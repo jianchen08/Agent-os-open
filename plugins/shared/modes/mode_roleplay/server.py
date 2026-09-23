@@ -17,10 +17,12 @@ webview 面板页（工作区 tab 面板，manifest detachable 声明悬浮窗�
 - 数据端点：/ext/mode_roleplay/data/{bootstrap,sessions,messages,cards,lorebooks}。
   messages 端点保留（零连带），面板 UI 不再消费（对话在宿主聊天区）。
 - 写动作：/data/actions/{play,regenerate} 经 tool-executor 调 task_submit 真派发
-  （eval_harness 先例），args 携 mode=roleplay + 卡上下文；body 的 session_id
-  （面板自 window.__agentosCtx 取）透传 task_submit 作会话归属锚点——任务落用户
-  会话线程，对话在聊天区继续；缺省省略=独立任务（现状）。卡 = 模式命名空间
-  agent 键（mode_roleplay/card_<id>，模式体系设计 §8.1）。
+  （eval_harness 先例），args 携 mode=roleplay + 卡上下文。开演（BUG-73 修复）
+  会话锚由服务端按卡派生（thread-rp-<card_id> 卡专属扮演会话，同卡复演复用；
+  无 sessions 行的线程内核只落映射不动用户会话）——宿主活跃会话 id 不参与
+  归属（此前透传 window.__agentosCtx.sessionId 曾把开演任务落进用户当时活跃
+  的无关会话线程）。regenerate 行级锚定来源管道 thread_id，body 显式 session_id
+  兜底。卡 = 模式命名空间 agent 键（mode_roleplay/card_<id>，模式体系设计 §8.1）。
 - 卡 theme/avatar：/data/cards 透出卡 yaml 的 theme（ThemeConfig 档，面板选卡时
   经 theme.apply 桥注入对话框）与 avatar（画廊头像）。
 
@@ -307,32 +309,62 @@ async def _dispatch_task(args: dict[str, Any]) -> dict[str, Any]:
     return {"task_id": task_id}
 
 
-def _play_args(
-    card_id: str, user_persona: str, greeting_index: int | None, session_id: str = ""
-) -> dict[str, Any]:
+def _roleplay_thread(card_id: str) -> str:
+    """卡专属扮演会话锚（BUG-73 断点a 修复）：thread-rp-<card_id>。
+
+    同卡复演=复用同一专属会话（线程维度「创建/复用专属扮演会话」）；内核
+    chat.send_message 创建分支对无 sessions 行的 thread 只落 pipeline_sessions
+    映射、不动任何用户会话（活跃管道切换对缺席行显式跳过）——开演由此与宿主
+    活跃会话彻底解耦（R92「任务落活跃既有 thread」同族根除）。
+    """
+    return f"thread-rp-{card_id}"
+
+
+def _selected_greeting(card: dict[str, Any], greeting_index: int) -> tuple[str, int]:
+    """所选开场白（原文, 解析后序号）：0=first_mes，≥1=alternate_greetings[i-1]。
+
+    越界/无备选回落 first_mes（序号同步归 0——metadata 记录与实际注入一致）。
+    """
+    if greeting_index >= 1:
+        alternates = card.get("alternate_greetings") or []
+        if greeting_index - 1 < len(alternates):
+            return alternates[greeting_index - 1], greeting_index
+    return card.get("first_mes") or "", 0
+
+
+def _play_args(card_id: str, user_persona: str, greeting_index: int | None) -> dict[str, Any]:
     """「以此角色开演」→ task_submit args（卡=模式命名空间 agent 键，§8.1）。
 
-    session_id（面板自 window.__agentosCtx 取）非空时透传，作 task_submit 的
-    会话归属锚点——任务落用户会话线程，对话在聊天区继续；空则省略（独立任务）。
+    会话锚 = 卡专属扮演会话（_roleplay_thread）；宿主活跃会话 id 不参与
+    （BUG-73：面板曾透传 window.__agentosCtx.sessionId，开演任务落用户当时
+    活跃的无关会话线程）。所选开场白全文随派发注入（greeting_index 语义），
+    开场要求约束产出形态：演出必须作为回复正文输出、task_evaluate 只做收尾。
     """
     card = next((c for c in _load_cards() if c["id"] == card_id), None)
     if card is None:
         return {"error": f"未知角色卡: {card_id}"}
+    raw_index = greeting_index if isinstance(greeting_index, int) and greeting_index >= 0 else 0
+    greeting, index = _selected_greeting(card, raw_index)
+    # 段序 = 重要性序（goal_description 2000 字符硬上限按尾截断）：行为约束与
+    # 所选开场白在前，卡数据段（设定/性格/场景）垫底——超长只牺牲卡数据尾部。
     sections = [
         f"以「{card['name']}」的身份进行沉浸式角色扮演开场。",
-        f"# 角色设定\n{card['description']}",
+        "# 开场要求\n先把开场表演作为回复正文完整输出给用户（这是用户能看到的演出，"
+        "不得只写进 task_evaluate 的 summary），保持角色身份；正文输出完成后再调用"
+        " task_evaluate 结束。",
     ]
-    if card["personality"]:
-        sections.append(f"# 性格\n{card['personality']}")
-    if card["scenario"]:
-        sections.append(f"# 场景\n{card['scenario']}")
+    if greeting:
+        sections.append(
+            f"# 本场开场白（用户已选定）\n以下面这段开场白开场，自然衔接后继续演出：\n{greeting}"
+        )
     if user_persona.strip():
         sections.append(f"# 用户设定（对话者扮演）\n{user_persona.strip()}")
-    sections.append(
-        "# 开场要求\n以角色身份输出开场表演（可基于 first_mes 自然展开），"
-        "保持角色身份，结尾调用 task_evaluate 结束。"
-    )
-    args: dict[str, Any] = {
+    if card["scenario"]:
+        sections.append(f"# 场景\n{card['scenario']}")
+    if card["personality"]:
+        sections.append(f"# 性格\n{card['personality']}")
+    sections.append(f"# 角色设定\n{card['description']}")
+    return {
         "target_type": "agent",
         "target_id": f"mode_roleplay/{card_id}",
         # 面板经 tool-executor 直调 task_submit 不走管道 param_inject 注入链，
@@ -343,11 +375,10 @@ def _play_args(
         "goal_description": "\n\n".join(sections)[:2000],
         "mode": "roleplay",
         "task_kind": "roleplay_opening",
-        "metadata": {"card_id": card_id, "greeting_index": greeting_index or 0},
+        "metadata": {"card_id": card_id, "greeting_index": index},
+        # 卡专属扮演会话锚（thread_id 语义；非宿主活跃会话）
+        "session_id": _roleplay_thread(card_id),
     }
-    if session_id:
-        args["session_id"] = session_id
-    return args
 
 
 async def _regenerate_args(pipeline_id: str, session_id: str = "") -> dict[str, Any]:
@@ -467,7 +498,9 @@ async def _handle_actions(path: str, method: str, raw_body: str) -> dict[str, An
     if method != "POST":
         return {"success": True, "data": _json_response({"error": "method not allowed"}, 404)}
     body = _parse_body(raw_body)
-    # 会话归属锚点（面板自 window.__agentosCtx 取）：非空才透传 task_submit
+    # 重新生成的兜底会话锚（行级动作：行自带 thread_id 优先，body 显式值兜底）。
+    # 开演不走此键——会话锚由服务端按卡派生（_roleplay_thread，BUG-73），
+    # body 的宿主活跃会话 id 不再参与任何写动作归属。
     session_id = str(body.get("session_id") or "").strip()
     if path.endswith("/play"):
         card_id = str(body.get("card_id") or "")
@@ -475,7 +508,7 @@ async def _handle_actions(path: str, method: str, raw_body: str) -> dict[str, An
             return {"success": True, "data": _json_response({"error": "缺少 card_id"}, 400)}
         persona = str(body.get("user_persona") or "")
         greeting = body.get("greeting_index")
-        args = _play_args(card_id, persona, greeting if isinstance(greeting, int) else None, session_id)
+        args = _play_args(card_id, persona, greeting if isinstance(greeting, int) else None)
     else:
         pipeline_id = str(body.get("pipeline_id") or "")
         if not pipeline_id:

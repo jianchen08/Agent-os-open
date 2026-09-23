@@ -18,28 +18,24 @@
  * （真实依赖，tabs/visited 由 store 驱动，点击落点断言 store 终态）。
  */
 
-import { fireEvent, render, screen } from '@testing-library/react'
+import { createEvent, fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { WorkspacePanel } from '@/components/layout/WorkspacePanel'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { makeDataTransfer } from '@/test/dndTestUtils'
+import { StoreDrivenPanel } from './helpers/workspacePanelHarness'
 import { makeTab } from './helpers/workspaceTabFactory'
-import type { WorkspaceTab } from '@/types/layout'
 
-/** 与 FiveSpaceLayout 相同的数据流：tabs/visited 取自 layoutModeStore */
-function StoreDrivenPanel(extra: Record<string, unknown> = {}) {
-  const tabs = useLayoutModeStore((s) => s.workspaceTabs)
-  const visitedTabIds = useLayoutModeStore((s) => s.visitedTabIds)
-  return (
-    <WorkspacePanel
-      tabs={tabs}
-      visitedTabIds={visitedTabIds}
-      onTabChange={() => {}}
-      onTabClose={() => {}}
-      renderTabContent={(tab) => <div>内容-{tab.id}</div>}
-      {...extra}
-    />
-  )
+/** 三个普通标签的标准播种（a 激活、b/c 未激活），visited 可指定 */
+function seedThreeTabs(visitedTabIds: string[] = []): void {
+  useLayoutModeStore.setState({
+    workspaceTabs: [
+      makeTab({ id: 'a', title: '甲', isActive: true }),
+      makeTab({ id: 'b', title: '乙', isActive: false }),
+      makeTab({ id: 'c', title: '丙', isActive: false }),
+    ],
+    visitedTabIds,
+  })
 }
 
 function openTabMenu(tabId: string) {
@@ -93,14 +89,7 @@ describe('WorkspacePanel — 空态与全屏', () => {
 describe('WorkspacePanel — 右键菜单动作', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    useLayoutModeStore.setState({
-      workspaceTabs: [
-        makeTab({ id: 'a', title: '甲', isActive: true }),
-        makeTab({ id: 'b', title: '乙', isActive: false }),
-        makeTab({ id: 'c', title: '丙', isActive: false }),
-      ],
-      visitedTabIds: [],
-    })
+    seedThreeTabs()
   })
 
   it('「关闭本标签」只移除目标标签', () => {
@@ -113,18 +102,21 @@ describe('WorkspacePanel — 右键菜单动作', () => {
     expect(screen.getByTestId('workspace-tab-a')).toBeInTheDocument()
   })
 
-  it('「关闭其他标签」保留目标标签', () => {
+  it('「关闭其他标签」经确认层后保留目标标签（BUG-79 防误触）', () => {
     render(<StoreDrivenPanel />)
     openTabMenu('b')
     fireEvent.click(screen.getByTestId('workspace-tab-menu-close-other'))
+    // 批量关签先出确认层，确认后才落关签
+    fireEvent.click(screen.getByRole('button', { name: '确认关闭' }))
     expect(useLayoutModeStore.getState().workspaceTabs.map((t) => t.id)).toEqual(['b'])
     expect(screen.queryByTestId('workspace-tab-a')).toBeNull()
   })
 
-  it('「关闭所有标签」清空列表并回到空态', () => {
+  it('「关闭所有标签」经确认层后清空列表并回到空态（BUG-79 防误触）', () => {
     render(<StoreDrivenPanel />)
     openTabMenu('a')
     fireEvent.click(screen.getByTestId('workspace-tab-menu-close-all'))
+    fireEvent.click(screen.getByRole('button', { name: '确认关闭' }))
     expect(useLayoutModeStore.getState().workspaceTabs).toEqual([])
     expect(screen.getByTestId('workspace-nav-page')).toBeInTheDocument()
   })
@@ -166,14 +158,7 @@ describe('WorkspacePanel — 懒挂载与滚轮', () => {
   })
 
   it('仅激活与 visited 的 Tab 渲染内容，其余为 aria-hidden 占位', () => {
-    useLayoutModeStore.setState({
-      workspaceTabs: [
-        makeTab({ id: 'a', title: '甲', isActive: true }),
-        makeTab({ id: 'b', title: '乙', isActive: false }),
-        makeTab({ id: 'c', title: '丙', isActive: false }),
-      ],
-      visitedTabIds: ['c'],
-    })
+    seedThreeTabs(['c'])
     render(<StoreDrivenPanel />)
 
     expect(screen.getByText('内容-a')).toBeInTheDocument()
@@ -201,5 +186,69 @@ describe('WorkspacePanel — 懒挂载与滚轮', () => {
     tablist.dispatchEvent(event)
     expect(event.defaultPrevented).toBe(false)
     expect(tablist.scrollLeft).toBe(5)
+  })
+})
+
+describe('WorkspacePanel — 标签拖拽换位', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    seedThreeTabs()
+  })
+
+  it('dragStart 记录拖拽源并写入 dataTransfer 载荷（effectAllowed=move、text/plain=tab id）', () => {
+    render(<StoreDrivenPanel />)
+    const dt = makeDataTransfer()
+
+    fireEvent.dragStart(screen.getByTestId('workspace-tab-a'), { dataTransfer: dt })
+
+    expect(dt.effectAllowed).toBe('move')
+    expect(dt.getData('text/plain')).toBe('a')
+  })
+
+  it('dragOver 其他标签拦截默认行为（可成为放置目标），拖过自身不拦截', () => {
+    render(<StoreDrivenPanel />)
+    const dt = makeDataTransfer()
+    fireEvent.dragStart(screen.getByTestId('workspace-tab-a'), { dataTransfer: dt })
+
+    const overSelf = createEvent.dragOver(screen.getByTestId('workspace-tab-a'), { dataTransfer: dt })
+    fireEvent(screen.getByTestId('workspace-tab-a'), overSelf)
+    expect(overSelf.defaultPrevented).toBe(false)
+
+    const overOther = createEvent.dragOver(screen.getByTestId('workspace-tab-b'), { dataTransfer: dt })
+    fireEvent(screen.getByTestId('workspace-tab-b'), overOther)
+    expect(overOther.defaultPrevented).toBe(true)
+  })
+
+  it('drop 到其他标签：落 store 的 reorderWorkspaceTabs 换位', () => {
+    render(<StoreDrivenPanel />)
+    const dt = makeDataTransfer()
+    fireEvent.dragStart(screen.getByTestId('workspace-tab-a'), { dataTransfer: dt })
+
+    fireEvent.drop(screen.getByTestId('workspace-tab-b'), { dataTransfer: dt })
+
+    expect(useLayoutModeStore.getState().workspaceTabs.map((t) => t.id)).toEqual(['b', 'a', 'c'])
+  })
+
+  it('drop 兜底：拖拽源为空时从 dataTransfer 读回（跨窗口拖拽形态）', () => {
+    render(<StoreDrivenPanel />)
+
+    fireEvent.drop(screen.getByTestId('workspace-tab-c'), {
+      dataTransfer: makeDataTransfer({ 'text/plain': 'a' }),
+    })
+
+    expect(useLayoutModeStore.getState().workspaceTabs.map((t) => t.id)).toEqual(['b', 'c', 'a'])
+  })
+
+  it('drop 到自身与无拖拽源：不换位', () => {
+    render(<StoreDrivenPanel />)
+    const dt = makeDataTransfer()
+    fireEvent.dragStart(screen.getByTestId('workspace-tab-a'), { dataTransfer: dt })
+
+    fireEvent.drop(screen.getByTestId('workspace-tab-a'), { dataTransfer: dt })
+    expect(useLayoutModeStore.getState().workspaceTabs.map((t) => t.id)).toEqual(['a', 'b', 'c'])
+
+    // dragStart 已被上次 drop 消费复位，且 dataTransfer 无载荷
+    fireEvent.drop(screen.getByTestId('workspace-tab-b'), { dataTransfer: makeDataTransfer() })
+    expect(useLayoutModeStore.getState().workspaceTabs.map((t) => t.id)).toEqual(['a', 'b', 'c'])
   })
 })

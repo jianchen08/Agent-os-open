@@ -85,12 +85,12 @@ def main():
             tid, tag, status = ent
             if status in ("completed", "failed", "cancelled"):
                 cur.execute(
-                    "SELECT field_value FROM pipeline_state WHERE pipeline_id=? "
+                    "SELECT value FROM pipeline_state WHERE pipeline_id=? "
                     "AND field_key='task.eval_summary'", (tid,))
                 row = cur.fetchone()
                 evaluated = row is not None and len(row[0]) > 4
                 cur.execute(
-                    "SELECT field_value FROM pipeline_state WHERE pipeline_id=? "
+                    "SELECT value FROM pipeline_state WHERE pipeline_id=? "
                     "AND field_key='task.acceptance_criteria'", (tid,))
                 ac = cur.fetchone()
                 names = list(json.loads(ac[0]).keys()) if ac and ac[0] else []

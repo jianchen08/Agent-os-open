@@ -17,6 +17,7 @@ import {
   clearTokens,
   isExpired,
   isAuthFailureFromError,
+  loadMirroredAuthSession,
   refresh,
   scrubLegacyTokenStorages,
   startAutoRefresh,
@@ -152,6 +153,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         const { restartGrowthLoop } = await import('@/services/modules/GrowthLoop')
         await restartGrowthLoop()
       } catch (err) {
+        // 记日志即止：自生长闭环是登录副链路，失败不回滚登录主流程
+        // （OBS-R258-1 吞错误规则登记）
         console.error('登录后启动自生长闭环失败:', err)
       }
     } catch (error: unknown) {
@@ -194,6 +197,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         const { restartGrowthLoop } = await import('@/services/modules/GrowthLoop')
         await restartGrowthLoop()
       } catch (err) {
+        // 记日志即止：自生长闭环是注册副链路，失败不回滚注册主流程
+        // （OBS-R258-1 吞错误规则登记）
         console.error('注册后启动自生长闭环失败:', err)
       }
     } catch (error: unknown) {
@@ -295,7 +300,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         return
       }
 
-      const storedRefreshToken = getRefreshTokenValue()
+      let storedRefreshToken = getRefreshTokenValue()
+      if (!storedRefreshToken) {
+        // localStorage 批量提交被强杀丢失的兜底：从主进程镜像回读种子
+        const mirrored = await loadMirroredAuthSession()
+        if (mirrored) {
+          localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, mirrored)
+          storedRefreshToken = mirrored
+        }
+      }
       if (storedRefreshToken) {
         // 页面刷新恢复：refresh 轮换换取新 token 对
         try {

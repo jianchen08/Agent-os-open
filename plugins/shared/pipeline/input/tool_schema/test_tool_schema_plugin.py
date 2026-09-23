@@ -286,6 +286,85 @@ class TestCapabilityFetch:
 
 
 # ═══════════════════════════════════════════════════════════
+# 隔离/worktree 会话默认工具面剥离宿主 GUI 自动化工具（BUG-65）
+# ═══════════════════════════════════════════════════════════
+
+
+# 用户空间 external MCP 宿主 GUI 自动化工具（agent yaml tool_ids 上游原名）
+_GUI_TOOL_IDS = ("App", "Snapshot", "Click", "Type", "Shortcut", "Wait",
+                 "Move", "Screenshot", "Scroll")
+
+
+class TestIsolatedSurfaceStrip:
+    def test_boundary_reliant_context_strips_gui_tool_ids(self) -> None:
+        """隔离/worktree 上下文（依赖隔离边界免审批）→ GUI 工具 id 不进 capability
+        调用，安全工具原样保留；无 execution_context = 缺省隔离，同剥离。
+
+        参数化三组有区分度输入：显式 isolated / worktree 拓扑（isolation 显式
+        non_isolated 也剥离——边界依赖看工作区拓扑）/ 无 execution_context
+        （缺省隔离，fail-closed 与 isolation_guard 归一口径一致）。
+        """
+        ecs = [
+            ("isolated", {"isolation": {"level": "isolated"}}),
+            ("worktree", {"isolation": {"level": "non_isolated"},
+                          "workspace": {"mode": "worktree"}}),
+            ("default_isolated", None),
+        ]
+        for label, ec in ecs:
+            tool_ids = ["file_read", "bash_execute", "Type", "Click", "App"]
+            state: dict[str, Any] = {"tool_ids": tool_ids}
+            if ec is not None:
+                state["execution_context"] = ec
+            caller = _FakeCaller(result={
+                "schemas": [{"function": {"name": "file_read"}}],
+                "contracts": {},
+            })
+            p = ToolSchemaPlugin(config={})
+            p.set_capability_caller(caller)
+            result = _run(p.execute(_make_ctx(state=state)))
+            (method, params), = caller.calls  # 单次 capability 调用
+            assert method == "schemas", label
+            forwarded = params["tool_ids"]
+            # 字面值断言：GUI id 全部剥离、安全 id 全部保留
+            assert "Type" not in forwarded and "Click" not in forwarded \
+                and "App" not in forwarded, label
+            assert forwarded == ["file_read", "bash_execute"], label
+            # 性质断言：转发面与 GUI 集合交集为空，且 = 声明面减 GUI 集
+            assert set(forwarded).isdisjoint(_GUI_TOOL_IDS), label
+            assert set(forwarded) == set(tool_ids) - set(_GUI_TOOL_IDS), label
+            # 剥离不改变 capability 结果落 state（原样透传）
+            assert [s["function"]["name"]
+                    for s in result.state_updates["tool_schemas"]] == ["file_read"], label
+
+    def test_non_isolated_context_keeps_gui_tool_ids(self) -> None:
+        """显式非隔离会话（审批闸生效）工具面不变：GUI id 照常进 capability 调用。"""
+        caller = _FakeCaller(result={"schemas": [], "contracts": {}})
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
+        tool_ids = ["file_read", "Type", "App", "Shortcut"]
+        _run(p.execute(_make_ctx(state={
+            "tool_ids": tool_ids,
+            "execution_context": {"isolation": {"level": "non_isolated"}},
+        })))
+        assert caller.calls == [("schemas", {"tool_ids": tool_ids})]
+
+    def test_strip_does_not_false_alarm_drift(self, caplog: Any) -> None:
+        """隔离上下文剥离的 GUI id 不再计入 wanted：内核返回面缺它不触发漂移告警。"""
+        caller = _FakeCaller(result={
+            "schemas": [{"function": {"name": "file_read"}}],
+            "contracts": {},
+        })
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
+        with caplog.at_level(logging.WARNING):
+            _run(p.execute(_make_ctx(state={
+                "tool_ids": ["file_read", "Type"],
+                "execution_context": {"isolation": {"level": "isolated"}},
+            })))
+        assert not any("工具面漂移" in r.getMessage() for r in caplog.records)
+
+
+# ═══════════════════════════════════════════════════════════
 # server.py MCP 适配层
 # ═══════════════════════════════════════════════════════════
 

@@ -1,5 +1,8 @@
 {
   "id": "resource_search_tool",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Resource Search Tool",
   "description": "搜索系统内 Agent、工具、Skill 资源的 MCP 工具",
   "version": "1.0.0",

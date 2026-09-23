@@ -145,6 +145,26 @@ class BufferedChannelOutputAdapter(IOutputAdapter):
         """
         self._channel_user_id = user_id
 
+    async def deliver_to(
+        self, target_user_id: str, text: str, reply_ctx: dict[str, Any] | None = None
+    ) -> None:
+        """按显式目标投递文本（渠道入站桥回复路径）。
+
+        与 send() 的差异：目标与投递上下文来自会话映射（入站桥持有），
+        不读管道 state。渠道差异仍经 _resolve_target/_deliver 注入点。
+        失败语义契约与 send() 相同：底层渠道 API 发送失败异常原样传播。
+
+        Args:
+            target_user_id: 会话映射内的回复目标标识
+            text: 待投递文本
+            reply_ctx: 渠道投递上下文（如 QQ 的 _message_type/_group_id），
+                原样作为 state 传给 _deliver
+        """
+        target = self._resolve_target(target_user_id)
+        if target is None:
+            return
+        await self._deliver(target, text, dict(reply_ctx or {}))
+
     def accumulated_text(self) -> str:
         """当前已累积但尚未投递的流式文本（只读观察面）。
 

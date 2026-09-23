@@ -1,5 +1,8 @@
 {
   "id": "channel_wecom",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "WeCom Channel",
   "version": "1.0.0",
   "plugin_type": "system",
@@ -83,7 +86,8 @@
     "route_signals": [],
     "lifecycle_hooks": [
       "on_load",
-      "on_unload"
+      "on_unload",
+      "domain_event"
     ],
     "services": []
   },
@@ -108,6 +112,54 @@
       "auth": "none",
       "handler_capability": "http.handle",
       "description": "企微 URL 验证（query 透传，插件解密 echostr 回明文）"
+    }
+  ],
+  "granted_capabilities": [
+    "chat",
+    "pipeline-state",
+    "human-interaction"
+  ],
+  "config_files": [
+    {
+      "id": "settings",
+      "label": "企业微信渠道连接配置",
+      "fields": [
+        {
+          "name": "corp_id",
+          "label": "企业 ID（CorpID）",
+          "type": "string",
+          "required": true,
+          "description": "企业微信管理后台「我的企业」页的企业 ID"
+        },
+        {
+          "name": "agent_id",
+          "label": "应用 AgentId",
+          "type": "number",
+          "default": 0,
+          "description": "自建应用的 AgentId"
+        },
+        {
+          "name": "secret",
+          "label": "应用 Secret",
+          "type": "string",
+          "required": true,
+          "description": "自建应用的 Secret"
+        },
+        {
+          "name": "token",
+          "label": "回调 Token",
+          "type": "string",
+          "default": "",
+          "description": "接收消息回调配置的 Token（回调模式必填）"
+        },
+        {
+          "name": "encoding_aes_key",
+          "label": "回调 EncodingAESKey",
+          "type": "string",
+          "default": "",
+          "description": "接收消息回调配置的 EncodingAESKey（回调模式必填）"
+        }
+      ]
     }
   ]
 }

@@ -228,14 +228,10 @@ async fn test_cold_checkpoint_row_carries_latest_run_status() {
     let pid = format!("cold_ghost_{}", std::process::id());
     let run_id = format!("run_{}", std::process::id());
 
-    use agentos_core::traits::StorageBackend;
     use agentos_core::types::RunStatus;
-    store.create_run(&run_id, "h", tenant).unwrap();
-    StorageBackend::set_run_pipeline(store.as_ref(), &run_id, &pid)
-        .await
-        .unwrap();
-    StorageBackend::update_run_status(store.as_ref(), &run_id, RunStatus::Failed, None, None)
-        .await
+    store.record_run_start(&pid, tenant, &run_id, "h").unwrap();
+    store
+        .set_run_status_projection(&pid, tenant, RunStatus::Failed)
         .unwrap();
     // 消息槽落 run↔pipeline 映射（list_pipelines join 通道）
     store

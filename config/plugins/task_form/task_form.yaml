@@ -28,7 +28,7 @@ form:
       placeholder: 填了则创建项目并挂靠（目录缺省自动生成）
       description: 与「挂靠项目」二选一；已存在目录非 git 仓库会自动 git init
     - name: project_path
-      type: input
+      type: directory
       label: 新建项目目录（可选）
       placeholder: 留空自动生成 {工作空间}/projects/<标题>
       description: 配合「新建项目标题」；已存在目录直接复用
@@ -38,7 +38,7 @@ form:
       datasourceUri: /ext/task_form/options/agents
       description: 任务由该 Agent 配置执行
     - name: workspace
-      type: input
+      type: directory
       label: 工作空间（可选）
       placeholder: 留空使用默认工作空间；挂靠项目时恒为项目文件夹
     - name: workspace_mode

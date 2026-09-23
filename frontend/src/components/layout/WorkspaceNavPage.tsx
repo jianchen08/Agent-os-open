@@ -4,9 +4,11 @@
  * 内容完全由 ContributionRegistry 聚合的页面声明驱动（无硬编码页面清单）：
  * - 顶部搜索框：按标题/页面 id/来源插件本地过滤（视图态，不持久化）
  * - 主体：workspace 空间大图标卡片网格——slot=tab 带 mode 扩展字段 → 模式面板组
- *   （置顶）；slot=tab 无 mode → 工作区页签组；slot=activity-bar → 活动栏组
- * - 「更多」折叠区：非 workspace 空间按 MORE_SPACE_GROUP_LABELS 顺序渲染小卡片
- *   分组（同卡片语言缩小号），默认折叠；搜索有值自动展开并跨组过滤，组内无匹配不占位
+ *   （置顶）；slot=tab 无 mode → 工作区页签组；slot=activity-bar → 活动栏组；
+ *   调试中心/设置为一级直属分组（大卡片，不折叠）
+ * - 「更多」折叠区：其余非 workspace 空间按 MORE_SPACE_GROUP_LABELS 顺序渲染
+ *   小卡片分组（同卡片语言缩小号），默认折叠；搜索有值自动展开并跨组过滤，
+ *   组内无匹配不占位
  * 点击条目经既有 openPluginPage 打开对应落点（path 直达 / widget 开工作区页签）。
  *
  * registry 由 GrowthLoop 全局装载（登录后初始化 + schema_updated 事件刷新），
@@ -20,10 +22,14 @@ import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import type { PageDeclaration, PageSpace } from '@/services/schema/ContributionRegistry'
 import { openPluginPage } from '@/services/workspacePanelOpener'
 
-/** 「更多」区空间分组标题（非 workspace 空间按此表顺序渲染；未收录空间按原值兜底，条目不丢） */
-const MORE_SPACE_GROUP_LABELS: ReadonlyArray<{ space: PageSpace; label: string }> = [
-  { space: 'settings', label: '设置' },
+/** 一级直属空间分组（大卡片、不折叠，按表序渲染在活动栏组之后） */
+const PRIMARY_SPACE_GROUPS: ReadonlyArray<{ space: PageSpace; label: string }> = [
   { space: 'debug_center', label: '调试中心' },
+  { space: 'settings', label: '设置' },
+]
+
+/** 「更多」区空间分组标题（其余非 workspace 空间按此表顺序渲染；未收录空间按原值兜底，条目不丢） */
+const MORE_SPACE_GROUP_LABELS: ReadonlyArray<{ space: PageSpace; label: string }> = [
   { space: 'chat', label: '聊天动作' },
   { space: 'floating', label: '浮窗' },
   { space: 'dock', label: '状态条' },
@@ -146,19 +152,28 @@ export function WorkspaceNavPage() {
   const [query, setQuery] = useState('')
   const [moreExpanded, setMoreExpanded] = useState(false)
 
-  const { mode, tab, activityBar, moreGroups, moreTotal, hasAnyPage } = useMemo(() => {
+  const { mode, tab, activityBar, primaryGroups, moreGroups, moreTotal, hasAnyPage } = useMemo(() => {
     void contribTick
     const pages = contributionRegistry.getPages()
     const q = query.trim().toLowerCase()
     const hit = (p: PageDeclaration) => matchesQuery(p, q)
     const workspace = pages.filter((p) => p.space === 'workspace' && hit(p))
-    // 非 workspace 空间按表序分组；未收录空间（PageSpace 运行时扩展）按原值兜底追加
-    const known = new Set(MORE_SPACE_GROUP_LABELS.map((g) => g.space))
-    const extras = [...new Set(pages.map((p) => p.space).filter((s) => !known.has(s) && s !== 'workspace'))]
+    // 一级直属分组（调试中心/设置）+ 其余非 workspace 空间「更多」分组；
+    // 未收录空间（PageSpace 运行时扩展）按原值兜底追加进「更多」，条目不丢
+    const primarySpaces = new Set(PRIMARY_SPACE_GROUPS.map((g) => g.space))
+    const knownSpaces = new Set([...primarySpaces, ...MORE_SPACE_GROUP_LABELS.map((g) => g.space)])
+    const extras = [
+      ...new Set(pages.map((p) => p.space).filter((s) => !knownSpaces.has(s) && s !== 'workspace')),
+    ]
     return {
       mode: workspace.filter((p) => p.slot === 'tab' && modeKeyOf(p)),
       tab: workspace.filter((p) => p.slot === 'tab' && !modeKeyOf(p)),
       activityBar: workspace.filter((p) => p.slot === 'activity-bar'),
+      primaryGroups: PRIMARY_SPACE_GROUPS.map(({ space, label }) => ({
+        space,
+        label,
+        pages: pages.filter((p) => p.space === space && hit(p)),
+      })).filter((g) => g.pages.length > 0),
       moreGroups: [...MORE_SPACE_GROUP_LABELS, ...extras.map((space) => ({ space, label: String(space) }))]
         .map(({ space, label }) => ({
           space,
@@ -166,7 +181,7 @@ export function WorkspaceNavPage() {
           pages: pages.filter((p) => p.space === space && hit(p)),
         }))
         .filter((g) => g.pages.length > 0),
-      moreTotal: pages.filter((p) => p.space !== 'workspace').length,
+      moreTotal: pages.filter((p) => p.space !== 'workspace' && !primarySpaces.has(p.space)).length,
       hasAnyPage: pages.length > 0,
     }
   }, [contribTick, query])
@@ -174,7 +189,12 @@ export function WorkspaceNavPage() {
   const searching = query.trim() !== ''
   const expanded = searching || moreExpanded
   const searchMissed =
-    searching && mode.length === 0 && tab.length === 0 && activityBar.length === 0 && moreGroups.length === 0
+    searching &&
+    mode.length === 0 &&
+    tab.length === 0 &&
+    activityBar.length === 0 &&
+    primaryGroups.length === 0 &&
+    moreGroups.length === 0
 
   return (
     <div data-testid="workspace-nav-page" className="text-foreground flex h-full min-h-0 flex-col">
@@ -210,6 +230,9 @@ export function WorkspaceNavPage() {
           <NavGroup testId="nav-group-mode" label="模式面板" pages={mode} />
           <NavGroup testId="nav-group-tab" label="工作区页签" pages={tab} />
           <NavGroup testId="nav-group-activity-bar" label="活动栏" pages={activityBar} />
+          {primaryGroups.map((g) => (
+            <NavGroup key={g.space} testId={`nav-group-${g.space}`} label={g.label} pages={g.pages} />
+          ))}
           {moreGroups.length > 0 && (
             <section data-testid="nav-more" className="mt-1">
               <button

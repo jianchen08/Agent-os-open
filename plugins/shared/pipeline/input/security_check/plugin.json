@@ -1,5 +1,8 @@
 {
   "id": "pipeline_security_check",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Security Check",
   "version": "1.0.0",
   "plugin_type": "pipeline",
@@ -8,7 +11,7 @@
   "entry": "python server.py",
   "mcp": {
     "transport": "stdio",
-    "request_timeout_secs": 90000
+    "request_timeout_secs": 86400
   },
   "invoke_entry": "security_check.execute",
   "activation": "eager",
@@ -80,15 +83,12 @@
         "id": "permission_mode_selector",
         "type": "form",
         "space": "chat-input",
-        "title": "权限模式",
         "props": {
           "title": "权限模式",
-          "submitLabel": "切换模式",
           "fields": [
             {
               "name": "mode",
               "type": "select",
-              "label": "权限模式",
               "default": "default",
               "options": [
                 {
@@ -109,14 +109,13 @@
                 {
                   "label": "旁路（跳过审批）",
                   "value": "bypass",
-                  "description": "不做规则匹配、不弹审批，危险命令可能直接执行；仅保留路径遍历、敏感目录、nul 重定向三条内置底线"
+                  "description": "不做规则匹配、不弹审批，危险命令可能直接执行；仅保留路径遍历、敏感目录、nul 重定向三条内置底线。隔离/worktree 会话未显式选择档位时默认即本档（免审批）"
                 }
               ]
             }
           ],
           "endpoint": "/ext/pipeline_security_check/permission_mode",
-          "readbackUri": "/ext/pipeline_security_check/permission_mode",
-          "description": "切换当前会话的权限模式（对该会话后续所有管道生效，管道/子代理轮换不影响）。隔离/worktree 会话未显式选择时默认完全免审批（选择器显示「免审批」）；显式选择任一档后以所选档为准，黑名单规则命中（rm -rf 等）照常按档处置。非隔离会话按所选档/默认档走。auto/bypass 属高风险档，切换需在审批窗二次确认"
+          "readbackUri": "/ext/pipeline_security_check/permission_mode"
         }
       }
     ]

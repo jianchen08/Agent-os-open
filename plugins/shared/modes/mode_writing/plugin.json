@@ -1,5 +1,8 @@
 {
   "id": "mode_writing",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Mode Writing",
   "version": "1.2.0",
   "plugin_type": "system",

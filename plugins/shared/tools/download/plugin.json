@@ -1,5 +1,8 @@
 {
   "id": "download_tool",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Download Tool",
   "description": "通用文件下载 MCP 工具，支持多连接分段下载和断点续传",
   "version": "1.0.0",

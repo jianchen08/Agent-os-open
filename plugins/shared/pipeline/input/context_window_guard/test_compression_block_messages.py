@@ -146,17 +146,23 @@ class FakeBackend:
 
 
 class FlakyBackend(FakeBackend):
-    """指定序号的 add 调用抛错的伪 IMemoryBackend（写库故障替身）。"""
+    """指定序号的 add 调用抛错的伪 IMemoryBackend（写库故障替身）。
 
-    def __init__(self, fail_calls: set[int]) -> None:
+    message 可指定异常文案（服务失败/形状错配两种失败形态的打点断言用）。
+    """
+
+    def __init__(
+        self, fail_calls: set[int], message: str = "backend write boom"
+    ) -> None:
         super().__init__()
         self._fail_calls = fail_calls
+        self._message = message
 
     async def add(self, **kwargs: Any) -> str:
         n = len(self.add_calls) + 1
         if n in self._fail_calls:
             self.add_calls.append(kwargs)
-            raise RuntimeError("backend write boom")
+            raise RuntimeError(self._message)
         return await super().add(**kwargs)
 
 
@@ -360,6 +366,33 @@ class TestMemoryWriteFailureFailOpen:
         }
         assert "L1" not in levels, "写入失败的工件不得伪造引用"
         assert levels.get("L2") == "mem-2"  # 失败调用也占替身序号，L2 落库拿到 mem-2
+
+    def test_shape_mismatch_failure_degrades_with_distinct_log(self, caplog: Any) -> None:
+        """形状错配失败（BUG-64 形态：retain 响应无 id）与服务失败同款
+        fail-open——引用留空、块内联摘要照常、序列编辑照常；异常文案原样
+        进日志，「形状错配」标记可与「服务失败」区分。"""
+        mod = _load_guard_module()
+        backend = FlakyBackend(
+            {1, 2, 3, 4, 5},
+            message="hindsight.retain 响应形状错配: 未返回 memory id（写入未确认）",
+        )
+        svc = _make_service(mod, backend)
+        msgs = _round_msgs(4)
+
+        result = _run(
+            mod.CompressionService._do_compress_round(
+                svc, msgs, 10000, {"recent": 300}
+            )
+        )
+        assert result is not None, "形状错配失败不得阻塞压缩流程"
+        compressed, deleted = result
+        by_seq = {m["seq"]: m for m in compressed}
+        assert by_seq[1]["metadata"]["compression_ref"]["memory_ids"] == []
+        assert by_seq[2]["metadata"]["compression_ref"]["memory_ids"] == []
+        assert "完成了 X 任务" in by_seq[1]["content"]
+        assert sorted(deleted) == [3]
+        assert "落库失败" in caplog.text
+        assert "形状错配" in caplog.text
 
 
 # ═══════════════════════════════════════════════════════════

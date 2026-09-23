@@ -123,3 +123,13 @@ describe('isRetryableError 边界', () => {
     expect(isRetryableError({ response: {} })).toBe(false)
   })
 })
+
+describe('retry 退化输入守卫', () => {
+  it('maxAttempts=0 → 循环体零次执行，类型级收尾 throw（不静默成功）', async () => {
+    const fn = vi.fn()
+    await expect(retry(fn, { maxAttempts: 0 })).rejects.toThrow(
+      /maxAttempts=0 无效，未执行任何尝试/,
+    )
+    expect(fn).not.toHaveBeenCalled()
+  })
+})

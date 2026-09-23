@@ -18,6 +18,7 @@ pub mod config_service;
 pub mod contract;
 pub mod http_dispatcher;
 pub mod kernel_capabilities;
+pub mod log_liveness;
 pub mod metrics;
 pub mod pipeline_loader;
 pub mod plugin_lifecycle;
@@ -30,6 +31,7 @@ pub mod sidecar_warmup;
 #[cfg(test)]
 pub(crate) mod test_env;
 pub mod tools;
+pub mod venv_provision;
 pub mod ws_session;
 pub mod ws_ticket;
 

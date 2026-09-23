@@ -10,6 +10,13 @@
  */
 
 import { X } from '@/assets/icons'
+import { TabLabel } from '@/components/layout/TabLabel'
+import {
+  BAND_BUTTON_CLASS,
+  BAND_TAB_MAX_WIDTH_CLASS,
+  BAND_TAB_MIN_WIDTH_CLASS,
+  BAND_TAB_WIDTH_CLASS,
+} from '@/components/layout/bandButton'
 import { cn } from '@/lib/utils'
 import type { AgentLevel } from '@/types/models'
 import type { AgentTabStatus } from '@/types/task'
@@ -43,9 +50,14 @@ export interface AgentTabItemProps {
   onClick: () => void
   /** 关闭回调 */
   onClose?: () => void
+  /** 拖拽换位回调（拖拽 tab 落到本 tab 上时触发） */
+  onReorder?: (dragTabId: string, targetTabId: string) => void
   /** 自定义类名 */
   className?: string
 }
+
+/** 进行中的拖拽源（HTML5 DnD 的 dataTransfer 在 dragover 期不可读，用模块态中转） */
+let dragSource: { id: string; path: string } | null = null
 
 /** 获取状态图标 */
 const getStatusIcon = (status: AgentTabStatus) => {
@@ -68,13 +80,32 @@ const getStatusIcon = (status: AgentTabStatus) => {
 /**
  * AgentTabItem 组件
  */
-export const AgentTabItem: React.FC<AgentTabItemProps> = ({ tab, onClick, onClose, className }) => {
+export const AgentTabItem: React.FC<AgentTabItemProps> = ({ tab, onClick, onClose, onReorder, className }) => {
   const isMainTab = tab.agentLevel === 1
 
   return (
     <div
       role="tab"
       tabIndex={0}
+      draggable
+      onDragStart={(e) => {
+        dragSource = { id: tab.id, path: tab.path?.join('/') ?? '' }
+        e.dataTransfer.effectAllowed = 'move'
+        e.dataTransfer.setData('text/plain', tab.id)
+      }}
+      onDragOver={(e) => {
+        if (dragSource && dragSource.id !== tab.id && dragSource.path === (tab.path?.join('/') ?? '')) {
+          e.preventDefault()
+        }
+      }}
+      onDrop={(e) => {
+        e.preventDefault()
+        const source = dragSource
+        dragSource = null
+        if (source && source.id !== tab.id && source.path === (tab.path?.join('/') ?? '')) {
+          onReorder?.(source.id, tab.id)
+        }
+      }}
       onClick={onClick}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
@@ -83,9 +114,11 @@ export const AgentTabItem: React.FC<AgentTabItemProps> = ({ tab, onClick, onClos
         }
       }}
       className={cn(
-        'group relative rounded-lg px-3 py-2 font-medium',
-        'transition-all duration-200',
-        'flex max-w-[200px] min-w-0 items-center gap-2',
+        BAND_BUTTON_CLASS,
+        'group relative overflow-hidden font-medium',
+        BAND_TAB_WIDTH_CLASS,
+        BAND_TAB_MIN_WIDTH_CLASS,
+        BAND_TAB_MAX_WIDTH_CLASS,
         isMainTab && 'bg-primary/5 border-primary/20 border',
         tab.isActive
           ? 'bg-primary/15 text-primary border-primary/30 border shadow-sm'
@@ -106,7 +139,7 @@ export const AgentTabItem: React.FC<AgentTabItemProps> = ({ tab, onClick, onClos
         {getStatusIcon(tab.status)}
       </span>
 
-      <span className="truncate text-sm font-medium">{tab.name}</span>
+      <TabLabel title={tab.name} className="text-sm font-medium" />
 
       {tab.unreadCount && tab.unreadCount > 0 && (
         <span className="bg-warning text-warning-foreground flex-shrink-0 rounded-full px-1.5 py-0.5 text-xs font-medium">

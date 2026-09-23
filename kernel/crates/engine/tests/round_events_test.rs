@@ -251,7 +251,6 @@ fn make_executor(
         ],
         store_dyn,
         "run_round_events",
-        "main",
     )
     .with_round_events(recorder)
 }
@@ -468,7 +467,6 @@ async fn test_tool_iteration_reuses_open_round() {
         ],
         store_dyn,
         "run_alt_rounds",
-        "main",
     )
     .with_round_events(recorder.clone());
 
@@ -712,7 +710,6 @@ async fn test_tool_iteration_semantic_flag_with_custom_core_plugin() {
         vec![CUSTOM_LLM.to_string(), CUSTOM_TOOL.to_string()],
         store_dyn,
         "run_custom_rounds",
-        "main",
     )
     .with_round_events(recorder.clone());
 

@@ -5,8 +5,9 @@ REM  AgentOS 0.2 Stopper (Windows)
 REM
 REM  Port-targeted kill, same strategy as start_web_02.bat's cleanup:
 REM  find PIDs LISTENING on our ports via netstat -ano, then
-REM  taskkill /F /T (tree kill), plus an image-name fallback for
-REM  instances bound to other ports (AGENTOS_KERNEL_PORT override).
+REM  taskkill /F /T (tree kill), plus a path-scoped fallback (this repo's
+REM  target\release only) for instances bound to other ports
+REM  (AGENTOS_KERNEL_PORT override).
 REM
 REM  Env vars (same defaults as start_web_02.bat):
 REM    AGENTOS_KERNEL_PORT    default 9100
@@ -17,6 +18,7 @@ REM  ============================================================
 setlocal EnableDelayedExpansion
 
 cd /d "%~dp0"
+set "KERNEL_DIR=%cd%\kernel"
 if not defined AGENTOS_KERNEL_PORT set "AGENTOS_KERNEL_PORT=9100"
 if not defined AGENTOS_FRONTEND_PORT set "AGENTOS_FRONTEND_PORT=6390"
 
@@ -37,13 +39,12 @@ powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $
 call :KillPort "%AGENTOS_KERNEL_PORT%" "kernel" && set "STOPPED=1"
 call :KillPort "%AGENTOS_FRONTEND_PORT%" "frontend" && set "STOPPED=1"
 
-REM Image-name fallback: product-unique image, cannot hit unrelated projects.
-tasklist /FI "IMAGENAME eq agentos-kernel.exe" 2>nul | findstr /I "agentos-kernel" >nul 2>&1
-if not errorlevel 1 (
-    echo        [STOP] killing lingering agentos-kernel.exe by image name
-    taskkill /F /IM agentos-kernel.exe >nul 2>&1
-    set "STOPPED=1"
-)
+REM Path-scoped fallback for instances the port scan missed (AGENTOS_KERNEL_PORT
+REM override runs): kill only kernels whose exe lives under THIS repo's
+REM target\release. The installed app runs its own same-name exe (bundled
+REM kernel, child of the running app, port 9101) - it must survive dev stop
+REM (2026-09-20 dual-stack coexistence).
+powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'agentos-kernel.exe' -and $_.ExecutablePath -like '%KERNEL_DIR%\target\release\*' } | ForEach-Object { Write-Host ('       [STOP] killing dev kernel PID ' + $_.ProcessId); taskkill /F /T /PID $_.ProcessId 2>&1 | Out-Null }"
 
 echo.
 if "%STOPPED%"=="1" (

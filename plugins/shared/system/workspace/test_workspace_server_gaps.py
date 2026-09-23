@@ -257,21 +257,26 @@ class TestFileContentWorktreeRelocation:
 # ═══════════════════════════════════════════════════════════
 
 
+def _seed_state_workspace(srv: Any, tmp_path: Path, pipeline_id: str = "p-open") -> Path:
+    """经 state 读面种一个带坐标与归属的任务行，返回工作空间路径。"""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "a.txt").write_text("x", encoding="utf-8")
+    _WS.set_state_reader(lambda: [
+        {
+            "pipeline_id": pipeline_id,
+            "workspace": str(ws),
+            "task.submitted_by": "user-a",
+        }
+    ])
+    return ws
+
+
 class TestOpenWorkspaceFileManagerFallback:
     """无 tool-executor 能力（_connector_caller is None）时的兜底分支。"""
 
     def _workspace(self, srv: Any, tmp_path: Path) -> Path:
-        ws = tmp_path / "ws"
-        ws.mkdir()
-        (ws / "a.txt").write_text("x", encoding="utf-8")
-        _WS.set_state_reader(lambda: [
-            {
-                "pipeline_id": "p-open",
-                "workspace": str(ws),
-                "task.submitted_by": "user-a",
-            }
-        ])
-        return ws
+        return _seed_state_workspace(srv, tmp_path)
 
     def test_file_manager_success_path(self, srv: Any, tmp_path: Path, monkeypatch) -> None:
         """兜底成功 → success=True + 宿主机路径（613-615）。"""
@@ -313,6 +318,105 @@ class TestOpenWorkspaceFileManagerFallback:
     def test_real_file_manager_rejects_missing_dir(self, srv: Any, tmp_path: Path) -> None:
         """真实实现（非替身）：目录不存在 → False，不启动进程。"""
         assert srv._open_in_system_file_manager(str(tmp_path / "ghost")) is False
+
+
+class TestOpenWorkspaceConnectorEnvelope:
+    """tool-executor 信封形状下的连接器结果消费（no_connector 双位读取）。
+
+    真机 2026-09-21 断链：tool-executor 轴返回内核 ToolExecutionResult 信封
+    （success/error 在顶层、工具返回嵌 data），消费面只读顶层标记 → 连接器
+    未连接时系统文件管理器兜底成死路径，打开文件夹恒报「连接器执行失败」。
+    """
+
+    def _caller_returning(self, srv: Any, envelope: dict[str, Any]) -> None:
+        async def _fake(action_type: str, parameters: dict[str, Any]) -> dict[str, Any]:
+            return envelope
+
+        srv._connector_caller = _fake
+
+    def test_no_connector_marker_in_data_falls_back(self, srv: Any, tmp_path: Path, monkeypatch) -> None:
+        """标记在 data 内（tool-executor 轴经归一层的现实形状）→ 兜底打开。"""
+        ws = _seed_state_workspace(srv, tmp_path)
+        self._caller_returning(srv, {
+            "success": False,
+            "data": {"no_connector": True, "action_type": "open_folder"},
+            "error": "没有已连接的连接器支持动作: open_folder",
+        })
+        monkeypatch.setattr(srv, "_open_in_system_file_manager", lambda p: True)
+
+        result = _run(srv.open_workspace_in_ide("p-open", caller={"sub": "user-a"}))
+
+        assert result["success"] is True
+        assert "系统文件管理器" in result["message"]
+        assert result["path"] == str(ws)
+
+    def test_top_level_no_connector_still_falls_back(self, srv: Any, tmp_path: Path, monkeypatch) -> None:
+        """顶层标记（服务轴直调形状）→ 兜底不回退。"""
+        _seed_state_workspace(srv, tmp_path)
+        self._caller_returning(srv, {
+            "success": False,
+            "no_connector": True,
+            "data": None,
+            "error": "没有已连接的连接器支持动作: open_folder",
+        })
+        monkeypatch.setattr(srv, "_open_in_system_file_manager", lambda p: True)
+
+        result = _run(srv.open_workspace_in_ide("p-open", caller={"sub": "user-a"}))
+
+        assert result["success"] is True
+
+    def test_business_failure_does_not_fall_back(self, srv: Any, tmp_path: Path, monkeypatch) -> None:
+        """业务失败（无标记）→ 不兜底，如实报连接器执行失败。"""
+        _seed_state_workspace(srv, tmp_path)
+        self._caller_returning(srv, {"success": False, "data": None, "error": "IDE 未就绪"})
+        opened: list[str] = []
+        monkeypatch.setattr(srv, "_open_in_system_file_manager", lambda p: opened.append(p))
+
+        result = _run(srv.open_workspace_in_ide("p-open", caller={"sub": "user-a"}))
+
+        assert result["success"] is False
+        assert "连接器执行失败" in result["message"]
+        assert "IDE 未就绪" in result["message"]
+        assert opened == []
+
+    def test_success_connector_type_read_from_data(self, srv: Any, tmp_path: Path) -> None:
+        """成功路径 connector_type 在 data 内（信封 ②-b(B) 内嵌形状）→ 消息可见。"""
+        _seed_state_workspace(srv, tmp_path)
+        self._caller_returning(srv, {
+            "success": True,
+            "data": {"success": True, "connector_type": "vscode"},
+        })
+
+        result = _run(srv.open_workspace_in_ide("p-open", caller={"sub": "user-a"}))
+
+        assert result["success"] is True
+        assert "vscode" in result["message"]
+
+
+class TestOpenFileConnectorEnvelope:
+    """open_file_in_ide 的信封形状消费（无兜底面：如实区分未连接与执行失败）。"""
+
+    def test_no_connector_marker_in_data_reported_as_unconnected(self, srv: Any) -> None:
+        async def _fake(action_type: str, parameters: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "success": False,
+                "data": {"no_connector": True, "action_type": "open_file"},
+                "error": "没有已连接的连接器支持动作: open_file",
+            }
+
+        srv._connector_caller = _fake
+        result = _run(srv.open_file_in_ide({"file_path": "D:/x/a.py"}))
+        assert result["success"] is False
+        assert "没有可用的 IDE 连接器" in result["message"]
+
+    def test_business_failure_reported_as_execute_failure(self, srv: Any) -> None:
+        async def _fake(action_type: str, parameters: dict[str, Any]) -> dict[str, Any]:
+            return {"success": False, "data": None, "error": "IDE 未就绪"}
+
+        srv._connector_caller = _fake
+        result = _run(srv.open_file_in_ide({"file_path": "D:/x/a.py"}))
+        assert result["success"] is False
+        assert "连接器执行失败" in result["message"]
 
 
 # ═══════════════════════════════════════════════════════════

@@ -23,6 +23,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Any
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -63,14 +64,17 @@ class IMemoryBackend(ABC):
             source: 可选来源标注
             metadata: 可选定向键值（如 review_id）——键值会被序列化为 str
                 合入 wire metadata（hindsight pydantic dict[str,str] 校验面）。
-            document_id: 可选文档 id（服务端原样落库为 document id，返回即
-                该 id——delete/update 的定向通路，2026-08-22 真机实证）
+            document_id: 文档 id（服务端原样落库为 document id，返回即
+                该 id——delete/update 的定向通路）；缺省时后端自造
+                mem-{uuid} 锚点（同步 retain 服务端无 id 回传，写入必须
+                可确认，2026-09-22 真机契约）
             update_mode: 可选更新语义（'replace' 替换同 document_id 文档 /
                 'append' 追加），服务端文档级操作
 
         Returns:
-            memory id；能力失败（调用失败/服务端报错/未返回 id）上抛
-            RuntimeError，不返回空串假成功。
+            memory id（即 document id）；调用失败/服务端报错/降级签名上抛
+            RuntimeError，响应形状违约（无 id/非 dict）上抛 MemoryShapeError，
+            不返回空串假成功。
         """
         raise NotImplementedError
 
@@ -145,6 +149,14 @@ class IMemoryBackend(ABC):
 # ═══════════════════════════════════════════════════════════
 
 
+class MemoryShapeError(RuntimeError):
+    """hindsight 响应形状与契约不符（无 id 回传/非 dict）。
+
+    与服务失败（调用异常/降级签名，普通 RuntimeError）分型：调用方打点
+    据异常类型与文案中的「形状错配」标记区分两类故障（BUG-64 取证口径）。
+    """
+
+
 class HindsightBackend(IMemoryBackend):
     """Hindsight sidecar 后端——经 tool-executor 调用 hindsight 工具。
 
@@ -202,8 +214,13 @@ class HindsightBackend(IMemoryBackend):
             "memory_type": memory_type,
             "metadata": wire_meta,
         }
-        if document_id:
-            args["document_id"] = document_id
+        if not document_id:
+            # 同步 retain 服务端不回传 id（hindsight-client 0.9.x RetainResponse
+            # 无 id 字段、operation_id 恒 None）——后端自造 mem-{uuid} 文档锚点，
+            # 服务端原样落库并回传（memory 工具层同契约），写入可确认、
+            # delete/update 定向通路可用。
+            document_id = f"mem-{uuid4().hex}"
+        args["document_id"] = document_id
         if update_mode:
             args["update_mode"] = update_mode
         params = {
@@ -233,9 +250,13 @@ class HindsightBackend(IMemoryBackend):
                 )
             memory_id = str(result.get("id", "") or "")
             if not memory_id:
-                raise RuntimeError("hindsight.retain 未返回 memory id（写入未确认）")
+                raise MemoryShapeError(
+                    "hindsight.retain 响应形状错配: 未返回 memory id（写入未确认）"
+                )
             return memory_id
-        raise RuntimeError(f"hindsight.retain 返回非预期类型: {type(result).__name__}")
+        raise MemoryShapeError(
+            f"hindsight.retain 响应形状错配: 返回非预期类型 {type(result).__name__}"
+        )
 
     async def search(
         self,
@@ -291,6 +312,38 @@ class HindsightBackend(IMemoryBackend):
                 if (item.get("metadata") or {}).get("knowledge_name") == knowledge_name
             ]
         return mapped
+
+    async def list_banks(self) -> list[str]:
+        """列举 hindsight 实例全部 bank id（IMemoryBackend 端口之外的扩展方法）。
+
+        列表面跨 bank 聚合的发现通路：memory 工具按会话 bank 落库，页面
+        列表面需要先发现 bank 集合再逐 bank 取文档。失败诚实上抛
+        RuntimeError（静默降级单 bank 会让列表面无声漏掉工具写入的记忆）。
+        """
+        params = {
+            "tool_name": "hindsight.list_banks",
+            "plugin_id": "hindsight_memory_service",
+            "args": {},
+        }
+        try:
+            result = await self._call("tool-executor.invoke", params)
+        except Exception as e:
+            raise RuntimeError(f"hindsight.list_banks 调用失败: {e}") from e
+        if isinstance(result, dict):
+            if "data" in result:
+                inner = result.get("data")
+                if isinstance(inner, dict):
+                    result = inner
+            if result.get("error") or result.get("initialized") is False:
+                raise RuntimeError(
+                    f"hindsight 后端降级: {result.get('error') or 'not initialized'}"
+                )
+            banks = result.get("banks")
+            if isinstance(banks, list):
+                return [str(b) for b in banks if b]
+        raise MemoryShapeError(
+            f"hindsight.list_banks 响应形状错配: 返回非预期类型 {type(result).__name__}"
+        )
 
     async def get_documents(
         self,

@@ -46,6 +46,12 @@ export interface WebviewWidgetProps {
   widgetId?: string
   /** 标题 */
   title?: string
+  /**
+   * 宿主数据注入（消息卡宿主桥，web/cards/compression.html 输入契约）：
+   * 就绪后经下行桥以 method "message.data" 推送 params = { message }——
+   * 卡未收到前呈折叠占位态（不伪造计数）。可选；通用 widget 不带此 prop。
+   */
+  injectMessage?: { content: string; metadata?: Record<string, unknown> | null }
 }
 
 /** 注入 iframe 的 bootstrap JS：暴露 window.agentos.postMessage 给插件 HTML。
@@ -105,6 +111,7 @@ export function WebviewWidget({
   htmlPath,
   widgetId,
   title,
+  injectMessage,
 }: WebviewWidgetProps): React.ReactNode {
   const [html, setHtml] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -305,6 +312,17 @@ export function WebviewWidget({
       '*',
     )
   }, [webviewReady, activeSessionId])
+
+  // 下行桥 message.data（消息卡宿主桥）：就绪时按卡输入契约推送宿主消息数据
+  // （content + metadata 含 compression_ref）。挂载即推一次；消息内容是不可变
+  // 终态（落库记录），无需随引用变化重推。
+  useEffect(() => {
+    if (!webviewReady || !injectMessage) return
+    iframeRef.current?.contentWindow?.postMessage(
+      buildWebviewMessage('message.data', { message: injectMessage }),
+      '*', // sandbox iframe origin='null'，同上
+    )
+  }, [webviewReady, injectMessage])
 
   if (error) {
     return (

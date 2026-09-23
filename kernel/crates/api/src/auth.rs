@@ -1744,23 +1744,6 @@ mod tests {
         ) -> Result<(), agentos_core::types::StorageError> {
             unreachable!("注册路径不调用")
         }
-        async fn update_run_status(
-            &self,
-            _run_id: &str,
-            _status: agentos_core::types::RunStatus,
-            _branch: Option<&str>,
-            _seq: Option<u32>,
-        ) -> Result<(), agentos_core::types::StorageError> {
-            unreachable!("注册路径不调用")
-        }
-        async fn create_run(
-            &self,
-            _run_id: &str,
-            _config_hash: &str,
-            _tenant_id: &str,
-        ) -> Result<(), agentos_core::types::StorageError> {
-            unreachable!("注册路径不调用")
-        }
         async fn store_blob(
             &self,
             _data: &[u8],
@@ -1993,19 +1976,24 @@ mod tests {
     #[tokio::test]
     async fn login_failures_table_eviction_keeps_bounded() {
         // 表级有界：条目数达上限后，新用户名登录尝试逐出窗口起点最早的一条
-        //（免认证 DoS 面的内存有界契约）。
+        //（免认证 DoS 面的内存有界契约）。全部条目取窗口内时间戳 → 清理分支
+        // 不代劳，逐出分支（逐出最旧 + 新用户名占位）被真实命中。
         let state = AppState::new();
-        let now = std::time::Instant::now();
         {
             let mut failures = state.login_failures.lock();
-            for i in 0..LOGIN_FAILURES_MAX_ENTRIES {
+            // u9999 首个失败时刻最早：其余条目用单调时钟向后毫秒偏移构造
+            // 「更晚」。不用 now-大回退构造年龄——Windows 上 Instant 自开机
+            // 起算，开机未满窗口秒数时减法下溢 panic（环境脆断）。
+            let now = std::time::Instant::now();
+            failures.insert("u9999".to_string(), vec![now]);
+            for i in 0..LOGIN_FAILURES_MAX_ENTRIES - 1 {
                 failures.insert(
                     format!("u{i}"),
-                    vec![now - std::time::Duration::from_secs(i as u64 + 1)],
+                    vec![now + std::time::Duration::from_millis(i as u64 + 1)],
                 );
             }
         }
-        let oldest_key = "u9999"; // 首个失败时刻最早（now - 10000s）
+        let oldest_key = "u9999"; // 首个失败时刻最早
         let err = login_handler(
             axum::extract::State(state.clone()),
             Json(LoginRequest {
@@ -2021,9 +2009,14 @@ mod tests {
             !failures.contains_key(oldest_key),
             "最旧条目应被逐出以保持表有界"
         );
-        assert!(
-            failures.len() < LOGIN_FAILURES_MAX_ENTRIES,
-            "逐出后条目数应低于上限"
+        assert!(failures.contains_key("fresh_user"), "新用户名必须完成占位");
+        // 有界不变量：满表逐出一进一出后恰好钉在上限（原断言 len < MAX 只在
+        // 窗口清理先清掉大部分种子行时成立，并非逐出分支的契约）
+        assert_eq!(
+            failures.len(),
+            LOGIN_FAILURES_MAX_ENTRIES,
+            "条目数必须钉在上限以内: {}",
+            failures.len()
         );
     }
 
@@ -2096,30 +2089,15 @@ mod tests {
         ) -> Result<(), agentos_core::types::StorageError> {
             self.inner.append_trace(entry).await
         }
-        async fn update_run_status(
+        async fn record_run_start(
             &self,
-            run_id: &str,
-            status: agentos_core::types::RunStatus,
-            branch: Option<&str>,
-            seq: Option<u32>,
-        ) -> Result<(), agentos_core::types::StorageError> {
-            self.inner
-                .update_run_status(run_id, status, branch, seq)
-                .await
-        }
-        async fn create_run(
-            &self,
+            pipeline_id: &str,
+            tenant_id: &str,
             run_id: &str,
             config_hash: &str,
-            tenant_id: &str,
         ) -> Result<(), agentos_core::types::StorageError> {
-            agentos_core::traits::StorageBackend::create_run(
-                self.inner.as_ref(),
-                run_id,
-                config_hash,
-                tenant_id,
-            )
-            .await
+            self.inner
+                .record_run_start(pipeline_id, tenant_id, run_id, config_hash)
         }
         async fn store_blob(
             &self,

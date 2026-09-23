@@ -84,27 +84,23 @@ export function mapThreadToSession(thread: Thread | ThreadStateResponse): Sessio
       (metadata.isolation_mode as 'isolated' | 'non_isolated' | undefined) ??
       null,
     pipelineIds: (thread as ThreadStateResponse).pipeline_ids || [],
-    activePipelineId: (thread as ThreadStateResponse).active_pipeline_id || null,
     pinned: metadata.pinned === true,
     starred: metadata.starred === true,
   }
 }
 
 /**
- * 会话主管道的权威解析（activePipelineId 优先，不按 [0] 位置猜测）：
- * - 优先后端权威 activePipelineId（session_routes 回显，内核 resolve 同源）；
- * - 缺失（旧数据）且 pipelineIds 恰一个元素 → 取 [0]（无歧义）；
- * - 缺失且多元素 → undefined（不猜位置序号，调用方 fail-closed 拒绝/中止）。
+ * 会话主管道解析（映射单一真值）：主管道 = pipelineIds[0]。
+ * 后端契约（ADR 2026-08-21-pipeline-ownership-session）：pipeline_ids 仅
+ * create_session 写入主管道，读面并入 pipeline_sessions 映射时保序「主管道在前」。
+ * active_pipeline_id 是运行时指针（任务出生经归属锚点创建即切到任务管道），
+ * 不承载主管道身份——对话标签（消息加载/发送目标/标签归属）与任务管理面板
+ * 同源消费本解析，两视图不允许分叉。
  */
 export function mainPipelineIdOf(session: {
-  activePipelineId?: string | null
   pipelineIds?: string[]
 }): string | undefined {
-  if (session.activePipelineId) return session.activePipelineId
-  if (session.pipelineIds && session.pipelineIds.length === 1) {
-    return session.pipelineIds[0]
-  }
-  return undefined
+  return session.pipelineIds?.[0] || undefined
 }
 
 /**

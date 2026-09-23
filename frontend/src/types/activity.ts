@@ -176,6 +176,8 @@ export interface ActivityData {
   details?: ActivityDetailBlock[]
   /** 头部展示的增删行数徽标（如 file_write 的 +X -Y） */
   diffStat?: { added: number; removed: number }
+  /** 头部大小徽标（字节，file_card 卡由 result.size 注入） */
+  size?: number
   /** 错误信息（统一错误信封对象或旧形态字符串，渲染端提取 message） */
   error?: string | import('./api').ErrorEnvelope
   /** 时间戳 */

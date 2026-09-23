@@ -1,5 +1,8 @@
 {
   "id": "pipeline_injected_param_validator",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Injected Param Validator",
   "version": "1.0.0",
   "plugin_type": "pipeline",

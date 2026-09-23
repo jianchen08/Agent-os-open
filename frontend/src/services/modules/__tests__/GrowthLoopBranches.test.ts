@@ -322,7 +322,7 @@ describe('GrowthLoop — 插件声明校验上报', () => {
 })
 
 describe('GrowthLoop — destroyGrowthLoop 清理', () => {
-  it('注销 resync、清空注册表与插件样式、清空工作区标签与 Dock', () => {
+  it('注销 resync、清空注册表与插件样式与 Dock；workspaceTabs 是用户布局数据保留（BUG-68）', () => {
     useLayoutModeStore.setState({
       workspaceTabs: [
         { id: 'tab-a', title: 'A', moduleId: 'm', isActive: true, isPinned: false },
@@ -345,7 +345,10 @@ describe('GrowthLoop — destroyGrowthLoop 清理', () => {
     expect(mocks.disposeResyncOnSchema).toHaveBeenCalledTimes(1)
     expect(mocks.clear).toHaveBeenCalledTimes(1)
     expect(mocks.removeAllPluginStyles).toHaveBeenCalledTimes(1)
-    expect(useLayoutModeStore.getState().workspaceTabs).toEqual([])
+    // BUG-68：页签是用户布局（认证过期/登出后重登须恢复），不再随闭环销毁清空
+    expect(useLayoutModeStore.getState().workspaceTabs).toEqual([
+      { id: 'tab-a', title: 'A', moduleId: 'm', isActive: true, isPinned: false },
+    ])
     expect(useLayoutModeStore.getState().dockItems).toEqual([])
   })
 })
@@ -417,8 +420,11 @@ describe('GrowthLoop — restartGrowthLoop', () => {
 
       try {
         await expect(restartGrowthLoop()).rejects.toThrow('notify exploded')
-        expect(useLayoutModeStore.getState().workspaceTabs).toEqual([])
-        expect(useLayoutModeStore.getState().dockItems).toEqual([])
+        // BUG-68：降级路径自身失败时用户页签与 dock 均保留（下次 schema 事件再换装）
+        expect(useLayoutModeStore.getState().workspaceTabs).toEqual([
+          { id: 'tab-x', title: 'X', moduleId: 'm', isActive: true, isPinned: false },
+        ])
+        expect(useLayoutModeStore.getState().dockItems).toHaveLength(1)
       } finally {
         useNotificationStore.setState({ addNotification: origAdd } as never)
       }

@@ -74,23 +74,6 @@ impl agentos_core::traits::StorageBackend for NullStorage {
     ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
-    async fn update_run_status(
-        &self,
-        _run_id: &str,
-        _status: agentos_core::types::RunStatus,
-        _branch: Option<&str>,
-        _seq: Option<u32>,
-    ) -> Result<(), agentos_core::types::StorageError> {
-        Ok(())
-    }
-    async fn create_run(
-        &self,
-        _run_id: &str,
-        _config_hash: &str,
-        _tenant_id: &str,
-    ) -> Result<(), agentos_core::types::StorageError> {
-        Ok(())
-    }
     async fn store_blob(
         &self,
         _data: &[u8],

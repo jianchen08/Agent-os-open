@@ -1,5 +1,8 @@
 {
   "id": "eval_probe",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Eval Probe Tools",
   "description": "评测探针工具（故意失败 case 载体：超时/参数错，评测任务专用）",
   "version": "1.0.0",

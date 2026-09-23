@@ -1,12 +1,14 @@
 # @feature: FP-0.2.二 | @vision: V2 安全
 """隔离会话审批语义测试 — security_check 的免审批默认与显式覆盖契约。
 
-用户裁定（2026-09-15，推翻并取代 c11025c04 的「隔离≠免审批」方向）：
+用户裁定（2026-09-15，推翻并取代 c11025c04 的「隔离≠免审批」方向），
+2026-09-22 统一口径（OBS-R255-1）：隔离免审批默认由旁路档承载——
 
-1. 隔离/worktree 会话 + 用户未显式选择权限档 → 基础检查通过即整体放行
-   （隔离容器即安全边界，黑名单命中也不弹审批，审批零发起）
-2. 显式覆盖：用户在前端权限选择器显式选择任一档（含 default）→ 以所选档
-   为准，黑名单 block/needs_approval 照常按档处置，隔离不再豁免
+1. 隔离/worktree 会话 + 用户未显式选择权限档 → 生效档即旁路：基础检查通过
+   即整体放行（隔离容器即安全边界，黑名单命中也不弹审批，审批零发起）
+2. 显式覆盖：选 default/accept_edits/auto 三档 → 以所选档为准，黑名单
+   block/needs_approval 照常按档处置，隔离不再豁免；选 bypass → 即免审批
+   本身（与隔离默认同档同路径）
 3. 非隔离任务 / 缺隔离标记 → 危险命令必须审批（保守对照，无免审批默认）
 
 「显式选择」判定 = 权限模式表（_PERMISSION_MODES，键 session_id——会话稳定
@@ -178,7 +180,7 @@ class TestIsolatedDefaultFreePass:
         decision = result.state_updates.get("security.decision", {})
         assert decision.get("allowed") is True, f"隔离免审批默认必须放行（{keyword!r}）"
         assert create.calls == 0, "隔离任务未显式选择权限档不得弹审批"
-        assert decision.get("reason") == "isolated task, base checks passed"
+        assert decision.get("reason") == "bypass: base checks passed"
 
     @pytest.mark.asyncio
     async def test_isolated_non_command_tool_blacklist_hit_passes(self) -> None:
@@ -303,6 +305,92 @@ class TestIsolatedExplicitOverride:
         decision = result.state_updates.get("security.decision", {})
         assert decision.get("allowed") is True
         assert create.calls == 0, "显式 bypass 按档放行，不弹审批"
+
+
+class TestBypassCarriesIsolatedDefault:
+    """隔离免审批默认由旁路档承载（OBS-R255-1，2026-09-22 统一口径）。
+
+    「隔离会话未显式选择」与「显式选 bypass」是同一生效档（旁路）：基础检查
+    通过即整体放行、审批零发起——二者在权限闸走单一路径，可观察行为完全
+    一致。档位解析优先级：显式选择 > 隔离默认（旁路）> 插件配置 > default。
+    """
+
+    _SESSION_ID = "sess-bx"
+    _PIPELINE_ID = "p-bx"
+
+    @pytest.fixture(autouse=True)
+    def _clean_modes(self):
+        sc_mod._PERMISSION_MODES.clear()
+        yield
+        sc_mod._PERMISSION_MODES.clear()
+
+    @pytest.fixture(autouse=True)
+    def _restore_cap(self):
+        yield
+        unwire_approval_cap(sc_mod)
+
+    def _isolated_ctx(self, command: str) -> Any:
+        return make_tool_ctx(
+            "bash_execute", {"command": command},
+            task_isolated=True,
+            pipeline_id=self._PIPELINE_ID,
+            session_id=self._SESSION_ID,
+        )
+
+    @pytest.mark.parametrize("explicit_bypass", [False, True], ids=["unselected", "explicit_bypass"])
+    @pytest.mark.asyncio
+    async def test_unselected_default_matches_explicit_bypass_decision(self, explicit_bypass: bool) -> None:
+        """同一危险命令：未选择（隔离默认）与显式旁路的 decision 逐字段相等。"""
+        if explicit_bypass:
+            sc_mod._PERMISSION_MODES[self._SESSION_ID] = "bypass"
+        _cap, create = wire_approval_cap(sc_mod, [])
+
+        plugin = SecurityCheckPlugin(config={"enabled": True, "rules": _GUARD_RULES})
+        result = await plugin.execute(self._isolated_ctx("rm -rf .packtest_probe_dir"))
+
+        decision = result.state_updates.get("security.decision", {})
+        assert decision.get("allowed") is True
+        assert create.calls == 0, "旁路档（含隔离默认）审批零发起"
+        assert decision.get("reason") == "bypass: base checks passed"
+
+    @pytest.mark.asyncio
+    async def test_isolated_default_outranks_config_mode(self) -> None:
+        """未显式选择时隔离默认（旁路）压过插件配置 mode=default：仍免审批。"""
+        _cap, create = wire_approval_cap(sc_mod, [])
+
+        plugin = SecurityCheckPlugin(
+            config={"enabled": True, "rules": _GUARD_RULES, "mode": "default"}
+        )
+        result = await plugin.execute(self._isolated_ctx("rm -rf .packtest_probe_dir"))
+
+        decision = result.state_updates.get("security.decision", {})
+        assert decision.get("allowed") is True
+        assert create.calls == 0, "隔离默认免审批不受插件配置 mode 影响"
+        assert decision.get("reason") == "bypass: base checks passed"
+
+    @pytest.mark.asyncio
+    async def test_isolated_default_keeps_builtin_hardlines(self) -> None:
+        """隔离默认（旁路档）不豁免三条内置底线：路径遍历仍拦截。
+
+        路径遍历检测作用于路径类参数（path/file_path 等），命令参数不在
+        其列——用 file_write 的 path 参数触发。
+        """
+        wire_approval_cap(sc_mod, [])
+
+        plugin = SecurityCheckPlugin(config={"enabled": True, "rules": _GUARD_RULES})
+        ctx = make_tool_ctx(
+            "file_write", {"path": "../../outside.txt", "content": "x"},
+            task_isolated=True,
+            pipeline_id=self._PIPELINE_ID,
+            session_id=self._SESSION_ID,
+        )
+        result = await plugin.execute(ctx)
+
+        decision = result.state_updates.get("security.decision", {})
+        assert decision.get("reason", "").startswith("soft_block"), (
+            f"路径遍历底线任何档位都强制执行: {decision!r}"
+        )
+        assert result.state_updates.get("raw_tool_calls") == []
 
 
 class TestConservativeControls:

@@ -1,5 +1,8 @@
 {
   "id": "human_interaction_tool",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Human Interaction Tool",
   "description": "用户交互插件（双角色：LLM 工具 + 交互服务。choice/conversation/notification 三模式）",
   "version": "2.0.0",
@@ -9,7 +12,7 @@
   "entry": "python server.py",
   "mcp": {
     "transport": "stdio",
-    "request_timeout_secs": 90000
+    "request_timeout_secs": 86400
   },
   "lifecycle": {
     "idle_timeout_secs": 0

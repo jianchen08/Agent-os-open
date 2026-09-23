@@ -14,6 +14,7 @@ import {
 import { invalidateSessions, readSessions  } from '@/hooks/queries/useSessionsQuery'
 import * as tokenLifecycle from '@/services/auth/tokenLifecycle'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
+import { extractThreadId } from '@/services/websocket/streaming/handlers/utils'
 import { useChatInputStore } from '@/stores/chatInputStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useLongTermTaskStore } from '@/stores/longTermTaskStore'
@@ -52,7 +53,7 @@ export function useRealtimeEvents(): void {
       const { activeSessionId } = useSessionStore.getState()
       const sessions = readSessions()
       if (!activeSessionId) return
-      // 只补当前会话的【主管道】（权威 activePipelineId 解析），
+      // 只补当前会话的【主管道】（映射真值 pipelineIds[0]），
       // 不对 session.pipelineIds 全部扇出。
       // 子管道的消息在用户切到对应 tab 时按需加载。
       const session = sessions.find((s) => s.id === activeSessionId)
@@ -256,6 +257,108 @@ export function useRealtimeEvents(): void {
     globalWS.subscribe(WS_SERVER_EVENTS.COMPRESSION_FAILED, handleCompressionFailed)
 
     /**
+     * 压缩波次完成（context_window_guard 压缩成功时 frontend.emit 透传）：
+     * 压缩以 set(seq, 块/null) ops 原地重写 message_slots → 内容寻址指纹变异，
+     * 前端跨压缩持有的 recordId 过期（回退/编辑重发出站 wire id miss）。
+     * 收到后按 API 权威全量对账刷新（fetchMessages 无游标 → initFromAPI：
+     * id/cmid/recordId 三键收敛，API 权威版自带新指纹；飞行中窗口保护在途
+     * 消息不被误清）。去抖 500ms：事件在插件 execute 内发出、槽位 ops 由引擎
+     * 在 execute 返回后落库，立即拉取的快照可能早于改写落库；同管道连续波次
+     * 也合并为一次。流式中不跳过——压缩正发生在管道运行内，这是唯一对账时机
+     * （loadPipelineMessages/reconcileFromAPI 的流式跳过语义在此不适用）。
+     */
+    const COMPRESSION_RECONCILE_DEBOUNCE_MS = 500
+    const compressionReconcileTimers = new Map<string, ReturnType<typeof setTimeout>>()
+    const handleCompressionApplied = (eventData: {
+      data?: { thread_id?: string; pipeline_id?: string }
+    }) => {
+      const pipelineId = eventData?.data?.pipeline_id || ''
+      const threadId = eventData?.data?.thread_id || ''
+      if (!pipelineId || !threadId) {
+        console.warn('[COMPRESSION_APPLIED] 坐标缺失，跳过对账', eventData?.data)
+        return
+      }
+      const pending = compressionReconcileTimers.get(pipelineId)
+      if (pending) clearTimeout(pending)
+      compressionReconcileTimers.set(
+        pipelineId,
+        setTimeout(() => {
+          compressionReconcileTimers.delete(pipelineId)
+          usePipelineMessageStore
+            .getState()
+            .fetchMessages(pipelineId, { threadId })
+            .catch(() => {
+              // 对账失败 = 旧指纹残留，回退/编辑重发可能失败（内核账本回溯兜底）
+              // ——必须让用户可见，静默会把故障留到操作失败那一刻才暴露。
+              useNotificationStore.getState().addNotification({
+                title: '压缩后消息对账失败',
+                message: '上下文压缩后消息同步失败，回退/编辑重发可能失败，建议刷新页面重试。',
+                priority: 'normal',
+                category: 'error',
+                isBlocking: false,
+                autoDismissMs: 8000,
+                sourceLabel: '上下文压缩',
+              })
+            })
+        }, COMPRESSION_RECONCILE_DEBOUNCE_MS),
+      )
+    }
+    globalWS.subscribe(WS_SERVER_EVENTS.COMPRESSION_APPLIED, handleCompressionApplied)
+
+    /**
+     * 段激活 ack（消息段模型 §5.1 WS 面：‹i/n› 多代切换 / 多端激活的对账事件）。
+     * 服务端按后缀语义整段替换落库后推送，防抖 500ms 复用压缩对账
+     * compressionReconcileTimers 模式：替换落库与事件发出存在竞态窗口，立即
+     * 拉取的快照可能早于写库；多端连续激活合并为一次。对账 = 消息全量重拉
+     * （initFromAPI 按 id/cmid/recordId 三键权威替换，乐观段视图被启用序列
+     * 覆盖）+ 段清单刷新（激活会把切换前后缀冻结为新段，spanIndex 随之增长）
+     * + 清乐观标记。对账失败必须可见：乐观视图与权威序列分叉会一直留存。
+     */
+    const SEGMENT_RECONCILE_DEBOUNCE_MS = 500
+    const segmentReconcileTimers = new Map<string, ReturnType<typeof setTimeout>>()
+    const handleSegmentActivated = (eventData: {
+      data?: { thread_id?: string; pipeline_id?: string; segment_id?: string; _threadId?: string }
+      _threadId?: string
+    }) => {
+      const pipelineId = eventData?.data?.pipeline_id || ''
+      // 内核 emit_event 统一封装的会话坐标是 data._threadId（与流式族同口径，
+      // 复用 extractThreadId 提取）；插件 frontend.emit 形态才携带 thread_id。
+      const threadId = extractThreadId(eventData) || eventData?.data?.thread_id || ''
+      if (!pipelineId || !threadId) {
+        console.warn('[SEGMENT_ACTIVATED] 坐标缺失，跳过对账', eventData?.data)
+        return
+      }
+      const pending = segmentReconcileTimers.get(pipelineId)
+      if (pending) clearTimeout(pending)
+      segmentReconcileTimers.set(
+        pipelineId,
+        setTimeout(() => {
+          segmentReconcileTimers.delete(pipelineId)
+          const ps = usePipelineMessageStore.getState()
+          Promise.all([
+            ps.fetchMessages(pipelineId, { threadId }),
+            ps.fetchSegments(pipelineId),
+          ])
+            .then(() => {
+              ps.clearSegmentView(pipelineId)
+            })
+            .catch(() => {
+              useNotificationStore.getState().addNotification({
+                title: '对话版本切换对账失败',
+                message: '版本切换后消息同步失败，建议刷新页面查看当前启用的内容。',
+                priority: 'normal',
+                category: 'error',
+                isBlocking: false,
+                autoDismissMs: 8000,
+                sourceLabel: '对话版本',
+              })
+            })
+        }, SEGMENT_RECONCILE_DEBOUNCE_MS),
+      )
+    }
+    globalWS.subscribe(WS_SERVER_EVENTS.SEGMENT_ACTIVATED, handleSegmentActivated)
+
+    /**
      * 被同账号新连接替换（B10 单连接踢旧，code=4000）：本页已永久失联且不再
      * 自动重连——必须明示用户，否则页面静默装死、消息全黑洞。典型成因：
      * 同一浏览器开了多个前端标签页互踢。
@@ -315,6 +418,12 @@ export function useRealtimeEvents(): void {
       globalWS.unsubscribe(WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT, handleUserInputSendTimeout)
       globalWS.unsubscribe(WS_SERVER_EVENTS.PENDING_INPUTS_CHANGED, handlePendingInputsChanged)
       globalWS.unsubscribe(WS_SERVER_EVENTS.COMPRESSION_FAILED, handleCompressionFailed)
+    globalWS.unsubscribe(WS_SERVER_EVENTS.COMPRESSION_APPLIED, handleCompressionApplied)
+    for (const timer of compressionReconcileTimers.values()) clearTimeout(timer)
+    compressionReconcileTimers.clear()
+    globalWS.unsubscribe(WS_SERVER_EVENTS.SEGMENT_ACTIVATED, handleSegmentActivated)
+    for (const timer of segmentReconcileTimers.values()) clearTimeout(timer)
+    segmentReconcileTimers.clear()
       globalWS.unsubscribe(WS_LOCAL_EVENTS.KICKED_BY_REPLACEMENT, handleKickedByReplacement)
     }
   }, [bumpWorkspaceDataVersion])

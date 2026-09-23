@@ -59,6 +59,29 @@
         ]
       },
       {
+        "from": "plugins/shared/_host/.venv",
+        "to": "plugins/shared/_host/.venv",
+        "filter": [
+          "**/*",
+          "!**/__pycache__{,/**}",
+          "!**/*.pyc",
+          "!**/.mypy_cache{,/**}",
+          "!**/.pytest_cache{,/**}",
+          "!**/.ruff_cache{,/**}"
+        ]
+      },
+      {
+        "from": "plugins/sdk",
+        "to": "plugins/sdk",
+        "filter": [
+          "pyproject.toml",
+          "src/**/*",
+          "!**/__pycache__{,/**}",
+          "!**/*.pyc",
+          "!**/*.egg-info{,/**}"
+        ]
+      },
+      {
         "from": "config",
         "to": "config"
       }

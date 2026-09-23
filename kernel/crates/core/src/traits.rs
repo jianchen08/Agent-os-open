@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{
     MessageRecord, PendingInputRecord, PipelineRunInfo, PluginContext, PluginError, PluginResult,
-    RouteType, RunRecord, RunStatus, SessionRecord, StorageError, ToolCategory,
+    RouteType, RunRecord, SegmentRecord, SessionRecord, StorageError, ToolCategory,
     ToolExecutionResult, ToolSource, TraceEntry, UserRecord,
 };
 
@@ -1180,12 +1180,12 @@ pub struct McpConfig {
     pub idle_timeout_secs: u64,
     #[serde(default = "default_protocol_version")]
     pub protocol_version: String,
-    /// 单次工具调用的响应等待超时（秒）。`None` = 内核默认 300s。
+    /// 单次工具调用的响应等待超时（秒）。`None` = 内核默认 86400s（mcp 客户端
+    /// `DEFAULT_REQUEST_TIMEOUT_SECS`，审批/人机交互族统一值，BUG-60）。
     ///
-    /// 长等待业务（交互插件 wait_for_choice 等用户响应，业务超时可达
-    /// 24h）必须显式声明，否则内核 MCP client 300s 兜底会先于用户操作掐断调用
-    /// （审批请求被 -32001 超时作废后引擎重试弹窗循环）。security_check 的 SDK
-    /// 侧 timeout 参数仅作提示，内核不读。
+    /// 长等待业务（交互插件 wait_for_choice 等用户响应，业务超时 24h）与内核
+    /// 默认同值；显式声明仍推荐——声明即契约，不受内核默认将来调整影响。
+    /// security_check 的 SDK 侧 timeout 参数仅作提示，内核不读。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_secs: Option<u64>,
 }
@@ -1328,30 +1328,33 @@ pub struct MessageQueryOpts {
 /// SQLite 四表模型的 trait 抽象，供 ContentLoader 和 AdrEngine 使用。
 /// 具体实现为 SQLite，但 trait 层不绑定具体数据库——便于测试时 mock。
 ///
-/// **四表模型**：
-/// - `runs`：运行实例元数据
-/// - `messages`：消息表（含分支标识）
-/// - `traces`：状态变更日志（Append-Only Patch）
-/// - `blobs`：不可变原始数据
+/// **存储模型**（ADR 2026-09-18：runs/branches 退役，state 唯一真值）：
+/// - `pipeline_state`：state 标量字段的唯一真值（含运行簿记键 run_status/
+///   run_started_at/run_ended_at/run_config_hash/run_id/suspend_request_id）
+/// - `message_slots` + `blobs`：消息 op 流（槽位 + 内容寻址）
+/// - `traces`：pipeline 级 op 日志（定位 = (pipeline_id, seq)，审计/DR 回放）
+/// - `pipeline_checkpoints`：纯备份（仅 state 丢失/损坏时作 DR 基线）
 ///
-/// [来源: docs/working/adr_engine_design.md §4.2]
+/// [来源: docs/decisions/（ADR 2026-09-18 runs 退役与 state 唯一真值）]
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
-    /// 获取运行实例记录。
+    /// 获取运行记录（由 state 运行簿记键合成；按 run_id 反查所属管道）。
     async fn get_run(&self, run_id: &str) -> Result<RunRecord, StorageError>;
 
-    /// 记录 run 的管道归属（GAP-1 统一：task = pipeline，按管道挂起/恢复需要）。
-    /// 默认 no-op（mock/null store），SqliteStore 覆盖为真实 UPDATE。
-    async fn set_run_pipeline(
+    /// 运行开始簿记：写 state 运行键（run_id/run_status='running'/run_started_at/
+    /// run_config_hash）。默认 no-op（mock/null store），SqliteStore 覆盖。
+    async fn record_run_start(
         &self,
-        _run_id: &str,
         _pipeline_id: &str,
+        _tenant_id: &str,
+        _run_id: &str,
+        _config_hash: &str,
     ) -> Result<(), StorageError> {
         Ok(())
     }
 
-    /// 列出某管道的全部 run（GAP-1 统一：suspend_pipeline/resume_pipeline 按管道
-    /// 操作——找最新非终态 run）。默认空（mock/null store），SqliteStore 覆盖。
+    /// 列出某管道的运行投影（ADR 2026-09-18：每管道至多一条——当前运行）。
+    /// 默认空（mock/null store），SqliteStore 覆盖。
     async fn list_runs_by_pipeline(
         &self,
         _pipeline_id: &str,
@@ -1386,25 +1389,9 @@ pub trait StorageBackend: Send + Sync {
     /// 获取指定 blob_id 的原始数据。
     async fn get_blob(&self, blob_id: &str) -> Result<Vec<u8>, StorageError>;
 
-    /// 追加一条状态变更日志到 traces 表（Append-Only，ADR ③）。
+    /// 追加一条状态变更日志到 traces 表（Append-Only，pipeline 级 op 流）。
+    /// seq 由存储层写入时分配（MAX(seq)+1），entry.seq 字段值被忽略。
     async fn append_trace(&self, entry: TraceEntry) -> Result<(), StorageError>;
-
-    /// 更新运行实例状态。
-    async fn update_run_status(
-        &self,
-        run_id: &str,
-        status: RunStatus,
-        current_branch: Option<&str>,
-        current_seq: Option<u32>,
-    ) -> Result<(), StorageError>;
-
-    /// 创建运行实例（同时建主分支 main）。在管道执行开始时调用。
-    async fn create_run(
-        &self,
-        run_id: &str,
-        config_hash: &str,
-        tenant_id: &str,
-    ) -> Result<(), StorageError>;
 
     /// 存储不可变原始数据到 blobs 表（内容寻址去重，blob_id = SHA256）。
     /// 返回 blob_id 供 message_slots 行引用。
@@ -1509,6 +1496,28 @@ pub trait StorageBackend: Send + Sync {
         _tenant_id: &str,
     ) -> Result<Vec<serde_json::Value>, StorageError> {
         Ok(vec![])
+    }
+
+    // ── 域12：消息段（替换事件的冻结内容，多代切换/压缩原文存档）─────────
+
+    /// 列出某管道的消息段（不含成员、含 preview，按 base_seq, created_at 升序）。
+    /// 默认空（mock/null store），SqliteStore 覆盖。
+    async fn list_message_segments(
+        &self,
+        _pipeline_id: &str,
+        _tenant_id: &str,
+    ) -> Result<Vec<SegmentRecord>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    /// 取单个消息段（含成员全文解析：members_blob 引用列表 → 逐成员 blob 重建）。
+    /// 不存在 → None。默认 None（mock/null store），SqliteStore 覆盖。
+    async fn get_message_segment(
+        &self,
+        _segment_id: &str,
+        _tenant_id: &str,
+    ) -> Result<Option<SegmentRecord>, StorageError> {
+        Ok(None)
     }
 
     // ── 域11：pending 输入队列（ADR-2026-08-26）─────────────────────
@@ -1718,7 +1727,7 @@ mod tests {
 
     #[test]
     fn mcp_config_request_timeout_secs_parse_roundtrip() {
-        // 显式声明 → 覆盖默认 300s
+        // 显式声明 → 覆盖内核默认（86400s，BUG-60 审批族统一值）
         let cfg: McpConfig = serde_json::from_value(serde_json::json!({
             "transport": "stdio",
             "request_timeout_secs": 90000,
@@ -1726,7 +1735,7 @@ mod tests {
         .expect("合法配置应可解析");
         assert_eq!(cfg.request_timeout_secs, Some(90000));
 
-        // 缺省 → None（保持内核 300s 默认兜底）
+        // 缺省 → None（内核 mcp 客户端默认兜底，现为 86400s 统一值）
         let cfg2: McpConfig =
             serde_json::from_value(serde_json::json!({"transport": "stdio"})).expect("缺省可解析");
         assert_eq!(cfg2.request_timeout_secs, None);
@@ -1957,23 +1966,6 @@ mod tests {
         async fn append_trace(&self, _entry: TraceEntry) -> Result<(), StorageError> {
             unreachable!("默认面测试不调用")
         }
-        async fn update_run_status(
-            &self,
-            _run_id: &str,
-            _status: RunStatus,
-            _current_branch: Option<&str>,
-            _current_seq: Option<u32>,
-        ) -> Result<(), StorageError> {
-            unreachable!("默认面测试不调用")
-        }
-        async fn create_run(
-            &self,
-            _run_id: &str,
-            _config_hash: &str,
-            _tenant_id: &str,
-        ) -> Result<(), StorageError> {
-            unreachable!("默认面测试不调用")
-        }
         async fn store_blob(&self, _data: &[u8], _mime_type: &str) -> Result<String, StorageError> {
             unreachable!("默认面测试不调用")
         }
@@ -2073,8 +2065,8 @@ mod tests {
     #[tokio::test]
     async fn storage_default_methods_contract() {
         let s = BareStore;
-        // run/pipeline 投影族默认：Ok / 空集
-        assert!(s.set_run_pipeline("r", "p").await.is_ok());
+        // 运行投影族默认：record_run_start no-op = Ok；list_runs_by_pipeline 空集
+        assert!(s.record_run_start("p", "t", "r", "hash").await.is_ok());
         assert!(s.list_runs_by_pipeline("p", "t").await.unwrap().is_empty());
         assert!(s.list_pipelines("t", None, 10).await.unwrap().is_empty());
         assert!(s.delete_pipeline("p").await.is_ok());
@@ -2574,7 +2566,10 @@ mod tests {
         assert_eq!(c.transport, McpTransport::Stdio);
         assert_eq!(c.idle_timeout_secs, 300, "缺省空闲卸载 300s");
         assert_eq!(c.protocol_version, "2025-06-18");
-        assert!(c.request_timeout_secs.is_none(), "缺省 = 内核 300s 兜底");
+        assert!(
+            c.request_timeout_secs.is_none(),
+            "缺省 = None（内核 mcp 客户端默认 86400s 兜底，BUG-60 审批族统一值）"
+        );
         assert!(c.endpoint.is_none(), "stdio 无外部端点");
         // HTTP 形态：长等待显式声明保留
         let h: McpConfig = serde_json::from_str(

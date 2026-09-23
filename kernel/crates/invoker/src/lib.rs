@@ -17,4 +17,7 @@ pub mod invoker;
 pub mod shared;
 pub mod verify;
 
-pub use invoker::{is_cohost_member, HostProcSnapshot, PluginInvokerImpl};
+pub use invoker::{
+    builtin_group_host_dir, find_group_host_dir, find_venv_interpreter, is_cohost_member,
+    is_plain_python_command, HostProcSnapshot, PluginInvokerImpl,
+};

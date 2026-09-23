@@ -1,5 +1,8 @@
 {
   "id": "multimodal_service",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Multimodal Service",
   "description": "多模态内容适配与语音识别服务（模型能力查询/格式转换/ASR转写）",
   "version": "1.0.0",
@@ -140,6 +143,49 @@
       "id": "media_providers",
       "path": "config/plugins/multimodal/media_providers.yaml",
       "label": "媒体提供商配置"
+    },
+    {
+      "id": "asr",
+      "path": "config/models/asr.yaml",
+      "label": "语音转写（ASR）配置",
+      "fields": [
+        {
+          "name": "asr.enabled",
+          "type": "toggle",
+          "label": "启用语音转写",
+          "description": "关闭后前端语音输入降级请求会收到「未配置」提示"
+        },
+        {
+          "name": "asr.default_provider",
+          "type": "string",
+          "label": "默认提供商 ID",
+          "description": "取 providers 下的键名（如 glm）；未命中时回退第一个 provider"
+        },
+        {
+          "name": "asr.providers.glm.api_base",
+          "type": "string",
+          "label": "API Base（glm）",
+          "description": "OpenAI 兼容端点基址，转写请求 POST {api_base}/audio/transcriptions"
+        },
+        {
+          "name": "asr.providers.glm.api_key",
+          "type": "string",
+          "label": "API Key（glm）",
+          "description": "支持 ${ENV_VAR} 占位（如 ${ZHIPU_API_KEY}）；也可直接填入密钥"
+        },
+        {
+          "name": "asr.providers.glm.model",
+          "type": "string",
+          "label": "转写模型（glm）",
+          "description": "如 glm-asr-v1"
+        },
+        {
+          "name": "asr.providers.glm.language",
+          "type": "string",
+          "label": "识别语言（glm）",
+          "description": "语言代码（如 zh-CN），请求可覆盖"
+        }
+      ]
     }
   ],
   "http_endpoints": [

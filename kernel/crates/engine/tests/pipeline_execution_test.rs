@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use agentos_core::traits::{MessageQueryOpts, PluginInvoker, StorageBackend};
 use agentos_core::types::{
     LoopBody, MessageRecord, PipelineConfig, PipelineStep, PluginContext, PluginError,
-    PluginResult, Route, RouteAction, RouteNext, RunRecord, RunStatus, StepItem, StepLibrary,
+    PluginResult, Route, RouteAction, RouteNext, RunRecord, StepItem, StepLibrary,
     ToolExecutionResult, TraceEntry,
 };
 use agentos_engine::compiler::compile_pipeline;
@@ -108,23 +108,6 @@ impl StorageBackend for NullStorage {
     async fn append_trace(
         &self,
         _entry: TraceEntry,
-    ) -> Result<(), agentos_core::types::StorageError> {
-        Ok(())
-    }
-    async fn update_run_status(
-        &self,
-        _run_id: &str,
-        _status: RunStatus,
-        _branch: Option<&str>,
-        _seq: Option<u32>,
-    ) -> Result<(), agentos_core::types::StorageError> {
-        Ok(())
-    }
-    async fn create_run(
-        &self,
-        _run_id: &str,
-        _config_hash: &str,
-        _tenant_id: &str,
     ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
@@ -323,7 +306,6 @@ fn make_executor(invoker: Arc<MockInvoker>, plugin_ids: &[&str]) -> PipelineExec
         plugin_ids.iter().map(|s| s.to_string()),
         store,
         "run_p7",
-        "main",
     )
 }
 
@@ -342,7 +324,6 @@ fn make_executor_with_store(
         plugin_ids.iter().map(|s| s.to_string()),
         store_dyn,
         run_id,
-        "main",
     )
 }
 

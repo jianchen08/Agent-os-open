@@ -1,5 +1,8 @@
 {
   "id": "lsp_service",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "LSP Service",
   "description": "LSP 语言服务协议工具（定义跳转/引用查找/诊断/补全/文件跳转）",
   "version": "1.0.0",

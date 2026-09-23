@@ -1241,23 +1241,26 @@ impl PipelineDispatcher for EngineDispatcher {
         if let Some(db) = self.state.db.as_ref() {
             match db.find_suspended_run_by_request_id(request_id) {
                 Ok(Some(run)) => {
-                    // resume 即 runs 表状态簿记：恢复 Running 状态供查询/复盘
-                    // 语义（新引擎执行流由 state.suspended 插件机制控制，与
-                    // capability pipeline-executor.resume 一致）。
-                    match db
-                        .update_run_status(
-                            &run.run_id,
-                            agentos_core::types::RunStatus::Running,
-                            None,
-                            None,
-                        )
-                        .await
-                    {
-                        Ok(()) => {
-                            info!(run_id = %run.run_id, request_id = request_id, "interaction_response 已唤醒 suspended run")
+                    // resume 即运行簿记（runs 表退役，ADR 2026-09-18）：恢复
+                    // Running 投影供查询/复盘语义（新引擎执行流由 state.suspended
+                    // 插件机制控制，与 capability pipeline-executor.resume 一致）。
+                    match run.pipeline_id.clone() {
+                        Some(pipeline_id) => {
+                            let mut fields = serde_json::Map::new();
+                            fields.insert("run_status".to_string(), serde_json::json!("running"));
+                            fields
+                                .insert("suspend_request_id".to_string(), serde_json::Value::Null);
+                            match db.upsert_state_fields(&pipeline_id, &run.tenant_id, &fields) {
+                                Ok(()) => {
+                                    info!(run_id = %run.run_id, request_id = request_id, "interaction_response 已唤醒 suspended run")
+                                }
+                                Err(e) => {
+                                    warn!(request_id = request_id, error = %e, "suspended run resume 失败")
+                                }
+                            }
                         }
-                        Err(e) => {
-                            warn!(request_id = request_id, error = %e, "suspended run resume 失败")
+                        None => {
+                            warn!(run_id = %run.run_id, request_id = request_id, "suspended run 无管道归属（state 无 run_id 键），跳过簿记")
                         }
                     }
                 }
@@ -1323,13 +1326,11 @@ impl PipelineDispatcher for EngineDispatcher {
             .into_iter()
             .find(|r| r.status == agentos_core::types::RunStatus::Running);
         if let Some(run) = target {
+            // runs 表退役（ADR 2026-09-18）：簿记 = state 运行键
+            let mut fields = serde_json::Map::new();
+            fields.insert("run_status".to_string(), serde_json::json!("suspended"));
             store
-                .update_run_status(
-                    &run.run_id,
-                    agentos_core::types::RunStatus::Suspended,
-                    Some(&run.current_branch),
-                    Some(run.current_seq),
-                )
+                .upsert_state_fields(&target_pipeline, &tenant_id, &fields)
                 .await
                 .map_err(|e| format!("stop_generation 置 suspended 失败: {e}"))?;
             info!(
@@ -1484,30 +1485,73 @@ impl PipelineDispatcher for EngineDispatcher {
             .get_messages_by_pipeline(&route_id, MessageQueryOpts::default())
             .await
             .map_err(|e| format!("regenerate 读历史失败: {e}"))?;
-        let target_seq = find_target_user_seq(&messages, user_message_id)
-            .ok_or_else(|| format!("regenerate 未找到目标 user 消息: {user_message_id}"))?;
+        let target =
+            resolve_regenerate_target(store, &route_id, &tenant_id, &messages, user_message_id)
+                .await?;
+        let target_seq = target.seq();
 
-        // 1b. 审计锚预检：目标消息无有效 run_id 即拒绝整操作（审计不可见 = 操作
-        //     不可执行，不合成占位 id）——先于任何截断落库。
-        let trace_run_id = messages
-            .iter()
-            .find(|m| m.seq_in_branch == target_seq)
-            .map(|m| m.run_id.clone())
-            .filter(|r| !r.is_empty())
-            .ok_or_else(|| {
-                "regenerate 拒绝: 目标 user 消息无有效 run_id(审计不可见)".to_string()
-            })?;
+        // 1b. 审计锚预检：Live 路径要求目标消息带有效 run_id（审计不可见 = 操作
+        //     不可执行，不合成占位 id）；Ledger 路径的锚 = 账本轨迹（resolve 时
+        //     已验指纹与 role），run 锚随槽位改写/删除不可恢复，以账本锚替代——
+        //     rollback trace 如实记录 resolution 与账本指针。
+        let trace_run_id = match &target {
+            RegenTarget::Live { run_id, .. } => run_id.clone(),
+            RegenTarget::Ledger { .. } => String::new(),
+        };
 
-        // 2. 构造截断 ops：目标 user 之后的全部槽位 set(seq,null)（删槽留洞，
-        //    context_window_guard 先例；后段 seq/id 不变）+（可选）改写目标内容。
+        // 2. 构造截断 ops：被换后缀先冻结为段（消息段模型 §5 写路径——截断前
+        //    冻结，切换无损不变量；与截断 ops 同批同事务）→ 目标 user 之后的全部
+        //    槽位 set(seq,null)（删槽留洞，context_window_guard 先例；后段 seq/id
+        //    不变）→ 目标槽位 op（Live 仅编辑重发改写内容；Ledger 恢复原文/以原文
+        //    metadata 写新内容）。
         let mut ops: Vec<serde_json::Value> = Vec::new();
-        if let Some(content) = new_content {
-            if let Some(target) = messages.iter().find(|m| m.seq_in_branch == target_seq) {
-                let mut msg = serde_json::json!({"role": "user", "content": content});
-                if let Some(meta) = target.metadata.clone() {
-                    msg["metadata"] = meta;
+        // 段统一含目标 user 消息（[target_seq..末尾]，base_seq = target_seq）：
+        // edit-resend 会原地改写目标槽位，不含 user 消息则旧文本不在任何段里，
+        // 切回旧代 = 新用户文本配旧轮次（激活连用户消息一起恢复，编辑/纯重试
+        // 两态统一正确）。冻结成员取槽位全文（get_messages 的 preview 是截断
+        // 变体，不能作冻结原文）；成员剥离 seq（位置标记属槽位坐标，冻结原文
+        // 携带会在写回时变成陈旧位置残留）。
+        let full_history = store
+            .load_message_history(&route_id, &tenant_id)
+            .await
+            .map_err(|e| format!("regenerate 读全文历史失败: {e}"))?;
+        let replaced_suffix: Vec<serde_json::Value> = full_history
+            .into_iter()
+            .filter_map(|mut m| {
+                let seq = m.get("seq").and_then(|v| v.as_u64())? as u32;
+                if seq < target_seq {
+                    return None;
                 }
-                ops.push(serde_json::json!({"op": "set", "seq": target_seq, "msg": msg}));
+                if let Some(o) = m.as_object_mut() {
+                    o.remove("seq");
+                }
+                Some(m)
+            })
+            .collect();
+        ops.push(freeze_segment_op(target_seq, replaced_suffix));
+        match &target {
+            RegenTarget::Live { seq, .. } => {
+                if let Some(content) = new_content {
+                    if let Some(target) = messages.iter().find(|m| m.seq_in_branch == *seq) {
+                        let mut msg = serde_json::json!({"role": "user", "content": content});
+                        if let Some(meta) = target.metadata.clone() {
+                            msg["metadata"] = meta;
+                        }
+                        ops.push(serde_json::json!({"op": "set", "seq": seq, "msg": msg}));
+                    }
+                }
+            }
+            RegenTarget::Ledger {
+                seq, original_msg, ..
+            } => {
+                let mut msg = match new_content {
+                    Some(content) => serde_json::json!({"role": "user", "content": content}),
+                    None => original_msg.clone(),
+                };
+                if let Some(meta) = original_msg.get("metadata") {
+                    msg["metadata"] = meta.clone();
+                }
+                ops.push(serde_json::json!({"op": "set", "seq": seq, "msg": msg}));
             }
         }
         for m in &messages {
@@ -1525,21 +1569,33 @@ impl PipelineDispatcher for EngineDispatcher {
         }
 
         // 4. rollback trace（append-only 审计痕：回退目标 + 补偿 ops 实录）。
-        // run_id 已由 1b 预检锚定（目标消息所在 run，审计反查可见）。
+        // Live 路径 run_id = 目标消息所在 run（1b 预检锚定，审计反查可见）；
+        // Ledger 路径 run 锚不可恢复，如实记空并以账本指针替代（可反查原文）。
         let now = chrono::Utc::now().to_rfc3339();
+        let mut patch_data = serde_json::json!({
+            "rollback_to_user_seq": target_seq,
+            "user_message_id": user_message_id,
+            "run_id": trace_run_id,
+            "pipeline_id": route_id,
+            "messages": { "_ops": ops },
+        });
+        if let RegenTarget::Ledger {
+            ledger_trace_id,
+            ledger_blob_id,
+            ..
+        } = &target
+        {
+            patch_data["resolution"] = serde_json::json!("trace_ledger");
+            patch_data["ledger_trace_id"] = serde_json::json!(ledger_trace_id);
+            patch_data["ledger_blob_id"] = serde_json::json!(ledger_blob_id);
+        }
         let entry = TraceEntry {
             trace_id: format!("t_{}", uuid::Uuid::new_v4().simple()),
-            run_id: trace_run_id,
-            branch_id: "main".to_string(),
-            seq_in_branch: 0,
+            pipeline_id: route_id.clone(),
+            seq: 0,
             plugin_id: "chat_regenerate".to_string(),
             patch_type: PatchType::Rollback,
-            patch_data: serde_json::json!({
-                "rollback_to_user_seq": target_seq,
-                "user_message_id": user_message_id,
-                "pipeline_id": route_id,
-                "messages": { "_ops": ops },
-            }),
+            patch_data,
             created_at: now,
         };
         store
@@ -1564,16 +1620,29 @@ impl PipelineDispatcher for EngineDispatcher {
                 .await;
         }
 
-        // 6. 重跑：目标 user 消息已在截断后历史中，跳过本轮 append。
-        let content = new_content
-            .map(|c| c.to_string())
-            .or_else(|| {
-                messages
-                    .iter()
-                    .find(|m| m.seq_in_branch == target_seq)
-                    .and_then(|m| m.content_preview.clone())
-            })
-            .unwrap_or_default();
+        // 6. 重跑：目标 user 消息已在截断后历史中（Live 原样在场 / Ledger 已
+        //    恢复原文），跳过本轮 append。Ledger 回退重跑用账本原文全文（槽位
+        //    preview 是压缩变体或短摘要，都不是用户指向的那条话）。
+        let content = match &target {
+            RegenTarget::Live { seq, .. } => new_content
+                .map(|c| c.to_string())
+                .or_else(|| {
+                    messages
+                        .iter()
+                        .find(|m| m.seq_in_branch == *seq)
+                        .and_then(|m| m.content_preview.clone())
+                })
+                .unwrap_or_default(),
+            RegenTarget::Ledger { original_msg, .. } => new_content
+                .map(|c| c.to_string())
+                .or_else(|| {
+                    original_msg
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_default(),
+        };
         let overlay = serde_json::json!({"_skip_user_append": true});
         // 复用 user_input 同款派发路径（pending 入队 → 链消费 → process_via_engine），
         // 保证与前端发送同一条 FIFO 链、同事件流。
@@ -1593,6 +1662,185 @@ impl PipelineDispatcher for EngineDispatcher {
         .map_err(|e| format!("regenerate 重跑派发失败: {e}"))?;
         Ok(())
     }
+
+    /// 激活消息段（多代切换，消息段模型 §2.5 后缀语义 + §7.3 补全）。
+    ///
+    /// 单批 ops 单事务，失败零写入：
+    /// ① 当前 `[seg.base_seq..末尾]` 非空后缀先整体冻结为新段（无损，
+    ///    append-only；visible_to=''，id 服务端 seg_&lt;uuid&gt;，preview 取首条）；
+    /// ② 目标段成员自 base_seq 逐槽 set 写回（目标更长则新增槽）；当前后缀
+    ///    更长则多余槽 set null（写回按目标段内容，多余槽不清理会双活）。
+    /// 运行态守卫：run 活跃期间拒绝（后缀替换会与引擎 append 竞争）。
+    /// 幂等：当前后缀与目标段逐条同指纹 → 已激活态，零变化仅 ack。
+    /// 多端并发后写赢（输家目标段仍在段表，可再次切换，零丢失）。
+    async fn dispatch_segment_activate(
+        &self,
+        user_id: &str,
+        thread_id: &str,
+        pipeline_id: &str,
+        segment_id: &str,
+    ) -> Result<(), String> {
+        let Some(store) = self.state.store.as_ref() else {
+            return Err("segment_activate disabled: kernel store not injected".to_string());
+        };
+        if segment_id.is_empty() {
+            return Err("segment_activate 缺少 segmentId".into());
+        }
+        let tenant_id =
+            agentos_http::auth::resolve_tenant_id_by_user(self.state.store.as_ref(), user_id).await;
+        let route_id =
+            resolve_pipeline_id_for_thread(store, thread_id, pipeline_id, &tenant_id).await;
+        if route_id.is_empty() {
+            return Err("segment_activate 缺少 pipeline_id".into());
+        }
+        // 运行态守卫（§7.3-1）：复用既有「管道是否在跑」判定（runs 表退役后
+        // 由 store 读 state run_status 控制键合成）。
+        let runs = store
+            .list_runs_by_pipeline(&route_id, &tenant_id)
+            .await
+            .map_err(|e| format!("segment_activate 查询 run 失败: {e}"))?;
+        if runs
+            .iter()
+            .any(|r| r.status == agentos_core::types::RunStatus::Running)
+        {
+            return Err("任务运行中".to_string());
+        }
+        // 目标段：必须存在且属于本管道（段 id 全局唯一，跨管道引用 = 客户端错）。
+        let segment = store
+            .get_message_segment(segment_id, &tenant_id)
+            .await
+            .map_err(|e| format!("segment_activate 读段失败: {e}"))?
+            .ok_or_else(|| format!("segment_activate 段不存在: {segment_id}"))?;
+        if segment.pipeline_id != route_id {
+            return Err(format!(
+                "segment_activate 段 {segment_id} 不属于管道 {route_id}"
+            ));
+        }
+        let members = segment.members.clone().unwrap_or_default();
+
+        // 当前 [base_seq..末尾] 后缀（全文 + 槽位 seq，成员剥离位置标记）。
+        let full_history = store
+            .load_message_history(&route_id, &tenant_id)
+            .await
+            .map_err(|e| format!("segment_activate 读历史失败: {e}"))?;
+        let mut suffix: Vec<(u32, serde_json::Value)> = full_history
+            .into_iter()
+            .filter_map(|mut m| {
+                let seq = m.get("seq").and_then(|v| v.as_u64())? as u32;
+                if seq < segment.base_seq as u32 {
+                    return None;
+                }
+                if let Some(o) = m.as_object_mut() {
+                    o.remove("seq");
+                }
+                Some((seq, m))
+            })
+            .collect();
+        suffix.sort_by_key(|(seq, _)| *seq);
+
+        // 幂等预检（§7.3-2）：当前后缀与目标段逐条同指纹 → 已激活态，零变化仅 ack
+        // （指纹规范化剥离 seq/_ 前缀字段，带槽位 seq 的后缀与冻结成员可比）。
+        let already_active = suffix.len() == members.len()
+            && suffix.iter().zip(members.iter()).all(|((_, cur), tgt)| {
+                agentos_core::ids::compute_message_id(cur)
+                    == agentos_core::ids::compute_message_id(tgt)
+            });
+        if already_active {
+            emit_segment_activated(&self.state, thread_id, &route_id, segment_id).await;
+            return Ok(());
+        }
+
+        // ①当前后缀先整体冻结（冻结先于覆写——切换无损不变量）；②目标段内容
+        // 逐槽写回；当前更长则按剩余后缀的实际槽位逐槽 set null。
+        let mut ops: Vec<serde_json::Value> = Vec::new();
+        if !suffix.is_empty() {
+            let frozen: Vec<serde_json::Value> = suffix.iter().map(|(_, m)| m.clone()).collect();
+            ops.push(freeze_segment_op(segment.base_seq as u32, frozen));
+        }
+        for (i, member) in members.iter().enumerate() {
+            let seq = segment.base_seq + i as i64;
+            ops.push(serde_json::json!({"op": "set", "seq": seq, "msg": member}));
+        }
+        for (seq, _) in suffix.iter().skip(members.len()) {
+            ops.push(serde_json::json!({"op": "set", "seq": seq, "msg": serde_json::Value::Null}));
+        }
+        store
+            .apply_messages_ops_to_table(&route_id, &tenant_id, &ops)
+            .await
+            .map_err(|e| format!("segment_activate 落库失败: {e}"))?;
+
+        // trace 落痕（chat_regenerate 审计痕形态推广）：patch_data 记目标段行 +
+        // 全部 ops（含新冻结段的 freeze_segment op 全文——DR 重放即重建段表）。
+        let entry = TraceEntry {
+            trace_id: format!("t_{}", uuid::Uuid::new_v4().simple()),
+            pipeline_id: route_id.clone(),
+            seq: 0,
+            plugin_id: "chat_regenerate".to_string(),
+            patch_type: PatchType::Rollback,
+            patch_data: serde_json::json!({
+                "action": "segment_activate",
+                "pipeline_id": route_id,
+                "activated_segment": {
+                    "id": segment.id,
+                    "base_seq": segment.base_seq,
+                    "base_len": segment.base_len,
+                    "visible_to": segment.visible_to,
+                    "preview": segment.preview,
+                },
+                "messages": { "_ops": ops },
+            }),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        store
+            .append_trace(entry)
+            .await
+            .map_err(|e| format!("segment_activate trace 失败: {e}"))?;
+
+        emit_segment_activated(&self.state, thread_id, &route_id, segment_id).await;
+        Ok(())
+    }
+}
+
+/// segment_activated ack 事件（多端对账，与 messages_truncated 同通道下发）。
+async fn emit_segment_activated(
+    state: &AppState,
+    thread_id: &str,
+    route_id: &str,
+    segment_id: &str,
+) {
+    if let Some(session) = state.session.as_ref() {
+        let _ = session
+            .emit_event(
+                thread_id,
+                "segment_activated",
+                serde_json::json!({
+                    "pipeline_id": route_id,
+                    "segment_id": segment_id,
+                    "_threadId": thread_id,
+                }),
+            )
+            .await;
+    }
+}
+
+/// 构造 freeze_segment op（域12 原语）：id 服务端生成 `seg_<uuid>`，
+/// visible_to=''（替换事件冻结的旧代段 = 全可见，‹i/n› 可切换激活），
+/// preview 取首条 content ≤200 字符（‹i/n› 代际预览免解 blob）。
+/// 成员须已剥离 seq（位置标记属槽位坐标，冻结原文携带会在写回时变陈旧残留）。
+fn freeze_segment_op(base_seq: u32, members: Vec<serde_json::Value>) -> serde_json::Value {
+    serde_json::json!({
+        "op": "freeze_segment",
+        "id": format!("seg_{}", uuid::Uuid::new_v4().simple()),
+        "base_seq": base_seq,
+        "base_len": members.len(),
+        "visible_to": "",
+        "preview": members
+            .first()
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+            .map(|c| c.chars().take(200).collect::<String>()),
+        "members": members,
+    })
 }
 
 /// 推送 `pending_inputs_changed` 事件（ADR-2026-08-26）：入队/消费/修改/删除时
@@ -1666,6 +1914,145 @@ fn find_target_user_seq(
         .iter()
         .find(|m| m.role == "user" && m.message_id == user_message_id)
         .map(|m| m.seq_in_branch)
+}
+
+/// regenerate 目标解析结果：定位 + 审计锚。
+enum RegenTarget {
+    /// 槽位在场且 run 锚有效（常规路径：id 精确命中或缺省末条 user）。
+    Live { seq: u32, run_id: String },
+    /// 槽位缺失或身份变异（压缩链路改写/删槽后，前端认领指纹不在槽位键空间）——
+    /// 经 trace 账本回溯定位：账本 append-only，原始 append 实录携带
+    /// (seq, 指纹, blob 锚)，blob 原文可验指纹与 role。审计锚 = 账本轨迹
+    /// （run 锚随槽位改写/删除不可恢复，rollback trace 如实记账本指针）。
+    Ledger {
+        seq: u32,
+        original_msg: serde_json::Value,
+        ledger_trace_id: String,
+        ledger_blob_id: String,
+    },
+}
+
+impl RegenTarget {
+    fn seq(&self) -> u32 {
+        match self {
+            RegenTarget::Live { seq, .. } | RegenTarget::Ledger { seq, .. } => *seq,
+        }
+    }
+}
+
+/// 定位 regenerate 目标：槽位精确匹配优先，miss/run 锚缺失时经 trace 账本
+/// 回溯（BUG-57：压缩链路改写目标槽位后 record_id 变异，前端认领的原始指纹
+/// 仍在账本中可验可查）。账本也验不了 → 维持原拒绝语义（fail-closed，不静默
+/// 截断）。存储故障显式报错，不吞。
+async fn resolve_regenerate_target(
+    store: &Arc<dyn agentos_core::traits::StorageBackend>,
+    pipeline_id: &str,
+    tenant_id: &str,
+    messages: &[agentos_core::types::MessageRecord],
+    user_message_id: &str,
+) -> Result<RegenTarget, String> {
+    let live_seq = find_target_user_seq(messages, user_message_id);
+    if live_seq.is_none() && user_message_id.is_empty() {
+        return Err(format!(
+            "regenerate 未找到目标 user 消息: {user_message_id}"
+        ));
+    }
+    let live_run_id = live_seq
+        .and_then(|seq| {
+            messages
+                .iter()
+                .find(|m| m.seq_in_branch == seq)
+                .map(|m| m.run_id.clone())
+        })
+        .unwrap_or_default();
+    if let Some(seq) = live_seq {
+        if !live_run_id.is_empty() {
+            return Ok(RegenTarget::Live {
+                seq,
+                run_id: live_run_id,
+            });
+        }
+    }
+    // 槽位 miss 或 run 锚缺失 → 账本回溯；验不出锚则按原语义拒绝。
+    resolve_target_via_ledger(store, pipeline_id, tenant_id, user_message_id)
+        .await?
+        .ok_or_else(|| {
+            if live_seq.is_some() {
+                "regenerate 拒绝: 目标 user 消息无有效 run_id(审计不可见)".to_string()
+            } else {
+                format!("regenerate 未找到目标 user 消息: {user_message_id}")
+            }
+        })
+}
+
+/// trace 账本回溯：扫描本管道 step 轨迹的指纹降级实录（messages._ops），取
+/// 携带该指纹的 set op 中 seq 最小者（对齐槽位路径 find 的最早命中语义；
+/// 同文多次发送共享同一指纹时定位最早一条），再经 blob 原文验证指纹一致且
+/// role=user（截断边界硬约束）。任一环验证不过 → None（调用方维持拒绝）。
+async fn resolve_target_via_ledger(
+    store: &Arc<dyn agentos_core::traits::StorageBackend>,
+    pipeline_id: &str,
+    tenant_id: &str,
+    user_message_id: &str,
+) -> Result<Option<RegenTarget>, String> {
+    if user_message_id.is_empty() {
+        return Ok(None); // 缺省定位无 id 可验，账本无从锚定
+    }
+    let traces = store
+        .get_step_traces_by_pipeline(pipeline_id, tenant_id)
+        .await
+        .map_err(|e| format!("regenerate 账本回溯失败: {e}"))?;
+    let mut best: Option<(u32, String, String)> = None; // (seq, blob_id, trace_id)
+    for t in &traces {
+        let Some(ops) = t
+            .patch_data
+            .get("messages")
+            .and_then(|m| m.get("_ops"))
+            .and_then(|v| v.as_array())
+        else {
+            continue;
+        };
+        for op in ops {
+            if op.get("op").and_then(|v| v.as_str()) != Some("set") {
+                continue;
+            }
+            if op.get("message_id").and_then(|v| v.as_str()) != Some(user_message_id) {
+                continue;
+            }
+            let (Some(seq), Some(blob_id)) = (
+                op.get("seq").and_then(|v| v.as_u64()).map(|s| s as u32),
+                op.get("blob_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            ) else {
+                continue;
+            };
+            if best.as_ref().is_none_or(|(s, _, _)| seq < *s) {
+                best = Some((seq, blob_id, t.trace_id.clone()));
+            }
+        }
+    }
+    let Some((seq, blob_id, trace_id)) = best else {
+        return Ok(None);
+    };
+    let bytes = store
+        .get_blob(&blob_id)
+        .await
+        .map_err(|e| format!("regenerate 账本回溯失败: {e}"))?;
+    let msg: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("regenerate 账本回溯失败: blob 解析 {e}"))?;
+    if agentos_core::ids::compute_message_id(&msg) != user_message_id {
+        return Ok(None); // 指纹不符 = 锚不可信，维持拒绝
+    }
+    if msg.get("role").and_then(|v| v.as_str()) != Some("user") {
+        return Ok(None); // 非 user 不可作截断边界（工具配对完整性硬约束）
+    }
+    Ok(Some(RegenTarget::Ledger {
+        seq,
+        original_msg: msg,
+        ledger_trace_id: trace_id,
+        ledger_blob_id: blob_id,
+    }))
 }
 
 /// 解析消息应路由到的真实 pipeline_id（防御性校验，后端不盲目信任前端数据）。
@@ -1846,23 +2233,6 @@ mod tests {
             Ok(vec![1, 2, 3])
         }
         async fn append_trace(&self, _entry: TraceEntry) -> Result<(), StorageError> {
-            Ok(())
-        }
-        async fn update_run_status(
-            &self,
-            _run_id: &str,
-            _status: RunStatus,
-            _branch: Option<&str>,
-            _seq: Option<u32>,
-        ) -> Result<(), StorageError> {
-            Ok(())
-        }
-        async fn create_run(
-            &self,
-            _run_id: &str,
-            _config_hash: &str,
-            _tenant_id: &str,
-        ) -> Result<(), StorageError> {
             Ok(())
         }
         async fn store_blob(&self, _data: &[u8], _mime_type: &str) -> Result<String, StorageError> {
@@ -2107,8 +2477,10 @@ mod tests {
         // 有 running run：按 thread 主管道定位并置 Suspended（传输信号）。
         let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap())
             as Arc<dyn StorageBackend>;
-        store.create_run("run-1", "cfg", "default").await.unwrap();
-        store.set_run_pipeline("run-1", "p1").await.unwrap();
+        store
+            .record_run_start("p1", "default", "run-1", "cfg")
+            .await
+            .unwrap();
         store
             .create_session(&session_record(Some("p1")))
             .await
@@ -2129,10 +2501,19 @@ mod tests {
         // run 已完成才点停止（竞态）：无 Running run → 幂等空转，不报错、不动已完成 run。
         let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap())
             as Arc<dyn StorageBackend>;
-        store.create_run("run-1", "cfg", "default").await.unwrap();
-        store.set_run_pipeline("run-1", "p1").await.unwrap();
         store
-            .update_run_status("run-1", RunStatus::Completed, None, None)
+            .record_run_start("p1", "default", "run-1", "cfg")
+            .await
+            .unwrap();
+        store
+            .upsert_state_fields(
+                "p1",
+                "default",
+                &json!({ "run_status": "completed" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
             .await
             .unwrap();
         store
@@ -2159,12 +2540,13 @@ mod tests {
             as Arc<dyn StorageBackend>;
         // 主管道 p-main 有 running run；子任务管道 p-sub 也有 running run。
         store
-            .create_run("run-main", "cfg", "default")
+            .record_run_start("p-main", "default", "run-main", "cfg")
             .await
             .unwrap();
-        store.set_run_pipeline("run-main", "p-main").await.unwrap();
-        store.create_run("run-sub", "cfg", "default").await.unwrap();
-        store.set_run_pipeline("run-sub", "p-sub").await.unwrap();
+        store
+            .record_run_start("p-sub", "default", "run-sub", "cfg")
+            .await
+            .unwrap();
         store
             .create_session(&session_record(Some("p-main")))
             .await
@@ -2235,10 +2617,9 @@ mod tests {
             .await
             .unwrap();
         store
-            .create_run("run-reg1", "cfg", "default")
+            .record_run_start("reg1", "default", "run-reg1", "cfg")
             .await
             .unwrap();
-        store.set_run_pipeline("run-reg1", "reg1").await.unwrap();
         store
             .create_session(&session_record(Some("reg1")))
             .await
@@ -2316,7 +2697,8 @@ mod tests {
         assert_eq!(payload["data"]["pipeline_id"], "reg1");
         assert_eq!(payload["data"]["truncate_before_seq"], 1);
 
-        // rollback trace：patch_type=rollback，run_id 复用消息 run（审计反查可见）
+        // rollback trace：patch_type=rollback，patch_data.run_id 复用消息所在 run
+        // （审计反查可见）
         let traces = store
             .get_step_traces_by_thread("T1", "default")
             .await
@@ -2326,7 +2708,10 @@ mod tests {
             .filter(|t| t.patch_type == agentos_core::types::PatchType::Rollback)
             .collect();
         assert_eq!(rollbacks.len(), 1, "恰好一条 rollback 轨迹");
-        assert_eq!(rollbacks[0].run_id, "run-reg1", "run_id 复用消息所在 run");
+        assert_eq!(
+            rollbacks[0].patch_data["run_id"], "run-reg1",
+            "run_id 复用消息所在 run"
+        );
         assert_eq!(rollbacks[0].plugin_id, "chat_regenerate");
         assert_eq!(rollbacks[0].patch_data["rollback_to_user_seq"], 0);
     }
@@ -2348,8 +2733,10 @@ mod tests {
             )
             .await
             .unwrap();
-        store.create_run("reg3", "cfg", "default").await.unwrap();
-        store.set_run_pipeline("reg3", "reg3").await.unwrap();
+        store
+            .record_run_start("reg3", "default", "reg3", "cfg")
+            .await
+            .unwrap();
         store
             .create_session(&session_record(Some("reg3")))
             .await
@@ -2397,8 +2784,10 @@ mod tests {
             )
             .await
             .unwrap();
-        store.create_run("reg2", "cfg", "default").await.unwrap();
-        store.set_run_pipeline("reg2", "reg2").await.unwrap();
+        store
+            .record_run_start("reg2", "default", "reg2", "cfg")
+            .await
+            .unwrap();
         store
             .create_session(&session_record(Some("reg2")))
             .await
@@ -2443,8 +2832,10 @@ mod tests {
             )
             .await
             .unwrap();
-        store.create_run("reg4", "cfg", "default").await.unwrap();
-        store.set_run_pipeline("reg4", "reg4").await.unwrap();
+        store
+            .record_run_start("reg4", "default", "reg4", "cfg")
+            .await
+            .unwrap();
         store
             .create_session(&session_record(Some("reg4")))
             .await
@@ -2479,6 +2870,228 @@ mod tests {
         );
     }
 
+    /// 预置「压缩改写」场景（BUG-57 真实形状，装机版 2026-09-22 取证）：
+    /// seq 0 user 原文落库（带 run 锚）后，prepare 步压缩链路以改写内容重写
+    /// 同一槽位（无 _run_id → record_id 变异为新指纹）；user_input 轨迹账本
+    /// 保留原始 append 的（seq, 指纹, blob 锚）。返回（认领指纹, 改写后指纹）。
+    async fn seed_compressed_history(
+        store: &Arc<dyn StorageBackend>,
+        pipeline_id: &str,
+        with_ledger: bool,
+    ) -> (String, String) {
+        let original = json!({"role": "user", "content": "第一问",
+                              "metadata": {"client_message_id": "cmid-1"}});
+        let rewritten = json!({"role": "user", "content": "<compressed>第一问</compressed>",
+                               "metadata": {"client_message_id": "cmid-1"}});
+        store
+            .apply_messages_ops_to_table(
+                pipeline_id,
+                "default",
+                &[
+                    json!({"op": "set", "seq": 0, "msg": original, "_run_id": "run-comp"}),
+                    json!({"op": "set", "seq": 1, "msg": {"role": "assistant", "content": "旧回复"},
+                           "_run_id": "run-comp"}),
+                ],
+            )
+            .await
+            .unwrap();
+        store
+            .apply_messages_ops_to_table(
+                pipeline_id,
+                "default",
+                &[json!({"op": "set", "seq": 0, "msg": rewritten})],
+            )
+            .await
+            .unwrap();
+        let claimed = agentos_core::ids::compute_message_id(&original);
+        let rewritten_id = agentos_core::ids::compute_message_id(&rewritten);
+        if with_ledger {
+            let bytes = serde_json::to_string(&original).unwrap();
+            let blob_id = store
+                .store_blob(bytes.as_bytes(), "application/json")
+                .await
+                .unwrap();
+            store
+                .append_trace(TraceEntry {
+                    trace_id: format!("t_ledger_{pipeline_id}"),
+                    pipeline_id: pipeline_id.to_string(),
+                    seq: 0,
+                    plugin_id: "user_input".to_string(),
+                    patch_type: agentos_core::types::PatchType::StateUpdate,
+                    patch_data: json!({"messages": {"_ops": [
+                        {"op": "set", "seq": 0, "message_id": claimed, "blob_id": blob_id},
+                    ]}}),
+                    created_at: "2026-09-22T12:57:12Z".to_string(),
+                })
+                .await
+                .unwrap();
+        }
+        store
+            .record_run_start(pipeline_id, "default", "run-comp", "cfg")
+            .await
+            .unwrap();
+        store
+            .create_session(&session_record(Some(pipeline_id)))
+            .await
+            .unwrap();
+        store
+            .link_pipeline_session(pipeline_id, "T1", "default")
+            .await
+            .unwrap();
+        (claimed, rewritten_id)
+    }
+
+    #[tokio::test]
+    async fn regenerate_resolves_claimed_id_after_compression_rewrite() {
+        // BUG-57 回归钉：压缩链路重写目标槽位后 record_id 变异，前端仍持认领
+        // 指纹回退——槽位查找 miss 时经 trace 账本回溯定位并恢复原文，截断其后。
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap())
+            as Arc<dyn StorageBackend>;
+        let (claimed, rewritten_id) = seed_compressed_history(&store, "regA", true).await;
+        assert_ne!(claimed, rewritten_id, "改写后指纹必须变异（场景前提）");
+
+        let mut state = crate::routes::AppState::new();
+        state.store = Some(store.clone());
+        let dispatcher = EngineDispatcher::new(state);
+        dispatcher
+            .dispatch_regenerate("u1", "T1", "regA", &claimed, None)
+            .await
+            .expect("账本回溯应使命令的 record id 仍可回退");
+
+        let rows = store
+            .get_messages_by_pipeline("regA", MessageQueryOpts::default())
+            .await
+            .unwrap();
+        let seqs: Vec<u32> = rows.iter().map(|r| r.seq_in_branch).collect();
+        assert_eq!(seqs, vec![0], "目标之后的槽位全部截断");
+        assert_eq!(rows[0].message_id, claimed, "原文恢复 → 指纹回归认领 id");
+        assert_eq!(
+            rows[0].content_preview.as_deref(),
+            Some("第一问"),
+            "改写内容被原文恢复（不是压缩变体）"
+        );
+
+        // rollback trace：run 锚不可恢复时以账本锚替代（可反查）
+        let traces = store
+            .get_step_traces_by_thread("T1", "default")
+            .await
+            .unwrap();
+        let rollback = traces
+            .iter()
+            .find(|t| t.patch_type == agentos_core::types::PatchType::Rollback)
+            .expect("恰好一条 rollback 轨迹");
+        assert_eq!(rollback.patch_data["resolution"], "trace_ledger");
+        assert_eq!(rollback.patch_data["ledger_trace_id"], "t_ledger_regA");
+        assert_eq!(rollback.patch_data["rollback_to_user_seq"], 0);
+    }
+
+    #[tokio::test]
+    async fn regenerate_edit_resend_on_compressed_target_restores_with_new_content() {
+        // 编辑重发命中压缩改写槽位：以账本原文的 metadata（cmid 幂等键）+
+        // 新内容恢复目标槽位，其后截断。
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap())
+            as Arc<dyn StorageBackend>;
+        let (claimed, _) = seed_compressed_history(&store, "regB", true).await;
+
+        let mut state = crate::routes::AppState::new();
+        state.store = Some(store.clone());
+        let dispatcher = EngineDispatcher::new(state);
+        dispatcher
+            .dispatch_regenerate("u1", "T1", "regB", &claimed, Some("改写后的问题"))
+            .await
+            .unwrap();
+
+        let rows = store
+            .get_messages_by_pipeline("regB", MessageQueryOpts::default())
+            .await
+            .unwrap();
+        let seqs: Vec<u32> = rows.iter().map(|r| r.seq_in_branch).collect();
+        assert_eq!(seqs, vec![0], "目标之后的槽位全部截断");
+        assert_eq!(rows[0].content_preview.as_deref(), Some("改写后的问题"));
+        assert_eq!(
+            rows[0]
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("client_message_id"))
+                .and_then(|v| v.as_str()),
+            Some("cmid-1"),
+            "metadata 取自账本原文（cmid 幂等键不丢）"
+        );
+    }
+
+    #[tokio::test]
+    async fn regenerate_unknown_id_without_ledger_still_rejects() {
+        // 无账本锚的未知 id 维持 fail-closed：报错不截断（不静默清空、不降低
+        // 审计门槛）。
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap())
+            as Arc<dyn StorageBackend>;
+        let (claimed, _) = seed_compressed_history(&store, "regC", false).await;
+
+        let mut state = crate::routes::AppState::new();
+        state.store = Some(store.clone());
+        let dispatcher = EngineDispatcher::new(state);
+        let err = dispatcher
+            .dispatch_regenerate("u1", "T1", "regC", &claimed, None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("未找到目标 user 消息"),
+            "无账本锚维持原拒绝语义: {err}"
+        );
+        let rows = store
+            .get_messages_by_pipeline("regC", MessageQueryOpts::default())
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2, "拒绝时槽位原样保留");
+    }
+
+    #[tokio::test]
+    async fn regenerate_ledger_rejects_non_user_fingerprint() {
+        // 账本锚只认 role=user：assistant 指纹不可作截断边界（工具配对完整性），
+        // 即便账本实录与 blob 均在场也拒绝。
+        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap())
+            as Arc<dyn StorageBackend>;
+        let assistant = json!({"role": "assistant", "content": "回答"});
+        let assistant_id = agentos_core::ids::compute_message_id(&assistant);
+        seed_compressed_history(&store, "regD", false).await;
+        let bytes = serde_json::to_string(&assistant).unwrap();
+        let blob_id = store
+            .store_blob(bytes.as_bytes(), "application/json")
+            .await
+            .unwrap();
+        store
+            .append_trace(TraceEntry {
+                trace_id: "t_ledger_regD_a".to_string(),
+                pipeline_id: "regD".to_string(),
+                seq: 1,
+                plugin_id: "user_input".to_string(),
+                patch_type: agentos_core::types::PatchType::StateUpdate,
+                patch_data: json!({"messages": {"_ops": [
+                    {"op": "set", "seq": 1, "message_id": assistant_id, "blob_id": blob_id},
+                ]}}),
+                created_at: "2026-09-22T12:57:13Z".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let mut state = crate::routes::AppState::new();
+        state.store = Some(store.clone());
+        let dispatcher = EngineDispatcher::new(state);
+        let err = dispatcher
+            .dispatch_regenerate("u1", "T1", "regD", &assistant_id, None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("未找到目标 user 消息"),
+            "非 user 指纹不可作截断边界: {err}"
+        );
+        let rows = store
+            .get_messages_by_pipeline("regD", MessageQueryOpts::default())
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2, "拒绝时槽位原样保留");
+    }
+
     #[tokio::test]
     async fn regenerate_unknown_target_returns_error() {
         // 目标 user 消息不存在 → 报错不截断（不静默清空）
@@ -2492,8 +3105,10 @@ mod tests {
             )
             .await
             .unwrap();
-        store.create_run("reg4", "cfg", "default").await.unwrap();
-        store.set_run_pipeline("reg4", "reg4").await.unwrap();
+        store
+            .record_run_start("reg4", "default", "reg4", "cfg")
+            .await
+            .unwrap();
         store
             .create_session(&session_record(Some("reg4")))
             .await
@@ -2526,7 +3141,6 @@ mod tests {
         let mk = |id: &str, role: &str, seq: u32| agentos_core::types::MessageRecord {
             message_id: id.to_string(),
             run_id: "r".to_string(),
-            branch_id: "main".to_string(),
             seq_in_branch: seq,
             role: role.to_string(),
             blob_id: None,
@@ -2563,6 +3177,488 @@ mod tests {
             "assistant id 不是合法截断边界"
         );
         assert_eq!(find_target_user_seq(&msgs, "ghost"), None);
+    }
+
+    // ── 消息段：regenerate 冻结 + segment_activate（多代切换）──
+
+    /// regenerate 截断前把被换后缀冻结为段（同批 ops 同事务）：段统一含目标
+    /// user 消息（[target_seq..末尾]，edit-resend 改写目标槽位后旧用户文本仍在
+    /// 段里），成员为槽位全文，rollback trace 的 messages._ops 携带 freeze op 全文。
+    #[tokio::test]
+    async fn regenerate_freezes_deleted_suffix_segment() {
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let store: Arc<dyn StorageBackend> = sqlite.clone();
+        seed_three_slot_history(&store).await;
+        let user_id = store
+            .get_messages_by_pipeline("reg1", MessageQueryOpts::default())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.seq_in_branch == 0)
+            .map(|m| m.message_id)
+            .unwrap();
+        let mut state = crate::routes::AppState::new();
+        state.store = Some(store.clone());
+        let dispatcher = EngineDispatcher::new(state);
+
+        dispatcher
+            .dispatch_regenerate("u1", "T1", "reg1", &user_id, None)
+            .await
+            .unwrap();
+
+        // 被换后缀（seq 0..2 整段，含目标 user）冻结为段：visible_to=''、
+        // preview 取首条、成员全文
+        let segments = store
+            .list_message_segments("reg1", "default")
+            .await
+            .unwrap();
+        assert_eq!(segments.len(), 1, "被换后缀冻结为一段");
+        let seg = &segments[0];
+        assert_eq!((seg.base_seq, seg.base_len), (0, 3));
+        assert_eq!(seg.visible_to, "");
+        assert_eq!(seg.preview.as_deref(), Some("第一问"));
+        let full = store
+            .get_message_segment(&seg.id, "default")
+            .await
+            .unwrap()
+            .expect("段可解析");
+        let members = full.members.unwrap();
+        assert_eq!(members[0]["role"], "user");
+        assert_eq!(members[0]["content"], "第一问", "旧用户消息原文入段");
+        assert!(
+            members[1].get("tool_calls").is_some(),
+            "成员为槽位全文（含 tool_calls，非截断 preview）"
+        );
+        assert_eq!(members[2]["role"], "tool");
+        assert!(
+            members.iter().all(|m| m.get("seq").is_none()),
+            "冻结成员不带槽位位置标记（seq 写回时变陈旧残留）"
+        );
+
+        // rollback trace 的 messages._ops 首位即 freeze op 全文（id 与段行一致）
+        let traces = store
+            .get_step_traces_by_thread("T1", "default")
+            .await
+            .unwrap();
+        let rollback = traces
+            .iter()
+            .find(|t| t.patch_type == agentos_core::types::PatchType::Rollback)
+            .expect("rollback 轨迹在场");
+        let ops = rollback.patch_data["messages"]["_ops"]
+            .as_array()
+            .expect("_ops 数组");
+        assert_eq!(ops[0]["op"], "freeze_segment");
+        assert_eq!(ops[0]["id"], seg.id);
+        assert_eq!(ops[0]["base_seq"], 0);
+    }
+
+    /// 统一含 target_seq 的动因回归：edit-resend 原地改写目标槽位后，旧用户
+    /// 文本仍在段里——激活该段连用户消息一起恢复（否则新用户文本配旧轮次）。
+    #[tokio::test]
+    async fn regenerate_edit_resend_old_user_text_restorable_via_segment() {
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let store: Arc<dyn StorageBackend> = sqlite.clone();
+        seed_three_slot_history(&store).await;
+        let user_id = store
+            .get_messages_by_pipeline("reg1", MessageQueryOpts::default())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.seq_in_branch == 0)
+            .map(|m| m.message_id)
+            .unwrap();
+        let mut state = crate::routes::AppState::new();
+        state.store = Some(store.clone());
+        let dispatcher = EngineDispatcher::new(state);
+        dispatcher
+            .dispatch_regenerate("u1", "T1", "reg1", &user_id, Some("改写后的问题"))
+            .await
+            .unwrap();
+
+        // 目标槽位已原地改写，旧文本只在冻结段里
+        let rows = store
+            .get_messages_by_pipeline("reg1", MessageQueryOpts::default())
+            .await
+            .unwrap();
+        assert_eq!(rows[0].content_preview.as_deref(), Some("改写后的问题"));
+        let seg = store
+            .list_message_segments("reg1", "default")
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("edit-resend 也冻结段");
+        assert_eq!((seg.base_seq, seg.base_len), (0, 3));
+        let old_user_text = store
+            .get_message_segment(&seg.id, "default")
+            .await
+            .unwrap()
+            .unwrap()
+            .members
+            .unwrap()[0]["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(old_user_text, "第一问", "旧用户文本经段可达");
+
+        // run 收尾（激活运行态守卫），切回旧代：用户消息连旧轮次一起恢复
+        store
+            .upsert_state_fields(
+                "reg1",
+                "default",
+                &json!({ "run_status": "completed" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .await
+            .unwrap();
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        let activator = segment_dispatcher(&store, &frames);
+        activator
+            .dispatch_segment_activate("u1", "T1", "reg1", &seg.id)
+            .await
+            .unwrap();
+
+        let rows = sqlite
+            .get_slot_messages_by_pipeline("reg1", "default", MessageQueryOpts::default())
+            .unwrap();
+        let got: Vec<(u32, String)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.seq_in_branch,
+                    r.content_preview.clone().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (0, "第一问".into()),
+                (1, "旧回复".into()),
+                (2, "{\"success\":true,\"data\":\"ok\"}".into())
+            ],
+            "激活恢复旧代：旧用户文本 + 旧轮次"
+        );
+    }
+
+    /// 预置激活场景：u@0 + gen1 代（A/B，已冻结为段 seg_gen1）+ 当前代
+    /// （新A/新B/新C，比 gen1 长）。run 簿记不落（无 running run，激活不设防）。
+    async fn seed_activate_history(store: &Arc<dyn StorageBackend>, pid: &str) {
+        let a = json!({"role": "assistant", "content": "旧A"});
+        let b = json!({"role": "assistant", "content": "旧B"});
+        store
+            .apply_messages_ops_to_table(
+                pid,
+                "default",
+                &[
+                    json!({"op": "set", "seq": 0, "msg": {"role": "user", "content": "问"}}),
+                    json!({"op": "set", "seq": 1, "msg": a}),
+                    json!({"op": "set", "seq": 2, "msg": b}),
+                    json!({
+                        "op": "freeze_segment", "id": "seg_gen1",
+                        "base_seq": 1, "base_len": 2, "visible_to": "",
+                        "preview": "旧A", "members": [a, b],
+                    }),
+                ],
+            )
+            .await
+            .unwrap();
+        // 当前代（3 条 > gen1 的 2 条）
+        store
+            .apply_messages_ops_to_table(
+                pid,
+                "default",
+                &[
+                    json!({"op": "set", "seq": 1, "msg": {"role": "assistant", "content": "新A"}}),
+                    json!({"op": "set", "seq": 2, "msg": {"role": "assistant", "content": "新B"}}),
+                    json!({"op": "set", "seq": 3, "msg": {"role": "assistant", "content": "新C"}}),
+                ],
+            )
+            .await
+            .unwrap();
+        store
+            .create_session(&session_record(Some(pid)))
+            .await
+            .unwrap();
+        store
+            .link_pipeline_session(pid, "T1", "default")
+            .await
+            .unwrap();
+    }
+
+    /// 接线 dispatcher + 捕获 sink（segment_activate 测试共用：ack 事件直达断言）。
+    fn segment_dispatcher(
+        store: &Arc<dyn StorageBackend>,
+        frames: &Arc<Mutex<Vec<String>>>,
+    ) -> EngineDispatcher {
+        let coordinator = Arc::new(agentos_session::SessionCoordinator::new());
+        coordinator.register_thread("T1", "u1");
+        coordinator.register(
+            "u1",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        let mut state = crate::routes::AppState::new();
+        state.store = Some(store.clone());
+        state.session = Some(coordinator);
+        EngineDispatcher::new(state)
+    }
+
+    fn frames_of_type(frames: &[String], event_type: &str) -> Vec<serde_json::Value> {
+        frames
+            .iter()
+            .filter(|f| f.contains(&format!("\"{event_type}\"")))
+            .map(|f| serde_json::from_str(f).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn segment_activate_freezes_suffix_writes_back_and_clears_extra_slots() {
+        // 后缀整段替换（§2.5）：当前 [base_seq..末尾]（3 条 > 目标 2 条）先冻结
+        // 为新段（无损，切换不变量），目标段成员逐槽写回，多余槽 set null。
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let store: Arc<dyn StorageBackend> = sqlite.clone();
+        seed_activate_history(&store, "act1").await;
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        let dispatcher = segment_dispatcher(&store, &frames);
+
+        dispatcher
+            .dispatch_segment_activate("u1", "T1", "act1", "seg_gen1")
+            .await
+            .unwrap();
+
+        // 启用序列写回：seq0 user 不动，seq1/2 回到 gen1，seq3（多余槽）清空
+        let rows = sqlite
+            .get_slot_messages_by_pipeline("act1", "default", MessageQueryOpts::default())
+            .unwrap();
+        let got: Vec<(u32, String)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.seq_in_branch,
+                    r.content_preview.clone().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![(0, "问".into()), (1, "旧A".into()), (2, "旧B".into())],
+            "目标段写回 + 多余槽清空"
+        );
+
+        // 当前后缀已先冻结为新段（旧代无损可切回）
+        let segments = store
+            .list_message_segments("act1", "default")
+            .await
+            .unwrap();
+        assert_eq!(segments.len(), 2, "gen1 段 + 新冻结后缀段");
+        let frozen = segments.iter().find(|s| s.id != "seg_gen1").expect("新段");
+        assert_eq!((frozen.base_seq, frozen.base_len), (1, 3));
+        assert_eq!(frozen.preview.as_deref(), Some("新A"), "preview 取首条");
+        let frozen_full = store
+            .get_message_segment(&frozen.id, "default")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            frozen_full.members.unwrap()[2]["content"],
+            "新C",
+            "被换下后缀完整入段（切换无损）"
+        );
+
+        // trace 落痕：目标段行 + 全部 ops（含 freeze op）
+        let traces = store
+            .get_step_traces_by_thread("T1", "default")
+            .await
+            .unwrap();
+        let tr = traces
+            .iter()
+            .find(|t| t.patch_data.get("action") == Some(&json!("segment_activate")))
+            .expect("激活 trace 在场");
+        assert_eq!(tr.patch_data["activated_segment"]["id"], "seg_gen1");
+        let ops = tr.patch_data["messages"]["_ops"].as_array().unwrap();
+        assert_eq!(ops[0]["op"], "freeze_segment", "冻结先于覆写");
+
+        // ack 事件（多端对账）
+        let acks = frames_of_type(&frames.lock().unwrap(), "segment_activated");
+        assert_eq!(acks.len(), 1, "ack 恰好一次");
+        assert_eq!(acks[0]["data"]["pipeline_id"], "act1");
+        assert_eq!(acks[0]["data"]["segment_id"], "seg_gen1");
+    }
+
+    #[tokio::test]
+    async fn segment_activate_target_longer_appends_new_slots() {
+        // 目标段比当前后缀长：不足槽位新增（写回按目标段内容）
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let store: Arc<dyn StorageBackend> = sqlite.clone();
+        let a = json!({"role": "assistant", "content": "A"});
+        let b = json!({"role": "assistant", "content": "B"});
+        let c = json!({"role": "assistant", "content": "C"});
+        store
+            .apply_messages_ops_to_table(
+                "act2",
+                "default",
+                &[
+                    json!({"op": "set", "seq": 0, "msg": {"role": "user", "content": "问"}}),
+                    json!({"op": "set", "seq": 1, "msg": a}),
+                    json!({"op": "set", "seq": 2, "msg": b}),
+                    json!({"op": "set", "seq": 3, "msg": c}),
+                    json!({
+                        "op": "freeze_segment", "id": "seg3",
+                        "base_seq": 1, "base_len": 3, "visible_to": "",
+                        "preview": "A", "members": [a, b, c],
+                    }),
+                    // 当前代截短到 1 条（目标段长于当前后缀）
+                    json!({"op": "set", "seq": 2, "msg": serde_json::Value::Null}),
+                    json!({"op": "set", "seq": 3, "msg": serde_json::Value::Null}),
+                ],
+            )
+            .await
+            .unwrap();
+        store
+            .create_session(&session_record(Some("act2")))
+            .await
+            .unwrap();
+        store
+            .link_pipeline_session("act2", "T1", "default")
+            .await
+            .unwrap();
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        let dispatcher = segment_dispatcher(&store, &frames);
+
+        dispatcher
+            .dispatch_segment_activate("u1", "T1", "act2", "seg3")
+            .await
+            .unwrap();
+
+        let rows = sqlite
+            .get_slot_messages_by_pipeline("act2", "default", MessageQueryOpts::default())
+            .unwrap();
+        let got: Vec<(u32, String)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.seq_in_branch,
+                    r.content_preview.clone().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (0, "问".into()),
+                (1, "A".into()),
+                (2, "B".into()),
+                (3, "C".into())
+            ],
+            "目标更长 → 缺失槽位逐槽补齐"
+        );
+    }
+
+    #[tokio::test]
+    async fn segment_activate_repeat_delivery_is_zero_change() {
+        // 幂等（§7.3-2）：已激活态重复投递 → 零变化（不建新段、不落 trace、
+        // 槽位不动），仅 ack 照发（多端对账）。
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let store: Arc<dyn StorageBackend> = sqlite.clone();
+        seed_activate_history(&store, "act3").await;
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        let dispatcher = segment_dispatcher(&store, &frames);
+
+        dispatcher
+            .dispatch_segment_activate("u1", "T1", "act3", "seg_gen1")
+            .await
+            .unwrap();
+        let segments_before = store
+            .list_message_segments("act3", "default")
+            .await
+            .unwrap();
+        let slots_before = sqlite
+            .get_slot_messages_by_pipeline("act3", "default", MessageQueryOpts::default())
+            .unwrap();
+        let traces_before = store
+            .get_step_traces_by_thread("T1", "default")
+            .await
+            .unwrap();
+        let acks_before = frames_of_type(&frames.lock().unwrap(), "segment_activated").len();
+
+        dispatcher
+            .dispatch_segment_activate("u1", "T1", "act3", "seg_gen1")
+            .await
+            .unwrap();
+
+        let segments_after = store
+            .list_message_segments("act3", "default")
+            .await
+            .unwrap();
+        let slots_after = sqlite
+            .get_slot_messages_by_pipeline("act3", "default", MessageQueryOpts::default())
+            .unwrap();
+        let traces_after = store
+            .get_step_traces_by_thread("T1", "default")
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(&segments_before).unwrap(),
+            serde_json::to_string(&segments_after).unwrap(),
+            "重复投递不建新段"
+        );
+        assert_eq!(
+            serde_json::to_string(&slots_before).unwrap(),
+            serde_json::to_string(&slots_after).unwrap(),
+            "重复投递槽位零变化"
+        );
+        assert_eq!(
+            traces_before.len(),
+            traces_after.len(),
+            "重复投递不追加 trace"
+        );
+        assert_eq!(
+            acks_before + 1,
+            frames_of_type(&frames.lock().unwrap(), "segment_activated").len(),
+            "ack 每次投递照发（多端对账）"
+        );
+    }
+
+    #[tokio::test]
+    async fn segment_activate_rejected_while_run_running() {
+        // 运行态守卫（§7.3-1）：run 活跃期间拒绝激活（后缀替换会与引擎 append
+        // 竞争），段表与槽位原样。
+        let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        let store: Arc<dyn StorageBackend> = sqlite.clone();
+        seed_activate_history(&store, "act4").await;
+        store
+            .record_run_start("act4", "default", "run-act4", "cfg")
+            .await
+            .unwrap();
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        let dispatcher = segment_dispatcher(&store, &frames);
+
+        let err = dispatcher
+            .dispatch_segment_activate("u1", "T1", "act4", "seg_gen1")
+            .await
+            .unwrap_err();
+        assert!(err.contains("任务运行中"), "拒绝原因: {err}");
+        assert_eq!(
+            store
+                .list_message_segments("act4", "default")
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "拒绝时不建新段"
+        );
+        let rows = sqlite
+            .get_slot_messages_by_pipeline("act4", "default", MessageQueryOpts::default())
+            .unwrap();
+        assert_eq!(rows.len(), 4, "拒绝时槽位原样");
+        assert!(
+            frames_of_type(&frames.lock().unwrap(), "segment_activated").is_empty(),
+            "拒绝时无 ack"
+        );
     }
 
     #[tokio::test]
@@ -3290,22 +4386,16 @@ mod tests {
     #[tokio::test]
     async fn interaction_response_routes_to_handler_and_resumes_suspended_run() {
         let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
-        // 挂起 run + resume 凭据（approval/human_interaction suspend 落库形态）
-        store.create_run("run-s1", "cfg", "default").unwrap();
-        StorageBackend::update_run_status(
-            store.as_ref(),
-            "run-s1",
-            RunStatus::Suspended,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
+        // 挂起 run + resume 凭据（approval/human_interaction suspend 落库形态：
+        // state 运行键 + suspend_request_id 凭据）
         store
-            .set_run_metadata(
-                "run-s1",
-                &json!({"pending_interaction_request_id": "req-77"}),
-            )
+            .record_run_start("p-s1", "default", "run-s1", "cfg")
+            .unwrap();
+        store
+            .set_run_status_projection("p-s1", "default", RunStatus::Suspended)
+            .unwrap();
+        store
+            .upsert_state_field("p-s1", "default", "suspend_request_id", &json!("req-77"))
             .unwrap();
 
         let (handler, registry) = handler_recorder(false);
@@ -3329,7 +4419,7 @@ mod tests {
             assert_eq!(calls[0].1["response"]["response_type"], "approve");
         }
 
-        // (B) 路径：挂起 run 被 resume（runs 表状态簿记回 Running）
+        // (B) 路径：挂起 run 被 resume（state 运行键簿记回 Running）
         let run = StorageBackend::get_run(store.as_ref(), "run-s1")
             .await
             .unwrap();
@@ -3401,9 +4491,8 @@ mod tests {
         StorageBackend::link_pipeline_session(store.as_ref(), "ps", "T1", "default")
             .await
             .unwrap();
-        store.create_run("run-q1", "cfg", "default").unwrap();
-        StorageBackend::set_run_pipeline(store.as_ref(), "run-q1", "ps")
-            .await
+        store
+            .record_run_start("ps", "default", "run-q1", "cfg")
             .unwrap();
         let mk_input = |id: &str, content: &str| agentos_core::types::PendingInputRecord {
             id: id.to_string(),

@@ -62,9 +62,14 @@ def _backend_with(search_results: list[dict[str, Any]], delete_result: bool = Tr
 
 
 def _backend_documents(docs: list[dict[str, Any]], delete_result: bool = True) -> MagicMock:
-    """documents 通路替身：get_documents 返回文档条目（original_text 形态）。"""
+    """documents 通路替身：get_documents 返回文档条目（original_text 形态）。
+
+    list_banks 返回 []（无会话 bank）→ 列表面聚合退化为单默认 bank，
+    get_documents 单次调用语义不变。
+    """
     backend = MagicMock()
     backend.get_documents = AsyncMock(return_value=docs)
+    backend.list_banks = AsyncMock(return_value=[])
     backend.delete = AsyncMock(return_value=delete_result)
     return backend
 
@@ -261,6 +266,72 @@ class TestSemanticConsolidateStats:
         }
         assert backend.get_documents.call_args.kwargs["tags"] == ["type:semantic"]
 
+    def test_list_semantic_aggregates_session_and_default_banks(self, mod: Any) -> None:
+        """列表面聚合会话 bank + 默认 bank（BUG-76：只查默认 bank 漏工具写入），
+        跨 bank 按 created_at 降序（最新在前，bank 名序不得把新记忆挤进截断区）。"""
+        backend = MagicMock()
+        backend.list_banks = AsyncMock(return_value=["thread-b", "kb", "thread-a", "default"])
+        fetched: dict[str, list[dict[str, Any]]] = {
+            "thread-a": [_doc("s-a", "会话a", "semantic", created_at="2026-09-20T00:00:00Z")],
+            "thread-b": [_doc("s-b", "会话b", "semantic", created_at="2026-09-22T00:00:00Z")],
+            "kb": [_doc("s-kb", "知识库", "semantic", created_at="2026-09-21T00:00:00Z")],
+            "default": [_doc("s-d", "默认", "semantic", created_at="2026-08-19T00:00:00Z")],
+        }
+
+        async def _get_documents(
+            user_id: str, tags: list[str] | None, tags_match: str, limit: int
+        ) -> list[dict[str, Any]]:
+            return list(fetched.get(user_id, []))
+
+        backend.get_documents = AsyncMock(side_effect=_get_documents)
+        mod.set_memory_backend(backend)
+
+        result = _run(mod.list_semantic())
+
+        # thread-* 会话 bank + 默认 bank 全量出现、按时间降序；kb 等非对话 bank 不聚合
+        assert [item["id"] for item in result["items"]] == ["s-b", "s-a", "s-d"]
+        assert result["total"] == 3
+
+    def test_list_semantic_without_bank_discovery_falls_back_to_default(
+        self, mod: Any
+    ) -> None:
+        """后端无 list_banks 能力（非 hindsight 替身）→ 单默认 bank 退化。"""
+        backend = MagicMock()
+        fetched: dict[str, list[dict[str, Any]]] = {
+            "default": [_doc("s-d", "默认", "semantic")],
+            "thread-a": [_doc("s-a", "会话a", "semantic")],
+        }
+
+        async def _get_documents(
+            user_id: str, tags: list[str] | None, tags_match: str, limit: int
+        ) -> list[dict[str, Any]]:
+            return list(fetched.get(user_id, []))
+
+        backend.get_documents = AsyncMock(side_effect=_get_documents)
+        mod.set_memory_backend(backend)
+        # list_banks 为 MagicMock 自动属性（非协程方法）＝无 bank 发现能力
+
+        result = _run(mod.list_semantic())
+
+        assert [item["id"] for item in result["items"]] == ["s-d"]
+
+    def test_list_semantic_backend_without_list_banks_attr(self, mod: Any) -> None:
+        """backend 连 list_banks 属性都没有（最小替身）→ 单默认 bank 退化不崩。"""
+        from types import SimpleNamespace
+
+        async def _get_documents(
+            user_id: str, tags: list[str] | None, tags_match: str, limit: int
+        ) -> list[dict[str, Any]]:
+            assert user_id == "default"
+            return [_doc("s-d", "默认", "semantic")]
+
+        backend = SimpleNamespace(get_documents=_get_documents)
+        mod.set_memory_backend(backend)
+
+        result = _run(mod.list_semantic())
+
+        assert [item["id"] for item in result["items"]] == ["s-d"]
+
     def test_consolidate_without_reflect_is_stub(self, mod: Any) -> None:
         """后端无 reflect → 空操作（consolidated_count=0）。"""
         backend = _backend_with([])
@@ -328,6 +399,7 @@ class TestSemanticConsolidateStats:
 
         backend = MagicMock()
         backend.get_documents = AsyncMock(side_effect=_get_documents)
+        backend.list_banks = AsyncMock(return_value=[])
         mod.set_memory_backend(backend)
         result = _run(mod.get_memory_stats())
         assert result == {

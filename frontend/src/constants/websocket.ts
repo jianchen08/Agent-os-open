@@ -17,9 +17,10 @@ export enum WebSocketStatus {
  * 打包件（Electron 自定义协议 app://）下内核的固定回源地址。
  *
  * app:// 页面的 location 宿主是自定义协议而非内核，WS 无法从 location 派生；
- * 内核固定监听 127.0.0.1:9100（与 electron/app-protocol.ts 的代理目标一致）。
+ * 装机版内核默认监听 127.0.0.1:9101（与 electron/kernel-manager.ts 的
+ * KERNEL_DEFAULT_PORT 一致，与 dev 栈 9100 错峰；改动两处须同刀同步）。
  */
-const PACKAGED_KERNEL_WS_ORIGIN = 'ws://127.0.0.1:9100'
+const PACKAGED_KERNEL_WS_ORIGIN = 'ws://127.0.0.1:9101'
 
 /**
  * 从 API_BASE_URL 派生 WebSocket URL
@@ -162,6 +163,16 @@ export const WS_SERVER_EVENTS = {
   PENDING_INPUTS_CHANGED: 'pending_inputs_changed',
   /** 上下文压缩彻底失败（context_window_guard 经 frontend.emit 透传，按故障周期去重） */
   COMPRESSION_FAILED: 'compression_failed',
+  /**
+   * 压缩波次完成（context_window_guard 压缩成功时经 frontend.emit 透传）。
+   * 压缩原地重写 message_slots 槽位 → 内容寻址指纹变异，前端跨压缩持有的
+   * recordId 过期——收到后须按 API 权威全量对账刷新（BUG-72 A1）。
+   */
+  COMPRESSION_APPLIED: 'compression_applied',
+  /** 段激活 ack（消息段模型：‹i/n› 多代切换后服务端后缀整段替换完成的对账事件，
+   *  [来源: docs/working/消息历史双能力方案_多代切换与压缩原文_20260923.md §5.1]；
+   *  收到后对该 pipeline 增量重拉消息并刷新段清单） */
+  SEGMENT_ACTIVATED: 'segment_activated',
   /** 需要全量重新同步（断线重连后后端告知 last_sequence 过期） */
   RESYNC_REQUIRED: 'resync_required',
   /** widget 事件（内核 PluginWidgetBroadcaster 周期快照 + 插件 widget 交互，ADR §3.5'） */

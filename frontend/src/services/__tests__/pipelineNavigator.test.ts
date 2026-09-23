@@ -290,7 +290,7 @@ describe('navigateToPipeline - 全局导航', () => {
 
   it('子管道：未注册 → registerPipeline + openSubAgentTab + loadTabMessages，返回 true', async () => {
     mockSessionStore.activeSessionId = SESSION_A
-    // 会话有两个管道：权威 activePipelineId 是主管道，pipe-sub-1 是子管道
+    // 会话有两个管道：pipe-main 是主管道（映射首位），pipe-sub-1 是子管道
     mockSessions = [
       { id: SESSION_A, pipelineIds: ['pipe-main', 'pipe-sub-1'], activePipelineId: 'pipe-main' },
     ]
@@ -434,6 +434,12 @@ describe('navigateToPipeline - 主管道主标签分支精确路径', () => {
   })
 
   it('主标签缺失且 tab 非空 → 上报详情带 tab 摘要（id/level/pid）', async () => {
+    // 隔离铠甲：通知 store 的 30s 内容指纹去重表是模块级状态（resetAll 不清，
+    // BUG-74 eecf5629a），本文件前一用例「主管道判定命中但主标签缺失」已入列
+    // 同 title+message 指纹的上报，会把本用例的上报当重复吞掉——把时钟推过
+    // 去重窗，用例与文件内顺序解耦（同 useRealtimeEventsBranches /
+    // ChatContainer.sendGuard 做法）。
+    vi.useFakeTimers({ now: Date.now() + 31_000 })
     mockSessionStore.activeSessionId = SESSION_A
     mockSessions = [{ id: SESSION_A, pipelineIds: [MAIN_PIPE_A] }]
     mockTabStore.tabs = [{ id: 'sub-other', agentLevel: 2, pipelineRunId: 'other-pipe' }]
@@ -444,5 +450,6 @@ describe('navigateToPipeline - 主管道主标签分支精确路径', () => {
     expect(
       notifications.some((n) => n.message.includes('主标签缺失')),
     ).toBe(true)
+    vi.useRealTimers()
   })
 })

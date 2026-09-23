@@ -323,6 +323,13 @@ class TestPermissionModeTablePersistence:
 class TestDispatchShortCircuits:
     """危险工具分流的短路放行：只读白名单 / allow 规则 / accept_edits 文件类。"""
 
+    @pytest.fixture(autouse=True)
+    def _clean_modes(self):
+        """default 档语义测试与权限模式表解耦：清掉同文件用例残留的会话条目。"""
+        _clear_session_modes()
+        yield
+        _clear_session_modes()
+
     @pytest.mark.asyncio
     async def test_read_only_tool_skips_dangerous_judgment(self) -> None:
         """file_read 属只读白名单：即使参数命中危险声明也不弹审批。"""

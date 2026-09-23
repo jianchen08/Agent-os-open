@@ -1864,6 +1864,279 @@ async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
     );
 }
 
+// ── BUG-51：观测失败（verify_incomplete）插件的自动复验、预算与终态 ─────────
+
+/// BUG-51：观测失败插件（账本 verify_incomplete）每轮 sync 自动复验——无需等
+/// 声明/代码指纹变化；观测恢复即转正（账本 ok + 复验时间戳）。
+#[tokio::test]
+async fn sync_reverifies_verify_incomplete_plugin_and_promotes_on_recovery() {
+    let scopes = PluginScopeRegistry::new();
+    let registry_arc = Arc::new(CapabilityRegistryImpl::new());
+    let mut known = HashSet::new();
+    let mut hashes = HashMap::new();
+    let mut code_hashes = HashMap::new();
+    let ledger = crate::contract::ContractLedger::new();
+
+    // 首轮：新插件观测失败 → 声明注册 + 账本 verify_incomplete（BUG-51 原状）
+    let mut inv1 = MockInvoker::new(vec![mk_manifest("h1", "tool", &["t1"], false)]);
+    inv1.list_tools_fail = true;
+    let r1 = sync_once_with_store(
+        &inv1,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        &mut HashMap::new(),
+        None,
+        None,
+        Some(&ledger),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r1.tools_registered, 1, "观测失败仍按声明注册（注册面不变）");
+    assert_eq!(
+        ledger.get("h1").expect("账本应有 h1").gates.g2_consistency,
+        "verify_incomplete",
+        "账本标记校验未完成"
+    );
+
+    // 次轮：spawn/上报恢复，声明与代码指纹均未变 → 仍须复验并转正
+    let inv2 = MockInvoker::new(vec![mk_manifest("h1", "tool", &["t1"], false)]);
+    let r2 = sync_once_with_store(
+        &inv2,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        &mut HashMap::new(),
+        None,
+        None,
+        Some(&ledger),
+    )
+    .await
+    .unwrap();
+    assert!(
+        inv2.list_calls.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "无指纹变化也必须复验 verify_incomplete 插件"
+    );
+    let st = ledger.get("h1").expect("账本应有 h1");
+    assert_eq!(st.gates.g2_consistency, "ok", "观测恢复即转正");
+    assert!(st.gates.reverified_ts.is_some(), "转正必留复验时间戳");
+    assert_eq!(
+        r2.changed_plugin_ids,
+        vec!["h1".to_string()],
+        "复验重注册走 GAP-6 通道"
+    );
+}
+
+/// BUG-51：复验预算上限——连续 N 轮复验观测失败后落终态 verify_failed
+/// （plugins API 可见原因），且不再逐轮自动重验；代码变更（用户动手修）
+/// 重置预算重开复验，修复成功即转正。
+#[tokio::test]
+async fn verify_incomplete_reverify_budget_expires_to_verify_failed_terminal() {
+    let scopes = PluginScopeRegistry::new();
+    let registry_arc = Arc::new(CapabilityRegistryImpl::new());
+    let mut known = HashSet::new();
+    let mut hashes = HashMap::new();
+    let mut code_hashes = HashMap::new();
+    let ledger = crate::contract::ContractLedger::new();
+    // 连击账目必须跨轮持久（同一 HashMap 贯穿全部轮次，预算才可累积）
+    let mut obs_fail_streaks = HashMap::new();
+
+    // 代码目录 staging（仿 sync_revalidates_on_code_change_and_restores_fixed_tool）
+    let dir_old = tempfile::tempdir().unwrap();
+    std::fs::write(dir_old.path().join("impl_old.py"), b"v1").unwrap();
+    let dir_new = tempfile::tempdir().unwrap();
+    std::fs::write(dir_new.path().join("impl_new.py"), b"v2").unwrap();
+    let stage = Arc::new(parking_lot::RwLock::new(dir_old.path().to_path_buf()));
+    let resolver: Arc<CodeDirResolver> = {
+        let stage = stage.clone();
+        Arc::new(move |_id: &str| Some(stage.read().clone()))
+    };
+
+    // 首轮：新插件观测失败 → 声明注册 + verify_incomplete
+    let mut inv_fail = MockInvoker::new(vec![mk_manifest("h2", "tool", &["t1"], false)]);
+    inv_fail.list_tools_fail = true;
+    sync_once_with_store(
+        &inv_fail,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        &mut obs_fail_streaks,
+        Some(&resolver),
+        None,
+        Some(&ledger),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ledger.get("h2").expect("账本应有 h2").gates.g2_consistency,
+        "verify_incomplete"
+    );
+
+    // 连续复验失败至预算上限（首轮注册失败不计入复验预算）
+    for _ in 0..G2_REVERIFY_MAX_CONSECUTIVE_FAILS {
+        sync_once_with_store(
+            &inv_fail,
+            &registry_arc,
+            &scopes,
+            &mut known,
+            &mut None,
+            None,
+            &mut hashes,
+            &mut code_hashes,
+            &mut obs_fail_streaks,
+            Some(&resolver),
+            None,
+            Some(&ledger),
+        )
+        .await
+        .unwrap();
+    }
+    let st = ledger.get("h2").expect("账本应有 h2");
+    assert_eq!(st.gates.g2_consistency, "verify_failed", "预算超限落终态");
+    assert!(
+        st.gates.last_error.expect("终态必带原因").contains("复验"),
+        "用户可见原因要说明复验失败"
+    );
+
+    // 预算耗尽：不再逐轮自动重验（list_calls 零增长）
+    let calls_before = inv_fail
+        .list_calls
+        .load(std::sync::atomic::Ordering::Relaxed);
+    sync_once_with_store(
+        &inv_fail,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        &mut obs_fail_streaks,
+        Some(&resolver),
+        None,
+        Some(&ledger),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        inv_fail
+            .list_calls
+            .load(std::sync::atomic::Ordering::Relaxed),
+        calls_before,
+        "终态后停止单插件自动重验"
+    );
+
+    // 用户修复（代码指纹变化）→ 预算重置 → 本轮复验成功 → 转正
+    *stage.write() = dir_new.path().to_path_buf();
+    let inv_ok = MockInvoker::new(vec![mk_manifest("h2", "tool", &["t1"], false)]);
+    sync_once_with_store(
+        &inv_ok,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        &mut obs_fail_streaks,
+        Some(&resolver),
+        None,
+        Some(&ledger),
+    )
+    .await
+    .unwrap();
+    let st = ledger.get("h2").expect("账本应有 h2");
+    assert_eq!(st.gates.g2_consistency, "ok", "修复后复验通过即转正");
+    assert!(st.gates.reverified_ts.is_some(), "转正必留复验时间戳");
+}
+
+/// 合宿成员观测域化（BUG-51 验证链）：本成员带前缀剥前缀保留、他组前缀条目
+/// 剔除、裸名保留。健康成员经宿主聚合上报对照后可落 ok（转正链路不失真）。
+#[test]
+fn member_scoped_actual_tools_keeps_own_and_bare_drops_peers() {
+    let actual = vec![
+        act("mem1.t1"),
+        act("mem1.dot.name"),
+        act("peer_mem.other"),
+        act("plain_tool"),
+    ];
+    let scoped = member_scoped_actual_tools(actual, "mem1");
+    let names: Vec<&str> = scoped.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["t1", "dot.name", "plain_tool"],
+        "本成员前缀剥掉保留（工具名可含点）；他组前缀剔除；裸名保留"
+    );
+}
+
+fn act(name: &str) -> agentos_invoker::verify::ActualTool {
+    agentos_invoker::verify::ActualTool {
+        name: name.to_string(),
+        description: None,
+        input_schema: json!({"type": "object"}),
+    }
+}
+
+/// BUG-51 验证链：light 合宿成员经宿主聚合上报（本成员带前缀 + 他组条目）
+/// → 成员域化对照干净 → 账本 ok（而非恒 drift），声明工具照常注册。
+#[tokio::test]
+async fn sync_cohost_member_scoped_verify_lands_ok_not_drift() {
+    let scopes = PluginScopeRegistry::new();
+    let registry_arc = Arc::new(CapabilityRegistryImpl::new());
+    let mut known = HashSet::new();
+    let mut hashes = HashMap::new();
+    let mut code_hashes = HashMap::new();
+    let ledger = crate::contract::ContractLedger::new();
+
+    let mut inv = MockInvoker::new(vec![mk_manifest_light("mem1", &["t1"])]);
+    inv.list_tools.insert(
+        "mem1".into(),
+        json!({ "tools": [
+            {"name": "mem1.t1", "description": "t1"},
+            {"name": "peer_mem.other", "description": "other"}
+        ]}),
+    );
+    let r = sync_once_with_store(
+        &inv,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        &mut HashMap::new(),
+        None,
+        None,
+        Some(&ledger),
+    )
+    .await
+    .unwrap();
+    assert!(
+        r.drifted_plugins.is_empty(),
+        "他组成员工具不得计入本成员漂移: {:?}",
+        r.drifted_plugins
+    );
+    assert!(registry_arc.get_tool("t1").is_some(), "声明工具照常注册");
+    let st = ledger.get("mem1").expect("账本应登记 mem1");
+    assert_eq!(
+        st.gates.g2_consistency, "ok",
+        "成员域化对照干净 → ok（观测成功可落 ok，转正链路成立）"
+    );
+}
+
 /// 代码指纹解析缺省臂：无解析器 / 解析不到目录 → 指纹恒 0（复验退化为仅声明
 /// 指纹驱动，不误触发）。
 #[test]

@@ -571,6 +571,10 @@ async def _list_tasks_from_state() -> list[dict[str, Any]] | None:
                     "workspace": str(row.get("workspace") or "") or None,
                 },
                 "created_at": str(row.get("task.created_at") or ""),
+                # 执行 agent 归属（出生协议 agent.id 快照，task_birth 日志同
+                # 口径）：顶层 agent_name 供前端任务面板 Agent 列映射；历史行
+                # 无此键 → None（前端显示 '--'，不回填）
+                "agent_name": str(row.get("agent.id") or "") or None,
             }
         )
     out.extend(task_rows)
@@ -604,6 +608,9 @@ async def _list_tasks_from_state() -> list[dict[str, Any]] | None:
                         "workspace": str(fields.get("workspace") or ""),
                     },
                     "created_at": str(fields.get("created_at") or ""),
+                    # 登记声明（只登记不执行）无执行 agent 可言：恒 None，
+                    # 不借宿主管道的 agent.id 冒充归属
+                    "agent_name": None,
                 }
             )
     return out

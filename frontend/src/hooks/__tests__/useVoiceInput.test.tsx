@@ -15,14 +15,31 @@ import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mockTranscribe = vi.fn()
+/**
+ * TranscriptionError 替身：与 services/api/asr 的导出同类（instanceof 判定用）。
+ * vi.mock 工厂在导入期解引用该类，须经 vi.hoisted 提升到 mock 声明之前。
+ */
+const { FakeTranscriptionError } = vi.hoisted(() => {
+  class FakeTranscriptionError extends Error {
+    code?: string
+    constructor(message: string, code?: string) {
+      super(message)
+      this.name = 'TranscriptionError'
+      this.code = code
+    }
+  }
+  return { FakeTranscriptionError }
+})
 vi.mock('@/services/api/asr', () => ({
   transcribeAudio: (...args: unknown[]) => mockTranscribe(...args),
+  TranscriptionError: FakeTranscriptionError,
 }))
 
 import { useVoiceInput } from '../useVoiceInput'
 import type {
   SpeechRecognitionErrorEvent,
   SpeechRecognitionEvent,
+  UseVoiceInputOptions,
 } from '@/types/voiceInput'
 
 /** SpeechRecognition 替身：记录 start/stop，回调可手动触发；静态持有最后实例供断言 */
@@ -63,6 +80,16 @@ class FakeMediaRecorder {
   constructor(_stream?: MediaStream, _opts?: { mimeType?: string }) {
     FakeMediaRecorder.lastInstance = this
   }
+}
+
+/** 最新 SpeechRecognition 替身实例（构造时静态登记，供断言取用） */
+function lastRecognition() {
+  return (FakeRecognition as unknown as { lastInstance?: FakeRecognition }).lastInstance!
+}
+
+/** 最新 MediaRecorder 替身实例 */
+function lastRecorder() {
+  return (FakeMediaRecorder as unknown as { lastInstance?: FakeMediaRecorder }).lastInstance!
 }
 
 function makeStream(): MediaStream {
@@ -110,15 +137,38 @@ function installVoiceTestEnv() {
   })
 }
 
-/** 错误路径族共用：挂载带 onError 的 hook 并启动录音，返回可断言三元组 */
-async function startRecordingWithErrorHook() {
-  const onError = vi.fn()
-  const { result } = renderHook(() => useVoiceInput({ onError }))
+/** 挂载 hook 并启动录音，返回 hook 句柄、卸载函数与最新识别实例 */
+async function startRecognition(options: UseVoiceInputOptions = {}) {
+  const { result, unmount } = renderHook(() => useVoiceInput(options))
   await act(async () => {
     await result.current.startRecording()
   })
-  const instance = (FakeRecognition as unknown as { lastInstance?: FakeRecognition }).lastInstance!
-  return { onError, result, instance }
+  return { result, unmount, instance: lastRecognition() }
+}
+
+/** 启动录音并注入识别错误触发服务端 ASR 降级（默认 network），推进 timers 使切型稳定 */
+async function fallbackToServerAsr(options: UseVoiceInputOptions = {}, errorCode = 'network') {
+  const started = await startRecognition(options)
+  await act(async () => {
+    started.instance.onerror?.({ error: errorCode, message: '' } as SpeechRecognitionErrorEvent)
+    await vi.advanceTimersByTimeAsync(0)
+  })
+  return started
+}
+
+/** 停止录音并推进 timers，等待转写链路落定 */
+async function stopRecordingAndAwaitTranscribe(result: LatestHook) {
+  await act(async () => {
+    result.current.stopRecording()
+    await vi.advanceTimersByTimeAsync(0)
+  })
+}
+
+/** 错误路径族共用：挂载带 onError 的 hook 并启动录音，返回可断言三元组 */
+async function startRecordingWithErrorHook() {
+  const onError = vi.fn()
+  const started = await startRecognition({ onError })
+  return { onError, ...started }
 }
 
 describe('useVoiceInput: 浏览器 SpeechRecognition 模式', () => {
@@ -142,21 +192,15 @@ describe('useVoiceInput: 浏览器 SpeechRecognition 模式', () => {
   it('中间结果实时上屏回调；最终结果确认回调并更新 transcript', async () => {
     const onInterimResult = vi.fn()
     const onTranscriptionComplete = vi.fn()
-    const { result } = renderHook(() =>
-      useVoiceInput({ onInterimResult, onTranscriptionComplete }),
-    )
-    await act(async () => {
-      await result.current.startRecording()
-    })
-    const instance = (FakeRecognition as unknown as { lastInstance?: FakeRecognition }).lastInstance
+    const { result, instance } = await startRecognition({ onInterimResult, onTranscriptionComplete })
     expect(instance).toBeDefined()
     act(() => {
-      instance!.onresult?.(makeResultEvent([{ isFinal: false, transcript: '你好' }]))
+      instance.onresult?.(makeResultEvent([{ isFinal: false, transcript: '你好' }]))
     })
     expect(result.current.transcript).toBe('你好')
     expect(onInterimResult).toHaveBeenCalledWith('你好')
     act(() => {
-      instance!.onresult?.(makeResultEvent([{ isFinal: true, transcript: '你好世界' }]))
+      instance.onresult?.(makeResultEvent([{ isFinal: true, transcript: '你好世界' }]))
     })
     expect(onTranscriptionComplete).toHaveBeenCalledWith('你好世界')
     expect(result.current.transcript).toBe('你好世界')
@@ -192,11 +236,7 @@ describe('useVoiceInput: 浏览器 SpeechRecognition 模式', () => {
     const onError = vi.fn()
     const getUserMedia = vi.fn(async () => makeStream())
     installSpeechEnv(getUserMedia)
-    const { result } = renderHook(() => useVoiceInput({ onError }))
-    await act(async () => {
-      await result.current.startRecording()
-    })
-    const instance = (FakeRecognition as unknown as { lastInstance?: FakeRecognition }).lastInstance!
+    const { result, instance } = await startRecognition({ onError })
     act(() => result.current.stopRecording())
     expect(result.current.state).toBe('idle')
     act(() => {
@@ -207,11 +247,7 @@ describe('useVoiceInput: 浏览器 SpeechRecognition 模式', () => {
   })
 
   it('连续模式 onend 且非手动停止 → 自动重启识别', async () => {
-    const { result } = renderHook(() => useVoiceInput({ continuous: true }))
-    await act(async () => {
-      await result.current.startRecording()
-    })
-    const instance = (FakeRecognition as unknown as { lastInstance?: FakeRecognition }).lastInstance!
+    const { result, instance } = await startRecognition({ continuous: true })
     const startCallsBefore = instance.start.mock.calls.length
     act(() => instance.onend?.())
     expect(instance.start.mock.calls.length).toBe(startCallsBefore + 1)
@@ -241,15 +277,7 @@ describe('useVoiceInput: 服务端 ASR 降级（network 错误触发）', () => 
   it('network 错误 → 停浏览器识别，切 server-asr 模式并开始 MediaRecorder 录音', async () => {
     const getUserMedia = vi.fn(async () => makeStream())
     installSpeechEnv(getUserMedia)
-    const { result } = renderHook(() => useVoiceInput())
-    await act(async () => {
-      await result.current.startRecording()
-    })
-    const instance = (FakeRecognition as unknown as { lastInstance?: FakeRecognition }).lastInstance!
-    await act(async () => {
-      instance.onerror?.({ error: 'network', message: '' } as SpeechRecognitionErrorEvent)
-      await vi.advanceTimersByTimeAsync(0)
-    })
+    const { result, instance } = await fallbackToServerAsr()
     expect(instance.stop).toHaveBeenCalled()
     expect(result.current.mode).toBe('server-asr')
     expect(result.current.isRecording).toBe(true)
@@ -259,24 +287,13 @@ describe('useVoiceInput: 服务端 ASR 降级（network 错误触发）', () => 
   it('停止后转写：onstop → transcribeAudio → 成功回调最终文字', async () => {
     mockTranscribe.mockResolvedValue({ text: '你好世界' })
     const onTranscriptionComplete = vi.fn()
-    const { result } = renderHook(() => useVoiceInput({ onTranscriptionComplete }))
-    await act(async () => {
-      await result.current.startRecording()
-    })
-    const instance = (FakeRecognition as unknown as { lastInstance?: FakeRecognition }).lastInstance!
-    await act(async () => {
-      instance.onerror?.({ error: 'network', message: '' } as SpeechRecognitionErrorEvent)
-      await vi.advanceTimersByTimeAsync(0)
-    })
+    const { result } = await fallbackToServerAsr({ onTranscriptionComplete })
     // 模拟收到音频块
-    const recorder = (FakeMediaRecorder as unknown as { lastInstance?: FakeMediaRecorder }).lastInstance!
+    const recorder = lastRecorder()
     act(() => {
       recorder.ondataavailable?.({ data: new Blob(['x'], { type: 'audio/webm' }) })
     })
-    await act(async () => {
-      result.current.stopRecording()
-      await vi.advanceTimersByTimeAsync(0)
-    })
+    await stopRecordingAndAwaitTranscribe(result)
     expect(mockTranscribe).toHaveBeenCalledTimes(1)
     expect(onTranscriptionComplete).toHaveBeenCalledWith('你好世界')
     expect(result.current.state).toBe('idle')
@@ -285,22 +302,11 @@ describe('useVoiceInput: 服务端 ASR 降级（network 错误触发）', () => 
   it('后端 ASR 未配置（空 text）→ not_supported 友好提示', async () => {
     const onError = vi.fn()
     mockTranscribe.mockResolvedValue({ text: '' })
-    const { result } = renderHook(() => useVoiceInput({ onError }))
-    await act(async () => {
-      await result.current.startRecording()
-    })
-    const instance = (FakeRecognition as unknown as { lastInstance?: FakeRecognition }).lastInstance!
-    await act(async () => {
-      instance.onerror?.({ error: 'service-not-allowed', message: '' } as SpeechRecognitionErrorEvent)
-      await vi.advanceTimersByTimeAsync(0)
-    })
-    await act(async () => {
-      result.current.stopRecording()
-      await vi.advanceTimersByTimeAsync(0)
-    })
+    const { result } = await fallbackToServerAsr({ onError }, 'service-not-allowed')
+    await stopRecordingAndAwaitTranscribe(result)
     expect(onError).toHaveBeenCalledWith({
       type: 'not_supported',
-      message: '未配置语音转文字服务，请联系管理员启用 ASR',
+      message: '未配置语音转文字服务，请在 设置 → 插件配置 → 语音转写（ASR）中配置',
     })
     expect(result.current.state).toBe('idle')
   })
@@ -308,20 +314,21 @@ describe('useVoiceInput: 服务端 ASR 降级（network 错误触发）', () => 
   it('转写请求失败 → transcription_failed + 回 idle', async () => {
     const onError = vi.fn()
     mockTranscribe.mockRejectedValue(new Error('500'))
-    const { result } = renderHook(() => useVoiceInput({ onError }))
-    await act(async () => {
-      await result.current.startRecording()
-    })
-    const instance = (FakeRecognition as unknown as { lastInstance?: FakeRecognition }).lastInstance!
-    await act(async () => {
-      instance.onerror?.({ error: 'network', message: '' } as SpeechRecognitionErrorEvent)
-      await vi.advanceTimersByTimeAsync(0)
-    })
-    await act(async () => {
-      result.current.stopRecording()
-      await vi.advanceTimersByTimeAsync(0)
-    })
+    const { result } = await fallbackToServerAsr({ onError })
+    await stopRecordingAndAwaitTranscribe(result)
     expect(onError).toHaveBeenCalledWith({ type: 'transcription_failed', message: '语音转文字失败，请重试' })
+    expect(result.current.state).toBe('idle')
+  })
+
+  it('转写失败带结构化原因（TranscriptionError）→ 横幅补原因', async () => {
+    const onError = vi.fn()
+    mockTranscribe.mockRejectedValue(new FakeTranscriptionError('上游密钥无效', 'asr_failed'))
+    const { result } = await fallbackToServerAsr({ onError })
+    await stopRecordingAndAwaitTranscribe(result)
+    expect(onError).toHaveBeenCalledWith({
+      type: 'transcription_failed',
+      message: '语音转文字失败：上游密钥无效',
+    })
     expect(result.current.state).toBe('idle')
   })
 })
@@ -343,11 +350,8 @@ describe('useVoiceInput: 音频录制模式（supportsAudio=true）', () => {
 
   it('停止：聚合音频块回 onRecordingComplete，回 idle', async () => {
     const onRecordingComplete = vi.fn()
-    const { result } = renderHook(() => useVoiceInput({ supportsAudio: true, onRecordingComplete }))
-    await act(async () => {
-      await result.current.startRecording()
-    })
-    const recorder = (FakeMediaRecorder as unknown as { lastInstance?: FakeMediaRecorder }).lastInstance!
+    const { result } = await startRecognition({ supportsAudio: true, onRecordingComplete })
+    const recorder = lastRecorder()
     act(() => {
       recorder.ondataavailable?.({ data: new Blob(['chunk1'], { type: 'audio/webm' }) })
       recorder.ondataavailable?.({ data: new Blob(['chunk2'], { type: 'audio/webm' }) })
@@ -362,10 +366,7 @@ describe('useVoiceInput: 音频录制模式（supportsAudio=true）', () => {
   it('getUserMedia 拒绝 → permission_denied 错误', async () => {
     installSpeechEnv(vi.fn(async () => Promise.reject(new Error('denied'))))
     const onError = vi.fn()
-    const { result } = renderHook(() => useVoiceInput({ supportsAudio: true, onError }))
-    await act(async () => {
-      await result.current.startRecording()
-    })
+    const { result } = await startRecognition({ supportsAudio: true, onError })
     expect(result.current.error).toEqual({
       type: 'permission_denied',
       message: '无法访问麦克风，请检查权限设置',
@@ -387,22 +388,52 @@ describe('useVoiceInput: 音频录制模式（supportsAudio=true）', () => {
 })
 
 describe('useVoiceInput: 卸载清理', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-    installSpeechEnv(vi.fn(async () => makeStream()))
-  })
-  afterEach(() => {
-    vi.useRealTimers()
-    removeSpeechEnv()
-  })
+  installVoiceTestEnv()
 
   it('卸载时停止识别（资源清理；state 不再更新属卸载后语义）', async () => {
-    const { result, unmount } = renderHook(() => useVoiceInput())
-    await act(async () => {
-      await result.current.startRecording()
-    })
-    const instance = (FakeRecognition as unknown as { lastInstance?: FakeRecognition }).lastInstance!
+    const { unmount, instance } = await startRecognition()
     unmount()
     expect(instance.stop).toHaveBeenCalled()
+  })
+})
+
+describe('useVoiceInput: 错误映射补遗（audio-capture / 未知错误码 / 降级 getUserMedia 拒绝）', () => {
+  installVoiceTestEnv()
+
+  it('audio-capture 错误 → 设备文案 + transcription_failed', async () => {
+    const { onError, result, instance } = await startRecordingWithErrorHook()
+    act(() => {
+      instance.onerror?.({ error: 'audio-capture', message: '' } as SpeechRecognitionErrorEvent)
+    })
+    expect(onError).toHaveBeenCalledWith({
+      type: 'transcription_failed',
+      message: '无法捕获音频，请检查麦克风设备',
+    })
+    expect(result.current.state).toBe('idle')
+  })
+
+  it('未知错误码 → 通用文案「语音识别失败」', async () => {
+    const { onError, instance } = await startRecordingWithErrorHook()
+    act(() => {
+      instance.onerror?.({ error: 'weird-unknown-code', message: '' } as SpeechRecognitionErrorEvent)
+    })
+    expect(onError).toHaveBeenCalledWith({
+      type: 'transcription_failed',
+      message: '语音识别失败',
+    })
+  })
+
+  it('降级录音 getUserMedia 拒绝 → permission_denied（服务端 ASR 起录失败）', async () => {
+    installSpeechEnv(vi.fn(async () => {
+      throw new Error('Notallowed')
+    }))
+    const onError = vi.fn()
+    const { result } = await fallbackToServerAsr({ onError })
+    expect(result.current.mode).toBe('server-asr')
+    expect(onError).toHaveBeenCalledWith({
+      type: 'permission_denied',
+      message: '无法访问麦克风，请检查权限设置',
+    })
+    expect(result.current.state).toBe('idle')
   })
 })

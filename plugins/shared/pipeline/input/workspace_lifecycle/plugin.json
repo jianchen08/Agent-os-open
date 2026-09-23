@@ -1,5 +1,8 @@
 {
   "id": "pipeline_workspace_lifecycle",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Workspace Lifecycle",
   "version": "1.0.0",
   "plugin_type": "pipeline",
@@ -29,7 +32,7 @@
     "thread_fields": [
       {
         "name": "workspace",
-        "type": "string",
+        "type": "directory",
         "label": "工作空间",
         "x_metadata_key": "workspace",
         "x_execution_path": "workspace.source_path",

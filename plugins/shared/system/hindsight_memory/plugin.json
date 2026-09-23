@@ -1,5 +1,8 @@
 {
   "id": "hindsight_memory_service",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Hindsight Memory Service",
   "version": "1.0.0",
   "plugin_type": "system",
@@ -35,7 +38,7 @@
             "metadata": {
               "type": "object",
               "default": {},
-              "description": "Optional extra metadata"
+              "description": "Optional extra metadata. Writing to a session bank (thread-*) auto-appends the bank id as a thread tag so the memory is recallable by tag across banks."
             },
             "document_id": {
               "type": "string",
@@ -89,7 +92,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "Optional server-side tag filter"
+              "description": "Optional server-side tag filter. A thread tag (\"thread-X\" or \"session:thread-X\") triggers cross-bank recall: fan out over session banks (capped) with boolean tag groups, so session-X memories match wherever they landed."
             },
             "tags_match": {
               "type": "string",
@@ -220,6 +223,14 @@
               "maximum": 100
             }
           },
+          "type": "object"
+        }
+      },
+      {
+        "name": "hindsight.list_banks",
+        "description": "List all memory bank ids in the hindsight instance (bank discovery for cross-bank listing surfaces)",
+        "input_schema": {
+          "properties": {},
           "type": "object"
         }
       },

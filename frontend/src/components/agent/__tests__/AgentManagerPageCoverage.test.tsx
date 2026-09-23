@@ -127,6 +127,15 @@ describe('AgentManagerPage — 列表加载失败', () => {
     expect(screen.queryByRole('list', { name: '智能体列表' })).not.toBeInTheDocument()
   })
 
+  it('失败态不伪装空态：不出现「共 0 个智能体」计数，也不出现空态文案（OBS-R258-1）', async () => {
+    getAgentsMock.mockRejectedValue(new Error('后端不可达'))
+    renderPage()
+
+    await screen.findByText('后端不可达')
+    expect(screen.queryByText(/共 0 个智能体/)).not.toBeInTheDocument()
+    expect(screen.queryByText('暂无智能体')).not.toBeInTheDocument()
+  })
+
   it('非 Error 拒绝 → 回退通用文案（不展示 [object Object] 类脏文本）', async () => {
     getAgentsMock.mockRejectedValue({ code: 'E_IO' })
     renderPage()

@@ -31,19 +31,19 @@ _LIBRARY_OUT = os.path.join(ROOT, "reports", "eval", "trajectory_library")
 
 _TASK_QUERY = """
 SELECT s.pipeline_id,
-  MAX(CASE WHEN field_key='task.goal' THEN field_value END),
-  MAX(CASE WHEN field_key='task.description' THEN field_value END),
-  MAX(CASE WHEN field_key='task.status' THEN field_value END),
-  MAX(CASE WHEN field_key='task.acceptance_criteria' THEN field_value END),
-  MAX(CASE WHEN field_key='task.eval_summary' THEN field_value END),
-  MAX(CASE WHEN field_key='llm_model' THEN field_value END),
-  MAX(CASE WHEN field_key='agent.id' THEN field_value END),
-  MAX(CASE WHEN field_key='track.total_tokens' THEN field_value END),
-  MAX(CASE WHEN field_key='task.ended_at' THEN field_value END)
+  MAX(CASE WHEN field_key='task.goal' THEN s.value END),
+  MAX(CASE WHEN field_key='task.description' THEN s.value END),
+  MAX(CASE WHEN field_key='task.status' THEN s.value END),
+  MAX(CASE WHEN field_key='task.acceptance_criteria' THEN s.value END),
+  MAX(CASE WHEN field_key='task.eval_summary' THEN s.value END),
+  MAX(CASE WHEN field_key='llm_model' THEN s.value END),
+  MAX(CASE WHEN field_key='agent.id' THEN s.value END),
+  MAX(CASE WHEN field_key='track.total_tokens' THEN s.value END),
+  MAX(CASE WHEN field_key='task.ended_at' THEN s.value END)
 FROM pipeline_state s
 WHERE s.pipeline_id IN
   (SELECT pipeline_id FROM pipeline_state WHERE field_key='task.goal')
-GROUP BY s.pipeline_id"""
+GROUP BY s.pipeline_id"""  # state 值域标量化（ADR 2026-09-18）：value 列原文即标量
 
 
 def _decode(value: str | None) -> Any:
@@ -82,9 +82,11 @@ def load_tasks(db_path: str) -> list[dict[str, Any]]:
 
 
 def _run_ids(cur: sqlite3.Cursor, pipeline_id: str) -> list[str]:
-    cur.execute("SELECT run_id FROM runs WHERE pipeline_id=? ORDER BY created_at",
-                (pipeline_id,))
-    return [r[0] for r in cur.fetchall()]
+    # runs 表退役（ADR 2026-09-18）：当前 run_id 是 state 标量键
+    cur.execute("SELECT value FROM pipeline_state WHERE pipeline_id=? "
+                "AND field_key='run_id'", (pipeline_id,))
+    r = cur.fetchone()
+    return [r[0]] if r and r[0] else []
 
 
 def write_outputs(result: dict[str, Any], tag: str, suites_out: str,

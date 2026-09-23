@@ -1800,23 +1800,6 @@ mod tests {
         ) -> Result<(), agentos_core::types::StorageError> {
             unreachable!("出生字段失败路径不应触碰其他存储方法")
         }
-        async fn update_run_status(
-            &self,
-            _run_id: &str,
-            _status: agentos_core::types::RunStatus,
-            _branch: Option<&str>,
-            _seq: Option<u32>,
-        ) -> Result<(), agentos_core::types::StorageError> {
-            unreachable!("出生字段失败路径不应触碰其他存储方法")
-        }
-        async fn create_run(
-            &self,
-            _run_id: &str,
-            _config_hash: &str,
-            _tenant_id: &str,
-        ) -> Result<(), agentos_core::types::StorageError> {
-            unreachable!("出生字段失败路径不应触碰其他存储方法")
-        }
         async fn store_blob(
             &self,
             _data: &[u8],
@@ -2084,30 +2067,15 @@ mod tests {
         ) -> Result<(), agentos_core::types::StorageError> {
             self.inner.append_trace(entry).await
         }
-        async fn update_run_status(
+        async fn record_run_start(
             &self,
-            run_id: &str,
-            status: agentos_core::types::RunStatus,
-            branch: Option<&str>,
-            seq: Option<u32>,
-        ) -> Result<(), agentos_core::types::StorageError> {
-            self.inner
-                .update_run_status(run_id, status, branch, seq)
-                .await
-        }
-        async fn create_run(
-            &self,
+            pipeline_id: &str,
+            tenant_id: &str,
             run_id: &str,
             config_hash: &str,
-            tenant_id: &str,
         ) -> Result<(), agentos_core::types::StorageError> {
-            agentos_core::traits::StorageBackend::create_run(
-                self.inner.as_ref(),
-                run_id,
-                config_hash,
-                tenant_id,
-            )
-            .await
+            self.inner
+                .record_run_start(pipeline_id, tenant_id, run_id, config_hash)
         }
         async fn store_blob(
             &self,

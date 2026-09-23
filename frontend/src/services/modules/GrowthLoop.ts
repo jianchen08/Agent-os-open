@@ -177,7 +177,10 @@ export function destroyGrowthLoop(): void {
   removeAllPluginStyles()
   const store = useLayoutModeStore.getState()
   store.setDockItems([])
-  useLayoutModeStore.setState({ workspaceTabs: [] })
+  // workspaceTabs 是用户布局数据（导演台/主城/任务管理…），不是闭环状态：
+  // 认证过期/登出后重登须原样恢复（client.ts 认证过期契约「layout-mode 等保留，
+  // 供重登后恢复」）——清空它们会把内核暂不可达窗口的 401 放大成布局永久丢失
+  // （部署重启窗页签团灭，BUG-68）。
 }
 
 /**
@@ -200,8 +203,10 @@ export async function restartGrowthLoop(): Promise<void> {
     await reloadContributionRegistry()
     loggers.websocket.info('自生长闭环重启完成')
   } catch (error) {
-    useLayoutModeStore.setState({ workspaceTabs: [] })
-    useLayoutModeStore.getState().setDockItems([])
+    // 拉取失败保留用户工作区状态（FE11 同款降级）：页签/dock 是用户布局数据，
+    // 内核暂不可达窗口清空它们 = 随 persist 永久丢失（部署重启窗页签团灭，BUG-68）。
+    // 声明集已在 reloadContributionRegistry 失败时保留旧值，下次 schema 事件再换装。
+    loggers.websocket.warn('schema 重载失败，保留现有工作区页签与 dock（降级运行）:', error)
     throw error
   }
 }

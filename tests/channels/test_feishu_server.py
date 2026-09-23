@@ -117,8 +117,14 @@ class TestFeishuServerLifecycle:
         monkeypatch.setattr(
             load_feishu_server.plugin,
             "get_config",
-            lambda: {"app_id": "cli_x", "app_secret": "secret"},
+            lambda: {"settings": {"app_id": "cli_x", "app_secret": "secret"}},
         )
+
+        async def _no_start(self) -> None:
+            return None
+
+        # on_load 现在会调用 adapter.start()（真实会连飞书云端），测试置空。
+        monkeypatch.setattr(load_feishu_server.FeishuAdapter, "start", _no_start)
         await load_feishu_server._on_load({})
         # 适配器已构造的公共观察面：发送工具报"未连接"而非"未初始化"
         r = await load_feishu_server.feishu_send_message("u1", "hi")
@@ -128,8 +134,8 @@ class TestFeishuServerLifecycle:
     @pytest.mark.parametrize(
         ("config", "missing_key"),
         [
-            ({}, "app_id"),
-            ({"app_id": "cli_x", "app_secret": "   "}, "app_secret"),
+            ({"settings": {}}, "app_id"),
+            ({"settings": {"app_id": "cli_x", "app_secret": "   "}}, "app_secret"),
         ],
     )
     @pytest.mark.asyncio
@@ -160,6 +166,43 @@ class TestFeishuServerLifecycle:
     async def test_on_unload_no_adapter(self, load_feishu_server) -> None:
         load_feishu_server._adapter = None
         await load_feishu_server._on_unload({})  # 不抛
+
+
+class TestFeishuDomainEventBridge:
+    """on_domain_event → 入站桥委托（run 终态回复回流接线）。"""
+
+    @pytest.mark.asyncio
+    async def test_delegates_to_bridge(self, load_feishu_server) -> None:
+        seen: list[dict] = []
+
+        async def _handle(params: dict) -> None:
+            seen.append(params)
+
+        load_feishu_server._bridge = SimpleNamespace(handle_domain_event=_handle)
+        event = {"event": "run.completed", "pipeline_id": "a" * 12}
+        await load_feishu_server._on_domain_event(event)
+        assert seen == [event]
+
+    @pytest.mark.asyncio
+    async def test_no_bridge_is_noop(self, load_feishu_server) -> None:
+        assert load_feishu_server._bridge is None
+        await load_feishu_server._on_domain_event({"event": "run.completed"})
+
+    @pytest.mark.asyncio
+    async def test_on_unload_stops_bridge(self, load_feishu_server) -> None:
+        stopped: list[str] = []
+
+        async def _stop() -> None:
+            stopped.append("bridge")
+
+        async def _adapter_stop() -> None:
+            stopped.append("adapter")
+
+        load_feishu_server._bridge = SimpleNamespace(stop=_stop)
+        load_feishu_server._adapter = SimpleNamespace(stop=_adapter_stop)
+        await load_feishu_server._on_unload({})
+        assert stopped == ["bridge", "adapter"]
+        assert load_feishu_server._bridge is None
 
 
 class TestFeishuServerSendMessage:

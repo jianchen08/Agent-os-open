@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any
 
@@ -30,6 +31,10 @@ _LISTING_LIMIT_CAP = 100
 
 # 后端缺省 user_id（分发时不传 _user → Depends 缺省 → "default"）
 _DEFAULT_USER_ID = "default"
+
+# 会话 bank 前缀：内核会话 id 形如 thread-{uuid}，memory 工具的可信身份
+# （_owner_from_inputs → session_id）即会话 id——工具写入全部落会话 bank。
+_SESSION_BANK_PREFIX = "thread-"
 
 
 class MemoryAPIError(Exception):
@@ -107,21 +112,48 @@ def _document_to_memory(doc: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _conversation_banks(backend: Any) -> list[str]:
+    """对话记忆的 bank 集合 = 会话 bank（thread-*）+ 默认 bank。
+
+    memory 工具按可信 caller 身份（会话 id）分 bank 落库，列表面只查默认
+    bank 会漏掉全部工具写入；会话 bank 经 backend.list_banks 发现。后端无
+    bank 发现能力（list_banks 缺失或非协程方法）时按单 bank（默认 bank）
+    后端处理（consolidate_memory 的 reflect 能力探测同款约定）。
+    """
+    discover = getattr(backend, "list_banks", None)
+    if not callable(discover) or not inspect.iscoroutinefunction(discover):
+        return [_DEFAULT_USER_ID]
+    bank_ids = await discover()
+    session_banks = sorted(
+        {str(b) for b in bank_ids or [] if str(b).startswith(_SESSION_BANK_PREFIX)}
+    )
+    session_banks.append(_DEFAULT_USER_ID)
+    return session_banks
+
+
 async def _list_bank_documents(
     backend: Any, memory_type: str | None, limit: int
 ) -> list[dict[str, Any]]:
-    """经 documents/list 通路取回 bank 文档（列表/统计的既定数据面）。
+    """经 documents/list 通路取回对话记忆 bank 集合的文档（列表/统计的既定数据面）。
 
     recall 是带 query 的检索 API（空 query 服务端必拒），列表面必须走本通路，
-    否则链路断裂。能力失败（RuntimeError）诚实上抛由 http.handle 转 500。
+    否则链路断裂。逐 bank 取回后按 created_at 降序合并（hindsight list 无全局
+    排序语义，bank 名序迭代会把新记忆排进截断区），超 limit 截断（延续单
+    bank 时代的列表面上限语义）。能力失败（RuntimeError）诚实上抛由
+    http.handle 转 500。
     """
-    docs = await backend.get_documents(
-        user_id=_resolve_user_id(),
-        tags=_type_tag_filter(memory_type),
-        tags_match="any_strict",
-        limit=limit,
-    )
-    return [d for d in docs or [] if isinstance(d, dict)]
+    docs: list[dict[str, Any]] = []
+    for bank in await _conversation_banks(backend):
+        fetched = await backend.get_documents(
+            user_id=bank,
+            tags=_type_tag_filter(memory_type),
+            tags_match="any_strict",
+            limit=limit,
+        )
+        docs.extend(d for d in fetched or [] if isinstance(d, dict))
+    # ISO-8601 UTC 时间戳字符串序＝时间序；缺失 created_at 稳定排尾
+    docs.sort(key=lambda d: str(d.get("created_at", "") or ""), reverse=True)
+    return docs[:limit]
 
 
 async def list_memories(
@@ -357,8 +389,22 @@ async def search_memories_post(body: dict[str, Any] | None = None) -> dict[str, 
 # ---------------------------------------------------------------------------
 
 
+def _log_cross_bank_hit(operation: str, memory_id: str, bank: str) -> None:
+    """by-id 跨 bank 命中留痕（by-id 是管理面：跨 bank 放行但可审计）。"""
+    logger.info(
+        "memory by-id 跨 bank 命中（管理面放行）| operation=%s memory_id=%s bank=%s",
+        operation,
+        memory_id,
+        bank,
+    )
+
+
 async def get_memory(memory_id: str) -> dict[str, Any]:
     """获取指定记忆条目的详情（documents 直查通路，document_id 精确取回）。
+
+    跨 bank 定位：逐对话 bank（会话 bank + 默认 bank，与列表面同集合同序）
+    探测 document_id，记忆页跨 bank 列出的条目按 id 同样可查看——命中 bank
+    非默认 bank 时记日志（管理面放行可审计）。
 
     content 取 documents 面原文 original_text（recall 返回的是抽取后事实）；
     直查无相关性排序语义，score 恒 0（不伪造评分）。
@@ -374,27 +420,34 @@ async def get_memory(memory_id: str) -> dict[str, Any]:
     """
     backend = _get_memory_backend()
     if backend is not None:
-        docs = await backend.get_documents(
-            user_id=_resolve_user_id(),
-            document_id=memory_id,
-            limit=1,
-        )
-        for d in docs:
-            if str(d.get("id", "")) == memory_id:
-                m = _document_to_memory(d)
-                return {
-                    "id": m["id"],
-                    "content": m["content"],
-                    "memory_type": m["memory_type"],
-                    "tags": m["tags"],
-                    "score": m["score"],
-                    "created_at": m["created_at"],
-                }
+        for bank in await _conversation_banks(backend):
+            docs = await backend.get_documents(
+                user_id=bank,
+                document_id=memory_id,
+                limit=1,
+            )
+            for d in docs:
+                if str(d.get("id", "")) == memory_id:
+                    if bank != _DEFAULT_USER_ID:
+                        _log_cross_bank_hit("get", memory_id, bank)
+                    m = _document_to_memory(d)
+                    return {
+                        "id": m["id"],
+                        "content": m["content"],
+                        "memory_type": m["memory_type"],
+                        "tags": m["tags"],
+                        "score": m["score"],
+                        "created_at": m["created_at"],
+                    }
     raise MemoryAPIError(404, "MEM_NOTF_5001", "未找到相关记忆")
 
 
 async def delete_memory(memory_id: str) -> dict[str, str]:
-    """删除指定记忆条目。
+    """删除指定记忆条目（跨 bank 定位，语义与 get_memory 同）。
+
+    逐对话 bank 调 delete 直至命中（backend.delete 兼容文档 id 与记忆单元
+    id 的回退解析，bank 探测序与列表面一致）；命中 bank 非默认 bank 时记
+    日志（管理面放行可审计）。
 
     Args:
         memory_id: 记忆 ID
@@ -406,14 +459,16 @@ async def delete_memory(memory_id: str) -> dict[str, str]:
         MemoryAPIError: 记忆不存在 (404)
     """
     backend = _get_memory_backend()
-    deleted = False
     if backend is not None:
-        deleted = bool(
-            await backend.delete(
-                user_id=_resolve_user_id(),
-                memory_id=memory_id,
+        for bank in await _conversation_banks(backend):
+            deleted = bool(
+                await backend.delete(
+                    user_id=bank,
+                    memory_id=memory_id,
+                )
             )
-        )
-    if not deleted:
-        raise MemoryAPIError(404, "MEM_NOTF_5001", "未找到相关记忆")
-    return {"message": "记忆已删除"}
+            if deleted:
+                if bank != _DEFAULT_USER_ID:
+                    _log_cross_bank_hit("delete", memory_id, bank)
+                return {"message": "记忆已删除"}
+    raise MemoryAPIError(404, "MEM_NOTF_5001", "未找到相关记忆")

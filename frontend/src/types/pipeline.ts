@@ -49,8 +49,8 @@ export interface PipelineViewEntry {
    *  thread_id=自身 id（不在任何会话成员列表中），真实归属的用户会话由
    *  该键承载 */
   originSessionId?: string
-  /** 运行状态 */
-  status: PipelineStatus
+  /** 运行状态（项目登记行不是管道运行：kind=project 时无运行态，缺省） */
+  status?: PipelineStatus
   /** 开始时间（ISO8601） */
   startedAt: string
   /** 结束时间（ISO8601，未结束为 undefined） */

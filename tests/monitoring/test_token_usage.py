@@ -34,34 +34,41 @@ _spec.loader.exec_module(monitoring_server)
 
 
 def _seed_state(db_path: str) -> None:
-    """写 state 累计行（模拟 track 插件落库形态）+ 一条与用量无关的键。"""
+    """写 state 累计行（模拟 track 插件落库形态）+ 一条与用量无关的键。
+
+    state 值域标量化（ADR 2026-09-18）：标量按 value_kind='str' 原样存，
+    非标量声明键（track.llm_usage 过渡键）按 value_kind='json' 存 JSON 文本。
+    """
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
             "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT,"
-            " field_value TEXT, tenant_id TEXT, updated_at TEXT)"
+            " value TEXT, value_kind TEXT, tenant_id TEXT, updated_at TEXT)"
         )
         rows = [
             # 两管道同模型：累计相加（1500 + 1000）
             (
                 "pipe-a",
                 "track.llm_usage",
-                {"total_input_tokens": 1200, "total_output_tokens": 300, "total_tokens": 1500},
+                json.dumps({"total_input_tokens": 1200, "total_output_tokens": 300, "total_tokens": 1500}),
+                "json",
             ),
-            ("pipe-a", "llm_model", "deepseek-v4-flash"),
+            ("pipe-a", "llm_model", "deepseek-v4-flash", "str"),
             (
                 "pipe-b",
                 "track.llm_usage",
-                {"total_input_tokens": 800, "total_output_tokens": 200, "total_tokens": 1000},
+                json.dumps({"total_input_tokens": 800, "total_output_tokens": 200, "total_tokens": 1000}),
+                "json",
             ),
-            ("pipe-b", "llm_model", "deepseek-v4-flash"),
+            ("pipe-b", "llm_model", "deepseek-v4-flash", "str"),
             # 与用量无关的键不得进入统计
-            ("pipe-c", "task.status", "completed"),
+            ("pipe-c", "task.status", "completed", "str"),
         ]
-        for pid, key, val in rows:
+        for pid, key, val, kind in rows:
             conn.execute(
-                "INSERT INTO pipeline_state VALUES (?, ?, ?, 'default', '2026-09-15T00:00:00Z')",
-                (pid, key, json.dumps(val)),
+                "INSERT INTO pipeline_state (pipeline_id, field_key, value, value_kind, tenant_id, updated_at)"
+                " VALUES (?, ?, ?, ?, 'default', '2026-09-15T00:00:00Z')",
+                (pid, key, val, kind),
             )
         conn.commit()
     finally:
@@ -120,16 +127,17 @@ class TestTokenUsageFromState:
         assert usage["error_count"] == 1
 
 
-def _seed_state_rows(db_path: str, rows: list[tuple[str, str, str]]) -> None:
-    """写 pipeline_state 原始行（field_value 为待解析的原文，含畸形输入）。"""
+def _seed_state_rows(db_path: str, rows: list[tuple[str, str, str, str]]) -> None:
+    """写 pipeline_state 原始行（value/value_kind 为待解码原文，含畸形输入）。"""
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
             "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT,"
-            " field_value TEXT, tenant_id TEXT, updated_at TEXT)"
+            " value TEXT, value_kind TEXT, tenant_id TEXT, updated_at TEXT)"
         )
         conn.executemany(
-            "INSERT INTO pipeline_state VALUES (?, ?, ?, 'default', '2026-09-16T00:00:00Z')",
+            "INSERT INTO pipeline_state (pipeline_id, field_key, value, value_kind, tenant_id, updated_at)"
+            " VALUES (?, ?, ?, ?, 'default', '2026-09-16T00:00:00Z')",
             rows,
         )
         conn.commit()
@@ -140,15 +148,15 @@ def _seed_state_rows(db_path: str, rows: list[tuple[str, str, str]]) -> None:
 class TestTokenUsageMalformedStateRows:
     """state 行容错：值不可解析 / 非对象形态时降级为「无用量」，不炸整次聚合。"""
 
-    def test_unparsable_field_value_degrades_to_none(self, monkeypatch) -> None:
-        """field_value 不是合法 JSON（历史脏写）→ 该槽位为 None，不抛异常（566-567）。"""
+    def test_unparsable_json_value_degrades_to_none(self, monkeypatch) -> None:
+        """value_kind='json' 但 value 不是合法 JSON（历史脏写）→ 槽位 None，不抛异常。"""
         with tempfile.TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "kernel.db")
             _seed_state_rows(
                 db_path,
                 [
-                    ("pipe-bad", "track.llm_usage", "{not-json"),
-                    ("pipe-bad", "llm_model", json.dumps("deepseek-v4-flash")),
+                    ("pipe-bad", "track.llm_usage", "{not-json", "json"),
+                    ("pipe-bad", "llm_model", "deepseek-v4-flash", "str"),
                     # 同库另一管道正常：脏行不得污染健康行的统计
                     (
                         "pipe-ok",
@@ -156,8 +164,9 @@ class TestTokenUsageMalformedStateRows:
                         json.dumps(
                             {"total_input_tokens": 10, "total_output_tokens": 5, "total_tokens": 15}
                         ),
+                        "json",
                     ),
-                    ("pipe-ok", "llm_model", json.dumps("deepseek-v4-flash")),
+                    ("pipe-ok", "llm_model", "deepseek-v4-flash", "str"),
                 ],
             )
             monkeypatch.setattr(monitoring_server, "_kernel_db_path", lambda: db_path)
@@ -177,10 +186,10 @@ class TestTokenUsageMalformedStateRows:
             _seed_state_rows(
                 db_path,
                 [
-                    ("pipe-scalar", "track.llm_usage", json.dumps(42)),
-                    ("pipe-scalar", "llm_model", json.dumps("glm-4")),
-                    ("pipe-null", "track.llm_usage", json.dumps(None)),
-                    ("pipe-null", "llm_model", json.dumps("glm-4")),
+                    ("pipe-scalar", "track.llm_usage", json.dumps(42), "json"),
+                    ("pipe-scalar", "llm_model", "glm-4", "str"),
+                    ("pipe-null", "track.llm_usage", json.dumps(None), "json"),
+                    ("pipe-null", "llm_model", "glm-4", "str"),
                 ],
             )
             monkeypatch.setattr(monitoring_server, "_kernel_db_path", lambda: db_path)
@@ -194,7 +203,7 @@ class TestTokenUsageMalformedStateRows:
             assert usage["rows"][0]["total_tokens"] == 0
 
     def test_non_string_llm_model_falls_back_to_unrecorded_label(self, monkeypatch) -> None:
-        """llm_model 非字符串 → 归到「（未记录模型）」标签，不把数字当模型名。"""
+        """llm_model 非字符串（json 键存数字）→ 归「（未记录模型）」，不把数字当模型名。"""
         with tempfile.TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "kernel.db")
             _seed_state_rows(
@@ -206,8 +215,9 @@ class TestTokenUsageMalformedStateRows:
                         json.dumps(
                             {"total_input_tokens": 1, "total_output_tokens": 1, "total_tokens": 2}
                         ),
+                        "json",
                     ),
-                    ("pipe-num", "llm_model", json.dumps(123)),
+                    ("pipe-num", "llm_model", json.dumps(123), "json"),
                 ],
             )
             monkeypatch.setattr(monitoring_server, "_kernel_db_path", lambda: db_path)

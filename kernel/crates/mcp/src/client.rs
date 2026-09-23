@@ -27,6 +27,18 @@ use agentos_core::traits::AuthType;
 /// 此常量；AGENTOS_MCP_PROTOCOL_VERSION 环境变量可临时覆盖（协商逃生口）。
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
+/// JSON-RPC 请求等待响应的默认超时（秒）：24h = 86 400s。
+///
+/// 审批/人机交互族统一值（BUG-60 用户裁定 2026-09-22）：与 human 插件
+/// create_choice 声明的 `timeout_seconds=86400` 对齐——wait_for_choice 一类
+/// 长等待调用阻塞到用户响应，旧默认 300s 会先于用户操作掐断（装机版
+/// kernel.log 实锤「timeout waiting for response: 300s」→ 审批作废重试循环）。
+/// 插件可用 manifest `mcp.request_timeout_secs` 覆盖；长等待业务（审批/交互）
+/// 仍应显式声明同族值。管道步骤调用不经 invoker P12 包界（流式豁免），本默认
+/// 即其有效界；工具执行族另有 `default_capability_timeout_ms`（300s），
+/// 两族语义不同，勿混用。
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 86_400;
+
 /// stdio 读侧行缓冲收缩阈值（字节）：单帧超过该量级后换新分配，防一次
 /// 多 MB 大帧把 per-sidecar 行缓冲容量永久棘轮在峰值（35+ sidecar 常驻放大）。
 const LINE_BUF_SHRINK_BYTES: usize = 128 * 1024;
@@ -139,12 +151,11 @@ pub struct McpClient {
     /// Capability 路由器——处理 sidecar 反向调用内核能力。
     /// None 时 sidecar 反向调用将被拒绝（返回 method not found）。
     router: Option<Arc<dyn CapabilityRouter>>,
-    /// JSON-RPC 请求等待响应的超时（默认 300s）。
+    /// JSON-RPC 请求等待响应的超时（默认 [`DEFAULT_REQUEST_TIMEOUT_SECS`]）。
     ///
-    /// 300s 须覆盖 sidecar 端 LLM 调用的 first_token_timeout（llm.yaml 默认
-    /// 120s）并留足余量——否则 reasoning model 首 token 接近 120s 时内核先
-    /// 超时掐断，sidecar 的最终响应永远到不了内核（pending 已被移除）。
-    /// 调用方可用 [`McpClient::with_request_timeout`] 覆盖。
+    /// 默认值（86400s）为审批/人机交互族统一值，同时覆盖 sidecar 端 LLM 调用的
+    /// first_token_timeout（llm.yaml 默认 120s）等慢调用。调用方可用
+    /// [`McpClient::with_request_timeout`] 覆盖。
     request_timeout: Duration,
     /// HTTP transport 的 reqwest 客户端（connect 时构建，含解析后的 auth 默认头）。
     /// stdio 模式为 None。
@@ -387,7 +398,7 @@ impl McpClient {
             stdio_dead: Arc::new(AtomicBool::new(false)),
             last_heartbeat_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             router: None,
-            request_timeout: Duration::from_secs(300),
+            request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
             http_client: None,
             raw_frame_scratch: parking_lot::Mutex::new(Vec::new()),
         }
@@ -423,7 +434,7 @@ impl McpClient {
             stdio_dead: Arc::new(AtomicBool::new(false)),
             last_heartbeat_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             router: None,
-            request_timeout: Duration::from_secs(300),
+            request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
             http_client: None,
             raw_frame_scratch: parking_lot::Mutex::new(Vec::new()),
         }
@@ -1026,10 +1037,9 @@ impl McpClient {
             });
         }
 
-        // 等待响应（超时默认 300s：LLM 调用尤其是 reasoning model 首次可能较慢。
-        // 300s 须覆盖 sidecar 端 first_token_timeout（llm.yaml 默认 120s）并留足
-        // 余量——否则 reasoning model 首 token 接近上限时内核先掐断，sidecar 的
-        // 最终响应永远到不了内核。可用 with_request_timeout 按插件覆盖。）
+        // 等待响应（超时默认 86400s：审批/人机交互族统一值（BUG-60）——wait_for_choice
+        // 等用户响应的调用可长达 24h；同时覆盖 sidecar 端 first_token_timeout
+        // （llm.yaml 默认 120s）。可用 with_request_timeout 按插件覆盖。）
         let response = match tokio::time::timeout(self.request_timeout, rx).await {
             Ok(r) => r.map_err(|_| McpError::Protocol {
                 message: "response channel closed".to_string(),
@@ -3349,7 +3359,7 @@ sys.stdin.readline()
         if !python_available() {
             return;
         }
-        // sidecar 读一行后静默（不回响应）→ 短超时后返回 Timeout（不阻塞到默认 300s）
+        // sidecar 读一行后静默（不回响应）→ 短超时后返回 Timeout（不阻塞到默认 86400s）
         let script = "import sys; sys.stdin.readline(); import time; time.sleep(30)";
         let mut client = McpClient::new_stdio(
             python_exe().to_string(),
@@ -3625,6 +3635,26 @@ sys.stdin.readline()
         );
         assert_eq!(client.plugin_id.as_deref(), Some("my-plugin"));
         assert_eq!(client.request_timeout, Duration::from_secs(7));
+    }
+
+    #[test]
+    fn default_request_timeout_is_unified_approval_window() {
+        // BUG-60 审批族超时统一（用户裁定 2026-09-22）：JSON-RPC 等待默认值 =
+        // 统一常量 86400s（24h），与 human 插件 create_choice 声明的
+        // timeout_seconds=86400 对齐——审批等待不被旧 300s 默认值掐断。
+        assert_eq!(
+            DEFAULT_REQUEST_TIMEOUT_SECS, 86_400,
+            "统一常量漂移：审批族声明值以 human create_choice 的 86400 为准"
+        );
+        // 两种 transport 构造器共用同一常量（禁止散落魔数）
+        assert_eq!(
+            McpClient::new_stdio("cat", vec![]).request_timeout,
+            Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            McpClient::new_http("http://127.0.0.1:9/mcp", HashMap::new(), None).request_timeout,
+            Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)
+        );
     }
 
     #[tokio::test]

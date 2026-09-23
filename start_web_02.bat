@@ -104,15 +104,12 @@ powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $
 call :KillPort "%AGENTOS_KERNEL_PORT%" "kernel"
 call :KillPort "%AGENTOS_FRONTEND_PORT%" "frontend"
 
-REM Image-name fallback: agentos-kernel.exe is a product-unique image, so
-REM killing by name cannot hit unrelated projects (the old carpet-bomb problem
-REM was node.exe). Port scan alone misses instances bound to other ports
-REM (manual/debug runs with AGENTOS_KERNEL_PORT override).
-tasklist /FI "IMAGENAME eq agentos-kernel.exe" 2>nul | findstr /I "agentos-kernel" >nul 2>&1
-if not errorlevel 1 (
-    echo        [CLEAN] killing lingering agentos-kernel.exe by image name
-    taskkill /F /IM agentos-kernel.exe >nul 2>&1
-)
+REM Path-scoped fallback for instances the port scan missed (manual/debug
+REM runs with AGENTOS_KERNEL_PORT override): kill only kernels whose exe
+REM lives under THIS repo's target\release. The installed app runs its own
+REM same-name exe (bundled kernel, child of the running app, port 9101) -
+REM it must survive dev start/stop (2026-09-20 dual-stack coexistence).
+powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'agentos-kernel.exe' -and $_.ExecutablePath -like '%KERNEL_DIR%\target\release\*' } | ForEach-Object { Write-Host ('       [CLEAN] killing dev kernel PID ' + $_.ProcessId); taskkill /F /T /PID $_.ProcessId 2>&1 | Out-Null }"
 
 REM Wait until the exe is actually replaceable, not a blind 3s sleep:
 REM after taskkill the image handle can linger a few seconds (AV scan / WER),
@@ -127,9 +124,9 @@ REM ============================================================
 REM  Step 1: build kernel (release)
 REM ============================================================
 if "%NO_BUILD%"=="1" (
-    echo [1/4] Skipping kernel build (--no-build)
+    echo [1/4] Skipping kernel build ^(no-build^)
 ) else (
-    echo [1/4] Building Rust kernel (release)...
+    echo [1/4] Building Rust kernel ^(release^)...
     pushd "%KERNEL_DIR%"
     set "CARGO_INCREMENTAL=0"
     cargo +stable build --release --bin agentos-kernel -j 1
@@ -176,6 +173,21 @@ if errorlevel 1 (
 )
 echo.
 
+REM 2026-09-19 (user ruling): one-way repo -> user_root plugin sync. The dev
+REM user root is pinned to <project>\user_root above, so repo-side plugin
+REM changes must reach it at startup: plugin dirs missing from user_root are
+REM copied whole (minus __pycache__/.venv); existing ones get repo files
+REM overwritten only when the repo copy is newer (mtime/size). NEVER deletes
+REM user-only files/dirs (R158 lesson) and never touches non-plugin user
+REM content (config/data/.env). Best effort: failure warns and continues -
+REM the kernel still loads factory plugins from the repo root.
+echo [1.7/4] Syncing repo plugins into user_root (one-way, additive)...
+python "%PROJECT_ROOT%\scripts\sync_user_root.py"
+if errorlevel 1 (
+    echo [WARN] user_root plugin sync failed - continuing with possibly stale user plugins.
+)
+echo.
+
 REM ============================================================
 REM  Step 2: prepare plugin venvs (first run only; skip dirs with .venv)
 REM  Plugins run in per-directory uv venvs - the kernel refuses to fall
@@ -191,48 +203,36 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-set "VENV_CREATED=0"
-REM Three plugin dir layouts: system|tools/<name> (two levels),
-REM pipeline/<phase>/<name> (three levels), shared/<name> top level
-REM (db_admin etc.); uv sync only when .venv missing (idempotent skip).
-for %%A in (system tools) do (
-    for /d %%B in ("%PROJECT_ROOT%\plugins\shared\%%A\*") do (
-        if exist "%%B\plugin.json" if exist "%%B\pyproject.toml" if not exist "%%B\.venv" (
-            echo        uv sync: %%~nB
-            uv sync --project "%%B" >nul 2>&1
-            if errorlevel 1 (
-                echo [WARN] uv sync failed: %%B ^(see plugin uv.lock/pyproject^)
-            ) else (
-                set /a VENV_CREATED+=1
-            )
-        )
-    )
+REM Step 2 pre-work: shared cohost env first. host_group=light members spawn
+REM ONLY from plugins\shared\_host\.venv (fail-closed HOST_VENV_MISSING
+REM otherwise), so the shared env is a hard prerequisite, not an optimization.
+if not exist "%PROJECT_ROOT%\plugins\shared\_host\.venv" (
+    echo        uv sync: _host ^(shared cohost env^)
+    uv sync --project "%PROJECT_ROOT%\plugins\shared\_host" >nul 2>&1
+    if errorlevel 1 echo [WARN] uv sync failed: _host ^(light cohost members will be down^)
 )
-for /d %%A in ("%PROJECT_ROOT%\plugins\shared\pipeline\*") do (
-    for /d %%B in ("%%A\*") do (
-        if exist "%%B\plugin.json" if exist "%%B\pyproject.toml" if not exist "%%B\.venv" (
-            echo        uv sync: %%~nB
-            uv sync --project "%%B" >nul 2>&1
-            if errorlevel 1 (
-                echo [WARN] uv sync failed: %%B ^(see plugin uv.lock/pyproject^)
-            ) else (
-                set /a VENV_CREATED+=1
-            )
-        )
-    )
-)
-for /d %%B in ("%PROJECT_ROOT%\plugins\shared\*") do (
-    if exist "%%B\plugin.json" if exist "%%B\pyproject.toml" if not exist "%%B\.venv" (
-        echo        uv sync: %%~nB
-        uv sync --project "%%B" >nul 2>&1
-        if errorlevel 1 (
-            echo [WARN] uv sync failed: %%B ^(see plugin uv.lock/pyproject^)
-        ) else (
-            set /a VENV_CREATED+=1
-        )
-    )
-)
-echo [OK] Plugin venvs ready ^(created !VENV_CREATED! this run; existing ones skipped^).
+REM Per-plugin envs, dedup-aware (ADR 2026-09-07-plugin-venv-dedup): cohost
+REM members (ANY host_group declaration - light/light_stable/... run inside
+REM _host, same rule as kernel is_cohost_member) get NO own venv; everything
+REM else with plugin.json+pyproject.toml gets uv sync when .venv is missing
+REM (idempotent skip). Fixed-depth enumeration mirrors
+REM bootstrap_plugin_envs.py PLUGIN_GLOBS; a recursive scan would descend
+REM dsh_adapter's node_modules junction and hang.
+powershell -NoProfile -Command "$created=0; $root='%PROJECT_ROOT%\plugins\shared'; $globs=@('system\*','tools\*','pipeline\core\*','pipeline\input\*','pipeline\output\*','modes\*','db_admin','metrics_admin','user_admin'); foreach($g in $globs){ $p=Join-Path $root $g; if(-not (Test-Path -Path $p)){ continue }; foreach($d in (Get-ChildItem -Path $p -Directory)){ $pj=Join-Path $d.FullName 'plugin.json'; if(-not (Test-Path -LiteralPath $pj)){ continue }; try{ $j=Get-Content -LiteralPath $pj -Raw | ConvertFrom-Json }catch{ continue }; if($j.host_group){ continue }; if(Test-Path -LiteralPath (Join-Path $d.FullName '.venv')){ continue }; if(-not (Test-Path -LiteralPath (Join-Path $d.FullName 'pyproject.toml'))){ continue }; Write-Host ('       uv sync: ' + $d.Name); & uv sync --project $d.FullName *> $null; if($LASTEXITCODE -ne 0){ Write-Host ('       [WARN] uv sync failed: ' + $d.FullName) } else { $created++ } } }; Write-Host ('[OK] Plugin venvs ready (created ' + $created + ' this run; cohost members intentionally skipped)')"
+echo.
+
+REM ============================================================
+REM  Step 2.5: compress rotated kernel logs (ops hygiene)
+REM  tracing-appender daily files kernel.log.YYYY-MM-DD are plain text
+REM  (~37MB/day, R238). This gzips files older than 3 days into
+REM  logs\archive\ and prunes archives beyond 30 days. The script only
+REM  touches kernel.log.<date> names and never the newest file(s) a live
+REM  writer could hold; failures are non-fatal for startup.
+REM ============================================================
+echo [2.5/4] Compressing old kernel logs...
+python "%PROJECT_ROOT%\scripts\compress_kernel_logs.py" --apply
+if errorlevel 1 echo [WARN] kernel log compression reported failures - continuing.
+
 echo.
 
 REM ============================================================
@@ -390,7 +390,8 @@ set "WEU_N=0"
 :WaitExeUnlockLoop
 powershell -NoProfile -Command "try { $f=[System.IO.File]::Open('%~1','Open','ReadWrite','None'); $f.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
 if not errorlevel 1 goto :eof
-taskkill /F /IM agentos-kernel.exe >nul 2>&1
+REM Path-scoped too: never touch the installed app's same-name kernel.
+powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'agentos-kernel.exe' -and $_.ExecutablePath -like '%KERNEL_DIR%\target\release\*' } | ForEach-Object { taskkill /F /T /PID $_.ProcessId 2>&1 | Out-Null }" >nul 2>&1
 set /a WEU_N+=1
 if !WEU_N! GEQ 15 (
     echo        [WARN] exe still locked after 15s - cargo build may fail with os error 5

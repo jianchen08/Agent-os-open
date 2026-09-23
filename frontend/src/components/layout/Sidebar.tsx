@@ -15,7 +15,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Bell, ChatIcon, ChatActiveIcon, Loader2, Plus, Settings, User, X } from '@/assets/icons'
+import { Bell, ChatIcon, ChatActiveIcon, Loader2, Plus, User, X } from '@/assets/icons'
 import { ChangePasswordForm } from '@/components/auth/ChangePasswordForm'
 import { LoginModal } from '@/components/auth/LoginModal'
 import { NotificationCenter } from '@/components/chat/NotificationCenter'
@@ -43,87 +43,27 @@ import { evaluateWhen } from '@/services/schema/whenExpression'
 import { registerSessionProject, createSessionWithProject } from '@/services/sessionCreation'
 import { saveSessionExecutionOptions } from '@/services/sessionExecutionOptions'
 import { openWorkspacePanel, openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
+import {
+  resolveSessionByPipeline,
+  SettingsEntryButton,
+  SIDEBAR_STYLES,
+} from './SidebarParts'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useAuthStore } from '@/stores/authStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
-import { mainPipelineIdOf } from '@/utils/mappers'
 import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 import type { Session } from '@/types'
 
 /** fixed sessions + plugin container id */
 type SidebarView = 'sessions' | string
 
-/**
- * 消息搜索命中的管道 → 归属会话解析。
- *
- * 搜索结果的 session_id 是管道 ID（monitoring 插件 search 域回传 pipeline_id，
- * 12hex 短 id），而会话列表 id 是 thread_id（thread-xxx）——两者不同值。
- * 归属判定：主管道（activePipelineId 权威）命中直接归该会话；否则线性扫描
- * 全部会话的 pipelineIds（含子管道）找包含该管道的会话；均未命中（旧数据
- * thread_id==pipeline_id 同值）时兜底按会话 id 本身匹配。无归属返回 null
- * （调用方放弃跳转，避免误切到无关会话）。
- */
-function resolveSessionByPipeline(pipelineId: string, sessions: Session[]): Session | null {
-  if (!pipelineId) return null
-  for (const s of sessions) {
-    if (mainPipelineIdOf(s) === pipelineId) return s
-  }
-  for (const s of sessions) {
-    if (s.pipelineIds?.includes(pipelineId)) return s
-  }
-  return sessions.find((s) => s.id === pipelineId) ?? null
-}
 
 interface SidebarProps {
   /** 是否为移动端 */
   isMobile?: boolean
-}
-
-/**
- * Deep Space v2 侧栏尺寸
- * 设计来源：画布 C · SideBar · 会话视图 (49:196)
- * - 宽度 288px，内边距 12px
- * - 头部 36px，搜索 32px，会话项 55px
- * - 折叠按钮放最顶部（用户决策）
- */
-const SIDEBAR_STYLES = {
-  headerHeight: 'h-9', // 36px
-  padding: 'p-3', // 12px
-  paddingX: 'px-3',
-  buttonSize: 'sm' as const,
-  searchHeight: 'h-8', // 32px
-  itemHeight: 55,
-  width: {
-    desktop: 288,
-    smallDesktop: 260,
-    mobile: 288,
-  },
-} as const
-
-/**
- * 设置常驻入口：侧栏底栏一级可见齿轮按钮（展开态/折叠 rail 两形态），
- * 点击打开设置中枢（settings_hub 工作区页签）——模型配置等插件声明页
- * （contributes.pages space=settings）在其中左导航可达。
- */
-function SettingsEntryButton({ rail = false }: { rail?: boolean }) {
-  return (
-    <button
-      type="button"
-      onClick={() => openWorkspacePanelByPath('/settings')}
-      className={cn(
-        'text-muted-foreground hover:text-foreground flex shrink-0 items-center justify-center transition-colors hover:bg-[var(--hover-overlay)]',
-        rail ? 'h-9 w-9 rounded-lg' : 'h-7 w-7 rounded-md',
-      )}
-      title="设置"
-      aria-label="设置"
-      data-testid={rail ? 'sidebar-rail-settings' : 'sidebar-settings'}
-    >
-      <Settings className={rail ? 'h-4 w-4' : 'h-3.5 w-3.5'} />
-    </button>
-  )
 }
 
 /**
@@ -166,7 +106,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
         .getPagesBySpace('workspace')
         .filter((p) => p.slot === 'activity-bar')
         // when 条件（ADR §3.4）：声明了 when 的插件页面按 context keys 求值，
-        // 不满足则不在侧边栏显示（如调试中心仅管理员可见：user.role == 'admin'）
+        // 不满足则不在侧边栏显示
         .filter((p) =>
           p.when ? evaluateWhen(p.when, { 'user.role': user?.role ?? 'guest' }) : true,
         )
@@ -487,6 +427,17 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
     setActiveView('sessions')
   }, [])
 
+  /**
+   * 任务管理常驻入口：任务管理页归前端自有（用户裁定 2026-09-21，
+   * TOP_NAV_PANELS['/tasks']），不经插件 contributes.pages 声明，
+   * 故与插件条目（activity-bar 槽位）并排静态渲染并共用高亮态。
+   */
+  const handleTasksClick = useCallback(() => {
+    setActiveView('tasks')
+    openWorkspacePanelByPath('/tasks')
+    if (isMobile) setSidebarCollapsed(true)
+  }, [isMobile, setSidebarCollapsed])
+
   return (
     <>
       {/* 移动端遮罩层 */}
@@ -568,6 +519,30 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               ) : (
                 <ChatIcon className="h-5 w-5" />
               )}
+            </button>
+            {/* 任务管理常驻入口（前端自有页，与插件条目同形态） */}
+            <button
+              type="button"
+              onClick={handleTasksClick}
+              className={cn(
+                'mb-2 flex h-10 w-10 items-center justify-center rounded-lg transition-colors',
+                activeView === 'tasks'
+                  ? 'text-[var(--ds-accent-primary,#22D3EE)]'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]',
+              )}
+              style={
+                activeView === 'tasks'
+                  ? {
+                      background: 'var(--bg-elevated, var(--ds-bg-elevated, #111C38))',
+                      boxShadow: 'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.45))',
+                    }
+                  : undefined
+              }
+              title="任务管理"
+              aria-label="任务管理"
+              data-testid="sidebar-rail-tasks"
+            >
+              <span className="text-[14px]">📋</span>
             </button>
             {pluginContainers.map((entry) => {
               const selected = activeView === entry.id
@@ -707,6 +682,34 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                     <Plus className="h-3.5 w-3.5 text-[var(--ds-accent-primary,#22D3EE)]" />
                   </span>
                   新建会话
+                </button>
+
+                {/* 任务管理常驻入口（前端自有页，用户裁定 2026-09-21：不入插件声明） */}
+                <button
+                  type="button"
+                  onClick={handleTasksClick}
+                  className={cn(
+                    'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors',
+                    activeView === 'tasks'
+                      ? 'text-foreground'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]',
+                  )}
+                  style={
+                    activeView === 'tasks'
+                      ? {
+                          background: 'var(--bg-elevated, var(--ds-bg-elevated, #111C38))',
+                          boxShadow:
+                            'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.35))',
+                        }
+                      : undefined
+                  }
+                  data-testid="sidebar-menu-tasks"
+                  title="任务管理"
+                >
+                  <span className="flex h-4 w-4 shrink-0 items-center justify-center text-[13px] opacity-90">
+                    📋
+                  </span>
+                  <span className="min-w-0 flex-1 truncate">任务管理</span>
                 </button>
 
                 {/* plugin contributed pages — workspace/activity-bar（vscode-like） */}

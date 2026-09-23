@@ -1,5 +1,8 @@
 {
   "id": "user_admin",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "User Admin HTTP Face",
   "description": "用户管理 HTTP 面（channel_api 退役批次2 users 域并入）：/ext/user_admin/** 经内核 dispatcher 进本插件 http.handle。既有 user-admin capability 面（PATCH 改角色/改租户，内核自保护）+ users 域六组端点（列表/统计/角色 PUT/激活/删除/设置）经 db-admin capability 查/写内核 users 表。鉴权凭证（Authorization 头）原样透传 _authorization、内核侧真角色校验；插件不做鉴权决策。",
   "version": "1.0.0",
@@ -35,7 +38,7 @@
         "title": "用户管理",
         "icon": "👥",
         "space": "workspace",
-        "slot": "activity-bar",
+        "slot": "tab",
         "order": 15,
         "path": "/admin",
         "widget": "widget_stage",
@@ -92,32 +95,6 @@
             {
               "key": "last_login_at",
               "label": "最近登录"
-            }
-          ],
-          "rowActions": [
-            {
-              "key": "disable",
-              "label": "禁用",
-              "method": "PUT",
-              "url": "/ext/user_admin/users/{id}/active?is_active=false",
-              "when": {
-                "key": "is_active",
-                "equals": true
-              },
-              "confirm": "确认禁用该用户？",
-              "variant": "destructive",
-              "successText": "已禁用"
-            },
-            {
-              "key": "enable",
-              "label": "启用",
-              "method": "PUT",
-              "url": "/ext/user_admin/users/{id}/active?is_active=true",
-              "when": {
-                "key": "is_active",
-                "equals": false
-              },
-              "successText": "已启用"
             }
           ]
         }
@@ -185,7 +162,7 @@
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 4,
-      "description": "更新用户激活状态（users 表无 is_active 列，保持存根语义——原 PUT /ext/channel_api/users/{user_id}/active）"
+      "description": "更新用户激活状态（未支持：users 表无 is_active 列，恒 501 结构化错误防误用——原 PUT /ext/channel_api/users/{user_id}/active）"
     },
     {
       "route_id": "user_active_update_patch",
@@ -195,7 +172,7 @@
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 4,
-      "description": "更新用户激活状态（PATCH 形态，同 PUT 存根语义——原 PATCH /ext/channel_api/users/{user_id}/active）"
+      "description": "更新用户激活状态（PATCH 形态，同 PUT 未支持语义：恒 501 结构化错误——原 PATCH /ext/channel_api/users/{user_id}/active）"
     },
     {
       "route_id": "user_settings_get",

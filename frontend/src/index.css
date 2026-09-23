@@ -306,6 +306,15 @@ body.has-bg-image .theme-chat-area {
   background: transparent;
 }
 
+/* 隐藏滚动条但保留滚动能力：顶带标签行/横向滚动区专用——滚动条会占掉
+   内容盒高度（40px 带里只剩 32px），并让标签垂直错位。 */
+.scrollbar-hide {
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
 /* === Electron 主窗口窗口控制簇（html.has-custom-titlebar 由 TitleBar 挂载时
    添加，仅 Electron 主窗口；Web / 子浮窗无此类，布局不受影响） ===
    控制簇钉在视口右上角（与布局顶带同排，不占独立栏位），页面内容占满

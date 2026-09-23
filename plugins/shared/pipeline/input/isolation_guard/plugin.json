@@ -1,5 +1,8 @@
 {
   "id": "pipeline_isolation_guard",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Isolation Guard",
   "version": "1.0.0",
   "plugin_type": "pipeline",

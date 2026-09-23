@@ -82,6 +82,27 @@ export interface ElectronWindowControlsAPI {
 }
 
 /**
+ * preload.ts 暴露的系统通知子 API（ipcRenderer.invoke('notification:show') 封装）。
+ *
+ * 主进程用 Electron Notification 按宿主 OS 路由：Windows toast /
+ * macOS 通知中心 / Linux libnotify。提示音仍由渲染进程 Web Audio 合成。
+ */
+export interface ElectronNotificationAPI {
+  /** 弹出系统通知；返回是否成功弹出（宿主不支持/参数非法为 false） */
+  show(opts: { title: string; body: string }): Promise<boolean>
+}
+
+/**
+ * preload.ts 暴露的原生对话框子 API（ipcRenderer.invoke('dialog:pick-directory') 封装）。
+ *
+ * 主进程用 Electron dialog.showOpenDialog 弹出系统资源管理器目录选择。
+ */
+export interface ElectronDialogAPI {
+  /** 选择目录；返回绝对路径，用户取消为 null */
+  pickDirectory(): Promise<string | null>
+}
+
+/**
  * 注入到 window 上的 electronAPI（子集）。
  *
  * 实际 preload 还暴露 onWindowInfo/getAppVersion/getPlatform/on 等，
@@ -94,6 +115,18 @@ export interface ElectronAPI {
   isChildWindow?: boolean
   /** 主窗口自控子 API（自定义标题栏按钮） */
   windowControls?: ElectronWindowControlsAPI
+  /** 认证会话镜像子 API（refresh token 强杀耐久备份；Web/旧版壳下缺失，消费方判空） */
+  authSession?: ElectronAuthSessionAPI
+  /** 系统通知子 API（Electron 环境存在；Web/旧版壳下可能缺失，消费方须判空） */
+  notification?: ElectronNotificationAPI
+  /** 原生对话框子 API（Electron 环境存在；Web/旧版壳下缺失，消费方须判空） */
+  dialog?: ElectronDialogAPI
+}
+
+/** 认证会话镜像子 API：refresh token 由主进程落盘，进程强杀不丢（自动登录跨重启） */
+export interface ElectronAuthSessionAPI {
+  save: (refreshToken: string | null) => Promise<boolean>
+  load: () => Promise<string | null>
 }
 
 /** 前端通过 window.electronAPI 访问（Electron 环境下存在，Web 下为 undefined） */

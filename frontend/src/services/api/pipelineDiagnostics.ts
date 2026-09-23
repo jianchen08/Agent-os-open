@@ -20,10 +20,10 @@ export interface TraceLlmUsage {
   provider?: string
 }
 
-/** 单条 step 级 trace（patch_data 为 PluginResult 原文，前端展开查看） */
+/** 单条 step 级 trace（patch_data 为状态窗口原文，前端展开查看；traces 为 pipeline 级 op 流） */
 export interface PipelineTraceRow {
   trace_id: string
-  run_id: string
+  pipeline_id: string
   seq: number | null
   plugin_id: string
   patch_type: string
@@ -42,10 +42,11 @@ export interface PipelineTracesResponse {
   pipeline_id: string
 }
 
-/** pipeline_state 单字段行（field_value 为 DB 原始字符串，展示时尝试 JSON pretty） */
+/** pipeline_state 单字段行（value 为 DB 标量原文，展示时尝试 JSON pretty；标量化见 ADR 2026-09-18） */
 export interface PipelineStateField {
   field_key: string
   field_value: string | null
+  value_kind?: string
   updated_at: string | null
 }
 

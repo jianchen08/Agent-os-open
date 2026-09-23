@@ -361,6 +361,21 @@ describe('sessionListStore', () => {
       useSessionListStore.getState().toggleSessionPin('s1')
       expect(readSessions().find((s) => s.id === 's1')?.pinned).toBe(false)
     })
+
+    it('置顶/取消置顶均以 metadata.pinned 持久化到后端（BUG-78 契约锁：PATCH metadata 必须落库）', async () => {
+      const sessions = [makeSession({ id: 's1', pinned: false })]
+      seedSessionsWithUpdateApi(seedSessions, sessions)
+
+      useSessionListStore.getState().toggleSessionPin('s1')
+      await vi.waitFor(() => {
+        expect(mockUpdateSessionApi).toHaveBeenCalledWith('s1', { metadata: { pinned: true } })
+      })
+
+      useSessionListStore.getState().toggleSessionPin('s1')
+      await vi.waitFor(() => {
+        expect(mockUpdateSessionApi).toHaveBeenCalledWith('s1', { metadata: { pinned: false } })
+      })
+    })
   })
 
   // ── renameSession ──

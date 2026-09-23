@@ -103,7 +103,8 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
     // 顶角图标落在所属区域边角内（位置恒定、面板让位而非图标移动）
     const rowWrapper = screen.getByTestId('chat-content').parentElement?.parentElement
     expect(rowWrapper?.className).not.toContain('pt-10')
-    expect(screen.getByTestId('sidebar-panel').className).toContain('pt-10')
+    // 顶带上移为独立行后，面板不再让位（pt-10 死区随之移除）
+    expect(screen.getByTestId('sidebar-panel').className).not.toContain('pt-10')
     // 区域锚点（DSH 皮肤位置路由的转译落点=我方 data-region；DSH 词汇
     // 锚点已废——适配器递送层做选择器转译，组件不贴 DSH 名字）
     expect(screen.getByTestId('sidebar-panel').getAttribute('data-region')).toBe('sidebar')
@@ -302,6 +303,7 @@ describe('FiveSpaceLayout — 工作区全屏组件恒定性（2026-08-24 单树
     expect(screen.getByTestId('workspace-tab-t1')).toBe(tabNode)
     // 全屏形态：工作区 flex-1 铺满、无 pt-10 图标带；聊天区 CSS 隐藏保挂载
     expect(workspaceArea.className).toContain('flex-1')
+    // 顶带上移为独立行后，面板不再让位
     expect(workspaceArea.className).not.toContain('pt-10')
     expect(chatNode.parentElement?.classList.contains('hidden')).toBe(true)
 
@@ -311,7 +313,7 @@ describe('FiveSpaceLayout — 工作区全屏组件恒定性（2026-08-24 单树
     })
     expect(document.querySelector('[data-region="workspace"]')).toBe(workspaceArea)
     expect(workspaceArea.className).not.toContain('flex-1')
-    expect(workspaceArea.className).toContain('pt-10')
+    expect(workspaceArea.className).not.toContain('pt-10')
     expect(chatNode.parentElement?.classList.contains('hidden')).toBe(false)
     expect(screen.getByTestId('workspace-tab-t1')).toBe(tabNode)
   })

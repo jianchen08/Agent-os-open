@@ -323,66 +323,101 @@ pub async fn create_session_handler(
 /// body: { "agent_id": "<id>" }。响应返回完整会话状态(含新 agent_id)。
 /// 域2持久化（2026-08-24 阶段1：三写）：
 /// ① registry 线程绑定（内存热路径消费）；
-/// ② sessions 表 agent_id（跨重启 DB 冷兜底，DB 无记录则跳过 DB）；
-/// ③ 主管道 state `agent.id`（绑定真值落管道 state，管道自足）。
-/// ③ 失败仅 warn 不阻断——registry/DB 已更新，执行面仍可解析。
+/// ② sessions 表 agent_id（跨重启 DB 冷兜底，写失败仅 warn 不阻断）；
+/// ③ 主管道 state `agent.id`（绑定真值落管道 state，管道自足，写失败仅 warn）。
+/// 多租户：与同文件 create/list/delete 同语义——request_tenant_ctx 解析请求租户，
+/// ②③ 在 scope 内读写；非本租户/不存在的会话 → 404 且零副作用（①不写、DB 不落，
+/// 与 list 语义一致，不伪造内存回退 200）；仅 store 未配置（无持久化数据源）时
+/// 回退内存响应。
 pub async fn update_session_agent_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<Value>,
-) -> Json<Value> {
+) -> Result<Json<Value>, ApiError> {
     let agent_id = body
         .get("agent_id")
         .and_then(|v| v.as_str())
         .unwrap_or("agentos")
         .to_string();
 
-    // 内存 registry 更新（WS 路由仍用它）
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // ②③ 多租户：sessions 表与管道 state 按 task_local tenant 过滤/落库，需在
+    // 请求租户 scope 内执行——scope 缺失回退 default 租户（非 default 租户用户
+    // 改自己会话查空、改 default 租户会话误命中）。先确认会话在请求租户内存在
+    // （不存在 → 404），存在才继续写入。
+    if let Some(store) = state.store.as_ref() {
+        let tenant_ctx =
+            crate::server::request_tenant_ctx(state.store.as_ref(), &headers, &id).await;
+        let tenant_id = tenant_ctx.tenant_id.clone();
+        let pipeline_id = state
+            .session
+            .as_ref()
+            .and_then(|s| s.registry().get_pipeline_for_thread(&id));
+        let store_clone = store.clone();
+        let id_for_scope = id.clone();
+        let agent_for_scope = agent_id.clone();
+        let now_for_scope = now.clone();
+        let updated = agentos_tenant::scope(tenant_ctx, async move {
+            let mut s = store_clone
+                .get_session(&id_for_scope)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(
+                        thread_id = %id_for_scope,
+                        error = %e,
+                        "get_session 查询失败，返回 503（不伪造 404/200）"
+                    );
+                    ApiError::ServiceUnavailable {
+                        message: "会话查询暂时不可用（存储异常），请稍后重试".to_string(),
+                    }
+                })?
+                .ok_or_else(|| ApiError::NotFound {
+                    message: format!("会话不存在或不可访问: {id_for_scope}"),
+                })?;
+
+            // ③ 主管道 state 持久化真值（2026-08-24 阶段1：绑定真值落管道 state，
+            // 管道自足——执行面冷恢复/未来动态管道消费 agent.id）。失败仅 warn
+            // 不阻断：sessions 表仍会更新。
+            if let Some(pid) = pipeline_id {
+                if let Err(e) = store_clone
+                    .upsert_state_field(&pid, &tenant_id, "agent.id", &json!(agent_for_scope))
+                    .await
+                {
+                    tracing::warn!(
+                        thread_id = %id_for_scope,
+                        pipeline = %pid,
+                        error = %e,
+                        "会话 agent 绑定写入管道 state 失败（不阻断，sessions 表仍更新）"
+                    );
+                }
+            }
+
+            // ② sessions 表 agent_id + updated_at（写失败仅 warn 不阻断）
+            s.agent_id = Some(agent_for_scope.clone());
+            s.updated_at = now_for_scope;
+            if let Err(e) = store_clone.update_session(&s).await {
+                tracing::warn!(thread_id = %id_for_scope, error = %e, "update_session(agent) 落库失败");
+            }
+            Ok(s)
+        })
+        .await?;
+
+        // ① registry 热绑定（WS 路由仍用它）——存在性确认后执行，404 路径零副作用
+        if let Some(session) = &state.session {
+            session.registry().register_thread_agent(&id, &agent_id);
+        }
+
+        return Ok(Json(session_to_session_json(&updated)));
+    }
+
+    // store 未配置（无持久化会话数据源）：内存 registry 更新 + 回退内存构造响应
     if let Some(session) = &state.session {
         let registry = session.registry();
         registry.register_thread_agent(&id, &agent_id);
     }
 
-    let now = chrono::Utc::now().to_rfc3339();
-
-    // ③ 主管道 state 持久化真值（2026-08-24 阶段1：绑定真值落管道 state，
-    // 管道自足——执行面冷恢复/未来动态管道消费 agent.id）。失败仅 warn
-    // 不阻断：registry/DB 已更新，执行面解析仍可命中。
-    if let Some(store) = state.store.as_ref() {
-        let tenant_id = agentos_http::auth::resolve_request_tenant_id(Some(store), &headers).await;
-        let pipeline_id = state
-            .session
-            .as_ref()
-            .and_then(|s| s.registry().get_pipeline_for_thread(&id));
-        if let Some(pid) = pipeline_id {
-            if let Err(e) = store
-                .upsert_state_field(&pid, &tenant_id, "agent.id", &json!(agent_id))
-                .await
-            {
-                tracing::warn!(
-                    thread_id = %id,
-                    pipeline = %pid,
-                    error = %e,
-                    "会话 agent 绑定写入管道 state 失败（registry/DB 已更新）"
-                );
-            }
-        }
-    }
-
-    // DB 更新：若存在会话记录则更新 agent_id + updated_at
-    if let Some(store) = state.store.as_ref() {
-        if let Ok(Some(mut s)) = store.get_session(&id).await {
-            s.agent_id = Some(agent_id.clone());
-            s.updated_at = now.clone();
-            if let Err(e) = store.update_session(&s).await {
-                tracing::warn!(thread_id = %id, error = %e, "update_session(agent) 落库失败");
-            }
-            return Json(session_to_session_json(&s));
-        }
-    }
-
-    // DB 无记录：回退内存构造响应
     let pipeline_id = state
         .session
         .as_ref()
@@ -392,7 +427,7 @@ pub async fn update_session_agent_handler(
         .map(|p| vec![p.to_string()])
         .unwrap_or_default();
 
-    Json(json!({
+    Ok(Json(json!({
         "thread_id": id,
         "title": null,
         "current_state": "active",
@@ -404,43 +439,87 @@ pub async fn update_session_agent_handler(
         "pipeline_ids": pipeline_ids,
         "active_pipeline_id": pipeline_id,
         "metadata": {},
-    }))
+    })))
 }
 
 /// PATCH /api/v1/sessions/{id} — 重命名/更新会话（title/intent/metadata）。
 ///
 /// 前端 `updateSession()` 调此端点（session.ts 用 PATCH）。
 /// body: { "intent": "<title>" }（前端把 title 映射成 intent）。响应返回完整会话状态。
-/// 域2持久化：更新 sessions 表 title/intent + updated_at（DB 无记录则仅回退内存响应）。
+/// 域2持久化：更新 sessions 表 title/intent + updated_at。
+/// 多租户：与同文件 create/list/delete 同语义——request_tenant_ctx 解析请求租户，
+/// 读改写在 scope 内执行；非本租户/不存在的会话 → 404（与 list 语义一致，
+/// 不伪造内存回退 200）；仅 store 未配置（无持久化数据源）时回退内存响应。
 pub async fn update_session_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<Value>,
-) -> Json<Value> {
+) -> Result<Json<Value>, ApiError> {
     // 前端 updateSession 把 title 放进 intent 字段。
     let new_intent = body
         .get("intent")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let metadata_patch = body.get("metadata").and_then(|m| m.as_object()).cloned();
 
     let now = chrono::Utc::now().to_rfc3339();
 
-    // DB 更新：若存在会话记录则更新 title/intent + updated_at
+    // DB 读改写：按 task_local tenant 过滤，需在请求租户 scope 内执行——
+    // scope 缺失回退 default 租户（非 default 租户用户改自己会话查空、
+    // 改 default 租户会话误命中）。会话不存在 → 404。
     if let Some(store) = state.store.as_ref() {
-        if let Ok(Some(mut s)) = store.get_session(&id).await {
+        let tenant_ctx =
+            crate::server::request_tenant_ctx(state.store.as_ref(), &headers, &id).await;
+        let store_clone = store.clone();
+        let id_for_scope = id.clone();
+        let now_for_scope = now.clone();
+        let updated = agentos_tenant::scope(tenant_ctx, async move {
+            let mut s = store_clone
+                .get_session(&id_for_scope)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(
+                        thread_id = %id_for_scope,
+                        error = %e,
+                        "get_session 查询失败，返回 503（不伪造 404/200）"
+                    );
+                    ApiError::ServiceUnavailable {
+                        message: "会话查询暂时不可用（存储异常），请稍后重试".to_string(),
+                    }
+                })?
+                .ok_or_else(|| ApiError::NotFound {
+                    message: format!("会话不存在或不可访问: {id_for_scope}"),
+                })?;
             if let Some(ref intent) = new_intent {
                 s.title = Some(intent.clone());
                 s.intent = Some(intent.clone());
             }
-            s.updated_at = now.clone();
-            if let Err(e) = store.update_session(&s).await {
-                tracing::warn!(thread_id = %id, error = %e, "update_session(title/intent) 落库失败");
+            // body.metadata 按 key 合并进既有 metadata（body 优先），不整体替换
+            // ——整体替换会抹掉 session_type/user_id（会话列表过滤/租户归属失真，
+            // 与 create_session 的默认值合并同一保全逻辑）。前端置顶/星标切换
+            // （sessionListStore toggleSessionPin/toggleSessionStar）走本字段落库。
+            if let Some(patch) = &metadata_patch {
+                let mut merged = s.metadata.take().unwrap_or_else(|| json!({}));
+                if let Some(obj) = merged.as_object_mut() {
+                    for (k, v) in patch {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                }
+                s.metadata = Some(merged);
             }
-            return Json(session_to_session_json(&s));
-        }
+            s.updated_at = now_for_scope;
+            if let Err(e) = store_clone.update_session(&s).await {
+                tracing::warn!(thread_id = %id_for_scope, error = %e, "update_session(title/intent/metadata) 落库失败");
+            }
+            Ok(s)
+        })
+        .await?;
+        return Ok(Json(session_to_session_json(&updated)));
     }
 
-    // DB 无记录：回退内存构造响应（保留 agent_id/pipeline_id 等已知状态）
+    // store 未配置（无持久化会话数据源）：回退内存构造响应
+    // （保留 agent_id/pipeline_id 等已知状态）
     let agent_id = state
         .session
         .as_ref()
@@ -454,7 +533,7 @@ pub async fn update_session_handler(
         .map(|p| vec![p.to_string()])
         .unwrap_or_default();
 
-    Json(json!({
+    Ok(Json(json!({
         "thread_id": id,
         "title": new_intent,
         "current_state": "active",
@@ -466,7 +545,7 @@ pub async fn update_session_handler(
         "pipeline_ids": pipeline_ids,
         "active_pipeline_id": pipeline_id,
         "metadata": {},
-    }))
+    })))
 }
 
 /// DELETE /api/v1/sessions/{id} — 删除会话（级联）。
@@ -1060,23 +1139,6 @@ mod sessions_list_tests {
         ) -> Result<(), agentos_core::types::StorageError> {
             unreachable!("list_sessions 错误路径不应触碰其他存储方法")
         }
-        async fn update_run_status(
-            &self,
-            _run_id: &str,
-            _status: agentos_core::types::RunStatus,
-            _branch: Option<&str>,
-            _seq: Option<u32>,
-        ) -> Result<(), agentos_core::types::StorageError> {
-            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
-        }
-        async fn create_run(
-            &self,
-            _run_id: &str,
-            _config_hash: &str,
-            _tenant_id: &str,
-        ) -> Result<(), agentos_core::types::StorageError> {
-            unreachable!("list_sessions 错误路径不应触碰其他存储方法")
-        }
         async fn store_blob(
             &self,
             _data: &[u8],
@@ -1381,23 +1443,6 @@ mod delete_session_tests {
         ) -> Result<(), agentos_core::types::StorageError> {
             unreachable!("delete_session 错误路径不应触碰其他存储方法")
         }
-        async fn update_run_status(
-            &self,
-            _run_id: &str,
-            _status: agentos_core::types::RunStatus,
-            _branch: Option<&str>,
-            _seq: Option<u32>,
-        ) -> Result<(), agentos_core::types::StorageError> {
-            unreachable!("delete_session 错误路径不应触碰其他存储方法")
-        }
-        async fn create_run(
-            &self,
-            _run_id: &str,
-            _config_hash: &str,
-            _tenant_id: &str,
-        ) -> Result<(), agentos_core::types::StorageError> {
-            unreachable!("delete_session 错误路径不应触碰其他存储方法")
-        }
         async fn store_blob(
             &self,
             _data: &[u8],
@@ -1695,7 +1740,7 @@ mod delete_session_tests {
 #[cfg(test)]
 mod sessions_crud_tests {
     //! 会话 CRUD 处理器补测：create/update 的用户来源仲裁、metadata 默认值合并、
-    //! DB 故障容忍、DB 无记录回退响应，以及消息查询的管道解析/分页分支。
+    //! DB 故障容忍、DB 无记录 404（不伪造回退 200），以及消息查询的管道解析/分页分支。
 
     use std::{collections::HashMap, sync::Mutex};
 
@@ -1887,23 +1932,6 @@ mod sessions_crud_tests {
             unreachable!("crud 测试路径不应触碰")
         }
         async fn append_trace(&self, _entry: agentos_core::types::TraceEntry) -> Result<(), SErr> {
-            unreachable!("crud 测试路径不应触碰")
-        }
-        async fn update_run_status(
-            &self,
-            _run_id: &str,
-            _status: agentos_core::types::RunStatus,
-            _branch: Option<&str>,
-            _seq: Option<u32>,
-        ) -> Result<(), SErr> {
-            unreachable!("crud 测试路径不应触碰")
-        }
-        async fn create_run(
-            &self,
-            _run_id: &str,
-            _config_hash: &str,
-            _tenant_id: &str,
-        ) -> Result<(), SErr> {
             unreachable!("crud 测试路径不应触碰")
         }
         async fn store_blob(&self, _data: &[u8], _mime_type: &str) -> Result<String, SErr> {
@@ -2139,36 +2167,34 @@ mod sessions_crud_tests {
     // ── update_session_agent ──────────────────────────────────────────────
 
     #[tokio::test]
-    async fn update_session_agent_defaults_and_falls_back_without_db_record() {
-        // DB 无记录：回退内存构造响应；body 缺 agent_id → 默认 agentos。
+    async fn update_session_agent_without_db_record_returns_404() {
+        // store 在而会话不在（本租户无记录）：404 且零副作用——registry 不得
+        // 被写入（修复前此处回退内存构造伪造 200 并写 registry）。
         let store = sqlite();
         let state = state_with(Some(store as std::sync::Arc<dyn StorageBackend>), true);
         let registry = state.session.as_ref().unwrap().registry();
         registry.register_thread("T-fb", ADMIN_USER_ID);
         registry.register_thread_pipeline("T-fb", "p-fb");
 
-        for (body_agent, expect_agent) in [(None, "agentos"), (Some("custom-x"), "custom-x")] {
-            let body = match body_agent {
-                Some(a) => json!({"agent_id": a}),
-                None => json!({}),
-            };
-            let resp = update_session_agent_handler(
-                State(state.clone()),
-                HeaderMap::new(),
-                Path("T-fb".into()),
-                Json(body),
-            )
-            .await;
-            let b = resp.0;
-            assert_eq!(b["agent_id"], json!(expect_agent), "body: {body_agent:?}");
-            assert_eq!(
-                b["pipeline_ids"],
-                json!(["p-fb"]),
-                "回退响应带 registry 管道"
-            );
-            assert_eq!(b["active_pipeline_id"], json!("p-fb"));
-            assert_eq!(b["title"], Value::Null, "无 DB 记录时 title 为空");
+        let resp = update_session_agent_handler(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path("T-fb".into()),
+            Json(json!({"agent_id": "custom-x"})),
+        )
+        .await;
+        match resp {
+            Ok(body) => panic!("DB 无记录不得伪造 200 回退响应: {:?}", body.0),
+            Err(e) => assert!(
+                matches!(e, ApiError::NotFound { .. }),
+                "无记录应 404，实际 {e:?}"
+            ),
         }
+        assert_eq!(
+            registry.get_agent_for_thread("T-fb").as_deref(),
+            None,
+            "404 路径不得写内存 registry"
+        );
     }
 
     #[tokio::test]
@@ -2190,7 +2216,8 @@ mod sessions_crud_tests {
             Path("T1".into()),
             Json(json!({"agent_id": "x-agent"})),
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(resp.0["agent_id"], json!("x-agent"));
         assert_eq!(
             registry.get_agent_for_thread("T1").as_deref(),
@@ -2218,7 +2245,8 @@ mod sessions_crud_tests {
             Path("T1".into()),
             Json(json!({"agent_id": "y-agent"})),
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(
             resp.0["agent_id"],
             json!("y-agent"),
@@ -2243,10 +2271,12 @@ mod sessions_crud_tests {
         // ① 带 intent：title 与 intent 同时更新
         let resp = update_session_handler(
             State(state.clone()),
+            HeaderMap::new(),
             Path("T-r".into()),
             Json(json!({"intent": "新名"})),
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(resp.0["title"], json!("新名"));
         assert_eq!(resp.0["intent"], json!("新名"));
         let rec = store.get_session("T-r").await.unwrap().unwrap();
@@ -2255,14 +2285,99 @@ mod sessions_crud_tests {
 
         // ② 不带 intent：仅更新 updated_at，title 不动
         let before = rec.updated_at.clone();
-        let resp = update_session_handler(State(state), Path("T-r".into()), Json(json!({}))).await;
+        let resp = update_session_handler(
+            State(state),
+            HeaderMap::new(),
+            Path("T-r".into()),
+            Json(json!({})),
+        )
+        .await
+        .unwrap();
         assert_eq!(resp.0["title"], json!("新名"), "缺 intent 不得清空既有标题");
         let rec = store.get_session("T-r").await.unwrap().unwrap();
         assert_ne!(rec.updated_at, before, "touch 语义：updated_at 刷新");
     }
 
     #[tokio::test]
-    async fn update_session_falls_back_to_registry_state_without_db_record() {
+    async fn update_session_merges_metadata_and_preserves_existing_keys() {
+        // 前端置顶/星标走 PATCH metadata（sessionListStore toggleSessionPin/
+        // toggleSessionStar）：body.metadata 必须按 key 合并进既有 metadata，
+        // 不得整体替换（会抹掉 session_type/user_id，列表过滤与租户归属失真），
+        // 更不得静默丢弃（丢弃则置顶态只活在前端缓存，列表一刷新即回退）。
+        let store = sqlite();
+        let mut seeded = session_record("T-md", Some("p-md"));
+        seeded.metadata = Some(json!({
+            "session_type": "main_pipeline",
+            "user_id": ADMIN_USER_ID,
+        }));
+        store.create_session(&seeded).await.unwrap();
+        let state = state_with(
+            Some(store.clone() as std::sync::Arc<dyn StorageBackend>),
+            false,
+        );
+
+        // ① PATCH metadata {pinned:true}：落库 + 响应携带，既有 key 保全
+        let resp = update_session_handler(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path("T-md".into()),
+            Json(json!({"metadata": {"pinned": true}})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            resp.0["metadata"]["pinned"],
+            json!(true),
+            "响应携带合并后 metadata"
+        );
+        assert_eq!(
+            resp.0["metadata"]["session_type"],
+            json!("main_pipeline"),
+            "既有 session_type 不得被抹掉"
+        );
+        let rec = store.get_session("T-md").await.unwrap().unwrap();
+        let meta = rec.metadata.as_ref().unwrap();
+        assert_eq!(meta["pinned"], json!(true), "metadata.pinned 必须落库");
+        assert_eq!(meta["session_type"], json!("main_pipeline"));
+        assert_eq!(meta["user_id"], json!(ADMIN_USER_ID));
+        assert_ne!(
+            rec.updated_at, seeded.updated_at,
+            "touch 语义：updated_at 刷新"
+        );
+
+        // ② 再 PATCH {pinned:false}：同一 key 覆盖为 false（取消置顶可落库）
+        let resp = update_session_handler(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path("T-md".into()),
+            Json(json!({"metadata": {"pinned": false}})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0["metadata"]["pinned"], json!(false));
+        let rec = store.get_session("T-md").await.unwrap().unwrap();
+        assert_eq!(rec.metadata.as_ref().unwrap()["pinned"], json!(false));
+
+        // ③ 不带 metadata：既有 metadata 原样保留（纯改名不清元数据）
+        let resp = update_session_handler(
+            State(state),
+            HeaderMap::new(),
+            Path("T-md".into()),
+            Json(json!({"intent": "新名"})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0["title"], json!("新名"));
+        let rec = store.get_session("T-md").await.unwrap().unwrap();
+        let meta = rec.metadata.as_ref().unwrap();
+        assert_eq!(meta["pinned"], json!(false));
+        assert_eq!(meta["session_type"], json!("main_pipeline"));
+    }
+
+    #[tokio::test]
+    async fn update_session_without_db_record_returns_404() {
+        // store 在而会话不在（本租户无记录）：404，不再回退内存构造伪造 200
+        // （非 default 租户用户改自己会话此前正是命中该伪造路径）。
         let store = sqlite();
         let state = state_with(Some(store as std::sync::Arc<dyn StorageBackend>), true);
         let registry = state.session.as_ref().unwrap().registry();
@@ -2270,24 +2385,20 @@ mod sessions_crud_tests {
         registry.register_thread_pipeline("T-fb2", "p-fb2");
         registry.register_thread_agent("T-fb2", "a-fb2");
 
-        // ① 带 intent：回退响应携带 registry 已知 agent/管道
         let resp = update_session_handler(
-            State(state.clone()),
+            State(state),
+            HeaderMap::new(),
             Path("T-fb2".into()),
             Json(json!({"intent": "改名"})),
         )
         .await;
-        let b = resp.0;
-        assert_eq!(b["title"], json!("改名"));
-        assert_eq!(b["intent"], json!("改名"));
-        assert_eq!(b["agent_id"], json!("a-fb2"));
-        assert_eq!(b["pipeline_ids"], json!(["p-fb2"]));
-
-        // ② 不带 intent：title/intent 双 null
-        let resp =
-            update_session_handler(State(state), Path("T-fb2".into()), Json(json!({}))).await;
-        assert_eq!(resp.0["title"], Value::Null);
-        assert_eq!(resp.0["intent"], Value::Null);
+        match resp {
+            Ok(body) => panic!("DB 无记录不得伪造 200 回退响应: {:?}", body.0),
+            Err(e) => assert!(
+                matches!(e, ApiError::NotFound { .. }),
+                "无记录应 404，实际 {e:?}"
+            ),
+        }
     }
 
     #[tokio::test]
@@ -2298,10 +2409,12 @@ mod sessions_crud_tests {
 
         let resp = update_session_handler(
             State(state.clone()),
+            HeaderMap::new(),
             Path("T".into()),
             Json(json!({"intent": "x"})),
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(resp.0["intent"], json!("x"));
         assert_eq!(resp.0["agent_id"], Value::Null);
         assert_eq!(resp.0["pipeline_ids"], json!([]));
@@ -2312,7 +2425,8 @@ mod sessions_crud_tests {
             Path("T".into()),
             Json(json!({"agent_id": "solo"})),
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(resp.0["agent_id"], json!("solo"));
         assert_eq!(resp.0["pipeline_ids"], json!([]));
     }
@@ -2872,5 +2986,267 @@ mod session_routes_logging_tests {
             text2.contains("降级使用 body user_id"),
             "降级分支须留痕（标记可伪造）: {text2}"
         );
+    }
+}
+
+#[cfg(test)]
+mod session_patch_tenant_scope_tests {
+    //! 会话 PATCH 双端点租户 scope（BUG-78 A2）：PATCH /sessions/{id} 与
+    //! PATCH /sessions/{id}/agent 必须与同文件 create/list/delete 同语义——
+    //! request_tenant_ctx 解析请求租户并在 scope 内读写。修复前无 scope：
+    //! get_session 恒以 default 租户查询——非 default 租户用户改自己会话查空
+    //! （伪造内存回退 200，脱钩不落库），改 default 租户会话反而命中（跨租户写）。
+    //! 修复后：非本租户/不存在 → 404 且零副作用；本租户 → 200 + 落库。
+
+    use axum::{body::Body, http::Request, http::StatusCode};
+    use tower::ServiceExt;
+
+    use super::*;
+    use agentos_core::traits::StorageBackend;
+    use agentos_core::types::TenantContext;
+
+    const SEED_PW: &str = "test-patch-tenant-pw-2026";
+    const ALICE_ID: &str = "00000000-0000-0000-0000-0000000000a1";
+    const ALICE_TENANT: &str = "t-alice";
+
+    fn sqlite() -> std::sync::Arc<agentos_engine::SqliteStore> {
+        std::sync::Arc::new(agentos_engine::SqliteStore::open_memory().unwrap())
+    }
+
+    async fn seed_user(
+        store: &agentos_engine::SqliteStore,
+        user_id: &str,
+        username: &str,
+        tenant_id: &str,
+    ) -> String {
+        let record = agentos_core::types::UserRecord {
+            user_id: user_id.to_string(),
+            username: username.to_string(),
+            password: agentos_http::auth::hash_password(SEED_PW).unwrap(),
+            email: None,
+            // 写面角色闸（write_surface_auth）要求 admin——各租户的租户管理员
+            role: "admin".to_string(),
+            tenant_id: tenant_id.to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            last_login_at: None,
+            must_change_password: false,
+        };
+        store.create_user(&record).await.unwrap();
+        agentos_http::auth::encode_token(
+            agentos_http::auth::TokenType::Access,
+            &agentos_http::auth::BuiltInUser::from(&record),
+            3600,
+        )
+    }
+
+    async fn seed_session(store: &agentos_engine::SqliteStore, thread_id: &str, tenant_id: &str) {
+        let rec = agentos_core::types::SessionRecord {
+            thread_id: thread_id.to_string(),
+            title: Some("原标题".to_string()),
+            intent: None,
+            current_state: "active".to_string(),
+            agent_id: Some("origin_agent".to_string()),
+            active_pipeline_id: None,
+            pipeline_ids: vec![],
+            metadata: Some(json!({"session_type": "main_pipeline"})),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_active_at: None,
+        };
+        if tenant_id == "default" {
+            store.create_session(&rec).await.unwrap();
+        } else {
+            agentos_tenant::scope(
+                TenantContext::new(tenant_id, "seed"),
+                store.create_session(&rec),
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn setup_router() -> (
+        axum::Router,
+        AppState,
+        std::sync::Arc<agentos_engine::SqliteStore>,
+    ) {
+        let store = sqlite();
+        let mut state = AppState::new();
+        state.store = Some(store.clone());
+        state.db = Some(store.clone());
+        state.session = Some(std::sync::Arc::new(
+            agentos_session::SessionCoordinator::new(),
+        ));
+        let router = crate::server::build_router(state.clone());
+        (router, state, store)
+    }
+
+    async fn patch(
+        router: &axum::Router,
+        uri: String,
+        token: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 16384).await.unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn patch_rename_cross_tenant_returns_404_without_mutating() {
+        // t-alice 用户 PATCH default 租户的会话 → 404，DB 记录原封不动。
+        // 修复前：无 scope 恒按 default 查询 → 命中并跨租户改写（200）。
+        let (router, _state, store) = setup_router().await;
+        seed_session(&store, "t-def", "default").await;
+        let alice_token = seed_user(&store, ALICE_ID, "alice", ALICE_TENANT).await;
+
+        let (status, body) = patch(
+            &router,
+            "/api/v1/sessions/t-def".to_string(),
+            &alice_token,
+            json!({"intent": "越权改名"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "跨租户改名必须 404: {body}");
+
+        let rec = store.get_session("t-def").await.unwrap().unwrap();
+        assert_eq!(rec.title.as_deref(), Some("原标题"), "DB 记录不得被改写");
+    }
+
+    #[tokio::test]
+    async fn patch_agent_cross_tenant_returns_404_without_mutating() {
+        // t-alice 用户 PATCH default 租户会话的 agent 绑定 → 404，
+        // DB 记录 agent_id 与内存 registry 均原封不动。
+        let (router, state, store) = setup_router().await;
+        seed_session(&store, "t-def", "default").await;
+        let alice_token = seed_user(&store, ALICE_ID, "alice", ALICE_TENANT).await;
+
+        let (status, body) = patch(
+            &router,
+            "/api/v1/sessions/t-def/agent".to_string(),
+            &alice_token,
+            json!({"agent_id": "hijacked_agent"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "跨租户绑定必须 404: {body}");
+
+        let rec = store.get_session("t-def").await.unwrap().unwrap();
+        assert_eq!(
+            rec.agent_id.as_deref(),
+            Some("origin_agent"),
+            "DB agent_id 不得被跨租户改写"
+        );
+        let registry = state.session.as_ref().unwrap().registry();
+        assert_ne!(
+            registry.get_agent_for_thread("t-def").as_deref(),
+            Some("hijacked_agent"),
+            "404 路径不得写内存 registry"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_rename_in_request_tenant_persists() {
+        // 两组有区分度输入：非 default 租户（t-alice）与 default 租户各自
+        // PATCH 本租户会话 → 200 且落库到各自租户（修复前非 default 租户
+        // 命中伪造回退 200，响应像成功但 DB 不落库）。
+        let (router, _state, store) = setup_router().await;
+        seed_session(&store, "t-alice-1", ALICE_TENANT).await;
+        seed_session(&store, "t-def", "default").await;
+        let alice_token = seed_user(&store, ALICE_ID, "alice", ALICE_TENANT).await;
+        let admin_token = seed_user(&store, "u-admin-1", "root_admin", "default").await;
+
+        // ① t-alice 改自己会话：200 + 落库在本租户
+        let (status, body) = patch(
+            &router,
+            "/api/v1/sessions/t-alice-1".to_string(),
+            &alice_token,
+            json!({"intent": "改名后"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "本租户改名应成功: {body}");
+        let rec = agentos_tenant::scope(
+            TenantContext::new(ALICE_TENANT, "verify"),
+            store.get_session("t-alice-1"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(rec.title.as_deref(), Some("改名后"), "title 必须落库");
+        assert_eq!(rec.intent.as_deref(), Some("改名后"));
+
+        // ② default 租户改自己会话：200 + 落库（基线不回归）
+        let (status, body) = patch(
+            &router,
+            "/api/v1/sessions/t-def".to_string(),
+            &admin_token,
+            json!({"intent": "默认租户新名"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "default 租户改名应成功: {body}");
+        let rec = store.get_session("t-def").await.unwrap().unwrap();
+        assert_eq!(rec.title.as_deref(), Some("默认租户新名"));
+    }
+
+    #[tokio::test]
+    async fn patch_agent_in_request_tenant_persists() {
+        // agent 绑定同矩阵：本租户 PATCH → 200 + sessions 表落库 + registry 同步；
+        // 两组租户输入（t-alice / default）行为一致。
+        let (router, state, store) = setup_router().await;
+        seed_session(&store, "t-alice-1", ALICE_TENANT).await;
+        seed_session(&store, "t-def", "default").await;
+        let alice_token = seed_user(&store, ALICE_ID, "alice", ALICE_TENANT).await;
+        let admin_token = seed_user(&store, "u-admin-1", "root_admin", "default").await;
+
+        let (status, body) = patch(
+            &router,
+            "/api/v1/sessions/t-alice-1/agent".to_string(),
+            &alice_token,
+            json!({"agent_id": "general_agent"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "本租户绑定应成功: {body}");
+        let rec = agentos_tenant::scope(
+            TenantContext::new(ALICE_TENANT, "verify"),
+            store.get_session("t-alice-1"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            rec.agent_id.as_deref(),
+            Some("general_agent"),
+            "agent_id 必须落库（本租户 scope 内）"
+        );
+        let registry = state.session.as_ref().unwrap().registry();
+        assert_eq!(
+            registry.get_agent_for_thread("t-alice-1").as_deref(),
+            Some("general_agent"),
+            "registry 热绑定同步"
+        );
+
+        let (status, body) = patch(
+            &router,
+            "/api/v1/sessions/t-def/agent".to_string(),
+            &admin_token,
+            json!({"agent_id": "general_agent"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "default 租户绑定应成功: {body}");
+        let rec = store.get_session("t-def").await.unwrap().unwrap();
+        assert_eq!(rec.agent_id.as_deref(), Some("general_agent"));
     }
 }

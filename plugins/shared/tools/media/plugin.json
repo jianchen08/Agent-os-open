@@ -1,5 +1,8 @@
 {
   "id": "media_tools",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Media Generation Tools",
   "description": "媒体生成 MCP 工具集（图片/音乐/视频/TTS）",
   "version": "1.0.0",

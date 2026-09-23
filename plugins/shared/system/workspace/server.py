@@ -172,6 +172,25 @@ def _get_project_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent.parent.parent
 
 
+def _connector_payload(result: dict[str, Any]) -> dict[str, Any]:
+    """tool-executor 信封 → connector.execute 工具原始返回。
+
+    经 tool-executor 轴时返回体是内核 ToolExecutionResult 信封（success/error
+    在顶层，工具自身返回嵌在 data）；服务轴直调时工具返回即顶层。连接器标记
+    （no_connector/connector_type）按 data 优先、顶层兜底双位读取。
+    """
+    data = result.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def _connector_flag(result: dict[str, Any], key: str) -> Any:
+    """从信封顶层与 data 载荷双位取连接器标记（no_connector / connector_type）。"""
+    payload = _connector_payload(result)
+    if key in payload:
+        return payload[key]
+    return result.get(key)
+
+
 async def open_file_in_ide(body: dict[str, Any]) -> dict[str, Any]:
     """在 IDE 中打开指定文件（body: file_path/line/column）。"""
     file_path = body.get("file_path", "")
@@ -206,7 +225,7 @@ async def open_file_in_ide(body: dict[str, Any]) -> dict[str, Any]:
             "message": f"打开文件失败: {e}",
             "file_path": file_path,
         }
-    if result.get("no_connector"):
+    if _connector_flag(result, "no_connector"):
         return {
             "success": False,
             "message": "当前没有可用的 IDE 连接器，请确保 VSCode 扩展已启动并连接",
@@ -215,7 +234,7 @@ async def open_file_in_ide(body: dict[str, Any]) -> dict[str, Any]:
     if result.get("success"):
         return {
             "success": True,
-            "message": f"已在 {result.get('connector_type', '')} 中打开文件: {file_path}",
+            "message": f"已在 {_connector_flag(result, 'connector_type') or ''} 中打开文件: {file_path}",
             "file_path": file_path,
         }
     return {
@@ -633,7 +652,7 @@ async def open_workspace_in_ide(
             "path": host_path,
         }
 
-    if result.get("no_connector"):
+    if _connector_flag(result, "no_connector"):
         # 无 IDE 连接器时，fallback 到系统文件管理器
         # 注意：_open_in_system_file_manager 在容器内运行，必须用容器路径
         opened = _open_in_system_file_manager(workspace_path)
@@ -654,7 +673,7 @@ async def open_workspace_in_ide(
     if result.get("success"):
         return {
             "success": True,
-            "message": f"已在 {result.get('connector_type', '')} 中打开工作空间",
+            "message": f"已在 {_connector_flag(result, 'connector_type') or ''} 中打开工作空间",
             "path": host_path,
         }
     return {

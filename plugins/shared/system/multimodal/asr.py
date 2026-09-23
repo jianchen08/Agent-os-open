@@ -6,6 +6,10 @@
 
 配置驱动：通过 ``config/models/asr.yaml`` 切换服务商，默认指向智谱 GLM-ASR，
 将来换讯飞/阿里云只需新增 provider 段并修改 ``default_provider``，无需改代码。
+配置真值走用户空间优先解析（ADR 2026-09-13-unified-user-root：用户层存在该
+文件即整体替换工厂配置），与内核 config_files 读写同一落点；服务实例按 stat
+签名探测配置变更并热重载（设置页保存免重启生效——watcher 只扫 plugins 目录，
+config/ 变更不触发插件 respawn）。
 
 采用业界通用的 OpenAI 兼容契约 ``POST /audio/transcriptions``
 （multipart 上传音频，返回 ``{"text": "..."}``），降低切换服务商成本。
@@ -26,6 +30,8 @@ from typing import Any
 import aiohttp
 import yaml
 from pydantic import BaseModel, Field
+
+import user_space
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +92,34 @@ def _resolve_env_value(raw: str) -> str:
     return raw
 
 
+def _factory_config_path() -> Path:
+    """工厂配置路径（项目根 = plugins/shared/system/multimodal/asr.py 向上回溯四级）。"""
+    return Path(__file__).resolve().parents[4] / "config" / "models" / "asr.yaml"
+
+
+def _default_config_path() -> Path:
+    """配置落点解析：用户层存在该文件即用户层，否则工厂路径。
+
+    与内核 ``config_files`` 读写同一套落点语义（``resolve_config_path`` 的
+    文件级整体替换），保证设置页写哪份、本服务读哪份。
+    """
+    user_dir = user_space.user_config_dir()
+    if user_dir is not None:
+        candidate = user_dir / "models" / "asr.yaml"
+        if candidate.is_file():
+            return candidate
+    return _factory_config_path()
+
+
+def _stat_signature(path: Path) -> tuple[int, int] | None:
+    """文件 stat 签名（mtime_ns, size）；不可 stat（缺失等）返回 None。"""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
 def load_asr_config(config_path: Path | None = None) -> ASRConfig:
     """从 YAML 配置文件加载 ASR 配置。
 
@@ -108,8 +142,7 @@ def load_asr_config(config_path: Path | None = None) -> ASRConfig:
         ASRConfig 实例。未找到配置文件或文件缺失关键字段时，回退到环境变量/默认值。
     """
     if config_path is None:
-        # 项目根 = plugins/shared/system/multimodal/asr.py 向上回溯四级
-        config_path = Path(__file__).resolve().parents[4] / "config" / "models" / "asr.yaml"
+        config_path = _default_config_path()
 
     if not config_path.exists():
         logger.debug("[ASR] 配置文件不存在: %s，使用默认值", config_path)
@@ -160,7 +193,10 @@ class ASRService:
     """语音识别（ASR）转写服务。
 
     通过 OpenAI 兼容的 ``POST /audio/transcriptions`` 接口调用配置的 ASR 服务商，
-    将音频字节流转写为文本。HTTP 调用模式参考 ``MiniMaxTTSProvider``。
+    将音频字节流转写为文本。
+
+    配置热生效：无显式配置构造时绑定默认落点（用户层优先），每次公开调用前
+    按落点变化 + stat 签名探测配置变更并重载——设置页保存免插件 respawn 即生效。
 
     Attributes:
         _config: ASR 配置
@@ -170,18 +206,45 @@ class ASRService:
         """初始化 ASRService。
 
         Args:
-            config: ASR 配置；为 None 时自动加载默认配置
+            config: ASR 配置；为 None 时自动加载默认配置并启用变更探测
         """
-        self._config = config if config is not None else load_asr_config()
+        self._explicit: bool
+        self._config: ASRConfig
+        self._config_path: Path | None
+        self._stat: tuple[int, int] | None
+        if config is not None:
+            self._explicit = True
+            self._config = config
+            self._config_path = None
+            self._stat = None
+        else:
+            self._explicit = False
+            self._config = load_asr_config()
+            self._config_path = _default_config_path()
+            self._stat = _stat_signature(self._config_path)
 
     @property
     def config(self) -> ASRConfig:
-        """当前 ASR 配置。"""
+        """当前 ASR 配置（读取前探测配置变更）。"""
+        self._maybe_reload()
         return self._config
+
+    def _maybe_reload(self) -> None:
+        """探测配置落点/内容变化并重载（显式配置或 stat 失败时保持现值）。"""
+        if self._explicit or self._config_path is None:
+            return
+        path = _default_config_path()
+        signature = _stat_signature(path)
+        if path == self._config_path and signature == self._stat:
+            return
+        logger.debug("[ASR] 检测到配置变更: %s → %s", self._config_path, path)
+        self._config_path = path
+        self._stat = signature
+        self._config = load_asr_config(path)
 
     def is_available(self) -> bool:
         """检查 ASR 服务是否可用（已启用且 API Key 已配置）。"""
-        return self._config.enabled and bool(self._config.api_key)
+        return self.config.enabled and bool(self.config.api_key)
 
     async def transcribe(
         self,
@@ -205,7 +268,8 @@ class ASRService:
         Raises:
             RuntimeError: ASR 未配置、HTTP 错误、业务错误或响应缺少文本
         """
-        if not self.is_available():
+        cfg = self.config
+        if not (cfg.enabled and bool(cfg.api_key)):
             raise RuntimeError("ASR 服务未配置或未启用（缺少 API Key 或 asr.yaml）")
 
         if not audio_bytes:
@@ -213,23 +277,23 @@ class ASRService:
 
         ext = _MIME_TO_EXT.get(mime_type, "webm")
         filename = f"audio.{ext}"
-        lang = language or self._config.language
-        url = f"{self._config.api_base.rstrip('/')}/audio/transcriptions"
+        lang = language or cfg.language
+        url = f"{cfg.api_base.rstrip('/')}/audio/transcriptions"
 
         logger.info(
             "[ASR] 提交转写: size=%d bytes, mime=%s, model=%s, lang=%s",
             len(audio_bytes),
             mime_type,
-            self._config.model,
+            cfg.model,
             lang,
         )
 
         form = aiohttp.FormData()
         form.add_field("file", audio_bytes, filename=filename, content_type=mime_type)
-        form.add_field("model", self._config.model)
+        form.add_field("model", cfg.model)
         form.add_field("language", lang)
 
-        headers = {"Authorization": f"Bearer {self._config.api_key}"}
+        headers = {"Authorization": f"Bearer {cfg.api_key}"}
 
         try:
             async with (
@@ -238,7 +302,7 @@ class ASRService:
                     url,
                     data=form,
                     headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=self._config.timeout),
+                    timeout=aiohttp.ClientTimeout(total=cfg.timeout),
                 ) as resp,
             ):
                 if resp.status != 200:

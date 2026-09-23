@@ -1,5 +1,8 @@
 {
   "id": "pipeline_result_format",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Result Format",
   "version": "1.0.0",
   "plugin_type": "pipeline",

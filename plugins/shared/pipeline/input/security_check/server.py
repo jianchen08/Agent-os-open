@@ -257,8 +257,9 @@ async def _switch_permission_mode(body: dict) -> dict:
     """切换会话权限模式（高风险模式需审批确认）。
 
     写表即显式选择：包括显式选 default（表内无条目时也要落表）——隔离/worktree
-    会话的免审批默认仅在「未显式选择」（表内无条目）时生效，显式选 default
-    表示黑名单照常生效，必须能与缺省态区分。
+    会话的免审批默认仅在「未显式选择」（表内无条目）时生效；显式选
+    default/accept_edits/auto 表示黑名单照常生效，必须能与缺省态区分；
+    显式选 bypass 即免审批本身（与隔离默认同档，落表留痕）。
     """
     key = _resolve_key(body)
     mode = str(body.get("mode", "") or "")

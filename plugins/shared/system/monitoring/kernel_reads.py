@@ -120,9 +120,9 @@ class ClearExecutionDataError(Exception):
 async def list_traces(pipeline_id: str) -> list[dict[str, Any]]:
     """按 pipeline_id 直查单管道 step 级轨迹（traces.list_by_pipeline，seq 升序）。
 
-    行字段（TraceEntry）：trace_id/run_id/branch_id/seq_in_branch/plugin_id/
-    patch_type/patch_data（PluginResult JSON）/created_at。绑真会话的任务管道
-    旧读面（按 thread_id）查不到，此读面绕开会话映射直查。
+    行字段（TraceEntry）：trace_id/pipeline_id/seq/plugin_id/patch_type/
+    patch_data（状态窗口 JSON）/created_at。绑真会话的任务管道旧读面
+    （按 thread_id）查不到，此读面绕开会话映射直查。
     """
     return _rows(await _call("traces", pipeline_id=pipeline_id))
 
@@ -131,7 +131,7 @@ async def list_runs_by_pipeline(pipeline_id: str) -> list[dict[str, Any]]:
     """按 pipeline_id 列该管道全部 run（pipeline-runs.list_by_pipeline）。
 
     行字段（PipelineRunInfo）：run_id/pipeline_id/thread_id/status/started_at/
-    ended_at/total_tokens/total_seconds。
+    ended_at。
     """
     return _rows(await _call("runs-by-pipeline", pipeline_id=pipeline_id))
 

@@ -51,10 +51,16 @@ export interface PluginMessageCardProps {
   instanceKey: string
   /** 样式 id（message.metadata.message_style） */
   styleId: string
+  /**
+   * 宿主数据注入（消息卡宿主桥）：消息的 content + metadata（含 compression_ref）
+   * 原样下行给卡（web/cards/compression.html 输入契约 message.data 信封）。
+   * 缺省不下发——通用 widget 卡自行经 widget.event 通道取数。
+   */
+  message?: { content: string; metadata?: Record<string, unknown> | null }
 }
 
 /** 消息卡容器：有界高度内嵌插件 webview（沙箱安全模型同 WebviewWidget） */
-export function PluginMessageCard({ instanceKey, styleId }: PluginMessageCardProps) {
+export function PluginMessageCard({ instanceKey, styleId, message }: PluginMessageCardProps) {
   const resolved = resolveMessageStyle(styleId)
   if (!resolved) return null
   return (
@@ -68,6 +74,7 @@ export function PluginMessageCard({ instanceKey, styleId }: PluginMessageCardPro
         htmlPath={resolved.htmlPath}
         widgetId={resolved.widgetId ?? `${instanceKey}:${styleId}`}
         title={resolved.page.title ?? styleId}
+        injectMessage={message}
       />
     </div>
   )

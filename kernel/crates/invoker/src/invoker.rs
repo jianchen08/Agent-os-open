@@ -163,7 +163,8 @@ fn namespaced_tool_name(manifest: &PluginManifest, tool_name: &str) -> String {
 ///
 /// 插件目录层级不固定（plugins/shared/<type>/<phase>/<name>），不能按固定
 /// 深度回溯；逐级向上探测 `_host` 子目录，到文件系统根仍无则 None。
-fn find_group_host_dir(member_dir: &Path) -> Option<std::path::PathBuf> {
+/// pub 供 venv 自愈（venv_provision）复用同一探测序，避免两处定位漂移。
+pub fn find_group_host_dir(member_dir: &Path) -> Option<std::path::PathBuf> {
     let mut cur = Some(member_dir);
     while let Some(dir) = cur {
         let candidate = dir.join(GROUP_HOST_DIR);
@@ -179,8 +180,8 @@ fn find_group_host_dir(member_dir: &Path) -> Option<std::path::PathBuf> {
 /// 同源）下的合宿宿主目录：`<内置根>/_host/`（host.py 与共享 venv 的仓库原件）。
 ///
 /// 仅作 find_group_host_dir 探测全空时的回退定位（见 resolve_group_host_command），
-/// 不参与常规探测序。
-fn builtin_group_host_dir() -> Option<std::path::PathBuf> {
+/// 不参与常规探测序。pub 供 venv 自愈（venv_provision）复用同一定位序。
+pub fn builtin_group_host_dir() -> Option<std::path::PathBuf> {
     let root = std::env::var("AGENTOS_PLUGINS_DIR")
         .ok()
         .filter(|d| !d.trim().is_empty())?;
@@ -328,7 +329,8 @@ fn venv_interpreter_layout(plugin_dir: &Path, windows: bool) -> std::path::PathB
 
 /// 探测插件目录的 venv 解释器：按本平台布局优先，另一平台布局作回退
 /// （探测无害——命中即返回绝对路径，缺失返回 None，不执行解释器）。
-fn find_venv_interpreter(plugin_dir: &Path) -> Option<std::path::PathBuf> {
+/// pub：boot 期 venv 自愈（api::venv_provision）与 spawn 期解析共用同一探测。
+pub fn find_venv_interpreter(plugin_dir: &Path) -> Option<std::path::PathBuf> {
     [
         venv_interpreter_layout(plugin_dir, cfg!(windows)),
         venv_interpreter_layout(plugin_dir, !cfg!(windows)),
@@ -340,7 +342,7 @@ fn find_venv_interpreter(plugin_dir: &Path) -> Option<std::path::PathBuf> {
 /// 判定 entry 首词是否 PATH 裸 python 命令（`python` / `python3`，含 Windows
 /// 可执行扩展 `.exe`/`.bat`/`.cmd`）。带路径分隔符的绝对/相对路径不判——venv
 /// 只替代"靠 PATH 解析的裸解释器"，显式绝对路径 entry 是刻意选择，不动。
-fn is_plain_python_command(command: &str) -> bool {
+pub fn is_plain_python_command(command: &str) -> bool {
     if command.contains('\\') || command.contains('/') {
         return false;
     }
@@ -778,8 +780,9 @@ impl Drop for InflightGuard {
 /// 优先级：工具声明 `capabilities.tools[].timeout_ms` > 插件级
 /// `mcp.request_timeout_secs`（既有声明，秒→毫秒）> 内核默认
 /// [`agentos_core::traits::default_capability_timeout_ms`]。插件级声明兜底
-/// 保证长等待插件（human 审批 90000s 等）既有声明继续生效，不被 300s 默认
-/// 掐断；工具声明 `Some(0)` 为 0 哨兵豁免（对齐 `lifecycle.idle_timeout_secs`）。
+/// 保证长等待插件（human 审批 86400s 等，BUG-60 审批族统一值）既有声明继续
+/// 生效，不被 300s 工具执行默认掐断；工具声明 `Some(0)` 为 0 哨兵豁免
+/// （对齐 `lifecycle.idle_timeout_secs`）。
 fn tool_timeout_ms(manifest: &PluginManifest, tool_name: &str) -> Option<u64> {
     let declared = manifest
         .capabilities
@@ -2149,9 +2152,9 @@ impl PluginInvokerImpl {
     ///    见 [`Self::build_sidecar_transport_client`]。
     ///
     /// 尾部统一应用插件级调用超时（manifest.mcp.request_timeout_secs）：长等待
-    /// 业务（交互插件 wait_for_choice 的 24h 审批等）必须显式声明，
-    /// 否则内核 MCP client 300s 默认兜底先于用户操作掐断调用（-32001 超时 →
-    /// 审批作废 → 引擎重试弹窗循环）。
+    /// 业务（交互插件 wait_for_choice 的 24h 审批等）以声明值为准；未声明时
+    /// 落内核 mcp 客户端默认（86400s，BUG-60 审批族统一值）——不再有 300s 默认
+    /// 先于用户操作掐断调用（-32001 超时 → 审批作废 → 引擎重试弹窗循环）。
     fn build_mcp_client(
         &self,
         host_key: &str,

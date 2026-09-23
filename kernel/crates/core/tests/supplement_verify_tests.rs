@@ -86,7 +86,6 @@ fn test_message_record_roundtrip() {
     let original = MessageRecord {
         message_id: "msg_001".to_string(),
         run_id: "run_001".to_string(),
-        branch_id: "main".to_string(),
         seq_in_branch: 1,
         role: "user".to_string(),
         blob_id: Some("blob_001".to_string()),
@@ -105,7 +104,6 @@ fn test_message_record_roundtrip() {
     let deserialized: MessageRecord = serde_json::from_str(&json_str).unwrap();
     assert_eq!(deserialized.message_id, original.message_id);
     assert_eq!(deserialized.run_id, original.run_id);
-    assert_eq!(deserialized.branch_id, original.branch_id);
     assert_eq!(deserialized.seq_in_branch, original.seq_in_branch);
     assert_eq!(deserialized.role, original.role);
     assert_eq!(deserialized.blob_id, original.blob_id);
@@ -119,7 +117,6 @@ fn test_message_record_roundtrip_no_optional() {
     let original = MessageRecord {
         message_id: "msg_002".to_string(),
         run_id: "run_001".to_string(),
-        branch_id: "main".to_string(),
         seq_in_branch: 2,
         role: "assistant".to_string(),
         blob_id: None,
@@ -145,9 +142,8 @@ fn test_message_record_roundtrip_no_optional() {
 fn test_trace_entry_roundtrip() {
     let original = TraceEntry {
         trace_id: "trace_001".to_string(),
-        run_id: "run_001".to_string(),
-        branch_id: "main".to_string(),
-        seq_in_branch: 1,
+        pipeline_id: "pipe_001".to_string(),
+        seq: 1,
         plugin_id: "plugin_001".to_string(),
         patch_type: PatchType::StateUpdate,
         patch_data: json!({"key": "value", "num": 42}),
@@ -156,9 +152,8 @@ fn test_trace_entry_roundtrip() {
     let json_str = serde_json::to_string(&original).unwrap();
     let deserialized: TraceEntry = serde_json::from_str(&json_str).unwrap();
     assert_eq!(deserialized.trace_id, original.trace_id);
-    assert_eq!(deserialized.run_id, original.run_id);
-    assert_eq!(deserialized.branch_id, original.branch_id);
-    assert_eq!(deserialized.seq_in_branch, original.seq_in_branch);
+    assert_eq!(deserialized.pipeline_id, original.pipeline_id);
+    assert_eq!(deserialized.seq, original.seq);
     assert_eq!(deserialized.plugin_id, original.plugin_id);
     assert_eq!(deserialized.patch_type, original.patch_type);
     assert_eq!(deserialized.patch_data, original.patch_data);
@@ -177,9 +172,8 @@ fn test_trace_entry_roundtrip_all_patch_types() {
     for pt in &patch_types {
         let entry = TraceEntry {
             trace_id: "t".to_string(),
-            run_id: "r".to_string(),
-            branch_id: "b".to_string(),
-            seq_in_branch: 0,
+            pipeline_id: "pipe".to_string(),
+            seq: 0,
             plugin_id: "p".to_string(),
             patch_type: pt.clone(),
             patch_data: json!({}),

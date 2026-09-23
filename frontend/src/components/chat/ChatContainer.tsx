@@ -1,6 +1,6 @@
 /** 聊天容器组件 整合消息列表、Agent Tab 导航和输入区域的完整聊天界面。 */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { Loader2 } from '@/assets/icons'
 import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
@@ -27,6 +27,7 @@ import {
 import { mainPipelineIdOf } from '@/utils/mappers'
 import { resolveModelDisplayName } from '@/utils/modelName'
 import { findModelParams, mapParamsToStrength } from '@/utils/thinkingStrength'
+import { createPortal } from 'react-dom'
 import { AgentTabBar } from './AgentTabBar'
 import { ChatInput } from './ChatInput'
 import { ReferenceSelectionRow } from './ReferenceSelectionRow'
@@ -313,6 +314,12 @@ export const ChatContainer = ({
   /** 是否显示 AgentTabBar（至少存在一个 Tab 时显示） */
   // 单主对话标签也显示（顶部中间恒有标签条）
   const showTabBar = tabs.length >= 1
+  // 顶带槽位（FiveSpaceLayout 顶带的标签行容器）：存在=portal 进拖拽容器，
+  // 不存在（移动端/无顶带形态）=内联回退。整树提交后查询，时序必然就绪。
+  const [tabsSlot, setTabsSlot] = useState<HTMLElement | null>(null)
+  useLayoutEffect(() => {
+    setTabsSlot(document.getElementById('chat-top-band-tabs'))
+  }, [])
 
   /** 处理 Tab 切换 */
   const handleTabChange = useCallback(
@@ -380,21 +387,29 @@ export const ChatContainer = ({
       // （位置映射，不给组件贴 DSH 名字）
       data-chat-state={filteredMessages.length > 0 ? 'active' : 'empty'}
     >
-      {/* Agent Tab 导航栏（多 Tab 时显示；单 Tab 也常驻）。
-          顶部 40px 图标带行：与侧栏/工作区开关按钮同排（按钮钉页角、
-          标签行居中并在两侧留出 48px 避让角图标），带内无分割线。
-          本行兼作 Electron 窗口拖拽带（-webkit-app-region 在 Web 为惰性），
-          标签内容整体 no-drag 保交互 */}
-      {showTabBar && (
-        <div
-          className="app-drag-region flex h-10 shrink-0 items-center justify-center px-12"
-          data-testid="chat-session-header"
-        >
-          <div className="app-no-drag min-w-0">
+      {/* 对话标签行：桌面 portal 进布局顶带槽位（chat-top-band-tabs）——
+          顶带是唯一拖拽容器，标签行作为其 DOM 子元素自动获得 no-drag 洞；
+          槽位不存在（移动端/无顶带形态）回退内联渲染。 */}
+      {showTabBar && tabsSlot &&
+        createPortal(
+          <div className="flex h-full min-w-0 items-center justify-center">
             <AgentTabBar
               tabs={barTabs}
               onTabChange={handleTabChange}
               onTabClose={handleTabClose}
+              onReorder={(dragId, targetId) => useAgentTabStore.getState().reorderTab(dragId, targetId)}
+            />
+          </div>,
+          tabsSlot,
+        )}
+      {showTabBar && !tabsSlot && (
+        <div className="flex h-10 shrink-0 items-center justify-center" data-testid="chat-session-header">
+          <div className="min-w-0">
+            <AgentTabBar
+              tabs={barTabs}
+              onTabChange={handleTabChange}
+              onTabClose={handleTabClose}
+              onReorder={(dragId, targetId) => useAgentTabStore.getState().reorderTab(dragId, targetId)}
             />
           </div>
         </div>
@@ -452,8 +467,8 @@ export const ChatContainer = ({
             // 管道 ID 单一来源：当前标签的 pipelineRunId（主标签=后端回填的主管道
             // ID，子标签=sub_agent_created 事件下发的子管道 ID）。
             // 主标签兜底：对话框预建会话在缓存重拉/事件回填竞态下 pipelineRunId
-            // 可能短暂为空——回退到会话主管道确定性解析（activePipelineId /
-            // pipelineIds 唯一），发送不再静默丢失；子标签不兜底（串管道风险）。
+            // 可能短暂为空——回退到会话主管道映射解析（pipelineIds[0]），
+            // 发送不再静默丢失；子标签不兜底（串管道风险）。
             let pid = activeTab?.pipelineRunId
             if (!pid && !isSubTabActive) {
               const session = readSessions().find((s) => s.id === sessionId)

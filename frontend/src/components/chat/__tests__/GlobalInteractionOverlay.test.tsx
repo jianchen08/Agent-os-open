@@ -488,6 +488,7 @@ describe('BUG-43 浮层不拦截 composer', () => {
   it('收起徽标带审批倒计时（N 项待决策 + 剩余时间），点击展开恢复卡片', () => {
     setInteractions([
       makeInteraction({
+        // BUG-60 审批族统一 24h：声明 86400s 原样生效——创建于 1s 前 → 剩余 23:59:59（跨秒边界容差 24:00:00）
         timeoutSeconds: 86400,
         createdAt: new Date(Date.now() - 1000).toISOString(),
       }),
@@ -496,9 +497,29 @@ describe('BUG-43 浮层不拦截 composer', () => {
     render(<GlobalInteractionOverlay />)
 
     const badge = screen.getByText(/项待决策/)
-    expect(badge.textContent).toMatch(/^1 项待决策 23:59:\d{2}$/)
+    expect(badge.textContent).toMatch(/^1 项待决策 (23:59:59|24:00:00)$/)
     fireEvent.click(badge)
     expect(useInteractionStore.getState().isMinimized).toBe(false)
     expect(card()).toBeInTheDocument()
+  })
+})
+
+describe('GlobalInteractionOverlay — composer 间距跟随（resize）', () => {
+  it('窗口 resize 且 composer 在挂时重新测量（onResize 分支）', async () => {
+    setInteractions([makeInteraction()])
+    render(<GlobalInteractionOverlay />)
+
+    // 挂一个符合 composer 选择器的假元素，触发 MutationObserver 换绑
+    const composer = document.createElement('textarea')
+    composer.setAttribute('data-testid', 'chat-composer')
+    composer.className = 'fake-x'
+    document.body.appendChild(composer)
+    // jsdom 无布局：top 恒 0 → clearance 落 COMPOSER_GAP_PX 分支之外也属已测量；
+    // 本用例只锁「resize 时 watched 存在则重测不抛错」这一行为契约
+    expect(() => {
+      window.dispatchEvent(new Event('resize'))
+    }).not.toThrow()
+
+    composer.remove()
   })
 })

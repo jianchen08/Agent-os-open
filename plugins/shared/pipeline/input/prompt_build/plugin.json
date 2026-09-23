@@ -1,5 +1,8 @@
 {
   "id": "pipeline_prompt_build",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Prompt Build",
   "version": "1.0.0",
   "plugin_type": "pipeline",

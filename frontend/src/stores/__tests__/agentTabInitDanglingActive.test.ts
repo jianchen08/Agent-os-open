@@ -135,8 +135,8 @@ describe('AgentTabStore initSessionTabs 悬空 activeTabId 恢复', () => {
   })
 
   it('活跃 Tab 无 pipelineRunId（权威主管道缺失）：清空 activePipelineId 残值而非保留', () => {
-    // 会话缓存未就绪（activePipelineId 缺失且管道数≠1）→ 主 Tab 无绑定可激活
-    seedSessions([makeSession({ activePipelineId: null, pipelineIds: ['pid-a', 'pid-b'] })])
+    // 会话缓存未就绪（pipelineIds 空）→ 主 Tab 无绑定可激活
+    seedSessions([makeSession({ activePipelineId: null, pipelineIds: [] })])
     seedResidualActivePipeline('pid-prev-session')
     localStorage.setItem(
       `agent-tabs-${SESSION_ID}`,

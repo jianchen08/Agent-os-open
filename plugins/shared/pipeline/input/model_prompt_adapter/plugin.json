@@ -1,5 +1,8 @@
 {
   "id": "pipeline_model_prompt_adapter",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Model Prompt Adapter",
   "description": "按模型/状态路由的消息注入规则执行器（DeepSeek 思维链 few-shot 等模型适配，rules.yaml 配置驱动）",
   "version": "1.0.0",

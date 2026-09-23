@@ -104,6 +104,7 @@ mode_X/                     # 出厂种子 plugins/shared/modes/ → 播种 → 
 
 - `config_files`：需要哪个配置文件就显式映射哪条，未声明（或空）= 收空配置（fail-closed）；`path` 相对 `config/` 根且必须落 `config/` 子树内；经 `/api/v1/plugins/{id}/config/{file_id}` 读写，mtime 热更新；追加 `"settings": false` = 注入专用不出口到 schema（UI 由插件自声明承载，避免双入口）。内核保留文件（plugin_allowlist/plugin_roots/auth/pipelines/steps）不可映射。
 - `ui_schema` / `contributes` / `http_endpoints` 是三个声明面：新增插件时前端自动长出对应界面，禁止为单插件改 `frontend/src`（前端冻结铁律见 [ai-coding-spec.md](ai-coding-spec.md)）。
+- **紧凑选择器（chat-input 输入条内的单 select form）声明短写**：只写 `props` 的 `title` + `fields`（+ `endpoint`/`readbackUri`/`icon` 等行为键）。字段 `label` 省略（缺省回退 `props.title`）；widget 级 `title` 不写（`ContributionRegistry` 归一化时丢弃，是死字段）；`props.description`/`submitLabel` 不写（该形态无 UI 载体，选项说明写在 `options[].description`）。设置名（`title`）只出现在两处：触发器可访问名 `${title}：${当前值}`（BUG-6 自标识，读屏与 GUI 脚本按此前缀定位）与菜单头；可见文案为裸当前值。
 
 ### 4.5 依赖与引用（目标语义）
 

@@ -926,6 +926,48 @@ pub async fn pipelines_runs_handler(
     Ok(axum::Json(json!({ "items": rows })))
 }
 
+// ── 消息段端点（多代切换/压缩原文存档）─────────────────────────
+// 段 = 替换事件的冻结内容（消息段模型 §5 读路径）：清单一次拉取（免解 blob），
+// 展开/切换预览走单段端点解析成员全文。全部按租户隔离；不存在条目返回 404。
+
+/// GET /api/v1/pipelines/{pipeline_id}/message-segments——段清单（无成员、含
+/// preview，按 base_seq, created_at 升序）。
+pub async fn message_segments_list_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(pipeline_id): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let store = state.store.as_ref().ok_or_else(|| ApiError::NotFound {
+        message: "store not injected".to_string(),
+    })?;
+    let tenant_ctx = endpoint_tenant_ctx(&state, &headers).await;
+    let rows = store
+        .list_message_segments(&pipeline_id, &tenant_ctx.tenant_id)
+        .await
+        .map_err(ApiError::internal("message-segments 查询失败"))?;
+    Ok(axum::Json(json!({ "segments": rows })))
+}
+
+/// GET /api/v1/message-segments/{id}——单段（含成员全文解析）。
+pub async fn message_segment_get_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let store = state.store.as_ref().ok_or_else(|| ApiError::NotFound {
+        message: "store not injected".to_string(),
+    })?;
+    let tenant_ctx = endpoint_tenant_ctx(&state, &headers).await;
+    let segment = store
+        .get_message_segment(&id, &tenant_ctx.tenant_id)
+        .await
+        .map_err(ApiError::internal("message-segment 查询失败"))?
+        .ok_or_else(|| ApiError::NotFound {
+            message: format!("message-segment 不存在: {id}"),
+        })?;
+    Ok(axum::Json(json!({ "segment": segment })))
+}
+
 // ── pending 输入队列端点（ADR-2026-08-26）─────────────────────────
 // 等待窗口内（入队→激活）的管道消息可经此处查询/修改/删除/清空。
 // 全部按租户隔离；不存在条目返回 404（显示性错误，不静默）。
@@ -2230,7 +2272,13 @@ pub async fn validate_all_plugins_handler(
         }
         match invoker.list_plugin_tools(&m.id).await {
             Ok(raw) => {
-                let (actual, malformed) = parse_actual_tools(&raw);
+                let (mut actual, malformed) = parse_actual_tools(&raw);
+                // 合宿成员观测域化（BUG-51 验证链，与 g2_verify_and_sanitize 同判）：
+                // 宿主 tools/list 是全组聚合面，剥本成员前缀 + 剔他组前缀条目——
+                // 否则成员的声明工具恒误报 missing（虚假"剔除工具"判定）。
+                if agentos_invoker::is_cohost_member(m) {
+                    actual = crate::plugin_watcher::member_scoped_actual_tools(actual, &m.id);
+                }
                 let mismatches = compare_tools(&declared_with_services(m), &actual);
                 let items: Vec<serde_json::Value> = mismatches
                     .iter()
@@ -2345,6 +2393,21 @@ pub async fn plugins_status_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> axum::Json<serde_json::Value> {
     let enabled_ids = state.enabled_plugin_ids.read().await;
+    // BUG-51 注册门禁：验证未完成/验证失败插件的可见原因（契约账本 last_error
+    // 经 error 字段透出，插件管理红框展示）。漂移/sanitized 有专属账本标示面，
+    // 不占 error（口径：error = 必败风险提示，判定证据走契约状态页）。
+    let verify_errors: std::collections::HashMap<String, String> = state
+        .contract_states
+        .snapshot()
+        .into_iter()
+        .filter(|st| {
+            matches!(
+                st.gates.g2_consistency.as_str(),
+                "verify_incomplete" | "verify_failed"
+            )
+        })
+        .filter_map(|st| st.gates.last_error.map(|e| (st.plugin_id, e)))
+        .collect();
     let items: Vec<serde_json::Value> = state
         .manifests
         .read()
@@ -2387,7 +2450,7 @@ pub async fn plugins_status_handler(
                 })).collect::<Vec<_>>(),
                 "has_contributes": m.contributes.is_some(),
                 "has_http_endpoints": !m.http_endpoints.is_empty(),
-                "error": null,
+                "error": verify_errors.get(&m.id),
             })
         })
         .collect();
@@ -4029,24 +4092,15 @@ mod pending_inputs_failure_tests {
         ) -> Result<(), agentos_core::types::StorageError> {
             self.inner.append_trace(entry).await
         }
-        async fn update_run_status(
+        async fn record_run_start(
             &self,
-            run_id: &str,
-            status: agentos_core::types::RunStatus,
-            branch: Option<&str>,
-            seq: Option<u32>,
-        ) -> Result<(), agentos_core::types::StorageError> {
-            self.inner
-                .update_run_status(run_id, status, branch, seq)
-                .await
-        }
-        async fn create_run(
-            &self,
+            pipeline_id: &str,
+            tenant_id: &str,
             run_id: &str,
             config_hash: &str,
-            tenant_id: &str,
         ) -> Result<(), agentos_core::types::StorageError> {
-            StorageBackend::create_run(self.inner.as_ref(), run_id, config_hash, tenant_id).await
+            self.inner
+                .record_run_start(pipeline_id, tenant_id, run_id, config_hash)
         }
         async fn store_blob(
             &self,
@@ -5660,19 +5714,10 @@ mod routes_http_handler_tests {
     #[tokio::test]
     async fn pipelines_runs_with_db_returns_seeded_run() {
         let db = sqlite();
-        let dyn_store: Arc<dyn StorageBackend> = db.clone();
-        db.create_run("run_rt_1", "hash", "default").unwrap();
-        // message_slots 提供 run → pipeline 归属（无槽 run 被过滤）；槽位行
-        // 的 run_id 经 op 的 `_run_id` 内部字段落表，join 才能命中。
-        let mut st = json!({"pipeline_id": "pipe_runs_rt", "messages": []});
-        agentos_engine::apply_messages_op_update(
-            &mut st,
-            dyn_store.as_ref(),
-            "default",
-            &[json!({"op": "set", "_run_id": "run_rt_1", "msg": {"role": "user", "content": "hi"}})],
-        )
-        .await
-        .unwrap();
+        // 运行簿记 = state 运行键（ADR 2026-09-18）：record_run_start 即建立
+        // run ↔ pipeline 归属，快照由 pipeline_state 聚合合成。
+        db.record_run_start("pipe_runs_rt", "default", "run_rt_1", "hash")
+            .unwrap();
 
         let mut state = AppState::new();
         state.db = Some(db);
@@ -5997,17 +6042,9 @@ mod routes_http_handler_tests {
         let db = sqlite();
         let dyn_store: Arc<dyn StorageBackend> = db.clone();
 
-        // 冷行：run + message slot + checkpoint → source=checkpoint 出口
-        db.create_run("run_st_cold", "hash", "default").unwrap();
-        let mut st = json!({"pipeline_id": "pipe_st_cold", "messages": []});
-        agentos_engine::apply_messages_op_update(
-            &mut st,
-            dyn_store.as_ref(),
-            "default",
-            &[json!({"op": "set", "_run_id": "run_st_cold", "msg": {"role": "user", "content": "hi"}})],
-        )
-        .await
-        .unwrap();
+        // 冷行：运行簿记（state 运行键）+ checkpoint → source=checkpoint 出口
+        db.record_run_start("pipe_st_cold", "default", "run_st_cold", "hash")
+            .unwrap();
         StorageBackend::save_checkpoint(
             dyn_store.as_ref(),
             "pipe_st_cold",
@@ -6021,8 +6058,7 @@ mod routes_http_handler_tests {
         .await
         .unwrap();
 
-        // 孤儿：run + slot 但无 checkpoint 无表字段 → 不出口
-        db.create_run("run_st_orphan", "hash", "default").unwrap();
+        // 孤儿：只有消息槽行、无运行簿记（state 无运行键）无 checkpoint → 不出口
         let mut st2 = json!({"pipeline_id": "pipe_st_orphan", "messages": []});
         agentos_engine::apply_messages_op_update(
             &mut st2,
@@ -6047,14 +6083,12 @@ mod routes_http_handler_tests {
         assert_eq!(cold["source"], "checkpoint");
         assert_eq!(cold["state"]["raw_result"], "复盘结论", "基线键随摘要出口");
         assert_eq!(cold["state"]["current_phase"], "post");
-        // BUG-2 后契约：checkpoint 自身的易变 per-run 键（run_status/ended）仍不
-        // 出口，但冷行携带 runs 表最新 run 的权威运行状态（fill-if-absent
-        // overlay）——run_st_cold 未收束（running），死管道不再被消费方猜 running
-        // 之外的状态，投影缺失时以 runs 真值补齐。
+        // 运行状态随 state 运行键（run_status='running'）出口；收束投影缺失时
+        // 才以投影状态 fill-if-absent 补齐（BUG-2 幽灵 running 契约）。
         assert_eq!(
             cold["state"]["run_status"],
             json!("running"),
-            "run_status 以 runs 表最新 run 权威状态补齐"
+            "run_status 以运行簿记权威状态出口"
         );
         assert_eq!(
             cold["thread_id"], "",
@@ -6062,7 +6096,7 @@ mod routes_http_handler_tests {
         );
         assert!(
             !items.iter().any(|i| i["pipeline_id"] == "pipe_st_orphan"),
-            "孤儿 run（无持久痕迹）不出口"
+            "孤儿 run（无运行簿记痕迹）不出口"
         );
     }
 
@@ -6866,6 +6900,68 @@ mod routes_http_handler_tests {
         );
     }
 
+    /// BUG-51：验证未完成/验证失败插件在 plugins 列表可见原因（error 字段），
+    /// 用户可在插件管理看到；正常/漂移插件 error 维持 null（漂移有专属净化标示）。
+    #[tokio::test]
+    async fn plugins_status_surfaces_verify_failure_reason() {
+        use crate::contract::PluginContractState;
+        let state = AppState::new();
+        *state.manifests.write().await = vec![
+            base_manifest("vp_pending", PluginType::Tool),
+            base_manifest("vp_drift", PluginType::Tool),
+            base_manifest("vp_ok", PluginType::Tool),
+        ];
+        let manifests = state.manifests.read().await.clone();
+        let g2_fail = crate::plugin_watcher::G2VerifyOutcome {
+            manifest: manifests[0].clone(),
+            rejected_tools: Vec::new(),
+            drift: false,
+            spawn_failed: true,
+            smoke_failed: false,
+        };
+        state.contract_states.upsert(PluginContractState::derived(
+            &manifests[0],
+            true,
+            Some(&g2_fail),
+        ));
+        let g2_drift = crate::plugin_watcher::G2VerifyOutcome {
+            manifest: manifests[1].clone(),
+            rejected_tools: vec!["t1".to_string()],
+            drift: true,
+            spawn_failed: false,
+            smoke_failed: false,
+        };
+        state.contract_states.upsert(PluginContractState::derived(
+            &manifests[1],
+            true,
+            Some(&g2_drift),
+        ));
+
+        let resp = plugins_status_handler(axum::extract::State(state)).await;
+        let items = resp.0.as_array().unwrap();
+        let find = |id: &str| {
+            items
+                .iter()
+                .find(|i| i["plugin_id"] == id)
+                .unwrap_or_else(|| panic!("{id} 应在列表"))
+        };
+        let pending = find("vp_pending");
+        assert!(
+            pending["error"]
+                .as_str()
+                .expect("待复验插件必须可见原因")
+                .contains("复验"),
+            "error 应说明校验未完成待复验: {:?}",
+            pending["error"]
+        );
+        assert_eq!(
+            find("vp_drift")["error"],
+            serde_json::Value::Null,
+            "漂移插件不走 error 面（有专属净化标示）"
+        );
+        assert_eq!(find("vp_ok")["error"], serde_json::Value::Null);
+    }
+
     #[tokio::test]
     async fn validate_all_without_invoker_reports_unavailable() {
         let state = AppState::new();
@@ -7034,6 +7130,59 @@ mod routes_http_handler_tests {
         assert!(cr[0]["reason"].as_str().unwrap().contains("plugin_dirs"));
     }
 
+    /// BUG-51 验证链：合宿成员的 validate-all 观测域化——宿主聚合上报剥本成员
+    /// 前缀、剔他组前缀条目后对照；成员声明工具不再误报 missing（虚假剔除判定）。
+    #[tokio::test]
+    async fn validate_all_scopes_cohost_member_report_to_member() {
+        let mut m = base_manifest("va_mem", PluginType::Tool);
+        m.host_group = Some("light".to_string());
+        m.capabilities.tools = vec![agentos_core::traits::ToolCapability {
+            name: "t1".to_string(),
+            description: None,
+            input_schema: None,
+            output_schema: None,
+            category: None,
+            ui: None,
+            render: None,
+            smoke: None,
+            timeout_ms: None,
+        }];
+        // 宿主聚合面：本成员带前缀 + 他组前缀条目
+        let invoker = StubInvoker::with_list(Ok(json!({
+            "tools": [
+                {"name": "va_mem.t1", "inputSchema": {}},
+                {"name": "peer_mem.other", "inputSchema": {}}
+            ]
+        })));
+        let mut state = AppState::new();
+        *state.manifests.write().await = vec![m.clone()];
+        state.invoker = Some(invoker as Arc<dyn PluginInvoker>);
+        let ledger = state.contract_states.clone();
+        let resp = validate_all_plugins_handler(axum::extract::State(state)).await;
+        let report = resp.0["reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["plugin_id"] == "va_mem")
+            .expect("va_mem 应在报告")
+            .clone();
+        assert_eq!(
+            report["status"], "clean",
+            "成员域化对照干净 → clean（他组条目不计入）: {report}"
+        );
+        let mismatches = report["mismatches"].as_array().unwrap();
+        assert!(
+            mismatches.is_empty(),
+            "本成员声明工具不得误报 missing: {mismatches:?}"
+        );
+        let gates = ledger.get("va_mem").expect("账本应登记 va_mem");
+        assert!(
+            gates.gates.rejected_tools.is_empty(),
+            "不得产生虚假剔除名单: {:?}",
+            gates.gates.rejected_tools
+        );
+    }
+
     #[tokio::test]
     async fn contract_status_defaults_not_covered_and_reflects_ledger() {
         let mut m = base_manifest("cs_x", PluginType::Tool);
@@ -7065,7 +7214,8 @@ mod routes_http_handler_tests {
         std::env::set_var("AGENTOS_DISABLE_SELF_EXIT", "1");
 
         let db = sqlite();
-        db.create_run("run_restart_1", "hash", "default").unwrap();
+        db.record_run_start("pipe_restart_1", "default", "run_restart_1", "hash")
+            .unwrap();
         let mut state = AppState::new();
         state.db = Some(db.clone());
 

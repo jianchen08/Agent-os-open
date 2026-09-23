@@ -1,5 +1,8 @@
 {
   "id": "task_form",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Task Form Service",
   "description": "任务表单声明与取数端点——新建任务表单字段（config/plugins/task_form/task_form.yaml）+ 执行 Agent/容器任务动态选项（自持服务，channel_api 零追加）",
   "version": "1.0.0",
@@ -88,7 +91,6 @@
         "id": "task_mode",
         "type": "form",
         "space": "chat-input",
-        "title": "任务模式",
         "props": {
           "title": "任务模式",
           "icon": "sparkles",
@@ -96,7 +98,6 @@
             {
               "name": "mode",
               "type": "select",
-              "label": "任务模式",
               "default": "",
               "options": [
                 {
@@ -107,8 +108,7 @@
                 }
               ]
             }
-          ],
-          "description": "切换当前会话的任务模式（chatInputStore 按会话记忆，发送时并入消息级 execution_context）。选择器本体仅持「自动」兜底档，模式选项由各模式插件 select-option 声明追加"
+          ]
         }
       }
     ]

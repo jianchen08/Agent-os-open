@@ -138,7 +138,9 @@ export const ChatInput = ({
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([])
   const [isDragging, setIsDragging] = useState(false)
-  const [uploadError, setUploadError] = useState<string | null>(null)
+  /** 输入区错误提示（上传失败/发送未受理）：落在操作点、可手动关闭，
+   *  下一次受理发送自动清除 */
+  const [inputError, setInputError] = useState<string | null>(null)
   const [isExpanded, setIsExpanded] = useState(false)
   /** 任务模式（task_mode 声明式选择器）：null = 自动，发送不带 mode 键。
    *  状态提升在 chatInputStore 按 draftKey（tabId/sessionId）记忆——切换
@@ -226,7 +228,7 @@ export const ChatInput = ({
 
       const validation = validateFile(audioFile, capabilities)
       if (!validation.valid) {
-        setUploadError(validation.error || '音频文件验证失败')
+        setInputError(validation.error || '音频文件验证失败')
         return
       }
 
@@ -271,7 +273,7 @@ export const ChatInput = ({
               : pf,
           ),
         )
-        setUploadError(errorMessage)
+        setInputError(errorMessage)
       }
     },
     [modelName, capabilities],
@@ -341,7 +343,7 @@ export const ChatInput = ({
     onTranscriptionComplete: handleVoiceTranscriptionComplete,
     onInterimResult: handleVoiceInterim,
     onError: (error) => {
-      setUploadError(error.message)
+      setInputError(error.message)
     },
   })
 
@@ -408,7 +410,7 @@ export const ChatInput = ({
               : pf,
           ),
         )
-        setUploadError(errorMessage)
+        setInputError(errorMessage)
       }
     },
     [modelName],
@@ -420,14 +422,14 @@ export const ChatInput = ({
       if (!files || files.length === 0) return
       if (!enableFileUpload) return
 
-      setUploadError(null)
+      setInputError(null)
 
       const newPendingFiles: PendingFile[] = []
       for (let i = 0; i < files.length; i++) {
         const file = files[i]
         const validation = validateFile(file, capabilities)
         if (!validation.valid) {
-          setUploadError(validation.error || '文件验证失败')
+          setInputError(validation.error || '文件验证失败')
           continue
         }
 
@@ -478,6 +480,19 @@ export const ChatInput = ({
       return
     }
 
+    // 在途附件不随消息发出（[来源: docs/working/packtest/R236_多模态断链BUG62_20260922.md]）：
+    // 附件引用在发送瞬间才并入正文（appendAttachmentRefs 只认已有 /uploads/ url 的
+    // 附件），在途附件拿不到引用，照发即 LLM 收不到该附件（模型看到「看这张图」
+    // 却无图可看）。显式拒绝并提示（拒绝必须反馈），正文与附件原样保留，
+    // 上传完成后重发即可。
+    const hasUploadingAttachment = pendingFiles.some(
+      (pf) => pf.status === 'pending' || pf.status === 'uploading',
+    )
+    if (hasUploadingAttachment) {
+      setInputError('附件正在上传，请等待上传完成后再发送')
+      return
+    }
+
     /** 引用注入（源无关）：枚举全部引用 provider 的待发引用，随消息拼接发送
         （同消息渲染），发送即消耗（卡片消失，重新点选恢复） */
     const pendingRefs = getReferenceProviders()
@@ -512,10 +527,16 @@ export const ChatInput = ({
       mode: taskMode ?? undefined,
     }
 
-    // 受理协议：false = 未受理（管道未就绪/子标签不支持等），保留输入、附件、
-    // 草稿与引用供用户重试；true/void（兼容既有只发不回的回调）= 受理，清空。
+    // 受理协议：false = 未受理（无会话/令牌、管道未就绪、子标签不支持等），保留
+    // 输入、附件、草稿与引用供用户重试；true/void（兼容既有只发不回的回调）= 受
+    // 理，清空。
     const accepted = onSendMessage(params)
     if (accepted === false) {
+      // 未受理必须在操作点显式反馈（OBS-25）：拒绝详情由各拒绝层写通知中心
+      // （入口在侧栏，输入时不一定可见），输入区不落提示的话用户视角仍是
+      // 「点了没反应」。拒发不触碰任何流式状态，「停止生成」只由真实
+      // isGenerating 驱动。
+      setInputError('消息未发送，请检查会话状态')
       return
     }
 
@@ -527,7 +548,7 @@ export const ChatInput = ({
     interimVoiceStartRef.current = -1
     setAttachments([])
     setPendingFiles([])
-    setUploadError(null)
+    setInputError(null)
 
     /** 发送后清除草稿 */
     if (draftKey) {
@@ -713,20 +734,20 @@ export const ChatInput = ({
       onDragLeave={enableDragDrop && inputCapabilities.canDragDrop ? handleDragLeave : undefined}
       onDrop={enableDragDrop && inputCapabilities.canDragDrop ? handleDrop : undefined}
     >
-      {/* 上传错误提示 */}
-      {uploadError && (
+      {/* 输入区错误提示（上传失败/发送未受理） */}
+      {inputError && (
         <div
-          id="upload-error"
+          id="input-error"
           role="alert"
           className="text-destructive bg-destructive/10 mb-3 flex items-center gap-2 rounded-xl p-2 text-sm"
         >
           <AlertCircle className="h-icon-md w-icon-md flex-shrink-0" />
-          <span className="flex-1">{uploadError}</span>
+          <span className="flex-1">{inputError}</span>
           <Button
             variant="ghost"
             size="sm"
             className="h-6 w-6 rounded-lg p-0"
-            onClick={() => setUploadError(null)}
+            onClick={() => setInputError(null)}
             aria-label="关闭错误提示"
           >
             <X className="h-icon-md w-icon-md" />
@@ -820,7 +841,7 @@ export const ChatInput = ({
           rows={1}
           data-testid="chat-input-textarea"
           aria-label="消息输入"
-          aria-describedby={uploadError ? 'upload-error' : undefined}
+          aria-describedby={inputError ? 'input-error' : undefined}
           className={cn(
             'w-full resize-none',
             'pl-3 pt-3 pb-2 pr-10',

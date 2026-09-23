@@ -3,18 +3,88 @@
  *
  * 统计卡片 + 情景/语义记忆与搜索三个内部 tab，自持内部 tab 状态；
  * 数据 query 化（memoryStats/memoryEpisodes 缓存 SWR）。
+ * 列表项操作面：查看详情（by-id 端点取全文）+ 删除单条（不可逆，两步确认）。
  */
 
+import { useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { Brain, Inbox, Search } from '@/assets/icons'
+import { Brain, Eye, Inbox, Search, Trash2 } from '@/assets/icons'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { MEMORY_EPISODES_PAGE_SIZE, useMemoryEpisodesQuery, useMemoryStatsQuery } from '@/hooks/queries/useMemoryQueries'
-import { searchHindsight, getSemanticMemory } from '@/services/api/memory'
-import type { SemanticKnowledge, MemoryItem } from '@/services/api/memory'
+import {
+  deleteMemoryById,
+  getMemoryById,
+  getSemanticMemory,
+  searchHindsight,
+} from '@/services/api/memory'
+import { queryKeys } from '@/services/query/queryKeys'
+import type { MemoryDetail, SemanticKnowledge, MemoryItem } from '@/services/api/memory'
 
 /** Tab 类型 */
 type TabType = 'episodes' | 'semantic' | 'search'
+
+/** 从被 reject 的对象中提取后端错误消息（apiClient 拦截器构造普通 ApiError，非 Error 实例）。 */
+const getApiMsg = (e: unknown, fallback: string): string =>
+  (e as { message?: string })?.message ?? fallback
+
+/**
+ * 列表项操作列（情景/语义条目共用）：查看详情 + 删除。
+ * 删除不可逆——两步确认（点击删除 → 确认/取消），确认后按钮进入删除中态。
+ */
+function MemoryItemActions(props: {
+  id: string
+  confirming: boolean
+  deleting: boolean
+  onView: (id: string) => void
+  onRequestDelete: (id: string) => void
+  onCancelDelete: () => void
+  onConfirmDelete: (id: string) => void
+}) {
+  const { id, confirming, deleting } = props
+  return (
+    <div className="flex shrink-0 items-center gap-1">
+      {confirming ? (
+        <>
+          <button
+            onClick={() => props.onConfirmDelete(id)}
+            disabled={deleting}
+            className="bg-destructive text-destructive-foreground rounded px-2 py-0.5 text-xs disabled:opacity-50"
+          >
+            {deleting ? '删除中...' : '确认删除'}
+          </button>
+          <button
+            onClick={props.onCancelDelete}
+            disabled={deleting}
+            className="hover:bg-accent/50 rounded px-2 py-0.5 text-xs"
+          >
+            取消
+          </button>
+        </>
+      ) : (
+        <>
+          <button
+            onClick={() => props.onView(id)}
+            className="text-muted-foreground hover:text-foreground rounded p-1"
+            title="查看详情"
+            aria-label={`查看记忆详情 ${id}`}
+          >
+            <Eye className="h-4 w-4" />
+          </button>
+          <button
+            onClick={() => props.onRequestDelete(id)}
+            className="text-muted-foreground hover:text-destructive rounded p-1"
+            title="删除"
+            aria-label={`删除记忆 ${id}`}
+          >
+            <Trash2 className="h-4 w-4" />
+          </button>
+        </>
+      )}
+    </div>
+  )
+}
 
 /**
  * 对话记忆分区组件
@@ -32,6 +102,14 @@ export function ConversationMemorySection() {
   const [searchResults, setSearchResults] = useState<MemoryItem[]>([])
   const [searchTotal, setSearchTotal] = useState(0)
   const [isSearching, setIsSearching] = useState(false)
+
+  // 条目操作面状态：详情对话框 + 删除两步确认（不可逆操作）
+  const queryClient = useQueryClient()
+  const [detailOpen, setDetailOpen] = useState(false)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [detail, setDetail] = useState<MemoryDetail | null>(null)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
 
   // 统计 + 第一页情景记忆（query 化）：staleTime 窗口内重挂零请求
   const statsQuery = useMemoryStatsQuery()
@@ -86,6 +164,38 @@ export function ConversationMemorySection() {
     setActiveTab(tab)
     if (tab === 'semantic' && semantics.length === 0) {
       void fetchSemantics()
+    }
+  }
+
+  /** 查看详情：by-id 端点取全文（列表条目为摘要/截断展示） */
+  const handleViewDetail = async (id: string) => {
+    setDetailOpen(true)
+    setDetailLoading(true)
+    setDetail(null)
+    try {
+      setDetail(await getMemoryById(id))
+    } catch (err: unknown) {
+      setDetailOpen(false)
+      setError(getApiMsg(err, '获取记忆详情失败'))
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
+  /** 删除单条（确认后调用）：不可逆，成功后刷新统计/分页并本地剔除语义条目 */
+  const handleDeleteConfirm = async (id: string) => {
+    setDeletingId(id)
+    setError(null)
+    try {
+      await deleteMemoryById(id)
+      setConfirmDeleteId(null)
+      void queryClient.invalidateQueries({ queryKey: queryKeys.memoryStats })
+      void queryClient.invalidateQueries({ queryKey: queryKeys.memoryEpisodesPrefix })
+      setSemantics((prev) => prev.filter((s) => s.id !== id))
+    } catch (err: unknown) {
+      setError(getApiMsg(err, '删除记忆失败'))
+    } finally {
+      setDeletingId(null)
     }
   }
 
@@ -146,8 +256,17 @@ export function ConversationMemorySection() {
             ) : (
               episodes.map((ep) => (
                 <div key={ep.id} className="rounded-lg border p-4">
-                  <div className="mb-2 flex items-start justify-between">
+                  <div className="mb-2 flex items-start justify-between gap-2">
                     <h3 className="mr-2 flex-1 text-sm font-semibold">{ep.intent_text}</h3>
+                    <MemoryItemActions
+                      id={ep.id}
+                      confirming={confirmDeleteId === ep.id}
+                      deleting={deletingId === ep.id}
+                      onView={handleViewDetail}
+                      onRequestDelete={setConfirmDeleteId}
+                      onCancelDelete={() => setConfirmDeleteId(null)}
+                      onConfirmDelete={handleDeleteConfirm}
+                    />
                     {ep.final_score !== undefined && (
                       <span className="bg-primary/10 text-primary rounded-full px-2 py-0.5 text-xs">
                         {ep.final_score.toFixed(2)}
@@ -212,7 +331,18 @@ export function ConversationMemorySection() {
             ) : (
               semantics.map((sm) => (
                 <div key={sm.id} className="rounded-lg border p-4">
-                  <p className="mb-2 text-sm">{sm.content}</p>
+                  <div className="mb-2 flex items-start justify-between gap-2">
+                    <p className="flex-1 text-sm">{sm.content}</p>
+                    <MemoryItemActions
+                      id={sm.id}
+                      confirming={confirmDeleteId === sm.id}
+                      deleting={deletingId === sm.id}
+                      onView={handleViewDetail}
+                      onRequestDelete={setConfirmDeleteId}
+                      onCancelDelete={() => setConfirmDeleteId(null)}
+                      onConfirmDelete={handleDeleteConfirm}
+                    />
+                  </div>
                   <div className="text-muted-foreground flex items-center gap-2 text-xs">
                     <span className="bg-accent/30 rounded px-1.5 py-0.5">{sm.source_type}</span>
                     <span>{new Date(sm.created_at).toLocaleString()}</span>
@@ -272,6 +402,34 @@ export function ConversationMemorySection() {
             ))}
           </div>
         )}
+
+        {/* 记忆详情对话框（by-id 端点取全文） */}
+        <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
+          <DialogContent width="32rem">
+            <DialogHeader>
+              <DialogTitle>记忆详情</DialogTitle>
+              <DialogDescription>记忆条目的完整内容与元信息</DialogDescription>
+            </DialogHeader>
+            {detailLoading ? (
+              <div className="text-muted-foreground py-6 text-center text-sm">加载中...</div>
+            ) : detail ? (
+              <div className="space-y-3">
+                <p className="text-sm break-words whitespace-pre-wrap">{detail.content}</p>
+                <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
+                  <span className="bg-accent/30 rounded px-1.5 py-0.5">
+                    {detail.memory_type || '未知类型'}
+                  </span>
+                  {detail.tags.map((tag) => (
+                    <span key={tag} className="bg-primary/10 text-primary rounded px-1.5 py-0.5">
+                      {tag}
+                    </span>
+                  ))}
+                  {detail.created_at && <span>{new Date(detail.created_at).toLocaleString()}</span>}
+                </div>
+              </div>
+            ) : null}
+          </DialogContent>
+        </Dialog>
     </>
   )
 }

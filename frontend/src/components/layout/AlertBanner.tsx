@@ -187,10 +187,13 @@ export function useLayoutAlerts(): AlertBannerItem[] {
   const { budgetStatus, refetch: refreshBudget } = useBudgetStatus()
 
   // cost_update 事件到达时复查预算状态（事件驱动，免轮询）；
-  // 失败静默——告警以最后一次已知状态为准
+  // 失败静默——告警以最后一次已知状态为准（useBudgetStatus 内 error 态承载）
   useEffect(() => {
     const refetchBudget = () => {
-      refreshBudget().catch(() => undefined)
+      refreshBudget().catch(() => {
+        // HACK: WS 回调无人消费 rejection，兜底防 unhandled rejection；
+        // 失败态由 useBudgetStatus 的 error 状态承载（OBS-R258-1 吞错误规则登记）
+      })
     }
     globalWS.subscribe(WS_SERVER_EVENTS.COST_UPDATE, refetchBudget)
     return () => {

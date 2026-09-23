@@ -174,12 +174,12 @@ impl<'a> PluginContext<'a> {
 ///
 /// [来源: docs/working/adr_engine_design.md §5.3]
 pub struct ContentLoader {
-    /// SQLite 存储句柄（四表：runs/messages/traces/blobs）
+    /// SQLite 存储句柄（blobs/state/traces 懒加载）
     store: Arc<dyn StorageBackend>,
-    /// 当前运行实例 ID
+    /// 当前运行实例 ID（关联标签，state.run_id 同源）
     run_id: String,
-    /// 当前分支 ID（ADR ⑤）
-    branch_id: String,
+    /// 所属管道 ID（内容按管道定位）
+    pipeline_id: String,
 }
 
 impl ContentLoader {
@@ -187,13 +187,13 @@ impl ContentLoader {
     ///
     /// # Arguments
     /// * `store` - SQLite 存储后端
-    /// * `run_id` - 运行实例 ID
-    /// * `branch_id` - 当前分支 ID
-    pub fn new(store: Arc<dyn StorageBackend>, run_id: String, branch_id: String) -> Self {
+    /// * `run_id` - 运行实例 ID（关联标签）
+    /// * `pipeline_id` - 所属管道 ID
+    pub fn new(store: Arc<dyn StorageBackend>, run_id: String, pipeline_id: String) -> Self {
         Self {
             store,
             run_id,
-            branch_id,
+            pipeline_id,
         }
     }
 }
@@ -202,7 +202,7 @@ impl std::fmt::Debug for ContentLoader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ContentLoader")
             .field("run_id", &self.run_id)
-            .field("branch_id", &self.branch_id)
+            .field("pipeline_id", &self.pipeline_id)
             .finish()
     }
 }
@@ -212,7 +212,7 @@ impl Clone for ContentLoader {
         Self {
             store: Arc::clone(&self.store),
             run_id: self.run_id.clone(),
-            branch_id: self.branch_id.clone(),
+            pipeline_id: self.pipeline_id.clone(),
         }
     }
 }
@@ -459,81 +459,77 @@ impl RunStatus {
     }
 }
 
-/// runs 表记录——运行实例元数据。
+/// 运行记录——由 state 投影合成的运行元数据（runs 表已退役，ADR 2026-09-18）。
 ///
-/// 对应 SQLite 四表中的 `runs` 表。
-///
-/// [来源: docs/working/adr_engine_design.md §4.2 表1]
+/// 结构保留以维持 capability `pipeline-executor.get_run_status` 等对外形状；
+/// 字段来源：pipeline_state 标量键（run_id/run_status/run_started_at/
+/// run_ended_at/run_config_hash/suspend_request_id）。current_branch/current_seq
+/// 为导航指针退役后的恒定兼容值（"main"/0），无独立真值。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
-    /// 运行实例唯一 ID（UUID）
+    /// 运行实例唯一 ID（UUID；state.run_id 同源）
     pub run_id: String,
     /// YAML 配置哈希（配置即产品，ADR ⑪）
     pub config_hash: String,
-    /// 运行状态
+    /// 运行状态（state.run_status 权威）
     pub status: RunStatus,
     /// 多租户隔离
     pub tenant_id: String,
-    /// 创建时间（ISO8601）
+    /// 开始时间（ISO8601；state.run_started_at）
     pub created_at: String,
-    /// 结束时间（None = 未结束）
+    /// 结束时间（None = 未结束；state.run_ended_at）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<String>,
-    /// 当前活跃分支 ID（ADR ⑤）
+    /// 兼容字段（恒 "main"，导航指针已退役）
     pub current_branch: String,
-    /// 当前分支内序列号（ADR ⑤）
+    /// 兼容字段（恒 0，导航指针已退役）
     pub current_seq: u32,
-    /// 附加元数据（JSON：Agent ID、会话 ID 等）
+    /// 兼容元数据（挂起凭据 suspend_request_id 映射回 pending_interaction_request_id）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+    /// 所属管道 ID（state 反查所得；None = 投影未携带）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline_id: Option<String>,
 }
 
 /// 管道运行快照（统一管道管理查询：`GET /api/v1/pipelines/runs`）。
 ///
-/// runs × message_slots × pipeline_sessions 三表联结：
-/// - run → pipeline 映射经 message_slots.run_id（op-based 落槽时写入）；
-/// - pipeline → 会话映射经 pipeline_sessions；
-/// - 消耗账本真值在 state 的 track.total_tokens（无投影表）。
-///
-/// 无消息槽的 run（旧引擎 start_run 占位）在查询层被过滤，只呈现真实执行的管道。
+/// runs 表退役后由 pipeline_state 运行簿记键（run_status/run_started_at/
+/// run_ended_at/run_id）× pipeline_sessions 合成：
+/// - 每个执行过的管道恰一条快照（当前运行的投影）；
+/// - pipeline → 会话映射经 pipeline_sessions。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineRunInfo {
-    /// 运行实例唯一 ID（UUID）
+    /// 运行实例唯一 ID（UUID；state.run_id）
     pub run_id: String,
-    /// 所属管道 ID（消息层主键，可空——理论上查询层已过滤）
+    /// 所属管道 ID
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pipeline_id: Option<String>,
     /// 归属会话（thread）ID，可空（pipeline_sessions 未建映射的历史数据）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
-    /// 运行状态
+    /// 运行状态（state.run_status）
     pub status: RunStatus,
-    /// 创建时间（ISO8601，即开始时间）
+    /// 开始时间（ISO8601；state.run_started_at）
     pub started_at: String,
     /// 结束时间（None = 未结束）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<String>,
 }
 
-/// messages 表记录——消息表（含分支标识）。
+/// 消息槽位记录（message_slots 投影）。
 ///
-/// 对应 SQLite 四表中的 `messages` 表。
-///
-/// **关键设计**（ADR ⑤⑦）：
-/// - `branch_id` + `seq_in_branch` 实现多分支模型
+/// **关键设计**：
+/// - `seq` 是稳定逻辑槽位（≠ 数组下标），删除留 gap；定位 = (pipeline_id, seq)
 /// - `blob_id` 指向 blobs 表，内容懒加载
-/// - `content_preview` 仅存极短摘要（ADR ④废除完整 preview 机制）
-///
-/// [来源: docs/working/adr_engine_design.md §4.2 表2]
+/// - `run_id` 为产出该消息的运行关联标签（state.run_id 同源，无 runs 表）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageRecord {
     /// 消息唯一 ID（UUID）
     pub message_id: String,
-    /// 所属运行实例 ID
+    /// 产出该消息的运行关联标签（state.run_id 同源）
     pub run_id: String,
-    /// 分支标识（ADR ⑤）
-    pub branch_id: String,
-    /// 分支内序列号（ADR ⑤）
+    /// 消息槽位序号（稳定逻辑槽位，删除留 gap）
     pub seq_in_branch: u32,
     /// 消息角色（system / user / assistant / tool）
     pub role: String,
@@ -583,6 +579,39 @@ pub struct MessageRecord {
     /// GET messages 原样回显，前端据此把乐观消息与权威记录对账去重。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+}
+
+/// 消息段记录（message_segments 投影）——替换事件的冻结内容。
+///
+/// 段 = 消息引用的有序列表（成员本体是内容寻址 blob，一条一存），
+/// 存储粒度 = 消息、分支/可见性粒度 = 段（消息段模型方案 §2/§4）：
+/// - `base_seq`/`base_len` 定位冻结区间 `[base_seq, base_seq + base_len)`；
+/// - `members_blob_id` 指向「成员 blob_id 有序数组」的 blob（引用列表，非全文）；
+/// - `visible_to` 是非启用段的可消费者标签（空串 = 全可见）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SegmentRecord {
+    /// 段唯一 ID（`seg_<uuid>`，写入方生成；段行按 id 幂等）
+    pub id: String,
+    /// 归属租户（一用户一租户）
+    pub tenant_id: String,
+    /// 所属管道 ID
+    pub pipeline_id: String,
+    /// 区间起点（插入后移时同步 +1）
+    pub base_seq: i64,
+    /// 区间长度（= 成员数；冻结时确定）
+    pub base_len: i64,
+    /// 成员引用列表 blob（成员 blob_id 的 JSON 数组）
+    pub members_blob_id: String,
+    /// 非启用段的可消费者标签集；空串 = 全可见（启用内容无标签）
+    pub visible_to: String,
+    /// 首条 content 截断预览（‹i/n› 代际预览免解 blob）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    /// 创建时间（ISO8601）
+    pub created_at: String,
+    /// 成员消息全文（get 路径解析引用列表后填充；list 路径 None 不解 blob）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub members: Option<Vec<serde_json::Value>>,
 }
 
 /// sessions 表记录——会话标签夹（域2，对齐 0.1 SessionModel）。
@@ -679,31 +708,28 @@ pub enum PatchType {
     Rollback,
 }
 
-/// traces 表记录——状态变更日志（Append-Only Patch）。
+/// traces 表记录——状态变更日志（Append-Only Patch，pipeline 级 op 流）。
 ///
-/// 对应 SQLite 四表中的 `traces` 表。
+/// 对应 SQLite `traces` 表（ADR 2026-09-18：runs/branches 退役与 state 唯一真值）。
 ///
-/// **关键设计**（ADR ③）：
-/// - **Append-Only**：只追加，永不修改、永不删除
-/// - **Patch 记录**：每条 trace 记录一个 PluginResult 的变更
-/// - **正向重放**：回滚时按 branch_id + seq_in_branch 正向重放 Patch 恢复状态
-///
-/// [来源: docs/working/adr_engine_design.md §4.2 表3]
+/// **关键设计**：
+/// - **Append-Only**：只追加，永不修改、永不删除（保留期清扫除外）
+/// - **Patch 记录**：每条 trace 记录一个状态窗口的变更
+/// - **定位 = (pipeline_id, seq)**：seq 由存储层写入时分配（MAX(seq)+1），
+///   即日志位置——「当前在哪」= 日志末端，无需独立导航指针
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceEntry {
     /// 日志条目唯一 ID
     pub trace_id: String,
-    /// 所属运行实例 ID
-    pub run_id: String,
-    /// 所属分支
-    pub branch_id: String,
-    /// 分支内序列号
-    pub seq_in_branch: u32,
+    /// 所属管道 ID（op 流主键）
+    pub pipeline_id: String,
+    /// 日志序号（存储层写入时分配 = MAX(seq)+1；构造方可填 0，入库前被覆盖）
+    pub seq: u32,
     /// 产生此 Patch 的插件 ID
     pub plugin_id: String,
     /// Patch 类型
     pub patch_type: PatchType,
-    /// Patch 内容（JSON，对应 PluginResult 的字段）
+    /// Patch 内容（JSON，对应状态窗口的变更）
     pub patch_data: serde_json::Value,
     /// 创建时间（ISO8601）
     pub created_at: String,
@@ -1143,23 +1169,6 @@ mod tests {
         async fn append_trace(&self, _entry: TraceEntry) -> Result<(), StorageError> {
             unreachable!("本用例不触发存储调用")
         }
-        async fn update_run_status(
-            &self,
-            _run_id: &str,
-            _status: RunStatus,
-            _current_branch: Option<&str>,
-            _current_seq: Option<u32>,
-        ) -> Result<(), StorageError> {
-            unreachable!("本用例不触发存储调用")
-        }
-        async fn create_run(
-            &self,
-            _run_id: &str,
-            _config_hash: &str,
-            _tenant_id: &str,
-        ) -> Result<(), StorageError> {
-            unreachable!("本用例不触发存储调用")
-        }
         async fn store_blob(&self, _data: &[u8], _mime_type: &str) -> Result<String, StorageError> {
             unreachable!("本用例不触发存储调用")
         }
@@ -1564,6 +1573,7 @@ mod tests {
             current_branch: "main".into(),
             current_seq: 3,
             metadata: Some(serde_json::json!({"agent_id": "main"})),
+            pipeline_id: Some("p-1".into()),
         };
         assert_serde_roundtrip(&running);
         // ended_at None 不序列化；结束形态携带 ended_at
@@ -1607,7 +1617,6 @@ mod tests {
         let minimal = MessageRecord {
             message_id: "m-1".into(),
             run_id: "r-1".into(),
-            branch_id: "main".into(),
             seq_in_branch: 0,
             role: "user".into(),
             blob_id: None,
@@ -1715,9 +1724,8 @@ mod tests {
     fn trace_entry_serde_roundtrip() {
         let entry = TraceEntry {
             trace_id: "tr-1".into(),
-            run_id: "r-1".into(),
-            branch_id: "main".into(),
-            seq_in_branch: 7,
+            pipeline_id: "p-1".into(),
+            seq: 7,
             plugin_id: "llm_core".into(),
             patch_type: PatchType::StateUpdate,
             patch_data: serde_json::json!({"state_updates": {"k": 1}}),

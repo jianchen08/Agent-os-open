@@ -57,12 +57,12 @@ describe('notificationStore 入队与排序', () => {
     expect(titles).toEqual(['后入队但时间更早', '先入队'])
   })
 
-  it('显式 id 重复入队去重：只保留一条', () => {
+  it('显式 id 重复入队更新而非新增：最新内容生效、只保留一条', () => {
     store.getState().addNotification(makeInput({ id: 'dup-1', title: '第一次' }))
     store.getState().addNotification(makeInput({ id: 'dup-1', title: '第二次' }))
     const list = store.getState().notifications
     expect(list).toHaveLength(1)
-    expect(list[0].title).toBe('第一次')
+    expect(list[0].title).toBe('第二次')
     expect(list[0].isRead).toBe(false)
   })
 

@@ -80,6 +80,11 @@ export interface ElectronAPI {
   isChildWindow: boolean;
 
   /** 主窗口自控 API（自定义标题栏按钮；按发起调用的窗口自身生效） */
+  /** 认证会话镜像（强杀耐久备份）：refresh token 主进程落盘，跨重启自动登录 */
+  authSession: {
+    save(refreshToken: string | null): Promise<boolean>;
+    load(): Promise<string | null>;
+  };
   windowControls: {
     /** 最小化 */
     minimize(): Promise<void>;
@@ -96,6 +101,18 @@ export interface ElectronAPI {
      * @returns 取消监听的函数
      */
     onMaximizedChange(callback: (maximized: boolean) => void): () => void;
+  };
+
+  /** 系统通知子 API（宿主 OS 原生通知：Windows toast / macOS 通知中心 / Linux libnotify） */
+  notification: {
+    /** 弹出系统通知；返回是否成功弹出（宿主不支持/参数非法为 false） */
+    show(opts: { title: string; body: string }): Promise<boolean>;
+  };
+
+  /** 原生对话框子 API（系统资源管理器） */
+  dialog: {
+    /** 选择目录；返回绝对路径，用户取消为 null */
+    pickDirectory(): Promise<string | null>;
   };
 }
 
@@ -137,6 +154,15 @@ contextBridge.exposeInMainWorld("electronAPI", {
     return () => {
       ipcRenderer.removeListener("window-info", handler);
     };
+  },
+  /** 认证会话镜像（强杀耐久备份）：tokenLifecycle 写入/清除时镜像，启动时回读 */
+  authSession: {
+    save: (refreshToken: string | null) => {
+      return ipcRenderer.invoke("auth:session:save", refreshToken) as Promise<boolean>;
+    },
+    load: () => {
+      return ipcRenderer.invoke("auth:session:load") as Promise<string | null>;
+    },
   },
 
   /**
@@ -238,6 +264,28 @@ contextBridge.exposeInMainWorld("electronAPI", {
       return () => {
         ipcRenderer.removeListener(MAXIMIZED_CHANGED_CHANNEL, handler);
       };
+    },
+  },
+
+  /**
+   * 系统通知子 API。invoke 通道为 notification:show，主进程用 Electron
+   * Notification 按宿主 OS 路由（Windows toast / macOS 通知中心 / Linux
+   * libnotify）；提示音仍由渲染进程 Web Audio 合成，主进程侧静音。
+   */
+  notification: {
+    show: (opts: { title: string; body: string }) => {
+      return ipcRenderer.invoke("notification:show", opts) as Promise<boolean>;
+    },
+  },
+
+  /**
+   * 原生对话框子 API。invoke 通道为 dialog:pick-directory，主进程用
+   * Electron dialog.showOpenDialog 以发起窗口为父窗模态弹出资源管理器
+   * 目录选择；选中返回绝对路径，用户取消为 null。
+   */
+  dialog: {
+    pickDirectory: () => {
+      return ipcRenderer.invoke("dialog:pick-directory") as Promise<string | null>;
     },
   },
 } satisfies ElectronAPI);

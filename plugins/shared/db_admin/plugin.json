@@ -1,5 +1,8 @@
 {
   "id": "db_admin",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "DB Admin HTTP Face",
   "description": "DB Admin 管理后台的 HTTP 面层（boot-plugin 第一刀）：/ext/db_admin/** 端点经内核 dispatcher 进本插件 http.handle，反向调用内核 db-admin capability（SQL 能力层：表枚举/行 CRUD/SQL 执行器，逻辑与鉴权在内核 handler 内）。鉴权凭证（Authorization 头）由本插件原样转发、内核侧解析，插件不做鉴权决策。",
   "version": "1.0.0",

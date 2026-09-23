@@ -30,7 +30,8 @@ fn tool_round_tokio_blocking_no_segfault() {
     // Windows-only SEGV 复现/回归：native cdylib 产物（.dll）不入库（.gitignore
     // *.dll），CI runner 无产物也无 D:\crashdumps_kernel 大状态文件——该测试
     // 依赖取证期本机资产，非 Windows 环境直接跳过（与 rust-coverage 注释的
-    // STATUS_ACCESS_VIOLATION 容错同族）。
+    // STATUS_ACCESS_VIOLATION 容错同族）。取证资产（dll×2 + 状态文件）任一缺失
+    // 同样跳过：本测试是资产驱动的取证复现，不是可合成夹具的单测。
     if !cfg!(windows) {
         eprintln!("skip: Windows-only native cdylib SEGV repro（CI 无 dll 产物/取证资产）");
         return;
@@ -40,6 +41,18 @@ fn tool_round_tokio_blocking_no_segfault() {
         std::path::Path::new(base).join("pipeline/core/tool_core/pipeline_tool_core_native.dll");
     let sg = std::path::Path::new(base)
         .join("pipeline/output/spill_guard/pipeline_spill_guard_native.dll");
+    let state_path = std::path::Path::new(r"D:\crashdumps_kernel\big_state.json");
+    let missing = [tc.as_os_str(), sg.as_os_str(), state_path.as_os_str()]
+        .into_iter()
+        .filter(|p| !std::path::Path::new(p).exists())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        eprintln!(
+            "skip: 取证资产缺失 {:?}（SEGV repro 需完整取证期本机资产）",
+            missing
+        );
+        return;
+    }
     let loader = Arc::new(NativePluginLoader::new());
     loader.load("pipeline_tool_core", &tc).expect("load tc");
     loader.load("pipeline_spill_guard", &sg).expect("load sg");
@@ -50,7 +63,7 @@ fn tool_round_tokio_blocking_no_segfault() {
             .build()
             .unwrap(),
     );
-    let state = std::fs::read_to_string(r"D:\crashdumps_kernel\big_state.json").unwrap();
+    let state = std::fs::read_to_string(state_path).unwrap();
 
     let ctx_tc = PluginCtx {
         state_json: state.clone(),

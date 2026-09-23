@@ -1,5 +1,8 @@
 {
   "id": "browser_tool",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Browser Tool",
   "description": "浏览器操作工具——经 MCP Bridge 网关操作宿主机 Playwright 浏览器（隔离任务自动在沙箱内发起调用）",
   "version": "1.0.0",

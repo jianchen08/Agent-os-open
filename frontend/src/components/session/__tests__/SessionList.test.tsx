@@ -11,43 +11,10 @@
 import { cleanup, fireEvent, render, screen, within, act } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SessionList } from '../SessionList'
-import type { Session } from '@/types'
-
-/** 创建模拟会话数据的工厂函数 */
-function createMockSession(overrides: Partial<Session> = {}): Session {
-  return {
-    id: `session-${Math.random().toString(36).slice(2, 9)}`,
-    title: '测试会话',
-    createdAt: '2026-01-01T00:00:00Z',
-    updatedAt: '2026-01-01T12:00:00Z',
-    messageCount: 5,
-    starred: false,
-    pinned: false,
-    ...overrides,
-  }
-}
+import { createSessionListCallbacks, makeSession, openDropdownMenu } from './sessionTestUtils'
 
 /** 默认回调函数集合 */
-const defaultCallbacks = {
-  onSessionClick: vi.fn(),
-  onDeleteSession: vi.fn().mockResolvedValue(undefined),
-  onEditSession: vi.fn(),
-  onCopySession: vi.fn(),
-  onStarSession: vi.fn(),
-  onPinSession: vi.fn(),
-}
-
-/**
- * 打开 Radix UI DropdownMenu 的辅助函数
- *
- * Radix UI 需要完整的指针事件序列（pointerDown → pointerUp → click）
- * 才能正确触发菜单打开。
- */
-function openDropdownMenu(triggerElement: HTMLElement): void {
-  fireEvent.pointerDown(triggerElement)
-  fireEvent.pointerUp(triggerElement)
-  fireEvent.click(triggerElement)
-}
+const defaultCallbacks = createSessionListCallbacks()
 
 afterEach(() => {
   cleanup()
@@ -59,7 +26,7 @@ afterEach(() => {
 // ============================================================
 /** 渲染单会话列表并打开其「更多操作」下拉（置顶族用例共用） */
 async function renderSingleAndOpenMenu(pinned: boolean) {
-  const session = createMockSession({ pinned })
+  const session = makeSession({ pinned })
   render(
     <SessionList
       sessions={[session]}
@@ -120,8 +87,8 @@ describe('AC-1.3-1: 置顶功能入口', () => {
 // ============================================================
 describe('AC-1.3-2: 置顶会话分组显示', () => {
   it('有置顶会话时应显示「已置顶」和「全部会话」分组标题', () => {
-    const pinnedSession = createMockSession({ pinned: true, title: '置顶会话A' })
-    const normalSession = createMockSession({ pinned: false, title: '普通会话B' })
+    const pinnedSession = makeSession({ pinned: true, title: '置顶会话A' })
+    const normalSession = makeSession({ pinned: false, title: '普通会话B' })
     render(
       <SessionList
         sessions={[pinnedSession, normalSession]}
@@ -136,7 +103,7 @@ describe('AC-1.3-2: 置顶会话分组显示', () => {
   })
 
   it('无置顶会话时不应显示「已置顶」分组标题', () => {
-    const normalSession = createMockSession({ pinned: false, title: '普通会话' })
+    const normalSession = makeSession({ pinned: false, title: '普通会话' })
     render(
       <SessionList
         sessions={[normalSession]}
@@ -151,12 +118,12 @@ describe('AC-1.3-2: 置顶会话分组显示', () => {
   })
 
   it('置顶会话应显示在普通会话之前', () => {
-    const pinnedSession = createMockSession({
+    const pinnedSession = makeSession({
       pinned: true,
       title: '置顶会话',
       updatedAt: '2026-01-01T00:00:00Z',
     })
-    const normalSession = createMockSession({
+    const normalSession = makeSession({
       pinned: false,
       title: '普通会话',
       updatedAt: '2026-01-02T00:00:00Z',
@@ -179,8 +146,8 @@ describe('AC-1.3-2: 置顶会话分组显示', () => {
   })
 
   it('两组之间应有视觉分隔线', () => {
-    const pinnedSession = createMockSession({ pinned: true, title: '置顶会话' })
-    const normalSession = createMockSession({ pinned: false, title: '普通会话' })
+    const pinnedSession = makeSession({ pinned: true, title: '置顶会话' })
+    const normalSession = makeSession({ pinned: false, title: '普通会话' })
     render(
       <SessionList
         sessions={[pinnedSession, normalSession]}
@@ -198,13 +165,13 @@ describe('AC-1.3-2: 置顶会话分组显示', () => {
   })
 
   it('置顶会话组内应按 updatedAt 降序排序', () => {
-    const pinnedOlder = createMockSession({
+    const pinnedOlder = makeSession({
       id: 'pinned-older',
       pinned: true,
       title: '较旧置顶',
       updatedAt: '2026-01-01T00:00:00Z',
     })
-    const pinnedNewer = createMockSession({
+    const pinnedNewer = makeSession({
       id: 'pinned-newer',
       pinned: true,
       title: '较新置顶',
@@ -229,13 +196,13 @@ describe('AC-1.3-2: 置顶会话分组显示', () => {
   })
 
   it('普通会话组内应按 updatedAt 降序排序', () => {
-    const normalOlder = createMockSession({
+    const normalOlder = makeSession({
       id: 'normal-older',
       pinned: false,
       title: '较旧普通',
       updatedAt: '2026-01-01T00:00:00Z',
     })
-    const normalNewer = createMockSession({
+    const normalNewer = makeSession({
       id: 'normal-newer',
       pinned: false,
       title: '较新普通',
@@ -265,7 +232,7 @@ describe('AC-1.3-2: 置顶会话分组显示', () => {
 // ============================================================
 describe('AC-1.3-3: 置顶视觉标识', () => {
   it('置顶会话左侧应显示 Pin 图标替代 MessageSquare 图标', () => {
-    const pinnedSession = createMockSession({ pinned: true, title: '置顶会话' })
+    const pinnedSession = makeSession({ pinned: true, title: '置顶会话' })
     render(
       <SessionList
         sessions={[pinnedSession]}
@@ -281,7 +248,7 @@ describe('AC-1.3-3: 置顶视觉标识', () => {
   })
 
   it('普通会话左侧不显示图标（现行契约：仅置顶会话有 Pin 图标）', () => {
-    const normalSession = createMockSession({ pinned: false, title: '普通会话' })
+    const normalSession = makeSession({ pinned: false, title: '普通会话' })
     render(
       <SessionList
         sessions={[normalSession]}
@@ -314,7 +281,7 @@ describe('AC-1.3-4: 兼容现有功能', () => {
   })
 
   it('删除按钮点击后应设置确认状态（触发 Dialog 打开）', async () => {
-    const session = createMockSession({ title: '待删除会话' })
+    const session = makeSession({ title: '待删除会话' })
     render(
       <SessionList
         sessions={[session]}
@@ -347,7 +314,7 @@ describe('AC-1.3-4: 兼容现有功能', () => {
   })
 
   it('星标切换功能不受影响', async () => {
-    const session = createMockSession({ starred: false })
+    const session = makeSession({ starred: false })
     render(
       <SessionList
         sessions={[session]}
@@ -371,7 +338,7 @@ describe('AC-1.3-4: 兼容现有功能', () => {
   })
 
   it('hover 时仍显示操作按钮（现行契约：星标 + 更多操作）', () => {
-    const session = createMockSession()
+    const session = makeSession()
     render(
       <SessionList
         sessions={[session]}
@@ -390,7 +357,7 @@ describe('AC-1.3-4: 兼容现有功能', () => {
   })
 
   it('点击星标图标应直接调用 onStarSession（简化交互，无需打开下拉菜单）', () => {
-    const session = createMockSession({ starred: false })
+    const session = makeSession({ starred: false })
     render(
       <SessionList
         sessions={[session]}
@@ -409,7 +376,7 @@ describe('AC-1.3-4: 兼容现有功能', () => {
   })
 
   it('点击星标图标不应触发行点击（切换会话）', () => {
-    const session = createMockSession({ starred: false })
+    const session = makeSession({ starred: false })
     render(
       <SessionList
         sessions={[session]}

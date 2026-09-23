@@ -179,9 +179,11 @@
   <div class="toast" id="toast"></div>
 
   <script>
-  // ── 宿主下行桥通用接收器（theme.sync / ctx.sync）──
-  // theme.sync：宿主推 --ag-* 主题 token，逐键设到根元素（面板主题跟宿主）；
-  // ctx.sync：宿主推会话上下文（sessionId 等），存 window.__agentosCtx 供开演送入对话框。
+  // ── 宿主下行桥通用接收器（theme.sync）──
+  // theme.sync：宿主推 --ag-* 主题 token，逐键设到根元素（面板主题跟宿主）。
+  // 宿主下行的会话上下文同步消息在此被有意忽略（BUG-73 断点a）：开演会话锚由
+  // 服务端按卡派生专属扮演会话，宿主活跃会话 id 不再参与任何上行——防「开演
+  // 任务落活跃既有 thread」回归。
   window.addEventListener('message', function (e) {
     var d = e.data;
     if (!d || !d.__agentos_webview) return;
@@ -190,8 +192,6 @@
       Object.keys(d.params.tokens).forEach(function (k) {
         rootStyle.setProperty(k, d.params.tokens[k]);
       });
-    } else if (d.method === 'ctx.sync' && d.params) {
-      window.__agentosCtx = d.params;
     }
   });
 
@@ -269,11 +269,6 @@
   }
   function dotClass(s) {
     return s.run_status === 'running' ? 'running' : (s.task_status === 'completed' ? 'done' : 'other');
-  }
-  // 会话上下文（ctx.sync 下行）：开演/重新生成据此把任务送入当前会话线程
-  function currentSessionId() {
-    var ctx = window.__agentosCtx;
-    return (ctx && ctx.sessionId) ? String(ctx.sessionId) : '';
   }
 
   // ── 数据装载 ──
@@ -458,18 +453,50 @@
     var personaEl = $('persona');
     state.persona = personaEl ? personaEl.value : state.persona;
     setStatus('派发中...');
+    // 会话锚由服务端按卡派生（thread-rp-<card_id> 卡专属扮演会话，BUG-73）：
+    // 宿主活跃会话 id 不上行，开演不再落入用户当时打开的无关会话线程。
     var body = { card_id: c.id, user_persona: state.persona, greeting_index: state.greetingIndex };
-    var sid = currentSessionId();
-    if (sid) body.session_id = sid;
     agentosFetch('/ext/mode_roleplay/data/actions/play', body).then(function (res) {
       var d = unwrap(res) || {};
       setStatus('');
       if (d.error) { toast('派发失败：' + d.error, true); return; }
-      toast('已送入对话框，请在聊天区继续');
+      var taskId = String(d.task_id || '').slice(0, 12);
+      toast('已开演：「' + c.name + '」（任务 ' + taskId + '），演出将落在「开演记录」');
+      // 可见反馈闭环：自动切「开演记录」页签；新记录行要等管道写入 mode 键
+      // 才在列表可见——立即刷一次 + 延迟补刷（演出落定后行/状态到位）。
+      switchTab('sessions');
       loadSessions();
+      setTimeout(loadSessions, 4000);
+      setTimeout(loadSessions, 12000);
     }).catch(function (e) { setStatus(''); toast('派发失败：' + e, true); });
   }
-  // 开演记录摘要（对话在对话框，面板只读不渲染消息流）
+  // 开演记录详情（BUG-73 断点b 可见面）：摘要卡 + 扮演轮次回显。
+  // 演出消息落在任务管道里（聊天区不渲染），面板经 /data/messages 只读回显
+  // assistant 轮次——「开演是否有真实扮演产出」在此可核。
+  function performanceHtml(messages) {
+    var turns = (messages || []).filter(function (m) { return m.role === 'assistant' && m.content; });
+    if (!turns.length) {
+      return '<div class="notice">🎬 演出尚未落定（任务执行中或暂无产出），稍后点「刷新」再看。</div>';
+    }
+    return turns.map(function (m) {
+      return '<div class="quote">' + escapeHtml(m.content) + '</div>';
+    }).join('');
+  }
+  function loadPerformance(pipelineId) {
+    agentosFetch('/ext/mode_roleplay/data/messages?pipeline_id=' + encodeURIComponent(pipelineId))
+      .then(function (res) {
+        if (state.activeSession !== pipelineId) return;  // 已切走：丢弃过期回包
+        var d = unwrap(res) || {};
+        var box = $('performance');
+        if (box) box.innerHTML = performanceHtml(d.messages || []);
+      })
+      .catch(function (e) {
+        if (state.activeSession !== pipelineId) return;
+        var box = $('performance');
+        if (box) box.innerHTML = '<div class="notice">演出读取失败：' +
+          escapeHtml(unwrapErrorMessage(e)) + '（可点「刷新」重试）</div>';
+      });
+  }
   function openSessionRecord(pipelineId) {
     state.activeSession = pipelineId;
     renderList();
@@ -480,13 +507,16 @@
       '<button class="secondary" onclick="regenerateLast()">重新生成</button>');
     var timeLabel = s.created_at || ('记录 ' + s.pipeline_id.slice(0, 10));
     $('mainBody').innerHTML =
-      '<div class="section"><h3>该任务已在对话框/管道执行</h3><div class="sumcard">' +
+      '<div class="section"><h3>本场摘要</h3><div class="sumcard">' +
       '<div class="sumrow"><span class="sumlabel">目标</span><span class="sumval">' + escapeHtml(s.goal || '—') + '</span></div>' +
       '<div class="sumrow"><span class="sumlabel">状态</span><span class="sumval"><span class="dot ' + dotClass(s) + '"></span> ' +
       escapeHtml(s.task_status || s.run_status || '—') + '</span></div>' +
       '<div class="sumrow"><span class="sumlabel">时间</span><span class="sumval">' + escapeHtml(timeLabel) + '</span></div>' +
       '</div></div>' +
-      '<div class="notice">💬 对话请在聊天区继续（选择角色扮演模式）。</div>';
+      '<div class="section"><h3>开场表演</h3><div id="performance">' +
+      '<div class="notice">演出加载中...</div></div></div>' +
+      '<div class="notice">💬 续演：聊天区选「角色扮演」模式对话，或回到角色卡再次开演。</div>';
+    loadPerformance(pipelineId);
   }
   function regenerateLast() {
     if (!state.activeSession) { toast('先在「开演记录」选择一条记录', true); return; }

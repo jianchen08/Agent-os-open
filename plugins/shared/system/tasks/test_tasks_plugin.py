@@ -485,6 +485,103 @@ class TestListTasksFromStateDedup:
         assert proj["parent_task_id"] is None
 
 
+# ── 执行 agent 归属出口（BUG-69）────────────────────────────────
+# 出生链已把执行 agent 身份写全（task_submit 经统一出生协议把 agent.id 落出生
+# state，task_birth 日志同口径），但出口两处丢弃：state 聚合读面按 manifest
+# export_fields 白名单过滤（无声明 = 键被剥）+ 投影不映射 → /ext/task_service/
+# tasks 行恒无归属，前端任务面板 Agent 列恒 '--'。出口契约两环都要有：
+# manifest 声明 agent.id（读面放行）+ 投影映射顶层 agent_name（前端消费键）。
+class TestAgentNameExposure:
+    def _manifest(self) -> dict:
+        return json.loads((_PLUGIN_DIR / "plugin.json").read_text())
+
+    def test_manifest_exports_agent_id_for_state_read_surface(self) -> None:
+        """manifest export_fields 声明 agent.id：pipeline-state 聚合读面据此
+        放行该键——未声明即白名单剥除，投影永远见不到归属（断链上游）。"""
+        assert "agent.id" in self._manifest()["export_fields"]
+
+    @pytest.mark.parametrize(
+        "agent_id",
+        ["general_agent", "mode_coding/code_writer"],
+    )
+    async def test_task_row_carries_top_level_agent_name(
+        self, monkeypatch: pytest.MonkeyPatch, agent_id: str
+    ) -> None:
+        """state 行带 agent.id → 任务行顶层 agent_name（值与出生口径一致）。"""
+        import http_api
+
+        class FakeState:
+            async def call(self, _name: str, _params: dict) -> list:
+                return [
+                    {
+                        "pipeline_id": "pipe-a1",
+                        "task.goal": "写报告",
+                        "task.status": "running",
+                        "agent.id": agent_id,
+                    }
+                ]
+
+        monkeypatch.setattr(http_api, "_capability", lambda _name: FakeState())
+        out = await http_api._list_tasks_from_state()
+        assert out is not None
+        assert len(out) == 1
+        assert out[0]["agent_name"] == agent_id
+        # 响应模型同键透传（前端 task.agent_name 消费面）
+        resp = http_api._task_to_response(out[0])
+        assert resp.agent_name == agent_id
+
+    async def test_historical_row_without_agent_identity_stays_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """历史任务行无 agent.id → agent_name None（兼容形态，前端显示 '--'）；
+        不虚报、不回填。"""
+        import http_api
+
+        class FakeState:
+            async def call(self, _name: str, _params: dict) -> list:
+                return [
+                    {
+                        "pipeline_id": "pipe-old",
+                        "task.goal": "历史任务",
+                        "task.status": "completed",
+                    }
+                ]
+
+        monkeypatch.setattr(http_api, "_capability", lambda _name: FakeState())
+        out = await http_api._list_tasks_from_state()
+        assert out is not None
+        assert out[0]["agent_name"] is None
+        resp = http_api._task_to_response(out[0])
+        assert resp.agent_name is None
+
+    async def test_owned_registration_row_has_no_agent_identity(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """登记声明（task.owned，只登记不执行）无执行 agent 可言 → agent_name
+        None，不借宿主管道的身份冒充归属。"""
+        import http_api
+
+        class FakeState:
+            async def call(self, _name: str, _params: dict) -> list:
+                return [
+                    {
+                        "pipeline_id": "host-pipe",
+                        "task.goal": "宿主",
+                        "task.status": "running",
+                        "agent.id": "general_agent",
+                        "task.owned.reg-1.title": "容器登记",
+                        "task.owned.reg-1.status": "active",
+                    }
+                ]
+
+        monkeypatch.setattr(http_api, "_capability", lambda _name: FakeState())
+        out = await http_api._list_tasks_from_state()
+        assert out is not None
+        by_id = {str(t["id"]): t for t in out}
+        assert by_id["reg-1"]["agent_name"] is None
+        assert by_id["host-pipe"]["agent_name"] == "general_agent"
+
+
 # ── 归属会话透传（ADR 2026-08-21）────────────────────────────────
 # 手动创建任务把用户会话随 chat.send_message 创建参数透传：内核创建分支以真实
 # 会话 link pipeline_sessions（runs 快照/前端导航据此归属）；响应层 thread_id
@@ -495,6 +592,19 @@ class TestOwnershipSessionFlow:
 
         resp = _task_to_response({"id": "t1", "title": "T", "metadata": {"session_id": "thread-s1"}})
         assert resp.thread_id == "thread-s1"
+
+    def test_task_response_agent_name_passthrough_and_compat(self) -> None:
+        """执行 agent 归属顶层透传（BUG-69）；无归属行（历史任务）保持 None
+        ——exclude_none 序列化后键缺席，前端映射空串显示 '--'（预期形态）。"""
+        from http_api import _task_to_response
+
+        with_agent = _task_to_response(
+            {"id": "t1", "title": "T", "agent_name": "mode_coding/code_writer"}
+        )
+        assert with_agent.agent_name == "mode_coding/code_writer"
+        historical = _task_to_response({"id": "t2", "title": "T"})
+        assert historical.agent_name is None
+        assert "agent_name" not in historical.model_dump(by_alias=True, exclude_none=True)
 
     def test_task_response_keeps_top_level_thread_id(self) -> None:
         from http_api import _task_to_response

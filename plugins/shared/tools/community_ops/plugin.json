@@ -1,5 +1,8 @@
 {
   "id": "community_ops_tool",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Community Ops Tool",
   "description": "社区运营工具：GitHub 开源仓巡检/评论发布 + 社区反馈登记册",
   "version": "1.0.0",

@@ -30,7 +30,11 @@ import {
 } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
 import { useInteractionStore } from '@/stores/interactionStore'
-import { useNotificationStore } from '@/stores/notificationStore'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { resolveNotificationRoute, useNotificationStore } from '@/stores/notificationStore'
+import { readSessions } from '@/hooks/queries/useSessionsQuery'
+import { useSessionListStore } from '@/stores/sessionListStore'
+import { openWorkspacePanel, TOP_NAV_PANELS } from '@/services/workspacePanelOpener'
 import { PRIORITY_STYLES } from '@/types/notification'
 import { resolveNotificationLayout } from '@/utils/notificationModes'
 import { NotificationItemComponent } from './NotificationItem'
@@ -102,6 +106,25 @@ export function NotificationCenter({ className, hideTrigger = false }: Notificat
           closePanel()
           return
         }
+      }
+      // 按 payload 路由（OBS-R259-1）：任务 → 打开/激活任务管理签并定位该任务；
+      // 会话 → 切换到该会话；都无（或会话已不在列表）→ 维持现状（零导航、面板不动）
+      const route = resolveNotificationRoute(notification)
+      if (!route) return
+      if (route.kind === 'task') {
+        const spec = TOP_NAV_PANELS['/tasks']
+        openWorkspacePanel(spec)
+        useLayoutModeStore
+          .getState()
+          .updateWorkspaceTab(spec.id, { props: { focusTaskId: route.taskId } })
+        closePanel()
+        return
+      }
+      // 会话 id 坐标可能是管道 id 等非会话键（如命中率告警按 pipeline 挂
+      // sessionId）：不在会话列表一律视为无路由坐标，维持现状不跳转
+      if (readSessions().some((s) => s.id === route.sessionId)) {
+        void useSessionListStore.getState().setActiveSession(route.sessionId)
+        closePanel()
       }
     },
     [markAsRead, closePanel],

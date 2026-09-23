@@ -81,10 +81,8 @@ export interface Session {
   workspaceMode?: 'worktree' | 'plain' | null
   /** 会话隔离模式：isolated（容器）/ non_isolated（宿主+审批） */
   isolationMode?: 'isolated' | 'non_isolated' | null
-  /** 关联的管道 ID 列表 */
+  /** 关联的管道 ID 列表（[0] 恒为会话主管道，后端保序合并；见 mainPipelineIdOf） */
   pipelineIds?: string[]
-  /** 当前活跃的管道 ID */
-  activePipelineId?: string | null
   /** 元数据 */
   metadata?: Record<string, unknown>
   /** 是否已星标 */

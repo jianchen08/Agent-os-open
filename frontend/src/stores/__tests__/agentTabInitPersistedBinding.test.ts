@@ -105,8 +105,8 @@ describe('AgentTabStore initSessionTabs 持久化绑定保全（BUG-28 恢复链
     expect(pipelineTabMap[PERSISTED_PID]).toBe(MAIN_TAB_ID)
   })
 
-  it('缓存有会话但权威主管道缺失（activePipelineId 空+多管道）：保持持久化绑定', () => {
-    seedSessions([makeSession({ activePipelineId: null, pipelineIds: ['pid-a', 'pid-b'] })])
+  it('缓存有会话但权威主管道缺失（pipelineIds 空）：保持持久化绑定', () => {
+    seedSessions([makeSession({ activePipelineId: null, pipelineIds: [] })])
     localStorage.setItem(`agent-tabs-${SESSION_ID}`, persistedTabsPayload())
 
     useAgentTabStore.getState().initSessionTabs(SESSION_ID)

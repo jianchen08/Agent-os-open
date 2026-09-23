@@ -15,6 +15,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import { SessionEditModal } from '../SessionEditModal'
+import { makeAgent, submitCreate } from './sessionTestUtils'
 import type { Session } from '@/types'
 
 const getThreadSchemaMock = vi.hoisted(() => vi.fn())
@@ -30,16 +31,6 @@ vi.mock('@/hooks/queries/useAgentsQuery', () => ({
 vi.mock('@/services/sessionExecutionOptions', () => ({
   loadSessionExecutionOptions: loadSnapshotMock,
 }))
-
-function agent(overrides: Record<string, unknown>) {
-  return {
-    id: 'a-1',
-    configId: 'agentos',
-    name: '灵汐',
-    status: 'active',
-    ...overrides,
-  }
-}
 
 function session(overrides: Partial<Session> = {}): Session {
   return {
@@ -78,7 +69,7 @@ function renderModal(props: Partial<React.ComponentProps<typeof SessionEditModal
 
 beforeEach(() => {
   vi.resetAllMocks()
-  useAgentsQueryMock.mockReturnValue({ data: [agent({})] })
+  useAgentsQueryMock.mockReturnValue({ data: [makeAgent({})] })
   getThreadSchemaMock.mockResolvedValue([])
   loadSnapshotMock.mockReturnValue(null)
 })
@@ -157,12 +148,12 @@ describe('SessionEditModal — 插件字段 schema 拉取', () => {
 describe('SessionEditModal — Agent 下拉', () => {
   it.each([
     {
-      agents: [agent({ status: 'active', name: '活跃甲' }), agent({ id: 'b-2', configId: 'b', name: '停用乙', status: 'inactive' })],
+      agents: [makeAgent({ status: 'active', name: '活跃甲' }), makeAgent({ id: 'b-2', configId: 'b', name: '停用乙', status: 'inactive' })],
       present: ['活跃甲'],
       absent: ['停用乙'],
     },
     {
-      agents: [agent({ status: 'error', name: '错误丙' })],
+      agents: [makeAgent({ status: 'error', name: '错误丙' })],
       present: [],
       absent: ['错误丙'],
     },
@@ -182,8 +173,8 @@ describe('SessionEditModal — Agent 下拉', () => {
   it('选中 Agent 后保存 → agentId 取 configId 优先（无 configId 才用 id）', async () => {
     useAgentsQueryMock.mockReturnValue({
       data: [
-        agent({ id: 'a-1', configId: 'cfg-main', name: '主控' }),
-        agent({ id: 'raw-id-only', configId: undefined, name: '无配置ID' }),
+        makeAgent({ id: 'a-1', configId: 'cfg-main', name: '主控' }),
+        makeAgent({ id: 'raw-id-only', configId: undefined, name: '无配置ID' }),
       ],
     })
     const { onSave } = renderModal()
@@ -258,10 +249,7 @@ describe('SessionEditModal — 插件字段值并入保存产物', () => {
     const combo = await screen.findByRole('combobox', { name: /隔离模式/ })
     fireEvent.mouseDown(combo.closest('.ant-select')!)
     fireEvent.click(await screen.findByText('隔离'))
-    fireEvent.click(screen.getByRole('button', { name: /创建/ }))
-
-    await waitFor(() => expect(onSave).toHaveBeenCalled())
-    const options = onSave.mock.calls[0][3]
+    const options = await submitCreate(onSave)
     expect(options.fieldMetadata).toMatchObject({ isolation_mode: 'isolated' })
     expect(options.executionContext).toEqual({ isolation: { level: 'isolated' } })
   })

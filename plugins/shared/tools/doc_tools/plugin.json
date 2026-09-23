@@ -1,5 +1,8 @@
 {
   "id": "doc_tools",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Document Tools",
   "description": "文档处理工具集（Markdown↔Word↔PDF 互转 + 文本提取）。摘要/翻译的内容理解走 LLM，本插件只做格式转换与文本提取。",
   "version": "1.0.0",

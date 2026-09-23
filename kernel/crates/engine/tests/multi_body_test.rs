@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use agentos_core::traits::{PluginInvoker, StorageBackend};
 use agentos_core::types::{
     LoopBody, MessageRecord, PipelineConfig, PipelineStep, PluginContext, PluginError,
-    PluginResult, Route, RouteAction, RouteNext, RunRecord, RunStatus, StepLibrary, TenantContext,
+    PluginResult, Route, RouteAction, RouteNext, RunRecord, StepLibrary, TenantContext,
     ToolExecutionResult, TraceEntry,
 };
 use agentos_engine::compiler::compile_pipeline;
@@ -148,23 +148,6 @@ impl StorageBackend for NullStorage {
         entry: TraceEntry,
     ) -> Result<(), agentos_core::types::StorageError> {
         self.traces.lock().unwrap().push(entry);
-        Ok(())
-    }
-    async fn update_run_status(
-        &self,
-        _run_id: &str,
-        _status: RunStatus,
-        _branch: Option<&str>,
-        _seq: Option<u32>,
-    ) -> Result<(), agentos_core::types::StorageError> {
-        Ok(())
-    }
-    async fn create_run(
-        &self,
-        _run_id: &str,
-        _config_hash: &str,
-        _tenant_id: &str,
-    ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
     async fn store_blob(
@@ -336,7 +319,6 @@ fn make_executor(invoker: Arc<PhaseRecordingInvoker>) -> (PipelineExecutor, Arc<
         ],
         store.clone(),
         "r",
-        "b",
     );
     (executor, store)
 }

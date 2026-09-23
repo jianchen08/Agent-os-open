@@ -37,7 +37,17 @@ export const TOP_NAV_PANELS: Record<string, WorkspacePanelSpec> = {
     icon: 'settings',
     moduleId: '__panel_settings__',
   },
-  // 监控/成本/智能体/任务管理均已声明化（各插件 contributes.pages 按 path
+  // 任务管理归前端自有（用户裁定 2026-09-21）：声明在本表，不依赖插件
+  // contributes.pages——插件只提供后端能力（任务 API/服务/工具面）。页签 id
+  // 与 layoutModeStore 默认页签同源（ws-panel-tasks），故重复打开幂等激活。
+  '/tasks': {
+    id: 'ws-panel-tasks',
+    title: '任务管理',
+    component: 'pipeline_manager',
+    icon: 'folder',
+    moduleId: '__panel_tasks__',
+  },
+  // 监控/成本/智能体均已声明化（各插件 contributes.pages 按 path
   // 声明，解析顺序 1），禁用插件即移除入口，此处不再硬编码。
   // 「插件管理」双入口已收敛：设置中枢内核组 kernel-plugins 渲染同一
   // PluginsSettingsPage，独立 '/settings/plugins' 面板条目已撤。
@@ -102,18 +112,46 @@ function pluginPageSpec(page: PageDeclaration): WorkspacePanelSpec {
 }
 
 /**
+ * config_files 配置声明页 → 设置中枢深链页签
+ *
+ * plugin_configs 归一化的配置页（legacyFrom='settingsPanels'，无 path/widget）
+ * 唯一渲染落点是设置中枢（「设置」唯一 UI）：按 StepNode.openPluginConfig 同款
+ * 规格，每配置文件一个稳定页签（重复打开幂等激活），props.initialActive 深链
+ * 直达目标配置页。页 id 为 `{pluginId}:{fileId}`（ContributionRegistry 归一化契约）。
+ */
+function pluginConfigSpec(page: PageDeclaration): WorkspacePanelSpec | null {
+  if (page.legacyFrom !== 'settingsPanels' || !page.pluginId) return null
+  const fileId = page.id.startsWith(`${page.pluginId}:`)
+    ? page.id.slice(page.pluginId.length + 1)
+    : page.id
+  return {
+    id: `ws-plugin-config-${page.pluginId}-${fileId}`,
+    title: page.title || fileId,
+    component: 'settings_hub',
+    icon: 'settings',
+    moduleId: '__panel_settings__',
+    props: { initialActive: `plugin:${page.pluginId}:${fileId}` },
+  }
+}
+
+/**
  * 打开插件贡献页面（插件页面导航面板等导航消费方用）
  *
  * 解析顺序：
  * 1. 声明 path → 走既有 openWorkspacePanelByPath（path 声明是页面直达语义的单入口）
  * 2. 声明 widget → 按声明直接开工作区页签（与 path 解析的插件页分支同映射）
- * 3. 无 path 也无 widget（如 settings 配置文件页，渲染归属设置中枢）→ 显式报错，
- *    绝不静默（与 openWorkspacePanelByPath 失败口径一致）
+ * 3. config_files 配置页（plugin_configs 归一化产物，无 path/widget）→ 设置中枢深链页签
+ * 4. 其余无 path 也无 widget → 显式报错，绝不静默（与 openWorkspacePanelByPath 失败口径一致）
  */
 export function openPluginPage(page: PageDeclaration): boolean {
   if (page.path) return openWorkspacePanelByPath(page.path)
   if (page.widget) {
     openWorkspacePanel(pluginPageSpec(page))
+    return true
+  }
+  const configSpec = pluginConfigSpec(page)
+  if (configSpec) {
+    openWorkspacePanel(configSpec)
     return true
   }
   useNotificationStore.getState().addNotification({
@@ -154,9 +192,12 @@ export function openWorkspacePanelByPath(path: string): boolean {
     openWorkspacePanel(exact)
     return true
   }
-  // 3) 前缀匹配（如 /settings/xxx）
+  // 3) 前缀匹配（如 /settings/xxx）。比较器仅在 ≥2 个前缀键同时命中时被调用；
+  // 现有 TOP_NAV_PANELS 前缀键唯一（'/settings'），单元素 sort 不调比较器——
+  // 键扩容出现嵌套前缀时本行自然可达。
   const prefix = Object.keys(TOP_NAV_PANELS)
     .filter((k) => k.startsWith('/') && path.startsWith(k))
+    // v8 ignore next
     .sort((a, b) => b.length - a.length)[0]
   if (prefix) {
     openWorkspacePanel(TOP_NAV_PANELS[prefix])

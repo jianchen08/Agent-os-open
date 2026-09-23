@@ -1,5 +1,8 @@
 {
   "id": "pipeline_level_guard",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Level Guard",
   "version": "1.0.0",
   "plugin_type": "pipeline",

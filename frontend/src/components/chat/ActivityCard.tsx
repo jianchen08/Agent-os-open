@@ -21,6 +21,7 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { ErrorSourceBadge } from '@/components/shared/ErrorSourceBadge'
 import { TOOL_CONTENT_SCROLL_CLASS } from '@/lib/toolCardStyles'
 import { cn } from '@/lib/utils'
+import { formatFileSize } from '@/utils/format'
 import { formatDuration } from '@/types/activity'
 import { useConfirmDialog } from '@/utils/confirm'
 import { DetailBlock } from './ActivityBlockViews'
@@ -250,6 +251,13 @@ const ActivityCard: FC<ActivityCardProps> = ({
           <span className="flex flex-shrink-0 items-center gap-2 font-mono text-xs font-semibold">
             <span className="text-status-success">+{activity.diffStat.added}</span>
             <span className="text-status-error">-{activity.diffStat.removed}</span>
+          </span>
+        )}
+
+        {/* 大小徽标（file_card 的写后文件字节数） */}
+        {activity.size !== undefined && (
+          <span className="text-muted-foreground/70 flex-shrink-0">
+            {formatFileSize(activity.size)}
           </span>
         )}
 

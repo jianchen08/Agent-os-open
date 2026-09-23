@@ -745,12 +745,24 @@ describe('FiveSpaceLayout Tab 关闭与面板开关', () => {
 
   it('桌面工作区开关：点击折叠（工作区面板卸载）', () => {
     renderLayout()
-    expect(document.querySelector('[data-region="workspace"]')).not.toBeNull()
+    expect(document.querySelector('[data-testid="workspace-column"]')).not.toBeNull()
 
     fireEvent.click(screen.getByTestId('workspace-toggle-float'))
 
     expect(useUIStore.getState().workspaceCollapsed).toBe(true)
-    expect(document.querySelector('[data-region="workspace"]')).toBeNull()
+    // 折叠后工作区列卸载；顶带内的工作区标签槽位仍在（槽位≠列）
+    expect(document.querySelector('[data-testid="workspace-column"]')).toBeNull()
+  })
+
+  it('工作区-聊天边界分隔线与侧栏同规格：非全屏带 border-l，全屏独占时隐藏', () => {
+    renderLayout()
+    const column = document.querySelector('[data-testid="workspace-column"]') as HTMLElement
+    expect(column.className).toContain('border-l')
+    expect(column.className).toContain('border-border/50')
+
+    fireEvent.click(screen.getByTestId('workspace-toggle-fullscreen'))
+    const fullColumn = document.querySelector('[data-testid="workspace-column"]') as HTMLElement
+    expect(fullColumn.className).not.toContain('border-l')
   })
 
   it('持久化比例恢复：面板宽度 = 比例 × 主内容区宽（clamp 生效）', () => {

@@ -185,6 +185,32 @@ impl PluginContractState {
         Self::derived(plugin, enabled, None)
     }
 
+    /// 验证失败终态（BUG-51 注册门禁）：G2 复验预算超限（连续多轮观测失败）
+    /// 后的终止标记——插件停留在 LLM 工具面遮挡态，`last_error` 携带用户可见
+    /// 原因（plugins API error / 契约页透出）。清除仅经真实复验通过（`ok`）
+    /// 或用户动手修复触发的新一轮判定（drift/sanitized）。
+    pub fn verify_failed(plugin: &PluginManifest, enabled: bool, reason: String) -> Self {
+        Self {
+            plugin_id: plugin.id.clone(),
+            enabled,
+            gates: ContractGates {
+                manifest_schema_valid: true,
+                dep_ok: true,
+                g2_consistency: "verify_failed".to_string(),
+                smoke_result: "not_covered".to_string(),
+                render_decl_valid: "n/a".to_string(),
+                runtime_input_violations: 0,
+                runtime_output_violations: 0,
+                last_error: Some(reason),
+                rejected_tools: Vec::new(),
+                sanitized: None,
+                reverified_ts: None,
+                registry_disk_diffs: None,
+            },
+            last_scan_ts: now_ms(),
+        }
+    }
+
     /// 账本 upsert 合并语义（ADR 2026-08-28 决策1：粘滞）。`self` = 新观测，
     /// `old` = 账本既有记录。
     ///
@@ -213,7 +239,7 @@ impl PluginContractState {
         );
         let old_has_evidence = matches!(
             old.gates.g2_consistency.as_str(),
-            "drift" | "sanitized" | "verify_incomplete"
+            "drift" | "sanitized" | "verify_incomplete" | "verify_failed"
         );
         if new_is_weak && old_has_evidence {
             let mut kept = old;
@@ -314,6 +340,25 @@ impl ContractLedger {
 
     pub fn get(&self, plugin_id: &str) -> Option<PluginContractState> {
         self.inner.read().get(plugin_id).cloned()
+    }
+
+    /// 验证未完成（verify_incomplete）与验证失败终态（verify_failed）的插件 id
+    /// （BUG-51 注册门禁：LLM 工具面遮挡名单的账本视图）。复验通过（`ok`）即
+    /// 自动移出——调用方实时读账本现值，无独立状态机。
+    pub fn verify_pending_plugin_ids(&self) -> Vec<String> {
+        let g = self.inner.read();
+        let mut ids: Vec<String> = g
+            .values()
+            .filter(|st| {
+                matches!(
+                    st.gates.g2_consistency.as_str(),
+                    "verify_incomplete" | "verify_failed"
+                )
+            })
+            .map(|st| st.plugin_id.clone())
+            .collect();
+        ids.sort();
+        ids
     }
 
     pub fn snapshot(&self) -> Vec<PluginContractState> {
@@ -662,6 +707,91 @@ mod tests {
         // 完全一致 → 空
         let same = manifest_with_tools("a", &["t1"]);
         assert!(registry_disk_diffs(&same, &same).is_empty());
+    }
+
+    // ── BUG-51：verify_failed 终态（复验预算超限）账本语义 ─────────────────
+
+    #[test]
+    fn verify_failed_marks_terminal_with_reason() {
+        let st = PluginContractState::verify_failed(
+            &manifest("a"),
+            true,
+            "连续 5 轮复验观测失败".to_string(),
+        );
+        assert_eq!(st.gates.g2_consistency, "verify_failed");
+        assert!(
+            st.gates
+                .last_error
+                .expect("终态必带用户可见原因")
+                .contains("复验"),
+            "原因要说明复验失败"
+        );
+    }
+
+    #[test]
+    fn weak_signal_does_not_erase_verify_failed() {
+        let l = ContractLedger::new();
+        l.upsert(PluginContractState::verify_failed(
+            &manifest("a"),
+            true,
+            "budget exhausted".to_string(),
+        ));
+        // 后续观测失败写 verify_incomplete（弱信号）→ 终态保持
+        l.upsert(PluginContractState::derived(
+            &manifest("a"),
+            true,
+            Some(&outcome(false, true)),
+        ));
+        let st = l.get("a").expect("账本必须有记录");
+        assert_eq!(
+            st.gates.g2_consistency, "verify_failed",
+            "弱信号不得擦除终态"
+        );
+    }
+
+    #[test]
+    fn explicit_ok_clears_verify_failed() {
+        let l = ContractLedger::new();
+        l.upsert(PluginContractState::verify_failed(
+            &manifest("a"),
+            true,
+            "budget exhausted".to_string(),
+        ));
+        // 修复后复验通过（ok 唯一清除口）→ 转正
+        l.upsert(PluginContractState::derived(
+            &manifest("a"),
+            true,
+            Some(&outcome(false, false)),
+        ));
+        let st = l.get("a").expect("账本必须有记录");
+        assert_eq!(st.gates.g2_consistency, "ok", "复验通过即转正");
+        assert!(st.gates.reverified_ts.is_some(), "转正必留复验时间戳");
+        assert!(st.gates.last_error.is_none());
+    }
+
+    #[test]
+    fn verify_pending_ids_covers_both_pending_and_terminal() {
+        let l = ContractLedger::new();
+        l.upsert(PluginContractState::derived(
+            &manifest("a"),
+            true,
+            Some(&outcome(false, true)),
+        ));
+        l.upsert(PluginContractState::verify_failed(
+            &manifest("b"),
+            true,
+            "budget exhausted".to_string(),
+        ));
+        l.upsert(PluginContractState::derived(
+            &manifest("c"),
+            true,
+            Some(&outcome(false, false)),
+        ));
+        assert_eq!(
+            l.verify_pending_plugin_ids(),
+            vec!["a".to_string(), "b".to_string()],
+            "遮挡名单 = verify_incomplete ∪ verify_failed；ok 的 c 不在列"
+        );
     }
 
     #[test]

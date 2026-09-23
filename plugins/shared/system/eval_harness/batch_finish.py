@@ -50,14 +50,14 @@ def main():
             st = str((d.get("data") or d).get("status") or "")
             if st in ("completed", "failed", "cancelled"):
                 cur.execute(
-                    "SELECT field_value FROM pipeline_state WHERE pipeline_id=? "
+                    "SELECT value FROM pipeline_state WHERE pipeline_id=? "
                     "AND field_key='task.eval_summary'", (tid,))
                 row = cur.fetchone()
                 evaluated = row is not None and len(row[0]) > 4
                 crit = {}
                 # 预期指标从 AC 声明取（判定=评估闸门已跑出 summary）
                 cur.execute(
-                    "SELECT field_value FROM pipeline_state WHERE pipeline_id=? "
+                    "SELECT value FROM pipeline_state WHERE pipeline_id=? "
                     "AND field_key='task.acceptance_criteria'", (tid,))
                 ac_row = cur.fetchone()
                 names = list(json.loads(ac_row[0]).keys()) if ac_row and ac_row[0] else []

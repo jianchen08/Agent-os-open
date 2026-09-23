@@ -8,7 +8,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { transcribeAudio } from '@/services/api/asr'
+import { TranscriptionError, transcribeAudio } from '@/services/api/asr'
 import type {
   SpeechRecognitionConstructor,
   SpeechRecognitionErrorEvent,
@@ -224,16 +224,20 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
           if (result?.text) {
             onTranscriptionComplete?.(result.text)
           } else {
-            // 后端 ASR 未配置，友好提示
+            // 后端 ASR 未配置（503），指路设置页配置入口
             onError?.({
               type: 'not_supported',
-              message: '未配置语音转文字服务，请联系管理员启用 ASR',
+              message: '未配置语音转文字服务，请在 设置 → 插件配置 → 语音转写（ASR）中配置',
             })
           }
-        } catch {
+        } catch (err) {
+          // 结构化失败（502 等）横幅补后端原因；其余错误保持通用文案
           onError?.({
             type: 'transcription_failed',
-            message: '语音转文字失败，请重试',
+            message:
+              err instanceof TranscriptionError
+                ? `语音转文字失败：${err.message}`
+                : '语音转文字失败，请重试',
           })
         } finally {
           setState('idle')

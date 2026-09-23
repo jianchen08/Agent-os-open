@@ -7,7 +7,7 @@
   "host_type": "sidecar",
   "entry": "python server.py",
   "invoke_entry": "context_build.execute",
-  "requires_services": ["mode.get_profile"],
+  "requires_services": ["mode.get_profile", "packaging"],
   "capabilities": {
     "tools": [],
     "route_signals": [],

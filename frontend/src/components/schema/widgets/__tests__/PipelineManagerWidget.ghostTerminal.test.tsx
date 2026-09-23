@@ -8,83 +8,31 @@
  * task.status 投影归入「执行中」分组——终态优先，崩溃遗留不再显示为幽灵执行中。
  */
 
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { screen } from '@testing-library/react'
+import { describe, expect, it, beforeEach } from 'vitest'
+// 顺序约束：先于被测组件 import——vi.mock 工厂体在被测组件初始化时执行，
+// 届时本模块必须已求值（见 pmTestUtils 头注）
+import { pmMod, pmSeed, renderPmAllStatuses, resetPmContainers } from './pmTestUtils'
+import { renderWithProviders } from '@/test/renderWithProviders'
 import { PipelineManagerWidget } from '@/components/schema/widgets/PipelineManagerWidget'
 
-/** 测试播种数据（可变单例：beforeEach 清空，用例自行填充） */
-const seed = vi.hoisted(() => {
-  const runs: Record<string, Record<string, unknown>> = {}
-  const states: Record<string, Record<string, unknown>> = {}
-  const tasks: Record<string, unknown>[] = []
-  return {
-    runs,
-    states,
-    tasks,
-    mockFetchProjects: vi.fn(() => Promise.resolve({ items: [] as unknown[] })),
-    mockWorkspaceOpen: vi.fn(() => Promise.resolve({ data: { success: true } })),
-    mockNavigate: vi.fn(() => Promise.resolve(true)),
-    mockInvalidate: vi.fn(),
-    mockReadSessions: vi.fn(() => [] as Record<string, unknown>[]),
-    mockEnsureSessions: vi.fn(() => Promise.resolve([] as unknown[])),
-    mockUseRuns: vi.fn(() => ({ data: runs })),
-    mockUseStates: vi.fn(() => ({ data: states })),
-    mockUseTasks: vi.fn(() => ({ data: tasks })),
-    mockUseSessions: vi.fn(() => ({ data: [] })),
-  }
-})
-
-vi.mock('@/services/api/tasks', () => ({
-  pauseTask: vi.fn(),
-  resumeTask: vi.fn(),
-  cancelTask: vi.fn(),
-  deleteProject: vi.fn(),
-  fetchProjects: seed.mockFetchProjects,
-}))
-vi.mock('@/services/api/client', () => ({
-  default: { post: seed.mockWorkspaceOpen },
-}))
-vi.mock('@/services/pipelineNavigator', () => ({
-  navigateToPipeline: seed.mockNavigate,
-}))
-vi.mock('@/hooks/queries/usePipelineRunsQuery', () => ({
-  usePipelineRunsQuery: seed.mockUseRuns,
-  usePipelineStatesQuery: seed.mockUseStates,
-}))
-vi.mock('@/hooks/queries/useAllTasksQuery', () => ({
-  useAllTasksQuery: seed.mockUseTasks,
-}))
-vi.mock('@/hooks/queries/useLongTermTasksQuery', () => ({
-  invalidateLongTermTasks: seed.mockInvalidate,
-}))
-vi.mock('@/hooks/queries/useSessionsQuery', () => ({
-  useSessionsQuery: seed.mockUseSessions,
-  readSessions: seed.mockReadSessions,
-  ensureSessionsLoaded: seed.mockEnsureSessions,
-}))
-vi.mock('@/stores/contextUsageStore', () => ({
-  useContextUsageStore: (sel: (s: unknown) => unknown) => sel({ usageByPipeline: {} }),
-}))
-vi.mock('@/stores/sessionListStore', () => ({
-  useSessionListStore: {
-    getState: () => ({
-      setActiveSession: vi.fn(() => Promise.resolve()),
-    }),
-  },
-}))
-
-import { renderWithProviders } from '@/test/renderWithProviders'
+// 渲染专用文件只触 query 读面：任务域端点经 useProjectsQuery 只走 fetchProjects，
+// 暂停/取消/导航/工作空间/实时 usage 均不进入渲染路径（真实模块惰性加载等价）。
+vi.mock('@/services/api/tasks', () => pmMod.tasksApi())
+vi.mock('@/hooks/queries/usePipelineRunsQuery', () => pmMod.pipelineRunsQuery())
+vi.mock('@/hooks/queries/useAllTasksQuery', () => pmMod.allTasksQuery())
+vi.mock('@/hooks/queries/useSessionsQuery', () => pmMod.sessionsQuery())
 
 /** 播种一条「runs 窗口外 + state 行在场」的崩溃残留任务（BUG-2b 幽灵形态） */
 function seedGhostTask(taskStatus: string, runStatus: string | undefined) {
-  seed.tasks.push({
+  pmSeed.tasks.push({
     id: 'ghostPipe',
     title: '崩溃残留任务',
     status: taskStatus,
     pipeline_run_id: 'ghostPipe',
     agent_name: 'general_agent',
   })
-  seed.states.ghostPipe = {
+  pmSeed.states.ghostPipe = {
     pipeline_id: 'ghostPipe',
     thread_id: 'th-ghost',
     source: 'checkpoint',
@@ -92,36 +40,29 @@ function seedGhostTask(taskStatus: string, runStatus: string | undefined) {
   }
 }
 
+/** 终态防御公共序列：播种幽灵任务 → 全量视野渲染 → 条目落「最近完成」组
+ *  且「执行中的管道」分组不渲染 */
+async function expectGhostLandsCompleted(taskStatus: string, runStatus: string) {
+  seedGhostTask(taskStatus, runStatus)
+  renderPmAllStatuses(<PipelineManagerWidget />)
+  expect(await screen.findByText('崩溃残留任务')).toBeInTheDocument()
+  expect(screen.queryByText('执行中的管道')).toBeNull()
+  expect(screen.getByText('最近完成')).toBeInTheDocument()
+}
+
 describe('PipelineManagerWidget 合并第 2 源终态防御（BUG-2b）', () => {
-  beforeEach(() => {
-    for (const k of Object.keys(seed.runs)) delete seed.runs[k]
-    for (const k of Object.keys(seed.states)) delete seed.states[k]
-    seed.tasks.length = 0
-  })
+  beforeEach(resetPmContainers)
 
   it('state 视图持权威 completed 而任务投影残留 running：不归入执行中分组', async () => {
-    seedGhostTask('running', 'completed')
-    renderWithProviders(<PipelineManagerWidget />)
-    // 条目仍在（落到最近完成组），但「执行中的管道」分组不再为幽灵渲染
-    expect(await screen.findByText('崩溃残留任务')).toBeInTheDocument()
-    expect(screen.queryByText('执行中的管道')).toBeNull()
-    expect(screen.getByText('最近完成')).toBeInTheDocument()
+    await expectGhostLandsCompleted('running', 'completed')
   })
 
   it('state 视图持权威 cancelled 而任务投影残留 running：同款终态防御', async () => {
-    seedGhostTask('running', 'cancelled')
-    renderWithProviders(<PipelineManagerWidget />)
-    expect(await screen.findByText('崩溃残留任务')).toBeInTheDocument()
-    expect(screen.queryByText('执行中的管道')).toBeNull()
-    expect(screen.getByText('最近完成')).toBeInTheDocument()
+    await expectGhostLandsCompleted('running', 'cancelled')
   })
 
   it('state 视图持权威 failed 而任务投影残留 pending：同款终态防御', async () => {
-    seedGhostTask('pending', 'failed')
-    renderWithProviders(<PipelineManagerWidget />)
-    expect(await screen.findByText('崩溃残留任务')).toBeInTheDocument()
-    expect(screen.queryByText('执行中的管道')).toBeNull()
-    expect(screen.getByText('最近完成')).toBeInTheDocument()
+    await expectGhostLandsCompleted('pending', 'failed')
   })
 
   it('对照：state 视图 run_status=running（真实在飞）仍归执行中分组', async () => {
@@ -133,8 +74,8 @@ describe('PipelineManagerWidget 合并第 2 源终态防御（BUG-2b）', () => 
 
   it('对照：无 state 行（runs 窗口外纯任务源）× 未决任务态：无运行证据落未知不归执行中（BUG-21）', async () => {
     seedGhostTask('running', undefined)
-    delete seed.states.ghostPipe
-    renderWithProviders(<PipelineManagerWidget />)
+    delete pmSeed.states.ghostPipe
+    renderPmAllStatuses(<PipelineManagerWidget />)
     expect(await screen.findByText('崩溃残留任务')).toBeInTheDocument()
     expect(screen.queryByText('执行中的管道')).toBeNull()
     expect(screen.getAllByTitle(/运行状态：未知/).length).toBeGreaterThanOrEqual(1)

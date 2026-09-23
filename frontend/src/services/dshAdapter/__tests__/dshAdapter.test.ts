@@ -86,3 +86,24 @@ describe('loadDshAdapterContributions', () => {
     expect(result.failures[0]).toContain('network down')
   })
 })
+
+describe('loadDshAdapterContributions — renderer 注册异常隔离（catch 分支）', () => {
+  it('条目本身不可解构（null）→ TypeError 被 catch，记入 failures 不中断其余条目', async () => {
+    getSchema.mockResolvedValue({
+      plugin_contributes: [
+        {
+          plugin_id: 'dsh_adapter',
+          contributes: {
+            dsh_adapter: { source_commit: 'x' },
+            renderers: [null, { tool: 'after_null', card: 'read' }],
+          },
+        },
+      ],
+    })
+    const result = await loadDshAdapterContributions()
+    expect(result.renderersRegistered).toBe(1)
+    expect(result.failures).toHaveLength(1)
+    expect(result.failures[0]).toContain('null')
+    expect(getRenderIntent('after_null')?.card).toBe('read')
+  })
+})

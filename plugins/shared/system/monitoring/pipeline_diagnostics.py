@@ -90,8 +90,8 @@ def project_trace(entry: dict[str, Any]) -> dict[str, Any]:
     tool_calls = patch.get("_executed_tool_calls")
     return {
         "trace_id": entry.get("trace_id") or "",
-        "run_id": entry.get("run_id") or "",
-        "seq": entry.get("seq_in_branch"),
+        "pipeline_id": entry.get("pipeline_id") or "",
+        "seq": entry.get("seq"),
         "plugin_id": entry.get("plugin_id") or "",
         "patch_type": entry.get("patch_type") or "",
         "created_at": entry.get("created_at") or "",
@@ -137,7 +137,8 @@ async def get_pipeline_state_full(pipeline_id: str) -> dict[str, Any]:
     fields = [
         {
             "field_key": r.get("field_key"),
-            "field_value": r.get("field_value"),
+            "field_value": r.get("value"),
+            "value_kind": r.get("value_kind"),
             "updated_at": r.get("updated_at"),
         }
         for r in rows

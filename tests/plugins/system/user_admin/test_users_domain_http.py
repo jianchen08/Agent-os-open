@@ -7,7 +7,9 @@
 2. GET /users/stats —— 聚合统计（total/active/admin）
 3. PUT /users/{id}/role —— db-admin.table_update_row 真实写（role 白名单校验）
 4. DELETE /users/{id} —— db-admin.table_delete_row 真实删
-5. PUT/PATCH /users/{id}/active + GET/PUT /users/settings —— 存根语义
+5. PUT/PATCH /users/{id}/active —— 显式未支持（501，users 表无 is_active 列）；
+   GET/PUT /users/settings —— 存根语义
+   manifest users_table 声明不再含 /active 假行动作（BUG-70）
 6. PATCH /users/{id}/role + tenant —— user-admin capability 保留面（原 4 端点回归）
 7. _authorization 透传：Authorization 头原样进 capability params（内核真鉴权）
 8. POST /users 已删除（create_user 处置）→ 404
@@ -276,16 +278,31 @@ def test_users_delete_kernel_403_passthrough(server: Any) -> None:
     assert status == 403
 
 
-# ── active / settings 存根 ────────────────────────────────────────────────
+# ── active 显式未支持 / settings 存根 ─────────────────────────────────────
 
 
-def test_users_active_stub_put_and_patch(server: Any) -> None:
+def test_users_active_unsupported_501(server: Any) -> None:
+    """users 表无 is_active 列：active 端点恒 501 结构化错误，不假装成功（BUG-70）。"""
+    calls = _inject(server, "db-admin", {})
     for method in ("PUT", "PATCH"):
         status, body = _decode(_call(
             server, "/ext/user_admin/users/u2/active", method, raw_body=_b64(json.dumps({"is_active": False})),
         ))
-        assert status == 200
-        assert body == {"id": "u2", "is_active": True}  # 表无 is_active 列，保持存根
+        assert status == 501
+        assert body["error"]["code"] == "501"
+        assert "is_active" in body["error"]["message"]
+    assert calls == []  # 无处落库：绝不触达任何 capability（零副作用）
+
+
+def test_manifest_users_table_has_no_active_row_actions() -> None:
+    """users_table 声明不再含 /active 假行动作（BUG-70：假按钮+假成功反馈摘除）。"""
+    manifest = json.loads((_PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+    tables = [w for w in manifest.get("ui_schema", {}).get("widgets", []) if w.get("type") == "table"]
+    active_actions = [
+        a for t in tables for a in t.get("props", {}).get("rowActions", [])
+        if "/active" in str(a.get("url", ""))
+    ]
+    assert active_actions == []
 
 
 def test_users_settings_stub(server: Any) -> None:

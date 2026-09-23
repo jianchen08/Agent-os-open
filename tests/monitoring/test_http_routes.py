@@ -289,10 +289,16 @@ class TestExecutionDomain:
 class TestSessionsDomain:
     @pytest.fixture
     def empty_runs_db(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-        """空 runs 表的临时内核库：一切 session 视为本租户（无冲突判据）。"""
+        """无 pipeline_state 簿记行的临时内核库：一切 session 视为本租户（无冲突判据）。
+
+        runs 表已退役（ADR 2026-09-18）：管道存在性/租户锚 = pipeline_state 行。
+        """
         db = tmp_path / "kernel.db"
         conn = sqlite3.connect(db)
-        conn.execute("CREATE TABLE runs (pipeline_id TEXT, tenant_id TEXT)")
+        conn.execute(
+            "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT,"
+            " value TEXT, value_kind TEXT, tenant_id TEXT, updated_at TEXT)"
+        )
         conn.commit()
         conn.close()
         monkeypatch.setattr(server, "_kernel_db_path", lambda: str(db))
@@ -329,7 +335,9 @@ class TestSessionsDomain:
 
     async def test_cross_tenant_session_404(self, monkeypatch: pytest.MonkeyPatch, empty_runs_db: Path) -> None:
         conn = sqlite3.connect(empty_runs_db)
-        conn.execute("INSERT INTO runs VALUES ('s1', 'other-tenant')")
+        conn.execute(
+            "INSERT INTO pipeline_state VALUES ('s1', 'run_status', 'running', 'str', 'other-tenant', '2026-09-19T00:00:00Z')"
+        )
         conn.commit()
         conn.close()
         usage = Recorder(result={"total_tokens": 42})
@@ -490,8 +498,13 @@ class TestTenantConflictAndToolCalls:
     def _db(self, tmp_path: Path) -> Path:
         db = tmp_path / "kernel.db"
         conn = sqlite3.connect(db)
-        conn.execute("CREATE TABLE runs (pipeline_id TEXT, tenant_id TEXT)")
-        conn.execute("INSERT INTO runs VALUES ('p1', 't-other')")
+        conn.execute(
+            "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT,"
+            " value TEXT, value_kind TEXT, tenant_id TEXT, updated_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO pipeline_state VALUES ('p1', 'run_status', 'completed', 'str', 't-other', '2026-09-19T00:00:00Z')"
+        )
         conn.commit()
         conn.close()
         return db
@@ -512,11 +525,13 @@ class TestTenantConflictAndToolCalls:
         db = tmp_path / "kernel.db"
         conn = sqlite3.connect(db)
         conn.execute(
-            "CREATE TABLE traces (trace_id TEXT, run_id TEXT, created_at TEXT, patch_data TEXT, tenant_id TEXT)"
+            "CREATE TABLE traces (trace_id TEXT, pipeline_id TEXT, seq INTEGER,"
+            " plugin_id TEXT, patch_type TEXT, patch_data TEXT, tenant_id TEXT, created_at TEXT)"
         )
         ok_row = '{"tool_results":[{"tool_name":"bash","success":1,"error":null,"duration_ms":120.0}]}'
         conn.execute(
-            "INSERT INTO traces VALUES ('tr1','r1','2026-09-13T00:00:00Z',?, 't1')", (ok_row,)
+            "INSERT INTO traces VALUES ('tr1','p1',1,'core/tool_core','state_update',?, 't1','2026-09-13T00:00:00Z')",
+            (ok_row,),
         )
         conn.commit()
         conn.close()

@@ -470,6 +470,11 @@ describe('handleSendMessage', () => {
 })
 
 describe('handleSendMessage 静默拒绝点显式化（BUG-28 第三刀）', () => {
+  // 隔离铠甲：用例中途断言失败也要还回真实时钟（假时钟泄漏会挂掉后续用例）
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   // 真机取证（R69 + 第三刀分支模拟）：router 守卫 `!sid || !currentToken` 曾是
   // 发送链唯一无通知的静默拒绝点——输入保留、无气泡、零通知、零内核痕迹，
   // 用户视角 = 「点了没反应」。契约：拒绝必须显式；token 缺失先自愈
@@ -489,27 +494,35 @@ describe('handleSendMessage 静默拒绝点显式化（BUG-28 第三刀）', () 
 
   it('无令牌且自动恢复失败：返回 false 不出站，显式通知重新登录', async () => {
     await renderHomeWithSession()
+    // 隔离铠甲：通知 store 的 30s 内容指纹去重表是模块级状态（setState 不清，
+    // BUG-74 eecf5629a），前面「无令牌：返回 false 不出站」走的也是恢复失败
+    // 分支、已入列同 title+message 指纹的通知——把时钟推过去重窗，用例与
+    // 文件内顺序解耦（同 useRealtimeEventsBranches / ChatContainer.sendGuard 做法）。
+    vi.useFakeTimers({ now: Date.now() + 31_000 })
     mockEnsureFreshToken.mockResolvedValue(null)
     useAuthStore.setState({ token: null })
     expect(await sendAndCapture({ content: 'hi', pipelineId: 'p1' })).toBe(false)
     expect(mockWs.sendUserInput).not.toHaveBeenCalled()
-    await waitFor(() =>
-      expect(
-        useNotificationStore.getState().notifications.some((n) => n.title === '发送未受理' && n.message.includes('重新登录')),
-      ).toBe(true),
-    )
+    // 通知在 ensureFreshToken().then 微任务回调里入列：排空后直断
+    // （waitFor 的轮询定时器在假时钟下冻结，不适用）
+    await act(async () => {})
+    expect(
+      useNotificationStore.getState().notifications.some((n) => n.title === '发送未受理' && n.message.includes('重新登录')),
+    ).toBe(true)
     // 恢复失败不得伪造令牌（诚实状态机）
     expect(useAuthStore.getState().token).toBeNull()
   })
 
   it('无活跃会话：返回 false 不出站且显式通知引导刷新（不再静默）', async () => {
     await renderHomeWithSession()
+    // 隔离铠甲：同上——前面「无活跃会话：返回 false 不出站」已入列同指纹的
+    // 「发送未受理」通知，时钟推过去重窗解除文件内顺序耦合。
+    vi.useFakeTimers({ now: Date.now() + 31_000 })
     useSessionStore.setState({ activeSessionId: null })
     expect(await sendAndCapture({ content: 'hi', pipelineId: 'p1' })).toBe(false)
     expect(mockWs.sendUserInput).not.toHaveBeenCalled()
-    await waitFor(() =>
-      expect(useNotificationStore.getState().notifications.some((n) => n.title === '发送未受理')).toBe(true),
-    )
+    // 无会话分支同步入列，直断即可（假时钟下 waitFor 轮询定时器冻结）
+    expect(useNotificationStore.getState().notifications.some((n) => n.title === '发送未受理')).toBe(true)
   })
 })
 
@@ -611,6 +624,75 @@ describe('handleRegenerate / onRollbackTo / onEdit', () => {
     expect(mockWs.sendRegenerate).toHaveBeenCalledWith('s1', { pipelineId: 'p1', userMessageId: 'u1', newContent: '改后的第一问' })
     const bucket = usePipelineMessageStore.getState().messagesByPipeline['p1']
     expect(bucket.find((m) => m.id === 'u1')?.content).toBe('改后的第一问')
+  })
+})
+
+describe('回退/编辑重发出站 id 键空间（BUG-57 回归钉）', () => {
+  // 双字段范式：user 消息 UI 寻址 id 是前端 uuid，后端权威主键在 recordId
+  // （mc_ 指纹，认领时写入；历史回读消息无 recordId，其 id 本身即后端
+  // record_id）。内核 regenerate 按 record_id 键空间精确匹配——出站必须带
+  // 权威 id；本地截断/改写仍按 UI id 寻址不变。
+  async function seedClaimed(): Promise<void> {
+    await renderHomeWithSession()
+    usePipelineMessageStore.setState((s) => ({
+      activePipelineId: 'p1',
+      messagesByPipeline: {
+        ...s.messagesByPipeline,
+        p1: [
+          { id: 'uuid-a', sessionId: 's1', role: 'user', content: '第一问', timestamp: 't', status: 'sent', recordId: 'mc-aaa' },
+          { id: 'ans-a', sessionId: 's1', role: 'assistant', content: '答一', timestamp: 't', status: 'sent' },
+          { id: 'uuid-b', sessionId: 's1', role: 'user', content: '第二问', timestamp: 't', status: 'sent', recordId: 'mc-bbb' },
+          { id: 'ans-b', sessionId: 's1', role: 'assistant', content: '答二', timestamp: 't', status: 'sent' },
+        ],
+      },
+    }))
+  }
+
+  it('回退已认领消息：出站带 recordId（非 UI uuid），本地截断仍按 UI id', async () => {
+    await seedClaimed()
+    await act(async () => {
+      (chatProps as CapturedProps | null)?.onRollbackTo?.('uuid-a')
+    })
+    expect(mockWs.sendRegenerate).toHaveBeenCalledWith('s1', { pipelineId: 'p1', userMessageId: 'mc-aaa' })
+    expect(usePipelineMessageStore.getState().messagesByPipeline['p1']).toHaveLength(1)
+  })
+
+  it('回退未认领消息（历史回读形态 id 即 record_id）：出站原样带该 id', async () => {
+    await seedClaimed()
+    usePipelineMessageStore.setState((s) => ({
+      messagesByPipeline: {
+        ...s.messagesByPipeline,
+        p1: [{ id: 'mc-legacy', sessionId: 's1', role: 'user', content: '旧问', timestamp: 't', status: 'sent' }],
+      },
+    }))
+    await act(async () => {
+      (chatProps as CapturedProps | null)?.onRollbackTo?.('mc-legacy')
+    })
+    expect(mockWs.sendRegenerate).toHaveBeenCalledWith('s1', { pipelineId: 'p1', userMessageId: 'mc-legacy' })
+  })
+
+  it('编辑重发已认领消息：出站带 recordId + newContent，本地改写仍按 UI id', async () => {
+    await seedClaimed()
+    await act(async () => {
+      await (chatProps as CapturedProps | null)?.onEdit?.('uuid-a', '改写后的第一问')
+    })
+    expect(mockWs.sendRegenerate).toHaveBeenCalledWith('s1', { pipelineId: 'p1', userMessageId: 'mc-aaa', newContent: '改写后的第一问' })
+    const bucket = usePipelineMessageStore.getState().messagesByPipeline['p1']
+    expect(bucket.find((m) => m.id === 'uuid-a')?.content).toBe('改写后的第一问')
+  })
+
+  it('编辑重发未认领消息（无 recordId）：出站回退 UI id', async () => {
+    await seedClaimed()
+    usePipelineMessageStore.setState((s) => ({
+      messagesByPipeline: {
+        ...s.messagesByPipeline,
+        p1: [{ id: 'uuid-b', sessionId: 's1', role: 'user', content: '第二问', timestamp: 't', status: 'sent' }],
+      },
+    }))
+    await act(async () => {
+      await (chatProps as CapturedProps | null)?.onEdit?.('uuid-b', '改写后的第二问')
+    })
+    expect(mockWs.sendRegenerate).toHaveBeenCalledWith('s1', { pipelineId: 'p1', userMessageId: 'uuid-b', newContent: '改写后的第二问' })
   })
 })
 

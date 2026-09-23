@@ -1,5 +1,8 @@
 {
   "id": "memory_tool",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Memory Tool",
   "description": "知识记忆存储和检索 MCP 工具",
   "version": "1.0.0",

@@ -66,7 +66,8 @@
     "metrics"
   ],
   "requires_services": [
-    "llm"
+    "llm",
+    "packaging"
   ],
   "config_files": [
     {
@@ -110,12 +111,11 @@
         "props": {
           "title": "思考强度",
           "icon": "brain",
-          "fields": [
-            {
-              "name": "strength",
-              "type": "select",
-              "label": "思考强度",
-              "default": "medium",
+    "fields": [
+      {
+        "name": "strength",
+        "type": "select",
+        "default": "medium",
               "options": [
                 {
                   "label": "关闭",

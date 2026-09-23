@@ -1220,6 +1220,41 @@ def test_task_level_execution_context_workspace_forms(tool_module, inputs, expec
     assert ("isolation" in ec) == bool(inputs.get("isolation_level"))
 
 
+# ── 派发 execution_context 模式键透传（BUG-61：模式面板按 state.mode 过滤行源）──
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode_value", ["coding", "research"])
+async def test_dispatch_execution_context_carries_mode(tool_module, monkeypatch, mode_value):
+    """mode 输入随派发透传进 execution_context（与聊天主链消息级 EC 同形）。
+
+    内核 1a2 把消息级 execution_context 并入出生管道 initial state 后，
+    context_build 据 execution_context.mode 回写 state.mode；模式面板
+    （mode_coding 等）的会话/看板行源按 state.mode 过滤——派发链丢键即
+    全面板零呈现（BUG-61 根因）。
+    """
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    tool, captured = make_tool(tool_module)
+    # 面板派发形态 = L1 根任务（mode_coding _issue_args 同口径）
+    result = await tool.execute(base_inputs(parent_agent_level=1, mode=mode_value))
+    assert result.success, result.error
+    assert captured["dispatch"]["execution_context"]["mode"] == mode_value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode_value", [None, "", "   "])
+async def test_dispatch_execution_context_without_mode_has_no_key(
+    tool_module, monkeypatch, mode_value
+):
+    """未声明 mode（缺键/空串/空白）→ execution_context 不带 mode 键（零注入语义）。"""
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    tool, captured = make_tool(tool_module)
+    overrides = {} if mode_value is None else {"mode": mode_value}
+    result = await tool.execute(base_inputs(parent_agent_level=1, **overrides))
+    assert result.success, result.error
+    assert "mode" not in captured["dispatch"]["execution_context"]
+
+
 # ── 指标定义加载 fail-open 与评估说明展开 ────────────────────
 
 

@@ -885,6 +885,248 @@ class TestHistoryImageDetectionGaps:
         )
 
 
+# ── 文本附件注入（BUG-52：聊天文本附件内容对 LLM 不可见）──────
+
+
+async def test_text_attachment_content_injected_as_delimited_block(tmp_path, monkeypatch):
+    """小文本附件：消息内 /uploads/ markdown 链接 → 内容以明确分隔文本块注入。"""
+    monkeypatch.setenv("UPLOADS_DIR", str(tmp_path))
+    (tmp_path / "meeting_notes.txt").write_text(
+        "会议定在周四14点，参会3人，团建地点千岛湖。", encoding="utf-8"
+    )
+    pre = MultimodalPreprocessor()
+
+    result = await pre.execute(
+        _make_ctx(text="会议定在什么时间？\n[meeting_notes.txt](/uploads/meeting_notes.txt)")
+    )
+
+    updates = result.state_updates
+    assert updates["has_multimodal"] is True
+    blocks = updates["multimodal_content"]
+    assert len(blocks) == 1 and blocks[0]["type"] == "text"
+    body = blocks[0]["text"]
+    assert "meeting_notes.txt" in body and "/uploads/meeting_notes.txt" in body
+    assert "周四14点" in body and "千岛湖" in body
+    assert "内容结束]" in body, "附件内容边界分隔明确（LLM 可辨识起止）"
+
+
+async def test_text_attachment_oversize_not_injected_degrades_to_notice(
+    tmp_path, monkeypatch
+):
+    """超大文本附件：内容不注入，产出引导走知识库的显式降级提示（禁静默丢弃）。"""
+    monkeypatch.setenv("UPLOADS_DIR", str(tmp_path))
+    payload = "事实甲乙丙丁\n" * (128 * 1024)  # 远超 256KB 上限
+    (tmp_path / "big.log").write_text(payload, encoding="utf-8")
+    pre = MultimodalPreprocessor()
+
+    result = await pre.execute(_make_ctx(text="[big.log](/uploads/big.log)"))
+
+    blocks = result.state_updates["multimodal_content"]
+    assert len(blocks) == 1 and blocks[0]["type"] == "text"
+    body = blocks[0]["text"]
+    assert "事实甲乙丙丁" not in body, "超限内容不得注入"
+    assert "知识库" in body, "降级提示须引导替代路径"
+
+
+async def test_text_attachment_exactly_at_cap_boundary_injected(tmp_path, monkeypatch):
+    """边界性质：恰好等于上限（256KB）仍在注入分支，与超限分支区分。"""
+    monkeypatch.setenv("UPLOADS_DIR", str(tmp_path))
+    body_text = "a" * (256 * 1024)
+    (tmp_path / "edge.txt").write_text(body_text, encoding="utf-8")
+    pre = MultimodalPreprocessor()
+
+    result = await pre.execute(_make_ctx(text="[edge.txt](/uploads/edge.txt)"))
+
+    blocks = result.state_updates["multimodal_content"]
+    assert len(blocks) == 1 and body_text in blocks[0]["text"]
+
+
+async def test_text_attachment_seen_roundtrip_not_reinjected(tmp_path, monkeypatch):
+    """检出即登记：seen 经 state 回灌后同附件不再重发（防工具循环重复注入）。"""
+    monkeypatch.setenv("UPLOADS_DIR", str(tmp_path))
+    (tmp_path / "a.md").write_text("# 标题", encoding="utf-8")
+    pre = MultimodalPreprocessor()
+    messages = [{"role": "user", "content": "[a.md](/uploads/a.md)"}]
+
+    async def run(state_extra: dict) -> dict:
+        state: dict = {"messages": messages}
+        state.update(state_extra)
+        result = await pre.execute(SimpleNamespace(state=state))
+        return result.state_updates
+
+    first = await run({})
+    assert [b["type"] for b in first["multimodal_content"]] == ["text"]
+    second = await run({"multimodal_seen": first["multimodal_seen"]})
+    assert second["multimodal_content"] == []
+    assert second["multimodal_seen"] == first["multimodal_seen"]
+
+
+async def test_text_attachment_missing_file_failure_notice(tmp_path, monkeypatch):
+    """引用文件不存在：显式失败占位块（禁静默丢内容，同图片链路口径）。"""
+    monkeypatch.setenv("UPLOADS_DIR", str(tmp_path))
+    pre = MultimodalPreprocessor()
+
+    result = await pre.execute(_make_ctx(text="[gone.txt](/uploads/gone.txt)"))
+
+    assert result.state_updates["multimodal_content"] == [
+        {"type": "text", "text": "[附件 /uploads/gone.txt 解析失败：文件不存在]"}
+    ]
+
+
+async def test_text_attachment_read_error_failure_notice(tmp_path, monkeypatch):
+    """读取 IO 错误：显式失败占位块，不拖垮管道。"""
+    monkeypatch.setenv("UPLOADS_DIR", str(tmp_path))
+    (tmp_path / "r.txt").write_text("x", encoding="utf-8")
+
+    def _raise(self: Path, *args: Any, **kwargs: Any) -> str:
+        raise OSError("io error")
+
+    monkeypatch.setattr(Path, "read_text", _raise)
+    pre = MultimodalPreprocessor()
+
+    result = await pre.execute(_make_ctx(text="[r.txt](/uploads/r.txt)"))
+
+    assert result.state_updates["multimodal_content"] == [
+        {"type": "text", "text": "[附件 /uploads/r.txt 解析失败：文件读取失败]"}
+    ]
+
+
+async def test_text_attachment_empty_file_explicit_notice(tmp_path, monkeypatch):
+    """空内容文件：显式「内容为空」占位（LLM 可向用户说明，不静默跳过）。"""
+    monkeypatch.setenv("UPLOADS_DIR", str(tmp_path))
+    (tmp_path / "empty.md").write_text("", encoding="utf-8")
+    pre = MultimodalPreprocessor()
+
+    result = await pre.execute(_make_ctx(text="[empty.md](/uploads/empty.md)"))
+
+    blocks = result.state_updates["multimodal_content"]
+    assert blocks == [{"type": "text", "text": "[附件 empty.md（/uploads/empty.md）内容为空]"}]
+
+
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        ("script.py", "print('hi')"),
+        ("data.json", '{"k": 1}'),
+        ("conf.yaml", "a: 1"),
+        ("table.csv", "x,y\n1,2"),
+        ("page.html", "<p>hi</p>"),
+        ("notes.MD", "# 标题"),
+    ],
+)
+async def test_text_code_extensions_injected(
+    tmp_path, monkeypatch, filename: str, content: str
+):
+    """代码/结构化文本扩展名同走注入分支（与前端文本类白名单对齐，扩展名大小写不敏感）。"""
+    monkeypatch.setenv("UPLOADS_DIR", str(tmp_path))
+    (tmp_path / filename).write_text(content, encoding="utf-8")
+    pre = MultimodalPreprocessor()
+    url = f"/uploads/{filename}"
+
+    result = await pre.execute(_make_ctx(text=f"[{filename}]({url})"))
+
+    blocks = result.state_updates["multimodal_content"]
+    assert len(blocks) == 1 and blocks[0]["type"] == "text"
+    assert content in blocks[0]["text"]
+
+
+@pytest.mark.parametrize(
+    "filename", ["report.pdf", "archive.zip", "photo.png", "clip.mp4", "doc.docx"]
+)
+async def test_non_text_extension_link_not_injected(
+    tmp_path, monkeypatch, filename: str
+):
+    """二进制/图片/视频扩展名链接不产文本块（不属文本注入分支，现状保持）。"""
+    monkeypatch.setenv("UPLOADS_DIR", str(tmp_path))
+    (tmp_path / filename).write_bytes(b"\x00\x01binary")
+    pre = MultimodalPreprocessor()
+
+    result = await pre.execute(_make_ctx(text=f"[{filename}](/uploads/{filename})"))
+
+    blocks = result.state_updates["multimodal_content"]
+    # 图片/PDF 扩展名可能被既有图片链路（本地路径兜底）认领为 image_url 块，
+    # 但文本注入分支不得产 text 块
+    assert all(b["type"] != "text" for b in blocks)
+
+
+async def test_external_site_text_link_not_hijacked():
+    """外站 .txt 链接不注入——只认 /uploads/ 前缀（平台管理的引用）。"""
+    pre = MultimodalPreprocessor()
+
+    result = await pre.execute(_make_ctx(text="[notes](https://example.com/a.txt)"))
+
+    assert result.state_updates["multimodal_content"] == []
+    assert result.state_updates["has_multimodal"] is False
+
+
+async def test_image_markdown_token_not_detected_as_text_attachment():
+    """图片 token（![...](...)）不产文本块——图片归 image_url 链路，单一职责。"""
+    pre = MultimodalPreprocessor()
+
+    result = await pre.execute(_make_ctx(text="看 ![a.png](/uploads/a.png)"))
+
+    blocks = result.state_updates["multimodal_content"]
+    assert [b["type"] for b in blocks] == ["image_url"]
+
+
+async def test_image_and_text_attachment_both_injected(tmp_path, monkeypatch):
+    """同一消息图片+文本附件各产各块（image_url 与 text 并存，互不挤占）。"""
+    monkeypatch.setenv("UPLOADS_DIR", str(tmp_path))
+    (tmp_path / "n.txt").write_text("正文事实", encoding="utf-8")
+    pre = MultimodalPreprocessor()
+
+    result = await pre.execute(
+        _make_ctx(text="![p.png](/uploads/p.png)\n[n.txt](/uploads/n.txt)")
+    )
+
+    blocks = result.state_updates["multimodal_content"]
+    assert [b["type"] for b in blocks] == ["image_url", "text"]
+    assert "正文事实" in blocks[1]["text"]
+
+
+def test_extract_text_attachment_refs_matrix():
+    """引用提取器：整 token 匹配；图片 token（! 前缀）与外站/二进制链接排除。"""
+    refs = MultimodalPreprocessor._extract_text_attachment_refs(
+        "正文 [a.txt](/uploads/a.txt) 中 [b](/uploads/x.py) "
+        "图 ![c](/uploads/c.png) 外 [d](https://e.com/f.txt) 非 [e](/uploads/e.exe)"
+    )
+
+    assert refs == [("a.txt", "/uploads/a.txt"), ("b", "/uploads/x.py")]
+
+
+def test_detect_text_attachments_non_list_messages_returns_empty():
+    """messages 非 list → 空结果，不抛（同图片链路防御口径）。"""
+    pre = MultimodalPreprocessor()
+    for messages in (None, {"role": "user"}, "junk", 7):
+        blocks, seen = pre._detect_message_text_attachments(messages, {})
+        assert blocks == [] and seen == {}
+
+
+def test_detect_text_attachments_non_user_messages_skipped():
+    """assistant/tool 消息里的文本链接不注入（防历史回灌重发）。"""
+    pre = MultimodalPreprocessor()
+    blocks, seen = pre._detect_message_text_attachments(
+        [
+            {"role": "assistant", "content": "[a.txt](/uploads/a.txt)"},
+            {"role": "tool", "content": "[b.txt](/uploads/b.txt)"},
+            {"role": "user", "content": "[c.txt](/uploads/c.txt)"},
+        ],
+        {},
+    )
+    assert len(blocks) == 1 and "c.txt" in blocks[0]["text"]
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize("content", [{"text": "x"}, "", None, 123])
+def test_detect_text_attachments_non_string_content_skipped(content):
+    """user 消息 content 非非空字符串（dict/空串/None/数字）→ 跳过该条。"""
+    pre = MultimodalPreprocessor()
+    blocks, seen = pre._detect_message_text_attachments(
+        [{"role": "user", "content": content}], {}
+    )
+    assert blocks == [] and seen == {}
+
+
 # ── 模块自举行（plugins/shared 入 sys.path）──────────────────────────
 
 

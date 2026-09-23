@@ -72,6 +72,9 @@ export function InteractionCard({
   const isDone = interaction.status !== 'pending'
   const { features, textInputPlaceholder } = resolveInteractionLayout(interaction)
   const secondsLeft = useApprovalCountdown(interaction)
+  // BUG-60：决策窗（300s）耗尽即超时态——后端已按拒绝裁决（Soft-block），
+  // 选项置灰禁用防僵尸卡（按钮可点但后端无监听者，误导用户仍可审批）
+  const expired = secondsLeft != null && secondsLeft <= 0
 
   const handleTextSubmit = () => {
     const trimmed = textInput.trim()
@@ -186,7 +189,7 @@ export function InteractionCard({
                   key={hasId ? opt.id : `missing-id-${i}`}
                   variant="outline"
                   size="sm"
-                  disabled={isSubmitting || !hasId}
+                  disabled={isSubmitting || !hasId || expired}
                   title={!hasId ? '该选项缺少 id（后端契约违规），已禁用' : undefined}
                   onClick={() => {
                     // AC-1.2-3: 短 description（<20字符）直接执行选择；长描述（>=20字符）弹窗展示详情
@@ -297,7 +300,7 @@ export function InteractionCard({
             </Button>
             <Button
               size="sm"
-              disabled={isSubmitting || !detailOption?.id}
+              disabled={isSubmitting || !detailOption?.id || expired}
               title={!detailOption?.id ? '该选项缺少 id（后端契约违规），已禁用' : undefined}
               onClick={() => {
                 if (detailOption) {

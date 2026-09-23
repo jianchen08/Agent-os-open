@@ -1,5 +1,8 @@
 {
   "id": "resource_merge_tool",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Resource Merge Tool",
   "description": "基于 git worktree 的资源合并与回滚 MCP 工具",
   "version": "1.0.0",

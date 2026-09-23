@@ -80,18 +80,38 @@ def _assert_relative_and_usable(repo: Path, ws: Path, ops: type) -> None:
     assert not Path(pointed).is_absolute(), f"仍是绝对路径: {pointed}"
     # 相对路径从 ws_dir 出发必须真实命中 admin 目录
     assert (ws / pointed).is_dir(), f"相对 gitdir 解析失败: {pointed}"
-    # admin 侧回指也是相对
+    # admin 侧回指必须绝对（git 以 cwd 相对解析该文件，相对形态会被
+    # worktree prune 判死误删 admin → worktree 悬空，BUG-53 真机实证）
     back = (repo / ".git" / "worktrees" / ws.name / "gitdir").read_text(
         encoding="utf-8").strip()
-    assert not Path(back).is_absolute(), f"admin 回指仍是绝对路径: {back}"
+    assert Path(back).is_absolute(), f"admin 回指不是绝对路径: {back}"
+    assert back.endswith(".git"), f"admin 回指应指向 worktree 的 .git 文件: {back}"
     # 本侧 git 可用（rev-parse + status 真跑）
-    ops._run_git_git_ok = None  # noqa: B010 — 占位避免误用
     proc = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=ws,
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
     proc2 = subprocess.run(["git", "status", "--short"], cwd=ws,
                            capture_output=True, text=True)
     assert proc2.returncode == 0, proc2.stderr
+
+
+def test_normalized_worktree_survives_prune(
+    repo_with_worktree: tuple[Path, Path, Any],
+) -> None:
+    """归一后的 worktree 必须能活过 git worktree prune（BUG-53 真机实证：
+
+    双侧相对形态下，并发任务的清理 prune 会把在途 worktree 的 admin 判死
+    删除 → worktree 悬空、合并门控 not a git repository 误判失败）。
+    """
+    repo, ws, ops = repo_with_worktree
+    inst = ops.__new__(ops)
+    inst._normalize_worktree_gitdir_links(ws, repo)
+    proc = subprocess.run(["git", "worktree", "prune", "--dry-run", "--verbose"],
+                          cwd=repo, capture_output=True, text=True)
+    combined = proc.stdout + proc.stderr
+    assert ws.name not in combined, (
+        f"归一后的 worktree 被 prune 判死: {combined}"
+    )
 
 
 def test_normalize_rewrites_windows_absolute_to_relative(

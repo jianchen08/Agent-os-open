@@ -1,5 +1,8 @@
 {
   "id": "pipeline_tool_schema_validator",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Tool Schema Validator",
   "version": "1.0.0",
   "plugin_type": "pipeline",

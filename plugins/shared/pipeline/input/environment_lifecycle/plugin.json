@@ -1,5 +1,8 @@
 {
   "id": "pipeline_environment_lifecycle",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Environment Lifecycle",
   "version": "1.0.0",
   "plugin_type": "pipeline",

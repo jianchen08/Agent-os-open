@@ -11,7 +11,7 @@
 
 /* eslint-disable import-x/order */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { transcribeAudio } from '@/services/api/asr'
+import { TranscriptionError, transcribeAudio } from '@/services/api/asr'
 import { searchGlobal } from '@/services/api/search'
 import { getPayloadDiagList, getPayloadDiagFile } from '@/services/api/llmPayload'
 import { getEvaluationMetrics } from '@/services/api/evaluationMetrics'
@@ -56,6 +56,29 @@ describe('ASR API - transcribeAudio', () => {
     const result = await transcribeAudio(new Blob(['a']), 'audio/webm')
 
     expect(result).toBeNull()
+  })
+
+  it('502（转写失败）抛 TranscriptionError，携带后端结构化原因', async () => {
+    vi.mocked(apiClient.post).mockRejectedValueOnce({
+      response: { status: 502, data: { code: 'asr_failed', message: '上游密钥无效' } },
+    })
+
+    const err = await transcribeAudio(new Blob(['a']), 'audio/webm').catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(TranscriptionError)
+    expect((err as TranscriptionError).message).toBe('上游密钥无效')
+    expect((err as TranscriptionError).code).toBe('asr_failed')
+  })
+
+  it('结构化体缺 message 时回退 HTTP 状态码原因', async () => {
+    vi.mocked(apiClient.post).mockRejectedValueOnce({
+      response: { status: 500, data: { error: 'internal' } },
+    })
+
+    const err = await transcribeAudio(new Blob(['a']), 'audio/webm').catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(TranscriptionError)
+    expect((err as TranscriptionError).message).toBe('HTTP 500')
   })
 
   it('其他错误原样抛出', async () => {

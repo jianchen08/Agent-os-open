@@ -1,5 +1,8 @@
 {
   "id": "task_submit_tool",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Task Submit Tool",
   "description": "任务提交 MCP 工具，将任务提交给指定 Agent 执行",
   "version": "1.0.0",

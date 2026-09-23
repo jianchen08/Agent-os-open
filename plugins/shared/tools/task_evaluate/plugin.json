@@ -1,5 +1,8 @@
 {
   "id": "task_evaluate_tool",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Task Evaluate Tool",
   "description": "任务评估 MCP 工具，评估任务的验收指标是否满足",
   "version": "1.0.0",

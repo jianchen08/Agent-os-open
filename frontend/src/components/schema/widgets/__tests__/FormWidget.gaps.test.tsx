@@ -184,7 +184,8 @@ describe('G3：readbackUri 回读当前值（权限模式选择器）', () => {
 
 describe('G4：紧凑选择器触发器自标识（BUG-6 回归）', () => {
   // BUG-6：思考强度触发器可访问名是裸「高」，GUI 脚本按「高」找权限档误中它，
-  // 误以为已切到「高」权限模式。触发器必须自标识（设置名：当前值）。
+  // 误以为已切到「高」权限模式。触发器必须自标识（设置名：当前值）——自标识
+  // 由可访问名承载，可见文案只留裸值（省输入条宽度，2026-09-21 用户裁定）。
   const thinkingField = {
     name: 'strength',
     type: 'select' as const,
@@ -197,10 +198,11 @@ describe('G4：紧凑选择器触发器自标识（BUG-6 回归）', () => {
     ],
   }
 
-  it('受控思考强度选择器：可访问名与可见文案均为「思考强度：高」', () => {
+  it('受控思考强度选择器：可访问名带设置名前缀，可见文案只留裸值', () => {
     render(<FormWidget fields={[thinkingField]} value={{ strength: 'high' }} onChange={vi.fn()} />)
     const trigger = screen.getByRole('button', { name: '思考强度：高' })
-    expect(trigger).toHaveTextContent('思考强度：高')
+    expect(trigger).toHaveTextContent('高')
+    expect(trigger).not.toHaveTextContent('思考强度')
   })
 
   it('裸「高」精确名按钮不再存在（按「高」找权限档不再误中思考强度）', () => {

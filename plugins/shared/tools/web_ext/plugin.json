@@ -1,5 +1,8 @@
 {
   "id": "web_operate_tool",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Web Operate Tool",
   "description": "Web 操作 MCP 工具（HTTP 请求和网页抓取）",
   "version": "1.0.0",

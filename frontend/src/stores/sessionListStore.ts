@@ -98,10 +98,11 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
     useAgentTabStore.getState().initSessionTabs(newSession.id)
     uiStorage.setLastActiveSession(newSession.id)
 
-    if (newSession.activePipelineId) {
+    const mainPid = mainPipelineIdOf(newSession)
+    if (mainPid) {
       const pipelineStore = usePipelineMessageStore.getState()
       pipelineStore.registerPipeline({
-        pipelineId: newSession.activePipelineId,
+        pipelineId: mainPid,
         sessionId: newSession.id,
         level: 1,
         tabId: null,
@@ -110,11 +111,11 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
         parentId: null,
         unreadCount: 0,
       })
-      pipelineStore.activatePipeline(newSession.activePipelineId)
+      pipelineStore.activatePipeline(mainPid)
       logger.info(
         '[createSession] pipeline registered: sessionId=%s pipelineId=%s',
         newSession.id.slice(0, 12),
-        newSession.activePipelineId.slice(0, 12),
+        mainPid.slice(0, 12),
       )
     }
 
@@ -248,7 +249,8 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
       return
     }
 
-    // s.activePipelineId，显示"老数据"（上一个会话的消息）。
+    // initSessionTabs 内部先清 pipelineMessageStore.activePipelineId（跨会话
+    // 单例的视图指针）再重建标签面——不清则切换会话后显示"老数据"（上一会话的消息）。
     useAgentTabStore.getState().initSessionTabs(id)
 
     useSessionStore.setState({ activeSessionId: id })
@@ -267,7 +269,7 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
 
     if (fetchData) {
       try {
-        // 主管道权威解析：activePipelineId 优先，不按 [0] 位置猜测
+        // 主管道解析：映射真值 pipelineIds[0]（与任务管理面板同源，见 mainPipelineIdOf）
         const pipelineId = mainPipelineIdOf(session)
         if (!pipelineId) {
           console.error('[setActiveSession] 会话缺少主管道: sessionId=%s pipelineIds=%o', id, session.pipelineIds)
@@ -278,6 +280,8 @@ export const useSessionListStore = create<SessionListState>()((_, get) => ({
           await usePipelineMessageStore.getState().loadPipelineMessages(pipelineId, { threadId: id })
         }
       } catch (error) {
+        // 记日志即止：切换动作本身已完成（空消息区可见），重进会话或 WS 重连
+        // 触发对账重拉自愈（OBS-R258-1 吞错误规则登记）
         console.error('[setActiveSession] 加载会话数据失败:', error)
       }
       // 注意：切换会话只刷新消息区域，工作区（FileTreeWidget 等）保持不动。

@@ -23,36 +23,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SessionList } from '../SessionList'
+import { createSessionListCallbacks, makeSession, openDropdownMenu } from './sessionTestUtils'
 import type { Session } from '@/types/models'
 
-function createSession(overrides: Partial<Session> = {}): Session {
-  return {
-    id: `session-${Math.random().toString(36).slice(2, 9)}`,
-    title: '测试会话',
-    createdAt: '2026-01-01T00:00:00Z',
-    updatedAt: '2026-01-01T12:00:00Z',
-    messageCount: 5,
-    starred: false,
-    pinned: false,
-    ...overrides,
-  } as Session
-}
-
-const callbacks = {
-  onSessionClick: vi.fn(),
-  onDeleteSession: vi.fn().mockResolvedValue(undefined),
-  onEditSession: vi.fn(),
-  onCopySession: vi.fn(),
-  onStarSession: vi.fn(),
-  onPinSession: vi.fn(),
-}
-
-/** Radix 菜单需完整指针序列才打开 */
-function openMenu(trigger: HTMLElement) {
-  fireEvent.pointerDown(trigger)
-  fireEvent.pointerUp(trigger)
-  fireEvent.click(trigger)
-}
+const callbacks = createSessionListCallbacks()
 
 function renderList(sessions: Session[], extra: Record<string, unknown> = {}) {
   return render(
@@ -73,11 +47,11 @@ afterEach(() => {
 
 describe('SessionList — 删除确认流程', () => {
   it('菜单「删除」打开确认对话框并回显会话标题，「取消」关闭且不调用删除', async () => {
-    const session = createSession({ title: '待删会话' })
+    const session = makeSession({ title: '待删会话' })
     renderList([session])
 
     await act(async () => {
-      openMenu(screen.getAllByRole('button', { name: '更多操作' })[0])
+      openDropdownMenu(screen.getAllByRole('button', { name: '更多操作' })[0])
     })
     fireEvent.click(await screen.findByText('删除'))
 
@@ -93,11 +67,11 @@ describe('SessionList — 删除确认流程', () => {
   })
 
   it('「确认删除」以目标会话 id 调用回调并关闭对话框', async () => {
-    const session = createSession({ id: 'target-1', title: '目标' })
+    const session = makeSession({ id: 'target-1', title: '目标' })
     renderList([session])
 
     await act(async () => {
-      openMenu(screen.getAllByRole('button', { name: '更多操作' })[0])
+      openDropdownMenu(screen.getAllByRole('button', { name: '更多操作' })[0])
     })
     fireEvent.click(await screen.findByText('删除'))
     fireEvent.click(await screen.findByRole('button', { name: /确认删除/ }))
@@ -112,10 +86,10 @@ describe('SessionList — 删除确认流程', () => {
 
   it('删除回调 reject 时对话框仍收尾（错误由 store 层处理）', async () => {
     callbacks.onDeleteSession.mockRejectedValueOnce(new Error('boom'))
-    renderList([createSession({ id: 'bad', title: '失败' })])
+    renderList([makeSession({ id: 'bad', title: '失败' })])
 
     await act(async () => {
-      openMenu(screen.getAllByRole('button', { name: '更多操作' })[0])
+      openDropdownMenu(screen.getAllByRole('button', { name: '更多操作' })[0])
     })
     fireEvent.click(await screen.findByText('删除'))
     fireEvent.click(await screen.findByRole('button', { name: /确认删除/ }))
@@ -127,10 +101,10 @@ describe('SessionList — 删除确认流程', () => {
   })
 
   it('Escape 关闭删除确认对话框（onOpenChange 关闭路径，不执行删除）', async () => {
-    renderList([createSession({ id: 'esc', title: 'ESC 关闭' })])
+    renderList([makeSession({ id: 'esc', title: 'ESC 关闭' })])
 
     await act(async () => {
-      openMenu(screen.getAllByRole('button', { name: '更多操作' })[0])
+      openDropdownMenu(screen.getAllByRole('button', { name: '更多操作' })[0])
     })
     fireEvent.click(await screen.findByText('删除'))
     expect(await screen.findByRole('dialog')).toBeInTheDocument()
@@ -143,11 +117,11 @@ describe('SessionList — 删除确认流程', () => {
   })
 
   it('目标会话从列表消失后标题回退「此会话」', async () => {
-    const session = createSession({ id: 'gone', title: '即将消失' })
+    const session = makeSession({ id: 'gone', title: '即将消失' })
     const view = renderList([session])
 
     await act(async () => {
-      openMenu(screen.getAllByRole('button', { name: '更多操作' })[0])
+      openDropdownMenu(screen.getAllByRole('button', { name: '更多操作' })[0])
     })
     fireEvent.click(await screen.findByText('删除'))
     await screen.findByRole('dialog')
@@ -169,8 +143,8 @@ describe('SessionList — 删除确认流程', () => {
 describe('SessionList — 分组与元信息', () => {
   it('置顶会话独立分组并带置顶徽标，普通会话在全部会话组', () => {
     renderList([
-      createSession({ id: 'p1', title: '置顶的', pinned: true }),
-      createSession({ id: 'n1', title: '普通的', pinned: false }),
+      makeSession({ id: 'p1', title: '置顶的', pinned: true }),
+      makeSession({ id: 'n1', title: '普通的', pinned: false }),
     ])
 
     expect(screen.getByText('已置顶')).toBeInTheDocument()
@@ -184,7 +158,7 @@ describe('SessionList — 分组与元信息', () => {
   })
 
   it('无置顶会话时不渲染置顶分组', () => {
-    renderList([createSession({ title: '仅普通' })])
+    renderList([makeSession({ title: '仅普通' })])
     expect(screen.queryByText('已置顶')).toBeNull()
     expect(screen.getByText('全部会话')).toBeInTheDocument()
   })
@@ -196,7 +170,7 @@ describe('SessionList — 分组与元信息', () => {
     // 固定「现在」为 2026-01-01 正午：同日显示 HH:MM，跨日显示 M/D
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-01-01T12:00:00'))
-    renderList([createSession({ updatedAt })])
+    renderList([makeSession({ updatedAt })])
     expect(screen.getByText(expected)).toBeInTheDocument()
     vi.useRealTimers()
   })
@@ -205,14 +179,14 @@ describe('SessionList — 分组与元信息', () => {
     ['invalid-date'],
     [''],
   ] as const)('时间字段非法（%s）时不渲染时间元信息', (updatedAt) => {
-    renderList([createSession({ updatedAt, createdAt: updatedAt })])
+    renderList([makeSession({ updatedAt, createdAt: updatedAt })])
     const item = screen.getByRole('button', { name: /会话: 测试会话/ })
     expect(within(item).queryByText(/\d{1,2}:\d{2}|\d{1,2}\/\d{1,2}/)).toBeNull()
   })
 
   it('时间字段为无法转数值的宿主对象（Symbol）时静默显示空元信息（catch 兜底）', () => {
     renderList([
-      createSession({ title: '坏时间', updatedAt: Symbol('bad') as unknown as string }),
+      makeSession({ title: '坏时间', updatedAt: Symbol('bad') as unknown as string }),
     ])
     const item = screen.getByRole('button', { name: /会话: 坏时间/ })
     // new Date(Symbol) 抛 TypeError → catch 返回 ''，不崩溃
@@ -221,8 +195,8 @@ describe('SessionList — 分组与元信息', () => {
 
   it('同组多条会话按更新时间倒序（最新在前）', () => {
     renderList([
-      createSession({ id: 'older', title: '较旧', updatedAt: '2026-01-01T00:00:00Z' }),
-      createSession({ id: 'newer', title: '较新', updatedAt: '2026-06-01T00:00:00Z' }),
+      makeSession({ id: 'older', title: '较旧', updatedAt: '2026-01-01T00:00:00Z' }),
+      makeSession({ id: 'newer', title: '较新', updatedAt: '2026-06-01T00:00:00Z' }),
     ])
     const items = document.querySelectorAll('[data-group="normal"] [role="button"]')
     expect(items[0].textContent).toContain('较新')
@@ -230,7 +204,7 @@ describe('SessionList — 分组与元信息', () => {
   })
 
   it('正在删除的会话显示加载态且不渲染操作菜单', () => {
-    const session = createSession({ id: 'deleting', title: '删除中' })
+    const session = makeSession({ id: 'deleting', title: '删除中' })
     renderList([session], { deletingSessionIds: new Set(['deleting']) })
     expect(screen.queryByRole('button', { name: '更多操作' })).toBeNull()
     expect(screen.getByRole('button', { name: /会话: 删除中/ })).toHaveClass('pointer-events-none')
@@ -238,7 +212,7 @@ describe('SessionList — 分组与元信息', () => {
 
   it('工作空间徽标显示目录末段与隔离图标', () => {
     renderList([
-      createSession({
+      makeSession({
         title: '带工作空间',
         workspace: 'D:\\workspaces\\task-42',
         isolationMode: 'isolated',
@@ -252,19 +226,19 @@ describe('SessionList — 分组与元信息', () => {
 describe('SessionList — 菜单回调', () => {
   it('提供 onResetMessages 时菜单含「重置消息」，点击回调收到会话 id', async () => {
     const onResetMessages = vi.fn()
-    renderList([createSession({ id: 'r1', title: '重置目标' })], { onResetMessages })
+    renderList([makeSession({ id: 'r1', title: '重置目标' })], { onResetMessages })
 
     await act(async () => {
-      openMenu(screen.getAllByRole('button', { name: '更多操作' })[0])
+      openDropdownMenu(screen.getAllByRole('button', { name: '更多操作' })[0])
     })
     fireEvent.click(await screen.findByText('重置消息'))
     expect(onResetMessages).toHaveBeenCalledWith('r1')
   })
 
   it('未提供 onResetMessages 时菜单不含「重置消息」', async () => {
-    renderList([createSession()])
+    renderList([makeSession()])
     await act(async () => {
-      openMenu(screen.getAllByRole('button', { name: '更多操作' })[0])
+      openDropdownMenu(screen.getAllByRole('button', { name: '更多操作' })[0])
     })
     await screen.findByText('编辑会话')
     expect(screen.queryByText('重置消息')).toBeNull()
@@ -276,11 +250,11 @@ describe('SessionList — 菜单回调', () => {
     ['星标', 'onStarSession'],
     ['置顶会话', 'onPinSession'],
   ] as const)('菜单「%s」触发对应回调', async (label, cbName) => {
-    const session = createSession({ id: 'c1' })
+    const session = makeSession({ id: 'c1' })
     renderList([session])
 
     await act(async () => {
-      openMenu(screen.getAllByRole('button', { name: '更多操作' })[0])
+      openDropdownMenu(screen.getAllByRole('button', { name: '更多操作' })[0])
     })
     fireEvent.click(await screen.findByText(label))
     if (cbName === 'onEditSession' || cbName === 'onCopySession') {
@@ -291,14 +265,14 @@ describe('SessionList — 菜单回调', () => {
   })
 
   it('星标按钮直接切换（不经菜单）且不触发会话点击', () => {
-    renderList([createSession({ id: 's1', title: '星标目标' })])
+    renderList([makeSession({ id: 's1', title: '星标目标' })])
     fireEvent.click(screen.getByTestId('star-button'))
     expect(callbacks.onStarSession).toHaveBeenCalledWith('s1')
     expect(callbacks.onSessionClick).not.toHaveBeenCalled()
   })
 
   it('点击列表项触发会话切换', () => {
-    renderList([createSession({ id: 'clicked', title: '点我' })])
+    renderList([makeSession({ id: 'clicked', title: '点我' })])
     fireEvent.click(screen.getByRole('button', { name: /会话: 点我/ }))
     expect(callbacks.onSessionClick).toHaveBeenCalledWith('clicked')
   })

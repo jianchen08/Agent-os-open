@@ -13,7 +13,7 @@
  * 真实组件行为由 ChatInput.sendReceipt.test.tsx 覆盖）。
  */
 import { render, act } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { ChatContainer } from '../ChatContainer'
@@ -232,6 +232,14 @@ describe('发送自愈：主管道解析失败触发会话列表强制重拉（B
     sessionsRef.rejectNextReload = false
     useAgentTabStore.setState({ tabs: [], activeTabId: null, unreadCounts: {} })
     useNotificationStore.setState({ notifications: [] })
+    // 隔离铠甲：通知 store 的 30s 内容指纹去重表是模块级状态（setState 不清），
+    // 前一个 describe 刚入列同指纹的「会话管道未就绪」会吞掉本 describe 的入列——
+    // 把时钟推过去重窗，用例与文件内顺序解耦（同前 useRealtimeEventsBranches 做法）。
+    vi.useFakeTimers({ now: Date.now() + 31_000 })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('主标签 pid 空 + 缓存无会话 → 未受理且触发一次强制重拉（自愈路径存在）', () => {

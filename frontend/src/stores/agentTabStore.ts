@@ -12,7 +12,7 @@ import { readSessions } from '@/hooks/queries/useSessionsQuery'
 import { mainPipelineIdOf } from '@/utils/mappers'
 import type { AgentTab } from '@/types/task'
 
-/** 获取主管道 ID（权威 activePipelineId 解析，不按 [0] 位置猜测） */
+/** 获取主管道 ID（映射真值 pipelineIds[0]，与任务管理面板同源） */
 function getMainPipelineId(sessionId: string): string | null {
   const sessions = readSessions()
   const session = sessions.find((s) => s.id === sessionId)
@@ -227,6 +227,8 @@ interface AgentTabState {
   addTab: (tab: Omit<AgentTab, 'messages'>) => void
   /** 移除 Agent Tab */
   removeTab: (tabId: string) => void
+  /** 拖拽换位：把 dragTabId 移到 targetTabId 当前位置（同层级内） */
+  reorderTab: (dragTabId: string, targetTabId: string) => void
   /** 设置活跃 Tab */
   setActiveTab: (tabId: string) => void
   /** 更新 Tab 状态 */
@@ -480,6 +482,18 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
   /** 移除 Agent Tab */
   removeTab: (tabId) => {
     set((state) => pruneTabFromState(state, tabId))
+    get().saveCurrentTabs()
+  },
+  // 拖拽换位：同层级标签内移动位置（主/子各自成组，不跨层）
+  reorderTab: (dragTabId, targetTabId) => {
+    if (dragTabId === targetTabId) return
+    const from = get().tabs.findIndex((t) => t.id === dragTabId)
+    const to = get().tabs.findIndex((t) => t.id === targetTabId)
+    if (from === -1 || to === -1) return
+    const tabs = [...get().tabs]
+    const [moved] = tabs.splice(from, 1)
+    tabs.splice(tabs.findIndex((t) => t.id === targetTabId), 0, moved)
+    set({ tabs })
     get().saveCurrentTabs()
   },
 

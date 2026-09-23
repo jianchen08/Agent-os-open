@@ -1,5 +1,8 @@
 {
   "id": "task_manage_tool",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Task Management Tool",
   "description": "任务管理 MCP 工具，查询和控制任务生命周期",
   "version": "1.0.0",

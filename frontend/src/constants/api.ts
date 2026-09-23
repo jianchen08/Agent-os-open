@@ -100,6 +100,10 @@ export const API_ENDPOINTS = {
   MESSAGES: {
     /** 获取会话消息列表（从数据库ExecutionRecord表读取执行记录） */
     LIST: (sessionId: string) => `/api/v1/sessions/${sessionId}/messages`,
+    /** 段清单（消息段模型：‹i/n› 多代切换与压缩原文，GET pipelines/{pipeline_id}/message-segments） */
+    SEGMENTS_OF_PIPELINE: (pipelineId: string) => `/api/v1/pipelines/${pipelineId}/message-segments`,
+    /** 单段详情（含成员引用列表全文解析，GET message-segments/{id}） */
+    SEGMENT: (segmentId: string) => `/api/v1/message-segments/${segmentId}`,
   },
   /** 记忆管理相关 - hindsight_memory_service 插件端点（生成物投影，原 channel_api memory 域） */
   MEMORY: {
@@ -109,6 +113,12 @@ export const API_ENDPOINTS = {
     SEMANTIC: HINDSIGHT_MEMORY_SERVICE_ENDPOINTS.memory_semantic_list,
     /** 获取记忆统计 */
     STATS: HINDSIGHT_MEMORY_SERVICE_ENDPOINTS.memory_stats,
+    /** 获取单条记忆详情 */
+    ITEM: (id: string) =>
+      HINDSIGHT_MEMORY_SERVICE_ENDPOINTS.memory_get.replace('{memory_id}', id),
+    /** 删除单条记忆 */
+    DELETE: (id: string) =>
+      HINDSIGHT_MEMORY_SERVICE_ENDPOINTS.memory_delete.replace('{memory_id}', id),
   },
   /** Agent配置相关 - agent_manager 插件端点（生成物投影） */
   AGENTS: {

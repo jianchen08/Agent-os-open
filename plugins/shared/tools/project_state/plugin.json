@@ -1,5 +1,8 @@
 {
   "id": "project_state_tool",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Project State Tool",
   "description": "项目方案工作流状态查询与迁移（plan/running/done，ADR 2026-09-17）",
   "version": "1.0.0",

@@ -262,7 +262,7 @@ providers:
         reasoning_effort: low
       medium:
         reasoning_effort: medium
-      "off":
+      'off':
         thinking:
           type: disabled
     type: deepseek
@@ -338,7 +338,7 @@ providers:
       medium:
         thinking:
           type: adaptive
-      "off":
+      'off':
         thinking:
           type: disabled
     type: minimax
@@ -511,7 +511,7 @@ providers:
       medium:
         thinking:
           type: enabled
-      "off":
+      'off':
         thinking:
           type: disabled
         reasoning_effort: none
@@ -534,7 +534,7 @@ providers:
       medium:
         thinking:
           type: enabled
-      "off":
+      'off':
         thinking:
           type: disabled
         reasoning_effort: none
@@ -552,5 +552,5 @@ providers:
         reasoning_effort: low
       medium:
         reasoning_effort: medium
-      "off":
+      'off':
         reasoning_effort: none

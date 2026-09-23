@@ -140,6 +140,9 @@ function typeMatches(expected: unknown, value: unknown): boolean {
   }
   if (Array.isArray(expected)) return expected.some(check)
   if (typeof expected === 'string') return check(expected)
+  // 调用点（validateOutputSubset）以 Array.isArray||typeof==='string' 为前置守卫，
+  // 此尾行仅满足 TS 全路径返回的类型完整性，生产不可达。
+  /* v8 ignore next */
   return true
 }
 

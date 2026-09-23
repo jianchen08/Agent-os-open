@@ -966,6 +966,91 @@ class TestCompressFailureNotification:
         assert result.state_updates.get("messages") is None
 
 
+class TestCompressAppliedNotification:
+    """压缩成功推送 compression_applied（BUG-72 A1：前端据此对账刷新 recordId）。"""
+
+    @staticmethod
+    def _success_ctx(mod: Any, service: Any, extra_state: dict[str, Any] | None = None) -> Any:
+        ctx = mod._make_minimal_ctx(
+            state=_trigger_state({"session_id": "sess-applied", **(extra_state or {})}),
+            pipeline_id="pipe-applied",
+        )
+        ctx._services["context_service"] = service
+        return ctx
+
+    @staticmethod
+    def _shrunk_service() -> Any:
+        """压缩产出有效收缩的 service（同 seq 子集、短内容）。"""
+        messages = _trigger_state()["messages"]
+        shrunk = [
+            {"role": m["role"], "content": "s", "seq": m["seq"]}
+            for m in messages
+            if m["seq"] in (1, 4)
+        ]
+        return _mock_service(return_value=shrunk)
+
+    def test_success_event_emitted_with_coords(self) -> None:
+        """压缩成功向前端推送一次 compression_applied，载荷带 thread/pipeline 坐标。"""
+        mod = _load_plugin_module()
+        mod._memory_backend = None
+        mod._capability_caller = None
+        events: list[tuple[str, dict[str, Any], str]] = []
+
+        async def _emit(event: str, payload: dict[str, Any], thread_id: str) -> None:
+            events.append((event, payload, thread_id))
+
+        mod.set_frontend_emit(_emit)
+        plugin = mod.ContextWindowGuardPlugin({"trigger_ratio": 0.5})
+        _run(plugin.execute(self._success_ctx(mod, self._shrunk_service())))
+        assert len(events) == 1, "压缩成功恰好推送一次 compression_applied"
+        event, payload, thread_id = events[0]
+        assert event == "compression_applied"
+        assert thread_id == "sess-applied"
+        assert payload["pipeline_id"] == "pipe-applied"
+
+    def test_each_wave_emits_again(self) -> None:
+        """连续两轮压缩各自推送（每次波次都改写槽位指纹，前端都需对账）。"""
+        mod = _load_plugin_module()
+        mod._memory_backend = None
+        mod._capability_caller = None
+        events: list[tuple[str, dict[str, Any], str]] = []
+
+        async def _emit(event: str, payload: dict[str, Any], thread_id: str) -> None:
+            events.append((event, payload, thread_id))
+
+        mod.set_frontend_emit(_emit)
+        plugin = mod.ContextWindowGuardPlugin({"trigger_ratio": 0.5})
+        _run(plugin.execute(self._success_ctx(mod, self._shrunk_service())))
+        _run(plugin.execute(self._success_ctx(mod, self._shrunk_service())))
+        assert len(events) == 2, "每个压缩波次各推送一次"
+
+    def test_emit_failure_swallowed_on_success_path(self) -> None:
+        """成功路径前端通道抛异常 → 只留日志，压缩 ops 照常上报。"""
+        mod = _load_plugin_module()
+        mod._memory_backend = None
+        mod._capability_caller = None
+
+        async def _boom(_event: str, _payload: dict[str, Any], _tid: str) -> None:
+            raise RuntimeError("frontend down")
+
+        mod.set_frontend_emit(_boom)
+        plugin = mod.ContextWindowGuardPlugin({"trigger_ratio": 0.5})
+        result = _run(plugin.execute(self._success_ctx(mod, self._shrunk_service())))
+        assert not result.skip_remaining
+        assert result.state_updates.get("messages", {}).get("_ops"), "压缩 ops 不受推送失败影响"
+
+    def test_no_emit_channel_still_compresses(self) -> None:
+        """frontend.emit 未注入 → 压缩照常（事件是增强能力，不反噬管线）。"""
+        mod = _load_plugin_module()
+        mod._memory_backend = None
+        mod._capability_caller = None
+        mod.set_frontend_emit(None)
+        plugin = mod.ContextWindowGuardPlugin({"trigger_ratio": 0.5})
+        result = _run(plugin.execute(self._success_ctx(mod, self._shrunk_service())))
+        assert not result.skip_remaining
+        assert result.state_updates.get("messages", {}).get("_ops")
+
+
 # ═══════════════════════════════════════════════════════════
 # trim / clean / 拼接估算的 backend 边界
 # ═══════════════════════════════════════════════════════════

@@ -158,11 +158,9 @@ async fn test_tables_lists_all_tables_dynamic() {
         .map(|t| t["name"].as_str().unwrap().to_string())
         .collect();
     for expect in [
-        "runs",
         "message_slots",
         "traces",
         "blobs",
-        "branches",
         "sessions",
         "test_notes",
         "users",
@@ -172,12 +170,15 @@ async fn test_tables_lists_all_tables_dynamic() {
             "缺少表 {expect}: {names:?}"
         );
     }
-    // 退役 0.1 投影表不得再出现在表清单（DROP 语义：表清单与后端实际读写一一对应）
+    // 退役 0.1 投影表不得再出现在表清单（DROP 语义：表清单与后端实际读写一一对应）。
+    // ADR 2026-09-18：runs/branches 表退役（运行簿记 = pipeline_state 运行键）。
     for retired in [
         "memory",
         "execution_records",
         "pipeline_run_summaries",
         "messages",
+        "runs",
+        "branches",
     ] {
         assert!(
             !names.contains(&retired.to_string()),
@@ -185,13 +186,13 @@ async fn test_tables_lists_all_tables_dynamic() {
         );
     }
     // 每个表有 columns 与 row_count
-    let runs = tables.iter().find(|t| t["name"] == "runs").unwrap();
-    assert!(!runs["columns"].as_array().unwrap().is_empty());
-    assert!(runs["row_count"].is_number());
+    let users = tables.iter().find(|t| t["name"] == "users").unwrap();
+    assert!(!users["columns"].as_array().unwrap().is_empty());
+    assert!(users["row_count"].is_number());
     // 列含主键标志
-    let run_cols = runs["columns"].as_array().unwrap();
-    let run_id = run_cols.iter().find(|c| c["name"] == "run_id").unwrap();
-    assert_eq!(run_id["pk"], true);
+    let user_cols = users["columns"].as_array().unwrap();
+    let user_id = user_cols.iter().find(|c| c["name"] == "user_id").unwrap();
+    assert_eq!(user_id["pk"], true);
 }
 
 #[tokio::test]

@@ -1,5 +1,8 @@
 {
   "id": "simple_tools",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Simple Tools Plugin",
   "description": "简单工具集插件（yaml_validate / read_execution_detail 两个纯函数工具）",
   "version": "1.0.0",

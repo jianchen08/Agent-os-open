@@ -1,5 +1,8 @@
 {
   "id": "pipeline_multimodal_preprocessor",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Multimodal Preprocessor",
   "version": "1.0.0",
   "plugin_type": "pipeline",

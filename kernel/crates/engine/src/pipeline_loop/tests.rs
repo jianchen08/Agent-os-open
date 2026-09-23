@@ -127,9 +127,9 @@ impl PluginInvoker for MockInvoker {
 struct NullStorage {
     checkpoints: Mutex<Vec<i64>>,
     trace_plugin_ids: Mutex<Vec<String>>,
-    /// true 时 set_run_pipeline 返回 Err（persist_run_start 持久化故障注入）。
-    fail_set_run_pipeline: std::sync::atomic::AtomicBool,
-    /// 收到的 update_run_status 终态序列（终态映射表测试读取）。
+    /// true 时 record_run_start 返回 Err（persist_run_start 持久化故障注入）。
+    fail_record_run_start: std::sync::atomic::AtomicBool,
+    /// 收到的 run_status 投影序列（upsert_state_field 调用序，终态映射表测试读取）。
     run_statuses: Mutex<Vec<RunStatus>>,
 }
 
@@ -138,7 +138,7 @@ impl Default for NullStorage {
         Self {
             checkpoints: Mutex::new(Vec::new()),
             trace_plugin_ids: Mutex::new(Vec::new()),
-            fail_set_run_pipeline: std::sync::atomic::AtomicBool::new(false),
+            fail_record_run_start: std::sync::atomic::AtomicBool::new(false),
             run_statuses: Mutex::new(Vec::new()),
         }
     }
@@ -171,7 +171,7 @@ impl NullStorage {
             .collect()
     }
 
-    /// 收到的 run 终态（update_run_status 调用序）。
+    /// 收到的 run_status 投影（终态写面 upsert_state_field 调用序）。
     fn recorded_run_statuses(&self) -> Vec<RunStatus> {
         self.run_statuses.lock().unwrap().clone()
     }
@@ -179,17 +179,19 @@ impl NullStorage {
 
 #[async_trait]
 impl StorageBackend for NullStorage {
-    async fn set_run_pipeline(
+    async fn record_run_start(
         &self,
-        _run_id: &str,
         _pipeline_id: &str,
+        _tenant_id: &str,
+        _run_id: &str,
+        _config_hash: &str,
     ) -> Result<(), agentos_core::types::StorageError> {
         if self
-            .fail_set_run_pipeline
+            .fail_record_run_start
             .load(std::sync::atomic::Ordering::SeqCst)
         {
             return Err(agentos_core::types::StorageError::Database(
-                "injected set_run_pipeline failure".into(),
+                "injected record_run_start failure".into(),
             ));
         }
         Ok(())
@@ -224,22 +226,27 @@ impl StorageBackend for NullStorage {
         self.checkpoints.lock().unwrap().push(step_no);
         Ok(())
     }
-    async fn update_run_status(
+    async fn upsert_state_field(
         &self,
-        _run_id: &str,
-        status: RunStatus,
-        _branch: Option<&str>,
-        _seq: Option<u32>,
-    ) -> Result<(), agentos_core::types::StorageError> {
-        self.run_statuses.lock().unwrap().push(status);
-        Ok(())
-    }
-    async fn create_run(
-        &self,
-        _run_id: &str,
-        _config_hash: &str,
+        _pipeline_id: &str,
         _tenant_id: &str,
+        key: &str,
+        value: &serde_json::Value,
     ) -> Result<(), agentos_core::types::StorageError> {
+        // 终态写面（runs 表退役后引擎经 upsert_state_fields 批量写 run_status）
+        if key == "run_status" {
+            if let Some(s) = value.as_str() {
+                let status = match s {
+                    "running" => RunStatus::Running,
+                    "suspended" => RunStatus::Suspended,
+                    "completed" => RunStatus::Completed,
+                    "failed" => RunStatus::Failed,
+                    "cancelled" => RunStatus::Cancelled,
+                    _ => RunStatus::Running,
+                };
+                self.run_statuses.lock().unwrap().push(status);
+            }
+        }
         Ok(())
     }
     async fn store_blob(
@@ -363,7 +370,6 @@ impl Fixture {
             plugin_ids.iter().map(|s| s.to_string()),
             store.clone() as Arc<dyn StorageBackend>,
             "run_test",
-            "main",
         );
         Self {
             executor,
@@ -640,7 +646,6 @@ async fn checkpoint_counts_steps_across_loop_rounds_not_rounds() {
         ["a", "b", "c"].iter().map(|s| s.to_string()),
         store.clone() as Arc<dyn StorageBackend>,
         "r",
-        "b",
     );
     let config = PipelineConfig {
         name: "ckpt_loop".into(),
@@ -765,7 +770,6 @@ fn make_executor(invoker: Arc<dyn PluginInvoker>, plugin_ids: &[&str]) -> Pipeli
         plugin_ids.iter().map(|s| s.to_string()),
         store,
         "r",
-        "b",
     )
 }
 
@@ -1871,14 +1875,14 @@ fn test_op_ledger_entry_set_without_msg_ids_null() {
 // ── persist_run_start 持久化失败可见性（扫描 2026-08-27 辖区二 Should#2）──
 
 #[tokio::test]
-async fn set_run_pipeline_failure_counts_persist_failure_and_run_continues() {
-    // set_run_pipeline（run↔pipeline 归属登记）失败不得静默：与同函数
-    // create_run/link_pipeline_session 同款 warn + persist_failure 计数；
-    // 同时执行面不受阻（登记失败只降级归属可查性，不中断本轮）。
+async fn record_run_start_failure_counts_persist_failure_and_run_continues() {
+    // record_run_start（运行开始簿记，state 运行键）失败不得静默：与同函数
+    // link_pipeline_session 同款 warn + persist_failure 计数；
+    // 同时执行面不受阻（簿记失败只降级运行可查性，不中断本轮）。
     let fixture = Fixture::build(&["a"]);
     fixture
         .store
-        .fail_set_run_pipeline
+        .fail_record_run_start
         .store(true, std::sync::atomic::Ordering::SeqCst);
     fixture.invoker.set_result(
         "a",
@@ -1901,7 +1905,7 @@ async fn set_run_pipeline_failure_counts_persist_failure_and_run_continues() {
     let snap = fixture.executor.metrics().snapshot();
     assert!(
         snap.persist_failures >= 1,
-        "set_run_pipeline 失败必须计入 persist_failure（原 let _ 静默），实际 {}",
+        "record_run_start 失败必须计入 persist_failure（不得静默），实际 {}",
         snap.persist_failures
     );
 }
@@ -2821,7 +2825,6 @@ async fn run_end_checkpoint_strips_declared_volatile_keys() {
         std::iter::empty::<String>(),
         store,
         "r_decl",
-        "b_decl",
     );
     let final_state = json!({
         "pipeline_id": "pipe_decl",
@@ -2877,7 +2880,6 @@ async fn run_end_checkpoint_keeps_keys_without_declaration() {
         std::iter::empty::<String>(),
         store,
         "r_keep",
-        "b_keep",
     );
     let final_state = json!({
         "pipeline_id": "pipe_keep",
@@ -3011,7 +3013,6 @@ fn make_bus_executor(bus: Option<Arc<HookEventBus>>, run_id: &str) -> PipelineEx
         ["pipeline_dummy"].iter().map(|s| s.to_string()),
         store,
         run_id,
-        "main",
     )
     .with_hook_bus(bus)
 }

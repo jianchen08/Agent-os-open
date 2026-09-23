@@ -10,19 +10,12 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryPage } from '@/pages/memory/MemoryPage'
-import { getSemanticMemory, searchHindsight } from '@/services/api/memory'
+import { getSemanticMemory, searchHindsight, getEpisodes } from '@/services/api/memory'
 import { renderWithProviders } from '@/test/renderWithProviders'
+import { arrangeMemoryBaseResponses } from './memoryPageTestUtils'
 
-vi.mock('@/services/api/memory', () => ({
-  getEpisodes: vi.fn(),
-  getMemoryStats: vi.fn(),
-  getSemanticMemory: vi.fn(),
-  searchHindsight: vi.fn(),
-}))
+vi.mock('@/services/api/memory', async () => (await import('./memoryPageTestUtils')).memoryApiModuleMock())
 
-import { getEpisodes, getMemoryStats } from '@/services/api/memory'
-
-const STATS = { episode_count: 7, knowledge_count: 3, total_count: 10 }
 
 const EPISODES = {
   items: [
@@ -44,11 +37,8 @@ function renderPage() {
   return renderWithProviders(<MemoryPage />)
 }
 
-beforeEach(() => {
-  vi.mocked(getMemoryStats).mockResolvedValue(STATS as never)
-  vi.mocked(getEpisodes).mockResolvedValue(EPISODES as never)
-  vi.mocked(getSemanticMemory).mockResolvedValue({ items: [] } as never)
-  vi.mocked(searchHindsight).mockResolvedValue({ items: [], total: 0, query: '' } as never)
+beforeEach(async () => {
+  await arrangeMemoryBaseResponses(EPISODES)
 })
 
 describe('MemoryPage: 统计与情景记忆', () => {

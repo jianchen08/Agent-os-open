@@ -1,5 +1,8 @@
 {
   "id": "pipeline_godot_context",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Godot Context",
   "description": "Godot 编辑器选中引用：接收宿主插件推送、转发前端、引用与用户消息合并",
   "version": "1.0.0",

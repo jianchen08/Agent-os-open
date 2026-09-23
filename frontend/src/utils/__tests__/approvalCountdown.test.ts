@@ -38,10 +38,29 @@ describe('formatRemaining 剩余时间格式', () => {
 describe('approvalDeadlineMs 审批等待截止时刻', () => {
   const BASE = '2026-09-18T00:00:00Z'
 
-  it('createdAt + timeoutSeconds → 基准时刻 + 等待上限', () => {
+  // BUG-60（用户裁定 2026-09-22 推翻 cap 方案）：审批族超时统一 24h——内核
+  // mcp client 默认 86400s 与 human create_choice 声明对齐，声明值端到端生效，
+  // 截止时刻 = 基准 + 声明值原样透传（无 min cap 收敛）
+  it.each([
+    [600, '声明 600s（短窗显式声明）→ 原样透传'],
+    [86400, '声明 86400s（审批族统一 24h 常量）→ 原样透传'],
+    [120000, '声明 120000s（装机版历史值）→ 原样透传'],
+  ])('timeoutSeconds=%i → 截止 = 基准 + 声明值（%s）', (declared) => {
     expect(
-      approvalDeadlineMs({ createdAt: BASE, timestamp: BASE, timeoutSeconds: 86400 }),
-    ).toBe(Date.parse(BASE) + 86400_000)
+      approvalDeadlineMs({ createdAt: BASE, timestamp: BASE, timeoutSeconds: declared }),
+    ).toBe(Date.parse(BASE) + declared * 1000)
+  })
+
+  it('统一常量断言：声明 86400s（审批族统一 24h）截止恰为基准 + 24h', () => {
+    expect(approvalDeadlineMs({ createdAt: BASE, timestamp: BASE, timeoutSeconds: 86400 })).toBe(
+      Date.parse(BASE) + 86_400_000,
+    )
+  })
+
+  it('声明窗 60s → 按声明值计算（区分度输入）', () => {
+    expect(approvalDeadlineMs({ createdAt: BASE, timestamp: BASE, timeoutSeconds: 60 })).toBe(
+      Date.parse(BASE) + 60_000,
+    )
   })
 
   it('createdAt 缺失回退 timestamp（区分度输入）', () => {

@@ -115,13 +115,25 @@ function applyCardMeta(
   // 声明意图优先；数据路由分支（applyDataDrivenIntent 产物）按数据形状重推
   const intent = getRenderIntent(base.toolName!) ?? inferRenderIntent(ctx)
   const meta = intent ? deriveCardMeta(ctx, intent) : {}
+  const humanizedTitle = enhanced.title === base.title ? humanizeToolName(base.toolName!) : enhanced.title
   const result: ActivityData = {
     ...enhanced,
-    // render 分支不改标题：沿用工具名人性化（与 L0/契约视图口径一致）
-    title: enhanced.title === base.title ? humanizeToolName(base.toolName!) : enhanced.title,
+    // render 分支不改标题：沿用工具名人性化（与 L0/契约视图口径一致）；
+    // meta.title（file_card = 文件名）声明在先
+    title: meta.title ?? humanizedTitle,
   }
   if (meta.summary) {
     result.subtitle = meta.summary
+  }
+  if (meta.size !== undefined) {
+    result.size = meta.size
+  }
+  if (meta.diffStat) {
+    result.diffStat = meta.diffStat
+  }
+  if (meta.icon) {
+    const Icon = resolveChatCardIcon(meta.icon)
+    result.customIcon = <Icon className="h-icon-md w-icon-md" />
   }
   if (meta.filePath) {
     return injectFileOpen(result, meta.filePath, toolCall, options)

@@ -81,6 +81,8 @@ export async function findPipelineLocation(pipelineId: string): Promise<Pipeline
       }
     }
   } catch (e) {
+    // 记日志并落 null：调用方按"找不到管道"呈现定位失败提示（不伪装成功）
+    // （OBS-R258-1 吞错误规则登记）
     console.error('[findPipelineLocation] fetchSessions API 调用失败', e)
   }
 
@@ -198,7 +200,7 @@ export async function navigateToPipeline(
   // 固定存在的不变量（initSessionTabs 保证），走到缺失分支即数据不一致 bug，
   // 显式报错暴露，不做静默兜底（静默激活会掩盖根因）。
   const targetSession = readSessions().find((s) => s.id === targetSessionId)
-  // 主管道判定（权威 activePipelineId 解析，不按 [0] 位置猜测）
+  // 主管道判定（映射真值 pipelineIds[0]，与任务管理面板同源）
   const isMainPipeline = !!targetSession && mainPipelineIdOf(targetSession) === pipelineId
   if (isMainPipeline) {
     const mainTab = currentTabStore.tabs.find((t) => t.id === `main-${targetSessionId}`)

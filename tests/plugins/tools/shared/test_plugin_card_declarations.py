@@ -34,6 +34,7 @@ RENDER_CARDS = {
     "generic",
     "image",
     "file",
+    "file_card",
     "table",
     "form",
 }

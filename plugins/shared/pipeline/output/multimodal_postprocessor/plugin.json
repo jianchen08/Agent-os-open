@@ -1,5 +1,8 @@
 {
   "id": "pipeline_multimodal_postprocessor",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Multimodal Postprocessor",
   "version": "1.0.0",
   "plugin_type": "pipeline",

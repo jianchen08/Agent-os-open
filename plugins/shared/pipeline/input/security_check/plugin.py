@@ -105,9 +105,11 @@ _PROJECT_ROOT = os.path.dirname(  # noqa: PTH120
 # 黑名单制：只作用于"未被 allow 白名单/命令指纹放行的危险工具"，
 # 参数未命中安全规则关键词的操作任何档位都直接执行，各档差异只在"命中后的处置"。
 # 三条内置底线（路径遍历/敏感系统目录/nul 重定向）任何模式都强制执行。
-# 隔离/worktree 会话默认完全免审批（隔离容器即安全边界，用户未显式选择权限档时
-# 基础检查通过即整体放行）；用户在前端选择器显式选择任一档后以所选档为准，
-# 隔离不再豁免黑名单（显式选择判定：_PERMISSION_MODES 表在场即显式，缺省不写表）。
+# 隔离/worktree 会话的免审批默认由旁路档承载（隔离容器即安全边界，OBS-R255-1
+# 2026-09-22 统一口径）：用户未显式选择权限档时隔离会话生效档即 bypass；显式选择
+# default/accept_edits/auto 三档后以所选档为准，隔离不再豁免黑名单；显式选 bypass
+# 即免审批本身（与隔离默认同档同路径）。显式选择判定：_PERMISSION_MODES 表在场即
+# 显式，缺省不写表。
 # - default      : 命中 block/needs_approval 规则都逐次弹审批
 # - accept_edits : file_read/file_write 一律放行；其余工具命中规则仍弹审批
 # - auto         : block 规则自动拒绝不打扰；needs_approval 规则才弹审批
@@ -120,8 +122,8 @@ PERMISSION_MODES: dict[str, str] = {
 }
 
 # 权限模式表：key = session_id（会话稳定键——同会话内主/子管道、任务轮换的
-# pipeline_id 各不相同，会话级设置必须以会话为键，否则显式选择被隔离豁免
-# 路径吞掉）；写入端 = server.py http.handle 切换端点（前端选择器同键），
+# pipeline_id 各不相同，会话级设置必须以会话为键，否则显式选择被隔离免审批
+# 默认吞掉）；写入端 = server.py http.handle 切换端点（前端选择器同键），
 # 本插件 execute 读；sidecar 进程内共享；持久化到 data/permission_modes.json
 # 防重启丢失。
 _PERMISSION_MODES: dict[str, str] = {}
@@ -423,16 +425,15 @@ class SecurityCheckPlugin(IInputPlugin):
         本方法只做编排；两道检查分别委托 ``_run_base_safety_scan`` /
         ``_authorize_tool_calls``，各自可独立理解。
 
-        隔离/worktree 会话默认免审批，显式选择可覆盖：
+        权限档单点解析（旁路档承载隔离免审批，OBS-R255-1）：
         1. 基础安全检查（路径遍历 / 敏感系统目录黑名单 / nul 重定向）→ 任何
            模式都必须执行，这是防注入、防触碰 OS 核心目录的底线，隔离不能绕过
-        2. 隔离任务 + 用户未显式选择权限档 → 基础检查通过即整体放行
-           （隔离容器即安全边界，黑名单命中也不弹审批）
-        3. 显式选择（前端权限选择器写入 _PERMISSION_MODES 表）→ 以所选档为准，
-           参数级黑名单（block / needs_approval）照常按档处置，隔离不再豁免
-        4. 非隔离任务 → 按权限档走：危险工具分类门槛（命令执行类 /
-           dangerous_operations 声明）兜底无隔离边界的任意执行，命中规则的
-           参数按档处置
+        2. 生效档 = 旁路（隔离任务未显式选择的免审批默认，或显式/配置选旁路）
+           → 基础检查通过即整体放行，不做规则匹配
+        3. 其余档 → 按档走：隔离任务豁免环境类门槛（危险工具分类），非隔离
+           任务危险工具分类兜底无隔离边界的任意执行，命中规则的参数按档处置
+        4. 档位解析优先级见 ``_resolve_permission_mode``：显式选择 > 隔离默认
+           （旁路）> 插件配置 > default
 
         Args:
             ctx: 插件执行上下文
@@ -459,16 +460,17 @@ class SecurityCheckPlugin(IInputPlugin):
 
         # ── 第二道：按模式分流 ──
 
-        # 隔离/worktree 默认免审批（用户未显式选择权限档时，隔离容器即安全边界，
-        # 基础检查通过即整体放行）；显式选择任一档后以所选档为准，黑名单照常
-        # 生效（isolation_level 是隔离唯一真相源，显式判定见 _explicit_permission_mode）。
+        # 权限档单点解析：隔离/worktree 未显式选择 → 生效档即旁路（免审批默认，
+        # 隔离容器即安全边界）；显式选旁路同档。命中旁路 → 基础检查通过即整体
+        # 放行（isolation_level 是隔离唯一真相源，解析优先级见 _resolve_permission_mode）。
         execution_contexts = ctx.state.get("execution_contexts", [])
         isolated = self._is_isolated(execution_contexts)
-        if isolated and self._explicit_permission_mode(ctx) is None:
-            logger.info("[%s] 隔离任务，基础检查通过，放行", self.name)
-            return {"security.decision": {"allowed": True, "reason": "isolated task, base checks passed"}}
+        mode = self._resolve_permission_mode(ctx, isolated=isolated)
+        if mode == "bypass":
+            logger.info("[%s] 旁路档免审批放行（隔离默认或显式选择），基础检查已通过", self.name)
+            return {"security.decision": {"allowed": True, "reason": "bypass: base checks passed"}}
 
-        decision = await self._authorize_tool_calls(ctx, tool_calls, isolated=isolated)
+        decision = await self._authorize_tool_calls(ctx, tool_calls, isolated=isolated, mode=mode)
         if decision is not None:
             return decision
 
@@ -536,13 +538,20 @@ class SecurityCheckPlugin(IInputPlugin):
         tool_calls: list[dict[str, Any]],
         *,
         isolated: bool,
+        mode: str,
     ) -> dict[str, Any] | None:
         """逐工具授权：只读白名单 → 环境门槛（隔离豁免）→ 规则/指纹/权限模式。
 
         隔离豁免「环境类」检查：isolated=True 时跳过危险工具分类门槛
         （命令执行类 / dangerous_operations 声明），隔离边界承担执行环境风险，
-        未命中规则的参数不弹审批。走本方法的隔离任务必已显式选择权限档
-        （未选择时 _do_work 已整体放行），命中黑名单规则按所选档处置。
+        未命中规则的参数不弹审批。生效档为旁路时不会进入本方法（_do_work 已
+        整体放行），其余档命中黑名单规则按所选档处置。
+
+        Args:
+            ctx: 插件执行上下文
+            tool_calls: 工具调用列表
+            isolated: 是否隔离任务（豁免环境类门槛）
+            mode: ``_do_work`` 解析好的生效权限档（单点解析，避免二次判定）
 
         Returns:
             需要处置（软拦截/弹审批）时的决策字典；全部放行返回 None。
@@ -588,6 +597,7 @@ class SecurityCheckPlugin(IInputPlugin):
                 action=action,
                 rule_name=rule_name,
                 signature=signature,
+                mode=mode,
             )
             if isinstance(mode_decision, dict):
                 return mode_decision
@@ -602,29 +612,28 @@ class SecurityCheckPlugin(IInputPlugin):
         action: str,
         rule_name: str | None,
         signature: str | None,
+        mode: str,
     ) -> str | dict[str, Any]:
         """按权限模式处置未命中白名单/记忆指纹的危险工具。
 
         模式决定"未命中规则"的档位：default=确认、accept_edits=文件放行、
-        auto=尽量自动、bypass=跳过审批。
+        auto=尽量自动。旁路档不进入本方法（_do_work 单点判定整体放行）。
         default / auto(ask) / accept_edits(命令类) 且**未命中任何规则**
         → 参数安全，直接放行。命中 needs_approval/block 规则的参数（rm -rf 等关键词）
         已在 _match_rules 返回对应 action，只有 action 为空（未命中）才走到放行分支；
         规则缺失/为空（安全闸门失效风险）→ 兜底弹审批（安全优先）。
 
+        Args:
+            ctx: 插件执行上下文
+            tool_name: 工具名
+            action: 规则匹配动作（allow/needs_approval/block 或空）
+            rule_name: 命中的规则名（未命中为空）
+            signature: 命令指纹（弹审批时供"同命令免批"记忆）
+            mode: ``_do_work`` 解析好的生效权限档
+
         Returns:
             "pass"（放行）；或处置完成的决策字典（auto 自动拒绝 / 弹审批）。
         """
-        mode = self._resolve_permission_mode(ctx)
-
-        if mode == "bypass":
-            logger.info(
-                "[%s] bypass 模式放行 | tool=%s",
-                self.name,
-                tool_name,
-            )
-            return "pass"
-
         if mode == "accept_edits" and tool_name in _FILE_TOOLS:
             logger.info(
                 "[%s] accept_edits 模式文件类放行 | tool=%s",
@@ -678,17 +687,20 @@ class SecurityCheckPlugin(IInputPlugin):
         session_id = str(ctx.state.get(StateKeys.SESSION_ID, "") or "")
         return _PERMISSION_MODES.get(session_id)
 
-    def _resolve_permission_mode(self, ctx: PluginContext) -> str:
-        """解析当前调度的权限模式。
+    def _resolve_permission_mode(self, ctx: PluginContext, *, isolated: bool = False) -> str:
+        """解析当前调度的生效权限档（单点解析，OBS-R255-1）。
 
         key 为 session_id（会话级模式：同会话内所有管道共享同一显式档，
         与写入端 http.handle 同键）。优先级：用户显式选择（http.handle 写入
-        的 _PERMISSION_MODES）> 插件配置（pipeline yaml security_check config
-        的 mode 字段）> 默认 "default"。
+        的 _PERMISSION_MODES）> 隔离免审批默认（isolated=True 且未显式选择
+        → 旁路档承载，隔离容器即安全边界）> 插件配置（pipeline yaml
+        security_check config 的 mode 字段）> 默认 "default"。
         """
         explicit = self._explicit_permission_mode(ctx)
         if explicit:
             return explicit
+        if isolated:
+            return "bypass"
         return self._config.get("mode", "default")
 
     async def _await_approval(
@@ -775,7 +787,7 @@ class SecurityCheckPlugin(IInputPlugin):
                 # 等待用户审批是长等待语义：默认 30s 会先于用户点击掐断。
                 # 业务超时 86400 由 human 服务 enforce；本参数仅作 SDK
                 # 侧提示（内核不读 meta.timeout）——内核按 human 插件声明的
-                # mcp.request_timeout_secs=90000（plugin.json）等待响应。
+                # mcp.request_timeout_secs=86400（BUG-60 审批族统一值）等待响应。
                 timeout=86500.0,
             )
             # capability 返回 error dict 时转换成对应异常（与原 service 行为对齐）

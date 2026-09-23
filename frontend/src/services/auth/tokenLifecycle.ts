@@ -84,6 +84,7 @@ export function setTokens(accessToken: string, refreshToken: string, expiresIn: 
     // localStorage 不可用：refresh 链路将按无凭据处理（重启浏览器后需重登），
     // access token 本轮仍有效，不阻塞当前会话
   }
+  mirrorAuthSession(refreshToken)
   notifyTokenChanged()
 }
 
@@ -95,8 +96,35 @@ export function clearTokens(): void {
   } catch {
     // 同上：不可用时无残留可清
   }
+  mirrorAuthSession(null)
   scrubLegacyTokenStorages()
   notifyTokenChanged()
+}
+
+/**
+ * refresh token 强杀耐久镜像：localStorage 走 Chromium 批量提交，进程被
+ * 强杀时最近的轮换写入可能未落盘（服务端单次轮换已作废旧值）→ 重启后
+ * 必然重新登录。主进程文件同步写立即落 OS 页缓存，进程强杀不丢。
+ * Web / 旧版壳无 electronAPI 时为 no-op。
+ */
+function mirrorAuthSession(refreshToken: string | null): void {
+  try {
+    void window.electronAPI?.authSession?.save?.(refreshToken)?.catch(() => {
+      // 镜像失败不阻塞令牌主链路（localStorage 仍是第一真值）
+    })
+  } catch {
+    // 环境不支持即跳过
+  }
+}
+
+/** 从主进程镜像回读 refresh token；无 electronAPI / 文件缺失返回 null */
+export async function loadMirroredAuthSession(): Promise<string | null> {
+  try {
+    const token = await window.electronAPI?.authSession?.load?.()
+    return typeof token === 'string' && token.length > 0 ? token : null
+  } catch {
+    return null
+  }
 }
 
 // ──────────────────────────────────────────────
@@ -166,14 +194,16 @@ export async function refresh(): Promise<void> {
   })()
 
   // 无论成功失败都清空 in-flight，允许下次重新尝试。
-  // catch 兜住清理链自身的 rejection：主 promise 已 return 给调用方处理，
-  // 这条 finally 派生链无人消费，失败时会成为 unhandled rejection
-  // （浏览器控制台报错 / vitest 计入 Unhandled Errors）。
   refreshInFlight
     .finally(() => {
       refreshInFlight = null
     })
-    .catch(() => {})
+    .catch(() => {
+      // HACK: 主 promise 已 return 给调用方处理（错误经其 throw 分类决策），
+      // 这条 finally 派生链无人消费，空 catch 只为兜住派生链 rejection 防
+      // unhandled rejection（浏览器控制台报错 / vitest 计入 Unhandled Errors）。
+      // （OBS-R258-1 吞错误规则登记）
+    })
 
   return refreshInFlight
 }

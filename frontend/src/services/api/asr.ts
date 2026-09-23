@@ -7,6 +7,49 @@ export interface TranscriptionResult {
   text: string
 }
 
+/** 转写失败错误：携带后端结构化错误体（code/message），供调用方在横幅中补原因 */
+export class TranscriptionError extends Error {
+  /** 后端错误码（如 asr_failed）；无结构化体时缺省 */
+  readonly code?: string
+
+  constructor(message: string, code?: string) {
+    super(message)
+    this.name = 'TranscriptionError'
+    this.code = code
+  }
+}
+
+interface ErrorWithResponse {
+  response?: { status?: number; data?: unknown }
+}
+
+/** 未知错误收窄：带 axios 形态 response 的错误对象 */
+function isErrorWithResponse(error: unknown): error is ErrorWithResponse {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'response' in error &&
+    typeof (error as ErrorWithResponse).response === 'object'
+  )
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+/** 从后端结构化错误体提取用户可读原因（{code, message}）；缺失时回退 HTTP 状态码 */
+function extractFailureReason(response: ErrorWithResponse['response']): {
+  message: string
+  code?: string
+} {
+  const status = response?.status
+  const body = response?.data
+  const code = isRecord(body) && typeof body.code === 'string' ? body.code : undefined
+  const backendMessage =
+    isRecord(body) && typeof body.message === 'string' && body.message ? body.message : undefined
+  return { message: backendMessage ?? `HTTP ${status ?? 'unknown'}`, code }
+}
+
 /** 将音频 Blob 转写为文本 静默处理 503（ASR 未配置），避免全局错误拦截器报错 */
 export async function transcribeAudio(
   blob: Blob,
@@ -28,10 +71,15 @@ export async function transcribeAudio(
       },
     )
     return response.data
-  } catch (error: any) {
+  } catch (error: unknown) {
     // 503 = 后端 ASR 未配置，静默返回 null（不触发全局报错）
-    if (error?.response?.status === 503) {
+    if (isErrorWithResponse(error) && error.response?.status === 503) {
       return null
+    }
+    // HTTP 错误 → 抛带结构化原因的 TranscriptionError（横幅补原因）
+    if (isErrorWithResponse(error)) {
+      const { message, code } = extractFailureReason(error.response)
+      throw new TranscriptionError(message, code)
     }
     throw error
   }

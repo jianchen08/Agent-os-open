@@ -95,6 +95,47 @@ pub fn load_allowlist_file(path: &Path) -> AllowlistConfig {
     }
 }
 
+/// 双源同 id 裁决策略（ADR 2026-09-20-packaged-dual-source-adjudication）。
+///
+/// 同一插件 id 同时出现在内置根（打包/仓内共享插件）与用户根（用户空间副本）
+/// 时，由本策略决定胜者。此前口径恒为「用户根赢」（见
+/// [`DualSourcePolicy::UserFirst`]）——对 dev 合理，但对装机版失真：用户空间的
+/// 共享插件副本是旧安装/旧迁移遗留（陈旧、.venv 缺失、扁平布局），无条件压过
+/// 版本匹配的打包新版 → 装机版跑陈旧副本（BUG-55）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DualSourcePolicy {
+    /// 用户根赢（dev 形态默认）：同 id 双源时用户根子树恒胜。开发者在
+    /// user_root 的合法改动（工作副本、venv、补丁）永远生效，行为与历史
+    /// 口径逐位一致。
+    #[default]
+    UserFirst,
+    /// 内置根优先（装机形态）：同 id 双源时内置（打包）副本胜，**除非**用户
+    /// 副本 manifest `version` 按 semver 严格大于内置（用户真升级过该插件）；
+    /// 版本相等或任一侧不可解析 → 内置胜。用户根仍承载「内置没有的额外
+    /// 插件」（第三方安装面不变）。
+    BuiltinFirst,
+}
+
+/// 双源裁决策略环境变量（装机链由 electron `buildKernelEnv` 设为 `builtin`）。
+pub const PLUGIN_SOURCE_PRIORITY_ENV: &str = "AGENTOS_PLUGIN_SOURCE_PRIORITY";
+
+impl DualSourcePolicy {
+    /// 从进程环境解析策略：`builtin` → [`DualSourcePolicy::BuiltinFirst`]，
+    /// 其余（未设/`user`/未知值）→ [`DualSourcePolicy::UserFirst`]（保守默认 =
+    /// 历史口径）。
+    pub fn from_env() -> Self {
+        Self::parse(std::env::var(PLUGIN_SOURCE_PRIORITY_ENV).ok().as_deref())
+    }
+
+    /// 纯解析（`from_env` 的无环境变异测试面）。
+    pub fn parse(value: Option<&str>) -> Self {
+        match value.map(str::trim) {
+            Some("builtin") => Self::BuiltinFirst,
+            _ => Self::UserFirst,
+        }
+    }
+}
+
 /// 插件加载器实现。
 ///
 /// 支持双根扫描：
@@ -111,6 +152,8 @@ pub struct PluginLoaderImpl {
     config_root: Option<PathBuf>,
     /// 插件准入白名单（P2-2）
     allowlist: AllowlistConfig,
+    /// 双源同 id 裁决策略（默认 UserFirst = 历史口径）
+    dual_source_policy: DualSourcePolicy,
     /// 已发现的 manifest 来源缓存 {plugin_id: manifest 文件路径}。
     ///
     /// 内存归一（manifest 唯一真源 = AppState.manifests）：本表只持轻量路径
@@ -135,9 +178,20 @@ impl PluginLoaderImpl {
             user_root,
             config_root: None,
             allowlist: AllowlistConfig::default(),
+            dual_source_policy: DualSourcePolicy::default(),
             manifests: RwLock::new(HashMap::new()),
             loaded: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// 设置双源同 id 裁决策略，返回 self 供链式调用。
+    ///
+    /// 生产接线（agentos-kernel `build_plugin_loader`）经
+    /// [`DualSourcePolicy::from_env`] 读 [`PLUGIN_SOURCE_PRIORITY_ENV`]；
+    /// 测试直接传值。
+    pub fn with_dual_source_policy(mut self, policy: DualSourcePolicy) -> Self {
+        self.dual_source_policy = policy;
+        self
     }
 
     /// 设置配置文件根目录，返回 self 供链式调用。
@@ -284,6 +338,111 @@ impl PluginLoaderImpl {
             if user_read {
                 prune_managed_plugin_dirs(user_root, keep.get(user_root));
             }
+        }
+    }
+
+    /// 路径是否落在用户根子树内。
+    fn is_user_rooted(&self, p: &Path) -> bool {
+        self.user_root
+            .as_ref()
+            .is_some_and(|user_root| p.starts_with(user_root))
+    }
+
+    /// 路径是否落在用户模式种子区（`<user_root>/modes/`）。
+    ///
+    /// 模式区有自己的账本化对账（`reconcile_mode_seeds`：版本闸 + 内容哈希 +
+    /// 定制检测 H1），对「用户已定制副本」的判定远比 manifest version 精确——
+    /// 双源裁决对它整体让位：模式区同 id 恒用户赢（任何策略下），否则装机版
+    /// 会用打包副本压掉用户已定制的模式（违反 H1「用户定制必须存活」）。
+    fn is_user_modes_path(&self, p: &Path) -> bool {
+        self.user_root
+            .as_ref()
+            .is_some_and(|user_root| p.starts_with(user_root.join("modes")))
+    }
+
+    /// 用户副本 version 是否按 semver 严格大于内置副本。任一侧不可解析 →
+    /// false（不可判定时保守判「用户不新」——装机口径下内置为权威分发物）。
+    fn user_strictly_newer(user_ver: &str, builtin_ver: &str) -> bool {
+        match (
+            semver::Version::parse(user_ver.trim()),
+            semver::Version::parse(builtin_ver.trim()),
+        ) {
+            (Ok(user), Ok(builtin)) => user > builtin,
+            _ => false,
+        }
+    }
+
+    /// 同 id 冲突裁决：challenger 是否应取代 incumbent（ADR
+    /// 2026-09-20-packaged-dual-source-adjudication）。
+    ///
+    /// - [`DualSourcePolicy::UserFirst`]（dev 默认）：历史口径——用户根子树赢，
+    ///   其余 last-wins；
+    /// - [`DualSourcePolicy::BuiltinFirst`]（装机）：跨根冲突按 semver 裁决——
+    ///   用户副本**严格更新**才用户赢，否则内置赢；同侧维持 last-wins。
+    ///
+    /// 模式种子区（[`Self::is_user_modes_path`]）两种策略下都保持用户赢。
+    /// 判定只依赖两侧（根归属， version）——与 root_paths 迭代序解耦，热路径
+    /// HashSet 乱序不会让胜者逐轮翻转（2026-09-18 翻转根修的延续）。
+    fn should_replace(
+        &self,
+        incumbent_path: &Path,
+        incumbent_version: &str,
+        challenger_path: &Path,
+        challenger_version: &str,
+    ) -> bool {
+        let incumbent_user = self.is_user_rooted(incumbent_path);
+        let challenger_user = self.is_user_rooted(challenger_path);
+        // 模式种子区让位：恒用户赢（= UserFirst 规则）。语义：在位者是用户根
+        // 且挑战者非用户根 → 保留在位者；其余换。
+        if (incumbent_user && self.is_user_modes_path(incumbent_path))
+            || (challenger_user && self.is_user_modes_path(challenger_path))
+        {
+            return !incumbent_user || challenger_user;
+        }
+        match self.dual_source_policy {
+            DualSourcePolicy::UserFirst => !incumbent_user || challenger_user,
+            DualSourcePolicy::BuiltinFirst => match (incumbent_user, challenger_user) {
+                (true, false) => !Self::user_strictly_newer(incumbent_version, challenger_version),
+                (false, true) => Self::user_strictly_newer(challenger_version, incumbent_version),
+                // 同侧（内置×内置 / 用户×用户）维持 last-wins
+                _ => true,
+            },
+        }
+    }
+
+    /// 把一个扫描候选并入发现集：无在位者直接入；有在位者经
+    /// [`Self::should_replace`] 裁决。跨根换源时留一条 info（装机版 boot 日志
+    /// 验证面：同 id 双源最终由谁服务）。
+    fn admit(
+        &self,
+        all: &mut HashMap<String, (PluginManifest, PathBuf)>,
+        manifest: PluginManifest,
+        path: PathBuf,
+    ) {
+        let replace = match all.get(&manifest.id) {
+            None => true,
+            Some((incumbent, incumbent_path)) => {
+                let should = self.should_replace(
+                    incumbent_path,
+                    &incumbent.version,
+                    &path,
+                    &manifest.version,
+                );
+                if should && self.is_user_rooted(incumbent_path) != self.is_user_rooted(&path) {
+                    info!(
+                        "Dual-source same-id resolved: id={} winner={} user_version={} builtin_version={} policy={:?}",
+                        manifest.id,
+                        if self.is_user_rooted(&path) { "user" } else { "builtin" },
+                        if self.is_user_rooted(&path) { &manifest.version } else { &incumbent.version },
+                        if self.is_user_rooted(&path) { &incumbent.version } else { &manifest.version },
+                        self.dual_source_policy,
+                    );
+                }
+                should
+            }
+        };
+        if replace {
+            all.insert(manifest.id.clone(), (manifest, path));
         }
     }
 
@@ -674,30 +833,20 @@ impl PluginLoader for PluginLoaderImpl {
         self.sync_external_mcp_plugins();
 
         // 扫描 root_paths（外部传入的路径）。同 id 双源裁决与内置根/用户根扫描段
-        // 同语义：**用户根子树赢**。root_paths 的迭代序来自调用方（热路径
-        // discover_new_plugins 把内置+用户根的父目录混装进每轮新建的 HashSet，
-        // 序不稳定），朴素 last-wins 会让双源同 id 的胜者逐轮翻转——源码目录随之
-        // 翻转 → 代码指纹每轮必变 → 复验驱逐/重注册循环（/ext 路由间歇 503/504，
-        // 2026-09-18 根修）。故用户根条目一旦胜出即不可被非用户根条目覆盖，
-        // 与迭代序解耦；其余路径间维持 last-wins 不变。
-        let is_user_rooted = |p: &Path| -> bool {
-            self.user_root
-                .as_ref()
-                .is_some_and(|user_root| p.starts_with(user_root))
-        };
+        // 同语义，统一经 [`Self::admit`] → [`Self::should_replace`]：UserFirst
+        // （dev 默认）下为历史口径「**用户根子树赢**」。root_paths 的迭代序来自
+        // 调用方（热路径 discover_new_plugins 把内置+用户根的父目录混装进每轮
+        // 新建的 HashSet，序不稳定），朴素 last-wins 会让双源同 id 的胜者逐轮
+        // 翻转——源码目录随之翻转 → 代码指纹每轮必变 → 复验驱逐/重注册循环
+        // （/ext 路由间歇 503/504，2026-09-18 根修）。故用户根条目一旦胜出即
+        // 不可被非用户根条目覆盖，与迭代序解耦；其余路径间维持 last-wins 不变。
+        // BuiltinFirst（装机）下同规则换边：跨根冲突按 semver 裁决（见 ADR）。
         for root_str in root_paths {
             let root = Path::new(root_str);
             match self.scan_root(root) {
                 Ok(found) => {
                     for (manifest, path) in found {
-                        let dominated = all_manifests.get(&manifest.id).is_some_and(
-                            |(_, existing): &(PluginManifest, PathBuf)| {
-                                is_user_rooted(existing.as_path()) && !is_user_rooted(&path)
-                            },
-                        );
-                        if !dominated {
-                            all_manifests.insert(manifest.id.clone(), (manifest, path));
-                        }
+                        self.admit(&mut all_manifests, manifest, path);
                     }
                 }
                 Err(e) => {
@@ -710,9 +859,7 @@ impl PluginLoader for PluginLoaderImpl {
         match self.scan_root(&self.builtin_root) {
             Ok(found) => {
                 for (manifest, path) in found {
-                    all_manifests
-                        .entry(manifest.id.clone())
-                        .or_insert((manifest, path));
+                    self.admit(&mut all_manifests, manifest, path);
                 }
             }
             Err(e) => {
@@ -724,12 +871,12 @@ impl PluginLoader for PluginLoaderImpl {
             }
         }
 
-        // 扫描用户根（用户根覆盖内置根：同 ID）
+        // 扫描用户根（同 id 冲突同样经 admit 按策略裁决）
         if let Some(user_root) = &self.user_root {
             match self.scan_root(user_root) {
                 Ok(found) => {
                     for (manifest, path) in found {
-                        all_manifests.insert(manifest.id.clone(), (manifest, path));
+                        self.admit(&mut all_manifests, manifest, path);
                     }
                 }
                 Err(e) => {
@@ -1242,6 +1389,17 @@ mod tests {
     use std::fs;
 
     fn create_test_plugin_dir(root: &Path, id: &str, plugin_type: &str) {
+        create_test_plugin_dir_with_version(root, id, plugin_type, "1.0.0");
+    }
+
+    /// [`create_test_plugin_dir`] 的版本参数化变体（双源裁决测试用：
+    /// 用户新/资源新/版本相同各形状需要显式版本）。
+    fn create_test_plugin_dir_with_version(
+        root: &Path,
+        id: &str,
+        plugin_type: &str,
+        version: &str,
+    ) {
         let dir = root.join(id);
         fs::create_dir_all(&dir).unwrap();
         // pipeline 类型插件需声明 invoke_entry（ADR 附录 D②，P6 discover 聚合校验）
@@ -1254,7 +1412,7 @@ mod tests {
             r#"{{
     "id": "{}",
     "name": "Test Plugin {}",
-    "version": "1.0.0",
+    "version": "{}",
     "plugin_type": "{}",
     "language": "rust",
     "host_type": "in_process",
@@ -1264,7 +1422,7 @@ mod tests {
     "permissions": {{}},
     "priority": 100{}
 }}"#,
-            id, id, plugin_type, invoke_entry_field
+            id, id, version, plugin_type, invoke_entry_field
         );
         fs::write(dir.join("plugin.json"), manifest_json).unwrap();
     }
@@ -2028,6 +2186,236 @@ mod tests {
             assert!(
                 std::path::Path::new(&dir).starts_with(user.path()),
                 "source dir 必须在用户根（roots 序: {roots:?}），got: {dir}"
+            );
+        }
+    }
+
+    /// 双源裁决策略（BUG-55：装机版同 id 双源时旧用户空间副本压过打包新版）。
+    ///
+    /// 实测语料（R190 装机版）：用户空间扁平副本与打包副本**字节相同、版本相同**
+    /// （llm_service 双侧 1.0.0）——版本/指纹/mtime 全都无法区分，历史口径
+    /// 「用户根赢」让装机版永远跑陈旧副本。修复 = 策略化裁决（ADR
+    /// 2026-09-20-packaged-dual-source-adjudication）：装机链置 BuiltinFirst，
+    /// 跨根同 id 冲突按 semver 裁决；dev 默认 UserFirst 逐位不变。
+
+    #[tokio::test]
+    async fn test_builtin_first_policy_parse() {
+        // 解析面：仅 `builtin` 激活内置优先；未设/user/未知值/空白一律保守回落
+        // UserFirst（历史口径）。纯函数，不动进程环境。
+        assert_eq!(
+            DualSourcePolicy::parse(Some("builtin")),
+            DualSourcePolicy::BuiltinFirst
+        );
+        assert_eq!(
+            DualSourcePolicy::parse(Some(" builtin ")),
+            DualSourcePolicy::BuiltinFirst,
+            "首尾空白应容忍"
+        );
+        assert_eq!(
+            DualSourcePolicy::parse(None),
+            DualSourcePolicy::UserFirst,
+            "未设 = dev 历史口径"
+        );
+        for v in ["user", "BUILTIN", "built-in", ""] {
+            assert_eq!(
+                DualSourcePolicy::parse(Some(v)),
+                DualSourcePolicy::UserFirst,
+                "未知值 {v:?} 必须保守回落 UserFirst"
+            );
+        }
+    }
+
+    /// BUG-55 实测形状：双副本版本相同（1.0.0）——装机策略下内置（打包）副本
+    /// 必须赢，服务源码目录落到内置根（invoker 按它 spawn sidecar，正是 LLM 链
+    /// 断的病灶位置）。
+    #[tokio::test]
+    async fn test_builtin_first_equal_version_builtin_wins() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        create_test_plugin_dir_with_version(builtin.path(), "llm_like", "system", "1.0.0");
+        create_test_plugin_dir_with_version(user.path(), "llm_like", "system", "1.0.0");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
+            .with_dual_source_policy(DualSourcePolicy::BuiltinFirst);
+        let manifests = loader.discover(&[]).await.unwrap();
+
+        assert_eq!(manifests.len(), 1, "同 id 双源必须合并为单 manifest");
+        let dir = loader.get_plugin_dir("llm_like").unwrap();
+        assert!(
+            std::path::Path::new(&dir).starts_with(builtin.path()),
+            "版本相同时内置（打包）副本必须赢，got: {dir}"
+        );
+    }
+
+    /// 用户副本 semver 严格更新（用户真升级过）→ 用户赢——BuiltinFirst 不得
+    /// 掐灭用户的显式升级。
+    #[tokio::test]
+    async fn test_builtin_first_newer_user_copy_user_wins() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        create_test_plugin_dir_with_version(builtin.path(), "upgraded", "system", "1.0.0");
+        create_test_plugin_dir_with_version(user.path(), "upgraded", "system", "1.1.0");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
+            .with_dual_source_policy(DualSourcePolicy::BuiltinFirst);
+        loader.discover(&[]).await.unwrap();
+
+        let dir = loader.get_plugin_dir("upgraded").unwrap();
+        assert!(
+            std::path::Path::new(&dir).starts_with(user.path()),
+            "用户 semver 严格更新时用户副本必须赢，got: {dir}"
+        );
+    }
+
+    /// 用户副本陈旧（semver 严格更老）→ 内置赢（打包升级压过陈旧副本）。
+    #[tokio::test]
+    async fn test_builtin_first_older_user_copy_builtin_wins() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        create_test_plugin_dir_with_version(builtin.path(), "stale", "system", "1.0.0");
+        create_test_plugin_dir_with_version(user.path(), "stale", "system", "0.9.0");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
+            .with_dual_source_policy(DualSourcePolicy::BuiltinFirst);
+        loader.discover(&[]).await.unwrap();
+
+        let dir = loader.get_plugin_dir("stale").unwrap();
+        assert!(
+            std::path::Path::new(&dir).starts_with(builtin.path()),
+            "用户副本陈旧时内置副本必须赢，got: {dir}"
+        );
+    }
+
+    /// 用户副本 version 非 semver（新旧不可判）→ 内置赢（保守判「用户不新」：
+    /// 装机口径下内置是权威分发物；用户定制应升 version 让位规则可见）。
+    #[tokio::test]
+    async fn test_builtin_first_unparseable_user_version_builtin_wins() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        create_test_plugin_dir_with_version(builtin.path(), "oddver", "system", "1.0.0");
+        create_test_plugin_dir_with_version(user.path(), "oddver", "system", "not-semver");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
+            .with_dual_source_policy(DualSourcePolicy::BuiltinFirst);
+        loader.discover(&[]).await.unwrap();
+
+        let dir = loader.get_plugin_dir("oddver").unwrap();
+        assert!(
+            std::path::Path::new(&dir).starts_with(builtin.path()),
+            "用户 version 不可解析时内置副本必须赢，got: {dir}"
+        );
+    }
+
+    /// dev 默认（UserFirst，未设策略）：版本相同 → 用户赢——历史口径逐位不变
+    /// （钉住回归：dev 用户工作副本压过仓内共享份的语义不得被本次改动破坏）。
+    #[tokio::test]
+    async fn test_user_first_default_equal_version_user_wins() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        create_test_plugin_dir_with_version(builtin.path(), "dev_copy", "system", "1.0.0");
+        create_test_plugin_dir_with_version(user.path(), "dev_copy", "system", "1.0.0");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()));
+        loader.discover(&[]).await.unwrap();
+
+        let dir = loader.get_plugin_dir("dev_copy").unwrap();
+        assert!(
+            std::path::Path::new(&dir).starts_with(user.path()),
+            "UserFirst 默认下用户副本必须赢（dev 口径不变），got: {dir}"
+        );
+    }
+
+    /// BuiltinFirst 下用户根仍是「额外插件」安装面：内置没有的 id 照常从用户
+    /// 根装载（第三方安装面不变）。
+    #[tokio::test]
+    async fn test_builtin_first_user_only_id_still_loads_from_user() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        create_test_plugin_dir(builtin.path(), "builtin_only", "system");
+        create_test_plugin_dir(user.path(), "third_party", "tool");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
+            .with_dual_source_policy(DualSourcePolicy::BuiltinFirst);
+        loader.discover(&[]).await.unwrap();
+
+        let dir = loader.get_plugin_dir("third_party").unwrap();
+        assert!(
+            std::path::Path::new(&dir).starts_with(user.path()),
+            "内置没有的 id 必须从用户根装载，got: {dir}"
+        );
+        assert!(loader.get_plugin_dir("builtin_only").is_some());
+    }
+
+    /// BuiltinFirst 下胜者同样不得随 root_paths 迭代序翻转（2026-09-18 翻转
+    /// 根修的策略化延续）：热路径把双根父目录混装进 HashSet，序逐轮不稳定，
+    /// 裁决只依赖两侧（根归属， version）。
+    #[tokio::test]
+    async fn test_builtin_first_winner_stable_regardless_of_root_order() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let nested_a = builtin.path().join("nested-builtin");
+        let nested_b = user.path().join("nested-user");
+        create_test_plugin_dir_with_version(&nested_a, "mode_x", "pipeline", "1.0.0");
+        create_test_plugin_dir_with_version(&nested_b, "mode_x", "pipeline", "1.0.0");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
+            .with_dual_source_policy(DualSourcePolicy::BuiltinFirst);
+
+        let orders = [
+            vec![nested_a.clone(), nested_b.clone()],
+            vec![nested_b.clone(), nested_a.clone()],
+        ];
+        for roots in &orders {
+            let root_strs: Vec<String> = roots
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            let root_refs: Vec<&str> = root_strs.iter().map(|s| s.as_str()).collect();
+            let manifests = loader.discover(&root_refs).await.unwrap();
+            assert_eq!(
+                manifests.len(),
+                1,
+                "同 id 双源必须合并（roots 序: {roots:?}）"
+            );
+            let dir = loader.get_plugin_dir("mode_x").unwrap();
+            assert!(
+                std::path::Path::new(&dir).starts_with(builtin.path()),
+                "版本相同胜者必须恒为内置根，与序无关（roots 序: {roots:?}），got: {dir}"
+            );
+        }
+    }
+
+    /// 模式种子区让位：`<user_root>/modes/` 下的同 id 副本在任何策略下恒用户
+    /// 赢——模式区有自己的账本化对账（版本+内容哈希+定制检测），装机策略不得
+    /// 用打包副本压掉用户已定制的模式（H1「用户定制必须存活」）。modes 是二级
+    /// 嵌套，经 root_paths 进入（与生产 collect_boot_plugin_roots 同形）。
+    #[tokio::test]
+    async fn test_builtin_first_user_modes_subtree_stays_user_wins() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let builtin_modes = builtin.path().join("modes");
+        let user_modes = user.path().join("modes");
+        create_test_plugin_dir_with_version(&builtin_modes, "mode_y", "pipeline", "1.0.0");
+        create_test_plugin_dir_with_version(&user_modes, "mode_y", "pipeline", "1.0.0");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
+            .with_dual_source_policy(DualSourcePolicy::BuiltinFirst);
+
+        let orders = [
+            vec![builtin_modes.clone(), user_modes.clone()],
+            vec![user_modes.clone(), builtin_modes.clone()],
+        ];
+        for roots in &orders {
+            let root_strs: Vec<String> = roots
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            let root_refs: Vec<&str> = root_strs.iter().map(|s| s.as_str()).collect();
+            loader.discover(&root_refs).await.unwrap();
+            let dir = loader.get_plugin_dir("mode_y").unwrap();
+            assert!(
+                std::path::Path::new(&dir).starts_with(&user_modes),
+                "模式种子区同 id 恒用户赢（账本对账让位），与序无关（roots 序: {roots:?}），got: {dir}"
             );
         }
     }

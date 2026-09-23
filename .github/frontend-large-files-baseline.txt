@@ -1,7 +1,7 @@
 # 前端 >1000 行文件冻结基线（清单内行数只减不增；新入列 >1000 行文件即红）。
 # 巨型文件拆分在活跃演化期需独立行为验证门槛，单独立项分批（第三/四轮裁定），
 # 本清单即管控机制。见 scripts/check_frontend_any_baseline.py。
-frontend/src/components/schema/widgets/FileTreeWidget.tsx 1415
-frontend/src/components/schema/widgets/PipelineManagerWidget.tsx 1766
+frontend/src/components/schema/widgets/FileTreeWidget.tsx 1369
+frontend/src/components/schema/widgets/PipelineManagerWidget.tsx 1090
 frontend/src/services/themeService.ts 1090
-frontend/src/stores/pipelineMessageStore.ts 1417
+frontend/src/stores/pipelineMessageStore.ts 1340

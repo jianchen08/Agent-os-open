@@ -9,7 +9,7 @@
  * 架构：字段词汇表（UIInputFormField 统一类型）→ JSON Schema + uiSchema 映射，
  * 渲染/状态/校验管线交给 RJSF（ajv + antd Form.Item）；本模块只补齐主题没有的能力：
  * - 自定义 widgets：switch（antd Switch）/ asyncSelect（datasourceUri 异步下拉）/
- *   colorPicker / filePicker
+ *   colorPicker / filePicker / directoryPicker（Electron 原生目录选择，Web 退化手输）
  * - transformErrors：ajv 英文错误 → 中文文案（沿用原校验文案语义）
  * - datasource 工具函数（normalizeOptions / fetchDatasourceOptions，原 SchemaDriver 迁入）
  *
@@ -20,6 +20,7 @@ import Form from '@rjsf/antd'
 import validator from '@rjsf/validator-ajv8'
 import { Select, Switch } from 'antd'
 import { useEffect, useMemo, useState } from 'react'
+import { toast } from 'sonner'
 import apiClient from '@/services/api/client'
 import type { UIInputFormField } from '@/types/schema'
 import type { IChangeEvent } from '@rjsf/core'
@@ -183,6 +184,10 @@ function fieldToRjsfProperty(field: UIInputFormField): { prop: Record<string, un
         prop.type = 'string'
         ui['ui:widget'] = 'filePicker'
         break
+      case 'directory':
+        prop.type = 'string'
+        ui['ui:widget'] = 'directoryPicker'
+        break
       case 'slider': {
         prop.type = 'number'
         const bounds = numericBounds(field)
@@ -315,6 +320,40 @@ function resolveAsyncSelectOptions(
       opts.depKey = depKey
       opts.dependsOn = f.dependsOn ?? []
     }
+    out[f.name] = { ...entry, 'ui:options': opts }
+  }
+  return changed ? out : uiSchema
+}
+
+/**
+ * 值守卫选项置灰（optionGuard，BUG-75 歧义消除）：requires 字段值为空时，
+ * 除 onEmpty 外的选项经 ui:options.enumDisabled 置灰不可选（antd SelectWidget
+ * 原生消费）；值恢复后重新可选。与消费侧值兜底（SessionEditModal.applyGuards）
+ * 同源于同一声明，两层互补。与级联语义化同款：uiSchema 随表单值实时重建，
+ * 依赖值变化 → 选项可用性实时切换。
+ */
+function resolveGuardedOptions(
+  fields: UIInputFormField[],
+  uiSchema: UiSchema,
+  formData: Record<string, unknown>,
+): UiSchema {
+  let changed = false
+  const out: UiSchema = { ...uiSchema }
+  for (const f of fields) {
+    if (!f.optionGuard) continue
+    const src = formData?.[f.optionGuard.requires]
+    const srcEmpty = typeof src !== 'string' || src.trim() === ''
+    const disabled = srcEmpty
+      ? (f.options ?? []).filter((o) => o.value !== f.optionGuard!.onEmpty).map((o) => o.value)
+      : []
+    const entry = uiSchema[f.name]
+    if (!entry) continue
+    const opts = { ...((entry['ui:options'] as Record<string, unknown>) ?? {}) }
+    const prev = (opts.enumDisabled as Array<string | number> | undefined) ?? []
+    if (prev.length === disabled.length && prev.every((v, i) => v === disabled[i])) continue
+    changed = true
+    if (disabled.length > 0) opts.enumDisabled = disabled
+    else delete opts.enumDisabled
     out[f.name] = { ...entry, 'ui:options': opts }
   }
   return changed ? out : uiSchema
@@ -531,12 +570,64 @@ function FilePickerWidget({ id, value, onChange, disabled, readonly }: WidgetPro
   )
 }
 
+const DIRECTORY_INPUT_CLS =
+  'bg-background border-input w-full min-w-0 flex-1 rounded-md border px-3 py-2 text-sm'
+
+/**
+ * directory → 文本输入 + 「浏览…」（Electron 原生目录对话框）
+ *
+ * 表单值恒为文本（绝对路径），手输与浏览两路并存：Electron 壳注入
+ * electronAPI.dialog 时渲染浏览按钮（系统资源管理器选择，选中回填/取消不改写/
+ * 失败 toast 不静默）；Web 构建无桥接，退化为纯文本输入。
+ */
+function DirectoryPickerWidget({ id, value, onChange, disabled, readonly, placeholder }: WidgetProps) {
+  const pick = window.electronAPI?.dialog?.pickDirectory
+  const handleChange = (next: string) => onChange(next)
+  const input = (
+    <input
+      id={id}
+      type="text"
+      className={DIRECTORY_INPUT_CLS}
+      value={String(value ?? '')}
+      placeholder={placeholder}
+      disabled={disabled || readonly}
+      onChange={(e) => handleChange(e.target.value)}
+    />
+  )
+  if (!pick) return input
+
+  const handleBrowse = () => {
+    pick()
+      .then((dir) => {
+        if (dir) handleChange(dir)
+      })
+      .catch((err: unknown) => {
+        toast.error(`目录选择失败：${err instanceof Error ? err.message : String(err)}`)
+      })
+  }
+  return (
+    <div className="flex items-center gap-2">
+      {input}
+      <button
+        type="button"
+        data-testid="directory-browse"
+        className="border-input bg-background hover:bg-muted text-foreground disabled:cursor-not-allowed disabled:opacity-50 whitespace-nowrap rounded-md border px-3 py-2 text-sm"
+        disabled={disabled || readonly}
+        onClick={handleBrowse}
+      >
+        浏览…
+      </button>
+    </div>
+  )
+}
+
 /** 自定义 widget 注册表（与 @rjsf/antd 主题 widgets 合并） */
 const WIDGETS: RegistryWidgetsType = {
   switch: SwitchWidget,
   asyncSelect: AsyncSelectWidget,
   colorPicker: ColorPickerWidget,
   filePicker: FilePickerWidget,
+  directoryPicker: DirectoryPickerWidget,
 }
 
 /** 顶部错误清单关闭（错误就近显示在 Form.Item，避免重复） */
@@ -594,12 +685,13 @@ export function RjsfForm({
   const [blockedErrors, setBlockedErrors] = useState<string[]>([])
   const { schema, uiSchema: fieldUiSchema } = useMemo(() => toRjsf(fields), [fields])
   // 级联语义化（缺口 G2）：模板 URI + 依赖指纹随表单值实时解析（字段值变化 →
-  // 该字段 ui:options 变化 → RJSF 重渲 widget → AsyncSelect 重拉）
+  // 该字段 ui:options 变化 → RJSF 重渲 widget → AsyncSelect 重拉）；
+  // 值守卫选项置灰（optionGuard）同在同一遍随表单值实时切换
   const [formData, setFormData] = useState(() => buildFormValues(fields, initialValues))
-  const uiSchema = useMemo(
-    () => resolveAsyncSelectOptions(fields, fieldUiSchema, formData),
-    [fields, fieldUiSchema, formData],
-  )
+  const uiSchema = useMemo(() => {
+    const resolved = resolveAsyncSelectOptions(fields, fieldUiSchema, formData)
+    return resolveGuardedOptions(fields, resolved, formData)
+  }, [fields, fieldUiSchema, formData])
   const transformErrors = useMemo(() => makeErrorTransformer(fields), [fields])
 
   const uiSchemaWithSubmit = useMemo(

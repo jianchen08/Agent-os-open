@@ -1,5 +1,8 @@
 {
   "id": "trigger_setup_tool",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Trigger Setup Tool",
   "description": "触发器配置 MCP 工具",
   "version": "1.0.0",

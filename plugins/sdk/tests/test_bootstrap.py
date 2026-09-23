@@ -5,6 +5,7 @@
 - 标准三层布局与深层嵌套（tools/external_mcp/godot_mcp 形态）同一共享根判定；
 - 顶级插件（plugins/shared/<name>）父级即命中；
 - 指纹缺失回退三级上溯；
+- user_root 扁平单插件副本（BUG-56）：经 SDK 自身安装位置锚回仓库共享根；
 - 注入终态序 [shared_root, plugin_dir]、幂等、group_root 只返回不注入；
 - 真实仓库布局冒烟（真实依赖路径，repo 缺席时跳过）。
 """
@@ -17,7 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from agentos_plugin_sdk.bootstrap import bootstrap_plugin
+import agentos_plugin_sdk.bootstrap as bootstrap_module
+from agentos_plugin_sdk.bootstrap import bootstrap_plugin, find_shared_root
 
 
 @pytest.fixture(autouse=True)
@@ -197,3 +199,106 @@ def test_bootstrap_extra_idempotent(tmp_path: Path) -> None:
     assert first == second
     tasks_dir = str(tmp_path / "system" / "tasks")
     assert sys.path.count(tasks_dir) == 1
+
+
+# ---- BUG-56：user_root 扁平单插件副本的共享根解析 ----
+
+
+def _make_flat_user_root(tmp_path: Path) -> Path:
+    """user_root 扁平副本布局：<root>/user_root/plugins/<name>/（祖先无指纹）。"""
+    plugin_dir = tmp_path / "user_root" / "plugins" / "context_build"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "server.py").write_text("# stub\n", encoding="utf-8")
+    return plugin_dir
+
+
+def _anchor_sdk_to_fake_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """把 SDK 锚钉到 tmp 仿仓库布局（hermetic，不依赖运行宿主仓库），返回仿共享根。
+
+    仿仓库：repo/plugins/sdk/src/agentos_plugin_sdk/bootstrap.py（SDK 安装位）
+    + repo/plugins/shared/{system,tools,pipeline}（指纹齐备的共享根）。
+    """
+    fake_pkg = tmp_path / "repo" / "plugins" / "sdk" / "src" / "agentos_plugin_sdk"
+    fake_pkg.mkdir(parents=True)
+    monkeypatch.setattr(bootstrap_module, "__file__", str(fake_pkg / "bootstrap.py"))
+    shared = tmp_path / "repo" / "plugins" / "shared"
+    for group in ("system", "tools", "pipeline"):
+        (shared / group).mkdir(parents=True, exist_ok=True)
+    return shared
+
+
+def test_bootstrap_flat_copy_resolves_via_sdk_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """扁平单插件副本（plugins/<名>，祖先无指纹）：SDK 位置锚解析回仓库共享根。"""
+    shared = _anchor_sdk_to_fake_repo(tmp_path, monkeypatch)
+    plugin_dir = _make_flat_user_root(tmp_path)
+
+    result = bootstrap_plugin(plugin_dir / "server.py")
+
+    assert result.shared_root == str(shared)
+    assert result.plugin_dir == str(plugin_dir)
+    assert sys.path[:2] == [str(shared), str(plugin_dir)]
+
+
+def test_bootstrap_flat_copies_grouped_and_flat_shapes_same_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """多副本两形态（plugins/<名> 与 plugins/<分类>/<名>）解析到同一共享根。"""
+    shared = _anchor_sdk_to_fake_repo(tmp_path, monkeypatch)
+    flat = tmp_path / "user_root" / "plugins" / "context_build"
+    flat.mkdir(parents=True)
+    (flat / "server.py").write_text("# stub\n", encoding="utf-8")
+    grouped = tmp_path / "user_root" / "plugins" / "modes" / "mode_coding"
+    grouped.mkdir(parents=True)
+    (grouped / "server.py").write_text("# stub\n", encoding="utf-8")
+
+    for plugin_dir in (flat, grouped):
+        result = bootstrap_plugin(plugin_dir / "server.py")
+        assert result.shared_root == str(shared)
+
+    assert sys.path.count(str(shared)) == 1
+
+
+def test_bootstrap_flat_copy_nonrepo_sdk_keeps_legacy_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SDK 非仓库安装（site-packages 平拷贝）：锚不可用，保持旧上三级回退。"""
+    fake_pkg = tmp_path / "venv" / "Lib" / "site-packages" / "agentos_plugin_sdk"
+    fake_pkg.mkdir(parents=True)
+    monkeypatch.setattr(bootstrap_module, "__file__", str(fake_pkg / "bootstrap.py"))
+    plugin_dir = _make_flat_user_root(tmp_path)
+
+    result = bootstrap_plugin(plugin_dir / "server.py")
+
+    # 锚失效（site-packages 上溯无指纹）→ 旧回退：插件目录上三级
+    assert result.shared_root == str(tmp_path)
+    assert sys.path[:2] == [str(tmp_path), str(plugin_dir)]
+
+
+def test_find_shared_root_exposes_single_point(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """find_shared_root 公开单点：与 bootstrap_plugin 同一判定（fs_tools 复用面）。"""
+    shared = _anchor_sdk_to_fake_repo(tmp_path, monkeypatch)
+    plugin_dir = _make_flat_user_root(tmp_path)
+
+    assert find_shared_root(plugin_dir / "server.py") == str(shared)
+    # 深层文件（包内模块 __file__ 形态）同样解析
+    pkg_file = plugin_dir / "src" / "pkg_inner" / "mod.py"
+    pkg_file.parent.mkdir(parents=True)
+    pkg_file.write_text("# stub\n", encoding="utf-8")
+    assert find_shared_root(pkg_file) == str(shared)
+
+
+def test_bootstrap_flat_copy_real_user_root_smoke() -> None:
+    """真实 user_root 副本冒烟（R192 现场）：锚定真实仓库共享根。"""
+    repo_root = Path(__file__).resolve().parents[3]
+    copy_server = repo_root / "user_root" / "plugins" / "context_build" / "server.py"
+    if not copy_server.is_file():
+        pytest.skip("user_root 扁平副本不在位（无用户空间环境）")
+
+    result = bootstrap_plugin(copy_server)
+
+    assert Path(result.shared_root) == repo_root / "plugins" / "shared"
+    assert os.path.isdir(os.path.join(result.shared_root, "system"))

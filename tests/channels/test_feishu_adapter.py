@@ -28,6 +28,32 @@ class TestFeishuInputAdapter:
             await asyncio.wait_for(adapter.receive(), timeout=0.05)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("chat_id", "expected_key"),
+        [("oc_chat1", "coc_chat1"), ("", "uou_open1")],
+    )
+    async def test_conversation_coordinates(self, chat_id: str, expected_key: str) -> None:
+        """入站桥会话坐标：chat_id 为会话键，缺失回退发送者；回复目标 open_id。"""
+        adapter = FeishuInputAdapter()
+        await adapter.enqueue_message(
+            {
+                "header": {"event_id": "evt-1"},
+                "event": {
+                    "sender": {"sender_id": {"open_id": "ou_open1"}},
+                    "message": {
+                        "message_type": "text",
+                        "content": '{"text":"hi"}',
+                        "chat_id": chat_id,
+                    },
+                },
+            }
+        )
+        state = await adapter.receive()
+        assert state["_conversation_key"] == expected_key
+        assert state["_reply_target"] == "ou_open1"
+        assert state["_reply_ctx"] == {}
+
+    @pytest.mark.asyncio
     async def test_enqueue_and_receive(self) -> None:
         """测试消息入队和接收。"""
         adapter = FeishuInputAdapter()

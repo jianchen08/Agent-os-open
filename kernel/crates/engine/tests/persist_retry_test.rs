@@ -16,7 +16,7 @@ use std::time::Instant;
 use agentos_core::traits::{PluginInvoker, StorageBackend};
 use agentos_core::types::{
     MessageRecord, PipelineConfig, PipelineStep, PluginContext, PluginError, PluginResult,
-    RunRecord, RunStatus, StepLibrary, TenantContext, ToolExecutionResult, TraceEntry,
+    RunRecord, StepLibrary, TenantContext, ToolExecutionResult, TraceEntry,
 };
 use agentos_engine::compiler::compile_pipeline;
 use agentos_engine::PipelineExecutor;
@@ -72,9 +72,7 @@ struct FlakyStorage {
     append_failures_remaining: AtomicUsize,
     upsert_attempts: AtomicUsize,
     upsert_failures_remaining: AtomicUsize,
-    /// 收到的 run 终态（成功路径收尾断言用）。
-    run_statuses: Mutex<Vec<RunStatus>>,
-    // ── B5 收尾面：checkpoint / update_run_status 失败配额与计数 ──
+    // ── B5 收尾面：checkpoint / 终态写面（run_status 键）失败配额与计数 ──
     checkpoint_attempts: AtomicUsize,
     checkpoint_failures_remaining: AtomicUsize,
     status_attempts: AtomicUsize,
@@ -91,7 +89,6 @@ impl FlakyStorage {
             append_failures_remaining: AtomicUsize::new(append_failures),
             upsert_attempts: AtomicUsize::new(0),
             upsert_failures_remaining: AtomicUsize::new(upsert_failures),
-            run_statuses: Mutex::new(Vec::new()),
             checkpoint_attempts: AtomicUsize::new(0),
             checkpoint_failures_remaining: AtomicUsize::new(0),
             status_attempts: AtomicUsize::new(0),
@@ -108,8 +105,14 @@ impl FlakyStorage {
         self.append_failed.load(Ordering::SeqCst)
     }
 
-    fn upsert_attempt_count(&self) -> usize {
-        self.upsert_attempts.load(Ordering::SeqCst)
+    /// 指定键的 upsert_state_field 调用次数（含失败调用——入账在配额判定前）。
+    fn upsert_attempts_for(&self, key: &str) -> usize {
+        self.upsert_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| k == key)
+            .count()
     }
 }
 
@@ -165,23 +168,18 @@ impl StorageBackend for FlakyStorage {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), agentos_core::types::StorageError> {
-        self.upsert_attempts.fetch_add(1, Ordering::SeqCst);
         self.upsert_calls
             .lock()
             .unwrap()
             .push((key.to_string(), value.clone()));
+        // 终态写面（run_status 键，runs 表退役后引擎经 upsert_state_fields 批量写
+        // → 默认 trait 实现逐键落到这里）走独立失败配额与计数。
+        if key == "run_status" {
+            self.status_attempts.fetch_add(1, Ordering::SeqCst);
+            return take_one_fail(&self.status_failures_remaining);
+        }
+        self.upsert_attempts.fetch_add(1, Ordering::SeqCst);
         take_one_fail(&self.upsert_failures_remaining)
-    }
-    async fn update_run_status(
-        &self,
-        _run_id: &str,
-        status: RunStatus,
-        _branch: Option<&str>,
-        _seq: Option<u32>,
-    ) -> Result<(), agentos_core::types::StorageError> {
-        self.status_attempts.fetch_add(1, Ordering::SeqCst);
-        self.run_statuses.lock().unwrap().push(status);
-        take_one_fail(&self.status_failures_remaining)
     }
     async fn save_checkpoint(
         &self,
@@ -192,14 +190,6 @@ impl StorageBackend for FlakyStorage {
     ) -> Result<(), agentos_core::types::StorageError> {
         self.checkpoint_attempts.fetch_add(1, Ordering::SeqCst);
         take_one_fail(&self.checkpoint_failures_remaining)
-    }
-    async fn create_run(
-        &self,
-        _run_id: &str,
-        _config_hash: &str,
-        _tenant_id: &str,
-    ) -> Result<(), agentos_core::types::StorageError> {
-        Ok(())
     }
     async fn store_blob(
         &self,
@@ -343,7 +333,6 @@ async fn append_trace_fails_once_retries_and_succeeds() {
         vec!["writer".to_string()],
         backend,
         "r",
-        "b",
     );
     let config = make_config();
     let compiled = compile_pipeline(&config, &StepLibrary::default(), executor.plugin_ids())
@@ -385,7 +374,6 @@ async fn append_trace_fails_three_times_run_fails() {
         vec!["writer".to_string()],
         backend,
         "r",
-        "b",
     );
     let config = make_config();
     let compiled = compile_pipeline(&config, &StepLibrary::default(), executor.plugin_ids())
@@ -427,7 +415,6 @@ async fn upsert_state_field_fails_once_retries_and_succeeds() {
         vec!["writer".to_string()],
         backend,
         "r",
-        "b",
     )
     .with_persistent_fields(vec!["track.total".to_string()]);
     let config = make_config();
@@ -439,7 +426,11 @@ async fn upsert_state_field_fails_once_retries_and_succeeds() {
         .await
         .expect("失败 1 次后重试成功，run 应正常完成");
 
-    assert_eq!(store.upsert_attempt_count(), 2, "1 次失败 + 1 次重试成功");
+    assert_eq!(
+        store.upsert_attempts_for("track.total"),
+        2,
+        "1 次失败 + 1 次重试成功（投影键恰好 2 次调用）"
+    );
 }
 
 /// upsert_state_field 连续 3 次失败 → run 失败，错误可见。
@@ -454,7 +445,6 @@ async fn upsert_state_field_fails_three_times_run_fails() {
         vec!["writer".to_string()],
         backend,
         "r",
-        "b",
     )
     .with_persistent_fields(vec!["track.total".to_string()]);
     let config = make_config();
@@ -471,16 +461,16 @@ async fn upsert_state_field_fails_three_times_run_fails() {
         "错误应可见（上抛的 StorageError）：{msg}"
     );
     assert_eq!(
-        store.upsert_attempt_count(),
+        store.upsert_attempts_for("track.total"),
         3,
         "首次 + 2 次重试 = 3 次尝试"
     );
 }
 
-// ── B5：run 收尾落库（checkpoint / update_run_status）失败重试 + 终态未落库标记 ──
+// ── B5：run 收尾落库（checkpoint / 终态写面 run_status 键）失败重试 + 终态未落库标记 ──
 
 impl FlakyStorage {
-    /// 注入收尾面失败配额：save_checkpoint / update_run_status 各自的连续失败次数。
+    /// 注入收尾面失败配额：save_checkpoint / 终态写面（run_status 键）各自的连续失败次数。
     fn with_end_failure_quotas(self, checkpoint_failures: usize, status_failures: usize) -> Self {
         self.checkpoint_failures_remaining
             .store(checkpoint_failures, Ordering::SeqCst);
@@ -522,7 +512,6 @@ async fn run_end_checkpoint_fails_once_retries_and_succeeds() {
         vec!["writer".to_string()],
         backend,
         "r",
-        "b",
     );
     let config = make_config();
     let compiled = compile_pipeline(&config, &StepLibrary::default(), executor.plugin_ids())
@@ -552,7 +541,7 @@ async fn run_end_checkpoint_fails_once_retries_and_succeeds() {
 
 /// 收尾 checkpoint 连续 3 次失败 → run 仍正常完成（终态点无法终止 run），
 /// 恰好 3 次尝试（首次 + 2 次重试），且不误写终态未落库标记（那是
-/// update_run_status 专属语义）。
+/// 终态写面 run_status 键重试耗尽专属语义）。
 #[tokio::test]
 async fn run_end_checkpoint_exhausts_retries_run_still_completes() {
     let store = Arc::new(FlakyStorage::new(0, 0).with_end_failure_quotas(usize::MAX, 0));
@@ -564,7 +553,6 @@ async fn run_end_checkpoint_exhausts_retries_run_still_completes() {
         vec!["writer".to_string()],
         backend,
         "r",
-        "b",
     );
     let config = make_config();
     let compiled = compile_pipeline(&config, &StepLibrary::default(), executor.plugin_ids())
@@ -589,12 +577,13 @@ async fn run_end_checkpoint_exhausts_retries_run_still_completes() {
     );
     assert!(
         store.terminal_persist_markers().is_empty(),
-        "checkpoint 失败不得写 update_run_status 专属的补偿标记"
+        "checkpoint 失败不得写终态写面专属的补偿标记"
     );
 }
 
-/// update_run_status 连续 3 次失败 → 重试耗尽后 best-effort 写「终态未落库」
-/// 补偿标记（含 run_id 与预期终态、时间戳），run 仍正常完成（终态点无法终止 run）。
+/// 终态写面（run_status 键）连续 3 次失败 → 重试耗尽后 best-effort 写
+/// 「终态未落库」补偿标记（含 run_id 与预期终态、时间戳），run 仍正常完成
+/// （终态点无法终止 run）。
 #[tokio::test]
 async fn run_end_status_exhausts_retries_writes_terminal_persist_marker() {
     let store = Arc::new(FlakyStorage::new(0, 0).with_end_failure_quotas(0, usize::MAX));
@@ -606,7 +595,6 @@ async fn run_end_status_exhausts_retries_writes_terminal_persist_marker() {
         vec!["writer".to_string()],
         backend,
         "r_terminal",
-        "b",
     );
     let config = make_config();
     let compiled = compile_pipeline(&config, &StepLibrary::default(), executor.plugin_ids())
@@ -634,10 +622,9 @@ async fn run_end_status_exhausts_retries_writes_terminal_persist_marker() {
         "标记必须带 run_id（G8 排空兜底按它精准匹配）: {value}"
     );
     let intended = value["intended_status"].as_str().unwrap_or("");
-    let injected_status = format!("{:?}", store.run_statuses.lock().unwrap()[0]).to_lowercase();
     assert_eq!(
-        intended, injected_status,
-        "标记的预期终态必须与注入的终态一致: {value}"
+        intended, "completed",
+        "标记的预期终态必须与控制态折算一致（无控制键 = completed）: {value}"
     );
     assert!(
         value["failed_at"].as_str().is_some_and(|s| !s.is_empty()),

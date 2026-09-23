@@ -1,5 +1,8 @@
 {
   "id": "evaluation_service",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Evaluation Service",
   "version": "1.0.0",
   "plugin_type": "system",

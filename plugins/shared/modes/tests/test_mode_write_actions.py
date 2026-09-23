@@ -271,7 +271,12 @@ def test_research_followup_errors_unknown_session_and_no_report():
 
 
 def test_roleplay_play_success_with_real_seed_card():
-    """以此角色开演成功（出厂卡 card_luna）→ 目标=卡 agent 键+人设入描述。"""
+    """以此角色开演成功（出厂卡 card_luna）→ 目标=卡 agent 键+人设入描述。
+
+    BUG-73 契约：开演锚**卡专属扮演会话**（thread-rp-<card_id>，同卡复演复用），
+    body 的宿主活跃 session_id 一律忽略（R92 同族「落活跃既有 thread」根除）；
+    所选开场白全文随派发注入（greeting_index=2 → 备选第 2 条原文入上下文）。
+    """
     module = _fresh("mode_roleplay")
     executor = _RecordingExecutor({"data": {"task_id": "task-play"}})
     module._set_provider("tool-executor", executor)
@@ -280,7 +285,7 @@ def test_roleplay_play_success_with_real_seed_card():
         "card_id": "card_luna",
         "user_persona": "旅行者",
         "greeting_index": 2,
-        "session_id": "sess-p",
+        "session_id": "sess-active-host",
     }
     out = _body_json(
         _call(module, "/ext/mode_roleplay/data/actions/play", "POST", json.dumps(body))
@@ -290,12 +295,48 @@ def test_roleplay_play_success_with_real_seed_card():
     assert args["target_id"] == "mode_roleplay/card_luna"
     assert args["task_kind"] == "roleplay_opening"
     assert args["metadata"] == {"card_id": "card_luna", "greeting_index": 2}
-    assert args["session_id"] == "sess-p"
+    # 专属扮演会话锚：卡维度派生，与宿主活跃会话无关（body session_id 被忽略）
+    assert args["session_id"] == "thread-rp-card_luna"
+    assert args["session_id"] != "sess-active-host"
     assert "塞拉菲娜·月语" in args["goal_description"]
     assert "# 用户设定（对话者扮演）" in args["goal_description"]
     # 出厂卡自带性格与场景字段 → 两段都入描述
     assert "# 性格" in args["goal_description"]
     assert "# 场景" in args["goal_description"]
+    # 所选开场白全文注入（greeting_index=2 = alternate_greetings[1]）
+    assert "# 本场开场白" in args["goal_description"]
+    assert "一曲还缺一个听众" in args["goal_description"]
+    # 开场表演必须作为回复正文输出（不得只写进 task_evaluate summary——
+    # 首次开演 0bf057da402f 的可观测病灶：可见消息只剩待办清单）
+    assert "回复正文" in args["goal_description"]
+
+
+def test_roleplay_play_greeting_fallback_out_of_range():
+    """greeting_index 越界/缺省 → 回落 first_mes（不虚构不报错），锚仍专属。"""
+    module = _fresh("mode_roleplay")
+    executor = _RecordingExecutor({"data": {"task_id": "task-play-fb"}})
+    module._set_provider("tool-executor", executor)
+
+    # 越界（card_luna 仅 2 条备选：index 9 不存在）
+    body = {"card_id": "card_luna", "greeting_index": 9}
+    _body_json(
+        _call(module, "/ext/mode_roleplay/data/actions/play", "POST", json.dumps(body))
+    )
+    args = executor.last["args"]
+    assert "以月神之名" in args["goal_description"]  # first_mes 原文
+    assert args["metadata"]["greeting_index"] == 0
+    assert args["session_id"] == "thread-rp-card_luna"
+
+    # 缺省 greeting_index → 同 first_mes 口径；body 带宿主 session_id 仍被忽略
+    executor.last = None
+    body2 = {"card_id": "card_luna", "session_id": "thread-858ab1bd"}
+    _body_json(
+        _call(module, "/ext/mode_roleplay/data/actions/play", "POST", json.dumps(body2))
+    )
+    args2 = executor.last["args"]
+    assert "以月神之名" in args2["goal_description"]
+    assert args2["metadata"]["greeting_index"] == 0
+    assert args2["session_id"] == "thread-rp-card_luna"
 
 
 def test_roleplay_regenerate_success_row_anchor():

@@ -111,3 +111,46 @@ describe('ChatInput 发送受理协议（false 保留输入，true/void 清空�
     expect(useChatInputStore.getState().drafts['draft-void-1']).toBeUndefined()
   })
 })
+
+describe('ChatInput 未受理显式反馈（OBS-25：拒绝必须落在操作点）', () => {
+  it('回调返回 false → 输入区出现「消息未发送」显式提示，输入与草稿保留', () => {
+    const onSendMessage = vi.fn(() => false)
+    renderInput(onSendMessage, 'draft-reject-feedback-1')
+
+    typeAndSend('无活跃会话时发送')
+
+    // 反馈在输入区可见（role=alert），指明未发送而非静默保留
+    expect(screen.getByRole('alert')).toHaveTextContent('消息未发送，请检查会话状态')
+    expect(textareaValue()).toBe('无活跃会话时发送')
+    expect(useChatInputStore.getState().drafts['draft-reject-feedback-1']).toBe('无活跃会话时发送')
+  })
+
+  it('false 后重试受理 → 未受理提示清除（不残留旧错）；提示亦可手动关闭', () => {
+    const onSendMessage = vi.fn(() => false)
+    renderInput(onSendMessage, 'draft-reject-then-accept')
+
+    typeAndSend('第一次被拒')
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+
+    onSendMessage.mockReturnValue(true)
+    typeAndSend('第二次重试')
+    expect(screen.queryByRole('alert')).toBeNull()
+
+    onSendMessage.mockReturnValue(false)
+    typeAndSend('再次被拒')
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '关闭错误提示' }))
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('未受理不制造忙碌假象：不出现「停止生成」按钮，发送按钮保持可见', () => {
+    const onSendMessage = vi.fn(() => false)
+    renderInput(onSendMessage, 'draft-reject-busy-1')
+
+    typeAndSend('被拒发送')
+
+    expect(screen.queryByTestId('chat-stop-button')).toBeNull()
+    expect(screen.getByTestId('chat-send-button')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('消息未发送')
+  })
+})

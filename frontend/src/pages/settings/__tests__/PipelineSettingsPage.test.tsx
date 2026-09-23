@@ -336,18 +336,28 @@ describe('PipelineSettingsPage', () => {
   })
 
   describe('加载失败', () => {
-    it('显示错误提示且禁存（保存禁用、编辑区不渲染）——防止空对象写回 autonomous.yaml', async () => {
+    it('Error 实例拒绝：ErrorState 上屏（真实错误信息）+ 重试，且禁存（保存禁用、编辑区不渲染）——防止空对象写回 autonomous.yaml', async () => {
       mockGetPipelineConfig.mockRejectedValue(new Error('Network error'))
       renderWithProviders(<PipelineSettingsPage />)
 
-      await waitFor(() => {
-        expect(screen.getByText('无法加载配置')).toBeInTheDocument()
-      })
+      expect(await screen.findByText('Network error')).toBeInTheDocument()
       // 加载失败 = 只读：保存按钮禁用，可视化/源码编辑区均不渲染
       expect(screen.getByTestId('save-btn')).toBeDisabled()
       expect(mockSavePipelineConfig).not.toHaveBeenCalled()
       expect(screen.queryByTestId('pipeline-flow-editor')).not.toBeInTheDocument()
       expect(screen.queryByRole('form', { name: '管道配置表单' })).not.toBeInTheDocument()
+      // 重试 → refetch（仍失败不崩）
+      fireEvent.click(screen.getByRole('button', { name: /重试/ }))
+      await waitFor(() => expect(mockGetPipelineConfig).toHaveBeenCalledTimes(2))
+      expect(screen.getByTestId('save-btn')).toBeDisabled()
+    })
+
+    it('非 Error 拒绝（ApiError 普通对象）：回退固定文案「无法加载配置」（不展示 [object Object] 类脏文本）', async () => {
+      mockGetPipelineConfig.mockRejectedValue({ message: 'boom' })
+      renderWithProviders(<PipelineSettingsPage />)
+
+      expect(await screen.findByText('无法加载配置')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /重试/ })).toBeInTheDocument()
     })
   })
 

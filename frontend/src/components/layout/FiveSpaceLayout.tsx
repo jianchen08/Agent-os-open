@@ -7,6 +7,14 @@ import { getEditorForFile } from '@/config/fileEditors'
 // 按需引入 antd Splitter 子模块，避免加载 antd 全量入口（26+ 组件 → 全部 icons →
 // 触发 847 项 @ant-design/icons-svg/lib/asn/* 全量预构建，首屏 JS 与启动预构建时间双高）
 import { cn } from '@/lib/utils'
+import {
+  BAND_BUTTON_ACTIVE_CLASS,
+  BAND_BUTTON_ICON_CLASS,
+  BAND_BUTTON_IDLE_CLASS,
+  BAND_EDGE_PADDING_CLASS,
+  BAND_GAP_CLASS,
+  BAND_ICON_BUTTON_CLASS,
+} from './bandButton'
 import apiClient from '@/services/api/client'
 import { WORKSPACE_SERVICE_ENDPOINTS as W } from '@/services/api/endpoints.generated'
 import { safeLoadLayout } from '@/services/layout/resolver'
@@ -380,7 +388,7 @@ export function FiveSpaceLayout({
         if (WidgetComponent) {
           return (
             <div className="h-full min-h-0 overflow-hidden" data-fallback={panelExact ? undefined : tab.component}>
-              <WidgetComponent panel={tab.component} dataSource={tab.dataSource} />
+              <WidgetComponent {...(tab.props ?? {})} panel={tab.component} dataSource={tab.dataSource} />
             </div>
           )
         }
@@ -592,7 +600,7 @@ export function FiveSpaceLayout({
                   aria-label="工作区"
                   data-testid="mobile-workspace-btn"
                 >
-                  <PanelRightIcon className="h-4 w-4" />
+                  <PanelRightIcon className={BAND_BUTTON_ICON_CLASS} />
                 </button>
               </div>
             </aside>
@@ -615,45 +623,92 @@ export function FiveSpaceLayout({
              展开时聊天区让位（不遮挡），收起时聊天全宽。图标钉在页面左/右上角
              （位置恒定）；各面板自顶全高展开，顶部 40px 图标带
              归入各自展开的区域（图标落在所属区域边角内，从视觉上属于该区域），
-             区域间距用位置计算让位而非移动图标；边界无边线。 */
-          <section className="relative flex min-h-0 flex-1 overflow-hidden" data-region="chat">
-            {/* 侧栏开关：钉在页面左上角；侧栏展开时落在侧栏区域顶角内（工作区全屏时隐藏） */}
-            <button
-              type="button"
-              onClick={() => useUIStore.getState().setSidebarCollapsed(!sidebarCollapsed)}
+             区域间距用位置计算让位而非移动图标；面板-聊天边界有分隔线：
+             侧栏侧由 Sidebar 自身 border-r 承载，工作区侧以同规格 border-l 对称。 */
+          <section className="relative flex min-h-0 flex-1 flex-col overflow-hidden" data-region="chat">
+            {/* 顶带：唯一拖拽容器（用户裁定：没有按钮交互的地方皆可拖动）。
+                全部交互控件都是本条的 DOM 子元素并显式 app-no-drag——拖拽区域图
+                只为子元素挖洞，跨组件绝对定位元素盖在带上不产生洞（点侧边栏
+                反被最大化即此）。控制簇留在视口层（登录页也需要），由右侧
+                同尺寸 no-drag 垫声明洞；对话标签行由 ChatContainer 经 portal
+                渲入槽位（动态标签增删自动跟随）。 */}
+            {/* 顶带三区（宽度跟随下方三列：面板开合/拖宽自动同步）——
+                侧栏区=[侧栏开关]；聊天区=[对话标签行 portal]；
+                工作区区=[工作区标签行 portal][工作区开关][控制簇槽位]。
+                区内非按钮处皆为拖拽面；按钮 app-no-drag + 主题圆角（rounded-md
+                = var(--radius-md)，主题变换圆角/直角自动跟随）。 */}
+            <div
               className={cn(
-                'absolute left-2 top-2 z-30 flex h-7 w-7 items-center justify-center rounded-md transition-colors',
-                !sidebarCollapsed && sidebarContent
-                  ? 'bg-accent text-accent-foreground'
-                  : 'text-muted-foreground hover:bg-accent hover:text-foreground',
-                workspaceFullscreen && 'hidden',
+                'app-drag-region relative flex h-10 shrink-0 items-center',
+                BAND_GAP_CLASS,
+                BAND_EDGE_PADDING_CLASS,
               )}
-              title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
-              aria-label="侧边栏"
-              data-testid="sidebar-toggle-float"
+              data-testid="chat-top-band"
+              ref={(el) => {
+                if (el) window.dispatchEvent(new Event('chat-top-band-mounted'))
+              }}
             >
-              <Menu className="h-4 w-4" />
-            </button>
-            {/* 工作区开关：钉在页面右上角；工作区展开时落在工作区区域顶角内（工作区全屏时隐藏）。
-                Electron 主窗口时左移让出窗口控制簇（3×w-11=132px + 间距），
-                与控制簇同排 */}
-            <button
-              type="button"
-              onClick={() => setWorkspaceCollapsed(!workspaceCollapsed)}
-              className={cn(
-                'absolute top-2 z-30 flex h-7 w-7 items-center justify-center rounded-md transition-colors',
-                isDesktopMainWindow() ? 'right-[148px]' : 'right-2',
-                !workspaceCollapsed
-                  ? 'bg-accent text-accent-foreground'
-                  : 'text-muted-foreground hover:bg-accent hover:text-foreground',
-                workspaceFullscreen && 'hidden',
-              )}
-              title={workspaceCollapsed ? '展开工作区' : '收起工作区'}
-              aria-label="工作区"
-              data-testid="workspace-toggle-float"
-            >
-              <PanelRightIcon className="h-4 w-4" />
-            </button>
+              <div className="app-drag-region flex h-full shrink-0 items-center" style={{ width: sidebarContent && !sidebarCollapsed && !workspaceFullscreen ? panelWidth('sidebar', 248, 200, 360) : 44 }}>
+                <button
+                  type="button"
+                  onClick={() => useUIStore.getState().setSidebarCollapsed(!sidebarCollapsed)}
+                  className={cn(
+                    BAND_ICON_BUTTON_CLASS,
+                    !sidebarCollapsed && sidebarContent
+                      ? BAND_BUTTON_ACTIVE_CLASS
+                      : BAND_BUTTON_IDLE_CLASS,
+                    workspaceFullscreen && 'hidden',
+                  )}
+                  title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
+                  aria-label="侧边栏"
+                  data-testid="sidebar-toggle-float"
+                >
+                  <Menu className={BAND_BUTTON_ICON_CLASS} />
+                </button>
+              </div>
+              <div className={cn('app-drag-region flex h-full min-w-0 flex-1 items-center justify-center', workspaceFullscreen && 'hidden')}>
+                <div
+                  id="chat-top-band-tabs"
+                  className="app-no-drag flex h-full min-w-0 items-center overflow-y-hidden"
+                />
+              </div>
+              <div
+                className={cn(
+                  'app-drag-region flex h-full min-w-0 items-center',
+                  BAND_GAP_CLASS,
+                  workspaceFullscreen && 'flex-1',
+                )}
+                style={workspaceFullscreen ? undefined : { width: workspaceCollapsed ? 176 : panelWidth('workspace', workspaceDefaultWidth, 360, workspaceMaxWidth) }}
+              >
+                <div
+                  id="chat-top-band-workspace-tabs"
+                  className={cn(
+                    'scrollbar-hide flex h-full min-w-0 flex-1 items-center overflow-x-auto overflow-y-hidden',
+                    BAND_GAP_CLASS,
+                  )}
+                />
+                <button
+                  type="button"
+                  onClick={() => setWorkspaceCollapsed(!workspaceCollapsed)}
+                  className={cn(
+                    BAND_ICON_BUTTON_CLASS,
+                    !workspaceCollapsed
+                      ? BAND_BUTTON_ACTIVE_CLASS
+                      : BAND_BUTTON_IDLE_CLASS,
+                    workspaceFullscreen && 'hidden',
+                  )}
+                  title={workspaceCollapsed ? '展开工作区' : '收起工作区'}
+                  aria-label="工作区"
+                  data-testid="workspace-toggle-float"
+                >
+                  <PanelRightIcon className="h-4 w-4" />
+                </button>
+                <div
+                  id="chat-top-band-cluster"
+                  className="app-no-drag flex h-full shrink-0 items-center"
+                />
+              </div>
+            </div>
 
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
               <div className="flex min-h-0 flex-1 overflow-hidden">
@@ -664,7 +719,7 @@ export function FiveSpaceLayout({
                 {sidebarContent && !sidebarCollapsed && (
                   <aside
                     className={cn(
-                      'flex shrink-0 flex-col overflow-hidden pt-10',
+                      'flex shrink-0 flex-col overflow-hidden',
                       workspaceFullscreen && 'hidden',
                     )}
                     style={{
@@ -701,7 +756,9 @@ export function FiveSpaceLayout({
                   {chatContent}
                 </div>
 
-                {/* 工作区（让位式，无边线；顶部让出图标带；宽度可拖拽调）。
+                {/* 工作区（让位式；左边线与侧栏 border-r 同规格
+                    （border-border/50），全屏独占时隐藏；顶部让出图标带；
+                    宽度可拖拽调）。
                     全屏：隐藏手柄、宽 flex-1 占满；退出恢复让位式宽度。
                     组件位置恒定——全屏切换不重挂载（重挂载=数据全量重拉） */}
                 {(!workspaceCollapsed || workspaceFullscreen) && (
@@ -718,7 +775,9 @@ export function FiveSpaceLayout({
                     <div
                       className={cn(
                         'theme-workspace-area flex flex-col overflow-hidden',
-                        workspaceFullscreen ? 'min-h-0 min-w-0 flex-1' : 'shrink-0 pt-10',
+                        workspaceFullscreen
+                          ? 'min-h-0 min-w-0 flex-1'
+                          : 'shrink-0 border-l border-border/50',
                       )}
                       style={
                         workspaceFullscreen
@@ -728,6 +787,7 @@ export function FiveSpaceLayout({
                             }
                       }
                       data-region="workspace"
+                      data-testid="workspace-column"
                     >
                       <WorkspaceHost
                         tabs={workspaceTabs}

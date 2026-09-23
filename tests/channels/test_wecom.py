@@ -262,6 +262,13 @@ class TestWeComInputAdapter:
         assert state["_agent_id"] == ""
         assert state["should_stop"] is False
 
+    def test_conversation_coordinates(self) -> None:
+        """入站桥会话坐标：企微应用消息按发送者确定会话与回复目标。"""
+        state = WeComInputAdapter._raw_to_state({"FromUserName": "u1", "MsgType": "text", "Content": "x"})
+        assert state["_conversation_key"] == "uu1"
+        assert state["_reply_target"] == "u1"
+        assert state["_reply_ctx"] == {}
+
     @pytest.mark.asyncio
     async def test_enqueue_and_receive(self) -> None:
         adapter = WeComInputAdapter()

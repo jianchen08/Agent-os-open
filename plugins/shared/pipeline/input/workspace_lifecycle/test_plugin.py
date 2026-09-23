@@ -28,8 +28,9 @@ pytestmark = pytest.mark.unit
 
 _PLUGIN_DIR = Path(__file__).resolve().parent
 _SHARED_ROOT = _PLUGIN_DIR.parents[2]  # plugins/shared（state_fields / pipeline 包）
-_ISOLATION_DIR = _SHARED_ROOT / "system" / "isolation"
-for _p in (str(_SHARED_ROOT), str(_ISOLATION_DIR)):
+_SYSTEM_DIR = _SHARED_ROOT / "system"  # isolation.workspace 包（锚点治理判定面）
+_ISOLATION_DIR = _SYSTEM_DIR / "isolation"
+for _p in (str(_SHARED_ROOT), str(_SYSTEM_DIR), str(_ISOLATION_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 

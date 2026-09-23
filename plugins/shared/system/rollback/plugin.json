@@ -1,5 +1,8 @@
 {
   "id": "rollback_service",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Rollback Service",
   "version": "1.0.0",
   "plugin_type": "system",

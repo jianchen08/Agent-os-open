@@ -180,3 +180,23 @@ describe('dbAdmin API 客户端', () => {
     expect(result.rows_affected).toBe(0)
   })
 })
+
+describe('fetchDbRows paramsSerializer 接线（DEF-2 防复发）', () => {
+  it('axios 配置中的 serialize 箭头真实调用 serializeDbQueryParams（filter 重复参数形态）', async () => {
+    mockGet.mockImplementation(async (_url: string, config: { params: Record<string, unknown>; paramsSerializer: { serialize: (p: unknown) => string } }) => {
+      const query = config.paramsSerializer.serialize(config.params)
+      expect(query).toBe(
+        'limit=10&offset=20&filter=memory_type%3Aeq%3Aepisode&filter=content%3Acontains%3Ahello&sort=created_at%3Adesc',
+      )
+      return { data: { table: 'memory', total: 0, limit: 10, offset: 20, rows: [] } }
+    })
+
+    const result = await dbAdmin.fetchDbRows('memory', {
+      limit: 10,
+      offset: 20,
+      filter: ['memory_type:eq:episode', 'content:contains:hello'],
+      sort: 'created_at:desc',
+    })
+    expect(result.total).toBe(0)
+  })
+})

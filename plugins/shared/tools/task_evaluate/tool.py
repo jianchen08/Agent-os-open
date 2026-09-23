@@ -1071,10 +1071,14 @@ class TaskEvaluateTool(BuiltinTool):
         无"服务不可用跳过"分支：ws_meta 读不到 = 门控失败
         （worktree 产物不能静默丢失）。
 
+        合并落点由 agent 自主选择（路径白名单把守合法性，内核不裁判落点
+        世界——2026-09-19 用户裁决）：门控只管合并机制本身。
+
         Returns:
             None 表示合并成功或不需要合并（plain/shared 模式），
-            str 表示门控失败原因（自描述分类：ws_meta 读取失败 / worktree
-            合并失败），调用方按原文透传并据此标记任务 failed。
+            str 表示门控失败原因（自描述分类：ws_meta 读取失败 / 元数据残缺 /
+            worktree 合并失败 / 产物未到达），调用方按原文透传并据此
+            标记任务 failed。
         """
         ws_meta = await self._read_task_ws_meta(task)
         return await asyncio.to_thread(

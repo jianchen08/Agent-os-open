@@ -71,8 +71,11 @@ def _augment_description(description: str, output_schema: dict[str, Any] | None)
     return f"{description}\n{line}" if description else line
 
 
-# 反向 capability 调用等待内核响应的超时（与旧自研通道一致的 30s 默认）。
-CAPABILITY_CALL_TIMEOUT_S = 30.0
+# 反向 capability 调用等待内核响应的超时：86400s=24h（BUG-60 审批族统一值，
+# 与内核 mcp client 默认及 human create_choice 声明对齐）。本值经 meta 随请求
+# 传递、仅作提示（内核不读 meta.timeout），实际等待界在内核侧；长等待方法
+# （human-interaction.wait_for_choice 等）历史上靠显式传大值避免 30s 误断。
+CAPABILITY_CALL_TIMEOUT_S = 86400.0
 
 
 def _bind_log_context(log_ctx: dict[str, Any]) -> contextlib.AbstractContextManager[Any]:
@@ -196,9 +199,8 @@ class KernelChannel:
         Args:
             method: 形如 "pipeline-executor.resume" 的命名空间方法名
             params: 调用参数
-            timeout: 等待响应超时（秒）；None 用 CAPABILITY_CALL_TIMEOUT_S。
-                长等待语义的方法（如 human-interaction.wait_for_choice 等
-                用户响应）必须显式传大值，否则默认 30s 会先于用户操作掐断。
+            timeout: 等待响应超时（秒）；None 用 CAPABILITY_CALL_TIMEOUT_S
+                （86400s，BUG-60 审批族统一值；仅作提示，内核不读）。
 
         Returns:
             内核返回的 result（dict；内核对非 object 返回值包 {"__raw__": value}

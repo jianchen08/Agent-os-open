@@ -43,14 +43,15 @@ export interface UIInputFormField {
     | 'textarea'
     | 'date'
     | 'file'
+    | 'directory'
     | 'input'
     | 'toggle'
     | 'slider'
     | 'color'
     | 'radio'
     | 'checkbox'
-  /** 标签文本 */
-  label: string
+  /** 标签文本（缺省回退 name；compact 选择器还回退 props.title） */
+  label?: string
   /** 描述/提示 */
   description?: string
   /** 默认值 */
@@ -64,6 +65,13 @@ export interface UIInputFormField {
   requiredWhen?: { field: string; equals: string | number }
   /** 选择项（type 为 select/multiselect/radio/checkbox 时使用） */
   options?: Array<{ label: string; value: string | number }>
+  /**
+   * 值守卫渲染（与插件声明 x_guard 同源语义）：requires 指向的另一字段为空时，
+   * 本字段选项中除 onEmpty 外全部置灰不可选（如工作空间拓扑 worktree 依赖
+   * 工作空间目录已填写；选项 label 自带的说明文案即悬浮 title）。空判定与
+   * applyGuards 一致：依赖值非字符串或去空格后为空。
+   */
+  optionGuard?: { requires: string; onEmpty: string | number }
   /** 动态数据源 URI（调用内核代理端点获取选项列表） */
   datasourceUri?: string
   /**

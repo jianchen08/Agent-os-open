@@ -1,5 +1,8 @@
 {
   "id": "spill_retrieve_tool",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Spill Retrieve Tool",
   "description": "取回 spill_guard 存档的工具大输出原文（按 tool_call_id）。管道结束（on_pipeline_end 钩子）自动清理该管道的 spill 目录。",
   "version": "1.0.0",

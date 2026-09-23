@@ -390,6 +390,27 @@ describe('layoutModeStore — persist merge 迁移清洗', () => {
     expect(store.getState().mode).toBe('classic')
   })
 
+  it('任务管理归前端：旧 ws-plugin-tasks 页签被清洗（不与 ws-panel-tasks 双开）', async () => {
+    const store = await loadWithPersisted({
+      mode: 'five-space',
+      workspaceTabs: [
+        {
+          id: 'ws-plugin-tasks',
+          title: '任务管理',
+          moduleId: '__plugin_task_service__',
+          component: 'pipeline_manager',
+          isActive: true,
+          isPinned: false,
+        },
+        { id: 'ws-panel-monitoring', title: '监控', moduleId: 'x', isActive: false, isPinned: false },
+      ],
+    })
+    const tabs = store.getState().workspaceTabs
+    // 插件声明的旧页签被清洗；同功能页签不会以两个 id 并存
+    expect(tabs.map((t) => t.id)).toEqual(['ws-panel-monitoring'])
+    expect(tabs.some((t) => t.component === 'pipeline_manager')).toBe(false)
+  })
+
   it('清洗后为空 → 补齐默认「任务管理」页签并激活', async () => {
     const store = await loadWithPersisted({
       mode: 'dark' as never,

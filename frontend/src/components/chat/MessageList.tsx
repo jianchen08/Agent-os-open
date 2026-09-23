@@ -19,6 +19,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Loader2 } from '@/assets/icons'
 import { cn } from '@/lib/utils'
 import { mergeConsecutiveAssistantMessages } from '@/services/api/session'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
+import { collectSegmentSwitcherAnchors } from '@/utils/segmentAnchor'
 import { compareMessages } from '@/utils/messageOrder'
 import { MessageItem } from './MessageItem'
 import type { MessageListProps } from './types'
@@ -38,6 +40,9 @@ import type { Message } from '@/types/models'
  * 最新底部为锚。
  */
 const scrollRestoreCache = new Map<string, number>()
+
+/** 空锚点表（spanIndex 无段/无活跃管道时复用同一实例，避免 useMemo 每轮新建） */
+const EMPTY_SEGMENT_ANCHORS: ReadonlyMap<string, number> = new Map()
 
 /**
  * 消息列表组件属性扩展
@@ -131,6 +136,20 @@ export const MessageList = ({
     return target?.id
   }, [jumpTarget, displayMessages])
 
+  /** 消息段模型：活跃管道的段索引（spanIndex 低频变更，订阅开销可忽略） */
+  const activePipelineId = usePipelineMessageStore((s) => s.activePipelineId)
+  const spanIndex = usePipelineMessageStore((s) => s.spanIndex)
+
+  /**
+   * ‹i/n› 多代切换器锚点（messageId → 锚点 base_seq）：每个替换点只标其覆盖
+   * 范围内序列最晚的 assistant（轮末条），且锚点段数 >1 才显示（多代可切换）。
+   */
+  const segmentSwitcherAnchors = useMemo(() => {
+    const segments = activePipelineId ? spanIndex[activePipelineId] : undefined
+    if (!segments || segments.length === 0) return EMPTY_SEGMENT_ANCHORS
+    return collectSegmentSwitcherAnchors(displayMessages, segments)
+  }, [displayMessages, spanIndex, activePipelineId])
+
   const scrollRef = useRef<HTMLDivElement>(null)
   /** 是否在底部附近（距底部 150px 内） */
   const isNearBottom = useRef(true)
@@ -199,6 +218,7 @@ export const MessageList = ({
             onEdit={onEdit}
             onRegenerate={onRegenerate}
             onRollbackTo={onRollbackTo}
+            segmentSwitcherBaseSeq={segmentSwitcherAnchors.get(message.id) ?? null}
           />
         </div>
       )
@@ -211,6 +231,7 @@ export const MessageList = ({
       onRegenerate,
       onRollbackTo,
       highlightedMessageId,
+      segmentSwitcherAnchors,
     ],
   )
 

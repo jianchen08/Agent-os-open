@@ -4,8 +4,8 @@
 既有 test_http_routes.py 只在 server 分发层 stub routes_search；本文件直测
 search 域本体：
 
-1. ``_tenant_pipeline_ids``：租户缺失 / 库缺失 / 真库 runs 直查 / 库损坏
-   fail-closed → None（绝不全量兜底）；
+1. ``_tenant_pipeline_ids``：租户缺失 / 库缺失 / 真库 run_status 簿记键直查 /
+   库损坏 fail-closed → None（绝不全量兜底）；
 2. ``_search_sessions``：租户缺失 / 库缺失 / 大小写不敏感子串 / 租户隔离 /
    LIKE 通配符显式转义（% _ \\ 不充当模式）/ last_active_at 排序 / limit /
    库损坏 → []；
@@ -41,7 +41,10 @@ import routes_search  # noqa: E402 — tests/monitoring/conftest 注入插件目
 
 @pytest.fixture
 def kernel_db_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """真实 tmp 内核库（sessions/runs 同形表）+ kernel_db_path 指向它。"""
+    """真实 tmp 内核库（sessions / pipeline_state 同形表）+ kernel_db_path 指向它。
+
+    runs 表已退役（ADR 2026-09-18）：执行过 = pipeline_state 有 run_status 簿记键。
+    """
     import kernel_db
 
     db = tmp_path / "agentos_kernel.db"
@@ -51,7 +54,8 @@ def kernel_db_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "tenant_id TEXT, updated_at TEXT, last_active_at TEXT)"
     )
     conn.execute(
-        "CREATE TABLE runs (pipeline_id TEXT, tenant_id TEXT, created_at TEXT)"
+        "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT, "
+        "value TEXT, value_kind TEXT, tenant_id TEXT, updated_at TEXT)"
     )
     conn.executemany(
         "INSERT INTO sessions VALUES (?,?,?,?,?)",
@@ -63,11 +67,12 @@ def kernel_db_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ],
     )
     conn.executemany(
-        "INSERT INTO runs VALUES (?,?,?)",
+        "INSERT INTO pipeline_state (pipeline_id, field_key, value, value_kind, tenant_id, updated_at)"
+        " VALUES (?,?,?,?,?,?)",
         [
-            ("pipe-1", "tenant-1", "2026-09-02T00:00:00Z"),
-            ("pipe-2", "tenant-1", "2026-09-01T00:00:00Z"),
-            ("pipe-x", "tenant-2", "2026-09-03T00:00:00Z"),
+            ("pipe-1", "run_status", "completed", "str", "tenant-1", "2026-09-02T00:00:00Z"),
+            ("pipe-2", "run_status", "completed", "str", "tenant-1", "2026-09-01T00:00:00Z"),
+            ("pipe-x", "run_status", "completed", "str", "tenant-2", "2026-09-03T00:00:00Z"),
         ],
     )
     conn.commit()

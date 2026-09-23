@@ -93,23 +93,24 @@ def seeded_db() -> Generator[str, None, None]:
 
             # pipeline_state：与上行同量的累计投影（monitoring 按模型口径读它）
             conn.execute(
-                "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT, field_value TEXT)"
+                "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT, value TEXT, value_kind TEXT)"
             )
+            # state 值域标量化（ADR 2026-09-18）：json 键存 JSON 文本，标量按 str 原样存
             state_rows = [
                 # gpt-x 两管道（1500 + 1000 = 2500）
-                ("p-a", "track.llm_usage", '{"total_input_tokens": 1200, "total_output_tokens": 300, "total_tokens": 1500}'),
-                ("p-a", "llm_model", '"gpt-x"'),
-                ("p-b", "track.llm_usage", '{"total_input_tokens": 800, "total_output_tokens": 200, "total_tokens": 1000}'),
-                ("p-b", "llm_model", '"gpt-x"'),
+                ("p-a", "track.llm_usage", '{"total_input_tokens": 1200, "total_output_tokens": 300, "total_tokens": 1500}', "json"),
+                ("p-a", "llm_model", "gpt-x", "str"),
+                ("p-b", "track.llm_usage", '{"total_input_tokens": 800, "total_output_tokens": 200, "total_tokens": 1000}', "json"),
+                ("p-b", "llm_model", "gpt-x", "str"),
                 # deepseek-r1
-                ("p-c", "track.llm_usage", '{"total_input_tokens": 100, "total_output_tokens": 50, "total_tokens": 150}'),
-                ("p-c", "llm_model", '"deepseek-r1"'),
+                ("p-c", "track.llm_usage", '{"total_input_tokens": 100, "total_output_tokens": 50, "total_tokens": 150}', "json"),
+                ("p-c", "llm_model", "deepseek-r1", "str"),
                 # 无 llm_model → 「（未记录模型）」行
-                ("p-d", "track.llm_usage", '{"total_input_tokens": 50, "total_output_tokens": 27, "total_tokens": 77}'),
+                ("p-d", "track.llm_usage", '{"total_input_tokens": 50, "total_output_tokens": 27, "total_tokens": 77}', "json"),
                 # 非用量键（聚合面不得计入）
-                ("p-d", "context_window", "32000"),
+                ("p-d", "context_window", "32000", "str"),
             ]
-            conn.executemany("INSERT INTO pipeline_state VALUES (?, ?, ?)", state_rows)
+            conn.executemany("INSERT INTO pipeline_state VALUES (?, ?, ?, ?)", state_rows)
             conn.commit()
         finally:
             conn.close()

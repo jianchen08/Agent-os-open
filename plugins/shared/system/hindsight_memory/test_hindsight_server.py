@@ -128,6 +128,7 @@ class TestPluginManifest:
             "hindsight.delete",
             "hindsight.import_document",
             "hindsight.get_documents",
+            "hindsight.list_banks",
         ):
             assert name in tool_names, f"{name} missing in capabilities.services"
 
@@ -147,6 +148,7 @@ class TestToolRegistration:
             "hindsight.delete",
             "hindsight.import_document",
             "hindsight.get_documents",
+            "hindsight.list_banks",
         ):
             assert name in mod.plugin._tools, f"tool {name} not registered"
 
@@ -604,6 +606,69 @@ class TestGetDocumentsTool:
         )
 
         assert result.get("documents") in (None, [])
+        assert "error" in result
+
+
+# ═══════════════════════════════════════════════════════════
+# hindsight.list_banks 只读工具（跨 bank 列表面的 bank 发现通路）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestListBanksTool:
+    def test_degrades_without_client(self, mod: Any) -> None:
+        """_client 为 None 时降级字典，不崩溃。"""
+        mod._client = None
+        result = _call_tool(mod, "hindsight.list_banks")
+        assert result.get("initialized") is False
+        assert "error" in result
+
+    def test_lists_bank_ids_from_pydantic_listing(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """pydantic 响应（model_dump 面）提取 bank id 列表。"""
+        listing = MagicMock()
+        listing.model_dump.return_value = {
+            "banks": [{"bank_id": "default"}, {"bank_id": "thread-abc"}]
+        }
+        mock_client.banks = MagicMock()
+        mock_client.banks.list_banks = AsyncMock(return_value=listing)
+
+        result = _call_tool(mod, "hindsight.list_banks")
+
+        assert result == {"banks": ["default", "thread-abc"], "total": 2}
+
+    def test_lists_bank_ids_from_attribute_shape(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        """属性访问形态响应（SimpleNamespace 面及缺 model_dump 的客户端）同样提取。"""
+        mock_client.banks = MagicMock()
+        mock_client.banks.list_banks = AsyncMock(
+            return_value=SimpleNamespace(
+                banks=[SimpleNamespace(bank_id="thread-x"), SimpleNamespace(bank_id="")]
+            )
+        )
+
+        result = _call_tool(mod, "hindsight.list_banks")
+
+        assert result == {"banks": ["thread-x"], "total": 1}
+
+    def test_client_without_banks_api_returns_error(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        mock_client.banks = None
+        result = _call_tool(mod, "hindsight.list_banks")
+        assert result["banks"] == []
+        assert "error" in result
+
+    def test_banks_api_error_returns_error_dict(
+        self, mod: Any, mock_client: MagicMock
+    ) -> None:
+        mock_client.banks = MagicMock()
+        mock_client.banks.list_banks = AsyncMock(side_effect=RuntimeError("api down"))
+
+        result = _call_tool(mod, "hindsight.list_banks")
+
+        assert result["banks"] == []
         assert "error" in result
 
 

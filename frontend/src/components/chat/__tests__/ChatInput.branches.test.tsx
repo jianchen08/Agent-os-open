@@ -700,6 +700,72 @@ describe('ChatInput 发送守卫', () => {
   })
 })
 
+describe('ChatInput 上传中发送拦截（附件在途不随消息发出）', () => {
+  /** 挂起版上传响应：附件停在在途态（pending→uploading，永不 resolve） */
+  function hangUpload(): void {
+    mocks.uploadFile.mockImplementation(
+      () => new Promise<typeof uploadOk>(() => {}),
+    )
+  }
+
+  it('上传中按 Enter：显式提示且不发送，正文与附件保留', async () => {
+    hangUpload()
+    const onSendMessage = vi.fn()
+    const { container } = renderInput({ onSendMessage })
+    fireEvent.change(fileInputEl(container), { target: { files: [textFile()] } })
+    expect(await screen.findByText('notes.txt')).toBeInTheDocument()
+    fireEvent.change(textareaEl(), { target: { value: '看这张图' } })
+    fireEvent.keyDown(textareaEl(), { key: 'Enter' })
+    expect(onSendMessage).not.toHaveBeenCalled()
+    expect(screen.getByRole('alert')).toHaveTextContent('附件正在上传')
+    expect(textareaEl().value).toBe('看这张图')
+    expect(screen.getByText('notes.txt')).toBeInTheDocument()
+  })
+
+  it('上传中拒绝 → 上传完成后重发：附件随消息发出（携带 /uploads/ 引用）', async () => {
+    let resolveUpload: (value: typeof uploadOk) => void = () => {}
+    mocks.uploadFile.mockImplementation(
+      () => new Promise<typeof uploadOk>((res) => (resolveUpload = res)),
+    )
+    const onSendMessage = vi.fn()
+    const { container } = renderInput({ onSendMessage })
+    fireEvent.change(fileInputEl(container), { target: { files: [textFile()] } })
+    expect(await screen.findByText('notes.txt')).toBeInTheDocument()
+    fireEvent.change(textareaEl(), { target: { value: '看这张图' } })
+    fireEvent.keyDown(textareaEl(), { key: 'Enter' })
+    expect(onSendMessage).not.toHaveBeenCalled()
+
+    resolveUpload(uploadOk)
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: '移除附件 notes.txt' })).not.toBeDisabled(),
+    )
+    fireEvent.keyDown(textareaEl(), { key: 'Enter' })
+    expect(onSendMessage).toHaveBeenCalledTimes(1)
+    expect(onSendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachments: [
+          expect.objectContaining({ name: 'notes.txt', url: '/uploads/notes.txt' }),
+        ],
+      }),
+    )
+    expect(textareaEl().value).toBe('')
+  })
+
+  it('上传已失败（error 终态）的附件不拦截发送', async () => {
+    mocks.uploadFile.mockRejectedValueOnce(new Error('网络中断'))
+    const onSendMessage = vi.fn()
+    const { container } = renderInput({ onSendMessage })
+    fireEvent.change(fileInputEl(container), { target: { files: [textFile()] } })
+    expect(await screen.findByRole('alert')).toHaveTextContent('网络中断')
+    fireEvent.change(textareaEl(), { target: { value: '先发文字' } })
+    fireEvent.keyDown(textareaEl(), { key: 'Enter' })
+    expect(onSendMessage).toHaveBeenCalledTimes(1)
+    expect(onSendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ content: '先发文字', attachments: undefined }),
+    )
+  })
+})
+
 describe('ChatInput 引用注入与消耗（referenceProviders 注册缝）', () => {
   const REF_SOURCE = 'ut-ref'
   beforeEach(() => {

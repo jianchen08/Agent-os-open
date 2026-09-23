@@ -31,7 +31,8 @@ export function App() {
           buster: 'v1',
         }}
       >
-        {/* Electron 主窗口自定义标题栏（组件内自门控：Web / 子浮窗渲染空） */}
+        {/* Electron 主窗口自定义标题栏（组件内自门控：Web / 子浮窗渲染空）。
+            全局挂载以覆盖登录页；主界面顶带经 auth-session 同尺寸垫声明其挖洞 */}
         <TitleBar />
         <RouterProvider router={router} />
         <ExtensionHost />

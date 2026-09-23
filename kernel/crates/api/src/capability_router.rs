@@ -81,6 +81,9 @@ pub struct KernelCapabilityRouter {
     streaming_declaration_lookup: Option<StreamingDeclarationLookupFn>,
     /// 强制注入工具声明并集查询（P1-5 声明化，见 [`ForceIncludeToolsLookupFn`]）。
     force_include_tools_lookup: Option<ForceIncludeToolsLookupFn>,
+    /// 工具面遮挡名单查询（BUG-51 注册门禁，见 [`ShadowedPluginIdsLookupFn`]）。
+    /// None = 未装配 → 不遮挡（兼容旧装配/测试）。
+    shadowed_plugin_ids_lookup: Option<ShadowedPluginIdsLookupFn>,
     /// 工具连续失败告警器：同一工具名在调用侧连续返回
     /// success=false（参数校验失败/执行错误）达到阈值即告警——把"同一工具
     /// 连续 N 次失败"这个信号汇总成一条可操作的告警，避免空转无人察觉。
@@ -137,6 +140,13 @@ pub type StreamingDeclarationLookupFn =
 /// `force_include_tools` 声明的并集（tool-surface 过滤时无视 tool_ids 注入）。
 /// None/空 = 无声明，零强制注入（fail-closed）。
 pub type ForceIncludeToolsLookupFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+
+/// 工具面遮挡名单查询闭包（BUG-51 注册门禁）：() → 当前处于「验证未完成
+/// （verify_incomplete）/ 验证失败终态（verify_failed）」的插件 id 集合。
+/// tool-surface.schemas 对名单内插件的工具一律不透出（强制注入也不得复活），
+/// 直至账本复验通过（ok）自动转正。实现方读契约账本现值。None = 未装配
+/// （不遮挡，兼容旧装配/测试）。
+pub type ShadowedPluginIdsLookupFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 
 /// 调用路径注册表自愈闭包（BUG-37）：(tool_name) → 重注册后的工具描述符。
 ///
@@ -335,6 +345,7 @@ impl KernelCapabilityRouter {
             capability_contracts: None,
             streaming_declaration_lookup: None,
             force_include_tools_lookup: None,
+            shadowed_plugin_ids_lookup: None,
             tool_failure_tracker: None,
             export_fields_lookup: None,
             pipeline_resumer: None,
@@ -380,6 +391,12 @@ impl KernelCapabilityRouter {
     /// 注入强制注入工具声明查询（P1-5 声明化）。
     pub fn with_force_include_tools_lookup(mut self, lookup: ForceIncludeToolsLookupFn) -> Self {
         self.force_include_tools_lookup = Some(lookup);
+        self
+    }
+
+    /// 注入工具面遮挡名单查询（BUG-51 注册门禁）。
+    pub fn with_shadowed_plugin_ids_lookup(mut self, lookup: ShadowedPluginIdsLookupFn) -> Self {
+        self.shadowed_plugin_ids_lookup = Some(lookup);
         self
     }
 
@@ -592,6 +609,10 @@ impl KernelCapabilityRouter {
     ///   声明并集，无视白名单）注入；空白名单 = agent 声明零工具，仅强制
     ///   注入集合返回；白名单条目等于插件 id 时该插件全部工具注入（一行
     ///   接入配法）；
+    /// - 遮挡名单（BUG-51 注册门禁）内插件的工具一律不透出——G2 观测失败
+    ///   （verify_incomplete）与复验超限（verify_failed）插件的工具是必败面，
+    ///   声明注册保留（服务/HTTP 面不受影响），LLM 面先遮挡，复验通过（账本
+    ///   ok）自动转正；优先级高于白名单与强制注入；
     /// - input_schema 非 object 的工具不注入（LLM 严格校验 parameters 是
     ///   object；注册路径已对缺 schema 工具按 {} 补注册，本过滤只拦注册后
     ///   被改写成非 object 的极端形态）；
@@ -621,6 +642,12 @@ impl KernelCapabilityRouter {
             .as_ref()
             .map(|lookup| lookup().into_iter().collect())
             .unwrap_or_default();
+        // BUG-51 注册门禁：遮挡名单 = 验证未完成/验证失败插件 id（账本现值）。
+        let shadowed: std::collections::HashSet<String> = self
+            .shadowed_plugin_ids_lookup
+            .as_ref()
+            .map(|lookup| lookup().into_iter().collect())
+            .unwrap_or_default();
         let all_tools = registry.list_tools();
         // tool_ids 条目等于插件 id → 该插件全部工具入面（一行接入的 agent 侧
         // 配法：白名单写插件名即透出其全部工具，动态导入的多工具 MCP 免逐个
@@ -634,6 +661,7 @@ impl KernelCapabilityRouter {
                     || wanted_plugin_ids.contains(t.plugin_id.as_str())
                     || force_include.contains(&t.name)
             })
+            .filter(|t| !shadowed.contains(&t.plugin_id))
             .filter(|t| t.input_schema.is_object())
             .map(|t| {
                 json!({
@@ -804,32 +832,38 @@ impl KernelCapabilityRouter {
                 "seq": run.current_seq,
             }));
         }
+        // runs 表退役（ADR 2026-09-18）：簿记 = state 运行键回写。
+        let Some(pipeline_id) = run.pipeline_id.clone() else {
+            return Err(McpError::Protocol {
+                message: format!("suspend 失败: run 无管道归属（run_id={run_id}）"),
+            });
+        };
         store
-            .update_run_status(
-                run_id,
-                agentos_core::types::RunStatus::Suspended,
-                Some(&run.current_branch),
-                Some(run.current_seq),
+            .upsert_state_fields(
+                &pipeline_id,
+                &run.tenant_id,
+                &json!({ "run_status": "suspended" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
             )
             .await
             .map_err(|e| McpError::Protocol {
                 message: format!("suspend 失败: {e}"),
             })?;
         // 挂起凭据落库（审批挂起恢复链写侧）：approval 插件 suspend 时携带
-        // 交互 request_id（形参名 approval_id 兼容），落 runs.metadata 供
-        // interaction_response 按 request_id 反查唤醒（find_suspended_run_by_request_id）。
-        // 现有读面在 metadata 缺失时按"无凭据"跳过，故失败降级 warn 不回滚挂起。
+        // 交互 request_id（形参名 approval_id 兼容），落 state 标量键
+        // `suspend_request_id` 供 interaction_response 按 request_id 反查唤醒
+        // （find_suspended_run_by_request_id）。失败降级 warn 不回滚挂起。
         let request_id = params
             .get("request_id")
             .and_then(|v| v.as_str())
             .or_else(|| params.get("approval_id").and_then(|v| v.as_str()))
             .filter(|s| !s.is_empty());
         if let (Some(db), Some(req_id)) = (self.sqlite.as_ref(), request_id) {
-            let mut meta = run.metadata.clone().unwrap_or_else(|| json!({}));
-            if let Some(obj) = meta.as_object_mut() {
-                obj.insert("pending_interaction_request_id".to_string(), json!(req_id));
-            }
-            if let Err(e) = db.set_run_metadata(run_id, &meta) {
+            let mut fields = serde_json::Map::new();
+            fields.insert("suspend_request_id".to_string(), json!(req_id));
+            if let Err(e) = db.upsert_state_fields(&pipeline_id, &run.tenant_id, &fields) {
                 tracing::warn!(
                     run_id = %run_id,
                     request_id = %req_id,
@@ -860,29 +894,41 @@ impl KernelCapabilityRouter {
         let store = self.store.as_ref().ok_or_else(|| McpError::Protocol {
             message: "resume disabled: kernel store not injected".to_string(),
         })?;
-        store
-            .update_run_status(run_id, agentos_core::types::RunStatus::Running, None, None)
+        let run = store
+            .get_run(run_id)
             .await
             .map_err(|e| McpError::Protocol {
                 message: format!("resume 失败: {e}"),
             })?;
-        // 恢复即清挂起凭据：陈旧 pending_interaction_request_id 留在 metadata
-        // 会让后续按凭据的反查误判该 run 仍在等审批。
+        let Some(pipeline_id) = run.pipeline_id.clone() else {
+            return Err(McpError::Protocol {
+                message: format!("resume 失败: run 无管道归属（run_id={run_id}）"),
+            });
+        };
+        store
+            .upsert_state_fields(
+                &pipeline_id,
+                &run.tenant_id,
+                &json!({ "run_status": "running" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .await
+            .map_err(|e| McpError::Protocol {
+                message: format!("resume 失败: {e}"),
+            })?;
+        // 恢复即清挂起凭据：陈旧 suspend_request_id 留在 state 会让后续按凭据
+        // 的反查误判该 run 仍在等审批。
         if let Some(db) = self.sqlite.as_ref() {
-            if let Ok(run) = db.get_run(run_id).await {
-                if let Some(mut meta) = run.metadata {
-                    if let Some(obj) = meta.as_object_mut() {
-                        if obj.remove("pending_interaction_request_id").is_some() {
-                            if let Err(e) = db.set_run_metadata(run_id, &meta) {
-                                tracing::warn!(
-                                    run_id = %run_id,
-                                    error = %e,
-                                    "resume 清挂起凭据失败（凭据残留）"
-                                );
-                            }
-                        }
-                    }
-                }
+            let mut fields = serde_json::Map::new();
+            fields.insert("suspend_request_id".to_string(), Value::Null);
+            if let Err(e) = db.upsert_state_fields(&pipeline_id, &run.tenant_id, &fields) {
+                tracing::warn!(
+                    run_id = %run_id,
+                    error = %e,
+                    "resume 清挂起凭据失败（凭据残留）"
+                );
             }
         }
         Ok(json!({"status": "resumed", "run_id": run_id}))
@@ -920,11 +966,13 @@ impl KernelCapabilityRouter {
             }
             Some(run) => {
                 store
-                    .update_run_status(
-                        &run.run_id,
-                        agentos_core::types::RunStatus::Suspended,
-                        Some(&run.current_branch),
-                        Some(run.current_seq),
+                    .upsert_state_fields(
+                        pipeline_id,
+                        &run.tenant_id,
+                        &json!({ "run_status": "suspended" })
+                            .as_object()
+                            .unwrap()
+                            .clone(),
                     )
                     .await
                     .map_err(|e| McpError::Protocol {
@@ -994,11 +1042,13 @@ impl KernelCapabilityRouter {
                 .is_some();
             if approval_pending {
                 store
-                    .update_run_status(
-                        &run.run_id,
-                        agentos_core::types::RunStatus::Running,
-                        None,
-                        None,
+                    .upsert_state_fields(
+                        pipeline_id,
+                        &run.tenant_id,
+                        &json!({ "run_status": "running" })
+                            .as_object()
+                            .unwrap()
+                            .clone(),
                     )
                     .await
                     .map_err(|e| McpError::Protocol {
@@ -1037,11 +1087,13 @@ impl KernelCapabilityRouter {
                     "resume_pipeline 恢复派发未装配，降级纯簿记（翻 Running 不拉起执行）"
                 );
                 store
-                    .update_run_status(
-                        &run.run_id,
-                        agentos_core::types::RunStatus::Running,
-                        None,
-                        None,
+                    .upsert_state_fields(
+                        pipeline_id,
+                        &run.tenant_id,
+                        &json!({ "run_status": "running" })
+                            .as_object()
+                            .unwrap()
+                            .clone(),
                     )
                     .await
                     .map_err(|e| McpError::Protocol {

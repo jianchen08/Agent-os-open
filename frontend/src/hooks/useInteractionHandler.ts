@@ -17,6 +17,7 @@ import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useUIStore } from '@/stores/uiStore'
 import { playNotificationSound } from '@/utils/audioNotification'
+import { showSystemNotification } from '@/utils/systemNotification'
 import type { PendingInteraction } from '@/stores/interactionStore'
 
 /** 模块级标志位：防止多个组件调用 useInteractionHandler 时重复注册 WebSocket 事件订阅 */
@@ -229,8 +230,6 @@ export function useInteractionHandler(sessionId: string | undefined) {
     if (_isSubscribed) return
     _isSubscribed = true
 
-    const requestToNotificationMap = new Map<string, string>()
-
     /**
      * 把已解析的交互写入对应 store（去重 + mode 分流）。
      * WS 实时推送与刷新恢复共用此入口，避免两套写入逻辑产生行为分叉。
@@ -247,8 +246,15 @@ export function useInteractionHandler(sessionId: string | undefined) {
       // choice/conversation 模式在通知中心产生冗余通知。
       // - choice/conversation 模式：只写入 interactionStore（交互卡片已在聊天区域展示）
       if (parsed.mode === 'notification') {
-        // notification 模式：只写入通知中心，不写入交互 Store
-        const notifId = useNotificationStore.getState().addNotification({
+        // notification 模式：只写入通知中心，不写入交互 Store。去重不能靠
+        // interactionStore（这里从不写入）——用后端 request_id 作通知稳定 id，
+        // 由通知中心的幂等闸兜住 /interaction/pending 兜底轮询对同一条
+        // forever-pending 通知的反复重放（BUG-74：同 id 重复入列、badge 无限增长）。
+        const wasListed = useNotificationStore
+          .getState()
+          .notifications.some((n) => n.id === parsed.requestId)
+        useNotificationStore.getState().addNotification({
+          id: parsed.requestId,
           title: parsed.title || '人类交互请求',
           message: parsed.description || `${parsed.agentId || 'Agent'} 请求您的输入`,
           priority: (parsed.priority as 'high' | 'normal' | 'low') || 'high',
@@ -256,11 +262,15 @@ export function useInteractionHandler(sessionId: string | undefined) {
           isBlocking: false,
           sourceLabel: resolveInteractionSourceLabel(parsed),
         })
-        requestToNotificationMap.set(parsed.requestId, notifId)
-      } else {
-        // choice/conversation 模式：只写入交互 Store，由 GlobalInteractionOverlay 全局展示
-        addInteraction(parsed)
+        // 入列复核：被幂等闸挡回（已在列 → 仅更新；已被用户移除 → 不回弹）
+        // 时不算新交互，提示音/系统级通知不得随轮询重放反复触发。
+        const isListed = useNotificationStore
+          .getState()
+          .notifications.some((n) => n.id === parsed.requestId)
+        return isListed && !wasListed
       }
+      // choice/conversation 模式：只写入交互 Store，由 GlobalInteractionOverlay 全局展示
+      addInteraction(parsed)
       return true
     }
 
@@ -273,6 +283,14 @@ export function useInteractionHandler(sessionId: string | undefined) {
 
       const isNew = ingestParsedInteraction(parsed)
       if (!isNew) return
+
+      // 系统级通知：Electron 下经宿主 OS 原生通知呈现（Windows toast /
+      // macOS 通知中心 / Linux libnotify）；Web 环境无桥接自动跳过。
+      // 不 await：通知失败不阻断交互卡片与提示音链路。
+      void showSystemNotification({
+        title: parsed.title || '人类交互请求',
+        body: parsed.description || `${parsed.agentId || 'Agent'} 请求您的输入`,
+      })
 
       // 避免重复通知。
       playNotificationSound().catch(() => {
@@ -363,6 +381,8 @@ export function useInteractionHandler(sessionId: string | undefined) {
           ingestParsedInteraction(parsed)
         }
       } catch (err) {
+        // 记日志即止：恢复失败时逐条循环已留痕，此处为整链失败兜底；
+        // WS 实时事件仍会继续送达交互（OBS-R258-1 吞错误规则登记）
         console.warn('[InteractionHandler] 恢复待处理交互失败:', err)
       }
     }

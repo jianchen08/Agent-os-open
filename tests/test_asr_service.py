@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,11 +23,14 @@ import pytest
 
 # 0.2：multimodal 插件位于 plugins/shared/system/multimodal/，
 # from multimodal.asr import 需要 system/ 父目录（包命名空间）；
-# asr.py 内部平铺导入 mm_types 等，需要 multimodal 目录自身。
-_SYSTEM = Path(__file__).resolve().parent.parent / "plugins" / "shared" / "system"
+# asr.py 内部平铺导入 mm_types（multimodal 目录自身）与 user_space
+# （plugins/shared 裸模块，配置用户层解析）。
+_SHARED = Path(__file__).resolve().parent.parent / "plugins" / "shared"
+_SYSTEM = _SHARED / "system"
 _MULTIMODAL = _SYSTEM / "multimodal"
-sys.path.insert(0, str(_SYSTEM))
-sys.path.insert(0, str(_MULTIMODAL))
+for _p in (_SHARED, _SYSTEM, _MULTIMODAL):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from multimodal.asr import (  # noqa: E402
     ASRConfig,
@@ -186,3 +190,103 @@ def test_get_asr_service_singleton():
         asr_mod._asr_service = svc1
         assert asr_mod.get_asr_service() is svc1
     reset_asr_service()
+
+
+# ── 用户空间真值 + 配置热生效（设置中枢 ASR 配置页的读取契约）──────────────
+
+
+def _user_yaml(model: str, api_key: str = "sk-user") -> str:
+    return (
+        "asr:\n"
+        "  enabled: true\n"
+        "  default_provider: p1\n"
+        "  providers:\n"
+        "    p1:\n"
+        '      api_base: "https://user.example.com/v1"\n'
+        f'      api_key: "{api_key}"\n'
+        f'      model: "{model}"\n'
+        '      language: "zh-CN"\n'
+    )
+
+
+def _clear_user_space_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AGENTOS_USER_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("AGENTOS_USER_ROOT", raising=False)
+
+
+def test_load_config_user_layer_priority(tmp_path, monkeypatch):
+    """用户层存在 models/asr.yaml 时优先于工厂配置（文件级整体替换，不合并）。"""
+    monkeypatch.setenv("AGENTOS_USER_CONFIG_DIR", str(tmp_path))
+    user_yaml = tmp_path / "models" / "asr.yaml"
+    user_yaml.parent.mkdir(parents=True)
+    user_yaml.write_text(_user_yaml("user-asr-model"), encoding="utf-8")
+
+    cfg = load_asr_config()
+
+    assert cfg.model == "user-asr-model"
+    assert cfg.api_key == "sk-user"
+    assert cfg.api_base == "https://user.example.com/v1"
+
+
+def test_load_config_factory_fallback_without_user_layer(monkeypatch):
+    """用户层未接管（文件不存在）时回落工厂 config/models/asr.yaml。"""
+    _clear_user_space_env(monkeypatch)
+
+    cfg = load_asr_config()
+
+    assert cfg.model == "glm-asr-v1"
+
+
+def test_service_picks_up_user_layer_created_later(tmp_path, monkeypatch):
+    """设置页首次保存（用户层文件从无到有）：既有服务实例下次读取即切用户层。"""
+    _clear_user_space_env(monkeypatch)
+    svc = ASRService()
+    assert svc.config.model == "glm-asr-v1"
+
+    monkeypatch.setenv("AGENTOS_USER_CONFIG_DIR", str(tmp_path))
+    user_yaml = tmp_path / "models" / "asr.yaml"
+    user_yaml.parent.mkdir(parents=True)
+    user_yaml.write_text(_user_yaml("late-user-model"), encoding="utf-8")
+
+    assert svc.config.model == "late-user-model"
+    assert svc.is_available() is True
+
+
+def test_service_reloads_on_file_content_change(tmp_path, monkeypatch):
+    """配置文件内容变更（stat 签名变化）后，既有实例下次读取新值（免重启热生效）。"""
+    monkeypatch.setenv("AGENTOS_USER_CONFIG_DIR", str(tmp_path))
+    yaml_path = tmp_path / "models" / "asr.yaml"
+    yaml_path.parent.mkdir(parents=True)
+    yaml_path.write_text(_user_yaml("m1", api_key="k1"), encoding="utf-8")
+
+    svc = ASRService()
+    assert svc.config.model == "m1"
+    assert svc.config.api_key == "k1"
+
+    yaml_path.write_text(_user_yaml("m2", api_key="k2"), encoding="utf-8")
+    # Windows mtime 粒度粗：显式推进 stat 签名，测试不受文件系统时间分辨率影响
+    st = yaml_path.stat()
+    os.utime(yaml_path, ns=(st.st_atime_ns + 1_000_000_000, st.st_mtime_ns + 1_000_000_000))
+
+    assert svc.config.model == "m2"
+    assert svc.config.api_key == "k2"
+    assert svc.is_available() is True
+
+
+def test_service_explicit_config_not_reloaded(tmp_path, monkeypatch):
+    """显式传入 ASRConfig（代码内构造，无配置文件语义）时不做文件重载探测。"""
+    monkeypatch.setenv("AGENTOS_USER_CONFIG_DIR", str(tmp_path))
+    user_yaml = tmp_path / "models" / "asr.yaml"
+    user_yaml.parent.mkdir(parents=True)
+    user_yaml.write_text(_user_yaml("user-model"), encoding="utf-8")
+
+    svc = ASRService(ASRConfig(api_key="sk-inline", model="inline-model"))
+    assert svc.config.model == "inline-model"
+    assert svc.config.api_key == "sk-inline"
+
+
+def test_stat_signature_missing_file_returns_none(tmp_path):
+    """不可 stat（文件缺失）时签名返回 None，调用方保持现值不重载。"""
+    from multimodal import asr as asr_mod
+
+    assert asr_mod._stat_signature(tmp_path / "missing.yaml") is None

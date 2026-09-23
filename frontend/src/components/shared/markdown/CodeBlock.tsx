@@ -41,6 +41,8 @@ const CodeHeader: FC<{ language?: string; code: string; isStreaming?: boolean }>
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     } catch (err) {
+      // 记日志即止：剪贴板不可用（非安全上下文/权限拒绝）时复制钮保持原态，
+      // 用户仍可手动选择文本复制（OBS-R258-1 吞错误规则登记）
       console.error('复制失败:', err)
     }
   }

@@ -129,7 +129,8 @@ export function FormWidget(props: Record<string, unknown>) {
   const pipelineId = useActivePipelineId()
   const sessionId = useSessionStore((s) => s.activeSessionId)
   // 会话列表（TanStack Query 缓存）：取当前会话的隔离形态（isolationMode/
-  // workspaceMode），供权限模式选择器如实显示隔离免审批默认
+  // workspaceMode），供权限模式选择器如实显示隔离免审批默认（生效档=旁路，
+  // OBS-R255-1：免审批默认由旁路档承载，未显式选择仍区别于显式选旁路）
   const { data: sessions } = useSessionsQuery()
   // 回读端点（可选）：挂载时 + 提交成功后 GET 查询当前值并刷新选择器显示。
   // 用于"切换端点的当前值不在表单初值里"的声明式选择器（如权限模式——
@@ -436,6 +437,10 @@ export function FormWidget(props: Record<string, unknown>) {
   const compact = Boolean(
     compactField && (endpoint || onChange) && !fieldsUri && !dataUri && !props.modal,
   )
+  // 紧凑形态的声明短写：字段 label 缺省回退 props.title（二者同值时只写一处）
+  const compactSetting = compactField
+    ? ({ ...compactField, label: compactField.label ?? (props.title as string | undefined) ?? '' })
+    : undefined
 
   const formBody = (
     <div>
@@ -500,13 +505,15 @@ export function FormWidget(props: Record<string, unknown>) {
 
   if (compact && compactField) {
     // 会话隔离形态（隔离容器 / worktree 副本）且未显式选择权限档：后端生效
-    // 语义为免审批默认（显式选择可覆盖），选择器如实显示该默认而非 default 档
+    // 语义为免审批默认（旁路档承载，OBS-R255-1），显式选择可覆盖——选择器
+    // 如实显示该默认而非 default 档；不显示「旁路」标签是为了保留「未显式
+    // 选择」（explicit=false）与「显式选旁路」的可辨别性（后端 explicit 协议同源）
     const activeSession = sessions?.find((s) => s.id === sessionId)
     const isolatedDefaultFreePass =
       activeSession?.isolationMode === 'isolated' || activeSession?.workspaceMode === 'worktree'
     return (
       <CompactSelectToggle
-        field={compactField}
+        field={compactSetting ?? compactField}
         title={props.title as string | undefined}
         icon={props.icon as string | undefined}
         onSelect={handleSubmit}
@@ -707,6 +714,15 @@ function statusClass(status: SubmitStatus): string {
  * 图标按钮 + DropdownMenu（label + description + Check），点选即提交/回调。
  * 用于插件声明式选择器（如权限模式切换 / 思考强度跟随管道标签），不占表单布局。
  * icon 为语义字符串（经 chatCardIconRegistry 解析，如 'shield'/'brain'），缺省 shield。
+ *
+ * 触发器可见文案 = 裸当前值（如「高」/「旁路（跳过审批）」）——输入条宽度有限，
+ * 设置名前缀不进可见文案；自标识由可访问名承载（`${设置名}：${当前值}`，BUG-6），
+ * 读屏与 GUI 脚本按带前缀的可访问名定位。设置名取 props.title，回退字段 label。
+ *
+ * 声明短写（本形态专用，2026-09-21 裁定）：单 select 选择器的 props 只需
+ * `title` + `fields`（+ endpoint/readbackUri 等行为键）。字段 label 与 title 同值时
+ * 只写 title；widget 级 `title` 不写（ContributionRegistry 归一化时丢弃，是死字段）；
+ * `description` 不写（本形态无 UI 载体——选项说明写在 options[].description）。
  */
 function CompactSelectToggle({
   field,
@@ -742,8 +758,8 @@ function CompactSelectToggle({
   const disabled = disabledProp || submitting || options.length === 0
   const Icon = resolveChatCardIcon(icon ?? 'shield')
   // 触发器自标识（BUG-6）：只显示裸值（如「高」）会与相邻权限档位混淆——
-  // GUI/读屏按「高」找权限等级会误中思考强度。可访问名与可见文案一律带
-  // 设置名前缀（如「思考强度：高」/「权限模式：默认（命中规则才确认）」）。
+  // GUI/读屏按「高」找权限等级会误中思考强度。自标识由可访问名承载
+  // （「思考强度：高」），可见文案只留裸值以省输入条宽度。
   const settingLabel = title ?? field.label
   const currentLabel = current?.label ?? unselectedLabel ?? field.label
 
@@ -773,7 +789,7 @@ function CompactSelectToggle({
             title={title ?? field.label}
           >
             <Icon className="h-icon-md w-icon-md" />
-            <span>{settingLabel}：{currentLabel}</span>
+            <span>{currentLabel}</span>
             <ChevronDown className="h-icon-xs w-icon-xs opacity-70" />
           </button>
         </DropdownMenuTrigger>

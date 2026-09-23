@@ -207,7 +207,7 @@ async def _fetch_messages(pipeline_run_id: str) -> list[dict[str, Any]] | dict[s
     """经 service-registry 调用 messages.list，返回内核消息记录列表。
 
     返回的每条记录字段对齐 kernel/crates/core/src/types.rs MessageRecord：
-    message_id / run_id / branch_id / seq_in_branch / role / content_preview /
+    message_id / run_id / seq_in_branch / role / content_preview /
     tool_calls_json / tool_call_id / reasoning_content / created_at / pipeline_id。
     能力调用失败时返回降级错误 dict（不抛异常）。
     """
@@ -234,8 +234,8 @@ async def _fetch_messages(pipeline_run_id: str) -> list[dict[str, Any]] | dict[s
 async def _fetch_traces(thread_id: str) -> list[dict[str, Any]]:
     """经 service-registry 调用 traces.list，返回插件步骤轨迹(state 变更 patch)。
 
-    每条轨迹含 plugin_id / patch_type / patch_data(JSON state_updates) /
-    seq_in_branch / created_at。这是复盘的「轨迹流程」主线——看每个插件
+    每条轨迹含 plugin_id / patch_type / patch_data(状态窗口 JSON) /
+    seq / created_at。这是复盘的「轨迹流程」主线——看每个插件
     这步做了什么(state 怎么变、路由走向、错误),不含对话原文。
 
     Args:
@@ -313,7 +313,7 @@ def _render_skeleton(
     trace_steps: list[dict[str, Any]] = []
     for tr in traces:
         plugin_id = tr.get("plugin_id", "?")
-        seq = tr.get("seq_in_branch")
+        seq = tr.get("seq", tr.get("seq_in_branch"))
         patch_data = tr.get("patch_data")
         state_changes: dict[str, Any] = {}
         if isinstance(patch_data, str):
@@ -496,7 +496,6 @@ def _render_l0(
         item: dict[str, Any] = {
             "message_id": msg.get("message_id"),
             "run_id": msg.get("run_id"),
-            "branch_id": msg.get("branch_id"),
             "seq_in_branch": msg.get("seq_in_branch"),
             "role": msg.get("role"),
             "content": _truncate_text(

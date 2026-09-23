@@ -291,7 +291,7 @@ class TestSwitchThenExecuteE2E:
         )
         decision = r.state_updates.get("security.decision", {})
         assert decision.get("allowed") is True
-        assert decision.get("reason") == "isolated task, base checks passed"
+        assert decision.get("reason") == "bypass: base checks passed"
         # 放行路径不产生拒绝副作用
         assert r.state_updates.get("raw_tool_calls") is None
 

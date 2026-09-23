@@ -1,5 +1,8 @@
 {
   "id": "pipeline_tool_schema",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Tool Schema",
   "version": "1.0.0",
   "plugin_type": "pipeline",
@@ -34,7 +37,8 @@
       "tool_schemas"
     ],
     "reads": [
-      "tool_ids"
+      "tool_ids",
+      "execution_context"
     ]
   }
 }

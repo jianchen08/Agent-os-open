@@ -94,13 +94,15 @@ def _lookup_run_tenant(run_id: str) -> str:
             return ""
         conn = sqlite3.connect(db_path)
         try:
+            # runs 表退役（ADR 2026-09-18）：run_id 是 state 标量键，反查归属租户
             row = conn.execute(
-                "SELECT tenant_id FROM runs WHERE run_id = ?", (run_id,)
+                "SELECT tenant_id FROM pipeline_state WHERE field_key = 'run_id' AND value = ?",
+                (run_id,),
             ).fetchone()
         finally:
             conn.close()
     except sqlite3.Error as exc:
-        logger.warning("[approval] runs 租户查询失败 | run_id=%s | err=%s", run_id, exc)
+        logger.warning("[approval] state 租户查询失败 | run_id=%s | err=%s", run_id, exc)
         return ""
     return str(row[0]) if row else ""
 

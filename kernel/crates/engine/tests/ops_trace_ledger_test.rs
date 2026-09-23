@@ -301,7 +301,6 @@ async fn run_pipeline_emit_ops(
         plugin_ids.iter().map(|s| s.to_string()),
         store_dyn,
         run_id,
-        "main",
     );
 
     let initial_state = json!({

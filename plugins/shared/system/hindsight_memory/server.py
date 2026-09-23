@@ -13,6 +13,9 @@
 
 韧性设计：hindsight 包可能未安装——on_load 内 try/except 懒导入，
 失败时 _client=None，所有工具检测 None 后返回降级字典，sidecar 永不崩溃。
+on_load in-flight 期间（冷启动窗，hindsight-api 子进程首启 26-40s 级）
+工具面有界等待初始化完成（共享就绪事件），超时才降级——冷启动窗内
+等待后就成功，而非必失败。
 
 bank_id 是多租户隔离 key（来自内核的 tenant_id），缺省回落到默认值。
 
@@ -26,6 +29,7 @@ import json
 import logging
 import os
 import sys
+import time
 from typing import TYPE_CHECKING, Any
 
 from agentos_plugin_sdk.bootstrap import bootstrap_plugin
@@ -59,6 +63,14 @@ plugin = AgentOSPlugin("hindsight_memory_service")
 _client: Any = None
 # hindsight-api 服务器子进程（on_load 启动,on_unload 终止）
 _api_process: Any = None
+# on_load in-flight 就绪事件：on_load 运行期间非 None，任何出口（成功/失败/
+# 异常）必 set + 清引用。工具面 _client is None 时依此有界等待——冷启动窗
+# （hindsight-api 子进程首启 26-40s 级）内等待而非必失败；多等待者共享同一
+# 事件，等待期间 on_load 不重入、不重复 spawn。
+_init_inflight: asyncio.Event | None = None
+# 冷启动窗有界等待上限（秒）：覆盖 _wait_api_ready 的 60s 轮询窗 + bank 建立，
+# 留余量取 90s（工具层死线 300s 内）。
+_COLD_START_WAIT_S = 90.0
 # hindsight-api 监听端口
 _HINDSIGHT_PORT = "8420"
 
@@ -78,6 +90,20 @@ _IMPORT_CONCURRENCY = 6
 # 允许导入的文件扩展名
 _ALLOWED_DOC_EXTS = (".txt", ".md")
 
+# 会话 bank 前缀（与 routes_memory._SESSION_BANK_PREFIX 同一线约定：内核会话
+# id 形如 thread-{uuid}，memory 工具可信身份即会话 id）。A4 thread-tag 召回
+# 的写入/召回两侧都以此判定会话 bank。
+_THREAD_BANK_PREFIX = "thread-"
+# 会话 tag 前缀（memory 工具 store 侧注入形态 "session:<id>"）
+_SESSION_TAG_PREFIX = "session:"
+
+# thread-tag 跨 bank 召回的 bank 扇出上限：每 bank 一次 arecall 向量检索，
+# 无上限会随会话 bank 积累击穿工具面客户端死线（memory 工具 recall 走 SDK
+# 默认 30s）。扇出序 = 自身 bank → default → 其余 thread-*（字典序）；超限
+# bank 不参与 thread-tag 召回（妥协：超限老会话记忆 tag 召回不可达；升级
+# 触发：实际 bank 数逼近上限时改最近活跃优先）。
+_RECALL_BANK_FANOUT_CAP = 20
+
 
 def _degrade_dict(operation: str) -> dict[str, Any]:
     """构造统一的降级返回（_client 未就绪时）。"""
@@ -86,6 +112,29 @@ def _degrade_dict(operation: str) -> dict[str, Any]:
         "initialized": False,
         "operation": operation,
     }
+
+
+async def _wait_backend_ready(operation: str) -> None:
+    """on_load in-flight 时有界等待其完成（冷启动窗内等待而非必失败）。
+
+    调用前提：_client is None。等待共享就绪事件至 on_load 结束或超时；
+    返回后由调用方复查 _client——仍 None（初始化失败/超时）才降级。
+    无 in-flight on_load（永久降级态）立即返回，不加人为延迟。
+    """
+    ready = _init_inflight
+    if ready is None:
+        return
+    started = time.monotonic()
+    try:
+        await asyncio.wait_for(ready.wait(), timeout=_COLD_START_WAIT_S)
+    except TimeoutError:  # py311+ asyncio.TimeoutError 即内建 TimeoutError
+        pass
+    logger.info(
+        "[hindsight] 记忆调用等待后端初始化（已等 %.2fs）| operation=%s initialized=%s",
+        time.monotonic() - started,
+        operation,
+        _client is not None,
+    )
 
 
 def _resolve_bank_id(bank_id: str | None) -> str:
@@ -154,7 +203,9 @@ def _chunk_text(text: str, chunk_size: int = _CHUNK_SIZE) -> list[str]:
             "metadata": {
                 "type": "object",
                 "default": {},
-                "description": "Optional extra metadata",
+                "description": "Optional extra metadata. Writing to a session "
+                "bank (thread-*) auto-appends the bank id as a thread tag so "
+                "the memory is recallable by tag across banks.",
             },
             "document_id": {
                 "type": "string",
@@ -202,6 +253,8 @@ async def hindsight_retain(
     import uuid  # noqa: PLC0415
 
     if _client is None:
+        await _wait_backend_ready("retain")
+    if _client is None:
         return _degrade_dict("retain")
 
     try:
@@ -228,6 +281,12 @@ async def hindsight_retain(
                 parsed_tags = None
             if isinstance(parsed_tags, list):
                 tags.extend(str(t) for t in parsed_tags if t)
+
+        # A4 thread tag：会话 bank（thread-*）写入自动带 bank id 标记——bank 是
+        # 隔离键不随内容走，tag 才随内容走；这是 agent 按自身 thread tag 跨
+        # bank 召回（hindsight.recall 的 thread tag 过滤面）的写入侧依据。
+        if bank.startswith(_THREAD_BANK_PREFIX) and bank not in tags:
+            tags.append(bank)
 
         call_kwargs: dict[str, Any] = {
             "bank_id": bank,
@@ -264,6 +323,123 @@ async def hindsight_retain(
         return {"id": "", "stored": False, "error": str(e)}
 
 
+# ── A4 thread-tag 召回：把「跨 bank 召回」转化为 tag 过滤（BUG-76 用户裁定）──
+
+
+def _normalize_thread_tag(tag: str) -> str:
+    """tag 归一为会话 bank id：剥 ``session:`` 前缀后须以 ``thread-`` 开头。
+
+    Args:
+        tag: 原始 tag（"thread-X" 原生 / "session:thread-X" memory 工具注入
+            形态 / 其他业务 tag）
+
+    Returns:
+        会话 bank id；非 thread tag 返回空串。
+    """
+    value = tag.removeprefix(_SESSION_TAG_PREFIX)
+    return value if value.startswith(_THREAD_BANK_PREFIX) else ""
+
+
+def _thread_tag_filters(tags: list[str]) -> list[str]:
+    """从合并 tags 提取 thread tag（两种形态归一到 bank id），保序去重。"""
+    out: list[str] = []
+    for tag in tags:
+        normalized = _normalize_thread_tag(str(tag))
+        if normalized and normalized not in out:
+            out.append(normalized)
+    return out
+
+
+def _build_tag_groups(
+    merged_tags: list[str], thread_tags: list[str], tags_match: str
+) -> list[dict[str, Any]]:
+    """thread-tag 召回的服务端布尔 tag 组（组间 AND，组内按各自 match）。
+
+    - 组 1（会话归属）：thread tag 双形态（"thread-X" 原生注入 /
+      "session:thread-X" memory 工具注入——存量记忆只有后者）any_strict：
+      任一形态命中即归属该会话，无 tag 记忆排除（无标记不可归属）；
+    - 组 2（其余过滤）：type:*（memory_type）与调用方业务 tag，沿调用方
+      tags_match 语义（缺省 any）。
+    """
+    forms: list[str] = []
+    for normalized in thread_tags:
+        for form in (normalized, f"{_SESSION_TAG_PREFIX}{normalized}"):
+            if form not in forms:
+                forms.append(form)
+    groups: list[dict[str, Any]] = [{"tags": forms, "match": "any_strict"}]
+    others = [t for t in merged_tags if not _normalize_thread_tag(str(t))]
+    if others:
+        groups.append({"tags": others, "match": tags_match or "any"})
+    return groups
+
+
+def _recall_items(result: Any) -> list[dict[str, Any]]:
+    """arecall 响应 → 条目 dict 列表（results 主字段；text 统一为 content）。"""
+    items: list[dict[str, Any]] = []
+    collection = getattr(result, "results", None)
+    if collection:
+        for item in collection:
+            if hasattr(item, "model_dump"):
+                items.append(item.model_dump())
+            elif isinstance(item, dict):
+                items.append(item)
+            else:
+                items.append({"content": str(item)})
+    for item in items:
+        if "text" in item and "content" not in item:
+            item["content"] = item.pop("text")
+    return items
+
+
+async def _recall_target_banks(own_bank: str) -> list[str]:
+    """thread-tag 召回的 bank 扇出序（上限 _RECALL_BANK_FANOUT_CAP，见常量注）。
+
+    自身 bank 优先（tag 过滤下保底命中），随后 default 与其余 thread-*
+    （字典序）。bank 发现失败（list_banks 报错/能力缺失）降级仅自身 bank——
+    发现面是只读辅助通路，部分结果好于失败；warn 留痕可排查。
+    """
+    banks = [own_bank]
+    listing = await hindsight_list_banks()
+    if not isinstance(listing, dict) or listing.get("error"):
+        logger.warning(
+            "[hindsight.recall] bank 发现失败，thread-tag 召回降级自身 bank | detail=%s",
+            listing.get("error") if isinstance(listing, dict) else listing,
+        )
+        return banks
+    default_bank = _resolve_bank_id(None)
+    extras = sorted(
+        {
+            str(b)
+            for b in (listing.get("banks") or [])
+            if b
+            and str(b) != own_bank
+            and (str(b) == default_bank or str(b).startswith(_THREAD_BANK_PREFIX))
+        }
+    )
+    return (banks + extras)[:_RECALL_BANK_FANOUT_CAP]
+
+
+async def _recall_across_banks(
+    own_bank: str, query: str, tag_groups: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """thread-tag 跨 bank 召回：逐 bank arecall（tag_groups 服务端过滤）合并。
+
+    并发扇出（每 bank 一次向量检索，总耗时≈最慢 bank）；单 bank 失败诚实
+    上抛（与单 bank recall 同风格，吞错会把降级包成假成功）。跨 bank 按 id
+    去重（同一记忆单元只落一个 bank，防御合并重复）；排序截断归调用方统一
+    处理。
+    """
+    banks = await _recall_target_banks(own_bank)
+    responses = await asyncio.gather(
+        *(_client.arecall(bank_id=b, query=query, tag_groups=tag_groups) for b in banks)
+    )
+    merged: dict[str, dict[str, Any]] = {}
+    for response in responses:
+        for item in _recall_items(response):
+            merged.setdefault(str(item.get("id", "")), item)
+    return list(merged.values())
+
+
 @plugin.tool(
     name="hindsight.recall",
     schema={
@@ -287,7 +463,10 @@ async def hindsight_retain(
             "tags": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Optional server-side tag filter",
+                "description": "Optional server-side tag filter. A thread tag "
+                "(\"thread-X\" or \"session:thread-X\") triggers cross-bank "
+                "recall: fan out over session banks (capped) with boolean tag "
+                "groups, so session-X memories match wherever they landed.",
             },
             "tags_match": {
                 "type": "string",
@@ -317,13 +496,14 @@ async def hindsight_recall(
     "query must contain at least one word character"——list 工具先于查询判空）。
     """
     if _client is None:
+        await _wait_backend_ready("recall")
+    if _client is None:
         return _degrade_dict("recall")
     if not query or not query.strip():
         return {"results": [], "total": 0, "error": "query is required (empty query rejected)"}
 
     try:
         bank = _resolve_bank_id(bank_id)
-        kwargs: dict[str, Any] = {"bank_id": bank, "query": query}
         # memory_type（type: 前缀）与调用方 tags 合并后一次投给服务端——
         # 覆盖式赋值会在同传时丢掉 memory_type 过滤（pipeline chunk 检索
         # 同时带 memory_type=chunk + tags=[pipeline:{id}] 的场景）。
@@ -332,31 +512,26 @@ async def hindsight_recall(
             merged_tags.append(f"type:{memory_type}")
         if tags:
             merged_tags.extend(tags)
-        if merged_tags:
-            kwargs["tags"] = merged_tags
-            kwargs["tags_match"] = tags_match or "any"
-
-        result = await _client.arecall(**kwargs)
-        # RecallResponse (hindsight 0.9.1) 召回结果主字段是 results
-        # （每条含 id/text/type/score 等）。
-        items: list[dict[str, Any]] = []
-        collection = getattr(result, "results", None)
-        if collection:
-            for item in collection:
-                if hasattr(item, "model_dump"):
-                    items.append(item.model_dump())
-                elif isinstance(item, dict):
-                    items.append(item)
-                else:
-                    items.append({"content": str(item)})
-        # 统一字段名:results 里的 text → content(上层期望 content 字段)
-        for item in items:
-            if "text" in item and "content" not in item:
-                item["content"] = item.pop("text")
+        # A4 thread-tag 召回：tags 含 thread tag（"thread-X"/"session:thread-X"）
+        # → 跨 bank 扇出 + tag_groups 布尔过滤（agent 传自己的 thread tag 即可
+        # 查到自己会话的记忆，无论落在哪个 bank）；否则维持单 bank 现行为
+        #（含 pipeline:{id} 等业务 tag 的既有平铺过滤面不触发扇出）。
+        thread_tags = _thread_tag_filters(merged_tags)
+        if thread_tags:
+            items = await _recall_across_banks(
+                bank, query, _build_tag_groups(merged_tags, thread_tags, tags_match)
+            )
+        else:
+            kwargs: dict[str, Any] = {"bank_id": bank, "query": query}
+            if merged_tags:
+                kwargs["tags"] = merged_tags
+                kwargs["tags_match"] = tags_match or "any"
+            result = await _client.arecall(**kwargs)
+            items = _recall_items(result)
         # 相关度排序 + top_k 截断：RecallResult 的分数在嵌套 scores.final
         # （顶层无 score 键，读取归各消费方映射层），召回条数由 token 预算
         # 驱动与 top_k 无关——按 final 降序排并截断 top_k，「检索数量」契约
-        # 才成立。
+        # 才成立（跨 bank 合并与单 bank 同一口径）。
         limit = max(1, int(top_k or 5))
 
         def _final_score(item: dict[str, Any]) -> float:
@@ -390,6 +565,8 @@ async def hindsight_reflect(bank_id: str = "", query: str = "") -> dict[str, Any
 
     query 缺省时用一个通用查询触发反思/巩固。
     """
+    if _client is None:
+        await _wait_backend_ready("reflect")
     if _client is None:
         return _degrade_dict("reflect")
 
@@ -453,6 +630,8 @@ async def hindsight_summarize(
     经 tool-executor.invoke 跨进程调用；失败返回降级 dict（含 error），不抛异常。
     """
     if _client is None:
+        await _wait_backend_ready("summarize")
+    if _client is None:
         return _degrade_dict("summarize")
 
     try:
@@ -515,6 +694,8 @@ async def hindsight_delete(bank_id: str = "", memory_id: str = "") -> dict[str, 
       直删 404）：按单元解析父文档后级联删除——残留条目可清理。
     - memory_id 缺省：删整个 bank（adelete_bank，既有语义保留）。
     """
+    if _client is None:
+        await _wait_backend_ready("delete")
     if _client is None:
         return _degrade_dict("delete")
 
@@ -646,6 +827,8 @@ async def hindsight_import_document(
     Rejects non-txt/md file paths with an error dict (no retain).
     """
     if _client is None:
+        await _wait_backend_ready("import_document")
+    if _client is None:
         return _degrade_dict("import_document")
 
     # 解析文本来源
@@ -759,6 +942,8 @@ async def hindsight_get_documents(
       → 逐条 get_document 补 original_text（单条失败降级返回条目本身）。
     """
     if _client is None:
+        await _wait_backend_ready("get_documents")
+    if _client is None:
         return _degrade_dict("get_documents")
 
     def _to_dict(doc: Any) -> dict[str, Any]:
@@ -813,6 +998,49 @@ async def hindsight_get_documents(
     except Exception as e:
         logger.warning("[hindsight.get_documents] 调用失败 | error=%s", e)
         return {"documents": [], "total": 0, "error": str(e)}
+
+
+@plugin.tool(
+    name="hindsight.list_banks",
+    schema={"type": "object", "properties": {}, "required": []},
+    description="List all memory bank ids in the hindsight instance "
+    "(bank discovery for cross-bank listing surfaces)",
+)
+async def hindsight_list_banks() -> dict[str, Any]:
+    """列举实例全部 bank id（跨 bank 列表面的发现通路，只读）。
+
+    memory 工具按会话 bank 落库，列表面（记忆页列表/统计）先发现 bank
+    集合再逐 bank 取文档，否则只见默认 bank。
+    """
+    if _client is None:
+        await _wait_backend_ready("list_banks")
+    if _client is None:
+        return _degrade_dict("list_banks")
+
+    try:
+        banks_api = getattr(_client, "banks", None)
+        if banks_api is None or not hasattr(banks_api, "list_banks"):
+            return {"banks": [], "error": "client has no banks.list_banks"}
+        listing = await banks_api.list_banks()
+        if hasattr(listing, "model_dump"):
+            listing = listing.model_dump()
+        if isinstance(listing, dict):
+            items = listing.get("banks")
+        else:
+            items = getattr(listing, "banks", None)
+        bank_ids: list[str] = []
+        for item in items or []:
+            bid = (
+                str(item.get("bank_id", "") or "")
+                if isinstance(item, dict)
+                else str(getattr(item, "bank_id", "") or "")
+            )
+            if bid:
+                bank_ids.append(bid)
+        return {"banks": bank_ids, "total": len(bank_ids)}
+    except Exception as e:
+        logger.warning("[hindsight.list_banks] 调用失败 | error=%s", e)
+        return {"banks": [], "error": str(e)}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1195,7 +1423,24 @@ async def _on_load(params: dict[str, Any]) -> None:
     2. 启动 hindsight-api 子进程(后台,监听 _HINDSIGHT_PORT)
     3. 创建 Hindsight(base_url) 客户端,确保 bank 存在
     4. 任一步失败 → _client=None,所有工具降级,sidecar 不崩
+
+    冷启动窗等待面：进入即立共享就绪事件（工具面 _client is None 期间有界
+    等待它），任何出口（成功/失败/异常）finally 必唤醒全部等待者并清引用，
+    等待者醒来复查 _client。
     """
+    global _init_inflight
+
+    ready = asyncio.Event()
+    _init_inflight = ready
+    try:
+        await _on_load_init()
+    finally:
+        _init_inflight = None
+        ready.set()
+
+
+async def _on_load_init() -> None:
+    """on_load 初始化主体（配置装配 + spawn api + 建客户端；失败降级不崩）。"""
     global _client, _DEFAULT_BANK_ID, _api_process
 
     config = plugin.get_config() or {}

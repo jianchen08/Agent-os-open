@@ -304,6 +304,8 @@ export class ElectronWindowManager implements WindowManager {
       return
     }
     void window.electronAPI!.window.close(windowId).catch((err) => {
+      // 记日志即止：窗口已关闭于用户视角无回滚动作，web fallback 由切换逻辑承接
+      // （OBS-R258-1 吞错误规则登记）
       console.error('[WindowManager] electronAPI.window.close failed:', err)
     })
   }
@@ -314,6 +316,8 @@ export class ElectronWindowManager implements WindowManager {
       return
     }
     void window.electronAPI!.window.focus(windowId).catch((err) => {
+      // 记日志即止：聚焦失败不产生数据错误，下一次交互自然重试
+      // （OBS-R258-1 吞错误规则登记）
       console.error('[WindowManager] electronAPI.window.focus failed:', err)
     })
   }

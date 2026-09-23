@@ -489,10 +489,16 @@ class TestContextTokenUsageTenantGuard:
 
     @pytest.fixture
     def runs_db(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+        """runs 表退役（ADR 2026-09-18）：租户锚 = pipeline_state 簿记行。"""
         db = tmp_path / "kernel.db"
         conn = sqlite3.connect(db)
-        conn.execute("CREATE TABLE runs (pipeline_id TEXT, tenant_id TEXT)")
-        conn.execute("INSERT INTO runs VALUES ('s-foreign', 'other-tenant')")
+        conn.execute(
+            "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT,"
+            " value TEXT, value_kind TEXT, tenant_id TEXT, updated_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO pipeline_state VALUES ('s-foreign', 'run_status', 'running', 'str', 'other-tenant', '2026-09-19T00:00:00Z')"
+        )
         conn.commit()
         conn.close()
         monkeypatch.setattr(_server, "_kernel_db_path", lambda: str(db))
@@ -526,12 +532,15 @@ class TestContextTokenUsageTenantGuard:
     async def test_owned_session_context_usage_passes_parent(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """对照支：未知管道（runs 无行）放行，parent 参数透传业务函数。"""
+        """对照支：未知管道（pipeline_state 无簿记行）放行，parent 参数透传业务函数。"""
         import types
 
         db = tmp_path / "kernel.db"
         conn = sqlite3.connect(db)
-        conn.execute("CREATE TABLE runs (pipeline_id TEXT, tenant_id TEXT)")
+        conn.execute(
+            "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT,"
+            " value TEXT, value_kind TEXT, tenant_id TEXT, updated_at TEXT)"
+        )
         conn.commit()
         conn.close()
         monkeypatch.setattr(_server, "_kernel_db_path", lambda: str(db))

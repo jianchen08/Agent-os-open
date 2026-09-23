@@ -263,6 +263,50 @@ class TestFileWriteDiffOutput:
         assert "new_content" in props
 
 
+class TestFileWriteSizeOutput:
+    """file_write 输出 size（写后磁盘字节数，前端 file_card 大小徽标数据源，R174）。
+
+    契约：每个 action 的成功输出必须带 size，且等于落盘文件的真实字节数
+    （UTF-8 编码，非字符数）——前端文件卡直接展示，不再自行读取文件。
+    """
+
+    @pytest.mark.asyncio
+    async def test_write_new_file_size_is_utf8_byte_length(self, tmp_path: Path) -> None:
+        f = tmp_path / "new.txt"
+        result = await file_write(str(f), action="write", content="你好", workspace=str(tmp_path))
+        assert result.success
+        # 中文 2 字符 → UTF-8 6 字节（字节语义而非字符数）
+        assert result.output["size"] == 6
+        assert f.stat().st_size == 6
+
+    @pytest.mark.asyncio
+    async def test_search_replace_size_matches_disk(self, tmp_path: Path) -> None:
+        f = tmp_path / "r.txt"
+        f.write_text("hello world", encoding="utf-8")
+        result = await file_write(
+            str(f), action="search_replace", old_str="world", new_str="Rust!", create_backup=False,
+            workspace=str(tmp_path),
+        )
+        assert result.success
+        assert result.output["size"] == f.stat().st_size
+        assert result.output["size"] == len(b"hello Rust!")
+
+    @pytest.mark.asyncio
+    async def test_delete_lines_size_matches_disk(self, tmp_path: Path) -> None:
+        f = tmp_path / "del.txt"
+        f.write_text("L1\nL2\nL3", encoding="utf-8")
+        result = await file_write(
+            str(f), action="delete_lines", start_line=2, end_line=2, create_backup=False,
+            workspace=str(tmp_path),
+        )
+        assert result.success
+        assert result.output["size"] == f.stat().st_size
+
+    def test_output_schema_declares_size(self) -> None:
+        """size 字段必须在 output_schema 声明（契约锁步，防再断链）。"""
+        assert "size" in FILE_WRITE_OUTPUT_SCHEMA["properties"]
+
+
 class TestListDirectory:
     @pytest.mark.asyncio
     async def test_list_files(self, tmp_path: Path) -> None:

@@ -1,5 +1,8 @@
 {
   "id": "metrics_admin",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Metrics Admin HTTP Face",
   "description": "指标读面的 HTTP 面层（boot-plugin 第三刀）：/ext/metrics_admin/** 端点经内核 dispatcher 进本插件 http.handle，反向调用内核 metrics-admin capability（查询/枚举/Prometheus 导出，逻辑与鉴权在内核 handler 内）。写面（metrics.record 热路径）仍为内核内置反向调用，不经本插件。鉴权凭证（Authorization 头）由本插件原样转发、内核侧解析，插件不做鉴权决策。内核 /metrics（Prometheus 抓取）作为运维契约保留在内核，不经本插件。",
   "version": "1.0.0",

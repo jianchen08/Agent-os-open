@@ -1,5 +1,8 @@
 {
   "id": "channel_cli",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "CLI Channel",
   "version": "1.0.0",
   "plugin_type": "system",

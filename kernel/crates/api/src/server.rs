@@ -41,13 +41,14 @@ use crate::auth::{
 };
 use crate::routes::{
     actions_execute_handler, get_pipeline_config_with_etag, get_plugin_config_with_etag,
-    health_handler, metrics_prometheus_handler, pending_inputs_clear_handler,
-    pending_inputs_delete_handler, pending_inputs_list_handler, pending_inputs_update_handler,
-    pipelines_handler, pipelines_runs_handler, pipelines_state_handler,
-    plugins_contract_status_handler, plugins_dependents_handler, plugins_set_enabled_handler,
-    plugins_status_handler, put_pipeline_config_handler, put_plugin_config_handler, schema_handler,
-    serve_upload_handler, system_memstats_handler, system_restart_handler, tools_handler,
-    validate_all_plugins_handler, AppState,
+    health_handler, message_segment_get_handler, message_segments_list_handler,
+    metrics_prometheus_handler, pending_inputs_clear_handler, pending_inputs_delete_handler,
+    pending_inputs_list_handler, pending_inputs_update_handler, pipelines_handler,
+    pipelines_runs_handler, pipelines_state_handler, plugins_contract_status_handler,
+    plugins_dependents_handler, plugins_set_enabled_handler, plugins_status_handler,
+    put_pipeline_config_handler, put_plugin_config_handler, schema_handler, serve_upload_handler,
+    system_memstats_handler, system_restart_handler, tools_handler, validate_all_plugins_handler,
+    AppState,
 };
 use crate::session_routes::{
     create_session_handler, delete_session_handler, list_session_messages_handler,
@@ -113,6 +114,15 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/pipelines/{pipeline_id}/pending-inputs/{input_id}",
             put(pending_inputs_update_handler).delete(pending_inputs_delete_handler),
+        )
+        // 消息段（多代切换/压缩原文存档）：段清单按区间聚合；单段含成员全文解析
+        .route(
+            "/api/v1/pipelines/{pipeline_id}/message-segments",
+            get(message_segments_list_handler),
+        )
+        .route(
+            "/api/v1/message-segments/{id}",
+            get(message_segment_get_handler),
         )
         .route("/api/v1/tools", get(tools_handler))
         // P7: 管道配置查询/更新（内核承载 config/pipelines/*.yaml）
@@ -235,6 +245,8 @@ pub fn build_router(state: AppState) -> Router {
 ///   可驱动执行与消耗算力）
 /// - `/api/v1/pipelines*`（管道域读端点：列表/runs/state/pending-inputs——
 ///   管道运行数据含会话内容与执行轨迹，缺省匿名=任意人可读）
+/// - `/api/v1/message-segments*`（消息段读端点：段行含消息引用列表，单段解析
+///   成员全文——同属会话内容读面）
 /// - `/api/v1/tools`、`/api/v1/schema`（工具面与配置聚合读端点）
 /// - `/api/v1/config/pipelines/{name}`（GET 读 + PUT 写，写面原有）
 /// - `/metrics`（Prometheus 导出：指标含用量数据，抓取方需带 token）
@@ -261,6 +273,7 @@ async fn write_surface_auth(
     let needs_auth = path.starts_with("/api/v1/sessions")
         || path.starts_with("/api/v1/plugins")
         || path.starts_with("/api/v1/pipelines")
+        || path.starts_with("/api/v1/message-segments")
         || path.starts_with("/api/v1/config/pipelines/")
         || path == "/api/v1/system/restart"
         || path == "/api/v1/system/memstats"
@@ -1732,77 +1745,22 @@ async fn recover_cold_history(
     declared_volatile: &std::collections::HashSet<String>,
 ) -> (serde_json::Value, Vec<serde_json::Value>) {
     let mut history_prefix: Vec<serde_json::Value> = Vec::new();
-    // 冷路径（零兼容重排）：
-    // ① checkpoint 只提供**标量基线**——messages 一律不消费（load 后剥离丢弃），
-    //    无论新旧格式（任务 5 瘦身后新 checkpoint 本就不含 messages）。
-    // ② 无 checkpoint → traces 回放**标量字段**（merge_patch 跳过 messages）。
-    // ③ pipeline_state 表补充累计标量（每 step upsert 最新值）。
-    // ④ messages 从 message_slots 表直读（消息队列持久真值，零回放）。
+    // 冷路径（ADR 2026-09-18：state 唯一真值，checkpoint 降级纯备份/DR）：
+    // ① pipeline_state 表是主真值——直接读累计标量（每 step upsert 最新值）。
+    // ② messages 从 message_slots 表直读（消息队列持久真值，零回放）。
+    // ③ DR 路径（仅当 ①+② 双双为空 = state 缺失/损坏）：checkpoint 标量基线 +
+    //    traces 回放重建。checkpoint/traces 不再参与常规恢复主路径。
     let mut recovered: serde_json::Value = serde_json::json!({});
-    let mut ckpt_hit = false;
-    if !effective_pipeline_id.is_empty() {
-        match store
-            .load_latest_checkpoint(effective_pipeline_id, tenant_id)
-            .await
-        {
-            Ok(Some((_step_no, ckpt_state))) => {
-                recovered = ckpt_state;
-                // 队列真值在表：checkpoint 的 messages 剥离丢弃（新旧格式一律）
-                if let Some(rec_obj) = recovered.as_object_mut() {
-                    rec_obj.remove("messages");
-                }
-                ckpt_hit = true;
-                debug!(
-                    pipeline_id = %effective_pipeline_id,
-                    "冷启动从 checkpoint 恢复标量基线（messages 走表读）"
-                );
-            }
-            Ok(None) => {
-                // 无 checkpoint：正常冷启动路径，走 traces 回放
-            }
-            Err(e) => {
-                // checkpoint 读失败不等同无 checkpoint：降级走 traces 回放时留痕，
-                // 避免静默丢标量基线（错误是数据读失败，不是记录不存在）。
-                error!(
-                    pipeline_id = %effective_pipeline_id,
-                    error = %e,
-                    "load_latest_checkpoint 冷恢复失败，降级 traces 回放"
-                );
-            }
-        }
-    }
-    if !ckpt_hit {
-        // 只回放本管道自己的轨迹。thread 全量回放会把同会话其它管道
-        // （父会话/兄弟子任务）的控制态（conversation_mode/core_type/router.*）
-        // 种进本管道初始 state——曾致新子任务第 0 轮即被对话挂起路由误挂
-        // （2026-08-30 管道身份裁定：执行态恢复只认 pipeline_id）。
-        match store
-            .get_step_traces_by_pipeline(effective_pipeline_id, tenant_id)
-            .await
-        {
-            Ok(step_traces) => {
-                for entry in &step_traces {
-                    merge_patch(&mut recovered, &entry.patch_data);
-                }
-            }
-            Err(e) => {
-                // 持久化恢复失败：bug 信号（内存丢 + DB 也读不到），显式 error 暴露。
-                error!(
-                    pipeline_id = %effective_pipeline_id,
-                    error = %e,
-                    "get_step_traces_by_pipeline 回放失败"
-                );
-            }
-        }
-    }
-    // 累计标量字段以 pipeline_state 为准（每 step upsert 最新值），
-    // 重建后插件能在正确基线上自然累加，不归零。
+    let mut state_hit = false;
     if !effective_pipeline_id.is_empty() {
         match store
             .load_pipeline_state(effective_pipeline_id, tenant_id)
             .await
         {
             Ok(state_fields) => {
+                if !state_fields.is_empty() {
+                    state_hit = true;
+                }
                 if let Some(rec_obj) = recovered.as_object_mut() {
                     for (k, v) in &state_fields {
                         rec_obj.insert(k.clone(), v.clone());
@@ -1824,13 +1782,80 @@ async fn recover_cold_history(
             .load_message_history(effective_pipeline_id, tenant_id)
             .await
         {
-            Ok(msgs) => history_prefix = msgs,
+            Ok(msgs) if !msgs.is_empty() => {
+                history_prefix = msgs;
+                state_hit = true;
+            }
+            Ok(_) => {}
             Err(e) => {
                 error!(
                     pipeline_id = %effective_pipeline_id,
                     error = %e,
                     "load_message_history 冷恢复失败（对话历史可能不完整）"
                 );
+            }
+        }
+    }
+    // DR 路径：state 与消息双双缺席（state 丢失/损坏/首次恢复旧库）——
+    // checkpoint 提供标量基线（messages 剥离丢弃），无 checkpoint 则 traces
+    // 回放标量字段（merge_patch 跳过 messages）。
+    if !state_hit && !effective_pipeline_id.is_empty() {
+        warn!(
+            pipeline_id = %effective_pipeline_id,
+            "state 与消息双空：走 DR 重建（checkpoint 基线 + traces 回放）"
+        );
+        let mut ckpt_hit = false;
+        match store
+            .load_latest_checkpoint(effective_pipeline_id, tenant_id)
+            .await
+        {
+            Ok(Some((_step_no, ckpt_state))) => {
+                recovered = ckpt_state;
+                // 队列真值在表：checkpoint 的 messages 剥离丢弃（新旧格式一律）
+                if let Some(rec_obj) = recovered.as_object_mut() {
+                    rec_obj.remove("messages");
+                }
+                ckpt_hit = true;
+                debug!(
+                    pipeline_id = %effective_pipeline_id,
+                    "DR 重建从 checkpoint 取标量基线"
+                );
+            }
+            Ok(None) => {
+                // 无 checkpoint：继续 traces 回放
+            }
+            Err(e) => {
+                // checkpoint 读失败不等同无 checkpoint：降级走 traces 回放时留痕，
+                // 避免静默丢标量基线（错误是数据读失败，不是记录不存在）。
+                error!(
+                    pipeline_id = %effective_pipeline_id,
+                    error = %e,
+                    "load_latest_checkpoint DR 重建失败，降级 traces 回放"
+                );
+            }
+        }
+        if !ckpt_hit {
+            // 只回放本管道自己的轨迹。thread 全量回放会把同会话其它管道
+            // （父会话/兄弟子任务）的控制态（conversation_mode/core_type/router.*）
+            // 种进本管道初始 state——曾致新子任务第 0 轮即被对话挂起路由误挂
+            // （2026-08-30 管道身份裁定：执行态恢复只认 pipeline_id）。
+            match store
+                .get_step_traces_by_pipeline(effective_pipeline_id, tenant_id)
+                .await
+            {
+                Ok(step_traces) => {
+                    for entry in &step_traces {
+                        merge_patch(&mut recovered, &entry.patch_data);
+                    }
+                }
+                Err(e) => {
+                    // 持久化恢复失败：bug 信号（内存丢 + DB 也读不到），显式 error 暴露。
+                    error!(
+                        pipeline_id = %effective_pipeline_id,
+                        error = %e,
+                        "get_step_traces_by_pipeline 回放失败"
+                    );
+                }
             }
         }
     }
@@ -2006,7 +2031,16 @@ async fn stage_execute(
     run_id: &str,
     user_id: &str,
 ) -> Result<serde_json::Value, EngineOutcome> {
-    let branch_id = "main".to_string();
+    // runs 表退役（ADR 2026-09-18）：防御失败簿记所需坐标提前捕获（initial_state/
+    // tenant 随后移入 executor）
+    let defensive_bookkeeping: (String, String) = (
+        initial_state
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        tenant.tenant_id.clone(),
+    );
 
     // 轮次观察点桥接（一轮 = 一条消息）：session 未接线的部署形态不挂（仅引擎执行）。
     // 线程/管道坐标从 initial_state 取（WS 路径与注入路径同一来源）。
@@ -2071,7 +2105,6 @@ async fn stage_execute(
         known_ids.iter().cloned(),
         store.clone(),
         run_id.to_string(),
-        branch_id,
     )
     // 分层持久化：从所有插件 manifest 的 persistent_fields 声明收集并集。
     // 这些是需跨轮持久化的累计标量字段（如 track.total_tokens）。
@@ -2161,11 +2194,19 @@ async fn stage_execute(
             // B2：引擎失败兜底——把 run 标记 failed + ended_at，避免永远卡 running、
             // 历史悬空。（PipelineExecutor::run 当前不返回 Err，这是防御网；崩溃留下的
             // running 孤儿由内核启动 reap_orphan_runs 清扫。）
-            if let Err(pe) = store
-                .update_run_status(run_id, agentos_core::types::RunStatus::Failed, None, None)
-                .await
-            {
-                warn!(run_id = %run_id, error = %pe, "update_run_status(Failed) 失败（继续）");
+            // runs 表退役（ADR 2026-09-18）：簿记 = state 运行键（按 pipeline_id 定位）
+            let (failed_pipeline_id, bookkeeping_tenant) = &defensive_bookkeeping;
+            if !failed_pipeline_id.is_empty() {
+                let now = chrono::Utc::now().to_rfc3339();
+                let mut fields = serde_json::Map::new();
+                fields.insert("run_status".to_string(), serde_json::json!("failed"));
+                fields.insert("run_ended_at".to_string(), serde_json::json!(now));
+                if let Err(pe) = store
+                    .upsert_state_fields(failed_pipeline_id, bookkeeping_tenant, &fields)
+                    .await
+                {
+                    warn!(run_id = %run_id, error = %pe, "run_status(Failed) 簿记失败（继续）");
+                }
             }
             Err(EngineOutcome {
                 content: format!("[engine-run-failed] {message}"),

@@ -26,10 +26,10 @@ users 域（10 端点 → user_admin 插件）：
   但零页面调用），用户创建属内核 register（自注册）与 user-admin capability
   扩展的职责面，插件侧 db-admin 裸 INSERT 无法承载 username 唯一性友好报错/
   一用户一租户（tenant_id=user_id）等业务约束（报告说明）。
-- update_user_active（PUT/PATCH /users/{id}/active）：保留存根语义——users 表
+- update_user_active（PUT/PATCH /users/{id}/active）：**显式未支持**——users 表
   **无 is_active 列**（engine store.rs：user_id/username/password/email/role/
-  tenant_id/created_at/last_login_at），前端管理面板的激活开关无实际落点；
-  schema 演进属内核侧课题，不在本插件刀口。
+  tenant_id/created_at/last_login_at），激活状态无处落库；产品拍板内核迁移前
+  恒回 501 结构化错误，不假装成功（管理页假行动作已摘除，BUG-70）。
 - PATCH /users/{id}/role 与 PATCH /users/{id}/tenant 维持 user-admin capability
   面（内核自保护：不能降自己角色/改自己租户）；PUT /users/{id}/role 走
   db-admin（源 users.ts 消费形态）。
@@ -157,10 +157,17 @@ async def _handle_users_domain(
     if len(rest) == 2 and rest[1] == "role" and method == "PUT":
         return True, await _users_update_role(rest[0], raw_body, auth)
 
-    # ── PUT|PATCH /users/{id}/active（users 表无 is_active 列，保持存根语义）──
+    # ── PUT|PATCH /users/{id}/active（显式未支持存根，恒 501 结构化错误）──
+    # 现状契约：engine store users 表无 is_active 列（user_id/username/password/
+    # email/role/tenant_id/created_at/last_login_at），激活状态无处落库；产品
+    # 拍板内核迁移前，本端点不假装成功（BUG-70：管理页假行动作已同步摘除）。
     if len(rest) == 2 and rest[1] == "active" and method in ("PUT", "PATCH"):
-        _decode_body(raw_body)
-        return True, _ok(_json_response({"id": rest[0], "is_active": True}))
+        return True, _ok(_json_response({
+            "error": {
+                "code": "501",
+                "message": "用户激活状态更新未支持：users 表无 is_active 列（内核迁移待产品拍板）",
+            }
+        }, 501))
 
     # ── DELETE /users/{id}（db-admin.table_delete_row）──
     if len(rest) == 1 and method == "DELETE":

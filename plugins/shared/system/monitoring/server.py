@@ -556,15 +556,20 @@ def _collect_token_usage() -> dict[str, Any]:
         try:
             conn = sqlite3.connect(db_path)
             by_pipe: dict[str, dict[str, Any]] = {}
-            for pid, key, val in conn.execute(
-                "SELECT pipeline_id, field_key, field_value FROM pipeline_state"
+            # state 值域标量化（ADR 2026-09-18）：标量按 value_kind 解码，
+            # value_kind='json' 的过渡键按 JSON 解析（非标量声明键域迁移消灭前）。
+            for pid, key, val, kind in conn.execute(
+                "SELECT pipeline_id, field_key, value, value_kind FROM pipeline_state"
                 " WHERE field_key IN ('track.llm_usage', 'llm_model')"
             ):
                 slot = by_pipe.setdefault(pid, {})
-                try:
-                    slot[key] = json.loads(val)
-                except (TypeError, ValueError):
-                    slot[key] = None
+                if kind == "json":
+                    try:
+                        slot[key] = json.loads(val)
+                    except (TypeError, ValueError):
+                        slot[key] = None
+                else:
+                    slot[key] = val
             # 同模型的多个管道汇总为一行（state 按管道自持累计，跨管道同一
             # 模型需相加才是「按模型」的全局口径）。
             merged: dict[str, dict[str, Any]] = {}
@@ -1208,10 +1213,11 @@ def _read_payload_diag(name: str) -> dict[str, Any]:
 
 
 def _pipeline_tenant_conflict(pipeline_id: str, tenant_id: str) -> bool:
-    """True = 管道存在于 runs 表但归属他租户（跨租户访问拒绝的判据）。
+    """True = 管道存在于 state 表但归属他租户（跨租户访问拒绝的判据）。
 
-    未知管道（runs 无行）返回 False——无数据可泄露，放行让业务层返回空形态，
-    避免误伤"会话已建但管道尚未跑过"的合法读取。
+    未知管道（state 无运行簿记键）返回 False——无数据可泄露，放行让业务层返回
+    空形态，避免误伤"会话已建但管道尚未跑过"的合法读取。
+    （runs 表退役，ADR 2026-09-18：管道存在性锚 = pipeline_state 行。）
     """
     import sqlite3
 
@@ -1224,7 +1230,7 @@ def _pipeline_tenant_conflict(pipeline_id: str, tenant_id: str) -> bool:
         conn = sqlite3.connect(db_path)
         try:
             row = conn.execute(
-                "SELECT tenant_id FROM runs WHERE pipeline_id = ? LIMIT 1",
+                "SELECT tenant_id FROM pipeline_state WHERE pipeline_id = ? LIMIT 1",
                 (pipeline_id,),
             ).fetchone()
         finally:
@@ -1284,7 +1290,7 @@ def _query_tool_calls(q: dict[str, str], tenant_id: str = "") -> dict[str, Any]:
     min_duration = q.get("min_duration", "").strip()
 
     sql = """
-        SELECT t.trace_id, t.run_id, t.created_at,
+        SELECT t.trace_id, t.pipeline_id, t.created_at,
                json_extract(item.value, '$.tool_name')   AS tool_name,
                json_extract(item.value, '$.success')     AS success,
                json_extract(item.value, '$.error')       AS error,
@@ -1453,7 +1459,7 @@ _TOOL_CALLS_HTML = """<!DOCTYPE html>
   </div>
   <div style="overflow:auto; max-height:calc(100vh - 200px)">
     <table>
-      <thead><tr><th>时间</th><th>工具</th><th>状态</th><th>耗时</th><th>run_id</th><th>错误</th></tr></thead>
+      <thead><tr><th>时间</th><th>工具</th><th>状态</th><th>耗时</th><th>管道</th><th>错误</th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
     <div id="empty" class="empty">点击查询加载数据</div>
@@ -1637,7 +1643,7 @@ async function query() {
         '<td>' + fmt(i.created_at) + '</td><td>' + escapeHtml(i.tool_name || '?') + '</td>' +
         '<td class="' + (ok ? 'ok' : 'fail') + '">' + (ok ? '成功' : '失败') + '</td>' +
         durCell(i.duration_ms) +
-        '<td style="color:#94a3b8;font-size:11px">' + escapeHtml((i.run_id || '').slice(0,8)) + '</td>' +
+        '<td style="color:#94a3b8;font-size:11px">' + escapeHtml((i.pipeline_id || '').slice(0,8)) + '</td>' +
         '<td style="font-size:11px" class="' + (ok ? '' : 'fail') + '">' + (ok ? '' : escapeHtml(brief)) + '</td></tr>' +
         '<tr class="rowdetail" style="display:none"><td colspan="6"><pre>' + escapeHtml(errText || '(无错误信息)') + '</pre></td></tr>';
     }).join('');

@@ -9,11 +9,15 @@
  *    每模型采样参数编辑（default_params，PUT /llm/models/{id}）。
  * 添加模型表单与模型行「参数」面板共用 ModelParamsEditor（上下文/采样/
  * 思考模式/思考强度映射/多模态/自定义参数），添加时即可一并填写。
+ *
+ * 数据面四态统一（OBS-R258-1）：主面（LLM 配置）加载失败显式 ErrorState + 重试，
+ * 不伪装空态；副面（预置声明）失败降级由数据源注释声明。
  */
 
-import { useQuery } from '@tanstack/react-query'
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { ChevronDown, Plus, RefreshCw, Trash2 } from '@/assets/icons'
+import { ErrorState } from '@/components/shared/ErrorState'
+import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -28,9 +32,9 @@ import {
 } from '@/components/ui/select'
 import { toast } from '@/components/ui/sonner'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
+import { useLlmConfigQuery, useLlmPresetsQuery } from '@/hooks/queries/useLlmQueries'
+import { useAsyncResource } from '@/hooks/useAsyncResource'
 import {
-  getLLMConfig,
-  getLLMPresets,
   getProviderTypes,
   addModel,
   updateModel,
@@ -45,7 +49,6 @@ import {
   type RemoteModel,
   type LLMDefaults,
 } from '@/services/api/config'
-import { queryKeys } from '@/services/query/queryKeys'
 import {
   buildModelFields,
   buildRemoteModelFields,
@@ -70,8 +73,6 @@ const getApiMsg = (e: unknown, fallback = '操作失败'): string =>
  */
 export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   const [config, setConfig] = useState<LLMConfigResponse | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
-  const [loadError, setLoadError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState('providers')
 
   const [fetchTarget, setFetchTarget] = useState<string | null>(null)
@@ -102,12 +103,12 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
 
   // 配置面预置声明（llm_service /ext 端点下发，声明驱动——前端零硬编码词典）：
   // provider 分组/显示名、常用类型置顶、思考强度档位白名单
-  const presetsQuery = useQuery({
-    queryKey: queryKeys.llmPresets,
-    queryFn: () => getLLMPresets(),
-    staleTime: 5 * 60_000,
+  // 副面降级决策（OBS-R258-1 铁律 4）：声明拉取失败不阻断主配置面——
+  // 分组归「自定义」、思考强度走内置缺省档位、类型目录回退常用类型
+  const presetsResource = useAsyncResource(useLlmPresetsQuery(), {
+    fallbackErrorText: '获取预置声明失败',
   })
-  const presets = presetsQuery.data
+  const presets = presetsResource.data
   const presetProviderIds = useMemo(
     () => new Set(presets?.provider_groups.flatMap((g) => g.providers.map(([id]) => id)) ?? []),
     [presets],
@@ -131,31 +132,17 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
 
   // 加载配置（query 化）：重进设置页缓存秒开；apiClient 用绝对 baseURL 绕过
   // Vite 代理；生产环境前后端须同源或后端配置 CORS 头。
-  const configQuery = useQuery({
-    queryKey: queryKeys.llmConfig,
-    queryFn: () => getLLMConfig(),
-    staleTime: 60_000,
+  // 主面四态统一（OBS-R258-1）：失败显式 ErrorState + 重试上屏，不伪造空配置；
+  // apiClient 拒绝的是普通 ApiError 对象（非 Error 实例）→ 走 fallbackErrorText
+  const configResource = useAsyncResource(useLlmConfigQuery(), {
+    fallbackErrorText: '无法连接服务器，请检查网络后重试',
   })
 
   useEffect(() => {
-    if (configQuery.data) {
-      setConfig(configQuery.data)
+    if (configResource.data) {
+      setConfig(configResource.data)
     }
-  }, [configQuery.data])
-
-  useEffect(() => {
-    if (configQuery.isPending) return
-    setIsLoading(false)
-    if (configQuery.isError) {
-      console.error('[LlmSettingsPage] Failed to load LLM config:', configQuery.error)
-      setLoadError('无法连接服务器，请检查网络后重试')
-      setConfig({
-        models: {},
-        providers: {},
-        defaults: { chat: '', embedding: '', tiers: {} },
-      })
-    }
-  }, [configQuery.isPending, configQuery.isError, configQuery.error])
+  }, [configResource.data])
 
   // 默认模型草稿随配置同步（保存/增删模型后回显服务器最新值）
   useEffect(() => {
@@ -347,7 +334,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
     [providerTypesLoaded, presets],
   )
 
-  if (isLoading) {
+  if (configResource.status === 'loading') {
     return (
       <PageShell
         title="模型设置"
@@ -357,10 +344,28 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
         backLabel="设置"
         maxWidth="max-w-3xl"
       >
-        <div className="text-muted-foreground flex items-center justify-center py-20 text-sm">
-          <div className="border-primary mr-2 h-5 w-5 animate-spin rounded-full border-2 border-t-transparent" />
-          加载配置...
-        </div>
+        <LoadingState text="加载配置..." />
+      </PageShell>
+    )
+  }
+
+  // 失败态（OBS-R258-1 铁律 1/2）：主配置面失败整页 ErrorState + 重试，
+  // 不渲染「暂无提供商/暂无模型」类零数据伪装物
+  if (configResource.status === 'error') {
+    return (
+      <PageShell
+        title="模型设置"
+        description="配置大语言模型提供商与模型"
+        embedded={embedded}
+        backHref="/settings"
+        backLabel="设置"
+        maxWidth="max-w-3xl"
+      >
+        <ErrorState
+          variant="center"
+          message={configResource.error ?? ''}
+          onRetry={configResource.refetch}
+        />
       </PageShell>
     )
   }
@@ -372,26 +377,6 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
       embedded={embedded}
       mainLabel="模型设置表单"
     >
-      {loadError && (
-        <div className="bg-destructive/10 mb-4 flex items-center justify-between rounded-lg px-4 py-3">
-          <div>
-            <p className="text-destructive text-sm font-medium">{loadError}</p>
-            <p className="text-destructive/80 mt-0.5 text-xs">
-              模型列表为空，下拉选项将无可用内容。请重试或检查后端服务是否正常运行。
-            </p>
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => void configQuery.refetch()}
-            className="border-destructive/30 text-destructive hover:bg-destructive/10 ml-4 shrink-0"
-          >
-            <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-            重试
-          </Button>
-        </div>
-      )}
-
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
           <TabsTrigger value="providers">提供商与密钥</TabsTrigger>

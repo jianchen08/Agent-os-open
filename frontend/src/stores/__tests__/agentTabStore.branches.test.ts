@@ -476,6 +476,38 @@ describe('AgentTabStore Tab 增删改查', () => {
     expect(sub?.status).toBe('waiting_input')
     expect(unreadCounts[SUB_TAB_ID]).toBe(0)
   })
+
+  it('reorderTab：拖拽源移动到目标位置，落盘顺序同步', () => {
+    useAgentTabStore.setState({
+      currentSessionId: SESSION_ID,
+      tabs: [makeMainTab(), makeSubTab({ id: 'sub-a', pipelineRunId: 'pid-a' }), makeSubTab({ id: 'sub-b', pipelineRunId: 'pid-b' })],
+      activeTabId: MAIN_TAB_ID,
+    })
+
+    useAgentTabStore.getState().reorderTab('sub-b', MAIN_TAB_ID)
+
+    const ids = useAgentTabStore.getState().tabs.map((t) => t.id)
+    expect(ids).toEqual(['sub-b', MAIN_TAB_ID, 'sub-a'])
+    // 集合不变、仅顺序变化（性质断言）
+    expect([...ids].sort()).toEqual([MAIN_TAB_ID, 'sub-a', 'sub-b'].sort())
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY)!) as { tabs: AgentTab[] }
+    expect(saved.tabs.map((t) => t.id)).toEqual(ids)
+  })
+
+  it('reorderTab 守卫：同签与未知签均不移动', () => {
+    useAgentTabStore.setState({
+      currentSessionId: SESSION_ID,
+      tabs: [makeMainTab(), makeSubTab()],
+      activeTabId: MAIN_TAB_ID,
+    })
+    const before = useAgentTabStore.getState().tabs.map((t) => t.id)
+
+    useAgentTabStore.getState().reorderTab(MAIN_TAB_ID, MAIN_TAB_ID)
+    useAgentTabStore.getState().reorderTab('ghost', MAIN_TAB_ID)
+    useAgentTabStore.getState().reorderTab(MAIN_TAB_ID, 'ghost')
+
+    expect(useAgentTabStore.getState().tabs.map((t) => t.id)).toEqual(before)
+  })
 })
 
 describe('AgentTabStore closeTab/switchToTab/setActiveTab 边界', () => {

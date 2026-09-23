@@ -1,5 +1,8 @@
 {
   "id": "pipeline_tool_cache_writer",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Tool Cache Writer",
   "version": "1.0.0",
   "plugin_type": "pipeline",

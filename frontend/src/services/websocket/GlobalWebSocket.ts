@@ -466,6 +466,25 @@ class GlobalWebSocketService {
     this._send({ type: 'user_input_response', thread_id: threadId, execution_id: executionId, response })
   }
 
+  /**
+   * 段激活：‹i/n› 多代切换（消息段模型 P1，方案 §5 写事件 3）。服务端按后缀
+   * 语义整段替换并在 run 活跃时拒绝（错误「任务运行中」——调用方在发送前自持
+   * streaming 预检 toast，ack 对账纠偏）。通知性消息：离线时入队，重连后随
+   * _flushQueue 发出；segment_activated ack 由 useRealtimeEvents 防抖对账。
+   */
+  sendSegmentActivate(threadId: string, opts?: {
+    pipelineId?: string
+    segmentId?: string
+  }): void {
+    this._send({
+      type: 'segment_activate',
+      thread_id: threadId,
+      pipeline_id: opts?.pipelineId || '',
+      segment_id: opts?.segmentId || '',
+    })
+  }
+
+
   /** 响应人类交互请求 */
   sendInteractionResponse(threadId: string, requestId: string, response: unknown): void {
     this._send({ type: 'interaction_response', thread_id: threadId, data: { request_id: requestId, response } })

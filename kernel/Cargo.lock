@@ -250,6 +250,7 @@ dependencies = [
  "libloading",
  "mimalloc",
  "parking_lot",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml",

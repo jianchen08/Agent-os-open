@@ -309,7 +309,7 @@ describe('sessionListStore — setActiveSession 分支', () => {
   })
 
   it('fetchData=false 时不加载消息（仅切换选中态）', async () => {
-    seedSessions([makeSession('s1', { activePipelineId: 'p1' } as never)])
+    seedSessions([makeSession('s1', { pipelineIds: ['p1'] } as never)])
     const loadSpy = vi.spyOn(usePipelineMessageStore.getState(), 'loadPipelineMessages')
 
     await useSessionListStore.getState().setActiveSession('s1', false)
@@ -319,8 +319,8 @@ describe('sessionListStore — setActiveSession 分支', () => {
     loadSpy.mockRestore()
   })
 
-  it('fetchData=true 时按主管道加载消息（activePipelineId 优先）', async () => {
-    seedSessions([makeSession('s1', { activePipelineId: 'p-main' } as never)])
+  it('fetchData=true 时按主管道加载消息（映射真值 pipelineIds[0]）', async () => {
+    seedSessions([makeSession('s1', { pipelineIds: ['p-main'] } as never)])
     const loadSpy = vi
       .spyOn(usePipelineMessageStore.getState(), 'loadPipelineMessages')
       .mockResolvedValue({ ok: true })
@@ -332,8 +332,8 @@ describe('sessionListStore — setActiveSession 分支', () => {
   })
 
   it('无主管道时打 error 日志且不加载', async () => {
-    // 多管道且无 activePipelineId → mainPipelineIdOf 返回 undefined
-    seedSessions([makeSession('s1', { pipelineIds: ['p1', 'p2'] } as never)])
+    // 映射为空 → mainPipelineIdOf 返回 undefined
+    seedSessions([makeSession('s1', { pipelineIds: [] } as never)])
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const loadSpy = vi.spyOn(usePipelineMessageStore.getState(), 'loadPipelineMessages')
 
@@ -346,7 +346,7 @@ describe('sessionListStore — setActiveSession 分支', () => {
   })
 
   it('加载消息抛错时被捕获并打 error（不冒泡）', async () => {
-    seedSessions([makeSession('s1', { activePipelineId: 'p-main' } as never)])
+    seedSessions([makeSession('s1', { pipelineIds: ['p-main'] } as never)])
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const loadSpy = vi
       .spyOn(usePipelineMessageStore.getState(), 'loadPipelineMessages')

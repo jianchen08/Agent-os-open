@@ -1,5 +1,8 @@
 {
   "id": "task_service",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Task Service",
   "version": "1.0.0",
   "plugin_type": "system",
@@ -518,22 +521,8 @@
     "task.eval_retry_count",
     "task.eval_total_calls",
     "task.eval_summary",
-    "task.error"
+    "task.error",
+    "agent.id"
   ],
-  "contributes": {
-    "pages": [
-      {
-        "id": "tasks",
-        "title": "任务管理",
-        "icon": "📁",
-        "space": "workspace",
-        "slot": "tab",
-        "path": "/tasks",
-        "widget": "pipeline_manager",
-        "order": 5,
-        "description": "任务/管道管理（pipeline_manager 预置域 widget 承载，按钮触发打开、非侧栏常驻）"
-      }
-    ]
-  },
   "host_group": "light_stable"
 }

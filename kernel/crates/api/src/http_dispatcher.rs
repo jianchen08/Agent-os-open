@@ -264,48 +264,84 @@ async fn exec_ext_request(
     };
 
     let method_str = method.as_str().to_string();
-    let mut headers_map = header_map_to_hashmap(&headers);
 
-    // 3) 鉴权闸（D2 两刀均落地）：执行 manifest `http_endpoints[].auth` 声明。
-    //    静态资源（/assets/**）不声明 http_endpoints，不受此闸约束。
-    //    已认证（user/admin 声明）时注入身份头（X-AgentOS-Tenant / User / Role，
-    //    值来自已验签 token 解析的用户记录）——插件侧租户过滤/归属校验只信
-    //    这组内核注入头，不自行解析 token（HMAC 密钥不出内核）。
-    if let Some(registry) = state.capability_registry.as_ref() {
-        if let Some(route) = registry.find_http_route(&path, &method_str) {
-            match enforce_ext_auth(state.store.as_ref(), &headers, &route).await {
-                ExtAuthOutcome::AllowAnonymous => {
-                    // A2：匿名放行 ≠ 信任客户端——剥离客户端伪造的身份头
-                    //（键集与认证分支覆盖注入严格一致），否则匿名端点的插件
-                    // 会把伪造租户/用户/角色当真（越权读写他人租户数据）。
-                    for spoofed in ["x-agentos-tenant", "x-agentos-user", "x-agentos-role"] {
-                        headers_map.remove(spoofed);
+    // 3) 鉴权闸 + 4) 分发（BUG-58：路由缺席自愈重试；BUG-67 改 additive 语义）。
+    //    首次分发 NotFound 且插件声明面在册（manifest 在共享 store + 在启用集）
+    //    时，按声明 manifest 自愈补注册缺失路由（heal_plugin_http_routes：
+    //    只增不毁——不收回 scope 在册面，防并发自愈/复验互相绞杀），再整体
+    //    重试一次；重试时鉴权闸重跑——恢复出的路由携带 auth 声明，鉴权必须以
+    //    恢复后的声明为准。自愈无法恢复（声明无端点/恢复仍缺席）才落 503
+    //    瞬态语义；插件未声明/未启用仍 404（fail-closed 不变）。
+    let raw_body = body.to_vec();
+    let mut route_healed = false;
+    let mut declared = false;
+    let outcome = loop {
+        let mut headers_map = header_map_to_hashmap(&headers);
+        if let Some(registry) = state.capability_registry.as_ref() {
+            if let Some(route) = registry.find_http_route(&path, &method_str) {
+                match enforce_ext_auth(state.store.as_ref(), &headers, &route).await {
+                    ExtAuthOutcome::AllowAnonymous => {
+                        // A2：匿名放行 ≠ 信任客户端——剥离客户端伪造的身份头
+                        //（键集与认证分支覆盖注入严格一致），否则匿名端点的插件
+                        // 会把伪造租户/用户/角色当真（越权读写他人租户数据）。
+                        for spoofed in ["x-agentos-tenant", "x-agentos-user", "x-agentos-role"] {
+                            headers_map.remove(spoofed);
+                        }
                     }
+                    ExtAuthOutcome::Authenticated {
+                        user_id,
+                        role,
+                        tenant_id,
+                    } => {
+                        headers_map.insert("x-agentos-tenant".to_string(), tenant_id);
+                        headers_map.insert("x-agentos-user".to_string(), user_id);
+                        headers_map.insert("x-agentos-role".to_string(), role);
+                    }
+                    ExtAuthOutcome::Deny(resp) => return resp,
                 }
-                ExtAuthOutcome::Authenticated {
-                    user_id,
-                    role,
-                    tenant_id,
-                } => {
-                    headers_map.insert("x-agentos-tenant".to_string(), tenant_id);
-                    headers_map.insert("x-agentos-user".to_string(), user_id);
-                    headers_map.insert("x-agentos-role".to_string(), role);
-                }
-                ExtAuthOutcome::Deny(resp) => return resp,
             }
         }
-    }
 
-    let raw_body = body.to_vec();
-    let outcome = dispatch_http(
-        &dispatcher,
-        &path,
-        &method_str,
-        raw_body,
-        headers_map,
-        query_multi,
-    )
-    .await;
+        let outcome = dispatch_http(
+            &dispatcher,
+            &path,
+            &method_str,
+            raw_body.clone(),
+            headers_map,
+            query_multi.clone(),
+        )
+        .await;
+        match outcome {
+            DispatchOutcome::NotFound => {
+                let plugin_id = ext_path_plugin_id(&path);
+                declared = match plugin_id {
+                    Some(pid) => {
+                        state.manifests.read().await.iter().any(|m| m.id == pid)
+                            && state.enabled_plugin_ids.read().await.contains(pid)
+                    }
+                    None => false,
+                };
+                if declared && !route_healed {
+                    route_healed = crate::plugin_lifecycle::heal_plugin_http_routes(
+                        state
+                            .capability_registry
+                            .as_ref()
+                            .expect("dispatcher 资源在场"),
+                        &state.plugin_scopes,
+                        &state.manifests,
+                        &state.enabled_plugin_ids,
+                        plugin_id.unwrap_or_default(),
+                    )
+                    .await;
+                    if route_healed {
+                        continue;
+                    }
+                }
+                break DispatchOutcome::NotFound;
+            }
+            other => break other,
+        }
+    };
     match outcome {
         DispatchOutcome::Handled(resp) => {
             // 插件回包任一段落不合法（状态码越界 / body 非 base64）= 上游故障，
@@ -346,23 +382,15 @@ async fn exec_ext_request(
         }
         DispatchOutcome::NotFound => {
             // 声明面在册（manifest 已知且插件启用）但路由缺席 = 插件生命周期空窗
-            // （G2 复验重注册 / enable-disable 切换 / 空闲卸载后的再注册间隙，
-            // scopes.revoke 与重注册之间静默无日志）——瞬态不可用而非路由不存在：
-            // 503+Retry-After 让前端按可重试处理（裸 404 会被前端当「路由没了」
-            // 常态化报错，2026-09-04 任务页实测反复 404）；warn 补上空窗观测。
-            let plugin_id = ext_path_plugin_id(&path);
-            let declared = match plugin_id {
-                Some(pid) => {
-                    state.manifests.read().await.iter().any(|m| m.id == pid)
-                        && state.enabled_plugin_ids.read().await.contains(pid)
-                }
-                None => false,
-            };
+            // 或注册面静默丢失。上方已自愈重试过一次（BUG-58：heal 成功则不会
+            // 落到这里）；仍未恢复 = 自愈无物可恢复（声明无端点）或恢复失败——
+            // 瞬态不可用而非路由不存在：503+Retry-After 让前端按可重试处理
+            // （裸 404 会被前端当「路由没了」常态化报错，2026-09-04 任务页实测
+            // 反复 404）；warn 补上空窗观测。
             if declared {
                 warn!(
                     path = %path,
-                    plugin = plugin_id.unwrap_or_default(),
-                    "http route missing for declared plugin (503, transient lifecycle window)"
+                    "http route missing for declared plugin even after heal attempt (503, transient lifecycle window)"
                 );
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -1637,6 +1665,228 @@ mod tests {
                 body_encoding: "base64".to_string(),
             })
         }
+    }
+
+    // ── BUG-58：路由缺席自愈（declared+enabled 注册面静默丢失 → 调用路径恢复）──
+
+    /// 构造带 http_endpoints 的 manifest（走 JSON 反序列化，省去手写字段）。
+    fn manifest_with_endpoints(
+        id: &str,
+        endpoints: &[(&str, &str, &str, Option<&str>)],
+    ) -> PluginManifest {
+        let eps: Vec<serde_json::Value> = endpoints
+            .iter()
+            .map(|(route_id, method, path, auth)| {
+                serde_json::json!({
+                    "route_id": route_id, "method": method, "path": path,
+                    "auth": auth, "handler_capability": "http.handle"
+                })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "version": "1.0.0",
+            "plugin_type": "system", "language": "python",
+            "host_type": "sidecar", "entry": "python server.py",
+            "capabilities": {},
+            "http_endpoints": eps
+        }))
+        .expect("valid manifest")
+    }
+
+    /// BUG-58 核心回归：声明面在册（store manifest + 启用集）但注册表条目静默
+    /// 丢失 → 请求触发调用路径自愈 → 路由恢复并当次分发成功（200 而非 503），
+    /// 且注册表可查、guard 入 scope（幂等基线，不残留悬空注册）。
+    #[tokio::test]
+    async fn exec_ext_request_heals_missing_route_for_declared_plugin() {
+        use crate::routes::AppState;
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let mut state = AppState::new();
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        // 关键前置：注册表无任何路由（模拟装机版静默丢失后的现场）
+        state.capability_registry = Some(registry.clone());
+        state.http_handler = Some(Arc::new(NopHandlerForTests));
+        let manifest = manifest_with_endpoints(
+            "mode_x",
+            &[
+                ("p1", "GET", "/ext/mode_x/page/panel", Some("none")),
+                ("d1", "GET", "/ext/mode_x/data/bootstrap", Some("none")),
+            ],
+        );
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest]));
+        state
+            .enabled_plugin_ids
+            .write()
+            .await
+            .insert("mode_x".to_string());
+        let scopes_keepalive = state.plugin_scopes.clone();
+        let app = crate::server::build_router(state);
+        // scope 账本须在断言期保活：oneshot 消费 Router → AppState 释放 →
+        // PluginScopeRegistry drop = M1 结构性收回（guard 全撤）。生产态 AppState
+        // 常驻，此析构只在测试里发生；此处持 Arc 模拟生产态。
+        let scopes_for_assert = scopes_keepalive.clone();
+        let registry_for_assert = registry;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ext/mode_x/data/bootstrap")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::OK,
+            "自愈恢复路由后当次请求必须分发成功，而非 503"
+        );
+        assert!(
+            registry_for_assert
+                .find_http_route("/ext/mode_x/data/bootstrap", "GET")
+                .is_some(),
+            "自愈后路由必须可查（后续请求直接命中）"
+        );
+        assert!(
+            registry_for_assert
+                .find_http_route("/ext/mode_x/page/panel", "GET")
+                .is_some(),
+            "声明内其余端点一并恢复"
+        );
+        assert_eq!(
+            registry_for_assert.list_http_routes().len(),
+            2,
+            "恢复条数 = 声明端点数（scope 账本 = {} 条 guard）",
+            scopes_for_assert.scope_of("mode_x").len()
+        );
+    }
+
+    /// fail-closed 不变：插件未启用（不在启用集）→ 不自愈、仍 404
+    /// （自愈不得复活被禁用插件的摘除语义）。
+    #[tokio::test]
+    async fn exec_ext_request_does_not_heal_disabled_plugin() {
+        use crate::routes::AppState;
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let mut state = AppState::new();
+        state.capability_registry = Some(Arc::new(CapabilityRegistryImpl::new()));
+        state.http_handler = Some(Arc::new(NopHandlerForTests));
+        let manifest =
+            manifest_with_endpoints("mode_y", &[("d1", "GET", "/ext/mode_y/data", Some("none"))]);
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest]));
+        // enabled_plugin_ids 留空 = 插件已禁用
+        let app = crate::server::build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ext/mode_y/data")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    /// 声明无 http_endpoints（自愈无物可恢复）→ 维持既有 503 瞬态语义。
+    #[tokio::test]
+    async fn exec_ext_request_503_persists_when_declaration_has_no_endpoints() {
+        use crate::routes::AppState;
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let mut state = AppState::new();
+        state.capability_registry = Some(Arc::new(CapabilityRegistryImpl::new()));
+        state.http_handler = Some(Arc::new(NopHandlerForTests));
+        let manifest = manifest_with_endpoints("mode_z", &[]);
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest]));
+        state
+            .enabled_plugin_ids
+            .write()
+            .await
+            .insert("mode_z".to_string());
+        let app = crate::server::build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ext/mode_z/data")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("temporarily unavailable"));
+    }
+
+    /// 自愈后鉴权闸必须重跑：声明 auth="user" 的路由经自愈恢复后，无 token
+    /// 请求 → 401（而非借自愈绕过鉴权 200，也不是 503）。
+    #[tokio::test]
+    async fn exec_ext_request_reapplies_auth_after_heal() {
+        use crate::routes::AppState;
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let mut state = AppState::new();
+        state.capability_registry = Some(Arc::new(CapabilityRegistryImpl::new()));
+        state.http_handler = Some(Arc::new(NopHandlerForTests));
+        let manifest =
+            manifest_with_endpoints("mode_a", &[("d1", "GET", "/ext/mode_a/data", Some("user"))]);
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest]));
+        state
+            .enabled_plugin_ids
+            .write()
+            .await
+            .insert("mode_a".to_string());
+        // store 缺席（401 需要验 token 的用户存储）→ resolve_request_user 走
+        // 存储缺失路径；此处只断言"不是 200"，即自愈后鉴权确实执行。
+        let app = crate::server::build_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ext/mode_a/data")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::UNAUTHORIZED,
+            "自愈恢复的路由必须重过鉴权闸"
+        );
+    }
+
+    /// 自愈分支覆盖：启用集命中但 store 无 manifest（manifest 缺席）→ 不动作。
+    #[tokio::test]
+    async fn heal_noops_when_manifest_absent_from_store() {
+        use crate::routes::AppState;
+        let mut state = AppState::new();
+        state.capability_registry = Some(Arc::new(CapabilityRegistryImpl::new()));
+        state
+            .enabled_plugin_ids
+            .write()
+            .await
+            .insert("ghost".to_string());
+        let healed = crate::plugin_lifecycle::heal_plugin_http_routes(
+            state.capability_registry.as_ref().unwrap(),
+            &state.plugin_scopes,
+            &state.manifests,
+            &state.enabled_plugin_ids,
+            "ghost",
+        )
+        .await;
+        assert!(!healed, "manifest 缺席时自愈必须不动作");
     }
 
     /// `register_manifest_http_routes`：scopes 为 Some 时走 guarded 注册并入

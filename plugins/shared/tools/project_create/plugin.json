@@ -1,5 +1,8 @@
 {
   "id": "project_create_tool",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Project Create Tool",
   "description": "创建项目（= 真实文件夹 + 登记行），任务树分组锚点，无执行者",
   "version": "1.0.0",

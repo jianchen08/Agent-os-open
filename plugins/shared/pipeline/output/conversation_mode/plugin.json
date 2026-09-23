@@ -1,5 +1,8 @@
 {
   "id": "pipeline_conversation_mode",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Conversation Mode",
   "version": "1.0.0",
   "plugin_type": "pipeline",

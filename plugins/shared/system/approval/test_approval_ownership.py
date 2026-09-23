@@ -54,17 +54,19 @@ def _load_server() -> Any:
 
 
 def _make_runs_db(tmp_path: Path, run_tenant: dict[str, str]) -> Path:
-    """内核 runs 表最小形态：run_id → tenant_id 权威锚。"""
+    """内核 pipeline_state 最小形态：run_id 标量键 → tenant_id 权威锚（ADR 2026-09-18）。"""
     db_path = tmp_path / "agentos_kernel.db"
     conn = sqlite3.connect(db_path)
     conn.execute(
-        "CREATE TABLE runs (run_id TEXT PRIMARY KEY, config_hash TEXT, status TEXT,"
-        " tenant_id TEXT, created_at TEXT)"
+        "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT, value TEXT,"
+        " value_kind TEXT DEFAULT 'str', tenant_id TEXT, updated_at TEXT,"
+        " PRIMARY KEY (pipeline_id, field_key, tenant_id))"
     )
-    for run_id, tenant in run_tenant.items():
+    for i, (run_id, tenant) in enumerate(run_tenant.items()):
         conn.execute(
-            "INSERT INTO runs VALUES (?, 'h', 'running', ?, '2026-01-01T00:00:00')",
-            (run_id, tenant),
+            "INSERT INTO pipeline_state (pipeline_id, field_key, value, value_kind, tenant_id, updated_at)"
+            " VALUES (?, 'run_id', ?, 'str', ?, '2026-01-01T00:00:00')",
+            (f"pipe-{i}", run_id, tenant),
         )
     conn.commit()
     conn.close()

@@ -4,6 +4,7 @@ import tseslint from 'typescript-eslint'
 import reactHooks from 'eslint-plugin-react-hooks'
 import reactRefresh from 'eslint-plugin-react-refresh'
 import importX from 'eslint-plugin-import-x'
+import localRules from './eslint-rules/local-rules.mjs'
 
 export default tseslint.config(
   // Global ignores
@@ -22,6 +23,7 @@ export default tseslint.config(
       'react-hooks': reactHooks,
       'react-refresh': reactRefresh,
       'import-x': importX,
+      'local-rules': localRules,
     },
     languageOptions: {
       ecmaVersion: 2022,
@@ -124,6 +126,25 @@ export default tseslint.config(
 
       // Relax overly strict defaults for React projects
       '@typescript-eslint/no-require-imports': 'off',
+
+      // OBS-R258-1：禁吞错误（空 catch / 只 console 的 catch / .catch 静默兜底）。
+      // 豁免登记 = catch 块/处理函数体内 `// HACK: <原因>` 注释。
+      'local-rules/no-swallowed-errors': 'error',
+    },
+  },
+
+  // OBS-R258-1 四态约定（先窄后宽，试点 pages 目录）：页面数据面禁裸用
+  // useQuery，一律走 useAsyncResource / hooks/queries/* 标准入口按 status
+  // 穷举渲染 loading/error/empty/ready。未迁移页面调用点逐行 eslint-disable
+  // + HACK 原因登记（棘轮：新增调用点仍被拦）；扩张路径见
+  // docs/working/前端空态失败态四态约定_OBS-R258-1.md
+  {
+    files: ['src/pages/**/*.tsx'],
+    plugins: {
+      'local-rules': localRules,
+    },
+    rules: {
+      'local-rules/no-bare-usequery-in-pages': 'error',
     },
   },
 
@@ -139,6 +160,9 @@ export default tseslint.config(
       '@typescript-eslint/no-non-null-assertion': 'off',
       'no-console': 'off',
       'react-refresh/only-export-components': 'off',
+      // 测试断言错误路径属正常（mock 拒绝/catch 断言），两条 OBS-R258-1 规则只在生产面执法
+      'local-rules/no-swallowed-errors': 'off',
+      'local-rules/no-bare-usequery-in-pages': 'off',
     },
   },
 

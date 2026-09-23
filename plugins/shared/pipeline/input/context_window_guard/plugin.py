@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -60,6 +61,12 @@ _COMPRESSION_NOTICE = (
     "[系统提示] 由于对话历史过长，较早的上下文已被记忆系统分层压缩。"
     "压缩摘要包含在上方消息中，请基于压缩摘要和当前剩余上下文继续完成任务。"
 )
+
+# 压缩块消息卡样式 id：块消息 metadata.message_style 携带，前端
+# ContributionRegistry 按 chatMessages 槽声明（plugin.json
+# contributes.chatMessages[].id 同值）命中即路由通用 webview 消息卡容器
+# （消息段模型方案 §5.1 压缩卡）
+COMPRESSION_CARD_STYLE = "compression_card"
 
 # ═══════════════════════════════════════════════════════════
 # 语义标记词汇表（对齐 DSH ContextForm，docs/tasks/task_compression_optimization.md 任务 1）
@@ -867,6 +874,10 @@ class CompressionService:
         # 最近一次 compress_messages 产出的压缩块消息（自带 seq；供插件 emit
         # set(seq, 块消息) ops——块消息原位占用被压批次的头部槽位）
         self._last_block_msgs: list[dict[str, Any]] = []
+        # 最近一次 compress_messages 生成的 freeze_segment ops（每成功批次一个）：
+        # 被压原文冻结为 [user] 段，与块写入同一 messages._ops 批次落库（消息段
+        # 模型 §2.6 不变量 2：冻结与建块同事务——只写块不冻结 = 原文丢失）
+        self._last_freeze_ops: list[dict[str, Any]] = []
 
     def set_llm_call_fn(self, llm_call_fn: LLMCallFn) -> None:
         """延迟注入 LLM 调用函数。
@@ -964,6 +975,7 @@ class CompressionService:
         # 重置上一轮累计（每轮调用独立；注解见 __init__）
         self._last_deleted_seqs = []
         self._last_block_msgs = []
+        self._last_freeze_ops = []
 
         if not self._llm_call_fn:
             logger.warning("[CompressionService] 跳过压缩：未提供 LLM 调用函数")
@@ -1115,7 +1127,16 @@ class CompressionService:
             )
 
             batch_blocks = self._build_batch_blocks(batch, comp_result, refs)
+            # 段冻结（消息段模型 §5 写路径 2）：每成功批次一个段——被压原文以
+            # members 原文数组冻结为 [user] 段（visible_to="user"，模型永不消费）；
+            # 本批次块消息 compression_ref 带 segment_id 作前端展开入口，过程块/
+            # 快照块同 seq_range 归组一张压缩卡
+            segment_id = f"seg_{uuid.uuid4()}"
+            for block in batch_blocks:
+                block["metadata"]["compression_ref"]["segment_id"] = segment_id
+                block["metadata"]["message_style"] = COMPRESSION_CARD_STYLE
             block_msgs.extend(batch_blocks)
+            self._last_freeze_ops.append(self._freeze_segment_op(batch, segment_id))
             compressed_slot_seqs.extend(
                 m["seq"] for m in batch if isinstance(m.get("seq"), int)
             )
@@ -1226,6 +1247,38 @@ class CompressionService:
                     process_refs + snapshot_refs
                 )
         return blocks
+
+    @staticmethod
+    def _freeze_segment_op(
+        batch: list[dict[str, Any]],
+        segment_id: str,
+    ) -> dict[str, Any]:
+        """构造 freeze_segment op（消息段模型 §4：被压区间冻结为段）。
+
+        与 set/insert 同批同事务，内核据此落段表。members = 本批被压原消息
+        数组原文（引用列表落库语义由内核承载）；base_len = 成员数；preview 取
+        首条 content 截断 200 字符（‹i/n› 代际预览免解 blob）；visible_to=
+        "user" = 仅用户界面可渲染，模型永不消费（§2.6）。
+
+        Args:
+            batch: 本批被压缩的原消息（升序，非空）
+            segment_id: 段 id（seg_<uuid>，与同批次块消息 compression_ref 一致）
+
+        Returns:
+            freeze_segment op 字典（无 seq 键——段冻结不是槽位编辑）
+        """
+        seqs = [m["seq"] for m in batch if isinstance(m.get("seq"), int)]
+        return {
+            "op": "freeze_segment",
+            "id": segment_id,
+            # 引擎分配 seq 是被压区间坐标；批次全无 seq（异常形态）时 0 占位，
+            # members 原文仍完整保全（段是数据保全面，不因坐标缺失丢内容）
+            "base_seq": min(seqs, default=0),
+            "base_len": len(batch),
+            "visible_to": "user",
+            "preview": str(batch[0].get("content", ""))[:200],
+            "members": list(batch),
+        }
 
     async def _build_compression_content(
         self,
@@ -2071,6 +2124,14 @@ class ContextWindowGuardPlugin(IInputPlugin):
                 if isinstance(seq, int) and seq in block_seqs:
                     continue
                 ops.append({"op": "set", "seq": seq, "msg": None})
+            # 段冻结与块写入/delete ops 同一 _ops 批次（同事务落库，内核落段表，
+            # §2.6 不变量 2）；降级路径不冻结——压缩失败/无产出时原文仍留序列，
+            # 无段可立
+            freeze_ops = getattr(service, "_last_freeze_ops", None)
+            if isinstance(freeze_ops, list):
+                ops.extend(op for op in freeze_ops if isinstance(op, dict))
+
+            await self._notify_compress_applied(ctx)
 
             return PluginResult(
                 state_updates={
@@ -2100,6 +2161,37 @@ class ContextWindowGuardPlugin(IInputPlugin):
             degrade_updates["messages"] = {"_ops": delete_ops}
         await self._notify_compress_failure(ctx)
         return PluginResult(state_updates=degrade_updates)
+
+    async def _notify_compress_applied(self, ctx: PluginContext) -> None:
+        """压缩成功时向前端推送一次 compression_applied 事件（BUG-72 A1）。
+
+        压缩以 set(seq, 块/null) ops 原地重写 message_slots → 内容寻址指纹
+        变异，前端跨压缩持有的 recordId 过期；前端收到后按 API 权威全量对账
+        刷新。每个压缩波次各推一次（波次即指纹改写，无去重）。通道未注入或
+        发射失败均只留日志，绝不反噬压缩成功路径。
+        """
+        emit = _frontend_emit
+        if emit is None:
+            logger.debug(
+                "[%s] frontend.emit 未注入，压缩完成不推前端（仅日志）",
+                self.name,
+            )
+            return
+        thread_id = str(
+            ctx.state.get("session_id") or ctx.state.get("thread_id") or ""
+        )
+        payload = {
+            "thread_id": thread_id,
+            "pipeline_id": str(ctx.state.get(StateKeys.PIPELINE_ID) or ""),
+        }
+        try:
+            await emit("compression_applied", payload, thread_id)
+        except Exception as exc:  # noqa: BLE001 —— 通知是增强能力，失败不阻断压缩成功路径
+            logger.warning(
+                "[%s] compression_applied 事件推送失败（忽略）: %s",
+                self.name,
+                exc,
+            )
 
     async def _notify_compress_failure(self, ctx: PluginContext) -> None:
         """压缩彻底失败时向前端推送一次 compression_failed 事件。

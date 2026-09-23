@@ -235,9 +235,14 @@ async def connector_execute(
 
     connector = _registry.get_best_connector_for(action_type)
     if connector is None:
+        # no_connector 标记双位携带：顶层供服务轴直调方读取；data 内副本供
+        # tool-executor 轴——内核 invoker 归一层对「success 无 data」形状剥未知键
+        # 成 data=null（normalize_mcp_tool_result ②-b），标记只有进 data 才能以
+        # ②-a 信封原样穿过到达调用方（workspace 文件管理器兜底依赖它）。
         return {
             "success": False,
             "no_connector": True,
+            "data": {"no_connector": True, "action_type": action_type},
             "error": f"没有已连接的连接器支持动作: {action_type}",
         }
 

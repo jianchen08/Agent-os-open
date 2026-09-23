@@ -143,6 +143,10 @@
       font-size: 12px; display: none; max-width: 80%; z-index: 40;
     }
     .toast.error { background: var(--err); color: #fff; }
+    /* 自灭兜底：JS 定时器在宿主窗口被遮挡/节流时可能迟到数分钟——CSS 动画
+       由渲染管线驱动，fill-mode forwards 保证任何一次渲染时 toast 已到终态隐藏。 */
+    .toast.show { animation: toast-auto-hide 3.2s ease-in forwards; }
+    @keyframes toast-auto-hide { to { opacity: 0; visibility: hidden; } }
       /* 面板桥失败 ≠ 真空数据：显式错误横幅（--ag-err 语义色）与「暂无 XX」空态区分 */
     .bridge-err {
       border: 1px solid var(--err, #dc2626); border-radius: var(--radius, 8px); padding: 16px;
@@ -212,14 +216,23 @@
   });
   // agentosFetch：经 window.agentos.postMessage（宿主代发 REST 带 token）+ Promise 化。
   // webview iframe 是 opaque-origin 沙箱（CSP connect-src 'none'），直接 fetch 不可行。
+  // 30s 超时兜底（与宿主 API_TIMEOUT 同口径）：桥静默悬挂时显式 reject——
+  // 刷新状态条/错误提示依赖 Promise 必达落定，不能无限 pending（BUG-61 附带
+  // 「刷新中…」不消退的根因）。
+  var FETCH_TIMEOUT_MS = 30000;
   function agentosFetch(path, params) {
     return new Promise(function (resolve, reject) {
       if (!window.agentos) { reject(new Error('window.agentos 桥不可用')); return; }
       var id = window.agentos.postMessage(path, params);
+      var timer = setTimeout(function () {
+        window.removeEventListener('message', handler);
+        reject(new Error('桥响应超时（' + FETCH_TIMEOUT_MS / 1000 + 's）: ' + path));
+      }, FETCH_TIMEOUT_MS);
       function handler(e) {
         var d = e.data;
         if (!d || !d.__agentos_webview || d.id !== id) return;
         window.removeEventListener('message', handler);
+        clearTimeout(timer);
         if (d.method && d.method.indexOf('.error') > -1) reject(new Error(JSON.stringify(d.params || d.error)));
         else resolve(d.params);
       }
@@ -250,12 +263,16 @@
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   }
+  var toastTimer = null;
   function toast(msg, isError) {
     var t = $('toast');
     t.textContent = msg;
     t.className = 'toast' + (isError ? ' error' : '');
     t.style.display = 'block';
-    setTimeout(function () { t.style.display = 'none'; }, 3200);
+    void t.offsetWidth;  // 强制回流：className 重置已摘掉 .show，不加回流动画不重启
+    t.classList.add('show');  // CSS 动画自灭兜底（定时器节流时仍能消失）
+    if (toastTimer !== null) clearTimeout(toastTimer);  // 单飞计时：上一条未灭不提前灭掉本条
+    toastTimer = setTimeout(function () { t.style.display = 'none'; toastTimer = null; }, 3200);
   }
   // 面板桥失败 ≠ 真空数据：桥不可用/请求失败渲染显式错误横幅（--ag-err 语义色），
   // 与 emptyBox 的诚实空态视觉区分；重试按钮走全量刷新。

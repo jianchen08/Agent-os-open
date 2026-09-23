@@ -64,7 +64,7 @@ const TERMINAL_PERSIST_FAILED_KEY: &str = "terminal_persist_failed";
 /// - `project_root`：`{{path:...}}` 模板解析基准
 /// - `default_tenant`：构造 `PluginContext` 时注入的租户上下文
 /// - `plugin_ids`：已知插件 id 集合，`lookup_plugin` 在里面查（命中规则③判定）
-/// - `store` / `run_id` / `branch_id`：构造 `ContentLoader`（ADR ⑦）
+/// - `store` / `run_id`：构造 `ContentLoader`（ADR ⑦）
 pub struct PipelineExecutor {
     invoker: Arc<dyn PluginInvoker>,
     project_root: PathBuf,
@@ -72,7 +72,6 @@ pub struct PipelineExecutor {
     plugin_ids: HashSet<String>,
     store: Arc<dyn StorageBackend>,
     run_id: String,
-    branch_id: String,
     /// 监控 M2：engine 自采计数器（监控设计 §三 通道1 + §补引擎调度层）。
     /// 默认 new 一个；生产侧可用 with_metrics 注入共享实例。
     metrics: Arc<crate::metrics::EngineMetrics>,
@@ -126,7 +125,7 @@ impl PipelineExecutor {
     /// * `default_tenant` - 默认租户上下文
     /// * `plugin_ids` - 已知插件 id 列表（从 manifest 加载）
     /// * `store` - 存储后端，用于构造 `ContentLoader`
-    /// * `run_id` / `branch_id` - 当前运行实例 / 分支标识
+    /// * `run_id` - 当前运行实例 ID（关联标签，state.run_id 同源）
     pub fn new(
         invoker: Arc<dyn PluginInvoker>,
         project_root: PathBuf,
@@ -134,7 +133,6 @@ impl PipelineExecutor {
         plugin_ids: impl IntoIterator<Item = String>,
         store: Arc<dyn StorageBackend>,
         run_id: impl Into<String>,
-        branch_id: impl Into<String>,
     ) -> Self {
         Self {
             invoker,
@@ -143,7 +141,6 @@ impl PipelineExecutor {
             plugin_ids: plugin_ids.into_iter().collect(),
             store,
             run_id: run_id.into(),
-            branch_id: branch_id.into(),
             metrics: Arc::new(crate::metrics::EngineMetrics::new()),
             persistent_fields: HashSet::new(),
             steps_since_checkpoint: AtomicI64::new(0),
@@ -918,7 +915,7 @@ impl PipelineExecutor {
         let content_loader = ContentLoader::new(
             Arc::clone(&self.store),
             self.run_id.clone(),
-            self.branch_id.clone(),
+            pipeline_id.clone().unwrap_or_default(),
         );
         let mut terminated = false;
         for entry in hit {
@@ -1117,9 +1114,8 @@ impl PipelineExecutor {
         use agentos_core::types::{PatchType, TraceEntry};
         let entry = TraceEntry {
             trace_id: format!("t_{}", uuid::Uuid::new_v4().simple()),
-            run_id: self.run_id.clone(),
-            branch_id: self.branch_id.clone(),
-            seq_in_branch: 0,
+            pipeline_id: state_str(state_after, "pipeline_id").unwrap_or_default(),
+            seq: 0,
             plugin_id: window_id.to_string(),
             patch_type: PatchType::StateUpdate,
             patch_data: diff,
@@ -1336,7 +1332,7 @@ impl PipelineExecutor {
         let content_loader = ContentLoader::new(
             Arc::clone(&self.store),
             self.run_id.clone(),
-            self.branch_id.clone(),
+            state_str(state, "pipeline_id").unwrap_or_default(),
         );
         let mut config = if inputs.is_empty() {
             serde_json::Value::Object(Default::default())
@@ -1378,45 +1374,28 @@ impl PipelineExecutor {
     /// server.rs 的 stage_build_initial_state 注入。
     async fn persist_run_start(&self, state: &mut serde_json::Value, config_hash: &str) {
         // config_hash = 编译期对 PipelineConfig 的确定性指纹
-        // （compiler::pipeline_config_hash：serde_json 规范化 + SHA-256 前 16 hex），
-        // 随 CompiledPipeline 走到此落 runs 表。
+        // （compiler::pipeline_config_hash：serde_json 规范化 + SHA-256 前 16 hex）。
+        // runs 表退役（ADR 2026-09-18）：运行簿记 = state 运行键（run_id /
+        // run_status='running' / run_started_at / run_config_hash）。
         let tenant_id = self.default_tenant.tenant_id.clone();
-        if let Err(e) = self
-            .store
-            .create_run(&self.run_id, config_hash, &tenant_id)
-            .await
-        {
-            warn!(run_id = %self.run_id, error = %e, "create_run 落库失败（继续执行）");
-            self.metrics.inc_persist_failure();
-        }
-        // GAP-1 统一：记录 run 的管道归属（state.pipeline_id = effective id），
-        // 供按管道挂起/恢复（suspend_pipeline/resume_pipeline）定位 run。
-        let run_pipeline_id = state
-            .get("pipeline_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if !run_pipeline_id.is_empty() {
-            if let Err(e) = self
-                .store
-                .set_run_pipeline(&self.run_id, run_pipeline_id)
-                .await
-            {
-                warn!(
-                    run_id = %self.run_id,
-                    pipeline_id = %run_pipeline_id,
-                    error = %e,
-                    "set_run_pipeline 归属登记失败（继续执行）"
-                );
-                self.metrics.inc_persist_failure();
-            }
-        }
 
         // pipeline_id 从 state 读（stage_build_initial_state 注入，前端创建会话
         // 时生成、每轮回传）。它是消息层查询主键，适配"通过 state 通路执行持久化"。
         let pipeline_id = state
             .get("pipeline_id")
             .and_then(|v| v.as_str())
-            .unwrap_or("");
+            .unwrap_or("")
+            .to_string();
+        if !pipeline_id.is_empty() {
+            if let Err(e) = self
+                .store
+                .record_run_start(&pipeline_id, &tenant_id, &self.run_id, config_hash)
+                .await
+            {
+                warn!(run_id = %self.run_id, error = %e, "运行开始簿记落库失败（继续执行）");
+                self.metrics.inc_persist_failure();
+            }
+        }
 
         // 写入 pipeline↔session 映射（每次管道开跑时记录，含子任务管道）。
         // 删除会话时据此按 thread_id 找到全部 pipeline_id 级联清理。
@@ -1427,7 +1406,7 @@ impl PipelineExecutor {
             .unwrap_or("");
         if let Err(e) = self
             .store
-            .link_pipeline_session(pipeline_id, session_id, &tenant_id)
+            .link_pipeline_session(&pipeline_id, session_id, &tenant_id)
             .await
         {
             warn!(error = %e, "link_pipeline_session 失败（继续）");
@@ -1445,9 +1424,8 @@ impl PipelineExecutor {
                     use agentos_core::types::{PatchType, TraceEntry};
                     let entry = TraceEntry {
                         trace_id: format!("t_{}", uuid::Uuid::new_v4().simple()),
-                        run_id: self.run_id.clone(),
-                        branch_id: self.branch_id.clone(),
-                        seq_in_branch: 0,
+                        pipeline_id: pipeline_id.clone(),
+                        seq: 0,
                         plugin_id: "user_input".to_string(),
                         patch_type: PatchType::StateUpdate,
                         patch_data: serde_json::json!({ "messages": { "_ops": ops } }),
@@ -1504,23 +1482,42 @@ impl PipelineExecutor {
             crate::transient::global_registry().clear_pipeline(&tenant_id, pipeline_id);
         }
 
-        // update_run_status 要求 current_branch 和 current_seq 同时 Some 或同时 None。
         // 终态映射单点（控制状态键契约 ADR 2026-08-30）：RunStatus::from_control_state
         // 与域事件派生（api derive_run_terminal_events）共用，两处不得各持一套词汇。
+        // runs 表退役（ADR 2026-09-18）：终态直接写 state 运行键（run_status 折算值
+        // + run_ended_at）。
         let final_status = agentos_core::types::RunStatus::from_control_state(final_state);
+        let status_str = match final_status {
+            agentos_core::types::RunStatus::Running => "running",
+            agentos_core::types::RunStatus::Suspended => "suspended",
+            agentos_core::types::RunStatus::Completed => "completed",
+            agentos_core::types::RunStatus::Failed => "failed",
+            agentos_core::types::RunStatus::Cancelled => "cancelled",
+        };
+        let terminal = !matches!(
+            final_status,
+            agentos_core::types::RunStatus::Running | agentos_core::types::RunStatus::Suspended
+        );
         if let Err(e) = self
             .retry_persist("update_run_status", || {
-                let status = final_status.clone();
+                let status_str = status_str.to_string();
+                let tenant_id = tenant_id.clone();
                 async move {
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let mut fields = serde_json::Map::new();
+                    fields.insert("run_status".into(), serde_json::json!(status_str));
+                    if terminal {
+                        fields.insert("run_ended_at".into(), serde_json::json!(now));
+                    }
                     self.store
-                        .update_run_status(&self.run_id, status, None, None)
+                        .upsert_state_fields(pipeline_id, tenant_id.as_str(), &fields)
                         .await
                 }
             })
             .await
         {
-            // B5：终态落库重试耗尽——run 行滞留 running，G8 优雅重启排空会把
-            // 已结束的 run 误标 suspended（当可恢复挂起）、崩溃清扫会误标 failed。
+            // B5：终态落库重试耗尽——投影滞留 running，G8 优雅重启排空会把
+            // 已结束的运行误标 suspended（当可恢复挂起）、崩溃清扫会误标 failed。
             // 终态点已无法终止 run（run 已结束），重试 + 显式补偿标记是该点位
             // 的最正确语义：error 强观测 + 写「终态未落库」标记供重启排空精准补写。
             error!(

@@ -1,5 +1,8 @@
 {
   "id": "channel_qq",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "QQ Channel",
   "version": "1.0.0",
   "plugin_type": "system",
@@ -56,11 +59,51 @@
     "route_signals": [],
     "lifecycle_hooks": [
       "on_load",
-      "on_unload"
+      "on_unload",
+      "domain_event"
     ],
     "services": []
   },
   "permissions": {},
   "priority": 50,
-  "requires_content": 5
+  "requires_content": 5,
+  "granted_capabilities": [
+    "chat",
+    "pipeline-state",
+    "human-interaction"
+  ],
+  "config_files": [
+    {
+      "id": "settings",
+      "label": "QQ 渠道连接配置",
+      "fields": [
+        {
+          "name": "access_token",
+          "label": "Access Token",
+          "type": "string",
+          "required": true,
+          "description": "OneBot 反向 WS 鉴权令牌；需与 OneBot 实现（NapCat/go-cqhttp 等）配置一致",
+          "default": "napcat-agentos-2026"
+        },
+        {
+          "name": "ws_host",
+          "label": "反向 WS 监听地址",
+          "type": "string",
+          "default": "127.0.0.1"
+        },
+        {
+          "name": "ws_port",
+          "label": "反向 WS 监听端口",
+          "type": "number",
+          "default": 8080
+        },
+        {
+          "name": "http_api_url",
+          "label": "OneBot HTTP API 地址",
+          "type": "string",
+          "default": "http://127.0.0.1:5700"
+        }
+      ]
+    }
+  ]
 }

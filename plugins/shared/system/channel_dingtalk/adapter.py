@@ -55,6 +55,11 @@ class DingTalkInputAdapter(QueuedChannelInputAdapter):
             raw_message=raw,
             _sender_id=sender_id,
             _conversation_id=conversation_id,
+            # 入站桥会话坐标：conversationId 是平台天然会话标识，
+            # 缺失时回退按发送者建会话；回复目标为发送者 staffId。
+            _conversation_key=f"c{conversation_id}" if conversation_id else f"u{sender_staff_id}",
+            _reply_target=sender_staff_id,
+            _reply_ctx={},
         )
 
 

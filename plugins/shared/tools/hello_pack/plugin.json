@@ -1,0 +1,44 @@
+{
+  "id": "hello_pack",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Hello Pack Tools",
+  "description": "最小工具插件 hello_pack（无入参，返回 hello pack 消息）。",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "hello_pack",
+        "description": "最小工具 hello_pack：无需任何入参，返回 {\"message\":\"hello pack\"}。",
+        "render": {
+          "card": "form",
+          "title": "Hello Pack"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "message"
+          ],
+          "properties": {
+            "message": {
+              "type": "string",
+              "description": "固定返回 hello pack 消息"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 50,
+  "host_group": "light"
+}

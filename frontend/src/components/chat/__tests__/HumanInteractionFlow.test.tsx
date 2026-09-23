@@ -112,6 +112,37 @@ function createCardProps(
   }
 }
 
+/** 组装卡片 props（interaction 走 createPendingInteraction 覆盖）并渲染 */
+function renderCard(
+  interactionOverrides: Partial<PendingInteraction> = {},
+  propsOverrides: Partial<InteractionCardProps> = {},
+) {
+  const props = createCardProps({
+    interaction: createPendingInteraction(interactionOverrides),
+    ...propsOverrides,
+  })
+  render(<InteractionCard {...props} />)
+}
+
+/** 向 interaction store 添加一条交互，断言以 pending 状态入列并返回 state */
+function addToStoreExpectPending(interaction: PendingInteraction) {
+  act(() => {
+    useInteractionStore.getState().addInteraction(interaction)
+  })
+  const state = useInteractionStore.getState()
+  expect(state.pendingInteractions).toHaveLength(1)
+  expect(state.pendingInteractions[0].status).toBe('pending')
+  return state
+}
+
+/** 挂载 conversation 模式卡片并取回文本输入框（文本提交族共用） */
+function renderConversationInput() {
+  const onRespondText = vi.fn()
+  renderCard({ mode: 'conversation', title: '请输入' }, { onRespondText })
+  const textarea = screen.getByPlaceholderText('输入回复...')
+  return { onRespondText, textarea }
+}
+
 // ---------------------------------------------------------------------------
 //  测试
 // ---------------------------------------------------------------------------
@@ -129,19 +160,17 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
   describe('choice 模式交互', () => {
     it('应渲染选项按钮，用户点击后触发 onRespondChoice 回调', async () => {
       const onRespondChoice = vi.fn()
-      const props = createCardProps({
-        interaction: createPendingInteraction({
+      renderCard(
+        {
           mode: 'choice',
           title: '选择操作',
           options: [
             { id: 'a', label: '批准' },
             { id: 'b', label: '拒绝' },
           ],
-        }),
-        onRespondChoice,
-      })
-
-      render(<InteractionCard {...props} />)
+        },
+        { onRespondChoice },
+      )
 
       // 验证标题
       expect(screen.getByText('选择操作')).toBeInTheDocument()
@@ -161,19 +190,17 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
 
     it('点击"拒绝"应触发 onRespondChoice 传入 optionId=b', async () => {
       const onRespondChoice = vi.fn()
-      const props = createCardProps({
-        interaction: createPendingInteraction({
+      renderCard(
+        {
           mode: 'choice',
           title: '审批请求',
           options: [
             { id: 'a', label: '批准' },
             { id: 'b', label: '拒绝' },
           ],
-        }),
-        onRespondChoice,
-      })
-
-      render(<InteractionCard {...props} />)
+        },
+        { onRespondChoice },
+      )
 
       await act(async () => {
         fireEvent.click(screen.getByText('拒绝'))
@@ -183,20 +210,16 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
     })
 
     it('提交中时选项按钮应禁用', async () => {
-      const onRespondChoice = vi.fn()
-      const props = createCardProps({
-        interaction: createPendingInteraction({
+      renderCard(
+        {
           mode: 'choice',
           options: [
             { id: 'a', label: '批准' },
             { id: 'b', label: '拒绝' },
           ],
-        }),
-        onRespondChoice,
-        isSubmitting: true,
-      })
-
-      render(<InteractionCard {...props} />)
+        },
+        { isSubmitting: true },
+      )
 
       const approveBtn = screen.getByText('批准').closest('button')!
       const rejectBtn = screen.getByText('拒绝').closest('button')!
@@ -207,15 +230,7 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
 
     it('choice 模式无选项时应显示文本输入框', async () => {
       const onRespondText = vi.fn()
-      const props = createCardProps({
-        interaction: createPendingInteraction({
-          mode: 'choice',
-          options: [],
-        }),
-        onRespondText,
-      })
-
-      render(<InteractionCard {...props} />)
+      renderCard({ mode: 'choice', options: [] }, { onRespondText })
 
       // 无选项时应显示文本输入区域
       const textarea = screen.getByPlaceholderText('输入回复后发送...')
@@ -240,22 +255,12 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
   // -----------------------------------------------------------------------
   describe('conversation 模式交互', () => {
     it('应渲染文本输入框和发送按钮，输入文字并提交', async () => {
-      const onRespondText = vi.fn()
-      const props = createCardProps({
-        interaction: createPendingInteraction({
-          mode: 'conversation',
-          title: '请输入',
-        }),
-        onRespondText,
-      })
-
-      render(<InteractionCard {...props} />)
+      const { onRespondText, textarea } = renderConversationInput()
 
       // 验证标题
       expect(screen.getByText('请输入')).toBeInTheDocument()
 
       // 验证输入框存在
-      const textarea = screen.getByPlaceholderText('输入回复...')
       expect(textarea).toBeInTheDocument()
 
       // 验证"发送"按钮存在
@@ -277,18 +282,7 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
     })
 
     it('按 Enter 键应提交文本（不按 Shift）', async () => {
-      const onRespondText = vi.fn()
-      const props = createCardProps({
-        interaction: createPendingInteraction({
-          mode: 'conversation',
-          title: '请输入',
-        }),
-        onRespondText,
-      })
-
-      render(<InteractionCard {...props} />)
-
-      const textarea = screen.getByPlaceholderText('输入回复...')
+      const { onRespondText, textarea } = renderConversationInput()
 
       await act(async () => {
         fireEvent.change(textarea, { target: { value: '快捷回复' } })
@@ -302,18 +296,7 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
     })
 
     it('Shift+Enter 不应提交文本（换行）', async () => {
-      const onRespondText = vi.fn()
-      const props = createCardProps({
-        interaction: createPendingInteraction({
-          mode: 'conversation',
-          title: '请输入',
-        }),
-        onRespondText,
-      })
-
-      render(<InteractionCard {...props} />)
-
-      const textarea = screen.getByPlaceholderText('输入回复...')
+      const { onRespondText, textarea } = renderConversationInput()
 
       await act(async () => {
         fireEvent.change(textarea, { target: { value: '多行文本' } })
@@ -328,18 +311,7 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
     })
 
     it('空文本不应触发提交', async () => {
-      const onRespondText = vi.fn()
-      const props = createCardProps({
-        interaction: createPendingInteraction({
-          mode: 'conversation',
-          title: '请输入',
-        }),
-        onRespondText,
-      })
-
-      render(<InteractionCard {...props} />)
-
-      const textarea = screen.getByPlaceholderText('输入回复...')
+      const { onRespondText, textarea } = renderConversationInput()
 
       // 空文本直接按 Enter
       await act(async () => {
@@ -362,16 +334,14 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
 
     it('应渲染快捷回复建议按钮', async () => {
       const onRespondText = vi.fn()
-      const props = createCardProps({
-        interaction: createPendingInteraction({
+      renderCard(
+        {
           mode: 'conversation',
           title: '请选择建议',
           suggestions: ['建议A', '建议B', '建议C'],
-        }),
-        onRespondText,
-      })
-
-      render(<InteractionCard {...props} />)
+        },
+        { onRespondText },
+      )
 
       // 验证建议按钮
       expect(screen.getByText('建议A')).toBeInTheDocument()
@@ -388,15 +358,7 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
 
     it('应渲染"进入对话"跳转按钮', async () => {
       const onNavigateToTab = vi.fn()
-      const props = createCardProps({
-        interaction: createPendingInteraction({
-          mode: 'conversation',
-          title: '对话模式',
-        }),
-        onNavigateToTab,
-      })
-
-      render(<InteractionCard {...props} />)
+      renderCard({ mode: 'conversation', title: '对话模式' }, { onNavigateToTab })
 
       expect(screen.getByText('进入对话')).toBeInTheDocument()
 
@@ -413,16 +375,12 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
   // -----------------------------------------------------------------------
   describe('交互状态流转', () => {
     it('pending 状态应显示蓝色主题和脉冲动画', () => {
-      const props = createCardProps({
-        interaction: createPendingInteraction({
-          mode: 'choice',
-          title: '审批请求',
-          options: [{ id: 'ok', label: '同意' }],
-          status: 'pending',
-        }),
+      renderCard({
+        mode: 'choice',
+        title: '审批请求',
+        options: [{ id: 'ok', label: '同意' }],
+        status: 'pending',
       })
-
-      render(<InteractionCard {...props} />)
 
       const card = document.querySelector('.animate-pulse-subtle')
       expect(card).toBeInTheDocument()
@@ -433,16 +391,12 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
     })
 
     it('responded 状态应显示"已完成"标识和灰色主题', () => {
-      const props = createCardProps({
-        interaction: createPendingInteraction({
-          mode: 'choice',
-          title: '审批请求',
-          options: [{ id: 'ok', label: '同意' }],
-          status: 'responded',
-        }),
+      renderCard({
+        mode: 'choice',
+        title: '审批请求',
+        options: [{ id: 'ok', label: '同意' }],
+        status: 'responded',
       })
-
-      render(<InteractionCard {...props} />)
 
       // 应显示"已完成"
       expect(screen.getByText('已完成')).toBeInTheDocument()
@@ -452,15 +406,11 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
     })
 
     it('navigated 状态应显示"已跳转"标识', () => {
-      const props = createCardProps({
-        interaction: createPendingInteraction({
-          mode: 'conversation',
-          title: '对话交互',
-          status: 'navigated',
-        }),
+      renderCard({
+        mode: 'conversation',
+        title: '对话交互',
+        status: 'navigated',
       })
-
-      render(<InteractionCard {...props} />)
 
       expect(screen.getByText('已跳转')).toBeInTheDocument()
 
@@ -523,13 +473,7 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
         options: [{ id: 'ok', label: '确定' }],
       })
 
-      act(() => {
-        useInteractionStore.getState().addInteraction(interaction)
-      })
-
-      let state = useInteractionStore.getState()
-      expect(state.pendingInteractions).toHaveLength(1)
-      expect(state.pendingInteractions[0].status).toBe('pending')
+      let state = addToStoreExpectPending(interaction)
 
       // 模拟超时 → dismiss
       act(() => {
@@ -578,15 +522,7 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
         { id: 'opt-5', label: '选项五' },
       ]
 
-      const props = createCardProps({
-        interaction: createPendingInteraction({
-          mode: 'choice',
-          title: '多项选择',
-          options,
-        }),
-      })
-
-      render(<InteractionCard {...props} />)
+      renderCard({ mode: 'choice', title: '多项选择', options })
 
       // 验证所有选项渲染
       for (const opt of options) {
@@ -605,16 +541,7 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
         { id: 'f', label: '选项F' },
       ]
 
-      const props = createCardProps({
-        interaction: createPendingInteraction({
-          mode: 'choice',
-          title: '多选项测试',
-          options,
-        }),
-        onRespondChoice,
-      })
-
-      render(<InteractionCard {...props} />)
+      renderCard({ mode: 'choice', title: '多选项测试', options }, { onRespondChoice })
 
       // 点击每个选项
       for (const opt of options) {
@@ -634,15 +561,7 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
         { id: 'opt-3', label: '暂缓', description: '需要更多信息' },
       ]
 
-      const props = createCardProps({
-        interaction: createPendingInteraction({
-          mode: 'choice',
-          title: '带描述的选项',
-          options,
-        }),
-      })
-
-      render(<InteractionCard {...props} />)
+      renderCard({ mode: 'choice', title: '带描述的选项', options })
 
       // 按钮文本应渲染
       expect(screen.getByText('批准')).toBeInTheDocument()
@@ -656,15 +575,7 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
         label: `选项${i + 1}`,
       }))
 
-      const props = createCardProps({
-        interaction: createPendingInteraction({
-          mode: 'choice',
-          title: '多项布局',
-          options,
-        }),
-      })
-
-      render(<InteractionCard {...props} />)
+      renderCard({ mode: 'choice', title: '多项布局', options })
 
       // 验证所有选项都存在
       const buttons = screen.getAllByText(/选项\d/)
@@ -682,22 +593,16 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
   describe('renderInteractionCard 工具验证', () => {
     it('通过 renderInteractionCard 正确渲染 choice 模式', async () => {
       const onRespondChoice = vi.fn()
-      const { container } = await renderInteractionCard({
-        interaction: {
+      await renderInteractionCard({
+        interaction: createPendingInteraction({
           requestId: 'req-testutils',
           mode: 'choice',
           title: '测试工具渲染',
-          description: '',
-          threadId: 'thread-1',
-          tabId: 'tab-1',
-          agentId: 'agent-1',
-          timestamp: new Date().toISOString(),
-          status: 'pending',
           options: [
             { id: 'yes', label: '是' },
             { id: 'no', label: '否' },
           ],
-        },
+        }),
         onRespondChoice,
       })
 
@@ -715,18 +620,12 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
     it('通过 renderInteractionCard 正确渲染 conversation 模式', async () => {
       const onRespondText = vi.fn()
       await renderInteractionCard({
-        interaction: {
+        interaction: createPendingInteraction({
           requestId: 'req-conv-testutils',
           mode: 'conversation',
           title: '对话测试',
-          description: '',
-          threadId: 'thread-1',
-          tabId: 'tab-1',
-          agentId: 'agent-1',
-          timestamp: new Date().toISOString(),
-          status: 'pending',
           suggestions: ['建议1', '建议2'],
-        },
+        }),
         onRespondText,
       })
 
@@ -750,13 +649,7 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
       })
 
       // 添加
-      act(() => {
-        useInteractionStore.getState().addInteraction(interaction)
-      })
-
-      let state = useInteractionStore.getState()
-      expect(state.pendingInteractions).toHaveLength(1)
-      expect(state.pendingInteractions[0].status).toBe('pending')
+      let state = addToStoreExpectPending(interaction)
 
       // 响应
       act(() => {
@@ -810,96 +703,132 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
   })
 
   // -----------------------------------------------------------------------
-  // 审批倒计时（BUG-14 有界等待）：timeoutSeconds + createdAt 驱动
+  // 审批倒计时（BUG-14 有界等待 + BUG-60 审批族超时统一 24h）：
+  // timeoutSeconds + createdAt 驱动；声明值端到端生效（min cap 已废除）
   // -----------------------------------------------------------------------
   describe('审批倒计时', () => {
-    it('携带 timeoutSeconds 的 pending 卡显示剩余时间并每秒递减', async () => {
+    it('窗口内倒计时正常递减且选项按钮可点（声明 600s 原样生效）', async () => {
       vi.useFakeTimers()
       try {
-        const props = createCardProps({
-          interaction: createPendingInteraction({
+        const onRespondChoice = vi.fn()
+        renderCard(
+          {
             mode: 'choice',
             title: '安全审批: bash_execute',
             timeoutSeconds: 600,
             createdAt: new Date().toISOString(),
             options: [{ id: 'approved_once', label: '仅本次执行' }],
-          }),
-        })
-
-        render(<InteractionCard {...props} />)
+          },
+          { onRespondChoice },
+        )
 
         expect(screen.getByTestId('approval-countdown')).toHaveTextContent('剩余 10:00')
         await act(async () => {
           vi.advanceTimersByTime(1000)
         })
         expect(screen.getByTestId('approval-countdown')).toHaveTextContent('剩余 9:59')
+        // 窗口内按钮可点：点击即回调（后端仍在等待响应）
+        fireEvent.click(screen.getByRole('button', { name: '仅本次执行' }))
+        expect(onRespondChoice).toHaveBeenCalledWith('approved_once')
       } finally {
         vi.useRealTimers()
       }
     })
 
-    it('24h 等待上限（BUG-40）倒计时以 时:分:秒 展示（非原始秒数，无 NaN/负值）', () => {
-      const props = createCardProps({
-        interaction: createPendingInteraction({
-          mode: 'choice',
-          title: '安全审批: bash_execute',
-          timeoutSeconds: 86400,
-          createdAt: new Date().toISOString(),
-          options: [{ id: 'approved_once', label: '仅本次执行' }],
-        }),
+    it('声明 24h 统一超时（BUG-60 审批族 86400s）倒计时以 时:分:秒 直出（BUG-40 格式兼容）', () => {
+      renderCard({
+        mode: 'choice',
+        title: '安全审批: bash_execute',
+        timeoutSeconds: 86400,
+        createdAt: new Date().toISOString(),
+        options: [{ id: 'approved_once', label: '仅本次执行' }],
       })
 
-      render(<InteractionCard {...props} />)
-
       const countdown = screen.getByTestId('approval-countdown')
+      // BUG-60：声明值端到端生效——后端统一 24h 决策窗，倒计时按声明直出
       expect(countdown).toHaveTextContent('剩余 24:00:00')
       // 性质断言：不出现原始秒数/NaN/负数
       expect(countdown.textContent).not.toMatch(/86400|NaN|-\d/)
     })
 
     it('无 timeoutSeconds 的卡片不显示倒计时（会话等非审批交互不受影响）', () => {
-      const props = createCardProps({
-        interaction: createPendingInteraction({
-          mode: 'choice',
-          title: '选择操作',
-          options: [{ id: 'a', label: '批准' }],
-        }),
+      renderCard({
+        mode: 'choice',
+        title: '选择操作',
+        options: [{ id: 'a', label: '批准' }],
       })
 
-      render(<InteractionCard {...props} />)
       expect(screen.queryByTestId('approval-countdown')).not.toBeInTheDocument()
     })
 
-    it('已过截止时间显示已超时提示', () => {
-      const props = createCardProps({
-        interaction: createPendingInteraction({
+    it('已过截止时间（声明 600s，创建于 700s 前）显示已超时且选项全部禁用', () => {
+      const onRespondChoice = vi.fn()
+      renderCard(
+        {
           mode: 'choice',
           title: '安全审批',
           timeoutSeconds: 600,
           createdAt: new Date(Date.now() - 700_000).toISOString(),
-          options: [{ id: 'approved_once', label: '仅本次执行' }],
-        }),
-      })
+          options: [
+            { id: 'approved_once', label: '仅本次执行' },
+            { id: 'denied', label: '拒绝执行' },
+          ],
+        },
+        { onRespondChoice },
+      )
 
-      render(<InteractionCard {...props} />)
       const countdown = screen.getByTestId('approval-countdown')
       expect(countdown).toHaveTextContent('已超时')
       // 剩余时间不为负
       expect(countdown.textContent).not.toMatch(/-\d/)
+      // BUG-60：超时态按钮置灰禁用，点击不产生响应（后端已按拒绝裁决）
+      for (const label of ['仅本次执行', '拒绝执行']) {
+        const button = screen.getByRole('button', { name: label })
+        expect(button).toBeDisabled()
+        fireEvent.click(button)
+      }
+      expect(onRespondChoice).not.toHaveBeenCalled()
+    })
+
+    it('声明 86400s 卡片随 fake timers 推进越过统一 24h 决策窗 → 超时标注+按钮禁用', async () => {
+      vi.useFakeTimers()
+      try {
+        const onRespondChoice = vi.fn()
+        renderCard(
+          {
+            mode: 'choice',
+            title: '安全审批: bash_execute',
+            timeoutSeconds: 86400,
+            createdAt: new Date().toISOString(),
+            options: [{ id: 'approved_once', label: '仅本次执行' }],
+          },
+          { onRespondChoice },
+        )
+        expect(screen.getByTestId('approval-countdown')).toHaveTextContent('剩余 24:00:00')
+
+        await act(async () => {
+          vi.advanceTimersByTime(86_401_000)
+        })
+
+        expect(screen.getByTestId('approval-countdown')).toHaveTextContent('已超时')
+        const button = screen.getByRole('button', { name: '仅本次执行' })
+        expect(button).toBeDisabled()
+        fireEvent.click(button)
+        expect(onRespondChoice).not.toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     it('已完结（responded）卡片不显示倒计时', () => {
-      const props = createCardProps({
-        interaction: createPendingInteraction({
-          mode: 'choice',
-          title: '安全审批',
-          timeoutSeconds: 600,
-          createdAt: new Date().toISOString(),
-          status: 'responded',
-        }),
+      renderCard({
+        mode: 'choice',
+        title: '安全审批',
+        timeoutSeconds: 600,
+        createdAt: new Date().toISOString(),
+        status: 'responded',
       })
 
-      render(<InteractionCard {...props} />)
       expect(screen.queryByTestId('approval-countdown')).not.toBeInTheDocument()
     })
   })

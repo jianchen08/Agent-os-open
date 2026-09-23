@@ -7,10 +7,11 @@
  * 插件改词表无需动前端，未声明时显示原始 agent_type。
  */
 
-import { render, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { AgentManagerPage } from '../AgentManagerPage'
+import { renderWithProviders } from '@/test/renderWithProviders'
 import * as agentsApi from '@/services/api/agents'
+import { AgentManagerPage } from '../AgentManagerPage'
 
 const getAgentsMock = vi.mocked(agentsApi.getAgents)
 
@@ -35,20 +36,20 @@ vi.mock('@/services/api/agents', async (importOriginal) => ({
 describe('AgentManagerPage — typeLabels 声明下发', () => {
   it('声明命中的类型显示声明标签', async () => {
     mockItems(['main', 'atomic'])
-    render(<AgentManagerPage typeLabels={{ main: '主控', atomic: '原子' }} />)
+    renderWithProviders(<AgentManagerPage typeLabels={{ main: '主控', atomic: '原子' }} />)
     await waitFor(() => expect(screen.getByText('主控')).toBeInTheDocument())
     expect(screen.getByText('原子')).toBeInTheDocument()
   })
 
   it('未命中的类型回退原值（不猜词表）', async () => {
     mockItems(['orchestrator'])
-    render(<AgentManagerPage typeLabels={{ main: '主控' }} />)
+    renderWithProviders(<AgentManagerPage typeLabels={{ main: '主控' }} />)
     await waitFor(() => expect(screen.getByText('orchestrator')).toBeInTheDocument())
   })
 
   it('未下发 typeLabels（无声明 props）→ 全部原值', async () => {
     mockItems(['main', 'sub'])
-    render(<AgentManagerPage />)
+    renderWithProviders(<AgentManagerPage />)
     await waitFor(() => expect(screen.getByText('main')).toBeInTheDocument())
     expect(screen.getByText('sub')).toBeInTheDocument()
   })

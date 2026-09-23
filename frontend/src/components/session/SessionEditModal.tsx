@@ -205,13 +205,18 @@ export const SessionEditModal = memo<SessionEditModalProps>(
 
     const isCreate = mode === 'create'
 
-    /** 全部插件字段统一走表单核心渲染（类型/选项/描述全部来自插件声明） */
+    /** 全部插件字段统一走表单核心渲染（类型/选项/描述全部来自插件声明）；
+     *  x_guard 同时翻译为渲染层值守卫（optionGuard）：依赖源为空 → 除 on_empty
+     *  外的选项置灰（BUG-75 歧义消除），与保存层 applyGuards 兜底互补同源 */
     const formFields: UIInputFormField[] = pluginFields.map((f) => ({
       name: f.name,
       type: (f.type || 'string') as UIInputFormField['type'],
       label: f.label || f.name,
       description: f.description,
       options: f.options,
+      ...(f.x_guard
+        ? { optionGuard: { requires: f.x_guard.requires, onEmpty: f.x_guard.on_empty } }
+        : {}),
     }))
 
     return (

@@ -8,12 +8,15 @@
  * - maximum 校验的 ajv → 中文文案（「最大值为 n」）
  * - colorPicker：十六进制回显（初值透传）、缺值兜底 #000000、输入事件回写表单值
  * - filePicker：表单值存文件名（e.target.files[0].name）、未选文件回写空串
+ * - directoryPicker：Electron 原生目录选择（选中回填/取消不改写/失败 toast）、
+ *   Web 无桥接退化为纯文本输入
  *
  * 断行为：用户可见的渲染产物与 onChange 载荷（可观察输入→输出），不断言内部实现。
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import React from 'react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { toast } from 'sonner'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import apiClient from '@/services/api/client'
 import { RjsfForm, makeErrorTransformer, toRjsf } from '../RjsfForm'
 import type { UIInputFormField } from '@/types/schema'
@@ -21,6 +24,10 @@ import type { RJSFValidationError } from '@rjsf/utils'
 
 vi.mock('@/services/api/client', () => ({
   default: { get: vi.fn() },
+}))
+
+vi.mock('sonner', () => ({
+  toast: { error: vi.fn(), success: vi.fn() },
 }))
 
 beforeEach(() => {
@@ -248,5 +255,78 @@ describe('RjsfForm — filePicker widget', () => {
 
     expect(input.disabled).toBe(true)
     expect(screen.getByText('附件')).toBeInTheDocument()
+  })
+})
+
+describe('RjsfForm — directoryPicker widget（工作空间/项目目录声明）', () => {
+  const dirField: UIInputFormField[] = [
+    { name: 'ws', type: 'directory', label: '工作空间', placeholder: '留空自动生成' },
+  ]
+
+  /** 模拟 Electron 壳注入的原生目录选择桥（Web 构建无此对象） */
+  function stubElectron(pick: ReturnType<typeof vi.fn>) {
+    vi.stubGlobal('electronAPI', { dialog: { pickDirectory: pick } })
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('toRjsf：directory → string 属性 + directoryPicker widget', () => {
+    const { schema, uiSchema } = toRjsf(dirField)
+    const props = schema.properties as Record<string, Record<string, unknown>>
+    expect(props.ws).toMatchObject({ type: 'string' })
+    expect(uiSchema.ws).toMatchObject({ 'ui:widget': 'directoryPicker' })
+  })
+
+  it('Web（无 electronAPI）→ 纯文本输入，手输回填表单值', () => {
+    const onChange = vi.fn()
+    const { container } = render(<RjsfForm fields={dirField} onChange={onChange} />)
+
+    expect(screen.queryByTestId('directory-browse')).not.toBeInTheDocument()
+    const input = container.querySelector('input[type="text"]') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'D:\\projects\\demo' } })
+
+    expect(onChange.mock.calls.at(-1)?.[0]).toMatchObject({ ws: 'D:\\projects\\demo' })
+  })
+
+  it('Electron → 渲染「浏览…」；选中目录回填表单值，placeholder 透传', async () => {
+    const pick = vi.fn().mockResolvedValue('E:\\ws\\chosen')
+    stubElectron(pick)
+    const onChange = vi.fn()
+    const { container } = render(<RjsfForm fields={dirField} onChange={onChange} />)
+
+    const input = container.querySelector('input[type="text"]') as HTMLInputElement
+    expect(input).toHaveAttribute('placeholder', '留空自动生成')
+    fireEvent.click(screen.getByTestId('directory-browse'))
+
+    await waitFor(() => expect(pick).toHaveBeenCalledTimes(1))
+    await waitFor(() =>
+      expect(onChange.mock.calls.at(-1)?.[0]).toMatchObject({ ws: 'E:\\ws\\chosen' }),
+    )
+  })
+
+  it('用户取消（resolve null）→ 不改写表单值', async () => {
+    const pick = vi.fn().mockResolvedValue(null)
+    stubElectron(pick)
+    const onChange = vi.fn()
+    render(<RjsfForm fields={dirField} onChange={onChange} />)
+
+    fireEvent.click(screen.getByTestId('directory-browse'))
+
+    await waitFor(() => expect(pick).toHaveBeenCalledTimes(1))
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('原生对话框失败（reject）→ toast 报错不静默，不改写表单值', async () => {
+    const pick = vi.fn().mockRejectedValue(new Error('dialog gone'))
+    stubElectron(pick)
+    const onChange = vi.fn()
+    render(<RjsfForm fields={dirField} onChange={onChange} />)
+
+    fireEvent.click(screen.getByTestId('directory-browse'))
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalled())
+    expect(onChange).not.toHaveBeenCalled()
   })
 })

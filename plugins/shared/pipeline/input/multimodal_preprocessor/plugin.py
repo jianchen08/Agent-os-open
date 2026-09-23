@@ -17,6 +17,14 @@ multimodal_content 里**保持引用原样**（不转 base64）——state/trace
 llm_core 在请求装配时读文件转 base64 data URL（发送前转换，二进制瞬态）。
 消息文本不改写：markdown 引用原样保留（前端渲染与历史回看依赖它），
 解析失败由 llm_core 产出占位块（禁静默丢内容）。
+
+文本附件注入（BUG-52）：前端把文本类附件以 markdown 链接
+（``[name](/uploads/x.txt)``）并入消息正文，图片链路只认图片扩展名——
+文本附件内容对 LLM 不可见，且 /uploads/ 不在 file_read 可见范围，
+用户旅程「传文件问内容」断裂。本插件对用户消息里的 /uploads/ 文本类
+链接读出内容、以明确分隔的 text 块注入（任何模型都能接收文本），
+检出即登记（同图片防重发语义）；超过 256KB 不注入内容、产出引导走
+知识库的降级提示，读取失败产出显式占位块（禁静默丢内容）。
 """
 
 from __future__ import annotations
@@ -27,6 +35,7 @@ import logging
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Any
 
 # 共享上传目录解析（plugins/shared/uploads_path.py，ADR 2026-08-21 三方对齐）：
@@ -60,6 +69,23 @@ _LOCAL_FILE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# 文本类附件扩展名（与前端 files.ts TEXT_FILE_EXTENSIONS 对齐；.svg 归图片链路）
+_TEXT_ATTACHMENT_EXTS = (
+    "txt|md|markdown|log|csv|tsv|json|yaml|yml|toml|xml|ini|cfg|conf|properties|env"
+    "|py|js|jsx|ts|tsx|java|kt|go|rs|c|cpp|h|hpp|cs|rb|php|swift|dart"
+    "|sh|bash|bat|ps1|sql|r|lua|pl|vue|svelte|scss|less|css|html|htm"
+    "|graphql|gql|proto|zig"
+)
+
+# markdown 文本附件链接（前端发送时并入正文的附件索引，BUG-52）：
+# [filename](/uploads/xxx.txt)——(?<!!) 排除图片 token（![...](...) 归图片链路），
+# 只认 /uploads/ 前缀（平台管理的引用），不劫持用户手打的任意 markdown 外链。
+_MD_TEXT_LINK_PATTERN = re.compile(
+    rf"(?<!!)\[([^\]]*)\]\((/uploads/[^\s)]+\.(?:{_TEXT_ATTACHMENT_EXTS}))\)",
+    re.IGNORECASE,
+)
+
+
 class MultimodalPreprocessor(IInputPlugin):
     """多模态预处理 Input 插件。
 
@@ -77,6 +103,10 @@ class MultimodalPreprocessor(IInputPlugin):
     # seen 登记集上限：条目 = 消息键 × 图片引用，量级跟随会话历史中的图片
     # token 数（正常会话远不可达），超限逐最旧防长会话无界增长。
     _MAX_SEEN_ENTRIES = 4096
+
+    # 文本附件注入上限（BUG-52）：超出不注入内容、产出引导走知识库的降级
+    # 提示——防单条附件把请求 token 顶爆（前端上传闸 10MB，注入闸收紧到 256KB）。
+    _MAX_TEXT_ATTACHMENT_BYTES = 256 * 1024
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化多模态预处理插件。
@@ -121,8 +151,11 @@ class MultimodalPreprocessor(IInputPlugin):
         message_blocks, seen = self._detect_messages_multimodal(
             state.get("messages", []), seen
         )
+        text_blocks, seen = self._detect_message_text_attachments(
+            state.get("messages", []), seen
+        )
 
-        all_blocks = attachment_blocks + message_blocks
+        all_blocks = attachment_blocks + message_blocks + text_blocks
 
         return PluginResult(
             state_updates={
@@ -448,11 +481,122 @@ class MultimodalPreprocessor(IInputPlugin):
                 seen[entry] = None
                 blocks.append({"type": "image_url", "image_url": {"url": url}})
 
+        return blocks, self._cap_seen(seen)
+
+    def _cap_seen(
+        self, seen: dict[tuple[str, str], None]
+    ) -> dict[tuple[str, str], None]:
+        """登记集超上限逐最旧（防御性有界，正常会话远不可达）。"""
         overflow = len(seen) - self._MAX_SEEN_ENTRIES
-        if overflow > 0:
-            for entry in list(seen)[:overflow]:
-                seen.pop(entry, None)
-        return blocks, seen
+        for entry in list(seen)[:overflow]:
+            seen.pop(entry, None)
+        return seen
+
+    def _detect_message_text_attachments(
+        self, messages: Any, seen: dict[tuple[str, str], None]
+    ) -> tuple[list[dict], dict[tuple[str, str], None]]:
+        """扫描对话历史里的用户消息，注入新检出的 /uploads/ 文本附件内容。
+
+        前端把文本类附件以 markdown 链接（``[name](/uploads/x.txt)``）并入
+        消息正文（BUG-52）：图片链路只认图片扩展名，文本附件内容对 LLM
+        不可见且 /uploads/ 不在 file_read 可见范围。此处读出文件内容以明确
+        分隔的 text 块注入；检出即登记 (消息键, 引用)（同图片防重发语义，
+        防工具循环每轮重发/token 爆炸）。
+
+        超过 ``_MAX_TEXT_ATTACHMENT_BYTES`` 不注入内容、产出引导走知识库的
+        降级提示；文件缺失/读错误/内容为空产出显式占位块（禁静默丢内容）。
+
+        Args:
+            messages: state["messages"] 对话历史
+            seen: 已登记集（插入序 dict，键 (msg_key, url)，与图片链路共享）
+
+        Returns:
+            (新增文本附件块列表, 更新后的登记集)
+        """
+        blocks: list[dict] = []
+        if not isinstance(messages, list):
+            return blocks, seen
+        for msg in messages:
+            if not isinstance(msg, dict) or msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, str) or not content:
+                continue
+            msg_key = self._message_key(msg)
+            for name, url in self._extract_text_attachment_refs(content):
+                entry = (msg_key, url)
+                if entry in seen:
+                    continue
+                seen[entry] = None
+                blocks.append(self._build_text_attachment_block(name, url))
+
+        return blocks, self._cap_seen(seen)
+
+    @staticmethod
+    def _extract_text_attachment_refs(text: str) -> list[tuple[str, str]]:
+        """提取消息文本中的文本附件引用 ``[(显示名, url)]``。
+
+        只认 /uploads/ 前缀 + 文本类扩展名的 markdown 链接（``(?<!!)`` 排除
+        图片 token——图片引用归图片链路），不劫持用户手打的任意 markdown。
+
+        Args:
+            text: 用户消息文本
+
+        Returns:
+            (markdown 链接文本, /uploads/ 引用) 列表（出现序）
+        """
+        return [
+            (match.group(1).strip() or "附件", match.group(2))
+            for match in _MD_TEXT_LINK_PATTERN.finditer(text)
+        ]
+
+    def _build_text_attachment_block(self, name: str, url: str) -> dict:
+        """读出文本附件内容构造 text 块（失败/超限/空内容产出显式占位）。
+
+        Args:
+            name: 附件显示名（markdown 链接文本）
+            url: /uploads/ 引用
+
+        Returns:
+            ``{"type": "text", "text": ...}`` 内容块
+        """
+        full_path = self._resolve_upload_path(url)
+        if not full_path or not os.path.isfile(full_path):
+            logger.warning("[MultimodalPreprocessor] 文本附件文件不存在: %s", url)
+            return {
+                "type": "text",
+                "text": self._attachment_failure_notice(url, "文件不存在"),
+            }
+        try:
+            if Path(full_path).stat().st_size > self._MAX_TEXT_ATTACHMENT_BYTES:
+                return {
+                    "type": "text",
+                    "text": self._text_attachment_oversize_notice(name, url),
+                }
+            content = Path(full_path).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            logger.error(
+                "[MultimodalPreprocessor] 读取文本附件失败: %s, %s", full_path, exc
+            )
+            return {
+                "type": "text",
+                "text": self._attachment_failure_notice(url, "文件读取失败"),
+            }
+        if not content.strip():
+            return {"type": "text", "text": f"[附件 {name}（{url}）内容为空]"}
+        return {
+            "type": "text",
+            "text": f"[用户附件 {name}（{url}）的内容开始]\n{content}\n[用户附件内容结束]",
+        }
+
+    @staticmethod
+    def _text_attachment_oversize_notice(name: str, url: str) -> str:
+        """构造文本附件超限的 LLM 可见降级提示（引导替代路径，禁静默丢弃）。"""
+        max_kb = MultimodalPreprocessor._MAX_TEXT_ATTACHMENT_BYTES // 1024
+        return (
+            f"[附件 {name}（{url}）超过 {max_kb}KB 注入上限，内容未读取——"
+            f"请建议用户改用知识库上传该文件，或直接粘贴需要的部分]"
+        )
 
     @staticmethod
     def _message_key(msg: dict) -> str:

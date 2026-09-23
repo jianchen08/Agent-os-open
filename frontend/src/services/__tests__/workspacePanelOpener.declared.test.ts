@@ -1,9 +1,13 @@
 /**
  * 面板声明迁移测试（widget 化 T11）
  *
- * 验收口径：monitoring/agent_manager/task_service/user_admin 的面板入口由插件
+ * 验收口径：monitoring/agent_manager/user_admin 的面板入口由插件
  * contributes.pages 声明驱动——声明在 → openWorkspacePanelByPath 打开对应
  * widget 页签；声明移除（禁用插件）→ 不再命中（面板消失），不回退硬编码。
+ *
+ * 例外（用户裁定 2026-09-21）：**任务管理归前端自有**——插件 task_service 只提供
+ * 后端能力（任务 API/服务/工具面），页面声明在前端预置表（TOP_NAV_PANELS），
+ * 故「插件禁用」不影响 /tasks 可达性；页签 id 与默认页签同源保证幂等单页签。
  * 样例声明为机制验证用合成数据（memory_panel 注册已随 P0-3 摘除，不再入样）。
  */
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -57,23 +61,6 @@ function seedSchema(enabled: 'all' | 'none') {
             },
           },
           {
-            plugin_id: 'task_service',
-            plugin_name: 'Task Service',
-            contributes: {
-              pages: [
-                {
-                  id: 'tasks',
-                  title: '任务管理',
-                  icon: 'folder',
-                  space: 'workspace',
-                  slot: 'tab',
-                  path: '/tasks',
-                  widget: 'pipeline_manager',
-                },
-              ],
-            },
-          },
-          {
             plugin_id: 'user_admin',
             plugin_name: 'User Admin',
             contributes: {
@@ -120,28 +107,34 @@ describe('T11：面板入口声明驱动', () => {
     expect(openWorkspacePanelByPath('/monitoring')).toBe(false)
   })
 
-  it('TOP_NAV_PANELS 不再持有监控/记忆/任务条目（硬编码已摘除）', () => {
+  it('TOP_NAV_PANELS 不持有监控/记忆条目（插件声明化已摘硬编码）', () => {
     expect(TOP_NAV_PANELS['/monitoring']).toBeUndefined()
     expect(TOP_NAV_PANELS['/memory']).toBeUndefined()
-    expect(TOP_NAV_PANELS['/tasks']).toBeUndefined()
     expect(TOP_NAV_PANELS['/settings/plugins']).toBeUndefined()
-    // 内核自持项保留（设置中枢是壳 UI，T13 拍板范围）
+    // 前端自持项保留：设置中枢（壳 UI）+ 任务管理（用户裁定归前端）
     expect(TOP_NAV_PANELS['/settings']).toBeDefined()
+    expect(TOP_NAV_PANELS['/tasks']).toBeDefined()
+    expect(TOP_NAV_PANELS['/tasks']?.component).toBe('pipeline_manager')
   })
 
-  it('task_service 声明化：/tasks 由插件 pages 声明（widget=pipeline_manager）', () => {
+  it('任务管理前端自持：/tasks 打开 pipeline_manager 页签（id 与默认页签同源）', () => {
     expect(openWorkspacePanelByPath('/tasks')).toBe(true)
-    const tab = useLayoutModeStore.getState().workspaceTabs.find((t) =>
-      t.id.startsWith('ws-plugin-tasks'),
+    const tab = useLayoutModeStore.getState().workspaceTabs.find(
+      (t) => t.id === 'ws-panel-tasks',
     )
     expect(tab).toBeDefined()
     expect(tab?.component).toBe('pipeline_manager')
-    expect(tab?.moduleId).toBe('__plugin_task_service__')
+    expect(tab?.moduleId).toBe('__panel_tasks__')
   })
 
-  it('task_service 禁用（声明移除）→ /tasks 不再命中（不回退硬编码）', () => {
+  it('任务管理前端自持：插件声明缺失也不影响可达（与插件禁用态无关）', () => {
     seedSchema('none')
-    expect(openWorkspacePanelByPath('/tasks')).toBe(false)
+    expect(openWorkspacePanelByPath('/tasks')).toBe(true)
+    const tabs = useLayoutModeStore
+      .getState()
+      .workspaceTabs.filter((t) => t.component === 'pipeline_manager')
+    // 幂等：同名页签只应存在一个（两个来源合并后不再重复）
+    expect(tabs).toHaveLength(1)
   })
 
   it('user_admin 声明化：/admin → widget_stage 组台页（props.space 透传页签）', () => {

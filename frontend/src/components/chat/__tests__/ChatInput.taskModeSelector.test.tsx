@@ -154,8 +154,10 @@ describe('ChatInput — 任务模式选择器（声明式，底部工具栏）',
     setupInput(onSendMessage)
 
     const trigger = screen.getByTestId('compact-select-trigger')
-    expect(trigger).toHaveTextContent('任务模式')
+    // 可见文案只留裸值；设置名在可访问名（BUG-6 自标识）
     expect(trigger).toHaveTextContent('自动')
+    expect(trigger).not.toHaveTextContent('任务模式')
+    expect(screen.getByRole('button', { name: '任务模式：自动' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByTestId('chat-send-button'))
     await waitFor(() => expect(onSendMessage).toHaveBeenCalledTimes(1))

@@ -7,8 +7,11 @@ copy_file / move_file / delete_file。
 工作空间约束（punch B5，参考 download/tool.py 的 project_root 前缀校验）：
 - 全部路径参数以 workspace/project_root 为锚：相对路径以根解析，绝对路径
   越界拒绝——写/删/move/copy 一律 fail-closed；纯读操作（read/search）
-  越界时另有仓库源码区第二锚点（repo_anchor：仓库根内、运行时/产物目录
-  之外可读，ADR 2026-09-12）。
+  越界时另有三级锚点（2026-09-19 用户裁定：读是宽的，写/删才限工作空间）：
+  /uploads/ 附件只读锚（BUG-57，共享解析点 basename 拼接，租户隔离）与
+  仓库源码区（repo_anchor：仓库根内、运行时/产物目录之外）、登记白名单
+  前缀（config/users/{tenant}/project_whitelist.yaml）；相对路径以根解析
+  落空时按白名单前缀根/仓库根回退解析一次。
 - 凭据类文件硬拒（与根内外无关）：.env 族（.env.example 豁免）、
   .git-credentials / .netrc、id_rsa/id_dsa/id_ecdsa/id_ed25519、
   *.pem/*.p12/*.pfx/*.jks/*.keystore。泛化后缀 *.key 不拦（工作区内
@@ -28,25 +31,48 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
 import shutil
 import sys
 from pathlib import Path
 from typing import Any
 
+from agentos_plugin_sdk.bootstrap import find_shared_root
+
 from agentos_builtin_tools.result import ToolResult
 
-# 仓库源码区读取锚（ADR 2026-09-12-read-anchor-repo-source）：本文件位于
-# <repo>/plugins/shared/tools/builtin_tools/src/agentos_builtin_tools/，
-# 上溯 4 级即 plugins/shared（repo_anchor 所在共享根），与 http_json 同款
-# 裸名导入先例。
-_SHARED_ROOT = str(Path(__file__).resolve().parents[4])
+# 共享根自举复用 SDK 单点判定（BUG-56）：本文件可不经 server bootstrap 直接
+# 导入（测试/独立工具语境），自持注入。旧 parents[4] 深度假设在 user_root
+# 扁平单插件副本布局下把 user_root 误当共享根——find_shared_root 布局感知
+# 解析（仓库指纹步行 + SDK 位置锚），两布局同解。
+_SHARED_ROOT = find_shared_root(Path(__file__).resolve())
 if _SHARED_ROOT not in sys.path:
     sys.path.insert(0, _SHARED_ROOT)
-from repo_anchor import repo_read_verdict  # noqa: E402
+from repo_anchor import repo_read_verdict, resolve_repo_root  # noqa: E402
+from uploads_path import resolve_uploads_url  # noqa: E402
+
+
+def _load_registration_whitelist() -> list[str]:
+    """读面白名单加载（project_registry 惰性导入，单源复用其 YAML 契约）。
+
+    project_registry 携带 tenant_data/user_space 等传递依赖子树，比 repo_anchor
+    重且对部署布局敏感——放到调用点导入：共享根自举失败时白名单降级为空
+    （读放行范围收缩，安全侧）并 error 留痕，不阻断 sidecar 引导与其余判定
+    链（凭据黑名单/仓库锚/工作空间锚均不依赖本模块）。
+    """
+    try:
+        from project_registry import load_registration_whitelist as _load  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001 — 共享根缺失降级可见（error 级留痕）
+        logger.error(
+            "[fs_tools] 读面白名单模块不可用，按空白名单处理（范围收缩）: %s", exc
+        )
+        return []
+    return _load()
 
 logger = logging.getLogger(__name__)
 
-# 纯读操作集合：享受仓库源码区第二锚点（写/删/move/copy 不豁免）。
+# 纯读操作集合：享受仓库源码区 + 登记白名单前缀两级锚点（写/删/move/copy
+# 不豁免）。
 _READ_OPERATIONS = frozenset({"read", "search"})
 
 # 大文件不再拒绝（task_spill_guard.md 任务 2）：大输出兜底由 pipeline 的
@@ -87,6 +113,78 @@ def _sensitive_file_reason(resolved: Path) -> str | None:
     return None
 
 
+def _path_under_prefix(path: str, prefix: str) -> bool:
+    """normcase/normpath 归一后的前缀判定（Windows 大小写不敏感同规）。"""
+    p = os.path.normcase(os.path.normpath(path))
+    pre = os.path.normcase(os.path.normpath(prefix))
+    return p == pre or p.startswith(pre + os.sep)
+
+
+def _read_outside_verdict(resolved: Path) -> tuple[bool, str | None]:
+    """根外纯读判定链：仓库源码区锚（含拒绝目录）→ 登记白名单前缀。
+
+    Returns:
+        (是否允许, 拒绝原因)；(False, None) = 无锚覆盖，调用方走原单根拒绝
+        文案。仓库锚先行：仓库根本身常在白名单内，但 config/data/logs 等
+        运行时/产物目录的读取拒绝不因白名单放行（仓库拒绝集更严，恒优先）。
+    """
+    matched, deny_reason = repo_read_verdict(resolved)
+    if matched:
+        return deny_reason is None, deny_reason
+    for entry in _load_registration_whitelist():
+        if _path_under_prefix(str(resolved), entry):
+            return True, None
+    return False, None
+
+
+def _fallback_bases() -> list[str]:
+    """相对路径回退解析基准：白名单前缀根 + 仓库根（normcase 去重）。
+
+    仓库根单列：仓库读面本就受 repo_anchor 拒绝集约束（ADR 2026-09-12），
+    相对路径与绝对路径享有同一仓库读面（2026-09-19 裁定的读宽口径）；
+    白名单文件缺失/未登记仓库时（如部署布局下租户配置目录不可达）回退
+    仍可用。
+    """
+    bases: list[str] = []
+    seen: set[str] = set()
+    for entry in _load_registration_whitelist():
+        key = os.path.normcase(os.path.normpath(entry))
+        if key not in seen:
+            seen.add(key)
+            bases.append(entry)
+    root = resolve_repo_root()
+    if root is not None:
+        key = os.path.normcase(str(root))
+        if key not in seen:
+            bases.append(str(root))
+    return bases
+
+
+def _read_relative_fallback(target: Path) -> tuple[bool, str, str | None]:
+    """相对路径白名单前缀根回退解析一次（读操作专用，2026-09-19 用户裁定）。
+
+    相对路径以工作空间解析落空（目标不存在）时，按回退基准根（白名单
+    前缀根 + 仓库根，见 :func:`_fallback_bases`）逐个回退解析；首个存在的
+    候选经根外读判定链校验（凭据黑名单已在工作空间解析时先行——回退候选
+    与原解析 basename 相同，无需重查），命中即以候选为读取路径；全部落空
+    → 维持原解析（下游 File not found）。净正向相对路径（未逃出工作空间）
+    拼接到任何前缀根下都不会出界，无需二次前缀校验。
+
+    Returns:
+        (是否命中, 拒绝原因, 候选绝对路径)；未命中 = (False, "", None)。
+    """
+    for base in _fallback_bases():
+        candidate = (Path(base) / target).resolve()
+        if not candidate.exists():
+            continue
+        allow, deny_reason = _read_outside_verdict(candidate)
+        if allow:
+            return True, "", str(candidate)
+        if deny_reason is not None:
+            return False, deny_reason, str(candidate)
+    return False, "", None
+
+
 def _check_workspace_path(
     path: str,
     workspace: str | None,
@@ -106,9 +204,12 @@ def _check_workspace_path(
         (是否允许, 拒绝原因, 校验用绝对路径)
         未注入 workspace/project_root 时返回拒绝——相对路径无处锚定，落回
         sidecar cwd 会把插件目录/宿主仓库当工作区读写。
-        纯读操作（read/search）在单根越界时还有第二锚点：仓库源码区
-        （repo_anchor，运行时/产物目录除外，ADR 2026-09-12）；写/删/move
-        无此豁免——仓库源码树仍非 agent 写面。
+        纯读操作（read/search）在单根越界时还有三级锚点：/uploads/ 附件只读
+        锚（BUG-57：解析到租户 uploads 落盘目录，与上传落盘/内核静态服务
+        同源）、仓库源码区（repo_anchor，运行时/产物目录除外，ADR
+        2026-09-12）与登记白名单前缀（2026-09-19 用户裁定）；相对路径以根
+        解析落空时按白名单前缀根回退解析一次。写/删/move 无此豁免——仓库
+        源码树与 uploads 域均非 agent 写面。
     """
     root_str = project_root or workspace
     if not root_str:
@@ -134,16 +235,31 @@ def _check_workspace_path(
         resolved.relative_to(root)
     except ValueError:
         if operation in _READ_OPERATIONS:
-            matched, deny_reason = repo_read_verdict(resolved)
-            if matched:
-                if deny_reason is None:
-                    return True, "", str(resolved)
+            # /uploads/{filename} 附件只读锚（BUG-57）：共享解析点 basename
+            # 拼接（``..`` 穿越形态天然拒绝，租户按构造隔离，见
+            # uploads_path.resolve_uploads_url）。置于仓库/白名单锚之前——
+            # uploads 兜底落盘可在仓库 data/ 内，仓库拒绝集不得遮蔽附件域。
+            candidate = resolve_uploads_url(path)
+            if candidate is not None:
+                return True, "", str(candidate)
+            allow, deny_reason = _read_outside_verdict(resolved)
+            if allow:
+                return True, "", str(resolved)
+            if deny_reason is not None:
                 return False, deny_reason, str(resolved)
         return (
             False,
             f"路径 {path} 超出 workspace/project_root（{root}）范围，{operation} 操作被拒绝",
             str(resolved),
         )
+    # 相对路径在工作空间内落空（目标不存在）→ 白名单前缀根回退解析一次
+    # （仅读操作；工作空间内已存在则优先，回退不遮蔽本地副本）。
+    if operation in _READ_OPERATIONS and not target.is_absolute() and not resolved.exists():
+        hit, reason, candidate = _read_relative_fallback(target)
+        if hit:
+            return True, "", candidate
+        if reason:
+            return False, reason, candidate
     return True, "", str(resolved)
 
 
@@ -339,6 +455,8 @@ FILE_WRITE_OUTPUT_SCHEMA: dict[str, Any] = {
         "file": {"type": "string", "description": "写盘后的宿主绝对路径（前端卡片打开用）"},
         "added": {"type": "integer"},
         "removed": {"type": "integer"},
+        # 写后磁盘字节数（前端 file_card 大小徽标数据源，R174）
+        "size": {"type": "integer"},
         "backup": {"type": ["string", "null"]},
         # 写前/写后全文：前端 diff 卡数据源（plugin.json ui.chat_card 的
         # diffOldSource/diffNewSource）。大文件溢出由 pipeline 的 spill_guard
@@ -347,6 +465,11 @@ FILE_WRITE_OUTPUT_SCHEMA: dict[str, Any] = {
         "new_content": {"type": ["string", "null"]},
     },
 }
+
+
+def _disk_size(path: Path) -> int:
+    """写后文件磁盘字节数（file_card 大小徽标；以磁盘为准，不经编码推算）。"""
+    return path.stat().st_size
 
 
 async def file_write(
@@ -391,6 +514,7 @@ async def file_write(
                     "file": str(file_path.resolve()),
                     "added": added,
                     "removed": 0,
+                    "size": _disk_size(file_path),
                     "backup": backup,
                     "old_content": existing,
                     "new_content": content,
@@ -406,6 +530,7 @@ async def file_write(
                     "file": str(file_path.resolve()),
                     "added": content.count("\n") + 1 if content else 0,
                     "removed": 0,
+                    "size": _disk_size(file_path),
                     "backup": backup,
                     "old_content": existing,
                     "new_content": existing + content,
@@ -433,6 +558,7 @@ async def file_write(
                     "file": str(file_path.resolve()),
                     "added": 0,
                     "removed": 0,
+                    "size": _disk_size(file_path),
                     "backup": backup,
                     "old_content": existing,
                     "new_content": new_content,
@@ -454,6 +580,7 @@ async def file_write(
                     "file": str(file_path.resolve()),
                     "added": content.count("\n") + 1 if content else 0,
                     "removed": 0,
+                    "size": _disk_size(file_path),
                     "backup": backup,
                     "old_content": existing,
                     "new_content": "\n".join(lines),
@@ -476,6 +603,7 @@ async def file_write(
                     "file": str(file_path.resolve()),
                     "added": 0,
                     "removed": end - start_line + 1,
+                    "size": _disk_size(file_path),
                     "backup": backup,
                     "old_content": existing,
                     "new_content": "\n".join(lines),

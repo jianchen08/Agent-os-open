@@ -15,8 +15,13 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useNotificationStore } from '@/stores/notificationStore'
-import type { NotificationItem } from '@/types/notification'
 import { NotificationCenter } from '../NotificationCenter'
+import {
+  makeNotification,
+  makePendingInteraction,
+  resetNotificationStores,
+} from './helpers/notificationTestUtils'
+import type { NotificationItem } from '@/types/notification'
 
 vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({
   MarkdownRenderer: ({ content }: { content: string }) => (
@@ -24,40 +29,13 @@ vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({
   ),
 }))
 
-function makeNotification(overrides: Partial<NotificationItem> = {}): NotificationItem {
-  return {
-    id: 'n-1',
-    category: 'info',
-    title: '通知标题',
-    priority: 'normal',
-    isBlocking: false,
-    isRead: false,
-    timestamp: new Date().toISOString(),
-    ...overrides,
-  }
-}
-
 /** 通过 store 公共 API 造通知（走真实排序/阻塞弹层逻辑） */
 function seedNotifications(items: NotificationItem[]): void {
   useNotificationStore.setState({ notifications: items })
 }
 
-function resetStores(): void {
-  useNotificationStore.setState({
-    notifications: [],
-    groupState: { collapsed: { critical: false, high: false, normal: true, low: true } },
-    isPanelOpen: false,
-    activeBlockingNotification: null,
-  })
-  useInteractionStore.setState({
-    pendingInteractions: [],
-    globalOpenRequestId: null,
-    isMinimized: false,
-  })
-}
-
 beforeEach(() => {
-  resetStores()
+  resetNotificationStores()
   document.body.style.overflow = ''
   document.documentElement.style.overflow = ''
 })
@@ -226,19 +204,7 @@ describe('NotificationCenter 通知点击与交互跳转', () => {
   it('sourceId 命中 pending 交互：打开全局交互浮层并关闭面板', async () => {
     const user = userEvent.setup()
     useInteractionStore.setState({
-      pendingInteractions: [
-        {
-          requestId: 'req-1',
-          mode: 'notification',
-          title: '交互标题',
-          description: '交互描述',
-          threadId: 'th-1',
-          tabId: 'tab-1',
-          agentId: 'agent-1',
-          timestamp: new Date().toISOString(),
-          status: 'pending',
-        },
-      ],
+      pendingInteractions: [makePendingInteraction()],
     })
     seedNotifications([makeNotification({ id: 's1', sourceId: 'req-1' })])
     render(<NotificationCenter />)
@@ -254,19 +220,7 @@ describe('NotificationCenter 通知点击与交互跳转', () => {
   it('sourceId 命中的交互已非 pending：面板保持打开、不跳转', async () => {
     const user = userEvent.setup()
     useInteractionStore.setState({
-      pendingInteractions: [
-        {
-          requestId: 'req-2',
-          mode: 'notification',
-          title: '交互标题',
-          description: '交互描述',
-          threadId: 'th-1',
-          tabId: 'tab-1',
-          agentId: 'agent-1',
-          timestamp: new Date().toISOString(),
-          status: 'responded',
-        },
-      ],
+      pendingInteractions: [makePendingInteraction({ requestId: 'req-2', status: 'responded' })],
     })
     seedNotifications([makeNotification({ id: 's2', sourceId: 'req-2' })])
     render(<NotificationCenter />)

@@ -1,7 +1,8 @@
 // @feature FP-T12 前端适配 | @ci frontend-test
 /**
  * LlmSettingsPage 覆盖缺口补充测试（与既有 LlmSettingsPage.test 互补，不重复）：
- * - 配置加载失败：错误横幅 + 重试（refetch）；console.error 上报
+ * - 配置加载失败（OBS-R258-1 四态）：整页 ErrorState + 重试（refetch），
+ *   不渲染零数据伪装物；非 Error 拒绝回退固定文案；预置声明副面降级不阻断主面
  * - 错误路径族：默认模型保存/添加模型/删除模型/模型设置保存/更新 Key/
  *   并发保存/添加提供商/删除提供商 全部失败 → toast.error 带 getApiMsg 描述
  *   （含 reject(undefined) 萰底描述）
@@ -167,20 +168,41 @@ afterEach(() => {
 })
 
 describe('LlmSettingsPage 缺口：加载失败与重试', () => {
-  it('配置加载失败：横幅提示 + console 上报 + 重试触发 refetch', async () => {
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+  it('配置加载失败（Error 实例）：整页 ErrorState + 重试，不渲染零数据伪装物（OBS-R258-1 铁律 1/2）', async () => {
     mock.getLLMConfig.mockRejectedValue(new Error('net down'))
     mock.getLLMPresets.mockResolvedValue(presetsFixture)
     renderWithProviders(<LlmSettingsPage />)
 
-    expect(await screen.findByText('无法连接服务器，请检查网络后重试')).toBeInTheDocument()
-    expect(errSpy).toHaveBeenCalled()
-    // 空配置兜底：提供商 Tab 显示空态
-    expect(screen.getByText('暂无提供商')).toBeInTheDocument()
+    expect(await screen.findByText('net down')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /重试/ })).toBeInTheDocument()
+    // 失败态不渲染任何"零数据"伪装物：空态文案与 Tab 数据面均不出现
+    expect(screen.queryByText('暂无提供商')).not.toBeInTheDocument()
+    expect(screen.queryByText('暂无模型')).not.toBeInTheDocument()
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument()
 
     // 重试 → refetch（仍然失败不崩）
     fireEvent.click(screen.getByRole('button', { name: /重试/ }))
     await waitFor(() => expect(mock.getLLMConfig).toHaveBeenCalledTimes(2))
+    expect(screen.getByText('net down')).toBeInTheDocument()
+  })
+
+  it('配置加载失败（非 Error 拒绝）：回退固定文案「无法连接服务器，请检查网络后重试」', async () => {
+    mock.getLLMConfig.mockRejectedValue({ message: 'boom' })
+    mock.getLLMPresets.mockResolvedValue(presetsFixture)
+    renderWithProviders(<LlmSettingsPage />)
+
+    expect(await screen.findByText('无法连接服务器，请检查网络后重试')).toBeInTheDocument()
+  })
+
+  it('预置声明拉取失败：副面降级不阻断主配置面（OBS-R258-1 铁律 4）', async () => {
+    mock.getLLMConfig.mockResolvedValue(configFixture)
+    mock.getLLMPresets.mockRejectedValue(new Error('presets down'))
+    renderWithProviders(<LlmSettingsPage />)
+
+    // 声明缺席 → 分组全部归「自定义」，提供商/模型列表照常渲染
+    expect(await screen.findByText('自定义（2）')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: '模型' }))
+    await waitFor(() => expect(screen.getByText('已注册模型 (2)')).toBeInTheDocument())
   })
 
   it('同组多提供者按 has_key 排序：未配置排前', async () => {

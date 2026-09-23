@@ -7,7 +7,7 @@
 //!
 //! 复用，避免逻辑重复。
 
-use agentos_core::traits::{PluginManifest, ToolDescriptor};
+use agentos_core::traits::{CapabilityRegistry, PluginManifest, ToolDescriptor};
 use agentos_core::types::{ToolCategory, ToolSource};
 use agentos_plugin_loader::{CapabilityRegistryImpl, PluginScopeRegistry};
 use std::sync::Arc;
@@ -206,6 +206,82 @@ pub fn tool_registry_heal_fn(
             registry.get_tool(tool_name)
         })
     })
+}
+
+/// /ext 调用路径 HTTP 路由自愈（BUG-58 立通道；BUG-67 改判 **additive 语义**）。
+///
+/// 声明面在册（manifest 在共享 store）且插件在启用集、但注册表查不到请求路由
+/// 时，按声明 manifest **逐条补注册缺失的 http 路由**。只增不毁：
+///
+/// - **不收回既有 scope**（BUG-67 裁决：原实现走 reenable 全量 revoke + 重建，
+///   在请求路径上执行时与并发的 sibling 自愈 / watcher 复验互相绞杀——前一个
+///   刚恢复的路由被后一个的 revoke 摘除，同一请求自愈后重试仍 miss → 503
+///   持续，装机版 R239/R244 实证；且 revoke 连带摧毁 scope 里非 http 维度的
+///   在册登记（模式包资源键 / widget 绑定），reenable 并不重建它们）。工具
+///   缺席有 BUG-37 工具自愈通道、禁用摘除有 disable 语义，都不归本自愈处置。
+/// - **幂等**：已在册的声明端点跳过；并发同键注册的冲突按「竞胜方条目已在」
+///   计成功（additive 语义下冲突只可能来自并发补注册同一路由）。
+///
+/// 不动作（返回 false，fail-closed 语义不被本自愈复活）：manifest 缺席、插件
+/// 已禁用、或声明无 http_endpoints。返回是否恢复了 http 路由，调用方据此重试
+/// 当次请求。
+pub async fn heal_plugin_http_routes(
+    registry: &Arc<CapabilityRegistryImpl>,
+    scopes: &PluginScopeRegistry,
+    manifests: &crate::plugin_watcher::ManifestsStore,
+    enabled_ids: &Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+    plugin_id: &str,
+) -> bool {
+    if !enabled_ids.read().await.contains(plugin_id) {
+        return false;
+    }
+    let manifest = {
+        let store = manifests.read().await;
+        store.iter().find(|m| m.id == plugin_id).cloned()
+    };
+    let Some(manifest) = manifest else {
+        return false;
+    };
+    if manifest.http_endpoints.is_empty() {
+        return false;
+    }
+    let scope = scopes.scope_of(plugin_id);
+    let mut http_routes = 0usize;
+    for ep in &manifest.http_endpoints {
+        // 幂等基线：端点已在（并发自愈/watcher 先行恢复）→ 计成功，不动。
+        if registry
+            .find_http_route(&ep.path, &ep.method)
+            .is_some_and(|d| d.plugin_id == manifest.id)
+        {
+            http_routes += 1;
+            continue;
+        }
+        let ok = registry
+            .register_http_route_guarded(plugin_id, ep.clone())
+            .map(|(_d, guard)| scope.track(guard))
+            .or_else(|_| {
+                // 注册冲突 = 并发补注册同键竞胜；复核条目确属本插件 → 计成功。
+                if registry
+                    .find_http_route(&ep.path, &ep.method)
+                    .is_some_and(|d| d.plugin_id == manifest.id)
+                {
+                    Ok(())
+                } else {
+                    Err(())
+                }
+            })
+            .is_ok();
+        if ok {
+            http_routes += 1;
+        }
+    }
+    tracing::info!(
+        target: "plugin-registration",
+        plugin = %manifest.id,
+        http_routes,
+        "调用路径自愈：注册表缺失的声明 http 路由已按 manifest 补注册（additive，不收回在册面）"
+    );
+    http_routes > 0
 }
 
 /// 广播域事件（通用域事件通道：`LifecycleHook::DomainEvent` + `ctx["event"]` 事件名）。
@@ -1022,5 +1098,190 @@ mod capability_registration_tests {
         // manifest 缺席的工具 → None。
         enabled_ids.write().await.insert("p_heal".to_string());
         assert!(heal("ghost_tool").await.is_none(), "未知工具不应自愈");
+    }
+
+    // ── BUG-67：调用路径自愈必须 additive（只补缺失路由，不收回在册面）──
+    //
+    // 装机版实证（R239/R244 部署窗 kernel.log 13:27:56~13:28:07Z）：面板并行
+    // 请求各自触发 heal，heal 经 reenable（全量 revoke + 重建）执行——并发的
+    // heal 互相绞杀（前一个刚注册的路由被后一个的 revoke 摘除），同一请求
+    // heal 后重试仍 miss → 503 持续（日志形态：12 条 route registered →
+    // 自愈行 → "even after heal attempt" WARN，逐请求循环）；且 revoke 连带
+    // 摧毁 scope 里非 http 维度的在册登记（模式包资源键 / widget 绑定——
+    // reenable 不重建它们，只能等 watcher 重扫恢复）。
+
+    fn manifest_with_routes_and_tool(id: &str, tool: &str) -> PluginManifest {
+        let mut m = manifest(id, tool);
+        m.http_endpoints = vec![
+            endpoint(&format!("/ext/{id}/a")),
+            endpoint(&format!("/ext/{id}/b")),
+        ];
+        m
+    }
+
+    fn sample_mode_package(plugin_id: &str) -> agentos_plugin_loader::ModePackageResources {
+        agentos_plugin_loader::ModePackageResources {
+            plugin_id: plugin_id.to_string(),
+            mode_id: plugin_id.to_string(),
+            agents: vec![agentos_plugin_loader::ModeAgentEntry {
+                key: format!("{plugin_id}/main"),
+                plugin_id: plugin_id.to_string(),
+                path: std::path::PathBuf::from("agents/main.yaml"),
+            }],
+            pipelines: vec![],
+        }
+    }
+
+    /// 生命周期空窗现场：非路由维度（工具 + 模式包资源键）live 且入 scope，
+    /// 路由维度刚被摘除（guard 落测试手中，drop 即空窗）。
+    #[allow(clippy::type_complexity)]
+    async fn heal_fixture_with_route_window(
+        id: &str,
+    ) -> (
+        Arc<CapabilityRegistryImpl>,
+        Arc<agentos_plugin_loader::PluginScopeRegistry>,
+        crate::plugin_watcher::ManifestsStore,
+        Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+    ) {
+        let m = manifest_with_routes_and_tool(id, &format!("t_{id}"));
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let scopes = Arc::new(agentos_plugin_loader::PluginScopeRegistry::new());
+        // live 面：工具入 scope（register 同源）；模式包资源键入 scope（boot 同源）。
+        register_plugin_capabilities(&m, &registry, &scopes);
+        let mode_guard = agentos_plugin_loader::register_mode_package_guarded(
+            &registry,
+            sample_mode_package(id),
+        )
+        .expect("模式包资源应注册");
+        scopes.scope_of(id).track(mode_guard);
+        // 路由维度：guard 由调用方持有（可精确制造空窗）。
+        let route_guards: Vec<_> = m
+            .http_endpoints
+            .iter()
+            .map(|ep| {
+                registry
+                    .register_http_route_guarded(id, ep.clone())
+                    .expect("路由应注册")
+                    .1
+            })
+            .collect();
+        let manifests: crate::plugin_watcher::ManifestsStore =
+            Arc::new(tokio::sync::RwLock::new(vec![m]));
+        let enabled_ids = Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::from([
+            id.to_string(),
+        ])));
+        drop(route_guards); // 路由全量缺席 = 生命周期空窗
+        (registry, scopes, manifests, enabled_ids)
+    }
+
+    async fn heal(
+        registry: &Arc<CapabilityRegistryImpl>,
+        scopes: &Arc<agentos_plugin_loader::PluginScopeRegistry>,
+        manifests: &crate::plugin_watcher::ManifestsStore,
+        enabled_ids: &Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+        plugin_id: &str,
+    ) -> bool {
+        heal_plugin_http_routes(registry, scopes, manifests, enabled_ids, plugin_id).await
+    }
+
+    /// 路由全量缺席（生命周期空窗现场）→ 自愈补齐声明路由，且**不得连带
+    /// 摧毁 scope 里非 http 维度的在册登记**（工具/模式包资源键是 live 面，
+    /// 不是自愈的处置对象；装机版实测被 revoke 后只能等 watcher 重扫恢复）。
+    #[tokio::test]
+    async fn heal_restores_routes_without_revoking_live_registrations() {
+        let id = "p_hx_full";
+        let (registry, scopes, manifests, enabled_ids) = heal_fixture_with_route_window(id).await;
+        assert!(
+            registry
+                .find_http_route(&format!("/ext/{id}/a"), "GET")
+                .is_none(),
+            "前置：路由维度缺席"
+        );
+
+        assert!(
+            heal(&registry, &scopes, &manifests, &enabled_ids, id).await,
+            "空窗自愈应恢复声明路由"
+        );
+
+        assert!(
+            registry
+                .find_http_route(&format!("/ext/{id}/a"), "GET")
+                .is_some()
+                && registry
+                    .find_http_route(&format!("/ext/{id}/b"), "GET")
+                    .is_some(),
+            "自愈后声明路由必须可查（既有语义）"
+        );
+        assert!(
+            registry.get_mode_agent(&format!("{id}/main")).is_some(),
+            "自愈不得连带摧毁模式包资源键（BUG-67：heal 全量 revoke 的连带毁灭面）"
+        );
+        assert!(
+            registry.get_tool(&format!("t_{id}")).is_some(),
+            "自愈不得连带摧毁工具注册"
+        );
+    }
+
+    /// 部分空窗：仅单端点缺席、其余面（/b 路由 + 工具 + 模式包资源键）在册时，
+    /// 自愈只补缺失项，**在册面原样存活**（不 revoke、不重注册）。（装机版
+    /// 实证：每次 503 触发的 heal 全量 revoke，把并发请求刚恢复的路由又摘掉，
+    /// 503 持续；在册的模式包资源键连带被毁。）
+    #[tokio::test]
+    async fn heal_fills_only_missing_and_leaves_present_surface_intact() {
+        let id = "p_hx_part";
+        let m = manifest_with_routes_and_tool(id, &format!("t_{id}"));
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let scopes = Arc::new(agentos_plugin_loader::PluginScopeRegistry::new());
+        register_plugin_capabilities(&m, &registry, &scopes);
+        let mode_guard = agentos_plugin_loader::register_mode_package_guarded(
+            &registry,
+            sample_mode_package(id),
+        )
+        .expect("模式包资源应注册");
+        scopes.scope_of(id).track(mode_guard);
+        // /a、/b 路由在册，guard 由测试持有——可精确摘除 /a 制造部分空窗。
+        let (a_ep, b_ep) = (m.http_endpoints[0].clone(), m.http_endpoints[1].clone());
+        let (_, a_guard) = registry
+            .register_http_route_guarded(id, a_ep.clone())
+            .expect("/a 注册成功");
+        let (_, _b_guard) = registry
+            .register_http_route_guarded(id, b_ep.clone())
+            .expect("/b 注册成功");
+        drop(a_guard); // 仅 /a 缺席
+        assert!(
+            registry.find_http_route(&a_ep.path, "GET").is_none(),
+            "前置：/a 缺席"
+        );
+        assert!(
+            registry.find_http_route(&b_ep.path, "GET").is_some(),
+            "前置：/b 在册"
+        );
+
+        let manifests: crate::plugin_watcher::ManifestsStore =
+            Arc::new(tokio::sync::RwLock::new(vec![m]));
+        let enabled_ids = Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::from([
+            id.to_string(),
+        ])));
+        assert!(
+            heal_plugin_http_routes(&registry, &scopes, &manifests, &enabled_ids, id).await,
+            "部分空窗自愈应成功"
+        );
+
+        assert!(
+            registry.find_http_route(&a_ep.path, "GET").is_some(),
+            "缺失端点 /a 必须补齐"
+        );
+        assert!(
+            registry.find_http_route(&b_ep.path, "GET").is_some(),
+            "在册端点 /b 必须原样存活"
+        );
+        assert!(
+            registry.get_mode_agent(&format!("{id}/main")).is_some(),
+            "自愈不得连带摧毁模式包资源键（BUG-67 连带毁灭面）"
+        );
+        assert!(
+            registry.get_tool(&format!("t_{id}")).is_some(),
+            "自愈不得连带摧毁工具注册"
+        );
     }
 }

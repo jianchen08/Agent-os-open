@@ -1,5 +1,8 @@
 {
   "id": "pipeline_tool_cache",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Tool Cache",
   "version": "1.0.0",
   "plugin_type": "pipeline",

@@ -99,6 +99,26 @@ class TestQQInputAdapter:
         assert state["_group_id"] == 999
 
     @pytest.mark.asyncio
+    async def test_conversation_coordinates(self) -> None:
+        """入站桥会话坐标：私聊按 QQ 号、群聊按群号，回复上下文随来源路由。"""
+        adapter = QQInputAdapter()
+        await adapter.enqueue_message(
+            {"user_id": 123456, "message_id": "m1", "message_type": "private", "message": "a"}
+        )
+        private_state = await adapter.receive()
+        assert private_state["_conversation_key"] == "u123456"
+        assert private_state["_reply_target"] == "123456"
+        assert private_state["_reply_ctx"] == {"_message_type": "private"}
+
+        await adapter.enqueue_message(
+            {"user_id": 1, "message_id": "m2", "message_type": "group", "group_id": 999, "message": "b"}
+        )
+        group_state = await adapter.receive()
+        assert group_state["_conversation_key"] == "g999"
+        assert group_state["_reply_target"] == "999"
+        assert group_state["_reply_ctx"] == {"_message_type": "group", "_group_id": 999}
+
+    @pytest.mark.asyncio
     async def test_raw_empty_defaults(self) -> None:
         """空报文降级为默认私聊信封。"""
         adapter = QQInputAdapter()
@@ -135,7 +155,7 @@ class TestQQOutputAdapter:
         out.set_channel_user_id("123")
         await out.send({"raw_result": "完成", "_channel_user_id": "123"})
         client.send_message.assert_awaited_once_with(
-            user_id=123, content="完成", message_type="private"
+            user_id=123, content="完成", message_type="private", group_id=None
         )
 
     @pytest.mark.asyncio
@@ -145,7 +165,7 @@ class TestQQOutputAdapter:
         out.set_message_type("group")
         await out.send({"_channel_user_id": "55", "_message_type": "group", "raw_error": "err"})
         client.send_message.assert_awaited_once_with(
-            user_id=55, content="❌ 错误: err", message_type="group"
+            user_id=55, content="❌ 错误: err", message_type="group", group_id=None
         )
 
     @pytest.mark.asyncio
@@ -170,7 +190,7 @@ class TestQQOutputAdapter:
         await out.send_stream({"text": "第一"})
         await out.send_stream({"text": "段", "type": "end"})
         client.send_message.assert_awaited_once_with(
-            user_id=321, content="第一段", message_type="private"
+            user_id=321, content="第一段", message_type="private", group_id=None
         )
 
     @pytest.mark.asyncio

@@ -11,6 +11,8 @@ export const queryKeys = {
   sessions: ['sessions'] as const,
   /** agent 列表（GET /ext/agent_manager/agents） */
   agents: ['agents'] as const,
+  /** agent 管理页列表（AgentManagerPage，按搜索词分条；与全量 agents 缓存隔离） */
+  agentsManager: (search: string) => ['agents', 'manager', search] as const,
   /** 聚合 schema（agents/pipelines/tools/routes/plugin_configs/plugin_contributes） */
   schema: ['schema'] as const,
   /** 插件列表（状态+能力面组合） */
@@ -46,6 +48,8 @@ export const queryKeys = {
   dbTables: ['debug', 'db-tables'] as const,
   /** 记忆：episodes 分页（页码进 key） */
   memoryEpisodes: (page: number) => ['memory', 'episodes', page] as const,
+  /** 记忆：episodes 全部分页的前缀（单条删除后批量失效用） */
+  memoryEpisodesPrefix: ['memory', 'episodes'] as const,
   /** 记忆：统计 */
   memoryStats: ['memory', 'stats'] as const,
   /** 知识库：文件列表 */
@@ -58,4 +62,8 @@ export const queryKeys = {
   pipelineRuns: ['pipeline-runs'] as const,
   /** 管道 states 快照（GET /api/v1/pipelines/state） */
   pipelineStates: ['pipeline-states'] as const,
+  /** 项目登记列表（GET /ext/task_service/projects，项目=文件夹+登记行） */
+  projectsRegistry: ['projects', 'registry'] as const,
+  /** 项目登记 key 前缀（登记写操作后批量失效用） */
+  projectsPrefix: ['projects'] as const,
 } as const

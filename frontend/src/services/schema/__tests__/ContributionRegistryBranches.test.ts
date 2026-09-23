@@ -508,3 +508,20 @@ describe('ContributionRegistry — 配置面板与 widget 声明', () => {
     expect(registry.getWidgetsForPlugin('a1')[0].order).toBeUndefined()
   })
 })
+
+describe('ContributionRegistry — normalizeAndRegister 未知旧 key 兜底（register 公开入口）', () => {
+  it('LEGACY_PAGE_MAP 之外的旧类型经 register() 兜底归一化为 workspace/tab（742 行分支）', () => {
+    // registerFromSchema 会过滤该 key（439 行守卫），但公开 register() 直达
+    // normalizeAndRegister——兜底分支只在此路径可达（防未来调用方回归）。
+    registry.register({ type: 'workspaceTabs', id: 'legacy-tab', title: '旧页签', pluginId: 'p1' } as never)
+    const page = registry.getPage('legacy-tab')
+    expect(page).toMatchObject({
+      id: 'legacy-tab',
+      space: 'workspace',
+      slot: 'tab',
+      legacyFrom: 'workspaceTabs',
+      pluginId: 'p1',
+    })
+    expect(registry.getByType('workspaceTabs')).toHaveLength(1)
+  })
+})

@@ -30,6 +30,7 @@ import { toolCallToActivity } from '@/utils/activityConverter'
 import { formatTimestamp } from '@/utils/format'
 import { getGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
 import ActivityCard from './ActivityCard'
+import { CompressionOriginalsButton } from './CompressionOriginalsButton'
 import useMessageRender from './hooks/useMessageRender'
 import { MessageActions } from './MessageActions'
 import MessageContentRenderer from './MessageContentRenderer'
@@ -157,6 +158,7 @@ export const MessageItem = memo(function MessageItem({
   onEdit,
   onRegenerate,
   onRollbackTo,
+  segmentSwitcherBaseSeq,
   className = '',
   searchQuery,
   taskId,
@@ -276,11 +278,13 @@ export const MessageItem = memo(function MessageItem({
     )
   }
 
-  // 消息卡路由（模式体系 §5.0 通用能力）：非流式 assistant 消息携带
+  // 消息卡路由（模式体系 §5.0 通用能力）：非流式 assistant / system 消息携带
   // metadata.message_style 且 registry 有声明 → 通用 webview 消息卡容器；
   // 无声明（禁用/未声明）同源消失，回退下方默认渲染。流式期间不路由
-  // （正文仍在到达，卡片属终态渲染，完成后接管）。
-  if (isAssistant && !isMessageStreaming) {
+  // （正文仍在到达，卡片属终态渲染，完成后接管）。system 覆盖压缩块消息
+  // （消息段模型 §5.1：role=system 块 + metadata.message_style=compression_card，
+  // 卡渲染 + 宿主桥数据注入；带段引用的块消息另有宿主侧「查看原始」入口）。
+  if ((isAssistant || isSystemMessage) && !isMessageStreaming) {
     const styleId = message.metadata?.[MESSAGE_STYLE_METADATA_KEY]
     if (typeof styleId === 'string' && resolveMessageStyle(styleId)) {
       return (
@@ -291,16 +295,34 @@ export const MessageItem = memo(function MessageItem({
             className,
           )}
           data-testid="message-item"
-          data-role="assistant"
+          data-role={message.role}
           data-message-style={styleId}
         >
-          <Avatar className="h-8 w-8 flex-shrink-0 rounded-xl bg-secondary text-secondary-foreground shadow-sm">
+          <Avatar
+            className={cn(
+              'h-8 w-8 flex-shrink-0 rounded-xl shadow-sm',
+              isSystemMessage
+                ? 'bg-status-warning/15 text-status-warning'
+                : 'bg-secondary text-secondary-foreground',
+            )}
+          >
             <AvatarFallback className="rounded-xl text-sm font-medium">
-              <Bot className="h-icon-md w-icon-md" />
+              {isSystemMessage ? (
+                <Bell className="h-icon-md w-icon-md" />
+              ) : (
+                <Bot className="h-icon-md w-icon-md" />
+              )}
             </AvatarFallback>
           </Avatar>
           <div className="min-w-0 flex-1">
-            <PluginMessageCard instanceKey={message.id} styleId={styleId} />
+            <PluginMessageCard
+              instanceKey={message.id}
+              styleId={styleId}
+              message={{ content: message.content, metadata: message.metadata }}
+            />
+            {/* 宿主侧「查看原始 N 条」：卡上行桥未放行内核段端点（web/cards/
+                compression.html 取数缺口），段取数由宿主承担（只读，不激活） */}
+            {isSystemMessage && <CompressionOriginalsButton message={message} />}
           </div>
         </div>
       )
@@ -634,6 +656,7 @@ export const MessageItem = memo(function MessageItem({
                 onContentUpdate={handleContentUpdate}
                 onRegenerate={onRegenerate}
                 onRollbackTo={onRollbackTo}
+                segmentSwitcherBaseSeq={segmentSwitcherBaseSeq}
               />
             </div>
           )}

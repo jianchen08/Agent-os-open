@@ -210,8 +210,8 @@ describe('AgentTabStore 激活即重绑', () => {
     expect(pipelineMock.activatePipeline).toHaveBeenCalledWith(MAIN_PID)
   })
 
-  it('权威主管道缺失（activePipelineId 空且管道数≠1）：保持原绑定，不置空不猜位', () => {
-    seedSessions([makeSession({ activePipelineId: null, pipelineIds: ['pid-a', 'pid-b'] })])
+  it('权威主管道缺失（pipelineIds 空）：保持原绑定，不置空不猜位', () => {
+    seedSessions([makeSession({ activePipelineId: null, pipelineIds: [] })])
     useAgentTabStore.getState().initSessionTabs(SESSION_ID)
     seedStaleMainBinding(STALE_SUB_PID, SUB_TAB_ID)
 

@@ -1101,7 +1101,7 @@ async fn test_multi_turn_cold_start_recovers_from_store() {
     // 直接写 slots（模拟上一轮已持久化，registry 无该管道——冷启动）
     let store_ref = store.clone();
     agentos_tenant::scope(tenant.clone(), async {
-            store_ref.create_run("run_cold", "", "tenant_cold").await.unwrap();
+            store_ref.record_run_start(pipe, "tenant_cold", "run_cold", "").await.unwrap();
             store_ref.link_pipeline_session(pipe, thread, "tenant_cold").await.unwrap();
             sqlite
                 .apply_messages_ops_to_table(pipe, "tenant_cold", &[
@@ -1172,7 +1172,7 @@ async fn test_cold_recovery_ignores_stale_ended_flag() {
     // ended=true（修复前版本落档形态）。
     let store_ref = store.clone();
     agentos_tenant::scope(tenant.clone(), async {
-            store_ref.create_run("run_ended", "", "tenant_ended").await.unwrap();
+            store_ref.record_run_start(pipe, "tenant_ended", "run_ended", "").await.unwrap();
             store_ref.link_pipeline_session(pipe, thread, "tenant_ended").await.unwrap();
             sqlite
                 .apply_messages_ops_to_table(pipe, "tenant_ended", &[
@@ -2387,12 +2387,14 @@ async fn test_engine_run_failure_marks_run_failed() {
         "outcome 内容应携带失败标识: {}",
         r.content
     );
-    // 防御网落库：该管道最新 run 置 failed（不悬空 running）
+    // 防御网落库：该管道最新 run 置 failed（不悬空 running）——runs 表退役后
+    // 运行状态真值 = pipeline_state 运行键（ADR 2026-09-18）
     let status: String = sqlite
         .with_conn(|c| {
             c.query_row(
-                "SELECT status FROM runs WHERE pipeline_id = 'pipe_fail_evt' \
-                     ORDER BY created_at DESC LIMIT 1",
+                "SELECT value FROM pipeline_state \
+                     WHERE field_key = 'run_status' AND pipeline_id = 'pipe_fail_evt' \
+                     AND tenant_id = 'tenant_gap2_err'",
                 [],
                 |row| row.get(0),
             )
@@ -2426,10 +2428,13 @@ async fn test_engine_user_stop_marks_run_cancelled() {
     )
     .await;
     assert!(!r.failed, "用户停止不是引擎失败");
+    // runs 表退役：运行状态真值 = pipeline_state 运行键（ADR 2026-09-18）
     let status: String = sqlite
         .with_conn(|c| {
             c.query_row(
-                "SELECT status FROM runs WHERE pipeline_id = 'pipe_cancel_evt'                      ORDER BY created_at DESC LIMIT 1",
+                "SELECT value FROM pipeline_state \
+                     WHERE field_key = 'run_status' AND pipeline_id = 'pipe_cancel_evt' \
+                     AND tenant_id = 'tenant_cancel'",
                 [],
                 |row| row.get(0),
             )
@@ -2524,7 +2529,7 @@ async fn test_user_message_slot_carries_run_id() {
     .await;
     assert!(!r.failed, "首轮发送不应失败: {}", r.content);
 
-    // message_slots 里该 user 消息（seq 0）的 run_id 非空且与 runs 表对齐
+    // message_slots 里该 user 消息（seq 0）的 run_id 非空且与 state 运行键对齐
     let slot_run: String = sqlite
         .with_conn(|c| {
             c.query_row(
@@ -2538,7 +2543,9 @@ async fn test_user_message_slot_carries_run_id() {
     let run_row: String = sqlite
         .with_conn(|c| {
             c.query_row(
-                "SELECT run_id FROM runs WHERE pipeline_id = 'pipe_runid' LIMIT 1",
+                "SELECT value FROM pipeline_state \
+                 WHERE field_key = 'run_id' AND pipeline_id = 'pipe_runid' \
+                 AND tenant_id = 'tenant_runid' LIMIT 1",
                 [],
                 |row| row.get(0),
             )
@@ -3693,6 +3700,109 @@ async fn test_pending_inputs_endpoints_guards() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+// ── 消息段端点（多代切换/压缩原文存档）：GET 清单 + GET 单段 ──
+
+#[tokio::test]
+async fn test_message_segments_endpoints_happy_path_and_guards() {
+    let (state, _invoker, store, sqlite, _user_space_guard) = make_engine_state();
+    let token = seed_admin_token(&sqlite).await;
+    let bearer = format!("Bearer {token}");
+    let app = build_router(state);
+    let pid = "pipe-seg-ep";
+
+    // 冻结一段（store 直写）：段行 + 成员全文
+    store
+        .apply_messages_ops_to_table(
+            pid,
+            "default",
+            &[json!({
+                "op": "freeze_segment", "id": "seg_ep1",
+                "base_seq": 1, "base_len": 1, "visible_to": "[user]",
+                "preview": "被压原文", "members": [{"role": "user", "content": "被压原文"}],
+            })],
+        )
+        .await
+        .unwrap();
+
+    // GET 清单：无成员字段、含 preview，租户过滤
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/pipelines/{pid}/message-segments"))
+                .header("authorization", &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = serde_json::from_slice::<serde_json::Value>(
+        &axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let segments = body["segments"].as_array().unwrap();
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0]["id"], "seg_ep1");
+    assert_eq!(segments[0]["base_seq"], 1);
+    assert_eq!(segments[0]["preview"], "被压原文");
+    assert_eq!(segments[0]["visible_to"], "[user]");
+    assert!(segments[0].get("members").is_none(), "清单不解析成员");
+
+    // GET 单段：成员全文解析
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/message-segments/seg_ep1")
+                .header("authorization", &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = serde_json::from_slice::<serde_json::Value>(
+        &axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["segment"]["id"], "seg_ep1");
+    assert_eq!(
+        body["segment"]["members"][0]["content"], "被压原文",
+        "成员全文可达"
+    );
+
+    // 不存在的段 → 404
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/message-segments/seg_ghost")
+                .header("authorization", &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // 未鉴权 → 401（段行含会话内容，读面必须过闸）
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/message-segments/seg_ep1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 /// 无 store 路径（单测/兼容）：dispatch 直接入链执行（spawn_chain），
 /// 不经持久化队列——消息仍被消费（队列语义被旁路）。
 #[tokio::test]
@@ -3783,22 +3893,15 @@ async fn seed_pipeline_trace(
     run_id: &str,
     patch_data: serde_json::Value,
 ) {
-    store.create_run(run_id, "cfg", "default").unwrap();
-    store.set_run_pipeline(run_id, pipeline_id).await.unwrap();
-    store
-        .apply_messages_ops_to_table(
-            pipeline_id,
-            "default",
-            &[json!({"op": "set", "seq": 0,
-                     "msg": {"role": "user", "content": "hi"}, "_run_id": run_id})],
-        )
-        .unwrap();
+    // 只落轨迹、不写 state 运行键/消息槽：ADR 2026-09-18 冷恢复新序下
+    // traces 回放仅在 state 与消息双空的 DR 分支参与，预置保持双空回放才命中
+    // （回放按 pipeline_id 直查，traces 已是 pipeline 级 op 流）。
     store
         .append_trace(TraceEntry {
             trace_id: format!("t-{run_id}"),
-            run_id: run_id.to_string(),
-            branch_id: "main".into(),
-            seq_in_branch: 0,
+            pipeline_id: pipeline_id.to_string(),
+            // 写入侧 seq 恒 0，存储层按 (pipeline_id, MAX(seq)+1) 分配日志序
+            seq: 0,
             plugin_id: "post".into(),
             patch_type: PatchType::StateUpdate,
             patch_data,
@@ -3820,7 +3923,8 @@ async fn cold_recovery_replays_only_own_pipeline_traces() {
         .await
         .unwrap();
 
-    // 父管道轨迹携带对话挂起控制态（事故现场同款）+ 持久任务域标量
+    // 父管道轨迹携带对话挂起控制态（事故现场同款）+ 持久任务域标量。
+    // 两管道只落轨迹（state/消息双空）——回放是 DR 分支的专属路径。
     seed_pipeline_trace(
         &store,
         "pipe-parent",
@@ -4398,23 +4502,6 @@ impl StorageBackend for B3FlakyUserAppendStore {
     async fn append_trace(
         &self,
         _entry: agentos_core::types::TraceEntry,
-    ) -> Result<(), agentos_core::types::StorageError> {
-        unreachable!("user append 路径不应触碰其他存储方法")
-    }
-    async fn update_run_status(
-        &self,
-        _run_id: &str,
-        _status: agentos_core::types::RunStatus,
-        _branch: Option<&str>,
-        _seq: Option<u32>,
-    ) -> Result<(), agentos_core::types::StorageError> {
-        unreachable!("user append 路径不应触碰其他存储方法")
-    }
-    async fn create_run(
-        &self,
-        _run_id: &str,
-        _config_hash: &str,
-        _tenant_id: &str,
     ) -> Result<(), agentos_core::types::StorageError> {
         unreachable!("user append 路径不应触碰其他存储方法")
     }
@@ -5028,11 +5115,7 @@ mod routes_endpoints_tests {
         use agentos_core::traits::StorageBackend;
         let dyn_store: Arc<dyn StorageBackend> = sqlite.clone();
         dyn_store
-            .create_run(run_id, "cfg", "default")
-            .await
-            .unwrap();
-        dyn_store
-            .set_run_pipeline(run_id, pipeline_id)
+            .record_run_start(pipeline_id, "default", run_id, "cfg")
             .await
             .unwrap();
         sqlite
@@ -5076,11 +5159,13 @@ mod routes_endpoints_tests {
         seed_run_with_slot(&sqlite, "run_b", "pipe_b", "thread_b").await;
         let dyn_store: Arc<dyn StorageBackend> = sqlite.clone();
         dyn_store
-            .update_run_status(
-                "run_b",
-                agentos_core::types::RunStatus::Completed,
-                None,
-                None,
+            .upsert_state_fields(
+                "pipe_b",
+                "default",
+                &serde_json::json!({ "run_status": "completed" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
             )
             .await
             .unwrap();
@@ -5212,8 +5297,10 @@ mod routes_endpoints_tests {
             )
             .await
             .unwrap();
-        // 冷行需要 runs × message_slots 联结可见
-        sqlite.create_run("run_cold_cov", "cfg", "default").unwrap();
+        // 冷行需要 state 运行簿记键可见（runs 表退役，ADR 2026-09-18）
+        sqlite
+            .record_run_start(pid_cold, "default", "run_cold_cov", "cfg")
+            .unwrap();
         sqlite
             .apply_messages_ops_to_table(
                 pid_cold,
@@ -6022,7 +6109,9 @@ mod routes_endpoints_tests {
         let _guard = DisableSelfExit::set();
 
         let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
-        sqlite.create_run("run_g8_cov", "cfg", "default").unwrap();
+        sqlite
+            .record_run_start("pipe_g8_cov", "default", "run_g8_cov", "cfg")
+            .unwrap();
         let mut state = AppState::new();
         state.db = Some(sqlite.clone());
 
@@ -6045,16 +6134,18 @@ mod routes_endpoints_tests {
     async fn drain_and_exit75_counts_suspended_runs_with_db() {
         let _guard = DisableSelfExit::set();
         let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
-        sqlite.create_run("run_drain_1", "cfg", "default").unwrap();
-        sqlite.create_run("run_drain_2", "cfg", "default").unwrap();
         sqlite
-            .update_run_status(
-                "run_drain_2",
+            .record_run_start("pipe_drain_1", "default", "run_drain_1", "cfg")
+            .unwrap();
+        sqlite
+            .record_run_start("pipe_drain_2", "default", "run_drain_2", "cfg")
+            .unwrap();
+        sqlite
+            .set_run_status_projection(
+                "pipe_drain_2",
+                "default",
                 agentos_core::types::RunStatus::Completed,
-                None,
-                None,
             )
-            .await
             .unwrap();
 
         let n = crate::routes::drain_and_exit75(Some(&sqlite), None, "unit-test drain").await;
@@ -6440,7 +6531,7 @@ mod session_endpoints_tests {
     // ── PATCH /api/v1/sessions/{id}（重命名）─────────────────────────────
 
     #[tokio::test]
-    async fn update_session_renames_db_record_and_falls_back_when_absent() {
+    async fn update_session_renames_db_record_and_404s_when_absent() {
         let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
         let dyn_store: Arc<dyn StorageBackend> = store.clone();
         dyn_store
@@ -6458,10 +6549,12 @@ mod session_endpoints_tests {
         // DB 命中：title/intent 同步更新 + updated_at 前移
         let resp = update_session_handler(
             axum::extract::State(state.clone()),
+            HeaderMap::new(),
             axum::extract::Path("t_upd".to_string()),
             axum::Json(serde_json::json!({"intent": "新名字"})),
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(resp.0["thread_id"], "t_upd");
         assert_eq!(resp.0["title"], "新名字");
         assert_eq!(resp.0["intent"], "新名字");
@@ -6477,13 +6570,15 @@ mod session_endpoints_tests {
         // 无 intent 的 PATCH：只碰 updated_at，title 保持
         let resp = update_session_handler(
             axum::extract::State(state.clone()),
+            HeaderMap::new(),
             axum::extract::Path("t_upd".to_string()),
             axum::Json(serde_json::json!({})),
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(resp.0["title"], "新名字", "无 intent 不得清标题");
 
-        // DB 未命中：内存回退响应（agent/pipeline 取 registry 已知状态）
+        // DB 未命中：404（不回退内存构造伪造 200；与 list「无记录不出口」同语义）
         state
             .session
             .as_ref()
@@ -6492,15 +6587,18 @@ mod session_endpoints_tests {
             .register_thread_agent("t-ghost", "ag_ghost");
         let resp = update_session_handler(
             axum::extract::State(state),
+            HeaderMap::new(),
             axum::extract::Path("t-ghost".to_string()),
             axum::Json(serde_json::json!({"intent": "ghost-name"})),
         )
         .await;
-        assert_eq!(resp.0["thread_id"], "t-ghost");
-        assert_eq!(resp.0["title"], "ghost-name");
-        assert_eq!(resp.0["intent"], "ghost-name");
-        assert_eq!(resp.0["agent_id"], "ag_ghost");
-        assert_eq!(resp.0["current_state"], "active");
+        match resp {
+            Ok(body) => panic!("DB 无记录不得伪造 200 回退响应: {:?}", body.0),
+            Err(e) => assert!(
+                matches!(e, ApiError::NotFound { .. }),
+                "无记录应 404，实际 {e:?}"
+            ),
+        }
     }
 
     // ── PATCH /api/v1/sessions/{id}/agent（DB 未命中回退）────────────────
@@ -6518,7 +6616,8 @@ mod session_endpoints_tests {
             axum::extract::Path("t-fb".to_string()),
             axum::Json(serde_json::json!({"agent_id": "ag_fb"})),
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(resp.0["agent_id"], "ag_fb");
         assert_eq!(resp.0["pipeline_ids"][0], "p-fb");
         assert_eq!(resp.0["active_pipeline_id"], "p-fb");
@@ -6530,7 +6629,8 @@ mod session_endpoints_tests {
             axum::extract::Path("t-x".to_string()),
             axum::Json(serde_json::json!({})),
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(resp.0["agent_id"], "agentos");
     }
 
@@ -6549,7 +6649,9 @@ mod session_endpoints_tests {
     #[tokio::test]
     async fn list_messages_maps_tool_envelope_reasoning_and_metadata() {
         let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
-        store.create_run("run_msgs_cov", "cfg", "default").unwrap();
+        store
+            .record_run_start("pipe_msgs_cov", "default", "run_msgs_cov", "cfg")
+            .unwrap();
         seed_message_ops(
             &store,
             "pipe_msgs_cov",
@@ -6665,7 +6767,9 @@ mod session_endpoints_tests {
     #[tokio::test]
     async fn list_messages_falls_back_to_active_pipeline_and_handles_no_store() {
         let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
-        store.create_run("run_fb_cov", "cfg", "default").unwrap();
+        store
+            .record_run_start("pipe_active_cov", "default", "run_fb_cov", "cfg")
+            .unwrap();
         seed_message_ops(
             &store,
             "pipe_active_cov",
@@ -7463,35 +7567,15 @@ mod server_gap_tests {
         ) -> Result<(), agentos_core::types::StorageError> {
             agentos_core::traits::StorageBackend::append_trace(self.inner.as_ref(), entry).await
         }
-        async fn update_run_status(
+        async fn record_run_start(
             &self,
-            run_id: &str,
-            status: agentos_core::types::RunStatus,
-            branch: Option<&str>,
-            seq: Option<u32>,
-        ) -> Result<(), agentos_core::types::StorageError> {
-            agentos_core::traits::StorageBackend::update_run_status(
-                self.inner.as_ref(),
-                run_id,
-                status,
-                branch,
-                seq,
-            )
-            .await
-        }
-        async fn create_run(
-            &self,
+            pipeline_id: &str,
+            tenant_id: &str,
             run_id: &str,
             config_hash: &str,
-            tenant_id: &str,
         ) -> Result<(), agentos_core::types::StorageError> {
-            agentos_core::traits::StorageBackend::create_run(
-                self.inner.as_ref(),
-                run_id,
-                config_hash,
-                tenant_id,
-            )
-            .await
+            self.inner
+                .record_run_start(pipeline_id, tenant_id, run_id, config_hash)
         }
         async fn store_blob(
             &self,
@@ -7704,24 +7788,15 @@ mod server_gap_tests {
     #[tokio::test]
     async fn cold_recovery_checkpoint_failure_degrades_to_traces() {
         let probe = Arc::new(ProbeStore::new());
-        // 回放查询先经 message_slots 反查本管道的 run_id 集合（再按 run_id 扫
-        // traces），故须先落一条本管道的消息槽位行，trace 才会被回放命中。
-        probe
-            .inner
-            .apply_messages_ops_to_table(
-                "pipe_cp_fail",
-                "default",
-                &[serde_json::json!({"op": "set", "seq": 0,
-                    "msg": {"role": "user", "content": "seed"}, "_run_id": "run-trace"})],
-            )
-            .unwrap();
+        // DR 重建入口条件 = state 与消息双空：本测试不落 state 行与消息槽行，
+        // traces 按 pipeline_id 直查回放（traces 已是 pipeline 级 op 流）。
         agentos_core::traits::StorageBackend::append_trace(
             probe.inner.as_ref(),
             agentos_core::types::TraceEntry {
                 trace_id: "t1".to_string(),
-                run_id: "run-trace".to_string(),
-                branch_id: "main".to_string(),
-                seq_in_branch: 1,
+                pipeline_id: "pipe_cp_fail".to_string(),
+                // 写入侧 seq 恒 0，存储层按 (pipeline_id, MAX(seq)+1) 分配日志序
+                seq: 0,
                 plugin_id: "seed".to_string(),
                 patch_type: agentos_core::types::PatchType::StateUpdate,
                 patch_data: serde_json::json!({"from_trace": true}),

@@ -143,7 +143,6 @@ describe('session API 覆盖缺口（批九）', () => {
         status: 'idle',
         agentId: 'ag-1',
         pipelineIds: ['p-main', 'p-sub'],
-        activePipelineId: 'p-main',
       })
       expect(session.createdAt).toBe(TS)
       expect(session.updatedAt).toBe('2026-09-13T00:01:00Z')
@@ -166,7 +165,6 @@ describe('session API 覆盖缺口（批九）', () => {
         status: 'created',
         agentId: null,
         pipelineIds: [],
-        activePipelineId: null,
       })
       expect(session.updatedAt).toBe(TS)
       expect(session.intent).toBeUndefined()

@@ -197,23 +197,6 @@ impl StorageBackend for MockStorageBackend {
     async fn append_trace(&self, _entry: TraceEntry) -> Result<(), StorageError> {
         Ok(())
     }
-    async fn update_run_status(
-        &self,
-        _run_id: &str,
-        _status: RunStatus,
-        _branch: Option<&str>,
-        _seq: Option<u32>,
-    ) -> Result<(), StorageError> {
-        Ok(())
-    }
-    async fn create_run(
-        &self,
-        _run_id: &str,
-        _config_hash: &str,
-        _tenant_id: &str,
-    ) -> Result<(), StorageError> {
-        Ok(())
-    }
     async fn store_blob(&self, _data: &[u8], _mime_type: &str) -> Result<String, StorageError> {
         Ok("mock_blob".to_string())
     }
@@ -344,6 +327,7 @@ fn test_run_record_serialization() {
         current_branch: "main".to_string(),
         current_seq: 0,
         metadata: None,
+        pipeline_id: Some("pipe_001".to_string()),
     };
     let json_str = serde_json::to_string(&record).unwrap();
     assert!(json_str.contains("run_001"));
@@ -370,7 +354,6 @@ fn test_message_record_serialization() {
     let record = MessageRecord {
         message_id: "msg_001".to_string(),
         run_id: "run_001".to_string(),
-        branch_id: "main".to_string(),
         seq_in_branch: 1,
         role: "user".to_string(),
         blob_id: Some("blob_001".to_string()),
@@ -387,7 +370,6 @@ fn test_message_record_serialization() {
     };
     let json_str = serde_json::to_string(&record).unwrap();
     assert!(json_str.contains("msg_001"));
-    assert!(json_str.contains("main"));
     assert!(json_str.contains("seq_in_branch"));
 }
 
@@ -395,9 +377,8 @@ fn test_message_record_serialization() {
 fn test_trace_entry_serialization() {
     let entry = TraceEntry {
         trace_id: "trace_001".to_string(),
-        run_id: "run_001".to_string(),
-        branch_id: "main".to_string(),
-        seq_in_branch: 1,
+        pipeline_id: "pipe_001".to_string(),
+        seq: 1,
         plugin_id: "plugin_001".to_string(),
         patch_type: PatchType::StateUpdate,
         patch_data: json!({"key": "value"}),
@@ -405,6 +386,7 @@ fn test_trace_entry_serialization() {
     };
     let json_str = serde_json::to_string(&entry).unwrap();
     assert!(json_str.contains("trace_001"));
+    assert!(json_str.contains("pipe_001"));
     assert!(json_str.contains("state_update"));
     assert!(json_str.contains("plugin_001"));
 }

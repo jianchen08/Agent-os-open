@@ -15,8 +15,7 @@
  * 恒为嵌入形态（SettingsHubWidget / PanelHostWidget 两个消费方均内嵌渲染）。
  */
 
-import { useQuery } from '@tanstack/react-query'
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import {
   RefreshCw,
   AlertCircle,
@@ -29,41 +28,18 @@ import {
   X,
   type LucideIcon,
 } from '@/assets/icons'
-import { parseContractStatus, type PluginContractStatus } from '@/components/debug/ContractStatusPanel'
+import { EmptyState } from '@/components/shared/EmptyState'
+import { ErrorState } from '@/components/shared/ErrorState'
 import { PageShell } from '@/components/shared/PageShell'
 import { toast } from '@/components/ui/sonner'
 import { API_ENDPOINTS } from '@/constants/api'
+import { usePluginsQuery } from '@/hooks/queries/usePluginsQuery'
+import { useAsyncResource } from '@/hooks/useAsyncResource'
 import apiClient from '@/services/api/client'
 import { refreshPluginContributions } from '@/services/modules/GrowthLoop'
 import { queryClient } from '@/services/query/queryClient'
 import { queryKeys } from '@/services/query/queryKeys'
-
-/** 插件状态信息（对齐后端 plugins_status_handler 返回） */
-interface PluginStatus {
-  plugin_id: string
-  name: string
-  description?: string | null
-  config_type: string
-  host_type: string
-  version: string | null
-  enabled: boolean
-  activation: string
-  status: string
-  config_files: Array<{ id: string; label: string; path: string }>
-  has_contributes: boolean
-  has_http_endpoints: boolean
-  error: string | null
-}
-
-/** 工具能力条目（/api/v1/schema 的 tools 面，ToolDescriptor 序列化子集） */
-interface ToolCapability {
-  name: string
-  description?: string
-  plugin_id?: string
-  category?: string
-  source?: string
-  input_schema?: Record<string, unknown>
-}
+import type { PluginStatus } from '@/hooks/queries/usePluginsQuery'
 
 /** 类型主题：卡片徽标 + 图标方块共用一套配色。
  *  半透明底/边框用 color-mix 绑定 ds 语义令牌（同 ActivityCard 模式），
@@ -119,50 +95,24 @@ function activationLabel(a: string): string {
 }
 
 export function PluginsSettingsPage() {
-  const [plugins, setPlugins] = useState<PluginStatus[]>([])
   const [togglingId, setTogglingId] = useState<string | null>(null)
   const [filter, setFilter] = useState<'all' | 'pipeline' | 'tool' | 'system' | 'disabled'>('all')
   // 统一搜索词：同时作用于插件列表与工具能力区（单一搜索入口）
   const [search, setSearch] = useState('')
   const [expandedTool, setExpandedTool] = useState<string | null>(null)
 
-  // 插件状态 + 工具能力面（query 化）：插件启停后由 toggle 乐观更新缓存，
-  // 重进设置页缓存秒开
-  const pluginsQuery = useQuery({
-    queryKey: queryKeys.plugins,
-    queryFn: async () => {
-      const res = await apiClient.get<PluginStatus[]>(API_ENDPOINTS.PLUGINS.LIST)
-      // 能力面与插件面同拉（读失败不阻断插件列表——能力区降级空）
-      let tools: ToolCapability[] = []
-      try {
-        const schema = await apiClient.get<{ tools?: ToolCapability[] }>(API_ENDPOINTS.SCHEMA.GET)
-        tools = Array.isArray(schema.data?.tools) ? schema.data.tools : []
-      } catch {
-        tools = []
-      }
-      // 契约状态面（ADR 2026-08-28：插件行内"已净化/工具被剔除"标示的数据源；
-      // 读失败不阻断插件列表——标示降级为不显示）
-      let contract: PluginContractStatus[] = []
-      try {
-        const cs = await apiClient.get<unknown>(API_ENDPOINTS.PLUGINS.CONTRACT_STATUS)
-        contract = parseContractStatus(cs.data)
-      } catch {
-        contract = []
-      }
-      return { plugins: res.data, capabilities: tools, contract }
-    },
-    staleTime: 60_000,
+  // 插件状态 + 工具能力面（query 化标准入口）：插件启停后由 toggle 乐观更新
+  // 缓存，重进设置页缓存秒开
+  const pluginsQuery = usePluginsQuery()
+  // 四态统一（OBS-R258-1）：loading/error/empty/ready 穷举——主面（插件列表）
+  // 失败显式 ErrorState + 重试，不伪装空态；副面（能力/契约）降级由 query 内
+  // 注释声明的降级分支承载
+  const resource = useAsyncResource(pluginsQuery, {
+    isEmpty: (data) => data.plugins.length === 0,
+    fallbackErrorText: '获取插件状态失败',
   })
-  const isLoading = pluginsQuery.isPending && plugins.length === 0
-  const error = pluginsQuery.isError
-    ? pluginsQuery.error instanceof Error ? pluginsQuery.error.message : '获取插件状态失败'
-    : null
-
-  useEffect(() => {
-    if (pluginsQuery.data) {
-      setPlugins(pluginsQuery.data.plugins)
-    }
-  }, [pluginsQuery.data])
+  const isLoading = resource.isLoading
+  const plugins = resource.data?.plugins ?? []
 
   /** 切换插件启用状态 */
   /** 反向依赖查询（ADR 2026-09-14 §2.4 禁用事前提醒数据源；端点不可得时静默放行） */
@@ -210,7 +160,7 @@ export function PluginsSettingsPage() {
         { enabled: !currentEnabled },
       )
       if (res.data.success) {
-        // 缓存乐观更新（立即反映，重启后内核才真正生效）
+        // 缓存乐观更新（立即反映，重启后内核才真正生效）；视图从缓存派生
         queryClient.setQueryData<{ plugins: PluginStatus[] }>(queryKeys.plugins, (prev) =>
           prev
             ? {
@@ -222,13 +172,6 @@ export function PluginsSettingsPage() {
                 ),
               }
             : prev,
-        )
-        setPlugins((prev) =>
-          prev.map((p) =>
-            p.plugin_id === pluginId
-              ? { ...p, enabled: !currentEnabled, status: !currentEnabled ? 'active' : 'disabled' }
-              : p,
-          ),
         )
         toast.success(res.data.message || `已${!currentEnabled ? '启用' : '禁用'} ${pluginId}`)
         // §2.4 禁用连带：后端已同步摘除受影响依赖方能力，逐名提醒（恢复 = 重新启用提供者）
@@ -265,8 +208,8 @@ export function PluginsSettingsPage() {
       (p.config_type || '').toLowerCase().includes(q)
     )
   })
-  const capFiltered = pluginsQuery.data?.capabilities
-    ? pluginsQuery.data.capabilities.filter((t) => {
+  const capFiltered = resource.data?.capabilities
+    ? resource.data.capabilities.filter((t) => {
         if (!q) return true
         return (
           t.name?.toLowerCase().includes(q) ||
@@ -275,9 +218,9 @@ export function PluginsSettingsPage() {
         )
       })
     : []
-  const capabilities = pluginsQuery.data?.capabilities ?? []
+  const capabilities = resource.data?.capabilities ?? []
   const contractMap = new Map(
-    (pluginsQuery.data?.contract ?? []).map((c) => [c.plugin_id, c]),
+    (resource.data?.contract ?? []).map((c) => [c.plugin_id, c]),
   )
 
   const filterTabs: Array<{ id: typeof filter; label: string }> = [
@@ -322,7 +265,7 @@ export function PluginsSettingsPage() {
               )}
             </div>
             <button
-              onClick={() => void pluginsQuery.refetch()}
+              onClick={resource.refetch}
               disabled={isLoading}
               className="hover:bg-[var(--hover-overlay)] flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
               style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}
@@ -331,39 +274,44 @@ export function PluginsSettingsPage() {
               刷新
             </button>
           </div>
-          {/* 视图分段 + 启用计数 */}
-          <div className="mt-2 flex flex-wrap items-center gap-1">
-            {filterTabs.map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setFilter(tab.id)}
-                className={`rounded-md px-2.5 py-1 text-[11px] transition-colors ${
-                  filter === tab.id
-                    ? 'text-[var(--ds-accent-primary,#22D3EE)]'
-                    : 'text-muted-foreground hover:text-foreground'
-                }`}
-                style={
-                  filter === tab.id
-                    ? {
-                        background: 'var(--ds-bg-elevated, #111C38)',
-                        boxShadow: 'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.45))',
-                      }
-                    : undefined
-                }
-              >
-                {tab.label}
-              </button>
-            ))}
-            <span className="text-muted-foreground ml-auto font-mono text-[10px]" data-testid="plugins-enabled-count">
-              {plugins.filter((p) => p.enabled).length}/{plugins.length} 启用
-            </span>
-          </div>
+          {/* 视图分段 + 启用计数（数据面控件：仅 ready 态出现，失败/加载中不出假计数） */}
+          {resource.status === 'ready' && (
+            <div className="mt-2 flex flex-wrap items-center gap-1">
+              {filterTabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  onClick={() => setFilter(tab.id)}
+                  className={`rounded-md px-2.5 py-1 text-[11px] transition-colors ${
+                    filter === tab.id
+                      ? 'text-[var(--ds-accent-primary,#22D3EE)]'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                  style={
+                    filter === tab.id
+                      ? {
+                          background: 'var(--ds-bg-elevated, #111C38)',
+                          boxShadow: 'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.45))',
+                        }
+                      : undefined
+                  }
+                >
+                  {tab.label}
+                </button>
+              ))}
+              <span className="text-muted-foreground ml-auto font-mono text-[10px]" data-testid="plugins-enabled-count">
+                {plugins.filter((p) => p.enabled).length}/{plugins.length} 启用
+              </span>
+            </div>
+          )}
         </div>
 
-        {error && <div className="bg-destructive/10 text-destructive rounded-lg p-4 text-sm">{error}</div>}
+        {/* 错误态（shared，带重试；主面失败显式呈现，不伪装空态） */}
+        {resource.status === 'error' && (
+          <ErrorState message={resource.error ?? ''} onRetry={resource.refetch} />
+        )}
 
         {/* 加载骨架 */}
-        {isLoading && (
+        {resource.status === 'loading' && (
           <div className="flex flex-col gap-2">
             {Array.from({ length: 6 }).map((_, i) => (
               <div key={i} className="animate-pulse rounded-lg border p-3.5">
@@ -374,16 +322,13 @@ export function PluginsSettingsPage() {
           </div>
         )}
 
-        {/* 空状态 */}
-        {!isLoading && !error && plugins.length === 0 && (
-          <div className="flex flex-col items-center justify-center py-16">
-            <Plug className="text-muted-foreground/40 mb-3 h-12 w-12" />
-            <p className="text-muted-foreground text-sm">暂无已注册的插件</p>
-          </div>
+        {/* 空状态（shared） */}
+        {resource.status === 'empty' && (
+          <EmptyState icon={Plug} title="暂无已注册的插件" />
         )}
 
         {/* 插件列表（VSCode 扩展卡片式） */}
-        {!isLoading && !error && plugins.length > 0 && (
+        {resource.status === 'ready' && (
           <div className="flex flex-col gap-2" aria-live="polite">
             {filtered.length === 0 && (
               <p className="text-muted-foreground py-8 text-center text-sm">没有匹配的插件</p>
@@ -494,7 +439,7 @@ export function PluginsSettingsPage() {
         )}
 
         {/* ── 工具能力浏览（ToolsPage 退役并入；受顶部统一搜索词过滤）── */}
-        {!isLoading && !error && capabilities.length > 0 && (
+        {resource.status === 'ready' && capabilities.length > 0 && (
           <section className="mt-2" aria-label="工具能力浏览">
             <div className="mb-2 flex flex-wrap items-center gap-3">
               <h2 className="flex items-center gap-1.5 text-sm font-medium">

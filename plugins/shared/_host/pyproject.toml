@@ -1,10 +1,15 @@
 [project]
 name = "agentos-cohost-host"
 version = "1.0.0"
-description = "Lingxi AgentOS co-hosting host base — shared venv for light group members (方案 §4.7)"
+description = "Lingxi AgentOS co-hosting host base — shared venv for cohost members (方案 §4.7)"
 requires-python = ">=3.11"
+# 本 venv 是合宿成员（任一 host_group）的运行环境：成员自身 .venv 零消费。
+# 故此处必须装齐成员依赖并集——漏一项 = 该成员在宿主进程内 import 即失败，
+# 且宿主 fail-fast 连坐全组成员（monitoring 缺 psutil 实证）。
 dependencies = [
     "agentos-plugin-sdk>=0.2.0",
+    # light_stable 成员依赖（稳定观察面；成员清单见 bootstrap_plugin_envs.py 审计输出）：
+    "psutil",   # monitoring — 系统指标采集
 ]
 
 # 本地 SDK 源映射（editable，与成员插件 pyproject 同轨）：

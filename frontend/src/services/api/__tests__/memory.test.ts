@@ -8,7 +8,9 @@
 /* eslint-disable import-x/order */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  deleteMemoryById,
   getEpisodes,
+  getMemoryById,
   getMemoryStats,
   getSemanticMemory,
 } from '@/services/api/memory'
@@ -17,6 +19,7 @@ vi.mock('../client', () => ({
   default: {
     get: vi.fn(),
     post: vi.fn(),
+    delete: vi.fn(),
   },
 }))
 
@@ -105,6 +108,52 @@ describe('记忆 API', () => {
   })
 
   // importDocument 用例已删除：函数指向后端不存在的 /memory/import 端点（2026-08 清理）
+
+  describe('getMemoryById - 获取单条记忆详情', () => {
+    it('应该按 id 请求详情端点并返回详情', async () => {
+      const mockDetail = {
+        id: 'mem-1',
+        content: '蓝鲸关键词记忆',
+        memory_type: 'semantic',
+        tags: ['session:thread-abc'],
+        score: 0,
+        created_at: '2026-09-20T00:00:00Z',
+      }
+      vi.mocked(apiClient.get).mockResolvedValueOnce({ data: mockDetail })
+
+      const result = await getMemoryById('mem-1')
+
+      expect(result).toEqual(mockDetail)
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/hindsight_memory_service/memory/mem-1')
+    })
+
+    it('不同 id 请求不同 URL（id 进路径）', async () => {
+      vi.mocked(apiClient.get).mockResolvedValue({ data: { id: 'x', content: '', memory_type: '', tags: [], score: 0, created_at: '' } })
+
+      await getMemoryById('mem-a')
+      await getMemoryById('mem-b')
+
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/hindsight_memory_service/memory/mem-a')
+      expect(apiClient.get).toHaveBeenCalledWith('/ext/hindsight_memory_service/memory/mem-b')
+    })
+  })
+
+  describe('deleteMemoryById - 删除单条记忆', () => {
+    it('应该按 id 发 DELETE 并返回消息', async () => {
+      vi.mocked(apiClient.delete).mockResolvedValueOnce({ data: { message: '记忆已删除' } })
+
+      const result = await deleteMemoryById('mem-1')
+
+      expect(result).toEqual({ message: '记忆已删除' })
+      expect(apiClient.delete).toHaveBeenCalledWith('/ext/hindsight_memory_service/memory/mem-1')
+    })
+
+    it('后端 404（未找到）应上抛给调用方', async () => {
+      vi.mocked(apiClient.delete).mockRejectedValueOnce({ message: '未找到相关记忆' })
+
+      await expect(deleteMemoryById('mem-gone')).rejects.toEqual({ message: '未找到相关记忆' })
+    })
+  })
 
   describe('重试机制', () => {
     it('应该在网络错误时重试', async () => {

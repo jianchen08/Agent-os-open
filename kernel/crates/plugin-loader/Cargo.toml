@@ -18,6 +18,9 @@ agentos-core.workspace = true
 agentos-mcp.workspace = true
 parking_lot = "0.12"
 chrono.workspace = true
+# 双源同 id 裁决（ADR 2026-09-20-packaged-dual-source-adjudication）：
+# 用户/内置副本 manifest version 按 semver 语义比较
+semver = "1"
 # 插件准入哈希校验（P2-2）
 sha2 = "0.10"
 # 原生插件 cdylib 动态加载（直接 dlopen 拿构造函数符号，还原 Box<dyn PipelinePlugin>）。

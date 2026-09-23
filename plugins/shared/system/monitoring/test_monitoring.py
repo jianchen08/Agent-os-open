@@ -468,12 +468,12 @@ def _make_kernel_db(tmp_path: Path) -> Path:
     """
     db_path = tmp_path / "agentos_kernel.db"
     conn = sqlite3.connect(db_path)
-    conn.execute("CREATE TABLE traces (trace_id TEXT, run_id TEXT, created_at TEXT, plugin_id TEXT, patch_data TEXT, tenant_id TEXT)")
+    conn.execute("CREATE TABLE traces (trace_id TEXT, pipeline_id TEXT, created_at TEXT, plugin_id TEXT, patch_data TEXT, tenant_id TEXT)")
     conn.execute(
         "INSERT INTO traces VALUES (?, ?, ?, ?, ?, ?)",
         (
             "tr-1",
-            "run-1",
+            "pipe-1",
             "2026-01-01T00:00:00",
             "core",
             json.dumps(
@@ -498,7 +498,7 @@ def _make_kernel_db(tmp_path: Path) -> Path:
         "INSERT INTO traces VALUES (?, ?, ?, ?, ?, ?)",
         (
             "tr-2",
-            "run-1",
+            "pipe-1",
             "2026-01-01T00:01:00",
             "core",
             json.dumps({"tool_results": [{"tool_name": "file_read", "success": True, "data": "x", "duration_ms": 3.0}]}),
@@ -508,12 +508,12 @@ def _make_kernel_db(tmp_path: Path) -> Path:
     # 负控制①：插件 id 恰为 pipeline_tool_core 但 patch_data 无 tool_results。
     conn.execute(
         "INSERT INTO traces VALUES (?, ?, ?, ?, ?, ?)",
-        ("tr-3", "run-2", "2026-01-01T00:02:00", "pipeline_tool_core", json.dumps({"raw_result": "你好"}), "tenant-b"),
+        ("tr-3", "pipe-2", "2026-01-01T00:02:00", "pipeline_tool_core", json.dumps({"raw_result": "你好"}), "tenant-b"),
     )
     # 负控制②：普通 step 行，无工具结果。
     conn.execute(
         "INSERT INTO traces VALUES (?, ?, ?, ?, ?, ?)",
-        ("tr-4", "run-2", "2026-01-01T00:03:00", "prepare", json.dumps({"tool_schemas_count": 41}), "tenant-b"),
+        ("tr-4", "pipe-2", "2026-01-01T00:03:00", "prepare", json.dumps({"tool_schemas_count": 41}), "tenant-b"),
     )
     conn.commit()
     conn.close()
@@ -536,14 +536,14 @@ def _make_windowed_db(
     db_path = tmp_path / "agentos_kernel.db"
     conn = sqlite3.connect(db_path)
     conn.execute(
-        "CREATE TABLE traces (trace_id TEXT, run_id TEXT, created_at TEXT, plugin_id TEXT, patch_data TEXT, tenant_id TEXT)"
+        "CREATE TABLE traces (trace_id TEXT, pipeline_id TEXT, created_at TEXT, plugin_id TEXT, patch_data TEXT, tenant_id TEXT)"
     )
     rows = []
     for pos in range(1, total + 1):
         results = tool_results_by_pos.get(pos)
         patch: dict[str, Any] = {"tool_results": results} if results else {"raw_result": "no tools"}
         created = f"2026-01-01T{pos // 60:02d}:{pos % 60:02d}:00"
-        rows.append((f"tr-{pos}", "run-1", created, "core", json.dumps(patch), tenant))
+        rows.append((f"tr-{pos}", "pipe-1", created, "core", json.dumps(patch), tenant))
     conn.executemany("INSERT INTO traces VALUES (?, ?, ?, ?, ?, ?)", rows)
     conn.commit()
     conn.close()
@@ -664,7 +664,7 @@ class TestToolCalls:
         monkeypatch.setenv("AGENTOS_DB_PATH", str(_make_kernel_db(tmp_path)))
         a = mod._query_tool_calls({}, "tenant-a")
         assert a["total"] == 3
-        assert all(i["run_id"] == "run-1" for i in a["items"])
+        assert all(i["pipeline_id"] == "pipe-1" for i in a["items"])
         # tenant-b 的 traces 行 patch_data 无 tool_results → 工具查询恒空；
         # 租户互斥由 tenant-a 查不到 tenant-b 的 run-2 行证明。
         b = mod._query_tool_calls({}, "tenant-b")
@@ -968,7 +968,7 @@ def _make_llm_traces_db(tmp_path: Path) -> Path:
     db_path = tmp_path / "agentos_kernel.db"
     conn = sqlite3.connect(db_path)
     conn.execute(
-        "CREATE TABLE traces (trace_id TEXT, run_id TEXT, created_at TEXT,"
+        "CREATE TABLE traces (trace_id TEXT, pipeline_id TEXT, created_at TEXT,"
         " plugin_id TEXT, patch_data TEXT)"
     )
     usage_rows = [
@@ -980,12 +980,12 @@ def _make_llm_traces_db(tmp_path: Path) -> Path:
     for tid, ts, usage in usage_rows:
         conn.execute(
             "INSERT INTO traces VALUES (?, ?, ?, ?, ?)",
-            (tid, "run-1", ts, "core", json.dumps({"llm_usage": usage})),
+            (tid, "pipe-1", ts, "core", json.dumps({"llm_usage": usage})),
         )
     # pipeline_state：累计真值（与 traces 的逐轮和同量——两源一致是设计契约）
     conn.execute(
         "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT,"
-        " field_value TEXT, tenant_id TEXT, updated_at TEXT)"
+        " value TEXT, value_kind TEXT DEFAULT 'str', tenant_id TEXT, updated_at TEXT)"
     )
     state_rows = [
         # deepseek：两个管道各 110 / 220（合计 330，与 traces 两轮之和一致）
@@ -1000,10 +1000,16 @@ def _make_llm_traces_db(tmp_path: Path) -> Path:
         ("pipe-d", "track.llm_usage", {"total_input_tokens": 7, "total_output_tokens": 3, "total_tokens": 10, "last_input_tokens": 7, "last_output_tokens": 3}),
     ]
     for pid, key, val in state_rows:
-        conn.execute(
-            "INSERT INTO pipeline_state VALUES (?, ?, ?, 'default', '2026-09-01T00:00:00Z')",
-            (pid, key, json.dumps(val)),
-        )
+        if isinstance(val, str):
+            conn.execute(
+                "INSERT INTO pipeline_state VALUES (?, ?, ?, 'str', 'default', '2026-09-01T00:00:00Z')",
+                (pid, key, val),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO pipeline_state VALUES (?, ?, ?, 'json', 'default', '2026-09-01T00:00:00Z')",
+                (pid, key, json.dumps(val)),
+            )
     conn.commit()
     conn.close()
     return db_path
@@ -1292,32 +1298,47 @@ class TestTokenAggregationBurstCache:
 
 
 def _make_runs_for_search(tmp_path: Path) -> Path:
-    """runs 表两租户各一管道，驱动 _tenant_pipeline_ids 的可见集判定。"""
+    """pipeline_state 两租户各一管道（run_status 簿记键），驱动可见集判定。
+
+    runs 表退役（ADR 2026-09-18）：执行过 = 有 run_status 标量键。
+    """
     db_path = tmp_path / "agentos_kernel.db"
     conn = sqlite3.connect(db_path)
     conn.execute(
-        "CREATE TABLE runs (run_id TEXT PRIMARY KEY, pipeline_id TEXT, tenant_id TEXT, created_at TEXT)"
+        "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT, value TEXT,"
+        " value_kind TEXT DEFAULT 'str', tenant_id TEXT, updated_at TEXT,"
+        " PRIMARY KEY (pipeline_id, field_key, tenant_id))"
     )
-    conn.execute("INSERT INTO runs VALUES ('r-1', 'p-tenant-a', 'tenant-a', '2026-01-01T00:00:00')")
-    conn.execute("INSERT INTO runs VALUES ('r-2', 'p-tenant-b', 'tenant-b', '2026-01-02T00:00:00')")
+    conn.execute(
+        "INSERT INTO pipeline_state VALUES ('p-tenant-a', 'run_status', 'completed', 'str', 'tenant-a', '2026-01-01T00:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO pipeline_state VALUES ('p-tenant-b', 'run_status', 'completed', 'str', 'tenant-b', '2026-01-02T00:00:00')"
+    )
     conn.commit()
     conn.close()
     return db_path
 
 
 def _make_sessions_for_search(tmp_path: Path) -> Path:
-    """sessions 表两租户各一同名会话（真实标题源）+ runs 表供消息域可见集。"""
+    """sessions 表两租户各一同名会话（真实标题源）+ state 运行键供可见集。"""
     db_path = tmp_path / "agentos_kernel.db"
     conn = sqlite3.connect(db_path)
     conn.execute(
-        "CREATE TABLE runs (run_id TEXT PRIMARY KEY, pipeline_id TEXT, tenant_id TEXT, created_at TEXT)"
+        "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT, value TEXT,"
+        " value_kind TEXT DEFAULT 'str', tenant_id TEXT, updated_at TEXT,"
+        " PRIMARY KEY (pipeline_id, field_key, tenant_id))"
     )
     conn.execute(
         "CREATE TABLE sessions (thread_id TEXT PRIMARY KEY, title TEXT, tenant_id TEXT, "
         "last_active_at TEXT, updated_at TEXT)"
     )
-    conn.execute("INSERT INTO runs VALUES ('r-a', 'p-tenant-a', 'tenant-a', '2026-01-01T00:00:00')")
-    conn.execute("INSERT INTO runs VALUES ('r-b', 'p-tenant-b', 'tenant-b', '2026-01-02T00:00:00')")
+    conn.execute(
+        "INSERT INTO pipeline_state VALUES ('p-tenant-a', 'run_status', 'completed', 'str', 'tenant-a', '2026-01-01T00:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO pipeline_state VALUES ('p-tenant-b', 'run_status', 'completed', 'str', 'tenant-b', '2026-01-02T00:00:00')"
+    )
     conn.execute(
         "INSERT INTO sessions VALUES ('thread-a', 'stress2-19 租户甲会话', 'tenant-a', "
         "'2026-01-03T00:00:00', '2026-01-03T00:00:00')"

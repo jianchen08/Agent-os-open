@@ -100,17 +100,29 @@ class FakeDocumentsAPI:
         return dict(doc)
 
 
+class FakeBanksAPI:
+    """内存 banks API：list_banks 返回既有 bank 清单（hindsight 服务端契约）。"""
+
+    def __init__(self, banks: dict[str, dict[str, dict[str, Any]]]) -> None:
+        self._banks = banks
+
+    async def list_banks(self) -> Any:
+        items = [SimpleNamespace(bank_id=bid) for bid in self._banks]
+        return SimpleNamespace(banks=items)
+
+
 class FakeHindsightClient:
-    """内存 hindsight 客户端：aretain 落库 + documents 面读回。"""
+    """内存 hindsight 客户端：aretain 落库 + documents/banks 面读回。"""
 
     def __init__(self) -> None:
-        self.banks: dict[str, dict[str, dict[str, Any]]] = {}
-        self.documents = FakeDocumentsAPI(self.banks)
+        self.bank_store: dict[str, dict[str, dict[str, Any]]] = {}
+        self.documents = FakeDocumentsAPI(self.bank_store)
+        self.banks = FakeBanksAPI(self.bank_store)
 
     async def aretain(self, **kwargs: Any) -> Any:
         bank = kwargs.get("bank_id", "")
-        doc_id = kwargs.get("document_id") or f"auto-{len(self.banks.get(bank, {})) + 1}"
-        self.banks.setdefault(bank, {})[doc_id] = {
+        doc_id = kwargs.get("document_id") or f"auto-{len(self.bank_store.get(bank, {})) + 1}"
+        self.bank_store.setdefault(bank, {})[doc_id] = {
             "id": doc_id,
             "original_text": kwargs.get("content", ""),
             "tags": [str(t) for t in (kwargs.get("tags") or [])],
@@ -261,3 +273,59 @@ class TestListingRealChain:
             "extra_data": {},
             "created_at": "2026-08-27T00:00:00Z",
         }
+
+
+def _seed_bank(stack: Any, bank_id: str, doc_id: str, mtype: str, text: str) -> None:
+    """向指定 bank 落一条记忆（memory 工具按会话 bank 写入的生产同款路径）。"""
+    _call_tool(
+        stack["hindsight"],
+        "hindsight.retain",
+        bank_id=bank_id,
+        content=text,
+        memory_type=mtype,
+        document_id=doc_id,
+        metadata={"tags": [f"session:{bank_id}"]},
+    )
+
+
+class TestSessionBankAggregation:
+    """BUG-76 回归：memory 工具按会话身份（thread-* bank）落库，列表面只查
+    默认 bank 会漏掉全部工具写入——页面与工具数据源不一致（用户误判记忆丢失）。
+    不变量：会话 bank + 默认 bank 的记忆全部出现在列表面/统计面。"""
+
+    def test_semantic_list_includes_session_bank_writes(self, stack: Any) -> None:
+        _seed_bank(stack, "thread-ebae9800", "mem-bluewhale", "semantic", "用户测试关键词是蓝鲸")
+        _seed(stack, "se-legacy", "semantic", "默认 bank 旧记忆", [])
+
+        result = _run(stack["routes"].list_semantic())
+
+        ids = {item["id"] for item in result["items"]}
+        assert ids == {"mem-bluewhale", "se-legacy"}
+        assert result["total"] == 2
+
+    def test_session_writes_counted_in_stats(self, stack: Any) -> None:
+        _seed_bank(stack, "thread-abc", "mem-s1", "semantic", "会话记忆一")
+        _seed_bank(stack, "thread-xyz", "ep-s1", "episode", "会话情景一")
+
+        stats = _run(stack["routes"].get_memory_stats())
+
+        assert stats["knowledge_count"] == 1
+        assert stats["episode_count"] == 1
+        assert stats["total_count"] == 2
+
+    def test_episodes_list_includes_session_bank_writes(self, stack: Any) -> None:
+        _seed_bank(stack, "thread-abc", "ep-s1", "episode", "会话情景记忆")
+
+        result = _run(stack["routes"].list_episodes(page=1, page_size=20))
+
+        assert [item["id"] for item in result["items"]] == ["ep-s1"]
+
+    def test_non_conversation_banks_excluded_from_listing(self, stack: Any) -> None:
+        """非对话 bank（kb/探针测试库/流水线 chunk 库）不进对话记忆列表面。"""
+        _seed_bank(stack, "kb", "kb-doc", "semantic", "知识库文档")
+        _seed_bank(stack, "probe-deadbeef", "probe-doc", "semantic", "探针写入")
+        _seed_bank(stack, "thread-abc", "mem-s1", "semantic", "会话记忆")
+
+        result = _run(stack["routes"].list_semantic())
+
+        assert [item["id"] for item in result["items"]] == ["mem-s1"]

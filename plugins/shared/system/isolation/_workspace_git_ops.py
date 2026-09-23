@@ -481,14 +481,20 @@ class _GitOpsMixin:
         self._normalize_worktree_gitdir_links(ws_dir, repo_path)
 
     def _normalize_worktree_gitdir_links(self, ws_dir: Path, repo_path: Path) -> None:
-        """把 worktree 的双向 gitdir 链接改写为相对路径（跨 OS 侧统一格式）。
+        """归一 worktree 双向 gitdir 链接：ws 侧相对（跨 OS 侧可读），admin 侧绝对。
 
         `git worktree add` 在哪侧执行就把链接写成哪侧绝对路径（宿主 `D:/`
-        与 WSL `/mnt/d` 互不解析）——另一侧的合并门控/评估 oracle 会报
-        "fatal: not a git repository"（2026-09-17 SWE 种子实跑实证：同题
-        两轮 worktree 分别为两种形态，宿主侧一好一坏）。相对路径不含挂载
-        前缀，同一目录树在两侧的相对解析指向同一物理位置，统一为相对形态
-        后任一侧创建、任一侧可用。幂等；定位失败仅告警不阻断建树。
+        与 WSL `/mnt/d` 互不解析）——另一侧读 worktree 会报
+        "fatal: not a git repository"（2026-09-17 SWE 种子实跑实证）。ws 侧
+        `.git` 文件的 gitdir 由 git 以该文件所在目录为基准解析，写成相对形态
+        后两侧均可用。
+
+        admin 侧（`.git/worktrees/<name>/gitdir`）**必须保持绝对**：git 以
+        进程 cwd 相对解析该文件内容，相对形态会被任何一次 `git worktree
+        prune` 判死并删除 admin（BUG-53 真机实证：并发任务的清理 prune 误删
+        在途 worktree 的 admin → worktree 悬空、合并门控 not a git
+        repository 误判失败）。指向 `<ws>/.git` 的绝对形式与 git 原生写法
+        一致。幂等；定位失败仅告警不阻断建树。
         """
         git_file = ws_dir / ".git"
         if not git_file.is_file():
@@ -504,7 +510,7 @@ class _GitOpsMixin:
             )
             return
         rel_git = os.path.relpath(admin_dir, ws_dir).replace("\\", "/")
-        rel_ws = os.path.relpath(ws_dir, admin_dir).replace("\\", "/")
+        abs_gitdir = str(ws_dir / ".git")
         # Windows git 给 worktree .git 文件加隐藏/只读属性——CPython 无法以
         # 写模式打开隐藏文件，用临时文件 + os.replace 覆盖（replace 可替换
         # 隐藏目标；只读目标先 chmod 放开）
@@ -512,16 +518,16 @@ class _GitOpsMixin:
             with contextlib.suppress(OSError):
                 os.chmod(target, stat.S_IWRITE)
         self._replace_text_forced(git_file, f"gitdir: {rel_git}\n")
-        self._replace_text_forced(admin_dir / "gitdir", rel_ws + "\n")
+        self._replace_text_forced(admin_dir / "gitdir", abs_gitdir + "\n")
         rc, _, err = self._run_git("rev-parse", "--git-dir", cwd=ws_dir)
         if rc != 0:
             logger.warning(
-                "[WorkspaceGitOps] gitdir 相对化后本侧 rev-parse 失败（保留相对形态）: %s",
+                "[WorkspaceGitOps] gitdir 归一后本侧 rev-parse 失败（保留归一形态）: %s",
                 err[:200],
             )
         else:
             logger.info(
-                "[WorkspaceGitOps] worktree gitdir 已统一为相对路径（跨侧可用）: ws=%s",
+                "[WorkspaceGitOps] worktree gitdir 已归一（ws 侧相对跨侧可用，admin 侧绝对防 prune 误删）: ws=%s",
                 ws_dir,
             )
 

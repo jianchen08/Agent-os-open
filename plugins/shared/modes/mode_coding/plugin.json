@@ -1,5 +1,8 @@
 {
   "id": "mode_coding",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Mode Coding",
   "version": "1.3.0",
   "plugin_type": "system",

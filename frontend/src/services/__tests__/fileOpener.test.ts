@@ -133,3 +133,28 @@ describe('fileOpener.openFile（工具卡片打开文件链路）', () => {
   // try/catch 吞掉全部异常（console.error 后正常返回），外层 catch 无任何可达
   // 路径。该分支属防御性双保险，删分支是源码简化决策（待拍板），测试不伪造。
 })
+
+describe('fileOpener.openFile — 外层降级 catch（解析层崩溃 → 内置编辑器兜底）', () => {
+  it('第一次解析调用本身抛错（inner try 之前）→ 外层 catch 降级重试后成功返回提示', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    // layoutStore.getState 首调即崩（在 defaultBuiltinOpenHandler 的 inner try 之外，
+    // 是外层 catch 的唯一可达触发面——apiClient 错误已被 inner catch 吞掉）
+    const realGetState = useLayoutModeStore.getState.bind(useLayoutModeStore)
+    const spy = vi.spyOn(useLayoutModeStore, 'getState').mockImplementationOnce(() => {
+      throw new Error('layout store 瞬时崩溃')
+    })
+    useLayoutModeStore.setState({ workspaceTabs: [], activeTabId: null, visitedTabIds: [] })
+    getMock.mockImplementation(async () => fileContentResp('fallback-content') as never)
+
+    const res = await openFile('src/app.ts')
+
+    expect(res.success).toBe(true)
+    expect(res.editor).toBe('builtin')
+    expect(res.message).toContain('解析失败')
+    // 降级路径真实拉到内容并注册了编辑器数据
+    expect(getFileEditorData('file-local-src_app.ts')?.content).toBe('fallback-content')
+    spy.mockRestore()
+    void realGetState
+    errSpy.mockRestore()
+  })
+})

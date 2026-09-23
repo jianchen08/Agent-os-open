@@ -333,10 +333,14 @@ class TestContainerTransport:
         assert r["ok"] is True
         assert r["body"]["result"]["content"] == []
         args = captured[0]["args"]
-        assert args[:4] == ["docker", "exec", "-i", "-e"]
+        # docker 解析为完整路径（进程启动审计契约），断言对齐解析锚
+        assert args[:4] == [bc._DOCKER, "exec", "-i", "-e"]
         assert "cid-9" in args
         assert "PYTHONIOENCODING=utf-8" in args
-        assert captured[0]["input"] == bc._INNER_SCRIPT.encode("utf-8")
+        # 脚本经 -c 承载，stdin 专供 spec JSON（2c0d76422 修 stdio 断链）
+        assert args[-2:] == ["-c", bc._INNER_SCRIPT]
+        spec = json.loads(captured[0]["input"].decode("utf-8"))
+        assert spec["payload"] == {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
 
     def test_docker_exec_failure_reports_stderr(self, monkeypatch):
         c = self._client(monkeypatch)

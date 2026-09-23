@@ -34,7 +34,7 @@ function renderPanel(kind: PanelKind | string, props: Record<string, unknown>) {
     case 'agents_panel':
       return <AgentManagerPage {...props} />
     case 'pipeline_manager':
-      return <PipelineManagerPanel />
+      return <PipelineManagerPanel {...props} />
     default:
       // 按 component 名直达
       if (kind === 'settings_hub' || !kind) {
@@ -58,8 +58,9 @@ export function AgentsPanel(props: Record<string, unknown>) {
 }
 /** 任务/管道管理面板：右侧面板直接展示（无标题栏包裹），
  *  统一管道管理视图：执行中的管道（任务/会话）实时状态 + 任务树组合。
- *  文件树通过任务节点"打开工作空间"按钮按需打开（0.1 语义）。 */
-export function PipelineManagerPanel() {
+ *  文件树通过任务节点"打开工作空间"按钮按需打开（0.1 语义）。
+ *  props 透传（通知点击路由 OBS-R259-1：focusTaskId 任务定位随页签下发）。 */
+export function PipelineManagerPanel(props: Record<string, unknown>) {
   return (
     <div
       className={cn('flex h-full flex-col')}
@@ -68,7 +69,9 @@ export function PipelineManagerPanel() {
     >
       <div className="min-h-0 flex-1">
         {/* PipelineManagerWidget：管道管理（内核快照 + 实时事件）+ 任务树组合 */}
-        <PipelineManagerWidget />
+        <PipelineManagerWidget
+          focusTaskId={typeof props.focusTaskId === 'string' ? props.focusTaskId : undefined}
+        />
       </div>
     </div>
   )

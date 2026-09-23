@@ -6,11 +6,22 @@
  * 集成系统托盘、全局快捷键和窗口信息采集。
  */
 
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, shell } from "electron";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  globalShortcut,
+  ipcMain,
+  Menu,
+  Notification,
+  shell,
+} from "electron";
+import { createHash } from "crypto";
 import * as path from "path";
 
 import {
   APP_BASE_URL,
+  APP_LOADING_URL,
   installAppProtocolHandler,
   registerAppSchemePrivileges,
 } from "./app-protocol";
@@ -19,6 +30,7 @@ import {
   shutdownManagedKernel,
 } from "./kernel-manager";
 import { createTray, destroyTray } from "./tray";
+import { loadAuthSession, saveAuthSession } from "./auth-session";
 import {
   startWindowInfoPolling,
   stopWindowInfoPolling,
@@ -28,11 +40,27 @@ import {
 // 协议特权注册必须在 app ready 之前（模块加载即执行）
 registerAppSchemePrivileges();
 
+// 进程级兜底日志：任何逃逸到顶层的异常/拒绝都必须留下可诊断输出，
+// 禁止无日志死路（BUG-50 的反馈缺口：启动序列中断后无任何痕迹）
+process.on("uncaughtException", (err) => {
+  console.error("[Electron] 未捕获异常:", err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[Electron] 未处理的 Promise 拒绝:", reason);
+});
+
 /** 开发环境下 Vite dev server 的 URL（端口 5188，与 vite.config.ts 一致） */
 const VITE_DEV_SERVER_URL = "http://localhost:5188";
 
 /** 全局快捷键：Ctrl+Shift+A 切换窗口显示/隐藏 */
 const TOGGLE_SHORTCUT = "Ctrl+Shift+A";
+
+/**
+ * Windows 系统通知（toast）的 AppUserModelID，与 package.json build.appId 一致：
+ * electron-builder NSIS 安装的开始菜单快捷方式即以此 AUMID 创建，进程侧
+ * 必须声明同一 ID，toast 才能归属到应用（否则不显示或归到 electron 名下）。
+ */
+const APP_USER_MODEL_ID = "com.agentos.assistant";
 
 /**
  * 子窗口标记（preload.ts 的 isChildWindow 依据同一字面量）。
@@ -292,47 +320,48 @@ function loadFrontend(
   }
 }
 
-/** 内核就绪前的加载态页面（纯静态 HTML+CSS，无脚本） */
-const KERNEL_LOADING_HTML = `<!doctype html>
-<html lang="zh-CN">
-<head><meta charset="utf-8"><title>灵汐助手</title>
-<style>
-  html,body{height:100%;margin:0;background:#f5f6fa;font-family:"Microsoft YaHei",system-ui,sans-serif}
-  .box{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;color:#4b5563}
-  .spin{width:36px;height:36px;border:4px solid #d1d5db;border-top-color:#4f6ef7;border-radius:50%;animation:r 1s linear infinite}
-  p{margin:0;font-size:14px}
-  @keyframes r{to{transform:rotate(360deg)}}
-</style></head>
-<body><div class="box"><div class="spin"></div><p>正在启动灵汐助手内核，首次启动可能需要数十秒…</p></div></body>
-</html>`;
+/**
+ * 生产首屏加载态页（app://bundle/__loading.html，由 app-protocol 协议内路由
+ * 伺服）。加载失败只降级 UI（立即显示窗口，黑窗等待真实前端），绝不影响
+ * 内核拉起序列——两条链路各自独立，此处任何异常都不得中断 bootPackagedKernel。
+ */
+function showKernelLoadingPage(win: BrowserWindow): void {
+  win.loadURL(APP_LOADING_URL).catch((err) => {
+    // ERR_ABORTED = 加载态被后续真实内容导航取代（内核秒就绪时），属预期
+    if ((err as { code?: string })?.code !== "ERR_ABORTED") {
+      console.error("[Electron] 加载内核启动加载态失败（不阻断内核拉起）:", err);
+      if (!win.isDestroyed()) {
+        win.show();
+      }
+    }
+  });
+}
 
-/** 首屏加载分流：dev 直载前端；生产先显示加载态，内核就绪后再载前端 */
+/** 首屏加载分流：dev 直载前端；生产先显示加载态，内核就绪后再载前端。
+ *  加载态与内核拉起互不依赖：前者失败只降级 UI，后者自带失败兜底
+ *  （错误对话框 + 退出），任一失败都不阻断另一条。 */
 function loadInitialContent(win: BrowserWindow): void {
   if (isDevelopment()) {
     loadFrontend(win);
     return;
   }
-  win
-    .loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(KERNEL_LOADING_HTML)}`)
-    .catch((err) => {
-      // ERR_ABORTED = 加载态被后续真实内容导航取代（复用模式下内核秒就绪），属预期
-      if ((err as { code?: string })?.code !== "ERR_ABORTED") {
-        console.error("[Electron] 加载内核启动加载态失败:", err);
-      }
-    });
+  showKernelLoadingPage(win);
   void bootPackagedKernelThenLoad(win);
 }
 
 /**
- * 拉起打包件内核（复用/拉起两态，见 kernel-manager）并在健康就绪后载入前端。
+ * 拉起打包件内核（只 spawn 包内内核，见 kernel-manager）并在健康就绪后载入前端。
  * 失败（安装损坏/启动失败/就绪超时）一律显式错误对话框 + 退出，不静默白屏。
  */
 async function bootPackagedKernelThenLoad(win: BrowserWindow): Promise<void> {
   try {
-    const { mode } = await ensurePackagedKernelRunning({
+    const result = await ensurePackagedKernelRunning({
       resourcesPath: process.resourcesPath,
+      // token 签名密钥持久化（userData 每安装身份一份）：刷新令牌跨重启有效，
+      // 否则内核每进程随机签名，用户每次打开应用都要重新登录
+      userDataDir: app.getPath("userData"),
     });
-    console.info(`[Electron] 内核就绪（${mode === "reuse" ? "复用已运行内核" : "已拉起打包内核"}），加载前端`);
+    console.info(`[Electron] 内核就绪（已拉起打包内核 pid=${result.pid ?? "?"}），加载前端`);
   } catch (err) {
     // 错误消息自带用户指引（缺失→重装 / 超时→看日志重试），此处原样呈现
     const message = err instanceof Error ? err.message : String(err);
@@ -400,6 +429,85 @@ function toggleMainWindow(): void {
     mainWindow.show();
     mainWindow.focus();
   }
+}
+
+/**
+ * 把主窗口带到前台（还原最小化 → 显示 → 聚焦）。
+ *
+ * 窗口不存在/已销毁时静默返回。second-instance（双开唤起首实例）与
+ * 系统通知点击共用同一恢复序列。
+ */
+export function focusMainWindow(win: BrowserWindow | null): void {
+  if (!win || win.isDestroyed()) {
+    return;
+  }
+  if (win.isMinimized()) {
+    win.restore();
+  }
+  if (!win.isVisible()) {
+    win.show();
+  }
+  win.focus();
+}
+
+/**
+ * 弹出系统级通知（Windows toast / macOS 通知中心 / Linux libnotify，
+ * 由 Electron Notification 按宿主 OS 路由）。
+ *
+ * - 静音（silent: true）：提示音由渲染进程 Web Audio 统一合成，避免双重响
+ * - 点击通知聚焦主窗口（交互请求的落点在应用内）
+ * - 参数非法或宿主不支持时返回 false，不抛错（调用方按布尔处理）
+ *
+ * 不接触 ipcMain，便于单测。
+ */
+export function showSystemNotification(opts: {
+  title?: unknown;
+  body?: unknown;
+}): boolean {
+  if (!opts || typeof opts.title !== "string" || opts.title.length === 0) {
+    console.warn("[Electron] notification:show 参数非法，需要非空 title", opts);
+    return false;
+  }
+  if (!Notification.isSupported()) {
+    console.warn("[Electron] 宿主不支持系统通知，跳过");
+    return false;
+  }
+  const body = typeof opts.body === "string" ? opts.body : "";
+  const notification = new Notification({
+    title: opts.title,
+    body,
+    silent: true,
+  });
+  notification.on("click", () => {
+    focusMainWindow(mainWindow);
+  });
+  notification.show();
+  return true;
+}
+
+/**
+ * 弹出系统目录选择对话框（资源管理器），供渲染进程声明工作空间/项目目录。
+ *
+ * - 以发起调用的窗口为父窗模态弹出；发起窗口缺失（webContents 已销毁等）
+ *   退化为无父窗弹出，功能不失效
+ * - openDirectory 单一选择；createDirectory 供 macOS 原生「新建文件夹」
+ *   （Windows 对话框自带该按钮，声明冗余无害）
+ * - 用户取消/未选返回 null，选中返回绝对路径
+ *
+ * 不接触 ipcMain，便于单测。
+ */
+export async function pickDirectoryViaDialog(
+  event: Electron.IpcMainInvokeEvent,
+): Promise<string | null> {
+  const parent = BrowserWindow.fromWebContents(event.sender);
+  const options: Electron.OpenDialogOptions = {
+    properties: ["openDirectory", "createDirectory"],
+  };
+  const result = parent
+    ? await dialog.showOpenDialog(parent, options)
+    : await dialog.showOpenDialog(options);
+  if (result.canceled) return null;
+  return result.filePaths[0] ?? null;
 }
 
 /**
@@ -515,6 +623,20 @@ function registerIpcHandlers(): void {
     return BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false;
   });
 
+  // 认证会话镜像（渲染进程 localStorage 的强杀耐久备份）：refresh token 单次
+  // 轮换后若 Chromium 批量提交尚未落盘即被强杀，stored 值已被服务端作废——
+  // 主进程文件同步写立即落入 OS 页缓存，进程强杀不丢。
+  ipcMain.handle("auth:session:save", (_event, refreshToken: unknown) => {
+    if (refreshToken !== null && typeof refreshToken !== "string") {
+      return false;
+    }
+    saveAuthSession(app.getPath("userData"), typeof refreshToken === "string" ? refreshToken : null);
+    return true;
+  });
+  ipcMain.handle("auth:session:load", () => {
+    return loadAuthSession(app.getPath("userData"));
+  });
+
   // ===== P2/P3 多窗口 IPC（ipcMain.handle,支持 async 返回）=====
 
   // 创建子窗口/悬浮窗;id 重复则聚焦已有
@@ -590,6 +712,19 @@ function registerIpcHandlers(): void {
       }
     },
   );
+
+  // ===== 系统通知 IPC（渲染进程交互提醒经宿主 OS 原生通知呈现）=====
+  ipcMain.handle(
+    "notification:show",
+    (_event, opts: { title?: unknown; body?: unknown }) => {
+      return showSystemNotification(opts);
+    },
+  );
+
+  // ===== 原生目录选择 IPC（工作空间/项目路径声明经资源管理器选择）=====
+  ipcMain.handle("dialog:pick-directory", (event) => {
+    return pickDirectoryViaDialog(event);
+  });
 }
 
 /**
@@ -636,22 +771,62 @@ function cleanup(): void {
 
 // ========== 应用生命周期 ==========
 
-// 禁止多实例：抢锁失败（已有首实例持有锁）即退出，
-// 否则第二实例会完整启动（双窗口/双托盘/共享 userData 竞争）。
-// 此时 whenReady 不会触发，不会创建窗口/托盘；before-quit 清理路径
-// 对「从未 ready」态均为安全空操作（受管内核不存在，shutdown 幂等 no-op）。
+/**
+ * 打包件 userData 安装身份目录（BUG-50 两遗留之一）。
+ *
+ * asar 内 package.json 无 productName → app.name 落 name 字段（agent-os），
+ * 默认 userData=%APPDATA%\agent-os 与开发环境/其他副本（win-unpacked 等）
+ * 共享：磁盘缓存被先到者占用 → 渲染进程网络栈退化（ERR_FAILED），且缓存
+ * 损坏跨实例传染。现按安装根（exe 所在目录，小写归一）哈希派生安装身份：
+ * 同一安装稳定不变，不同副本互相隔离。
+ */
+export function resolvePackagedUserData(
+  exePath: string,
+  appDataPath: string,
+  appName: string,
+): string {
+  const installId = createHash("sha256")
+    .update(path.dirname(exePath).toLowerCase())
+    .digest("hex")
+    .slice(0, 12);
+  return path.join(appDataPath, appName, "userdata", installId);
+}
+
+// userData 定位必须先于抢锁：Windows 单实例锁键派生自 userData 目录
+// （Chromium ProcessSingleton 的消息窗口类名与 lockfile 均以它为源），
+// setPath 即改锁身份——「锁 key 含安装身份」由此成立。
+// dev 不重定位（沿用默认 %APPDATA%\<productName>，与打包件天然隔离）。
+if (app.isPackaged) {
+  const userDataDir = resolvePackagedUserData(
+    app.getPath("exe"),
+    app.getPath("appData"),
+    app.getName(),
+  );
+  app.setPath("userData", userDataDir);
+  console.info(`[Electron] userData: ${userDataDir}`);
+}
+
+// Windows toast 通知的进程身份：打包件与安装快捷方式同 AUMID；
+// dev（无安装快捷方式）按 Electron 文档以 exe 路径兜底声明。
+// 必须在任何 Notification 弹出之前完成（模块加载期设置一次）。
+if (process.platform === "win32") {
+  app.setAppUserModelId(app.isPackaged ? APP_USER_MODEL_ID : process.execPath);
+}
+
+// 禁止多实例：抢锁失败（已有首实例持有锁）即退出，否则第二实例会完整启动
+// （双窗口/双托盘/共享 userData 竞争）。**必须用 app.exit 而非 app.quit**：
+// 实测（.packtest/bug50b/lockprobe）模块加载期（ready 之前）的 app.quit()
+// 不阻断启动序列——whenReady 照常触发、窗口/托盘/内核拉起全部照走，BUG-29
+// 的旧守卫因此形同虚设（装机版双开第二实例完整启动的直接根因）；exit(0)
+// 同步立即终止。第二实例此刻只执行过 setPath/协议特权注册，无受管内核、
+// 无窗口托盘，无需 before-quit 清理。
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
-  app.quit();
+  app.exit(0);
 }
 
 app.on("second-instance", () => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    if (!mainWindow.isVisible()) {
-      mainWindow.show();
-    }
-    mainWindow.focus();
-  }
+  focusMainWindow(mainWindow);
 });
 
 // 应用就绪后初始化
@@ -703,8 +878,7 @@ app.on("window-all-closed", () => {
 
 // 应用退出前清理资源
 app.on("before-quit", () => {
-  // 收受管内核进程树（taskkill /F /T 连带 sidecar；仅 spawn 模式有受管内核，
-  // 复用模式的外部内核不杀；electron 崩溃路径孤儿兜底为遗留项）
+  // 收受管内核进程树（taskkill /F /T 连带 sidecar；electron 崩溃路径孤儿兜底为遗留项）
   shutdownManagedKernel();
   // 移除 close 事件的 preventDefault，允许窗口真正关闭
   if (mainWindow && !mainWindow.isDestroyed()) {

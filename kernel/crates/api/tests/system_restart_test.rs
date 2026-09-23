@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use agentos_api::routes::AppState;
+use agentos_core::traits::StorageBackend;
 use agentos_core::types::RunStatus;
 use agentos_engine::SqliteStore;
 
@@ -15,13 +16,15 @@ use agentos_engine::SqliteStore;
 async fn g8_restart_suspends_running_runs() {
     std::env::set_var("AGENTOS_DISABLE_SELF_EXIT", "1");
     let store = Arc::new(SqliteStore::open_memory().unwrap());
-    store.create_run("r1", "hash", "default").unwrap();
-    store.create_run("r2", "hash", "default").unwrap();
-    // r2 先完成——不应被排空动到。
-    use agentos_core::traits::StorageBackend;
     store
-        .update_run_status("r2", RunStatus::Completed, None, None)
-        .await
+        .record_run_start("pipe_g8_r1", "default", "r1", "hash")
+        .unwrap();
+    store
+        .record_run_start("pipe_g8_r2", "default", "r2", "hash")
+        .unwrap();
+    // r2 先完成——不应被排空动到。
+    store
+        .set_run_status_projection("pipe_g8_r2", "default", RunStatus::Completed)
         .unwrap();
 
     let mut state = AppState::new();
@@ -59,12 +62,13 @@ async fn g8_restart_without_db_degrades() {
 async fn drain_and_exit75_suspends_without_exit_under_escape_hatch() {
     std::env::set_var("AGENTOS_DISABLE_SELF_EXIT", "1");
     let store = Arc::new(SqliteStore::open_memory().unwrap());
-    store.create_run("d1", "hash", "default").unwrap();
+    store
+        .record_run_start("pipe_g8_d1", "default", "d1", "hash")
+        .unwrap();
     let suspended =
         agentos_api::routes::drain_and_exit75(Some(&store), None, "test: watcher cdylib change")
             .await;
     assert_eq!(suspended, 1, "应排空 1 个 running run");
-    use agentos_core::traits::StorageBackend;
     let run = StorageBackend::get_run(&*store, "d1").await.unwrap();
     assert_eq!(run.status, RunStatus::Suspended, "run 应被排空为 suspended");
     // 无 db → 0（诚实降级，不 panic）

@@ -146,7 +146,6 @@ fn make_executor(
         vec!["pipeline_dummy".to_string()],
         store_dyn,
         "run_end_hook",
-        "main",
     )
     .with_pipeline_end_hook_plugins(hooks.iter().map(|s| s.to_string()))
 }

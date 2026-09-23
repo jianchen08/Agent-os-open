@@ -45,8 +45,10 @@ _TE_DIR = Path(__file__).resolve().parent
 _TASKS_DIR = _TE_DIR.parents[1] / "system" / "tasks"
 # 共享根模块（state_fields / worktree_merge）：单文件直跑时也自足解析
 _SHARED_DIR = _TE_DIR.parents[1]
+# system/（isolation.workspace：合并门控哨兵测试注入判定 base 用）
+_SYSTEM_DIR = _TE_DIR.parents[1] / "system"
 
-for _d in (_TE_DIR, _TASKS_DIR, _SHARED_DIR):
+for _d in (_TE_DIR, _TASKS_DIR, _SHARED_DIR, _SYSTEM_DIR):
     if str(_d) not in sys.path:
         sys.path.insert(0, str(_d))
 
@@ -584,6 +586,51 @@ class TestMergeGate:
         err = await mod.TaskEvaluateTool()._try_merge_before_complete(SimpleNamespace(id="t1", metadata=None))
         assert err is not None
         assert "t1" in err and "ws_meta" in err
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "project_rel",
+        ["ai_ws/sessions/thread-abc", "ai_ws/sessions/thread-abc/docs", "real_repo"],
+        ids=["session_dir", "session_nested", "real_repo"],
+    )
+    async def test_gate_merges_regardless_of_project_root_world(
+        self, mod: Any, monkeypatch: Any, tmp_path: Path, project_rel: str
+    ) -> None:
+        """锚点自主权（2026-09-19 用户裁决）：合并落点由 agent 自主选择，
+        会话工作区锚定与真实仓库锚定同权——门控只管合并机制本身，不裁判
+        落点世界，project_root 原样透传机制层。"""
+
+        captured: list[str] = []
+
+        def fake_merge(task_id: str, ws_meta: dict[str, Any]) -> str | None:
+            captured.append(str(ws_meta.get("project_root")))
+            return None
+
+        monkeypatch.setattr(mod.worktree_merge, "merge_worktree_before_complete", fake_merge)
+        ws_base = tmp_path / "ai_ws"
+        import isolation.workspace as _ws_pkg
+
+        monkeypatch.setattr(_ws_pkg, "get_workspace_base_dir", lambda: ws_base)
+        project_root = tmp_path / project_rel
+        project_root.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(
+            mod,
+            "_state_reader",
+            lambda: [
+                {
+                    "pipeline_id": "p1",
+                    "ws_meta": {
+                        "mode": "worktree",
+                        "path": str(tmp_path / "wt"),
+                        "project_root": str(project_root),
+                        "branch": "task/p1",
+                    },
+                }
+            ],
+        )
+        result = await mod.TaskEvaluateTool()._try_merge_before_complete(SimpleNamespace(id="p1", metadata=None))
+        assert result is None
+        assert captured == [str(project_root)]
 
     @pytest.mark.asyncio
     async def test_complete_task_plain_ws_meta_completes_through_real_gate(

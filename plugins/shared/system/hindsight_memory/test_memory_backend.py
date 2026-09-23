@@ -221,12 +221,90 @@ class TestHindsightBackend:
     async def test_hindsight_add_raises_on_empty_id(
         self, mod: Any, caller: AsyncMock
     ) -> None:
-        """响应无 error 但也无 id（写入未确认）必须失败——空 id 不是成功。"""
+        """响应无 error 但也无 id（服务端违约，写入未确认）必须失败——空 id
+        不是成功，且以形状错配类型（MemoryShapeError）区别于服务失败。"""
         caller.return_value = {"stored": True}
         backend = mod.HindsightBackend(caller)
 
-        with pytest.raises(RuntimeError, match="memory id"):
+        with pytest.raises(mod.MemoryShapeError, match="memory id"):
             await backend.add(user_id="user-1", content="hello")
+
+
+# ═══════════════════════════════════════════════════════════
+# 无 document_id 写入自造锚点（BUG-64）
+# ── hindsight-client 0.9.x 同步 retain 无 document_id 时服务端不回传任何
+#    id（RetainResponse 无 id 字段、operation_id 恒 None），压缩/review
+#    路径的 add 恒"写入未确认"假失败。写入必须可确认：后端自造
+#    mem-{uuid} document_id，服务端原样落库并回传（memory 工具层同契约）。
+# ═══════════════════════════════════════════════════════════
+
+
+class TestAddAutoDocumentAnchor:
+    @staticmethod
+    def _echo_caller(caller: AsyncMock) -> None:
+        """capability_caller 替身：模拟服务端 retain 契约（document_id
+        原样回传为 id），普通 retain / document 路径共用。"""
+
+        async def _invoke(method: str, params: dict[str, Any]) -> dict[str, Any]:
+            args = params["args"]
+            return {
+                "success": True,
+                "data": {"id": args.get("document_id", ""), "stored": True},
+            }
+
+        caller.side_effect = _invoke
+
+    async def test_add_without_document_id_returns_anchor(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """无 document_id（压缩/review 路径形态）→ 自造 mem- 锚点发往服务端
+        并原样返回，add 产出可确认的稳定引用。"""
+        self._echo_caller(caller)
+        backend = mod.HindsightBackend(caller)
+
+        mem_id = await backend.add(user_id="user-1", content="hello")
+
+        assert mem_id.startswith("mem-")
+        args = caller.call_args.args[1]["args"]
+        assert args["document_id"] == mem_id
+
+    async def test_generated_anchor_unique_per_write(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """性质断言：两次写入锚点互异——同 document_id 重复 store 会被
+        服务端覆盖，锚点必须每次唯一。"""
+        self._echo_caller(caller)
+        backend = mod.HindsightBackend(caller)
+
+        first = await backend.add(user_id="u", content="a")
+        second = await backend.add(user_id="u", content="b")
+
+        assert first.startswith("mem-") and second.startswith("mem-")
+        assert first != second
+
+    async def test_add_with_document_id_keeps_caller_anchor(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """显式 document_id（delete/update 定向形态）→ 原样透传并回传，
+        不被自造锚点顶替。"""
+        self._echo_caller(caller)
+        backend = mod.HindsightBackend(caller)
+
+        mem_id = await backend.add(user_id="u", content="c", document_id="doc-fixed")
+
+        assert mem_id == "doc-fixed"
+        assert caller.call_args.args[1]["args"]["document_id"] == "doc-fixed"
+
+    async def test_missing_id_in_response_raises_shape_error(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """服务端违约（带 document_id 仍不回传 id）→ MemoryShapeError，
+        消息带形状错配标记（区别于服务失败的调用异常/降级标记）。"""
+        caller.return_value = {"success": True, "data": {"stored": True}}
+        backend = mod.HindsightBackend(caller)
+
+        with pytest.raises(mod.MemoryShapeError, match="形状错配"):
+            await backend.add(user_id="u", content="c", document_id="doc-fixed")
 
 
 # ═══════════════════════════════════════════════════════════

@@ -1,5 +1,8 @@
 {
   "id": "pipeline_delegate_depth_guard",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Delegate Depth Guard",
   "version": "1.0.0",
   "plugin_type": "pipeline",

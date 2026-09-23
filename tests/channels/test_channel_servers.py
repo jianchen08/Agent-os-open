@@ -89,14 +89,63 @@ class TestServerLoad:
         channel = load_server.__name__.replace("_server_test", "")
         assert load_server.plugin.name == channel
 
+
+def _stub_adapter_start(module, monkeypatch) -> None:
+    """on_load 现在会调用 adapter.start()（真实会绑端口/连外网），测试置空。"""
+    channel = module.__name__.replace("_server_test", "").replace("channel_", "")
+    cls = getattr(module, {"wecom": "WeComAdapter", "qq": "QQAdapter", "dingtalk": "DingTalkAdapter"}[channel])
+
+    async def _no_start(self) -> None:
+        return None
+
+    monkeypatch.setattr(cls, "start", _no_start)
+
+
+class TestDomainEventBridge:
+    """on_domain_event → 入站桥委托（run 终态回复回流接线）。"""
+
+    @pytest.mark.parametrize("load_server", ["wecom", "qq", "dingtalk"], indirect=True)
+    async def test_delegates_to_bridge(self, load_server) -> None:
+        seen: list[dict] = []
+
+        async def _handle(params: dict) -> None:
+            seen.append(params)
+
+        load_server._bridge = SimpleNamespace(handle_domain_event=_handle)
+        event = {"event": "run.completed", "pipeline_id": "a" * 12}
+        await load_server._on_domain_event(event)
+        assert seen == [event]
+
+    @pytest.mark.parametrize("load_server", ["wecom", "qq", "dingtalk"], indirect=True)
+    async def test_no_bridge_is_noop(self, load_server) -> None:
+        assert load_server._bridge is None
+        await load_server._on_domain_event({"event": "run.completed"})
+
+    @pytest.mark.parametrize("load_server", ["wecom", "qq", "dingtalk"], indirect=True)
+    async def test_on_unload_stops_bridge(self, load_server) -> None:
+        stopped: list[str] = []
+
+        async def _stop() -> None:
+            stopped.append("bridge")
+
+        async def _adapter_stop() -> None:
+            stopped.append("adapter")
+
+        load_server._bridge = SimpleNamespace(stop=_stop)
+        load_server._adapter = SimpleNamespace(stop=_adapter_stop)
+        await load_server._on_unload({})
+        assert stopped == ["bridge", "adapter"]
+        assert load_server._bridge is None
+
 class TestWeComServer:
     @pytest.mark.parametrize("load_server", ["wecom"], indirect=True)
     async def test_on_load_constructs_adapter(self, load_server, monkeypatch) -> None:
         monkeypatch.setattr(
             load_server.plugin,
             "get_config",
-            lambda: {"corp_id": "ww1", "agent_id": "2", "secret": "s", "token": "t", "encoding_aes_key": "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"},
+            lambda: {"settings": {"corp_id": "ww1", "agent_id": "2", "secret": "s", "token": "t", "encoding_aes_key": "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"}},
         )
+        _stub_adapter_start(load_server, monkeypatch)
         await load_server._on_load({})
         # 适配器已构造的公共观察面：发送工具报"未连接"而非"未初始化"
         r = await load_server.wecom_send_message("u1", "hi")
@@ -186,7 +235,8 @@ class TestWeComServer:
 class TestQQServer:
     @pytest.mark.parametrize("load_server", ["qq"], indirect=True)
     async def test_on_load_constructs_adapter(self, load_server, monkeypatch) -> None:
-        monkeypatch.setattr(load_server.plugin, "get_config", lambda: {"access_token": "tok"})
+        monkeypatch.setattr(load_server.plugin, "get_config", lambda: {"settings": {"access_token": "tok"}})
+        _stub_adapter_start(load_server, monkeypatch)
         await load_server._on_load({})
         # 适配器已构造的公共观察面：发送工具报"未连接"而非"未初始化"
         r = await load_server.qq_send_message(1, "hi")
@@ -247,7 +297,8 @@ class TestQQServer:
 class TestDingTalkServer:
     @pytest.mark.parametrize("load_server", ["dingtalk"], indirect=True)
     async def test_on_load_constructs_adapter(self, load_server, monkeypatch) -> None:
-        monkeypatch.setattr(load_server.plugin, "get_config", lambda: {"client_id": "a", "client_secret": "b"})
+        monkeypatch.setattr(load_server.plugin, "get_config", lambda: {"settings": {"client_id": "a", "client_secret": "b"}})
+        _stub_adapter_start(load_server, monkeypatch)
         await load_server._on_load({})
         # 适配器已构造的公共观察面：发送工具报"未连接"而非"未初始化"
         r = await load_server.dingtalk_send_message("u1", "hi")
@@ -311,11 +362,11 @@ class TestCredentialFailClosed:
     @pytest.mark.parametrize(
         ("load_server", "config", "missing_key"),
         [
-            ("wecom", {}, "corp_id"),
-            ("wecom", {"corp_id": "ww1", "secret": "   "}, "secret"),
-            ("qq", {}, "access_token"),
-            ("dingtalk", {}, "client_id"),
-            ("dingtalk", {"client_id": "a"}, "client_secret"),
+            ("wecom", {"settings": {}}, "corp_id"),
+            ("wecom", {"settings": {"corp_id": "ww1", "secret": "   "}}, "secret"),
+            ("qq", {"settings": {}}, "access_token"),
+            ("dingtalk", {"settings": {}}, "client_id"),
+            ("dingtalk", {"settings": {"client_id": "a"}}, "client_secret"),
         ],
         indirect=["load_server"],
     )
@@ -328,14 +379,15 @@ class TestCredentialFailClosed:
     @pytest.mark.parametrize(
         ("load_server", "config"),
         [
-            ("wecom", {"corp_id": "ww1", "agent_id": 2, "secret": "s", "token": "t",
-                       "encoding_aes_key": "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"}),
-            ("qq", {"access_token": "tok"}),
-            ("dingtalk", {"client_id": "a", "client_secret": "b"}),
+            ("wecom", {"settings": {"corp_id": "ww1", "agent_id": 2, "secret": "s", "token": "t",
+                       "encoding_aes_key": "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"}}),
+            ("qq", {"settings": {"access_token": "tok"}}),
+            ("dingtalk", {"settings": {"client_id": "a", "client_secret": "b"}}),
         ],
         indirect=["load_server"],
     )
     async def test_full_credentials_load_constructs_adapter(self, load_server, monkeypatch, config) -> None:
         monkeypatch.setattr(load_server.plugin, "get_config", lambda: config)
+        _stub_adapter_start(load_server, monkeypatch)
         await load_server._on_load({})
         assert load_server._adapter is not None

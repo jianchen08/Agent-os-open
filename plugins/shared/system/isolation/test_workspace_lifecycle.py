@@ -21,8 +21,10 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _PLUGIN_DIR = Path(__file__).resolve().parent  # plugins/shared/system/isolation/
-if str(_PLUGIN_DIR) not in sys.path:
-    sys.path.insert(0, str(_PLUGIN_DIR))
+_SHARED_DIR = _PLUGIN_DIR.parent.parent  # plugins/shared/（worktree_merge 平铺模块解析）
+for _d in (_PLUGIN_DIR, _SHARED_DIR):
+    if str(_d) not in sys.path:
+        sys.path.insert(0, str(_d))
 
 
 def _load_mod() -> Any:
@@ -382,3 +384,69 @@ class TestSafeWsName:
     def test_blank_name_falls_back_to_ws(self) -> None:
         """清洗后为空 → 固定 ws 前缀，目录名仍可生成。"""
         assert _MOD._safe_ws_name("///", "t1234567890") == "ws__wt_t1234567"
+
+
+# ═══════════════════════════════════════════════════════════
+# worktree 会话锚定自主权（2026-09-19 用户裁决，BUG-53 修正）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestSessionAnchorAutonomy:
+    """agent 自主锚定会话工作区合法（路径白名单前缀内即合法，系统不上浮）。
+
+    2026-09-19 用户裁决：worktree 源锚点用 agent 指定的 workspace 原样落地，
+    服务不做出生期改锚——锚定会话世界时在其上建会话仓是 agent 自主行为的
+    合法结果；路径合法性由项目登记白名单（config/users/default/
+    project_whitelist.yaml 前缀授权）把守，不归本层治理。
+    """
+
+    def _make_manager_at(self, tmp_path: Path) -> WorkspaceLifecycleManager:  # type: ignore[valid-type]
+        return _make_manager(tmp_path, ws_root=tmp_path / "ai_ws")
+
+    def _assert_anchored_in_place(self, meta: dict, session_ws: Path, ws_base: Path, task_id: str) -> None:
+        assert meta["mode"] == "worktree"
+        assert meta["project_root"] == str(session_ws), "锚点原样采用，不上浮到项目根"
+        assert meta["branch"] == f"task/{task_id}"
+        ws_dir = Path(meta["path"])
+        assert ws_dir.is_dir()
+        assert ws_dir.is_relative_to(ws_base)
+
+    def test_subtask_session_anchor_worktrees_in_place(self, tmp_path: Path) -> None:
+        """形状1（子任务分支）：显式 worktree 源=会话目录 → 原地锚定建副本。"""
+        session_ws = tmp_path / "ai_ws" / "sessions" / "thread-abc"
+        session_ws.mkdir(parents=True)
+        m = self._make_manager_at(tmp_path)
+        meta = m._start_subtask(
+            "sub1",
+            str(session_ws),
+            {"workspace_mode": "worktree", "_has_explicit_workspace": True},
+        )
+        self._assert_anchored_in_place(meta, session_ws, tmp_path / "ai_ws", "sub1")
+
+    def test_root_task_session_anchor_worktrees_in_place(self, tmp_path: Path) -> None:
+        """形状2（根任务分支）：根任务锚定会话空间同样原样落地。"""
+        session_ws = tmp_path / "ai_ws" / "sessions" / "thread-abc" / "sub"
+        session_ws.mkdir(parents=True)
+        m = self._make_manager_at(tmp_path)
+        meta = m._start_root_task("r1", str(session_ws), {"task_id": "r1", "_has_explicit_workspace": True})
+        self._assert_anchored_in_place(meta, session_ws, tmp_path / "ai_ws", "r1")
+
+    def test_merged_products_visible_in_session_workspace(self, tmp_path: Path) -> None:
+        """合并落地全链：会话锚定任务出生 → worktree 产物 → 合并门控 →
+        产物落在 agent 锚定的会话仓工作区（会话世界内真实可见）。"""
+        import worktree_merge
+
+        session_ws = tmp_path / "ai_ws" / "sessions" / "thread-abc"
+        session_ws.mkdir(parents=True)
+        m = self._make_manager_at(tmp_path)
+        meta = m._start_subtask(
+            "sub-merge",
+            str(session_ws),
+            {"workspace_mode": "worktree", "_has_explicit_workspace": True},
+        )
+        product = Path(meta["path"]) / "sales_2025_dashboard.html"
+        product.write_text("<html>886 / 118</html>", encoding="utf-8")
+        assert worktree_merge.merge_worktree_before_complete("sub-merge", meta) is None
+        landed = session_ws / "sales_2025_dashboard.html"
+        assert landed.exists(), "产物必须到达锚定的会话仓工作区（agent 自主锚定的合法落点）"
+        assert landed.read_text(encoding="utf-8") == "<html>886 / 118</html>"

@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<!--
+  压缩块消息卡（chatMessages 声明 id=compression_card；消息段模型方案 §5.1）
+
+  路由：消息 metadata.message_style 命中本样式 id → PluginMessageCard 通用
+  webview 消息卡容器 → WebviewWidget 以 srcDoc 装载本页（CSP：default-src
+  'none'，connect-src 'none'——本页无任何外联，纯静态 + postMessage 桥）。
+
+  输入契约（容器下行桥，theme.sync/ctx.sync 同款信封 {__agentos_webview,
+  method, params}）：
+  - method "message.data"：params = { message: { content, metadata } }——
+    归组的压缩块消息（过程块/快照块同 compression_ref.seq_range 归组一张卡）；
+  - method "widget.event"：params = AdaptedWidgetEvent { widget_id, event,
+    data }，取 data.message 同上（既有通用事件通道，宿主以
+    widget_id = `${message.id}:${styleId}` 派发即达，零新增容器面）；
+  - method "theme.sync"：params.tokens = --ag-* 主题 token map，应用为根变量。
+  未收到消息数据前卡片呈折叠占位态（不伪造计数）。
+
+  计数口径：N = compression_ref.seq_range 跨度（seq_end - seq_start + 1，
+  被压区间槽位数；被压批次槽位连续时即精确成员数）。精确成员数以段取数
+  （compression_ref.segment_id → message-segments/{id} 的 members）为准。
+
+  取数缺口（现状契约）：容器上行桥只放行 /ext/{pluginId}/** 前缀（插件自有
+  端点），段读取端点（内核 REST）不在白名单——「查看原始 N 条」点击后展示
+  segment 提示，不做取数（宿主侧补齐桥接后接入，前端车道登记）。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --ag-bg: #ffffff;
+    --ag-fg: #1f2328;
+    --ag-muted: #656d76;
+    --ag-border: #d0d7de;
+    --ag-card: #f6f8fa;
+    --ag-accent: #0969da;
+    --ag-accent-soft: rgba(9, 105, 218, 0.14);
+    --ag-radius: 8px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font: 13px/1.55 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: var(--ag-fg);
+    background: var(--ag-bg);
+    padding: 10px 12px;
+  }
+  .card-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .card-badge {
+    flex: none;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    background: var(--ag-accent-soft);
+    color: var(--ag-accent);
+  }
+  .card-title { font-weight: 600; }
+  .card-note { color: var(--ag-muted); font-size: 12px; }
+  .card-actions { margin-left: auto; display: flex; gap: 6px; }
+  button {
+    font: inherit;
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: var(--ag-radius);
+    border: 1px solid var(--ag-border);
+    background: var(--ag-card);
+    color: var(--ag-fg);
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--ag-accent); color: var(--ag-accent); }
+  .section { margin-top: 10px; }
+  .section > h3 {
+    margin: 0 0 4px;
+    font-size: 12px;
+    color: var(--ag-muted);
+    font-weight: 600;
+  }
+  .section-body {
+    background: var(--ag-card);
+    border: 1px solid var(--ag-border);
+    border-radius: var(--ag-radius);
+    padding: 8px 10px;
+    max-height: 132px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
+  .kv dt { color: var(--ag-muted); }
+  .kv dd { margin: 0; }
+  .seg-hint {
+    margin-top: 10px;
+    padding: 6px 10px;
+    border-radius: var(--ag-radius);
+    border: 1px dashed var(--ag-border);
+    color: var(--ag-muted);
+    font-size: 12px;
+  }
+  .seg-hint code { color: var(--ag-accent); }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+  <div class="card-head">
+    <span class="card-badge">压缩</span>
+    <span class="card-title" id="title">已压缩对话</span>
+    <span class="card-note hidden" id="pending-note">等待消息数据</span>
+    <span class="card-actions">
+      <button id="toggle-btn" class="hidden">展开</button>
+      <button id="raw-btn" class="hidden">查看原始</button>
+    </span>
+  </div>
+  <div id="expanded" class="hidden">
+    <div class="section" id="process-section">
+      <h3>过程摘要</h3>
+      <div class="section-body" id="process-body"></div>
+    </div>
+    <div class="section hidden" id="snapshot-section">
+      <h3>状态快照</h3>
+      <div class="section-body" id="snapshot-body"></div>
+    </div>
+  </div>
+  <div id="seg-hint" class="seg-hint hidden"></div>
+<script>
+(function () {
+  'use strict';
+
+  var titleEl = document.getElementById('title');
+  var pendingNote = document.getElementById('pending-note');
+  var toggleBtn = document.getElementById('toggle-btn');
+  var rawBtn = document.getElementById('raw-btn');
+  var expandedEl = document.getElementById('expanded');
+  var processSection = document.getElementById('process-section');
+  var processBody = document.getElementById('process-body');
+  var snapshotSection = document.getElementById('snapshot-section');
+  var snapshotBody = document.getElementById('snapshot-body');
+  var segHint = document.getElementById('seg-hint');
+
+  var collapsed = true;
+  var segmentId = '';
+  var memberCount = 0;
+
+  // ── 数据注入（见文件头输入契约）───────────────────────────────
+
+  function extractMessage(params) {
+    if (!params || typeof params !== 'object') return null;
+    var candidates = [params.message, params.data && params.data.message, params];
+    for (var i = 0; i < candidates.length; i++) {
+      var c = candidates[i];
+      if (c && typeof c === 'object' && typeof c.content === 'string') return c;
+    }
+    return null;
+  }
+
+  function matchTag(content, tag) {
+    // 内联标签解析（<compressed seq="a-b" ...>…</compressed> / <current_state>…）
+    var re = new RegExp('<' + tag + '(?:\\s[^>]*)?>([\\s\\S]*?)</' + tag + '>', 'i');
+    var m = content.match(re);
+    if (!m) return null;
+    return { openTag: m[0].slice(0, m[0].indexOf('>')), inner: m[1].trim() };
+  }
+
+  function attrOf(openTag, name) {
+    var m = openTag.match(new RegExp(name + '="([^"]*)"'));
+    return m ? m[1] : '';
+  }
+
+  function prettyBody(inner) {
+    // 摘要体可读化：剥段落后尝试 JSON 解析为键值对，失败按原文渲染
+    var text = inner.replace(/^##\s*过程摘要\s*/, '').trim();
+    try {
+      var parsed = JSON.parse(text);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        var wrap = document.createElement('dl');
+        wrap.className = 'kv';
+        Object.keys(parsed).forEach(function (key) {
+          if (parsed[key] === null || parsed[key] === undefined || parsed[key] === '') return;
+          var dt = document.createElement('dt');
+          dt.textContent = key;
+          var dd = document.createElement('dd');
+          dd.textContent = typeof parsed[key] === 'string'
+            ? parsed[key]
+            : JSON.stringify(parsed[key]);
+          wrap.appendChild(dt);
+          wrap.appendChild(dd);
+        });
+        return wrap;
+      }
+    } catch (_e) { /* 非 JSON：按纯文本渲染 */ }
+    var pre = document.createElement('span');
+    pre.textContent = text;
+    return pre;
+  }
+
+  function hydrate(message) {
+    var ref = message.metadata && message.metadata.compression_ref;
+    segmentId = (ref && typeof ref.segment_id === 'string' && ref.segment_id) || '';
+
+    var process = matchTag(message.content, 'compressed');
+    var snapshot = matchTag(message.content, 'current_state');
+
+    // 计数口径见文件头：优先段引用 seq_range，退化解析内容 seq 属性
+    var range = ref && Array.isArray(ref.seq_range) && ref.seq_range.length === 2
+      ? ref.seq_range
+      : null;
+    if (!range && process) {
+      var seqAttr = attrOf(process.openTag, 'seq').split('-');
+      range = seqAttr.length === 2 ? [+seqAttr[0], +seqAttr[1]] : null;
+    }
+    memberCount = range && isFinite(range[0]) && isFinite(range[1])
+      ? range[1] - range[0] + 1
+      : 0;
+
+    titleEl.textContent = memberCount > 0
+      ? '已压缩 ' + memberCount + ' 条对话'
+      : '已压缩对话';
+    rawBtn.textContent = memberCount > 0 ? '查看原始 ' + memberCount + ' 条' : '查看原始';
+
+    processSection.classList.toggle('hidden', !process);
+    processBody.innerHTML = '';
+    processBody.appendChild(prettyBody(process ? process.inner : ''));
+    snapshotSection.classList.toggle('hidden', !snapshot);
+    snapshotBody.innerHTML = '';
+    snapshotBody.appendChild(prettyBody(snapshot ? snapshot.inner : ''));
+
+    pendingNote.classList.add('hidden');
+    toggleBtn.classList.remove('hidden');
+    rawBtn.classList.remove('hidden');
+  }
+
+  // ── 交互 ─────────────────────────────────────────────────────
+
+  toggleBtn.addEventListener('click', function () {
+    collapsed = !collapsed;
+    expandedEl.classList.toggle('hidden', collapsed);
+    toggleBtn.textContent = collapsed ? '展开' : '收起';
+    if (collapsed) segHint.classList.add('hidden');
+  });
+
+  // 取数缺口（现状契约，见文件头）：容器上行白名单只放行插件自有 /ext 端点，
+  // 段读取端点不可达——按契约展示 segment 提示，不做取数。
+  rawBtn.addEventListener('click', function () {
+    segHint.textContent = segmentId
+      ? '原始消息已冻结为段 ' + segmentId + '（取数桥接未开放，暂不可在卡内查看原文）'
+      : '原始消息段编号未知（消息数据未注入）';
+    segHint.classList.remove('hidden');
+  });
+
+  // ── 容器下行桥 ────────────────────────────────────────────────
+
+  function applyTokens(tokens) {
+    if (!tokens || typeof tokens !== 'object') return;
+    Object.keys(tokens).forEach(function (key) {
+      if (key.indexOf('--') === 0) {
+        document.documentElement.style.setProperty(key, tokens[key]);
+      }
+    });
+  }
+
+  window.addEventListener('message', function (event) {
+    var msg = event.data;
+    if (!msg || msg.__agentos_webview !== true || typeof msg.method !== 'string') return;
+    if (msg.method === 'theme.sync') {
+      applyTokens(msg.params && msg.params.tokens);
+      return;
+    }
+    if (msg.method === 'message.data' || msg.method === 'widget.event') {
+      var message = extractMessage(msg.params);
+      if (message) hydrate(message);
+    }
+  });
+
+  // 宿主桥未注入（独立预览/测试）时的静态可见性兜底：折叠占位 + 等待提示
+  pendingNote.classList.remove('hidden');
+})();
+</script>
+</body>
+</html>

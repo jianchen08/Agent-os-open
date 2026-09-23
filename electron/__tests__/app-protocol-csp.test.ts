@@ -75,8 +75,8 @@ describe("app:// 静态响应 CSP（审查 F5）", () => {
     const csp = resp.headers.get("Content-Security-Policy");
     expect(csp).toContain("default-src 'self'");
     expect(csp).toContain("object-src 'none'");
-    // 内核 WS 直连源（打包件 WebSocket 绕过协议层代理）
-    expect(csp).toContain("connect-src 'self' http://127.0.0.1:9100 ws://127.0.0.1:9100");
+    // 内核 WS 直连源（打包件 WebSocket 绕过协议层代理；装机版默认端口 9101）
+    expect(csp).toContain("connect-src 'self' http://127.0.0.1:9101 ws://127.0.0.1:9101");
     // ajv8 (RJSF) new Function 所需（web 链同款）
     expect(csp).toContain("'unsafe-eval'");
     expect(resp.headers.get("X-Content-Type-Options")).toBe("nosniff");
@@ -94,6 +94,22 @@ describe("app:// 静态响应 CSP（审查 F5）", () => {
     expect(resp.headers.get("Content-Security-Policy")).toBeNull();
     const calls = electronMock.net.fetch.mock.calls;
     expect(calls.length).toBeGreaterThan(0);
-    expect(calls[calls.length - 1]?.[0]).toBe("http://127.0.0.1:9100/api/v1/sessions");
+    expect(calls[calls.length - 1]?.[0]).toBe("http://127.0.0.1:9101/api/v1/sessions");
+  });
+
+  it("AGENTOS_KERNEL_PORT 错峰：代理回源与 CSP connect-src 随解析端口整体迁移", async () => {
+    vi.stubEnv("AGENTOS_KERNEL_PORT", "19200");
+    try {
+      const handler = await install();
+      const page = await handler(new Request("app://bundle/"));
+      const csp = page.headers.get("Content-Security-Policy") ?? "";
+      expect(csp).toContain("connect-src 'self' http://127.0.0.1:19200 ws://127.0.0.1:19200");
+      expect(csp).not.toContain("127.0.0.1:9101");
+      await handler(new Request("app://bundle/api/v1/sessions"));
+      const calls = electronMock.net.fetch.mock.calls;
+      expect(calls[calls.length - 1]?.[0]).toBe("http://127.0.0.1:19200/api/v1/sessions");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

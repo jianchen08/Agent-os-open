@@ -1983,6 +1983,13 @@ class TaskSubmitTool(BuiltinTool):
         level = inputs.get("isolation_level") or "isolated"
         if level:
             _ec["isolation"] = {"level": level}
+        # 模式键透传（消息级 execution_context 契约键，与聊天主链同形）：内核
+        # 1a2 并入出生管道 initial state 后 context_build 据此回写 state.mode
+        # （观测链出口/模式面板行源过滤键）——丢键则派发管道 state 无 mode，
+        # 模式面板对该任务零呈现（BUG-61）。空白视同未声明。
+        mode = str(inputs.get("mode") or "").strip()
+        if mode:
+            _ec["mode"] = mode
         return _ec
 
     def _check_parent_ownership(

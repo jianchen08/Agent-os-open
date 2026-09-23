@@ -42,6 +42,7 @@ PLUGIN_GLOBS = [
     "plugins/shared/pipeline/core/*",
     "plugins/shared/pipeline/input/*",
     "plugins/shared/pipeline/output/*",
+    "plugins/shared/modes/*",
     "plugins/shared/db_admin",
     "plugins/shared/metrics_admin",
     "plugins/shared/user_admin",
@@ -141,13 +142,19 @@ def dir_size_mb(path: Path) -> int:
 
 
 def classify(plugin_dir: Path, shared: dict[str, str]) -> str:
-    """类别：light（合宿成员，venv 冗余）/ linkable（锁与共享环境逐包相等）/ independent。"""
+    """类别：light（合宿成员，venv 冗余）/ linkable（锁与共享环境逐包相等）/ independent。
+
+    合宿成员判定与内核 is_cohost_member 同源对齐：声明**任意** host_group
+    （light / light_stable / …多组扩展）即成员——运行期都从 _host 共享 venv
+    拉起，自身 .venv 零消费。只认 "light" 会把 light_stable 成员误判
+    independent（漏删 + launcher 回潮重建）。
+    """
     manifest = plugin_dir / "plugin.json"
     try:
         meta = json.loads(manifest.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return "independent"
-    if meta.get("host_group") == "light":
+    if meta.get("host_group"):
         return "light"
     locked = lock_packages(plugin_dir)
     if locked and all(shared.get(name) == ver for name, ver in locked.items()):

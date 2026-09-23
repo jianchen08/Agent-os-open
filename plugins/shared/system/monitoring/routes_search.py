@@ -61,9 +61,10 @@ def _tenant_pipeline_ids(tenant_id: str, limit: int = _TENANT_PIPELINE_SCAN) -> 
     try:
         conn = sqlite3.connect(db_path)
         try:
+            # runs 表退役（ADR 2026-09-18）：执行过 = 有 run_status 簿记键
             rows = conn.execute(
-                "SELECT pipeline_id FROM runs WHERE tenant_id = ? "
-                "ORDER BY created_at DESC LIMIT ?",
+                "SELECT pipeline_id FROM pipeline_state WHERE tenant_id = ? "
+                "AND field_key = 'run_status' ORDER BY updated_at DESC LIMIT ?",
                 (tenant_id, int(limit)),
             ).fetchall()
         finally:

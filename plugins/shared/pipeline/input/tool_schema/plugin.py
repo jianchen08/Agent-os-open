@@ -5,6 +5,11 @@
 过滤能力注册表，把 OpenAI function calling 格式的 schema 列表与工具输出契约
 写回 state，供 llm_core（tools 参数）与 tool_core（输出契约校验）消费。
 
+隔离/worktree 会话（依赖隔离边界免审批，execution_context 归一口径见
+_is_boundary_reliant）的默认工具面剥离宿主 GUI 自动化工具（HOST_GUI_TOOL_IDS，
+BUG-65）：触达隔离边界之外的工具不得出现在依赖该边界免审批的会话里；
+非隔离会话审批闸生效，不剥离。state["tool_ids"] 保留 agent 原声明（审计面）。
+
 agent 配置解析（读 config/agents/** 取 tool_ids）归 context_build；本插件不做
 任何 yaml 读取，也不做全量兜底——state 无 tool_ids = 配置断链，工具面置空。
 
@@ -28,6 +33,17 @@ logger = logging.getLogger(__name__)
 # 接线等待轮询间隔（秒）：等待期让出事件循环，on_load 通知处理器在同一
 # loop 上落地注入。
 _WIRE_POLL_SECONDS = 0.1
+
+# 宿主 GUI 自动化工具 id 集（用户空间 external MCP computer_use 上游原名，
+# agent yaml tool_ids 显式列名的同一集合）：这些工具直接触达宿主桌面 =
+# 隔离边界之外。隔离/worktree 会话按「隔离容器即安全边界」裁定默认免审批
+# （2026-09-15），GUI 工具留在面内等于 Type/Shortcut 进终端 ≈ Shell 等价物
+# 结构性绕开 bash 审批闸（R220：Shell/PowerShell 不进 LLM 面）——边界依赖
+# 上下文的默认工具面一律剥离（BUG-65）。非隔离会话审批闸生效，不剥离。
+HOST_GUI_TOOL_IDS: frozenset[str] = frozenset({
+    "App", "Snapshot", "Click", "Type", "Shortcut", "Wait",
+    "Move", "Screenshot", "Scroll",
+})
 
 
 class ToolSchemaPlugin(IInputPlugin):
@@ -80,6 +96,28 @@ class ToolSchemaPlugin(IInputPlugin):
         result = await self._do_work(ctx)
         return PluginResult(state_updates=result)
 
+    @staticmethod
+    def _is_boundary_reliant(state: dict[str, Any]) -> bool:
+        """判定当前上下文是否依赖隔离边界免审批（隔离/worktree 会话）。
+
+        归一口径与 isolation_guard 一致：execution_context.isolation.level
+        缺省 = 默认隔离（任务默认隔离执行）；只有显式 non_isolated 才是
+        非隔离（审批闸生效）。工作区拓扑 execution_context.workspace.mode
+        = worktree 的会话同属边界依赖（隔离副本即免审批边界），isolation
+        轴即使显式 non_isolated 也剥离。state 无 execution_context = 缺省
+        隔离（fail-closed：宁可错剥不可漏剥）。
+        """
+        ec = state.get("execution_context")
+        if not isinstance(ec, dict):
+            return True
+        iso = ec.get("isolation")
+        level = iso.get("level") if isinstance(iso, dict) else None
+        if str(level or "isolated") != "non_isolated":
+            return True
+        ws = ec.get("workspace")
+        mode = ws.get("mode") if isinstance(ws, dict) else None
+        return str(mode or "") == "worktree"
+
     async def _await_caller_wired(self) -> Callable[..., Awaitable[dict[str, Any]]] | None:
         """等待 capability caller 接线（有界），返回 caller 或 None（超时）。
 
@@ -124,6 +162,19 @@ class ToolSchemaPlugin(IInputPlugin):
                 self.name,
             )
             return {"tool_schemas": [], "tool_output_contracts": {}}
+
+        # 隔离/worktree 会话默认工具面剥离宿主 GUI 自动化工具（BUG-65）：
+        # state["tool_ids"] 保留 agent 原声明（审计面），剥离只作用于本次
+        # tool-surface 白名单——被剥 id 不进 wanted，也就不触发工具面漂移告警。
+        if self._is_boundary_reliant(ctx.state):
+            stripped = sorted(t for t in set(wanted) if t in HOST_GUI_TOOL_IDS)
+            if stripped:
+                logger.warning(
+                    "[%s] 隔离/worktree 会话剥离宿主 GUI 自动化工具"
+                    "（隔离边界免审批会话不得触达宿主桌面）| stripped=%s",
+                    self.name, stripped,
+                )
+                wanted = [t for t in wanted if t not in HOST_GUI_TOOL_IDS]
 
         caller = await self._await_caller_wired()
         if caller is None:

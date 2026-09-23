@@ -567,3 +567,4 @@ class TestRootRepoReady:
             root.mkdir()
         m = _make_manager(tmp_path, tmp_path / "wsroot")
         assert m._root_repo_ready(root) is expected
+

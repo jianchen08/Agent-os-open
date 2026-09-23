@@ -23,6 +23,12 @@ vi.mock('@/utils/logger', () => ({
 const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }))
 vi.mock('@/services/api/client', () => ({ default: { get: mockGet } }))
 
+// 段清单是 loadPipelineMessages 的并行旁路面（消息段模型），不归本文件
+// mode 决策/游标断言管——桩定为空清单，避免吃掉 mockGet 的 once 队列
+vi.mock('@/services/api/messageSegments', () => ({
+  getMessageSegments: vi.fn(async () => []),
+}))
+
 const { storageGet, storageSet, storageRemove } = vi.hoisted(() => ({
   storageGet: vi.fn<() => Promise<unknown>>(),
   storageSet: vi.fn<() => Promise<void>>(),

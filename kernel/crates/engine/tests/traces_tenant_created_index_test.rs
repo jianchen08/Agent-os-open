@@ -22,14 +22,13 @@ async fn open_creates_idx_traces_tenant_created_and_window_query_uses_it() {
 
     // 窗口子查询的消费形态需要真实行：走公共 append_trace（tenant 走
     // current_or_default = 'default'，与下方查询参数一致）
-    store.create_run("run-1", "hash", "default").unwrap();
     for i in 0..5u32 {
         store
             .append_trace(TraceEntry {
                 trace_id: format!("trace_{i}"),
-                run_id: "run-1".to_string(),
-                branch_id: "main".to_string(),
-                seq_in_branch: i,
+                pipeline_id: "pipe_idx".to_string(),
+                // 写入时 seq 由存储层分配（MAX(seq)+1），构造方填 0 即可
+                seq: 0,
                 plugin_id: "core".to_string(),
                 patch_type: PatchType::StateUpdate,
                 patch_data: serde_json::json!({"key": i}),

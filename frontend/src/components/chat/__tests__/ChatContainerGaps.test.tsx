@@ -728,3 +728,25 @@ describe('ChatContainer — 待发送队列条与输入草稿键', () => {
     expect(stubs.chatInput?.draftKey).toBe('main-1')
   })
 })
+
+describe('对话标签行 portal（顶带唯一拖拽容器，标签行为其 DOM 子元素）', () => {
+  it('槽位存在 → 标签行 portal 进槽位（拖拽容器子元素=自动 no-drag 洞）', async () => {
+    const slot = document.createElement('div')
+    slot.id = 'chat-top-band-tabs'
+    document.body.appendChild(slot)
+    try {
+      setupActivePipeline([])
+      await mountContainer()
+      expect(slot.querySelector('[data-testid="stub-tab-bar"]')).not.toBeNull()
+      expect(document.querySelector('[data-testid="chat-session-header"]')).toBeNull()
+    } finally {
+      slot.remove()
+    }
+  })
+
+  it('槽位不存在（移动端/无顶带形态）→ 标签行内联回退渲染', async () => {
+    setupActivePipeline([])
+    await mountContainer()
+    expect(document.querySelector('[data-testid="stub-tab-bar"]')).not.toBeNull()
+  })
+})

@@ -5,7 +5,7 @@
  * 覆盖四类输入：
  * - 显式 apiUrl（http/https）→ 协议升级为 ws/wss
  * - 空 apiUrl + http(s) 页面源 → 从 location 派生（dev Vite 代理 / nginx 同源）
- * - 空 apiUrl + app: 页面源（BUG-9 打包件自定义协议）→ 内核直连 ws://127.0.0.1:9100
+ * - 空 apiUrl + app: 页面源（BUG-9 打包件自定义协议）→ 内核直连 ws://127.0.0.1:9101
  *   （app:// 页面无法从 location 派生 ws 地址：host 是自定义协议宿主而非内核）
  */
 
@@ -36,8 +36,8 @@ describe('deriveWsUrl', () => {
     )
   })
 
-  it('空 apiUrl + app: 页面（打包件）→ 内核直连 ws://127.0.0.1:9100', () => {
-    expect(deriveWsUrl('', fakeLoc('app:', 'bundle'))).toBe('ws://127.0.0.1:9100')
+  it('空 apiUrl + app: 页面（打包件）→ 内核直连 ws://127.0.0.1:9101（装机版默认端口，与 dev 9100 错峰）', () => {
+    expect(deriveWsUrl('', fakeLoc('app:', 'bundle'))).toBe('ws://127.0.0.1:9101')
   })
 
   it('性质：任意输入结果恒为合法 ws/wss URL（非空且带可解析 origin）', () => {

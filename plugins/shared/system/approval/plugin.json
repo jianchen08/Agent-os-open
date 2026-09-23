@@ -9,7 +9,8 @@
   "requires_services": [
     "human-interaction",
     "pipeline-executor",
-    "event-bus"
+    "event-bus",
+    "packaging"
   ],
   "lifecycle": {
     "idle_timeout_secs": 0
@@ -93,7 +94,10 @@
     ]
   },
   "granted_capabilities": [
-    "tool-executor"
+    "tool-executor",
+    "human-interaction",
+    "pipeline-executor",
+    "event-bus"
   ],
   "http_endpoints": [
     {

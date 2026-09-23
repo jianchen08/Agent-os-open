@@ -1,5 +1,8 @@
 {
   "id": "pipeline_child_task_guard",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Child Task Guard",
   "version": "1.0.0",
   "plugin_type": "pipeline",

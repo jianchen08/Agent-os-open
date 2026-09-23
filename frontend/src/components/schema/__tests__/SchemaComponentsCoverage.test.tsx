@@ -578,14 +578,16 @@ describe('WorkspacePanel 空态与全屏入口', () => {
     // 动作后菜单收起
     expect(screen.queryByTestId('workspace-tab-menu-close')).toBeNull()
 
-    // 「关闭其他标签」
+    // 「关闭其他标签」：批量关签先出确认层，确认后落 store（BUG-79 防误触）
     fireEvent.contextMenu(screen.getByTestId('workspace-tab-t2'))
     fireEvent.click(screen.getByTestId('workspace-tab-menu-close-other'))
+    fireEvent.click(screen.getByRole('button', { name: '确认关闭' }))
     expect(closeOther).toHaveBeenCalledWith('t2')
 
     // 「关闭所有标签」
     fireEvent.contextMenu(screen.getByTestId('workspace-tab-t1'))
     fireEvent.click(screen.getByTestId('workspace-tab-menu-close-all'))
+    fireEvent.click(screen.getByRole('button', { name: '确认关闭' }))
     expect(closeAll).toHaveBeenCalledTimes(1)
 
     closeTab.mockRestore()

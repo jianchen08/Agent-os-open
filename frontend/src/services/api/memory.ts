@@ -58,6 +58,16 @@ export interface MemoryStats {
   last_updated: string
 }
 
+/** 单条记忆详情（GET /memory/{memory_id} 响应，by-id 跨 bank 定位） */
+export interface MemoryDetail {
+  id: string
+  content: string
+  memory_type: string
+  tags: string[]
+  score: number
+  created_at: string
+}
+
 export async function getEpisodes(
   page: number = 1,
   pageSize: number = 20,
@@ -132,6 +142,28 @@ export async function getSemanticMemory(
 export async function getMemoryStats(options: RetryOptions = {}): Promise<MemoryStats> {
   return requestWithRetry(async () => {
     const response = await apiClient.get<MemoryStats>(API_ENDPOINTS.MEMORY.STATS)
+    return response.data
+  }, options)
+}
+
+/** 获取单条记忆详情（后端按 id 跨 bank 定位：会话 bank + 默认 bank） */
+export async function getMemoryById(
+  id: string,
+  options: RetryOptions = {},
+): Promise<MemoryDetail> {
+  return requestWithRetry(async () => {
+    const response = await apiClient.get<MemoryDetail>(API_ENDPOINTS.MEMORY.ITEM(id))
+    return response.data
+  }, options)
+}
+
+/** 删除单条记忆（不可逆；后端按 id 跨 bank 定位删除），返回删除消息 */
+export async function deleteMemoryById(
+  id: string,
+  options: RetryOptions = {},
+): Promise<{ message: string }> {
+  return requestWithRetry(async () => {
+    const response = await apiClient.delete<{ message: string }>(API_ENDPOINTS.MEMORY.DELETE(id))
     return response.data
   }, options)
 }

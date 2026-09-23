@@ -170,7 +170,10 @@ export function useBudgetStatus(
     if (autoFetch) {
       // 自动拉取属被动获取：失败已记入 error state，不再向上抛
       // （挂载于常驻布局时无人 await，裸抛会成为未处理 rejection）
-      fetchBudgetStatus().catch(() => undefined)
+      fetchBudgetStatus().catch(() => {
+        // HACK: effect 内无人消费 rejection，兜底防 unhandled rejection；
+        // 失败态由本 hook 的 error 状态承载（OBS-R258-1 吞错误规则登记）
+      })
     }
   }, [autoFetch, fetchBudgetStatus])
 

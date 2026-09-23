@@ -42,6 +42,32 @@ class TestDingTalkInputAdapter:
         assert state["user_input"] == "Hello DingTalk"
         assert state["_channel_type"] == "dingtalk"
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("raw", "expected_key", "expected_target"),
+        [
+            (
+                {"conversationId": "cid-1", "senderStaffId": "staff-1", "msgtype": "text", "text": {"content": "hi"}},
+                "ccid-1",
+                "staff-1",
+            ),
+            # conversationId 缺失（异常报文）→ 回退按发送者建会话
+            (
+                {"senderStaffId": "staff-2", "msgtype": "text", "text": {"content": "hi"}},
+                "ustaff-2",
+                "staff-2",
+            ),
+        ],
+    )
+    async def test_conversation_coordinates(self, raw, expected_key, expected_target) -> None:
+        """入站桥会话坐标：conversationId 为会话键，回复目标为发送者。"""
+        adapter = DingTalkInputAdapter()
+        await adapter.enqueue_message(raw)
+        state = await adapter.receive()
+        assert state["_conversation_key"] == expected_key
+        assert state["_reply_target"] == expected_target
+        assert state["_reply_ctx"] == {}
+
 
 class TestDingTalkOutputAdapter:
     """DingTalkOutputAdapter 测试。"""

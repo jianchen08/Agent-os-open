@@ -63,6 +63,10 @@ class WeComInputAdapter(QueuedChannelInputAdapter):
             raw_message=raw,
             _agent_id=agent_id,
             _to_user=to_user,
+            # 入站桥会话坐标：企微应用消息是用户级 p2p，会话按发送者确定。
+            _conversation_key=f"u{from_user}",
+            _reply_target=from_user,
+            _reply_ctx={},
         )
 
 

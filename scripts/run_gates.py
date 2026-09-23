@@ -487,6 +487,14 @@ GATES: list[Gate] = [
             # preview 后台进程必须重定向脱离 stdout 管道：kill npm 不一定杀透
             # node 层，残留 node 持有管道会让 run_gate 的 subprocess.run 等
             # EOF 永久阻塞（CI 实证挂死 80min+，2026-09-01）。
+            # Windows（Git Bash）下 kill npm 收不到 node 孙进程，残留监听会让
+            # 下轮 strictPort 起不来——起服前按端口清残留（仅 MINGW/MSYS 分支，
+            # Linux CI 无此问题走原路径）。
+            "  case \"$(uname -s)\" in MINGW*|MSYS*|CYGWIN*)\n"
+            "    for pid in $(netstat -ano | grep ':5188' | grep -i listen | awk '{print $NF}' | sort -u); do\n"
+            "      taskkill //F //PID $pid >/dev/null 2>&1 || true\n"
+            "    done ;;\n"
+            "  esac\n"
             "  npm run preview -- --port 5188 --strictPort >/dev/null 2>&1 & PREVIEW_PID=$!\n"
             "  for i in $(seq 1 30); do curl -sf http://localhost:5188 >/dev/null && break; sleep 2; done\n"
             "  if ! curl -sf http://localhost:5188 >/dev/null; then\n"
@@ -495,6 +503,11 @@ GATES: list[Gate] = [
             "  npx playwright test e2e/specs/ci-smoke.spec.ts\n"
             "  RC=$?\n"
             "  kill $PREVIEW_PID || true\n"
+            "  case \"$(uname -s)\" in MINGW*|MSYS*|CYGWIN*)\n"
+            "    for pid in $(netstat -ano | grep ':5188' | grep -i listen | awk '{print $NF}' | sort -u); do\n"
+            "      taskkill //F //PID $pid >/dev/null 2>&1 || true\n"
+            "    done ;;\n"
+            "  esac\n"
             "  exit $RC\n"
             "}"
         ),

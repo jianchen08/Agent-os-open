@@ -1,5 +1,8 @@
 {
   "id": "agent_manager",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Agent Manager",
   "description": "agent 配置聚合注册表——系统注册表（config/agents/**/*.yaml）与模式包注册表（/api/v1/schema mode_agents）聚合列表（source: system|mode:<plugin_id>，schema 不可得降级注明）+ 系统面读/写（掩码+etag/乐观锁+备份，admin 门控）+ 模式包 agent 读（用户副本优先，出厂种子只读回落）与写（用户副本文件 + 用户仓 git commit 尝试，用户门控）端点与 agent.get/list/config-validate 服务",
   "version": "1.0.0",
@@ -159,7 +162,7 @@
         "title": "智能体",
         "icon": "👤",
         "space": "workspace",
-        "slot": "activity-bar",
+        "slot": "tab",
         "order": 30,
         "path": "/agents",
         "widget": "agents_panel",

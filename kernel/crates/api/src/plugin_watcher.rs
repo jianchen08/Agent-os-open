@@ -36,8 +36,7 @@ use agentos_core::traits::{
 };
 use agentos_core::types::PluginError;
 use agentos_invoker::verify::{
-    compare_tools, declared_with_services, normalize_member_actual_tools, parse_actual_tools,
-    rejected_tool_names,
+    compare_tools, declared_with_services, parse_actual_tools, rejected_tool_names, ActualTool,
 };
 use agentos_plugin_loader::{
     output_schema_error, provides_methods_unbacked, CapabilityRegistryImpl, PluginEnablement,
@@ -325,6 +324,29 @@ fn reject_malformed_output_schemas(manifest: &mut PluginManifest) -> Vec<String>
     rejected
 }
 
+/// 合宿成员观测域化（BUG-51 验证链）：合宿宿主的 `tools/list` 是**全组聚合面**
+/// （§4.2：成员工具按 `{plugin_id}.{tool}` 注册），成员的一致性对照只应覆盖
+/// 成员自身声明面——他组成员的带前缀工具计入本成员 undeclared/drift，健康
+/// 成员将永落 drift、观测成功无以落 `ok`（转正链路失真）。处理：剥本成员
+/// 前缀 + 剔除他组前缀条目；**裸名保留**（防御：宿主/哨兵形态的裸名上报
+/// 不丢，顶多记 undeclared 不产生 missing 误剔——08-31 教训的保守侧）。
+pub(crate) fn member_scoped_actual_tools(
+    actual: Vec<ActualTool>,
+    plugin_id: &str,
+) -> Vec<ActualTool> {
+    let prefix = format!("{plugin_id}.");
+    actual
+        .into_iter()
+        .filter(|t| t.name.starts_with(&prefix) || !t.name.contains('.'))
+        .map(|mut t| {
+            if let Some(rest) = t.name.strip_prefix(&prefix) {
+                t.name = rest.to_string();
+            }
+            t
+        })
+        .collect()
+}
+
 /// 注册闸冒烟：对声明了 `smoke: true` 的工具构造样例输入真调一次，验证"基本能力
 /// 能跑"（fail-closed）。调用异常/返回 failure → 拒绝该工具 + 记 `smoke_failed`。
 /// 副作用敏感/需要真实参数的能力由插件**显式** `smoke: true` 才被冒烟——缺省不冒烟，
@@ -392,6 +414,12 @@ const G2_OBSERVE_RETRY_BACKOFF_MS: [u64; 2] = [300, 1000];
 /// sync 都重观测，失败记录无限堆积（2026-09-09 minidump 归因：860MB 内核驻留
 /// 的最大单一来源）。编辑 plugin.json（声明指纹变化）或导入成功即重置。
 const DYNAMIC_IMPORT_MAX_CONSECUTIVE_FAILS: u32 = 5;
+
+/// BUG-51 复验预算上限：观测失败（账本 verify_incomplete）插件的自动复验
+/// 连续失败达 N 轮即落终态 verify_failed（账本可见，插件管理 error 透出原因），
+/// 停止该插件的逐轮自动重验。声明/代码指纹变化（用户动手修）或复验成功即
+/// 重置预算。不设上限的逐轮 spawn 复验只会对真坏插件无限燃烧进程与日志。
+const G2_REVERIFY_MAX_CONSECUTIVE_FAILS: u32 = 5;
 
 /// 一行接入（2026-09-03 用户裁定）判定：external MCP 允许零工具声明——
 /// 空声明 = 观测即声明，采信握手 `tools/list` 全量导入（多工具服务免抄
@@ -498,11 +526,12 @@ pub async fn g2_verify_and_sanitize(
                 };
             }
             // 合宿成员（声明 host_group，任意组名）的工具经宿主注册为 `{plugin_id}.{tool}`
-            // （§4.2 命名空间），G2 对照声明裸名前必须归一前缀；否则成员 100%
-            // 被误判 missing 漂移而剔光（08-31 实测 task_manage/memory/human 全灭）。
+            // （§4.2 命名空间），G2 对照声明裸名前必须归一前缀；否则成员 100% 被误判
+            // missing 漂移而剔光（08-31 实测 task_manage/memory 全灭）。对照域再域化到
+            // 成员自身（他组前缀条目剔除）——成员判定只看成员声明面（BUG-51 验证链）。
             // 判定与 invoker 装箱准入同源（agentos_invoker::is_cohost_member）。
             let actual = if agentos_invoker::is_cohost_member(&manifest) {
-                normalize_member_actual_tools(actual, &manifest.id)
+                member_scoped_actual_tools(actual, &manifest.id)
             } else {
                 actual
             };
@@ -1048,11 +1077,39 @@ async fn sync_reverify_changed(
         // 被 g2_applicable 闸排除在推送式检测外：.py 变更对 watcher 可见。
         let g2_applicable = m.host_type == HostType::Sidecar
             && (!m.capabilities.tools.is_empty() || !m.capabilities.services.is_empty());
+        // BUG-51 注册门禁：观测失败（verify_incomplete）/复验超限终态
+        // （verify_failed）的 G2 插件不依赖指纹变化逐轮复验——观测恢复即转正
+        // （账本 ok 唯一清除口），连续失败达预算上限落终态停验；动态 MCP 有
+        // 自身的补观测连击通道（上方熔断），不进本预算（零声明插件本就无工具
+        // 可遮挡）。账本未接线（测试）时无此触发。
+        let ledger_state = contract_states
+            .and_then(|ledger| ledger.get(&m.id))
+            .map(|st| st.gates.g2_consistency);
+        let g2_verify_pending = !dynamic_import
+            && g2_applicable
+            && matches!(
+                ledger_state.as_deref(),
+                Some("verify_incomplete") | Some("verify_failed")
+            );
         let cur_code_fp = current_code_fp(code_dirs, m);
         let code_changed = known_code_hashes
             .get(&m.id)
             .is_some_and(|old| cur_code_fp != *old);
-        if !decl_changed && !code_changed && !dynamic_import {
+        if code_changed {
+            // 用户动手修（实现变更）= 新的复验预算。
+            known_obs_fail_streaks.remove(&m.id);
+        }
+        if !decl_changed && !code_changed && !dynamic_import && !g2_verify_pending {
+            continue;
+        }
+        // 复验预算闸：无声明/代码变更的纯待复验轮次，连击达上限即跳过（终态
+        // verify_failed 的常态路径——终态不再自动重验，动手修才重开）。
+        if g2_verify_pending
+            && !decl_changed
+            && !code_changed
+            && known_obs_fail_streaks.get(&m.id).copied().unwrap_or(0)
+                >= G2_REVERIFY_MAX_CONSECUTIVE_FAILS
+        {
             continue;
         }
         sync_reverify_apply(
@@ -1071,6 +1128,43 @@ async fn sync_reverify_changed(
             report,
         )
         .await;
+        // BUG-51 复验连击记账：本轮复验后账本仍在校验未完成/终态 = 观测失败
+        // → 连击 +1（达上限跨线时落 verify_failed 终态并告警一次）；观测成功
+        // （ok/drift/sanitized 任一判定）→ 预算清零。
+        if g2_verify_pending {
+            match contract_states
+                .and_then(|ledger| ledger.get(&m.id))
+                .map(|st| st.gates.g2_consistency)
+            {
+                Some(state) if matches!(state.as_str(), "verify_incomplete" | "verify_failed") => {
+                    let streak = known_obs_fail_streaks.entry(m.id.clone()).or_insert(0);
+                    *streak += 1;
+                    if *streak == G2_REVERIFY_MAX_CONSECUTIVE_FAILS {
+                        if let Some(ledger) = contract_states {
+                            ledger.upsert(crate::contract::PluginContractState::verify_failed(
+                                m,
+                                true,
+                                format!(
+                                    "G2 复验连续 {} 轮观测失败（spawn/tools-list 重试后仍失败），\
+                                     已停止自动复验；插件工具保持从 LLM 工具面遮挡。请修复插件后\
+                                     重验：编辑插件文件自动触发，或 POST /api/v1/plugins/validate-all",
+                                    G2_REVERIFY_MAX_CONSECUTIVE_FAILS
+                                ),
+                            ));
+                        }
+                        warn!(
+                            target: "plugin_watcher",
+                            plugin = %m.id,
+                            fails = *streak,
+                            "G2 复验预算超限：落验证失败终态（verify_failed），停止自动重验（修复后声明/代码变更重开）"
+                        );
+                    }
+                }
+                _ => {
+                    known_obs_fail_streaks.remove(&m.id);
+                }
+            }
+        }
         // 观测连击记账：动态 MCP 补观测后注册面仍零工具 = 本轮失败 → 连击 +1
         // （达上限仅在跨越时告警一次，避免逐轮刷日志）；观测导入成功 → 清零。
         if dynamic_import {

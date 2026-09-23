@@ -1,6 +1,6 @@
 // @feature: FP-0.2.〇 存储账本 | @vision: V3 可嵌入 | @ci: rust-test
-//! 热路径六方法（get_run / set_run_pipeline / list_runs_by_pipeline / get_blob /
-//! append_trace / update_run_status）经 blocking() 走专用 DB 线程池的回归。
+//! 热路径方法（get_run / record_run_start / list_runs_by_pipeline / get_blob /
+//! append_trace / get_messages_by_pipeline）经 blocking() 走专用 DB 线程池的回归。
 //!
 //! 行为契约在迁池前后不变（本文件断言读写语义本身）；重点守护跨池派发最容易
 //! 丢失的 task_local 租户语义：池线程没有 task_local，租户必须由 async 包装在
@@ -13,12 +13,12 @@ use agentos_core::traits::StorageBackend;
 use agentos_core::types::{PatchType, RunStatus, StorageError, TenantContext, TraceEntry};
 use agentos_engine::SqliteStore;
 
-fn trace(run_id: &str, seq: u32) -> TraceEntry {
+fn trace(pipeline_id: &str, seq: u32) -> TraceEntry {
     TraceEntry {
         trace_id: format!("t-{seq}"),
-        run_id: run_id.to_string(),
-        branch_id: "main".to_string(),
-        seq_in_branch: seq,
+        pipeline_id: pipeline_id.to_string(),
+        // 写入时 seq 由存储层分配（MAX(seq)+1），构造方填 0 即可
+        seq: 0,
         plugin_id: "plugin_under_test".to_string(),
         patch_type: PatchType::StateUpdate,
         patch_data: serde_json::json!({ "k": seq }),
@@ -26,26 +26,24 @@ fn trace(run_id: &str, seq: u32) -> TraceEntry {
     }
 }
 
-/// append_trace / get_run / update_run_status 的租户来自 task_local：
-/// 经池派发后仍按调用方租户读写，租户隔离不因迁池失效。
+/// append_trace / get_run 的租户来自 task_local：经池派发后仍按调用方租户读写，
+/// 租户隔离不因迁池失效。
 #[tokio::test]
 async fn trait_run_methods_carry_task_local_tenant_through_db_pool() {
     let store = Arc::new(SqliteStore::open_memory().unwrap());
-    store.create_run("run-a", "hash", "tenant-a").unwrap();
 
     agentos_tenant::scope(TenantContext::new("tenant-a", "s"), async {
-        StorageBackend::append_trace(&*store, trace("run-a", 1))
+        // 簿记显式携带租户（trait 契约），运行投影落 tenant-a
+        StorageBackend::record_run_start(&*store, "pipe-a", "tenant-a", "run-a", "hash-a")
             .await
             .unwrap();
-        StorageBackend::update_run_status(
-            &*store,
-            "run-a",
-            RunStatus::Completed,
-            Some("main"),
-            Some(1),
-        )
-        .await
-        .unwrap();
+        StorageBackend::append_trace(&*store, trace("pipe-a", 1))
+            .await
+            .unwrap();
+        // 终态簿记走投影写面（固有方法，显式携带租户）
+        store
+            .set_run_status_projection("pipe-a", "tenant-a", RunStatus::Completed)
+            .unwrap();
         let run = StorageBackend::get_run(&*store, "run-a").await.unwrap();
         assert_eq!(run.tenant_id, "tenant-a");
         assert!(
@@ -53,7 +51,7 @@ async fn trait_run_methods_carry_task_local_tenant_through_db_pool() {
             "终态写入必须生效: {:?}",
             run.status
         );
-        assert_eq!(run.current_seq, 1);
+        assert_eq!(run.current_seq, 0, "导航指针退役后的恒定兼容值");
     })
     .await;
 
@@ -87,28 +85,25 @@ async fn trait_run_methods_carry_task_local_tenant_through_db_pool() {
     );
 }
 
-/// 其余三个池包装方法（set_run_pipeline / list_runs_by_pipeline / get_blob）
+/// 其余三个池包装方法（record_run_start / list_runs_by_pipeline / get_blob）
 /// 迁池后读写语义不变。
 #[tokio::test]
 async fn trait_pool_wrappers_preserve_semantics() {
     let store = Arc::new(SqliteStore::open_memory().unwrap());
-    StorageBackend::create_run(&*store, "run-p", "hash", "tenant-p")
-        .await
-        .unwrap();
-    StorageBackend::set_run_pipeline(&*store, "run-p", "pipe-1")
+    StorageBackend::record_run_start(&*store, "pipe-1", "tenant-p", "run-p", "hash-p")
         .await
         .unwrap();
 
     let runs = StorageBackend::list_runs_by_pipeline(&*store, "pipe-1", "tenant-p")
         .await
         .unwrap();
-    assert_eq!(runs.len(), 1, "按管道反查 run 必须命中");
+    assert_eq!(runs.len(), 1, "按管道反查当前运行投影必须命中");
     assert_eq!(runs[0].run_id, "run-p");
 
     let missing = StorageBackend::list_runs_by_pipeline(&*store, "pipe-none", "tenant-p")
         .await
         .unwrap();
-    assert!(missing.is_empty(), "无 run 的管道必须返回空列表");
+    assert!(missing.is_empty(), "无运行簿记的管道必须返回空列表");
 
     let blob_id = StorageBackend::store_blob(&*store, b"payload", "text/plain")
         .await

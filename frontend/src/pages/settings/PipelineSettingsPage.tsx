@@ -12,21 +12,24 @@
  * - 读写：GET/PUT /api/v1/config/pipelines/autonomous（P7 端点原子写 +
  *   If-Match 乐观锁 + G10 结构校验；保存后引擎 mtime 热加载，1s TTL 门内生效）
  *
+ * 数据面四态统一（OBS-R258-1）：配置加载失败显式 ErrorState + 重试上屏，
+ * 失败态保持 config=null（编辑区不渲染、保存禁用——FE1/FE2 只读兜底）。
+ *
  * @param embedded 嵌入设置主页右侧面板时为 true（去掉独立全屏头）
  */
 
-import { useQuery } from '@tanstack/react-query'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Code, Eye, Loader2 } from '@/assets/icons'
 import { ConfigObject } from '@/components/config/PluginConfigEditor'
 import { PipelineFlowEditor } from '@/components/pipeline/PipelineFlowEditor'
+import { ErrorState } from '@/components/shared/ErrorState'
+import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
 import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/sonner'
-import {
-  getPipelineConfig,
-  savePipelineConfig,
-} from '@/services/api/pipelineConfig'
+import { usePipelineConfigQuery } from '@/hooks/queries/usePipelineConfigQuery'
+import { useAsyncResource } from '@/hooks/useAsyncResource'
+import { savePipelineConfig } from '@/services/api/pipelineConfig'
 import { fetchPipelinePluginCatalog } from '@/services/api/pipelines'
 import {
   deleteAtPath,
@@ -60,40 +63,29 @@ export function PipelineSettingsPage({ embedded = false }: { embedded?: boolean 
   const [etag, setEtag] = useState('')
   const [catalog, setCatalog] = useState<PipelinePluginCatalogEntry[]>([])
   const [catalogError, setCatalogError] = useState<string | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
-  const [loadError, setLoadError] = useState<string | null>(null)
   const [saveState, setSaveState] = useState<SaveState>('idle')
   const [viewMode, setViewMode] = useState<ViewMode>('visual')
 
   // 加载配置（query 化）：重进设置页缓存秒开；编辑副本为本地 state，
-  // 后台刷新只换初始数据源，不打断进行中的编辑
-  const configQuery = useQuery({
-    queryKey: queryKeys.pipelineConfig(PIPELINE_NAME),
-    queryFn: () => getPipelineConfig(PIPELINE_NAME),
-    staleTime: 60_000,
+  // 后台刷新只换初始数据源，不打断进行中的编辑。
+  // 主面四态统一（OBS-R258-1）：失败显式 ErrorState + 重试上屏；apiClient
+  // 拒绝的是普通 ApiError 对象（非 Error 实例）→ 走 fallbackErrorText
+  const configResource = useAsyncResource(usePipelineConfigQuery(PIPELINE_NAME), {
+    fallbackErrorText: '无法加载配置',
   })
+  const isLoading = configResource.status === 'loading'
+  // 失败保持 config=null（编辑区不渲染、保存禁用）——落 {} 会使用户点保存
+  // 把空对象写进 autonomous.yaml（内核唯一执行的管道）
+  const loadError = configResource.isError ? (configResource.error ?? '无法加载配置') : null
 
   useEffect(() => {
-    const result = configQuery.data
-    if (!result) return
-    const data = result.data ?? {}
+    const data = configResource.data?.data ?? null
+    if (!data) return
     setConfig(data)
-    setEtag(result.etag ?? '')
+    setEtag(configResource.data?.etag ?? '')
     // 非 0.2 格式（无 loop_bodies）时可视化无从渲染，自动落源码视图
     if (!isPipelineV2Data(data)) setViewMode('raw')
-  }, [configQuery.data])
-
-  useEffect(() => {
-    if (configQuery.isPending) return
-    setIsLoading(false)
-    if (configQuery.isError) {
-      // 失败保持 config=null（编辑区不渲染、保存禁用）——落 {} 会使用户
-      // 点保存把空对象写进 autonomous.yaml（内核唯一执行的管道）
-      const msg = configQuery.error instanceof Error ? configQuery.error.message : '无法加载配置'
-      setLoadError('无法加载配置')
-      toast.error('配置加载失败', { description: msg })
-    }
-  }, [configQuery.isPending, configQuery.isError, configQuery.error])
+  }, [configResource.data])
 
   // 插件目录（变化频率低，mount 拉取，目录失败不阻塞配置编辑）
   useEffect(() => {
@@ -239,7 +231,7 @@ export function PipelineSettingsPage({ embedded = false }: { embedded?: boolean 
         </div>
       </div>
 
-      {!visualAvailable && !isLoading && (
+      {!visualAvailable && !isLoading && config && (
         <div className="mb-4 rounded-lg bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
           配置不含 loop_bodies（非 0.2 多循环体格式），已切到源码视图。
         </div>
@@ -250,17 +242,11 @@ export function PipelineSettingsPage({ embedded = false }: { embedded?: boolean 
         </div>
       )}
 
-      {isLoading && (
-        <div className="text-muted-foreground flex items-center justify-center py-20 text-sm">
-          <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-          加载配置...
-        </div>
-      )}
+      {isLoading && <LoadingState text="加载配置..." />}
 
-      {loadError && !isLoading && (
-        <div className="mb-4 rounded-lg bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
-          {loadError}
-        </div>
+      {/* 失败态（OBS-R258-1）：显式 ErrorState + 重试；config 保持 null（只读禁存） */}
+      {configResource.status === 'error' && (
+        <ErrorState message={loadError ?? ''} onRetry={configResource.refetch} />
       )}
 
       {!isLoading && config && viewMode === 'visual' && visualAvailable && (

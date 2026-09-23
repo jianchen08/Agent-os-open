@@ -2,7 +2,9 @@
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import type { PersistStorage, StorageValue } from 'zustand/middleware'
 import { createTolerantStorage } from '@/utils/tolerantStorage'
+import { loggers } from '@/utils/logger'
 import type { FloatingWindowInstance, WorkspaceTab, DockItem } from '@/types/layout'
 import type { ReactNode } from 'react'
 
@@ -96,6 +98,8 @@ interface LayoutModeActions {
   /** 关闭全部标签（钉住标签保留） */
   closeAllWorkspaceTabs: () => void
   updateWorkspaceTab: (tabId: string, updates: Partial<WorkspaceTab>) => void
+  /** 拖拽换位：把 dragTabId 移到 targetTabId 当前位置 */
+  reorderWorkspaceTabs: (dragTabId: string, targetTabId: string) => void
 
   /** Dock item management */
   setDockItems: (items: DockItem[]) => void
@@ -119,6 +123,71 @@ interface LayoutModeActions {
 
   /** 递增工作区数据版本号，触发依赖组件刷新 */
   bumpWorkspaceDataVersion: () => void
+}
+
+// ---- persist 缩容闸（BUG-79）----
+// layout-mode 在每次 set 时整体覆写持久化的 workspaceTabs：任何把页签集合写小的
+// 路径都会被持久化放大成不可逆丢失（12 个用户签被覆盖写没）。闸门契约：页签集合
+// 缩小的持久化写入仅允许两类来源——
+// ① 用户关签动作（closeWorkspaceTab/closeOtherWorkspaceTabs/closeAllWorkspaceTabs，
+//    同步事置 userClosePending，与随后的本次写 1:1 消费）；
+// ② merge 迁移清洗（登记本次清洗移除的页签 id，写入丢失集 ⊆ 移除集时放行，
+//    清洗与后续加签同窗发生时仍可落盘）。
+// 其余缩容写入一律拒写并告警：localStorage 保留上次完好集合，刷新后经 merge
+// 原样恢复（自愈，无需恢复集）。
+let userClosePending = false
+let migrationRemovedTabIds: string[] | null = null
+
+/** persist 落盘的页签载荷形状（partialize 产物） */
+type PersistedLayoutState = { mode: LayoutMode; workspaceTabs: WorkspaceTab[] }
+
+function extractTabIds(value: StorageValue<PersistedLayoutState> | null): string[] | null {
+  const tabs = value?.state?.workspaceTabs
+  if (!Array.isArray(tabs)) return null
+  const ids: string[] = []
+  for (const tab of tabs) {
+    if (typeof (tab as WorkspaceTab)?.id === 'string') ids.push(tab.id as string)
+  }
+  return ids
+}
+
+function createShrinkGuardedLayoutStorage(): PersistStorage<PersistedLayoutState> | undefined {
+  const inner = createTolerantStorage()
+  if (!inner) return inner
+  return {
+    getItem: (name) =>
+      inner.getItem(name) as
+        | StorageValue<PersistedLayoutState>
+        | null
+        | Promise<StorageValue<PersistedLayoutState> | null>,
+    setItem: (name, value) => {
+      if (name === 'layout-mode') {
+        const nextIds = extractTabIds(value)
+        if (nextIds !== null) {
+          const prevIds = extractTabIds(inner.getItem(name) as StorageValue<PersistedLayoutState> | null)
+          if (prevIds !== null) {
+            const lost = prevIds.filter((id) => !nextIds.includes(id))
+            const removed = migrationRemovedTabIds
+            const migrationAuthorized =
+              removed !== null && lost.length > 0 && lost.every((id) => removed.includes(id))
+            if (lost.length > 0 && !userClosePending && !migrationAuthorized) {
+              loggers.storage.warn(
+                '[layout-mode] 拒绝缩容页签集的持久化写入（非关签/迁移来源，BUG-79 闸）：'
+                  + '丢失 %d 签 %j，保留上次完好集合，刷新后自动恢复',
+                lost.length,
+                lost,
+              )
+              return
+            }
+          }
+        }
+        userClosePending = false
+        migrationRemovedTabIds = null
+      }
+      inner.setItem(name, value)
+    },
+    removeItem: (name) => inner.removeItem(name),
+  }
 }
 
 export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
@@ -210,12 +279,16 @@ export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
         })),
  // PERF 关闭 Tab 时清理 visited 记录，
       // 下次若重开会重新挂载（其内部状态本就随卸载丢失，记录保留无意义）。
-      closeWorkspaceTab: (tabId) =>
+      closeWorkspaceTab: (tabId) => {
+        // 关签意图随本次写消费：缩容闸据此放行用户主动关签的持久化（BUG-79 闸）
+        userClosePending = true
         set((state) => ({
           workspaceTabs: state.workspaceTabs.filter((t) => t.id !== tabId),
           visitedTabIds: state.visitedTabIds.filter((id) => id !== tabId),
-        })),
-      closeOtherWorkspaceTabs: (tabId) =>
+        }))
+      },
+      closeOtherWorkspaceTabs: (tabId) => {
+        userClosePending = true
         set((state) => {
           const keep = state.workspaceTabs.filter(
             (t) => t.id === tabId || t.isPinned,
@@ -231,8 +304,10 @@ export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
               (id) => tabs.some((t) => t.id === id),
             ),
           }
-        }),
-      closeAllWorkspaceTabs: () =>
+        })
+      },
+      closeAllWorkspaceTabs: () => {
+        userClosePending = true
         set((state) => {
           const keep = state.workspaceTabs.filter((t) => t.isPinned)
           return {
@@ -241,13 +316,26 @@ export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
               (id) => keep.some((t) => t.id === id),
             ),
           }
-        }),
+        })
+      },
       updateWorkspaceTab: (tabId, updates) =>
         set((state) => ({
           workspaceTabs: state.workspaceTabs.map((t) =>
             t.id === tabId ? { ...t, ...updates } : t,
           ),
         })),
+
+      reorderWorkspaceTabs: (dragTabId, targetTabId) =>
+        set((state) => {
+          if (dragTabId === targetTabId) return state
+          const from = state.workspaceTabs.findIndex((t) => t.id === dragTabId)
+          const to = state.workspaceTabs.findIndex((t) => t.id === targetTabId)
+          if (from === -1 || to === -1) return state
+          const tabs = [...state.workspaceTabs]
+          const [moved] = tabs.splice(from, 1)
+          tabs.splice(to, 0, moved)
+          return { workspaceTabs: tabs }
+        }),
 
       setDockItems: (items) => set({ dockItems: items }),
       updateDockItem: (id, updates) =>
@@ -302,8 +390,8 @@ export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
     }),
     {
       name: 'layout-mode',
-      // 配额满时吞掉 QuotaExceededError，避免 toggleMode 等 action 崩溃
-      storage: createTolerantStorage(),
+      // 配额满时吞掉 QuotaExceededError（含缩容闸：非关签/迁移来源的缩容写入拒落盘）
+      storage: createShrinkGuardedLayoutStorage(),
       // 在 merge 时强制重置，避免恢复到一个不一致的状态。
       partialize: (state) => ({
         mode: state.mode,
@@ -312,6 +400,7 @@ export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
       merge: (persisted, current) => {
         const p = (persisted as Partial<LayoutModeState>) || {}
         let tabs = Array.isArray(p.workspaceTabs) ? p.workspaceTabs : current.workspaceTabs
+        const preCleanTabIds = tabs.map((t) => t.id)
         // 迁移（0.2 收尾）：旧的固定「工作区」标签（ws-panel-workspace）已退役——
         // 右侧面板本身就是工作区，顶层标签（任务管理/文件树/设置…）都是其内容，
         // 不再存在名为「工作区」的标签页。从持久化数据中清洗掉。
@@ -319,6 +408,11 @@ export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
         // 迁移（plugins_panel 撤除）：独立「插件管理」面板与设置中枢 kernel-plugins
         // 双入口收敛，注册名已摘——持久化的旧页签从持久化数据中清洗掉。
         tabs = tabs.filter((t) => t.id !== 'ws-panel-plugins')
+        // 迁移（任务管理归前端 2026-09-21 用户裁定）：任务管理页不再由 task_service
+        // 插件的 contributes.pages 声明（页面归前端，声明在前端预置表），旧页签 id
+        // ws-plugin-tasks 退役——清洗后由预置面板以 ws-panel-tasks 重新打开，避免
+        // 同一功能在顶带残留两个页签。
+        tabs = tabs.filter((t) => t.id !== 'ws-plugin-tasks')
         // 清洗后为空 → 默认激活任务管理标签（面板直接展示任务管理）
         if (tabs.length === 0) {
           tabs = [
@@ -333,6 +427,11 @@ export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
             },
           ]
         }
+        // 迁移清洗授权：登记本次清洗移除的页签 id，缩容闸仅对丢失集 ⊆ 移除集的
+        // 写入放行（BUG-79 闸；清洗与后续加签同窗发生时仍可落盘）
+        migrationRemovedTabIds = preCleanTabIds.filter(
+          (id) => !tabs.some((t) => t.id === id),
+        )
         return {
           ...current,
           ...p,

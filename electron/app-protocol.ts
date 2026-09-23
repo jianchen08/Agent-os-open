@@ -11,8 +11,9 @@
  *  - SPA 深链（/p/<pageId>、/login 等无文件对应路径）：回落 index.html，
  *    createBrowserRouter 按 pathname 匹配（与 nginx try_files 同语义）；
  *  - 内核 API（/api、/ext、/media、/uploads）：主进程 net.fetch 回源
- *    http://127.0.0.1:9100——同源化后前端 axios 沿用相对路径，无 CORS、
- *    无 CSP connect-src 问题（与 dev 侧 vite server.proxy 拓扑同构）。
+ *    http://127.0.0.1:<内核端口>（缺省 9101，与 dev 栈 9100 错峰）——同源化后
+ *    前端 axios 沿用相对路径，无 CORS、无 CSP connect-src 问题（与 dev 侧
+ *    vite server.proxy 拓扑同构）。
  *    WebSocket（/ws）无法经协议层代理，由前端按打包件形态直连内核
  *    （frontend/src/constants/websocket.ts deriveWsUrl 的 app: 分支）。
  *
@@ -26,29 +27,62 @@ import * as fs from "fs";
 import * as path from "path";
 import { pathToFileURL } from "url";
 
+import { KERNEL_PORT } from "./kernel-manager";
+
 /** 自定义协议名与宿主（app://bundle 为打包件前端唯一源） */
 export const APP_SCHEME = "app";
 export const APP_HOST = "bundle";
 /** 打包件主窗口/子窗口的加载基址 */
 export const APP_BASE_URL = `${APP_SCHEME}://${APP_HOST}`;
 
-/** 内核回源地址（内核默认端口 9100，与 dev 侧 vite proxy 默认目标一致） */
-const KERNEL_ORIGIN = "http://127.0.0.1:9100";
+/**
+ * 内核启动加载态页（协议内路由，不走 dist 文件）。
+ *
+ * 首屏在内核就绪前经本路由加载（main.ts loadInitialContent）——必须与应用
+ * 同源（app://）：data: URL 的顶层导航在渲染进程网络栈退化时（如多实例
+ * 共享 userData 的磁盘缓存竞争）会被 Chromium 拒绝（ERR_FAILED），而 app://
+ * 由主进程 protocol.handle 伺服，与应用其余页面同一条加载链。
+ */
+export const APP_LOADING_PATHNAME = "/__loading.html";
+/** 加载态页完整 URL（main.ts 生产首屏加载用） */
+export const APP_LOADING_URL = `${APP_BASE_URL}${APP_LOADING_PATHNAME}`;
+
+/** 加载态页内容（纯静态 HTML+CSS，无脚本；CSP 由静态安全头统一携带） */
+const LOADING_PAGE_HTML = `<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>灵汐助手</title>
+<style>
+  html,body{height:100%;margin:0;background:#f5f6fa;font-family:"Microsoft YaHei",system-ui,sans-serif}
+  .box{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;color:#4b5563}
+  .spin{width:36px;height:36px;border:4px solid #d1d5db;border-top-color:#4f6ef7;border-radius:50%;animation:r 1s linear infinite}
+  p{margin:0;font-size:14px}
+  @keyframes r{to{transform:rotate(360deg)}}
+</style></head>
+<body><div class="box"><div class="spin"></div><p>正在启动灵汐助手内核，首次启动可能需要数十秒…</p></div></body>
+</html>`;
+
+/**
+ * 内核回源地址（端口与内核 spawn/健康探测同源解析，resolveKernelPort 见
+ * kernel-manager；AGENTOS_KERNEL_PORT 可整体错峰，缺省 9101）。
+ */
+const KERNEL_ORIGIN = `http://127.0.0.1:${KERNEL_PORT}`;
+/** 打包件渲染进程直连内核 WS 源（WebSocket 无法经协议层代理） */
+const KERNEL_WS_ORIGIN = `ws://127.0.0.1:${KERNEL_PORT}`;
 
 /**
  * app:// 源的内容安全策略（与 web 部署链 nginx.conf / vite dev 同口径）。
  *
  * 差异点仅 connect-src：内核 API 走 app://bundle 同源代理，但 WebSocket
  * 无法经协议层代理，打包件由渲染进程直连内核（websocket.ts app: 分支）
- * ——须显式放行内核源 http/ws://127.0.0.1:9100。'unsafe-eval' 为 ajv8
- * (RJSF v6) new Function 编译校验器所需，web 链同款。
+ * ——须显式放行内核 http/ws 源（与回源同端口，见 KERNEL_ORIGIN）。'unsafe-eval'
+ * 为 ajv8 (RJSF v6) new Function 编译校验器所需，web 链同款。
  */
 const APP_CSP = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
-  "connect-src 'self' http://127.0.0.1:9100 ws://127.0.0.1:9100",
+  `connect-src 'self' ${KERNEL_ORIGIN} ${KERNEL_WS_ORIGIN}`,
   "font-src 'self' data:",
   "frame-src 'self' blob: data:",
   "object-src 'none'",
@@ -187,6 +221,14 @@ export function installAppProtocolHandler(): void {
       const url = new URL(request.url);
       if (isKernelProxyPath(url.pathname)) {
         return await proxyToKernel(request, url);
+      }
+      if (url.pathname === APP_LOADING_PATHNAME) {
+        return withStaticSecurityHeaders(
+          new Response(LOADING_PAGE_HTML, {
+            status: 200,
+            headers: { "Content-Type": "text/html; charset=utf-8" },
+          }),
+        );
       }
       return await serveStatic(distRoot, url);
     } catch (err) {

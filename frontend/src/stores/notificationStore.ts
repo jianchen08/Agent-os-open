@@ -22,6 +22,53 @@ function generateNotificationId(): string {
   return `notif-${Date.now()}-${_nextId++}`
 }
 
+/**
+ * 无 id 通知的内容指纹入列记录：fingerprint → { id, at }。
+ * 重复投递的事件可能不携带稳定 id（纯前端错误提示等），按内容指纹兜底。
+ */
+const recentFingerprints = new Map<string, { id: string; at: number }>()
+
+/**
+ * 指纹去重窗口：必须覆盖重复投递的实际间隔抖动（/interaction/pending 兜底
+ * 轮询周期 10s + 网络延迟），10s 整会因投递抖动漏挡，故取 30s。
+ */
+const FINGERPRINT_DEDUP_WINDOW_MS = 30_000
+
+/** 已被用户移除/清空的通知 id 记忆上限（长期会话防无界增长） */
+const DISMISSED_ID_CAP = 1000
+
+/** 已被用户移除/清空的通知 id：同 id 重投不回弹（clear 后轮询/重放不得复活旧通知） */
+const dismissedNotificationIds = new Set<string>()
+
+function rememberDismissedId(id: string): void {
+  dismissedNotificationIds.add(id)
+  while (dismissedNotificationIds.size > DISMISSED_ID_CAP) {
+    const oldest = dismissedNotificationIds.values().next().value
+    if (oldest === undefined) break
+    dismissedNotificationIds.delete(oldest)
+  }
+}
+
+/**
+ * 通知点击路由目标（按通知关联坐标解析的导航语义，数据面供面板点击路由消费）
+ */
+export type NotificationRouteTarget =
+  | { kind: 'task'; taskId: string }
+  | { kind: 'session'; sessionId: string }
+
+/**
+ * 按通知关联坐标解析点击路由目标（OBS-R259-1）：
+ * task_id 优先（任务管理签定位），其次 thread/session（同源会话 id）；
+ * 都无 → null（调用方维持现状，零导航）。
+ */
+export function resolveNotificationRoute(
+  notification: Pick<NotificationItem, 'taskId' | 'sessionId'>,
+): NotificationRouteTarget | null {
+  if (notification.taskId) return { kind: 'task', taskId: notification.taskId }
+  if (notification.sessionId) return { kind: 'session', sessionId: notification.sessionId }
+  return null
+}
+
 /** 通知中心状态接口 */
 interface NotificationState {
   /** 通知列表（按优先级排序） */
@@ -116,16 +163,57 @@ export const useNotificationStore = create<NotificationState>()((set, get) => ({
   activeBlockingNotification: null,
 
   addNotification: (data) => {
+    const now = new Date()
     const id = data.id ?? generateNotificationId()
+
+    // 无 id 通知兜底闸：同 title+message 短窗内只入一条（重连重放/轮询重入
+    // 类重复投递不携带稳定 id 时按内容指纹挡住刷屏）。命中时返回首次入列 id。
+    // 携带关联坐标（sessionId/sourceId/taskId/agentId）的通知不走此闸：这类
+    // 是按实体语义的重复事件（如逐 pipeline 的命中率骤降告警），短窗吞掉
+    // 会让真实告警丢失——它们的重复投递应在生产方修复。
+    if (!data.id && !data.sessionId && !data.sourceId && !data.taskId && !data.agentId) {
+      const fingerprint = `${data.title}\u0000${data.message ?? ''}`
+      const seen = recentFingerprints.get(fingerprint)
+      if (seen && now.getTime() - seen.at < FINGERPRINT_DEDUP_WINDOW_MS) {
+        return seen.id
+      }
+      recentFingerprints.set(fingerprint, { id, at: now.getTime() })
+      for (const [key, value] of recentFingerprints) {
+        if (now.getTime() - value.at >= FINGERPRINT_DEDUP_WINDOW_MS) {
+          recentFingerprints.delete(key)
+        }
+      }
+    }
+
     const newItem: NotificationItem = {
       ...data,
       id,
       isRead: false,
-      timestamp: new Date().toISOString(),
+      timestamp: now.toISOString(),
     }
 
     set((state) => {
-      if (state.notifications.some((n) => n.id === id)) return state
+      const existingIdx = state.notifications.findIndex((n) => n.id === id)
+      if (existingIdx >= 0) {
+        // 同 id 重复投递（重连重放 / pending 轮询重入）：更新而非新增——内容
+        // 与时间戳以最新投递为准，已读态保持（重放不是新活动，badge 不增长、
+        // 不重新弹层）。
+        const merged: NotificationItem = {
+          ...newItem,
+          isRead: state.notifications[existingIdx].isRead,
+        }
+        const updated = [...state.notifications]
+        updated[existingIdx] = merged
+        return {
+          notifications: sortNotifications(updated),
+          ...(state.activeBlockingNotification?.id === id
+            ? { activeBlockingNotification: merged }
+            : {}),
+        }
+      }
+
+      // 已被用户移除/清空的通知 id 不再回弹入列
+      if (dismissedNotificationIds.has(id)) return state
 
       const updated = sortNotifications([...state.notifications, newItem])
       const blockingUpdate = checkBlockingNotification(state, newItem)
@@ -187,6 +275,7 @@ export const useNotificationStore = create<NotificationState>()((set, get) => ({
   },
 
   removeNotification: (id) => {
+    rememberDismissedId(id)
     set((state) => {
       const updated = state.notifications.filter((n) => n.id !== id)
       const blockingUpdate =
@@ -215,6 +304,9 @@ export const useNotificationStore = create<NotificationState>()((set, get) => ({
   },
 
   clearAll: () => {
+    for (const n of get().notifications) {
+      rememberDismissedId(n.id)
+    }
     set({
       notifications: [],
       activeBlockingNotification: null,

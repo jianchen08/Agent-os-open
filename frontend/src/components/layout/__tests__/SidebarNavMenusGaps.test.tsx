@@ -239,6 +239,39 @@ describe('折叠 rail：插件入口与高亮切换', () => {
   })
 })
 
+describe('任务管理常驻入口（前端自有页，非插件声明）', () => {
+  it('展开态：渲染任务管理入口，点击打开 ws-panel-tasks 页签并高亮', () => {
+    useUIStore.setState({ sidebarCollapsed: false })
+    renderWithProviders(<Sidebar />, { queryClient: createTestQueryClient() })
+    fireEvent.click(screen.getByTestId('sidebar-menu-tasks'))
+    expect(useLayoutModeStore.getState().workspaceTabs.map((t) => t.id)).toContain('ws-panel-tasks')
+    expect(screen.getByTestId('sidebar-menu-tasks').getAttribute('style')).toContain('inset')
+  })
+
+  it('折叠 rail：点击图标打开同一页签；重复点击幂等激活不重复追加', () => {
+    useUIStore.setState({ sidebarCollapsed: true })
+    renderWithProviders(<Sidebar />, { queryClient: createTestQueryClient() })
+    fireEvent.click(screen.getByTestId('sidebar-rail-tasks'))
+    expect(useLayoutModeStore.getState().workspaceTabs.map((t) => t.id)).toContain('ws-panel-tasks')
+
+    fireEvent.click(screen.getByTestId('sidebar-rail-tasks'))
+    expect(
+      useLayoutModeStore.getState().workspaceTabs.filter((t) => t.id === 'ws-panel-tasks'),
+    ).toHaveLength(1)
+  })
+
+  it('会话/任务高亮互斥：点任务后会话入口熄灭，点回会话恢复', () => {
+    useUIStore.setState({ sidebarCollapsed: true })
+    renderWithProviders(<Sidebar />, { queryClient: createTestQueryClient() })
+    const sessionsBtn = screen.getByTestId('sidebar-rail-sessions')
+    fireEvent.click(screen.getByTestId('sidebar-rail-tasks'))
+    expect(sessionsBtn.getAttribute('style') ?? '').not.toContain('inset')
+
+    fireEvent.click(sessionsBtn)
+    expect(sessionsBtn.getAttribute('style')).toContain('inset')
+  })
+})
+
 describe('折叠 rail 用户菜单', () => {
   function openRailUserMenu() {
     useUIStore.setState({ sidebarCollapsed: true })
@@ -558,6 +591,13 @@ describe('移动端自动收起', () => {
     renderWithProviders(<Sidebar isMobile />, { queryClient: createTestQueryClient() })
     fireEvent.click(screen.getByTestId('sidebar-menu-plugin-plug-path'))
     expect(useLayoutModeStore.getState().workspaceTabs.map((t) => t.id)).toContain('ws-plugin-plug-path')
+    expect(useUIStore.getState().sidebarCollapsed).toBe(true)
+  })
+
+  it('点击任务管理入口 → 打开页签并自动收起侧栏', () => {
+    renderWithProviders(<Sidebar isMobile />, { queryClient: createTestQueryClient() })
+    fireEvent.click(screen.getByTestId('sidebar-menu-tasks'))
+    expect(useLayoutModeStore.getState().workspaceTabs.map((t) => t.id)).toContain('ws-panel-tasks')
     expect(useUIStore.getState().sidebarCollapsed).toBe(true)
   })
 })

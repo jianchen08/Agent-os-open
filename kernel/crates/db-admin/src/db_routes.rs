@@ -716,15 +716,14 @@ fn serde_json_to_sql(v: &Value) -> Box<dyn rusqlite::ToSql> {
 
 // ─── 全量执行数据清理（clear_execution_data） ────────────────────────
 
-/// 执行数据清理白名单（9 表；users 刻意保留——与 2026-08-22 手动清库同口径）。
+/// 执行数据清理白名单（7 表；users 刻意保留——与 2026-08-22 手动清库同口径）。
+/// runs/branches 已退役（ADR 2026-09-18），不在清单。
 ///
 /// 走专用方法而非 SQL 执行器：execute 的"全表 DELETE 一律 403"是泛化防线，
 /// 本方法以白名单常量显式声明"清什么"，与 engine store.rs 的 DDL 同仓演进。
-pub const EXECUTION_DATA_TABLES: [&str; 9] = [
-    "runs",
+pub const EXECUTION_DATA_TABLES: [&str; 7] = [
     "traces",
     "blobs",
-    "branches",
     "sessions",
     "pipeline_sessions",
     "pipeline_state",
@@ -770,8 +769,8 @@ pub fn clear_execution_data_inner(conn: &Connection) -> Result<Value, ApiError> 
     let running: Vec<(String, String)> = {
         let mut stmt = conn
             .prepare(
-                "SELECT pipeline_id, tenant_id FROM runs
-                 WHERE status = 'running' AND pipeline_id IS NOT NULL AND pipeline_id != ''",
+                "SELECT pipeline_id, tenant_id FROM pipeline_state
+                 WHERE field_key = 'run_status' AND value = 'running'",
             )
             .map_err(ApiError::internal("活跃管道检查失败"))?;
         let rows = stmt
@@ -932,7 +931,10 @@ mod tests {
         store
             .with_conn(|conn| {
                 let names = list_table_names(conn).unwrap();
-                assert!(names.contains(&"runs".to_string()), "应含引擎表: {names:?}");
+                assert!(
+                    names.contains(&"traces".to_string()),
+                    "应含引擎表: {names:?}"
+                );
                 assert!(
                     !names.iter().any(|n| n.starts_with("sqlite_")),
                     "应排除 sqlite_ 内部表"

@@ -1,5 +1,8 @@
 {
   "id": "e2e_lifecycle_probe",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "E2E Lifecycle Probe",
   "description": "插件装卸载生命周期 e2e 探针（tests/e2e_02/test_07）。默认禁用；启用后提供 e2e_probe_echo 工具与 /ext/e2e_lifecycle_probe/echo 端点，无副作用、无外部依赖。",
   "version": "1.0.0",

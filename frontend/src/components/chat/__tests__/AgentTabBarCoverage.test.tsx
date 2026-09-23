@@ -22,10 +22,11 @@
  * 回调触发时 scrollContainerRef 必然已赋值，属防御性兜底。
  */
 
-import { fireEvent, render, screen } from '@testing-library/react'
+import { createEvent, fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { AgentTabBar, type AgentTab } from '@/components/chat/AgentTabBar'
 import { AgentTabItem } from '@/components/chat/AgentTabItem'
+import { makeDataTransfer } from '@/test/dndTestUtils'
 import type { AgentTabItemData } from '@/components/chat/AgentTabItem'
 
 function makeItem(overrides: Partial<AgentTabItemData> = {}): AgentTabItemData {
@@ -223,5 +224,109 @@ describe('AgentTabBar — tab 列表与滚轮', () => {
     tablist.dispatchEvent(event)
     expect(event.defaultPrevented).toBe(false)
     expect(tablist.scrollLeft).toBe(10)
+  })
+})
+
+describe('AgentTabItem — 拖拽换位', () => {
+  /** 同一路径组（path 全等）的两个 tab（t1/t2）；extras 追加异组 tab */
+  function renderSamePathPair(extra?: AgentTabItemData[]) {
+    const onReorder = vi.fn()
+    const tabs = [
+      makeItem({ id: 't1', name: '子任务一', path: ['主管道'] }),
+      makeItem({ id: 't2', name: '子任务二', path: ['主管道'] }),
+      ...(extra ?? []),
+    ]
+    render(
+      <>
+        {tabs.map((tab) => (
+          <AgentTabItem key={tab.id} tab={tab} onClick={() => {}} onReorder={onReorder} />
+        ))}
+      </>,
+    )
+    return onReorder
+  }
+
+  it('dragStart 写入拖拽载荷（effectAllowed=move、text/plain=tab id）', () => {
+    renderSamePathPair()
+    const dt = makeDataTransfer()
+
+    fireEvent.dragStart(screen.getByRole('tab', { name: /子任务一/ }), { dataTransfer: dt })
+
+    expect(dt.effectAllowed).toBe('move')
+    expect(dt.getData('text/plain')).toBe('t1')
+
+    // 自 drop 复位模块态拖拽源，不外溢到后续用例
+    fireEvent.drop(screen.getByRole('tab', { name: /子任务一/ }), { dataTransfer: dt })
+  })
+
+  it('dragOver 同组其他 tab 拦截默认行为；自身与异组不拦截', () => {
+    renderSamePathPair([makeItem({ id: 't3', name: '别组', path: ['主管道', '别组'] })])
+    const dt = makeDataTransfer()
+    fireEvent.dragStart(screen.getByRole('tab', { name: /子任务一/ }), { dataTransfer: dt })
+
+    const overSelf = createEvent.dragOver(screen.getByRole('tab', { name: /子任务一/ }), { dataTransfer: dt })
+    fireEvent(screen.getByRole('tab', { name: /子任务一/ }), overSelf)
+    expect(overSelf.defaultPrevented).toBe(false)
+
+    const overSameGroup = createEvent.dragOver(screen.getByRole('tab', { name: /子任务二/ }), { dataTransfer: dt })
+    fireEvent(screen.getByRole('tab', { name: /子任务二/ }), overSameGroup)
+    expect(overSameGroup.defaultPrevented).toBe(true)
+
+    const overOtherGroup = createEvent.dragOver(screen.getByRole('tab', { name: /别组/ }), { dataTransfer: dt })
+    fireEvent(screen.getByRole('tab', { name: /别组/ }), overOtherGroup)
+    expect(overOtherGroup.defaultPrevented).toBe(false)
+
+    // drop 异组不换位，仅复位拖拽源
+    fireEvent.drop(screen.getByRole('tab', { name: /别组/ }), { dataTransfer: dt })
+  })
+
+  it('drop 同组其他 tab：onReorder 收到（拖拽源 id, 目标 id）', () => {
+    const onReorder = renderSamePathPair()
+    const dt = makeDataTransfer()
+    fireEvent.dragStart(screen.getByRole('tab', { name: /子任务一/ }), { dataTransfer: dt })
+
+    fireEvent.drop(screen.getByRole('tab', { name: /子任务二/ }), { dataTransfer: dt })
+
+    expect(onReorder).toHaveBeenCalledTimes(1)
+    expect(onReorder).toHaveBeenCalledWith('t1', 't2')
+  })
+
+  it('drop 守卫：无拖拽源 / 自身 / 异组均不回调', () => {
+    const onReorder = renderSamePathPair([makeItem({ id: 't3', name: '别组', path: ['主管道', '别组'] })])
+    const dt = makeDataTransfer()
+
+    // 未经 dragStart：无拖拽源
+    fireEvent.drop(screen.getByRole('tab', { name: /子任务二/ }), { dataTransfer: makeDataTransfer() })
+
+    // drop 到自身
+    fireEvent.dragStart(screen.getByRole('tab', { name: /子任务一/ }), { dataTransfer: dt })
+    fireEvent.drop(screen.getByRole('tab', { name: /子任务一/ }), { dataTransfer: dt })
+
+    // drop 到异组
+    fireEvent.dragStart(screen.getByRole('tab', { name: /子任务一/ }), { dataTransfer: dt })
+    fireEvent.drop(screen.getByRole('tab', { name: /别组/ }), { dataTransfer: dt })
+
+    expect(onReorder).not.toHaveBeenCalled()
+  })
+
+  it('无 path 的 tab 以空串归组：同组可拖拽换位', () => {
+    const onReorder = vi.fn()
+    render(
+      <>
+        <AgentTabItem tab={makeItem({ id: 't1', path: undefined })} onClick={() => {}} onReorder={onReorder} />
+        <AgentTabItem tab={makeItem({ id: 't2', path: undefined })} onClick={() => {}} onReorder={onReorder} />
+      </>,
+    )
+    const dt = makeDataTransfer()
+    const first = screen.getAllByRole('tab')[0]!
+    const second = screen.getAllByRole('tab')[1]!
+
+    fireEvent.dragStart(first, { dataTransfer: dt })
+    const over = createEvent.dragOver(second, { dataTransfer: dt })
+    fireEvent(second, over)
+    expect(over.defaultPrevented).toBe(true)
+
+    fireEvent.drop(second, { dataTransfer: dt })
+    expect(onReorder).toHaveBeenCalledWith('t1', 't2')
   })
 })

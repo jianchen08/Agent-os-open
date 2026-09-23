@@ -81,16 +81,17 @@ class TestCollectTokenUsage:
         db_path = tmp_path / "kernel.db"
         conn = sqlite3.connect(db_path)
         conn.execute(
-            "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT, field_value TEXT)"
+            "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT, value TEXT, value_kind TEXT)"
         )
+        # state 值域标量化（ADR 2026-09-18）：json 键存 JSON 文本，标量按 str 原样存
         rows = [
-            ("p1", "track.llm_usage", {"total_input_tokens": 7, "total_output_tokens": 3, "total_tokens": 10}),
-            ("p2", "track.llm_usage", {"total_input_tokens": 5, "total_output_tokens": 5, "total_tokens": 10}),
-            ("p3", "context_window", 32000),  # 非用量键不计入
+            ("p1", "track.llm_usage", json.dumps({"total_input_tokens": 7, "total_output_tokens": 3, "total_tokens": 10}), "json"),
+            ("p2", "track.llm_usage", json.dumps({"total_input_tokens": 5, "total_output_tokens": 5, "total_tokens": 10}), "json"),
+            ("p3", "context_window", "32000", "str"),  # 非用量键不计入
         ]
         conn.executemany(
-            "INSERT INTO pipeline_state VALUES (?, ?, ?)",
-            [(pid, key, json.dumps(val) if isinstance(val, dict) else str(val)) for pid, key, val in rows],
+            "INSERT INTO pipeline_state VALUES (?, ?, ?, ?)",
+            rows,
         )
         conn.commit()
         conn.close()
@@ -111,17 +112,17 @@ class TestCollectTokenUsage:
         db_path = tmp_path / "kernel.db"
         conn = sqlite3.connect(db_path)
         conn.execute(
-            "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT, field_value TEXT)"
+            "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT, value TEXT, value_kind TEXT)"
         )
         rows = [
-            ("p1", "track.llm_usage", {"total_input_tokens": 7, "total_output_tokens": 3, "total_tokens": 10}),
-            ("p1", "llm_model", "m-a"),
-            ("p2", "track.llm_usage", {"total_input_tokens": 5, "total_output_tokens": 5, "total_tokens": 10}),
-            ("p2", "llm_model", "m-b"),
+            ("p1", "track.llm_usage", json.dumps({"total_input_tokens": 7, "total_output_tokens": 3, "total_tokens": 10}), "json"),
+            ("p1", "llm_model", "m-a", "str"),
+            ("p2", "track.llm_usage", json.dumps({"total_input_tokens": 5, "total_output_tokens": 5, "total_tokens": 10}), "json"),
+            ("p2", "llm_model", "m-b", "str"),
         ]
         conn.executemany(
-            "INSERT INTO pipeline_state VALUES (?, ?, ?)",
-            [(pid, key, json.dumps(val) if isinstance(val, dict) else json.dumps(val)) for pid, key, val in rows],
+            "INSERT INTO pipeline_state VALUES (?, ?, ?, ?)",
+            rows,
         )
         conn.commit()
         conn.close()

@@ -122,6 +122,11 @@ describe('openWorkspacePanelByPath - 前缀匹配', () => {
 })
 
 describe('openPluginPage - 插件贡献页直达', () => {
+  beforeEach(() => {
+    mockLayoutStore.addWorkspaceTab.mockClear()
+    useNotificationStore.setState({ notifications: [] })
+  })
+
   it('无 path 也无 widget → 显式通知「页面无法打开」并返回 false', () => {
     const ok = openPluginPage({ id: 'cfg-page', title: '某配置页' })
     expect(ok).toBe(false)
@@ -133,5 +138,45 @@ describe('openPluginPage - 插件贡献页直达', () => {
     const ok = openPluginPage({ id: 'w-page', title: '构件页', widget: 'some_widget' })
     expect(ok).toBe(true)
     expect(mockLayoutStore.addWorkspaceTab).toHaveBeenCalled()
+  })
+
+  it('config_files 配置页（legacyFrom=settingsPanels，无 path/widget）→ 设置中枢深链页签（BUG-77）', () => {
+    const ok = openPluginPage({
+      type: 'pages',
+      id: 'evaluation_service:evaluation_metrics',
+      title: '评估指标定义',
+      space: 'settings',
+      datasourceUri: 'config/plugins/evaluation/evaluation_metrics.yaml',
+      pluginId: 'evaluation_service',
+      legacyFrom: 'settingsPanels',
+    })
+    expect(ok).toBe(true)
+    expect(mockLayoutStore.addWorkspaceTab).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'ws-plugin-config-evaluation_service-evaluation_metrics',
+        title: '评估指标定义',
+        component: 'settings_hub',
+        moduleId: '__panel_settings__',
+        props: { initialActive: 'plugin:evaluation_service:evaluation_metrics' },
+      }),
+    )
+    expect(
+      useNotificationStore.getState().notifications.some((n) => n.category === 'error'),
+    ).toBe(false)
+  })
+
+  it('settingsPanels 页缺 pluginId（畸形数据）→ 不走深链，仍落显式错误通知', () => {
+    const ok = openPluginPage({
+      type: 'pages',
+      id: 'evaluation_service:evaluation_metrics',
+      title: '评估指标定义',
+      space: 'settings',
+      legacyFrom: 'settingsPanels',
+    })
+    expect(ok).toBe(false)
+    expect(mockLayoutStore.addWorkspaceTab).not.toHaveBeenCalled()
+    expect(
+      useNotificationStore.getState().notifications.some((n) => n.message.includes('未声明 path 或 widget')),
+    ).toBe(true)
   })
 })

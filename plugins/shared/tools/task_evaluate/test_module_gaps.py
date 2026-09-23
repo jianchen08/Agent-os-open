@@ -160,9 +160,19 @@ class TestExecutorSharedRootBootstrap:
                 sys.modules["state_fields"] = saved_state_fields
 
     def test_executor_load_does_not_duplicate_shared_root(self, monkeypatch) -> None:
-        """对照：shared root 已在 sys.path 时不自举重复（幂等守卫）。"""
+        """对照：shared root 已在 sys.path 时，_executor 自举零新增（幂等守卫）。
+
+        断言取集合语义（自举前后 shared root 条目数不变量），不断言进程级
+        全局恰一：pytest 9 对包链测试目录（pipeline 含 __init__.py）会在用例
+        setup 阶段经 import_path(prepend) 前置 pkg_root（plugins/shared），其
+        守卫只比较 sys.path[0]，共跑场景合法存在第二条。
+        """
         original_path = list(sys.path)
         try:
+            target = os.path.abspath(str(_SHARED_ROOT))
+            before = sum(1 for e in sys.path if e and os.path.abspath(e) == target)
+            assert before >= 1, "守卫前提：shared root 已在 sys.path"
+
             spec = importlib.util.spec_from_file_location(
                 "task_eval_executor_idempotent_under_test", _TE_DIR / "_executor.py"
             )
@@ -171,9 +181,8 @@ class TestExecutorSharedRootBootstrap:
             sys.modules["task_eval_executor_idempotent_under_test"] = module
             spec.loader.exec_module(module)
 
-            target = os.path.abspath(str(_SHARED_ROOT))
-            matches = [e for e in sys.path if e and os.path.abspath(e) == target]
-            assert len(matches) == 1
+            after = sum(1 for e in sys.path if e and os.path.abspath(e) == target)
+            assert after == before
             assert module.state_fields is sys.modules["state_fields"]
         finally:
             sys.path[:] = original_path

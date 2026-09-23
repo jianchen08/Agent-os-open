@@ -155,6 +155,9 @@ export interface MessageItemProps {
   onRegenerate?: () => void
   /** 回退回调（user 消息「回退」确认后触发，参数为目标 user 消息 ID） */
   onRollbackTo?: (userMessageId: string) => void
+  /** ‹i/n› 多代切换器锚点（消息段模型）：本消息为其锚点覆盖范围的轮末条
+   *  assistant 时由 MessageList 标定，值为锚点 base_seq；null/缺省不显示切换器 */
+  segmentSwitcherBaseSeq?: number | null
 }
 
 /**

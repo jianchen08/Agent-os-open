@@ -19,9 +19,9 @@ fn insert_trace(store: &SqliteStore, trace_id: &str, created_at: &str, tenant_id
     store
         .with_conn::<_, StorageError>(|conn| {
             conn.execute(
-                "INSERT INTO traces (trace_id, run_id, branch_id, seq_in_branch, plugin_id, \
+                "INSERT INTO traces (trace_id, pipeline_id, seq, plugin_id, \
                  patch_type, patch_data, tenant_id, created_at) \
-                 VALUES (?1, 'run-ret', 'main', 0, 'p', 'state_update', '{}', ?2, ?3)",
+                 VALUES (?1, 'pipe-ret', 0, 'p', 'state_update', '{}', ?2, ?3)",
                 rusqlite::params![trace_id, tenant_id, created_at],
             )?;
             Ok(())

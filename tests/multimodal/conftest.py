@@ -16,9 +16,14 @@ import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_MULTIMODAL_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "multimodal"
+_SHARED_ROOT = _REPO_ROOT / "plugins" / "shared"
+_MULTIMODAL_DIR = _SHARED_ROOT / "system" / "multimodal"
 
 _s = str(_MULTIMODAL_DIR)
+# plugins/shared 裸模块（user_space，asr.py 配置用户层解析）以 append 驻留：
+# 唯一真值源无同名冲突，不入 sys.path[0]（不污染本目录测试文件的解析优先权）。
+if str(_SHARED_ROOT) not in sys.path:
+    sys.path.append(str(_SHARED_ROOT))
 # 不做模块级 insert：驻留会污染同进程后续文件收集的 sys.path[0]（tasks/
 # security 等插件测试的懒加载解析错位）。本目录测试文件各自文件级锁定
 # （test_disk_storage.py），运行期由下方 autouse fixture 锁定。

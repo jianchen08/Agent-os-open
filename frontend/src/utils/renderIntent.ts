@@ -3,8 +3,8 @@
  *
  * 工具卡片渲染采用「双路由」：
  * 1. **声明路由**：插件在 plugin.json 的 capabilities.tools[].render 直接声明渲染形式
- *    （card = terminal|diff|read|web|search|generic|image|file|table|form + bindings +
- *    title），工具结果按声明路由到对应渲染形式。
+ *    （card = terminal|diff|read|web|search|generic|image|file|file_card|table|form +
+ *    bindings + title），工具结果按声明路由到对应渲染形式。
  * 2. **数据路由**：无声明时按结果/参数的数据形状自动匹配渲染形式（结果含
  *    old/new 文本对 → diff；含 stdout+exit_code → terminal；含 lines+content → read；
  *    含 url → web；图片扩展名路径 → image；文件路径 → file；表头+二维数组 → table）。
@@ -32,6 +32,7 @@ export type RenderIntentCard =
   | 'generic'
   | 'image'
   | 'file'
+  | 'file_card'
   | 'table'
   | 'form'
 
@@ -80,7 +81,7 @@ function normalizeRenderIntent(raw: Record<string, unknown> | undefined): ToolRe
   if (!raw || typeof raw !== 'object') return undefined
   const card = raw.card
   const CARDS: readonly string[] = [
-    'terminal', 'diff', 'read', 'web', 'search', 'generic', 'image', 'file', 'table', 'form',
+    'terminal', 'diff', 'read', 'web', 'search', 'generic', 'image', 'file', 'file_card', 'table', 'form',
   ]
   if (typeof card !== 'string' || !CARDS.includes(card)) return undefined
   const intent: ToolRenderIntent = { card: card as RenderIntentCard }
@@ -297,6 +298,32 @@ export function filePayload(ctx: RenderContext, intent: ToolRenderIntent): Recor
   return { path }
 }
 
+/**
+ * file_card 卡 payload（R174 文件产物卡）：路径 + 写后大小 + 增删行 +
+ * 写前/写后全文。路径必填（无路径/URL → null 级联）；写前/写后全文缺失
+ * （在途调用）不由本函数截断，由 blocks 层级联回后续声明分支。
+ */
+export function fileCardPayload(ctx: RenderContext, intent: ToolRenderIntent): Record<string, unknown> | null {
+  const path = str(pickField('path', PATH_FIELDS, ctx, intent))
+  if (!path || /^https?:\/\//i.test(path)) return null
+  const oldText = pickField('oldText', ['result.old_content', 'result.oldText'], ctx, intent)
+  const newText = pickField('newText', ['result.new_content', 'result.newText'], ctx, intent)
+  return {
+    path,
+    size: num(pickField('size', ['result.size'], ctx, intent)),
+    added: num(pickField('added', ['result.added'], ctx, intent)),
+    removed: num(pickField('removed', ['result.removed'], ctx, intent)),
+    oldText: typeof oldText === 'string' ? oldText : null,
+    newText: typeof newText === 'string' ? newText : null,
+  }
+}
+
+/** 路径末段（文件名）；空路径原样返回 */
+function basenameOf(path: string): string {
+  const normalized = path.replace(/\\/g, '/')
+  return normalized.slice(normalized.lastIndexOf('/') + 1) || normalized
+}
+
 /** 二维数组行 → 字符串行（table 卡共用）。 */
 function rowsToStrings(rows: unknown): string[][] | null {
   if (!Array.isArray(rows)) return null
@@ -465,6 +492,14 @@ export interface CardMeta {
   summary?: string
   /** 可在工作区打开的文件路径（存在时条目提供打开入口） */
   filePath?: string
+  /** 头部主位标题覆盖（file_card = 文件名；缺省沿用工具名人性化） */
+  title?: string
+  /** 头部大小徽标（字节；file_card = 写后文件大小） */
+  size?: number
+  /** 头部增删行徽标（file_card = result.added/removed） */
+  diffStat?: { added: number; removed: number }
+  /** 头部图标语义名（经 chatCardIconRegistry 解析为组件） */
+  icon?: string
 }
 
 /** search 卡的查询词字段族（args 侧）。 */
@@ -537,6 +572,24 @@ export function deriveCardMeta(ctx: RenderContext, intent: ToolRenderIntent): Ca
       const command = str(pickField('command', ['args.command', 'args.cmd'], ctx, intent))
       return command !== undefined ? { summary: command } : {}
     }
+    case 'file_card': {
+      // 折叠 chip 元信息：标题=文件名（主位），摘要=完整路径，大小/增删行
+      // 齐备时出徽标；result 缺字段不硬造（undefined 缺省面）
+      if (!path) return {}
+      const size = num(pickField('size', ['result.size'], ctx, intent))
+      const added = num(pickField('added', ['result.added'], ctx, intent))
+      const removed = num(pickField('removed', ['result.removed'], ctx, intent))
+      return {
+        title: basenameOf(path),
+        summary: path,
+        filePath: path,
+        ...(size !== undefined ? { size } : {}),
+        ...(added !== undefined || removed !== undefined
+          ? { diffStat: { added: added ?? 0, removed: removed ?? 0 } }
+          : {}),
+        icon: 'file',
+      }
+    }
     case 'web': {
       const url = str(pickField('url', ['result.url', 'args.url'], ctx, intent))
       return url !== undefined ? { summary: url } : {}
@@ -560,6 +613,7 @@ const PAYLOAD_BUILDERS: Record<Exclude<RenderIntentCard, 'generic'>, (ctx: Rende
   web: webPayload,
   image: imagePayload,
   file: filePayload,
+  file_card: fileCardPayload,
   table: tablePayload,
   form: formPayload,
 }
@@ -580,6 +634,33 @@ export function renderIntentToBlocks(
     case 'file': {
       const path = typeof payload.path === 'string' ? payload.path : ''
       return [{ label: intent.title ?? (intent.card === 'image' ? '图片' : '文件'), content: '', contentType: intent.card, path }]
+    }
+    case 'file_card': {
+      // 展开形态二分（对齐成熟 AI 编码产品的文件卡）：新建文件（无基线
+      // old_content）→ 全文预览；修改已有文件 → 改前/改后 diff。在途调用
+      //（无写后全文）产不出块 → 空数组级联回后续声明分支。
+      const newText = typeof payload.newText === 'string' ? payload.newText : null
+      const oldText = typeof payload.oldText === 'string' ? payload.oldText : null
+      if (newText === null) return []
+      const label = intent.title ?? basenameOf(typeof payload.path === 'string' ? payload.path : '')
+      if (oldText === null || oldText === '') {
+        return [{
+          id: 'file-card-preview',
+          label,
+          content: newText,
+          contentType: 'code',
+          collapsible: true,
+          defaultExpanded: true,
+        }]
+      }
+      return [{
+        id: 'file-card-diff',
+        label,
+        content: '',
+        contentType: 'diff',
+        diffOld: oldText,
+        diffNew: newText,
+      }]
     }
     case 'table': {
       const columns = Array.isArray(payload.columns) ? payload.columns as string[] : []
@@ -709,8 +790,6 @@ export function renderIntentToBlocks(
         },
       }]
     }
-    default:
-      return []
   }
 }
 

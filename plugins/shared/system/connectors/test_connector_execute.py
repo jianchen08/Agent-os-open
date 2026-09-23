@@ -133,6 +133,19 @@ async def test_execute_no_connector_marks_no_connector(srv: Any) -> None:
     assert "error" in resp
 
 
+async def test_execute_no_connector_marker_survives_envelope_normalization(srv: Any) -> None:
+    """标记必须同时在 data 内：tool-executor 轴的内核归一层对「success 无 data」
+    形状剥未知键成 data=null，顶层标记到不了调用方（真机 2026-09-21 打开文件夹
+    恒失败的根因）；data 内副本随 ②-a 信封原样穿过。"""
+    srv._registry = _FakeRegistry(None)
+    try:
+        resp = await srv.connector_execute("open_folder", {})
+    finally:
+        srv._registry = None
+    assert resp["data"]["no_connector"] is True
+    assert resp["data"]["action_type"] == "open_folder"
+
+
 async def test_execute_service_uninitialized(srv: Any) -> None:
     """服务未初始化（on_load 前）：success=False + 服务未初始化。"""
     saved = srv._registry

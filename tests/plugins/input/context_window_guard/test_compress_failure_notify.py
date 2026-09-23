@@ -102,22 +102,30 @@ class TestCompressFailureFrontendNotify:
         assert len(self.emitted) == 1
 
     def test_success_resets_notify_state(self) -> None:
-        """失败→成功→再失败：第二次故障周期可再次透传。"""
+        """失败→成功→再失败：第二次故障周期可再次透传。
+
+        成功轮另推一件 compression_applied（BUG-72 A1：每波次一次），
+        事件种类序列锁「failed 不因成功重复、applied 不顶替 failed 重置语义」。
+        """
         plugin, service = _make_plugin_with_service(self.mod, None)
         _execute_once(self.mod, plugin, service)
-        assert len(self.emitted) == 1
+        assert [e[0] for e in self.emitted] == ["compression_failed"]
 
         # 成功一轮（有效收缩：返回比原消息 token 更少的短块消息序列）
         service.compress_messages = AsyncMock(
             return_value=[{"role": "system", "content": "<compressed>ok</compressed>", "seq": 1}]
         )
         _execute_once(self.mod, plugin, service)
-        assert len(self.emitted) == 1
+        assert [e[0] for e in self.emitted] == ["compression_failed", "compression_applied"]
 
         # 再失败 → 新故障周期，再次透传
         service.compress_messages = AsyncMock(return_value=None)
         _execute_once(self.mod, plugin, service)
-        assert len(self.emitted) == 2
+        assert [e[0] for e in self.emitted] == [
+            "compression_failed",
+            "compression_applied",
+            "compression_failed",
+        ]
 
     def test_missing_channel_degrades_silently(self) -> None:
         """frontend.emit 未注入（None）：失败处理不炸、管线照常降级返回。"""

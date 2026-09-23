@@ -7,7 +7,7 @@
   "host_type": "sidecar",
   "entry": "python server.py",
   "description": "自进化评测面（编排薄层）：题集展开/结果聚合/提案校验与应用/隐藏集保密派发。派发走任务系统、判定走评估闸门、生效走 G2+热重载，模式 profile 经模式插件服务调用获取，不自建任何平行机制。",
-  "requires_services": ["mode.get_profile"],
+  "requires_services": ["mode.get_profile", "packaging"],
   "permissions": {},
   "priority": 56,
   "host_group": "light",

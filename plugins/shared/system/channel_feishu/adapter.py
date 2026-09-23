@@ -52,12 +52,18 @@ class FeishuInputAdapter(QueuedChannelInputAdapter):
 
         session_id = raw.get("header", {}).get("event_id", uuid.uuid4().hex[:12])
 
+        # 入站桥会话坐标：chat_id 是平台天然会话标识（p2p/群聊各自稳定），
+        # 缺失时回退按发送者建会话；回复目标为发送者 open_id。
+        chat_id = str(message.get("chat_id", "") or "")
         return build_channel_state(
             channel_type="feishu",
             user_input=user_input,
             session_id=session_id,
             channel_user_id=open_id,
             raw_message=raw,
+            _conversation_key=f"c{chat_id}" if chat_id else f"u{open_id}",
+            _reply_target=open_id,
+            _reply_ctx={},
         )
 
 

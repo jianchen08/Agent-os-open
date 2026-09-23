@@ -1,5 +1,8 @@
 {
   "id": "pipeline_param_inject",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Param Inject",
   "version": "1.0.0",
   "plugin_type": "pipeline",

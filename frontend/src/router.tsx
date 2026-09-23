@@ -37,6 +37,7 @@ import { useSessionStore } from './stores/sessionStore'
 import { useUIStore } from './stores/uiStore'
 import { appendAttachmentRefs } from './utils/attachmentRefs'
 import { resolveSendTarget } from './utils/mappers'
+import { resolveWireUserMessageId } from './utils/messageWireId'
 import { generateUUID } from './utils/uuid'
 import type { SendMessageParams } from './components/chat/types'
 import type { ReactNode } from 'react'
@@ -157,7 +158,11 @@ function HomePage(): ReactNode {
   // query 数据到位后恢复上次选中会话（内部幂等：已有有效选中时不动作）
   useEffect(() => {
     if (sessionsQuery.data) {
-      restoreActiveSessionIfNeeded(sessionsQuery.data).catch(console.error)
+      restoreActiveSessionIfNeeded(sessionsQuery.data).catch((error: unknown) => {
+        // HACK: best-effort 恢复选中——失败不阻塞启动，用户仍可手选会话；
+        // 只记日志不传播（OBS-R258-1 吞错误规则登记）
+        console.error('[router] 恢复活跃会话失败:', error)
+      })
     }
   }, [sessionsQuery.data, restoreActiveSessionIfNeeded])
 
@@ -472,8 +477,14 @@ function HomePage(): ReactNode {
     const ps = usePipelineMessageStore.getState()
     const pipelineId = ps.activePipelineId
     if (!sid || !pipelineId) return
+    // 本地截断/寻址按 UI id；出站 user_message_id 解析为后端权威 id（recordId，
+    // 缺失回退 UI id）——内核按 record_id 键空间精确匹配（BUG-57）。
+    const target = ps.getMessages(pipelineId).find((m) => m.id === userMessageId)
     ps.truncateMessagesAfter(pipelineId, userMessageId)
-    globalWS.sendRegenerate(sid, { pipelineId, userMessageId })
+    globalWS.sendRegenerate(sid, {
+      pipelineId,
+      userMessageId: target ? resolveWireUserMessageId(target) : userMessageId,
+    })
   }, [])
 
   /** 编辑重发：改写目标 user 消息内容并截断其后重跑 */
@@ -482,9 +493,14 @@ function HomePage(): ReactNode {
     const ps = usePipelineMessageStore.getState()
     const pipelineId = ps.activePipelineId
     if (!sid || !pipelineId) return
+    const target = ps.getMessages(pipelineId).find((m) => m.id === messageId)
     ps.truncateMessagesAfter(pipelineId, messageId)
     ps.updateMessage(pipelineId, messageId, { content: newContent })
-    globalWS.sendRegenerate(sid, { pipelineId, userMessageId: messageId, newContent })
+    globalWS.sendRegenerate(sid, {
+      pipelineId,
+      userMessageId: target ? resolveWireUserMessageId(target) : messageId,
+      newContent,
+    })
   }, [])
 
   /** 登出并跳转到登录页（清理/登出/跳转统一收敛在 performLogout） */

@@ -6,9 +6,14 @@
  * 插件 http_endpoints，原内核 /api/v1/agents 已删——[来源: docs/decisions/2026-08-20-agent-manager-plugin.md]）。
  * 经 widgetRegistry 注册为 `agents_panel`，插件 contributes.pages（path=/agents）
  * 声明入口；亦可经 PanelHostWidget 内嵌工作区页签。
+ *
+ * 数据面走四态统一模式（OBS-R258-1）：useQuery + useAsyncResource 派生
+ * loading/error/empty/ready 穷举态——加载失败显式 ErrorState + 重试，
+ * 计数「共 N 个智能体」只在 ready 态出现（失败/加载中不伪装「共 0 个」）。
  */
 
-import { useState, useEffect, useCallback } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { useState } from 'react'
 import { Bot, EditIcon, RefreshCw } from '@/assets/icons'
 import { AgentConfigModal } from '@/components/agent/AgentConfigModal'
 import { EmptyState } from '@/components/shared/EmptyState'
@@ -16,7 +21,9 @@ import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
 import { StatusBadge } from '@/components/shared/StatusBadge'
+import { useAsyncResource } from '@/hooks/useAsyncResource'
 import { getAgents } from '@/services/api/agents'
+import { queryKeys } from '@/services/query/queryKeys'
 import type { AgentResponse } from '@/services/api/agents'
 
 /** 页面 props：页声明（contributes.pages /agents）随页签下发 */
@@ -29,47 +36,37 @@ export interface AgentManagerPageProps {
  * Agent 管理页面组件（agent_manager 插件页面承载）
  */
 export function AgentManagerPage({ typeLabels }: AgentManagerPageProps = {}) {
-  const [agents, setAgents] = useState<AgentResponse[]>([])
-  const [total, setTotal] = useState(0)
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [expandedId, setExpandedId] = useState<string | null>(null)
   const [search, setSearch] = useState('')
+  const [expandedId, setExpandedId] = useState<string | null>(null)
   const [editingAgent, setEditingAgent] = useState<AgentResponse | null>(null)
 
-  /**
-   * 加载 Agent 列表（agent_manager agents）
-   */
-  const fetchAgents = useCallback(async () => {
-    setIsLoading(true)
-    setError(null)
-    try {
-      const res = await getAgents({ search: search || undefined, pageSize: 100 })
-      setAgents(res.items)
-      setTotal(res.total)
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : '获取 Agent 列表失败'
-      setError(message)
-    } finally {
-      setIsLoading(false)
-    }
-  }, [search])
-
-  useEffect(() => {
-    fetchAgents()
-  }, [fetchAgents])
+  // 四态统一（OBS-R258-1）：搜索词进 queryKey，换词自动重查；
+  // refetch 供失败重试/手动刷新/编辑保存后回读共用
+  const agentsQuery = useQuery({
+    queryKey: queryKeys.agentsManager(search),
+    queryFn: () => getAgents({ search: search || undefined, pageSize: 100 }),
+  })
+  const resource = useAsyncResource(agentsQuery, {
+    isEmpty: (data) => data.items.length === 0,
+    fallbackErrorText: '获取 Agent 列表失败',
+  })
+  const agents = resource.data?.items ?? []
 
   return (
     <PageShell title="智能体管理" embedded>
       <div className="mb-3 flex items-center gap-3">
-        <span className="text-muted-foreground text-xs">共 {total} 个智能体</span>
+        {resource.status === 'ready' && (
+          <span className="text-muted-foreground text-xs">
+            共 {resource.data?.total ?? 0} 个智能体
+          </span>
+        )}
         <button
-          onClick={fetchAgents}
-          disabled={isLoading}
+          onClick={resource.refetch}
+          disabled={resource.isLoading}
           className="hover:bg-accent/50 h-8 w-8 rounded-lg border p-1.5 text-xs disabled:opacity-50 md:min-h-[44px] md:min-w-[44px]"
           aria-label="刷新智能体列表"
         >
-          <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`h-3.5 w-3.5 ${resource.isLoading ? 'animate-spin' : ''}`} />
         </button>
       </div>
 
@@ -84,13 +81,15 @@ export function AgentManagerPage({ typeLabels }: AgentManagerPageProps = {}) {
       />
 
       {/* 加载态 - 骨架屏（shared，结构与真实卡片对齐） */}
-      {isLoading && <LoadingState variant="skeleton" skeletonCount={6} />}
+      {resource.status === 'loading' && <LoadingState variant="skeleton" skeletonCount={6} />}
 
-      {/* 错误态（shared，带重试） */}
-      {error && <ErrorState message={error} onRetry={fetchAgents} />}
+      {/* 错误态（shared，带重试；失败显式呈现，不伪装空态） */}
+      {resource.status === 'error' && (
+        <ErrorState message={resource.error ?? ''} onRetry={resource.refetch} />
+      )}
 
       {/* 空状态（shared） */}
-      {!isLoading && !error && agents.length === 0 && (
+      {resource.status === 'empty' && (
         <EmptyState
           icon={Bot}
           title={search ? '没有找到匹配的智能体' : '暂无智能体'}
@@ -100,7 +99,7 @@ export function AgentManagerPage({ typeLabels }: AgentManagerPageProps = {}) {
 
       {/* Agent 卡片列表（容器查询：工作区面板宽度驱动列数。视口断点在分栏
           布局下会强推 3 列——~510px 面板每卡仅 ~150px，标题截断成单字） */}
-      {!isLoading && !error && agents.length > 0 && (
+      {resource.status === 'ready' && (
         <div className="@container">
           <div
             className="grid grid-cols-1 gap-4 @2xl:grid-cols-2 @5xl:grid-cols-3"
@@ -208,7 +207,7 @@ export function AgentManagerPage({ typeLabels }: AgentManagerPageProps = {}) {
         agent={editingAgent}
         isOpen={!!editingAgent}
         onClose={() => setEditingAgent(null)}
-        onSaved={fetchAgents}
+        onSaved={resource.refetch}
       />
     </PageShell>
   )

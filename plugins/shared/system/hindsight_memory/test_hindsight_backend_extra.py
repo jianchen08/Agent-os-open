@@ -74,23 +74,35 @@ class TestAddBranches:
         assert args["document_id"] == "mem-d1"
         assert args["update_mode"] == "replace"
 
-    async def test_add_without_document_id_omits_keys(self, mod: Any, caller: AsyncMock) -> None:
-        """无 document_id/update_mode 时不产生对应键（参数面保持最小）。"""
-        caller.return_value = {"id": "m", "stored": True}
+    async def test_add_without_document_id_generates_anchor(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """无 document_id → args 携带自造 mem- 锚点（同步 retain 服务端无 id
+        回传，写入必须可确认）；update_mode 缺省仍不产生键。"""
+
+        async def _echo(method: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "success": True,
+                "data": {"id": params["args"]["document_id"], "stored": True},
+            }
+
+        caller.side_effect = _echo
         backend = mod.HindsightBackend(caller)
 
-        await backend.add(user_id="u", content="c")
+        mem_id = await backend.add(user_id="u", content="c")
 
         args = caller.call_args.args[1]["args"]
-        assert "document_id" not in args
+        assert args["document_id"] == mem_id
+        assert args["document_id"].startswith("mem-")
         assert "update_mode" not in args
 
     async def test_add_raises_on_non_dict_result(self, mod: Any, caller: AsyncMock) -> None:
-        """返回非 dict（如意外字符串）→ 诚实上抛（不伪造成成功）。"""
+        """返回非 dict（如意外字符串）→ 诚实上抛，类型为形状错配
+        （MemoryShapeError，区别于服务失败）。"""
         caller.return_value = "ok"
         backend = mod.HindsightBackend(caller)
 
-        with pytest.raises(RuntimeError, match="非预期类型"):
+        with pytest.raises(mod.MemoryShapeError, match="非预期类型"):
             await backend.add(user_id="u", content="c")
 
 
@@ -337,3 +349,72 @@ class TestImportDocumentBranches:
 
         assert result["name"] == "mine"
         assert result["chunks_imported"] == 1
+
+
+# ═══════════════════════════════════════════════════════════
+# list_banks 分支
+# ═══════════════════════════════════════════════════════════
+
+
+class TestListBanksBranches:
+    async def test_list_banks_extracts_ids_from_envelope(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """invoker 信封 {success, data:{banks:[...]}} 解包后提取 bank id 列表；
+        请求投向 sidecar hindsight.list_banks 工具。"""
+
+        async def _echo(method: str, params: dict[str, Any]) -> dict[str, Any]:
+            assert method == "tool-executor.invoke"
+            assert params["tool_name"] == "hindsight.list_banks"
+            return {"success": True, "data": {"banks": ["thread-a", "default", ""]}}
+
+        caller.side_effect = _echo
+        backend = mod.HindsightBackend(caller)
+
+        assert await backend.list_banks() == ["thread-a", "default"]
+
+    async def test_list_banks_plain_dict_business_shape(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """无信封的纯业务 dict（sidecar 直连形态）同样提取。"""
+        caller.return_value = {"banks": ["thread-b"], "total": 1}
+        backend = mod.HindsightBackend(caller)
+
+        assert await backend.list_banks() == ["thread-b"]
+
+    async def test_list_banks_degraded_signature_raises(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """降级签名（error/initialized:false）→ 诚实上抛（列表面静默缩水
+        等于无声丢记忆）。"""
+        for degraded in (
+            {"banks": [], "error": "sidecar down"},
+            {"initialized": False, "error": "hindsight not initialized"},
+        ):
+            caller.side_effect = None
+            caller.return_value = degraded
+            backend = mod.HindsightBackend(caller)
+            with pytest.raises(RuntimeError, match="降级"):
+                await backend.list_banks()
+
+    async def test_list_banks_caller_failure_raises(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        caller.side_effect = RuntimeError("invoke down")
+        backend = mod.HindsightBackend(caller)
+
+        with pytest.raises(RuntimeError, match="invoke down"):
+            await backend.list_banks()
+
+    async def test_list_banks_shape_violation_raises(
+        self, mod: Any, caller: AsyncMock
+    ) -> None:
+        """banks 键缺失/非 dict 响应 → MemoryShapeError（形状错配分型）。"""
+        caller.return_value = {"total": 0}
+        backend = mod.HindsightBackend(caller)
+        with pytest.raises(mod.MemoryShapeError):
+            await backend.list_banks()
+
+        caller.return_value = "garbage"
+        with pytest.raises(mod.MemoryShapeError):
+            await backend.list_banks()

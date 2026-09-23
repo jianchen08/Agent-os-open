@@ -1,5 +1,8 @@
 {
   "id": "artifacts",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Artifacts Service",
   "description": "制品 + 批注域 HTTP 面（channel_api 拆迁批次 1 承接）——制品 CRUD/版本/diff、批注 CRUD/resolve、多模态文件上传；服务实现为本目录 artifact_service/annotation_service（纯内存单例）",
   "version": "1.0.0",

@@ -5,6 +5,7 @@
 //! - `interaction_response` → dispatch_interaction_response（回复人工交互）
 //! - `stop_generation` → dispatch_stop（取消生成）
 //! - `regenerate` → dispatch_regenerate（重新生成/回退/编辑重发，批次 D）
+//! - `segment_activate` → dispatch_segment_activate（激活消息段，多代切换）
 //! - `active_thread_changed` → dispatch_active_thread（切换选中会话，排队优先级键）
 //! - `heartbeat` → 心跳确认（不转发）
 //! - 其余 → 忽略
@@ -108,6 +109,25 @@ pub trait PipelineDispatcher: Send + Sync {
         Ok(())
     }
 
+    /// 激活消息段（多代切换，消息段模型 §2.5 后缀语义）。
+    ///
+    /// 单批 ops 单事务：①当前 `[seg.base_seq..末尾]` 非空后缀冻结为新段
+    /// （visible_to=''，id 服务端 seg_&lt;uuid&gt;）②目标段成员自 base_seq 逐槽
+    /// set 写回（当前更长则多余槽 set null；目标更长则新增槽）③trace 落痕
+    /// ④ack 事件 segment_activated。run 活跃期间拒绝（错误「任务运行中」——
+    /// 后缀替换会与引擎 append 竞争）。重复投递幂等；多端并发后写赢。
+    /// pipeline_id 是消息路由键（同 user_input）；缺省由实现侧回退 thread 主管道。
+    /// 默认 no-op（测试 mock 无需关心）。
+    async fn dispatch_segment_activate(
+        &self,
+        _user_id: &str,
+        _thread_id: &str,
+        _pipeline_id: &str,
+        _segment_id: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     /// 前端通知当前选中会话切换（排队优先级策略键）。
     ///
     /// 内核据此把该用户的活跃管道更新为当前选中的主管道——全局并发闸门有
@@ -164,6 +184,7 @@ impl InboundRouter {
             "interaction_response" => self.route_interaction(msg).await,
             "stop_generation" => self.route_stop(msg).await,
             "regenerate" => self.route_regenerate(msg, user_id).await,
+            "segment_activate" => self.route_segment_activate(msg, user_id).await,
             "active_thread_changed" => self.route_active_thread(msg, user_id).await,
             _ => RouteOutcome::Ignored,
         }
@@ -308,6 +329,36 @@ impl InboundRouter {
                 &user_message_id,
                 new_content,
             )
+            .await
+        {
+            Ok(()) => RouteOutcome::Handled,
+            Err(e) => RouteOutcome::Error(e),
+        }
+    }
+
+    /// segment_activate——激活消息段（多代切换）。
+    ///
+    /// 契约载荷 {pipelineId, segmentId}（顶层优先、data 信封兜底；snake_case
+    /// 作旧调用方兼容回退）；pipeline_id 同 user_input 兼容两处，缺省由实现侧
+    /// 回退 thread 主管道。
+    async fn route_segment_activate(&self, msg: &Value, user_id: &str) -> RouteOutcome {
+        let thread_id = match msg.get("thread_id").and_then(|v| v.as_str()) {
+            Some(t) if !t.is_empty() => t.to_string(),
+            _ => return RouteOutcome::Error("segment_activate 缺少 thread_id".into()),
+        };
+        // 契约载荷 {pipelineId, segmentId}：顶层优先、data 信封兜底；snake_case
+        // 作旧调用方兼容回退（与 pipeline_id 同法）。
+        let pipeline_id = field_or_data(msg, "pipelineId")
+            .or_else(|| field_or_data(msg, "pipeline_id"))
+            .unwrap_or_default()
+            .to_string();
+        let segment_id = field_or_data(msg, "segmentId")
+            .or_else(|| field_or_data(msg, "segment_id"))
+            .unwrap_or_default()
+            .to_string();
+        match self
+            .dispatcher
+            .dispatch_segment_activate(user_id, &thread_id, &pipeline_id, &segment_id)
             .await
         {
             Ok(()) => RouteOutcome::Handled,

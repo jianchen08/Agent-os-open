@@ -1,5 +1,8 @@
 {
   "id": "llm_service",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "LLM Service",
   "version": "1.0.0",
   "plugin_type": "system",

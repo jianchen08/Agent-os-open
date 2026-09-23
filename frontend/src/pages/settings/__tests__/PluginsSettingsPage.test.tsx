@@ -16,24 +16,11 @@ import React from 'react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import { PluginsSettingsPage } from '../PluginsSettingsPage'
+import { MONITORING_PLUGIN, apiClientStub } from './pluginsSettingsTestUtils'
 
 // ── Mock API 层（apiClient.get 按 URL 分流插件面/schema tools 面）──
 const mockPlugins = [
-  {
-    plugin_id: 'monitoring_service',
-    name: 'Monitoring Service',
-    description: '系统指标采集与监控告警',
-    config_type: 'system',
-    host_type: 'sidecar',
-    version: '1.0.0',
-    enabled: true,
-    activation: 'lazy',
-    status: 'active',
-    config_files: [],
-    has_contributes: false,
-    has_http_endpoints: true,
-    error: null,
-  },
+  MONITORING_PLUGIN,
   {
     plugin_id: 'bash_tool',
     name: 'Bash Execute Tool',
@@ -71,25 +58,20 @@ const mockTools = [
   { name: 'metrics_admin.status', description: '插件状态查询', plugin_id: 'metrics_admin', category: 'system', source: 'mcp' },
 ]
 
-const mockGet = vi.fn()
-const mockPut = vi.fn()
-vi.mock('@/services/api/client', () => ({
-  default: {
-    get: (...args: unknown[]) => mockGet(...args),
-    put: (...args: unknown[]) => mockPut(...args),
-  },
+vi.mock('@/services/api/client', async () => ({
+  default: (await import('./pluginsSettingsTestUtils')).apiClientStub,
 }))
 
 vi.mock('@/services/modules/GrowthLoop', () => ({
   refreshPluginContributions: vi.fn().mockResolvedValue(undefined),
 }))
 
-vi.mock('@/components/ui/sonner', () => ({
-  toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn() },
+vi.mock('@/components/ui/sonner', async () => ({
+  toast: (await import('./pluginsSettingsTestUtils')).toastStub,
 }))
 
 function setupApi(contract: unknown = { plugins: [] }) {
-  mockGet.mockImplementation(async (url: string) => {
+  apiClientStub.get.mockImplementation(async (url: string) => {
     if (url === '/api/v1/plugins') return { data: mockPlugins }
     if (url === '/api/v1/schema') return { data: { tools: mockTools } }
     if (url === '/api/v1/plugins/contract-status') return { data: contract }
@@ -308,7 +290,7 @@ describe('PluginsSettingsPage · G2 净化标示（ADR 2026-08-28）', () => {
   })
 
   it('契约状态端点不可用 → 列表照常渲染（标示降级为不显示）', async () => {
-    mockGet.mockImplementation(async (url: string) => {
+    apiClientStub.get.mockImplementation(async (url: string) => {
       if (url === '/api/v1/plugins') return { data: mockPlugins }
       if (url === '/api/v1/schema') return { data: { tools: mockTools } }
       throw new Error('contract-status 404')

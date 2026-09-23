@@ -1,5 +1,8 @@
 {
   "id": "pipeline_pause_guard",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Pause Guard",
   "version": "1.0.0",
   "plugin_type": "pipeline",

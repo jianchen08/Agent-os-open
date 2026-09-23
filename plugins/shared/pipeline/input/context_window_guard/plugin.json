@@ -69,6 +69,19 @@
       "label": "上下文窗口配置"
     }
   ],
+  "contributes": {
+    "chatMessages": [
+      {
+        "description": "压缩块消息卡：折叠态「已压缩 N 条对话」，展开态渲染过程摘要与状态快照（块内联 <compressed>/<current_state> 标签解析），原始消息按 compression_ref.segment_id 走段取数",
+        "id": "compression_card",
+        "props": {
+          "htmlPath": "/assets/cards/compression.html",
+          "pluginId": "pipeline_context_window_guard"
+        },
+        "title": "压缩卡"
+      }
+    ]
+  },
   "entry": "python server.py",
   "host_group": "light",
   "host_type": "sidecar",
@@ -79,6 +92,9 @@
   "permissions": {},
   "plugin_type": "pipeline",
   "priority": 50,
+  "requires_services": [
+    "packaging"
+  ],
   "state": {
     "reads": [
       "messages",

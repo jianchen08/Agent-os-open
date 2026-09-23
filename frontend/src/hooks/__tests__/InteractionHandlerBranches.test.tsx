@@ -54,6 +54,9 @@ vi.mock('@/utils/audioNotification', () => ({
   // 时升级为假红）；需要拒绝路径的用例各自 mockRejectedValue 覆写
   playNotificationSound: vi.fn(async () => false),
 }))
+vi.mock('@/utils/systemNotification', () => ({
+  showSystemNotification: vi.fn(async () => true),
+}))
 const mockNavigateToPipeline = vi.hoisted(() => vi.fn().mockResolvedValue(undefined))
 vi.mock('@/services/pipelineNavigator', () => ({ navigateToPipeline: mockNavigateToPipeline }))
 const mockAgents = vi.hoisted(() => ({ list: [] as Array<{ id: string; configId?: string; name: string }> }))
@@ -66,6 +69,7 @@ import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useUIStore } from '@/stores/uiStore'
 import { playNotificationSound } from '@/utils/audioNotification'
+import { showSystemNotification } from '@/utils/systemNotification'
 
 const Wrapper = ({ children }: { children: React.ReactNode }) =>
   React.createElement(MemoryRouter, null, children)
@@ -350,6 +354,50 @@ describe('音频通知失败兜底', () => {
     await waitFor(() => expect(useNotificationStore.getState().notifications).toHaveLength(1))
     await act(async () => {})
     expect(useNotificationStore.getState().notifications).toHaveLength(1)
+    view.unmount()
+  })
+})
+
+describe('系统通知派发（OS 原生通知路由）', () => {
+  it('新交互到达 → showSystemNotification 以解析出的 title/description 调用一次', async () => {
+    const view = await mountHandler()
+    ws.emit('interaction_request', {
+      request_id: 'req-sys1', interaction_mode: 'choice', title: '审批', description: '请确认',
+      agent_id: 'a', session_id: 's', thread_id: 't', pipeline_id: 'p',
+    })
+    await waitFor(() => expect(useInteractionStore.getState().pendingInteractions).toHaveLength(1))
+    await act(async () => {})
+    expect(vi.mocked(showSystemNotification)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(showSystemNotification)).toHaveBeenCalledWith({ title: '审批', body: '请确认' })
+    view.unmount()
+  })
+
+  it('无 title/description → 用人类交互请求兜底标题与 agentId 兜底正文', async () => {
+    const view = await mountHandler()
+    ws.emit('interaction_request', {
+      request_id: 'req-sys2', interaction_mode: 'choice', agent_id: 'agent-a',
+      session_id: 's', thread_id: 't', pipeline_id: 'p',
+    })
+    await waitFor(() => expect(useInteractionStore.getState().pendingInteractions).toHaveLength(1))
+    await act(async () => {})
+    expect(vi.mocked(showSystemNotification)).toHaveBeenCalledWith({
+      title: '人类交互请求',
+      body: 'agent-a 请求您的输入',
+    })
+    view.unmount()
+  })
+
+  it('重复推送同一 request_id → 不重复派发系统通知', async () => {
+    const view = await mountHandler()
+    const payload = {
+      request_id: 'req-sys3', interaction_mode: 'choice', title: '审批',
+      session_id: 's', thread_id: 't', pipeline_id: 'p',
+    }
+    ws.emit('interaction_request', payload)
+    await waitFor(() => expect(useInteractionStore.getState().pendingInteractions).toHaveLength(1))
+    ws.emit('interaction_request', { ...payload, title: '改动版' })
+    await act(async () => {})
+    expect(vi.mocked(showSystemNotification)).toHaveBeenCalledTimes(1)
     view.unmount()
   })
 })

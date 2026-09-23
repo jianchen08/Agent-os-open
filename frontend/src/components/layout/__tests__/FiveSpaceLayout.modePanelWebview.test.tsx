@@ -12,10 +12,11 @@
  * 仅 HTTP 外部依赖打桩（apiClient），渲染链全真。
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as costControlMod from '@/services/api/costControl'
-import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
+import { openWorkspacePanel, openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
@@ -27,6 +28,12 @@ import { initializeWidgets } from '@/services/schema/registerWidgets'
 // CodeEditor 依赖链在 vitest 不解析（同既有布局测试手法），布局测试不关心编辑器本体
 vi.mock('@/components/workspace/CodeEditor', () => ({
   CodeEditor: () => <div data-testid="mock-code-editor" />,
+}))
+
+// 设置中枢 schema 查询不进本文件断言面（深链渲染只依赖 tab.props.initialActive），
+// 无 QueryClientProvider 的布局测试 harness 下静态置空（同 FormWidget 系测试手法）
+vi.mock('@/hooks/queries/useSchemaQuery', () => ({
+  useSchemaQuery: () => ({ data: undefined as Record<string, unknown> | undefined }),
 }))
 
 // budget 告警源：默认无预算告警
@@ -140,6 +147,43 @@ describe('FiveSpaceLayout — 模式面板页签走 webview iframe（godot 样�
     // → WorkspaceNavPage（registry 空 → 显式空态占位，非「模块内容不可用」）
     await waitFor(() => expect(screen.getAllByTestId('workspace-nav-page').length).toBeGreaterThan(0))
     expect(screen.getByTestId('workspace-tab-ws-panel-workspace-nav')).toBeInTheDocument()
+    expect(screen.queryByText('模块内容不可用')).not.toBeInTheDocument()
+  })
+
+  it('panel 页签 props 透传（BUG-77）：设置中枢深链页签落到目标配置页并拉取该配置', async () => {
+    // config_files 配置页深链（openPluginPage/StepNode.openPluginConfig 同款页签规格）
+    apiMock.get.mockResolvedValue({
+      data: { success: true, data: { evaluation_metric: 'p99_latency' }, etag: 'etag-1' },
+      headers: {},
+    })
+    openWorkspacePanel({
+      id: 'ws-plugin-config-evaluation_service-evaluation_metrics',
+      title: '评估指标定义',
+      component: 'settings_hub',
+      moduleId: '__panel_settings__',
+      props: { initialActive: 'plugin:evaluation_service:evaluation_metrics' },
+    })
+    // 设置中枢内嵌页消费 react-query，harness 无全局 Provider → 本测自备
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <MemoryRouter>
+        <QueryClientProvider client={queryClient}>
+          <FiveSpaceLayout
+            chatContent={<div data-testid="chat-content" />}
+            sidebarContent={<div data-testid="sidebar-content" />}
+          />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    )
+
+    // 页签打开；initialActive 经 renderTabContent 透传进 SettingsHubWidget
+    // → PluginConfigEmbed → PluginConfigEditor，按深键拉取目标配置文件
+    expect(screen.getByTestId('workspace-tab-ws-plugin-config-evaluation_service-evaluation_metrics')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(apiMock.get).toHaveBeenCalledWith(
+        '/api/v1/plugins/evaluation_service/config/evaluation_metrics',
+      ),
+    )
     expect(screen.queryByText('模块内容不可用')).not.toBeInTheDocument()
   })
 })

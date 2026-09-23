@@ -1335,15 +1335,23 @@ async fn test_pipeline_state_cold_rows_carry_latest_run_status() {
 
     let store: std::sync::Arc<dyn agentos_core::traits::StorageBackend> =
         std::sync::Arc::new(agentos_engine::SqliteStore::open_memory().expect("open_memory"));
-    use agentos_core::types::RunStatus;
     // trait 写面按 task_local 租户路由：与生产一致， 种子在租户作用域内完成
     agentos_tenant::scope(
         agentos_core::types::TenantContext::new(&tenant, "th_cold_rs"),
         async {
-            store.create_run(&run_id, "h", &tenant).await.unwrap();
-            store.set_run_pipeline(&run_id, &pid).await.unwrap();
             store
-                .update_run_status(&run_id, RunStatus::Cancelled, None, None)
+                .record_run_start(&pid, &tenant, &run_id, "h")
+                .await
+                .unwrap();
+            store
+                .upsert_state_fields(
+                    &pid,
+                    &tenant,
+                    &json!({ "run_status": "cancelled" })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                )
                 .await
                 .unwrap();
             // 出生投影只有任务域字段：run_status 缺失（崩溃形态）
@@ -1698,23 +1706,22 @@ async fn test_service_registry_unknown_method() {
 
 #[tokio::test]
 async fn test_traces_list_by_pipeline_bypasses_session_mapping() {
-    // run↔管道映射按生产链路落全（run_id 经 message_slots 落槽 + runs.pipeline_id
-    // 回填）→ 两条 step 级 trace；pipeline_sessions 只落 (task→thread-xxx)
-    // 真会话映射（无自环行）——按旧 traces.list(thread_id=task) 查恒空，
-    // list_by_pipeline 仍能查到。
+    // run↔管道映射按生产链路落全（record_run_start 写 state 运行键 + run_id 经
+    // message_slots 落槽）→ 两条 step 级 trace；pipeline_sessions 只落
+    // (task→thread-xxx) 真会话映射（无自环行）——按旧 traces.list(thread_id=task)
+    // 查恒空，list_by_pipeline 仍能查到。
     let store: Arc<dyn StorageBackend> =
         Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
     let router =
         KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_store(store.clone());
     store
-        .create_run("run_tp_1", "hash", "default")
+        .record_run_start("task_tp", "default", "run_tp_1", "hash")
         .await
         .unwrap();
-    store.set_run_pipeline("run_tp_1", "task_tp").await.unwrap();
     let user_msg = json!({"role": "user", "content": "kickoff"});
     // 引擎真实链路 merge_and_project 给每个 op 注入 _run_id（write_slot_to_
     // table_locked 落 message_slots.run_id）——run_ids_of_pipelines 经槽表反查
-    // run 集合，缺槽行则按管道查轨迹恒空（生产语义，非测试捷径）。
+    // run 集合（生产语义，非测试捷径）。
     store
         .apply_messages_ops_to_table(
             "task_tp",
@@ -1727,9 +1734,9 @@ async fn test_traces_list_by_pipeline_bypasses_session_mapping() {
         store
             .append_trace(TraceEntry {
                 trace_id: format!("trace_tp_{i}"),
-                run_id: "run_tp_1".to_string(),
-                branch_id: "main".to_string(),
-                seq_in_branch: i as u32,
+                pipeline_id: "task_tp".to_string(),
+                // 写入侧 seq 恒 0，存储层按 (pipeline_id, MAX(seq)+1) 分配日志序
+                seq: 0,
                 plugin_id: plugin.to_string(),
                 patch_type: agentos_core::types::PatchType::StateUpdate,
                 patch_data: json!({"k": i}),
@@ -1777,7 +1784,7 @@ async fn test_traces_list_by_pipeline_bypasses_session_mapping() {
         .iter()
         .map(|r| r["plugin_id"].as_str().unwrap_or(""))
         .collect();
-    assert_eq!(plugin_ids, vec!["core", "post"], "created_at 升序");
+    assert_eq!(plugin_ids, vec!["core", "post"], "日志序（seq 升序）");
 
     let missing = router
         .handle(
@@ -1795,30 +1802,16 @@ async fn test_traces_list_by_pipeline_bypasses_session_mapping() {
 }
 
 #[tokio::test]
-async fn test_pipeline_runs_list_by_pipeline_returns_runs() {
-    // 同管道两条 run → list_by_pipeline 返回 2 条（含 created_at/ended_at/status），
-    // 终态 run 带 ended_at（elapsed_seconds 终点数据源）。
-    let store: Arc<dyn StorageBackend> =
-        Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+async fn test_pipeline_runs_list_by_pipeline_returns_current_run_projection() {
+    // ADR 2026-09-18（runs 表退役）：list_by_pipeline 返回该管道的当前运行投影
+    // （每管道至多一条，含 created_at/ended_at/status），终态 run 带 ended_at
+    // （elapsed_seconds 终点数据源）；同管道新一轮 record_run_start 覆盖投影。
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
     let router =
         KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_store(store.clone());
     store
-        .create_run("run_lp_1", "hash", "default")
-        .await
-        .unwrap();
-    store.set_run_pipeline("run_lp_1", "task_lp").await.unwrap();
-    store
-        .create_run("run_lp_2", "hash", "default")
-        .await
-        .unwrap();
-    store.set_run_pipeline("run_lp_2", "task_lp").await.unwrap();
-    store
-        .update_run_status(
-            "run_lp_1",
-            agentos_core::types::RunStatus::Completed,
-            None,
-            None,
-        )
+        .record_run_start("task_lp", "default", "run_lp_1", "hash")
         .await
         .unwrap();
 
@@ -1831,21 +1824,55 @@ async fn test_pipeline_runs_list_by_pipeline_returns_runs() {
         .await
         .unwrap();
     let rows = res.as_array().expect("runs list_by_pipeline rows");
-    assert_eq!(rows.len(), 2, "管道全部 run 记录");
+    assert_eq!(rows.len(), 1, "管道当前运行投影恰一条");
     assert!(
         rows.iter()
             .all(|r| r.get("created_at").and_then(|v| v.as_str()).is_some()),
         "每条 run 带 created_at（耗时起点数据源）"
     );
-    let completed = rows
-        .iter()
-        .find(|r| r["run_id"] == "run_lp_1")
-        .expect("run_lp_1 in rows");
+
+    // 终态落库后投影带 ended_at + 终态 status（set_run_status_projection 对
+    // 终态补 run_ended_at）
+    sqlite
+        .set_run_status_projection(
+            "task_lp",
+            "default",
+            agentos_core::types::RunStatus::Completed,
+        )
+        .unwrap();
+    let res = router
+        .handle(
+            "service-registry",
+            "pipeline-runs.list_by_pipeline",
+            json!({"pipeline_id": "task_lp"}),
+        )
+        .await
+        .unwrap();
+    let completed = res.as_array().unwrap().first().expect("投影仍在").clone();
+    assert_eq!(completed["run_id"], "run_lp_1");
     assert_eq!(completed["status"], "completed");
     assert!(
         completed.get("ended_at").is_some(),
         "终态 run 带 ended_at（耗时终点数据源）"
     );
+
+    // 同管道新一轮 run 开跑：覆盖为当前运行投影（仍至多一条）
+    store
+        .record_run_start("task_lp", "default", "run_lp_2", "hash")
+        .await
+        .unwrap();
+    let res = router
+        .handle(
+            "service-registry",
+            "pipeline-runs.list_by_pipeline",
+            json!({"pipeline_id": "task_lp"}),
+        )
+        .await
+        .unwrap();
+    let rows = res.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "runs 表退役后每管道至多一条投影");
+    assert_eq!(rows[0]["run_id"], "run_lp_2", "投影指向最新 run");
+    assert_eq!(rows[0]["status"], "running");
 
     let empty = router
         .handle(
@@ -1866,14 +1893,13 @@ async fn test_pipeline_runs_list_by_pipeline_returns_runs() {
 
 #[tokio::test]
 async fn test_pipeline_executor_get_run_status_ok() {
-    // 建 run（模拟 start_run 后的 runs 表记录）→ get_run_status 返回状态
-    let store: Arc<dyn StorageBackend> =
-        Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    // 建 run（模拟 start_run 后的运行簿记）→ get_run_status 返回状态
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
     let router =
         KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_store(store.clone());
-    store
-        .create_run("run_status_1", "hash", "default")
-        .await
+    sqlite
+        .record_run_start("task_status_1", "default", "run_status_1", "hash")
         .unwrap();
     let res = router
         .handle(
@@ -1886,14 +1912,12 @@ async fn test_pipeline_executor_get_run_status_ok() {
     assert_eq!(res["run_id"], "run_status_1");
     assert_eq!(res["status"], "running", "新建 run 状态应为 running");
     // 更新为 completed 后再次查询应反映真实状态（复盘据此落 completed）
-    store
-        .update_run_status(
-            "run_status_1",
+    sqlite
+        .set_run_status_projection(
+            "task_status_1",
+            "default",
             agentos_core::types::RunStatus::Completed,
-            None,
-            None,
         )
-        .await
         .unwrap();
     let res2 = router
         .handle(
@@ -2233,14 +2257,12 @@ async fn test_suspend_resume_pipeline_by_id() {
         agentos_core::types::TenantContext::new("tenant_sr", "thread_sr"),
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
-            store.create_run("run_sr_1", "h", &tenant).await.unwrap();
             store
-                .set_run_pipeline("run_sr_1", "pipe_task_9")
+                .record_run_start("pipe_task_9", &tenant, "run_sr_1", "h")
                 .await
                 .unwrap();
-            store.create_run("run_sr_2", "h", &tenant).await.unwrap();
             store
-                .set_run_pipeline("run_sr_2", "pipe_task_9")
+                .record_run_start("pipe_task_9", &tenant, "run_sr_2", "h")
                 .await
                 .unwrap();
             store
@@ -2349,8 +2371,10 @@ async fn resume_pipeline_approval_pending_flips_only() {
         agentos_core::types::TenantContext::new("tenant_ap", "thread_ap"),
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
-            store.create_run("run_ap_1", "h", &tenant).await.unwrap();
-            store.set_run_pipeline("run_ap_1", "pipe_ap").await.unwrap();
+            store
+                .record_run_start("pipe_ap", &tenant, "run_ap_1", "h")
+                .await
+                .unwrap();
             store
                 .link_pipeline_session("pipe_ap", "thread_ap", &tenant)
                 .await
@@ -2363,11 +2387,10 @@ async fn resume_pipeline_approval_pending_flips_only() {
                 )
                 .await
                 .unwrap();
+            // 审批署名：挂起凭据落 state 键 suspend_request_id（get_run 投影把它
+            // 映射回 metadata.pending_interaction_request_id）
             sqlite
-                .set_run_metadata(
-                    "run_ap_1",
-                    &json!({"pending_interaction_request_id": "req_1"}),
-                )
+                .upsert_state_field("pipe_ap", &tenant, "suspend_request_id", &json!("req_1"))
                 .unwrap();
 
             let r = router
@@ -2403,9 +2426,12 @@ async fn suspend_persists_pending_interaction_credential_and_resume_clears_it() 
         agentos_core::types::TenantContext::new("tenant_s7", "thread_s7"),
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
-            store.create_run("run_s7", "h", &tenant).await.unwrap();
+            store
+                .record_run_start("pipe_s7", &tenant, "run_s7", "h")
+                .await
+                .unwrap();
 
-            // suspend：status 翻 Suspended + 凭据落 metadata
+            // suspend：status 翻 Suspended + 凭据落 state 键 suspend_request_id
             router
                 .handle(
                     "pipeline-executor",
@@ -2421,8 +2447,11 @@ async fn suspend_persists_pending_interaction_credential_and_resume_clears_it() 
                 .as_ref()
                 .and_then(|m| m.get("pending_interaction_request_id"))
                 .and_then(|v| v.as_str())
-                .expect("suspend 后 metadata 必须带挂起凭据");
+                .expect("suspend 后投影 metadata 必须带挂起凭据");
             assert_eq!(cred, "req_s7");
+            // 凭据真身 = state 标量键 suspend_request_id（反查唤醒的依据）
+            let found = sqlite.find_suspended_run_by_request_id("req_s7").unwrap();
+            assert!(found.is_some(), "挂起凭据必须可按 request_id 反查");
 
             // resume：翻 Running + 凭据清除（陈旧凭据会让反查误判仍在等审批）
             router
@@ -2431,12 +2460,11 @@ async fn suspend_persists_pending_interaction_credential_and_resume_clears_it() 
                 .unwrap();
             let got = store.get_run("run_s7").await.unwrap();
             assert_eq!(got.status, agentos_core::types::RunStatus::Running);
-            let still_cred = got
-                .metadata
-                .as_ref()
-                .map(|m| m.get("pending_interaction_request_id").is_some())
-                .unwrap_or(false);
-            assert!(!still_cred, "resume 后挂起凭据必须清除");
+            let cleared = sqlite.find_suspended_run_by_request_id("req_s7").unwrap();
+            assert!(
+                cleared.is_none(),
+                "resume 后挂起凭据必须清除（按凭据反查不再命中）"
+            );
         },
     )
     .await;
@@ -2456,7 +2484,10 @@ async fn suspend_without_request_id_leaves_metadata_absent() {
         agentos_core::types::TenantContext::new("tenant_s7b", "thread_s7b"),
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
-            store.create_run("run_s7b", "h", &tenant).await.unwrap();
+            store
+                .record_run_start("pipe_s7b", &tenant, "run_s7b", "h")
+                .await
+                .unwrap();
             router
                 .handle("pipeline-executor", "suspend", json!({"run_id": "run_s7b"}))
                 .await
@@ -2500,8 +2531,10 @@ async fn resume_pipeline_running_in_flight_idempotent() {
         agentos_core::types::TenantContext::new("tenant_rf", "thread_rf"),
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
-            store.create_run("run_rf_1", "h", &tenant).await.unwrap();
-            store.set_run_pipeline("run_rf_1", "pipe_rf").await.unwrap();
+            store
+                .record_run_start("pipe_rf", &tenant, "run_rf_1", "h")
+                .await
+                .unwrap();
             store
                 .link_pipeline_session("pipe_rf", "thread_rf", &tenant)
                 .await
@@ -2557,16 +2590,16 @@ async fn resume_pipeline_terminal_history_dispatches_new_round() {
         agentos_core::types::TenantContext::new("tenant_th", "thread_th"),
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
-            store.create_run("run_th_1", "h", &tenant).await.unwrap();
-            store.set_run_pipeline("run_th_1", "pipe_th").await.unwrap();
             store
-                .update_run_status(
-                    "run_th_1",
-                    agentos_core::types::RunStatus::Cancelled,
-                    None,
-                    None,
-                )
+                .record_run_start("pipe_th", &tenant, "run_th_1", "h")
                 .await
+                .unwrap();
+            sqlite
+                .set_run_status_projection(
+                    "pipe_th",
+                    &tenant,
+                    agentos_core::types::RunStatus::Cancelled,
+                )
                 .unwrap();
             store
                 .link_pipeline_session("pipe_th", "thread_th", &tenant)
@@ -2625,17 +2658,17 @@ async fn resume_pipeline_forwards_state_overlay_to_dispatch() {
         agentos_core::types::TenantContext::new("tenant_ov", "thread_ov"),
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
-            store.create_run("run_ov_1", "h", &tenant).await.unwrap();
-            store.set_run_pipeline("run_ov_1", "pipe_ov").await.unwrap();
-            // 停泊挂起态（无审批署名 → 走续跑拉起分支）
             store
-                .update_run_status(
-                    "run_ov_1",
-                    agentos_core::types::RunStatus::Suspended,
-                    None,
-                    None,
-                )
+                .record_run_start("pipe_ov", &tenant, "run_ov_1", "h")
                 .await
+                .unwrap();
+            // 停泊挂起态（无审批署名 → 走续跑拉起分支）
+            sqlite
+                .set_run_status_projection(
+                    "pipe_ov",
+                    &tenant,
+                    agentos_core::types::RunStatus::Suspended,
+                )
                 .unwrap();
             store
                 .link_pipeline_session("pipe_ov", "thread_ov", &tenant)
@@ -2681,8 +2714,10 @@ async fn resume_pipeline_without_resumer_degrades_bookkeeping() {
         agentos_core::types::TenantContext::new("tenant_nr", "thread_nr"),
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
-            store.create_run("run_nr_1", "h", &tenant).await.unwrap();
-            store.set_run_pipeline("run_nr_1", "pipe_nr").await.unwrap();
+            store
+                .record_run_start("pipe_nr", &tenant, "run_nr_1", "h")
+                .await
+                .unwrap();
             store
                 .link_pipeline_session("pipe_nr", "thread_nr", &tenant)
                 .await
@@ -3105,6 +3140,152 @@ async fn tool_surface_empty_whitelist_yields_declared_only() {
     assert_eq!(schema_names(&result), vec!["spill_retrieve".to_string()]);
 }
 
+// ── BUG-51：观测失败插件遮挡（verify_incomplete/verify_failed 不进 LLM 工具面）──
+
+/// 构造挂了多插件工具注册表 + 遮挡名单的路由器（工具按描述符的 plugin_id 注册）。
+fn router_with_plugin_tools_and_shadowed(
+    tools: &[agentos_core::traits::ToolDescriptor],
+    shadowed: Vec<String>,
+) -> KernelCapabilityRouter {
+    use agentos_plugin_loader::CapabilityRegistryImpl;
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    for t in tools {
+        registry.register_tool(&t.plugin_id, t.clone());
+    }
+    let lookup: crate::capability_router::ShadowedPluginIdsLookupFn =
+        Arc::new(move || shadowed.clone());
+    KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_registry(registry)
+        .with_shadowed_plugin_ids_lookup(lookup)
+}
+
+fn tool_for(name: &str, plugin_id: &str) -> agentos_core::traits::ToolDescriptor {
+    agentos_core::traits::ToolDescriptor {
+        name: name.to_string(),
+        description: format!("test tool {name}"),
+        plugin_id: plugin_id.to_string(),
+        input_schema: json!({"type": "object", "properties": {}}),
+        output_schema: Some(json!({"type": "object"})),
+        category: agentos_core::types::ToolCategory::System,
+        source: agentos_core::types::ToolSource::Mcp,
+        ui: None,
+        render: None,
+    }
+}
+
+#[tokio::test]
+async fn tool_surface_shadows_verify_pending_plugin_tools() {
+    // BUG-51 契约：观测失败按声明注册的插件，工具在 LLM 工具面不可见（注册面
+    // 保留，服务/HTTP 面不受影响）；白名单/插件 id 两种配法都不得透出。
+    let router = router_with_plugin_tools_and_shadowed(
+        &[
+            tool_for("hello_pack", "hello_pack"),
+            tool_for("bash_execute", "bash"),
+        ],
+        vec!["hello_pack".to_string()],
+    );
+    let result = router
+        .handle(
+            "tool-surface",
+            "schemas",
+            json!({"tool_ids": ["hello_pack", "bash_execute"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        schema_names(&result),
+        vec!["bash_execute".to_string()],
+        "遮挡插件的工具不得进入 LLM 工具面"
+    );
+}
+
+#[tokio::test]
+async fn tool_surface_shadow_keeps_contracts_unfiltered() {
+    // 契约表不过滤（既有语义）：遮挡的工具若仍被非 LLM 通道调用，输出校验照常。
+    let router = router_with_plugin_tools_and_shadowed(
+        &[tool_for("hello_pack", "hello_pack")],
+        vec!["hello_pack".to_string()],
+    );
+    let result = router
+        .handle(
+            "tool-surface",
+            "schemas",
+            json!({"tool_ids": ["hello_pack"]}),
+        )
+        .await
+        .unwrap();
+    let contracts = result["contracts"].as_object().unwrap();
+    assert!(
+        contracts.contains_key("hello_pack"),
+        "契约表与被过滤的 schema 面解耦"
+    );
+}
+
+#[tokio::test]
+async fn tool_surface_unshadows_when_ledger_clears() {
+    // 转正：复验通过（账本 ok）后遮挡名单不再含该插件 → 工具自动回面。
+    let pending = std::sync::Arc::new(std::sync::Mutex::new(vec!["hello_pack".to_string()]));
+    use agentos_plugin_loader::CapabilityRegistryImpl;
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    registry.register_tool("hello_pack", tool_for("hello_pack", "hello_pack"));
+    let pending_for_lookup = pending.clone();
+    let lookup: crate::capability_router::ShadowedPluginIdsLookupFn =
+        Arc::new(move || pending_for_lookup.lock().unwrap().clone());
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_registry(registry)
+        .with_shadowed_plugin_ids_lookup(lookup);
+
+    let before = router
+        .handle(
+            "tool-surface",
+            "schemas",
+            json!({"tool_ids": ["hello_pack"]}),
+        )
+        .await
+        .unwrap();
+    assert!(schema_names(&before).is_empty(), "待复验期间工具不可见");
+
+    pending.lock().unwrap().clear();
+    let after = router
+        .handle(
+            "tool-surface",
+            "schemas",
+            json!({"tool_ids": ["hello_pack"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        schema_names(&after),
+        vec!["hello_pack".to_string()],
+        "复验通过（账本清除）后自动转正"
+    );
+}
+
+#[tokio::test]
+async fn tool_surface_shadow_overrides_force_include() {
+    // 必败工具不得借 force_include_tools 强制注入复活（遮挡优先于强制注入）。
+    use agentos_plugin_loader::CapabilityRegistryImpl;
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    registry.register_tool("hello_pack", tool_for("hello_pack", "hello_pack"));
+    let forced: Vec<String> = vec!["hello_pack".to_string()];
+    let forced_lookup: crate::capability_router::ForceIncludeToolsLookupFn =
+        Arc::new(move || forced.clone());
+    let shadowed_lookup: crate::capability_router::ShadowedPluginIdsLookupFn =
+        Arc::new(|| vec!["hello_pack".to_string()]);
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_registry(registry)
+        .with_force_include_tools_lookup(forced_lookup)
+        .with_shadowed_plugin_ids_lookup(shadowed_lookup);
+    let result = router
+        .handle("tool-surface", "schemas", json!({"tool_ids": []}))
+        .await
+        .unwrap();
+    assert!(
+        schema_names(&result).is_empty(),
+        "遮挡插件的工具即使被声明强制注入也不回面"
+    );
+}
+
 #[tokio::test]
 async fn tool_surface_without_declaration_forces_nothing() {
     // P1-5 fail-closed：无任何 force_include_tools 声明 → 零强制注入，
@@ -3274,23 +3455,6 @@ impl StorageBackend for FailingBatchStore {
     async fn append_trace(
         &self,
         _entry: TraceEntry,
-    ) -> Result<(), agentos_core::types::StorageError> {
-        unreachable!("pipeline-state.update 失败路径不应触碰其他存储方法")
-    }
-    async fn update_run_status(
-        &self,
-        _run_id: &str,
-        _status: agentos_core::types::RunStatus,
-        _branch: Option<&str>,
-        _seq: Option<u32>,
-    ) -> Result<(), agentos_core::types::StorageError> {
-        unreachable!("pipeline-state.update 失败路径不应触碰其他存储方法")
-    }
-    async fn create_run(
-        &self,
-        _run_id: &str,
-        _config_hash: &str,
-        _tenant_id: &str,
     ) -> Result<(), agentos_core::types::StorageError> {
         unreachable!("pipeline-state.update 失败路径不应触碰其他存储方法")
     }
@@ -3476,8 +3640,10 @@ async fn delete_pipeline_removes_runs_and_registry_entries() {
     agentos_tenant::scope(
         agentos_core::types::TenantContext::new(&tenant, "th_del"),
         async {
-            store.create_run("run_del_1", "h", &tenant).await.unwrap();
-            store.set_run_pipeline("run_del_1", &pid).await.unwrap();
+            store
+                .record_run_start(&pid, &tenant, "run_del_1", "h")
+                .await
+                .unwrap();
             store
                 .link_pipeline_session(&pid, "th_del", &tenant)
                 .await
@@ -4216,30 +4382,30 @@ async fn service_registry_pipeline_runs_list_with_status_filter_and_limit_cap() 
         Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
     let router =
         KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_store(store.clone());
-    for (n, (i, status)) in [
-        ("run_f1", agentos_core::types::RunStatus::Running),
-        ("run_f2", agentos_core::types::RunStatus::Completed),
-        ("run_f3", agentos_core::types::RunStatus::Failed),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        store.create_run(i, "h", "default").await.unwrap();
-        store.set_run_pipeline(i, "pipe_f").await.unwrap();
+    // ADR 2026-09-18：运行投影 = pipeline_state 运行簿记键（每管道恰一条）。
+    // 三管道三种状态，覆盖 status 过滤与 limit 封顶两个消费面。
+    for (pipe, run_id, status_str) in [
+        ("pipe_f1", "run_f1", "running"),
+        ("pipe_f2", "run_f2", "completed"),
+        ("pipe_f3", "run_f3", "failed"),
+    ] {
         store
-            .update_run_status(i, status, None, None)
+            .record_run_start(pipe, "default", run_id, "h")
             .await
             .unwrap();
-        // list_pipelines 三表联结要求 run 有消息槽（无槽 run 被过滤）；
-        // 槽位键 (pipeline, seq) 唯一，同 seq 会相互覆盖 → 各 run 用独立 seq
-        store
-            .apply_messages_ops_to_table(
-                "pipe_f",
-                "default",
-                &[json!({"op": "set", "seq": n, "msg": {"role": "user", "content": "x"}, "_run_id": i})],
-            )
-            .await
-            .unwrap();
+        if status_str != "running" {
+            store
+                .upsert_state_fields(
+                    pipe,
+                    "default",
+                    &json!({ "run_status": status_str })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                )
+                .await
+                .unwrap();
+        }
     }
 
     // status 过滤
@@ -4426,16 +4592,22 @@ async fn suspend_resume_param_and_store_guards() {
         .handle("pipeline-executor", "suspend", json!({"run_id": "ghost"}))
         .await
         .is_err());
-    // resume 走 update_run_status（对不存在 run 是无行更新，返回 ok resumed）——
-    // 断言实际契约：resume 幂等不报错
-    let ghost_resumed = router
+    // resume 同样 fail-closed：runs 表退役后 resume 先按 run_id 反查运行投影，
+    // 无归属即显式协议错误（静默 ok resumed 会掩盖伪造/已清理的凭据）
+    let err = router
         .handle("pipeline-executor", "resume", json!({"run_id": "ghost"}))
         .await
-        .unwrap();
-    assert_eq!(ghost_resumed["status"], "resumed");
+        .expect_err("不存在的 run 必须显式报错（fail-closed）");
+    assert!(
+        format!("{err}").contains("resume 失败"),
+        "resume ghost 须以协议错误出口: {err}"
+    );
 
     // suspend 幂等：第二次挂起已挂起 run 直接返回句柄，不再改写
-    store.create_run("run_idem", "h", "default").await.unwrap();
+    store
+        .record_run_start("pipe_idem", "default", "run_idem", "h")
+        .await
+        .unwrap();
     let first = router
         .handle(
             "pipeline-executor",
@@ -4488,17 +4660,18 @@ async fn resume_pipeline_param_and_resumer_error_guards() {
         agentos_core::types::TenantContext::new("tenant_rerr", "thread_rerr"),
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
-            store.create_run("run_rerr", "h", &tenant).await.unwrap();
             store
-                .set_run_pipeline("run_rerr", "pipe_rerr")
+                .record_run_start("pipe_rerr", &tenant, "run_rerr", "h")
                 .await
                 .unwrap();
             store
-                .update_run_status(
-                    "run_rerr",
-                    agentos_core::types::RunStatus::Suspended,
-                    None,
-                    None,
+                .upsert_state_fields(
+                    "pipe_rerr",
+                    &tenant,
+                    &json!({ "run_status": "suspended" })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
                 )
                 .await
                 .unwrap();
@@ -4946,19 +5119,16 @@ async fn suspend_pipeline_without_active_run_is_idempotent_ok() {
         agentos_core::types::TenantContext::new("tenant_sp_noop", "th_sp_noop"),
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
-            store.create_run("run_done", "h", &tenant).await.unwrap();
             store
-                .set_run_pipeline("run_done", "pipe_sp_done")
+                .record_run_start("pipe_sp_done", &tenant, "run_done", "h")
                 .await
                 .unwrap();
-            store
-                .update_run_status(
-                    "run_done",
+            sqlite
+                .set_run_status_projection(
+                    "pipe_sp_done",
+                    &tenant,
                     agentos_core::types::RunStatus::Completed,
-                    None,
-                    None,
                 )
-                .await
                 .unwrap();
 
             let res = router
@@ -5036,19 +5206,16 @@ async fn resume_pipeline_without_resumer_degrades_with_diagnostics() {
         agentos_core::types::TenantContext::new("tenant_nobo", "th_nobo"),
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
-            store.create_run("run_nobo", "h", &tenant).await.unwrap();
             store
-                .set_run_pipeline("run_nobo", "pipe_nobo")
+                .record_run_start("pipe_nobo", &tenant, "run_nobo", "h")
                 .await
                 .unwrap();
-            store
-                .update_run_status(
-                    "run_nobo",
+            sqlite
+                .set_run_status_projection(
+                    "pipe_nobo",
+                    &tenant,
                     agentos_core::types::RunStatus::Suspended,
-                    None,
-                    None,
                 )
-                .await
                 .unwrap();
             store
                 .link_pipeline_session("pipe_nobo", "th_nobo", &tenant)
@@ -5094,8 +5261,14 @@ async fn suspend_records_pending_interaction_credential() {
         agentos_core::types::TenantContext::new("tenant_pc", "th_pc"),
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
-            for (run_id, with_request) in [("run_pc_yes", true), ("run_pc_no", false)] {
-                store.create_run(run_id, "h", &tenant).await.unwrap();
+            for (pipe, run_id, with_request) in [
+                ("pipe_pc_yes", "run_pc_yes", true),
+                ("pipe_pc_no", "run_pc_no", false),
+            ] {
+                store
+                    .record_run_start(pipe, &tenant, run_id, "h")
+                    .await
+                    .unwrap();
                 let mut params = json!({"run_id": run_id});
                 if with_request {
                     params["request_id"] = json!("req-123");
@@ -5132,7 +5305,10 @@ async fn resume_clears_pending_interaction_credential() {
         agentos_core::types::TenantContext::new("tenant_rc", "th_rc"),
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
-            store.create_run("run_rc", "h", &tenant).await.unwrap();
+            store
+                .record_run_start("pipe_rc", &tenant, "run_rc", "h")
+                .await
+                .unwrap();
             router
                 .handle(
                     "pipeline-executor",
@@ -5157,16 +5333,10 @@ async fn resume_clears_pending_interaction_credential() {
                 .await
                 .unwrap();
             assert_eq!(res["status"], "resumed");
-            let meta = sqlite
-                .get_run("run_rc")
-                .await
-                .unwrap()
-                .metadata
-                .unwrap_or_else(|| json!({}));
-            assert!(
-                meta.get("pending_interaction_request_id").is_none(),
-                "恢复必须清挂起凭据: {meta}"
-            );
+            // 恢复必须清挂起凭据（state 键 suspend_request_id 置空）：按凭据
+            // 反查不再命中，后续 interaction_response 不会误判仍在等审批
+            let cleared = sqlite.find_suspended_run_by_request_id("req-rc").unwrap();
+            assert!(cleared.is_none(), "恢复后挂起凭据必须清除（反查不得命中）");
         },
     )
     .await;
@@ -5184,7 +5354,7 @@ async fn get_run_status_returns_record_or_errors() {
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
             store
-                .create_run("run_grs", "hash_grs", &tenant)
+                .record_run_start("pipe_grs", &tenant, "run_grs", "hash_grs")
                 .await
                 .unwrap();
             let res = router
@@ -5234,8 +5404,10 @@ async fn delete_pipeline_removes_data_and_is_idempotent() {
                 "agentos",
                 json!({"pipeline_id": pid, "status": "completed"}),
             );
-            store.create_run("run_del", "h", &tenant).await.unwrap();
-            store.set_run_pipeline("run_del", &pid).await.unwrap();
+            store
+                .record_run_start(&pid, &tenant, "run_del", "h")
+                .await
+                .unwrap();
             store
                 .link_pipeline_session(&pid, "th_del", &tenant)
                 .await

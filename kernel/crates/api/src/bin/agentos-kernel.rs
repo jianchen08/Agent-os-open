@@ -215,6 +215,10 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // 日志契约（2026-09-15 单日志面）：文件层是唯一常驻日志——tracing-appender
     // daily 轮转写 logs/kernel.log.YYYY-MM-DD（相对进程工作目录），保留上限
     // 30 份（D3：daily 轮转无限累积会让 logs/ 目录随运行时长无界增长）。
+    // 轮转口径为纯 UTC（BUG-71 裁决 2026-09-23）：文件名 = 写入时刻的 UTC 日期，
+    // 轮转边界 = UTC 午夜 = 本地 08:00（UTC+8）；本地日 X 的日志行因此横跨两个
+    // 文件，且本地午夜 00:00 时最新文件仍叫 X-1——按本地日期找文件会扑空，外部
+    // 判活统一走 logs/kernel.liveness（见 log_liveness）。
     // stdout 不再双写（supervisor 侧重定向已退役：OS 级追加重定向是无界
     // 增长面，内核只持有无路径的 fd、无法自轮替）；仅当文件层构建失败
     // （只读盘/无目录权限）时才挂 stdout 层降级——此时它是唯一诊断面。
@@ -227,7 +231,24 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         .build("logs")
     {
         Ok(appender) => {
-            let (writer, guard) = tracing_appender::non_blocking(appender);
+            // 活性面（BUG-71 裁决）：成功写打点、写失败显式告警（上游 worker 对
+            // IO 错误全静默）、持续静默超阈值报警并停止刷新 logs/kernel.liveness。
+            // 告警面 stderr 在装机部署被丢弃（electron stdio=ignore），标记文件
+            // 是外部判活权威面。
+            let liveness = agentos_api::log_liveness::LogLiveness::new();
+            let watched = agentos_api::log_liveness::LivenessWriter::new(
+                appender,
+                liveness.clone(),
+                Arc::new(|msg: String| eprintln!("{msg}")),
+                agentos_api::log_liveness::ERR_REPORT_RATE_LIMIT,
+            );
+            agentos_api::log_liveness::spawn_silence_watchdog(
+                liveness,
+                std::path::Path::new("logs"),
+                agentos_api::log_liveness::WatchdogConfig::production(),
+                Arc::new(|msg: String| eprintln!("{msg}")),
+            );
+            let (writer, guard) = tracing_appender::non_blocking(watched);
             (
                 Some(
                     fmt::layer()
@@ -773,6 +794,28 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // 在 loader 被 move 进 Arc 之前，先取出插件根目录映射，
     // 后续注入 AppState 启用 /ext/{plugin_id}/assets/** 静态资源托管。
     let plugin_dirs = loader.get_plugin_dirs();
+    // venv 自愈（装机形态，BUG-55 方向③，ADR 2026-09-20 决策②）：门开时 boot
+    // 后台对缺 venv 解释器的 Python sidecar 跑 `uv sync` 重建——打包资源排除
+    // .venv 且装机链没有 dev launcher，不自愈则 sidecar spawn 期永久 fail-closed。
+    // 共享合宿宿主（_host）优先重建：合宿成员 spawn 只认它（HOST_VENV_MISSING
+    // 无回退）；合宿成员自身 venv 不建（运行期零消费，去重 ADR 2026-09-07）。
+    // dev 门不开（重建权在 launcher）。uv 缺席/失败只 warn 降级，不阻断启动。
+    if agentos_api::venv_provision::autoprovision_enabled() {
+        let targets =
+            agentos_api::venv_provision::select_missing_venv_plugins(&manifests, &plugin_dirs);
+        let host = agentos_api::venv_provision::select_shared_host_target(&manifests, &plugin_dirs);
+        if !targets.is_empty() || host.is_some() {
+            info!(
+                target: "agentos-kernel",
+                count = targets.len(),
+                host = host.as_ref().map(|d| d.display().to_string()),
+                "检测到缺 venv 解释器的 Python sidecar，boot 后台 uv sync 自愈（共享合宿宿主优先；完成前相应 sidecar spawn 仍会失败）"
+            );
+            tokio::spawn(agentos_api::venv_provision::provision_and_log(
+                targets, host,
+            ));
+        }
+    }
     let loader_arc = Arc::new(loader);
     let native_loader = Arc::new(NativePluginLoader::new());
     let invoker =
@@ -1163,6 +1206,15 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
 
+    // 工具面遮挡名单查询闭包（BUG-51 注册门禁）：G2 观测失败（账本
+    // verify_incomplete）与复验超限终态（verify_failed）插件的工具不进 LLM
+    // 工具面（必败面遮挡），复验通过（账本 ok）即自动转正——实时读契约账本
+    // 现值，无独立状态需要维护。
+    let shadowed_plugin_ids_lookup: agentos_api::capability_router::ShadowedPluginIdsLookupFn = {
+        let ledger_for_shadow = contract_states.clone();
+        Arc::new(move || ledger_for_shadow.verify_pending_plugin_ids())
+    };
+
     // 管道恢复派发闭包（resume_pipeline 续跑拉起）：经 EngineDispatcher 走与
     // 聊天/催促同一条派发链。dispatcher 构造晚于 router（AppState 之后，见下方
     // chat handler 注册块），经 OnceLock 槽位二阶段接线——未 set 前调用报
@@ -1233,6 +1285,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         .with_streaming_declaration_lookup(streaming_declaration_lookup)
         .with_export_fields_lookup(export_fields_lookup)
         .with_force_include_tools_lookup(force_include_tools_lookup)
+        .with_shadowed_plugin_ids_lookup(shadowed_plugin_ids_lookup)
         .with_pipeline_resumer(pipeline_resumer)
         .with_capability_contracts(capability_contracts.clone());
     // SQLite 固有面：suspend/resume 挂起凭据读写（审批挂起恢复链写侧）。
@@ -2067,10 +2120,16 @@ pub(crate) fn build_plugin_loader(
     let allowlist = agentos_plugin_loader::load_allowlist_file(
         &config_root.join("kernel/plugin_allowlist.yaml"),
     );
+    // 双源同 id 裁决策略（ADR 2026-09-20-packaged-dual-source-adjudication）：
+    // 装机链（electron buildKernelEnv）设 AGENTOS_PLUGIN_SOURCE_PRIORITY=builtin
+    // → 打包副本压过用户空间陈旧副本（除非用户副本 semver 严格更新）；dev 不设
+    // → UserFirst 历史口径逐位不变。
+    let dual_source_policy = agentos_plugin_loader::DualSourcePolicy::from_env();
     PluginLoaderImpl::new(plugins_dir, user_plugins_dir)
         // 接入 config_root：否则 load_config() 因 config_root=None 恒返回空 {}
         .with_config_root(config_root)
         .with_allowlist(allowlist)
+        .with_dual_source_policy(dual_source_policy)
 }
 
 #[cfg(test)]

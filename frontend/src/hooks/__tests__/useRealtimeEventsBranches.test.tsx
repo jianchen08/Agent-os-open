@@ -94,6 +94,7 @@ const ALL_REALTIME_EVENTS = [
   WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT,
   WS_SERVER_EVENTS.PENDING_INPUTS_CHANGED,
   WS_SERVER_EVENTS.COMPRESSION_FAILED,
+  WS_SERVER_EVENTS.COMPRESSION_APPLIED,
   WS_LOCAL_EVENTS.KICKED_BY_REPLACEMENT,
 ]
 
@@ -144,7 +145,7 @@ function seedTasksAndMount(tasks: Array<Record<string, unknown>>) {
 }
 
 describe('useRealtimeEvents — 订阅与退订覆盖面', () => {
-  it('挂载时订阅全部 8 条事件（含本地与服务器事件）', () => {
+  it('挂载时订阅全部 9 条事件（含本地与服务器事件）', () => {
     const { unmount } = renderHook(() => useRealtimeEvents())
     for (const evt of ALL_REALTIME_EVENTS) {
       expect(subscribedCount(evt)).toBeGreaterThan(0)
@@ -201,9 +202,9 @@ describe('useRealtimeEvents — 重连补漏 handleWsReconnect', () => {
     unmount()
   })
 
-  it('会话存在但解析不出主管道（多管道且无 activePipelineId）时不补拉', () => {
+  it('会话存在但主管道缺失（pipelineIds 空）时不补拉', () => {
     const loadSpy = seedSessionWithLoadSpy(
-      [{ id: 'sess-2', pipelineIds: ['p1', 'p2'] }],
+      [{ id: 'sess-2', pipelineIds: [] }],
       'sess-2',
     )
 
@@ -216,7 +217,7 @@ describe('useRealtimeEvents — 重连补漏 handleWsReconnect', () => {
 
   it('1 秒内重复重连事件只补拉一次（防抖）', async () => {
     const loadSpy = seedSessionWithLoadSpy(
-      [{ id: 'sess-1', activePipelineId: 'pipe-main' }],
+      [{ id: 'sess-1', pipelineIds: ['pipe-main'] }],
       'sess-1',
     )
 
@@ -244,7 +245,7 @@ describe('useRealtimeEvents — 重连补漏 handleWsReconnect', () => {
   })
 
   it('补拉返回 ok=false 时发高优错误通知（含标题与分类）', async () => {
-    seedSessionWithLoadResponse([{ id: 'sess-1', activePipelineId: 'pipe-main' }], 'sess-1', { ok: false, error: new Error('boom') })
+    seedSessionWithLoadResponse([{ id: 'sess-1', pipelineIds: ['pipe-main'] }], 'sess-1', { ok: false, error: new Error('boom') })
 
     const { unmount } = renderHook(() => useRealtimeEvents())
     await act(async () => {
@@ -582,6 +583,10 @@ describe('useRealtimeEvents — 通知类事件', () => {
   })
 
   it('user_input_send_timeout 事件体缺 data 时用空对象兜底并走缺省 reason', () => {
+    // 隔离铠甲：通知 store 的短窗去重指纹表是模块级状态（clearAll 不清），
+    // 上一个用例刚入列同指纹的缺省 reason 通知——把时钟推过去重窗，
+    // 本用例与用例顺序解耦（否则顺序耦合性红）。
+    vi.useFakeTimers({ now: Date.now() + 31_000 })
     const { unmount } = renderHook(() => useRealtimeEvents())
     act(() => emit(WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT, {}))
 
@@ -590,6 +595,7 @@ describe('useRealtimeEvents — 通知类事件', () => {
       .notifications.find((n) => n.title === '消息发送失败')
     expect(notif?.message).toContain('连接断开，消息未送达')
     unmount()
+    vi.useRealTimers()
   })
 
   it('user_input_send_timeout 缺 thread_id 时插入的 system 消息 sessionId 落空串', () => {
@@ -789,5 +795,88 @@ describe('useRealtimeEvents — visibility 回前台重连', () => {
     })
 
     expect(connectMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('useRealtimeEvents — compression_applied 指纹对账（BUG-72 A1）', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  /** 挂载 + 桩定 fetchMessages，返回 spy 与 unmount */
+  function mountWithFetchSpy(rejected = false) {
+    const fetchSpy = rejected
+      ? vi.fn().mockRejectedValue(new Error('network down'))
+      : vi.fn().mockResolvedValue(undefined)
+    usePipelineMessageStore.setState({ fetchMessages: fetchSpy } as never)
+    const { unmount } = renderHook(() => useRealtimeEvents())
+    return { fetchSpy, unmount }
+  }
+
+  it('压缩完成事件 → 去抖后对该管道全量对账（带 threadId）', async () => {
+    vi.useFakeTimers()
+    const { fetchSpy, unmount } = mountWithFetchSpy()
+    act(() =>
+      emit(WS_SERVER_EVENTS.COMPRESSION_APPLIED, {
+        data: { pipeline_id: 'pipe-ca', thread_id: 'sess-ca' },
+      }),
+    )
+    // 去抖窗口内不拉（事件在插件 execute 内发出，槽位 ops 稍后落库）
+    expect(fetchSpy).not.toHaveBeenCalled()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600)
+    })
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    expect(fetchSpy).toHaveBeenCalledWith('pipe-ca', { threadId: 'sess-ca' })
+    unmount()
+  })
+
+  it('同管道连续波次去抖合并为一次对账', async () => {
+    vi.useFakeTimers()
+    const { fetchSpy, unmount } = mountWithFetchSpy()
+    act(() => {
+      emit(WS_SERVER_EVENTS.COMPRESSION_APPLIED, {
+        data: { pipeline_id: 'pipe-ca', thread_id: 'sess-ca' },
+      })
+      emit(WS_SERVER_EVENTS.COMPRESSION_APPLIED, {
+        data: { pipeline_id: 'pipe-ca', thread_id: 'sess-ca' },
+      })
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600)
+    })
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    unmount()
+  })
+
+  it('坐标缺失（无 pipeline_id/thread_id）不触发对账', async () => {
+    vi.useFakeTimers()
+    const { fetchSpy, unmount } = mountWithFetchSpy()
+    act(() =>
+      emit(WS_SERVER_EVENTS.COMPRESSION_APPLIED, { data: { pipeline_id: '' } }),
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600)
+    })
+    expect(fetchSpy).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('对账失败弹通知（消息操作可能仍指向旧指纹，须让用户可见）', async () => {
+    vi.useFakeTimers()
+    const { unmount } = mountWithFetchSpy(true)
+    act(() =>
+      emit(WS_SERVER_EVENTS.COMPRESSION_APPLIED, {
+        data: { pipeline_id: 'pipe-ca', thread_id: 'sess-ca' },
+      }),
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600)
+    })
+    const notif = useNotificationStore
+      .getState()
+      .notifications.find((n) => n.title === '压缩后消息对账失败')
+    expect(notif).toBeDefined()
+    unmount()
   })
 })

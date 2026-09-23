@@ -1,13 +1,21 @@
 # @feature: FP-0.2.二 内部模块 manifest | @ci: python-coverage
 # -*- coding: utf-8 -*-
-"""角色扮演模式活面板行为测试（宿主融合形态，2026-09-17 三裁定）：
+"""角色扮演模式活面板行为测试（宿主融合形态，2026-09-17 三裁定 + BUG-73 修复契约）：
 
-- 对话回归对话框：面板不再内置对话流（UI 不消费 /data/messages；端点零连带保留），
-  开演/重新生成带 session_id 送入用户会话线程。
+- 对话回归对话框：开演产出经「开演记录」详情回显（/data/messages 消费面恢复，
+  只读渲染 assistant 扮演轮次）——任务管道不再锚宿主活跃会话，聊天区看不到的
+  演出在面板可见。
+- BUG-73（开演断链三件套）契约：
+  ① 开演锚**卡专属扮演会话**（thread-rp-<card_id>，服务端派生，body 的宿主
+    活跃 session_id 一律忽略）——R92「任务落活跃既有 thread」根除；
+  ② 所选开场白全文随派发注入 agent 上下文；
+  ③ 面板可见反馈：派发成功 toast 带任务号 + 自动切「开演记录」页签 + 立即与
+    延迟各刷新一次（新记录行等管道写入 mode 键后才可见）。
 - 卡 theme/avatar：/data/cards 透出，theme 为 ThemeConfig 档（必备键断言对照
   frontend/src/types/theme.ts 的 ThemeConfig/ThemeColors/BackgroundsConfig 类型定义
   手写，与 theme.apply 桥 validateThemeConfig 的 fail-closed 校验同口径）。
-- 面板主题跟宿主：HTML 内联 theme.sync/ctx.sync 接收器 + CSS var(--ag-*) token 桥。
+- 面板主题跟宿主：HTML 内联 theme.sync 接收器 + CSS var(--ag-*) token 桥；
+  ctx.sync 宿主上下文消费面移除（开演不再读宿主活跃会话，防回退断言在案）。
 
 fake provider 注入（module._set_provider）捕获 task_submit args 断言形状，不真派发。
 """
@@ -110,6 +118,33 @@ def test_cards_expose_theme_and_avatar() -> None:
     assert "dark" in categories and "light" in categories
 
 
+def test_card_system_prompt_has_no_raw_placeholders() -> None:
+    """BUG-73 断点b 伴生缺陷：卡 system_prompt 的 {description}/{personality}/
+    {scenario} 占位符无任何替换机制（直进 LLM=字面量），出厂卡必须内联实际值。
+    比对按空白折叠（YAML 多行折叠标量会在行间插空格，语义等价）。"""
+    import re as _re
+
+    import yaml as _yaml
+
+    def _norm(text: str) -> str:
+        return _re.sub(r"\s+", "", text)
+
+    agents_dir = os.path.join(MODES_DIR, "mode_roleplay", "agents")
+    for fname in sorted(os.listdir(agents_dir)):
+        if not (fname.startswith("card_") and fname.endswith(".yaml")):
+            continue
+        with open(os.path.join(agents_dir, fname), encoding="utf-8") as fh:
+            data = _yaml.safe_load(fh) or {}
+        prompt = _norm(str(data.get("system_prompt") or ""))
+        assert "{description}" not in prompt, fname
+        assert "{personality}" not in prompt, fname
+        assert "{scenario}" not in prompt, fname
+        # 实际设定值必须真实内联（不是空占位）
+        assert _norm(str(data.get("description") or "")) in prompt, fname
+        assert _norm(str(data.get("personality") or "")) in prompt, fname
+        assert _norm(str(data.get("scenario") or "")) in prompt, fname
+
+
 def _validate_theme_config_like_host(theme: Any) -> list[str]:
     """手写 validateThemeConfig 同构校验（frontend/src/services/themeService.ts
     的 fail-closed 必填键矩阵）：id/name + colors 六字段 + components/effects/
@@ -165,39 +200,50 @@ def test_cards_theme_passes_host_validate_theme_config_isomorphically() -> None:
 
 
 def test_panel_html_theme_sync_receiver_and_host_tokens() -> None:
-    """宿主主题 token 桥：theme.sync 接收器 + --ag-* 变量引用；ctx.sync 存会话上下文。"""
+    """宿主主题 token 桥：theme.sync 接收器 + --ag-* 变量引用。
+    ctx.sync 宿主会话上下文消费面移除（BUG-73 断点a 根除：开演不再读宿主活跃
+    会话——防回退断言 __agentosctx 不得回归）。"""
     html = _panel_html().lower()
-    assert "theme.sync" in html and "ctx.sync" in html
-    assert "__agentosctx" in html
+    assert "theme.sync" in html
+    assert "__agentosctx" not in html
+    assert "ctx.sync" not in html
     assert "--ag-" in html  # var(--ag-*, fallback) 桥接形式
     assert "setproperty" in html  # token 逐键落根元素
     # 面板主题跟宿主：prefers-color-scheme 仅作 fallback 基座
     assert "prefers-color-scheme" in html
 
 
-def test_panel_html_dialog_back_to_chatbox() -> None:
-    """对话回归对话框：无消息流渲染；第三页签=开演记录（摘要卡，非对话流）。"""
+def test_panel_html_dedicated_session_play_flow() -> None:
+    """BUG-73 断点a/c 面板契约：开演不透传宿主会话锚（专属会话由服务端派生），
+    派发成功可见反馈=toast 带任务号 + 自动切「开演记录」页签 + 立即与延迟刷新。"""
     html = _panel_html()
     lowered = html.lower()
-    # 消息流消费面移除：UI 不再调 /data/messages，渲染函数不复存在
-    assert "/data/messages" not in lowered
-    assert "loadmessages" not in lowered and "renderchat" not in lowered
-    # 对话流气泡样式不复存在
-    assert ".msg" not in lowered and "bubble" not in lowered
-    # 三页签：角色卡 / 世界书 / 开演记录
+    # 三页签布局保持：角色卡 / 世界书 / 开演记录
     assert "角色卡" in html and "世界书" in html and "开演记录" in html
-    # 摘要卡文案：任务已在对话框/管道执行 + 对话指引
-    assert "该任务已在对话框/管道执行" in html
-    assert "对话请在聊天区继续（选择角色扮演模式）" in html
-    # 开演成功 toast 指向聊天区
-    assert "已送入对话框，请在聊天区继续" in html
-    # theme.apply 随卡切换（选卡上行卡 theme 档）
-    assert "theme.apply" in lowered
-    # session_id 随 play/regenerate body 发送（自 ctx 取）
-    assert "session_id" in lowered
+    # 宿主会话锚不再出现在任何上行 body（开演/重新生成均不透传）
+    assert "session_id" not in lowered
+    assert "currentsessionid" not in lowered
+    # 派发成功反馈三件套：toast 带任务号/去向、切开演记录页签、延迟补刷新
+    assert "已开演" in html and "开演记录" in html
+    assert "switchtab('sessions')" in lowered
+    assert "settimeout" in lowered  # 新记录行需等管道写 mode 键，延迟补刷新
+    # 派发中状态反馈保留
+    assert "派发中" in html
 
 
-# ── 开演/重新生成的 session_id 透传（args 捕获断形状）─────────────────────────────
+def test_panel_html_record_detail_renders_performance() -> None:
+    """BUG-73 断点b 可见面：开演记录详情消费 /data/messages 只读回显 assistant
+    扮演轮次（此前产出落在无 UI 渲染的任务管道里=「无扮演产出」的观测成因）。"""
+    html = _panel_html()
+    lowered = html.lower()
+    # 消息端点消费恢复（按 pipeline_id 查询）
+    assert "/data/messages?pipeline_id=" in lowered
+    # assistant 轮次渲染 + 空态诚实（演出未落时提示稍后刷新）
+    assert "开场表演" in html
+    assert "演出尚未落" in html
+
+
+# ── 开演/重新生成的会话锚（args 捕获断形状）─────────────────────────────────────
 
 
 def _fake_invoke_capturing(captured: dict[str, Any], task_id: str) -> Any:
@@ -208,34 +254,40 @@ def _fake_invoke_capturing(captured: dict[str, Any], task_id: str) -> Any:
     return _fake_invoke
 
 
-def test_play_action_relays_session_id() -> None:
+def test_play_action_anchors_dedicated_card_thread() -> None:
+    """BUG-73 断点a：开演锚卡专属扮演会话（thread-rp-<card_id>），body 携带的
+    宿主活跃 session_id 一律忽略（缺席/空/活跃会话 id 三形态同裁决）。"""
     module = _load_server()
     captured: dict[str, Any] = {}
     module._set_provider("tool-executor", _fake_invoke_capturing(captured, "task-s1"))
 
-    def _play(raw_session_id: str | None) -> dict[str, Any]:
+    def _play(body_extra: dict[str, Any]) -> dict[str, Any]:
         body: dict[str, Any] = {"card_id": "card_luna", "user_persona": "北地佣兵"}
-        if raw_session_id is not None:
-            body["session_id"] = raw_session_id
+        body.update(body_extra)
         return _body_json(
             _call(module, f"{_EP}/actions/play", method="POST", raw_body=json.dumps(body))
         )
 
-    # 带 sessionId：透传 task_submit（会话归属锚点，任务落用户会话线程）
-    assert _play("sess-abc-123") == {"task_id": "task-s1"}
+    # body 带「宿主当前活跃会话」：忽略，锚卡专属会话（R92 同族污染根除）
+    assert _play({"session_id": "thread-858ab1bd-bf13-4d59-a7c7-e39b589f158b"}) == {
+        "task_id": "task-s1"
+    }
     args = captured["args"]
-    assert args["session_id"] == "sess-abc-123"
+    assert args["session_id"] == "thread-rp-card_luna"
     assert args["target_id"] == "mode_roleplay/card_luna" and args["mode"] == "roleplay"
     # 面板按主 agent（L1）身份代用户派发（tool-executor 直调无注入链，须自携）
     assert args["parent_agent_level"] == 1
 
-    # 无 sessionId：省略键（=现状独立任务，不虚构归属）
-    assert _play(None) == {"task_id": "task-s1"}
-    assert "session_id" not in captured["args"]
+    # 无 session_id / 空 session_id：同一专属锚（不虚构宿主归属）
+    assert _play({}) == {"task_id": "task-s1"}
+    assert captured["args"]["session_id"] == "thread-rp-card_luna"
+    assert _play({"session_id": ""}) == {"task_id": "task-s1"}
+    assert captured["args"]["session_id"] == "thread-rp-card_luna"
 
-    # 空 sessionId：与缺省同口径（省略）
-    assert _play("") == {"task_id": "task-s1"}
-    assert "session_id" not in captured["args"]
+    # 不同卡 → 各自专属锚（同卡复演=复用同一扮演会话）
+    captured.clear()
+    assert _play({"card_id": "card_kael"}) == {"task_id": "task-s1"}
+    assert captured["args"]["session_id"] == "thread-rp-card_kael"
 
 
 def test_play_action_accepts_kernel_base64_body() -> None:
@@ -324,7 +376,7 @@ def test_regenerate_action_anchors_source_pipeline_thread() -> None:
     assert "session_id" not in captured["args"]
 
 
-# ── 零连带：/data/messages 端点保留（UI 不消费，后端契约不变）─────────────────────
+# ── /data/messages 端点（BUG-73 后恢复消费：开演记录详情回显扮演轮次）──────────────
 
 
 def test_messages_endpoint_still_served() -> None:
@@ -332,7 +384,7 @@ def test_messages_endpoint_still_served() -> None:
     # 缺 pipeline_id → 400；错误 method → 404（端点契约保持）
     assert _envelope_status(_call(module, f"{_EP}/messages")) == 400
     assert _envelope_status(_call(module, f"{_EP}/messages", method="POST")) == 404
-    # 正常查询仍返回归一消息（后端零连带）
+    # 正常查询仍返回归一消息
     async def _provider(pipeline_id: str, limit: int | None = None) -> list[dict[str, Any]]:
         return [{"role": "assistant", "content_preview": "「说数。」", "status": "success", "created_at": "t2"}]
 

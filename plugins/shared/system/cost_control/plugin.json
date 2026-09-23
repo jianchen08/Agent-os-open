@@ -1,5 +1,8 @@
 {
   "id": "cost_control",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Cost Control Service",
   "version": "1.0.0",
   "plugin_type": "system",

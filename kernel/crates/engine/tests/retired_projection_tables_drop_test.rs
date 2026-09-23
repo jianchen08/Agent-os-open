@@ -18,7 +18,8 @@
 //! 行为断言（公开 API，临时文件库模拟旧库升级路径）：
 //! - 旧库残留四张退役空表 → SqliteStore::open（内含 init）后消失；
 //! - 旧库残留有行的退役表 → 原名撤位、`*_retired_*` 副本行数不变；
-//! - 现行引擎表不受影响（runs/message_slots/blobs/pipeline_state 抽查）。
+//! - 现行引擎表不受影响（traces/message_slots/blobs/pipeline_state 抽查；
+//!   runs/branches 已随 ADR 2026-09-18 退役，簿记收敛进 pipeline_state）。
 
 use agentos_engine::SqliteStore;
 use rusqlite::Connection;
@@ -94,7 +95,9 @@ fn open_drops_empty_retired_projection_tables() {
             "空退役表不应留下 _retired_ 副本：{retired}"
         );
     }
-    for live in ["runs", "message_slots", "blobs", "pipeline_state"] {
+    // runs 已退役（ADR 2026-09-18）：open 后不得再存在
+    assert!(!table_exists(&conn, "runs"), "退役的 runs 表不应重建");
+    for live in ["traces", "message_slots", "blobs", "pipeline_state"] {
         assert!(table_exists(&conn, live), "现行引擎表应保留：{live}");
     }
     drop(store);
@@ -153,7 +156,9 @@ fn open_preserves_nonempty_retired_tables_as_renamed_copies() {
     }
 
     // 现行引擎表可用（新 schema 生效）
-    for live in ["runs", "message_slots", "blobs", "pipeline_state"] {
+    // runs 已退役（ADR 2026-09-18）：open 后不得再存在
+    assert!(!table_exists(&conn, "runs"), "退役的 runs 表不应重建");
+    for live in ["traces", "message_slots", "blobs", "pipeline_state"] {
         assert!(table_exists(&conn, live), "现行引擎表应保留：{live}");
     }
     drop(store);

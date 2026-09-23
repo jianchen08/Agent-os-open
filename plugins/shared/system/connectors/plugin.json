@@ -1,5 +1,8 @@
 {
   "id": "connectors_service",
+  "requires_services": [
+    "packaging"
+  ],
   "name": "Connectors Service",
   "version": "1.0.0",
   "plugin_type": "system",

@@ -77,6 +77,8 @@ async function defaultBuiltinOpenHandler(
       console.warn('[fileOpener] 读取文件失败:', resp.data?.message)
     }
   } catch (error) {
+    // 记日志即止：打开失败仅缺失一个编辑器页签，无数据损坏面；
+    // 用户可直接重试打开（OBS-R258-1 吞错误规则登记）
     console.error('[fileOpener] 打开文件失败:', error)
   }
 }

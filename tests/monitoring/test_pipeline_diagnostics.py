@@ -37,7 +37,7 @@ def _trace(seq: int, patch: dict | str, plugin_id: str = "llm_core") -> dict:
         "trace_id": f"tr-{seq}",
         "run_id": "run-1",
         "branch_id": "main",
-        "seq_in_branch": seq,
+        "seq": seq,
         "plugin_id": plugin_id,
         "patch_type": "state_update",
         "patch_data": patch,
@@ -122,8 +122,8 @@ class TestGetPipelineStateFull:
         _set_provider("db-admin-query", {
             "table": "pipeline_state", "total": 2, "limit": 500, "offset": 0,
             "rows": [
-                {"field_key": "iteration", "field_value": "7", "updated_at": "t1"},
-                {"field_key": "track.llm_usage", "field_value": '{"total_tokens": 900}', "updated_at": "t2"},
+                {"field_key": "iteration", "value": "7", "value_kind": "str", "updated_at": "t1"},
+                {"field_key": "track.llm_usage", "value": '{"total_tokens": 900}', "value_kind": "json", "updated_at": "t2"},
             ],
         })
         _set_provider("runs-by-pipeline", [{"run_id": "r1", "status": "completed"}])
@@ -140,7 +140,7 @@ class TestGetPipelineStateFull:
 
     def test_summary_missing_is_none_not_crash(self):
         """state 摘要行缺失（冷管道）→ summary=None，fields/runs 照常返回。"""
-        _set_provider("db-admin-query", {"rows": [{"field_key": "k", "field_value": "v", "updated_at": "t"}]})
+        _set_provider("db-admin-query", {"rows": [{"field_key": "k", "value": "v", "value_kind": "str", "updated_at": "t"}]})
         _set_provider("runs-by-pipeline", [])
         _set_provider("pipeline-state", [{"pipeline_id": "other"}])
 

@@ -1902,29 +1902,12 @@ impl agentos_core::traits::StorageBackend for MockStorage {
     ) -> Result<(), agentos_core::types::StorageError> {
         Ok(())
     }
-    async fn update_run_status(
-        &self,
-        _run_id: &str,
-        _status: agentos_core::types::RunStatus,
-        _branch: Option<&str>,
-        _seq: Option<u32>,
-    ) -> Result<(), agentos_core::types::StorageError> {
-        Ok(())
-    }
     async fn get_messages_by_pipeline(
         &self,
         _pipeline_id: &str,
         _opts: agentos_core::traits::MessageQueryOpts,
     ) -> Result<Vec<agentos_core::types::MessageRecord>, agentos_core::types::StorageError> {
         Ok(vec![])
-    }
-    async fn create_run(
-        &self,
-        _run_id: &str,
-        _config_hash: &str,
-        _tenant_id: &str,
-    ) -> Result<(), agentos_core::types::StorageError> {
-        Ok(())
     }
     async fn store_blob(
         &self,
@@ -4739,6 +4722,32 @@ fn test_group_grants_follows_live_packing_no_stale_snapshot() {
             "pipeline-state".to_string(),
             "tool-surface".to_string()
         ])
+    );
+}
+
+#[test]
+fn test_group_grants_undeclared_member_makes_group_undeclared() {
+    // approval 形状钉子（R208 装机版审批轮询间歇 500）：调用方自带白名单
+    // （granted=[tool-executor]，不含所调能力）与未声明成员装箱同组时，
+    // 组未声明（None）→ 未声明语义开关决定（非 strict=全授予，放行）。
+    // 装箱顺序改变同一调用成败的形态由此钉死——调用方必须把所调能力
+    // 写全自己的 granted_capabilities（approval_service 缺 human-interaction
+    // 已修，不能依赖与未声明成员装箱的运气）。
+    let loader = Arc::new(MockLoader::new());
+    let mut caller = make_light_manifest("approval_like", "python a.py");
+    caller.granted_capabilities = vec!["tool-executor".to_string()];
+    let mut undeclared = make_light_manifest("undeclared_like", "python b.py");
+    undeclared.granted_capabilities = Vec::new();
+    loader.add_manifest(caller);
+    loader.add_manifest(undeclared);
+
+    let invoker = PluginInvokerImpl::new(loader);
+    invoker.assign_light_host_with("approval_like", "light", 6);
+    invoker.assign_light_host_with("undeclared_like", "light", 6);
+    assert_eq!(
+        invoker.group_granted_capabilities("group:light:1"),
+        None,
+        "任一成员未声明 = 组未声明（非 strict 下默认全授予，approval 形状放行）"
     );
 }
 

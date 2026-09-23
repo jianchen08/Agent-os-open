@@ -17,6 +17,12 @@ import type { Message } from '@/types/models'
 const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }))
 vi.mock('@/services/api/client', () => ({ default: { get: mockGet } }))
 
+// 段清单是 loadPipelineMessages 的并行旁路面（消息段模型），不归本文件
+// mode 决策断言管——桩定为空清单，避免吃掉 mockGet 的 once 队列
+vi.mock('@/services/api/messageSegments', () => ({
+  getMessageSegments: vi.fn(async () => []),
+}))
+
 vi.mock('@/utils/logger', async () => (await import('./helpers/storeTestMocks')).loggerMockFull())
 
 vi.mock('@/utils/retry', async () => (await import('./helpers/storeTestMocks')).retryMockFull())

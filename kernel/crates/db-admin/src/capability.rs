@@ -490,7 +490,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert!(names.contains(&"runs"), "应枚举引擎表: {names:?}");
+        assert!(names.contains(&"traces"), "应枚举引擎表: {names:?}");
     }
 
     #[tokio::test]
@@ -659,23 +659,24 @@ mod tests {
     // 涉及全局 pipeline_state_registry 的场景合并在单个串行测试里
     // （全局单例 + cargo 并行测试 = 串扰源，见 clears_nine_tables 场景段）。
 
-    /// 播种全量执行数据（9 表）+ users 1 行；runs 状态与管道名可参数化。
+    /// 播种全量执行数据（7 表）+ users 1 行；运行状态与管道名可参数化。
+    /// runs/branches 已退役（ADR 2026-09-18）：运行簿记 = pipeline_state 标量键。
     fn seed_execution_data(store: &agentos_engine::SqliteStore, runs_status: &str, pid: &str) {
         store
             .with_conn(|conn| {
                 conn.execute_batch(&format!(
-                    "INSERT INTO runs (run_id, config_hash, status, tenant_id, pipeline_id, created_at, current_branch) VALUES
-                        ('run1','cfg','{runs_status}','default','{pid}','2026-01-01T00:00:00Z','b1'),
-                        ('run2','cfg','completed','default','pipe_done','2026-01-01T00:00:00Z','b1');
-                     INSERT INTO traces (trace_id, run_id, branch_id, seq_in_branch, plugin_id, patch_type, patch_data, created_at) VALUES
-                        ('t1','run1','b1',1,'p','StateUpdate','{{}}','2026-01-01T00:00:00Z'),
-                        ('t2','run2','b1',1,'p','StateUpdate','{{}}','2026-01-01T00:00:00Z');
+                    "INSERT INTO traces (trace_id, pipeline_id, seq, plugin_id, patch_type, patch_data, created_at) VALUES
+                        ('t1','{pid}',1,'p','StateUpdate','{{}}','2026-01-01T00:00:00Z');
                      INSERT INTO blobs (blob_id, mime_type, size_bytes, data, created_at) VALUES
                         ('bl1','application/json',2,x'7B7D','2026-01-01T00:00:00Z');
-                     INSERT INTO branches (branch_id, run_id, created_at) VALUES ('b1','run1','2026-01-01T00:00:00Z');
                      INSERT INTO sessions (thread_id, created_at, updated_at) VALUES ('th1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
                      INSERT INTO pipeline_sessions (pipeline_id, thread_id, created_at) VALUES ('{pid}','th1','2026-01-01T00:00:00Z');
-                     INSERT INTO pipeline_state (pipeline_id, field_key, field_value, updated_at) VALUES ('{pid}','track.total_tokens','10','2026-01-01T00:00:00Z');
+                     INSERT OR IGNORE INTO pipeline_state (pipeline_id, field_key, value, value_kind, tenant_id, updated_at) VALUES
+                        ('{pid}','track.total_tokens','10','int','default','2026-01-01T00:00:00Z'),
+                        ('{pid}','run_id','run1','str','default','2026-01-01T00:00:00Z'),
+                        ('{pid}','run_status','{runs_status}','str','default','2026-01-01T00:00:00Z'),
+                        ('pipe_done','run_id','run2','str','default','2026-01-01T00:00:00Z'),
+                        ('pipe_done','run_status','completed','str','default','2026-01-01T00:00:00Z');
                      INSERT INTO pipeline_checkpoints (checkpoint_id, pipeline_id, step_no, state_json, created_at) VALUES ('cp1','{pid}',1,'{{}}','2026-01-01T00:00:00Z');
                      INSERT INTO message_slots (tenant_id, pipeline_id, seq, message_id, blob_id, run_id, created_at) VALUES ('default','{pid}',1,'m1','bl1','run1','2026-01-01T00:00:00Z');
                      INSERT INTO users (user_id, username, password, role, tenant_id, created_at) VALUES ('u_test','tester','x','user','default','2026-01-01T00:00:00Z');"
@@ -697,11 +698,9 @@ mod tests {
             .unwrap()
     }
 
-    const NINE_TABLES: [&str; 9] = [
-        "runs",
+    const SEVEN_TABLES: [&str; 7] = [
         "traces",
         "blobs",
-        "branches",
         "sessions",
         "pipeline_sessions",
         "pipeline_state",
@@ -776,7 +775,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(envelope["status"], 409, "运行中管道应拒绝: {envelope}");
-        assert_eq!(count_table(&store, "runs"), 2, "拒绝时数据未动");
+        assert_eq!(count_table(&store, "pipeline_state"), 5, "拒绝时数据未动");
         assert_eq!(count_table(&store, "message_slots"), 1);
         assert_eq!(count_table(&store, "users"), 1);
 
@@ -792,7 +791,7 @@ mod tests {
         // 播种行数：runs2+traces2+blobs1+branches1+sessions1+pipeline_sessions1
         //           +pipeline_state1+checkpoints1+message_slots1 = 11
         assert_eq!(body["cleared_count"], 11, "清除计数=播种总数: {body}");
-        for t in NINE_TABLES {
+        for t in SEVEN_TABLES {
             assert_eq!(count_table(&store, t), 0, "{t} 应清空");
         }
         assert_eq!(count_table(&store, "users"), 1, "users 必须保留");
@@ -832,12 +831,12 @@ mod tests {
         assert!(backup.contains("clear-backup-"), "备份名带标记: {backup}");
         let meta = std::fs::metadata(&backup).unwrap();
         assert!(meta.len() > 0, "备份文件非空");
-        // 备份是清理前快照：恢复出的备份库仍含 9 表数据（VACUUM INTO 一致性）
+        // 备份是清理前快照：恢复出的备份库仍含清理前数据（VACUUM INTO 一致性）
         let bconn = rusqlite::Connection::open(&backup).unwrap();
-        let runs: i64 = bconn
-            .query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))
+        let state_rows: i64 = bconn
+            .query_row("SELECT COUNT(*) FROM pipeline_state", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(runs, 2, "备份保留清理前数据");
+        assert_eq!(state_rows, 3, "备份保留清理前数据");
         let users: i64 = bconn
             .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
             .unwrap();
@@ -1124,7 +1123,7 @@ mod tests {
     async fn list_table_names_includes_projection_tables() {
         let (_handler, store) = handler_with_db();
         let names = store.with_conn(crate::db_routes::list_table_names).unwrap();
-        for expected in ["runs", "traces", "blobs", "sessions", "message_slots"] {
+        for expected in ["traces", "blobs", "sessions", "message_slots"] {
             assert!(
                 names.iter().any(|n| n == expected),
                 "应包含投影表 {expected}: {names:?}"

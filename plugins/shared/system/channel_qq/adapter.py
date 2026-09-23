@@ -54,9 +54,18 @@ class QQInputAdapter(QueuedChannelInputAdapter):
         # 提取文本内容
         user_input = _extract_qq_text(raw)
 
-        extra: dict[str, Any] = {"_message_type": message_type}
-        # 群消息额外携带 group_id
-        if group_id is not None:
+        # 入站桥会话坐标：私聊与群聊是不同会话；群回复目标为群号。
+        is_group = message_type == "group" and group_id is not None
+        extra: dict[str, Any] = {
+            "_message_type": message_type,
+            "_conversation_key": f"g{group_id}" if is_group else f"u{user_id}",
+            "_reply_target": str(group_id) if is_group else user_id,
+            "_reply_ctx": {
+                "_message_type": message_type,
+                **({"_group_id": group_id} if is_group else {}),
+            },
+        }
+        if is_group:
             extra["_group_id"] = group_id
 
         return build_channel_state(
@@ -115,12 +124,13 @@ class QQOutputAdapter(BufferedChannelOutputAdapter):
             return None
 
     async def _deliver(self, target: Any, text: str, state: dict[str, Any]) -> None:
-        """经 OneBot 客户端投递，消息类型按消息来源路由。"""
+        """经 OneBot 客户端投递，消息类型按消息来源路由（群消息带群号）。"""
         msg_type = state.get("_message_type", self._message_type)
         await self._onebot_client.send_message(
             user_id=target,
             content=text,
             message_type=msg_type,
+            group_id=state.get("_group_id"),
         )
 
 

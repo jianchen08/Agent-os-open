@@ -14,7 +14,15 @@
 
 import { Copy, Minus, Square, X } from 'lucide-react'
 import { useLayoutEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
+import { cn } from '@/lib/utils'
+import {
+  BAND_BUTTON_ICON_CLASS,
+  BAND_BUTTON_IDLE_CLASS,
+  BAND_GAP_CLASS,
+  BAND_ICON_BUTTON_CLASS,
+} from './bandButton'
 
 /** Electron 主窗口（非子浮窗）判定：TitleBar 仅在此环境渲染 */
 export function isDesktopMainWindow(): boolean {
@@ -26,14 +34,16 @@ export function isDesktopMainWindow(): boolean {
   )
 }
 
-/** 窗口控制按钮（Windows 惯例：方形、贴合窗口边缘） */
-const CONTROL_BUTTON_CLASS =
-  'text-muted-foreground hover:bg-accent hover:text-foreground flex w-11 shrink-0 items-center justify-center transition-colors'
-const CLOSE_BUTTON_CLASS =
-  'text-muted-foreground hover:bg-destructive hover:text-destructive-foreground flex w-11 shrink-0 items-center justify-center transition-colors'
+/** 顶带窗口控制按钮：统一款式（同高度/同尺寸/同圆角/同悬停），
+    个性化一律走主题令牌（rounded-md=var(--radius-md)、bg-accent 等主题变量），
+    组件内不写按钮级差异样式 */
+const CONTROL_BUTTON_CLASS = `${BAND_ICON_BUTTON_CLASS} ${BAND_BUTTON_IDLE_CLASS}`
 
 export function TitleBar(): ReactNode {
   const [isMaximized, setIsMaximized] = useState(false)
+  /** 顶带控制簇槽位：存在=portal 进顶带（拖拽容器子元素，自动 no-drag 洞）；
+      不存在（登录页等无顶带路由）=保持视口右上 fixed 形态 */
+  const [clusterSlot, setClusterSlot] = useState<HTMLElement | null>(null)
   // 环境门控：仅 Electron 主窗口渲染（Web / 子浮窗直接空，安全可挂任意处）
   const visible = isDesktopMainWindow()
   const controls = window.electronAPI?.windowControls
@@ -49,23 +59,27 @@ export function TitleBar(): ReactNode {
         if (mounted) setIsMaximized(maximized)
       })
       .catch((err: unknown) => {
+        // 记日志即止：最大化状态仅影响标题钮图标，下一次最大化/还原事件会纠偏
+        // （OBS-R258-1 吞错误规则登记）
         console.error('[TitleBar] 查询最大化状态失败:', err)
       })
     const unsubscribe = controls.onMaximizedChange(setIsMaximized)
+    // 顶带挂载晚于本组件（登录→主界面路由切换）：监听挂载事件后迁入槽位
+    const syncSlot = () => setClusterSlot(document.getElementById('chat-top-band-cluster'))
+    syncSlot()
+    window.addEventListener('chat-top-band-mounted', syncSlot)
     return () => {
       mounted = false
       unsubscribe()
+      window.removeEventListener('chat-top-band-mounted', syncSlot)
       document.documentElement.classList.remove('has-custom-titlebar')
     }
   }, [controls])
 
   if (!visible || !controls) return null
 
-  return (
-    <div
-      className="text-foreground fixed top-0 right-0 z-[2147483647] flex h-10 select-none items-stretch"
-      data-testid="custom-titlebar"
-    >
+  const cluster = (
+    <div className={cn('flex h-full select-none items-center', BAND_GAP_CLASS)}>
       <button
         type="button"
         aria-label="最小化"
@@ -73,7 +87,7 @@ export function TitleBar(): ReactNode {
         className={CONTROL_BUTTON_CLASS}
         onClick={() => void controls.minimize()}
       >
-        <Minus className="h-3.5 w-3.5" />
+        <Minus className={BAND_BUTTON_ICON_CLASS} />
       </button>
       <button
         type="button"
@@ -82,17 +96,37 @@ export function TitleBar(): ReactNode {
         className={CONTROL_BUTTON_CLASS}
         onClick={() => void controls.toggleMaximize()}
       >
-        {isMaximized ? <Copy className="h-3 w-3" /> : <Square className="h-3 w-3" />}
+        {isMaximized ? (
+          <Copy className={BAND_BUTTON_ICON_CLASS} />
+        ) : (
+          <Square className={BAND_BUTTON_ICON_CLASS} />
+        )}
       </button>
       <button
         type="button"
         aria-label="关闭"
         title="关闭"
-        className={CLOSE_BUTTON_CLASS}
+        className={CONTROL_BUTTON_CLASS}
         onClick={() => void controls.close()}
       >
-        <X className="h-4 w-4" />
+        <X className={BAND_BUTTON_ICON_CLASS} />
       </button>
+    </div>
+  )
+  return clusterSlot ? (
+    createPortal(
+      <div data-testid="custom-titlebar">{cluster}</div>,
+      clusterSlot,
+    )
+  ) : (
+    <div
+      className={cn(
+        'text-foreground app-no-drag fixed top-0 right-0 z-[2147483647] flex h-10 select-none items-center',
+        BAND_GAP_CLASS,
+      )}
+      data-testid="custom-titlebar"
+    >
+      {cluster}
     </div>
   )
 }
