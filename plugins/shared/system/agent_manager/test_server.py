@@ -49,7 +49,7 @@ def _load_module() -> Any:
     return mod
 
 
-@pytest.fixture()
+@pytest.fixture
 def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     """临时项目根（AGENTOS_CONFIG_ROOT=<tmp>/config）+ 常驻两个 agent。"""
     agents_main = tmp_path / "config" / "agents" / "main"

@@ -1,16 +1,20 @@
 # @feature: FP-0.2.二 内部模块统一 manifest 化 | @ci: python-coverage
-"""仓库源码区读取锚测试（ADR 2026-09-12-read-anchor-repo-source）。
+"""仓库源码区读取锚测试（ADR 2026-09-12-read-anchor-repo-source；读黑名单制
+按 ADR 2026-09-24-read-deny-write-zones 修订）。
 
-锁定契约（读 = read/search 三锚；写/删/move 维持单根；凭据黑名单恒先行）：
+锁定契约（读 = read/search 走黑名单判定链；写/删/move 走写区判定链；
+凭据黑名单恒先行）：
 1. 仓库源码区（kernel/、docs/ 等非拒绝目录）纯读允许——即便在
    workspace/project_root 注入根之外；
 2. 仓库运行时/产物目录（config/data/logs/.ai_workspaces/.git/.venv）
    读取拒绝，且拒绝原因指明目录与可读面；
-3. 写操作对仓库源码区无豁免（单根越界仍拒绝）；
+3. 写操作：空名单布局下仓库源码区仍拒绝（不在任何写区）；仓库拒绝
+   目录对写恒拒（系统自保，不随写区放行）；
 4. 凭据黑名单先于仓库锚（仓库根 .env 读取拒绝）；
 5. enhanced_search 以仓库根为起点时拒绝目录被剪枝（零命中且不报错），
    直接以拒绝目录为起点时整体拒绝；
-6. A1 回归：仓库外任意路径/``..`` 逃逸仍拒绝，自身工作区不受影响。
+6. 仓库/根外普通路径读放行（读黑名单制，区域不设限）；自身工作区
+   不受影响。
 """
 
 from __future__ import annotations
@@ -28,7 +32,11 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture()
 def fake_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """构造带 config/isolation 标记的假仓库并钉住解析缓存。"""
+    """构造带 config/isolation 标记的假仓库并钉住解析缓存。
+
+    写区名单 env 钉到空名单 tmp（ADR 2026-09-24 后写区判定消费名单，
+    不钉会读到宿主真实名单，测试对机器状态敏感）。
+    """
     root = tmp_path / "repo"
     (root / "config" / "kernel").mkdir(parents=True)
     (root / "kernel" / "src").mkdir(parents=True)
@@ -47,7 +55,13 @@ def fake_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (root / ".git" / "objects").mkdir(parents=True)
     (root / ".git" / "objects" / "x.pack").write_text("git needle", encoding="utf-8")
     (root / ".env").write_text("SECRET=1", encoding="utf-8")
+    users_dir = tmp_path / "config" / "users"
+    (users_dir / "default").mkdir(parents=True)
+    (users_dir / "default" / "project_whitelist.yaml").write_text(
+        "entries: []\n", encoding="utf-8"
+    )
     monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(root / "config"))
+    monkeypatch.setenv("AGENTOS_CONFIG_USERS_DIR", str(users_dir))
     repo_anchor.reset_cache()
     yield root
     repo_anchor.reset_cache()
@@ -84,14 +98,35 @@ class TestRepoReadAnchor:
             assert not allowed, f"{denied} 不应可读"
             assert "运行时/产物区" in reason
 
-    async def test_write_has_no_repo_exemption(self, fake_repo: Path, tmp_path: Path) -> None:
-        """写操作对仓库源码区无豁免（单根越界仍拒绝）。"""
+    async def test_write_repo_source_without_zone_still_rejected(
+        self, fake_repo: Path, tmp_path: Path
+    ) -> None:
+        """空名单布局下写仓库源码区仍拒绝（不在任何写区，ADR 2026-09-24 决策2）。"""
         ws = tmp_path / "ws"
         ws.mkdir()
         allowed, reason, _ = _check_workspace_path(
             str(fake_repo / "kernel" / "src" / "lib.py"), str(ws), None, operation="write"
         )
         assert not allowed
+        assert "超出 workspace/project_root" in reason
+
+    def test_write_self_guard_skipped_without_repo_anchor(
+        self, fake_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """仓库锚不可得：写面自保不启用，路径按无写区处理（区外拒绝文案）。"""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        monkeypatch.setattr(repo_anchor, "resolve_repo_root", lambda: None)
+
+        allowed, reason, _ = _check_workspace_path(
+            str(fake_repo / "data" / "tenant" / "secret.txt"),
+            str(ws),
+            None,
+            operation="write",
+        )
+
+        assert not allowed
+        assert "运行时/产物区" not in reason
         assert "超出 workspace/project_root" in reason
 
     async def test_credential_blacklist_precedes_repo_anchor(
@@ -112,18 +147,45 @@ class TestRepoReadAnchor:
         allowed, reason = await _read(str(own / "mine.txt"), str(own))
         assert allowed, reason
 
-    async def test_escape_outside_both_anchors_still_denied(
+    async def test_outside_both_anchors_readable_under_denylist(
         self, fake_repo: Path, tmp_path: Path
     ) -> None:
-        """A1 回归：仓库与注入根之外的路径仍拒绝（仓库锚不过度放行）。"""
+        """读黑名单制：仓库与注入根之外的普通路径读放行（ADR 2026-09-24 决策1）。"""
         ws = tmp_path / "ws"
         ws.mkdir()
         outside = tmp_path / "outside"
         outside.mkdir()
         (outside / "s.txt").write_text("x", encoding="utf-8")
         allowed, reason = await _read(str(outside / "s.txt"), str(ws))
-        assert not allowed
-        assert "超出 workspace/project_root" in reason
+        assert allowed, reason
+
+    async def test_write_repo_denied_dir_rejected_even_in_zone(
+        self, fake_repo: Path, tmp_path: Path
+    ) -> None:
+        """仓库拒绝目录对写恒拒：仓库根整个在写区名单内也不放行（系统自保优先）。
+
+        同刀正例：名单覆盖后仓库源码区写放行（写区语义，交上层按档走）。
+        """
+        import yaml
+
+        wl = tmp_path / "config" / "users" / "default" / "project_whitelist.yaml"
+        wl.write_text(yaml.safe_dump({"entries": [str(fake_repo)]}), encoding="utf-8")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+
+        denied, deny_reason, _ = _check_workspace_path(
+            str(fake_repo / "data" / "tenant" / "secret.txt"),
+            str(ws),
+            None,
+            operation="write",
+        )
+        assert not denied
+        assert "运行时/产物区" in deny_reason
+
+        allowed, reason, _ = _check_workspace_path(
+            str(fake_repo / "kernel" / "src" / "lib.py"), str(ws), None, operation="write"
+        )
+        assert allowed, reason
 
 
 class TestRepoSearchPrune:

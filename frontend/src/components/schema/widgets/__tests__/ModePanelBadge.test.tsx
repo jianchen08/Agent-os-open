@@ -10,8 +10,8 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { getModePanelIcon, getModePanelLabel, getModePanelTarget } from '@/services/schema/modePanel'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { ModePanelBadge } from '../ModePanelBadge'
 
 /** 模式插件声明种子（收集后一次性 loadFromSchema——装载幂等清空 registry） */

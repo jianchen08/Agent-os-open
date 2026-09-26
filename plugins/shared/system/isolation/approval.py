@@ -17,8 +17,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from agentos_plugin_sdk.isolation_types import IsolationLevel
 from agentos_plugin_sdk.isolation_policy import ToolIsolationPolicy
+from agentos_plugin_sdk.isolation_types import IsolationLevel
 
 if TYPE_CHECKING:
     # Tool 仅用于类型注解（ApprovalContext.tool 字段）。运行时不 import，

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """外部公开数据集适配（纯函数核心）：数据集记录 → 判定题集 case + 轨迹样本库记录。
 
 来源路线（ADR 2026-09-16-external-dataset-sourcing，调研报告 P0 复用清单）：

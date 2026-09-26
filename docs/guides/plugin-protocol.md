@@ -58,7 +58,7 @@ mode_X/                     # 出厂种子 plugins/shared/modes/ → 播种 → 
 
 ### 3.2 三层工具过滤链
 
-1. **启用档案**：`manifest.enabled` > `config/plugins/default_profile.yaml` > 默认 true；禁用插件整个不进注册表。watcher 每轮从盘上重读 profile（运行期改即生效）。
+1. **启用档案**：`manifest.enabled` > `config/kernel/default_profile.yaml` > 默认 true；禁用插件整个不进注册表。watcher 每轮从盘上重读 profile（运行期改即生效）。
 2. **能力注册**：`capabilities.tools[]` → ToolDescriptor 进 CapabilityRegistry；external MCP 工具缺 `input_schema` 拒注册（内置工具缺则 `{}` 补注册 + warn）。
 3. **tool_ids 白名单**：LLM 实际可见 = 注册表 ∩ 当前 agent `tool_ids`；解析不出 tool_ids = **空工具面**（禁止静默全量），仅框架强制工具 `spill_retrieve` 兜底注入。
 

@@ -38,6 +38,7 @@ import os
 from typing import Any
 
 import yaml
+
 from agentos_plugin_sdk import AgentOSPlugin
 from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 from agentos_plugin_sdk.capability import bind_capability_caller

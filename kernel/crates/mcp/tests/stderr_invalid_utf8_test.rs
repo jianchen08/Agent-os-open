@@ -107,7 +107,7 @@ async fn stderr_invalid_utf8_does_not_block_sidecar() {
             panic!("sidecar 被 stderr 非 UTF-8 阻塞：initialize 5s 内未返回（复现 120s 卡死根因）")
         }
         Ok(Err(e)) => {
-            panic!("initialize 快速失败（非预期）：{}", e)
+            panic!("initialize 快速失败（非预期）：{e}")
         }
         Ok(Ok(_)) => {
             // 符合预期：非 UTF-8 stderr 不应阻塞 sidecar，initialize 应正常完成

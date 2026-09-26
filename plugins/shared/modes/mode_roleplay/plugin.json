@@ -4,12 +4,12 @@
     "packaging"
   ],
   "name": "Mode Roleplay",
-  "version": "1.2.1",
+  "version": "1.4.0",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",
   "entry": "python server.py",
-  "description": "角色扮演模式出厂种子：模式元数据服务面（mode.describe / mode.get_profile）+ 工作区面板数据面（角色卡/世界书/开演记录；宿主融合——对话回归对话框、卡 theme/avatar 经 theme.apply 随卡切主题、面板主题跟宿主 token）+ 写动作（开演/重新生成经 task_submit 真派发；开演会话锚=卡专属扮演会话 thread-rp-<card_id> 由服务端派生、所选开场白随派发注入、开演记录详情回显扮演轮次——宿主活跃会话不参与归属），profile 与示例卡/世界书随包内打包",
+  "description": "角色扮演模式出厂种子：模式元数据服务面（mode.describe / mode.get_profile）+ 工作区面板数据面（角色卡/世界书/开演记录；宿主融合——对话回归对话框、卡 theme/avatar 经 theme.apply 随卡切主题、面板主题跟宿主 token）+ 写动作（重新生成经 task_submit 真派发；开演端点 possess-only——附身校验回执不派任务，fresh 开演已会话化：面板经 roleplay.continue 宿主桥建扮演会话持续对话，所选开场白/用户设定经会话执行选项快照随消息透传；开演记录详情回显扮演轮次——宿主活跃会话不参与归属）+ 卡库/世界书双根（出厂∪用户层同 id 接管；save/delete/import/export 卡管理与 ST V2/V3 导入导出；世界书 save/delete/import 与 ST World Info 导入）+ persona 档案面（roleplay_personas.json），profile 与示例卡/世界书随包内打包",
   "permissions": {},
   "priority": 45,
   "host_group": "light",
@@ -143,7 +143,107 @@
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 4,
-      "description": "世界书条目表（包内 lorebooks/*.yaml，ST World Info 子集）"
+      "description": "世界书条目表（双根合并：包内出厂 ∪ 用户层 lorebooks 同 id 接管，ST World Info 子集）"
+    },
+    {
+      "route_id": "mode_roleplay_data_personas",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/data/personas",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "persona 档案列表（用户空间 roleplay_personas.json，name 唯一键）"
+    },
+    {
+      "route_id": "mode_roleplay_card_save",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/cards/save",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：卡保存落用户层（出厂同 id 覆盖即接管语义）"
+    },
+    {
+      "route_id": "mode_roleplay_card_delete",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/cards/delete",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：删除用户层卡（出厂卡拒绝并指引复制后修改）"
+    },
+    {
+      "route_id": "mode_roleplay_card_import",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/cards/import",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：导入 ST V2/V3 角色卡（PNG/JSON）落用户层，附结构 issues 与可疑指令 warnings"
+    },
+    {
+      "route_id": "mode_roleplay_card_export",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/cards/export",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：导出卡为 ST V2 JSON 信封（base64，data URI 下载）"
+    },
+    {
+      "route_id": "mode_roleplay_lorebook_save",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/lorebooks/save",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：世界书保存落用户层（出厂同 id 覆盖即接管语义）"
+    },
+    {
+      "route_id": "mode_roleplay_lorebook_delete",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/lorebooks/delete",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：删除用户层世界书（出厂书拒绝并指引复制后修改）"
+    },
+    {
+      "route_id": "mode_roleplay_lorebook_import",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/lorebooks/import",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：导入 SillyTavern World Info JSON（entries 数字键对象/数组双形态）落用户层，附可疑指令 warnings"
+    },
+    {
+      "route_id": "mode_roleplay_persona_save",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/personas/save",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：persona 档案 upsert（name 唯一键，已存在即更新）"
+    },
+    {
+      "route_id": "mode_roleplay_persona_delete",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/personas/delete",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：删除 persona 档案（persona_id/name 同值二选一）"
     },
     {
       "route_id": "mode_roleplay_action_play",
@@ -214,5 +314,8 @@
         }
       }
     ]
+  },
+  "lifecycle": {
+    "idle_timeout_secs": 0
   }
 }

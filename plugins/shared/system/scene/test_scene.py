@@ -127,10 +127,10 @@ class TestScenePersistence:
         assert p.load_scenes() == []
 
     @pytest.mark.parametrize(
-        ("corrupt_content",),
+        "corrupt_content",
         [
-            ('{not json',),
-            ('{"scenes": {"a": ',),
+            '{not json',
+            '{"scenes": {"a": ',
         ],
         ids=["non-json-text", "truncated-json"],
     )

@@ -28,10 +28,9 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
+import user_space
 import yaml
 from pydantic import BaseModel, Field
-
-import user_space
 
 logger = logging.getLogger(__name__)
 

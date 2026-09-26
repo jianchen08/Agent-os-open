@@ -15,11 +15,39 @@
     "tools": [
       {
         "name": "http.handle",
-        "description": "HTTP endpoint handler for /ext/metrics_admin/**（metrics-admin capability 的 HTTP 面转发层）"
+        "description": "HTTP endpoint handler for /ext/metrics_admin/**（metrics-admin capability 的 HTTP 面转发层）",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "integer"
+            },
+            "body": {
+              "type": "object"
+            }
+          }
+        },
+        "render": {
+          "card": "generic"
+        }
       },
       {
         "name": "metrics_admin.status",
-        "description": "插件状态（capability 句柄是否已注入）"
+        "description": "插件状态（capability 句柄是否已注入）",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "injected": {
+              "type": "boolean"
+            }
+          }
+        },
+        "render": {
+          "card": "generic"
+        }
       }
     ],
     "route_signals": [],

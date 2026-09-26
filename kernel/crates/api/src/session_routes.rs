@@ -692,6 +692,14 @@ pub async fn list_session_messages_handler(
             // 与流式 tool_result 事件的 success 信号统一，前端刷新后可还原失败态。
             "status": rec.status.clone().unwrap_or_else(|| "completed".to_string()),
         });
+        // 执行身份戳记（assistant blob agent_id 读时提取）：消息生成时的管道
+        // 执行身份，前端气泡卡名/卡头像的数据源（扮演场景）。无戳记不写字段
+        // （缺省不污染；camelCase 对齐前端 BackendMessageResponse.agentId）。
+        if let Some(aid) = rec.agent_id.as_deref() {
+            msg.as_object_mut()
+                .expect("msg is object")
+                .insert("agentId".into(), Value::String(aid.to_string()));
+        }
         // 工具失败文本：role=tool 且 status=failed 时附带，前端据此与流式渲染保持一致。
         if let Some(err) = rec.error.as_deref() {
             if !err.is_empty() {
@@ -1619,6 +1627,7 @@ mod delete_session_tests {
             lifecycle: None,
             native: None,
             granted_capabilities: vec![],
+            restricted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],

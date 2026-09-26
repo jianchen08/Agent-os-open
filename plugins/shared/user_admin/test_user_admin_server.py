@@ -36,7 +36,7 @@ def _load_module() -> Any:
     return mod
 
 
-@pytest.fixture()
+@pytest.fixture
 def server(monkeypatch: pytest.MonkeyPatch) -> Any:
     mod = _load_module()
     monkeypatch.setattr(mod, "_call_db", _fake_call_db)

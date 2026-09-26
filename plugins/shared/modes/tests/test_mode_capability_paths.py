@@ -1,5 +1,4 @@
 # @feature: FP-0.2.二 模式体系测试补标 | @ci: python-coverage
-# -*- coding: utf-8 -*-
 """六模式包能力闭包与残留容错面补测（写动作/降级文件之外的第三面）。
 
 - on_load 惰性闭包族：_messages（limit 透传）/ _invoke / _task_list 经假能力
@@ -121,30 +120,14 @@ def test_on_load_messages_closure_limit_passthrough(mode, monkeypatch):
         ("mode_godot", "/ext/mode_godot/data/actions/dispatch", {"instruction": "放大按钮"}),
         ("mode_planning", "/ext/mode_planning/data/actions/plan", {"goal": "规划博客"}),
         ("mode_research", "/ext/mode_research/data/actions/start", {"question": "q", "depth": "quick"}),
-        ("mode_roleplay", "/ext/mode_roleplay/data/actions/play", {"card_id": "card_luna"}),
+        # play possess-only / regenerate 410 退役（2026-09-25 会话化）：mode_roleplay 零派发面
         ("mode_writing", "/ext/mode_writing/data/actions/chapter_act", {"act": "continue"}),
     ],
 )
 def test_on_load_invoke_closure_write_actions_via_capability(mode, action, body, monkeypatch):
     """写动作经 on_load 注册的 _invoke 闭包走 tool-executor 能力 → 200 任务 id。"""
     module = _fresh(mode)
-    handles = _install_capabilities(
-        monkeypatch, module, {"invoke": {"data": {"task_id": "task-cap"}}}
-    )
-    result = _call(module, action, "POST", json.dumps(body))
-    assert _status(result) == 200
-    assert _body_json(result) == {"task_id": "task-cap"}
-    methods = [m for m, _ in handles["tool-executor"].calls]
-    assert "invoke" in methods
-    invoke_payload = next(p for m, p in handles["tool-executor"].calls if m == "invoke")
-    assert invoke_payload["tool_name"] == "task_submit"
-
-
-# ── planning：tasks/discussions 路由 + projects 双口径 + 写动作错误分诊 ──────────
-
-
-def test_planning_tasks_route_via_task_list_closure(monkeypatch):
-    """/data/tasks 走 _task_list 闭包（tool-executor 调 task.list）→ 归一输出。"""
+    extra: dict = {}
     module = _fresh("mode_planning")
     handles = _install_capabilities(
         monkeypatch,
@@ -378,9 +361,14 @@ def test_writing_dispatch_error_triage():
 
 
 def test_roleplay_load_cards_robustness(tmp_path):
-    """卡目录：缺目录空集/非卡文件跳过/目录卡抛 OSError 跳过/非 dict 跳过/合法入列。"""
+    """卡目录：缺目录空集/非卡文件跳过/目录卡抛 OSError 跳过/非 dict 跳过/合法入列。
+
+    成熟化 Wave B 双根签名：第二参显式传空目录隔离用户层（缺省经 user_space
+    现场解析，环境相关——单测不依赖机器用户空间状态）。
+    """
     module = _fresh("mode_roleplay")
-    assert module._load_cards(str(tmp_path / "nope")) == []
+    no_user = str(tmp_path / "no_user")
+    assert module._load_cards(str(tmp_path / "nope"), no_user) == []
 
     agents = tmp_path / "agents"
     agents.mkdir()
@@ -391,7 +379,7 @@ def test_roleplay_load_cards_robustness(tmp_path):
         yaml.safe_dump({"name": "测试卡", "description": "描述", "personality": "温和"}),
         encoding="utf-8",
     )
-    cards = module._load_cards(str(agents))
+    cards = module._load_cards(str(agents), no_user)
     assert [c["id"] for c in cards] == ["card_ok"]
     assert cards[0]["name"] == "测试卡"
 
@@ -423,22 +411,15 @@ def test_roleplay_load_lorebooks_robustness(tmp_path):
     assert books[0]["entries"][0]["keys"] == ["月光"]
 
 
-def test_roleplay_dispatch_error_triage():
-    """roleplay 派发：通道未注入/抛错透传/缺任务 id。"""
+def test_roleplay_dispatch_retired_410():
+    """regenerate 已收编进扮演会话的宿主消息操作 → 410 语义化退役（本插件
+    零任务派发面，play possess-only）。"""
     module = _fresh("mode_roleplay")
-    body = json.dumps({"card_id": "card_luna"})
+    body = json.dumps({"pipeline_id": "p-rp1"})
+    result = _call(module, "/ext/mode_roleplay/data/actions/regenerate", "POST", body)
+    assert _status(result) == 410
+    assert "收编" in _body_json(result)["error"]
 
-    # 派发阶段错误如实回 200 载荷（args 阶段错误才 400/409 分诊）
-    result = _call(module, "/ext/mode_roleplay/data/actions/play", "POST", body)
-    assert _status(result) == 200 and "通道不可用" in _body_json(result)["error"]
-
-    module._set_provider("tool-executor", _OnceProvider(RuntimeError("executor 炸了")))
-    out = _body_json(_call(module, "/ext/mode_roleplay/data/actions/play", "POST", body))
-    assert "task_submit 调用失败" in out["error"]
-
-    module._set_provider("tool-executor", _OnceProvider({"data": {"ok": True}}))
-    out = _body_json(_call(module, "/ext/mode_roleplay/data/actions/play", "POST", body))
-    assert "未返回任务 id" in out["error"]
 
 
 # ── godot：addon HTTP 抓取矩阵 + 派发错误分诊 ────────────────────────────────────

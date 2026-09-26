@@ -204,3 +204,20 @@ async def test_project_root_template_replaced() -> None:
     if resolved is None:
         pytest.skip("本环境无法解析项目根（AGENTOS_CONFIG_ROOT 缺失且非仓库布局）")
     assert args["path"] == f"{resolved}/config"
+
+
+async def test_authorized_zones_injected_when_present() -> None:
+    """管道级授权写区（zone_grant 卡批准写 state）注入 authorized_zones。"""
+    import json
+
+    zones = json.dumps([r"d:\proj", r"e:\work"])
+    result = await _run(_state(authorized_write_zones=zones))
+    (tc,) = _calls(result)
+    assert tc["args"]["authorized_zones"] == zones
+
+
+async def test_authorized_zones_absent_not_injected() -> None:
+    """state 无授权键 → 不注入（写工具收 None，走名单判定链）。"""
+    result = await _run(_state())
+    (tc,) = _calls(result)
+    assert "authorized_zones" not in tc["args"]

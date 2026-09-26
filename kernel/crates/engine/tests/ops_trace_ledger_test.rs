@@ -96,29 +96,25 @@ fn assert_ledger_op_shape(op: &Value) {
     assert_eq!(
         op.get("op").and_then(|v| v.as_str()),
         Some("set"),
-        "实录 op 应为 set 原语：{:?}",
-        op
+        "实录 op 应为 set 原语：{op:?}"
     );
     assert!(
         op.get("seq").and_then(|v| v.as_u64()).is_some(),
-        "实录必须带稳定 seq 槽位号：{:?}",
-        op
+        "实录必须带稳定 seq 槽位号：{op:?}"
     );
     match op.get("message_id") {
         None | Some(Value::Null) => {} // delete：指纹为 null 或缺失
         Some(Value::String(s)) => assert!(
             s.starts_with("mc_"),
-            "指纹应为 mc_ 前缀的内容派生 id：{:?}",
-            s
+            "指纹应为 mc_ 前缀的内容派生 id：{s:?}"
         ),
-        Some(other) => panic!("message_id 形态异常：{}", other),
+        Some(other) => panic!("message_id 形态异常：{other}"),
     }
     let keys: Vec<&str> = op.as_object().unwrap().keys().map(|k| k.as_str()).collect();
     assert!(
         keys.iter()
             .all(|k| matches!(*k, "op" | "seq" | "at" | "message_id" | "blob_id")),
-        "实录 op 绝无 msg 全文字段（只允许 op/seq/at/message_id/blob_id 定位字段），实际字段：{:?}",
-        keys
+        "实录 op 绝无 msg 全文字段（只允许 op/seq/at/message_id/blob_id 定位字段），实际字段：{keys:?}"
     );
     // blob_id（若有）是全文 blob 定位符（裸 SHA256 hex），不是内容
     if let Some(Value::String(b)) = op.get("blob_id") {
@@ -362,13 +358,11 @@ async fn emitted_ops_leave_fingerprint_ledger_in_traces_without_fulltext() {
     for (_, raw) in all_traces(&store) {
         assert!(
             !raw.contains(USER_FULL) && !raw.contains("LEDGER_FULLTEXT_MARKER_USER"),
-            "trace 不得含消息全文（全文只在 blobs）：{}",
-            raw
+            "trace 不得含消息全文（全文只在 blobs）：{raw}"
         );
         assert!(
             !raw.contains(ASSISTANT_FULL) && !raw.contains("LEDGER_FULLTEXT_MARKER_ASSISTANT"),
-            "trace 不得含消息全文（全文只在 blobs）：{}",
-            raw
+            "trace 不得含消息全文（全文只在 blobs）：{raw}"
         );
     }
 }
@@ -399,8 +393,7 @@ async fn delete_op_ledger_records_null_fingerprint() {
         .find(|o| o["seq"].as_u64() == Some(1) && o.get("message_id").is_none_or(|v| v.is_null()));
     assert!(
         del.is_some(),
-        "delete（set seq, null）的实录 message_id 应为 null 或缺失，全部实录：{:?}",
-        ops
+        "delete（set seq, null）的实录 message_id 应为 null 或缺失，全部实录：{ops:?}"
     );
 
     // 同槽位的 set 实录仍在（带指纹）→ delete 与 set 可区分
@@ -412,8 +405,7 @@ async fn delete_op_ledger_records_null_fingerprint() {
     });
     assert!(
         set1.is_some(),
-        "槽 1 的 set 实录应带 mc_ 指纹，全部实录：{:?}",
-        ops
+        "槽 1 的 set 实录应带 mc_ 指纹，全部实录：{ops:?}"
     );
 
     // 表侧 delete 已生效：槽位 0,2（1 为 gap）
@@ -510,8 +502,7 @@ async fn step_trace_keeps_scalar_diff_besides_messages_ledger() {
     let raw = serde_json::to_string(entry).unwrap();
     assert!(
         !raw.contains("FULLTEXT_MARKER_d_用户问") && !raw.contains("FULLTEXT_MARKER_d_助手答"),
-        "实录条目不得含消息全文：{}",
-        raw
+        "实录条目不得含消息全文：{raw}"
     );
 }
 
@@ -609,8 +600,7 @@ async fn get_step_traces_by_thread_reads_back_ledger_content() {
         let raw = serde_json::to_string(&t.patch_data).unwrap();
         assert!(
             !raw.contains("FULLTEXT_MARKER_e_问") && !raw.contains("FULLTEXT_MARKER_e_答"),
-            "thread 读回的实录不得含消息全文：{}",
-            raw
+            "thread 读回的实录不得含消息全文：{raw}"
         );
     }
 }

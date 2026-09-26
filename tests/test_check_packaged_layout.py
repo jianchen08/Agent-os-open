@@ -12,6 +12,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -45,7 +46,8 @@ def make_resources(root: Path) -> Path:
     return root
 
 
-def error_codes(findings: list[C.Finding]) -> set[str]:
+def error_codes(findings: list[Any]) -> set[str]:
+    # 注：C 为动态装配的脚本模块，mypy 看不到 C.Finding 形状，标注退 Any
     return {f.code for f in findings if f.level == "error"}
 
 
@@ -152,3 +154,77 @@ def test_main_cli_exit_codes_and_json(tmp_path, capsys, monkeypatch):
     # 资源根不存在 → 退出 1
     monkeypatch.setattr(sys, "argv", ["check_packaged_layout.py", str(tmp_path / "nope")])
     assert C.main() == 1
+
+
+# ---------- 判据 6：成员依赖 ⊆ 包内共享 venv ----------
+
+
+def _add_member_with_deps(root: Path, deps: list[str]) -> Path:
+    member = root / "plugins" / "shared" / "tools" / "web_like"
+    member.mkdir(parents=True)
+    (member / "plugin.json").write_text(
+        json.dumps({"id": "web_like", "host_group": "light"}), encoding="utf-8"
+    )
+    dep_lines = "\n".join(f'    "{d}",' for d in deps)
+    (member / "pyproject.toml").write_text(
+        f"[project]\nname='web-like'\ndependencies=[\n{dep_lines}\n]\n",
+        encoding="utf-8",
+    )
+    return member
+
+
+def _add_dist(root: Path, name: str, version: str) -> None:
+    sp = root / "plugins" / "shared" / "_host" / ".venv" / "Lib" / "site-packages"
+    sp.mkdir(parents=True, exist_ok=True)
+    (sp / f"{name}-{version}.dist-info").mkdir()
+
+
+def test_member_dep_missing_from_host_venv_fails(tmp_path):
+    """成员声明 httpx 而包内 venv 未实装 → HOST_VENV_DEP_MISSING（web_operate 实证形态）。"""
+    root = make_resources(tmp_path / "res")
+    _add_member_with_deps(root, ["httpx", "trafilatura>=1.8"])
+    _add_dist(root, "pip", "24.0")  # site-packages 层在位，仅缺成员依赖
+    codes = error_codes(C.check_resources(root))
+    assert "HOST_VENV_DEP_MISSING" in codes
+
+
+def test_member_dep_installed_passes(tmp_path):
+    root = make_resources(tmp_path / "res")
+    _add_member_with_deps(root, ["httpx"])
+    _add_dist(root, "httpx", "0.28.1")
+    assert not error_codes(C.check_resources(root))
+
+
+def test_sdk_editable_dep_exempt(tmp_path):
+    """SDK 是 editable 本地源（无 dist-info），不得误报。"""
+    root = make_resources(tmp_path / "res")
+    _add_member_with_deps(root, ["agentos-plugin-sdk>=0.2.0"])
+    _add_dist(root, "pip", "24.0")
+    assert not error_codes(C.check_resources(root))
+
+
+def test_dep_name_normalized(tmp_path):
+    """归一比对：dist-info 用 PEP503 异形名（Pillow/Flask_Style）也须命中。"""
+    root = make_resources(tmp_path / "res")
+    _add_member_with_deps(root, ["Pillow"])
+    _add_dist(root, "pip", "24.0")
+    _add_dist(root, "pillow", "11.0.0")
+    assert not error_codes(C.check_resources(root))
+
+
+def test_independent_plugin_deps_not_checked(tmp_path):
+    """independent 插件自带 venv，其依赖不进共享闭包比对。"""
+    root = make_resources(tmp_path / "res")
+    indep = root / "plugins" / "shared" / "system" / "heavy_plugin"
+    (indep / "pyproject.toml").write_text(
+        "[project]\nname='heavy'\ndependencies=['torch']\n", encoding="utf-8"
+    )
+    assert not error_codes(C.check_resources(root))
+
+
+def test_site_packages_missing_fails(tmp_path):
+    """解释器在位但 site-packages 整层缺失 = 破损 venv，独立报错。"""
+    root = make_resources(tmp_path / "res")
+    _add_member_with_deps(root, ["httpx"])
+    codes = error_codes(C.check_resources(root))
+    assert "HOST_VENV_SITE_PKG_MISSING" in codes

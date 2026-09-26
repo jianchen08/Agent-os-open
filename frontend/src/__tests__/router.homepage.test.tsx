@@ -111,15 +111,16 @@ vi.mock('@/components/layout/ChatPanelShell', () => ({
   },
 }))
 
+import { updateSessionsCache } from '../hooks/queries/useSessionsQuery'
 import { createRouter } from '../router'
+import { saveSessionExecutionOptions } from '../services/sessionExecutionOptions'
 import { useAgentTabStore } from '../stores/agentTabStore'
 import { useAuthStore } from '../stores/authStore'
 import { useInteractionStore, type PendingInteraction } from '../stores/interactionStore'
 import { useNotificationStore } from '../stores/notificationStore'
 import { usePendingInputStore } from '../stores/pendingInputStore'
 import { usePipelineMessageStore } from '../stores/pipelineMessageStore'
-import { updateSessionsCache } from '../hooks/queries/useSessionsQuery'
-import { saveSessionExecutionOptions } from '../services/sessionExecutionOptions'
+import { useRoleplayPossessStore } from '../stores/roleplayPossessStore'
 import { useSessionListStore } from '../stores/sessionListStore'
 import { useSessionStore } from '../stores/sessionStore'
 import { useUIStore } from '../stores/uiStore'
@@ -207,6 +208,8 @@ beforeEach(() => {
   useUIStore.setState(initial.ui, true)
   useAuthStore.setState(initial.auth, true)
   useNotificationStore.setState(initial.notification, true)
+  // 附身态是模块级持久 store（persist localStorage）：显式归零防用例间串档
+  useRoleplayPossessStore.setState({ possessed: null })
   updateSessionsCache(() => [])
   mockApiGet.mockResolvedValue({ data: { items: [], threads: [], children: [], tree: [], tasks: [] } })
 })
@@ -466,6 +469,114 @@ describe('handleSendMessage', () => {
     expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toEqual({
       mode: 'writing',
     })
+  })
+
+  // 附身注入走消息级 execution_context（withRoleplayPersona，2026-09-25 审计裁定）：
+  // 附身期间注入卡人设 roleplay_persona + 强制 mode=roleplay（附身即激活模式物料）；
+  // 主 agent 身份不变——帧无 agentId（内核 WS 聊天入口不读该键，反向锁定防回归）。
+  it('附身期间：executionContext 并入 roleplay_persona+mode=roleplay，帧无 agentId', async () => {
+    useRoleplayPossessStore.setState({
+      possessed: {
+        card_id: 'card_luna', name: '月见', avatar: '🌙',
+        personaText: '银发碧眼的月精灵法师，月光神殿的最后一位守望者。',
+      },
+    })
+    await renderHomeWithSession()
+    await sendAndCapture({ content: '附身发言', pipelineId: 'p1' })
+    expect(mockWs.sendUserInput).toHaveBeenCalledTimes(1)
+    const [, , opts] = mockWs.sendUserInput.mock.calls[0]
+    expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toEqual({
+      roleplay_persona: '银发碧眼的月精灵法师，月光神殿的最后一位守望者。',
+      mode: 'roleplay',
+    })
+    expect((opts as { agentId?: string }).agentId).toBeUndefined()
+  })
+
+  it('附身期间叠加会话执行选项快照：附身键并入快照键，帧无 agentId', async () => {
+    saveSessionExecutionOptions('s1', {
+      values: {},
+      executionContext: { workspace: { source_path: '/w' } },
+    })
+    useRoleplayPossessStore.setState({
+      possessed: { card_id: 'card_rin', name: '凛', avatar: '🎭', personaText: '北地佣兵，沉默寡言。' },
+    })
+    await renderHomeWithSession()
+    await sendAndCapture({ content: '附身发言', pipelineId: 'p1' })
+    const [, , opts] = mockWs.sendUserInput.mock.calls[0]
+    expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toEqual({
+      workspace: { source_path: '/w' },
+      roleplay_persona: '北地佣兵，沉默寡言。',
+      mode: 'roleplay',
+    })
+    expect((opts as { agentId?: string }).agentId).toBeUndefined()
+  })
+
+  it('busy 分支：附身键同样透传且帧无 agentId', async () => {
+    useRoleplayPossessStore.setState({
+      possessed: { card_id: 'card_rin', name: '凛', avatar: '🎭', personaText: '北地佣兵，沉默寡言。' },
+    })
+    await renderHomeWithSession()
+    usePipelineMessageStore.setState((s) => ({
+      streamingState: { ...s.streamingState, p1: { isStreaming: true, messageId: 'm-st' } },
+    }))
+    await sendAndCapture({ content: '排队附身', pipelineId: 'p1' })
+    expect(mockWs.sendUserInput).toHaveBeenCalledTimes(1)
+    const [, , opts] = mockWs.sendUserInput.mock.calls[0]
+    expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toEqual({
+      roleplay_persona: '北地佣兵，沉默寡言。',
+      mode: 'roleplay',
+    })
+    expect((opts as { agentId?: string }).agentId).toBeUndefined()
+  })
+
+  it('未附身：发送不带 agentId 也不带附身键', async () => {
+    await renderHomeWithSession()
+    await sendAndCapture({ content: '普通发言', pipelineId: 'p1' })
+    expect(mockWs.sendUserInput).toHaveBeenCalledTimes(1)
+    const [, , opts] = mockWs.sendUserInput.mock.calls[0]
+    expect((opts as { agentId?: string }).agentId).toBeUndefined()
+    expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toBeUndefined()
+  })
+
+  // 扮演会话绑定链（roleplay.continue 桥 → 会话执行选项 agentId）：帧带 agentId
+  // （内核透传管道 state agent.id，卡 yaml 窄工具面生效）+ context 并入
+  // mode=roleplay；会话化开演档键（快照 roleplayGreeting/roleplayUserPersona）
+  // 随绑定逐消息并入 execution_context.roleplay_greeting/roleplay_user_persona
+  // （2026-09-25 会话化开演，material.py 据此组开场注入段）。
+  it('扮演会话绑定：帧带 agentId，context 并入 mode=roleplay', async () => {
+    saveSessionExecutionOptions('s1', {
+      values: {},
+      agentId: 'mode_roleplay/card_luna',
+      agentName: '月见',
+    })
+    await renderHomeWithSession()
+    await sendAndCapture({ content: '（开始）', pipelineId: 'p1' })
+    expect(mockWs.sendUserInput).toHaveBeenCalledTimes(1)
+    const [, , opts] = mockWs.sendUserInput.mock.calls[0]
+    expect((opts as { agentId?: string }).agentId).toBe('mode_roleplay/card_luna')
+    expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toEqual({
+      mode: 'roleplay',
+    })
+  })
+
+  it('扮演会话开演档：快照开场白/用户设定并入消息 execution_context', async () => {
+    saveSessionExecutionOptions('s1', {
+      values: {},
+      agentId: 'mode_roleplay/card_luna',
+      agentName: '月见',
+      roleplayGreeting: '「欢迎光临！」',
+      roleplayUserPersona: '北地来的佣兵。',
+    })
+    await renderHomeWithSession()
+    await sendAndCapture({ content: '继续演出', pipelineId: 'p1' })
+    expect(mockWs.sendUserInput).toHaveBeenCalledTimes(1)
+    const [, , opts] = mockWs.sendUserInput.mock.calls[0]
+    expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toEqual({
+      mode: 'roleplay',
+      roleplay_greeting: '「欢迎光临！」',
+      roleplay_user_persona: '北地来的佣兵。',
+    })
+    expect((opts as { agentId?: string }).agentId).toBe('mode_roleplay/card_luna')
   })
 })
 

@@ -42,7 +42,7 @@ def _load_server_module(monkeypatch: pytest.MonkeyPatch, project_root: Path) -> 
     return mod
 
 
-@pytest.fixture()
+@pytest.fixture
 def metrics_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """带汇总 yaml 的项目根。"""
     cfg = tmp_path / "config" / "plugins" / "evaluation"

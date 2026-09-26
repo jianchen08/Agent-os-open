@@ -4,7 +4,7 @@
 
 不写任何 Python/Rust，用 manifest 直连现成 MCP 服务。约定：`language: "external"`、`entry: "mcp:external"`、`host_type: "sidecar"`（不 spawn 自带进程）。
 
-## 1. HTTP 远程形态（参考 `plugins/shared/tools/external_mcp/mcp_registry/plugin.json`）
+## 1. HTTP 远程形态（参考 external_mcp 五子插件（目录形态见 plugins/shared/mcp_servers/））
 
 ```jsonc
 {
@@ -33,7 +33,7 @@
 }
 ```
 
-## 2. 本地命令形态（参考 `plugins/shared/tools/external_mcp/omnisearch/plugin.json`）
+## 2. 本地命令形态（参考 同上）
 
 `"transport": "stdio"` + `endpoint.command/args/env`——内核 spawn 第三方命令（如 `node server.js` 或某 venv 的 python），env 可声明 `PYTHONUTF8: "1"` 等；`${VAR}` 与 `${VAR:-默认值}` 占位在构造时解析。
 

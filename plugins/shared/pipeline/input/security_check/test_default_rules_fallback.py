@@ -87,24 +87,31 @@ class TestDefaultRulesFallback:
         assert updates.get("raw_tool_calls") == []
 
     @pytest.mark.asyncio
-    async def test_benign_commands_not_blocked_by_defaults(self) -> None:
-        """回退默认规则不等于全员审批：未命中关键词的普通命令照常放行。"""
+    async def test_benign_commands_get_conservative_approval_when_degraded(self) -> None:
+        """D7 裁定（2026-09-24）：降级态保守审批——未命中关键词的普通命令
+        不再静默放行，走 needs_approval（人审把关；测试环境交互通道缺席 →
+        软拦截 + approval_channel_missing 标记）。
+
+        取代的旧契约（"普通命令照常放行"）被 D7 推翻：规则库失明时无法
+        确认参数安全，放行 = 闸门失明继续开车；人审是各档位自身语义。
+        """
         plugin = SecurityCheckPlugin(
             config={"enabled": True, "security_rules": {"mode": "blacklist"}}
         )
+        assert plugin._rules_degraded is True
 
         for benign in ("ls -la /tmp/demo-dir", "echo ok-from-benign-probe"):
             r = await plugin.execute(_ctx_for(benign))
             updates = r.state_updates
             decision = updates.get("security.decision", {})
-            assert decision.get("allowed") is True
-            assert "soft_block" not in decision.get("reason", ""), (
-                f"普通命令不应被默认规则拦截: {benign!r} → {decision.get('reason')!r}"
+            assert decision.get("allowed") is True  # 软拦截语义：管道继续
+            # D7 保守审批路径：人审尝试发生（测试环境交互通道缺席 →
+            # soft_block + approval_channel_missing 标记，见 _await_approval）
+            assert decision.get("approval_channel_missing") is True, (
+                f"降级态普通命令应走保守审批（D7），实际 {decision!r}"
             )
-            # 放行路径不产生任何拒绝副作用（不写 tool_results、不清空工具调用）
-            assert not any("tool" in k and k != "security.decision" for k in updates), (
-                f"普通命令放行不应产生工具结果/状态改写: {benign!r} → keys={sorted(updates)}"
-            )
+            # 审批副作用生效：拒绝/待审反馈给 LLM（raw_tool_calls 清空）
+            assert updates.get("raw_tool_calls") == []
 
 
 class TestRulesDegradedNotice:

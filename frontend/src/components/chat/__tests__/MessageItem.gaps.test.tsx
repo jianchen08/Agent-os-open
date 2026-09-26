@@ -11,20 +11,16 @@
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { MessageItem } from '../MessageItem'
+import { openAttachment } from '@/services/attachmentOpener'
+import { reportError } from '@/services/errorReporting'
 import { useThemeStore } from '@/stores/themeStore'
 import { renderWithProviders } from '@/test/renderWithProviders'
+import { MessageItem } from '../MessageItem'
 import type { Message } from '@/types/models'
 
-vi.mock('@/components/chat/LobeChatMarkdown', () => ({
-  LobeChatMarkdown: ({ content }: { content: string }) => (
-    <div data-testid="user-markdown">{content}</div>
-  ),
-}))
+vi.mock('@/components/chat/LobeChatMarkdown', async () => (await import('./helpers/messageItemMocks')).lobeMarkdownStubMock())
 
-vi.mock('@/stores/sessionStore', () => ({
-  useSessionStore: () => ({ activeSessionId: 'session-1' }),
-}))
+vi.mock('@/stores/sessionStore', async () => (await import('./helpers/messageItemMocks')).sessionStoreActiveMock())
 vi.mock('@/stores/interactionStore', () => ({
   useInteractionStore: (sel: (s: { pendingInteractions: unknown[] }) => unknown) =>
     sel({ pendingInteractions: [] }),
@@ -32,11 +28,8 @@ vi.mock('@/stores/interactionStore', () => ({
 vi.mock('@/hooks/queries/useAgentsQuery', () => ({
   useAgentsQuery: () => ({ data: [] }),
 }))
-vi.mock('@/services/errorReporting', () => ({
-  ErrorType: { CLIENT: 'client' },
-  reportError: vi.fn(),
-}))
-vi.mock('@/services/attachmentOpener', () => ({ openAttachment: vi.fn() }))
+vi.mock('@/services/errorReporting', async () => (await import('./helpers/messageItemMocks')).errorReportingMock())
+vi.mock('@/services/attachmentOpener', async () => (await import('./helpers/messageItemMocks')).attachmentOpenerMock())
 vi.mock('@/components/media/ImageGallery', () => ({
   ImageGallery: ({ images }: { images: { id: string; title: string }[] }) => (
     <div data-testid="gallery">{images.map((i) => <span key={i.id}>{i.title}</span>)}</div>
@@ -65,8 +58,6 @@ vi.mock('@/components/chat/hooks/useMessageRender', () => ({
   }),
 }))
 
-import { openAttachment } from '@/services/attachmentOpener'
-import { reportError } from '@/services/errorReporting'
 
 function makeMessage(partial: Partial<Message>): Message {
   return {

@@ -18,11 +18,14 @@ State 命名空间：
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import re
+import shlex
 import urllib.parse
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 from service import (
@@ -88,10 +91,12 @@ def set_frontend_emit(fn: FrontendEmitFn | None) -> None:
     """
     global _frontend_emit  # noqa: PLW0603
     _frontend_emit = fn
+import zone_policy
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import StateKeys
-from agentos_plugin_sdk.isolation_policy import IsolationPolicyLoader
 from sensitive_paths import is_sensitive_path
+
+from agentos_plugin_sdk.isolation_policy import IsolationPolicyLoader
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +151,22 @@ _READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "resource_evaluator",
     "compatibility_checker",
 })
+
+# 位置闸参数操作表（ADR 2026-09-24-read-deny-write-zones 修订：位置轴管道层
+# 统一执法）：工具 → {路径参数名: 操作类}。操作类 "read" 走读黑名单链，其余
+# （write/delete/move）走写区链。config ``path_param_operations`` 可覆盖/扩充。
+# bash 命令串中的路径非结构化参数，不进本表——维持命令规则轨道（S4 归一化），
+# 边界见 ADR 修订节。
+_DEFAULT_PATH_PARAM_OPERATIONS: dict[str, dict[str, str]] = {
+    "file_read": {"path": "read"},
+    "list_directory": {"path": "read"},
+    "enhanced_search": {"path": "read"},
+    "file_write": {"path": "write"},
+    "create_directory": {"path": "write"},
+    "delete_file": {"path": "delete", "paths": "delete"},
+    "move_file": {"source": "move", "destination": "write"},
+    "copy_file": {"source": "read", "destination": "write"},
+}
 
 
 def _load_permission_modes() -> None:
@@ -250,16 +271,29 @@ class SecurityCheckPlugin(IInputPlugin):
         self._enabled = self._config.get("enabled", True)
         self._max_path_depth = self._config.get("max_path_depth", 10)
         self._fuzzy_tool_matching = self._config.get("fuzzy_tool_matching", False)
+        self._path_param_operations: dict[str, dict[str, str]] = {
+            **_DEFAULT_PATH_PARAM_OPERATIONS,
+            **(self._config.get("path_param_operations") or {}),
+        }
         self._path_params = self._config.get(
             "path_params",
             [
                 "path",
                 "file_path",
+                "filepath",
+                "file",
+                "filename",
+                "paths",
+                "file_paths",
                 "directory",
+                "dir",
+                "cwd",
+                "destination",
                 "dest",
                 "target",
                 "output_path",
                 "working_dir",
+                "workdir",
             ],
         )
         # 命令参数名列表：基础检查里用于 CMD 风格 nul 重定向检测
@@ -458,7 +492,16 @@ class SecurityCheckPlugin(IInputPlugin):
         if blocked is not None:
             return blocked
 
-        # ── 第二道：按模式分流 ──
+        # ── 第二道：位置闸（ADR 2026-09-24-read-deny-write-zones 修订）──
+        # 位置轴管道层统一执法：读黑名单链/写区链对所有档位一致执法（含旁路
+        # 档——bypass 免审批摩擦，不免区域授权）。写区外触发授权卡，批准的
+        # 授权经 zone_updates 落 state（本管道有效）或名单文件（永久）。
+        zone_updates: dict[str, Any] = {}
+        zone_blocked = await self._enforce_zone_policy(ctx, tool_calls, zone_updates)
+        if zone_blocked is not None:
+            return {**zone_blocked, **zone_updates}
+
+        # ── 第三道：按模式分流 ──
 
         # 权限档单点解析：隔离/worktree 未显式选择 → 生效档即旁路（免审批默认，
         # 隔离容器即安全边界）；显式选旁路同档。命中旁路 → 基础检查通过即整体
@@ -468,13 +511,16 @@ class SecurityCheckPlugin(IInputPlugin):
         mode = self._resolve_permission_mode(ctx, isolated=isolated)
         if mode == "bypass":
             logger.info("[%s] 旁路档免审批放行（隔离默认或显式选择），基础检查已通过", self.name)
-            return {"security.decision": {"allowed": True, "reason": "bypass: base checks passed"}}
+            return {
+                "security.decision": {"allowed": True, "reason": "bypass: base checks passed"},
+                **zone_updates,
+            }
 
         decision = await self._authorize_tool_calls(ctx, tool_calls, isolated=isolated, mode=mode)
         if decision is not None:
-            return decision
+            return {**decision, **zone_updates}
 
-        return {"security.decision": {"allowed": True, "reason": "all checks passed"}}
+        return {"security.decision": {"allowed": True, "reason": "all checks passed"}, **zone_updates}
 
     def _run_base_safety_scan(
         self,
@@ -530,6 +576,222 @@ class SecurityCheckPlugin(IInputPlugin):
                     tool_name,
                     f"CMD 风格重定向被拦截: {nul_reason}（Git Bash 下请用 2>/dev/null）",
                 )
+        return None
+
+    async def _enforce_zone_policy(
+        self,
+        ctx: PluginContext,
+        tool_calls: list[dict[str, Any]],
+        zone_updates: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """第二道：位置闸（ADR 2026-09-24-read-deny-write-zones 修订）。
+
+        对声明在 ``path_param_operations`` 里的工具路径参数统一执法（判定单源
+        zone_policy）：读走黑名单链（仓库拒绝集 + read_deny），写走写区链
+        （根锚 ∪ 名单 entries ∪ 管道级授权；仓库自保目录恒拒）。所有档位一致
+        执法——含旁路档（bypass 免审批摩擦，不免区域授权），故本阶段位于
+        模式分流之前。写区外 → 弹授权卡（两选项：仅本管道 / 永久写入配置），
+        批准的授权经 ``zone_updates`` 落 state（管道级）或名单文件（永久），
+        并就地补写当前调用的 args（param_inject 注入发生在本阶段之前，工具层
+        兜底校验靠它看到本次新授权）。
+
+        Returns:
+            违规（拒绝/授权未批）时的软拦截决策字典；全部放行返回 None。
+        """
+        workspace = ctx.state.get("workspace", "") or None
+        project_root = ctx.state.get("project_root", "") or None
+        session_zones = zone_policy.load_session_zones(ctx.state)
+        for tc in tool_calls:
+            tool_name = tc.get("name", "")
+            param_ops = self._path_param_operations.get(tool_name)
+            if not param_ops:
+                continue
+            args = tc.get("args", {})
+            for param, op in param_ops.items():
+                raw_value = args.get(param)
+                if not raw_value:
+                    continue
+                values = raw_value if isinstance(raw_value, list) else [raw_value]
+                for value in values:
+                    if not isinstance(value, str) or not value.strip():
+                        continue
+                    blocked = await self._enforce_single_path(
+                        ctx,
+                        tool_name=tool_name,
+                        args=args,
+                        value=value,
+                        op=op,
+                        workspace=workspace,
+                        project_root=project_root,
+                        session_zones=session_zones,
+                        zone_updates=zone_updates,
+                    )
+                    if blocked is not None:
+                        return blocked
+        return None
+
+    async def _enforce_single_path(
+        self,
+        ctx: PluginContext,
+        *,
+        tool_name: str,
+        args: dict[str, Any],
+        value: str,
+        op: str,
+        workspace: str | None,
+        project_root: str | None,
+        session_zones: list[str],
+        zone_updates: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """单条路径的位置闸判定（操作类 read 走读链，其余走写区链）。"""
+        try:
+            resolved = zone_policy.resolve_anchored(value, workspace, project_root)
+        except ValueError:
+            # 无锚（workspace/project_root 均未注入）：位置闸无从判定，交由
+            # 工具层 fail-closed 兜底（fs_tools 相对路径拒绝）——不在此软拦截。
+            return None
+
+        if op == "read":
+            allow, reason = zone_policy.read_verdict(resolved)
+            if not allow:
+                logger.warning(
+                    "[%s] 位置闸拒绝读取 | tool=%s | path=%s | reason=%s",
+                    self.name, tool_name, resolved, reason,
+                )
+                return self._soft_block(ctx, tool_name, reason or "读取被位置闸拒绝")
+            return None
+
+        # 根锚内（任务自己的工作区/项目根）先于一切放行——锚内不套自保拒绝，
+        # 与工具层兜底校验同序（fs_tools._check_workspace_path 根锚先行）。
+        if zone_policy.within_root_anchors(resolved, workspace, project_root):
+            return None
+        allow, reason = zone_policy.write_verdict(resolved, session_zones)
+        if allow:
+            return None
+        if reason is not None:
+            # 仓库自保目录等硬拒绝：不可授权，直接拦
+            logger.warning(
+                "[%s] 位置闸拒绝写入（系统自保） | tool=%s | path=%s | reason=%s",
+                self.name, tool_name, resolved, reason,
+            )
+            return self._soft_block(ctx, tool_name, reason)
+        # 写区外：弹授权卡（两选项），批准的授权落 state/名单后放行本次
+        return await self._authorize_zone_grant(
+            ctx, tool_name=tool_name, args=args, resolved=resolved,
+            session_zones=session_zones, zone_updates=zone_updates,
+        )
+
+    async def _authorize_zone_grant(
+        self,
+        ctx: PluginContext,
+        *,
+        tool_name: str,
+        args: dict[str, Any],
+        resolved: Path,
+        session_zones: list[str],
+        zone_updates: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """写区外授权卡：两选项（仅本管道 / 永久写入配置），批准即放行本次。
+
+        卡面经 human-interaction（与审批卡同通道）；批准与落盘都在本插件内
+        完成，LLM 无法伪造授权。仅本管道 = 授权写 state 键
+        ``task.authorized_write_zones``（管道终态随 state 回收，不向子管道
+        传播）；永久 = project_registry.add_write_zone（locked 写面唯一系统
+        通道）。拒绝/超时/取消 → 软拦截。
+        """
+        grant_dir = zone_policy.grant_dir_of(resolved)
+        hi_cap = _get_human_interaction_cap()
+        if hi_cap is None:
+            logger.warning(
+                "[%s] human-interaction capability not injected; zone grant soft-block",
+                self.name,
+            )
+            return self._soft_block(
+                ctx,
+                tool_name,
+                f"路径 {grant_dir} 不在写区内，且交互服务不可用无法发起授权",
+            )
+
+        session_id = ctx.state.get(StateKeys.SESSION_ID, "")
+        try:
+            create_res = await hi_cap.call("create_choice", {
+                "session_id": session_id,
+                "thread_id": session_id,
+                "tab_id": "",
+                "title": f"授权写入 {grant_dir}",
+                "description": (
+                    f"工具 {tool_name} 要写的路径在写区外。批准后写操作按会话"
+                    "权限档执行；拒绝则本次申请作废。"
+                ),
+                "options": [
+                    {"id": "pipeline", "label": "仅本管道"},
+                    {"id": "permanent", "label": "永久写入配置"},
+                ],
+                "priority": "high",
+                "user_id": ctx.state.get("user_id", ""),
+            })
+            if not isinstance(create_res, dict) or create_res.get("error"):
+                raise RuntimeError(f"create_choice failed: {create_res}")
+            request_id = create_res.get("request_id", "-")
+            wait_res = await hi_cap.call(
+                "wait_for_choice",
+                {"request_id": request_id, "timeout": 86400},
+                timeout=86500.0,
+            )
+            if not isinstance(wait_res, dict):
+                raise RuntimeError(f"wait_for_choice returned non-dict: {wait_res}")
+            if wait_res.get("error"):
+                raise RuntimeError(str(wait_res["error"]))
+            selected = str(wait_res.get("selected_option", "") or "")
+        except Exception as e:  # noqa: BLE001 — 拒绝/超时/取消/通道故障统一软拦截
+            logger.warning(
+                "[%s] 写区授权未批准 | tool=%s | dir=%s | err=%s",
+                self.name, tool_name, grant_dir, e,
+            )
+            return self._soft_block(
+                ctx,
+                tool_name,
+                f"写区授权未批准（拒绝/超时/取消）：路径 {grant_dir} 不在写区内，写入被拒绝",
+            )
+
+        if selected not in ("pipeline", "permanent"):
+            logger.warning(
+                "[%s] 写区授权未知选项（按拒绝） | tool=%s | selected=%s",
+                self.name, tool_name, selected,
+            )
+            return self._soft_block(ctx, tool_name, f"写区授权未批准：路径 {grant_dir} 不在写区内")
+
+        if selected == "pipeline":
+            pipeline_id = ctx.state.get("pipeline_id", "")
+            if not pipeline_id:
+                return self._soft_block(
+                    ctx, tool_name,
+                    f"无法定位管道，「仅本管道」授权不可用；可重新发起并选择永久授权：{grant_dir}",
+                )
+            merged = session_zones if grant_dir in session_zones else [*session_zones, grant_dir]
+            updates_json = json.dumps(merged)
+            # state 落盘（后续工具调用经 param_inject/本闸读到）+ 当前调用参数
+            # 就地补授权（param_inject 注入先于本阶段，工具层兜底校验靠它）。
+            zone_updates[zone_policy.STATE_KEY] = updates_json
+            ctx.state[zone_policy.STATE_KEY] = updates_json
+            args["authorized_zones"] = updates_json
+            logger.info(
+                "[%s] 管道级写区授权生效 | pipeline=%s | dir=%s",
+                self.name, pipeline_id, grant_dir,
+            )
+            return None
+
+        # 永久授权：locked 写面唯一系统通道（名单文件即时生效，工具层兜底
+        # 校验每次调用重读名单，无需补参数）
+        try:
+            from project_registry import add_write_zone  # noqa: PLC0415 — 共享根惰性导入
+            add_write_zone(grant_dir)
+        except ValueError as exc:
+            return self._soft_block(ctx, tool_name, str(exc))
+        except Exception as e:  # noqa: BLE001 — 名单模块不可用等降级可见
+            logger.error("[%s] 永久授权落盘失败 | dir=%s | err=%s", self.name, grant_dir, e)
+            return self._soft_block(ctx, tool_name, f"永久授权落盘失败: {e}")
+        logger.info("[%s] 永久写区授权落盘 | dir=%s", self.name, grant_dir)
         return None
 
     async def _authorize_tool_calls(
@@ -590,6 +852,17 @@ class SecurityCheckPlugin(IInputPlugin):
                     tool_name,
                 )
                 continue
+
+            # S2/D7 裁定（2026-09-24，用户授权自定）：降级态保守审批——规则库
+            # 失明时无法确认参数安全，回落各档位自身语义（危险操作交人审）。
+            # 这不是新发明：_dispatch_by_permission_mode 的 docstring 自述
+            # 「规则缺失→兜底弹审批（安全优先）」，本分支是该自述的落地。
+            # allow 白名单与已记忆指纹先于本判定放行（降级不吞既有豁免）；
+            # bypass 显式档不进本方法（用户主权保持）；降级横幅
+            # （security_rules_degraded 事件）向用户解释弹卡原因。
+            if self._rules_degraded:
+                action = "needs_approval"
+                rule_name = "rules_degraded_conservative"
 
             mode_decision = await self._dispatch_by_permission_mode(
                 ctx,
@@ -1281,8 +1554,12 @@ class SecurityCheckPlugin(IInputPlugin):
 
                     matched = False
                     if pat_type == "keyword":
-                        # 关键词子串匹配，大小写不敏感
-                        if pat_value.lower() in value_str.lower():
+                        # S4 安全整改（评估 2026-09-24 / 执行方案批次 1）：argv
+                        # 归一化匹配——裸子串匹配可被空白变体绕过（"rm  -rf"
+                        # 双空格不含单空格子串 "rm -rf"）。归一化 = shlex 分词
+                        # （解析失败的退化输入回退按任意空白切分）后单空格
+                        # 重join + 大小写折叠，语义保持（只吃空白/大小写差异）。
+                        if self._keyword_in(pat_value, value_str):
                             matched = True
                     elif pat_type == "regex":
                         # 正则匹配
@@ -1311,6 +1588,26 @@ class SecurityCheckPlugin(IInputPlugin):
         if best_allow[0] and allow_priority >= reject_priority:
             return best_allow
         return first_reject
+
+    def _keyword_in(self, pattern: str, value: str) -> bool:
+        """argv 归一化关键词命中判定（S4）。
+
+        归一化：shlex.split 分词（posix=False 保留 Windows 反斜杠；解析失败
+        回退按任意空白切分）→ 单空格重 join → casefold。只消除空白与大小写
+        差异，不改变 token 语义；未命中时再比对裸 casefold 子串（覆盖模式串
+        含引号等 shlex 会剥离的字符的场景，取并集 = fail-closed 方向）。
+        """
+        def _norm(text: str) -> str:
+            try:
+                tokens = shlex.split(text, posix=False)
+            except ValueError:
+                tokens = text.split()
+            return " ".join(tokens).casefold()
+
+        norm_pat = _norm(pattern)
+        if norm_pat and norm_pat in _norm(value):
+            return True
+        return pattern.casefold() in value.casefold()
 
     def _rule_priority(self, rule: dict[str, Any]) -> int:
         """规则优先级（缺省 0）。非法值告警并按 0 处理，与非法正则同防御。"""

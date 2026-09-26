@@ -43,8 +43,8 @@ vi.mock('@/services/websocket/GlobalWebSocket', () => ({
   globalWS: { subscribe: wsSubscribe, unsubscribe: wsUnsubscribe },
 }))
 
-import { useBudgetStatus, useCostControl } from '../useCostControl'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
+import { useBudgetStatus, useCostControl } from '../useCostControl'
 import type {
   BudgetStatusResponse,
   CostConfigResponse,

@@ -5,9 +5,9 @@
  * 不 mock pipelineStore，验证消息在 store 中的完整生命周期
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { resetPipelineStoreState } from './helpers/storeTestMocks'
 import type * as handlersMod from '@/services/websocket/streaming/handlers'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
-import { resetPipelineStoreState } from './helpers/storeTestMocks'
 
 vi.mock('@/utils/logger', async () => (await import('./helpers/storeTestMocks')).loggerMockFull())
 

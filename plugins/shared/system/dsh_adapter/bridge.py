@@ -179,7 +179,7 @@ class DshRuntimeBridge:
                 self._proc.kill()
                 try:
                     await asyncio.wait_for(self._proc.wait(), timeout=5)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
             self._proc = None
 

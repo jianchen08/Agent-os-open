@@ -101,8 +101,7 @@ async fn stderr_does_not_block_sidecar() {
     let progressed = second != first;
     assert!(
         progressed,
-        "sidecar 被 stderr 阻塞了：keepalive 未推进 first={:?} second={:?}",
-        first, second
+        "sidecar 被 stderr 阻塞了：keepalive 未推进 first={first:?} second={second:?}"
     );
 
     // 进程未被 stderr 阻塞挂死即可（脚本自然退出也接受），随后正常 kill。

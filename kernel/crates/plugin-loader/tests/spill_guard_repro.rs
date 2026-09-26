@@ -47,10 +47,7 @@ fn tool_round_tokio_blocking_no_segfault() {
         .filter(|p| !std::path::Path::new(p).exists())
         .collect::<Vec<_>>();
     if !missing.is_empty() {
-        eprintln!(
-            "skip: 取证资产缺失 {:?}（SEGV repro 需完整取证期本机资产）",
-            missing
-        );
+        eprintln!("skip: 取证资产缺失 {missing:?}（SEGV repro 需完整取证期本机资产）");
         return;
     }
     let loader = Arc::new(NativePluginLoader::new());
@@ -76,7 +73,7 @@ fn tool_round_tokio_blocking_no_segfault() {
     };
 
     for i in 0..3 {
-        eprintln!("=== round {} ===", i);
+        eprintln!("=== round {i} ===");
         {
             let l = Arc::clone(&loader);
             let ctx = ctx_tc.clone();

@@ -1,5 +1,4 @@
 # @feature: FP-0.2.二 模式面板成熟化（godot 切片）| @ci: python-coverage
-# -*- coding: utf-8 -*-
 """mode_godot 活面板行为测试：编辑器 seam 四态 / godot 记录双口径 / 写动作捕获。
 
 面板数据面（ADR 2026-09-17-mode-panel-mature-interfaces）：

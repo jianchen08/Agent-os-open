@@ -30,7 +30,6 @@ for _d in [_DIR, _SHARED, _SYSTEM]:
         sys.path.insert(0, str(_d))
 
 from pipeline.plugin import PluginContext  # noqa: E402
-
 from test_stop_check_run_reset import _FakeClock  # noqa: E402
 
 

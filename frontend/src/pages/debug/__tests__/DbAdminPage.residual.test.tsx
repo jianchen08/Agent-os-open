@@ -16,9 +16,9 @@ import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as authApi from '@/services/api/auth'
 import * as dbAdmin from '@/services/api/dbAdmin'
-import type { DbQueryParams, DbTableInfo } from '@/services/api/dbAdmin'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import { DbAdminPage } from '../DbAdminPage'
+import type { DbQueryParams, DbTableInfo } from '@/services/api/dbAdmin'
 
 vi.mock('@/services/api/auth', () => ({
   getCurrentUser: vi.fn(),

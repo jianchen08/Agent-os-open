@@ -66,4 +66,7 @@ export const queryKeys = {
   projectsRegistry: ['projects', 'registry'] as const,
   /** 项目登记 key 前缀（登记写操作后批量失效用） */
   projectsPrefix: ['projects'] as const,
+  /** 呈现档案（模式包卡，按 agentId 分条；前缀不在 MODE_PRESENTER_SOURCES 的
+   *  agent 走 agents 注册表，不入此缓存） */
+  presenterProfile: (agentId: string) => ['presenterProfiles', agentId] as const,
 } as const

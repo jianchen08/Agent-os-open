@@ -6,8 +6,8 @@ import {
   WS_SERVER_EVENTS,
   WebSocketErrorCode,
 } from '@/constants/websocket'
-import { fetchWsTicket } from '@/services/auth/wsTicket'
 import { isAuthFailureFromError, isExpired, refresh, getAccessToken } from '@/services/auth/tokenLifecycle'
+import { fetchWsTicket } from '@/services/auth/wsTicket'
 import { triggerAuthExpired } from '@/services/authCallbacks'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { loggers } from '@/utils/logger'
@@ -361,6 +361,13 @@ class GlobalWebSocketService {
      * 不带则后端按 thread metadata 出生值注入（与旧行为一致）。
      */
     executionContext?: Record<string, unknown>
+    /**
+     * 执行身份 agent 键：内核 route_user_input 提取后合成 {"agent.id": v} 单键
+     * overlay 写管道 state 持久键（1c2f41915，消息级覆盖、后续轮次沿用）——
+     * 扮演会话的身份通道；附身不走此键（走 execution_context.roleplay_persona，
+     * 主 agent 全量工具语义）。不带则帧内无 agent_id 键。
+     */
+    agentId?: string
   }): void {
     const msg: PendingMessage = {
       type: 'user_input',
@@ -372,6 +379,7 @@ class GlobalWebSocketService {
       thinking_strength: opts?.thinkingStrength || '',
       client_message_id: opts?.clientMessageId || '',
       ...(opts?.executionContext ? { execution_context: opts.executionContext } : {}),
+      ...(opts?.agentId ? { agent_id: opts.agentId } : {}),
     }
 
     this._send(msg)

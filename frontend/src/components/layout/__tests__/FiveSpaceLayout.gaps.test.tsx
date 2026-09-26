@@ -22,7 +22,6 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ReactNode } from 'react'
 import apiClient from '@/services/api/client'
 import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 vi.mock('@/services/pipelineNavigator', () => ({
@@ -44,6 +43,7 @@ import { FiveSpaceLayout } from '../FiveSpaceLayout'
 import type * as costControlMod from '@/services/api/costControl'
 import type * as workspacePanelOpenerMod from '@/services/workspacePanelOpener'
 import type { WorkspaceTab } from '@/types/layout'
+import type { ReactNode } from 'react'
 
 // CodeEditor 依赖链含 @lobehub/ui（vitest 不解析），mock 为带保存按钮的替身：
 // 点击后调用 onSave 并展示布尔结果（外部依赖契约模拟，onSave 契约为 (content) => Promise<boolean>）
@@ -847,5 +847,26 @@ describe('FiveSpaceLayout 异常提示条动作分流', () => {
     fireEvent.click(await screen.findByRole('alert'))
 
     expect(openWorkspacePanelByPath).not.toHaveBeenCalled()
+  })
+})
+
+describe('FiveSpaceLayout 顶带三区切分与内容列严格同域', () => {
+  // 用户裁定：顶带切分严格按工作区/侧栏列边界；两端留白只能内化为各区
+  // 内部内边距。留白若留在切分层，三区外缘整体内收——工作区标签行会
+  // 偏出工作区列范围（左压聊天区、右不到窗边），亮色主题下肉眼可见。
+  it('切分层（顶带容器）不吃留白，留白内化到侧栏区与工作区区内部', () => {
+    renderLayout()
+
+    const band = screen.getByTestId('chat-top-band')
+    expect(band.className).not.toContain('px-2')
+
+    // 工作区区 = 工作区标签槽位的父容器：留白在其内部，区外缘与工作区列对齐
+    const wsSlot = document.getElementById('chat-top-band-workspace-tabs')
+    expect(wsSlot).not.toBeNull()
+    expect(wsSlot!.parentElement!.className).toContain('px-2')
+
+    // 侧栏区同理：开关按钮的容器带内部留白，区外缘与侧栏列对齐
+    const sidebarToggle = screen.getByTestId('sidebar-toggle-float')
+    expect(sidebarToggle.parentElement!.className).toContain('px-2')
   })
 })

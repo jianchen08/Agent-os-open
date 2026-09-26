@@ -126,7 +126,8 @@ class TestDiscover:
         (pipelines / "broken.yaml").write_text("loop_bodies: [unclosed", encoding="utf-8")
 
         got = discover_orchestrations(
-            pipelines_dir=pipelines, modes_root=tmp_path / "absent"
+            pipelines_dir=pipelines, modes_root=tmp_path / "absent",
+            user_modes_root=tmp_path / "user_absent"  # 显式置空：禁读宿主/仓库真实用户空间（机器状态敏感）
         )
         assert set(got) == {"good"}
 
@@ -139,7 +140,8 @@ class TestDiscover:
         (pipelines / "list.yaml").write_text("- a\n- b\n", encoding="utf-8")
 
         got = discover_orchestrations(
-            pipelines_dir=pipelines, modes_root=tmp_path / "absent"
+            pipelines_dir=pipelines, modes_root=tmp_path / "absent",
+            user_modes_root=tmp_path / "user_absent"  # 显式置空：禁读宿主/仓库真实用户空间（机器状态敏感）
         )
         assert set(got) == {"good"}
 
@@ -154,7 +156,8 @@ class TestDiscover:
             {"task_kinds": ["review", "translation", 42, None]},
         )
         got = discover_orchestrations(
-            pipelines_dir=pipelines, modes_root=tmp_path / "absent"
+            pipelines_dir=pipelines, modes_root=tmp_path / "absent",
+            user_modes_root=tmp_path / "user_absent"  # 显式置空：禁读宿主/仓库真实用户空间（机器状态敏感）
         )
         assert got["kinds"].task_kinds == ("review", "translation")
 

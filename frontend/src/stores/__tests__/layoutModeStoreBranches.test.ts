@@ -7,8 +7,8 @@
  * persist 反序列化路径。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { FloatingWindowInstance, WorkspaceTab, DockItem } from '@/types/layout'
 import { useLayoutModeStore } from '../layoutModeStore'
+import type { FloatingWindowInstance, WorkspaceTab, DockItem } from '@/types/layout'
 
 const makeWindow = (id: string, extra: Partial<FloatingWindowInstance> = {}): FloatingWindowInstance => ({
   id,

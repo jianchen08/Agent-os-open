@@ -107,7 +107,7 @@ class FakeProc:
         if self._kill_works:
             self.returncode = 0
 
-    def wait(self) -> "asyncio.Future[int]":
+    def wait(self) -> asyncio.Future[int]:
         fut: asyncio.Future[int] = asyncio.get_running_loop().create_future()
         if self.returncode is not None:
             fut.set_result(self.returncode)
@@ -117,7 +117,7 @@ class FakeProc:
 class _ExplodingStream:
     """一读即炸的流：模拟底层管道故障（区别于正常 EOF）。"""
 
-    def __aiter__(self) -> "_ExplodingStream":
+    def __aiter__(self) -> _ExplodingStream:
         return self
 
     async def __anext__(self) -> bytes:

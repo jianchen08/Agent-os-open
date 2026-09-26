@@ -21,10 +21,9 @@ if _paths.group_root not in sys.path:
     sys.path.insert(0, _paths.group_root)
 
 from plugin import PromptBuildPlugin, set_memory_backend  # noqa: E402
+from wiring import build_memory_backend  # noqa: E402  （共享裸名模块，共享根经 bootstrap 入 path）
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
-
-from wiring import build_memory_backend  # noqa: E402  （共享裸名模块，共享根经 bootstrap 入 path）
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("prompt_build_pipeline")

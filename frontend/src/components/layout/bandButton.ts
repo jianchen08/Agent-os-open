@@ -33,7 +33,10 @@ export const BAND_ICON_BUTTON_CLASS = `${BAND_BUTTON_CLASS} w-7 shrink-0 px-0`
     禁止在组件里另写 ml-/mr-（按钮间距只有一处可改） */
 export const BAND_GAP_CLASS = 'gap-1'
 
-/** 顶带两端留白（窗口边缘不贴按钮） */
+/** 顶带两端留白（按钮不贴窗口边缘）。
+    只能内化在三区（侧栏区/工作区区）内部：切分层（顶带容器）不得引用本值——
+    三区切分必须与内容三列严格同域，留白上提到切分层会把工作区标签行整体
+    偏出工作区列范围（左压聊天区、右不到窗边） */
 export const BAND_EDGE_PADDING_CLASS = 'px-2'
 
 /** 标签可压缩区间：内容超宽时先压到下限再横向滚动（下限保证仍可点选/拖拽） */

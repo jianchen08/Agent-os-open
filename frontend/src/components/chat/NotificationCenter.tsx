@@ -28,13 +28,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { readSessions } from '@/hooks/queries/useSessionsQuery'
 import { cn } from '@/lib/utils'
+import { openWorkspacePanel, TOP_NAV_PANELS } from '@/services/workspacePanelOpener'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { resolveNotificationRoute, useNotificationStore } from '@/stores/notificationStore'
-import { readSessions } from '@/hooks/queries/useSessionsQuery'
 import { useSessionListStore } from '@/stores/sessionListStore'
-import { openWorkspacePanel, TOP_NAV_PANELS } from '@/services/workspacePanelOpener'
 import { PRIORITY_STYLES } from '@/types/notification'
 import { resolveNotificationLayout } from '@/utils/notificationModes'
 import { NotificationItemComponent } from './NotificationItem'

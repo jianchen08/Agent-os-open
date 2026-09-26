@@ -19,7 +19,21 @@
     "tools": [
       {
         "name": "http.handle",
-        "description": "HTTP endpoint handler for /ext/pipeline_security_check/**（权限模式切换端点）"
+        "description": "HTTP endpoint handler for /ext/pipeline_security_check/**（权限模式切换端点）",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "integer"
+            },
+            "body": {
+              "type": "object"
+            }
+          }
+        },
+        "render": {
+          "card": "generic"
+        }
       }
     ],
     "route_signals": [],
@@ -29,7 +43,8 @@
     ]
   },
   "export_fields": [
-    "security.decision"
+    "security.decision",
+    "task.authorized_write_zones"
   ],
   "state": {
     "volatile_keys": [
@@ -40,9 +55,12 @@
       "execution_contexts",
       "messages_tail:50",
       "pipeline_id",
+      "project_root",
       "raw_tool_calls",
       "session_id",
-      "thread_id"
+      "task.authorized_write_zones",
+      "thread_id",
+      "workspace"
     ]
   },
   "permissions": {},
@@ -75,8 +93,45 @@
       "auth": "user",
       "handler_capability": "http.handle",
       "description": "查询会话当前权限模式（键 session_id）"
+    },
+    {
+      "route_id": "zone_policy_get",
+      "method": "GET",
+      "path": "/ext/pipeline_security_check/zones",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "读授权名单全量（entries=写区，read_deny=读排除）"
+    },
+    {
+      "route_id": "zone_policy_add",
+      "method": "POST",
+      "path": "/ext/pipeline_security_check/zones/add",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "追加授权名单条目（section + path；用户显式操作通道）"
+    },
+    {
+      "route_id": "zone_policy_remove",
+      "method": "POST",
+      "path": "/ext/pipeline_security_check/zones/remove",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "移除授权名单条目（幂等；用户显式操作通道）"
     }
   ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "zone-policy-settings",
+        "title": "授权区",
+        "icon": "🛡️",
+        "space": "settings",
+        "order": 6,
+        "widget": "zone_policy_settings",
+        "description": "授权区管理：写区（entries）与读排除（read_deny）名单，位置闸执法依据（ADR 2026-09-24）"
+      }
+    ]
+  },
   "ui_schema": {
     "widgets": [
       {

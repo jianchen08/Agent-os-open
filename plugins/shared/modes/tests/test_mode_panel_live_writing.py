@@ -1,5 +1,4 @@
 # @feature: FP-0.2.二 内部模块 manifest | @ci: python-coverage
-# -*- coding: utf-8 -*-
 """写作模式活面板行为测试：作品树投影 / 设定集白名单读 / 章节提取 / 章动作派发。
 
 活面板数据面契约（ADR 2026-09-17-mode-panel-mature-interfaces）：fake provider
@@ -185,6 +184,31 @@ def test_bible_absent_files_reported_honestly(tmp_path: Path) -> None:
     bible = body["bible"]
     assert bible["sections"] == []
     assert bible["absent"] == ["BIBLE.md", "OUTLINE.md", "LEDGER.md"]
+
+
+def test_bible_non_utf8_file_degrades_to_absent(tmp_path: Path) -> None:
+    """非 UTF-8 文件与缺失同语义进 absent：读面异常不击穿端点（补捕
+    UnicodeDecodeError，roleplay B1 家族同刀）。"""
+    module = _load_server()
+    _seed_bible(tmp_path)
+    tmp_path.joinpath("BIBLE.md").write_bytes(b"\xff\xfe\x00bad-utf8")
+    rows = [
+        {
+            "pipeline_id": "pipe-www1", "mode": "writing",
+            "task.ws_meta": {"mode": "plain", "path": str(tmp_path)},
+        }
+    ]
+    module._set_provider("pipeline-state", lambda: asyncio.sleep(0, result=rows))
+    body = _body_json(_call(module, f"{_EP}/bible", query={"pipeline_id": "pipe-www1"}))
+    bible = body["bible"]
+    assert bible["absent"] == ["BIBLE.md"]
+    assert [s["name"] for s in bible["sections"]] == ["OUTLINE.md", "LEDGER.md"]
+
+
+def test_panel_html_select_work_clears_instruction() -> None:
+    """切作品清空指令框：A 作品的定制指令不残留进 B 作品的下一次派发。"""
+    html = _panel_html()
+    assert "if (inst) { inst.value = ''; }" in html
 
 
 def test_bible_root_traversal_normalized_within_workspace(tmp_path: Path) -> None:

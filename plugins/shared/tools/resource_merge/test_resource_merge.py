@@ -114,7 +114,7 @@ class TestRunGit:
 
         class _SlowProc:
             async def communicate(self) -> tuple[bytes, bytes]:
-                raise asyncio.TimeoutError()
+                raise TimeoutError()
 
         async def _fake_create(*args, **kwargs):
             return _SlowProc()

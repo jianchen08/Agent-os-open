@@ -46,7 +46,7 @@ def _load_server() -> Any:
     return module
 
 
-@pytest.fixture()
+@pytest.fixture
 def server() -> Any:
     return _load_server()
 

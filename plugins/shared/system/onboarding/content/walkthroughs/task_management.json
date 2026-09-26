@@ -1,0 +1,46 @@
+{
+  "id": "task_management",
+  "title": "任务管理",
+  "description": "认识任务树：派任务、看状态、处理审批、失败重试、找回产出",
+  "order": 2,
+  "default_open": false,
+  "steps": [
+    {
+      "id": "meet_tasks",
+      "title": "认识任务管理页",
+      "body": "左侧是对话，**任务管理页**是另一只眼睛：它把每个会话执行过的任务组织成树——主任务下可以派生子任务，层层展开。随时从顶栏进入。",
+      "cta": { "label": "打开任务管理", "action": { "type": "open_panel", "target": "/tasks" } },
+      "completion": { "type": "panel_visited", "panel": "/tasks" }
+    },
+    {
+      "id": "dispatch_task",
+      "title": "派一个任务",
+      "body": "在对话里说清一件事（「把这份报告总结成三句话」或「帮我写一个爬虫脚本」），它就会开工。执行过程不打扰你，完成后任务树里可见。",
+      "completion": { "type": "manual" }
+    },
+    {
+      "id": "read_status",
+      "title": "看懂任务状态",
+      "body": "任务列表里每个任务都带状态标识：正在执行的、已经完成的、出错停下的一眼可辨。点击任务可以展开它的执行过程。",
+      "completion": { "type": "manual" }
+    },
+    {
+      "id": "approval",
+      "title": "审批与确认",
+      "body": "涉及敏感操作（写文件、执行命令等）时，它会先弹出**审批卡**征求你的同意：可以只放行这一次，也可以选择之后同类操作不再打扰。",
+      "completion": { "type": "manual" }
+    },
+    {
+      "id": "failure_retry",
+      "title": "失败与重试",
+      "body": "任务失败不代表白费：点开失败的任务能看到卡在哪一步，改一改要求重新发送即可，已完成的步骤不会浪费。",
+      "completion": { "type": "manual" }
+    },
+    {
+      "id": "workspace_output",
+      "title": "工作空间与产出",
+      "body": "每个任务有自己的工作空间，产出的文件都落在里面。在任务详情里打开工作空间，就能查看和取走它做好的东西。",
+      "completion": { "type": "manual" }
+    }
+  ]
+}

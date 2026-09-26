@@ -4,12 +4,12 @@
     "packaging"
   ],
   "name": "Mode Research",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",
   "entry": "python server.py",
-  "description": "调研模式出厂种子：模式元数据服务面（mode.describe / mode.get_profile）+ 工作区面板数据面（调研任务/报告阅读器[引用角标]/信源库，对标 Perplexity/Elicit）+ 写动作（发起调研/送入对话框追问经 task_submit 真派发，携 session_id 送入宿主对话框线程，无则省略）+ hindsight.recall 知识库检索代理 + 宿主融合面板（theme.sync/ctx.sync 下行桥，Perplexity 式密度），profile 随包内打包",
+  "description": "研究模式出厂种子（原「调研模式」，2026-09-25 更名对齐 Deep Research 业界口径）：模式元数据服务面（mode.describe / mode.get_profile）+ 工作区面板数据面（研究任务/报告阅读器[引用角标+交付文件直读]/信源库[可点外链]，对标 Perplexity/Elicit）+ 写动作（发起研究/送入对话框追问经 task_submit 真派发，携 session_id 送入宿主对话框线程，无则省略）+ hindsight.recall 知识库检索代理 + 宿主融合面板（theme.sync/ctx.sync 下行桥，Perplexity 式密度），profile 随包内打包",
   "permissions": {},
   "priority": 45,
   "host_group": "light",
@@ -18,7 +18,7 @@
     "services": [
       {
         "name": "mode.describe",
-        "description": "返回调研模式元数据（chain/权重/预算/profile 路径/panel_page_id）",
+        "description": "返回研究模式元数据（chain/权重/预算/profile 路径/panel_page_id）",
         "input_schema": {
           "type": "object",
           "properties": {}
@@ -61,7 +61,7 @@
       },
       {
         "name": "mode.get_profile",
-        "description": "返回调研模式包内 profile.yaml 解析后的内容",
+        "description": "返回研究模式包内 profile.yaml 解析后的内容",
         "input_schema": {
           "type": "object",
           "properties": {}
@@ -93,7 +93,7 @@
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 4,
-      "description": "Webview HTML page: 调研台面板（插件自带 webview 页）"
+      "description": "Webview HTML page: 研究台面板（插件自带 webview 页）"
     },
     {
       "route_id": "mode_research_data_bootstrap",
@@ -113,7 +113,7 @@
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 4,
-      "description": "调研任务列表（pipeline-state mode 键过滤归一）"
+      "description": "研究任务列表（pipeline-state mode 键过滤归一）"
     },
     {
       "route_id": "mode_research_data_messages",
@@ -133,7 +133,7 @@
       "handler_capability": "http.handle",
       "timeout_ms": 5000,
       "max_concurrency": 4,
-      "description": "报告阅读器载荷（最后一条长 assistant 消息 + 引用角标 + URL 信源）"
+      "description": "报告阅读器载荷（交付文件直读优先，回落最后一条长 assistant 消息 + 引用角标 + URL 信源）"
     },
     {
       "route_id": "mode_research_data_sources",
@@ -153,7 +153,7 @@
       "handler_capability": "http.handle",
       "timeout_ms": 20000,
       "max_concurrency": 4,
-      "description": "写动作：发起调研（task_submit 派发，携 quick/deep 深度档与 session_id，无则省略）"
+      "description": "写动作：发起研究（task_submit 派发，携 quick/deep 深度档与 session_id，无则省略）"
     },
     {
       "route_id": "mode_research_action_followup",
@@ -170,7 +170,7 @@
     "pages": [
       {
         "id": "research_desk",
-        "title": "调研台",
+        "title": "研究台",
         "icon": "🔎",
         "space": "workspace",
         "slot": "tab",
@@ -182,7 +182,7 @@
           "widgetId": "research_desk"
         },
         "order": 30,
-        "description": "调研模式面板：调研任务/报告阅读器/信源库",
+        "description": "研究模式面板：研究任务/报告阅读器/信源库",
         "mode": "research",
         "detachable": {
           "popout": true,
@@ -209,10 +209,13 @@
         "props": {
           "target": "task_mode",
           "value": "research",
-          "label": "调研",
+          "label": "研究",
           "icon": "🔎"
         }
       }
     ]
+  },
+  "lifecycle": {
+    "idle_timeout_secs": 0
   }
 }

@@ -12,11 +12,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { queryClient } from '@/services/query/queryClient'
 import { queryKeys } from '@/services/query/queryKeys'
+import { clearSessionExecutionOptions } from '@/services/sessionExecutionOptions'
+import { globalWS } from '@/services/websocket/GlobalWebSocket'
+import { useAgentStore } from '../agentStore'
+import { useNotificationStore } from '../notificationStore'
+import { usePipelineMessageStore } from '../pipelineMessageStore'
 import { useSessionListStore } from '../sessionListStore'
 import { useSessionStore } from '../sessionStore'
-import { usePipelineMessageStore } from '../pipelineMessageStore'
-import { useNotificationStore } from '../notificationStore'
-import { useAgentStore } from '../agentStore'
 import type { Session } from '@/types/models'
 
 vi.mock('../agentTabStore', () => ({
@@ -53,8 +55,6 @@ vi.mock('@/services/sessionExecutionOptions', () => ({
 }))
 
 import * as sessionApi from '@/services/api/session'
-import { globalWS } from '@/services/websocket/GlobalWebSocket'
-import { clearSessionExecutionOptions } from '@/services/sessionExecutionOptions'
 
 const makeSession = (id: string, extra: Partial<Session> = {}): Session =>
   ({

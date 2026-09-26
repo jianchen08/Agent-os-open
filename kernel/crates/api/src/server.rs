@@ -31,7 +31,9 @@ use axum::{
     Router,
 };
 
-use crate::pipeline_loader::{load_pipeline_config, load_step_library, validate_no_name_conflicts};
+use crate::pipeline_loader::{
+    load_pipeline_config_by_name, load_step_library, validate_no_name_conflicts,
+};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
@@ -380,7 +382,7 @@ fn is_local_origin(origin: &str) -> bool {
 
 /// 精确匹配 origin 是否在生产白名单中（不做子域/前缀模糊匹配）。
 fn origin_matches_allowlist(origin: &str, allowlist: &[&str]) -> bool {
-    allowlist.iter().any(|o| *o == origin)
+    allowlist.contains(&origin)
 }
 
 /// 判断 origin 是否被放行：本地源任意端口，或命中 `AGENTOS_CORS_ORIGINS` 白名单。
@@ -742,13 +744,94 @@ pub fn load_and_compile(
     config_root: &std::path::Path,
     plugin_ids: &std::collections::HashSet<String>,
 ) -> Result<agentos_engine::compiler::CompiledPipeline, String> {
+    load_and_compile_by_name(config_root, "autonomous", plugin_ids)
+}
+
+/// 按名加载 + 校验 + 编译管道（[`load_and_compile`] 的通用形态）。
+///
+/// 错误信息始终携带管道配置名（调用方透传给请求方定位用了哪个配置）。
+pub fn load_and_compile_by_name(
+    config_root: &std::path::Path,
+    name: &str,
+    plugin_ids: &std::collections::HashSet<String>,
+) -> Result<agentos_engine::compiler::CompiledPipeline, String> {
     use agentos_engine::compiler::compile_pipeline;
-    let pipeline =
-        load_pipeline_config(config_root).map_err(|e| format!("加载管道配置失败: {e}"))?;
+    let pipeline = load_pipeline_config_by_name(config_root, name)
+        .map_err(|e| format!("加载管道配置 '{name}' 失败: {e}"))?;
     let steps = load_step_library(config_root).map_err(|e| format!("加载公共 step 库失败: {e}"))?;
     validate_no_name_conflicts(&pipeline, &steps, plugin_ids)
-        .map_err(|conflict| format!("命名冲突: {conflict}"))?;
-    compile_pipeline(&pipeline, &steps, plugin_ids).map_err(|e| e.to_string())
+        .map_err(|conflict| format!("管道配置 '{name}' 命名冲突: {conflict}"))?;
+    compile_pipeline(&pipeline, &steps, plugin_ids)
+        .map_err(|e| format!("管道配置 '{name}' 编译失败: {e}"))
+}
+
+// ═════════════════════════════════════════════════════════════════
+// 管道编译缓存（PipelineCache）：显式指定的管道配置按需加载编译
+// ═════════════════════════════════════════════════════════════════
+
+/// 进程级编译缓存：键 = 管道配置 id（config/pipelines/{id}.yaml 的文件名主干）。
+///
+/// autonomous 启动期预入（bin/agentos-kernel.rs，现状行为不变）；其余配置
+/// **用什么加载什么**——首次显式指定时按需加载+编译+入缓存，绝不启动期全量
+/// 扫描。失效唯一路径 = PUT 管道配置热更端点显式失效（一期不校验 mtime，
+/// 磁盘改动不经 PUT 不生效）。生产单 config_root，键取管道 id 即可区分。
+static PIPELINE_COMPILED_CACHE: OnceLock<
+    ParkingRwLock<HashMap<String, Arc<agentos_engine::compiler::CompiledPipeline>>>,
+> = OnceLock::new();
+
+fn pipeline_compiled_cache(
+) -> &'static ParkingRwLock<HashMap<String, Arc<agentos_engine::compiler::CompiledPipeline>>> {
+    PIPELINE_COMPILED_CACHE.get_or_init(|| ParkingRwLock::new(HashMap::new()))
+}
+
+/// 启动期预入编译产物（autonomous 单例；现状行为的缓存面）。
+pub fn pipeline_cache_seed(name: &str, compiled: Arc<agentos_engine::compiler::CompiledPipeline>) {
+    pipeline_compiled_cache()
+        .write()
+        .insert(name.to_string(), compiled);
+}
+
+/// 失效缓存对应键（PUT 管道配置热更写盘后调用）：下次显式指定该配置时
+/// 按需重载新内容。不存在的键幂等。
+pub fn pipeline_cache_invalidate(name: &str) {
+    if pipeline_compiled_cache().write().remove(name).is_some() {
+        info!(pipeline_config = %name, "Pipeline compiled cache invalidated (config updated)");
+    }
+}
+
+/// 管道编译产物选择收敛点（CompiledPipeline 唯一运行时取用面）。
+///
+/// - `None` → autonomous 单例（[`maybe_reload_compiled_pipeline`] 热重载路径，
+///   缺省行为与历史逐字节一致）；
+/// - `Some(id)` → 缓存命中返回；未命中 → 按名加载+校验+编译+入缓存返回；
+///   任一步失败 → `Err`（带管道名）——**不回落 autonomous**：用哪个管道就是
+///   哪个，静默回落 = 用错管道。
+pub(crate) async fn compiled_for(
+    state: &AppState,
+    config_root: &std::path::Path,
+    config_id: Option<&str>,
+) -> Result<Arc<agentos_engine::compiler::CompiledPipeline>, String> {
+    let Some(name) = config_id.filter(|s| !s.is_empty()) else {
+        return Ok(maybe_reload_compiled_pipeline(state, config_root).await);
+    };
+    if let Some(hit) = pipeline_compiled_cache().read().get(name) {
+        return Ok(Arc::clone(hit));
+    }
+    // 显式指定的配置必须存在：缺文件 = Err（不降级空管道、不回落 autonomous
+    // ——静默跑错管道比报错更糟）。缺文件降级仅属 autonomous 启动加载
+    // （load_pipeline_config 的缺省启动契约）。
+    let path =
+        crate::pipeline_loader::resolve_pipeline_config_path(config_root, &format!("{name}.yaml"));
+    if !path.exists() {
+        return Err(format!("管道配置 '{name}' 不存在（{}）", path.display()));
+    }
+    let known_ids = live_plugin_ids(state).await;
+    let compiled = Arc::new(load_and_compile_by_name(config_root, name, &known_ids)?);
+    pipeline_compiled_cache()
+        .write()
+        .insert(name.to_string(), Arc::clone(&compiled));
+    info!(pipeline_config = %name, "Pipeline config lazily loaded and compiled");
+    Ok(compiled)
 }
 
 /// 空编译产物（配置缺失/首次编译失败时的安全降级：空管道执行，语义与
@@ -802,6 +885,7 @@ pub(crate) async fn process_via_engine(
     thinking_strength: &str,
     execution_context: Option<&serde_json::Value>,
     state_overlay: Option<&serde_json::Value>,
+    pipeline_config_id: Option<&str>,
     client_message_id: &str,
 ) -> EngineOutcome {
     // Box::pin 到堆上：回写段 + executor.run 的深 sidecar 调用链让 Future 状态机
@@ -817,6 +901,7 @@ pub(crate) async fn process_via_engine(
         thinking_strength,
         execution_context,
         state_overlay,
+        pipeline_config_id,
         client_message_id,
     ))
     .await
@@ -836,6 +921,7 @@ async fn process_via_engine_inner(
     thinking_strength: &str,
     execution_context: Option<&serde_json::Value>,
     state_overlay: Option<&serde_json::Value>,
+    pipeline_config_id: Option<&str>,
     client_message_id: &str,
 ) -> EngineOutcome {
     // ── 前置依赖：invoker / store / project_root 任一缺席 → echo 降级 ──
@@ -955,6 +1041,7 @@ async fn process_via_engine_inner(
         message,
         &run_id,
         user_id,
+        pipeline_config_id,
     )
     .await
     {
@@ -1618,6 +1705,42 @@ mod apply_state_overlay_tests {
         assert_eq!(initial["run_status"], "running", "保留字拦截 overlay 直写");
         assert_eq!(initial["task.goal"], "合法注入", "非保留键照常并入");
     }
+
+    /// agent.id 消息级覆盖（WS agent_id 透传 2026-09-25）：overlay 在恢复合并
+    /// 之后应用——帧显式携带的执行身份覆盖既有持久键（每条消息可切换人格），
+    /// 原本无该键时照常写入（管道后续轮次沿用最后写入值）。
+    #[test]
+    fn overlay_agent_id_overrides_recovered_identity() {
+        // 既有身份（热/冷恢复写入 initial_state 后的形态）被消息级覆盖。
+        let mut initial = serde_json::json!({"agent.id": "old_persona", "run_status": "running"});
+        apply_state_overlay(
+            &mut initial,
+            &serde_json::json!({"agent.id": "new_persona"}),
+        );
+        assert_eq!(
+            initial["agent.id"], "new_persona",
+            "消息级显式身份覆盖恢复基线"
+        );
+        // 管道原本无身份键（会话类管道）→ 写入生效。
+        let mut fresh = serde_json::json!({"run_status": "running"});
+        apply_state_overlay(&mut fresh, &serde_json::json!({"agent.id": "persona_a"}));
+        assert_eq!(fresh["agent.id"], "persona_a");
+    }
+
+    /// 通道守卫：agent.id 不得进入 overlay 保留字与 per-run 挥发键——否则
+    /// WS agent_id 透传（router 合成单键 overlay）与 task_birth 出生键会被
+    /// 静默拦截，执行身份通道断裂（回归锚 2026-09-25）。
+    #[test]
+    fn agent_dot_id_is_neither_reserved_nor_volatile() {
+        assert!(
+            !crate::kernel_capabilities::RESERVED_STATE_KEYS.contains(&"agent.id"),
+            "agent.id 是身份持久键，不得列为 overlay 保留字"
+        );
+        assert!(
+            !agentos_engine::VOLATILE_RUN_KEYS.contains(&"agent.id"),
+            "agent.id 跨轮沿用，不得列为 per-run 挥发键"
+        );
+    }
 }
 
 /// 阶段 2a：run 启动前刷新 registry 快照（实际状态轮中可见）。
@@ -2030,6 +2153,7 @@ async fn stage_execute(
     message: &str,
     run_id: &str,
     user_id: &str,
+    pipeline_config_id: Option<&str>,
 ) -> Result<serde_json::Value, EngineOutcome> {
     // runs 表退役（ADR 2026-09-18）：防御失败簿记所需坐标提前捕获（initial_state/
     // tenant 随后移入 executor）
@@ -2067,8 +2191,23 @@ async fn stage_execute(
     });
 
     // ── Pull 热加载（在 project_root 被 move 给 executor 之前算出 config_root）──
+    // 管道编译产物选择收敛点：None = autonomous 热重载单例（现状路径）；
+    // Some(id) = 按需加载编译缓存（失败 Err 透传，不回落 autonomous——
+    // 用哪个管道就是哪个，静默回落 = 用错管道）。
     let config_root = project_root.join("config");
-    let compiled = maybe_reload_compiled_pipeline(state, &config_root).await;
+    let compiled = match compiled_for(state, &config_root, pipeline_config_id).await {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(pipeline_config = ?pipeline_config_id, error = %e, "Pipeline config select failed");
+            return Err(EngineOutcome {
+                content: format!("[error] 管道配置加载失败: {e}"),
+                final_assistant: None,
+                failed: true,
+                degraded: false,
+                plugin_errors: Vec::new(),
+            });
+        }
+    };
     // P1-1 core 器官缺省声明化：管道配置 `initial_state:` 声明的键值在开轮前
     // 补种（缺省只补缺，已有值不覆盖——本轮/调用方值优先）。core_type 是纯
     // 语义迭代形态标志，未声明时以 llm_call 作语义缺省；core_plugin 缺省由
@@ -2405,6 +2544,7 @@ async fn chat_handler(
             None,
             None,
             &exec_agent,
+            None,
             &cmid,
             agentos_core::types::PendingInputSource::Http,
         )
@@ -2545,14 +2685,14 @@ pub async fn start_server(addr: SocketAddr, state: AppState) -> Result<(), ApiEr
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| ApiError::Internal {
-            message: format!("Failed to bind {}: {}", addr, e),
+            message: format!("Failed to bind {addr}: {e}"),
         })?;
     info!("API server starting on {}", addr);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown_invoker))
         .await
         .map_err(|e| ApiError::Internal {
-            message: format!("Server error: {}", e),
+            message: format!("Server error: {e}"),
         })?;
     Ok(())
 }

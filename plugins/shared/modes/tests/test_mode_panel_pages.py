@@ -1,5 +1,4 @@
 # @feature: FP-0.2.二 模式体系测试补标 | @ci: python-coverage
-# -*- coding: utf-8 -*-
 """模式 webview 面板页供给测试：http.handle 路由 / manifest 声明 / 页面契约。
 
 面板承载形态（模式体系落地设计 §2 末，2026-09-15 用户裁定）：工作区 tab 页 =
@@ -41,7 +40,7 @@ PANEL_MARKERS = {
     "coding": ("修复流水线", "diff 复盘", "worktree"),
     "writing": ("作品树", "章节编辑器", "设定集"),
     "roleplay": ("角色卡", "会话", "世界书"),
-    "research": ("调研任务", "报告阅读器", "信源库"),
+    "research": ("研究任务", "报告阅读器", "信源库"),
     "godot": ("godot 项目", "场景状态", "执行记录"),
     "planning": ("项目状态", "方案讨论", "任务链"),
 }
@@ -217,8 +216,18 @@ LIVE_DATA_ENDPOINTS = {
         ("/data/messages", "GET"),
         ("/data/cards", "GET"),
         ("/data/lorebooks", "GET"),
+        ("/data/personas", "GET"),
         ("/data/actions/play", "POST"),
         ("/data/actions/regenerate", "POST"),
+        ("/data/cards/save", "POST"),
+        ("/data/cards/delete", "POST"),
+        ("/data/cards/import", "POST"),
+        ("/data/cards/export", "POST"),
+        ("/data/lorebooks/save", "POST"),
+        ("/data/lorebooks/delete", "POST"),
+        ("/data/lorebooks/import", "POST"),
+        ("/data/personas/save", "POST"),
+        ("/data/personas/delete", "POST"),
     ],
     "writing": [
         ("/data/bootstrap", "GET"),
@@ -398,7 +407,10 @@ def test_live_roleplay_messages_query_contract() -> None:
     assert body["messages"][1]["role"] == "assistant"
 
 
-def test_live_roleplay_play_action_dispatches_task_submit() -> None:
+def test_live_roleplay_play_action_possess_only() -> None:
+    """play 端点 possess-only 契约（fresh 开演已会话化：面板走 roleplay.continue
+    宿主桥建扮演会话，不再派发任务）——校验卡 + 回执 presenter（含 theme），
+    零任务派发。"""
     module = _load_server("mode_roleplay")
     captured: dict = {}
 
@@ -410,20 +422,15 @@ def test_live_roleplay_play_action_dispatches_task_submit() -> None:
     body = _body_json(
         _call(
             module, f"{_ROLEPLAY_EP}/actions/play", method="POST",
-            raw_body=json.dumps(
-                {"card_id": "card_luna", "user_persona": "北地佣兵", "greeting_index": 1}
-            ),
+            raw_body=json.dumps({"card_id": "card_luna", "play_mode": "possess"}),
         )
     )
-    assert body == {"task_id": "task-123"}
-    assert captured["tool_name"] == "task_submit" and captured["plugin_id"] == "task_submit_tool"
-    args = captured["args"]
-    # 卡 = 模式命名空间 agent 键（§8.1）；mode 键随行进管道
-    assert args["target_type"] == "agent" and args["target_id"] == "mode_roleplay/card_luna"
-    assert args["mode"] == "roleplay" and args["task_kind"] == "roleplay_opening"
-    assert "塞拉菲娜·月语" in args["goal_title"]
-    assert "北地佣兵" in args["goal_description"]
-    assert args["metadata"] == {"card_id": "card_luna", "greeting_index": 1}
+    assert captured == {}, "play 不再派发任务（fresh 已会话化）"
+    assert body["card_id"] == "card_luna" and body["play_mode"] == "possess"
+    presenter = body["presenter"]
+    assert presenter["card_id"] == "card_luna"
+    assert presenter["name"] == "塞拉菲娜·月语" and presenter["avatar"] == "🌙"
+    assert presenter["theme"]["id"] == "mode_roleplay_card_luna", "theme 档随 possess 下发"
 
 
 def test_live_roleplay_play_action_error_paths() -> None:
@@ -437,47 +444,25 @@ def test_live_roleplay_play_action_error_paths() -> None:
     )
     assert _envelope_status(result) == 400
     assert "未知角色卡" in _body_json(result)["error"]
+    # fresh 已删除（会话化，不留兼容层）→ 与未知值同判 400
+    result = _call(
+        module, f"{_ROLEPLAY_EP}/actions/play", method="POST",
+        raw_body=json.dumps({"card_id": "card_luna", "play_mode": "fresh"}),
+    )
+    assert _envelope_status(result) == 400
+    assert "未知 play_mode" in _body_json(result)["error"]
     # GET 打写动作端点 → 404
     assert _envelope_status(_call(module, f"{_ROLEPLAY_EP}/actions/play")) == 404
 
 
-def test_live_roleplay_regenerate_action_composes_from_history() -> None:
+def test_live_roleplay_regenerate_retired_410() -> None:
+    """regenerate 已收编进扮演会话的宿主消息操作 → 410 语义化退役。"""
     module = _load_server("mode_roleplay")
-    module._set_provider("pipeline-state", lambda: asyncio.sleep(0, result=_fake_state_rows()))
-
-    async def _messages_provider(pipeline_id: str, limit: int | None = None) -> list[dict]:
-        assert pipeline_id == "pipe-aaa"
-        return _fake_messages()
-
-    module._set_provider("messages", _messages_provider)
-    captured: dict = {}
-
-    async def _fake_invoke(payload: dict) -> dict:
-        captured.update(payload)
-        return {"data": {"task_id": "task-456"}}
-
-    module._set_provider("tool-executor", _fake_invoke)
-    body = _body_json(
-        _call(module, f"{_ROLEPLAY_EP}/actions/regenerate", method="POST",
-              raw_body=json.dumps({"pipeline_id": "pipe-aaa"}))
-    )
-    assert body == {"task_id": "task-456"}
-    args = captured["args"]
-    assert args["target_id"] == "mode_roleplay/card_luna"  # 继承会话绑定的卡 agent 键
-    assert args["mode"] == "roleplay" and args["task_kind"] == "roleplay_regenerate"
-    assert "上一条角色回复" in args["goal_description"]
-    assert "pipe-aaa" in args["goal_description"]
-
-
-def test_live_roleplay_regenerate_error_paths() -> None:
-    module = _load_server("mode_roleplay")
-    # 缺 pipeline_id → 400
-    assert _envelope_status(_call(module, f"{_ROLEPLAY_EP}/actions/regenerate", method="POST")) == 400
-    # 会话不在本模式 → 400
-    module._set_provider("pipeline-state", lambda: asyncio.sleep(0, result=_fake_state_rows()))
     result = _call(
         module, f"{_ROLEPLAY_EP}/actions/regenerate", method="POST",
-        raw_body=json.dumps({"pipeline_id": "pipe-bbb"}),
+        raw_body=json.dumps({"pipeline_id": "pipe-aaa"}),
     )
-    assert _envelope_status(result) == 400
-    assert "不存在" in _body_json(result)["error"]
+    assert _envelope_status(result) == 410
+    assert "收编" in _body_json(result)["error"]
+
+

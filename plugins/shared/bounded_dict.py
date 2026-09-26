@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Callable, Iterator
-from typing import Any, MutableMapping
+from collections.abc import Callable, Iterator, MutableMapping
+from typing import Any
 
 __all__ = ["BoundedDict"]
 

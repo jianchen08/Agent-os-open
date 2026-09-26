@@ -9,8 +9,8 @@
  */
 import { act, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ChartWidget } from '../ChartWidget'
 import { resetSharedFetchCache } from '@/services/schema/dataWidget'
+import { ChartWidget } from '../ChartWidget'
 
 let ioCb: IntersectionObserverCallback | null = null
 let ioTargets: Element[] = []

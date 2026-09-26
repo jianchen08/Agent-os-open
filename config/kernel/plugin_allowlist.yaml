@@ -1,8 +1,27 @@
-# 插件准入白名单
+# 插件准入白名单（2026-09-25 准入分级）
+#
 # mode: permissive（默认，白名单为空时放行所有，开发友好）/ strict（非白名单插件加载失败）
-# plugins: 白名单条目，每项含 id 和可选 sha256（manifest+entry 文件的哈希）
+# plugins: 白名单条目，每项含：
+#   id      - 插件 id
+#   sha256  - 可选，插件目录树规范化哈希（排序相对路径+文件字节流；排除
+#             .venv*/__pycache__/.git/node_modules/logs/*.pyc）。热重扫每轮重验，
+#             篡改 → 即时吊销（从发现集消失），文件复原后自动恢复。留空只校验 id。
+#   grants  - 可选，危险前端能力授予（host_js=皮肤 hooks.mjs 宿主执行 /
+#             host_css=client_styles 宿主 CSS 注入）。未授予 → 注册面剥除，
+#             /api/v1/plugins restricted_capabilities 可见（设置页显示"受限"）。
+#
+# 授予判定口径（ADR 2026-09-25-plugin-frontend-surface-hardening）：
+# - dev 姿态（AGENTOS_PLUGIN_SOURCE_PRIORITY 未设，UserFirst）→ 全授予（开发流零变化）；
+# - 内置根插件（随包分发）→ 恒授予，不经本表；
+# - 装机姿态（BuiltinFirst）用户根插件 → 按本表 grants；本文件缺失 → 全授予（引导默认）。
 mode: permissive
-plugins: []
+plugins:
+  # dsh_adapter 声明 skin（16 款 DSH 皮肤 hooks.mjs 宿主执行）：
+  # 装机版用户空间副本 semver 严格更新压过内置时（sync_installed_user_space 通道），
+  # 副本同样需要本条目授予，否则皮肤 hooks 被剥。
+  - id: "dsh_adapter"
+    sha256: ""   # 留空：树哈希随开发迭代漂移，装机版按包内内置副本信任
+    grants: ["host_js", "host_css"]
 # 示例（strict 模式）：
 # plugins:
 #   - id: "hindsight_memory_service"

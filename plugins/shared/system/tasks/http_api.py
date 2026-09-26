@@ -30,7 +30,6 @@ import time
 from typing import Any
 
 import state_fields  # noqa: PLC0415 — plugins/shared 平铺模块（裸名导入先例 tenant_data）
-
 from pydantic import BaseModel, Field
 
 # 共享层样板（plugins/shared/http_json.py）入 sys.path 后裸名导入。

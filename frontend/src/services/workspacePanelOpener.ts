@@ -5,10 +5,10 @@
  */
 
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { useUIStore } from '@/stores/uiStore'
+import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 import type { WorkspaceTab } from '@/types/layout'
 
 export interface WorkspacePanelSpec {

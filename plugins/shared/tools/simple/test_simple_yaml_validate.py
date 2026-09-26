@@ -205,18 +205,17 @@ class TestReadDetailParamChecks:
         assert result == {"error": "不支持的 level: L9"}
         caller.assert_not_awaited()
 
-    async def test_thread_id_kwarg_used_for_traces(self, mod: Any) -> None:
-        """skeleton 的 traces.list 用 kwargs 传入的 thread_id，messages 用 pipeline_run_id。"""
+    async def test_skeleton_uses_list_by_pipeline(self, mod: Any) -> None:
+        """skeleton 的 traces 走 traces.list_by_pipeline（按 pipeline 直查，§10.1）。"""
         caller = AsyncMock()
-        caller.return_value = []
+        caller.side_effect = [[]]
         mod.set_capability_caller(caller)
         await mod.read_execution_detail(
             pipeline_run_id="p1", level="skeleton", thread_id="th-9"
         )
-        assert caller.await_count == 2
         traces_call = caller.await_args_list[0]
-        assert traces_call.args[0] == "traces.list"
-        assert traces_call.args[1] == {"thread_id": "th-9"}
+        assert traces_call.args[0] == "traces.list_by_pipeline"
+        assert traces_call.args[1] == {"pipeline_id": "p1"}
 
 
 class TestFetchDegradation:
@@ -227,54 +226,42 @@ class TestFetchDegradation:
         assert result["error"] == "内核 messages.list 调用失败: kernel down"
 
     async def test_traces_call_exception_degrades_to_empty(self, mod: Any) -> None:
-        """traces.list 抛异常 → 空轨迹，skeleton 仍正常渲染。"""
+        """traces.list_by_pipeline 抛异常 → 空轨迹，skeleton 仍正常渲染。"""
         caller = AsyncMock()
-        caller.side_effect = [RuntimeError("no traces"), []]  # traces 抛错, messages 空
+        caller.side_effect = [RuntimeError("no traces")]
         mod.set_capability_caller(caller)
         result = await mod.read_execution_detail(pipeline_run_id="p1", level="skeleton")
         assert result["level"] == "skeleton"
         assert result["trace_count"] == 0
-        assert result["message_count"] == 0
+        assert result["error_anchors"] == []
 
     async def test_messages_list_returned_in_wrapped_dict(self, mod: Any) -> None:
-        """messages.list 返回 {messages: [...]} 包裹形态时正常解包。"""
+        """messages.list 返回 {messages: [...]} 包裹形态时正常解包（L1 降级路径）。"""
         caller = AsyncMock()
         caller.side_effect = [
-            {"traces": [{"plugin_id": "p", "seq_in_branch": 1}]},
+            {"results": []},
             {"messages": [_make_message(1, "user", "hi")]},
         ]
         mod.set_capability_caller(caller)
-        result = await mod.read_execution_detail(pipeline_run_id="p1", level="skeleton")
-        assert result["trace_count"] == 1
-        assert result["message_count"] == 1
-        assert result["message_lines"] == ["[seq 1] user: hi"]
+        result = await mod.read_execution_detail(pipeline_run_id="p1", level="L1")
+        assert result["level"] == "L1"
+        assert result["turn_count"] == 1
 
     async def test_messages_list_scalar_return_empty(self, mod: Any) -> None:
         """messages.list 返回非 list/dict 形态 → 按空列表处理。"""
         caller = AsyncMock()
-        caller.side_effect = [[], "garbage"]
+        caller.side_effect = ["garbage"]
         mod.set_capability_caller(caller)
-        result = await mod.read_execution_detail(pipeline_run_id="p1", level="skeleton")
-        assert result["message_count"] == 0
-
-    async def test_skeleton_messages_error_dict_resets_to_empty(self, mod: Any) -> None:
-        """skeleton 下 messages 失败 → 骨架只渲染轨迹，不抛错。"""
-        caller = AsyncMock()
-        caller.side_effect = [[], RuntimeError("boom")]
-        mod.set_capability_caller(caller)
-        result = await mod.read_execution_detail(pipeline_run_id="p1", level="skeleton")
-        assert result["level"] == "skeleton"
-        assert result["message_count"] == 0
-        assert result["message_lines"] == []
+        result = await mod.read_execution_detail(pipeline_run_id="p1", level="L0")
+        assert result["record_count"] == 0
 
     async def test_skeleton_traces_scalar_result_degrades(self, mod: Any) -> None:
-        """traces.list 返回非 list/dict 形态 → 按空轨迹处理，不崩溃。"""
+        """traces.list_by_pipeline 返回非 list/dict 形态 → 按空轨迹处理，不崩溃。"""
         caller = AsyncMock()
-        caller.side_effect = ["garbage", []]
+        caller.side_effect = ["garbage"]
         mod.set_capability_caller(caller)
         result = await mod.read_execution_detail(pipeline_run_id="p1", level="skeleton")
         assert result["trace_count"] == 0
-        assert result["message_count"] == 0
 
     async def test_l1_messages_error_dict_propagates(self, mod: Any) -> None:
         """L1 无压缩块且 messages 调用失败 → 原样返回降级错误 dict。"""
@@ -351,13 +338,21 @@ class TestSkeletonRenderEdges:
         assert step["seq"] is None
         assert step["key_changes"] is None
 
-    async def test_message_lines_empty_preview_renders_bare(self, mod: Any) -> None:
-        """消息 content_preview 为空 → 不输出冒号后内容。"""
+    async def test_skeleton_patch_data_variants(self, mod: Any) -> None:
+        """patch_data 的 str/dict/损坏 JSON 三形态均正常渲染，不崩溃。"""
         caller = AsyncMock()
-        caller.side_effect = [[], [_make_message(1, "user", ""), _make_message(2, "tool", "")]]
+        caller.side_effect = [[
+            {"plugin_id": "p1", "seq": 1, "patch_type": "StateUpdate", "patch_data": '{"k": 1}'},
+            {"plugin_id": "p2", "seq": 2, "patch_type": "StateUpdate", "patch_data": {"k2": 2}},
+            {"plugin_id": "p3", "seq": 3, "patch_type": "Error", "patch_data": "not-json{"},
+        ]]
         mod.set_capability_caller(caller)
         result = await mod.read_execution_detail(pipeline_run_id="p1", level="skeleton")
-        assert result["message_lines"] == ["[seq 1] user", "[seq 2] tool"]
+        assert result["trace_count"] == 3
+        assert result["trace_steps"][1]["patch_type"] == "StateUpdate"
+        assert result["trace_steps"][2]["state_keys"] == ["_raw"]
+        # Error 锚点：损坏 JSON 无 raw_error 但锚点仍在
+        assert result["error_anchors"][0]["plugin"] == "p3"
 
 
 class TestL1ChunkRender:

@@ -4,5 +4,7 @@
 #   cd frontend && pnpm exec jscpd
 # 首跑基线 2026-09-13（R6v2-close 复跑实测）：knip 118 项发现；jscpd 558 clones（src 扫描面）。
 # 修复存量后用 --init 收紧并 commit 留归因；禁止上调。
-knip_findings=118
-jscpd_clones=558
+# 收紧 2026-09-24（执行方案 0-1）：清偿批 5 提交后 Windows pnpm 口径实测
+# knip 118→99、jscpd 558→547；Linux CI 观察态比对见 ci.yml frontend job
+knip_findings=99
+jscpd_clones=547

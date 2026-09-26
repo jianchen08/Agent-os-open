@@ -113,7 +113,7 @@ fn register_rate_check(state: &AppState) -> Result<(), ApiError> {
     attempts.retain(|t| *t > cutoff);
     if attempts.len() >= REGISTER_MAX_ATTEMPTS {
         return Err(ApiError::TooManyRequests {
-            message: format!("注册请求过于频繁，请 {} 秒后重试", REGISTER_WINDOW_SECS),
+            message: format!("注册请求过于频繁，请 {REGISTER_WINDOW_SECS} 秒后重试"),
             retry_after_secs: REGISTER_WINDOW_SECS,
         });
     }

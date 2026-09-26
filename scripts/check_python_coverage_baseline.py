@@ -5,7 +5,8 @@
 - plugins-coverage gate 产出的 coverage.xml（line-rate）对照
   .github/python-coverage-baseline.txt；
 - 实测 < 基线 → 退出码 1（CI 红）；
-- **自动棘轮（2026-08-21 用户裁决）**：实测 ≥ 基线（绿跑）→ 自动把基线写到
+- **自动棘轮已停用（D1 拍板 2026-09-24：目标线固定 90，用户口径；与 2026-08-21
+  恒推高裁决冲突，新拍板覆盖；陈旧产物误棘轮两次实证）**：原机制备忘——实测 ≥ 基线（绿跑）→ 自动把基线写到
   floor(实测)+1——向上取整到下一个整数百分比（47.48→48、45.5→46、恰为整数
   →再 +1），恒高于实测留压力，下轮未提升即红是预期设计。写入只替换数值行、
   保留归因注释；改动随本批 commit 留归因（CI job 内的写入随 job 丢弃，
@@ -137,14 +138,16 @@ def main() -> int:
         )
         return 1
 
-    ratchet_to = next_pressure_line(pct)
-    update_baseline_value(ratchet_to)
     print(f"[python-cov] ✅ 行覆盖率 {pct:.2f}% ≥ 基线 {baseline:.2f}%")
-    print(
-        f"[python-cov] 🔧 基线自动棘轮: {baseline:.2f}% → {ratchet_to:.2f}%"
-        f"（实测 {pct:.2f} 向上取整到下一整数；下轮需 ≥ {ratchet_to:.2f} 才绿）。"
-    )
-    print("[python-cov] 基线文件已就地更新，随本批改动 commit 留归因（CI job 内的写入随 job 丢弃，以仓库提交为准）。")
+    # D1 拍板（2026-09-24）：目标线固定 90（用户口径），自动棘轮停用——
+    # "目标"语义与"恒推高"不可共存（python 基线被推至 100.00 后实测永
+    # 达不到正是当年 --skip 的成因）；收紧 = --init 手动 + commit 归因。
+    suggested = next_pressure_line(pct)
+    if suggested != baseline:
+        print(
+            f"[python-cov] 💡 可收紧：--init 锚定实测（建议下一压力线 {suggested:.2f}%），"
+            "基线改动走 commit 留归因。"
+        )
     return 0
 
 

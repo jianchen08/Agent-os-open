@@ -29,6 +29,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
 from agentos_plugin_sdk.capability import CapabilityHandle
 
 pytestmark = pytest.mark.unit
@@ -40,11 +41,11 @@ if str(_PLUGIN_DIR) not in sys.path:
 import media_reviewer  # noqa: E402
 from media_reviewer import ImageReviewer, VideoReviewer  # noqa: E402
 from models import MediaReviewConfig  # noqa: E402
-
 from PIL import Image as PILImage  # noqa: E402
-from PIL.ExifTags import Base as ExifBase  # noqa: E402
-from PIL.ExifTags import GPSTAGS  # noqa: E402
-
+from PIL.ExifTags import (
+    GPSTAGS,  # noqa: E402
+    Base as ExifBase,  # noqa: E402
+)
 
 # ═══════════════════════════════════════════════════════════
 # media_reviewer：PIL 边界替身（EXIF 数据源可编程，格式/尺寸走真实验证）

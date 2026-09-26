@@ -207,7 +207,7 @@ def test_build_messages_strips_internal_fields() -> None:
         "messages": [
             {"role": "user", "content": "q", "seq": 3},
             {"role": "tool", "tool_call_id": "call_abc123", "content": "r", "tool_result": {"ok": True}},
-            {"role": "assistant", "content": "a", "_context_form": "x"},
+            {"role": "assistant", "content": "a", "_context_form": "x", "agent_id": "roleplay_agent"},
         ],
     }
     msgs = pre._build_messages(state)  # noqa: SLF001
@@ -215,7 +215,7 @@ def test_build_messages_strips_internal_fields() -> None:
     assert msgs[1] == {"role": "user", "content": "c1"}  # _context_form 剥离
     assert msgs[2] == {"role": "user", "content": "q"}  # seq 剥离
     assert msgs[3] == {"role": "tool", "tool_call_id": "call_abc123", "content": "r"}  # tool_result 剥离
-    assert msgs[4] == {"role": "assistant", "content": "a"}  # _context_form 剥离
+    assert msgs[4] == {"role": "assistant", "content": "a"}  # _context_form/agent_id 剥离
 
 
 def test_build_messages_multimodal_merges_into_list_content() -> None:
@@ -300,6 +300,56 @@ async def test_success_no_text_no_tool_calls_no_messages_update() -> None:
     # 空回复重试（2026-08-30 用户裁定）：首轮计数 1 + 置续跑标志回 LLM
     assert result["llm_empty_streak"] == 1
     assert result["_has_new_llm_input"] is True
+
+
+# ─────────────────── 执行身份戳记（agent_id → 消息 blob） ───────────────────
+
+
+@pytest.mark.parametrize(
+    ("text", "tool_calls", "finish_reason"),
+    [
+        ("纯文本回复", [], "stop"),
+        ("", [{"id": "call_abc123", "name": "bash", "args": "{}"}], "tool_calls"),
+    ],
+    ids=["plain", "tool_calls"],
+)
+async def test_success_stamps_agent_id_from_state(
+    text: str, tool_calls: list, finish_reason: str
+) -> None:
+    """state 持久键 agent.id → assistant blob 戳记 agent_id（消息生成时的管道
+    执行身份，前端气泡卡名/卡头像数据源）。纯文本与 tool_calls 两种产出形态
+    都要戳记。"""
+    caller = _FakeCaller(
+        {
+            "success": True,
+            "data": _ok_response(
+                text=text, tool_calls=tool_calls, finish_reason=finish_reason
+            ),
+        }
+    )
+    state = {**_base_state(), "agent.id": "roleplay_agent"}
+    result = await _make_plugin(caller).execute(_make_ctx(state))
+
+    assistant = result["messages"]["_ops"][0]["msg"]
+    assert assistant["agent_id"] == "roleplay_agent"
+
+
+@pytest.mark.parametrize(
+    "agent_id_state",
+    [None, ""],
+    ids=["key_absent", "empty_string"],
+)
+async def test_success_no_agent_id_state_omits_stamp(agent_id_state: str | None) -> None:
+    """无 agent.id（会话类管道未透传）或空串 → blob 不写 agent_id 键
+    （缺省不污染，前端按可空类型兜底默认身份）。"""
+    caller = _FakeCaller({"success": True, "data": _ok_response(text="ok")})
+    state = _base_state()
+    if agent_id_state is not None:
+        state["agent.id"] = agent_id_state
+    result = await _make_plugin(caller).execute(_make_ctx(state))
+
+    assistant = result["messages"]["_ops"][0]["msg"]
+    assert "agent_id" not in assistant
 
 
 # ─────────────────── 空回复重试（2026-08-30 用户裁定） ───────────────────

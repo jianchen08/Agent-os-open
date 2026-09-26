@@ -58,6 +58,30 @@ def test_prepare_chain_wires_context_build():
     )
 
 
+def test_prepare_chain_wires_mode_material_after_context_build():
+    """模式物料步骤紧跟 context_build，且在 tool_schema/prompt_build 之前。
+
+    2026-09-24 架构重构：模式物料段与 tool_ids 收窄自 context_build 抽出归
+    pipeline_mode_material_inject——缺位则模式注入整体断链；错位到 tool_schema 之后
+    则收窄不生效，错位到 prompt_build 之后则模式段进不了本轮提示词。
+    """
+    steps = _prepare_steps()
+    assert "pipeline_mode_material_inject" in steps, (
+        "pipeline_mode_material_inject 未接入 autonomous 管道 prepare 链——"
+        "模式物料段/mode 回写/tool_ids 收窄整体断链"
+    )
+    idx = {name: i for i, name in enumerate(steps)}
+    assert idx["pipeline_context_build"] < idx["pipeline_mode_material_inject"], (
+        "模式物料步骤须在 context_build 之后（消费其写出的基线工具面与提示词）"
+    )
+    assert idx["pipeline_mode_material_inject"] < idx["pipeline_tool_schema"], (
+        "模式物料步骤必须先于 tool_schema：tool_ids 收窄由其叠加"
+    )
+    assert idx["pipeline_mode_material_inject"] < idx["pipeline_prompt_build"], (
+        "模式物料步骤必须先于 prompt_build：模式段追加须先于提示词组装"
+    )
+
+
 # ── 插件契约（context_build → prompt_build 平铺导入，逐出同名裸模块）──
 
 add_plugin_dir("input", "context_build")

@@ -34,12 +34,12 @@ vi.mock('../client', () => {
   return { default: mockClient, apiClient: mockClient }
 })
 
-import * as filesApi from '../files'
-import * as pipelinesApi from '../pipelines'
-import * as memoryApi from '../memory'
-import * as authApi from '../auth'
 import { API_ENDPOINTS } from '@/constants/api'
+import * as authApi from '../auth'
 import { ARTIFACTS_ENDPOINTS, HINDSIGHT_MEMORY_SERVICE_ENDPOINTS, MULTIMODAL_SERVICE_ENDPOINTS } from '../endpoints.generated'
+import * as filesApi from '../files'
+import * as memoryApi from '../memory'
+import * as pipelinesApi from '../pipelines'
 
 beforeEach(() => {
   vi.clearAllMocks()

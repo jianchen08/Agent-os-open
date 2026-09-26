@@ -57,6 +57,11 @@ _COLLIDING_NAMES = frozenset(
         "exceptions",
         "budget_manager",
         "constants",
+        # cost_control 平铺 config.py 与仓根 config/ 包同名：裸名 `from config
+        # import`（cost_control/server.py）驻留后，sdk isolation_policy 的
+        # `from config.config_center import` 断裂（'config' is not a package）
+        # → 安全规则注入链降级 → soft_block 误拦（2026-09-26 三扫实证）。
+        "config",
         # 注：pipeline 不逐出——它是包（plugins/shared/pipeline/），不是平铺裸名
         # 模块；逐出会让已持引用的测试模块与插件重载拿到两份 PluginResult
         # 类对象，isinstance 恒假（level_guard/environment_lifecycle 共跑 31 红）。

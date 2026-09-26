@@ -1,5 +1,4 @@
 # @feature: FP-0.2.二 内部模块 manifest | @ci: python-coverage
-# -*- coding: utf-8 -*-
 """角色扮演模式活面板行为测试（宿主融合形态，2026-09-17 三裁定 + BUG-73 修复契约）：
 
 - 对话回归对话框：开演产出经「开演记录」详情回显（/data/messages 消费面恢复，
@@ -213,21 +212,23 @@ def test_panel_html_theme_sync_receiver_and_host_tokens() -> None:
     assert "prefers-color-scheme" in html
 
 
-def test_panel_html_dedicated_session_play_flow() -> None:
-    """BUG-73 断点a/c 面板契约：开演不透传宿主会话锚（专属会话由服务端派生），
-    派发成功可见反馈=toast 带任务号 + 自动切「开演记录」页签 + 立即与延迟刷新。"""
+def test_panel_html_sessionized_play_flow() -> None:
+    """会话化开演面板契约（2026-09-25，扮演是对话不是任务）：fresh 走
+    roleplay.continue 宿主桥（无任务派发、无开演记录页签联动）；宿主会话锚
+    不出现在任何上行 body；possess/regenerate 派发中状态反馈保留。"""
     html = _panel_html()
     lowered = html.lower()
     # 三页签布局保持：角色卡 / 世界书 / 开演记录
     assert "角色卡" in html and "世界书" in html and "开演记录" in html
-    # 宿主会话锚不再出现在任何上行 body（开演/重新生成均不透传）
+    # 宿主会话锚不再出现在任何上行 body（开演已会话化/重新生成不透传）
     assert "session_id" not in lowered
     assert "currentsessionid" not in lowered
-    # 派发成功反馈三件套：toast 带任务号/去向、切开演记录页签、延迟补刷新
-    assert "已开演" in html and "开演记录" in html
-    assert "switchtab('sessions')" in lowered
-    assert "settimeout" in lowered  # 新记录行需等管道写 mode 键，延迟补刷新
-    # 派发中状态反馈保留
+    # 会话化开演：roleplay.continue 桥 + 会话切换 toast；旧任务派发反馈
+    # （任务号 toast/切开演记录页签/延迟补刷）随之移除
+    assert "roleplay.continue" in lowered
+    assert "扮演会话已创建，已切换" in html
+    assert "已开演" not in html
+    # possess/regenerate 派发中状态反馈保留
     assert "派发中" in html
 
 
@@ -243,6 +244,84 @@ def test_panel_html_record_detail_renders_performance() -> None:
     assert "演出尚未落" in html
 
 
+def test_panel_html_wave_b_mature_contract() -> None:
+    """角色扮演面板消费面契约（Wave B + 2026-09-25 会话化开演）：
+    - 开演双按钮并列（possess/fresh，无默认不记忆）：possess 走 /data/actions/
+      play 回执 + roleplay.possess 宿主桥；fresh 走 roleplay.continue 宿主桥
+      建扮演会话（开演即对话），载荷携所选开场白 selectedGreetingText 与
+      用户设定 resolvedUserPersonaText，成功 toast「扮演会话已创建，已切换」；
+    - 卡库画廊网格 + 页签工具行（新建/导入）；来源徽标（出厂/自建）；
+    - 卡 CRUD 面（save/import/export/delete）+ persona 档案面
+      （读取/管理 save/delete），开演选中档走 persona_name、临时文本走
+      user_persona（互斥上行）；
+    - 开演进度态：running/completed 无产出/其余三态联动文案。
+    后端端点由并行任务实现（manifest 声明以该任务为准），本测试锁面板消费面。"""
+    html = _panel_html()
+    lowered = html.lower()
+    # 双按钮 + 附身上行宿主桥动作 + 会话化开演桥
+    assert "附身当前助手" in html and "新开扮演会话" in html
+    assert "已附身" in html and "roleplay.possess" in lowered
+    assert "扮演会话已创建，已切换" in html
+    # 会话化开演：fresh 分支走 roleplay.continue，携开场白/用户设定文本
+    # （onclick 串在 JS 源里经 \' 转义，先归一再断言）
+    unescaped = html.replace("\\'", "'")
+    lowered_unescaped = unescaped.lower()
+    assert "playcard('possess')" in lowered_unescaped and "playcard('fresh')" in lowered_unescaped
+    assert "selectedgreetingtext(c)" in lowered and "resolveduserpersonatext()" in lowered
+    # 开场白/用户设定空则键缺省（桥 fail-closed：在场键须非空字符串）
+    assert "payload.greeting = greeting" in lowered and "payload.personatext = personatext" in lowered
+    # 附身上行携带卡人设文本（cardPersonaText：description+personality+scenario
+    # 拼接；宿主发送链经 execution_context.roleplay_persona 注入，主 agent 身份不变）
+    assert "cardPersonaText" in html and "personaText: cardPersonaText(c)" in html
+    # 卡库：画廊网格 + 工具行 + 来源徽标
+    assert "repeat(auto-fill, minmax(150px, 1fr))" in lowered
+    assert "openCardForm()" in html and "importcard()" in lowered
+    assert "出厂" in html and "自建" in html
+    assert "出厂卡·可复制修改" in html
+    # 卡 CRUD 面与 persona 面端点消费
+    for suffix in (
+        "/data/cards/save", "/data/cards/import", "/data/cards/export", "/data/cards/delete",
+        "/data/personas", "/data/personas/save", "/data/personas/delete",
+    ):
+        assert suffix in lowered, f"缺端点消费 {suffix}"
+    # persona 三态互斥上行 + 管理/临时填写入口
+    assert "persona_name" in lowered and "user_persona" in lowered
+    assert "临时填写" in html and "管理" in html
+    # 开演进度态联动文案
+    assert "演出进行中" in html and "演出已完成但未捕获产出" in html
+
+
+def test_panel_html_lorebook_management_contract() -> None:
+    """世界书页签管理 UI 契约（用户层物料双根化消费面，对齐卡管理形态）：
+    工具行（新建/导入）+ 来源徽标（出厂/自建）+ 书 CRUD/导入端点消费 +
+    条目编辑控件 + 注入联动说明（按卡 lorebook_ids 生效）。"""
+    html = _panel_html()
+    lowered = html.lower()
+    # 工具行 + 书 CRUD 面端点消费（详情/表单/删除/导入）
+    assert "openbookform()" in lowered
+    assert "importbook()" in lowered
+    for suffix in (
+        "/data/lorebooks/save", "/data/lorebooks/delete", "/data/lorebooks/import",
+    ):
+        assert suffix in lowered, f"缺端点消费 {suffix}"
+    # 来源徽标 + 出厂书只读保护 + 用户书两步确认删除
+    assert "出厂" in html
+    assert "自建" in html
+    assert "出厂书·可复制修改" in html
+    assert "确认删除" in html
+    # 条目编辑控件（keys 逗号分隔/content/enabled/constant/insertion_order/position 下拉）
+    assert "ekeys_" in lowered
+    assert "econtent_" in lowered
+    assert "eenabled_" in lowered
+    assert "econstant_" in lowered
+    assert "eorder_" in lowered
+    assert "epos_" in lowered
+    assert "before_char" in lowered
+    assert "after_char" in lowered
+    # 注入联动说明：世界书经卡 lorebook_ids 绑定生效
+    assert "lorebook_ids" in lowered
+
+
 # ── 开演/重新生成的会话锚（args 捕获断形状）─────────────────────────────────────
 
 
@@ -254,40 +333,32 @@ def _fake_invoke_capturing(captured: dict[str, Any], task_id: str) -> Any:
     return _fake_invoke
 
 
-def test_play_action_anchors_dedicated_card_thread() -> None:
-    """BUG-73 断点a：开演锚卡专属扮演会话（thread-rp-<card_id>），body 携带的
-    宿主活跃 session_id 一律忽略（缺席/空/活跃会话 id 三形态同裁决）。"""
+def test_play_action_possess_only_ignores_body_context_keys() -> None:
+    """play 端点 possess-only（fresh 已会话化，2026-09-25）：不再派发任务，
+    body 携带的会话锚/persona/开场白等上下文键零消费（服务端无状态）。"""
     module = _load_server()
     captured: dict[str, Any] = {}
     module._set_provider("tool-executor", _fake_invoke_capturing(captured, "task-s1"))
 
     def _play(body_extra: dict[str, Any]) -> dict[str, Any]:
-        body: dict[str, Any] = {"card_id": "card_luna", "user_persona": "北地佣兵"}
+        body: dict[str, Any] = {
+            "card_id": "card_luna", "play_mode": "possess", "user_persona": "北地佣兵",
+        }
         body.update(body_extra)
         return _body_json(
             _call(module, f"{_EP}/actions/play", method="POST", raw_body=json.dumps(body))
         )
 
-    # body 带「宿主当前活跃会话」：忽略，锚卡专属会话（R92 同族污染根除）
-    assert _play({"session_id": "thread-858ab1bd-bf13-4d59-a7c7-e39b589f158b"}) == {
-        "task_id": "task-s1"
-    }
-    args = captured["args"]
-    assert args["session_id"] == "thread-rp-card_luna"
-    assert args["target_id"] == "mode_roleplay/card_luna" and args["mode"] == "roleplay"
-    # 面板按主 agent（L1）身份代用户派发（tool-executor 直调无注入链，须自携）
-    assert args["parent_agent_level"] == 1
-
-    # 无 session_id / 空 session_id：同一专属锚（不虚构宿主归属）
-    assert _play({}) == {"task_id": "task-s1"}
-    assert captured["args"]["session_id"] == "thread-rp-card_luna"
-    assert _play({"session_id": ""}) == {"task_id": "task-s1"}
-    assert captured["args"]["session_id"] == "thread-rp-card_luna"
-
-    # 不同卡 → 各自专属锚（同卡复演=复用同一扮演会话）
-    captured.clear()
-    assert _play({"card_id": "card_kael"}) == {"task_id": "task-s1"}
-    assert captured["args"]["session_id"] == "thread-rp-card_kael"
+    # 上下文键各异形态：一律零消费零派发，回执 possess 卡档案
+    for extra in (
+        {"session_id": "thread-858ab1bd-bf13-4d59-a7c7-e39b589f158b"},
+        {},
+        {"session_id": "", "greeting_index": 2},
+    ):
+        out = _play(extra)
+        assert captured == {}, "play 零派发（fresh 已会话化）"
+        assert out["card_id"] == "card_luna" and out["play_mode"] == "possess"
+        assert out["presenter"]["name"] == "塞拉菲娜·月语"
 
 
 def test_play_action_accepts_kernel_base64_body() -> None:
@@ -297,83 +368,31 @@ def test_play_action_accepts_kernel_base64_body() -> None:
     captured: dict[str, Any] = {}
     module._set_provider("tool-executor", _fake_invoke_capturing(captured, "task-b64"))
 
-    # 内核形态：base64(json)
+    # 内核形态：base64(json)（possess 回执：卡档案 + theme）
     raw_b64 = base64.b64encode(
-        json.dumps({"card_id": "card_kael", "user_persona": "银币商人"}).encode("utf-8")
+        json.dumps({"card_id": "card_kael", "play_mode": "possess"}).encode("utf-8")
     ).decode("ascii")
-    assert _body_json(_call(module, f"{_EP}/actions/play", method="POST", raw_body=raw_b64)) == {
-        "task_id": "task-b64"
-    }
-    args = captured["args"]
-    assert args["target_id"] == "mode_roleplay/card_kael"
-    assert "银币商人" in args["goal_description"]
+    out = _body_json(_call(module, f"{_EP}/actions/play", method="POST", raw_body=raw_b64))
+    assert captured == {}
+    assert out["card_id"] == "card_kael" and out["play_mode"] == "possess"
+    assert out["presenter"]["card_id"] == "card_kael"
 
-    # 裸 JSON 形态（第二组区分度输入）：另一张卡解析结果不同
-    captured.clear()
-    assert _body_json(
+    # 裸 JSON 形态（第二组区分度输入）：未知 play_mode 显式 400
+    out = _body_json(
         _call(
             module, f"{_EP}/actions/play", method="POST",
-            raw_body=json.dumps({"card_id": "card_mira", "user_persona": "星见高中转校生"}),
+            raw_body=json.dumps({"card_id": "card_mira", "play_mode": "haunt"}),
         )
-    ) == {"task_id": "task-b64"}
-    args = captured["args"]
-    assert args["target_id"] == "mode_roleplay/card_mira"
-    assert "星见高中转校生" in args["goal_description"]
+    )
+    assert out["error"] == "未知 play_mode: haunt"
 
 
-def test_regenerate_action_anchors_source_pipeline_thread() -> None:
-    """行级动作锚定来源管道：session_id = 所操作行的 thread_id（用户裁定 T1——
-    GUI 操作哪条管道，交互落哪条管道的线程），非 body 透传的当前活跃会话。"""
+def test_regenerate_retired_410() -> None:
+    """regenerate 已收编进扮演会话的宿主消息操作 → 410 语义化退役。"""
     module = _load_server()
-    rows = [
-        {
-            "pipeline_id": "pipe-r1", "thread_id": "th-1", "agent_id": "mode_roleplay/card_kael",
-            "run_status": "completed", "mode": "roleplay", "task.goal": "与凯尔谈委托",
-            "task.status": "completed", "message_count": 2,
-        },
-        {   # 另一行（不同 thread_id）：证明锚的是所操作行，不是任意行
-            "pipeline_id": "pipe-r2", "thread_id": "th-2", "agent_id": "mode_roleplay/card_luna",
-            "run_status": "completed", "mode": "roleplay", "task.goal": "月语神殿夜谈",
-            "task.status": "completed", "message_count": 4,
-        },
-    ]
-    module._set_provider("pipeline-state", lambda: asyncio.sleep(0, result=rows))
-
-    async def _messages_provider(pipeline_id: str, limit: int | None = None) -> list[dict[str, Any]]:
-        return [
-            {"role": "user", "content_preview": "这单有风险", "status": "success", "created_at": "t1"},
-            {"role": "assistant", "content_preview": "「说数。」", "status": "success", "created_at": "t2"},
-        ]
-
-    module._set_provider("messages", _messages_provider)
-    captured: dict[str, Any] = {}
-    module._set_provider("tool-executor", _fake_invoke_capturing(captured, "task-r1"))
-
-    def _regen(body_extra: dict[str, Any]) -> dict[str, Any]:
-        body: dict[str, Any] = {"pipeline_id": "pipe-r1", **body_extra}
-        return _body_json(
-            _call(module, f"{_EP}/actions/regenerate", method="POST", raw_body=json.dumps(body))
-        )
-
-    # 操作 pipe-r1：锚该行 thread_id；body 携带的当前活跃会话值被忽略
-    assert _regen({"session_id": "sess-current-active"}) == {"task_id": "task-r1"}
-    args = captured["args"]
-    assert args["session_id"] == "th-1"
-    assert args["session_id"] != "th-2" and args["session_id"] != "sess-current-active"
-    assert args["task_kind"] == "roleplay_regenerate"
-    assert args["metadata"] == {"source_pipeline_id": "pipe-r1"}
-    # parent_agent_level=1 依据同 play（面板 = 主 agent 身份代用户派发）
-    assert args["parent_agent_level"] == 1
-
-    # 行缺 thread_id：回退 body 显式 session_id；皆缺省省略
-    rows[0]["thread_id"] = ""
-    module._set_provider("pipeline-state", lambda: asyncio.sleep(0, result=rows))
-    assert _regen({"session_id": "sess-fallback"}) == {"task_id": "task-r1"}
-    assert captured["args"]["session_id"] == "sess-fallback"
-
-    module._set_provider("pipeline-state", lambda: asyncio.sleep(0, result=rows))
-    assert _regen({}) == {"task_id": "task-r1"}
-    assert "session_id" not in captured["args"]
+    result = _call(module, f"{_EP}/actions/regenerate", method="POST", raw_body=json.dumps({"pipeline_id": "p-rp"}))
+    assert _envelope_status(result) == 410
+    assert "收编" in _body_json(result)["error"]
 
 
 # ── /data/messages 端点（BUG-73 后恢复消费：开演记录详情回显扮演轮次）──────────────

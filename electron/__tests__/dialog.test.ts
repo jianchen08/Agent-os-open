@@ -55,6 +55,7 @@ const electronMock = vi.hoisted(() => {
 });
 
 vi.mock("electron", () => ({
+  safeStorage: undefined,
   app: electronMock.app,
   BrowserWindow: electronMock.BrowserWindow,
   Notification: vi.fn(),

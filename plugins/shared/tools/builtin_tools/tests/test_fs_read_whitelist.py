@@ -1,14 +1,17 @@
-# @feature: FP-0.2.spill_guard 内置工具读护栏(R171 读面白名单前缀锚) | @ci: python-coverage
-"""读面白名单前缀锚测试（2026-09-19 用户裁定：读是宽的，写/删才限工作空间）。
+# @feature: FP-0.2.spill_guard 内置工具读护栏 | @ci: python-coverage
+"""区域读写判定测试（ADR 2026-09-24-read-deny-write-zones：读黑名单制+写区白名单）。
 
-锁定契约（file_read / list_directory / enhanced_search 共用
+锁定契约（file_read / list_directory / enhanced_search / 写删move 共用
 fs_tools._check_workspace_path 单点判定）：
-1. 相对路径以工作空间解析落空 → 按白名单前缀根回退解析一次（R171 主场景：
-   L1 会话空工作空间读仓库相对路径不再 File not found）；
-2. 工作空间外路径落在白名单前缀内 → 纯读允许；白名单外仍拒绝；
-3. 仓库锚拒绝目录（config 等）不因白名单放行，凭据黑名单恒先行；
-4. 写/删/move 对白名单内工作空间外路径维持拒绝（写保护回归）；
-5. 工作空间内已存在文件优先（回退只在落空时发生）。
+1. 读黑名单制：根外普通路径全放；凭据黑名单、仓库拒绝集、read_deny 前缀
+   除外（读不再需要名单/授权）；
+2. 相对路径以工作空间解析落空 → 按白名单前缀根/仓库根回退解析一次（R171
+   主场景：L1 会话空工作空间读仓库相对路径不再 File not found）；
+3. 写区：entries 前缀内写/删/move 放行（交上层按权限档走），仓库自保
+   目录对写恒拒（系统自保优先于写区）；
+4. 写区外拒绝并提示授权通道（名单/授权卡）；
+5. read_deny 只挡读不挡写（读写语义按节分离，不按方向双名单）；
+6. 工作空间内已存在文件优先（回退只在落空时发生）。
 """
 
 from __future__ import annotations
@@ -36,10 +39,10 @@ _HELLO_REL = "plugins/shared/tools/hello_pack/hello_pack.py"
 
 
 @pytest.fixture()
-def whitelist_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
-    """假仓库（repo 锚标记）+ 第二白名单前缀 + 空会话工作空间 + 白名单文件。
+def zone_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """假仓库（repo 锚标记）+ 第二写区 + read_deny 排除区 + 空会话工作空间。
 
-    白名单经 env AGENTOS_CONFIG_USERS_DIR 钉到 tmp（与登记侧测试同款隔离）；
+    名单经 env AGENTOS_CONFIG_USERS_DIR 钉到 tmp（与登记侧测试同款隔离）；
     repo 锚经 AGENTOS_CONFIG_ROOT 钉到假仓库并重置解析缓存。
     """
     repo = tmp_path / "repo"
@@ -53,44 +56,53 @@ def whitelist_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleName
     second = tmp_path / "second_project"
     (second / "data").mkdir(parents=True)
     (second / "data" / "report.csv").write_text("col\n1\n", encoding="utf-8")
+    denied = tmp_path / "private_zone"
+    denied.mkdir(parents=True)
+    (denied / "diary.txt").write_text("PRIVATE\n", encoding="utf-8")
     ws = tmp_path / "sessions" / "s1"  # 模拟主会话自动生成的空工作空间
     ws.mkdir(parents=True)
     users_dir = tmp_path / "config" / "users"
     (users_dir / "default").mkdir(parents=True)
     (users_dir / "default" / "project_whitelist.yaml").write_text(
-        yaml.safe_dump({"entries": [str(repo), str(second)]}), encoding="utf-8"
+        yaml.safe_dump(
+            {
+                "entries": [str(repo), str(second)],
+                "read_deny": [str(denied)],
+            }
+        ),
+        encoding="utf-8",
     )
     monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(repo / "config"))
     monkeypatch.setenv("AGENTOS_CONFIG_USERS_DIR", str(users_dir))
     repo_anchor.reset_cache()
-    yield SimpleNamespace(repo=repo, second=second, ws=ws)
+    yield SimpleNamespace(repo=repo, second=second, denied=denied, ws=ws)
     repo_anchor.reset_cache()
 
 
-class TestReadWhitelistFallback:
-    """相对路径工作空间落空 → 白名单前缀根回退解析一次（裁定第 1 条）。"""
+class TestReadDenylist:
+    """读黑名单制（决策1）：根外普通路径全放，凭据/仓库拒绝集/read_deny 除外。"""
 
     @pytest.mark.parametrize(
         "relpath",
         [_HELLO_REL, "note.txt"],
     )
     async def test_repo_relative_path_from_empty_session_workspace(
-        self, whitelist_env: SimpleNamespace, relpath: str
+        self, zone_env: SimpleNamespace, relpath: str
     ) -> None:
         """R171 主场景：空会话工作空间读仓库相对路径成功，file 回宿主绝对路径。"""
-        result = await file_read(path=relpath, workspace=str(whitelist_env.ws))
+        result = await file_read(path=relpath, workspace=str(zone_env.ws))
 
         assert result.success is True, result.error
         assert "GREETING" in result.output["content"] or "REPO" in result.output["content"]
-        expected = (whitelist_env.repo / relpath).resolve()
+        expected = (zone_env.repo / relpath).resolve()
         assert Path(result.output["file"]) == expected
 
     async def test_list_directory_repo_relative_from_empty_session_workspace(
-        self, whitelist_env: SimpleNamespace
+        self, zone_env: SimpleNamespace
     ) -> None:
         """list_directory 同款回退：仓库相对目录可列出。"""
         result = await list_directory(
-            "plugins/shared/tools/hello_pack", workspace=str(whitelist_env.ws)
+            "plugins/shared/tools/hello_pack", workspace=str(zone_env.ws)
         )
 
         assert result.success is True, result.error
@@ -98,19 +110,19 @@ class TestReadWhitelistFallback:
         assert names == {"hello_pack.py"}
 
     async def test_relative_path_missing_everywhere_reports_file_not_found(
-        self, whitelist_env: SimpleNamespace
+        self, zone_env: SimpleNamespace
     ) -> None:
         """回退全落空 → 维持原 File not found（不虚构内容）。"""
-        result = await file_read(path="ghost.txt", workspace=str(whitelist_env.ws))
+        result = await file_read(path="ghost.txt", workspace=str(zone_env.ws))
 
         assert result.success is False
         assert "File not found" in result.error
 
     async def test_relative_fallback_into_second_prefix(
-        self, whitelist_env: SimpleNamespace
+        self, zone_env: SimpleNamespace
     ) -> None:
         """相对路径只存在于第二前缀下：回退遍历多前缀命中。"""
-        result = await file_read(path="data/report.csv", workspace=str(whitelist_env.ws))
+        result = await file_read(path="data/report.csv", workspace=str(zone_env.ws))
 
         assert result.success is True, result.error
         assert "col" in result.output["content"]
@@ -161,87 +173,94 @@ class TestReadWhitelistFallback:
         finally:
             repo_anchor.reset_cache()
 
-    async def test_traversal_escape_not_rescued_by_fallback(
-        self, tmp_path: Path, whitelist_env: SimpleNamespace
+    async def test_outside_any_prefix_readable(
+        self, zone_env: SimpleNamespace, tmp_path: Path
     ) -> None:
-        """``..`` 逃逸出工作空间且在白名单外：仍拒绝（回退不开越界口子）。"""
-        leaked = tmp_path / "leaked.txt"
-        leaked.write_text("x\n", encoding="utf-8")
-
-        result = await file_read(path="../leaked.txt", workspace=str(whitelist_env.ws))
-
-        assert result.success is False
-        assert "超出 workspace/project_root" in result.error
-
-
-class TestWhitelistAbsoluteRead:
-    """工作空间外、白名单前缀内的纯读放行；白名单外仍拒绝（裁定第 2 条）。"""
-
-    async def test_second_prefix_absolute_readable(
-        self, whitelist_env: SimpleNamespace
-    ) -> None:
-        """仓库锚之外的第二白名单前缀：绝对路径可读（白名单独立于仓库锚生效）。"""
-        target = whitelist_env.second / "data" / "report.csv"
-
-        result = await file_read(path=str(target), workspace=str(whitelist_env.ws))
-
-        assert result.success is True, result.error
-        assert "col" in result.output["content"]
-
-    async def test_outside_whitelist_rejected(
-        self, tmp_path: Path, whitelist_env: SimpleNamespace
-    ) -> None:
-        """白名单外路径仍拒绝（读放宽不等于任意读）。"""
+        """名单外普通路径读放行（读不再需要名单/授权）。"""
         outsider = tmp_path / "outsider"
         outsider.mkdir()
         (outsider / "s.txt").write_text("x\n", encoding="utf-8")
 
-        result = await file_read(path=str(outsider / "s.txt"), workspace=str(whitelist_env.ws))
+        result = await file_read(path=str(outsider / "s.txt"), workspace=str(zone_env.ws))
+
+        assert result.success is True, result.error
+        assert "x" in result.output["content"]
+
+    async def test_read_deny_prefix_rejected(self, zone_env: SimpleNamespace) -> None:
+        """read_deny 前缀命中拒绝读取（用户排除区）。"""
+        result = await file_read(
+            path=str(zone_env.denied / "diary.txt"), workspace=str(zone_env.ws)
+        )
 
         assert result.success is False
-        assert "超出 workspace/project_root" in result.error
+        assert "read_deny" in result.error
+
+    async def test_read_deny_prefix_descendant_rejected(
+        self, zone_env: SimpleNamespace
+    ) -> None:
+        """read_deny 前缀授权任意层级后代（子目录同拒）。"""
+        child = zone_env.denied / "sub"
+        child.mkdir()
+        (child / "x.txt").write_text("y\n", encoding="utf-8")
+
+        result = await file_read(path=str(child / "x.txt"), workspace=str(zone_env.ws))
+
+        assert result.success is False
+        assert "read_deny" in result.error
 
     async def test_repo_denied_dir_via_fallback_rejected(
-        self, whitelist_env: SimpleNamespace
+        self, zone_env: SimpleNamespace
     ) -> None:
-        """回退候选落在仓库拒绝目录（config/）：拒绝，白名单不淹没仓库锚。"""
-        result = await file_read(path="config/llm.yaml", workspace=str(whitelist_env.ws))
+        """回退候选落在仓库拒绝目录（config/）：拒绝（仓库锚先行于 read_deny 链）。"""
+        result = await file_read(path="config/llm.yaml", workspace=str(zone_env.ws))
 
         assert result.success is False
         assert "运行时/产物区" in result.error
 
-    async def test_env_via_relative_denied(self, whitelist_env: SimpleNamespace) -> None:
+    async def test_env_via_relative_denied(self, zone_env: SimpleNamespace) -> None:
         """凭据黑名单恒先行：仓库根 .env 经相对路径回退仍拒绝。"""
-        result = await file_read(path=".env", workspace=str(whitelist_env.ws))
+        result = await file_read(path=".env", workspace=str(zone_env.ws))
 
         assert result.success is False
         assert "凭据类文件" in result.error
 
+    async def test_traversal_escape_readable_under_denylist(
+        self, zone_env: SimpleNamespace
+    ) -> None:
+        """``..`` 逃逸出工作空间的普通文件读放行（区域不设限；凭据/排除区仍拦）。"""
+        leaked = zone_env.ws.parent / "leaked.txt"
+        leaked.write_text("x\n", encoding="utf-8")
+
+        result = await file_read(path="../leaked.txt", workspace=str(zone_env.ws))
+
+        assert result.success is True, result.error
+        assert "x" in result.output["content"]
+
 
 class TestWorkspacePrecedence:
-    """工作空间内已存在文件优先，回退不遮蔽（裁定第 5 条）。"""
+    """工作空间内已存在文件优先，回退不遮蔽（契约第 6 条）。"""
 
     async def test_existing_workspace_file_not_shadowed_by_repo(
-        self, whitelist_env: SimpleNamespace
+        self, zone_env: SimpleNamespace
     ) -> None:
         """同名文件工作空间内存在 → 读工作空间副本，不回退仓库。"""
-        (whitelist_env.ws / "note.txt").write_text("WS\n", encoding="utf-8")
+        (zone_env.ws / "note.txt").write_text("WS\n", encoding="utf-8")
 
-        result = await file_read(path="note.txt", workspace=str(whitelist_env.ws))
+        result = await file_read(path="note.txt", workspace=str(zone_env.ws))
 
         assert result.success is True, result.error
         assert result.output["content"] == "WS\n"
 
 
 class TestWhitelistModuleDegradation:
-    """project_registry 不可用：白名单降级为空（范围收缩），工具面不断。"""
+    """project_registry 不可用：写区/读排除名单双双降级为空（范围收缩），工具面不断。"""
 
     async def test_import_failure_degrades_to_empty_whitelist(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """共享根缺失（导入失败）→ 空白名单；工作空间内读取不受影响。"""
+        """共享根缺失（导入失败）→ 空名单；工作空间内读取不受影响。"""
         from agentos_builtin_tools import fs_tools
 
         ws = tmp_path / "ws_deg"
@@ -250,98 +269,177 @@ class TestWhitelistModuleDegradation:
         monkeypatch.setitem(sys.modules, "project_registry", None)
 
         assert fs_tools._load_registration_whitelist() == []
+        # 判定单源 zone_policy 的读排除加载同款降级（fs_tools 判定链经它）
+        assert fs_tools._zone_policy._load_read_deny() == []
 
         result = await file_read(path="local.txt", workspace=str(ws))
         assert result.success is True, result.error
         assert result.output["content"] == "ok\n"
 
 
-class TestWriteProtectionUnchanged:
-    """写/删/move 对白名单内、工作空间外路径维持拒绝（裁定第 4 条）。"""
+class TestWriteZones:
+    """写区语义（决策2/3）：entries 前缀写放行；区外拒绝；仓库自保目录恒拒。"""
 
-    async def test_write_repo_absolute_rejected(self, whitelist_env: SimpleNamespace) -> None:
-        """写仓库绝对路径（工作空间外、白名单内）拒绝，仓库文件不被改动。
-
-        （相对写路径解析进工作空间属合法工作空间写，不在此列——写保护锚的是
-        落点在工作空间外的路径。）
-        """
-        target = whitelist_env.repo / _HELLO_REL
-        before = target.read_text(encoding="utf-8")
+    async def test_write_repo_source_zone_allowed(self, zone_env: SimpleNamespace) -> None:
+        """仓库根在名单内：源码区写放行（写区语义，交上层按权限档走）。"""
+        target = zone_env.repo / _HELLO_REL
 
         result = await file_write(
-            path=str(target), action="append", content="evil", workspace=str(whitelist_env.ws)
+            path=str(target),
+            action="append",
+            content="\n# touched",
+            workspace=str(zone_env.ws),
         )
 
-        assert result.success is False
-        assert "超出 workspace/project_root" in result.error
-        assert target.read_text(encoding="utf-8") == before
+        assert result.success is True, result.error
+        assert "# touched" in target.read_text(encoding="utf-8")
 
-    async def test_write_second_prefix_absolute_rejected(
-        self, whitelist_env: SimpleNamespace
-    ) -> None:
-        """写第二白名单前缀（工作空间外）拒绝。"""
-        target = whitelist_env.second / "data" / "report.csv"
-        before = target.read_text(encoding="utf-8")
+    async def test_write_second_prefix_allowed(self, zone_env: SimpleNamespace) -> None:
+        """第二写区内追加放行。"""
+        target = zone_env.second / "data" / "report.csv"
 
         result = await file_write(
-            path=str(target), action="append", content="evil", workspace=str(whitelist_env.ws)
+            path=str(target), action="append", content="2\n", workspace=str(zone_env.ws)
         )
 
-        assert result.success is False
-        assert target.read_text(encoding="utf-8") == before
+        assert result.success is True, result.error
+        assert "2" in target.read_text(encoding="utf-8")
 
-    async def test_delete_repo_file_rejected(self, whitelist_env: SimpleNamespace) -> None:
-        """删仓库绝对路径（工作空间外）拒绝，文件保留。"""
-        target = whitelist_env.repo / "note.txt"
+    async def test_delete_in_zone_allowed(self, zone_env: SimpleNamespace) -> None:
+        """删写区内文件放行。"""
+        victim = zone_env.second / "data" / "report.csv"
 
-        result = await delete_file(path=str(target), workspace=str(whitelist_env.ws))
+        result = await delete_file(path=str(victim), workspace=str(zone_env.ws))
 
-        assert result.success is False
-        assert "超出 workspace/project_root" in result.error
-        assert target.exists()
+        assert result.success is True, result.error
+        assert not victim.exists()
 
-    async def test_move_into_repo_rejected(self, whitelist_env: SimpleNamespace) -> None:
-        """移动目标在仓库内拒绝（move 双端同规）。"""
-        src = whitelist_env.ws / "local.txt"
-        src.write_text("x\n", encoding="utf-8")
+    async def test_move_within_zone_allowed(self, zone_env: SimpleNamespace) -> None:
+        """写区内移动放行（双端同区）。"""
+        src = zone_env.second / "data" / "report.csv"
+        dst = zone_env.second / "data" / "renamed.csv"
 
         result = await move_file(
-            source=str(src),
-            destination=str(whitelist_env.repo / "note.txt"),
-            workspace=str(whitelist_env.ws),
+            source=str(src), destination=str(dst), workspace=str(zone_env.ws)
+        )
+
+        assert result.success is True, result.error
+        assert dst.exists()
+        assert not src.exists()
+
+    async def test_write_outside_all_zones_rejected(
+        self, zone_env: SimpleNamespace, tmp_path: Path
+    ) -> None:
+        """区外写拒绝并提示授权通道，文件不被创建。"""
+        outsider = tmp_path / "outsider2"
+        outsider.mkdir()
+        target = outsider / "new.txt"
+
+        result = await file_write(
+            path=str(target), action="write", content="x", workspace=str(zone_env.ws)
         )
 
         assert result.success is False
-        assert src.exists()
+        assert "写区名单" in result.error
+        assert "授权" in result.error
+        assert not target.exists()
+
+    async def test_write_repo_denied_dir_rejected_even_in_zone(
+        self, zone_env: SimpleNamespace
+    ) -> None:
+        """仓库自保目录对写恒拒：名单覆盖仓库根也不放行 config/（系统自保优先）。"""
+        target = zone_env.repo / "config" / "evil.yaml"
+
+        result = await file_write(
+            path=str(target), action="write", content="x", workspace=str(zone_env.ws)
+        )
+
+        assert result.success is False
+        assert "运行时/产物区" in result.error
+        assert not target.exists()
+
+    async def test_write_with_pipeline_authorized_zone_allowed(
+        self, zone_env: SimpleNamespace
+    ) -> None:
+        """管道级授权前缀（zone_grant 卡批准注入）放行区外写（决策3）。"""
+        import json
+
+        granted = zone_env.ws.parent / "granted"
+        granted.mkdir()
+        target = granted / "new.txt"
+
+        result = await file_write(
+            path=str(target),
+            action="write",
+            content="x",
+            workspace=str(zone_env.ws),
+            authorized_zones=json.dumps([str(granted)]),
+        )
+
+        assert result.success is True, result.error
+        assert target.read_text(encoding="utf-8") == "x"
+
+    async def test_write_with_invalid_authorized_zones_fails_closed(
+        self, zone_env: SimpleNamespace, tmp_path: Path
+    ) -> None:
+        """authorized_zones 非法 JSON：按无授权处理（安全侧），区外写仍拒。"""
+        outsider = tmp_path / "outsider4"
+        outsider.mkdir()
+        target = outsider / "new.txt"
+
+        result = await file_write(
+            path=str(target),
+            action="write",
+            content="x",
+            workspace=str(zone_env.ws),
+            authorized_zones="not-json",
+        )
+
+        assert result.success is False
+        assert not target.exists()
+
+    async def test_read_deny_does_not_gate_write_rejection_reason(
+        self, zone_env: SimpleNamespace
+    ) -> None:
+        """read_deny 只挡读不挡写：排除区写拒绝的原因是区外（契约第 5 条）。"""
+        target = zone_env.denied / "new.txt"
+
+        result = await file_write(
+            path=str(target), action="write", content="x", workspace=str(zone_env.ws)
+        )
+
+        assert result.success is False
+        assert "只读排除区" not in result.error
+        assert "写区名单" in result.error
+        assert not target.exists()
 
 
-class TestSearchWhitelistFallback:
+class TestSearchZones:
     """enhanced_search 同类只读操作同规（共用单点判定）。"""
 
     async def test_search_repo_relative_from_empty_session_workspace(
-        self, whitelist_env: SimpleNamespace
+        self, zone_env: SimpleNamespace
     ) -> None:
         """搜索相对路径落空 → 回退仓库目录命中源码文件。"""
         result = await enhanced_search(
             query="GREETING",
             path="plugins/shared/tools/hello_pack",
-            workspace=str(whitelist_env.ws),
+            workspace=str(zone_env.ws),
         )
 
         assert result.success is True, result.error
         assert len(result.output["results"]) == 1
 
-    async def test_search_outside_whitelist_rejected(
-        self, tmp_path: Path, whitelist_env: SimpleNamespace
+    async def test_search_outside_zones_readable(
+        self, zone_env: SimpleNamespace, tmp_path: Path
     ) -> None:
-        """搜索起点在白名单外仍拒绝。"""
-        outsider = tmp_path / "outsider"
+        """搜索根外普通目录放行（读黑名单制同规）。"""
+        outsider = tmp_path / "outsider3"
         outsider.mkdir()
         (outsider / "s.txt").write_text("GREETING\n", encoding="utf-8")
 
         result = await enhanced_search(
-            query="GREETING", path=str(outsider), workspace=str(whitelist_env.ws)
+            query="GREETING", path=str(outsider), workspace=str(zone_env.ws)
         )
 
-        assert result.success is False
-        assert "超出 workspace/project_root" in result.error
+        assert result.success is True, result.error

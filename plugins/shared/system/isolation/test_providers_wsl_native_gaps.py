@@ -22,6 +22,7 @@ from __future__ import annotations
 import importlib
 import json
 import sys
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -503,7 +504,7 @@ class TestWriteMetadataFailure:
         monkeypatch.setattr(Path, "write_text", _boom)
 
         ok = provider._write_metadata(
-            "cua-x", "/host/ws", "/mnt/c/ws", datetime.now(timezone.utc)
+            "cua-x", "/host/ws", "/mnt/c/ws", datetime.now(UTC)
         )
 
         assert ok is False
@@ -513,7 +514,7 @@ class TestWriteMetadataFailure:
         from datetime import datetime, timezone
 
         provider = _make_provider(tmp_path)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         ok = provider._write_metadata("cua-ok", "/host/ws", "/mnt/c/ws", now)
 

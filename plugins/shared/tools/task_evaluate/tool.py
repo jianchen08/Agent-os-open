@@ -23,10 +23,10 @@ import logging
 from typing import Any
 
 import state_fields
-from time_iso import now_iso_utc as _now_iso  # 共享时间戳单点（task.ended_at 落 state）
 import worktree_merge
 from _eval_core import sanitize_eval_paths
 from task_types import TaskModel, TaskStatus
+from time_iso import now_iso_utc as _now_iso  # 共享时间戳单点（task.ended_at 落 state）
 
 from agentos_plugin_sdk import (
     BuiltinTool,
@@ -217,6 +217,8 @@ async def task_evaluate_func(inputs: dict[str, Any]) -> dict[str, Any]:  # noqa:
                         "task.status": "failed",
                         "task.ended_at": _now_iso(),
                         "task.error": merge_error,
+                        "task.failure_class": "merge_gate",
+                        "task.failure_reason": merge_error,
                     },
                 )
             return {
@@ -488,7 +490,7 @@ class TaskEvaluateTool(BuiltinTool):
                 ),
                 timeout=timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "[TaskEvaluate] 单指标评估超时 | task_id=%s | metric_id=%s | timeout=%ss",
                 task_id,
@@ -719,7 +721,7 @@ class TaskEvaluateTool(BuiltinTool):
                 timeout=timeout,
             )
             return await self._handle_evaluation_result(inputs, task_service, task, result)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "[TaskEvaluate] 自动评估超时 | task_id=%s | metrics=%s | timeout=%ss",
                 task.id,
@@ -1014,6 +1016,8 @@ class TaskEvaluateTool(BuiltinTool):
                             "task.eval_summary": submitted_summary
                             or self._build_rich_summary(eval_result),
                             "task.error": merge_error,
+                            "task.failure_class": "merge_gate",
+                            "task.failure_reason": merge_error,
                         },
                     )
                 except Exception as e:
@@ -1028,6 +1032,8 @@ class TaskEvaluateTool(BuiltinTool):
                             "task.eval_summary": submitted_summary
                             or self._build_rich_summary(eval_result),
                             "task.error": merge_error,
+                            "task.failure_class": "merge_gate",
+                            "task.failure_reason": merge_error,
                         },
                     )
                 return create_failure_result(
@@ -1164,6 +1170,8 @@ class TaskEvaluateTool(BuiltinTool):
                         "task.ended_at": _now_iso(),
                         "task.eval_summary": _summary,
                         "task.error": _reason,
+                        "task.failure_class": "eval_retry_exhausted",
+                        "task.failure_reason": _reason,
                     },
                 )
             else:

@@ -331,6 +331,13 @@ class ParamInjectPlugin(IInputPlugin):
             project_root = ctx.state.get("project_root", "")
             if project_root:
                 args["project_root"] = project_root
+
+            # 管道级授权写区（zone_grant 卡批准写入，ADR 2026-09-24 决策3）：
+            # JSON 数组串（前缀列表）。写面工具签名声明者收得到，其余工具由
+            # SDK 按签名过滤静默丢弃（workspace/project_root 同款注入契约）。
+            authorized_zones = ctx.state.get("authorized_write_zones", "")
+            if authorized_zones:
+                args["authorized_zones"] = authorized_zones
         else:
             # parent_ws_meta：子任务出生契约经它携带父工作空间坐标，使
             # workspace_lifecycle 的共享决策不依赖发起瞬间的聚合读可见性

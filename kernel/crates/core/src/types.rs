@@ -393,6 +393,9 @@ pub struct PendingInputRecord {
     pub execution_context: Option<serde_json::Value>,
     /// 出生注入 overlay（lineage.* / task.* 等扁平键）
     pub state_overlay: Option<serde_json::Value>,
+    /// 管道配置 ID（config/pipelines/{id}.yaml）：显式指定 = 按需加载编译该配置
+    /// 执行；None = autonomous（缺省路径与既有行为一致）
+    pub pipeline_config_id: Option<String>,
     /// 创建时间（RFC3339；FIFO 序 = created_at, id 升序）
     pub created_at: String,
 }
@@ -579,6 +582,11 @@ pub struct MessageRecord {
     /// GET messages 原样回显，前端据此把乐观消息与权威记录对账去重。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+    /// 产出该消息的管道执行身份（assistant blob `agent_id` 戳记读时提取）：
+    /// 消息生成时的管道 state `agent.id`，前端气泡卡名/卡头像的数据源。
+    /// 仅 llm_core 戳记的 assistant 消息非空，其余角色/旧消息为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
 }
 
 /// 消息段记录（message_segments 投影）——替换事件的冻结内容。
@@ -1490,6 +1498,7 @@ mod tests {
             client_message_id: "cmid-1".into(),
             execution_context: Some(serde_json::json!({"workspace_mode": "isolated"})),
             state_overlay: None,
+            pipeline_config_id: None,
             created_at: "2026-09-13T00:00:00Z".into(),
         }
     }
@@ -1630,6 +1639,7 @@ mod tests {
             error: None,
             tool_result_json: None,
             metadata: None,
+            agent_id: None,
         };
         assert_serde_roundtrip(&minimal);
         let full = MessageRecord {
@@ -1640,6 +1650,7 @@ mod tests {
             tool_calls_json: Some("[]".into()),
             reasoning_content: Some("thinking".into()),
             metadata: Some(serde_json::json!({"client_message_id": "cmid-1"})),
+            agent_id: Some("general_agent".into()),
             ..minimal.clone()
         };
         assert_serde_roundtrip(&full);

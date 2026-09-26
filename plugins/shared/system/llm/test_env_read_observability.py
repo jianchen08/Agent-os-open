@@ -40,12 +40,12 @@ def _load(name: str, filename: str) -> Any:
     return m
 
 
-@pytest.fixture()
+@pytest.fixture
 def ccm() -> Any:
     return _load("env_obs_config_models_test", "_config_models.py")
 
 
-@pytest.fixture()
+@pytest.fixture
 def rlc() -> Any:
     m = _load("env_obs_routes_llm_config_test", "routes_llm_config.py")
     m.invalidate_all_llm_caches = None

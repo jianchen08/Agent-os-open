@@ -33,7 +33,6 @@ from http_json import (  # noqa: E402
     protocol_error as _protocol_error,
 )
 from kernel_token import decode_kernel_token  # noqa: E402
-
 from tool import TriggerSetupTool
 from triggers.manager import get_trigger_manager
 from triggers.types import TriggerConfig, TriggerStatus

@@ -24,8 +24,6 @@ add/commit/merge/verify 叠加可阻塞数分钟）——调用方必须丢线�
 
 from __future__ import annotations
 
-from agentos_plugin_sdk.fs_utils import force_rmtree
-
 import contextlib
 import logging
 import os
@@ -33,6 +31,8 @@ import subprocess
 import threading
 from pathlib import Path
 from typing import Any
+
+from agentos_plugin_sdk.fs_utils import force_rmtree
 
 logger = logging.getLogger(__name__)
 

@@ -123,13 +123,11 @@ fn load_message_history_rebuilds_full_messages_in_seq_order() {
     for m in &hist {
         assert!(
             m.get("role").and_then(|v| v.as_str()).is_some(),
-            "每条消息应含 role：{}",
-            m
+            "每条消息应含 role：{m}"
         );
         assert!(
             m.get("content").and_then(|v| v.as_str()).is_some(),
-            "每条消息应含 content：{}",
-            m
+            "每条消息应含 content：{m}"
         );
     }
     // 全文（非 preview）：250+ 字符完整读回
@@ -272,8 +270,7 @@ fn message_slots_table_is_pure_index_without_content_columns() {
     ] {
         assert!(
             !cols.iter().any(|c| c == banned),
-            "message_slots 应为纯索引，内容列 {banned} 应删除（内容在 blobs），实际列：{:?}",
-            cols
+            "message_slots 应为纯索引，内容列 {banned} 应删除（内容在 blobs），实际列：{cols:?}"
         );
     }
     for required in [
@@ -287,8 +284,7 @@ fn message_slots_table_is_pure_index_without_content_columns() {
     ] {
         assert!(
             cols.iter().any(|c| c == required),
-            "纯索引列 {required} 应保留，实际列：{:?}",
-            cols
+            "纯索引列 {required} 应保留，实际列：{cols:?}"
         );
     }
 }

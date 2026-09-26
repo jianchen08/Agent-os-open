@@ -10,9 +10,9 @@
  * safeSet/safeGet），因此下列断言走的是「内存降级」路径，仍能验证业务不变性。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { resetPipelineStoreState } from './helpers/storeTestMocks'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
-import { resetPipelineStoreState } from './helpers/storeTestMocks'
 
 vi.mock('@/utils/logger', async () => (await import('./helpers/storeTestMocks')).loggerMockSmall())
 

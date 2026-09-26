@@ -22,6 +22,7 @@
  *   防御性保留，测试用 stubGlobal 覆盖 URL 构造抛错场景。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { toast } from '@/components/ui/sonner'
 import {
   addChatCardDeclaration,
   clearChatCardDeclarations,
@@ -34,7 +35,6 @@ import {
   type ChatCardDeclaration,
   type ToolCallContext,
 } from '@/utils/chatCardInterpreter'
-import { toast } from '@/components/ui/sonner'
 
 vi.mock('@/components/ui/sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn() },

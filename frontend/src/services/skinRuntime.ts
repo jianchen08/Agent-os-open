@@ -22,6 +22,7 @@
 import { apiClient } from '@/services/api/client'
 import { EXT_ROUTE } from '@/services/api/extRoute'
 import { sanitizeCss, getStyleNonce } from '@/services/pluginStyles'
+import { useSkinConsentStore } from '@/stores/skinConsentStore'
 import { loggers } from '@/utils/logger'
 import type { PluginTheme } from '@/types/theme'
 
@@ -36,6 +37,62 @@ export function isSkinTheme(
   theme: { skin?: string; pluginId?: string } | null | undefined,
 ): theme is PluginTheme & { skin: string } {
   return typeof theme?.skin === 'string' && theme.skin.length > 0 && !!theme.pluginId
+}
+
+// ── hooks 启用确认 + 消费点指纹 pin（2026-09-25 准入分级波2）────────────────
+// hooks.mjs 在宿主同源上下文执行，是插件→前端最危险通道：首次启用与指纹漂移
+// 须用户确认（确认卡挂 skinConsentStore），pin 打在**消费点**——dsh 递送层对
+// hooks.mjs 做运行时选择器转译（ADR-0822），源文件哈希≠实际执行文本，只有对
+// fetch 到的文本算哈希才锚住真实载荷。
+
+/** 皮肤 merged.css 体积上限（静态样式层） */
+export const MAX_SKIN_CSS_BYTES = 256 * 1024
+
+const PIN_STORAGE_KEY = 'agentos_skin_hook_pins'
+
+/** 读全部 hooks 指纹 pin（scope → sha256 hex；localStorage 损坏按空处理） */
+export function loadSkinHookPins(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(PIN_STORAGE_KEY)
+    return raw ? (JSON.parse(raw) as Record<string, string>) : {}
+  } catch {
+    return {}
+  }
+}
+
+/** 写单条 pin（用户确认后调用） */
+export function saveSkinHookPin(scope: string, hash: string): void {
+  const pins = loadSkinHookPins()
+  pins[scope] = hash
+  try {
+    localStorage.setItem(PIN_STORAGE_KEY, JSON.stringify(pins))
+  } catch (e) {
+    loggers.websocket.warn(`[skinRuntime] pin 持久化失败: ${(e as Error)?.message ?? e}`)
+  }
+}
+
+export type SkinHookDecision =
+  | { action: 'run' }
+  | { action: 'confirm'; hash: string; reason: 'first' | 'drift'; previous?: string }
+
+/** 纯判定：hooks 文本指纹 vs pin。首启用/漂移 → 需确认；一致 → 直接运行。 */
+export function decideSkinHook(
+  scope: string,
+  hash: string,
+  pins: Record<string, string>,
+): SkinHookDecision {
+  const pinned = pins[scope]
+  if (!pinned) return { action: 'confirm', hash, reason: 'first' }
+  if (pinned !== hash) return { action: 'confirm', hash, reason: 'drift', previous: pinned }
+  return { action: 'run' }
+}
+
+/** hooks 文本 sha256（hex；crypto.subtle 在 jsdom/旧环境缺席时抛错由调用方兜底） */
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
 }
 
 /** scope 值（html[data-skin] 的属性值；全局唯一 = 插件:皮肤） */
@@ -92,6 +149,13 @@ export async function applyPluginSkin(theme: PluginTheme & { skin: string }): Pr
     })
     if (applyGeneration !== gen) return // 已被更新的切换取代
     const css = typeof res.data === 'string' ? res.data : String(res.data)
+    // 体积上限（2026-09-25）：静态样式层超限整段拒绝
+    if (css.length > MAX_SKIN_CSS_BYTES) {
+      loggers.websocket.warn(
+        `[skinRuntime] ${scope} merged.css 超限（${css.length} > ${MAX_SKIN_CSS_BYTES} 字节），拒绝注入`,
+      )
+      return
+    }
     const clean = sanitizeCss(css)
     if (clean === null) {
       loggers.websocket.warn(`[skinRuntime] ${scope} 命中危险 CSS 构造，拒绝注入`)
@@ -215,6 +279,31 @@ async function runSkinHooks(theme: PluginTheme & { skin: string }, scope: string
     const text = typeof res.data === 'string' ? res.data : String(res.data)
     if (!text.trim()) {
       loggers.websocket.debug(`[skinRuntime] ${scope} 无 hooks.mjs，跳过动态层`)
+      return
+    }
+    // 启用确认 + 消费点指纹 pin（2026-09-25）：首启用/漂移不执行，挂确认卡；
+    // 静态 CSS 层不受影响（装饰主面已在，动态层等用户点头）。
+    try {
+      const hash = await sha256Hex(text)
+      const decision = decideSkinHook(scope, hash, loadSkinHookPins())
+      if (decision.action === 'confirm') {
+        useSkinConsentStore.getState().setPending({
+          theme,
+          scope,
+          hash: decision.hash,
+          reason: decision.reason,
+          previous: decision.previous,
+        })
+        loggers.websocket.info(
+          `[skinRuntime] ${scope} hooks 待用户确认（${decision.reason}），跳过动态层`,
+        )
+        return
+      }
+    } catch (e) {
+      // 指纹计算环境不可用（无 crypto.subtle）→ 保守拒绝动态层（fail-closed）
+      loggers.websocket.warn(
+        `[skinRuntime] ${scope} hooks 指纹计算失败，跳过动态层: ${(e as Error)?.message ?? e}`,
+      )
       return
     }
     activeHookBlobUrl = URL.createObjectURL(new Blob([text], { type: 'text/javascript' }))

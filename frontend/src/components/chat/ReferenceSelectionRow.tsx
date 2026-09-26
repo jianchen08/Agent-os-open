@@ -6,8 +6,8 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import { X } from '@/assets/icons'
-import { getReferenceProviders, type ReferenceRowState } from '@/services/references'
 import { cn } from '@/lib/utils'
+import { getReferenceProviders, type ReferenceRowState } from '@/services/references'
 import { ReferenceChip } from './ReferenceChip'
 
 export function ReferenceSelectionRow({ threadId }: { threadId?: string }) {

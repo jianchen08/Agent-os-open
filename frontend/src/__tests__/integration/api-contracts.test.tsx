@@ -27,6 +27,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { postUp } from '@/components/schema/widgets/__tests__/webviewTestBridge'
 import { WebviewWidget } from '@/components/schema/widgets/WebviewWidget'
 import apiClient from '@/services/api/client'
 // 真实 apiClient（axios 单例）—— 服务模块导入的是同一个实例，spy 在此对象上即生效。
@@ -35,7 +36,6 @@ import { initializeGrowthLoop } from '@/services/modules/GrowthLoop'
 import { commandDispatcher } from '@/services/schema/commandDispatcher'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import type { Mock } from 'vitest'
-import { postUp } from '@/components/schema/widgets/__tests__/webviewTestBridge'
 // ── spyOn 工具：在每个用例前重置 ──
 let getSpy: Mock
 let postSpy: Mock
@@ -147,6 +147,15 @@ describe('C5 契约: WebviewWidget action 上行 → POST /api/v1/actions/execut
   beforeEach(() => {
     getSpy.mockResolvedValue({ data: '<html><body></body></html>' })
     postSpy.mockResolvedValue({ data: { ok: true } })
+    // 命令白名单（2026-09-25 桥统一）：C5 的 action 语义 = 本插件贡献的命令，
+    // 上行前先登记 demo.ping 为 demo 贡献（afterEach 全局 clear 兜底）
+    contributionRegistry.registerPage({
+      type: 'pages',
+      id: 'demo.ping',
+      space: 'chat',
+      pluginId: 'demo',
+      legacyFrom: 'commands',
+    })
   })
 
   it('action 方法 → POST /api/v1/actions/execute { action: method, args: params }', async () => {

@@ -1,0 +1,13 @@
+[project]
+name = "agentos-plugin-onboarding-service"
+version = "1.0.0"
+description = "Lingxi AgentOS 0.2 plugin — onboarding_service（引导内容与进度端点）"
+requires-python = ">=3.11"
+dependencies = [
+    "agentos-plugin-sdk>=0.2.0",
+]
+
+# 本地 SDK 源映射（uv lock 解析必需——agentos-plugin-sdk 不在任何 registry）：
+# editable 链接 plugins/sdk/src 源码目录（判据 2 案 A）。
+[tool.uv.sources]
+agentos-plugin-sdk = { path = "../../../sdk", editable = true }

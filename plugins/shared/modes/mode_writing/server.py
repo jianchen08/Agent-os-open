@@ -31,9 +31,12 @@ import base64
 import json
 import logging
 import os
+import time
+import uuid
 from typing import Any
 
 import yaml
+
 from agentos_plugin_sdk import AgentOSPlugin
 from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 from agentos_plugin_sdk.capability import bind_capability_caller
@@ -276,7 +279,8 @@ def _read_bible(root_dir: str) -> dict[str, Any]:
         try:
             with open(os.path.join(root, name), encoding="utf-8") as fh:
                 sections.append({"name": name, "content": fh.read()})
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # 读取失败与缺失同语义：如实进 absent（非 UTF-8 文件不击穿端点）
             absent.append(name)
     return {"root": root, "sections": sections, "absent": absent}
 
@@ -374,6 +378,9 @@ async def _chapter_act_args(
     （面板当前活跃会话），无则省略键。
     """
     label = _ACT_LABELS[act]
+    # 产物文件名由派发方（本面板）定：goal 声明与 acceptance_criteria file_check
+    # 同路径同源——杜绝"零评估标记完成"（rules/dispatch.md 验收铁律）。
+    artifact_rel = f"chapters/{act}-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}.md"
     sections = [
         f"{_ACT_BRIEFS[act]}。",
         f"# 动作\n写作模式章节工坊「{label}」（task_kind=writing_{act}）。",
@@ -381,8 +388,8 @@ async def _chapter_act_args(
     if instruction.strip():
         sections.append(f"# 用户指令\n{instruction.strip()}")
     sections.append(
-        "# 派发口径\n成稿落盘为工作空间内 markdown 章节文件，goal 写明产物文件名，"
-        "声明 file_check 验收（input_params.path=产物相对路径）；结尾调用 task_evaluate 结束。"
+        f"# 派发口径\n成稿为全文写入工作空间内 markdown 文件，产物文件名：{artifact_rel}"
+        "（相对工作空间路径）；结尾调用 task_evaluate 结束。"
     )
     args: dict[str, Any] = {
         "target_type": "agent",
@@ -393,6 +400,7 @@ async def _chapter_act_args(
         "parent_agent_level": 1,
         "goal_title": f"写作章节·{label}",
         "goal_description": "\n\n".join(sections)[:2000],
+        "acceptance_criteria": {"file_check": {"input_params": {"path": artifact_rel}}},
         "mode": "writing",
         "task_kind": f"writing_{act}",
     }

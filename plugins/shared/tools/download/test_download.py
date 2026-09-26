@@ -801,7 +801,7 @@ class TestHandlerSuccessBranch:
             _MOD.httpx, "AsyncClient", lambda **kw: real_client(**{**kw, "trust_env": False})
         )
 
-    @pytest.fixture()
+    @pytest.fixture
     def trusted_server(self, monkeypatch) -> Any:
         """装载 server.py 并把其模块级实现槽位换成 allow_ssrf_skip=True 子类。"""
         saved_impl = sys.modules.get(TestCohostShadowing._IMPL_KEY)

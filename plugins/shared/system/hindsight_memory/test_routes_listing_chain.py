@@ -137,7 +137,7 @@ def _call_tool(module: Any, tool_name: str, **kwargs: Any) -> Any:
     return _run(result)
 
 
-@pytest.fixture()
+@pytest.fixture
 def stack(monkeypatch: pytest.MonkeyPatch) -> Any:
     """装载真实 sidecar 模块 + 真实 routes 模块，经 HindsightBackend 直连。"""
     hmod = _load_module(_PLUGIN_DIR / "server.py", "hindsight_chain_sidecar")

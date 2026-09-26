@@ -16,6 +16,16 @@
 name: Dependency Audit
 
 on:
+  pull_request:
+    paths:
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'plugins/sdk/pyproject.toml'
+      - 'pnpm-lock.yaml'
+      - 'frontend/package.json'
+      - 'kernel/**/Cargo.toml'
+      - 'kernel/Cargo.lock'
+      - '.github/workflows/dependency-audit.yml'
   workflow_dispatch:
   schedule:
     # 每周一 03:00 UTC（北京时间周一 11:00）

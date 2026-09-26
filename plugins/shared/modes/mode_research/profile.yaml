@@ -1,8 +1,8 @@
-# 调研模式 profile（B 部类物料：由用户维护；出厂种子随 mode_research 插件内打包，
-# 经 mode.get_profile 服务透出；suite 路径相对项目根）
+# 研究模式 profile（原「调研模式」，2026-09-25 更名；B 部类物料：由用户维护；
+# 出厂种子随 mode_research 插件内打包，经 mode.get_profile 服务透出；suite 路径相对项目根）
 # 对标 Perplexity/Elicit 范式：问题→带引用报告；验证器族含引用可溯断言与幻觉检测
 mode: research
-name: 调研模式
+name: 研究模式
 panel_page_id: research_desk
 chain:
   entry: main

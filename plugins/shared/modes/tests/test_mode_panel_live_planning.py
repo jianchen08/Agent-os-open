@@ -1,5 +1,4 @@
 # @feature: FP-0.2.二 模式体系测试补标 | @ci: python-coverage
-# -*- coding: utf-8 -*-
 """计划模式活面板行为测试：数据端点归一/两态项目口径/写动作真派发形状。
 
 面板成熟化（ADR 2026-09-17-mode-panel-mature-interfaces）：/data/* 数据端点 +

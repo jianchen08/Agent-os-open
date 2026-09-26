@@ -14,34 +14,16 @@ import type { Message } from '@/types/models'
 
 // LobeChatMarkdown 拉起 @lobehub/ui 全家桶——单测用轻量桩替身，
 // 断言"用户 content 交给了 markdown 渲染器"即可（渲染细节归其自身测试）。
-vi.mock('@/components/chat/LobeChatMarkdown', () => ({
-  LobeChatMarkdown: ({ content }: { content: string }) => (
-    <div data-testid="user-markdown">{content}</div>
-  ),
-}))
+vi.mock('@/components/chat/LobeChatMarkdown', async () => (await import('./helpers/messageItemMocks')).lobeMarkdownStubMock())
 
-vi.mock('@/stores/sessionStore', () => ({
-  useSessionStore: () => ({ activeSessionId: 'session-1' }),
-}))
-vi.mock('@/stores/agentStore', () => ({ useAgentStore: () => ({ agents: [] }) }))
-vi.mock('@/stores/interactionStore', () => ({
-  useInteractionStore: () => ({ pendingInteractions: [] }),
-}))
-vi.mock('@/services/errorReporting', () => ({
-  ErrorType: { CLIENT: 'client' },
-  reportError: vi.fn(),
-}))
-vi.mock('@/services/attachmentOpener', () => ({ openAttachment: vi.fn() }))
-vi.mock('@/components/chat/MessageActions', () => ({
-  MessageActions: () => null,
-}))
-vi.mock('@/components/chat/MessageContentRenderer', () => ({
-  default: () => null,
-}))
-vi.mock('@/components/chat/hooks/useMessageRender', () => {
-  const useMessageRender = () => ({ fragments: [], isStreaming: false })
-  return { useMessageRender, default: useMessageRender }
-})
+vi.mock('@/stores/sessionStore', async () => (await import('./helpers/messageItemMocks')).sessionStoreActiveMock())
+vi.mock('@/stores/agentStore', async () => (await import('./helpers/messageItemMocks')).agentStoreEmptyMock())
+vi.mock('@/stores/interactionStore', async () => (await import('./helpers/messageItemMocks')).interactionStoreEmptyMock())
+vi.mock('@/services/errorReporting', async () => (await import('./helpers/messageItemMocks')).errorReportingMock())
+vi.mock('@/services/attachmentOpener', async () => (await import('./helpers/messageItemMocks')).attachmentOpenerMock())
+vi.mock('@/components/chat/MessageActions', async () => (await import('./helpers/messageItemMocks')).messageActionsStubMock())
+vi.mock('@/components/chat/MessageContentRenderer', async () => (await import('./helpers/messageItemMocks')).messageContentRendererStubMock())
+vi.mock('@/components/chat/hooks/useMessageRender', async () => (await import('./helpers/messageItemMocks')).useMessageRenderStubMock())
 
 function makeUserMessage(content: string): Message {
   return {

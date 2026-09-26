@@ -20,9 +20,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import kernel_reads  # noqa: F401 —— 本插件内核只读能力桥
-
 import execution_records as er  # 复用最近管道扫描边界（同插件内部模块）
+import kernel_reads  # noqa: F401 —— 本插件内核只读能力桥
 
 logger = logging.getLogger(__name__)
 

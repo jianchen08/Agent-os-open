@@ -42,5 +42,11 @@
       "prompt.tool_descriptions",
       "user_id"
     ]
-  }
+  },
+  "export_fields": [
+    "track.messages_chars"
+  ],
+  "persistent_fields": [
+    "track.messages_chars"
+  ]
 }

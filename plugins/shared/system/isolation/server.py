@@ -17,21 +17,21 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from checkpoint import CheckpointManager
 import wsl_health
+from checkpoint import CheckpointManager
+
+# 直接导入同目录实现模块（文件就在旁边，不需要额外路径前缀）
+from manager import IsolationManager, extract_providers_config
+from workspace import _isolation_config_path
+
+from agentos_plugin_sdk import AgentOSPlugin
 from agentos_plugin_sdk.isolation_types import (
     IsolationLevel,
     OperationType,
     TaskType,
 )
-
-# 直接导入同目录实现模块（文件就在旁边，不需要额外路径前缀）
-from manager import IsolationManager, extract_providers_config
-from workspace import _isolation_config_path
 from agentos_plugin_sdk.permission_checker import PermissionChecker
 from agentos_plugin_sdk.permission_policy import PermissionPolicyManager
-
-from agentos_plugin_sdk import AgentOSPlugin
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("isolation_service")

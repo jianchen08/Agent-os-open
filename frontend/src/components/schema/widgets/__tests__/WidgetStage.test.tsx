@@ -10,8 +10,8 @@
 
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { WidgetStage } from '../WidgetStage'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { WidgetStage } from '../WidgetStage'
 
 const layerMock = vi.fn((props: { space?: string; declarations?: unknown[] }) => (
   <div data-testid="declared-layer">{(props.declarations ?? []).length} 件</div>

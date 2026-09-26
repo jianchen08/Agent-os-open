@@ -16,6 +16,7 @@ import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 // 顺序约束：先于被测组件 import——vi.mock 工厂体在被测组件初始化时执行，
 // 届时本模块必须已求值（见 pmTestUtils 头注）
+// eslint-disable-next-line import-x/order -- pmTestUtils 须先于被测组件求值（vi.mock 工厂时序约束，见 pmTestUtils 头注；禁用排序自动修防回归）
 import { pmMod, pmSeed } from './pmTestUtils'
 import { PipelineManagerWidget } from '@/components/schema/widgets/PipelineManagerWidget'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
@@ -153,6 +154,52 @@ const SESSION_MAIN_TASKS: Record<string, unknown>[] = [
     agent_name: 'general_agent',
   },
 ]
+/** 同会话兄弟子任务 + 主管道自身已完成（缺省运行中视图会滤掉主管道条目）：
+ *  复现 2026-09-24 用户实报——兄弟任务曾被回退锚点互挂成假父子 */
+const SIBLING_THREAD_RUNS: Record<string, unknown> = {
+  mainRun: {
+    pipeline_id: 'pipe-sib-main',
+    run_id: 'run-sib-main',
+    thread_id: 'th-sib',
+    status: 'completed',
+    started_at: '2026-09-24T08:30:00Z',
+    ended_at: '2026-09-24T08:31:00Z',
+  },
+  subRunA: {
+    pipeline_id: 'pipe-sib-a',
+    run_id: 'run-sib-a',
+    thread_id: 'th-sib',
+    status: 'running',
+    started_at: '2026-09-24T08:37:33Z',
+  },
+  subRunB: {
+    pipeline_id: 'pipe-sib-b',
+    run_id: 'run-sib-b',
+    thread_id: 'th-sib',
+    status: 'running',
+    started_at: '2026-09-24T08:37:34Z',
+  },
+}
+const SIBLING_THREAD_TASKS: Record<string, unknown>[] = [
+  {
+    id: 't-sib-a',
+    title: '补充调研A',
+    status: 'pending',
+    pipeline_run_id: 'pipe-sib-a',
+    parent_task_id: 'pipe-sib-main',
+    threadId: 'th-sib',
+    agent_name: 'research_agent',
+  },
+  {
+    id: 't-sib-b',
+    title: '补充调研B',
+    status: 'pending',
+    pipeline_run_id: 'pipe-sib-b',
+    parent_task_id: 'pipe-sib-main',
+    threadId: 'th-sib',
+    agent_name: 'research_agent',
+  },
+]
 /** 一对一层级 + 树/详情解耦场景：父任务条目行 ← 子任务条目行（childPipe 有 state 真值） */
 const DECOUPLE_TASKS: Record<string, unknown>[] = [
   {
@@ -183,9 +230,9 @@ const DECOUPLE_STATES: Record<string, unknown> = {
     },
   },
 }
-/** 会话主管道缺席场景：主管道 run 被快照过滤后条目集里没有会话根，
- *  threadTop 回退线程组最早任务条目。契约：树与列表同源同量，建树环节
- *  不得丢条目（最早任务自挂自身会让整族从树里静默消失） */
+/** 会话主管道缺席场景：主管道 run 被快照过滤后条目集里没有会话根。
+ *  契约：树与列表同源同量，建树环节不得丢条目；线程无主管道锚点时成员
+ *  落根平铺（平级可见），兄弟任务之间不互挂（假层级，用户指正 2026-09-24） */
 const ORPHAN_THREAD_RUNS: Record<string, unknown> = {
   ghost: {
     pipeline_id: 'ghost13009006',
@@ -428,42 +475,69 @@ describe('PipelineManagerWidget', () => {
     expect(padding).toMatch(/padding-left:\s*2[48]px/)
   })
 
-  it('会话主管道缺席时线程组任务不自挂丢行（树与列表同量）', async () => {
+  it('运行中视图兄弟任务平级挂主管道锚点行下（主管道自身已完成时合成锚点）', async () => {
+    pmSeed.usePipelineRunsQuery.mockReturnValue({ data: SIBLING_THREAD_RUNS })
+    pmSeed.useAllTasksQuery.mockReturnValue({ data: SIBLING_THREAD_TASKS })
+    pmSeed.sessions.push({ id: 'th-sib', title: '帮我多次调研', pipelineIds: ['pipe-sib-main'] })
+    try {
+      // 缺省运行中视图：主管道条目自身已完成被滤掉，锚点行由全量条目合成补渲染
+      renderWithProviders(<PipelineManagerWidget />)
+      // 整族在「执行中的管道」组（分组看子树是否含执行中成员，不按锚点自身终态
+      // 误入「最近完成」）；本种子无其他条目 → 「最近完成」组不渲染
+      expect(await screen.findByText(/执行中的管道/)).toBeInTheDocument()
+      expect(screen.queryByText(/最近完成/)).toBeNull()
+      // 主管道锚点行可见（行名 = 会话标题），顶层 depth 0 = 8px
+      const mainRow = (await screen.findAllByText('帮我多次调研'))[0].closest('div')
+      expect(mainRow?.getAttribute('style')).toMatch(/padding-left:\s*8px/)
+      fireEvent.click(mainRow?.querySelector('button') as HTMLElement)
+      // 两个兄弟子任务平级挂锚点行下（同为 depth 1 = 24px），不互挂
+      const rowA = (await screen.findAllByText('补充调研A'))[0].closest('div')
+      const rowB = (await screen.findAllByText('补充调研B'))[0].closest('div')
+      expect(rowA?.getAttribute('style')).toMatch(/padding-left:\s*24px/)
+      expect(rowB?.getAttribute('style')).toMatch(/padding-left:\s*24px/)
+    } finally {
+      pmSeed.sessions.length = 0
+    }
+  })
+
+  it('会话主管道缺席时线程组任务落根平铺（树与列表同量，兄弟不互挂）', async () => {
     pmSeed.usePipelineRunsQuery.mockReturnValue({ data: ORPHAN_THREAD_RUNS })
     pmSeed.useAllTasksQuery.mockReturnValue({ data: ORPHAN_THREAD_TASKS })
     renderPanelAllStatuses(<PipelineManagerWidget />)
-    // 顶层即可见：线程组最早任务（threadTop 回退目标）、无线程任务、孤儿会话
+    // 顶层即可见：同线程任务（无主管道锚点 → 平级落根）、无线程任务、孤儿会话
     expect((await screen.findAllByText('陨石躲避')).length).toBe(1)
     expect(screen.getAllByText('通道实测').length).toBe(1)
     expect(screen.getAllByText('会话 th-ghost').length).toBe(1)
-    // 展开最早任务行：同线程兄弟全部在树中（整族不得消失）
-    const chevron = screen.getAllByText('陨石躲避')[0].closest('div')?.querySelector('button')
-    fireEvent.click(chevron!)
-    expect((await screen.findAllByText('工具链自检')).length).toBe(1)
-    // 同线程兄弟挂 threadTop（depth 1 = 24px）
+    // 兄弟不互挂：工具链自检不再嵌进最早兄弟陨石躲避行下（顶层平铺 depth 0 = 8px）
     const toolRow = screen.getAllByText('工具链自检')[0].closest('div')
-    expect(toolRow?.getAttribute('style')).toMatch(/padding-left:\s*24px/)
-    // 树逐层点击展开：再展开兄弟行，parent_task_id 孙级在树中（depth 2 = 40px）
+    expect(toolRow?.getAttribute('style')).toMatch(/padding-left:\s*8px/)
+    // parent_task_id 锚定不受影响：评估子任务仍挂父任务行下（depth 1 = 24px）
     const toolChevron = toolRow?.querySelector('button')
     fireEvent.click(toolChevron!)
     const evalRow = (await screen.findAllByText('评估子任务'))[0].closest('div')
-    expect(evalRow?.getAttribute('style')).toMatch(/padding-left:\s*40px/)
+    expect(evalRow?.getAttribute('style')).toMatch(/padding-left:\s*24px/)
   })
 
   it('挂会话主管道下的非任务子管道仍渲染（防回归）', async () => {
     pmSeed.usePipelineRunsQuery.mockReturnValue({ data: SESSION_MAIN_RUNS })
-    renderPanelAllStatuses(<PipelineManagerWidget />)
-    // 树默认收起：先展开主管道条目
-    const chevron = (await screen.findAllByText('会话 th-1'))[0].closest('div')?.querySelector('button')
-    fireEvent.click(chevron!)
-    // 会话列表 mock 为空 → 条目名回退"会话 th-1"（主管道 + 子管道同名）
-    const rows = await screen.findAllByText('会话 th-1')
-    expect(rows.length).toBeGreaterThanOrEqual(1)
-    // 至少一行带缩进（depth>0 = 挂主管道条目下的直接子管道；主管道本身 depth=0 无缩进）
-    const indented = rows.some(
-      (el) => el.closest('div')?.getAttribute('style')?.match(/padding-left:\s*2[48]px/),
-    )
-    expect(indented).toBe(true)
+    // 主管道身份 = session.pipelineIds[0]（61e54023e）——播种会话登记锚定层级
+    pmSeed.sessions.push({ id: 'th-1', title: '主会话', pipelineIds: ['mainpipe111'] })
+    try {
+      renderPanelAllStatuses(<PipelineManagerWidget />)
+      // 树默认收起：先展开主管道条目
+      const chevron = (await screen.findAllByText('主会话'))[0].closest('div')?.querySelector('button')
+      fireEvent.click(chevron!)
+      // 主管道 + 直接子管道同名（会话标题）；至少一行带缩进
+      // （depth>0 = 挂主管道条目下的直接子管道；主管道本身 depth=0 无缩进）
+      const rows = await screen.findAllByText('主会话')
+      expect(rows.length).toBeGreaterThanOrEqual(1)
+      const indented = rows.some(
+        (el) => el.closest('div')?.getAttribute('style')?.match(/padding-left:\s*2[48]px/),
+      )
+      expect(indented).toBe(true)
+    } finally {
+      pmSeed.sessions.length = 0
+    }
   })
 
   it('任务条目行渲染打开工作空间按钮并开 workspace 文件树标签', async () => {

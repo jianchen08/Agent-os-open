@@ -12,23 +12,13 @@
 
 import { screen, fireEvent, within } from '@testing-library/react'
 import React from 'react'
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import { StepNode } from '../StepNode'
+import { makeOps } from './helpers/pipelineTestUtils'
 import type { PipelineEditorOps, PipelineStepV2 } from '@/services/pipeline/model'
 
 /** ops 录制桩：记录调用以断言 path */
-function makeOps() {
-  const calls: Array<{ op: keyof PipelineEditorOps; args: unknown[] }> = []
-  const ops: PipelineEditorOps = {
-    set: vi.fn((...args: unknown[]) => calls.push({ op: 'set', args })),
-    remove: vi.fn((...args: unknown[]) => calls.push({ op: 'remove', args })),
-    insert: vi.fn((...args: unknown[]) => calls.push({ op: 'insert', args })),
-    move: vi.fn((...args: unknown[]) => calls.push({ op: 'move', args })),
-  }
-  return { ops, calls }
-}
-
 const catalog = [
   {
     id: 'pipeline_llm_core',

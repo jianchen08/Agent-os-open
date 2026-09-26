@@ -2,11 +2,11 @@
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { PersistStorage, StorageValue } from 'zustand/middleware'
-import { createTolerantStorage } from '@/utils/tolerantStorage'
 import { loggers } from '@/utils/logger'
+import { createTolerantStorage } from '@/utils/tolerantStorage'
 import type { FloatingWindowInstance, WorkspaceTab, DockItem } from '@/types/layout'
 import type { ReactNode } from 'react'
+import type { PersistStorage, StorageValue } from 'zustand/middleware'
 
 /** Layout mode type */
 export type LayoutMode = 'classic' | 'five-space'

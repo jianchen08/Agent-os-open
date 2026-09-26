@@ -28,8 +28,8 @@ from __future__ import annotations
 import logging
 import re
 import sys
-from pathlib import Path
 import time
+from pathlib import Path
 from typing import Any
 
 from decider import IsolationDecider
@@ -383,8 +383,7 @@ class IsolationGuard(IInputPlugin):
         )
         task_metadata = self._get_task_metadata(ctx)
         task_isolated = (ec_iso or task_metadata.get("isolation_level") or "isolated") == "isolated"
-        for context in execution_contexts:
-            context["task_isolated"] = task_isolated
+        self._apply_task_isolation(execution_contexts, task_isolated)
 
         state_updates: dict[str, Any] = {
             "execution_contexts": execution_contexts,
@@ -632,6 +631,18 @@ class IsolationGuard(IInputPlugin):
             workspace=workspace,
             blocked=True,
         )
+
+    def _apply_task_isolation(self, execution_contexts: list[dict[str, Any]], task_isolated: bool) -> None:
+        """给每个 context 注入任务级隔离标志（S1 安全整改，评估 2026-09-24）。
+
+        "隔离容器即安全边界"裁定（2026-09-15）的前提是执行面在容器内。host
+        裸跑的 context（force_host、主 agent L1 路由、宿主路径路由、policy
+        host）不承载免审批默认——task_isolated=False 使 security_check 的
+        all() 语义对含 host 调用的批次 fail-closed（回落所选权限档审批）。
+        worktree/容器 context 不受影响，裁定语义保持。
+        """
+        for context in execution_contexts:
+            context["task_isolated"] = task_isolated and context.get("provider") != "host"
 
     def _decide_isolation(
         self,

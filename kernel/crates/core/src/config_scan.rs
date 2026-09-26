@@ -87,7 +87,7 @@ mod tests {
     fn string_loader(path: &Path) -> Result<Option<serde_json::Value>, String> {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         if name.contains("boom") {
-            return Err(format!("io failure: {}", name));
+            return Err(format!("io failure: {name}"));
         }
         let content = fs::read_to_string(path).unwrap();
         Ok(Some(serde_json::Value::String(content)))
@@ -127,7 +127,7 @@ mod tests {
         let mut read_dir_error = |_: &Path, e: std::io::Error| e.to_string();
         collect_yaml_dir(root, &mut map, &mut string_loader, &mut read_dir_error).unwrap();
 
-        assert!(map.is_empty(), "隐藏/非 yaml 文件不应收录，实际: {:?}", map);
+        assert!(map.is_empty(), "隐藏/非 yaml 文件不应收录，实际: {map:?}");
     }
 
     #[test]
@@ -179,7 +179,7 @@ mod tests {
         let mut read_dir_error = |_: &Path, e: std::io::Error| e.to_string();
         let err = collect_yaml_dir(root, &mut map, &mut loader, &mut read_dir_error)
             .expect_err("文件级 Err 应传播");
-        assert!(err.contains("boom"), "错误应保留根因: {}", err);
+        assert!(err.contains("boom"), "错误应保留根因: {err}");
         assert!(!map.values().any(|v| v == "B"), "出错的文件自身不得被收录");
     }
 
@@ -194,6 +194,6 @@ mod tests {
             |dir: &Path, e: std::io::Error| format!("read failed at {}: {}", dir.display(), e);
         let err = collect_yaml_dir(&missing, &mut map, &mut loader, &mut read_dir_error)
             .expect_err("目录不存在应映射为调用方错误");
-        assert!(err.contains("no-such-dir"), "映射应保留触发目录: {}", err);
+        assert!(err.contains("no-such-dir"), "映射应保留触发目录: {err}");
     }
 }

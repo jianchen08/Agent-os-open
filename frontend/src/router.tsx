@@ -2,7 +2,7 @@
 
 import { lazy, Suspense, useEffect, useCallback } from 'react'
 import { createBrowserRouter, Navigate, useNavigate } from 'react-router-dom'
-import { withTaskMode } from '@/services/schema/modeOptions'
+import { composeRoleplaySendIdentity, withTaskMode } from '@/services/schema/modeOptions'
 import { ChangePasswordGate } from './components/auth/ChangePasswordGate'
 import { GlobalInteractionOverlay } from './components/chat/GlobalInteractionOverlay'
 import ErrorBoundary from './components/ErrorBoundary'
@@ -19,9 +19,9 @@ import { useRealtimeEvents } from './hooks/useRealtimeEvents'
 import { useWidgetEvents } from './hooks/useWidgetEvents'
 import { LoginPage } from './pages/auth/LoginPage'
 import { RegisterPage } from './pages/auth/RegisterPage'
-import { loadSessionExecutionOptions } from './services/sessionExecutionOptions'
 import { performLogout } from './services/auth/logout'
 import { ensureFreshToken } from './services/auth/tokenLifecycle'
+import { loadSessionExecutionOptions } from './services/sessionExecutionOptions'
 import { globalWS } from './services/websocket/GlobalWebSocket'
 import { flushStreamChunkBuffer } from './services/websocket/streaming/handlers/streamHandler'
 import { initStreamingEvents, destroyStreamingEvents } from './services/websocket/streamingEventService'
@@ -32,6 +32,7 @@ import { useInteractionStore } from './stores/interactionStore'
 import { useNotificationStore } from './stores/notificationStore'
 import { usePendingInputStore } from './stores/pendingInputStore'
 import { usePipelineMessageStore } from './stores/pipelineMessageStore'
+import { useRoleplayPossessStore } from './stores/roleplayPossessStore'
 import { useSessionListStore } from './stores/sessionListStore'
 import { useSessionStore } from './stores/sessionStore'
 import { useUIStore } from './stores/uiStore'
@@ -363,9 +364,20 @@ function HomePage(): ReactNode {
 
       // 模式键（模式体系 §4.2 数据链）：选择器显式选择时并入消息级 execution_context
       // （「自动」不带键，模式归属归后端自然语言分类路径）；会话执行选项其余键原样保留。
-      const executionContext = withTaskMode(
-        loadSessionExecutionOptions(sid)?.executionContext,
-        params.mode,
+      // 扮演身份归一（composeRoleplaySendIdentity）：附身态（roleplay.possess 桥，
+      // 显式全局态）经 execution_context.roleplay_persona 注入卡人设；扮演会话绑定
+      // （roleplay.continue 桥写会话执行选项 agentId）走 WS 帧 agent_id（内核透传
+      // 管道 state agent.id，卡身份=agent 键）+ mode=roleplay，开演档键（会话化
+      // 开演快照的开场白/用户设定）随绑定逐消息并入。两者并存附身独占
+      // （roleplay_persona 与 agent_id 的卡键优先序已在后端 material.py 定死，
+      // 前端只走单路）；都无则不带。
+      const sessionOptions = loadSessionExecutionOptions(sid)
+      const { executionContext, agentId } = composeRoleplaySendIdentity(
+        withTaskMode(sessionOptions?.executionContext, params.mode),
+        useRoleplayPossessStore.getState().possessed,
+        sessionOptions?.agentId,
+        sessionOptions?.roleplayGreeting,
+        sessionOptions?.roleplayUserPersona,
       )
 
       // [来源: docs/decisions/2026-08-22-streaming-protocol-rewrite.md] 单一消息数组：
@@ -384,6 +396,7 @@ function HomePage(): ReactNode {
           pipelineId: targetPipelineId,
           clientMessageId: userMessageId,
           executionContext,
+          agentId,
         })
         usePendingInputStore.getState().load(targetPipelineId)
         return
@@ -397,8 +410,9 @@ function HomePage(): ReactNode {
         status: 'sending',
         clientMessageId: userMessageId,
       })
-      // 发送瞬间启动流式态（驱动"思考中"指示）；stream_start 到达时会以
-      // 后端真实 message_id 重建流式态并建 assistant 占位气泡。
+      // 发送瞬间启动流式态（驱动生成态：ChatInput Stop 按钮/消息项 isGenerating）；
+      // stream_start 到达时才以后端真实 message_id 建 assistant 占位气泡——
+      // 此前窗口期不渲染思考气泡，发送失败反馈由 send_timeout 错误气泡承担。
       pipelineStore.startStreaming(targetPipelineId, userMessageId)
       // 用户发消息 = 对挂起中 conversation 交互的响应（2026-09-02 裁定）：
       // 先解除挂起（提交空 approved，交互工具返回空回复），消息再推进下一步。
@@ -424,6 +438,7 @@ function HomePage(): ReactNode {
         pipelineId: targetPipelineId,
         clientMessageId: userMessageId,
         executionContext,
+        agentId,
       })
     },
     [],
@@ -582,6 +597,20 @@ function HomePage(): ReactNode {
           <span className="flex flex-col gap-1">
             <span className="text-base font-medium">浏览智能体</span>
             <span className="text-muted-foreground text-sm">按场景挑选合适的专家角色</span>
+          </span>
+        </button>
+        <button
+          onClick={() => openWorkspacePanelByPath('/p/get_started')}
+          className="bg-card border-border hover:border-primary hover:shadow-md group flex items-start gap-4 rounded-xl border p-5 text-left transition-all"
+        >
+          <span className="bg-primary/10 text-primary flex h-10 w-10 shrink-0 items-center justify-center rounded-lg">
+            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+          </span>
+          <span className="flex flex-col gap-1">
+            <span className="text-base font-medium">开始使用</span>
+            <span className="text-muted-foreground text-sm">引导配置模型，走通第一件事</span>
           </span>
         </button>
       </div>

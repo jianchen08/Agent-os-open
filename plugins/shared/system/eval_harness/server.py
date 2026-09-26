@@ -225,7 +225,7 @@ async def eval_run_heldout(mode: str = "coding") -> dict[str, Any]:
         task_id = ""
         if isinstance(res, dict):
             data_field = res.get("data") or res
-            task_id = str((data_field.get("task_id") or data_field.get("id") or ""))
+            task_id = str(data_field.get("task_id") or data_field.get("id") or "")
         mapping.append({"case_id": batch["case_id"], "task_id": task_id})
     return {"success": True, "run_tag": tag, "dispatched": mapping,
             "note": "用 task_manage 查这些任务的终态与验收结果；聚合时 mode 传 "

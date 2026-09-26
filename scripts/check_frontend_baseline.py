@@ -68,6 +68,16 @@ def parse_eslint_errors(output: str) -> int:
     return 0
 
 
+def parse_eslint_warnings(output: str) -> int | None:
+    """从 ESLint 输出解析 warning 数（批次 8-1 棘轮维）。无汇总行 = 0。"""
+    m = re.search(r"\(\d+\s+errors?,\s*(\d+)\s+warnings?\)", output)
+    if m:
+        return int(m.group(1))
+    if "problems" in output:
+        return None  # 格式异常交由 errors 解析器报错，此处不重复报
+    return 0
+
+
 def count_vitest_failures() -> int:
     """运行 vitest 并解析失败测试数。"""
     result = subprocess.run(
@@ -115,12 +125,13 @@ def parse_vitest_coverage_pct(output: str) -> float | None:
     return None
 
 
-def read_baseline() -> tuple[int, int, float]:
-    """读取基线文件，返回 (vitest_failures, eslint_errors, vitest_coverage_pct)。"""
+def read_baseline() -> tuple[int, int, float, int]:
+    """读取基线文件；eslint_warnings 未配置返回 -1（维度跳过）。"""
     if not BASELINE_FILE.exists():
-        return (0, 0, 0.0)
+        return (0, 0, 0.0, -1)
     vitest = eslint = 0
     coverage = 0.0
+    warnings = -1
     for line in BASELINE_FILE.read_text(encoding="utf-8").splitlines():
         if line.startswith("vitest_failures="):
             vitest = int(line.split("=")[1])
@@ -128,7 +139,9 @@ def read_baseline() -> tuple[int, int, float]:
             eslint = int(line.split("=")[1])
         elif line.startswith("vitest_coverage_pct="):
             coverage = float(line.split("=")[1])
-    return (vitest, eslint, coverage)
+        elif line.startswith("eslint_warnings="):
+            warnings = int(line.split("=")[1])
+    return (vitest, eslint, coverage, warnings)
 
 
 def write_baseline(vitest: int, eslint: int, coverage: float) -> None:
@@ -158,7 +171,7 @@ def main() -> int:
     parser.add_argument("--init", action="store_true", help="用当前结果写入/收紧基线")
     args = parser.parse_args()
 
-    base_v, base_e, base_c = read_baseline()
+    base_v, base_e, base_c, base_w = read_baseline()
 
     if args.vitest_file or args.eslint_file:
         # CI 模式：复用 frontend-test job 已 tee 的输出（N1 修复，避免重跑）。
@@ -166,6 +179,7 @@ def main() -> int:
         eslint_out = Path(args.eslint_file).read_text(encoding="utf-8", errors="replace") if args.eslint_file else ""
         cur_v = parse_vitest_failures(vitest_out) if vitest_out else 0
         cur_e = parse_eslint_errors(eslint_out) if eslint_out else 0
+        cur_w = parse_eslint_warnings(eslint_out) if eslint_out else None
         cur_c = parse_vitest_coverage_pct(vitest_out) if vitest_out else None
     else:
         print("运行 vitest（约 30s）...")
@@ -173,6 +187,7 @@ def main() -> int:
         print("运行 ESLint...")
         cur_e = count_eslint_errors()
         cur_c = None  # 本地模式跑的是无插桩 vitest run，无覆盖率数据
+        cur_w = None  # 本地 warnings 由 count_eslint_errors 复用运行面，见下
 
     print("\n              基线      当前")
     print(f"vitest失败:   {base_v:<8}  {cur_v}")
@@ -195,6 +210,9 @@ def main() -> int:
     failed = False
 
     increased = (cur_v > base_v) or (cur_e > base_e)
+    if base_w >= 0 and cur_w is not None and cur_w > base_w:
+        print(f"\n❌ eslint warnings {cur_w} > 基线 {base_w}（批次8-1 棘轮，只减不增）")
+        failed = True
     decreased = (cur_v < base_v) or (cur_e < base_e)
 
     if increased:

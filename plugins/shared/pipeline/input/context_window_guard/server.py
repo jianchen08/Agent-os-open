@@ -19,10 +19,12 @@ from plugin import (
     set_frontend_emit,
     set_memory_backend,
 )  # noqa: E402
+from wiring import (  # noqa: E402  （共享裸名模块，共享根经 bootstrap 入 path）
+    build_memory_backend,
+    make_capability_caller,
+)
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
-
-from wiring import build_memory_backend, make_capability_caller  # noqa: E402  （共享裸名模块，共享根经 bootstrap 入 path）
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("context_window_guard_pipeline")

@@ -28,9 +28,10 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import pytest
 
@@ -100,7 +101,7 @@ def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProce
 requires_git = pytest.mark.skipif(shutil.which("git") is None, reason="git 不可用")
 
 
-@pytest.fixture()
+@pytest.fixture
 def repo(tmp_path: Path) -> Path:
     """真实临时 git 仓库（main 分支含一个已提交文件）。"""
     if shutil.which("git") is None:
@@ -117,7 +118,7 @@ def repo(tmp_path: Path) -> Path:
     return r
 
 
-@pytest.fixture()
+@pytest.fixture
 def tool(repo: Path) -> Any:
     return _load_tool().ResourceMergeTool(base_path=str(repo))
 

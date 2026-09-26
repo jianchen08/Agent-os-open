@@ -25,6 +25,7 @@ from logging.handlers import RotatingFileHandler
 from typing import Any, Protocol, runtime_checkable
 
 import litellm
+
 from agentos_plugin_sdk.error_classifier import ErrorKind, classify_error
 from agentos_plugin_sdk.stream_watchdog import StreamHardTimeout
 
@@ -276,7 +277,7 @@ async def _await_with_escape(
             what, timeout,
         )
         task.cancel()
-        raise asyncio.TimeoutError(f"{what} 超时 {timeout:.0f}s")
+        raise TimeoutError(f"{what} 超时 {timeout:.0f}s")
     return task.result()
 
 
@@ -1090,7 +1091,7 @@ class _BaseLiteLLMAdapter:
                 model=model,
                 llm_provider="zai",
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error(
                 "[%s] STREAM TIMEOUT: first chunk 超时 (%.0fs) 含建连阶段 model=%s",
                 type(self).__name__,
@@ -1148,7 +1149,9 @@ class _BaseLiteLLMAdapter:
                         _ACLOSE_TIMEOUT_SECONDS,
                         what="first-chunk aclose",
                     )
-                except BaseException:
+                except Exception:
+                    # 关闭失败不掩盖正在传播的业务异常；KeyboardInterrupt/
+                    # CancelledError 等须穿透以不破坏取消语义
                     pass
             raise
         _t3 = _time.monotonic()
@@ -1224,7 +1227,7 @@ class _BaseLiteLLMAdapter:
                     )
                 except StopAsyncIteration:
                     break
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     _idle = _time.monotonic() - state.last_chunk_monotonic
                     logger.warning(
                         "[%s] STREAM TIMEOUT: inter-chunk 静默超时 (%.0fs) 距上个 chunk #%d 已静默 %.0fs model=%s",
@@ -1269,7 +1272,7 @@ class _BaseLiteLLMAdapter:
                         _ACLOSE_TIMEOUT_SECONDS,
                         what="response.aclose",
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.warning(
                         "[%s] response.aclose finally 超时 %.0fs（半死 socket 放弃关闭），"
                         "残留连接交 GC 回收",
@@ -1999,7 +2002,7 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                         timeout=_ACLOSE_TIMEOUT_SECONDS,
                         what="stream.aclose",
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.warning(
                         "[%s] stream.aclose 超时 %.0fs（半死 socket 放弃优雅关闭），"
                         "残留连接交由 GC 回收",
@@ -2145,7 +2148,7 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
         while not _done_evt.is_set() and _chunk_queue.empty():
             if _time.monotonic() >= _deadline:
                 _close_evt.set()
-                raise asyncio.TimeoutError(
+                raise TimeoutError(
                     f"litellm.acompletion 超时 {_acompletion_timeout:.0f}s"
                     f"（HTTP 层 timeout 已设 {_acompletion_timeout:.0f}s；残留线程由 daemon 回收）"
                     f"model={litellm_model}"

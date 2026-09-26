@@ -173,11 +173,11 @@ class TestUploadsGuardsUnchanged:
         assert result.success is False
         assert "凭据类文件" in result.error
 
-    async def test_outside_uploads_prefix_rejected(
+    async def test_outside_uploads_prefix_readable_under_denylist(
         self, uploads_env: SimpleNamespace
     ) -> None:
-        """非 /uploads/ 的根外绝对路径仍拒绝（放行分支不外溢）。"""
+        """读黑名单制：非 /uploads/ 的根外普通文件读放行（附件锚只管 /uploads/ 形）。"""
         result = await file_read(path=str(uploads_env.secret), workspace=str(uploads_env.ws))
 
-        assert result.success is False
-        assert "超出 workspace/project_root" in result.error
+        assert result.success is True, result.error
+        assert "OUTSIDE UPLOADS" in result.output["content"]

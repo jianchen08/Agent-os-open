@@ -42,7 +42,6 @@ _paths = bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根（http_
 # HTTP status + 结构化错误体），与 error 的扁平失败信封不同。
 import media_review_service  # noqa: E402
 from bounded_dict import BoundedDict  # noqa: E402
-from time_iso import now_iso_utc as _now_iso  # noqa: E402
 from http_json import (  # noqa: E402
     decode_body as _decode_body,
     json_response as _json_response,
@@ -51,6 +50,7 @@ from http_json import (  # noqa: E402
     protocol_error as _error,
 )
 from review_service import get_review_service  # noqa: E402
+from time_iso import now_iso_utc as _now_iso  # noqa: E402
 from wiring import build_memory_backend  # noqa: E402  （共享裸名模块，共享根经 bootstrap 入 path）
 
 logger = logging.getLogger(__name__)
@@ -61,6 +61,11 @@ plugin = AgentOSPlugin("review_service")
 _REVIEW_AGENT_ID = "review_agent"
 # 触发来源标记（与 src/memory/maintenance/service.py _try_launch_review_agent tags.source 对齐）
 _REVIEW_SOURCE = "tool_review"
+
+# 复盘预算缺省上限（§10.5-3）：单复盘管道可纳入的管道数。超出拒绝派发
+# （fail-closed），由调用方拆分为多个复盘。可用 plugin_configs 的
+# max_pipelines_per_review 覆盖。
+_MAX_PIPELINES_PER_REVIEW = 5
 
 # 复盘报告存储：review_id -> report dict
 # report 含 status: pending(子管道已起,报告未回写) / running(子管道进行中) /
@@ -168,7 +173,14 @@ def _local_degrade_report(
 
 
 def _build_review_pipeline_params(
-    review_id: str, task_id: str, summary: str, artifacts: list[str], metrics: dict[str, Any]
+    review_id: str,
+    task_id: str,
+    summary: str,
+    artifacts: list[str],
+    metrics: dict[str, Any],
+    *,
+    target_pipelines: list[str] | None = None,
+    budget: int = _MAX_PIPELINES_PER_REVIEW,
 ) -> dict[str, Any]:
     """构造 review_agent 管道的 chat.send_message 参数（含血缘与 state 预置）。"""
     return {
@@ -187,6 +199,10 @@ def _build_review_pipeline_params(
             "review.summary": summary,
             "review.artifacts": artifacts,
             "review.metrics": metrics,
+            # 被复盘集合与预算（§10.5-2）：read_execution_detail 的查询边界
+            # 依据——只许查集合内管道，越界拒绝。
+            "review.target_pipelines": target_pipelines or ([task_id] if task_id else []),
+            "review.budget_pipelines": budget,
             # 血缘扁平键：根形式（系统组件，诚实声明复盘来源——不伪造父/默认
             # session）；血缘方案本插件自持，内核零知识
             "lineage.root": True,
@@ -227,7 +243,14 @@ async def _register_review_pipeline_owner(chat: Any, task_id: str, pipeline_id: 
 
 
 async def _dispatch_review_pipeline(
-    review_id: str, task_id: str, summary: str, artifacts: list[str], metrics: dict[str, Any]
+    review_id: str,
+    task_id: str,
+    summary: str,
+    artifacts: list[str],
+    metrics: dict[str, Any],
+    *,
+    target_pipelines: list[str] | None = None,
+    budget: int = _MAX_PIPELINES_PER_REVIEW,
 ) -> dict[str, Any] | None:
     """派发 review_agent 管道并落 running 报告，返回 running 响应或 None 走降级。
 
@@ -241,7 +264,10 @@ async def _dispatch_review_pipeline(
     if chat is None:
         return None
 
-    params = _build_review_pipeline_params(review_id, task_id, summary, artifacts, metrics)
+    params = _build_review_pipeline_params(
+        review_id, task_id, summary, artifacts, metrics,
+        target_pipelines=target_pipelines, budget=budget,
+    )
     try:
         resp = await chat.call("send_message", params)
         pipeline_id = str(resp.get("pipeline_id") or "") if isinstance(resp, dict) else ""
@@ -285,6 +311,12 @@ async def _dispatch_review_pipeline(
             "summary": {"type": "string"},
             "artifacts": {"type": "array", "items": {"type": "string"}, "default": []},
             "metrics": {"type": "object", "default": {}},
+            "pipeline_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "多管道复盘的被复盘管道清单（与 task_id 去重合并登记；超预算拒绝）",
+                "default": [],
+            },
         },
         "required": ["task_id", "summary"],
     },
@@ -295,6 +327,7 @@ async def trigger_review(
     summary: str,
     artifacts: list[str] | None = None,
     metrics: dict[str, Any] | None = None,
+    pipeline_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Trigger a post-task review via review_agent sub-pipeline (B path).
 
@@ -302,19 +335,48 @@ async def trigger_review(
     报告 running，get_report 轮询复盘管道 state 聚合行，真实完成才落
     completed。chat 能力缺席/派发失败 → 本地降级兜底（不产空 lessons 假成功）。
 
+    被复盘集合与预算（§10.5）：pipeline_ids 为多管道复盘的显式清单（与
+    task_id 去重合并），派发时整体登记进复盘管道 state（review.target_pipelines
+    + review.budget_pipelines），read_execution_detail 据此过滤越界查询；
+    集合大小超预算（max_pipelines_per_review 配置，缺省 5）→ 拒绝派发。
+
     Returns:
         review_id + status:
         - running (pipeline): 复盘管道已派发
         - degraded (local_degrade): 降级产出基础报告（不报 completed，防轮询方误判）
+        - rejected: 超复盘预算（fail-closed，调用方应拆分）
     """
     review_id = f"review_{uuid.uuid4().hex[:8]}"
     artifacts_l = artifacts or []
     metrics_l = metrics or {}
 
+    # ── 被复盘集合登记与预算执法（§10.5-2/3）：task_id 优先，清单去重合并；
+    # 超预算拒绝（fail-closed），不派发不产生报告。──
+    target_pipelines = [task_id] if task_id else []
+    for pid in pipeline_ids or []:
+        if pid and pid not in target_pipelines:
+            target_pipelines.append(pid)
+    try:
+        budget = int(plugin.get_config().get("max_pipelines_per_review") or _MAX_PIPELINES_PER_REVIEW)
+    except Exception:  # noqa: BLE001 — 配置读取失败回缺省
+        budget = _MAX_PIPELINES_PER_REVIEW
+    if len(target_pipelines) > budget:
+        return {
+            "review_id": review_id,
+            "status": "rejected",
+            "error": (
+                f"复盘预算超限：被复盘管道 {len(target_pipelines)} 个 > 上限 {budget}，"
+                "请拆分为多个复盘"
+            ),
+        }
+
     # ── 深度复盘经 chat.send_message 起 review_agent 管道；trigger 端点
     # 只报 running/degraded 两种状态，completed 由管道产出经 store_report
     # 回写；降级兜底语义见 _dispatch_review_pipeline / _local_degrade_report。──
-    running = await _dispatch_review_pipeline(review_id, task_id, summary, artifacts_l, metrics_l)
+    running = await _dispatch_review_pipeline(
+        review_id, task_id, summary, artifacts_l, metrics_l,
+        target_pipelines=target_pipelines, budget=budget,
+    )
     if running is not None:
         return running
 

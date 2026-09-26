@@ -16,26 +16,13 @@
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
 import { makeEventFactory } from './helpers/streamingEventFactory'
+import { resetStreamingStore } from './helpers/streamingStoreKit'
 
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    stream: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    pipelineStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  },
-  createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
-}))
+vi.mock('@/utils/logger', async () => (await import('../../../../../stores/__tests__/helpers/storeTestMocks')).loggerMockFull())
 
-vi.mock('@/services/api/session', () => ({
-  getMessages: vi.fn().mockResolvedValue({ messages: [], total: 0, session_id: '' }),
-  mergeConsecutiveAssistantMessages: (msgs: any[]) => msgs,
-}))
+vi.mock('@/services/api/session', async () => (await import('../../../../../stores/__tests__/helpers/storeTestMocks')).apiSessionMockFull())
 
-vi.mock('@/utils/retry', () => ({
-  retry: (fn: () => any) => fn(),
-  isRetryableError: vi.fn().mockReturnValue(false),
-}))
+vi.mock('@/utils/retry', async () => (await import('../../../../../stores/__tests__/helpers/storeTestMocks')).retryMockBase())
 
 const PIPELINE_ID = 'pipe-tool-text-order-001'
 const MESSAGE_ID = 'msg_tool_text_order_01'
@@ -62,7 +49,6 @@ function getTextContents(): string[] {
 }
 
 describe('工具调用与文本块顺序：tool_start 与 buffered text delta 的时序竞争', () => {
-  let usePipelineMessageStore: any
   let handleStreamStart: any
   let handleTextDelta: any
   let handleStreamEnd: any
@@ -74,21 +60,7 @@ describe('工具调用与文本块顺序：tool_start 与 buffered text delta �
 
   beforeEach(async () => {
     vi.useFakeTimers()
-    vi.resetModules()
-    const storeMod = await import('@/stores/pipelineMessageStore')
-    usePipelineMessageStore = storeMod.usePipelineMessageStore
-    ;(window as any).__pipelineStore = usePipelineMessageStore
-    usePipelineMessageStore.setState({
-      messagesByPipeline: {}, pipelines: {},
-      pipelineSessionMap: { [PIPELINE_ID]: THREAD_ID },
-      streamingState: {}, activePipelineId: null,
-      topCursorsByPipeline: {}, bottomCursorsByPipeline: {},
-      hasMoreOlderByPipeline: {}, isLoadingOlderByPipeline: {},
-    })
-    usePipelineMessageStore.getState().registerPipeline({
-      pipelineId: PIPELINE_ID, sessionId: THREAD_ID, level: 1, tabId: null,
-      agentName: '', status: 'idle', parentId: null, unreadCount: 0,
-    })
+    await resetStreamingStore(PIPELINE_ID, THREAD_ID)
 
     const handlerMod = await import('@/services/websocket/streaming/handlers')
     handleStreamStart = handlerMod.handleStreamStart

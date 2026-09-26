@@ -56,7 +56,7 @@ plugins:
     enabled: false
   rollback_service:
     enabled: false
-  pipeline_godot_context:
+  pipeline_host_context:
     enabled: true
   godot_mcp:
     enabled: true

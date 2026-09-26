@@ -68,6 +68,7 @@ fn manifest_base(plugin_id: &str) -> PluginManifest {
         http_endpoints: vec![],
         ui_schema: None,
         contributes: None,
+        restricted_capabilities: Vec::new(),
         enabled: None,
         activation: None,
         persistent_fields: vec![],
@@ -309,6 +310,7 @@ async fn dispatch_success_pushes_new_message_and_stream_end() {
             None,
             None,
             "agentos",
+            None,
             "cmid-ok-1",
             PendingInputSource::User,
         )
@@ -354,6 +356,7 @@ async fn dispatch_silent_core_pushes_no_assistant_reply_error_not_echo() {
             None,
             None,
             "agentos",
+            None,
             "",
             PendingInputSource::User,
         )
@@ -410,6 +413,7 @@ async fn dispatch_engine_failure_pushes_stream_error() {
             None,
             None,
             "agentos",
+            None,
             "",
             PendingInputSource::User,
         )
@@ -481,6 +485,7 @@ async fn endpoint_update_emits_pending_inputs_changed() {
                 client_message_id: String::new(),
                 execution_context: None,
                 state_overlay: None,
+                pipeline_config_id: None,
                 created_at: chrono::Utc::now().to_rfc3339(),
             },
         )
@@ -561,6 +566,7 @@ async fn dispatch_idle_chain_runs_direct_without_pending_frames() {
             None,
             None,
             "agentos",
+            None,
             "cmid-idle-1",
             PendingInputSource::User,
         )
@@ -615,6 +621,7 @@ async fn dispatch_busy_chain_enqueues_then_consumes_after_release() {
             None,
             None,
             "agentos",
+            None,
             "cmid-busy-1",
             PendingInputSource::User,
         )
@@ -656,4 +663,142 @@ async fn dispatch_busy_chain_enqueues_then_consumes_after_release() {
     );
     let rows = store.list_pending_inputs("default", "pipe-busy-1").unwrap();
     assert!(rows.is_empty(), "消费后队列表必须清空");
+}
+
+/// 等到第 `expected_count` 次 pipeline_round_finished（每轮恰好一帧）。
+async fn wait_for_rounds(frames: &Arc<Mutex<Vec<String>>>, expected_count: usize) {
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            let n = frames
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|f| f.contains("pipeline_round_finished"))
+                .count();
+            if n >= expected_count {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("应收到轮次收尾帧");
+}
+
+/// WS agent_id 透传 → 管道 state 持久键 agent.id（2026-09-25，双审查断裂点
+/// 修复的落库断言）：帧显式携带 → 落 pipeline_state 表（persistent_fields
+/// 声明投影，镜像生产 context_build 对 agent.id 的声明）；下一条消息切换
+/// 身份 → 消息级覆盖；再一条不带 → 沿用最后写入值（内核不写键不回退）。
+#[tokio::test]
+async fn dispatch_agent_id_lands_as_persistent_state_key_and_overrides() {
+    pin_temp_user_root();
+    let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let coord = Arc::new(SessionCoordinator::new());
+    let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+    coord.register(
+        "u1",
+        Arc::new(FrameSink {
+            frames: frames.clone(),
+        }),
+    );
+    coord.register_thread("thread-agent-1", "u1");
+    seed_session_with_pipeline(&store, "thread-agent-1", "pipe-agent-1").await;
+    let state = make_engine_state(store.clone(), Arc::new(OkInvoker), coord, false);
+    // 生产中 agent.id 的持久化声明来自 context_build manifest（persistent_fields）；
+    // 夹具 manifests 默认为空集，这里补一条同款声明使投影生效。
+    let mut m = manifest_base("mock_llm_core");
+    m.persistent_fields = vec!["agent.id".to_string()];
+    state.manifests.write().await.push(m);
+
+    let dispatcher = agentos_api::ws_session::EngineDispatcher::new(state);
+    use agentos_core::traits::StorageBackend;
+    use agentos_session::router::PipelineDispatcher;
+    let identity_of = |fields: &std::collections::HashMap<String, serde_json::Value>| {
+        fields
+            .get("agent.id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    // 第 1 条：帧带 agent_id=persona_a → 身份落持久键。
+    dispatcher
+        .dispatch_user_input(
+            "thread-agent-1",
+            "u1",
+            "第一条",
+            "",
+            "",
+            None,
+            Some(&json!({"agent.id": "persona_a"})),
+            "persona_a",
+            None,
+            "cmid-agent-1",
+            PendingInputSource::User,
+        )
+        .await
+        .unwrap();
+    wait_for_rounds(&frames, 1).await;
+    let fields = StorageBackend::load_pipeline_state(store.as_ref(), "pipe-agent-1", "default")
+        .await
+        .unwrap();
+    assert_eq!(
+        identity_of(&fields),
+        "persona_a",
+        "帧 agent_id 应落 pipeline_state 持久键 agent.id"
+    );
+
+    // 第 2 条：切换身份 persona_b → 消息级覆盖（overlay 在恢复合并之后应用）。
+    dispatcher
+        .dispatch_user_input(
+            "thread-agent-1",
+            "u1",
+            "第二条",
+            "",
+            "",
+            None,
+            Some(&json!({"agent.id": "persona_b"})),
+            "persona_b",
+            None,
+            "cmid-agent-2",
+            PendingInputSource::User,
+        )
+        .await
+        .unwrap();
+    wait_for_rounds(&frames, 2).await;
+    let fields = StorageBackend::load_pipeline_state(store.as_ref(), "pipe-agent-1", "default")
+        .await
+        .unwrap();
+    assert_eq!(
+        identity_of(&fields),
+        "persona_b",
+        "下一条消息显式身份应覆盖既有持久键"
+    );
+
+    // 第 3 条：不带 agent_id → 不写键，沿用最后写入值（缺省零变化）。
+    dispatcher
+        .dispatch_user_input(
+            "thread-agent-1",
+            "u1",
+            "第三条",
+            "",
+            "",
+            None,
+            None,
+            "",
+            None,
+            "cmid-agent-3",
+            PendingInputSource::User,
+        )
+        .await
+        .unwrap();
+    wait_for_rounds(&frames, 3).await;
+    let fields = StorageBackend::load_pipeline_state(store.as_ref(), "pipe-agent-1", "default")
+        .await
+        .unwrap();
+    assert_eq!(
+        identity_of(&fields),
+        "persona_b",
+        "缺省消息不得改写身份：管道沿用最后写入值"
+    );
 }

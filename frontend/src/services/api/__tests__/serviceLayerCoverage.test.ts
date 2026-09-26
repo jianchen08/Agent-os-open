@@ -33,8 +33,8 @@ import {
   getWorkspaceFileContent,
   getWorkspaceFileTree,
 } from '@/services/api/workspaces'
-import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
-import { MONITORING_ENDPOINTS } from '@/services/api/endpoints.generated'
+import { WORKSPACE_SERVICE_ENDPOINTS, MONITORING_ENDPOINTS  } from '@/services/api/endpoints.generated'
+
 
 const okResponse = (data: unknown) => ({ data })
 

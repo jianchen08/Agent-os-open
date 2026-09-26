@@ -14,9 +14,9 @@
  */
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { GlobalInteractionOverlay } from '../GlobalInteractionOverlay'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { useSessionStore } from '@/stores/sessionStore'
+import { GlobalInteractionOverlay } from '../GlobalInteractionOverlay'
 import type { PendingInteraction } from '@/stores/interactionStore'
 
 // ---------------------------------------------------------------------------

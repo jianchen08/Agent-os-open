@@ -46,6 +46,7 @@ fn manifest(plugin_id: &str, plugin_type: PluginType, host_type: HostType) -> Pl
         http_endpoints: vec![],
         ui_schema: None,
         contributes: None,
+        restricted_capabilities: Vec::new(),
         enabled: None,
         activation: None,
         persistent_fields: vec![],

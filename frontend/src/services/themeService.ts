@@ -8,6 +8,17 @@
 
 import { presetThemes } from '@/config/themes'
 import { ThemeStorageService } from '@/services/themeStorage'
+import {
+  colorToHsl,
+  colorToHslSolid,
+  colorToRgb,
+  contrastPick,
+  extractSolidFromGradient,
+  hexToRgb,
+  relativeLuminance,
+  validateThemeValuesDeep,
+  wcagRatio,
+} from './themeValuePolicy'
 import type { PluginTheme, ThemeConfig, ThemeInfo } from '@/types/theme'
 
 /**
@@ -872,6 +883,10 @@ export function validateThemeConfig(config: unknown): { valid: boolean; errors?:
     errors.push('缺少或无效的 backgrounds 字段')
   }
 
+  if (errors.length === 0) {
+    errors.push(...validateThemeValuesDeep(theme))
+  }
+
   return {
     valid: errors.length === 0,
     errors: errors.length > 0 ? errors : undefined,
@@ -886,205 +901,4 @@ export function validateThemeConfig(config: unknown): { valid: boolean; errors?:
  */
 function kebabCase(str: string): string {
   return str.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase()
-}
-
-/**
- * 将 HEX 颜色值转换为 RGB 对象
- *
- * @param hex - HEX 颜色值（如 #3b82f6 或 #fff）
- * @returns RGB 对象，如果解析失败则返回 null
- */
-function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
-  const match = hex.replace(/^#/, '').match(/^([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i)
-  if (!match) return null
-  return {
-    r: parseInt(match[1], 16),
-    g: parseInt(match[2], 16),
-    b: parseInt(match[3], 16),
-  }
-}
-
-/**
- * 将任意颜色值解析为 RGB（HEX / rgb(a) / 渐变取色标中位近似）
- *
- * @param color - 颜色值字符串
- * @returns RGB 对象（不含 alpha），无法解析时返回 null
- */
-export function colorToRgb(color: string): { r: number; g: number; b: number } | null {
-  if (!color || typeof color !== 'string') return null
-  if (color.startsWith('#')) return hexToRgb(color)
-
-  const rgbaMatch = color.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\s*\)/)
-  if (rgbaMatch) {
-    return { r: parseInt(rgbaMatch[1]), g: parseInt(rgbaMatch[2]), b: parseInt(rgbaMatch[3]) }
-  }
-
-  const solidFromGradient = extractSolidFromGradient(color)
-  return solidFromGradient ? hexToRgb(solidFromGradient) : null
-}
-
-/**
- * 颜色相对亮度（WCAG 2.1）：0（纯黑）..1（纯白），对比度复算与黑白择优的共用基元
- */
-function relativeLuminance(rgb: { r: number; g: number; b: number }): number {
-  const channels = [rgb.r, rgb.g, rgb.b].map((v) => {
-    const n = v / 255
-    return n <= 0.03928 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4
-  })
-  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
-}
-
-/**
- * 两实色的 WCAG 对比度（2.2:1..21:1），气泡内链接保底判据用
- */
-function wcagRatio(a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }): number {
-  const la = relativeLuminance(a)
-  const lb = relativeLuminance(b)
-  const [hi, lo] = la >= lb ? [la, lb] : [lb, la]
-  return (hi + 0.05) / (lo + 0.05)
-}
-
-/**
- * 为给定底色择优前景色（纯白或纯黑，取对比度更高者）
- *
- * 语义前景（primary/secondary/accent/status 前景）的单点计算：声明值面向
- * 各自背景 authored，跨槽位复用必撞色，这里按底色亮度择黑/白保证恒可读。
- * 亮度分界 L≈0.179（黑白对比度相等点），偏亮取黑、偏暗取白。
- *
- * @param bg - 底色值字符串（HEX/rgba/渐变）
- * @returns '#000000' 或 '#ffffff'，无法解析时回退白色（深色底为主）
- */
-function contrastPick(bg: string): string {
-  const rgb = colorToRgb(bg)
-  if (!rgb) return '#ffffff'
-  return relativeLuminance(rgb) > 0.179 ? '#000000' : '#ffffff'
-}
-
-/**
- * 将 RGB 值转换为 HSL 格式字符串
- *
- * 输出格式为 shadcn/ui 期望的原始 HSL 值（不含 hsl() 包裹），
- * 如 "210 40% 98%" 或 "210 40% 98% / 0.5"（带透明度）
- *
- * @param r - 红色通道 (0-255)
- * @param g - 绿色通道 (0-255)
- * @param b - 蓝色通道 (0-255)
- * @param alpha - 可选透明度 (0-1)
- * @returns HSL 格式字符串
- */
-function rgbToHsl(r: number, g: number, b: number, alpha?: number): string {
-  const rn = r / 255
-  const gn = g / 255
-  const bn = b / 255
-  const max = Math.max(rn, gn, bn)
-  const min = Math.min(rn, gn, bn)
-  const l = (max + min) / 2
-  let h = 0
-  let s = 0
-
-  if (max !== min) {
-    const d = max - min
-    s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
-    switch (max) {
-      case rn:
-        h = ((gn - bn) / d + (gn < bn ? 6 : 0)) / 6
-        break
-      case gn:
-        h = ((bn - rn) / d + 2) / 6
-        break
-      case bn:
-        h = ((rn - gn) / d + 4) / 6
-        break
-    }
-  }
-
-  const hDeg = Math.round(h * 360)
-  const sPct = Math.round(s * 100)
-  const lPct = Math.round(l * 100)
-
-  if (alpha !== undefined && alpha < 1) {
-    return `${hDeg} ${sPct}% ${lPct}% / ${alpha}`
-  }
-  return `${hDeg} ${sPct}% ${lPct}%`
-}
-
-/**
- * 从渐变等复杂颜色值中提取实色（取色标中位近似整体观感）
- *
- * 渐变字符串塞进 hsl(var(--xxx)) 桥接会全线失效（面板透明），
- * 这里为 shadcn 桥接提取一个可解析的实色近似值。
- *
- * @param color - 颜色值字符串
- * @returns 实色 HEX，无法提取时返回 null
- */
-function extractSolidFromGradient(color: string): string | null {
-  const stops = color.match(/#[0-9a-f]{6}\b/gi)
-  if (!stops || stops.length === 0) return null
-  return stops[Math.floor((stops.length - 1) / 2)]
-}
-
-/**
- * 将任意颜色值转换为 HSL 原始格式
- *
- * 支持 HEX (#rrggbb) 和 RGBA (rgba(r,g,b,a)) 格式，
- * 输出 shadcn/ui 期望的 HSL 原始值（用于 hsl(var(--xxx)) 模式）。
- * 渐变值提取色标中位转实色（渐变原样输出会让 hsl() 桥接全线失效）。
- *
- * @param color - 颜色值字符串
- * @returns HSL 格式字符串，解析失败时返回原值
- */
-function colorToHsl(color: string): string {
-  if (color.startsWith('#')) {
-    const rgb = hexToRgb(color)
-    if (rgb) return rgbToHsl(rgb.r, rgb.g, rgb.b)
-  }
-
-  const rgbaMatch = color.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\s*\)/)
-  if (rgbaMatch) {
-    const r = parseInt(rgbaMatch[1])
-    const g = parseInt(rgbaMatch[2])
-    const b = parseInt(rgbaMatch[3])
-    const a = rgbaMatch[4] !== undefined ? parseFloat(rgbaMatch[4]) : undefined
-    return rgbToHsl(r, g, b, a)
-  }
-
-  const solidFromGradient = extractSolidFromGradient(color)
-  if (solidFromGradient) {
-    const rgb = hexToRgb(solidFromGradient)
-    if (rgb) return rgbToHsl(rgb.r, rgb.g, rgb.b)
-  }
-
-  return color
-}
-
-/**
- * 将颜色转换为不透明的 HSL 原始格式
- *
- * 与 colorToHsl 相同，但强制忽略 alpha 通道，确保输出为完全不透明；
- * 渐变值同样提取色标中位转实色。
- *
- * @param color - 颜色值字符串
- * @returns 不透明的 HSL 格式字符串
- */
-function colorToHslSolid(color: string): string {
-  if (color.startsWith('#')) {
-    const rgb = hexToRgb(color)
-    if (rgb) return rgbToHsl(rgb.r, rgb.g, rgb.b)
-  }
-
-  const rgbaMatch = color.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\s*\)/)
-  if (rgbaMatch) {
-    const r = parseInt(rgbaMatch[1])
-    const g = parseInt(rgbaMatch[2])
-    const b = parseInt(rgbaMatch[3])
-    return rgbToHsl(r, g, b)
-  }
-
-  const solidFromGradient = extractSolidFromGradient(color)
-  if (solidFromGradient) {
-    const rgb = hexToRgb(solidFromGradient)
-    if (rgb) return rgbToHsl(rgb.r, rgb.g, rgb.b)
-  }
-
-  return color
 }

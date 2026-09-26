@@ -133,6 +133,7 @@ async fn app_with_deps() -> (tempfile::TempDir, axum::Router, UserRootGuard) {
         http_endpoints: vec![],
         ui_schema: None,
         contributes: None,
+        restricted_capabilities: Vec::new(),
         enabled: None,
         activation: None,
         persistent_fields: vec![],

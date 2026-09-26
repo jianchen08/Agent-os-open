@@ -86,7 +86,7 @@ async fn test_static_asset_serves_index_html() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!("/ext/{}/assets/index.html", PLUGIN_ID))
+                .uri(format!("/ext/{PLUGIN_ID}/assets/index.html"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -120,7 +120,7 @@ async fn test_static_asset_serves_js_with_correct_mime() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!("/ext/{}/assets/app.js", PLUGIN_ID))
+                .uri(format!("/ext/{PLUGIN_ID}/assets/app.js"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -151,7 +151,7 @@ async fn test_static_asset_serves_css_with_correct_mime() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!("/ext/{}/assets/style.css", PLUGIN_ID))
+                .uri(format!("/ext/{PLUGIN_ID}/assets/style.css"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -179,7 +179,7 @@ async fn test_static_asset_serves_nested_path() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!("/ext/{}/assets/sub/deep.json", PLUGIN_ID))
+                .uri(format!("/ext/{PLUGIN_ID}/assets/sub/deep.json"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -210,7 +210,7 @@ async fn test_static_asset_nonexistent_returns_404() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!("/ext/{}/assets/nonexistent.html", PLUGIN_ID))
+                .uri(format!("/ext/{PLUGIN_ID}/assets/nonexistent.html"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -231,7 +231,7 @@ async fn test_static_asset_rejects_path_traversal() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!("/ext/{}/assets/../../../../etc/passwd", PLUGIN_ID))
+                .uri(format!("/ext/{PLUGIN_ID}/assets/../../../../etc/passwd"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -278,7 +278,7 @@ async fn test_static_asset_only_intercepts_assets_subpath() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!("/ext/{}/not-assets/index.html", PLUGIN_ID))
+                .uri(format!("/ext/{PLUGIN_ID}/not-assets/index.html"))
                 .body(Body::empty())
                 .unwrap(),
         )

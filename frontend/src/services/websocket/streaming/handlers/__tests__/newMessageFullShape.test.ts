@@ -14,19 +14,10 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { makeEventFactory } from './helpers/streamingEventFactory'
+import { resetStreamingStore } from './helpers/streamingStoreKit'
 import type * as sessionMod from '@/services/api/session'
-import type * as handlersMod from '@/services/websocket/streaming/handlers'
-import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    stream: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    pipelineStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  },
-  createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
-}))
+vi.mock('@/utils/logger', async () => (await import('../../../../../stores/__tests__/helpers/storeTestMocks')).loggerMockFull())
 
 vi.mock('@/services/api/session', async (importOriginal) => {
   const actual = await importOriginal<sessionMod>()
@@ -92,21 +83,7 @@ describe('new_message 完整消息形态（冷热同构）', () => {
   let handleStreamStart: any
 
   beforeEach(async () => {
-    vi.resetModules()
-    const storeMod = await import('@/stores/pipelineMessageStore')
-    usePipelineMessageStore = storeMod.usePipelineMessageStore
-    ;(window as any).__pipelineStore = usePipelineMessageStore
-    usePipelineMessageStore.setState({
-      messagesByPipeline: {}, pipelines: {},
-      pipelineSessionMap: { [PIPELINE_ID]: THREAD_ID },
-      streamingState: {}, activePipelineId: null,
-      topCursorsByPipeline: {}, bottomCursorsByPipeline: {},
-      hasMoreOlderByPipeline: {}, isLoadingOlderByPipeline: {},
-    })
-    usePipelineMessageStore.getState().registerPipeline({
-      pipelineId: PIPELINE_ID, sessionId: THREAD_ID, level: 1, tabId: null,
-      agentName: '', status: 'idle', parentId: null, unreadCount: 0,
-    })
+    usePipelineMessageStore = await resetStreamingStore(PIPELINE_ID, THREAD_ID)
 
     const handlerMod = await import('@/services/websocket/streaming/handlers')
     handleNewMessage = handlerMod.handleNewMessage

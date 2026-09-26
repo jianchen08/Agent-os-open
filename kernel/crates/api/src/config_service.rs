@@ -201,7 +201,7 @@ fn resolve_config_target_inner(
         for seg in Path::new(&rel).iter() {
             let s = seg.to_string_lossy();
             let stem = s.split('.').next().unwrap_or(&s);
-            if KERNEL_RESERVED_SEGMENTS.iter().any(|r| *r == stem) {
+            if KERNEL_RESERVED_SEGMENTS.contains(&stem) {
                 return Err(ConfigError::KernelReservedFile {
                     path: mapping_path.to_string(),
                 });

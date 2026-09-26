@@ -15,7 +15,6 @@
 import { Copy, Minus, Square, X } from 'lucide-react'
 import { useLayoutEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { ReactNode } from 'react'
 import { cn } from '@/lib/utils'
 import {
   BAND_BUTTON_ICON_CLASS,
@@ -23,6 +22,7 @@ import {
   BAND_GAP_CLASS,
   BAND_ICON_BUTTON_CLASS,
 } from './bandButton'
+import type { ReactNode } from 'react'
 
 /** Electron 主窗口（非子浮窗）判定：TitleBar 仅在此环境渲染 */
 export function isDesktopMainWindow(): boolean {

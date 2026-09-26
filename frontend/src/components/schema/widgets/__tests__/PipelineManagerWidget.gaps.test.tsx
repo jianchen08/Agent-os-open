@@ -25,6 +25,7 @@ import { act, fireEvent, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 // 顺序约束：先于被测组件 import——vi.mock 工厂体在被测组件初始化时执行，
 // 届时本模块必须已求值（见 pmTestUtils 头注）
+// eslint-disable-next-line import-x/order -- pmTestUtils 须先于被测组件求值（vi.mock 工厂时序约束，见 pmTestUtils 头注；禁用排序自动修防回归）
 import { pmMod, pmSeed, renderPmAllStatuses, resetPmContainers } from './pmTestUtils'
 import { PipelineManagerWidget } from '@/components/schema/widgets/PipelineManagerWidget'
 import { useAgentTabStore } from '@/stores/agentTabStore'

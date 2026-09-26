@@ -11,9 +11,9 @@
  * 2. 被删除槽位（API 快照无对应）→ 本地残影丢弃（不留下指向空槽位的幽灵）。
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { resolveWireUserMessageId } from '@/utils/messageWireId'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
-import { resolveWireUserMessageId } from '@/utils/messageWireId'
 
 vi.mock('@/utils/logger', async () => {
   const { loggerMockFull } = await import('./helpers/storeTestMocks')

@@ -19,15 +19,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
 const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }))
 
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    stream: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    pipelineStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  },
-  createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
-}))
+vi.mock('@/utils/logger', async () => (await import('../../../stores/__tests__/helpers/storeTestMocks')).loggerMockFull())
 
 // 冷加载路径走真实 session.ts（mapBackendMessageToMessage + merge），只 mock HTTP 层。
 vi.mock('@/services/api/client', () => ({ default: { get: mockGet } }))
@@ -38,13 +30,9 @@ vi.mock('@/utils/retry', () => ({
   isRetryableError: vi.fn().mockReturnValue(false),
 }))
 
-vi.mock('@/stores/contextUsageStore', () => ({
-  useContextUsageStore: { getState: () => ({ clear: vi.fn(), set: vi.fn(), get: () => null }) },
-}))
+vi.mock('@/stores/contextUsageStore', async () => (await import('../../../stores/__tests__/helpers/storeTestMocks')).contextUsageMock())
 
-vi.mock('@/stores/notificationStore', () => ({
-  useNotificationStore: { getState: () => ({ addNotification: vi.fn() }) },
-}))
+vi.mock('@/stores/notificationStore', async () => (await import('../../../stores/__tests__/helpers/storeTestMocks')).notificationStoreMock())
 
 // ── 共享 fixture（同一份工具调用在两条路径上的两种形态） ─────────────────────
 const PID = 'pipe-parity-001'

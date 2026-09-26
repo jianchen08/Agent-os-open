@@ -8,21 +8,15 @@
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { MessageItem } from '../MessageItem'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import { loadChatCardDeclarations, clearChatCardDeclarations } from '@/utils/chatCardInterpreter'
 import { registerGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
+import { MessageItem } from '../MessageItem'
 import type { Message } from '@/types/models'
 
-vi.mock('@/components/chat/LobeChatMarkdown', () => ({
-  LobeChatMarkdown: ({ content }: { content: string }) => (
-    <div data-testid="user-markdown">{content}</div>
-  ),
-}))
+vi.mock('@/components/chat/LobeChatMarkdown', async () => (await import('./helpers/messageItemMocks')).lobeMarkdownStubMock())
 
-vi.mock('@/stores/sessionStore', () => ({
-  useSessionStore: () => ({ activeSessionId: 'session-1' }),
-}))
+vi.mock('@/stores/sessionStore', async () => (await import('./helpers/messageItemMocks')).sessionStoreActiveMock())
 
 // 可变 store 桩：用例内改写 pendingInteractions（空数组 = selector 短路对照）
 let pendingInteractions: Array<Record<string, unknown>> = []
@@ -34,17 +28,11 @@ vi.mock('@/stores/interactionStore', () => ({
 vi.mock('@/hooks/queries/useAgentsQuery', () => ({
   useAgentsQuery: () => ({ data: [] }),
 }))
-vi.mock('@/services/errorReporting', () => ({
-  ErrorType: { CLIENT: 'client' },
-  reportError: vi.fn(),
-}))
-vi.mock('@/services/attachmentOpener', () => ({ openAttachment: vi.fn() }))
+vi.mock('@/services/errorReporting', async () => (await import('./helpers/messageItemMocks')).errorReportingMock())
+vi.mock('@/services/attachmentOpener', async () => (await import('./helpers/messageItemMocks')).attachmentOpenerMock())
 vi.mock('@/components/chat/MessageContentRenderer', () => ({ default: () => null }))
 vi.mock('@/components/chat/MessageActions', () => ({ MessageActions: () => null }))
-vi.mock('@/components/chat/hooks/useMessageRender', () => {
-  const useMessageRender = () => ({ fragments: [], isStreaming: false })
-  return { useMessageRender, default: useMessageRender }
-})
+vi.mock('@/components/chat/hooks/useMessageRender', async () => (await import('./helpers/messageItemMocks')).useMessageRenderStubMock())
 
 function makeMessage(partial: Partial<Message>): Message {
   return {

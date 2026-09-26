@@ -21,6 +21,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as crypto from "crypto";
 import * as path from "path";
+import { focusMainWindow } from "../main";
 
 const electronMock = vi.hoisted(() => {
   const state = { lockGranted: false, isPackaged: true };
@@ -47,6 +48,7 @@ const electronMock = vi.hoisted(() => {
 });
 
 vi.mock("electron", () => ({
+  safeStorage: undefined,
   app: electronMock.app,
   BrowserWindow: vi.fn(),
   dialog: { showErrorBox: vi.fn() },
@@ -163,5 +165,59 @@ describe("resolvePackagedUserData（纯函数性质）", () => {
     const other = await userData("C:\\Inst\\App", "other-name");
     expect(path.dirname(installed)).not.toBe(path.dirname(other));
     expect(path.basename(installed)).toBe(path.basename(other));
+  });
+});
+
+describe("focusMainWindow（second-instance 聚焦已有主窗口，BUG-86）", () => {
+  /** 假主窗口：状态由参数决定，动作可观察 */
+  const makeWin = (state: { destroyed?: boolean; minimized?: boolean; visible?: boolean }) => ({
+    isDestroyed: () => state.destroyed ?? false,
+    isMinimized: () => state.minimized ?? false,
+    isVisible: () => state.visible ?? true,
+    restore: vi.fn(),
+    show: vi.fn(),
+    focus: vi.fn(),
+  });
+
+  it("最小化窗口 → 还原→聚焦（restore 即恢复可见，无需 show 重复显示）", () => {
+    // 真实 BrowserWindow 语义：最小化窗口 isVisible()=true，restore() 后即回到原可见态
+    const win = makeWin({ minimized: true, visible: true });
+    focusMainWindow(win as never);
+    expect(win.restore).toHaveBeenCalledTimes(1);
+    expect(win.show).not.toHaveBeenCalled();
+    expect(win.focus).toHaveBeenCalledTimes(1);
+    // 序列不变量：restore < focus
+    expect(win.restore.mock.invocationCallOrder[0]).toBeLessThan(
+      win.focus.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("隐藏窗口（收进托盘）→ show+focus，不做无谓 restore", () => {
+    const win = makeWin({ visible: false });
+    focusMainWindow(win as never);
+    expect(win.restore).not.toHaveBeenCalled();
+    expect(win.show).toHaveBeenCalledTimes(1);
+    expect(win.focus).toHaveBeenCalledTimes(1);
+  });
+
+  it("前台可见窗口 → 仅聚焦（不闪隐复显）", () => {
+    const win = makeWin({});
+    focusMainWindow(win as never);
+    expect(win.restore).not.toHaveBeenCalled();
+    expect(win.show).not.toHaveBeenCalled();
+    expect(win.focus).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["窗口不存在（null）", null],
+    ["窗口已销毁", makeWin({ destroyed: true })],
+  ])("%s → 静默返回，零窗口调用", (_name, win) => {
+    expect(() => focusMainWindow(win as never)).not.toThrow();
+    if (win) {
+      const w = win as ReturnType<typeof makeWin>;
+      expect(w.restore).not.toHaveBeenCalled();
+      expect(w.show).not.toHaveBeenCalled();
+      expect(w.focus).not.toHaveBeenCalled();
+    }
   });
 });

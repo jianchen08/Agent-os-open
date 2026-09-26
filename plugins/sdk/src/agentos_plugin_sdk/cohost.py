@@ -39,6 +39,13 @@ logger = logging.getLogger(__name__)
 # 遮蔽纪律）承担，本类只做成员换入与聚合表重建。
 RELOAD_MEMBER_METHOD = "agentos/reload_member"
 
+# 内核 → 宿主的单成员卸载请求（带应答；ADR 2026-09-24
+# member-granularity-unload）：定向 on_unload → 从成员表摘除 → 三张聚合表
+# 原位重聚合 → 模块缓存摘除（unload_handler，宿主侧遮蔽纪律，best-effort）。
+# 最后成员拒绝成员级卸载（协议错误）——空成员集破坏合宿进程不变量，内核
+# 对最后成员走整组回收（kill 进程）。
+UNLOAD_MEMBER_METHOD = "agentos/unload_member"
+
 
 class CohostServer:
     """多 AgentOSPlugin 实例的单进程聚合 MCP 服务端。
@@ -50,6 +57,10 @@ class CohostServer:
             注入后注册 ``agentos/reload_member`` 请求（成员粒度热重载）；
             回调只负责按遮蔽纪律加载新实例（host.py 职责），换入与聚合表
             重建由本类完成。缺省不注册（独占 server.py 复用 McpServer 形态）。
+        unload_handler: 可选摘除回调 ``(plugin_id) -> Any``。注册
+            ``agentos/unload_member`` 请求；成员退出服务面后由宿主侧摘除其
+            模块缓存（_MemberLoader.drop_member）。异常就地隔离留痕——
+            服务面已摘除，缓存残留只影响内存不 Correctness。缺省不摘。
 
     Raises:
         ValueError: 成员为空，或聚合后出现重名工具/资源（成员 id 含点号
@@ -61,6 +72,7 @@ class CohostServer:
         members: Mapping[str, AgentOSPlugin],
         *,
         reload_handler: Callable[[str], Any] | None = None,
+        unload_handler: Callable[[str], Any] | None = None,
     ) -> None:
         if not members:
             raise ValueError("cohost server requires at least one member plugin")
@@ -70,9 +82,14 @@ class CohostServer:
         self._resources = self._aggregate_resources()
         self._lifecycle_handlers = self._aggregate_lifecycle_handlers()
         self._initialize_params: dict[str, Any] = {}
-        handlers: dict[str, tuple[type, Any]] | None = None
+        handlers: dict[str, tuple[type, Any]] = {
+            UNLOAD_MEMBER_METHOD: (types.RequestParams, self._handle_unload_request)
+        }
         if reload_handler is not None:
-            handlers = {RELOAD_MEMBER_METHOD: (types.RequestParams, self._handle_reload_request)}
+            handlers[RELOAD_MEMBER_METHOD] = (
+                types.RequestParams,
+                self._handle_reload_request,
+            )
         self._server = McpServer(
             tools=self._tools,
             resources=self._resources,
@@ -82,6 +99,7 @@ class CohostServer:
             request_handlers=handlers,
         )
         self._reload_handler = reload_handler
+        self._unload_handler = unload_handler
 
     @property
     def tool_names(self) -> list[str]:
@@ -190,6 +208,54 @@ class CohostServer:
         # 缺失会让该成员的初始化状态为空而其请求面照常可达（静默半死）。
         await self._dispatch_member_load(plugin_id)
         return {"reloaded": True, "plugin_id": plugin_id, "tools": len(self._tools)}
+
+    async def _handle_unload_request(self, ctx: Any, _params: Any) -> dict[str, Any]:
+        """``agentos/unload_member`` 请求处理：定向 on_unload → 摘出成员表 →
+        三张聚合表原位重聚合 → 模块缓存摘除（best-effort）。
+
+        plugin_id 从 ctx.params 原始 mapping 读取（校验模型只声明 _meta，
+        自定义字段不落模型）。未知成员/缺 plugin_id/最后成员以异常应答
+        （协议错误），内核据此回退整组回收——宿主状态未被破坏。"""
+        raw = dict(ctx.params) if ctx.params else {}
+        plugin_id = raw.get("plugin_id")
+        if not isinstance(plugin_id, str) or not plugin_id:
+            raise ValueError("unload_member: missing plugin_id")
+        if plugin_id not in self._members:
+            raise ValueError(f"unload_member: unknown member: {plugin_id}")
+        if len(self._members) <= 1:
+            raise ValueError(
+                "unload_member: refusing to unload the last member "
+                "(kernel must use whole-host unload)"
+            )
+        await self._dispatch_member_unload(plugin_id)
+        del self._members[plugin_id]
+        # 子集聚合不可能产生新重名（原表合法的子集），聚合期异常在此不可达。
+        new_tools = self._aggregate_tools()
+        new_resources = self._aggregate_resources()
+        new_handlers = self._aggregate_lifecycle_handlers()
+        self._tools.clear()
+        self._tools.update(new_tools)
+        self._resources.clear()
+        self._resources.update(new_resources)
+        self._lifecycle_handlers.clear()
+        self._lifecycle_handlers.update(new_handlers)
+        if self._unload_handler is not None:
+            try:
+                removed = self._unload_handler(plugin_id)
+                if asyncio.iscoroutine(removed):
+                    await removed
+            except Exception:
+                logger.exception(
+                    "[cohost] 成员模块缓存摘除异常（已隔离，服务面已摘除）: plugin=%s",
+                    plugin_id,
+                )
+        logger.info(
+            "[cohost] member unloaded: %s (tools=%d, members=%d)",
+            plugin_id,
+            len(self._tools),
+            len(self._members),
+        )
+        return {"unloaded": True, "plugin_id": plugin_id, "tools": len(self._tools)}
 
     # ── 聚合装配 ──────────────────────────────────────────
 

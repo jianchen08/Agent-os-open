@@ -18,9 +18,9 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import React from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { toast } from '@/components/ui/sonner'
+import { RjsfForm } from '@/services/schema/RjsfForm'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import { FormWidget, DecisionFormAdapter } from '../FormWidget'
-import { RjsfForm } from '@/services/schema/RjsfForm'
 
 // FormWidget 现消费会话隔离形态（useSessionsQuery）计算权限档显示默认；
 // 本文件无 QueryClientProvider，静态 mock 空列表（无会话 → 非隔离默认显示路径）

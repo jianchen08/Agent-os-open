@@ -25,48 +25,26 @@ import type { Message } from '@/types/models'
 // （activityConverter → toolCardRegistry → render 意图路由），mock 会砍断链路。
 // ============================================================
 
-vi.mock('@/stores/sessionStore', () => ({
-  useSessionStore: () => ({ activeSessionId: 'session-1' }),
-}))
+vi.mock('@/stores/sessionStore', async () => (await import('./helpers/messageItemMocks')).sessionStoreActiveMock())
 
-vi.mock('@/stores/agentStore', () => ({
-  useAgentStore: () => ({ agents: [] }),
-}))
+vi.mock('@/stores/agentStore', async () => (await import('./helpers/messageItemMocks')).agentStoreEmptyMock())
 
-vi.mock('@/stores/interactionStore', () => ({
-  useInteractionStore: () => ({ pendingInteractions: [] }),
-}))
+vi.mock('@/stores/interactionStore', async () => (await import('./helpers/messageItemMocks')).interactionStoreEmptyMock())
 
-vi.mock('@/services/errorReporting', () => ({
-  ErrorType: { CLIENT: 'client' },
-  reportError: vi.fn(),
-}))
+vi.mock('@/services/errorReporting', async () => (await import('./helpers/messageItemMocks')).errorReportingMock())
 
-vi.mock('@/services/attachmentOpener', () => ({
-  openAttachment: vi.fn(),
-}))
+vi.mock('@/services/attachmentOpener', async () => (await import('./helpers/messageItemMocks')).attachmentOpenerMock())
 
-vi.mock('@/components/chat/MessageActions', () => ({
-  MessageActions: () => null,
-}))
+vi.mock('@/components/chat/MessageActions', async () => (await import('./helpers/messageItemMocks')).messageActionsStubMock())
 
 // LobeChatMarkdown 拉起 @lobehub/ui 全家桶（vitest 下 fluent-emoji ESM 目录
 // 导入解析失败）——用户消息 markdown 统一渲染（ADR 2026-08-21）引入的依赖，
 // 按本文件"重依赖 mock"惯例桩掉（渲染细节归 MessageItemUserMarkdown 测试）。
-vi.mock('@/components/chat/LobeChatMarkdown', () => ({
-  LobeChatMarkdown: ({ content }: { content: string }) => (
-    <div data-testid="user-markdown">{content}</div>
-  ),
-}))
+vi.mock('@/components/chat/LobeChatMarkdown', async () => (await import('./helpers/messageItemMocks')).lobeMarkdownStubMock())
 
-vi.mock('@/components/chat/MessageContentRenderer', () => ({
-  default: () => null,
-}))
+vi.mock('@/components/chat/MessageContentRenderer', async () => (await import('./helpers/messageItemMocks')).messageContentRendererStubMock())
 
-vi.mock('@/components/chat/hooks/useMessageRender', () => {
-  const useMessageRender = () => ({ fragments: [], isStreaming: false })
-  return { useMessageRender, default: useMessageRender }
-})
+vi.mock('@/components/chat/hooks/useMessageRender', async () => (await import('./helpers/messageItemMocks')).useMessageRenderStubMock())
 
 // ============================================================
 // 测试数据工厂

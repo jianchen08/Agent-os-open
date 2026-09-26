@@ -5,12 +5,12 @@ import { persist } from 'zustand/middleware'
 import { getMessageSegments, type SegmentDetail, type SegmentMeta } from '@/services/api/messageSegments'
 import { getMessages as apiGetMessages, mapBackendMessageToMessage } from '@/services/api/session'
 import { useContextKeys } from '@/stores/contextKeysStore'
-import { trimMessagesForPersistence } from '@/stores/pipelineMessagePersistence'
 import {
   _fetchAbortControllers,
   abortKeyOf,
   fetchKindOf,
 } from '@/stores/pipelineMessageFetchWindows'
+import { trimMessagesForPersistence } from '@/stores/pipelineMessagePersistence'
 // retry removed per audit: 内部 API 不应内置重试，429/5xx 重试统一由 axios interceptor 管理
 import { decideClaim } from '@/streaming/claim'
 import { indexedDbStorage } from '@/utils/indexedDbStorage'

@@ -38,13 +38,13 @@ from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 _paths = bootstrap_plugin(__file__)  # 插件目录（kernel_reads 等平铺模块）+ plugins/shared 根入 sys.path
 
 import kernel_reads  # noqa: E402 — 平铺同目录模块（bootstrap 已插插件目录）
-from kernel_db import kernel_db_path as _kernel_db_path  # noqa: E402 — 内核库路径共享真值源
 import traces_usage  # noqa: E402 — traces llm_usage 聚合 SQL 单点（与 cost_control 同源）
 from http_json import (  # noqa: E402 — HTTP 响应封装公共实现，调用点零改名
     error as _error,
     json_response as _json_response,
     ok as _ok,
 )
+from kernel_db import kernel_db_path as _kernel_db_path  # noqa: E402 — 内核库路径共享真值源
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
@@ -387,7 +387,7 @@ def _collect_system_metrics() -> dict[str, Any]:
     vm = psutil.virtual_memory()
     du = psutil.disk_usage("/")
     boot_ts = psutil.boot_time()
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.UTC)
     uptime = max(0, int(now.timestamp() - boot_ts))
     return {
         "cpu_usage": cpu,

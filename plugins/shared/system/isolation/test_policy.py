@@ -44,7 +44,7 @@ class TestDefaultPolicyPath:
 
     def test_module_default_constant_matches_resolver(self) -> None:
         """DEFAULT_POLICY_PATH 与 default_policy_path() 锚点解析一致（loader 默认路径来源）。"""
-        assert DEFAULT_POLICY_PATH == default_policy_path()
+        assert default_policy_path() == DEFAULT_POLICY_PATH
 
     def test_ancestor_walk_not_hardcoded(self) -> None:
         """路径通过祖先目录查找得到（不依赖固定父目录层数）。"""
@@ -132,7 +132,7 @@ class TestPolicyLoaderFileFallback:
 class TestParseAndPriority:
     """_parse_policy 字段解析与 tools > categories > default 决策优先级。"""
 
-    @pytest.fixture()
+    @pytest.fixture
     def tmp_yaml(self, tmp_path: Path) -> Path:
         cfg = tmp_path / "policy.yaml"
         cfg.write_text(

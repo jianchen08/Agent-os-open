@@ -67,7 +67,7 @@ def _isolate_tasks_plugin_modules():
             sys.modules.pop(m, None)
 
 
-@pytest.fixture()
+@pytest.fixture
 def svc(tmp_path: Path) -> Any:
     from service import TaskService
 

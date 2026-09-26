@@ -36,5 +36,8 @@ pub mod ws_session;
 pub mod ws_ticket;
 
 pub use capability_router::KernelCapabilityRouter;
-pub use pipeline_loader::{load_pipeline_config, load_step_library, validate_no_name_conflicts};
+pub use pipeline_loader::{
+    load_pipeline_config, load_pipeline_config_by_name, load_step_library,
+    validate_no_name_conflicts,
+};
 pub use server::start_server;

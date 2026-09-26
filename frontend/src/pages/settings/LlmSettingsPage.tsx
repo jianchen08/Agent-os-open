@@ -49,6 +49,7 @@ import {
   type RemoteModel,
   type LLMDefaults,
 } from '@/services/api/config'
+import { FetchModelsModal } from './FetchModelsModal'
 import {
   buildModelFields,
   buildRemoteModelFields,
@@ -57,7 +58,6 @@ import {
   DEFAULT_STRENGTH_LEVELS,
 } from './modelParams'
 import { ModelParamsEditor } from './ModelParamsEditor'
-import { FetchModelsModal } from './FetchModelsModal'
 
 /**
  * 从被 reject 的对象中提取后端错误消息。

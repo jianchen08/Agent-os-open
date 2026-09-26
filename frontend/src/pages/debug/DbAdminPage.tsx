@@ -15,9 +15,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { PageShell } from '@/components/shared/PageShell'
 import { useDbTablesQuery } from '@/hooks/queries/useDebugQueries'
-import { useAuthStore } from '@/stores/authStore'
 import * as authApi from '@/services/api/auth'
 import * as dbAdmin from '@/services/api/dbAdmin'
+import { useAuthStore } from '@/stores/authStore'
 import type { ColumnInfo, DbQueryResult, DbTableInfo } from '@/services/api/dbAdmin'
 
 /** 筛选操作符 */

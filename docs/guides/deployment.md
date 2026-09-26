@@ -64,7 +64,7 @@ done
 
 ## 三、关键环境变量
 
-优先级约定：环境变量 > `config/storage.yaml` > 内置默认（存储域，见
+优先级约定：环境变量 > `config/kernel/storage.yaml` > 内置默认（存储域，见
 `kernel/crates/engine/src/storage_factory.rs`）。
 
 | 变量 | 作用 | 默认 | 来源 |

@@ -117,7 +117,7 @@ impl CapabilityRouter for RecordingRouter {
             ("pipeline-executor", "resume") => Ok(json!({"status": "resumed_from_rust"})),
             ("event-bus", "emit") => Ok(json!({"emitted": true})),
             _ => Err(McpError::Protocol {
-                message: format!("unknown capability method {}.{}", capability, method),
+                message: format!("unknown capability method {capability}.{method}"),
             }),
         }
     }

@@ -2,8 +2,8 @@
  * 消息系统组件类型定义
  */
 
-import type { Message, MessageRole, MessageToolCall, ThinkingContent } from '@/types/models'
 import type { TaskMode } from '@/services/schema/modeOptions'
+import type { Message, MessageRole, MessageToolCall, ThinkingContent } from '@/types/models'
 
 /**
  * 消息内容类型

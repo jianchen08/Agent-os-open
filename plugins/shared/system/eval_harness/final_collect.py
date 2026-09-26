@@ -1,10 +1,16 @@
-# -*- coding: utf-8 -*-
 """终局收集：按题目标题取最新任务实例，等终态 → DB eval_summary 判定 → scorecard。
 
 用法：python final_collect.py [最大等待秒，缺省 3600]
 """
 from __future__ import annotations
-import json, os, re, sqlite3, sys, time, urllib.request
+
+import json
+import os
+import re
+import sqlite3
+import sys
+import time
+import urllib.request
 from typing import Any
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -12,8 +18,8 @@ ROOT = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
 os.chdir(ROOT)
 sys.path.insert(0, HERE)
 
-import yaml  # noqa: E402
 import aggregate  # noqa: E402
+import yaml  # noqa: E402
 
 BASE = "http://localhost:" + os.environ.get("AGENTOS_KERNEL_PORT", "9100")
 CASE_IDS = ["normal_qa", "normal_file_ops", "tac_policy_lookup",
@@ -68,8 +74,10 @@ def main():
                 token = ((token.get("data") or token).get("token")
                          or (token.get("data") or token).get("access_token"))
                 last_login = time.monotonic()
-            except Exception:
-                pass
+            except Exception as e:
+                # 刷新失败不更新 last_login，下轮重试；stderr 留痕便于诊断
+                print(f"[final_collect] token refresh failed: {e}",
+                      file=sys.stderr)
         try:
             latest = latest_by_case(token)
         except Exception:
@@ -94,7 +102,7 @@ def main():
                     "AND field_key='task.acceptance_criteria'", (tid,))
                 ac = cur.fetchone()
                 names = list(json.loads(ac[0]).keys()) if ac and ac[0] else []
-                crit = {m: (evaluated and status == "completed") for m in names}
+                crit = dict.fromkeys(names, evaluated and status == "completed")
                 verdicts[cid] = {"task_id": tid, "task_status": status,
                                  "criteria": crit}
                 print(f"[{cid}] {status} evaluated={evaluated}", flush=True)

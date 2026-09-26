@@ -6,8 +6,8 @@
  */
 
 import { useState, type FC } from 'react'
-import { useShallow } from 'zustand/react/shallow'
 import { toast } from 'sonner'
+import { useShallow } from 'zustand/react/shallow'
 import { Copy, Pencil, RotateCcw, RefreshCw } from '@/assets/icons'
 import { Button } from '@/components/ui/button'
 import { getMessageSegmentDetail } from '@/services/api/messageSegments'
@@ -28,7 +28,7 @@ export interface MessageActionsProps {
   isUserMessage?: boolean
   /** 是否禁用操作 */
   disabled?: boolean
-  /** 是否为最后一条消息（控制重试按钮显示） */
+  /** 是否为最后一条消息（控制重试/编辑回复按钮显示） */
   isLastMessage?: boolean
   /** 消息复制回调 */
   onCopy?: () => void

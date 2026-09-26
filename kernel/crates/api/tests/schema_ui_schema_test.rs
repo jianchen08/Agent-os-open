@@ -43,6 +43,7 @@ fn manifest_with_ui(
         http_endpoints: vec![],
         ui_schema,
         contributes: None,
+        restricted_capabilities: Vec::new(),
         enabled: None,
         activation: None,
         persistent_fields: vec![],

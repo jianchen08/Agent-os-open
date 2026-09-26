@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use agentos_core::traits::{
     CapabilityRegistry, HttpHandleCapability, HttpHandleRequest, HttpHandleResponse,
-    HttpRouteDescriptor, PluginManifest,
+    HttpRouteDescriptor, PluginInvoker, PluginManifest,
 };
 use agentos_plugin_loader::CapabilityRegistryImpl;
 use base64::Engine;
@@ -39,10 +39,25 @@ pub struct HttpDispatcher {
     handler: Arc<dyn HttpHandleCapability>,
     /// RouteKey(path+method) → 并发信号量，惰性创建。
     semaphores: tokio::sync::Mutex<HashMap<(String, String), Arc<Semaphore>>>,
+    /// 宿主启动态探针（D1 宽限面）：目标插件所在宿主正处于 spawn/respawn 窗口
+    /// 时，端点超时预算暂停消耗（等待就绪而非 504）。`None` = 不感知启动态，
+    /// 分发行为与既有单次 timeout 完全一致（测试桩 / 未接线的构造路径）。
+    startup_probe: Option<Arc<dyn PluginInvoker>>,
 }
 
+/// 目标宿主处于启动窗口时，端点超时预算之上允许的额外等待上限（D1）。
+///
+/// 覆盖装机版实测 respawn 冷启窗（组宿主约 1.5-2.5s；solo 宿主含插件 on_load
+/// 排队实测可达 5s+，2026-09-25 kernel.log）并留余量；探针异常常开时由它兜底
+/// 保证端点仍有界返回，不会无限悬挂。
+const HOST_STARTING_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// 分发等待循环的轮询切片（D1）：预算是否暂停消耗按切片粒度重估——调用方
+/// 在等待期间宿主才进入启动窗口（排队等 spawn 锁）也能被宽限覆盖。
+const DISPATCH_POLL_SLICE: std::time::Duration = std::time::Duration::from_millis(250);
+
 impl HttpDispatcher {
-    /// 创建 dispatcher。
+    /// 创建 dispatcher（不感知宿主启动态）。
     pub fn new(
         registry: Arc<CapabilityRegistryImpl>,
         handler: Arc<dyn HttpHandleCapability>,
@@ -51,7 +66,14 @@ impl HttpDispatcher {
             registry,
             handler,
             semaphores: tokio::sync::Mutex::new(HashMap::new()),
+            startup_probe: None,
         }
+    }
+
+    /// 挂载宿主启动态探针（D1），返回 self 供链式调用。
+    pub fn with_startup_probe(mut self, probe: Option<Arc<dyn PluginInvoker>>) -> Self {
+        self.startup_probe = probe;
+        self
     }
 
     /// 获取（或创建）某路由的并发信号量。
@@ -134,10 +156,45 @@ pub async fn dispatch_http(
         query_multi,
     };
 
-    // per-endpoint timeout（默认 30000ms）。
-    let timeout = std::time::Duration::from_millis(route.timeout_ms());
-    let handle_fut = dispatcher.handler.handle(req);
-    match tokio::time::timeout(timeout, handle_fut).await {
+    // per-endpoint timeout（默认 30000ms）。D1：目标宿主处于 spawn/respawn 窗口
+    // 时预算暂停消耗（等待就绪而非 504）——按 [`DISPATCH_POLL_SLICE`] 轮询切片
+    // 重估启动态，切片内 starting 则本切片不扣减预算；[`HOST_STARTING_GRACE`]
+    // 为追加等待的硬上限（探针异常常开 / 宿主永不就绪也必须有界返回）。无探针
+    // 或全程非 starting 时逐切片扣减，与既有单次 timeout 语义逐毫秒等价。
+    let base_timeout = std::time::Duration::from_millis(route.timeout_ms());
+    let hard_deadline = std::time::Instant::now() + base_timeout + HOST_STARTING_GRACE;
+    let mut remaining = base_timeout;
+    let mut handle_fut = std::pin::pin!(dispatcher.handler.handle(req));
+    let outcome: Result<Result<HttpHandleResponse, String>, ()> = loop {
+        let starting = dispatcher
+            .startup_probe
+            .as_ref()
+            .is_some_and(|probe| probe.is_host_starting(&route.plugin_id));
+        let slice = if starting {
+            DISPATCH_POLL_SLICE
+        } else {
+            remaining.min(DISPATCH_POLL_SLICE)
+        };
+        match tokio::time::timeout(slice, handle_fut.as_mut()).await {
+            Ok(result) => break Ok(result),
+            Err(_elapsed) => {
+                if !starting {
+                    remaining = remaining.saturating_sub(slice);
+                }
+                if remaining.is_zero() || std::time::Instant::now() >= hard_deadline {
+                    warn!(
+                        plugin = %route.plugin_id,
+                        path = %route.endpoint.path,
+                        timeout_ms = route.timeout_ms(),
+                        host_starting = starting,
+                        "http endpoint timeout (504)"
+                    );
+                    break Err(());
+                }
+            }
+        }
+    };
+    match outcome {
         Ok(Ok(resp)) => DispatchOutcome::Handled(resp),
         Ok(Err(e)) => {
             warn!(
@@ -147,14 +204,7 @@ pub async fn dispatch_http(
             );
             DispatchOutcome::HandlerError(e)
         }
-        Err(_) => {
-            warn!(
-                plugin = %route.plugin_id,
-                timeout_ms = route.timeout_ms(),
-                "http endpoint timeout (504)"
-            );
-            DispatchOutcome::Timeout
-        }
+        Err(()) => DispatchOutcome::Timeout,
     }
 }
 
@@ -205,7 +255,10 @@ pub fn build_router_with_http_routes(
     // 至少要有 dispatcher 资源（registry + handler）或 plugin_dirs（静态资源）才挂通配路由。
     // 否则保留内核静态路由（兼容 AppState::new() 的旧测试）。
     let dispatcher: Option<Arc<HttpDispatcher>> = match (registry, handler) {
-        (Some(r), Some(h)) => Some(Arc::new(HttpDispatcher::new(r, h))),
+        (Some(r), Some(h)) => Some(Arc::new(
+            // D1：注入宿主启动态探针——respawn 冷启窗内端点等待就绪而非 504。
+            HttpDispatcher::new(r, h).with_startup_probe(state.invoker.clone()),
+        )),
         _ => None,
     };
     let has_static = !plugin_dirs.is_empty();
@@ -1293,6 +1346,182 @@ mod tests {
         assert_eq!(resp.status(), axum::http::StatusCode::GATEWAY_TIMEOUT);
     }
 
+    // ── D1 宽限面：宿主 starting 期间端点超时预算暂停（等待就绪而非 504）──
+
+    /// D1 探针桩：只回答 is_host_starting，其余 trait 面不可达/空实现。
+    struct StartingProbeInvoker {
+        starting: std::sync::atomic::AtomicBool,
+    }
+
+    /// trait 默认实现语义：未覆写 is_host_starting 的实现方（测试桩等）
+    /// 恒不在启动窗口——dispatcher 行为与无探针时完全一致。
+    #[test]
+    fn invoker_default_is_host_starting_is_false() {
+        let invoker = ScriptedInvoker {
+            result: parking_lot::Mutex::new(Err("unused".to_string())),
+        };
+        assert!(
+            !agentos_core::traits::PluginInvoker::is_host_starting(&invoker, "p1"),
+            "默认实现必须返回 false（不在启动窗口）"
+        );
+    }
+
+    #[async_trait::async_trait]
+    impl agentos_core::traits::PluginInvoker for StartingProbeInvoker {
+        async fn invoke_pipeline_plugin<'a>(
+            &self,
+            _plugin_id: &str,
+            _ctx: &agentos_core::types::PluginContext<'a>,
+        ) -> Result<agentos_core::types::PluginResult, agentos_core::types::PluginError> {
+            unreachable!("本测试不触达管道插件调用")
+        }
+        async fn invoke_tool(
+            &self,
+            _plugin_id: &str,
+            _tool_name: &str,
+            _inputs: &serde_json::Value,
+        ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError>
+        {
+            unreachable!("本测试不触达工具调用")
+        }
+        async fn send_lifecycle_hook(
+            &self,
+            _plugin_id: &str,
+            _hook: agentos_core::traits::LifecycleHook,
+            _context: &agentos_core::traits::HookContext,
+        ) -> Result<(), agentos_core::types::PluginError> {
+            Ok(())
+        }
+        fn is_host_starting(&self, _plugin_id: &str) -> bool {
+            self.starting.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// D1：宿主 starting 期间预算暂停——handler 在 base timeout 之后才完成
+    /// 仍被等待就绪（respawn 冷启窗内不 504），无探针同型请求则照旧 504。
+    #[tokio::test]
+    async fn dispatch_waits_for_starting_host_beyond_base_timeout() {
+        struct DelayedOkHandler;
+        #[async_trait::async_trait]
+        impl HttpHandleCapability for DelayedOkHandler {
+            async fn handle(&self, _req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                Ok(HttpHandleResponse {
+                    status: 200,
+                    headers: HashMap::new(),
+                    body: String::new(),
+                    body_encoding: "base64".to_string(),
+                })
+            }
+        }
+
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let mut ep = endpoint("r", "GET", "/ext/p1/starting");
+        ep.timeout_ms = Some(100); // 远小于 handler 的 400ms
+        registry.register_http_route("p1", ep).unwrap();
+
+        // 有探针且 starting：预算暂停 → 等 handler 完成而非 100ms 处 504
+        let dispatcher = HttpDispatcher::new(registry.clone(), Arc::new(DelayedOkHandler))
+            .with_startup_probe(Some(Arc::new(StartingProbeInvoker {
+                starting: std::sync::atomic::AtomicBool::new(true),
+            })));
+        let started = std::time::Instant::now();
+        let outcome = dispatch_http(
+            &dispatcher,
+            "/ext/p1/starting",
+            "GET",
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .await;
+        assert!(
+            matches!(outcome, DispatchOutcome::Handled(_)),
+            "starting 窗口内必须等待就绪而非 504: {outcome:?}"
+        );
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(350),
+            "完成必须落在 base timeout 之后的宽限窗内（等待了 {:?}）",
+            started.elapsed()
+        );
+
+        // 无探针：同型请求在 base timeout 处照旧 504（既有语义逐毫秒等价）
+        let dispatcher = HttpDispatcher::new(registry, Arc::new(DelayedOkHandler));
+        let outcome = dispatch_http(
+            &dispatcher,
+            "/ext/p1/starting",
+            "GET",
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .await;
+        assert!(
+            matches!(outcome, DispatchOutcome::Timeout),
+            "无探针时不得被宽限: {outcome:?}"
+        );
+    }
+
+    /// D1：宿主退出 starting 窗口后预算恢复消耗——不能被宽限无限拖住。
+    #[tokio::test]
+    async fn dispatch_budget_resumes_when_host_leaves_starting_window() {
+        struct SlowHandler;
+        #[async_trait::async_trait]
+        impl HttpHandleCapability for SlowHandler {
+            async fn handle(&self, _req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
+                tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+                Ok(HttpHandleResponse {
+                    status: 200,
+                    headers: HashMap::new(),
+                    body: String::new(),
+                    body_encoding: "base64".to_string(),
+                })
+            }
+        }
+
+        let probe = Arc::new(StartingProbeInvoker {
+            starting: std::sync::atomic::AtomicBool::new(true),
+        });
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let mut ep = endpoint("r", "GET", "/ext/p1/flap");
+        ep.timeout_ms = Some(100);
+        registry.register_http_route("p1", ep).unwrap();
+        let dispatcher = HttpDispatcher::new(registry, Arc::new(SlowHandler))
+            .with_startup_probe(Some(probe.clone() as Arc<dyn PluginInvoker>));
+
+        // 300ms 后探针翻 false：预算恢复消耗，100ms 预算在 ~400ms 处耗尽 → 504
+        //（handler 900ms 才完成，必然赶不上）；elapsed < 900ms 证明预算确实恢复。
+        let p = probe.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            p.starting.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        let started = std::time::Instant::now();
+        let outcome = dispatch_http(
+            &dispatcher,
+            "/ext/p1/flap",
+            "GET",
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .await;
+        assert!(
+            matches!(outcome, DispatchOutcome::Timeout),
+            "退出 starting 窗口后预算必须恢复消耗: {outcome:?}"
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_millis(350),
+            "starting 期间预算必须暂停（400ms 完成前不 504）: {elapsed:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(800),
+            "预算恢复后必须按剩余预算 504（不能被宽限无限拖住）: {elapsed:?}"
+        );
+    }
+
     /// handler 返回 Err → 502（DispatchOutcome::HandlerError 映射）。
     struct ErrHandler;
 
@@ -1914,7 +2143,7 @@ mod tests {
             register_manifest_http_routes(&registry, &[manifest("p1", "/ext/p1/a")], Some(&scopes));
         assert!(errors.is_empty(), "首个注册不得报错: {errors:?}");
         assert!(
-            scopes.scope_of("p1").len() >= 1,
+            !scopes.scope_of("p1").is_empty(),
             "guarded 注册必须把撤销 guard 登记进 scope"
         );
 

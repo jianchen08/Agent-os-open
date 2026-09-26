@@ -49,6 +49,14 @@
             "metrics": {
               "type": "object",
               "default": {}
+            },
+            "pipeline_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "多管道复盘的被复盘管道清单（与 task_id 去重合并登记；超预算拒绝）",
+              "default": []
             }
           },
           "required": [
@@ -84,6 +92,9 @@
               "description": "降级分支"
             }
           }
+        },
+        "render": {
+          "card": "form"
         }
       },
       {
@@ -160,6 +171,9 @@
               "type": "number"
             }
           }
+        },
+        "render": {
+          "card": "table"
         }
       },
       {

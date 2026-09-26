@@ -6,11 +6,13 @@
 //! initialize（秒级/个）的冷启动成本，实测首条消息 41.5s vs 第二条 1.9s。
 //!
 //! 预热集 = 编译管道引用的插件（[`CompiledPipeline::referenced_plugin_ids`]
-//! 单一来源：步骤项 + Composite 池递归 + hooks 目标）∩ enabled sidecar。
-//! 非管道插件（工具/服务等）保持纯懒加载。预热集插件经 [`PluginInvokerImpl::warmup_sidecar`]
-//! 登记 keep-warm 常驻集，所在宿主组豁免 idle GC——预热常驻；若预热宿主仍被
-//! 空闲回收，新会话首条消息会重新全价冷启动，预热被架空。Dynamic 项运行时
-//! 才解析，不在预热集（同由懒 spawn 兜底）。
+//! 单一来源：步骤项 + Composite 池递归 + hooks 目标）∪ **声明
+//! `contributes.pages` 的插件**（模式面板等用户直接点击的延迟敏感面——首开
+//! 付全价冷启动，ADR 2026-09-24-member-granularity-unload-mode-panel-warmup）
+//! ∩ enabled sidecar。其余插件（工具/服务等）保持纯懒加载。预热集插件经
+//! [`PluginInvokerImpl::warmup_sidecar`] 登记 keep-warm 常驻集，豁免 idle
+//! GC——预热常驻；若预热宿主仍被空闲回收，新会话首条消息会重新全价冷启动，
+//! 预热被架空。Dynamic 项运行时才解析，不在预热集（同由懒 spawn 兜底）。
 
 use std::sync::Arc;
 
@@ -30,10 +32,20 @@ pub fn warmup_disabled() -> bool {
     std::env::var("AGENTOS_DISABLE_SIDECAR_WARMUP").as_deref() == Ok("1")
 }
 
-/// 选预热目标：编译管道引用的插件 ∩ enabled sidecar manifests。
+/// 面板面判定：manifest `contributes.pages` 声明非空数组（contributes 是
+/// 无类型透传，内核不解释结构——这里只看 pages 存在性，不解释页内容）。
+fn declares_panel_pages(m: &PluginManifest) -> bool {
+    m.contributes
+        .as_ref()
+        .and_then(|c| c.get("pages"))
+        .and_then(|p| p.as_array())
+        .is_some_and(|pages| !pages.is_empty())
+}
+
+/// 选预热目标：(编译管道引用的插件 ∪ 声明 `contributes.pages` 的插件) ∩ enabled sidecar。
 ///
 /// 纯函数。enabled 过滤由调用方保证（传 enabled_manifests 快照）；此处
-/// 按 host_type（native 无进程模型）+ 管道引用集求交。返回保持传入顺序。
+/// 按 host_type（native 无进程模型）+ 引用集/面板声明求交。返回保持传入顺序。
 pub fn select_warmup_targets(
     pipeline: &CompiledPipeline,
     enabled_manifests: &[PluginManifest],
@@ -41,7 +53,10 @@ pub fn select_warmup_targets(
     let referenced = pipeline.referenced_plugin_ids();
     enabled_manifests
         .iter()
-        .filter(|m| m.host_type == HostType::Sidecar && referenced.contains(&m.id))
+        .filter(|m| {
+            m.host_type == HostType::Sidecar
+                && (referenced.contains(&m.id) || declares_panel_pages(m))
+        })
         .cloned()
         .collect()
 }
@@ -142,6 +157,7 @@ mod tests {
             lifecycle: None,
             native: None,
             granted_capabilities: vec![],
+            restricted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -201,6 +217,56 @@ mod tests {
         let targets = select_warmup_targets(&pipeline, &enabled);
         let ids: Vec<&str> = targets.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["alpha"], "只选管道引用的 sidecar: {ids:?}");
+    }
+
+    /// 面板声明面（contributes.pages 非空数组）纳入预热集：未被管道引用的
+    /// sidecar 面板插件选中；native 面板插件与 pages 空缺/空数组的 sidecar
+    /// 排除——区分度三组（无 pages / 空 pages / 非空 pages）。
+    #[test]
+    fn select_warmup_targets_includes_panel_page_sidecars() {
+        let pipeline = single_step_pipeline("alpha");
+        let with_pages = |id: &str, host: HostType, pages: serde_json::Value| {
+            let mut m = manifest(id, host);
+            m.contributes = Some(serde_json::json!({ "pages": pages }));
+            m
+        };
+        let enabled = vec![
+            with_pages(
+                "mode_x",
+                HostType::Sidecar,
+                serde_json::json!([{"id": "p"}]),
+            ),
+            with_pages(
+                "mode_native",
+                HostType::InProcess,
+                serde_json::json!([{"id": "p"}]),
+            ),
+            with_pages("pages_empty", HostType::Sidecar, serde_json::json!([])),
+            with_pages("pages_null", HostType::Sidecar, serde_json::Value::Null),
+            manifest("no_pages_tool", HostType::Sidecar),
+        ];
+        let targets = select_warmup_targets(&pipeline, &enabled);
+        let ids: Vec<&str> = targets.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["mode_x"], "只选非空 pages 的 sidecar: {ids:?}");
+    }
+
+    /// 管道引用 ∪ 面板声明是并集语义：同一插件两路命中只出现一次（无重复
+    /// 预热），且结果保持传入顺序（供预分配装箱序稳定）。
+    #[test]
+    fn select_warmup_targets_union_is_dedup_and_order_stable() {
+        let pipeline = single_step_pipeline("both");
+        let mut both = manifest("both", HostType::Sidecar);
+        both.contributes = Some(serde_json::json!({ "pages": [{"id": "p"}] }));
+        let mut panel = manifest("panel_only", HostType::Sidecar);
+        panel.contributes = Some(serde_json::json!({ "pages": [{"id": "q"}] }));
+        let enabled = vec![panel.clone(), both.clone()];
+        let targets = select_warmup_targets(&pipeline, &enabled);
+        let ids: Vec<&str> = targets.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["panel_only", "both"],
+            "并集去重+保持传入序: {ids:?}"
+        );
     }
 
     /// 空管道（无引用）→ 空集（空集短路，不发射任务）。

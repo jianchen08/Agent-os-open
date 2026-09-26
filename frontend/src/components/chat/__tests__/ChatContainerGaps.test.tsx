@@ -13,19 +13,19 @@
  */
 import { act, render } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { ChatContainer } from '../ChatContainer'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
-import type { PipelineMeta } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useThinkingModeStore } from '@/stores/thinkingModeStore'
 import { useUIStore } from '@/stores/uiStore'
 import { useVotingStore } from '@/stores/votingStore'
+import { ChatContainer } from '../ChatContainer'
+import type { ChatContainerProps, SendMessageParams } from '../types'
+import type { PipelineMeta } from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 import type { AgentTab } from '@/types/task'
 import type { VotingSession } from '@/types/voting'
-import type { ChatContainerProps, SendMessageParams } from '../types'
 
 const stubs = vi.hoisted(() => ({
   tabBar: null as null | {

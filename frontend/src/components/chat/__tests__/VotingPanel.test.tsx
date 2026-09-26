@@ -11,9 +11,8 @@
  */
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
-
-import { VotingPanel } from '../VotingPanel'
 import { useVotingStore } from '@/stores/votingStore'
+import { VotingPanel } from '../VotingPanel'
 import type { VotingOption, VotingSession } from '@/types/voting'
 
 function makeOption(overrides: Partial<VotingOption> = {}): VotingOption {

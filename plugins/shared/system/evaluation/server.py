@@ -22,12 +22,12 @@ plugin = AgentOSPlugin("evaluation_service")
 
 _paths = bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根（http_json）入 sys.path
 
+from bounded_dict import BoundedDict  # noqa: E402
 from http_json import (  # noqa: E402
     error as _error,
     json_response as _json_response,
     ok as _ok,
 )
-from bounded_dict import BoundedDict  # noqa: E402
 
 # ── HTTP 端点（http.handle）—— 前端 /ext/evaluation_service/metrics 入口 ──────
 # 内核 http_dispatcher 透传：dispatcher 把 HttpHandleRequest（method/path/raw_body/

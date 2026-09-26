@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # @feature: FP-0.2.二 eval_harness 覆盖率收口 | @ci: python-coverage
 """eval_harness server.py 缺口分支补测（覆盖率收口批）。
 

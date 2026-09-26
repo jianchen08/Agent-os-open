@@ -16,12 +16,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WS_SERVER_EVENTS } from '@/constants/websocket'
 import { getTaskList } from '@/services/api/monitoring'
 import { resumeTask } from '@/services/api/tasks'
-import type { TaskPauseResumeResponse } from '@/services/api/tasks'
 import { queryClient } from '@/services/query/queryClient'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { renderWithProviders } from '@/test/renderWithProviders'
-import type { TaskInfo } from '@/types/monitoring'
 import { DebugTasksPage } from '../DebugTasksPage'
+import type { TaskPauseResumeResponse } from '@/services/api/tasks'
+import type { TaskInfo } from '@/types/monitoring'
 
 vi.mock('@/services/api/monitoring', () => ({
   getTaskList: vi.fn(),

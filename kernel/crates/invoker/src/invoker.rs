@@ -45,6 +45,13 @@ const GROUP_HOST_DIR: &str = "_host";
 /// 处理器；带应答，失败以协议错误应答，内核回退 force_unload）。
 const RELOAD_MEMBER_METHOD: &str = "agentos/reload_member";
 
+/// 内核 → 宿主的成员粒度卸载请求方法（带应答；ADR
+/// 2026-09-24-member-granularity-unload-mode-panel-warmup）：宿主定向 on_unload
+/// → 成员表摘除 → 三张聚合表原位重聚合；最后成员以协议错误拒绝，内核对
+/// 最后成员走整组回收。失败（旧宿主不认识该方法/协议错误/超时）一律回退
+/// 整组驱逐——语义终点与现状一致。
+const UNLOAD_MEMBER_METHOD: &str = "agentos/unload_member";
+
 /// reload_member 请求超时上界（控制面操作必须有界）。请求窗口自宿主侧
 /// on_load 定向派发落地起覆盖「模块重 exec + on_load 重放」——慢而未死的
 /// 成员初始化（慢盘/慢解释器/预热 IO）必须等足预算完成，超时即回退整组
@@ -559,7 +566,7 @@ fn normalize_mcp_tool_result(
     if inner.get("success").is_some() && inner.get("data").is_some() {
         // ②-a 真 ToolExecutionResult 信封（from_value 对非 bool success 同样报错）
         serde_json::from_value(inner).map_err(|e| PluginError {
-            message: format!("failed to parse MCP response as ToolExecutionResult: {}", e),
+            message: format!("failed to parse MCP response as ToolExecutionResult: {e}"),
             code: Some("PARSE_ERROR".to_string()),
             source: Some("plugin-invoker".to_string()),
         })
@@ -700,8 +707,7 @@ impl agentos_native_sdk::HostServices for NativeHostServices {
                 let buf = unsafe { &mut *self.err_buf.get() };
                 buf.clear();
                 buf.push_str(&format!(
-                    "capability {}.{} params JSON invalid: {e}",
-                    capability, method
+                    "capability {capability}.{method} params JSON invalid: {e}"
                 ));
                 return Err(buf.as_str());
             }
@@ -772,6 +778,24 @@ struct InflightGuard {
 impl Drop for InflightGuard {
     fn drop(&mut self) {
         self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// spawn 窗口记账 guard（RAII，D1 宽限面）：构造时成员 id 已写入
+/// `starting_plugins`，`Drop` 时成对摘除。成功/失败/panic 任何退出路径都随
+/// future drop 走 `Drop`，窗口记账必然出清——泄漏一个条目 = 该插件端点
+/// 宽限常开（dispatcher 预算暂停失效），必须出窗即清。
+struct StartingPluginsGuard<'a> {
+    set: &'a RwLock<std::collections::HashSet<String>>,
+    members: Vec<String>,
+}
+
+impl Drop for StartingPluginsGuard<'_> {
+    fn drop(&mut self) {
+        let mut set = self.set.write();
+        for member in &self.members {
+            set.remove(member);
+        }
     }
 }
 
@@ -871,12 +895,14 @@ pub struct PluginInvokerImpl {
     /// 合宿宿主指纹 = 当前成员指纹并集 + 成员集本身（§4.6）：任一成员代码变更或
     /// 成员集变化 → kill 整宿主 respawn。
     fingerprints: RwLock<HashMap<String, (u64, Instant)>>,
-    /// 宿主最后调用时刻 {宿主键: Instant}——空闲软卸载依据（§4.8）。
+    /// 成员最后调用时刻 {plugin_id: Instant}——空闲软卸载依据（成员粒度记账，
+    /// ADR 2026-09-24-member-granularity-unload-mode-panel-warmup 取代原宿主键
+    /// 记账：合宿卸载粒度成员化后，每个成员按自己的调用时钟与自己的
+    /// `lifecycle.idle_timeout_secs` 独立判定，不再整组连坐）。
     ///
-    /// 合宿宿主按宿主键记账：组内任一成员被调即整组续命；宿主空闲 = 全部成员
-    /// 都空闲（即宿主键条目超时）。每次 get_or_create_mcp_client 命中/创建时
-    /// 刷新；后台 GC 据此判定是否空闲超时。
-    last_used: RwLock<HashMap<String, Instant>>,
+    /// 每次 get_or_create_mcp_client 命中/创建时刷新（调用路径已知 plugin_id）；
+    /// 后台 GC 据此判定成员是否空闲超时。
+    member_last_used: RwLock<HashMap<String, Instant>>,
     /// 假死 respawn 熔断账本 {宿主键: Vec<respawn 时刻>}（进程治理三信号模型）。
     ///
     /// 10 分钟窗口内 ≥3 次假死 respawn 则停手只告警——防循环重启掩盖根因
@@ -916,6 +942,19 @@ pub struct PluginInvokerImpl {
     /// [`Self::unload_host`] 清理；调用先于卸载重建条目也无碍（guard 持 Arc
     /// 克隆，减数不依赖条目存活）。
     inflight_calls: RwLock<HashMap<String, Arc<AtomicUsize>>>,
+    /// 成员 in-flight capability 调用计数 {plugin_id: 原子计数}（成员粒度 GC 门：
+    /// 该成员有调用在飞时不卸该成员；宿主仍由 [`Self::inflight_calls`] 守整组
+    /// kill 面）。RAII 语义与 [`Self::inflight_calls`] 同构。
+    member_inflight_calls: RwLock<HashMap<String, Arc<AtomicUsize>>>,
+    /// 正在 spawn/respawn 窗口内的插件 id 集（宿主连接 + initialize 握手未完成）。
+    ///
+    /// D1 宽限面（宿主重载风暴 2026-09-25）：HTTP dispatcher 据此区分「插件处理
+    /// 慢」与「基础设施冷启动等待」，前者烧端点超时预算、后者暂停预算（等待
+    /// 就绪而非 504，见 http_dispatcher 的分发循环）。spawn 锁内写入本次加载的
+    /// 全体成员（组宿主 = 成员集，独占 = 单插件），spawn 出窗（成功/失败/panic）
+    /// 由 RAII guard 摘除。键为 plugin_id 扁平集：dispatcher 侧按路由插件 id
+    /// O(1) 探测，无需 plugin→宿主键反查。
+    starting_plugins: RwLock<std::collections::HashSet<String>>,
 }
 
 impl PluginInvokerImpl {
@@ -930,13 +969,15 @@ impl PluginInvokerImpl {
             hook_bus: RwLock::new(None),
             native_loader: None,
             fingerprints: RwLock::new(HashMap::new()),
-            last_used: RwLock::new(HashMap::new()),
+            member_last_used: RwLock::new(HashMap::new()),
             freeze_respawns: RwLock::new(HashMap::new()),
             host_spawned_at: RwLock::new(HashMap::new()),
             light_packing: RwLock::new(LightPacking::default()),
             spawned_members: RwLock::new(HashMap::new()),
             keep_warm_plugins: RwLock::new(std::collections::HashSet::new()),
             inflight_calls: RwLock::new(HashMap::new()),
+            member_inflight_calls: RwLock::new(HashMap::new()),
+            starting_plugins: RwLock::new(std::collections::HashSet::new()),
         }
     }
 
@@ -965,8 +1006,7 @@ impl PluginInvokerImpl {
             .map(|n| n.artifact.as_str())
             .ok_or_else(|| PluginError {
                 message: format!(
-                    "Native plugin '{}' missing manifest.native.artifact (ADR 附录 D②)",
-                    plugin_id
+                    "Native plugin '{plugin_id}' missing manifest.native.artifact (ADR 附录 D②)"
                 ),
                 code: Some("MISSING_NATIVE_ARTIFACT".to_string()),
                 source: Some("plugin-invoker".to_string()),
@@ -976,8 +1016,7 @@ impl PluginInvokerImpl {
             .get_plugin_dir(plugin_id)
             .ok_or_else(|| PluginError {
                 message: format!(
-                    "Native plugin '{}' directory not found (not discovered?)",
-                    plugin_id
+                    "Native plugin '{plugin_id}' directory not found (not discovered?)"
                 ),
                 code: Some("NATIVE_PLUGIN_DIR_NOT_FOUND".to_string()),
                 source: Some("plugin-invoker".to_string()),
@@ -1002,8 +1041,7 @@ impl PluginInvokerImpl {
     ) -> Result<&Arc<NativePluginLoader>, PluginError> {
         self.native_loader.as_ref().ok_or_else(|| PluginError {
             message: format!(
-                "Native plugin '{}' invoked but no NativePluginLoader configured",
-                plugin_id
+                "Native plugin '{plugin_id}' invoked but no NativePluginLoader configured"
             ),
             code: Some("NATIVE_LOADER_NOT_CONFIGURED".to_string()),
             source: Some("plugin-invoker".to_string()),
@@ -1385,8 +1423,7 @@ impl PluginInvokerImpl {
             .as_deref()
             .ok_or_else(|| PluginError {
                 message: format!(
-                    "pipeline plugin '{}' missing manifest.invoke_entry (ADR 附录 D②)",
-                    plugin_id
+                    "pipeline plugin '{plugin_id}' missing manifest.invoke_entry (ADR 附录 D②)"
                 ),
                 code: Some("MISSING_INVOKE_ENTRY".to_string()),
                 source: Some("plugin-invoker".to_string()),
@@ -1403,7 +1440,7 @@ impl PluginInvokerImpl {
         // ① 调用前存活检查（B1：死亡 → PLUGIN_CRASHED，交由恢复包装器 respawn+重试）
         if Self::is_dead_sidecar(&client).await {
             return Err(PluginError {
-                message: format!("plugin process crashed: {}", plugin_id),
+                message: format!("plugin process crashed: {plugin_id}"),
                 code: Some("PLUGIN_CRASHED".to_string()),
                 source: Some("plugin-invoker".to_string()),
             });
@@ -1478,13 +1515,13 @@ impl PluginInvokerImpl {
                 }
                 return Err(if died_mid_call {
                     PluginError {
-                        message: format!("plugin process died mid-call: {}: {}", plugin_id, e),
+                        message: format!("plugin process died mid-call: {plugin_id}: {e}"),
                         code: Some("PLUGIN_CRASHED".to_string()),
                         source: Some("plugin-invoker".to_string()),
                     }
                 } else {
                     PluginError {
-                        message: format!("MCP call failed: {}", e),
+                        message: format!("MCP call failed: {e}"),
                         code: Some("MCP_CALL_FAILED".to_string()),
                         source: Some("plugin-invoker".to_string()),
                     }
@@ -1498,7 +1535,7 @@ impl PluginInvokerImpl {
         let inner = extract_mcp_content(&result);
         let plugin_result: PluginResult =
             serde_json::from_value(inner).map_err(|e| PluginError {
-                message: format!("failed to parse MCP response as PluginResult: {}", e),
+                message: format!("failed to parse MCP response as PluginResult: {e}"),
                 code: Some("PARSE_ERROR".to_string()),
                 source: Some("plugin-invoker".to_string()),
             })?;
@@ -1520,7 +1557,7 @@ impl PluginInvokerImpl {
         // ① 调用前存活检查（B1：死亡 → PLUGIN_CRASHED，可透明恢复）
         if Self::is_dead_sidecar(&client).await {
             return Err(PluginError {
-                message: format!("plugin process crashed: {}", plugin_id),
+                message: format!("plugin process crashed: {plugin_id}"),
                 code: Some("PLUGIN_CRASHED".to_string()),
                 source: Some("plugin-invoker".to_string()),
             });
@@ -1545,13 +1582,13 @@ impl PluginInvokerImpl {
                 let died_mid_call = Self::is_dead_sidecar(&client).await;
                 return Err(if died_mid_call {
                     PluginError {
-                        message: format!("plugin process died mid-call: {}: {}", plugin_id, e),
+                        message: format!("plugin process died mid-call: {plugin_id}: {e}"),
                         code: Some("PLUGIN_CRASHED".to_string()),
                         source: Some("plugin-invoker".to_string()),
                     }
                 } else {
                     PluginError {
-                        message: format!("MCP tool call failed: {}", e),
+                        message: format!("MCP tool call failed: {e}"),
                         code: Some("MCP_TOOL_CALL_FAILED".to_string()),
                         source: Some("plugin-invoker".to_string()),
                     }
@@ -1644,10 +1681,7 @@ impl PluginInvokerImpl {
         })
         .await
         .map_err(|join_err| PluginError {
-            message: format!(
-                "native plugin '{}' execute task panicked: {}",
-                plugin_id, join_err
-            ),
+            message: format!("native plugin '{plugin_id}' execute task panicked: {join_err}"),
             code: Some("NATIVE_EXECUTE_PANICKED".to_string()),
             source: Some("plugin-invoker".to_string()),
         })?;
@@ -1656,7 +1690,7 @@ impl PluginInvokerImpl {
         let plugin_result = result.and_then(|state_updates_json| {
             let state_updates: std::collections::HashMap<String, serde_json::Value> =
                 serde_json::from_str(&state_updates_json).map_err(|e| PluginError {
-                    message: format!("native plugin state_updates parse failed: {}", e),
+                    message: format!("native plugin state_updates parse failed: {e}"),
                     code: Some("NATIVE_OUTPUT_PARSE".to_string()),
                     source: Some("plugin-invoker".to_string()),
                 })?;
@@ -1750,10 +1784,7 @@ impl PluginInvokerImpl {
         })
         .await
         .map_err(|join_err| PluginError {
-            message: format!(
-                "native plugin '{}' execute task panicked: {}",
-                plugin_id, join_err
-            ),
+            message: format!("native plugin '{plugin_id}' execute task panicked: {join_err}"),
             code: Some("NATIVE_EXECUTE_PANICKED".to_string()),
             source: Some("plugin-invoker".to_string()),
         })?;
@@ -1762,10 +1793,7 @@ impl PluginInvokerImpl {
         // invoke_tool 的 sidecar 决策树：纯业务数据包 success 信封）。
         let result = raw.and_then(|out_json| {
             let inner: Value = serde_json::from_str(&out_json).map_err(|e| PluginError {
-                message: format!(
-                    "native plugin '{}' tool output parse failed: {}",
-                    plugin_id, e
-                ),
+                message: format!("native plugin '{plugin_id}' tool output parse failed: {e}"),
                 code: Some("NATIVE_OUTPUT_PARSE".to_string()),
                 source: Some("plugin-invoker".to_string()),
             })?;
@@ -2023,9 +2051,28 @@ impl PluginInvokerImpl {
         // Double-check：持 spawn 锁后再查缓存——前一个持锁者可能已创建好 client，
         // 命中即复用避免重复 spawn（判死门控与 fast path 同款；极端情况 double-check
         // 时又崩溃 → kill 后继续走下方 spawn）。细节见 reuse_fresh_host_locked。
-        if let Some(client) = self.reuse_fresh_host_locked(&host_key).await {
+        if let Some(client) = self.reuse_fresh_host_locked(&host_key, &manifest.id).await {
             return Ok(client);
         }
+
+        // D1 宽限面：spawn 窗口记账（本次加载的全体成员，组宿主 = 成员集快照
+        // 基准即当前分配表，独占 = 单插件）。guard 持写锁摘除，成功/失败/panic
+        // 出窗必清——HTTP dispatcher 在窗口内暂停端点超时预算（等待就绪而非
+        // 504），泄漏一个条目 = 该插件端点宽限常开，必须出窗即清。
+        let starting_members = match parse_group_slot(&host_key) {
+            Some(_) => self.host_members(&host_key),
+            None => vec![manifest.id.clone()],
+        };
+        {
+            let mut starting = self.starting_plugins.write();
+            for member in &starting_members {
+                starting.insert(member.clone());
+            }
+        }
+        let _starting_guard = StartingPluginsGuard {
+            set: &self.starting_plugins,
+            members: starting_members,
+        };
 
         // 构造新客户端（持有 spawn 锁保证串行）：传输三路分流由 manifest.mcp
         // 决定（HTTP 远程 / 外部 stdio 命令 / 项目自带 sidecar），见 build_mcp_client。
@@ -2069,7 +2116,7 @@ impl PluginInvokerImpl {
             return None;
         }
         if !self.is_host_stale(host_key, manifest).await {
-            self.touch_last_used(host_key);
+            self.touch_member_last_used(&manifest.id);
             return Some(Arc::clone(&client));
         }
         info!(
@@ -2091,23 +2138,44 @@ impl PluginInvokerImpl {
     /// MCP [-32602] tool not found（2026-09-18 00:21 实测序列）。
     /// 因此逐出前按 Arc 身份复核：条目已非本次判定的实例（被并发 respawn
     /// 替换/移除）则不动缓存与快照，只杀死本次判定的旧实例。
+    ///
+    /// BUG-81 根因修复：条目摘除**先于** kill，且 kill 绝不 inline 等写锁——
+    /// 长等待调用（审批 wait_for_choice 24h）持读锁期间，`write().await` 的
+    /// 公平排队会把全部后续读者（fast path 的 `client.read()`）队头阻塞在
+    /// 驱逐者身后，整宿主所有端点连锁超时（装机版 2026-09-23T19:21 实测
+    /// approval_service 504 风暴 5400+ 条）。对齐 [`Self::unload_host`] 的
+    /// 既有模式：身份命中即摘条目与快照（新调用立即走 respawn 新实例），
+    /// `try_write` 拿不到写锁（在飞调用未排空）就放弃本次 kill——在飞 Arc
+    /// 全部释放时由 kill_on_drop 兜底终止残留进程。
     async fn kill_and_evict_if_current(&self, host_key: &str, client: &SharedMcpClient) {
-        if let Err(e) = client.write().await.kill().await {
-            tracing::debug!(
-                "evict: best-effort kill of host {} failed (will respawn): {e}",
-                host_key
-            );
-        }
-        // 身份复核与缓存移除同持一把写锁（原子）；快照紧随其后移除——respawn
-        // 的快照写入以「先驱逐旧条目」为前提，见本函数 doc 的时序论证。
-        let mut clients = self.mcp_clients.write();
-        if clients
-            .get(host_key)
-            .is_some_and(|cur| Arc::ptr_eq(cur, client))
-        {
-            clients.remove(host_key);
-            drop(clients);
+        let evicted = {
+            let mut clients = self.mcp_clients.write();
+            let is_current = clients
+                .get(host_key)
+                .is_some_and(|cur| Arc::ptr_eq(cur, client));
+            if is_current {
+                clients.remove(host_key);
+            }
+            is_current
+        };
+        if evicted {
             self.spawned_members.write().remove(host_key);
+        }
+        match client.try_write() {
+            Ok(mut guard) => {
+                if let Err(e) = guard.kill().await {
+                    tracing::debug!(
+                        "evict: best-effort kill of host {} failed (will respawn): {e}",
+                        host_key
+                    );
+                }
+            }
+            Err(_) => {
+                tracing::debug!(
+                    "evict: kill of host {} deferred (in-flight calls hold read lock; kill_on_drop reaps)",
+                    host_key
+                );
+            }
         }
     }
 
@@ -2117,7 +2185,16 @@ impl PluginInvokerImpl {
     /// 防误报）；不做指纹 staleness 检测（刚 spawn/校验过的进程无需 stat），
     /// 但做成员集漂移检测——spawn 窗口内新成员装箱进本宿主（分配表已更新、
     /// 快照未写入）时，前一个持锁者 spawn 的进程成员集已过期，必须 kill 重来。
-    async fn reuse_fresh_host_locked(&self, host_key: &str) -> Option<SharedMcpClient> {
+    ///
+    /// BUG-81 同源修复（与 [`Self::kill_and_evict_if_current`] 同理）：条目/快照
+    /// 摘除先于 kill，kill 用 `try_write` 不 inline 等写锁——在飞长调用持读锁时
+    /// inline 等待会在持 spawn 锁状态下悬挂，该宿主的全部 respawn/复用连锁排队。
+    /// 写锁拿不到就放弃本次 kill，残留进程由 kill_on_drop 兜底。
+    async fn reuse_fresh_host_locked(
+        &self,
+        host_key: &str,
+        plugin_id: &str,
+    ) -> Option<SharedMcpClient> {
         let cached = {
             let clients = self.mcp_clients.read();
             clients.get(host_key).cloned()
@@ -2126,18 +2203,28 @@ impl PluginInvokerImpl {
         let client_guard = client.read().await;
         if !Self::is_dead_sidecar(&client_guard).await && !self.light_host_members_drifted(host_key)
         {
-            self.touch_last_used(host_key);
+            self.touch_member_last_used(plugin_id);
             return Some(Arc::clone(&client));
         }
         drop(client_guard);
-        if let Err(e) = client.write().await.kill().await {
-            tracing::debug!(
-                "double-check: best-effort kill of host {} failed (will respawn): {e}",
-                host_key
-            );
-        }
         self.mcp_clients.write().remove(host_key);
         self.spawned_members.write().remove(host_key);
+        match client.try_write() {
+            Ok(mut guard) => {
+                if let Err(e) = guard.kill().await {
+                    tracing::debug!(
+                        "double-check: best-effort kill of host {} failed (will respawn): {e}",
+                        host_key
+                    );
+                }
+            }
+            Err(_) => {
+                tracing::debug!(
+                    "double-check: kill of host {} deferred (in-flight calls hold read lock; kill_on_drop reaps)",
+                    host_key
+                );
+            }
+        }
         None
     }
 
@@ -2343,7 +2430,7 @@ impl PluginInvokerImpl {
         manifest: &PluginManifest,
     ) -> Result<SharedMcpClient, PluginError> {
         client.connect().await.map_err(|e| PluginError {
-            message: format!("MCP connect failed: {}", e),
+            message: format!("MCP connect failed: {e}"),
             code: Some("MCP_CONNECT_FAILED".to_string()),
             source: Some("plugin-invoker".to_string()),
         })?;
@@ -2355,7 +2442,7 @@ impl PluginInvokerImpl {
         // 复用 shared::build_injected_config——native/wasm 分支也走同一函数，三家对齐。
         let config = crate::shared::injected_config(self.loader.as_ref(), manifest).await?;
         client.initialize(&config).await.map_err(|e| PluginError {
-            message: format!("MCP initialize failed: {}", e),
+            message: format!("MCP initialize failed: {e}"),
             code: Some("MCP_INIT_FAILED".to_string()),
             source: Some("plugin-invoker".to_string()),
         })?;
@@ -2403,8 +2490,8 @@ impl PluginInvokerImpl {
             let mut spawned = self.host_spawned_at.write();
             spawned.insert(host_key.to_string(), Instant::now());
         }
-        // 新 spawn 即"活跃"，记录宿主最后调用时刻（空闲软卸载依据）
-        self.touch_last_used(host_key);
+        // 新 spawn 即"活跃"，记录成员最后调用时刻（空闲软卸载依据，成员粒度记账）
+        self.touch_member_last_used(&manifest.id);
 
         Ok(client_arc)
     }
@@ -2709,9 +2796,8 @@ impl PluginInvokerImpl {
             })
             .ok_or_else(|| PluginError {
                 message: format!(
-                    "light 合宿宿主目录 {GROUP_HOST_DIR}/ 未定位到（从成员 {:?} 插件目录向上探测均未命中）——\
-                     host.py 由合宿宿主侧任务承载，请确认 plugins/shared/_host/ 已就位",
-                    members
+                    "light 合宿宿主目录 {GROUP_HOST_DIR}/ 未定位到（从成员 {members:?} 插件目录向上探测均未命中）——\
+                     host.py 由合宿宿主侧任务承载，请确认 plugins/shared/_host/ 已就位"
                 ),
                 code: Some("HOST_DIR_NOT_FOUND".to_string()),
                 source: Some("plugin-invoker".to_string()),
@@ -2819,23 +2905,6 @@ impl PluginInvokerImpl {
         }
     }
 
-    /// 宿主空闲回收阈值（组内全部成员的 idle_timeout_secs 聚合，§4.8）。
-    ///
-    /// 任一成员声明 `Some(0)`（永不空闲卸载）→ 宿主永不回收（连坐保护）；
-    /// 否则取成员声明/默认值的最严格（最大）阈值——任何成员要求保活更久，
-    /// 整组就保活更久（整组回收是连坐，宁晚勿早）。
-    fn host_idle_timeout_secs(&self, members: &[String]) -> u64 {
-        let mut max = 0;
-        for pid in members {
-            let secs = self.idle_timeout_secs_sync(pid);
-            if secs == 0 {
-                return 0;
-            }
-            max = max.max(secs);
-        }
-        max
-    }
-
     /// 插件权限声明的前置日志校验（P2-2）。
     ///
     /// 0.2 只做声明 + 日志告警，不做硬 enforce（filesystem/system_calls 留 0.3 沙箱）。
@@ -2874,14 +2943,14 @@ impl PluginInvokerImpl {
         }
     }
 
-    /// 刷新宿主的最后调用时刻（调用即"活跃"，重置空闲计时——宿主键粒度）。
+    /// 刷新成员的最后调用时刻（调用即"活跃"，重置空闲计时——成员粒度记账）。
     ///
-    /// 合宿宿主：组内任一成员被调即整组续命（last_used 按宿主键记账，
-    /// 宿主空闲 = 全部成员都空闲，§4.8）。
-    fn touch_last_used(&self, host_key: &str) {
-        self.last_used
+    /// 成员粒度卸载（ADR 2026-09-24-member-granularity-unload-mode-panel-warmup）
+    /// 下每个成员按自己的调用时钟独立判定空闲，不再整组续命。
+    fn touch_member_last_used(&self, plugin_id: &str) {
+        self.member_last_used
             .write()
-            .insert(host_key.to_string(), Instant::now());
+            .insert(plugin_id.to_string(), Instant::now());
     }
 
     /// 进入一次 capability 调用：宿主 in-flight 计数 +1，返回 RAII guard。
@@ -2898,17 +2967,33 @@ impl PluginInvokerImpl {
         InflightGuard { counter }
     }
 
+    /// 进入一次 capability 调用：成员 in-flight 计数 +1（成员粒度 GC 门）。
+    fn enter_member_inflight(&self, plugin_id: &str) -> InflightGuard {
+        let counter = {
+            let mut map = self.member_inflight_calls.write();
+            map.entry(plugin_id.to_string())
+                .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
+                .clone()
+        };
+        counter.fetch_add(1, Ordering::SeqCst);
+        InflightGuard { counter }
+    }
+
     /// sidecar 统一入口 in-flight 计入（P22，ADR 2026-09-07）：
-    /// 按 manifest 解析宿主键并 +1，返回 (宿主键, RAII guard)。
+    /// 按 manifest 解析宿主键并 +1（宿主面 + 成员面），返回 (宿主键, 宿主 guard, 成员 guard)。
     ///
     /// [`Self::invoke_pipeline_plugin`] / [`Self::invoke_tool`] 的 Sidecar 分支
     /// 是所有 sidecar capability 调用的必经点（管道步骤 / tool-executor 反向
     /// 调用 / http.handle 分发），计数在入口一次持有、覆盖透明恢复全程；
     /// 单次尝试函数（attempt_sidecar_*）不再各自计数。
-    fn enter_sidecar_inflight(&self, manifest: &PluginManifest) -> (String, InflightGuard) {
+    fn enter_sidecar_inflight(
+        &self,
+        manifest: &PluginManifest,
+    ) -> (String, InflightGuard, InflightGuard) {
         let host_key = self.resolve_host_key(manifest);
         let guard = self.enter_inflight(&host_key);
-        (host_key, guard)
+        let member_guard = self.enter_member_inflight(&manifest.id);
+        (host_key, guard, member_guard)
     }
 
     /// 读取宿主当前 in-flight capability 调用数（空闲 GC 回收门，P12）。
@@ -2920,12 +3005,21 @@ impl PluginInvokerImpl {
             .unwrap_or(0)
     }
 
+    /// 读取成员当前 in-flight capability 调用数（成员粒度 GC 回收门）。
+    fn member_inflight(&self, plugin_id: &str) -> usize {
+        self.member_inflight_calls
+            .read()
+            .get(plugin_id)
+            .map(|c| c.load(Ordering::SeqCst))
+            .unwrap_or(0)
+    }
+
     /// 启动后台空闲软卸载 GC 任务。
     ///
     /// 每 30s 扫描 last_used（宿主键粒度），对空闲超过阈值的宿主整组回收
     /// （sidecar kill 进程，manifest 描述保留，下次调用重新 spawn）。
-    /// 预热集（keep-warm 常驻集，见 [`Self::warmup_sidecar`]）所在宿主组
-    /// 豁免回收——预热常驻语义，否则预热被架空、首条消息重新全价冷启动。
+    /// 预热集（keep-warm 常驻集，见 [`Self::warmup_sidecar`]）成员豁免回收
+    /// ——预热常驻语义，否则预热被架空、首条消息重新全价冷启动。
     /// 对齐 trait 文档声明的「空闲超时自动卸载」设计原则。
     ///
     /// 必须用 Arc<Self> 调用（后台任务需 'static 持有 invoker）。在 main 启动期调一次。
@@ -2943,66 +3037,110 @@ impl PluginInvokerImpl {
         info!("Plugin idle-unload GC task started (scan every 30s)");
     }
 
-    /// 单次 GC 扫描：收集所有活跃宿主键 + 最后调用时刻，对超时的整组回收（§4.8）。
+    /// 单次 GC 扫描：按成员粒度回收空闲超时的插件（成员级卸载，ADR
+    /// 2026-09-24-member-granularity-unload-mode-panel-warmup 取代原 §4.8 整组
+    /// 回收的记账面）。
+    ///
+    /// - 非最后成员：进程内摘除（`unload_group_member`），宿主与其余成员不动；
+    /// - 独占宿主 / 组内最后成员：走既有整组回收（kill 进程 + 槽位释放），
+    ///   进程级清理兜底不变。
     async fn run_idle_gc_pass(&self) {
-        // 快照当前所有"活跃"宿主键，避免长时间持锁
+        // 快照当前所有"活跃"成员 id，避免长时间持锁
         let candidates: Vec<String> = {
-            let mut keys: Vec<String> = self.last_used.read().keys().cloned().collect();
+            let mut keys: Vec<String> = self.member_last_used.read().keys().cloned().collect();
             keys.sort();
             keys.dedup();
             keys
         };
 
         let now = Instant::now();
-        for host_key in candidates {
-            // 宿主空闲判定（合宿：整组续命语义下，宿主键条目过期 = 全部成员空闲）
+        for plugin_id in candidates {
+            // 预热常驻豁免（成员粒度）：属于预热集的成员自己不回收，其余成员
+            // 照常回收——常驻不再连坐同宿主插件；显式卸载（force_unload）不受
+            // 此豁免约束。
+            if self.keep_warm_plugins.read().contains(&plugin_id) {
+                continue;
+            }
             let idle_secs = self
-                .last_used
+                .member_last_used
                 .read()
-                .get(&host_key)
+                .get(&plugin_id)
                 .map(|t| now.duration_since(*t).as_secs())
                 .unwrap_or(0);
             if idle_secs == 0 {
                 continue;
             }
-            let members = self.host_members(&host_key);
-            // 预热常驻豁免：任一成员属于预热集（boot 管道引用插件）→ 整组不回收。
-            // 组语义对称——整组回收是连坐，整组豁免也按成员判定；显式卸载
-            // （force_unload）不受此豁免约束。
-            if members
-                .iter()
-                .any(|pid| self.keep_warm_plugins.read().contains(pid))
-            {
+            let threshold = self.idle_timeout_secs_sync(&plugin_id);
+            // threshold == 0 表示该成员持久保活（声明"永不空闲卸载"，如模式面板包）。
+            if threshold == 0 || idle_secs <= threshold {
                 continue;
             }
-            let threshold = self.host_idle_timeout_secs(&members);
-            // threshold == 0 表示宿主持久保活（任一成员声明"永不空闲卸载"），跳过。
-            if threshold != 0 && idle_secs > threshold {
-                // in-flight 门（P12，ADR 2026-09-07）：有调用在飞不回收——
-                // touch_last_used 只在取客户端时刷新，长调用执行期间空闲计时
-                // 会虚假超期；此时 kill 宿主 = 打断在飞调用（悬挂/重试风暴根源）。
-                let inflight = self.host_inflight(&host_key);
-                if inflight > 0 {
+            let Some(host_key) = self.existing_host_key_for(&plugin_id) else {
+                // 无宿主（从未 spawn / InProcess / 已卸载）：清掉陈旧记账。
+                self.member_last_used.write().remove(&plugin_id);
+                continue;
+            };
+            // 软卸载 vs 整组回收的判定口径 = **spawn 快照**（进程实际服务面），
+            // 不是分配表：成员粒度软卸载保留分配条目（待重加入标记，见
+            // finalize_member_unload），表长含「进程已卸、待下次 respawn 回归」
+            // 的成员——按表长判定会把「进程内最后一名活跃成员」误走软卸载路径
+            // （宿主协议拒绝卸最后成员 → GC 只 warn 不回收，宿主永不释放）。
+            // 快照缺失（进程服务面未知）回退分配表口径：生产路径 spawn 先写
+            // 快照后入缓存（BUG-44 不变量），缺省仅为异常态兜底，与既有行为
+            // 一致。
+            let snapshot_len = match self.spawned_members.read().get(&host_key).cloned() {
+                Some(spawned) => spawned.len(),
+                None => self.host_members(&host_key).len(),
+            };
+            if snapshot_len > 1 {
+                // 成员有调用在飞不卸（同 P12 门：空闲计时在长调用期间会虚假超期）。
+                let member_inflight = self.member_inflight(&plugin_id);
+                if member_inflight > 0 {
                     info!(
+                        plugin = %plugin_id,
                         host = %host_key,
-                        members = ?members,
-                        inflight = inflight,
+                        inflight = member_inflight,
                         idle_secs = idle_secs,
                         threshold = threshold,
-                        "Host idle-unload skipped: capability calls in flight"
+                        "Member idle-unload skipped: capability calls in flight"
                     );
                     continue;
                 }
                 info!(
+                    plugin = %plugin_id,
                     host = %host_key,
-                    members = ?members,
                     idle_secs = idle_secs,
                     threshold = threshold,
-                    "Host idle-unloading (soft): exceeds idle timeout"
+                    "Member idle-unloading (soft): exceeds idle timeout"
                 );
-                if let Err(e) = self.unload_host(&host_key, true).await {
-                    warn!("idle GC unload {} failed: {}", host_key, e);
+                if let Err(e) = self.unload_group_member(&plugin_id).await {
+                    warn!("idle GC member unload {} failed: {}", plugin_id, e);
                 }
+                continue;
+            }
+            // 独占宿主 / 组内最后成员：整组回收（kill 进程 + 槽位释放）。
+            // in-flight 门（P12，ADR 2026-09-07）：有调用在飞不回收。
+            let inflight = self.host_inflight(&host_key);
+            if inflight > 0 {
+                info!(
+                    host = %host_key,
+                    members = ?self.host_members(&host_key),
+                    inflight = inflight,
+                    idle_secs = idle_secs,
+                    threshold = threshold,
+                    "Host idle-unload skipped: capability calls in flight"
+                );
+                continue;
+            }
+            info!(
+                host = %host_key,
+                members = ?self.host_members(&host_key),
+                idle_secs = idle_secs,
+                threshold = threshold,
+                "Host idle-unloading (soft): exceeds idle timeout"
+            );
+            if let Err(e) = self.unload_host(&host_key, true).await {
+                warn!("idle GC unload {} failed: {}", host_key, e);
             }
         }
     }
@@ -3042,6 +3180,53 @@ impl PluginInvokerImpl {
     /// （respawn 按当前表重建成员集，§4.5 第 2 条分配粘性），槽位回收只在
     /// idle GC 路径发生。
     pub async fn force_unload_impl(&self, plugin_id: &str) -> Result<(), PluginError> {
+        // 成员粒度优先（ADR 2026-09-24-member-granularity-unload-mode-panel-warmup）：
+        // 存活组宿主的非最后成员先试进程内摘除；失败/不适用回退整组驱逐
+        // （语义终点一致：下个调用者拿新码，爆炸半径收缩）。
+        if let Some(host_key) = self.existing_host_key_for(plugin_id) {
+            if parse_group_slot(&host_key).is_some()
+                && self.mcp_clients.read().contains_key(&host_key)
+                && self
+                    .spawned_members
+                    .read()
+                    .get(&host_key)
+                    .is_some_and(|members| !members.iter().any(|m| m == plugin_id))
+            {
+                // 软卸载待重加入成员（分配在、宿主存活、快照已知且不含它）：
+                // 无进程内服务面可摘，清掉分配标记即完成强制语义（该成员不随
+                // 下次 respawn 回归），与「无宿主」路径同一终点——不得为它整组
+                // kill。快照未知（None）不进此分支：进程服务面不明按既有
+                // fail-closed 路径处理（BUG-44 同哲学）。
+                self.light_packing.write().assignments.remove(plugin_id);
+                self.emit_lifecycle_unload(plugin_id);
+                if let Err(e) = self.loader.unload(plugin_id).await {
+                    warn!(
+                        "loader unload {} (force unload pending-rejoin member) failed: {}",
+                        plugin_id, e
+                    );
+                }
+                return Ok(());
+            }
+            let group_with_peers =
+                parse_group_slot(&host_key).is_some() && self.host_members(&host_key).len() > 1;
+            if group_with_peers && self.mcp_clients.read().contains_key(&host_key) {
+                match self.unload_group_member(plugin_id).await {
+                    Ok(()) => {
+                        // 强制语义：撤销「待重加入」分配标记（软卸载保留分配是
+                        // idle 语境——成员随下次 respawn 回归；强制卸载要求它
+                        // 不再自动回归，见 finalize_member_unload）。
+                        self.light_packing.write().assignments.remove(plugin_id);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        warn!(
+                            "unload_member fallback to whole-host unload for {}: {}",
+                            plugin_id, e
+                        );
+                    }
+                }
+            }
+        }
         self.unload_plugin_host(plugin_id, false).await
     }
 
@@ -3118,6 +3303,127 @@ impl PluginInvokerImpl {
                 source: None,
             }),
         }
+    }
+
+    /// 成员粒度卸载实现：向成员所在组宿主发 `agentos/unload_member` 请求
+    /// （带应答），宿主进程内摘除该成员（定向 on_unload + 三张聚合表原位
+    /// 重聚合 + 模块缓存摘除），其余成员进程不动——卸载爆炸半径从整组收缩到
+    /// 单成员（ADR 2026-09-24-member-granularity-unload-mode-panel-warmup）。
+    ///
+    /// 三路判定（与 [`PluginInvoker::reload_member`] 契约同构）：
+    /// - 独占宿主 / 组内最后成员 → Err（调用方回退整组路径：独占单进程杀即
+    ///   等价粒度；最后成员卸载 = 进程级回收，空成员集破坏合宿不变量）；
+    /// - 无存活进程（未装箱/未 spawn/已驱逐）→ Ok(no-op)：无进程内服务面，
+    ///   记账由调用方按需清理；
+    /// - 存活组宿主 → 应答成功 Ok 后完成内核侧记账收尾（见
+    ///   [`Self::finalize_member_unload`]）；宿主协议错误/超时 Err——宿主状态
+    ///   未被破坏（成员仍在服务），回退整组驱逐路径安全。
+    pub async fn unload_group_member(&self, plugin_id: &str) -> Result<(), PluginError> {
+        let Some(host_key) = self.existing_host_key_for(plugin_id) else {
+            return Ok(());
+        };
+        if parse_group_slot(&host_key).is_none() {
+            return Err(PluginError {
+                message: format!("unload_member: {plugin_id} 不在合宿组宿主（独占无进程内卸载面）"),
+                code: None,
+                source: None,
+            });
+        }
+        // 最后成员判定口径 = **spawn 快照**（进程实际服务面）：软卸载保留分配
+        // 条目（待重加入标记，见 finalize_member_unload），按分配表长判定会被
+        // 待重加入成员虚胖——卸掉进程内最后一名服务成员会得到空成员集进程，
+        // 破坏合宿不变量（host.py 侧同样拒绝，双保险同口径）。
+        let process_members = self
+            .spawned_members
+            .read()
+            .get(&host_key)
+            .cloned()
+            .unwrap_or_else(|| self.host_members(&host_key));
+        if process_members.len() <= 1 {
+            return Err(PluginError {
+                message: format!(
+                    "unload_member: {plugin_id} 是宿主 {host_key} 的最后成员（须走整组回收）"
+                ),
+                code: None,
+                source: None,
+            });
+        }
+        let Some(client) = self.mcp_clients.read().get(&host_key).cloned() else {
+            return Ok(());
+        };
+        let params = json!({ "plugin_id": plugin_id });
+        let outcome = tokio::time::timeout(RELOAD_MEMBER_TIMEOUT, async move {
+            client
+                .read()
+                .await
+                .request(UNLOAD_MEMBER_METHOD, params)
+                .await
+        })
+        .await;
+        match outcome {
+            Ok(Ok(result)) => {
+                if result.get("unloaded").and_then(Value::as_bool) != Some(true) {
+                    return Err(PluginError {
+                        message: format!(
+                            "unload_member: 宿主应答缺少 unloaded=true（{plugin_id}）"
+                        ),
+                        code: None,
+                        source: None,
+                    });
+                }
+                self.finalize_member_unload(&host_key, plugin_id).await;
+                info!(
+                    plugin_id = plugin_id,
+                    host = %host_key,
+                    "成员粒度卸载完成（宿主进程内摘除，其余成员不受影响；记账与并集指纹已刷新）"
+                );
+                Ok(())
+            }
+            Ok(Err(e)) => Err(PluginError {
+                message: format!("unload_member: 宿主应答错误（{plugin_id}）: {e}"),
+                code: None,
+                source: None,
+            }),
+            Err(_) => Err(PluginError {
+                message: format!(
+                    "unload_member: 宿主应答超时（{plugin_id}，{}s）",
+                    RELOAD_MEMBER_TIMEOUT.as_secs()
+                ),
+                code: None,
+                source: None,
+            }),
+        }
+    }
+
+    /// 成员卸载成功后的内核侧记账收尾（请求应答成功后调用，恰一次）。
+    ///
+    /// - OnUnload 旁路广播 + loader 卸载（能力/路由登记面摘除）；
+    /// - `spawned_members` 快照摘除该成员（进程服务面已收缩）；**分配表条目保留**
+    ///   ——保留即「待重加入」标记：漂移检测（分配表 ≠ 快照）会在该宿主下一次
+    ///   被调用时触发整宿主 respawn，按分配表重建成员集，把全部软卸载成员**一次
+    ///   性**带回进程。若像旧版那样同摘分配条目，每个被卸成员都要各自重装箱 →
+    ///   各自触发一次整宿主 respawn——装机版 2026-09-25 实测：GC 每轮软卸载
+    ///   15-20 名成员，下个繁忙期逐成员重装箱引发分钟级重载风暴（宿主重载
+    ///   风暴 → 插件 http 端点 504），k 次整杀收敛为 1 次；
+    /// - 清成员空闲时钟与成员 in-flight 条目；刷新宿主并集指纹（分配表未变，
+    ///   刷新后与旧值一致——指纹是 spawn 期望态，不因软卸载漂移）。
+    async fn finalize_member_unload(&self, host_key: &str, plugin_id: &str) {
+        self.emit_lifecycle_unload(plugin_id);
+        if let Err(e) = self.loader.unload(plugin_id).await {
+            warn!(
+                "loader unload {} (member unload from {}) failed: {}",
+                plugin_id, host_key, e
+            );
+        }
+        if let Some(members) = self.spawned_members.write().get_mut(host_key) {
+            members.retain(|m| m != plugin_id);
+        }
+        self.member_last_used.write().remove(plugin_id);
+        self.member_inflight_calls.write().remove(plugin_id);
+        let fp = self.host_union_fingerprint(host_key);
+        self.fingerprints
+            .write()
+            .insert(host_key.to_string(), (fp, Instant::now()));
     }
 
     /// 按插件 id 卸载其宿主（idle GC 与 force_unload 的公共实现）。
@@ -3217,9 +3523,16 @@ impl PluginInvokerImpl {
             }
         }
 
-        // 清除指纹缓存 + last_used（宿主键），下次调用重新计算并 respawn
+        // 清除指纹缓存 + 成员记账（空闲时钟/in-flight 按成员键），下次调用重新计算并 respawn
         self.fingerprints.write().remove(host_key);
-        self.last_used.write().remove(host_key);
+        {
+            let mut last_used = self.member_last_used.write();
+            let mut member_inflight = self.member_inflight_calls.write();
+            for member in &members {
+                last_used.remove(member);
+                member_inflight.remove(member);
+            }
+        }
         // 清除 spawn 成员集快照（与 mcp_clients 条目同生命周期，见字段注释）
         self.spawned_members.write().remove(host_key);
         // 清除 in-flight 计数条目（与 mcp_clients 同生命周期；在飞 guard 持有
@@ -3341,7 +3654,8 @@ impl PluginInvoker for PluginInvokerImpl {
                 // pipeline 调用的必经点（引擎管道步骤 / 直调），计数在此 +1，
                 // RAII guard 跨越透明恢复的 respawn+重试全程（成功/失败/超时/
                 // panic 随 future drop 回落），空闲 GC 不得回收本宿主。
-                let _inflight = self.enter_sidecar_inflight(manifest);
+                let (_host_key, _inflight, _member_inflight) =
+                    self.enter_sidecar_inflight(manifest);
                 // B1（M2-reactive 第一刀）：sidecar 死亡透明恢复——单次尝试抽出为
                 // attempt_sidecar_pipeline，死亡判定（PLUGIN_CRASHED）触发
                 // force_unload + respawn + 重试一次（长事务在途调用不被依赖死亡破坏）。
@@ -3408,7 +3722,8 @@ impl PluginInvoker for PluginInvokerImpl {
                         // llm.complete_stream 流式、http.handle 分发），计数覆盖
                         // 透明恢复的 respawn+重试全程；流式调用的 MCP 响应在流
                         // 完全结束才返回，guard 即覆盖整个流生命周期。
-                        let _inflight = self.enter_sidecar_inflight(manifest);
+                        let (_host_key, _inflight, _member_inflight) =
+                            self.enter_sidecar_inflight(manifest);
                         // B1（M2-reactive 第一刀）：sidecar 死亡透明恢复——与 pipeline 路径同构。
                         self.with_transparent_recovery(plugin_id, || async {
                             self.attempt_sidecar_tool(plugin_id, manifest, tool_name, inputs)
@@ -3524,6 +3839,10 @@ impl PluginInvoker for PluginInvokerImpl {
         self.reload_group_member(plugin_id).await
     }
 
+    async fn unload_member(&self, plugin_id: &str) -> Result<(), PluginError> {
+        self.unload_group_member(plugin_id).await
+    }
+
     /// 重新扫描插件目录（覆盖 trait 默认实现）。
     ///
     /// 从 AGENTOS_PLUGINS_DIR 递归收集含 plugin.json 的目录的父目录作为 roots
@@ -3628,6 +3947,15 @@ impl PluginInvoker for PluginInvokerImpl {
     /// 见 inherent [`PluginInvokerImpl::kill_sidecar_if_any`]（0.2 收尾 §3.3b）。
     async fn kill_sidecar_if_any(&self, plugin_id: &str) {
         PluginInvokerImpl::kill_sidecar_if_any(self, plugin_id).await
+    }
+
+    /// 目标插件所在宿主是否在 spawn/respawn 窗口（覆盖 trait 默认 false）。
+    ///
+    /// D1 宽限面：HTTP dispatcher 据此区分「插件处理慢」与「基础设施冷启动
+    /// 等待」，后者暂停端点超时预算（等待就绪而非 504，宿主重载风暴
+    /// 2026-09-25）。记账见 [`PluginInvokerImpl::starting_plugins`]。
+    fn is_host_starting(&self, plugin_id: &str) -> bool {
+        self.starting_plugins.read().contains(plugin_id)
     }
 }
 

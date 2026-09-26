@@ -22,15 +22,7 @@ vi.mock('@/services/api/client', () => ({
   default: { get: mockGet },
 }))
 
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    stream: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    pipelineStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  },
-  createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
-}))
+vi.mock('@/utils/logger', async () => (await import('../../../stores/__tests__/helpers/storeTestMocks')).loggerMockFull())
 
 vi.mock('@/utils/retry', () => ({
   requestWithRetry: async (fn: () => Promise<any>) => fn(),

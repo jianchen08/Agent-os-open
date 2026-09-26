@@ -19,6 +19,7 @@ import { useState } from 'react'
 import {
   RefreshCw,
   AlertCircle,
+  AlertTriangle,
   Plug,
   ToggleLeft,
   Wrench,
@@ -92,6 +93,11 @@ function typeTheme(configType: string): {
 /** activation 中文 */
 function activationLabel(a: string): string {
   return { eager: '启动即载', lazy: '按需载入', manual: '手动启动' }[a] || a
+}
+
+/** 危险前端能力 id → 用户可读标签（准入分级 2026-09-25） */
+function restrictedCapLabel(cap: string): string {
+  return { host_js: '宿主脚本（皮肤 hooks）', host_css: '宿主样式注入' }[cap] ?? cap
 }
 
 export function PluginsSettingsPage() {
@@ -409,6 +415,20 @@ export function PluginsSettingsPage() {
                             {gate.sanitized
                               ? `剔除 ${(gate.sanitized.rejected_tools ?? []).join('、') || '（见契约页）'}（工具 ${gate.sanitized.tools_before ?? '?'}→${gate.sanitized.tools_after ?? '?'}）`
                               : (gate.last_error ?? 'G2 复核判定声明与实现不一致')}
+                          </span>
+                        </div>
+                      )}
+                      {/* 准入分级（2026-09-25）：危险前端能力未获 allowlist 授予 →
+                          注册面已剥除（skin/client_styles 不生效），行内可见禁静默 */}
+                      {(plugin.restricted_capabilities ?? []).length > 0 && (
+                        <div
+                          className="bg-status-warning/10 text-status-warning mt-1.5 flex items-start gap-1 rounded p-2 text-xs"
+                          data-testid={`plugin-restricted-${plugin.plugin_id}`}
+                        >
+                          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                          <span className="line-clamp-2">
+                            已限制：{(plugin.restricted_capabilities ?? []).map(restrictedCapLabel).join('、')}{' '}
+                            未获准入授予——对应宿主级前端能力不生效（主题皮肤/自定义样式）
                           </span>
                         </div>
                       )}

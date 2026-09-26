@@ -116,9 +116,9 @@ class TestPythonCoverageBaseline:
         monkeypatch.setattr(sys, "argv", ["x", "--xml", str(_write_cov_xml(tmp_path, "0.5123"))])
         assert py_cov.main() == 0
         text = bf.read_text(encoding="utf-8")
-        assert "python_line_coverage=52.00" in text
+        assert "python_line_coverage=51.0" in text  # 基线原样（D1: 自动棘轮停用）
         assert "# 归因注释" in text  # 只替换数值行，归因注释保留
-        assert "自动棘轮" in capsys.readouterr().out
+        assert "可收紧" in capsys.readouterr().out  # 建议 --init 手动锚定
 
     def test_red_run_leaves_baseline_untouched(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -139,7 +139,7 @@ class TestPythonCoverageBaseline:
         bf.write_text("python_line_coverage=52.00\n", encoding="utf-8")
         monkeypatch.setattr(sys, "argv", ["x", "--xml", str(_write_cov_xml(tmp_path, "0.52"))])
         assert py_cov.main() == 0
-        assert "python_line_coverage=53.00" in bf.read_text(encoding="utf-8")
+        assert "python_line_coverage=52.00" in bf.read_text(encoding="utf-8")
 
     def test_measured_100_caps_ratchet_at_100(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -441,9 +441,9 @@ class TestRustCoverageBaseline:
         monkeypatch.setattr(sys, "argv", ["x", "--lcov", str(self._lcov(tmp_path))])
         assert rust_cov.main() == 0
         text = bf.read_text(encoding="utf-8")
-        assert "rust_line_coverage=51.0" in text
+        assert "rust_line_coverage=50.0" in text  # 基线原样（D1: 自动棘轮停用）
         assert "# 归因注释" in text
-        assert "自动棘轮" in capsys.readouterr().out
+        assert "可收紧" in capsys.readouterr().out  # 建议 --init 手动锚定
 
     def test_history_comment_with_key_pattern_does_not_poison_baseline(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -549,7 +549,7 @@ class TestFrontendCoverageParse:
         bf = tmp_path / "baseline.txt"
         monkeypatch.setattr(fe_base, "BASELINE_FILE", bf)
         fe_base.write_baseline(3, 5, 52.9)
-        assert fe_base.read_baseline() == (3, 5, 52.9)
+        assert fe_base.read_baseline() == (3, 5, 52.9, -1)  # eslint 维度未配置=-1
 
 
 class TestFrontendBaselineGateDimensions:

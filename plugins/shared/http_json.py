@@ -72,7 +72,7 @@ def decode_body(raw_body: str, *, strict_object: bool = False) -> dict[str, Any]
 
     非 dict 顶层 JSON（数组/标量）不符合请求体契约 → 默认返回 ``{}``（交由
     调用方走缺参错误路径），不透传非 dict 值；``strict_object=True``（如
-    godot_context 写面）改为抛 ValueError("JSON body must be an object")，
+    host_context 写面）改为抛 ValueError("JSON body must be an object")，
     由调用方转 400。
     """
     if not raw_body:

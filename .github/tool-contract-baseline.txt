@@ -1,0 +1,5 @@
+# 工具契约完备度基线（只减不增）——check_tool_contract_completeness.py 消费
+# 2026-09-24 批次 4-1 收敛：28/30 存量全部补齐（monitoring5/channel13/admin6/
+# dsh2/review2），基线即 0/0——新工具声明漏 output_schema/render 在 PR 阶段拦截
+missing_output_schema=0
+missing_render=0

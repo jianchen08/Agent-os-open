@@ -155,7 +155,7 @@ export function useRealtimeEvents(): void {
 
     /**
      * 发送失败透传（任何错误都必须让用户看见）：
-     * user_input 断线排队超 TTL（连接迟迟未恢复）→ 撤"思考中"占位气泡、
+     * user_input 断线排队超 TTL（连接迟迟未恢复）→ 乐观 user 消息标 failed、
      * 停止流式态、在原位置插入 system 错误消息 + 通知中心高优告警。
      */
     const handleUserInputSendTimeout = (eventData: {

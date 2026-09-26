@@ -71,7 +71,7 @@ def _isolate_tasks_plugin_modules():
             sys.modules.pop(m, None)
 
 
-@pytest.fixture()
+@pytest.fixture
 def srv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     """加载 server.py 并以 tmp data_dir 完成 on_load。"""
     spec = importlib.util.spec_from_file_location(

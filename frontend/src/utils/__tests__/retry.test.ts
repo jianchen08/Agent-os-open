@@ -1,6 +1,5 @@
 /** @feature: FP-0.2.四 前端 Schema | @ci: frontend-test */
 import { describe, expect, it, vi } from 'vitest'
-
 import { isRetryableError, requestWithRetry, retry } from '../retry'
 
 describe('isRetryableError', () => {

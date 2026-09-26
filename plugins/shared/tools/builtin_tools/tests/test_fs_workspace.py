@@ -1,11 +1,13 @@
 # @feature: FP-0.2.二 内部模块统一 manifest 化 | @vision: V3 可嵌入 | @ci: python-coverage
-"""fs_tools 工作空间约束测试（punch B5）。
+"""fs_tools 工作空间约束测试（punch B5；读黑名单制按 ADR 2026-09-24-read-deny-write-zones 修订）。
 
-project_root 前缀校验（参考 download/tool.py 的 WorkspaceAwareMixin 语义）：
-- 读写同规：workspace 外绝对路径一律拒绝（读不豁免）；
+位置闸语义：
+- 读（read/search）：黑名单制全放——凭据硬拒、仓库拒绝集、read_deny 前缀
+  除外，根外普通路径放行；
+- 写/删/move/copy：workspace/project_root 锚内或写区（entries 前缀）内
+  放行，区外拒绝（fail-closed）；
 - 凭据类文件（.env 族/SSH 私钥/证书私钥）硬拒，与根内外无关，
   .env.example 豁免；
-- workspace 内路径（含相对路径解析）通过；
 - 未注入 workspace/project_root 时 fail-closed 报错（不做 cwd 兜底）。
 """
 
@@ -28,6 +30,17 @@ from agentos_builtin_tools.fs_tools import (
 from agentos_builtin_tools.search_tool import enhanced_search
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _empty_zone_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """写区名单钉空（本文件测根锚语义；不钉会读宿主真实名单，机器敏感）。"""
+    users_dir = tmp_path / "config" / "users"
+    (users_dir / "default").mkdir(parents=True)
+    (users_dir / "default" / "project_whitelist.yaml").write_text(
+        "entries: []\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("AGENTOS_CONFIG_USERS_DIR", str(users_dir))
 
 
 class TestFileWriteWorkspaceConstraint:
@@ -292,8 +305,10 @@ class TestFileReadReturnsResolvedPath:
         assert result.success is False
         assert "未注入" in result.error
 
-    async def test_absolute_outside_path_rejected(self, tmp_path: Path) -> None:
-        """根外绝对路径读取拒绝（与写同规 fail-closed），不返回文件内容。"""
+    async def test_absolute_outside_path_readable_under_denylist(
+        self, tmp_path: Path
+    ) -> None:
+        """读黑名单制：根外普通文件读放行（ADR 2026-09-24 决策1，区域不设限）。"""
         ws = tmp_path / "ws"
         ws.mkdir()
         outside = tmp_path / "cfg.ini"
@@ -301,8 +316,8 @@ class TestFileReadReturnsResolvedPath:
 
         result = await file_read(path=str(outside), workspace=str(ws))
 
-        assert result.success is False
-        assert "超出 workspace/project_root" in result.error
+        assert result.success is True, result.error
+        assert "[a]" in result.output["content"]
 
 
 class TestSensitiveFileDeny:

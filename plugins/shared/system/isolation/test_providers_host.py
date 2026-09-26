@@ -26,6 +26,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import pytest
+
 from agentos_plugin_sdk.isolation_types import (
     EnvironmentStatus,
     ExecutionResult,
@@ -35,7 +37,6 @@ from agentos_plugin_sdk.isolation_types import (
     OperationType,
     TaskType,
 )
-import pytest
 
 if TYPE_CHECKING:
     from plugins.shared.system.isolation.providers.host_provider import HostProvider
@@ -89,10 +90,10 @@ def _provider(tmp_path: Path) -> HostProvider:
 
 class TestLifecycle:
     def test_get_level(self) -> None:
-        assert _provider(Path(".")).get_level() == IsolationLevel.HOST
+        assert _provider(Path()).get_level() == IsolationLevel.HOST
 
     def test_is_available_always_true(self) -> None:
-        ok, err = _run(_provider(Path(".")).is_available())
+        ok, err = _run(_provider(Path()).is_available())
         assert ok is True
         assert err is None
 
@@ -244,7 +245,6 @@ class TestExecuteCommand:
         import time
 
         import psutil
-
         from proc_tree import kill_process_tree as _kill_tree_guard
 
         provider = _provider(tmp_path)

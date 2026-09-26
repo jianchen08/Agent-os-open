@@ -290,7 +290,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .unwrap_or(9100);
 
-    let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
+    let addr: SocketAddr = format!("{host}:{port}").parse()?;
     if !addr.ip().is_loopback() {
         warn!(
             target: "agentos-kernel",
@@ -481,11 +481,10 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // 不满足（能力角色无人提供 / 服务端点未注册）→ 拒绝启动；服务→插件映射由服务面注册表
     // 完成，消费者不点名插件 id。把"依赖不满足"从运行期谜题提前到启动期暴露。
     agentos_plugin_loader::resolve_requires_services(&manifests).map_err(|e| {
-        eprintln!("[boot] 插件服务依赖解析失败，拒绝启动: {}", e);
+        eprintln!("[boot] 插件服务依赖解析失败，拒绝启动: {e}");
         std::io::Write::flush(&mut std::io::stderr()).ok();
         Box::<dyn std::error::Error>::from(format!(
-            "plugin service dependency resolution failed at boot: {}",
-            e
+            "plugin service dependency resolution failed at boot: {e}"
         ))
     })?;
 
@@ -494,12 +493,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // 服务依赖环 fail-fast（与 pipeline load_and_compile 的坏配置拒绝启动一致）。
     let manifests =
         agentos_plugin_loader::sort_manifests_topologically(&manifests).map_err(|e| {
-            eprintln!("[boot] 插件依赖环检测失败，拒绝启动: {}", e);
+            eprintln!("[boot] 插件依赖环检测失败，拒绝启动: {e}");
             std::io::Write::flush(&mut std::io::stderr()).ok();
-            Box::<dyn std::error::Error>::from(format!(
-                "circular plugin dependencies at boot: {}",
-                e
-            ))
+            Box::<dyn std::error::Error>::from(format!("circular plugin dependencies at boot: {e}"))
         })?;
 
     info!(
@@ -696,12 +692,35 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         "Storage driver resolved (config/kernel/storage.yaml > env > default sqlite)"
     );
 
-    // 迁移护栏（ADR 2026-09-13-unified-user-root §2.5）：默认库位置从项目根迁到
-    // 用户空间后，存量部署若原样启动会**开出一个全新的空库**——数据没丢，但用户
-    // 看到的是"全没了"，且此后写入都进新库、两边分叉。这里检测该形态并显式告警
-    // 给出迁移命令；**不静默自动迁移**（magic 迁移不可观测，失败/半途中断时状态
-    // 不明——沿用仓内 migrate_legacy_data_to_default 的显式调用裁定）。
-    warn_legacy_db_not_migrated(&storage_cfg, &config_root);
+    // BUG-85 启动迁移：装机形态默认库位置已改用户根（electron 注入
+    // AGENTOS_DB_PATH），安装目录（resources\）残留的存量库须在首启时复制到
+    // 新位置——否则静默卸载把它当程序文件删除，用户会话/消息/凭据全丢。
+    // 复制失败 fail-closed 拒绝启动（不静默换新库）；dev 仓形态新旧同位，
+    // 天然 no-op，现网行为不变。
+    let migrated = agentos_engine::storage_factory::migrate_legacy_db_to_user_root(
+        &storage_cfg,
+        &config_root,
+    )?;
+    if migrated {
+        eprintln!(
+            "[boot] 存量库已迁移到本次生效位置 {}（旧库原件保留，随卸载清理）。",
+            storage_cfg.sqlite_path
+        );
+        info!(
+            target: "agentos-kernel",
+            db = %storage_cfg.sqlite_path,
+            "legacy install-dir database migrated to effective location (BUG-85)"
+        );
+    } else {
+        // 迁移护栏（ADR 2026-09-13-unified-user-root §2.5）：默认库位置从项目根迁到
+        // 用户空间后，存量部署若原样启动会**开出一个全新的空库**——数据没丢，但用户
+        // 看到的是"全没了"，且此后写入都进新库、两边分叉。这里检测该形态并显式告警
+        // 给出迁移命令；**不静默自动迁移**（magic 迁移不可观测，失败/半途中断时状态
+        // 不明——沿用仓内 migrate_legacy_data_to_default 的显式调用裁定）。
+        // BUG-85 后装机形态由上方 migrate_legacy_db_to_user_root 自动接管，本护栏
+        // 只对未触发迁移的形态（dev 同位/全新安装/两处都有）兜底。
+        warn_legacy_db_not_migrated(&storage_cfg, &config_root);
+    }
 
     let (store, sqlite_db) = agentos_engine::storage_factory::open_storage(&storage_cfg)?;
     let store_dyn: Arc<dyn agentos_core::traits::StorageBackend> = store.clone();
@@ -1121,10 +1140,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 // （注册低频，禁用竞态毫秒级窗口可接受；错误方向是"多注册一次"而非丢注册）。
                 if let Ok(ids) = enabled_for_dyn.try_read() {
                     if !ids.contains(plugin_id) {
-                        return Err(format!(
-                            "plugin '{}' is disabled (L1 Enabled 闸)",
-                            plugin_id
-                        ));
+                        return Err(format!("plugin '{plugin_id}' is disabled (L1 Enabled 闸)"));
                     }
                 }
                 // 写入注册表（guarded：guard 入 scope，禁用插件时一次性收回）。
@@ -1253,6 +1269,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                             None,
                             Some(&overlay),
                             "",
+                            None,
                             "",
                             agentos_core::types::PendingInputSource::Trigger,
                         )
@@ -1389,6 +1406,10 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // 可启动"一致）。
     match agentos_api::server::load_and_compile(&config_root, &plugin_ids) {
         Ok(compiled) => {
+            // autonomous 编译产物预入管道编译缓存（其余管道配置用什么加载什么，
+            // 按需加载+编译+缓存，绝不启动期全量扫描）。
+            let compiled = Arc::new(compiled);
+            agentos_api::server::pipeline_cache_seed("autonomous", Arc::clone(&compiled));
             // boot 后台预热：管道引用的 sidecar 宿主提前 spawn 进缓存，消除
             // "启动后首次消息"的管道链串行冷启动（每宿主 spawn→initialize 秒级，
             // 实测首条消息 41.5s vs 第二条 1.9s）。预热集只含管道引用插件
@@ -1397,7 +1418,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             // capabilities 声明，反向调用不空快照）。
             agentos_api::sidecar_warmup::spawn_pipeline_sidecar_warmup(
                 invoker.clone(),
-                Arc::new(compiled),
+                compiled,
                 enabled_manifests.clone(),
             );
         }

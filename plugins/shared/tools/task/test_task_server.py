@@ -40,8 +40,8 @@ _server_mod = importlib.util.module_from_spec(_spec)
 sys.modules["task_manage_server_plugin_test"] = _server_mod
 _spec.loader.exec_module(_server_mod)
 
-import tool as _task_mod  # noqa: E402
 import task_manage_server_plugin_test as _srv  # noqa: E402
+import tool as _task_mod  # noqa: E402
 
 pytestmark = pytest.mark.unit
 

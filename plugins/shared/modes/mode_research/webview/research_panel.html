@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>调研台</title>
+  <title>研究台</title>
   <style>
     /* 主题 token：宿主下行桥 theme.sync 逐键落 --ag-*（documentElement 内联样式
        优先级高于 ：root），现值兜底；--bg 等本地别名引用 token，全页跟随宿主主题。 */
@@ -84,6 +84,13 @@
     }
     .main-head .title { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #wordCount { color: var(--muted); font-size: 11px; flex: none; }
+    .srcbadge {
+      flex: none; font-size: 10px; color: var(--muted); border: 1px solid var(--border);
+      border-radius: 999px; padding: 1px 8px;
+    }
+    .srcbadge.file { color: var(--ok); border-color: var(--ok); }
+    .rlink { color: var(--accent); cursor: pointer; word-break: break-all; }
+    .rlink:hover { text-decoration: underline; }
     .main-body { flex: 1; overflow-y: auto; padding: 12px 14px; }
     /* 报告正文（Perplexity 式阅读密度）：行距 1.7 + 引用角标 accent 底色高亮 */
     .prose { line-height: 1.7; white-space: pre-wrap; }
@@ -135,23 +142,23 @@
 </head>
 <body>
   <header>
-    <h1>🔎 调研台</h1>
+    <h1>🔎 研究台</h1>
     <span id="modeName"></span>
     <span class="spacer"></span>
     <span id="status"></span>
     <button class="secondary" onclick="refreshAll()">刷新</button>
   </header>
   <div class="layout">
-    <aside class="drawer" aria-label="调研任务">
-      <h2>调研任务</h2>
+    <aside class="drawer" aria-label="研究任务">
+      <h2>研究任务</h2>
       <div class="newform">
-        <textarea id="question" rows="3" placeholder="输入调研问题，例如：边缘部署下大模型量化方案的取舍……"></textarea>
+        <textarea id="question" rows="3" placeholder="输入研究问题，例如：边缘部署下大模型量化方案的取舍……"></textarea>
         <div class="formrow">
           <select id="depth">
             <option value="quick">快速档 · 单轮聚焦</option>
             <option value="deep">深度档 · 多轮核验长报告</option>
           </select>
-          <button onclick="startResearch()">发起调研</button>
+          <button onclick="startResearch()">发起研究</button>
         </div>
       </div>
       <div class="list" id="sessions"></div>
@@ -160,6 +167,8 @@
       <div class="main-head">
         <span class="title" id="mainTitle">报告阅读器</span>
         <span id="wordCount"></span>
+        <span id="srcBadge"></span>
+        <button class="secondary" onclick="copyReport()">复制全文</button>
         <button class="secondary" onclick="reloadReport()">刷新报告</button>
       </div>
       <div class="main-body" id="mainBody"></div>
@@ -300,7 +309,7 @@
       .catch(function (e) { setStatus('加载失败'); toast(String(e), true); });
   }
 
-  // ── 左栏：调研任务 ──
+  // ── 左栏：研究任务 ──
   function renderSessions() {
     var el = $('sessions');
     if (state.errors.sessions) {
@@ -308,7 +317,7 @@
       return;
     }
     if (!state.sessions.length) {
-      el.innerHTML = emptyBox('暂无调研任务', '在上方表单输入问题点「发起调研」');
+      el.innerHTML = emptyBox('暂无研究任务', '在上方表单输入问题点「发起研究」');
       return;
     }
     el.innerHTML = state.sessions.map(function (s) {
@@ -330,7 +339,7 @@
   }
   function startResearch() {
     var q = ($('question').value || '').trim();
-    if (!q) { toast('先输入调研问题', true); return; }
+    if (!q) { toast('先输入研究问题', true); return; }
     var depth = $('depth').value;
     setStatus('派发中...');
     agentosFetch('/ext/mode_research/data/actions/start', {
@@ -342,7 +351,7 @@
         setStatus('');
         if (d.error) { toast('发起失败：' + d.error, true); return; }
         $('question').value = '';
-        toast('已派发调研任务 ' + (d.task_id || '').slice(0, 10) + '，完成后在「调研任务」查看报告');
+        toast('已派发研究任务 ' + (d.task_id || '').slice(0, 10) + '，完成后在「研究任务」查看报告');
         loadSessions();
       })
       .catch(function (e) { setStatus(''); toast('发起失败：' + e, true); });
@@ -365,22 +374,27 @@
     if (!state.activeSession) {
       $('mainTitle').textContent = '报告阅读器';
       $('wordCount').textContent = '';
-      el.innerHTML = emptyBox('从左侧「调研任务」选择一条，或发起新调研', '对标调研工作台：任务 / 报告 / 信源三面');
+      $('srcBadge').textContent = '';
+      el.innerHTML = emptyBox('从左侧「研究任务」选择一条，或发起新研究', '任务 / 报告 / 信源三面');
       return;
     }
     $('mainTitle').textContent = '报告 · ' + ((s && s.goal) || state.activeSession);
     var r = state.report || {};
     $('wordCount').textContent = r.report ? ('字数 ' + r.word_count) : '';
+    var badge = $('srcBadge');
+    badge.textContent = r.source === 'file' ? '交付文件' : (r.source === 'message' ? '对话消息' : '');
+    badge.className = 'srcbadge' + (r.source === 'file' ? ' file' : '');
+    badge.title = r.report_path ? ('来源：' + r.report_path) : '';
     if (state.errors.report) {
       el.innerHTML = renderProcess() + bridgeErrorBox(state.errors.report);
       return;
     }
     if (!r.report) {
-      el.innerHTML = renderProcess() + emptyBox('该会话还没有调研报告', '等待较长的 assistant 输出收敛后点「刷新报告」');
+      el.innerHTML = renderProcess() + emptyBox('该会话还没有研究报告', '等待任务完成收敛后点「刷新报告」');
       return;
     }
-    // [n] 引用角标高亮（先整体转义再替换，角标内只有数字）
-    var body = escapeHtml(r.report).replace(/\[(\d{1,3})\]/g, function (m, n) {
+    // 先转义 → 正文 URL 可点（外链新窗）→ [n] 角标高亮（角标内只有数字）
+    var body = linkifyUrls(escapeHtml(r.report)).replace(/\[(\d{1,3})\]/g, function (m, n) {
       return '<span class="cite" title="信源 ' + n + '">[' + n + ']</span>';
     });
     var cites = (r.citations_found || []).length;
@@ -389,13 +403,47 @@
       (cites ? '<div class="kbnote">正文引用角标 ' + cites + ' 处，对应信源见右栏「信源库」</div>' : '');
   }
   function reloadReport() {
-    if (!state.activeSession) { toast('先在左侧选择一个调研任务', true); return; }
+    if (!state.activeSession) { toast('先在左侧选择一个研究任务', true); return; }
     loadReport();
     loadProcess();
   }
+  // 复制全文：clipboard API 优先，execCommand 兜底（沙箱 iframe 权限策略不定）
+  function copyText(text, okMsg) {
+    function fallbackCopy() {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      var done = false;
+      try { done = document.execCommand('copy'); } catch (e) { done = false; }
+      document.body.removeChild(ta);
+      toast(done ? okMsg : '复制失败（沙箱剪贴板不可用）', !done);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { toast(okMsg); }, fallbackCopy);
+    } else {
+      fallbackCopy();
+    }
+  }
+  function copyReport() {
+    var text = (state.report || {}).report || '';
+    if (!text) { toast('当前没有可复制的报告', true); return; }
+    copyText(text, '已复制全文');
+  }
+  // 正文 URL 可交互（双盲链缓解）：面板沙箱禁 href 导航（CSP 契约测试钉死，
+  // roleplay 导出同禁令先例）——点击复制链接，真跳转待宿主 openExternal 桥。
+  function linkifyUrls(escaped) {
+    return escaped.replace(/https?:\/\/[^\s，。、；！？：（）【】《》「」『』…—·]+/g, function (u) {
+      var trail = '';
+      u = u.replace(/[）〉】」』.,;:!?\]]+$/, function (t) { trail = t; return ''; });
+      return '<span class="rlink" data-url="' + u + '" title="点击复制链接">' + u + '</span>' + trail;
+    });
+  }
   // ── 写动作：送入对话框追问（task_submit 真派发，回答流进对话框线程）──
   function sendFollowup() {
-    if (!state.activeSession) { toast('先在左侧选择一个调研任务', true); return; }
+    if (!state.activeSession) { toast('先在左侧选择一个研究任务', true); return; }
     var q = ($('followupQ').value || '').trim();
     if (!q) { toast('先输入追问内容', true); return; }
     setStatus('派发中...');
@@ -420,8 +468,9 @@
       return;
     }
     var html = links.map(function (linkText, i) {
+      var u = escapeHtml(linkText);
       return '<div class="source"><span class="sidx">[' + (i + 1) + ']</span>' +
-        '<span class="stext">' + escapeHtml(linkText) + '</span></div>';
+        '<span class="stext"><span class="rlink" data-url="' + u + '" title="点击复制链接">' + u + '</span></span></div>';
     }).join('');
     el.innerHTML = html + state.kbHtml;
   }
@@ -452,6 +501,14 @@
   }
 
   // ── 入口 ──
+  // URL 点击复制（事件委托）：面板内真跳转待宿主 openExternal 桥（挂账）
+  document.body.addEventListener('click', function (e) {
+    var t = e.target;
+    if (t && t.classList && t.classList.contains('rlink')) {
+      var u = t.getAttribute('data-url');
+      if (u) copyText(u, '链接已复制，可在浏览器打开');
+    }
+  });
   renderReport();
   renderSessions();
   renderSourceLinks([]);

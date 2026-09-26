@@ -36,6 +36,7 @@ import {
   ensureFreshToken,
   startAutoRefresh,
   stopAutoRefresh,
+  loadMirroredAuthSession,
 } from '@/services/auth/tokenLifecycle'
 
 const BASE_TIME = new Date('2026-01-01T00:00:00Z').getTime()
@@ -357,5 +358,32 @@ describe('tokenLifecycle: ensureFreshToken（用前保证新鲜）', () => {
     vi.advanceTimersByTime(2_000)
     mockApiRefreshToken.mockRejectedValue(new Error('Network Error'))
     await expect(ensureFreshToken()).resolves.toBeNull()
+  })
+})
+
+describe('tokenLifecycle: 主进程镜像回读 (loadMirroredAuthSession)', () => {
+  afterEach(() => {
+    delete (window as unknown as { electronAPI?: unknown }).electronAPI
+  })
+
+  it('镜像持有会话 → 返回 refresh token 原文', async () => {
+    ;(window as unknown as { electronAPI: unknown }).electronAPI = {
+      authSession: { load: vi.fn().mockResolvedValue('rt-from-mirror') },
+    }
+    await expect(loadMirroredAuthSession()).resolves.toBe('rt-from-mirror')
+  })
+
+  it('镜像返回非字符串（无会话/接口缺席）→ null', async () => {
+    ;(window as unknown as { electronAPI: unknown }).electronAPI = {
+      authSession: { load: vi.fn().mockResolvedValue(undefined) },
+    }
+    await expect(loadMirroredAuthSession()).resolves.toBeNull()
+  })
+
+  it('镜像读取抛错（桥故障）→ 吞错返回 null 不外泄异常', async () => {
+    ;(window as unknown as { electronAPI: unknown }).electronAPI = {
+      authSession: { load: vi.fn().mockRejectedValue(new Error('bridge down')) },
+    }
+    await expect(loadMirroredAuthSession()).resolves.toBeNull()
   })
 })

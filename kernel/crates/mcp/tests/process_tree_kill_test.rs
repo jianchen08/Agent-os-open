@@ -99,9 +99,8 @@ async fn kill_terminates_whole_process_tree() {
     let script = format!(
         "import subprocess, sys, time\n\
          g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])\n\
-         open({pid_file:?}, 'w').write(str(g.pid))\n\
+         open({pid_file_str:?}, 'w').write(str(g.pid))\n\
          time.sleep(300)\n",
-        pid_file = pid_file_str,
     );
 
     let mut client = McpClient::new_stdio(python_exe(), vec!["-c".into(), script]);

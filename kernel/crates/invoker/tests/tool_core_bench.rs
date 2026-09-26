@@ -414,8 +414,7 @@ async fn bench_sidecar_channel() {
     let cold_ms = cold_start.elapsed().as_secs_f64() * 1000.0;
     if let Err(e) = first {
         eprintln!(
-            "SKIP bench_sidecar_channel: sidecar spawn/invoke 失败（python 或依赖缺失?）: {:?}",
-            e
+            "SKIP bench_sidecar_channel: sidecar spawn/invoke 失败（python 或依赖缺失?）: {e:?}"
         );
         return;
     }

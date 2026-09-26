@@ -357,7 +357,7 @@ impl ConfigCenter {
                     &abs_path.to_string_lossy(),
                     ConfigEventType::ManualReload,
                     &config_type,
-                    &format!("IO error: {}", e),
+                    &format!("IO error: {e}"),
                 );
             }
         };
@@ -375,7 +375,7 @@ impl ConfigCenter {
                     &abs_path.to_string_lossy(),
                     ConfigEventType::ManualReload,
                     &config_type,
-                    &format!("YAML parse error: {}", e),
+                    &format!("YAML parse error: {e}"),
                 );
             }
         };
@@ -545,7 +545,7 @@ impl ConfigCenter {
                                     config_type: config_type.clone(),
                                     success: false,
                                     rolled_back: cache.read().contains_key(&path_str),
-                                    error: Some(format!("IO error: {}", e)),
+                                    error: Some(format!("IO error: {e}")),
                                     timestamp: chrono::Utc::now().to_rfc3339(),
                                     content_hash: String::new(),
                                 });
@@ -576,7 +576,7 @@ impl ConfigCenter {
                             }) {
                             Ok(v) => v,
                             Err(e) => {
-                                let error_msg = format!("YAML parse error: {}", e);
+                                let error_msg = format!("YAML parse error: {e}");
                                 warn!("Config load failed: {} | {}", path_str, error_msg);
                                 let rolled_back = {
                                     let c = cache.read();
@@ -639,13 +639,13 @@ impl ConfigCenter {
             Config::default(),
         )
         .map_err(|e| ConfigError::Io {
-            message: format!("notify init error: {}", e),
+            message: format!("notify init error: {e}"),
         })?;
 
         watcher
             .watch(&self.config_root, RecursiveMode::Recursive)
             .map_err(|e| ConfigError::Io {
-                message: format!("notify watch error: {}", e),
+                message: format!("notify watch error: {e}"),
             })?;
 
         info!(

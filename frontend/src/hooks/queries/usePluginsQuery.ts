@@ -27,6 +27,9 @@ export interface PluginStatus {
   config_files: Array<{ id: string; label: string; path: string }>
   has_contributes: boolean
   has_http_endpoints: boolean
+  /** 准入分级（2026-09-25）：被剥除的危险前端能力（host_js/host_css），
+   *  非空 = 设置页显示"已限制"（未授予即注册面剥除，禁静默） */
+  restricted_capabilities?: string[]
   error: string | null
 }
 

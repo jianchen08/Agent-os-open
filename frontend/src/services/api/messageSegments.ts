@@ -1,8 +1,8 @@
 /** 消息段 API 服务（消息段模型：多代切换与压缩原文，方案 §5 读路径）
  *  [来源: docs/working/消息历史双能力方案_多代切换与压缩原文_20260923.md] */
 
-import apiClient from '@/services/api/client'
 import { API_ENDPOINTS } from '@/constants/api'
+import apiClient from '@/services/api/client'
 import type { BackendMessageResponse } from '@/services/api/session'
 
 const SEGMENTS_OF_PIPELINE = (pipelineId: string) =>

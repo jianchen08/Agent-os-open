@@ -118,7 +118,17 @@ _THINKING_STRENGTH_ALLOWED = {"reasoning_effort", "thinking"}
 # reasoning_content 不入此名单——provider 适配层（adapt_messages_before_send）
 # 的采样保留策略在下游消费它（DeepSeek rc 采样）。
 _OUTBOUND_INTERNAL_FIELDS = frozenset(
-    {"seq", "tool_result", "_context_form", "metadata", "status", "llm_error_info"}
+    {
+        "seq",
+        "tool_result",
+        "_context_form",
+        "metadata",
+        "status",
+        "llm_error_info",
+        # 消息执行身份戳记（气泡卡名/卡头像数据源）：持久化态与读侧透传用，
+        # 不属于任何 provider wire 契约——不剥离会被严格 provider 整请求拒绝。
+        "agent_id",
+    }
 )
 
 
@@ -449,7 +459,12 @@ class LLMCore(ICorePlugin):
             llm_usage = self._build_usage(response)
             self._log_success(ctx, response, streaming=streaming)
 
-            appended_msg = self._build_assistant_message(result_text, tool_calls, thinking_text)
+            # 执行身份戳记：state 持久键 agent.id（出生方经 state 透传，
+            # context_build 同键消费）——空会话/未透传时为空串，消息不戳记。
+            agent_id_stamp = str(ctx.state.get("agent.id", "") or "")
+            appended_msg = self._build_assistant_message(
+                result_text, tool_calls, thinking_text, agent_id=agent_id_stamp or None
+            )
 
             # 仅当产出了 assistant 消息才 emit append op（无文本/无工具调用时不追加）。
             messages_update = (
@@ -579,6 +594,7 @@ class LLMCore(ICorePlugin):
         result_text: str | None,
         tool_calls: list[dict[str, Any]],
         thinking_text: str | None,
+        agent_id: str | None = None,
     ) -> dict[str, Any] | None:
         """构造本轮 assistant 回复消息（append 到 messages）。
 
@@ -586,6 +602,10 @@ class LLMCore(ICorePlugin):
         由引擎 apply 到 state["messages"] + message_slots(不再返回全量 history)。
         统一保留 reasoning_content 到内存（不管 provider）：发送给 API 时由
         ProviderAdapter 按 provider 决定是否剥离。
+
+        执行身份戳记契约：``agent_id`` = 消息生成时的管道执行身份（state 持久键
+        ``agent.id``），随消息 blob 持久化并透传到前端——气泡卡名/卡头像的数据源。
+        空则不写字段（缺省不污染；出站请求经 _OUTBOUND_INTERNAL_FIELDS 剥离）。
 
         Returns:
             assistant 消息 dict；无文本且无工具调用时返回 None
@@ -610,11 +630,15 @@ class LLMCore(ICorePlugin):
             }
             if thinking_text:
                 assistant_msg["reasoning_content"] = thinking_text
+            if agent_id:
+                assistant_msg["agent_id"] = agent_id
             return assistant_msg
         if result_text:
             plain_msg: dict[str, Any] = {"role": "assistant", "content": result_text}
             if thinking_text:
                 plain_msg["reasoning_content"] = thinking_text
+            if agent_id:
+                plain_msg["agent_id"] = agent_id
             return plain_msg
         return None
 
@@ -958,7 +982,8 @@ class LLMCore(ICorePlugin):
             # 2026-09-03）：seq 槽位号；tool_result 持久化信封；_context_form
             # 语义标记；metadata（内核 client_message_id 幂等键等 UI 对账数据，
             # router.rs ADR-2026-08-21）；status/llm_error_info（轮次终态与
-            # 错误信息，前端消费）。reasoning_content 不剥——provider 适配层
+            # 错误信息，前端消费）；agent_id（消息执行身份戳记，前端气泡
+            # 卡名/卡头像数据源）。reasoning_content 不剥——provider 适配层
             # 的采样保留策略在下游消费它。
             if any(k in m for k in _OUTBOUND_INTERNAL_FIELDS):
                 m = {k: v for k, v in m.items() if k not in _OUTBOUND_INTERNAL_FIELDS}  # noqa: PLW2901

@@ -48,7 +48,7 @@ _BINARY_SNIFF_BYTES = 64 * 1024
 _BINARY_SCAN_BYTES = 4 * 1024 * 1024
 
 
-def _binary_contains(file_path: Path, pattern: "re.Pattern[str]") -> bool:
+def _binary_contains(file_path: Path, pattern: re.Pattern[str]) -> bool:
     """二进制文件按字节扫描命中（latin-1 映射保字节，预算内读取）。"""
     try:
         with file_path.open("rb") as fh:

@@ -9,6 +9,7 @@
 
 import { resolveChatCardIcon } from './chatCardIconRegistry'
 import { interpretChatCard, getChatCardDeclaration, isSafeOpenUrl, type ToolCallContext } from './chatCardInterpreter'
+import { buildOutputSchemaView, getOutputSchema } from './outputSchemaView'
 import {
   applyDataDrivenIntent,
   applyRenderIntent,
@@ -18,7 +19,6 @@ import {
   getRenderIntent,
   inferRenderIntent,
 } from './renderIntent'
-import { buildOutputSchemaView, getOutputSchema } from './outputSchemaView'
 import type { ActivityData, ActivityDetailBlock } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
 

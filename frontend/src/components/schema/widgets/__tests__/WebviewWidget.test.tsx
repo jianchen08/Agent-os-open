@@ -19,6 +19,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { apiClient } from '@/services/api/client'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 // ── Mock 外部依赖 ──
 vi.mock('@/services/api/client', () => ({
   apiClient: {
@@ -45,8 +46,26 @@ describe('WebviewWidget — 上行消息路由', () => {
     vi.clearAllMocks()
     // 默认 HTML 加载成功（保证 iframe 挂载 + handler 注册）
     apiGet.mockResolvedValue({ data: '<html><body></body></html>' })
+    // 命令白名单（2026-09-25 桥统一）：demo.ping/demo.fail = demo 插件贡献的命令
+    contributionRegistry.registerPage({
+      type: 'pages',
+      id: 'demo.ping',
+      space: 'chat',
+      pluginId: 'demo',
+      legacyFrom: 'commands',
+    })
+    contributionRegistry.registerPage({
+      type: 'pages',
+      id: 'demo.fail',
+      space: 'chat',
+      pluginId: 'demo',
+      legacyFrom: 'commands',
+    })
   })
-  afterEach(() => vi.clearAllMocks())
+  afterEach(() => {
+    vi.clearAllMocks()
+    contributionRegistry.clear()
+  })
 
   it('AC-1: action 方法 → POST /api/v1/actions/execute { action, args }', async () => {
     apiPost.mockResolvedValue({ data: { ok: true } })
@@ -143,6 +162,73 @@ describe('WebviewWidget — 上行消息路由', () => {
     await new Promise((r) => setTimeout(r, 50))
     expect(apiPost).not.toHaveBeenCalled()
     expect(apiPost).toHaveBeenCalledTimes(0)
+  })
+
+  it('AC-9: 未登记命令 → error 下行"不在命令白名单"，不进 EXECUTE（2026-09-25 桥统一）', async () => {
+    render(<WebviewWidget pluginId="demo" widgetId="w1" />)
+
+    await waitFor(() => expect(screen.getByTitle('Webview')).toBeInTheDocument())
+    const iframe = screen.getByTitle('Webview') as HTMLIFrameElement
+    const downSpy = vi.spyOn(iframe.contentWindow!, 'postMessage')
+
+    postUp('demo.unknown_cmd', { x: 1 })
+
+    await waitFor(() => {
+      const msg = findDownMessage(downSpy, 'demo.unknown_cmd.error')
+      expect(msg).toBeDefined()
+      const m = msg as { params?: { message?: string } } | undefined
+      expect(String(m?.params?.message ?? '')).toContain('不在命令白名单')
+    })
+    expect(apiPost).not.toHaveBeenCalledWith('/api/v1/actions/execute', expect.anything())
+    expect(apiPost).toHaveBeenCalledTimes(0)
+  })
+
+  it('AC-10: 他插件贡献的命令 → 拒绝（跨插件命令面封死）', async () => {
+    contributionRegistry.registerPage({
+      type: 'pages',
+      id: 'other_app.cmd',
+      space: 'chat',
+      pluginId: 'other_app',
+      legacyFrom: 'commands',
+    })
+    render(<WebviewWidget pluginId="demo" widgetId="w1" />)
+
+    await waitFor(() => expect(screen.getByTitle('Webview')).toBeInTheDocument())
+    const iframe = screen.getByTitle('Webview') as HTMLIFrameElement
+    const downSpy = vi.spyOn(iframe.contentWindow!, 'postMessage')
+
+    postUp('other_app.cmd', { y: 2 })
+
+    await waitFor(() => {
+      const msg = findDownMessage(downSpy, 'other_app.cmd.error')
+      expect(msg).toBeDefined()
+      const m = msg as { params?: { message?: string } } | undefined
+      expect(String(m?.params?.message ?? '')).toContain('不在命令白名单')
+    })
+    expect(apiPost).toHaveBeenCalledTimes(0)
+  })
+
+  it('AC-11: 本插件贡献的命令 → 放行进 EXECUTE（白名单正例）', async () => {
+    apiPost.mockResolvedValue({ data: { ok: true } })
+    contributionRegistry.registerPage({
+      type: 'pages',
+      id: 'demo.run_report',
+      space: 'chat',
+      pluginId: 'demo',
+      legacyFrom: 'commands',
+    })
+    render(<WebviewWidget pluginId="demo" widgetId="w1" />)
+
+    await waitFor(() => expect(screen.getByTitle('Webview')).toBeInTheDocument())
+
+    postUp('demo.run_report', { id: 7 })
+
+    await waitFor(() => {
+      expect(apiPost).toHaveBeenCalledWith('/api/v1/actions/execute', {
+        action: 'demo.run_report',
+        args: { id: 7 },
+      })
+    })
   })
 
   it('AC-4: action 成功响应 → iframe 收到 method.result 下行（id 对应）', async () => {

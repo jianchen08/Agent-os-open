@@ -19,8 +19,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { ChevronDown, ChevronUp, FolderTree, Search } from '@/assets/icons'
 import { Input } from '@/components/ui/input'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import type { PageDeclaration, PageSpace } from '@/services/schema/ContributionRegistry'
 import { openPluginPage } from '@/services/workspacePanelOpener'
+import type { PageDeclaration, PageSpace } from '@/services/schema/ContributionRegistry'
 
 /** 一级直属空间分组（大卡片、不折叠，按表序渲染在活动栏组之后） */
 const PRIMARY_SPACE_GROUPS: ReadonlyArray<{ space: PageSpace; label: string }> = [

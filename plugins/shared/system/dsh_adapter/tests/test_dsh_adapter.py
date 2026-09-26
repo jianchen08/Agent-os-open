@@ -14,8 +14,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import re
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -27,7 +27,6 @@ sys.path.insert(0, str(PLUGIN_DIR))
 from bridge import DshRuntimeBridge  # noqa: E402
 from translator import (  # noqa: E402
     DSH_SOURCE_COMMIT,
-    skins_to_plugin_themes,
     DSH_SOURCE_VERSION,
     discover_dsh_plugins,
     dsh_params_to_json_schema,
@@ -35,6 +34,7 @@ from translator import (  # noqa: E402
     load_installed_plugins,
     load_plugin_config,
     map_dsh_slot,
+    skins_to_plugin_themes,
     to_lingxi_tool_entry,
     translate_hooks_config,
     translate_package,

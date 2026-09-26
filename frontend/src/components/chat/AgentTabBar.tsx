@@ -6,15 +6,15 @@
  */
 
 import { useCallback, useRef } from 'react'
-import { cn } from '@/lib/utils'
+import { Plus } from '@/assets/icons'
 import {
   BAND_BUTTON_ICON_CLASS,
   BAND_BUTTON_IDLE_CLASS,
   BAND_GAP_CLASS,
   BAND_ICON_BUTTON_CLASS,
 } from '@/components/layout/bandButton'
-import { Plus } from '@/assets/icons'
 import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
+import { cn } from '@/lib/utils'
 import { AgentTabItem } from './AgentTabItem'
 import type { AgentTabStatus } from '@/types/task'
 

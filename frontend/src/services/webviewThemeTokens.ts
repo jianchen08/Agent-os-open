@@ -4,7 +4,7 @@
  * 独立模块：themeService 为冻结巨型文件只许缩小不许增长（any 棘轮门禁），
  * 面板融合新增面落此处。
  */
-import { colorToRgb } from './themeService'
+import { colorToRgb } from './themeValuePolicy'
 import type { ThemeConfig } from '@/types/theme'
 
 /**

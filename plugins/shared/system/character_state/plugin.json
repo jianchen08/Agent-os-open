@@ -1,0 +1,251 @@
+{
+  "id": "character_state",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Character State",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [],
+    "services": [
+      {
+        "name": "character_state.init",
+        "description": "初始化角色状态账本（幂等：已存在则不覆盖，返回现状）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "card_id": {
+              "type": "string",
+              "description": "角色卡 ID（状态命名空间）"
+            },
+            "schema": {
+              "type": "object",
+              "description": "状态 schema：key → {type: number|string|bool, initial, template}（条目形态借鉴表格记忆）",
+              "additionalProperties": {
+                "type": "object"
+              }
+            }
+          },
+          "required": [
+            "card_id",
+            "schema"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "card_id",
+            "created",
+            "schema",
+            "values"
+          ],
+          "properties": {
+            "card_id": {
+              "type": "string"
+            },
+            "created": {
+              "type": "boolean",
+              "description": "true=本次新建；false=已存在返回现状"
+            },
+            "schema": {
+              "type": "object"
+            },
+            "values": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      {
+        "name": "character_state.get",
+        "description": "读取角色当前状态值与 schema",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "card_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "card_id"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "card_id",
+            "schema",
+            "values"
+          ],
+          "properties": {
+            "card_id": {
+              "type": "string"
+            },
+            "schema": {
+              "type": "object"
+            },
+            "values": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      {
+        "name": "character_state.update",
+        "description": "更新状态值（key 须在 schema 且类型匹配），写 values 并追加 history（含 from/to）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "card_id": {
+              "type": "string"
+            },
+            "changes": {
+              "type": "object",
+              "description": "key → 新值（非空；未知 key 或类型不符报错）",
+              "additionalProperties": {}
+            }
+          },
+          "required": [
+            "card_id",
+            "changes"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "card_id",
+            "values"
+          ],
+          "properties": {
+            "card_id": {
+              "type": "string"
+            },
+            "values": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      {
+        "name": "character_state.history",
+        "description": "查询最近 N 条变更历史（seq 升序尾部）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "card_id": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 1,
+              "description": "返回条数上限"
+            }
+          },
+          "required": [
+            "card_id"
+          ]
+        },
+        "output_schema": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "name": "character_state.rollback",
+        "description": "回滚到指定 seq 后的 values 快照；history 保留并追加 rollback 记录",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "card_id": {
+              "type": "string"
+            },
+            "seq": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "目标历史序号（恢复到该条记录生效后的状态）"
+            }
+          },
+          "required": [
+            "card_id",
+            "seq"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "card_id",
+            "values"
+          ],
+          "properties": {
+            "card_id": {
+              "type": "string"
+            },
+            "values": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      {
+        "name": "character_state.render",
+        "description": "按 schema.template 渲染状态文本块（表现层投影）；未初始化返回空串",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "card_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "card_id"
+          ]
+        },
+        "output_schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "character_state.delete",
+        "description": "删除角色状态账本文件",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "card_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "card_id"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "card_id",
+            "deleted"
+          ],
+          "properties": {
+            "card_id": {
+              "type": "string"
+            },
+            "deleted": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 50,
+  "host_group": "light"
+}

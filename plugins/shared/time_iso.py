@@ -13,13 +13,13 @@ task_submit（拷贝漂移实证：hindsight 为 ``Z`` 后缀秒级，其余 ``+
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from typing import Any
 
 
 def now_iso_utc() -> str:
     """当前 UTC 时刻 ISO 8601（``+00:00`` 后缀微秒精度，多数派既有格式）。"""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def iso_sort_key(value: str) -> tuple[int, Any]:

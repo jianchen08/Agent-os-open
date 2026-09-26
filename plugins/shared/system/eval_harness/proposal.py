@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """提案七条静态校验（纯函数，机械执行）。
 
 提案语义（MVP）：整文件替换——content 为提案后的完整文件内容，target 为主仓
@@ -101,9 +100,8 @@ def validate(proposal: dict[str, Any], project_root: str) -> list[str]:
         current = file_sha256(abs_target)
         if base_hash and base_hash != current:
             violations.append("base: 目标文件已前移（base_hash 不符），请基于最新内容重新生成")
-    else:
-        if proposal["change_type"] != "new_plugin" and proposal.get("layer") != "L3":
-            violations.append("base: 目标文件不存在且提案非新增类")
+    elif proposal["change_type"] != "new_plugin" and proposal.get("layer") != "L3":
+        violations.append("base: 目标文件不存在且提案非新增类")
 
     # ⑥ 写面唯一：由 server 层落盘保证（staging 目录），此处校验提案未内嵌绝对路径
     if re_search_abs_path(str(proposal.get("content", ""))):

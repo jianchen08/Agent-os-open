@@ -1863,9 +1863,9 @@ class TriggerManager:
         """
 
         if dt.tzinfo is None:
-            return dt.replace(tzinfo=datetime.timezone.utc)
+            return dt.replace(tzinfo=datetime.UTC)
 
-        return dt.astimezone(datetime.timezone.utc)
+        return dt.astimezone(datetime.UTC)
 
     def _check_interval(self, trigger: TriggerConfig, now: datetime.datetime) -> bool:
         """检查周期触发器是否到期。

@@ -452,7 +452,7 @@ class WslNativeProvider(IsolationProvider):
         return self._wsl_argv(["--exec", "bash", "-c", f"kill -{signal} {pid}"])
 
     def _map_working_dir(self, working_dir: str | None) -> str:
-        """/workspace 约定路径 → 环境 workspace 的 WSL 路径。
+        r"""/workspace 约定路径 → 环境 workspace 的 WSL 路径。
 
         guard 对未显式指定 working_dir 的 bash 调用补 /workspace（容器挂载点
         约定）；wsl_native 无挂载点，映射到 workspace_wsl。其余 POSIX 路径与

@@ -19,13 +19,13 @@ _paths = bootstrap_plugin(__file__, extra=(os.path.join("system", "tasks"), "sys
 # 评估类型面（_eval_core.py）位于本目录，已由 bootstrap_plugin 的插件目录注入覆盖。
 # 跨插件共享类型走 SDK（agentos_plugin_sdk，pip 安装）。
 
-from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
-
 # 本插件 tool 模块在 exec 期绑定（不得改为 on_load 期 `import tool` 懒加载）：
 # 合宿静息态下裸名 `tool` 槽位可能是其他成员的同名模块，运行期 import 会
 # 命中异成员模块；exec 期处于宿主 loader 的裸名遮蔽保护窗口（异成员模块已
 # 摘除、自身目录在 sys.path 首位），解析结果必为本插件 tool.py。
 import tool as tool_mod  # noqa: E402
+
+from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
 plugin = AgentOSPlugin("task_evaluate_tool")
 

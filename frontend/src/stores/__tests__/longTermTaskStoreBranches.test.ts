@@ -7,11 +7,11 @@
  * activeTaskId 状态、抛出的 Error 消息；mock 仅落在网络层（longTermTasks API）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { readLongTermTasks } from '@/hooks/queries/useLongTermTasksQuery'
+import * as longTermTaskApi from '@/services/api/longTermTasks'
 import { queryClient } from '@/services/query/queryClient'
 import { queryKeys } from '@/services/query/queryKeys'
-import { readLongTermTasks } from '@/hooks/queries/useLongTermTasksQuery'
 import { useLongTermTaskStore } from '../longTermTaskStore'
-import * as longTermTaskApi from '@/services/api/longTermTasks'
 import type { Task } from '@/types/task'
 
 vi.mock('@/services/api/longTermTasks', () => ({

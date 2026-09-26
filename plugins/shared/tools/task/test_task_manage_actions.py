@@ -69,7 +69,7 @@ def _ensure_plugin_paths():
             sys.modules[n] = m
 
 
-@pytest.fixture()
+@pytest.fixture
 def svc(tmp_path: Path) -> Any:
     """真实 TaskService（tmp 数据目录，每用例隔离）。"""
     from service import TaskService
@@ -77,7 +77,7 @@ def svc(tmp_path: Path) -> Any:
     return TaskService(data_dir=str(tmp_path))
 
 
-@pytest.fixture()
+@pytest.fixture
 def tool(svc: Any) -> TaskTool:
     t = TaskTool()
     t._task_service = svc

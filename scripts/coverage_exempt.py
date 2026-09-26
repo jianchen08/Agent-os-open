@@ -50,6 +50,9 @@ BASE_TEST_PATHS: list[str] = [
     # context_build 双根自举/sidecar 复用测试（2026-09-18 登记：目录内 7 用例
     # 此前不在基集，plugin.py sys.path 守卫缺行失真——覆盖率批十修正）。
     "plugins/shared/pipeline/input/context_build/",
+    # 模式物料通用步骤测试（2026-09-24 架构重构：自 context_build 抽出为独立
+    # 管道插件，原 tests/test_context_build_mode_material.py 断言随迁目录内）。
+    "plugins/shared/pipeline/input/mode_material_inject/",
     "plugins/shared/pipeline/input/environment_lifecycle/",
     "plugins/shared/pipeline/input/level_guard/",
     "plugins/shared/pipeline/input/multimodal_preprocessor/",
@@ -100,11 +103,10 @@ BASE_TEST_PATHS: list[str] = [
     "plugins/shared/tools/triggers_ext/",
     # 2026-08-25 批次E：散落测试全绿接入插桩车道（本地全车道共跑 2371 全绿后纳入）。
     # tests/suites（含 core/task 等平铺 import 套件，task_types 独占模块双实例
-    # 根因已修：根 conftest 逐出名单去独占名 + 运行期路径守卫）、connectors（0.2
-    # 连接器平铺 import）、unit（含 channel_migration 六通道插件契约）、monitoring
-    # （0.2 监控模块）、multimodal（storage 槽位收敛）、顶层任务契约与权限测试。
+    # 根因已修：根 conftest 逐出名单去独占名 + 运行期路径守卫）、unit（含
+    # channel_migration 六通道插件契约）、monitoring（0.2 监控模块）、multimodal
+    # （storage 槽位收敛）、顶层任务契约与权限测试。
     "tests/suites/",
-    "tests/connectors/",
     "tests/unit/",
     "tests/monitoring/",
     "tests/multimodal/",
@@ -140,7 +142,6 @@ BASE_TEST_PATHS: list[str] = [
     "plugins/shared/pipeline/output/tool_cache_writer/",
     "plugins/shared/system/agent_manager/",
     "plugins/shared/system/approval/",
-    "plugins/shared/system/connectors/",
     # evaluation 读面/执行面行为测试（2026-08-26 A5.3 P0 批：server.py 50%→93%）
     "plugins/shared/system/evaluation/",
     "plugins/shared/system/isolation/",
@@ -178,7 +179,7 @@ BASE_TEST_PATHS: list[str] = [
     "tests/test_context_build_dynamic_vars.py",
     "tests/test_context_build_runtime_params.py",
     "tests/test_duplicate_check_merge.py",
-    "tests/test_godot_context_plugin.py",
+    "tests/test_host_context_plugin.py",
     "tests/test_host_mode_security.py",
     "tests/test_isolation_docker_recheck.py",
     "tests/test_isolation_io_error.py",
@@ -215,9 +216,6 @@ BASE_TEST_PATHS: list[str] = [
     # 缓存失效/非 dict yaml/priority/血缘投影/static_vars 装载/层级覆盖），
     # 缺此条目则新文件不进插桩车道、plugin.py 覆盖率失真。
     "tests/test_context_build_gaps.py",
-    # 2026-09-15 模式体系 P2：context_build 模式物料档注入（设计稿 §3.3②/
-    # §4.1/§4.2）行为测试，缺此条目则 mode_material.py 不进插桩车道、覆盖率失真。
-    "tests/test_context_build_mode_material.py",
     # 2026-09-15 模式体系 P3：mode 键两级解析第二级（§3.3 系统注册表未命中 →
     # 模式包 agents/<stem>.yaml）装配测试，缺此条目则 plugin.py 模式分支
     # 不进插桩车道、改动行覆盖率失真。

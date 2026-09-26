@@ -14,7 +14,6 @@ IP 字面量不依赖 DNS 环境即可验证内网拒绝：
 from __future__ import annotations
 
 import pytest
-
 from web_ext.tool import WebTool
 
 pytestmark = pytest.mark.unit

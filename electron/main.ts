@@ -353,13 +353,16 @@ function loadInitialContent(win: BrowserWindow): void {
  * 拉起打包件内核（只 spawn 包内内核，见 kernel-manager）并在健康就绪后载入前端。
  * 失败（安装损坏/启动失败/就绪超时）一律显式错误对话框 + 退出，不静默白屏。
  */
-async function bootPackagedKernelThenLoad(win: BrowserWindow): Promise<void> {
+export async function bootPackagedKernelThenLoad(win: BrowserWindow): Promise<void> {
   try {
     const result = await ensurePackagedKernelRunning({
       resourcesPath: process.resourcesPath,
       // token 签名密钥持久化（userData 每安装身份一份）：刷新令牌跨重启有效，
       // 否则内核每进程随机签名，用户每次打开应用都要重新登录
       userDataDir: app.getPath("userData"),
+      // 库位置钉用户根（BUG-85）：装机默认库=<appData>/agentos/agentos_kernel.db，
+      // 安装目录不再落库，静默卸载不再删用户数据
+      appDataDir: app.getPath("appData"),
     });
     console.info(`[Electron] 内核就绪（已拉起打包内核 pid=${result.pid ?? "?"}），加载前端`);
   } catch (err) {

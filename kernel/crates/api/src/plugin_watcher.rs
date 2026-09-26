@@ -660,7 +660,7 @@ fn deterministic_json(v: &serde_json::Value) -> String {
                 .map(|k| format!("{:?}:{}", k, deterministic_json(&map[*k])))
                 .collect::<Vec<_>>()
                 .join(",");
-            format!("{{{}}}", inner)
+            format!("{{{inner}}}")
         }
         serde_json::Value::Array(arr) => {
             let inner = arr
@@ -668,7 +668,7 @@ fn deterministic_json(v: &serde_json::Value) -> String {
                 .map(deterministic_json)
                 .collect::<Vec<_>>()
                 .join(",");
-            format!("[{}]", inner)
+            format!("[{inner}]")
         }
         other => other.to_string(),
     }
@@ -1145,10 +1145,9 @@ async fn sync_reverify_changed(
                                 m,
                                 true,
                                 format!(
-                                    "G2 复验连续 {} 轮观测失败（spawn/tools-list 重试后仍失败），\
+                                    "G2 复验连续 {G2_REVERIFY_MAX_CONSECUTIVE_FAILS} 轮观测失败（spawn/tools-list 重试后仍失败），\
                                      已停止自动复验；插件工具保持从 LLM 工具面遮挡。请修复插件后\
-                                     重验：编辑插件文件自动触发，或 POST /api/v1/plugins/validate-all",
-                                    G2_REVERIFY_MAX_CONSECUTIVE_FAILS
+                                     重验：编辑插件文件自动触发，或 POST /api/v1/plugins/validate-all"
                                 ),
                             ));
                         }

@@ -10,8 +10,8 @@
  *
  * 计数口径与卡一致：优先 compression_ref.seq_range 跨度，缺省退化为「查看原始」。
  */
-import { useState } from 'react'
 import { Modal } from 'antd'
+import { useState } from 'react'
 import { toast } from 'sonner'
 import { getMessageSegmentDetail, type SegmentDetail } from '@/services/api/messageSegments'
 import { formatTimestamp } from '@/utils/format'

@@ -122,6 +122,7 @@ fn manifest_base(plugin_id: &str) -> PluginManifest {
         http_endpoints: vec![],
         ui_schema: None,
         contributes: None,
+        restricted_capabilities: Vec::new(),
         enabled: None,
         activation: None,
         persistent_fields: vec![],

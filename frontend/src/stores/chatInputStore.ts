@@ -20,8 +20,8 @@
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { TaskMode } from '@/services/schema/modeOptions'
 import { createTolerantStorage } from '@/utils/tolerantStorage'
+import type { TaskMode } from '@/services/schema/modeOptions'
 
 interface ChatInputState {
   /** 待插入的文本（ChatInput 消费后清空） */

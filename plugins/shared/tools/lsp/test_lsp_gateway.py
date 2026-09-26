@@ -75,7 +75,7 @@ class TestStaticConfig:
             assert lang in gw_mod.INSTALL_HINTS
 
     def test_install_hint_unknown(self, gw_mod: Any) -> None:
-        hint = gw_mod.INSTALL_HINTS.get("cobol", f"请安装 cobol 语言的 LSP 服务器")
+        hint = gw_mod.INSTALL_HINTS.get("cobol", "请安装 cobol 语言的 LSP 服务器")
         assert "cobol" in hint
 
 

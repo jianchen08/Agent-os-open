@@ -3,9 +3,6 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import {
   AlertCircle,
-  File as FileIcon,
-  Image as ImageIcon,
-  Loader2,
   Maximize2,
   Minimize2,
   Paperclip,
@@ -14,6 +11,7 @@ import {
   X,
 } from '@/assets/icons'
 import { DeclaredWidgetLayer } from '@/components/schema/DeclaredWidgetLayer'
+import { ContextUsageWidget } from '@/components/schema/widgets/ContextUsageWidget'
 import { Button } from '@/components/ui/button'
 import { useControlledSlotBridge } from '@/hooks/useControlledSlotBridge'
 import { useModelCapabilities } from '@/hooks/useModelCapabilities'
@@ -22,15 +20,22 @@ import { cn } from '@/lib/utils'
 import { uploadFile, validateFile } from '@/services/api/files'
 import { ErrorSeverity, ErrorType, reportError } from '@/services/errorReporting'
 import { getReferenceProviders, buildReferenceBlock, type ReferenceSelection } from '@/services/references'
+import {
+  clearSessionAgent,
+  readSessionAgent,
+  type SessionAgentBinding,
+} from '@/services/roleplayContinue'
 import { useChatInputStore } from '@/stores/chatInputStore'
+import { useRoleplayPossessStore } from '@/stores/roleplayPossessStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import {
   DEFAULT_THINKING_STRENGTH,
   STRENGTH_TO_ENABLE,
   type ThinkingStrength,
 } from '@/types/thinkingMode'
-import { formatFileSize } from '@/utils/format'
 import { ChatInputActions } from './ChatInputActions'
-import { ContextUsageWidget } from '@/components/schema/widgets/ContextUsageWidget'
+import { AttachmentPreview } from './ChatInputAttachmentPreview'
+import { ChatInputPossessChip } from './ChatInputPossessChip'
 import { VoiceInputButton } from './VoiceInputButton'
 import type { Attachment, ChatInputProps, PendingFile, SendMessageParams } from './types'
 import type { TaskMode } from '@/services/schema/modeOptions'
@@ -42,70 +47,6 @@ const formatDuration = (seconds: number): string => {
     .padStart(2, '0')
   const s = (seconds % 60).toString().padStart(2, '0')
   return `${m}:${s}`
-}
-
-/** 附件预览组件 */
-const AttachmentPreview = ({
-  attachment,
-  onRemove,
-}: {
-  attachment: Attachment | PendingFile
-  onRemove: () => void
-}) => {
-  const isPendingFile = 'file' in attachment
-  const isImage = isPendingFile
-    ? attachment.file.type.startsWith('image/')
-    : attachment.type?.startsWith('image/')
-  const status = isPendingFile ? attachment.status : (attachment as Attachment).status
-  const fileName = isPendingFile ? attachment.file.name : attachment.name
-  const fileSize = isPendingFile ? attachment.file.size : attachment.size
-  const previewUrl = isPendingFile ? attachment.previewUrl : attachment.previewUrl
-
-  return (
-    <div
-      className={cn(
-        'group relative flex items-center gap-2 rounded-xl p-2 transition-all duration-200',
-        status === 'error'
-          ? 'bg-destructive/10 border-destructive/50 border'
-          : 'bg-muted/50 border-border/30 hover:border-border/50 border hover:shadow-sm',
-      )}
-    >
-      {/* 预览图标/缩略图 */}
-      {previewUrl ? (
-        <img src={previewUrl} alt={fileName} className="h-10 w-10 rounded-lg object-cover" />
-      ) : (
-        <div className="bg-background/80 flex h-10 w-10 items-center justify-center rounded-lg">
-          {isImage ? (
-            <ImageIcon className="text-muted-foreground h-5 w-5" />
-          ) : (
-            <FileIcon className="text-muted-foreground h-5 w-5" />
-          )}
-        </div>
-      )}
-
-      {/* 文件信息 */}
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-medium">{fileName}</div>
-        <div className="text-muted-foreground text-xs">{formatFileSize(fileSize)}</div>
-      </div>
-
-      {/* 上传状态 */}
-      {status === 'uploading' && <Loader2 className="text-primary h-icon-md w-icon-md animate-spin" />}
-      {status === 'error' && <AlertCircle className="text-destructive h-icon-md w-icon-md" />}
-
-      {/* 删除按钮 */}
-      <Button
-        variant="ghost"
-        size="sm"
-        className="hover:bg-destructive/10 hover:text-destructive h-6 w-6 rounded-lg p-0 opacity-100 md:opacity-0 md:group-hover:opacity-100"
-        onClick={onRemove}
-        disabled={status === 'uploading'}
-        aria-label={`移除附件 ${fileName}`}
-      >
-        <X className="h-icon-md w-icon-md" />
-      </Button>
-    </div>
-  )
 }
 
 /** 统一的聊天输入组件 */
@@ -150,6 +91,26 @@ export const ChatInput = ({
     (m: TaskMode | null) => useChatInputStore.getState().setTaskMode(draftKey ?? '', m),
     [draftKey],
   )
+  /** 附身档（roleplay.possess 桥写入，全局态不按会话分）：null = 未附身 */
+  const possessed = useRoleplayPossessStore((s) => s.possessed)
+  /** 扮演会话绑定（roleplay.continue 桥写入会话执行选项，按活跃会话分）：null = 未绑定 */
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const [sessionAgent, setSessionAgent] = useState<SessionAgentBinding | null>(null)
+  useEffect(() => {
+    setSessionAgent(activeSessionId ? readSessionAgent(activeSessionId) : null)
+  }, [activeSessionId])
+  /** 退出扮演会话：清该会话执行选项的 agentId（发送链随之不带身份） */
+  const handleExitRoleplaySession = useCallback(() => {
+    if (!activeSessionId) return
+    try {
+      clearSessionAgent(activeSessionId)
+    } catch (e) {
+      // 本地存储不可用属环境故障：落在操作点显式提示，不静默假退出
+      setInputError(`退出扮演会话失败：${e instanceof Error ? e.message : String(e)}`)
+      return
+    }
+    setSessionAgent(null)
+  }, [activeSessionId])
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -905,6 +866,32 @@ export const ChatInput = ({
                 className="flex-row items-center"
               />
             )}
+
+        {/* 附身指示条 chip（roleplay.possess 桥）：附身档由本组件订阅传入，
+            未附身零渲染；解除与展示契约见 ChatInputPossessChip */}
+        <ChatInputPossessChip possessed={possessed} />
+
+        {/* 扮演会话指示条（roleplay.continue 桥落地的会话执行选项绑定）：绑定存在
+            且未附身时常驻展示 + 一键退出；与附身 chip 互斥（附身是显式全局态，
+            优先展示——发送链同序：附身独占时会话绑定全让位） */}
+        {!possessed && sessionAgent && (
+          <div
+            data-testid="roleplay-session-indicator"
+            className="bg-muted text-muted-foreground flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium"
+          >
+            <span aria-hidden="true">🎭</span>
+            <span>扮演会话：{sessionAgent.name}</span>
+            <button
+              type="button"
+              className="hover:text-foreground ml-0.5 rounded px-0.5 text-sm leading-none"
+              onClick={handleExitRoleplaySession}
+              aria-label="退出扮演会话"
+              title="退出扮演会话"
+            >
+              ×
+            </button>
+          </div>
+        )}
 
         {/* 插件声明式工具栏 widget（chat-input 空间附加式）：任务模式/权限模式
             选择器等（插件 ui_schema 声明驱动，跟随当前选中管道标签）；

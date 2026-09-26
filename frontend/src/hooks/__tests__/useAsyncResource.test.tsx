@@ -16,10 +16,10 @@
 import { QueryClientProvider, useQuery } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { useAsyncResource } from '../useAsyncResource'
 import { createTestQueryClient } from '@/test/renderWithProviders'
-import type { ReactNode } from 'react'
+import { useAsyncResource } from '../useAsyncResource'
 import type { QueryClientProviderProps } from '@tanstack/react-query'
+import type { ReactNode } from 'react'
 
 const fetchList = vi.fn<() => Promise<string[]>>()
 

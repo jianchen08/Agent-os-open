@@ -1,0 +1,5 @@
+# 授权名单（locked 用户配置，agent 只读 + 提案制；ADR 2026-09-24-read-deny-write-zones）
+# entries = 写区前缀（读为黑名单制全放，名单不再是读的必要条件）
+# read_deny = 读排除前缀（可选节；凭据黑名单与仓库拒绝集之外的用户口子）
+entries:
+  - D:\myproject\container_e17cc5927dfd

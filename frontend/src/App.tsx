@@ -9,6 +9,7 @@ import { RouterProvider } from 'react-router-dom'
 import ErrorBoundary from './components/ErrorBoundary'
 import { ExtensionHost } from './components/extension/ExtensionHost'
 import { TitleBar } from './components/layout/TitleBar'
+import { SkinConsentDialog } from './components/shared/SkinConsentDialog'
 import { Toaster } from './components/ui/sonner'
 import { createRouter } from './router'
 import { queryClient } from './services/query/queryClient'
@@ -36,6 +37,8 @@ export function App() {
         <TitleBar />
         <RouterProvider router={router} />
         <ExtensionHost />
+        {/* 皮肤 hooks 启用确认卡（2026-09-25 准入分级：宿主 JS 执行须用户点头） */}
+        <SkinConsentDialog />
         <Toaster />
       </PersistQueryClientProvider>
     </ErrorBoundary>

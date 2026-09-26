@@ -37,12 +37,12 @@ from _config_models import (  # noqa: E402
     get_config,
     set_config,
 )
+from _message_normalizer import normalize_messages_for_provider  # noqa: E402
 from http_json import (  # noqa: E402
     decode_body as _decode_body,
     json_response as _json_response,
     ok as _ok,
 )
-from _message_normalizer import normalize_messages_for_provider  # noqa: E402
 from streaming import StreamTranslator, map_finish_reason  # noqa: E402
 
 # litellm 首次 import 时会同步 fetch GitHub 的 model cost map，在离线/受限网络

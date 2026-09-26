@@ -2155,6 +2155,7 @@ fn test_manifest(id: &str) -> PluginManifest {
         lifecycle: None,
         native: None,
         granted_capabilities: vec![],
+        restricted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],
@@ -3204,7 +3205,7 @@ async fn lifecycle_bus_event_tags_are_subscriber_contract() {
         .expect("run should succeed");
 
     let ev: LifecycleEvent = rx.recv().await.expect("start event");
-    let tags: Vec<String> = ev.ctx.tags().iter().map(|(k, _)| k.clone()).collect();
+    let tags: Vec<String> = ev.ctx.tags().keys().cloned().collect();
     assert!(tags.contains(&"pipeline_id".to_string()));
     assert!(tags.contains(&"run_id".to_string()));
 }

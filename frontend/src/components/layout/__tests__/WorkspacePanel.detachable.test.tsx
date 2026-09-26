@@ -13,11 +13,11 @@
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { openPluginPage } from '@/services/workspacePanelOpener'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
+import { openPluginPage } from '@/services/workspacePanelOpener'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { WorkspacePanel } from '../WorkspacePanel'
+import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 
 const DETACHABLE_PAGE: PageDeclaration = {
   type: 'pages',

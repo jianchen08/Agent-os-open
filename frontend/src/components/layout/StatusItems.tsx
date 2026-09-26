@@ -14,10 +14,10 @@
 import { useMemo } from 'react'
 import { contributionRegistry, type PageDeclaration } from '@/services/schema/ContributionRegistry'
 import { evaluateWhen, type ContextKeys } from '@/services/schema/whenExpression'
+import { openPluginPage } from '@/services/workspacePanelOpener'
 import { useContextKeys } from '@/stores/contextKeysStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { useWidgetEventStore } from '@/stores/widgetEventStore'
-import { openPluginPage } from '@/services/workspacePanelOpener'
 
 /** 状态项 onClick 行为声明（本期唯一行为类型：导航到页面） */
 interface StatusBarClickBehavior {

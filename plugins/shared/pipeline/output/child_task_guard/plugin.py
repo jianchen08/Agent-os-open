@@ -15,9 +15,10 @@ import asyncio
 import logging
 from typing import Any
 
-from agentos_plugin_sdk.enum_utils import safe_enum_value
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
 from pipeline.types import ACTIVE_TASK_STATUSES
+
+from agentos_plugin_sdk.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 

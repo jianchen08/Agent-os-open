@@ -1,10 +1,10 @@
 /** 复现测试：发送新消息后上一条 AI 回复重复 Bug 场景： */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { resetPipelineStoreState } from './helpers/storeTestMocks'
 import type * as handlersMod from '@/services/websocket/streaming/handlers'
 import type * as utilsMod2 from '@/services/websocket/streaming/handlers/utils'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
-import { resetPipelineStoreState } from './helpers/storeTestMocks'
 
 vi.mock('@/utils/logger', async () => (await import('./helpers/storeTestMocks')).loggerMockFull())
 

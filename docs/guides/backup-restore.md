@@ -22,7 +22,7 @@ uv run python scripts/backup_db.py --verify
   源库以只读连接打开，**对运行中的内核安全**：不阻塞请求、不改动源库，
   产出单一自洽快照文件（含 WAL 中已提交内容）。
 - **库路径解析**（与内核 `storage_factory.rs` 同优先级）：
-  `AGENTOS_DB_PATH` 环境变量 > `config/storage.yaml` 的 `storage.sqlite.path`
+  `AGENTOS_DB_PATH` 环境变量 > `config/kernel/storage.yaml` 的 `storage.sqlite.path`
   > 默认项目根 `agentos_kernel.db`（相对路径按项目根展开）。
 - **driver 防呆**：`AGENTOS_STORAGE_DRIVER` 或 storage.yaml 的 driver 非
   `sqlite`（如 `memory`）时直接报错拒绝——内存库无文件可备份，备份错对象

@@ -71,6 +71,7 @@ fn make_test_manifest(
         http_endpoints: vec![],
         ui_schema: None,
         contributes: None,
+        restricted_capabilities: Vec::new(),
         enabled: None,
         activation: None,
         provides: None,
@@ -99,6 +100,7 @@ fn test_message_record_roundtrip() {
         error: None,
         tool_result_json: None,
         metadata: None,
+        agent_id: None,
     };
     let json_str = serde_json::to_string(&original).unwrap();
     let deserialized: MessageRecord = serde_json::from_str(&json_str).unwrap();
@@ -130,6 +132,7 @@ fn test_message_record_roundtrip_no_optional() {
         error: None,
         tool_result_json: None,
         metadata: None,
+        agent_id: None,
     };
     let json_str = serde_json::to_string(&original).unwrap();
     let deserialized: MessageRecord = serde_json::from_str(&json_str).unwrap();

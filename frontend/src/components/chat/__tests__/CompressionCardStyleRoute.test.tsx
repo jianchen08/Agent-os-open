@@ -16,9 +16,10 @@
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { apiClient } from '@/services/api/client'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import { resolveMessageStyle } from '../PluginMessageCard'
 import { MessageItem } from '../MessageItem'
+import { resolveMessageStyle } from '../PluginMessageCard'
 import type { Message } from '@/types/models'
 
 vi.mock('@/services/api/client', () => ({
@@ -36,17 +37,13 @@ vi.mock('@/stores/interactionStore', () => ({
 vi.mock('@/hooks/queries/useAgentsQuery', () => ({
   useAgentsQuery: () => ({ data: [] }),
 }))
-vi.mock('@/services/errorReporting', () => ({
-  ErrorType: { CLIENT: 'client' },
-  reportError: vi.fn(),
-}))
+vi.mock('@/services/errorReporting', async () => (await import('./helpers/messageItemMocks')).errorReportingMock())
 vi.mock('@/components/chat/LobeChatMarkdown', () => ({
   LobeChatMarkdown: ({ content }: { content: string }) => (
     <div data-testid="default-markdown">{content}</div>
   ),
 }))
 
-import { apiClient } from '@/services/api/client'
 
 /** context_window_guard plugin.json contributes.chatMessages 的 fixture 形态 */
 const COMPRESSION_CARD_DECLARATION = {

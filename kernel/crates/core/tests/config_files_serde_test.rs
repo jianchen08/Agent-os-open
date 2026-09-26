@@ -122,6 +122,7 @@ fn test_empty_config_files_omitted_in_serialization() {
         http_endpoints: vec![],
         ui_schema: None,
         contributes: None,
+        restricted_capabilities: Vec::new(),
         enabled: None,
         activation: None,
         persistent_fields: vec![],

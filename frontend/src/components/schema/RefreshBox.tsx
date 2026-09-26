@@ -15,8 +15,8 @@
  * intervalSeconds=0（无轮询声明）不参与暂停/补拉，行为与旧版一致。
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
 import { useElementVisible } from '@/hooks/useElementVisible'
+import type { ReactNode } from 'react'
 
 export interface RefreshDecl {
   type: 'poll'

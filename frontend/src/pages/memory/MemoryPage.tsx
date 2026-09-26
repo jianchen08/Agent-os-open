@@ -11,10 +11,10 @@
  */
 
 import { useState } from 'react'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { PageShell } from '@/components/shared/PageShell'
-import { ConversationMemorySection } from './ConversationMemorySection'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { KnowledgeBaseContent } from '@/pages/knowledge-base/KnowledgeBaseContent'
+import { ConversationMemorySection } from './ConversationMemorySection'
 
 /** 分区类型 */
 type MemorySection = 'conversation' | 'documents'

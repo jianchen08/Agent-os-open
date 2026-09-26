@@ -8,6 +8,12 @@
     "e2e/**/*.ts",
     "scripts/**/*.mjs"
   ],
-  "ignore": ["dist/**", "coverage/**", "test-results/**", "probe-out/**"],
+  "ignore": [
+    "dist/**",
+    "coverage/**",
+    "test-results/**",
+    "probe-out/**",
+    "src/services/api/endpoints.generated.ts"
+  ],
   "ignoreExportsUsedInFile": true
 }

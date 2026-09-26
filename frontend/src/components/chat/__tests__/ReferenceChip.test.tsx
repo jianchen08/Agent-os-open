@@ -30,12 +30,12 @@ describe('ReferenceChip 默认渲染', () => {
   it('有 previewUrl 时渲染缩略图', () => {
     render(
       <ReferenceChip
-        data={{ kind: 'godot-node', title: 'Player', previewUrl: '/ext/pipeline_godot_context/preview?index=0' }}
+        data={{ kind: 'godot-node', title: 'Player', previewUrl: '/ext/pipeline_host_context/preview?index=0' }}
       />,
     )
 
     const img = screen.getByRole('img', { name: 'Player' })
-    expect(img).toHaveAttribute('src', '/ext/pipeline_godot_context/preview?index=0')
+    expect(img).toHaveAttribute('src', '/ext/pipeline_host_context/preview?index=0')
   })
 })
 

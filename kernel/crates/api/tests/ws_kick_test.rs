@@ -37,6 +37,7 @@ impl PipelineDispatcher for NoopDispatcher {
         _execution_context: Option<&serde_json::Value>,
         _state_overlay: Option<&serde_json::Value>,
         _agent_id: &str,
+        _pipeline_config_id: Option<&str>,
         _cmid: &str,
         _source: PendingInputSource,
     ) -> Result<(), String> {

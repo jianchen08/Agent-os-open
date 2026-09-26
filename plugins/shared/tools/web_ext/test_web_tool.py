@@ -268,7 +268,7 @@ class TestExecuteDispatch:
 
     def test_dispatch_fetch(self, monkeypatch, dns_ok, fake_trafilatura) -> None:
         fake_trafilatura._extracted = "正文内容"
-        client = _FakeAsyncClient(get_resp=_FakeResponse("<html><body>正文内容</body></html>".encode("utf-8")))
+        client = _FakeAsyncClient(get_resp=_FakeResponse("<html><body>正文内容</body></html>".encode()))
         _install_client(monkeypatch, client)
         tool = WebTool()
         result = _run(tool.execute({"action": "fetch", "url": "http://example.com/page"}))
@@ -423,7 +423,7 @@ class TestExtractData:
     def test_html_extracted(self, fake_trafilatura) -> None:
         fake_trafilatura._extracted = "抽取正文"
         tool = WebTool()
-        resp = _FakeResponse("<html><body><p>抽取正文</p></body></html>".encode("utf-8"))
+        resp = _FakeResponse("<html><body><p>抽取正文</p></body></html>".encode())
         assert tool._extract_data(resp) == "抽取正文"
         assert fake_trafilatura.calls[0][1]["include_tables"] is True
 
@@ -443,7 +443,7 @@ class TestExtractData:
 
     def test_plain_text_returned(self) -> None:
         tool = WebTool()
-        resp = _FakeResponse("纯文本内容".encode("utf-8"))
+        resp = _FakeResponse("纯文本内容".encode())
         assert tool._extract_data(resp) == "纯文本内容"
 
     def test_doctype_html_detected(self, fake_trafilatura) -> None:
@@ -475,7 +475,7 @@ class TestHttpGet:
 
     def test_success_html_extracted(self, monkeypatch, dns_ok, fake_trafilatura) -> None:
         fake_trafilatura._extracted = "网页正文"
-        client = _FakeAsyncClient(get_resp=_FakeResponse("<html><body>网页正文</body></html>".encode("utf-8")))
+        client = _FakeAsyncClient(get_resp=_FakeResponse("<html><body>网页正文</body></html>".encode()))
         _install_client(monkeypatch, client)
         tool = WebTool()
         result = _run(tool._http_get({"url": "http://example.com/page"}))
@@ -585,7 +585,7 @@ class TestHttpPost:
 class TestFetchPage:
     def test_extract_text_success(self, monkeypatch, dns_ok, fake_trafilatura) -> None:
         fake_trafilatura._extracted = "正文"
-        client = _FakeAsyncClient(get_resp=_FakeResponse("<html><body>正文</body></html>".encode("utf-8")))
+        client = _FakeAsyncClient(get_resp=_FakeResponse("<html><body>正文</body></html>".encode()))
         _install_client(monkeypatch, client)
         tool = WebTool()
         result = _run(tool._fetch_page({"url": "http://example.com/page"}))

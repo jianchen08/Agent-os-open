@@ -13,11 +13,11 @@
 import { act, renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useMessageRender } from '@/components/chat/hooks/useMessageRender'
+import { resetPipelineStoreState } from './helpers/storeTestMocks'
 import type * as handlersMod from '@/services/websocket/streaming/handlers'
 import type * as streamHandlerMod from '@/services/websocket/streaming/handlers/streamHandler'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
-import { resetPipelineStoreState } from './helpers/storeTestMocks'
 
 // ── mock 外部依赖（与 MessageOrderVerification.test.tsx 对齐）──
 vi.mock('@/utils/activityConverter', () => ({

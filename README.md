@@ -207,7 +207,7 @@ chmod +x start_web_02.sh
 
 默认配置开箱即用，以下情况需要按需调整：
 
-**工作空间根目录**：任务的工作文件默认存放在 `config/isolation/isolation_config.yaml` 中 `workspace.root` 指定的目录下。如果你的项目不在该路径，或希望放到其他盘符/分区，编辑该文件把 `root` 改为你的实际路径（支持绝对路径，如 Linux 的 `/tmp/ai_workspaces` 或 Windows 的 `D:/workspaces`）。注意：容器隔离模式下 `root` 必须是绝对路径，相对路径会导致 Docker bind mount 失败。
+**工作空间根目录**：任务的工作文件默认存放在 `config/plugins/isolation/isolation_config.yaml` 中 `workspace.root` 指定的目录下。如果你的项目不在该路径，或希望放到其他盘符/分区，编辑该文件把 `root` 改为你的实际路径（支持绝对路径，如 Linux 的 `/tmp/ai_workspaces` 或 Windows 的 `D:/workspaces`）。注意：容器隔离模式下 `root` 必须是绝对路径，相对路径会导致 Docker bind mount 失败。
 
 **多实例运行（同时跑两个版本做对比测试）**：compose project 会自动按**所在目录名**隔离（不同目录 = 不同的容器名/网络/卷，互不冲突），无需手动设置 `COMPOSE_PROJECT_NAME`。唯一会冲突的是**宿主端口**（前端 6390 / 内核 9100 / Redis 6690）。
 

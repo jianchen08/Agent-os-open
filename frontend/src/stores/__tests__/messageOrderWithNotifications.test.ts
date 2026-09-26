@@ -17,18 +17,15 @@
  * - initFromAPI 后：非飞行中 localOnly 丢弃；飞行中（占位/乐观 user）保留
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { wireStreamOrderKit } from './helpers/storeTestMocks'
 import type * as handlersMod from '@/services/websocket/streaming/handlers'
-import type * as streamHandlerMod from '@/services/websocket/streaming/handlers/streamHandler'
 import type * as lifecycleHandlersMod from '@/services/websocket/streaming/lifecycleHandlers'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
-import { activityConverterRichMock, resetPipelineStoreState } from './helpers/storeTestMocks'
 
 // ── mock 外部依赖（与 multiturnOrderE2E / fix_duplicate_ai_repro 对齐）──
 vi.mock('@/utils/activityConverter', async () => (await import('./helpers/storeTestMocks')).activityConverterRichMock())
-vi.mock('@/utils/toolCardRegistry', () => ({
-  enhanceActivityWithToolConfig: (base: any) => base,
-}))
+vi.mock('@/utils/toolCardRegistry', async () => (await import('./helpers/storeTestMocks')).toolCardRegistryMock())
 vi.mock('@/services/api/session', async () => (await import('./helpers/storeTestMocks')).apiSessionMockFull())
 vi.mock('@/utils/retry', async () => (await import('./helpers/storeTestMocks')).retryMockBase())
 vi.mock('@/utils/logger', async () => (await import('./helpers/storeTestMocks')).loggerMockFull())
@@ -39,75 +36,28 @@ const THREAD_ID = 'tid_order_b000000000'
 let pipelineStore: pipelineMessageStoreMod.usePipelineMessageStore
 let handlers: handlersMod
 let handleSystemNotification: lifecycleHandlersMod.handleSystemNotification
-let flushStreamChunkBuffer: streamHandlerMod.flushStreamChunkBuffer
 
-/** 构造一条最小可用消息 */
-function makeMsg(id: string, overrides: Partial<Message>): Message {
-  return {
-    id,
-    sessionId: THREAD_ID,
-    role: 'assistant',
-    content: '',
-    timestamp: new Date().toISOString(),
-    parentId: null,
-    sequence: 0,
-    status: 'completed',
-    ...overrides,
-  } as Message
-}
-
-/** 构造一个流式 chunk / 工具等 WS 事件（顶层 + data 双层，匹配真实后端 _make_event） */
-function evt(type: string, data: Record<string, any>): any {
-  return { type, sequence: data.sequence ?? 0, data: { pipeline_id: PIPELINE_ID, ...data } }
-}
-
-/** 构造一个 system_notification 事件（resolvePipelineId 取 data.pipeline_id）。
- * 模拟后端 emit_notification：生成 record_id（hex12，唯一 id 来源），
- * 前端用它作消息 id，与 track 落库 record_id 一致。 */
-function notificationEvent(content: string, overrides: Record<string, any> = {}): any {
-  const recordId = Math.random().toString(16).slice(2, 14).padEnd(12, '0')
-  return {
-    data: {
-      pipeline_id: PIPELINE_ID,
-      content,
-      level: 'info',
-      notification_id: `sys_${Math.random().toString(36).slice(2, 10)}`,
-      record_id: recordId,
-      ...overrides,
-    },
-  }
-}
-
-/** 刷写 streamChunk 的 RAF 缓冲（jsdom 不自动跑 RAF，需手动调） */
-function flush(): void {
-  flushStreamChunkBuffer()
-}
-
-/** 读取 store 中消息的 id 序列 */
-function ids(): string[] {
-  return pipelineStore.getState().getMessages(PIPELINE_ID).map((m) => m.id)
-}
-
-/** 读取 store 中所有 system 消息的 id 序列（system 消息 id 现为后端 record_id，无固定前缀） */
-function systemIds(): string[] {
-  return pipelineStore.getState().getMessages(PIPELINE_ID)
-    .filter((m) => m.role === 'system')
-    .map((m) => m.id)
-}
+let makeMsg: (id: string, overrides?: Partial<Message>) => Message
+let evt: (type: string, data: Record<string, any>) => any
+let notificationEvent: (content: string, overrides?: Record<string, any>) => any
+let flush: () => void
+let ids: () => string[]
+let systemIds: () => string[]
 
 beforeEach(async () => {
   vi.resetModules()
-  const storeMod = await import('@/stores/pipelineMessageStore')
-  pipelineStore = await resetPipelineStoreState()
-  const h = await import('@/services/websocket/streaming/handlers')
-  handlers = h
-  const lh = await import('@/services/websocket/streaming/lifecycleHandlers')
-  handleSystemNotification = lh.handleSystemNotification
-  const sf = await import('@/services/websocket/streaming/handlers/streamHandler')
-  flushStreamChunkBuffer = sf.flushStreamChunkBuffer
+  ;({
+    pipelineStore,
+    handlers,
+    handleSystemNotification,
 
-  pipelineStore.getState().registerPipeline({ pipelineId: PIPELINE_ID, sessionId: THREAD_ID } as any)
-  pipelineStore.getState().activatePipeline(PIPELINE_ID)
+    makeMsg,
+    evt,
+    notificationEvent,
+    flush,
+    ids,
+    systemIds,
+  } = await wireStreamOrderKit(PIPELINE_ID, THREAD_ID))
 })
 
 /** user-1/ai-1 API 基线（withParts=true 时 ai-1 携带 text parts）——initFromAPI 播种用 */

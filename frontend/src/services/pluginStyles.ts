@@ -50,14 +50,21 @@ export function getStyleNonce(): string | null {
 /** 注入防重入集合（同一 styleId 的并发 fetch 只发一次） */
 const inflight = new Set<string>()
 
+/** client_styles 单段体积上限：装饰 CSS 无需巨量，超限整段拒绝 */
+export const MAX_CLIENT_STYLE_BYTES = 64 * 1024
+
 /**
  * 消毒 CSS：命中危险构造整段拒绝（fail-closed）
  *
- * 过滤目标（任务文档）：
+ * 过滤目标（2026-09-25 白名单化升级）：
  * - expression() —— IE 动态属性，可执行 JS
  * - javascript: / vbscript: URL（url() 与 @import 均可携带）
- * - @import 外部 URL —— 跨域拉取/绕过管控
+ * - @import —— **一律禁止**（远程拉取跨域管控；本地拆分应由构建期合并，
+ *   merged.css 即合并产物）
  * - behavior: / -moz-binding: —— 旧式绑定，可执行外部行为
+ * - url() 白名单审计：仅允许 data: 与相对路径（同源 /ext 资产、SVG 片段
+ *   引用 url(#id)）；绝对地址（scheme:// 或协议相对 //）一律整段拒绝——
+ *   远程外联探针/追踪像素封死
  *
  * @param css - 插件 CSS 原文
  * @returns 通过消毒的 CSS；命中危险构造返回 null（调用方跳过注入并 warn）
@@ -67,8 +74,7 @@ export function sanitizeCss(css: string): string | null {
     [/expression\s*\(/i, 'expression()'],
     [/javascript\s*:/i, 'javascript:'],
     [/vbscript\s*:/i, 'vbscript:'],
-    [/@import\s+(?:url\s*\()?\s*["']?https?:/i, '外部 @import'],
-    [/@import\s+["']?\/\//i, '协议相对 @import'],
+    [/@import\b/i, '@import（一律禁止，构建期合并为唯一正道）'],
     [/behavior\s*:/i, 'behavior:'],
     [/-moz-binding\s*:/i, '-moz-binding:'],
   ]
@@ -77,6 +83,24 @@ export function sanitizeCss(css: string): string | null {
       loggers.websocket.warn(`[pluginStyles] 命中危险 CSS 构造 "${label}"，整段拒绝注入`)
       return null
     }
+  }
+  if (auditCssUrls(css) === null) {
+    loggers.websocket.warn('[pluginStyles] url() 含非白名单地址（仅放行 data: 与相对路径），整段拒绝注入')
+    return null
+  }
+  return css
+}
+
+/** url() 白名单审计：命中任一非白名单地址返回 null（整段拒绝）。 */
+function auditCssUrls(css: string): string | null {
+  const re = /url\(\s*(['"]?)([^'")]*)\1\s*\)/gi
+  let m: RegExpExecArray | null
+  while ((m = re.exec(css)) !== null) {
+    const u = m[2].trim()
+    if (!u) continue
+    if (/^data:/i.test(u)) continue
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(u)) return null
+    if (u.startsWith('//')) return null
   }
   return css
 }
@@ -159,6 +183,13 @@ export async function injectPluginStyle(style: ClientStyleDeclaration): Promise<
       transformResponse: [(d) => d],
     })
     const css = typeof res.data === 'string' ? res.data : String(res.data)
+    // 体积上限（2026-09-25 白名单化）：装饰 CSS 超限整段拒绝
+    if (css.length > MAX_CLIENT_STYLE_BYTES) {
+      loggers.websocket.warn(
+        `[pluginStyles] ${key} 超限（${css.length} > ${MAX_CLIENT_STYLE_BYTES} 字节），拒绝注入`,
+      )
+      return false
+    }
     const clean = sanitizeCss(css)
     if (clean === null) return false
 

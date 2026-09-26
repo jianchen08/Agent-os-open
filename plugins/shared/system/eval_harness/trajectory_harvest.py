@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """真实轨迹筛选采集（纯函数核心）：任务终态记录 → 判定题集 + 轨迹样本库。
 
 采集流水线（ADR 2026-09-16-trajectory-harvest-sourcing）：
@@ -143,7 +142,10 @@ def harvest(tasks: list[dict[str, Any]], generated_tag: str = "") -> dict[str, A
             continue
 
         mode = map_mode(record.get("agent_id"))
-        base_id = f"hv_{_slug(record.get('goal_title') or "", pid)}"
+        # PEP 701（py312）之前的 f-string 不允许内层复用同类引号；项目钉
+        # py311，嵌套表达式提为局部变量（评估 P0-4：原写法 py311 导入即炸）。
+        goal_title = record.get("goal_title") or ""
+        base_id = f"hv_{_slug(goal_title, pid)}"
         case_id = base_id
         if case_id in used_case_ids:
             case_id = f"{base_id}_{pid[:8]}"

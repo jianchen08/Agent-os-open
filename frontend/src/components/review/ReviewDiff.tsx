@@ -6,8 +6,8 @@
  */
 
 import { useMemo, useState } from 'react'
-import { buildUnifiedLines, computeDiff } from '@/utils/diffLcs'
 import { Columns2, Rows3 } from '@/assets/icons'
+import { buildUnifiedLines, computeDiff } from '@/utils/diffLcs'
 import type { DiffLine, DiffLineType } from '@/types/review'
 
 export interface ReviewDiffProps {

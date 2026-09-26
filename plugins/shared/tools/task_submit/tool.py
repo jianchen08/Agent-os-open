@@ -29,9 +29,9 @@ from agentos_plugin_sdk import (
 # shared conftest 同款做法），保证测试/生产任一进程形态下该行都被执行。
 _SHARED_ROOT = str(Path(__file__).resolve().parents[2])
 sys.path.insert(0, _SHARED_ROOT)
-from task_birth import TaskBirthError, birth_task_pipeline  # noqa: E402
 import state_fields  # noqa: E402 — plugins/shared 平铺模块（ws_meta 还原）
 from mode_keys import find_mode_agent_yaml  # noqa: E402 — plugins/shared 平铺模块（模式键两级解析）
+from task_birth import TaskBirthError, birth_task_pipeline  # noqa: E402
 from time_iso import now_iso_utc as _now_iso  # noqa: E402 — 共享时间戳单点
 
 logger = logging.getLogger(__name__)

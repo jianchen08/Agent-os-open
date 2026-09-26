@@ -522,8 +522,7 @@ async fn test_chat_uses_engine_not_echo() {
     let content = json["content"].as_str().unwrap();
     assert!(
         !content.starts_with("Response to:"),
-        "Chat should not be in echo mode, got: {}",
-        content
+        "Chat should not be in echo mode, got: {content}"
     );
     assert_eq!(json["session_id"], "test_session");
 }
@@ -827,6 +826,116 @@ async fn hot_reload_compiles_step_referencing_plugin_discovered_after_boot() {
     );
 }
 
+// ── 管道配置按需加载编译缓存（compiled_for 收敛点）──────────────────
+
+/// 构造临时 config 根并写入指定管道配置（钉用户根保证解析只看本用例目录）。
+fn write_lazy_config(root: &std::path::Path, name: &str, body_id: &str) -> std::path::PathBuf {
+    let cfg = root.join("config").join("pipelines");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(
+        cfg.join(format!("{name}.yaml")),
+        format!(
+            "name: {name}\nloop_bodies:\n  - id: {body_id}\n    steps:\n      - id: only\n        steps: []\n"
+        ),
+    )
+    .unwrap();
+    root.join("config")
+}
+
+/// 按需加载：首次显式指定触发磁盘加载并编译；二次命中缓存（磁盘 mtime 变化
+/// 不影响——一期不校验 mtime，PUT 失效是唯一失效路径）；失效后重载新内容。
+#[tokio::test]
+async fn compiled_for_lazy_loads_caches_and_invalidates() {
+    let name = format!("lazy_{}", uuid::Uuid::new_v4().simple());
+    let root = std::env::temp_dir().join(format!("lazy_a_{}", uuid::Uuid::new_v4().simple()));
+    let _guard = crate::test_env::pin_user_root(&root);
+    let config_root = write_lazy_config(&root, &name, "body_v1");
+    let state = AppState::new();
+
+    // 首次：磁盘加载 + 编译 + 入缓存
+    let first = crate::server::compiled_for(&state, &config_root, Some(&name))
+        .await
+        .expect("首次按需加载应成功");
+    assert_eq!(first.bodies.len(), 1);
+    assert_eq!(first.bodies[0].id, "body_v1");
+
+    // 磁盘内容改变（mtime 必然变化）→ 二次调用仍命中缓存（旧内容）
+    write_lazy_config(&root, &name, "body_v2");
+    let second = crate::server::compiled_for(&state, &config_root, Some(&name))
+        .await
+        .expect("缓存命中应成功");
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &second),
+        "缓存命中必须返回同一编译产物（不重读磁盘）"
+    );
+    assert_eq!(
+        second.bodies[0].id, "body_v1",
+        "mtime 变化不触发重载（一期契约）"
+    );
+
+    // 失效（PUT 热更唯一失效路径）→ 下次按需重载新内容
+    crate::server::pipeline_cache_invalidate(&name);
+    let third = crate::server::compiled_for(&state, &config_root, Some(&name))
+        .await
+        .expect("失效后重载应成功");
+    assert_eq!(third.bodies[0].id, "body_v2", "失效后必须读到磁盘新内容");
+    crate::server::pipeline_cache_invalidate(&name);
+}
+
+/// 失败透传：显式指定不存在的配置 → Err 带管道名，绝不回落 autonomous
+///（静默回落 = 用错管道）；坏 YAML 同样报错且点名配置。
+#[tokio::test]
+async fn compiled_for_explicit_config_failure_errors_without_fallback() {
+    let state = AppState::new();
+    let root = std::env::temp_dir().join(format!("lazy_b_{}", uuid::Uuid::new_v4().simple()));
+    let _guard = crate::test_env::pin_user_root(&root);
+    let config_root = root.join("config");
+    std::fs::create_dir_all(config_root.join("pipelines")).unwrap();
+
+    let missing = format!("ghost_{}", uuid::Uuid::new_v4().simple());
+    let err = crate::server::compiled_for(&state, &config_root, Some(&missing))
+        .await
+        .expect_err("不存在的配置必须报错（回落 autonomous 会返回 Ok）");
+    assert!(err.contains(&missing), "错误必须带管道名便于定位: {err}");
+
+    // 坏 YAML：错误同样透传且点名配置（不降级、不回落）
+    let broken = format!("broken_{}", uuid::Uuid::new_v4().simple());
+    std::fs::write(
+        config_root.join("pipelines").join(format!("{broken}.yaml")),
+        "name: [unclosed\n",
+    )
+    .unwrap();
+    let err = crate::server::compiled_for(&state, &config_root, Some(&broken))
+        .await
+        .expect_err("坏配置必须报错");
+    assert!(err.contains(&broken), "错误必须带管道名: {err}");
+    crate::server::pipeline_cache_invalidate(&broken);
+}
+
+/// 缺省路径（None）= autonomous 热重载单例：与 maybe_reload_compiled_pipeline
+/// 返回同一实例（现状行为不变，回归红线）。
+#[tokio::test]
+async fn compiled_for_none_returns_hot_reload_singleton() {
+    let yaml =
+        "name: t\nloop_bodies:\n  - id: main\n    steps:\n      - id: one\n        steps: []\n";
+    let root = std::env::temp_dir().join(format!("lazy_c_{}", uuid::Uuid::new_v4().simple()));
+    let _guard = crate::test_env::pin_user_root(&root);
+    let cfg = root.join("config").join("pipelines");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(cfg.join("autonomous.yaml"), yaml).unwrap();
+    let config_root = root.join("config");
+    let state = AppState::new();
+
+    let via_none = crate::server::compiled_for(&state, &config_root, None)
+        .await
+        .expect("缺省路径应成功");
+    let via_reload = crate::server::maybe_reload_compiled_pipeline(&state, &config_root).await;
+    assert!(
+        std::sync::Arc::ptr_eq(&via_none, &via_reload),
+        "None 必须收敛到既有热重载单例（同一 Arc）"
+    );
+}
+
 /// 构造带 store + mock invoker 的 AppState（enable_session 以启用 registry 路径）。
 /// 创建临时 config 目录 + autonomous.yaml（引用 mock LLM 插件），使
 /// maybe_reload_pipeline_configs 能加载真实配置（否则 load_pipeline_config
@@ -959,6 +1068,7 @@ async fn test_multi_turn_second_round_sees_first_round_context() {
             "",
             None,
             None,
+            None,
             "",
         ),
     )
@@ -977,6 +1087,7 @@ async fn test_multi_turn_second_round_sees_first_round_context() {
             "m2",
             "",
             "",
+            None,
             None,
             None,
             "",
@@ -1031,6 +1142,7 @@ async fn test_multi_turn_http_pipeline_coordinate_context_and_reject_missing() {
             "",
             None,
             None,
+            None,
             "",
         ),
     )
@@ -1050,6 +1162,7 @@ async fn test_multi_turn_http_pipeline_coordinate_context_and_reject_missing() {
             "",
             None,
             None,
+            None,
             "",
         ),
     )
@@ -1067,6 +1180,7 @@ async fn test_multi_turn_http_pipeline_coordinate_context_and_reject_missing() {
             "h2",
             "",
             "",
+            None,
             None,
             None,
             "",
@@ -1134,6 +1248,7 @@ async fn test_multi_turn_cold_start_recovers_from_store() {
             "c2",
             "",
             "",
+            None,
             None,
             None,
             "",
@@ -1205,6 +1320,7 @@ async fn test_cold_recovery_ignores_stale_ended_flag() {
             "e2",
             "",
             "",
+            None,
             None,
             None,
             "",
@@ -1283,6 +1399,7 @@ async fn test_multi_user_isolation_end_to_end() {
             "",
             None,
             None,
+            None,
             "",
         ),
     )
@@ -1301,6 +1418,7 @@ async fn test_multi_user_isolation_end_to_end() {
             "b1",
             "",
             "",
+            None,
             None,
             None,
             "",
@@ -1476,6 +1594,7 @@ async fn test_registered_user_can_save_and_read_history() {
             "",
             None,
             None,
+            None,
             "",
         ),
     )
@@ -1577,6 +1696,7 @@ fn thread_field_manifest(
         lifecycle: None,
         native: None,
         granted_capabilities: vec![],
+        restricted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],
@@ -2015,6 +2135,7 @@ async fn test_process_via_engine_state_overlay_reaches_plugin_context() {
             "",
             None,
             Some(&overlay),
+            None,
             "",
         ),
     )
@@ -2280,6 +2401,7 @@ async fn test_process_via_engine_emits_run_terminal_domain_events() {
             lifecycle: None,
             native: None,
             granted_capabilities: vec![],
+            restricted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -2319,6 +2441,7 @@ async fn test_process_via_engine_emits_run_terminal_domain_events() {
             "",
             None,
             Some(&overlay),
+            None,
             "",
         ),
     )
@@ -2377,6 +2500,7 @@ async fn test_engine_run_failure_marks_run_failed() {
             "",
             None,
             Some(&overlay),
+            None,
             "",
         ),
     )
@@ -2423,6 +2547,7 @@ async fn test_engine_user_stop_marks_run_cancelled() {
             "",
             None,
             Some(&overlay),
+            None,
             "",
         ),
     )
@@ -2474,6 +2599,7 @@ async fn test_replay_after_interrupt_does_not_duplicate_user_message() {
             "",
             None,
             None,
+            None,
             "",
         ),
     )
@@ -2521,6 +2647,7 @@ async fn test_user_message_slot_carries_run_id() {
             "o1",
             "",
             "",
+            None,
             None,
             None,
             "",
@@ -2578,6 +2705,7 @@ async fn test_repeated_user_message_after_reply_still_appends() {
                 "",
                 None,
                 None,
+                None,
                 "",
             ),
         )
@@ -2626,6 +2754,7 @@ async fn test_concurrent_chats_with_interrupted_replay_consistent() {
                     "o1",
                     "",
                     "",
+                    None,
                     None,
                     None,
                     "",
@@ -2707,6 +2836,7 @@ async fn test_run_terminal_does_not_write_task_status() {
             "",
             None,
             Some(&overlay),
+            None,
             "",
         ),
     )
@@ -2746,6 +2876,7 @@ async fn test_run_terminal_does_not_write_task_status() {
             "o1",
             "",
             "",
+            None,
             None,
             None,
             "",
@@ -2790,6 +2921,7 @@ async fn test_run_terminal_skips_writeback_for_owned_only_pipeline() {
             "",
             None,
             Some(&overlay),
+            None,
             "",
         ),
     )
@@ -2864,6 +2996,7 @@ async fn test_task_lifecycle_end_to_end_state_flow() {
             "",
             None,
             Some(&overlay),
+            None,
             "",
         ),
     )
@@ -2942,6 +3075,7 @@ async fn inject_dispatch_events_reach_user_connection_via_pipeline_coordinate() 
             None,
             None,
             "agentos",
+            None,
             "",
             PendingInputSource::Trigger,
         )
@@ -2983,6 +3117,7 @@ async fn test_pending_input_idle_consumed_immediately() {
             None,
             None,
             "",
+            None,
             "cmid-1",
             PendingInputSource::User,
         )
@@ -3029,6 +3164,7 @@ async fn test_pending_input_dispatch_leaves_no_residue() {
             None,
             None,
             "",
+            None,
             "",
             PendingInputSource::User,
         )
@@ -3530,6 +3666,7 @@ async fn seed_pending(store: &Arc<dyn StorageBackend>, pid: &str, content: &str)
                 client_message_id: String::new(),
                 execution_context: None,
                 state_overlay: None,
+                pipeline_config_id: None,
                 created_at: chrono::Utc::now().to_rfc3339(),
             },
         )
@@ -3824,6 +3961,7 @@ async fn test_pending_input_no_store_dispatch_direct() {
             None,
             None,
             "agentos",
+            None,
             "",
             PendingInputSource::User,
         )
@@ -7729,9 +7867,14 @@ mod server_gap_tests {
     // ── compute_config_fingerprint（管道热重载指纹） ──
 
     /// 指纹：steps 目录内的 yaml/yml 文件参与（非 yaml 不参与）；同状态稳定。
+    ///
+    /// 须钉桩用户根：autonomous.yaml 生效落点「用户空间优先」，而钉桩 guard 持
+    /// 进程级环境变量+锁——不钉桩时并发线程上其他测试的钉桩/恢复会翻转本测试
+    /// 看到的用户根，两个时刻解析到不同文件即指纹漂移（并发假红）。
     #[test]
     fn config_fingerprint_tracks_steps_files_and_is_stable() {
         let tmp = tempfile::tempdir().unwrap();
+        let _user_root = crate::test_env::pin_user_root(tmp.path());
         let config = tmp.path().join("config");
         std::fs::create_dir_all(config.join("pipelines")).unwrap();
         std::fs::create_dir_all(config.join("steps")).unwrap();

@@ -14,7 +14,6 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-import time
 
 # 上游响应等待上限（秒）。超出视为上游无响应，调用方丢弃会话重建。
 RESPONSE_TIMEOUT_SECS = 120.0

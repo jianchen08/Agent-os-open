@@ -1,11 +1,18 @@
 /** 工作区面板 管理工作区 Tab 切换，支持从悬浮窗拖拽吸附 */
 
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { FullscreenIcon, FullscreenExitIcon, PlusIcon } from '@/assets/icons'
 import { isDetachable } from '@/components/schema/PageRenderer'
+import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
+import { useSessionThemeScope } from '@/hooks/useSessionThemeScope'
 import { cn } from '@/lib/utils'
-import { TabLabel } from './TabLabel'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { windowManager } from '@/services/window/WindowManager'
+import { WORKSPACE_NAV_TAB, openWorkspacePanel } from '@/services/workspacePanelOpener'
+import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import {
   BAND_BUTTON_ACTIVE_CLASS,
   BAND_BUTTON_CLASS,
@@ -17,17 +24,10 @@ import {
   BAND_TAB_MIN_WIDTH_CLASS,
   BAND_TAB_WIDTH_CLASS,
 } from './bandButton'
-import { useSessionThemeScope } from '@/hooks/useSessionThemeScope'
-import { WORKSPACE_NAV_TAB, openWorkspacePanel } from '@/services/workspacePanelOpener'
-import { useLayoutModeStore } from '@/stores/layoutModeStore'
-import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
-import { windowManager } from '@/services/window/WindowManager'
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { Button } from '@/components/ui/button'
-import { createPortal } from 'react-dom'
-import type { WorkspaceTab } from '@/types/layout'
+import { TabLabel } from './TabLabel'
 import { WorkspaceNavPage } from './WorkspaceNavPage'
+import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
+import type { WorkspaceTab } from '@/types/layout'
 
 /** 工作区面板属性 */
 export interface WorkspacePanelProps {

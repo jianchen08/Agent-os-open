@@ -10,9 +10,9 @@
 import { act, render } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { presetThemes } from '@/config/themes'
+import { compileThemeVarEntries, useSessionThemeScope } from '@/hooks/useSessionThemeScope'
 import { useSessionStore } from '@/stores/sessionStore'
 import { getActiveSessionTheme, useSessionThemeStore } from '@/stores/sessionThemeStore'
-import { compileThemeVarEntries, useSessionThemeScope } from '@/hooks/useSessionThemeScope'
 import type { ThemeConfig } from '@/types/theme'
 
 /** 两个有区分度的合法档：dark 原档 + 主色改档 */

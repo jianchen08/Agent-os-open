@@ -331,7 +331,7 @@ def test_read_audio_bytes_oserror_returns_empty(tmp_path, monkeypatch):
 
 
 async def test_attachment_plain_text_extracted(tmp_path, monkeypatch):
-    (tmp_path / "note.txt").write_bytes("hello 世界".encode("utf-8"))
+    (tmp_path / "note.txt").write_bytes("hello 世界".encode())
     monkeypatch.setenv("UPLOADS_DIR", str(tmp_path))
     pre = MultimodalPreprocessor()
     result = await pre.execute(_make_ctx("", [{"url": "/uploads/note.txt", "mime_type": "text/plain"}]))

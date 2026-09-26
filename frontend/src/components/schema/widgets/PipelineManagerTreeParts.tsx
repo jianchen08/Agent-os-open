@@ -17,10 +17,11 @@ import {
   MessageSquare,
   Trash2,
 } from '@/assets/icons'
-import { statusIcon } from './pipelineStatusVisuals'
-import { ModePanelBadge } from './ModePanelBadge'
 import { entryDurationMs, formatDuration } from '@/types/activity'
 import { taskStatusLabel } from '@/types/taskStatus'
+import { ModePanelBadge } from './ModePanelBadge'
+import { statusIcon } from './pipelineStatusVisuals'
+import type { Session } from '@/types/models'
 import type { PipelineViewEntry } from '@/types/pipeline'
 
 /** 提取条目的 token 展示值（实时 usage 优先，回退 summaries 汇总） */
@@ -59,6 +60,62 @@ export interface PipelineTreeNode {
   children: PipelineTreeNode[]
 }
 
+// ═════════════════════════════════════════════════════════════════
+// 建树纯函数（自 PipelineManagerWidget 迁出：主管道锚点解析/锚点行合成）
+// ═════════════════════════════════════════════════════════════════
+
+/** 会话主管道锚点：threadId 组内 session.pipelineIds[0]，在全量条目上解析
+ *  （真值主管道，不受状态筛选收窄影响）。不回退线程组最早条目——最早条目
+ *  可能是兄弟任务，回退即兄弟父子假层级（用户指正 2026-09-24）；主管道
+ *  条目缺席时该线程无锚点，成员落根平铺（平级可见，不互挂） */
+// eslint-disable-next-line react-refresh/only-export-components -- 建树纯函数按冻结拆分归置随树部件同文件导出，非组件导出为有意为之
+export function resolveThreadTop(
+  pipelineEntries: PipelineViewEntry[],
+  sessions: Session[],
+): Map<string, string> {
+  const threadTop = new Map<string, string>()
+  const threadGroups = new Map<string, PipelineViewEntry[]>()
+  for (const e of pipelineEntries) {
+    if (!e.threadId) continue
+    const list = threadGroups.get(e.threadId) ?? []
+    list.push(e)
+    threadGroups.set(e.threadId, list)
+  }
+  for (const [tid, list] of threadGroups) {
+    const session = sessions.find((s) => s.id === tid)
+    const mainPid = session?.pipelineIds?.[0]
+    const main = mainPid ? list.find((e) => e.pipelineId === mainPid) : undefined
+    if (main) threadTop.set(tid, main.key)
+  }
+  return threadTop
+}
+
+/** 锚点合成上下文：建树过程的登记面（视图内条目/全量条目/已建节点/根列表）
+ *  与类型筛选——按引用传入，与原闭包同对象读写，行为等价 */
+export interface PipelineTreeAnchorContext {
+  entryByKey: Map<string, PipelineViewEntry>
+  allEntryByKey: Map<string, PipelineViewEntry>
+  nodeByKey: Map<string, PipelineTreeNode>
+  roots: PipelineTreeNode[]
+  kindFilter: 'all' | 'task' | 'session'
+}
+
+/** 锚点行合成：窄筛视图（缺省只看运行中）会滤掉自身不在跑的主管道条目，
+ *  其锚点行从全量条目补渲染挂根——运行中的子任务平级挂其下，主管道归属
+ *  可见（用户裁定 2026-09-24）。视图内已含（含稍后建行的前向引用，走
+ *  childrenMap 合并）或已建的锚点直接复用；类型筛选命不中的锚点不合成 */
+// eslint-disable-next-line react-refresh/only-export-components -- 同上：锚点合成纯函数随树部件同文件导出
+export function ensureAnchorNode(key: string, ctx: PipelineTreeAnchorContext): string | undefined {
+  if (ctx.entryByKey.has(key) || ctx.nodeByKey.has(key)) return key
+  const anchorEntry = ctx.allEntryByKey.get(key)
+  if (!anchorEntry) return undefined
+  if (ctx.kindFilter !== 'all' && anchorEntry.kind !== ctx.kindFilter) return undefined
+  const node: PipelineTreeNode = { key, entry: anchorEntry, depth: 0, children: [] }
+  ctx.nodeByKey.set(key, node)
+  ctx.roots.push(node)
+  return key
+}
+
 export function PipelineTree({
   tree,
   nowMs,
@@ -72,17 +129,21 @@ export function PipelineTree({
 }: {
   tree: PipelineTreeNode[]
 } & PipelineTreeCommonProps) {
-  // 主管道（顶层）与容器任务按状态分组：执行中 / 最近完成（子树跟随父级）；
+  // 主管道（顶层）与容器任务按状态分组：执行中 / 最近完成（子树跟随父级）。
+  // 分组看子树是否含执行中成员：窄筛视图下合成的主管道锚点行（自身终态/空闲）
+  // 带运行中子任务时归「执行中的管道」，不按锚点自身状态误入「最近完成」；
   // 项目登记行不是管道运行，独立成「项目」组（既非执行中也非已完成）
-  const isActiveNode = (n: PipelineTreeNode): boolean =>
-    n.entry.status === 'running' || n.entry.status === 'suspended'
+  const isSubtreeActive = (n: PipelineTreeNode): boolean =>
+    n.entry.status === 'running'
+    || n.entry.status === 'suspended'
+    || n.children.some(isSubtreeActive)
   const split = (nodes: PipelineTreeNode[]) => {
     const projects: PipelineTreeNode[] = []
     const active: PipelineTreeNode[] = []
     const done: PipelineTreeNode[] = []
     for (const n of nodes) {
       if (n.entry.kind === 'project') projects.push(n)
-      else if (isActiveNode(n)) active.push(n)
+      else if (isSubtreeActive(n)) active.push(n)
       else done.push(n)
     }
     return { projects, active, done }

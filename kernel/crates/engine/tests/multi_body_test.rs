@@ -456,8 +456,7 @@ async fn test_phase_loop_guard_errors() {
     let result = executor.run_compiled(&compiled, json!({})).await;
     assert!(
         result.is_err(),
-        "Phase 互跳应被转移防护截断为错误：{:?}",
-        result
+        "Phase 互跳应被转移防护截断为错误：{result:?}"
     );
 }
 

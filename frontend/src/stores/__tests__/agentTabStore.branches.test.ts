@@ -11,11 +11,11 @@
  *   活跃子 Tab 懒加载
  */
 import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest'
+import { makeSessionFactory, makeSubTabFactory, makeSubTabInputFactory } from './helpers/agentTabTestUtils'
 import type * as agentTabStoreMod from '@/stores/agentTabStore'
-import type { loggers } from '@/utils/logger'
 import type { Session } from '@/types/models'
 import type { AgentTab } from '@/types/task'
-import { makeSessionFactory, makeSubTabFactory, makeSubTabInputFactory } from './helpers/agentTabTestUtils'
+import type { loggers } from '@/utils/logger'
 
 vi.mock('@/services/api/session', () => ({
   getSessions: vi.fn(),

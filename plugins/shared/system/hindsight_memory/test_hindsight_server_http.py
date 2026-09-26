@@ -575,7 +575,7 @@ class TestKbDomainDispatch:
 
     def test_categories_routes(self, srv: Any, kb: Any) -> None:
         # POST 创建
-        body = base64.b64encode('{"name": "架构"}'.encode("utf-8")).decode("ascii")
+        body = base64.b64encode('{"name": "架构"}'.encode()).decode("ascii")
         out = _run(srv._handle_kb_domain(
             "/ext/hindsight_memory_service/knowledge-base/categories", "POST", body, {}, None,
         ))

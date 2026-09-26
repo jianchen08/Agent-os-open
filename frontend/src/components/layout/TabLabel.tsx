@@ -12,8 +12,8 @@
  * 本元素（见该 hook 注释：不走 React style 对象）。
  */
 
-import { cn } from '@/lib/utils'
 import { useFadeOverflow } from '@/hooks/useFadeOverflow'
+import { cn } from '@/lib/utils'
 
 export interface TabLabelProps {
   /** 标签标题（完整文本；遮蔽只影响呈现，不截断数据） */

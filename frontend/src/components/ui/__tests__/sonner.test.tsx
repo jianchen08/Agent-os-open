@@ -14,7 +14,6 @@
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
-
 import { Toaster, toast } from '../sonner'
 
 describe('Toaster 挂载', () => {

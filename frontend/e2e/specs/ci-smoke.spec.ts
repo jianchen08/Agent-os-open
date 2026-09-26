@@ -18,9 +18,11 @@ test.describe('CI 冒烟（零外部依赖）', () => {
     // #root 被 React 挂载后非空（非白屏崩溃）
     await expect(page.locator('#root')).not.toBeEmpty({ timeout: 30_000 })
 
-    // 渲染出实质内容（非空白页）
-    const bodyText = await page.locator('body').innerText()
-    expect(bodyText.trim().length, '页面应渲染出实质内容').toBeGreaterThan(0)
+    // 渲染出实质内容（非空白页）。web-first 断言（执行方案批次7-①）：
+    // toContainText 自动重试，不再依赖「not.toBeEmpty 后一次性读 innerText」
+    // 的非同步组合——首屏「路由内容整树卸载」的 ~4ms 窗口曾致 8.3% flake
+    //（评估 §0.3(7)），#root 卸载窗口期本断言会重试而非失败。
+    await expect(page.locator('#root')).toContainText(/\S/, { timeout: 30_000 })
 
     // 无致命未捕获 JS 错误（过滤后端缺失导致的网络错误）
     const fatal = errors.filter((e) => !e.includes('net::') && !e.includes('Network Error'))

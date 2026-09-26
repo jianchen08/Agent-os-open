@@ -845,6 +845,44 @@ describe('GlobalWebSocketService', () => {
 
       disconnect()
     })
+
+    // 消息级原生 agent_id 通道（附身身份切换，用户裁定 2026-09-24）：
+    // 带 agentId 则帧带 snake_case agent_id（内核 chat_send_handler params 契约），
+    // 不带则帧无该键（后端按既有执行上下文执行，不触发身份切换）。
+    it('sendUserInput 携带 agentId 时帧带 agent_id 字段', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+
+      service.sendUserInput('thread-1', '附身测试', {
+        pipelineId: 'pipe-s',
+        clientMessageId: 'cmid-agent',
+        agentId: 'mode_roleplay/card_luna',
+      })
+
+      const ws = await connectAndOpen({ connect, getLatestWs })
+
+      const userMsg = getSentMessages(ws).find((c: any) => c?.type === 'user_input')
+      expect(userMsg).toBeDefined()
+      expect(userMsg.agent_id).toBe('mode_roleplay/card_luna')
+
+      disconnect()
+    })
+
+    it('sendUserInput 未携带 agentId 时帧无 agent_id 键', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+
+      service.sendUserInput('thread-1', '无附身', {
+        pipelineId: 'pipe-s',
+        clientMessageId: 'cmid-noagent',
+      })
+
+      const ws = await connectAndOpen({ connect, getLatestWs })
+
+      const userMsg = getSentMessages(ws).find((c: any) => c?.type === 'user_input')
+      expect(userMsg).toBeDefined()
+      expect(userMsg).not.toHaveProperty('agent_id')
+
+      disconnect()
+    })
   })
 
   // ──────────────────────────────────────────────

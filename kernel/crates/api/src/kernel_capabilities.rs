@@ -868,6 +868,7 @@ mod tests {
                 _ec: Option<&Value>,
                 _ov: Option<&Value>,
                 _a: &str,
+                _pipeline_config_id: Option<&str>,
                 _cmid: &str,
                 _source: PendingInputSource,
             ) -> Result<(), String> {

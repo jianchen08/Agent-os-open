@@ -18,25 +18,11 @@ import { makeEventFactory } from './helpers/streamingEventFactory'
 import type * as handlersMod from '@/services/websocket/streaming/handlers'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    stream: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    pipelineStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  },
-  createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
-}))
+vi.mock('@/utils/logger', async () => (await import('../../../../../stores/__tests__/helpers/storeTestMocks')).loggerMockFull())
 
-vi.mock('@/services/api/session', () => ({
-  getMessages: vi.fn().mockResolvedValue({ messages: [], total: 0, session_id: '' }),
-  mergeConsecutiveAssistantMessages: (msgs: any[]) => msgs,
-}))
+vi.mock('@/services/api/session', async () => (await import('../../../../../stores/__tests__/helpers/storeTestMocks')).apiSessionMockFull())
 
-vi.mock('@/utils/retry', () => ({
-  retry: (fn: () => any) => fn(),
-  isRetryableError: vi.fn().mockReturnValue(false),
-}))
+vi.mock('@/utils/retry', async () => (await import('../../../../../stores/__tests__/helpers/storeTestMocks')).retryMockBase())
 
 const PIPELINE_ID = 'pipe-thinking-order-001'
 const MESSAGE_ID = 'msg_thinking_order_01'

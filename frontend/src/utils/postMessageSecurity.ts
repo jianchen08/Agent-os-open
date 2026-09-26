@@ -93,3 +93,29 @@ export function validateWebviewEvent(
   if (!validateWebviewToken(event.data, expectedToken)) return null
   return event.data
 }
+
+// ── 上行方法封闭表（2026-09-25 桥协议统一，方案 §3.4「一座桥」）──────────────
+//
+// 沙箱 iframe → 宿主的全部合法桥 method 登记于此；新增桥 = 本表登记 +
+// WebviewWidget 路由分支 + 校验器，禁止散落 handler。
+// - '__ready'：面板就绪信号（宿主以此恢复下行桥推送）；
+// - 'theme.apply'：会话主题档推送（sessionThemeStore 深校验 fail-closed）；
+// - 'roleplay.possess'：附身卡上行（roleplayPossessStore，载荷 fail-closed）。
+// - 'roleplay.continue'：以卡开扮演会话上行（roleplayContinue 服务：建会话 +
+//   会话执行选项绑定卡身份，载荷 fail-closed）。
+// 表外 method 分两类：'/' 前缀 = 本插件 /ext REST 数据面约定（自带前缀
+// 白名单，见 WebviewWidget）；其余 = 命令调用，走本插件命令白名单（同处）。
+
+export const WEBVIEW_UPLINK_METHODS = ['__ready', 'theme.apply', 'roleplay.possess', 'roleplay.continue'] as const
+
+export type WebviewUplinkMethod = (typeof WEBVIEW_UPLINK_METHODS)[number]
+
+/** method 是否为 '/' 开头的本插件 /ext REST 路径约定（不属于桥词表）。 */
+export function isRestPathMethod(method: string): boolean {
+  return method.startsWith('/')
+}
+
+/** method 是否在桥封闭表内（宿主侧应各自有路由分支处理）。 */
+export function isBridgedUplinkMethod(method: string): boolean {
+  return (WEBVIEW_UPLINK_METHODS as readonly string[]).includes(method)
+}

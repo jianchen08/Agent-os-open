@@ -141,7 +141,21 @@
           },
           "required": []
         },
-        "category": "system"
+        "category": "system",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "manifest": {
+              "type": "object"
+            }
+          }
+        },
+        "render": {
+          "card": "generic"
+        }
       },
       {
         "name": "dsh_list_plugins",
@@ -151,7 +165,21 @@
           "properties": {},
           "required": []
         },
-        "category": "system"
+        "category": "system",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "plugins": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "render": {
+          "card": "table"
+        }
       }
     ],
     "route_signals": [],

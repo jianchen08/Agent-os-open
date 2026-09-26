@@ -12,9 +12,9 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getEvaluationMetrics } from '@/services/api/evaluationMetrics'
-import type { EvaluationMetric } from '@/services/api/evaluationMetrics'
 import { createTestQueryClient, renderWithProviders } from '@/test/renderWithProviders'
 import { DebugEvaluationMetricsPage } from '../DebugEvaluationMetricsPage'
+import type { EvaluationMetric } from '@/services/api/evaluationMetrics'
 
 vi.mock('@/services/api/evaluationMetrics', () => ({
   getEvaluationMetrics: vi.fn(),

@@ -8,7 +8,6 @@
 
 import { create } from 'zustand'
 import { STORAGE_KEYS } from '../constants/storage'
-import { queryClient } from '../services/query/queryClient'
 import * as authApi from '../services/api/auth'
 import {
   getAccessToken,
@@ -25,6 +24,7 @@ import {
   onTokenChanged,
 } from '../services/auth/tokenLifecycle'
 import { registerAuthExpiredCallback } from '../services/authCallbacks'
+import { queryClient } from '../services/query/queryClient'
 import type { LoginResponse, RefreshResponse, UserInfoResponse } from '../types/api'
 import type { User } from '../types/models'
 

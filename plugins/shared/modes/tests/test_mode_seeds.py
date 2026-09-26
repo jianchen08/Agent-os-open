@@ -1,5 +1,4 @@
 # @feature: FP-0.2.二 模式体系测试补标 | @ci: python-coverage
-# -*- coding: utf-8 -*-
 """五模式出厂种子契约测试：manifest / profile / server 三面同验。
 
 种子单元自包含（目录级播种/升级/回退的结构前提），五份同构种子共用同一
@@ -74,7 +73,7 @@ def test_describe_returns_contract_fields(plugin_id: str, mode: str, panel_page_
 def test_get_profile_returns_full_seed(plugin_id: str, mode: str, panel_page_id: str) -> None:
     module = _load_server(plugin_id)
     profile = asyncio.run(module.mode_get_profile())
-    assert PROFILE_REQUIRED_KEYS <= set(profile)
+    assert set(profile) >= PROFILE_REQUIRED_KEYS
     assert profile["mode"] == mode
     assert profile["panel_page_id"] == panel_page_id
     # describe 与 get_profile 同源一致（单一真值，不得两份内容漂移）

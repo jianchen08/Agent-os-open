@@ -21,9 +21,9 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { ErrorSourceBadge } from '@/components/shared/ErrorSourceBadge'
 import { TOOL_CONTENT_SCROLL_CLASS } from '@/lib/toolCardStyles'
 import { cn } from '@/lib/utils'
-import { formatFileSize } from '@/utils/format'
 import { formatDuration } from '@/types/activity'
 import { useConfirmDialog } from '@/utils/confirm'
+import { formatFileSize } from '@/utils/format'
 import { DetailBlock } from './ActivityBlockViews'
 import type {
   ActivityCardProps,

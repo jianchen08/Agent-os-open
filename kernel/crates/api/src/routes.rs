@@ -2450,6 +2450,9 @@ pub async fn plugins_status_handler(
                 })).collect::<Vec<_>>(),
                 "has_contributes": m.contributes.is_some(),
                 "has_http_endpoints": !m.http_endpoints.is_empty(),
+                // 准入分级（2026-09-25）：被剥除的危险前端能力（host_js/host_css），
+                // 非空 = 设置页插件卡显示"受限"（禁静默降级）
+                "restricted_capabilities": m.restricted_capabilities,
                 "error": verify_errors.get(&m.id),
             })
         })
@@ -2592,9 +2595,9 @@ pub async fn plugins_set_enabled_handler(
         "registered": registered,
         "cascade_disabled": cascade_disabled,
         "message": if new_enabled {
-            format!("已启用插件 {}（立即生效）", plugin_id)
+            format!("已启用插件 {plugin_id}（立即生效）")
         } else if cascade_disabled.is_empty() {
-            format!("已禁用插件 {}（立即生效）", plugin_id)
+            format!("已禁用插件 {plugin_id}（立即生效）")
         } else {
             format!(
                 "已禁用插件 {}（立即生效）；连带摘除依赖方：{}",
@@ -3059,6 +3062,10 @@ pub async fn put_pipeline_config_handler(
     // B4/B6：原子写 + round-trip 校验（复用 config_service）
     atomic_write_yaml(&path, &req.data).map_err(config_err_to_api)?;
 
+    // 管道编译缓存失效：写盘成功即失效对应键——下次显式指定该配置时按需
+    // 重载新内容（缓存无 mtime 校验，PUT 是唯一失效路径）。
+    crate::server::pipeline_cache_invalidate(&name);
+
     let new_etag = compute_etag(
         std::fs::read_to_string(&path)
             .map_err(ApiError::internal("re-read after write failed"))?
@@ -3158,6 +3165,7 @@ mod state_summary_tests {
             lifecycle: None,
             native: None,
             granted_capabilities: vec![],
+            restricted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -4009,6 +4017,7 @@ mod pending_inputs_failure_tests {
                     client_message_id: cmid.to_string(),
                     execution_context: None,
                     state_overlay: None,
+                    pipeline_config_id: None,
                     created_at: chrono::Utc::now().to_rfc3339(),
                 },
             )
@@ -4242,6 +4251,7 @@ mod pending_inputs_failure_tests {
             client_message_id: String::new(),
             execution_context: None,
             state_overlay: None,
+            pipeline_config_id: None,
             created_at: chrono::Utc::now().to_rfc3339(),
         }
     }
@@ -4765,6 +4775,7 @@ mod routes_http_handler_tests {
             lifecycle: None,
             native: None,
             granted_capabilities: vec![],
+            restricted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -5751,6 +5762,7 @@ mod routes_http_handler_tests {
             client_message_id: cmid.to_string(),
             execution_context: None,
             state_overlay: None,
+            pipeline_config_id: None,
             created_at: chrono::Utc::now().to_rfc3339(),
         }
     }
@@ -7268,6 +7280,7 @@ mod app_state_builder_tests {
             lifecycle: None,
             native: None,
             granted_capabilities: vec![],
+            restricted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],

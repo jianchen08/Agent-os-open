@@ -17,13 +17,12 @@ _paths = bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根入 sys.
 
 # tasks/projects 域 HTTP 面自持。
 # http_api 内部懒 import server.plugin 取能力句柄，此处顶层 import 无环。
+import events as task_events  # noqa: E402,PLC0415
 import http_api  # noqa: E402,PLC0415
 from service import TaskService  # noqa: E402
 from task_types import TaskStatus  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
-
-import events as task_events  # noqa: E402,PLC0415
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("task_service")
@@ -80,6 +79,7 @@ async def _on_load(params: dict[str, Any]) -> None:
     # 清理链跨进程能力：pipeline-executor（删任务时停/删管道数据）+
     # frontend（task_deleted 前端通知）。缺 capability 时降级留痕。
     import _task_cleanup  # noqa: PLC0415
+
     from agentos_plugin_sdk.capability import FrontendEmitter  # noqa: PLC0415
 
     async def _exec(params: dict[str, Any]) -> dict[str, Any]:

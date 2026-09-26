@@ -46,7 +46,7 @@ def _load_module(name: str, file_name: str) -> Any:
     return module
 
 
-@pytest.fixture()
+@pytest.fixture
 def tool_mod() -> Any:
     return _load_module("task_eval_tool_gaps_under_test", "tool.py")
 

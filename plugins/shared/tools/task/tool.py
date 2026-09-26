@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import timezone
+from datetime import UTC, timezone
 from typing import TYPE_CHECKING, Any
 
 from state_machine import InvalidTransitionError
@@ -63,7 +63,7 @@ def _as_utc(value: datetime) -> datetime:
     naive/aware 混用会使相减/比较抛 TypeError；凡从 state/DB 读出的时间
     先经此归一再运算，当前时间统一 datetime.now(timezone.utc)。
     """
-    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def _resolve_status_value(raw: str, task_ref: str) -> Any:
@@ -316,7 +316,7 @@ class TaskTool(BuiltinTool):
 
             return (completed - started).total_seconds()
 
-        return (datetime.now(timezone.utc) - started).total_seconds()
+        return (datetime.now(UTC) - started).total_seconds()
 
     async def _calc_elapsed_from_runs(self, pipeline_id: str) -> float | None:
         """任务耗时（秒）——state 桥路径：run 记录起点终点直算。
@@ -379,7 +379,7 @@ class TaskTool(BuiltinTool):
         if all_terminal and ended_ats:
             return (max(ended_ats) - started).total_seconds()
 
-        return (datetime.now(timezone.utc) - started).total_seconds()
+        return (datetime.now(UTC) - started).total_seconds()
 
     @staticmethod
     def _format_elapsed(seconds: float | None) -> str:

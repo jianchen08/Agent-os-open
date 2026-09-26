@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """真实轨迹采集脚本（运维通道）：DB 只读直查 → 筛选 → harvested 套件 + 轨迹样本库。
 
 用法（root venv，项目根 cwd）：

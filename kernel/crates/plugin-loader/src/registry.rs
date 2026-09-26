@@ -463,12 +463,11 @@ impl CapabilityRegistry for CapabilityRegistryImpl {
 /// 3. **denylist 子路径**：path 不得包含 `api/v1`（防 `/ext/{pid}/api/v1/...` 越界）。
 fn validate_http_route_path(plugin_id: &str, path: &str) -> Result<(), String> {
     // 规则 1：强制 /ext/{plugin_id}/** 命名空间。
-    let expected_ns = format!("/ext/{}/", plugin_id);
-    let exact_ns = format!("/ext/{}", plugin_id);
+    let expected_ns = format!("/ext/{plugin_id}/");
+    let exact_ns = format!("/ext/{plugin_id}");
     if path != exact_ns && !path.starts_with(&expected_ns) {
         return Err(format!(
-            "http route path '{}' must be under namespace '/ext/{}/**'",
-            path, plugin_id
+            "http route path '{path}' must be under namespace '/ext/{plugin_id}/**'"
         ));
     }
 
@@ -476,8 +475,7 @@ fn validate_http_route_path(plugin_id: &str, path: &str) -> Result<(), String> {
     for seg in path.split('/') {
         if KERNEL_RESERVED_PATH_SEGMENTS.contains(&seg) {
             return Err(format!(
-                "http route path '{}' contains kernel-reserved segment '{}'",
-                path, seg
+                "http route path '{path}' contains kernel-reserved segment '{seg}'"
             ));
         }
     }
@@ -485,8 +483,7 @@ fn validate_http_route_path(plugin_id: &str, path: &str) -> Result<(), String> {
     // 规则 3：denylist 子路径 api/v1（覆盖 /api/v1/* 与 /ext/{pid}/api/v1/*）。
     if path.contains("api/v1") {
         return Err(format!(
-            "http route path '{}' contains kernel-reserved subpath 'api/v1'",
-            path
+            "http route path '{path}' contains kernel-reserved subpath 'api/v1'"
         ));
     }
     Ok(())
@@ -974,7 +971,7 @@ mod tests {
     fn make_tool_descriptor(name: &str, plugin_id: &str, category: ToolCategory) -> ToolDescriptor {
         ToolDescriptor {
             name: name.to_string(),
-            description: format!("Tool {}", name),
+            description: format!("Tool {name}"),
             plugin_id: plugin_id.to_string(),
             input_schema: json!({}),
             output_schema: None,
@@ -1432,9 +1429,9 @@ mod tests {
 
     fn make_http_endpoint(plugin_id: &str, suffix: &str) -> HttpEndpoint {
         HttpEndpoint {
-            route_id: format!("{}-{}", plugin_id, suffix),
+            route_id: format!("{plugin_id}-{suffix}"),
             method: "GET".to_string(),
-            path: format!("/ext/{}/{}", plugin_id, suffix),
+            path: format!("/ext/{plugin_id}/{suffix}"),
             auth: Some("none".to_string()),
             handler_capability: "http.handle".to_string(),
             timeout_ms: None,
@@ -1556,7 +1553,7 @@ mod tests {
             force_include_tools: Vec::new(),
             state: None,
             id: id.to_string(),
-            name: format!("P {}", id),
+            name: format!("P {id}"),
             description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::System,
@@ -1579,6 +1576,7 @@ mod tests {
             http_endpoints: vec![],
             ui_schema: None,
             contributes: None,
+            restricted_capabilities: Vec::new(),
             enabled: None,
             activation: None,
             provides: None,

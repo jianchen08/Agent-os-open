@@ -57,3 +57,13 @@ export function getModePanelIcon(mode: string): string | undefined {
   const option = taskModeOptionOf(mode)
   return typeof option?.icon === 'string' ? option.icon : undefined
 }
+
+/**
+ * 模式前缀 → 呈现数据端点（呈现档案插槽协议的数据源映射，消费方
+ * presenterProfiles.ts）。agent_id 命中 `mode_X/card_y` 形态且 mode_X 在映射内
+ * → 经该端点取 {cards:[...]} 按 id 匹配呈现档案；不在映射内的前缀（含无 `/`
+ * 的裸 agent_id）走 agents 注册表老路，不入本协议。
+ */
+export const MODE_PRESENTER_SOURCES: Record<string, string> = {
+  mode_roleplay: '/ext/mode_roleplay/data/cards',
+}

@@ -99,19 +99,7 @@ struct SqliteSection {
 /// 文件不存在 = 未配置（走默认 sqlite）；文件存在但读取/YAML 解析失败 = `Err`
 /// （数据正确性优先：坏配置可能让读写落到错误 driver/路径，拒绝启动而非静默默认）。
 pub fn resolve_storage_config(config_root: &Path) -> Result<StorageConfig, StorageError> {
-    // config_root 相对时先按进程 CWD 绝对化——project_root 必须是绝对基准，
-    // 相对 db path 锚定后才与 CWD 无关。
-    let config_root_abs = if config_root.is_absolute() {
-        config_root.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(config_root))
-            .unwrap_or_else(|_| config_root.to_path_buf())
-    };
-    let project_root: PathBuf = config_root_abs
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
+    let project_root: PathBuf = project_root_of(config_root);
 
     // ① config 文件：NotFound = 未配置；其余读失败/解析失败 = Err
     let config_path = config_root.join(STORAGE_CONFIG_FILE);
@@ -158,6 +146,93 @@ pub fn resolve_storage_config(config_root: &Path) -> Result<StorageConfig, Stora
         driver,
         sqlite_path,
     })
+}
+
+/// config_root 对应的项目根（config 的父目录）；config_root 相对时按进程 CWD
+/// 绝对化——project_root 必须是绝对基准，相对 db path 锚定后才与 CWD 无关。
+/// [`resolve_storage_config`] 与 [`migrate_legacy_db_to_user_root`] 共用此定位
+/// 规则，保证"旧位置"判定与解析用的项目根同源。
+fn project_root_of(config_root: &Path) -> PathBuf {
+    let config_root_abs = if config_root.is_absolute() {
+        config_root.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(config_root))
+            .unwrap_or_else(|_| config_root.to_path_buf())
+    };
+    config_root_abs
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// 启动迁移（BUG-85）：装机形态默认库位置已改用户根（electron 注入
+/// `AGENTOS_DB_PATH`），安装目录（项目根 = `resources\`）残留的存量库在首启时
+/// 复制到新位置——否则静默卸载会把它当程序文件删掉，用户数据全丢。
+///
+/// 触发条件（全部满足才复制，其余一律不动，返回 `Ok(false)`）：
+/// 1. driver=sqlite 且非 `:memory:`；
+/// 2. 目标（本次解析出的库路径）尚不存在——**两处都有 = 用新位置**，绝不回拷覆盖；
+/// 3. 项目根存在同名存量库且非空（0 字节残留无数据可迁）；
+/// 4. 存量库与目标不是同一物理路径（dev 仓形态：yaml 相对路径锚定项目根，
+///    新旧同位，天然不触发——dev 现网行为不变）。
+///
+/// 复制 db + `-wal` + `-shm`（启动期旧内核未持库，文件级复制即完整快照）；
+/// 任一步失败 → 清掉已产生的半成品并返回 `Err`（fail-closed 拒绝启动）——
+/// **绝不静默换新库**。迁移不删旧库（原件保留，卸载面自会清理）。
+pub fn migrate_legacy_db_to_user_root(
+    cfg: &StorageConfig,
+    config_root: &Path,
+) -> Result<bool, StorageError> {
+    if cfg.driver != "sqlite" || cfg.sqlite_path == ":memory:" {
+        return Ok(false);
+    }
+    let current = Path::new(&cfg.sqlite_path);
+    let project_root = project_root_of(config_root);
+    let legacy = project_root.join(DB_FILENAME);
+    if legacy == current {
+        return Ok(false);
+    }
+    if current.exists() {
+        return Ok(false);
+    }
+    let Ok(meta) = std::fs::metadata(&legacy) else {
+        return Ok(false);
+    };
+    if meta.len() == 0 {
+        return Ok(false);
+    }
+
+    if let Some(parent) = current.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            StorageError::Io(format!(
+                "迁移存量库失败：创建目标目录 {} 失败: {e}",
+                parent.display()
+            ))
+        })?;
+    }
+    let mut copied: Vec<PathBuf> = Vec::new();
+    for suffix in ["", "-wal", "-shm"] {
+        let src = project_root.join(format!("{DB_FILENAME}{suffix}"));
+        if !src.is_file() {
+            continue;
+        }
+        let dst = current.with_file_name(format!("{DB_FILENAME}{suffix}"));
+        match std::fs::copy(&src, &dst) {
+            Ok(_) => copied.push(dst),
+            Err(e) => {
+                for done in &copied {
+                    let _ = std::fs::remove_file(done);
+                }
+                return Err(StorageError::Io(format!(
+                    "迁移存量库失败：复制 {} → {} 失败: {e}（半成品已清理，拒绝静默换新库）",
+                    src.display(),
+                    dst.display()
+                )));
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// 相对 db path 锚定项目根解析（与 plugins/shared/kernel_db.py 同规则）：
@@ -356,7 +431,7 @@ storage:
             Ok(_) => panic!("unknown driver 应报错"),
             Err(e) => e,
         };
-        let msg = format!("{}", err);
+        let msg = format!("{err}");
         assert!(msg.contains("unknown storage driver"), "got: {msg}");
         assert!(msg.contains("postgres"), "留桩 driver 应点名: {msg}");
     }
@@ -425,5 +500,166 @@ storage:
         let cfg = resolve_storage_config(dir.path()).expect("resolve ok");
         std::env::remove_var(ENV_DB_PATH);
         assert_eq!(cfg.sqlite_path, ":memory:");
+    }
+
+    // ==== 启动迁移（BUG-85：装机形态库位置改用户根，安装目录存量库随卸载被删） ====
+
+    fn write_file(path: &Path, bytes: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// 存量库在项目根（装机形态=安装目录 resources\）、目标在用户根且不存在
+    /// → db + wal + shm 三件复制到目标，返回 true；旧库原件保留（卸载面自清）。
+    #[test]
+    fn migrate_copies_legacy_db_wal_shm_to_target() {
+        let project = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let legacy = project.path().join(DB_FILENAME);
+        write_file(&legacy, b"legacy-db-bytes");
+        write_file(
+            &project.path().join(format!("{DB_FILENAME}-wal")),
+            b"wal-bytes",
+        );
+        write_file(
+            &project.path().join(format!("{DB_FILENAME}-shm")),
+            b"shm-bytes",
+        );
+        let target = user.path().join(DB_FILENAME);
+        let cfg = StorageConfig {
+            driver: "sqlite".to_string(),
+            sqlite_path: target.to_string_lossy().to_string(),
+        };
+
+        let migrated = migrate_legacy_db_to_user_root(&cfg, &project.path().join("config"))
+            .expect("迁移应成功");
+
+        assert!(migrated, "旧位置有库且新位置无库 → 应执行迁移");
+        assert_eq!(std::fs::read(&target).unwrap(), b"legacy-db-bytes");
+        assert_eq!(
+            std::fs::read(user.path().join(format!("{DB_FILENAME}-wal"))).unwrap(),
+            b"wal-bytes"
+        );
+        assert_eq!(
+            std::fs::read(user.path().join(format!("{DB_FILENAME}-shm"))).unwrap(),
+            b"shm-bytes"
+        );
+        assert!(legacy.exists(), "迁移是复制不是搬移：旧库原件保留");
+    }
+
+    /// 两处都有库 = 用新位置（不回拷覆盖）：目标内容原样，返回 false。
+    #[test]
+    fn migrate_noop_when_target_already_exists() {
+        let project = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        write_file(&project.path().join(DB_FILENAME), b"old-data");
+        let target = user.path().join(DB_FILENAME);
+        write_file(&target, b"new-data");
+        let cfg = StorageConfig {
+            driver: "sqlite".to_string(),
+            sqlite_path: target.to_string_lossy().to_string(),
+        };
+
+        let migrated =
+            migrate_legacy_db_to_user_root(&cfg, &project.path().join("config")).expect("应 no-op");
+
+        assert!(!migrated, "目标已存在 → 不迁移");
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"new-data",
+            "新位置内容不得被旧库回拷覆盖"
+        );
+    }
+
+    /// dev 仓形态：目标与项目根存量库同一物理路径 → no-op（dev 现网行为不变）。
+    #[test]
+    fn migrate_noop_when_target_is_legacy_path() {
+        let project = tempfile::tempdir().unwrap();
+        let legacy = project.path().join(DB_FILENAME);
+        write_file(&legacy, b"dev-db");
+        let cfg = StorageConfig {
+            driver: "sqlite".to_string(),
+            sqlite_path: legacy.to_string_lossy().to_string(),
+        };
+
+        let migrated =
+            migrate_legacy_db_to_user_root(&cfg, &project.path().join("config")).expect("应 no-op");
+
+        assert!(!migrated, "新旧同位 → 不迁移");
+        assert_eq!(std::fs::read(&legacy).unwrap(), b"dev-db");
+    }
+
+    /// 旧位置无库或仅 0 字节残留 → no-op（全新安装无数据可迁）。
+    #[test]
+    fn migrate_noop_when_legacy_missing_or_empty() {
+        let project = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let target = user.path().join(DB_FILENAME);
+        let cfg = StorageConfig {
+            driver: "sqlite".to_string(),
+            sqlite_path: target.to_string_lossy().to_string(),
+        };
+        // ① 项目根根本没有库
+        let migrated =
+            migrate_legacy_db_to_user_root(&cfg, &project.path().join("config")).expect("应 no-op");
+        assert!(!migrated, "无存量库 → 不迁移");
+        assert!(!target.exists(), "no-op 不得凭空造库");
+        // ② 0 字节残留（建库未写入）
+        write_file(&project.path().join(DB_FILENAME), b"");
+        let migrated =
+            migrate_legacy_db_to_user_root(&cfg, &project.path().join("config")).expect("应 no-op");
+        assert!(!migrated, "空库残留无数据可迁 → 不迁移");
+        assert!(!target.exists());
+    }
+
+    /// 非 sqlite driver / :memory: → no-op（内存库无迁移语义）。
+    #[test]
+    fn migrate_noop_for_memory_driver_and_alias() {
+        let project = tempfile::tempdir().unwrap();
+        let legacy = project.path().join(DB_FILENAME);
+        write_file(&legacy, b"db");
+        let memory_cfg = StorageConfig {
+            driver: "memory".to_string(),
+            sqlite_path: String::new(),
+        };
+        let alias_cfg = StorageConfig {
+            driver: "sqlite".to_string(),
+            sqlite_path: ":memory:".to_string(),
+        };
+        assert!(
+            !migrate_legacy_db_to_user_root(&memory_cfg, &project.path().join("config")).unwrap()
+        );
+        assert!(
+            !migrate_legacy_db_to_user_root(&alias_cfg, &project.path().join("config")).unwrap()
+        );
+    }
+
+    /// 复制失败 fail-closed：目标目录不可创建 → Err 拒绝启动（不静默换新库），
+    /// 旧库原件保留（数据未丢，可人工介入后重试）。
+    #[test]
+    fn migrate_fails_closed_when_target_uncreatable() {
+        let project = tempfile::tempdir().unwrap();
+        write_file(&project.path().join(DB_FILENAME), b"precious");
+        // 目标父节点是一个已存在的**文件** → create_dir_all 必败
+        let blocker = tempfile::tempdir().unwrap();
+        let blocker_file = blocker.path().join("not-a-dir");
+        std::fs::write(&blocker_file, b"x").unwrap();
+        let target = blocker_file.join(DB_FILENAME);
+        let cfg = StorageConfig {
+            driver: "sqlite".to_string(),
+            sqlite_path: target.to_string_lossy().to_string(),
+        };
+
+        let err = match migrate_legacy_db_to_user_root(&cfg, &project.path().join("config")) {
+            Ok(m) => panic!("目标不可创建应 Err，got migrated={m}"),
+            Err(e) => e,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("迁移存量库失败"), "err: {msg}");
+        assert_eq!(
+            std::fs::read(project.path().join(DB_FILENAME)).unwrap(),
+            b"precious",
+            "失败路径旧库原件保留"
+        );
     }
 }

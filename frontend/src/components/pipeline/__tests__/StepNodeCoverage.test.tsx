@@ -22,6 +22,7 @@ import React from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import { StepNode } from '../StepNode'
+import { makeOps } from './helpers/pipelineTestUtils'
 import type { PipelineEditorOps, PipelineStepV2 } from '@/services/pipeline/model'
 import type * as openerMod from '@/services/workspacePanelOpener'
 
@@ -32,16 +33,6 @@ vi.mock('@/services/workspacePanelOpener', async (importOriginal) => {
 
 const { openWorkspacePanel } = await import('@/services/workspacePanelOpener')
 
-function makeOps() {
-  const calls: Array<{ op: keyof PipelineEditorOps; args: unknown[] }> = []
-  const ops: PipelineEditorOps = {
-    set: vi.fn((...args: unknown[]) => calls.push({ op: 'set', args })),
-    remove: vi.fn((...args: unknown[]) => calls.push({ op: 'remove', args })),
-    insert: vi.fn((...args: unknown[]) => calls.push({ op: 'insert', args })),
-    move: vi.fn((...args: unknown[]) => calls.push({ op: 'move', args })),
-  }
-  return { ops, calls }
-}
 
 const catalog = [
   {

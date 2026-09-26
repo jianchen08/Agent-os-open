@@ -17,7 +17,6 @@ from typing import Any
 
 import psutil
 import pytest
-
 from detector import IDEDetector
 from lsp_types import IDEType
 

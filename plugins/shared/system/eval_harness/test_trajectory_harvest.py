@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # @feature: FP-0.2.二 真实轨迹筛选采集（ADR 2026-09-16-trajectory-harvest-sourcing） | @ci: python-coverage
 """trajectory_harvest 纯函数单测：终态过滤/去重/oracle 门控/归桶/双产物审计。
 

@@ -9,15 +9,17 @@
  * 漂移/手写回潮检查：
  *     python scripts/check_frontend_endpoints_sync.py
  */
-/* eslint-disable */
+ 
 
 
-  /** agent_manager（Agent Manager）：plugin.json 声明 4 端点 */
+  /** agent_manager（Agent Manager）：plugin.json 声明 6 端点 */
   export const AGENT_MANAGER_ENDPOINTS = {
     'agent_manager_list': '/ext/agent_manager/agents',
     'agent_manager_schema': '/ext/agent_manager/agents/schema',
     'agent_manager_get_config': '/ext/agent_manager/agents/{id}/config',
     'agent_manager_put_config': '/ext/agent_manager/agents/{id}/config',
+    'agent_manager_mode_get_config': '/ext/agent_manager/agents/{mode_id}/{stem}/config',
+    'agent_manager_mode_put_config': '/ext/agent_manager/agents/{mode_id}/{stem}/config',
   } as const
 
   /** approval_service（Approval Service）：plugin.json 声明 7 端点 */
@@ -88,6 +90,11 @@
     'probe_echo': '/ext/e2e_lifecycle_probe/echo',
   } as const
 
+  /** eval_harness_service（Eval Harness Service）：plugin.json 声明 1 端点 */
+  export const EVAL_HARNESS_SERVICE_ENDPOINTS = {
+    'eval_harness_evolution_panel_page': '/ext/eval_harness_service/page/evolution-panel',
+  } as const
+
   /** evaluation_service（Evaluation Service）：plugin.json 声明 3 端点 */
   export const EVALUATION_SERVICE_ENDPOINTS = {
     'metrics_list': '/ext/evaluation_service/metrics',
@@ -153,6 +160,85 @@
     'series': '/ext/metrics_admin/series',
   } as const
 
+  /** mode_coding（Mode Coding）：plugin.json 声明 7 端点 */
+  export const MODE_CODING_ENDPOINTS = {
+    'mode_coding_action_dispatch_issue': '/ext/mode_coding/data/actions/dispatch_issue',
+    'mode_coding_data_board': '/ext/mode_coding/data/board',
+    'mode_coding_data_bootstrap': '/ext/mode_coding/data/bootstrap',
+    'mode_coding_data_messages': '/ext/mode_coding/data/messages',
+    'mode_coding_data_reviews': '/ext/mode_coding/data/reviews',
+    'mode_coding_data_sessions': '/ext/mode_coding/data/sessions',
+    'mode_coding_panel_page': '/ext/mode_coding/page/coding-panel',
+  } as const
+
+  /** mode_godot（Mode Godot）：plugin.json 声明 9 端点 */
+  export const MODE_GODOT_ENDPOINTS = {
+    'mode_godot_action_dispatch': '/ext/mode_godot/data/actions/dispatch',
+    'mode_godot_action_open_editor': '/ext/mode_godot/data/actions/open_editor',
+    'mode_godot_data_bootstrap': '/ext/mode_godot/data/bootstrap',
+    'mode_godot_data_messages': '/ext/mode_godot/data/messages',
+    'mode_godot_data_preview': '/ext/mode_godot/data/preview',
+    'mode_godot_data_records': '/ext/mode_godot/data/records',
+    'mode_godot_data_scene': '/ext/mode_godot/data/scene',
+    'mode_godot_data_sessions': '/ext/mode_godot/data/sessions',
+    'mode_godot_panel_page': '/ext/mode_godot/page/godot-panel',
+  } as const
+
+  /** mode_planning（Mode Planning）：plugin.json 声明 8 端点 */
+  export const MODE_PLANNING_ENDPOINTS = {
+    'mode_planning_action_create_project': '/ext/mode_planning/data/actions/create_project',
+    'mode_planning_action_plan': '/ext/mode_planning/data/actions/plan',
+    'mode_planning_data_bootstrap': '/ext/mode_planning/data/bootstrap',
+    'mode_planning_data_discussions': '/ext/mode_planning/data/discussions',
+    'mode_planning_data_projects': '/ext/mode_planning/data/projects',
+    'mode_planning_data_sessions': '/ext/mode_planning/data/sessions',
+    'mode_planning_data_tasks': '/ext/mode_planning/data/tasks',
+    'mode_planning_panel_page': '/ext/mode_planning/page/planning-panel',
+  } as const
+
+  /** mode_research（Mode Research）：plugin.json 声明 8 端点 */
+  export const MODE_RESEARCH_ENDPOINTS = {
+    'mode_research_action_followup': '/ext/mode_research/data/actions/followup',
+    'mode_research_action_start': '/ext/mode_research/data/actions/start',
+    'mode_research_data_bootstrap': '/ext/mode_research/data/bootstrap',
+    'mode_research_data_messages': '/ext/mode_research/data/messages',
+    'mode_research_data_report': '/ext/mode_research/data/report',
+    'mode_research_data_sessions': '/ext/mode_research/data/sessions',
+    'mode_research_data_sources': '/ext/mode_research/data/sources',
+    'mode_research_panel_page': '/ext/mode_research/page/research-panel',
+  } as const
+
+  /** mode_roleplay（Mode Roleplay）：plugin.json 声明 15 端点 */
+  export const MODE_ROLEPLAY_ENDPOINTS = {
+    'mode_roleplay_action_play': '/ext/mode_roleplay/data/actions/play',
+    'mode_roleplay_action_regenerate': '/ext/mode_roleplay/data/actions/regenerate',
+    'mode_roleplay_data_bootstrap': '/ext/mode_roleplay/data/bootstrap',
+    'mode_roleplay_data_cards': '/ext/mode_roleplay/data/cards',
+    'mode_roleplay_card_delete': '/ext/mode_roleplay/data/cards/delete',
+    'mode_roleplay_card_export': '/ext/mode_roleplay/data/cards/export',
+    'mode_roleplay_card_import': '/ext/mode_roleplay/data/cards/import',
+    'mode_roleplay_card_save': '/ext/mode_roleplay/data/cards/save',
+    'mode_roleplay_data_lorebooks': '/ext/mode_roleplay/data/lorebooks',
+    'mode_roleplay_data_messages': '/ext/mode_roleplay/data/messages',
+    'mode_roleplay_data_personas': '/ext/mode_roleplay/data/personas',
+    'mode_roleplay_persona_delete': '/ext/mode_roleplay/data/personas/delete',
+    'mode_roleplay_persona_save': '/ext/mode_roleplay/data/personas/save',
+    'mode_roleplay_data_sessions': '/ext/mode_roleplay/data/sessions',
+    'mode_roleplay_panel_page': '/ext/mode_roleplay/page/roleplay-panel',
+  } as const
+
+  /** mode_writing（Mode Writing）：plugin.json 声明 8 端点 */
+  export const MODE_WRITING_ENDPOINTS = {
+    'mode_writing_action_chapter_act': '/ext/mode_writing/data/actions/chapter_act',
+    'mode_writing_data_bible': '/ext/mode_writing/data/bible',
+    'mode_writing_data_bootstrap': '/ext/mode_writing/data/bootstrap',
+    'mode_writing_data_chapter': '/ext/mode_writing/data/chapter',
+    'mode_writing_data_messages': '/ext/mode_writing/data/messages',
+    'mode_writing_data_sessions': '/ext/mode_writing/data/sessions',
+    'mode_writing_data_works': '/ext/mode_writing/data/works',
+    'mode_writing_panel_page': '/ext/mode_writing/page/writing-panel',
+  } as const
+
   /** monitoring（Monitoring Service）：plugin.json 声明 25 端点 */
   export const MONITORING_ENDPOINTS = {
     'mon_cache_stats': '/ext/monitoring/cache-stats',
@@ -164,7 +250,6 @@
     'mon_execution_record_get': '/ext/monitoring/execution/records/{record_id}',
     'mon_execution_record_children': '/ext/monitoring/execution/records/{record_id}/children',
     'mon_orphan_runs': '/ext/monitoring/orphans',
-    'mon_payload_diag_page': '/ext/monitoring/page/payload-diag',
     'mon_tool_calls_page': '/ext/monitoring/page/tool-calls',
     'mon_payload_diag_list': '/ext/monitoring/payload-diag',
     'mon_payload_diag_get': '/ext/monitoring/payload-diag/file',
@@ -179,6 +264,7 @@
     'mon_token_usage': '/ext/monitoring/token-usage',
     'mon_token_usage_by_time': '/ext/monitoring/token-usage/by-time',
     'mon_tool_calls': '/ext/monitoring/tool-calls',
+    'mon_tool_calls_stats': '/ext/monitoring/tool-calls/stats',
     'mon_traces_by_pipeline': '/ext/monitoring/traces',
   } as const
 
@@ -189,19 +275,29 @@
     'mm_files_supported_types': '/ext/multimodal_service/files/supported-types',
   } as const
 
-  /** pipeline_godot_context（Godot Context）：plugin.json 声明 5 端点 */
-  export const PIPELINE_GODOT_CONTEXT_ENDPOINTS = {
-    'selection_preview': '/ext/pipeline_godot_context/preview',
-    'selection_clear': '/ext/pipeline_godot_context/selection',
-    'selection_push': '/ext/pipeline_godot_context/selection',
-    'selection_snapshot': '/ext/pipeline_godot_context/selection',
-    'selection_subscribe': '/ext/pipeline_godot_context/subscribe',
+  /** onboarding_service（Onboarding Service）：plugin.json 声明 3 端点 */
+  export const ONBOARDING_SERVICE_ENDPOINTS = {
+    'progress_get': '/ext/onboarding_service/progress',
+    'progress_update': '/ext/onboarding_service/progress',
+    'walkthroughs_list': '/ext/onboarding_service/walkthroughs',
   } as const
 
-  /** pipeline_security_check（Security Check）：plugin.json 声明 2 端点 */
+  /** pipeline_host_context（Host Context）：plugin.json 声明 5 端点 */
+  export const PIPELINE_HOST_CONTEXT_ENDPOINTS = {
+    'selection_preview': '/ext/pipeline_host_context/preview',
+    'selection_clear': '/ext/pipeline_host_context/selection',
+    'selection_push': '/ext/pipeline_host_context/selection',
+    'selection_snapshot': '/ext/pipeline_host_context/selection',
+    'selection_subscribe': '/ext/pipeline_host_context/subscribe',
+  } as const
+
+  /** pipeline_security_check（Security Check）：plugin.json 声明 5 端点 */
   export const PIPELINE_SECURITY_CHECK_ENDPOINTS = {
     'permission_mode_get': '/ext/pipeline_security_check/permission_mode',
     'permission_mode_switch': '/ext/pipeline_security_check/permission_mode',
+    'zone_policy_get': '/ext/pipeline_security_check/zones',
+    'zone_policy_add': '/ext/pipeline_security_check/zones/add',
+    'zone_policy_remove': '/ext/pipeline_security_check/zones/remove',
   } as const
 
   /** review_service（Review Service）：plugin.json 声明 9 端点 */

@@ -41,7 +41,6 @@ import contextlib
 import importlib.util
 import json
 import logging
-from typing import Any
 import os
 import re
 import sys
@@ -212,6 +211,8 @@ class _MemberLoader:
     def __init__(self) -> None:
         # plugin_id → 该成员 exec 期间引入、位于其目录下的裸名模块表
         self._owned: dict[str, dict[str, ModuleType]] = {}
+        # plugin_id → 成员插件目录（drop_member 按文件归属排除恢复用）
+        self._dirs: dict[str, Path] = {}
 
     def load(self, plugin_id: str, plugin_dir: Path) -> AgentOSPlugin:
         """加载一个成员，返回其 server.py 暴露的 ``plugin``（AgentOSPlugin 实例）。
@@ -230,6 +231,7 @@ class _MemberLoader:
         finally:
             self._restore_modules(masked, exclude_dir=exclude_dir)
         self._owned[plugin_id] = owned
+        self._dirs[plugin_id] = plugin_dir
         plugin_obj = getattr(module, "plugin", None)
         if not isinstance(plugin_obj, AgentOSPlugin):
             raise CohostError(f"成员 {plugin_id}：server.py 未暴露 plugin（AgentOSPlugin 实例）")
@@ -246,6 +248,47 @@ class _MemberLoader:
         loader 实例：owned 表是被重载成员模块边界的事实记录。
         """
         return self.load(plugin_id, plugin_dir)
+
+    def drop_member(self, plugin_id: str) -> int:
+        """成员卸载后的模块缓存摘除（``agentos/unload_member`` 的宿主侧收尾）。
+
+        只摘「当前驻留者属于被卸成员」的槽位：唯一名模块（含 ``name.*``
+        懒载子模块）与其 owned 裸名表中文件归属本成员目录的驻留模块。裸名
+        槽位被他人模块驻留（载入次序的遮蔽恢复所致）时不摘——那是别人的
+        活模块。Python 无强制卸载——已被闭包/线程/他人模块持有引用的对象
+        不受影响，本方法只保证「下次重载该成员必从磁盘新 exec」与静息态
+        槽位不残留旧代码对象，不承诺内存立即回收。必须与首载同一 loader
+        实例（owned/_dirs 表是成员模块边界的事实记录）。返回摘除的模块数。
+        """
+        owned = self._owned.pop(plugin_id, None)
+        if owned is None:
+            return 0
+        plugin_dir = self._dirs.pop(plugin_id, None)
+        prefix = (
+            os.path.normcase(os.path.abspath(plugin_dir)) + os.sep
+            if plugin_dir is not None
+            else None
+        )
+        module_name = _MEMBER_MODULE_PREFIX + re.sub(r"\W", "_", plugin_id)
+        candidates = (
+            set(owned)
+            | {name for name in sys.modules if name.startswith(module_name)}
+        )
+        removed = 0
+        for name in sorted(candidates):
+            module = sys.modules.get(name)
+            if module is None:
+                continue
+            file = getattr(module, "__file__", None)
+            under_dropped = (
+                prefix is not None
+                and file
+                and os.path.normcase(os.path.abspath(file)).startswith(prefix)
+            )
+            if name.startswith(module_name) or under_dropped:
+                if sys.modules.pop(name, None) is not None:
+                    removed += 1
+        return removed
 
     def _restore_modules(
         self, popped: Mapping[str, ModuleType], exclude_dir: Path | None = None
@@ -530,7 +573,11 @@ def main(argv: Sequence[str] | None = None, *, shared_root: Path | None = None) 
     loader = _MemberLoader()
     try:
         members = _load_members(root, member_ids, loader=loader)
-        server = CohostServer(members, reload_handler=_build_reload_handler(root, loader))
+        server = CohostServer(
+            members,
+            reload_handler=_build_reload_handler(root, loader),
+            unload_handler=loader.drop_member,
+        )
     except (CohostError, ValueError) as exc:
         print(f"[cohost] 启动失败（fail-fast）：{exc}", file=sys.stderr)
         return 1

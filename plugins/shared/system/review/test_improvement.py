@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # @feature: FP-0.2.二 review improvement 缺口分支补测 | @ci: python-coverage
 """improvement（复盘改进建议）规则驱动分类的单元测试。"""
 from __future__ import annotations
@@ -83,7 +82,7 @@ def test_rules_are_data_driven(tmp_path):
         "criteria": {"x": False}, "symptom_note": "出现自定义关键词",
     }], project_root=str(tmp_path))
     assert out["suggestions"][0]["triage"] == "mechanism_covered"
-    assert improvement._RULES_PATH == orig
+    assert orig == improvement._RULES_PATH
 
 
 def test_external_cause_triaged_not_filed():

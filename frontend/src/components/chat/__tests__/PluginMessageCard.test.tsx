@@ -10,9 +10,10 @@
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { apiClient } from '@/services/api/client'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import { PluginMessageCard, resolveMessageStyle } from '../PluginMessageCard'
 import { MessageItem } from '../MessageItem'
+import { PluginMessageCard, resolveMessageStyle } from '../PluginMessageCard'
 import type { Message } from '@/types/models'
 
 vi.mock('@/services/api/client', () => ({
@@ -35,10 +36,7 @@ vi.mock('@/stores/interactionStore', () => ({
 vi.mock('@/hooks/queries/useAgentsQuery', () => ({
   useAgentsQuery: () => ({ data: [] }),
 }))
-vi.mock('@/services/errorReporting', () => ({
-  ErrorType: { CLIENT: 'client' },
-  reportError: vi.fn(),
-}))
+vi.mock('@/services/errorReporting', async () => (await import('./helpers/messageItemMocks')).errorReportingMock())
 vi.mock('@/components/chat/LobeChatMarkdown', () => ({
   LobeChatMarkdown: ({ content }: { content: string }) => (
     <div data-testid="default-markdown">{content}</div>
@@ -50,7 +48,6 @@ vi.mock('@/components/chat/MessageContentRenderer', () => ({
   ),
 }))
 
-import { apiClient } from '@/services/api/client'
 
 /** 注册一条 contributes.chatMessages 形态的归一化声明 */
 function registerChatMessageStyle(id: string, pluginId: string, htmlPath?: string): void {

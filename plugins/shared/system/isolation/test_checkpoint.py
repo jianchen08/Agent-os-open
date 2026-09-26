@@ -109,7 +109,7 @@ class TestCreateCheckpoint:
         assert (backup_root / "sub" / "b.txt").exists()
         # 校验和正确性
         a_file = next(f for f in cp.files if f.original_path == "a.txt")
-        assert a_file.checksum == "alpha".encode().hex() or len(a_file.checksum) == 64
+        assert a_file.checksum == b"alpha".hex() or len(a_file.checksum) == 64
 
     def test_create_with_explicit_files(self, tmp_path: Path) -> None:
         _write(tmp_path / "ws" / "keep.txt")

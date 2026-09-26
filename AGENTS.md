@@ -23,7 +23,7 @@ React 前端。
 | `data/`、`logs/`、`reports/` | 运行时产物 |
 
 存储：SQLite（默认项目根 `agentos_kernel.db`），driver 化切换见
-`config/storage.yaml`（`AGENTOS_STORAGE_DRIVER`/`AGENTOS_DB_PATH` 环境变量可覆盖）。
+`config/kernel/storage.yaml`（`AGENTOS_STORAGE_DRIVER`/`AGENTOS_DB_PATH` 环境变量可覆盖）。
 
 ## ⚠️ 工作区铁律（最重要）
 
@@ -87,8 +87,8 @@ commit**，不要留到"最后一起提交"。commit 前的调查/验证工作�
   只减不增）；修好基线内既有红测试就收紧 `.github/pytest-failure-baseline.txt`
   （现值 plugins-coverage 0 / plugins-heavy 0）；新代码带测试（覆盖率棘轮门禁
   兜底，2026-08-20 ADR：整体覆盖率基线只升不降且**略高于实测留压力**——
-  Python 87.0/Rust 90.0/前端 69.33（现值 2026-09-10 核；整体闸挂起 --skip 中，
-  恢复执法属用户裁定），改动行覆盖率 100%（diff coverage，
+  现行执法线见 `docs/working/基线总表.md`（自动生成，D1 拍板：Python/Rust
+  目标 90、内核目标 100、已恢复执法），改动行覆盖率 100%（diff coverage，
   `[skip-diff-cov]` 逃生口），检查器 `scripts/check_*_coverage_baseline.py` +
   `scripts/check_diff_coverage.py`）。
   基线文件改动一律走 commit 留归因。细则与三问清单：
@@ -124,6 +124,10 @@ commit**，不要留到"最后一起提交"。commit 前的调查/验证工作�
 - **量化阈值**：嵌套 ≤4 层、函数圈复杂度/认知复杂度 >25、函数体 >200 行、新增
   Bug/漏洞 >0 均 Must Fix；覆盖率分级 P0 核心逻辑 100% 分支 / P1 公共服务工具
   90% / P2 一般代码 80%。
+- **CJK 行宽纪律（Rust）**：rustfmt 按 Unicode 显示宽度计数（中文每字 2 列）
+  且无配置开关——含中文注释/字符串的行按每字 2 列预留 100 列上限，提交前本地
+  `cargo fmt`；kernel-fmt 门禁执法（09-23/09-24 同类回归两连实证，见成熟度评估
+  §0.4）。
 - **反模式红线**：硬编码密钥/URL；无注解 any / `@ts-ignore`（确实无法标注须
   `// HACK: <原因>`）；隐性技术债务（简化实现必须写明妥协内容+升级触发条件+时间
   上限）；调试日志残留（任务结束前清理）；无测试提交；方案倒退（用旧方案须说明
@@ -142,6 +146,19 @@ commit**，不要留到"最后一起提交"。commit 前的调查/验证工作�
   加入 agentos.yaml 的 tool_ids，补 output_schema/render。
 - 加系统插件：`plugins/shared/system/<name>/`。
 - 改 agent 配置：`config/agents/main/`（agentos.yaml + persona/ + 提示词骨架）。
+- **装机版插件更新（不动装机包）**：`python scripts/sync_installed_user_space.py
+  --user-root "$env:APPDATA\agentos" --plugin <plugins/ 下相对路径>`——插件镜像
+  同步到装机版用户空间（内核同 id 用户赢自动消费，venv 自动供给），绝不重打包、
+  绝不写安装目录（脚本硬拒绝）。`--config <config/ 下相对路径>` 整覆盖用户空间
+  配置（如换挂 pipelines/autonomous.yaml）；`--addon <Godot项目根>` 修存量项目
+  播种副本（插件端点改名后旧副本推死端点）。改端点/WS 事件名等**前端契约**时，
+  装机版内嵌前端（asar）只能随应用升级消费——config 换挂须与应用升级同批。
+- **dev 侧插件 502 排障**：新插件同步进 `user_root/plugins/` 后端点 502 =
+  平铺布局下 `uv sync` 因 SDK 相对路径（../../../../sdk）出界必败且 launcher
+  Step2 静默——直接复制仓内插件 `.venv` 即愈（editable SDK 绝对路径同机可迁移）；
+  配置类问题先核对内核注入形态：按 manifest `config_files[].id` 命名空间嵌套
+  （如 `{"settings": {...}}`）而非平铺。dev 内核 admin 口令错 = 带
+  `AGENTOS_ADMIN_PASSWORD` 环境变量重启 launcher（播种/重置同源恢复通道）。
 - 查架构决策：`docs/decisions/` 按日期排序；被否方案查各 ADR 的 Alternatives Considered 节。
 - DSH 适配器（源码零改动、插件装载、升级）：`plugins/shared/system/dsh_adapter/`，
   操作路径与决策见 `docs/working/dsh_decision_records.md`。

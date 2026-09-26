@@ -322,14 +322,16 @@ describe('MessageList', () => {
   })
 
   describe('isGenerating 状态', () => {
-    it('isGenerating=true 且最后一条是 user 消息时显示思考中', () => {
+    // 现行契约：stream_start 到达前 store 里只有乐观 user 消息、无 assistant
+    // 消息，此窗口期不渲染"思考中"气泡——思考指示由 assistant 消息存在后的
+    // MessageItem 承担；发送失败反馈由 send_timeout 的错误气泡承担。
+    it('最后一条是 user 且 isGenerating=true 时也不渲染思考占位气泡', () => {
       const messages = [makeMessage({ id: 'msg-1', role: 'user', content: '你好' })]
       const { container } = render(
         <MessageList {...defaultProps} messages={messages} isGenerating={true} />,
       )
 
-      // displayMessages 渲染 1 条 user 消息；最后一条 role='user' 且 isGenerating → 显示"思考中"
-      expect(container.textContent).toContain('思考中')
+      expect(container.textContent).not.toContain('思考中')
     })
 
     it('isGenerating=false 时不显示思考中', () => {
@@ -638,6 +640,78 @@ describe('MessageList', () => {
       ro.cb?.()
 
       // 不被拉回底部，停留在用户的滚动位置
+      expect(listEl.scrollTop).toBe(300)
+    })
+
+    it('上滑翻历史后发送消息（乐观 user sending），强制回到底部并恢复跟随', () => {
+      const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
+      const { listEl, rerender } = renderListWithMetrics(
+        'send-force-bottom',
+        messages,
+        1000,
+        defaultProps,
+      )
+      flushRaf()
+      expect(listEl.scrollTop).toBe(1000)
+
+      // 用户上滑翻历史（跟随停止）
+      fireEvent.wheel(listEl, { deltaY: -100 })
+      listEl.scrollTop = 300
+      fireEvent.scroll(listEl)
+
+      // 用户发送消息：乐观 user 气泡入列（status 'sending'，无权威 sequence），
+      // 流式态同步开启（startStreaming）
+      const sent = [
+        ...messages,
+        makeMessage({ id: 'msg-2', role: 'user', status: 'sending', sequence: undefined }),
+      ]
+      rerender(
+        <MessageList {...defaultProps} messages={sent} isGenerating tabId="send-force-bottom" />,
+      )
+      mockScrollMetrics(listEl, 1200)
+      flushRaf()
+
+      // 发送 = 回底意图：即使此前上滑，也必须滚到新消息所在底部
+      expect(listEl.scrollTop).toBe(1200)
+
+      // 跟随已恢复：随后的流式内容增长仍钉底
+      const streamed = [...sent, makeMessage({ id: 'msg-3', sequence: 3 })]
+      rerender(
+        <MessageList {...defaultProps} messages={streamed} isGenerating tabId="send-force-bottom" />,
+      )
+      mockScrollMetrics(listEl, 1400)
+      flushRaf()
+      expect(listEl.scrollTop).toBe(1400)
+    })
+
+    it('触发器注入 user 气泡（status completed）不强制回底，不打扰翻历史', () => {
+      const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
+      const { listEl, rerender } = renderListWithMetrics(
+        'inject-no-yank',
+        messages,
+        1000,
+        defaultProps,
+      )
+      flushRaf()
+      expect(listEl.scrollTop).toBe(1000)
+
+      // 用户上滑翻历史
+      fireEvent.wheel(listEl, { deltaY: -100 })
+      listEl.scrollTop = 300
+      fireEvent.scroll(listEl)
+
+      // 触发器/HTTP 注入的 user 气泡（权威消息，status 'completed'）落列
+      const injected = [
+        ...messages,
+        makeMessage({ id: 'msg-inj', role: 'user', status: 'completed', sequence: 2 }),
+      ]
+      rerender(
+        <MessageList {...defaultProps} messages={injected} tabId="inject-no-yank" />,
+      )
+      mockScrollMetrics(listEl, 1200)
+      flushRaf()
+
+      // 非用户主动发送：不被拉回底部
       expect(listEl.scrollTop).toBe(300)
     })
 

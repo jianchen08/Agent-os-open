@@ -1,5 +1,4 @@
 # @feature: FP-0.2.二 模式体系测试补标 | @ci: python-coverage
-# -*- coding: utf-8 -*-
 """mode_coding 活面板行为测试：六列落列状态机 / reviews 代理 / dispatch_issue 派发。
 
 对标 Devin/Cursor/Cline 的编码面板（ADR 2026-09-17-mode-panel-mature-interfaces）：

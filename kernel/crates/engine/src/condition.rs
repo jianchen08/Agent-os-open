@@ -261,7 +261,7 @@ fn scan_string(chars: &[char], i: usize) -> Result<(Token, usize), String> {
         j += 1;
     }
     if j >= n {
-        return Err(format!("Unterminated string literal at position {}", start));
+        return Err(format!("Unterminated string literal at position {start}"));
     }
     // chars[start..j] 即引号内内容
     let body: String = chars[start..j].iter().collect();
@@ -334,7 +334,7 @@ fn scan_operator(chars: &[char], i: usize) -> Result<(Token, usize), String> {
     let c = chars[i];
     let may_be_two_char = matches!(c, '=' | '!' | '<' | '>');
     if may_be_two_char && i + 1 < n && chars[i + 1] == '=' {
-        let op: String = format!("{}=", c);
+        let op: String = format!("{c}=");
         return Ok((
             Token {
                 kind: TokKind::Op,
@@ -344,7 +344,7 @@ fn scan_operator(chars: &[char], i: usize) -> Result<(Token, usize), String> {
         ));
     }
     if c == '=' {
-        return Err(format!("Unexpected '=' at position {}", i));
+        return Err(format!("Unexpected '=' at position {i}"));
     }
     // <, >, +, -, *, / 单字符
     Ok((
@@ -366,7 +366,7 @@ fn scan_single(chars: &[char], i: usize) -> Result<(Token, usize), String> {
         '(' => TokKind::LParen,
         ')' => TokKind::RParen,
         ',' => TokKind::Comma,
-        _ => return Err(format!("Unexpected character '{}' at position {}", c, i)),
+        _ => return Err(format!("Unexpected character '{c}' at position {i}")),
     };
     Ok((
         Token {

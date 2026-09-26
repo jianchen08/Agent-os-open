@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # @feature: FP-0.2.二 自进化指标 P0-P3 优先级裁决（ADR 2026-09-16） | @ci: python-coverage
 """evolution_metrics 单测：P0-P3 各指标与优先级门控裁决（纯函数，账本投影）。
 

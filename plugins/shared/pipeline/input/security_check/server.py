@@ -224,6 +224,14 @@ async def http_handle(path: str, method: str, plugin_id: str = "", raw_body: str
                 logger.debug("[security_check] GET query 解析失败（按缺参处理）| path=%s | error=%s", path_norm, exc)
         return await _get_permission_mode(body)
 
+    # ── 授权区管理面（ADR 2026-09-24-read-deny-write-zones：名单增删查）──
+    if method.upper() == "GET" and path_norm == "/ext/pipeline_security_check/zones":
+        return _get_zone_policy()
+    if method.upper() == "POST" and path_norm == "/ext/pipeline_security_check/zones/add":
+        return _add_zone(body)
+    if method.upper() == "POST" and path_norm == "/ext/pipeline_security_check/zones/remove":
+        return _remove_zone(body)
+
     return _http_response(404, {"error": "not found"})
 
 
@@ -311,6 +319,70 @@ async def _get_permission_mode(body: dict) -> dict:
         200,
         {"mode": mode, "explicit": explicit, "valid_modes": list(PERMISSION_MODES.keys())},
     )
+
+
+# ─── 授权区管理面（/ext/pipeline_security_check/zones*）────────────────────
+# 名单 = 用户空间真值 config/users/{tenant}/project_whitelist.yaml
+# （entries=写区，read_deny=读排除；ADR 2026-09-24-read-deny-write-zones 决策4）。
+# locked 写面：写入仅经本端点（用户显式操作）与位置闸授权卡两条系统通道，
+# agent 工具面无写通道。
+
+_ZONE_SECTIONS = ("entries", "read_deny")
+
+
+def _get_zone_policy() -> dict:
+    """读授权名单全量（真值解析：用户空间优先，legacy 读取回退）。"""
+    try:
+        from project_registry import load_read_deny, load_registration_whitelist
+        return _http_response(200, {
+            "entries": load_registration_whitelist(),
+            "read_deny": load_read_deny(),
+        })
+    except Exception as exc:  # noqa: BLE001 — 共享根缺失等降级可见
+        logger.error("[security_check] 授权名单读取失败: %s", exc)
+        return _http_response(500, {"error": f"read failed: {exc}"})
+
+
+def _add_zone(body: dict) -> dict:
+    """追加名单条目（section=entries|read_deny）。"""
+    section = str(body.get("section", "") or "")
+    path = str(body.get("path", "") or "").strip()
+    if section not in _ZONE_SECTIONS:
+        return _http_response(400, {"error": f"invalid section: {section}"})
+    if not path:
+        return _http_response(400, {"error": "path required"})
+    try:
+        from project_registry import add_read_deny, add_write_zone
+        merged = (
+            add_write_zone(path) if section == "entries" else add_read_deny(path)
+        )
+    except ValueError as exc:
+        return _http_response(400, {"error": str(exc)})
+    except Exception as exc:  # noqa: BLE001 — 共享根缺失等降级可见
+        logger.error("[security_check] 授权名单追加失败: %s", exc)
+        return _http_response(500, {"error": f"add failed: {exc}"})
+    logger.info("[security_check] 授权名单追加 | section=%s | path=%s", section, path)
+    return _http_response(200, {"added": True, "section": section, section: merged})
+
+
+def _remove_zone(body: dict) -> dict:
+    """移除名单条目（幂等：条目不存在时无变化）。"""
+    section = str(body.get("section", "") or "")
+    path = str(body.get("path", "") or "").strip()
+    if section not in _ZONE_SECTIONS:
+        return _http_response(400, {"error": f"invalid section: {section}"})
+    if not path:
+        return _http_response(400, {"error": "path required"})
+    try:
+        from project_registry import remove_zone
+        merged = remove_zone(path, section)
+    except ValueError as exc:
+        return _http_response(400, {"error": str(exc)})
+    except Exception as exc:  # noqa: BLE001 — 共享根缺失等降级可见
+        logger.error("[security_check] 授权名单移除失败: %s", exc)
+        return _http_response(500, {"error": f"remove failed: {exc}"})
+    logger.info("[security_check] 授权名单移除 | section=%s | path=%s", section, path)
+    return _http_response(200, {"removed": True, "section": section, section: merged})
 
 
 if __name__ == "__main__":

@@ -11,7 +11,10 @@ R208 先例——合宿成员跳过自身 venv、进程从 plugins/shared/_host/
   3. 内置模式包（plugins/shared/modes/*）不带任何自身 .venv；
   4. 一切声明 host_group 的合宿成员不带自身 .venv（运行期零消费，纯装机浪费）；
   5. 包内不出现 junction/symlink 形态的 .venv（Windows junction 存绝对路径，
-     跨机必断——ADR 2026-09-07-plugin-venv-dedup）。
+     跨机必断——ADR 2026-09-07-plugin-venv-dedup）；
+  6. 合宿成员 pyproject 声明的依赖已实装进包内 _host/.venv（extraResources
+     整目录照搬 dev 磁盘 venv，dev 漏 sync 则装机版调用期 ModuleNotFoundError
+     ——web_operate 缺 httpx 实证；解释器在位不等于依赖闭包完整）。
 
 只读校验（无 --apply 语义）；independent 类插件带真实 .venv 属合法形态，
 仅记 info。定深扫描（禁递归 glob，dsh_adapter 自嵌套 junction 会挂死）。
@@ -98,6 +101,96 @@ def manifest_host_group(plugin_dir: Path) -> str | None:
     return str(group) if group else None
 
 
+def norm(name: str) -> str:
+    """PEP 503 归一（与 bootstrap_plugin_envs 同口径）。"""
+    import re
+
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def pyproject_dep_names(plugin_dir: Path) -> set[str]:
+    """插件 pyproject.toml 声明的依赖归一名集合（无 pyproject 返回空集）。"""
+    pp = plugin_dir / "pyproject.toml"
+    if not pp.is_file():
+        return set()
+    try:
+        import tomllib
+
+        data = tomllib.load(open(pp, "rb"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return set()
+    deps = data.get("project", {}).get("dependencies", []) or []
+    names: set[str] = set()
+    for dep in deps:
+        name = str(dep).split(";")[0].split("[")[0]
+        for sep in ("=", "<", ">", "!", "~", " "):
+            name = name.split(sep)[0]
+        if name.strip():
+            names.add(norm(name.strip()))
+    return names
+
+
+def installed_dist_names(host_venv: Path) -> set[str] | None:
+    """包内 _host/.venv 实装发行包归一名全集；site-packages 缺失返回 None。"""
+    candidates = [
+        host_venv / "Lib" / "site-packages",
+        *sorted(host_venv.glob("lib/python*/site-packages")),
+    ]
+    sp = next((p for p in candidates if p.is_dir()), None)
+    if sp is None:
+        return None
+    import re
+
+    dist_re = re.compile(r"^(.+)-(\d.*)\.dist-info$", re.IGNORECASE)
+    return {norm(m.group(1)) for e in sp.iterdir() if (m := dist_re.match(e.name))}
+
+
+# editable 本地源（SDK）不产生 dist-info，豁免依赖闭包比对
+EDITABLE_DEPS = {"agentos-plugin-sdk"}
+
+
+def check_host_venv_deps(shared: Path, host_venv: Path) -> list[Finding]:
+    """断言合宿成员 pyproject 依赖 ⊆ 包内 _host/.venv 实装（判据 6）。"""
+    findings: list[Finding] = []
+    installed = installed_dist_names(host_venv)
+    members: list[tuple[str, Path]] = []
+    for pattern in PLUGIN_GLOBS:
+        for plugin_dir in sorted(shared.glob(pattern)):
+            group = manifest_host_group(plugin_dir)
+            if group and (plugin_dir / "pyproject.toml").is_file():
+                members.append((str(plugin_dir.relative_to(shared)), plugin_dir))
+    if not members:
+        return findings
+    if installed is None:
+        findings.append(
+            Finding(
+                "error",
+                "HOST_VENV_SITE_PKG_MISSING",
+                str(host_venv),
+                "共享 venv 无 site-packages——依赖闭包无从校验，成员 import 必失败",
+            )
+        )
+        return findings
+    for rel, plugin_dir in members:
+        missing = sorted(
+            name
+            for name in pyproject_dep_names(plugin_dir)
+            if name not in installed and name not in EDITABLE_DEPS
+        )
+        if missing:
+            findings.append(
+                Finding(
+                    "error",
+                    "HOST_VENV_DEP_MISSING",
+                    str(plugin_dir),
+                    f"合宿成员 {rel} 声明的依赖 {missing} 未实装进包内共享 venv——"
+                    "装机版调用期即 ModuleNotFoundError（web_operate 缺 httpx 实证）；"
+                    "在 plugins/shared/_host 跑 uv sync 后重打包",
+                )
+            )
+    return findings
+
+
 def check_resources(root: Path) -> list[Finding]:
     findings: list[Finding] = []
     shared = root / SHARED_REL
@@ -133,13 +226,16 @@ def check_resources(root: Path) -> list[Finding]:
                 "全体 light 成员与内置模式包将 HOST_VENV_MISSING",
             )
         )
+    else:
+        # 6. 成员依赖闭包 ⊆ 包内共享 venv（解释器在位 ≠ 依赖完整）
+        findings.extend(check_host_venv_deps(shared, host_venv))
 
     # 3/4/5. 定深扫描插件目录
     for pattern in PLUGIN_GLOBS:
         for plugin_dir in sorted(shared.glob(pattern)):
             if not (plugin_dir / "plugin.json").is_file():
                 continue
-            rel = plugin_dir.relative_to(root)
+            plugin_dir.relative_to(root)
             venv = plugin_dir / ".venv"
             if is_link(venv):
                 findings.append(

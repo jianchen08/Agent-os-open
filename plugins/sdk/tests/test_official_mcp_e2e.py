@@ -217,7 +217,7 @@ class KernelHarness:
                 except subprocess.TimeoutExpired:
                     self._proc.kill()
         except Exception:
-            pass
+            pass  # 尽力而为的测试收尾：子进程可能已自行退出，忽略二次清理失败
 
 
 @pytest.fixture()

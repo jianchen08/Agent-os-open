@@ -70,21 +70,18 @@ async fn checkpoint_strips_messages_and_writes_max_seq_watermark() {
     // 无 messages：key 不存在，原文也不含消息全文标记
     assert!(
         saved.get("messages").is_none(),
-        "checkpoint 不应含 messages 全文，实际：{}",
-        raw
+        "checkpoint 不应含 messages 全文，实际：{raw}"
     );
     assert!(
         !raw.contains("CKPT_MSG_"),
-        "checkpoint 原文不得含消息内容（全文只在 blobs）：{}",
-        raw
+        "checkpoint 原文不得含消息内容（全文只在 blobs）：{raw}"
     );
 
     // 有 ckpt_max_seq 水位 = 消息队列最大 seq（4）
     assert_eq!(
         saved.get("ckpt_max_seq").and_then(|v| v.as_u64()),
         Some(4),
-        "应写入 ckpt_max_seq 水位 = max seq，实际：{}",
-        raw
+        "应写入 ckpt_max_seq 水位 = max seq，实际：{raw}"
     );
 
     // 标量字段保留
@@ -160,8 +157,7 @@ async fn legacy_full_checkpoint_load_strips_messages_unconditionally() {
         .expect("旧 checkpoint 应能 load");
     assert!(
         loaded.get("messages").is_none(),
-        "零兼容：load 后一律 remove(messages)，不做旧格式识别，实际：{}",
-        loaded
+        "零兼容：load 后一律 remove(messages)，不做旧格式识别，实际：{loaded}"
     );
     assert_eq!(
         loaded.get("turn_count").and_then(|v| v.as_u64()),

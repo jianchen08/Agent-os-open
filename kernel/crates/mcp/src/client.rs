@@ -23,8 +23,19 @@ use crate::error::McpError;
 
 use agentos_core::traits::AuthType;
 
+use rmcp::model::{CallToolRequestParams, ClientCapabilities, ClientConfig, Implementation};
+use rmcp::service::{serve_client, RoleClient, RunningService};
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::transport::StreamableHttpClientTransport;
+use url::Url;
+
+/// rmcp 客户端会话（HTTP transport 专用）：connect 时完成 initialize 握手，
+/// tools/* 调用复用同一会话，kill 时取消关停。
+type HttpService = RunningService<RoleClient, ClientConfig>;
+
 /// MCP initialize 握手协议版本（2024-11-05 spec）。MCP 发布新 spec 版本时更新
 /// 此常量；AGENTOS_MCP_PROTOCOL_VERSION 环境变量可临时覆盖（协商逃生口）。
+/// stdio 运输层（sidecar 专用）使用；HTTP 运输层的版本协商由 rmcp 承载。
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// JSON-RPC 请求等待响应的默认超时（秒）：24h = 86 400s。
@@ -93,10 +104,12 @@ struct JsonRpcError {
 pub enum McpTransport {
     /// stdio transport: fork 子进程，通过 stdin/stdout 传 JSON-RPC
     Stdio { command: String, args: Vec<String> },
-    /// HTTP transport: 通过 HTTP POST 传 JSON-RPC（连远程第三方 MCP server）
+    /// HTTP transport: 连远程第三方 MCP server（rmcp streamable-http 运输层：
+    /// initialize 握手、Mcp-Session-Id 会话管理、SSE/JSON 双应答形态与版本
+    /// 协商全部由官方 SDK 承载）
     Http {
         url: String,
-        /// 额外请求头（auth 在 connect 时解析 env 后并入 reqwest 默认头）。
+        /// 额外请求头（auth 在 connect 时解析 env 后并入运输层默认头）。
         headers: HashMap<String, String>,
         /// 鉴权配置（value 含 ${ENV_VAR} 占位，connect 时解析）。
         auth: Option<agentos_core::traits::EndpointAuth>,
@@ -157,9 +170,9 @@ pub struct McpClient {
     /// first_token_timeout（llm.yaml 默认 120s）等慢调用。调用方可用
     /// [`McpClient::with_request_timeout`] 覆盖。
     request_timeout: Duration,
-    /// HTTP transport 的 reqwest 客户端（connect 时构建，含解析后的 auth 默认头）。
-    /// stdio 模式为 None。
-    http_client: Option<reqwest::Client>,
+    /// HTTP transport 的 rmcp 客户端会话（connect 时握手建立，含解析后的
+    /// auth 默认头）。stdio 模式为 None。
+    http_service: Option<HttpService>,
     /// `call_tool_raw` 组帧缓冲（per-client 复用）：重载荷 state 每步数百 KB，
     /// 每步新分配大缓冲在长跑下放大分配器压力——容量保留、内容每帧清零重写
     /// （M3 热路径缓冲复用；stdout/stderr 行缓冲另有容量棘轮治理）。
@@ -209,8 +222,8 @@ fn ip_address_blocked(ip: std::net::IpAddr, block_loopback: bool) -> bool {
 
 /// 校验出网 URL 通过边界检查；非法 URL / 命中禁止段 → Err（fail-closed）。
 fn is_outbound_url_allowed(url: &str) -> Result<(), McpError> {
-    let parsed = reqwest::Url::parse(url).map_err(|e| McpError::ConnectionFailed {
-        message: format!("invalid MCP http url {}: {}", url, e),
+    let parsed = Url::parse(url).map_err(|e| McpError::ConnectionFailed {
+        message: format!("invalid MCP http url {url}: {e}"),
     })?;
     let host = parsed.host_str().unwrap_or_default().to_string();
     if host.is_empty() {
@@ -254,14 +267,42 @@ fn is_outbound_url_allowed(url: &str) -> Result<(), McpError> {
     }
 }
 
+/// 解析 tools/call params（`{"name": ..., "arguments": {...}}`）为 rmcp 请求参数。
+///
+/// HTTP transport 路径的入参来自插件 manifest 面（引擎/工具面拼装），name 缺失
+/// 或 arguments 非对象都是配置/协议错误——显式报错，不静默改写。
+fn parse_call_tool_params(params: Value) -> Result<CallToolRequestParams, McpError> {
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| McpError::Protocol {
+            message: "tools/call params 缺 name（字符串）".to_string(),
+        })?;
+    let arguments = match params.get("arguments") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let obj: rmcp::model::JsonObject =
+                serde_json::from_value(v.clone()).map_err(|e| McpError::Protocol {
+                    message: format!("tools/call arguments 必须是对象: {e}"),
+                })?;
+            Some(obj)
+        }
+    };
+    let mut call = CallToolRequestParams::new(name.to_string());
+    call.arguments = arguments;
+    Ok(call)
+}
+
+/// 出网守卫环境互斥锁（仅测试）：AGENTOS_MCP_BLOCK_LOOPBACK 是进程级全局，
+/// 加固开关的设置-断言-恢复窗口内，一切经 connect 走出网守卫的环回 mock
+/// 测试必须与之串行（否则环回被临时拒绝，connect 随机翻红）。
+#[cfg(test)]
+pub(crate) static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 出网守卫单测（安全审查 2026-08-20 B-2）。
 #[cfg(test)]
 mod outbound_guard_tests {
     use super::*;
-
-    /// 环境变量（AGENTOS_MCP_BLOCK_LOOPBACK）是进程级全局状态，涉及它的用例
-    /// 必须与断言环回放行的用例串行（否则互相竞态）。
-    static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_private_and_special_ipv4_blocked() {
@@ -399,7 +440,7 @@ impl McpClient {
             last_heartbeat_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             router: None,
             request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
-            http_client: None,
+            http_service: None,
             raw_frame_scratch: parking_lot::Mutex::new(Vec::new()),
         }
     }
@@ -435,7 +476,7 @@ impl McpClient {
             last_heartbeat_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             router: None,
             request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
-            http_client: None,
+            http_service: None,
             raw_frame_scratch: parking_lot::Mutex::new(Vec::new()),
         }
     }
@@ -563,10 +604,24 @@ impl McpClient {
                 Ok(())
             }
             McpTransport::Http { url, headers, auth } => {
-                // HTTP 模式：不 spawn 子进程。构建 reqwest 客户端（解析 ${ENV_VAR}
-                // 鉴权占位 → 并入默认头），存入 self.http_client 供 send_request 复用。
-                let client = self.build_http_client(url, headers, auth)?;
-                self.http_client = Some(client);
+                // HTTP 模式：不 spawn 子进程。构建 rmcp streamable-http 运输层
+                // （解析 ${ENV_VAR} 鉴权占位 → 并入运输层默认头）并完成 initialize
+                // 握手，会话存入 self.http_service 供 tools/* 复用——握手时序、
+                // Mcp-Session-Id 会话管理、SSE/JSON 双应答形态与版本协商全部由
+                // 官方 SDK 承载（ADR 2026-09-24-external-mcp-http-rmcp-migration）。
+                let config = self.build_http_transport_config(url, headers, auth)?;
+                let service = serve_client(
+                    ClientConfig::new(
+                        ClientCapabilities::default(),
+                        Implementation::from_build_env(),
+                    ),
+                    StreamableHttpClientTransport::from_config(config),
+                )
+                .await
+                .map_err(|e| McpError::ConnectionFailed {
+                    message: format!("rmcp streamable-http handshake: {e}"),
+                })?;
+                self.http_service = Some(service);
                 Ok(())
             }
         }
@@ -788,32 +843,36 @@ impl McpClient {
         }
     }
 
-    /// 构建 HTTP reqwest 客户端：解析 `${ENV_VAR}` 鉴权占位、合并额外头、设超时。
-    fn build_http_client(
+    /// 构建 rmcp streamable-http 运输层配置：解析 `${ENV_VAR}` 鉴权占位、
+    /// 合并额外头、做出网边界校验。
+    fn build_http_transport_config(
         &self,
         url: &str,
         headers: &HashMap<String, String>,
         auth: &Option<agentos_core::traits::EndpointAuth>,
-    ) -> Result<reqwest::Client, McpError> {
-        use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+    ) -> Result<StreamableHttpClientTransportConfig, McpError> {
+        use http::header::{HeaderName, HeaderValue};
 
         // 先校验 URL 合法 + 出网边界（早暴露配置错误；顺带防 SSRF 到内网/云元数据）。
         is_outbound_url_allowed(url)?;
 
-        let mut header_map = HeaderMap::new();
+        let mut custom_headers: HashMap<HeaderName, HeaderValue> = HashMap::new();
         for (k, v) in headers {
             match (
                 HeaderName::try_from(k.as_str()),
                 HeaderValue::try_from(v.as_str()),
             ) {
                 (Ok(name), Ok(val)) => {
-                    header_map.append(name, val);
+                    custom_headers.insert(name, val);
                 }
                 _ => {
                     tracing::warn!("[mcp] HTTP 端点非法 header 跳过 | {}={}", k, v);
                 }
             }
         }
+        // 鉴权 token（Bearer 形态经 rmcp auth_header 承载，SDK 内部 bearer_auth
+        // 自补 `Bearer ` 前缀）。
+        let mut bearer_token: Option<String> = None;
         // 鉴权头（${ENV_VAR} 解析，查找顺序：进程环境 → .env overlay）。
         // 引用未设置变量时：auth.required 缺省/true → 报错早暴露（不静默放行）；
         // 显式 false（可选凭据）→ 跳过该鉴权头照常连接，由服务端 401 说话（GAP-4b）。
@@ -832,11 +891,8 @@ impl McpClient {
                     Err(e) => return Err(e),
                 };
                 if let Some(resolved) = resolved {
-                    let (name, val) = match a.auth_type {
-                        AuthType::Bearer => (
-                            reqwest::header::AUTHORIZATION,
-                            format!("Bearer {}", resolved),
-                        ),
+                    match a.auth_type {
+                        AuthType::Bearer => bearer_token = Some(resolved),
                         AuthType::ApiKey => {
                             let name =
                                 HeaderName::try_from(a.header_name.as_str()).map_err(|e| {
@@ -847,84 +903,90 @@ impl McpClient {
                                         ),
                                     }
                                 })?;
-                            (name, resolved)
+                            let val = HeaderValue::from_str(&resolved).map_err(|e| {
+                                McpError::ConnectionFailed {
+                                    message: format!("invalid auth header value: {e}"),
+                                }
+                            })?;
+                            custom_headers.insert(name, val);
                         }
                         AuthType::None => unreachable!(),
-                    };
-                    let val =
-                        HeaderValue::from_str(&val).map_err(|e| McpError::ConnectionFailed {
-                            message: format!("invalid auth header value: {}", e),
-                        })?;
-                    header_map.append(name, val);
+                    }
                 }
             }
         }
 
-        reqwest::Client::builder()
-            .default_headers(header_map)
-            .timeout(self.request_timeout)
-            .build()
-            .map_err(|e| McpError::ConnectionFailed {
-                message: format!("build http client: {}", e),
-            })
+        let mut config = StreamableHttpClientTransportConfig::with_uri(url);
+        config.auth_header = bearer_token;
+        config.custom_headers = custom_headers;
+        Ok(config)
     }
 
-    /// HTTP transport：POST 一个 JSON-RPC 请求，解析 plain JSON 响应。
+    /// HTTP transport：经 rmcp 会话执行 tools/list / tools/call，结果序列化回
+    /// `Value`（与 stdio 路径的 result 载荷同形：tools/call → CallToolResult，
+    /// 含 `content`/`isError`）。
     ///
-    /// 绕开 stdio 的 pending/reader-loop（外部第三方 MCP server 不会反向调用内核
-    /// capability，无需异步配对通道）。SSE 流式响应（`text/event-stream`）暂不支持，
-    /// 命中时返回清晰错误（plain JSON 覆盖标准非流式调用，流式留作后续）。
-    async fn http_post(&self, url: &str, request: &JsonRpcRequest) -> Result<Value, McpError> {
-        let client = self
-            .http_client
+    /// initialize 握手已在 connect（serve_client）内完成；外部第三方 MCP 场景
+    /// 内核只实际使用这两个方法，其余方法显式拒绝（fail-closed，不伪装成空结果）。
+    /// JSON-RPC error 响应由 SDK 转译为 Err；超时沿用 [`Self::request_timeout`]。
+    async fn http_request(&self, method: &str, params: Option<Value>) -> Result<Value, McpError> {
+        let service = self
+            .http_service
             .as_ref()
             .ok_or_else(|| McpError::ConnectionFailed {
-                message: "http client not built (connect not called)".to_string(),
+                message: "http service not built (connect not called)".to_string(),
             })?;
-        let resp =
-            client
-                .post(url)
-                .json(request)
-                .send()
-                .await
-                .map_err(|e| McpError::Transport {
-                    message: format!("http post: {}", e),
-                })?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            let snippet: String = body.chars().take(200).collect();
-            return Err(McpError::Protocol {
-                message: format!("http {} {}: {}", status.as_u16(), url, snippet),
-            });
-        }
-        // SSE 流式暂不支持：探测 content-type，给出清晰错误而非解析失败。
-        if let Some(ct) = resp.headers().get(reqwest::header::CONTENT_TYPE) {
-            if ct
-                .as_bytes()
-                .windows(b"text/event-stream".len())
-                .any(|w| w.eq_ignore_ascii_case(b"text/event-stream"))
-            {
-                return Err(McpError::Protocol {
-                    message: "SSE 流式 HTTP 响应暂不支持（plain JSON only）".to_string(),
-                });
+        let peer = service.peer();
+        let value = match method {
+            "tools/list" => {
+                let result = tokio::time::timeout(self.request_timeout, peer.list_tools(None))
+                    .await
+                    .map_err(|_| McpError::Timeout {
+                        timeout_secs: self.request_timeout.as_secs(),
+                    })?
+                    .map_err(|e| McpError::Protocol {
+                        message: format!("tools/list: {e}"),
+                    })?;
+                serde_json::to_value(result).map_err(|e| McpError::Protocol {
+                    message: format!("serialize tools/list result: {e}"),
+                })?
             }
-        }
-        let response: JsonRpcResponse = resp.json().await.map_err(|e| McpError::Protocol {
-            message: format!("parse http json-rpc response: {}", e),
-        })?;
-        if let Some(error) = response.error {
-            return Err(McpError::Protocol {
-                message: format!("[{}] {}", error.code, error.message),
-            });
-        }
-        response.result.ok_or_else(|| McpError::Protocol {
-            message: "response has no result".to_string(),
-        })
+            "tools/call" => {
+                let params = params.ok_or_else(|| McpError::Protocol {
+                    message: "tools/call 缺 params".to_string(),
+                })?;
+                let call = parse_call_tool_params(params)?;
+                let result = tokio::time::timeout(self.request_timeout, peer.call_tool(call))
+                    .await
+                    .map_err(|_| McpError::Timeout {
+                        timeout_secs: self.request_timeout.as_secs(),
+                    })?
+                    .map_err(|e| McpError::Protocol {
+                        message: format!("tools/call: {e}"),
+                    })?;
+                serde_json::to_value(result).map_err(|e| McpError::Protocol {
+                    message: format!("serialize tools/call result: {e}"),
+                })?
+            }
+            other => {
+                return Err(McpError::Protocol {
+                    message: format!(
+                        "方法 {other} 不被 streamable http 运输层支持（外部 MCP 仅承载 tools/list 与 tools/call）"
+                    ),
+                })
+            }
+        };
+        Ok(value)
     }
 
     /// 发送 JSON-RPC 请求并等待响应
     async fn send_request(&self, method: &str, params: Option<Value>) -> Result<Value, McpError> {
+        // HTTP transport：经 rmcp 会话承载（握手在 connect 完成），绕开 stdio 的
+        // pending/reader-loop 配对机制；仅 tools/list 与 tools/call 有协议承载位。
+        if let McpTransport::Http { .. } = &self.transport {
+            return self.http_request(method, params).await;
+        }
+
         let id = Uuid::new_v4().to_string();
         let request = JsonRpcRequest {
             jsonrpc: "2.0",
@@ -934,13 +996,8 @@ impl McpClient {
         };
 
         let request_str = serde_json::to_string(&request).map_err(|e| McpError::Protocol {
-            message: format!("serialize error: {}", e),
+            message: format!("serialize error: {e}"),
         })?;
-
-        // HTTP transport：直接 POST，绕开 stdio 的 pending/reader-loop 配对机制。
-        if let McpTransport::Http { url, .. } = &self.transport {
-            return self.http_post(url, &request).await;
-        }
 
         self.send_frame_and_await(id, &request_str).await
     }
@@ -959,7 +1016,7 @@ impl McpClient {
         if let McpTransport::Http { .. } = &self.transport {
             let params_value = match params_json {
                 Some(s) => Some(serde_json::from_str(&s).map_err(|e| McpError::Protocol {
-                    message: format!("raw params 非法 JSON: {}", e),
+                    message: format!("raw params 非法 JSON: {e}"),
                 })?),
                 None => None,
             };
@@ -970,7 +1027,7 @@ impl McpClient {
             .map(serde_json::value::RawValue::from_string)
             .transpose()
             .map_err(|e| McpError::Protocol {
-                message: format!("raw params 非法 JSON: {}", e),
+                message: format!("raw params 非法 JSON: {e}"),
             })?;
         let request = JsonRpcRequestRaw {
             jsonrpc: "2.0",
@@ -979,7 +1036,7 @@ impl McpClient {
             params,
         };
         let request_str = serde_json::to_string(&request).map_err(|e| McpError::Protocol {
-            message: format!("serialize error: {}", e),
+            message: format!("serialize error: {e}"),
         })?;
         self.send_frame_and_await(id, &request_str).await
     }
@@ -1009,19 +1066,19 @@ impl McpClient {
                     .map_err(|e| {
                         self.mark_stdio_dead();
                         McpError::Transport {
-                            message: format!("write error: {}", e),
+                            message: format!("write error: {e}"),
                         }
                     })?;
                 writer.write_all(b"\n").await.map_err(|e| {
                     self.mark_stdio_dead();
                     McpError::Transport {
-                        message: format!("write newline error: {}", e),
+                        message: format!("write newline error: {e}"),
                     }
                 })?;
                 writer.flush().await.map_err(|e| {
                     self.mark_stdio_dead();
                     McpError::Transport {
-                        message: format!("flush error: {}", e),
+                        message: format!("flush error: {e}"),
                     }
                 })
             }
@@ -1068,6 +1125,14 @@ impl McpClient {
     /// 发送 initialize 请求完成 MCP 协议握手。
     /// config 参数为插件配置 JSON，将包含在 initialize params 的 `config` 字段中。
     pub async fn initialize(&self, config: &Value) -> Result<Value, McpError> {
+        // HTTP transport：initialize 握手已在 connect（serve_client）内完成，
+        // 能力协商与 notifications/initialized 均由 rmcp 承载——此处幂等直返回，
+        // 不向第三方 server 发协议外方法。
+        if let McpTransport::Http { .. } = &self.transport {
+            *self.initialized.lock().await = true;
+            return Ok(serde_json::json!({ "initialized": true }));
+        }
+
         // 声明内核可被 sidecar 反向调用的 capability 名单。
         // 从 router 的 known_namespaces() 动态派生——router 是注册表时，
         // 运行时注册的 namespace（如交互插件声明）自动出现在声明里，
@@ -1123,7 +1188,7 @@ impl McpClient {
         });
 
         let notif_str = serde_json::to_string(&notification).map_err(|e| McpError::Protocol {
-            message: format!("serialize notification error: {}", e),
+            message: format!("serialize notification error: {e}"),
         })?;
 
         if let Some(stdin) = &self.stdin {
@@ -1132,34 +1197,25 @@ impl McpClient {
                 .write_all(notif_str.as_bytes())
                 .await
                 .map_err(|e| McpError::Transport {
-                    message: format!("write error: {}", e),
+                    message: format!("write error: {e}"),
                 })?;
             writer
                 .write_all(b"\n")
                 .await
                 .map_err(|e| McpError::Transport {
-                    message: format!("write newline error: {}", e),
+                    message: format!("write newline error: {e}"),
                 })?;
             writer.flush().await.map_err(|e| McpError::Transport {
-                message: format!("flush error: {}", e),
+                message: format!("flush error: {e}"),
             })?;
-        } else if let McpTransport::Http { url, .. } = &self.transport {
-            // HTTP transport：fire-and-forget POST notification（忽略响应体）。
-            let client = self
-                .http_client
-                .as_ref()
-                .ok_or_else(|| McpError::ConnectionFailed {
-                    message: "http client not built (connect not called)".to_string(),
-                })?;
-            let _ = client
-                .post(url)
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(notif_str)
-                .send()
-                .await
-                .map_err(|e| McpError::Transport {
-                    message: format!("http notification: {}", e),
-                })?;
+        } else if let McpTransport::Http { .. } = &self.transport {
+            // HTTP transport：notifications/initialized 已由 rmcp 握手承载（幂等
+            // no-op）；其余通知无协议承载位，显式拒绝（fail-closed，不静默丢弃）。
+            if method != "notifications/initialized" {
+                return Err(McpError::Protocol {
+                    message: format!("通知 {method} 不被 streamable http 运输层支持"),
+                });
+            }
         } else {
             return Err(McpError::ConnectionFailed {
                 message: "not connected (no stdin, not http)".to_string(),
@@ -1206,14 +1262,14 @@ impl McpClient {
             buf.reserve(arguments_json.len() + 64);
             buf.extend_from_slice(b"{\"name\":");
             serde_json::to_writer(&mut *buf, &name).map_err(|e| McpError::Protocol {
-                message: format!("serialize error: {}", e),
+                message: format!("serialize error: {e}"),
             })?;
             buf.extend_from_slice(b",\"arguments\":");
             buf.extend_from_slice(arguments_json.as_bytes());
             buf.extend_from_slice(b"}");
             // JSON 输出恒为合法 UTF-8；copy 出帧串，scratch 容量留在 client 内复用
             String::from_utf8(buf.to_vec()).map_err(|e| McpError::Protocol {
-                message: format!("raw params 非 UTF-8: {}", e),
+                message: format!("raw params 非 UTF-8: {e}"),
             })?
         };
         self.send_request_raw("tools/call", Some(params))
@@ -1244,16 +1300,16 @@ impl McpClient {
             buf.clear();
             buf.extend_from_slice(b"{\"name\":");
             serde_json::to_writer(&mut *buf, &name).map_err(|e| McpError::Protocol {
-                message: format!("serialize error: {}", e),
+                message: format!("serialize error: {e}"),
             })?;
             buf.extend_from_slice(b",\"arguments\":");
             write_arguments(&mut buf).map_err(|e| McpError::Protocol {
-                message: format!("serialize arguments error: {}", e),
+                message: format!("serialize arguments error: {e}"),
             })?;
             buf.extend_from_slice(b"}");
             // JSON 输出恒为合法 UTF-8；copy 出帧串，scratch 容量留在 client 内复用
             String::from_utf8(buf.to_vec()).map_err(|e| McpError::Protocol {
-                message: format!("raw params 非 UTF-8: {}", e),
+                message: format!("raw params 非 UTF-8: {e}"),
             })?
         };
         self.send_request_raw("tools/call", Some(params))
@@ -1349,6 +1405,13 @@ impl McpClient {
     /// 先整树杀（kill_process_tree），再对直接子进程 kill 兜底。idle GC 卸载 /
     /// 崩溃清理 / 热重载 respawn 三条 kill 路径均收敛到此方法。
     pub async fn kill(&mut self) -> Result<(), McpError> {
+        if let Some(service) = self.http_service.take() {
+            // HTTP transport：取消 rmcp 会话（运输层工作协程 + 会话清理一并
+            // 关停）；失败不阻断调用方（对端按会话超时自行清理兜底）。
+            if let Err(e) = service.cancel().await {
+                tracing::debug!("[mcp] rmcp service cancel failed: {e}");
+            }
+        }
         if let Some(child) = &self.child {
             let mut child = child.lock().await;
             let pid = child.id();
@@ -1363,7 +1426,7 @@ impl McpClient {
                 }
             } else {
                 child.kill().await.map_err(|e| McpError::Transport {
-                    message: format!("kill error: {}", e),
+                    message: format!("kill error: {e}"),
                 })?;
             }
         }
@@ -1459,16 +1522,16 @@ async fn write_raw_line(
         .write_all(json_str.as_bytes())
         .await
         .map_err(|e| McpError::Transport {
-            message: format!("write error: {}", e),
+            message: format!("write error: {e}"),
         })?;
     writer
         .write_all(b"\n")
         .await
         .map_err(|e| McpError::Transport {
-            message: format!("write newline error: {}", e),
+            message: format!("write newline error: {e}"),
         })?;
     writer.flush().await.map_err(|e| McpError::Transport {
-        message: format!("flush error: {}", e),
+        message: format!("flush error: {e}"),
     })?;
     Ok(())
 }
@@ -1851,7 +1914,7 @@ fn resolve_windows_command(command: &str) -> String {
 ///
 /// 引用的变量两处均未设置时报错（早暴露，不静默放行）——外部 MCP 端点的鉴权值
 /// 缺失通常意味着配置未就绪，连出去也会被 401 拒绝，不如在 connect 时直接失败。
-/// 可选凭据（`auth.required == false`）由 [`McpClient`] 的 `build_http_client`
+/// 可选凭据（`auth.required == false`）由 [`McpClient`] 的 `build_http_transport_config`
 /// 捕获该错误后跳过鉴权头，本函数不感知 required 语义。
 ///
 /// 默认值语法（shell 标准，用于可选变量——如 omnisearch 的限流 key，缺失只降级
@@ -1940,6 +2003,14 @@ fn lookup_env_var(var: &str, overlay: &HashMap<String, String>) -> Option<String
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::await_holding_lock,
+    // ENV_GUARD 文件级 std Mutex 的「持锁跨 await」是 deliberate 设计：环回
+    // 测试须整测试体独占进程环境变量/端口，互斥边界=整个测试而非单个 await
+    // 段（rmcp 迁移期根治环回竞态的机制，见 ENV_GUARD 定义处）。测试是一次性
+    // 执行，std 锁竞争最坏为 OS 线程 park，无生产 async 的死锁面。
+    reason = "deliberate: 环回测试整体串行化"
+)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -2302,85 +2373,141 @@ sys.stdin.readline()
         );
     }
 
-    // ── HTTP transport 测试 ──────────────────────────────────────────
+    // ── HTTP transport 测试（rmcp streamable-http 对端形态）────────────
 
-    /// 启动一个 mock HTTP MCP server：回显收到的 id + 固定 result，并把原始请求
-    /// （headers+body）存入共享 state 供断言。返回 (url, captured_raw_request)。
-    async fn spawn_mock_mcp_server(
-        result: Value,
-    ) -> (String, Arc<std::sync::Mutex<Option<Vec<u8>>>>) {
+    /// 规范 MCP streamable-http mock（逐字节按 spec 组帧）：initialize 握手
+    /// （stateless：无 Mcp-Session-Id 响应头）+ notification → 202 + GET → 405
+    /// （不支持 SSE，客户端按规范回退纯 POST 形态）+ DELETE → 200（会话清理）+
+    /// tools/list / tools/call 可配置载荷。每次 POST 捕获整帧（头+体，小写化）
+    /// 供 auth/extra header 与帧计数断言。
+    async fn spawn_spec_mcp_mock(
+        tools: Value,
+        call_result: Value,
+    ) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        fn subseq(hay: &[u8], needle: &[u8]) -> Option<usize> {
+            hay.windows(needle.len()).position(|w| w == needle)
+        }
+        fn content_length(headers: &[u8]) -> usize {
+            String::from_utf8_lossy(headers)
+                .to_ascii_lowercase()
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0)
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let captured: Arc<std::sync::Mutex<Option<Vec<u8>>>> =
-            Arc::new(std::sync::Mutex::new(None));
+        let tools_payload = serde_json::json!({ "tools": tools });
+        let init_payload = serde_json::json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "serverInfo": {"name": "spec-mock", "version": "1.0"}
+        });
+        let captured: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
         let cap2 = captured.clone();
         tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut data = Vec::new();
-            let mut tmp = [0u8; 4096];
-            // 读完 headers + Content-Length 指定的 body
             loop {
-                let n = sock.read(&mut tmp).await.unwrap();
-                if n == 0 {
-                    break;
-                }
-                data.extend_from_slice(&tmp[..n]);
-                if let Some(hdr_end) = subseq(&data, b"\r\n\r\n") {
-                    let cl = extract_content_length(&data[..hdr_end]);
-                    let body_start = hdr_end + 4;
-                    if data.len() >= body_start + cl {
-                        break;
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let tools_payload = tools_payload.clone();
+                let call_result = call_result.clone();
+                let init_payload = init_payload.clone();
+                let cap2 = cap2.clone();
+                tokio::spawn(async move {
+                    let mut data: Vec<u8> = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    loop {
+                        // 按帧读取（headers + Content-Length 指定的 body），粘帧
+                        // 时逐帧处理——keep-alive 连接上一帧响应后同连接还有后续请求
+                        let frame_end = loop {
+                            if let Some(hdr_end) = subseq(&data, b"\r\n\r\n") {
+                                let cl = content_length(&data[..hdr_end]);
+                                if data.len() >= hdr_end + 4 + cl {
+                                    break hdr_end + 4 + cl;
+                                }
+                            }
+                            match sock.read(&mut tmp).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => data.extend_from_slice(&tmp[..n]),
+                            }
+                        };
+                        // GET（服务器→客户端 SSE 流探测）→ 405：客户端按规范视为
+                        // 不支持 SSE，回退纯 POST 形态（stateless 服务的合法形态）。
+                        if data.starts_with(b"GET") {
+                            let out =
+                                "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n";
+                            if sock.write_all(out.as_bytes()).await.is_err() {
+                                return;
+                            }
+                            data.drain(..frame_end);
+                            continue;
+                        }
+                        // DELETE（客户端会话清理）→ 200 空体
+                        if data.starts_with(b"DELETE") {
+                            let out = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+                            if sock.write_all(out.as_bytes()).await.is_err() {
+                                return;
+                            }
+                            data.drain(..frame_end);
+                            continue;
+                        }
+                        let hdr_end = subseq(&data, b"\r\n\r\n").unwrap_or(0);
+                        // 请求帧捕获（小写化：header 断言与 method 计数共用）
+                        cap2.lock()
+                            .unwrap()
+                            .push(String::from_utf8_lossy(&data[..frame_end]).to_lowercase());
+                        let body: Value = serde_json::from_slice(&data[hdr_end + 4..frame_end])
+                            .unwrap_or(Value::Null);
+                        let method = body.get("method").and_then(Value::as_str).unwrap_or("");
+                        // notification（无 id）→ 202 Accepted（规范形态，无响应体）
+                        let is_notification = body.get("id").is_none();
+                        let payload = if is_notification {
+                            String::new()
+                        } else {
+                            let id = body.get("id").cloned().unwrap_or(Value::Null);
+                            let result = match method {
+                                // 规范握手：协议版本 + 能力 + serverInfo（id 回显）
+                                "initialize" => init_payload.clone(),
+                                "tools/list" => tools_payload.clone(),
+                                "tools/call" => call_result.clone(),
+                                _ => serde_json::json!({}),
+                            };
+                            serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result})
+                                .to_string()
+                        };
+                        let status = if is_notification {
+                            "HTTP/1.1 202 Accepted"
+                        } else {
+                            "HTTP/1.1 200 OK"
+                        };
+                        let out = format!(
+                            "{status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            payload.len(),
+                            payload
+                        );
+                        if sock.write_all(out.as_bytes()).await.is_err() {
+                            return;
+                        }
+                        data.drain(..frame_end);
                     }
-                }
+                });
             }
-            *cap2.lock().unwrap() = Some(data.clone());
-            // 解析 body 取 JSON-RPC id 回显（响应帧按 id 关联请求）
-            let body_start = subseq(&data, b"\r\n\r\n")
-                .map(|p| p + 4)
-                .unwrap_or(data.len());
-            let body_str = String::from_utf8_lossy(&data[body_start..]);
-            let id = serde_json::from_str::<Value>(&body_str)
-                .ok()
-                .and_then(|v| v.get("id").cloned())
-                .unwrap_or(Value::Null);
-            let resp = serde_json::json!({
-                "jsonrpc": "2.0", "id": id, "result": result
-            })
-            .to_string();
-            let out = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                resp.len(),
-                resp
-            );
-            let _ = sock.write_all(out.as_bytes()).await;
         });
         (url, captured)
     }
 
-    fn subseq(hay: &[u8], needle: &[u8]) -> Option<usize> {
-        hay.windows(needle.len()).position(|w| w == needle)
-    }
-
-    fn extract_content_length(headers: &[u8]) -> usize {
-        let s = String::from_utf8_lossy(headers).to_ascii_lowercase();
-        for line in s.split("\r\n") {
-            if let Some(rest) = line.strip_prefix("content-length:") {
-                return rest.trim().parse().unwrap_or(0);
-            }
-        }
-        0
-    }
-
     #[tokio::test]
-    async fn test_http_send_request_roundtrip() {
-        let expected = serde_json::json!({
-            "protocolVersion": "2024-11-05",
-            "serverInfo": {"name": "mock", "version": "1.0"}
-        });
-        let (url, captured) = spawn_mock_mcp_server(expected.clone()).await;
+    async fn test_http_rmcp_roundtrip_and_headers_sent() {
+        let _loopback_guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        let tools = serde_json::json!([{
+            "name": "echo",
+            "description": "echo tool",
+            "inputSchema": {"type": "object", "properties": {}}
+        }]);
+        let (url, captured) = spawn_spec_mcp_mock(tools, serde_json::json!({"content": []})).await;
 
         // bearer 鉴权 + env 占位 + 额外头
         std::env::set_var("MCP_TEST_KEY", "secret-token-xyz");
@@ -2395,21 +2522,115 @@ sys.stdin.readline()
 
         let mut client = McpClient::new_http(url, headers, Some(auth));
         client.connect().await.unwrap();
-        let result = client.send_request("initialize", None).await.unwrap();
-        assert_eq!(result, expected);
+        let result = client.send_request("tools/list", None).await.unwrap();
+        // rmcp 会话返回的 ListToolsResult 序列化形态：{"tools": [...]}
+        let tool_names: Vec<&str> = result["tools"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| t.get("name").and_then(Value::as_str))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            tool_names,
+            vec!["echo"],
+            "tools/list 应返回 mock 声明的工具: {result}"
+        );
 
         // 校验收到的请求带上了 auth 头和额外头
-        let raw = captured.lock().unwrap().clone().unwrap();
-        let raw_s = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+        let raw = captured.lock().unwrap().join("\n---\n");
         assert!(
-            raw_s.contains("authorization: bearer secret-token-xyz"),
-            "auth header missing: {raw_s}"
+            raw.contains("authorization: bearer secret-token-xyz"),
+            "auth header missing: {raw}"
         );
         assert!(
-            raw_s.contains("x-trace: sample-origin"),
-            "extra header missing: {raw_s}"
+            raw.contains("x-trace: sample-origin"),
+            "extra header missing: {raw}"
         );
         std::env::remove_var("MCP_TEST_KEY");
+    }
+
+    #[tokio::test]
+    async fn test_http_rmcp_call_tool_roundtrip() {
+        let _loopback_guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        let call_result = serde_json::json!({
+            "content": [{"type": "text", "text": "echo: hi"}],
+            "isError": false
+        });
+        let (url, _captured) = spawn_spec_mcp_mock(serde_json::json!([]), call_result).await;
+
+        let mut client = McpClient::new_http(url, HashMap::new(), None);
+        client.connect().await.unwrap();
+        let result = client
+            .send_request(
+                "tools/call",
+                Some(serde_json::json!({"name": "echo", "arguments": {"msg": "hi"}})),
+            )
+            .await
+            .unwrap();
+        // CallToolResult 序列化形态：content 数组 + isError 标志
+        assert_eq!(result["content"][0]["text"], "echo: hi", "{result}");
+        assert_eq!(result["isError"], false, "{result}");
+    }
+
+    #[tokio::test]
+    async fn test_http_rmcp_unsupported_method_rejected() {
+        let _loopback_guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        let (url, _captured) =
+            spawn_spec_mcp_mock(serde_json::json!([]), serde_json::json!({})).await;
+        let mut client = McpClient::new_http(url, HashMap::new(), None);
+        client.connect().await.unwrap();
+        let err = client
+            .send_request("resources/list", None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("不被 streamable http 运输层支持"),
+            "非 tools/* 方法应显式拒绝: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_rmcp_initialize_idempotent_noop() {
+        let _loopback_guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        let (url, captured) =
+            spawn_spec_mcp_mock(serde_json::json!([]), serde_json::json!({"content": []})).await;
+        let mut client = McpClient::new_http(url, HashMap::new(), None);
+        client.connect().await.unwrap();
+        let result = client.initialize(&serde_json::json!({})).await.unwrap();
+        assert_eq!(result, serde_json::json!({ "initialized": true }));
+        // connect（rmcp 握手）已发过一次 initialize；幂等 no-op 不得再发第二帧
+        let n_init = captured
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|f| f.contains("\"method\":\"initialize\""))
+            .count();
+        assert_eq!(n_init, 1, "initialize 幂等：connect 后再调不应再发握手帧");
+    }
+
+    #[tokio::test]
+    async fn test_http_rmcp_notification_semantics() {
+        let _loopback_guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        let (url, _captured) =
+            spawn_spec_mcp_mock(serde_json::json!([]), serde_json::json!({"content": []})).await;
+        let mut client = McpClient::new_http(url, HashMap::new(), None);
+        client.connect().await.unwrap();
+        // notifications/initialized 已由 rmcp 握手承载 → 幂等放行
+        client
+            .send_notification("notifications/initialized", None)
+            .await
+            .expect("initialized 通知应幂等放行");
+        // 其余通知无协议承载位 → 显式拒绝（fail-closed）
+        let err = client
+            .send_notification("agentos/custom", None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("不被 streamable http 运输层支持"),
+            "非 initialized 通知应显式拒绝: {err}"
+        );
     }
 
     #[tokio::test]
@@ -2431,10 +2652,11 @@ sys.stdin.readline()
 
     #[tokio::test]
     async fn test_http_optional_auth_missing_env_skips_header_and_connects() {
+        let _loopback_guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
         // required=false + 占位变量缺失 → connect 成功、请求不带该鉴权头
         // （照常连接，由服务端 401 说话）
-        let expected = serde_json::json!({"ok": true});
-        let (url, captured) = spawn_mock_mcp_server(expected.clone()).await;
+        let (url, captured) =
+            spawn_spec_mcp_mock(serde_json::json!([]), serde_json::json!({"content": []})).await;
 
         std::env::remove_var("MCP_OPT_AUTH_KEY_DEFINITELY_UNSET");
         let auth = agentos_core::traits::EndpointAuth {
@@ -2448,27 +2670,26 @@ sys.stdin.readline()
             .connect()
             .await
             .expect("required=false 时缺变量不应 connect 失败");
-        let result = client.send_request("tools/list", None).await.unwrap();
-        assert_eq!(result, expected);
+        client.send_request("tools/list", None).await.unwrap();
 
         // 断言实际发出的请求头集合：鉴权头必须缺席
-        let raw = captured.lock().unwrap().clone().unwrap();
-        let raw_s = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+        let raw = captured.lock().unwrap().join("\n---\n");
         assert!(
-            !raw_s.contains("x-api-key"),
-            "可选鉴权未配置时不应携带 x-api-key 头: {raw_s}"
+            !raw.contains("x-api-key"),
+            "可选鉴权未配置时不应携带 x-api-key 头: {raw}"
         );
         assert!(
-            !raw_s.contains("authorization:"),
-            "可选鉴权未配置时不应携带 authorization 头: {raw_s}"
+            !raw.contains("authorization:"),
+            "可选鉴权未配置时不应携带 authorization 头: {raw}"
         );
     }
 
     #[tokio::test]
     async fn test_http_optional_auth_with_env_still_sends_header() {
+        let _loopback_guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
         // required=false 但变量已配置 → 鉴权头照常发送（可选 ≠ 永不发送）
-        let expected = serde_json::json!({"ok": true});
-        let (url, captured) = spawn_mock_mcp_server(expected.clone()).await;
+        let (url, captured) =
+            spawn_spec_mcp_mock(serde_json::json!([]), serde_json::json!({"content": []})).await;
 
         std::env::set_var("MCP_OPT_AUTH_KEY_SET", "secret-abc");
         let auth = agentos_core::traits::EndpointAuth {
@@ -2481,11 +2702,10 @@ sys.stdin.readline()
         client.connect().await.unwrap();
         client.send_request("tools/list", None).await.unwrap();
 
-        let raw = captured.lock().unwrap().clone().unwrap();
-        let raw_s = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+        let raw = captured.lock().unwrap().join("\n---\n");
         assert!(
-            raw_s.contains("x-api-key: secret-abc"),
-            "可选鉴权已配置时仍应发送鉴权头: {raw_s}"
+            raw.contains("x-api-key: secret-abc"),
+            "可选鉴权已配置时仍应发送鉴权头: {raw}"
         );
         std::env::remove_var("MCP_OPT_AUTH_KEY_SET");
     }
@@ -3345,13 +3565,23 @@ sys.stdin.readline()
     }
 
     #[tokio::test]
-    async fn test_send_notification_http_without_connect_returns_error() {
+    async fn test_send_notification_http_without_connect_semantics() {
         let client = McpClient::new_http("http://127.0.0.1:1", HashMap::new(), None);
-        let err = client
+        // notifications/initialized：HTTP 下是幂等 no-op（rmcp 握手已承载），
+        // 未 connect 也放行
+        client
             .send_notification("notifications/initialized", None)
             .await
+            .expect("initialized 通知幂等放行");
+        // 其余通知：无协议承载位 → 显式拒绝
+        let err = client
+            .send_notification("agentos/custom", None)
+            .await
             .unwrap_err();
-        assert!(matches!(err, McpError::ConnectionFailed { .. }));
+        assert!(
+            err.to_string().contains("不被 streamable http 运输层支持"),
+            "实际: {err}"
+        );
     }
 
     #[tokio::test]
@@ -3449,137 +3679,67 @@ sys.stdin.readline()
     }
 
     #[tokio::test]
-    async fn test_http_post_error_branches() {
-        // 未 connect → 明确报错
-        let client = McpClient::new_http("http://127.0.0.1:1", HashMap::new(), None);
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id: "1".to_string(),
-            method: "tools/list".to_string(),
-            params: None,
-        };
+    async fn test_http_rmcp_call_tool_invalid_params() {
+        let _loopback_guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        // tools/call params 缺 name / arguments 非对象 → 显式报错（不发网络请求）
+        let (url, _captured) =
+            spawn_spec_mcp_mock(serde_json::json!([]), serde_json::json!({"content": []})).await;
+        let mut client = McpClient::new_http(url, HashMap::new(), None);
+        client.connect().await.unwrap();
+
         let err = client
-            .http_post("http://127.0.0.1:1", &request)
+            .send_request("tools/call", Some(serde_json::json!({"arguments": {}})))
             .await
             .unwrap_err();
-        assert!(matches!(err, McpError::ConnectionFailed { .. }));
-
-        // 连接拒绝 → Transport 错误
-        let mut client2 = McpClient::new_http("http://127.0.0.1:1", HashMap::new(), None);
-        client2.connect().await.unwrap();
-        let err2 = client2
-            .http_post("http://127.0.0.1:1", &request)
-            .await
-            .unwrap_err();
-        assert!(matches!(err2, McpError::Transport { .. }));
-    }
-
-    #[tokio::test]
-    async fn test_http_post_sse_and_error_response() {
-        // SSE content-type → 明确报错（流式暂不支持）
-        let (url, _) = spawn_raw_http_server(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: x\n\n",
-        )
-        .await;
-        let mut client = McpClient::new_http(url.clone(), HashMap::new(), None);
-        client.connect().await.unwrap();
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id: "1".to_string(),
-            method: "tools/list".to_string(),
-            params: None,
-        };
-        let err = client.http_post(&url, &request).await.unwrap_err();
-        assert!(matches!(err, McpError::Protocol { .. }));
-        assert!(err.to_string().contains("SSE"));
-
-        // JSON-RPC error 响应 → Protocol 错误（带 code/message）
-        let (url2, _) = spawn_raw_http_server(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"method not found\"}}",
-        )
-        .await;
-        let mut client2 = McpClient::new_http(url2.clone(), HashMap::new(), None);
-        client2.connect().await.unwrap();
-        let err2 = client2.http_post(&url2, &request).await.unwrap_err();
-        assert!(matches!(err2, McpError::Protocol { .. }));
-        assert!(err2.to_string().contains("-32601"));
-
-        // 非 2xx 状态 → Protocol 错误（带状态码与响应体片段）
-        let (url3, _) = spawn_raw_http_server(
-            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n\r\n{\"error\":\"boom\"}",
-        )
-        .await;
-        let mut client3 = McpClient::new_http(url3.clone(), HashMap::new(), None);
-        client3.connect().await.unwrap();
-        let err3 = client3.http_post(&url3, &request).await.unwrap_err();
-        assert!(matches!(err3, McpError::Protocol { .. }));
-        assert!(err3.to_string().contains("500"));
-    }
-
-    /// 启动一个返回固定原始 HTTP 响应的 mock server。
-    async fn spawn_raw_http_server(raw_response: &'static str) -> (String, ()) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 4096];
-            let _ = sock.read(&mut buf).await;
-            let _ = sock.write_all(raw_response.as_bytes()).await;
-        });
-        (url, ())
-    }
-
-    #[tokio::test]
-    async fn test_http_send_notification_roundtrip() {
-        // HTTP notification：fire-and-forget POST，忽略响应体
-        let (url, captured) = spawn_mock_mcp_server(json!({"ok": true})).await;
-        let mut client = McpClient::new_http(url, HashMap::new(), None);
-        client.connect().await.unwrap();
-        client
-            .send_notification("notifications/initialized", Some(json!({"a": 1})))
-            .await
-            .unwrap();
-
-        let raw = captured.lock().unwrap().clone().unwrap();
-        let raw_s = String::from_utf8_lossy(&raw);
         assert!(
-            raw_s.contains("notifications/initialized"),
-            "notification method 应出现在请求体: {raw_s}"
+            err.to_string().contains("缺 name"),
+            "缺 name 应显式报错: {err}"
         );
+
+        let err2 = client
+            .send_request(
+                "tools/call",
+                Some(serde_json::json!({"name": "t", "arguments": "not-an-object"})),
+            )
+            .await
+            .unwrap_err();
         assert!(
-            raw_s.contains("\"a\":1"),
-            "notification params 应出现在请求体: {raw_s}"
+            err2.to_string().contains("必须是对象"),
+            "arguments 非对象应显式报错: {err2}"
         );
     }
 
     #[tokio::test]
-    async fn test_http_send_request_roundtrip_with_error_result() {
-        // 响应含 error 字段 → send_request 返回 Protocol 错误
-        let (url, _) = spawn_raw_http_server(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"nope\"}}",
-        )
-        .await;
+    async fn test_http_rmcp_malformed_tools_list_maps_to_error() {
+        let _loopback_guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        // 服务端返回畸形 ListToolsResult（tools=null）→ rmcp 解析失败 →
+        // Protocol 错误（不 panic、不静默空列表）
+        let (url, _) = spawn_spec_mcp_mock(Value::Null, serde_json::json!({"content": []})).await;
         let mut client = McpClient::new_http(url, HashMap::new(), None);
         client.connect().await.unwrap();
         let err = client.send_request("tools/list", None).await.unwrap_err();
-        assert!(matches!(err, McpError::Protocol { .. }));
-        assert!(err.to_string().contains("nope"));
+        assert!(matches!(err, McpError::Protocol { .. }), "实际: {err:?}");
     }
 
     #[tokio::test]
-    async fn test_http_send_request_result_missing() {
-        // 响应无 result 也无 error → Protocol 错误
-        let (url, _) = spawn_raw_http_server(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1}",
+    async fn test_http_rmcp_malformed_call_result_maps_to_error() {
+        let _loopback_guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        // 服务端返回畸形 CallToolResult（content 非数组）→ Protocol 错误
+        let (url, _) = spawn_spec_mcp_mock(
+            serde_json::json!([]),
+            serde_json::json!({"content": "oops"}),
         )
         .await;
         let mut client = McpClient::new_http(url, HashMap::new(), None);
         client.connect().await.unwrap();
-        let err = client.send_request("tools/list", None).await.unwrap_err();
-        assert!(matches!(err, McpError::Protocol { .. }));
+        let err = client
+            .send_request(
+                "tools/call",
+                Some(serde_json::json!({"name": "t", "arguments": {}})),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, McpError::Protocol { .. }), "实际: {err:?}");
     }
 
     #[tokio::test]
@@ -3592,15 +3752,20 @@ sys.stdin.readline()
 
     #[tokio::test]
     async fn test_http_connect_invalid_header_skipped() {
+        let _loopback_guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
         // 非法 header 名/值 → 跳过并告警，connect 仍成功
-        let (url, _) = spawn_mock_mcp_server(json!({"ok": true})).await;
+        let (url, captured) =
+            spawn_spec_mcp_mock(serde_json::json!([]), serde_json::json!({"content": []})).await;
         let mut headers = HashMap::new();
         headers.insert("bad header name".to_string(), "v".to_string());
         headers.insert("x-ok".to_string(), "1".to_string());
         let mut client = McpClient::new_http(url, headers, None);
         client.connect().await.unwrap();
-        let result = client.send_request("tools/list", None).await.unwrap();
-        assert_eq!(result["ok"], true);
+        client.send_request("tools/list", None).await.unwrap();
+        // 非法名被跳过，合法名照发
+        let raw = captured.lock().unwrap().join("\n---\n");
+        assert!(!raw.contains("bad header name"), "{raw}");
+        assert!(raw.contains("x-ok: 1"), "{raw}");
     }
 
     #[tokio::test]
@@ -3665,25 +3830,6 @@ sys.stdin.readline()
         let mut client2 = McpClient::new_stdio("cat", vec![]);
         client2.kill().await.unwrap();
         assert!(!client2.is_alive().await);
-    }
-
-    #[tokio::test]
-    async fn test_http_post_parse_error() {
-        // 200 但响应体不是合法 JSON-RPC → Protocol 错误
-        let (url, _) = spawn_raw_http_server(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\nnot-json",
-        )
-        .await;
-        let mut client = McpClient::new_http(url.clone(), HashMap::new(), None);
-        client.connect().await.unwrap();
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id: "1".to_string(),
-            method: "tools/list".to_string(),
-            params: None,
-        };
-        let err = client.http_post(&url, &request).await.unwrap_err();
-        assert!(matches!(err, McpError::Protocol { .. }));
     }
 
     #[test]
@@ -4080,16 +4226,17 @@ sys.stdin.readline()
     /// 收益不适用，语义必须等价）。
     #[tokio::test]
     async fn http_call_tool_raw_roundtrips_like_value_path() {
-        let expected = json!({"content": [{"type": "text", "text": "hi"}]});
-        let (url, captured) = spawn_mock_mcp_server(expected.clone()).await;
+        let _loopback_guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        let call_result = json!({"content": [{"type": "text", "text": "hi"}]});
+        let (url, captured) = spawn_spec_mcp_mock(serde_json::json!([]), call_result.clone()).await;
         let mut client = McpClient::new_http(url, HashMap::new(), None);
         client.connect().await.unwrap();
         let result = client
             .call_tool_raw("search", r#"{"q":"kernel"}"#)
             .await
             .expect("HTTP raw 通道应成功");
-        assert_eq!(result, expected, "result 原样透传");
-        let raw = String::from_utf8_lossy(&captured.lock().unwrap().clone().unwrap()).to_string();
+        assert_eq!(result, call_result, "result 原样透传");
+        let raw = captured.lock().unwrap().join("\n---\n");
         assert!(
             raw.contains(r#""name":"search""#) && raw.contains(r#""q":"kernel""#),
             "工具名与 arguments 必须进 params 原文: {raw}"
@@ -4098,16 +4245,17 @@ sys.stdin.readline()
 
     #[tokio::test]
     async fn http_call_tool_roundtrip_carries_name_and_arguments() {
-        let expected = json!({"content": [{"type": "text", "text": "hi"}]});
-        let (url, captured) = spawn_mock_mcp_server(expected.clone()).await;
+        let _loopback_guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        let call_result = json!({"content": [{"type": "text", "text": "hi"}]});
+        let (url, captured) = spawn_spec_mcp_mock(serde_json::json!([]), call_result.clone()).await;
         let mut client = McpClient::new_http(url, HashMap::new(), None);
         client.connect().await.unwrap();
         let result = client
             .call_tool("search", &json!({"q": "kernel"}))
             .await
             .expect("HTTP tools/call 应成功");
-        assert_eq!(result, expected, "result 原样透传");
-        let raw = String::from_utf8_lossy(&captured.lock().unwrap().clone().unwrap()).to_string();
+        assert_eq!(result, call_result, "result 原样透传");
+        let raw = captured.lock().unwrap().join("\n---\n");
         assert!(
             raw.contains(r#""method":"tools/call""#),
             "方法应为 tools/call: {raw}"
@@ -4118,17 +4266,18 @@ sys.stdin.readline()
 
     #[tokio::test]
     async fn http_call_tool_raw_parses_params_then_roundtrips() {
+        let _loopback_guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
         // HTTP 通道的 raw 形态回退解析重走 Value 路径：行为与 stdio 一致
-        let expected = json!({"echo": true});
-        let (url, captured) = spawn_mock_mcp_server(expected.clone()).await;
+        let call_result = json!({"content": [{"type": "text", "text": "ok"}]});
+        let (url, captured) = spawn_spec_mcp_mock(serde_json::json!([]), call_result.clone()).await;
         let mut client = McpClient::new_http(url, HashMap::new(), None);
         client.connect().await.unwrap();
         let result = client
             .call_tool_raw("t", r#"{"state":{"a":1}}"#)
             .await
             .expect("HTTP raw 调用应成功");
-        assert_eq!(result, expected);
-        let raw = String::from_utf8_lossy(&captured.lock().unwrap().clone().unwrap()).to_string();
+        assert_eq!(result, call_result);
+        let raw = captured.lock().unwrap().join("\n---\n");
         assert!(
             raw.contains(r#""arguments":{"state":{"a":1}}"#),
             "arguments 原文应到边: {raw}"
@@ -4360,26 +4509,8 @@ sys.stdin.readline()
     }
 
     #[tokio::test]
-    async fn http_post_parses_json_without_content_type() {
-        // 无 Content-Type 头的响应：跳过 SSE 探测，plain JSON 照常解析
-        let (url, _) = spawn_raw_http_server(
-            "HTTP/1.1 200 OK\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}",
-        )
-        .await;
-        let mut client = McpClient::new_http(url.clone(), HashMap::new(), None);
-        client.connect().await.unwrap();
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id: "1".to_string(),
-            method: "tools/list".to_string(),
-            params: None,
-        };
-        let result = client.http_post(&url, &request).await.unwrap();
-        assert_eq!(result["ok"], json!(true));
-    }
-
-    #[tokio::test]
     async fn http_connect_rejects_invalid_auth_header_value() {
+        let _loopback_guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
         // 鉴权值含非法字符（控制字符）→ 构建客户端时早失败（不静默丢头）
         let auth = agentos_core::traits::EndpointAuth {
             auth_type: AuthType::ApiKey,
@@ -4395,9 +4526,10 @@ sys.stdin.readline()
 
     #[tokio::test]
     async fn http_auth_type_none_skips_auth_header() {
+        let _loopback_guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
         // AuthType::None：不解析不注入鉴权头（无鉴权端点显式声明）
-        let expected = json!({"ok": true});
-        let (url, captured) = spawn_mock_mcp_server(expected.clone()).await;
+        let (url, captured) =
+            spawn_spec_mcp_mock(serde_json::json!([]), serde_json::json!({"content": []})).await;
         let auth = agentos_core::traits::EndpointAuth {
             auth_type: AuthType::None,
             header_name: "Authorization".to_string(),
@@ -4406,10 +4538,8 @@ sys.stdin.readline()
         };
         let mut client = McpClient::new_http(url, HashMap::new(), Some(auth));
         client.connect().await.unwrap();
-        let result = client.send_request("tools/list", None).await.unwrap();
-        assert_eq!(result, expected);
-        let raw = String::from_utf8_lossy(&captured.lock().unwrap().clone().unwrap())
-            .to_ascii_lowercase();
+        client.send_request("tools/list", None).await.unwrap();
+        let raw = captured.lock().unwrap().join("\n---\n");
         assert!(
             !raw.contains("authorization:"),
             "AuthType::None 不应携带鉴权头: {raw}"

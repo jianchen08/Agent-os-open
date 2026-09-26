@@ -15,7 +15,6 @@ import json
 from typing import Any
 
 import pytest
-
 import server as mod
 
 

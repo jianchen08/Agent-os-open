@@ -6,8 +6,8 @@
  */
 import { act, renderHook } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import type { QueryClient, QueryKey } from '@tanstack/react-query'
 import { useVisibleRefetch } from '../useVisibleRefetch'
+import type { QueryClient, QueryKey } from '@tanstack/react-query'
 
 function makeClient() {
   return {

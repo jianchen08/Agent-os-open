@@ -1,0 +1,94 @@
+{
+  "id": "onboarding_service",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Onboarding Service",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [],
+    "services": [
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for /ext/onboarding_service/** (walkthroughs content + user progress)",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string" },
+            "method": { "type": "string" },
+            "plugin_id": { "type": "string" },
+            "raw_body": { "type": "string" },
+            "headers": { "type": "object" },
+            "query": { "type": "object" }
+          }
+        }
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 55,
+  "http_endpoints": [
+    {
+      "route_id": "walkthroughs_list",
+      "method": "GET",
+      "path": "/ext/onboarding_service/walkthroughs",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "引导内容清单（fail-closed 校验后的 walkthroughs）"
+    },
+    {
+      "route_id": "progress_get",
+      "method": "GET",
+      "path": "/ext/onboarding_service/progress",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "读取用户引导进度（用户空间 onboarding/progress.json）"
+    },
+    {
+      "route_id": "progress_update",
+      "method": "POST",
+      "path": "/ext/onboarding_service/progress",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "合并单条步骤进度（walkthrough_id/step_id 必须存在于已装载内容）"
+    }
+  ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "get_started",
+        "title": "开始使用",
+        "icon": "🚀",
+        "space": "workspace",
+        "slot": "tab",
+        "path": "/p/get_started",
+        "widget": "onboarding_panel",
+        "order": 1,
+        "description": "引导完成模型配置、走通核心链、讲解任务管理"
+      },
+      {
+        "id": "onboarding_guide",
+        "title": "使用引导",
+        "icon": "🧭",
+        "space": "settings",
+        "slot": "nav",
+        "widget": "onboarding_panel",
+        "order": 90,
+        "description": "功能导览与配置引导入口（设置中枢内查看）"
+      }
+    ]
+  },
+  "host_group": "light"
+}

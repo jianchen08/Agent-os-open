@@ -298,7 +298,8 @@ CREATE TABLE IF NOT EXISTS pipeline_pending_inputs (
     thinking_strength TEXT NOT NULL DEFAULT '',
     client_message_id TEXT NOT NULL DEFAULT '',
     execution_context TEXT,
-    state_overlay     TEXT,
+    state_overlay TEXT,
+    pipeline_config_id TEXT,
     created_at        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pending_pipeline
@@ -389,6 +390,18 @@ fn migrate_add_users_must_change_password(conn: &Connection) -> Result<(), Stora
     if has == 0 {
         conn.execute(
             "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// 为旧库（无 pipeline_config_id 列的 pipeline_pending_inputs 表）补加该列。幂等。
+/// 存量行该列为 NULL = autonomous（显式指定才写值，缺省路径不变）。
+fn migrate_add_pending_pipeline_config_id(conn: &Connection) -> Result<(), StorageError> {
+    if !table_has_column(conn, "pipeline_pending_inputs", "pipeline_config_id")? {
+        conn.execute(
+            "ALTER TABLE pipeline_pending_inputs ADD COLUMN pipeline_config_id TEXT",
             [],
         )?;
     }
@@ -601,7 +614,7 @@ fn migrate_add_tenant_id(conn: &Connection) -> Result<(), StorageError> {
         // 行级读取失败必须显式留痕（不吞）：判断结果只取可读行，失败时保守跳过
         // ALTER——列存在性不明时不做可能自撞"duplicate column"的补列。
         let mut has_col = false;
-        let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
         for r in rows {
             match r {
@@ -618,8 +631,7 @@ fn migrate_add_tenant_id(conn: &Connection) -> Result<(), StorageError> {
         if !has_col {
             conn.execute(
                 &format!(
-                    "ALTER TABLE {} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'",
-                    table
+                    "ALTER TABLE {table} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'"
                 ),
                 [],
             )?;
@@ -819,6 +831,13 @@ fn slot_row_to_record(
         // 自定义元数据随 blob 全文持久化，读时原样提取（user 消息的
         // client_message_id 幂等键契约，ADR 2026-08-21）
         metadata: msg.get("metadata").filter(|m| m.is_object()).cloned(),
+        // 执行身份戳记读时提取（assistant blob 的 agent_id）：空串归一为
+        // None，读侧统一缺省不污染
+        agent_id: msg
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from),
     }
 }
 
@@ -1134,10 +1153,10 @@ impl SqliteStore {
         // 留档、空表 DROP），保证 db_admin 表清单与后端实际读写一一对应。
         retire_table_preserve_rows(conn, "messages")?;
         migrate_add_users_must_change_password(conn)?;
+        migrate_add_pending_pipeline_config_id(conn)?;
         if current_version > SCHEMA_VERSION {
             return Err(StorageError::Database(format!(
-                "数据库 schema 版本 {} 高于本内核支持的 {}（由更新版本的内核写出）——拒绝打开以防止静默破坏；请升级内核或迁移数据",
-                current_version, SCHEMA_VERSION
+                "数据库 schema 版本 {current_version} 高于本内核支持的 {SCHEMA_VERSION}（由更新版本的内核写出）——拒绝打开以防止静默破坏；请升级内核或迁移数据"
             )));
         }
         for (name, migrate) in MIGRATIONS.iter().skip(current_version.max(0) as usize) {
@@ -1583,11 +1602,11 @@ impl SqliteStore {
         );
         let mut idx = 3;
         if opts.before_sequence.is_some() {
-            sql.push_str(&format!(" AND s.seq < ?{}", idx));
+            sql.push_str(&format!(" AND s.seq < ?{idx}"));
             idx += 1;
         }
         if opts.after_sequence.is_some() {
-            sql.push_str(&format!(" AND s.seq > ?{}", idx));
+            sql.push_str(&format!(" AND s.seq > ?{idx}"));
             idx += 1;
         }
         // 尾锚定窗口：无 after 游标 + limit → DESC 取最新 N 条（结果统一反转为 ASC）；
@@ -1600,7 +1619,7 @@ impl SqliteStore {
             " ORDER BY s.seq ASC, s.created_at ASC, s.message_id ASC"
         });
         if opts.limit.is_some() {
-            sql.push_str(&format!(" LIMIT ?{}", idx));
+            sql.push_str(&format!(" LIMIT ?{idx}"));
         }
 
         let mut stmt = conn.prepare(&sql)?;
@@ -1926,8 +1945,8 @@ impl SqliteStore {
             "INSERT OR IGNORE INTO pipeline_pending_inputs \
              (id, pipeline_id, tenant_id, user_id, content, thread, source, agent_id, \
               route_id, thinking_strength, client_message_id, execution_context, \
-              state_overlay, created_at) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+              state_overlay, pipeline_config_id, created_at) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             rusqlite::params![
                 input.id,
                 pipeline_id,
@@ -1943,6 +1962,7 @@ impl SqliteStore {
                 input.client_message_id,
                 ec,
                 ov,
+                input.pipeline_config_id,
                 input.created_at,
             ],
         )?;
@@ -1992,7 +2012,7 @@ impl SqliteStore {
             .query_row(
                 "SELECT id, pipeline_id, tenant_id, user_id, content, thread, source, \
                         agent_id, route_id, thinking_strength, client_message_id, \
-                        execution_context, state_overlay, created_at \
+                        execution_context, state_overlay, pipeline_config_id, created_at \
                  FROM pipeline_pending_inputs \
                  WHERE tenant_id=?1 AND pipeline_id=?2 \
                  ORDER BY created_at, id LIMIT 1",
@@ -2012,7 +2032,8 @@ impl SqliteStore {
                         row.get::<_, String>(10)?,
                         row.get::<_, Option<String>>(11)?,
                         row.get::<_, Option<String>>(12)?,
-                        row.get::<_, String>(13)?,
+                        row.get::<_, Option<String>>(13)?,
+                        row.get::<_, String>(14)?,
                     ))
                 },
             )
@@ -2031,6 +2052,7 @@ impl SqliteStore {
             cmid,
             ec,
             ov,
+            pcid,
             created,
         )) = row
         else {
@@ -2058,6 +2080,7 @@ impl SqliteStore {
             client_message_id: cmid,
             execution_context,
             state_overlay,
+            pipeline_config_id: pcid,
             created_at: created,
         }))
     }
@@ -2073,7 +2096,7 @@ impl SqliteStore {
             .prepare(
                 "SELECT id, pipeline_id, tenant_id, user_id, content, thread, source, \
                         agent_id, route_id, thinking_strength, client_message_id, \
-                        execution_context, state_overlay, created_at \
+                        execution_context, state_overlay, pipeline_config_id, created_at \
                  FROM pipeline_pending_inputs \
                  WHERE tenant_id=?1 AND pipeline_id=?2 \
                  ORDER BY created_at, id",
@@ -2093,7 +2116,8 @@ impl SqliteStore {
                     row.get::<_, String>(10)?,
                     row.get::<_, Option<String>>(11)?,
                     row.get::<_, Option<String>>(12)?,
-                    row.get::<_, String>(13)?,
+                    row.get::<_, Option<String>>(13)?,
+                    row.get::<_, String>(14)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -2114,6 +2138,7 @@ impl SqliteStore {
                     cmid,
                     ec,
                     ov,
+                    pcid,
                     created,
                 )| {
                     let source = Self::parse_pending_source(&source, &id);
@@ -2135,6 +2160,7 @@ impl SqliteStore {
                         client_message_id: cmid,
                         execution_context,
                         state_overlay,
+                        pipeline_config_id: pcid,
                         created_at: created,
                     }
                 },
@@ -2208,7 +2234,7 @@ impl SqliteStore {
         state: &serde_json::Value,
     ) -> Result<(), StorageError> {
         let conn = self.conn.lock();
-        let checkpoint_id = format!("cp_{}_{}", pipeline_id, step_no);
+        let checkpoint_id = format!("cp_{pipeline_id}_{step_no}");
         // 瘦身副本：剥离 messages + 易变 per-run 键（内核自有 ∪ 插件声明），
         // 写 ckpt_max_seq 水位（原 state 不动）。易变键（GAP-3）：
         // message/input/message_id/suspended 等属于"本轮运行"，不是管道累计
@@ -2911,11 +2937,11 @@ impl SqliteStore {
             )
             .optional()?;
         let Some(pipeline_id) = pipeline_id else {
-            return Err(StorageError::NotFound(format!("run not found: {}", run_id)));
+            return Err(StorageError::NotFound(format!("run not found: {run_id}")));
         };
         load_run_projection(&conn, &pipeline_id, tenant_id)?
             .map(|p| p.into_run_record(tenant_id))
-            .ok_or_else(|| StorageError::NotFound(format!("run not found: {}", run_id)))
+            .ok_or_else(|| StorageError::NotFound(format!("run not found: {run_id}")))
     }
 
     fn list_runs_by_pipeline_inner(
@@ -2940,10 +2966,9 @@ impl SqliteStore {
         );
         match row {
             Ok(data) => Ok(data),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Err(StorageError::NotFound(format!(
-                "blob not found: {}",
-                blob_id
-            ))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                Err(StorageError::NotFound(format!("blob not found: {blob_id}")))
+            }
             Err(e) => Err(e.into()),
         }
     }
@@ -4298,8 +4323,7 @@ mod tests {
             .collect();
         assert!(
             !backup_names.is_empty(),
-            "损坏文件应被备份保留现场，实际: {:?}",
-            backup_names
+            "损坏文件应被备份保留现场，实际: {backup_names:?}"
         );
 
         // ── 相位二：显式选择自动重建（AGENTOS_DB_AUTO_REBUILD=1）──
@@ -4365,8 +4389,7 @@ mod tests {
             .collect();
         assert!(
             corrupt_files.is_empty(),
-            "健康库不应产生备份: {:?}",
-            corrupt_files
+            "健康库不应产生备份: {corrupt_files:?}"
         );
     }
 
@@ -5039,10 +5062,10 @@ mod tests {
         // 追加 3 条 trace（构造方 seq 恒 0，存储层写入时自动分配 MAX(seq)+1）
         for i in 0..3u32 {
             let entry = TraceEntry {
-                trace_id: format!("trace_{}", i),
+                trace_id: format!("trace_{i}"),
                 pipeline_id: "pipe_trace_seq".to_string(),
                 seq: 0,
-                plugin_id: format!("plugin_{}", i),
+                plugin_id: format!("plugin_{i}"),
                 patch_type: PatchType::StateUpdate,
                 patch_data: json!({"key": format!("value_{}", i)}),
                 created_at: chrono::Utc::now().to_rfc3339(),
@@ -5251,6 +5274,7 @@ mod tests {
             client_message_id: String::new(),
             execution_context: None,
             state_overlay: Some(json!({"task.goal": content})),
+            pipeline_config_id: None,
             created_at: created.to_string(),
         }
     }
@@ -5307,6 +5331,62 @@ mod tests {
             vec!["in_2", "in_3"],
             "pop 后剩余两条"
         );
+    }
+
+    /// pipeline_config_id 往返：显式指定经落库往返保留（链忙排队后消费仍用
+    /// 原配置）；缺省 None 往返保持 None（= autonomous，不产生假指定）。
+    #[tokio::test]
+    async fn test_pending_input_roundtrips_pipeline_config_id() {
+        let store = SqliteStore::open_memory().unwrap();
+        // 显式指定：入队 → pop 往返保真
+        let mut explicit = pending_input(
+            "in_pcid_1",
+            "pipe_pcid_a",
+            "指定配置",
+            "2026-09-25T01:00:00Z",
+        );
+        explicit.pipeline_config_id = Some("custom_pipe".to_string());
+        store
+            .enqueue_pending_input("default", "pipe_pcid_a", &explicit)
+            .unwrap();
+        let got = store
+            .pop_pending_input("default", "pipe_pcid_a")
+            .unwrap()
+            .expect("显式条目应可弹出");
+        assert_eq!(
+            got.pipeline_config_id.as_deref(),
+            Some("custom_pipe"),
+            "管道配置 id 必须经持久化往返保留（排队后消费仍用原配置）"
+        );
+
+        // 缺省：None 入队 → None 出队（旧客户端行为不变）
+        let default_rec = pending_input("in_pcid_2", "pipe_pcid_b", "缺省", "2026-09-25T02:00:00Z");
+        store
+            .enqueue_pending_input("default", "pipe_pcid_b", &default_rec)
+            .unwrap();
+        let got = store
+            .pop_pending_input("default", "pipe_pcid_b")
+            .unwrap()
+            .expect("缺省条目应可弹出");
+        assert!(
+            got.pipeline_config_id.is_none(),
+            "缺省往返必须保持 None，不得伪造指定: {:?}",
+            got.pipeline_config_id
+        );
+
+        // list 路径同样保真（等待窗口列表视图）
+        let mut explicit2 = pending_input(
+            "in_pcid_3",
+            "pipe_pcid_c",
+            "列表视图",
+            "2026-09-25T03:00:00Z",
+        );
+        explicit2.pipeline_config_id = Some("other_pipe".to_string());
+        store
+            .enqueue_pending_input("default", "pipe_pcid_c", &explicit2)
+            .unwrap();
+        let listed = store.list_pending_inputs("default", "pipe_pcid_c").unwrap();
+        assert_eq!(listed[0].pipeline_config_id.as_deref(), Some("other_pipe"));
     }
 
     /// 空队列 pop 返回 None；不同租户/管道隔离。

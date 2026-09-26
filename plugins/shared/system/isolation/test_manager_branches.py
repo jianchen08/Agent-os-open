@@ -1349,7 +1349,7 @@ class TestIoErrorHealWslBranch:
         # 用 type() 运行时构造（mypy 不接受动态 base class 语句）
         _WSLProvider: Any = type(
             "_WSLProvider",
-            (ScriptedProvider, getattr(docker_stub, "DockerProvider")),
+            (ScriptedProvider, docker_stub.DockerProvider),
             {
                 "_is_wsl_docker": lambda self: True,
                 "_resolve_mount_path": lambda self, workspace: "/mnt/d/proj/ws-a",

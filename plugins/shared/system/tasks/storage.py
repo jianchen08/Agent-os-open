@@ -21,8 +21,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from agentos_plugin_sdk.enum_utils import safe_enum_value
 from task_types import TaskModel, TaskStatus
+
+from agentos_plugin_sdk.enum_utils import safe_enum_value
 
 # 多租户数据根咽喉点（plugins/shared/tenant_data.py）。本文件位于
 # plugins/shared/system/tasks/storage.py，上溯 2 级到 plugins/shared/。

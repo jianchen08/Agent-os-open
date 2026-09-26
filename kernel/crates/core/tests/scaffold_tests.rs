@@ -31,8 +31,7 @@ fn test_workspace_has_8_crates() {
     for crate_path in &expected_crates {
         assert!(
             cargo_toml.contains(crate_path),
-            "Cargo.toml 缺少 workspace member: {}",
-            crate_path
+            "Cargo.toml 缺少 workspace member: {crate_path}"
         );
     }
 }
@@ -53,13 +52,12 @@ fn test_all_crates_have_skeleton() {
         let cargo_path = format!("{}crates/{}/Cargo.toml", workspace_root(), name);
         let lib_path = format!("{}crates/{}/src/lib.rs", workspace_root(), name);
         let cargo_content = std::fs::read_to_string(&cargo_path)
-            .unwrap_or_else(|_| panic!("缺少文件: {}", cargo_path));
+            .unwrap_or_else(|_| panic!("缺少文件: {cargo_path}"));
         let _lib_content =
-            std::fs::read_to_string(&lib_path).unwrap_or_else(|_| panic!("缺少文件: {}", lib_path));
+            std::fs::read_to_string(&lib_path).unwrap_or_else(|_| panic!("缺少文件: {lib_path}"));
         assert!(
             cargo_content.contains("[package]"),
-            "{} 的 Cargo.toml 缺少 [package] 段",
-            name
+            "{name} 的 Cargo.toml 缺少 [package] 段"
         );
     }
 }
@@ -82,8 +80,7 @@ fn test_workspace_dependencies_present() {
     for dep in &expected_deps {
         assert!(
             cargo_toml.contains(dep),
-            "workspace dependencies 缺少: {}",
-            dep
+            "workspace dependencies 缺少: {dep}"
         );
     }
 }
@@ -95,11 +92,10 @@ fn test_crates_depend_on_core() {
     for name in &dependent_crates {
         let cargo_path = format!("{}crates/{}/Cargo.toml", workspace_root(), name);
         let content = std::fs::read_to_string(&cargo_path)
-            .unwrap_or_else(|_| panic!("缺少文件: {}", cargo_path));
+            .unwrap_or_else(|_| panic!("缺少文件: {cargo_path}"));
         assert!(
             content.contains("agentos-core"),
-            "crate {} 应依赖 agentos-core",
-            name
+            "crate {name} 应依赖 agentos-core"
         );
     }
 }
@@ -128,8 +124,7 @@ fn test_rust_toolchain_exists() {
         || version_line.contains("stable");
     assert!(
         has_valid_version,
-        "rust-toolchain.toml 版本应 ≥1.83 或 stable，实际: {}",
-        version_line
+        "rust-toolchain.toml 版本应 ≥1.83 或 stable，实际: {version_line}"
     );
 }
 
@@ -147,9 +142,8 @@ fn test_ci_has_5_jobs() {
     ];
     for job in &expected_jobs {
         assert!(
-            ci_content.contains(&format!("{}:", job)),
-            "ci.yml 缺少 job: {}",
-            job
+            ci_content.contains(&format!("{job}:")),
+            "ci.yml 缺少 job: {job}"
         );
     }
 }
@@ -243,8 +237,7 @@ fn test_config_directory_exists() {
     }
     assert!(
         yaml_count > 0,
-        "config/ 目录应包含 YAML 配置文件，实际找到 {} 个",
-        yaml_count
+        "config/ 目录应包含 YAML 配置文件，实际找到 {yaml_count} 个"
     );
 }
 
@@ -271,12 +264,10 @@ fn test_crate_naming_convention() {
     for (dir, expected_name) in &crate_dirs {
         let cargo_path = format!("{}crates/{}/Cargo.toml", workspace_root(), dir);
         let content = std::fs::read_to_string(&cargo_path)
-            .unwrap_or_else(|_| panic!("缺少文件: {}", cargo_path));
+            .unwrap_or_else(|_| panic!("缺少文件: {cargo_path}"));
         assert!(
-            content.contains(&format!("name = \"{}\"", expected_name)),
-            "crate {} 的 name 应为 {}",
-            dir,
-            expected_name
+            content.contains(&format!("name = \"{expected_name}\"")),
+            "crate {dir} 的 name 应为 {expected_name}"
         );
     }
 }

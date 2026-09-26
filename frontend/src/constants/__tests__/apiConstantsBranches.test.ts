@@ -11,12 +11,6 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  API_BASE_URL,
-  API_ENDPOINTS,
-  API_TIMEOUT,
-  type API_ENDPOINTS as ApiEndpointsShape,
-} from '../api'
-import {
   AGENT_MANAGER_ENDPOINTS,
   APPROVAL_SERVICE_ENDPOINTS,
   COST_CONTROL_ENDPOINTS,
@@ -27,6 +21,12 @@ import {
   TASK_SERVICE_ENDPOINTS,
   USER_ADMIN_ENDPOINTS,
 } from '../../services/api/endpoints.generated'
+import {
+  API_BASE_URL,
+  API_ENDPOINTS,
+  API_TIMEOUT,
+  type API_ENDPOINTS as ApiEndpointsShape,
+} from '../api'
 
 afterEach(() => {
   vi.unstubAllEnvs()

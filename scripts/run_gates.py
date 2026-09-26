@@ -44,6 +44,7 @@ taiki-e/install-action）。
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -89,6 +90,15 @@ class Gate:
     needs: tuple[str, ...] = ()
     fast: bool = False  # 廉价本地检查（--mode fast / Git hooks）
     allow_failure: bool = False  # 观察型：失败不阻塞
+    # ── 接线元数据（元门禁 gate-wiring V1 消费；单一真值=定义处，见
+    #    docs/working/企业级成熟度整改执行方案_20260924.md 批次 M）──
+    # ci=被某 workflow --filter 引用（默认）；inline-ci=CI 内联实现；
+    # observation=观察型；local=仅本地 mode（过渡态）。非 ci 必须给理由。
+    wiring: str = "ci"
+    wiring_reason: str = ""
+    # fast 档估时（秒；V5 预算校验：所有 fast 门禁总和 ≤ FAST_BUDGET）。
+    # fast=True 必须声明，防"未估时重门禁溜进 fast 档"的漏洞。
+    est_seconds: int | None = None
 
 
 def _shell_join_pytest(args: list[str]) -> str:
@@ -113,6 +123,7 @@ GATES: list[Gate] = [
         domain="kernel",
         cwd="kernel",
         command=("cargo", "fmt", "--all", "--", "--check"),
+        est_seconds=5,
         fast=True,
     ),
     Gate(
@@ -161,9 +172,9 @@ GATES: list[Gate] = [
             # 该参数 cargo llvm-cov 只接受一次，不可重复传。
             "--ignore-filename-regex 'bin[\\\\/]agentos-kernel\\.rs$' "
             "--lcov --output-path coverage.lcov --ignore-run-fail "
-            # --skip（2026-09-01 用户裁定）：覆盖率压力线（rust 90.0 vs CI 实测
-            # ~86.8）暂时摘下不作为闸门，插桩度量照跑供观察；恢复 = 去掉 --skip。
-            "&& python ../scripts/check_rust_coverage_baseline.py --lcov coverage.lcov --skip"
+            # D1 拍板（2026-09-24）：执法线降至 90.0（Windows 实测 92.51），
+            # --skip 摘除恢复执法；内核目标线 100% 见 rust-coverage-baseline.txt
+            "&& python ../scripts/check_rust_coverage_baseline.py --lcov coverage.lcov"
         ),
     ),
     Gate(
@@ -213,6 +224,8 @@ GATES: list[Gate] = [
         ),
         needs=("kernel-build",),
         allow_failure=True,
+        wiring="observation",
+        wiring_reason="观察型回收（allow_failure 恒 exit 0 不阻塞），设计如此",
     ),
     Gate(
         # Rust 依赖安全审计门禁（rust_dependency_review 报告 §二 #1）：RUSTSEC
@@ -228,6 +241,22 @@ GATES: list[Gate] = [
         cwd="kernel",
         command=("cargo", "deny", "check"),
     ),
+    Gate(
+        # 通道基准观察（批次 5）：既有 #[ignore] 手写基准的门禁化登记。
+        # wiring=local：基准数值受机器负载影响不设红线；转 CI 观察态需
+        # release 编译预算评估（正式 criterion 化另行立项）。
+        id="kernel-bench",
+        label="通道基准观察（native+serde --ignored，时序参考）",
+        domain="kernel",
+        cwd="kernel",
+        shell=(
+            "cargo test -p agentos-invoker --test tool_core_bench bench_native -- --ignored --nocapture && "
+            "cargo test -p agentos-invoker --test tool_core_bench bench_serde -- --ignored --nocapture"
+        ),
+        allow_failure=True,
+        wiring="local",
+        wiring_reason="批次5 观察态：基准数值负载敏感不设红线；CI 化需 release 编译预算评估",
+    ),
     # ── 插件 SDK（plugins/sdk，独立包）────────────────────────────────
     Gate(
         id="sdk-lint",
@@ -235,6 +264,7 @@ GATES: list[Gate] = [
         domain="plugins",
         cwd="plugins/sdk",
         command=("ruff", "check", "."),
+        est_seconds=3,
         fast=True,
     ),
     Gate(
@@ -243,6 +273,7 @@ GATES: list[Gate] = [
         domain="plugins",
         cwd="plugins/sdk",
         command=("mypy", "src/agentos_plugin_sdk"),
+        est_seconds=30,
         fast=True,
     ),
     Gate(
@@ -258,6 +289,7 @@ GATES: list[Gate] = [
         label="豁免名单配对校验（--ignore ≡ positional）",
         domain="plugins",
         command=(sys.executable, "scripts/coverage_exempt.py", "--check"),
+        est_seconds=2,
         fast=True,
     ),
     Gate(
@@ -268,7 +300,69 @@ GATES: list[Gate] = [
         label="渠道共享拷贝守卫（channel_common 黑名单 0 命中）",
         domain="plugins",
         command=(sys.executable, "scripts/check_channel_copy_guard.py"),
+        est_seconds=2,
         fast=True,
+    ),
+    Gate(
+        # 工具契约完备度闸（批次 4-2，评估 P1-3）：声明即注册须带
+        # output_schema + render 的机械执法；存量已于批次 4-1 全部补齐，
+        # 基线 0/0——新声明漏键即红。
+        id="tool-contract-completeness",
+        label="工具契约完备度（output_schema + render 缺项基线锁）",
+        domain="plugins",
+        command=(sys.executable, "scripts/check_tool_contract_completeness.py"),
+        est_seconds=2,
+        fast=True,
+    ),
+    Gate(
+        # config/ 静态校验闸（批次 4-4，盲区审计）：yaml 可解析 + 管道步骤
+        # 引用存在性——把"内核启动才炸"的配置错前置到 PR 阶段。
+        id="config-static",
+        label="config 静态校验（yaml 可解析 + 管道引用存在）",
+        domain="plugins",
+        command=(sys.executable, "scripts/check_config_static.py"),
+        est_seconds=2,
+        fast=True,
+    ),
+    Gate(
+        # 配置直读机械闸（ADR 2026-09-14 §2.6）：插件代码禁止直读 config/，
+        # 唯一合法入口 = manifest config_files 声明 + 内核注入。2026-09-24
+        # 复活——此前从未注册车道且基线键为机器绝对路径（与相对 found 键
+        # 永不命中=从未绿过且无人知，元门禁 V7 的原型猎物）；基线已重建为
+        # 仓库相对 posix 键（93 文件/267 处棘轮），检查器对绝对键 fail-closed。
+        id="config-direct-reads",
+        label="配置直读守卫（config/ 路径字面量基线锁，只减不增）",
+        domain="plugins",
+        command=(sys.executable, "scripts/check_config_direct_reads.py"),
+        est_seconds=3,
+        fast=True,
+    ),
+    Gate(
+        # 门禁基建自身的 lint（执行方案 0-6）：run_gates/检查器族 33 处存量
+        # 入基线棘轮，新增即红。通用检查器 check_ruff_baseline.py 与
+        # plugins-lint（批次 2）共用。
+        id="scripts-lint",
+        label="scripts/ ruff 基线锁（只减不增）",
+        domain="cross",
+        shell=(
+            'T=$(mktemp); ( ruff check scripts/ 2>&1 || true ) | tee "$T"; '
+            'python scripts/check_ruff_baseline.py --name scripts --from-file "$T"'
+        ),
+        est_seconds=2,
+        fast=True,
+    ),
+    Gate(
+        # 插件主体面 lint 真空收口（执行方案批次 2，评估 P0-2）：plugins/
+        # 19.1 万行 + mcp-servers/（0-6 摘除历史排除）共 1590 处存量入基线
+        # 棘轮，新增即红。类型面已有 plugins-mypy-baseline 执法，本 gate 只
+        # 补 ruff 风格/卫生面。不进 fast 档（全量 ruff 约 40s，会破 V5 预算）。
+        id="plugins-lint",
+        label="插件主体 ruff 基线锁（plugins/ + mcp-servers/，只减不增）",
+        domain="plugins",
+        shell=(
+            'T=$(mktemp); ( ruff check plugins/ mcp-servers/ 2>&1 || true ) | tee "$T"; '
+            'python scripts/check_ruff_baseline.py --name plugins --from-file "$T"'
+        ),
     ),
     Gate(
         id="plugins-coverage",
@@ -280,11 +374,10 @@ GATES: list[Gate] = [
             + " --cov=plugins --cov-report=term-missing --cov-report=xml:coverage.xml"
             + ' 2>&1 || true ) | tee "$T"; '
             'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage --from-file "$T" '
-            # --skip（2026-09-01 用户裁定）：覆盖率整体基线暂时不做闸门——
-            # 本地/CI 实测恒差（Windows 86.1 vs Linux 实测）与压力线设计冲突，
-            # 先挂起观察；基线值保留在 .github/python-coverage-baseline.txt，
-            # 插桩与 coverage.xml 产出不变（diff/渠道门禁仍消费），恢复 = 去掉 --skip。
-            "&& python scripts/check_python_coverage_baseline.py --skip"
+            # D1 拍板（2026-09-24）：整体基线 100.00→90.0 并摘除 --skip 恢复执法
+            #（插桩基集实测 ~98.5 绿）；旧挂起理由（Windows/Linux 恒差 vs 100
+            # 压力线）随 90 目标口径失效。
+            "&& python scripts/check_python_coverage_baseline.py"
         ),
         env=_PLUGINS_ENV,
     ),
@@ -389,6 +482,8 @@ GATES: list[Gate] = [
         domain="frontend",
         cwd="frontend",
         command=("npm", "run", "typecheck"),
+        # 2026-09-24 实测校准：本地/CI 实跑 ~14s（原估 25 虚高，V5 预算超限复核触发）
+        est_seconds=15,
         fast=True,
     ),
     Gate(
@@ -451,6 +546,7 @@ GATES: list[Gate] = [
         # 纯扫描零依赖（批次F 2026-09-08）：any 存量消化另行立项，本闸防增；
         # 巨型文件拆分裁定为单独立项分批（第三/四轮扫描），冻结基线即管控机制。
         command=(sys.executable, "scripts/check_frontend_any_baseline.py"),
+        est_seconds=3,
         fast=True,
     ),
     Gate(
@@ -466,6 +562,8 @@ GATES: list[Gate] = [
             'T=$(mktemp); ( npm exec -- knip --no-progress 2>&1 || true ) | tee "$T"; '
             'python ../scripts/check_knip_jscpd_baseline.py --knip-file "$T"'
         ),
+        wiring="local",
+        wiring_reason="批次0-1 过渡：Linux/Windows 计数一致性验证后接 ci.yml（执行方案 09-24）",
     ),
     Gate(
         id="frontend-jscpd-baseline",
@@ -476,6 +574,8 @@ GATES: list[Gate] = [
             'T=$(mktemp); ( npm exec -- jscpd 2>&1 || true ) | tee "$T"; '
             'python ../scripts/check_knip_jscpd_baseline.py --jscpd-file "$T"'
         ),
+        wiring="local",
+        wiring_reason="批次0-1 过渡：Linux/Windows 计数一致性验证后接 ci.yml（执行方案 09-24）",
     ),
     Gate(
         id="frontend-e2e-smoke",
@@ -511,6 +611,22 @@ GATES: list[Gate] = [
             "  exit $RC\n"
             "}"
         ),
+        wiring="inline-ci",
+        wiring_reason="CI 内联实现（ci.yml frontend-e2e 直排 steps）：run_gates 一次性 subprocess 捕获会让挂死阶段零日志（2026-09-01 实证 80min+），执法未缺失",
+    ),
+    Gate(
+        # 前端产物体积闸（批次 5，评估 R5/P1-2）：vendor chunk 字节基线锁 +
+        # 无效动态导入计数锁。链在 frontend-e2e-smoke 之后（needs）复用其
+        # build 产物；不进 fast 档（build 约 50s）。
+        id="bundle-size",
+        label="前端产物体积（vendor 字节 + 无效动态导入计数，只减不增）",
+        domain="frontend",
+        cwd="frontend",
+        shell=(
+            'T=$(mktemp); ( npm run build 2>&1 || true ) | tee "$T"; '
+            'python ../scripts/check_bundle_size.py --from-file "$T"'
+        ),
+        needs=("frontend-e2e-smoke",),
     ),
     # ── Electron 桌面壳（electron/，root npm 环境）────────────────────
     Gate(
@@ -518,7 +634,20 @@ GATES: list[Gate] = [
         label="Electron 主进程 tsc 编译（electron:compile）",
         domain="electron",
         command=("npm", "run", "electron:compile"),
+        est_seconds=5,
         fast=True,
+    ),
+    Gate(
+        # electron/__tests__ 8 文件 96 用例（主进程模块：app-protocol CSP/
+        # kernel-manager/auth-session/dialog 等）——2026-09-24 前零车道接线
+        #（盲区审计发现），本 gate 补齐。运行口径 = frontend 的 vitest 二进制
+        # + --root ../electron（electron 无独立 node_modules/配置，与 09-16
+        # 审查批手动验证口径一致）。实跑 0.65s。
+        id="electron-test",
+        label="Electron 主进程 vitest（__tests__ 96 用例）",
+        domain="electron",
+        cwd="frontend",
+        command=("npm", "exec", "--", "vitest", "run", "--root", "../electron"),
     ),
     # ── 横切（仓库级）────────────────────────────────────────────────
     Gate(
@@ -528,10 +657,41 @@ GATES: list[Gate] = [
         command=(sys.executable, "scripts/check_tdd_compliance.py"),
     ),
     Gate(
+        # 基线总表一致性闸（批次 6-2）：生成物 vs .github 基线真值逐字节比对，
+        # 手改生成物或基线变更未回写即红（根治活文档手抄数字漂移）。
+        id="doc-baseline-sync",
+        label="基线总表一致性（生成物 = .github 真值）",
+        domain="cross",
+        command=(sys.executable, "scripts/gen_baseline_table.py"),
+        est_seconds=2,
+        fast=True,
+    ),
+    Gate(
+        # 活文档路径存在性闸（批次 6-3）：照着活文档必须能找到文件
+        # （评估 §2.4 四处错位的机械化防复发）。历史记录层不回溯执法。
+        id="doc-paths",
+        label="活文档路径存在性（19 篇，引用全部可解析）",
+        domain="cross",
+        command=(sys.executable, "scripts/check_doc_paths.py"),
+        est_seconds=2,
+        fast=True,
+    ),
+    Gate(
         id="traceability-gate",
         label="@feature 追溯闭环（非法标记硬失败 + 未标记基线锁）",
         domain="cross",
         command=(sys.executable, "scripts/check_test_traceability.py"),
+        est_seconds=5,
+        fast=True,
+    ),
+    Gate(
+        # 元门禁（批次 M，执行方案 09-24）：门禁体系的门禁 V1–V8。自举：
+        # 本 gate wiring=ci，未接线时 V1 红在自己身上。
+        id="gate-wiring",
+        label="元门禁：接线/契约/力度/账本/基线覆盖 八项校验",
+        domain="cross",
+        command=(sys.executable, "scripts/check_gate_wiring.py"),
+        est_seconds=3,
         fast=True,
     ),
 ]
@@ -546,12 +706,22 @@ MODES: dict[str, list[str]] = {
 }
 
 
-# ── 门禁图校验（重复 id / 未知依赖 / 环）──────────────────────────────
+# ── 门禁图校验（重复 id / 未知依赖 / 环 / wiring 合法性）──────────────
+WIRING_VALUES = ("ci", "inline-ci", "observation", "local")
+
+
 def validate_graph(gates: list[Gate]) -> None:
     ids = [g.id for g in gates]
     if len(ids) != len(set(ids)):
         dupes = sorted({i for i in ids if ids.count(i) > 1})
         raise ValueError(f"run_gates: 重复门禁 id: {dupes}")
+    for gate in gates:
+        if gate.wiring not in WIRING_VALUES:
+            raise ValueError(f"run_gates: 门禁 {gate.id} wiring 非法: {gate.wiring!r}（合法值 {WIRING_VALUES}）")
+        if gate.wiring != "ci" and not gate.wiring_reason:
+            raise ValueError(f"run_gates: 门禁 {gate.id} wiring={gate.wiring} 但缺 wiring_reason（豁免必须留痕）")
+        if gate.fast and gate.est_seconds is None:
+            raise ValueError(f"run_gates: 门禁 {gate.id} fast=True 但未声明 est_seconds（V5 预算防漏洞）")
     # 依赖可以指向选中集之外的门禁（CI job 用 --filter 拆开时，依赖关系
     # 由 workflow 的 job needs: 承担），只要它在全量清单里存在即可。
     known = {g.id for g in GATES}
@@ -720,7 +890,27 @@ def run_selected(gates: list[Gate], max_active: int) -> int:
     return 0
 
 
-def list_gates() -> int:
+def list_gates(as_json: bool = False) -> int:
+    if as_json:
+        # 元门禁消费的机器可读合同（check_gate_wiring.py 经 subprocess 取
+        # 此输出，不 import 本文件、不重抄 GATES——单一真值防第二口径）。
+        payload = [
+            {
+                "id": g.id,
+                "label": g.label,
+                "domain": g.domain,
+                "fast": g.fast,
+                "wiring": g.wiring,
+                "wiring_reason": g.wiring_reason,
+                "allow_failure": g.allow_failure,
+                "est_seconds": g.est_seconds,
+                "needs": list(g.needs),
+                "command": g.shell if g.shell else " ".join(g.command),
+            }
+            for g in GATES
+        ]
+        print(json.dumps(payload, ensure_ascii=False, indent=1))
+        return 0
     print(f"{'门禁 id':<28} {'域':<10} {'fast':<5} {'needs':<20} 命令")
     for g in GATES:
         cmd = g.shell if g.shell else " ".join(g.command)
@@ -736,12 +926,13 @@ def list_gates() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="统一机械门禁入口（quality-gates）")
     parser.add_argument("--list", action="store_true", help="列出全部门禁")
+    parser.add_argument("--json", action="store_true", help="与 --list 连用：机器可读 JSON（元门禁消费）")
     parser.add_argument("--mode", choices=sorted(MODES), help="按模式选择门禁聚合")
     parser.add_argument("--filter", help="逗号分隔的门禁 id 精确选择（CI job 用）")
     ns = parser.parse_args()
 
     if ns.list:
-        return list_gates()
+        return list_gates(as_json=ns.json)
     if bool(ns.mode) == bool(ns.filter):
         parser.error("必须且只能指定 --mode 或 --filter 其一")
 

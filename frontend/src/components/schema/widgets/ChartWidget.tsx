@@ -9,8 +9,7 @@
 
 import React, { useMemo } from 'react'
 import { useElementVisible } from '@/hooks/useElementVisible'
-import { useDataWidget } from '@/services/schema/dataWidget'
-import { DataWidgetStatus } from '@/services/schema/dataWidget'
+import { useDataWidget, DataWidgetStatus  } from '@/services/schema/dataWidget'
 import { WidgetEmptyState } from './WidgetEmptyState'
 
 /** 图表类型 */

@@ -291,7 +291,7 @@ impl PipelineExecutor {
         while idx < compiled.bodies.len() {
             if guard > max_guard {
                 return Err(EngineError::Other {
-                    message: format!("循环体转移次数超限（{} 次，疑似 Phase 转移死循环）", guard),
+                    message: format!("循环体转移次数超限（{guard} 次，疑似 Phase 转移死循环）"),
                 });
             }
             let body = &compiled.bodies[idx];

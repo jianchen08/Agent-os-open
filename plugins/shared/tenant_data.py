@@ -17,8 +17,9 @@
    钩子调用（不在本模块对真实 data/ 执行破坏性移动）。
 4. ``tenant_config_dir(tenant_id)`` —— 返回 ``{base}/users/{tenant_id}/`` 配置覆盖层目录
    （不自动创建：目录存在 = 该租户有配置覆盖，不存在 = 无覆盖，调用方回退全局配置）。
-   ``base`` 默认为仓库 ``config/users/``（可经 env ``AGENTOS_CONFIG_USERS_DIR`` 或显式
-   参数覆盖）。
+   ``base`` 默认为用户空间 ``<USER_CONFIG>/users``（可经 env ``AGENTOS_CONFIG_USERS_DIR``
+   或显式参数覆盖；真值迁移期读取面回退仓库 ``config/users/``，见
+   ``legacy_config_users_base``）。
 
 capability 调用模式（绑定闭包用 SDK ``bind_capability_caller``）：
 - SDK ``CapabilityHandle.call(method, params)`` 会拼成 wire method ``f"{cap}.{method}"``
@@ -120,18 +121,34 @@ def tenant_data_root(
 
 
 def _default_config_users_base() -> Path:
-    """config/users 覆盖层 base（``config/users/`` 目录）。
+    """config/users 覆盖层 base（用户空间真值，ADR 2026-09-24-read-deny-write-zones 决策5）。
 
-    优先 env ``AGENTOS_CONFIG_USERS_DIR``；否则仓库根 ``config/users/``
-    （本文件位于 ``plugins/shared/tenant_data.py``，上溯 2 级到仓库根）。
+    优先 env ``AGENTOS_CONFIG_USERS_DIR``；否则用户空间
+    ``<USER_CONFIG>/users``（与 ``_default_data_base`` 同构——真值必须可写且
+    升级不丢，装机布局下代码相对路径落包内 resources 会被整包替换）；用户
+    空间不可得时兜底 :func:`legacy_config_users_base`（仓库根，旧行为）。
 
-    仍在仓库内：租户配置轴与用户空间（``<USER_ROOT>/config``）的关系**待 ADR
-    2026-09-13-unified-user-root 的 P2 定案**（候选定位：用户空间＝单机/安装作用域，
-    租户覆盖＝其内的一层子轴）。当前该目录零生产消费方，故不随本刀迁移。
+    本刀同时闭掉 ADR 2026-09-13-unified-user-root 的 P2 待定案：租户配置
+    覆盖轴定位＝用户空间（单机/安装作用域）内的一层子轴。真值迁移期读取
+    面有 legacy 回退（见 :func:`legacy_config_users_base`），写面恒写本 base。
     """
     env = os.environ.get(CONFIG_USERS_BASE_ENV)
     if env:
         return Path(env)
+    resolved = user_space.user_config_dir()
+    if resolved is not None:
+        return resolved / "users"
+    return legacy_config_users_base()
+
+
+def legacy_config_users_base() -> Path:
+    """真值迁移期的旧解析：仓库根 ``config/users/``（装机布局落包内 resources）。
+
+    仅作读取回退锚（用户空间配置文件缺失时，消费方按此 base 回退读——
+    覆盖层"无覆盖 → 回退全局"语义的迁移期形态）；写面（授权卡永久落盘）
+    恒写用户空间真值 base，不落此处。本文件位于
+    ``plugins/shared/tenant_data.py``，上溯 2 级到仓库根。
+    """
     return Path(__file__).resolve().parents[2] / "config" / "users"
 
 

@@ -23,8 +23,10 @@ async def _search(**kwargs: object) -> object:
 
 
 class TestSearchPathBoundary:
-    async def test_absolute_path_outside_root_rejected(self, tmp_path: Path) -> None:
-        """根外绝对路径拒绝（两组有区分度输入：同级目录 / 更深层目录）。"""
+    async def test_absolute_path_outside_root_searchable_under_denylist(
+        self, tmp_path: Path
+    ) -> None:
+        """读黑名单制：根外绝对路径可搜索（两组有区分度输入，ADR 2026-09-24 决策1）。"""
         ws = tmp_path / "ws"
         (ws / "sub").mkdir(parents=True)
         (ws / "sub" / "note.txt").write_text("needle here", encoding="utf-8")
@@ -32,26 +34,29 @@ class TestSearchPathBoundary:
         outside_dir = tmp_path / "outside"
         outside_dir.mkdir()
         (outside_dir / "secret.txt").write_text("needle here", encoding="utf-8")
+        (outside_dir / "deeper").mkdir()
+        (outside_dir / "deeper" / "deep.txt").write_text("needle here", encoding="utf-8")
 
-        for outside in (outside_dir, tmp_path / "outside" / "deeper"):
+        for outside in (outside_dir, outside_dir / "deeper"):
             result = await enhanced_search(
                 query="needle", path=str(outside), workspace=str(ws)
             )
-            assert result.success is False
-            assert "超出 workspace/project_root" in (result.error or "")
+            assert result.success is True, result.error
 
-    async def test_relative_traversal_escape_rejected(self, tmp_path: Path) -> None:
-        """``../`` 相对逃逸出根被拒绝（一级与多级逃逸）。"""
+    async def test_relative_traversal_escape_searchable_under_denylist(
+        self, tmp_path: Path
+    ) -> None:
+        """读黑名单制：``../`` 逃逸出根的相对路径可搜索（一级逃逸/兄弟目录两态）。"""
         ws = tmp_path / "ws"
         (ws / "sub").mkdir(parents=True)
         (tmp_path / "leaked.txt").write_text("needle", encoding="utf-8")
+        sibling = tmp_path / "sibling"
+        sibling.mkdir()
+        (sibling / "leaked2.txt").write_text("needle", encoding="utf-8")
 
-        for path in ("../leaked.txt", "../../leaked.txt"):
-            result = await enhanced_search(
-                query="needle", path=path, workspace=str(ws)
-            )
-            assert result.success is False
-            assert "超出 workspace/project_root" in (result.error or "")
+        for path in ("../leaked.txt", "../sibling/leaked2.txt"):
+            result = await enhanced_search(query="needle", path=path, workspace=str(ws))
+            assert result.success is True, result.error
 
     async def test_workspace_prefix_remap_still_works(self, tmp_path: Path) -> None:
         """/workspace/ 前缀重映射到注入工作空间后正常搜索（容器挂载约定）。"""

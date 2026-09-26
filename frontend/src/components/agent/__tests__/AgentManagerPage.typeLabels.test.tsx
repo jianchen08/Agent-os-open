@@ -9,8 +9,8 @@
 
 import { screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { renderWithProviders } from '@/test/renderWithProviders'
 import * as agentsApi from '@/services/api/agents'
+import { renderWithProviders } from '@/test/renderWithProviders'
 import { AgentManagerPage } from '../AgentManagerPage'
 
 const getAgentsMock = vi.mocked(agentsApi.getAgents)

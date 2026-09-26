@@ -16,15 +16,15 @@ vi.mock('@/stores/pipelineMessageStore', async () =>
   (await import('./helpers/pipelineStoreMockFactory')).makePipelineStoreMock())
 
 import { updateSessionsCache } from '@/hooks/queries/useSessionsQuery'
-import type { PipelineStateInfo } from '@/services/api/pipelines'
 import { queryClient } from '@/services/query/queryClient'
 import { queryKeys } from '@/services/query/queryKeys'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { seedPipelineState } from '@/test/modePanelTestUtils'
-import type { AgentTab } from '@/types/task'
 import { makeSessionFactory } from './helpers/agentTabTestUtils'
+import type { PipelineStateInfo } from '@/services/api/pipelines'
+import type { AgentTab } from '@/types/task'
 
 const SESSION_ID = 'sess-nav'
 const MAIN_PID = 'pid-main'

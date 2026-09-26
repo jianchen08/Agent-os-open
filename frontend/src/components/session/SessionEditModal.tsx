@@ -246,6 +246,9 @@ export const SessionEditModal = memo<SessionEditModalProps>(
 
             <div>
               <label className="text-foreground mb-1 block text-sm font-medium">Agent</label>
+              {/* 绑定值必须是 agent.id：模式包 agent 的可解析键是完整模式键
+                  （mode_X/<stem>，context_build 经 mode_keys 两级解析），config_id
+                  只是裸 stem——绑 configId 会使模式键丢前缀、人设配置装配落空。 */}
               <select
                 value={selectedAgentId || ''}
                 onChange={(e) => setSelectedAgentId(e.target.value || null)}
@@ -254,8 +257,8 @@ export const SessionEditModal = memo<SessionEditModalProps>(
                 <option value="">默认 Agent</option>
                 {availableAgents.map((agent, index) => (
                   <option
-                    key={`${agent.configId || agent.id}-${index}`}
-                    value={agent.configId || agent.id}
+                    key={`${agent.id || agent.configId}-${index}`}
+                    value={agent.id || agent.configId}
                   >
                     {agent.name}
                   </option>

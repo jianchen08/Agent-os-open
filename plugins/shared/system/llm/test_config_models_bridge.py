@@ -24,7 +24,7 @@ pytestmark = pytest.mark.unit
 _DIR = Path(__file__).resolve().parent
 
 
-@pytest.fixture()
+@pytest.fixture
 def mod() -> Any:
     """按显式路径加载 _config_models（裸名防劫持）。"""
     spec = importlib.util.spec_from_file_location(

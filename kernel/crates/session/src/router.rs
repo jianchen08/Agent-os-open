@@ -27,6 +27,17 @@ fn field_or_data<'a>(msg: &'a Value, key: &str) -> Option<&'a str> {
     })
 }
 
+/// 配置类 id 形态校验（agent_id / pipeline_config_id 共用）：非空、不含空白
+/// 字符、长度 ≤128 字符、不含 ".."（防路径形 id / 任意键注入）。内核零注册表
+/// 知识，不做存在性校验——消费侧（context_build / 管道编译缓存）找不到目标
+/// 自然报错或回落默认并告警。
+pub fn valid_config_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().count() <= 128
+        && !s.chars().any(char::is_whitespace)
+        && !s.contains("..")
+}
+
 /// 管道分发器——session crate 通过此 trait 把入站消息交给引擎层（api crate 实现）。
 ///
 /// 解耦设计：router 不直接依赖 engine，便于测试用 mock 验证路由正确性。
@@ -42,13 +53,22 @@ pub trait PipelineDispatcher: Send + Sync {
     /// reasoning_effort）。
     ///
     /// state_overlay 是自由 state 注入（GAP-1：chat.send_message 的 `state`
-    /// 参数 + 引擎写入的 lineage 扁平键），在 execution_context 合并点之后并入
-    /// initial_state 顶层扁平键；WS 前端路径不携带（None）。
+    /// 参数 + 引擎写入的 lineage 扁平键），在 execution_context 合并点之后、
+    /// 引擎恢复合并之后并入 initial_state 顶层扁平键；WS 前端路径不透传前端
+    /// 自由 overlay，router 仅在帧携带 agent_id 时合成单键 overlay
+    /// `{"agent.id": v}`（消息级执行身份，见下）。
     ///
     /// agent_id 指定执行管道加载的 agent 配置（config/agents/**/<id>.yaml，
     /// 决定人格/tool_ids/技能）。任务派发按 target 选 agent；WS 主会话路径
     /// 传空串 = 未指定，由 dispatcher 实现侧按线程绑定解析
     /// （registry → DB sessions.agent_id → 默认 "agentos"，2026-08-24 阶段1）。
+    /// 帧显式携带时（2026-09-25）：该槽位仍只作派发簿记，run 执行身份由
+    /// router 合成的 state overlay 落管道 state 持久键 `agent.id` 承载——
+    /// 消息级覆盖，管道后续轮次沿用最后写入值；空串 = 不写键，沿用既有身份。
+    ///
+    /// pipeline_config_id 指定执行管道的配置（config/pipelines/{id}.yaml）：
+    /// 显式指定 = 按需加载编译该配置执行（None = autonomous 缺省路径）。
+    /// router 侧已做形态校验（[`valid_config_id`]），非法帧按缺失传 None。
     ///
     /// client_message_id 是前端幂等键（ADR 2026-08-21）：随 user 消息
     /// metadata 落库并在 GET messages 回显，前端据此对账去重乐观消息。
@@ -68,6 +88,7 @@ pub trait PipelineDispatcher: Send + Sync {
         execution_context: Option<&serde_json::Value>,
         state_overlay: Option<&serde_json::Value>,
         agent_id: &str,
+        pipeline_config_id: Option<&str>,
         client_message_id: &str,
         source: PendingInputSource,
     ) -> Result<(), String>;
@@ -225,13 +246,39 @@ impl InboundRouter {
         // execution_context：消息级执行上下文（{workspace:{source_path,mode},
         // isolation:{level}}），会话执行选项编辑后的最新值随消息生效——引擎合并
         // 点（1a2）优先于 thread metadata 会话级注入。顶层优先、data 信封兜底；
-        // 缺失为 None = 后端按出生值注入（与旧客户端行为一致）。state_overlay
-        // 仍仅服务端内部路径使用，WS 入站不收。
+        // 缺失为 None = 后端按出生值注入（与旧客户端行为一致）。前端自由
+        // state_overlay 不收（agent_id 身份键由上方单键合成）。
         let execution_context = msg
             .get("data")
             .and_then(|d| d.get("execution_context"))
             .filter(|v| v.is_object())
             .or_else(|| msg.get("execution_context").filter(|v| v.is_object()));
+        // agent_id：消息级执行身份（用户拍板语义：新开扮演人设 id 就是
+        // agent_id）。顶层优先、data 信封兜底；形态非法（空/含空白/超 128
+        // 字符/含 ".."）一律按缺失处理（忽略不报错——可选提示性字段不得让
+        // 消息投递失败，与 execution_context 非对象按缺失同法）。缺失为空串
+        // = 未指定 → 不写身份键、不合成交道 overlay，管道沿用既有 agent.id
+        // （与旧客户端行为逐字节一致）。
+        let agent_id = field_or_data(msg, "agent_id")
+            .filter(|s| valid_config_id(s))
+            .unwrap_or("")
+            .to_string();
+        // pipeline_config_id：显式指定执行管道的配置（config/pipelines/{id}.yaml，
+        // 按需加载编译缓存）。顶层优先、data 信封兜底；形态校验对齐 agent_id
+        // 同款（[..]/空白/超长防路径穿越拼文件名），非法按缺失忽略 = autonomous
+        // 缺省路径（不报错——可选提示性字段不得让消息投递失败）。
+        let pipeline_config_id = field_or_data(msg, "pipeline_config_id")
+            .filter(|s| valid_config_id(s))
+            .map(str::to_string);
+        // 合法非空时合成单键 state overlay：在引擎恢复合并（热/冷）之后应用
+        // （apply_state_overlay）＝消息级覆盖既有持久键，随 final_state 落
+        // pipeline_state 表，后续轮次恢复沿用最后写入值；消费方 context_build
+        // 按 agent.id 加载 yaml（加载不到回落默认并告警，内核零 agent 知识）。
+        let state_overlay = if agent_id.is_empty() {
+            None
+        } else {
+            Some(serde_json::json!({ "agent.id": agent_id }))
+        };
         match self
             .dispatcher
             .dispatch_user_input(
@@ -241,11 +288,12 @@ impl InboundRouter {
                 &pipeline_id,
                 &thinking_strength,
                 execution_context,
-                None,
-                // 空串 = 未指定，agent 解析归 dispatcher
-                // 实现侧（线程绑定 registry → DB sessions.agent_id → agentos）。
-                // 硬编码 "agentos" 会使会话编辑切换的绑定成为纯展示字段。
-                "",
+                state_overlay.as_ref(),
+                // 空串 = 未指定，agent 解析归 dispatcher 实现侧（线程绑定
+                // registry → DB sessions.agent_id → agentos）；显式值仅作
+                // 派发簿记，执行身份由上面合成的 agent.id overlay 承载。
+                &agent_id,
+                pipeline_config_id.as_deref(),
                 &client_message_id,
                 // WS 入口即前端发送（ADR-2026-08-26 来源标注）。
                 agentos_core::types::PendingInputSource::User,
@@ -318,8 +366,10 @@ impl InboundRouter {
         let user_message_id = field_or_data(msg, "user_message_id")
             .unwrap_or_default()
             .to_string();
-        // 缺失 = None（重新生成最后一条）；存在但非字符串同样按缺失处理（原提取链同此语义）
-        let new_content = field_or_data(msg, "new_content");
+        // 缺失 = None（重新生成最后一条）；存在但非字符串同样按缺失处理（原提取链同此语义）；
+        // 空白串 = 纯重试（前端 sendRegenerate 恒带 new_content 字段，空串非编辑意图，
+        // 按编辑处理会把目标 user 槽位改写为空内容）
+        let new_content = field_or_data(msg, "new_content").filter(|s| !s.trim().is_empty());
         match self
             .dispatcher
             .dispatch_regenerate(
@@ -409,6 +459,7 @@ mod user_input_ec_tests {
     #[derive(Default)]
     struct RecordingDispatcher {
         last_execution_context: Mutex<Option<Value>>,
+        last_pipeline_config_id: Mutex<Option<String>>,
     }
 
     #[async_trait]
@@ -423,10 +474,12 @@ mod user_input_ec_tests {
             execution_context: Option<&Value>,
             _state_overlay: Option<&Value>,
             _agent_id: &str,
+            pipeline_config_id: Option<&str>,
             _client_message_id: &str,
             _source: PendingInputSource,
         ) -> Result<(), String> {
             *self.last_execution_context.lock().unwrap() = execution_context.cloned();
+            *self.last_pipeline_config_id.lock().unwrap() = pipeline_config_id.map(str::to_string);
             Ok(())
         }
 
@@ -499,6 +552,56 @@ mod user_input_ec_tests {
         bad["execution_context"] = json!("not-an-object");
         assert_eq!(r2.route(&bad, "u1").await, RouteOutcome::Handled);
         assert!(d2.last_execution_context.lock().unwrap().is_none());
+    }
+
+    // ── pipeline_config_id：帧内显式指定管道配置（按需加载编译缓存）──────
+
+    #[tokio::test]
+    async fn pipeline_config_id_top_level_and_data_envelope_forwarded() {
+        // 顶层优先
+        let (r, d) = router();
+        let mut msg = base_msg();
+        msg["pipeline_config_id"] = json!("custom_pipe");
+        assert_eq!(r.route(&msg, "u1").await, RouteOutcome::Handled);
+        assert_eq!(
+            d.last_pipeline_config_id.lock().unwrap().as_deref(),
+            Some("custom_pipe"),
+            "顶层 pipeline_config_id 应透传 dispatcher"
+        );
+
+        // data 信封兜底
+        let (r2, d2) = router();
+        let mut msg2 = base_msg();
+        msg2["data"] = json!({ "pipeline_config_id": "envelope_pipe" });
+        assert_eq!(r2.route(&msg2, "u1").await, RouteOutcome::Handled);
+        assert_eq!(
+            d2.last_pipeline_config_id.lock().unwrap().as_deref(),
+            Some("envelope_pipe")
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_config_id_invalid_or_absent_is_none() {
+        // 不带 = None（旧客户端零变化）
+        let (r, d) = router();
+        assert_eq!(r.route(&base_msg(), "u1").await, RouteOutcome::Handled);
+        assert!(d.last_pipeline_config_id.lock().unwrap().is_none());
+
+        // 形态非法一律按缺失忽略（不报错、不阻断投递）：路径穿越 / 空白 / 超长
+        for (why, bad) in [
+            ("路径穿越", json!("../etc")),
+            ("含空白", json!("a b")),
+            ("超 128", json!("x".repeat(129))),
+        ] {
+            let (r2, d2) = router();
+            let mut msg = base_msg();
+            msg["pipeline_config_id"] = bad;
+            assert_eq!(r2.route(&msg, "u1").await, RouteOutcome::Handled, "{why}");
+            assert!(
+                d2.last_pipeline_config_id.lock().unwrap().is_none(),
+                "{why}: 非法值必须按缺失忽略 = autonomous 缺省路径"
+            );
+        }
     }
 
     /// 同一 mock 走完 interaction_response / stop_generation 两条路由：二者

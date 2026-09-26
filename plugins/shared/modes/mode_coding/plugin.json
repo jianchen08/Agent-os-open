@@ -204,5 +204,8 @@
         }
       }
     ]
+  },
+  "lifecycle": {
+    "idle_timeout_secs": 0
   }
 }

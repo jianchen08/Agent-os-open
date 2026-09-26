@@ -60,7 +60,7 @@ def _load_module() -> Any:
     return mod
 
 
-@pytest.fixture()
+@pytest.fixture
 def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     """临时三根：系统 config/agents + 出厂模式根 + 用户根（AGENTOS_USER_ROOT）。"""
     agents = tmp_path / "config" / "agents" / "main"

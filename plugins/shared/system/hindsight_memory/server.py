@@ -1335,17 +1335,13 @@ def _start_api_server(port: int, data_dir: str) -> tuple[subprocess.Popen[bytes]
     # AgentOS SDK（mcp>=2.0,<3）完全隔离——mcp 1.x/2.0 生态互斥问题正解
     # 在此。当前为「双 venv」布局：.venv=SDK 轨（invoker 启动 server.py
     # 用），.venv-hindsight=API 服务器栈（requirements.txt 锁版本）。
-    _venv_python = os.path.join(_THIS_DIR, ".venv-hindsight", "Scripts", "python.exe")
-    if not os.path.isfile(_venv_python):
-        # Unix 布局回退探测（与 invoker resolve_sidecar_command 同款双布局）
-        _unix_python = os.path.join(_THIS_DIR, ".venv-hindsight", "bin", "python")
-        if os.path.isfile(_unix_python):
-            _venv_python = _unix_python
+    _venv_python = _aux_venv_python(_THIS_DIR)
     if not os.path.isfile(_venv_python):
         logger.error(
             "[hindsight] API 服务器 venv python 缺失（%s），hindsight-api 无法"
-            "启动。创建方式：uv venv .venv-hindsight --python 3.12 && "
-            "uv pip install -r requirements.txt（依赖清单见 requirements.txt）",
+            "启动。正常路径下 on_load 已后台自愈（uv venv + uv pip install -r "
+            "requirements.txt）；走到此处说明自愈未触发或失败，请核对插件目录"
+            "内 requirements.txt 与 uv 可用性，或手工执行该两步",
             _venv_python,
         )
         raise RuntimeError("hindsight venv 未初始化")
@@ -1410,6 +1406,81 @@ async def _wait_api_ready(
     raise RuntimeError("hindsight-api 服务器 60s 内未就绪")
 
 
+# ── 辅助 venv 自愈（装机链源头修复）────────────────────────────
+# 打包 extraResources 排除一切 .venv-*，装机首启 .venv-hindsight 必缺失；内核
+# venv 自愈（venv_provision.rs）只建 .venv（uv sync 语义），辅助 venv 的命名
+# 与清单只有本插件知道——自愈归插件侧，知识不出插件。缺 venv 时 on_load 快速
+# 返回进降级（工具面既有 degrade 语义不变），后台供给完成后自连；供给失败
+# warn 留痕，下次 on_load（热重载/重启）重试。
+_AUX_PROVISION_TIMEOUT_S = 900  # 冷缓存装 numpy/pg0 级依赖可到分钟级；后台运行不阻 boot，取宽上限
+
+
+def _aux_venv_python(plugin_dir: str) -> str:
+    """辅助 venv 解释器路径（win/unix 双布局，与 _start_api_server 同口径）。"""
+    win = os.path.join(plugin_dir, ".venv-hindsight", "Scripts", "python.exe")
+    if os.path.isfile(win):
+        return win
+    return os.path.join(plugin_dir, ".venv-hindsight", "bin", "python")
+
+
+def _needs_aux_provision(plugin_dir: str) -> bool:
+    """辅助 venv 缺失且供给清单在位（requirements.txt 随包分发）才需要自愈。"""
+    if os.path.isfile(_aux_venv_python(plugin_dir)):
+        return False
+    return os.path.isfile(os.path.join(plugin_dir, "requirements.txt"))
+
+
+def _aux_provision_cmds(plugin_dir: str) -> list[list[str]]:
+    """供给命令序列：uv venv + uv pip install -r requirements.txt（与错误指引同款两步）。"""
+    venv_dir = os.path.join(plugin_dir, ".venv-hindsight")
+    return [
+        ["uv", "venv", venv_dir, "--python", "3.12"],
+        ["uv", "pip", "install", "--python", _aux_venv_python(plugin_dir),
+         "-r", os.path.join(plugin_dir, "requirements.txt")],
+    ]
+
+
+async def _provision_aux_venv(plugin_dir: str) -> None:
+    """顺序执行供给命令；uv 缺席/失败/超时以可读错误上抛（调用方 warn 降级）。"""
+    import shutil as _shutil
+    import subprocess as _subprocess
+
+    if _shutil.which("uv") is None:
+        raise RuntimeError("uv 不在 PATH——辅助 venv 自愈无从执行（同内核 autoprovision 前提）")
+    for cmd in _aux_provision_cmds(plugin_dir):
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_AUX_PROVISION_TIMEOUT_S)
+        except TimeoutError:
+            proc.kill()
+            raise RuntimeError(f"辅助 venv 供给超时（>{_AUX_PROVISION_TIMEOUT_S}s）: {' '.join(cmd)}")
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"辅助 venv 供给失败（exit {proc.returncode}）: {' '.join(cmd)}\n"
+                f"{stderr.decode('utf-8', errors='replace')[-800:]}"
+            )
+
+
+async def _provision_then_connect(plugin_dir: str, port: str, data_dir: str) -> None:
+    """后台自愈任务体：供给成功即自连后端；任何失败 warn 留痕保持降级。"""
+    global _client
+    try:
+        await _provision_aux_venv(plugin_dir)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[hindsight] 辅助 venv 自愈失败（保持降级，热重载/重启后重试） | error=%s", e)
+        return
+    logger.info("[hindsight] 辅助 venv 自愈完成，连接后端")
+    try:
+        await _connect_backend(port, data_dir)
+    except Exception as e:  # noqa: BLE001
+        _client = None
+        logger.warning("[hindsight] 自愈后连接失败，sidecar 进入降级模式 | error=%s", e)
+
+
 @plugin.on_load
 async def _on_load(params: dict[str, Any]) -> None:
     """启动 hindsight-api 服务器(pg0 嵌入式 PG)并创建 HTTP 客户端。
@@ -1439,6 +1510,36 @@ async def _on_load(params: dict[str, Any]) -> None:
         ready.set()
 
 
+async def _connect_backend(port: str, data_dir: str) -> None:
+    """spawn/复用 hindsight-api 并建立客户端（_on_load_init 与自愈任务共用）。"""
+    global _client, _api_process
+
+    base_url = f"http://127.0.0.1:{port}"
+    # 幂等连接既有服务：插件重载/重启时端口可能已有健康 hindsight-api
+    # （外部/上次实例常驻），直接复用而非再 spawn（端口冲突 + 首启 pg0
+    # 建库慢会拖垮 on_load 轮询超时）。
+    if _hindsight_api_up(base_url):
+        logger.info("[hindsight] 复用既有 hindsight-api 服务 %s", base_url)
+    else:
+        _api_process, _stderr_path = _start_api_server(int(port), data_dir)
+        await _wait_api_ready(base_url, _api_process, _stderr_path)
+
+    from hindsight_client import Hindsight  # type: ignore  # 第三方 hindsight_client 无类型 stub
+
+    _client = Hindsight(base_url=base_url)
+
+    # 确保默认 bank 存在(幂等)
+    try:
+        await _client.acreate_bank(bank_id=_DEFAULT_BANK_ID)
+    except Exception as be:  # noqa: BLE001
+        logger.debug("[hindsight] 创建默认 bank(可能已存在): %s", be)
+
+    logger.info(
+        "[hindsight] on_load 完成 | base_url=%s bank=%s model=%s",
+        base_url, _DEFAULT_BANK_ID, os.environ.get("HINDSIGHT_API_LLM_MODEL"),
+    )
+
+
 async def _on_load_init() -> None:
     """on_load 初始化主体（配置装配 + spawn api + 建客户端；失败降级不崩）。"""
     global _client, _DEFAULT_BANK_ID, _api_process
@@ -1463,32 +1564,21 @@ async def _on_load_init() -> None:
     _apply_llm_env()
 
     port = int(config.get("port") or os.environ.get("HINDSIGHT_PORT") or _HINDSIGHT_PORT)
-    base_url = f"http://127.0.0.1:{port}"
+
+    # 辅助 venv 缺失（装机首启形态）：不阻塞 on_load，后台自愈完成后自连；
+    # 本轮直接进降级（_client 恒 None，工具面既有 degrade 语义承载）。
+    if _needs_aux_provision(_THIS_DIR):
+        logger.warning(
+            "[hindsight] 辅助 venv 缺失（%s），后台自愈启动；完成前记忆工具降级",
+            os.path.join(_THIS_DIR, ".venv-hindsight"),
+        )
+        asyncio.get_running_loop().create_task(
+            _provision_then_connect(_THIS_DIR, str(port), data_dir)
+        )
+        return
 
     try:
-        # 幂等连接既有服务：插件重载/重启时端口可能已有健康 hindsight-api
-        # （外部/上次实例常驻），直接复用而非再 spawn（端口冲突 + 首启 pg0
-        # 建库慢会拖垮 on_load 轮询超时）。
-        if _hindsight_api_up(base_url):
-            logger.info("[hindsight] 复用既有 hindsight-api 服务 %s", base_url)
-        else:
-            _api_process, _stderr_path = _start_api_server(port, data_dir)
-            await _wait_api_ready(base_url, _api_process, _stderr_path)
-
-        from hindsight_client import Hindsight  # type: ignore  # 第三方 hindsight_client 无类型 stub
-
-        _client = Hindsight(base_url=base_url)
-
-        # 确保默认 bank 存在(幂等)
-        try:
-            await _client.acreate_bank(bank_id=_DEFAULT_BANK_ID)
-        except Exception as be:  # noqa: BLE001
-            logger.debug("[hindsight] 创建默认 bank(可能已存在): %s", be)
-
-        logger.info(
-            "[hindsight] on_load 完成 | base_url=%s bank=%s model=%s",
-            base_url, _DEFAULT_BANK_ID, os.environ.get("HINDSIGHT_API_LLM_MODEL"),
-        )
+        await _connect_backend(str(port), data_dir)
     except Exception as e:
         _client = None
         logger.warning(

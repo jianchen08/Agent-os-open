@@ -84,6 +84,7 @@ fn test_none_invoke_entry_omitted_in_serialization() {
         http_endpoints: vec![],
         ui_schema: None,
         contributes: None,
+        restricted_capabilities: Vec::new(),
         enabled: None,
         activation: None,
         provides: None,

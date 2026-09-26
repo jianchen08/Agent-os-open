@@ -108,42 +108,32 @@ class TestReadExecutionDetailDegradation:
 
 
 class TestReadExecutionDetailSkeleton:
-    async def test_read_detail_skeleton_calls_traces_and_messages(
+    async def test_read_detail_skeleton_calls_traces_by_pipeline(
         self, mod: Any
     ) -> None:
-        """skeleton 层调用 traces.list(轨迹流程) + messages.list(对话骨架)。"""
+        """skeleton 层调用 traces.list_by_pipeline(patch 流主干) + messages.list。"""
         caller = AsyncMock()
-        caller.return_value = []  # 空列表
+        caller.side_effect = [[], []]
         mod.set_capability_caller(caller)
 
         await mod.read_execution_detail(pipeline_run_id="pipe-1", level="skeleton")
 
-        # skeleton 应调用 2 次:traces.list + messages.list
-        assert caller.await_count == 2
         methods = [c.args[0] for c in caller.await_args_list]
-        assert "traces.list" in methods
-        assert "messages.list" in methods
+        assert "traces.list_by_pipeline" in methods
+        assert "messages.list" not in methods  # 消息不再进骨架（§10.1 裁定）
 
-    async def test_read_detail_skeleton_builds_trace_steps_and_message_lines(
+    async def test_read_detail_skeleton_builds_trace_steps_with_patch_type(
         self, mod: Any
     ) -> None:
-        """skeleton 层渲染 trace_steps(轨迹主线) + message_lines(对话骨架)。"""
+        """skeleton 层渲染 trace_steps（patch 流主干，带 patch_type 分型）。"""
         import json as _json
 
         caller = AsyncMock()
-
-        # 第一次调用(traces.list)返回轨迹;第二次(messages.list)返回消息
-        # AsyncMock 每次返回同一个值,所以用 side_effect 区分
         caller.side_effect = [
-            # traces.list 返回
+            # traces.list_by_pipeline 返回
             [
-                {"plugin_id": "memory_read", "seq_in_branch": 1, "patch_data": _json.dumps({"memory.retrieved": []})},
-                {"plugin_id": "llm_core", "seq_in_branch": 2, "patch_data": _json.dumps({"core_type": "llm_call", "raw_error": None})},
-            ],
-            # messages.list 返回
-            [
-                _make_message(1, "user", content_preview="你好"),
-                _make_message(2, "assistant", content_preview="收到"),
+                {"plugin_id": "memory_read", "seq": 1, "patch_type": "StateUpdate", "patch_data": _json.dumps({"memory.retrieved": []})},
+                {"plugin_id": "llm_core", "seq": 2, "patch_type": "Error", "patch_data": _json.dumps({"core_type": "llm_call", "raw_error": None})},
             ],
         ]
         mod.set_capability_caller(caller)
@@ -154,14 +144,13 @@ class TestReadExecutionDetailSkeleton:
 
         assert result["pipeline_run_id"] == "pipe-1"
         assert result["level"] == "skeleton"
-        # trace_steps = 轨迹主线
+        # trace_steps = patch 流主干（消息行已退出骨架，§10.1 裁定）
         assert "trace_steps" in result
         assert result["trace_count"] == 2
         assert result["trace_steps"][0]["plugin"] == "memory_read"
-        # message_lines = 对话骨架
-        assert "message_lines" in result
-        assert result["message_count"] == 2
-        assert "你好" in result["message_lines"][0]
+        assert result["trace_steps"][0]["patch_type"] == "StateUpdate"
+        # Error patch 独立锚点化
+        assert result["error_anchors"][0]["plugin"] == "llm_core"
 
 
 # ═══════════════════════════════════════════════════════════

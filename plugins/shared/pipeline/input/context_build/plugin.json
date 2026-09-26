@@ -7,7 +7,7 @@
   "host_type": "sidecar",
   "entry": "python server.py",
   "invoke_entry": "context_build.execute",
-  "requires_services": ["mode.get_profile", "packaging"],
+  "requires_services": ["packaging"],
   "capabilities": {
     "tools": [],
     "route_signals": [],
@@ -29,7 +29,6 @@
   "export_fields": [
     "task.id",
     "tool_ids",
-    "mode",
     "project_roots",
     "context.*",
     "model_tier",
@@ -40,7 +39,6 @@
   ],
   "persistent_fields": [
     "task.id",
-    "mode",
     "project_roots",
     "model_tier",
     "max_iterations",
@@ -48,12 +46,11 @@
     "timeout_seconds",
     "agent_level"
   ],
-  "description": "\n\n[state 出口口径] 本插件真实产出键 = task.id / tool_ids / mode / project_roots（挂靠项目时项目根列表）/ context.*（含 extra_context 与 agent 配置运行时键）；mode = 任务模式解析回写（execution_context.mode 非空且形态合法时逐轮覆盖）；lineage.* 仅读（出生写面在 task_birth 出生 state，经 chat_send_handler/task_submit 一次写全），display_name/name/tags 取自 agent 配置非本插件写入。",
+  "description": "\n\n[state 出口口径] 本插件真实产出键 = task.id / tool_ids（agent yaml 声明白名单；\"inherit\" = 不写键、继承基线全量工具面）/ project_roots（挂靠项目时项目根列表）/ context.*（含 extra_context 与 agent 配置运行时键）；模式物料段与 mode 键回写由 pipeline_mode_material 步骤承载（本插件零模式知识）；lineage.* 仅读（出生写面在 task_birth 出生 state，经 chat_send_handler/task_submit 一次写全），display_name/name/tags 取自 agent 配置非本插件写入。",
   "state": {
     "reads": [
       "agent.id",
       "core_type",
-      "execution_context",
       "iteration",
       "lineage.parent_pipeline_id",
       "pipeline_id",

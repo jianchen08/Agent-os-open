@@ -17,13 +17,13 @@ TOOL_NAME = "hello_pack"
 
 # 入参 schema：与 plugin.json capabilities.tools[0].input_schema 逐字一致
 # （G2 声明↔实现对照按 input_schema 严格比对，漂移即剔除）
-HELLO_PACK_INPUT_SCHEMA: Dict[str, Any] = {
+HELLO_PACK_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {},
 }
 
 # 出参 schema：与 plugin.json capabilities.tools[0].output_schema 一致
-HELLO_PACK_OUTPUT_SCHEMA: Dict[str, Any] = {
+HELLO_PACK_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "required": ["message"],
     "properties": {
@@ -35,7 +35,7 @@ HELLO_PACK_OUTPUT_SCHEMA: Dict[str, Any] = {
 }
 
 # 渲染意图：与 plugin.json capabilities.tools[0].render 一致
-HELLO_PACK_RENDER: Dict[str, Any] = {
+HELLO_PACK_RENDER: dict[str, Any] = {
     "card": "form",
     "title": "Hello Pack",
 }
@@ -45,7 +45,7 @@ HELLO_PACK_DESCRIPTION = (
 )
 
 
-def hello_pack(_args: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def hello_pack(_args: dict[str, Any] | None = None) -> dict[str, Any]:
     """最小工具 hello_pack 的实现入口。
 
     参数：
@@ -59,12 +59,12 @@ def hello_pack(_args: Dict[str, Any] | None = None) -> Dict[str, Any]:
 
 
 # 工具注册表：name -> callable，便于插件系统按 name 分发
-TOOL_REGISTRY: Dict[str, Any] = {
+TOOL_REGISTRY: dict[str, Any] = {
     TOOL_NAME: hello_pack,
 }
 
 
-def dispatch(tool_name: str, args: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def dispatch(tool_name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
     """按工具名分发的统一入口。
 
     参数：

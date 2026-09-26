@@ -1,7 +1,7 @@
 # @feature: FP-0.2.二 context_build 分支覆盖补齐 | @ci: python-coverage
 """context_build 插件未覆盖分支的行为契约补测。
 
-锁八件事（对应 plugin.py 缺行）：
+锁九件事（对应 plugin.py 缺行）：
 1. **config_id 回退匹配**：agent 文件名 ≠ agent_id 时按 yaml 头部
    config_id 匹配；不可读的 *.yaml 项（如同名目录）跳过不中断扫描；
 2. **空 agent_id**：空身份不发起任何文件加载；
@@ -13,7 +13,9 @@
 7. **static_vars / constraints_text 装载**：enabled 开关、空表、
    非 list 形态不装载；约束渲染区分 [必须]/[建议] 且过滤非字符串项；
 8. **层级覆盖**：yaml level（strip+upper）覆盖默认 L1，插件配置
-   agent_level 显式值最高优先，非 L 前缀不采纳。
+   agent_level 显式值最高优先，非 L 前缀不采纳；
+9. **project_roots 注入**（ADR 2026-09-17 决策 4）：挂靠项目注入根列表，
+   未登记降级不注入，无挂靠键零注入。
 
 [来源: coverage.xml 2026-09-13 缺行清单]
 """
@@ -439,3 +441,51 @@ def test_hierarchical_key_empty_segment_skips_direct(config_root, tmp_path):
     updates = _run({}, {"agent.id": "a//b"})
     assert "tool_ids" not in updates
     assert updates["context.agent_name"] == ""
+
+
+# ── 9. project_roots 注入（ADR 2026-09-17 决策 4：项目范围声明；
+#      2026-09-24 自 tests/test_context_build_mode_material.py 迁入）──
+
+
+class TestProjectRootsInjection:
+    def test_anchored_run_injects_project_roots(self, monkeypatch) -> None:
+        """挂靠项目（task.parent_project_id）→ state.project_roots = [项目根]。"""
+        import project_registry
+
+        monkeypatch.setattr(
+            project_registry,
+            "load_project_paths",
+            lambda: {"proj00000001": "D:/x/proj_a"},
+        )
+        updates = _run(
+            {"agent_level": "L3"},
+            {
+                "agent.id": "executor/general_agent",
+                "lineage.parent_pipeline_id": "p1",
+                "task.parent_project_id": "proj00000001",
+            },
+        )
+        assert updates["project_roots"] == ["D:/x/proj_a"]
+
+    def test_unregistered_project_degrades_without_injection(self, monkeypatch) -> None:
+        """project_id 不在登记 → 降级不注入（warning，不阻断管道）。"""
+        import project_registry
+
+        monkeypatch.setattr(project_registry, "load_project_paths", lambda: {})
+        updates = _run(
+            {"agent_level": "L3"},
+            {
+                "agent.id": "executor/general_agent",
+                "lineage.parent_pipeline_id": "p1",
+                "task.parent_project_id": "ghost0000001",
+            },
+        )
+        assert "project_roots" not in updates
+
+    def test_no_project_key_is_zero_injection(self) -> None:
+        """无挂靠键（聊天管道/独立任务）→ 零注入。"""
+        updates = _run(
+            {"agent_level": "L1"},
+            {"agent.id": "", "user_input": "hi"},
+        )
+        assert "project_roots" not in updates

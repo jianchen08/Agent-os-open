@@ -16,8 +16,17 @@ tracing.workspace = true
 agentos-core.workspace = true
 uuid.workspace = true
 parking_lot = "0.12"
-# MCP Streamable HTTP transport（external_mcp 插件连远程第三方 MCP server）
-reqwest.workspace = true
+# external Streamable HTTP transport 客户端（ADR 2026-09-24-external-mcp-http-rmcp-migration）：
+# 官方 rmcp 客户端（规范全量：SSE/JSON 双应答、Mcp-Session-Id 会话、版本协商），
+# 取代自研 plain JSON POST 子集；sidecar stdio 运输层保持自研（agentos/* 私有扩展面）
+rmcp = { version = "3.4.1", default-features = false, features = [
+    "client",
+    "transport-streamable-http-client-reqwest",
+] }
+# SSRF 出网守卫的 URL 解析（原经 reqwest::Url，迁 rmcp 后 transport 由 rmcp 内部
+# reqwest 承担，本 crate 仅剩 URL 解析直接依赖 url crate）
+url.workspace = true
+http.workspace = true
 
 # Unix 进程组信号（kill 整树杀 sidecar 孙进程，防孤儿）
 [target.'cfg(unix)'.dependencies]

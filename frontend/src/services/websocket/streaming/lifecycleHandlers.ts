@@ -2,10 +2,10 @@
  *
  * 2026-08 清理：handleStateChange（state_change 事件）已删除——后端无该事件发射源。
  */
+import { invalidatePipelineStates } from '@/hooks/queries/usePipelineRunsQuery'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
-import { invalidatePipelineStates } from '@/hooks/queries/usePipelineRunsQuery'
 import { loggers } from '@/utils/logger'
 import { terminatePipeline } from './handlers/utils'
 import { resolvePipelineId } from './router'

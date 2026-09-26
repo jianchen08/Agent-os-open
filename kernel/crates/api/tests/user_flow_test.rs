@@ -42,6 +42,7 @@ fn test_manifest(
         lifecycle: None,
         native: None,
         granted_capabilities: vec![],
+        restricted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files,
@@ -229,6 +230,7 @@ fn test_plugin_status_data_from_manifest() {
         lifecycle: None,
         native: None,
         granted_capabilities: vec![],
+        restricted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![agentos_core::traits::ConfigFileMapping {
@@ -318,6 +320,7 @@ fn test_eager_vs_lazy_distinction() {
         config_files: vec![],
         ui_schema: None,
         contributes: None,
+        restricted_capabilities: Vec::new(),
         http_endpoints: vec![],
         enabled: None,
         activation: Some(agentos_core::traits::ActivationPolicy::Eager),

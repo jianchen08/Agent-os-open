@@ -107,6 +107,8 @@
 vitest_failures=0
 eslint_errors=0
 vitest_coverage_pct=99.36
+# 批次8-1 warnings 棘轮（只减不增）：844 = 2026-09-24 实测起步（no-explicit-any/import-x/order 优先清偿）
+eslint_warnings=844
 #
 # 收紧（2026-09-18 覆盖率补测批，dev/0.2@16b413b83 工作树实测 99.36）：
 # vitest 全量 502 文件 5606 用例 0 失败，Lines 15315/15413 = 99.36%（99.12 →

@@ -13,8 +13,8 @@ SceneManager 注入 tmp_path 持久化，零真实目录写入。
 
 from __future__ import annotations
 
-import importlib.util
 import base64
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -47,7 +47,7 @@ def _load_server() -> Any:
     return module
 
 
-@pytest.fixture()
+@pytest.fixture
 def srv(tmp_path: Path) -> Any:
     module = _load_server()
     from scene.manager import SceneManager
@@ -65,7 +65,7 @@ def srv(tmp_path: Path) -> Any:
     module._manager = None
 
 
-@pytest.fixture()
+@pytest.fixture
 def bare_srv() -> Any:
     module = _load_server()
     yield module

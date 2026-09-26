@@ -71,6 +71,11 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # HTTP 客户端（MCP Streamable HTTP transport：external_mcp 插件连远程第三方 MCP server）
 # rustls-tls 而非 native-tls——Windows 宿主免 OpenSSL 折腾，跨平台一致。
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# URL 解析（agentos-mcp 的 SSRF 出网守卫；transport 本体已迁 rmcp，见
+# ADR 2026-09-24-external-mcp-http-rmcp-migration）
+url = "2"
+# HTTP 语义类型（HeaderName/HeaderValue；rmcp transport config 的自定义头面）
+http = "1"
 # 时间
 chrono = { version = "0.4", features = ["serde"] }
 # OS 标准目录（%APPDATA% / ~/Library/Application Support / ~/.local/share）

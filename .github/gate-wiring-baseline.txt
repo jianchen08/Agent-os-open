@@ -1,0 +1,11 @@
+# 元门禁（gate-wiring）基线棘轮（只减不增）——scripts/check_gate_wiring.py 消费
+# 收紧方式：批次落地后改值并单独 commit 留归因；禁止上调。
+# observation_max: wiring="observation" 门禁数上限（防"打不过就 allow_failure"，V4）
+observation_max=1
+# missing_max: ci-baseline-checklist.txt 中 missing 行数上限（V8 能力棘轮）
+# 9→7（2026-09-24 批次0-6：lint-python-scripts / tests-electron 落地转 covered）
+# 7→6（2026-09-24 批次2：lint-python-plugins 落地转 covered）
+# 6→5（2026-09-24 批次4-4：config-validation 落地转 covered）
+# 5→4（2026-09-24 批次5：artifact-size 落地转 covered）
+# 4→2（2026-09-24 批次6/8：docs+dep-vuln-py-js 落地转 covered）
+missing_max=2

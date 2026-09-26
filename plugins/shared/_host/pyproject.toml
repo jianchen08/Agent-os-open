@@ -8,8 +8,21 @@ requires-python = ">=3.11"
 # 且宿主 fail-fast 连坐全组成员（monitoring 缺 psutil 实证）。
 dependencies = [
     "agentos-plugin-sdk>=0.2.0",
-    # light_stable 成员依赖（稳定观察面；成员清单见 bootstrap_plugin_envs.py 审计输出）：
-    "psutil",   # monitoring — 系统指标采集
+    # 成员依赖并集（成员清单与逐项归属见 bootstrap_plugin_envs.py 审计输出；
+    # 闭包不变量由 tests/test_bootstrap_plugin_envs.py 两条真语料测试执法：
+    # import 闭包 + pyproject 声明 ⊆ 本 venv 实装）：
+    "psutil",              # monitoring — 系统指标采集
+    "pyyaml",              # eval_harness
+    "websockets>=12.0",    # eval_harness — ws 评估通道
+    "pillow",              # review — 图片审查
+    "av",                  # review — 音视频审查
+    "sqlalchemy>=2",       # rollback — 快照元数据
+    "aiohttp",             # rollback — 快照拉取
+    "httpx",               # download / web_ext — HTTP 客户端（注意：与 mcp 生态
+                           # 的改名包 httpx2 并存，import 名不同互不冲突）
+    "trafilatura>=1.8",    # web_ext — 网页正文抽取
+    "litellm",             # task_evaluate — LLM 评估
+    "tzdata>=2024.1",      # prompt_build — Windows 时区数据
 ]
 
 # 本地 SDK 源映射（editable，与成员插件 pyproject 同轨）：

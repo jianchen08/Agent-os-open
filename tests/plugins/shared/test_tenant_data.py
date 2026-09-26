@@ -400,3 +400,53 @@ class TestMultimodalStorageTenantIsolationBehavior:
         _async_run(s.save("a1b2c3d4e5f6", {"name": "x", "size": 3}))
         loaded = _async_run(s.load("a1b2c3d4e5f6"))
         assert loaded == {"name": "x", "size": 3}
+
+
+class TestConfigUsersBaseResolution:
+    """config/users base 解析链（ADR 2026-09-24-read-deny-write-zones 决策5）。
+
+    env ``AGENTOS_CONFIG_USERS_DIR`` > 用户空间 ``<USER_CONFIG>/users`` >
+    legacy 仓库根（真值迁移期读取回退锚；写面恒写用户空间真值）。
+    """
+
+    def test_env_pin_takes_precedence(self, tmp_path, monkeypatch):
+        from tenant_data import _default_config_users_base
+
+        monkeypatch.setenv("AGENTOS_CONFIG_USERS_DIR", str(tmp_path / "envpin"))
+        monkeypatch.setenv("AGENTOS_USER_CONFIG_DIR", str(tmp_path / "uscfg"))
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path / "usroot"))
+
+        assert _default_config_users_base() == tmp_path / "envpin"
+
+    def test_user_config_dir_next(self, tmp_path, monkeypatch):
+        from tenant_data import _default_config_users_base
+
+        monkeypatch.delenv("AGENTOS_CONFIG_USERS_DIR", raising=False)
+        monkeypatch.setenv("AGENTOS_USER_CONFIG_DIR", str(tmp_path / "uscfg"))
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path / "usroot"))
+
+        assert _default_config_users_base() == tmp_path / "uscfg" / "users"
+
+    def test_user_root_config_next(self, tmp_path, monkeypatch):
+        from tenant_data import _default_config_users_base
+
+        monkeypatch.delenv("AGENTOS_CONFIG_USERS_DIR", raising=False)
+        monkeypatch.delenv("AGENTOS_USER_CONFIG_DIR", raising=False)
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path / "usroot"))
+
+        assert _default_config_users_base() == tmp_path / "usroot" / "config" / "users"
+
+    def test_legacy_fallback_when_user_space_unavailable(self, tmp_path, monkeypatch):
+        """用户空间不可得（OS 目录极端环境）→ 回退仓库根 legacy base。"""
+        import user_space
+        from tenant_data import _default_config_users_base, legacy_config_users_base
+
+        for var in (
+            "AGENTOS_CONFIG_USERS_DIR",
+            "AGENTOS_USER_CONFIG_DIR",
+            "AGENTOS_USER_ROOT",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setattr(user_space, "user_config_dir", lambda: None)
+
+        assert _default_config_users_base() == legacy_config_users_base()

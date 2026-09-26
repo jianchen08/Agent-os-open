@@ -73,7 +73,7 @@ def _isolate_tasks_plugin_modules():
             sys.modules.pop(m, None)
 
 
-@pytest.fixture()
+@pytest.fixture
 def mgr() -> Any:
     from timer_manager import TimerManager
 

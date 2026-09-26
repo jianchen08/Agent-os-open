@@ -8,8 +8,17 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-/// (thread_id, user_id, content, thinking_strength, client_message_id, agent_id)
-type UserInputRecord = (String, String, String, String, String, String);
+/// (thread_id, user_id, content, thinking_strength, client_message_id, agent_id,
+///  state_overlay)
+type UserInputRecord = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<serde_json::Value>,
+);
 
 /// regenerate 记录：(thread_id, pipeline_id, user_message_id, new_content)
 type RegenerateRecord = (String, String, String, Option<String>);
@@ -33,8 +42,9 @@ impl PipelineDispatcher for MockDispatcher {
         _pipeline_id: &str,
         thinking_strength: &str,
         _execution_context: Option<&serde_json::Value>,
-        _state_overlay: Option<&serde_json::Value>,
+        state_overlay: Option<&serde_json::Value>,
         agent_id: &str,
+        _pipeline_config_id: Option<&str>,
         client_message_id: &str,
         _source: PendingInputSource,
     ) -> Result<(), String> {
@@ -45,6 +55,7 @@ impl PipelineDispatcher for MockDispatcher {
             thinking_strength.into(),
             client_message_id.into(),
             agent_id.into(),
+            state_overlay.cloned(),
         ));
         Ok(())
     }
@@ -191,10 +202,8 @@ async fn user_input_without_client_message_id_defaults_empty() {
 
 #[tokio::test]
 async fn user_input_dispatches_unspecified_agent_id() {
-    // 2026-08-24 阶段1：router 不再硬编码 "agentos"——agent 解析归
-    // dispatch_user_input 实现侧（线程绑定 registry → DB → agentos）。
-    // 空串 = 未指定，由 EngineDispatcher 按绑定解析；任务派发等显式路径
-    // 走 chat.send_message 的 agent_id 参数，不经此路由。
+    // 帧不带 agent_id = 未指定：agent_id 槽位传空串（解析归 dispatch 实现
+    // 侧），且不合成交道 overlay——缺省行为与无此字段时代码路径逐字节一致。
     let (router, dispatcher) = router();
     let msg = serde_json::json!({
         "type": "user_input",
@@ -206,8 +215,97 @@ async fn user_input_dispatches_unspecified_agent_id() {
     let inputs = dispatcher.user_inputs.lock().unwrap();
     assert_eq!(
         inputs[0].5, "",
-        "WS 主会话路径 agent_id 应传空串（未指定，由 dispatcher 解析）"
+        "帧不带 agent_id → agent_id 槽位为空串（未指定）"
     );
+    assert!(
+        inputs[0].6.is_none(),
+        "帧不带 agent_id → 不合成 overlay（沿用既有管道身份）"
+    );
+}
+
+// ── agent_id 透传（消息级执行身份：帧显式携带 → dispatcher 收到 + 单键
+//    overlay {"agent.id"}；形态非法按缺失处理）──────────────────────────
+
+#[tokio::test]
+async fn user_input_carries_agent_id_top_level_with_identity_overlay() {
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "user_input",
+        "thread_id": "thread-1",
+        "content": "hi",
+        "agent_id": "persona_x",
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let inputs = dispatcher.user_inputs.lock().unwrap();
+    assert_eq!(inputs[0].5, "persona_x", "帧内 agent_id 透传到 dispatcher");
+    assert_eq!(
+        inputs[0].6,
+        Some(serde_json::json!({"agent.id": "persona_x"})),
+        "合成单键 overlay：身份经 agent.id 持久键消息级落入管道 state"
+    );
+}
+
+#[tokio::test]
+async fn user_input_carries_agent_id_via_data_envelope() {
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "user_input",
+        "thread_id": "thread-1",
+        "data": {"content": "hi", "agent_id": "persona_y"},
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let inputs = dispatcher.user_inputs.lock().unwrap();
+    assert_eq!(inputs[0].5, "persona_y", "data 信封位置同样提取");
+    assert_eq!(
+        inputs[0].6,
+        Some(serde_json::json!({"agent.id": "persona_y"}))
+    );
+}
+
+#[tokio::test]
+async fn user_input_invalid_agent_id_treated_as_absent() {
+    // 非法形态一律按缺失处理（锁定：忽略而非拒绝——可选提示性字段不得让
+    // 消息投递失败，与 execution_context 非对象按缺失同法）。逐一覆盖：
+    // 含 ".."、含空白、超 128 字符、空串、非字符串。
+    for (label, bad) in [
+        ("含路径穿越点", serde_json::json!("../evil")),
+        ("含空白", serde_json::json!("bad id")),
+        ("超 128 字符", serde_json::json!("a".repeat(129))),
+        ("空串", serde_json::json!("")),
+        ("非字符串", serde_json::json!(42)),
+    ] {
+        let (router, dispatcher) = router();
+        let msg = serde_json::json!({
+            "type": "user_input",
+            "thread_id": "thread-1",
+            "content": "hi",
+            "agent_id": bad,
+        });
+        let outcome = router.route(&msg, "user-A").await;
+        assert_eq!(outcome, RouteOutcome::Handled, "{label}: 消息仍应投递");
+        let inputs = dispatcher.user_inputs.lock().unwrap();
+        assert_eq!(inputs[0].5, "", "{label}: agent_id 按缺失（空串）");
+        assert!(inputs[0].6.is_none(), "{label}: 不合成 overlay");
+    }
+}
+
+#[tokio::test]
+async fn user_input_agent_id_boundary_length_accepted() {
+    // 恰 128 字符（上界）合法：形态校验拒绝的是越界而非长度本身。
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "user_input",
+        "thread_id": "thread-1",
+        "content": "hi",
+        "agent_id": "a".repeat(128),
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let inputs = dispatcher.user_inputs.lock().unwrap();
+    assert_eq!(inputs[0].5, "a".repeat(128));
+    assert!(inputs[0].6.is_some());
 }
 
 #[tokio::test]
@@ -297,6 +395,29 @@ async fn regenerate_routed_with_edit_resend_content() {
 }
 
 #[tokio::test]
+async fn regenerate_pure_retry_empty_new_content_maps_to_none() {
+    // 前端 sendRegenerate 恒带 new_content 字段：纯重试时为空串——空串是
+    // 「无编辑意图」，必须按缺省（None）透传；若按 Some("") 走编辑分支，
+    // 目标 user 槽位会被改写为空内容（真机 E2E 实证缺陷）
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "regenerate",
+        "thread_id": "thread-1",
+        "pipeline_id": "p1",
+        "user_message_id": "mc_last",
+        "new_content": "",
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let regens = dispatcher.regenerates.lock().unwrap();
+    assert_eq!(regens[0].2, "mc_last");
+    assert_eq!(
+        regens[0].3, None,
+        "空串 new_content → None（纯重试，不改写）"
+    );
+}
+
+#[tokio::test]
 async fn regenerate_missing_thread_id_returns_error() {
     let (router, dispatcher) = router();
     let msg = serde_json::json!({"type": "regenerate"});
@@ -325,6 +446,7 @@ async fn regenerate_default_noop_dispatcher_is_handled() {
             _: Option<&serde_json::Value>,
             _: Option<&serde_json::Value>,
             _: &str,
+            _: Option<&str>,
             _: &str,
             _: PendingInputSource,
         ) -> Result<(), String> {
@@ -369,6 +491,7 @@ async fn regenerate_dispatcher_failure_returns_error() {
             _: Option<&serde_json::Value>,
             _: Option<&serde_json::Value>,
             _: &str,
+            _: Option<&str>,
             _: &str,
             _: PendingInputSource,
         ) -> Result<(), String> {
@@ -458,6 +581,7 @@ async fn dispatcher_failure_returns_error() {
             _: Option<&serde_json::Value>,
             _: Option<&serde_json::Value>,
             _: &str,
+            _: Option<&str>,
             _: &str,
             _: PendingInputSource,
         ) -> Result<(), String> {
@@ -522,6 +646,7 @@ async fn interaction_response_passes_response_body_through() {
             _: Option<&serde_json::Value>,
             _: Option<&serde_json::Value>,
             _: &str,
+            _: Option<&str>,
             _: &str,
             _: PendingInputSource,
         ) -> Result<(), String> {
@@ -572,6 +697,7 @@ async fn interaction_response_without_body_dispatches_null() {
             _: Option<&serde_json::Value>,
             _: Option<&serde_json::Value>,
             _: &str,
+            _: Option<&str>,
             _: &str,
             _: PendingInputSource,
         ) -> Result<(), String> {
@@ -614,6 +740,7 @@ async fn interaction_response_dispatcher_failure_returns_error() {
             _: Option<&serde_json::Value>,
             _: Option<&serde_json::Value>,
             _: &str,
+            _: Option<&str>,
             _: &str,
             _: PendingInputSource,
         ) -> Result<(), String> {
@@ -696,6 +823,7 @@ async fn stop_generation_dispatcher_failure_returns_error() {
             _: Option<&serde_json::Value>,
             _: Option<&serde_json::Value>,
             _: &str,
+            _: Option<&str>,
             _: &str,
             _: PendingInputSource,
         ) -> Result<(), String> {
@@ -741,6 +869,7 @@ impl PipelineDispatcher for ActiveThreadRecorder {
         _: Option<&serde_json::Value>,
         _: Option<&serde_json::Value>,
         _: &str,
+        _: Option<&str>,
         _: &str,
         _: PendingInputSource,
     ) -> Result<(), String> {
@@ -849,6 +978,7 @@ async fn active_thread_changed_dispatcher_failure_returns_error() {
             _: Option<&serde_json::Value>,
             _: Option<&serde_json::Value>,
             _: &str,
+            _: Option<&str>,
             _: &str,
             _: PendingInputSource,
         ) -> Result<(), String> {
@@ -894,6 +1024,7 @@ async fn active_thread_changed_default_noop_dispatcher_is_handled() {
             _: Option<&serde_json::Value>,
             _: Option<&serde_json::Value>,
             _: &str,
+            _: Option<&str>,
             _: &str,
             _: PendingInputSource,
         ) -> Result<(), String> {
@@ -1050,6 +1181,7 @@ async fn non_object_execution_context_is_ignored() {
             execution_context: Option<&serde_json::Value>,
             _: Option<&serde_json::Value>,
             _: &str,
+            _: Option<&str>,
             _: &str,
             _: PendingInputSource,
         ) -> Result<(), String> {

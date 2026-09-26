@@ -34,14 +34,29 @@ pub enum AllowlistMode {
     Strict,
 }
 
+/// 危险前端能力词表（2026-09-25 准入分级）：插件清单可声明、但须 allowlist
+/// 显式授予（`grants`）才在注册面生效的宿主级能力。能力按 manifest 内容静态
+/// 判定，插件不得自报等级。
+/// - `host_js`：contributes.themes[].skin → 皮肤 hooks.mjs 在宿主渲染进程执行；
+/// - `host_css`：contributes.client_styles → 任意 CSS 注入宿主 document.head。
+pub const CAP_HOST_JS: &str = "host_js";
+pub const CAP_HOST_CSS: &str = "host_css";
+pub const DANGEROUS_FRONTEND_CAPS: [&str; 2] = [CAP_HOST_JS, CAP_HOST_CSS];
+
 /// 白名单中的单个插件条目。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AllowlistEntry {
     pub id: String,
-    /// 可选 SHA256（manifest 文件字节 || entry 文件字节 的哈希，小写 hex）。
-    /// 留空则只校验 id，不校验哈希。
+    /// 可选 SHA256（插件目录树规范化哈希，小写 hex，见
+    /// [`PluginLoaderImpl::compute_plugin_sha256`]）。留空则只校验 id，不校验哈希。
     #[serde(default)]
     pub sha256: String,
+    /// 危险前端能力授予（[`DANGEROUS_FRONTEND_CAPS`] 子集）。缺省 = 不授予：
+    /// 该插件清单中的 skin / client_styles 声明在注册面剥除（剥权记录在
+    /// manifest.restricted_capabilities，经 /api/v1/plugins 供设置页可见）。
+    /// 内置根插件不经本表恒授予（随包分发可信面）。
+    #[serde(default)]
+    pub grants: Vec<String>,
 }
 
 /// 插件准入白名单配置。
@@ -55,6 +70,11 @@ pub struct AllowlistConfig {
     /// 白名单条目列表。
     #[serde(default)]
     pub plugins: Vec<AllowlistEntry>,
+    /// 准入是否已部署（allowlist 文件存在，含解析失败的 fail-closed 退化态）。
+    /// false（文件缺失，引导默认）= 危险前端能力全授予——未部署准入的实例
+    /// 不引入行为变化；true = 用户根插件按条目 `grants` 授予。
+    #[serde(skip)]
+    pub deployed: bool,
 }
 
 /// 加载插件准入白名单配置（缺失与损坏分化，K2）：
@@ -72,7 +92,10 @@ pub struct AllowlistConfig {
 pub fn load_allowlist_file(path: &Path) -> AllowlistConfig {
     match std::fs::read_to_string(path) {
         Ok(text) => match serde_yaml::from_str::<AllowlistConfig>(&text) {
-            Ok(cfg) => cfg,
+            Ok(cfg) => AllowlistConfig {
+                deployed: true,
+                ..cfg
+            },
             Err(e) => {
                 warn!(
                     path = %path.display(),
@@ -82,6 +105,7 @@ pub fn load_allowlist_file(path: &Path) -> AllowlistConfig {
                 AllowlistConfig {
                     mode: AllowlistMode::Strict,
                     plugins: Vec::new(),
+                    deployed: true,
                 }
             }
         },
@@ -591,8 +615,7 @@ impl PluginLoaderImpl {
                 return Err(LoaderError::ManifestValidation {
                     plugin_id: manifest.id.clone(),
                     reason: format!(
-                        "native artifact 无法解析相对路径（manifest {:?} 无父目录）",
-                        source_path
+                        "native artifact 无法解析相对路径（manifest {source_path:?} 无父目录）"
                     ),
                 });
             };
@@ -618,6 +641,22 @@ impl PluginLoaderImpl {
 
         // ── P2-2 插件准入校验（白名单 + SHA256）──
         self.validate_allowlist(manifest, source_path)?;
+
+        // ── 准入分级（2026-09-25）：危险前端能力按授予剥权 ──
+        // 检测在前、剥权在后；剥权写入 manifest.restricted_capabilities 供
+        // /api/v1/plugins 与设置页可见（禁静默降级）。与 validate_allowlist
+        // 同点执法：每次扫描/热重扫都重算——授予变化或清单篡改即时生效。
+        let declared = detect_frontend_dangerous_caps(manifest.contributes.as_ref());
+        let not_granted = self.frontend_caps_not_granted(&manifest.id, source_path, &declared);
+        if !not_granted.is_empty() {
+            strip_frontend_capabilities(manifest, &not_granted);
+            manifest.restricted_capabilities =
+                not_granted.iter().map(|cap| (*cap).to_string()).collect();
+            warn!(
+                "Plugin '{}' dangerous frontend capabilities not granted by allowlist, stripped from registration face: {:?}",
+                manifest.id, not_granted
+            );
+        }
 
         // ── 配置单一真值校验（2026-09-02 用户裁定）：真值要么在 manifest
         // （内联形态，path 省略，fields.default 即真值），要么在引用文件
@@ -720,10 +759,12 @@ impl PluginLoaderImpl {
             });
         }
 
-        // 哈希校验（仅当白名单条目声明了 sha256 时执行）
+        // 哈希校验（仅当白名单条目声明了 sha256 时执行）：插件目录树规范化
+        // 哈希，热重扫每轮重验——篡改源文件 → 下轮准入失败 → 从发现集消失 →
+        // 注册表注销（fail-closed 即时吊销；文件复原后自动恢复）。
         if let Some(entry) = entry {
             if !entry.sha256.is_empty() {
-                let computed = self.compute_plugin_sha256(manifest, source_path)?;
+                let computed = self.compute_plugin_sha256(source_path)?;
                 if !secure_eq(&computed, &entry.sha256) {
                     return Err(LoaderError::ManifestValidation {
                         plugin_id: manifest.id.clone(),
@@ -743,61 +784,28 @@ impl PluginLoaderImpl {
         Ok(())
     }
 
-    /// 计算 `sha256(manifest_bytes || entry_file_bytes)`，返回小写 hex。
+    /// 计算插件目录树规范化哈希，返回小写 hex。
     ///
-    /// `manifest_bytes` = 读取 `source_path` 的原始字节。
-    /// `entry_file_bytes` = entry 字段在插件目录（`source_path.parent()`）
-    /// 中引用到的入口文件字节；找不到入口文件则按空字节处理
-    /// （如 `python3 -m my_plugin` 这类没有明确入口文件的情况）。
-    fn compute_plugin_sha256(
-        &self,
-        manifest: &PluginManifest,
-        source_path: &Path,
-    ) -> Result<String, LoaderError> {
-        let manifest_bytes = std::fs::read(source_path).map_err(|e| LoaderError::Io {
-            message: format!("Failed to read manifest {}: {}", source_path.display(), e),
+    /// sha256 输入流 = 排序后的 `(相对路径 \0 文件字节 \0)` 顺序拼接——路径
+    /// 排序保证确定性（文件系统枚举序不进摘要），路径入摘要防同字节文件换位
+    /// 伪装。排除非源完整性面（环境噪声，不属"插件源"）：`.venv*`/`__pycache__`/
+    /// `.git`/`node_modules`/`.pytest_cache`/`logs` 目录与 `*.pyc` 文件；符号
+    /// 链接一律跳过（逃逸面，与 /ext 静态服务同口径）。
+    fn compute_plugin_sha256(&self, source_path: &Path) -> Result<String, LoaderError> {
+        let dir = source_path.parent().ok_or_else(|| LoaderError::Io {
+            message: format!("manifest path has no parent: {}", source_path.display()),
         })?;
-
-        let entry_bytes = self.read_entry_bytes(manifest, source_path)?;
-
+        let mut files = Vec::new();
+        collect_tree_files(dir, dir, &mut files)?;
+        files.sort_by(|a, b| a.0.cmp(&b.0));
         let mut hasher = Sha256::new();
-        hasher.update(&manifest_bytes);
-        hasher.update(&entry_bytes);
+        for (rel, bytes) in &files {
+            hasher.update(rel.as_bytes());
+            hasher.update([0u8]);
+            hasher.update(bytes);
+            hasher.update([0u8]);
+        }
         Ok(format!("{:x}", hasher.finalize()))
-    }
-
-    /// 读取 entry 字段引用的入口文件字节。
-    ///
-    /// 解析规则（保守）：
-    /// - 取 entry 字符串的最后一个 token 作为候选入口文件名
-    ///   （如 `python3 server.py` → `server.py`）。
-    /// - 仅当该 token 在插件目录（`source_path.parent()`）下作为文件存在时才读取；
-    ///   否则返回空字节（如 `python3 -m my_plugin` 或 entry 为空）。
-    fn read_entry_bytes(
-        &self,
-        manifest: &PluginManifest,
-        source_path: &Path,
-    ) -> Result<Vec<u8>, LoaderError> {
-        if manifest.entry.is_empty() {
-            return Ok(Vec::new());
-        }
-        // 取最后一个 token
-        let candidate = manifest.entry.split_whitespace().last();
-        let Some(file_name) = candidate else {
-            return Ok(Vec::new());
-        };
-        // 排除明显是 flag（如 `-m`/`--port`）或命令本身的情况
-        if file_name.starts_with('-') {
-            return Ok(Vec::new());
-        }
-        let Some(dir) = source_path.parent() else {
-            return Ok(Vec::new());
-        };
-        let entry_path = dir.join(file_name);
-        match std::fs::read(&entry_path) {
-            Ok(bytes) => Ok(bytes),
-            Err(_) => Ok(Vec::new()),
-        }
     }
 }
 
@@ -815,6 +823,117 @@ fn secure_eq(a: &str, b: &str) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+/// 从 manifest 内容静态检测危险前端能力（插件不得自报等级，见
+/// [`DANGEROUS_FRONTEND_CAPS`]）：
+/// - `host_js`：contributes.themes[] 任一条目带非空 `skin` 字符串；
+/// - `host_css`：contributes.client_styles 为非空数组。
+fn detect_frontend_dangerous_caps(contributes: Option<&serde_json::Value>) -> Vec<&'static str> {
+    let Some(contributes) = contributes else {
+        return Vec::new();
+    };
+    let mut caps = Vec::new();
+    let has_skin = contributes
+        .get("themes")
+        .and_then(|t| t.as_array())
+        .is_some_and(|themes| {
+            themes.iter().any(|t| {
+                t.get("skin")
+                    .and_then(|s| s.as_str())
+                    .is_some_and(|s| !s.trim().is_empty())
+            })
+        });
+    if has_skin {
+        caps.push(CAP_HOST_JS);
+    }
+    if contributes
+        .get("client_styles")
+        .and_then(|v| v.as_array())
+        .is_some_and(|styles| !styles.is_empty())
+    {
+        caps.push(CAP_HOST_CSS);
+    }
+    caps
+}
+
+/// 把未授予的危险能力从 manifest 注册面剥除（磁盘清单原样，重扫重算）：
+/// - `host_js`：contributes.themes[] 逐条移除 `skin` 键（数组变空则整键移除）；
+/// - `host_css`：移除 `client_styles` 键。
+///
+/// contributes 非 object / 目标键形态不符时原样跳过（无可剥面）。
+fn strip_frontend_capabilities(manifest: &mut PluginManifest, not_granted: &[&str]) {
+    let Some(contributes) = manifest
+        .contributes
+        .as_mut()
+        .and_then(|v| v.as_object_mut())
+    else {
+        return;
+    };
+    if not_granted.contains(&CAP_HOST_JS) {
+        if let Some(serde_json::Value::Array(themes)) = contributes.get_mut("themes") {
+            for theme in themes.iter_mut() {
+                if let Some(obj) = theme.as_object_mut() {
+                    obj.remove("skin");
+                }
+            }
+            if themes.is_empty() {
+                contributes.remove("themes");
+            }
+        }
+    }
+    if not_granted.contains(&CAP_HOST_CSS) {
+        contributes.remove("client_styles");
+    }
+}
+
+/// 递归收集插件源树文件（相对路径 + 字节）。排除面与符号链接见
+/// [`PluginLoaderImpl::compute_plugin_sha256`]。
+fn collect_tree_files(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), LoaderError> {
+    const EXCLUDED_DIRS: [&str; 5] = [
+        "__pycache__",
+        ".git",
+        "node_modules",
+        ".pytest_cache",
+        "logs",
+    ];
+    for entry in std::fs::read_dir(dir).map_err(|e| LoaderError::Io {
+        message: format!("Failed to read dir {}: {}", dir.display(), e),
+    })? {
+        let entry = entry.map_err(|e| LoaderError::Io {
+            message: format!("Failed to read entry in {}: {}", dir.display(), e),
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|e| LoaderError::Io {
+            message: format!("Failed to stat {}: {}", path.display(), e),
+        })?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            if EXCLUDED_DIRS.contains(&name.as_str()) || name.starts_with(".venv") {
+                continue;
+            }
+            collect_tree_files(root, &path, out)?;
+        } else if name.ends_with(".pyc") {
+            continue;
+        } else {
+            let rel = path
+                .strip_prefix(root)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| path.to_string_lossy().to_string());
+            let bytes = std::fs::read(&path).map_err(|e| LoaderError::Io {
+                message: format!("Failed to read {}: {}", path.display(), e),
+            })?;
+            out.push((rel, bytes));
+        }
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -960,7 +1079,7 @@ impl PluginLoader for PluginLoaderImpl {
             let manifests = self.manifests.read();
             let path = manifests.get(plugin_id).cloned().ok_or_else(|| {
                 agentos_core::types::PluginError {
-                    message: format!("plugin not found: {}", plugin_id),
+                    message: format!("plugin not found: {plugin_id}"),
                     code: Some("PLUGIN_NOT_FOUND".to_string()),
                     source: Some("plugin-loader".to_string()),
                 }
@@ -1002,7 +1121,7 @@ impl PluginLoader for PluginLoaderImpl {
             Ok(())
         } else {
             Err(agentos_core::types::PluginError {
-                message: format!("plugin not loaded: {}", plugin_id),
+                message: format!("plugin not loaded: {plugin_id}"),
                 code: Some("NOT_LOADED".to_string()),
                 source: Some("plugin-loader".to_string()),
             })
@@ -1146,6 +1265,39 @@ impl PluginLoaderImpl {
     ///
     /// 供 [`Self::get_manifest`] 与 [`PluginLoader::load`] 按需读盘用——
     /// 运行时完整 manifest 不常驻内存（唯一真源在 AppState.manifests）。
+    /// 危险前端能力授予判定：返回清单声明了但**未获授予**的能力子集。
+    ///
+    /// 授予规则（2026-09-25 准入分级，ADR 同日）：
+    /// - dev 姿态（[`DualSourcePolicy::UserFirst`]，装机链不设此环境变量）→
+    ///   全授予（开发流零变化）；
+    /// - 内置根插件（随包分发可信面）→ 全授予；
+    /// - 装机姿态用户根插件：allowlist 未部署（文件缺失，引导默认）→ 全授予；
+    ///   已部署 → 按 allowlist 条目 `grants`（无条目 = 全不授予）。
+    fn frontend_caps_not_granted(
+        &self,
+        manifest_id: &str,
+        source_path: &Path,
+        caps: &[&'static str],
+    ) -> Vec<&'static str> {
+        if caps.is_empty()
+            || self.dual_source_policy == DualSourcePolicy::UserFirst
+            || !self.is_user_rooted(source_path)
+            || !self.allowlist.deployed
+        {
+            return Vec::new();
+        }
+        let granted = self
+            .allowlist
+            .plugins
+            .iter()
+            .find(|e| e.id == manifest_id)
+            .map(|e| &e.grants);
+        caps.iter()
+            .filter(|cap| !granted.is_some_and(|g| g.iter().any(|g| g.as_str() == **cap)))
+            .copied()
+            .collect()
+    }
+
     fn read_manifest(&self, path: &Path) -> Result<PluginManifest, LoaderError> {
         let content = std::fs::read_to_string(path).map_err(|e| LoaderError::Io {
             message: format!("Failed to read {}: {}", path.display(), e),
@@ -1155,7 +1307,7 @@ impl PluginLoaderImpl {
             Err(json_err) => serde_yaml::from_str::<PluginManifest>(&content).map_err(|yaml_err| {
                 LoaderError::ManifestParse {
                     path: path.display().to_string(),
-                    message: format!("json error: {}, yaml error: {}", json_err, yaml_err),
+                    message: format!("json error: {json_err}, yaml error: {yaml_err}"),
                 }
             }),
         }
@@ -1404,25 +1556,24 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         // pipeline 类型插件需声明 invoke_entry（ADR 附录 D②，P6 discover 聚合校验）
         let invoke_entry_field = if plugin_type == "pipeline" {
-            format!(",\n    \"invoke_entry\": \"{}.execute\"", id)
+            format!(",\n    \"invoke_entry\": \"{id}.execute\"")
         } else {
             String::new()
         };
         let manifest_json = format!(
             r#"{{
-    "id": "{}",
-    "name": "Test Plugin {}",
-    "version": "{}",
-    "plugin_type": "{}",
+    "id": "{id}",
+    "name": "Test Plugin {id}",
+    "version": "{version}",
+    "plugin_type": "{plugin_type}",
     "language": "rust",
     "host_type": "in_process",
     "entry": "test_plugin",
     "capabilities": {{}},
     "requires_services": [],
     "permissions": {{}},
-    "priority": 100{}
-}}"#,
-            id, id, version, plugin_type, invoke_entry_field
+    "priority": 100{invoke_entry_field}
+}}"#
         );
         fs::write(dir.join("plugin.json"), manifest_json).unwrap();
     }
@@ -1721,6 +1872,7 @@ mod tests {
             http_endpoints: vec![],
             ui_schema: None,
             contributes: None,
+            restricted_capabilities: Vec::new(),
             enabled: None,
             activation: None,
             provides: None,
@@ -1765,6 +1917,7 @@ mod tests {
                 http_endpoints: vec![],
                 ui_schema: None,
                 contributes: None,
+                restricted_capabilities: Vec::new(),
                 enabled: None,
                 activation: None,
                 provides: None,
@@ -1859,6 +2012,7 @@ mod tests {
             http_endpoints: vec![],
             ui_schema: None,
             contributes: None,
+            restricted_capabilities: Vec::new(),
             enabled: None,
             activation: None,
             provides: None,
@@ -1913,6 +2067,7 @@ mod tests {
             http_endpoints: vec![],
             ui_schema: None,
             contributes: None,
+            restricted_capabilities: Vec::new(),
             enabled: None,
             activation: None,
             provides: None,
@@ -1976,6 +2131,7 @@ mod tests {
             http_endpoints: vec![],
             ui_schema: None,
             contributes: None,
+            restricted_capabilities: Vec::new(),
             enabled: None,
             activation: None,
             provides: None,
@@ -2060,6 +2216,7 @@ mod tests {
             http_endpoints: vec![],
             ui_schema: None,
             contributes: None,
+            restricted_capabilities: Vec::new(),
             enabled: None,
             activation: None,
             provides: None,
@@ -2100,6 +2257,7 @@ mod tests {
             http_endpoints: vec![],
             ui_schema: None,
             contributes: None,
+            restricted_capabilities: Vec::new(),
             enabled: None,
             activation: None,
             provides: None,
@@ -2461,8 +2619,7 @@ mod tests {
         let dir = plugin_dir.unwrap();
         assert!(
             dir.ends_with("dir_test_plugin"),
-            "plugin dir should end with plugin id, got: {}",
-            dir
+            "plugin dir should end with plugin id, got: {dir}"
         );
     }
 
@@ -2489,8 +2646,7 @@ mod tests {
         let dir = plugin_dir.unwrap();
         assert!(
             dir.ends_with("dir_test"),
-            "plugin dir should end with plugin id, got: {}",
-            dir
+            "plugin dir should end with plugin id, got: {dir}"
         );
     }
 
@@ -2546,6 +2702,7 @@ mod tests {
             http_endpoints: vec![],
             ui_schema: None,
             contributes: None,
+            restricted_capabilities: Vec::new(),
             enabled: None,
             activation: None,
             provides: None,
@@ -3220,6 +3377,7 @@ mod tests {
         let allowlist = AllowlistConfig {
             mode: AllowlistMode::Strict,
             plugins: vec![],
+            ..Default::default()
         };
         let loader = PluginLoaderImpl::new(builtin.path(), None).with_allowlist(allowlist);
 
@@ -3279,12 +3437,19 @@ mod tests {
         // 入口文件
         fs::write(plugin_dir.join("server.py"), "# entry file\n").unwrap();
 
-        // 算出正确的 sha256(manifest_bytes || entry_bytes)
+        // 第一性原理重算目录树规范化哈希：本插件仅两文件，排序相对路径为
+        // (plugin.json, server.py)，sha256 输入 = 各 `路径\0字节\0` 顺序拼接。
         let manifest_bytes = fs::read(&manifest_path).unwrap();
         let entry_bytes = fs::read(plugin_dir.join("server.py")).unwrap();
         let mut hasher = Sha256::new();
+        hasher.update(b"plugin.json");
+        hasher.update([0u8]);
         hasher.update(&manifest_bytes);
+        hasher.update([0u8]);
+        hasher.update(b"server.py");
+        hasher.update([0u8]);
         hasher.update(&entry_bytes);
+        hasher.update([0u8]);
         let correct_hash = format!("{:x}", hasher.finalize());
 
         // 1) 正确哈希 → 放行
@@ -3293,7 +3458,9 @@ mod tests {
             plugins: vec![AllowlistEntry {
                 id: "hashed_plugin".to_string(),
                 sha256: correct_hash.clone(),
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let loader_ok = PluginLoaderImpl::new(builtin.path(), None).with_allowlist(allowlist_ok);
         let manifests = loader_ok.discover(&[]).await.unwrap();
@@ -3315,13 +3482,213 @@ mod tests {
             plugins: vec![AllowlistEntry {
                 id: "hashed_plugin".to_string(),
                 sha256: broken_hash,
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let loader_bad = PluginLoaderImpl::new(builtin.path(), None).with_allowlist(allowlist_bad);
         let manifests_bad = loader_bad.discover(&[]).await.unwrap();
         assert!(
             manifests_bad.is_empty(),
             "sha256 mismatch should reject the plugin"
+        );
+    }
+
+    // ── 准入分级（2026-09-25）：危险前端能力 grants / 剥权 ──
+
+    /// 写一个带危险前端能力声明的 tool 插件（skin / client_styles 可选开关）。
+    fn write_frontend_plugin(root: &Path, id: &str, with_skin: bool, with_client_styles: bool) {
+        let dir = root.join(id);
+        fs::create_dir_all(&dir).unwrap();
+        let themes = if with_skin {
+            r#"[{"id": "t1", "name": "T1", "base": "dark", "skin": "s1"}]"#
+        } else {
+            "[]"
+        };
+        let styles = if with_client_styles {
+            r#"[{"id": "s", "path": "/assets/x.css"}]"#
+        } else {
+            "[]"
+        };
+        let manifest = format!(
+            r#"{{
+    "id": "{id}",
+    "name": "Frontend {id}",
+    "version": "1.0.0",
+    "plugin_type": "tool",
+    "language": "python",
+    "host_type": "sidecar",
+    "entry": "python server.py",
+    "capabilities": {{}},
+    "contributes": {{"themes": {themes}, "client_styles": {styles}}}
+}}"#
+        );
+        fs::write(dir.join("plugin.json"), manifest).unwrap();
+    }
+
+    /// 内容静态检测：themes[].skin 非空 → host_js；client_styles 非空数组 →
+    /// host_css；空串/空数组/缺失 → 不算声明。
+    #[test]
+    fn detect_frontend_dangerous_caps_by_manifest_content() {
+        use serde_json::json;
+        assert!(
+            detect_frontend_dangerous_caps(None).is_empty(),
+            "无 contributes 无危险能力"
+        );
+        assert!(
+            detect_frontend_dangerous_caps(Some(&json!({"themes": []}))).is_empty(),
+            "空 themes 无危险能力"
+        );
+        assert_eq!(
+            detect_frontend_dangerous_caps(Some(&json!({"themes": [{"skin": "s1"}]}))),
+            vec![CAP_HOST_JS],
+            "skin 非空 → host_js"
+        );
+        assert!(
+            detect_frontend_dangerous_caps(Some(&json!({"themes": [{"skin": ""}]}))).is_empty(),
+            "空串 skin 不算声明"
+        );
+        assert_eq!(
+            detect_frontend_dangerous_caps(Some(&json!({"client_styles": [{"id": "s"}]}))),
+            vec![CAP_HOST_CSS],
+            "非空 client_styles → host_css"
+        );
+        assert!(
+            detect_frontend_dangerous_caps(Some(&json!({"client_styles": []}))).is_empty(),
+            "空 client_styles 不算声明"
+        );
+        assert_eq!(
+            detect_frontend_dangerous_caps(Some(
+                &json!({"themes": [{"skin": "s1"}], "client_styles": [{"id": "s"}]})
+            )),
+            vec![CAP_HOST_JS, CAP_HOST_CSS],
+            "双能力按词表序"
+        );
+    }
+
+    /// 装机姿态（BuiltinFirst）：用户根插件未列入 allowlist → 危险能力全剥 +
+    /// restricted_capabilities 记录；内置根同款声明 → 原样（可信面不剥）。
+    #[tokio::test]
+    async fn builtin_first_strips_ungranted_dangerous_caps_for_user_plugins() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        write_frontend_plugin(user.path(), "skin_user", true, true);
+        write_frontend_plugin(builtin.path(), "skin_builtin", true, true);
+
+        let allowlist = AllowlistConfig {
+            mode: AllowlistMode::Permissive,
+            plugins: vec![],
+            deployed: true,
+        };
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
+            .with_allowlist(allowlist)
+            .with_dual_source_policy(DualSourcePolicy::BuiltinFirst);
+        let manifests = loader.discover(&[]).await.unwrap();
+
+        let user_manifest = manifests
+            .iter()
+            .find(|m| m.id == "skin_user")
+            .expect("user plugin admitted");
+        assert_eq!(
+            user_manifest.restricted_capabilities,
+            vec![CAP_HOST_JS.to_string(), CAP_HOST_CSS.to_string()],
+            "未授予应按词表序记录剥权"
+        );
+        let user_contributes = user_manifest.contributes.as_ref().unwrap();
+        assert!(
+            user_contributes["themes"][0].get("skin").is_none(),
+            "skin 字段应被剥除"
+        );
+        assert!(
+            user_contributes.get("client_styles").is_none(),
+            "client_styles 应被整键剥除"
+        );
+
+        let builtin_manifest = manifests
+            .iter()
+            .find(|m| m.id == "skin_builtin")
+            .expect("builtin plugin admitted");
+        assert!(
+            builtin_manifest.restricted_capabilities.is_empty(),
+            "内置根插件不应剥权"
+        );
+        assert!(
+            builtin_manifest
+                .contributes
+                .as_ref()
+                .unwrap()
+                .get("client_styles")
+                .is_some(),
+            "内置根 client_styles 应原样保留"
+        );
+    }
+
+    /// dev 姿态（UserFirst）：allowlist 已部署但未列入 → 仍全授予（开发流零变化）。
+    #[tokio::test]
+    async fn user_first_keeps_dangerous_caps_even_when_unlisted() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        write_frontend_plugin(user.path(), "skin_dev", true, true);
+
+        let allowlist = AllowlistConfig {
+            mode: AllowlistMode::Permissive,
+            plugins: vec![],
+            deployed: true,
+        };
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
+            .with_allowlist(allowlist)
+            .with_dual_source_policy(DualSourcePolicy::UserFirst);
+        let manifests = loader.discover(&[]).await.unwrap();
+        let manifest = manifests.iter().find(|m| m.id == "skin_dev").unwrap();
+        assert!(
+            manifest.restricted_capabilities.is_empty(),
+            "dev 姿态应全授予"
+        );
+        assert!(
+            manifest
+                .contributes
+                .as_ref()
+                .unwrap()
+                .get("client_styles")
+                .is_some(),
+            "dev 姿态 client_styles 应原样"
+        );
+    }
+
+    /// allowlist 条目按 grants 部分授予：未授予项剥、已授予项保留。
+    #[tokio::test]
+    async fn allowlist_grants_selective() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        write_frontend_plugin(user.path(), "skin_partial", true, true);
+
+        let allowlist = AllowlistConfig {
+            mode: AllowlistMode::Permissive,
+            plugins: vec![AllowlistEntry {
+                id: "skin_partial".to_string(),
+                sha256: String::new(),
+                grants: vec![CAP_HOST_CSS.to_string()],
+            }],
+            deployed: true,
+        };
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
+            .with_allowlist(allowlist)
+            .with_dual_source_policy(DualSourcePolicy::BuiltinFirst);
+        let manifests = loader.discover(&[]).await.unwrap();
+        let manifest = manifests.iter().find(|m| m.id == "skin_partial").unwrap();
+        assert_eq!(
+            manifest.restricted_capabilities,
+            vec![CAP_HOST_JS.to_string()],
+            "只记录未授予项"
+        );
+        let contributes = manifest.contributes.as_ref().unwrap();
+        assert!(
+            contributes["themes"][0].get("skin").is_none(),
+            "host_js 未授予应剥 skin"
+        );
+        assert!(
+            contributes.get("client_styles").is_some(),
+            "host_css 已授予应保留"
         );
     }
 
@@ -3332,21 +3699,20 @@ mod tests {
         let dir = root.join(id);
         fs::create_dir_all(&dir).unwrap();
         let entry_field = match invoke_entry {
-            Some(e) => format!(",\n    \"invoke_entry\": \"{}\"", e),
+            Some(e) => format!(",\n    \"invoke_entry\": \"{e}\""),
             None => String::new(),
         };
         let manifest_json = format!(
             r#"{{
-    "id": "{}",
-    "name": "Pipeline {}",
+    "id": "{id}",
+    "name": "Pipeline {id}",
     "version": "1.0.0",
     "plugin_type": "pipeline",
     "language": "python",
     "host_type": "sidecar",
     "entry": "python server.py",
-    "capabilities": {{}}{}
-}}"#,
-            id, id, entry_field
+    "capabilities": {{}}{entry_field}
+}}"#
         );
         fs::write(dir.join("plugin.json"), manifest_json).unwrap();
     }
@@ -4031,80 +4397,106 @@ mod tests {
         );
     }
 
-    // ── 入口文件哈希提取（read_entry_bytes）的边界分支 ──
+    // ── 目录树规范化哈希（compute_plugin_sha256）的边界分支 ──
 
-    /// entry 为空 → 空字节（等价只哈希 manifest）。
+    /// 确定性：同一棵树重复计算结果一致（枚举序不进摘要——路径排序兜底）。
     #[test]
-    fn read_entry_bytes_empty_entry_is_empty() {
+    fn tree_hash_is_deterministic() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest_path = dir.path().join("p.json");
-        fs::write(&manifest_path, "{}").unwrap();
-        let loader = PluginLoaderImpl::new(dir.path(), None);
-        let m: PluginManifest = serde_json::from_str(
-            r#"{
-                "id":"e","name":"N","version":"1.0.0","plugin_type":"tool",
-                "language":"python","host_type":"sidecar","entry":"",
-                "capabilities":{}
-            }"#,
-        )
-        .unwrap();
-        assert!(
-            loader
-                .read_entry_bytes(&m, &manifest_path)
-                .unwrap()
-                .is_empty(),
-            "空 entry 无入口文件"
-        );
-    }
-
-    /// entry 末 token 是 flag（`-m`）或文件不存在 → 空字节（不误当文件读）。
-    #[test]
-    fn read_entry_bytes_rejects_flags_and_missing_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest_path = dir.path().join("p.json");
-        fs::write(&manifest_path, "{}").unwrap();
-        let loader = PluginLoaderImpl::new(dir.path(), None);
-
-        for entry in ["python -m", "python -m somemod", "python missing_server.py"] {
-            let m: PluginManifest = serde_json::from_str(&format!(
-                r#"{{
-                    "id":"e","name":"N","version":"1.0.0","plugin_type":"tool",
-                    "language":"python","host_type":"sidecar","entry":"{entry}",
-                    "capabilities":{{}}
-                }}"#
-            ))
-            .unwrap();
-            assert!(
-                loader
-                    .read_entry_bytes(&m, &manifest_path)
-                    .unwrap()
-                    .is_empty(),
-                "entry={entry:?} 不应取到入口文件字节"
-            );
-        }
-    }
-
-    /// 入口文件存在 → 返回其真实字节（sha256 语料需覆盖插件代码本体）。
-    #[test]
-    fn read_entry_bytes_reads_existing_entry_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest_path = dir.path().join("plugin.json");
-        fs::write(&manifest_path, "{}").unwrap();
+        fs::write(dir.path().join("plugin.json"), b"{}").unwrap();
         fs::write(dir.path().join("server.py"), b"print('hi')").unwrap();
         let loader = PluginLoaderImpl::new(dir.path(), None);
-        let m: PluginManifest = serde_json::from_str(
-            r#"{
-                "id":"e","name":"N","version":"1.0.0","plugin_type":"tool",
-                "language":"python","host_type":"sidecar","entry":"python server.py",
-                "capabilities":{}
-            }"#,
+        let manifest_path = dir.path().join("plugin.json");
+        let first = loader.compute_plugin_sha256(&manifest_path).unwrap();
+        let second = loader.compute_plugin_sha256(&manifest_path).unwrap();
+        assert_eq!(first, second, "同一棵树两次计算应一致");
+    }
+
+    /// 内容变更 → 摘要变化（热篡改检测的判定基础）。
+    #[test]
+    fn tree_hash_changes_when_file_content_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("plugin.json"), b"{}").unwrap();
+        fs::write(dir.path().join("server.py"), b"print('hi')").unwrap();
+        let loader = PluginLoaderImpl::new(dir.path(), None);
+        let manifest_path = dir.path().join("plugin.json");
+        let before = loader.compute_plugin_sha256(&manifest_path).unwrap();
+        fs::write(dir.path().join("server.py"), b"print('bye')").unwrap();
+        let after = loader.compute_plugin_sha256(&manifest_path).unwrap();
+        assert_ne!(before, after, "文件字节变更应改变摘要");
+    }
+
+    /// 排除面：.venv* / __pycache__ / *.pyc / node_modules / logs 不进摘要
+    /// （环境噪声，不属于"插件源"；增删这些文件不改变摘要）。
+    #[test]
+    fn tree_hash_excludes_env_noise() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("plugin.json"), b"{}").unwrap();
+        let loader = PluginLoaderImpl::new(dir.path(), None);
+        let manifest_path = dir.path().join("plugin.json");
+        let before = loader.compute_plugin_sha256(&manifest_path).unwrap();
+
+        fs::create_dir_all(dir.path().join(".venv-hindsight")).unwrap();
+        fs::write(
+            dir.path().join(".venv-hindsight").join("pyvenv.cfg"),
+            b"junk",
         )
         .unwrap();
-        assert_eq!(
-            loader.read_entry_bytes(&m, &manifest_path).unwrap(),
-            b"print('hi')",
-            "应读到入口文件字节"
-        );
+        fs::create_dir_all(dir.path().join("__pycache__")).unwrap();
+        fs::write(
+            dir.path()
+                .join("__pycache__")
+                .join("server.cpython-312.pyc"),
+            b"junk",
+        )
+        .unwrap();
+        fs::write(dir.path().join("server.pyc"), b"junk").unwrap();
+        fs::create_dir_all(dir.path().join("node_modules")).unwrap();
+        fs::write(dir.path().join("node_modules").join("x.js"), b"junk").unwrap();
+        fs::create_dir_all(dir.path().join("logs")).unwrap();
+        fs::write(dir.path().join("logs").join("run.log"), b"junk").unwrap();
+        let after = loader.compute_plugin_sha256(&manifest_path).unwrap();
+        assert_eq!(before, after, "排除面文件增删不应改变摘要");
+    }
+
+    /// 相对路径入摘要：同字节文件放在不同路径下 → 摘要不同（防换位伪装）。
+    #[test]
+    fn tree_hash_binds_relative_paths() {
+        let dir_a = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir_a.path().join("a")).unwrap();
+        fs::write(dir_a.path().join("a").join("x.py"), b"same").unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir_b.path().join("b")).unwrap();
+        fs::write(dir_b.path().join("b").join("x.py"), b"same").unwrap();
+
+        let loader = PluginLoaderImpl::new(dir_a.path(), None);
+        let hash_a = loader
+            .compute_plugin_sha256(&dir_a.path().join("a"))
+            .unwrap();
+        let hash_b = loader
+            .compute_plugin_sha256(&dir_b.path().join("b"))
+            .unwrap();
+        assert_ne!(hash_a, hash_b, "同字节不同相对路径应产生不同摘要");
+    }
+
+    /// 符号链接不进摘要（逃逸面，与 /ext 静态服务同口径）。
+    #[cfg(unix)]
+    #[test]
+    fn tree_hash_skips_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("plugin.json"), b"{}").unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", dir.path().join("evil.py")).unwrap();
+        let loader = PluginLoaderImpl::new(dir.path(), None);
+        let hash = loader
+            .compute_plugin_sha256(&dir.path().join("plugin.json"))
+            .unwrap();
+        // 只含 plugin.json 一个文件：与手工两文件摘要不同（symlink 未进摘要）
+        let mut hasher = Sha256::new();
+        hasher.update(b"plugin.json");
+        hasher.update([0u8]);
+        hasher.update(b"{}");
+        hasher.update([0u8]);
+        assert_eq!(hash, format!("{:x}", hasher.finalize()), "symlink 应被跳过");
     }
 
     /// 哈希比对：等长不同内容判不等（常量时间比较的差异分支）。
@@ -4267,23 +4659,15 @@ mod tests {
         );
     }
 
-    /// manifest 路径不可读时 sha256 计算同样传播 IO 错误（不静默当空 manifest）。
+    /// 目录缺失时 sha256 计算传播 IO 错误（不静默当空树）。
     #[test]
-    fn compute_plugin_sha256_propagates_manifest_read_failure() {
+    fn compute_plugin_sha256_propagates_missing_dir() {
         let dir = tempfile::tempdir().unwrap();
         let loader = PluginLoaderImpl::new(dir.path(), None);
-        let m: PluginManifest = serde_json::from_str(
-            r#"{
-                "id":"e","name":"N","version":"1.0.0","plugin_type":"tool",
-                "language":"python","host_type":"sidecar","entry":"server.py",
-                "capabilities":{}
-            }"#,
-        )
-        .unwrap();
-        let missing_path = dir.path().join("no-such-manifest.json");
+        let ghost_path = dir.path().join("ghost").join("plugin.json");
         let err = loader
-            .compute_plugin_sha256(&m, &missing_path)
-            .expect_err("manifest 缺失应报 IO 错误");
+            .compute_plugin_sha256(&ghost_path)
+            .expect_err("目录缺失应报 IO 错误");
         assert!(
             matches!(err, LoaderError::Io { .. }),
             "应为 Io 变体，实际: {err:?}"
@@ -4306,32 +4690,6 @@ mod tests {
         ));
         assert_eq!(map["cfg"]["target"], "new");
         assert_eq!(map["cfg"]["keep"], 1, "兄弟键在递归路径下同样保留");
-    }
-
-    /// 入口文件为**目录**（存在但不可读）→ 空字节（读取失败按无入口处理）。
-    #[test]
-    fn read_entry_bytes_directory_instead_of_file_reads_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest_path = dir.path().join("p.json");
-        fs::write(&manifest_path, "{}").unwrap();
-        // 同名目录占位：is_file 为假，std::fs::read 失败
-        fs::create_dir_all(dir.path().join("server.py")).unwrap();
-        let loader = PluginLoaderImpl::new(dir.path(), None);
-        let m: PluginManifest = serde_json::from_str(
-            r#"{
-                "id":"e","name":"N","version":"1.0.0","plugin_type":"tool",
-                "language":"python","host_type":"sidecar","entry":"python server.py",
-                "capabilities":{}
-            }"#,
-        )
-        .unwrap();
-        assert!(
-            loader
-                .read_entry_bytes(&m, &manifest_path)
-                .unwrap()
-                .is_empty(),
-            "目录占位入口应读为空字节（不 panic）"
-        );
     }
 }
 

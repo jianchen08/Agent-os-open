@@ -3,9 +3,9 @@
  * 曾在主测试与 gaps 测试逐字复制（jscpd 克隆门禁重复源）。
  */
 import { render } from '@testing-library/react'
+import React from 'react'
 import { MemoryRouter } from 'react-router-dom'
 import { FiveSpaceLayout } from '../../FiveSpaceLayout'
-import React from 'react'
 
 /** antd Splitter 依赖 ResizeObserver / matchMedia，jsdom 缺失，测试环境打桩 */
 export class ResizeObserverStub {

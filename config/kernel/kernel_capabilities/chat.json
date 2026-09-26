@@ -45,6 +45,11 @@
             "minLength": 1,
             "description": "执行 agent（按 target 选执行器；缺省 agentos）"
           },
+          "pipeline_config_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "执行管道的配置名（config/pipelines/{id}.yaml）：显式指定 = 按需加载编译该配置执行（失败报错不回落）；缺省 = autonomous"
+          },
           "execution_context": {
             "type": "object",
             "description": "任务级执行上下文（workspace_mode/isolation_level 等，init 体生命周期插件消费）"

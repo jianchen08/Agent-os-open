@@ -13,27 +13,13 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Awaitable, Callable
 from typing import Any
 
 from mode_keys import find_mode_agent_yaml
-from mode_material import (
-    MODE_ID_RE,
-    build_mode_section,
-    find_package_dir,
-    resolve_mode,
-    tool_surface_note,
-    unwrap_mode_profile,
-)
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import StateKeys
 
 logger = logging.getLogger(__name__)
-
-# 模式物料档取数通道（P2 主会话路径，设计稿 §3.3②/§4.1/§4.2）：async
-# (mode) -> profile dict；实现 = server.py 经 tool-executor 显式 plugin_id
-# 调 mode.get_profile（eval_harness 先例同通道）。None = 通道未接线（降级）。
-ProfileFetcher = Callable[[str], Awaitable[dict[str, Any]]]
 
 
 class ContextBuildPlugin(IInputPlugin):
@@ -52,11 +38,7 @@ class ContextBuildPlugin(IInputPlugin):
         _agent_level: Agent 层级
     """
 
-    def __init__(
-        self,
-        config: dict[str, Any] | None = None,
-        profile_fetcher: ProfileFetcher | None = None,
-    ) -> None:
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
         """初始化上下文构建插件。
 
         Args:
@@ -65,15 +47,12 @@ class ContextBuildPlugin(IInputPlugin):
                 - agent_name: Agent 名称
                 - agent_level: Agent 层级 (l1_main/l2_subtask/l3_atomic)
                 - extra_context: 额外上下文字典
-            profile_fetcher: 模式 profile 取数通道（server.py 接线 mode.get_profile
-                服务调用；缺省 None = 通道未接线，模式物料降级不注入）。
         """
         self._config = config or {}
         self._system_prompt = self._config.get("system_prompt", "")
         self._agent_name = self._config.get("agent_name", "")
         self._agent_level = self._config.get("agent_level", "L1")
         self._extra_context = self._config.get("extra_context", {})
-        self._profile_fetcher = profile_fetcher
         # agent 配置自持：执行身份是管道 state 持久键 agent.id（出生方经 state
         # 透传落库），加载 config/agents/**/<agent_id>.yaml 是本插件（sidecar）
         # 的职责。缓存：yaml 路径 → 解析结果（mtime 失效），进程内复用。
@@ -251,17 +230,16 @@ class ContextBuildPlugin(IInputPlugin):
         # 同 sidecar 进程内多个管道复用本插件实例，缓存会造成 agent_name
         # 跨管道污染）。实例属性只作配置默认值，不缓存解析结果。
         agent_name = self._agent_name or str(agent_cfg.get("display_name") or "")
-        # tool_ids 随 agent 配置注入：键存在即写（含显式空表 = agent 声明零工具，
-        # 须与"未声明/断链"区分，下游 tool_schema 据此跳过断链告警）；本键唯一
-        # 供给方是本插件，tool_schema 经 tool-surface capability 据此过滤工具面。
+        # tool_ids 随 agent 配置装载，三态：list = 白名单即写（含显式空表 =
+        # agent 声明零工具，须与"未声明/断链"区分，下游 tool_schema 据此跳过
+        # 断链告警）；"inherit" = 继承基线全量工具面（附身等场景：执行者身份
+        # 换、工具能力保留），不写本键——主 agent 工具清单更新自动跟随；其余
+        # （未声明/断链）同样不写。本键唯一供给方是本插件，tool_schema 经
+        # tool-surface capability 据此过滤工具面；模式物料收窄（如有）由
+        # mode_material_inject 步骤在 state.tool_ids 基线上叠加。
         _tool_ids = agent_cfg.get("tool_ids")
         if isinstance(_tool_ids, list):
             updates["tool_ids"] = _tool_ids
-        # 模式物料档（模式体系 P2，设计稿 §3.3②/§4.1/§4.2）：state 带
-        # execution_context.mode 且为 main 会话路径才注入（模式段 + tool_ids
-        # 收窄）；专属 agent 绑定分支（§4.2 档2/档3，口径由其自身配置承载/
-        # 模式不适用）留 Wave2/P3。取数失败 = 降级不注入，绝不阻断管道。
-        await self._apply_mode_material(ctx.state, agent_id_key, agent_cfg, updates)
         # 任务域出生投影（ADR 2026-08-28 声明化）：血缘扁平键存在 = 任务管道
         # （聊天管道无血缘键，不写 task.*）——task.id 即引擎管道 id，调用方预传
         # 值一律覆盖（身份权威在引擎 id，此处统一收口）。
@@ -376,7 +354,6 @@ class ContextBuildPlugin(IInputPlugin):
         与 project_create/task_submit/isolation 同源（project_registry.load_project_paths），
         登记行是 id ↔ 路径唯一真值；未命中返回空表（调用方降级不注入）。
         """
-        import os
         import sys
         from pathlib import Path
 
@@ -387,85 +364,3 @@ class ContextBuildPlugin(IInputPlugin):
 
         path = str(load_project_paths().get(project_id, "") or "")
         return [path] if path else []
-
-    @staticmethod
-    def _is_main_path(agent_id_key: str, agent_cfg: dict[str, Any]) -> bool:
-        """§4.2 身份轴 main 路径判定：缺省主 agent（state 无 agent.id，消费面
-        自持默认主 agent）或解析出的 agent 配置 agent_type=main。
-
-        其余（绑定专属 agent）= 档2/档3，P2 不注入——本判定即 Wave2/P3
-        分支的接线点。
-        """
-        if not agent_id_key:
-            return True
-        return agent_cfg.get("agent_type") == "main"
-
-    async def _apply_mode_material(
-        self,
-        state: dict[str, Any],
-        agent_id_key: str,
-        agent_cfg: dict[str, Any],
-        updates: dict[str, Any],
-    ) -> None:
-        """模式物料档注入：模式段追加进 context.system_prompt，tool_ids 收窄。
-
-        全路径失败均降级为 warning + 不写入（不抛出），管道行为与无模式一致。
-        """
-        mode = resolve_mode(state)
-        if not mode:
-            return
-        if not MODE_ID_RE.match(mode):
-            logger.warning(
-                "[context_build] mode 键形态非法，跳过模式物料注入 | mode=%r", mode
-            )
-            return
-        # state 顶层 mode 键回写（观测链出口：/pipelines/state 摘要 mode →
-        # 前端模式面板自动弹出/模式徽标同源取数，无键零动作）。解析成功即回写、
-        # 逐轮覆盖；物料注入降级（通道未接线/取数失败/非主路径）不回滚——回写
-        # 是解析路径产物，不随注入成败翻转。出口可见性由 manifest
-        # export_fields/persistent_fields 声明。
-        updates["mode"] = mode
-        if not self._is_main_path(agent_id_key, agent_cfg):
-            logger.debug(
-                "[context_build] 非主会话路径，模式物料不注入（Wave2/P3 分支）"
-                "| mode=%s | agent.id=%s",
-                mode,
-                agent_id_key,
-            )
-            return
-        if self._profile_fetcher is None:
-            logger.warning(
-                "[context_build] 模式 profile 取数通道未接线，模式物料降级不注入"
-                " | mode=%s",
-                mode,
-            )
-            return
-        try:
-            raw = await self._profile_fetcher(mode)
-            profile = unwrap_mode_profile(raw)
-        except Exception as exc:  # noqa: BLE001 — 降级语义：任何取数失败都不阻断管道
-            logger.warning(
-                "[context_build] mode.get_profile 调用失败，模式物料降级不注入"
-                " | mode=%s | err=%s",
-                mode,
-                exc,
-            )
-            return
-        pkg_dir = find_package_dir(mode)
-        baseline = updates.get("tool_ids")
-        note, narrowed = tool_surface_note(
-            profile, baseline if isinstance(baseline, list) else None
-        )
-        section = build_mode_section(mode, profile, pkg_dir, note)
-        base_prompt = str(updates.get("context.system_prompt", "") or "")
-        updates["context.system_prompt"] = (
-            f"{base_prompt}\n\n{section}" if base_prompt else section
-        )
-        if narrowed is not None:
-            updates["tool_ids"] = narrowed
-        logger.info(
-            "[context_build] 模式物料段已注入 | mode=%s | pkg_dir=%s | tool_ids=%s",
-            mode,
-            pkg_dir,
-            "收窄" if narrowed is not None else "维持基线",
-        )

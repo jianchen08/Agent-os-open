@@ -12,8 +12,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { MessageContentRenderer } from '../MessageContentRenderer'
 import type { RenderFragment } from '@/components/chat/hooks/useMessageRender'
 import type { ActivityData } from '@/types/activity'
-import type { MessageToolCall, ThinkingContent } from '@/types/models'
 import type { SystemLevel } from '@/types/messageParts'
+import type { MessageToolCall, ThinkingContent } from '@/types/models'
 
 const probes = vi.hoisted(() => ({
   /** 所有 stub 子组件的渲染总次数（memo 命中时子树不重渲染 → 计数不变） */

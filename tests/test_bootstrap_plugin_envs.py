@@ -163,20 +163,40 @@ def _repo_importable_names() -> set[str]:
     合宿成员经 bootstrap_plugin 把「插件目录 + plugins/shared 根 + 组根（如
     tools/）」入 sys.path，故这些目录下的 .py 与子目录（含命名空间包，如
     tools/human/ 被 import 成 human.*）都是仓内可导入面，不属依赖缺口。
+    另有成员在代码内自行 sys.path 注入兄弟插件目录 / scripts 子目录
+    （实证：task_evaluate 注入 system/tasks 解析 task_types；eval_harness
+    的 ws_batch 注入 scripts/eval_bench 解析 kernel_client）——凡仓内同面
+    .py 均计入（有界定深扫，禁递归 glob：dsh_adapter 自嵌套 junction 会挂死）。
     """
     shared_root = REPO / "plugins" / "shared"
     names = {p.stem for p in shared_root.glob("*.py")}
     for parent in (shared_root, *[d for d in shared_root.iterdir() if d.is_dir()]):
         names |= {p.stem for p in parent.glob("*.py")}
         names |= {p.name for p in parent.iterdir() if p.is_dir() and p.name != "__pycache__"}
+    # 插件目录层（system/*/ tools/*/ modes/*/ pipeline/*/*/）与 scripts 两层：
+    # 兄弟插件模块与 eval_bench 脚本面
+    for sub in ("system/*", "tools/*", "modes/*", "pipeline/*/*"):
+        for d in shared_root.glob(sub):
+            if d.is_dir():
+                names |= {p.stem for p in d.glob("*.py")}
+    scripts = REPO / "scripts"
+    names |= {p.stem for p in scripts.glob("*.py")}
+    for d in scripts.iterdir():
+        if d.is_dir() and d.name != "__pycache__":
+            names |= {p.stem for p in d.glob("*.py")}
     return names
 
 
-def _server_top_third_party(plugin_dir: Path) -> set[str]:
-    """server.py 模块顶层的第三方 import 名（host.py 只 exec server.py，故 fail-fast 触发面在此）。
+def _plugin_top_third_party(plugin_dir: Path) -> set[str]:
+    """成员目录全部非测试 .py 模块顶层的第三方 import 名。
 
-    剔除：标准库、成员自身目录下的模块（成员子包/平铺同目录模块）、仓库内可导入
-    名字（plugins/shared 面）。
+    扫 server.py 之外还要扫其余顶层 .py：成员可在调用时才 exec 加载模块
+    （实证 web_ext `_load_web_tool()` 懒加载 tool.py，其顶层 `import httpx`
+    在每次工具调用时才触发 ModuleNotFoundError——load 期 fail-fast 抓不到，
+    只能靠静态扫面兜住）。剔除：test_*/conftest.py（只在 pytest 车道运行，
+    不进宿主 venv）、标准库、成员自身目录下的模块（成员子包/平铺同目录
+    模块）、仓库内可导入名字（plugins/shared 面）；函数/方法内的 lazy import
+    静态扫不到，属登记面不在本门禁。
     """
     import ast
 
@@ -185,16 +205,16 @@ def _server_top_third_party(plugin_dir: Path) -> set[str]:
     stl = set(sys.stdlib_module_names)
     repo_mods = _repo_importable_names()
 
-    server = plugin_dir / "server.py"
-    if not server.exists():
-        return set()
-    tree = ast.parse(server.read_text(encoding="utf-8", errors="replace"))
     mods: set[str] = set()
-    for node in tree.body:  # 仅模块顶层：函数/方法内的 lazy import 不触发 fail-fast
-        if isinstance(node, ast.Import):
-            mods |= {a.name.split(".")[0] for a in node.names}
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            mods.add(node.module.split(".")[0])
+    for py in sorted(plugin_dir.glob("*.py")):
+        if py.stem.startswith("test") or py.stem == "conftest":
+            continue
+        tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
+        for node in tree.body:  # 仅模块顶层
+            if isinstance(node, ast.Import):
+                mods |= {a.name.split(".")[0] for a in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                mods.add(node.module.split(".")[0])
     return {m for m in mods if m not in stl and m not in local and m not in repo_mods}
 
 
@@ -225,7 +245,7 @@ def test_cohost_members_deps_subset_of_host_declaration():
     for pid, d in members:
         missing = sorted(
             m
-            for m in _server_top_third_party(d)
+            for m in _plugin_top_third_party(d)
             if m not in importable and B.norm(m) not in importable
         )
         if missing:
@@ -235,3 +255,114 @@ def test_cohost_members_deps_subset_of_host_declaration():
         "合宿成员依赖未落在 plugins/shared/_host/ 的依赖闭包内（共享 venv 装不上 → "
         f"宿主 fail-fast 连坐全组；补进 _host/pyproject.toml 后重跑 uv lock）: {gaps}"
     )
+
+
+def _host_installed_dists() -> set[str]:
+    """`_host/.venv` 实装发行包归一名全集（site-packages/*.dist-info 扫描）。
+
+    与 uv.lock 判据互补：lock 是「声明闭包」，实装是「磁盘真值」——lock 更新了
+    但忘 `uv sync` 时本判据仍红（打包 extraResources 整目录照搬 _host/.venv，
+    磁盘真值就是装机版运行时真值）。
+    """
+    import re
+
+    sp = REPO / "plugins" / "shared" / "_host" / ".venv" / "Lib" / "site-packages"
+    if not sp.is_dir():  # Unix 布局
+        candidates = sorted((REPO / "plugins" / "shared" / "_host" / ".venv").glob("lib/python*/site-packages"))
+        assert candidates, "_host/.venv site-packages 不存在，先 uv sync --project plugins/shared/_host"
+        sp = candidates[0]
+    dist_re = re.compile(r"^(.+)-(\d.*)\.dist-info$", re.IGNORECASE)
+    return {B.norm(m.group(1)) for e in sp.iterdir() if (m := dist_re.match(e.name))}
+
+
+def test_cohost_members_pyproject_deps_installed_in_host_venv():
+    """每个合宿成员 pyproject 声明的依赖，必须已实装进 _host/.venv（磁盘真值）。
+
+    lock 判据（上一条）抓「声明缺依赖」，本条抓「声明/锁已补但 venv 没 sync」——
+    两者任一漏网，装机版都按同样方式炸（包内 _host/.venv 整目录照搬 dev 磁盘）。
+    SDK 是 editable 本地源不在 dist-info 口径内，豁免。
+    """
+    installed = _host_installed_dists()
+
+    members: list[tuple[str, Path]] = []
+    for pattern in B.PLUGIN_GLOBS:
+        for d in sorted(REPO.glob(pattern)):
+            manifest = d / "plugin.json"
+            if not manifest.exists():
+                continue
+            import json
+
+            meta = json.loads(manifest.read_text(encoding="utf-8"))
+            if meta.get("host_group"):
+                members.append((str(meta.get("id")), d))
+
+    assert members, "真实语料应扫到合宿成员（host_group 声明），实际 0——扫描判据失效"
+
+    gaps: dict[str, list[str]] = {}
+    for pid, d in members:
+        missing = sorted(
+            name
+            for name in B.pyproject_dep_names(d)
+            if name != "agentos-plugin-sdk" and name not in installed
+        )
+        if missing:
+            gaps[pid] = missing
+
+    assert not gaps, (
+        "合宿成员 pyproject 依赖未实装进 plugins/shared/_host/.venv（打包整目录照搬该 "
+        f"venv，装机版将 ModuleNotFoundError；在 _host 目录跑 uv sync）: {gaps}"
+    )
+
+
+# ---------- _plugin_top_third_party 扫面单元用例 ----------
+
+
+def _write(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8")
+
+
+def test_scan_catches_lazy_loaded_module_import(tmp_path):
+    """调用时才 exec 的模块（tool.py）顶层 import 必须在扫面内——web_ext 实证形态。
+
+    回归锚：仅扫 server.py 时 web_ext 的 `import httpx` 藏在懒加载 tool.py 里，
+    18 次搜索调用期 ModuleNotFoundError 门禁全绿。
+    """
+    d = tmp_path / "lazy_member"
+    d.mkdir()
+    _write(d / "plugin.json", '{"id": "lazy_member", "host_group": "light"}')
+    _write(d / "server.py", "def _load():\n    pass\n")
+    _write(d / "tool.py", "import httpx\nimport os\n\n\ndef run():\n    return httpx\n")
+
+    mods = _plugin_top_third_party(d)
+    assert "httpx" in mods, "懒加载模块顶层第三方 import 必须被扫出"
+    assert "os" not in mods, "标准库不算依赖缺口"
+
+
+def test_scan_ignores_test_and_conftest_files(tmp_path):
+    """test_*.py / conftest.py 只在 pytest 车道运行，不进宿主 venv，必须豁免。"""
+    d = tmp_path / "tested_member"
+    d.mkdir()
+    _write(d / "server.py", "import yaml\n")
+    _write(d / "test_web_tool.py", "import httpx\nimport pytest\n")
+    _write(d / "conftest.py", "import pytest\n")
+
+    mods = _plugin_top_third_party(d)
+    assert mods == {"yaml"}, f"测试面 import 不得计入依赖缺口，实际 {mods}"
+
+
+def test_scan_never_fires_without_member_python_files(tmp_path):
+    """空目录/无 .py 成员返回空集（不误报）。"""
+    d = tmp_path / "empty_member"
+    d.mkdir()
+    assert _plugin_top_third_party(d) == set()
+
+
+def test_scan_importform_top_level(tmp_path):
+    """from-import 顶层形态同样入扫（与 server.py 时代同口径）。"""
+    d = tmp_path / "fromform_member"
+    d.mkdir()
+    _write(d / "server.py", "from PIL import Image\nfrom . import helper\n")
+
+    mods = _plugin_top_third_party(d)
+    assert "PIL" in mods
+    assert "helper" not in mods, "相对导入非第三方依赖"

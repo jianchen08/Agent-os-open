@@ -10,13 +10,13 @@
  */
 
 import { X } from '@/assets/icons'
-import { TabLabel } from '@/components/layout/TabLabel'
 import {
   BAND_BUTTON_CLASS,
   BAND_TAB_MAX_WIDTH_CLASS,
   BAND_TAB_MIN_WIDTH_CLASS,
   BAND_TAB_WIDTH_CLASS,
 } from '@/components/layout/bandButton'
+import { TabLabel } from '@/components/layout/TabLabel'
 import { cn } from '@/lib/utils'
 import type { AgentLevel } from '@/types/models'
 import type { AgentTabStatus } from '@/types/task'

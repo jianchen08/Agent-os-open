@@ -364,3 +364,93 @@ class TestSecondaryEvidenceDemotedButKept:
         )
         assert result.state_updates.get("ended") is True
         assert "task.status" not in result.state_updates
+
+
+class TestConversationModeTaskExemption:
+    """对话型模式任务豁免（2026-09-25 扮演会话化）：roleplay 等对话型模式的
+    任务轮是纯演出（文本即交付物），无评估义务——不注入提醒、不适用耗尽裁决，
+    文本轮按交付收束（补落 completed + end，对齐会话管道「文本即停」）。
+
+    豁免键 = state.mode（模式物料步骤回写，面板派发 args 的 mode 键经
+    execution_context 透传）；会话聊天管道（无 task.id）在更早的 task.id 门槛
+    已零动作早退，本豁免只作用于任务管道残留路径（如重新生成变体任务）。
+    """
+
+    def test_conversation_task_text_round_completes_without_reminder(self) -> None:
+        """roleplay 任务纯文本轮 → 补落 completed + end，零提醒注入。"""
+        import asyncio
+
+        reminder = TaskReminder(config={"max_reminders": 3})
+        state = _base_task_state(mode="roleplay", messages=[])
+        result = asyncio.run(reminder.execute(_ctx(state)))
+        assert result.state_updates.get("task.status") == "completed"
+        assert _is_iso_datetime(result.state_updates.get("task.ended_at"))
+        assert result.state_updates.get("ended") is True
+        assert result.state_updates.get("_has_new_llm_input") is False
+        # 零提醒：消息数组不被追加提醒条目，提醒额度不记账
+        assert "messages" not in result.state_updates
+        assert "evaluate_reminder_count" not in result.state_updates
+
+    def test_conversation_task_idempotent_when_already_completed(self) -> None:
+        """已完成态幂等：不重复补落终态（与②补落同一写面通路）。"""
+        import asyncio
+
+        reminder = TaskReminder()
+        result = asyncio.run(
+            reminder.execute(_ctx(_base_task_state(mode="roleplay", **{"task.status": "completed"})))
+        )
+        assert result.state_updates.get("ended") is True
+        assert "task.status" not in result.state_updates
+
+    def test_conversation_task_tool_round_still_routes_to_tools(self) -> None:
+        """信号①优先于豁免：带工具调用的轮次照常路由工具执行（零评判）。"""
+        import asyncio
+
+        reminder = TaskReminder()
+        state = _base_task_state(
+            mode="roleplay",
+            raw_tool_calls=[{"function": {"name": "bash"}}],
+            raw_result="",
+        )
+        result = asyncio.run(reminder.execute(_ctx(state)))
+        assert set(result.state_updates) - {_mod._RESULT_FP_KEY} == set()
+
+    def test_non_conversation_task_still_gets_reminder(self) -> None:
+        """对照组：非对话型模式（mode 缺席 / coding）→ 提醒级联照常。"""
+        import asyncio
+
+        reminder = TaskReminder(config={"max_reminders": 3})
+        for mode in (None, "coding"):
+            state = _base_task_state()
+            if mode is not None:
+                state["mode"] = mode
+            result = asyncio.run(reminder.execute(_ctx(state)))
+            assert result.state_updates.get("evaluate_reminder_count") == 1, mode
+            assert result.state_updates.get("_has_new_llm_input") is True, mode
+            assert "task.status" not in result.state_updates, mode
+
+    def test_conversation_mode_without_task_id_still_zero_action(self) -> None:
+        """会话聊天管道（无 task.id）+ mode=roleplay：task.id 门槛先行早退，
+        豁免分支不参与（会话「文本即停」由 DSL 路由原生承载）。"""
+        import asyncio
+
+        reminder = TaskReminder()
+        state = _base_task_state(mode="roleplay")
+        del state["task.id"]
+        del state["task.status"]
+        result = asyncio.run(reminder.execute(_ctx(state)))
+        assert set(result.state_updates) - {_mod._RESULT_FP_KEY} == set()
+
+    def test_evaluation_pipeline_not_exempted_by_conversation_mode(self) -> None:
+        """评估子管道不豁免：evaluation_mode 在场时 mode=roleplay 不得短路
+        评估语义（照常进入评估提醒级联）。"""
+        import asyncio
+
+        reminder = TaskReminder(config={"max_reminders": 3})
+        state = _base_task_state(
+            mode="roleplay",
+            plugin_configs={"task_reminder": {"evaluation_mode": True}},
+        )
+        result = asyncio.run(reminder.execute(_ctx(state)))
+        assert result.state_updates.get("evaluate_reminder_count") == 1
+        assert result.state_updates.get("task.status") != "completed"

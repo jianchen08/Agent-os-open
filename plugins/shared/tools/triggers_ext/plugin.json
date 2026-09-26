@@ -207,6 +207,20 @@
               "type": "object"
             }
           }
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "integer"
+            },
+            "body": {
+              "type": "object"
+            }
+          }
+        },
+        "render": {
+          "card": "generic"
         }
       }
     ],

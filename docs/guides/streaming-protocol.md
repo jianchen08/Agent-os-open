@@ -2,7 +2,7 @@
 
 > 面向**想给灵汐 AgentOS 0.2 提供实时流式能力**的插件开发者，以及维护消息链路的前端/内核工程师。
 > 本文定义流式事件的**平台公共契约**：所有消息实时通道（LLM 流式回复、插件实时进度/结构化卡片）发射的事件信封统一走本协议。
-> 单一真值源：`config/kernel_capabilities/streaming.json`（内核入口校验 + 前端消费 + 插件发射端均读本文件，不读代码副本）。
+> 单一真值源：`config/kernel/kernel_capabilities/streaming.json`（内核入口校验 + 前端消费 + 插件发射端均读本文件，不读代码副本）。
 > 决策背景见 [ADR 2026-08-22 流式链路重写为平台公共契约](../decisions/2026-08-22-streaming-protocol-rewrite.md)。
 > **协议状态：已采纳并落地**——`ManifestCapabilities.streaming` 字段已进内核契约（`kernel/crates/core/src/traits.rs`），前端 `pluginDeclarationValidate` 已按声明校验，插件可实际接入。LLM 正文流式为 8 事件块协议（见 §3.1）。
 
@@ -57,7 +57,7 @@
 ### message_id 命名空间（前缀隔离，防冲突）
 
 后端与前端共享同一个消息 id 空间，**冲突会发生**——因此协议强制前缀隔离
-（单一真值源在 `config/kernel_capabilities/streaming.json` 的
+（单一真值源在 `config/kernel/kernel_capabilities/streaming.json` 的
 `x-message-id-namespaces`，结构化清单：`prefix`/`owner`/`plugin_forbidden`/
 `pattern`，内核网关与前端按同一清单校验）：
 
@@ -77,7 +77,7 @@
 
 ## 3. 事件类型与载荷
 
-> 本表是人读速览；**机器读真值源是 `config/kernel_capabilities/streaming.json`**
+> 本表是人读速览；**机器读真值源是 `config/kernel/kernel_capabilities/streaming.json`**
 > （含完整 JSON Schema、必选/形态校验），两端实现与机械闸都消费它。
 
 | 事件 | 必选字段 | 载荷语义 | 前端操作 |
@@ -257,7 +257,7 @@ manifest 的 `part_types` 声明会通过 G2/前端声明校验，但前端尚�
 
 ## 9. 测试与门禁
 
-- **契约机械闸**：`config/kernel_capabilities/streaming.json` ↔ 内核校验执行器
+- **契约机械闸**：`config/kernel/kernel_capabilities/streaming.json` ↔ 内核校验执行器
   一致（kernel_capabilities tests，与 chat.json 同款机械闸）。
 - **事件序列测试**（前端 vitest）：block_start→delta→block_end→tool→new_message
   多事件序列断言 store 终态；含"user 不消失、part 不错位"回归用例（2026-08-22 用户

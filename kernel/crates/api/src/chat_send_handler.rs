@@ -49,6 +49,7 @@ pub(crate) const HANDLED_PARAM_NAMES: &[&str] = &[
     "thread_id",
     "execution_context",
     "agent_id",
+    "pipeline_config_id",
     "state",
 ];
 
@@ -133,6 +134,9 @@ struct SendParams<'a> {
     /// 管道 state 持久键 `agent.id`（出生方经 state 透传、context_build 与
     /// 内核工具面消费），派发不再注入身份。
     agent_id: String,
+    /// 显式指定的管道配置（config/pipelines/{id}.yaml）：按需加载编译该配置
+    /// 执行；None = autonomous 缺省路径。
+    pipeline_config_id: Option<String>,
     overlay: Option<Value>,
 }
 
@@ -204,6 +208,7 @@ impl ChatSendHandler {
                 p.execution_context,
                 p.overlay.as_ref(),
                 &p.agent_id,
+                p.pipeline_config_id.as_deref(),
                 "",
                 PendingInputSource::Trigger,
             )
@@ -308,6 +313,15 @@ impl ChatSendHandler {
             .unwrap_or("agentos")
             .to_string();
 
+        // pipeline_config_id（可选）：显式指定执行管道的配置，按需加载编译缓存。
+        // 形态校验对齐 WS router 同款（valid_config_id），非法按缺失 = autonomous
+        // 缺省路径（可选提示性参数不得让消息投递失败）。
+        let pipeline_config_id = params
+            .get("pipeline_config_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| agentos_session::router::valid_config_id(s))
+            .map(str::to_string);
+
         // state 注入（可选）：校验保留字后作为 overlay 透传。
         let overlay = validate_state_overlay(params.get("state"))?;
 
@@ -321,6 +335,7 @@ impl ChatSendHandler {
             ownership_thread,
             execution_context,
             agent_id,
+            pipeline_config_id,
             overlay,
         })
     }
@@ -574,6 +589,7 @@ impl ChatSendHandler {
         let ec = p.execution_context.cloned();
         let ov = p.overlay.clone();
         let aid = p.agent_id.clone();
+        let pcid = p.pipeline_config_id.clone();
         let session = self.session.clone();
         tokio::spawn(async move {
             if let Err(e) = dispatcher
@@ -586,6 +602,7 @@ impl ChatSendHandler {
                     ec.as_ref(),
                     ov.as_ref(),
                     &aid,
+                    pcid.as_deref(),
                     "",
                     PendingInputSource::Trigger,
                 )
@@ -671,7 +688,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     /// 单次 dispatch_user_input 记录（全参快照）：
-    /// (thread_id, user_id, content, pipeline_id, thinking, execution_context, state_overlay, agent_id)
+    /// (thread_id, user_id, content, pipeline_id, thinking, execution_context,
+    ///  state_overlay, agent_id, pipeline_config_id)
     type DispatchRecord = (
         String,
         String,
@@ -681,6 +699,7 @@ mod tests {
         Option<Value>,
         Option<Value>,
         String,
+        Option<String>,
     );
 
     /// 记录型 mock dispatcher：捕获每次 dispatch 调用供断言。
@@ -708,6 +727,7 @@ mod tests {
             execution_context: Option<&Value>,
             state_overlay: Option<&Value>,
             agent_id: &str,
+            pipeline_config_id: Option<&str>,
             _cmid: &str,
             _source: PendingInputSource,
         ) -> Result<(), String> {
@@ -720,6 +740,7 @@ mod tests {
                 execution_context.cloned(),
                 state_overlay.cloned(),
                 agent_id.to_string(),
+                pipeline_config_id.map(str::to_string),
             ));
             Ok(())
         }
@@ -1067,6 +1088,69 @@ mod tests {
         assert_eq!(calls(&d)[1].7, "general_agent", "显式值原样透传簿记");
     }
 
+    // ── pipeline_config_id：显式指定管道配置（按需加载编译缓存）──────────
+
+    #[tokio::test]
+    async fn pipeline_config_id_param_forwarded_to_dispatch() {
+        // 两组有区分度输入：显式值原样透传；不同管道互不串扰
+        for (pid, cfg) in [("pipe_cfg_1", "custom_pipe"), ("pipe_cfg_2", "other_pipe")] {
+            let (h, d) = handler();
+            let res = h
+                .handle(
+                    "send_message",
+                    json!({
+                        "pipeline_id": pid,
+                        "message": "m",
+                        "user_id": "u1",
+                        "pipeline_config_id": cfg,
+                    }),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res["status"], "dispatched");
+            assert_eq!(calls(&d)[0].8.as_deref(), Some(cfg), "显式配置应透传");
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_config_id_invalid_or_absent_is_none() {
+        let (h, d) = handler();
+        // 不带 = None（autonomous 缺省路径，旧调用方零变化）
+        h.handle(
+            "send_message",
+            json!({"pipeline_id": "pipe_x", "message": "m", "user_id": "u1"}),
+        )
+        .await
+        .unwrap();
+        assert!(calls(&d)[0].8.is_none(), "缺省必须为 None");
+
+        // 形态非法（路径穿越/空白/超长）按缺失忽略，不报错
+        for (why, bad) in [
+            ("路径穿越", json!("../etc")),
+            ("含空白", json!("a b")),
+            ("超 128", json!("x".repeat(129))),
+        ] {
+            let (h2, d2) = handler();
+            let res = h2
+                .handle(
+                    "send_message",
+                    json!({
+                        "pipeline_id": "pipe_x",
+                        "message": "m",
+                        "user_id": "u1",
+                        "pipeline_config_id": bad,
+                    }),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res["status"], "dispatched", "{why}: 非法值不阻断派发");
+            assert!(
+                calls(&d2)[0].8.is_none(),
+                "{why}: 非法值必须按缺失 = autonomous"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn create_with_flag_generates_engine_pipeline_id() {
         let (h, d) = handler();
@@ -1342,6 +1426,7 @@ mod tests {
             _execution_context: Option<&Value>,
             state_overlay: Option<&Value>,
             _agent_id: &str,
+            _pipeline_config_id: Option<&str>,
             _cmid: &str,
             _source: PendingInputSource,
         ) -> Result<(), String> {
@@ -1611,6 +1696,7 @@ mod tests {
             _ec: Option<&Value>,
             _ov: Option<&Value>,
             _a: &str,
+            _pipeline_config_id: Option<&str>,
             _cmid: &str,
             _source: PendingInputSource,
         ) -> Result<(), String> {

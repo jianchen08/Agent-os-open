@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # @feature: FP-0.2.二 eval_harness 缺口分支补测 | @ci: python-coverage
 """eval_harness 单元测试（不依赖内核）：题集展开/聚合/提案校验/账本/模式服务解析。"""
 from __future__ import annotations

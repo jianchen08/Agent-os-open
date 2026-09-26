@@ -1,7 +1,13 @@
-# -*- coding: utf-8 -*-
 """批量评测：多题集选题 → task_submit 派发 → 轮询 → eval_summary 判定 → 聚合。"""
 from __future__ import annotations
-import json, os, sys, time, urllib.request, urllib.error
+
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
 import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -51,8 +57,9 @@ def _find_task_id_by_title(token: str, title: str) -> str:
         for t in items:
             if str(t.get("title") or "") == title:
                 return str(t.get("id") or t.get("task_id") or "")
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[batch_run] task lookup failed for {title!r}: {e}",
+              file=sys.stderr)
     return ""
 
 

@@ -20,8 +20,8 @@ import { Loader2 } from '@/assets/icons'
 import { cn } from '@/lib/utils'
 import { mergeConsecutiveAssistantMessages } from '@/services/api/session'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
-import { collectSegmentSwitcherAnchors } from '@/utils/segmentAnchor'
 import { compareMessages } from '@/utils/messageOrder'
+import { collectSegmentSwitcherAnchors } from '@/utils/segmentAnchor'
 import { MessageItem } from './MessageItem'
 import type { MessageListProps } from './types'
 import type { Message } from '@/types/models'
@@ -440,15 +440,23 @@ export const MessageList = ({
    *
    * 仅在已首次定位后且消息数量增加时排队钉底。跟随判定放 rAF 内：scroll 事件
    * （停止跟随）先于 rAF 执行，排队时仍在跟随、执行前用户已上滑的钉底不落盘。
+   *
+   * 例外：用户主动发送（乐观 user 气泡以 status='sending' 落列；触发器/HTTP
+   * 注入的 user 气泡是权威消息 status='completed'，得以区分）= 回底意图，
+   * 强制钉底并恢复跟随——此前翻历史的位置不保留，与主流聊天应用一致。
    */
   useEffect(() => {
     if (initialScrollDone.current && messages.length > lastMessageCount.current) {
+      const lastMessage = messages[messages.length - 1]
+      const isUserSend =
+        lastMessage?.role === 'user' && lastMessage?.status === 'sending'
       requestAnimationFrame(() => {
+        if (isUserSend) isFollowingBottom.current = true
         if (isFollowingBottom.current) pinToBottom()
       })
     }
     lastMessageCount.current = messages.length
-  }, [messages.length, pinToBottom])
+  }, [messages, pinToBottom])
 
   /** 流式输出期间持续跟随底部（用户上移后 isFollowingBottom=false，不再钉底） */
   useEffect(() => {
@@ -540,17 +548,6 @@ export const MessageList = ({
           renderItem(message, index, displayMessages.length),
         )}
 
-        {/* 底部加载占位 */}
-        {isGenerating && displayMessages[displayMessages.length - 1]?.role === 'user' && (
-          <div className="flex items-start gap-3 px-4 py-3">
-            <div className="bg-primary/10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full">
-              <Loader2 className="text-primary h-icon-md w-icon-md animate-spin" />
-            </div>
-            <div className="bg-secondary/50 rounded-2xl rounded-tl-sm px-4 py-2.5">
-              <span className="text-muted-foreground text-sm">思考中...</span>
-            </div>
-          </div>
-        )}
         <div className="h-icon-md" />
       </div>
     </div>

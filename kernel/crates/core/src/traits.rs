@@ -139,6 +139,23 @@ pub trait PluginInvoker: Send + Sync {
         })
     }
 
+    /// 成员粒度卸载（合宿成员从共享宿主进程内摘除，其余成员不动）。
+    ///
+    /// 仅对「已装箱到合宿组宿主、有存活进程且非最后成员」的成员生效：向宿主发
+    /// `agentos/unload_member` 请求（带应答），宿主定向 on_unload 并从服务面
+    /// 摘除该成员（ADR 2026-09-24-member-granularity-unload-mode-panel-warmup）。
+    /// 无存活宿主 = 无进程内服务面，返回 Ok(no-op)；独占插件、组内最后成员
+    /// （须走整组回收）、实现不支持、请求失败（宿主协议错误/超时）返回 Err
+    /// ——调用方必须回退 [`Self::force_unload`] 整组路径。
+    /// 默认实现返回不支持错误（无此能力的实现 / MockInvoker 编译兼容）。
+    async fn unload_member(&self, _plugin_id: &str) -> Result<(), PluginError> {
+        Err(PluginError {
+            message: "unload_member not supported by this invoker".into(),
+            code: None,
+            source: None,
+        })
+    }
+
     /// 重新扫描插件目录，发现新增插件（运行时懒加载入口）。
     ///
     /// 重扫 plugin roots（幂等：loader 内部 cache.clear + 重插，不杀已 spawn 的进程），
@@ -178,6 +195,17 @@ pub trait PluginInvoker: Send + Sync {
     /// sidecar 按调用懒 spawn，reenable 后下次调用自然重生（0.2 收尾 §3.3b）。
     /// 默认实现 no-op。
     async fn kill_sidecar_if_any(&self, _plugin_id: &str) {}
+
+    /// 目标插件所在宿主是否正处于 spawn/respawn 窗口（连接 + initialize 握手
+    /// 未完成，调用方只能排队等它就绪）。
+    ///
+    /// 供 HTTP dispatcher 区分「插件处理慢」与「基础设施冷启动等待」：starting
+    /// 期间端点超时预算暂停消耗（等待就绪而非 504，宿主重载风暴 2026-09-25）。
+    /// 默认返回 false——无 spawn 概念的实现（InProcess / 测试桩）语义即「不在
+    /// 启动窗口」，dispatcher 行为与无探针时完全一致。
+    fn is_host_starting(&self, _plugin_id: &str) -> bool {
+        false
+    }
 }
 
 /// 生命周期钩子类型。
@@ -595,6 +623,14 @@ pub struct PluginManifest {
     /// 由前端 ContributionRegistry 作为唯一真相源消费（与 ui_schema 透传同理）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contributes: Option<serde_json::Value>,
+    /// 危险前端能力被准入系统剥除的记录（2026-09-25 准入分级）。
+    ///
+    /// 非空 = 本插件清单声明了宿主级危险能力（skin hooks=host_js /
+    /// client_styles=host_css）但未获 allowlist `grants` 授予，loader 已在注册面
+    /// 剥除对应声明（磁盘清单原样，重扫重算）；经 /api/v1/plugins 出口供设置页
+    /// 可见（禁静默降级）。空 = 无剥权（内置根 / dev 姿态 / 已授予 / 未声明）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restricted_capabilities: Vec<String>,
     /// HTTP 端点贡献声明（ADR §3.3）。
     ///
     /// 插件可向内核统一 HTTP server 贡献端点（如企微 webhook 回调）。
@@ -2058,6 +2094,7 @@ mod tests {
             client_message_id: String::new(),
             execution_context: None,
             state_overlay: None,
+            pipeline_config_id: None,
             created_at: "2026-01-01T00:00:00Z".into(),
         }
     }

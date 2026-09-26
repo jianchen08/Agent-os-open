@@ -11,9 +11,9 @@
 
 import { act, fireEvent, screen } from '@testing-library/react'
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
+import { useChatInputStore } from '@/stores/chatInputStore'
 import { renderWithProviders as render } from '@/test/renderWithProviders'
 import { CodeEditor } from '../CodeEditor'
-import { useChatInputStore } from '@/stores/chatInputStore'
 import type * as fileEditorRegistry from '@/stores/fileEditorRegistry'
 
 const onSaveMock = vi.fn()

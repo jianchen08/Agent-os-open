@@ -20,6 +20,32 @@
         "input_schema": {
           "properties": {},
           "type": "object"
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "system": {
+              "type": "object"
+            },
+            "database": {
+              "type": "object"
+            },
+            "llm": {
+              "type": "object"
+            },
+            "tool": {
+              "type": "object"
+            },
+            "task": {
+              "type": "object"
+            }
+          }
+        },
+        "render": {
+          "card": "table",
+          "bindings": {
+            "sections": "result.sections"
+          }
         }
       },
       {
@@ -28,6 +54,34 @@
         "input_schema": {
           "properties": {},
           "type": "object"
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "healthy",
+                "warning",
+                "critical"
+              ]
+            },
+            "issues": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "metrics": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "status"
+          ]
+        },
+        "render": {
+          "card": "generic"
         }
       },
       {
@@ -49,6 +103,17 @@
             "response_time"
           ],
           "type": "object"
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "recorded": {
+              "type": "boolean"
+            }
+          }
+        },
+        "render": {
+          "card": "generic"
         }
       },
       {
@@ -73,6 +138,17 @@
             "execution_time"
           ],
           "type": "object"
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "recorded": {
+              "type": "boolean"
+            }
+          }
+        },
+        "render": {
+          "card": "generic"
         }
       },
       {
@@ -104,6 +180,17 @@
             "completed"
           ],
           "type": "object"
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "updated": {
+              "type": "boolean"
+            }
+          }
+        },
+        "render": {
+          "card": "generic"
         }
       }
     ],

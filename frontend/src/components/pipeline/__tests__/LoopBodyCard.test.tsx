@@ -12,21 +12,11 @@
 
 import { screen, fireEvent, within } from '@testing-library/react'
 import React from 'react'
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import { LoopBodyCard } from '../LoopBodyCard'
+import { makeOps } from './helpers/pipelineTestUtils'
 import type { LoopBodyV2, PipelineEditorOps } from '@/services/pipeline/model'
-
-function makeOps() {
-  const calls: Array<{ op: keyof PipelineEditorOps; args: unknown[] }> = []
-  const ops: PipelineEditorOps = {
-    set: vi.fn((...args: unknown[]) => calls.push({ op: 'set', args })),
-    remove: vi.fn((...args: unknown[]) => calls.push({ op: 'remove', args })),
-    insert: vi.fn((...args: unknown[]) => calls.push({ op: 'insert', args })),
-    move: vi.fn((...args: unknown[]) => calls.push({ op: 'move', args })),
-  }
-  return { ops, calls }
-}
 
 const BODY_PATH = ['loop_bodies', 1]
 

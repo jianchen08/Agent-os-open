@@ -1,6 +1,6 @@
 /** 管道运行状态展示（文案/图标/终态集），自 PipelineManagerWidget 拆出。 */
-import React from 'react'
 import { Ban, CheckCircle2, CircleDot, Loader2, PauseCircle, XCircle } from 'lucide-react'
+import React from 'react'
 import type { PipelineStatus } from '@/types/pipeline'
 import type { AgentTab } from '@/types/task'
 

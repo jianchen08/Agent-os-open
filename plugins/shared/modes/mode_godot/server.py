@@ -58,6 +58,7 @@ from typing import Any
 from urllib.error import HTTPError
 
 import yaml
+
 from agentos_plugin_sdk import AgentOSPlugin
 from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 from agentos_plugin_sdk.capability import bind_capability_caller

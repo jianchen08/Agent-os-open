@@ -150,7 +150,7 @@ exit 循环体（单次）  workspace 收尾 + 环境释放（run_on_error，提
 - **宿主三轨**：Python sidecar（默认；独立进程、MCP over stdio、uv venv 单轨、懒启动/空闲回收/崩溃自愈/热重载）、Rust cdylib 原生（`in_process`；高频管道步骤晋升轨、永不 dlclose）、外部 MCP（`entry: "mcp:external"`；零代码直连第三方 MCP 服务）。
 - **能力声明**：`capabilities.tools`（进 LLM 面）/ `services`（内部服务，不进 LLM 面）/ `lifecycle_hooks` / `streaming`（流式事件声明，fail-closed）；`route_signals` 仅是声明位，执行面零消费，新插件无需声明。
 - **插件间耦合唯一轴**：`requires_services`（能力角色名，boot 期闸校验）。
-- **LLM 可见工具三层过滤**：启用档案（`config/plugins/default_profile.yaml`，watcher 每轮 sync 重读）→ 能力注册（缺 schema 的 external MCP 工具拒注册）→ Agent `tool_ids` 白名单（解析不出 = 空工具面，禁止静默全量）。
+- **LLM 可见工具三层过滤**：启用档案（`config/kernel/default_profile.yaml`，watcher 每轮 sync 重读）→ 能力注册（缺 schema 的 external MCP 工具拒注册）→ Agent `tool_ids` 白名单（解析不出 = 空工具面，禁止静默全量）。
 - **全链路热生效**：新插件自动发现注册、manifest 变更自动 revoke + 重注册（G2 漂移校验）、Python 代码改动 respawn、cdylib 集合变更 G8 优雅重启——插件改动无需 re-enable 或重启内核。
 
 协议全字段见 [plugin-protocol.md](guides/plugin-protocol.md)。

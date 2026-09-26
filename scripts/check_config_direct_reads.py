@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """配置直读机械闸（ADR 2026-09-14-config-ownership-plugin-lifecycle §2.6）。
 
 插件代码禁止直读 config/ 下配置文件——配置唯一合法入口是 manifest `config_files`
@@ -9,7 +8,7 @@ Python/Rust 源码中的硬编码配置路径字面量，新违规即红（存�
 - 扫描目标：plugins/shared/**/*.py、plugins/sdk/src/**/*.py、
   plugins/shared/pipeline/**/src/**/*.rs（native cdylib）
 - 判定：出现 `config/` 路径字面量（斜杠/分段拼接两种形态）
-- 基线：scripts/check_config_direct_reads_baseline.txt（每行 = 文件:出现次数），
+- 基线：.github/check_config_direct_reads_baseline.txt（每行 = 文件:出现次数），
   只减不增；基线外新增 → exit 1
 
 用法：python scripts/check_config_direct_reads.py
@@ -77,7 +76,7 @@ def main() -> int:
         if n:
             found[str(p.relative_to(ROOT)).replace("\\", "/")] = n
 
-    baseline_path = Path(__file__).parent / "check_config_direct_reads_baseline.txt"
+    baseline_path = Path(__file__).resolve().parent.parent / ".github" / "check_config_direct_reads_baseline.txt"
     baseline: dict[str, int] = {}
     if baseline_path.exists():
         for line in baseline_path.read_text(encoding="utf-8").splitlines():
@@ -85,6 +84,15 @@ def main() -> int:
             if not line or line.startswith("#"):
                 continue
             path, _, cnt = line.rpartition(":")
+            # fail-closed：基线键必须是仓库相对 posix 路径。历史缺陷实证——
+            # 机器绝对路径键（D:/...）与相对路径 found 键永不命中 → 恒"新增
+            # 违规"恒红且无人发现（检查器当时未注册车道）。格式错直接拒判。
+            if (len(path) > 2 and path[1] == ":") or path.startswith("/") or path.startswith("\\"):
+                print(
+                    f"配置直读机械闸：基线含非相对路径键（历史缺陷形态）：{path}\n"
+                    "基线键须为仓库相对 posix 路径；请以 --init 重生成基线。"
+                )
+                return 2
             baseline[path] = int(cnt)
 
     new_violations = {
@@ -110,5 +118,31 @@ def main() -> int:
     return 0
 
 
+def init_baseline() -> int:
+    """以当前实测重建基线（仓库相对 posix 键；--init 须单独 commit 留归因）。"""
+    found: Counter[str] = Counter()
+    for p in iter_sources():
+        try:
+            text = p.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        n = count_violations(text)
+        if n:
+            found[str(p.relative_to(ROOT)).replace("\\", "/")] = n
+    lines = [
+        "# 配置直读存量基线（棘轮只减不增）；格式 文件相对路径: 处数",
+        "# 依据 ADR 2026-09-14-config-ownership-plugin-lifecycle §2.6",
+        "# 存量为历史欠账：新增直读即红，存量随触碰逐文件清偿",
+        "# 键必须是仓库相对 posix 路径（绝对路径键属历史缺陷形态，检查器拒判）",
+        *sorted(f"{path}: {cnt}" for path, cnt in found.items()),
+    ]
+    baseline_path = Path(__file__).resolve().parent.parent / ".github" / "check_config_direct_reads_baseline.txt"
+    baseline_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"配置直读机械闸：基线已重建（{len(found)} 文件 / {sum(found.values())} 处）。")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--init" in sys.argv:
+        sys.exit(init_baseline())
     sys.exit(main())

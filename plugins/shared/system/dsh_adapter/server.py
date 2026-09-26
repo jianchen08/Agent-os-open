@@ -261,6 +261,11 @@ async def dsh_glob(
         "required": [],
     },
     description="Translate a DSH plugin package (or all installed ones under dsh_plugins/) into AgentOS-equivalent registration manifests.",
+    output_schema={
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}, "manifest": {"type": "object"}},
+    },
+    render={"card": "generic"},
 )
 async def dsh_translate_manifest(package_path: str | None = None) -> dict[str, Any]:
     """单包翻译（指定路径）或全量装载翻译（缺省扫 dsh_plugins/）。"""
@@ -273,6 +278,11 @@ async def dsh_translate_manifest(package_path: str | None = None) -> dict[str, A
     name="dsh_list_plugins",
     schema={"type": "object", "properties": {}, "required": []},
     description="List DSH plugin packages installed under the adapter's dsh_plugins/ directory (name/version/client/renderers).",
+    output_schema={
+        "type": "object",
+        "properties": {"plugins": {"type": "array", "items": {"type": "object"}}},
+    },
+    render={"card": "table"},
 )
 async def dsh_list_plugins() -> dict[str, Any]:
     """汇报已装载的 DSH 插件包（轻量：不跑 Node runtime，纯清单翻译）。"""

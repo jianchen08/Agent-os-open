@@ -1,0 +1,41 @@
+{
+  "id": "get_started",
+  "title": "开始使用",
+  "description": "四步走通核心链：配好模型 → 发一条消息 → 交给它一个任务",
+  "order": 1,
+  "default_open": true,
+  "steps": [
+    {
+      "id": "welcome",
+      "title": "欢迎来到灵汐",
+      "body": "灵汐是一个**可进化的智能体操作系统**：你用自然语言把事情交给它，它组织模型、工具与记忆去完成。一切能力都由插件承载——聊天只是起点，任务管理、记忆、多种专属模式都随取随用。\n\n这份引导带你走通最核心的一条链，随时可以从右上角帮助按钮回到本页。",
+      "completion": { "type": "manual" }
+    },
+    {
+      "id": "configure_llm",
+      "title": "配置模型与 API",
+      "body": "灵汐通过大模型工作，先花一分钟完成配置：选一个提供商，填入 API Key，再挑一个默认模型即可。下面的向导会一步步带你完成。",
+      "wizard": "llm_setup",
+      "completion": {
+        "type": "all",
+        "conditions": [
+          { "type": "api_check", "endpoint": "/ext/llm_service/config/llm", "json_path": "providers", "op": "non_empty" },
+          { "type": "api_check", "endpoint": "/ext/llm_service/config/llm", "json_path": "defaults.chat", "op": "non_empty" }
+        ]
+      }
+    },
+    {
+      "id": "first_message",
+      "title": "发出第一条消息",
+      "body": "配置就绪后，回到对话界面，在输入框随便说点什么——比如「介绍一下你自己」。这就是一次完整的模型调用，消息成功发出即说明模型配置可用。",
+      "completion": { "type": "api_check", "endpoint": "/api/v1/n", "json_path": "threads", "op": "non_empty" }
+    },
+    {
+      "id": "first_task",
+      "title": "交给它第一个任务",
+      "body": "对话之外，你还可以把一件完整的事交给它：比如「整理这个目录下的文件并写一份摘要」。任务会独立执行、可随时查看进度。\n\n打开任务管理页看看你的任务在哪里、长什么样——下一篇「任务管理」会带你细看。",
+      "cta": { "label": "打开任务管理", "action": { "type": "open_panel", "target": "/tasks" } },
+      "completion": { "type": "panel_visited", "panel": "/tasks" }
+    }
+  ]
+}

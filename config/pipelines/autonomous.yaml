@@ -13,12 +13,15 @@ loop_bodies:
     steps:
     - pipeline_pause_guard
     - pipeline_context_build
+    # 模式物料通用步骤（2026-09-24 架构重构：自 context_build 抽出）——
+    # 须先于 tool_schema（tool_ids 收窄）与 prompt_build（模式段追加）。
+    - pipeline_mode_material_inject
     - pipeline_injected_param_validator
     - pipeline_tool_schema
     - pipeline_param_inject
     - pipeline_multimodal_preprocessor
     - pipeline_model_prompt_adapter
-    - pipeline_godot_context
+    - pipeline_host_context
     - pipeline_prompt_build
     # W2a 上下文压缩粗门（引擎只算术，零领域知识）：占用比 =（上次真实
     # input_tokens + 自锚以来字符增量 × 2.0）÷ 模型窗口。口径：token ≈ 紧凑

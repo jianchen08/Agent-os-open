@@ -1,5 +1,4 @@
 # @feature: FP-0.2.二 模式体系测试补标 | @ci: python-coverage
-# -*- coding: utf-8 -*-
 """六模式包写动作成功路径补测（对 test_mode_servers_gaps 的补位）。
 
 gaps 文件覆盖写动作的错误面（通道抛错/缺任务 id/非法载荷）；本文件驱动
@@ -270,130 +269,45 @@ def test_research_followup_errors_unknown_session_and_no_report():
 # ── roleplay：play / regenerate ──────────────────────────────────────────────────
 
 
-def test_roleplay_play_success_with_real_seed_card():
-    """以此角色开演成功（出厂卡 card_luna）→ 目标=卡 agent 键+人设入描述。
-
-    BUG-73 契约：开演锚**卡专属扮演会话**（thread-rp-<card_id>，同卡复演复用），
-    body 的宿主活跃 session_id 一律忽略（R92 同族「落活跃既有 thread」根除）；
-    所选开场白全文随派发注入（greeting_index=2 → 备选第 2 条原文入上下文）。
-    """
+def test_roleplay_play_possess_only_with_real_seed_card():
+    """play possess-only 契约（出厂卡 card_luna）：校验卡 + 回执 presenter（含
+    theme），零任务派发。fresh 开演已会话化（2026-09-25）——面板走
+    roleplay.continue 宿主桥建扮演会话，开场白/用户设定随执行选项快照透传，
+    服务端不再派发开演任务。"""
     module = _fresh("mode_roleplay")
     executor = _RecordingExecutor({"data": {"task_id": "task-play"}})
     module._set_provider("tool-executor", executor)
 
     body = {
         "card_id": "card_luna",
-        "user_persona": "旅行者",
+        "play_mode": "possess",
         "greeting_index": 2,
         "session_id": "sess-active-host",
     }
     out = _body_json(
         _call(module, "/ext/mode_roleplay/data/actions/play", "POST", json.dumps(body))
     )
-    assert out == {"task_id": "task-play"}
-    args = executor.last["args"]
-    assert args["target_id"] == "mode_roleplay/card_luna"
-    assert args["task_kind"] == "roleplay_opening"
-    assert args["metadata"] == {"card_id": "card_luna", "greeting_index": 2}
-    # 专属扮演会话锚：卡维度派生，与宿主活跃会话无关（body session_id 被忽略）
-    assert args["session_id"] == "thread-rp-card_luna"
-    assert args["session_id"] != "sess-active-host"
-    assert "塞拉菲娜·月语" in args["goal_description"]
-    assert "# 用户设定（对话者扮演）" in args["goal_description"]
-    # 出厂卡自带性格与场景字段 → 两段都入描述
-    assert "# 性格" in args["goal_description"]
-    assert "# 场景" in args["goal_description"]
-    # 所选开场白全文注入（greeting_index=2 = alternate_greetings[1]）
-    assert "# 本场开场白" in args["goal_description"]
-    assert "一曲还缺一个听众" in args["goal_description"]
-    # 开场表演必须作为回复正文输出（不得只写进 task_evaluate summary——
-    # 首次开演 0bf057da402f 的可观测病灶：可见消息只剩待办清单）
-    assert "回复正文" in args["goal_description"]
+    # possess 零派发（executor 捕获面无调用）
+    assert executor.last is None
+    assert out["card_id"] == "card_luna" and out["play_mode"] == "possess"
+    presenter = out["presenter"]
+    assert presenter["card_id"] == "card_luna"
+    assert presenter["name"] == "塞拉菲娜·月语" and presenter["avatar"] == "🌙"
+    # theme 档随 possess 下发（附身态对话框随卡主题注入宿主）
+    assert presenter["theme"]["id"] == "mode_roleplay_card_luna"
 
 
-def test_roleplay_play_greeting_fallback_out_of_range():
-    """greeting_index 越界/缺省 → 回落 first_mes（不虚构不报错），锚仍专属。"""
+def test_roleplay_regenerate_retired_gone_410():
+    """重新生成已收编进扮演会话的宿主消息操作 → 端点 410 语义化退役。"""
     module = _fresh("mode_roleplay")
-    executor = _RecordingExecutor({"data": {"task_id": "task-play-fb"}})
-    module._set_provider("tool-executor", executor)
-
-    # 越界（card_luna 仅 2 条备选：index 9 不存在）
-    body = {"card_id": "card_luna", "greeting_index": 9}
-    _body_json(
-        _call(module, "/ext/mode_roleplay/data/actions/play", "POST", json.dumps(body))
-    )
-    args = executor.last["args"]
-    assert "以月神之名" in args["goal_description"]  # first_mes 原文
-    assert args["metadata"]["greeting_index"] == 0
-    assert args["session_id"] == "thread-rp-card_luna"
-
-    # 缺省 greeting_index → 同 first_mes 口径；body 带宿主 session_id 仍被忽略
-    executor.last = None
-    body2 = {"card_id": "card_luna", "session_id": "thread-858ab1bd"}
-    _body_json(
-        _call(module, "/ext/mode_roleplay/data/actions/play", "POST", json.dumps(body2))
-    )
-    args2 = executor.last["args"]
-    assert "以月神之名" in args2["goal_description"]
-    assert args2["metadata"]["greeting_index"] == 0
-    assert args2["session_id"] == "thread-rp-card_luna"
-
-
-def test_roleplay_regenerate_success_row_anchor():
-    """重新生成成功 → 目标=行 agent_id，上一条角色回复节选入派发描述。"""
-    module = _fresh("mode_roleplay")
-    executor = _RecordingExecutor({"data": {"task_id": "task-regen"}})
-    module._set_provider("tool-executor", executor)
-    _install_state(
-        module,
-        rows=[
-            {
-                "mode": "roleplay",
-                "pipeline_id": "p-rp1",
-                "thread_id": "th-rp1",
-                "agent_id": "mode_roleplay/card_luna",
-                "task.goal": "开演",
-            }
-        ],
-        messages=[{"role": "assistant", "content_preview": "（微微一笑）欢迎，旅人。"}],
-    )
-    body = {"pipeline_id": "p-rp1", "session_id": "sess-body"}
-    out = _body_json(
-        _call(module, "/ext/mode_roleplay/data/actions/regenerate", "POST", json.dumps(body))
-    )
-    assert out == {"task_id": "task-regen"}
-    args = executor.last["args"]
-    assert args["target_id"] == "mode_roleplay/card_luna"
-    assert args["task_kind"] == "roleplay_regenerate"
-    assert args["metadata"] == {"source_pipeline_id": "p-rp1"}
-    assert args["session_id"] == "th-rp1"  # 行 thread_id 优先于 body 兜底
-    assert "（微微一笑）欢迎，旅人。" in args["goal_description"]
-
-
-def test_roleplay_regenerate_errors_unknown_session_and_no_reply():
-    """重新生成错误分诊：未知会话 400；无 assistant 回复 409。"""
-    module = _fresh("mode_roleplay")
-    _install_state(module, rows=[], messages=[])
-    result = _call(
-        module,
-        "/ext/mode_roleplay/data/actions/regenerate",
-        "POST",
-        json.dumps({"pipeline_id": "p-x"}),
-    )
-    assert _status(result) == 400 and "会话不存在" in _body_json(result)["error"]
-
-    _install_state(
-        module,
-        rows=[{"mode": "roleplay", "pipeline_id": "p-rp1", "thread_id": "th-rp1"}],
-        messages=[{"role": "user", "content_preview": "只有用户输入"}],
-    )
     result = _call(
         module,
         "/ext/mode_roleplay/data/actions/regenerate",
         "POST",
         json.dumps({"pipeline_id": "p-rp1"}),
     )
-    assert _status(result) == 409 and "还没有可重新生成" in _body_json(result)["error"]
+    assert _status(result) == 410
+    assert "收编" in _body_json(result)["error"]
 
 
 # ── writing：chapter_act ─────────────────────────────────────────────────────────
@@ -425,6 +339,10 @@ def test_writing_chapter_act_success_new_session_passthrough(act: str, kind: str
     assert args["parent_agent_level"] == 1
     assert args["session_id"] == "sess-w"
     assert "inherit_mode" not in args and "inherit_from" not in args
+    # 验收自洽（dispatch.md 铁律）：file_check 与 goal 声明同一产物路径
+    crit = args["acceptance_criteria"]["file_check"]["input_params"]["path"]
+    assert crit.startswith(f"chapters/{act}-") and crit.endswith(".md")
+    assert crit in args["goal_description"]
 
 
 def test_writing_chapter_act_workspace_inherit_from_row():
@@ -455,6 +373,9 @@ def test_writing_chapter_act_workspace_inherit_from_row():
     assert args["inherit_from"] == "task-parent"
     assert args["metadata"] == {"source_pipeline_id": "p-w1"}
     assert args["session_id"] == "th-w1"  # 行锚优先于 body 兜底
+    # 继承路径下产物落继承来的作品工作空间，验收路径仍与 goal 同源
+    crit = args["acceptance_criteria"]["file_check"]["input_params"]["path"]
+    assert crit in args["goal_description"]
 
 
 def test_writing_chapter_act_row_without_task_id_no_inherit():

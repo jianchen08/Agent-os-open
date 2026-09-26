@@ -96,6 +96,7 @@ CI (.github/workflows/ci.yml — 测试跑 + 覆盖率门禁 + 追溯校验)
 | (横向) timing 不变量 | `tests/test_isolation_docker_timeout.py`、`tests/test_rate_limiter.py` | timing | T5#3(已修,5 个 timing 标记) | — |
 | (横向) TDD 合规 | (静态检查,无测试文件) | tdd-gate | — | — |
 | FP-GATE 覆盖率棘轮门禁 | `tests/gates/`(基线锁+diff 覆盖率检查器单测) | python-coverage | — | ADR 2026-08-20(基线锁+改动行100%) |
+| FP-GATE-META 元门禁 gate-wiring | `tests/gates/test_gate_wiring.py`(V1–V8 校验函数回归+删值实验六件+活体冒烟) | gate-wiring | — | 执行方案批次M(企业级成熟度整改执行方案_20260924) |
 | (横向) 前端 e2e | `frontend/e2e/specs/*.spec.ts`(14 个) | frontend-e2e(ci-smoke 子集) | T5#2、T5#5、T5#6、T5#7、T5#8、T5#14 | 0% CI |
 | (横向) 兜底反模式零静默(fallback-audit) | `tests/test_context_build_agent_yaml_observability.py`(P3)、`plugins/shared/tools/tests/test_workspace_aware_degrade_warning.py`(P7)、`plugins/shared/pipeline/input/security_check/test_encoded_traversal.py`(P14);其余 P 项就地扩展既有 @feature 测试文件(task_submit/prompt_build/triggers_ext/resource_merge/task_evaluate/task_manage/context_window_guard/workspace/knowledge_inject/tool_schema 漂移) | python-coverage(部分)/none-local | — | 来源 docs/working/兜底反模式全库审查_20260820.md 三节 |
 | (横向) 兜底反模式零静默(fallback-audit, 前端) | FE1/FE2 `configEditorGuard`/`PipelineSettingsPage`/`PluginConfigEditor.typed`、FE3 `WidgetRegistry`、FE4 `toolResultSuccessFallback`、FE5 `ApprovalRouter.declared`、FE6 `pipelineRegistryStore.statesError`、FE8 `FileTreeWidget.errorState`、FE9/FE10、FE11 `GrowthLoop.schemaLoadError`、FE12 `authStore.registerUserInfoFailure`、FE13 `InteractionCard.modes` | frontend-test | — | 来源 docs/working/兜底反模式全库审查_20260820.md 四节,标记引用 FP-0.2.四/五 |

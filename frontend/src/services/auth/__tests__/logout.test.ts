@@ -16,10 +16,10 @@ vi.mock('@/services/websocket/streamingEventService', () => ({
 }))
 
 import { ROUTES } from '@/constants/routes'
-import { performLogout } from '../logout'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { useAuthStore } from '@/stores/authStore'
 import { useSessionStore } from '@/stores/sessionStore'
+import { performLogout } from '../logout'
 
 describe('performLogout 统一登出编排', () => {
   let disconnectSpy: ReturnType<typeof vi.spyOn>

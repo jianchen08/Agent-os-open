@@ -172,6 +172,76 @@ export function kernelResourcePaths(
   };
 }
 
+/** 主账本库文件名（与内核 storage_factory::DB_FILENAME 同名，改动须同刀同步） */
+const DB_FILENAME = "agentos_kernel.db";
+
+/** 读环境变量，空白串视为未设（与内核 env_path 同语义） */
+function envValue(env: NodeJS.ProcessEnv, key: string): string | undefined {
+  const v = env[key]?.trim();
+  return v ? v : undefined;
+}
+
+/**
+ * 装机形态默认库位置（BUG-85）：`AGENTOS_USER_ROOT` 显式生效，否则回落
+ * `<appData>/agentos`——与内核 user_root() 的 dirs 回落（%APPDATA%\agentos）
+ * 同源同值；库文件名与内核 DB_FILENAME 同名。默认落在用户根而非安装目录
+ * （resources\config 的 storage.yaml 相对路径锚定会把库拖进卸载抹除面）。
+ */
+export function resolvePackagedDbPath(
+  env: NodeJS.ProcessEnv,
+  appDataDir: string,
+): string {
+  const userRoot = envValue(env, "AGENTOS_USER_ROOT") ?? path.join(appDataDir, "agentos");
+  return path.join(userRoot, DB_FILENAME);
+}
+
+/**
+ * 装机形态授权名单真值目录（ADR 2026-09-24-read-deny-write-zones 决策5）：
+ * `<userRoot>/config/users`——与插件侧 user_space.user_config_dir() 同源同值。
+ * 真值必须在用户空间（可写、应用升级不丢），包内 `resources\config\users`
+ * 降级为首次播种源。
+ */
+export function resolvePackagedConfigUsersDir(
+  env: NodeJS.ProcessEnv,
+  appDataDir: string,
+): string {
+  const userRoot = envValue(env, "AGENTOS_USER_ROOT") ?? path.join(appDataDir, "agentos");
+  return path.join(userRoot, "config", "users");
+}
+
+/**
+ * 播种授权名单（幂等，非破坏性）：把包内 `configRoot/users` 子树复制到用户
+ * 空间真值目录——仅补缺失文件，绝不覆盖/删除既有内容（用户空间是活跃真值，
+ * 用户批准的永久授权都在这里）。包内无 users 子树（异常包）时不动作。
+ * fsMod 注入便于测试（与 probeKernelHealth 的 fetch 注入同款）。
+ */
+export function seedZonePolicyFiles(
+  fsMod: Pick<
+    typeof fs,
+    "existsSync" | "mkdirSync" | "readdirSync" | "statSync" | "copyFileSync"
+  >,
+  configRoot: string,
+  targetUsersDir: string,
+): void {
+  const sourceUsersDir = path.join(configRoot, "users");
+  if (!fsMod.existsSync(sourceUsersDir)) {
+    return;
+  }
+  const walk = (src: string, dst: string): void => {
+    fsMod.mkdirSync(dst, { recursive: true });
+    for (const entry of fsMod.readdirSync(src, { withFileTypes: true })) {
+      const s = path.join(src, entry.name);
+      const d = path.join(dst, entry.name);
+      if (entry.isDirectory()) {
+        walk(s, d);
+      } else if (!fsMod.existsSync(d)) {
+        fsMod.copyFileSync(s, d);
+      }
+    }
+  };
+  walk(sourceUsersDir, targetUsersDir);
+}
+
 /**
  * 构造内核子进程环境。
  *
@@ -181,6 +251,12 @@ export function kernelResourcePaths(
  * - AGENTOS_KERNEL_PORT：钉为 resolveKernelPort 解析值——内核监听端口与健康
  *   探测（KERNEL_HEALTH_URL）恒一致，ambient 值不致造成两者分叉；
  * - AGENTOS_PLUGINS_DIR / AGENTOS_CONFIG_ROOT：指向包内资源；
+ * - AGENTOS_DB_PATH：BUG-85 库位置改用户根——仅当 ambient 未设时注入
+ *   resolvePackagedDbPath 解析值（显式覆盖能力归用户，空白串视为未设）；
+ *   不注入时包内 storage.yaml 的相对路径会把库锚进安装目录，静默卸载即删库；
+ * - AGENTOS_CONFIG_USERS_DIR：授权名单真值钉用户空间（ADR 2026-09-24 决策5，
+ *   恒为 `<userRoot>/config/users`）——包内 resources 名单经 seedZonePolicyFiles
+ *   首次播种，授权卡永久项写用户空间，升级不丢；ambient 显式设置优先；
  * - AGENTOS_PLUGIN_SOURCE_PRIORITY=builtin：双源同 id 裁决置内置优先——装机版
  *   用户空间的共享插件副本是旧安装/旧迁移遗留（陈旧/扁平布局/.venv 缺失），
  *   不得压过包内版本匹配的新版（BUG-55，ADR
@@ -197,6 +273,8 @@ export function buildKernelEnv(
   base: NodeJS.ProcessEnv,
   paths: KernelResourcePaths,
   tokenSecret?: string,
+  dbPath?: string,
+  configUsersDir?: string,
 ): NodeJS.ProcessEnv {
   return {
     ...base,
@@ -210,6 +288,12 @@ export function buildKernelEnv(
     // token 签名密钥持久化（每安装身份一份）：不注入时内核每进程随机签名，
     // 重启后全部 token 失效=每次打开应用都要重新登录
     ...(tokenSecret ? { AGENTOS_TOKEN_SECRET: tokenSecret } : {}),
+    // 库位置钉用户根（BUG-85）：ambient 显式设置优先（覆盖能力保留）
+    ...(dbPath && !envValue(base, "AGENTOS_DB_PATH") ? { AGENTOS_DB_PATH: dbPath } : {}),
+    // 授权名单真值钉用户空间（ADR 2026-09-24 决策5）：ambient 显式设置优先
+    ...(configUsersDir && !envValue(base, "AGENTOS_CONFIG_USERS_DIR")
+      ? { AGENTOS_CONFIG_USERS_DIR: configUsersDir }
+      : {}),
   };
 }
 
@@ -282,12 +366,22 @@ let restartTimer: NodeJS.Timeout | null = null;
 let restarting = false;
 /** 当前安装身份的 token 签名密钥（ensure 时解析一次，重启复用同一份） */
 let tokenSecret: string | null = null;
+/** 当前安装身份的库位置（ensure 时解析一次，重启复用同一份；BUG-85） */
+let packagedDbPath: string | null = null;
+/** 当前安装身份的授权名单真值目录（ensure 时解析并播种一次；ADR 2026-09-24 决策5） */
+let packagedConfigUsersDir: string | null = null;
 
 /** spawn 包内内核（ensure 与自动重启共用的副作用层） */
 function spawnKernelProcess(paths: KernelResourcePaths): ChildProcess {
   return spawn(paths.kernelExe, [], {
     cwd: paths.kernelDir,
-    env: buildKernelEnv(process.env, paths, tokenSecret ?? undefined),
+    env: buildKernelEnv(
+      process.env,
+      paths,
+      tokenSecret ?? undefined,
+      packagedDbPath ?? undefined,
+      packagedConfigUsersDir ?? undefined,
+    ),
     stdio: "ignore",
     windowsHide: true,
   });
@@ -296,6 +390,7 @@ function spawnKernelProcess(paths: KernelResourcePaths): ChildProcess {
 /** 等待内核健康就绪；进程退出或 spawn 错误提前失败（绝不在引导期错杀内核） */
 async function awaitKernelReady(
   child: ChildProcess,
+  probe: () => Promise<boolean>,
 ): Promise<{ ready: boolean; spawnError: Error | null; exited: boolean; exitCode: number | null }> {
   let spawnError: Error | null = null;
   const spawnFailed = new Promise<null>((resolve) => {
@@ -314,7 +409,7 @@ async function awaitKernelReady(
     });
   });
   const ready = await Promise.race([
-    waitForKernelHealth(() => probeKernelHealth(fetch), {
+    waitForKernelHealth(probe, {
       intervalMs: KERNEL_HEALTH_INTERVAL_MS,
       timeoutMs: KERNEL_HEALTH_TIMEOUT_MS,
     }),
@@ -387,7 +482,7 @@ async function restartManagedKernel(paths: KernelResourcePaths): Promise<void> {
   try {
     const child = spawnKernelProcess(paths);
     managed = child;
-    const { ready, spawnError } = await awaitKernelReady(child);
+    const { ready, spawnError } = await awaitKernelReady(child, () => probeKernelHealth(fetch));
     if (!ready) {
       killKernelTree(child.pid);
       managed = null;
@@ -439,12 +534,28 @@ export async function ensurePackagedKernelRunning(opts: {
   probe?: () => Promise<boolean>;
   /** userData 目录：解析持久化 token 签名密钥（自动登录跨重启） */
   userDataDir?: string;
+  /** OS 应用数据目录（app.getPath("appData")）：解析装机默认库位置（BUG-85 用户根） */
+  appDataDir?: string;
 }): Promise<{ mode: "spawned"; pid?: number }> {
   const paths = kernelResourcePaths(opts.resourcesPath);
   if (!fs.existsSync(paths.kernelExe)) {
     throw new KernelMissingError(paths.kernelExe);
   }
   tokenSecret = opts.userDataDir ? resolveTokenSecret(opts.userDataDir) : null;
+  packagedDbPath = opts.appDataDir
+    ? resolvePackagedDbPath(process.env, opts.appDataDir)
+    : null;
+  packagedConfigUsersDir = opts.appDataDir
+    ? resolvePackagedConfigUsersDir(process.env, opts.appDataDir)
+    : null;
+  if (packagedConfigUsersDir) {
+    try {
+      seedZonePolicyFiles(fs, paths.configRoot, packagedConfigUsersDir);
+    } catch (err) {
+      // 播种失败不阻断启动：名单读取侧对缺失文件按空名单处理（安全侧）
+      console.warn("[kernel-manager] 授权名单播种失败（按空白名单降级）:", err);
+    }
+  }
 
   const probe = opts.probe ?? (() => probeKernelHealth(fetch));
   if (await probe()) {
@@ -454,7 +565,7 @@ export async function ensurePackagedKernelRunning(opts: {
   const child = spawnKernelProcess(paths);
   managed = child;
 
-  const { ready, spawnError, exited, exitCode } = await awaitKernelReady(child);
+  const { ready, spawnError, exited, exitCode } = await awaitKernelReady(child, probe);
   if (!ready) {
     shutdownManagedKernel();
     throw spawnError ?? (exited

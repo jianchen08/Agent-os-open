@@ -51,8 +51,7 @@ pub fn validate_schema_version(data: &Value, source: &str) -> Result<(), ConfigE
         other => Err(ConfigError::YamlParse {
             path: source.to_string(),
             message: format!(
-                "不支持的 config schema_version: {:?}（支持 {:?}）——配置由更新版本内核写出，禁止猜测语义",
-                other, SUPPORTED_CONFIG_SCHEMA_VERSIONS
+                "不支持的 config schema_version: {other:?}（支持 {SUPPORTED_CONFIG_SCHEMA_VERSIONS:?}）——配置由更新版本内核写出，禁止猜测语义"
             ),
         }),
     }
@@ -294,7 +293,7 @@ impl ConfigLoader {
         let parsed: Value =
             serde_yaml::from_value(expanded).map_err(|e| ConfigError::YamlParse {
                 path: source_path.to_string(),
-                message: format!("YAML to JSON conversion error: {}", e),
+                message: format!("YAML to JSON conversion error: {e}"),
             })?;
         validate_schema_version(&parsed, source_path)?;
 
@@ -443,7 +442,7 @@ impl CompositePluginYaml {
     /// 从 YAML 字符串解析组合插件配置。
     pub fn from_yaml_str(yaml: &str) -> Result<Self, ConfigError> {
         let config: Self = serde_yaml::from_str(yaml).map_err(|e| ConfigError::Composite {
-            message: format!("YAML parse error: {}", e),
+            message: format!("YAML parse error: {e}"),
         })?;
 
         if config.plugin_type != "composite" {

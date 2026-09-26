@@ -30,7 +30,8 @@ pub use enablement::{PluginEnablement, PluginProfile, ProfileEntry};
 pub use error::LoaderError;
 pub use loader::{
     load_allowlist_file, AllowlistConfig, AllowlistEntry, AllowlistMode, DualSourcePolicy,
-    PluginLoaderImpl, PLUGIN_SOURCE_PRIORITY_ENV,
+    PluginLoaderImpl, CAP_HOST_CSS, CAP_HOST_JS, DANGEROUS_FRONTEND_CAPS,
+    PLUGIN_SOURCE_PRIORITY_ENV,
 };
 pub use mode_registry::{
     register_mode_package_guarded, scan_mode_package_resources, ModeAgentEntry,

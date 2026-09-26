@@ -11,19 +11,19 @@
  * → FiveSpaceLayout renderTabContent → widgetRegistry.get('webview') → WebviewWidget。
  * 仅 HTTP 外部依赖打桩（apiClient），渲染链全真。
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type * as costControlMod from '@/services/api/costControl'
-import { openWorkspacePanel, openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
+import { initializeWidgets } from '@/services/schema/registerWidgets'
+import { openWorkspacePanel, openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useUIStore } from '@/stores/uiStore'
 import { FiveSpaceLayout } from '../FiveSpaceLayout'
 import { ResizeObserverStub, setViewportWidth } from './helpers/fiveSpaceTestUtils'
-import { initializeWidgets } from '@/services/schema/registerWidgets'
+import type * as costControlMod from '@/services/api/costControl'
+import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 
 // CodeEditor 依赖链在 vitest 不解析（同既有布局测试手法），布局测试不关心编辑器本体
 vi.mock('@/components/workspace/CodeEditor', () => ({

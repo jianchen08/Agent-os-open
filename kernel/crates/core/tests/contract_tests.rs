@@ -139,6 +139,7 @@ fn make_test_manifest(
         http_endpoints: vec![],
         ui_schema: None,
         contributes: None,
+        restricted_capabilities: Vec::new(),
         enabled: None,
         activation: None,
         provides: None,
@@ -288,7 +289,7 @@ fn make_test_content_loader() -> ContentLoader {
 #[test]
 fn test_content_loader_debug_clone() {
     let loader = make_test_content_loader();
-    let _debug_str = format!("{:?}", loader);
+    let _debug_str = format!("{loader:?}");
     let _cloned = loader.clone();
 }
 
@@ -367,6 +368,7 @@ fn test_message_record_serialization() {
         error: None,
         tool_result_json: None,
         metadata: None,
+        agent_id: None,
     };
     let json_str = serde_json::to_string(&record).unwrap();
     assert!(json_str.contains("msg_001"));

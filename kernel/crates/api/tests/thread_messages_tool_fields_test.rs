@@ -91,6 +91,7 @@ async fn app_with_deps() -> (
         http_endpoints: vec![],
         ui_schema: None,
         contributes: None,
+        restricted_capabilities: Vec::new(),
         enabled: None,
         activation: None,
         persistent_fields: vec![],
@@ -372,5 +373,56 @@ async fn user_message_metadata_client_message_id_echoed() {
     assert!(
         plain.get("metadata").is_none(),
         "无 metadata 的消息不得回显空对象"
+    );
+}
+
+/// 执行身份戳记契约：assistant blob 携带 `agent_id`（llm_core 按管道 state
+/// `agent.id` 戳记）时，GET messages 必须以 camelCase `agentId` 原样透传——
+/// 前端气泡卡名/卡头像的数据源（扮演场景），刷新后与流式 new_message 冷热同构。
+/// 无戳记消息（user/旧数据）不携带该字段（缺省不污染）。
+#[tokio::test]
+async fn assistant_agent_id_stamp_echoed_and_absent_omitted() {
+    let (_tmp, app, store) = app_with_deps().await;
+    store
+        .apply_messages_ops_to_table(
+            PID,
+            "default",
+            &[
+                json!({
+                    "op": "set", "seq": 0,
+                    "msg": { "role": "user", "content": "问我" }
+                }),
+                json!({
+                    "op": "set", "seq": 1,
+                    "msg": {
+                        "role": "assistant",
+                        "content": "扮演回复",
+                        "agent_id": "roleplay_agent"
+                    }
+                }),
+            ],
+        )
+        .unwrap();
+    let token = admin_token(&app).await;
+
+    let body = get_messages_json(&app, &token).await;
+    let messages = body["messages"].as_array().expect("messages 数组");
+
+    let assistant = messages
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("assistant 消息");
+    assert_eq!(
+        assistant["agentId"], "roleplay_agent",
+        "blob 的 agent_id 必须以 agentId 透传"
+    );
+
+    let user_msg = messages
+        .iter()
+        .find(|m| m["role"] == "user")
+        .expect("user 消息");
+    assert!(
+        user_msg.get("agentId").is_none(),
+        "无戳记消息不得携带 agentId 字段"
     );
 }

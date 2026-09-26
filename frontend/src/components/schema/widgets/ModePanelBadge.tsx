@@ -7,8 +7,8 @@
  * （插件禁用/无关会话 §5.3）一律不渲染——零 mode 零渲染。
  */
 
-import { openPluginPage } from '@/services/workspacePanelOpener'
 import { getModePanelIcon, getModePanelLabel, getModePanelTarget } from '@/services/schema/modePanel'
+import { openPluginPage } from '@/services/workspacePanelOpener'
 
 export function ModePanelBadge({ mode }: { mode: string }) {
   const target = getModePanelTarget(mode)

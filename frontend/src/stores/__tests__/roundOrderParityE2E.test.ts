@@ -12,11 +12,11 @@
  *    连续性：一轮辅助消息（text→tool→text）合并为单个气泡，不拆不串。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { resetPipelineStoreState } from './helpers/storeTestMocks'
 import type * as sessionMod from '@/services/api/session'
 import type * as handlersMod from '@/services/websocket/streaming/handlers'
 import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type * as messageOrderMod from '@/utils/messageOrder'
-import { resetPipelineStoreState } from './helpers/storeTestMocks'
 
 vi.mock('@/utils/logger', async () => (await import('./helpers/storeTestMocks')).loggerMockFull())
 

@@ -45,6 +45,17 @@
             "content"
           ],
           "type": "object"
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "success": {
+              "type": "boolean"
+            }
+          }
+        },
+        "render": {
+          "card": "generic"
         }
       },
       {
@@ -53,6 +64,23 @@
         "input_schema": {
           "properties": {},
           "type": "object"
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string"
+            },
+            "connected": {
+              "type": "boolean"
+            },
+            "healthy": {
+              "type": "boolean"
+            }
+          }
+        },
+        "render": {
+          "card": "generic"
         }
       }
     ],

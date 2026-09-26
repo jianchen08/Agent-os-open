@@ -21,16 +21,6 @@ if str(PLUGIN_DIR) not in sys.path:
 
 import translator as tr  # noqa: E402
 from translator import (  # noqa: E402
-    classify_dsh_plugin,
-    describe_available_skins,
-    discover_dsh_plugins,
-    dsh_params_to_json_schema,
-    list_available_skins,
-    resolve_skin_background,
-    skin_base_of,
-    to_lingxi_tool_entry,
-    translate_hooks_config,
-    translate_package,
     _brand_text_seed,
     _build_shadcn_bridge,
     _extract_bubble_tokens,
@@ -45,6 +35,16 @@ from translator import (  # noqa: E402
     _resolve_sidebar_fill,
     _wcag_luminance,
     _wcag_ratio,
+    classify_dsh_plugin,
+    describe_available_skins,
+    discover_dsh_plugins,
+    dsh_params_to_json_schema,
+    list_available_skins,
+    resolve_skin_background,
+    skin_base_of,
+    to_lingxi_tool_entry,
+    translate_hooks_config,
+    translate_package,
 )
 
 

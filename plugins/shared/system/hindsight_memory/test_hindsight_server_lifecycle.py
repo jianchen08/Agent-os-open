@@ -788,7 +788,7 @@ class _FakeResponse:
 
     status = 200
 
-    def __enter__(self) -> "_FakeResponse":
+    def __enter__(self) -> _FakeResponse:
         return self
 
     def __exit__(self, *args: Any) -> None:

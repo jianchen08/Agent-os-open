@@ -17,12 +17,12 @@
 
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { ChatInput } from '../ChatInput'
-import type { SendMessageParams } from '../types'
-import { useChatInputStore } from '@/stores/chatInputStore'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
+import { useChatInputStore } from '@/stores/chatInputStore'
 import { renderWithProviders } from '@/test/renderWithProviders'
+import { ChatInput } from '../ChatInput'
+import type { SendMessageParams } from '../types'
 
 const mocks = vi.hoisted(() => ({
   fetchPipelineStates: vi.fn(),
@@ -113,7 +113,7 @@ function seedTaskModeDeclarations(): void {
               type: 'select-option',
               space: 'chat-input',
               order: 10,
-              props: { target: 'task_mode', value: 'research', label: '调研', icon: '🔎' },
+              props: { target: 'task_mode', value: 'research', label: '研究', icon: '🔎' },
             },
           ],
         },
@@ -176,13 +176,13 @@ describe('ChatInput — 任务模式选择器（声明式，底部工具栏）',
     expect((onSendMessage.mock.calls[0][0] as SendMessageParams).mode).toBe('writing')
   })
 
-  it('菜单选「调研」→ store 更新，发送 mode=research（select-option 追加选项可选中）', async () => {
+  it('菜单选「研究」→ store 更新，发送 mode=research（select-option 追加选项可选中）', async () => {
     const onSendMessage = vi.fn(() => true)
     setupInput(onSendMessage)
 
     openDropdown(screen.getByTestId('compact-select-trigger'))
-    fireEvent.click(screen.getByRole('menuitem', { name: /调研/ }))
-    expect(screen.getByTestId('compact-select-trigger')).toHaveTextContent('调研')
+    fireEvent.click(screen.getByRole('menuitem', { name: /研究/ }))
+    expect(screen.getByTestId('compact-select-trigger')).toHaveTextContent('研究')
 
     fireEvent.click(screen.getByTestId('chat-send-button'))
     await waitFor(() => expect(onSendMessage).toHaveBeenCalledTimes(1))

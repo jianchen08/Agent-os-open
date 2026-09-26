@@ -223,7 +223,7 @@ class PromptBuildPlugin(IInputPlugin):
                 self._build_dynamic_vars(ctx),
                 timeout=DYNAMIC_VARS_BUILD_TIMEOUT_S,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # fail-visible：动态变量丢失以标记消息呈现，不静默置空。
             logger.error(
                 "[%s] build_dynamic_vars 超时(%.0fs)！注入上下文降级标记继续",
@@ -259,6 +259,20 @@ class PromptBuildPlugin(IInputPlugin):
             len(system_content),
             bool(dynamic_vars_msg),
         )
+
+        # 字符账本（管道 when 门的数据源）：本步在 context_window_guard 之前
+        # 每轮执行，此处按当前序列重算全量消息字符数，guard 的
+        # (last_input_tokens + (messages_chars - messages_chars_at_llm)*2)
+        # / model_context_window 增量估算才有正确基线（llm_core 在调用时刻
+        # 写 at_llm 锚；本键每轮重算，截断/编辑后自愈）。
+        messages = ctx.state.get("messages")
+        if isinstance(messages, list):
+            total = 0
+            for m in messages:
+                content = m.get("content") if isinstance(m, dict) else None
+                if isinstance(content, str):
+                    total += len(content)
+            updates["track.messages_chars"] = total
 
         return updates
 
@@ -704,7 +718,7 @@ class PromptBuildPlugin(IInputPlugin):
                         self._resolve_placeholder(ctx, match),
                         timeout=30.0,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.error(
                         "[%s] resolve_placeholder 超时(30s)！占位符解析卡死，"
                         "跳过此占位符避免永久挂起 | depth=%d idx=%d/%d | placeholder=%s",

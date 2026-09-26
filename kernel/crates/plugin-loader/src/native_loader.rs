@@ -181,7 +181,7 @@ impl NativePluginLoader {
                 .get(plugin_id)
                 .map(Arc::clone)
                 .ok_or_else(|| PluginError {
-                    message: format!("native plugin not loaded: {}", plugin_id),
+                    message: format!("native plugin not loaded: {plugin_id}"),
                     code: Some("NATIVE_NOT_LOADED".to_string()),
                     source: Some("native-loader".to_string()),
                 })?
@@ -203,7 +203,7 @@ impl NativePluginLoader {
             plugin.instance.execute(&ectx).map(str::to_string)
         }))
         .map_err(|_| PluginError {
-            message: format!("native plugin '{}' panicked during execute", plugin_id),
+            message: format!("native plugin '{plugin_id}' panicked during execute"),
             code: Some("NATIVE_PLUGIN_PANICKED".to_string()),
             source: Some("native-loader".to_string()),
         });
@@ -234,7 +234,7 @@ impl NativePluginLoader {
                 Ok(())
             }
             None => Err(PluginError {
-                message: format!("native plugin not loaded (cannot unload): {}", plugin_id),
+                message: format!("native plugin not loaded (cannot unload): {plugin_id}"),
                 code: Some("NATIVE_NOT_LOADED".to_string()),
                 source: Some("native-loader".to_string()),
             }),
@@ -281,11 +281,11 @@ impl NativePluginLoader {
             return artifact.to_string();
         }
         if cfg!(windows) {
-            format!("{}.dll", artifact)
+            format!("{artifact}.dll")
         } else if cfg!(target_os = "macos") {
-            format!("lib{}.dylib", artifact)
+            format!("lib{artifact}.dylib")
         } else {
-            format!("lib{}.so", artifact)
+            format!("lib{artifact}.so")
         }
     }
 }

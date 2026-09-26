@@ -1,20 +1,12 @@
 /** Five Space Layout Component Implements the five-rendering-space layout: */
 
 import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react'
-import { FolderOpen, Menu, Minimize2, PanelRightIcon } from '@/assets/icons'
+import { BookOpen, FolderOpen, Menu, Minimize2, PanelRightIcon } from '@/assets/icons'
 import { HtmlPreviewWidget } from '@/components/schema/widgets/HtmlPreviewWidget'
 import { getEditorForFile } from '@/config/fileEditors'
 // 按需引入 antd Splitter 子模块，避免加载 antd 全量入口（26+ 组件 → 全部 icons →
 // 触发 847 项 @ant-design/icons-svg/lib/asn/* 全量预构建，首屏 JS 与启动预构建时间双高）
 import { cn } from '@/lib/utils'
-import {
-  BAND_BUTTON_ACTIVE_CLASS,
-  BAND_BUTTON_ICON_CLASS,
-  BAND_BUTTON_IDLE_CLASS,
-  BAND_EDGE_PADDING_CLASS,
-  BAND_GAP_CLASS,
-  BAND_ICON_BUTTON_CLASS,
-} from './bandButton'
 import apiClient from '@/services/api/client'
 import { WORKSPACE_SERVICE_ENDPOINTS as W } from '@/services/api/endpoints.generated'
 import { safeLoadLayout } from '@/services/layout/resolver'
@@ -28,6 +20,14 @@ import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
 import { taskStatusToAgentTabStatus } from '@/types/taskStatus'
 import { AlertBanner, useLayoutAlerts, type AlertBannerItem } from './AlertBanner'
+import {
+  BAND_BUTTON_ACTIVE_CLASS,
+  BAND_BUTTON_ICON_CLASS,
+  BAND_BUTTON_IDLE_CLASS,
+  BAND_EDGE_PADDING_CLASS,
+  BAND_GAP_CLASS,
+  BAND_ICON_BUTTON_CLASS,
+} from './bandButton'
 import { FloatingWindowManager, renderFloatingWindowContent } from './FloatingWindowManager'
 import { FullscreenOverlay } from './FullscreenOverlay'
 import { isDesktopMainWindow } from './TitleBar'
@@ -635,20 +635,28 @@ export function FiveSpaceLayout({
             {/* 顶带三区（宽度跟随下方三列：面板开合/拖宽自动同步）——
                 侧栏区=[侧栏开关]；聊天区=[对话标签行 portal]；
                 工作区区=[工作区标签行 portal][工作区开关][控制簇槽位]。
+                三区切分与内容三列严格同域：切分层不吃留白，两端留白内化为
+                侧栏区/工作区区的内部内边距（区外缘仍与列边界对齐）——留白
+                若留在切分层，工作区标签行会整体偏出工作区列范围。
                 区内非按钮处皆为拖拽面；按钮 app-no-drag + 主题圆角（rounded-md
                 = var(--radius-md)，主题变换圆角/直角自动跟随）。 */}
             <div
               className={cn(
                 'app-drag-region relative flex h-10 shrink-0 items-center',
                 BAND_GAP_CLASS,
-                BAND_EDGE_PADDING_CLASS,
               )}
               data-testid="chat-top-band"
               ref={(el) => {
                 if (el) window.dispatchEvent(new Event('chat-top-band-mounted'))
               }}
             >
-              <div className="app-drag-region flex h-full shrink-0 items-center" style={{ width: sidebarContent && !sidebarCollapsed && !workspaceFullscreen ? panelWidth('sidebar', 248, 200, 360) : 44 }}>
+              <div
+                className={cn(
+                  'app-drag-region flex h-full shrink-0 items-center',
+                  BAND_EDGE_PADDING_CLASS,
+                )}
+                style={{ width: sidebarContent && !sidebarCollapsed && !workspaceFullscreen ? panelWidth('sidebar', 248, 200, 360) : 44 }}
+              >
                 <button
                   type="button"
                   onClick={() => useUIStore.getState().setSidebarCollapsed(!sidebarCollapsed)}
@@ -676,6 +684,7 @@ export function FiveSpaceLayout({
                 className={cn(
                   'app-drag-region flex h-full min-w-0 items-center',
                   BAND_GAP_CLASS,
+                  BAND_EDGE_PADDING_CLASS,
                   workspaceFullscreen && 'flex-1',
                 )}
                 style={workspaceFullscreen ? undefined : { width: workspaceCollapsed ? 176 : panelWidth('workspace', workspaceDefaultWidth, 360, workspaceMaxWidth) }}
@@ -687,6 +696,17 @@ export function FiveSpaceLayout({
                     BAND_GAP_CLASS,
                   )}
                 />
+                <button
+                  type="button"
+                  onClick={() => openWorkspacePanelByPath('/p/get_started')}
+                  className={BAND_BUTTON_IDLE_CLASS}
+                  title="使用引导"
+                  aria-label="使用引导"
+                  data-testid="onboarding-help-button"
+                >
+                  <BookOpen className="h-4 w-4" />
+
+                </button>
                 <button
                   type="button"
                   onClick={() => setWorkspaceCollapsed(!workspaceCollapsed)}

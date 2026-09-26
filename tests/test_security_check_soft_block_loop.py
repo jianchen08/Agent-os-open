@@ -304,11 +304,25 @@ class TestBaseScanHardFloor:
     )
     @pytest.mark.asyncio
     async def test_nul_redirect_miss_passes(self, command: str):
-        """/dev/null 重定向与 null* 标识符不误伤 → 正常放行。"""
+        """/dev/null 重定向与 null* 标识符不误伤 → 正常放行。
+
+        D7（2026-09-24 用户裁定）后降级态=全部危险工具保守审批，无参数级豁免；
+        「不误伤」语义必须在规则可用时验收：显式给一条不含 nul 模式的规则，
+        验证基线扫描（非降级）对 null 系命令零误伤。
+        """
         add_plugin_dir("input", "security_check")
         from plugin import SecurityCheckPlugin
 
-        plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
+        plugin = SecurityCheckPlugin(config={
+            "enabled": True,
+            "rules": [{
+                "name": "dangerous_commands",
+                "tools": ["*"],
+                "params": ["command"],
+                "action": "needs_approval",
+                "patterns": [{"type": "keyword", "value": "rm -rf"}],
+            }],
+        })
         result = await plugin.execute(_ctx_with_args("bash_execute", {"command": command}))
         decision = result.state_updates["security.decision"]
         assert decision["allowed"] is True

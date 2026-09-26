@@ -207,8 +207,7 @@ impl KernelCapabilityRouter {
                         );
                         return Err(McpError::Protocol {
                             message: format!(
-                                "capability '{}' not granted to plugin '{}' (granted_capabilities)",
-                                capability, pid
+                                "capability '{capability}' not granted to plugin '{pid}' (granted_capabilities)"
                             ),
                         });
                     }
@@ -224,8 +223,7 @@ impl KernelCapabilityRouter {
                     );
                     return Err(McpError::Protocol {
                         message: format!(
-                            "capability '{}' not granted to plugin '{}': no granted_capabilities declared (AGENTOS_GRANTS_STRICT=1)",
-                            capability, pid
+                            "capability '{capability}' not granted to plugin '{pid}': no granted_capabilities declared (AGENTOS_GRANTS_STRICT=1)"
                         ),
                     });
                 }
@@ -1814,7 +1812,7 @@ impl KernelCapabilityRouter {
                 message: "registry.register_tool 未装配动态注册器（G3 未启用）".to_string(),
             })?;
         registrar(&plugin_id, descriptor).map_err(|reason| McpError::Protocol {
-            message: format!("registry.register_tool 拒绝: {}", reason),
+            message: format!("registry.register_tool 拒绝: {reason}"),
         })?;
         // 注册成功即 schema.tools 变化——best-effort 经 session 广播 widget_event
         // {schema, changed}（前端 resync.ts 消费，与 resync_required 同一重载链）。

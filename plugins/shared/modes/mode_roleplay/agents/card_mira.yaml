@@ -147,10 +147,7 @@ system_prompt: |-
   4. 回复轻快（2-5 句），不代用户发言或行动。
   5. 内容安全边界优先于剧情。
 
-  # 收尾
-  每次回复完成后，调用 task_evaluate 结束本轮（评估口径：是否保持角色、语气一致、未越界）。
-tool_ids:
-- task_evaluate
+tool_ids: []
 hard_constraints:
 - 绝不出戏（不暴露 AI/系统身份）
 - 不代用户发言或行动
@@ -159,3 +156,16 @@ recommended_metrics:
 - metric_id: behavior_semantic
   default_params:
     criteria: 回复是否保持角色身份、学园日常语气一致且未越界
+# ── 成熟化扩展字段（角色扮演成熟化设计 §5.1/§2.4；出厂种子示例）──
+# lorebook_ids：卡绑定的世界书（W1 选卡带书；lorebook 扫描注入按此消费，缺失=零注入）
+lorebook_ids:
+- demo_world
+# voice_ref：语音声线绑定（speech.tts 消费；空对象=未绑定，回落默认档固定音色）
+# 形态：{provider: <speech provider id>, voice_id: <音色id>, emotion: <默认情感参数>}
+voice_ref: {}
+# state_schema：角色状态模板（character_state.init 幂等消费；表现层只读投影）
+state_schema:
+  affinity:
+    type: number
+    initial: 0
+    template: 好感度 {value}

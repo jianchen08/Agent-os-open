@@ -26,7 +26,7 @@ const PLUGIN_VERSION := "0.2.0"
 const MAX_HEADER_BYTES := 16 * 1024  # 单个请求头部最多读取 16KB，防止异常连接占用内存
 
 # AgentOS 插件推送端点（内核默认端口 9100；可在 Project Settings agentos/push_endpoint 覆盖）
-const DEFAULT_PUSH_ENDPOINT := "http://127.0.0.1:9100/ext/pipeline_godot_context/selection"
+const DEFAULT_PUSH_ENDPOINT := "http://127.0.0.1:9100/ext/pipeline_host_context/selection"
 const PUSH_DEBOUNCE_SEC := 0.3
 const HEARTBEAT_INTERVAL_SEC := 5.0
 

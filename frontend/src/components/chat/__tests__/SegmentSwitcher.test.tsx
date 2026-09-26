@@ -11,9 +11,9 @@
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { MessageActions } from '../MessageActions'
-import { anchorBaseSeqOf, collectSegmentSwitcherAnchors } from '@/utils/segmentAnchor'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
+import { anchorBaseSeqOf, collectSegmentSwitcherAnchors } from '@/utils/segmentAnchor'
+import { MessageActions } from '../MessageActions'
 import type { SegmentDetail, SegmentMeta } from '@/services/api/messageSegments'
 import type { Message } from '@/types/models'
 

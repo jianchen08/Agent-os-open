@@ -15,7 +15,6 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Loader2, ClipboardList, FolderTree, Trash2 } from '@/assets/icons'
 import { Button } from '@/components/ui/button'
-import { pipelineStatusToTabStatus, TERMINAL_PIPELINE_STATUSES } from './pipelineStatusVisuals'
 import {
   Dialog,
   DialogContent,
@@ -32,23 +31,26 @@ import { useSessionsQuery, readSessions, ensureSessionsLoaded } from '@/hooks/qu
 import { useAsyncResource } from '@/hooks/useAsyncResource'
 import { useElementVisible } from '@/hooks/useElementVisible'
 import { useVisibleRefetch } from '@/hooks/useVisibleRefetch'
-import { queryKeys } from '@/services/query/queryKeys'
 import apiClient from '@/services/api/client'
 import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { mapStateInfoToViewModel, type PipelineStateEntryViewModel } from '@/services/api/pipelines'
 import { deleteProject, pauseTask, resumeTask, cancelTask } from '@/services/api/tasks'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
+import { queryKeys } from '@/services/query/queryKeys'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
-import { openWorkspaceTreeTab } from './workspaceTreeTab'
-import {
-  PipelineTable,
-  PipelineTree,
-  type PipelineTreeNode,
-} from './PipelineManagerTreeParts'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { taskStatusToPipelineStatus } from '@/types/taskStatus'
+import {
+  ensureAnchorNode,
+  PipelineTable,
+  PipelineTree,
+  resolveThreadTop,
+  type PipelineTreeNode,
+} from './PipelineManagerTreeParts'
+import { pipelineStatusToTabStatus, TERMINAL_PIPELINE_STATUSES } from './pipelineStatusVisuals'
+import { openWorkspaceTreeTab } from './workspaceTreeTab'
 import type { PipelineViewEntry } from '@/types/pipeline'
 
 // ═════════════════════════════════════════════════════════════════
@@ -434,9 +436,14 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
   /** 管道树：会话主管道顶层 → 任务条目行（一对一绑定：条目行即任务行，
    *  不再包任务节点层）→ 子任务/子管道直挂该条目行下；
    *  无任务归属的管道直接挂主管道下；孤儿（无会话归属）顶层平铺。
-   *  状态分组按顶层节点状态划分，子树跟随父级不拆散层级。 */
+   *  锚点取全量条目上的会话主管道真值（不回退最早兄弟条目——兄弟互挂是
+   *  假层级，用户指正 2026-09-24）；窄筛视图下主管道锚点行被滤掉时从全量
+   *  条目合成补渲染（运行管道的主管道归属可见）。顶层分组按子树是否含
+   *  执行中成员划分，子树跟随父级不拆散层级。 */
   const pipelineTree = useMemo(() => {
     const entryByKey = new Map(filteredPipelineEntries.map((e) => [e.key, e]))
+    // 全量条目索引（含被状态/类型筛选滤掉的条目）：主管道锚点行的合成来源
+    const allEntryByKey = new Map(pipelineEntries.map((e) => [e.key, e]))
     // 任务索引（id → task；全量任务）
     const taskById = new Map(allTasks.map((t) => [String(t.id ?? ''), t]))
     // 任务父子映射：taskId → parentTaskId（任务链父 = parent_task_id）；
@@ -450,23 +457,9 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
       const proj = String(meta?.parent_project_id ?? '')
       if (proj) projectOfTask.set(String(t.id), proj)
     }
-    // 会话主管道：threadId 组内 session.pipelineIds[0]（缺省取最早 started_at）
-    const threadTop = new Map<string, string>()
-    const threadGroups = new Map<string, PipelineViewEntry[]>()
-    for (const e of filteredPipelineEntries) {
-      if (!e.threadId) continue
-      const list = threadGroups.get(e.threadId) ?? []
-      list.push(e)
-      threadGroups.set(e.threadId, list)
-    }
-    for (const [tid, list] of threadGroups) {
-      const session = sessions.find((s) => s.id === tid)
-      const mainPid = session?.pipelineIds?.[0]
-      const main = mainPid ? list.find((e) => e.pipelineId === mainPid) : undefined
-      const top =
-        main ?? [...list].sort((a, b) => a.startedAt.localeCompare(b.startedAt))[0]
-      threadTop.set(tid, top.key)
-    }
+    // 会话主管道锚点（解析契约见 resolveThreadTop）：全量条目上取
+    // session.pipelineIds[0] 真值，不回退兄弟最早条目
+    const threadTop = resolveThreadTop(pipelineEntries, sessions)
     const childrenMap = new Map<string, PipelineTreeNode[]>()
     // 节点注册表（key → 节点；childrenMap 归属合并的目标查找）
     const nodeByKey = new Map<string, PipelineTreeNode>()
@@ -476,6 +469,8 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
       list.push(node)
       childrenMap.set(parentKey, list)
     }
+    // 锚点行合成（契约见 ensureAnchorNode）：登记面按引用打包传入
+    const anchorCtx = { entryByKey, allEntryByKey, nodeByKey, roots, kindFilter }
     // 项目分组节点（登记行合成；无任务挂靠的项目也显示为空分组）
     const projectNodeKeys = new Map<string, string>() // projectId → node key
     for (const p of projects) {
@@ -526,17 +521,18 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
       }
       const node: PipelineTreeNode = { key: e.key, entry: e, depth: 0, children: [] }
       nodeByKey.set(e.key, node)
-      if (parentKey && (entryByKey.has(parentKey) || childrenMap.has(parentKey))) {
-        pushChild(parentKey, node)
+      const resolvedParent = parentKey ? ensureAnchorNode(parentKey, anchorCtx) : undefined
+      if (resolvedParent) {
+        pushChild(resolvedParent, node)
       } else {
         roots.push(node)
       }
     }
     // 3) 任务条目行归属：父任务条目行（parent_task_id=父任务 id）→ 父管道条目
     //    （子任务管道出生即 lineage.parent_pipeline_id = 提交者管道 id）→ 会话
-    //    主管道 → 顶层。自挂守卫（与循环 2 的 threadTop!==key 同款）：父任务/
-    //    线程顶层解析到自身（会话主管道缺席时 threadTop 回退最早任务条目=自身）
-    //    时落根平铺——树与列表同源同量，建树环节不得丢条目
+    //    主管道锚点行（缺席时由 ensureAnchorNode 合成）→ 顶层平铺。自挂守卫：
+    //    锚点解析到自身时落根平铺——树与列表同源同量，建树环节不得丢条目；
+    //    同 parent_task_id 的兄弟之间不互挂（假层级，用户指正 2026-09-24）
     for (const [taskId, node] of taskRowNodes) {
       // 项目挂靠优先：登记命中的任务挂项目分组节点（项目不是管道，不能当 lineage 父）
       const projId = projectOfTask.get(taskId)
@@ -565,8 +561,10 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
       // thread_id 在 TaskModel.metadata 中（API 顶层无此字段）
       const tid = String(t?.thread_id ?? t?.threadId ?? tmeta?.thread_id ?? tmeta?.threadId ?? '')
       const topKey = tid && threadTop.has(tid) ? threadTop.get(tid)! : ''
-      if (topKey && topKey !== node.key && (entryByKey.has(topKey) || childrenMap.has(topKey))) {
-        pushChild(topKey, node)
+      const resolvedTop =
+        topKey && topKey !== node.key ? ensureAnchorNode(topKey, anchorCtx) : undefined
+      if (resolvedTop) {
+        pushChild(resolvedTop, node)
       } else {
         roots.push(node)
       }
@@ -592,7 +590,7 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         children: build(n.children, depth + 1),
       }))
     return build(visibleRoots, 0)
-  }, [filteredPipelineEntries, allTasks, sessions, projects, statusFilter])
+  }, [filteredPipelineEntries, pipelineEntries, allTasks, sessions, projects, statusFilter, kindFilter])
 
   /** 展开/折叠树子级（行首 chevron / 任务节点行点击） */
   const toggleTreeNode = useCallback((key: string) => {

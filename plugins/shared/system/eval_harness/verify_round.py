@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """瘦身后闭环复验：task_submit HTTP 通道（带 acceptance_criteria）→ 轮询终态 → 聚合。
 
 用法（root venv，项目根 cwd）：.venv/Scripts/python.exe reports/verify_round.py
@@ -15,9 +14,8 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 
 os.chdir(ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import yaml  # noqa: E402
-
 import aggregate  # noqa: E402
+import yaml  # noqa: E402
 
 BASE = "http://localhost:9100"
 USER, PASSWORD = "admin", os.environ.get("AGENTOS_ADMIN_PASSWORD", "admin12345")

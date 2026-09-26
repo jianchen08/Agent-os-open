@@ -30,6 +30,7 @@ impl PipelineDispatcher for NoopDispatcher {
         _execution_context: Option<&Value>,
         _state_overlay: Option<&Value>,
         _agent_id: &str,
+        _pipeline_config_id: Option<&str>,
         _cmid: &str,
         _source: PendingInputSource,
     ) -> Result<(), String> {

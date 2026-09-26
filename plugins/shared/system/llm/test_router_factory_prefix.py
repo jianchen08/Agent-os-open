@@ -103,9 +103,8 @@ def test_loader_failure_warns_then_raises(
     """懒加载失败 → warning 留痕，随后仍 fail-closed 抛配置错误。"""
     monkeypatch.setattr(rf, "_provider_type_map", {})
     monkeypatch.setitem(sys.modules, "_config_models", None)  # from ... import → ImportError
-    with caplog.at_level(logging.WARNING):
-        with pytest.raises(ValueError, match="前缀映射缺失"):
-            rf.get_litellm_prefix("apigo")
+    with caplog.at_level(logging.WARNING), pytest.raises(ValueError, match="前缀映射缺失"):
+        rf.get_litellm_prefix("apigo")
     assert any("懒加载" in r.getMessage() for r in caplog.records)
 
 

@@ -14,13 +14,13 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest'
-import type { PipelineStateInfo } from '@/services/api/pipelines'
 import { autoOpenModePanel } from '@/services/modePanelAutoOpen'
 import { queryClient } from '@/services/query/queryClient'
 import { queryKeys } from '@/services/query/queryKeys'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { seedPipelineState } from '@/test/modePanelTestUtils'
+import type { PipelineStateInfo } from '@/services/api/pipelines'
 
 const MODE_PAGE = {
   type: 'pages' as const,

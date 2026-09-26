@@ -1,9 +1,9 @@
 # @feature: FP-0.2.二 内部模块 manifest | @ci: python-coverage
-# -*- coding: utf-8 -*-
-"""调研模式活面板行为测试：报告解析 / URL 抽取 / KB 两态 / 写动作 args 捕获。
+"""研究模式活面板行为测试：报告解析（交付文件直读优先/消息回落）/ URL 抽取 /
+KB 两态 / 写动作 args 捕获。
 
 ADR 2026-09-17-mode-panel-mature-interfaces：research 面板对标 Perplexity/Elicit
-（调研任务 + 报告阅读器[引用角标] + 信源库）。provider 全 fake，不真派发任务；
+（研究任务 + 报告阅读器[引用角标] + 信源库）。provider 全 fake，不真派发任务；
 装载模块名前缀 mode_live_mode_research，与契约文件（test_mode_panel_pages）互不覆写。
 """
 from __future__ import annotations
@@ -139,7 +139,7 @@ def test_report_picks_last_long_assistant_message() -> None:
 
 
 def test_report_honest_empty_without_long_assistant() -> None:
-    """只有短消息 → 空报告载荷（不拿短消息凑数）。"""
+    """只有短消息 → 空报告载荷（不拿短消息凑数）；source=message 如实标注。"""
     module = _load_server()
 
     async def _provider(pipeline_id: str, limit: int | None = None) -> list[dict]:
@@ -147,7 +147,68 @@ def test_report_honest_empty_without_long_assistant() -> None:
 
     module._set_provider("messages", _provider)
     body = _body_json(_call(module, f"{EP}/report", query={"pipeline_id": "pipe-aaa"}))
-    assert body == {"report": "", "word_count": 0, "citations_found": [], "sources": []}
+    assert body == {
+        "report": "", "word_count": 0, "citations_found": [], "sources": [],
+        "source": "message",
+    }
+
+
+def test_report_reads_deliverable_file_first(tmp_path) -> None:
+    """交付文件直读优先：task_manage.get → research_report_path → 工作空间文件。
+
+    source=file + report_path 如实标注；角标/信源解析对文件正文同样生效。
+    """
+    module = _load_server()
+    file_body = _BODY + "文件版信源 https://example.com/report。"
+    (tmp_path / "report.md").write_text(file_body, encoding="utf-8")
+    rows = [
+        {
+            "pipeline_id": "pipe-aaa", "mode": "research",
+            "task.id": "task-r1", "task.ws_meta": {"path": str(tmp_path)},
+        }
+    ]
+    module._set_provider("pipeline-state", lambda: asyncio.sleep(0, result=rows))
+    captured: dict = {}
+
+    async def _fake_invoke(payload: dict) -> dict:
+        captured.update(payload)
+        return {
+            "data": {
+                "task": {
+                    "result_data": json.dumps({"research_report_path": "report.md"}),
+                }
+            }
+        }
+
+    module._set_provider("tool-executor", _fake_invoke)
+    body = _body_json(_call(module, f"{EP}/report", query={"pipeline_id": "pipe-aaa"}))
+    assert captured["tool_name"] == "task_manage" and captured["plugin_id"] == "task_manage_tool"
+    assert captured["args"] == {"action": "get", "task_id": "task-r1"}
+    assert body["source"] == "file" and body["report_path"] == "report.md"
+    assert body["report"] == file_body
+    assert body["sources"] == ["https://example.com/report"]
+
+
+def test_report_falls_back_to_message_without_deliverable() -> None:
+    """交付文件链任一环缺失（result_data 无路径/文件不可读）→ 回落消息启发式。"""
+    module = _load_server()
+    rows = [
+        {
+            "pipeline_id": "pipe-aaa", "mode": "research",
+            "task.id": "task-r1", "task.ws_meta": {"path": "Z:/no/such/dir"},
+        }
+    ]
+    module._set_provider("pipeline-state", lambda: asyncio.sleep(0, result=rows))
+
+    async def _fake_invoke(payload: dict) -> dict:
+        # result_data 无 research_report_path → 直读链断 → 回落
+        return {"data": {"task": {"result_data": "{}"}}}
+
+    module._set_provider("tool-executor", _fake_invoke)
+    _set_messages(module, _BODY)
+    body = _body_json(_call(module, f"{EP}/report", query={"pipeline_id": "pipe-aaa"}))
+    assert body["source"] == "message"
+    assert body["report"] == _BODY
 
 
 def test_report_and_messages_missing_params() -> None:
@@ -181,7 +242,10 @@ def test_no_provider_degrades_to_empty_payloads() -> None:
     module = _load_server()
     assert _body_json(_call(module, f"{EP}/sessions")) == {"sessions": []}
     body = _body_json(_call(module, f"{EP}/report", query={"pipeline_id": "pipe-aaa"}))
-    assert body == {"report": "", "word_count": 0, "citations_found": [], "sources": []}
+    assert body == {
+        "report": "", "word_count": 0, "citations_found": [], "sources": [],
+        "source": "message",
+    }
 
 
 # ── 信源库（/data/sources：URL 抽取 + KB 两态）──────────────────────────────────
@@ -252,7 +316,7 @@ def test_sources_missing_params() -> None:
 # ── 写动作（task_submit 真派发形状；fake 捕获不落任务）──────────────────────────
 
 def test_start_action_dispatches_task_submit() -> None:
-    """发起调研：mode/task_kind/goal 随深度档变化的 args 形状。"""
+    """发起研究：mode/task_kind/goal 随深度档变化的 args 形状。"""
     module = _load_server()
     captured: dict = {}
 
@@ -275,7 +339,7 @@ def test_start_action_dispatches_task_submit() -> None:
     assert args["mode"] == "research" and args["task_kind"] == "research_deep"
     assert "量化方案怎么选" in args["goal_description"]
     assert "多轮检索" in args["goal_description"]  # deep 档要求
-    assert args["goal_title"].startswith("调研·")
+    assert args["goal_title"].startswith("研究·")
     assert len(args["goal_description"]) <= 2000
     assert args["metadata"] == {"depth": "deep"}
 

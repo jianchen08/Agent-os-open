@@ -16,6 +16,7 @@ import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useUIStore } from '@/stores/uiStore'
 import { FiveSpaceLayout } from '../FiveSpaceLayout'
+import { chatContent, renderLayout, ResizeObserverStub, setViewportWidth, sidebarContent } from './helpers/fiveSpaceTestUtils'
 import type * as costControlMod from '@/services/api/costControl'
 import type * as workspacePanelOpenerMod from '@/services/workspacePanelOpener'
 
@@ -40,7 +41,6 @@ vi.mock('@/services/workspacePanelOpener', async (importOriginal) => ({
   openWorkspacePanelByPath: vi.fn(() => true),
 }))
 
-import { chatContent, renderLayout, ResizeObserverStub, setViewportWidth, sidebarContent } from './helpers/fiveSpaceTestUtils'
 
 function resetStores() {
   mockBudget.current = null

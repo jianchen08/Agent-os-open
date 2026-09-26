@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC
 from typing import Any
 
 import kernel_reads  # noqa: F401 —— 本插件内核只读能力桥（provider 由 server._on_load 注入）
@@ -248,7 +249,7 @@ async def list_orphan_runs(min_minutes: int = 10, limit: int = 50) -> dict[str, 
         for row in await kernel_reads.list_state_rows()
         if row.get("pipeline_id")
     }
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     items: list[dict[str, Any]] = []
     for run in runs:
         started = run.get("started_at") or ""

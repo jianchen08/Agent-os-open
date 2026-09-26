@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -38,6 +39,7 @@ if _SHARED_ROOT not in sys.path:
     sys.path.insert(0, _SHARED_ROOT)
 from tenant_data import (  # noqa: E402
     DEFAULT_TENANT,
+    legacy_config_users_base,
     tenant_config_dir,
     tenant_data_root,
 )
@@ -322,25 +324,170 @@ def _norm_path(path: str) -> str:
 # ════════════════════════════════════════════════════════════
 
 
-def load_registration_whitelist(
-    tenant_id: str = DEFAULT_TENANT, base: str | Path | None = None
-) -> list[str]:
-    """项目登记白名单（``config/users/{tenant}/project_whitelist.yaml``）。
+def _load_zone_policy(tenant_id: str, base: str | Path | None) -> dict[str, Any]:
+    """授权名单 YAML 单点解析（``entries``/``read_deny`` 两节共用）。
 
-    前缀授权：条目授权自身及任意层级后代（含登记时新建的目录，授权看路径
-    不要求先存在）。文件缺失/损坏 = 空白名单（范围收缩，安全侧）。写面
-    locked 分级（agent 只读 + 提案制）见 ADR 2026-09-17-plan-mode-project-state-gate。
+    名单文件：``config/users/{tenant}/project_whitelist.yaml``（locked 用户
+    配置，ADR 2026-09-24-read-deny-write-zones 决策4）。真值在用户空间；
+    ``base=None``（默认解析）且用户空间文件缺失时按 legacy base（仓库根
+    ``config/users``，装机布局落包内 resources）回退读——真值迁移期的覆盖层
+    "无覆盖 → 回退全局"形态，写面（授权卡永久落盘）恒写用户空间。显式传
+    ``base``（测试/部署钉桩）不回退：调用方明确指定即所见即所得。
     """
     config_path = tenant_config_dir(tenant_id, base=base) / "project_whitelist.yaml"
+    if not config_path.is_file() and base is None:
+        config_path = legacy_config_users_base() / tenant_id / "project_whitelist.yaml"
     if not config_path.is_file():
-        return []
+        return {}
     try:
         data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
-        logger.error("项目登记白名单解析失败（按空白名单处理）: %s — %s", config_path, exc)
-        return []
-    entries = data.get("entries") or []
+        logger.error("项目授权名单解析失败（按空名单处理）: %s — %s", config_path, exc)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def load_registration_whitelist(
+    tenant_id: str = DEFAULT_TENANT, base: str | Path | None = None
+) -> list[str]:
+    """项目登记白名单＝写区名单（``config/users/{tenant}/project_whitelist.yaml`` entries）。
+
+    前缀授权：条目授权自身及任意层级后代（含登记时新建的目录，授权看路径
+    不要求先存在）。语义自 ADR 2026-09-24-read-deny-write-zones 起为**写区**
+    （读不再依赖名单——读黑名单制全放）；读面排除前缀见
+    :func:`load_read_deny`。文件缺失/损坏 = 空名单（范围收缩，安全侧）。
+    写面 locked 分级（agent 只读 + 提案制）见 ADR 2026-09-17-plan-mode-project-state-gate。
+    """
+    entries = _load_zone_policy(tenant_id, base).get("entries") or []
     return [str(e) for e in entries if str(e or "").strip()]
+
+
+def load_read_deny(
+    tenant_id: str = DEFAULT_TENANT, base: str | Path | None = None
+) -> list[str]:
+    """读排除前缀（同名单文件 ``read_deny`` 节，ADR 2026-09-24-read-deny-write-zones 决策1）。
+
+    黑名单制读面的用户排除区：命中前缀的路径拒绝读取（凭据黑名单与仓库
+    锚拒绝集之外的用户自留口子，企业/高敏场景收紧用）。解析与回退规则同
+    :func:`load_registration_whitelist`；缺节 = 无排除。
+    """
+    entries = _load_zone_policy(tenant_id, base).get("read_deny") or []
+    return [str(e) for e in entries if str(e or "").strip()]
+
+
+def add_write_zone(
+    path: str, tenant_id: str = DEFAULT_TENANT, base: str | Path | None = None
+) -> list[str]:
+    """授权卡永久落盘（ADR 2026-09-24-read-deny-write-zones 决策3②）：追加写区前缀。
+
+    locked 写面的唯一系统通道：仅供位置闸（security_check）在用户批准卡片后
+    调用（agent 工具面无直接写名单通道）。真值恒写用户空间；用户空间文件
+    缺失时先从 legacy base 播种（真值迁移期），再归一化去重追加。
+
+    Returns:
+        落盘后的完整写区条目列表。
+
+    Raises:
+        ValueError: path 为空或归一后为盘符根/UNC 根（不给整盘授权）。
+    """
+    return _mutate_zone_section("entries", path, add=True, tenant_id=tenant_id, base=base)
+
+
+def add_read_deny(
+    path: str, tenant_id: str = DEFAULT_TENANT, base: str | Path | None = None
+) -> list[str]:
+    """追加读排除前缀（同名单文件 ``read_deny`` 节；设置页/授权卡共用通道）。
+
+    播种与归一化语义同 :func:`add_write_zone`；整盘根同样拒绝（整盘 deny
+    会使该盘所有读取失效，按目录粒度配置）。
+
+    Returns:
+        落盘后的完整 read_deny 条目列表。
+    """
+    return _mutate_zone_section("read_deny", path, add=True, tenant_id=tenant_id, base=base)
+
+
+def remove_zone(
+    path: str,
+    section: str = "entries",
+    tenant_id: str = DEFAULT_TENANT,
+    base: str | Path | None = None,
+) -> list[str]:
+    """移除名单条目（设置页管理面；幂等——条目不存在时无变化直接返回）。
+
+    Args:
+        section: ``"entries"``（写区）或 ``"read_deny"``（读排除）。
+
+    Returns:
+        移除后的该节完整条目列表（真值文件缺失 = 空列表，无操作）。
+    """
+    if section not in ("entries", "read_deny"):
+        raise ValueError(f"非法名单节: {section!r}")
+    return _mutate_zone_section(section, path, add=False, tenant_id=tenant_id, base=base)
+
+
+def _mutate_zone_section(
+    section: str,
+    path: str,
+    *,
+    add: bool,
+    tenant_id: str,
+    base: str | Path | None,
+) -> list[str]:
+    """名单节读改写单点（增/删共用；用户空间真值 + legacy 播种）。
+
+    - 归一化：去重比较按 normcase/normpath 同规；落盘条目保原大小写
+      （normpath 归一，展示友好）。
+    - 播种：add 且真值文件缺失且 base=None（默认解析）时，从 legacy base
+      整体接管后修改（remove 不播种——没有可移除的对象就无操作）。
+    - 整盘根（空路径/盘符根/UNC 根）拒绝：不给整盘授权，也不给整盘排除。
+    """
+    normalized = os.path.normcase(os.path.normpath(str(path or "").strip()))
+    drive, rest = os.path.splitdrive(normalized)
+    if not normalized or not drive or rest in ("", "\\", "/"):
+        raise ValueError(f"非法名单条目（空路径或整盘根）: {path!r}")
+    stored = os.path.normpath(str(path).strip())
+
+    target_dir = tenant_config_dir(tenant_id, base=base)
+    target_file = target_dir / "project_whitelist.yaml"
+    if (
+        add
+        and not target_file.is_file()
+        and base is None
+        and legacy_config_users_base().joinpath(tenant_id, "project_whitelist.yaml").is_file()
+    ):
+        target_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(
+            legacy_config_users_base() / tenant_id / "project_whitelist.yaml", target_file
+        )
+
+    data: dict[str, Any] = {}
+    if target_file.is_file():
+        try:
+            loaded = yaml.safe_load(target_file.read_text(encoding="utf-8")) or {}
+            if isinstance(loaded, dict):
+                data = loaded
+        except yaml.YAMLError as exc:
+            logger.error("授权名单解析失败（重建文件，legacy 播种已保留条目语义）: %s — %s", target_file, exc)
+
+    entries = [str(e) for e in (data.get(section) or []) if str(e or "").strip()]
+    if add:
+        if normalized not in [os.path.normcase(os.path.normpath(e)) for e in entries]:
+            entries.append(stored)
+    else:
+        entries = [
+            e for e in entries if os.path.normcase(os.path.normpath(e)) != normalized
+        ]
+    data[section] = entries
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_file.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    logger.info(
+        "[zone_policy] 名单节变更 | section=%s | add=%s | entry=%s", section, add, stored
+    )
+    return entries
 
 
 def _canonical_path(path: str | Path) -> str:
@@ -457,12 +604,11 @@ def remove_project_folder(path: str) -> bool:
         return False
     if not target.is_dir():
         return False
-    import shutil
-
     # 只读解锁回调双签名：onexc(func, path, exc)=3.12+ 增补 API；
     # onerror(func, path, excinfo)=3.11 及以下（未删除，仅弃用）。
     # CI（3.11）与本地（3.12/3.14）并存，按签名可用性分发（不猜版本号）。
     import inspect
+    import shutil
 
     if "onexc" in inspect.signature(shutil.rmtree).parameters:
         shutil.rmtree(target, onexc=_rmtree_onexc)  # type: ignore[call-arg]

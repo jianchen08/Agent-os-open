@@ -33,10 +33,10 @@ import logging
 import os
 import sys
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from collections.abc import Iterator
 
 import pytest
 

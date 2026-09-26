@@ -387,6 +387,8 @@
     state.activeWork = pid;
     state.chapter = null;
     state.bible = null;
+    var inst = $('instruction');
+    if (inst) { inst.value = ''; }  // 指令框随作品切换清空：A 作品的指令不带进 B 作品
     renderWorks();
     renderBible();
     $('toolbar').style.display = 'flex';

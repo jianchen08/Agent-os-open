@@ -256,3 +256,4 @@ def log_collector():
     collector = LogCollector()
     yield collector
     collector.stop()
+

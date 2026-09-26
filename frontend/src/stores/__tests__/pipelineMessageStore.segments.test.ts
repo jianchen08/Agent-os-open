@@ -10,8 +10,8 @@
  * - fetchSegments 失败降级为空清单（切换器隐藏），不影响消息主链路。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { SegmentDetail, SegmentMeta } from '@/services/api/messageSegments'
+import type * as pipelineMessageStoreMod from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
 vi.mock('@/utils/logger', async () => {

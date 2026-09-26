@@ -244,7 +244,7 @@ _last_engine_ensure: float = 0.0
 # 保活会话句柄（模块级强引用）：Popen 句柄即弃既触发 GC ResourceWarning，
 # 又让插件卸载时无从终止 sleep infinity 残留——拉起者负责终止
 # （terminate_keepalive，isolation 插件 on_unload 调用）。
-_keepalive_proc: "subprocess.Popen[bytes] | None" = None
+_keepalive_proc: subprocess.Popen[bytes] | None = None
 # Windows 隐藏窗口标志（sidecar 拉起 wsl.exe 时不闪控制台）。POSIX 必须为 0：
 # subprocess 对非零 creationflags 抛 ValueError（Windows-only 参数），写死会使
 # Linux 上所有带此标志的探测整体不可用。平台门控在定义处一处收口（对齐

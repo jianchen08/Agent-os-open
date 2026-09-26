@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-from agentos_plugin_sdk.fs_utils import force_rmtree
-
 import contextlib
 import logging
 import os
@@ -16,6 +14,8 @@ import stat
 import subprocess
 import threading
 from pathlib import Path
+
+from agentos_plugin_sdk.fs_utils import force_rmtree
 
 logger = logging.getLogger(__name__)
 

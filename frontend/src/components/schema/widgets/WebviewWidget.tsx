@@ -28,13 +28,29 @@ import { Button } from '@/components/ui/button'
 import { API_ENDPOINTS } from '@/constants/api'
 import { apiClient } from '@/services/api/client'
 import { EXT_ROUTE, extUrl } from '@/services/api/extRoute'
+import {
+  createRoleplaySession,
+  parseRoleplayContinuePayload,
+} from '@/services/roleplayContinue'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { buildWebviewThemeTokens } from '@/services/webviewThemeTokens'
+import { useRoleplayPossessStore } from '@/stores/roleplayPossessStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { getActiveSessionTheme, useSessionThemeStore } from '@/stores/sessionThemeStore'
 import { useThemeStore } from '@/stores/themeStore'
 import { useWidgetEventStore } from '@/stores/widgetEventStore'
 import { loggers } from '@/utils/logger'
 import { buildWebviewMessage, validateWebviewEvent } from '@/utils/postMessageSecurity'
+
+/** 命令 owner 查找：contributes.commands 归一化条目按 id（或旧 command 扩展
+ *  字段）匹配，返回所属插件 id。仅同插件沙箱可调用该命令（WebviewWidget
+ *  上行白名单）。 */
+function findCommandOwner(commandId: string): string | undefined {
+  const command = contributionRegistry
+    .getCommands()
+    .find((c) => c.id === commandId || (c.command as string | undefined) === commandId)
+  return command?.pluginId
+}
 
 /** Webview widget 渲染指令 props（由 RenderingEngine 从 contributes.widgets 注入） */
 export interface WebviewWidgetProps {
@@ -249,6 +265,41 @@ export function WebviewWidget({
           sendDown('result', { applied: true })
           return
         }
+        if (msg.method === 'roleplay.possess') {
+          // 附身桥协议（roleplay.possess）：白名单宿主侧方法——面板附身卡成功
+          // 后上行 {card_id, name, avatar, personaText?}，写入 roleplayPossessStore
+          // （发送链据此把卡人设并入 execution_context.roleplay_persona）。载荷校验
+          // fail-closed：非法整包丢弃（零状态变更）并回 error。纯宿主行为，不经
+          // 内核 transport。
+          const applied = useRoleplayPossessStore.getState().setPossessed(msg.params)
+          if (!applied) {
+            sendDown('error', {
+              message: 'roleplay.possess 已丢弃：载荷需 card_id/name 非空字符串 + avatar（emoji 或色对）',
+            })
+            return
+          }
+          sendDown('result', { applied: true })
+          return
+        }
+        if (msg.method === 'roleplay.continue') {
+          // 转续演/会话化开演桥协议（roleplay.continue）：白名单宿主侧方法——面板以
+          // 某卡开纯净扮演会话：建会话（扮演·<卡名>，store 创建流随建即激活=切到聊天区）
+          // + 该会话执行选项绑定卡身份（发送链据此逐消息并入 WS agent_id +
+          // mode=roleplay）+ 自动首条触发消息（可选开演档 greeting/personaText 随
+          // 快照键生效，material.py 据此组开场注入段）。载荷校验 fail-closed：
+          // card_id/name 非空字符串（开演档键在场须非空字符串），非法整包丢弃
+          // （零状态变更）并回 error；avatar 为对称装饰位不消费。
+          const payload = parseRoleplayContinuePayload(msg.params)
+          if (!payload) {
+            sendDown('error', {
+              message: 'roleplay.continue 已丢弃：载荷需 card_id/name 非空字符串',
+            })
+            return
+          }
+          const created = await createRoleplaySession(payload)
+          sendDown('result', { applied: true, session_id: created.sessionId })
+          return
+        }
         if (msg.method.startsWith('/')) {
           // REST 路径约定：以 '/' 开头视为插件自定义 HTTP 端点。
           // 路由白名单（安全审查 B-4）：只允许本插件的 /ext/{pluginId}/ 前缀，
@@ -264,7 +315,17 @@ export function WebviewWidget({
               ? await apiClient.post(msg.method, msg.params)
               : await apiClient.get(msg.method)
         } else {
-          // action 约定：复用 command transport 同一端点（带 Bearer token）
+          // 命令白名单（2026-09-25 桥协议统一，方案 §3.4）：表外非 '/' method
+          // 视为命令调用，只放行**本插件贡献的 command**（contributes.commands，
+          // registry 按 pluginId 过滤）——封死"沙箱页面直呼任意插件命令"的跨
+          // 插件面。内置命令白名单当前为空（无暴露给沙箱的全局命令需求）。
+          if (findCommandOwner(msg.method) !== pluginId) {
+            sendDown('error', {
+              message: `method 不在命令白名单（仅限本插件贡献的命令）: ${msg.method}`,
+            })
+            return
+          }
+          // 命令约定：复用 command transport 同一端点（带 Bearer token）
           res = await apiClient.post(API_ENDPOINTS.ACTIONS.EXECUTE, {
             action: msg.method,
             args: msg.params,

@@ -30,6 +30,7 @@ from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
 _paths = bootstrap_plugin(__file__)  # 插件目录（budget_manager 等平铺模块）+ plugins/shared 根（kernel_db/http_json）入 sys.path
 
+import traces_usage  # noqa: E402 — traces llm_usage 聚合 SQL 单点（与 monitoring 同源）
 from budget_manager import (  # noqa: E402
     BudgetAlert,
     BudgetManager,
@@ -37,17 +38,16 @@ from budget_manager import (  # noqa: E402
     reset_budget_manager,
 )
 from exceptions import BudgetExceededException, QuotaExhaustedException  # noqa: E402
-from config import CostControlConfig, get_cost_control_config  # noqa: E402
-from kernel_db import kernel_db_path  # noqa: E402
-import traces_usage  # noqa: E402 — traces llm_usage 聚合 SQL 单点（与 monitoring 同源）
 from http_json import (  # noqa: E402 — HTTP 响应封装公共实现，调用点零改名
     decode_body as _decode_body,
     error as _error,
     json_response as _json_response,
     ok as _ok,
 )
+from kernel_db import kernel_db_path  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
+from config import CostControlConfig, get_cost_control_config  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("cost_control")
@@ -413,7 +413,7 @@ def _reshape_usage_statistics(raw: dict[str, Any]) -> dict[str, Any]:
             for sid, stats in raw.get("sessions", {}).items()
         ],
         "recent_records": raw.get("recent_records", []),
-        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "updated_at": datetime.datetime.now(datetime.UTC).isoformat(),
     }
 
 

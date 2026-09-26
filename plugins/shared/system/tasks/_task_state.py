@@ -11,11 +11,12 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from agentos_plugin_sdk.enum_utils import safe_enum_value
 from state_machine import (
     _TASK_TRANSITIONS,
     InvalidTransitionError,
 )
+
+from agentos_plugin_sdk.enum_utils import safe_enum_value
 
 if TYPE_CHECKING:
     # 仅用于类型注解（运行时延迟求值，from __future__ import annotations）。

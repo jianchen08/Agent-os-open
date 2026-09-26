@@ -9,13 +9,13 @@
  * - 渲染源无关：MessageItem 按 source 渲染「{source} 引用」与 {source}-node
  */
 
+import { parseReferenceMessage } from '@/components/chat/ReferenceChip'
 import {
   buildReferenceBlock,
   getReferenceProviders,
   registerReferenceProvider,
   type ReferenceSelection,
 } from '../referenceProviders'
-import { parseReferenceMessage } from '@/components/chat/ReferenceChip'
 
 const CONSUMED: string[] = []
 

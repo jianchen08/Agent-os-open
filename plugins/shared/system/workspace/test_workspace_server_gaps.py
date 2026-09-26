@@ -107,7 +107,7 @@ def _rebind_flat_modules() -> None:
     _WS = _load_flat("workspace_service")
 
 
-@pytest.fixture()
+@pytest.fixture
 def srv() -> Any:
     """加载 server 并注入 state 读面（可被各测试覆盖）。"""
     _rebind_flat_modules()
@@ -154,7 +154,7 @@ class TestFileContentWorktreeRelocation:
         assert result["success"] is True
         assert result["content"] == "重定位后的内容"
         assert result["path"] == dead_path, "返回体保留原请求路径（前端契约不变）"
-        assert result["size"] == len("重定位后的内容".encode("utf-8"))
+        assert result["size"] == len("重定位后的内容".encode())
 
     def test_unmapped_dead_path_still_reports_missing(
         self, srv: Any, tmp_path: Path

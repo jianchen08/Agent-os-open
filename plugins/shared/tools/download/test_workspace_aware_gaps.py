@@ -60,7 +60,7 @@ class _Tool(WorkspaceAwareMixin):
         self.base_path = workspace
 
 
-@pytest.fixture()
+@pytest.fixture
 def fresh_policy_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """清类级 manager 缓存与模块级 warn-once 旗标（monkeypatch 自动还原）。"""
     monkeypatch.setattr(WorkspaceAwareMixin, "_policy_manager", None)

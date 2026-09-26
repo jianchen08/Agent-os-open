@@ -26,6 +26,11 @@ from manager import IsolationManager
 # _run_docker_sync 超时上限（秒）。测试里把硬超时压到这个值，让"挂起"场景
 # 快速收敛——这验证的是超时机制本身，生产默认是 15s/30s。
 _TEST_TIMEOUT = 0.5
+_POISON_SLEEP = 30
+# 毒化 sleep 时长（批次7-②）：时序不变量 = 「probe 被注入超时中断，远早于毒化
+# sleep 完成」。对比对象从字面 3.0s 墙钟预算改为毒化常量——负载尖峰下 0.5s
+# 超时的真实中断可合法过冲到数秒（墙钟预算语义曾致 timing-gate 3.56<3.0 假红），
+# 而 ≪30s 的中断判定负载免疫且仍锁死「未超时机制冻死进程」这一被测行为。
 
 
 def _make_manager() -> IsolationManager:
@@ -119,7 +124,7 @@ async def test_find_existing_container_does_not_hang_when_daemon_hangs(monkeypat
 
     # 模拟 daemon 假死：containers.get 永久阻塞
     fake_client = MagicMock()
-    fake_client.containers.get = MagicMock(side_effect=lambda name: time.sleep(30))
+    fake_client.containers.get = MagicMock(side_effect=lambda name: time.sleep(_POISON_SLEEP))
     fake_client.close = MagicMock()
 
     start = time.perf_counter()
@@ -128,7 +133,9 @@ async def test_find_existing_container_does_not_hang_when_daemon_hangs(monkeypat
     elapsed = time.perf_counter() - start
 
     assert result is None  # 超时返回 None，而非永久阻塞
-    assert elapsed < 3.0  # 远小于 sleep(30)，证明被超时机制中断
+    # 时序不变量：远小于毒化 sleep（_POISON_SLEEP），证明被注入超时中断；
+    # 对比对象是毒化常量而非字面墙钟预算——负载免疫（批次7-②，D1 轮修正）。
+    assert elapsed < _POISON_SLEEP
 
 
 async def test_find_existing_container_returns_none_on_not_found():
@@ -170,7 +177,7 @@ async def test_destroy_container_does_not_hang_when_daemon_hangs(monkeypatch):
     _patch_fast_timeout(monkeypatch, manager)
 
     fake_client = MagicMock()
-    fake_client.containers.get = MagicMock(side_effect=lambda name: time.sleep(30))
+    fake_client.containers.get = MagicMock(side_effect=lambda name: time.sleep(_POISON_SLEEP))
     fake_client.close = MagicMock()
 
     start = time.perf_counter()

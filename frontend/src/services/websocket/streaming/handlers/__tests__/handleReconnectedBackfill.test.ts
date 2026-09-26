@@ -6,33 +6,15 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
-vi.mock('@/utils/logger', () => ({
-  loggers: {
-    sessionStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    stream: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    pipelineStore: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-  },
-  createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
-}))
+vi.mock('@/utils/logger', async () => (await import('../../../../../stores/__tests__/helpers/storeTestMocks')).loggerMockFull())
 
-vi.mock('@/services/api/session', () => ({
-  getMessages: vi.fn().mockResolvedValue({ messages: [], total: 0, session_id: '' }),
-  mergeConsecutiveAssistantMessages: (msgs: any[]) => msgs,
-}))
+vi.mock('@/services/api/session', async () => (await import('../../../../../stores/__tests__/helpers/storeTestMocks')).apiSessionMockFull())
 
-vi.mock('@/utils/retry', () => ({
-  retry: (fn: () => any) => fn(),
-  isRetryableError: vi.fn().mockReturnValue(false),
-}))
+vi.mock('@/utils/retry', async () => (await import('../../../../../stores/__tests__/helpers/storeTestMocks')).retryMockBase())
 
-vi.mock('@/stores/contextUsageStore', () => ({
-  useContextUsageStore: { getState: () => ({ clear: vi.fn(), set: vi.fn(), get: () => null }) },
-}))
+vi.mock('@/stores/contextUsageStore', async () => (await import('../../../../../stores/__tests__/helpers/storeTestMocks')).contextUsageMock())
 
-vi.mock('@/stores/notificationStore', () => ({
-  useNotificationStore: { getState: () => ({ addNotification: vi.fn() }) },
-}))
+vi.mock('@/stores/notificationStore', async () => (await import('../../../../../stores/__tests__/helpers/storeTestMocks')).notificationStoreMock())
 
 const SUB_PID = 'pipe-sub-001'
 const MAIN_PID = 'pipe-main-001'

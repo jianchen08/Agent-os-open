@@ -9,7 +9,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 
@@ -50,7 +50,7 @@ class BridgePolicy:
     _audit_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     @classmethod
-    def from_config(cls, config: dict) -> "BridgePolicy":
+    def from_config(cls, config: dict) -> BridgePolicy:
         auth = config.get("auth") or {}
         return cls(
             token_env=str(auth.get("token_env", "AGENTOS_BRIDGE_TOKEN")),
@@ -125,7 +125,7 @@ class BridgePolicy:
         if not self.audit_dir:
             return
         record = {
-            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+            "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
             "upstream": upstream,
             "caller": caller,
             "session": session_key,
@@ -138,7 +138,7 @@ class BridgePolicy:
         line = json.dumps(record, ensure_ascii=False)
         try:
             os.makedirs(self.audit_dir, exist_ok=True)
-            day = datetime.now(timezone.utc).strftime("%Y%m%d")
+            day = datetime.now(UTC).strftime("%Y%m%d")
             with self._audit_lock:
                 with open(os.path.join(self.audit_dir, f"audit-{day}.jsonl"), "a", encoding="utf-8") as f:
                     f.write(line + "\n")

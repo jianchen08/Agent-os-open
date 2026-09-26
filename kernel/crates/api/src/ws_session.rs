@@ -690,6 +690,7 @@ impl EngineDispatcher {
                 &rec.thinking_strength,
                 rec.execution_context.as_ref(),
                 rec.state_overlay.as_ref(),
+                rec.pipeline_config_id.as_deref(),
                 &rec.client_message_id,
             ),
         )
@@ -911,6 +912,10 @@ impl agentos_engine::RoundEvents for SessionRoundEvents {
                         // interrupted/error，正常消息缺省 completed（冷热同构）。
                         "status": message_status_from_blob(assistant),
                         "thread_id": thread_id,
+                        // 执行身份戳记从 blob 透传（blob 里有什么带什么）：消息
+                        // 生成时的管道执行身份，前端气泡卡名/卡头像的数据源；
+                        // blob 无该字段时写 null（前端 Message.agentId 可空）。
+                        "agentId": assistant.get("agent_id"),
                     },
                 });
                 if let Some(cmid) = &client_message_id {
@@ -1033,6 +1038,7 @@ impl PipelineDispatcher for EngineDispatcher {
         execution_context: Option<&serde_json::Value>,
         state_overlay: Option<&serde_json::Value>,
         agent_id: &str,
+        pipeline_config_id: Option<&str>,
         client_message_id: &str,
         source: PendingInputSource,
     ) -> Result<(), String> {
@@ -1087,6 +1093,7 @@ impl PipelineDispatcher for EngineDispatcher {
             client_message_id: client_message_id.to_string(),
             execution_context: execution_context.cloned(),
             state_overlay: state_overlay.cloned(),
+            pipeline_config_id: pipeline_config_id.map(str::to_string),
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         // store 未注入（单测/兼容路径）：无持久化队列，直接入链执行本轮（旧行为）。
@@ -1655,6 +1662,7 @@ impl PipelineDispatcher for EngineDispatcher {
             None,
             Some(&overlay),
             "",
+            None,
             "",
             agentos_core::types::PendingInputSource::System,
         )
@@ -3154,6 +3162,7 @@ mod tests {
             error: None,
             tool_result_json: None,
             metadata: None,
+            agent_id: None,
         };
         let msgs = vec![
             mk("m0", "user", 0),
@@ -3949,6 +3958,7 @@ mod tests {
             lifecycle: None,
             native: None,
             granted_capabilities: vec![],
+            restricted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -4271,6 +4281,75 @@ mod tests {
         assert!(end["data"]["final_sequence"].is_null());
     }
 
+    #[tokio::test]
+    async fn session_round_events_agent_id_passthrough() {
+        // 执行身份戳记透传契约：blob 带 agent_id → message.agentId 原样透传
+        //（前端气泡卡名/卡头像数据源）；blob 不带 → agentId 为 null（缺省不污染）
+        let coord = Arc::new(agentos_session::SessionCoordinator::new());
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        coord.register(
+            "u1",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        let events = SessionRoundEvents::new(coord.clone(), "thread-sr3", "pipe-sr3", "u1");
+        coord.register_thread("thread-sr3", "u1");
+
+        agentos_engine::RoundEvents::on_round_end(
+            &events,
+            agentos_engine::RoundEnd {
+                round_index: 1,
+                message_id: "a_1".into(),
+                pipeline_id: "pipe-sr3".into(),
+                thread_id: "thread-sr3".into(),
+                assistant: Some(json!({
+                    "role": "assistant", "content": "扮演回复",
+                    "agent_id": "roleplay_agent", "seq": 3
+                })),
+                user_message: None,
+            },
+        )
+        .await;
+        {
+            let all = frame_types(&frames).await;
+            let new_msg = all
+                .iter()
+                .find(|(t, _)| t == "new_message")
+                .map(|(_, v)| v.clone())
+                .expect("应有 new_message");
+            assert_eq!(
+                new_msg["data"]["message"]["agentId"], "roleplay_agent",
+                "blob 的 agent_id 必须原样透传为 agentId: {new_msg}"
+            );
+        }
+
+        // 无戳记 blob：agentId 为 null（json! 直引 blob 字段的缺省形态）
+        frames.lock().unwrap().clear();
+        agentos_engine::RoundEvents::on_round_end(
+            &events,
+            agentos_engine::RoundEnd {
+                round_index: 2,
+                message_id: "a_2".into(),
+                pipeline_id: "pipe-sr3".into(),
+                thread_id: "thread-sr3".into(),
+                assistant: Some(json!({"role": "assistant", "content": "普通回复"})),
+                user_message: None,
+            },
+        )
+        .await;
+        let all = frame_types(&frames).await;
+        let new_msg = all
+            .iter()
+            .find(|(t, _)| t == "new_message")
+            .map(|(_, v)| v.clone())
+            .expect("应有 new_message");
+        assert!(
+            new_msg["data"]["message"]["agentId"].is_null(),
+            "blob 无 agent_id 时 agentId 必须 null: {new_msg}"
+        );
+    }
+
     // ── 补测：管道解析 / agent 解析失败分支 ───────────────────────────────
 
     #[tokio::test]
@@ -4508,6 +4587,7 @@ mod tests {
             client_message_id: String::new(),
             execution_context: None,
             state_overlay: None,
+            pipeline_config_id: None,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         store
@@ -4589,6 +4669,7 @@ mod tests {
                 client_message_id: "cm-drain-fail-1".to_string(),
                 execution_context: None,
                 state_overlay: None,
+                pipeline_config_id: None,
                 created_at: chrono::Utc::now().to_rfc3339(),
             }]);
         let store = Arc::new(mock) as Arc<dyn StorageBackend>;
@@ -4607,7 +4688,7 @@ mod tests {
         .await;
 
         let outcome = rx.try_recv().expect("残留条目必须通知失败 outcome 防挂死");
-        assert!(outcome.failed, "出队失败 → failed outcome: {:?}", outcome);
+        assert!(outcome.failed, "出队失败 → failed outcome: {outcome:?}");
         assert!(
             outcome.content.contains("pending 消费出队失败"),
             "失败原因可追溯: {}",
@@ -4667,6 +4748,7 @@ mod tests {
             _execution_context: Option<&serde_json::Value>,
             _state_overlay: Option<&serde_json::Value>,
             _agent_id: &str,
+            _pipeline_config_id: Option<&str>,
             _cmid: &str,
             _source: agentos_core::types::PendingInputSource,
         ) -> Result<(), String> {
@@ -4699,6 +4781,7 @@ mod tests {
             _execution_context: Option<&serde_json::Value>,
             _state_overlay: Option<&serde_json::Value>,
             _agent_id: &str,
+            _pipeline_config_id: Option<&str>,
             _cmid: &str,
             _source: agentos_core::types::PendingInputSource,
         ) -> Result<(), String> {
@@ -5013,6 +5096,7 @@ mod tests {
             _execution_context: Option<&serde_json::Value>,
             _state_overlay: Option<&serde_json::Value>,
             _agent_id: &str,
+            _pipeline_config_id: Option<&str>,
             _cmid: &str,
             _source: agentos_core::types::PendingInputSource,
         ) -> Result<(), String> {
@@ -5227,6 +5311,7 @@ mod tests {
                 None,
                 None,
                 "",
+                None,
                 "cm-noop",
                 agentos_core::types::PendingInputSource::User,
             )
@@ -5266,6 +5351,7 @@ mod tests {
                 None,
                 None,
                 "",
+                None,
                 &cmid,
                 agentos_core::types::PendingInputSource::User,
             )
@@ -5345,6 +5431,7 @@ mod tests {
                 None,
                 None,
                 "",
+                None,
                 &cmid,
                 agentos_core::types::PendingInputSource::User,
             )
@@ -5469,6 +5556,7 @@ mod tests {
                     client_message_id: String::new(),
                     execution_context: None,
                     state_overlay: None,
+                    pipeline_config_id: None,
                     created_at: "2026-09-13T00:00:00Z".to_string(),
                 },
             )

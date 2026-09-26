@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """WS 直驱批量评测（轮次重试版）。
 
 绕开任务队列：每题建会话（出生绑定执行者）→ WS user_input 派发 →
@@ -24,8 +23,8 @@ os.chdir(ROOT)
 sys.path.insert(0, os.path.join(ROOT, "scripts", "eval_bench"))
 sys.path.insert(0, HERE)
 
-from kernel_client import KernelClient, dispatch_and_collect  # noqa: E402
 import aggregate  # noqa: E402
+from kernel_client import KernelClient, dispatch_and_collect  # noqa: E402
 
 WS_ROOT = os.path.join(ROOT, ".ai_workspaces", "sessions")
 MAX_ROUNDS = 3
@@ -76,8 +75,8 @@ async def run_one_case(client, ws_url, case, results) -> bool:
     try:
         client.login("admin",
                      os.environ.get("AGENTOS_ADMIN_PASSWORD", "admin12345"))
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[ws_batch] login failed for case {cid}: {e}", file=sys.stderr)
     import urllib.request as u2
     creq = u2.Request(client.base_url + "/api/v1/sessions", method="POST")
     creq.add_header("Content-Type", "application/json")

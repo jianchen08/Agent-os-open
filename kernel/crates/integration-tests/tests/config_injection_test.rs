@@ -154,7 +154,7 @@ fn read_result_file(path: impl AsRef<str>) -> Value {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    panic!("Mock server did not write result file: {}", path);
+    panic!("Mock server did not write result file: {path}");
 }
 
 fn clear_result_file(path: impl AsRef<str>) {
@@ -217,7 +217,7 @@ impl PluginLoader for MockLoader {
     async fn load(&self, plugin_id: &str) -> Result<LoadedPlugin, PluginError> {
         let manifests = self.manifests.read();
         let manifest = manifests.get(plugin_id).ok_or_else(|| PluginError {
-            message: format!("plugin not found: {}", plugin_id),
+            message: format!("plugin not found: {plugin_id}"),
             code: Some("NOT_FOUND".to_string()),
             source: None,
         })?;
@@ -247,7 +247,7 @@ fn make_sidecar_manifest(id: &str, entry: &str) -> PluginManifest {
         force_include_tools: Vec::new(),
         state: None,
         id: id.to_string(),
-        name: format!("Test {}", id),
+        name: format!("Test {id}"),
         description: None,
         version: "1.0.0".to_string(),
         plugin_type: PluginType::Tool,
@@ -270,6 +270,7 @@ fn make_sidecar_manifest(id: &str, entry: &str) -> PluginManifest {
         http_endpoints: vec![],
         ui_schema: None,
         contributes: None,
+        restricted_capabilities: Vec::new(),
         enabled: None,
         activation: None,
         persistent_fields: vec![],
@@ -561,8 +562,7 @@ async fn fp4_invoker_works_with_empty_config() {
     let config = &received["received_config"];
     assert!(
         config.is_object() && config.as_object().map(|o| o.is_empty()).unwrap_or(false),
-        "config should be empty object {{}}, got: {}",
-        config
+        "config should be empty object {{}}, got: {config}"
     );
 }
 

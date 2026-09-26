@@ -156,8 +156,7 @@ async fn widget_overflow_keeps_latest_frame_per_widget_id() {
                 .collect();
             assert!(
                 widget_payloads.contains(&"v3"),
-                "widget 溢出应保留最新帧 v3，实际: {:?}",
-                widget_payloads
+                "widget 溢出应保留最新帧 v3，实际: {widget_payloads:?}"
             );
         }
         _ => panic!("widget 溢出不应触发 resync（保留最新帧）"),

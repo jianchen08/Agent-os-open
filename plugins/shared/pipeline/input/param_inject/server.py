@@ -13,10 +13,9 @@ from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 _paths = bootstrap_plugin(__file__)  # 插件目录（本地 plugin.py）+ plugins/shared 根入 sys.path
 
 from plugin import ParamInjectPlugin, set_capability_caller  # noqa: E402
+from wiring import make_capability_caller  # noqa: E402  （共享裸名模块，共享根经 bootstrap 入 path）
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
-
-from wiring import make_capability_caller  # noqa: E402  （共享裸名模块，共享根经 bootstrap 入 path）
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("param_inject_pipeline")

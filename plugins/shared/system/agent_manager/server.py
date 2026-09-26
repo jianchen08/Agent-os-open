@@ -63,17 +63,19 @@ plugin = AgentOSPlugin("agent_manager")
 
 _paths = bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根（http_json）入 sys.path
 
+from atomic_io import atomic_write_text as _atomic_write_text  # noqa: E402
 from http_json import (  # noqa: E402
     decode_body as _decode_body,
     error as _error,
     json_response as _json_response,
     ok as _ok,
 )
-from atomic_io import atomic_write_text as _atomic_write_text  # noqa: E402
 from kernel_token import decode_kernel_token as _decode_kernel_token  # noqa: E402
 from mode_keys import parse_mode_agent_key as _parse_mode_agent_key  # noqa: E402
-from user_space import user_plugins_dir as _user_plugins_dir  # noqa: E402
-from user_space import user_root as _user_root
+from user_space import (
+    user_plugins_dir as _user_plugins_dir,  # noqa: E402
+    user_root as _user_root,
+)
 
 # ── 目录定位：AGENTOS_CONFIG_ROOT（内核启动写入，sidecar 继承进程环境）优先；
 #    回退 __file__ 上溯项目根（与 context_build/task_form 同款防御）。──

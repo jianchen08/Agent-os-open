@@ -7,8 +7,6 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 import sys
 import time
 import urllib.request
@@ -22,8 +20,8 @@ sys.path.insert(0, str(HERE))
 # policy 裸模块可能被其他车道（security_check 等置前 sys.path 的测试）逐出
 # 重解析——双实例防线：PolicyError 等一律在使用点导入（与 check_domain_policy
 # 同一导入点，类身份一致），不在模块级缓存类对象。
-from server import BridgeApp, make_handler  # noqa: E402
 import upstream  # noqa: E402
+from server import BridgeApp, make_handler  # noqa: E402
 from upstream import UpstreamError, UpstreamManager, UpstreamSession  # noqa: E402
 
 
@@ -290,7 +288,7 @@ class TestHTTP:
         srv = ThreadingHTTPServer(("127.0.0.1", 18765), make_handler(app))
         t = threading.Thread(target=srv.serve_forever, daemon=True)
         t.start()
-        yield f"http://127.0.0.1:18765", app
+        yield "http://127.0.0.1:18765", app
         srv.shutdown()
         app.manager.shutdown_all()
 

@@ -123,7 +123,7 @@ def _fake_capability_lookup(handles: dict[str, _FakeCapHandle]):
     return _get_capability
 
 
-@pytest.fixture()
+@pytest.fixture
 def gaps_srv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """加载 server.py，注入伪能力句柄并完成 on_load（启动调和真实执行）。"""
     mod = _load_server()

@@ -1,0 +1,9 @@
+# mode_roleplay 专属编排注册（mode_registry → 编排键 mode_roleplay/roleplay）。
+# 概念口径（plugin-loader/mode_registry.rs）：编排键是管道定义的派单坐标（路由
+# 咨询/任务型匹配），引擎可执行模板仍为 autonomous（唯一 def）——扮演的执行
+# 身份由消息 agent_id 透传（chat.send_message 原生参数 → state agent.id →
+# context_build 按卡加载），本文件声明角色扮演任务型到本编排键的归属。
+task_kinds:
+- roleplay.chat
+- roleplay.opening
+- roleplay.regenerate

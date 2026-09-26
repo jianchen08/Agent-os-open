@@ -129,7 +129,7 @@ class TestExecuteWorkflow:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", RuntimeWarning)
                     awaitable.close()
-                raise asyncio.TimeoutError("dynamic vars stuck")
+                raise TimeoutError("dynamic vars stuck")
             return real_wait_for(awaitable, timeout)
 
         monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
@@ -305,7 +305,7 @@ class TestPlaceholderTimeout:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", RuntimeWarning)
                     awaitable.close()
-                raise asyncio.TimeoutError("placeholder stuck")
+                raise TimeoutError("placeholder stuck")
             return real_wait_for(awaitable, timeout)
 
         monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)

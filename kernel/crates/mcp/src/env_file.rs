@@ -72,11 +72,11 @@ pub fn write_env_updates(
         let rendered = if value.is_empty() {
             String::new()
         } else if value.contains(' ') || value.contains('#') || value.contains('\t') {
-            format!("\"{}\"", value)
+            format!("\"{value}\"")
         } else {
             value.clone()
         };
-        let prefix = format!("{}=", key);
+        let prefix = format!("{key}=");
         // 找最后一个同名键行（用户手工可能重复声明，统一收敛为一行）
         let mut last_idx: Option<usize> = None;
         for (i, line) in lines.iter().enumerate() {
@@ -90,10 +90,10 @@ pub fn write_env_updates(
                 lines.remove(i);
             }
             (Some(i), false) => {
-                lines[i] = format!("{}={}", key, rendered);
+                lines[i] = format!("{key}={rendered}");
             }
             (None, true) => {} // 本就不存在，无需移除
-            (None, false) => lines.push(format!("{}={}", key, rendered)),
+            (None, false) => lines.push(format!("{key}={rendered}")),
         }
     }
 

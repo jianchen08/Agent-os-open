@@ -1,6 +1,7 @@
 /** 消息项组件 显示单条消息，支持用户消息和 AI 消息的不同样式 */
 
-import { memo, useEffect, useRef, useState } from 'react'
+import { createContext, memo, useContext, useEffect, useRef, useState } from 'react'
+import { toast } from 'sonner'
 import {
   AlertCircleIcon as AlertCircle,
   Bell,
@@ -21,9 +22,12 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
 import { cn } from '@/lib/utils'
+import { usePresenterProfile } from '@/services/api/presenterProfiles'
 import { openAttachment } from '@/services/attachmentOpener'
 import { ErrorType, reportError } from '@/services/errorReporting'
 import { useInteractionStore } from '@/stores/interactionStore'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
+import { useRoleplayPossessStore } from '@/stores/roleplayPossessStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useThemeStore } from '@/stores/themeStore'
 import { toolCallToActivity } from '@/utils/activityConverter'
@@ -37,7 +41,11 @@ import MessageContentRenderer from './MessageContentRenderer'
 import { MESSAGE_STYLE_METADATA_KEY, PluginMessageCard, resolveMessageStyle } from './PluginMessageCard'
 import { parseReferenceMessage, ReferenceChip } from './ReferenceChip'
 import type { MessageItemProps } from './types'
+import type { PresenterAvatar, PresenterProfile } from '@/services/api/presenterProfiles'
+import type { RoleplayPossession } from '@/services/schema/modeOptions'
+import type { ActivityData } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
+import type { ReactNode } from 'react'
 
 /** tool 消息状态 → ActivityStatus 映射（streaming 与 running 同义） */
 const TOOL_STATUS_MAP: Record<string, MessageToolCall['status']> = {
@@ -150,6 +158,153 @@ const MessageEditor = ({ content, onSave, onCancel, disabled = false }: MessageE
   )
 }
 
+/** 扮演呈现档案上下文（PresenterScope → 头像槽/徽标的单向投递） */
+const PresenterContext = createContext<PresenterProfile | null>(null)
+
+/**
+ * 附身档 → 呈现档案：附身是临时态（消息本体身份仍是主 agent），仅投递
+ * {name, avatar} 供头像槽/徽标消费；origin 标 possess 以区分卡目录解析来源。
+ */
+function possessionToPresenter(possessed: RoleplayPossession): PresenterProfile {
+  return { name: possessed.name, avatar: possessed.avatar, origin: 'possess' }
+}
+
+/**
+ * 扮演呈现档案作用域：assistant 消息带 agentId 或附身激活时挂载（挂载条件由
+ * 调用方裁定）。呈现优先级：消息自带模式卡键 → presenter 解析优先（卡身份是
+ * 消息的永久属性）；presenter 未命中且附身激活 → 附身档覆盖（解除即回退）。
+ * agentId 缺席时 usePresenterProfile 恒 null（零请求）。
+ */
+function PresenterScope({
+  agentId,
+  possessed,
+  children,
+}: {
+  agentId: string | undefined
+  possessed: RoleplayPossession | null
+  children: ReactNode
+}) {
+  const presenter = usePresenterProfile(agentId)
+  const profile = presenter ?? (possessed ? possessionToPresenter(possessed) : null)
+  return <PresenterContext.Provider value={profile}>{children}</PresenterContext.Provider>
+}
+
+/**
+ * 扮演头像徽章（assistant 气泡左侧 28px 圆角头像位）：
+ * avatar=emoji 串 → emoji 居中 + 浅底；{fg,bg} 色对 → 名字首字 + fg 字色 bg 底
+ * （缺色回退主题 secondary 令牌）；avatar=null → 首字 + 默认底。
+ * presenter 未命中（非扮演）时调用方不渲染本组件、走默认头像，布局零变化。
+ */
+function PresenterAvatarBadge({ name, avatar }: { name: string; avatar: PresenterAvatar }) {
+  const emoji = typeof avatar === 'string' && avatar.trim() !== '' ? avatar : null
+  const pair = avatar && typeof avatar !== 'string' ? avatar : null
+  return (
+    <div
+      className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg shadow-sm"
+      data-testid="presenter-avatar"
+      style={{
+        background: emoji ? 'var(--secondary)' : (pair?.bg ?? 'var(--secondary)'),
+        color: emoji ? undefined : pair?.fg,
+      }}
+    >
+      <span className={emoji ? 'text-base leading-none' : 'text-sm font-medium leading-none'}>
+        {emoji ?? name.charAt(0)}
+      </span>
+    </div>
+  )
+}
+
+/**
+ * 消息行首列头像槽：assistant 且扮演档案命中 → 扮演头像徽章；
+ * 其余（user/system/未命中）→ 默认头像（形态与既有渲染一致）。
+ */
+function AvatarSlot({ isUser, isSystemMessage }: { isUser: boolean; isSystemMessage: boolean }) {
+  const presenter = useContext(PresenterContext)
+  if (!isUser && !isSystemMessage && presenter) {
+    return <PresenterAvatarBadge name={presenter.name} avatar={presenter.avatar} />
+  }
+  return (
+    <Avatar
+      className={cn(
+        'h-8 w-8 flex-shrink-0 rounded-xl shadow-sm',
+        isUser
+          ? 'bg-primary text-primary-foreground'
+          : isSystemMessage
+            ? 'bg-status-warning/15 text-status-warning'
+            : 'bg-secondary text-secondary-foreground',
+      )}
+    >
+      <AvatarFallback className="rounded-xl text-sm font-medium">
+        {isUser ? (
+          <User className="h-icon-md w-icon-md" />
+        ) : isSystemMessage ? (
+          <Bell className="h-icon-md w-icon-md" />
+        ) : (
+          <Bot className="h-icon-md w-icon-md" />
+        )}
+      </AvatarFallback>
+    </Avatar>
+  )
+}
+
+/**
+ * assistant 徽标：扮演命中 → 卡名（emoji 形态并入徽标前位，色对/null 形态仅
+ * 卡名，不动徽标底色）；未命中 → 注册表徽标（Sparkles+agent 名，原样）。
+ * presenter 与 agent 双未命中不渲染。
+ */
+function PresenterAwareBadge({ agent }: { agent: { name: string } | null }) {
+  const presenter = useContext(PresenterContext)
+  if (!presenter && !agent) return null
+  return (
+    <span className="inline-flex items-center gap-1 rounded-lg bg-[var(--badge-info-bg)] px-2 py-0.5 text-xs text-[var(--badge-info-text)]">
+      {presenter ? (
+        <>
+          {typeof presenter.avatar === 'string' && presenter.avatar && (
+            <span aria-hidden="true">{presenter.avatar}</span>
+          )}
+          <span className="font-medium">{presenter.name}</span>
+        </>
+      ) : (
+        <>
+          <Sparkles className="h-icon-xs w-icon-xs" />
+          <span className="font-medium">{agent?.name}</span>
+        </>
+      )}
+    </span>
+  )
+}
+
+/**
+ * 扮演呈现态工具消息体：工具卡片沉浸化——默认折叠为一行低调叙事行
+ * （`✦ <角色名>的静默行动`；名字缺席回退 `✦ 静默行动`；失败态显示
+ * `✦ 行动受挫` 弱警示色），点击行展开原生 ActivityCard 详情（可查证），
+ * 再点收回；折叠态为组件内 useState，每消息独立且不持久化。
+ * 非扮演态（presenter/附身双未命中）原样直出 ActivityCard，布局与既有零差异。
+ */
+function ToolMessageBody({ activity, failed }: { activity: ActivityData; failed: boolean }) {
+  const presenter = useContext(PresenterContext)
+  const [expanded, setExpanded] = useState(false)
+  if (!presenter) {
+    return <ActivityCard activity={activity} />
+  }
+  return (
+    <>
+      <button
+        type="button"
+        data-testid="roleplay-tool-narrative"
+        onClick={() => setExpanded((v) => !v)}
+        className={cn(
+          'cursor-pointer rounded px-0.5 text-left text-xs transition-colors',
+          failed ? 'text-status-warning/70' : 'text-muted-foreground',
+        )}
+      >
+        {failed ? '✦ 行动受挫' : presenter.name ? `✦ ${presenter.name}的静默行动` : '✦ 静默行动'}
+      </button>
+      {expanded && <ActivityCard activity={activity} />}
+    </>
+  )
+}
+
 /** 消息项组件 */
 export const MessageItem = memo(function MessageItem({
   message,
@@ -184,6 +339,20 @@ export const MessageItem = memo(function MessageItem({
   const { data: agents = [] } = useAgentsQuery()
   const agent = message.agentId ? agents.find((a) => a.id === message.agentId) : null
 
+  // 附身态订阅：选择器直返 possessed，null 恒稳定引用，未附身零额外重渲染
+  const possessed = useRoleplayPossessStore((s) => s.possessed)
+  // 附身作用域：消息对象无管道归属字段，以「消息 session === 活跃管道所属
+  // session」判定（主聊天视图消息恒取自活跃管道）；历史会话/其他会话的气泡
+  // 不随附身切换。布尔选择器，false 稳定不触发重渲染。
+  const possessInScope = usePipelineMessageStore((s) => {
+    const activePipelineSession = s.activePipelineId
+      ? s.pipelineSessionMap[s.activePipelineId]
+      : undefined
+    return activePipelineSession === message.sessionId
+  })
+  /** 附身覆盖生效 = 附身激活且消息属活跃管道会话 */
+  const possessActive = possessed !== null && possessInScope
+
   const hasPendingInteraction = useInteractionStore(
     (s) =>
       s.pendingInteractions.some(
@@ -217,6 +386,14 @@ export const MessageItem = memo(function MessageItem({
   }
 
   const handleSaveEdit = async (newContent: string) => {
+    // AI 消息编辑一期：内核无 assistant 消息内容更新通道（regenerate 的
+    // new_content 仅收 user 消息、segment_activate 只激活既有段），诚实提示
+    // 不落库，且绝不走 user 编辑重发链路（其目标是 user 消息截断重跑）
+    if (isAssistant) {
+      setIsEditing(false)
+      toast.error('消息编辑通道未接线')
+      return
+    }
     if (onEdit) {
       setIsEditing(false)
       await onEdit(message.id, newContent)
@@ -235,10 +412,16 @@ export const MessageItem = memo(function MessageItem({
     taskId,
   })
 
-  /** 工具消息独立渲染：统一走 ActivityCard（与消息流 parts 吸收路径同款满宽卡） */
+  /**
+   * 工具消息独立渲染：非扮演态统一走 ActivityCard 满宽卡（与消息流 parts 吸收
+   * 路径同款）；扮演呈现态（presenter 命中或附身生效）由 ToolMessageBody 特化
+   * 为折叠叙事行，工具卡片沉浸化。作用域按消息 agentId（卡键）与附身态挂载，
+   * presenter/附身双未命中时其内直出原生卡，渲染输出与既有逐字节一致。
+   */
   if (isTool) {
     const toolName: string = message.toolName || (message.metadata?.name as string | undefined) || '工具'
     const toolStatus: string = message.status || 'completed'
+    const resolvedStatus = resolveToolStatus(toolStatus)
     const toolResult: unknown = message.toolResult || message.metadata?.result || message.metadata?.output
     const toolError: unknown = message.toolError || message.metadata?.error
     const durationMs: unknown = message.durationMs || message.metadata?.duration_ms
@@ -248,7 +431,7 @@ export const MessageItem = memo(function MessageItem({
         call_id: message.toolCallId || message.id,
         tool_name: toolName,
         tool_args: (message.metadata?.args as Record<string, unknown> | undefined) ?? {},
-        status: resolveToolStatus(toolStatus),
+        status: resolvedStatus,
         result: toolResult,
         resultData: message.toolResultData,
         error: typeof toolError === 'string' ? toolError : undefined,
@@ -262,19 +445,24 @@ export const MessageItem = memo(function MessageItem({
     )
 
     return (
-      <div
-        className={cn(
-          'group hover:bg-muted/30 flex gap-3 px-4 py-2 transition-colors',
-          'max-w-[calc(100%-44px)]',
-          className,
-        )}
-        data-testid="message-item"
-        data-role="tool"
+      <PresenterScope
+        agentId={message.agentId ?? undefined}
+        possessed={possessActive ? possessed : null}
       >
-        <div className="min-w-0 flex-1">
-          <ActivityCard activity={activity} />
+        <div
+          className={cn(
+            'group hover:bg-muted/30 flex gap-3 px-4 py-2 transition-colors',
+            'max-w-[calc(100%-44px)]',
+            className,
+          )}
+          data-testid="message-item"
+          data-role="tool"
+        >
+          <div className="min-w-0 flex-1">
+            <ToolMessageBody activity={activity} failed={resolvedStatus === 'failed'} />
+          </div>
         </div>
-      </div>
+      </PresenterScope>
     )
   }
 
@@ -329,7 +517,7 @@ export const MessageItem = memo(function MessageItem({
     }
   }
 
-  return (
+  const row = (
     <div
       className={cn(
         'group flex gap-3 px-4 py-3 transition-colors',
@@ -340,26 +528,7 @@ export const MessageItem = memo(function MessageItem({
       data-testid="message-item"
       data-role={message.role}
     >
-      <Avatar
-        className={cn(
-          'h-8 w-8 flex-shrink-0 rounded-xl shadow-sm',
-          isUser
-            ? 'bg-primary text-primary-foreground'
-            : isSystemMessage
-              ? 'bg-status-warning/15 text-status-warning'
-              : 'bg-secondary text-secondary-foreground',
-        )}
-      >
-        <AvatarFallback className="rounded-xl text-sm font-medium">
-          {isUser ? (
-            <User className="h-icon-md w-icon-md" />
-          ) : isSystemMessage ? (
-            <Bell className="h-icon-md w-icon-md" />
-          ) : (
-            <Bot className="h-icon-md w-icon-md" />
-          )}
-        </AvatarFallback>
-      </Avatar>
+      <AvatarSlot isUser={isUser} isSystemMessage={isSystemMessage} />
 
       <div
         className={cn(
@@ -634,12 +803,7 @@ export const MessageItem = memo(function MessageItem({
             isUser ? 'flex-row-reverse' : '',
           )}
         >
-          {isAssistant && agent && (
-            <span className="inline-flex items-center gap-1 rounded-lg bg-[var(--badge-info-bg)] px-2 py-0.5 text-xs text-[var(--badge-info-text)]">
-              <Sparkles className="h-icon-xs w-icon-xs" />
-              <span className="font-medium">{agent.name}</span>
-            </span>
-          )}
+          {isAssistant && <PresenterAwareBadge agent={agent ?? null} />}
 
           <span className="text-muted-foreground/70">{formatTimestamp(message.timestamp)}</span>
 
@@ -664,4 +828,19 @@ export const MessageItem = memo(function MessageItem({
       </div>
     </div>
   )
+
+  // 扮演呈现作用域：assistant+agentId（卡身份解析）或附身激活（限活跃管道
+  // 会话）挂载，其余消息行不引入作用域，渲染输出与既有完全一致；
+  // possessed 按作用域门控传入，作用域外不泄漏进 agentId 挂载的档案解析
+  if (isAssistant && (message.agentId || possessActive)) {
+    return (
+      <PresenterScope
+        agentId={message.agentId ?? undefined}
+        possessed={possessActive ? possessed : null}
+      >
+        {row}
+      </PresenterScope>
+    )
+  }
+  return row
 })

@@ -16,6 +16,14 @@ export interface SessionFieldSnapshot {
   values: Record<string, string>
   /** 按 x_execution_path 组装好的消息级执行上下文（无声明值时缺省） */
   executionContext?: Record<string, unknown>
+  /** 扮演会话绑定（roleplay.continue 桥）：非空 = 每条消息以该 agent 身份发送 */
+  agentId?: string
+  /** 绑定卡显示名（输入区指示条展示用；缺席回退 agentId 尾段） */
+  agentName?: string
+  /** 会话化开演档：所选开场白文本（发送链并入 execution_context.roleplay_greeting） */
+  roleplayGreeting?: string
+  /** 会话化开演档：用户设定文本（发送链并入 execution_context.roleplay_user_persona） */
+  roleplayUserPersona?: string
 }
 
 const STORAGE_PREFIX = 'session-exec-options:'

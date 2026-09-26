@@ -1,0 +1,67 @@
+# 角色扮演专用管道（纯对话精简链）——经管道配置 ID `roleplay` 显式选用
+# （WS user_input 帧 / HTTP chat params / task_submit orchestration_key）。
+# 与 autonomous 的差异（一切为了沉浸感，扮演是对话不是任务）：
+# - 无任务域步骤：task_reminder（评估提醒）/duplicate_check（签名去重）/
+#   sensitive_checker（任务终检）/tool_cache 系列全部不在链上；
+# - 无多模态/godot 上下文等任务向装配；
+# - 对话循环：纯文本轮即本轮回复结束（会话语义），工具轮保留路由（防御，
+#   出厂卡 tool_ids: [] 时不触达）；
+# - 收尾无评估：无 task_reminder 即无提醒/裁决，文本落定即本轮完成。
+loop_bodies:
+- id: init
+  steps:
+  - id: init
+    steps:
+    - pipeline_workspace_lifecycle
+    - pipeline_environment_lifecycle
+- id: main
+  steps:
+  - context:
+      model_tier: '{{state.model_tier}}'
+    id: prepare
+    steps:
+    - pipeline_pause_guard
+    - pipeline_context_build
+    - pipeline_mode_material_inject
+    - pipeline_injected_param_validator
+    - pipeline_tool_schema
+    - pipeline_param_inject
+    - pipeline_model_prompt_adapter
+    - pipeline_prompt_build
+    - pipeline_isolation_guard
+    - pipeline_level_guard
+    - pipeline_security_check
+  - context:
+      temperature: 0.8
+    id: core
+    steps:
+    - pipeline_llm_core
+    - pipeline_spill_guard
+  - id: post
+    next:
+    - then: end
+      when: raw_tool_calls == [] or raw_tool_calls == None
+    - set:
+        core_plugin: pipeline_tool_core
+        core_type: tool_execute
+      then: loop
+      when: raw_tool_calls != [] and raw_tool_calls != None
+    - set:
+        core_plugin: pipeline_llm_core
+        core_type: llm_call
+      then: loop
+      when: core_type == 'tool_execute'
+    - then: end
+    steps: []
+  while: 'True'
+- id: exit
+  run_on_error: true
+  steps:
+  - id: exit
+    steps:
+    - pipeline_workspace_lifecycle
+    - pipeline_environment_lifecycle
+name: roleplay
+initial_state:
+  core_plugin: pipeline_llm_core
+  core_type: llm_call

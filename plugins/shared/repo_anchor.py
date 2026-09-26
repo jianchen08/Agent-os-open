@@ -107,6 +107,34 @@ def repo_read_verdict(resolved: Path) -> tuple[bool, str | None]:
     return (True, None)
 
 
+def repo_write_denied(resolved: Path) -> str | None:
+    """写面系统自保拒绝（ADR 2026-09-24-read-deny-write-zones 决策2）。
+
+    仓库根内拒绝目录对**写**恒拒——写区名单覆盖仓库源码/文档目录后，运行时
+    面与产物面（data/config/logs/.git 等）不随写区放行，否则 agent 可经名单
+    前缀改写内核运行时资产（登记簿/日志/规则配置）。仅约束根锚之外的写区
+    路径：workspace/project_root 锚内写不经本判定（任务工作区常驻仓库
+    ``.ai_workspaces``，锚内行为保持现状，不新开也不收口）。
+
+    Returns:
+        拒绝原因；None = 不拒绝（不在仓库根内，或在一等源码/文档区）。
+    """
+    root = resolve_repo_root()
+    if root is None:
+        return None
+    try:
+        rel = resolved.relative_to(root)
+    except ValueError:
+        return None
+    first = rel.parts[0] if rel.parts else ""
+    if first in REPO_READ_DENIED_DIRS:
+        return (
+            f"路径位于仓库 {first}/ 目录（运行时/产物区，不可写），"
+            "写操作被拒绝；写区覆盖仓库源码与文档目录"
+        )
+    return None
+
+
 def repo_walk_prune(resolved_root: Path) -> set[str]:
     """搜索根若在仓库根内，返回遍历需剪枝的拒绝目录绝对路径集合。
 

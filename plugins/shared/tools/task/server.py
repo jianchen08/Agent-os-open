@@ -20,14 +20,14 @@ _paths = bootstrap_plugin(__file__, extra=(os.path.join("system", "tasks"), "sys
 # 内部用 `from tasks.service import TaskService` 限定导入（M3 防误解析），
 # 要求 `tasks` 包所在目录（system/）也在搜索路径上。跨插件共享类型走 SDK。
 
-from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
-
 # 本插件 tool 模块在 exec 期绑定（不得改为 on_load 期/handler 内 `import tool`
 # 懒加载）：合宿静息态下裸名 `tool` 槽位是其他成员的同名模块（task_evaluate
 # 等成员在 exec 期绑定后占据槽位），运行期 import 会命中异成员模块；exec 期
 # 处于宿主 loader 的裸名遮蔽保护窗口（异成员模块已摘除、自身目录在 sys.path
 # 首位），解析结果必为本插件 tool.py。
 import tool as tool_mod  # noqa: E402
+
+from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
 
 plugin = AgentOSPlugin("task_manage_tool")
 @plugin.on_load

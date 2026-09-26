@@ -12,9 +12,9 @@
  * 外部依赖边界（网络）mock：getSessions（列表拉取/强制重拉）、
  * pipelineMessageStore（消息拉取）、getDefaults/getLLMConfig（挂起避免网络）。
  */
+import { QueryClientProvider } from '@tanstack/react-query'
 import { render, act } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { QueryClientProvider } from '@tanstack/react-query'
 
 vi.mock('@/services/api/session', () => ({
   getSessions: vi.fn(),
@@ -54,18 +54,17 @@ vi.mock('@/hooks/queries/useAgentsQuery', async () => {
   }
 })
 
+import { readSessions } from '@/hooks/queries/useSessionsQuery'
 import { getSessions } from '@/services/api/session'
-import { ChatContainer } from '../ChatContainer'
 import { queryClient } from '@/services/query/queryClient'
 import { queryKeys } from '@/services/query/queryKeys'
 import { useAgentTabStore } from '@/stores/agentTabStore'
+import { useNotificationStore } from '@/stores/notificationStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { useSessionStore } from '@/stores/sessionStore'
-import { useNotificationStore } from '@/stores/notificationStore'
-import { readSessions } from '@/hooks/queries/useSessionsQuery'
-import { resolveSendTarget } from '@/utils/mappers'
-import { mapThreadToSession } from '@/utils/mappers'
+import { resolveSendTarget, mapThreadToSession  } from '@/utils/mappers'
 import { uiStorage } from '@/utils/storage'
+import { ChatContainer } from '../ChatContainer'
 import type { SendMessageParams } from '../types'
 
 const chatInputSpy = vi.hoisted(() => ({

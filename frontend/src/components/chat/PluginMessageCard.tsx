@@ -8,8 +8,8 @@
  * 消息组件；声明禁用（registry 无此样式）同源消失，消息回退默认渲染。
  */
 
-import { contributionRegistry, type PageDeclaration } from '@/services/schema/ContributionRegistry'
 import { WebviewWidget } from '@/components/schema/widgets/WebviewWidget'
+import { contributionRegistry, type PageDeclaration } from '@/services/schema/ContributionRegistry'
 
 /** 消息 metadata 中携带样式 id 的键（消息卡声明契约） */
 export const MESSAGE_STYLE_METADATA_KEY = 'message_style'

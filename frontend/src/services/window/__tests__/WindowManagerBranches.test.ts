@@ -9,8 +9,8 @@
  * electronAPI 作为外部依赖（宿主进程）用 stub 替换。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { WebWindowManager, ElectronWindowManager, isElectronWindowAvailable } from '../WindowManager'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { WebWindowManager, ElectronWindowManager, isElectronWindowAvailable } from '../WindowManager'
 import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 
 const page = (extra: Partial<PageDeclaration> = {}): PageDeclaration =>

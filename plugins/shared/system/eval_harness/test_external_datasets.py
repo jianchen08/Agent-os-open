@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # @feature: FP-0.2.二 外部公开数据集接入 | @ci: python-coverage
 # @feature: 外部公开数据集接入（ADR 2026-09-16-external-dataset-sourcing） | @ci: python-coverage
 """external_datasets 纯函数单测：难度分带/分层种子/oracle 改造/许可画像/轨迹池映射。"""

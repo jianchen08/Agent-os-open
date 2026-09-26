@@ -5,6 +5,8 @@ import { MediaTimelineView } from '@/components/approval/MediaTimelineView'
 // 任务域 file_tree 绑定（启停动作/状态词表）——组合根挂载副作用注册，
 // file_tree 通用件经注册缝消费、不感知任务域（2026-09-18 三向耦合审查 W3）
 import '@/components/schema/widgets/taskFileTreeActions'
+import { ContractStatusPanel } from '@/components/debug/ContractStatusPanel'
+import { WorkspaceNavPage } from '@/components/layout/WorkspaceNavPage'
 import { ArtifactPreviewWidget } from '@/components/schema/widgets/ArtifactPreviewWidget'
 import { ChartWidget } from '@/components/schema/widgets/ChartWidget'
 import { CodeBlockWidget } from '@/components/schema/widgets/CodeBlockWidget'
@@ -18,13 +20,13 @@ import { GalleryWidget } from '@/components/schema/widgets/GalleryWidget'
 import { HtmlPreviewWidget } from '@/components/schema/widgets/HtmlPreviewWidget'
 import { InlineEditWidget } from '@/components/schema/widgets/InlineEditWidget'
 import { KanbanWidget } from '@/components/schema/widgets/KanbanWidget'
+import { OnboardingPanel } from '@/components/schema/widgets/OnboardingPanel'
 import {
   AgentsPanel,
   PipelineManagerPanel,
   SettingsHubPanel,
 } from '@/components/schema/widgets/PanelHostWidget'
 import { ReviewDocumentWidget } from '@/components/schema/widgets/ReviewDocumentWidget'
-import { WorkspaceNavPage } from '@/components/layout/WorkspaceNavPage'
 import { SortableListWidget } from '@/components/schema/widgets/SortableListWidget'
 import { StatusCardWidget } from '@/components/schema/widgets/StatusCardWidget'
 import { TableWidget } from '@/components/schema/widgets/TableWidget'
@@ -32,8 +34,8 @@ import { TerminalWidget } from '@/components/schema/widgets/TerminalWidget'
 import { WebviewWidget } from '@/components/schema/widgets/WebviewWidget'
 import { WidgetStage } from '@/components/schema/widgets/WidgetStage'
 import { WizardWidget } from '@/components/schema/widgets/WizardWidget'
+import { ZonePolicySettingsWidget } from '@/components/schema/widgets/ZonePolicySettingsWidget'
 import { TextDiffView } from '@/components/shared/TextDiffView'
-import { ContractStatusPanel } from '@/components/debug/ContractStatusPanel'
 import { DbAdminPage } from '@/pages/debug/DbAdminPage'
 import { DebugEvaluationMetricsPage } from '@/pages/debug/DebugEvaluationMetricsPage'
 import { DebugExecutionRecordsPage } from '@/pages/debug/DebugExecutionRecordsPage'
@@ -42,8 +44,8 @@ import { DebugPipelineStatePage } from '@/pages/debug/DebugPipelineStatePage'
 import { DebugSessionsPage } from '@/pages/debug/DebugSessionsPage'
 import { DebugTasksPage } from '@/pages/debug/DebugTasksPage'
 import { DebugUsersPage } from '@/pages/debug/DebugUsersPage'
-import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
 import { MemoryPage } from '@/pages/memory/MemoryPage'
+import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
 import { widgetRegistry } from './WidgetRegistry'
 import type { WidgetComponent } from './WidgetRegistry'
 import type { Annotation } from '@/types/review'
@@ -122,6 +124,9 @@ const WIDGETS: WidgetEntry[] = [
   { name: 'kanban', component: KanbanWidget, spaces: ['workspace'], fallback: 'table' },
   // 顶栏打开的工作区面板（可关闭页签，非常驻）
   { name: 'settings_hub', component: SettingsHubPanel, spaces: ['workspace', 'floating'] },
+  // 授权区管理（security_check contributes.pages space=settings 声明页；
+  // RenderingSpaceType 无 settings——get() 直查不筛 spaces，元数据仅降级用）
+  { name: 'zone_policy_settings', component: ZonePolicySettingsWidget, spaces: ['workspace'] },
   // agents_panel = agent_manager 插件页面承载（原 AgentsPage 内容迁移；
   // tools_panel 已随 ToolsPage 退役，plugins_panel 独立面板随双入口收敛撤除——
   // 能力浏览并入设置中枢「插件注册表」kernel-plugins）
@@ -177,6 +182,9 @@ const WIDGETS: WidgetEntry[] = [
   // 记忆域（hindsight_memory 声明页承载，预置域 widget——交互复杂度
   // 超出声明组台能力，验收标准=入口声明+数据面插件化）
   { name: 'memory_panel', component: MemoryPanelWidget, spaces: ['workspace'] },
+  // 引导清单页（onboarding_service 声明页承载，memory_panel 同判据：
+  // 巡礼/向导/宿主页签导航超出 webview 沙箱能力，内容面插件化）
+  { name: 'onboarding_panel', component: OnboardingPanel, spaces: ['workspace'] },
   // 统一导航页（新标签页按钮与空标签态同一内容源：workspace 卡片主体验 +
   // 顶部搜索 + 非 workspace 空间「更多」折叠区，长尾页面全量收录）
   { name: 'workspace_nav_page', component: WorkspaceNavPage, spaces: ['workspace'] },

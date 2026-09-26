@@ -84,6 +84,7 @@ fn llm_manifest() -> agentos_core::traits::PluginManifest {
         http_endpoints: vec![],
         ui_schema: None,
         contributes: None,
+        restricted_capabilities: Vec::new(),
         enabled: None,
         activation: None,
         persistent_fields: vec![],

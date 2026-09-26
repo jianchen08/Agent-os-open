@@ -1,18 +1,19 @@
 /** 聊天容器组件 整合消息列表、Agent Tab 导航和输入区域的完整聊天界面。 */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useShallow } from 'zustand/react/shallow'
 import { Loader2 } from '@/assets/icons'
 import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
 import { usePipelineRunsQuery } from '@/hooks/queries/usePipelineRunsQuery'
 import { forceReloadSessions, readSessions } from '@/hooks/queries/useSessionsQuery'
+import { useSessionThemeScope } from '@/hooks/useSessionThemeScope'
 import { getDefaults, getLLMConfig, type LLMDefaults } from '@/services/api/config'
 import { switchThinkingMode } from '@/services/api/thinkingMode'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
-import { useSessionThemeScope } from '@/hooks/useSessionThemeScope'
 import {
   useThinkingModeStore,
   useExplicitThinkingStrength,
@@ -27,12 +28,11 @@ import {
 import { mainPipelineIdOf } from '@/utils/mappers'
 import { resolveModelDisplayName } from '@/utils/modelName'
 import { findModelParams, mapParamsToStrength } from '@/utils/thinkingStrength'
-import { createPortal } from 'react-dom'
 import { AgentTabBar } from './AgentTabBar'
 import { ChatInput } from './ChatInput'
-import { ReferenceSelectionRow } from './ReferenceSelectionRow'
 import { MessageList } from './MessageList'
 import { PendingInputQueueBar } from './PendingInputQueueBar'
+import { ReferenceSelectionRow } from './ReferenceSelectionRow'
 import { VotingPanel } from './VotingPanel'
 import type { ChatContainerProps } from './types'
 import type { Message } from '@/types/models'

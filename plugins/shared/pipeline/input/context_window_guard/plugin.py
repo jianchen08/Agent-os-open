@@ -715,9 +715,10 @@ L2 是 L1 的紧凑概括（每个字段一两句话）。降级才有意义。
         return "\n".join(lines)
 
     # 发送给 LLM 前必须剥离的内部字段（fork 复制消息时清理，不改动原消息；
-    # metadata=内核 client_message_id 等持久化对账数据，与 llm_core 出站
-    # 黑名单 _OUTBOUND_INTERNAL_FIELDS 对齐——严格 provider 拒收未知字段）
-    _INTERNAL_MSG_FIELDS = ("seq", "tool_result", "_context_form", "metadata")
+    # metadata=内核 client_message_id 等持久化对账数据，agent_id=消息执行身份
+    # 戳记，与 llm_core 出站黑名单 _OUTBOUND_INTERNAL_FIELDS 对齐——严格
+    # provider 拒收未知字段）
+    _INTERNAL_MSG_FIELDS = ("seq", "tool_result", "_context_form", "metadata", "agent_id")
 
     @classmethod
     def _render_fork_message(cls, msg: dict[str, Any]) -> dict[str, Any]:

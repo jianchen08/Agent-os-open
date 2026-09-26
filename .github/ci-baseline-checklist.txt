@@ -1,0 +1,38 @@
+# CI 能力基线清单（元门禁 V8 消费，scripts/check_gate_wiring.py）
+# ─────────────────────────────────────────────────────────────────
+# 格式（竖线分隔四列）:  能力行 | satisfied_by | 状态 | 备注
+#   能力行 = 能力×域（笼统一行会掩盖单域盲区，如"有lint"≠"全仓有lint"）
+#   satisfied_by = 逗号分隔门禁 id；ci: 前缀 = CI 内联 job 名（如 ci:secret-scan）
+#   状态 = covered（id 必须存在且已接线，复用 V1 判定）
+#        | missing（计数基线锁 .github/gate-wiring-baseline.txt 只减不增）
+#        | exempt（必须在备注给理由）
+# 约定：执法挂起（如覆盖率 --skip）记 covered+备注，不降状态——本清单管
+# "能力存在性"，执法强度由 V4 等棘轮管，两维度正交。
+# 初值快照 2026-09-24（missing=9，全部有批次落点，见
+# docs/working/企业级成熟度整改执行方案_20260924.md；落地一批转 covered
+# 一批并收紧 missing_max）。
+format-rust | kernel-fmt | covered |
+lint-rust | kernel-clippy | covered |
+lint-python-sdk | sdk-lint | covered |
+lint-frontend | frontend-lint | covered |
+typecheck-python | sdk-mypy,plugins-mypy-baseline | covered |
+typecheck-frontend | frontend-typecheck,electron-compile | covered |
+tests-rust | kernel-test | covered |
+tests-python | plugins-coverage,plugins-heavy | covered |
+tests-frontend | frontend-coverage | covered |
+build | kernel-build,kernel-build-release | covered |
+coverage-rust | kernel-coverage | covered | 执法挂起（--skip，批次3恢复）；车道在跑
+coverage-python | plugins-coverage | covered | 同上
+dep-vuln-rust | rust-deny | covered |
+secret-scan | ci:secret-scan | covered | CI 内联 job（gitleaks 全历史，恒跑）
+license-rust | rust-deny | covered | 仅 Rust；Py/JS 许可证扫描行业可选级未单列
+lint-python-plugins | plugins-lint | covered | 批次2 落地（1590 存量基线锁，含 mcp-servers 36）
+lint-python-scripts | scripts-lint | covered | 批次0-6 落地（33 存量基线锁）
+tests-electron | electron-test | covered | 批次0-6 落地（8 文件 96 用例，此前零车道）
+dep-vuln-python-js | ci:python-audit,ci:frontend-audit | covered | 批次8-5 落地（依赖面变更 PR 触发 pip-audit/pnpm audit）
+duplication-frontend | frontend-jscpd-baseline | missing | 批次0-1 接线转正后 covered
+dead-code-frontend | frontend-knip-baseline | missing | 批次0-1
+artifact-size | bundle-size | covered | 批次5 落地（vendor 字节基线锁+无效动态导入计数锁=2 处避环合法动态导入）
+docs | doc-baseline-sync,doc-paths | covered | 批次6 落地（基线总表生成式+活文档路径闸）
+config-validation | config-static | covered | 批次4-4 落地（81 yaml 可解析+管道引用存在性；G2 深校验仍由内核持有）
+commit-convention | - | exempt | 行业可选；本仓 traceability-gate+tdd-gate 提供更高价值替代

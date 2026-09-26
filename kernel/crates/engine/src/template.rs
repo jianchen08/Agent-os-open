@@ -91,7 +91,7 @@ fn render_expr(expr: &str, state: &Value, project_root: &Path) -> String {
         state_lookup(state, rest).unwrap_or_default()
     } else {
         // 无法识别 → 当字面量（恢复原始 {{...}} 形式）
-        format!("{{{{{}}}}}", expr)
+        format!("{{{{{expr}}}}}")
     }
 }
 

@@ -43,7 +43,7 @@ def _load_module() -> Any:
     return mod
 
 
-@pytest.fixture()
+@pytest.fixture
 def form_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """临时项目根：config/task_form.yaml + config/agents/**/*.yaml。"""
     config_dir = tmp_path / "config"

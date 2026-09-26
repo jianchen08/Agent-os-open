@@ -30,7 +30,7 @@ pub async fn injected_config(
                 .unwrap_or(false)
             {
                 return Err(PluginError {
-                    message: format!("Plugin config parse error: {}", e),
+                    message: format!("Plugin config parse error: {e}"),
                     code: Some("CONFIG_PARSE_ERROR".to_string()),
                     source: Some("plugin-invoker".to_string()),
                 });
@@ -321,6 +321,7 @@ mod tests {
             http_endpoints: vec![],
             ui_schema: None,
             contributes: None,
+            restricted_capabilities: Vec::new(),
             enabled: None,
             activation: None,
             provides: None,

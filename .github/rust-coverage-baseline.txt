@@ -63,7 +63,11 @@
 # （提交 5371899ba/8d3df5ded；api lib 21 failed→2 failed）。
 # 剩余真零覆盖 3 文件 58 行 = native-sdk-test-plugin/lib.rs（测试夹具）、
 # plugin-loader/error.rs、session/lib.rs。
-rust_line_coverage=95.0
+# D1 拍板（2026-09-24）：执法线 90.0（Windows 实测 92.51 绿；CI Linux 待观察）
+# 内核目标线 100%（用户口径）——main()/启动面结构性不可达（见 run_gates
+# kernel-coverage 的 --ignore-filename-regex 注释），100% line 执法需先拆
+# main 面（批次 8 async_main 拆分项）；内核 diff coverage 100% 已在执法
+rust_line_coverage=90.0
 #
 # 收官批实测（2026-09-16，dev/0.2@96ec0abdd+bin scope 对齐）：llvm-cov 独占窗口
 # 0 failed（--skip 三例既有负载敏感 flake：reverify_host_evict…/

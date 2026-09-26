@@ -14,17 +14,17 @@
  */
 
 import { fireEvent, render, screen } from '@testing-library/react'
-import type { ReactElement } from 'react'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { WorkspaceNavPage } from '@/components/layout/WorkspaceNavPage'
-import { WebviewWidget } from '@/components/schema/widgets/WebviewWidget'
 import { renderPageContent } from '@/components/schema/PageRenderer'
+import { WebviewWidget } from '@/components/schema/widgets/WebviewWidget'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
-import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
+import type { ReactElement } from 'react'
 
 /** 已退役的四模式面板具名 widget（前端不再注册，防复活守护） */
 const RETIRED_PANEL_WIDGETS = [

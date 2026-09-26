@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # @feature: FP-0.2.二 内部模块 manifest（worktree gitdir 跨侧统一） | @ci: python-coverage
 """_workspace_git_ops._normalize_worktree_gitdir_links 单测（真实 git 仓）。
 
@@ -11,14 +10,14 @@ from __future__ import annotations
 
 import importlib.util
 import logging
-import shutil
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
-from typing import Any
 
 pytestmark = pytest.mark.unit
 

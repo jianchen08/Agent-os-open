@@ -1040,7 +1040,7 @@ class TestPathTraversalResolvedBranch:
 
         assert reason, "含 NUL 的路径绝不允许放行"
         assert ("Invalid path" in reason) or ("Null byte injection" in reason), reason
-        assert path.split("\x00")[0] in reason, "拒绝理由须含可定位的路径前缀"
+        assert path.split("\x00", maxsplit=1)[0] in reason, "拒绝理由须含可定位的路径前缀"
 
     @pytest.mark.parametrize(
         ("path", "expected"),

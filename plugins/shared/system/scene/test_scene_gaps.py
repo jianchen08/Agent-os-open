@@ -237,9 +237,8 @@ class TestPersistenceWriteFailures:
         assert persistence.load_scenes() == [], "只读文件应仍可读（读失败不在此分支）"
 
         try:
-            with caplog.at_level("ERROR", logger="scene.persistence"):
-                with pytest.raises(OSError):
-                    persistence.save_scene(_scene("s1"))
+            with caplog.at_level("ERROR", logger="scene.persistence"), pytest.raises(OSError):
+                persistence.save_scene(_scene("s1"))
         finally:
             target.chmod(0o666)
         assert any("写入场景数据失败" in r.getMessage() for r in caplog.records)

@@ -135,25 +135,33 @@ async def read_execution_detail(
     level: str,
     iteration: int | None = None,
     fields: list[str] | None = None,
+    allowed_pipelines: list[str] | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """查看管道执行的详细记录（从内核 trace/message 表读取）。
 
-    经 service-registry 能力调用内核 ``messages.list`` / ``traces.list`` 读取
-    真实对话消息与插件轨迹。
+    经 service-registry 能力调用内核 ``messages.list`` / ``traces.list_by_pipeline``
+    读取真实对话消息与插件轨迹。
 
     Args:
         pipeline_run_id: 管道运行 ID（映射到内核 messages.pipeline_id 主键）。
         level: 抽象层级：
-            - ``skeleton``：骨架——每条消息一行（``[seq N] role: preview``），
-              附插件 step 轨迹（若 traces 可查）。
+            - ``skeleton``：骨架——traces patch 流为主干，每个有更新的 step 一行
+              （iteration 归属 + 插件名 + patch_type 分型 + 关键变更字段），
+              Error patch 独立锚点化（error_anchors）；消息不再进骨架。
             - ``L1``：按对话轮次（turn）压缩——每遇到一条 role=user 开新轮次，
               把后续 assistant/tool 聚合进同一轮。
             - ``L0``：原始记录——返回完整 content_preview + tool_calls_json 等。
+              白名单全量（§10.5-1）：第 1 条消息 / 各轮用户消息 / 命令
+              （tool_calls_json）/ 交互工具结果与选项不走预览截断。
         iteration: 旧参数（按 iteration 过滤）。新版内核消息表无 iteration 字段，
             只有 seq_in_branch；为向后兼容保留，传入时映射为「第 iteration 个轮次」
             （1-based），用以框定 L1/L0 的轮次范围。None 表示不按轮次过滤。
         fields: L0 层字段过滤（保留兼容；当前实现返回全字段）。
+        allowed_pipelines: 查询边界（复盘管道 state 登记的被复盘管道集合，
+            §10.5-2）。非 None 且非空时 pipeline_run_id 不在集合内即拒绝
+            （不发内核查询）；None 或空（未登记）保持旧行为放行——单任务
+            复盘兼容。
     """
     if _capability_caller is None:
         return {"error": "capability 未注入，无法查询内核执行记录"}
@@ -163,16 +171,17 @@ async def read_execution_detail(
     if not level:
         return {"error": "level 不能为空"}
 
-    # thread_id: traces 按 thread_id 查(复盘 agent 传入,缺省用 pipeline_run_id)
-    thread_id = kwargs.get("thread_id") or pipeline_run_id
+    # 查询边界执法：登记集合非空即生效，越界拒绝且不发内核查询。
+    if allowed_pipelines and pipeline_run_id not in allowed_pipelines:
+        return {
+            "error": f"pipeline {pipeline_run_id} 不在本复盘登记的被复盘集合内（查询越界）",
+            "error_code": "PIPELINE_OUT_OF_SCOPE",
+        }
 
     if level == "skeleton":
-        # skeleton = 轨迹流程(traces)为主 + messages 轮次骨架为辅
-        traces = await _fetch_traces(thread_id)
-        messages = await _fetch_messages(pipeline_run_id)
-        if isinstance(messages, dict) and "error" in messages:
-            messages = []
-        return _render_skeleton(pipeline_run_id, traces, cast(list[dict[str, Any]], messages))
+        # skeleton = traces patch 流主干（每有更新 step 一行）
+        traces = await _fetch_traces_by_pipeline(pipeline_run_id)
+        return _render_skeleton(pipeline_run_id, traces)
 
     if level == "L1":
         # L1 = 压缩摘要(Hindsight 压缩块);无压缩块时降级用 messages 轮次摘要
@@ -191,7 +200,7 @@ async def read_execution_detail(
         return _render_l1(pipeline_run_id, turns)
 
     if level == "L0":
-        # L0 = 穿透到原文(messages + tool_calls),按需加载
+        # L0 = 穿透到原文(messages + tool_calls),按需加载;白名单类全量
         messages = await _fetch_messages(pipeline_run_id)
         if isinstance(messages, dict) and "error" in messages:
             return messages
@@ -201,6 +210,32 @@ async def read_execution_detail(
         return _render_l0(pipeline_run_id, cast(list[dict[str, Any]], records))
 
     return {"error": f"不支持的 level: {level}"}
+
+
+async def _fetch_traces_by_pipeline(pipeline_run_id: str) -> list[dict[str, Any]]:
+    """经 service-registry 调 traces.list_by_pipeline（按 pipeline 直查 patch 流）。
+
+    每条 trace 对齐内核 TraceEntry：trace_id/pipeline_id/seq/plugin_id/
+    patch_type/patch_data/created_at。调用失败降级空列表（不崩骨架）。
+    """
+    assert _capability_caller is not None
+    try:
+        result = await _capability_caller(
+            "traces.list_by_pipeline",
+            {"pipeline_id": pipeline_run_id},
+        )
+    except Exception as exc:  # noqa: BLE001 — 内核调用失败统一降级
+        logger.warning(
+            "[read_execution_detail] traces.list_by_pipeline 调用失败 pipeline=%s: %s",
+            pipeline_run_id,
+            exc,
+        )
+        return []
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict) and isinstance(result.get("traces"), list):
+        return result["traces"]
+    return []
 
 
 async def _fetch_messages(pipeline_run_id: str) -> list[dict[str, Any]] | dict[str, Any]:
@@ -228,35 +263,6 @@ async def _fetch_messages(pipeline_run_id: str) -> list[dict[str, Any]] | dict[s
         return result
     if isinstance(result, dict) and isinstance(result.get("messages"), list):
         return result["messages"]
-    return []
-
-
-async def _fetch_traces(thread_id: str) -> list[dict[str, Any]]:
-    """经 service-registry 调用 traces.list，返回插件步骤轨迹(state 变更 patch)。
-
-    每条轨迹含 plugin_id / patch_type / patch_data(状态窗口 JSON) /
-    seq / created_at。这是复盘的「轨迹流程」主线——看每个插件
-    这步做了什么(state 怎么变、路由走向、错误),不含对话原文。
-
-    Args:
-        thread_id: 会话 ID(traces 按 thread_id 查询)
-
-    Returns:
-        轨迹列表；调用失败返回空列表(降级,不崩)。
-    """
-    assert _capability_caller is not None
-    try:
-        result = await _capability_caller(
-            "traces.list",
-            {"thread_id": thread_id},
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[read_execution_detail] traces.list 调用失败 thread=%s: %s", thread_id, exc)
-        return []
-    if isinstance(result, list):
-        return result
-    if isinstance(result, dict) and isinstance(result.get("traces"), list):
-        return result["traces"]
     return []
 
 
@@ -299,21 +305,26 @@ async def _fetch_compression_chunks(pipeline_id: str) -> list[dict[str, Any]]:
 def _render_skeleton(
     pipeline_run_id: str,
     traces: list[dict[str, Any]],
-    messages: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """渲染 skeleton 层：轨迹流程(traces)为主 + messages 轮次骨架为辅。
+    """渲染 skeleton 层：traces patch 流主干（§10.1 裁定）。
 
-    轨迹主线：每个插件步骤一行,展示插件名 + state 变更的关键字段(路由/token/错误)。
-    对话骨架：每条消息一行(附在 trace_steps 后),供快速定位轮次。
+    每个有更新的 step 一行：iteration 归属（可从 patch state 键推导时）+
+    插件名 + patch_type 分型 + 关键变更字段。Error patch 独立锚点化
+    （error_anchors 单独可查，不淹没在普通行里）。消息不进骨架——骨架只回答
+    「流程怎么走的、哪一步出的错」，具体内容按需 L0 钻取。
 
-    设计理由:复盘优先看「流程是否正常」(哪个插件跑了/state 怎么变/路由走向),
-    而非直接灌对话原文——具体内容按需通过 L0 穿透。
+    设计理由：patch 流 = 引擎对「有更新 step」的权威记录（有更新才写），
+    以它为主干避免 0.1 式消息平铺把错误锚点和轮次归属淹没。
     """
-    # ── 轨迹主线:每个插件步骤 ──
     trace_steps: list[dict[str, Any]] = []
+    error_anchors: list[dict[str, Any]] = []
+    # iteration 归属：patch state 键推导（引擎每轮覆盖写 iteration 到 state，
+    # StateUpdate patch 携带即归该轮；推导不出为 None）
+    current_iteration: int | None = None
     for tr in traces:
-        plugin_id = tr.get("plugin_id", "?")
         seq = tr.get("seq", tr.get("seq_in_branch"))
+        plugin_id = str(tr.get("plugin_id", "?"))
+        patch_type = str(tr.get("patch_type", "StateUpdate"))
         patch_data = tr.get("patch_data")
         state_changes: dict[str, Any] = {}
         if isinstance(patch_data, str):
@@ -323,6 +334,10 @@ def _render_skeleton(
                 state_changes = {"_raw": patch_data[:100]}
         elif isinstance(patch_data, dict):
             state_changes = patch_data
+
+        raw_iter = state_changes.get("iteration")
+        if isinstance(raw_iter, int):
+            current_iteration = raw_iter
 
         # 提取复盘关键字段(路由/token/错误/状态)
         key_fields: dict[str, Any] = {}
@@ -335,33 +350,32 @@ def _render_skeleton(
             if k in state_changes:
                 key_fields[k] = state_changes[k]
 
-        trace_steps.append({
+        step = {
             "seq": seq,
+            "iteration": current_iteration,
             "plugin": plugin_id,
+            "patch_type": patch_type,
             "state_keys": list(state_changes.keys())[:8],
             "key_changes": key_fields if key_fields else None,
-        })
+        }
+        trace_steps.append(step)
 
-    # ── 对话骨架:每条消息一行(轮次定位用)──
-    message_lines: list[str] = []
-    for msg in messages:
-        seq = msg.get("seq_in_branch")
-        role = msg.get("role", "?")
-        preview = _safe_content_to_str(msg.get("content_preview")).replace("\n", " ").strip()
-        preview = preview[:60]
-        if preview:
-            message_lines.append(f"[seq {seq}] {role}: {preview}")
-        else:
-            message_lines.append(f"[seq {seq}] {role}")
+        if patch_type == "Error":
+            error_anchors.append({
+                "seq": seq,
+                "iteration": current_iteration,
+                "plugin": plugin_id,
+                "raw_error": state_changes.get("raw_error"),
+            })
 
     return {
         "pipeline_run_id": pipeline_run_id,
         "level": "skeleton",
         "trace_steps": trace_steps,
         "trace_count": len(trace_steps),
-        "message_lines": message_lines,
-        "message_count": len(messages),
-        "hint": "trace_steps=插件流程(状态变更), message_lines=对话骨架(定位轮次), L1=压缩摘要, L0=穿透原文",
+        "error_anchors": error_anchors,
+        "hint": "trace_steps=patch流主干(每有更新step一行,带iteration归属), "
+                "error_anchors=错误锚点(单独钻取), L1=压缩摘要, L0=穿透原文(白名单类全量)",
     }
 
 
@@ -490,20 +504,42 @@ def _select_l0_records(
 def _render_l0(
     pipeline_run_id: str, records: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    """渲染 L0 层：返回完整 content_preview + tool_calls_json 等原始字段。"""
+    """渲染 L0 层：返回完整 content_preview + tool_calls_json 等原始字段。
+
+    白名单全量（§10.5-1，裁定 2026-09-25）：第 1 条消息 / 各轮用户消息 /
+    命令（tool_calls_json）/ 交互工具结果与选项不走 500 字符预览帽——
+    「任务原始指令 vs agent 行为」对照与用户决策点证据不可截断；其余
+    （assistant/tool 普通内容）保持截断防上下文爆炸。
+    """
     filtered: list[dict[str, Any]] = []
+    first_user_seen = False
     for msg in records:
+        content = _safe_content_to_str(msg.get("content_preview"))
+        role = msg.get("role")
+        tool_calls_json = msg.get("tool_calls_json")
+        # 白名单判定（content 维度）：首条 user 消息（任务原始指令）/ 各轮
+        # 用户消息 / 交互工具结果。命令本体 tool_calls_json 恒全量透传
+        # （不经 _truncate_text），不参与 content 白名单判定。
+        if role == "user" and not first_user_seen:
+            first_user_seen = True
+            is_whitelisted = True
+        else:
+            is_whitelisted = (
+                role == "user" or _is_interaction_tool_result(msg)
+            )
         item: dict[str, Any] = {
             "message_id": msg.get("message_id"),
             "run_id": msg.get("run_id"),
             "seq_in_branch": msg.get("seq_in_branch"),
-            "role": msg.get("role"),
-            "content": _truncate_text(
-                _safe_content_to_str(msg.get("content_preview")), _CONTENT_MAX_LEN
+            "role": role,
+            "content": (
+                content
+                if is_whitelisted
+                else _truncate_text(content, _CONTENT_MAX_LEN)
             ),
+            "full": is_whitelisted,
             "created_at": msg.get("created_at"),
         }
-        tool_calls_json = msg.get("tool_calls_json")
         if tool_calls_json:
             item["tool_calls_json"] = tool_calls_json
         tool_call_id = msg.get("tool_call_id")
@@ -520,6 +556,20 @@ def _render_l0(
         "record_count": len(filtered),
         "records": filtered,
     }
+
+
+def _is_interaction_tool_result(msg: dict[str, Any]) -> bool:
+    """交互工具结果判定（审批卡/选择卡的选项与用户选择是决策点证据）。
+
+    判据：tool_call_id 在场（tool 角色结果）且内容含审批/选择卡契约特征
+    （approved/rejected/response_type/selection 等结构化键）。误判代价低
+    （多给全量），漏判代价高（决策点证据被截断），故宽匹配。
+    """
+    if msg.get("role") != "tool" or not msg.get("tool_call_id"):
+        return False
+    content = _safe_content_to_str(msg.get("content_preview"))
+    markers = ("approved", "rejected", "response_type", "selection", "choice", "option")
+    return any(m in content.lower() for m in markers)
 
 
 def _truncate_text(text: str | None, max_len: int) -> str | None:

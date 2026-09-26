@@ -11,10 +11,10 @@
  */
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { invalidateKnowledgeBaseCache, useKnowledgeBaseQuery } from '@/hooks/queries/useKnowledgeBaseQuery'
 import apiClient from '@/services/api/client'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import { KnowledgeBaseContent } from '../KnowledgeBaseContent'
-import { invalidateKnowledgeBaseCache, useKnowledgeBaseQuery } from '@/hooks/queries/useKnowledgeBaseQuery'
 
 vi.mock('@/services/api/client', () => ({
   default: {

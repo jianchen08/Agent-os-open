@@ -43,17 +43,17 @@ import { evaluateWhen } from '@/services/schema/whenExpression'
 import { registerSessionProject, createSessionWithProject } from '@/services/sessionCreation'
 import { saveSessionExecutionOptions } from '@/services/sessionExecutionOptions'
 import { openWorkspacePanel, openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
-import {
-  resolveSessionByPipeline,
-  SettingsEntryButton,
-  SIDEBAR_STYLES,
-} from './SidebarParts'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useAuthStore } from '@/stores/authStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
+import {
+  resolveSessionByPipeline,
+  SettingsEntryButton,
+  SIDEBAR_STYLES,
+} from './SidebarParts'
 import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 import type { Session } from '@/types'
 

@@ -170,28 +170,45 @@ describe('SessionEditModal — Agent 下拉', () => {
     }
   })
 
-  it('选中 Agent 后保存 → agentId 取 configId 优先（无 configId 才用 id）', async () => {
+  it('选中 Agent 后保存 → agentId 取 id 优先（无 id 才用 configId）', async () => {
     useAgentsQueryMock.mockReturnValue({
       data: [
         makeAgent({ id: 'a-1', configId: 'cfg-main', name: '主控' }),
-        makeAgent({ id: 'raw-id-only', configId: undefined, name: '无配置ID' }),
+        makeAgent({ id: undefined, configId: 'cfg-fallback', name: '无ID' }),
       ],
     })
     const { onSave } = renderModal()
 
     const combo = await screen.findByRole('combobox')
-    fireEvent.change(combo, { target: { value: 'raw-id-only' } })
+    fireEvent.change(combo, { target: { value: 'cfg-fallback' } })
     fireEvent.click(screen.getByRole('button', { name: /创建/ }))
 
     await waitFor(() => expect(onSave).toHaveBeenCalled())
-    // 无 configId → 回退 id
-    expect(onSave.mock.calls[0][2]).toBe('raw-id-only')
+    // 无 id → 回退 configId
+    expect(onSave.mock.calls[0][2]).toBe('cfg-fallback')
 
-    // configId 优先路径
-    fireEvent.change(combo, { target: { value: 'cfg-main' } })
+    // id 优先路径
+    fireEvent.change(combo, { target: { value: 'a-1' } })
     fireEvent.click(screen.getByRole('button', { name: /创建/ }))
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(2))
-    expect(onSave.mock.calls[1][2]).toBe('cfg-main')
+    expect(onSave.mock.calls[1][2]).toBe('a-1')
+  })
+
+  it('模式包 agent → 保存值携带完整模式键（mode_X/<stem>，非裸 config_id）', async () => {
+    useAgentsQueryMock.mockReturnValue({
+      data: [
+        makeAgent({ id: 'mode_roleplay/card_mira', configId: 'card_mira', name: '星野未来' }),
+      ],
+    })
+    const { onSave } = renderModal()
+
+    const combo = await screen.findByRole('combobox')
+    fireEvent.change(combo, { target: { value: 'mode_roleplay/card_mira' } })
+    fireEvent.click(screen.getByRole('button', { name: /创建/ }))
+
+    await waitFor(() => expect(onSave).toHaveBeenCalled())
+    // 绑定裸 config_id 会使模式键丢前缀、context_build 人设装配落空（回归锚）
+    expect(onSave.mock.calls[0][2]).toBe('mode_roleplay/card_mira')
   })
 })
 

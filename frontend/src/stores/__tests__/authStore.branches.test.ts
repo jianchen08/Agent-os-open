@@ -38,6 +38,7 @@ const tl = vi.hoisted(() => ({
   refresh: vi.fn(),
   scrubLegacyTokenStorages: vi.fn(),
   onTokenChanged: vi.fn(),
+  loadMirroredAuthSession: vi.fn(),
 }))
 
 const growthLoop = vi.hoisted(() => ({
@@ -308,6 +309,7 @@ describe('authStore initializeAuth 恢复分支', () => {
     tl.isExpired.mockReturnValue(true)
     tl.isAuthFailureFromError.mockReturnValue(true)
     tl.refresh.mockResolvedValue(undefined)
+    tl.loadMirroredAuthSession.mockResolvedValue(null)
     tl.scrubLegacyTokenStorages.mockImplementation(() => {})
     growthLoop.destroyGrowthLoop.mockImplementation(() => {})
     authApi.logout.mockResolvedValue(undefined)
@@ -322,6 +324,18 @@ describe('authStore initializeAuth 恢复分支', () => {
       isInitializing: true,
       error: null,
     })
+  })
+
+  it('refresh 键丢失（批量写入被强杀）→ 主进程镜像回读种子并完成恢复', async () => {
+    tl.getRefreshTokenValue.mockReturnValue(null)
+    tl.loadMirroredAuthSession.mockResolvedValue('rt-mirror')
+
+    await useAuthStore.getState().initializeAuth()
+
+    const s = useAuthStore.getState()
+    expect(localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)).toBe('rt-mirror')
+    expect(s.isAuthenticated).toBe(true)
+    expect(s.isInitializing).toBe(false)
   })
 
   it('内存 token 仍有效（同页重建）：直接恢复认证态并异步刷新用户信息', async () => {

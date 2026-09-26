@@ -1,5 +1,4 @@
 # @feature: FP-0.2.二 模式体系测试补标 | @ci: python-coverage
-# -*- coding: utf-8 -*-
 """六模式包数据面降级/容错补测（对 test_mode_panel_live_* 的补位）。
 
 live 测试覆盖正常读数/落列/派发形状；本文件专攻同构的边角面：
@@ -65,7 +64,7 @@ def _status(result: dict) -> int:
     return int(result["data"]["status"])
 
 
-@pytest.fixture()
+@pytest.fixture
 def fresh(request):
     """干净模块：清 provider + caplog 捕获降级告警。"""
     module = _load_server(request.param)

@@ -12,21 +12,20 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
-
 from lsp_types import (
     CompletionItem,
     Diagnostic,
     IDEInfo,
     IDEType,
+    Location,
     LSPErrorCode,
     LSPRequest,
     LSPResponse,
     LSPServerInfo,
-    Location,
     Position,
     Range,
 )
+from pydantic import ValidationError
 
 pytestmark = pytest.mark.unit
 

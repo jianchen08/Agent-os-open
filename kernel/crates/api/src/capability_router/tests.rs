@@ -42,6 +42,7 @@ fn test_task_export_manifest() -> agentos_core::traits::PluginManifest {
         lifecycle: None,
         native: None,
         granted_capabilities: vec![],
+        restricted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],
@@ -2004,9 +2005,8 @@ async fn g6_ungranted_capability_denied() {
         .await
         .unwrap_err();
     assert!(
-        format!("{}", err).contains("not granted"),
-        "应被白名单拒绝: {}",
-        err
+        format!("{err}").contains("not granted"),
+        "应被白名单拒绝: {err}"
     );
 }
 
@@ -2045,7 +2045,7 @@ async fn g6_strict_denies_undeclared_grants() {
         )
         .await
         .unwrap_err();
-    let msg = format!("{}", err);
+    let msg = format!("{err}");
     assert!(
         msg.contains("not granted") && msg.contains("no granted_capabilities declared"),
         "strict 拒绝未声明者，且信息指向未声明: {msg}"
@@ -2090,9 +2090,8 @@ async fn g6_strict_still_denies_ungranted_capability() {
         .await
         .unwrap_err();
     assert!(
-        format!("{}", err).contains("not granted"),
-        "白名单不命中时 strict 照常拒绝: {}",
-        err
+        format!("{err}").contains("not granted"),
+        "白名单不命中时 strict 照常拒绝: {err}"
     );
 }
 
@@ -2153,7 +2152,7 @@ async fn g3_register_tool_requires_plugin_context() {
         .handle("registry", "register_tool", json!({"name": "x"}))
         .await
         .unwrap_err();
-    assert!(format!("{}", err).contains("_plugin_id"));
+    assert!(format!("{err}").contains("_plugin_id"));
 }
 
 #[tokio::test]
@@ -2165,7 +2164,7 @@ async fn g3_register_tool_requires_name() {
         .handle("registry", "register_tool", json!({"_plugin_id": "p"}))
         .await
         .unwrap_err();
-    assert!(format!("{}", err).contains("name"));
+    assert!(format!("{err}").contains("name"));
 }
 
 #[tokio::test]
@@ -2179,7 +2178,7 @@ async fn g3_register_tool_without_registrar_errors() {
         )
         .await
         .unwrap_err();
-    assert!(format!("{}", err).contains("未装配"));
+    assert!(format!("{err}").contains("未装配"));
 }
 
 #[tokio::test]
@@ -2199,9 +2198,8 @@ async fn g3_envelope_gate_applies_to_registry_namespace() {
         .await
         .unwrap_err();
     assert!(
-        format!("{}", err).contains("not granted"),
-        "信封闸应先于注册拒绝: {}",
-        err
+        format!("{err}").contains("not granted"),
+        "信封闸应先于注册拒绝: {err}"
     );
 }
 

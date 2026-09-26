@@ -1,7 +1,11 @@
-# -*- coding: utf-8 -*-
 """批量收官：对已派发的任务轮询到终态 → DB 读 eval_summary 判定 → scorecard。"""
 from __future__ import annotations
-import json, os, sqlite3, time, urllib.request
+
+import json
+import os
+import sqlite3
+import time
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))

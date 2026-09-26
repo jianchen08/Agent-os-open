@@ -1,0 +1,3 @@
+# scripts/ ruff 基线棘轮（只减不增）——check_ruff_baseline.py 消费
+# 首跑基线 2026-09-24（执行方案 0-6）：33 处存量（run_gates/检查器族），新增即红
+ruff_findings=32

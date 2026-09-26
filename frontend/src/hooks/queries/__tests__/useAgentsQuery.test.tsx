@@ -14,7 +14,6 @@
 import { QueryClientProvider } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ReactNode } from 'react'
 
 const getAgentsMock = vi.hoisted(() => vi.fn())
 const reportErrorMock = vi.hoisted(() => vi.fn())
@@ -25,9 +24,10 @@ vi.mock('@/services/errorReporting', () => ({
   reportError: reportErrorMock,
 }))
 
-import { readAgents, useAgentsQuery } from '../useAgentsQuery'
 import { queryClient } from '@/services/query/queryClient'
 import { queryKeys } from '@/services/query/queryKeys'
+import { readAgents, useAgentsQuery } from '../useAgentsQuery'
+import type { ReactNode } from 'react'
 
 function wrapper({ children }: { children: ReactNode }) {
   return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>

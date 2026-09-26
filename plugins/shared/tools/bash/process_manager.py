@@ -38,7 +38,7 @@ def _wsl_transport(backend: dict[str, Any]) -> list[str]:
 
 
 def _map_wsl_working_dir(backend: dict[str, Any], working_dir: str | None) -> str:
-    """/workspace 约定路径 → 环境 workspace 的 WSL 路径；其余原样透传。
+    r"""/workspace 约定路径 → 环境 workspace 的 WSL 路径；其余原样透传。
 
     反斜杠形态（`\workspace`，工具层 ntpath 规整产物）同樣映射——与
     WslNativeProvider._map_working_dir 同语义（漂移钉 TestArgvDriftPin）。
@@ -1054,7 +1054,8 @@ class ProcessManager:
         try:
             await asyncio.wait({task}, timeout=timeout)
         except Exception:
-            pass
+            logger.debug("drain output task wait failed (pid=%s)",
+                         pid, exc_info=True)
 
     def get_summary(self, pid: int) -> dict[str, Any] | None:
         """获取进程摘要。

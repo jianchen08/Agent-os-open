@@ -50,15 +50,27 @@ describe('sanitizeCss — 消毒（fail-closed）', () => {
     ['外部 @import', '@import url("https://evil.example/x.css");'],
     ['外部 @import 无 url()', '@import "https://evil.example/x.css";'],
     ['协议相对 @import', "@import '//evil.example/x.css';"],
+    ['相对路径 @import（2026-09-25 白名单化：一律禁止）', "@import './base.css'; body { color: red; }"],
     ['behavior:', 'div { behavior: url(#default#time2) }'],
     ['-moz-binding:', 'div { -moz-binding: url(http://evil/x.xml#x) }'],
   ])('拒绝 %s', (_label, css) => {
     expect(sanitizeCss(css)).toBeNull()
   })
 
-  it('相对路径 @import（同源）放行', () => {
-    const css = "@import './base.css'; body { color: red; }"
+  it.each([
+    ['data: URL', '.a { background: url(data:image/png;base64,AAAA) }'],
+    ['同源相对路径', '.a { background: url(/ext/p/assets/x.png) }'],
+    ['SVG 片段引用', '.a { filter: url(#gold) }'],
+  ])('放行 %s（2026-09-25 url() 白名单）', (_label, css) => {
     expect(sanitizeCss(css)).toBe(css)
+  })
+
+  it.each([
+    ['https 绝对地址', '.a { background: url(https://evil.example/i.png) }'],
+    ['协议相对地址', '.a { background: url(//tracker.example/i.png) }'],
+    ['blob: scheme', '.a { background: url(blob:https://x/y) }'],
+  ])('url() 白名单外整段拒绝 %s', (_label, css) => {
+    expect(sanitizeCss(css)).toBeNull()
   })
 })
 

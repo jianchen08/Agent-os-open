@@ -1,0 +1,43 @@
+{
+  "id": "pipeline_mode_material_inject",
+  "name": "Mode Material Inject",
+  "version": "1.0.0",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "host_group": "light",
+  "entry": "python server.py",
+  "invoke_entry": "mode_material_inject.execute",
+  "requires_services": ["mode.get_profile", "packaging"],
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "steps": [
+      {
+        "name": "pipeline_mode_material_inject"
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 50,
+  "export_fields": [
+    "mode",
+    "tool_ids",
+    "context.*"
+  ],
+  "persistent_fields": [
+    "mode"
+  ],
+  "description": "\n\n[state 出口口径] 通用模式物料步骤（任何模式共用，零具体模式专属逻辑）：mode = 任务模式解析回写（execution_context.mode 非空且形态合法时逐轮覆盖，前端模式面板/模式徽标同源取数）；context.system_prompt = 基础模式段（路由指引/口径/工具面注记）+ 模式包 material.py::build_injection 追加段（非空时以空行衔接，基线提示词保留）；tool_ids = 仅模式声明 material_scope.tool_ids 且 state 基线存在时收窄写回（只收窄不扩权，tool_ids: inherit 的全量基线不套用）。无 mode 键 = 零动作直通；全路径失败降级 warning 不阻断。",
+  "state": {
+    "reads": [
+      "execution_context",
+      "tool_ids",
+      "context.system_prompt"
+    ]
+  }
+}

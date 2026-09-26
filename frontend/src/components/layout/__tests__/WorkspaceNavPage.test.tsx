@@ -21,9 +21,9 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { WorkspaceNavPage } from '@/components/layout/WorkspaceNavPage'
 import { WorkspacePanel } from '@/components/layout/WorkspacePanel'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
+import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 
 /** 声明播种：两个模式面板 + 两个普通页签 + 一个活动栏页 + 调试中心/设置一级分组页 + 一个浮窗页（带 path+widget） */
 function seedPages(): void {

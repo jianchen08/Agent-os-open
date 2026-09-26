@@ -331,6 +331,77 @@ class TestRegistrationWhitelist:
         (d / "project_whitelist.yaml").write_text("entries: [unclosed", encoding="utf-8")
         assert load_registration_whitelist(base=base) == []
 
+    def test_load_read_deny_and_zone_policy_sections(self, tmp_path: Path) -> None:
+        """read_deny 节与 entries 同文件解析（ADR 2026-09-24 决策1/4）；缺节 = 无排除。"""
+        from project_registry import load_read_deny, load_registration_whitelist
+
+        base = tmp_path / "cfgusers"
+        d = base / "default"
+        d.mkdir(parents=True)
+        (d / "project_whitelist.yaml").write_text(
+            "entries:\n"
+            f"  - {tmp_path / 'work'}\n"
+            "read_deny:\n"
+            f"  - {tmp_path / 'private'}\n"
+            f"  - {tmp_path / 'space two'}\n",
+            encoding="utf-8",
+        )
+        assert load_registration_whitelist(base=base) == [str(tmp_path / "work")]
+        assert load_read_deny(base=base) == [
+            str(tmp_path / "private"),
+            str(tmp_path / "space two"),
+        ]
+
+        (d / "project_whitelist.yaml").write_text(
+            f"entries:\n  - {tmp_path / 'work'}\n", encoding="utf-8"
+        )
+        assert load_read_deny(base=base) == []
+
+        # 非字典 YAML（标量/列表形态）= 空名单，不炸
+        (d / "project_whitelist.yaml").write_text("- scalar\n", encoding="utf-8")
+        assert load_registration_whitelist(base=base) == []
+        assert load_read_deny(base=base) == []
+
+    def test_missing_user_space_file_falls_back_to_legacy_base(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """真值迁移期读取回退（ADR 2026-09-24 决策5）：用户空间文件缺失 → legacy base 读。
+
+        显式 base（钉桩）不回退；用户空间有文件即真值优先，不与 legacy 合并。
+        """
+        import project_registry as pr
+
+        legacy = tmp_path / "repo_cfg_users"
+        d = legacy / "default"
+        d.mkdir(parents=True)
+        (d / "project_whitelist.yaml").write_text(
+            f"entries:\n  - {tmp_path / 'legacy_zone'}\n"
+            f"read_deny:\n  - {tmp_path / 'legacy_deny'}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(pr, "legacy_config_users_base", lambda: legacy)
+        # 默认解析（用户空间 base）钉到 tmp：不读宿主真实用户空间（机器状态敏感）。
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path / "usroot"))
+
+        assert pr.load_registration_whitelist() == [str(tmp_path / "legacy_zone")]
+        assert pr.load_read_deny() == [str(tmp_path / "legacy_deny")]
+
+        empty = tmp_path / "explicit_base"
+        assert pr.load_registration_whitelist(base=empty) == []
+
+        user_space_dir = tmp_path / "user_space_users"
+        (user_space_dir / "default").mkdir(parents=True)
+        (user_space_dir / "default" / "project_whitelist.yaml").write_text(
+            f"entries:\n  - {tmp_path / 'us_zone'}\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(
+            pr,
+            "tenant_config_dir",
+            lambda tenant_id, base=None: user_space_dir / tenant_id,
+        )
+        assert pr.load_registration_whitelist() == [str(tmp_path / "us_zone")]
+        assert pr.load_read_deny() == []
+
     def test_match_registration_scope_prefix_any_depth(self, tmp_path: Path) -> None:
         import project_registry as pr
 

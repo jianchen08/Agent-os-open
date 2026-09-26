@@ -4,14 +4,20 @@
 copy_file / move_file / delete_file。
 核心业务逻辑从 0.1 src/tools/builtin/ 迁移，外层用 SDK 封装为 MCP 工具。
 
-工作空间约束（punch B5，参考 download/tool.py 的 project_root 前缀校验）：
-- 全部路径参数以 workspace/project_root 为锚：相对路径以根解析，绝对路径
-  越界拒绝——写/删/move/copy 一律 fail-closed；纯读操作（read/search）
-  越界时另有三级锚点（2026-09-19 用户裁定：读是宽的，写/删才限工作空间）：
-  /uploads/ 附件只读锚（BUG-57，共享解析点 basename 拼接，租户隔离）与
-  仓库源码区（repo_anchor：仓库根内、运行时/产物目录之外）、登记白名单
-  前缀（config/users/{tenant}/project_whitelist.yaml）；相对路径以根解析
-  落空时按白名单前缀根/仓库根回退解析一次。
+工作空间约束（punch B5，参考 download/tool.py 的 project_root 前缀校验，
+区域读写语义按 ADR 2026-09-24-read-deny-write-zones 重定）：
+- 判定链固定为 内容黑名单 → 位置闸 → 档位；位置轴只由本模块承担，四档
+  权限模式一行不动。
+- **读 = 黑名单制全放**：凭据黑名单恒拦（.env 族/密钥/SSH 私钥，与区域
+  无关）→ 仓库锚拒绝集（运行时/产物目录）→ 用户 read_deny 前缀（名单文件
+  ``read_deny`` 节）→ 其余全放。读不再需要名单/授权；登记白名单前缀（
+  ``entries``）不再是读的必要条件。
+- **写 = 写区白名单**：写/删/move/copy 仅当落点在 workspace/project_root
+  锚内，或写区（登记白名单 ``entries`` 前缀）内且不在仓库自保目录时放行
+  （交上层按权限档走）；区外拒绝并提示授权通道。仓库锚拒绝集对根锚之外
+  的写恒拒（系统自保）。
+- 相对路径以根解析落空时按白名单前缀根/仓库根回退解析一次（读写各自
+  判定链校验回退候选）。
 - 凭据类文件硬拒（与根内外无关）：.env 族（.env.example 豁免）、
   .git-credentials / .netrc、id_rsa/id_dsa/id_ecdsa/id_ed25519、
   *.pem/*.p12/*.pfx/*.jks/*.keystore。泛化后缀 *.key 不拦（工作区内
@@ -48,31 +54,34 @@ from agentos_builtin_tools.result import ToolResult
 _SHARED_ROOT = find_shared_root(Path(__file__).resolve())
 if _SHARED_ROOT not in sys.path:
     sys.path.insert(0, _SHARED_ROOT)
-from repo_anchor import repo_read_verdict, resolve_repo_root  # noqa: E402
+import zone_policy as _zone_policy  # noqa: E402
+from repo_anchor import resolve_repo_root  # noqa: E402
 from uploads_path import resolve_uploads_url  # noqa: E402
 
 
 def _load_registration_whitelist() -> list[str]:
-    """读面白名单加载（project_registry 惰性导入，单源复用其 YAML 契约）。
+    """写区名单加载（project_registry 惰性导入，单源复用其 YAML 契约）。
 
-    project_registry 携带 tenant_data/user_space 等传递依赖子树，比 repo_anchor
-    重且对部署布局敏感——放到调用点导入：共享根自举失败时白名单降级为空
-    （读放行范围收缩，安全侧）并 error 留痕，不阻断 sidecar 引导与其余判定
-    链（凭据黑名单/仓库锚/工作空间锚均不依赖本模块）。
+    语义自 ADR 2026-09-24-read-deny-write-zones 起为**写区**（读黑名单制
+    全放，前缀不再是读的必要条件；相对路径回退解析仍以白名单前缀根为
+    候选锚）。project_registry 携带 tenant_data/user_space 等传递依赖子树，
+    比 repo_anchor 重且对部署布局敏感——放到调用点导入：共享根自举失败时
+    名单降级为空（写区收缩，安全侧）并 error 留痕，不阻断 sidecar 引导与
+    其余判定链（凭据黑名单/仓库锚/工作空间锚均不依赖本模块）。
     """
     try:
         from project_registry import load_registration_whitelist as _load  # noqa: PLC0415
     except Exception as exc:  # noqa: BLE001 — 共享根缺失降级可见（error 级留痕）
         logger.error(
-            "[fs_tools] 读面白名单模块不可用，按空白名单处理（范围收缩）: %s", exc
+            "[fs_tools] 写区名单模块不可用，按空名单处理（范围收缩）: %s", exc
         )
         return []
     return _load()
 
 logger = logging.getLogger(__name__)
 
-# 纯读操作集合：享受仓库源码区 + 登记白名单前缀两级锚点（写/删/move/copy
-# 不豁免）。
+# 纯读操作集合：走读黑名单判定链（读全放，凭据/仓库拒绝集/read_deny 除外）；
+# 其余操作（写/删/move/copy）走写区判定链。
 _READ_OPERATIONS = frozenset({"read", "search"})
 
 # 大文件不再拒绝（task_spill_guard.md 任务 2）：大输出兜底由 pipeline 的
@@ -113,28 +122,21 @@ def _sensitive_file_reason(resolved: Path) -> str | None:
     return None
 
 
-def _path_under_prefix(path: str, prefix: str) -> bool:
-    """normcase/normpath 归一后的前缀判定（Windows 大小写不敏感同规）。"""
-    p = os.path.normcase(os.path.normpath(path))
-    pre = os.path.normcase(os.path.normpath(prefix))
-    return p == pre or p.startswith(pre + os.sep)
-
-
 def _read_outside_verdict(resolved: Path) -> tuple[bool, str | None]:
-    """根外纯读判定链：仓库源码区锚（含拒绝目录）→ 登记白名单前缀。
+    """根外纯读判定链（读黑名单制，判定单源 = zone_policy.read_verdict）。"""
+    return _zone_policy.read_verdict(resolved)
 
-    Returns:
-        (是否允许, 拒绝原因)；(False, None) = 无锚覆盖，调用方走原单根拒绝
-        文案。仓库锚先行：仓库根本身常在白名单内，但 config/data/logs 等
-        运行时/产物目录的读取拒绝不因白名单放行（仓库拒绝集更严，恒优先）。
-    """
-    matched, deny_reason = repo_read_verdict(resolved)
-    if matched:
-        return deny_reason is None, deny_reason
-    for entry in _load_registration_whitelist():
-        if _path_under_prefix(str(resolved), entry):
-            return True, None
-    return False, None
+
+def _parse_authorized_zones(raw: str | None) -> list[str]:
+    """管道级授权写区解析（判定单源 = zone_policy.parse_zones_raw）。"""
+    return _zone_policy.parse_zones_raw(raw)
+
+
+def _write_zone_verdict(
+    resolved: Path, extra_zones: list[str] | None = None
+) -> tuple[bool, str | None]:
+    """写区判定链（判定单源 = zone_policy.write_verdict；管道层位置闸同源）。"""
+    return _zone_policy.write_verdict(resolved, extra_zones)
 
 
 def _fallback_bases() -> list[str]:
@@ -190,26 +192,26 @@ def _check_workspace_path(
     workspace: str | None,
     project_root: str | None,
     operation: str,
+    authorized_zones: str | None = None,
 ) -> tuple[bool, str, str | None]:
-    """project_root 前缀校验（fail-closed：无注入上下文一律拒绝）。
+    """位置闸单点（ADR 2026-09-24-read-deny-write-zones：读黑名单制，写区白名单）。
 
     Args:
         path: 待校验路径（绝对或相对；相对路径以根为基准解析）
         workspace: 工作空间路径（运行时注入，可选）
         project_root: 项目根路径（运行时注入，可选；优先于 workspace 作根）
-        operation: "read" / "write" / "delete" / "move"（语义仅用于报错文案；
-            根外路径与凭据类文件对所有操作一律拒绝）
+        operation: "read" / "search" / "write" / "delete" / "move" / "copy"
+            （决定走读判定链还是写区判定链）
 
     Returns:
         (是否允许, 拒绝原因, 校验用绝对路径)
         未注入 workspace/project_root 时返回拒绝——相对路径无处锚定，落回
         sidecar cwd 会把插件目录/宿主仓库当工作区读写。
-        纯读操作（read/search）在单根越界时还有三级锚点：/uploads/ 附件只读
-        锚（BUG-57：解析到租户 uploads 落盘目录，与上传落盘/内核静态服务
-        同源）、仓库源码区（repo_anchor，运行时/产物目录除外，ADR
-        2026-09-12）与登记白名单前缀（2026-09-19 用户裁定）；相对路径以根
-        解析落空时按白名单前缀根回退解析一次。写/删/move 无此豁免——仓库
-        源码树与 uploads 域均非 agent 写面。
+        读操作（read/search）单根越界时：/uploads/ 附件只读锚（BUG-57）→
+        读黑名单判定链（仓库锚拒绝集 + read_deny 前缀，其余全放）；相对
+        路径以根解析落空时按白名单前缀根回退解析一次。
+        写/删/move/copy 单根越界时：写区判定链（仓库自保目录恒拒 → 白名单
+        entries 前缀放行，交上层按权限档走）；区外拒绝并提示授权通道。
     """
     root_str = project_root or workspace
     if not root_str:
@@ -247,19 +249,29 @@ def _check_workspace_path(
                 return True, "", str(resolved)
             if deny_reason is not None:
                 return False, deny_reason, str(resolved)
+        if operation not in _READ_OPERATIONS:
+            allow, deny_reason = _write_zone_verdict(
+                resolved, _parse_authorized_zones(authorized_zones)
+            )
+            if deny_reason is not None:
+                return False, deny_reason, str(resolved)
+            if allow:
+                return True, "", str(resolved)
         return (
             False,
-            f"路径 {path} 超出 workspace/project_root（{root}）范围，{operation} 操作被拒绝",
+            f"路径 {path} 超出 workspace/project_root（{root}）且不在写区名单内，"
+            f"{operation} 操作被拒绝；可请用户将目录加入授权名单"
+            "（project_whitelist.yaml entries）或通过授权卡临时放行",
             str(resolved),
         )
     # 相对路径在工作空间内落空（目标不存在）→ 白名单前缀根回退解析一次
     # （仅读操作；工作空间内已存在则优先，回退不遮蔽本地副本）。
     if operation in _READ_OPERATIONS and not target.is_absolute() and not resolved.exists():
-        hit, reason, candidate = _read_relative_fallback(target)
+        hit, reason, fallback_candidate = _read_relative_fallback(target)
         if hit:
-            return True, "", candidate
+            return True, "", fallback_candidate
         if reason:
-            return False, reason, candidate
+            return False, reason, fallback_candidate
     return True, "", str(resolved)
 
 
@@ -484,6 +496,7 @@ async def file_write(
     create_backup: bool = True,
     workspace: str | None = None,
     project_root: str | None = None,
+    authorized_zones: str | None = None,
 ) -> ToolResult:
     """写入/编辑文件。workspace/project_root 可用时禁止根外路径（B5）。
 
@@ -492,7 +505,7 @@ async def file_write(
     """
     # 工作空间约束（写路径：根外一律拒绝；相对路径以根锚定后执行）
     allowed, reason, resolved = _check_workspace_path(
-        path, workspace, project_root, operation="write"
+        path, workspace, project_root, operation="write", authorized_zones=authorized_zones
     )
     if not allowed:
         return ToolResult.failure_result(reason)
@@ -724,10 +737,11 @@ async def create_directory(
     parents: bool = True,
     workspace: str | None = None,
     project_root: str | None = None,
+    authorized_zones: str | None = None,
 ) -> ToolResult:
     """创建目录（幂等：目录已存在直接返回成功；相对路径以注入根锚定）。"""
     allowed, reason, resolved = _check_workspace_path(
-        path, workspace, project_root, operation="write"
+        path, workspace, project_root, operation="write", authorized_zones=authorized_zones
     )
     if not allowed:
         return ToolResult.failure_result(reason)
@@ -774,6 +788,7 @@ async def copy_file(
     overwrite: bool = False,
     workspace: str | None = None,
     project_root: str | None = None,
+    authorized_zones: str | None = None,
 ) -> ToolResult:
     """复制文件或目录。源与目标均以注入根锚定（无注入报错）。"""
     if copies:
@@ -785,6 +800,7 @@ async def copy_file(
                 overwrite=overwrite,
                 workspace=workspace,
                 project_root=project_root,
+                authorized_zones=authorized_zones,
             )
             results.append(
                 {"source": item["source"], "destination": item["destination"], "success": r.success}
@@ -794,15 +810,17 @@ async def copy_file(
     if not source or not destination:
         return ToolResult.failure_result("source and destination are required (or use copies)")
 
-    for _field, value, op in (("source", source, "move"), ("destination", destination, "write")):
+    for _field, value, op in (("source", source, "read"), ("destination", destination, "write")):
         allowed, reason, resolved = _check_workspace_path(
-            value, workspace, project_root, operation=op
+            value, workspace, project_root, operation=op, authorized_zones=authorized_zones
         )
         if not allowed:
             return ToolResult.failure_result(reason)
 
     def _anchor(value: str, op: str) -> str:
-        _, _, resolved = _check_workspace_path(value, workspace, project_root, operation=op)
+        _, _, resolved = _check_workspace_path(
+            value, workspace, project_root, operation=op, authorized_zones=authorized_zones
+        )
         return resolved if resolved is not None else value
 
     src = Path(_anchor(source, "move"))
@@ -857,6 +875,7 @@ async def move_file(
     overwrite: bool = False,
     workspace: str | None = None,
     project_root: str | None = None,
+    authorized_zones: str | None = None,
 ) -> ToolResult:
     """移动或重命名文件/目录。源与目标均须在 workspace/project_root 内（B5）。"""
     # 工作空间约束：move 同时改动源（移出）与目标（写入），两端都校验；
@@ -887,6 +906,7 @@ async def move_file(
                 overwrite=overwrite,
                 workspace=workspace,
                 project_root=project_root,
+                authorized_zones=authorized_zones,
             )
             results.append(
                 {"source": item["source"], "destination": item["destination"], "success": r.success}
@@ -947,6 +967,7 @@ async def delete_file(
     force: bool = False,
     workspace: str | None = None,
     project_root: str | None = None,
+    authorized_zones: str | None = None,
 ) -> ToolResult:
     """删除文件或目录。workspace/project_root 可用时禁止根外路径（B5）。"""
     target_paths = paths if paths else [path] if path else []
@@ -958,7 +979,7 @@ async def delete_file(
     anchored: list[str] = []
     for p in target_paths:
         allowed, reason, resolved = _check_workspace_path(
-            p, workspace, project_root, operation="delete"
+            p, workspace, project_root, operation="delete", authorized_zones=authorized_zones
         )
         if not allowed:
             return ToolResult.failure_result(reason)

@@ -35,7 +35,10 @@
   "persistent_fields": [
     "llm_model",
     "track.llm_usage",
-    "track.total_tokens"
+    "track.total_tokens",
+    "context_window",
+    "track.messages_chars_at_llm",
+    "track.model_context_window"
   ],
   "state": {
     "volatile_keys": [
@@ -111,11 +114,11 @@
         "props": {
           "title": "思考强度",
           "icon": "brain",
-    "fields": [
-      {
-        "name": "strength",
-        "type": "select",
-        "default": "medium",
+          "fields": [
+            {
+              "name": "strength",
+              "type": "select",
+              "default": "medium",
               "options": [
                 {
                   "label": "关闭",
@@ -154,6 +157,8 @@
     "router.stop_reason",
     "context_window",
     "track.llm_usage",
-    "track.total_tokens"
+    "track.total_tokens",
+    "track.messages_chars_at_llm",
+    "track.model_context_window"
   ]
 }

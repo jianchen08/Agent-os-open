@@ -8,9 +8,10 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from agentos_plugin_sdk.enum_utils import safe_enum_value
 from pipeline.plugin import IOutputPlugin, OutputResult, PluginContext
 from pipeline.types import ACTIVE_TASK_STATUSES
+
+from agentos_plugin_sdk.enum_utils import safe_enum_value
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,11 @@ _RUN_KEY = "evaluate_reminder_run"
 # 失败轮短路标记：execute 包装层消费后摘除，不会进入 state 合并
 # （下划线键被引擎 merge 过滤，双保险）。
 _FAILURE_ROUND_FLAG = "_system_failure_round"
+
+# 对话型模式集合（模式键契约值，TASK_MODES 子集）：这些模式的任务轮是纯对话
+# 演出（文本即交付物），无评估义务。键源 = state.mode（模式物料步骤回写；
+# 面板派发 args 的 mode 键经 execution_context 透传，与消息级上下文同契约）。
+_CONVERSATION_TASK_MODES = frozenset({"roleplay"})
 
 
 class TaskReminder(IOutputPlugin):
@@ -98,7 +104,8 @@ class TaskReminder(IOutputPlugin):
 
         前置门槛（不属三信号）：pending→running 推进（幂等）/ llm_call 轮 /
         L1 调度层永不触发 / ``task.id`` 存在性（state 单一真值，缺失即会话
-        管道）/ 活跃子任务（纯文本是等待/协调行为）/ 评估模式连续无文本计数。
+        管道）/ 活跃子任务（纯文本是等待/协调行为）/ 对话型模式任务（文本即
+        交付物，收束见 ``_conversation_round_result``）/ 评估模式连续无文本计数。
 
         ``_has_successful_task_evaluate``（messages JSON 文本检测）降为次级
         证据保留——真实路径 LLM 面被 result_format 渲染化，文本形态不作主证据。
@@ -207,6 +214,21 @@ class TaskReminder(IOutputPlugin):
                 iteration,
             )
             return OutputResult()
+
+        # ── 对话型模式任务豁免：roleplay 等对话型模式的任务轮是纯演出，文本
+        #    即交付物，无评估义务——工具零面下评估提醒是催调不存在工具的噪音
+        #    循环，耗尽裁决（failed 改写）对必然无评估证据的对话任务是误杀。
+        #    纯文本轮到此（信号①已放行工具轮、空文本轮已先行返回）即按交付
+        #    收束：补落 completed + end，与信号②补落同一写面通路，对齐会话
+        #    管道「文本即停」会话语义；评估子管道不豁免（其 JSON 检测裁决
+        #    优先级更高，身份随派发透传 mode 键时不得短路评估语义）。──
+        if (
+            str(state.get("mode") or "") in _CONVERSATION_TASK_MODES
+            and not self._is_evaluation_mode(state)
+        ):
+            return self._conversation_round_result(
+                state, iteration=iteration, task_id=task_id,
+            )
 
         # ── 活跃子任务：纯文本是等待/协调行为，不催提交评估 ──
         if await self._has_active_children(task_id, ctx):
@@ -446,10 +468,10 @@ class TaskReminder(IOutputPlugin):
         任一 ``task.subtasks_pending.<task_id>`` 键真值即存在未回子任务；
         终态清除写 null（假值）不构成挂号。
         """
-        for key, value in state.items():
-            if str(key).startswith(_PENDING_SUBTASK_PREFIX) and value:
-                return True
-        return False
+        return any(
+            str(key).startswith(_PENDING_SUBTASK_PREFIX) and value
+            for key, value in state.items()
+        )
 
     def _pending_subtask_wait_result(
         self,
@@ -522,6 +544,31 @@ class TaskReminder(IOutputPlugin):
         state_updates["ended"] = True
         return OutputResult(state_updates=state_updates)
 
+    def _conversation_round_result(
+        self,
+        state: dict[str, Any],
+        *,
+        iteration: Any,
+        task_id: str,
+    ) -> OutputResult:
+        """对话型任务文本轮收束：演出文本即交付物，补落 completed 并 end。
+
+        写面与信号②补落同一通路（task.status 尚为出生/执行值时补落 completed
+        + ended_at，已落终态时幂等跳过）；end 信号终止任务管道（对话型任务的
+        提醒预算与耗尽裁决均不适用，本收束点是该类任务唯一的当轮终局写点）。
+        """
+        state_updates: dict[str, Any] = {"_has_new_llm_input": False}
+        if str(state.get("task.status") or "") != "completed":
+            state_updates["task.status"] = "completed"
+            state_updates["task.ended_at"] = datetime.now(UTC).isoformat()
+        logger.info(
+            "TaskReminder[iter=%s][task=%s]: conversation task text deliverable, closing round (end)",
+            iteration,
+            task_id,
+        )
+        state_updates["ended"] = True
+        return OutputResult(state_updates=state_updates)
+
     def _reminder_exhausted_result(
         self,
         state: dict[str, Any],
@@ -540,8 +587,14 @@ class TaskReminder(IOutputPlugin):
         """
         state_updates: dict[str, Any] = {}
         if not self._has_completion_evidence(state):
+            # 失败归因结构化（§10.2 裁定）：裁决方置 failed 时同时写失败类别
+            # 与终止原因——复盘分诊只认终局归因声明，不从错误堆反推。
             state_updates["task.status"] = "failed"
             state_updates["task.ended_at"] = datetime.now(UTC).isoformat()
+            state_updates["task.failure_class"] = "reminder_exhausted"
+            state_updates["task.failure_reason"] = (
+                f"评估提醒耗尽（{reminder_count} 次提醒后仍未提交评估结论）"
+            )
             logger.warning(
                 "TaskReminder[iter=%s][task=%s]: max_reminders reached without evaluation, "
                 "task.status -> failed",
@@ -587,8 +640,14 @@ class TaskReminder(IOutputPlugin):
         state_updates: dict[str, Any] = {}
         if task_id:
             if not self._has_completion_evidence(state):
+                # 失败归因结构化（§10.2 裁定）：裁决方置 failed 时同时写失败
+                # 类别与终止原因（复盘分诊只认终局归因声明）。
                 state_updates["task.status"] = "failed"
                 state_updates["task.ended_at"] = datetime.now(UTC).isoformat()
+                state_updates["task.failure_class"] = "empty_response"
+                state_updates["task.failure_reason"] = (
+                    "空回复重试耗尽（agent 连续空响应退出，未完成执行义务）"
+                )
                 logger.warning(
                     "TaskReminder[iter=%s][task=%s]: empty-response retries exhausted, "
                     "task.status -> failed",

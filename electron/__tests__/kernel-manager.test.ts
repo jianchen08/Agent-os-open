@@ -28,7 +28,10 @@ import {
   planKernelRestart,
   probeKernelHealth,
   resolveKernelPort,
+  resolvePackagedConfigUsersDir,
+  resolvePackagedDbPath,
   resolveTokenSecret,
+  seedZonePolicyFiles,
   shutdownManagedKernel,
   waitForKernelHealth,
 } from "../kernel-manager";
@@ -215,6 +218,41 @@ describe("ensurePackagedKernelRunning", () => {
     expect(err.name).toBe("KernelPortBusyError");
     expect(err.message).toContain("9101");
   });
+
+  /** 造一个「spawn 成功但立即退出」的内核 exe（win=cmd 副本，unix=/bin/true 副本；
+   *  两者无参 + stdio ignore 下都立即以 code=0 退出，走真实 spawn 不 mock） */
+  const makeQuickExitResources = (): string => {
+    const dir = makeFakeResources();
+    const exeName = process.platform === "win32" ? "agentos-kernel.exe" : "agentos-kernel";
+    const src =
+      process.platform === "win32"
+        ? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe")
+        : "/bin/true";
+    fs.copyFileSync(src, path.join(dir, "kernel", exeName));
+    return dir;
+  };
+
+  it("内核进程启动期间秒退 → 抛错带退出码（BUG-86：秒退必须可见反馈，绝不静默孤儿窗口）", async () => {
+    const dir = makeQuickExitResources();
+    try {
+      await expect(
+        ensurePackagedKernelRunning({ resourcesPath: dir, probe: async () => false }),
+      ).rejects.toThrow(/启动期间退出.*code=0/s);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it("内核 exe spawn 失败（非可执行文件）→ 拒绝带原因，不静默（BUG-86 同面反馈契约）", async () => {
+    const dir = makeFakeResources(); // 零字节 exe：win 下 spawn 直接失败
+    try {
+      await expect(
+        ensurePackagedKernelRunning({ resourcesPath: dir, probe: async () => false }),
+      ).rejects.toThrow(/spawn|启动失败/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("shutdownManagedKernel", () => {
@@ -350,6 +388,68 @@ describe("buildKernelEnv token 密钥注入", () => {
   });
 });
 
+describe("buildKernelEnv AGENTOS_DB_PATH 注入（BUG-85：装机形态默认库=用户根，卸载不删用户数据）", () => {
+  const paths = kernelResourcePaths("C:\\app\\resources", "win32");
+  const appData = "C:\\Users\\u\\AppData\\Roaming";
+  // ensure 侧真实链路：先 resolvePackagedDbPath 解析，再传 buildKernelEnv 注入
+  const resolved = resolvePackagedDbPath({}, appData);
+
+  /** 布局契约以 path.relative 断言（不硬编码分隔符，测试主机分隔符不影响） */
+  it("提供 dbPath 时注入 AGENTOS_DB_PATH=<appData>/agentos/agentos_kernel.db（用户根直下）", () => {
+    const env = buildKernelEnv({}, paths, undefined, resolved);
+    expect(env.AGENTOS_DB_PATH).toBeDefined();
+    expect(
+      path.relative(path.join(appData, "agentos", "agentos_kernel.db"), env.AGENTOS_DB_PATH!),
+    ).toBe("");
+  });
+
+  it("基座已有非空 AGENTOS_DB_PATH → 原样保留（AGENTOS_DB_PATH 覆盖能力不夺）", () => {
+    const env = buildKernelEnv(
+      { AGENTOS_DB_PATH: "E:\\custom\\ledger.db" },
+      paths,
+      undefined,
+      resolved,
+    );
+    expect(env.AGENTOS_DB_PATH).toBe("E:\\custom\\ledger.db");
+  });
+
+  it("基座 AGENTOS_DB_PATH 为空白串视为未设 → 注入默认（空白覆盖值不得劫持装机默认）", () => {
+    const env = buildKernelEnv({ AGENTOS_DB_PATH: "  " }, paths, undefined, resolved);
+    expect(
+      path.relative(path.join(appData, "agentos", "agentos_kernel.db"), env.AGENTOS_DB_PATH!),
+    ).toBe("");
+  });
+
+  it("不提供 dbPath → 不注入（调用方零变化，dev 形态零变化）", () => {
+    const env = buildKernelEnv({}, paths);
+    expect(env.AGENTOS_DB_PATH).toBeUndefined();
+  });
+});
+
+describe("resolvePackagedDbPath（装机形态默认库位置=用户根）", () => {
+  it("无 AGENTOS_USER_ROOT → <appData>/agentos/agentos_kernel.db（与内核 user_root 回落同源）", () => {
+    const p = resolvePackagedDbPath({}, "C:\\ad");
+    expect(path.relative(path.join("C:\\ad", "agentos", "agentos_kernel.db"), p)).toBe("");
+  });
+
+  it("AGENTOS_USER_ROOT 显式生效；空白串视为未设回落默认（两档区分输入）", () => {
+    expect(path.relative(path.join("D:\\ur", "agentos_kernel.db"), resolvePackagedDbPath({ AGENTOS_USER_ROOT: "D:\\ur" }, "C:\\ad"))).toBe("");
+    expect(path.relative(path.join("C:\\ad", "agentos", "agentos_kernel.db"), resolvePackagedDbPath({ AGENTOS_USER_ROOT: " " }, "C:\\ad"))).toBe("");
+  });
+
+  it("性质：结果恒在用户根之内且文件名钉 agentos_kernel.db（与内核 DB_FILENAME 同名）", () => {
+    for (const [env, appData] of [
+      [{}, "C:\\ad"],
+      [{ AGENTOS_USER_ROOT: "D:\\ur" }, "C:\\ad"],
+    ] as const) {
+      const p = resolvePackagedDbPath(env, appData);
+      const root = env.AGENTOS_USER_ROOT?.trim() || path.join(appData, "agentos");
+      expect(path.relative(root, p)).not.toContain("..");
+      expect(path.basename(p)).toBe("agentos_kernel.db");
+    }
+  });
+});
+
 describe("resolveKernelPort（AGENTOS_KERNEL_PORT 错峰解析）", () => {
   it("缺省/非法值回落默认端口", () => {
     expect(resolveKernelPort({})).toBe(KERNEL_DEFAULT_PORT);
@@ -383,6 +483,80 @@ describe("resolveKernelPort（AGENTOS_KERNEL_PORT 错峰解析）", () => {
     } finally {
       vi.unstubAllEnvs();
       vi.resetModules();
+    }
+  });
+});
+
+describe("resolvePackagedConfigUsersDir + AGENTOS_CONFIG_USERS_DIR 注入（ADR 2026-09-24 决策5：授权名单真值=用户空间）", () => {
+  const paths = kernelResourcePaths("C:\\app\\resources", "win32");
+  const appData = "C:\\Users\\u\\AppData\\Roaming";
+  // ensure 侧真实链路：先 resolve 再传 buildKernelEnv 注入
+  const resolved = resolvePackagedConfigUsersDir({}, appData);
+
+  it("无 AGENTOS_USER_ROOT → <appData>/agentos/config/users（与插件侧 user_config_dir 同源）", () => {
+    expect(path.relative(path.join(appData, "agentos", "config", "users"), resolved)).toBe("");
+  });
+
+  it("AGENTOS_USER_ROOT 显式 → <userRoot>/config/users", () => {
+    const p = resolvePackagedConfigUsersDir({ AGENTOS_USER_ROOT: "D:\\ur" }, appData);
+    expect(path.relative(path.join("D:\\ur", "config", "users"), p)).toBe("");
+  });
+
+  it("提供 configUsersDir 时注入；基座非空值原样保留；空白串视为未设；不提供不注入", () => {
+    const injected = buildKernelEnv({}, paths, undefined, undefined, resolved);
+    expect(injected.AGENTOS_CONFIG_USERS_DIR).toBeDefined();
+    const kept = buildKernelEnv(
+      { AGENTOS_CONFIG_USERS_DIR: "E:\\z" },
+      paths,
+      undefined,
+      undefined,
+      resolved,
+    );
+    expect(kept.AGENTOS_CONFIG_USERS_DIR).toBe("E:\\z");
+    const blank = buildKernelEnv(
+      { AGENTOS_CONFIG_USERS_DIR: " " },
+      paths,
+      undefined,
+      undefined,
+      resolved,
+    );
+    expect(blank.AGENTOS_CONFIG_USERS_DIR).toBeDefined();
+    expect(buildKernelEnv({}, paths).AGENTOS_CONFIG_USERS_DIR).toBeUndefined();
+  });
+});
+
+describe("seedZonePolicyFiles（包内名单首次播种，幂等非破坏）", () => {
+  it("复制缺失文件；既有内容绝不覆盖；包内无 users 子树不动作", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "seedzone-"));
+    try {
+      const configRoot = path.join(tmp, "resources", "config");
+      fs.mkdirSync(path.join(configRoot, "users", "default"), { recursive: true });
+      fs.writeFileSync(
+        path.join(configRoot, "users", "default", "project_whitelist.yaml"),
+        "entries: []\n",
+        "utf-8",
+      );
+      const target = path.join(tmp, "target", "users");
+
+      seedZonePolicyFiles(fs, configRoot, target);
+      expect(
+        fs.readFileSync(path.join(target, "default", "project_whitelist.yaml"), "utf-8"),
+      ).toBe("entries: []\n");
+
+      // 幂等非破坏：用户空间既有内容（已批准的永久授权）不被包内版本冲掉
+      const targetFile = path.join(target, "default", "project_whitelist.yaml");
+      fs.writeFileSync(targetFile, "entries:\n  - D:\\mine\n", "utf-8");
+      seedZonePolicyFiles(fs, configRoot, target);
+      expect(fs.readFileSync(targetFile, "utf-8")).toContain("D:\\mine");
+
+      // 包内无 users 子树（异常包）→ 目标目录不创建
+      const emptyConfig = path.join(tmp, "empty_config");
+      fs.mkdirSync(emptyConfig, { recursive: true });
+      const t2 = path.join(tmp, "t2");
+      seedZonePolicyFiles(fs, emptyConfig, t2);
+      expect(fs.existsSync(t2)).toBe(false);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
 });

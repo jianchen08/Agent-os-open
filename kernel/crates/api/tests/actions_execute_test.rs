@@ -53,6 +53,7 @@ fn manifest_with_commands(plugin_id: &str, commands: Vec<Value>) -> PluginManife
         lifecycle: None,
         native: None,
         granted_capabilities: vec![],
+        restricted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],

@@ -808,8 +808,7 @@ mod tests {
         assert_eq!(envelope2["status"], 200);
         assert_eq!(
             envelope2["body"]["cleared_count"], 0,
-            "空库再清=0: {}",
-            envelope2
+            "空库再清=0: {envelope2}"
         );
 
         // 场景 3：文件库 → 生成 .clear-backup-* 备份文件（含 users 快照）。

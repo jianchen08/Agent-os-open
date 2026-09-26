@@ -85,7 +85,7 @@ def _run(coro: Any) -> Any:
         loop.close()
 
 
-@pytest.fixture()
+@pytest.fixture
 def http_api() -> Any:
     return _load_module("triggers_ext_http_api_create", "http_api.py", ("tool", "http_api", "server"))
 

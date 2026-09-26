@@ -94,7 +94,7 @@ class GitHelpers:
             stdout = stdout_bytes.decode("utf-8", errors="replace").rstrip()
             stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
             return process.returncode or 0, stdout, stderr
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return -1, "", f"命令执行超时（{timeout}秒）"
         except FileNotFoundError:
             return -1, "", "未找到 git 命令，请确保系统已安装 git"

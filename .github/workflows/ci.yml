@@ -343,8 +343,8 @@ jobs:
           uv sync --frozen --extra dev
           uv pip install -e ./plugins/sdk
 
-      - name: Run gates (sdk-lint, sdk-mypy)
-        run: python scripts/run_gates.py --filter sdk-lint,sdk-mypy
+      - name: Run gates (sdk-lint, sdk-mypy, config-direct-reads, scripts-lint, plugins-lint, tool-contract-completeness)
+        run: python scripts/run_gates.py --filter sdk-lint,sdk-mypy,config-direct-reads,scripts-lint,plugins-lint,tool-contract-completeness,config-static
 
   # ── Python Test（插件 SDK）─────────────────────────────────
   python-test:
@@ -640,6 +640,14 @@ jobs:
           GITHUB_BASE_REF: ${{ github.base_ref }}
         run: python scripts/run_gates.py --filter frontend-typecheck,frontend-lint,frontend-coverage,frontend-diff-coverage,frontend-any-baseline
 
+      # ── knip/jscpd 跨平台计数观察（执行方案 0-1 前置，2026-09-24）──
+      # 基线已按 Windows pnpm 口径收紧（99/547）。本观察态步骤收集 Linux 侧
+      # 计数供两平台口径比对；一致（或按 CI 实测再收紧）后转正式执法——
+      # 加入上方 --filter 并把两 gate 的 wiring=local 转 ci（V1 可核）。
+      - name: knip/jscpd Linux observation (cross-platform count check)
+        continue-on-error: true
+        run: python scripts/run_gates.py --filter frontend-knip-baseline,frontend-jscpd-baseline
+
   # ── Frontend E2E 冒烟（零后端依赖）──────────────────────────────────────
   # PR 级 e2e 门禁：构建前端 → vite preview 服务于 5188 → 跑零外部依赖冒烟子集
   # (e2e/specs/ci-smoke.spec.ts，不依赖 kernel/LLM)。journey_* 全流程需后端，
@@ -694,6 +702,12 @@ jobs:
           fi
           npx playwright test e2e/specs/ci-smoke.spec.ts
 
+      # bundle-size 闸（批次 5）：复用上方 build 产物，vendor 字节基线 +
+      # 无效动态导入计数锁（gate 自带 build+tee，经 run_gates 单一入口）。
+      - name: Run gates (bundle-size)
+        working-directory: frontend
+        run: python ../scripts/run_gates.py --filter bundle-size
+
   # ── Electron 主进程编译门禁 ─────────────────────────────────────────────
   # electron/ 桌面壳（main/preload/tray/window-info）tsc 编译门禁
   # （electron:compile，与 electron:build 共用同一命令）；
@@ -723,8 +737,8 @@ jobs:
           ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
         run: npm ci
 
-      - name: Run gates (electron-compile)
-        run: python scripts/run_gates.py --filter electron-compile
+      - name: Run gates (electron-compile, electron-test)
+        run: python scripts/run_gates.py --filter electron-compile,electron-test
 
   # ── Pre-commit（项目代码质量门禁入口）────────────────────────────────
   # .pre-commit-config.yaml 自述为"项目代码质量门禁的入口"。
@@ -816,7 +830,7 @@ jobs:
           python-version: "3.11"
 
       - name: Run gates (traceability-gate)
-        run: python scripts/run_gates.py --filter traceability-gate
+        run: python scripts/run_gates.py --filter traceability-gate,doc-baseline-sync,doc-paths
 
   # ── All Checks Passed（汇总门禁，分支保护唯一入口）───────────────────────
   # Phase 1（2026-08-23）：分支保护规则只挂本 job 一个名字。
@@ -824,6 +838,23 @@ jobs:
   #   e2e-manual 占位删除。PR 必跑 job = 下方 needs 列表。
   # 任何 job 失败（success/skipped 之外）→ 本 job 红。
   # 新增/删除 PR job 时，必须同步更新本列表 + GitHub 分支保护无需改动。
+  # ── Meta Gate Wiring（元门禁 V1–V8，恒跑不受路径过滤）────────────────
+  # 门禁体系的门禁：接线完整性/调用契约/观察型棘轮/fast 预算/账本秩序/
+  # 行业基线覆盖。自举——本 job 就是 gate-wiring 的接线，删掉它 V1 红在自身。
+  gate-wiring:
+    name: Meta gate wiring (V1-V8)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Run meta gate
+        run: python scripts/run_gates.py --filter gate-wiring
+
   all-checks-passed:
     name: All checks passed
     runs-on: ubuntu-latest
@@ -849,6 +880,7 @@ jobs:
       - secret-scan
       - tdd-gate
       - traceability-gate
+      - gate-wiring
     steps:
       - name: Check all required jobs succeeded
         run: |

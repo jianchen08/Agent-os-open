@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""调研模式插件——模式元数据服务面 + 面板数据面（出厂种子，随用户空间播种分发）。
+"""研究模式插件（原「调研模式」，2026-09-25 更名对齐 Deep Research 业界口径）——
+模式元数据服务面 + 面板数据面（出厂种子，随用户空间播种分发）。
 
 服务契约（manifest capabilities.services；wire = MCP tools/call）：
 - mode.describe：返回 {mode, name, chain, weights, budget, profile_path, panel_page_id}
@@ -14,7 +15,8 @@ webview 面板页（工作区 tab 面板，manifest detachable 声明悬浮窗�
 - 内核读数桥：on_load 注入 pipeline-state / messages / tool-executor providers
   （monitoring kernel_reads 同构；能力未就绪 handler 降级空载荷，前端诚实空态）。
 - 数据端点：/ext/mode_research/data/{bootstrap,sessions,messages,report,sources}。
-  报告 = 会话内最后一条达长度阈值的 assistant 消息；解析 [n] 引用角标与正文 URL。
+  报告 = 交付文件直读优先（task_manage.get → research_report_path → 工作空间根），
+  回落会话内最后一条达长度阈值的 assistant 消息；解析 [n] 引用角标与正文 URL。
 - 写动作：/data/actions/{start,followup} 经 tool-executor 调 task_submit 真派发
   （eval_harness 先例），args 携 mode=research + 深度档/原报告上下文；
   session_id（宿主 ctx.sync 下发的对话框线程）非空时透传——followup 即
@@ -37,6 +39,7 @@ import re
 from typing import Any
 
 import yaml
+
 from agentos_plugin_sdk import AgentOSPlugin
 from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 from agentos_plugin_sdk.capability import bind_capability_caller
@@ -62,7 +65,7 @@ def load_profile(path: str = _PROFILE_PATH) -> dict[str, Any]:
 @plugin.tool(
     name="mode.describe",
     schema={"type": "object", "properties": {}},
-    description="返回调研模式元数据（chain/权重/预算/profile 路径/panel_page_id）",
+    description="返回研究模式元数据（chain/权重/预算/profile 路径/panel_page_id）",
     output_schema={
         "type": "object",
         "required": ["mode", "name", "chain", "weights", "budget", "profile_path", "panel_page_id"],
@@ -87,7 +90,7 @@ async def mode_describe() -> dict[str, Any]:
 @plugin.tool(
     name="mode.get_profile",
     schema={"type": "object", "properties": {}},
-    description="返回调研模式包内 profile.yaml 解析后的内容",
+    description="返回研究模式包内 profile.yaml 解析后的内容",
     output_schema={
         "type": "object",
         "required": ["mode"],
@@ -163,8 +166,26 @@ async def _on_load(_params: dict[str, Any]) -> None:
 
 # ── 数据归一（pipeline-state 行 = 扁平点号键摘要，mode/task.* 经出口白名单）────────
 
+def _parse_ws_meta(value: Any) -> dict[str, Any]:
+    """task.ws_meta 两形态容忍：dict 直用；JSON 字符串解析；其余视为缺失
+    （mode_writing 同构先例——种子单元自包含，各自内联）。"""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            data = json.loads(value)
+        except ValueError:
+            return {}
+        return data if isinstance(data, dict) else {}
+    return {}
+
+
 def _norm_sessions(rows: Any) -> list[dict[str, Any]]:
-    """全量 state 行 → 本模式调研任务行（mode 键过滤 + 面板字段裁剪）。"""
+    """全量 state 行 → 本模式研究任务行（mode 键过滤 + 面板字段裁剪）。
+
+    task_id/ws_root 为报告交付文件直读坐标（task_manage.get 定任务、
+    ws_meta.path 定工作空间根），缺省时报告回落消息启发式。
+    """
     items: list[dict[str, Any]] = []
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict) or str(row.get("mode") or "") != "research":
@@ -177,6 +198,8 @@ def _norm_sessions(rows: Any) -> list[dict[str, Any]]:
                 "run_status": str(row.get("run_status") or ""),
                 "goal": str(row.get("task.goal") or row.get("input") or ""),
                 "task_status": str(row.get("task.status") or ""),
+                "task_id": str(row.get("task.id") or ""),
+                "ws_root": str(_parse_ws_meta(row.get("task.ws_meta")).get("path") or ""),
                 "message_count": row.get("message_count") or 0,
             }
         )
@@ -212,7 +235,7 @@ _URL_TRAILING_PUNCT = "。，、；！？）》〉】」』\"'.,;:!?"
 
 
 def _pick_report(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """报告 = 倒序首条达长度阈值的 assistant 消息（调研报告 = 收敛的长答案）。"""
+    """报告 = 倒序首条达长度阈值的 assistant 消息（研究报告 = 收敛的长答案）。"""
     for msg in reversed(messages):
         if msg.get("role") == "assistant" and len(str(msg.get("content") or "")) >= _REPORT_MIN_CHARS:
             return msg
@@ -253,6 +276,42 @@ def _report_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
         "citations_found": _extract_citations(report),
         "sources": _extract_urls(report),
     }
+
+
+async def _report_from_deliverable(task_id: str, ws_root: str) -> dict[str, Any] | None:
+    """交付文件直读：task_manage.get → result_data.research_report_path → 工作空间文件。
+
+    研究链的交付真值是落盘 md（ORA output_schema 只回 research_report_path），
+    消息启发式只是回落。任一环缺失/失败返回 None（回落，不假成功）。
+    """
+    fn = _PROVIDERS.get("tool-executor")
+    if fn is None or not task_id:
+        return None
+    try:
+        res = await fn(
+            {
+                "tool_name": "task_manage",
+                "plugin_id": "task_manage_tool",
+                "args": {"action": "get", "task_id": task_id},
+            }
+        )
+    except Exception:  # noqa: BLE001 —— 读面降级：交付文件通道失败回落消息启发式
+        return None
+    data = res.get("data") if isinstance(res, dict) else None
+    task = data.get("task") if isinstance(data, dict) and isinstance(data.get("task"), dict) else data
+    result = _parse_ws_meta(task.get("result_data") if isinstance(task, dict) else None)
+    rel = str(result.get("research_report_path") or "")
+    if not rel:
+        return None
+    full = os.path.join(ws_root, rel) if ws_root else rel
+    try:
+        with open(full, encoding="utf-8") as fh:
+            content = fh.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not content.strip():
+        return None
+    return {"report": content, "report_path": rel}
 
 
 # ── 知识库检索（hindsight.recall 服务面代理；未就绪降级 kb_available=False）────────
@@ -318,7 +377,7 @@ async def _kb_search(query: str) -> list[dict[str, Any]] | None:
 # ── 写动作（task_submit 真派发；eval_harness 先例：tool-executor 显式 plugin_id）──
 
 _DEPTH_REQUIREMENTS = {
-    "quick": "档位要求（quick）：单轮聚焦检索，输出简明调研报告（核心要点+结论）。",
+    "quick": "档位要求（quick）：单轮聚焦检索，输出简明研究报告（核心要点+结论）。",
     "deep": (
         "档位要求（deep）：多轮检索交叉核验，输出结构化长报告（分节论述，"
         "信息充分后再收敛）。"
@@ -344,13 +403,13 @@ async def _dispatch_task(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _start_args(question: str, depth: str, session_id: str = "") -> dict[str, Any]:
-    """「发起调研」→ task_submit args（问题 + 深度档要求 + 报告产出口径）。
+    """「发起研究」→ task_submit args（问题 + 深度档要求 + 报告产出口径）。
 
     session_id = 宿主对话框线程（面板经 ctx.sync 收到 window.__agentosCtx.sessionId），
     非空时透传——任务送入对话框线程；无则省略该键。
     """
     sections = [
-        f"针对以下问题开展调研并输出调研报告：{question}",
+        f"针对以下问题开展研究并输出研究报告：{question}",
         _DEPTH_REQUIREMENTS[depth],
         "# 报告口径\n正文以 [1][2] 角标标注引用，末尾附信源 URL 列表；"
         "结尾调用 task_evaluate 结束。",
@@ -367,7 +426,7 @@ def _start_args(question: str, depth: str, session_id: str = "") -> dict[str, An
         # 此键须自携：按主 agent（L1）身份代用户派发（tasks/http_api.py 面板
         # 先例同口径）；缺省闸门以 MISSING_INJECTED_PARAM 拒之，L1 身份放行 L2/L3 目标。
         "parent_agent_level": 1,
-        "goal_title": f"调研·{question[:40]}",
+        "goal_title": f"研究·{question[:40]}",
         "goal_description": "\n\n".join(sections)[:2000],
         "mode": "research",
         "task_kind": f"research_{depth}",
@@ -379,7 +438,7 @@ def _start_args(question: str, depth: str, session_id: str = "") -> dict[str, An
 
 
 async def _followup_args(pipeline_id: str, question: str, session_id: str = "") -> dict[str, Any]:
-    """「送入对话框追问」→ 携原报告节选的追加调研任务 args。
+    """「送入对话框追问」→ 携原报告节选的追加研究任务 args。
 
     派发目标与 start 同键（research 链编排 agent，依据见 _start_args 注释）——
     行 agent_id 不作目标：会话出身行的 agent_id 未必是可派发键（如 L1 主上下文）。
@@ -393,10 +452,10 @@ async def _followup_args(pipeline_id: str, question: str, session_id: str = "") 
     messages = _norm_messages(await _call_provider("messages", pipeline_id=pipeline_id))
     last_assistant = next((m for m in reversed(messages) if m["role"] == "assistant"), None)
     if last_assistant is None:
-        return {"error": "该会话还没有可追问的调研输出"}
+        return {"error": "该会话还没有可追问的研究输出"}
     excerpt = last_assistant["content"][:600]
     sections = [
-        "基于以下调研报告继续追问，补充调研后作答。",
+        "基于以下研究报告继续追问，补充调研后作答。",
         f"# 原报告节选\n{excerpt}",
         f"# 追问\n{question}",
         "# 要求\n延续原报告的引用角标与信源列出口径；结尾调用 task_evaluate 结束。",
@@ -605,12 +664,39 @@ async def http_handle(
             return {"success": True, "data": _json_response({"sessions": _norm_sessions(rows)})}
         if path.endswith("/sources"):
             return await _handle_sources(query)
-        # 剩余路由 = /data/report：会话报告载荷（正文/字数/角标/URL 信源）
+        # 剩余路由 = /data/report：会话报告载荷。交付文件直读优先
+        # （task_manage.get → research_report_path → ws_meta.path 定根），
+        # 任一环缺失回落消息启发式；source 字段如实标注取数来源。
         pipeline_id = str(query.get("pipeline_id") or "")
         if not pipeline_id:
             return {"success": True, "data": _json_response({"error": "缺少 pipeline_id"}, 400)}
-        rows = _norm_messages(await _call_provider("messages", pipeline_id=pipeline_id))
-        return {"success": True, "data": _json_response(_report_payload(rows))}
+        state_rows = await _call_provider("pipeline-state")
+        row = next(
+            (
+                r
+                for r in state_rows if isinstance(r, dict)
+                and str(r.get("pipeline_id") or "") == pipeline_id
+            ),
+            None,
+        ) if isinstance(state_rows, list) else None
+        task_id = str(row.get("task.id") or "") if row else ""
+        ws_root = str(_parse_ws_meta(row.get("task.ws_meta")).get("path") or "") if row else ""
+        from_file = await _report_from_deliverable(task_id, ws_root)
+        if from_file is not None:
+            report = from_file["report"]
+            payload = {
+                "report": report,
+                "word_count": len(report),
+                "citations_found": _extract_citations(report),
+                "sources": _extract_urls(report),
+                "source": "file",
+                "report_path": from_file["report_path"],
+            }
+        else:
+            rows = _norm_messages(await _call_provider("messages", pipeline_id=pipeline_id))
+            payload = _report_payload(rows)
+            payload["source"] = "message"
+        return {"success": True, "data": _json_response(payload)}
     routed = await _handle_messages(path, method, query)
     if routed is not None:
         return routed

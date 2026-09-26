@@ -36,6 +36,10 @@ export default defineConfig({
   test: {
     // 使用 jsdom 模拟浏览器 DOM 环境
     environment: 'jsdom',
+    // 资源韧性上限（执行方案批次7-④，2026-09-24）：全量车道在低内存机器上
+    // 曾 521/524 suite 崩溃（评估实证，单车道正常）——worker 数显式封顶，
+    // 结果不依赖机器空闲度；4 = CI runner 核数上界，本机 24T 同样受益。
+    maxWorkers: 4,
     // 引入 @testing-library/jest-dom 扩展匹配器
     setupFiles: ['./src/test/setup.ts'],
     // 测试文件匹配模式

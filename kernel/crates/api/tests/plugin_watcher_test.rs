@@ -38,7 +38,7 @@ fn create_plugin_dir(root: &Path, id: &str, tools: &[&str]) {
     std::fs::create_dir_all(&dir).unwrap();
     let tools_json: Vec<String> = tools
         .iter()
-        .map(|t| format!(r#"{{"name":"{}","description":"{}"}}"#, t, t))
+        .map(|t| format!(r#"{{"name":"{t}","description":"{t}"}}"#))
         .collect();
     let manifest = format!(
         r#"{{
@@ -138,8 +138,7 @@ async fn watcher_debounces_burst() {
     let count = handle.sync_count.load(Ordering::Relaxed);
     assert_eq!(
         count, 1,
-        "burst of 3 triggers must debounce to exactly 1 sync, got {}",
-        count
+        "burst of 3 triggers must debounce to exactly 1 sync, got {count}"
     );
 }
 

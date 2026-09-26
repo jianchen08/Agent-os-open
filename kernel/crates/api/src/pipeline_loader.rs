@@ -372,7 +372,22 @@ pub fn resolve_pipeline_config_path(config_root: &Path, name: &str) -> PathBuf {
 /// 改动落到 `<USER_ROOT>/config/pipelines/`，内核加载必须读同一份——否则出现
 /// "保存成功、重启后还是旧配置"。
 pub fn load_pipeline_config(config_root: &Path) -> Result<PipelineConfig, PipelineLoadError> {
-    let path = resolve_pipeline_config_path(config_root, "autonomous.yaml");
+    load_pipeline_config_by_name(config_root, "autonomous")
+}
+
+/// 按名加载管道配置（`config/pipelines/{name}.yaml` → [`PipelineConfig`]）。
+///
+/// 管道配置按需加载路径（用什么加载什么）：调用方（server 编译缓存）在消息
+/// 显式携带 `pipeline_config_id` 时按名加载该配置并编译，绝不启动期全量扫描。
+/// [`load_pipeline_config`] = 本函数传 `"autonomous"`（缺省路径现状不变）。
+///
+/// 降级与错误语义与 [`load_pipeline_config`] 一致：文件不存在返回默认配置
+/// （空 loop_bodies，不报错）；解析/语义失败返回 `Err`（含文件路径与细节）。
+pub fn load_pipeline_config_by_name(
+    config_root: &Path,
+    name: &str,
+) -> Result<PipelineConfig, PipelineLoadError> {
+    let path = resolve_pipeline_config_path(config_root, &format!("{name}.yaml"));
     if !path.exists() {
         tracing::warn!(
             "Pipeline config not found at {}, using default (empty loop bodies)",
@@ -743,6 +758,40 @@ loop_bodies:
         let _guard = pin_tmp_user_space(tmp.path());
         let cfg = load_pipeline_config(tmp.path()).expect("missing config should not error");
         assert!(cfg.loop_bodies.is_empty());
+    }
+
+    /// 按名加载：同一 config_root 下两份管道配置各自按名读出，互不串扰；
+    /// autonomous 缺省入口与 by-name("autonomous") 同源。
+    #[test]
+    fn test_load_pipeline_config_by_name_reads_each_named_config() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let _guard = pin_tmp_user_space(root);
+        fs::create_dir_all(root.join("pipelines")).unwrap();
+        fs::write(
+            root.join("pipelines/autonomous.yaml"),
+            "name: auto_pipe\nloop_bodies:\n  - id: main\n    steps:\n      - id: a\n        steps: []\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("pipelines/custom.yaml"),
+            "name: custom_pipe\nloop_bodies:\n  - id: solo\n    steps:\n      - id: b\n        steps: []\n",
+        )
+        .unwrap();
+
+        // 按名各自读出（用什么加载什么，不是只认 autonomous）
+        let custom = load_pipeline_config_by_name(root, "custom").expect("custom 应能加载");
+        assert_eq!(custom.name, "custom_pipe");
+        assert_eq!(custom.loop_bodies[0].id, "solo");
+
+        let auto_by_name = load_pipeline_config_by_name(root, "autonomous").expect("应能加载");
+        let auto_default = load_pipeline_config(root).expect("缺省入口应能加载");
+        assert_eq!(auto_by_name.name, "auto_pipe");
+        assert_eq!(auto_default.name, auto_by_name.name, "缺省 = autonomous");
+
+        // 不存在的名字 → 与缺省同款降级（默认空配置，不报错）
+        let missing = load_pipeline_config_by_name(root, "no_such_pipe").expect("缺失降级");
+        assert!(missing.loop_bodies.is_empty());
     }
 
     /// hooks 声明解析（服务化提案 §3.6）：body 级 + step 级复合键 + 空配置零条目。
