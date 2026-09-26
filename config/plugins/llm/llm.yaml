@@ -3,7 +3,7 @@ concurrency:
   max_concurrent_pipelines: 5
 defaults:
   call_timeout: 600
-  chat: minimax-m3
+  chat: glm-5.2
   embedding: bge-m3
   first_token_timeout: 120
   stream_idle_timeout: 180

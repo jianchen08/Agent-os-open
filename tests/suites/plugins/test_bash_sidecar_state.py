@@ -41,6 +41,24 @@ _NEEDS_BASH = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _prewarm_wsl_vm():
+    """WSL VM 预热：本机 wsl.exe 在 PATH 时 ProcessManager 优先 `wsl -e bash -c`，
+    VM 冷启动实测 9~15s（闲置自动终止 + 大套件内存重压），会吃光用例的
+    execute/continue 等待窗口——2026-09-26 全量车道实锤：continue(timeout=10)
+    在 elapsed 13.3s 返回 running 且 output 为空（bash 尚未起跑），单跑 VM
+    半暖则恒绿。模块首个用例前把 VM 拉热，等待窗口只度量命令本身；
+    预热超时按异常传播（VM 起不来时后续用例必然全红，不如在此给出清晰错误）。"""
+    if not shutil.which("wsl"):
+        return
+    subprocess.run(
+        ["wsl", "-e", "bash", "-c", ":"],
+        timeout=120,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 # ============================================================================
 # Fixtures / helpers
 # ============================================================================
