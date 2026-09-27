@@ -814,9 +814,13 @@ class TestCreateEnvironment:
         assert env.status == EnvironmentStatus.ERROR.value
         assert "工作空间路径不存在" in env.provider_info.get("error", "")
 
-    def test_wsl_skips_host_path_check(self, tmp_path: Path, monkeypatch: Any) -> None:
+    def test_wsl_verified_mount_source_creates(self, tmp_path: Path, monkeypatch: Any) -> None:
         provider = _provider()
         monkeypatch.setattr(provider, "_is_wsl_docker", lambda: True)
+        # WSL 分支宿主校验经 wsl 探测执行（不再一刀切跳过）：挂载源探测证实
+        # 存在即走全创建流程，挂载参数照常生成；悬空拒绝由
+        # tests/test_docker_provider_wsl_mount_check.py 钉住。
+        monkeypatch.setattr(provider, "_wsl_dir_exists", lambda _p: True)
         monkeypatch.setattr(provider, "_ensure_image", _fake_ensure_image())
         monkeypatch.setattr(provider, "_start_one", self._fake_start_not_found())
         captured: dict[str, Any] = {}
@@ -826,7 +830,6 @@ class TestCreateEnvironment:
             return "abc123", ""
 
         monkeypatch.setattr(provider, "_create_and_start", fake_create_and_start)
-        # WSL 路径在 Windows 宿主上不存在，但跳过宿主校验直接交给 daemon
         env = _run(provider.create_environment(_ctx(workspace=r"D:\myproject\ws"), "c1"))
         assert env.status == EnvironmentStatus.READY.value
         assert "/mnt/d/myproject/ws:/workspace" in captured["run_args"]

@@ -137,6 +137,32 @@ class DockerProvider(IsolationProvider):
         rest = m.group(2)
         return f"/mnt/{drive}/{rest}"
 
+    @staticmethod
+    def _wsl_dir_exists(wsl_path: str) -> bool:
+        """经默认发行版探测 WSL 侧目录是否真实存在（test -d）。
+
+        探测本身失败（wsl 不可用/超时）与"目录不存在"同样返回 False——
+        挂载源无法证实存在时创建容器只会复现静默空目录问题，宁可显式失败。
+        超时取 60s：wsl VM 冷启动实测可达 9~15s，过短会把暖机误判为悬空。
+        """
+        import subprocess as _sp  # noqa: PLC0415
+
+        try:
+            proc = _sp.run(
+                ["wsl", "--exec", "test", "-d", wsl_path],
+                capture_output=True,
+                timeout=60,
+                check=False,  # 返回码即语义（rc==0 才算存在），不按异常处理
+            )
+        except (OSError, _sp.TimeoutExpired) as exc:
+            logger.error(
+                "[DockerProvider] WSL 挂载源探测失败（按不存在处理）| path=%s | err=%s",
+                wsl_path,
+                exc,
+            )
+            return False
+        return proc.returncode == 0
+
     def get_level(self) -> IsolationLevel:
         """获取隔离级别。"""
         return IsolationLevel.CONTAINER
@@ -339,9 +365,10 @@ class DockerProvider(IsolationProvider):
 
             # 路径校验：
             # - Docker Desktop(daemon 在 Windows): 校验原 Windows 路径
-            # - WSL docker(daemon 在 Linux): Agent 在 Windows,无法用 Path() 校验
-            #   WSL 路径(/mnt/d/...在 Windows 不存在),跳过宿主校验,交给 docker
-            #   daemon 在挂载时校验(挂载不存在路径 docker 会报错)
+            # - WSL docker(daemon 在 Linux): Windows 侧 Path() 校验不了 /mnt/...
+            #   形态，改经 wsl 探测挂载源真实存在——bind mount 源不存在时 daemon
+            #   会静默自动创建空目录（并非报错），命令落空目录却以成功假象通过
+            #   （2026-09-27 装机版实证：容器内 /workspace 指向已不存在的宿主目录）
             if not self._is_wsl_docker():
                 check_path = context.workspace or ""
                 if check_path and not Path(check_path).exists():
@@ -354,6 +381,19 @@ class DockerProvider(IsolationProvider):
                         context,
                         now,
                         f"工作空间路径不存在: {check_path}",
+                    )
+            else:
+                mount_src = self._resolve_mount_path(context.workspace)
+                if mount_src and not self._wsl_dir_exists(mount_src):
+                    logger.error(
+                        "[DockerProvider] 拒绝创建容器：工作空间挂载源悬空 | task=%s | mount_src=%s",
+                        context.task_id,
+                        mount_src,
+                    )
+                    return self._make_error_environment(
+                        context,
+                        now,
+                        f"工作空间挂载源悬空: {mount_src}",
                     )
 
         # 构建 docker create 命令参数（_build_run_args 已含 IMAGE 与 COMMAND）

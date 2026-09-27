@@ -56,6 +56,11 @@ EXCLUDED_DIR_NAMES = ("__pycache__", ".venv")
 #: 插件内用户数据子目录名：镜像删除时保留（用户活跃数据，非仓从属物）。
 PRESERVED_USER_DATA_DIRS = ("data",)
 
+#: 开发机绝对路径指纹：随 sync 进用户空间即复现“提示词锚定 dev 路径 →
+#: 隔离挂载悬空”链（2026-09-27 R295 装机实证）。检测优先于替换：替换规则
+#: 会失配静默空转（sync_open_repo 的 isolation root 替换实证），命中即拒。
+DEV_PATH_PATTERNS = ("d:\\myproject", "d:/myproject", "container_e17cc5927dfd")
+
 #: 已知装机包安装位（相对 %LOCALAPPDATA% / Program Files 的候选）：目标落在
 #: 这些目录子树内一律拒绝——「不动装机版」是本脚本的硬边界。
 _INSTALL_DIR_CANDIDATES = (
@@ -192,11 +197,29 @@ def sync_plugin(repo_rel: str, user_root: Path, dry_run: bool) -> None:
     )
 
 
+def _assert_no_dev_paths(src: Path) -> None:
+    """文本源文件含开发机绝对路径时拒绝同步（fail-closed，防止污染用户空间）。"""
+    if src.suffix.lower() not in (".yaml", ".yml", ".json", ".md", ".txt", ".toml", ".py"):
+        return
+    try:
+        lines = src.read_text(encoding="utf-8").splitlines()
+    except (UnicodeDecodeError, OSError):
+        return
+    for i, line in enumerate(lines, 1):
+        low = line.lower()
+        if any(pat in low for pat in DEV_PATH_PATTERNS):
+            raise SystemExit(
+                f"[REFUSE] {src}:{i} 含开发机绝对路径（{line.strip()[:80]}）——"
+                "可变路径用占位符（{{user_root}} 等），真值落用户空间"
+            )
+
+
 def sync_config(repo_rel: str, user_root: Path, dry_run: bool) -> None:
     """config/ 下单文件整覆盖到 <user_root>/config/<同路径>。"""
     src = _REPO_ROOT / "config" / repo_rel.replace("\\", "/")
     if not src.is_file():
         raise SystemExit(f"[REFUSE] {src} 不存在——--config 传 config/ 下相对路径")
+    _assert_no_dev_paths(src)
     dst = user_root / "config" / src.relative_to(_REPO_ROOT / "config")
     print(f"[config] {src} -> {dst}")
     if not dry_run:

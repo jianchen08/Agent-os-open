@@ -74,7 +74,7 @@ L1（灵汐）/ L2（research_orchestrator_agent 等编排者）
 | task_evaluate_tool | task_evaluate | 未显式列出（按 `defaults.enabled: true` 默认启用） | [来源: config/kernel/default_profile.yaml] |
 | web_ext（web_operate_tool） | web_operate | 未显式列出（按 `defaults.enabled: true` 默认启用） | [来源: plugins/shared/tools/web_ext/plugin.json] |
 
-> omnisearch 为 external MCP：`plugin.json` 的 `mcp.endpoint` 指向本地部署（`D:/myproject/omnisearch-mcp`，PyPI 发布后可切 uvx）；部署缺失时 `universal_search` 不可用——如实标注 [来源: plugins/shared/tools/external_mcp/omnisearch/plugin.json]。
+> omnisearch 为 external MCP：`plugin.json` 的 `mcp.endpoint` 指向本地部署（示例 `D:/path/to/omnisearch-mcp`，PyPI 发布后可切 uvx）；部署缺失时 `universal_search` 不可用——如实标注 [来源: plugins/shared/tools/external_mcp/omnisearch/plugin.json]。
 
 ---
 

@@ -601,6 +601,23 @@ class PromptBuildPlugin(IInputPlugin):
             pr = self._system_root()
             return str(pr) if pr else ""
 
+        if var_type == "user_root":
+            # {{user_root}} = 用户数据根（AGENTOS_USER_ROOT，装机版回落
+            # %APPDATA%/agentos）。提示词中可写产物落盘锚点（如资源准备任务的
+            # workspace）用它表达——种子配置不得写死开发机绝对路径，装机语义下
+            # 可写目录一律落用户空间，包内 resources 只读。
+            try:
+                import user_space as _user_space  # noqa: PLC0415
+
+                root = _user_space.user_root()
+            except Exception as exc:  # pragma: no cover - import 失败即环境残缺
+                logger.warning("[%s] 用户根解析失败，已替换为空串 | err=%s", self.name, exc)
+                return ""
+            if root is None:
+                logger.warning("[%s] 用户根不可用（无 AGENTOS_USER_ROOT 且系统数据目录缺失），已替换为空串", self.name)
+                return ""
+            return str(root)
+
         var_def = self._placeholder_var_def(var_type, params)
         if var_def is None:
             # 未识别占位符（拼错/格式错）不能静默消失——配置作者需要留痕定位

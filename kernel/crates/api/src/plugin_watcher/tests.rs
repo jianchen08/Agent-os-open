@@ -2769,10 +2769,13 @@ async fn reverify_host_evict_failure_is_warned_and_continues() {
     }
 
     let m = mk_manifest_light_pipeline("evict_fail");
+    // 两份指纹必然相异的"代码"（不同文件名，免 mtime 粒度抖动）：代码指纹只含
+    // 「文件名+mtime」，同名文件在 Windows 粗时钟刻度内先后写出 mtime 相同，
+    // code_changed 恒 false，驱逐分支整段被跳过。
     let v1 = tempfile::tempdir().unwrap();
-    std::fs::write(v1.path().join("impl.py"), b"v1").unwrap();
+    std::fs::write(v1.path().join("impl_v1.py"), b"v1").unwrap();
     let v2 = tempfile::tempdir().unwrap();
-    std::fs::write(v2.path().join("impl.py"), b"v2").unwrap();
+    std::fs::write(v2.path().join("impl_v2.py"), b"v2").unwrap();
     let stage = Arc::new(parking_lot::RwLock::new(v1.path().to_path_buf()));
     let resolver: Arc<CodeDirResolver> = {
         let stage = stage.clone();

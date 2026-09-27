@@ -505,6 +505,17 @@ class IsolationGuard(IInputPlugin):
         """
         if not workspace:
             return None
+        # 悬空挂载防护：workspace 是容器挂载源，挂载前必须真实存在。state/
+        # metadata 里的 workspace 可能指向已删除或从未创建的目录（如按陈旧
+        # 提示词锚定的路径），缺此预检时 docker daemon 会对不存在的 bind
+        # mount 源静默自动建空目录，命令落空目录却以成功假象通过。
+        if not Path(workspace).exists():
+            logger.warning(
+                "[%s] 拒绝创建容器：工作空间路径不存在（悬空挂载防护）| workspace=%s",
+                self.name,
+                workspace,
+            )
+            return None
         manager = self._get_manager()
         if manager is None:
             return None

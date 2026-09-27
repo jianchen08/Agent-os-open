@@ -164,6 +164,15 @@ async function renderLoaded(
   await waitFor(() => {
     expect(screen.queryByText(/加载配置/)).not.toBeInTheDocument()
   })
+  // 编辑器子树与加载占位不同 commit 上屏：全量并行下上一等待可能命中
+  // 「占位已撤、表单/流程图未挂」的中间态，后续同步查询即抖红——再等到
+  // 可视流程图或源码表单真实挂载（v1 非 0.2 格式只有源码表单）。
+  await waitFor(() => {
+    expect(
+      screen.queryByTestId('pipeline-flow-editor') ??
+        screen.queryByRole('form', { name: '管道配置表单' }),
+    ).toBeTruthy()
+  })
 }
 
 describe('PipelineSettingsPage', () => {
@@ -329,7 +338,9 @@ describe('PipelineSettingsPage', () => {
     it('非 0.2 格式配置自动落源码视图并提示', async () => {
       await renderLoaded(sampleV1)
 
-      expect(screen.getByText(/非 0\.2 多循环体格式/)).toBeInTheDocument()
+      // 提示在「加载完成」之后的独立 effect commit 上屏，全量并行下 waitFor
+      // 可能命中两 commit 之间的中间态——终态断言异步等待，不做同步抢跑
+      expect(await screen.findByText(/非 0\.2 多循环体格式/)).toBeInTheDocument()
       expect(screen.queryByTestId('pipeline-flow-editor')).not.toBeInTheDocument()
       expect(screen.getByDisplayValue(/tool_schema/)).toBeInTheDocument()
     })

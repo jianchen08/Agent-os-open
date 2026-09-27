@@ -93,6 +93,11 @@ BASE_TEST_PATHS: list[str] = [
     "tests/test_isolation_prune_throttle.py",
     "tests/test_isolation_sandbox.py",
     "tests/test_isolation_skills_copy.py",
+    # R295 悬空挂载双闸（2026-09-27）：WSL 挂载源探测与 isolation_guard
+    # 悬空预检的回归测试；不接线则 docker_provider/isolation_guard 新分支
+    # 在插桩车道零覆盖，diff coverage 必红。
+    "tests/test_docker_provider_wsl_mount_check.py",
+    "tests/test_isolation_guard_dangling_workspace.py",
     # 2026-08-21 覆盖率批次：既有绿灯测试接线进插桩车道（@ci: none-local
     # 未接车道时目标模块整体不进覆盖面：python_packager/server.py（sidecar-only
     # 缺进程内导入）、download/tool.py、triggers_ext、monitoring 等）。

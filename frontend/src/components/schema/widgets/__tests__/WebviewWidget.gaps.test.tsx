@@ -26,10 +26,27 @@ vi.mock('@/stores/sessionStore', async () => {
     })),
   }
 })
+// 出站边界记录器：下行消息构造可观测（校验函数保持真实现）。iframe 窗口在
+// 全量套件下会被 srcdoc 重载替换，窗口级 postMessage spy 会随旧窗丢记录。
+vi.mock('@/utils/postMessageSecurity', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/utils/postMessageSecurity')>()
+  return {
+    ...actual,
+    buildWebviewMessage: vi.fn(actual.buildWebviewMessage),
+  }
+})
 
 import { WebviewWidget } from '../WebviewWidget'
+import { buildWebviewMessage } from '@/utils/postMessageSecurity'
 
 const apiGet = apiClient.get as unknown as Mock
+
+/** 组件已构造的指定 method 下行消息的构建参数列表（出站边界记录）。 */
+function downBuiltCalls(method: string): Array<[string, ...unknown[]]> {
+  return vi
+    .mocked(buildWebviewMessage)
+    .mock.calls.filter((args) => args[0] === method) as Array<[string, ...unknown[]]>
+}
 
 const THEME_PROFILE = {
   colors: { bg: '#101014', fg: '#f5f5f5' },
@@ -44,13 +61,6 @@ beforeEach(() => {
 async function renderWidget(props: Record<string, unknown> = {}): Promise<Mock> {
   render(<WebviewWidget pluginId="demo" widgetId="w1" {...props} />)
   await waitFor(() => expect(screen.getByTitle('Webview')).toBeInTheDocument())
-  const iframe = screen.getByTitle('Webview') as HTMLIFrameElement
-  return vi.spyOn(iframe.contentWindow!, 'postMessage')
-}
-
-// 全量套件下 iframe src 重载会替换 contentWindow：早先装的 spy 落在旧窗口上
-// 永远等不到下行调用。断言前按当前窗口重取 spy（vi.spyOn 幂等，同窗口同 spy）。
-function currentDownSpy(): Mock {
   const iframe = screen.getByTitle('Webview') as HTMLIFrameElement
   return vi.spyOn(iframe.contentWindow!, 'postMessage')
 }
@@ -76,7 +86,10 @@ describe('WebviewWidget · 桥边缘分支', () => {
       content: '（压缩摘要）前情：勇者进入洞窟……',
       metadata: { compression_ref: 'cmp_42' },
     }
-    const downSpy = await renderWidget({ injectMessage })
+    // 该下行推送是 ready 翻转时的一次性动作，全量套件下会撞 srcdoc 重载换窗：
+    // 窗口级 spy 随旧窗口丢失记录且推送不重发。改在组件出站边界记录——
+    // buildWebviewMessage 包装为记录器（校验函数保持真实现），与换窗解耦。
+    await renderWidget({ injectMessage })
 
     act(() => {
       bridgePostUp('__ready', {}, 'wv_ready')
@@ -84,13 +97,12 @@ describe('WebviewWidget · 桥边缘分支', () => {
 
     await waitFor(
       () => {
-        expect(allDownByMethod(currentDownSpy(), 'message.data')).toHaveLength(1)
+        expect(downBuiltCalls('message.data')).toHaveLength(1)
       },
       // 全量套件高负载下就绪链路延迟可达数秒（CI 实证 3s+），放宽轮询上限
       { timeout: 8000 },
     )
-    const down = allDownByMethod(currentDownSpy(), 'message.data')[0]!
-    expect(down.params).toEqual({ message: injectMessage })
+    expect(downBuiltCalls('message.data')[0]![1]).toEqual({ message: injectMessage })
   })
 
   it('未带 injectMessage 的通用 widget：就绪后不推 message.data（不伪造卡数据）', async () => {

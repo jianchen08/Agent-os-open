@@ -92,6 +92,13 @@ describe('ChangePasswordGate（D1-4 首登强制改密）', () => {
     expect(screen.getByTestId('change-password-logout-button')).toBeTruthy()
   })
 
+  it('点击退出登录调用 store.logout（改密中途可主动登出）', async () => {
+    const user = userEvent.setup()
+    render(<ChangePasswordGate />)
+    await user.click(screen.getByTestId('change-password-logout-button'))
+    expect(mockLogout).toHaveBeenCalledTimes(1)
+  })
+
   it('改密成功后显示确认提示（放行由 ProtectedRoute 依标记清除后承接）', async () => {
     mockChangePassword.mockResolvedValueOnce({
       access_token: 'at-new',
