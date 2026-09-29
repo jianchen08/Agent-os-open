@@ -137,9 +137,7 @@ async def test_existing_values_not_overwritten_but_empty_task_id_is() -> None:
 async def test_forged_underscore_keys_stripped() -> None:
     """LLM 夹带 `_` 前缀伪造键先剥（防绕过危险命令黑名单）。"""
     state = _state(
-        raw_tool_calls=[
-            {"name": "bash_execute", "args": {"command": "ls", "_owner": "evil", "_container_id": "x"}}
-        ]
+        raw_tool_calls=[{"name": "bash_execute", "args": {"command": "ls", "_owner": "evil", "_container_id": "x"}}]
     )
     result = await _run(state)
     args = _calls(result)[0]["args"]
@@ -165,9 +163,7 @@ async def test_task_submit_skips_workspace_ctx_and_gets_parent_ws_meta() -> None
     """task_submit：workspace/isolation/project_root 不注入；parent_ws_meta 覆盖注入。"""
     ws_meta = '{"path": "/ws/parent", "mode": "shared"}'
     state = _state(
-        raw_tool_calls=[
-            {"name": "task_submit", "args": {"workspace": "/llm/forged", "parent_task_id": "p1"}}
-        ],
+        raw_tool_calls=[{"name": "task_submit", "args": {"workspace": "/llm/forged", "parent_task_id": "p1"}}],
         ws_meta=ws_meta,
     )
     args = _calls(await _run(state))[0]["args"]
@@ -221,3 +217,24 @@ async def test_authorized_zones_absent_not_injected() -> None:
     result = await _run(_state())
     (tc,) = _calls(result)
     assert "authorized_zones" not in tc["args"]
+
+
+async def test_authorized_read_zones_injected_when_present() -> None:
+    """管道级授权读取（读授权卡批准写 state，用户裁定 2026-09-28）注入。
+
+    state 键与 security_check 落盘键同名同前缀（task.authorized_read_zones），
+    不复制写侧 authorized_write_zones 的前缀漂移形态。
+    """
+    import json
+
+    grants = json.dumps([r"d:\proj\config"])
+    result = await _run(_state(**{"task.authorized_read_zones": grants}))
+    (tc,) = _calls(result)
+    assert tc["args"]["authorized_read_zones"] == grants
+
+
+async def test_authorized_read_zones_absent_not_injected() -> None:
+    """state 无读授权键 → 不注入（读工具走黑名单判定链）。"""
+    result = await _run(_state())
+    (tc,) = _calls(result)
+    assert "authorized_read_zones" not in tc["args"]

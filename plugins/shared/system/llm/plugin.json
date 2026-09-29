@@ -218,56 +218,6 @@
       "description": "获取思考模式推荐（原 POST /ext/channel_api/thinking-mode/recommendations 语义）"
     },
     {
-      "route_id": "config_llm_get",
-      "method": "GET",
-      "path": "/ext/llm_service/config/llm",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "获取完整 LLM 配置（providers/models 脱敏 + key 状态——原 GET /ext/channel_api/config/llm 语义）"
-    },
-    {
-      "route_id": "config_llm_providers_get",
-      "method": "GET",
-      "path": "/ext/llm_service/config/llm/providers",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "获取提供商列表（原 GET /ext/channel_api/config/llm/providers 语义）"
-    },
-    {
-      "route_id": "config_llm_providers_create",
-      "method": "POST",
-      "path": "/ext/llm_service/config/llm/providers",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "添加提供商（body: provider_id/config，明文 api_key 落 .env——原 POST /ext/channel_api/config/llm/providers 语义）"
-    },
-    {
-      "route_id": "config_llm_providers_update",
-      "method": "PUT",
-      "path": "/ext/llm_service/config/llm/providers/{provider_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "更新提供商配置（body: config——原 PUT /ext/channel_api/config/llm/providers/{provider_id} 语义）"
-    },
-    {
-      "route_id": "config_llm_providers_delete",
-      "method": "DELETE",
-      "path": "/ext/llm_service/config/llm/providers/{provider_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "删除提供商（原 DELETE /ext/channel_api/config/llm/providers/{provider_id} 语义）"
-    },
-    {
       "route_id": "config_llm_provider_types_get",
       "method": "GET",
       "path": "/ext/llm_service/config/llm/provider-types",
@@ -296,66 +246,6 @@
       "timeout_ms": 15000,
       "max_concurrency": 4,
       "description": "从提供商 API 实时拉取可用模型（原 GET /ext/channel_api/config/llm/providers/{provider_id}/remote-models 语义）"
-    },
-    {
-      "route_id": "config_llm_models_get",
-      "method": "GET",
-      "path": "/ext/llm_service/config/llm/models",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "获取模型列表（api_key 脱敏——原 GET /ext/channel_api/config/llm/models 语义）"
-    },
-    {
-      "route_id": "config_llm_models_create",
-      "method": "POST",
-      "path": "/ext/llm_service/config/llm/models",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "添加模型（body: models 字典——原 POST /ext/channel_api/config/llm/models 语义）"
-    },
-    {
-      "route_id": "config_llm_models_update",
-      "method": "PUT",
-      "path": "/ext/llm_service/config/llm/models/{model_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "更新模型配置（body: config——原 PUT /ext/channel_api/config/llm/models/{model_id} 语义）"
-    },
-    {
-      "route_id": "config_llm_models_delete",
-      "method": "DELETE",
-      "path": "/ext/llm_service/config/llm/models/{model_id}",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "删除模型（原 DELETE /ext/channel_api/config/llm/models/{model_id} 语义）"
-    },
-    {
-      "route_id": "config_llm_defaults_get",
-      "method": "GET",
-      "path": "/ext/llm_service/config/llm/defaults",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 8,
-      "description": "获取默认模型配置（原 GET /ext/channel_api/config/llm/defaults 语义）"
-    },
-    {
-      "route_id": "config_llm_defaults_update",
-      "method": "PUT",
-      "path": "/ext/llm_service/config/llm/defaults",
-      "auth": "user",
-      "handler_capability": "http.handle",
-      "timeout_ms": 5000,
-      "max_concurrency": 4,
-      "description": "更新默认模型配置（body: chat/embedding/tiers 可空部分更新——原 PUT /ext/channel_api/config/llm/defaults 语义）"
     }
   ]
 }

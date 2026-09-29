@@ -2,13 +2,9 @@
 
 import { lazy, Suspense, useEffect, useCallback } from 'react'
 import { createBrowserRouter, Navigate, useNavigate } from 'react-router-dom'
-import { composeRoleplaySendIdentity, withTaskMode } from '@/services/schema/modeOptions'
-import { ChangePasswordGate } from './components/auth/ChangePasswordGate'
-import { GlobalInteractionOverlay } from './components/chat/GlobalInteractionOverlay'
-import ErrorBoundary from './components/ErrorBoundary'
+import { composeSendIdentity, withModeBinding, withTaskMode } from '@/services/schema/modeOptions'
 import { ChatPanelShell } from './components/layout/ChatPanelShell'
 import { Sidebar } from './components/layout/Sidebar'
-import { SchemaFullscreenHost } from './components/schema/SchemaFullscreenHost'
 import { ROUTES } from './constants/routes'
 import { WS_LOCAL_EVENTS } from './constants/websocket'
 import { useAgentsQuery } from './hooks/queries/useAgentsQuery'
@@ -17,14 +13,17 @@ import { useSessionsQuery, readSessions } from './hooks/queries/useSessionsQuery
 import { useConnectionStatus } from './hooks/useConnectionStatus'
 import { useRealtimeEvents } from './hooks/useRealtimeEvents'
 import { useWidgetEvents } from './hooks/useWidgetEvents'
-import { LoginPage } from './pages/auth/LoginPage'
 import { RegisterPage } from './pages/auth/RegisterPage'
 import { performLogout } from './services/auth/logout'
 import { ensureFreshToken } from './services/auth/tokenLifecycle'
 import { loadSessionExecutionOptions } from './services/sessionExecutionOptions'
+import { loadPipelineBinding } from './services/pipelineExecutionOptions'
 import { globalWS } from './services/websocket/GlobalWebSocket'
 import { flushStreamChunkBuffer } from './services/websocket/streaming/handlers/streamHandler'
-import { initStreamingEvents, destroyStreamingEvents } from './services/websocket/streamingEventService'
+import {
+  initStreamingEvents,
+  destroyStreamingEvents,
+} from './services/websocket/streamingEventService'
 import { openWorkspacePanelByPath } from './services/workspacePanelOpener'
 import { useAgentTabStore } from './stores/agentTabStore'
 import { useAuthStore } from './stores/authStore'
@@ -32,7 +31,7 @@ import { useInteractionStore } from './stores/interactionStore'
 import { useNotificationStore } from './stores/notificationStore'
 import { usePendingInputStore } from './stores/pendingInputStore'
 import { usePipelineMessageStore } from './stores/pipelineMessageStore'
-import { useRoleplayPossessStore } from './stores/roleplayPossessStore'
+import { usePersonaPossessStore } from './stores/personaPossessStore'
 import { useSessionListStore } from './stores/sessionListStore'
 import { useSessionStore } from './stores/sessionStore'
 import { useUIStore } from './stores/uiStore'
@@ -61,66 +60,13 @@ const PluginPageRenderer = lazy(() =>
 /** 懒加载 fallback */
 const LazyFallback = <div className="text-muted-foreground p-4">加载中...</div>
 
-/**
- * 懒加载路由元素统一装配：ProtectedRoute → 路由级 ErrorBoundary → Suspense(lazy)。
- *
- * 路由级边界（E11）：懒加载 chunk 拉取失败（部署后旧 chunk 404/网络抖动）或
- * 路由组件渲染抛错时，降级 UI 只替换该路由内容，认证壳保持存活——若漏到
- * App.tsx 顶层边界，整个 RouterProvider 被卸载，导航彻底瘫痪只能整页刷新。
- */
-export function LazyRoute({ children }: { children: ReactNode }): ReactNode {
-  return (
-    <ProtectedRoute>
-      <ErrorBoundary>
-        <Suspense fallback={LazyFallback}>{children}</Suspense>
-      </ErrorBoundary>
-    </ProtectedRoute>
-  )
-}
+// 路由守卫与懒加载装配自本模块抽出（行为零变化；LazyRoute 公共面经 re-export 保持）
+import { LazyRoute, ProtectedRoute } from './router/lazyRoute'
+export { LazyRoute }
 
 /** 判断当前视口是否为移动端（< md 断点 768px） */
 function isMobileViewport(): boolean {
   return typeof window !== 'undefined' && window.innerWidth < 768
-}
-
-// 路由守卫
-
-/** 路由守卫组件 检查用户认证状态： */
-function ProtectedRoute({ children }: { children: ReactNode }): ReactNode {
-  const { isAuthenticated, isInitializing, mustChangePassword } = useAuthStore()
-
-  // 开发与生产行为一致（2026-09-13 用户裁定）：无 dev 放行旁路——旁路会让
-  // 「未登录却见完整主界面」只在开发可见，等价于把认证回归挡在生产首日。
-
-  // 首登强制改密闸（D1-4）：播种账号未改密前拦下所有受保护页面
-  if (isAuthenticated && mustChangePassword) {
-    return <ChangePasswordGate />
-  }
-
-  if (isInitializing) {
-    return (
-      <div className="bg-background text-foreground flex min-h-screen items-center justify-center">
-        <div className="space-y-2 text-center">
-          <div className="border-primary mx-auto h-8 w-8 animate-spin rounded-full border-2 border-t-transparent" />
-          <p className="text-muted-foreground text-sm">加载中...</p>
-        </div>
-      </div>
-    )
-  }
-
-  if (!isAuthenticated) {
-    return <Navigate to={ROUTES.LOGIN} replace />
-  }
-
-  return (
-    <>
-      {children}
-      {/* 全局交互浮层：在所有受保护页面中显示待处理交互 */}
-      <GlobalInteractionOverlay />
-      {/* 全屏声明浮层：订阅插件 ui_schema 声明的事件（on_event:*），渲染 fullscreen 空间 widget */}
-      <SchemaFullscreenHost />
-    </>
-  )
 }
 
 // 聊天主页
@@ -182,8 +128,12 @@ function HomePage(): ReactNode {
 
   /** 当前活跃会话的分页状态（从 pipelineMessageStore 响应式读取） */
   const activeKey = activePipelineId
-  const hasMoreMessages = usePipelineMessageStore((s) => activeKey ? (s.hasMoreOlderByPipeline[activeKey] ?? false) : false)
-  const isLoadingMoreMessages = usePipelineMessageStore((s) => activeKey ? (s.isLoadingOlderByPipeline[activeKey] ?? false) : false)
+  const hasMoreMessages = usePipelineMessageStore((s) =>
+    activeKey ? (s.hasMoreOlderByPipeline[activeKey] ?? false) : false,
+  )
+  const isLoadingMoreMessages = usePipelineMessageStore((s) =>
+    activeKey ? (s.isLoadingOlderByPipeline[activeKey] ?? false) : false,
+  )
 
   // 初始化全局流式事件处理器（不随组件卸载而销毁）
   useEffect(() => {
@@ -260,178 +210,149 @@ function HomePage(): ReactNode {
 
   /** 发送消息：目标 = 所在标签管道（主/子一对一，成员校验不过 fail-closed），乐观消息与流式态写 pipelineMessageStore 对应管道桶。
    *  受理协议：返回 false = 未受理（无会话/令牌、目标管道校验不过），ChatInput 保留输入；其余路径视为受理（void）。 */
-  const handleSendMessage = useCallback(
-    (params: SendMessageParams) => {
-      const { activeSessionId: sid } = useSessionStore.getState()
-      const currentToken = useAuthStore.getState().token
+  const handleSendMessage = useCallback((params: SendMessageParams) => {
+    const { activeSessionId: sid } = useSessionStore.getState()
+    const currentToken = useAuthStore.getState().token
 
-      if (!sid || !currentToken) {
-        // 显式拒绝（BUG-28 第三刀：真机取证钉死的发送链唯一静默拒绝点——
-        // token 仅存内存，恢复/轮换链任何断点都会让这里变 null，症状为
-        // 输入保留+零通知+零内核痕迹，用户视角 = 「点了没反应」）。
-        // token 缺失先自愈：tokenLifecycle 唯一真值源（内存有效令牌直接
-        // 取用，过期走 refresh 轮换），恢复成功回写 authStore 供重发过闸；
-        // 会话缺失无自愈源（activeSessionId 单点权威），显式引导刷新。
-        // 不绕过受理协议：返回 false，输入保留，绝不静默丢消息。
-        if (sid) {
-          void ensureFreshToken().then((token) => {
-            if (token) {
-              useAuthStore.setState({ token })
-              useNotificationStore.getState().addNotification({
-                title: '登录态已恢复',
-                message: '访问令牌已自动续期，请重新点击发送',
-                priority: 'normal',
-                category: 'alert',
-                isBlocking: false,
-                autoDismissMs: 8000,
-                sourceLabel: '前端',
-              })
-            } else {
-              useNotificationStore.getState().addNotification({
-                title: '发送未受理',
-                message: '登录态已失效且自动恢复失败，请重新登录后再发送',
-                priority: 'high',
-                category: 'error',
-                isBlocking: false,
-                autoDismissMs: 8000,
-                sourceLabel: '前端',
-              })
-            }
-          })
-        } else {
-          useNotificationStore.getState().addNotification({
-            title: '发送未受理',
-            message: '页面会话状态异常（无活跃会话），请刷新页面后重试',
-            priority: 'high',
-            category: 'error',
-            isBlocking: false,
-            autoDismissMs: 8000,
-            sourceLabel: '前端',
-          })
-        }
-        return false
-      }
-
-      const listStore = useSessionListStore.getState()
-      const sessions = readSessions()
-      const session = sessions.find(s => s.id === sid)
-      if (session && (session.title === '灵汐' || session.title === '新会话')) {
-        const title = params.content.replace(/\n/g, ' ').trim().slice(0, 30)
-        if (title) {
-          listStore.renameSession(sid, title)
-        }
-      }
-
-      const pipelineStore = usePipelineMessageStore.getState()
-
-      // 管道路由（一对一）：目标 = 发送所在标签的管道 params.pipelineId
-      // （主标签=主管道，子标签=子管道），原样透传不做主管道改写。会话串桶
-      // 由成员校验拦截：目标不属于当前会话（标签管道映射 ∪ 会话快照
-      // pipelineIds，两源都按 sid 划界）即状态滞后/脏值，fail-closed 终止
-      // 发送并显式通知，绝不静默改发主管道（子管道视图发送落主管道 = 写错
-      // 桶，与内核 resolve_pipeline_id_for_thread 同一裁定）。
-      const targetPipelineId = resolveSendTarget(
-        params.pipelineId,
-        session,
-        useAgentTabStore.getState().pipelineTabMap,
-      )
-      if (!targetPipelineId) {
-        console.warn(
-          '[handleSendMessage] 目标管道不属于当前会话，终止发送: sid=%s pid=%s',
-          sid.slice(0, 12),
-          params.pipelineId?.slice(0, 12) ?? '(empty)',
-        )
+    if (!sid || !currentToken) {
+      // 显式拒绝（BUG-28 第三刀：真机取证钉死的发送链唯一静默拒绝点——
+      // token 仅存内存，恢复/轮换链任何断点都会让这里变 null，症状为
+      // 输入保留+零通知+零内核痕迹，用户视角 = 「点了没反应」）。
+      // token 缺失先自愈：tokenLifecycle 唯一真值源（内存有效令牌直接
+      // 取用，过期走 refresh 轮换），恢复成功回写 authStore 供重发过闸；
+      // 会话缺失无自愈源（activeSessionId 单点权威），显式引导刷新。
+      // 不绕过受理协议：返回 false，输入保留，绝不静默丢消息。
+      if (sid) {
+        void ensureFreshToken().then((token) => {
+          if (token) {
+            useAuthStore.setState({ token })
+            useNotificationStore.getState().addNotification({
+              title: '登录态已恢复',
+              message: '访问令牌已自动续期，请重新点击发送',
+              priority: 'normal',
+              category: 'alert',
+              isBlocking: false,
+              autoDismissMs: 8000,
+              sourceLabel: '前端',
+            })
+          } else {
+            useNotificationStore.getState().addNotification({
+              title: '发送未受理',
+              message: '登录态已失效且自动恢复失败，请重新登录后再发送',
+              priority: 'high',
+              category: 'error',
+              isBlocking: false,
+              autoDismissMs: 8000,
+              sourceLabel: '前端',
+            })
+          }
+        })
+      } else {
         useNotificationStore.getState().addNotification({
-          title: '发送已终止',
-          message: '消息目标管道不属于当前会话，为防串桶已阻止发送，请刷新页面后重试',
+          title: '发送未受理',
+          message: '页面会话状态异常（无活跃会话），请刷新页面后重试',
           priority: 'high',
           category: 'error',
           isBlocking: false,
           autoDismissMs: 8000,
           sourceLabel: '前端',
         })
-        return false
       }
+      return false
+    }
 
-      const userMessageId = generateUUID()
-      // 附件索引随 content 携带（[来源: docs/decisions/2026-08-21-multimodal-attachments-chain.md]）：
-      // markdown 引用并入正文——
-      // 内核零改动（照旧只存文本 content），multimodal_preprocessor 识别
-      // /uploads/ 引用、llm_core 发送前读文件转 base64；用户消息气泡 markdown
-      // 渲染图片/链接，历史回读天然带引用。不再挂 attachments 数组（避免与
-      // markdown 图片双重显示）。
-      const contentWithRefs = appendAttachmentRefs(params.content, params.attachments)
+    const listStore = useSessionListStore.getState()
+    const sessions = readSessions()
+    const session = sessions.find((s) => s.id === sid)
+    if (session && (session.title === '灵汐' || session.title === '新会话')) {
+      const title = params.content.replace(/\n/g, ' ').trim().slice(0, 30)
+      if (title) {
+        listStore.renameSession(sid, title)
+      }
+    }
 
-      // 模式键（模式体系 §4.2 数据链）：选择器显式选择时并入消息级 execution_context
-      // （「自动」不带键，模式归属归后端自然语言分类路径）；会话执行选项其余键原样保留。
-      // 扮演身份归一（composeRoleplaySendIdentity）：附身态（roleplay.possess 桥，
-      // 显式全局态）经 execution_context.roleplay_persona 注入卡人设；扮演会话绑定
-      // （roleplay.continue 桥写会话执行选项 agentId）走 WS 帧 agent_id（内核透传
-      // 管道 state agent.id，卡身份=agent 键）+ mode=roleplay，开演档键（会话化
-      // 开演快照的开场白/用户设定）随绑定逐消息并入。两者并存附身独占
-      // （roleplay_persona 与 agent_id 的卡键优先序已在后端 material.py 定死，
-      // 前端只走单路）；都无则不带。
-      const sessionOptions = loadSessionExecutionOptions(sid)
-      const { executionContext, agentId } = composeRoleplaySendIdentity(
-        withTaskMode(sessionOptions?.executionContext, params.mode),
-        useRoleplayPossessStore.getState().possessed,
-        sessionOptions?.agentId,
-        sessionOptions?.roleplayGreeting,
-        sessionOptions?.roleplayUserPersona,
+    const pipelineStore = usePipelineMessageStore.getState()
+
+    // 管道路由（一对一）：目标 = 发送所在标签的管道 params.pipelineId
+    // （主标签=主管道，子标签=子管道），原样透传不做主管道改写。会话串桶
+    // 由成员校验拦截：目标不属于当前会话（标签管道映射 ∪ 会话快照
+    // pipelineIds，两源都按 sid 划界）即状态滞后/脏值，fail-closed 终止
+    // 发送并显式通知，绝不静默改发主管道（子管道视图发送落主管道 = 写错
+    // 桶，与内核 resolve_pipeline_id_for_thread 同一裁定）。
+    const targetPipelineId = resolveSendTarget(
+      params.pipelineId,
+      session,
+      useAgentTabStore.getState().pipelineTabMap,
+    )
+    if (!targetPipelineId) {
+      console.warn(
+        '[handleSendMessage] 目标管道不属于当前会话，终止发送: sid=%s pid=%s',
+        sid.slice(0, 12),
+        params.pipelineId?.slice(0, 12) ?? '(empty)',
       )
-
-      // [来源: docs/decisions/2026-08-22-streaming-protocol-rewrite.md] 单一消息数组：
-      // 乐观 user、流式 assistant 全在 messagesByPipeline 同一数组，靠 status
-      // 状态机区分生命周期；独立 pending 区不存在。new_message 事件携带
-      // user_message 权威回传时按 cmid 认领（recordId 双字段范式，UI id 永不变）。
-      // ── busy 分支（ADR-2026-08-26）──
-      // 管道执行中（streaming）发送 → 消息照常走 WS（内核 pending 队列排队，
-      // 等待窗口内可编辑/删除/清空），但不建乐观气泡/不启动流式态——
-      // 队列条由 pending_inputs_changed 事件同步；消费激活时 stream_start
-      // 到达 → 现有流式协议接管（占位气泡 → 认领 → 回复）。
-      if (pipelineStore.isStreaming(targetPipelineId)) {
-        globalWS.sendUserInput(sid, contentWithRefs, {
-          enableThinking: params.enableThinking,
-          thinkingStrength: params.thinkingStrength,
-          pipelineId: targetPipelineId,
-          clientMessageId: userMessageId,
-          executionContext,
-          agentId,
-        })
-        usePendingInputStore.getState().load(targetPipelineId)
-        return
-      }
-      pipelineStore.addMessage(targetPipelineId, {
-        id: userMessageId,
-        sessionId: sid,
-        role: 'user',
-        content: contentWithRefs,
-        timestamp: new Date().toISOString(),
-        status: 'sending',
-        clientMessageId: userMessageId,
+      useNotificationStore.getState().addNotification({
+        title: '发送已终止',
+        message: '消息目标管道不属于当前会话，为防串桶已阻止发送，请刷新页面后重试',
+        priority: 'high',
+        category: 'error',
+        isBlocking: false,
+        autoDismissMs: 8000,
+        sourceLabel: '前端',
       })
-      // 发送瞬间启动流式态（驱动生成态：ChatInput Stop 按钮/消息项 isGenerating）；
-      // stream_start 到达时才以后端真实 message_id 建 assistant 占位气泡——
-      // 此前窗口期不渲染思考气泡，发送失败反馈由 send_timeout 错误气泡承担。
-      pipelineStore.startStreaming(targetPipelineId, userMessageId)
-      // 用户发消息 = 对挂起中 conversation 交互的响应（2026-09-02 裁定）：
-      // 先解除挂起（提交空 approved，交互工具返回空回复），消息再推进下一步。
-      // 覆盖 pending（未点"进入对话"）与 entered 两态；choice 模式需显式
-      // 选选项不自动解除。只按目标管道探测一次：sid 是会话坐标不是管道坐标，
-      // 二次探测会把"另一个会话的交互"自动批准掉（store 层按管道精确归属）。
-      const pendingConversations =
-        useInteractionStore.getState().getPendingConversationsForPipeline(targetPipelineId)
-      for (const interaction of pendingConversations) {
-        globalWS.sendInteractionResponse(sid, interaction.requestId, {
-          response_type: 'approved',
-          feedback: '',
-        })
-        useInteractionStore.getState().markResponded(interaction.requestId)
-      }
+      return false
+    }
 
-      // globalWS.sendUserInput 是同步入队（_send 永不抛异常：已连接则 ws.send，
-      // 否则入队待重连），发送失败由 user_input_send_timeout（20s TTL）显式
-      // 撤下 pending + 插入错误气泡 + 高优通知兜底（诚实状态机，无静默容忍）。
+    const userMessageId = generateUUID()
+    // 附件索引随 content 携带（[来源: docs/decisions/2026-08-21-multimodal-attachments-chain.md]）：
+    // markdown 引用并入正文——
+    // 内核零改动（照旧只存文本 content），multimodal_preprocessor 识别
+    // /uploads/ 引用、llm_core 发送前读文件转 base64；用户消息气泡 markdown
+    // 渲染图片/链接，历史回读天然带引用。不再挂 attachments 数组（避免与
+    // markdown 图片双重显示）。
+    const contentWithRefs = appendAttachmentRefs(params.content, params.attachments)
+
+    // 模式键（模式体系 §4.2 数据链）：消息级 params.mode 并入 execution_context
+    // （「默认」不带键）；会话 modeBinding 出生即定覆写消息级 mode（D1/D9），
+    // 会话执行选项其余键原样保留。
+    // 身份归一（composeSendIdentity，三优先级 附身 > 会话绑定 > 不带）：附身态
+    // （mode.possess 桥，显式全局态）经 execution_context[personaKey] 注入人设
+    // （注入键随附身档钉住，registry decl.persona.from 出生解析）；会话绑定
+    // （modeSessionBinder 出生通道写会话执行选项快照）走 WS 帧 agent_id（内核
+    // 透传管道 state agent.id，agent 身份=agent 键）+ mode 键 + 扩展上下文键。
+    // 两者并存附身独占（人设键与 agent_id 的卡键优先序已在后端 material.py
+    // 定死，前端只走单路）；都无则不带。
+    const sessionOptions = loadSessionExecutionOptions(sid)
+    const sessionBinding =
+      sessionOptions &&
+      (sessionOptions.modeBinding?.mode || sessionOptions.agentId || sessionOptions.extraContext)
+        ? {
+            mode: sessionOptions.modeBinding?.mode ?? '',
+            ...(sessionOptions.agentId ? { agentId: sessionOptions.agentId } : {}),
+            ...(sessionOptions.extraContext ? { extraContext: sessionOptions.extraContext } : {}),
+          }
+        : undefined
+    // 管道级绑定优先（B8 管道标签）：子管道的模式参数不污染会话出生语义
+    const pipelineBinding = loadPipelineBinding(targetPipelineId)
+    const effectiveBinding = pipelineBinding ?? sessionOptions?.modeBinding
+    const { executionContext, agentId } = composeSendIdentity(
+      withModeBinding(
+        withTaskMode(sessionOptions?.executionContext, params.mode),
+        effectiveBinding,
+      ),
+      usePersonaPossessStore.getState().possessed,
+      sessionBinding,
+    )
+
+    // [来源: docs/decisions/2026-08-22-streaming-protocol-rewrite.md] 单一消息数组：
+    // 乐观 user、流式 assistant 全在 messagesByPipeline 同一数组，靠 status
+    // 状态机区分生命周期；独立 pending 区不存在。new_message 事件携带
+    // user_message 权威回传时按 cmid 认领（recordId 双字段范式，UI id 永不变）。
+    // ── busy 分支（ADR-2026-08-26）──
+    // 管道执行中（streaming）发送 → 消息照常走 WS（内核 pending 队列排队，
+    // 等待窗口内可编辑/删除/清空），但不建乐观气泡/不启动流式态——
+    // 队列条由 pending_inputs_changed 事件同步；消费激活时 stream_start
+    // 到达 → 现有流式协议接管（占位气泡 → 认领 → 回复）。
+    if (pipelineStore.isStreaming(targetPipelineId)) {
       globalWS.sendUserInput(sid, contentWithRefs, {
         enableThinking: params.enableThinking,
         thinkingStrength: params.thinkingStrength,
@@ -439,10 +360,53 @@ function HomePage(): ReactNode {
         clientMessageId: userMessageId,
         executionContext,
         agentId,
+        pipelineConfigId: effectiveBinding?.pipelineConfigId,
       })
-    },
-    [],
-  )
+      usePendingInputStore.getState().load(targetPipelineId)
+      return
+    }
+    pipelineStore.addMessage(targetPipelineId, {
+      id: userMessageId,
+      sessionId: sid,
+      role: 'user',
+      content: contentWithRefs,
+      timestamp: new Date().toISOString(),
+      status: 'sending',
+      clientMessageId: userMessageId,
+    })
+    // 发送瞬间启动流式态（驱动生成态：ChatInput Stop 按钮/消息项 isGenerating）；
+    // stream_start 到达时才以后端真实 message_id 建 assistant 占位气泡——
+    // 此前窗口期不渲染思考气泡，发送失败反馈由 send_timeout 错误气泡承担。
+    pipelineStore.startStreaming(targetPipelineId, userMessageId)
+    // 用户发消息 = 对挂起中 conversation 交互的响应（2026-09-02 裁定）：
+    // 先解除挂起（提交空 approved，交互工具返回空回复），消息再推进下一步。
+    // 覆盖 pending（未点"进入对话"）与 entered 两态；choice 模式需显式
+    // 选选项不自动解除。只按目标管道探测一次：sid 是会话坐标不是管道坐标，
+    // 二次探测会把"另一个会话的交互"自动批准掉（store 层按管道精确归属）。
+    const pendingConversations = useInteractionStore
+      .getState()
+      .getPendingConversationsForPipeline(targetPipelineId)
+    for (const interaction of pendingConversations) {
+      globalWS.sendInteractionResponse(sid, interaction.requestId, {
+        response_type: 'approved',
+        feedback: '',
+      })
+      useInteractionStore.getState().markResponded(interaction.requestId)
+    }
+
+    // globalWS.sendUserInput 是同步入队（_send 永不抛异常：已连接则 ws.send，
+    // 否则入队待重连），发送失败由 user_input_send_timeout（20s TTL）显式
+    // 撤下 pending + 插入错误气泡 + 高优通知兜底（诚实状态机，无静默容忍）。
+    globalWS.sendUserInput(sid, contentWithRefs, {
+      enableThinking: params.enableThinking,
+      thinkingStrength: params.thinkingStrength,
+      pipelineId: targetPipelineId,
+      clientMessageId: userMessageId,
+      executionContext,
+      agentId,
+      pipelineConfigId: effectiveBinding?.pipelineConfigId,
+    })
+  }, [])
 
   /** 停止生成 */
   const handleStopGenerate = useCallback(() => {
@@ -559,7 +523,12 @@ function HomePage(): ReactNode {
       <div className="flex flex-col items-center gap-4">
         <div className="bg-primary/10 text-primary flex h-20 w-20 items-center justify-center rounded-xl">
           <svg className="h-10 w-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={1.5}
+              d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"
+            />
           </svg>
         </div>
         <div className="flex flex-col items-center gap-2 text-center">
@@ -572,7 +541,7 @@ function HomePage(): ReactNode {
       <div className="grid w-full max-w-xl grid-cols-1 gap-4 sm:grid-cols-2">
         <button
           onClick={handleCreateSession}
-          className="bg-card border-border hover:border-primary hover:shadow-md group flex items-start gap-4 rounded-xl border p-5 text-left transition-all"
+          className="bg-card border-border hover:border-primary group flex items-start gap-4 rounded-xl border p-5 text-left transition-all hover:shadow-md"
         >
           <span className="bg-primary text-primary-foreground flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-xl font-medium">
             +
@@ -584,12 +553,16 @@ function HomePage(): ReactNode {
         </button>
         <button
           onClick={() => openWorkspacePanelByPath('/agents')}
-          className="bg-card border-border hover:border-primary hover:shadow-md group flex items-start gap-4 rounded-xl border p-5 text-left transition-all"
+          className="bg-card border-border hover:border-primary group flex items-start gap-4 rounded-xl border p-5 text-left transition-all hover:shadow-md"
         >
           <span className="bg-primary/10 text-primary flex h-10 w-10 shrink-0 items-center justify-center rounded-lg">
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <circle cx="9" cy="8" r="3.25" strokeWidth={1.5} />
-              <path strokeLinecap="round" strokeWidth={1.5} d="M3.5 19c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25" />
+              <path
+                strokeLinecap="round"
+                strokeWidth={1.5}
+                d="M3.5 19c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"
+              />
               <circle cx="16.5" cy="9" r="2.5" strokeWidth={1.5} />
               <path strokeLinecap="round" strokeWidth={1.5} d="M15.2 14.7c2.3.3 4 1.7 4.8 4.3" />
             </svg>
@@ -601,11 +574,16 @@ function HomePage(): ReactNode {
         </button>
         <button
           onClick={() => openWorkspacePanelByPath('/p/get_started')}
-          className="bg-card border-border hover:border-primary hover:shadow-md group flex items-start gap-4 rounded-xl border p-5 text-left transition-all"
+          className="bg-card border-border hover:border-primary group flex items-start gap-4 rounded-xl border p-5 text-left transition-all hover:shadow-md"
         >
           <span className="bg-primary/10 text-primary flex h-10 w-10 shrink-0 items-center justify-center rounded-lg">
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={1.5}
+                d="M13 10V3L4 14h7v7l9-11h-7z"
+              />
             </svg>
           </span>
           <span className="flex flex-col gap-1">
@@ -647,10 +625,8 @@ export function createRouter() {
     // /p/memory 全页可达）。
     // 调试页面无独立路由：debug_center 插件声明页（debug_center_hub）内嵌九个子页
     // （pages/debug/* 以 embedded 模式复用），路由侧双通道已退役。
-    {
-      path: ROUTES.LOGIN,
-      element: <LoginPage />,
-    },
+    // /login 无独立路由（ADR 2026-09-28）：整页登录页退役，未认证一律由
+    // ProtectedRoute 呈现 AuthGate 登录模态。
     {
       path: ROUTES.REGISTER,
       element: <RegisterPage />,

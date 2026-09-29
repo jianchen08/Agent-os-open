@@ -92,6 +92,8 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 mimalloc = { version = "0.1.52", features = ["extended"] }
 # mimalloc 选项控制（mi_option_set：purge_delay=0 空闲页立即归还 OS）
 libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
+# 任务活动标签槽（task_activity：O(1) 原子标签交换，堆栈级诊断面）
+arc-swap = "1"
 # 内核 crate（workspace 内部引用）
 agentos-core = { path = "crates/core" }
 agentos-config = { path = "crates/config" }

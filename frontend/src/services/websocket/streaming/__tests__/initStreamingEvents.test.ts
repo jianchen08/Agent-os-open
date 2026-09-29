@@ -53,6 +53,7 @@ vi.mock('../handlers', () => ({
   handleStreamError: () => { invoked.calls.push('stream_error') },
   handleStreamStart: () => { invoked.calls.push('stream_start') },
   handlePipelineRoundFinished: () => { invoked.calls.push('pipeline_round_finished') },
+  handleRunFailed: () => { invoked.calls.push('run_failed') },
   handleTextDelta: () => { invoked.calls.push('text_delta') },
   handleToolCallDelta: () => { invoked.calls.push('tool_call_delta') },
   handleToolProgress: () => { invoked.calls.push('tool_progress') },
@@ -115,6 +116,7 @@ describe('initStreamingEvents 全局流式事件接线', () => {
       WS_SERVER_EVENTS.PIPELINE_ROUND_FINISHED,
       WS_SERVER_EVENTS.STREAM_ERROR,
       WS_SERVER_EVENTS.PLUGIN_ERROR,
+      WS_SERVER_EVENTS.RUN_FAILED,
       WS_SERVER_EVENTS.NEW_MESSAGE,
       WS_SERVER_EVENTS.TOOL_START,
       WS_SERVER_EVENTS.TOOL_RESULT,
@@ -152,6 +154,18 @@ describe('initStreamingEvents 全局流式事件接线', () => {
     mockHandlers.get(WS_SERVER_EVENTS.ITERATION)!({ iteration: 2, max_iterations: 5 })
 
     expect(invoked.calls).toContain('iteration')
+  })
+
+  it('run_failed 绕过相关性门控：非关注管道的失败事件照常到达 handler（后台管道失败正是要通知的场景）', async () => {
+    const mod = await import('../index')
+    mod.initStreamingEvents()
+
+    mockHandlers.get(WS_SERVER_EVENTS.RUN_FAILED)!({ data: { pipeline_id: 'pipe-never-registered' } })
+
+    expect(invoked.calls).toContain('run_failed')
+    expect(mockLogger.info).not.toHaveBeenCalledWith(
+      expect.stringContaining('drop irrelevant pipeline event'),
+    )
   })
 
   it('高频增量事件（text/reasoning/tool_call_delta、keepalive）不写事件日志', async () => {

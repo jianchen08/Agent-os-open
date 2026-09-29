@@ -9,10 +9,10 @@
  * 漂移/手写回潮检查：
  *     python scripts/check_frontend_endpoints_sync.py
  */
- 
+/* eslint-disable */
 
 
-  /** agent_manager（Agent Manager）：plugin.json 声明 6 端点 */
+  /** agent_manager（Agent Manager）：plugin.json 声明 7 端点 */
   export const AGENT_MANAGER_ENDPOINTS = {
     'agent_manager_list': '/ext/agent_manager/agents',
     'agent_manager_schema': '/ext/agent_manager/agents/schema',
@@ -20,6 +20,7 @@
     'agent_manager_put_config': '/ext/agent_manager/agents/{id}/config',
     'agent_manager_mode_get_config': '/ext/agent_manager/agents/{mode_id}/{stem}/config',
     'agent_manager_mode_put_config': '/ext/agent_manager/agents/{mode_id}/{stem}/config',
+    'agent_manager_modes': '/ext/agent_manager/modes',
   } as const
 
   /** approval_service（Approval Service）：plugin.json 声明 7 端点 */
@@ -33,13 +34,14 @@
     'interaction_viewed': '/ext/approval_service/interaction/{request_id}/viewed',
   } as const
 
-  /** artifacts（Artifacts Service）：plugin.json 声明 13 端点 */
+  /** artifacts（Artifacts Service）：plugin.json 声明 14 端点 */
   export const ARTIFACTS_ENDPOINTS = {
     'artifacts_create': '/ext/artifacts',
     'artifacts_list': '/ext/artifacts',
     'annotations_delete': '/ext/artifacts/annotations/{annotation_id}',
     'annotations_update': '/ext/artifacts/annotations/{annotation_id}',
     'annotations_resolve': '/ext/artifacts/annotations/{annotation_id}/resolve',
+    'artifacts_file_content': '/ext/artifacts/files/{stored_filename}',
     'artifacts_upload': '/ext/artifacts/upload',
     'artifacts_delete': '/ext/artifacts/{artifact_id}',
     'artifacts_get': '/ext/artifacts/{artifact_id}',
@@ -90,11 +92,6 @@
     'probe_echo': '/ext/e2e_lifecycle_probe/echo',
   } as const
 
-  /** eval_harness_service（Eval Harness Service）：plugin.json 声明 1 端点 */
-  export const EVAL_HARNESS_SERVICE_ENDPOINTS = {
-    'eval_harness_evolution_panel_page': '/ext/eval_harness_service/page/evolution-panel',
-  } as const
-
   /** evaluation_service（Evaluation Service）：plugin.json 声明 3 端点 */
   export const EVALUATION_SERVICE_ENDPOINTS = {
     'metrics_list': '/ext/evaluation_service/metrics',
@@ -129,21 +126,10 @@
     'hindsight_stats': '/ext/hindsight_memory_service/stats',
   } as const
 
-  /** llm_service（LLM Service）：plugin.json 声明 20 端点 */
+  /** llm_service（LLM Service）：plugin.json 声明 9 端点 */
   export const LLM_SERVICE_ENDPOINTS = {
-    'config_llm_get': '/ext/llm_service/config/llm',
-    'config_llm_defaults_get': '/ext/llm_service/config/llm/defaults',
-    'config_llm_defaults_update': '/ext/llm_service/config/llm/defaults',
-    'config_llm_models_create': '/ext/llm_service/config/llm/models',
-    'config_llm_models_get': '/ext/llm_service/config/llm/models',
-    'config_llm_models_delete': '/ext/llm_service/config/llm/models/{model_id}',
-    'config_llm_models_update': '/ext/llm_service/config/llm/models/{model_id}',
     'config_llm_presets_get': '/ext/llm_service/config/llm/presets',
     'config_llm_provider_types_get': '/ext/llm_service/config/llm/provider-types',
-    'config_llm_providers_create': '/ext/llm_service/config/llm/providers',
-    'config_llm_providers_get': '/ext/llm_service/config/llm/providers',
-    'config_llm_providers_delete': '/ext/llm_service/config/llm/providers/{provider_id}',
-    'config_llm_providers_update': '/ext/llm_service/config/llm/providers/{provider_id}',
     'config_llm_providers_remote_models_get': '/ext/llm_service/config/llm/providers/{provider_id}/remote-models',
     'thinking_mode_check': '/ext/llm_service/thinking-mode/check/{model_name}',
     'thinking_mode_health': '/ext/llm_service/thinking-mode/healthz',
@@ -169,6 +155,11 @@
     'mode_coding_data_reviews': '/ext/mode_coding/data/reviews',
     'mode_coding_data_sessions': '/ext/mode_coding/data/sessions',
     'mode_coding_panel_page': '/ext/mode_coding/page/coding-panel',
+  } as const
+
+  /** mode_evolution（Mode Evolution）：plugin.json 声明 1 端点 */
+  export const MODE_EVOLUTION_ENDPOINTS = {
+    'mode_evolution_panel_page': '/ext/mode_evolution/page/evolution-panel',
   } as const
 
   /** mode_godot（Mode Godot）：plugin.json 声明 9 端点 */
@@ -208,7 +199,7 @@
     'mode_research_panel_page': '/ext/mode_research/page/research-panel',
   } as const
 
-  /** mode_roleplay（Mode Roleplay）：plugin.json 声明 15 端点 */
+  /** mode_roleplay（Mode Roleplay）：plugin.json 声明 18 端点 */
   export const MODE_ROLEPLAY_ENDPOINTS = {
     'mode_roleplay_action_play': '/ext/mode_roleplay/data/actions/play',
     'mode_roleplay_action_regenerate': '/ext/mode_roleplay/data/actions/regenerate',
@@ -219,6 +210,9 @@
     'mode_roleplay_card_import': '/ext/mode_roleplay/data/cards/import',
     'mode_roleplay_card_save': '/ext/mode_roleplay/data/cards/save',
     'mode_roleplay_data_lorebooks': '/ext/mode_roleplay/data/lorebooks',
+    'mode_roleplay_lorebook_delete': '/ext/mode_roleplay/data/lorebooks/delete',
+    'mode_roleplay_lorebook_import': '/ext/mode_roleplay/data/lorebooks/import',
+    'mode_roleplay_lorebook_save': '/ext/mode_roleplay/data/lorebooks/save',
     'mode_roleplay_data_messages': '/ext/mode_roleplay/data/messages',
     'mode_roleplay_data_personas': '/ext/mode_roleplay/data/personas',
     'mode_roleplay_persona_delete': '/ext/mode_roleplay/data/personas/delete',

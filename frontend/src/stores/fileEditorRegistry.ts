@@ -22,8 +22,12 @@ export interface FileEditorData {
   containerTaskId: string
   /** 是否正在加载（运行时状态，不持久化） */
   loading?: boolean
-  /** 附件直链 URL（如 /uploads/xxx.pdf）；优先于 containerTaskId 拼接的 workspaces URL */
+  /** 附件直链 URL（如 /uploads/xxx.pdf 或内存 blob URL）；优先于 containerTaskId 拼接的 workspaces URL */
   url?: string
+  /** 内存 blob URL（运行时状态，不持久化；页签关闭时统一 revokeObjectURL 防泄漏） */
+  blobUrl?: string
+  /** 查看器覆盖（'none' = 未命中加载器，渲染「无对应的加载器」卡） */
+  viewerOverride?: 'none'
 }
 
 /** 文件变更监听器回调类型 */
@@ -68,10 +72,10 @@ function _loadFromStorage(): Map<string, FileEditorData> {
 function _saveToStorage(): void {
   if (typeof localStorage === 'undefined') return
   try {
-    const obj: Record<string, Omit<FileEditorData, 'loading'>> = {}
+    const obj: Record<string, Omit<FileEditorData, 'loading' | 'blobUrl'>> = {}
     for (const [tabId, data] of editorDataMap) {
       if ((data.content?.length ?? 0) > MAX_PERSIST_SIZE) continue
-      const { loading: _l, ...rest } = data
+      const { loading: _l, blobUrl: _b, ...rest } = data
       obj[tabId] = rest
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(obj))
@@ -127,11 +131,20 @@ export function updateFileEditorData(
 /**
  * 移除文件编辑器数据
  *
- * 在关闭 Tab 时调用，防止内存泄漏。
+ * 在关闭 Tab 时调用，防止内存泄漏；blob URL 在此统一 revoke
+ * （撤销责任单点，查看器组件不管资源生命周期）。
  *
  * @param tabId - 工作区 Tab ID
  */
 export function removeFileEditorData(tabId: string): void {
+  const data = editorDataMap.get(tabId)
+  if (data?.blobUrl && typeof URL !== 'undefined' && URL.revokeObjectURL) {
+    try {
+      URL.revokeObjectURL(data.blobUrl)
+    } catch {
+      // 已撤销/无效 URL 静默忽略
+    }
+  }
   editorDataMap.delete(tabId)
   fileChangeListeners.delete(tabId)
   _saveToStorage()

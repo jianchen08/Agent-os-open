@@ -14,7 +14,7 @@
 import * as fs from "fs";
 import * as path from "path";
 
-import { safeStorage } from "electron";
+import * as electronModules from "electron";
 
 const AUTH_SESSION_FILE = "auth-session.json";
 
@@ -49,10 +49,17 @@ type ElectronSafeStorage = {
   decryptString(data: Buffer): string;
 };
 
-/** 惰性适配 safeStorage；纯 Node 环境（未 mock electron）下为 undefined。 */
-const ss = safeStorage as ElectronSafeStorage | undefined;
+/** 惰性适配 safeStorage；纯 Node 环境（未 mock electron）下为 undefined。
+ *  命名空间取属性而非具名导入，且容错降级：部分 electron mock（如
+ *  app-protocol 测试）不提供 safeStorage，缺失导出的访问会抛。 */
+let ss: ElectronSafeStorage | undefined;
+try {
+  ss = (electronModules as { safeStorage?: ElectronSafeStorage }).safeStorage;
+} catch {
+  ss = undefined;
+}
 
-function resolveElectronCipher(): TokenCipher | null {
+export function resolveElectronCipher(): TokenCipher | null {
   if (!ss) {
     return null;
   }

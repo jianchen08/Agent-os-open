@@ -177,3 +177,109 @@ class TestWallClockBudget:
         assert result.success is True
         assert result.metadata.get("truncated") is False
         assert len(result.output["results"]) == 5
+
+
+class TestDependencyTreePruning:
+    """遍历剪枝（ADR 2026-09-28）：依赖/构建产物目录按 basename 全深度跳过。"""
+
+    @pytest.mark.parametrize(
+        "skip_name",
+        [
+            "node_modules",
+            ".git",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "target",
+            "dist",
+            ".zctmp",
+        ],
+    )
+    async def test_skip_dir_names_hidden_at_any_depth(
+        self, tmp_path: Path, skip_name: str
+    ) -> None:
+        """名单内目录（含深层嵌套形态）中的命中文件不进结果；名单外正常命中。"""
+        (tmp_path / "app" / skip_name / "pkg").mkdir(parents=True)
+        (tmp_path / "app" / skip_name / "pkg" / "needle.txt").write_text(
+            "x", encoding="utf-8"
+        )
+        (tmp_path / "docs" / "working").mkdir(parents=True)
+        (tmp_path / "docs" / "working" / "needle.txt").write_text(
+            "x", encoding="utf-8"
+        )
+        result = await _search(
+            query="needle",
+            path=str(tmp_path),
+            search_type="filename",
+            workspace=str(tmp_path),
+            project_root=str(tmp_path),
+        )
+        paths = [r["file_path"] for r in result.output["results"]]
+        # 性质断言：任何结果路径都不含被剪枝目录段
+        assert all(skip_name not in Path(p).parts for p in paths)
+        assert any(
+            p.endswith(str(Path("docs") / "working" / "needle.txt")) for p in paths
+        )
+
+    async def test_nested_node_modules_chain_pruned(self, tmp_path: Path) -> None:
+        """npm 依赖循环嵌套链（a/node_modules/b/node_modules/…）整体不可见。"""
+        deep = tmp_path / "app" / "node_modules" / "pkg" / "node_modules" / "dep"
+        deep.mkdir(parents=True)
+        (deep / "needle.txt").write_text("x", encoding="utf-8")
+        result = await _search(
+            query="needle",
+            path=str(tmp_path),
+            search_type="filename",
+            workspace=str(tmp_path),
+            project_root=str(tmp_path),
+        )
+        assert result.output["results"] == []
+
+    async def test_wt_prefix_dir_pruned(self, tmp_path: Path) -> None:
+        """.wt-<topic> worktree 前缀目录跳过（镜像 .gitignore /.wt-*/）。"""
+        (tmp_path / ".wt-feat-x" / "docs").mkdir(parents=True)
+        (tmp_path / ".wt-feat-x" / "docs" / "needle.txt").write_text(
+            "x", encoding="utf-8"
+        )
+        result = await _search(
+            query="needle",
+            path=str(tmp_path),
+            search_type="filename",
+            workspace=str(tmp_path),
+            project_root=str(tmp_path),
+        )
+        assert result.output["results"] == []
+
+    async def test_skip_dir_as_search_root_still_searchable(
+        self, tmp_path: Path
+    ) -> None:
+        """直接以被剪枝目录为 path 起搜仍可进入（根自身不剪，只剪子树）。"""
+        nm = tmp_path / "vendor" / "node_modules"
+        nm.mkdir(parents=True)
+        (nm / "needle.txt").write_text("x", encoding="utf-8")
+        result = await _search(
+            query="needle",
+            path=str(nm),
+            search_type="filename",
+            workspace=str(tmp_path),
+            project_root=str(tmp_path),
+        )
+        assert [r["content"] for r in result.output["results"]] == ["needle.txt"]
+
+    async def test_text_search_also_prunes(self, tmp_path: Path) -> None:
+        """text 内容搜索与 filename 共用同一 walk，剪枝同样生效。"""
+        (tmp_path / "app" / "node_modules" / "pkg").mkdir(parents=True)
+        (tmp_path / "app" / "node_modules" / "pkg" / "a.js").write_text(
+            "needle-content", encoding="utf-8"
+        )
+        (tmp_path / "src.py").write_text("needle-content", encoding="utf-8")
+        result = await _search(
+            query="needle-content",
+            path=str(tmp_path),
+            search_type="text",
+            workspace=str(tmp_path),
+            project_root=str(tmp_path),
+        )
+        paths = [r["file_path"] for r in result.output["results"]]
+        assert all("node_modules" not in Path(p).parts for p in paths)
+        assert any(p.endswith("src.py") for p in paths)

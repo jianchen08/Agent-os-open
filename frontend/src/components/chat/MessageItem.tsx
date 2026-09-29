@@ -23,11 +23,11 @@ import { Button } from '@/components/ui/button'
 import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
 import { cn } from '@/lib/utils'
 import { usePresenterProfile } from '@/services/api/presenterProfiles'
-import { openAttachment } from '@/services/attachmentOpener'
 import { ErrorType, reportError } from '@/services/errorReporting'
+import { markdownLinkInterceptor, openFileWithLoader } from '@/services/fileLoaderRegistry'
 import { useInteractionStore } from '@/stores/interactionStore'
+import { usePersonaPossessStore } from '@/stores/personaPossessStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
-import { useRoleplayPossessStore } from '@/stores/roleplayPossessStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useThemeStore } from '@/stores/themeStore'
 import { toolCallToActivity } from '@/utils/activityConverter'
@@ -40,9 +40,11 @@ import { MessageActions } from './MessageActions'
 import MessageContentRenderer from './MessageContentRenderer'
 import { MESSAGE_STYLE_METADATA_KEY, PluginMessageCard, resolveMessageStyle } from './PluginMessageCard'
 import { parseReferenceMessage, ReferenceChip } from './ReferenceChip'
+import { useMessageStateCard } from '@/hooks/queries/useMessageStateCard'
+import { stripBySpan } from '@/services/schema/messageStateCard'
 import type { MessageItemProps } from './types'
 import type { PresenterAvatar, PresenterProfile } from '@/services/api/presenterProfiles'
-import type { RoleplayPossession } from '@/services/schema/modeOptions'
+import type { PersonaPossession } from '@/services/schema/modeOptions'
 import type { ActivityData } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
 import type { ReactNode } from 'react'
@@ -59,6 +61,9 @@ const TOOL_STATUS_MAP: Record<string, MessageToolCall['status']> = {
 
 /** 已警告过的未知状态值（同一未知值只警告一次，长消息流不刷屏） */
 const warnedUnknownToolStatuses = new Set<string>()
+
+/** 消息 markdown 附件链接拦截（/uploads 链接改走加载器，防整窗导航死页） */
+const attachmentLinkInterceptor = markdownLinkInterceptor()
 
 /**
  * 解析 tool 消息状态：未知值不猜 completed（未知 ≠ 成功），
@@ -158,19 +163,19 @@ const MessageEditor = ({ content, onSave, onCancel, disabled = false }: MessageE
   )
 }
 
-/** 扮演呈现档案上下文（PresenterScope → 头像槽/徽标的单向投递） */
+/** 呈现档案上下文（PresenterScope → 头像槽/徽标的单向投递） */
 const PresenterContext = createContext<PresenterProfile | null>(null)
 
 /**
  * 附身档 → 呈现档案：附身是临时态（消息本体身份仍是主 agent），仅投递
  * {name, avatar} 供头像槽/徽标消费；origin 标 possess 以区分卡目录解析来源。
  */
-function possessionToPresenter(possessed: RoleplayPossession): PresenterProfile {
+function possessionToPresenter(possessed: PersonaPossession): PresenterProfile {
   return { name: possessed.name, avatar: possessed.avatar, origin: 'possess' }
 }
 
 /**
- * 扮演呈现档案作用域：assistant 消息带 agentId 或附身激活时挂载（挂载条件由
+ * 呈现档案作用域：assistant 消息带 agentId 或附身激活时挂载（挂载条件由
  * 调用方裁定）。呈现优先级：消息自带模式卡键 → presenter 解析优先（卡身份是
  * 消息的永久属性）；presenter 未命中且附身激活 → 附身档覆盖（解除即回退）。
  * agentId 缺席时 usePresenterProfile 恒 null（零请求）。
@@ -181,7 +186,7 @@ function PresenterScope({
   children,
 }: {
   agentId: string | undefined
-  possessed: RoleplayPossession | null
+  possessed: PersonaPossession | null
   children: ReactNode
 }) {
   const presenter = usePresenterProfile(agentId)
@@ -190,10 +195,10 @@ function PresenterScope({
 }
 
 /**
- * 扮演头像徽章（assistant 气泡左侧 28px 圆角头像位）：
+ * 呈现头像徽章（assistant 气泡左侧 28px 圆角头像位）：
  * avatar=emoji 串 → emoji 居中 + 浅底；{fg,bg} 色对 → 名字首字 + fg 字色 bg 底
  * （缺色回退主题 secondary 令牌）；avatar=null → 首字 + 默认底。
- * presenter 未命中（非扮演）时调用方不渲染本组件、走默认头像，布局零变化。
+ * presenter 未命中（非呈现态）时调用方不渲染本组件、走默认头像，布局零变化。
  */
 function PresenterAvatarBadge({ name, avatar }: { name: string; avatar: PresenterAvatar }) {
   const emoji = typeof avatar === 'string' && avatar.trim() !== '' ? avatar : null
@@ -215,7 +220,7 @@ function PresenterAvatarBadge({ name, avatar }: { name: string; avatar: Presente
 }
 
 /**
- * 消息行首列头像槽：assistant 且扮演档案命中 → 扮演头像徽章；
+ * 消息行首列头像槽：assistant 且呈现档案命中 → 呈现头像徽章；
  * 其余（user/system/未命中）→ 默认头像（形态与既有渲染一致）。
  */
 function AvatarSlot({ isUser, isSystemMessage }: { isUser: boolean; isSystemMessage: boolean }) {
@@ -248,7 +253,7 @@ function AvatarSlot({ isUser, isSystemMessage }: { isUser: boolean; isSystemMess
 }
 
 /**
- * assistant 徽标：扮演命中 → 卡名（emoji 形态并入徽标前位，色对/null 形态仅
+ * assistant 徽标：呈现命中 → 档案名（emoji 形态并入徽标前位，色对/null 形态仅
  * 卡名，不动徽标底色）；未命中 → 注册表徽标（Sparkles+agent 名，原样）。
  * presenter 与 agent 双未命中不渲染。
  */
@@ -275,11 +280,11 @@ function PresenterAwareBadge({ agent }: { agent: { name: string } | null }) {
 }
 
 /**
- * 扮演呈现态工具消息体：工具卡片沉浸化——默认折叠为一行低调叙事行
+ * 呈现态工具消息体：工具卡片沉浸化——默认折叠为一行低调叙事行
  * （`✦ <角色名>的静默行动`；名字缺席回退 `✦ 静默行动`；失败态显示
  * `✦ 行动受挫` 弱警示色），点击行展开原生 ActivityCard 详情（可查证），
  * 再点收回；折叠态为组件内 useState，每消息独立且不持久化。
- * 非扮演态（presenter/附身双未命中）原样直出 ActivityCard，布局与既有零差异。
+ * 非呈现态（presenter/附身双未命中）原样直出 ActivityCard，布局与既有零差异。
  */
 function ToolMessageBody({ activity, failed }: { activity: ActivityData; failed: boolean }) {
   const presenter = useContext(PresenterContext)
@@ -291,7 +296,7 @@ function ToolMessageBody({ activity, failed }: { activity: ActivityData; failed:
     <>
       <button
         type="button"
-        data-testid="roleplay-tool-narrative"
+        data-testid="presenter-tool-narrative"
         onClick={() => setExpanded((v) => !v)}
         className={cn(
           'cursor-pointer rounded px-0.5 text-left text-xs transition-colors',
@@ -340,7 +345,7 @@ export const MessageItem = memo(function MessageItem({
   const agent = message.agentId ? agents.find((a) => a.id === message.agentId) : null
 
   // 附身态订阅：选择器直返 possessed，null 恒稳定引用，未附身零额外重渲染
-  const possessed = useRoleplayPossessStore((s) => s.possessed)
+  const possessed = usePersonaPossessStore((s) => s.possessed)
   // 附身作用域：消息对象无管道归属字段，以「消息 session === 活跃管道所属
   // session」判定（主聊天视图消息恒取自活跃管道）；历史会话/其他会话的气泡
   // 不随附身切换。布尔选择器，false 稳定不触发重渲染。
@@ -404,8 +409,17 @@ export const MessageItem = memo(function MessageItem({
     setIsEditing(false)
   }
 
+  // 状态统一标记卡分发（2026-09-28 设计 §5b）：三道门（最新 assistant 非流式 /
+  // 解析步端点载荷在场 / 插件 message_cards 声明命中——宿主零样式 id 硬编码）。
+  // 正文按 span 精确切除标记段（标记可能在中间，后半正文不可丢）；无载荷/无
+  // 声明 = null，渲染输出与既有逐字节一致。
+  const stateCard = useMessageStateCard(isLast && isAssistant && !isMessageStreaming)
+  const stateCardMessage = stateCard
+    ? { ...message, content: stripBySpan(message.content, stateCard.span) }
+    : message
+
   const renderContext = useMessageRender({
-    message,
+    message: stateCardMessage,
     isLast,
     isGenerating,
     versionContent,
@@ -681,7 +695,7 @@ export const MessageItem = memo(function MessageItem({
                       // 附件索引以 markdown 引用并入 content（![f](/uploads/x.png)），
                       // 图片/链接由此直接渲染，历史回读天然带引用。
                       <div className="text-sm">
-                        <LobeChatMarkdown content={userContent} />
+                        <LobeChatMarkdown content={userContent} onLinkClick={attachmentLinkInterceptor} />
                       </div>
                     )}
                     {imageAttachments.length > 0 && (
@@ -711,10 +725,11 @@ export const MessageItem = memo(function MessageItem({
                               key={att.id || `file-${idx}`}
                               onClick={() => {
                                 if (att.url) {
-                                  void openAttachment({
+                                  void openFileWithLoader({
                                     id: att.id,
                                     name: att.name || '文件',
                                     url: att.url,
+                                    mime: mime || undefined,
                                   })
                                 }
                               }}
@@ -732,7 +747,7 @@ export const MessageItem = memo(function MessageItem({
               }
 
               // 导致消息不渲染。刷新后只有2条消息可见。
-              const _rawFallback = renderContext.displayContent || message.content
+              const _rawFallback = renderContext.displayContent || stateCardMessage.content
               const _displayFallback = _rawFallback?.trim() ? _rawFallback : ''
 
               // 挂起等待用户交互的 assistant 消息（工具阻塞中、无文本输出）不能整块隐藏：
@@ -829,6 +844,25 @@ export const MessageItem = memo(function MessageItem({
     </div>
   )
 
+  // 状态卡（追加形态）：正文（已切标记）之后尾随插件 webview 状态小卡——
+  // 渲染本体在插件（message-style 声明 htmlPath），宿主只做数据路由与挂载。
+  const rowWithCard =
+    stateCard ? (
+      <>
+        {row}
+        <PluginMessageCard
+          instanceKey={`${message.id}:state`}
+          styleId={stateCard.styleId}
+          message={{
+            content: stateCardMessage.content,
+            metadata: { state_updates: { entries: stateCard.entries, span: stateCard.span } },
+          }}
+        />
+      </>
+    ) : (
+      row
+    )
+
   // 扮演呈现作用域：assistant+agentId（卡身份解析）或附身激活（限活跃管道
   // 会话）挂载，其余消息行不引入作用域，渲染输出与既有完全一致；
   // possessed 按作用域门控传入，作用域外不泄漏进 agentId 挂载的档案解析
@@ -838,9 +872,9 @@ export const MessageItem = memo(function MessageItem({
         agentId={message.agentId ?? undefined}
         possessed={possessActive ? possessed : null}
       >
-        {row}
+        {rowWithCard}
       </PresenterScope>
     )
   }
-  return row
+  return rowWithCard
 })

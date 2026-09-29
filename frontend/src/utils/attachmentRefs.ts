@@ -8,6 +8,9 @@
  * 读文件转 base64 挂到 LLM 请求（二进制瞬态，不落任何持久层）。
  */
 
+/** 附件引用 url 前缀（内核匿名静态路由；单一来源——markdown 链接拦截等消费方 import） */
+export const UPLOADS_URL_PREFIX = '/uploads/'
+
 /** 附件引用拼装所需的最小附件形状（结构兼容 chat/types 的 Attachment） */
 export interface AttachmentRefInput {
   name?: string

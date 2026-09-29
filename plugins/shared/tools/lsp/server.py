@@ -59,7 +59,7 @@ async def _on_unload(params: dict[str, Any]) -> None:
 async def lsp_definition(file_path: str, line: int, character: int = 0, language: str | None = None) -> dict[str, Any]:
     """Go to definition of symbol at given position."""
     if _gateway is None:
-        return {"error": "LSP gateway not initialized"}
+        return {"success": False, "error": "LSP gateway not initialized"}
     position = Position(line=line, character=character)
     locations = await _gateway.go_to_definition(file_path, position, language)
     return {
@@ -88,7 +88,7 @@ async def lsp_definition(file_path: str, line: int, character: int = 0, language
 async def lsp_references(file_path: str, line: int, character: int = 0, language: str | None = None) -> dict[str, Any]:
     """Find all references of symbol at given position."""
     if _gateway is None:
-        return {"error": "LSP gateway not initialized"}
+        return {"success": False, "error": "LSP gateway not initialized"}
     position = Position(line=line, character=character)
     locations = await _gateway.find_references(file_path, position, language)
     return {
@@ -115,7 +115,7 @@ async def lsp_references(file_path: str, line: int, character: int = 0, language
 async def lsp_diagnostics(file_path: str, language: str | None = None) -> dict[str, Any]:
     """Get diagnostics for a file."""
     if _gateway is None:
-        return {"error": "LSP gateway not initialized"}
+        return {"success": False, "error": "LSP gateway not initialized"}
     diagnostics = await _gateway.get_diagnostics(file_path, language)
     return {
         "diagnostics": [

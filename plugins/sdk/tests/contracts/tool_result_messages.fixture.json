@@ -1,0 +1,227 @@
+{
+  "$comment": "工具结果配对消息契约夹具（ADR 2026-09-28）——tool_core Rust messages::rebuild 与 SDK Python build_tool_result_ops 双车道单一真值。每向量：tool_calls + results（entry 形状）→ expected_msgs（role=tool 追加段，含 tool_result envelope 七键）。改坏任一期望值两车道必须同时红（删值实验）。",
+  "vectors": [
+    {
+      "name": "success_object",
+      "tool_calls": [
+        {"name": "bash_execute", "id": "call_abc", "args": {"command": "echo hi"}}
+      ],
+      "results": [
+        {
+          "call_id": "call_abc",
+          "tool_name": "bash_execute",
+          "success": true,
+          "error": null,
+          "data": {"status": "ok", "output": "done"},
+          "metadata": null,
+          "duration_ms": 5.0
+        }
+      ],
+      "expected_msgs": [
+        {
+          "role": "tool",
+          "tool_call_id": "call_abc",
+          "content": "output: done\nstatus: ok\n",
+          "tool_result": {
+            "call_id": "call_abc",
+            "tool_name": "bash_execute",
+            "success": true,
+            "error": null,
+            "data": {"status": "ok", "output": "done"},
+            "metadata": null,
+            "duration_ms": 5.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "failure_with_reason",
+      "tool_calls": [
+        {"name": "file_write", "id": "call_deny", "args": {"path": "a.txt"}}
+      ],
+      "results": [
+        {
+          "call_id": "call_deny",
+          "tool_name": "file_write",
+          "success": false,
+          "error": "Agent level L1 not allowed to call: file_write",
+          "data": null,
+          "metadata": {"decided_by": "level_guard"},
+          "duration_ms": 0.0
+        }
+      ],
+      "expected_msgs": [
+        {
+          "role": "tool",
+          "tool_call_id": "call_deny",
+          "content": "Error: Agent level L1 not allowed to call: file_write",
+          "tool_result": {
+            "call_id": "call_deny",
+            "tool_name": "file_write",
+            "success": false,
+            "error": "Agent level L1 not allowed to call: file_write",
+            "data": null,
+            "metadata": {"decided_by": "level_guard"},
+            "duration_ms": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "null_data_empty_content",
+      "tool_calls": [
+        {"name": "noop_tool", "id": "call_n1", "args": {}}
+      ],
+      "results": [
+        {
+          "call_id": "call_n1",
+          "tool_name": "noop_tool",
+          "success": true,
+          "error": null,
+          "data": null,
+          "metadata": null,
+          "duration_ms": 1.5
+        }
+      ],
+      "expected_msgs": [
+        {
+          "role": "tool",
+          "tool_call_id": "call_n1",
+          "content": "",
+          "tool_result": {
+            "call_id": "call_n1",
+            "tool_name": "noop_tool",
+            "success": true,
+            "error": null,
+            "data": null,
+            "metadata": null,
+            "duration_ms": 1.5
+          }
+        }
+      ]
+    },
+    {
+      "name": "string_data_scalar_document",
+      "tool_calls": [
+        {"name": "file_read", "id": "call_s1", "args": {"path": "a.txt"}}
+      ],
+      "results": [
+        {
+          "call_id": "call_s1",
+          "tool_name": "file_read",
+          "success": true,
+          "error": null,
+          "data": "plain text",
+          "metadata": null,
+          "duration_ms": 0.5
+        }
+      ],
+      "expected_msgs": [
+        {
+          "role": "tool",
+          "tool_call_id": "call_s1",
+          "content": "plain text\n",
+          "tool_result": {
+            "call_id": "call_s1",
+            "tool_name": "file_read",
+            "success": true,
+            "error": null,
+            "data": "plain text",
+            "metadata": null,
+            "duration_ms": 0.5
+          }
+        }
+      ]
+    },
+    {
+      "name": "number_like_string_quoted",
+      "tool_calls": [
+        {"name": "calc", "id": "call_q1", "args": {}}
+      ],
+      "results": [
+        {
+          "call_id": "call_q1",
+          "tool_name": "calc",
+          "success": true,
+          "error": null,
+          "data": "42",
+          "metadata": null,
+          "duration_ms": 0.2
+        }
+      ],
+      "expected_msgs": [
+        {
+          "role": "tool",
+          "tool_call_id": "call_q1",
+          "content": "'42'\n",
+          "tool_result": {
+            "call_id": "call_q1",
+            "tool_name": "calc",
+            "success": true,
+            "error": null,
+            "data": "42",
+            "metadata": null,
+            "duration_ms": 0.2
+          }
+        }
+      ]
+    },
+    {
+      "name": "multi_call_mixed",
+      "tool_calls": [
+        {"name": "bash_execute", "id": "call_m1", "args": {"command": "ls"}},
+        {"name": "bash_execute", "id": "call_m2", "args": {"command": "rm -rf /"}}
+      ],
+      "results": [
+        {
+          "call_id": "call_m1",
+          "tool_name": "bash_execute",
+          "success": true,
+          "error": null,
+          "data": {"lines": 3},
+          "metadata": null,
+          "duration_ms": 12.0
+        },
+        {
+          "call_id": "call_m2",
+          "tool_name": "bash_execute",
+          "success": false,
+          "error": "危险操作被拦截: rm -rf /",
+          "data": null,
+          "metadata": {"decided_by": "security_check"},
+          "duration_ms": 0.0
+        }
+      ],
+      "expected_msgs": [
+        {
+          "role": "tool",
+          "tool_call_id": "call_m1",
+          "content": "lines: 3\n",
+          "tool_result": {
+            "call_id": "call_m1",
+            "tool_name": "bash_execute",
+            "success": true,
+            "error": null,
+            "data": {"lines": 3},
+            "metadata": null,
+            "duration_ms": 12.0
+          }
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_m2",
+          "content": "Error: 危险操作被拦截: rm -rf /",
+          "tool_result": {
+            "call_id": "call_m2",
+            "tool_name": "bash_execute",
+            "success": false,
+            "error": "危险操作被拦截: rm -rf /",
+            "data": null,
+            "metadata": {"decided_by": "security_check"},
+            "duration_ms": 0.0
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -7,12 +7,15 @@ pipeline_state.task.status 投影（谁持证据谁裁决）；内核 reap_orpha
 
 - 投影 completed + runs failed/suspended → completed 权威（补派 task_completed，
   闭合崩溃期间丢失的完成通知；runs 侧改写无任务域写面，归内核位）。
-- 投影未决 + runs 侧权威终态 → runs 托底裁决（ADR
-  2026-09-14-run-status-authority-startup-reconcile，翻案 U13 §二「completed
-  之外不裁」的保守口径：内核 9a5881fb2 起 reap 补齐 run_status 投影、冷行
-  携带权威 overlay，runs 侧已持真值证据）：runs completed → completed 补落 +
-  补派完成通知；runs failed/cancelled → failed 对齐 + 补派失败通知。崩溃
-  遗留的死管道不再永久悬挂为幽灵「执行中」（BUG-2b 面板根因）。
+- 投影未决 + runs failed/cancelled → failed 对齐 + 补派失败通知（ADR
+  2026-09-14-run-status-authority-startup-reconcile；与 stop_check「跑到
+  检测线仍未通过评估 = 失败」用户裁定同口径）。
+- 投影未决 + runs completed → **不裁 completed**（ADR 2026-09-28：完成唯一
+  判据 = task_evaluate 评估通过，用户裁定重申——run 正常收尾不构成完成证据），
+  补落 pending_evaluation（表「run 已终、评估未决」，零派发不清挂号）；
+  已是 pending_evaluation 的行幂等跳过。事故 2026-09-28：runs 托底把熔断
+  收尾的 run 裁成 completed 并向父管道派发「已完成 ✅」，而验收产物从未
+  产出、task_evaluate 从未被调。
 - 真最新 run = running/suspended 一律不裁（在飞 run 与幽灵无法单次扫描区分
   ——幽灵 running 由恢复链前置仲裁识破，见 http_api.resume_task；候选集含
   running，「旧终态 run + 新在飞 run」按真最新判定不误裁）。
@@ -36,7 +39,9 @@ logger = logging.getLogger(__name__)
 _COMPLETED_CANDIDATE_RUN_STATUSES = frozenset({"failed", "suspended"})
 
 # "无终态证据"集（未决投影）——仅这些值才允许 runs 托底裁决；用户侧终态
-# （stopped/timeout/cancelled）与任务域终态（completed/failed）保守不裁
+# （stopped/timeout/cancelled）与任务域终态（completed/failed）保守不裁。
+# pending_evaluation 双面语义：runs failed 侧 = 未决（failed 对齐准入）；
+# runs completed 侧 = 已调和产物（幂等跳过，见 classify_orphan_run）。
 _UNDECIDED_TASK_STATUSES = frozenset({"", "running", "pending", "evaluating", "pending_evaluation"})
 
 # 候选扫描 = runs 五态全量按 status 拉取（单次 500 上限），候选按管道收敛到
@@ -49,16 +54,20 @@ def classify_orphan_run(run_status: str, task_status: str) -> str | None:
     """仲裁纯函数：runs 侧终态 × 投影终态 → 调和裁决。
 
     Returns:
-        "completed"（投影 completed 权威，补派完成通知；或 runs 侧权威
-        completed × 未决投影，补落 + 补派完成通知）/ "failed"（无终态证据或
-        runs 侧 failed/cancelled 终态，对齐 failed）/ None（一致行、在飞行、
-        可恢复行、用户侧终态——不裁）。
+        "completed"（投影 completed 权威，补派完成通知）/ "failed"（未决投影 ×
+        runs failed/cancelled，对齐 failed + 补派失败通知）/ "pending_evaluation"
+        （未决投影 × runs completed：run 正常收尾不构成完成证据，落待评估、
+        零派发）/ None（一致行、在飞行、可恢复行、用户侧终态、已调和的
+        pending_evaluation 行——不裁）。
     """
     if task_status == "completed" and run_status in _COMPLETED_CANDIDATE_RUN_STATUSES:
         return "completed"
     if task_status in _UNDECIDED_TASK_STATUSES:
         if run_status == "completed":
-            return "completed"
+            # 完成唯一判据 = task_evaluate 评估通过（用户裁定 2026-09-28 重申）：
+            # run 正常收尾（含熔断/自然停）不是完成证据。已是 pending_evaluation
+            # 的行幂等跳过——on_load 高频触发（合宿成员集变化即 respawn），不churn。
+            return None if task_status == "pending_evaluation" else "pending_evaluation"
         if run_status in ("failed", "cancelled"):
             return "failed"
     return None
@@ -102,9 +111,9 @@ async def reconcile_startup(
 
     调和动作复用 events.handle_run_terminal_event 单点（合成 run 终态事件 →
     task_completed/task_failed 派生 + task.status 对账补落 + 父挂号清除）；
-    runs completed × 投影未决先经任务域写面补落 completed，合成事件携带调和
-    后投影 state 载荷派生完成通知（payload 路径免回查、不受出口白名单约束）。
-    任一能力读面故障 → 降级留痕返回空（启动扫描是兜底面，不阻断插件装载）。
+    runs completed × 投影未决不进派生链——只补落 pending_evaluation（完成
+    通知零派发，完成唯一判据 = 评估通过）。任一能力读面故障 → 降级留痕返回
+    空（启动扫描是兜底面，不阻断插件装载）。
     """
     try:
         rows = await state_cap.call("list", {})
@@ -142,31 +151,43 @@ async def reconcile_startup(
         verdict = classify_orphan_run(run_status, task_status)
         if verdict is None:
             continue
-        # completed 权威裁决且投影未决：runs 侧真值托底、评估闸门对死 run 永不
-        # 再结论——先经任务域写面补落 completed（写失败留痕续扫），合成事件携带
-        # 调和后投影派生（否则 events 既有闸「跑完不假完成」会正确地零派生）。
-        event_params: dict[str, Any] = {"pipeline_id": pid}
-        if verdict == "completed" and task_status != "completed":
+        entry = {
+            "pipeline_id": pid,
+            "run_id": run.get("run_id"),
+            "runs_status": run_status,
+            "task_status": task_status,
+            "verdict": verdict,
+        }
+        if verdict == "pending_evaluation":
+            # 未决 × run 正常收尾：只补落待评估投影，零派发不清挂号（完成通知
+            # 唯一来源 = 评估通过的 task_completed 派生链）。写失败留痕续扫。
             try:
                 await state_cap.call(
                     "update",
-                    {"pipeline_id": pid, "fields": {"task.status": "completed"}},
+                    {"pipeline_id": pid, "fields": {"task.status": "pending_evaluation"}},
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "[task_reconcile] completed 补落失败（留痕续扫）| pipeline=%s | err=%s",
+                    "[task_reconcile] 待评估补落失败（留痕续扫）| pipeline=%s | err=%s",
                     pid, exc,
                 )
                 continue
-            event_params["state"] = {**row, "task.status": "completed"}
-        # 合成 run 终态事件走既有派生链（派生 + 对账 + 清挂号），不另立写面。
-        # events 层对读面故障优雅降级（回 None 不抛），故以记录型包裹区分
-        # 「读面死亡」（该行留痕跳过）与「正常零派生」（派发已完整发生）。
+            reconciled.append(entry)
+            logger.info(
+                "[task_reconcile] run 完成但评估未决，落待评估（不派完成通知）| pipeline=%s | run=%s | 投影=%s",
+                pid, run_status, task_status,
+            )
+            continue
+        # 投影权威 completed（评估已通过，补派完成通知）/ 未决 × runs
+        # failed/cancelled（failed 对齐，派生链自带 task.status=failed 对账
+        # 补落）：合成 run 终态事件走既有派生链（派生 + 对账 + 清挂号），
+        # 不另立写面。events 层对读面故障优雅降级（回 None 不抛），故以记录型
+        # 包裹区分「读面死亡」（该行留痕跳过）与「正常零派生」（派发已完整发生）。
         watch = _StateReadFailureWatch(state_cap)
         synthetic_event = "run.completed" if verdict == "completed" else "run.failed"
         try:
             await events.handle_run_terminal_event(
-                synthetic_event, event_params, watch, bus_cap
+                synthetic_event, {"pipeline_id": pid}, watch, bus_cap
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -180,15 +201,7 @@ async def reconcile_startup(
                 pid, verdict,
             )
             continue
-        reconciled.append(
-            {
-                "pipeline_id": pid,
-                "run_id": run.get("run_id"),
-                "runs_status": run_status,
-                "task_status": task_status,
-                "verdict": verdict,
-            }
-        )
+        reconciled.append(entry)
         logger.info(
             "[task_reconcile] 分歧行已调和 | pipeline=%s | run=%s | 投影=%s | 裁决=%s",
             pid, run_status, task_status, verdict,

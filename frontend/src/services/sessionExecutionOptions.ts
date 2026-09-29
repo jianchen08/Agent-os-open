@@ -16,14 +16,22 @@ export interface SessionFieldSnapshot {
   values: Record<string, string>
   /** 按 x_execution_path 组装好的消息级执行上下文（无声明值时缺省） */
   executionContext?: Record<string, unknown>
-  /** 扮演会话绑定（roleplay.continue 桥）：非空 = 每条消息以该 agent 身份发送 */
+  /** 会话执行者绑定（mode.session 桥出生通道扩展位）：非空 = 每条消息以该 agent 身份发送 */
   agentId?: string
-  /** 绑定卡显示名（输入区指示条展示用；缺席回退 agentId 尾段） */
+  /** 绑定显示名（输入区指示条展示用；缺席回退 agentId 尾段） */
   agentName?: string
-  /** 会话化开演档：所选开场白文本（发送链并入 execution_context.roleplay_greeting） */
-  roleplayGreeting?: string
-  /** 会话化开演档：用户设定文本（发送链并入 execution_context.roleplay_user_persona） */
-  roleplayUserPersona?: string
+  /**
+   * 模式会话扩展 execution_context 键（modeSessionBinder 出生通道扩展位）：
+   * 随会话逐消息并入 execution_context（开演档等模式包特有键）。
+   */
+  extraContext?: Record<string, string>
+  /**
+   * 模式绑定（2026-09-28 设计 D1/D2，会话出生即定）：mode = 唯一模式身份键
+   * （发送链并入 execution_context.mode）；pipelineConfigId = mode.yaml 声明的
+   * 专属管道（config/pipelines/ 登记名，发送链并入 WS 帧 pipeline_config_id）。
+   * 非空 = 本会话逐消息以该模式/管道执行。
+   */
+  modeBinding?: { mode: string; pipelineConfigId?: string }
 }
 
 const STORAGE_PREFIX = 'session-exec-options:'

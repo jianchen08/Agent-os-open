@@ -15,7 +15,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use agentos_core::traits::{
-    HookContext, HostType, LifecycleHook, PluginInvoker, PluginLoader, PluginManifest, PluginType,
+    HookContext, HostBox, HostBoxKind, HostBoxMember, HostBoxesSnapshot, HostType, LifecycleHook,
+    PendingSpawnEntry, PluginInvoker, PluginLoader, PluginManifest, PluginType,
 };
 use agentos_core::types::{PluginContext, PluginError, PluginResult, ToolExecutionResult};
 use agentos_hooks::{EventTarget, HookEventBus, LifecycleEvent};
@@ -39,7 +40,11 @@ const PLUGIN_FINGERPRINT_TTL: Duration = Duration::from_secs(1);
 const DEFAULT_HOST_GROUP: &str = "light";
 
 /// 合宿宿主目录名（plugins/shared/_host/，host.py 由宿主侧任务承载）。
-const GROUP_HOST_DIR: &str = "_host";
+///
+/// pub：该名同时是共享宿主 venv 在用户空间登记处的键（`<USER_ROOT>/
+/// plugin-venvs/_host`，ADR 2026-09-28-venv-user-space-provisioning）——
+/// api::venv_provision 重定向共享宿主重建目标时复用同一常量，键形单源。
+pub const GROUP_HOST_DIR: &str = "_host";
 
 /// 内核 → 宿主的成员粒度热重载请求方法（SDK CohostServer/host.py 注册同名
 /// 处理器；带应答，失败以协议错误应答，内核回退 force_unload）。
@@ -60,6 +65,27 @@ const UNLOAD_MEMBER_METHOD: &str = "agentos/unload_member";
 /// 可容忍驻留。
 const RELOAD_MEMBER_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// 宿主启动窗（spawn 握手窗）超时：`connect()` + `initialize()` 全程的独立
+/// 时间界（ADR 2026-09-28），与 `request_timeout`（默认 86400s，审批长等待族）
+/// 彻底解耦——启动窗是基础设施冷启动等待，不是业务调用等待，同源复用 24h 界
+/// 曾使 sidecar 启动窗挂死钉死 per-host spawn 锁至 24h（A0 审计头号根因）。
+/// 默认 120s 盖过最坏冷启动（WSL bash 冷启 9~15s、合宿 respawn 2-6s、重 import
+/// 插件数秒级）约一个数量级；环境变量 `AGENTOS_MCP_START_TIMEOUT_SECS` 覆盖
+/// （解析非法——缺失/非数字/≤0——一律回退默认，与 `light_host_max_members`
+/// 同款惯例）。超时即显式 kill 半开客户端并返回 `HOST_START_TIMEOUT`
+/// （fail-fast 可恢复，下次调用照常重试 respawn，不标记熔断——熔断归批次 B）。
+const DEFAULT_HOST_START_TIMEOUT_SECS: u64 = 120;
+
+/// 读取宿主启动窗超时（环境变量优先，全部宿主共用同一窗口）。
+fn host_start_timeout() -> Duration {
+    std::env::var("AGENTOS_MCP_START_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(DEFAULT_HOST_START_TIMEOUT_SECS))
+}
+
 /// 合法组名字符集（进宿主键/日志/spawn 参数）：ASCII 字母数字下划线连字符，
 /// ≤32 字符。非法值一律独占（保守，与缺省同）。
 fn is_valid_group_name(name: &str) -> bool {
@@ -71,8 +97,12 @@ fn is_valid_group_name(name: &str) -> bool {
 }
 
 /// 单个合宿宿主的同时挂载成员数上限（合宿进程模型 §4.5）。
-/// 默认 6，可用环境变量 `AGENTOS_LIGHT_HOST_MAX_MEMBERS` 覆盖（<=0 视为无效回退默认）。
-const LIGHT_HOST_DEFAULT_MAX_MEMBERS: usize = 6;
+/// 默认 10，可用环境变量 `AGENTOS_LIGHT_HOST_MAX_MEMBERS` 覆盖（<=0 视为无效回退默认）。
+/// 内存账（2026-09-29 扩容裁定）：每宿主进程实测驻留 14-75MB（装机 20 宿主
+/// 快照口径），上限 6→10 后更多小组合宿可装箱进同进程——装机 20 宿主预计收敛
+/// 到约 13 宿主，省约 7 个进程 ≈ 98-525MB 常驻；单宿主 10 成员的上界驻留
+/// （10×上限增量仍远低于每成员独占进程的基线开销）不改变故障隔离粒度契约。
+const LIGHT_HOST_DEFAULT_MAX_MEMBERS: usize = 10;
 
 /// 读取合宿宿主挂载成员上限（环境变量优先，全组名共用同一上限）。
 fn light_host_max_members() -> usize {
@@ -325,13 +355,20 @@ impl CapabilityRouter for PluginScopedRouter {
 
 /// venv 解释器路径（纯路径选择逻辑，`windows` 参数使两平台分支皆可测）。
 ///
-/// uv venv 标准布局：Windows `.venv/Scripts/python.exe`、Unix `.venv/bin/python`。
-fn venv_interpreter_layout(plugin_dir: &Path, windows: bool) -> std::path::PathBuf {
+/// `venv_root` 是**直接含 Scripts|bin 的 venv 根**；插件目录形态（`.venv` 子目录）
+/// 与用户空间登记处形态（登记项本身即 venv 根）共用本布局。
+fn interpreter_layout(venv_root: &Path, windows: bool) -> std::path::PathBuf {
     if windows {
-        plugin_dir.join(".venv").join("Scripts").join("python.exe")
+        venv_root.join("Scripts").join("python.exe")
     } else {
-        plugin_dir.join(".venv").join("bin").join("python")
+        venv_root.join("bin").join("python")
     }
+}
+
+/// 插件目录形态：uv venv 标准布局 `.venv/Scripts/python.exe`（Windows）、
+/// `.venv/bin/python`（Unix）。
+fn venv_interpreter_layout(plugin_dir: &Path, windows: bool) -> std::path::PathBuf {
+    interpreter_layout(&plugin_dir.join(".venv"), windows)
 }
 
 /// 探测插件目录的 venv 解释器：按本平台布局优先，另一平台布局作回退
@@ -344,6 +381,40 @@ pub fn find_venv_interpreter(plugin_dir: &Path) -> Option<std::path::PathBuf> {
     ]
     .into_iter()
     .find(|p| p.is_file())
+}
+
+/// 探测用户空间 venv 登记处的一个登记项（登记项本身即 venv 根，无 `.venv`
+/// 中间层——`UV_PROJECT_ENVIRONMENT` 重定向的原生落点形态）。布局探测序与
+/// [`find_venv_interpreter`] 同源。
+pub fn find_registered_venv_interpreter(venv_dir: &Path) -> Option<std::path::PathBuf> {
+    [
+        interpreter_layout(venv_dir, cfg!(windows)),
+        interpreter_layout(venv_dir, !cfg!(windows)),
+    ]
+    .into_iter()
+    .find(|p| p.is_file())
+}
+
+/// venv 登记键合法性：单路径段（无分隔符、非点段）。独占插件键 = 插件 id
+/// （G2 校验保证安全段），共享合宿宿主键 = [`GROUP_HOST_DIR`]；防御式拒绝
+/// 含穿越形态的键——登记处位于用户空间，键拼路径前必须先挡路径注入。
+fn is_valid_venv_key(key: &str) -> bool {
+    !key.is_empty() && key != "." && key != ".." && !key.contains('/') && !key.contains('\\')
+}
+
+/// spawn 期 venv 解析第 2 优先级：用户空间登记处
+/// （`<USER_ROOT>/plugin-venvs/<key>`，[`agentos_core::user_space::user_plugin_venvs_dir`]）。
+///
+/// 插件目录 `.venv` 恒优先——纯 dev 路径零变化；登记处仅在插件目录解释器
+/// 缺席时兜底（装机态插件目录只读、`.venv` 被打包排除，ADR
+/// 2026-09-28-venv-user-space-provisioning）。用户空间不可用或键非法 → None
+/// （调用方沿 fail-closed 报错）。
+pub fn find_user_space_venv_interpreter(key: &str) -> Option<std::path::PathBuf> {
+    if !is_valid_venv_key(key) {
+        return None;
+    }
+    let venv_dir = agentos_core::user_space::user_plugin_venvs_dir()?.join(key);
+    find_registered_venv_interpreter(&venv_dir)
 }
 
 /// 判定 entry 首词是否 PATH 裸 python 命令（`python` / `python3`，含 Windows
@@ -360,6 +431,83 @@ pub fn is_plain_python_command(command: &str) -> bool {
         .or_else(|| lower.strip_suffix(".cmd"))
         .unwrap_or(&lower);
     matches!(name, "python" | "python3")
+}
+
+/// venv 解释器直达真身（Windows trampoline 消层）：uv/stdlib venv 的
+/// `Scripts/python.exe` 是 trampoline 跳板——spawn base 解释器后自身常驻中转
+/// stdio，sidecar 进程树因此多一层空壳（跳板 ~5MB，真身数百 MB 在孙辈），
+/// 任务管理器内存列与父子归属观测失真。
+///
+/// 解析 venv 根 `pyvenv.cfg` 的 `home` 键（stdlib venv 与 uv 同写的标准键）
+/// 直达 base 解释器，并注入 `__PYVENV_LAUNCHER__`（CPython getpath 的 venv
+/// 定位变量，以其值为 executable 定位 pyvenv.cfg）锚回 venv 身份——
+/// sys.executable/prefix/site-packages（含 .pth/editable）与跳板路径逐项
+/// 一致，进程单体直挂宿主。返回 (command, args, 需注入的 env)。
+///
+/// 非 trampoline 形态（外部 MCP 命令等）、pyvenv.cfg 缺失/无 home、真身缺席
+/// 一律原样回落（= 现状跳板路径，零行为漂移）；`windows=false`（Unix venv
+/// python 是 symlink 单进程）恒原样。
+fn resolve_venv_direct_interpreter(
+    command: &str,
+    args: Vec<String>,
+    windows: bool,
+) -> (String, Vec<String>, Option<(String, String)>) {
+    if !windows {
+        return (command.to_string(), args, None);
+    }
+    let exe = Path::new(command);
+    let is_trampoline = exe
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("python.exe"))
+        && exe
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case("Scripts"));
+    if !is_trampoline {
+        return (command.to_string(), args, None);
+    }
+    let base = exe
+        .parent()
+        .and_then(Path::parent)
+        .and_then(read_pyvenv_home)
+        .map(|home| home.join("python.exe"))
+        .filter(|p| p.is_file());
+    match base {
+        Some(base) => (
+            base.to_string_lossy().into_owned(),
+            args,
+            Some(("__PYVENV_LAUNCHER__".to_string(), command.to_string())),
+        ),
+        None => (command.to_string(), args, None),
+    }
+}
+
+/// 读 venv 根下 `pyvenv.cfg` 的 `home = <base 目录>` 键值。缺失/不可读/无该键
+/// → None；`home-x86` 等前缀相近键不误配（键名后必须紧跟 `=`）。
+fn read_pyvenv_home(venv_root: &Path) -> Option<std::path::PathBuf> {
+    let cfg = std::fs::read_to_string(venv_root.join("pyvenv.cfg")).ok()?;
+    for line in cfg.lines() {
+        let value = line
+            .trim()
+            .strip_prefix("home")
+            .and_then(|rest| rest.trim_start().strip_prefix('='))
+            .map(|v| v.trim().trim_matches('"').to_string())
+            .filter(|v| !v.is_empty());
+        if let Some(dir) = value {
+            return Some(std::path::PathBuf::from(dir));
+        }
+    }
+    None
+}
+
+/// spawn 期包装：按本平台启用直达解析（[`resolve_venv_direct_interpreter`]）。
+fn resolve_venv_direct_interpreter_for_spawn(
+    command: &str,
+    args: Vec<String>,
+) -> (String, Vec<String>, Option<(String, String)>) {
+    resolve_venv_direct_interpreter(command, args, cfg!(windows))
 }
 
 /// 标准 MCP 出参归一：参数白名单按工具声明的 input_schema 过滤。
@@ -442,7 +590,10 @@ fn extract_mcp_content(mcp_result: &serde_json::Value) -> serde_json::Value {
             .and_then(|item| item.get("text"))
             .and_then(|t| t.as_str())
             .unwrap_or("MCP tool returned isError=true");
-        return serde_json::json!({"error": err_msg});
+        // 显式失败信封（success=false）：MCP 协议层失败在提取点就落显式状态键，
+        // 不经裸 error 键猜测（归一化决策树只认显式 success，见
+        // normalize_mcp_tool_result）。
+        return serde_json::json!({"success": false, "error": err_msg});
     }
 
     // ── 标准 MCP content 协议归一（external MCP 一行接入配套）────────
@@ -553,8 +704,12 @@ fn tool_error_params(
 ///   - (A) 带 output 键（builtin_tools 的 ToolResult.to_dict()）→ data = output；
 ///   - (B) 无 output 键（server.py 解包直返、恰带 success 键的业务 dict）→ data = inner；
 ///   - success=false → failure(error)；
-/// - ① MCP isError=true / 工具返回 `{"error":"..."}`（无 success）→ failure；
-/// - ③ 纯业务数据（无 success 无 error）→ success(data=inner)。
+/// - ③ 纯业务数据（无 success 键）→ success(data=inner)——**顶层 error 键不再是
+///   失败信号**。工具成败只认显式 success 键（工具执行状态统一承载，废除按结果
+///   文本猜失败的兼容分支）：业务载荷的 error 字段（如 task_manage get 详情返回
+///   的下级任务失败原因）与执行失败信封必须可区分，否则成功查询会被翻转成
+///   工具报错（事故 2026-09-28）。MCP isError=true 的协议层失败由
+///   `extract_mcp_content` 在提取点显式转 `{success: false, error}`，走 ②-b。
 ///
 /// K7：②-b 的 `success` 键存在但非 bool（字符串/整数状态码等信封漂移）→
 /// `PARSE_ERROR`（与 ②-a 对信封解析失败同判）。禁止 `unwrap_or(true)` 把失败
@@ -613,11 +768,9 @@ fn normalize_mcp_tool_result(
                 metadata: inner.get("metadata").cloned(),
             })
         }
-    } else if let Some(err) = inner.get("error").and_then(|v| v.as_str()) {
-        // ① MCP isError=true 或工具自身返回 {"error": "..."} 且无 success 字段
-        Ok(ToolExecutionResult::failure(err))
     } else {
-        // ③ 纯业务数据 → 包成 success 信封
+        // ③ 纯业务数据（无 success 键）→ 包成 success 信封。顶层 error 键不再
+        // 是失败信号（成败只认显式 success 键，见函数 docstring）。
         Ok(ToolExecutionResult::success(inner))
     }
 }
@@ -631,10 +784,10 @@ fn normalize_mcp_tool_result(
 /// - 无 `success` → 旧 pipeline 插件（忽略 tool_call，返回 state_updates）→ 纯业务
 ///   数据包 success 信封——旧插件零破坏。
 ///
-/// 与 sidecar 决策树的差异（有意）：sidecar 另有「`{error}` 无 success → failure」
-/// 分支（MCP isError=true 提取的产物）；native 路径 execute 失败走 Err 错误通道、
-/// 不产该形态，且旧插件 state_updates 可能天然含 `error` 键，误判会破坏零兼容
-/// 承诺，故不设该分支。
+/// 与 sidecar 决策树口径一致：成败只认显式 `success` 键，顶层 `error` 键不是
+/// 失败信号（旧插件 state_updates 可能天然含 `error` 键，按错误猜测会破坏零
+/// 兼容承诺）。sidecar 的 MCP isError=true 协议层失败由 `extract_mcp_content`
+/// 在提取点显式转 `{success: false, error}`，与 native 的 Err 错误通道同判。
 fn normalize_native_tool_output(inner: &Value) -> ToolExecutionResult {
     match inner.get("success").and_then(|v| v.as_bool()) {
         Some(true) => {
@@ -681,7 +834,19 @@ struct NativeHostServices {
     /// （2026-09-02 收口）：错误消息写这里再借 `&str`——旧 `Err(String)` 把 exe
     /// 堆 String 交 dll 侧 drop = 反方向跨堆 free UB，真机 SIGSEGV 实测。
     err_buf: std::cell::UnsafeCell<String>,
+    /// 插件加载器（同步 `get_manifest` 读被调方声明，供等待界解析）。
+    loader: Arc<dyn PluginLoader>,
+    /// 反调等待界覆盖（毫秒）。`None` = 按 [`bridge_timeout_ms`] 解析（生产
+    /// 构造恒 None）；`Some(v)` = 测试注入固定界（短超时路径测试用，禁真等）。
+    bridge_timeout_override_ms: Option<u64>,
+    /// 慢调用告警阈。等待超过该值先发一次 warn（含已等待秒数）再继续等至
+    /// 等待界——生产恒 [`NATIVE_BRIDGE_SLOW_CALL_WARN_AFTER`]，测试注入短阈。
+    slow_call_warn_after: Duration,
 }
+
+/// 原生反调慢调用告警阈：等待超过 5s 即 warn（capability/method/已等待秒数），
+/// 不中断等待——保证同步桥上的长时间驻留在日志面可见。
+const NATIVE_BRIDGE_SLOW_CALL_WARN_AFTER: Duration = Duration::from_secs(5);
 
 // SAFETY: response_buf/err_buf 的 UnsafeCell 仅在 `&self` 独占借用期间写入；借出的 &str
 // 由调用方（插件，blocking 线程内同步消费）在下一次同 host 调用前读完。execute 的
@@ -729,17 +894,60 @@ impl agentos_native_sdk::HostServices for NativeHostServices {
         // - async worker 线程：block_in_place 让出 worker 再 block_on，避免死锁；
         // - spawn_blocking 线程：直接 block_on（blocking 线程不参与调度，阻塞安全；
         //   block_in_place 在非 worker 线程会 panic）。
+        // 等待有界（桥面护栏）：同步桥整体包界——被调 capability 挂死时到点放弃
+        // 内层 future 返回结构化错误，execute 线程（exec_lock 全程持有）不再无限
+        // 驻留；超慢告警阈未完成先发一次 warn 保证日志面可见。
+        let timeout_ms = self.bridge_timeout_override_ms.unwrap_or_else(|| {
+            bridge_timeout_ms(self.loader.as_ref(), capability, method, &params)
+        });
+        tracing::info!(
+            target: "native-bridge",
+            caller = %self.plugin_id,
+            capability = %capability,
+            method = %method,
+            timeout_ms = timeout_ms,
+            "native capability call enter (bounded sync bridge)"
+        );
+        let started = std::time::Instant::now();
         let fut = async move { router.handle(&cap, &mth, params).await };
+        let slow_after = self.slow_call_warn_after;
+        let caller = self.plugin_id.clone();
+        let cap_name = capability.to_string();
+        let mth_name = method.to_string();
+        let wait = bounded_with_slow_warn(
+            fut,
+            Duration::from_millis(timeout_ms),
+            slow_after,
+            move |_stage| {
+                tracing::warn!(
+                    target: "native-bridge",
+                    caller = %caller,
+                    capability = %cap_name,
+                    method = %mth_name,
+                    waited_secs = started.elapsed().as_secs_f64(),
+                    "native capability call still pending beyond slow-call threshold"
+                );
+            },
+        );
         let result = if self.on_blocking_thread {
-            tokio::runtime::Handle::current().block_on(fut)
+            tokio::runtime::Handle::current().block_on(wait)
         } else {
-            tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
+            tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(wait))
         };
+        let elapsed_ms = started.elapsed().as_millis();
         match result {
-            // 跨分配器契约：结果写进自我持有的缓冲（exe 堆），返回 &str 借用——
-            // dll 只读消费（立即转 Value），不存引用、不释放。旧 `String` 返回会
-            // 把 exe 分配的串交 dll 侧 drop = 反方向跨堆 free UB。
-            Ok(v) => {
+            Some(Ok(v)) => {
+                tracing::debug!(
+                    target: "native-bridge",
+                    caller = %self.plugin_id,
+                    capability = %capability,
+                    method = %method,
+                    elapsed_ms = elapsed_ms as u64,
+                    "native capability call done"
+                );
+                // 跨分配器契约：结果写进自我持有的缓冲（exe 堆），返回 &str 借用——
+                // dll 只读消费（立即转 Value），不存引用、不释放。旧 `String` 返回会
+                // 把 exe 分配的串交 dll 侧 drop = 反方向跨堆 free UB。
                 // SAFETY(跨分配器契约)：response_buf 由本结构（exe 侧）持有，
                 // 此处写、借出 &str 给 dll 只读——分配/释放全在 exe 堆。
                 // 并发安全性：execute 在单个 blocking 线程串行，同 host 的
@@ -749,14 +957,41 @@ impl agentos_native_sdk::HostServices for NativeHostServices {
                 buf.push_str(&serde_json::to_string(&v).unwrap_or_default());
                 Ok(buf.as_str())
             }
-            // Err 分支同契约（2026-09-02 收口）：错误消息写 err_buf（exe 堆）
-            // 借 &str 返回——dll 只读消费（立即拷贝/格式化），不持有、不释放。
-            // 旧 `Err(format!("{e}"))` 把 exe 堆 String 交 dll 侧 drop = 反方向
-            // 跨堆 free UB（真机 SIGSEGV 实测，与 execute 的 Err(String) 同根）。
-            Err(e) => {
+            Some(Err(e)) => {
+                tracing::debug!(
+                    target: "native-bridge",
+                    caller = %self.plugin_id,
+                    capability = %capability,
+                    method = %method,
+                    elapsed_ms = elapsed_ms as u64,
+                    "native capability call done (router error)"
+                );
+                // Err 分支同契约（2026-09-02 收口）：错误消息写 err_buf（exe 堆）
+                // 借 &str 返回——dll 只读消费（立即拷贝/格式化），不持有、不释放。
+                // 旧 `Err(format!("{e}"))` 把 exe 堆 String 交 dll 侧 drop = 反方向
+                // 跨堆 free UB（真机 SIGSEGV 实测，与 execute 的 Err(String) 同根）。
                 let buf = unsafe { &mut *self.err_buf.get() };
                 buf.clear();
                 buf.push_str(&format!("{e}"));
+                Err(buf.as_str())
+            }
+            None => {
+                // 等待界到点：内层 future 已被放弃（其持有的锁/计数随 drop 回落）。
+                // 结构化错误走既有 err_buf 契约回传——插件以失败收尾，管道可继续，
+                // 不静默驻留。错误含 capability/method/等待时长，直接定位挂点。
+                tracing::warn!(
+                    target: "native-bridge",
+                    caller = %self.plugin_id,
+                    capability = %capability,
+                    method = %method,
+                    waited_ms = elapsed_ms as u64,
+                    "native capability call exceeded bridge wait bound"
+                );
+                let buf = unsafe { &mut *self.err_buf.get() };
+                buf.clear();
+                buf.push_str(&format!(
+                    "capability {capability}.{method} bridge wait timed out after {elapsed_ms}ms"
+                ));
                 Err(buf.as_str())
             }
         }
@@ -851,6 +1086,62 @@ async fn with_capability_timeout<T>(
             code: Some("CAPABILITY_TIMEOUT".to_string()),
             source: Some("plugin-invoker".to_string()),
         }),
+    }
+}
+
+/// 原生反调桥的等待界（毫秒）：被调工具声明的超时解析序 > 内核默认。
+///
+/// 仅 `tool-executor.invoke` 且参数携带显式 `plugin_id` 时可同步解析被调方
+/// manifest（经 [`PluginLoader::get_manifest`]，读缓存路径不碰 async 面），按
+/// [`tool_timeout_ms`] 既有解析序取值（工具声明 `timeout_ms` > 插件级
+/// `mcp.request_timeout_secs` > 内核默认）；其余 capability（event-bus /
+/// service-registry 等）与注册表反查路径桥面同步不可解析 → 内核默认界。
+/// 解析链得到的豁免哨兵（工具声明 `Some(0)` → `None`）在桥面回落默认界：
+/// 桥面界是挂死护栏而非业务超时，业务豁免不重开无界驻留（ADR 2026-09-28）。
+fn bridge_timeout_ms(
+    loader: &dyn PluginLoader,
+    capability: &str,
+    method: &str,
+    params: &Value,
+) -> u64 {
+    let declared = if capability == "tool-executor" && method == "invoke" {
+        params
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .and_then(|tool_name| {
+                params
+                    .get("plugin_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .and_then(|plugin_id| loader.get_manifest(plugin_id))
+                    .and_then(|manifest| tool_timeout_ms(&manifest, tool_name))
+            })
+    } else {
+        None
+    };
+    declared.unwrap_or_else(agentos_core::traits::default_capability_timeout_ms)
+}
+
+/// 桥面有界等待：先等至慢告警阈，未完成发一次 `on_slow` 后继续等至总界；
+/// 总界到点放弃内层 future 返回 `None`（调用方落结构化错误）。内层 future 经
+/// `Pin<&mut F>` 重借用跨段存活——第一段超时只丢弃重借用，不丢弃等待对象。
+async fn bounded_with_slow_warn<F: std::future::Future>(
+    fut: F,
+    total: Duration,
+    slow_after: Duration,
+    on_slow: impl FnOnce(Duration),
+) -> Option<F::Output> {
+    let mut fut = std::pin::pin!(fut);
+    let first = slow_after.min(total);
+    match tokio::time::timeout(first, &mut fut).await {
+        Ok(out) => Some(out),
+        Err(_) => {
+            on_slow(first);
+            if total <= first {
+                return None;
+            }
+            tokio::time::timeout(total - first, &mut fut).await.ok()
+        }
     }
 }
 
@@ -1570,9 +1861,16 @@ impl PluginInvokerImpl {
         // （_call_context/session_id/workspace 等）必须调用前剥离；内部 sidecar
         // 的 SDK 按签名过滤不受影响。
         let mcp_arguments = if manifest.entry == "mcp:external" {
+            // 外部 MCP 不注入配置：未声明参数本会被剥离，且注入配置含
+            // 凭证不得出境。
             sanitize_external_mcp_arguments(manifest, tool_name, inputs)
         } else {
-            inputs.clone()
+            // 每调用 config 注入（对齐 attempt_sidecar_pipeline/native 工具
+            // 路径）：本路径承载全部跨插件工具/服务调用（如 llm_core →
+            // llm.complete_stream），不注入则目标插件配置冻结在握手快照，
+            // 设置页改配置须重启才生效（2026-09-28 事故根因）。
+            let injected = crate::shared::injected_config(self.loader.as_ref(), manifest).await?;
+            crate::shared::tool_arguments_with_config(inputs, injected)
         };
         let result = match client.call_tool(&mcp_tool_name, &mcp_arguments).await {
             Ok(v) => v,
@@ -1597,13 +1895,14 @@ impl PluginInvokerImpl {
         };
 
         // 解析 MCP 响应：extract_mcp_content 已提取 content[0].text 并反序列化为
-        // 工具 handler 的原始返回（业务 dict，如 {"result": ...} / {"error": ...}）。
+        // 工具 handler 的原始返回（业务 dict，如 {"result": ...}）。
         //
         // 工具返回的是**纯业务数据**，不带 ToolExecutionResult 的 success/data 信封
         // （那是内核内部结构，插件不该感知）。所以这里不能直接 from_value 成
         // ToolExecutionResult——否则业务 dict 缺 success 字段会报
         // "missing field `success`"。这里按三层优先级智能构造：
-        //   ① 若 isError=true（已被 extract 转成 {"error": "..."}）→ failure；
+        //   ① 若 isError=true（已被 extract 显式转 {"success": false, "error": ...}）
+        //      → failure；
         //   ② 若返回值恰好已是 ToolExecutionResult 信封（带 success 字段）→ 直接用；
         //   ③ 否则视为纯业务数据 → success(data=inner)，与 pipeline 路径
         //      （ToolExecutionResult::success(to_value(plugin_result))）对齐。
@@ -1669,6 +1968,9 @@ impl PluginInvokerImpl {
                     on_blocking_thread: true,
                     response_buf: std::cell::UnsafeCell::new(String::with_capacity(4096)),
                     err_buf: std::cell::UnsafeCell::new(String::with_capacity(256)),
+                    loader: Arc::clone(&self.loader),
+                    bridge_timeout_override_ms: None,
+                    slow_call_warn_after: NATIVE_BRIDGE_SLOW_CALL_WARN_AFTER,
                 });
 
         let loader = Arc::clone(loader);
@@ -1772,6 +2074,9 @@ impl PluginInvokerImpl {
                     on_blocking_thread: true,
                     response_buf: std::cell::UnsafeCell::new(String::with_capacity(4096)),
                     err_buf: std::cell::UnsafeCell::new(String::with_capacity(256)),
+                    loader: Arc::clone(&self.loader),
+                    bridge_timeout_override_ms: None,
+                    slow_call_warn_after: NATIVE_BRIDGE_SLOW_CALL_WARN_AFTER,
                 });
 
         let loader = Arc::clone(loader);
@@ -2372,6 +2677,11 @@ impl PluginInvokerImpl {
             let workdir = self.loader.get_plugin_dir(&manifest.id);
             (command, args, workdir)
         };
+        // Windows venv trampoline 消层：独占/合宿统一收口——命令直达 base
+        // 解释器 + __PYVENV_LAUNCHER__ 锚回 venv 身份（非 venv python 形态
+        // 恒原样，见 [`resolve_venv_direct_interpreter`]）。
+        let (command, args, venv_direct_env) =
+            resolve_venv_direct_interpreter_for_spawn(&command, args);
         let mut c = McpClient::new_stdio(command, args)
             // 宿主键用于 stderr 转发时区分宿主日志来源（[host_key] 前缀）——
             // 合宿连接是组共享进程，按宿主键归因日志。
@@ -2414,6 +2724,10 @@ impl PluginInvokerImpl {
                 }
             }
         }
+        // venv 直达解析的 venv 身份锚（__PYVENV_LAUNCHER__）走同一 env 注入通道。
+        if let Some(pair) = venv_direct_env {
+            extra_env.push(pair);
+        }
         if !extra_env.is_empty() {
             c = c.with_extra_env(extra_env);
         }
@@ -2429,23 +2743,61 @@ impl PluginInvokerImpl {
         host_key: &str,
         manifest: &PluginManifest,
     ) -> Result<SharedMcpClient, PluginError> {
-        client.connect().await.map_err(|e| PluginError {
-            message: format!("MCP connect failed: {e}"),
-            code: Some("MCP_CONNECT_FAILED".to_string()),
-            source: Some("plugin-invoker".to_string()),
-        })?;
+        // 启动窗时间界（ADR 2026-09-28）：connect + initialize 全程罩在独立的
+        // start-up 超时内，与 request_timeout（默认 86400s）解耦——sidecar 启动
+        // 窗挂死时 fail-fast，spawn 锁随 future 结束自然释放；G2 观测/生命周期
+        // 钩子/预热/管道流式四条无外层超时路径经本函数同一收口自动有界。
+        let start_window = host_start_timeout();
+        let started = Instant::now();
+        let handshake = async {
+            client.connect().await.map_err(|e| PluginError {
+                message: format!("MCP connect failed: {e}"),
+                code: Some("MCP_CONNECT_FAILED".to_string()),
+                source: Some("plugin-invoker".to_string()),
+            })?;
 
-        // initialize 握手（携带插件配置）。配置加载分级语义（PARSE 上抛/
-        // IO 降级空配置）由 shared::injected_config 统一承载。
-        // 按需注入（ADR §4.3，P6）：只走 config_files 映射；未声明则收空配置。
-        // 避免把全系统配置（含其他插件凭证）泄漏给每个 sidecar。
-        // 复用 shared::build_injected_config——native/wasm 分支也走同一函数，三家对齐。
-        let config = crate::shared::injected_config(self.loader.as_ref(), manifest).await?;
-        client.initialize(&config).await.map_err(|e| PluginError {
-            message: format!("MCP initialize failed: {e}"),
-            code: Some("MCP_INIT_FAILED".to_string()),
-            source: Some("plugin-invoker".to_string()),
-        })?;
+            // initialize 握手（携带插件配置）。配置加载分级语义（PARSE 上抛/
+            // IO 降级空配置）由 shared::injected_config 统一承载。
+            // 按需注入（ADR §4.3，P6）：只走 config_files 映射；未声明则收空配置。
+            // 避免把全系统配置（含其他插件凭证）泄漏给每个 sidecar。
+            // 复用 shared::build_injected_config——native/wasm 分支也走同一函数，三家对齐。
+            let config = crate::shared::injected_config(self.loader.as_ref(), manifest).await?;
+            client.initialize(&config).await.map_err(|e| PluginError {
+                message: format!("MCP initialize failed: {e}"),
+                code: Some("MCP_INIT_FAILED".to_string()),
+                source: Some("plugin-invoker".to_string()),
+            })?;
+            Ok(config)
+        };
+        let config = match tokio::time::timeout(start_window, handshake).await {
+            Ok(result) => result?,
+            Err(_) => {
+                let elapsed = started.elapsed();
+                // 显式 kill 半开客户端，不靠 drop 拖延（kill_on_drop 仅兜底）：
+                // 树杀限时 3s + child.kill 兜底，半开进程不留孤儿；kill 失败仅
+                // warn（best-effort，与既有 kill 路径口径一致）。
+                if let Err(e) = client.kill().await {
+                    warn!(
+                        "Host start timeout kill failed (kill_on_drop backstop on drop): host={}, err={}",
+                        host_key, e
+                    );
+                }
+                error!(
+                    "Host start (connect+initialize handshake) timed out: host={}, window={}s, elapsed={:.1}s — half-open client killed, next call will retry respawn",
+                    host_key,
+                    start_window.as_secs(),
+                    elapsed.as_secs_f32()
+                );
+                return Err(PluginError {
+                    message: format!(
+                        "host start timeout: {host_key} handshake did not complete within {}s",
+                        start_window.as_secs()
+                    ),
+                    code: Some("HOST_START_TIMEOUT".to_string()),
+                    source: Some("plugin-invoker".to_string()),
+                });
+            }
+        };
 
         // 发送 on_load 通知——触发 Python 插件的 @plugin.on_load 回调，
         // 初始化插件实例（如 _instance = MyPlugin(config)）。
@@ -2567,23 +2919,51 @@ impl PluginInvokerImpl {
                 source: Some("plugin-invoker".to_string()),
             });
         }
-        let interpreter = find_venv_interpreter(plugin_path).ok_or_else(|| PluginError {
-            message: format!(
-                "插件 {} 的 .venv 解释器缺失（探测 .venv/Scripts/python.exe 与 .venv/bin/python 均不存在）——\
-                 Python sidecar 不回退 PATH 裸 python。\
-                 修复：在插件目录 {} 下 `uv venv --python 3.12 && uv pip install -e <repo>/plugins/sdk + 确认清单依赖`，\
-                 或 `uv sync --project <插件目录>`（重建口径见 docs/working/插件uv运行时迁移方案_20260819.md）",
+        // 解析序：①插件目录 .venv（dev 现行为，恒优先）→ ②用户空间登记处
+        // （装机态兜底：打包排除 .venv 且插件目录只读，venv 由 autoprovision
+        // 落 `<USER_ROOT>/plugin-venvs/<插件id>`，ADR 2026-09-28）→ 均无则
+        // fail-closed（uv 单轨，无 PATH python 回退轨）。
+        let (interpreter, from_user_space) = match find_venv_interpreter(plugin_path) {
+            Some(interp) => (interp, false),
+            None => match find_user_space_venv_interpreter(&manifest.id) {
+                Some(interp) => (interp, true),
+                None => {
+                    return Err(PluginError {
+                        message: format!(
+                            "插件 {} 的 venv 解释器缺失（插件目录 {} 的 \
+                             .venv/Scripts/python.exe 与 .venv/bin/python \
+                             均不存在，用户空间登记处 plugin-venvs/{} 亦无）\
+                             ——Python sidecar 不回退 PATH 裸 python。\
+                             修复：dev 在插件目录下 `uv venv --python 3.12 && \
+                             uv pip install -e <repo>/plugins/sdk + 确认清单依赖`，\
+                             或 `uv sync --project <插件目录>`；\
+                             装机态由内核 autoprovision 重建到用户空间\
+                             （uv 缺席/失败见 boot 日志 venv-provision 通道）\
+                             （重建口径见 docs/working/插件uv运行时迁移方案_20260819.md）",
+                            manifest.id,
+                            plugin_path.display(),
+                            manifest.id
+                        ),
+                        code: Some("VENV_INTERPRETER_MISSING".to_string()),
+                        source: Some("plugin-invoker".to_string()),
+                    })
+                }
+            },
+        };
+        if from_user_space {
+            info!(
+                "[invoker] 插件 {} 插件目录 .venv 缺席，\
+                 走用户空间 venv 登记处解释器（装机态兜底）| interpreter={}",
                 manifest.id,
-                plugin_path.display()
-            ),
-            code: Some("VENV_INTERPRETER_MISSING".to_string()),
-            source: Some("plugin-invoker".to_string()),
-        })?;
-        info!(
-            "[invoker] 插件 {} 走 venv 解释器（uv 单轨）| interpreter={}",
-            manifest.id,
-            interpreter.display()
-        );
+                interpreter.display()
+            );
+        } else {
+            info!(
+                "[invoker] 插件 {} 走 venv 解释器（uv 单轨）| interpreter={}",
+                manifest.id,
+                interpreter.display()
+            );
+        }
         command = interpreter.to_string_lossy().into_owned();
         Ok((command, args))
     }
@@ -2802,17 +3182,40 @@ impl PluginInvokerImpl {
                 code: Some("HOST_DIR_NOT_FOUND".to_string()),
                 source: Some("plugin-invoker".to_string()),
             })?;
-        // 共享 venv 解释器（fail-closed，与 resolve_sidecar_command 的 uv 单轨同轨）。
-        let interpreter = find_venv_interpreter(&host_dir).ok_or_else(|| PluginError {
-            message: format!(
-                "light 合宿宿主 {} 的共享 venv 解释器缺失（探测 {}/.venv/Scripts/python.exe 与 \
-                 .venv/bin/python 均不存在）——共享 venv（plugins/shared/_host/.venv）由宿主侧任务构建",
-                host_dir.display(),
-                GROUP_HOST_DIR
-            ),
-            code: Some("HOST_VENV_MISSING".to_string()),
-            source: Some("plugin-invoker".to_string()),
-        })?;
+        // 共享 venv 解释器（fail-closed，与 resolve_sidecar_command 的 uv 单轨
+        // 同轨；解析序同源：宿主目录 .venv 优先，缺席回退用户空间登记处
+        // `plugin-venvs/_host`——装机态宿主 venv 由 autoprovision 重定向重建，
+        // ADR 2026-09-28-venv-user-space-provisioning）。
+        let (interpreter, from_user_space) = match find_venv_interpreter(&host_dir) {
+            Some(interp) => (interp, false),
+            None => match find_user_space_venv_interpreter(GROUP_HOST_DIR) {
+                Some(interp) => (interp, true),
+                None => {
+                    return Err(PluginError {
+                        message: format!(
+                            "light 合宿宿主 {} 的共享 venv 解释器缺失\
+                             （探测 {}/.venv/Scripts/python.exe 与 \
+                             .venv/bin/python 均不存在，用户空间登记处 \
+                             plugin-venvs/{GROUP_HOST_DIR} 亦无）——\
+                             共享 venv dev 由宿主侧任务构建，\
+                             装机态由内核 autoprovision 重建到用户空间",
+                            host_dir.display(),
+                            GROUP_HOST_DIR
+                        ),
+                        code: Some("HOST_VENV_MISSING".to_string()),
+                        source: Some("plugin-invoker".to_string()),
+                    })
+                }
+            },
+        };
+        if from_user_space {
+            info!(
+                target: "sidecar",
+                host_dir = %host_dir.display(),
+                interpreter = %interpreter.display(),
+                "合宿宿主 .venv 缺席，走用户空间 venv 登记处共享解释器（装机态兜底）"
+            );
+        }
         let mut sorted_members = members.to_vec();
         sorted_members.sort();
         let args = vec![
@@ -3093,16 +3496,24 @@ impl PluginInvokerImpl {
                 None => self.host_members(&host_key).len(),
             };
             if snapshot_len > 1 {
-                // 成员有调用在飞不卸（同 P12 门：空闲计时在长调用期间会虚假超期）。
-                let member_inflight = self.member_inflight(&plugin_id);
-                if member_inflight > 0 {
+                // 宿主在飞门（用户裁定 2026-09-28，ADR 2026-09-28-idle-gc-host-
+                // inflight-pin）：成员卸载即变更成员集 → 宿主指纹漂移 → 下一次
+                // 任意调用触发整宿主 respawn（BUG-81 语义：旧进程放弃 kill 保留
+                // 伺候在飞调用、新进程状态为空）——同宿主上停泊的长等待交互
+                // （wait_for_choice）被拆成「等待方旧进程 / 响应方新进程」，用户
+                // 响应永远送达不了等待。故宿主有任何在飞调用时任何成员都不得
+                // 软卸载；候选成员空闲，延后到宿主排空的下一轮 GC 再卸，代价为
+                // 零。候选成员自己的调用也计入宿主面（enter_sidecar_inflight
+                // 双面计数），无需单独门。
+                let host_inflight = self.host_inflight(&host_key);
+                if host_inflight > 0 {
                     info!(
                         plugin = %plugin_id,
                         host = %host_key,
-                        inflight = member_inflight,
+                        inflight = host_inflight,
                         idle_secs = idle_secs,
                         threshold = threshold,
-                        "Member idle-unload skipped: capability calls in flight"
+                        "Member idle-unload skipped: host capability calls in flight"
                     );
                     continue;
                 }
@@ -3957,6 +4368,14 @@ impl PluginInvoker for PluginInvokerImpl {
     fn is_host_starting(&self, plugin_id: &str) -> bool {
         self.starting_plugins.read().contains(plugin_id)
     }
+
+    /// 宿主盒子快照（覆盖 trait 默认空实现）。
+    ///
+    /// 见 M3 段 [`PluginInvokerImpl::host_boxes_snapshot_impl`]（api 只读端点
+    /// `GET /api/v1/plugins/hosts` 取数面）。
+    async fn host_boxes_snapshot(&self) -> HostBoxesSnapshot {
+        self.host_boxes_snapshot_impl().await
+    }
 }
 
 impl PluginInvokerImpl {
@@ -4106,6 +4525,155 @@ impl PluginInvokerImpl {
             });
         }
         out
+    }
+
+    /// 组装宿主盒子快照（`GET /api/v1/plugins/hosts` 取数面，只读：不 spawn、
+    /// 不驱逐、不 touch、不判死驱逐）。
+    ///
+    /// 锁序纪律与 [`Self::host_proc_snapshots`] 同构：parking_lot 锁先克隆
+    /// 收窄立即放锁，再对每个 client 做 tokio 锁内的 async 判死/pid 读取。
+    /// pid/alive/uptime 复用 host_proc_snapshots 采集面；rss_mb 归 api 侧富化
+    /// （RSS 采集面在 api crate，此处恒 None）。
+    ///
+    /// pending_spawn 口径：invoker 记账面可见的插件 id 全集（装箱分配表 ∪
+    /// 成员调用时钟 ∪ 独占宿主键 ∪ 启动窗口）对「有分配表条目 ∨ 有宿主缓存
+    /// 条目（在场即算，判死属 async 观测面不入差集）」的差集。全量启用清单
+    /// （L1 enabled × manifests）归 AppState 持有，不在 invoker 视野——从未
+    /// 触达 invoker 的插件不在此列。
+    async fn host_boxes_snapshot_impl(&self) -> HostBoxesSnapshot {
+        let pairs: Vec<(String, SharedMcpClient)> = {
+            let clients = self.mcp_clients.read();
+            clients
+                .iter()
+                .map(|(k, v)| (k.clone(), Arc::clone(v)))
+                .collect()
+        };
+        let uptimes: HashMap<String, Option<u64>> = {
+            let spawned = self.host_spawned_at.read();
+            spawned
+                .iter()
+                .map(|(k, t)| (k.clone(), Some(t.elapsed().as_secs())))
+                .collect()
+        };
+        let spawned_sets: HashMap<String, Vec<String>> = self.spawned_members.read().clone();
+        let last_used: HashMap<String, Instant> = self.member_last_used.read().clone();
+        let starting: std::collections::HashSet<String> = self.starting_plugins.read().clone();
+        let assignments: HashMap<String, String> = self.light_packing.read().assignments.clone();
+        let host_keys: std::collections::HashSet<String> =
+            pairs.iter().map(|(k, _)| k.clone()).collect();
+
+        // member_last_used 记 Instant（单调钟），契约要求 epoch 秒——以当前
+        // wall-clock 为基准回退 elapsed 换算（显示面精度足够，不作计时判据）。
+        let now_epoch = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+
+        let mut hosts = Vec::with_capacity(pairs.len());
+        for (host_key, client) in pairs {
+            let (pid, alive) = {
+                let guard = client.read().await;
+                (guard.pid().await, !Self::is_dead_sidecar(&guard).await)
+            };
+            let kind = if parse_group_slot(&host_key).is_some() {
+                HostBoxKind::Group
+            } else {
+                HostBoxKind::Solo
+            };
+            let member_ids = self.host_members(&host_key);
+            let spawned_set = spawned_sets.get(&host_key);
+            // spawned_members 只记合宿 spawn 面：独占宿主缺条目 = 进程服务面
+            // 即键内嵌插件自身；组宿主缺快照属异常态（spawn 不变量：快照先于
+            // 入缓存），如实出空集（成员全部渲染为待重加入，fail-closed 显示）。
+            let spawned_members_out = match (kind.clone(), spawned_set) {
+                (HostBoxKind::Solo, _) => member_ids.clone(),
+                (HostBoxKind::Group, Some(set)) => {
+                    let mut v = set.clone();
+                    v.sort();
+                    v
+                }
+                (HostBoxKind::Group, None) => Vec::new(),
+            };
+            let members = member_ids
+                .iter()
+                .map(|plugin_id| HostBoxMember {
+                    plugin_id: plugin_id.clone(),
+                    pending_rejoin: match (&kind, spawned_set) {
+                        // 独占成员无重加入概念（无组 respawn 面）
+                        (HostBoxKind::Solo, _) => false,
+                        // 组成员在分配表但不在 spawn 快照 = 待重加入；快照缺失
+                        // 按不在处理（与漂移检测 fail-closed 同口径）
+                        (HostBoxKind::Group, set) => set.is_none_or(|s| !s.contains(plugin_id)),
+                    },
+                })
+                .collect();
+            let starting_members: Vec<String> = member_ids
+                .iter()
+                .filter(|id| starting.contains(*id))
+                .cloned()
+                .collect();
+            let mut member_in_flight: HashMap<String, u64> = HashMap::new();
+            let mut last_call_at: Option<f64> = None;
+            for plugin_id in &member_ids {
+                let n = self.member_inflight(plugin_id) as u64;
+                if n > 0 {
+                    member_in_flight.insert(plugin_id.clone(), n);
+                }
+                if let Some(t) = last_used.get(plugin_id) {
+                    let epoch = now_epoch - t.elapsed().as_secs_f64();
+                    if last_call_at.is_none_or(|c| epoch > c) {
+                        last_call_at = Some(epoch);
+                    }
+                }
+            }
+            hosts.push(HostBox {
+                uptime_secs: uptimes.get(&host_key).copied().flatten(),
+                in_flight: self.host_inflight(&host_key) as u64,
+                spawned_members: spawned_members_out,
+                last_call_at,
+                starting: !starting_members.is_empty(),
+                starting_members,
+                members,
+                slot_used: member_ids.len() as u64,
+                slot_cap: match &kind {
+                    HostBoxKind::Group => light_host_max_members() as u64,
+                    HostBoxKind::Solo => 1,
+                },
+                member_in_flight,
+                host_key,
+                kind,
+                pid,
+                alive,
+                rss_mb: None,
+            });
+        }
+        hosts.sort_by(|a, b| a.host_key.cmp(&b.host_key));
+
+        let mut universe: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        universe.extend(assignments.keys().cloned());
+        universe.extend(last_used.keys().cloned());
+        universe.extend(starting.iter().cloned());
+        universe.extend(
+            host_keys
+                .iter()
+                .filter_map(|k| k.strip_prefix("plugin:"))
+                .map(str::to_string),
+        );
+        let pending_spawn = universe
+            .into_iter()
+            .filter(|id| !assignments.contains_key(id) && !host_keys.contains(&solo_host_key(id)))
+            .map(|id| PendingSpawnEntry {
+                enabled: self.loader.get_manifest(&id).is_some(),
+                last_call_at: last_used
+                    .get(&id)
+                    .map(|t| now_epoch - t.elapsed().as_secs_f64()),
+                plugin_id: id,
+            })
+            .collect();
+        HostBoxesSnapshot {
+            hosts,
+            pending_spawn,
+        }
     }
 }
 

@@ -286,6 +286,46 @@ impl ReplayBuffer {
             }
         }
     }
+
+    /// 内存驻留快照（堆栈级诊断面 GET /api/v1/system/memory-breakdown 消费）。
+    ///
+    /// 条目数为实测计数；`approx_payload_bytes` 为实测载荷字节（逐条
+    /// `payload.len()` 求和，不含 VecDeque/HashMap 结构开销——量级诊断用途）。
+    pub fn memory_stats(&self) -> ReplayMemoryStats {
+        let buffers = self.buffers.lock();
+        let mut stats = ReplayMemoryStats::default();
+        for buf in buffers.values() {
+            stats.threads += 1;
+            stats.message_groups += buf.message_frames.len();
+            for group in buf.message_frames.values() {
+                stats.message_frames += group.len();
+                stats.approx_payload_bytes +=
+                    group.iter().map(|s| s.event.payload.len()).sum::<usize>();
+            }
+            stats.misc_events += buf.misc.len();
+            stats.approx_payload_bytes += buf
+                .misc
+                .iter()
+                .map(|s| s.event.payload.len())
+                .sum::<usize>();
+        }
+        stats
+    }
+}
+
+/// [`ReplayBuffer::memory_stats`] 快照。
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct ReplayMemoryStats {
+    /// 有缓冲的 thread 数。
+    pub threads: usize,
+    /// 在飞消息分组数（message_id → 帧组）。
+    pub message_groups: usize,
+    /// 在飞消息帧总数。
+    pub message_frames: usize,
+    /// 杂项事件数（TTL/容量小环）。
+    pub misc_events: usize,
+    /// 载荷近似字节实测和（不含容器结构开销）。
+    pub approx_payload_bytes: usize,
 }
 
 #[cfg(test)]

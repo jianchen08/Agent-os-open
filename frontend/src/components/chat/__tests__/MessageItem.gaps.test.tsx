@@ -7,11 +7,11 @@
  * - 版本内容（onContentUpdate）替代显示
  * - AI 平铺模式（bubbleAiMode=flat）：无背景图=透明裸排；背景图激活=半透明气泡面+模糊
  * - 用户附件：图片 → ImageGallery；文件三形态图标分型（代码/文档/通用）；
- *   点击有 url 附件调 openAttachment、无 url 静默；空内容且无附件 → 不渲染气泡
+ *   点击有 url 附件调 openFileWithLoader、无 url 静默；空内容且无附件 → 不渲染气泡
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { openAttachment } from '@/services/attachmentOpener'
+import { openFileWithLoader } from '@/services/fileLoaderRegistry'
 import { reportError } from '@/services/errorReporting'
 import { useThemeStore } from '@/stores/themeStore'
 import { renderWithProviders } from '@/test/renderWithProviders'
@@ -29,7 +29,7 @@ vi.mock('@/hooks/queries/useAgentsQuery', () => ({
   useAgentsQuery: () => ({ data: [] }),
 }))
 vi.mock('@/services/errorReporting', async () => (await import('./helpers/messageItemMocks')).errorReportingMock())
-vi.mock('@/services/attachmentOpener', async () => (await import('./helpers/messageItemMocks')).attachmentOpenerMock())
+vi.mock('@/services/fileLoaderRegistry', async () => (await import('./helpers/messageItemMocks')).attachmentOpenerMock())
 vi.mock('@/components/media/ImageGallery', () => ({
   ImageGallery: ({ images }: { images: { id: string; title: string }[] }) => (
     <div data-testid="gallery">{images.map((i) => <span key={i.id}>{i.title}</span>)}</div>
@@ -249,8 +249,8 @@ describe('MessageItem 用户附件', () => {
     expect(screen.getByText('bin.dat')).toBeInTheDocument()
   })
 
-  it('点击有 url 的附件调 openAttachment；无 url 静默不调', () => {
-    vi.mocked(openAttachment).mockClear()
+  it('点击有 url 的附件调 openFileWithLoader；无 url 静默不调', () => {
+    vi.mocked(openFileWithLoader).mockClear()
     renderWithProviders(
       <MessageItem
         message={makeMessage({
@@ -263,11 +263,16 @@ describe('MessageItem 用户附件', () => {
       />,
     )
     fireEvent.click(screen.getByText('run.py'))
-    expect(openAttachment).toHaveBeenCalledWith({ id: 'a2', name: 'run.py', url: '/uploads/run.py' })
+    expect(openFileWithLoader).toHaveBeenCalledWith({
+      id: 'a2',
+      name: 'run.py',
+      url: '/uploads/run.py',
+      mime: 'text/x-python',
+    })
 
-    openAttachment.mockClear()
+    openFileWithLoader.mockClear()
     fireEvent.click(screen.getByText('nourl.txt'))
-    expect(openAttachment).not.toHaveBeenCalled()
+    expect(openFileWithLoader).not.toHaveBeenCalled()
   })
 
   it('空内容且无任何附件 → 不渲染气泡', () => {

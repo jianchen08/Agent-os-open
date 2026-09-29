@@ -3,7 +3,7 @@
 
 服务契约（manifest capabilities.services；wire = MCP tools/call）：
 - mode.describe：返回 {mode, name, chain, weights, budget, profile_path, panel_page_id}
-- mode.get_profile：返回包内 profile.yaml 解析后的完整 dict
+- mode.get_profile：返回包内 mode.yaml 解析后的完整 dict
 
 profile 与本插件同目录内打包（种子单元自包含，目录级播种/升级/回退的结构前提）；
 消费方（eval_harness 等）经内核服务调用获取（tool-executor 显式 plugin_id 通道），
@@ -52,6 +52,7 @@ webview 面板页（工作区 tab 面板，manifest detachable 声明悬浮窗�
 种子单元自包含：HttpHandleResponse 封装与读数桥在此内联——共享根裸模块对
 用户空间播种副本不可达（bootstrap 的 shared_root 指纹只认仓内 plugins/shared 布局）。
 """
+# config-write-surface-exempt: 模式物料写用户数据层(user_space双根,出厂件只读)
 from __future__ import annotations
 
 import base64
@@ -73,7 +74,7 @@ plugin = AgentOSPlugin("mode_roleplay")
 
 bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根入 sys.path
 
-_PROFILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profile.yaml")
+_PROFILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mode.yaml")
 _AGENTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents")
 _LOREBOOKS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lorebooks")
 
@@ -116,7 +117,7 @@ _DESCRIBE_FIELDS = ("mode", "name", "chain", "weights", "budget", "panel_page_id
 
 
 def load_profile(path: str = _PROFILE_PATH) -> dict[str, Any]:
-    """读取包内 profile.yaml；空文件或缺 mode 键视为种子损坏（fail-closed）。"""
+    """读取包内 mode.yaml；空文件或缺 mode 键视为种子损坏（fail-closed）。"""
     with open(path, encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
     if not isinstance(data, dict) or not data.get("mode"):
@@ -152,7 +153,7 @@ async def mode_describe() -> dict[str, Any]:
 @plugin.tool(
     name="mode.get_profile",
     schema={"type": "object", "properties": {}},
-    description="返回角色扮演模式包内 profile.yaml 解析后的内容",
+    description="返回角色扮演模式包内 mode.yaml 解析后的内容",
     output_schema={
         "type": "object",
         "required": ["mode"],
@@ -1044,6 +1045,80 @@ async def http_handle(
     routed = await _handle_actions(path, method, raw_body)
     if routed is not None:
         return routed
+    if path == "/ext/mode_roleplay/pipeline/open" and method == "POST":
+        # B8 管道标签（2026-09-29）：向既有会话开通扮演子管道——薄代理内核
+        # chat.send_message 创建分支（create:true + thread_id 归属既有会话，
+        # 内核测试 create_with_ownership_thread_links_real_session 钉死）。
+        # 职责就地（用户裁定）：面板直调本插件端点，不设独立代理插件。
+        try:
+            # 内核形态 body=base64(json)（http_dispatcher 契约）；裸 JSON 同收
+            # （宿主桥之外调用方/测试直调，与 _handle_actions 双形态一致）
+            try:
+                req = json.loads(base64.b64decode(raw_body).decode("utf-8")) if raw_body else {}
+            except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+                req = json.loads(raw_body) if raw_body else {}
+        except (ValueError, json.JSONDecodeError) as exc:
+            return {"success": True, "data": _json_response({"error": f"请求体非法 JSON: {exc}"}, 400)}
+        if not isinstance(req, dict):
+            return {"success": True, "data": _json_response({"error": "请求体须为 JSON 对象"}, 400)}
+        session_id = str(req.get("session_id", "") or "").strip()
+        if not session_id:
+            return {"success": True, "data": _json_response({"error": "session_id 必填"}, 400)}
+        agent_id = str(req.get("agent_id", "") or "").strip()
+        # user_id 从请求 token 解（内核转发 /ext 带全量 headers；token 载荷
+        # `access:<uid>:<username>:<exp>:<jti>:<h>` 自包含 uid）——chat.send_message
+        # 契约 user_id 非空，缺失即 401 如实拒绝（不猜默认用户）。
+        user_id = ""
+        headers_lc = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
+        auth = headers_lc.get("authorization", "").strip()
+        if auth.lower().startswith("bearer "):
+            try:
+                payload_b64 = auth[7:].strip().split(".", 1)[0]
+                pad = "=" * (-len(payload_b64) % 4)
+                parts = base64.urlsafe_b64decode(payload_b64 + pad).decode("utf-8").split(":", 5)
+                if len(parts) == 6 and parts[0] == "access":
+                    user_id = parts[1]
+            except (ValueError, IndexError):
+                user_id = ""
+        if not user_id:
+            return {"success": True, "data": _json_response({"error": "未认证：token 缺失或无效"}, 401)}
+        args: dict[str, Any] = {
+            "create": True,
+            "thread_id": session_id,
+            "message": str(req.get("first_message", "") or ""),
+            "user_id": user_id,
+            "pipeline_config_id": "roleplay",
+        }
+        if agent_id:
+            # run 执行身份 = 管道 state 持久键 agent.id（出生方经 state 透传，
+            # context_build 据此加载卡 agent yaml；顶层 agent_id 只是派发簿记）
+            args["state"] = {"agent.id": agent_id}
+        try:
+            cap = plugin.get_capability("chat")
+            from agentos_plugin_sdk.capability import bind_capability_caller
+
+            res = await bind_capability_caller(cap, "chat")(
+                "chat.send_message", args, timeout=25.0
+            )
+        except Exception as exc:  # noqa: BLE001 — 薄代理：capability 失败原样透传
+            return {"success": True, "data": _json_response({"error": f"管道开通失败: {exc}"}, 502)}
+        if not isinstance(res, dict) or res.get("status") != "created":
+            return {
+                "success": True,
+                "data": _json_response({"error": f"未走创建分支: {str(res)[:200]}"}, 502),
+            }
+        pipeline_id = str(res.get("pipeline_id", "") or "")
+        if not pipeline_id:
+            return {"success": True, "data": _json_response({"error": "回执缺 pipeline_id"}, 502)}
+        return {
+            "success": True,
+            "data": _json_response({
+                "pipeline_id": pipeline_id,
+                "thread_id": session_id,
+                "status": "created",
+                "pipeline_config_id": "roleplay",
+            }),
+        }
     return {"success": True, "data": _json_response({"error": "not found", "path": path}, 404)}
 
 

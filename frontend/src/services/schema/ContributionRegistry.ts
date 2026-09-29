@@ -212,7 +212,11 @@ export interface ClientStyleDeclaration {
 }
 
 /** contributes 中旁路注册（不归一化为页面）的视觉贡献 key */
-const NON_PAGE_CONTRIBUTE_KEYS: ReadonlySet<string> = new Set(['themes', 'client_styles'])
+const NON_PAGE_CONTRIBUTE_KEYS: ReadonlySet<string> = new Set([
+  'themes',
+  'client_styles',
+  'message_cards',
+])
 
 /**
  * 已弃用的旧贡献 key（[来源: docs/decisions/2026-08-17-widget-migration-t8-t13-t14-rulings.md]）：
@@ -228,6 +232,17 @@ const DEPRECATED_CONTRIBUTE_KEYS: ReadonlySet<string> = new Set([
   'chatInteractions',
   'chatActions',
 ])
+
+/**
+ * 前端下架的插件 ui_schema widget 声明（按 id 全域摘除）
+ *
+ * - plugins_runtime_table（monitoring「插件运行」表）：用户裁定 2026-09-27——
+ *   运行表与进程观测卡片（plugin_hosts）是同一数据的两套渲染，不允许并存；
+ *   表的列数据已迁入卡片（上次崩溃列经前端 join 运行端点补齐，见
+ *   PluginHostsWidget）。插件清单契约冻结期不动 plugins/，摘除落在前端
+ *   声明聚合单点（ui_schema 提取面）。
+ */
+const RETIRED_WIDGET_IDS: ReadonlySet<string> = new Set(['plugins_runtime_table'])
 
 /**
  * 旧贡献点 key → 归一化 space/slot 映射（统一架构 4.4 节）
@@ -285,6 +300,8 @@ export class ContributionRegistry {
   private settingsPanels: Map<string, SettingsPanelEntry> = new Map()
   /** 插件 widget 声明（按 pluginId 索引，来自 ui_schema） */
   private widgetsByPlugin: Map<string, WidgetDeclaration[]> = new Map()
+  /** 前端预置 widget 声明（前端自持组件的声明面，registerPresetWidgets 写入） */
+  private presetWidgets: WidgetDeclaration[] = []
   /** 插件主题声明（contributes.themes 旁路注册，不归一化为页面） */
   private pluginThemes: PluginTheme[] = []
   /** 插件 CSS 注入声明（contributes.client_styles 旁路注册，不归一化为页面） */
@@ -363,16 +380,18 @@ export class ContributionRegistry {
         if (!pluginId) continue
         const uiSchema = entry.ui_schema as { widgets?: Array<Record<string, unknown>> } | null | undefined
         if (!uiSchema || !Array.isArray(uiSchema.widgets)) continue
-        const widgets: WidgetDeclaration[] = uiSchema.widgets.map((w) => ({
-          id: w.id as string,
-          type: w.type as string,
-          space: w.space as string | undefined,
-          group: w.group as string | undefined,
-          trigger: w.trigger as string | undefined,
-          order: typeof w.order === 'number' ? w.order : undefined,
-          props: w.props as Record<string, unknown> | undefined,
-          pluginId,
-        }))
+        const widgets: WidgetDeclaration[] = (uiSchema.widgets as Array<Record<string, unknown>>)
+          .filter((w) => !RETIRED_WIDGET_IDS.has(String(w.id ?? '')))
+          .map((w) => ({
+            id: w.id as string,
+            type: w.type as string,
+            space: w.space as string | undefined,
+            group: w.group as string | undefined,
+            trigger: w.trigger as string | undefined,
+            order: typeof w.order === 'number' ? w.order : undefined,
+            props: w.props as Record<string, unknown> | undefined,
+            pluginId,
+          }))
         this.widgetsByPlugin.set(pluginId, widgets)
       }
     }
@@ -426,7 +445,9 @@ export class ContributionRegistry {
         if (!Array.isArray(items)) continue
         if (DEPRECATED_CONTRIBUTE_KEYS.has(type)) continue
         if (NON_PAGE_CONTRIBUTE_KEYS.has(type)) {
-          if (type === 'themes') {
+          if (type === 'message_cards') {
+            this.registerMessageCards(pluginId, items as Record<string, unknown>[])
+          } else if (type === 'themes') {
             this.registerPluginThemes(pluginId, items as Record<string, unknown>[])
           } else {
             this.registerClientStyles(pluginId, items as Record<string, unknown>[])
@@ -542,17 +563,33 @@ export class ContributionRegistry {
   // ── Widget 声明（来自 agents/pipelines/plugin_contributes 的 ui_schema）──
 
   /**
-   * 获取指定插件的 widget 声明（来自 ui_schema.widgets）
+   * 注册前端预置 widget 声明（与后端 ui_schema 声明同源消费）
+   *
+   * 用途：前端自持的复杂视图（数据面走内核端点、交互超出声明组台能力）
+   * 需要进入组台/全屏等声明消费链路，但声明源在插件 ui_schema 之外——
+   * 由前端组合根（registerWidgets）随组件注册一并声明。同 id 后注册者覆盖。
+   * loadFromSchema 幂等重载不清除预置声明：它们是前端静态配置而非后端数据，
+   * 清除会让声明随 schema 刷新消失且无人再补种。
+   */
+  registerPresetWidgets(widgets: WidgetDeclaration[]): void {
+    for (const widget of widgets) {
+      this.presetWidgets = this.presetWidgets.filter((p) => p.id !== widget.id)
+      this.presetWidgets.push(widget)
+    }
+  }
+
+  /**
+   * 获取指定插件的 widget 声明（来自 ui_schema）
    */
   getWidgetsForPlugin(pluginId: string): WidgetDeclaration[] {
     return this.widgetsByPlugin.get(pluginId) ?? []
   }
 
   /**
-   * 聚合所有插件的 widget 声明
+   * 聚合所有 widget 声明（前端预置 + 各插件 ui_schema）
    */
   getAllWidgets(): WidgetDeclaration[] {
-    const all: WidgetDeclaration[] = []
+    const all: WidgetDeclaration[] = [...this.presetWidgets]
     for (const list of this.widgetsByPlugin.values()) {
       all.push(...list)
     }
@@ -674,6 +711,21 @@ export class ContributionRegistry {
    * 幂等：同 pluginId + id 重复声明只更新不追加。
    * 同名 id 冲突（跨插件）：后注册者覆盖（风险 §四.1，缓解靠插件前缀约定）。
    */
+  /** 消息流内嵌卡片声明（contributes.message_cards，插件提供的渲染模板；宿主通用
+   *  渲染器按声明解释——宿主零专用卡片代码，2026-09-28 状态统一标记机制 §5b） */
+  private messageCards: Array<Record<string, unknown> & { pluginId: string }> = []
+
+  /** 全部 message_cards 声明（渲染侧按 match 命中，无声明零渲染） */
+  getAllMessageCards(): Array<Record<string, unknown> & { pluginId: string }> {
+    return this.messageCards
+  }
+
+  private registerMessageCards(pluginId: string, items: Array<Record<string, unknown>>): void {
+    for (const item of items) {
+      this.messageCards.push({ ...(item as Record<string, unknown>), pluginId })
+    }
+  }
+
   private registerPluginThemes(pluginId: string, items: Array<Record<string, unknown>>): void {
     for (const raw of items) {
       if (typeof raw.id !== 'string' || typeof raw.name !== 'string') continue

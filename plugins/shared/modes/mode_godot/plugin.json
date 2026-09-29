@@ -61,7 +61,7 @@
       },
       {
         "name": "mode.get_profile",
-        "description": "返回 Godot 游戏开发模式包内 profile.yaml 解析后的内容",
+        "description": "返回 Godot 游戏开发模式包内 mode.yaml 解析后的内容",
         "input_schema": {
           "type": "object",
           "properties": {}

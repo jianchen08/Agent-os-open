@@ -28,12 +28,14 @@ const RECONNECT_BASE_DELAY = 4_000
 const RECONNECT_MAX_DELAY = 60_000
 const RECONNECT_MAX_RETRIES = 30
 const HEARTBEAT_INTERVAL = 30_000
-// 超时设 90s 并要求连续 2 次未收到 ack 才判定连接死亡：
-// 局域网/非本机访问（如跨设备 ip=192.168.x.x）或后端繁忙时，单次 ack 延迟常见，
-// 零容错（45s 一次超时就断）会导致 WS 每 30-45s 反复断连，流式 chunk 大量丢失。
-// 连续 2 次超时（≈90s）仍能及时检测真死连接。
+// 判死阈值 = pong 新鲜度上限：距最近一次心跳 ack 超过 90s（连续 3 个 30s 周期
+// 无 ack）判定连接死亡。90s 而非单周期零容错：局域网/非本机访问（如跨设备
+// ip=192.168.x.x）或后端繁忙时单次 ack 延迟常见，零容错（45s 一次超时就断）
+// 会导致 WS 每 30-45s 反复断连，流式 chunk 大量丢失。判死截止期只由 ack 到达
+// 刷新，周期 tick 只做检查、**不在 tick 上清掉重挂**——每 tick 重挂同一截止期
+// 会让超时回调永远活不过下一跳（判死成死代码，僵尸连接上状态恒 connected、
+// 重连不启，装机"内核未连接"横幅出现后无法自愈）。
 const HEARTBEAT_TIMEOUT = 90_000
-const HEARTBEAT_MAX_MISS = 2
 const CONNECTION_TIMEOUT = 15_000
 
 /** 发送缓冲区阈值：超过此值延迟发送（1MB） */
@@ -56,8 +58,8 @@ class GlobalWebSocketService {
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _reconnectAttempts: number = 0
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
-  private _heartbeatTimeoutTimer: ReturnType<typeof setTimeout> | null = null
-  private _heartbeatMissCount: number = 0
+  /** 最近一次心跳 ack（pong）到达时刻：判死的唯一新鲜度来源 */
+  private _lastPongAt: number = 0
   private _disposed: boolean = false
   /**
    * 正在等待 token 刷新后重连。
@@ -86,8 +88,16 @@ class GlobalWebSocketService {
 
   private _connectionTimeoutTimer: ReturnType<typeof setTimeout> | null = null
 
-  /** user_input 排队超时计时器（key = client_message_id） */
-  private _userInputTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
+  /**
+   * user_input 在途超时计时器（key = client_message_id）。ADR 2026-09-29 回执
+   * 契约：入队与直发两条路径恒挂——僵尸 TCP 上 ws.send() 不抛错不入队（帧静默
+   * 进黑洞），计时器是唯一不依赖出站方向的有界失败机制。值携带 pipelineId/
+   * threadId 供 ack(ok:false)/stream_start 撤销时构造事件载荷。
+   */
+  private _userInputTimers: Map<
+    string,
+    { timer: ReturnType<typeof setTimeout>; pipelineId: string; threadId: string }
+  > = new Map()
 
   /** 是否发起过至少一次连接（connect 被调用过）。刷新后 token 恢复期为 false：
    *  「从未连接」≠「断开」，连接状态映射据此区分首连中与真断开（不出误导横幅）。 */
@@ -268,6 +278,35 @@ class GlobalWebSocketService {
           this._handleKickedByReplacement()
           return
         }
+        // user_input 回执（ADR 2026-09-29）：ok:true 撤在途计时；ok:false 撤计时
+        // 并立即透传既有 send_timeout 通道（serverAware=true，UI 文案按"服务器
+        // 拒收"呈现，不再等 TTL 也不谎报"后端无记录"）。
+        if (data.type === 'user_input_ack') {
+          const cmid = typeof data.client_message_id === 'string' ? data.client_message_id : ''
+          const armed = cmid ? this._disarmUserInputTimer(cmid) : undefined
+          if (data.ok === false) {
+            const reason = `服务器拒绝派发：${typeof data.error === 'string' ? data.error : '未知错误'}`
+            _wsLogger.warn('[GlobalWS] user_input 被内核拒收: cmid=%s error=%s', cmid.slice(0, 8), data.error)
+            this._emit(WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT, {
+              type: WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT,
+              data: {
+                thread_id: typeof data.thread_id === 'string' ? data.thread_id : (armed?.threadId ?? ''),
+                pipeline_id: armed?.pipelineId ?? '',
+                client_message_id: cmid,
+                reason,
+                serverAware: true,
+              },
+            })
+          }
+        }
+        // stream_start：该管道已有轮次在跑（内核→前端方向实测可达），按 pipeline_id
+        // 撤在途计时（回执契约的兜底撤销，ack 缺失时第二撤点）。
+        if (data.type === 'stream_start') {
+          const pid = data?.data?.pipeline_id ?? data?.pipeline_id
+          if (typeof pid === 'string') {
+            this._disarmUserInputTimersForPipeline(pid)
+          }
+        }
         _wsLogger.debug(
           `[WS_RAW] type=${data.type} pipeline_id=${data.data?.pipeline_id?.slice(0, 12) || 'null'} message_id=${data.data?.message_id?.slice(0, 12) || 'null'}`,
         )
@@ -343,7 +382,7 @@ class GlobalWebSocketService {
     }
     this._status = 'disconnected'
     this._queue = []
-    this._userInputTimers.forEach((timer) => clearTimeout(timer))
+    this._userInputTimers.forEach((armed) => clearTimeout(armed.timer))
     this._userInputTimers.clear()
     this._handlers.clear()
   }
@@ -364,10 +403,17 @@ class GlobalWebSocketService {
     /**
      * 执行身份 agent 键：内核 route_user_input 提取后合成 {"agent.id": v} 单键
      * overlay 写管道 state 持久键（1c2f41915，消息级覆盖、后续轮次沿用）——
-     * 扮演会话的身份通道；附身不走此键（走 execution_context.roleplay_persona，
-     * 主 agent 全量工具语义）。不带则帧内无 agent_id 键。
+     * 模式会话的执行者绑定通道；附身不走此键（走 execution_context 人设键
+     * [registry decl.persona.from 派生]，主 agent 全量工具语义）。不带则帧内
+     * 无 agent_id 键。
      */
     agentId?: string
+    /**
+     * 执行管道配置（config/pipelines/ 登记名）：内核 route_user_input 透传
+     * compiled_for 按需编译（2026-09-28 设计 D2 管道接通）——模式会话绑定
+     * 专属管道的通道；不带则按会话默认管道。
+     */
+    pipelineConfigId?: string
   }): void {
     const msg: PendingMessage = {
       type: 'user_input',
@@ -380,54 +426,87 @@ class GlobalWebSocketService {
       client_message_id: opts?.clientMessageId || '',
       ...(opts?.executionContext ? { execution_context: opts.executionContext } : {}),
       ...(opts?.agentId ? { agent_id: opts.agentId } : {}),
+      ...(opts?.pipelineConfigId ? { pipeline_config_id: opts.pipelineConfigId } : {}),
     }
 
     this._send(msg)
 
-    // 错误透传（有界失败）：_send 对断线是静默入队（永不抛错），入队即挂 TTL——
-    // 超时仍未发出则剔除并广播，UI 层撤占位气泡并提示用户，杜绝"无限思考中"。
+    // 错误透传（有界失败，恒挂）：入队路径超时未发出、直发路径超时未收回执
+    // （user_input_ack/stream_start 到达即撤），都广播 user_input_send_timeout
+    // 让 UI 撤占位气泡并提示——杜绝"无限思考中"（R302 实证直发零保护 8 分钟无声）。
     const cmid = (msg as { client_message_id?: string }).client_message_id
-    if (cmid && this._isQueuedUserInput(cmid)) {
-      this._armUserInputTimeout(cmid)
+    if (cmid) {
+      this._armUserInputTimeout(cmid, opts?.pipelineId || '', threadId)
     }
   }
 
-  /** 队列中是否存在指定 client_message_id 的 user_input */
-  private _isQueuedUserInput(cmid: string): boolean {
-    return this._queue.some(
-      (m) => m.type === 'user_input' && (m as { client_message_id?: string }).client_message_id === cmid,
-    )
-  }
-
-  /** 为排队中的 user_input 挂超时：到点仍在队列 → 剔除 + 广播 user_input_send_timeout */
-  private _armUserInputTimeout(cmid: string): void {
+  /** 为在途 user_input 挂超时：到点仍未被 ack 撤销 → 按在途形态广播 user_input_send_timeout */
+  private _armUserInputTimeout(cmid: string, pipelineId: string, threadId: string): void {
     if (this._userInputTimers.has(cmid)) return
     const timer = setTimeout(() => {
+      const armed = this._userInputTimers.get(cmid)
       this._userInputTimers.delete(cmid)
       const idx = this._queue.findIndex(
         (m) =>
           m.type === 'user_input'
           && (m as { client_message_id?: string }).client_message_id === cmid,
       )
-      if (idx === -1) return // 已随重连成功发出（或被去重剔除），无需处理
-      const [dropped] = this._queue.splice(idx, 1)
-      _wsLogger.warn(
-        '[GlobalWS] user_input 排队 %dms 未发出（连接未恢复），丢弃并广播 send_timeout: cmid=%s',
-        USER_INPUT_QUEUE_TTL_MS,
-        cmid.slice(0, 8),
-      )
+      let reason: string
+      let content: string | undefined
+      if (idx !== -1) {
+        // 仍在队列：断线未发出，剔除并广播（既有排队语义）
+        const [dropped] = this._queue.splice(idx, 1)
+        reason = `连接断开超过 ${USER_INPUT_QUEUE_TTL_MS / 1000}s，消息未送达已撤回`
+        content = typeof dropped.content === 'string' ? dropped.content : undefined
+        _wsLogger.warn(
+          '[GlobalWS] user_input 排队 %dms 未发出（连接未恢复），丢弃并广播 send_timeout: cmid=%s',
+          USER_INPUT_QUEUE_TTL_MS,
+          cmid.slice(0, 8),
+        )
+      } else {
+        // 已直发（帧过 ws.send）但 TTL 内无回执：连接可能已僵死，消息是否到达
+        // 不可知——如实报"未收到服务器回执"，不代内核断言有无记录
+        reason = `已发送但 ${USER_INPUT_QUEUE_TTL_MS / 1000}s 内未收到服务器回执（连接可能已中断）`
+        _wsLogger.warn(
+          '[GlobalWS] user_input 直发 %dms 未收到回执（连接疑似僵死），广播 send_timeout: cmid=%s',
+          USER_INPUT_QUEUE_TTL_MS,
+          cmid.slice(0, 8),
+        )
+      }
       this._emit(WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT, {
         type: WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT,
         data: {
-          thread_id: dropped.thread_id,
-          pipeline_id: dropped.pipeline_id,
+          thread_id: armed?.threadId ?? threadId,
+          pipeline_id: armed?.pipelineId ?? pipelineId,
           client_message_id: cmid,
-          content: dropped.content,
-          reason: `连接断开超过 ${USER_INPUT_QUEUE_TTL_MS / 1000}s，消息未送达已撤回`,
+          ...(content !== undefined ? { content } : {}),
+          reason,
         },
       })
     }, USER_INPUT_QUEUE_TTL_MS)
-    this._userInputTimers.set(cmid, timer)
+    this._userInputTimers.set(cmid, { timer, pipelineId, threadId })
+  }
+
+  /** ack 到达（ok 双值）即撤销在途计时器；返回撤销前的记载供 ok:false 透传构造事件 */
+  private _disarmUserInputTimer(cmid: string):
+    | { pipelineId: string; threadId: string }
+    | undefined {
+    const armed = this._userInputTimers.get(cmid)
+    if (!armed) return undefined
+    clearTimeout(armed.timer)
+    this._userInputTimers.delete(cmid)
+    return { pipelineId: armed.pipelineId, threadId: armed.threadId }
+  }
+
+  /** stream_start 到达：按 pipeline_id 撤销该管道全部在途计时（回执缺 cmid 时的兜底） */
+  private _disarmUserInputTimersForPipeline(pipelineId: string): void {
+    if (!pipelineId) return
+    for (const [cmid, armed] of this._userInputTimers) {
+      if (armed.pipelineId === pipelineId) {
+        clearTimeout(armed.timer)
+        this._userInputTimers.delete(cmid)
+      }
+    }
   }
 
   /**
@@ -577,15 +656,9 @@ class GlobalWebSocketService {
       const msg = this._queue.shift()!
       try {
         this.ws.send(JSON.stringify(msg))
-        // 已成功送入连接：撤销其排队超时计时（若有）
-        if (msg.type === 'user_input') {
-          const cmid = (msg as { client_message_id?: string }).client_message_id
-          const timer = cmid ? this._userInputTimers.get(cmid) : undefined
-          if (cmid && timer) {
-            clearTimeout(timer)
-            this._userInputTimers.delete(cmid)
-          }
-        }
+        // flush 把消息从队列移入直发：在途计时保持原样——TTL 到点回调按
+        // "不在队列"走"已发送未收回执"分支（ADR 2026-09-29：直发同样可能进
+        // 僵尸 TCP，计时由 ack/stream_start/TTL 三点收口，flush 不算送达）。
       } catch {
         this._queue.unshift(msg)
         break
@@ -609,49 +682,37 @@ class GlobalWebSocketService {
 
   private _startHeartbeat(): void {
     this._stopHeartbeat()
-    this._heartbeatMissCount = 0
+    // 连接刚建立即视为新鲜：首个判死窗口从这里起算
+    this._lastPongAt = Date.now()
     this._heartbeatTimer = setInterval(() => {
-      if (this._status === 'connected') {
-        this._send({ type: 'heartbeat', timestamp: Date.now() })
-        this._clearHeartbeatTimeout()
-        this._heartbeatTimeoutTimer = setTimeout(() => {
-          // 连续失败容错：单次 ack 超时不立即断连，累计达到 HEARTBEAT_MAX_MISS 才判定死亡。
-          // 避免局域网抖动/后端繁忙时的误断。
-          this._heartbeatMissCount += 1
-          if (this._heartbeatMissCount >= HEARTBEAT_MAX_MISS) {
-            _wsLogger.warn(
-              '[GlobalWS] 心跳连续 %d 次未收到 ack，判定连接死亡，主动关闭重连',
-              this._heartbeatMissCount,
-            )
-            if (this.ws) {
-              // // 心跳超时用 code=2002（TIMEOUT），**绝不复用 4001**。
-              // 4001 已被后端用于「token 无效/过期」的认证拒绝（见 app_factory.py:244/248），
-              // onclose 据此触发 token 刷新路径。若心跳超时也用 4001，会被误判为认证拒绝，
-              // 在无 refresh token 的环境（测试/未登录）反复抛错。心跳超时属于网络层故障，
-              // 应走普通重连（直接用当前 token 重连），不触发刷新。
-              this.ws.close(2002, '心跳超时')
-            }
-          } else {
-            _wsLogger.warn(
-              '[GlobalWS] 心跳 ack 超时（第 %d/%d 次），暂不断连等待下次心跳',
-              this._heartbeatMissCount, HEARTBEAT_MAX_MISS,
-            )
-          }
-        }, HEARTBEAT_TIMEOUT)
+      if (this._status !== 'connected') return
+      // pong 新鲜度判死：截止期 = lastPongAt + HEARTBEAT_TIMEOUT，只被 ack 到达
+      // 刷新、不被 tick 重挂。连续 3 个周期收不到 ack（后端假死/僵尸 TCP/代理
+      // 静默断连）在此触发 2002 主动关闭，经 onclose 走既有重连路径。
+      if (Date.now() - this._lastPongAt >= HEARTBEAT_TIMEOUT) {
+        _wsLogger.warn(
+          '[GlobalWS] 已 %d s 未收到心跳 ack，判定连接死亡，主动关闭重连',
+          HEARTBEAT_TIMEOUT / 1000,
+        )
+        // 判死即停心跳：close → onclose 之间（真实浏览器为异步窗口）不再重复
+        // 判死（幂等），重连成功 onopen 后重挂。
+        this._stopHeartbeat()
+        if (this.ws) {
+          // 心跳超时用 code=2002（TIMEOUT），**绝不复用 4001**。
+          // 4001 已被后端用于「token 无效/过期」的认证拒绝（见 app_factory.py:244/248），
+          // onclose 据此触发 token 刷新路径。若心跳超时也用 4001，会被误判为认证拒绝，
+          // 在无 refresh token 的环境（测试/未登录）反复抛错。心跳超时属于网络层故障，
+          // 应走普通重连（直接用当前 token 重连），不触发刷新。
+          this.ws.close(2002, '心跳超时')
+        }
+        return
       }
+      this._send({ type: 'heartbeat', timestamp: Date.now() })
     }, HEARTBEAT_INTERVAL)
   }
 
   private _handleHeartbeatAck(): void {
-    this._clearHeartbeatTimeout()
-    this._heartbeatMissCount = 0
-  }
-
-  private _clearHeartbeatTimeout(): void {
-    if (this._heartbeatTimeoutTimer) {
-      clearTimeout(this._heartbeatTimeoutTimer)
-      this._heartbeatTimeoutTimer = null
-    }
+    this._lastPongAt = Date.now()
   }
 
   private _stopHeartbeat(): void {
@@ -659,7 +720,6 @@ class GlobalWebSocketService {
       clearInterval(this._heartbeatTimer)
       this._heartbeatTimer = null
     }
-    this._clearHeartbeatTimeout()
   }
 
   /**
@@ -675,7 +735,7 @@ class GlobalWebSocketService {
     if (this._kickedByReplacement) return
     this._kickedByReplacement = true
     this._queue = []
-    this._userInputTimers.forEach((timer) => clearTimeout(timer))
+    this._userInputTimers.forEach((armed) => clearTimeout(armed.timer))
     this._userInputTimers.clear()
     _wsLogger.info('[GlobalWS] 被新连接替换，跳过重连')
     this._emit(WS_LOCAL_EVENTS.KICKED_BY_REPLACEMENT, {

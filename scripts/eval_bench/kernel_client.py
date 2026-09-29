@@ -158,13 +158,25 @@ class KernelClient:
     # ── 模型配置（评测跑前钉死默认 chat 模型，防结果失真） ──────
 
     def get_llm_defaults(self) -> dict[str, Any]:
-        """当前默认模型配置（llm_service 插件读面：{chat, embedding, tiers}）。"""
-        return self._authed_json("GET", f"{self.base_url}/ext/llm_service/config/llm/defaults")
+        """当前默认模型配置（内核单一配置面：{chat, embedding, tiers}）。
+
+        2026-09-28 批次 A1：插件 /ext 文件 IO 端点退役，经
+        /api/v1/plugins/llm_service/config/llm 读（该端点即设置页同一数据面）。
+        """
+        body = self._authed_json("GET", f"{self.base_url}/api/v1/plugins/llm_service/config/llm")
+        return body.get("data", {}).get("defaults", {})
 
     def set_llm_default_chat(self, model: str) -> dict[str, Any]:
-        """部分更新默认 chat 模型（与模型设置页同一条道）。"""
-        return self._authed_json("PUT", f"{self.base_url}/ext/llm_service/config/llm/defaults",
-                                 {"chat": model})
+        """部分更新默认 chat 模型（与模型设置页同一条道：读-改-写整文件，
+        If-Match 乐观锁；写恒用户空间）。"""
+        detail_url = f"{self.base_url}/api/v1/plugins/llm_service/config/llm"
+        current = self._authed_json("GET", detail_url)
+        data = current.get("data") or {}
+        defaults = data.get("defaults") or {}
+        defaults["chat"] = model
+        data["defaults"] = defaults
+        return self._authed_json("PUT", detail_url,
+                                 {"data": data, "if_match": current.get("etag")})
 
     # ── 审批响应（与前端同一条道：内核 interaction 门面） ────────
 

@@ -25,6 +25,10 @@
 - agent.get             按 agent_id（系统两轮匹配或模式键 mode_X/<stem>）取解析后的 yaml dict
 - agent.list            列表（双来源聚合；服务面无 caller token，模式注册表缺席时注明）
 - agent.config-validate yaml 语法校验（不写盘）
+- mode.list             模式目录条目 [{mode,name,description,pipelines:[{name,context}],
+                        chain:{entry},icon,theme}]
+                        （{{mode_catalog}} 占位符渲染的取数单源，设计 D5/D10；
+                        icon/theme 随载荷透出供选择器/主题消费，不进目录文本）
 
 行为契约（照 kernel/crates/api/src/routes.rs 现实现逐项搬移，一项不丢）：
 - 两轮匹配：顶层 <id>.yaml 优先 → 递归文件名匹配 → config_id 回退（server.rs find_agent_yaml）
@@ -401,6 +405,206 @@ def aggregate_agents(
     }
 
 
+# ══ 模式声明面聚合（mode.yaml 单一真值，2026-09-28 设计 D5）══
+
+# mode.yaml 声明字段白名单（schema fail-closed：未知字段 = 拒绝——防拼写漂移与
+# 空转声明回流；评估域字段经 mode.get_profile 消费，一并入册不算空转）。
+_MODE_DECL_REQUIRED = ("mode", "name")
+_MODE_DECL_ENUMS = {
+    "presenter_source": {"data_cards", "agent_registry", "none"},
+    "tool_card": {"native", "collapse", "hide"},
+    # 管道消费情境（D2 多管裁定）：conversation=对话链（会话路由）/ task=任务链（派发路由）
+    "pipeline_context": {"conversation", "task"},
+    # 持有方式：本批只开 registry（登记处引用）；package 包内自持落地通道留拍板，
+    # 校验拒绝（fail-closed，防声明了走不通）
+    "pipeline_source": {"registry"},
+}
+_MODE_DECL_KNOWN = {
+    "mode", "name", "description", "pipelines", "panel_page_id",
+    "presenter", "tool_card", "material", "persona",
+    "theme", "icon",
+    "chain", "suite", "material_scope",
+    "levers", "verifier_families", "weights", "budget",
+}
+_PIPELINE_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+
+
+def _validate_pipelines(data: dict[str, Any]) -> str:
+    """pipelines 列表声明校验（D2 多管列表化，批 F）。
+
+    name 非空登记名且唯一（一管一配置）、context 枚举必填（消费情境随声明）、
+    source 缺省 registry 且仅 registry（package 包内自持待拍板，fail-closed）。
+    返回错误串（空 = 合法）；零声明 = 不写该键（空列表拒绝——缺省语义不靠空列表表达）。
+    """
+    pipelines = data.get("pipelines")
+    if pipelines is None:
+        return ""
+    if not isinstance(pipelines, list) or not pipelines:
+        return f"pipelines 须为非空列表: {pipelines!r}（零声明 = 不写该键，缺省共享 autonomous）"
+    seen: set[str] = set()
+    for item in pipelines:
+        if not isinstance(item, dict):
+            return f"pipelines 条目须为 dict: {item!r}"
+        name = item.get("name")
+        if not (isinstance(name, str) and _PIPELINE_ID_RE.match(name)):
+            return f"pipelines[].name 形态非法: {name!r}（须为 config/pipelines 登记名）"
+        if name in seen:
+            return f"pipelines[].name 重复: {name!r}（一管一配置，name 唯一）"
+        seen.add(name)
+        context = item.get("context")
+        if context not in _MODE_DECL_ENUMS["pipeline_context"]:
+            return (
+                f"pipelines[].context 须为 {sorted(_MODE_DECL_ENUMS['pipeline_context'])} 之一"
+                f"（消费情境必填）: {context!r}"
+            )
+        source = item.get("source", "registry")
+        if source == "package":
+            return "pipelines[].source=package 包内自持待拍板（现行通道 = registry 登记处引用）"
+        if source not in _MODE_DECL_ENUMS["pipeline_source"]:
+            return f"pipelines[].source 须为 registry: {source!r}"
+    return ""
+
+
+def validate_mode_declaration(data: Any) -> tuple[dict[str, Any] | None, str]:
+    """mode.yaml 声明校验：返回 (声明, 错误)；错误非空 = 无效（调用方 fail-closed）。"""
+    if not isinstance(data, dict):
+        return None, "非 dict 形态"
+    for key in _MODE_DECL_REQUIRED:
+        if not isinstance(data.get(key), str) or not data[key].strip():
+            return None, f"缺必需字段 {key}"
+    unknown = sorted(set(data) - _MODE_DECL_KNOWN)
+    if unknown:
+        return None, f"未知字段 {unknown}（白名单外禁止）"
+    err = _validate_pipelines(data)
+    if err:
+        return None, err
+    presenter = data.get("presenter")
+    if presenter is not None and (
+        not isinstance(presenter, dict)
+        or presenter.get("source") not in _MODE_DECL_ENUMS["presenter_source"]
+    ):
+        return None, f"presenter.source 须为 {sorted(_MODE_DECL_ENUMS['presenter_source'])} 之一"
+    tool_card = data.get("tool_card")
+    if tool_card is not None and tool_card not in _MODE_DECL_ENUMS["tool_card"]:
+        return None, f"tool_card 须为 {sorted(_MODE_DECL_ENUMS['tool_card'])} 之一"
+    persona = data.get("persona")
+    if persona is not None and (
+        not isinstance(persona, dict)
+        or not isinstance(persona.get("from"), str)
+        or not persona.get("from", "").strip()
+    ):
+        return None, "persona 须为 {replace: bool, from: <execution_context 键>}"
+    # theme/icon（批 G⑤ 声明面开启，消费在 G-B 前端）：可选非空字符串，
+    # 简单形态校验（theme=主题 id，icon=选择器选项图标 emoji）。零声明 =
+    # 不写该键（缺省语义不靠空值表达，与 pipelines 同口径）。
+    for key in ("theme", "icon"):
+        if key in data:
+            value = data[key]
+            if not isinstance(value, str) or not value.strip():
+                return None, f"{key} 须为非空字符串（不声明 = 不切换主题/无图标）"
+    return data, ""
+
+
+def _scan_mode_declarations() -> tuple[list[tuple[str, dict[str, Any]]], list[str]]:
+    """出厂模式包 mode.yaml 扫描 + schema 校验（聚合读面与目录取数单点）。
+
+    返回 ((包目录名, 声明), errors)：包目录名即插件 id（前端端点路由消费，
+    与 mode 键独立保留）。单包校验失败 = 该包缺位 + errors 记原因
+    （fail-closed 不带病透出），其余包不受影响；目录缺失 = 空集（无模式包
+    的合法形态）。用户自建包双根接管留 Wave2（出厂七包为现役全集）。
+    """
+    decls: list[tuple[str, dict[str, Any]]] = []
+    errors: list[str] = []
+    root = _factory_modes_dir()
+    if root.is_dir():
+        for pkg in sorted(root.glob("mode_*")):
+            decl_path = pkg / "mode.yaml"
+            try:
+                data = yaml.safe_load(decl_path.read_text(encoding="utf-8"))
+            except (OSError, yaml.YAMLError) as exc:
+                errors.append(f"{pkg.name}: mode.yaml 不可读（{exc}）")
+                continue
+            decl, err = validate_mode_declaration(data)
+            if decl is None:
+                errors.append(f"{pkg.name}: {err}")
+                continue
+            decls.append((pkg.name, decl))
+    return decls, errors
+
+
+def _declared_pipelines(decl: dict[str, Any]) -> list[dict[str, str]]:
+    """声明透传为 [{name, context}]（schema 已校验；无声明 = 空列表，消费侧回落
+    共享 autonomous——缺省语义在消费面表达，不在此补默认条目）。"""
+    pipelines = decl.get("pipelines")
+    if not isinstance(pipelines, list):
+        return []
+    return [
+        {"name": item["name"], "context": item["context"]}
+        for item in pipelines
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+        and isinstance(item.get("context"), str)
+    ]
+
+
+def aggregate_modes() -> dict[str, Any]:
+    """出厂模式包 mode.yaml 聚合（直读包目录，进程内文件面，零服务依赖）。
+
+    persona 声明原样透传 {replace, from}（schema 已校验；未声明 = None——前端
+    附身注入键按 persona.from 派生、会话出生提示按 persona.replace 判定，
+    批 G-B 前端通用化消费面）。
+    """
+    decls, errors = _scan_mode_declarations()
+    modes = [
+        {
+            "mode": decl["mode"],
+            "name": decl["name"],
+            "description": decl.get("description"),
+            "pipelines": _declared_pipelines(decl),
+            "panel_page_id": decl.get("panel_page_id"),
+            "presenter": decl.get("presenter") or {"source": "none"},
+            "tool_card": decl.get("tool_card") or "native",
+            "material": decl.get("material"),
+            "persona": decl.get("persona"),
+            "theme": decl.get("theme"),
+            "icon": decl.get("icon"),
+            "plugin_id": pkg_name,
+        }
+        for pkg_name, decl in decls
+    ]
+    return {"modes": modes, "total": len(modes), "errors": errors}
+
+
+def list_modes() -> list[dict[str, Any]]:
+    """模式目录条目（mode.list 服务取数面，{{mode_catalog}} 渲染单一真值）。
+
+    条目 = mode 键 + name + description + 路由（pipelines 列表按消费情境 +
+    chain.entry 入口执行者）——目录**文本**仅此两件（设计 D10 用户裁定）；
+    另随载荷透出 icon/theme（批 G⑤ 选择器图标/主题声明，{{mode_catalog}}
+    渲染面不消费——不进目录文本）。按 mode 键排序确定性输出（占位符渲染
+    缓存前缀稳定依赖此）。description 未声明 = None，chain.entry 未声明 =
+    None，pipelines 未声明 = 空列表（渲染侧回落共享 autonomous），
+    icon/theme 未声明 = None。
+    """
+    decls, _errors = _scan_mode_declarations()
+    entries: list[dict[str, Any]] = []
+    for _pkg_name, decl in decls:
+        chain = decl.get("chain")
+        entry = chain.get("entry") if isinstance(chain, dict) else None
+        desc = decl.get("description")
+        icon = decl.get("icon")
+        theme = decl.get("theme")
+        entries.append({
+            "mode": decl["mode"],
+            "name": decl["name"],
+            "description": desc if isinstance(desc, str) else None,
+            "pipelines": _declared_pipelines(decl),
+            "chain": {"entry": entry if isinstance(entry, str) else None},
+            "icon": icon if isinstance(icon, str) else None,
+            "theme": theme if isinstance(theme, str) else None,
+        })
+    return sorted(entries, key=lambda e: e["mode"])
+
+
 # 字段声明原样搬内核 agents_schema_handler（来源 .agent_template_spec.yaml）
 AGENT_SCHEMA_FIELDS: list[dict[str, Any]] = [
     {"name": "config_id", "type": "string", "label": "配置ID", "required": True},
@@ -714,6 +918,9 @@ async def http_handle(
         if path == "/ext/agent_manager/agents/schema" and method == "GET":
             return _ok(_json_response({"fields": AGENT_SCHEMA_FIELDS}))
 
+        if path == "/ext/agent_manager/modes" and method == "GET":
+            return _ok(_json_response(aggregate_modes()))
+
         m = _CONFIG_PATH_RE.match(path) if path else None
         mm = _MODE_CONFIG_PATH_RE.match(path) if path else None
 
@@ -816,6 +1023,20 @@ async def agent_list(agent_type: str = "") -> dict[str, Any]:
     服务面无 caller token，模式包注册表取不到时按降级注明（mode_registry）。
     """
     return aggregate_agents(agent_type or None, token=None)
+
+
+@plugin.tool(
+    name="mode.list",
+    schema={"type": "object", "properties": {}},
+    description=(
+        "List mode catalog entries [{mode, name, description, pipelines: [{name, context}], chain: {entry}, icon, theme}] "
+        "sorted by mode key (single source for the {{mode_catalog}} prompt placeholder)"
+    ),
+)
+async def mode_list() -> dict[str, Any]:
+    """模式目录列表（mode.yaml 单一真值；条目 = 描述 + 路由，设计 D10）。"""
+    modes = list_modes()
+    return {"modes": modes, "total": len(modes)}
 
 
 @plugin.tool(

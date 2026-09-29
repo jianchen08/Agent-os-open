@@ -103,6 +103,19 @@ pub(crate) fn remove_outcome_waiter(cmid: &str) {
     }
 }
 
+/// 在飞 REST 同步等待桥条目数（堆栈级诊断面 memory-breakdown 消费；
+/// oneshot 即弃、无内存账本面——这是审批/交互等待在内核的唯一内存驻留）。
+pub fn outcome_waiters_count() -> usize {
+    OUTCOME_WAITERS
+        .get()
+        .map(|map| {
+            map.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len()
+        })
+        .unwrap_or(0)
+}
+
 /// 单连接出站帧队列容量（帧数）。正常排空速度远快于生产速度，此上限只在
 /// 消费端停滞（休眠机器 / 半死 TCP）时触顶——把每连接积压钉在
 /// `WS_OUTBOUND_CAPACITY × 单帧大小`，而非随断连时长无限增长
@@ -161,6 +174,10 @@ impl EventSink for WsSink {
     }
     fn id(&self) -> u64 {
         self.id
+    }
+    fn pending_frames(&self) -> Option<usize> {
+        // 实测在飞帧数：容量 - 剩余许可（诊断面消费端停滞积压直读）。
+        Some(self.tx.max_capacity().saturating_sub(self.tx.capacity()))
     }
     fn shutdown(&self) {
         // 关闭信号（watch 置位，队列满也可达）：出站排空任务收到即向对端发
@@ -310,57 +327,65 @@ async fn run_socket_loop(
 
     // 出站排空任务：从 channel 取消息写入 socket；关闭信号（B10 踢旧 /
     // 出站满载自愈）→ 按原因分路收尾。
-    let mut send_task = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = close_rx.changed() => {
-                    let signal = *close_rx.borrow_and_update();
-                    match signal {
-                        CLOSE_KICKED => {
-                            // 踢旧关闭（WsSink::shutdown，B10）：两段式通知——先发
-                            // 应用层 kicked 文本帧，再发带 CLOSE_CODE_KICKED 状态码的
-                            // Close 帧。前端 GlobalWebSocket 对 4000 判"被新连接替换"
-                            // 跳过重连；若按普通掉线处理，A/B 双客户端会各自退避重连
-                            // 互踢，形成循环。代理链（Vite dev proxy 等）可能吞掉
-                            // Close 帧状态码（浏览器端退化为 1006），文本帧先于 Close
-                            // 送达即可让前端照常置位防重连——两段缺一不可。
-                            let kicked = json!({
-                                "type": "kicked",
-                                "data": {"reason": "replaced_by_new_connection"},
-                            });
-                            let _ = sender
-                                .send(Message::Text(
-                                    serde_json::to_string(&kicked).unwrap_or_default().into(),
-                                ))
-                                .await;
-                            let _ = sender
-                                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                                    code: agentos_session::auth::CLOSE_CODE_KICKED,
-                                    reason: "replaced_by_new_connection".into(),
-                                })))
-                                .await;
-                            break;
+    // 堆栈级诊断插桩：per-connection 任务注册活动槽（标签 = 既有等待点
+    // select! 的等待语义），断开自动注销——task-dump 可见每连接任务。
+    let out_activity = agentos_core::task_activity::global_registry()
+        .register(&format!("ws-outbound-drain:{user_id}"));
+    let mut send_task = tokio::spawn(agentos_core::task_activity::scope(
+        out_activity,
+        async move {
+            agentos_core::task_activity::set_current_label("waiting outbound frames");
+            loop {
+                tokio::select! {
+                    _ = close_rx.changed() => {
+                        let signal = *close_rx.borrow_and_update();
+                        match signal {
+                            CLOSE_KICKED => {
+                                // 踢旧关闭（WsSink::shutdown，B10）：两段式通知——先发
+                                // 应用层 kicked 文本帧，再发带 CLOSE_CODE_KICKED 状态码的
+                                // Close 帧。前端 GlobalWebSocket 对 4000 判"被新连接替换"
+                                // 跳过重连；若按普通掉线处理，A/B 双客户端会各自退避重连
+                                // 互踢，形成循环。代理链（Vite dev proxy 等）可能吞掉
+                                // Close 帧状态码（浏览器端退化为 1006），文本帧先于 Close
+                                // 送达即可让前端照常置位防重连——两段缺一不可。
+                                let kicked = json!({
+                                    "type": "kicked",
+                                    "data": {"reason": "replaced_by_new_connection"},
+                                });
+                                let _ = sender
+                                    .send(Message::Text(
+                                        serde_json::to_string(&kicked).unwrap_or_default().into(),
+                                    ))
+                                    .await;
+                                let _ = sender
+                                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                                        code: agentos_session::auth::CLOSE_CODE_KICKED,
+                                        reason: "replaced_by_new_connection".into(),
+                                    })))
+                                    .await;
+                                break;
+                            }
+                            CLOSE_BACKPRESSURE => {
+                                // 满载自愈：普通关闭（非 4000）——前端按掉线自动重连，
+                                // 重连后经重放/整树刷新恢复，不判"被替换"。
+                                break;
+                            }
+                            _ => continue,
                         }
-                        CLOSE_BACKPRESSURE => {
-                            // 满载自愈：普通关闭（非 4000）——前端按掉线自动重连，
-                            // 重连后经重放/整树刷新恢复，不判"被替换"。
-                            break;
-                        }
-                        _ => continue,
                     }
-                }
-                text = out_rx.recv() => match text {
-                    Some(text) => {
-                        if sender.send(Message::Text(text.into())).await.is_err() {
-                            break;
+                    text = out_rx.recv() => match text {
+                        Some(text) => {
+                            if sender.send(Message::Text(text.into())).await.is_err() {
+                                break;
+                            }
                         }
+                        None => break,
                     }
-                    None => break,
                 }
             }
-        }
-        let _ = sender.close().await;
-    });
+            let _ = sender.close().await;
+        },
+    ));
 
     // 入站循环：路由消息（session/router/user_id move 进 task）
     let session_for_unreg = session.clone();
@@ -368,26 +393,34 @@ async fn run_socket_loop(
     let user_id_for_task = user_id.clone();
     // B3：每连接一次的回放标志（建连重放已消费时为 true）——首个带 thread_id
     // 的入站消息触发 replay_missed。
-    let mut recv_task = tokio::spawn(async move {
-        while let Some(Ok(msg)) = receiver.next().await {
-            match msg {
-                Message::Text(text) => {
-                    handle_inbound(
-                        &text,
-                        &user_id_for_task,
-                        &session,
-                        &router,
-                        last_sequence,
-                        &replayed_for_task,
-                        store.as_ref(),
-                    )
-                    .await;
+    let in_activity = agentos_core::task_activity::global_registry()
+        .register(&format!("ws-inbound-router:{user_id}"));
+    let mut recv_task = tokio::spawn(agentos_core::task_activity::scope(
+        in_activity,
+        async move {
+            agentos_core::task_activity::set_current_label("waiting inbound frames");
+            while let Some(Ok(msg)) = receiver.next().await {
+                match msg {
+                    Message::Text(text) => {
+                        agentos_core::task_activity::set_current_label("routing inbound message");
+                        handle_inbound(
+                            &text,
+                            &user_id_for_task,
+                            &session,
+                            &router,
+                            last_sequence,
+                            &replayed_for_task,
+                            store.as_ref(),
+                        )
+                        .await;
+                        agentos_core::task_activity::set_current_label("waiting inbound frames");
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
                 }
-                Message::Close(_) => break,
-                _ => {}
             }
-        }
-    });
+        },
+    ));
 
     // 任一任务结束即关闭会话
     tokio::select! {
@@ -499,8 +532,59 @@ async fn handle_inbound(
             session.registry().send_to_user(user_id, &ack_str).await;
             tracing::debug!(user = user_id, "heartbeat -> ack");
         }
-        RouteOutcome::Error(e) => warn!(user = user_id, error = %e, "入站路由错误"),
-        RouteOutcome::Handled | RouteOutcome::Ignored => {}
+        RouteOutcome::Error(e) => {
+            // 路由错误必须对客户端可见（ADR 2026-09-29 回执契约）：只写日志 =
+            // 前端「思考中」无限等待（装机 R302 实证 8 分钟无声）。user_input
+            // 回 user_input_ack(ok:false)，其余类型回 route_error 通用错误帧，
+            // 帧坐标尽力提取（缺 thread_id 的违约帧对应槽位为空串）。
+            let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let thread_id = agentos_session::router::field_or_data(&msg, "thread_id").unwrap_or("");
+            let cmid =
+                agentos_session::router::field_or_data(&msg, "client_message_id").unwrap_or("");
+            let frame = if msg_type == "user_input" {
+                serde_json::json!({
+                    "type": "user_input_ack",
+                    "client_message_id": cmid,
+                    "thread_id": thread_id,
+                    "ok": false,
+                    "error": e,
+                })
+            } else {
+                serde_json::json!({
+                    "type": "route_error",
+                    "data": {
+                        "message_type": msg_type,
+                        "thread_id": thread_id,
+                        "client_message_id": cmid,
+                        "error": e,
+                    },
+                })
+            };
+            let frame_str = serde_json::to_string(&frame).unwrap_or_default();
+            session.registry().send_to_user(user_id, &frame_str).await;
+            warn!(user = user_id, thread_id = %thread_id, error = %e, "入站路由错误（已回错误帧）");
+        }
+        RouteOutcome::Handled => {
+            // user_input 派发受理（直跑或入队均算受理）即回执 ok:true——前端
+            // 恒挂超时据此撤销；其余类型无回执消费方，保持零额外帧。
+            let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if msg_type == "user_input" {
+                let thread_id =
+                    agentos_session::router::field_or_data(&msg, "thread_id").unwrap_or("");
+                let cmid =
+                    agentos_session::router::field_or_data(&msg, "client_message_id").unwrap_or("");
+                let ack = serde_json::json!({
+                    "type": "user_input_ack",
+                    "client_message_id": cmid,
+                    "thread_id": thread_id,
+                    "ok": true,
+                });
+                let ack_str = serde_json::to_string(&ack).unwrap_or_default();
+                session.registry().send_to_user(user_id, &ack_str).await;
+                tracing::debug!(user = user_id, thread_id = %thread_id, "user_input -> ack ok");
+            }
+        }
+        RouteOutcome::Ignored => {}
     }
 }
 
@@ -3969,6 +4053,7 @@ mod tests {
             activation: None,
             persistent_fields: vec![],
             export_fields: vec![],
+            aux_venvs: Vec::new(),
             provides: None,
         }
     }
@@ -4983,8 +5068,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inbound_route_error_is_logged_not_fatal() {
-        // 路由错误（分发失败）：warn 留痕，连接不中断、无出站帧
+    async fn inbound_route_error_replies_user_input_ack_failure_frame() {
+        // 路由错误（分发失败）必须对客户端可见：回 user_input_ack(ok:false) 错误
+        // 帧（带 client_message_id/thread_id/error 原文），warn 仅留痕不再静默吞。
+        // （2026-09-29 装机 R302 实证：旧实现只写 WARN，前端「思考中」8 分钟无声。）
         let coord = agentos_session::SessionCoordinator::new();
         let frames = Arc::new(Mutex::new(Vec::<String>::new()));
         coord.register(
@@ -4995,7 +5082,133 @@ mod tests {
         );
         let router = InboundRouter::new(Arc::new(ErrUserInputDispatcher));
         handle_inbound(
-            json!({"type": "user_input", "thread_id": "T1", "content": "hi"})
+            json!({
+                "type": "user_input",
+                "thread_id": "T1",
+                "content": "hi",
+                "client_message_id": "cm-err-1",
+            })
+            .to_string()
+            .as_str(),
+            "u1",
+            &coord,
+            &router,
+            None,
+            &std::sync::atomic::AtomicBool::new(false),
+            None,
+        )
+        .await;
+        let all = frame_types(&frames).await;
+        let ack = all
+            .iter()
+            .find(|(t, _)| t == "user_input_ack")
+            .map(|(_, v)| v.clone())
+            .expect("派发失败必须回 user_input_ack(ok:false) 错误帧");
+        assert_eq!(ack["ok"], false, "失败回执 ok 必须 false: {ack}");
+        assert_eq!(ack["client_message_id"], "cm-err-1", "回执带幂等键: {ack}");
+        assert_eq!(ack["thread_id"], "T1", "回执带线程坐标: {ack}");
+        let err_text = ack["error"].as_str().unwrap_or_default();
+        assert!(
+            err_text.contains("injected dispatch failure"),
+            "error 携带失败原文: {ack}"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_user_input_success_replies_ack_ok_frame() {
+        // 派发受理（含直跑/入队两态）即回 user_input_ack(ok:true)——前端恒挂
+        // 超时据此撤销；无回执则「已送达」不可知，与失败路径同为盲区。
+        let coord = agentos_session::SessionCoordinator::new();
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        coord.register(
+            "u1",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        let router = InboundRouter::new(Arc::new(NoopDispatcher));
+        handle_inbound(
+            json!({
+                "type": "user_input",
+                "thread_id": "T1",
+                "content": "hi",
+                "client_message_id": "cm-ok-1",
+            })
+            .to_string()
+            .as_str(),
+            "u1",
+            &coord,
+            &router,
+            None,
+            &std::sync::atomic::AtomicBool::new(false),
+            None,
+        )
+        .await;
+        let all = frame_types(&frames).await;
+        let ack = all
+            .iter()
+            .find(|(t, _)| t == "user_input_ack")
+            .map(|(_, v)| v.clone())
+            .expect("派发受理必须回 user_input_ack(ok:true)");
+        assert_eq!(ack["ok"], true, "成功回执 ok 必须 true: {ack}");
+        assert_eq!(ack["client_message_id"], "cm-ok-1", "回执带幂等键: {ack}");
+        assert_eq!(ack["thread_id"], "T1");
+        assert!(ack.get("error").is_none(), "成功回执不携带 error 键: {ack}");
+    }
+
+    #[tokio::test]
+    async fn inbound_ack_reads_client_message_id_from_data_envelope() {
+        // cmid 顶层优先、data 信封兜底（与 pipeline_id 同法，契约只增不删）
+        let coord = agentos_session::SessionCoordinator::new();
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        coord.register(
+            "u1",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        let router = InboundRouter::new(Arc::new(NoopDispatcher));
+        handle_inbound(
+            json!({
+                "type": "user_input",
+                "thread_id": "T1",
+                "data": {"content": "hi", "client_message_id": "cm-env-1"},
+            })
+            .to_string()
+            .as_str(),
+            "u1",
+            &coord,
+            &router,
+            None,
+            &std::sync::atomic::AtomicBool::new(false),
+            None,
+        )
+        .await;
+        let all = frame_types(&frames).await;
+        let ack = all
+            .iter()
+            .find(|(t, _)| t == "user_input_ack")
+            .map(|(_, v)| v.clone())
+            .expect("data 信封 cmid 同样回执");
+        assert_eq!(ack["client_message_id"], "cm-env-1", "信封兜底提取: {ack}");
+    }
+
+    #[tokio::test]
+    async fn inbound_non_user_input_route_error_replies_route_error_frame() {
+        // 非 user_input 帧的路由错误回 route_error 通用错误帧（message_type 标明
+        // 来源类型），不冒用 user_input_ack 语义；帧字段尽力提取（缺为空串）。
+        let coord = agentos_session::SessionCoordinator::new();
+        let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+        coord.register(
+            "u1",
+            Arc::new(CapturingSink {
+                frames: frames.clone(),
+            }),
+        );
+        let router = InboundRouter::new(Arc::new(NoopDispatcher));
+        handle_inbound(
+            // interaction_response 缺 thread_id → RouteOutcome::Error（不经 dispatcher）
+            json!({"type": "interaction_response", "data": {"request_id": "r-1"}})
                 .to_string()
                 .as_str(),
             "u1",
@@ -5006,7 +5219,27 @@ mod tests {
             None,
         )
         .await;
-        assert!(frames.lock().unwrap().is_empty(), "路由错误不产出帧");
+        let all = frame_types(&frames).await;
+        let err_frame = all
+            .iter()
+            .find(|(t, _)| t == "route_error")
+            .map(|(_, v)| v.clone())
+            .expect("非 user_input 路由错误必须回 route_error 帧");
+        assert_eq!(
+            err_frame["data"]["message_type"], "interaction_response",
+            "标明来源消息类型: {err_frame}"
+        );
+        assert!(
+            err_frame["data"]["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("interaction_response 缺少 thread_id"),
+            "error 携带失败原文: {err_frame}"
+        );
+        assert!(
+            all.iter().all(|(t, _)| t != "user_input_ack"),
+            "非 user_input 错误不得冒用 user_input_ack"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -5296,6 +5529,86 @@ mod tests {
     }
 
     // ── dispatch_user_input：无 store 直跑链 / 忙链持久化入队 ──────────────
+
+    /// 失败注入版 e2e state：镜像 `.zctmp/ackproof/proof_silent_drop.py` 实证
+    /// 脚本场景（派发失败经真 socket 必须可见），区别于默认 SilentDispatcher。
+    fn ws_e2e_state_err_dispatch(
+        session: Arc<agentos_session::SessionCoordinator>,
+    ) -> crate::routes::AppState {
+        let mut state = crate::routes::AppState::new();
+        state.session = Some(session);
+        state.inbound_router = Some(Arc::new(InboundRouter::new(Arc::new(
+            ErrUserInputDispatcher,
+        ))));
+        state
+    }
+
+    #[tokio::test]
+    async fn ws_user_input_ack_roundtrip_over_real_socket() {
+        // 成功路径：真 socket 上 user_input → user_input_ack(ok:true) 先于一切
+        // 流式帧返回（会话收发循环全链路，非仅 handle_inbound 单元面）。
+        let coord = Arc::new(agentos_session::SessionCoordinator::new());
+        let addr = spawn_ws_server(ws_e2e_state(coord.clone())).await;
+        let token = mint_access_token("u-ack-1", "AckUser");
+        let mut ws = ws_connect(format!("ws://{addr}/ws/chat?token={token}")).await;
+        let conf = next_text_frame(&mut ws, "confirmation").await;
+        assert_eq!(conf["type"], "connection_confirmation");
+
+        ws.send(WsMessage::text(
+            json!({
+                "type": "user_input",
+                "thread_id": "T-ack-e2e",
+                "content": "hi",
+                "client_message_id": "cm-e2e-ok",
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        let ack = next_text_frame(&mut ws, "user_input_ack").await;
+        assert_eq!(ack["type"], "user_input_ack");
+        assert_eq!(ack["ok"], true, "受理必须回执 ok=true: {ack}");
+        assert_eq!(ack["client_message_id"], "cm-e2e-ok");
+        assert_eq!(ack["thread_id"], "T-ack-e2e");
+        let _ = ws.send(WsMessage::Close(None)).await;
+    }
+
+    #[tokio::test]
+    async fn ws_user_input_dispatch_failure_delivers_ack_error_over_real_socket() {
+        // 失败路径（python 实证脚本同形）：派发失败在真 socket 上 5s 内必须收到
+        // user_input_ack(ok:false)——旧实现此处零回帧（超时 panic 即红）。
+        let coord = Arc::new(agentos_session::SessionCoordinator::new());
+        let addr = spawn_ws_server(ws_e2e_state_err_dispatch(coord.clone())).await;
+        let token = mint_access_token("u-ack-2", "AckUser2");
+        let mut ws = ws_connect(format!("ws://{addr}/ws/chat?token={token}")).await;
+        let conf = next_text_frame(&mut ws, "confirmation").await;
+        assert_eq!(conf["type"], "connection_confirmation");
+
+        ws.send(WsMessage::text(
+            json!({
+                "type": "user_input",
+                "thread_id": "T-ack-fail",
+                "content": "hi",
+                "client_message_id": "cm-e2e-fail",
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        let ack = next_text_frame(&mut ws, "user_input_ack(ok:false)").await;
+        assert_eq!(ack["type"], "user_input_ack");
+        assert_eq!(ack["ok"], false, "失败必须回执 ok=false: {ack}");
+        assert_eq!(ack["client_message_id"], "cm-e2e-fail");
+        assert_eq!(ack["thread_id"], "T-ack-fail");
+        assert!(
+            ack["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("injected"),
+            "error 带原文: {ack}"
+        );
+        let _ = ws.send(WsMessage::Close(None)).await;
+    }
 
     #[tokio::test]
     async fn dispatch_user_input_rejects_when_pipeline_missing_without_store() {

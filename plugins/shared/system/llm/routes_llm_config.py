@@ -1,46 +1,35 @@
-"""LLM 配置管理 API 路由（config/llm 段），由 llm_service http.handle 分发。
+"""LLM 配置只读面（presets / provider-types / remote-models），由 llm_service
+http.handle 分发。
 
-api/concurrency/context-window/generic/cost-control 段不在此处
-（分别删除 / 归 cost_control 插件）。
+2026-09-28 配置读写单源化（批次 A1）：llm.yaml 的读写全量收口到内核单一配置面
+``GET/PUT /api/v1/plugins/llm_service/config/llm``（掩码 + ETag + 写恒用户空间 +
+播种 + 接管账本），动态 provider key 经 ``PUT /api/v1/config/env`` 落用户空间
+.env——本模块的文件写面与 yaml CRUD 端点**全部退役**，仅保留三个无文件写动作的
+只读端点：
 
-- 读写 config/plugins/llm/llm.yaml（含 .env 的 ${VAR} 占位符解析与明文 key 落库
-  语义），写入后清除内存缓存（invalidate_all_llm_caches /
-  ConfigCenter.reload，best-effort null-guard——sidecar 进程内相关模块不可
-  导入时跳过）；
-- 剥离 FastAPI 依赖：无 APIRouter/Depends/HTTPException，请求体由 server.py
-  http.handle 解码为 dict 传入，出错抛 :class:`ConfigAPIError`（status_code/
-  detail），由 server.py 统一捕获转对应 HTTP 状态（404/409/400/502 形态与
-  FastAPI 版一致：body ``{"detail": ...}``）；
-- 鉴权由内核 dispatcher 按 http_endpoints.auth=user 完成，handler 不读身份。
+- get_llm_presets：配置面预置声明（前端设置页唯一来源）；
+- get_provider_types：litellm 运行时类型清单；
+- get_remote_models：从提供商 API 实时拉取模型（读 llm.yaml 取 key/base，
+  用户空间接管文件优先）。
 
-[来源: docs/working/channel_api插件拆迁方案_20260821.md 批次 1]
+剥离 FastAPI 依赖：无 APIRouter/Depends/HTTPException，请求体由 server.py
+http.handle 解码为 dict 传入，出错抛 :class:`ConfigAPIError`（status_code/
+detail），由 server.py 统一捕获转对应 HTTP 状态；鉴权由内核 dispatcher 按
+http_endpoints.auth=user 完成，handler 不读身份。
+
+[来源: docs/working/channel_api插件拆迁方案_20260821.md 批次 1；
+ 读写单源化: docs/working/LLM配置改不生效修复方案_20260928.md 批次 A1]
 """
 
 from __future__ import annotations
 
-import copy
 import logging
 import os
 import re
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-# plugins/shared 根已由 server.py bootstrap_plugin 推上 sys.path（http_json 先例），
-# 裸名导入共享原子写助手（关键配置不截断，B4）。
-from atomic_io import atomic_write_text as _atomic_write_text
-
-# DEBT: config 子模块未复制到插件目录。llm_service 是独立 sidecar 进程，
-# config.config_center / config.models 不可导入时为 None，调用处已 null-guard。
-try:
-    from config.config_center import get_config_center
-except ImportError:
-    get_config_center = None  # type: ignore[assignment]
-try:
-    from config.models import invalidate_all_llm_caches
-except ImportError:
-    invalidate_all_llm_caches = None  # type: ignore[assignment]
+# plugins/shared 根已由 server.py bootstrap_plugin 推上 sys.path（http_json 先例）。
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +37,15 @@ logger = logging.getLogger(__name__)
 # 模型列表请求头版本号；与 anthropic 官方 SDK 默认一致，非本服务可调参数）。
 _ANTHROPIC_DEFAULT_API_BASE = "https://api.anthropic.com"
 _ANTHROPIC_API_VERSION = "2023-06-01"
+
+# 配置面预置声明（声明驱动：前端设置页唯一来源；P2-5）
+_PRESETS_FILE = Path(__file__).resolve().parent / "llm_presets.yaml"
+
+# 严格的整串占位符（如 ${DEEPSEEK_API_KEY}）
+_ENV_REF_RE = re.compile(r"^\$\{(\w+)\}$")
+# GET 接口脱敏值包含该片段；.env.example 的示例值以 your- 开头——均视为「未配置」
+_MASKED_MARK = "****"
+_EXAMPLE_PREFIX = "your-"
 
 
 class ConfigAPIError(Exception):
@@ -59,113 +57,106 @@ class ConfigAPIError(Exception):
         super().__init__(detail)
 
 
-def _invalidate_llm_caches() -> None:
-    """sidecar 模式下 config.models 不可导入（None），调用需 null-guard。
-
-    sidecar 不持有 LLM 内存缓存；配置写入的即时生效由「下次直接读 YAML」
-    保证（本模块所有读端点均直读磁盘）。
-    """
-    if invalidate_all_llm_caches is not None:
-        try:
-            invalidate_all_llm_caches()
-        except Exception:  # noqa: BLE001
-            logger.warning("invalidate_all_llm_caches 调用失败", exc_info=True)
-
-
 def _resolve_project_root() -> Path:
     """向上查找项目根（含 config/ 目录的目录）。
 
     硬编码 parent×N 的层级深度不可靠（模块相对项目根的深度会随布局变化），
-    按 config/ 目录特征向上探测定位。
+    按 config/ 目录特征向上探测定位；探测不中回落 parent×4（可预期、不炸）。
     """
     here = Path(__file__).resolve().parent
     for candidate in [here, *here.parents]:
-        if (candidate / "config").is_dir() and (candidate / "config" / "kernel").is_dir():
+        if (candidate / "config").is_dir():
             return candidate
-    # 兜底：回退 parent×4 语义。
-    return Path(__file__).resolve().parent.parent.parent.parent
+    return here.parents[3] if len(here.parents) > 3 else here
 
 
 _PROJECT_ROOT = _resolve_project_root()
-_CONFIG_MODELS_DIR = _PROJECT_ROOT / "config" / "plugins" / "llm"
-
-_LLM_YAML = _CONFIG_MODELS_DIR / "llm.yaml"
-_ENV_FILE = _PROJECT_ROOT / ".env"
-
-# 配置面预置声明（provider 分组/常用类型/思考强度白名单，前端设置页唯一来源；
-# 解耦方案 P2-5：前端不再复刻该清单，新增厂商仅改声明 + llm.yaml）
-_PRESETS_FILE = Path(__file__).resolve().parent / "llm_presets.yaml"
 
 
-# ---------------------------------------------------------------------------
-# YAML 读写工具
-# ---------------------------------------------------------------------------
+def _user_space_path(*parts: str) -> Path | None:
+    """用户空间落点（读写同源公理：读侧恒用户层优先）；不可用返回 None。"""
+    try:
+        from user_space import user_root  # noqa: PLC0415
+    except ImportError:
+        return None
+    root = user_root()
+    return Path(root).joinpath(*parts) if root else None
+
+
+def _llm_yaml_path() -> Path:
+    """llm.yaml 落点：用户空间接管文件优先，否则出厂种子。
+
+    单一解析器语义（ADR 2026-09-13/14）：运行时生效视图 = 用户空间文件级
+    整体替换。remote-models 取 provider key/base 必须与内核注入同源。
+    """
+    user = _user_space_path("config", "plugins", "llm", "llm.yaml")
+    if user is not None and user.is_file():
+        return user
+    return _PROJECT_ROOT / "config" / "plugins" / "llm" / "llm.yaml"
+
+
+def _env_file_path() -> Path:
+    """用户空间 .env 优先（设置页 key 经内核端点写入该文件），否则出厂回落。"""
+    user = _user_space_path(".env")
+    if user is not None and user.is_file():
+        return user
+    return _PROJECT_ROOT / ".env"
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise ConfigAPIError(status_code=404, detail=f"配置文件不存在: {path.name}")
+    import yaml  # noqa: PLC0415
+
     with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
 
-def _write_yaml(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # llm.yaml 承载 provider key 与路由定义，写中途崩溃不能留截断文件——
-    # 同目录 tmp + os.replace 原子换入（共享助手，全站唯一实现）。
-    _atomic_write_text(
-        path,
-        yaml.dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False),
-    )
-
-    # 通知 ConfigCenter 重载（best-effort：单例懒加载，失败仅记录不影响写入）
-    try:
-        get_config_center().reload(str(path))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("ConfigCenter reload 失败 | path=%s err=%s", path, exc, exc_info=True)
-
-
-def _mask_key(key: str) -> str:
-    """脱敏 key：保留首 4 尾 4 字符，中间打码；短 key 整体打码。"""
-    if not key or len(key) <= 8:
-        return "****" if key else ""
-    return f"{key[:4]}{'*' * 8}{key[-4:]}"
-
-
-# ---------------------------------------------------------------------------
-# ${VAR} 占位符解析（.env 兜底）
-# ---------------------------------------------------------------------------
-
-# 严格的整串占位符（如 ${DEEPSEEK_API_KEY}）
-_ENV_REF_RE = re.compile(r"^\$\{(\w+)\}$")
-# GET 接口脱敏值包含该片段；.env.example 的示例值以 your- 开头——均视为「未配置」
-_MASKED_MARK = "****"
-_EXAMPLE_PREFIX = "your-"
-
-_env_file_cache: tuple[float, dict[str, str]] | None = None
+_env_file_cache: tuple[float, dict[str, str], str] | None = None
 
 
 def _env_file_vars() -> dict[str, str]:
-    """读取项目根 .env（mtime 缓存）。内核只在启动时加载一次 .env，
-    UI 后写入的变量不在进程环境里，需回退读文件才能反映最新状态。
+    """读 .env 全量 key=value（mtime 缓存）。空行/注释跳过。
 
-    FileNotFoundError（无 .env）属正常形态静默返回；其余 OSError（文件被占/
-    权限等）warn 带 path 与异常摘要——静默空表会让 key 缺失只在远端 401
-    暴露，根因必须可观测。
+    文件不存在属正常形态静默返回；其余 OSError（文件被占/权限等）warn 带
+    path 与异常摘要——静默空表会让 key 缺失只在远端 401 暴露，根因必须可观测。
     """
     global _env_file_cache  # noqa: PLW0603
+    env_path = _env_file_path()
     try:
-        mtime = _ENV_FILE.stat().st_mtime
+        mtime = env_path.stat().st_mtime
     except FileNotFoundError:
         return {}
     except OSError as exc:
-        logger.warning(".env 读取失败（mtime 探测），按无变量处理 | path=%s | error=%s", _ENV_FILE, exc)
+        logger.warning(".env 读取失败（mtime 探测），按无变量处理 | path=%s | error=%s", env_path, exc)
         return {}
-    if _env_file_cache and _env_file_cache[0] == mtime:
+    if _env_file_cache and _env_file_cache[0] == mtime and _env_file_cache[2] == str(env_path):
         return _env_file_cache[1]
-    vars_ = _read_env_file(_ENV_FILE)
-    _env_file_cache = (mtime, vars_)
+    vars_ = _read_env_file(env_path)
+    _env_file_cache = (mtime, vars_, str(env_path))
     return vars_
+
+
+def _read_env_file(path: Path) -> dict[str, str]:
+    """读取 .env 文件，返回 key=value 字典（跳过注释和空行）。
+
+    Args:
+        path: .env 文件路径
+
+    Returns:
+        变量名字典；文件不存在时返回空字典
+    """
+    if not path.exists():
+        return {}
+    result: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" in stripped:
+            key, _, value = stripped.partition("=")
+            result[key.strip()] = value.strip()
+    return result
 
 
 def _is_placeholder_value(value: str) -> bool:
@@ -193,386 +184,6 @@ def _resolve_env_value(raw: str | None) -> str | None:
     return value
 
 
-def _provider_key_status(pconf: dict[str, Any]) -> tuple[bool, str | None]:
-    """计算 provider 的 (has_key, env_var)。
-
-    has_key 按「占位符能否解析出真实 key」判定——预置提供者未填 key 时
-    yaml 里已有 `${VAR}` 字符串，不能据此误报已配置。
-
-    Returns:
-        (是否已配置可用 key, 占位符变量名或 None)
-    """
-    keys = pconf.get("keys") or []
-    raw = ""
-    if keys and isinstance(keys[0], dict):
-        raw = keys[0].get("api_key", "")
-    if not raw:
-        raw = pconf.get("api_key", "")
-    resolved = _resolve_env_value(raw if isinstance(raw, str) else None)
-    m = _ENV_REF_RE.match(raw.strip()) if isinstance(raw, str) and raw else None
-    return bool(resolved), (m.group(1) if m else None)
-
-
-def _extract_api_key_to_env(provider_id: str, provider_config: dict[str, Any]) -> None:
-    """从提交的 provider 配置中提取明文 api_key 写入 .env，yaml 内改写为
-    ``${PROVIDER_ID_UPPER}_API_KEY`` 占位符（原地修改 provider_config）。
-
-    处理两种形态：顶层 ``api_key`` 字段与 ``keys[0].api_key``（「更新 Key」
-    流程直接传 keys 数组）。脱敏值（含 ``****``）与示例值（``your-`` 开头）
-    一律忽略，杜绝掩码值写回 yaml 污染配置。写入后同步 os.environ，
-    使本进程的 has_key 判定即时生效。
-    """
-    env_var_name = f"{provider_id.upper()}_API_KEY"
-    placeholder = f"${{{env_var_name}}}"
-
-    raw_key = provider_config.pop("api_key", None)
-    keys = provider_config.get("keys")
-    if raw_key is not None:
-        # 顶层 api_key：明文 → .env；掩码/示例值 → 丢弃
-        if isinstance(raw_key, str) and not _is_placeholder_value(raw_key):
-            _update_env_var(_ENV_FILE, env_var_name, raw_key)
-            os.environ[env_var_name] = raw_key
-            provider_config["keys"] = [{"id": f"{provider_id}_main", "api_key": placeholder}]
-        return
-
-    if isinstance(keys, list) and keys and isinstance(keys[0], dict):
-        k0 = keys[0]
-        raw_key = k0.get("api_key")
-        if isinstance(raw_key, str) and raw_key and not _ENV_REF_RE.match(raw_key.strip()):
-            if _is_placeholder_value(raw_key):
-                # 掩码值回传：从提交中剔除，避免覆盖磁盘上的占位符
-                k0.pop("api_key", None)
-            else:
-                _update_env_var(_ENV_FILE, env_var_name, raw_key)
-                os.environ[env_var_name] = raw_key
-                k0["api_key"] = placeholder
-
-
-# ---------------------------------------------------------------------------
-# .env 文件读写工具
-# ---------------------------------------------------------------------------
-
-
-def _read_env_file(path: Path) -> dict[str, str]:
-    """读取 .env 文件，返回 key=value 字典（跳过注释和空行）。
-
-    Args:
-        path: .env 文件路径
-
-    Returns:
-        变量名字典；文件不存在时返回空字典
-    """
-    if not path.exists():
-        return {}
-    result: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if "=" in stripped:
-            key, _, value = stripped.partition("=")
-            result[key.strip()] = value.strip()
-    return result
-
-
-def _update_env_var(path: Path, var_name: str, var_value: str) -> None:
-    """在 .env 文件中更新或添加一个环境变量，保留已有内容和注释。
-
-    文件不存在时创建。同名变量更新值，新变量追加到文件末尾。
-
-    Args:
-        path: .env 文件路径
-        var_name: 变量名（如 ``DEEPSEEK_API_KEY``）
-        var_value: 变量值
-    """
-    existing = _read_env_file(path)
-    existing[var_name] = var_value
-
-    lines: list[str] = []
-    if path.exists():
-        current_vars = set(existing.keys())
-        for line in path.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if stripped and not stripped.startswith("#") and "=" in stripped:
-                key = stripped.partition("=")[0].strip()
-                if key in current_vars:
-                    lines.append(f"{key}={existing[key]}")
-                    current_vars.discard(key)
-                    continue
-            lines.append(line)
-        for key in current_vars:
-            lines.append(f"{key}={existing[key]}")
-    else:
-        lines.append(f"{var_name}={var_value}")
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # .env 承载 LLM key 全量，写中途崩溃不能留下截断文件（write_text 直写
-    # = 丢 key 面）——同目录 tmp + os.replace 原子换入（共享助手）。
-    _atomic_write_text(path, "\n".join(lines) + "\n")
-
-
-# ---------------------------------------------------------------------------
-# LLM 配置端点（config/llm 段，原 routes_config.py 同名端点语义）
-# ---------------------------------------------------------------------------
-
-
-def get_llm_config() -> dict[str, Any]:
-    """获取完整 LLM 配置（providers/models 脱敏 + key 配置状态）。"""
-    data = _read_yaml(_LLM_YAML)
-    # 脱敏 providers 中 keys 数组的 api_key，并附上 key 配置状态
-    providers = data.get("providers", {})
-    masked: dict[str, Any] = {}
-    for pid, pconf in providers.items():
-        m = copy.deepcopy(pconf)
-        for key_entry in m.get("keys", []):
-            if "api_key" in key_entry:
-                key_entry["api_key"] = _mask_key(key_entry["api_key"])
-        has_key, env_var = _provider_key_status(pconf)
-        m["has_key"] = has_key
-        m["env_var"] = env_var
-        masked[pid] = m
-    # 脱敏 models 中的 api_key
-    models = data.get("models", {})
-    masked_models: dict[str, Any] = {}
-    for mid, mconf in models.items():
-        m = {**mconf}
-        if "api_key" in m:
-            m["api_key"] = _mask_key(m["api_key"])
-        masked_models[mid] = m
-
-    return {
-        "models": masked_models,
-        "providers": masked,
-        "defaults": data.get("defaults", {}),
-    }
-
-
-def get_providers() -> dict[str, Any]:
-    """获取提供商列表（含 key 配置状态）。"""
-    data = _read_yaml(_LLM_YAML)
-    providers = data.get("providers", {})
-    result: dict[str, Any] = {}
-    for pid, pconf in providers.items():
-        has_key, env_var = _provider_key_status(pconf)
-        result[pid] = {
-            "api_base": pconf.get("api_base", ""),
-            "has_key": has_key,
-            "env_var": env_var,
-        }
-    return {"providers": result}
-
-
-def get_models() -> dict[str, Any]:
-    """获取模型列表（api_key 脱敏）。"""
-    data = _read_yaml(_LLM_YAML)
-    models = data.get("models", {})
-    masked: dict[str, Any] = {}
-    for mid, mconf in models.items():
-        m = {**mconf}
-        if "api_key" in m:
-            m["api_key"] = _mask_key(m["api_key"])
-        masked[mid] = m
-    return {"models": masked}
-
-
-def get_defaults() -> dict[str, Any]:
-    """获取默认模型配置。"""
-    data = _read_yaml(_LLM_YAML)
-    defaults = data.get("defaults", {})
-    return {
-        "chat": defaults.get("chat", ""),
-        "embedding": defaults.get("embedding", ""),
-        "tiers": defaults.get("tiers", {}),
-    }
-
-
-def save_defaults(body: dict[str, Any]) -> dict[str, Any]:
-    """更新默认模型配置（chat/embedding/tiers 可空字段部分更新）。"""
-    data = _read_yaml(_LLM_YAML)
-    if "defaults" not in data:
-        data["defaults"] = {}
-    if body.get("chat") is not None:
-        data["defaults"]["chat"] = body["chat"]
-    if body.get("embedding") is not None:
-        data["defaults"]["embedding"] = body["embedding"]
-    if body.get("tiers") is not None:
-        data["defaults"]["tiers"] = body["tiers"]
-    _write_yaml(_LLM_YAML, data)
-    _invalidate_llm_caches()
-    logger.info("LLM 默认配置已更新: %s", body)
-    return {
-        "chat": data["defaults"].get("chat", ""),
-        "embedding": data["defaults"].get("embedding", ""),
-        "tiers": data["defaults"].get("tiers", {}),
-    }
-
-
-def add_model(body: dict[str, Any]) -> dict[str, Any]:
-    """添加模型。
-
-    请求的 model_id 已存在时按来源分派（模型 ID 由模型名派生，同名模型常
-    出现在多个提供商下）：
-    - 同 provider 且同 model_name：真重复，409；
-    - 否则（典型为同名模型挂在不同 provider）：自动派生新 ID
-      ``<model_id>-<provider>`` 新增，仍冲突则追加序号，绝不覆盖既有条目。
-
-    Returns:
-        全量 models + added_ids（实际写入的模型 ID，供前端提示自动改名结果）。
-
-    Raises:
-        ConfigAPIError 400: models 字段缺失或类型错误（镜像源 ModelAddRequest 必填语义）
-        ConfigAPIError 409: 同 provider 同 model_name 的重复添加
-    """
-    data = _read_yaml(_LLM_YAML)
-    models = data.setdefault("models", {})
-    model_entries = body.get("models")
-    if not isinstance(model_entries, dict):
-        raise ConfigAPIError(status_code=400, detail="models 字段必填（模型 ID → 配置字典）")
-    added_ids: list[str] = []
-    for model_id, model_conf in model_entries.items():
-        target_id = model_id
-        if model_id in models:
-            existing = models[model_id]
-            if (
-                existing.get("provider") == model_conf.get("provider")
-                and existing.get("model_name") == model_conf.get("model_name")
-            ):
-                raise ConfigAPIError(
-                    status_code=409,
-                    detail=f"模型 '{model_id}' 已存在于提供商 '{existing.get('provider')}'",
-                )
-            base = f"{model_id}-{model_conf.get('provider') or 'custom'}"
-            target_id = base
-            seq = 2
-            while target_id in models:
-                target_id = f"{base}-{seq}"
-                seq += 1
-        models[target_id] = model_conf
-        added_ids.append(target_id)
-    _write_yaml(_LLM_YAML, data)
-    _invalidate_llm_caches()
-    logger.info("添加模型: %s", added_ids)
-    return {"models": models, "added_ids": added_ids}
-
-
-def update_model(model_id: str, body: dict[str, Any]) -> dict[str, Any]:
-    """更新模型配置（config 字段透传合并）。
-
-    Raises:
-        ConfigAPIError 400: config 字段缺失或类型错误（镜像源 ModelConfigUpdateRequest 必填语义）
-        ConfigAPIError 404: 模型不存在
-    """
-    data = _read_yaml(_LLM_YAML)
-    models = data.setdefault("models", {})
-    update_config = body.get("config")
-    if not isinstance(update_config, dict):
-        raise ConfigAPIError(status_code=400, detail="config 字段必填（模型配置字典）")
-    if model_id not in models:
-        raise ConfigAPIError(status_code=404, detail=f"模型 '{model_id}' 不存在")
-    models[model_id].update(update_config)
-    _write_yaml(_LLM_YAML, data)
-    _invalidate_llm_caches()
-    logger.info("更新模型配置: %s", model_id)
-    return {"models": models}
-
-
-def delete_model(model_id: str) -> dict[str, Any]:
-    """删除模型。
-
-    Raises:
-        ConfigAPIError 404: 模型不存在
-    """
-    data = _read_yaml(_LLM_YAML)
-    models = data.get("models", {})
-    if model_id not in models:
-        raise ConfigAPIError(status_code=404, detail=f"模型 '{model_id}' 不存在")
-    del models[model_id]
-    _write_yaml(_LLM_YAML, data)
-    _invalidate_llm_caches()
-    logger.info("删除模型: %s", model_id)
-    return {"models": models}
-
-
-def add_provider(body: dict[str, Any]) -> dict[str, Any]:
-    """创建新 provider。
-
-    若 config 中包含 ``api_key``（顶层或 keys[0]），将 key 写入项目根目录
-    .env 文件，llm.yaml 中对应值改写为 ``${PROVIDER_ID_UPPER}_API_KEY``
-    占位符（见 ``_extract_api_key_to_env``）。
-
-    Raises:
-        ConfigAPIError 400: provider_id/config 缺失或类型错误（镜像源 ProviderCreateRequest 必填语义）
-        ConfigAPIError 409: provider_id 已存在
-    """
-    data = _read_yaml(_LLM_YAML)
-    providers = data.setdefault("providers", {})
-    provider_id = body.get("provider_id")
-    if not isinstance(provider_id, str):
-        raise ConfigAPIError(status_code=400, detail="provider_id 必填（提供商唯一标识）")
-    provider_config = copy.deepcopy(body.get("config"))
-    if not isinstance(provider_config, dict):
-        raise ConfigAPIError(status_code=400, detail="config 字段必填（提供商配置字典）")
-    if provider_id in providers:
-        raise ConfigAPIError(status_code=409, detail=f"提供商 '{provider_id}' 已存在")
-
-    _extract_api_key_to_env(provider_id, provider_config)
-
-    providers[provider_id] = provider_config
-    _write_yaml(_LLM_YAML, data)
-    _invalidate_llm_caches()
-    logger.info("添加提供商: %s", provider_id)
-    return {"providers": providers}
-
-
-def update_provider(provider_id: str, body: dict[str, Any]) -> dict[str, Any]:
-    """更新 provider 配置。
-
-    提交中的明文 ``api_key``（顶层或 ``keys[0].api_key``）与添加流程同义：
-    写入 .env、yaml 保持 ``${VAR}`` 占位符；脱敏/示例值被忽略，
-    防止 GET 返回的掩码值经保存回路污染 yaml。
-
-    ``keys`` 数组按条目与磁盘现状合并（未提交的字段保留原值）——前端
-    只改并发/RPM 时不带 api_key，合并保证磁盘上的占位符不被清掉。
-
-    Raises:
-        ConfigAPIError 400: config 字段缺失或类型错误（镜像源 ProviderConfigUpdateRequest 必填语义）
-        ConfigAPIError 404: 提供商不存在
-    """
-    data = _read_yaml(_LLM_YAML)
-    providers = data.get("providers", {})
-    provider_config = copy.deepcopy(body.get("config"))
-    if not isinstance(provider_config, dict):
-        raise ConfigAPIError(status_code=400, detail="config 字段必填（提供商配置字典）")
-    if provider_id not in providers:
-        raise ConfigAPIError(status_code=404, detail=f"提供商 '{provider_id}' 不存在")
-    _extract_api_key_to_env(provider_id, provider_config)
-
-    # keys 条目合并：按索引把提交项覆盖到磁盘现状上（api_key 等
-    # 未提交/被剔除的字段保留磁盘值，避免整组替换丢占位符）
-    new_keys = provider_config.get("keys")
-    existing_keys = providers[provider_id].get("keys")
-    if isinstance(new_keys, list) and isinstance(existing_keys, list) and existing_keys:
-        merged: list[Any] = []
-        for i, entry in enumerate(new_keys):
-            if isinstance(entry, dict):
-                base = (
-                    dict(existing_keys[i])
-                    if i < len(existing_keys) and isinstance(existing_keys[i], dict)
-                    else {}
-                )
-                base.update({k: v for k, v in entry.items() if v is not None})
-                merged.append(base)
-            else:
-                merged.append(entry)
-        provider_config["keys"] = merged
-
-    providers[provider_id].update(provider_config)
-    _write_yaml(_LLM_YAML, data)
-    _invalidate_llm_caches()
-    logger.info("更新提供商配置: %s", provider_id)
-    return {"providers": providers}
-
-
 def get_llm_presets() -> dict[str, Any]:
     """下发 LLM 配置面预置声明（provider 分组/常用类型/思考强度白名单）。
 
@@ -583,13 +194,16 @@ def get_llm_presets() -> dict[str, Any]:
     Raises:
         ConfigAPIError 500: 声明文件缺失/解析失败
     """
-    if not _PRESETS_FILE.exists():
+    presets_file = _PRESETS_FILE
+    if not presets_file.exists():
         raise ConfigAPIError(
             status_code=500,
-            detail=f"LLM 预置声明文件缺失: {_PRESETS_FILE.name}",
+            detail=f"LLM 预置声明文件缺失: {presets_file.name}",
         )
+    import yaml  # noqa: PLC0415
+
     try:
-        with open(_PRESETS_FILE, encoding="utf-8") as f:
+        with open(presets_file, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
     except yaml.YAMLError as exc:
         raise ConfigAPIError(
@@ -598,7 +212,7 @@ def get_llm_presets() -> dict[str, Any]:
     return {
         "provider_groups": data.get("provider_groups", []),
         "common_provider_types": data.get("common_provider_types", []),
-        "thinking_strength": data.get("thinking_strength", {}),
+        "thinking_strength": data.get("thinking_strength", {"levels": [], "allowed_keys": []}),
     }
 
 
@@ -637,7 +251,7 @@ def get_remote_models(provider_id: str) -> dict[str, Any]:
         ConfigAPIError 400: 未配置 API Key
         ConfigAPIError 502: 上游请求失败（提示用户可手动输入模型名）
     """
-    data = _read_yaml(_LLM_YAML)
+    data = _read_yaml(_llm_yaml_path())
     pconf = data.get("providers", {}).get(provider_id)
     if pconf is None:
         raise ConfigAPIError(status_code=404, detail=f"提供商 '{provider_id}' 不存在")
@@ -728,20 +342,3 @@ def _lookup_model_limits(provider_type: str, model_id: str) -> dict[str, int]:
     if isinstance(max_output, int) and max_output > 0:
         limits["max_output_tokens"] = max_output
     return limits
-
-
-def delete_provider(provider_id: str) -> dict[str, Any]:
-    """删除指定 provider。
-
-    Raises:
-        ConfigAPIError 404: provider_id 不存在
-    """
-    data = _read_yaml(_LLM_YAML)
-    providers = data.get("providers", {})
-    if provider_id not in providers:
-        raise ConfigAPIError(status_code=404, detail=f"提供商 '{provider_id}' 不存在")
-    del providers[provider_id]
-    _write_yaml(_LLM_YAML, data)
-    _invalidate_llm_caches()
-    logger.info("删除提供商: %s", provider_id)
-    return {"providers": providers}

@@ -1,5 +1,5 @@
 /**
- * 统一登出编排：WS/流式事件清理 + authStore.logout + SPA 跳转登录页。
+ * 统一登出编排：WS/流式事件清理 + authStore.logout + SPA 跳转 HOME。
  *
  * router.tsx 与 Sidebar 的登出菜单同源调用此函数，杜绝「完整清理」与
  * 「裸 logout()」两套路径并存——裸 logout 漏掉 WS 断开与流式订阅销毁，
@@ -15,12 +15,12 @@ import { destroyStreamingEvents } from '@/services/websocket/streamingEventServi
 import { useAuthStore } from '@/stores/authStore'
 import { useSessionStore } from '@/stores/sessionStore'
 
-/** 执行完整登出：清理 → 登出 → 跳转登录页。 */
+/** 执行完整登出：清理 → 登出 → 回 HOME（未认证由认证闸模态接管，ADR 2026-09-28）。 */
 export async function performLogout(navigate: (path: string) => void): Promise<void> {
   destroyStreamingEvents()
   // sessionStore 只持订阅清理与 wsStatus，连接本体的拆除在 globalWS.disconnect
   useSessionStore.getState().disconnectWebSocket()
   globalWS.disconnect()
   await useAuthStore.getState().logout()
-  navigate(ROUTES.LOGIN)
+  navigate(ROUTES.HOME)
 }

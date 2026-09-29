@@ -7,31 +7,13 @@
  * 声明同源消失 → 徽标不渲染（§5.3「查不到映射=不渲染」）；state 无 mode 键 →
  * 消费方零渲染。
  *
- * 徽标显示名/图标与选择器选项同源：模式插件的 select-option 追加声明
- * （target=task_mode，选项清单单源在各模式插件声明）。
+ * 徽标显示名/图标与选择器选项同源：modes registry 声明派生（mode.yaml
+ * name/icon，经 useModesRegistry 单源取数——选择器选项同函数族，
+ * taskModeOptionsFromModes）。
  */
 
 import { contributionRegistry, type PageDeclaration } from './ContributionRegistry'
-
-/** task_mode 选择器的 select-option 追加声明形态（props） */
-interface SelectOptionProps {
-  target?: unknown
-  value?: unknown
-  label?: unknown
-  icon?: unknown
-}
-
-function taskModeOptionOf(mode: string): SelectOptionProps | undefined {
-  const decl = contributionRegistry
-    .getAllWidgets()
-    .find(
-      (w) =>
-        w.type === 'select-option' &&
-        (w.props as SelectOptionProps | undefined)?.target === 'task_mode' &&
-        (w.props as SelectOptionProps | undefined)?.value === mode,
-    )
-  return decl?.props as SelectOptionProps | undefined
-}
+import type { ModeDeclaration, ModesRegistryResponse } from '@/services/api/modes'
 
 /**
  * 聚合 mode 值 → 模式面板页声明。
@@ -46,24 +28,25 @@ export function getModePanelTarget(mode: string): PageDeclaration | undefined {
     .find((p) => p.slot === 'tab' && p.mode === mode)
 }
 
-/** 模式徽标展示文案：select-option 声明 label 优先（模式显示名），回退 mode 值 */
-export function getModePanelLabel(mode: string): string {
-  const option = taskModeOptionOf(mode)
-  return typeof option?.label === 'string' ? option.label : mode
+/** registry 内按 mode 键取声明（缺席 = undefined） */
+export function modeDeclarationOf(
+  mode: string,
+  registry: ModesRegistryResponse | undefined,
+): ModeDeclaration | undefined {
+  if (!mode) return undefined
+  return registry?.modes.find((m) => m.mode === mode)
 }
 
-/** 模式徽标图标：select-option 声明 icon（缺省 undefined） */
-export function getModePanelIcon(mode: string): string | undefined {
-  const option = taskModeOptionOf(mode)
-  return typeof option?.icon === 'string' ? option.icon : undefined
+/** 模式徽标展示文案：registry 声明 name 优先，回退 mode 值 */
+export function getModePanelLabel(mode: string, registry: ModesRegistryResponse | undefined): string {
+  return modeDeclarationOf(mode, registry)?.name ?? mode
 }
 
-/**
- * 模式前缀 → 呈现数据端点（呈现档案插槽协议的数据源映射，消费方
- * presenterProfiles.ts）。agent_id 命中 `mode_X/card_y` 形态且 mode_X 在映射内
- * → 经该端点取 {cards:[...]} 按 id 匹配呈现档案；不在映射内的前缀（含无 `/`
- * 的裸 agent_id）走 agents 注册表老路，不入本协议。
- */
-export const MODE_PRESENTER_SOURCES: Record<string, string> = {
-  mode_roleplay: '/ext/mode_roleplay/data/cards',
+/** 模式徽标图标：registry 声明 icon（缺省 undefined） */
+export function getModePanelIcon(
+  mode: string,
+  registry: ModesRegistryResponse | undefined,
+): string | undefined {
+  const icon = modeDeclarationOf(mode, registry)?.icon
+  return typeof icon === 'string' && icon ? icon : undefined
 }

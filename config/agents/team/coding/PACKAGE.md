@@ -35,11 +35,11 @@ config/agents/team/coding/
 | 设计系统约束 | `config/rules/per_agent/design_system_constraints.md` | review |
 | 测试代码模板 | `config/templates/test_code_template.md` | test（static_vars） |
 | 代码分析报告模板 | `config/templates/code_analysis_report_template.md` | review（static_vars） |
-| 技能：编码实现 | `skills/code-implement/SKILL.md` | dev（提示词内按需加载） |
-| 技能：前端领域 | `skills/code-frontend/SKILL.md` | dev / review（按技术栈按需加载） |
-| 技能：后端领域 | `skills/code-backend/SKILL.md` | dev / review（按技术栈按需加载） |
+| 技能：编码实现 | `plugins/shared/modes/mode_coding/skills/code-implement/SKILL.md`（工作空间内经 `skills/code-implement/SKILL.md` 快照路径按需加载） | dev |
+| 技能：前端领域 | `plugins/shared/modes/mode_coding/skills/code-frontend/SKILL.md`（同上快照口径） | dev / review（按技术栈按需加载） |
+| 技能：后端领域 | `plugins/shared/modes/mode_coding/skills/code-backend/SKILL.md`（同上快照口径） | dev / review（按技术栈按需加载） |
 
-> 核验记录：上表 16 个引用路径已逐一核验存在（16/16 OK，2026-09-14 本批次 bash 核验）[来源: 本批次执行核验；各角色 YAML 的 system_prompt / static_vars / dynamic_vars 字段]
+> 核验记录：上表 16 个引用路径已逐一核验存在（2026-09-28 批 E 技能随包迁移后复验 16/16 OK；技能真值已迁入模式包 mode_coding/skills/，角色 YAML 按技能名引用，工作空间内经 `skills/<技能名>/SKILL.md` 同步快照解析）[来源: 本批次执行核验；各角色 YAML 的 system_prompt / static_vars / dynamic_vars 字段]
 
 ---
 
@@ -101,9 +101,9 @@ L1（灵汐）/ 人类
 | 角色 | skills 引用（提示词内按需加载） | 规则/模板引用要点 |
 |------|-------------------------------|-------------------|
 | `coding_pm_agent` | 无 | 4 共同项 + `testing_rules` + `requirement_structuring` + `dispatcher_rules_exec` |
-| `coding_dev_agent` | `skills/code-implement/SKILL.md`（编码前加载）；`skills/code-frontend` 或 `skills/code-backend`（按任务领域） | 4 共同项 + `testing_rules` + `code_writer_rules` |
+| `coding_dev_agent` | `code-implement`（编码前加载）；`code-frontend` 或 `code-backend`（按任务领域；均随 mode_coding/skills/ 内置） | 4 共同项 + `testing_rules` + `code_writer_rules` |
 | `coding_test_agent` | 无 | 4 共同项 + `testing_rules` + `isolation_network_rules` + `state_machine_test_design` + `test_code_template` |
-| `coding_review_agent` | `skills/code-frontend/SKILL.md` 或 `skills/code-backend/SKILL.md`（按任务技术栈） | 4 共同项 + `design_system_constraints` + `code_analysis_report_template` |
+| `coding_review_agent` | `code-frontend` 或 `code-backend`（按任务技术栈；均随 mode_coding/skills/ 内置） | 4 共同项 + `design_system_constraints` + `code_analysis_report_template` |
 
 > 「4 共同项」= `information_integrity_rules` / `document_context_rules` / `coding_domain_rules` / `execution_review_rules`（见 §一 引用表）。
 > 完整路径清单见 §一 外部引用表；以上均逐字段摘录自各角色 YAML，未增删 [来源: config/agents/team/coding/*.yaml]。

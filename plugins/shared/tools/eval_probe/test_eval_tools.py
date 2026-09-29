@@ -76,15 +76,18 @@ class TestEvalSleep:
     def test_out_of_range_rejected(self, seconds: float):
         """范围外拒绝（性质：任何越界值都拒绝，不限于枚举字面值）。"""
         result = eval_sleep(seconds=seconds)
+        assert result["success"] is False
         assert "error" in result
 
     def test_non_numeric_rejected(self):
         result = eval_sleep(seconds="30")  # type: ignore[arg-type]
+        assert result["success"] is False
         assert "error" in result
 
     def test_bool_rejected(self):
         """bool 是 int 子类，必须显式拒绝（True 不得当 1 秒睡）。"""
         result = eval_sleep(seconds=True)  # type: ignore[arg-type]
+        assert result["success"] is False
         assert "error" in result
 
 

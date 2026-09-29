@@ -3,7 +3,7 @@
 
 服务契约（manifest capabilities.services；wire = MCP tools/call）：
 - mode.describe：返回 {mode, name, chain, weights, budget, profile_path, panel_page_id}
-- mode.get_profile：返回包内 profile.yaml 解析后的完整 dict
+- mode.get_profile：返回包内 mode.yaml 解析后的完整 dict
 
 profile 与本插件同目录内打包（种子单元自包含，目录级播种/升级/回退的结构前提）；
 消费方（eval_harness 等）经内核服务调用获取（tool-executor 显式 plugin_id 通道），
@@ -21,15 +21,15 @@ webview 面板页（工作区 tab 面板，manifest detachable 声明悬浮窗�
   进真实管道，session_id 有则透传（宿主 ctx.sync 下发的对话框会话，写动作
   送入对话框线程）。
 
-调查结论（/data 端点口径依据，2026-09-17 只读核查）：
-- tasks 插件 id=task_service，capabilities.services = task.create / task.get /
-  task.transition / task.list / task.cancel / task.delete / task.get_transitions /
-  http.handle——**无 projects 读服务**：projects = 真实文件夹 + 登记行
-  （plugins/shared/project_registry.py，ProjectModel 含 title / status /
-  workflow_state[plan|running|done] / auto_execute），只暴露 7 个 HTTP 端点
-  /ext/task_service/projects*。故 /data/projects 从 pipeline-state 行按
-  task.parent_project_id 分组诚实派生（登记簿字段派生口径不可得，留空不造假）；
-  登记簿读服务出现后经 "projects" provider 注入即切登记态（行为测试两态覆盖）。
+调查结论（/data 端点口径依据，2026-09-17 只读核查；projects 通道 2026-09-28 补齐）：
+- tasks 插件 id=task_service，capabilities.services 含 projects.list（登记簿
+  全量读服务，与 /ext/task_service/projects 同源）。projects = 真实文件夹 +
+  登记行（plugins/shared/project_registry.py，ProjectModel 含 title / status /
+  workflow_state[plan|running|done] / auto_execute）。
+- /data/projects 走 "projects" provider（on_load 注入，经 tool-executor 显式
+  plugin_id 调 task_service projects.list）→ 登记态归一；服务不可达或登记为空
+  回退 pipeline-state 行按 task.parent_project_id 分组派生（note 如实说明，
+  行为测试两态覆盖）。
 - task.list 服务单层返回 {"tasks":[{id,title,status,priority}],"total"}，
   parent_task_id 过滤子任务；项目→任务锚 = state 行 task.parent_project_id
   （task_submit 双写镜像 metadata.project_id）。任务树 = 项目行作根 + 后端单层
@@ -61,13 +61,13 @@ plugin = AgentOSPlugin("mode_planning")
 
 bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根入 sys.path
 
-_PROFILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profile.yaml")
+_PROFILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mode.yaml")
 
 _DESCRIBE_FIELDS = ("mode", "name", "chain", "weights", "budget", "panel_page_id")
 
 
 def load_profile(path: str = _PROFILE_PATH) -> dict[str, Any]:
-    """读取包内 profile.yaml；空文件或缺 mode 键视为种子损坏（fail-closed）。"""
+    """读取包内 mode.yaml；空文件或缺 mode 键视为种子损坏（fail-closed）。"""
     with open(path, encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
     if not isinstance(data, dict) or not data.get("mode"):
@@ -103,7 +103,7 @@ async def mode_describe() -> dict[str, Any]:
 @plugin.tool(
     name="mode.get_profile",
     schema={"type": "object", "properties": {}},
-    description="返回计划模式包内 profile.yaml 解析后的内容",
+    description="返回计划模式包内 mode.yaml 解析后的内容",
     output_schema={
         "type": "object",
         "required": ["mode"],
@@ -185,9 +185,22 @@ async def _on_load(_params: dict[str, Any]) -> None:
     _set_provider("messages", _messages)
     _set_provider("task-list", _task_list)
     _set_provider("tool-executor", _invoke)
-    # "projects" 不注入：task_service 无 projects 读服务（登记簿仅 HTTP 端点），
-    # /data/projects 走派生口径；登记簿读服务出现后在此 _set_provider("projects", …)
-    # 即切登记态（归一形状见 _norm_registry_projects）。
+    # 登记簿读服务（task_service projects.list，经 tool-executor 显式 plugin_id）：
+    # /data/projects 切登记态；调用失败/登记为空由 _load_projects 回退派生口径。
+    _set_provider("projects", _registry_projects)
+
+
+async def _registry_projects() -> Any:
+    """登记簿行（task_service projects.list 读服务；tool-executor 通道）。"""
+    fn = _PROVIDERS.get("tool-executor")
+    if fn is None:
+        return []
+    res = await fn(
+        {"tool_name": "projects.list", "plugin_id": "task_service", "args": {}}
+    )
+    data = res.get("data") if isinstance(res, dict) else None
+    rows = data.get("projects") if isinstance(data, dict) else None
+    return rows if isinstance(rows, list) else []
 
 
 # ── 数据归一（pipeline-state 行 = 扁平点号键摘要；mode/task.* 出口白名单）──────────
@@ -301,22 +314,27 @@ def _norm_registry_projects(
 
 
 _DERIVED_NOTE = (
-    "派生口径：task_service 无 projects 读服务（登记簿仅 HTTP 端点），项目由 "
-    "pipeline-state 行按 task.parent_project_id 分组派生；workflow_state/auto_execute "
-    "为登记簿字段不可得，登记后尚无子任务行的项目不可见。"
+    "派生口径：登记簿读服务不可达或登记为空，项目由 pipeline-state 行按 "
+    "task.parent_project_id 分组派生；workflow_state/auto_execute 为登记簿字段"
+    "不可得，登记后尚无子任务行的项目不可见。"
 )
 
 
 async def _load_projects() -> dict[str, Any]:
-    """项目列表：登记 provider 在 → 登记态归一；否则 state 行派生（带 note）。"""
+    """项目列表：登记读服务返回非空 → 登记态归一；否则 state 行派生（带 note）。
+
+    登记行空（服务抖动降级 / 登记簿真空）回退派生——面板不因读服务波动变空态，
+    挂靠项目的任务行仍可见；note 如实说明当前口径。
+    """
     rows = await _call_provider("pipeline-state")
     task_rows = _project_task_rows(rows)
     if "projects" in _PROVIDERS:
         registry_rows = await _call_provider("projects")
-        return {
-            "projects": _norm_registry_projects(registry_rows, task_rows),
-            "source": "registry",
-        }
+        if registry_rows:
+            return {
+                "projects": _norm_registry_projects(registry_rows, task_rows),
+                "source": "registry",
+            }
     return {"projects": _derive_projects(task_rows), "source": "derived", "note": _DERIVED_NOTE}
 
 
@@ -399,7 +417,7 @@ def _plan_args(goal: str, session_id: str = "") -> dict[str, Any]:
     text = goal.strip()
     args: dict[str, Any] = {
         "target_type": "agent",
-        # 派发目标 = mode_planning/profile.yaml chain.executor_pool 首个合法键
+        # 派发目标 = mode_planning/mode.yaml chain.executor_pool 首个合法键
         # （chain.entry=main 是 L1 主执行上下文键，闸门查无此键必拒——用户旅程
         # 模拟 F2 实证；executor/generation/research_agent.yaml level L3、
         # is_active，经 task_submit 磁盘 rglob 解析可达，实测过目标存在性闸门；

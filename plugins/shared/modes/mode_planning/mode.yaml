@@ -1,0 +1,34 @@
+# 计划模式声明面 mode.yaml（2026-09-28 升格自 profile.yaml；设计真值 docs/working/模式包工作模式设计_20260928.md D3。B 部类物料：由用户维护；出厂种子随 mode_planning 插件内打包，
+# 经 mode.get_profile 服务透出；suite 路径相对项目根）
+# 链路：方案讨论段主 agent 自执行（无派发链），调研/环境/端到端验证外包执行者池
+mode: planning
+name: 计划模式
+icon: 🗂️                # 选择器选项图标（批 G⑤；emoji 随声明面透出 modes API/mode.list）
+panel_page_id: planning_desk
+chain:
+  entry: main
+  expected_path: [main]
+  executor_pool: [executor/generation/research_agent, executor/environment/environment_setup_agent, task/container_verification_agent]
+  entry_override: null
+suite:
+  smoke: config/self_evolve/suites/dev/planning.yaml
+  full: null          # 二期补全
+material_scope:
+  dispatch_stage:
+    - config/agents/main/task_dispatch_guide.md
+    - plugins/shared/modes/mode_planning/rules/plan_workflow.md
+  execution_stage:
+    - skills/skill-solution-software/SKILL.md
+    - skills/skill-solution-novel/SKILL.md
+    - skills/skill-solution-game/SKILL.md
+    - skills/skill-solution-research/SKILL.md
+levers:
+  plan_drift: {plan_stage: [plan_workflow, dispatch_guide]}
+  gate_skip: {gate_stage: [project_registry, project_state_tool]}
+  ac_untraceable: {output_stage: [solution_doc, task_files]}
+verifier_families: [file_assert, structure_assert]
+weights: {success: 1.0, cost: 0.2, rounds: 0.1}
+budget:
+  case_timeout: 1200
+  round_tokens: 1000000
+  proposals_per_session: 3

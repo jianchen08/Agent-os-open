@@ -1,34 +1,31 @@
-"""模式物料通用组装（模式体系 P2；自 context_build 抽出，2026-09-24 架构重构）。
+"""模式物料通用取数/解析纯函数面（mode_material_inject 的一部分，任何模式共用，
+零具体模式专属逻辑）。
 
-本模块是通用模式物料步骤的取数/组装纯函数面，任何模式共用，零角色扮演专属逻辑：
-- state 带 execution_context.mode → 组装模式段：路由指引（编排清单/调度链/
-  执行者池）+ 模式口径段 + 工具面注记；tool_ids 按模式声明收窄（只收窄不扩权，
-  且仅当 state.tool_ids 基线存在）。
-- 无 mode 键 = 零注入；profile 取数失败 = 降级不注入（调用方 warning，
-  不阻断管道）。
-- 模式专属物料（卡/世界书等）不在本模块：模式包经约定出口 material.py::
-    build_injection(state, pkg_dir) -> str
-  自持组装（种子自包含，不 import 共享根），由插件按真实名
-  ``mode_<mode>.material`` 动态加载后调用。
+mode_material_inject 职责终局三件（设计 D10，2026-09-28）= mode 观测回写 +
+persona 接管 + 组装器物料 system prompt 尾追加；本模块承载其取数/解析纯函数：
 
-取数通道：
-- profile 经 mode.get_profile 服务调用（tool-executor 显式 plugin_id，
-  eval_harness 仓内先例同通道；信封解析见 unwrap_mode_profile）；
-- 编排清单/口径段直读模式包约定目录（pipelines/*.yaml 键 = mode_X/<stem>、
-  文件头 task_kinds；rules/*.md）。目录扫描注册（Rust 侧）可用前的过渡取数，
-  注册面就绪后切 registry。
+- resolve_mode：读 execution_context.mode（无键/形态不符 = 空串，零激活语义）；
+- derive_mode_from_agent：execution_context.mode 缺席/空时按 state["agent.id"]
+  归属包派生（设计 D6：消费面单点，派发面零改动）；
+- find_package_dir：模式包目录双根解析（实现单点在共享平铺模块 mode_keys）；
+- resolve_persona_takeover：按 mode.yaml persona 声明解析人设接管文本
+  （命中 = 调用方写 state.context.persona_text，prompt_build 的 {{persona:}}
+  占位符据此换源）。
+
+模式知识注入唯一面 = prompt_build 的 {{mode_catalog}} 目录（描述+路由）；
+工具面单真值 = agent yaml tool_ids 三态——两者均不在本模块。
 """
 from __future__ import annotations
 
-import logging
 import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from mode_keys import find_mode_package_dir as _find_mode_package_dir
-
-logger = logging.getLogger(__name__)
+from mode_keys import (
+    find_mode_package_dir as _find_mode_package_dir,
+    parse_mode_agent_key as _parse_mode_agent_key,
+)
 
 # mode 键 = plugin_id（mode_X）与包目录名的构成成分，只放行安全形态
 # （设计稿口径：coding|writing|roleplay|research 一类小写标识）。
@@ -44,163 +41,63 @@ def resolve_mode(state: Mapping[str, Any]) -> str:
     return mode.strip()
 
 
+def derive_mode_from_agent(state: Mapping[str, Any]) -> str:
+    """按 state["agent.id"] 归属包派生 mode（设计 D6，消费面单点）。
+
+    agent 键形如 ``mode_X/<stem>``：``mode_`` 前缀只用于提取候选 X（形态
+    [a-z][a-z0-9_]{0,63}，parse_mode_agent_key 同口径），**真值判定靠包目录
+    存在性**——find_package_dir(X) 命中（声明面表达：包内 agents/*.yaml 即
+    归属）才派生，防凭空键伪造模式；禁止在前缀字符串上做其他模式行为分支。
+    非模式键/形态非法/包不存在 → 空串（零派生，零注入语义不变）。
+    """
+    agent_id = state.get("agent.id")
+    if not isinstance(agent_id, str):
+        return ""
+    parsed = _parse_mode_agent_key(agent_id)
+    if parsed is None:
+        return ""
+    mode, _stem = parsed
+    return mode if find_package_dir(mode) is not None else ""
+
+
 def find_package_dir(mode: str) -> Path | None:
     """模式包目录双根解析（实现单点在共享平铺模块 mode_keys）。"""
     return _find_mode_package_dir(mode)
 
 
-def read_orchestrations(pkg_dir: Path | None, mode: str) -> list[dict[str, Any]]:
-    """直读模式包 pipelines/*.yaml → 编排清单（键 mode_X/<stem> + 文件头 task_kinds）。
+def resolve_persona_takeover(pkg_dir: Path | None, state: Mapping[str, Any]) -> str:
+    """按 mode.yaml persona 声明解析人设接管文本（通用机制）。
 
-    目录/文件缺失 = 空清单（包未带编排，合法形态）；单文件解析失败 warning
-    跳过——本清单是路由咨询物料，不阻断管道（fail-closed 闸在 G2 注册面）。
+    声明形态（mode.yaml，模式声明"接管主 agent 人设注入"）::
+
+        persona:
+          replace: true            # 接管开关（非 true = 本模式不接管）
+          from: <键名>             # execution_context 中携带人设文本的键
+
+    命中 = 返回人设文本（调用方写 state.context.persona_text，prompt_build 的
+    {{persona:}} 占位符据此换源——替换提示词人设段，骨架不动）；声明缺席/
+    replace 非 true/from 缺文本 = 空串（零接管）。pkg_dir 缺失或 mode.yaml
+    不可读 = 空串（降级语义与组装器声明同口径）。
+
+    缓存语义（提示职责在接入方 UI）：接管改变系统提示词前缀，破坏前缀缓存
+    命中——接管声明即接受该代价。
     """
     if pkg_dir is None:
-        return []
-    pipelines_dir = pkg_dir / "pipelines"
-    if not pipelines_dir.is_dir():
-        return []
-    import yaml  # noqa: PLC0415
-
-    out: list[dict[str, Any]] = []
-    for path in sorted(pipelines_dir.glob("*.yaml")):
-        try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError) as exc:
-            logger.warning(
-                "[mode_material_inject] 模式编排文件解析失败，跳过 | path=%s | err=%s",
-                path,
-                exc,
-            )
-            continue
-        kinds = data.get("task_kinds") if isinstance(data, Mapping) else None
-        out.append({
-            "key": f"mode_{mode}/{path.stem}",
-            "task_kinds": [str(k) for k in kinds] if isinstance(kinds, list) else [],
-        })
-    return out
-
-
-def read_rules_text(pkg_dir: Path | None) -> str:
-    """读模式包 rules/*.md 口径段（文件名序拼接）；无规则 = 空串（调用方占位）。"""
-    if pkg_dir is None:
         return ""
-    rules_dir = pkg_dir / "rules"
-    if not rules_dir.is_dir():
+    try:
+        import yaml  # noqa: PLC0415
+
+        data = yaml.safe_load((pkg_dir / "mode.yaml").read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
         return ""
-    parts: list[str] = []
-    for path in sorted(rules_dir.glob("*.md")):
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError as exc:
-            logger.warning(
-                "[mode_material_inject] 模式规则文件不可读，跳过 | path=%s | err=%s",
-                path,
-                exc,
-            )
-            continue
-        if text.strip():
-            parts.append(text.strip())
-    return "\n\n".join(parts)
-
-
-def mode_tool_ids(profile: Mapping[str, Any]) -> list[str] | None:
-    """模式声明的工具面 material_scope.tool_ids；未声明/形态不符 = None（不收窄）。"""
-    scope = profile.get("material_scope")
-    if not isinstance(scope, Mapping):
-        return None
-    ids = scope.get("tool_ids")
-    if not isinstance(ids, list):
-        return None
-    return [t for t in ids if isinstance(t, str)]
-
-
-def tool_surface_note(
-    profile: Mapping[str, Any], baseline: list[str] | None
-) -> tuple[str, list[str] | None]:
-    """工具面注记文本 + 收窄结果。只收窄不扩权：
-
-    - 模式未声明 material_scope.tool_ids（一期未细化）= 不收窄，如实注明；
-    - state 基线无 tool_ids（agent 未声明或 tool_ids: inherit 继承全量面）
-      = 模式声明不套用（套用即扩权/误收窄继承面）；
-    - 两边都有 = 基线 ∩ 模式声明（保基线序，结果 ⊆ 基线）。
-    """
-    mode_ids = mode_tool_ids(profile)
-    if mode_ids is None:
-        return ("本模式 material_scope 未细化 tool_ids，本期不收窄（维持基线白名单）。", None)
-    if baseline is None:
-        return ("agent 基线未声明 tool_ids，模式声明不套用（只收窄不扩权）。", None)
-    narrowed = [t for t in baseline if t in set(mode_ids)]
-    note = (
-        f"模式工具面收窄：基线 {len(baseline)} 项 ∩ 模式声明 {len(mode_ids)} 项"
-        f" = {len(narrowed)} 项。"
-    )
-    return note, narrowed
-
-
-def build_mode_section(
-    mode: str,
-    profile: Mapping[str, Any],
-    pkg_dir: Path | None,
-    tool_note: str,
-) -> str:
-    """组装主 agent 提示词模式段（路由指引 + 口径段 + 工具面注记）。
-
-    三件内容取数：路由指引 = profile.chain（调度链/执行者池）+ 包内
-    pipelines/*.yaml（任务型→编排对应，主 agent 自行分析任务状态选编排，
-    主 agent 是路由器）；口径段 = 包内 rules/*.md（取不到注明占位）；
-    工具面 = 调用方经 tool_surface_note 预生成的注记。
-    """
-    name = str(profile.get("name") or mode)
-    lines: list[str] = [
-        f"## 模式物料（mode={mode}）",
-        f"本轮任务以「{name}」模式执行，以下物料由模式包 mode_{mode} 提供。",
-        "",
-        "### 编排路由（你是路由器）",
-        "自行分析当前任务状态与任务型，从下列清单选择匹配编排并以其编排键派单；"
-        "无匹配时按既有派单规则走共享编排。",
-    ]
-    orch = read_orchestrations(pkg_dir, mode)
-    if orch:
-        lines.append("可用编排（编排键 → 任务型）：")
-        for item in orch:
-            kinds = "、".join(item["task_kinds"]) if item["task_kinds"] else "未标注"
-            lines.append(f"- `{item['key']}`：任务型 {kinds}")
-    else:
-        lines.append(
-            "本模式包暂未携带专属编排（pipelines/ 为空），"
-            "按既有派单规则使用共享编排 `autonomous`。"
-        )
-    chain = profile.get("chain")
-    if isinstance(chain, Mapping):
-        path = chain.get("expected_path")
-        if isinstance(path, list) and path:
-            lines.append("调度链（偏好非强制）：" + " → ".join(str(p) for p in path))
-        pool = chain.get("executor_pool")
-        if isinstance(pool, list) and pool:
-            lines.append("执行者池：" + "、".join(str(p) for p in pool))
-    lines.append("")
-    lines.append("### 模式口径")
-    rules = read_rules_text(pkg_dir)
-    if rules:
-        lines.append(rules)
-    else:
-        lines.append(
-            f"（模式包 mode_{mode} 暂未携带口径规则 rules/*.md，占位——随模式包进化补全）"
-        )
-    lines.append("")
-    lines.append("### 工具面")
-    lines.append(tool_note)
-    return "\n".join(lines)
-
-
-def unwrap_mode_profile(res: Any) -> dict[str, Any]:
-    """mode.get_profile 返回信封解析：容忍 {"data": {...}} 或 profile 本体。
-
-    非 dict / 缺 mode 键 = 服务返回无效，抛 ValueError（调用方降级不注入）。
-    """
-    data = res.get("data") if isinstance(res, Mapping) else None
-    profile = data if isinstance(data, dict) else res
-    if not isinstance(profile, dict) or not profile.get("mode"):
-        raise ValueError(f"mode.get_profile 返回无效 profile: {str(res)[:200]}")
-    return profile
+    decl = data.get("persona") if isinstance(data, dict) else None
+    if not isinstance(decl, Mapping) or decl.get("replace") is not True:
+        return ""
+    from_key = decl.get("from")
+    if not isinstance(from_key, str) or not from_key.strip():
+        return ""
+    ec = state.get("execution_context")
+    text = ec.get(from_key.strip()) if isinstance(ec, Mapping) else None
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    return ""

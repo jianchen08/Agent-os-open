@@ -503,6 +503,12 @@ impl MetricsAggregator {
             .collect()
     }
 
+    /// series 总数（堆栈级诊断面 memory-breakdown 消费；条目数实测，
+    /// 不逐 series 深拷）。
+    pub fn series_count(&self) -> usize {
+        self.inner.read().len()
+    }
+
     /// 清空（测试用）。
     pub fn clear(&self) {
         self.inner.write().clear();

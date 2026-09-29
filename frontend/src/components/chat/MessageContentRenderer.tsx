@@ -7,12 +7,16 @@ import { LobeChatMarkdown } from '@/components/chat/LobeChatMarkdown'
 import { ThinkingDisplay } from '@/components/chat/ThinkingDisplay'
 import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
 import { cn } from '@/lib/utils'
+import { markdownLinkInterceptor } from '@/services/fileLoaderRegistry'
 import type { RenderFragment } from '@/components/chat/hooks/useMessageRender'
 import type { SystemLevel } from '@/types/messageParts'
 import type { ReactNode } from 'react'
 
 /** 是否使用 LobeChat Markdown 组件 注意：需要安装依赖 @lobehub/ui 和 motion */
 const USE_LOBECHAT_MARKDOWN = true
+
+/** 消息 markdown 附件链接拦截（/uploads 链接改走加载器，防整窗导航死页） */
+const attachmentLinkInterceptor = markdownLinkInterceptor()
 
 /** System notification style mapping by level */
 const SYSTEM_LEVEL_STYLES: Record<SystemLevel, { container: string; icon: string; text: string }> = {
@@ -117,7 +121,7 @@ function renderFragment(
       if (USE_LOBECHAT_MARKDOWN) {
         return (
           <div key={fragment.key}>
-            <LobeChatMarkdown content={content} isStreaming={isLastStreaming} />
+            <LobeChatMarkdown content={content} isStreaming={isLastStreaming} onLinkClick={attachmentLinkInterceptor} />
           </div>
         )
       }

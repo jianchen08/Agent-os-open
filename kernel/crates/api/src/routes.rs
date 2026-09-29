@@ -10,8 +10,8 @@ use tokio::sync::RwLock;
 
 use agentos_config::config_center::ConfigCenter;
 use agentos_core::traits::{
-    CapabilityRegistry, ConfigFileMapping, HttpHandleCapability, PluginInvoker, PluginManifest,
-    PluginType, StorageBackend,
+    CapabilityRegistry, ConfigFileMapping, HostBoxesSnapshot, HttpHandleCapability,
+    PendingSpawnEntry, PluginInvoker, PluginManifest, PluginType, StorageBackend,
 };
 use agentos_core::types::{PipelineConfig, StepLibrary};
 use agentos_invoker::verify::{compare_tools, declared_with_services, parse_actual_tools};
@@ -2050,6 +2050,136 @@ fn config_err_to_api(e: crate::config_service::ConfigError) -> ApiError {
     }
 }
 
+// ── 通用用户空间 .env 读写（2026-09-28 配置读写单源化批次 A2）─────────────
+// 动态命名的凭证变量（provider key = {PROVIDER_ID}_API_KEY，自定义 provider
+// 任意命名）无法走 manifest env-target 静态声明制——本端点是其唯一写面。
+// 落点恒用户空间 .env（env_file::env_path_for_root），写后经 invoker 的
+// .env mtime 指纹触发 sidecar 热重启生效。
+
+/// 内核级保留变量：AGENTOS_* 是内核行为开关（ADMIN_PASSWORD/DB_PATH/USER_ROOT/
+/// CONFIG_ROOT/STORAGE_DRIVER…），系统关键变量不得经配置面改写——422 拒绝。
+fn is_reserved_env_name(name: &str) -> bool {
+    let upper = name.to_uppercase();
+    if upper.starts_with("AGENTOS_") {
+        return true;
+    }
+    matches!(
+        upper.as_str(),
+        "PATH"
+            | "PATHEXT"
+            | "SYSTEMROOT"
+            | "SYSTEMDRIVE"
+            | "WINDIR"
+            | "COMSPEC"
+            | "HOMEDRIVE"
+            | "HOMEPATH"
+            | "USERPROFILE"
+            | "TEMP"
+            | "TMP"
+            | "PROGRAMFILES"
+            | "PROGRAMDATA"
+            | "APPDATA"
+            | "LOCALAPPDATA"
+            | "USERDOMAIN"
+    )
+}
+
+fn user_env_masked_view(env_path: &std::path::Path) -> serde_json::Value {
+    let text = std::fs::read_to_string(env_path).unwrap_or_default();
+    let vars = agentos_mcp::env_file::parse_env_text_for_read(&text);
+    let mut masked = serde_json::Map::new();
+    for name in vars.keys() {
+        masked.insert(name.clone(), serde_json::Value::String("***".to_string()));
+    }
+    serde_json::Value::Object(masked)
+}
+
+/// GET /api/v1/config/env——用户 .env 全量掩码视图（值恒 "***"，仅可见
+/// "是否已设置"）+ ETag。消费方：设置页派生 provider key 配置状态。
+pub async fn get_user_env_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let project_root = state.project_root.ok_or_else(|| ApiError::Internal {
+        message: "project_root not configured".to_string(),
+    })?;
+    let env_path = agentos_mcp::env_file::env_path_for_root(&project_root);
+    let vars = user_env_masked_view(&env_path);
+    let etag = compute_etag(serde_json::to_string(&vars).unwrap_or_default().as_bytes());
+    Ok(axum::Json(json!({
+        "path": ".env",
+        "vars": vars,
+        "etag": etag,
+    })))
+}
+
+/// PUT /api/v1/config/env 请求体：set 写值、unset 清除、哨兵与 ETag 同 env-target 语义。
+#[derive(Debug, serde::Deserialize)]
+pub struct UserEnvUpdateRequest {
+    #[serde(default)]
+    pub set: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub unset: Vec<String>,
+    pub if_match: Option<String>,
+}
+
+/// PUT /api/v1/config/env——保留名拒绝（422）、If-Match 乐观锁（409）、
+/// `***` 哨兵跳过、空值移除；落点恒用户空间 .env，原子行级合并。
+pub async fn put_user_env_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::Json(req): axum::Json<UserEnvUpdateRequest>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let project_root = state.project_root.ok_or_else(|| ApiError::Internal {
+        message: "project_root not configured".to_string(),
+    })?;
+    let env_path = agentos_mcp::env_file::env_path_for_root(&project_root);
+
+    let vars = user_env_masked_view(&env_path);
+    let current_etag = compute_etag(serde_json::to_string(&vars).unwrap_or_default().as_bytes());
+    if let Some(given) = req.if_match.as_deref() {
+        if given != current_etag {
+            return Err(ApiError::Conflict {
+                message: format!("ETag mismatch: current={current_etag}, given={given:?}"),
+            });
+        }
+    }
+
+    for name in req.set.keys().chain(req.unset.iter()) {
+        if is_reserved_env_name(name) {
+            return Err(ApiError::UnprocessableEntity {
+                message: format!("reserved env var not writable: {name}"),
+            });
+        }
+    }
+
+    let mut updates: Vec<(String, String)> = Vec::new();
+    for (name, value) in req.set {
+        if value == "***" {
+            continue; // 哨兵：保留现值
+        }
+        updates.push((name, value));
+    }
+    for name in req.unset {
+        updates.push((name, String::new())); // 空值 = 移除该行
+    }
+    agentos_mcp::env_file::write_env_updates(&env_path, &updates).map_err(|e| {
+        ApiError::Internal {
+            message: format!("write .env: {e}"),
+        }
+    })?;
+
+    let new_vars = user_env_masked_view(&env_path);
+    let new_etag = compute_etag(
+        serde_json::to_string(&new_vars)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    Ok(axum::Json(json!({
+        "ok": true,
+        "vars": new_vars,
+        "etag": new_etag,
+    })))
+}
+
 /// 返回带 ETag 头的 GET 响应（覆盖默认 JSON，附加 header）。
 pub async fn get_plugin_config_with_etag(
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -2162,6 +2292,71 @@ pub async fn system_restart_handler(
 /// delta API）。
 pub async fn system_memstats_handler() -> axum::Json<crate::allocator::MemStats> {
     axum::Json(crate::allocator::snapshot_stats())
+}
+
+/// GET /api/v1/plugins/hosts — 宿主盒子快照（宿主长跑劣化修复方案批次C 观测面）。
+///
+/// 同步读取 invoker 既有记账锁组装（只读：不 spawn、不驱逐、不 touch），
+/// pid/alive/uptime_secs 复用 host_proc_snapshots 采集面，rss_mb 由 api 侧
+/// 按 pid 富化（轮询同款跳板下探 + collect_memory_rss；HTTP transport 无
+/// pid 恒 null）。pending_spawn 经 api 侧差集补全：invoker 记账面可见条目
+/// （携带真实 last_call_at）与「AppState 启用清单（L1 真值源
+/// `enabled_plugin_ids`）− 盒子成员全集」的差集合并——从未触达 invoker 的
+/// 启用插件也进「待装载」区（metrics_admin 型缺口的观测闭环）；plugin_id
+/// 去重、invoker 条目优先、按 plugin_id 排序，字段形状不变。
+/// 响应契约字段冻结（前端宿主盒子视图逐字消费）。
+/// 鉴权走 `/api/v1/plugins*` 白名单读面（与 memstats 同级同法：GET →
+/// admin/viewer）。invoker 未装配（裸测试构造）返回空快照——只读诊断面
+/// 诚实表达「无盒子」。
+pub async fn plugins_hosts_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> axum::Json<HostBoxesSnapshot> {
+    let mut snapshot = match state.invoker.as_ref() {
+        Some(invoker) => invoker.host_boxes_snapshot().await,
+        None => HostBoxesSnapshot::default(),
+    };
+    crate::metrics::proc_state::enrich_host_boxes_rss(&mut snapshot.hosts);
+    let boxed_ids: std::collections::HashSet<String> = snapshot
+        .hosts
+        .iter()
+        .flat_map(|h| h.members.iter().map(|m| m.plugin_id.clone()))
+        .collect();
+    let enabled_ids = state.enabled_plugin_ids.read().await.clone();
+    snapshot.pending_spawn = merge_pending_spawn(snapshot.pending_spawn, &enabled_ids, &boxed_ids);
+    axum::Json(snapshot)
+}
+
+/// pending_spawn 差集补全（批次C1 契约接缝补刀）。
+///
+/// invoker 侧 pending_spawn 只含记账面可见 id——「已启用、从未被调用、
+/// 进程表无行」的插件不列，恰漏观测面核心场景（metrics_admin 型事故）。
+/// 本函数把 AppState 启用清单对盒子成员全集的差集并入：与 invoker 条目按
+/// plugin_id 去重合并（invoker 条目优先——携带真实 last_call_at 与记账
+/// enabled 面），补入条目固定 `enabled=true` / `last_call_at=null`。已装载
+/// 插件（在任一盒子 members 中）不因启用清单而重复出现。输出按 plugin_id
+/// 排序（BTreeMap 收敛），前端契约形状不变。
+fn merge_pending_spawn(
+    invoker_entries: Vec<PendingSpawnEntry>,
+    enabled_ids: &std::collections::HashSet<String>,
+    boxed_ids: &std::collections::HashSet<String>,
+) -> Vec<PendingSpawnEntry> {
+    let mut merged: std::collections::BTreeMap<String, PendingSpawnEntry> = invoker_entries
+        .into_iter()
+        .map(|e| (e.plugin_id.clone(), e))
+        .collect();
+    for plugin_id in enabled_ids {
+        if boxed_ids.contains(plugin_id) {
+            continue;
+        }
+        merged
+            .entry(plugin_id.clone())
+            .or_insert_with(|| PendingSpawnEntry {
+                plugin_id: plugin_id.clone(),
+                enabled: true,
+                last_call_at: None,
+            });
+    }
+    merged.into_values().collect()
 }
 
 /// 读磁盘 plugin.json 并与注册表 manifest 做工具集/schema 差异比对
@@ -3062,8 +3257,10 @@ pub async fn put_pipeline_config_handler(
     // B4/B6：原子写 + round-trip 校验（复用 config_service）
     atomic_write_yaml(&path, &req.data).map_err(config_err_to_api)?;
 
-    // 管道编译缓存失效：写盘成功即失效对应键——下次显式指定该配置时按需
-    // 重载新内容（缓存无 mtime 校验，PUT 是唯一失效路径）。
+    // 管道编译缓存失效（D9 版本钉住语义）：写盘成功即清该配置的"当前盘面
+    // 最新版"指针——下次未钉取用（新实例出生轮）按盘面重编译新内容入缓存；
+    // 历史版本产物保留不删（已钉实例恒用出生版本，PUT 热更只对之后出生的
+    // 实例生效）。缓存无 mtime 校验，PUT 是唯一失效路径。
     crate::server::pipeline_cache_invalidate(&name);
 
     let new_etag = compute_etag(
@@ -3176,6 +3373,7 @@ mod state_summary_tests {
             activation: None,
             persistent_fields: vec![],
             export_fields: fields.iter().map(|s| s.to_string()).collect(),
+            aux_venvs: Vec::new(),
             provides: None,
         }
     }
@@ -4786,6 +4984,7 @@ mod routes_http_handler_tests {
             activation: None,
             persistent_fields: vec![],
             export_fields: vec![],
+            aux_venvs: Vec::new(),
             provides: None,
         }
     }
@@ -6594,6 +6793,102 @@ mod routes_http_handler_tests {
         assert_eq!(err_status(err), StatusCode::CONFLICT);
     }
 
+    // ── 通用用户空间 .env 读写（批次 A2） ─────────────────────
+
+    #[tokio::test]
+    async fn user_env_get_masks_values_and_etags() {
+        let (state, tmp, _g) = plugin_cfg_state().await;
+        std::fs::write(
+            tmp.path().join(".env"),
+            "DEEPSEEK_API_KEY=sk-real\nOTHER=1\n",
+        )
+        .unwrap();
+        let resp = get_user_env_handler(axum::extract::State(state))
+            .await
+            .unwrap();
+        assert_eq!(resp.0["vars"]["DEEPSEEK_API_KEY"], "***", "值恒掩码");
+        assert_eq!(resp.0["vars"]["OTHER"], "***");
+        let etag = resp.0["etag"].as_str().unwrap();
+        assert!(!etag.is_empty());
+    }
+
+    #[tokio::test]
+    async fn user_env_put_writes_sentinel_skips_unset_clears() {
+        let (state, tmp, _g) = plugin_cfg_state().await;
+        std::fs::write(
+            tmp.path().join(".env"),
+            "EXISTING=keep\nDEEPSEEK_API_KEY=old\n",
+        )
+        .unwrap();
+        let view = get_user_env_handler(axum::extract::State(state.clone()))
+            .await
+            .unwrap();
+        let etag = view.0["etag"].as_str().unwrap().to_string();
+
+        let resp = put_user_env_handler(
+            axum::extract::State(state.clone()),
+            axum::Json(UserEnvUpdateRequest {
+                set: HashMap::from([
+                    ("MINIMAX_API_KEY".to_string(), "new-key".to_string()),
+                    ("DEEPSEEK_API_KEY".to_string(), "***".to_string()),
+                ]),
+                unset: vec!["EXISTING".to_string()],
+                if_match: Some(etag),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0["ok"], true);
+        let env_text = std::fs::read_to_string(tmp.path().join(".env")).unwrap();
+        assert!(env_text.contains("MINIMAX_API_KEY=new-key"), "{env_text}");
+        assert!(
+            env_text.contains("DEEPSEEK_API_KEY=old"),
+            "哨兵保留现值: {env_text}"
+        );
+        assert!(
+            !env_text.contains("EXISTING="),
+            "unset 移除该行: {env_text}"
+        );
+        // 落点恒用户空间（pin_user_root → <USER_ROOT>/.env）
+        let new_vars = &resp.0["vars"];
+        assert_eq!(new_vars["MINIMAX_API_KEY"], "***");
+        assert!(new_vars.get("EXISTING").is_none(), "清除后掩码视图不含该键");
+    }
+
+    #[tokio::test]
+    async fn user_env_put_rejects_reserved_names_and_etag_mismatch() {
+        let (state, tmp, _g) = plugin_cfg_state().await;
+        std::fs::write(tmp.path().join(".env"), "A=1\n").unwrap();
+
+        // 保留名 → 422（内核行为开关与系统变量不得经配置面改写）
+        for name in ["AGENTOS_ADMIN_PASSWORD", "agentos_db_path", "PATH"] {
+            let err = put_user_env_handler(
+                axum::extract::State(state.clone()),
+                axum::Json(UserEnvUpdateRequest {
+                    set: HashMap::from([(name.to_string(), "x".to_string())]),
+                    unset: vec![],
+                    if_match: None,
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err_status(err), StatusCode::UNPROCESSABLE_ENTITY, "{name}");
+        }
+
+        // ETag 不匹配 → 409
+        let err = put_user_env_handler(
+            axum::extract::State(state),
+            axum::Json(UserEnvUpdateRequest {
+                set: HashMap::from([("K".to_string(), "v".to_string())]),
+                unset: vec![],
+                if_match: Some("stale".to_string()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_status(err), StatusCode::CONFLICT);
+    }
+
     // ── 管道配置端点（config/pipelines/{name}.yaml） ───────────
 
     fn valid_pipeline_cfg() -> Value {
@@ -7247,6 +7542,205 @@ mod routes_http_handler_tests {
             run.status
         );
     }
+    // ── 批次C 宿主盒子快照端点（GET /api/v1/plugins/hosts） ──────────────
+
+    /// 空插件加载器（路由测试只需可构造的 invoker，不触达插件面）。
+    struct HostsStubLoader;
+
+    #[async_trait::async_trait]
+    impl agentos_core::traits::PluginLoader for HostsStubLoader {
+        async fn discover(
+            &self,
+            _root_paths: &[&str],
+        ) -> Result<Vec<PluginManifest>, agentos_core::types::PluginError> {
+            Ok(vec![])
+        }
+
+        fn validate_manifest(
+            &self,
+            _manifest: &PluginManifest,
+        ) -> Result<(), agentos_core::types::PluginError> {
+            Ok(())
+        }
+
+        async fn load(
+            &self,
+            _plugin_id: &str,
+        ) -> Result<agentos_core::traits::LoadedPlugin, agentos_core::types::PluginError> {
+            Err(agentos_core::types::PluginError {
+                message: "stub loader".to_string(),
+                code: None,
+                source: None,
+            })
+        }
+
+        async fn unload(&self, _plugin_id: &str) -> Result<(), agentos_core::types::PluginError> {
+            Ok(())
+        }
+
+        fn get_status(&self, _plugin_id: &str) -> agentos_core::traits::PluginStatus {
+            agentos_core::traits::PluginStatus::Discovered
+        }
+    }
+
+    /// 内存库播种 admin 的路由 app + access token，可注入 invoker 与启用清单
+    /// （种子/铸 token 与 [`app_with_admin_token`] 同源同构，多注 invoker）。
+    async fn hosts_app_with_invoker(
+        invoker: Option<Arc<dyn PluginInvoker>>,
+        enabled_ids: &[&str],
+    ) -> (axum::Router, String) {
+        let store = sqlite();
+        let password_hash = agentos_http::auth::hash_password(ADMIN_PW).unwrap();
+        store
+            .create_user(&agentos_core::types::UserRecord {
+                user_id: ADMIN_USER_ID.to_string(),
+                username: "admin".to_string(),
+                password: password_hash.clone(),
+                email: None,
+                role: "admin".to_string(),
+                tenant_id: agentos_http::auth::DEFAULT_TENANT_ID.to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                last_login_at: None,
+                must_change_password: false,
+            })
+            .await
+            .unwrap();
+        let admin = agentos_http::auth::BuiltInUser {
+            id: ADMIN_USER_ID.to_string(),
+            username: "admin".to_string(),
+            password: password_hash,
+            email: String::new(),
+            role: "admin".to_string(),
+            tenant_id: "default".to_string(),
+            created_at: String::new(),
+            must_change_password: false,
+        };
+        let token =
+            agentos_http::auth::encode_token(agentos_http::auth::TokenType::Access, &admin, 3600);
+        let mut state = AppState::new();
+        state.store = Some(store);
+        state.invoker = invoker;
+        state.enabled_plugin_ids = Arc::new(tokio::sync::RwLock::new(
+            enabled_ids.iter().map(|s| s.to_string()).collect(),
+        ));
+        (crate::server::build_router(state), token)
+    }
+
+    /// 白名单读面拒绝匿名（与 memstats 同语义链：缺凭证 401，
+    /// 403 保留给有凭证但角色不足）。
+    #[tokio::test]
+    async fn hosts_endpoint_without_token_unauthorized() {
+        let (app, _) = hosts_app_with_invoker(None, &[]).await;
+        let resp = oneshot(&app, "GET", "/api/v1/plugins/hosts", None, None).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// invoker 未装配（裸测试构造）→ 200 + 冻结顶层空骨架——只读诊断面
+    /// 诚实表达「无盒子」，不 500。
+    #[tokio::test]
+    async fn hosts_endpoint_unwired_invoker_returns_empty_frozen_shape() {
+        let (app, token) = hosts_app_with_invoker(None, &[]).await;
+        let resp = oneshot(&app, "GET", "/api/v1/plugins/hosts", Some(&token), None).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        let obj = v.as_object().expect("响应必须是 JSON 对象");
+        assert_eq!(obj.len(), 2, "顶层字段冻结为 hosts + pending_spawn");
+        assert!(obj.contains_key("hosts") && obj.contains_key("pending_spawn"));
+        assert_eq!(v["hosts"], json!([]));
+        assert_eq!(v["pending_spawn"], json!([]));
+    }
+
+    /// 已接线空 invoker → 200 + 同一冻结空骨架（Some 分支：直调
+    /// invoker.host_boxes_snapshot 取数）。
+    #[tokio::test]
+    async fn hosts_endpoint_wired_invoker_returns_snapshot_shape() {
+        let invoker = Arc::new(agentos_invoker::PluginInvokerImpl::new(Arc::new(
+            HostsStubLoader,
+        )));
+        let (app, token) = hosts_app_with_invoker(Some(invoker), &[]).await;
+        let resp = oneshot(&app, "GET", "/api/v1/plugins/hosts", Some(&token), None).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["hosts"], json!([]));
+        assert_eq!(v["pending_spawn"], json!([]));
+    }
+
+    /// 差集补全（handler 级）：从未触达 invoker 的启用插件进「待装载」区
+    /// （metrics_admin 型缺口观测闭环）——AppState 启用清单 − 盒子成员全集，
+    /// 补条目 enabled=true / last_call_at=null，按 plugin_id 排序。
+    #[tokio::test]
+    async fn hosts_endpoint_unwired_invoker_lists_enabled_plugins_as_pending_spawn() {
+        let (app, token) = hosts_app_with_invoker(None, &["metrics_admin", "aaa_untouched"]).await;
+        let resp = oneshot(&app, "GET", "/api/v1/plugins/hosts", Some(&token), None).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["hosts"], json!([]));
+        assert_eq!(
+            v["pending_spawn"],
+            json!([
+                {"plugin_id": "aaa_untouched", "enabled": true, "last_call_at": null},
+                {"plugin_id": "metrics_admin", "enabled": true, "last_call_at": null},
+            ])
+        );
+    }
+
+    /// merge 纯函数·从未触达场景：启用清单减盒子成员全集的差集补入；
+    /// 已装载插件（在盒子 members 中）不重复出现。
+    #[test]
+    fn merge_pending_spawn_fills_never_touched_enabled_plugins() {
+        let mut boxed = std::collections::HashSet::new();
+        boxed.insert("boxed_a".to_string());
+        let mut enabled = std::collections::HashSet::new();
+        enabled.insert("boxed_a".to_string());
+        enabled.insert("never_touched".to_string());
+        let merged = super::merge_pending_spawn(vec![], &enabled, &boxed);
+        assert_eq!(
+            merged,
+            vec![PendingSpawnEntry {
+                plugin_id: "never_touched".to_string(),
+                enabled: true,
+                last_call_at: None,
+            }],
+            "已装载的 boxed_a 不入差集，从未触达的 never_touched 补入"
+        );
+    }
+
+    /// merge 纯函数·去重优先级场景：invoker 记账条目（enabled=false / 带
+    /// last_call_at）优先保留，AppState 侧不重复补入；输出按 plugin_id 排序。
+    #[test]
+    fn merge_pending_spawn_invoker_entry_wins_and_output_sorted() {
+        let mut boxed = std::collections::HashSet::new();
+        boxed.insert("boxed_a".to_string());
+        let mut enabled = std::collections::HashSet::new();
+        enabled.insert("boxed_a".to_string());
+        enabled.insert("ghost".to_string());
+        enabled.insert("aaa".to_string());
+        let invoker_entries = vec![PendingSpawnEntry {
+            plugin_id: "ghost".to_string(),
+            enabled: false,
+            last_call_at: Some(7.0),
+        }];
+        let merged = super::merge_pending_spawn(invoker_entries, &enabled, &boxed);
+        assert_eq!(
+            merged,
+            vec![
+                PendingSpawnEntry {
+                    plugin_id: "aaa".to_string(),
+                    enabled: true,
+                    last_call_at: None,
+                },
+                PendingSpawnEntry {
+                    plugin_id: "ghost".to_string(),
+                    enabled: false,
+                    last_call_at: Some(7.0),
+                },
+            ],
+            "invoker 条目原样保留（记账 enabled 面不丢），AppState 不补第二条 ghost"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -7291,6 +7785,7 @@ mod app_state_builder_tests {
             activation: None,
             persistent_fields: vec![],
             export_fields: vec![],
+            aux_venvs: Vec::new(),
             provides: None,
         }
     }

@@ -95,14 +95,20 @@ impl MetricBroadcaster {
         session: Arc<agentos_session::SessionCoordinator>,
         interval: Duration,
     ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
+        // 堆栈级诊断插桩：活动槽 + 等待点标签（O(1)，不改等待语义）。
+        let activity =
+            agentos_core::task_activity::global_registry().register("metric-broadcaster");
+        tokio::spawn(agentos_core::task_activity::scope(activity, async move {
             let mut tick = tokio::time::interval(interval);
             // 第一次 tick 立即返回（不延迟），跳过避免启动期广播
             tick.tick().await;
+            agentos_core::task_activity::set_current_label("idle: next tick");
             loop {
                 tick.tick().await;
+                agentos_core::task_activity::set_current_label("broadcasting metrics_tick");
                 let data = collect_broadcast_snapshot(&agg, kernel_counters.as_deref());
                 if data.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+                    agentos_core::task_activity::set_current_label("idle: next tick");
                     continue; // 无关键指标 → 不广播
                 }
                 // 广播给全部活跃连接（EmitScope::Broadcast，监控设计 §六 形态2）。
@@ -110,8 +116,9 @@ impl MetricBroadcaster {
                 let _ = session
                     .broadcast_widget("metrics_tick", "tick", data, "kernel")
                     .await;
+                agentos_core::task_activity::set_current_label("idle: next tick");
             }
-        })
+        }))
     }
 }
 

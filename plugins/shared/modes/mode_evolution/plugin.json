@@ -1,0 +1,484 @@
+{
+  "id": "mode_evolution",
+  "name": "Mode Evolution",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "description": "自进化模式包（自洽整体）：负责整个系统的改进与执行闭环——题集展开/批次派发/结果聚合/失败归因（经复盘插件 triage_rules）/提案校验应用（staging→主仓 G2+热重载）/held-out 保密裁决/保留率哨兵/熔断一票否决，外加 evolution_panel 监控面板。T1-T8 流程物料随包打包（包内 rules/，B 部类），模式声明面 mode.yaml 自持（suite/levers/budget），evolution 引擎 agent 在包内 agents/ 注册表（mode_evolution/evolution）。",
+  "requires_services": [
+    "packaging"
+  ],
+  "permissions": {},
+  "priority": 56,
+  "host_group": "light",
+  "http_endpoints": [
+    {
+      "route_id": "mode_evolution_panel_page",
+      "method": "GET",
+      "path": "/ext/mode_evolution/page/evolution-panel",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "Webview HTML page: 自进化监控面板（插件自带 webview 页，供页时内联账本数据快照）"
+    }
+  ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "evolution_panel",
+        "title": "自进化",
+        "icon": "🧬",
+        "space": "workspace",
+        "slot": "tab",
+        "path": "/p/evolution_panel",
+        "widget": "webview",
+        "props": {
+          "pluginId": "mode_evolution",
+          "htmlPath": "/page/evolution-panel",
+          "widgetId": "evolution_panel"
+        },
+        "order": 63,
+        "description": "自进化监控面板：模式分组下钻轮次时间线（T1-T8）/scorecard 走势/假设清单/杠杆命中率/健康度五指标/熔断状态"
+      }
+    ]
+  },
+  "capabilities": {
+    "tools": [
+      {
+        "name": "eval_view_suite",
+        "description": "按模式取题集展开为 task_submit 批次清单（模式 profile 经模式插件 mode.get_profile 服务调用解析，派发由 agent 用自己的 task_submit 执行）",
+        "render": {
+          "card": "form",
+          "title": "评测·题集展开"
+        },
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string"
+            },
+            "tier": {
+              "type": "string",
+              "description": "profile.suite 档位（缺省 smoke）"
+            },
+            "cases": {
+              "type": "string"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "batches"
+          ],
+          "properties": {
+            "batches": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "eval_summarize",
+        "description": "聚合各 case 任务终态与验收结果出 scorecard（失败分类为复盘深分析预处理；判定谓词=终态∧AC∧budget_ok，声明预算须附 metrics 采集）",
+        "render": {
+          "card": "form",
+          "title": "评测·聚合"
+        },
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "mode",
+            "results"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string",
+              "description": "本轮执行模型 id（重放键）"
+            },
+            "round_type": {
+              "type": "string",
+              "enum": [
+                "treatment",
+                "control"
+              ],
+              "description": "treatment=进化进程轮（缺省）；control=零变更对照轮（不入基线链）"
+            },
+            "results": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "passed",
+            "total"
+          ],
+          "properties": {
+            "passed": {
+              "type": "number"
+            },
+            "total": {
+              "type": "number"
+            },
+            "delta": {
+              "type": "number"
+            }
+          }
+        }
+      },
+      {
+        "name": "eval_run_heldout",
+        "description": "held-out 隐藏集保密派发：内部经任务系统派发（题面不进 agent 上下文），返回 case↔task 映射；查终态后喂 eval_summarize 聚合",
+        "render": {
+          "card": "form",
+          "title": "评测·隐藏集派发"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "dispatched"
+          ],
+          "properties": {
+            "dispatched": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "proposal_submit",
+        "description": "提交物料更改提案（冻结面/白名单/原子性/base 校验，不过即拒）",
+        "render": {
+          "card": "form",
+          "title": "提案·提交"
+        },
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "layer",
+            "target",
+            "change_type",
+            "content",
+            "motivation"
+          ],
+          "properties": {
+            "layer": {
+              "type": "string",
+              "enum": [
+                "L1",
+                "L2",
+                "L3"
+              ]
+            },
+            "target": {
+              "type": "string"
+            },
+            "change_type": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string"
+            },
+            "motivation": {
+              "type": "string"
+            },
+            "base_hash": {
+              "type": "string"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "accepted"
+          ],
+          "properties": {
+            "accepted": {
+              "type": "boolean"
+            },
+            "proposal_id": {
+              "type": "string"
+            },
+            "violations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "proposal_apply",
+        "description": "应用已受理提案：content 写主仓目标文件（G2+热重载原生生效）并 pathspec commit；应用前复核校验",
+        "render": {
+          "card": "form",
+          "title": "提案·应用"
+        },
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "proposal_id"
+          ],
+          "properties": {
+            "proposal_id": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "applied"
+          ],
+          "properties": {
+            "applied": {
+              "type": "boolean"
+            },
+            "commit": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "proposal_reject",
+        "description": "驳回提案：记录原因与分类账（外因记账/预测失准/用户否决等）；已应用提案被用户裁决回滚同样走本工具（outcome=reverted，存档保留）",
+        "render": {
+          "card": "form",
+          "title": "提案·驳回"
+        },
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "proposal_id",
+            "reason"
+          ],
+          "properties": {
+            "proposal_id": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "category": {
+              "type": "string",
+              "enum": [
+                "external_cause",
+                "harness_defect",
+                "heldout_gap",
+                "judgment_failure",
+                "other",
+                "prediction_miss",
+                "sentry_regression",
+                "system_fault",
+                "user_veto"
+              ],
+              "description": "驳回/回滚分类（判定证据账：归因准确率与 P3 一票否决的数据源）"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "ok"
+          ],
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            }
+          }
+        }
+      },
+      {
+        "name": "eval_health",
+        "description": "流程健康度（轮次/提案命中率/杠杆账）+ 自进化指标 P0-P3 裁决（学习率/迁移/保留率/方差/效率/回滚/一票否决）",
+        "render": {
+          "card": "form",
+          "title": "评测·健康度"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "rounds"
+          ],
+          "properties": {
+            "rounds": {
+              "type": "number"
+            },
+            "hit_rate": {
+              "type": "number"
+            },
+            "breaker_tripped": {
+              "type": "boolean"
+            },
+            "evolution": {
+              "type": "object",
+              "description": "P0-P3 裁决：{metrics_version, verdict, reason, p0, p1, p2, p3}"
+            }
+          }
+        }
+      },
+      {
+        "name": "eval.screen",
+        "description": "轨迹库先行筛选：假设失败簇对轨迹样本库核查证据量（命中 ≥2 条失败轨迹才允许立项；不足先复跑确认或继续采集，省真实题集运行预算；verdict=insufficient 是裁决不是错误）",
+        "render": {
+          "card": "form",
+          "title": "评测·轨迹筛选"
+        },
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "description": "假设所属任务模式（与轨迹库归桶口径一致）"
+            },
+            "title_substring": {
+              "type": "string",
+              "description": "题名子串过滤（缺省按模式全量计）"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "verdict"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string"
+            },
+            "failure_samples": {
+              "type": "number"
+            },
+            "matched": {
+              "type": "number"
+            },
+            "replayable": {
+              "type": "number"
+            },
+            "threshold": {
+              "type": "number"
+            },
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "sufficient",
+                "insufficient"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    ],
+    "services": [
+      {
+        "name": "mode.describe",
+        "description": "返回自进化模式元数据（chain/权重/预算/profile 路径/panel_page_id）",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "mode",
+            "name",
+            "chain",
+            "weights",
+            "budget",
+            "profile_path",
+            "panel_page_id"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "chain": {
+              "type": "object"
+            },
+            "weights": {
+              "type": "object"
+            },
+            "budget": {
+              "type": "object"
+            },
+            "profile_path": {
+              "type": "string"
+            },
+            "panel_page_id": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "mode.get_profile",
+        "description": "返回自进化模式包内 mode.yaml 解析后的内容",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load"
+    ]
+  }
+}

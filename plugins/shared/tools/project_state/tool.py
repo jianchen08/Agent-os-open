@@ -1,6 +1,8 @@
-"""project_state 工具——项目方案工作流状态查询与迁移（ADR 2026-09-17）。
+"""project_state 工具——项目方案工作流状态查询、列举与迁移（ADR 2026-09-17）。
 
-状态机与合法边唯一真值 = plugins/shared/project_registry.py（WORKFLOW_TRANSITIONS）。
+读面两级：query 按 id 取单项目快照；list 全量列举登记簿（无需 id，agent 侧项目
+发现面）。状态机与合法边唯一真值 = plugins/shared/project_registry.py
+（WORKFLOW_TRANSITIONS）。
 plan→running（定稿过门）与 running→plan（修订回门）是人审门控迁移：本工具发起
 迁移即触发审批（security_rules needs_approval 按 action=transition 命中），审批
 通过前登记行不变——工具面只认合法边与登记写入，不做审批判定（插件判定/内核落库
@@ -38,13 +40,17 @@ _INPUT_SCHEMA: dict[str, Any] = {
         "project_id": {
             "type": "string",
             "minLength": 1,
-            "description": "项目 id（12hex 登记键）",
+            "description": "项目 id（12hex 登记键）。query/transition 必填；list 无需",
         },
         "action": {
             "type": "string",
-            "enum": ["query", "transition"],
+            "enum": ["query", "list", "transition"],
             "default": "query",
-            "description": "query=读当前工作流状态；transition=申请状态迁移（触发用户审批）",
+            "description": (
+                "query=按 project_id 读工作流状态；list=列举全部登记项目"
+                "（无需 project_id，按更新时间倒序）；transition=申请状态迁移"
+                "（触发用户审批）"
+            ),
         },
         "target_state": {
             "type": "string",
@@ -62,18 +68,38 @@ _INPUT_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": ["project_id"],
 }
 
 _OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "required": ["project_id", "workflow_state"],
+    "description": (
+        "query/transition 返回单项目快照（project_id/workflow_state/…/transitioned）；"
+        "list 返回全量清单（projects 数组 + total）"
+    ),
     "properties": {
         "project_id": {"type": "string"},
         "workflow_state": {"type": "string", "description": "plan | running | done"},
         "title": {"type": "string"},
         "path": {"type": "string"},
         "transitioned": {"type": "boolean", "description": "本次是否发生迁移（query 恒 false）"},
+        "projects": {
+            "type": "array",
+            "description": "list 结果：全部登记项目，按 updated_at 倒序",
+            "items": {
+                "type": "object",
+                "required": ["project_id", "workflow_state"],
+                "properties": {
+                    "project_id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "workflow_state": {"type": "string", "description": "plan | running | done"},
+                    "status": {"type": "string", "description": "active | paused（文件夹生命周期）"},
+                    "auto_execute": {"type": "boolean"},
+                    "path": {"type": "string"},
+                    "updated_at": {"type": "string"},
+                },
+            },
+        },
+        "total": {"type": "integer", "description": "list 结果：项目总数"},
     },
 }
 
@@ -92,8 +118,10 @@ class ProjectStateTool(BuiltinTool):
         return Tool(
             name="project_state",
             description=(
-                "查询或迁移项目方案工作流状态（plan | running | done）。"
-                "query：读登记行工作流状态；transition：申请状态迁移"
+                "查询、列举或迁移项目方案工作流状态（plan | running | done）。"
+                "query：按 project_id 读登记行工作流状态；list：列举全部登记项目"
+                "（无需 project_id，按更新时间倒序，含 title/path/status）；"
+                "transition：申请状态迁移"
                 "（plan→running 定稿过门 / running→plan 修订回门），"
                 "迁移触发用户审批（安全规则 needs_approval），审批通过前状态不变。"
                 "plan 态内 task_submit 仅允许派发调研/环境准备类任务，"
@@ -109,12 +137,21 @@ class ProjectStateTool(BuiltinTool):
         )
 
     async def execute(self, inputs: dict[str, Any]) -> ToolExecutionResult:
+        action = str(inputs.get("action") or "query").strip() or "query"
+        if action == "list":
+            registry = _registry()
+            projects = [self._row(p) for p in registry.list()]
+            projects.sort(key=lambda r: r["updated_at"], reverse=True)
+            return create_success_result(
+                data={"projects": projects, "total": len(projects)}
+            )
+
         project_id = str(inputs.get("project_id") or "").strip()
         if not project_id:
             return create_failure_result(
-                error="必须指定 project_id", error_code="MISSING_PROJECT_ID"
+                error=f"{action} 必须指定 project_id（列举项目用 action=list，无需 id）",
+                error_code="MISSING_PROJECT_ID",
             )
-        action = str(inputs.get("action") or "query").strip() or "query"
         registry = _registry()
         project = registry.get(project_id)
         if project is None:
@@ -164,6 +201,19 @@ class ProjectStateTool(BuiltinTool):
             reason[:200],
         )
         return self._snapshot(project, transitioned=True)
+
+    @staticmethod
+    def _row(project: Any) -> dict[str, Any]:
+        """登记行 → list 结果行（只出面板/调度消费字段，不出审计字段）。"""
+        return {
+            "project_id": project.id,
+            "title": project.title,
+            "workflow_state": project.workflow_state,
+            "status": project.status,
+            "auto_execute": bool(project.auto_execute),
+            "path": project.path,
+            "updated_at": project.updated_at,
+        }
 
     @staticmethod
     def _snapshot(project: Any, transitioned: bool) -> ToolExecutionResult:

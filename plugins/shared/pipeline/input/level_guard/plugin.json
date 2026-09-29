@@ -18,18 +18,17 @@
       "on_unload"
     ]
   },
-  "export_fields": [
-    "security.level_decision"
-  ],
+  "export_fields": [],
   "state": {
     "volatile_keys": [
-      "security.level_decision"
+      "pre_decided_results"
     ],
     "reads": [
       "agent_level",
       "core_type",
       "raw_tool_calls",
-      "tool_ids"
+      "tool_ids",
+      "pre_decided_results"
     ]
   },
   "permissions": {},

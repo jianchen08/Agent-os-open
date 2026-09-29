@@ -49,9 +49,9 @@ EVAL_BROKEN_SCHEMA: dict[str, Any] = {
 def eval_sleep(seconds: float, **_kwargs: Any) -> dict[str, Any]:
     """睡眠 seconds 秒后返回；范围非法时返回结构化参数错误。"""
     if not isinstance(seconds, (int, float)) or isinstance(seconds, bool):
-        return {"error": f"seconds 必须是数字，收到 {type(seconds).__name__}"}
+        return {"success": False, "error": f"seconds 必须是数字，收到 {type(seconds).__name__}"}
     if not (_SLEEP_MIN <= seconds <= _SLEEP_MAX):
-        return {"error": f"seconds 超出范围 [{_SLEEP_MIN:g}, {_SLEEP_MAX:g}]: {seconds}"}
+        return {"success": False, "error": f"seconds 超出范围 [{_SLEEP_MIN:g}, {_SLEEP_MAX:g}]: {seconds}"}
     time.sleep(seconds)
     return {"slept_seconds": seconds, "message": f"睡眠 {seconds:g}s 完成"}
 

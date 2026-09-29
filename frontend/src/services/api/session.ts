@@ -295,11 +295,12 @@ function assembleNonToolParts(params: {
         callId: tc.call_id || '',
         name: tc.tool_name || '',
         args: tc.tool_args || {},
-        // 构建时若 assistant toolCalls 已带 error，则派生为 'error'；否则默认 'done'。
-        // 此处 toolCalls 通常无 per-call status（后端不填充），最终 state 由
-        // mergeConsecutiveAssistantMessages 根据 tool-role 消息的 toolError/status 权威派生，
-        // 与流式 toolHandler.ts:142 路径一致（失败 → 'error'，成功 → 'done'）。
-        state: tc.error ? 'error' : 'done',
+        // 无逐调用 status（后端 toolCalls 不填充）时按证据派生：error → 'error'；
+        // 已带 result/resultData（终态证据）→ 'done'；否则 'streaming'（渲染
+        // pending）——new_message 在工具执行前到达时不宣称假终态，终态由
+        // tool_result 事件（热路径）或 mergeConsecutiveAssistantMessages 从
+        // role=tool 消息派生（冷路径，session.ts 下方）落地。
+        state: tc.error ? 'error' : (tc.result != null || tc.resultData != null) ? 'done' : 'streaming',
         result: tc.result,
         resultData: tc.resultData,
         error: tc.error,

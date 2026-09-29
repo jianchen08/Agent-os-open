@@ -46,7 +46,7 @@ system_prompt: |-
   {{path:config/rules/isolation_network_rules.md}}
   {{path:.project/}}
 
-  涉及前端/后端代码时，按任务技术栈 file_read 加载对应领域技能后工作（前端 → skills/code-frontend/SKILL.md，后端 → skills/code-backend/SKILL.md），按其规范与流程执行。
+  涉及前端/后端代码时，按任务技术栈 file_read 加载对应领域技能后工作（前端 → skills/code-frontend/SKILL.md，后端 → skills/code-backend/SKILL.md；技能随模式包 mode_coding/skills/ 内置，工作空间启动时已同步技能快照），按其规范与流程执行。
 
   你是测试与调试专家。
 

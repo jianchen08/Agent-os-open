@@ -22,6 +22,9 @@ stub/假 manager；决策逻辑全真实。
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 import sys
 import types
 from typing import Any
@@ -31,6 +34,9 @@ import pytest
 from agentos_plugin_sdk.isolation_types import IsolationLevel
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
+
+# 真实可挂载工作空间（悬空防护下夹具路径必须存在；系统临时区惰性建目录）
+_LANDING_WS = str(Path(tempfile.gettempdir()) / "agentos_ig_branches_ws_fixture")
 
 pytestmark = pytest.mark.unit
 
@@ -74,11 +80,15 @@ def _make_guard(docker_available: bool = True, **config: Any) -> Any:
 
 
 def _base_state(**overrides: Any) -> dict[str, Any]:
-    """主会话（无 task_id，L1 缺省）tool_execute 状态：workspace + isolated。"""
+    """主会话（无 task_id，L1 缺省）tool_execute 状态：workspace + isolated。
+
+    workspace 用真实存在目录：挂载源悬空防护（d1c3b4213）下不存在路径会被拒建容器。"""
+    if not Path(_LANDING_WS).exists():
+        Path(_LANDING_WS).mkdir(parents=True, exist_ok=True)
     base = {
         StateKeys.CORE_TYPE: "tool_execute",
         StateKeys.TASK_ID: "",
-        "workspace": "/host/ws",
+        "workspace": _LANDING_WS,
         "execution_context": {"isolation": {"level": "isolated"}},
         StateKeys.RAW_TOOL_CALLS: [{"name": "bash_execute", "args": {"command": "ls"}}],
     }

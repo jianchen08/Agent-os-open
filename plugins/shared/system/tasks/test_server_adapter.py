@@ -9,7 +9,8 @@
    与未知 action 拒绝；
 4. task.list 三形态（全量/按状态/按父任务）；
 5. task.cancel 级联与仅暂停两分支；
-6. task.delete、task.get_transitions。
+6. task.delete、task.get_transitions；
+7. projects.list 登记簿全量读（空登记/多行全字段）。
 
 模块隔离：与 test_tasks_plugin.py 同范式（裸名逐出 + 代际还原），
 见该文件 fixture 注释。
@@ -225,3 +226,47 @@ class TestTransitions:
         assert r["task_id"] == t["id"]
         assert "running" in r["transitions"]
         assert "completed" in r["transitions"]
+
+
+class TestProjectsList:
+    """projects.list 服务：登记簿全量读（跨插件消费，与 HTTP projects 域同源）。"""
+
+    def _isolate_registry(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import service_access
+
+        monkeypatch.setattr(service_access, "_project_registry_instance", None)
+        monkeypatch.setenv("TASKS_STORAGE_DIR", str(tmp_path / "reg"))
+
+    def test_list_empty_registry(self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        self._isolate_registry(monkeypatch, tmp_path)
+        out = asyncio.run(srv.projects_list())
+        assert out == {"projects": [], "total": 0}
+
+    def test_list_registry_unavailable_raises(self, srv: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        """登记簿不可用（懒构建失败降级 None）→ fail-honest 抛错，不返回假空清单。"""
+        monkeypatch.setattr(srv, "get_project_registry", lambda: None)
+        with pytest.raises(RuntimeError, match="ProjectRegistry 不可用"):
+            asyncio.run(srv.projects_list())
+
+    def test_list_returns_registered_rows(
+        self, srv: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._isolate_registry(monkeypatch, tmp_path)
+        from project_registry import ProjectModel, ProjectRegistry
+
+        ProjectRegistry().save(ProjectModel(title="雾镇", path=str(tmp_path / "wz")))
+        ProjectRegistry().save(
+            ProjectModel(title="算法册", path=str(tmp_path / "sf"), workflow_state="running")
+        )
+        out = asyncio.run(srv.projects_list())
+        assert out["total"] == 2
+        by_title = {row["title"]: row for row in out["projects"]}
+        assert set(by_title) == {"雾镇", "算法册"}
+        assert by_title["雾镇"]["workflow_state"] == "plan"
+        assert by_title["算法册"]["workflow_state"] == "running"
+        # 行形状 = 登记行全字段（asdict 同构，消费方按需裁剪）
+        assert set(by_title["雾镇"]) >= {
+            "id", "title", "path", "status", "workflow_state", "auto_execute",
+        }

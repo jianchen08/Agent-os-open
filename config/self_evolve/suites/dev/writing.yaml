@@ -33,12 +33,12 @@ cases:
   category: writing
   target: general_agent
   messages:
-  - 读取 plugins/shared/system/eval_harness/plugin.json，为它写一份面向使用者的中文说明 eval_harness_readme.md
+  - 读取 plugins/shared/modes/mode_evolution/plugin.json，为它写一份面向使用者的中文说明 mode_evolution_readme.md
     到当前工作空间：列出该插件提供的全部工具名（一行为一个），并各配一句话用途说明。
   acceptance_criteria:
     file_check:
       input_params:
-        path: eval_harness_readme.md
+        path: mode_evolution_readme.md
         check: contains
         pattern: eval_view_suite
   anchor: repo

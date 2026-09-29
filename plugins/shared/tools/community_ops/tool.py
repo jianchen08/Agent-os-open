@@ -12,6 +12,7 @@ feedback_ledger：社区反馈登记册（JSON 单文件，缺 entries 键或损
 参数 ledger_path > 环境变量 AGENTOS_COMMUNITY_LEDGER > <cwd>/data/community/。
 """
 
+# config-write-surface-exempt: 反馈台账=运行数据面(默认cwd/data/community)
 from __future__ import annotations
 
 import json

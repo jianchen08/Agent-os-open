@@ -259,9 +259,12 @@ impl PluginWidgetBroadcaster {
         // 每条绑定的上次推送时间（按 binding key 索引，绑定表变化不串位）。
         let last_pushed: Arc<Mutex<HashMap<String, std::time::Instant>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        tokio::spawn(async move {
+        let activity =
+            agentos_core::task_activity::global_registry().register("widget-metrics-broadcast");
+        tokio::spawn(agentos_core::task_activity::scope(activity, async move {
             let mut tick = tokio::time::interval(TICK_INTERVAL);
             tick.tick().await; // 跳过首次立即触发
+            agentos_core::task_activity::set_current_label("idle: next tick");
             info!(
                 target: "plugin_widget_broadcast",
                 count = bindings.read().len(),
@@ -296,7 +299,7 @@ impl PluginWidgetBroadcaster {
                     last_pushed.lock().insert(key, now);
                 }
             }
-        })
+        }))
     }
 }
 

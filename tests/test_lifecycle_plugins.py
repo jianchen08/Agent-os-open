@@ -199,6 +199,7 @@ async def test_workspace_init_main_session_syncs_skills_via_manager(
         task_tree=None,
         ws_meta_store={},
         base_path=str(tmp_path / "_repo"),
+        mode_skill_sources=[],  # 钉空包源 = 仅仓根单源（本用例断言的就是仓根源同步）
     )
     monkeypatch.setattr(
         type(plugins["ws"]), "_get_manager", lambda self, base_path_hint=None: manager

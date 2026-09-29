@@ -126,12 +126,14 @@ def _install_payload_diag_hook() -> None:
 
                 # 写入时惰性清理：目录超过 200 个文件删最老的（调试用，避免无限增长）
                 try:
+                    from pathlib import Path as _Path  # noqa: PLC0415
+
                     _files = sorted(
-                        (_os.path.join(_diag_dir, f) for f in _os.listdir(_diag_dir)),
-                        key=_os.path.getmtime,
+                        _Path(_diag_dir).iterdir(),
+                        key=lambda p: p.stat().st_mtime,
                     )
                     while len(_files) > 200:
-                        _os.remove(_files.pop(0))
+                        _files.pop(0).unlink()
                 except Exception as exc:  # noqa: BLE001 —— 清理失败不影响诊断主路径
                     logger.debug("[payload_diag] 诊断目录轮转清理失败（dir=%s）: %s", _diag_dir, exc)
             except Exception as exc:  # noqa: BLE001 —— 诊断落盘失败不影响请求主路径
@@ -238,6 +240,39 @@ def _track_background_task(task: asyncio.Task[Any]) -> None:
                 t.exception()  # 消费异常，避免 "never retrieved" 告警
 
     task.add_done_callback(_on_done)
+
+
+# worker loop 收尾的残留任务等待上限：正常路径 run_until_complete 返回时任务
+# 已全部结束，此处只兜第三方库（litellm 内部任务）未竟的残尾；超时即放弃，
+# 不让收尾卡死 worker 线程。
+_WORKER_LOOP_DRAIN_TIMEOUT_SECONDS = 5.0
+
+
+def _shutdown_worker_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """worker 事件循环收尾：取消残留任务 → 关闭 async 生成器 → close。
+
+    loop 生命周期 = 流消费生命周期：``_worker_main`` 返回即消费结束（流已在
+    loop 内 aclose），此后无任何对象再在 loop 上调度。不显式关闭则 loop 自持
+    的 self-pipe socketpair 及其上的 transport/client 会被 litellm 全局缓存
+    （``in_memory_llm_clients_cache`` 等）钉住常驻——每调用泄漏一个事件循环
+    （Windows 上表现为同 PID 自连端口对随调用数线性累积）。收尾是 best-effort：
+    主流程异常已装箱，此处失败只留 debug 日志。
+    """
+    try:
+        if not loop.is_closed():
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    asyncio.wait(pending, timeout=_WORKER_LOOP_DRAIN_TIMEOUT_SECONDS)
+                )
+            loop.run_until_complete(loop.shutdown_asyncgens())
+    except Exception:  # noqa: BLE001 —— 清理失败不掩盖已装箱的主流程异常
+        logger.debug("[_shutdown_worker_loop] worker loop 收尾异常（忽略）", exc_info=True)
+    finally:
+        if not loop.is_closed():
+            loop.close()
 
 
 async def _await_with_escape(
@@ -608,21 +643,25 @@ def _move_to_extra_body(kwargs: dict[str, Any], keys: tuple[str, ...]) -> None:
 
 
 # 思考参数必须经 extra_body 透传的 litellm provider type：openai（自定义中转
-# 端点）与 zai（GLM）。这类端点的上游直接接受 reasoning_effort/thinking body
-# 字段，而 litellm 顶层 kwargs 通道对它们不可用——模型不在 litellm 注册表时
-# 抛 UnsupportedParamsError，在注册表时原样转发（OpenAI SDK create() 无此
-# 形参 → TypeError）。
-_EXTRA_BODY_PROVIDER_TYPES = ("openai", "zai")
+# 端点）、zai（GLM）与 minimax。这类端点的上游直接接受 reasoning_effort/
+# thinking body 字段，而 litellm 顶层 kwargs 通道对它们不可用——模型不在
+# litellm 注册表时抛 UnsupportedParamsError，在注册表时原样转发（OpenAI SDK
+# create() 无此形参 → TypeError）。minimax 入通道的根因：M3.1 系模型
+# （如 M3.1-Flash-Preview）不在 litellm 注册表，supports_reasoning=False →
+# thinking/reasoning_effort 被判不支持，drop_params=True 下静默丢弃（档位
+# 映射在线上零效果）；extra_body 直进请求体，上游按自身契约消费，对注册表
+# 内的 M3 线上字节等价（thinking 经 extra_body 与顶层同入 JSON body）。
+_EXTRA_BODY_PROVIDER_TYPES = ("openai", "zai", "minimax")
 
 
 def _needs_extra_body_transport(model: str) -> bool:
     """判断该模型的 reasoning_effort/thinking 是否必须经 extra_body 透传。
 
     命中两种形态之一即为真：model 字符串自带 litellm 前缀（"openai/x" /
-    "zai/x"）；或 model 经 router_factory 解析出的 provider type 属于
-    extra_body 通道——生产调用传的是 model_id（yaml key），litellm 前缀在
-    KeyPool 内层才拼上，仅看前缀会漏掉该形态。解析失败（provider 未注册等）
-    按 False 处理，维持 litellm 原生行为，不因分类失败扩大故障面。
+    "zai/x" / "minimax/x"）；或 model 经 router_factory 解析出的 provider
+    type 属于 extra_body 通道——生产调用传的是 model_id（yaml key），litellm
+    前缀在 KeyPool 内层才拼上，仅看前缀会漏掉该形态。解析失败（provider 未
+    注册等）按 False 处理，维持 litellm 原生行为，不因分类失败扩大故障面。
     """
     if model.lower().startswith(tuple(f"{t}/" for t in _EXTRA_BODY_PROVIDER_TYPES)):
         return True
@@ -1474,9 +1513,14 @@ class _BaseLiteLLMAdapter:
             state.on_chunk({"type": "thinking_end", "content": ""})
         for tc in tool_calls:
             idx = tc.index if hasattr(tc, "index") else 0
+            tc_id = getattr(tc, "id", None)
             if idx not in state.tool_calls_map:
                 state.tool_calls_map[idx] = {
-                    "id": (getattr(tc, "id", None) or f"tc_{idx}_{id(state.tool_calls_map)}"),
+                    "id": (tc_id or f"tc_{idx}_{id(state.tool_calls_map)}"),
+                    # id 占位标记：首个 chunk 无 id 时先记占位，迟到的真实 id
+                    # 覆盖——单一关联键（流事件取首个非空 chunk id，最终结果
+                    # 必须同键，占位不覆盖会让同一工具调用以两个 id 分叉）
+                    "_id_fabricated": not tc_id,
                     "name": "",
                     "arguments": "",
                 }
@@ -1485,6 +1529,15 @@ class _BaseLiteLLMAdapter:
                     idx,
                     state.tool_calls_map[idx]["id"],
                 )
+            elif tc_id and state.tool_calls_map[idx].get("_id_fabricated"):
+                _stream_logger.debug(
+                    "[STREAM][TOOL_CALL] #%d late id adopted: %s → %s",
+                    idx,
+                    state.tool_calls_map[idx]["id"],
+                    tc_id,
+                )
+                state.tool_calls_map[idx]["id"] = tc_id
+                state.tool_calls_map[idx]["_id_fabricated"] = False
             if tc.function:
                 if tc.function.name:
                     state.tool_calls_map[idx]["name"] += tc.function.name
@@ -2121,11 +2174,11 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
             return None
 
         def _worker() -> None:
-            # ★ 不用 asyncio.run：它会在结束时 close() 线程事件循环，而
-            # CustomStreamWrapper 的 logging 回调 / fallback 重试的 async client
-            # 绑定该 loop → 消费时报 "Event loop is closed"（生产 20:08:02）。
-            # 用 new_event_loop + run_until_complete，loop 保持存活
-            # （daemon 线程持有，进程退出时由 OS 回收），流对象可被主循环消费。
+            # ★ 每次调用独立线程 + 独立事件循环：litellm 内部同步阻塞/半死连接
+            # 只冻结本 worker，不波及主循环；CustomStreamWrapper 绑定本 loop，
+            # 流式消费（_worker_main 的 async for）全程在本 loop 内完成，chunk
+            # 经线程安全队列送回主循环（主循环跨 loop 直 await 会报
+            # "attached to a different loop"）。
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
@@ -2134,7 +2187,10 @@ class KeyPoolAdapter(_BaseLiteLLMAdapter):
                 _exc_box.append(exc)
             finally:
                 _done_evt.set()
-                # 不 close loop：流 wrapper 绑定的 logging/fallback client 需要它存活。
+                # 消费已随 run_until_complete 返回而结束，loop 必须显式收尾
+                # 关闭（不关闭则被 litellm 全局缓存钉住成每次调用一个常驻
+                # 事件循环，见 _shutdown_worker_loop 契约）。
+                _shutdown_worker_loop(loop)
 
         _worker_thread = threading.Thread(
             target=_worker,

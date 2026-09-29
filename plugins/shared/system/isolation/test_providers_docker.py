@@ -456,6 +456,25 @@ class TestBuildRunArgs:
         args = provider._build_run_args("c1", _ctx(workspace=str(tmp_path / "ws")))
         assert not any(a.endswith(":/workspace") for a in args)
 
+    def test_skills_snapshot_reachable_via_workspace_mount(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """技能容器可达契约（R300 补验）：skills/ 快照随会话工作空间**整体**
+        进容器挂载（-v {ws}:/workspace）——挂载源目录里真实存在
+        skills/<技能>/SKILL.md，容器内 bash 以 /workspace 为根的相对路径
+        cat skills/<技能>/SKILL.md 必然可达（无需任何技能专项挂载）。"""
+        provider = _provider()
+        monkeypatch.setattr(provider, "_is_wsl_docker", lambda: False)
+        ws = tmp_path / "ws"
+        (ws / "skills" / "skill_container_flow").mkdir(parents=True)
+        (ws / "skills" / "skill_container_flow" / "SKILL.md").write_text(
+            "# 容器任务链", encoding="utf-8"
+        )
+        args = provider._build_run_args("c1", _ctx(workspace=str(ws)))
+        mount = next(a for a in args if a.endswith(":/workspace"))
+        mount_src = Path(mount.split(":/workspace")[0])
+        # 挂载源 = 会话工作空间本身，技能实体在其 skills/ 下（相对路径可达的物理前提）
+        assert mount_src == ws
+        assert (mount_src / "skills" / "skill_container_flow" / "SKILL.md").is_file()
+
     def test_wsl_mount_converted(self, tmp_path: Path, monkeypatch: Any) -> None:
         provider = _provider()
         monkeypatch.setattr(provider, "_is_wsl_docker", lambda: True)

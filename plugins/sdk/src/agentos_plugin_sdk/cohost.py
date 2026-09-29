@@ -97,6 +97,7 @@ class CohostServer:
             on_initialize=self._fan_out_initialize,
             kernel_channel=self._channel,
             request_handlers=handlers,
+            on_call_config=self._route_call_config,
         )
         self._reload_handler = reload_handler
         self._unload_handler = unload_handler
@@ -320,3 +321,35 @@ class CohostServer:
             # 复用共享实例，成员的反向调用走本服务端唯一 stdio 连接。
             plugin._kernel_channel = self._channel
             plugin._on_initialize(params)
+
+    def _member_for_tool(self, tool_name: str | None) -> AgentOSPlugin | None:
+        """按工具名解析属主成员（``{plugin_id}.`` 前缀即路由，最长前缀胜出）。
+
+        plugin_id 本身可含点号，前缀匹配必须对成员键整体比对（``pid + "."``
+        或全等），不能按 ``split(".")[0]`` 切首段。无工具名 / 不匹配任何成员
+        返回 None（调用方不串写任何成员——防御形态）。
+        """
+        if not tool_name:
+            return None
+        best: AgentOSPlugin | None = None
+        best_len = 0
+        for pid, plugin in self._members.items():
+            if tool_name == pid or tool_name.startswith(pid + "."):
+                if len(pid) > best_len:
+                    best, best_len = plugin, len(pid)
+        return best
+
+    async def _route_call_config(self, config: Any, tool_name: str | None = None) -> None:
+        """每调用配置路由（McpServer on_call_config 接缝）：定向属主成员。
+
+        内核按调用方成员 manifest 现算注入配置（各成员只收自己的
+        config_files 命名空间，合宿不共享注入）——本方法把本次调用的配置
+        送进属主成员的 ``_apply_call_config``（视图刷新 + on_config_changed
+        钩子）。缺此接线则成员配置冻结在握手快照（握手 config 属触发成员，
+        其余成员收不到自己的命名空间——2026-09-29 security_rules 注入链
+        失效直接根因）。工具名不匹配任何成员 / 非 dict config 一律不投递。
+        """
+        member = self._member_for_tool(tool_name)
+        if member is None:
+            return
+        await member._apply_call_config(config, tool_name)

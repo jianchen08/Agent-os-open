@@ -98,7 +98,7 @@ class TestDbLoading:
         db = self._setup_db(tmp_path)
         conn = sqlite3.connect(db)
         try:
-            runs = _mod._load_active_runs(conn)
+            runs = _mod.load_active_runs(conn)
         finally:
             conn.close()
         by_id = {r["run_id"]: r for r in runs}
@@ -122,7 +122,7 @@ class TestDbLoading:
             """
         )
         conn.commit()
-        runs = _mod._load_active_runs(conn)
+        runs = _mod.load_active_runs(conn)
         conn.close()
         assert runs[0]["interaction_request_id"] is None
         assert _mod.classify(runs[0], _CUTOFF) == "SUSPENDED"

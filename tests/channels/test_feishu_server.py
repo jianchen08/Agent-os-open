@@ -160,7 +160,7 @@ class TestFeishuServerLifecycle:
         assert stopped == ["stopped"]
         # 卸载后的公共观察面：发送工具回到"未初始化"哨兵值
         r = await load_feishu_server.feishu_send_message("u1", "hi")
-        assert r == {"error": "Feishu adapter not initialized"}
+        assert r == {"success": False, "error": "Feishu adapter not initialized"}
 
     @pytest.mark.asyncio
     async def test_on_unload_no_adapter(self, load_feishu_server) -> None:
@@ -212,19 +212,19 @@ class TestFeishuServerSendMessage:
     async def test_not_initialized(self, load_feishu_server) -> None:
         load_feishu_server._adapter = None
         r = await load_feishu_server.feishu_send_message("u1", "hi")
-        assert r == {"error": "Feishu adapter not initialized"}
+        assert r == {"success": False, "error": "Feishu adapter not initialized"}
 
     @pytest.mark.asyncio
     async def test_stream_client_missing(self, load_feishu_server) -> None:
         load_feishu_server._adapter = _fake_adapter_no_stream_client()
         r = await load_feishu_server.feishu_send_message("u1", "hi")
-        assert r == {"error": "Feishu adapter not initialized"}
+        assert r == {"success": False, "error": "Feishu adapter not initialized"}
 
     @pytest.mark.asyncio
     async def test_not_connected(self, load_feishu_server) -> None:
         load_feishu_server._adapter = _fake_adapter(_fake_stream_client(session=None))
         r = await load_feishu_server.feishu_send_message("u1", "hi")
-        assert r == {"error": "Feishu stream client not connected"}
+        assert r == {"success": False, "error": "Feishu stream client not connected"}
 
     @pytest.mark.asyncio
     async def test_success(self, load_feishu_server) -> None:
@@ -246,13 +246,13 @@ class TestFeishuServerSendCard:
     async def test_not_initialized(self, load_feishu_server) -> None:
         load_feishu_server._adapter = None
         r = await load_feishu_server.feishu_send_card("u1", {"elements": []})
-        assert r == {"error": "Feishu adapter not initialized"}
+        assert r == {"success": False, "error": "Feishu adapter not initialized"}
 
     @pytest.mark.asyncio
     async def test_not_connected(self, load_feishu_server) -> None:
         load_feishu_server._adapter = _fake_adapter(_fake_stream_client(session=None))
         r = await load_feishu_server.feishu_send_card("u1", {"elements": []})
-        assert r == {"error": "Feishu stream client not connected"}
+        assert r == {"success": False, "error": "Feishu stream client not connected"}
 
     @pytest.mark.asyncio
     async def test_success(self, load_feishu_server) -> None:

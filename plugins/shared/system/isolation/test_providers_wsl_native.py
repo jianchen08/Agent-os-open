@@ -66,7 +66,8 @@ def _load_mod() -> Any:
     spec = importlib.util.spec_from_file_location(
         mod_name, _PLUGIN_DIR / "providers" / "wsl_native_provider.py"
     )
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module
     spec.loader.exec_module(module)
@@ -500,7 +501,8 @@ class TestExecute:
         # argv：wsl -d distro --cd <映射后工作目录> -- sh -c command
         args = recorder.calls[-1]
         assert args[0] == "wsl"
-        assert "-d" in args and "Ubuntu" in args
+        assert "-d" in args
+        assert "Ubuntu" in args
         wd = args[args.index("--cd") + 1]
         assert wd == WslNativeProvider._to_wsl_path(provider._workspace)
         assert args[-3:-1] == ["bash", "-c"]
@@ -621,6 +623,7 @@ class TestPopenRunTimeout:
 class TestArgvBuilders:
     def test_build_exec_argv_full(self, tmp_path: Path) -> None:
         provider = _make_provider(tmp_path, user="agentos", sandbox_cmd=["bwrap", "--dev", "/dev"])
+        provider._workspace_wsl = "/mnt/d/ws"  # 真实执行时非空（create 校验过）
         argv = provider._build_exec_argv(
             working_dir="/workspace",
             command="echo hi",
@@ -634,9 +637,11 @@ class TestArgvBuilders:
         assert argv[argv.index("--exec") + 1 :][:4] == [
             "env",
             "AGENTOS_BRIDGE_URL=http://1.2.3.4:8765",
-            "bwrap",
-            "--dev",
+            "XDG_CACHE_HOME=/mnt/d/ws/.task_runtime/cache",
+            "npm_config_cache=/mnt/d/ws/.task_runtime/npm-cache",
         ]
+        assert argv[argv.index("--exec") + 1 :][4] == "PYTHONUSERBASE=/mnt/d/ws/.task_runtime/pyuser"
+        assert argv[argv.index("--exec") + 1 :][5:7] == ["bwrap", "--dev"]
         assert argv[-4:-1] == ["/dev", "bash", "-c"]
 
     def test_build_exec_argv_minimal(self, tmp_path: Path) -> None:
@@ -646,6 +651,48 @@ class TestArgvBuilders:
         assert "env" not in argv
         assert argv[-3:] == ["bash", "-c", "ls"]
         assert argv[argv.index("--exec") - 1] == provider._map_working_dir(None)
+
+    def test_build_exec_argv_injects_task_runtime_env(self, tmp_path: Path) -> None:
+        """执行壳注入任务运行时 env：缓存/npm/用户包副作用约束进 workspace。
+
+        治本发行版 home 污染（pip --user / XDG 缓存落 VHDX 无清理）——
+        注入位次钉死（bridge 之后、sandbox 之前），与 bash 工具侧
+        _wsl_runtime_env_pairs 同语义。
+        """
+        provider = _make_provider(tmp_path)
+        provider._workspace_wsl = "/mnt/d/repo/.ai_workspaces/ws-1"
+        argv = provider._build_exec_argv(working_dir=None, command="ls", bridge_env={}, timeout=5)
+        idx = argv.index("--exec")
+        assert argv[idx + 1 : idx + 5] == [
+            "env",
+            "XDG_CACHE_HOME=/mnt/d/repo/.ai_workspaces/ws-1/.task_runtime/cache",
+            "npm_config_cache=/mnt/d/repo/.ai_workspaces/ws-1/.task_runtime/npm-cache",
+            "PYTHONUSERBASE=/mnt/d/repo/.ai_workspaces/ws-1/.task_runtime/pyuser",
+        ]
+
+    def test_build_exec_argv_runtime_env_after_bridge(self, tmp_path: Path) -> None:
+        provider = _make_provider(tmp_path)
+        provider._workspace_wsl = "/mnt/d/ws"
+        argv = provider._build_exec_argv(
+            working_dir=None,
+            command="ls",
+            bridge_env={"AGENTOS_BRIDGE_URL": "http://1.2.3.4:8765"},
+            timeout=5,
+        )
+        idx = argv.index("--exec")
+        assert argv[idx + 1 : idx + 4] == [
+            "env",
+            "AGENTOS_BRIDGE_URL=http://1.2.3.4:8765",
+            "XDG_CACHE_HOME=/mnt/d/ws/.task_runtime/cache",
+        ]
+
+    def test_build_exec_argv_no_runtime_env_without_workspace(self, tmp_path: Path) -> None:
+        """workspace_wsl 未知（异常形态）不注入，防 env 值写坏文件系统根。"""
+        provider = _make_provider(tmp_path)
+        assert provider._workspace_wsl == ""
+        argv = provider._build_exec_argv(working_dir=None, command="ls", bridge_env={}, timeout=5)
+        assert not any(a.startswith(("XDG_CACHE_HOME=", "PYTHONUSERBASE=")) for a in argv)
+        assert "env" not in argv
 
     def test_build_kill_argv(self, tmp_path: Path) -> None:
         provider = _make_provider(tmp_path, user="agentos")

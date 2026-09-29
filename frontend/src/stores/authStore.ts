@@ -122,7 +122,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   /** 登录 调用后端 POST /api/v1/auth/login 端点进行认证。 */
   login: async (username, password) => {
-      if (!username || !password) {
+    if (!username || !password) {
       throw new Error('用户名和密码不能为空')
     }
 
@@ -166,7 +166,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   /** 注册 调用后端 POST /api/v1/auth/register 端点创建账户。 */
   register: async (username, password, email) => {
-      if (!username || !password) {
+    if (!username || !password) {
       throw new Error('用户名和密码不能为空')
     }
     if (!email) {
@@ -256,6 +256,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       mustChangePassword: false,
       error: null,
     })
+    // 改密成功即回写装机版凭据存档（ADR 2026-09-28）：下次启动内核注入值
+    // 与真实口令保持一致。非存档账号（非 admin）主进程拒收；回写失败容忍
+    // ——内核重置语义会把口令对齐回存档值，自动登录不因此失能。
+    const username = get().user?.username
+    if (username) {
+      void window.electronAPI?.adminCredential?.sync?.(username, newPassword)?.catch(() => {
+        // 回写失败不影响本次改密结果
+      })
+    }
   },
 
   /**
@@ -331,7 +340,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         }
       }
 
-      // 没有任何可恢复凭据，初始化完成
+      // 没有任何可恢复凭据：装机版自动登录（ADR 2026-09-28）——宿主提供
+      // 凭据（仅 app.isPackaged 非空）时以主进程存档的 admin 凭据走既有
+      // 登录链（首启播种账号照常触发强制改密闸）；失败回落手动登录。
+      const credential = await window.electronAPI?.adminCredential?.load?.()
+      if (credential?.username && credential.password) {
+        try {
+          await get().login(credential.username, credential.password)
+          set({ isInitializing: false })
+          return
+        } catch {
+          // 自动登录失败不阻断初始化，落入下方未认证终态
+        }
+      }
+
+      // 初始化完成（未认证）
       set({ isInitializing: false })
     } catch (_error) {
       // 存储不可用或其他错误，安全降级

@@ -3,7 +3,7 @@
 
 覆盖：importlib 显式路径加载（唯一模块名 + 逐出裸名）、on_load 能力接线
 （chat / pipeline-state / pipeline-executor 三路注入）、task_manage handler
-（成功返回 output / 失败返回 {"error": ...} 契约）。
+（成功/失败均返回 success 显式信封，output/error 按分支携带）。
 
 真实依赖：TaskTool 执行链（handler 内部构造）；capability 为
 AgentOSPlugin 内部句柄注入（fake call_fn），不触碰内核。
@@ -228,18 +228,60 @@ async def test_on_load_restores_capabilities_after_each_case(
 
 
 async def test_handler_success_returns_output() -> None:
-    """成功 → 返回 result.output（任务不存在路径的失败结果除外）。"""
+    """成功 → 返回执行结果信封（success=True + output=业务载荷）。"""
     # 用 get 列表路径（无副作用，不需 capability）
     out = await _srv.task_manage(action="get", parent_agent_level=1)
     assert isinstance(out, dict)
-    assert "d" in out, "get 列表成功返回 output dict"
-    assert "hint" in out
+    assert out["success"] is True, "成功必须显式携带 success 键（invoker 归一化分支②-b）"
+    payload = out["output"]
+    assert isinstance(payload, dict)
+    assert "d" in payload, "get 列表成功返回 output dict"
+    assert "hint" in payload
 
 
 async def test_handler_failure_returns_error_dict() -> None:
-    """失败 → 返回 {"error": <错误信息>}（错误码不回传）。"""
+    """失败 → 返回 success=False + error（信封形态，错误码不回传）。"""
     out = await _srv.task_manage(action="get")
-    assert out == {"error": "系统错误：parent_agent_level 未注入，无法确定调用者层级"}
+    assert out["success"] is False
+    assert out["error"] == "系统错误：parent_agent_level 未注入，无法确定调用者层级"
+    assert "output" not in out
+
+
+async def test_handler_success_with_task_error_field_keeps_envelope() -> None:
+    """回归（事故 2026-09-28）：get 详情成功载荷含顶层 error 键（下级任务失败原因）
+    不得被翻转成工具执行失败。
+
+    旧行为：handler 解包直返裸 dict → invoker 归一化分支①（无 success 键 +
+    error 非空字符串）把成功查询判为失败，LLM/前端看到「工具报错」而非
+    「下级任务失败」。新契约：信封 success=True 显式承载成败，任务域 error
+    字段原样保留在 output 内。
+    """
+    fatal = "工具 list_directory 连续被安全检查拦截 3 次（阈值 3），疑似死循环，终止任务"
+    rows = [
+        {
+            "pipeline_id": "task-err-1",
+            "task.goal": "子任务A",
+            "task.status": "failed",
+            "raw_error": fatal,
+            "lineage.origin_session_id": "thread-x",
+            "task.submitted_by": "main_agent",
+        }
+    ]
+
+    async def _reader() -> list[dict[str, Any]]:
+        return rows
+
+    _task_mod.set_state_reader(_reader)
+    try:
+        out = await _srv.task_manage(
+            action="get", task_id="task-err-1", parent_agent_level=1
+        )
+    finally:
+        _task_mod.set_state_reader(None)
+
+    assert out["success"] is True, "查询成功载荷含 error 字段不得翻转信封成败"
+    assert out["output"]["error"] == fatal, "下级任务失败原因原样保留在 output 内"
+    assert out["output"]["status"] == "failed"
 
 
 # ─────────────────────────── 合宿 exec 期绑定 ───────────────────────────

@@ -21,6 +21,11 @@
  */
 
 import { spawn, type ChildProcess } from "child_process";
+
+import {
+  ensureAdminCredential,
+  type AdminCredential,
+} from "./admin-credential";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
@@ -41,7 +46,9 @@ export const KERNEL_DEFAULT_PORT = 9101;
  * （buildKernelEnv 钉值）、健康探测（KERNEL_HEALTH_URL）、app:// 代理回源与
  * CSP（app-protocol）——四处必须同端口，否则探测/代理/内核各指一处。
  */
-export function resolveKernelPort(env: NodeJS.ProcessEnv = process.env): number {
+export function resolveKernelPort(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
   const parsed = Number.parseInt(env.AGENTOS_KERNEL_PORT ?? "", 10);
   return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535
     ? parsed
@@ -91,7 +98,9 @@ export function planKernelRestart(input: {
     return { action: "none" };
   }
   const attempt =
-    input.runDurationMs >= KERNEL_RESTART_STABLE_MS ? 1 : input.consecutiveRestarts + 1;
+    input.runDurationMs >= KERNEL_RESTART_STABLE_MS
+      ? 1
+      : input.consecutiveRestarts + 1;
   const delayMs = KERNEL_RESTART_DELAYS_MS[attempt - 1];
   if (delayMs === undefined) {
     return { action: "give-up", attempt };
@@ -162,7 +171,8 @@ export function kernelResourcePaths(
   resourcesPath: string,
   platform: NodeJS.Platform = process.platform,
 ): KernelResourcePaths {
-  const exeName = platform === "win32" ? "agentos-kernel.exe" : "agentos-kernel";
+  const exeName =
+    platform === "win32" ? "agentos-kernel.exe" : "agentos-kernel";
   const kernelDir = path.join(resourcesPath, "kernel");
   return {
     kernelExe: path.join(kernelDir, exeName),
@@ -191,7 +201,8 @@ export function resolvePackagedDbPath(
   env: NodeJS.ProcessEnv,
   appDataDir: string,
 ): string {
-  const userRoot = envValue(env, "AGENTOS_USER_ROOT") ?? path.join(appDataDir, "agentos");
+  const userRoot =
+    envValue(env, "AGENTOS_USER_ROOT") ?? path.join(appDataDir, "agentos");
   return path.join(userRoot, DB_FILENAME);
 }
 
@@ -205,7 +216,8 @@ export function resolvePackagedConfigUsersDir(
   env: NodeJS.ProcessEnv,
   appDataDir: string,
 ): string {
-  const userRoot = envValue(env, "AGENTOS_USER_ROOT") ?? path.join(appDataDir, "agentos");
+  const userRoot =
+    envValue(env, "AGENTOS_USER_ROOT") ?? path.join(appDataDir, "agentos");
   return path.join(userRoot, "config", "users");
 }
 
@@ -275,6 +287,7 @@ export function buildKernelEnv(
   tokenSecret?: string,
   dbPath?: string,
   configUsersDir?: string,
+  adminPassword?: string,
 ): NodeJS.ProcessEnv {
   return {
     ...base,
@@ -288,8 +301,14 @@ export function buildKernelEnv(
     // token 签名密钥持久化（每安装身份一份）：不注入时内核每进程随机签名，
     // 重启后全部 token 失效=每次打开应用都要重新登录
     ...(tokenSecret ? { AGENTOS_TOKEN_SECRET: tokenSecret } : {}),
+    // admin 口令注入（ADR 2026-09-28）：主进程凭据存档为唯一事实源，内核
+    // 「与当前口令不符即重置」语义成为存档损坏/丢失后的自愈通道；ambient
+    // 显式值已在 ensure 时收编进存档，注入值与内核实际生效口令恒一致
+    ...(adminPassword ? { AGENTOS_ADMIN_PASSWORD: adminPassword } : {}),
     // 库位置钉用户根（BUG-85）：ambient 显式设置优先（覆盖能力保留）
-    ...(dbPath && !envValue(base, "AGENTOS_DB_PATH") ? { AGENTOS_DB_PATH: dbPath } : {}),
+    ...(dbPath && !envValue(base, "AGENTOS_DB_PATH")
+      ? { AGENTOS_DB_PATH: dbPath }
+      : {}),
     // 授权名单真值钉用户空间（ADR 2026-09-24 决策5）：ambient 显式设置优先
     ...(configUsersDir && !envValue(base, "AGENTOS_CONFIG_USERS_DIR")
       ? { AGENTOS_CONFIG_USERS_DIR: configUsersDir }
@@ -307,7 +326,9 @@ export async function probeKernelHealth(
   timeoutMs = 2000,
 ): Promise<boolean> {
   try {
-    const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
+    const res = await fetchImpl(url, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
     return res.status === 200;
   } catch {
     return false;
@@ -347,8 +368,8 @@ export class KernelPortBusyError extends Error {
   constructor(port: number) {
     super(
       `端口 ${port} 已被其他内核占用（可能是开发环境的内核）。` +
-      `为避免两套环境混用，本应用只运行自带的内核；` +
-      `请先关闭占用该端口的内核后重试。`,
+        `为避免两套环境混用，本应用只运行自带的内核；` +
+        `请先关闭占用该端口的内核后重试。`,
     );
     this.name = "KernelPortBusyError";
   }
@@ -370,6 +391,13 @@ let tokenSecret: string | null = null;
 let packagedDbPath: string | null = null;
 /** 当前安装身份的授权名单真值目录（ensure 时解析并播种一次；ADR 2026-09-24 决策5） */
 let packagedConfigUsersDir: string | null = null;
+/** 当前安装身份的 admin 凭据（ensure 时解析一次，重启复用同一份；ADR 2026-09-28） */
+let adminCredential: AdminCredential | null = null;
+
+/** 自动登录用的当前 admin 凭据（未走包内内核 ensure 前为 null；仅装机路径有值） */
+export function getPackagedAdminCredential(): AdminCredential | null {
+  return adminCredential;
+}
 
 /** spawn 包内内核（ensure 与自动重启共用的副作用层） */
 function spawnKernelProcess(paths: KernelResourcePaths): ChildProcess {
@@ -381,6 +409,7 @@ function spawnKernelProcess(paths: KernelResourcePaths): ChildProcess {
       tokenSecret ?? undefined,
       packagedDbPath ?? undefined,
       packagedConfigUsersDir ?? undefined,
+      adminCredential?.password,
     ),
     stdio: "ignore",
     windowsHide: true,
@@ -391,7 +420,12 @@ function spawnKernelProcess(paths: KernelResourcePaths): ChildProcess {
 async function awaitKernelReady(
   child: ChildProcess,
   probe: () => Promise<boolean>,
-): Promise<{ ready: boolean; spawnError: Error | null; exited: boolean; exitCode: number | null }> {
+): Promise<{
+  ready: boolean;
+  spawnError: Error | null;
+  exited: boolean;
+  exitCode: number | null;
+}> {
   let spawnError: Error | null = null;
   const spawnFailed = new Promise<null>((resolve) => {
     child.once("error", (err) => {
@@ -467,7 +501,9 @@ async function restartManagedKernel(paths: KernelResourcePaths): Promise<void> {
     return;
   }
   if (!fs.existsSync(paths.kernelExe)) {
-    console.error(`[Kernel] 自动重启中止：内核组件缺失（${paths.kernelExe}），请重新安装。`);
+    console.error(
+      `[Kernel] 自动重启中止：内核组件缺失（${paths.kernelExe}），请重新安装。`,
+    );
     return;
   }
   // 端口已有内核应答（本应用残留孤儿，或同机第二份实例）→ 不再 spawn：
@@ -482,7 +518,9 @@ async function restartManagedKernel(paths: KernelResourcePaths): Promise<void> {
   try {
     const child = spawnKernelProcess(paths);
     managed = child;
-    const { ready, spawnError } = await awaitKernelReady(child, () => probeKernelHealth(fetch));
+    const { ready, spawnError } = await awaitKernelReady(child, () =>
+      probeKernelHealth(fetch),
+    );
     if (!ready) {
       killKernelTree(child.pid);
       managed = null;
@@ -532,7 +570,7 @@ export async function ensurePackagedKernelRunning(opts: {
   resourcesPath: string;
   /** 健康探测注入（测试用）；缺省探测解析端口 /health */
   probe?: () => Promise<boolean>;
-  /** userData 目录：解析持久化 token 签名密钥（自动登录跨重启） */
+  /** userData 目录：解析持久化 token 签名密钥与 admin 凭据存档（自动登录跨重启） */
   userDataDir?: string;
   /** OS 应用数据目录（app.getPath("appData")）：解析装机默认库位置（BUG-85 用户根） */
   appDataDir?: string;
@@ -542,6 +580,14 @@ export async function ensurePackagedKernelRunning(opts: {
     throw new KernelMissingError(paths.kernelExe);
   }
   tokenSecret = opts.userDataDir ? resolveTokenSecret(opts.userDataDir) : null;
+  adminCredential = opts.userDataDir
+    ? // ambient AGENTOS_ADMIN_PASSWORD 显式设置时收编为存档值（恢复通道与
+      // 存档不分叉，ADR 2026-09-28）；存档损坏/丢失即重新生成自愈
+      ensureAdminCredential(
+        opts.userDataDir,
+        process.env.AGENTOS_ADMIN_PASSWORD,
+      )
+    : null;
   packagedDbPath = opts.appDataDir
     ? resolvePackagedDbPath(process.env, opts.appDataDir)
     : null;
@@ -565,18 +611,24 @@ export async function ensurePackagedKernelRunning(opts: {
   const child = spawnKernelProcess(paths);
   managed = child;
 
-  const { ready, spawnError, exited, exitCode } = await awaitKernelReady(child, probe);
+  const { ready, spawnError, exited, exitCode } = await awaitKernelReady(
+    child,
+    probe,
+  );
   if (!ready) {
     shutdownManagedKernel();
-    throw spawnError ?? (exited
-      ? new Error(
-          `内核进程在启动期间退出（code=${exitCode}）。` +
-          `请重试；若反复出现，请反馈内核日志（安装目录 resources\\kernel\\logs\\）。`,
-        )
-      : new Error(
-          `内核在 ${KERNEL_HEALTH_TIMEOUT_MS / 1000} 秒内未就绪，应用将退出。` +
-          `请重试；若反复出现，请反馈内核日志（安装目录 resources\\kernel\\logs\\）。`,
-        ));
+    throw (
+      spawnError ??
+      (exited
+        ? new Error(
+            `内核进程在启动期间退出（code=${exitCode}）。` +
+              `请重试；若反复出现，请反馈内核日志（安装目录 resources\\kernel\\logs\\）。`,
+          )
+        : new Error(
+            `内核在 ${KERNEL_HEALTH_TIMEOUT_MS / 1000} 秒内未就绪，应用将退出。` +
+              `请重试；若反复出现，请反馈内核日志（安装目录 resources\\kernel\\logs\\）。`,
+          ))
+    );
   }
   intentionalShutdown = false;
   consecutiveRestarts = 0;

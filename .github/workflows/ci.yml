@@ -565,6 +565,25 @@ jobs:
       - name: Run endpoints sync checks (drift + handwritten ratchet)
         run: python scripts/check_frontend_endpoints_sync.py
 
+  # ── 插件配置写面机械门禁（2026-09-28 配置读写单源化批次 E1）──────────
+  # 公理：配置读写同源落用户空间——插件禁止自拼路径直写 config/.env/data
+  # 配置面（装机事故根因一即插件 /ext 自拼路径直写安装包）。规则锚定写动作
+  # + 配置路径字面量，豁免须带 config-write-surface-exempt: 理由注记。
+  # 纯 Python 扫描，独立轻量 job，与 run_gates.py 无耦合（本闸承诺由本 job 持有）。
+  plugin-config-write-surface:
+    name: Plugin Config Write Surface (配置写面单源闸)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Run plugin config write surface gate
+        run: python scripts/check_plugin_config_write_surface.py
+
   # ── Timing Gate（关键时序不变量，独立阻塞，§9.4/§6.4）──────────────
   # 专门运行标记了 @pytest.mark.timing 的用例（事件顺序 / 间隔 / 超时边界）。
   # 与单元测试 stage 隔离运行（避免真实延迟影响主套件稳定性）；
@@ -650,7 +669,8 @@ jobs:
 
   # ── Frontend E2E 冒烟（零后端依赖）──────────────────────────────────────
   # PR 级 e2e 门禁：构建前端 → vite preview 服务于 5188 → 跑零外部依赖冒烟子集
-  # (e2e/specs/ci-smoke.spec.ts，不依赖 kernel/LLM)。journey_* 全流程需后端，
+  # (ci-smoke React 挂载 + design_tokens 真浏览器 CSS token 解析——jsdom 无真
+  # CSS 引擎承载不了该层；均不依赖 kernel/LLM)。journey_* 全流程需后端，
   # 仍归本地/手动（见 frontend/e2e/specs/journey_*.spec.ts）。
   frontend-e2e:
     name: Frontend E2E (冒烟子集, 零后端依赖)
@@ -692,7 +712,7 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-      - name: Vite preview + playwright ci-smoke
+      - name: Vite preview + playwright smoke (ci-smoke + design_tokens)
         working-directory: frontend
         run: |
           npm run preview -- --port 5188 --strictPort & PREVIEW_PID=$!
@@ -700,7 +720,7 @@ jobs:
           if ! curl -sf http://localhost:5188 >/dev/null; then
             echo "preview 服务未就绪"; kill $PREVIEW_PID || true; exit 1
           fi
-          npx playwright test e2e/specs/ci-smoke.spec.ts
+          npx playwright test e2e/specs/ci-smoke.spec.ts e2e/specs/design_tokens.spec.ts
 
       # bundle-size 闸（批次 5）：复用上方 build 产物，vendor 字节基线 +
       # 无效动态导入计数锁（gate 自带 build+tee，经 run_gates 单一入口）。

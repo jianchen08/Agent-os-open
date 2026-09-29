@@ -211,7 +211,7 @@ async def bash_execute(**kwargs: dict[str, Any]) -> dict[str, Any]:
             await finalize()
     if result.success:
         return result.output
-    return {"error": result.error, "error_code": result.error_code}
+    return {"success": False, "error": result.error, "error_code": result.error_code}
 
 
 if __name__ == "__main__":

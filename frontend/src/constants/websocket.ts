@@ -139,6 +139,9 @@ export const WS_SERVER_EVENTS = {
   STREAM_END: 'stream_end',
   /** run 级收尾：一次用户输入触发的整次执行结束（生成态终止信号） */
   PIPELINE_ROUND_FINISHED: 'pipeline_round_finished',
+  /** run 级失败终态（run.failed 域事件前端镜像：引擎 Err / stop_reason 署名失败，
+   *  通知中心弹「管道运行失败」卡片；ADR 2026-09-28-run-failure-frontend-notification） */
+  RUN_FAILED: 'run_failed',
   /** 流式输出错误（LLM 调用失败等） */
   STREAM_ERROR: 'stream_error',
   /** 插件执行错误（非终止信号：引擎 warn+继续的插件失败，只弹通知不标记消息失败） */

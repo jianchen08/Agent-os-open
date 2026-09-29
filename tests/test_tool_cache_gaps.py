@@ -16,25 +16,22 @@
 缓存实现（agentos_plugin_sdk.tool_result_cache）是真依赖，只对
 「结果不可 JSON 序列化」的边界注入不可序列化对象（外部数据形态）。
 
-守卫分支（靶行 plugin.py 170）逐条说明：
-- ``_build_tool_result_messages`` 的 ``if i >= len(cached_results): break``：
-  ``execute`` 只在**全部**工具调用命中时才调用本方法（任一未命中即
-  ``return PluginResult()``），且每命中一次恰好 append 一条结果，故
-  ``len(cached_results) == len(tool_calls)`` 恒成立，经 ``execute`` 的真实
-  输入不可达——它是防未来"部分命中"改动的防御性护栏。护栏行为按其本义以
-  直调方法注入长度差输入覆盖（TestPartialCacheGuardBranch），不硬凑
-  execute 路径。
+守卫分支说明（ADR 2026-09-28 收编后）：配对消息构造走 SDK
+``tool_result_protocol.build_tool_result_ops``——``execute`` 只在**全部**
+工具调用命中时才构造（任一未命中即 ``return PluginResult()``），长度恒等；
+长度不匹配的显式防御（ValueError，不静默截断）在 SDK 侧
+（``test_tool_result_protocol.py::test_ops_length_mismatch_raises``）。
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
+
 from agentos_plugin_sdk.tool_result_cache import global_cache
 
 pytestmark = pytest.mark.unit
@@ -52,7 +49,8 @@ import importlib.util  # noqa: E402
 _tc_spec = importlib.util.spec_from_file_location(
     "tool_cache_plugin_gaps_under_test", str(_PLUGIN_DIR / "plugin.py")
 )
-assert _tc_spec is not None and _tc_spec.loader is not None
+assert _tc_spec is not None
+assert _tc_spec.loader is not None
 tc_plugin = importlib.util.module_from_spec(_tc_spec)
 sys.modules["tool_cache_plugin_gaps_under_test"] = tc_plugin
 _tc_spec.loader.exec_module(tc_plugin)
@@ -212,35 +210,38 @@ class TestHitShortCircuit:
         ops = result.state_updates["messages"]["_ops"]
         assert len(ops) == 1
         op = ops[0]
-        assert op["op"] == "set" and "seq" not in op, "无 seq = append 语义"
+        assert op["op"] == "set", "增量 op 形态"
+        assert "seq" not in op, "无 seq = append 语义"
         msg = op["msg"]
         assert msg["role"] == "tool"
         assert msg["tool_call_id"] == "call_1"
         assert msg["tool_result"]["tool_name"] == "web_search"
         assert msg["tool_result"]["data"] == {"answer": 42}
 
-    def test_hit_message_content_is_json_text(self) -> None:
-        """非字符串结果经 JSON 序列化为 content（对齐 tool_core 序列化形状）。"""
+    def test_hit_message_content_is_yaml_text(self) -> None:
+        """非字符串结果经 YAML 序列化为 content（协议统一形状=tool_core
+        messages::rebuild，契约夹具锚定；旧 JSON 文本形态为漂移已清偿）。"""
         p = tc_plugin.ToolCache()
         p.put({"name": "web_search", "args": {"q": "x"}}, {"nested": [1, 2]})
 
         ops = _run(p, _state()).state_updates["messages"]["_ops"]
 
-        assert ops[0]["msg"]["content"] == '{"nested": [1, 2]}'
+        assert ops[0]["msg"]["content"] == "nested:\n- 1\n- 2\n"
 
-    def test_string_result_kept_verbatim(self) -> None:
-        """字符串结果原样进 content，tool_result.data 包 content 键（形态契约）。"""
+    def test_string_result_scalar_document(self) -> None:
+        """字符串结果 = YAML 标量文档进 content，data 原样不包键（旧
+        {"content": ...} 包装为漂移已清偿，与执行路径同形）。"""
         p = tc_plugin.ToolCache()
         p.put({"name": "web_search", "args": {"q": "x"}}, "plain text")
 
         msg = _run(p, _state()).state_updates["messages"]["_ops"][0]["msg"]
 
-        assert msg["content"] == "plain text"
-        assert msg["tool_result"]["data"] == {"content": "plain text"}
+        assert msg["content"] == "plain text\n"
+        assert msg["tool_result"]["data"] == "plain text"
 
     def test_unserializable_result_falls_back_to_str(self) -> None:
-        """结果不可 JSON 序列化（自定义对象）→ content 经 default=str 序列化，
-        不抛（读面留可读痕迹）。"""
+        """结果 YAML 无法表示（自定义对象）→ content 回落 str(result)，
+        不抛（读面留可读痕迹；旧 default=str 的 JSON 串化形态随收编改直落）。"""
         p = tc_plugin.ToolCache()
 
         class _Opaque:
@@ -251,12 +252,11 @@ class TestHitShortCircuit:
 
         msg = _run(p, _state()).state_updates["messages"]["_ops"][0]["msg"]
 
-        assert isinstance(msg["content"], str)
-        assert json.loads(msg["content"]) == "<opaque>"
+        assert msg["content"] == "<opaque>"
 
-    def test_circular_result_falls_back_to_str(self) -> None:
-        """结果含循环引用（JSON 无法编码）→ content 回落 str(result)（TypeError/
-        ValueError 都被接住，插件读面不因工具数据形态而崩）。"""
+    def test_circular_result_yaml_anchor(self) -> None:
+        """结果含循环引用 → YAML 以锚点/别名表示（pyyaml 原生能力，读面
+        不崩；旧 JSON ValueError→str 回落随收编退役）。"""
         p = tc_plugin.ToolCache()
         cyclic: list[Any] = []
         cyclic.append(cyclic)
@@ -264,8 +264,7 @@ class TestHitShortCircuit:
 
         msg = _run(p, _state()).state_updates["messages"]["_ops"][0]["msg"]
 
-        assert msg["content"] == str(cyclic)
-        assert msg["content"].startswith("[["), "回落文本是 Python repr 而非 JSON"
+        assert msg["content"] == "&id001\n- *id001\n", "自引用以 YAML 锚点确定性表示"
 
     def test_multi_hit_results_paired_in_order(self) -> None:
         """多调用全命中：结果与 tool_calls 按下标配对，每个调用一条配对消息。"""
@@ -380,40 +379,27 @@ class TestPutRoundTrip:
 # ═══════════════ 越界守卫（靶行 170：长度差直调注入） ═══════════════
 
 
-class TestPartialCacheGuardBranch:
-    """``_build_tool_result_messages`` 的 ``if i >= len(cached_results): break``。
+class TestProtocolDelegationGuard:
+    """配对消息构造已收编 SDK tool_result_protocol（ADR 2026-09-28）。
 
-    经 ``execute`` 的真实输入不可达（见模块 docstring：全命中才调用、命中数
-    恒等于调用数），这里按守卫本义直调方法、注入长度差输入验证护栏契约：
-    ops 数 = min(调用数, 缓存数)，多余调用不产生 op、不越界不抛错。
+    旧 ``_build_tool_result_messages`` 的 ``break`` 截断守卫随方法退役；
+    长度不匹配的防御现为 SDK ``build_tool_result_ops`` 的显式 ValueError
+    （配对契约破坏不静默截断），由
+    ``plugins/sdk/tests/test_tool_result_protocol.py::test_ops_length_mismatch_raises``
+    锚定。本类保留一个经 execute 的等长不变量断言：全命中时 ops 数 ==
+    调用数（经真实输入可达的唯一形态）。
     """
 
-    @staticmethod
-    def _calls(n: int) -> list[dict[str, Any]]:
-        return [
-            {"id": f"c{i}", "name": "web_search", "args": {"q": f"q{i}"}}
-            for i in range(n)
-        ]
-
-    @pytest.mark.parametrize(
-        ("n_calls", "n_cached"),
-        [
-            (3, 2),  # 靶形态：第三个调用越过缓存末尾 → break
-            (3, 0),  # 零缓存：首个调用即越界
-            (3, 3),  # 对照：等长全回填（execute 真实契约形态）
-            (1, 5),  # 反向量级：缓存多于调用，多余缓存被忽略
-        ],
-    )
-    def test_ops_count_is_min_of_calls_and_cached(
-        self, n_calls: int, n_cached: int
-    ) -> None:
+    def test_full_hit_ops_count_equals_calls(self) -> None:
         p = tc_plugin.ToolCache()
-        ctx = PluginContext(state={}, config={})
-        cached = [{"idx": i} for i in range(n_cached)]
-
-        ops = p._build_tool_result_messages(ctx, self._calls(n_calls), cached)["_ops"]
-
-        assert len(ops) == min(n_calls, n_cached), "ops 数必须按 min 截断（守卫语义）"
-        assert [op["msg"]["tool_call_id"] for op in ops] == [
-            f"c{i}" for i in range(min(n_calls, n_cached))
-        ], "截断后的 ops 必须与前三（或全部）调用按下标配对"
+        for q in ("a", "b"):
+            p.put({"name": "web_search", "args": {"q": q}}, {"q": q})
+        state = {
+            StateKeys.RAW_TOOL_CALLS: [
+                {"id": f"c{i}", "name": "web_search", "args": {"q": q}}
+                for i, q in enumerate(("a", "b"))
+            ],
+        }
+        ops = _run(p, state).state_updates["messages"]["_ops"]
+        assert len(ops) == 2
+        assert [op["msg"]["tool_call_id"] for op in ops] == ["c0", "c1"]

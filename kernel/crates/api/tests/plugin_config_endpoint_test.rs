@@ -111,6 +111,7 @@ fn manifest_with_files(plugin_id: &str, files: Vec<ConfigFileMapping>) -> Plugin
         activation: None,
         persistent_fields: vec![],
         export_fields: vec![],
+        aux_venvs: Vec::new(),
         provides: None,
     }
 }

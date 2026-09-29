@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -19,6 +21,9 @@ import pytest
 from agentos_plugin_sdk.isolation_types import IsolationLevel
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
+
+# 真实可挂载工作空间（悬空防护下夹具路径必须存在；惰性建目录，落在系统临时区）
+_LANDING_WS = str(Path(tempfile.gettempdir()) / "agentos_ig_landing_ws_fixture")
 
 pytestmark = pytest.mark.unit
 
@@ -104,11 +109,16 @@ def _binding_manager(alive: bool, resolve_id: str = "container-abc") -> Any:
 
 
 def _base_state(**overrides: Any) -> dict[str, Any]:
-    """主会话（无 task_id，L1 缺省）tool_execute 状态：workspace + isolated。"""
+    """主会话（无 task_id，L1 缺省）tool_execute 状态：workspace + isolated。
+
+    workspace 用真实存在目录：挂载源悬空防护（d1c3b4213）下不存在路径会被
+    拒绝建容器，夹具路径必须可挂载。"""
+    if not Path(_LANDING_WS).exists():
+        Path(_LANDING_WS).mkdir(parents=True, exist_ok=True)
     base = {
         StateKeys.CORE_TYPE: "tool_execute",
         StateKeys.TASK_ID: "",
-        "workspace": "/host/ws",
+        "workspace": _LANDING_WS,
         "execution_context": {"isolation": {"level": "isolated"}},
         StateKeys.RAW_TOOL_CALLS: [{"name": "bash_execute", "args": {"command": "ls"}}],
     }
@@ -279,7 +289,13 @@ class TestContainerUnavailable:
         assert contexts[0]["provider"] == "denied"
         assert contexts[0]["blocked"] is True
         assert contexts[0]["reason"] == "container_create_failed"
-        assert result.state_updates["isolation.blocked"] is True
+        # 结果预填（ADR 2026-09-28）：blocked 调用直出预定拒绝结果
+        entries = result.state_updates["pre_decided_results"]
+        assert len(entries) == 1
+        assert entries[0]["tool_name"] == _base_state()[StateKeys.RAW_TOOL_CALLS][0]["name"]
+        assert entries[0]["success"] is False
+        assert "container_create_failed" in entries[0]["error"]
+        assert entries[0]["metadata"]["decided_by"] == "isolation_guard"
         # 不注入 _container_id（工具不会被放行到裸跑）
         assert StateKeys.RAW_TOOL_CALLS not in result.state_updates
 
@@ -309,6 +325,7 @@ class TestContainerUnavailable:
         contexts = result.state_updates["execution_contexts"]
         assert contexts[0]["blocked"] is True
         assert contexts[0]["reason"] == "container_create_failed"
+        assert result.state_updates["pre_decided_results"][0]["success"] is False
 
     @pytest.mark.asyncio
     async def test_环境服务不可用标blocked(self) -> None:
@@ -319,7 +336,7 @@ class TestContainerUnavailable:
 
         contexts = result.state_updates["execution_contexts"]
         assert contexts[0]["blocked"] is True
-        assert result.state_updates["isolation.blocked"] is True
+        assert result.state_updates["pre_decided_results"][0]["success"] is False
 
 
 # ============================================================

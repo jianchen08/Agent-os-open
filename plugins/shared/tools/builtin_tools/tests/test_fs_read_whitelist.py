@@ -75,7 +75,7 @@ def zone_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace
     monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(repo / "config"))
     monkeypatch.setenv("AGENTOS_CONFIG_USERS_DIR", str(users_dir))
     repo_anchor.reset_cache()
-    yield SimpleNamespace(repo=repo, second=second, denied=denied, ws=ws)
+    yield SimpleNamespace(repo=repo, second=second, denied=denied, ws=ws, users_dir=users_dir)
     repo_anchor.reset_cache()
 
 
@@ -101,9 +101,7 @@ class TestReadDenylist:
         self, zone_env: SimpleNamespace
     ) -> None:
         """list_directory 同款回退：仓库相对目录可列出。"""
-        result = await list_directory(
-            "plugins/shared/tools/hello_pack", workspace=str(zone_env.ws)
-        )
+        result = await list_directory("plugins/shared/tools/hello_pack", workspace=str(zone_env.ws))
 
         assert result.success is True, result.error
         names = {item["name"] for item in result.output["items"]}
@@ -118,9 +116,7 @@ class TestReadDenylist:
         assert result.success is False
         assert "File not found" in result.error
 
-    async def test_relative_fallback_into_second_prefix(
-        self, zone_env: SimpleNamespace
-    ) -> None:
+    async def test_relative_fallback_into_second_prefix(self, zone_env: SimpleNamespace) -> None:
         """相对路径只存在于第二前缀下：回退遍历多前缀命中。"""
         result = await file_read(path="data/report.csv", workspace=str(zone_env.ws))
 
@@ -195,9 +191,7 @@ class TestReadDenylist:
         assert result.success is False
         assert "read_deny" in result.error
 
-    async def test_read_deny_prefix_descendant_rejected(
-        self, zone_env: SimpleNamespace
-    ) -> None:
+    async def test_read_deny_prefix_descendant_rejected(self, zone_env: SimpleNamespace) -> None:
         """read_deny 前缀授权任意层级后代（子目录同拒）。"""
         child = zone_env.denied / "sub"
         child.mkdir()
@@ -208,9 +202,7 @@ class TestReadDenylist:
         assert result.success is False
         assert "read_deny" in result.error
 
-    async def test_repo_denied_dir_via_fallback_rejected(
-        self, zone_env: SimpleNamespace
-    ) -> None:
+    async def test_repo_denied_dir_via_fallback_rejected(self, zone_env: SimpleNamespace) -> None:
         """回退候选落在仓库拒绝目录（config/）：拒绝（仓库锚先行于 read_deny 链）。"""
         result = await file_read(path="config/llm.yaml", workspace=str(zone_env.ws))
 
@@ -235,6 +227,75 @@ class TestReadDenylist:
 
         assert result.success is True, result.error
         assert "x" in result.output["content"]
+
+
+class TestReadGrants:
+    """读授权前缀（用户裁定 2026-09-28）：黑名单命中经授权（读授权卡落盘/
+    read_allow 名单）放行；无授权对照见 TestReadDenylist（行为不变）。"""
+
+    async def test_authorized_read_zones_grant_repo_denied_dir(
+        self, zone_env: SimpleNamespace
+    ) -> None:
+        """管道级读授权前缀（authorized_read_zones）：仓库拒绝集 config/ 读放行。"""
+        import json as _json
+
+        zones = _json.dumps([str(zone_env.repo / "config")])
+        result = await file_read(
+            path=str(zone_env.repo / "config" / "llm.yaml"),
+            workspace=str(zone_env.ws),
+            authorized_read_zones=zones,
+        )
+
+        assert result.success is True, result.error
+        assert "api_key" in result.output["content"]
+
+    async def test_authorized_read_zones_grant_read_deny_prefix(
+        self, zone_env: SimpleNamespace
+    ) -> None:
+        """同链覆盖 read_deny 前缀（授权前缀先行于整条黑名单链）。"""
+        import json as _json
+
+        zones = _json.dumps([str(zone_env.denied)])
+        result = await list_directory(
+            path=str(zone_env.denied),
+            workspace=str(zone_env.ws),
+            authorized_read_zones=zones,
+        )
+
+        assert result.success is True, result.error
+        names = {item["name"] for item in result.output["items"]}
+        assert "diary.txt" in names  # fixture 播种文件（不依赖其他用例的目录副作用）
+
+    async def test_permanent_read_allow_entry_grants_without_param(
+        self, zone_env: SimpleNamespace
+    ) -> None:
+        """read_allow 名单（永久授权）命中：无参数透传也放行（工具层每次重读名单）。"""
+        wl = zone_env.users_dir / "default" / "project_whitelist.yaml"
+        data = yaml.safe_load(wl.read_text(encoding="utf-8"))
+        data["read_allow"] = [str(zone_env.repo / "config")]
+        wl.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+        result = await file_read(
+            path=str(zone_env.repo / "config" / "llm.yaml"), workspace=str(zone_env.ws)
+        )
+
+        assert result.success is True, result.error
+
+    async def test_read_grant_never_overrides_credential_blacklist(
+        self, zone_env: SimpleNamespace
+    ) -> None:
+        """授权不豁免凭据黑名单（.env 恒先行，正交关系）。"""
+        import json as _json
+
+        zones = _json.dumps([str(zone_env.repo)])
+        result = await file_read(
+            path=str(zone_env.repo / ".env"),
+            workspace=str(zone_env.ws),
+            authorized_read_zones=zones,
+        )
+
+        assert result.success is False
+        assert "凭据类文件" in result.error
 
 
 class TestWorkspacePrecedence:
@@ -319,9 +380,7 @@ class TestWriteZones:
         src = zone_env.second / "data" / "report.csv"
         dst = zone_env.second / "data" / "renamed.csv"
 
-        result = await move_file(
-            source=str(src), destination=str(dst), workspace=str(zone_env.ws)
-        )
+        result = await move_file(source=str(src), destination=str(dst), workspace=str(zone_env.ws))
 
         assert result.success is True, result.error
         assert dst.exists()

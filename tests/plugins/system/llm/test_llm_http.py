@@ -116,8 +116,8 @@ def llm_yaml(rtm: Any, rlc: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     yaml_path = tmp_path / "llm.yaml"
     yaml_path.write_text(_LLM_YAML_FIXTURE, encoding="utf-8")
     rtm._LLM_YAML = yaml_path  # type: ignore[attr-defined]
-    rlc._LLM_YAML = yaml_path  # type: ignore[attr-defined]
-    rlc._ENV_FILE = tmp_path / ".env"  # type: ignore[attr-defined]
+    monkeypatch.setattr(rlc, "_llm_yaml_path", lambda: yaml_path)
+    monkeypatch.setattr(rlc, "_env_file_path", lambda: tmp_path / ".env")
     rlc._env_file_cache = None  # type: ignore[attr-defined]
     return yaml_path
 
@@ -153,12 +153,17 @@ def _b64(payload: Any) -> str:
 # ── manifest ↔ 分发对齐 ───────────────────────────────────────────────
 
 
-def test_manifest_declares_20_http_endpoints() -> None:
-    """plugin.json http_endpoints 声明 20 端点（6 thinking-mode + 14 config/llm，P2-5 加 presets 下发）。"""
+def test_manifest_declares_9_http_endpoints() -> None:
+    """plugin.json http_endpoints 声明 9 端点（6 thinking-mode + 3 config/llm）。
+
+    批次 A1 后 llm.yaml 文件 IO 收口内核单一配置面（/api/v1/plugins/llm_service/
+    config/llm + /api/v1/config/env），插件 /ext 文件 IO 端点全部退役；仍存
+    config/llm 三端点 = provider-types / presets / remote-models（无状态读）。
+    """
     manifest = json.loads((_PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
     eps = manifest["http_endpoints"]
     by_id = {e["route_id"]: e for e in eps}
-    assert len(by_id) == 20
+    assert len(by_id) == 9
     # thinking-mode 6
     assert by_id["thinking_mode_health"]["path"] == "/ext/llm_service/thinking-mode/healthz"
     assert by_id["thinking_mode_models_list"]["path"] == "/ext/llm_service/thinking-mode/models"
@@ -166,19 +171,9 @@ def test_manifest_declares_20_http_endpoints() -> None:
     assert by_id["thinking_mode_check"]["path"] == "/ext/llm_service/thinking-mode/check/{model_name}"
     assert by_id["thinking_mode_switch"]["method"] == "POST"
     assert by_id["thinking_mode_recommendations"]["method"] == "POST"
-    # config/llm 13
-    assert by_id["config_llm_get"]["path"] == "/ext/llm_service/config/llm"
-    assert by_id["config_llm_defaults_get"]["path"] == "/ext/llm_service/config/llm/defaults"
-    assert by_id["config_llm_defaults_update"]["method"] == "PUT"
-    assert by_id["config_llm_models_get"]["path"] == "/ext/llm_service/config/llm/models"
-    assert by_id["config_llm_models_create"]["method"] == "POST"
-    assert by_id["config_llm_models_update"]["method"] == "PUT"
-    assert by_id["config_llm_models_delete"]["method"] == "DELETE"
-    assert by_id["config_llm_providers_get"]["path"] == "/ext/llm_service/config/llm/providers"
-    assert by_id["config_llm_providers_create"]["method"] == "POST"
-    assert by_id["config_llm_providers_update"]["method"] == "PUT"
-    assert by_id["config_llm_providers_delete"]["method"] == "DELETE"
+    # config/llm 3（文件 IO 已收口内核）
     assert by_id["config_llm_provider_types_get"]["path"] == "/ext/llm_service/config/llm/provider-types"
+    assert by_id["config_llm_presets_get"]["path"] == "/ext/llm_service/config/llm/presets"
     remote = by_id["config_llm_providers_remote_models_get"]
     assert remote["path"] == "/ext/llm_service/config/llm/providers/{provider_id}/remote-models"
     assert remote["timeout_ms"] == 15000
@@ -319,54 +314,6 @@ def test_thinking_mode_unknown_subpath_404(server: Any, llm_yaml: Path) -> None:
 # ── config/llm 段：读端点 ─────────────────────────────────────────────
 
 
-def test_get_llm_config_masked(server: Any, llm_yaml: Path) -> None:
-    status, body = _decode_http(
-        _call(server, path="/ext/llm_service/config/llm", method="GET")
-    )
-    assert status == 200
-    assert set(body) == {"models", "providers", "defaults"}
-    assert body["defaults"]["chat"] == "reason-m1"
-    # providers 脱敏 + key 状态：${OPENAI_API_KEY} 未配置 → has_key False
-    assert body["providers"]["openai"]["has_key"] is False
-    assert body["providers"]["openai"]["env_var"] == "OPENAI_API_KEY"
-    assert "****" in body["providers"]["openai"]["keys"][0]["api_key"]
-    # 明文 key 的 provider：has_key True、env_var None
-    assert body["providers"]["mock_llm"]["has_key"] is True
-    assert body["providers"]["mock_llm"]["env_var"] is None
-    # models 里顶层 api_key 脱敏
-    assert body["models"]["reason-m1"]["display_name"] == "Reason M1"
-
-
-def test_get_providers(server: Any, llm_yaml: Path) -> None:
-    status, body = _decode_http(
-        _call(server, path="/ext/llm_service/config/llm/providers", method="GET")
-    )
-    assert status == 200
-    assert body["providers"]["openai"]["api_base"] == "https://api.openai.com/v1"
-    assert body["providers"]["openai"]["has_key"] is False
-    assert body["providers"]["mock_llm"]["has_key"] is True
-
-
-def test_get_models_masked(server: Any, llm_yaml: Path) -> None:
-    status, body = _decode_http(
-        _call(server, path="/ext/llm_service/config/llm/models", method="GET")
-    )
-    assert status == 200
-    assert set(body["models"]) == {"reason-m1", "plain-m2"}
-
-
-def test_get_defaults(server: Any, llm_yaml: Path) -> None:
-    status, body = _decode_http(
-        _call(server, path="/ext/llm_service/config/llm/defaults", method="GET")
-    )
-    assert status == 200
-    assert body == {
-        "chat": "reason-m1",
-        "embedding": "emb-1",
-        "tiers": {"small": "plain-m2"},
-    }
-
-
 def test_get_provider_types(server: Any, llm_yaml: Path) -> None:
     status, body = _decode_http(
         _call(server, path="/ext/llm_service/config/llm/provider-types", method="GET")
@@ -380,306 +327,7 @@ def test_get_provider_types(server: Any, llm_yaml: Path) -> None:
 # ── config/llm 段：写端点（defaults/models/providers）─────────────────
 
 
-def test_put_defaults(server: Any, llm_yaml: Path) -> None:
-    status, body = _decode_http(
-        _call(
-            server,
-            path="/ext/llm_service/config/llm/defaults",
-            method="PUT",
-            raw_body=_b64({"chat": "plain-m2", "tiers": {"large": "reason-m1"}}),
-        )
-    )
-    assert status == 200
-    assert body["chat"] == "plain-m2"
-    assert body["tiers"]["large"] == "reason-m1"
-    # 落盘验证
-    on_disk = json.loads(json.dumps(__import__("yaml").safe_load(llm_yaml.read_text(encoding="utf-8"))))
-    assert on_disk["defaults"]["chat"] == "plain-m2"
-    assert on_disk["defaults"]["embedding"] == "emb-1"  # 未提交字段保留
-
-
-def test_post_model_and_409(server: Any, llm_yaml: Path) -> None:
-    status, body = _decode_http(
-        _call(
-            server,
-            path="/ext/llm_service/config/llm/models",
-            method="POST",
-            raw_body=_b64({"models": {"new-m3": {"provider": "openai", "display_name": "N3"}}}),
-        )
-    )
-    assert status == 200
-    assert "new-m3" in body["models"]
-
-    status, body = _decode_http(
-        _call(
-            server,
-            path="/ext/llm_service/config/llm/models",
-            method="POST",
-            raw_body=_b64({"models": {"new-m3": {"provider": "openai"}}}),
-        )
-    )
-    assert status == 409
-    # 冲突分派改造（7bfc905e8）后：409 detail 带提供商归属
-    assert body == {"detail": "模型 'new-m3' 已存在于提供商 'openai'"}
-
-
-def test_put_and_delete_model(server: Any, llm_yaml: Path) -> None:
-    _, _ = _decode_http(
-        _call(
-            server,
-            path="/ext/llm_service/config/llm/models",
-            method="POST",
-            raw_body=_b64({"models": {"upd-m": {"provider": "openai", "display_name": "U"}}}),
-        )
-    )
-    status, body = _decode_http(
-        _call(
-            server,
-            path="/ext/llm_service/config/llm/models/upd-m",
-            method="PUT",
-            raw_body=_b64({"config": {"display_name": "U2", "temperature": 0.1}}),
-        )
-    )
-    assert status == 200
-    assert body["models"]["upd-m"]["display_name"] == "U2"
-    assert body["models"]["upd-m"]["provider"] == "openai"  # 透传合并保留
-
-    status, body = _decode_http(
-        _call(server, path="/ext/llm_service/config/llm/models/upd-m", method="DELETE")
-    )
-    assert status == 200
-    assert "upd-m" not in body["models"]
-
-
-def test_update_missing_model_404(server: Any, llm_yaml: Path) -> None:
-    status, body = _decode_http(
-        _call(
-            server,
-            path="/ext/llm_service/config/llm/models/nope",
-            method="PUT",
-            raw_body=_b64({"config": {"x": 1}}),
-        )
-    )
-    assert status == 404
-    assert body == {"detail": "模型 'nope' 不存在"}
-
-
-def test_delete_missing_model_404(server: Any, llm_yaml: Path) -> None:
-    status, _ = _decode_http(
-        _call(server, path="/ext/llm_service/config/llm/models/nope", method="DELETE")
-    )
-    assert status == 404
-
-
-def test_post_provider_with_api_key_writes_env(
-    server: Any, rlc: Any, llm_yaml: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("NEWPROV_API_KEY", "")  # 防污染：测试结束还原
-    status, body = _decode_http(
-        _call(
-            server,
-            path="/ext/llm_service/config/llm/providers",
-            method="POST",
-            raw_body=_b64(
-                {
-                    "provider_id": "newprov",
-                    "config": {"api_base": "https://np.local/v1", "api_key": "sk-live-0123456789abcdef"},
-                }
-            ),
-        )
-    )
-    assert status == 200
-    assert "newprov" in body["providers"]
-    # yaml 内改写为占位符
-    on_disk = json.loads(json.dumps(__import__("yaml").safe_load(llm_yaml.read_text(encoding="utf-8"))))
-    keys = on_disk["providers"]["newprov"]["keys"]
-    assert keys[0]["api_key"] == "${NEWPROV_API_KEY}"
-    # 明文 key 落 .env（且仅占位符写 yaml，明文不落 yaml）
-    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
-    assert "NEWPROV_API_KEY=sk-live-0123456789abcdef" in env_text
-    assert "sk-live-0123456789abcdef" not in llm_yaml.read_text(encoding="utf-8")
-    # 响应中的 provider 含 keys + 占位符
-    assert body["providers"]["newprov"]["keys"][0]["api_key"] == "${NEWPROV_API_KEY}"
-
-
-def test_post_provider_masked_key_not_written(server: Any, llm_yaml: Path, tmp_path: Path) -> None:
-    status, body = _decode_http(
-        _call(
-            server,
-            path="/ext/llm_service/config/llm/providers",
-            method="POST",
-            raw_body=_b64(
-                {
-                    "provider_id": "maskedprov",
-                    "config": {"api_base": "https://m.local/v1", "api_key": "sk-t****5678"},
-                }
-            ),
-        )
-    )
-    assert status == 200
-    env_text = (tmp_path / ".env").read_text(encoding="utf-8") if (tmp_path / ".env").exists() else ""
-    assert "MASKEDPROV_API_KEY" not in env_text  # 掩码值绝不落 .env
-    on_disk = json.loads(json.dumps(__import__("yaml").safe_load(llm_yaml.read_text(encoding="utf-8"))))
-    assert "sk-t****5678" not in json.dumps(on_disk)
-
-
-def test_post_provider_dup_409(server: Any, llm_yaml: Path) -> None:
-    status, body = _decode_http(
-        _call(
-            server,
-            path="/ext/llm_service/config/llm/providers",
-            method="POST",
-            raw_body=_b64({"provider_id": "openai", "config": {"api_base": "x"}}),
-        )
-    )
-    assert status == 409
-    assert body == {"detail": "提供商 'openai' 已存在"}
-
-
 # ── config/llm 段：必填字段校验（镜像源 pydantic 必填语义，缺字段不落盘）──
-
-
-def test_post_model_missing_models_field_400(server: Any, llm_yaml: Path) -> None:
-    """POST /config/llm/models 缺 models 字段 → 400，不写盘（源 ModelAddRequest 必填）。"""
-    before = llm_yaml.read_text(encoding="utf-8")
-    status, body = _decode_http(
-        _call(
-            server,
-            path="/ext/llm_service/config/llm/models",
-            method="POST",
-            raw_body=_b64({}),
-        )
-    )
-    assert status == 400
-    assert "models" in body["detail"]
-    assert llm_yaml.read_text(encoding="utf-8") == before
-
-
-def test_put_model_missing_config_400(server: Any, llm_yaml: Path) -> None:
-    """PUT /config/llm/models/{id} 缺 config 字段 → 400，不写盘（源 ModelConfigUpdateRequest 必填）。"""
-    before = llm_yaml.read_text(encoding="utf-8")
-    status, body = _decode_http(
-        _call(
-            server,
-            path="/ext/llm_service/config/llm/models/reason-m1",
-            method="PUT",
-            raw_body=_b64({}),
-        )
-    )
-    assert status == 400
-    assert "config" in body["detail"]
-    assert llm_yaml.read_text(encoding="utf-8") == before
-
-
-def test_post_provider_missing_fields_400(server: Any, llm_yaml: Path, tmp_path: Path) -> None:
-    """POST /config/llm/providers 缺 provider_id/config → 400，不落 yaml/env。
-
-    防回归：空 body 曾会把空 provider 写进 llm.yaml（源 ProviderCreateRequest 必填语义）。
-    """
-    before = llm_yaml.read_text(encoding="utf-8")
-    status, body = _decode_http(
-        _call(
-            server,
-            path="/ext/llm_service/config/llm/providers",
-            method="POST",
-            raw_body=_b64({}),
-        )
-    )
-    assert status == 400
-    assert "provider_id" in body["detail"]
-    assert llm_yaml.read_text(encoding="utf-8") == before
-    assert not (tmp_path / ".env").exists()
-
-    status, body = _decode_http(
-        _call(
-            server,
-            path="/ext/llm_service/config/llm/providers",
-            method="POST",
-            raw_body=_b64({"provider_id": "np2", "config": "not-a-dict"}),
-        )
-    )
-    assert status == 400
-    assert "config" in body["detail"]
-    assert llm_yaml.read_text(encoding="utf-8") == before
-
-
-def test_put_provider_missing_config_400(server: Any, llm_yaml: Path) -> None:
-    """PUT /config/llm/providers/{id} 缺 config 字段 → 400，不写盘（源 ProviderConfigUpdateRequest 必填）。"""
-    before = llm_yaml.read_text(encoding="utf-8")
-    status, body = _decode_http(
-        _call(
-            server,
-            path="/ext/llm_service/config/llm/providers/openai",
-            method="PUT",
-            raw_body=_b64({}),
-        )
-    )
-    assert status == 400
-    assert "config" in body["detail"]
-    assert llm_yaml.read_text(encoding="utf-8") == before
-
-
-def test_put_provider(server: Any, llm_yaml: Path) -> None:
-    status, body = _decode_http(
-        _call(
-            server,
-            path="/ext/llm_service/config/llm/providers/mock_llm",
-            method="PUT",
-            raw_body=_b64({"config": {"api_base": "https://new.local/v1"}}),
-        )
-    )
-    assert status == 200
-    assert body["providers"]["mock_llm"]["api_base"] == "https://new.local/v1"
-    # keys 未提交 → 磁盘占位符保留
-    on_disk = json.loads(json.dumps(__import__("yaml").safe_load(llm_yaml.read_text(encoding="utf-8"))))
-    assert on_disk["providers"]["mock_llm"]["keys"][0]["api_key"] == "sk-plain-key-12345678"
-
-
-def test_put_provider_key_merge(server: Any, llm_yaml: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """只提交 keys[0] 明文 key：落 .env + yaml 改写占位符（源语义）。"""
-    monkeypatch.setenv("MOCK_LLM_API_KEY", "")
-    status, body = _decode_http(
-        _call(
-            server,
-            path="/ext/llm_service/config/llm/providers/mock_llm",
-            method="PUT",
-            raw_body=_b64({"config": {"keys": [{"id": "mk", "api_key": "sk-new-abcdef"}]}}),
-        )
-    )
-    assert status == 200
-    assert body["providers"]["mock_llm"]["keys"][0]["api_key"] == "${MOCK_LLM_API_KEY}"
-    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
-    assert "MOCK_LLM_API_KEY=sk-new-abcdef" in env_text
-    on_disk = json.loads(json.dumps(__import__("yaml").safe_load(llm_yaml.read_text(encoding="utf-8"))))
-    assert on_disk["providers"]["mock_llm"]["keys"][0]["api_key"] == "${MOCK_LLM_API_KEY}"
-
-
-def test_put_missing_provider_404(server: Any, llm_yaml: Path) -> None:
-    status, body = _decode_http(
-        _call(
-            server,
-            path="/ext/llm_service/config/llm/providers/nope",
-            method="PUT",
-            raw_body=_b64({"config": {"api_base": "x"}}),
-        )
-    )
-    assert status == 404
-    assert body == {"detail": "提供商 'nope' 不存在"}
-
-
-def test_delete_provider(server: Any, llm_yaml: Path) -> None:
-    status, body = _decode_http(
-        _call(server, path="/ext/llm_service/config/llm/providers/mock_llm", method="DELETE")
-    )
-    assert status == 200
-    assert "mock_llm" not in body["providers"]
-
-
-def test_delete_missing_provider_404(server: Any, llm_yaml: Path) -> None:
-    status, _ = _decode_http(
-        _call(server, path="/ext/llm_service/config/llm/providers/nope", method="DELETE")
-    )
-    assert status == 404
 
 
 # ── config/llm 段：remote-models ──────────────────────────────────────

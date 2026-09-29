@@ -33,6 +33,16 @@
       "description": "上传多模态文件（multipart/form-data；落盘 uploads 目录 + DiskFileStorage 元数据——原 POST /ext/channel_api/artifacts/upload 语义）"
     },
     {
+      "route_id": "artifacts_file_content",
+      "method": "GET",
+      "path": "/ext/artifacts/files/{stored_filename}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 30000,
+      "max_concurrency": 4,
+      "description": "上传文件字节流（前端文件加载器统一取流通道；键=/uploads url basename，auth:user 不受匿名通道媒体白名单约束）"
+    },
+    {
       "route_id": "artifacts_list",
       "method": "GET",
       "path": "/ext/artifacts",

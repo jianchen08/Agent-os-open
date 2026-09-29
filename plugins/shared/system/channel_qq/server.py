@@ -137,9 +137,9 @@ async def qq_send_message(
         OneBot API response dictionary
     """
     if _adapter is None or _adapter.stream_client is None:
-        return {"error": "QQ adapter not initialized"}
+        return {"success": False, "error": "QQ adapter not initialized"}
     if _adapter.stream_client._session is None:
-        return {"error": "OneBot client not connected"}
+        return {"success": False, "error": "OneBot client not connected"}
     result = await _adapter.stream_client.send_message(
         user_id=user_id,
         content=content,

@@ -51,7 +51,7 @@ function Harness() {
       submitTestId="harness-submit"
       switchPrompt="换页？"
       switchLinkText="去登录"
-      switchLinkTo="/login"
+      switchLinkTo="/register"
       switchLinkTestId="harness-switch"
       onSubmit={(e) => {
         e.preventDefault()
@@ -96,9 +96,7 @@ describe('useAuthForm / AuthField（共享件契约）', () => {
     await user.type(screen.getByLabelText(/名称/i), 'abc')
     await user.type(repeat, 'abc')
     fireEvent.blur(repeat)
-    await waitFor(() =>
-      expect(screen.queryByTestId('repeat-error')).not.toBeInTheDocument(),
-    )
+    await waitFor(() => expect(screen.queryByTestId('repeat-error')).not.toBeInTheDocument())
 
     await user.clear(repeat)
     await user.type(repeat, 'xyz')

@@ -6,9 +6,10 @@
 （不真派发任务、不碰真实登记簿）；端点 manifest/页面桥契约见
 test_mode_panel_pages.py（planning 已在 LIVE_PANELS）。
 
-两态口径（server.py 调查结论）：task_service 无 projects 读服务（登记簿仅
-HTTP 端点）→ 无 "projects" provider 时 /data/projects 从 pipeline-state 行按
-task.parent_project_id 派生并带 note；provider 注入即登记态（未来服务落地通道）。
+两态口径（server.py 现状契约）：/data/projects 走 "projects" provider（真接线 =
+_registry_projects 经 tool-executor 调 task_service projects.list）；登记行非空
+→ 登记态归一；provider 缺席/返回空（服务抖动或登记簿真空）→ state 行按
+task.parent_project_id 派生并带 note。
 """
 from __future__ import annotations
 
@@ -32,7 +33,8 @@ def _load_server():
     """按唯一模块名装载 server.py（与 pages/seeds 测试模块名不同域，provider 态隔离）。"""
     path = os.path.join(MODES_DIR, _PLUGIN_ID, "server.py")
     spec = importlib.util.spec_from_file_location("mode_live_mode_planning", path)
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -105,36 +107,43 @@ def test_live_planning_degrades_to_empty_without_kernel() -> None:
         _call(module, f"{_EP}/discussions", query={"pipeline_id": "pipe-x"})
     ) == {"messages": []}
     projects = _body_json(_call(module, f"{_EP}/projects"))
-    assert projects["projects"] == [] and projects["source"] == "derived"
-    assert "派生" in projects["note"] and "task.parent_project_id" in projects["note"]
+    assert projects["projects"] == []
+    assert projects["source"] == "derived"
+    assert "派生" in projects["note"]
+    assert "task.parent_project_id" in projects["note"]
 
 
 def test_live_planning_bootstrap_and_sessions() -> None:
     module = _load_server()
     bootstrap = _body_json(_call(module, f"{_EP}/bootstrap"))
-    assert bootstrap["mode"] == "planning" and bootstrap["panel_page_id"] == "planning_desk"
+    assert bootstrap["mode"] == "planning"
+    assert bootstrap["panel_page_id"] == "planning_desk"
 
     module._set_provider("pipeline-state", _state_provider(_fake_state_rows()))
     sessions = _body_json(_call(module, f"{_EP}/sessions"))["sessions"]
     assert len(sessions) == 2  # mode=planning 过滤（coding 行出局）
     plan = next(s for s in sessions if s["pipeline_id"] == "pipe-plan")
-    assert plan["goal"] == "雾镇二期方案" and plan["task_status"] == "running"
-    assert plan["task_id"] == "t_plan" and plan["parent_project_id"] == "proj_r1"
+    assert plan["goal"] == "雾镇二期方案"
+    assert plan["task_status"] == "running"
+    assert plan["task_id"] == "t_plan"
+    assert plan["parent_project_id"] == "proj_r1"
     assert plan["message_count"] == 6
 
 
 def test_live_planning_projects_derived_state() -> None:
-    """无登记 provider（现状：task_service 无 projects 服务）→ state 行派生 + note。"""
+    """无登记 provider（provider 缺席态）→ state 行派生 + note。"""
     module = _load_server()
     module._set_provider("pipeline-state", _state_provider(_fake_state_rows()))
     body = _body_json(_call(module, f"{_EP}/projects"))
-    assert body["source"] == "derived" and "登记" in body["note"]
+    assert body["source"] == "derived"
+    assert "登记" in body["note"]
     by_id = {p["project_id"]: p for p in body["projects"]}
     assert set(by_id) == {"proj_r1", "proj_x"}  # 未挂靠行不成组
     r1 = by_id["proj_r1"]
     assert r1["source"] == "derived"
     # 诚实不造假：登记簿字段派生口径不可得 → 留空不编造
-    assert r1["workflow_state"] == "" and r1["auto_execute"] is None
+    assert r1["workflow_state"] == ""
+    assert r1["auto_execute"] is None
     assert r1["tasks"] == [
         {"task_id": "t_plan", "pipeline_id": "pipe-plan", "title": "雾镇二期方案", "status": "running"}
     ]
@@ -142,7 +151,7 @@ def test_live_planning_projects_derived_state() -> None:
 
 
 def test_live_planning_projects_registry_state() -> None:
-    """登记 provider 注入（未来 projects 读服务通道）→ 登记态归一 + 任务合并。"""
+    """登记 provider 注入且非空 → 登记态归一 + 任务合并（登记簿为项目清单真值）。"""
     module = _load_server()
     module._set_provider("pipeline-state", _state_provider(_fake_state_rows()))
 
@@ -156,14 +165,73 @@ def test_live_planning_projects_registry_state() -> None:
 
     module._set_provider("projects", _registry)
     body = _body_json(_call(module, f"{_EP}/projects"))
-    assert body["source"] == "registry" and "note" not in body
+    assert body["source"] == "registry"
+    assert "note" not in body
     by_id = {p["project_id"]: p for p in body["projects"]}
     assert set(by_id) == {"proj_r1", "proj_empty"}  # 登记簿为项目清单真值
     r1 = by_id["proj_r1"]
-    assert r1["title"] == "雾镇" and r1["workflow_state"] == "plan"
+    assert r1["title"] == "雾镇"
+    assert r1["workflow_state"] == "plan"
     assert r1["auto_execute"] is True
     assert [t["task_id"] for t in r1["tasks"]] == ["t_plan"]  # state 行任务并入
     assert by_id["proj_empty"]["tasks"] == []  # 登记后尚无子任务行 → 空组可见
+
+
+def test_live_planning_projects_registry_empty_falls_back_to_derived() -> None:
+    """登记 provider 在但返回空（服务抖动降级/登记簿真空）→ 回退派生，面板不变空态。"""
+    module = _load_server()
+    module._set_provider("pipeline-state", _state_provider(_fake_state_rows()))
+
+    async def _empty() -> list[dict]:
+        return []
+
+    module._set_provider("projects", _empty)
+    body = _body_json(_call(module, f"{_EP}/projects"))
+    assert body["source"] == "derived"
+    assert "派生" in body["note"]
+    assert {p["project_id"] for p in body["projects"]} == {"proj_r1", "proj_x"}
+
+
+def test_live_planning_projects_real_provider_via_tool_executor() -> None:
+    """真接线契约：_registry_projects 经 tool-executor 调 task_service
+    projects.list（显式 plugin_id + data 信封解包）。"""
+    module = _load_server()
+    module._set_provider("pipeline-state", _state_provider(_fake_state_rows()))
+    calls: list[dict] = []
+
+    async def _te(payload: dict) -> dict:
+        calls.append(payload)
+        return {
+            "data": {
+                "projects": [
+                    {"id": "proj_r1", "title": "雾镇", "workflow_state": "running",
+                     "auto_execute": False, "status": "active"},
+                ],
+                "total": 1,
+            }
+        }
+
+    module._set_provider("tool-executor", _te)
+    module._set_provider("projects", module._registry_projects)
+    body = _body_json(_call(module, f"{_EP}/projects"))
+    assert calls == [{"tool_name": "projects.list", "plugin_id": "task_service", "args": {}}]
+    assert body["source"] == "registry"
+    assert "note" not in body
+    r1 = body["projects"][0]
+    assert r1["title"] == "雾镇"
+    assert r1["workflow_state"] == "running"
+    assert [t["task_id"] for t in r1["tasks"]] == ["t_plan"]  # state 行任务并入
+
+
+def test_live_planning_projects_real_provider_without_tool_executor() -> None:
+    """tool-executor 通道缺席 → 真接线 provider 降级空 → 派生回退（note 说明口径）。"""
+    module = _load_server()
+    module._set_provider("pipeline-state", _state_provider(_fake_state_rows()))
+    module._set_provider("projects", module._registry_projects)
+    body = _body_json(_call(module, f"{_EP}/projects"))
+    assert body["source"] == "derived"
+    assert "派生" in body["note"]
+    assert {p["project_id"] for p in body["projects"]} == {"proj_r1", "proj_x"}
 
 
 def test_live_planning_task_tree_two_levels() -> None:
@@ -253,7 +321,8 @@ def test_live_planning_create_project_optional_args_omitted() -> None:
               raw_body=json.dumps({"goal": "雾镇"}))
     )
     assert captured["args"] == {"goal": "雾镇"}
-    assert body["project_id"] == "proj_a" and body["created"] is False
+    assert body["project_id"] == "proj_a"
+    assert body["created"] is False
 
 
 def test_live_planning_plan_action_dispatches_task_submit() -> None:
@@ -270,13 +339,15 @@ def test_live_planning_plan_action_dispatches_task_submit() -> None:
               raw_body=json.dumps({"goal": "给雾镇做二期方案"}))
     )
     assert body == {"task_id": "task_7"}
-    assert captured["tool_name"] == "task_submit" and captured["plugin_id"] == "task_submit_tool"
+    assert captured["tool_name"] == "task_submit"
+    assert captured["plugin_id"] == "task_submit_tool"
     args = captured["args"]
     assert args["target_type"] == "agent"
     assert args["target_id"] == "executor/generation/research_agent"
     # 面板按主 agent（L1）身份代用户派发（tool-executor 直调无注入链，须自携）
     assert args["parent_agent_level"] == 1
-    assert args["mode"] == "planning" and args["task_kind"] == "planning_plan"
+    assert args["mode"] == "planning"
+    assert args["task_kind"] == "planning_plan"
     assert "给雾镇做二期方案" in args["goal_description"]
     assert len(args["goal_description"]) <= 2000  # task_submit schema 上限
     assert args["goal_title"].startswith("方案规划")
@@ -334,7 +405,8 @@ def _load_task_submit_tool():
             sys.path.insert(0, p)
     path = os.path.join(tool_dir, "tool.py")
     spec = importlib.util.spec_from_file_location("task_submit_tool_live_module", path)
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -421,10 +493,13 @@ def test_live_planning_panel_html_host_fusion_bridge_and_tokens() -> None:
     path = os.path.join(MODES_DIR, "mode_planning", "webview", "planning_panel.html")
     with open(path, encoding="utf-8") as fh:
         html = fh.read()
-    assert "theme.sync" in html and "ctx.sync" in html
+    assert "theme.sync" in html
+    assert "ctx.sync" in html
     assert "__agentosCtx" in html
     assert "document.documentElement.style.setProperty" in html  # token 逐键落 documentElement
-    assert "--ag-" in html and "--ag-bg" in html and "--ag-radius" in html
+    assert "--ag-" in html
+    assert "--ag-bg" in html
+    assert "--ag-radius" in html
     # 仅「发起规划」带会话上下文；create_project 无会话语义不走此参
     assert html.count("session_id: window.__agentosCtx") == 1
 
@@ -443,7 +518,8 @@ def test_live_planning_panel_html_create_project_input_guard() -> None:
     assert "projGoalHint').style.display = 'block'" in guard_body
     assert "$('projGoal').addEventListener('input'" in html
     # 成功/失败 toast 反馈均在（「创建成功 toast」确认存在）
-    assert "项目已" in html and "'创建' : '复用既有'" in html
+    assert "项目已" in html
+    assert "'创建' : '复用既有'" in html
     assert "创建失败" in html
 
 
@@ -457,4 +533,5 @@ def test_panel_html_bridge_error_banner_distinct_from_empty_state() -> None:
     assert "面板桥不可用/加载失败" in html
     assert 'onclick="refreshAll()">重试' in html
     # 横幅样式走 --ag-err 语义色（var(--err, fallback) 桥接形式）
-    assert ".bridge-err" in html and "var(--err, #dc2626)" in html
+    assert ".bridge-err" in html
+    assert "var(--err, #dc2626)" in html

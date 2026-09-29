@@ -132,9 +132,9 @@ async def wecom_send_message(
         WeCom API response dictionary
     """
     if _adapter is None or _adapter.stream_client is None:
-        return {"error": "WeCom adapter not initialized"}
+        return {"success": False, "error": "WeCom adapter not initialized"}
     if _adapter.stream_client._session is None:
-        return {"error": "WeCom stream client not connected"}
+        return {"success": False, "error": "WeCom stream client not connected"}
     result = await _adapter.stream_client.send_message(user_id, content, msg_type)
     return result
 
@@ -170,7 +170,7 @@ async def wecom_handle_callback(
         Decrypted message content or empty string on failure
     """
     if _adapter is None:
-        return {"error": "WeCom adapter not initialized"}
+        return {"success": False, "error": "WeCom adapter not initialized"}
     result = await _adapter.handle_callback(timestamp, nonce, msg_signature, body)
     return {"decrypted": result}
 

@@ -29,12 +29,14 @@ import { API_ENDPOINTS } from '@/constants/api'
 import { apiClient } from '@/services/api/client'
 import { EXT_ROUTE, extUrl } from '@/services/api/extRoute'
 import {
-  createRoleplaySession,
-  parseRoleplayContinuePayload,
-} from '@/services/roleplayContinue'
+  openModeSession,
+  parseModeSessionPayload,
+  resolvePersonaInjectionKey,
+} from '@/services/modeSessionBinder'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { buildWebviewThemeTokens } from '@/services/webviewThemeTokens'
-import { useRoleplayPossessStore } from '@/stores/roleplayPossessStore'
+import { useNotificationStore } from '@/stores/notificationStore'
+import { usePersonaPossessStore } from '@/stores/personaPossessStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { getActiveSessionTheme, useSessionThemeStore } from '@/stores/sessionThemeStore'
 import { useThemeStore } from '@/stores/themeStore'
@@ -265,38 +267,83 @@ export function WebviewWidget({
           sendDown('result', { applied: true })
           return
         }
-        if (msg.method === 'roleplay.possess') {
-          // 附身桥协议（roleplay.possess）：白名单宿主侧方法——面板附身卡成功
-          // 后上行 {card_id, name, avatar, personaText?}，写入 roleplayPossessStore
-          // （发送链据此把卡人设并入 execution_context.roleplay_persona）。载荷校验
-          // fail-closed：非法整包丢弃（零状态变更）并回 error。纯宿主行为，不经
-          // 内核 transport。
-          const applied = useRoleplayPossessStore.getState().setPossessed(msg.params)
-          if (!applied) {
+        if (msg.method === 'mode.possess') {
+          // 人设接管附身桥协议（mode.possess，批 G② 通用化）：白名单宿主侧
+          // 方法——模式面板附身成功后上行 {mode, card_id, name, avatar,
+          // personaText?}；注入键从 registry 该模式声明 decl.persona.from 解析
+          // （resolvePersonaInjectionKey）：resolved → 随档钉住（出生即钉，
+          // D9 同形态）；undeclared（模式未声明 persona/未收录）→ 整包拒绝；
+          // unreachable → 附身建立但 personaKey=null（发送链诚实降级不注入）。
+          // 载荷校验 fail-closed：非法整包丢弃（零状态变更）并回 error。纯宿主
+          // 行为，不经内核 transport。
+          const resolution = await resolvePersonaInjectionKey(
+            (msg.params as Record<string, unknown> | null)?.mode as string,
+          )
+          const personaKey =
+            resolution.status === 'resolved'
+              ? resolution.personaKey
+              : resolution.status === 'unreachable'
+                ? null
+                : undefined
+          if (personaKey === undefined) {
             sendDown('error', {
-              message: 'roleplay.possess 已丢弃：载荷需 card_id/name 非空字符串 + avatar（emoji 或色对）',
+              message: 'mode.possess 已丢弃：该模式未声明 persona 接管（mode.yaml persona.from）',
             })
             return
           }
+          const applied = usePersonaPossessStore.getState().setPossessed(msg.params, personaKey)
+          if (!applied) {
+            sendDown('error', {
+              message:
+                'mode.possess 已丢弃：载荷需 mode（合法形态键）+ card_id/name 非空字符串 + avatar（emoji 或色对）',
+            })
+            return
+          }
+          // D8 提示义务（附身侧，一次建立提示一次，解除不提示）：附身替换
+          // 系统提示词中的人设段（{{persona:}} 占位符换源），改变提示词前缀 →
+          // 前缀缓存失效，后续对话 token 成本上升——附身是用户显式选择，代价
+          // 须在建立时告知。
+          const possessedCard = usePersonaPossessStore.getState().possessed
+          useNotificationStore.getState().addNotification({
+            title: `已附身「${possessedCard?.name ?? ''}」`,
+            message: '附身将接管人设，改变提示词前缀、破坏缓存命中（成本上升）。',
+            priority: 'normal',
+            category: 'info',
+            isBlocking: false,
+            autoDismissMs: 8000,
+            sourceLabel: '人设接管',
+          })
           sendDown('result', { applied: true })
           return
         }
-        if (msg.method === 'roleplay.continue') {
-          // 转续演/会话化开演桥协议（roleplay.continue）：白名单宿主侧方法——面板以
-          // 某卡开纯净扮演会话：建会话（扮演·<卡名>，store 创建流随建即激活=切到聊天区）
-          // + 该会话执行选项绑定卡身份（发送链据此逐消息并入 WS agent_id +
-          // mode=roleplay）+ 自动首条触发消息（可选开演档 greeting/personaText 随
-          // 快照键生效，material.py 据此组开场注入段）。载荷校验 fail-closed：
-          // card_id/name 非空字符串（开演档键在场须非空字符串），非法整包丢弃
-          // （零状态变更）并回 error；avatar 为对称装饰位不消费。
-          const payload = parseRoleplayContinuePayload(msg.params)
+        if (msg.method === 'mode.session') {
+          // 模式会话出生桥协议（mode.session，批 G② 通用化）：白名单宿主侧
+          // 方法——模式面板以模式开新会话：modeSessionBinder 出生通道（建会话
+          // 随建即跳转 + modeBinding 快照 + 扩展位 agent_id/extra_context/
+          // first_message + D8 人设接管提示 + 面板页随开）。载荷 fail-closed：
+          // mode 形态键必填，扩展位在场须非空（agent_id 在场须携 name），非法
+          // 整包丢弃（零状态变更）并回 error。
+          const payload = parseModeSessionPayload(msg.params)
           if (!payload) {
             sendDown('error', {
-              message: 'roleplay.continue 已丢弃：载荷需 card_id/name 非空字符串',
+              message: 'mode.session 已丢弃：载荷需 mode（合法形态键）；扩展位在场须非空字符串',
             })
             return
           }
-          const created = await createRoleplaySession(payload)
+          // intoSessionId：'current' = 活跃会话（B8 管道标签：开进当前会话为
+          // 子管道，会话出生语义不动）；其余值原样透传（显式会话 id）
+          const intoSessionId =
+            payload.intoSessionId === 'current'
+              ? useSessionStore.getState().activeSessionId ?? undefined
+              : payload.intoSessionId
+          const created = await openModeSession(payload.mode, {
+            agentId: payload.agentId,
+            agentName: payload.agentName,
+            title: payload.title,
+            extraContext: payload.extraContext,
+            firstMessage: payload.firstMessage,
+            intoSessionId,
+          })
           sendDown('result', { applied: true, session_id: created.sessionId })
           return
         }

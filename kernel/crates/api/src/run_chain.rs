@@ -91,6 +91,18 @@ impl RunChainRegistry {
         self.chains.lock().len()
     }
 
+    /// 活跃管道偏好映射条目数（堆栈级诊断面 memory-breakdown 消费；
+    /// 容量以用户数为上界，不做淘汰）。
+    pub fn active_pipeline_count(&self) -> usize {
+        self.active_pipeline.lock().len()
+    }
+
+    /// 并发闸门快照 (running, waiting)（堆栈级诊断面：排队即卡顿的直读信号）。
+    pub fn gate_snapshot(&self) -> (usize, usize) {
+        let inner = self.gate.inner.lock();
+        (inner.running, inner.waiting.len())
+    }
+
     fn priority_rank(&self, user_id: &str, pipeline_key: &str) -> u8 {
         if !user_id.is_empty()
             && self.active_pipeline.lock().get(user_id).map(String::as_str) == Some(pipeline_key)
@@ -104,6 +116,10 @@ impl RunChainRegistry {
     /// 入链执行：同管道 FIFO，跨管道并行，全局闸门按活跃优先放行。
     ///
     /// 防御：空 key 无法构成串行维度，直接 spawn 不入链（链注册表不记条目）。
+    ///
+    /// 堆栈级诊断插桩：链任务注册活动槽（"run-chain:{key}"），标签只在既有
+    /// 等待点更新（等前序 FIFO / 等闸门 / 派发执行），O(1) 原子操作；任务
+    /// 结束守卫自动注销。task-dump 端点据此回答"哪个管道卡在哪个等待点"。
     pub fn enqueue<F>(self: &Arc<Self>, pipeline_key: &str, user_id: &str, fut: F)
     where
         F: Future<Output = ()> + Send + 'static,
@@ -115,6 +131,8 @@ impl RunChainRegistry {
         let rank = self.priority_rank(user_id, pipeline_key);
         let registry = Arc::clone(self);
         let key = pipeline_key.to_string();
+        let activity =
+            agentos_core::task_activity::global_registry().register(&format!("run-chain:{key}"));
         // spawn 与 insert 必须在同一临界区完成（spawn 同步、不 await），
         // 否则两个并发 enqueue 可能都拿到"空链"而并行执行。
         let mut map = self.chains.lock();
@@ -123,14 +141,23 @@ impl RunChainRegistry {
             None => (0, None),
         };
         let task_key = key.clone();
-        let task = tokio::spawn(async move {
+        let task = tokio::spawn(agentos_core::task_activity::scope(activity, async move {
             // ① 同管道前序：Err（前序 panic/中止）忽略——一个崩溃不毒化整条链。
+            if prev.is_some() {
+                agentos_core::task_activity::set_current_label("waiting prev run (fifo chain)");
+            }
             if let Some(prev) = prev {
                 let _ = prev.await;
             }
             // ② 全局闸门：limit=0 直通；设限时活跃管道优先获得槽位。
+            agentos_core::task_activity::set_current_label(format!(
+                "waiting admission gate (rank={rank})"
+            ));
             let _guard = registry.gate.acquire(rank).await;
             // ③ 业务执行。
+            agentos_core::task_activity::set_current_label(format!(
+                "dispatching pipeline {task_key}"
+            ));
             fut.await;
             // ④ 自清理。panic 时跳过（unwind 中 Drop 已释放闸门），残留条目
             //    由下一次 enqueue 的 remove+insert 覆盖，无语义泄漏。
@@ -138,7 +165,7 @@ impl RunChainRegistry {
             if map.get(&task_key).map(|entry| entry.gen) == Some(gen) {
                 map.remove(&task_key);
             }
-        });
+        }));
         map.insert(key, ChainEntry { gen, handle: task });
     }
 
@@ -148,6 +175,9 @@ impl RunChainRegistry {
     ///
     /// `fut` 尾部必须自行 pop pending 队列（收走占链竞态窗口内入队的消息），
     /// FIFO 由"直跑先占链、后续 enqueue 排在其后"保证。
+    ///
+    /// 诊断插桩同 [`Self::enqueue`]：活动槽 "run-chain:{key}"，等待点标签
+    /// O(1) 更新，跑完守卫自动注销。
     ///
     /// # Arguments
     /// 与 [`Self::enqueue`] 同语义：同 key 串行、跨 key 并行、gate 按活跃优先放行。
@@ -174,15 +204,23 @@ impl RunChainRegistry {
         // 链空闲：占链 spawn（同 enqueue 机制，gen 从 0 起、无前序）。
         let gen = 0u64;
         let task_key = key.clone();
-        let task = tokio::spawn(async move {
+        let activity =
+            agentos_core::task_activity::global_registry().register(&format!("run-chain:{key}"));
+        let task = tokio::spawn(agentos_core::task_activity::scope(activity, async move {
+            agentos_core::task_activity::set_current_label(format!(
+                "waiting admission gate (rank={rank})"
+            ));
             let _guard = registry.gate.acquire(rank).await;
+            agentos_core::task_activity::set_current_label(format!(
+                "dispatching pipeline {task_key}"
+            ));
             fut.await;
             // 自清理同 enqueue：panic 时跳过，残留由下一次 enqueue 覆盖。
             let mut map = registry.chains.lock();
             if map.get(&task_key).map(|entry| entry.gen) == Some(gen) {
                 map.remove(&task_key);
             }
-        });
+        }));
         map.insert(key, ChainEntry { gen, handle: task });
         true
     }
@@ -474,5 +512,68 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("闸门等待者未达到 {expect}");
+    }
+
+    // ── 堆栈级诊断插桩：等待点标签可见（task-dump 消费面）──
+
+    /// 轮询全局任务注册表，直到 name 条目的标签满足谓词（上限 5s）。
+    async fn wait_label(name: &str, pred: impl Fn(&str) -> bool) -> String {
+        let reg = agentos_core::task_activity::global_registry();
+        for _ in 0..500 {
+            if let Some(entry) = reg.snapshot().into_iter().find(|e| e.name == name) {
+                if pred(&entry.label) {
+                    return entry.label;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("任务 {name} 的标签 5s 内未满足谓词");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn chain_task_labels_visible_at_wait_points() {
+        let reg = RunChainRegistry::new(1); // 闸门限 1：制造闸门等待
+        let name = "run-chain:p-diag";
+        let release = Arc::new(tokio::sync::Notify::new());
+        let holder_wait = Arc::clone(&release);
+        // 占住唯一槽位。
+        reg.enqueue("p-holder", "", async move {
+            let _ = holder_wait.notified().await;
+        });
+        wait_gate_running(&reg, 1).await;
+        // 被测链任务：入闸前应显形 "waiting admission gate"。
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let entered_wait = Arc::clone(&entered);
+        let ran = reg.try_enqueue_direct("p-diag", "", async move {
+            entered_wait.notify_one();
+            // 闸门已过：此刻标签应为派发态（等待点标签链路端到端可见）。
+            let label = agentos_core::task_activity::current_label()
+                .expect("链任务体内标签可读（scope 传播）");
+            assert!(
+                label.starts_with("dispatching pipeline p-diag"),
+                "派发标签实际 {label}"
+            );
+        });
+        assert!(ran);
+        let label = wait_label(name, |l| l.contains("waiting admission gate")).await;
+        assert!(
+            label.contains("rank="),
+            "闸门等待标签含优先级（实际 {label}）"
+        );
+        // 放行 → 派发标签 → 跑完自动注销。
+        release.notify_one();
+        entered.notified().await;
+        wait_drained(&reg).await;
+        for _ in 0..500 {
+            let alive = agentos_core::task_activity::global_registry()
+                .snapshot()
+                .into_iter()
+                .any(|e| e.name == name);
+            if !alive {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("链任务跑完必须从 task-dump 注销");
     }
 }

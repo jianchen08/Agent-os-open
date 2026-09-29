@@ -30,7 +30,7 @@ async def project_create(**kwargs: dict[str, Any]) -> dict[str, Any]:
     result = await tool.execute(kwargs)
     if result.success and isinstance(result.output, dict):
         return result.output
-    return {"error": result.error}
+    return {"success": False, "error": result.error}
 
 
 if __name__ == "__main__":

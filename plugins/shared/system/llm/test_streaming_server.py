@@ -806,9 +806,8 @@ class TestHttpHandleDispatch:
         mod = _load_server()
         handler = mod.plugin._tools["http.handle"].handler
         for path in (
-            "/ext/llm_service/config/llm",
-            "/ext/llm_service/config/llm/models",
-            "/ext/llm_service/config/llm/defaults",
+            "/ext/llm_service/config/llm/presets",
+            "/ext/llm_service/config/llm/provider-types",
         ):
             result = _run(handler(path=path, method="GET", raw_body=""))
             assert result["success"] is True

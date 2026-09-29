@@ -53,12 +53,15 @@ libmimalloc-sys.workspace = true
 
 # 内存水位监控（bin agentos-kernel）：Private Bytes 直读（K32GetProcessMemoryInfo）。
 # 仅 FFI 声明零运行时开销，且为本仓依赖图既有传递依赖（Cargo.lock 0.52.0），零新增下载。
+# Wdk_System_SystemInformation：插件内存采集走 NtQuerySystemInformation 的
+# WorkingSetPrivateSize（任务管理器「活动的专用工作集」同源口径）。
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = [
     "Win32_Foundation",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
     "Win32_System_Diagnostics_ToolHelp",
+    "Wdk_System_SystemInformation",
 ] }
 
 [dev-dependencies]

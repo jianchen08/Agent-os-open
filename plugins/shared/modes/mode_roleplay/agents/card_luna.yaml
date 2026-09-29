@@ -177,3 +177,11 @@ state_schema:
     type: number
     initial: 0
     template: 好感度 {value}
+
+# dynamic_vars：每轮消息尾部的动态上下文（状态统一标记机制注入面——
+# 解析步 render 回写 context.character_state_text，此占位符每轮取新鲜值；
+# 消息尾部形态，system_prompt 前缀不动，缓存零损失）
+dynamic_vars:
+  enabled: true
+  items:
+  - 当前角色状态：{{state:context.character_state_text}}

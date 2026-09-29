@@ -13,6 +13,7 @@ routes_config.py 的 cost-control 段（_DEFAULT_COST_CONTROL 兜底 + 全文覆
 
 [来源: docs/working/module_migration_plan.md §5.1]
 """
+# config-write-surface-exempt: 真债:cost_control.yaml应走内核单一面(前端已可用PluginConfigEditor);迁移快照欠账,见方案§2审计表
 from __future__ import annotations
 
 import copy

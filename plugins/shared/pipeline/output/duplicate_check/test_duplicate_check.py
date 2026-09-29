@@ -689,15 +689,57 @@ class TestToolFailBreaker:
         assert updates["router.tool_fail_streak"]["eval_echo"] == 1
         assert "tool_ids" not in updates
 
+    def test_http_status_results_not_counted(self) -> None:
+        """HTTP 数字状态码结果（业务反馈）不计连败（用户裁定 2026-09-28）。
+
+        事故 2026-09-28 回归：web_operate 连探 5 条 GitHub 死链全 404
+        （URL 各不相同）被算成连败 5 次禁用断网——404 是"执行成功、目标
+        不存在"的可自愈反馈，不是工具故障。
+        """
+        plugin = DuplicateCheckPlugin()
+        results = [{"tool_name": "web_operate", "success": False, "error_code": "HTTP_404"}] * 5
+        state = _tool_exec_state(results, tool_ids=["web_operate", "file_read"])
+        updates = _exec_updates(plugin, state)
+        assert updates.get("router.tool_fail_streak", {}).get("web_operate", 0) == 0
+        assert "router.tool_fail_banned" not in updates
+        assert "tool_ids" not in updates  # 不禁用即不摘工具面
+
+    def test_http_network_errors_still_counted(self) -> None:
+        """网络层执行不了（HTTP_ERROR/TIMEOUT，非数字状态码）照旧计连败。"""
+        plugin = DuplicateCheckPlugin()
+        results = [
+            {"tool_name": "web_operate", "success": False, "error_code": "HTTP_ERROR"},
+            {"tool_name": "web_operate", "success": False, "error_code": "TIMEOUT"},
+            {"tool_name": "web_operate", "success": False, "error_code": "HTTP_503"},
+        ]
+        state = _tool_exec_state(results)
+        updates = _exec_updates(plugin, state)
+        # HTTP_ERROR/TIMEOUT 计入（2）；HTTP_503 拿到响应属业务反馈不计
+        assert updates["router.tool_fail_streak"]["web_operate"] == 2
+
+    def test_http_status_and_bare_failure_mixed(self) -> None:
+        """同工具交错：404 反馈不计，裸失败（无 error_code 执行异常）逐次累计。"""
+        plugin = DuplicateCheckPlugin()
+        results = [
+            {"tool_name": "t", "success": False, "error_code": "HTTP_404"},
+            {"tool_name": "t", "success": False},
+            {"tool_name": "t", "success": False, "error_code": "HTTP_403"},
+            {"tool_name": "t", "success": False},
+        ]
+        state = _tool_exec_state(results)
+        updates = _exec_updates(plugin, state)
+        assert updates["router.tool_fail_streak"]["t"] == 2
+        assert "router.tool_fail_banned" not in updates
+
     def test_mixed_tools_counted_independently(self) -> None:
         """多工具混合：只对失败的工具计数，成功工具互不影响。"""
         plugin = DuplicateCheckPlugin()
-        state = _tool_exec_state(
-            [_fail("a"), _ok("b"), _fail("a"), _ok("c"), _fail("a")]
-        )
+        state = _tool_exec_state([_fail("a"), _ok("b"), _fail("a"), _ok("c"), _fail("a")])
         updates = _exec_updates(plugin, state)
-        assert updates["router.tool_fail_streak"] == {"a": 3, "b": 0 - 0 + 1 if False else 0} or \
-               updates["router.tool_fail_streak"].get("a") == 3
+        assert (
+            updates["router.tool_fail_streak"] == {"a": 3, "b": 0 - 0 + 1 if False else 0}
+            or updates["router.tool_fail_streak"].get("a") == 3
+        )
 
     def test_exempt_tool_not_counted(self) -> None:
         """豁免清单内工具不计连败。"""
@@ -717,9 +759,7 @@ class TestToolFailBreaker:
     def test_structured_business_failure_not_counted(self) -> None:
         """success=True 的结构化业务失败（如 eval_echo valid=false）不计数——LLM 可自愈。"""
         plugin = DuplicateCheckPlugin()
-        state = _tool_exec_state(
-            [{"tool_name": "eval_echo", "success": True, "data": {"valid": False}}] * 9
-        )
+        state = _tool_exec_state([{"tool_name": "eval_echo", "success": True, "data": {"valid": False}}] * 9)
         updates = _exec_updates(plugin, state)
         assert updates.get("should_stop") is not True
         assert "tool_ids" not in updates
@@ -779,9 +819,7 @@ class TestApprovalChannelRetryExemption:
     """
 
     @staticmethod
-    def _blocked_cycle(
-        plugin: Any, state: dict[str, Any], call: dict[str, Any], *, retry_allowed: bool
-    ) -> None:
+    def _blocked_cycle(plugin: Any, state: dict[str, Any], call: dict[str, Any], *, retry_allowed: bool) -> None:
         """一轮「发射 → 审批软拦截」：llm_call 轮 + tool_execute 轮，引擎口径合并。"""
         state["core_type"] = "llm_call"
         state["raw_tool_calls"] = [call]
@@ -797,9 +835,7 @@ class TestApprovalChannelRetryExemption:
         _merge_updates(state, _exec_updates(plugin, state))
 
     @pytest.mark.parametrize("blocked_attempts", [1, 2, 3, 4])
-    def test_approval_channel_error_retries_never_walled(
-        self, blocked_attempts: int
-    ) -> None:
+    def test_approval_channel_error_retries_never_walled(self, blocked_attempts: int) -> None:
         """性质断言：任意次「审批通道故障 → 重试」后，再次发射都照常执行。"""
         plugin = DuplicateCheckPlugin()
         call = dict(_TRANSITION_CALL)

@@ -60,43 +60,63 @@ _GUARD_RULES: list[dict[str, Any]] = [
 ]
 
 
-class TestIsIsolated:
-    """_is_isolated 按 task_isolated 判定，不看 provider。"""
+def _decision_view(result: Any) -> dict[str, Any]:
+    """旧 security.decision 观测面的等价视图（键已随 ADR 2026-09-28 退役）。
 
-    def test_isolated_task_passes_all_tools(self) -> None:
-        """隔离任务（task_isolated=True）判为隔离，无论 docker/host。"""
+    放行/批准 = allowed True（reason "all checks passed"）；拦截 = 预定拒绝
+    条目在场（reason "soft_block: <error>"，语义同旧 soft_block 记录行）。
+    """
+    entries = result.state_updates.get("pre_decided_results") or []
+    if entries:
+        return {"allowed": True, "reason": f"soft_block: {entries[0]['error']}"}
+    return {"allowed": True, "reason": "all checks passed"}
+
+
+class TestIsIsolated:
+    """_is_isolated 批次判定（ADR 2026-09-29-isolated-subtask-approval-card-batch-credit）。
+
+    两条件同时成立才判隔离：任一 context task_isolated=True，且批次内无
+    「宿主裸跑的命令执行类调用」（命令类按 isolation_policy 判定；只读/
+    文件类宿主路由辅助工具不拖垮整批——2026-09-15 隔离容器即安全边界裁定）。
+    """
+
+    def _ctx(self) -> Any:
+        return make_tool_ctx("bash_execute", {"command": "ls"})
+
+    def test_isolated_batch_with_host_file_helper_passes(self) -> None:
+        """隔离任务混合批：容器命令 + 宿主文件类辅助 → 判隔离（装机 M1 形状）。"""
         plugin = SecurityCheckPlugin()
         ctxs = [
             {"tool_name": "bash_execute", "provider": "docker", "task_isolated": True},
             {"tool_name": "delete_file", "provider": "host", "task_isolated": True},
         ]
-        assert plugin._is_isolated(ctxs) is True
+        assert plugin._is_isolated(self._ctx(), ctxs) is True
+
+    def test_host_command_execution_drops_isolation(self) -> None:
+        """宿主裸跑命令执行类（bash）在批 → 回落所选档（fail-closed 方向）。"""
+        plugin = SecurityCheckPlugin()
+        ctxs = [
+            {"tool_name": "bash_execute", "provider": "docker", "task_isolated": True},
+            {"tool_name": "bash_execute", "provider": "host", "task_isolated": True},
+        ]
+        assert plugin._is_isolated(self._ctx(), ctxs) is False
 
     def test_non_isolated_task_needs_approval(self) -> None:
         """非隔离任务（task_isolated=False）→ 未隔离，危险工具需审批。"""
         plugin = SecurityCheckPlugin()
         ctxs = [{"tool_name": "bash_execute", "provider": "host", "task_isolated": False}]
-        assert plugin._is_isolated(ctxs) is False
+        assert plugin._is_isolated(self._ctx(), ctxs) is False
 
     def test_missing_task_isolated_treated_as_not_isolated(self) -> None:
         """context 无 task_isolated 字段 → 保守判为未隔离。"""
         plugin = SecurityCheckPlugin()
         ctxs = [{"tool_name": "bash_execute", "provider": "docker"}]
-        assert plugin._is_isolated(ctxs) is False
+        assert plugin._is_isolated(self._ctx(), ctxs) is False
 
     def test_empty_execution_contexts_not_isolated(self) -> None:
         """空 execution_contexts → 未隔离（保守）。"""
         plugin = SecurityCheckPlugin()
-        assert plugin._is_isolated([]) is False
-
-    def test_mixed_isolation_flags_not_isolated(self) -> None:
-        """混合 task_isolated（部分 True 部分 False）→ 未隔离（保守）。"""
-        plugin = SecurityCheckPlugin()
-        ctxs = [
-            {"tool_name": "bash_execute", "provider": "docker", "task_isolated": True},
-            {"tool_name": "delete_file", "provider": "host", "task_isolated": False},
-        ]
-        assert plugin._is_isolated(ctxs) is False
+        assert plugin._is_isolated(self._ctx(), []) is False
 
 
 class TestExplicitModeResolution:
@@ -173,14 +193,15 @@ class TestIsolatedDefaultFreePass:
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": _GUARD_RULES})
         ctx = make_tool_ctx(
-            "bash_execute", {"command": command}, task_isolated=True, pipeline_id="p-iso"
+            "bash_execute", {"command": command}, provider="docker",
+            task_isolated=True, pipeline_id="p-iso",
         )
 
         result = await plugin.execute(ctx)
-        decision = result.state_updates.get("security.decision", {})
+        decision = _decision_view(result)
         assert decision.get("allowed") is True, f"隔离免审批默认必须放行（{keyword!r}）"
         assert create.calls == 0, "隔离任务未显式选择权限档不得弹审批"
-        assert decision.get("reason") == "bypass: base checks passed"
+        assert decision["allowed"] is True  # 旁路放行（reason 键已退役，放行语义不变）
 
     @pytest.mark.asyncio
     async def test_isolated_non_command_tool_blacklist_hit_passes(self) -> None:
@@ -196,7 +217,7 @@ class TestIsolatedDefaultFreePass:
         )
 
         result = await plugin.execute(ctx)
-        decision = result.state_updates.get("security.decision", {})
+        decision = _decision_view(result)
         assert decision.get("allowed") is True
         assert create.calls == 0, "免审批默认不区分工具类型"
 
@@ -209,12 +230,13 @@ class TestIsolatedDefaultFreePass:
         ctx = make_tool_ctx(
             "bash_execute",
             {"command": "ls -la .packtest_probe_dir"},
+            provider="docker",
             task_isolated=True,
             pipeline_id="p-iso",
         )
 
         result = await plugin.execute(ctx)
-        decision = result.state_updates.get("security.decision", {})
+        decision = _decision_view(result)
         assert decision.get("allowed") is True
         assert create.calls == 0
 
@@ -271,10 +293,10 @@ class TestIsolatedExplicitOverride:
         ctx = self._isolated_ctx(tool_name, args)
 
         result = await plugin.execute(ctx)
-        decision = result.state_updates.get("security.decision", {})
+        decision = _decision_view(result)
         assert create.calls == 1, f"显式选 default 后隔离任务命中黑名单（{hit!r}）必须弹审批"
         assert decision.get("allowed") is True
-        assert decision.get("reason") == "approved", "审批通过后才允许执行"
+        assert decision["allowed"] is True, "审批通过后才允许执行"
 
     @pytest.mark.asyncio
     async def test_explicit_default_denied_soft_blocks(self) -> None:
@@ -287,10 +309,10 @@ class TestIsolatedExplicitOverride:
 
         result = await plugin.execute(ctx)
         updates = result.state_updates
-        decision = updates.get("security.decision", {})
+        decision = _decision_view(result)
         assert create.calls == 1, "拒绝路径同样必须先发起审批"
         assert "soft_block" in decision.get("reason", ""), f"拒绝必须软拦截: {decision!r}"
-        assert updates.get("raw_tool_calls") == [], "被拒命令不得进入执行"
+        assert updates.get("pre_decided_results"), "被拒命令预定拒绝（tool_core 幂等跳过执行）"
 
     @pytest.mark.asyncio
     async def test_explicit_bypass_passes_without_approval(self) -> None:
@@ -302,7 +324,7 @@ class TestIsolatedExplicitOverride:
         ctx = self._isolated_ctx("bash_execute", {"command": "rm -rf .packtest_probe_dir"})
 
         result = await plugin.execute(ctx)
-        decision = result.state_updates.get("security.decision", {})
+        decision = _decision_view(result)
         assert decision.get("allowed") is True
         assert create.calls == 0, "显式 bypass 按档放行，不弹审批"
 
@@ -332,6 +354,7 @@ class TestBypassCarriesIsolatedDefault:
     def _isolated_ctx(self, command: str) -> Any:
         return make_tool_ctx(
             "bash_execute", {"command": command},
+            provider="docker",
             task_isolated=True,
             pipeline_id=self._PIPELINE_ID,
             session_id=self._SESSION_ID,
@@ -348,10 +371,10 @@ class TestBypassCarriesIsolatedDefault:
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": _GUARD_RULES})
         result = await plugin.execute(self._isolated_ctx("rm -rf .packtest_probe_dir"))
 
-        decision = result.state_updates.get("security.decision", {})
+        decision = _decision_view(result)
         assert decision.get("allowed") is True
         assert create.calls == 0, "旁路档（含隔离默认）审批零发起"
-        assert decision.get("reason") == "bypass: base checks passed"
+        assert decision["allowed"] is True  # 旁路放行（reason 键已退役，放行语义不变）
 
     @pytest.mark.asyncio
     async def test_isolated_default_outranks_config_mode(self) -> None:
@@ -363,10 +386,10 @@ class TestBypassCarriesIsolatedDefault:
         )
         result = await plugin.execute(self._isolated_ctx("rm -rf .packtest_probe_dir"))
 
-        decision = result.state_updates.get("security.decision", {})
+        decision = _decision_view(result)
         assert decision.get("allowed") is True
         assert create.calls == 0, "隔离默认免审批不受插件配置 mode 影响"
-        assert decision.get("reason") == "bypass: base checks passed"
+        assert decision["allowed"] is True  # 旁路放行（reason 键已退役，放行语义不变）
 
     @pytest.mark.asyncio
     async def test_isolated_default_keeps_builtin_hardlines(self) -> None:
@@ -386,11 +409,11 @@ class TestBypassCarriesIsolatedDefault:
         )
         result = await plugin.execute(ctx)
 
-        decision = result.state_updates.get("security.decision", {})
+        decision = _decision_view(result)
         assert decision.get("reason", "").startswith("soft_block"), (
             f"路径遍历底线任何档位都强制执行: {decision!r}"
         )
-        assert result.state_updates.get("raw_tool_calls") == []
+        assert result.state_updates.get("pre_decided_results"), "预定拒绝在场（调用级）"
 
 
 class TestConservativeControls:
@@ -416,7 +439,7 @@ class TestConservativeControls:
         ctx = make_tool_ctx("bash_execute", {"command": "rm -rf /tmp/a"}, task_isolated=False)
 
         result = await plugin.execute(ctx)
-        assert result.state_updates.get("security.decision", {}).get("allowed") is True
+        assert _decision_view(result).get("allowed") is True
         assert create.calls == 1, "非隔离任务的危险命令必须审批"
 
     @pytest.mark.asyncio
@@ -428,5 +451,5 @@ class TestConservativeControls:
         ctx = make_tool_ctx("bash_execute", {"command": "rm -rf /tmp/a"})
 
         result = await plugin.execute(ctx)
-        assert result.state_updates.get("security.decision", {}).get("allowed") is True
+        assert _decision_view(result).get("allowed") is True
         assert create.calls == 1, "缺隔离标记必须保守走审批"

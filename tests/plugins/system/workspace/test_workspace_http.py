@@ -1906,7 +1906,12 @@ class TestAbsolutePathBoundary:
     """
 
     def test_read_absolute_kernel_db_denied(self, server: Any, ws_dir: str) -> None:
-        """项目根真实 agentos_kernel.db 经任务工作空间绝对路径必须拒读。"""
+        """项目根真实 agentos_kernel.db 经任务工作空间绝对路径必须拒读。
+
+        读面黑名单制（ADR 2026-09-24 zone-rw：默认全放、黑名单拒绝）+ 体积闸
+        双重防线，内核数据库形态必拒——拒绝原因随先命中的闸位（黑名单/体积），
+        不断言具体文案只断「必拒」语义。
+        """
         _inject_workspace_path(server, ws_dir)
         db_path = Path(__file__).resolve().parents[4] / "agentos_kernel.db"
         assert db_path.is_file(), "测试前置：项目根应有真实 agentos_kernel.db"
@@ -1917,10 +1922,11 @@ class TestAbsolutePathBoundary:
             query={"path": str(db_path)},
         ))
         assert status == 200
-        assert body["success"] is False
-        assert "超出工作空间范围" in body["message"]
+        assert body["success"] is False, "内核数据库文件任何读面都必拒"
 
-    def test_read_absolute_sibling_file_denied(self, server: Any, ws_dir: str, tmp_path: Path) -> None:
+    def test_read_absolute_sibling_file_allowed(self, server: Any, ws_dir: str, tmp_path: Path) -> None:
+        """工作空间外普通文件绝对路径读 = 放行（读黑名单制默认全放，
+        ADR 2026-09-24 zone-rw；黑名单路径另由黑名单系测试覆盖）。"""
         _inject_workspace_path(server, ws_dir)
         outside = tmp_path / "outside-ws.txt"
         outside.write_text("secret", encoding="utf-8")
@@ -1931,8 +1937,8 @@ class TestAbsolutePathBoundary:
             query={"path": str(outside)},
         ))
         assert status == 200
-        assert body["success"] is False
-        assert "超出工作空间范围" in body["message"]
+        assert body["success"] is True
+        assert body.get("content", "").endswith("secret")
 
     def test_read_absolute_path_inside_workspace_allowed(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)

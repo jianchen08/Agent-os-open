@@ -112,6 +112,27 @@ def _no_provider() -> Any:
     return provider
 
 
+def _inject_auto_complete(mod, monkeypatch, task: MagicMock, executor: Any):
+    """auto_complete 注入套件（评估流程语义测试共用）：
+    service/state_writer/合并替身，返回 (tool, service, state_writer)。"""
+    service = _make_service(task=task)
+    monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
+    monkeypatch.setattr(mod, "_get_service_provider", _no_provider)
+    # 职责边界（2026-08-24）：评估终态经 pipeline-state.update 写 state——
+    # 测试注入写面记录调用，断言评估完成时任务状态落 state。
+    state_writer = AsyncMock()
+    monkeypatch.setattr(mod, "_state_writer", state_writer)
+    # 合并机制替身（git CLI 外部依赖）：默认无需合并；门控 ws_meta 解析仍走
+    # 真实实现，真实 git 行为由 tests/plugins/shared/test_worktree_merge.py 覆盖
+    monkeypatch.setattr(
+        mod.worktree_merge,
+        "merge_worktree_before_complete",
+        lambda task_id, ws_meta: None,
+    )
+    tool = mod.TaskEvaluateTool(executor=executor)
+    return tool, service, state_writer
+
+
 # ── 迁移验证：可加载 + 0.2 类型面 ──────────────────────────
 
 
@@ -218,23 +239,8 @@ class TestTaskEvaluateValidation:
 class TestTaskEvaluateFlow:
     """未声明指标自动完成 / 全通过完成 / 失败重试 / 指标未找到。"""
 
-    def _inject(self, mod, monkeypatch, task: MagicMock, executor: Any) -> tuple[Any, MagicMock, Any]:
-        service = _make_service(task=task)
-        monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
-        monkeypatch.setattr(mod, "_get_service_provider", _no_provider)
-        # 职责边界（2026-08-24）：评估终态经 pipeline-state.update 写 state——
-        # 测试注入写面记录调用，断言评估完成时任务状态落 state。
-        state_writer = AsyncMock()
-        monkeypatch.setattr(mod, "_state_writer", state_writer)
-        # 合并机制替身（git CLI 外部依赖）：默认无需合并；门控 ws_meta 解析仍走
-        # 真实实现，真实 git 行为由 tests/plugins/shared/test_worktree_merge.py 覆盖
-        monkeypatch.setattr(
-            mod.worktree_merge,
-            "merge_worktree_before_complete",
-            lambda task_id, ws_meta: None,
-        )
-        tool = mod.TaskEvaluateTool(executor=executor)
-        return tool, service, state_writer
+    def _inject(self, mod, monkeypatch, task: MagicMock, executor: Any):
+        return _inject_auto_complete(mod, monkeypatch, task, executor)
 
     @pytest.mark.asyncio
     async def test_no_metrics_auto_completes(self, mod, monkeypatch):
@@ -436,23 +442,8 @@ class TestCriteriaFallbackMarked:
     无 criteria 指标直接通过并在完成 summary 如实标注。
     """
 
-    def _inject(self, mod, monkeypatch, task: MagicMock, executor: Any) -> tuple[Any, MagicMock, Any]:
-        service = _make_service(task=task)
-        monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
-        monkeypatch.setattr(mod, "_get_service_provider", _no_provider)
-        # 职责边界（2026-08-24）：评估终态经 pipeline-state.update 写 state——
-        # 测试注入写面记录调用，断言评估完成时任务状态落 state。
-        state_writer = AsyncMock()
-        monkeypatch.setattr(mod, "_state_writer", state_writer)
-        # 合并机制替身（git CLI 外部依赖）：默认无需合并；门控 ws_meta 解析仍走
-        # 真实实现，真实 git 行为由 tests/plugins/shared/test_worktree_merge.py 覆盖
-        monkeypatch.setattr(
-            mod.worktree_merge,
-            "merge_worktree_before_complete",
-            lambda task_id, ws_meta: None,
-        )
-        tool = mod.TaskEvaluateTool(executor=executor)
-        return tool, service, state_writer
+    def _inject(self, mod, monkeypatch, task: MagicMock, executor: Any):
+        return _inject_auto_complete(mod, monkeypatch, task, executor)
 
     @pytest.mark.asyncio
     async def test_no_criteria_params_kept_as_is(self, mod, monkeypatch):
@@ -506,9 +497,128 @@ class TestCriteriaFallbackMarked:
         result = await tool.execute({"action": "auto_complete", "task_id": task.id})
         assert result.success is True
         assert result.metadata["result"] == "completed"
-        # 通过来源可见：完成结果带"未配置 criteria 直接通过"标注
+        # 通过来源可见：完成结果带"未配置评估依据直接通过"标注
         passed_result = service.complete_evaluation.await_args.kwargs["result"]
-        assert "未配置 criteria 直接通过" in passed_result["summary"]
+        assert "未配置评估依据直接通过" in passed_result["summary"]
+
+
+class TestAgentMetricEvalBasisYaml:
+    """agent 型指标配置判定单源 = 指标定义 input_schema（semantic_check 直通缺陷回归锚）。
+
+    旧判定只认 criteria 键——yaml 口径参数（output/expected）在场仍被静默
+    直通，语义评估从未执行。现按定义 properties 判定；存量 criteria 兼容；
+    无任何定义参数仍直通（与既有契约一致）。
+    """
+
+    def _task_with_params(self, params: dict) -> MagicMock:
+        return _make_task(
+            metadata={
+                "evaluation_metric_ids": ["semantic_check"],
+                "acceptance_criteria": {"semantic_check": {"input_params": dict(params)}},
+            }
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"output": "第二十五章正文全文"},
+            {"expected": "总纲与25章每章1200-1800字剧情连续"},
+            {"output": "正文", "expected": "剧情连续", "check": "match"},
+        ],
+    )
+    async def test_yaml_params_reach_executor(self, mod, monkeypatch, params):
+        """semantic_check 带 yaml 定义参数 → 必须落执行器真实评估（不被直通吞掉）。"""
+        from _eval_core import EvaluationResult, MetricResult
+
+        task = self._task_with_params(params)
+
+        class FakeExecutor:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def run_evaluation(self, **kwargs):
+                self.calls.append(kwargs)
+                return EvaluationResult(
+                    task_id=task.id,
+                    results=[MetricResult(metric_id="semantic_check", passed=True, message="ok")],
+                    overall_passed=True,
+                    summary="通过",
+                )
+
+        executor = FakeExecutor()
+        tool, _, _ = _inject_auto_complete(mod, monkeypatch, task, executor)
+        result = await tool.execute({"action": "auto_complete", "task_id": task.id})
+        assert result.success is True
+        assert len(executor.calls) == 1, "yaml 口径参数的 semantic_check 必须真实评估"
+        assert executor.calls[0]["metric_ids"] == ["semantic_check"]
+        sent = executor.calls[0]["input_params"]["semantic_check"]
+        for key, value in params.items():
+            assert sent[key] == value
+
+    @pytest.mark.asyncio
+    async def test_legacy_criteria_still_evaluated(self, mod, monkeypatch):
+        """存量 criteria 参数兼容：仍视为已配置，落执行器。"""
+        from _eval_core import EvaluationResult, MetricResult
+
+        task = self._task_with_params({"criteria": "必须包含结论"})
+
+        class FakeExecutor:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def run_evaluation(self, **kwargs):
+                self.calls.append(kwargs)
+                return EvaluationResult(
+                    task_id=task.id,
+                    results=[MetricResult(metric_id="semantic_check", passed=True, message="ok")],
+                    overall_passed=True,
+                    summary="通过",
+                )
+
+        executor = FakeExecutor()
+        tool, _, _ = _inject_auto_complete(mod, monkeypatch, task, executor)
+        result = await tool.execute({"action": "auto_complete", "task_id": task.id})
+        assert result.success is True
+        assert len(executor.calls) == 1, "存量 criteria 任务不得回退为直通"
+
+    @pytest.mark.asyncio
+    async def test_tool_human_and_unknown_metric_verdicts_unchanged(self, mod, monkeypatch):
+        """判定分界性质锚：human 型维持直通（不进自动执行器）；tool 型带
+        command 必跑；定义缺失的未知指标按旧键面判定。"""
+        from _eval_core import EvaluationResult, MetricResult
+
+        task = _make_task(
+            metadata={
+                "evaluation_metric_ids": ["human_review", "bash_check", "ghost"],
+                "acceptance_criteria": {
+                    "human_review": {"input_params": {"mode": "choice", "title": "审核"}},
+                    "bash_check": {"input_params": {"command": "pytest -q"}},
+                    "ghost": {"input_params": {"criteria": "旧键面"}},
+                },
+            }
+        )
+
+        class FakeExecutor:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def run_evaluation(self, **kwargs):
+                self.calls.append(kwargs)
+                return EvaluationResult(
+                    task_id=task.id,
+                    results=[MetricResult(metric_id="bash_check", passed=True, message="ok")],
+                    overall_passed=True,
+                    summary="通过",
+                )
+
+        executor = FakeExecutor()
+        tool, _, _ = _inject_auto_complete(mod, monkeypatch, task, executor)
+        result = await tool.execute({"action": "auto_complete", "task_id": task.id})
+        assert result.success is True
+        assert len(executor.calls) == 1
+        # human_review 直通不评估；bash_check（command）与 ghost（criteria 旧键面）落执行器
+        assert sorted(executor.calls[0]["metric_ids"]) == ["bash_check", "ghost"]
 
 
 # ── 猜测型匹配反模式收口（2026-08-22）───────────────────────

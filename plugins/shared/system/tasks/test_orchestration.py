@@ -1,17 +1,16 @@
 # @feature: FP-0.2.〇 模式体系测试补标 | @ci: python-coverage
 # @feature: 模式体系P2 编排运行面 | @ci: python-coverage
-"""orchestration.py 行为测试（编排键三级解析 / 派生输入集 / 完备性校验）。
+"""orchestration.py 行为测试（编排键两级解析 / 派生输入集 / 完备性校验）。
 
 断输入→输出与结构化错误形状，不钉内部实现；关键路径走真实依赖
 （真实 config/pipelines/autonomous.yaml 与真实管道 manifest 声明）。
 
-覆盖契约（docs/working/模式体系落地设计_20260915.md §3.3/§3.5/§4.5/§十一）：
-- 发现：系统键（stem）/ 模式键（mode_X/stem）/ 用户根覆盖（用户赢）/
-  坏 yaml 跳过留痕；
-- 三级解析：① 显式键命中（系统键、模式键两形态）与未命中 fail-closed
-  （不落③，含可用编排提示）；② mode 限定候选（单候选选定 / task_kinds
-  匹配优先 / 意图不明落③ / mode 无编排落③——约束非门槛）；③ 兜底
-  autonomous；
+覆盖契约（docs/working/模式包工作模式设计_20260928.md D2/一管一配置）：
+- 发现：唯一来源 config/pipelines 登记处（系统键 = stem）/ 坏 yaml 跳过
+  留痕；包内 pipelines/ 编排清单退役不扫描（回归）；
+- 两级解析：① 显式键命中与未命中 fail-closed（不落②，含可用编排提示）；
+  ② 兜底 autonomous；mode 键不再限定编排候选（回归，D6 模式控制与管道
+  选择解耦）；
 - 派生输入集 = 编排引用 step 集合并集其 required_state_inputs；完备性
   校验过/不过（区分度输入：全齐 / 缺一 / 缺多）；
 - H3 两类错误结构：ORCHESTRATION_KEY_NOT_FOUND /
@@ -32,7 +31,7 @@ pytestmark = pytest.mark.unit
 _PLUGIN_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _PLUGIN_DIR.parents[3]
 
-_EVICT_NAMES = ("orchestration", "user_space")
+_EVICT_NAMES = ("orchestration",)
 
 
 @pytest.fixture(autouse=True)
@@ -90,31 +89,42 @@ _AUTONOMOUS_RAW: dict[str, Any] = {
 
 
 class TestDiscover:
-    def test_system_and_mode_keys_and_user_wins(self, tmp_path: Path) -> None:
-        """系统键=stem、模式键=mode_X/stem；用户根同键覆盖 factory（用户赢）。"""
+    def test_registry_keys_are_stems(self, tmp_path: Path) -> None:
+        """系统键 = 登记文件名 stem（一管一配置，config/pipelines 唯一来源）。"""
         from orchestration import discover_orchestrations
 
         pipelines = tmp_path / "pipelines"
         _write_pipeline(pipelines, "autonomous", _AUTONOMOUS_RAW)
-        factory_modes = tmp_path / "modes"
-        _write_pipeline(factory_modes / "mode_writing" / "pipelines", "chapter", {})
-        user_modes = tmp_path / "user_modes"
-        _write_pipeline(
-            user_modes / "mode_writing" / "pipelines",
-            "chapter",
-            {"name": "user-override"},
-        )
-        _write_pipeline(user_modes / "mode_research" / "pipelines", "report", {})
+        _write_pipeline(pipelines, "roleplay", {"name": "roleplay"})
 
-        got = discover_orchestrations(
-            pipelines_dir=pipelines,
-            modes_root=factory_modes,
-            user_modes_root=user_modes,
-        )
-        assert set(got) == {"autonomous", "mode_writing/chapter", "mode_research/report"}
-        # 用户副本覆盖 factory（同 id 用户赢）
-        assert got["mode_writing/chapter"].raw == {"name": "user-override"}
+        got = discover_orchestrations(pipelines_dir=pipelines)
+        assert set(got) == {"autonomous", "roleplay"}
         assert got["autonomous"].key == "autonomous"
+
+    def test_retired_mode_package_pipelines_not_scanned(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """回归：包内 pipelines/ 编排清单已退役（D2）——目录存在也不入候选。
+
+        钉死缺省根（repo 根 → tmp）：登记处照常发现，历史退役形态（出厂
+        模式包内 pipelines/ 目录）不扫描——重新引入该扫描源即红。
+        """
+        import orchestration
+        from orchestration import discover_orchestrations
+
+        _write_pipeline(
+            tmp_path / "config" / "pipelines", "autonomous", _AUTONOMOUS_RAW
+        )
+        # 历史退役形态：包内编排清单目录（同名异物教训源）
+        _write_pipeline(
+            tmp_path / "plugins" / "shared" / "modes" / "mode_writing" / "pipelines",
+            "chapter",
+            {"name": "chapter"},
+        )
+        monkeypatch.setattr(orchestration, "_repo_root", lambda: tmp_path)
+
+        got = discover_orchestrations()
+        assert set(got) == {"autonomous"}, "包内 pipelines/ 不再是扫描源"
 
     def test_corrupt_yaml_skipped_with_rest_intact(self, tmp_path: Path) -> None:
         """坏 yaml 跳过（留 warning），其余编排仍可发现——发现面聚合降级口径。"""
@@ -125,10 +135,7 @@ class TestDiscover:
         pipelines.mkdir(parents=True, exist_ok=True)
         (pipelines / "broken.yaml").write_text("loop_bodies: [unclosed", encoding="utf-8")
 
-        got = discover_orchestrations(
-            pipelines_dir=pipelines, modes_root=tmp_path / "absent",
-            user_modes_root=tmp_path / "user_absent"  # 显式置空：禁读宿主/仓库真实用户空间（机器状态敏感）
-        )
+        got = discover_orchestrations(pipelines_dir=pipelines)
         assert set(got) == {"good"}
 
     def test_non_mapping_yaml_skipped(self, tmp_path: Path) -> None:
@@ -139,61 +146,37 @@ class TestDiscover:
         _write_pipeline(pipelines, "good", _AUTONOMOUS_RAW)
         (pipelines / "list.yaml").write_text("- a\n- b\n", encoding="utf-8")
 
-        got = discover_orchestrations(
-            pipelines_dir=pipelines, modes_root=tmp_path / "absent",
-            user_modes_root=tmp_path / "user_absent"  # 显式置空：禁读宿主/仓库真实用户空间（机器状态敏感）
-        )
+        got = discover_orchestrations(pipelines_dir=pipelines)
         assert set(got) == {"good"}
 
-    def test_task_kinds_header_parsed(self, tmp_path: Path) -> None:
-        """文件头 task_kinds 标注进定义（非字符串项过滤）。"""
-        from orchestration import discover_orchestrations
 
-        pipelines = tmp_path / "pipelines"
-        _write_pipeline(
-            pipelines,
-            "kinds",
-            {"task_kinds": ["review", "translation", 42, None]},
-        )
-        got = discover_orchestrations(
-            pipelines_dir=pipelines, modes_root=tmp_path / "absent",
-            user_modes_root=tmp_path / "user_absent"  # 显式置空：禁读宿主/仓库真实用户空间（机器状态敏感）
-        )
-        assert got["kinds"].task_kinds == ("review", "translation")
-
-
-# ── 三级解析 ──
+# ── 两级解析 ──
 
 
 def _definitions(**raws: dict[str, Any]) -> dict[str, Any]:
     from orchestration import OrchestrationDefinition
 
     return {
-        key: OrchestrationDefinition(
-            key=key, path=f"<{key}>", raw=raw, task_kinds=tuple(raw.get("task_kinds", ()))
-        )
+        key: OrchestrationDefinition(key=key, path=f"<{key}>", raw=raw)
         for key, raw in raws.items()
     }
 
 
 class TestResolveExplicit:
-    def test_explicit_hit_system_and_mode_keys(self) -> None:
-        """① 显式键命中两形态：系统裸键与 mode_X/<编排名> 全限定键。"""
+    def test_explicit_hit_registry_keys(self) -> None:
+        """① 显式键命中：登记名（stem）直接取用。"""
         from orchestration import resolve_orchestration
 
-        defs = _definitions(
-            autonomous={"name": "auto"},
-            **{"mode_writing/chapter": {"name": "chapter"}},
-        )
+        defs = _definitions(autonomous={"name": "auto"}, roleplay={"name": "rp"})
         assert resolve_orchestration(
             explicit_key="autonomous", orchestrations=defs
         ).key == "autonomous"
         assert resolve_orchestration(
-            explicit_key="mode_writing/chapter", orchestrations=defs
-        ).key == "mode_writing/chapter"
+            explicit_key="roleplay", orchestrations=defs
+        ).key == "roleplay"
 
     def test_explicit_miss_fail_closed_no_fallback(self) -> None:
-        """① 显式键未命中 = fail-closed 结构化报错，禁止静默落③（H3①）。"""
+        """① 显式键未命中 = fail-closed 结构化报错，禁止静默落②（H3①）。"""
         from orchestration import (
             OrchestrationKeyNotFoundError,
             resolve_orchestration,
@@ -212,60 +195,48 @@ class TestResolveExplicit:
         assert "autonomous" in str(err)
 
 
-class TestResolveMode:
-    def test_single_candidate_selected_without_kind(self) -> None:
-        """② mode 包单编排：无 task_kind 也选定（唯一候选=意图明确）。"""
+class TestModeKeyNoLongerLimits:
+    """回归：mode 键不再限定编排候选（包内编排清单退役，D2/D6——模式控制
+    经 execution_context.mode 透传给消费面，与管道选择解耦）。"""
+
+    def test_mode_scoped_keys_present_still_falls_to_autonomous(self) -> None:
+        """候选集含 mode_ 前缀键（历史形态）且无显式键 → 恒落 autonomous，
+        不再按 mode 推断路由。"""
+        from orchestration import AUTONOMOUS_ORCHESTRATION_KEY, resolve_orchestration
+
+        defs = _definitions(
+            autonomous={"name": "auto"},
+            **{"mode_writing/chapter": {"name": "chapter"}},
+        )
+        assert resolve_orchestration(orchestrations=defs).key == AUTONOMOUS_ORCHESTRATION_KEY
+
+    def test_single_mode_scoped_candidate_not_auto_selected(self) -> None:
+        """唯一 mode_ 前缀候选也不再自动选定（旧②路单候选语义随 mode 限定退役）。"""
+        from orchestration import AUTONOMOUS_ORCHESTRATION_KEY, resolve_orchestration
+
+        defs = _definitions(
+            autonomous={"name": "auto"},
+            **{"mode_writing/chapter": {"name": "chapter"}},
+        )
+        got = resolve_orchestration(orchestrations=defs)
+        assert got.key == AUTONOMOUS_ORCHESTRATION_KEY
+
+    def test_mode_scoped_key_still_usable_when_explicit(self) -> None:
+        """显式给到 mode_ 前缀键仍按显式路径命中（解析面对键形不设枚举）。"""
         from orchestration import resolve_orchestration
 
         defs = _definitions(
             autonomous={"name": "auto"},
             **{"mode_writing/chapter": {"name": "chapter"}},
         )
-        got = resolve_orchestration(mode_key="mode_writing", orchestrations=defs)
-        assert got.key == "mode_writing/chapter"
-
-    def test_task_kinds_match_wins_over_candidates(self) -> None:
-        """② 多候选：task_kinds 与任务 kind 唯一命中者优先。"""
-        from orchestration import resolve_orchestration
-
-        defs = _definitions(
-            autonomous={"name": "auto"},
-            **{
-                "mode_writing/chapter": {"task_kinds": ["chapter"]},
-                "mode_writing/review": {"task_kinds": ["review"]},
-            },
-        )
-        got = resolve_orchestration(
-            mode_key="mode_writing", task_kind="review", orchestrations=defs
-        )
-        assert got.key == "mode_writing/review"
-
-    def test_ambiguous_candidates_fall_to_autonomous(self) -> None:
-        """② 多候选且无 task_kinds 可区分 = 意图不明 → 落③（H4：③只接意图不明）。"""
-        from orchestration import AUTONOMOUS_ORCHESTRATION_KEY, resolve_orchestration
-
-        defs = _definitions(
-            autonomous={"name": "auto"},
-            **{
-                "mode_writing/chapter": {},
-                "mode_writing/review": {},
-            },
-        )
-        got = resolve_orchestration(mode_key="mode_writing", orchestrations=defs)
-        assert got.key == AUTONOMOUS_ORCHESTRATION_KEY
-
-    def test_mode_without_pipelines_falls_to_autonomous(self) -> None:
-        """② mode 键无自有编排 → 落③：mode 是约束非门槛（H4），共享默认仍有效。"""
-        from orchestration import AUTONOMOUS_ORCHESTRATION_KEY, resolve_orchestration
-
-        defs = _definitions(autonomous={"name": "auto"})
-        got = resolve_orchestration(mode_key="mode_coding", orchestrations=defs)
-        assert got.key == AUTONOMOUS_ORCHESTRATION_KEY
+        assert resolve_orchestration(
+            explicit_key="mode_writing/chapter", orchestrations=defs
+        ).key == "mode_writing/chapter"
 
 
 class TestResolveFallback:
-    def test_no_keys_goes_autonomous(self) -> None:
-        """③ 无显式键无 mode 键（旧调用形态）→ autonomous，行为不变。"""
+    def test_no_key_goes_autonomous(self) -> None:
+        """② 无显式键（旧调用形态）→ autonomous，行为不变。"""
         from orchestration import resolve_orchestration
 
         defs = _definitions(
@@ -281,7 +252,7 @@ class TestResolveFallback:
             resolve_orchestration,
         )
 
-        defs = _definitions(**{"mode_writing/chapter": {}})
+        defs = _definitions(roleplay={"name": "rp"})
         with pytest.raises(OrchestrationKeyNotFoundError):
             resolve_orchestration(orchestrations=defs)
 
@@ -445,15 +416,6 @@ class TestStepDeclarationIndex:
             (d / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
         got = load_step_required_inputs(root)
         assert got["s_dup"] == ["k2"]
-
-    def test_user_modes_root_import_error_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """user_space 不可导入（裸插件环境）→ 用户模式根 None，factory 仍可用。"""
-        import orchestration
-
-        monkeypatch.setitem(sys.modules, "user_space", None)
-        assert orchestration._user_modes_root() is None
 
 
 class TestErrorShapes:

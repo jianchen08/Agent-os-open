@@ -4,6 +4,7 @@
 从 workspace_lifecycle.py 拆分而来。
 """
 
+# config-write-surface-exempt: 写动作针对任务工作区运行时面;命中串为gitignore内容
 from __future__ import annotations
 
 import contextlib
@@ -19,8 +20,18 @@ from agentos_plugin_sdk.fs_utils import force_rmtree
 
 logger = logging.getLogger(__name__)
 
+# 任务运行时目录（wsl_native 执行壳注入的 XDG_CACHE_HOME/npm_config_cache/
+# PYTHONUSERBASE 落点）：纯执行副作用（缓存/临时/用户包装），非任务产物，
+# 必须排除在 git 产物对比面之外。
+_TASK_RUNTIME_DIR = ".task_runtime"
+
+# 最小保护 .gitignore（workspace 缺 .gitignore 时播种）
+_GITIGNORE_MINIMAL = (
+    f"data/\n__pycache__/\n*.pyc\n*.pyo\n.pytest_cache/\nnode_modules/\n.env\n*.log\n*.bak\n{_TASK_RUNTIME_DIR}/\n"
+)
+
 # 排除的目录（不参与场景检测、复制和大小计算）
-_SKIP_DIRS = frozenset({".git", ".ai_workspaces", "__pycache__", ".pytest_cache", "data"})
+_SKIP_DIRS = frozenset({".git", ".ai_workspaces", "__pycache__", ".pytest_cache", "data", _TASK_RUNTIME_DIR})
 _WIN_RESERVED_NAMES = frozenset(
     {
         "nul",
@@ -256,6 +267,25 @@ class _GitOpsMixin:
             logger.warning("[WorkspaceLifecycle] _guard_root_branch 检查异常，默认放行", exc_info=True)
             return True
 
+    def _ensure_gitignore(self, cwd: Path) -> None:
+        """确保 .gitignore 在位且排除任务运行时目录。
+
+        缺失 → 写最小保护版本（含 .task_runtime/）；存在但缺该行 → 幂等追加
+        系统自产行（存量 workspace 不重生成，也不改用户既有内容）。
+        """
+        gitignore = cwd / ".gitignore"
+        try:
+            if not gitignore.exists():
+                logger.warning("[WorkspaceLifecycle] .gitignore 不存在，生成最小保护版本: %s", gitignore)
+                gitignore.write_text(_GITIGNORE_MINIMAL, encoding="utf-8")
+                return
+            text = gitignore.read_text(encoding="utf-8", errors="replace")
+            if _TASK_RUNTIME_DIR not in text:
+                with gitignore.open("a", encoding="utf-8") as f:
+                    f.write(f"{_TASK_RUNTIME_DIR}/\n")
+        except OSError as e:
+            logger.warning("[WorkspaceLifecycle] .gitignore 维护失败（非致命）: %s | %s", gitignore, e)
+
     def _git_init_and_initial_commit(self, cwd: Path, message: str) -> bool:  # noqa: PLR0912
         """Initialize a new git repo and make the initial commit with all files.
 
@@ -307,14 +337,7 @@ class _GitOpsMixin:
 
         self._ensure_git_user(cwd)
 
-        gitignore = cwd / ".gitignore"
-        if not gitignore.exists():
-            logger.warning("[WorkspaceLifecycle] .gitignore 不存在，生成最小保护版本: %s", gitignore)
-            with contextlib.suppress(OSError):
-                gitignore.write_text(
-                    "data/\n__pycache__/\n*.pyc\n*.pyo\n.pytest_cache/\nnode_modules/\n.env\n*.log\n*.bak\n",
-                    encoding="utf-8",
-                )
+        self._ensure_gitignore(cwd)
 
         self._remove_index_lock(cwd)
 
@@ -351,14 +374,7 @@ class _GitOpsMixin:
         if rc != 0 or not status.strip():
             return None
 
-        gitignore = cwd / ".gitignore"
-        if not gitignore.exists():
-            logger.warning("[WorkspaceLifecycle] .gitignore 不存在，生成最小保护版本: %s", gitignore)
-            with contextlib.suppress(OSError):
-                gitignore.write_text(
-                    "data/\n__pycache__/\n*.pyc\n*.pyo\n.pytest_cache/\nnode_modules/\n.env\n*.log\n*.bak\n",
-                    encoding="utf-8",
-                )
+        self._ensure_gitignore(cwd)
 
         rc, _, _ = self._run_git("add", "-A", cwd=cwd)
         if rc != 0:

@@ -32,6 +32,7 @@ copy_file / move_file / delete_file。
 copy_file,move_file,delete_file}/tool.py]
 """
 
+# config-write-surface-exempt: 内置文件工具=LLM受控写面;.env字面量为敏感保护清单
 from __future__ import annotations
 
 import asyncio
@@ -72,11 +73,10 @@ def _load_registration_whitelist() -> list[str]:
     try:
         from project_registry import load_registration_whitelist as _load  # noqa: PLC0415
     except Exception as exc:  # noqa: BLE001 — 共享根缺失降级可见（error 级留痕）
-        logger.error(
-            "[fs_tools] 写区名单模块不可用，按空名单处理（范围收缩）: %s", exc
-        )
+        logger.error("[fs_tools] 写区名单模块不可用，按空名单处理（范围收缩）: %s", exc)
         return []
     return _load()
+
 
 logger = logging.getLogger(__name__)
 
@@ -122,9 +122,20 @@ def _sensitive_file_reason(resolved: Path) -> str | None:
     return None
 
 
-def _read_outside_verdict(resolved: Path) -> tuple[bool, str | None]:
-    """根外纯读判定链（读黑名单制，判定单源 = zone_policy.read_verdict）。"""
-    return _zone_policy.read_verdict(resolved)
+def _read_outside_verdict(
+    resolved: Path,
+    extra_grants: list[str] | None = None,
+    workspace: str | None = None,
+    project_root: str | None = None,
+) -> tuple[bool, str | None]:
+    """根外纯读判定链（读黑名单制 + 读授权前缀，判定单源 = zone_policy.read_verdict）。
+
+    workspace/project_root 携入内建工作空间地界派生（用户裁定 2026-09-29：
+    工作空间根必须在白名单内——兄弟工作树读不撞仓库拒绝集）；写链不经此处。
+    """
+    return _zone_policy.read_verdict(
+        resolved, extra_grants, workspace=workspace, project_root=project_root
+    )
 
 
 def _parse_authorized_zones(raw: str | None) -> list[str]:
@@ -162,7 +173,12 @@ def _fallback_bases() -> list[str]:
     return bases
 
 
-def _read_relative_fallback(target: Path) -> tuple[bool, str, str | None]:
+def _read_relative_fallback(
+    target: Path,
+    extra_grants: list[str] | None = None,
+    workspace: str | None = None,
+    project_root: str | None = None,
+) -> tuple[bool, str, str | None]:
     """相对路径白名单前缀根回退解析一次（读操作专用，2026-09-19 用户裁定）。
 
     相对路径以工作空间解析落空（目标不存在）时，按回退基准根（白名单
@@ -179,7 +195,9 @@ def _read_relative_fallback(target: Path) -> tuple[bool, str, str | None]:
         candidate = (Path(base) / target).resolve()
         if not candidate.exists():
             continue
-        allow, deny_reason = _read_outside_verdict(candidate)
+        allow, deny_reason = _read_outside_verdict(
+            candidate, extra_grants, workspace=workspace, project_root=project_root
+        )
         if allow:
             return True, "", str(candidate)
         if deny_reason is not None:
@@ -193,6 +211,7 @@ def _check_workspace_path(
     project_root: str | None,
     operation: str,
     authorized_zones: str | None = None,
+    authorized_read_zones: str | None = None,
 ) -> tuple[bool, str, str | None]:
     """位置闸单点（ADR 2026-09-24-read-deny-write-zones：读黑名单制，写区白名单）。
 
@@ -202,6 +221,9 @@ def _check_workspace_path(
         project_root: 项目根路径（运行时注入，可选；优先于 workspace 作根）
         operation: "read" / "search" / "write" / "delete" / "move" / "copy"
             （决定走读判定链还是写区判定链）
+        authorized_zones: 管道级授权写区（JSON 数组串，zone 授权卡落盘）
+        authorized_read_zones: 管道级授权读取（JSON 数组串，读授权卡落盘，
+            用户裁定 2026-09-28：读黑名单命中经审批放行的前缀）
 
     Returns:
         (是否允许, 拒绝原因, 校验用绝对路径)
@@ -244,7 +266,14 @@ def _check_workspace_path(
             candidate = resolve_uploads_url(path)
             if candidate is not None:
                 return True, "", str(candidate)
-            allow, deny_reason = _read_outside_verdict(resolved)
+            # 锚携入读判定（用户裁定 2026-09-29）：工作空间根作为内建
+            # read_allow 前缀参与放行——兄弟工作树读不撞仓库拒绝集。
+            allow, deny_reason = _read_outside_verdict(
+                resolved,
+                _parse_authorized_zones(authorized_read_zones),
+                workspace=workspace,
+                project_root=project_root,
+            )
             if allow:
                 return True, "", str(resolved)
             if deny_reason is not None:
@@ -267,7 +296,12 @@ def _check_workspace_path(
     # 相对路径在工作空间内落空（目标不存在）→ 白名单前缀根回退解析一次
     # （仅读操作；工作空间内已存在则优先，回退不遮蔽本地副本）。
     if operation in _READ_OPERATIONS and not target.is_absolute() and not resolved.exists():
-        hit, reason, fallback_candidate = _read_relative_fallback(target)
+        hit, reason, fallback_candidate = _read_relative_fallback(
+            target,
+            _parse_authorized_zones(authorized_read_zones),
+            workspace=workspace,
+            project_root=project_root,
+        )
         if hit:
             return True, "", fallback_candidate
         if reason:
@@ -362,6 +396,7 @@ async def file_read(
     tail: int | None = None,
     workspace: str | None = None,
     project_root: str | None = None,
+    authorized_read_zones: str | None = None,
 ) -> ToolResult:
     """读取文件内容。
 
@@ -373,7 +408,11 @@ async def file_read(
     """
     # 工作空间约束（读路径：根外放行但记录；无注入上下文一律拒绝）
     allowed, reason, resolved = _check_workspace_path(
-        path, workspace, project_root, operation="read"
+        path,
+        workspace,
+        project_root,
+        operation="read",
+        authorized_read_zones=authorized_read_zones,
     )
     if not allowed:
         return ToolResult.failure_result(reason)
@@ -680,10 +719,15 @@ async def list_directory(
     pattern: str | None = None,
     workspace: str | None = None,
     project_root: str | None = None,
+    authorized_read_zones: str | None = None,
 ) -> ToolResult:
     """列出目录的直接子项（相对路径以注入根锚定；无注入报错）。"""
     allowed, reason, resolved = _check_workspace_path(
-        path, workspace, project_root, operation="read"
+        path,
+        workspace,
+        project_root,
+        operation="read",
+        authorized_read_zones=authorized_read_zones,
     )
     if not allowed:
         return ToolResult.failure_result(reason)

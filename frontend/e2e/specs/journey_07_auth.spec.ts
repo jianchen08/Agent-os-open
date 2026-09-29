@@ -54,17 +54,19 @@ test.describe('旅程07：认证', () => {
     }
   });
 
-  test('7.3 登录页面应正确显示', async ({ page }) => {
-    await page.goto('/login');
+  test('7.3 登录模态（认证闸）应正确显示', async ({ page }) => {
+    // /login 整页路由已退役（ADR 2026-09-28）：未认证打开首页即呈现认证闸登录模态
+    await page.goto('/');
     await page.waitForLoadState('networkidle');
 
-    // 验证登录表单
-    const inputs = page.locator('input');
+    // 验证登录模态表单
+    await expect(page.locator('[data-testid="login-modal-form"]'), '登录模态应可见').toBeVisible({ timeout: 10_000 });
+    const inputs = page.locator('[data-testid="login-modal-form"] input');
     const count = await inputs.count();
-    expect(count, '登录页应有输入框').toBeGreaterThanOrEqual(2);
+    expect(count, '登录模态应有输入框').toBeGreaterThanOrEqual(2);
 
     // 验证有登录按钮
-    const loginBtn = page.locator('button').filter({ hasText: /登录|login/i }).first();
+    const loginBtn = page.locator('[data-testid="login-modal-submit"]');
     await expect(loginBtn, '登录按钮应可见').toBeVisible({ timeout: 5_000 });
   });
 

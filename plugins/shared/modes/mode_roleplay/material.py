@@ -13,8 +13,11 @@ mode_material_inject/plugin.py）：暴露 ``build_injection(state, pkg_dir)``
   世界书扫描——卡接管声明与设定/性格/场景由 context_build 按卡键加载的卡
   yaml system_prompt 承载，此处重复注入即双份；
 - 旁路（非卡键但 execution_context.roleplay_persona 非空，附身场景前端透传
-  卡人设、主 agent 身份不变）→ 用该文本组接管块（此场景 context_build 无卡
-  数据，接管声明+人设全量必要）；卡键成立则 persona 分支不参与（卡优先）。
+  卡人设、主 agent 身份不变）→ 人设替换不在本组装器：mode.yaml persona 声明
+  （replace+from）由 mode_material_inject 通用机制写 context.persona_text，
+  prompt_build 的 {{persona:}} 占位符换源（替换主 agent 人设段，骨架不动；
+  追加式接管块已退役——双重人设且违背"直接替换"语义，2026-09-28）。本组装
+  器旁路只剩开演档段。
 - 世界书：卡 lorebook_ids 逐书扫描注入（scan_inject 按最近消息文本命中；
   书缺失/未命中 = 零注入）。书双根查找：用户层 books_dir/<book_id>.yaml 优先
   → 回落包内 lorebooks/<book_id>.yaml（同 id 用户接管；两目录参数皆可 None =
@@ -90,10 +93,6 @@ def _build(state: dict[str, Any], pkg_dir, books_dir, user_agents_dir) -> str:
         lore = _render_lorebooks(state, card, pkg_dir, books_dir)
         if lore:
             sections.append(lore)
-    else:
-        persona = _roleplay_persona(state)
-        if persona:
-            sections.append(_render_persona_takeover(persona))
     opening = _render_opening_sections(state)
     if opening:
         sections.append(opening)
@@ -145,22 +144,6 @@ def _render_card_examples(card: dict[str, Any]) -> str:
     name = str(card.get("name") or card.get("display_name") or "").strip() or "角色"
     example = raw.replace("{{char}}", name).replace("{{user}}", USER_PLACEHOLDER_NAME)
     return "\n".join(["# 对话示例", example])
-
-
-def _render_persona_takeover(persona: str) -> str:
-    """附身场景接管块：接管声明 + 前端透传的卡人设文本。"""
-    return "\n".join([
-        "# 扮演接管",
-        "你将接管以下人设进行沉浸式角色扮演，永远保持角色身份。",
-        "",
-        "# 人设",
-        persona.strip(),
-    ])
-
-
-def _roleplay_persona(state: dict[str, Any]) -> str:
-    """读 execution_context.roleplay_persona（可选字符串）；无/空返回空串。"""
-    return _execution_context_text(state, "roleplay_persona")
 
 
 def _execution_context_text(state: dict[str, Any], key: str) -> str:

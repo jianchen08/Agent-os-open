@@ -19,7 +19,9 @@ use serde_json::Value;
 /// 顶层与 data 信封两处取字符串字段：顶层优先、data 信封兜底
 /// （WS 消息 body 统一收进 data 信封是目标契约，现状前端部分字段仍放顶层）。
 /// 任意一处存在但非字符串 → 视为缺失（as_str 过滤），与各调用点原提取链一致。
-fn field_or_data<'a>(msg: &'a Value, key: &str) -> Option<&'a str> {
+/// pub：ws_session 回执帧（user_input_ack/route_error）按同法提取
+/// thread_id/client_message_id，单一真值源不复制提取链。
+pub fn field_or_data<'a>(msg: &'a Value, key: &str) -> Option<&'a str> {
     msg.get(key).and_then(|v| v.as_str()).or_else(|| {
         msg.get("data")
             .and_then(|d| d.get(key))

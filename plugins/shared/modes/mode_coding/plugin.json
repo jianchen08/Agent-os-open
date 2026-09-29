@@ -61,7 +61,7 @@
       },
       {
         "name": "mode.get_profile",
-        "description": "返回编码模式包内 profile.yaml 解析后的内容",
+        "description": "返回编码模式包内 mode.yaml 解析后的内容",
         "input_schema": {
           "type": "object",
           "properties": {}
@@ -185,22 +185,6 @@
             "w": 720,
             "h": 480
           }
-        }
-      }
-    ]
-  },
-  "ui_schema": {
-    "widgets": [
-      {
-        "id": "mode_opt_coding",
-        "type": "select-option",
-        "space": "chat-input",
-        "order": 10,
-        "props": {
-          "target": "task_mode",
-          "value": "coding",
-          "label": "编码",
-          "icon": "💻"
         }
       }
     ]

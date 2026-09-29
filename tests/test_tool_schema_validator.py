@@ -12,15 +12,13 @@ role=tool 诊断消息把缺失/类型错误明细反馈给 LLM，使其能补�
 
 from __future__ import annotations
 
-import json
-
 from tests._pipeline_plugin_path import add_plugin_dir
 
 add_plugin_dir("input", "tool_schema_validator")
 
-import plugin as _tsv_plugin_mod  # noqa: E402  模块级捕获：测试内 re-import 会被裸名逐出干扰
 from typing import Any
 
+import plugin as _tsv_plugin_mod  # noqa: E402  模块级捕获：测试内 re-import 会被裸名逐出干扰
 import pytest
 from pipeline.plugin import PluginContext
 from pipeline.types import StateKeys
@@ -86,8 +84,18 @@ def _make_ctx(
     )
 
 
-def _tool_msgs(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [m for m in messages if m.get("role") == "tool"]
+def _pre_by_call_id(updates: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """pre_decided_results 按 call_id 索引（结果预填契约，ADR 2026-09-28）。"""
+    return {e.get("call_id"): e for e in updates.get("pre_decided_results", [])}
+
+
+def _pre_by_name(updates: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """无 call_id 条目按工具名索引（名字兜底）。"""
+    return {
+        e.get("tool_name"): e
+        for e in updates.get("pre_decided_results", [])
+        if e.get("call_id") is None
+    }
 
 
 class TestSchemaValidationBlock:
@@ -108,17 +116,19 @@ class TestSchemaValidationBlock:
         result = await plugin.execute(ctx)
         updates = result.state_updates
 
-        # 不进入 validated_calls → tool_core 不会执行
+        # 被拒调用保留在 raw_tool_calls（tool_core 按 call_id 命中跳过执行）
         remaining = updates.get(StateKeys.RAW_TOOL_CALLS, [])
-        assert remaining == []
+        assert [tc["id"] for tc in remaining] == ["call_1"]
 
-        # 注入了诊断 tool 消息
-        tool_msgs = _tool_msgs(updates.get("messages", []))
-        assert len(tool_msgs) == 1
-        assert tool_msgs[0]["tool_call_id"] == "call_1"
-        content = tool_msgs[0]["content"]
-        assert "SCHEMA_VALIDATION_FAILED" in content
-        assert "Missing required field: action" in content
+        # 预填拒绝结果（结果预填契约，ADR 2026-09-28）
+        entry = _pre_by_call_id(updates)["call_1"]
+        assert entry["success"] is False
+        assert "SCHEMA_VALIDATION_FAILED" in entry["error"]
+        assert "Missing required field: action" in entry["error"]
+        assert entry["metadata"]["decided_by"] == "tool_schema_validator"
+
+        # 不再自建配对消息（tool_core 统一整形）
+        assert "messages" not in updates
 
         # 记录到 schema_errors 供观测
         assert updates.get("schema_errors")
@@ -145,13 +155,13 @@ class TestSchemaValidationBlock:
         ctx = _make_ctx([tc], messages=list(messages_before))
 
         result = await plugin.execute(ctx)
-        messages = result.state_updates.get("messages", [])
+        updates = result.state_updates
 
-        # assistant(tool_calls) 仍在，其后紧跟 role=tool 诊断
-        assert any(m["role"] == "assistant" and m.get("tool_calls") for m in messages)
-        tool_msgs = _tool_msgs(messages)
-        assert len(tool_msgs) == 1
-        assert tool_msgs[0]["tool_call_id"] == "call_9"
+        # 配对完整性经结果预填达成：调用保留（tool_core 命中预定结果后统一
+        # 整形 assistant(tool_calls) → tool 配对），validator 不动 messages。
+        assert [tc["id"] for tc in updates.get(StateKeys.RAW_TOOL_CALLS, [])] == ["call_9"]
+        assert _pre_by_call_id(updates)["call_9"]["success"] is False
+        assert "messages" not in updates
 
     @pytest.mark.asyncio
     async def test_unrepairable_type_mismatch_blocked(self) -> None:
@@ -171,10 +181,10 @@ class TestSchemaValidationBlock:
         result = await plugin.execute(ctx)
         updates = result.state_updates
 
-        assert updates.get(StateKeys.RAW_TOOL_CALLS, []) == []
-        tool_msgs = _tool_msgs(updates.get("messages", []))
-        assert len(tool_msgs) == 1
-        assert "Type mismatch for 'action'" in tool_msgs[0]["content"]
+        # 被拒调用保留 + 预填拒绝结果
+        assert [tc["id"] for tc in updates.get(StateKeys.RAW_TOOL_CALLS, [])] == ["call_2"]
+        assert _pre_by_call_id(updates)["call_2"]["success"] is False
+        assert "Type mismatch for 'action'" in _pre_by_call_id(updates)["call_2"]["error"]
 
 
 class TestSchemaValidationPass:
@@ -197,8 +207,9 @@ class TestSchemaValidationPass:
         remaining = updates.get(StateKeys.RAW_TOOL_CALLS, [])
         assert len(remaining) == 1
         assert remaining[0]["id"] == "call_3"
-        # 不注入诊断 tool 消息
-        assert _tool_msgs(updates.get("messages", [])) == []
+        # 不预填、不动 messages
+        assert "pre_decided_results" not in updates
+        assert "messages" not in updates
 
     @pytest.mark.asyncio
     async def test_repairable_type_mismatch_autofixed(self) -> None:
@@ -248,14 +259,14 @@ class TestSchemaValidationMixed:
         result = await plugin.execute(ctx)
         updates = result.state_updates
 
-        # 只有 good 进入 validated_calls
+        # good 与 bad 都保留（拦截是逐调用的）；只有 bad 被预填拒绝
         remaining = updates.get(StateKeys.RAW_TOOL_CALLS, [])
-        assert [tc["id"] for tc in remaining] == ["good"]
+        assert [tc["id"] for tc in remaining] == ["good", "bad"]
 
-        # 只为 bad 注入诊断消息
-        tool_msgs = _tool_msgs(updates.get("messages", []))
-        assert len(tool_msgs) == 1
-        assert tool_msgs[0]["tool_call_id"] == "bad"
+        entries = _pre_by_call_id(updates)
+        assert set(entries) == {"bad"}
+        assert entries["bad"]["success"] is False
+        assert "messages" not in updates
 
 
 class TestTruncationHint:
@@ -275,16 +286,15 @@ class TestTruncationHint:
         result = await plugin.execute(ctx)
         updates = result.state_updates
 
-        # 仍拦截（缺必填 action）
-        assert updates.get(StateKeys.RAW_TOOL_CALLS, []) == []
-        tool_msgs = _tool_msgs(updates.get("messages", []))
-        assert len(tool_msgs) == 1
-        content = tool_msgs[0]["content"]
+        # 仍拦截（缺必填 action）：调用保留 + 预填拒绝带截断引导
+        assert [tc["id"] for tc in updates.get(StateKeys.RAW_TOOL_CALLS, [])] == ["call_t"]
+        entry = _pre_by_call_id(updates)["call_t"]
+        error = entry["error"]
         # 截断引导文案出现
-        assert "max_tokens 被截断" in content
-        assert "append" in content
-        # 透传 output_truncated 标志
-        assert '"output_truncated":true' in content.replace(" ", "")
+        assert "max_tokens 被截断" in error
+        assert "append" in error
+        # 透传 output_truncated 标志（结构化 metadata，非旧 JSON 文本）
+        assert entry["metadata"]["output_truncated"] is True
 
     @pytest.mark.asyncio
     async def test_no_truncation_signal_no_hint(self) -> None:
@@ -295,9 +305,9 @@ class TestTruncationHint:
 
         result = await plugin.execute(ctx)
         updates = result.state_updates
-        tool_msgs = _tool_msgs(updates.get("messages", []))
-        assert len(tool_msgs) == 1
-        assert "max_tokens 被截断" not in tool_msgs[0]["content"]
+        entry = _pre_by_call_id(updates)["call_n"]
+        assert entry["success"] is False
+        assert "max_tokens 被截断" not in entry["error"]
 
 
 class TestRegistrySourceFallback:
@@ -317,8 +327,10 @@ class TestRegistrySourceFallback:
         ctx = PluginContext(state=state, _services={"tool_registry": _REGISTRY})
 
         result = await plugin.execute(ctx)
-        # registry 里有 file_write 定义 → 能识别缺 action 并拦截
-        assert result.state_updates.get(StateKeys.RAW_TOOL_CALLS, []) == []
+        # registry 里有 file_write 定义 → 能识别缺 action 并预填拒绝
+        updates = result.state_updates
+        assert [tc["id"] for tc in updates.get(StateKeys.RAW_TOOL_CALLS, [])] == ["c1"]
+        assert _pre_by_call_id(updates)["c1"]["success"] is False
 
     @pytest.mark.asyncio
     async def test_falls_back_to_state_definitions(self) -> None:
@@ -334,8 +346,10 @@ class TestRegistrySourceFallback:
         ctx = PluginContext(state=state, _services={})  # 无 registry
 
         result = await plugin.execute(ctx)
-        # 回退路径也能拦截缺 action
-        assert result.state_updates.get(StateKeys.RAW_TOOL_CALLS, []) == []
+        # 回退路径也能拦截缺 action（预填拒绝）
+        updates = result.state_updates
+        assert [tc["id"] for tc in updates.get(StateKeys.RAW_TOOL_CALLS, [])] == ["c2"]
+        assert _pre_by_call_id(updates)["c2"]["success"] is False
 
 
 class TestObjectArrayParseFailureKeepsOriginal:
@@ -372,9 +386,8 @@ class TestObjectArrayParseFailureKeepsOriginal:
         tc = {"name": "options_tool", "args": {"options": "not-json{"}, "id": "c_obj"}
         result = await plugin.execute(self._ctx_with(tc))
         updates = result.state_updates
-        assert updates.get(StateKeys.RAW_TOOL_CALLS, []) == [], "坏参数应被拦截"
-        tool_msgs = _tool_msgs(updates.get("messages", []))
-        assert tool_msgs and "SCHEMA_VALIDATION_FAILED" in tool_msgs[0]["content"]
+        assert [tc["id"] for tc in updates.get(StateKeys.RAW_TOOL_CALLS, [])] == ["c_obj"], "调用保留（tool_core 幂等跳过）"
+        assert "SCHEMA_VALIDATION_FAILED" in _pre_by_call_id(updates)["c_obj"]["error"]
 
     @pytest.mark.asyncio
     async def test_invalid_array_string_blocked_as_type_error(self) -> None:
@@ -383,9 +396,8 @@ class TestObjectArrayParseFailureKeepsOriginal:
         tc = {"name": "options_tool", "args": {"options": {}, "tags": "a, b"}, "id": "c_arr"}
         result = await plugin.execute(self._ctx_with(tc))
         updates = result.state_updates
-        assert updates.get(StateKeys.RAW_TOOL_CALLS, []) == []
-        tool_msgs = _tool_msgs(updates.get("messages", []))
-        assert tool_msgs and "SCHEMA_VALIDATION_FAILED" in tool_msgs[0]["content"]
+        assert [tc["id"] for tc in updates.get(StateKeys.RAW_TOOL_CALLS, [])] == ["c_arr"], "调用保留"
+        assert "SCHEMA_VALIDATION_FAILED" in _pre_by_call_id(updates)["c_arr"]["error"]
 
     @pytest.mark.asyncio
     async def test_valid_stringified_object_still_converted(self) -> None:
@@ -569,10 +581,12 @@ class TestRegistryFailureFallback:
         ctx = PluginContext(state=state, _services={"tool_registry": _BoomRegistry()})
 
         result = await plugin.execute(ctx)
+        updates = result.state_updates
 
-        # state 回退定义生效：缺 action 照常拦截
-        assert result.state_updates.get(StateKeys.RAW_TOOL_CALLS, []) == []
-        assert result.state_updates.get("schema_errors")
+        # state 回退定义生效：缺 action 照常拦截（预填拒绝）
+        assert [tc["id"] for tc in updates.get(StateKeys.RAW_TOOL_CALLS, [])] == ["c1"]
+        assert _pre_by_call_id(updates)["c1"]["success"] is False
+        assert updates.get("schema_errors")
 
     @pytest.mark.asyncio
     async def test_registry_raise_without_state_defs_passes_through(self) -> None:
@@ -612,9 +626,15 @@ class TestUnknownToolHandling:
         tc = {"name": "mystery_tool", "args": {"x": 1}, "id": "c1"}
 
         result = await plugin.execute(_state_ctx({StateKeys.RAW_TOOL_CALLS: [tc]}))
+        updates = result.state_updates
 
-        assert result.state_updates.get(StateKeys.RAW_TOOL_CALLS, []) == []
-        errors = result.state_updates.get("schema_errors", [])
+        # 调用保留（配对完整）+ 预填拒绝（LLM 收到反馈，不再静默丢调用）
+        assert [tc["id"] for tc in updates.get(StateKeys.RAW_TOOL_CALLS, [])] == ["c1"]
+        entry = _pre_by_call_id(updates)["c1"]
+        assert entry["success"] is False
+        assert "未注册" in entry["error"]
+        assert entry["metadata"]["error_code"] == "TOOL_NOT_FOUND"
+        errors = updates.get("schema_errors", [])
         assert len(errors) == 1
         assert errors[0]["tool"] == "mystery_tool"
         assert "Tool definition not found: mystery_tool" in errors[0]["error"]
@@ -700,10 +720,12 @@ class TestNumericTypeConversion:
         }
 
         result = await plugin.execute(_state_ctx(state))
+        updates = result.state_updates
 
-        assert result.state_updates.get(StateKeys.RAW_TOOL_CALLS, []) == []
-        tool_msgs = _tool_msgs(result.state_updates.get("messages", []))
-        assert tool_msgs and f"Type mismatch for '{field}'" in tool_msgs[0]["content"]
+        assert [tc["id"] for tc in updates.get(StateKeys.RAW_TOOL_CALLS, [])] == ["c1"]
+        entry = _pre_by_call_id(updates)["c1"]
+        assert entry["success"] is False
+        assert f"Type mismatch for '{field}'" in entry["error"]
 
 
 class TestBooleanTypeConversion:
@@ -744,9 +766,9 @@ class TestBooleanTypeConversion:
     async def test_unrecognized_boolean_string_blocked(self) -> None:
         result = await self._run("yes")
 
-        assert result.state_updates.get(StateKeys.RAW_TOOL_CALLS, []) == []
-        tool_msgs = _tool_msgs(result.state_updates.get("messages", []))
-        assert tool_msgs and "Type mismatch for 'flag'" in tool_msgs[0]["content"]
+        updates = result.state_updates
+        assert [tc["id"] for tc in updates.get(StateKeys.RAW_TOOL_CALLS, [])] == ["c1"]
+        assert "Type mismatch for 'flag'" in _pre_by_call_id(updates)["c1"]["error"]
 
     @pytest.mark.asyncio
     async def test_hostile_string_subclass_caught_by_conversion_guard(self) -> None:
@@ -758,9 +780,9 @@ class TestBooleanTypeConversion:
 
         result = await self._run(HostileStr("true"))
 
-        assert result.state_updates.get(StateKeys.RAW_TOOL_CALLS, []) == []
-        tool_msgs = _tool_msgs(result.state_updates.get("messages", []))
-        assert tool_msgs and "SCHEMA_VALIDATION_FAILED" in tool_msgs[0]["content"]
+        updates = result.state_updates
+        assert [tc["id"] for tc in updates.get(StateKeys.RAW_TOOL_CALLS, [])] == ["c1"]
+        assert "SCHEMA_VALIDATION_FAILED" in _pre_by_call_id(updates)["c1"]["error"]
 
 
 class TestSchemaEdgeCases:
@@ -795,7 +817,8 @@ class TestSchemaEdgeCases:
         assert remaining[0]["args"]["action"] == "123"  # 可修复字段照常修复
         assert remaining[0]["args"]["memo"] == memo_value  # 无 type 字段原值透传
         fixes = result.state_updates.get("schema_fixes", [])
-        assert fixes and all("memo" not in f for fix in fixes for f in fix["fixes"])
+        assert fixes, "修复有记录"
+        assert all("memo" not in f for fix in fixes for f in fix["fixes"]), "无 type 字段不进修复"
 
     @pytest.mark.asyncio
     async def test_undeclared_extra_field_ignored(self) -> None:
@@ -856,15 +879,13 @@ class TestTruncationBlockingInExecute:
         result = await tsv.plugin().execute(_state_ctx({StateKeys.RAW_TOOL_CALLS: [tc]}))
         updates = result.state_updates
 
-        assert updates.get(StateKeys.RAW_TOOL_CALLS, []) == []
+        assert [tc["id"] for tc in updates.get(StateKeys.RAW_TOOL_CALLS, [])] == ["c_t"]
         assert "schema_errors" not in updates  # 截断不是 schema 错误，走独立诊断
-        tool_msgs = _tool_msgs(updates.get("messages", []))
-        assert len(tool_msgs) == 1
-        assert tool_msgs[0]["tool_call_id"] == "c_t"
-        payload = json.loads(tool_msgs[0]["content"])
-        assert payload["success"] is False
-        assert payload["error_code"] == "ARGS_TRUNCATED"
-        assert payload["lost_keys"] == ["goal"]
+        entry = _pre_by_call_id(updates)["c_t"]
+        assert entry["success"] is False
+        assert entry["metadata"]["error_code"] == "ARGS_TRUNCATED"
+        assert entry["metadata"]["lost_keys"] == ["goal"]
+        assert "goal" in entry["error"]
 
     @pytest.mark.asyncio
     async def test_truncation_skips_only_the_truncated_call(self, tsv: _FreshModule) -> None:
@@ -877,8 +898,11 @@ class TestTruncationBlockingInExecute:
             _state_ctx({StateKeys.RAW_TOOL_CALLS: [bad, good]})
         )
 
-        remaining = result.state_updates.get(StateKeys.RAW_TOOL_CALLS, [])
-        assert [tc["id"] for tc in remaining] == ["c_good"]
+        updates = result.state_updates
+        # 两个调用都保留：截断的预填拒绝、完好的放行
+        remaining = updates.get(StateKeys.RAW_TOOL_CALLS, [])
+        assert [tc["id"] for tc in remaining] == ["c_bad", "c_good"]
+        assert _pre_by_call_id(updates)["c_bad"]["success"] is False
 
 
 class TestRepairChannelDegradation:

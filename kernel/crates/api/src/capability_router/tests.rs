@@ -52,6 +52,7 @@ fn test_task_export_manifest() -> agentos_core::traits::PluginManifest {
         enabled: None,
         activation: None,
         persistent_fields: vec![],
+        aux_venvs: Vec::new(),
         export_fields: [
             "task.goal",
             "task.status",

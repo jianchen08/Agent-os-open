@@ -12,6 +12,7 @@
 的 bash_execute 被错误路由进容器。
 """
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -52,6 +53,12 @@ def _make_guard(docker_available: bool = True) -> IsolationGuard:
 
     guard._manager = SimpleNamespace(get_or_create_environment=_goc)
     return guard
+
+
+# 真实可挂载工作空间（悬空防护下夹具路径必须存在；系统临时区惰性建目录）
+_REAL_WS = str(Path(tempfile.gettempdir()) / "agentos_ig_l1_ws_fixture")
+if not Path(_REAL_WS).exists():
+    Path(_REAL_WS).mkdir(parents=True, exist_ok=True)
 
 
 def _make_ctx(agent_level: str | None = None, workspace: str | None = None) -> PluginContext:
@@ -149,7 +156,7 @@ class TestSubtaskUnaffected:
     async def test_l2_goes_to_docker_when_available(self):
         """L2 + docker 可用 → 容器执行（主 agent 路由不应波及子任务）。"""
         guard = _make_guard(docker_available=True)
-        result = await guard.execute(_make_ctx("L2", workspace="/host/ws"))
+        result = await guard.execute(_make_ctx("L2", workspace=_REAL_WS))
 
         contexts = result.state_updates.get("execution_contexts", [])
         assert contexts[0]["provider"] == "docker"

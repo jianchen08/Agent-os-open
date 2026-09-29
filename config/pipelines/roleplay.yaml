@@ -52,7 +52,11 @@ loop_bodies:
       then: loop
       when: core_type == 'tool_execute'
     - then: end
-    steps: []
+    steps:
+    # 状态统一标记解析步（2026-09-28 设计）：提取 <state> 标记 → 账本落账
+    # （character_state/memory）→ render 回写下轮动态变量注入源 →
+    # context.state_updates 载荷（前端状态小卡 + span 隐藏）。零标记零动作。
+    - pipeline_state_marker_parse
   while: 'True'
 - id: exit
   run_on_error: true

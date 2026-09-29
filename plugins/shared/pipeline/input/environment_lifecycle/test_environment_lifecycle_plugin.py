@@ -302,10 +302,21 @@ def test_exit_caller_raises_keeps_mark_not_released() -> None:
     assert len(caller.calls) == 1
 
 
-def test_exit_error_payload_keeps_mark_not_released() -> None:
-    """destroy_env 业务失败以 {"error": ...} 返回 → 留痕不阻断，released=False。"""
+@pytest.mark.parametrize(
+    "destroy_result",
+    [
+        # 侧边直连形态：业务 dict 裸 error
+        {"error": "隔离服务未初始化"},
+        # tool-executor 信封形态：destroy_env 失败显式 success=False →
+        # 内核 ②-b 把业务 error 落到信封 error 键（data=null）
+        {"success": False, "error": "隔离服务未初始化", "data": None},
+    ],
+    ids=["raw-business-dict", "tool-executor-envelope"],
+)
+def test_exit_error_payload_keeps_mark_not_released(destroy_result: dict) -> None:
+    """destroy_env 失败（裸 error 或信封 error）→ 留痕不阻断，released=False。"""
     mod = _load_plugin()
-    caller = _FakeDestroyCaller(result={"error": "隔离服务未初始化"})
+    caller = _FakeDestroyCaller(result=destroy_result)
     mod.set_destroy_caller(caller)
     plugin = mod.EnvironmentLifecyclePlugin()
     state = {

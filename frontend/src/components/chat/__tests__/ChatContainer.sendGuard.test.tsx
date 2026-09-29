@@ -76,9 +76,8 @@ vi.mock('@/hooks/queries/usePipelineRunsQuery', () => ({
   usePipelineRunsQuery: () => ({ data: {} }),
 }))
 // 挂起态：避免挂载期网络调用在测试结束后 resolve 触发 act() 告警
-vi.mock('@/services/api/config', () => ({
-  getDefaults: () => new Promise(() => {}),
-  getLLMConfig: () => new Promise(() => {}),
+vi.mock('@/hooks/queries/useLlmQueries', () => ({
+  useLlmConfigQuery: () => ({ data: undefined, isError: false }),
 }))
 
 vi.mock('@/stores/agentTabStore', async () => {

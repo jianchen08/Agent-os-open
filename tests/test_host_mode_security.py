@@ -32,6 +32,18 @@ from tests._security_check_harness import (
 pytestmark = pytest.mark.unit
 
 
+def _decision_view(result: Any) -> dict[str, Any]:
+    """旧 security.decision 观测面的等价视图（键已随 ADR 2026-09-28 退役）。
+
+    放行/批准 = allowed True（reason "all checks passed"）；拦截 = 预定拒绝
+    条目在场（reason "soft_block: <error>"，语义同旧 soft_block 记录行）。
+    """
+    entries = result.state_updates.get("pre_decided_results") or []
+    if entries:
+        return {"allowed": True, "reason": f"soft_block: {entries[0]['error']}"}
+    return {"allowed": True, "reason": "all checks passed"}
+
+
 def _make_plugin(rules: list[dict[str, Any]] | None = None) -> Any:
     """构建 SecurityCheckPlugin 实例。"""
     add_plugin_dir("input", "security_check")
@@ -75,7 +87,7 @@ class TestHostModeNoWorkspaceBoundary:
         ctx = _make_ctx([{"name": "file_read", "args": {"path": outside}}])
 
         result = await plugin.execute(ctx)
-        decision = result.state_updates.get("security.decision", {})
+        decision = _decision_view(result)
 
         assert decision.get("allowed") is True
         # 不应因工作目录越界被拦截
@@ -93,8 +105,8 @@ class TestPathTraversalStillBlocked:
 
         result = await plugin.execute(ctx)
 
-        # 路径遍历走 soft_block，allowed=True 但有拒绝反馈
-        assert "路径遍历" in result.state_updates.get(StateKeys.RAW_RESULT, "")
+        # 路径遍历走软拦截（预定拒绝；RAW_RESULT 由 tool_core 收尾统一写）
+        assert "路径遍历" in _decision_view(result)["reason"]
 
 
 class TestSensitivePathBlocked:
@@ -108,7 +120,7 @@ class TestSensitivePathBlocked:
         ctx = _make_ctx([{"name": "file_read", "args": {"path": "C:\\Windows\\System32"}}])
 
         result = await plugin.execute(ctx)
-        assert "敏感系统目录" in result.state_updates.get(StateKeys.RAW_RESULT, "")
+        assert "敏感系统目录" in _decision_view(result)["reason"]
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(os.name == "nt", reason="Linux 敏感目录仅非 Windows 测试")
@@ -118,7 +130,7 @@ class TestSensitivePathBlocked:
         ctx = _make_ctx([{"name": "file_read", "args": {"path": "/etc/passwd"}}])
 
         result = await plugin.execute(ctx)
-        assert "敏感系统目录" in result.state_updates.get(StateKeys.RAW_RESULT, "")
+        assert "敏感系统目录" in _decision_view(result)["reason"]
 
 
 class TestDangerousToolDualTrack:
@@ -200,7 +212,7 @@ class TestDangerousDecisionEndToEnd:
         ctx = _make_ctx([{"name": "file_read", "args": {"path": "docs/a.md"}}])
 
         result = await plugin.execute(ctx)
-        assert result.state_updates.get("security.decision", {}).get("allowed") is True
+        assert _decision_view(result).get("allowed") is True
         assert create.calls == 0, "只读工具不得发起审批"
 
     @pytest.mark.asyncio
@@ -212,7 +224,7 @@ class TestDangerousDecisionEndToEnd:
         ctx = _make_ctx([{"name": "nonexistent_tool", "args": {}}])
 
         result = await plugin.execute(ctx)
-        assert result.state_updates.get("security.decision", {}).get("allowed") is True
+        assert _decision_view(result).get("allowed") is True
         assert create.calls == 0, "未声明危险操作的工具不得发起审批"
 
     @pytest.mark.asyncio
@@ -243,7 +255,7 @@ class TestDangerousDecisionEndToEnd:
 
         result = await plugin.execute(ctx)
         assert create.calls == 1, "危险工具（registry 轨）命中 needs_approval 规则必须弹审批"
-        assert result.state_updates.get("security.decision", {}).get("allowed") is True
+        assert _decision_view(result).get("allowed") is True
 
     @pytest.mark.asyncio
     async def test_non_dangerous_tool_skips_rule_dispatch(self) -> None:
@@ -267,7 +279,7 @@ class TestDangerousDecisionEndToEnd:
 
         result = await plugin.execute(ctx)
         assert create.calls == 0, "非危险工具不得进规则处置/审批"
-        assert result.state_updates.get("security.decision", {}).get("allowed") is True
+        assert _decision_view(result).get("allowed") is True
 
     @pytest.mark.asyncio
     async def test_command_in_container_tool_triggers_approval(self) -> None:
@@ -281,4 +293,4 @@ class TestDangerousDecisionEndToEnd:
 
         result = await plugin.execute(ctx)
         assert create.calls == 1, "命令执行类工具命中危险命令规则必须弹审批"
-        assert result.state_updates.get("security.decision", {}).get("allowed") is True
+        assert _decision_view(result).get("allowed") is True

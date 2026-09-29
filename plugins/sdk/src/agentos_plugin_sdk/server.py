@@ -54,6 +54,11 @@ SERVER_VERSION = "0.2.0"
 _STEP_METHOD_KEY = "_step_method"
 _PIPE_HOOK_KEY = "_pipe_hook"
 
+# 调用瞬态键：内核把步骤级 config（inputs/_step_method/_pipe_hook）合并进注入
+# 命名空间下发，逐调用不同但不属于配置面——配置变更对比时剔除（invoker
+# merge_injected_with_step_config 的合并契约）。
+CALL_CONFIG_TRANSIENT_KEYS = frozenset({"inputs", _STEP_METHOD_KEY, _PIPE_HOOK_KEY})
+
 
 def _augment_description(description: str, output_schema: dict[str, Any] | None) -> str:
     """声明了 output_schema 时，description 追加单行输出契约摘要。
@@ -267,12 +272,17 @@ class McpServer:
         steps: dict[str, Any] | None = None,
         pipe_hooks: dict[str, list[Any]] | None = None,
         request_handlers: dict[str, tuple[type, Any]] | None = None,
+        on_call_config: Any | None = None,
     ) -> None:
         self._tools = tools
         self._resources = resources
         self._lifecycle_handlers = lifecycle_handlers
         self._on_initialize = on_initialize
         self._kernel_channel = kernel_channel
+        # 每调用 config 感知回调（AgentOSPlugin._apply_call_config /
+        # CohostServer._route_call_config）：调用边界刷新注入配置视图并按需
+        # 触发 on_config_changed 钩子；签名 (config, tool_name)，见分发点注释
+        self._on_call_config = on_call_config
         self._steps: dict[str, Any] = steps or {}
         self._pipe_hooks: dict[str, list[Any]] = pipe_hooks or {}
         self._sdk = self._build_sdk_server()
@@ -367,6 +377,15 @@ class McpServer:
         """
         name = params.get("name", "")
         arguments = dict(params.get("arguments") or {})
+
+        # 配置变更感知（调用边界，先于任何分发）：内核每调用现算注入 config，
+        # 此处刷新插件配置视图并按需触发 on_config_changed 钩子。回调签名
+        # (config, tool_name)：独占形态全体工具同属本插件（忽略 tool_name）；
+        # 合宿形态按工具名 `{plugin_id}.` 前缀路由到属主成员（每调用配置按
+        # 调用方成员现算，不路由则成员配置冻结在握手快照——2026-09-29
+        # security_rules 注入链失效直接根因之一）。
+        if self._on_call_config is not None:
+            await self._on_call_config(arguments.get("config"), name)
 
         convention = await self._dispatch_convention(arguments)
         if convention is not None:

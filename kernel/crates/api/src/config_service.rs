@@ -305,6 +305,38 @@ pub fn restore_factory_config(mapping_path: &str) -> Result<bool, ConfigError> {
     Ok(true)
 }
 
+/// 启动期按 manifest 声明面播种（2026-09-28 配置读写单源化批次 A3）。
+///
+/// 读写同源公理：配置已迁移用户空间，则**读取出自用户空间**。启动时对每个
+/// manifest `config_files` 声明的**引用形态**文件（path 非空且 target != env）
+/// 做一次「用户层缺失即播种 + 接管登记」（[`seed_user_config_from_factory`]，
+/// 幂等：已存在/已登记跳过）——运行时读（用户空间叠加）恒命中用户层，
+/// factory 回退分支对声明族成为死分支。
+///
+/// 返回 (成功播种数, 失败明细 [(路径, 错误摘要)])；单文件失败不阻断启动，
+/// 由调用方（kernel bin 启动报告）决定呈现级别。
+pub fn seed_declared_configs(
+    project_root: &Path,
+    manifests: &[agentos_core::traits::PluginManifest],
+) -> (usize, Vec<(String, String)>) {
+    let mut seeded = 0usize;
+    let mut failures: Vec<(String, String)> = Vec::new();
+    for manifest in manifests {
+        for cf in &manifest.config_files {
+            if cf.path.is_empty() || cf.target.as_deref() == Some("env") {
+                // 内联形态（真值在 manifest）与 env 形态（写面即 .env）不参与播种
+                continue;
+            }
+            match seed_user_config_from_factory(project_root, &cf.path) {
+                Ok(true) => seeded += 1,
+                Ok(false) => {}
+                Err(e) => failures.push((cf.path.clone(), e.to_string())),
+            }
+        }
+    }
+    (seeded, failures)
+}
+
 /// B2（GET 掩码）：递归掩码真实明文 secret 值，**保留 `${ENV_VAR}` 占位符**。
 ///
 /// 规则（ADR §4.3 B2）：
@@ -436,6 +468,124 @@ pub fn atomic_write_yaml(target: &Path, value: &Value) -> Result<(), ConfigError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::pin_user_root;
+    use agentos_core::traits::{ConfigFileMapping, HostType, PluginManifest, PluginType};
+
+    fn seed_manifest(id: &str, entries: Vec<ConfigFileMapping>) -> PluginManifest {
+        PluginManifest {
+            force_include_tools: Vec::new(),
+            state: None,
+            id: id.to_string(),
+            name: format!("{id} 显示名"),
+            description: Some("测试插件".to_string()),
+            version: "1.0.0".to_string(),
+            plugin_type: PluginType::Tool,
+            pipeline_role: None,
+            language: "python".to_string(),
+            host_type: HostType::Sidecar,
+            host_group: None,
+            entry: "python server.py".to_string(),
+            capabilities: Default::default(),
+            requires_services: vec![],
+            permissions: Default::default(),
+            priority: 100,
+            mcp: None,
+            lifecycle: None,
+            native: None,
+            granted_capabilities: vec![],
+            restricted_capabilities: vec![],
+            requires_content: None,
+            invoke_entry: None,
+            config_files: entries,
+            http_endpoints: vec![],
+            ui_schema: None,
+            contributes: None,
+            enabled: None,
+            activation: None,
+            persistent_fields: vec![],
+            export_fields: vec![],
+            aux_venvs: Vec::new(),
+            provides: None,
+        }
+    }
+
+    fn ref_mapping(id: &str, path: &str) -> ConfigFileMapping {
+        ConfigFileMapping {
+            id: id.to_string(),
+            settings: None,
+            path: path.to_string(),
+            label: format!("{id} 配置"),
+            target: None,
+            fields: vec![],
+        }
+    }
+
+    #[test]
+    fn seed_declared_configs_seeds_reference_form_only_and_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 用户根须真实存在（seed 写侧 create_dir_all 在可用盘符内建子目录）
+        let user_root = tmp.path().join("user_root");
+        std::fs::create_dir_all(&user_root).unwrap();
+        let _guard = pin_user_root(&user_root);
+        let factory = tmp.path().join("config");
+        std::fs::create_dir_all(factory.join("plugins/cfg_rt")).unwrap();
+        std::fs::write(
+            factory.join("plugins/cfg_rt/cfg_rt.yaml"),
+            "a: 1
+",
+        )
+        .unwrap();
+
+        let manifests = vec![
+            seed_manifest(
+                "cfg_plugin",
+                vec![
+                    // 引用形态：应播种
+                    ref_mapping("file_cfg", "config/plugins/cfg_rt/cfg_rt.yaml"),
+                    // env 形态：不参与（写面即 .env，无播种语义）
+                    ConfigFileMapping {
+                        target: Some("env".to_string()),
+                        path: ".env".to_string(),
+                        ..ref_mapping("env_cfg", "")
+                    },
+                    // 内联形态：不参与（真值在 manifest）
+                    ref_mapping("inline_cfg", ""),
+                ],
+            ),
+            seed_manifest("no_cfg_plugin", vec![]),
+        ];
+
+        let (seeded, failures) = seed_declared_configs(tmp.path(), &manifests);
+
+        assert_eq!((seeded, failures.len()), (1, 0), "仅引用形态播种且无失败");
+        let user_file = agentos_core::user_space::user_config_dir()
+            .unwrap()
+            .join("plugins/cfg_rt/cfg_rt.yaml");
+        assert!(user_file.is_file(), "用户层应有播种副本");
+        // 幂等：第二次启动全跳过
+        let (seeded2, failures2) = seed_declared_configs(tmp.path(), &manifests);
+        assert_eq!((seeded2, failures2.len()), (0, 0));
+    }
+
+    #[test]
+    fn seed_declared_configs_collects_failures_without_aborting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_root = tmp.path().join("user_root");
+        std::fs::create_dir_all(&user_root).unwrap();
+        let _guard = pin_user_root(&user_root);
+        // factory 侧无该文件 → seed 返回 Ok(false)（不算失败），不炸
+        let manifests = vec![seed_manifest(
+            "cfg_plugin",
+            vec![ref_mapping(
+                "missing_cfg",
+                "config/plugins/missing/missing.yaml",
+            )],
+        )];
+
+        let (seeded, failures) = seed_declared_configs(tmp.path(), &manifests);
+
+        assert_eq!((seeded, failures.len()), (0, 0));
+    }
 
     #[test]
     fn atomic_write_yaml_rename_failure_cleans_tmp() {

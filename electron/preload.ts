@@ -64,7 +64,9 @@ export interface ElectronAPI {
    */
   window: {
     /** 创建并返回子窗口；id 重复时聚焦已有窗口 */
-    open(opts: ChildWindowOpenOptions): Promise<{ id: string; success: boolean }>;
+    open(
+      opts: ChildWindowOpenOptions,
+    ): Promise<{ id: string; success: boolean }>;
     /** 关闭指定窗口并从注册表移除 */
     close(id: string): Promise<void>;
     /** 聚焦指定窗口 */
@@ -84,6 +86,11 @@ export interface ElectronAPI {
   authSession: {
     save(refreshToken: string | null): Promise<boolean>;
     load(): Promise<string | null>;
+  };
+  /** 装机版自动登录凭据（ADR 2026-09-28）：load 仅装机形态返回非空；sync 供改密后回写存档 */
+  adminCredential: {
+    load(): Promise<{ username: string; password: string } | null>;
+    sync(username: string, password: string): Promise<boolean>;
   };
   windowControls: {
     /** 最小化 */
@@ -113,6 +120,12 @@ export interface ElectronAPI {
   dialog: {
     /** 选择目录；返回绝对路径，用户取消为 null */
     pickDirectory(): Promise<string | null>;
+  };
+
+  /** 应用壳进程树内存指标子 API（监控页全口径内存的应用壳段） */
+  appMetrics: {
+    /** 汇总 Electron 全部进程（主/渲染/GPU/utility）物理内存，KB 口径 */
+    get(): Promise<{ processCount: number; totalWorkingSetKb: number }>;
   };
 }
 
@@ -145,7 +158,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
    * 监听来自主进程的窗口信息更新事件。
    */
   onWindowInfo: (callback: (info: WindowInfo) => void): (() => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, info: WindowInfo): void => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      info: WindowInfo,
+    ): void => {
       callback(info);
     };
     ipcRenderer.on("window-info", handler);
@@ -158,10 +174,29 @@ contextBridge.exposeInMainWorld("electronAPI", {
   /** 认证会话镜像（强杀耐久备份）：tokenLifecycle 写入/清除时镜像，启动时回读 */
   authSession: {
     save: (refreshToken: string | null) => {
-      return ipcRenderer.invoke("auth:session:save", refreshToken) as Promise<boolean>;
+      return ipcRenderer.invoke(
+        "auth:session:save",
+        refreshToken,
+      ) as Promise<boolean>;
     },
     load: () => {
       return ipcRenderer.invoke("auth:session:load") as Promise<string | null>;
+    },
+  },
+  /** 装机版自动登录凭据（ADR 2026-09-28）：load 仅装机形态返回非空；sync 供改密后回写存档 */
+  adminCredential: {
+    load: () => {
+      return ipcRenderer.invoke("auth:admin-credential:load") as Promise<{
+        username: string;
+        password: string;
+      } | null>;
+    },
+    sync: (username: string, password: string) => {
+      return ipcRenderer.invoke(
+        "auth:admin-credential:sync",
+        username,
+        password,
+      ) as Promise<boolean>;
     },
   },
 
@@ -183,7 +218,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
    * 监听 IPC 通用事件的便捷方法。
    * 仅允许监听预定义的安全通道。
    */
-  on: (channel: string, callback: (...args: unknown[]) => void): (() => void) => {
+  on: (
+    channel: string,
+    callback: (...args: unknown[]) => void,
+  ): (() => void) => {
     // 白名单通道，防止渲染进程监听任意 IPC 事件
     // 注意：window:open 等使用 ipcRenderer.invoke（见下方 window 子 API），
     // 不经此白名单；此白名单只约束 ipcRenderer.on 监听通道。
@@ -196,7 +234,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
       return () => {};
     }
 
-    const handler = (_event: Electron.IpcRendererEvent, ...args: unknown[]): void => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      ...args: unknown[]
+    ): void => {
       callback(...args);
     };
     ipcRenderer.on(channel, handler);
@@ -247,7 +288,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
       return ipcRenderer.invoke("window:self:minimize") as Promise<void>;
     },
     toggleMaximize: () => {
-      return ipcRenderer.invoke("window:self:maximize-toggle") as Promise<boolean>;
+      return ipcRenderer.invoke(
+        "window:self:maximize-toggle",
+      ) as Promise<boolean>;
     },
     close: () => {
       return ipcRenderer.invoke("window:self:close") as Promise<void>;
@@ -255,8 +298,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
     isMaximized: () => {
       return ipcRenderer.invoke("window:self:is-maximized") as Promise<boolean>;
     },
-    onMaximizedChange: (callback: (maximized: boolean) => void): (() => void) => {
-      const handler = (_event: Electron.IpcRendererEvent, maximized: boolean): void => {
+    onMaximizedChange: (
+      callback: (maximized: boolean) => void,
+    ): (() => void) => {
+      const handler = (
+        _event: Electron.IpcRendererEvent,
+        maximized: boolean,
+      ): void => {
         callback(maximized);
       };
       ipcRenderer.on(MAXIMIZED_CHANGED_CHANNEL, handler);
@@ -285,7 +333,22 @@ contextBridge.exposeInMainWorld("electronAPI", {
    */
   dialog: {
     pickDirectory: () => {
-      return ipcRenderer.invoke("dialog:pick-directory") as Promise<string | null>;
+      return ipcRenderer.invoke("dialog:pick-directory") as Promise<
+        string | null
+      >;
+    },
+  },
+
+  /**
+   * 应用壳进程树内存指标。invoke 通道为 app:metrics，主进程汇总
+   * getAppMetrics 全部进程的物理内存（workingSetSize，KB 口径）。
+   */
+  appMetrics: {
+    get: () => {
+      return ipcRenderer.invoke("app:metrics") as Promise<{
+        processCount: number;
+        totalWorkingSetKb: number;
+      }>;
     },
   },
 } satisfies ElectronAPI);

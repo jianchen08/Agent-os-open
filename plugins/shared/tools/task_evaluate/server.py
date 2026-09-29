@@ -108,7 +108,7 @@ async def task_evaluate(**kwargs: dict[str, Any]) -> dict[str, Any]:
         return result.to_dict()
     if result.success:
         return result.output
-    return {"error": result.error}
+    return {"success": False, "error": result.error}
 
 
 if __name__ == "__main__":

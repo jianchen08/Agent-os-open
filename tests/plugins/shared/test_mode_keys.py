@@ -1,6 +1,7 @@
 # @feature: FP-0.2.〇 模式体系测试补标 | @ci: python-coverage
 # @feature: 模式体系P3 mode_coding试点 | @ci: python-coverage
-"""mode_keys 平铺模块行为测试：模式命名空间 agent 键解析（§2.3/§3.3 两级解析第二级）。
+"""mode_keys 平铺模块行为测试：模式命名空间 agent 键解析（§2.3/§3.3 两级解析第二级）
+与技能目录解析（批 E §3.1，与 agents 同构）。
 
 断输入→输出（键形 → (mode, stem)/路径/None），不 mock 文件面：
 出厂命中走真实 mode_coding 包；用户副本优先/双根回落经 AGENTOS_USER_ROOT
@@ -15,6 +16,7 @@ import pytest
 from mode_keys import (
     find_mode_agent_yaml,
     find_mode_package_dir,
+    find_mode_skill_dir,
     parse_mode_agent_key,
 )
 
@@ -149,3 +151,61 @@ class TestFindModeAgentYaml:
     )
     def test_miss_returns_none(self, key: str) -> None:
         assert find_mode_agent_yaml(key) is None
+
+
+class TestFindModeSkillDir:
+    """技能目录双根解析（批 E §3.1）：与 find_mode_agent_yaml 完全同语义。"""
+
+    @pytest.mark.parametrize(
+        "mode,name",
+        [
+            ("coding", "code-implement"),   # 出厂 mode_coding 迁入技能
+            ("coding", "code-self-review"),
+            ("godot", "code-godot"),        # 出厂 mode_godot 迁入技能
+        ],
+    )
+    def test_factory_skill_hit(self, mode: str, name: str) -> None:
+        """出厂包内迁入技能目录可解析（迁移验收锚点；SKILL.md 为技能标记）。"""
+        path = find_mode_skill_dir(mode, name)
+        assert path is not None
+        assert path.name == name
+        assert (path / "SKILL.md").is_file()
+        assert path.parent.parent.name == f"mode_{mode}"
+
+    def test_user_copy_skill_wins(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """双根同包用户副本赢：用户包内技能目录优先返回。"""
+        user_skill = tmp_path / "plugins" / "modes" / "mode_coding" / "skills" / "code-implement"
+        user_skill.mkdir(parents=True)
+        (tmp_path / "plugins" / "modes" / "mode_coding" / "plugin.json").write_text(
+            "{}", encoding="utf-8"
+        )
+        (user_skill / "SKILL.md").write_text("# 用户版\n", encoding="utf-8")
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path))
+
+        assert find_mode_skill_dir("coding", "code-implement") == user_skill
+
+    def test_user_copy_without_skill_no_cross_root_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """用户副本赢包后包内无该技能 → None（包级胜负已定，不回落出厂）。"""
+        user_pkg = tmp_path / "plugins" / "modes" / "mode_coding"
+        (user_pkg / "agents").mkdir(parents=True)
+        (user_pkg / "plugin.json").write_text("{}", encoding="utf-8")
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path))
+
+        assert find_mode_skill_dir("coding", "code-implement") is None
+
+    @pytest.mark.parametrize(
+        "mode,name",
+        [
+            ("no_such_mode", "code-implement"),  # 包不存在
+            ("coding", "no_such_skill"),         # 包在但技能不在
+            ("coding", "../secret"),             # 技能名形态非法（路径穿越）
+            ("coding", "a/b"),                   # 技能名含路径分隔符
+            ("coding", ""),                      # 空名
+        ],
+    )
+    def test_miss_returns_none(self, mode: str, name: str) -> None:
+        assert find_mode_skill_dir(mode, name) is None

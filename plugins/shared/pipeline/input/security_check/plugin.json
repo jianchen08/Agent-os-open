@@ -4,10 +4,11 @@
     "packaging"
   ],
   "name": "Security Check",
-  "version": "1.0.0",
+  "version": "1.0.4",
   "plugin_type": "pipeline",
   "language": "python",
   "host_type": "sidecar",
+  "host_group": "light",
   "entry": "python server.py",
   "mcp": {
     "transport": "stdio",
@@ -43,12 +44,11 @@
     ]
   },
   "export_fields": [
-    "security.decision",
     "task.authorized_write_zones"
   ],
   "state": {
     "volatile_keys": [
-      "security.decision"
+      "pre_decided_results"
     ],
     "reads": [
       "core_type",
@@ -57,6 +57,7 @@
       "pipeline_id",
       "project_root",
       "raw_tool_calls",
+      "pre_decided_results",
       "session_id",
       "task.authorized_write_zones",
       "thread_id",

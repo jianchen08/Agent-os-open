@@ -25,6 +25,7 @@ from typing import Any
 import state_fields
 import worktree_merge
 from _eval_core import sanitize_eval_paths
+from _executor import load_metric_definitions
 from task_types import TaskModel, TaskStatus
 from time_iso import now_iso_utc as _now_iso  # 共享时间戳单点（task.ended_at 落 state）
 
@@ -632,25 +633,39 @@ class TaskEvaluateTool(BuiltinTool):
             task,
             metric_ids,
         )
-        # 未配置 criteria 的指标直接通过：没有验收标准 = 视为满足（不做任务
+        # 未配置评估依据的指标直接通过：没有验收标准 = 视为满足（不做任务
         # 描述顶替——评估引擎按 input_params 检查语义判定，顶替只会伪造
         # "有标准"假象）；留 warning 让配置缺失可见。
-        # 工具型指标（bash_check 带 command / file_check 带 path）不适用本
-        # 直通：它们的参数键本就不是 criteria，免检放行 = 验证器没跑就判过
-        # （SWE 种子实跑实证，ADR 2026-09-16-external-dataset-sourcing）。
-        def _has_verifier_params(p: dict[str, Any]) -> bool:
-            return bool(p.get("command") or p.get("path"))
+        # 配置判定单源 = 指标定义（evaluation_metrics.yaml）：
+        # - agent 型（语义评估）：input_schema 任一属性键出现在参数里即算
+        #   已配置——semantic_check 的 output/expected 均有效（旧实现只认
+        #   criteria 键，yaml 口径参数在场仍被静默直通，评估器从未跑）；
+        #   存量 criteria 任务兼容保留；
+        # - 其余类型维持键面判定：criteria 或可执行验证参数（command/path）
+        #   （工具型指标参数键本就不是 criteria，免检放行 = 验证器没跑就判
+        #   过，SWE 种子实跑实证，ADR 2026-09-16-external-dataset-sourcing；
+        #   human 型不进自动执行器，维持直通）。
+        definitions = load_metric_definitions()
+
+        def _has_eval_basis(mid: str, p: dict[str, Any]) -> bool:
+            definition = definitions.get(mid) or {}
+            if str(definition.get("evaluator_type") or "") == "agent":
+                properties = (definition.get("input_schema") or {}).get("properties") or {}
+                return bool(
+                    any(key in p for key in properties)
+                    or (p.get("criteria") or "").strip()
+                )
+            return bool((p.get("criteria") or "").strip() or p.get("command") or p.get("path"))
 
         no_criteria_ids = [
             mid for mid in remaining_ids
-            if not (input_params.get(mid, {}).get("criteria") or "").strip()
-            and not _has_verifier_params(input_params.get(mid, {}))
+            if not _has_eval_basis(mid, input_params.get(mid, {}))
         ]
         if no_criteria_ids:
             already_passed += len(no_criteria_ids)
             remaining_ids = [mid for mid in remaining_ids if mid not in no_criteria_ids]
             logger.warning(
-                "[TaskEvaluate] 指标未配置 criteria，直接通过 | task_id=%s | metric_ids=%s",
+                "[TaskEvaluate] 指标未配置评估依据，直接通过 | task_id=%s | metric_ids=%s",
                 task.id,
                 sorted(no_criteria_ids),
             )
@@ -661,9 +676,9 @@ class TaskEvaluateTool(BuiltinTool):
                 already_passed,
                 len(metric_ids),
             )
-            # 通过来源如实标注：无 criteria 直接通过 ≠ 历史评估记录通过
+            # 通过来源如实标注：未配置评估依据直接通过 ≠ 历史评估记录通过
             _pass_note = (
-                f"（其中 {len(no_criteria_ids)} 个未配置 criteria 直接通过）"
+                f"（其中 {len(no_criteria_ids)} 个未配置评估依据直接通过）"
                 if no_criteria_ids
                 else "（来自历史评估记录）"
             )
@@ -1636,7 +1651,7 @@ class TaskEvaluateTool(BuiltinTool):
 
         criteria 不做任何兜底：未配置就是未配置（评估引擎按 input_params
         的检查语义判定，不消费 criteria；拿任务描述顶替只会伪造"有标准"
-        假象）。未配置 criteria 的指标在 _auto_complete 直接通过。
+        假象）。未配置评估依据的指标在 _auto_complete 直接通过。
         """
         for metric_id in metric_ids:
             p = params.get(metric_id, {})

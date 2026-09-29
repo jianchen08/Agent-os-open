@@ -5,11 +5,13 @@ import { createPortal } from 'react-dom'
 import { useShallow } from 'zustand/react/shallow'
 import { Loader2 } from '@/assets/icons'
 import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
+import { useLlmConfigQuery } from '@/hooks/queries/useLlmQueries'
 import { usePipelineRunsQuery } from '@/hooks/queries/usePipelineRunsQuery'
 import { forceReloadSessions, readSessions } from '@/hooks/queries/useSessionsQuery'
 import { useSessionThemeScope } from '@/hooks/useSessionThemeScope'
-import { getDefaults, getLLMConfig, type LLMDefaults } from '@/services/api/config'
+import { type LLMDefaults } from '@/services/api/config'
 import { switchThinkingMode } from '@/services/api/thinkingMode'
+import { syncModeThemeForSession } from '@/services/modeSessionBinder'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
@@ -146,47 +148,21 @@ export const ChatContainer = ({
   })
 
   /**
-   * P8 模型显示：LLM 默认配置中的模型分级映射（large/medium/small → 具体模型名）。
-   * 从 llm_service 的 config/llm/defaults 读取 tiers，失败时降级（tiers 为 undefined，
-   * resolveModelDisplayName 原样返回 model 值），一次性提示用户模型名未解析。
+   * LLM 配置（共享 query 缓存，queryKeys.llmConfig）：模型显示 tiers 与思考
+   * 强度反向映射同源消费。挂载期一次性快照（useEffect+useState）会在设置页
+   * 改配置后过期——输入框兜底模型名随缓存更新热更新（2026-09-28 批次 C）。
+   * 失败降级：tiers 缺失时 resolveModelDisplayName 原样返回键名，models 缺失
+   * 时思考强度回退默认档位，一次性提示。
    */
-  const [llmDefaults, setLlmDefaults] = useState<LLMDefaults | null>(null)
+  const { data: llmConfig, isError: llmConfigError } = useLlmConfigQuery()
+  const llmDefaults: LLMDefaults | null = llmConfig?.defaults ?? null
   useEffect(() => {
-    let cancelled = false
-    getDefaults()
-      .then((data) => {
-        if (!cancelled) setLlmDefaults(data)
-      })
-      .catch(() => {
-        notifyDegradedOnce('chat-llm-defaults', {
-          title: '模型信息获取失败',
-          message: '无法解析模型分级配置，标签将显示原始模型键',
-        })
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  /** 完整 LLM 配置（models: model_id → ModelConfig，含 default_params）：
-   *  供「新会话/切管道标签时，从管道实际参数反向映射思考强度」。失败降级为默认强度。 */
-  const [llmConfig, setLlmConfig] = useState<Awaited<ReturnType<typeof getLLMConfig>> | null>(null)
-  useEffect(() => {
-    let cancelled = false
-    getLLMConfig()
-      .then((data) => {
-        if (!cancelled) setLlmConfig(data)
-      })
-      .catch(() => {
-        notifyDegradedOnce('chat-llm-config', {
-          title: 'LLM 配置获取失败',
-          message: '思考强度无法按管道参数自动映射，已回退默认档位',
-        })
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
+    if (!llmConfigError) return
+    notifyDegradedOnce('chat-llm-config', {
+      title: 'LLM 配置获取失败',
+      message: '模型分级与思考强度映射不可用，已回退显示原始模型键与默认档位',
+    })
+  }, [llmConfigError])
 
   const rawModelName = useMemo(() => {
     const candidateIds = [activeTab?.agentId, pipelineAgentName].filter(Boolean) as string[]
@@ -231,6 +207,13 @@ export const ChatContainer = ({
       }
     }
   }, [sessionId, initSessionTabs])
+
+  /** 模式主题随会话激活（批 G⑤）：会话 modeBinding 的模式声明 theme 非空 →
+   *  会话主题 override 幂等补同步（出生已入栈；重载后栈丢失场景在此恢复；
+   *  无 mode/无声明/registry 不可达零动作）。异步取数 fire-and-forget。 */
+  useEffect(() => {
+    void syncModeThemeForSession(sessionId)
+  }, [sessionId])
 
   /** 判断是否为子 Tab（L2/L3）激活状态 */
   const isSubTabActive = activeTab != null && activeTab.agentLevel !== 1

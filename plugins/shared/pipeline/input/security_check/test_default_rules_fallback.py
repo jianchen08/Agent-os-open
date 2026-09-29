@@ -78,13 +78,13 @@ class TestDefaultRulesFallback:
 
         r = await plugin.execute(_ctx_for("rm -rf /tmp/fallback-target"))
         updates = r.state_updates
-        decision = updates.get("security.decision", {})
-        assert decision.get("allowed") is True
-        assert "soft_block" in decision.get("reason", ""), (
-            f"default 规则应命中 rm -rf 并走审批链（cap 缺席→软拦截），实际 reason={decision.get('reason')!r}"
+        entries = updates.get("pre_decided_results", [])
+        assert entries, "应有预定拒绝条目"
+        assert "交互服务不可用" in entries[0]["error"], (
+            f"default 规则应命中 rm -rf 并走审批链（cap 缺席→预定拒绝），实际 {entries!r}"
         )
-        # 软拦截副作用：本轮 raw_tool_calls 必须被清空（拒绝反馈给 LLM）
-        assert updates.get("raw_tool_calls") == []
+        # 调用级：不清空调用（tool_core 命中预定结果跳过执行并整形反馈）
+        assert "raw_tool_calls" not in updates
 
     @pytest.mark.asyncio
     async def test_benign_commands_get_conservative_approval_when_degraded(self) -> None:
@@ -103,15 +103,13 @@ class TestDefaultRulesFallback:
         for benign in ("ls -la /tmp/demo-dir", "echo ok-from-benign-probe"):
             r = await plugin.execute(_ctx_for(benign))
             updates = r.state_updates
-            decision = updates.get("security.decision", {})
-            assert decision.get("allowed") is True  # 软拦截语义：管道继续
             # D7 保守审批路径：人审尝试发生（测试环境交互通道缺席 →
-            # soft_block + approval_channel_missing 标记，见 _await_approval）
-            assert decision.get("approval_channel_missing") is True, (
-                f"降级态普通命令应走保守审批（D7），实际 {decision!r}"
+            # 预定拒绝 + approval_channel_missing 标记，见 _await_approval）
+            entries = updates.get("pre_decided_results", [])
+            assert entries, f"降级态普通命令应有预定拒绝（D7），实际 {entries!r}"
+            assert entries[0].get("metadata", {}).get("approval_channel_missing") is True, (
+                f"降级态普通命令应走保守审批（D7），实际 {entries!r}"
             )
-            # 审批副作用生效：拒绝/待审反馈给 LLM（raw_tool_calls 清空）
-            assert updates.get("raw_tool_calls") == []
 
 
 class TestRulesDegradedNotice:
@@ -229,7 +227,8 @@ class TestInjectedSecurityRulesNamespace:
         assert "injected_curl_rule" in names, "注入的 security_rules 应成为生效规则"
 
         r = await plugin.execute(_ctx_for("curl -s http://example.com"))
-        decision = r.state_updates.get("security.decision", {})
-        assert "soft_block" in decision.get("reason", ""), (
-            f"注入规则命中 curl 应触发审批链（无交互服务→软拦截），实际={decision.get('reason')!r}"
+        entries = r.state_updates.get("pre_decided_results", [])
+        assert entries, "注入规则命中 curl 应触发审批链"
+        assert "交互服务不可用" in entries[0]["error"], (
+            f"注入规则命中 curl 应触发审批链（无交互服务→预定拒绝），实际={entries!r}"
         )

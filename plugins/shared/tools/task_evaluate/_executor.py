@@ -58,6 +58,60 @@ _EVALUATOR_AGENT_ID = "evaluator_agent"
 _FAILED_STATUSES = {"failed", "cancelled", "timeout"}
 
 
+def default_metrics_path() -> str:
+    """指标定义文件坐标（config/plugins/evaluation/evaluation_metrics.yaml）。
+
+    祖先逐级探测：从本文件目录逐级向上，首个存在
+    ``<祖先>/config/plugins/evaluation/evaluation_metrics.yaml`` 的祖先即根。
+    三布局单算法通吃——仓库布局（plugins/shared/tools/task_evaluate，4 级）、
+    装机树布局（resources/plugins/shared/tools/task_evaluate，4 级）、用户
+    空间平铺布局（plugins/task_evaluate，2 级；向上 4 级会落到 %APPDATA%
+    外的幽灵路径，2026-09-29 装机实证致指标全量诚实失败）。全 miss 回落
+    历史行为（向上 4 级拼相对尾），调用方总拿到字符串。
+
+    与 task_submit/tool.py 的 ``_metrics_config_path`` 互为对偶（两插件独立
+    加载，不跨插件抽公共模块，改解析算法须两边同步改）。
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    probe = os.path.join("config", "plugins", "evaluation", "evaluation_metrics.yaml")
+    current = here
+    while True:
+        candidate = os.path.join(current, probe)
+        if os.path.isfile(candidate):
+            return candidate
+        parent = os.path.dirname(current)
+        if parent == current:  # 逐级到盘根仍 miss
+            break
+        current = parent
+    root = os.path.abspath(os.path.join(here, "..", "..", "..", ".."))
+    return os.path.join(root, probe)
+
+
+def load_metric_definitions(config_path: str | None = None) -> dict[str, dict[str, Any]]:
+    """加载指标定义（name → 定义），单源 = evaluation_metrics.yaml。
+
+    缺文件/坏格式 → 空表（fail-open，调用方按未定义降级）。模块级函数供
+    tool.py（配置判定）与本执行器共用同一份读取逻辑。
+    """
+    path = config_path or default_metrics_path()
+    table: dict[str, dict[str, Any]] = {}
+    try:
+        import yaml  # noqa: PLC0415
+
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        for m in data.get("metrics", []) or []:
+            if isinstance(m, dict) and m.get("name"):
+                table[str(m["name"])] = m
+    except Exception as exc:  # noqa: BLE001 — 指标面不可用不炸评估调用
+        logger.warning(
+            "[EvalExecutor] 指标配置加载失败 | path=%s err=%s",
+            path,
+            exc,
+        )
+    return table
+
+
 class PipelineEvaluationExecutor:
     """0.2 评估执行器：tool 型本地跑，agent 型派评估子管道（R2 工作区继承）。"""
 
@@ -74,32 +128,15 @@ class PipelineEvaluationExecutor:
 
     @staticmethod
     def _default_metrics_path() -> str:
-        root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-        return os.path.join(root, "config", "plugins", "evaluation", "evaluation_metrics.yaml")
+        return default_metrics_path()
 
     # ── 指标定义加载 ───────────────────────────────────────────
 
     def _load_metrics(self) -> dict[str, dict[str, Any]]:
         """加载指标定义（name → 定义）。缺文件/坏格式 → 空表（指标按未定义诚实失败）。"""
-        if self._metrics_cache is not None:
-            return self._metrics_cache
-        table: dict[str, dict[str, Any]] = {}
-        try:
-            import yaml  # noqa: PLC0415
-
-            with open(self._metrics_config_path, encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-            for m in data.get("metrics", []) or []:
-                if isinstance(m, dict) and m.get("name"):
-                    table[str(m["name"])] = m
-        except Exception as exc:  # noqa: BLE001 — 指标面不可用不炸评估调用
-            logger.warning(
-                "[EvalExecutor] 指标配置加载失败 | path=%s err=%s",
-                self._metrics_config_path,
-                exc,
-            )
-        self._metrics_cache = table
-        return table
+        if self._metrics_cache is None:
+            self._metrics_cache = load_metric_definitions(self._metrics_config_path)
+        return self._metrics_cache
 
     # ── 执行入口（对齐 _eval_core 契约）─────────────────────────
 
@@ -132,6 +169,10 @@ class PipelineEvaluationExecutor:
     ) -> MetricResult:
         metrics = self._load_metrics()
         definition = metrics.get(metric_id)
+        if definition is None and "::" in metric_id:
+            # 白话展开多实例键（file_check::<路径>，task_submit 生成）：首段即定义 ID，
+            # 实例区分度由键尾段与参数自带坐标承载
+            definition = metrics.get(metric_id.split("::", 1)[0])
         if definition is None:
             return MetricResult(
                 metric_id=metric_id,

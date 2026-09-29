@@ -65,7 +65,12 @@ const DialogContent = React.forwardRef<
 ))
 DialogContent.displayName = DialogPrimitive.Content.displayName
 
-const DialogHeader = ({ className, children, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
+const DialogHeader = ({
+  className,
+  children,
+  showClose = true,
+  ...props
+}: React.HTMLAttributes<HTMLDivElement> & { showClose?: boolean }) => (
   <div
     className={cn('flex flex-shrink-0 items-center justify-between gap-2 p-6 pb-0', className)}
     {...props}
@@ -73,10 +78,12 @@ const DialogHeader = ({ className, children, ...props }: React.HTMLAttributes<HT
     <div className="flex min-w-0 flex-1 flex-col space-y-1.5 text-center sm:text-left">
       {children}
     </div>
-    <DialogPrimitive.Close className="ring-offset-background focus:ring-ring data-[state=open]:bg-accent data-[state=open]:text-muted-foreground hover:bg-muted flex-shrink-0 rounded-md rounded-sm p-1 opacity-70 transition-opacity hover:opacity-100 focus:ring-2 focus:ring-offset-2 focus:outline-none disabled:pointer-events-none">
-      <XIcon className="h-4 w-4" />
-      <span className="sr-only">Close</span>
-    </DialogPrimitive.Close>
+    {showClose && (
+      <DialogPrimitive.Close className="ring-offset-background focus:ring-ring data-[state=open]:bg-accent data-[state=open]:text-muted-foreground hover:bg-muted flex-shrink-0 rounded-md rounded-sm p-1 opacity-70 transition-opacity hover:opacity-100 focus:ring-2 focus:ring-offset-2 focus:outline-none disabled:pointer-events-none">
+        <XIcon className="h-4 w-4" />
+        <span className="sr-only">Close</span>
+      </DialogPrimitive.Close>
+    )}
   </div>
 )
 DialogHeader.displayName = 'DialogHeader'

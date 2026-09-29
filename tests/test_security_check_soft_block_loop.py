@@ -34,6 +34,20 @@ from pipeline.plugin import PluginContext
 
 pytestmark = pytest.mark.unit
 
+def _decision_view(result: Any) -> dict[str, Any]:
+    """旧 security.decision 观测面的等价视图（键已随 ADR 2026-09-28 退役）。
+
+    reason 含拒绝原因原文（"soft_block: <error>"）；配对消息与调用清空语义
+    已结构化为 pre_decided_results + tool_core 幂等整形（孤儿配对由契约夹具
+    与 tool_core 单测锚定）。
+    """
+    entries = result.state_updates.get("pre_decided_results") or []
+    if entries:
+        return {"allowed": True, "reason": f"soft_block: {entries[0]['error']}"}
+    return {"allowed": True, "reason": "all checks passed"}
+
+
+
 
 def _ctx_with_traversal_path(
     tool_name: str = "file_write",
@@ -67,9 +81,11 @@ def _ctx_with_traversal_path(
 
 
 class TestSoftBlockWritesPairedToolMessage:
-    """P0 契约：_soft_block 必须把拒绝结果 append 成配对的 role=tool 消息。
+    """P0 契约（ADR 2026-09-28 结果预填形态）：拒绝经 pre_decided_results
+    携带 call_id，配对消息由 tool_core 命中后统一整形（孤儿防线结构性收口，
+    锚定=plugins/sdk/tests/contracts 契约夹具 + tool_core 幂等单测）。
 
-    契约：拒绝反馈必须配对写回 messages（否则模型收不到反馈）。
+    guard 侧契约：预定结果带 call_id、不动 messages（不再自建配对消息）。
     """
 
     @pytest.mark.asyncio
@@ -83,15 +99,14 @@ class TestSoftBlockWritesPairedToolMessage:
 
         result = await plugin.execute(ctx)
 
-        messages = result.state_updates.get("messages", [])
-        tool_msgs = [m for m in messages if m.get("role") == "tool"]
-
-        assert len(tool_msgs) == 1, "拒绝结果必须 append 为 role=tool 消息"
-        assert tool_msgs[0].get("tool_call_id") == "call_fix_1", (
-            "tool 消息的 tool_call_id 必须与被拒 assistant 的 id 配对，"
-            "否则 normalize Phase B 会把 assistant 当孤儿删除"
+        entries = result.state_updates.get("pre_decided_results", [])
+        assert len(entries) == 1, "拒绝必须产出预定结果"
+        assert entries[0].get("call_id") == "call_fix_1", (
+            "预定结果的 call_id 必须与被拒 assistant 的 id 配对"
+            "（tool_core 据此整形 role=tool 消息，否则 normalize Phase B 孤儿删除）"
         )
-        assert "路径遍历" in tool_msgs[0].get("content", "") or "traversal" in tool_msgs[0].get("content", "")
+        assert "路径遍历" in entries[0].get("error", "") or "traversal" in entries[0].get("error", "")
+        assert "messages" not in result.state_updates, "配对消息归 tool_core 统一整形"
 
     @pytest.mark.asyncio
     async def test_soft_block_preserves_existing_messages(self):
@@ -107,13 +122,10 @@ class TestSoftBlockWritesPairedToolMessage:
         ctx = _ctx_with_traversal_path(call_id="call_fix_1", messages=existing)
 
         result = await plugin.execute(ctx)
-        messages = result.state_updates.get("messages", [])
 
-        # 原有 2 条 + 新增 1 条 tool = 3 条
-        assert len(messages) == 3
-        assert messages[0]["role"] == "user"
-        assert messages[1]["role"] == "assistant"
-        assert messages[2]["role"] == "tool"
+        # guard 不动 messages（历史零破坏）；拒绝经预定结果传递
+        assert "messages" not in result.state_updates
+        assert [e.get("call_id") for e in result.state_updates["pre_decided_results"]] == ["call_fix_1"]
 
     @pytest.mark.asyncio
     async def test_soft_block_clears_raw_tool_calls(self):
@@ -125,7 +137,7 @@ class TestSoftBlockWritesPairedToolMessage:
         ctx = _ctx_with_traversal_path()
 
         result = await plugin.execute(ctx)
-        assert result.state_updates.get("raw_tool_calls") == []
+        assert result.state_updates.get("pre_decided_results"), "预定拒绝在场（tool_core 幂等跳过执行）"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -254,20 +266,18 @@ class TestBaseScanHardFloor:
         blocked = await plugin.execute(
             _ctx_with_traversal_path(path="/data/sysroot/secret", call_id="call-sens")
         )
-        decision = blocked.state_updates["security.decision"]
+        decision = _decision_view(blocked)
         assert "敏感系统目录被拦截" in decision.get("reason", "")
         assert "forbidden/prefix" in decision.get("reason", "")
-        tool_msgs = [
-            m for m in blocked.state_updates["messages"] if m.get("role") == "tool"
-        ]
-        assert [m["tool_call_id"] for m in tool_msgs] == ["call-sens"]
-        assert blocked.state_updates["raw_tool_calls"] == []
+        entries = blocked.state_updates["pre_decided_results"]
+        assert [e.get("call_id") for e in entries] == ["call-sens"]
+        # 配对消息由 tool_core 命中预定结果后统一整形（孤儿防线结构性收口）
 
         passed = await plugin.execute(
             _ctx_with_traversal_path(path="/data/normal/file.txt")
         )
-        assert passed.state_updates["security.decision"]["allowed"] is True
-        assert "soft_block" not in passed.state_updates["security.decision"].get("reason", "")
+        assert _decision_view(passed)["allowed"] is True
+        assert "soft_block" not in _decision_view(passed).get("reason", "")
 
     @pytest.mark.parametrize(
         "command",
@@ -287,12 +297,10 @@ class TestBaseScanHardFloor:
 
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
         result = await plugin.execute(_ctx_with_args("bash_execute", {"command": command}))
-        reason = result.state_updates["security.decision"].get("reason", "")
+        reason = _decision_view(result).get("reason", "")
         assert "CMD 风格重定向被拦截" in reason, f"{command!r} 应命中 nul 重定向拦截"
         assert "2>/dev/null" in reason, "拦截反馈应提示改用 2>/dev/null"
-        assert result.state_updates["raw_tool_calls"] == []
-        tool_msgs = [m for m in result.state_updates["messages"] if m.get("role") == "tool"]
-        assert tool_msgs, "拦截原因必须写回 messages 反馈给 LLM"
+        assert result.state_updates["pre_decided_results"], "预定拒绝在场（反馈经 tool_core 整形给 LLM）"
 
     @pytest.mark.parametrize(
         "command",
@@ -324,7 +332,7 @@ class TestBaseScanHardFloor:
             }],
         })
         result = await plugin.execute(_ctx_with_args("bash_execute", {"command": command}))
-        decision = result.state_updates["security.decision"]
+        decision = _decision_view(result)
         assert decision["allowed"] is True
         assert "soft_block" not in decision.get("reason", "")
         assert "tool_results" not in result.state_updates
@@ -339,12 +347,12 @@ class TestBaseScanHardFloor:
         result = await plugin.execute(
             _ctx_with_traversal_path(path="C:/tmp/x\x00y", call_id="call-null")
         )
-        reason = result.state_updates["security.decision"].get("reason", "")
+        reason = _decision_view(result).get("reason", "")
         assert "路径遍历攻击被拦截" in reason
         # resolve 是否对空字节抛 ValueError 随 Python 版本/平台而异：
         # 抛则走 Invalid path，不抛则落显式空字节检查——两条路都必须拦截
         assert ("Invalid path" in reason) or ("Null byte injection" in reason)
-        assert result.state_updates["raw_tool_calls"] == []
+        assert result.state_updates["pre_decided_results"], "预定拒绝在场"
 
     @pytest.mark.asyncio
     async def test_null_byte_path_reports_precise_reason(self):
@@ -356,10 +364,10 @@ class TestBaseScanHardFloor:
         result = await plugin.execute(
             _ctx_with_traversal_path(path="C:/tmp/x\x00y", call_id="call-null-precise")
         )
-        reason = result.state_updates["security.decision"].get("reason", "")
+        reason = _decision_view(result).get("reason", "")
         assert "Null byte injection detected" in reason
         assert "Invalid path" not in reason
-        assert result.state_updates["raw_tool_calls"] == []
+        assert result.state_updates["pre_decided_results"], "预定拒绝在场"
 
     @pytest.mark.asyncio
     async def test_resolve_failure_falls_to_invalid_path_fail_closed(self, monkeypatch):
@@ -375,9 +383,9 @@ class TestBaseScanHardFloor:
         result = await plugin.execute(
             _ctx_with_traversal_path(path="C:/tmp/ok-name", call_id="call-invalid")
         )
-        reason = result.state_updates["security.decision"].get("reason", "")
+        reason = _decision_view(result).get("reason", "")
         assert "Invalid path" in reason and "injected resolve failure" in reason
-        assert result.state_updates["raw_tool_calls"] == []
+        assert result.state_updates["pre_decided_results"], "预定拒绝在场"
 
 
 class TestSoftBlockToleratesStringArgs:
@@ -404,11 +412,10 @@ class TestSoftBlockToleratesStringArgs:
         )
         result = await plugin.execute(ctx)
 
-        assert result.state_updates["raw_tool_calls"] == []
-        tool_msgs = [m for m in result.state_updates["messages"] if m.get("role") == "tool"]
-        assert [m["tool_call_id"] for m in tool_msgs] == ["c-str", "c-dict"]
-        assert all(m["content"].startswith("Error: [审批拒绝]") for m in tool_msgs), (
-            f"同名调用都按审批拒绝标记，实际 {[m['content'] for m in tool_msgs]}"
+        entries = result.state_updates["pre_decided_results"]
+        assert [e.get("call_id") for e in entries] == ["c-str", "c-dict"]
+        assert all(e["error"].startswith("[审批拒绝]") for e in entries), (
+            f"同名调用都按审批拒绝标记，实际 {[e['error'] for e in entries]}"
         )
 
 
@@ -437,6 +444,6 @@ class TestDegradedNoticeEmitFailure:
         finally:
             sc_mod.set_frontend_emit(None)
 
-        decision = result.state_updates["security.decision"]
+        decision = _decision_view(result)
         assert decision["allowed"] is True, "提示失败不得阻断安全检查"
         assert any("事件推送失败" in r.getMessage() for r in caplog.records)

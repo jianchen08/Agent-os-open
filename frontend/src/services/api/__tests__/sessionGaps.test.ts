@@ -474,7 +474,7 @@ describe('session API 覆盖缺口（批九）', () => {
       expect('agentName' in (withoutName.metadata ?? {})).toBe(false)
     })
 
-    it('toolCalls 归一：id/callId 兜底、function.arguments JSON 解析、非法 JSON 保留原值、缺参回空对象、error 决定 part 状态', () => {
+    it('toolCalls 归一：id/callId 兜底、arguments JSON 解析、非法 JSON 保留原值；state 按证据派生（error→error / result 证据→done / 无证据→streaming）', () => {
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const msg = mapBackendMessageToMessage(
         backendMessage({
@@ -489,28 +489,37 @@ describe('session API 覆盖缺口（批九）', () => {
             { callId: 'call-e' },
             // ToolCallItem 形态：toolArgs 直接为对象
             { callId: 'call-f', toolName: 'db', toolArgs: { table: 'users' } },
+            // 终态证据向量：result / resultData 任一在场 → done
+            { callId: 'call-g', toolName: 'fs', result: 'ok' },
+            { callId: 'call-h', toolName: 'fs', resultData: { diff: '+1' } },
           ],
         }),
         's1',
       )
 
       const toolParts = msg.parts?.filter((p) => p.type === 'tool_call') ?? []
-      expect(toolParts).toHaveLength(6)
-      const [a, b, c, d, e, f] = toolParts as Array<Record<string, any>>
+      expect(toolParts).toHaveLength(8)
+      const [a, b, c, d, e, f, g, h] = toolParts as Array<Record<string, any>>
 
-      expect(a).toMatchObject({ callId: 'call-a', name: 'fs', state: 'done' })
+      // 无结果证据：不宣称假终态，缺省 'streaming'（渲染 pending）——new_message
+      // 在工具执行前到达/历史中工具未执行时诚实展示未完成；终态由 tool_result
+      // 事件（热路径）或 role=tool 消息合并（冷路径）落地
+      expect(a).toMatchObject({ callId: 'call-a', name: 'fs', state: 'streaming' })
       expect(a.args).toEqual({ path: 'a.txt' })
 
       expect(b.state).toBe('error')
       expect(b.error).toBe('boom')
 
-      expect(c.state).toBe('done')
+      expect(c.state).toBe('streaming')
 
       expect(d.args).toBe('{invalid json')
 
       expect(e).toMatchObject({ callId: 'call-e', name: '', args: {} })
       expect(f).toMatchObject({ callId: 'call-f', name: 'db' })
       expect(f.args).toEqual({ table: 'users' })
+      // 终态证据 → done（两向量：result / resultData）
+      expect(g.state).toBe('done')
+      expect(h.state).toBe('done')
       expect(warnSpy).not.toHaveBeenCalled()
     })
 

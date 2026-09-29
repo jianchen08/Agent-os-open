@@ -7,11 +7,14 @@
    就地补授权（param_inject 注入先于本阶段，工具层兜底靠它看到本次授权）；
 3. 「永久」→ add_write_zone 落名单文件（env 钉 tmp）；
 4. 拒绝/超时/未知选项 → 软拦截，不产生任何授权；
-5. 仓库自保目录（config/ 等）→ 直接拦，不弹卡；
-6. 读黑名单链：read_deny 命中拒绝，普通路径放行不弹卡；
+5. 仓库自保目录（config/ 等）对写直接拦不弹卡；
+6. 读链（用户裁定 2026-09-28）：锚内读豁免（工作区/项目根不查黑名单）；
+   锚外黑名单命中弹读授权卡（state 键 task.authorized_read_zones /
+   名单 read_allow 节），普通路径放行不弹卡；
 7. 根锚内（workspace/project_root）读写均不弹卡；
 8. 旁路档（隔离未显式选档）不豁免位置闸——_do_work 层序在模式分流之前；
-9. 未声明在 path_param_operations 里的工具不经位置闸。
+9. 未声明在 path_param_operations 里的工具不经位置闸；
+10. 连续拒绝熔断署名 router.stop_reason=tool_fail_loop（终态落 failed）。
 """
 
 from __future__ import annotations
@@ -35,9 +38,7 @@ import yaml  # noqa: E402
 
 
 def _load_plugin_module():
-    spec = importlib.util.spec_from_file_location(
-        "security_check_plugin_zone_gate", str(Path(_THIS_DIR) / "plugin.py")
-    )
+    spec = importlib.util.spec_from_file_location("security_check_plugin_zone_gate", str(Path(_THIS_DIR) / "plugin.py"))
     assert spec is not None
     assert spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
@@ -75,9 +76,7 @@ class FakeHICap:
 
 
 @pytest.fixture
-def zone_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[dict[str, Path]]:
+def zone_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Path]]:
     """假仓库锚 + tmp 名单 + workspace/project_root 布局。"""
     repo = tmp_path / "repo"
     (repo / "config" / "kernel").mkdir(parents=True)
@@ -143,9 +142,7 @@ async def test_write_outside_zone_pipeline_grant_allows_and_updates_state(
     )
     updates: dict[str, Any] = {}
 
-    blocked = await _plugin()._enforce_zone_policy(
-        ctx, ctx.state["raw_tool_calls"], updates
-    )
+    blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], updates)
 
     assert blocked is None
     assert updates[zone_policy.STATE_KEY] == json.dumps([str(outsider)])
@@ -202,7 +199,7 @@ async def test_write_outside_zone_denied_soft_blocks_without_grant(
     blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], updates)
 
     assert blocked is not None
-    assert blocked["security.decision"]["reason"].startswith("soft_block")
+    assert blocked["pre_decided_results"], "软拦截=预定结果"
     assert zone_policy.STATE_KEY not in updates
     assert zone_policy.STATE_KEY not in ctx.state
     assert not (zone_env["users_dir"] / "default" / "project_whitelist.yaml").exists()
@@ -247,9 +244,7 @@ async def test_zone_write_entries_zone_passes_without_card(
         FakeHICap(selected="pipeline"),
     )
 
-    blocked = await _plugin()._enforce_zone_policy(
-        ctx, ctx.state["raw_tool_calls"], {}
-    )
+    blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], {})
 
     assert blocked is None
     assert cap is not None
@@ -275,13 +270,13 @@ async def test_repo_denied_dir_write_blocked_without_card(
     blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], {})
 
     assert blocked is not None
-    assert "运行时/产物区" in blocked["tool_results"][0]["error"]
+    assert "运行时/产物区" in blocked["pre_decided_results"][0]["error"]
     assert cap is not None
     assert cap.calls == []
 
 
 async def test_read_deny_prefix_rejected(zone_env: dict[str, Path]) -> None:
-    """read_deny 命中：读拒绝（软拦截），不弹卡。"""
+    """read_deny 命中：弹读授权卡（用户裁定 2026-09-28），拒绝/超时 → 软拦截。"""
     denied = zone_env["tmp"] / "private"
     denied.mkdir()
     (denied / "diary.txt").write_text("x\n", encoding="utf-8")
@@ -294,15 +289,137 @@ async def test_read_deny_prefix_rejected(zone_env: dict[str, Path]) -> None:
             "raw_tool_calls": _tool_calls("file_read", {"path": str(denied / "diary.txt")}),
             "workspace": str(zone_env["ws"]),
         },
-        FakeHICap(selected="pipeline"),
+        FakeHICap(selected=None),
     )
 
     blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], {})
 
     assert blocked is not None
-    assert "read_deny" in blocked["tool_results"][0]["error"]
+    assert "读黑名单" in blocked["pre_decided_results"][0]["error"]
+    assert cap is not None
+    assert cap.calls, "read_deny 命中应弹读授权卡交用户裁定，不再机器硬拒"
+
+
+# ── 读面（用户裁定 2026-09-28）：黑名单命中 → 读授权卡 ────────────
+
+
+async def test_read_blacklist_pipeline_grant_allows_and_updates_state(
+    zone_env: dict[str, Path],
+) -> None:
+    """仓库拒绝集命中（config/）：批准「仅本管道」→ state 键 + args 就地补 + 放行。"""
+    target = zone_env["repo"] / "config" / "llm.yaml"
+    cap = FakeHICap(selected="pipeline")
+    ctx, _ = _ctx(
+        {
+            "raw_tool_calls": _tool_calls("file_read", {"path": str(target)}),
+            "workspace": str(zone_env["ws"]),
+        },
+        cap,
+    )
+    updates: dict[str, Any] = {}
+
+    blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], updates)
+
+    assert blocked is None
+    grant_dir = str(zone_env["repo"] / "config")
+    assert updates[zone_policy.STATE_KEY_READ] == json.dumps([grant_dir])
+    assert ctx.state[zone_policy.STATE_KEY_READ] == json.dumps([grant_dir])
+    args = ctx.state["raw_tool_calls"][0]["args"]
+    assert json.loads(args["authorized_read_zones"]) == [grant_dir]
+    assert cap.calls[0][1]["title"] == f"授权读取 {grant_dir}"
+
+
+async def test_read_blacklist_permanent_grant_writes_read_allow(
+    zone_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """「永久」：add_read_allow 落名单文件 read_allow 节（真值 = env 钉 tmp）。"""
+    import project_registry as pr
+
+    monkeypatch.setattr(pr, "legacy_config_users_base", lambda: zone_env["tmp"] / "no_legacy")
+    target = zone_env["repo"] / "config" / "llm.yaml"
+    ctx, _ = _ctx(
+        {
+            "raw_tool_calls": _tool_calls("file_read", {"path": str(target)}),
+            "workspace": str(zone_env["ws"]),
+        },
+        FakeHICap(selected="permanent"),
+    )
+
+    blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], {})
+
+    assert blocked is None
+    wl = zone_env["users_dir"] / "default" / "project_whitelist.yaml"
+    assert wl.is_file()
+    data = yaml.safe_load(wl.read_text(encoding="utf-8"))
+    assert data["read_allow"] == [str(zone_env["repo"] / "config")]
+
+
+async def test_read_allow_entry_passes_without_card(zone_env: dict[str, Path]) -> None:
+    """read_allow 名单命中：放行不弹卡（授权前缀先行于黑名单链）。"""
+    cfg = zone_env["repo"] / "config"
+    (zone_env["users_dir"] / "default" / "project_whitelist.yaml").write_text(
+        yaml.safe_dump({"read_allow": [str(cfg)]}), encoding="utf-8"
+    )
+    ctx, cap = _ctx(
+        {
+            "raw_tool_calls": _tool_calls("file_read", {"path": str(cfg / "llm.yaml")}),
+            "workspace": str(zone_env["ws"]),
+        },
+        FakeHICap(selected="pipeline"),
+    )
+
+    blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], {})
+
+    assert blocked is None
     assert cap is not None
     assert cap.calls == []
+
+
+async def test_root_anchored_read_inside_repo_denied_dir_passes(
+    zone_env: dict[str, Path],
+) -> None:
+    """事故 2026-09-28 回归：workspace 落在仓库 .ai_workspaces 下，列自己的
+    工作区（path="."）放行——锚内读不套仓库拒绝集，与写链锚内先行同序。"""
+    aiws = zone_env["repo"] / ".ai_workspaces" / "sessions" / "s1"
+    aiws.mkdir(parents=True)
+    ctx, cap = _ctx(
+        {
+            "raw_tool_calls": _tool_calls("list_directory", {"path": "."}),
+            "workspace": str(aiws),
+        },
+        FakeHICap(selected="pipeline"),
+    )
+
+    blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], {})
+
+    assert blocked is None
+    assert cap is not None
+    assert cap.calls == []
+
+
+async def test_reject_loop_signs_stop_reason(zone_env: dict[str, Path]) -> None:
+    """连续拒绝熔断署名（控制状态键契约 ADR 2026-08-30）：第 3 次软拦截带
+    ended + router.stop_reason=tool_fail_loop（内核终态映射落 failed，不再
+    折算 completed）。"""
+    target = zone_env["repo"] / "config" / "llm.yaml"
+    plugin = _plugin()  # 同实例累积签名计数（单管道作用域）
+    results = []
+    for _ in range(3):
+        ctx, _ = _ctx(
+            {
+                "raw_tool_calls": _tool_calls("file_read", {"path": str(target)}),
+                "workspace": str(zone_env["ws"]),
+            },
+            None,  # 交互服务缺席 → 软拦截（不弹卡）
+        )
+        results.append(await plugin._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], {}))
+
+    assert all(r is not None for r in results)
+    assert "ended" not in results[0]
+    assert "ended" not in results[1]
+    assert results[2].get("ended") is True
+    assert results[2].get("router.stop_reason") == "tool_fail_loop"
+    assert "疑似死循环" in str(results[2].get("raw_error", ""))
 
 
 async def test_read_outside_zone_passes_without_card(
@@ -379,9 +496,7 @@ async def test_zone_gate_precedes_bypass_short_circuit(
         {
             "raw_tool_calls": _tool_calls("file_write", {"path": str(outsider / "f.txt")}),
             "workspace": str(zone_env["ws"]),
-            "execution_contexts": [
-                {"provider": "docker", "level": "isolated", "task_isolated": True}
-            ],
+            "execution_contexts": [{"provider": "docker", "level": "isolated", "task_isolated": True}],
         },
         cap,
     )
@@ -391,7 +506,7 @@ async def test_zone_gate_precedes_bypass_short_circuit(
     assert cap.calls, "旁路档必须先过位置闸（区外写仍弹卡）"
     assert result[zone_policy.STATE_KEY] == json.dumps([str(outsider)])
     # 隔离会话生效档=旁路：位置闸放行后仍走旁路免审批（授权已完成落盘）
-    assert result["security.decision"]["reason"] == "bypass: base checks passed"
+    assert result.get("security.decision") is None, "旁路放行零决策产出"
 
 
 async def test_no_interaction_cap_fails_closed(zone_env: dict[str, Path]) -> None:
@@ -410,5 +525,5 @@ async def test_no_interaction_cap_fails_closed(zone_env: dict[str, Path]) -> Non
     blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], updates)
 
     assert blocked is not None
-    assert "交互服务不可用" in blocked["tool_results"][0]["error"]
+    assert "交互服务不可用" in blocked["pre_decided_results"][0]["error"]
     assert zone_policy.STATE_KEY not in updates

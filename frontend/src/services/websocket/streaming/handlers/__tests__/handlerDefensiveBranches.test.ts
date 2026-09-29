@@ -157,20 +157,20 @@ describe('流式 handler 缺口补测', () => {
       expect(parts()[0]).toMatchObject({ type: 'text', content: '正文', state: 'done' })
     })
 
-    it('tool_call 块重复开启（同 index）→ 幂等：不产生工具卡（卡面由契约事件建）', () => {
+    it('tool_call 块重复开启（同 index）→ 幂等：不建卡不抛错（建卡由首个 id+name 增量驱动，block_start 本身不建）', () => {
       h.handleBlockStart(makeEvent('block_start', { index: 0, block_type: 'tool_call' }))
       h.handleBlockStart(makeEvent('block_start', { index: 0, block_type: 'tool_call' }))
       expect(parts().filter((p: any) => p.type === 'tool_call')).toHaveLength(0)
     })
 
-    it('tool_call_delta 无消费面但仍登记块状态：后续同名 delta 不抛错且不建卡', () => {
+    it('tool_call_delta 缺 id/name（降级）→ 块状态照常登记、不建卡、不抛错', () => {
       h.handleBlockStart(makeEvent('block_start', { index: 0, block_type: 'tool_call' }))
       h.handleToolCallDelta(makeEvent('tool_call_delta', { index: 0, arguments_delta: '{"a"' }))
       h.handleToolCallDelta(makeEvent('tool_call_delta', { index: 0, arguments_delta: ':1}' }))
       expect(parts().filter((p: any) => p.type === 'tool_call')).toHaveLength(0)
     })
 
-    it('tool_call_delta 未经 block_start（块状态缺失）→ 自建累积态且不抛错', () => {
+    it('tool_call_delta 未经 block_start（块状态缺失）→ 自建累积态且不抛错（缺 id/name 不建卡）', () => {
       expect(() =>
         h.handleToolCallDelta(makeEvent('tool_call_delta', { index: 0, arguments_delta: '{}' })),
       ).not.toThrow()

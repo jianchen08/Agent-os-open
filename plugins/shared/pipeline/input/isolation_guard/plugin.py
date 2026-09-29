@@ -10,17 +10,20 @@ IsolationManager 按 workspace 幂等获取/创建容器并注入 _container_id
 - 决策"执行环境"（container / host / denied）+ 容器落地注入
 - 不做审批（审批归 security_check 插件）
 - 不写 security.decision（仅 security_check 写）
-- blocked 信号通过 isolation.blocked 表达
+- blocked 调用经结果预填直出拒绝结果（ADR 2026-09-28：写
+  pre_decided_results，tool_core 命中即跳过执行）
 
 容器落地安全底线：容器不可达（服务缺失/创建失败）→ 对应调用标 blocked，
 **绝不降级 host 裸跑**——降级会让 security_check 的 task_isolated 审批豁免
 放行危险命令。
 
 State 命名空间：
-    - execution_contexts : 各工具调用的执行上下文列表
+    - execution_contexts : 各工具调用的执行上下文列表（security_check
+      判 isolated 态仍读，保留）
     - isolation.container_name : 已落地的容器绑定（执行环境显式数据；
       后续轮凭绑定验活直读，不再重复推导/查找；失活才重新落地刷新）
-    - isolation.blocked   : 被策略阻止时设置（供路由拦截）
+    - pre_decided_results : 被策略阻止调用的预定拒绝结果（与其它 guard
+      经 SDK merge_pre_decided 合并）
 """
 
 from __future__ import annotations
@@ -37,11 +40,15 @@ from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import StateKeys
 
 from agentos_plugin_sdk.isolation_types import IsolationLevel
+from agentos_plugin_sdk.tool_result_protocol import (
+    merge_pre_decided,
+    tool_result_entry,
+)
 
 logger = logging.getLogger(__name__)
 
 # 容器绑定在管道 state 里的键：执行环境（容器名）是显式数据，落地一次
-# 全程直读，与 isolation.blocked 同命名空间。
+# 全程直读。
 _CONTAINER_STATE_KEY = "isolation.container_name"
 
 
@@ -420,12 +427,32 @@ class IsolationGuard(IInputPlugin):
                     [c["tool_name"] for c in docker_ctxs],
                 )
 
-        # 被策略阻止的工具写入 isolation.blocked，供路由拦截
-        blocked_tools = [c for c in execution_contexts if c.get("blocked")]
-        if blocked_tools:
-            tool_names = ", ".join(c["tool_name"] for c in blocked_tools)
-            state_updates["isolation.blocked"] = True
-            state_updates["isolation.block_reason"] = f"隔离策略阻止: {tool_names}"
+        # 被策略阻止的调用直出预定拒绝结果（ADR 2026-09-28 结果预填）：
+        # tool_core 按 call_id（无 id 按工具名兜底）命中即跳过执行。
+        # execution_contexts 与 tool_calls 按下标对齐（同一循环构造）。
+        blocked_pairs = [
+            (tc, c)
+            for tc, c in zip(tool_calls, execution_contexts, strict=True)
+            if c.get("blocked")
+        ]
+        if blocked_pairs:
+            entries = [
+                tool_result_entry(
+                    tc.get("name", ""),
+                    call_id=tc.get("id"),
+                    success=False,
+                    error=f"工具被隔离策略拦截: {c.get('reason', '隔离策略阻止')}",
+                    metadata={
+                        "decided_by": "isolation_guard",
+                        "provider": c.get("provider", ""),
+                    },
+                )
+                for tc, c in blocked_pairs
+            ]
+            state_updates["pre_decided_results"] = merge_pre_decided(
+                state.get("pre_decided_results"), entries
+            )
+            tool_names = ", ".join(c["tool_name"] for _, c in blocked_pairs)
             logger.warning(
                 "[IsolationGuard] 阻止工具执行 | tools=%s",
                 tool_names,

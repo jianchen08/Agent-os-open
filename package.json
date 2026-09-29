@@ -12,7 +12,7 @@
   "scripts": {
     "electron": "electron .",
     "electron:dev": "concurrently \"npm run dev --prefix frontend\" \"wait-on http://localhost:5188 && electron .\"",
-    "electron:build": "node scripts/sanitize_packaged_config.mjs && npm run build --prefix frontend && tsc -p electron/tsconfig.json && electron-builder",
+    "electron:build": "node scripts/sanitize_packaged_config.mjs && python scripts/check_kernel_freshness.py && python scripts/check_clean_tree.py && npm run build --prefix frontend && tsc -p electron/tsconfig.json && electron-builder",
     "electron:compile": "tsc -p electron/tsconfig.json",
     "electron:compile:watch": "tsc -p electron/tsconfig.json --watch",
     "test": "python scripts/run_gates.py --mode fast",
@@ -84,6 +84,10 @@
       {
         "from": "config",
         "to": "config"
+      },
+      {
+        "from": "skills",
+        "to": "skills"
       }
     ],
     "win": {

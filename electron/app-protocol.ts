@@ -36,6 +36,51 @@ export const APP_HOST = "bundle";
 export const APP_BASE_URL = `${APP_SCHEME}://${APP_HOST}`;
 
 /**
+ * 应用自身源判定（安全审查 2026-08-19 B-5；政策单一来源，main.ts 消费）：
+ *  - dev：Vite dev server（localhost:5188 / 127.0.0.1:5188，兼容 5173 默认口）；
+ *  - prod：app://（打包件自定义协议源）。
+ */
+const APP_DEV_ORIGINS = new Set([
+  "localhost:5188",
+  "127.0.0.1:5188",
+  "localhost:5173",
+  "127.0.0.1:5173",
+]);
+
+export function isAppSource(rawUrl: string): boolean {
+  try {
+    const u = new URL(rawUrl);
+    if (u.protocol === "app:") {
+      return true;
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:") {
+      return false;
+    }
+    return APP_DEV_ORIGINS.has(u.host);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 顶层导航政策（死页类级清理，docs/working/文件加载器路由设计_20260928.md §10）：
+ *  - 非 app/dev 源 → 阻止（审查 B-5 既有政策，防导航劫持，不回退）；
+ *  - app/dev 源命中内核代理面（/api /ext /media /uploads）→ 阻止——裸内核响应
+ *    （如 404 "not found" 纯文本、原始 PDF）永远不得整窗替换应用 UI；
+ *  - 其余 app/dev 源（SPA 深链 /p/<id>、/__loading.html 等）→ 放行。
+ */
+export function shouldBlockTopFrameNavigation(rawUrl: string): boolean {
+  if (!isAppSource(rawUrl)) {
+    return true;
+  }
+  try {
+    return isKernelProxyPath(new URL(rawUrl).pathname);
+  } catch {
+    return true;
+  }
+}
+
+/**
  * 内核启动加载态页（协议内路由，不走 dist 文件）。
  *
  * 首屏在内核就绪前经本路由加载（main.ts loadInitialContent）——必须与应用

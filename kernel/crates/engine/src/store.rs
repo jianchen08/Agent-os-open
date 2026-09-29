@@ -2253,6 +2253,11 @@ impl SqliteStore {
                 })
                 .unwrap_or(-1);
             obj.remove("messages");
+            // `_` 前缀引擎私有键整体不入档（ADR 2026-09-29-trace-mirror-dedup）：
+            // per-run staging（_full_tool_results/_executed_tool_calls 等），
+            // DR 消费链 merge_recovered_scalars 对 `_` 键零读取——装机实测
+            // checkpoint 里该类键单份可达 48KB+，纯死重。
+            obj.retain(|k, _| !k.starts_with('_'));
             for k in VOLATILE_RUN_KEYS {
                 obj.remove(*k);
             }
@@ -7006,6 +7011,41 @@ mod tests {
                 .is_none(),
             "租户隔离：他租户查不到"
         );
+    }
+
+    /// `_` 前缀引擎私有键不入档（ADR 2026-09-29-trace-mirror-dedup）：per-run
+    /// staging（_full_tool_results 等）是 DR 零消费死重；非 `_` 合法键保留。
+    #[tokio::test]
+    async fn checkpoint_strips_underscore_engine_private_keys() {
+        let store = SqliteStore::open_memory().unwrap();
+        store
+            .save_checkpoint(
+                "p_us",
+                "t1",
+                1,
+                &json!({
+                    "_full_tool_results": [{"tool_name": "bash_execute", "data": "X".repeat(128)}],
+                    "_executed_tool_calls": [{"name": "bash_execute"}],
+                    "task.status": "running",
+                    "system_message": {"role": "system", "content": "keep"},
+                }),
+            )
+            .unwrap();
+        let (_, state) = store
+            .load_latest_checkpoint("p_us", "t1")
+            .unwrap()
+            .expect("有档应出口");
+        assert!(
+            state.get("_full_tool_results").is_none(),
+            "全文 staging 键不得入档"
+        );
+        assert!(
+            state.get("_executed_tool_calls").is_none(),
+            "执行记录 staging 键不得入档"
+        );
+        assert_eq!(state["task.status"], "running", "非 `_` 合法键保留");
+        assert_eq!(state["system_message"]["role"], "system", "合法键值保真");
+        assert_eq!(state["ckpt_max_seq"], json!(-1), "水位照常写入");
     }
 
     /// checkpoint 行损坏（非 JSON）：显式 Serialization 错误，不静默当无档

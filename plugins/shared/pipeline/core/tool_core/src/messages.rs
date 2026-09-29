@@ -338,4 +338,45 @@ mod tests {
     fn serialize_null_is_empty() {
         assert_eq!(serialize_for_content(&Value::Null).unwrap(), "");
     }
+
+    /// 契约夹具一致性（ADR 2026-09-28）：与 SDK Python `build_tool_result_ops`
+    /// 双车道消费同一份夹具（plugins/sdk/tests/contracts/），两边必须同绿——
+    /// 漂移即红；删值实验 = 改坏任一期望值两车道同时红。
+    #[test]
+    fn fixture_parity_with_sdk_tool_result_protocol() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../sdk/tests/contracts/tool_result_messages.fixture.json"
+        );
+        let raw = std::fs::read_to_string(path).expect("契约夹具存在");
+        let fixture: Value = serde_json::from_str(&raw).expect("夹具 JSON 合法");
+        let vectors = fixture["vectors"].as_array().expect("vectors 数组");
+        assert!(vectors.len() >= 5, "夹具向量数异常（被清空即红）");
+        for v in vectors {
+            let name = v["name"].as_str().unwrap_or("?");
+            let tool_calls = v["tool_calls"].as_array().expect("tool_calls").clone();
+            let results: Vec<ToolResult> = v["results"]
+                .as_array()
+                .expect("results")
+                .iter()
+                .map(|e| ToolResult {
+                    tool_name: e["tool_name"].as_str().unwrap_or("unknown").to_string(),
+                    success: e["success"].as_bool().unwrap_or(false),
+                    error: e["error"].as_str().map(String::from),
+                    data: e["data"].clone(),
+                    metadata: e.get("metadata").cloned().filter(|m| !m.is_null()),
+                    duration_ms: e["duration_ms"].as_f64().unwrap_or(0.0),
+                    extra: None,
+                })
+                .collect();
+            let rebuilt = rebuild(&json!({}), &tool_calls, &results);
+            let tool_msgs: Vec<&Value> =
+                rebuilt.iter().filter(|m| m["role"] == "tool").collect();
+            let expected = v["expected_msgs"].as_array().expect("expected_msgs");
+            assert_eq!(tool_msgs.len(), expected.len(), "向量 {name}: tool 消息条数");
+            for (got, exp) in tool_msgs.iter().zip(expected.iter()) {
+                assert_eq!(*got, exp, "向量 {name}: 消息体不一致（夹具=双语言单一真值）");
+            }
+        }
+    }
 }

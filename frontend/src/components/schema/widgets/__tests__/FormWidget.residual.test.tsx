@@ -267,7 +267,11 @@ describe('datasource/json 写回失败', () => {
     await screen.findByLabelText('V')
     submitForm()
 
-    expect(await screen.findByTestId('form-widget-status')).toHaveTextContent('磁盘只读')
+    // 提交经「保存中…」中间态再到终态：等终态文案而非首拍快照（负载下首拍
+    // 常停在中间态，findBy 只保证元素在场不保证到达终态）
+    await waitFor(() =>
+      expect(screen.getByTestId('form-widget-status')).toHaveTextContent('磁盘只读'),
+    )
   })
 
   it('提交失败（非 Error 拒因）→ 回落「保存失败」兜底文案', async () => {

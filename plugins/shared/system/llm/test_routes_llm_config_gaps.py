@@ -1,38 +1,33 @@
-# @feature: FP-T12 前端适配 | @ci: python-coverage
-"""routes_llm_config 未覆盖分支补测（缓存失效 / .env 兜底 / defaults / keys 合并 / 预置解析 / 拉取模型容错）。
+# @feature: FP-0.2.CFG 配置读写单源化 | @ci: python-test
+"""routes_llm_config 保留面（presets / provider-types / remote-models）测试。
 
-行为契约（断输入→输出/副作用，直写临时 llm.yaml 后断言落盘结果）：
-- _invalidate_llm_caches：hook 注册则调用（成功透传 / 失败吞掉仅告警），None 跳过
-- _resolve_project_root：向上无 config/ 特征 → 回退 parent×4 兜底
-- _read_yaml：配置文件不存在 → ConfigAPIError 404
-- _resolve_env_value：空值 → None（未配置语义）
-- _provider_key_status：keys 缺失/为空 → 回退顶层 api_key 判定
-- _extract_api_key_to_env：keys[0].api_key 为掩码值/示例值 → 从提交中剔除，
-  绝不写回 .env / os.environ（防 GET 掩码回路污染）
-- save_defaults：defaults 段缺失时创建；chat/embedding/tiers 可空字段部分更新
-- update_provider：keys 提交含非 dict 条目 → 原样保留（按条目合并不炸）
-- get_llm_presets：声明文件 YAML 损坏 → ConfigAPIError 500（fail-closed）
-- get_provider_types：litellm.provider_list 读取失败 → 回退核心类型清单
+2026-09-28 批次 A1：llm.yaml 文件 IO 端点（yaml CRUD + .env 直写）退役——
+读写收口到内核单一配置面 `/api/v1/plugins/llm_service/config/llm`，provider
+key 走 `PUT /api/v1/config/env`。本文件覆盖退役后仍存活的只读面与解析助手：
+
+- 落点解析：_llm_yaml_path / _env_file_path 用户空间接管文件优先，缺省回落
+  出厂种子（读写同源公理的读侧）；
+- _read_yaml：配置文件不存在 → ConfigAPIError 404；
+- _resolve_env_value：空值 → None（「未配置」语义）；
+- get_llm_presets：声明文件 YAML 损坏 → ConfigAPIError 500（fail-closed）；
+- get_provider_types：litellm.provider_list 读取失败 → 回退核心类型清单；
 - get_remote_models：anthropic 类型默认基址与 /v1 归一（三种 api_base 形态）、
-  HTTP 错误 → 502（提示手动输入）、载荷无 data 有 models → models 键兜底
-
-外部依赖全桩（httpx / litellm / 文件系统经 tmp_path），绝不触网。
+  上游 HTTP 错误 → 502、models 键载荷兜底。
 """
+
 from __future__ import annotations
 
 import importlib.util
-import os
 import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 
 pytestmark = pytest.mark.unit
 
 _DIR = Path(__file__).resolve().parent
-# routes_llm_config 依赖 plugins/shared 根的共享模块（atomic_io 等），一并入 path
+# routes_llm_config 依赖 plugins/shared 根的共享模块（atomic_io/user_space 等），一并入 path
 _SHARED_DIR = _DIR.parents[1]
 for _p in (str(_DIR), str(_SHARED_DIR)):
     if str(_p) not in sys.path:
@@ -49,86 +44,48 @@ def rlc() -> Any:
     m = importlib.util.module_from_spec(spec)
     sys.modules["llm_routes_llm_config_gaps_test"] = m
     spec.loader.exec_module(m)
-    # 隔离副作用：缓存失效与 ConfigCenter reload 均指向测试外的全局态
-    m.invalidate_all_llm_caches = None
-    m.get_config_center = None
     return m
 
 
-@pytest.fixture
-def llm_yaml(rlc: Any, tmp_path: Path) -> Path:
-    """临时 llm.yaml：预置 deepseek 提供商（keys 含占位符）。"""
-    path = tmp_path / "llm.yaml"
-    path.write_text(
-        yaml.dump(
-            {
-                "providers": {
-                    "deepseek": {
-                        "type": "deepseek",
-                        "api_base": "https://api.deepseek.example",
-                        "keys": [{"id": "deepseek_main", "api_key": "${DEEPSEEK_API_KEY}"}],
-                    }
-                },
-                "models": {
-                    "deepseek-v4-flash": {"provider": "deepseek", "model_name": "deepseek-v4-flash"}
-                },
-            },
-            allow_unicode=True,
-        ),
-        encoding="utf-8",
-    )
-    rlc._LLM_YAML = path
-    return path
-
-
-def _on_disk(llm_yaml: Path) -> dict[str, Any]:
-    return yaml.safe_load(llm_yaml.read_text(encoding="utf-8"))
-
-
-# ─────────────────────────── 缓存失效 hook ───────────────────────────
-
-
-def test_invalidate_llm_caches_invokes_registered_hook(rlc: Any) -> None:
-    """config.models 可导入（hook 非 None）→ 写配置后调用失效钩子。"""
-    calls: list[bool] = []
-    rlc.invalidate_all_llm_caches = lambda: calls.append(True)
-
-    rlc._invalidate_llm_caches()
-
-    assert calls == [True]
-
-
-def test_invalidate_llm_caches_swallows_hook_failure(
-    rlc: Any, caplog: pytest.LogCaptureFixture
-) -> None:
-    """hook 自身失败 → 吞掉仅告警（配置写入主路径不受缓存失效故障拖累）。"""
-
-    def _boom() -> None:
-        raise RuntimeError("cache registry down")
-
-    rlc.invalidate_all_llm_caches = _boom
-
-    rlc._invalidate_llm_caches()  # 不外抛
-
-
-# ─────────────────────────── 项目根探测兜底 ───────────────────────────
-
-
-def test_resolve_project_root_falls_back_when_no_config_marker(
+def test_llm_yaml_path_user_space_takeover_wins(
     rlc: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """向上找不到 config/models 特征 → 回退 parent×4 语义（不炸、可预期）。"""
-    monkeypatch.setattr(
-        rlc, "__file__", str(tmp_path / "x" / "y" / "z" / "routes_llm_config.py")
-    )
+    """用户空间已接管 llm.yaml → 落点取用户层（读写同源公理读侧）。"""
+    user_llm = tmp_path / "user_root" / "config" / "plugins" / "llm" / "llm.yaml"
+    user_llm.parent.mkdir(parents=True)
+    user_llm.write_text("defaults: {}\n", encoding="utf-8")
+    monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path / "user_root"))
 
-    root = rlc._resolve_project_root()
+    resolved = rlc._llm_yaml_path()
 
-    assert root == Path(str(tmp_path / "x" / "y" / "z" / "routes_llm_config.py")).resolve().parents[3]
-    assert not (root / "config" / "models").is_dir()  # 兜底语义：不再要求特征命中
+    assert resolved == user_llm
 
 
-# ─────────────────────────── YAML 读取 / env 解析 ───────────────────────────
+def test_llm_yaml_path_falls_back_to_factory_without_takeover(
+    rlc: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """用户空间无该文件（未接管）→ 回落出厂种子路径。"""
+    monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path / "user_root"))
+    factory = tmp_path / "factory"
+    monkeypatch.setattr(rlc, "_PROJECT_ROOT", factory)
+
+    resolved = rlc._llm_yaml_path()
+
+    assert resolved == factory / "config" / "plugins" / "llm" / "llm.yaml"
+
+
+def test_env_file_path_prefers_user_space(
+    rlc: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """.env 落点恒用户空间优先（provider key 的唯一真值面）。"""
+    user_env = tmp_path / "user_root" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text("DEEPSEEK_API_KEY=x\n", encoding="utf-8")
+    monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path / "user_root"))
+
+    resolved = rlc._env_file_path()
+
+    assert resolved == user_env
 
 
 def test_read_yaml_missing_file_raises_404(rlc: Any, tmp_path: Path) -> None:
@@ -139,85 +96,10 @@ def test_read_yaml_missing_file_raises_404(rlc: Any, tmp_path: Path) -> None:
     assert "not-exists.yaml" in exc_info.value.detail
 
 
-@pytest.mark.parametrize("raw", [None, ""])
-def test_resolve_env_value_empty_returns_none(rlc: Any, raw: str | None) -> None:
+def test_resolve_env_value_empty_returns_none(rlc: Any) -> None:
     """空值/未填 → None（「未配置」语义，绝不能当成字面量 key 发上游）。"""
-    assert rlc._resolve_env_value(raw) is None
-
-
-def test_provider_key_status_falls_back_to_top_level_api_key(
-    rlc: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """keys 缺失或为空 → 回退顶层 api_key：明文即已配置；占位符按 env 解析判定。"""
-    has_key, env_var = rlc._provider_key_status({"api_key": "sk-plain-123456"})
-    assert has_key is True
-    assert env_var is None  # 非占位符形态 → 无 env 变量名
-
-    monkeypatch.setenv("MY_TEST_VAR", "real-key")
-    has_key, env_var = rlc._provider_key_status(
-        {"keys": [], "api_key": "${MY_TEST_VAR}"}
-    )
-    assert has_key is True  # 占位符可在环境解析 → 已配置
-    assert env_var == "MY_TEST_VAR"
-
-
-# ─────────────────────────── 掩码值防回写 ───────────────────────────
-
-
-@pytest.mark.parametrize("masked_key", ["sk-ab****wxyz", "your-api-key-here"])
-def test_extract_api_key_drops_masked_keys0_value_never_writes_env(
-    rlc: Any, tmp_path: Path, masked_key: str
-) -> None:
-    """keys[0].api_key 为掩码值/示例值 → 从提交中剔除，不写 .env / os.environ。"""
-    rlc._ENV_FILE = tmp_path / ".env"
-    provider_config: dict[str, Any] = {
-        "api_base": "https://relay.example",
-        "keys": [{"id": "prov_main", "api_key": masked_key}],
-    }
-
-    rlc._extract_api_key_to_env("prov", provider_config)
-
-    assert "api_key" not in provider_config["keys"][0]  # 掩码值被剔除
-    assert provider_config["keys"][0] == {"id": "prov_main"}  # 其余字段保留
-    assert provider_config["api_base"] == "https://relay.example"  # 顶层字段不受影响
-    assert not (tmp_path / ".env").exists()  # 未落盘
-    assert "PROV_API_KEY" not in os.environ  # 未同步进程环境
-
-
-# ─────────────────────────── save_defaults ───────────────────────────
-
-
-def test_save_defaults_creates_missing_defaults_section(rlc: Any, llm_yaml: Path) -> None:
-    """llm.yaml 无 defaults 段 → 创建并写入全量三键。"""
-    body = {"chat": "m-chat", "embedding": "m-emb", "tiers": {"fast": "m-lite"}}
-    result = rlc.save_defaults(body)
-
-    assert result == body
-    disk = _on_disk(llm_yaml)["defaults"]
-    assert disk == body  # 全量落盘
-
-
-def test_save_defaults_partial_update_preserves_other_fields(rlc: Any, llm_yaml: Path) -> None:
-    """已有 defaults 时部分更新：只动提交的字段，其余保留（可空字段语义）。"""
-    rlc.save_defaults({"chat": "m-chat", "embedding": "e-old", "tiers": {"fast": "m-lite"}})
-
-    result = rlc.save_defaults({"embedding": "e-new"})
-
-    assert result["embedding"] == "e-new"
-    assert result["chat"] == "m-chat"  # 未提交字段保留
-    assert result["tiers"] == {"fast": "m-lite"}
-    assert _on_disk(llm_yaml)["defaults"]["chat"] == "m-chat"
-
-
-# ─────────────────────────── update_provider：keys 条目合并 ───────────────────────────
-
-
-def test_update_provider_keeps_non_dict_key_entries(rlc: Any, llm_yaml: Path) -> None:
-    """keys 提交含非 dict 条目 → 原样进合并结果（合并循环不炸不丢）。"""
-    result = rlc.update_provider("deepseek", {"config": {"keys": ["bogus-entry"]}})
-
-    assert result["providers"]["deepseek"]["keys"] == ["bogus-entry"]
-    assert _on_disk(llm_yaml)["providers"]["deepseek"]["keys"] == ["bogus-entry"]
+    assert rlc._resolve_env_value(None) is None
+    assert rlc._resolve_env_value("") is None
 
 
 # ─────────────────────────── get_llm_presets：解析失败 ───────────────────────────

@@ -93,11 +93,14 @@ async def task_submit(**kwargs: dict[str, Any]) -> dict[str, Any]:
     result = await tool.execute(kwargs)
     if result.success:
         return result.output
-    # 失败载荷透传 error_code 与结构化 metadata（H3/M2：编排键不存在/
-    # 完备性失败等错误携 {missing_fields, orchestration_key, suggestion,
+    # 失败载荷必须显式 success=False：内核 invoker 归一化只认显式 success 键
+    # （task_manage 同构），裸 {"error": …} 会被包成 success=true 信封——
+    # tasks/http_api 等按 success 判定的消费方会把拒绝载荷当成功 data 返回。
+    # 同时透传 error_code 与结构化 metadata（H3/M2：编排键不存在/完备性失败
+    # 等错误携 {missing_fields, orchestration_key, suggestion,
     # available_orchestrations} 等可编程字段——错误是值，不只给人读文本；
     # error 键语义不变，additive）。
-    payload: dict[str, Any] = {"error": result.error}
+    payload: dict[str, Any] = {"success": False, "error": result.error}
     if result.error_code:
         payload["error_code"] = result.error_code
     payload.update(

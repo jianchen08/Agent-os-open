@@ -348,6 +348,8 @@ def _make_manager(tmp_path: Path, ws_root: str | Path) -> WorkspaceLifecycleMana
         task_tree=_FakeTree(),
         ws_meta_store={},
         base_path=str(tmp_path),
+        # 钉空模式包源 = 仅仓根单源（既有行为基线；本文件用例不涉包源并集）
+        mode_skill_sources=[],
     )
 
 

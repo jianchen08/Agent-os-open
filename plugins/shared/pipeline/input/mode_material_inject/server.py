@@ -2,13 +2,13 @@
 """mode_material_inject input pipeline plugin MCP 服务端——纯接口适配层。
 
 业务逻辑在 plugin.py/mode_material.py；本文件只做接口适配：
-通过 MCP SDK 暴露为工具 + 接线 mode.get_profile 取数通道。
+通过 MCP SDK 暴露为工具（职责终局三件：mode 观测回写 + persona 接管 +
+组装器物料追加，设计 D10）。
 """
 from __future__ import annotations
 
 import logging
 from functools import lru_cache
-from typing import Any
 
 from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
@@ -17,37 +17,16 @@ bootstrap_plugin(__file__)  # 插件目录（本地 plugin.py）+ plugins/shared
 from plugin import ModeMaterialInjectPlugin  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
-from agentos_plugin_sdk.capability import bind_capability_caller  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("mode_material_inject_pipeline")
-
-
-def _tool_executor_caller() -> Any:
-    """tool-executor 能力句柄的 async caller（跨插件工具/服务调用的既有通道）。
-
-    惰性解析：句柄由内核 initialize 附送，未附送（KeyError）延迟到调用点，
-    由消费方的降级路径统一处理。
-    """
-    te = plugin.get_capability("tool-executor")
-    return bind_capability_caller(te, "tool-executor")
-
-
-async def fetch_mode_profile(mode: str) -> Any:
-    """经内核服务调用取 mode.get_profile（tool-executor 显式 plugin_id 通道，
-    eval_harness 先例同形）。返回原始信封，解析/校验归插件侧消费边界
-    （mode_material.unwrap_mode_profile），失败由其降级路径统一处理。"""
-    invoke = _tool_executor_caller()
-    return await invoke("tool-executor.invoke",
-                        {"tool_name": "mode.get_profile",
-                         "plugin_id": f"mode_{mode}", "args": {}})
 
 
 @lru_cache(maxsize=1)
 def get_instance() -> ModeMaterialInjectPlugin:
     """懒构建并缓存插件单例（线程安全；替代模块级可变 `_instance` 全局）。"""
     config = plugin.get_config()
-    return ModeMaterialInjectPlugin(config=config, profile_fetcher=fetch_mode_profile)
+    return ModeMaterialInjectPlugin(config=config)
 
 
 @plugin.on_load

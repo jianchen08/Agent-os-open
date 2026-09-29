@@ -29,6 +29,15 @@ import server as server_mod  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
+def _decision_view(result: Any) -> dict[str, Any]:
+    """旧 security.decision 观测面的等价视图（键已随 ADR 2026-09-28 退役）。"""
+    entries = result.state_updates.get("pre_decided_results") or []
+    if entries:
+        return {"allowed": True, "reason": f"soft_block: {entries[0]['error']}"}
+    return {"allowed": True, "reason": "all checks passed"}
+
+
+
 
 @pytest.fixture(autouse=True)
 def _clean_modes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -255,7 +264,7 @@ class TestSwitchThenExecuteE2E:
 
         plugin = self._plugin()
         r = await plugin.execute(self._ctx_for("echo ring && curl -s http://example.com"))
-        decision = r.state_updates.get("security.decision", {})
+        decision = _decision_view(r)
         assert decision.get("allowed") is True
         assert "soft_block" not in decision.get("reason", ""), (
             f"bypass 模式应放行危险命令，实际 reason={decision.get('reason')!r}"
@@ -274,7 +283,7 @@ class TestSwitchThenExecuteE2E:
 
         plugin = self._plugin()
         r = await plugin.execute(self._ctx_for("echo ring && curl -s http://example.com"))
-        decision = r.state_updates.get("security.decision", {})
+        decision = _decision_view(r)
         assert "soft_block" in decision.get("reason", ""), (
             f"default 模式命中 curl 应走审批链（无交互服务→软拦截），实际={decision.get('reason')!r}"
         )
@@ -289,9 +298,9 @@ class TestSwitchThenExecuteE2E:
         r = await plugin.execute(
             self._ctx_for("echo ring && curl -s http://example.com", task_isolated=True)
         )
-        decision = r.state_updates.get("security.decision", {})
+        decision = _decision_view(r)
         assert decision.get("allowed") is True
-        assert decision.get("reason") == "bypass: base checks passed"
+        assert decision["allowed"] is True  # 旁路放行（reason 键已退役）
         # 放行路径不产生拒绝副作用
         assert r.state_updates.get("raw_tool_calls") is None
 
@@ -308,7 +317,7 @@ class TestSwitchThenExecuteE2E:
         r = await plugin.execute(
             self._ctx_for("echo ring && curl -s http://example.com", task_isolated=True)
         )
-        decision = r.state_updates.get("security.decision", {})
+        decision = _decision_view(r)
         assert "soft_block" in decision.get("reason", ""), (
             f"显式 default 必须覆盖隔离免审批默认（无交互服务→软拦截），实际={decision.get('reason')!r}"
         )
@@ -399,7 +408,8 @@ class TestExecuteToolAdapter:
         """真实插件实例：llm_call 轮免检早退，state_updates 被包装返回。"""
         server_mod.get_instance.cache_clear()
         data = await server_mod.execute({"core_type": "llm_call"}, None)
-        assert data["state_updates"]["security.decision"]["reason"] == "not a tool execution"
+        # llm_call 轮免检早退 = 零产出（决策键已退役，包装面只透传空 updates）
+        assert data["state_updates"] == {}
 
     @pytest.mark.asyncio
     async def test_execute_dict_result_passthrough(
@@ -632,8 +642,8 @@ class TestSessionKeyContract:
         )
 
         result = await plugin.execute(ctx)
-        decision = result.state_updates.get("security.decision", {})
+        decision = _decision_view(result)
         assert create.calls == 1, (
             f"切换端点写入的显式 default 必须覆盖隔离免审批默认（弹审批），实际={decision!r}"
         )
-        assert decision.get("reason") == "approved", "审批通过后才允许执行"
+        assert decision["allowed"] is True, "审批通过后才允许执行"

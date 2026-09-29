@@ -1620,14 +1620,22 @@ impl PluginWatcher {
         // 循环 F：轮询兜底（notify 不可靠环境的可靠性主体）。
         {
             let poll_tx = trigger.clone();
-            tokio::spawn(async move {
-                let mut tick = tokio::time::interval(poll_interval);
-                tick.tick().await; // 跳过首次立即触发
-                loop {
-                    tick.tick().await;
-                    let _ = poll_tx.send(());
-                }
-            });
+            let poll_activity =
+                agentos_core::task_activity::global_registry().register("plugin-watcher-poll");
+            tokio::spawn(agentos_core::task_activity::scope(
+                poll_activity,
+                async move {
+                    let mut tick = tokio::time::interval(poll_interval);
+                    tick.tick().await; // 跳过首次立即触发
+                    agentos_core::task_activity::set_current_label("idle: next poll tick");
+                    loop {
+                        tick.tick().await;
+                        agentos_core::task_activity::set_current_label("emitting poll trigger");
+                        let _ = poll_tx.send(());
+                        agentos_core::task_activity::set_current_label("idle: next poll tick");
+                    }
+                },
+            ));
         }
 
         info!(
@@ -1639,118 +1647,126 @@ impl PluginWatcher {
             "plugin watcher started (notify+poll)"
         );
 
-        tokio::spawn(async move {
-            // 持有 notify_watcher 保活（drop 即停止监听）；与 consumer 同生命周期。
-            let _notify = notify_watcher;
-            let mut known = known_ids;
-            let mut known_hashes = known_manifest_hashes;
-            let mut known_code = known_code_hashes;
-            let mut known_obs_fail = known_obs_fail_streaks;
-            let mut known_cdylib = known_cdylib;
+        let consumer_activity =
+            agentos_core::task_activity::global_registry().register("plugin-watcher-consumer");
+        tokio::spawn(agentos_core::task_activity::scope(
+            consumer_activity,
+            async move {
+                agentos_core::task_activity::set_current_label("waiting fs events (debounce)");
+                // 持有 notify_watcher 保活（drop 即停止监听）；与 consumer 同生命周期。
+                let _notify = notify_watcher;
+                let mut known = known_ids;
+                let mut known_hashes = known_manifest_hashes;
+                let mut known_code = known_code_hashes;
+                let mut known_obs_fail = known_obs_fail_streaks;
+                let mut known_cdylib = known_cdylib;
 
-            loop {
-                // 等首个触发事件；所有 sender drop → 退出。
-                if rx.recv().await.is_none() {
-                    break;
-                }
-                // 防抖：窗口内持续有事件就重新等待，静默 debounce 时长后才执行。
-                while let Ok(Some(_)) = tokio::time::timeout(debounce, rx.recv()).await {
-                    // 匹配到事件即继续等（重置防抖窗口）；超时或 channel 关闭则结束。
-                }
-                // 执行一次同步（幂等：无新插件则 no-op）。
-                // enablement 取数：配置了重读根 → 每次 sync 从盘上 profile 现读
-                // （运行期 PUT enabled 的写盘结果即时可见，消除 boot 快照分歧）；
-                // 否则用注入快照（测试路径）。
-                let effective_enablement: Option<PluginEnablement> = match &profile_reload_root {
-                    Some(root) => Some(PluginEnablement::load(root)),
-                    None => enablement.clone(),
-                };
-                let report = match sync_once_with_store(
-                    invoker.as_ref(),
-                    &registry,
-                    &scopes,
-                    &mut known,
-                    &mut known_cdylib,
-                    manifests_store.as_ref(),
-                    &mut known_hashes,
-                    &mut known_code,
-                    &mut known_obs_fail,
-                    code_dirs.as_ref(),
-                    effective_enablement.as_ref(),
-                    contract_states.as_deref(),
-                )
-                .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        warn!(target: "plugin_watcher", error = %e.message, "discover sync failed");
-                        continue;
+                loop {
+                    // 等首个触发事件；所有 sender drop → 退出。
+                    if rx.recv().await.is_none() {
+                        break;
                     }
-                };
-                sync_count_task.fetch_add(1, Ordering::Relaxed);
-                // 热发现注册的新插件并入 L1 启用集合（thread_fields /
-                // domain_event 面随热发现生效）。
-                if let Some(enabled) = enabled_ids.as_ref() {
-                    merge_report_into_enabled_ids(&report, enabled).await;
-                }
-                if !report.is_empty() || !report.drifted_plugins.is_empty() {
-                    info!(
-                        target: "plugin_watcher",
-                        new_plugins = report.new_plugin_ids.len(),
-                        tools = report.tools_registered,
-                        http_routes = report.http_routes_registered,
-                        drifted = report.drifted_plugins.len(),
-                        "auto-discovered new plugins (G2 drift-rejected: {:?})",
-                        report.drifted_plugins
-                    );
-                }
-                // A3：cdylib 集合变更 → 优雅重启（env 开关 + 注入 hook；无 hook 只记日志）。
-                if let Some(change) = &report.cdylib_change {
-                    let enabled = auto_restart_env_enabled(
-                        std::env::var("AGENTOS_AUTO_RESTART_ON_CDYLIB_CHANGE").ok(),
-                    );
-                    trigger_cdylib_restart_if_enabled(change, &restart_hook, enabled);
-                }
-                // 模式包资源增量重扫（每轮 sync 尾部）：registrable = 已注册(known)
-                // ∩ 启用（enablement 现读 + manifest 声明），与 boot registrable_ids
-                // 同语义；disabled 包不注册，禁用即同源消失（clear_plugin/租约收回）。
-                let manifest_enabled: HashMap<String, Option<bool>> = match manifests_store.as_ref()
-                {
-                    Some(store) => store
-                        .read()
-                        .await
+                    // 防抖：窗口内持续有事件就重新等待，静默 debounce 时长后才执行。
+                    while let Ok(Some(_)) = tokio::time::timeout(debounce, rx.recv()).await {
+                        // 匹配到事件即继续等（重置防抖窗口）；超时或 channel 关闭则结束。
+                    }
+                    // 执行一次同步（幂等：无新插件则 no-op）。
+                    // enablement 取数：配置了重读根 → 每次 sync 从盘上 profile 现读
+                    // （运行期 PUT enabled 的写盘结果即时可见，消除 boot 快照分歧）；
+                    // 否则用注入快照（测试路径）。
+                    let effective_enablement: Option<PluginEnablement> = match &profile_reload_root
+                    {
+                        Some(root) => Some(PluginEnablement::load(root)),
+                        None => enablement.clone(),
+                    };
+                    let report = match sync_once_with_store(
+                        invoker.as_ref(),
+                        &registry,
+                        &scopes,
+                        &mut known,
+                        &mut known_cdylib,
+                        manifests_store.as_ref(),
+                        &mut known_hashes,
+                        &mut known_code,
+                        &mut known_obs_fail,
+                        code_dirs.as_ref(),
+                        effective_enablement.as_ref(),
+                        contract_states.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            warn!(target: "plugin_watcher", error = %e.message, "discover sync failed");
+                            continue;
+                        }
+                    };
+                    sync_count_task.fetch_add(1, Ordering::Relaxed);
+                    // 热发现注册的新插件并入 L1 启用集合（thread_fields /
+                    // domain_event 面随热发现生效）。
+                    if let Some(enabled) = enabled_ids.as_ref() {
+                        merge_report_into_enabled_ids(&report, enabled).await;
+                    }
+                    if !report.is_empty() || !report.drifted_plugins.is_empty() {
+                        info!(
+                            target: "plugin_watcher",
+                            new_plugins = report.new_plugin_ids.len(),
+                            tools = report.tools_registered,
+                            http_routes = report.http_routes_registered,
+                            drifted = report.drifted_plugins.len(),
+                            "auto-discovered new plugins (G2 drift-rejected: {:?})",
+                            report.drifted_plugins
+                        );
+                    }
+                    // A3：cdylib 集合变更 → 优雅重启（env 开关 + 注入 hook；无 hook 只记日志）。
+                    if let Some(change) = &report.cdylib_change {
+                        let enabled = auto_restart_env_enabled(
+                            std::env::var("AGENTOS_AUTO_RESTART_ON_CDYLIB_CHANGE").ok(),
+                        );
+                        trigger_cdylib_restart_if_enabled(change, &restart_hook, enabled);
+                    }
+                    // 模式包资源增量重扫（每轮 sync 尾部）：registrable = 已注册(known)
+                    // ∩ 启用（enablement 现读 + manifest 声明），与 boot registrable_ids
+                    // 同语义；disabled 包不注册，禁用即同源消失（clear_plugin/租约收回）。
+                    let manifest_enabled: HashMap<String, Option<bool>> =
+                        match manifests_store.as_ref() {
+                            Some(store) => store
+                                .read()
+                                .await
+                                .iter()
+                                .map(|m| (m.id.clone(), m.enabled))
+                                .collect(),
+                            None => HashMap::new(),
+                        };
+                    let registrable: HashSet<String> = known
                         .iter()
-                        .map(|m| (m.id.clone(), m.enabled))
-                        .collect(),
-                    None => HashMap::new(),
-                };
-                let registrable: HashSet<String> = known
-                    .iter()
-                    .filter(|id| {
-                        effective_enablement.as_ref().is_none_or(|e| {
-                            e.is_enabled(id, manifest_enabled.get(*id).copied().flatten())
+                        .filter(|id| {
+                            effective_enablement.as_ref().is_none_or(|e| {
+                                e.is_enabled(id, manifest_enabled.get(*id).copied().flatten())
+                            })
                         })
-                    })
-                    .cloned()
-                    .collect();
-                let user_modes =
-                    agentos_core::user_space::user_plugins_dir().map(|p| p.join("modes"));
-                let mode_resynced = resync_mode_package_resources(
-                    &registry,
-                    &scopes,
-                    &plugins_dir,
-                    user_modes.as_deref(),
-                    &registrable,
-                );
-                if mode_resynced > 0 {
-                    info!(
-                        target: "plugin_watcher",
-                        packages = mode_resynced,
-                        "模式包资源增量重扫完成（键表已同步盘上现状）"
+                        .cloned()
+                        .collect();
+                    let user_modes =
+                        agentos_core::user_space::user_plugins_dir().map(|p| p.join("modes"));
+                    let mode_resynced = resync_mode_package_resources(
+                        &registry,
+                        &scopes,
+                        &plugins_dir,
+                        user_modes.as_deref(),
+                        &registrable,
                     );
+                    if mode_resynced > 0 {
+                        info!(
+                            target: "plugin_watcher",
+                            packages = mode_resynced,
+                            "模式包资源增量重扫完成（键表已同步盘上现状）"
+                        );
+                    }
+                    agentos_core::task_activity::set_current_label("waiting fs events (debounce)");
                 }
-            }
-        });
+            },
+        ));
 
         WatcherHandle {
             _join: (),

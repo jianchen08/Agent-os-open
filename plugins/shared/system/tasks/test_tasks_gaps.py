@@ -18,6 +18,9 @@
 - reconcile.reconcile_startup：能力读面形状违约的收敛——state 读面返回非
   列表、runs 读面含非 dict 行、run 行无 pipeline_id、任务行无对应候选 run
   一律跳过（不裁不派发）；调和派发途中抛错 → warning 留痕并续扫后续行。
+- reconcile 完成判据（事故 2026-09-28 回归）：run completed × 未决投影 →
+  落 pending_evaluation 零派发（永不托底裁 completed）；classify_orphan_run
+  判定矩阵（完成裁决唯一来源 = 投影 completed）。
 
 外部依赖替身边界：pipeline-executor / service-registry / tool-executor 均为
 跨进程内核能力句柄（按外部依赖替身）；隔离管理器（Docker 面）按既有
@@ -513,6 +516,104 @@ class TestReconcileShapeViolations:
         assert any("分歧行调和派发失败" in r.getMessage() for r in caplog.records)
         # 性质断言：失败行不产生任何 emit_domain（派发在派生阶段即中断）
         assert [c[1]["tags"]["pipeline_id"] for c in bus.calls] == ["pipe-2"]
+
+
+# ═══════════════════════════════════════════════════════════
+# reconcile：完成判据收紧（事故 2026-09-28 回归——runs 托底假完成通知）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestRunCompletedNeverCompletesTask:
+    """run 正常收尾 × 评估未通过/未发生 → 永不裁 completed（用户裁定）。
+
+    事故 2026-09-28：熔断收尾的 run 落 completed，reconcile runs 托底补写
+    task.status=completed 并向父管道派发「已完成 ✅」——验收产物从未产出、
+    task_evaluate 从未被调。回归锚：该形态必须落 pending_evaluation、
+    零域事件派发、不清父挂号。
+    """
+
+    async def test_missing_projection_lands_pending_evaluation_no_notify(self) -> None:
+        """事故原形态：run completed + task.status 键缺席 → 落待评估，零派发。"""
+        import reconcile
+
+        task_row = {
+            "pipeline_id": "pipe-rc",
+            "task.id": "pipe-rc",
+            "lineage.parent_pipeline_id": "pipe-parent",
+        }
+        state = _FakeCapability({"list": [task_row], "update": {"ok": True}})
+        runs = _FakeCapability({"pipeline-runs.list": [_run_row("completed", "pipe-rc")]})
+        bus = _FakeCapability({"emit_domain": {"ok": True}})
+
+        reconciled = await reconcile.reconcile_startup(state, runs, bus)
+
+        assert [r["verdict"] for r in reconciled] == ["pending_evaluation"]
+        # 写面单点：只写 task.status=pending_evaluation（无 completed 补落、无父挂号清除）
+        updates = [c for c in state.calls if c[0] == "update"]
+        assert updates == [
+            ("update", {"pipeline_id": "pipe-rc", "fields": {"task.status": "pending_evaluation"}})
+        ]
+        # 性质断言：零域事件（无完成/失败通知派发）
+        assert bus.calls == []
+
+    async def test_running_projection_same_landing(self) -> None:
+        """同契约第二输入：显式 running 投影同样落待评估、零派发。"""
+        import reconcile
+
+        task_row = {"pipeline_id": "pipe-rc2", "task.status": "running"}
+        state = _FakeCapability({"list": [task_row], "update": {"ok": True}})
+        runs = _FakeCapability({"pipeline-runs.list": [_run_row("completed", "pipe-rc2")]})
+        bus = _FakeCapability({"emit_domain": {"ok": True}})
+
+        reconciled = await reconcile.reconcile_startup(state, runs, bus)
+
+        assert [r["verdict"] for r in reconciled] == ["pending_evaluation"]
+        assert bus.calls == []
+
+    async def test_already_pending_evaluation_idempotent(self) -> None:
+        """已是 pending_evaluation → 幂等跳过：不重写、零派发（on_load 高频触发）。"""
+        import reconcile
+
+        task_row = {"pipeline_id": "pipe-rc3", "task.status": "pending_evaluation"}
+        state = _FakeCapability({"list": [task_row], "update": {"ok": True}})
+        runs = _FakeCapability({"pipeline-runs.list": [_run_row("completed", "pipe-rc3")]})
+        bus = _FakeCapability({"emit_domain": {"ok": True}})
+
+        assert await reconcile.reconcile_startup(state, runs, bus) == []
+        assert [c for c in state.calls if c[0] == "update"] == []
+        assert bus.calls == []
+
+
+@pytest.mark.parametrize(
+    ("run_status", "task_status", "expected"),
+    [
+        # 未决投影 × run 正常收尾 → 待评估（不裁 completed）
+        ("completed", "", "pending_evaluation"),
+        ("completed", "running", "pending_evaluation"),
+        ("completed", "pending", "pending_evaluation"),
+        ("completed", "evaluating", "pending_evaluation"),
+        ("completed", "pending_evaluation", None),
+        # 未决投影 × run 失败/取消 → failed 对齐（保持）
+        ("failed", "running", "failed"),
+        ("failed", "pending_evaluation", "failed"),
+        ("cancelled", "", "failed"),
+        # 投影权威：评估已通过，runs 失败/挂起 → 补派 completed（保持）
+        ("failed", "completed", "completed"),
+        ("suspended", "completed", "completed"),
+        # 一致行 / 在飞 / 可恢复 / 投影终态权威 → 不裁
+        ("completed", "completed", None),
+        ("completed", "failed", None),
+        ("running", "running", None),
+        ("suspended", "", None),
+    ],
+)
+def test_classify_orphan_run_matrix(
+    run_status: str, task_status: str, expected: str | None
+) -> None:
+    """判定矩阵：完成裁决只来自投影 completed（评估通过证据），不来自 runs completed。"""
+    import reconcile
+
+    assert reconcile.classify_orphan_run(run_status, task_status) == expected
 
 
 # ═══════════════════════════════════════════════════════════

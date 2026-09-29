@@ -99,6 +99,8 @@ def _make_manager(
         task_tree=tree if tree is not None else _FakeTree(tasks),
         ws_meta_store=meta_store or {},
         base_path=str(tmp_path),
+        # 钉空模式包源 = 仅仓根单源（既有行为基线；本文件用例不涉包源并集）
+        mode_skill_sources=[],
     )
 
 

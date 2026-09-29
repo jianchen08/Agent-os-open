@@ -25,6 +25,8 @@ import type { InteractionOption, PendingInteraction } from '@/stores/interaction
 
 export interface InteractionCardProps {
   interaction: PendingInteraction
+  /** 归属标签（会话标题 · Agent/管道名，浮层解析注入）；空串不显示 */
+  originLabel?: string
   onRespondChoice: (optionId: string, optionLabel?: string) => void
   onRespondText: (text: string) => void
   onNavigateToTab: () => void
@@ -61,6 +63,7 @@ function useApprovalCountdown(interaction: PendingInteraction): number | null {
 
 export function InteractionCard({
   interaction,
+  originLabel,
   onRespondChoice,
   onRespondText,
   onNavigateToTab,
@@ -138,6 +141,12 @@ export function InteractionCard({
             </button>
           )}
         </div>
+        {/* 归属标签：多会话/子任务并行时区分卡片来自哪个会话（管道） */}
+        {originLabel && (
+          <p className="text-muted-foreground mt-0.5 truncate text-xs" title={originLabel}>
+            来自：{originLabel}
+          </p>
+        )}
         {interaction.description && (
           <p className="text-muted-foreground mt-1 text-sm">{interaction.description}</p>
         )}

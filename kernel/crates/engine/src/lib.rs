@@ -28,6 +28,7 @@ pub mod transient;
 pub use metrics::{EngineMetrics, EngineMetricsSnapshot};
 pub use pipeline_loop::apply_messages_op_update;
 pub use pipeline_loop::apply_slot_ops_to_array;
+pub use pipeline_loop::trace_mirror_digest;
 pub use pipeline_loop::PipelineExecutor;
 pub use round_events::{RoundEnd, RoundEvents, RoundStart};
 pub use store::SqliteStore;

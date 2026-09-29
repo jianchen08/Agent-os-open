@@ -127,6 +127,8 @@ impl PluginInvoker for MockInvoker {
 struct NullStorage {
     checkpoints: Mutex<Vec<i64>>,
     trace_plugin_ids: Mutex<Vec<String>>,
+    /// 收到的完整轨迹条目（补丁形态断言用；append_trace 全量留档）。
+    traces: Mutex<Vec<TraceEntry>>,
     /// true 时 record_run_start 返回 Err（persist_run_start 持久化故障注入）。
     fail_record_run_start: std::sync::atomic::AtomicBool,
     /// 收到的 run_status 投影序列（upsert_state_field 调用序，终态映射表测试读取）。
@@ -138,6 +140,7 @@ impl Default for NullStorage {
         Self {
             checkpoints: Mutex::new(Vec::new()),
             trace_plugin_ids: Mutex::new(Vec::new()),
+            traces: Mutex::new(Vec::new()),
             fail_record_run_start: std::sync::atomic::AtomicBool::new(false),
             run_statuses: Mutex::new(Vec::new()),
         }
@@ -213,7 +216,11 @@ impl StorageBackend for NullStorage {
         &self,
         entry: TraceEntry,
     ) -> Result<(), agentos_core::types::StorageError> {
-        self.trace_plugin_ids.lock().unwrap().push(entry.plugin_id);
+        self.trace_plugin_ids
+            .lock()
+            .unwrap()
+            .push(entry.plugin_id.clone());
+        self.traces.lock().unwrap().push(entry);
         Ok(())
     }
     async fn save_checkpoint(
@@ -438,6 +445,106 @@ fn gated_body(steps: Vec<StepItem>) -> PipelineConfig {
         initial_state: std::collections::HashMap::new(),
         max_rounds: None,
     }
+}
+
+// ── 堆栈级诊断插桩：invoke 等待点标签（task-dump 消费面）──────────
+
+/// 捕获 invoke 时刻任务活动标签的 invoker（验证 run chain scope → engine
+/// 等待点的任务本地槽传播；human_interaction 等 24h 停泊等待即显形于此）。
+struct LabelCapturingInvoker {
+    seen: Mutex<Vec<(String, String)>>,
+}
+
+#[async_trait]
+impl PluginInvoker for LabelCapturingInvoker {
+    async fn invoke_pipeline_plugin<'a>(
+        &self,
+        plugin_id: &str,
+        _ctx: &PluginContext<'a>,
+    ) -> Result<PluginResult, PluginError> {
+        // invoke await = 既有等待点：标签此刻应指向本插件（invoke_plugin 设置）。
+        let label =
+            agentos_core::task_activity::current_label().unwrap_or_else(|| "<none>".to_string());
+        self.seen
+            .lock()
+            .unwrap()
+            .push((plugin_id.to_string(), label));
+        Ok(PluginResult::default())
+    }
+    async fn invoke_tool(
+        &self,
+        _p: &str,
+        _t: &str,
+        _i: &serde_json::Value,
+    ) -> Result<ToolExecutionResult, PluginError> {
+        Ok(ToolExecutionResult::success(serde_json::Value::Null))
+    }
+    async fn send_lifecycle_hook(
+        &self,
+        _p: &str,
+        _h: agentos_core::traits::LifecycleHook,
+        _c: &agentos_core::traits::HookContext,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn invoke_plugin_labels_task_activity_at_wait_point() {
+    let invoker = Arc::new(LabelCapturingInvoker {
+        seen: Mutex::new(Vec::new()),
+    });
+    let store: Arc<dyn StorageBackend> = Arc::new(NullStorage::default());
+    let executor = PipelineExecutor::new(
+        invoker.clone() as Arc<dyn PluginInvoker>,
+        PathBuf::from("."),
+        TenantContext::new("tenant_test", "session_test"),
+        std::iter::once("diag_step".to_string()).collect::<std::collections::HashSet<String>>(),
+        store,
+        "run_diag",
+    );
+    let config = PipelineConfig {
+        name: "diag".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![PipelineStep {
+                id: "body".into(),
+                when: None,
+                steps: vec![StepItem::Bare("diag_step".into())],
+                context: HashMap::new(),
+                routes: vec![],
+                loop_config: None,
+            }],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
+    };
+    let compiled = compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids)
+        .expect("compile should succeed");
+    // 生产路径：run chain（api 层）经 scope 包住 run_compiled——本测试同构
+    // 包一层，engine 深层的 set_current_label 经任务本地槽生效。
+    let activity = agentos_core::task_activity::global_registry().register("diag-run");
+    let _state = agentos_core::task_activity::scope(activity, async {
+        executor
+            .run_compiled(&compiled, json!({"pipeline_id": "p-diag"}))
+            .await
+            .expect("run should succeed")
+    })
+    .await;
+    let seen = invoker.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "单 step 单调用");
+    let (plugin_id, label) = &seen[0];
+    assert_eq!(plugin_id, "diag_step");
+    assert!(
+        label.contains("invoking plugin diag_step") && label.contains("pipeline p-diag"),
+        "等待点标签应含插件与管道（实际 {label}）"
+    );
+    // 无槽上下文（生产中非插桩任务路径）同函数不再 panic：current_label None。
+    assert_eq!(agentos_core::task_activity::current_label(), None);
 }
 
 #[tokio::test]
@@ -709,6 +816,132 @@ async fn when_gate_skipped_item_leaves_no_trace_and_no_call() {
     assert!(
         fixture.store.step_trace_plugin_ids().is_empty(),
         "整 step 被 when 门架空 → 不落 step 轨迹"
+    );
+}
+
+// ── 工具结果镜像定位符化（ADR 2026-09-29-trace-mirror-dedup）────────
+
+#[tokio::test]
+async fn step_trace_patches_tool_result_keys_as_digest() {
+    // 插件 state_updates 携带工具结果 staging 键 → 轨迹补丁里两键以摘要定位符
+    // 落库（count/逐项 tool_name 保真），原文零残留；普通键原样镜像。
+    let fixture = Fixture::build(&["a"]);
+    let marker = "X".repeat(4096);
+    fixture.invoker.set_result(
+        "a",
+        PluginResult {
+            state_updates: updates(&[
+                (
+                    "_full_tool_results",
+                    json!([
+                        {"tool_name": "bash_execute", "data": {"stdout": marker}, "success": true},
+                        {"tool_name": "file_read", "data": {"content": "第二项"}, "success": true},
+                    ]),
+                ),
+                (
+                    "tool_results",
+                    json!([
+                        {"tool_name": "bash_execute", "data": {"stdout": "截断展示版"}, "success": true},
+                    ]),
+                ),
+                ("current_phase", json!("executing")),
+            ]),
+            ..Default::default()
+        },
+    );
+    let config = PipelineConfig {
+        name: "mirror".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![atomic_step("s1", "a")],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        initial_state: HashMap::new(),
+        max_rounds: None,
+        checkpoint: CheckpointConfig::default(),
+    };
+    fixture
+        .run(
+            &config,
+            &StepLibrary::default(),
+            json!({"pipeline_id": "p_mirror"}),
+        )
+        .await;
+
+    let traces = fixture.store.traces.lock().unwrap();
+    let step_patch = traces
+        .iter()
+        .find(|t| t.plugin_id == "s1")
+        .map(|t| &t.patch_data)
+        .expect("step 窗口应有轨迹行（插件产出了 state_updates）");
+    let patch_str = step_patch.to_string();
+    assert!(!patch_str.contains("XXXX"), "全文零残留: {patch_str}");
+    assert!(!patch_str.contains("截断展示版"), "展示版原文零残留");
+
+    let full_digest = &step_patch["_full_tool_results"];
+    assert_eq!(full_digest["_trace_digest"], json!(true), "摘要标记在场");
+    assert_eq!(full_digest["count"], json!(2), "条数保真");
+    let names: Vec<&str> = full_digest["items"]
+        .as_array()
+        .expect("items 数组在场")
+        .iter()
+        .map(|i| i["tool_name"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(names, vec!["bash_execute", "file_read"], "逐项 tool_name");
+    assert!(
+        full_digest["items"][0]["chars"].as_u64().unwrap_or(0) > 4096,
+        "chars 反映原条目体量"
+    );
+
+    let display_digest = &step_patch["tool_results"];
+    assert_eq!(display_digest["_trace_digest"], json!(true));
+    assert_eq!(display_digest["count"], json!(1));
+
+    assert_eq!(
+        step_patch["current_phase"],
+        json!("executing"),
+        "普通键不受定位符化影响，原样镜像"
+    );
+}
+
+#[test]
+fn trace_digest_passthrough_non_array() {
+    let v = json!({"not": "an array"});
+    assert_eq!(
+        trace_mirror_digest(&v),
+        v,
+        "非数组输入原样透传（形状契约外的值不做有损变换）"
+    );
+}
+
+#[test]
+fn trace_digest_empty_array_zero_count() {
+    let d = trace_mirror_digest(&json!([]));
+    assert_eq!(d["_trace_digest"], json!(true));
+    assert_eq!(d["count"], json!(0));
+    assert_eq!(d["items"], json!([]));
+}
+
+#[test]
+fn trace_digest_far_smaller_leak_free_and_deterministic() {
+    let original = json!([
+        {"tool_name": "bash_execute", "data": {"stdout": "X".repeat(4096)}, "success": true},
+        {"tool_name": "file_read", "data": {"content": "y".repeat(2048)}, "success": true},
+    ]);
+    let digest = trace_mirror_digest(&original);
+    let orig_len = original.to_string().len();
+    let digest_len = digest.to_string().len();
+    assert!(
+        digest_len * 10 < orig_len,
+        "摘要应远小于原文（>10x）：digest={digest_len}B original={orig_len}B"
+    );
+    assert!(!digest.to_string().contains("XXX"), "摘要零内容泄漏");
+    assert_eq!(
+        digest,
+        trace_mirror_digest(&original),
+        "同输入摘要确定（幂等锚）"
     );
 }
 
@@ -2167,6 +2400,7 @@ fn test_manifest(id: &str) -> PluginManifest {
         provides: None,
         persistent_fields: vec![],
         export_fields: vec![],
+        aux_venvs: Vec::new(),
     }
 }
 

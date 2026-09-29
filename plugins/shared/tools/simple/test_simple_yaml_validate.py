@@ -188,21 +188,21 @@ class TestReadDetailParamChecks:
         caller = AsyncMock()
         mod.set_capability_caller(caller)
         result = await mod.read_execution_detail(pipeline_run_id="", level="skeleton")
-        assert result == {"error": "pipeline_run_id 不能为空"}
+        assert result == {"success": False, "error": "pipeline_run_id 不能为空"}
         caller.assert_not_awaited()
 
     async def test_missing_level(self, mod: Any) -> None:
         caller = AsyncMock()
         mod.set_capability_caller(caller)
         result = await mod.read_execution_detail(pipeline_run_id="p1", level="")
-        assert result == {"error": "level 不能为空"}
+        assert result == {"success": False, "error": "level 不能为空"}
         caller.assert_not_awaited()
 
     async def test_unsupported_level(self, mod: Any) -> None:
         caller = AsyncMock()
         mod.set_capability_caller(caller)
         result = await mod.read_execution_detail(pipeline_run_id="p1", level="L9")
-        assert result == {"error": "不支持的 level: L9"}
+        assert result == {"success": False, "error": "不支持的 level: L9"}
         caller.assert_not_awaited()
 
     async def test_skeleton_uses_list_by_pipeline(self, mod: Any) -> None:
@@ -269,7 +269,7 @@ class TestFetchDegradation:
         caller.side_effect = [{"results": []}, RuntimeError("boom")]
         mod.set_capability_caller(caller)
         result = await mod.read_execution_detail(pipeline_run_id="p1", level="L1")
-        assert result == {"error": "内核 messages.list 调用失败: boom"}
+        assert result == {"success": False, "error": "内核 messages.list 调用失败: boom"}
 
     async def test_l1_hindsight_exception_degrades_to_messages(self, mod: Any) -> None:
         """hindsight.recall 抛异常 → 压缩块为空，降级用 messages 轮次摘要。"""
@@ -293,7 +293,7 @@ class TestFetchDegradation:
         caller = AsyncMock(side_effect=RuntimeError("boom"))
         mod.set_capability_caller(caller)
         result = await mod.read_execution_detail(pipeline_run_id="p1", level="L0")
-        assert result == {"error": "内核 messages.list 调用失败: boom"}
+        assert result == {"success": False, "error": "内核 messages.list 调用失败: boom"}
 
 
 # ═══════════════════════════════════════════════════════════

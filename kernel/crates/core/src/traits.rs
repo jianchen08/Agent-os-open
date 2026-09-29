@@ -206,6 +206,92 @@ pub trait PluginInvoker: Send + Sync {
     fn is_host_starting(&self, _plugin_id: &str) -> bool {
         false
     }
+
+    /// 宿主盒子快照（只读枚举面，`GET /api/v1/plugins/hosts` 数据源）。
+    ///
+    /// 按宿主进程枚举盒子（进程态/成员集/在飞调用/启动窗口/待装载差集），
+    /// 全部由实现方既有记账状态同步组装——只读语义：不 spawn、不驱逐、
+    /// 不 touch 记账。响应 serde 字段名冻结（前端宿主盒子视图逐字消费）。
+    /// 默认返回空快照——无宿主概念的实现（MockInvoker/测试桩）语义即「无盒子」。
+    async fn host_boxes_snapshot(&self) -> HostBoxesSnapshot {
+        HostBoxesSnapshot::default()
+    }
+}
+
+// ── 3b. 宿主盒子快照（观测面契约，serde 字段名冻结） ────────────
+
+/// 宿主盒子类别（`kind` 字段）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostBoxKind {
+    /// 组宿主（`group:{组名}:{槽位}`，合宿进程承载多成员）
+    Group,
+    /// 独占宿主（`plugin:{plugin_id}`，单插件单进程）
+    Solo,
+}
+
+/// 宿主盒子成员行（`members` 数组元素）。
+#[derive(Debug, Clone, Serialize)]
+pub struct HostBoxMember {
+    pub plugin_id: String,
+    /// 成员在分配表但不在 spawned_members 快照（成员粒度软卸载后的待重加入
+    /// 标记；组宿主 spawn 快照缺失时按不在处理，与漂移检测 fail-closed 同口径）
+    pub pending_rejoin: bool,
+}
+
+/// 宿主盒子行（一个宿主进程一枚）。
+#[derive(Debug, Clone, Serialize)]
+pub struct HostBox {
+    pub host_key: String,
+    pub kind: HostBoxKind,
+    /// stdio 宿主的 OS 进程号；HTTP transport / 未连接 = null
+    pub pid: Option<u32>,
+    /// 未判死即 true（判死门控与进程态轮询同款）
+    pub alive: bool,
+    /// 宿主进程 RSS（MB）。由 api 侧按 pid 富化（跳板下探 + RSS 采集面）；
+    /// 无 pid（HTTP transport）恒 null。
+    pub rss_mb: Option<f64>,
+    /// 宿主进程运行秒数（spawn 时刻起算；无记账 = null）
+    pub uptime_secs: Option<u64>,
+    /// spawn 时刻成员集快照（进程实际服务面；独占宿主 = 键内嵌插件自身）
+    pub spawned_members: Vec<String>,
+    /// 当前成员集（分配表按宿主分组；独占 = 键内嵌插件）
+    pub members: Vec<HostBoxMember>,
+    /// 当前挂载成员数（分配表口径，与装箱判定同源；独占宿主 = 1）
+    pub slot_used: u64,
+    /// 挂载成员上限（组宿主 = `AGENTOS_LIGHT_HOST_MAX_MEMBERS` 快照时刻值；
+    /// 独占宿主恒 1，结构性单成员不可扩）——slot_used/slot_cap 同现，装箱
+    /// 余量观测面（合宿扩容观测用）。
+    pub slot_cap: u64,
+    /// 宿主级在飞 capability 调用数
+    pub in_flight: u64,
+    /// 有在飞调用的成员 → 调用数（零调用成员不列）
+    pub member_in_flight: HashMap<String, u64>,
+    /// 成员最近调用时刻的最大值（epoch 秒；null = 从未被调用）
+    pub last_call_at: Option<f64>,
+    /// 成员正处于 spawn/respawn 窗口
+    pub starting: bool,
+    /// 处于 spawn/respawn 窗口的成员
+    pub starting_members: Vec<String>,
+}
+
+/// 待装载插件行（`pending_spawn` 数组元素）。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PendingSpawnEntry {
+    pub plugin_id: String,
+    /// loader 已知（manifest 仍可解析）；记账残留（manifest 已不可得）= false
+    pub enabled: bool,
+    /// 最近调用时刻（epoch 秒；null = 从未被调用）
+    pub last_call_at: Option<f64>,
+}
+
+/// 宿主盒子快照（`GET /api/v1/plugins/hosts` 响应契约，字段名冻结）。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct HostBoxesSnapshot {
+    /// 在册宿主盒子（按 host_key 排序）
+    pub hosts: Vec<HostBox>,
+    /// 已知插件中「既无分配表条目也无存活宿主」的差集（按 plugin_id 排序）
+    pub pending_spawn: Vec<PendingSpawnEntry>,
 }
 
 /// 生命周期钩子类型。
@@ -607,6 +693,15 @@ pub struct PluginManifest {
     /// 有自己的兜底，见 P1-7 DEBT）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_files: Vec<ConfigFileMapping>,
+    /// 辅助 venv 声明（供给统一面，ADR 2026-09-28-aux-venv-autoprovision）。
+    ///
+    /// mcp 1.x/2.0 生态互斥等依赖冲突插件（hindsight 双 venv）声明插件目录
+    /// 内的第二个解释器环境；内核 boot autoprovision 与主 `.venv` 同窗口
+    /// 装配（`uv venv` + `uv pip install -r requirements`，含用户空间重定向
+    /// ——插件侧不再自建二道供给，与其他插件装机首启行为统一）。
+    /// 缺省 = 无辅助 venv。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aux_venvs: Vec<AuxVenvDecl>,
     /// 前端 UI Schema 声明（ADR 前端 schema 驱动）。
     ///
     /// 声明该插件要呈现的前端界面（用哪些 widget type、渲染空间、触发时机）。
@@ -1056,6 +1151,24 @@ pub struct StepCapability {
 /// - **内联形态**（`path` 省略）：真值即 `fields.default`（存在 manifest），
 ///   PUT 保存直接写回 manifest，不落独立配置文件。
 ///
+/// 辅助 venv 声明条目（`PluginManifest::aux_venvs`，供给统一面
+/// ADR 2026-09-28-aux-venv-autoprovision）。
+///
+/// 依赖互斥插件（如 hindsight：API 栈 mcp 1.x 与宿主 SDK mcp 2.x 不共容）
+/// 的第二解释器环境；内核 boot autoprovision 按 `uv venv` +
+/// `uv pip install -r requirements` 装配（插件目录只读时重定向用户空间
+/// 登记处 `plugin-venvs/<id>--<dir 净化名>`）。目录与清单名只允许
+/// `[A-Za-z0-9._-]` 且不得含路径分隔（防穿越，provision 侧校验）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AuxVenvDecl {
+    /// venv 目录名（插件目录内，如 `.venv-hindsight`）。
+    pub dir: String,
+    /// 依赖清单文件名（插件目录内，随包分发，如 `requirements.txt`）。
+    pub requirements: String,
+    /// Python 版本（`uv venv --python` 取值，如 `3.12`）。
+    pub python: String,
+}
+
 /// path 安全校验见 loader 的 B1 实现（归一化 + 落 config/ 子树 + denylist）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConfigFileMapping {
@@ -3048,6 +3161,19 @@ mod tests {
         assert_eq!(loader.get_plugin_dir("p"), None);
         assert!(loader.get_manifest("p").is_none());
         assert_eq!(loader.get_status("p"), PluginStatus::Discovered);
+    }
+
+    #[tokio::test]
+    async fn invoker_host_boxes_snapshot_default_is_empty() {
+        // 复用既有 BareInvoker 桩（无宿主概念实现走 trait 默认面）
+        let snap = BareInvoker.host_boxes_snapshot().await;
+        assert!(snap.hosts.is_empty(), "无宿主概念实现 = 无盒子");
+        assert!(snap.pending_spawn.is_empty());
+        // 序列化为空骨架（响应契约顶层形状）
+        assert_eq!(
+            serde_json::to_value(&snap).unwrap(),
+            serde_json::json!({"hosts": [], "pending_spawn": []})
+        );
     }
 
     #[test]

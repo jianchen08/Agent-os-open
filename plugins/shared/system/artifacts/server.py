@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import mimetypes
 import os
 import sys
 import uuid
@@ -184,6 +185,43 @@ async def handle_upload(raw_body: str, headers: dict[str, str] | None) -> dict[s
             }
         )
     )
+
+
+#: 单文件读取上限（装载进内存再 base64，防超大文件拖垮 sidecar）
+_MAX_UPLOAD_FILE_BYTES = 200 * 1024 * 1024
+
+
+async def _upload_file_content_response(stored_filename: str) -> dict[str, Any]:
+    """GET /ext/artifacts/files/{stored_filename} —— 上传文件字节流。
+
+    前端文件加载器路由的统一取流通道（附件预览/下载；键 = /uploads url 的
+    basename——url 是公开契约，url→磁盘文件的映射属服务端职责，前端不做
+    file_id 推导）。内核 ``/uploads`` 匿名通道受媒体扩展名白名单约束（img 标签
+    无法携认证头，安全边界），本端点 auth:user 不受限于此——txt/docx 等任何
+    已上传类型可取。响应形态 = 内核 HttpHandleResponse（插件全权控制
+    status/headers/body，body base64；dispatcher 原样回写）。
+    """
+    if (
+        not stored_filename
+        or "/" in stored_filename
+        or "\\" in stored_filename
+        or ".." in stored_filename
+    ):
+        return _json_response({"error": "invalid file name"}, 400)
+    file_path = os.path.join(_get_uploads_dir(), stored_filename)
+    if not os.path.isfile(file_path):
+        return _json_response({"error": f"upload file not found: {stored_filename}"}, 404)
+    if os.path.getsize(file_path) > _MAX_UPLOAD_FILE_BYTES:
+        return _json_response({"error": "file too large"}, 413)
+    with open(file_path, "rb") as f:
+        data = f.read()
+    content_type = mimetypes.guess_type(stored_filename)[0] or "application/octet-stream"
+    return {
+        "status": 200,
+        "headers": {"Content-Type": content_type},
+        "body": base64.b64encode(data).decode("ascii"),
+        "body_encoding": "base64",
+    }
 
 
 # ══ 制品 handler（routes_artifacts.py 迁入，剥 FastAPI 装饰器）══
@@ -385,11 +423,13 @@ async def http_handle(
             body = _decode_body(raw_body)
             return _ok(_json_response(await create_artifact(body)))
 
-        # ── 子路径（versions/diff/annotations）──
+        # ── 子路径（files/versions/diff/annotations）──
         if path.startswith(_PREFIX + "/"):
             rest = path[len(_PREFIX) + 1 :]  # "{artifact_id}" 或 "{artifact_id}/xxx"
             if "/" in rest:
                 art_id, sub_path = rest.split("/", 1)
+                if art_id == "files" and method == "GET":
+                    return _ok(await _upload_file_content_response(sub_path))
                 if sub_path == "versions" and method == "GET":
                     return _ok(_json_response(await get_version_history(art_id)))
                 if sub_path == "diff" and method == "GET":

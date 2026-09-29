@@ -185,15 +185,10 @@ def test_manifest_declares_webview_page_and_endpoint(
         "widgetId": page_id,
     }
     assert page["mode"] == mode
+    # 任务模式选择器选项单源 registry（批G-B⑦，1ca7d212c）：manifest ui_schema
+    # 的 select-option 声明已退役，不得回流（防双真值源）。
     ui_widgets = manifest.get("ui_schema", {}).get("widgets", [])
-    if mode in ("coding", "writing", "roleplay", "research"):
-        # 四键契约内的模式进任务模式选择器
-        opt = next(w for w in ui_widgets if w["id"] == f"mode_opt_{mode}")
-        assert opt["type"] == "select-option" and opt["space"] == "chat-input"
-        assert opt["props"]["target"] == "task_mode" and opt["props"]["value"] == mode
-    else:
-        # godot 家族键在 TASK_MODES 四键契约之外，不入任务模式选择器（仅面板配对）
-        assert not any(w.get("type") == "select-option" for w in ui_widgets)
+    assert not any(w.get("type") == "select-option" for w in ui_widgets)
     # http_endpoints：页面路由声明对齐 monitoring 页面类路由（timeout 5000 / 并发 4）
     endpoints = {e["path"]: e for e in manifest["http_endpoints"]}
     endpoint = endpoints[f"/ext/{plugin_id}/page/{mode}-panel"]

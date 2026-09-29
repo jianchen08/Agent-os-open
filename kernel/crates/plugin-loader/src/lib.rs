@@ -22,6 +22,10 @@ pub mod mode_registry;
 pub mod native_loader;
 pub mod registry;
 
+/// 测试期用户空间环境钉桩（用户空间用例跨模块共用同一把进程级锁）。
+#[cfg(test)]
+pub(crate) mod test_env;
+
 pub use capability_provider::{
     register_provided_capabilities, CapabilityBridge, CapabilityRoute, McpBridge,
     ProvidedCapabilityHandler,

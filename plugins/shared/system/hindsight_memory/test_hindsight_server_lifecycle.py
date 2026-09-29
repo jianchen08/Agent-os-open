@@ -487,11 +487,13 @@ def _patch_this_dir(srv: Any, monkeypatch: pytest.MonkeyPatch, root: Path) -> Pa
 
     server 的 .env / config/plugins/llm/llm.yaml / plugin.json 均自 _THIS_DIR 定位——
     真实布局 plugins/shared/system/hindsight_memory（4 层）↔ 测试用 3 层中间目录。
-    返回插件目录（manifest 写入用）。
+    用户空间候选（.env / llm.yaml 的 user_root 优先读）同步钉进沙箱，防真机
+    用户配置漏进用例（2026-09-28 配置热感知批次）。返回插件目录（manifest 写入用）。
     """
     target = root / "a" / "b" / "c" / "hindsight_memory"
     target.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(srv, "_THIS_DIR", str(target))
+    monkeypatch.setenv("AGENTOS_USER_ROOT", str(root / "user_root"))
     return target
 
 

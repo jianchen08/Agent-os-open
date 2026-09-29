@@ -248,6 +248,10 @@ defaults:
     #[test]
     fn test_corrupted_profile_disables_everything() {
         let dir = tempfile::tempdir().unwrap();
+        // load 走用户层优先解析：开发机 %APPDATA%/agentos/config/ 有真实
+        // profile 时未钉桩会读到它（解析成功 → corrupted 恒 false），必须把
+        // 用户配置层钉到临时目录内的空位，factory 损坏文件才会被读到。
+        let _user = crate::test_env::UserRootGuard::set(&dir.path().join("user-config"));
         let plugins_cfg = dir.path().join("kernel");
         std::fs::create_dir_all(&plugins_cfg).unwrap();
         std::fs::write(
@@ -273,6 +277,8 @@ defaults:
     #[test]
     fn test_missing_profile_keeps_default_enabled() {
         let dir = tempfile::tempdir().unwrap();
+        // 同上：用户配置层钉空位，否则开发机真实 profile 会被当成「文件存在」。
+        let _user = crate::test_env::UserRootGuard::set(&dir.path().join("user-config"));
         let en = PluginEnablement::load(dir.path());
         assert!(!en.is_corrupted(), "缺失不是损坏");
         assert!(

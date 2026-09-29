@@ -20,7 +20,6 @@ State 命名空间：
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
@@ -31,6 +30,10 @@ from agentos_plugin_sdk.tool_result_cache import (
     ToolResultCache,
     make_cache_key,
     namespace_from_state,
+)
+from agentos_plugin_sdk.tool_result_protocol import (
+    build_tool_result_ops,
+    tool_result_entry,
 )
 
 logger = logging.getLogger(__name__)
@@ -135,64 +138,22 @@ class ToolCache(IInputPlugin):
                 # 与 tool_cache 命中形成死循环
                 StateKeys.RAW_TOOL_CALLS: [],
                 # 补 messages 配对：llm_core 已 append assistant(tool_calls)
-                # 消息，这里追加 role=tool 结果消息（对齐 tool_core
-                # messages::rebuild 的产物形状）——否则 LLM 下一轮看不到工具
-                # 结果会重发同一调用，再次命中缓存，形成死循环
-                "messages": self._build_tool_result_messages(ctx, tool_calls, cached_results),
+                # 消息，这里追加 role=tool 结果消息——否则 LLM 下一轮看不到工具
+                # 结果会重发同一调用，再次命中缓存，形成死循环。配对消息构造
+                # 收编 SDK tool_result_protocol（ADR 2026-09-28 固定函数路径，
+                # 契约夹具与 tool_core Rust 双车道锚定；content 序列化随之由
+                # 本插件私有的 JSON 文本改为协议统一的 YAML，字符串结果不再包
+                # {"content": ...} 键——两处漂移就此清偿）。
+                "messages": build_tool_result_ops(
+                    tool_calls,
+                    [
+                        tool_result_entry(tc.get("name", ""), call_id=tc.get("id"), data=result)
+                        for tc, result in zip(tool_calls, cached_results, strict=True)
+                    ],
+                ),
             },
             skip_remaining=True,
         )
-
-    def _build_tool_result_messages(
-        self,
-        ctx: PluginContext,
-        tool_calls: list[dict[str, Any]],
-        cached_results: list[Any],
-    ) -> dict[str, Any]:
-        """构造缓存命中的 tool 结果消息 ops（对齐 tool_core messages::rebuild 形状）。
-
-        tool_core 正常路径在 execute 后重建 messages：assistant(tool_calls) 由
-        llm_core 已 append，tool_core 追加 role=tool 配对消息（content 为结果
-        序列化文本、tool_result envelope 为完整结果）。本方法对齐该形状，
-        用引擎的 _ops 增量形态（set 无 seq = append）追加配对消息。
-
-        Args:
-            ctx: 插件执行上下文
-            tool_calls: 本轮 raw_tool_calls（含 id）
-            cached_results: 缓存命中的结果列表（与 tool_calls 按下标配对）
-
-        Returns:
-            messages ops 字典（{"_ops": [...]}）
-        """
-        ops: list[dict[str, Any]] = []
-        for i, tc in enumerate(tool_calls):
-            if i >= len(cached_results):
-                break
-            result = cached_results[i]
-            call_id = tc.get("id") or f"call_{i}"
-            # 内容序列化对齐 tool_core serialize_for_content（JSON 文本）
-            content = result
-            if not isinstance(result, str):
-                try:
-                    content = json.dumps(result, ensure_ascii=False, default=str)
-                except (TypeError, ValueError):
-                    content = str(result)
-            tool_msg: dict[str, Any] = {
-                "role": "tool",
-                "tool_call_id": call_id,
-                "content": content,
-                "tool_result": {
-                    "call_id": call_id,
-                    "tool_name": tc.get("name", ""),
-                    "success": True,
-                    "error": None,
-                    "data": result if not isinstance(result, str) else {"content": result},
-                    "metadata": None,
-                    "duration_ms": 0.0,
-                },
-            }
-            ops.append({"op": "set", "msg": tool_msg})
-        return {"_ops": ops}
 
     def put(self, tool_call: dict[str, Any], result: Any) -> None:
         """将工具执行结果写入缓存（委托 SDK ToolResultCache.put）。

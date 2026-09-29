@@ -74,12 +74,12 @@ const stubs = vi.hoisted(() => ({
     config?: { model?: string }
   }>,
   runs: {} as Record<string, { status: string }>,
-  defaults: null as null | Promise<{ chat: string; embedding: string; tiers: Record<string, string> }>,
-  llmConfig: null as null | Promise<{
+  llmView: null as null | {
     models: Record<string, { provider: string; model_name: string; display_name: string; default_params?: Record<string, unknown> }>
     providers: Record<string, unknown>
     defaults: { chat: string; embedding: string; tiers: Record<string, string> }
-  }>,
+  },
+  llmError: false as boolean,
 }))
 
 const switchModeMock = vi.hoisted(() => vi.fn(() => Promise.resolve({})))
@@ -128,15 +128,8 @@ vi.mock('@/hooks/queries/useAgentsQuery', () => ({
 vi.mock('@/hooks/queries/usePipelineRunsQuery', () => ({
   usePipelineRunsQuery: () => ({ data: stubs.runs }),
 }))
-vi.mock('@/services/api/config', () => ({
-  getDefaults: () =>
-    (stubs.defaults ??= Promise.resolve({ chat: 'chat-model', embedding: 'emb-model', tiers: {} })),
-  getLLMConfig: () =>
-    (stubs.llmConfig ??= Promise.resolve({
-      models: {},
-      providers: {},
-      defaults: { chat: 'chat-model', embedding: 'emb-model', tiers: {} },
-    })),
+vi.mock('@/hooks/queries/useLlmQueries', () => ({
+  useLlmConfigQuery: () => ({ data: stubs.llmView, isError: stubs.llmError }),
 }))
 vi.mock('@/services/api/thinkingMode', () => ({
   switchThinkingMode: switchModeMock,
@@ -247,12 +240,12 @@ beforeEach(() => {
   stubs.sessions = []
   stubs.agents = []
   stubs.runs = {}
-  stubs.defaults = Promise.resolve({ chat: 'chat-model', embedding: 'emb-model', tiers: {} })
-  stubs.llmConfig = Promise.resolve({
+  stubs.llmView = {
     models: {},
     providers: {},
     defaults: { chat: 'chat-model', embedding: 'emb-model', tiers: {} },
-  })
+  }
+  stubs.llmError = false
   switchModeMock.mockClear()
   switchModeMock.mockImplementation(() => Promise.resolve({}))
   localStorage.clear()
@@ -401,25 +394,6 @@ describe('ChatContainer — 消息过滤与空态', () => {
   })
 })
 
-describe('ChatContainer — 配置加载取消', () => {
-  it('挂载后立即卸载：承诺迟到 resolve 不再写入状态（cancelled 守卫）', async () => {
-    let resolveDefaults!: (v: { chat: string; embedding: string; tiers: Record<string, string> }) => void
-    let resolveLlmConfig!: (v: unknown) => void
-    stubs.defaults = new Promise((res) => (resolveDefaults = res))
-    stubs.llmConfig = new Promise((res) => (resolveLlmConfig = res))
-
-    const view = render(<ChatContainer sessionId="sess-1" onSendMessage={outerSend} />)
-    view.unmount()
-
-    await act(async () => {
-      resolveDefaults({ chat: 'late', embedding: 'e', tiers: { large: 'late-model' } })
-      resolveLlmConfig({ models: {}, providers: {}, defaults: { chat: 'late', embedding: 'e', tiers: {} } })
-    })
-    // 未断言渲染（已卸载）；守卫生效的体现是无 act 外 setState 告警/异常
-    expect(useNotificationStore.getState().notifications).toHaveLength(0)
-  })
-})
-
 describe('ChatContainer — messageJump 透传', () => {
   it('跳转目标管道与激活管道一致 → 透传 MessageList，消费回调清除 uiStore', async () => {
     setupActivePipeline([])
@@ -485,7 +459,7 @@ describe('ChatContainer — 生成态双来源', () => {
 describe('ChatContainer — 模型名解析', () => {
   it('agentId 命中 agent.model，经 tiers 映射为显示名', async () => {
     stubs.agents = [{ id: 'agent-1', configId: 'cfg-1', model: 'large', config: {} }]
-    stubs.defaults = Promise.resolve({ chat: 'chat-model', embedding: 'emb', tiers: { large: 'deepseek-max' } })
+    stubs.llmView = { models: {}, providers: {}, defaults: { chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } } }
     useAgentTabStore.setState({ tabs: [makeMainTab({ agentId: 'agent-1' })], activeTabId: 'main-1' })
     await mountContainer()
     expect(stubs.chatInput?.modelName).toBe('deepseek-max')
@@ -493,7 +467,7 @@ describe('ChatContainer — 模型名解析', () => {
 
   it('agentId 为空时按管道 agentName 兜底解析', async () => {
     stubs.agents = [{ id: 'agent-9', configId: 'planner-agent', model: 'medium', config: {} }]
-    stubs.defaults = Promise.resolve({ chat: 'chat-model', embedding: 'emb', tiers: { medium: 'glm-air' } })
+    stubs.llmView = { models: {}, providers: {}, defaults: { chat: 'c', embedding: 'e', tiers: { medium: 'glm-air' } } }
     usePipelineMessageStore.setState({ pipelines: { 'pipe-1': makePipelineMeta({ agentName: 'planner-agent' }) } })
     useAgentTabStore.setState({ tabs: [makeMainTab()], activeTabId: 'main-1' })
     await mountContainer()
@@ -514,7 +488,7 @@ describe('ChatContainer — 模型名解析', () => {
 
   it('agent.model 缺失时回退 agent.config.model', async () => {
     stubs.agents = [{ id: 'agent-1', configId: 'cfg-1', config: { model: 'small' } }]
-    stubs.defaults = Promise.resolve({ chat: 'c', embedding: 'e', tiers: { small: 'glm-air' } })
+    stubs.llmView = { models: {}, providers: {}, defaults: { chat: 'c', embedding: 'e', tiers: { small: 'glm-air' } } }
     useAgentTabStore.setState({ tabs: [makeMainTab({ agentId: 'agent-1' })], activeTabId: 'main-1' })
     await mountContainer()
     expect(stubs.chatInput?.modelName).toBe('glm-air')
@@ -524,8 +498,8 @@ describe('ChatContainer — 模型名解析', () => {
 describe('ChatContainer — 思考强度', () => {
   it('未显式设置 → 从管道模型 default_params 反向映射（reasoning_effort=low → low）', async () => {
     stubs.agents = [{ id: 'agent-1', model: 'large', config: {} }]
-    stubs.defaults = Promise.resolve({ chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } })
-    stubs.llmConfig = Promise.resolve({
+    stubs.llmView = { models: {}, providers: {}, defaults: { chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } } }
+    stubs.llmView = {
       models: {
         'deepseek-max': {
           provider: 'ds',
@@ -536,7 +510,7 @@ describe('ChatContainer — 思考强度', () => {
       },
       providers: {},
       defaults: { chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } },
-    })
+    }
     useAgentTabStore.setState({ tabs: [makeMainTab({ agentId: 'agent-1' })], activeTabId: 'main-1' })
     await mountContainer()
     expect(stubs.chatInput?.thinkingStrength).toBe('low')
@@ -544,8 +518,8 @@ describe('ChatContainer — 思考强度', () => {
 
   it('标签显式记忆优先于参数反推', async () => {
     stubs.agents = [{ id: 'agent-1', model: 'large', config: {} }]
-    stubs.defaults = Promise.resolve({ chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } })
-    stubs.llmConfig = Promise.resolve({
+    stubs.llmView = { models: {}, providers: {}, defaults: { chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } } }
+    stubs.llmView = {
       models: {
         'deepseek-max': {
           provider: 'ds',
@@ -556,7 +530,7 @@ describe('ChatContainer — 思考强度', () => {
       },
       providers: {},
       defaults: { chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } },
-    })
+    }
     useAgentTabStore.setState({ tabs: [makeMainTab({ agentId: 'agent-1' })], activeTabId: 'main-1' })
     useThinkingModeStore.getState().setStrength('main-1', 'high')
     await mountContainer()
@@ -571,7 +545,7 @@ describe('ChatContainer — 思考强度', () => {
 
   it('切换强度：写入标签记忆并调用 switchThinkingMode（off → 不启用思考）', async () => {
     stubs.agents = [{ id: 'agent-1', model: 'large', config: {} }]
-    stubs.defaults = Promise.resolve({ chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } })
+    stubs.llmView = { models: {}, providers: {}, defaults: { chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } } }
     useAgentTabStore.setState({
       tabs: [makeMainTab({ agentId: 'agent-1' })],
       activeTabId: 'main-1',
@@ -587,7 +561,7 @@ describe('ChatContainer — 思考强度', () => {
 
   it('切换强度失败 → 一次性提示「思考强度同步失败」，本地记忆不受影响', async () => {
     stubs.agents = [{ id: 'agent-1', model: 'large', config: {} }]
-    stubs.defaults = Promise.resolve({ chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } })
+    stubs.llmView = { models: {}, providers: {}, defaults: { chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } } }
     useAgentTabStore.setState({
       tabs: [makeMainTab({ agentId: 'agent-1' })],
       activeTabId: 'main-1',
@@ -633,22 +607,11 @@ describe('ChatContainer — 思考强度', () => {
 })
 
 describe('ChatContainer — 降级提示', () => {
-  it('getDefaults 失败 → 一次性提示「模型信息获取失败」（重复挂载失败不重复弹）', async () => {
-    stubs.defaults = Promise.reject(new Error('网络异常'))
-    await mountContainer()
-    expect(notificationCountByTitle('模型信息获取失败')).toBe(1)
-
-    stubs.defaults = Promise.reject(new Error('再次失败'))
-    await mountContainer()
-    expect(notificationCountByTitle('模型信息获取失败')).toBe(1)
-  })
-
-  it('getLLMConfig 失败 → 一次性提示「LLM 配置获取失败」（重复挂载失败不重复弹）', async () => {
-    stubs.llmConfig = Promise.reject(new Error('网络异常'))
+  it('LLM 配置查询失败 → 一次性提示「LLM 配置获取失败」（重复挂载失败不重复弹）', async () => {
+    stubs.llmError = true
     await mountContainer()
     expect(notificationCountByTitle('LLM 配置获取失败')).toBe(1)
 
-    stubs.llmConfig = Promise.reject(new Error('再次失败'))
     await mountContainer()
     expect(notificationCountByTitle('LLM 配置获取失败')).toBe(1)
   })

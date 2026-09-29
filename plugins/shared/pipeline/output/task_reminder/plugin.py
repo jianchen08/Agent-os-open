@@ -32,11 +32,6 @@ _RUN_KEY = "evaluate_reminder_run"
 # （下划线键被引擎 merge 过滤，双保险）。
 _FAILURE_ROUND_FLAG = "_system_failure_round"
 
-# 对话型模式集合（模式键契约值，TASK_MODES 子集）：这些模式的任务轮是纯对话
-# 演出（文本即交付物），无评估义务。键源 = state.mode（模式物料步骤回写；
-# 面板派发 args 的 mode 键经 execution_context 透传，与消息级上下文同契约）。
-_CONVERSATION_TASK_MODES = frozenset({"roleplay"})
-
 
 class TaskReminder(IOutputPlugin):
     """任务评估提醒 Output 插件。"""
@@ -104,8 +99,7 @@ class TaskReminder(IOutputPlugin):
 
         前置门槛（不属三信号）：pending→running 推进（幂等）/ llm_call 轮 /
         L1 调度层永不触发 / ``task.id`` 存在性（state 单一真值，缺失即会话
-        管道）/ 活跃子任务（纯文本是等待/协调行为）/ 对话型模式任务（文本即
-        交付物，收束见 ``_conversation_round_result``）/ 评估模式连续无文本计数。
+        管道）/ 活跃子任务（纯文本是等待/协调行为）/ 评估模式连续无文本计数。
 
         ``_has_successful_task_evaluate``（messages JSON 文本检测）降为次级
         证据保留——真实路径 LLM 面被 result_format 渲染化，文本形态不作主证据。
@@ -214,21 +208,6 @@ class TaskReminder(IOutputPlugin):
                 iteration,
             )
             return OutputResult()
-
-        # ── 对话型模式任务豁免：roleplay 等对话型模式的任务轮是纯演出，文本
-        #    即交付物，无评估义务——工具零面下评估提醒是催调不存在工具的噪音
-        #    循环，耗尽裁决（failed 改写）对必然无评估证据的对话任务是误杀。
-        #    纯文本轮到此（信号①已放行工具轮、空文本轮已先行返回）即按交付
-        #    收束：补落 completed + end，与信号②补落同一写面通路，对齐会话
-        #    管道「文本即停」会话语义；评估子管道不豁免（其 JSON 检测裁决
-        #    优先级更高，身份随派发透传 mode 键时不得短路评估语义）。──
-        if (
-            str(state.get("mode") or "") in _CONVERSATION_TASK_MODES
-            and not self._is_evaluation_mode(state)
-        ):
-            return self._conversation_round_result(
-                state, iteration=iteration, task_id=task_id,
-            )
 
         # ── 活跃子任务：纯文本是等待/协调行为，不催提交评估 ──
         if await self._has_active_children(task_id, ctx):
@@ -538,31 +517,6 @@ class TaskReminder(IOutputPlugin):
             state_updates["task.ended_at"] = datetime.now(UTC).isoformat()
         logger.info(
             "TaskReminder[iter=%s][task=%s]: state completion evidence, closing round (end)",
-            iteration,
-            task_id,
-        )
-        state_updates["ended"] = True
-        return OutputResult(state_updates=state_updates)
-
-    def _conversation_round_result(
-        self,
-        state: dict[str, Any],
-        *,
-        iteration: Any,
-        task_id: str,
-    ) -> OutputResult:
-        """对话型任务文本轮收束：演出文本即交付物，补落 completed 并 end。
-
-        写面与信号②补落同一通路（task.status 尚为出生/执行值时补落 completed
-        + ended_at，已落终态时幂等跳过）；end 信号终止任务管道（对话型任务的
-        提醒预算与耗尽裁决均不适用，本收束点是该类任务唯一的当轮终局写点）。
-        """
-        state_updates: dict[str, Any] = {"_has_new_llm_input": False}
-        if str(state.get("task.status") or "") != "completed":
-            state_updates["task.status"] = "completed"
-            state_updates["task.ended_at"] = datetime.now(UTC).isoformat()
-        logger.info(
-            "TaskReminder[iter=%s][task=%s]: conversation task text deliverable, closing round (end)",
             iteration,
             task_id,
         )

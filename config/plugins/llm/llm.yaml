@@ -138,6 +138,39 @@ models:
       medium:
         thinking:
           type: adaptive
+      'off':
+        thinking:
+          type: disabled
+  minimax-m3.1-flash-preview:
+    api_base: https://api.minimaxi.com/v1
+    context_window: 1000000
+    default_params:
+      max_tokens: 100000
+      reasoning_effort: max
+      temperature: 0.7
+    display_name: MiniMax-M3.1-Flash-Preview
+    model_name: MiniMax-M3.1-Flash-Preview
+    multimodal:
+      max_image_size: 20971520
+      max_video_size: 104857600
+      supported_image_types:
+      - image/jpeg
+      - image/png
+      - image/gif
+      - image/webp
+      supports_image: true
+      supports_video: true
+    provider: minimax
+    reasoning_model: true
+    thinking_strength_params:
+      high:
+        reasoning_effort: max
+      low:
+        reasoning_effort: low
+      medium:
+        reasoning_effort: medium
+      'off':
+        reasoning_effort: low
   mock-llm:
     api_base: http://127.0.0.1:18080/v1
     api_key: '****'
@@ -328,19 +361,6 @@ providers:
       max_concurrent: 6
       rpm: 10
       token_quota: 0
-    thinking_strength_params:
-      high:
-        thinking:
-          type: adaptive
-      low:
-        thinking:
-          type: disabled
-      medium:
-        thinking:
-          type: adaptive
-      'off':
-        thinking:
-          type: disabled
     type: minimax
   mistral:
     api_base: https://api.mistral.ai/v1

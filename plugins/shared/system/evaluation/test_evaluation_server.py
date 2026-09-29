@@ -10,7 +10,9 @@
    非法分页参数回退）、单项 404、内置只读 DELETE 405、未知 path 404；
 4. 读面底层：_load_metrics 缺文件/坏 yaml 上抛、空内容=真空注册表、
    读失败经 http.handle 转 500 错误信封（配置损坏 ≠ 无指标）、
-   _project_root 环境变量与上溯兜底、_metric_to_response 字段补齐默认值。
+   _project_root 环境变量与上溯兜底、_metric_to_response 字段补齐默认值；
+5. 指标注册表 yaml 单源（_load_metric_registry）：键面/params_schema/required
+   随定义走，损坏 → 空表诚实判未注册，与生产 yaml 对齐回归锚。
 """
 from __future__ import annotations
 
@@ -44,12 +46,64 @@ def _load_server_module(monkeypatch: pytest.MonkeyPatch, project_root: Path) -> 
 
 @pytest.fixture
 def metrics_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """带汇总 yaml 的项目根。"""
+    """带汇总 yaml 的项目根。
+
+    内置四指标带 input_schema（与生产 yaml 同构子集）：指标注册表已改为
+    yaml 单源加载，注册/未知类型判定与 params_schema 均随定义走。
+    """
     cfg = tmp_path / "config" / "plugins" / "evaluation"
     cfg.mkdir(parents=True)
     (cfg / "evaluation_metrics.yaml").write_text(
         """
 metrics:
+  - name: file_check
+    description: 文件检查
+    category: file
+    evaluator_type: tool
+    level: 1
+    input_schema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: 文件或目录路径
+      required: [path]
+  - name: bash_check
+    description: 命令检查
+    category: command
+    evaluator_type: tool
+    input_schema:
+      type: object
+      properties:
+        command:
+          type: string
+      required: [command]
+  - name: semantic_check
+    description: 语义检查
+    category: semantic
+    evaluator_type: agent
+    input_schema:
+      type: object
+      properties:
+        output:
+          type: string
+          description: 要检查的输出
+        expected:
+          type: string
+          description: 期望的语义描述
+      required: [output]
+  - name: human_review
+    description: 人工审核
+    category: human
+    evaluator_type: human
+    input_schema:
+      type: object
+      properties:
+        mode:
+          type: string
+        title:
+          type: string
+      required: [mode, title]
   - name: m_file
     description: 文件检查
     category: functional
@@ -186,8 +240,16 @@ class TestHttpHandleMetricsList:
             )
         )
         assert status == 200
-        assert body["total"] == 3
-        assert {m["id"] for m in body["metrics"]} == {"m_file", "m_bash", "m_sem"}
+        assert body["total"] == 7
+        assert {m["id"] for m in body["metrics"]} == {
+            "file_check",
+            "bash_check",
+            "semantic_check",
+            "human_review",
+            "m_file",
+            "m_bash",
+            "m_sem",
+        }
 
     def test_filter_by_category_and_status(self, metrics_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         srv = _load_server_module(monkeypatch, metrics_root)
@@ -252,7 +314,7 @@ class TestHttpHandleMetricsList:
                 )
             )
         )
-        assert len(page["metrics"]) == 3 and page["total"] == 3
+        assert len(page["metrics"]) == 7 and page["total"] == 7
 
     def test_pagination_and_invalid_params_fallback(self, metrics_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         srv = _load_server_module(monkeypatch, metrics_root)
@@ -265,7 +327,7 @@ class TestHttpHandleMetricsList:
                 )
             )
         )
-        assert page["total"] == 3
+        assert page["total"] == 7
         assert len(page["metrics"]) == 1
 
         # 非法分页参数 → 回退全量
@@ -278,7 +340,7 @@ class TestHttpHandleMetricsList:
                 )
             )
         )
-        assert len(full["metrics"]) == 3
+        assert len(full["metrics"]) == 7
 
 
 class TestHttpHandleSingleAndErrors:
@@ -317,10 +379,81 @@ class TestHttpHandleSingleAndErrors:
         assert body["error"] == "not found"
 
     def test_metric_registry_resource(self, metrics_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """指标注册表资源暴露（内置四类型键面）。"""
+        """指标注册表资源 = yaml 单源：键面与 params_schema/required 随定义走。"""
         srv = _load_server_module(monkeypatch, metrics_root)
         reg = srv._metric_registry_resource()
-        assert {"file_check", "bash_check", "semantic_check", "human_review"} == set(reg["metrics"])
+        assert {
+            "file_check",
+            "bash_check",
+            "semantic_check",
+            "human_review",
+            "m_file",
+            "m_bash",
+            "m_sem",
+        } == set(reg["metrics"])
+        # 注册项与 input_schema 同源（params_schema=properties，required 直取）
+        assert reg["metrics"]["semantic_check"]["params_schema"] == {
+            "output": {"type": "string", "description": "要检查的输出"},
+            "expected": {"type": "string", "description": "期望的语义描述"},
+        }
+        assert reg["metrics"]["semantic_check"]["required"] == ["output"]
+        assert reg["metrics"]["human_review"]["required"] == ["mode", "title"]
+        # 无 input_schema 的定义 → 空 schema 面（不猜）
+        assert reg["metrics"]["m_sem"]["params_schema"] == {}
+        assert reg["metrics"]["m_sem"]["required"] == []
+
+
+class TestMetricRegistrySingleSource:
+    """指标注册表 = 汇总 yaml 单源（semantic_check 口径统一回归锚）。"""
+
+    def test_registry_matches_production_yaml(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """生产 yaml（仓库根）驱动注册表：semantic_check required=[expected]
+        （白话 expect 映射的 canonical 用法，ADR 2026-09-29-acceptance-flat-fields），
+        params_schema 含 output/expected 且无 criteria（旧硬编码 {"criteria"}
+        与定义矛盾的双源已消灭）。"""
+        repo_root = _DIR.parents[3]
+        srv = _load_server_module(monkeypatch, repo_root)
+        reg = srv._load_metric_registry()
+        assert "semantic_check" in reg
+        sem = reg["semantic_check"]
+        assert sem["required"] == ["expected"]
+        assert "output" in sem["params_schema"]
+        assert "expected" in sem["params_schema"]
+        assert "criteria" not in sem["params_schema"]
+
+    def test_registry_read_failure_yields_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """yaml 损坏 → 注册表空表（与 http 读面的 5xx 错误信封分立）。"""
+        broken = tmp_path / "config" / "plugins" / "evaluation"
+        broken.mkdir(parents=True)
+        (broken / "evaluation_metrics.yaml").write_text("metrics: [ {name: ,", encoding="utf-8")
+        srv = _load_server_module(monkeypatch, tmp_path)
+        assert srv._load_metric_registry() == {}
+
+    def test_registry_skips_nameless_entries(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """定义缺 name 的条目跳过（不产生无名注册项）。"""
+        cfg = tmp_path / "config" / "plugins" / "evaluation"
+        cfg.mkdir(parents=True)
+        (cfg / "evaluation_metrics.yaml").write_text(
+            "metrics:\n  - description: 无名条目\n  - name: ok_metric\n",
+            encoding="utf-8",
+        )
+        srv = _load_server_module(monkeypatch, tmp_path)
+        assert set(srv._load_metric_registry().keys()) == {"ok_metric"}
+
+    def test_unknown_type_when_registry_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """注册表空（yaml 损坏）→ evaluation_run 对任意类型诚实判失败。"""
+        broken = tmp_path / "config" / "plugins" / "evaluation"
+        broken.mkdir(parents=True)
+        (broken / "evaluation_metrics.yaml").write_text("metrics: [ {name: ,", encoding="utf-8")
+        srv = _load_server_module(monkeypatch, tmp_path)
+        summary = asyncio.run(
+            srv.evaluation_run(
+                task_id="t-broken",
+                metrics=[{"metric_id": "f", "type": "file_check", "params": {}}],
+            )
+        )
+        assert summary["all_passed"] is False
+        assert "unknown metric type" in summary["results"][0]["error"]
 
 
 class TestHttpHandleMetricsReadFailure:

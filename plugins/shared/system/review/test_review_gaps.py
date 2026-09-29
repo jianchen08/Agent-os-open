@@ -716,7 +716,7 @@ class TestOnLoadBackendInjection:
         await mod._on_load({})
 
         got = await mod.get_report("review-none-load")
-        assert got == {"error": "review not found", "review_id": "review-none-load"}
+        assert got == {"success": False, "error": "review not found", "review_id": "review-none-load"}
 
 
 class TestMediaReviewUploadProtocolErrors:

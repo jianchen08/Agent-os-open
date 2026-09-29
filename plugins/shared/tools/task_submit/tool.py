@@ -208,12 +208,23 @@ for _d in _DANGEROUS_WINDOWS_DIRS + _DANGEROUS_UNIX_DIRS:
 
 
 def _metrics_config_path() -> Path:
-    """评估指标配置路径（仓库根 config/plugins/evaluation/evaluation_metrics.yaml）。
+    """评估指标配置路径（config/plugins/evaluation/evaluation_metrics.yaml）。
 
-    与 task_evaluate 同款读取；指标定义的唯一加载点（提交期校验与
-    派发指令详情展开共用）。
+    祖先逐级探测（与 task_evaluate/_executor.py 的 ``default_metrics_path``
+    互为对偶，两插件独立加载不抽公共模块，改解析算法须两边同步改）：首个
+    含该 yaml 的祖先即根，三布局单算法通吃——仓库布局（4 级）、装机树布局
+    （resources/plugins/shared/tools/task_submit，4 级）、用户空间平铺布局
+    （plugins/task_submit，2 级；向上 4 级会落到 %APPDATA% 外的幽灵路径，
+    2026-09-29 装机实证）。全 miss 回落历史行为（向上 4 级拼相对尾）。
+    指标定义的唯一加载点（提交期校验与派发指令详情展开共用）。
     """
-    return Path(__file__).resolve().parents[4] / "config" / "plugins" / "evaluation" / "evaluation_metrics.yaml"
+    here = Path(__file__).resolve().parent
+    probe = Path("config") / "plugins" / "evaluation" / "evaluation_metrics.yaml"
+    for ancestor in (here, *here.parents):
+        candidate = ancestor / probe
+        if candidate.is_file():
+            return candidate
+    return here.parents[3] / probe
 
 
 def _load_metric_definitions() -> dict[str, dict[str, Any]]:
@@ -238,7 +249,7 @@ def _load_metric_definitions() -> dict[str, dict[str, Any]]:
 def _get_valid_metric_ids() -> set[str] | None:
     """获取所有合法的评估指标 ID 集合。
 
-    评估指标的真相来源是 config/evaluation/evaluation_metrics.yaml
+    评估指标的真相来源是 config/plugins/evaluation/evaluation_metrics.yaml
     （evaluation 插件同款读取）。
     用于在提交期校验 LLM 传入的 acceptance_criteria key 是否为真实存在的指标 ID，
     避免「把 pass_threshold 等 value 子字段误填为指标 ID」导致评估期反复
@@ -253,10 +264,26 @@ def _get_valid_metric_ids() -> set[str] | None:
     return valid or None
 
 
+# ── 白话验收标准（扁平字段，唯一宣传写法；用户裁定 2026-09-29，ADR
+# docs/decisions/2026-09-29-acceptance-flat-fields.md）──
+# 老指标名 dict 形态静默兼容（不宣传）；两形态混用拒绝（语义归属不明）。
+_FLAT_ACCEPTANCE_FIELDS = ("files", "expect", "command")
+_FLAT_INSTANCE_SEP = "::"
+
+
+def _metric_definition_id(key: str) -> str:
+    """acceptance_criteria 键 → 指标定义 ID。
+
+    白话展开的多实例键形如 ``file_check::chapters/chapter_025.md``（::<实例>
+    后缀仅区分实例，评估参数自带真实坐标），取首段即定义 ID。
+    """
+    return key.split(_FLAT_INSTANCE_SEP, 1)[0]
+
+
 def _validate_metric_ids(
     acceptance_criteria: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str]]:
-    """校验 acceptance_criteria 的 key 是否为合法指标 ID。
+    """校验 acceptance_criteria 的 key 是否为合法指标 ID（实例键按定义 ID 首段）。
 
     - 合法 key 保留；
     - 非法 key 剔除，记入返回的 invalid_ids 列表，由调用方决定如何处理
@@ -279,11 +306,163 @@ def _validate_metric_ids(
     filtered: dict[str, Any] = {}
     invalid: list[str] = []
     for key, value in acceptance_criteria.items():
-        if key in valid_ids:
+        if _metric_definition_id(key) in valid_ids:
             filtered[key] = value
         else:
             invalid.append(key)
     return filtered, invalid
+
+
+def _invalid_flat_field(field: str, expectation: str) -> ToolExecutionResult:
+    """白话字段形态非法的失败信封（自描述期望形态）。"""
+    return create_failure_result(
+        error=f"acceptance_criteria 的白话字段 {field} 形态非法，需要{expectation}。",
+        error_code="INVALID_ACCEPTANCE_FIELD",
+    )
+
+
+def _apply_legacy_metric_aliases(acceptance_criteria: dict[str, Any]) -> dict[str, Any]:
+    """深格式别名容错（就地归一，INFO 日志透明告知）——限 semantic_check 条目。
+
+    - expected_output → expected（dict/非串形态 json.dumps/str 归一）；
+    - criteria → 并入 expected（与既有值换行拼接，不覆盖）；
+    归一结果落 input_params（缺席则创建），提交期必填校验按归一后判定——
+    旧 criteria 形态（此前必然被拒）由此直接可用。别名不越指标定义：
+    expected 是 semantic_check 的定义参数，其余指标不改写。
+    """
+    for metric_id, config in acceptance_criteria.items():
+        if _metric_definition_id(metric_id) != "semantic_check" or not isinstance(config, dict):
+            continue
+        targets: list[dict[str, Any]] = [config]
+        if isinstance(config.get("input_params"), dict):
+            targets.append(config["input_params"])
+        merged: list[str] = []
+        for target in targets:
+            for alias in ("expected_output", "criteria"):
+                if alias not in target:
+                    continue
+                value = target.pop(alias)
+                if isinstance(value, dict):
+                    value = json.dumps(value, ensure_ascii=False)
+                elif value is not None and not isinstance(value, str):
+                    value = str(value)
+                if isinstance(value, str) and value.strip():
+                    merged.append(value)
+                    logger.info(
+                        "[TaskSubmit] 深格式别名归一 | metric=%s | %s→expected",
+                        metric_id,
+                        alias,
+                    )
+        if merged:
+            params = config.setdefault("input_params", {})
+            existing = str(params.get("expected") or "")
+            params["expected"] = "\n".join([existing, *merged]) if existing else "\n".join(merged)
+    return acceptance_criteria
+
+
+def _expand_flat_acceptance_criteria(
+    acceptance_criteria: dict[str, Any],
+) -> tuple[dict[str, Any], ToolExecutionResult | None]:
+    """白话扁平字段展开（主形态）+ 深格式别名容错。
+
+    - 白话字段 files/expect/command 任选组合（零指标知识零嵌套）：
+      files → 逐文件 file_check（存在且非空，实例键 ``file_check::<路径>``）；
+      expect → semantic_check(expected=expect)；command → bash_check(command=command)；
+    - 与指标名键混用 → MIXED_ACCEPTANCE_CRITERIA 拒绝（两形态语义归属不明）；
+    - 白话字段全空（无任何可执行标准）→ EMPTY_ACCEPTANCE_CRITERIA 拒绝，
+      错误动态附全部可用指标+必填（复用 _metric_required_examples，不另造清单）；
+    - 纯深格式 → 静默兼容原样（semantic_check 条目做别名容错）。
+    """
+    flat_present = [k for k in _FLAT_ACCEPTANCE_FIELDS if k in acceptance_criteria]
+    if not flat_present:
+        return _apply_legacy_metric_aliases(acceptance_criteria), None
+
+    metric_keys = sorted(k for k in acceptance_criteria if k not in _FLAT_ACCEPTANCE_FIELDS)
+    if metric_keys:
+        logger.warning(
+            "[TaskSubmit] acceptance_criteria 白话字段与指标名混用，拒绝 | flat=%s | metric_keys=%s",
+            flat_present,
+            metric_keys,
+        )
+        return {}, create_failure_result(
+            error=(
+                f"acceptance_criteria 混用了白话字段 {flat_present} 与指标名键 {metric_keys}，"
+                "两种写法不能同时使用。请只用白话字段（files/expect/command 任选组合），"
+                "或只用指标名 dict 形态（老写法，仍兼容）。"
+            ),
+            error_code="MIXED_ACCEPTANCE_CRITERIA",
+        )
+
+    expanded: dict[str, Any] = {}
+
+    files = acceptance_criteria.get("files")
+    if files is not None:
+        if isinstance(files, str):
+            files = [files]
+        if not isinstance(files, list) or not all(
+            isinstance(f, str) and f.strip() for f in files
+        ):
+            return {}, _invalid_flat_field("files", "非空字符串数组（产出文件相对路径）")
+        for path in files:
+            clean = path.strip()
+            expanded[f"file_check{_FLAT_INSTANCE_SEP}{clean}"] = {
+                "input_params": {"path": clean, "check": "not_empty"}
+            }
+
+    expect = acceptance_criteria.get("expect")
+    if expect is not None:
+        if not isinstance(expect, str):
+            return {}, _invalid_flat_field("expect", "非空字符串（验收期望的白话描述）")
+        if expect.strip():
+            expanded["semantic_check"] = {"input_params": {"expected": expect}}
+
+    command = acceptance_criteria.get("command")
+    if command is not None:
+        if not isinstance(command, str):
+            return {}, _invalid_flat_field("command", "非空字符串（验收命令，退出码 0=通过）")
+        if command.strip():
+            expanded["bash_check"] = {"input_params": {"command": command}}
+
+    if not expanded:
+        available = _metric_required_examples(sorted(_load_metric_definitions().keys()))
+        menu = f"当前可用指标及必填参数：{available}。" if available else ""
+        logger.warning(
+            "[TaskSubmit] acceptance_criteria 白话字段全空，拒绝提交 | flat=%s",
+            flat_present,
+        )
+        return {}, create_failure_result(
+            error=(
+                "acceptance_criteria 白话字段全部为空，没有任何可执行的验收标准。"
+                "可用白话字段：files（产出文件相对路径数组，逐文件检查存在且非空）、"
+                "expect（验收期望描述，评估 agent 在工作区内核对产出）、"
+                "command（验收命令，退出码 0 = 通过）。" + menu
+            ),
+            error_code="EMPTY_ACCEPTANCE_CRITERIA",
+        )
+    return expanded, None
+
+
+def _metric_required_examples(metric_ids: list[str]) -> str:
+    """按指标定义动态生成必填参数示例（单源 = evaluation_metrics.yaml）。
+
+    示例形如 ``file_check 需要 {"path": "<文件或目录路径>"}``；占位说明取自
+    input_schema.properties.<field>.description。定义增删改自动跟随，永不与
+    yaml 漂移。定义缺失/无必填的指标不生成条目。
+    """
+    definitions = _load_metric_definitions()
+    examples: list[str] = []
+    for metric_id in metric_ids:
+        schema = (definitions.get(metric_id) or {}).get("input_schema") or {}
+        required = schema.get("required") or []
+        if not required:
+            continue
+        properties = schema.get("properties") or {}
+        sample = {
+            field: f"<{(properties.get(field) or {}).get('description') or field}>"
+            for field in required
+        }
+        examples.append(f"{metric_id} 需要 {json.dumps(sample, ensure_ascii=False)}")
+    return "；".join(examples)
 
 
 def _validate_required_metric_params(
@@ -291,15 +470,19 @@ def _validate_required_metric_params(
 ) -> ToolExecutionResult | None:
     """校验各指标的必填 input_params（数据源 = 指标定义 input_schema.required）。
 
-    缺必填参数返回失败信封（INVALID_METRIC_PARAMS，逐指标列出缺失字段），
-    全部齐备返回 None。校验纯数据驱动——新增/修改指标定义自动生效。
+    缺必填参数返回失败信封（INVALID_METRIC_PARAMS，逐指标列出缺失字段，
+    修复示例由同一份定义动态生成），全部齐备返回 None。校验纯数据驱动——
+    新增/修改指标定义自动生效。
     """
     definitions = _load_metric_definitions()
     if not definitions:
         return None
     problems: list[str] = []
+    problem_ids: list[str] = []
     for metric_id, config in acceptance_criteria.items():
-        schema = (definitions.get(metric_id) or {}).get("input_schema") or {}
+        schema = (
+            (definitions.get(_metric_definition_id(metric_id)) or {}).get("input_schema") or {}
+        )
         required = schema.get("required") or []
         if not required:
             continue
@@ -307,6 +490,7 @@ def _validate_required_metric_params(
         params = params if isinstance(params, dict) else {}
         missing = [field for field in required if params.get(field) in (None, "")]
         if missing:
+            problem_ids.append(metric_id)
             problems.append(f"{metric_id} 缺必填参数 {missing}")
     if not problems:
         return None
@@ -314,15 +498,16 @@ def _validate_required_metric_params(
         "[TaskSubmit] acceptance_criteria 必填 input_params 缺失，拒绝提交 | problems=%s",
         problems,
     )
+    examples = _metric_required_examples(problem_ids)
+    hint = f"（如 {examples}）" if examples else ""
     return create_failure_result(
         error=(
             "acceptance_criteria 的评估指标缺少必填 input_params："
             + "；".join(problems)
             + "。缺失字段会在评估期每轮失败且无法自愈，"
             "请在对应指标的 input_params 中补齐后重新提交"
-            "（如 file_check 需要 {\"path\": \"产出文件相对路径\"}，"
-            "bash_check 需要 {\"command\": \"检查命令\"}，"
-            "semantic_check 需要 {\"criteria\": \"评估要求描述\"}）。"
+            + hint
+            + "。"
         ),
         error_code="INVALID_METRIC_PARAMS",
     )
@@ -413,7 +598,7 @@ def _build_evaluation_criteria_prompt(acceptance_criteria: dict[str, Any]) -> st
 
     parts: list[str] = []
     for metric_id, config in acceptance_criteria.items():
-        definition = definitions.get(metric_id)
+        definition = definitions.get(_metric_definition_id(metric_id))
         if not definition:
             continue
         lines: list[str] = []
@@ -504,43 +689,16 @@ _TASK_SUBMIT_INPUT_SCHEMA: dict[str, Any] = {
         "acceptance_criteria": {
             "type": "object",
             "description": (
-                "验收标准字典（可选，但推荐填写）。key 为评估指标 ID，value 为配置对象。"
-                "评估指标 ID 必须从下列内置指标中选取，按验证强度递增："
-                "\n- file_check：文件检查（工具自动，验证文件存在性/非空/内容匹配）"
-                "\n- bash_check：命令检查（工具自动，通过命令退出码判定结果）"
-                "\n- semantic_check：语义检查（agent 自动，验证意图覆盖/匹配/幻觉等语义层面）"
-                "\n- human_review：人工审核（人类执行，验证需要人工审批/复核的主观或不可逆判断）"
-                "\n选用规则：用户要求'人类评估/人工审核/人工确认'时必须用 human_review，"
-                "不得用 semantic_check 替代；semantic_check 是 agent 自动语义判断，不涉及人类。"
-                "指标 ID 必须精确匹配，禁止自创或用 value 子字段名（如 pass_threshold）充当 key。"
+                "验收标准（可选，推荐填写）。扁平白话字段，任选组合：\n"
+                '- files：产出文件相对路径数组，逐文件检查存在且非空，'
+                '如 ["chapters/chapter_025.md"]\n'
+                "- expect：验收期望的白话描述（评估 agent 在工作区内核对产出），"
+                '如 "总纲与25章每章1200-1800字剧情连续，progress.md 记录完整"\n'
+                '- command：验收命令（退出码 0 = 通过），如 "pytest tests/ -q"\n'
+                '示例：{"files": ["chapters/chapter_025.md"], '
+                '"expect": "总纲与25章每章1200-1800字剧情连续，progress.md 记录完整"}\n'
+                "不要写指标名或嵌套对象。"
             ),
-            "additionalProperties": {
-                "type": "object",
-                "description": "评估指标配置对象",
-                "properties": {
-                    "input_params": {
-                        "type": "object",
-                        "description": (
-                            "传递给评估工具的参数。不同指标所需参数不同："
-                            'file_check 需要 {"path": "src/main.py"}；'
-                            'bash_check 需要 {"command": "pytest tests/"}；'
-                            'semantic_check 需要 {"criteria": "评估要求描述"}；'
-                            'human_review 需要 {"title": "审核标题", "mode": "choice"}。'
-                        ),
-                    },
-                    "expected_output": {
-                        "type": "object",
-                        "description": "预期输出，用于验证评估结果（可选）",
-                    },
-                    "pass_threshold": {
-                        "type": "number",
-                        "minimum": 0,
-                        "maximum": 100,
-                        "description": "任务级别的通过阈值（0-100），优先级高于指标默认阈值",
-                    },
-                },
-                "required": [],
-            },
         },
         "project_id": {
             "type": "string",
@@ -621,26 +779,19 @@ _TASK_SUBMIT_INPUT_SCHEMA: dict[str, Any] = {
         "orchestration_key": {
             "type": "string",
             "description": (
-                "编排键（可选）。显式指定管道定义（函数），如 autonomous 或 "
-                "mode_X/<编排名>。注意这是编排定义键，不是运行实例 pipeline_id。"
-                "显式键不存在或提供插件被禁用 = 结构化报错（不会静默改走默认编排）。"
-                "未指定时按 mode 限定候选解析，仍无候选则兜底 autonomous。"
+                "编排键（可选）。显式指定管道定义（函数）= config/pipelines "
+                "登记名（如 autonomous、roleplay）。注意这是管道配置登记名，"
+                "不是运行实例 pipeline_id。显式键不存在或提供插件被禁用 = "
+                "结构化报错（不会静默改走默认编排）。未指定时兜底 autonomous。"
             ),
         },
         "mode": {
             "type": "string",
             "description": (
-                "模式键（可选）。用户显式约束：把编排候选限定为该模式包的 "
-                "pipelines（文件头 task_kinds 与 task_kind 匹配者优先）；"
-                "该模式包无自有编排或候选无法区分意图时仍兜底 autonomous"
-                "（约束非门槛）。"
-            ),
-        },
-        "task_kind": {
-            "type": "string",
-            "description": (
-                "任务型标注（可选）。与模式编排文件头 task_kinds 匹配，"
-                "用于同模式多编排时的优先选择；不影响 autonomous 兜底。"
+                "模式身份键（可选，[a-z][a-z0-9_]{0,63}，小写标识）。"
+                "派发带 mode → 子任务出生即受该模式包控制（模式物料/人设接管"
+                "按该模式解析，设计 D6）；与管道选择解耦（管道由 "
+                "orchestration_key / 兜底决定）。"
             ),
         },
     },
@@ -882,6 +1033,12 @@ class TaskSubmitTool(BuiltinTool):
                 list(acceptance_criteria.keys()),
             )
 
+        # ── 白话扁平字段展开（主形态）+ 深格式别名容错 ──
+        expanded, flat_fail = _expand_flat_acceptance_criteria(acceptance_criteria)
+        if flat_fail is not None:
+            return {}, flat_fail
+        acceptance_criteria = expanded
+
         # ── 评估指标 ID 合法性校验 ──
         # 防止 LLM 把 pass_threshold / $text 等 value 子字段误填为 acceptance_criteria
         # 的 key（即 metric_id），导致评估期 METRIC_NOT_FOUND 反复重试直至失败。
@@ -891,6 +1048,7 @@ class TaskSubmitTool(BuiltinTool):
             if invalid_ids and not normalized:
                 valid_ids = _get_valid_metric_ids() or set()
                 valid_list = ", ".join(sorted(valid_ids)) if valid_ids else "(指标加载失败)"
+                menu = _metric_required_examples(sorted(valid_ids))
                 logger.warning(
                     "[TaskSubmit] acceptance_criteria 全部 key 无效，拒绝提交 | invalid=%s | valid=%s",
                     invalid_ids,
@@ -902,7 +1060,9 @@ class TaskSubmitTool(BuiltinTool):
                         f"{invalid_ids}。这些 key 必须是真实存在的评估指标 ID，"
                         f"不能是 pass_threshold / expected_output 等 value 子字段。"
                         f"当前合法指标 ID: {valid_list}。"
-                        "请改用合法指标 ID 重新提交（系统不会自动补全或覆盖你传入的指标）。"
+                        + (f"各指标必填参数：{menu}。" if menu else "")
+                        + "也可改用白话扁平字段 files/expect/command（任选组合，无需指标知识）。"
+                        "请修正后重新提交（系统不会自动补全或覆盖你传入的指标）。"
                     ),
                     error_code="INVALID_METRIC_ID",
                 )
@@ -1516,7 +1676,6 @@ class TaskSubmitTool(BuiltinTool):
             "parent_task_id",
             "session_id",
             "thread_id",
-            "task_kind",
             "inherit_from",
             "inherit_mode",
         ):
@@ -1533,9 +1692,10 @@ class TaskSubmitTool(BuiltinTool):
     ) -> tuple[str, ToolExecutionResult | None]:
         """编排解析 + 完备性校验（§3.3 实例化时序：解析 → 校验 → 实例化）。
 
-        - 三级解析（域逻辑归 tasks/orchestration.py）：显式 orchestration_key
-          → mode 限定候选 → autonomous 兜底；旧调用（无编排键/mode）走③，
-          行为不变（additive）；
+        - 两级解析（域逻辑归 tasks/orchestration.py）：显式 orchestration_key
+          （config/pipelines 登记名）→ autonomous 兜底；旧调用（无编排键）
+          走兜底，行为不变；mode 键不参与编排选择（模式控制经
+          execution_context.mode 透传给消费面，设计 D6）；
         - 完备性（§3.5，派发期、实例化前）：初始输入集 ⊇ 所选编排派生输入集
           （成员 step required_state_inputs 并集，H2 静态声明），缺字段门口
           拒派；结构化错误随 metadata 可编程消费（M2 反馈回路）。
@@ -1549,8 +1709,6 @@ class TaskSubmitTool(BuiltinTool):
             definitions = orchestration.discover_orchestrations()
             definition = orchestration.resolve_orchestration(
                 explicit_key=str(inputs.get("orchestration_key") or ""),
-                mode_key=str(inputs.get("mode") or ""),
-                task_kind=str(inputs.get("task_kind") or ""),
                 orchestrations=definitions,
             )
         except orchestration.OrchestrationError as exc:

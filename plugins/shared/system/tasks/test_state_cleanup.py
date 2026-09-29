@@ -529,6 +529,41 @@ class TestFailCancelComplete:
         await svc._try_destroy_container_if_idle("t-2")  # 不抛异常即通过
 
     @pytest.mark.asyncio
+    async def test_try_destroy_container_if_idle_import_missing_skips_quietly(
+        self, svc: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """isolation 面未装载（导入 ImportError，装机实证 decider 缺失签名）→
+        显式可选依赖：DEBUG 跳过，不再 WARNING 噪声。"""
+        import logging
+
+        monkeypatch.setitem(sys.modules, "isolation.manager", None)
+        with caplog.at_level(logging.DEBUG):
+            await svc._try_destroy_container_if_idle("t-3")  # 不抛异常即通过
+
+        warned = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert warned == []
+        debugs = [r for r in caplog.records if r.levelno == logging.DEBUG]
+        assert any("isolation" in r.getMessage() for r in debugs)
+
+    @pytest.mark.asyncio
+    async def test_try_destroy_container_if_idle_runtime_failure_still_warns(
+        self, svc: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """导入成功但运行期失败 → 仍 WARNING（与可选缺失相区分）。"""
+        import logging
+
+        async def boom() -> Any:
+            raise RuntimeError("manager down")
+
+        _install_fake_package(
+            monkeypatch, "isolation.manager", type("IM", (), {"get_isolation_manager": boom})()
+        )
+        with caplog.at_level(logging.WARNING):
+            await svc._try_destroy_container_if_idle("t-4")  # 不抛异常即通过
+
+        assert any("终态销毁容器检查失败" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
     async def test_cancel_cascade_storage_none(self) -> None:
         from service import TaskService
 

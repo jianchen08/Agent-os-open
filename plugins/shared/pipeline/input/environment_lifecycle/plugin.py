@@ -149,7 +149,9 @@ class EnvironmentLifecyclePlugin(IInputPlugin):
                 exc,
             )
             return PluginResult(state_updates={"environment_released": False})
-        # isolation.destroy_env 约定业务失败以 {"error": ...} 返回而非抛异常
+        # isolation.destroy_env 约定业务失败显式 success=False 而非抛异常——
+        # 经 tool-executor 信封后失败态 error 键非空（内核 ②-b 取业务 error 落
+        # 信封），此处读信封 error 键即覆盖全部失败形态
         if isinstance(raw, dict) and raw.get("error"):
             logger.warning(
                 "[EnvironmentLifecycle] exit 销毁环境被拒绝（留痕不阻断）| task=%s | error=%s",

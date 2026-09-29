@@ -21,6 +21,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import {
   TASK_STATUSES,
   TASK_STATUS_ALIASES,
+  TASK_STATUS_EVAL_GATE_VALUE,
   TASK_STATUS_LABELS,
   normalizeTaskStatus,
   taskStatusLabel,
@@ -88,7 +89,7 @@ describe('任务状态词表 ↔ 后端写面对账（契约）', () => {
     expect([...TASK_STATUSES].sort()).toEqual([...new Set(enumValues)].sort())
   })
 
-  it('插件写面所有 task.status 字面量值都落在七态词表内', () => {
+  it('插件写面所有 task.status 字面量值都落在词表（七态+评估闸门值）内', () => {
     const source = collectSourceText('plugins/shared')
     expect(source.length).toBeGreaterThan(0)
     const written = new Set<string>()
@@ -96,7 +97,10 @@ describe('任务状态词表 ↔ 后端写面对账（契约）', () => {
       written.add(m[1])
     }
     expect(written.size).toBeGreaterThan(0)
-    const outside = [...written].filter((v) => !(TASK_STATUSES as readonly string[]).includes(v))
+    // 写面收口集合 = 七态 + 评估闸门未决值（reconcile 托底补落，
+    // ADR 2026-09-28-task-completed-eval-gate-only 授权的记账态，非生命周期态）
+    const allowed = [...TASK_STATUSES, TASK_STATUS_EVAL_GATE_VALUE]
+    const outside = [...written].filter((v) => !allowed.includes(v))
     expect(outside).toEqual([])
   })
 

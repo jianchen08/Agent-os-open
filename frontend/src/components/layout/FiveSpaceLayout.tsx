@@ -1,7 +1,7 @@
 /** Five Space Layout Component Implements the five-rendering-space layout: */
 
 import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react'
-import { BookOpen, FolderOpen, Menu, Minimize2, PanelRightIcon } from '@/assets/icons'
+import { FolderOpen, Menu, Minimize2, PanelRightIcon } from '@/assets/icons'
 import { HtmlPreviewWidget } from '@/components/schema/widgets/HtmlPreviewWidget'
 import { getEditorForFile } from '@/config/fileEditors'
 // 按需引入 antd Splitter 子模块，避免加载 antd 全量入口（26+ 组件 → 全部 icons →
@@ -34,6 +34,7 @@ import { isDesktopMainWindow } from './TitleBar'
 import { WorkspaceHost } from './WorkspaceHost'
 import { CodeEditor } from '../workspace/CodeEditor'
 import { FilePreview } from '../workspace/FilePreview'
+import { NoLoaderPreview } from '../workspace/NoLoaderPreview'
 import type { WorkspaceTab  } from '@/types/layout'
 
 /** Props for the FiveSpaceLayout component */
@@ -319,6 +320,17 @@ export function FiveSpaceLayout({
           } catch {
             return false
           }
+        }
+
+        // 「无对应的加载器」卡（未命中任何 loader 的文件类型）
+        if (editorData.viewerOverride === 'none') {
+          return (
+            <NoLoaderPreview
+              filePath={editorData.filePath}
+              size={editorData.size}
+              url={editorData.url}
+            />
+          )
         }
 
         const editor = getEditorForFile(editorData.filePath)
@@ -696,17 +708,6 @@ export function FiveSpaceLayout({
                     BAND_GAP_CLASS,
                   )}
                 />
-                <button
-                  type="button"
-                  onClick={() => openWorkspacePanelByPath('/p/get_started')}
-                  className={BAND_BUTTON_IDLE_CLASS}
-                  title="使用引导"
-                  aria-label="使用引导"
-                  data-testid="onboarding-help-button"
-                >
-                  <BookOpen className="h-4 w-4" />
-
-                </button>
                 <button
                   type="button"
                   onClick={() => setWorkspaceCollapsed(!workspaceCollapsed)}

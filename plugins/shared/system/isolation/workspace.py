@@ -9,6 +9,7 @@
 - validate_workspace_path()：工作空间路径安全性校验（任务/会话共用）
 """
 
+# config-write-surface-exempt: 隔离配置只读探测;无配置写面
 import logging
 import os
 import re

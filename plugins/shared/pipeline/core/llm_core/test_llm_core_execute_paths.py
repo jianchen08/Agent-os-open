@@ -182,15 +182,60 @@ async def test_model_id_unknown_keeps_current(monkeypatch: Any) -> None:
     assert plugin._model_id == ""  # noqa: SLF001
 
 
-async def test_model_id_same_skips_reparse(monkeypatch: Any) -> None:
-    """已锁定同一 model_id → 跳过重复解析（幂等，不重复打 resolved 日志）。"""
+async def test_model_id_same_unchanged_conf_idempotent(monkeypatch: Any) -> None:
+    """同一 model_id 且配置内容未变 → 解析幂等（字段与当前配置视图一致）。"""
     _inject_llm_config(monkeypatch)
     caller = _FakeCaller({"success": True, "data": _ok_response()})
     plugin = _make_plugin(caller, {"model_id": "deepseek-v4-pro"})
     await plugin.execute(_make_ctx(_base_state()))
+    await plugin.execute(_make_ctx(_base_state()))
     assert plugin._model_id == "deepseek-v4-pro"  # noqa: SLF001
-    # 构造配置未变（model_name 仍是默认 gpt-4）——跳过解析即不更新 self
-    assert plugin._model == "gpt-4"  # noqa: SLF001
+    # 字段对齐当前配置视图（首执行即对齐基线，二执行幂等不变）
+    assert plugin._model == "deepseek-v4-pro"  # noqa: SLF001
+    assert plugin._context_window == 64000  # noqa: SLF001
+
+
+async def test_same_model_param_change_reapplies(monkeypatch: Any) -> None:
+    """同模型改参（id 不变，配置内容变）→ 下一轮整体重解析生效。
+
+    配置热感知契约的另一半：tier 指向不变、只改 default_params/
+    context_window/api_key 时，字段不得冻结在旧值（2026-09-28 批次 B）。
+    """
+    _inject_llm_config(monkeypatch)
+    caller = _FakeCaller({"success": True, "data": _ok_response()})
+    plugin = _make_plugin(caller, {"model_id": "deepseek-v4-pro"})
+    await plugin.execute(_make_ctx(_base_state()))
+    assert plugin._context_window == 64000  # noqa: SLF001
+    assert plugin._default_params == {"temperature": 0.3}  # noqa: SLF001
+
+    import _config_models
+
+    monkeypatch.setattr(
+        _config_models,
+        "_config",
+        {
+            "llm": {
+                "models": {
+                    "deepseek-v4-pro": {
+                        "provider": "deepseek",
+                        "model_name": "deepseek-v4-pro",
+                        "api_base": "https://api.example.com/v2",
+                        "api_key": "k2",
+                        "context_window": 128000,
+                        "default_params": {"temperature": 0.7},
+                    }
+                },
+                "defaults": {"tiers": {"large": "deepseek-v4-pro"}, "chat": "deepseek-v4-pro"},
+            }
+        },
+    )
+    await plugin.execute(_make_ctx(_base_state()))
+
+    assert plugin._model_id == "deepseek-v4-pro"  # noqa: SLF001
+    assert plugin._context_window == 128000  # noqa: SLF001
+    assert plugin._default_params == {"temperature": 0.7}  # noqa: SLF001
+    assert plugin._api_key == "k2"  # noqa: SLF001
+    assert plugin._api_base == "https://api.example.com/v2"  # noqa: SLF001
 
 
 # ─────────────────── _build_messages 装配分支 ───────────────────
@@ -250,6 +295,158 @@ def test_build_messages_dynamic_vars_three_forms() -> None:
 
     msgs3 = pre._build_messages({**base, "prompt.dynamic_vars": {"content": ""}})  # noqa: SLF001
     assert len(msgs3) == 1  # 空 content 不追加
+
+
+# ─────────────────── 系统通知衰减（出站视图裁剪） ───────────────────
+
+
+def _notify(task_id: str, verdict: str = "失败 ❌") -> dict[str, Any]:
+    """构造 triggers_ext 自动父通知形态的历史消息（契约见 triggers/manager.py）。"""
+    return {"role": "user", "content": f"[系统通知] 子任务 '写周报' (ID: {task_id}) {verdict}\n请决定后续操作。"}
+
+
+def test_build_messages_decays_superseded_notification_keeps_last_per_task() -> None:
+    """同 task_id 更新通知出现 → 旧通知裁剪，保留每 task 最后一条。"""
+    pre = LLMCore.__new__(LLMCore)
+    state = {
+        "messages": [
+            {"role": "user", "content": "q"},
+            _notify("t_A", "失败 #1"),
+            _notify("t_A", "失败 #2"),
+            {"role": "user", "content": "继续"},
+        ],
+    }
+    msgs = pre._build_messages(state)  # noqa: SLF001
+    contents = [m["content"] for m in msgs if m.get("role") == "user"]
+    assert "q" in contents
+    assert "继续" in contents
+    notify_msgs = [c for c in contents if isinstance(c, str) and c.startswith("[系统通知]")]
+    assert len(notify_msgs) == 1, "同 task 仅保留最后一条通知"
+    assert "失败 #2" in notify_msgs[0], "保留的是最新一条"
+    assert all("失败 #1" not in c for c in contents), "旧通知已裁剪"
+
+
+def test_build_messages_decays_notification_consumed_by_tool_call() -> None:
+    """通知后编排器已产出工具调用 → 即使是该 task 最后一条也裁剪（已被消费）。"""
+    pre = LLMCore.__new__(LLMCore)
+    state = {
+        "messages": [
+            _notify("t_A"),
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "function": {"name": "task_submit", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+            {"role": "assistant", "content": "已重派"},
+        ],
+    }
+    msgs = pre._build_messages(state)  # noqa: SLF001
+    assert all(not (isinstance(m.get("content"), str) and m["content"].startswith("[系统通知]")) for m in msgs), "被消费的通知不再进请求"
+    # 工具对完整保留
+    assert any(m.get("role") == "assistant" and m.get("tool_calls") for m in msgs)
+    assert any(m.get("role") == "tool" for m in msgs)
+
+
+def test_build_messages_keeps_last_notification_without_subsequent_action() -> None:
+    """末尾通知且编排器尚未产出工具调用 → 保留（唤醒锚点，不可裁）。"""
+    pre = LLMCore.__new__(LLMCore)
+    state = {"messages": [{"role": "user", "content": "q"}, _notify("t_A")]}
+    msgs = pre._build_messages(state)  # noqa: SLF001
+    assert msgs[1]["content"].startswith("[系统通知]"), "未被消费/取代的通知保留"
+
+
+def test_build_messages_decay_is_per_task_isolated() -> None:
+    """衰减按 task_id 分维度：t_A 被工具调用消费裁剪，t_B 末条保留。"""
+    pre = LLMCore.__new__(LLMCore)
+    state = {
+        "messages": [
+            _notify("t_A"),
+            {"role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "task_submit", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+            _notify("t_B"),
+        ],
+    }
+    msgs = pre._build_messages(state)  # noqa: SLF001
+    notify_contents = [m["content"] for m in msgs if isinstance(m.get("content"), str) and m["content"].startswith("[系统通知]")]
+    assert len(notify_contents) == 1
+    assert "t_B" in notify_contents[0]
+
+
+def test_build_messages_non_notification_messages_untouched() -> None:
+    """非系统通知（普通 user / 显式触发器消息 / 无 ID 锚的标记文本 / list content）一律不动。"""
+    pre = LLMCore.__new__(LLMCore)
+    state = {
+        "messages": [
+            {"role": "user", "content": "[系统通知] 手打文本无 ID 锚"},
+            {"role": "user", "content": "触发器通知: 到点了"},
+            {"role": "user", "content": [{"type": "text", "text": "[系统通知] 列表形态不识别"}]},
+            {"role": "user", "content": "普通消息"},
+        ],
+    }
+    msgs = pre._build_messages(state)  # noqa: SLF001
+    assert len(msgs) == 4, "无可定维通知时不裁剪任何消息"
+
+
+def test_build_messages_tool_pair_survives_notification_decay() -> None:
+    """通知夹在工具对中间被裁剪时，assistant(tool_calls)+tool 消息原序保留。"""
+    pre = LLMCore.__new__(LLMCore)
+    tool_call_msg = {"role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "task_submit", "arguments": "{}"}}]}
+    tool_result_msg = {"role": "tool", "tool_call_id": "c1", "content": "ok"}
+    state = {
+        "messages": [
+            _notify("t_A", "失败 #1"),
+            tool_call_msg,
+            tool_result_msg,
+            _notify("t_A", "失败 #2"),
+        ],
+    }
+    msgs = pre._build_messages(state)  # noqa: SLF001
+    assert len(msgs) == 3, "仅 #1 被裁（被取代且被消费）"
+    assert msgs[0].get("tool_calls")
+    assert msgs[1].get("role") == "tool"
+    assert msgs[2]["content"].startswith("[系统通知]")
+    assert "失败 #2" in msgs[2]["content"]
+
+
+def test_build_messages_decay_property_at_most_one_notification_per_task() -> None:
+    """性质断言：混合历史衰减后每 task_id 至多 1 条通知，且消息数只减不增。
+
+    区分度输入：t_A/t_B 每条通知后都有工具调用（全被消费），t_C 末条通知
+    后无任何动作（存活）——消费与存活动同一fixture 内符号量级相反。
+    """
+    pre = LLMCore.__new__(LLMCore)
+    tool_call_msg = {"role": "assistant", "tool_calls": [{"id": "c9", "function": {"name": "task_submit", "arguments": "{}"}}]}
+    history: list[dict[str, Any]] = []
+    for tid in ("t_A", "t_B", "t_C"):
+        for n in range(3):
+            history.append({"role": "user", "content": f"轮次 {tid}-{n}"})
+            history.append(_notify(tid, f"失败 #{n}"))
+            if not (tid == "t_C" and n == 2):
+                history.append(dict(tool_call_msg))
+                history.append({"role": "tool", "tool_call_id": "c9", "content": "ok"})
+    state = {"messages": history}
+    msgs = pre._build_messages(state)  # noqa: SLF001
+    assert len(msgs) <= len(history)
+    per_task: dict[str, int] = {}
+    for m in msgs:
+        tid = _mod._system_notify_task_id(m)  # noqa: SLF001
+        if tid is not None:
+            per_task[tid] = per_task.get(tid, 0) + 1
+    assert all(v <= 1 for v in per_task.values()), "每 task_id 至多存活 1 条通知"
+    assert set(per_task) == {"t_C"}, "仅未被消费的末条通知存活"
+    assert len(msgs) < len(history), "混合历史经衰减只减不增"
+
+
+def test_build_messages_decay_view_only_state_untouched() -> None:
+    """衰减只裁出站请求视图：state["messages"] 持久层原样（长度与内容不变）。"""
+    pre = LLMCore.__new__(LLMCore)
+    history = [
+        {"role": "user", "content": "q", "seq": 1},
+        _notify("t_A", "失败 #1"),
+        _notify("t_A", "失败 #2"),
+    ]
+    pre._build_messages({"messages": history})  # noqa: SLF001
+    assert len(history) == 3, "持久层消息数不变"
+    assert history[1]["content"].startswith("[系统通知]")
+    assert "失败 #1" in history[1]["content"]
+    assert history[0].get("seq") == 1
 
 
 # ─────────────────── 成功路径组装分支 ───────────────────

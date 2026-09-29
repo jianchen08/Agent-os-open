@@ -1,0 +1,44 @@
+# 自进化模式声明面 mode.yaml（B 部类物料：由用户维护；出厂种子随 mode_evolution 插件内打包，
+# 经 mode.get_profile 服务透出；suite 路径相对项目根——与 mode_coding 先例同款，
+# 题集留 config/self_evolve/suites 共享评测治理区原位，流程规则物料已随包（包内 rules/），
+# ADR 2026-09-28-self-evolution-mode-pack）
+mode: evolution
+name: 自进化模式
+icon: 🧬                # 选择器选项图标（批 G⑤；emoji 随声明面透出 modes API/mode.list）
+panel_page_id: evolution_panel
+chain:
+  entry: evolution
+  expected_path: [mode_evolution/evolution]
+  executor_pool: [mode_evolution/evolution]
+  entry_override: null
+suite:
+  # 进化引擎自身的冒烟题集（与 coding 冒烟同源——引擎改进后先自证不退步）；
+  # T1 对目标模式跑题时按目标模式包的 mode.yaml suite 声明取（跨包经
+  # mode.get_profile 服务），不在本文件重复各模式题集。
+  smoke: config/self_evolve/suites/dev/smoke.yaml
+  external: config/self_evolve/suites/external/swe_verified_seed.yaml
+  full: null
+# 全局杠杆表（T2 归因→T3 立项的候选杠杆域；分诊信号类与判据在
+# config/plugins/review/triage_rules.yaml——复盘插件消费，此处只声明杠杆域）
+material_scope:
+  # 派发阶段物料：进化流程/归因/提案契约规则（B 部类，随包打包——包内 rules/，
+  # 引用经包内相对形态 {{path:./rules/...}} 解析）
+  dispatch_stage:
+    - plugins/shared/modes/mode_evolution/rules/
+  # 执行阶段物料：包内 agent 注册表（mode_evolution/evolution）
+  execution_stage:
+    - plugins/shared/modes/mode_evolution/agents/
+levers:
+  tool_misselect: {execution_stage: [tool_ids, dispatch_guide]}
+  orchestration_runaway: {orchestration_stage: [pipeline_steps, breaker_params]}
+  format_violation: {execution_stage: [persona, prompt_skeleton]}
+  eval_no_settle: {evaluation_stage: [evaluation_params]}
+  cross_round_amnesia: {execution_stage: [persistent_fields, memory_config]}
+  approval_chain_miss: {evaluation_stage: [approval_rules_yaml]}
+verifier_families: [file_assert, bash_exit, semantic_check]
+weights: {success: 1.0, cost: 0.2, rounds: 0.1}
+budget:
+  case_timeout: 900
+  round_tokens: 2000000
+  # 每模式每会话提案轮次上限（evolution_flow.md T8 同源）
+  proposals_per_session: 3

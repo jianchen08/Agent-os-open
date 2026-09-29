@@ -579,7 +579,7 @@ GATES: list[Gate] = [
     ),
     Gate(
         id="frontend-e2e-smoke",
-        label="playwright 冒烟（vite preview + ci-smoke，零后端依赖）",
+        label="playwright 冒烟（vite preview + ci-smoke + design_tokens，零后端依赖）",
         domain="frontend",
         cwd="frontend",
         shell=(
@@ -600,7 +600,7 @@ GATES: list[Gate] = [
             "  if ! curl -sf http://localhost:5188 >/dev/null; then\n"
             '    echo "preview 服务未就绪"; kill $PREVIEW_PID || true; exit 1\n'
             "  fi\n"
-            "  npx playwright test e2e/specs/ci-smoke.spec.ts\n"
+            "  npx playwright test e2e/specs/ci-smoke.spec.ts e2e/specs/design_tokens.spec.ts\n"
             "  RC=$?\n"
             "  kill $PREVIEW_PID || true\n"
             "  case \"$(uname -s)\" in MINGW*|MSYS*|CYGWIN*)\n"
@@ -638,13 +638,13 @@ GATES: list[Gate] = [
         fast=True,
     ),
     Gate(
-        # electron/__tests__ 8 文件 96 用例（主进程模块：app-protocol CSP/
-        # kernel-manager/auth-session/dialog 等）——2026-09-24 前零车道接线
-        #（盲区审计发现），本 gate 补齐。运行口径 = frontend 的 vitest 二进制
-        # + --root ../electron（electron 无独立 node_modules/配置，与 09-16
-        # 审查批手动验证口径一致）。实跑 0.65s。
+        # electron/__tests__ 11 文件 154 用例（主进程模块：app-protocol CSP/
+        # kernel-manager/auth-session/dialog/edit-menu 等）——2026-09-24 前零
+        # 车道接线（盲区审计发现），本 gate 补齐。运行口径 = frontend 的 vitest
+        # 二进制 + --root ../electron（electron 无独立 node_modules/配置，与
+        # 09-16 审查批手动验证口径一致）。实跑 0.65s。
         id="electron-test",
-        label="Electron 主进程 vitest（__tests__ 96 用例）",
+        label="Electron 主进程 vitest（__tests__ 154 用例）",
         domain="electron",
         cwd="frontend",
         command=("npm", "exec", "--", "vitest", "run", "--root", "../electron"),

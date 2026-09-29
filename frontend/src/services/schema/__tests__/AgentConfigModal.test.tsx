@@ -140,8 +140,11 @@ describe('AgentConfigModal', () => {
     expect(cfg.url).toBe('/ext/agent_manager/agents/code_reviewer_agent/config')
     expect(cfg.data.yaml).toContain('审查专家 v2')
     expect(cfg.data.yaml).toContain('config_id: code_reviewer_agent')
-    expect(onSaved).toHaveBeenCalledTimes(1)
-    expect(onClose).toHaveBeenCalledTimes(1)
+    // 保存成功后 onSaved/onClose 随 Promise 微任务链到达：等终态而非首拍同步断言
+    await waitFor(() => {
+      expect(onSaved).toHaveBeenCalledTimes(1)
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
   })
 
   it('AC-3: 取消关闭 Modal，不触发 PUT', async () => {

@@ -36,17 +36,6 @@ from uploads_path import resolve_uploads_url  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# tool_call id 标准格式契约（call_<hex>）：LLM 返回的 id 统一校验/重写，
-# 与 llm_service normalizer 的 id remap 同一契约、各自插件自持实现
-# （插件自包含，跨插件不 import 模块）。
-_TOOL_CALL_ID_RE = re.compile(r"call_[0-9a-f]+\Z")
-
-
-def _is_valid_tool_call_id(tc_id: Any) -> bool:
-    """检查 tool_call_id 是否符合系统标准格式 call_<hex>。"""
-    return isinstance(tc_id, str) and bool(_TOOL_CALL_ID_RE.fullmatch(tc_id))
-
-
 # ── 能力调用器（LLM 面唯一事实源 = llm_service）────────────────────────
 # llm_core 的 LLM 调用经内核 tool-executor 能力跨进程调 llm.complete_stream
 # （与 approval/hindsight 经 capability 的既有用法同构）。server.py 在 on_load
@@ -131,6 +120,58 @@ _OUTBOUND_INTERNAL_FIELDS = frozenset(
     }
 )
 
+# ── 系统通知衰减（编排上下文瘦身）────────────────────────────────────
+# 缺陷实证（2026-09-29/30 夜）：triggers_ext 自动父通知经 chat.send_message
+# 进入编排上下文后永不衰减，同一失败通知单请求内三连（MSG[212/214/216]），
+# 一晚 payload_diag 38263 行，上下文膨胀 → 请求超时 → 429 加剧。
+# 通知文本契约在 triggers_ext/triggers/manager.py："[系统通知] "前缀 +
+# "(ID: <task_id>)" 锚。衰减只裁出站请求视图，state["messages"] 持久层不动。
+_SYSTEM_NOTIFY_MARKER = "[系统通知]"
+_SYSTEM_NOTIFY_ID_RE = re.compile(r"\(ID:\s*([^)\s]+)\s*\)")
+
+
+def _system_notify_task_id(msg: dict[str, Any]) -> str | None:
+    """系统通知识别：user 纯文本消息带 "[系统通知]" 前缀且可提取 task 锚。
+
+    Returns:
+        通知所属 task_id；非系统通知（含 list 形态 content / 无 ID 锚）返回 None。
+    """
+    if msg.get("role") != "user":
+        return None
+    content = msg.get("content")
+    if not isinstance(content, str) or not content.startswith(_SYSTEM_NOTIFY_MARKER):
+        return None
+    matched = _SYSTEM_NOTIFY_ID_RE.search(content)
+    return matched.group(1) if matched else None
+
+
+def _decay_system_notifications(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """裁剪已取代/已消费的历史系统通知（保留每 task_id 最后一条未消费通知）。
+
+    通知 i（task T）出站裁剪当且仅当：
+    - 被取代：其后存在同 task_id 的更新通知（每 task_id 至多存活末条），或
+    - 已消费：其后编排器已产出过工具调用（assistant.tool_calls 非空——通知
+      的唤醒目的已达成）。
+
+    只移除 user 角色纯文本通知，assistant/tool 消息一概不动，工具对完整性
+    不受影响。入参列表与其中的 dict 均不被修改。
+    """
+    last_idx: dict[str, int] = {}
+    for i, m in enumerate(messages):
+        tid = _system_notify_task_id(m)
+        if tid is not None:
+            last_idx[tid] = i
+    consumed_after = [False] * (len(messages) + 1)
+    for i in range(len(messages) - 1, -1, -1):
+        acted = messages[i].get("role") == "assistant" and bool(messages[i].get("tool_calls"))
+        consumed_after[i] = consumed_after[i + 1] or acted
+    return [
+        m
+        for i, m in enumerate(messages)
+        if (tid := _system_notify_task_id(m)) is None
+        or (last_idx[tid] == i and not consumed_after[i + 1])
+    ]
+
 
 def resolve_thinking_strength_params(
     strength: str,
@@ -203,6 +244,9 @@ class LLMCore(ICorePlugin):
         # model_name（yaml 的 model_name，如 deepseek-v4-pro）：发给上游的真实模型名。
         # 两者必须分开：model_name 重名时（官方与 apigo 同底模），靠 model_id 区分路由。
         self._model_id: str = self._config.get("model_id", "")
+        # 最近一次解析落字段的完整模型配置（get_llm_core_config 产物）：同
+        # model_id 的配置内容比对基线——内容变化（改参/换 key）也触发重解析
+        self._resolved_conf: dict[str, Any] | None = None
         self._model: str = self._config.get("model_name", "gpt-4")
         self._api_base: str | None = self._config.get("api_base")
         self._api_key: str | None = self._config.get("api_key")
@@ -281,6 +325,9 @@ class LLMCore(ICorePlugin):
         优先级：``state.model_id`` > ``state.model_tier``(→ defaults.tiers)
         > ``llm.yaml defaults.chat``。任一命中即按其 model_id 查
         ``get_llm_core_config``；全部缺失则保持构造时的默认配置不变（不阻断）。
+        model_id 未变但配置内容变化（同模型改参/换 key，随 on_config_changed
+        刷新的注入视图而来）同样整体重解析；解析失败（未命中配置表）保持
+        当前字段不动。
 
         Args:
             state: 管道状态字典，读 ``model_id`` / ``model_tier``。
@@ -288,7 +335,9 @@ class LLMCore(ICorePlugin):
         Raises:
             RuntimeError: 命中的模型配置缺 api_base（换模型不得带病切换）。
         """
-        # 已锁定同一 model_id 则跳过（避免每轮重复解析）
+        # 已锁定同一 model_id 且配置内容未变则跳过（避免每轮重复解析）；
+        # 配置内容比对让「同模型改参」（采样参数/context_window 等）在下一轮
+        # 即生效，而非冻结到进程重启——id 未变不代表配置没变。
         resolved_id = state.get("model_id", "")
         if not resolved_id:
             tier = state.get("model_tier", "")
@@ -296,17 +345,20 @@ class LLMCore(ICorePlugin):
                 resolved_id = self._resolve_tier(tier)
         if not resolved_id:
             resolved_id = self._default_chat_model()
-        if not resolved_id or resolved_id == self._model_id:
+        if not resolved_id:
             return
 
         llm_conf = self._get_llm_core_config(resolved_id)
         if not llm_conf:
-            logger.warning(
-                "[%s] model_id=%s 在 llm.yaml 未找到配置，保持当前 model=%s",
-                self.name,
-                resolved_id,
-                self._model,
-            )
+            if resolved_id != self._model_id:
+                logger.warning(
+                    "[%s] model_id=%s 在 llm.yaml 未找到配置，保持当前 model=%s",
+                    self.name,
+                    resolved_id,
+                    self._model,
+                )
+            return
+        if resolved_id == self._model_id and llm_conf == self._resolved_conf:
             return
 
         # 先整体验证再落字段：任何缺失配置都在触碰实例状态前显式失败，
@@ -320,6 +372,7 @@ class LLMCore(ICorePlugin):
             )
 
         self._model_id = resolved_id
+        self._resolved_conf = llm_conf
         self._provider = llm_conf.get("provider", "")
         self._model = llm_conf.get("model_name", "")
         self._api_base = api_base
@@ -688,33 +741,28 @@ class LLMCore(ICorePlugin):
             )
 
     def _resolve_tool_call_ids(self, tool_calls: list[dict[str, Any]]) -> list[str]:
-        """解析并标准化 tool_call id，回写到入参列表并返回 id 序列。
+        """解析 tool_call id，回写到入参列表并返回 id 序列。
 
-        部分模型返回非标准格式（如 call_function_xxx_1），统一替换为
-        ``call_<hex>`` 格式，确保系统内一致且 API 兼容；assistant 消息与
-        state 中的 raw_tool_calls 使用同一份 id。
+        provider 返回的 id 原样透传（单一关联键，ADR 2026-09-28-tool-call-live-card）：
+        流式增量事件（llm_service 逐 chunk 发原始 id）、tool_start/tool_result 事件、
+        assistant 消息、raw_tool_calls、持久化与前端渲染全程使用同一个 id。仅
+        缺失/空 id 时兜底生成 ``call_<hex>``。禁止按内部格式白名单重造非空
+        id——重造会让流事件（原始 id）与最终结果（重造 id）分叉，前端同一
+        工具调用渲染两张卡（MiniMax call-<uuid> 连字符形态实测复发）。
 
         Args:
             tool_calls: 工具调用列表（原地回写 ``id`` 字段）
 
         Returns:
-            与入参顺序一致的标准化 id 列表
+            与入参顺序一致的 id 列表
         """
         resolved_ids: list[str] = []
         for tc in tool_calls:
             raw_id = tc.get("id")
-            if raw_id and _is_valid_tool_call_id(raw_id):
+            if raw_id:
                 resolved_ids.append(raw_id)
             else:
-                std_id = f"call_{uuid.uuid4().hex[:24]}"
-                resolved_ids.append(std_id)
-                if raw_id:
-                    logger.info(
-                        "[%s] LLM 返回非标准 tool_call_id，已修正: %s → %s",
-                        self.name,
-                        raw_id,
-                        std_id,
-                    )
+                resolved_ids.append(f"call_{uuid.uuid4().hex[:24]}")
         for i, tc in enumerate(tool_calls):
             tc["id"] = resolved_ids[i]
         return resolved_ids
@@ -974,8 +1022,10 @@ class LLMCore(ICorePlugin):
                 cm = {k: v for k, v in cm.items() if k not in _OUTBOUND_INTERNAL_FIELDS}  # noqa: PLW2901
             messages.append(cm)
 
-        # 3. 历史消息（管道维护的对话历史——压缩后只含最近消息）
-        history = state.get("messages", [])
+        # 3. 历史消息（管道维护的对话历史——压缩后只含最近消息）。
+        #    出站前衰减系统通知（已取代/已消费的自动父通知不再全量携带，
+        #    state 持久层不动——见 _decay_system_notifications）。
+        history = _decay_system_notifications(state.get("messages", []))
         for m in history:
             # 清理管道内部字段，不发给 LLM（_OUTBOUND_INTERNAL_FIELDS，严格
             # provider 如 zhipu 对 messages 内未知字段整请求拒绝——1210 实锤

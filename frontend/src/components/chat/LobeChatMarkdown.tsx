@@ -2,7 +2,7 @@
 
 import { ConfigProvider, Markdown } from '@lobehub/ui'
 import { motion } from 'motion/react'
-import { useMemo, type FC, type ReactNode } from 'react'
+import { useMemo, type FC, type MouseEvent, type ReactNode } from 'react'
 import { AttachmentImage } from '@/components/shared/markdown/AttachmentImage'
 import { preprocessSvgCodeBlocks } from '@/components/shared/markdown/shared'
 import './LobeChatMarkdown.css'
@@ -11,6 +11,12 @@ interface LobeChatMarkdownProps {
   content: string
   isStreaming?: boolean
   onDoubleClick?: () => void
+  /**
+   * 链接点击拦截（通用契约，组件对链接策略零知识）：返回 true = 已处理，
+   * 组件阻止默认导航（防止相对路径链接把整窗导航进裸资源页）；
+   * 返回 false / 未传 = 默认行为。策略消费方见 fileLoaderRegistry.markdownLinkInterceptor。
+   */
+  onLinkClick?: (link: { href: string; text: string }) => boolean
   children?: ReactNode
 }
 
@@ -19,12 +25,25 @@ export const LobeChatMarkdown: FC<LobeChatMarkdownProps> = ({
   content,
   isStreaming = false,
   onDoubleClick,
+  onLinkClick,
   children,
 }) => {
   const processedContent = useMemo(
     () => preprocessSvgCodeBlocks(content),
     [content],
   )
+
+  /** 容器级链接点击委托：命中 onLinkClick 即阻止默认导航 */
+  const handleContainerClick = (e: MouseEvent<HTMLDivElement>) => {
+    if (!onLinkClick) return
+    const anchor = (e.target as HTMLElement).closest('a')
+    if (!anchor) return
+    const href = anchor.getAttribute('href')
+    if (!href) return
+    if (onLinkClick({ href, text: anchor.textContent ?? '' })) {
+      e.preventDefault()
+    }
+  }
 
   // 深色主题适配说明（@lobehub/ui 5.32.2）：
   // Markdown 内部的 Shiki 高亮用内置 "lobe-theme"，其颜色全部引用 antd-style 的
@@ -37,7 +56,7 @@ export const LobeChatMarkdown: FC<LobeChatMarkdownProps> = ({
 
   return (
     <ConfigProvider motion={motion}>
-      <div className="lobe-chat-isolated" onDoubleClick={onDoubleClick}>
+      <div className="lobe-chat-isolated" onDoubleClick={onDoubleClick} onClick={handleContainerClick}>
         {children ?? (
           <Markdown
             variant="chat"

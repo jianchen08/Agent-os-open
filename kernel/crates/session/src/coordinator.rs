@@ -43,6 +43,11 @@ impl SessionCoordinator {
         &self.registry
     }
 
+    /// 暴露重放缓冲（堆栈级诊断面 memory-breakdown 读常驻条目用；只读）。
+    pub fn replay(&self) -> &Arc<ReplayBuffer> {
+        &self.replay
+    }
+
     /// 枚举当前内存中的线程列表（thread_id, user_id）。
     pub fn list_threads(&self) -> Vec<(String, String)> {
         self.registry.list_threads()

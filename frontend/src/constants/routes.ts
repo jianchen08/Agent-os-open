@@ -8,10 +8,10 @@
 export const ROUTES = {
   /** 首页/主界面（统一使用 HOME） */
   HOME: '/',
-  /** 登录页 */
-  LOGIN: '/login',
   /** 注册页 */
   REGISTER: '/register',
+  // /login 路由已退役（ADR 2026-09-28）：整页登录页并入 AuthGate 登录模态，
+  // 未认证访问受保护页由 ProtectedRoute 原位呈现，不再跳转独立登录页。
   // /settings 路由族无独立路由页（设置工作区页签化）：设置唯一入口 =
   // openWorkspacePanelByPath('/settings')（SettingsHubWidget）。
   // /tools、/agents 无独立路由页（agent_manager 插件化）：

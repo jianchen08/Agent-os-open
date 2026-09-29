@@ -91,10 +91,17 @@ export const API_ENDPOINTS = {
     ENABLED: (pluginId: string) => `/api/v1/plugins/${pluginId}/enabled`,
     /** 反向依赖查询（ADR 2026-09-14 §2.4：卸载/禁用事前提醒数据源） */
     DEPENDENTS: (pluginId: string) => `/api/v1/plugins/${pluginId}/dependents`,
+    /** 插件进程快照（只读，admin 鉴权；监控页「插件」tab 进程观测视图数据源） */
+    HOSTS: '/api/v1/plugins/hosts',
   },
   /** 通用动作执行 - 内核 /api/v1/actions/execute（命令面板/快捷键/webview action 共用 transport） */
   ACTIONS: {
     EXECUTE: '/api/v1/actions/execute',
+  },
+  /** 系统级只读面（admin 鉴权） */
+  SYSTEM: {
+    /** 内核分配器统计快照（OS 口径内核进程自身 RSS；监控页全口径内存的内核段数据源） */
+    MEMSTATS: '/api/v1/system/memstats',
   },
   /** 消息相关 - 对应后端 /api/v1/sessions/{id}/messages */
   MESSAGES: {
@@ -129,12 +136,10 @@ export const API_ENDPOINTS = {
     /** 读写 Agent 配置 yaml 原文（PUT 写回前后端自动备份 + If-Match 乐观锁） */
     CONFIG: (id: string) => AGENT_MANAGER_ENDPOINTS.agent_manager_get_config.replace('{id}', id),
   },
-  /** 配置管理相关 - llm_service/cost_control 插件端点（生成物投影，原 channel_api config 域） */
+  /** 配置管理相关 - llm_service/cost_control 插件端点（生成物投影，原 channel_api config 域）。
+   *  2026-09-28 批次 A1：llm.yaml 文件 IO 端点退役——读写走内核单一配置面
+   *  PLUGIN_CONFIG.FILE('llm_service','llm')，key 走 PLUGIN_CONFIG.USER_ENV。 */
   CONFIG: {
-    /** 获取 LLM 配置 */
-    LLM_GET: LLM_SERVICE_ENDPOINTS.config_llm_get,
-    /** 获取提供商列表 */
-    LLM_PROVIDERS: LLM_SERVICE_ENDPOINTS.config_llm_providers_get,
     /** 获取 litellm 支持的提供者类型清单（随 litellm 升级自动更新） */
     LLM_PROVIDER_TYPES: LLM_SERVICE_ENDPOINTS.config_llm_provider_types_get,
     /** LLM 配置面预置声明（provider 分组/常用类型/思考强度白名单，插件下发） */
@@ -142,12 +147,6 @@ export const API_ENDPOINTS = {
     /** 从提供商 API 实时拉取可用模型（需先配置 Key） */
     LLM_REMOTE_MODELS: (providerId: string) =>
       LLM_SERVICE_ENDPOINTS.config_llm_providers_remote_models_get.replace('{provider_id}', providerId),
-    /** 获取模型列表 */
-    LLM_MODELS: LLM_SERVICE_ENDPOINTS.config_llm_models_get,
-    /** 获取默认配置 */
-    LLM_DEFAULTS: LLM_SERVICE_ENDPOINTS.config_llm_defaults_get,
-    /** 更新默认配置（body: chat/embedding/tiers 可空部分更新） */
-    LLM_DEFAULTS_UPDATE: LLM_SERVICE_ENDPOINTS.config_llm_defaults_update,
     /** 获取成本控制配置 */
     COST_CONTROL_GET: COST_CONTROL_ENDPOINTS.cost_config_file_get,
     /** 更新成本控制配置 */
@@ -178,6 +177,8 @@ export const API_ENDPOINTS = {
   MONITORING: {
     /** 获取任务列表 */
     TASK_LIST: MONITORING_ENDPOINTS.mon_tasks,
+    /** 插件运行态表（进程观测卡片的 join 源：上次崩溃时间戳） */
+    PLUGIN_RUNTIME: MONITORING_ENDPOINTS.mon_plugins_runtime,
   },
   /** 任务管理 - task_service 插件端点（生成物投影，原 channel_api tasks 域；内核 /api/v1/tasks 无路由） */
   TASKS: {
@@ -269,6 +270,8 @@ export const API_ENDPOINTS = {
   PLUGIN_CONFIG: {
     /** 取/存某个插件的某个配置文件；需填充 pluginId 与 fileId */
     FILE: (pluginId: string, fileId: string) => `/api/v1/plugins/${pluginId}/config/${fileId}`,
+    /** 通用用户空间 .env 读写（2026-09-28 批次 A2：动态 provider key 等变量面） */
+    USER_ENV: '/api/v1/config/env',
   },
   /** 人类交互相关 - approval_service 插件端点（生成物投影，原 channel_api interaction 域） */
   INTERACTION: {

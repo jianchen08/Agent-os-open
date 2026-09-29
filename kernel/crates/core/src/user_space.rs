@@ -65,6 +65,17 @@ pub fn user_plugins_dir() -> Option<PathBuf> {
     env_path(USER_PLUGINS_DIR_ENV).or_else(|| user_root().map(|r| r.join("plugins")))
 }
 
+/// 用户空间 venv 登记处：`<USER_ROOT>/plugin-venvs/`。
+///
+/// 装机态插件目录只读（TrustedInstaller ACL），sidecar venv 作为可变派生数据
+/// 落用户空间（用户裁定 2026-09-27：包内只留种子）：独占插件键 = 插件 id，
+/// 共享合宿宿主键 = `_host`（登记项本身即 venv 根，不是含 `.venv` 的插件目录）。
+/// 解析（spawn 期回退）与重定向（autoprovision 目标）的消费者在
+/// invoker / api::venv_provision。
+pub fn user_plugin_venvs_dir() -> Option<PathBuf> {
+    user_root().map(|r| r.join("plugin-venvs"))
+}
+
 /// 解析一个配置相对路径应读/写的落点。
 ///
 /// `rel` 是相对 factory config 根的路径（如 `models/llm.yaml`；允许带
@@ -944,6 +955,7 @@ mod tests {
         assert_eq!(user_plugins_dir().unwrap(), user.join("plugins"));
         assert_eq!(user_config_dir().unwrap(), user.join("config"));
         assert_eq!(user_data_dir().unwrap(), user.join("data"));
+        assert_eq!(user_plugin_venvs_dir().unwrap(), user.join("plugin-venvs"));
         assert_eq!(user_root().unwrap(), user);
     }
 

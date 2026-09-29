@@ -4,10 +4,11 @@
     "packaging"
   ],
   "name": "Isolation Service",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",
+  "host_group": "light_stable",
   "entry": "python server.py",
   "capabilities": {
     "tools": [],

@@ -24,6 +24,7 @@ sidecar 重启后懒加载恢复；注入失败（管道被清理/协议错误�
 重建并回写映射。
 """
 
+# config-write-surface-exempt: 落点=<USER_ROOT>/data/channels用户空间通道台账
 from __future__ import annotations
 
 import asyncio

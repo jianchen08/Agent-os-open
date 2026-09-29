@@ -4,7 +4,7 @@
     "packaging"
   ],
   "name": "Task Service",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",
@@ -186,6 +186,14 @@
           "required": [
             "task_id"
           ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "projects.list",
+        "description": "List registered projects (登记行直读：id/title/path/status/workflow_state/auto_execute；与 /ext/task_service/projects 同源)",
+        "input_schema": {
+          "properties": {},
           "type": "object"
         }
       },

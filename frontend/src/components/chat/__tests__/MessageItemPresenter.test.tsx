@@ -15,11 +15,11 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
-import { useRoleplayPossessStore } from '@/stores/roleplayPossessStore'
+import { usePersonaPossessStore } from '@/stores/personaPossessStore'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import { MessageItem } from '../MessageItem'
 import type { PresenterProfile } from '@/services/api/presenterProfiles'
-import type { RoleplayPossession } from '@/services/schema/modeOptions'
+import type { PersonaPossession } from '@/services/schema/modeOptions'
 import type { Message } from '@/types/models'
 
 /**
@@ -106,22 +106,24 @@ afterEach(() => {
   vi.clearAllMocks()
   presenterState.profile = null
   agentsState.list = []
-  useRoleplayPossessStore.setState({ possessed: null })
+  usePersonaPossessStore.setState({ possessed: null })
   setPipelineScope('session-1')
 })
 
-/** 附身档工厂（store 契约必要项：card_id/name 非空 + avatar 两形态） */
-function makePossession(partial: Partial<RoleplayPossession> = {}): RoleplayPossession {
+/** 附身档工厂（store 契约必要项：mode 形态键 + card_id/name 非空 + avatar 两形态 + 注入键） */
+function makePossession(partial: Partial<PersonaPossession> = {}): PersonaPossession {
   return {
+    mode: 'roleplay',
     card_id: 'card_luna',
     name: '月见',
     avatar: '🌙',
     personaText: '',
+    personaKey: 'roleplay_persona',
     ...partial,
   }
 }
 
-describe('MessageItem 扮演徽标与头像位', () => {
+describe('MessageItem 呈现徽标与头像位', () => {
   it('presenter 命中（emoji 头像）：徽标显示卡名+emoji，头像位渲染 emoji（注册表未命中也出徽标）', () => {
     presenterState.profile = { name: '月见', avatar: '🌙', origin: 'mode_roleplay' }
     const { container } = renderWithProviders(
@@ -200,7 +202,7 @@ describe('MessageItem 扮演徽标与头像位', () => {
 
 describe('MessageItem 附身态头像切换', () => {
   it('附身激活 + 无 agentId（emoji）：头像位与徽标切为附身档，默认头像被替换', () => {
-    useRoleplayPossessStore.setState({ possessed: makePossession({ avatar: '🌙' }) })
+    usePersonaPossessStore.setState({ possessed: makePossession({ avatar: '🌙' }) })
     const { container } = renderWithProviders(
       <MessageItem message={makeMessage({ content: '附身回答' })} />,
     )
@@ -215,7 +217,7 @@ describe('MessageItem 附身态头像切换', () => {
   })
 
   it('附身激活 + 无 agentId（色对）：头像位渲染名字首字+fg 字色 bg 底，徽标仅附身名', () => {
-    useRoleplayPossessStore.setState({
+    usePersonaPossessStore.setState({
       possessed: makePossession({ avatar: { fg: '#ff0000', bg: '#0000ff' } }),
     })
     renderWithProviders(<MessageItem message={makeMessage({ content: '附身回答' })} />)
@@ -228,7 +230,7 @@ describe('MessageItem 附身态头像切换', () => {
 
   it('附身激活 + 有 agentId 卡键：presenter 解析优先，不被附身档覆盖', () => {
     presenterState.profile = { name: '卡上名', avatar: '🎭', origin: 'mode_roleplay' }
-    useRoleplayPossessStore.setState({ possessed: makePossession({ name: '附身名', avatar: '👻' }) })
+    usePersonaPossessStore.setState({ possessed: makePossession({ name: '附身名', avatar: '👻' }) })
     renderWithProviders(<MessageItem message={makeMessage({ agentId: ROLEPLAY_AGENT_ID })} />)
     expect(screen.getByText('卡上名')).toBeInTheDocument()
     expect(screen.queryByText('附身名')).toBeNull()
@@ -236,7 +238,7 @@ describe('MessageItem 附身态头像切换', () => {
   })
 
   it('附身作用域外（消息 session ≠ 活跃管道 session）不随附身切换', () => {
-    useRoleplayPossessStore.setState({ possessed: makePossession() })
+    usePersonaPossessStore.setState({ possessed: makePossession() })
     // 活跃管道归属另一会话：session 失配 → 消息行不进入附身覆盖
     setPipelineScope('session-2')
     renderWithProviders(<MessageItem message={makeMessage({ content: '他山消息' })} />)
@@ -250,7 +252,7 @@ describe('MessageItem 附身态头像切换', () => {
     const { container, rerender } = renderWithProviders(<MessageItem message={message} />)
     const baseline = container.innerHTML
     act(() => {
-      useRoleplayPossessStore.setState({ possessed: makePossession() })
+      usePersonaPossessStore.setState({ possessed: makePossession() })
     })
     rerender(<MessageItem message={message} />)
     // 附身生效：头像位切为附身 emoji
@@ -258,7 +260,7 @@ describe('MessageItem 附身态头像切换', () => {
     expect(screen.getByTestId('presenter-avatar').textContent).toBe('🌙')
     // 解除：possessed=null → 与基线一致（possessed=null 稳定引用，渲染零变化）
     act(() => {
-      useRoleplayPossessStore.setState({ possessed: null })
+      usePersonaPossessStore.setState({ possessed: null })
     })
     rerender(<MessageItem message={message} />)
     expect(container.innerHTML).toBe(baseline)
@@ -299,7 +301,7 @@ describe('MessageItem 扮演态工具消息卡片沉浸化', () => {
     const { container } = renderWithProviders(
       <MessageItem message={makeToolMessage({ agentId: ROLEPLAY_AGENT_ID })} />,
     )
-    const row = screen.getByTestId('roleplay-tool-narrative')
+    const row = screen.getByTestId('presenter-tool-narrative')
     expect(row.textContent).toBe('✦ 月见的静默行动')
     expect(row.className).toContain('text-muted-foreground')
     expect(row.className).toContain('text-xs')
@@ -308,9 +310,9 @@ describe('MessageItem 扮演态工具消息卡片沉浸化', () => {
   })
 
   it('附身态工具消息（无卡键）：折叠行显示附身档角色名，ActivityCard 不直出', () => {
-    useRoleplayPossessStore.setState({ possessed: makePossession() })
+    usePersonaPossessStore.setState({ possessed: makePossession() })
     const { container } = renderWithProviders(<MessageItem message={makeToolMessage()} />)
-    expect(screen.getByTestId('roleplay-tool-narrative').textContent).toBe('✦ 月见的静默行动')
+    expect(screen.getByTestId('presenter-tool-narrative').textContent).toBe('✦ 月见的静默行动')
     expect(container.querySelector('[data-activity-type]')).toBeNull()
   })
 
@@ -319,17 +321,17 @@ describe('MessageItem 扮演态工具消息卡片沉浸化', () => {
     const { container } = renderWithProviders(
       <MessageItem message={makeToolMessage({ agentId: ROLEPLAY_AGENT_ID })} />,
     )
-    fireEvent.click(screen.getByTestId('roleplay-tool-narrative'))
+    fireEvent.click(screen.getByTestId('presenter-tool-narrative'))
     const card = container.querySelector('[data-activity-type="tool_call"]')
     expect(card).not.toBeNull()
     expect(card?.getAttribute('data-activity-status')).toBe('completed')
-    fireEvent.click(screen.getByTestId('roleplay-tool-narrative'))
+    fireEvent.click(screen.getByTestId('presenter-tool-narrative'))
     expect(container.querySelector('[data-activity-type]')).toBeNull()
   })
 
   it('非扮演态工具消息：ActivityCard 原样直出，无折叠行（默认展开布局零变化）', () => {
     const { container } = renderWithProviders(<MessageItem message={makeToolMessage()} />)
-    expect(screen.queryByTestId('roleplay-tool-narrative')).toBeNull()
+    expect(screen.queryByTestId('presenter-tool-narrative')).toBeNull()
     const card = container.querySelector('[data-activity-type="tool_call"]')
     expect(card).not.toBeNull()
     expect(card?.getAttribute('data-activity-status')).toBe('completed')
@@ -346,7 +348,7 @@ describe('MessageItem 扮演态工具消息卡片沉浸化', () => {
         })}
       />,
     )
-    const row = screen.getByTestId('roleplay-tool-narrative')
+    const row = screen.getByTestId('presenter-tool-narrative')
     expect(row.textContent).toBe('✦ 行动受挫')
     expect(row.className).toContain('text-status-warning/70')
     fireEvent.click(row)

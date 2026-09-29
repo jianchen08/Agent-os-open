@@ -8,7 +8,8 @@
  * 验证方式：注入一个用 var(--token) 的元素，读 getComputedStyle 的计算值。
  * （用变量直接验证，不依赖 Tailwind 类是否被按需生成。）
  *
- * 运行：需 dev server（pnpm dev，baseURL http://localhost:5188）。
+ * 运行：dev server 或 vite preview（--port 5188）；CI 经 frontend-e2e 车道
+ * 与 ci-smoke 同跑（零后端依赖，主题预设内联编译不依赖 kernel）。
  *   pnpm exec playwright test e2e/specs/design_tokens.spec.ts
  */
 
@@ -33,11 +34,25 @@ test.describe('设计 token 真实浏览器解析', () => {
   }
 
   test('字号 token 阶梯解析为预期 px', async ({ page }) => {
-    expect(await computedPx(page, 'var(--font-size-caption)')).toBe('10px')
-    expect(await computedPx(page, 'var(--font-size-label)')).toBe('11px')
-    expect(await computedPx(page, 'var(--font-size-body)')).toBe('12px')
-    expect(await computedPx(page, 'var(--font-size-title)')).toBe('13px')
-    expect(await computedPx(page, 'var(--font-size-page-title)')).toBe('16px')
+    // 运行时契约：默认主题（presets dark/light 的 components.fontSize）经
+    // themeService.pushTypographyVars 内联覆盖语义阶梯，caption~page-title
+    // 映射 xs~xl = 12/14/16/18/20px；design-tokens.css 的 10/11/12/13/16 是
+    // 主题引擎未运行时的静态回落值，引擎常驻运行，用户可见值以主题为准。
+    const ladder = await Promise.all(
+      [
+        'var(--font-size-caption)',
+        'var(--font-size-label)',
+        'var(--font-size-body)',
+        'var(--font-size-title)',
+        'var(--font-size-page-title)',
+      ].map((v) => computedPx(page, v)),
+    )
+    expect(ladder).toEqual(['12px', '14px', '16px', '18px', '20px'])
+    // 性质断言：语义阶梯单调递增（字面值随主题演进时，乱序/坍缩仍须变红）
+    const px = ladder.map((s) => Number(s.replace('px', '')))
+    for (let i = 1; i < px.length; i++) {
+      expect(px[i], '阶梯应单调递增').toBeGreaterThan(px[i - 1])
+    }
   })
 
   test('图标尺寸 token 阶梯解析为预期 px', async ({ page }) => {

@@ -86,6 +86,26 @@ async def _on_load(params: dict[str, Any]) -> None:
     _adapter = None
 
 
+@plugin.on_config_changed
+def _on_config_changed(config: dict[str, Any]) -> None:
+    """每调用配置变更感知：刷新注入视图并重建 adapter/router。
+
+    内核每次调用现算下发用户空间叠加后的最新配置——不刷新则模型表/key 池
+    冻结在 sidecar 启动快照，设置页新增模型/换 key 须重启才生效
+    （2026-09-28 事故根因之二，llm_service 侧半边）。重建沿用 on_load 同款
+    语义：reset_router 清模块级单例，_adapter 置空由 _ensure_adapter 懒重建
+    （在途流持有旧对象引用不受影响，调用边界触发不引入中途换装）。
+    """
+    global _adapter
+    set_config(config)
+
+    from router_factory import reset_router  # noqa: PLC0415
+
+    reset_router()
+    _adapter = None
+    logger.info("LLM 配置变更感知：router/adapter 已重置，下次调用懒重建")
+
+
 @plugin.on_unload
 async def _on_unload(params: dict[str, Any]) -> None:
     """Cleanup on unload."""
@@ -762,41 +782,22 @@ async def _handle_config_llm(path: str, method: str, raw_body: str) -> dict[str,
     """config/llm 段 13 端点：字面量 (sub,method) 表 + providers/models 参数族。"""
     import routes_llm_config as rlc  # noqa: PLC0415
 
-    sub = path[len(_CONFIG_LLM_PREFIX):]  # "" / "/providers" / "/models/xxx" ...
+    sub = path[len(_CONFIG_LLM_PREFIX):]  # "" / "/provider-types" / "/presets" / ...
     literal = {
-        ("GET", ""): rlc.get_llm_config,
-        ("GET", "/providers"): rlc.get_providers,
-        ("POST", "/providers"): functools.partial(rlc.add_provider, _decode_body(raw_body)),
         ("GET", "/provider-types"): rlc.get_provider_types,
         ("GET", "/presets"): rlc.get_llm_presets,
-        ("GET", "/models"): rlc.get_models,
-        ("POST", "/models"): functools.partial(rlc.add_model, _decode_body(raw_body)),
-        ("GET", "/defaults"): rlc.get_defaults,
-        ("PUT", "/defaults"): functools.partial(rlc.save_defaults, _decode_body(raw_body)),
     }
     handler = literal.get((method, sub))
     if handler is not None:
         return _ok(_json_response(handler()))
 
-    # 参数族：/providers/{id}/remote-models（先判，防被 {id} 前缀吞）、{id} 写删
+    # 参数族：/providers/{id}/remote-models（先判，防被 {id} 前缀吞）
+    # 2026-09-28 批次 A1：config/llm 其余文件 IO 端点（yaml CRUD + .env 直写）
+    # 已退役——llm.yaml 读写收口到内核单一配置面
+    # /api/v1/plugins/llm_service/config/llm，provider key 走 /api/v1/config/env。
     if method == "GET" and sub.startswith("/providers/") and sub.endswith("/remote-models"):
         provider_id = sub[len("/providers/"):-len("/remote-models")]
         return _ok(_json_response(rlc.get_remote_models(provider_id)))
-    parametric = (
-        ("/providers/", "PUT", True, rlc.update_provider),
-        ("/providers/", "DELETE", False, rlc.delete_provider),
-        ("/models/", "PUT", True, rlc.update_model),
-        ("/models/", "DELETE", False, rlc.delete_model),
-    )
-    for prefix, want_method, needs_body, fn in parametric:
-        if method != want_method or not sub.startswith(prefix):
-            continue
-        arg = sub[len(prefix):]
-        return (
-            _ok(_json_response(fn(arg, _decode_body(raw_body))))
-            if needs_body
-            else _ok(_json_response(fn(arg)))
-        )
     logger.warning("llm http.handle: no config/llm route for sub=%s method=%s", sub, method)
     return _ok(_json_response({"error": "not found", "path": path}, 404))
 
@@ -824,7 +825,9 @@ async def http_handle(
     headers: dict[str, str] | None = None,
     query: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """按 path 分发：thinking-mode 域 6 端点 + config/llm 段 13 端点。
+    """按 path 分发：thinking-mode 域 6 端点 + config/llm 段 3 只读端点
+    （presets / provider-types / remote-models；文件 IO 端点已于批次 A1
+    退役，收口到内核单一配置面）。
 
     路径语义与原 /ext/channel_api/thinking-mode/** 与 /ext/channel_api/
     config/llm/** 逐项对齐（前端消费同一响应形态）；auth 由 http_endpoints

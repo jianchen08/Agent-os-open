@@ -116,7 +116,7 @@ class TestRoutesLlmConfigEnvReadWarn:
     ) -> None:
         """mtime 探测遇 PermissionError → warn 含 path 与异常摘要 + 空表。"""
         env_file = tmp_path / "project.env"
-        monkeypatch.setattr(rlc, "_ENV_FILE", env_file)
+        monkeypatch.setattr(rlc, "_env_file_path", lambda: env_file)
         rlc._env_file_cache = None
         _patch_path_call(monkeypatch, "stat", "project.env", PermissionError("env locked"))
         with caplog.at_level(logging.WARNING, logger=rlc.__name__):
@@ -128,7 +128,7 @@ class TestRoutesLlmConfigEnvReadWarn:
         self, rlc: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         """无 .env（FileNotFoundError）→ 静默空表、无告警（首启正常语义不变）。"""
-        monkeypatch.setattr(rlc, "_ENV_FILE", tmp_path / "absent.env")
+        monkeypatch.setattr(rlc, "_env_file_path", lambda: tmp_path / "absent.env")
         rlc._env_file_cache = None
         with caplog.at_level(logging.WARNING, logger=rlc.__name__):
             assert rlc._env_file_vars() == {}

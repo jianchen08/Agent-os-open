@@ -12,9 +12,11 @@
 创建审批请求并 await 等待用户响应，审批通过后写入 allowed=True。
 
 State 命名空间：
-    - security.decision : 本插件写入的安全决策结果
+    - pre_decided_results : 拦截方直出的预定结果（ADR 2026-09-28 结果预填；
+      security.decision 观测键已随决策面退役）
 """
 
+# config-write-surface-exempt: 主落点user_data_dir;data字面量为user_space导入失败回落防御
 from __future__ import annotations
 
 import contextlib
@@ -91,12 +93,18 @@ def set_frontend_emit(fn: FrontendEmitFn | None) -> None:
     """
     global _frontend_emit  # noqa: PLW0603
     _frontend_emit = fn
+
+
 import zone_policy
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import StateKeys
 from sensitive_paths import is_sensitive_path
 
 from agentos_plugin_sdk.isolation_policy import IsolationPolicyLoader
+from agentos_plugin_sdk.tool_result_protocol import (
+    merge_pre_decided,
+    tool_result_entry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,28 +137,48 @@ PERMISSION_MODES: dict[str, str] = {
 # 权限模式表：key = session_id（会话稳定键——同会话内主/子管道、任务轮换的
 # pipeline_id 各不相同，会话级设置必须以会话为键，否则显式选择被隔离免审批
 # 默认吞掉）；写入端 = server.py http.handle 切换端点（前端选择器同键），
-# 本插件 execute 读；sidecar 进程内共享；持久化到 data/permission_modes.json
-# 防重启丢失。
+# 本插件 execute 读；sidecar 进程内共享；持久化到用户数据根防重启丢失。
 _PERMISSION_MODES: dict[str, str] = {}
-_PERMISSION_MODES_FILE = os.path.join(_PROJECT_ROOT, "data", "permission_modes.json")
+
+
+def _resolve_permission_modes_file() -> str:
+    """落点统一用户空间（读写同源公理）：用户数据根优先，不可用回落 shared/data/。
+
+    安装形态下 _PROJECT_ROOT 指向安装目录——直写会随应用升级丢失且与其他
+    写面分裂（2026-09-28 配置读写单源化审计）。
+    """
+    try:
+        from user_space import user_data_dir  # noqa: PLC0415
+
+        data_dir = user_data_dir()
+        if data_dir:
+            return str(data_dir / "permission_modes.json")
+    except ImportError:
+        pass
+    return os.path.join(_PROJECT_ROOT, "data", "permission_modes.json")
+
+
+_PERMISSION_MODES_FILE = _resolve_permission_modes_file()
 
 # accept_edits 放行的文件类工具
 _FILE_TOOLS: frozenset[str] = frozenset({"file_read", "file_write"})
 
 # 只读工具白名单：只读操作默认不拦截（不判危险、不弹审批、不进审批链），
 # 第一道内置底线（路径遍历/敏感系统目录）仍生效；写类/命令类工具不在此列。
-_READ_ONLY_TOOLS: frozenset[str] = frozenset({
-    "file_read",
-    "enhanced_search",
-    "web_search",
-    "fetch",
-    "resource_search",
-    "memory",
-    "yaml_validate",
-    "schema_evaluator",
-    "resource_evaluator",
-    "compatibility_checker",
-})
+_READ_ONLY_TOOLS: frozenset[str] = frozenset(
+    {
+        "file_read",
+        "enhanced_search",
+        "web_search",
+        "fetch",
+        "resource_search",
+        "memory",
+        "yaml_validate",
+        "schema_evaluator",
+        "resource_evaluator",
+        "compatibility_checker",
+    }
+)
 
 # 位置闸参数操作表（ADR 2026-09-24-read-deny-write-zones 修订：位置轴管道层
 # 统一执法）：工具 → {路径参数名: 操作类}。操作类 "read" 走读黑名单链，其余
@@ -184,9 +212,7 @@ def _load_permission_modes() -> None:
             data = json.load(f)
         if isinstance(data, dict):
             _PERMISSION_MODES.clear()
-            _PERMISSION_MODES.update(
-                (k, v) for k, v in data.items() if v in PERMISSION_MODES
-            )
+            _PERMISSION_MODES.update((k, v) for k, v in data.items() if v in PERMISSION_MODES)
             logger.info("[security_check] 权限模式表加载 | sessions=%d", len(_PERMISSION_MODES))
     except FileNotFoundError:
         pass
@@ -341,9 +367,20 @@ class SecurityCheckPlugin(IInputPlugin):
             "patterns": [
                 {"type": "keyword", "value": kw}
                 for kw in (
-                    "rm -rf", "del /s", "format", "mkfs", "dd if=",
-                    "> /dev/sd", "chmod 777", "chown root", "shutdown",
-                    "reboot", "halt", "poweroff", "nc -", "netcat ",
+                    "rm -rf",
+                    "del /s",
+                    "format",
+                    "mkfs",
+                    "dd if=",
+                    "> /dev/sd",
+                    "chmod 777",
+                    "chown root",
+                    "shutdown",
+                    "reboot",
+                    "halt",
+                    "poweroff",
+                    "nc -",
+                    "netcat ",
                 )
             ],
         },
@@ -386,6 +423,30 @@ class SecurityCheckPlugin(IInputPlugin):
         )
         return list(self._DEFAULT_RULES)
 
+    def refresh_injected_config(self, config: dict[str, Any] | None) -> None:
+        """注入配置到站重导派生面（on_config_changed 钩子落点，server.py 注册）。
+
+        合宿握手只送触发成员的命名空间，本插件常以空配置构造并降级；内核每
+        调用现算下发的正确配置到站时经本方法重导两个 config_files 派生面：
+        安全规则（降级态翻转）与 dangerous_operations 轨道 2 数据源——两者
+        都是构造期快照，不重导则降级保守审批固化（2026-09-29 注入链失效根因）。
+        管道内状态（审批指纹/拒绝计数）不重置；规则再次缺位仍按降级回退
+        （fail-closed 方向不变），恢复后重臂降级提示（新降级周期不再静默）。
+        """
+        self._config = config or {}
+        previous_degraded = self._rules_degraded
+        self._rules_degraded = False
+        self._rules = self._load_rules()
+        self._dangerous_ops_by_tool = self._parse_dangerous_ops_config()
+        if not self._rules_degraded:
+            self._degrade_notice_sent = False
+            if previous_degraded:
+                logger.info(
+                    "[%s] 注入配置到站，安全规则重载恢复 | rules=%d",
+                    self.name,
+                    len(self._rules),
+                )
+
     @property
     def name(self) -> str:
         """插件唯一标识名称。"""
@@ -406,8 +467,8 @@ class SecurityCheckPlugin(IInputPlugin):
             ctx: 插件执行上下文
 
         Returns:
-            包含安全决策状态更新的插件执行结果。
-            如果检查不通过，会设置 security.decision 为 blocked。
+            状态更新：拦截时含 pre_decided_results（结果预填，ADR 2026-09-28），
+            放行/授权时仅含写区授权类更新。
         """
         # 每轮工具调用独立检查，不可短路（否则审批通过后硬底线被跳过，安全闸门失效）。
         await self._notify_rules_degraded_once(ctx)
@@ -432,9 +493,7 @@ class SecurityCheckPlugin(IInputPlugin):
                 self.name,
             )
             return
-        thread_id = str(
-            ctx.state.get(StateKeys.SESSION_ID) or ctx.state.get("thread_id") or ""
-        )
+        thread_id = str(ctx.state.get(StateKeys.SESSION_ID) or ctx.state.get("thread_id") or "")
         payload = {
             "thread_id": thread_id,
             "pipeline_id": str(ctx.state.get("pipeline_id") or ""),
@@ -476,17 +535,17 @@ class SecurityCheckPlugin(IInputPlugin):
             安全决策结果字典
         """
         if not self._enabled:
-            return {"security.decision": {"allowed": True, "reason": "security check disabled"}}
+            return {}
 
         core_type = ctx.state.get(StateKeys.CORE_TYPE, "llm_call")
 
         # LLM 调用不需要安全检查
         if core_type != "tool_execute":
-            return {"security.decision": {"allowed": True, "reason": "not a tool execution"}}
+            return {}
 
         tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
         if not tool_calls:
-            return {"security.decision": {"allowed": True, "reason": "no tool calls to check"}}
+            return {}
 
         blocked = self._run_base_safety_scan(ctx, tool_calls)
         if blocked is not None:
@@ -507,20 +566,17 @@ class SecurityCheckPlugin(IInputPlugin):
         # 隔离容器即安全边界）；显式选旁路同档。命中旁路 → 基础检查通过即整体
         # 放行（isolation_level 是隔离唯一真相源，解析优先级见 _resolve_permission_mode）。
         execution_contexts = ctx.state.get("execution_contexts", [])
-        isolated = self._is_isolated(execution_contexts)
+        isolated = self._is_isolated(ctx, execution_contexts)
         mode = self._resolve_permission_mode(ctx, isolated=isolated)
         if mode == "bypass":
             logger.info("[%s] 旁路档免审批放行（隔离默认或显式选择），基础检查已通过", self.name)
-            return {
-                "security.decision": {"allowed": True, "reason": "bypass: base checks passed"},
-                **zone_updates,
-            }
+            return {**zone_updates}
 
         decision = await self._authorize_tool_calls(ctx, tool_calls, isolated=isolated, mode=mode)
         if decision is not None:
             return {**decision, **zone_updates}
 
-        return {"security.decision": {"allowed": True, "reason": "all checks passed"}, **zone_updates}
+        return {**zone_updates}
 
     def _run_base_safety_scan(
         self,
@@ -652,14 +708,41 @@ class SecurityCheckPlugin(IInputPlugin):
             return None
 
         if op == "read":
-            allow, reason = zone_policy.read_verdict(resolved)
-            if not allow:
-                logger.warning(
-                    "[%s] 位置闸拒绝读取 | tool=%s | path=%s | reason=%s",
-                    self.name, tool_name, resolved, reason,
-                )
-                return self._soft_block(ctx, tool_name, reason or "读取被位置闸拒绝")
-            return None
+            # 锚内豁免（用户裁定 2026-09-28）：任务工作区常驻仓库 .ai_workspaces，
+            # 锚内读不套读黑名单——与写链 within_root_anchors 先行同序；工具层
+            # fs_tools 根锚分流本就放行锚内读，此处对齐消除双层漂移（事故
+            # 2026-09-28：模型 list_directory(path=".") 列自己工作区被拦 3 次熔断）。
+            if zone_policy.within_root_anchors(resolved, workspace, project_root):
+                return None
+            # 锚外读链携锚入判定（用户裁定 2026-09-29）：工作空间根作为内建
+            # read_allow 前缀参与放行——项目工作树是 sessions 的兄弟目录，锚
+            # 覆盖不到，不携锚则撞仓库拒绝集弹读授权卡（事故 2026-09-29：
+            # 无人值守停泊）。写分支不携此参（跨会话写污染防线）。
+            allow, reason = zone_policy.read_verdict(
+                resolved,
+                zone_policy.load_session_read_grants(ctx.state),
+                workspace=workspace,
+                project_root=project_root,
+            )
+            if allow:
+                return None
+            # 黑名单命中不机器硬拒（用户裁定 2026-09-28）：弹读授权卡交用户
+            # 裁定，批准（仅本管道/永久）即放行本次。
+            logger.info(
+                "[%s] 位置闸读黑名单命中，转读授权卡 | tool=%s | path=%s | reason=%s",
+                self.name,
+                tool_name,
+                resolved,
+                reason,
+            )
+            return await self._authorize_grant_card(
+                ctx,
+                tool_name=tool_name,
+                args=args,
+                resolved=resolved,
+                zone_updates=zone_updates,
+                write=False,
+            )
 
         # 根锚内（任务自己的工作区/项目根）先于一切放行——锚内不套自保拒绝，
         # 与工具层兜底校验同序（fs_tools._check_workspace_path 根锚先行）。
@@ -672,32 +755,49 @@ class SecurityCheckPlugin(IInputPlugin):
             # 仓库自保目录等硬拒绝：不可授权，直接拦
             logger.warning(
                 "[%s] 位置闸拒绝写入（系统自保） | tool=%s | path=%s | reason=%s",
-                self.name, tool_name, resolved, reason,
+                self.name,
+                tool_name,
+                resolved,
+                reason,
             )
             return self._soft_block(ctx, tool_name, reason)
         # 写区外：弹授权卡（两选项），批准的授权落 state/名单后放行本次
-        return await self._authorize_zone_grant(
-            ctx, tool_name=tool_name, args=args, resolved=resolved,
-            session_zones=session_zones, zone_updates=zone_updates,
+        return await self._authorize_grant_card(
+            ctx,
+            tool_name=tool_name,
+            args=args,
+            resolved=resolved,
+            zone_updates=zone_updates,
+            write=True,
         )
 
-    async def _authorize_zone_grant(
+    async def _authorize_grant_card(
         self,
         ctx: PluginContext,
         *,
         tool_name: str,
         args: dict[str, Any],
         resolved: Path,
-        session_zones: list[str],
         zone_updates: dict[str, Any],
+        write: bool,
     ) -> dict[str, Any] | None:
-        """写区外授权卡：两选项（仅本管道 / 永久写入配置），批准即放行本次。
+        """区域授权卡（读写共用骨架）：两选项（仅本管道 / 永久写入配置）。
+
+        写面（ADR 2026-09-24-read-deny-write-zones）：写区外路径弹卡，批准的
+        授权经 ``zone_updates`` 落 state 键 ``task.authorized_write_zones``
+        （管道级，随管道终态回收）或名单文件 entries 节（永久 =
+        project_registry.add_write_zone，locked 写面唯一系统通道）；仓库自保
+        目录在调用方先行硬拒（不可授权）。
+        读面（用户裁定 2026-09-28）：读黑名单（仓库拒绝集/read_deny）命中
+        不机器硬拒，弹卡交用户裁定；批准落 state 键
+        ``task.authorized_read_zones`` 或名单 read_allow 节。
 
         卡面经 human-interaction（与审批卡同通道）；批准与落盘都在本插件内
-        完成，LLM 无法伪造授权。仅本管道 = 授权写 state 键
-        ``task.authorized_write_zones``（管道终态随 state 回收，不向子管道
-        传播）；永久 = project_registry.add_write_zone（locked 写面唯一系统
-        通道）。拒绝/超时/取消 → 软拦截。
+        完成，LLM 无法伪造授权。拒绝/超时/取消 → 软拦截。
+
+        Args:
+            write: True = 写区授权卡（authorized_zones / entries 名单）；
+                False = 读授权卡（authorized_read_zones / read_allow 名单）。
         """
         grant_dir = zone_policy.grant_dir_of(resolved)
         hi_cap = _get_human_interaction_cap()
@@ -706,30 +806,46 @@ class SecurityCheckPlugin(IInputPlugin):
                 "[%s] human-interaction capability not injected; zone grant soft-block",
                 self.name,
             )
+            if write:
+                return self._soft_block(
+                    ctx,
+                    tool_name,
+                    f"路径 {grant_dir} 不在写区内，且交互服务不可用无法发起授权",
+                )
             return self._soft_block(
                 ctx,
                 tool_name,
-                f"路径 {grant_dir} 不在写区内，且交互服务不可用无法发起授权",
+                f"路径 {grant_dir} 位于读黑名单，且交互服务不可用无法发起授权",
+            )
+
+        if write:
+            title = f"授权写入 {grant_dir}"
+            description = f"工具 {tool_name} 要写的路径在写区外。批准后写操作按会话权限档执行；拒绝则本次申请作废。"
+        else:
+            title = f"授权读取 {grant_dir}"
+            description = (
+                f"工具 {tool_name} 要读的路径位于读黑名单（运行时/产物区或"
+                "用户排除区）。批准后授权范围内读取放行；拒绝则本次申请作废。"
             )
 
         session_id = ctx.state.get(StateKeys.SESSION_ID, "")
         try:
-            create_res = await hi_cap.call("create_choice", {
-                "session_id": session_id,
-                "thread_id": session_id,
-                "tab_id": "",
-                "title": f"授权写入 {grant_dir}",
-                "description": (
-                    f"工具 {tool_name} 要写的路径在写区外。批准后写操作按会话"
-                    "权限档执行；拒绝则本次申请作废。"
-                ),
-                "options": [
-                    {"id": "pipeline", "label": "仅本管道"},
-                    {"id": "permanent", "label": "永久写入配置"},
-                ],
-                "priority": "high",
-                "user_id": ctx.state.get("user_id", ""),
-            })
+            create_res = await hi_cap.call(
+                "create_choice",
+                {
+                    "session_id": session_id,
+                    "thread_id": session_id,
+                    "tab_id": "",
+                    "title": title,
+                    "description": description,
+                    "options": [
+                        {"id": "pipeline", "label": "仅本管道"},
+                        {"id": "permanent", "label": "永久写入配置"},
+                    ],
+                    "priority": "high",
+                    "user_id": ctx.state.get("user_id", ""),
+                },
+            )
             if not isinstance(create_res, dict) or create_res.get("error"):
                 raise RuntimeError(f"create_choice failed: {create_res}")
             request_id = create_res.get("request_id", "-")
@@ -744,54 +860,89 @@ class SecurityCheckPlugin(IInputPlugin):
                 raise RuntimeError(str(wait_res["error"]))
             selected = str(wait_res.get("selected_option", "") or "")
         except Exception as e:  # noqa: BLE001 — 拒绝/超时/取消/通道故障统一软拦截
+            if write:
+                logger.warning(
+                    "[%s] 写区授权未批准 | tool=%s | dir=%s | err=%s",
+                    self.name,
+                    tool_name,
+                    grant_dir,
+                    e,
+                )
+                return self._soft_block(
+                    ctx,
+                    tool_name,
+                    f"写区授权未批准（拒绝/超时/取消）：路径 {grant_dir} 不在写区内，写入被拒绝",
+                )
             logger.warning(
-                "[%s] 写区授权未批准 | tool=%s | dir=%s | err=%s",
-                self.name, tool_name, grant_dir, e,
+                "[%s] 读授权未批准 | tool=%s | dir=%s | err=%s",
+                self.name,
+                tool_name,
+                grant_dir,
+                e,
             )
             return self._soft_block(
                 ctx,
                 tool_name,
-                f"写区授权未批准（拒绝/超时/取消）：路径 {grant_dir} 不在写区内，写入被拒绝",
+                f"读授权未批准（拒绝/超时/取消）：路径 {grant_dir} 位于读黑名单，读取被拒绝",
             )
 
         if selected not in ("pipeline", "permanent"):
             logger.warning(
-                "[%s] 写区授权未知选项（按拒绝） | tool=%s | selected=%s",
-                self.name, tool_name, selected,
+                "[%s] %s授权未知选项（按拒绝） | tool=%s | selected=%s",
+                self.name,
+                "写区" if write else "读",
+                tool_name,
+                selected,
             )
-            return self._soft_block(ctx, tool_name, f"写区授权未批准：路径 {grant_dir} 不在写区内")
+            if write:
+                return self._soft_block(ctx, tool_name, f"写区授权未批准：路径 {grant_dir} 不在写区内")
+            return self._soft_block(ctx, tool_name, f"读授权未批准：路径 {grant_dir} 位于读黑名单")
 
+        state_key = zone_policy.STATE_KEY if write else zone_policy.STATE_KEY_READ
         if selected == "pipeline":
             pipeline_id = ctx.state.get("pipeline_id", "")
             if not pipeline_id:
                 return self._soft_block(
-                    ctx, tool_name,
+                    ctx,
+                    tool_name,
                     f"无法定位管道，「仅本管道」授权不可用；可重新发起并选择永久授权：{grant_dir}",
                 )
-            merged = session_zones if grant_dir in session_zones else [*session_zones, grant_dir]
+            base_list = (
+                zone_policy.load_session_zones(ctx.state) if write else zone_policy.load_session_read_grants(ctx.state)
+            )
+            merged = base_list if grant_dir in base_list else [*base_list, grant_dir]
             updates_json = json.dumps(merged)
             # state 落盘（后续工具调用经 param_inject/本闸读到）+ 当前调用参数
             # 就地补授权（param_inject 注入先于本阶段，工具层兜底校验靠它）。
-            zone_updates[zone_policy.STATE_KEY] = updates_json
-            ctx.state[zone_policy.STATE_KEY] = updates_json
-            args["authorized_zones"] = updates_json
+            zone_updates[state_key] = updates_json
+            ctx.state[state_key] = updates_json
+            args["authorized_zones" if write else "authorized_read_zones"] = updates_json
             logger.info(
-                "[%s] 管道级写区授权生效 | pipeline=%s | dir=%s",
-                self.name, pipeline_id, grant_dir,
+                "[%s] 管道级%s授权生效 | pipeline=%s | dir=%s",
+                self.name,
+                "写区" if write else "读取",
+                pipeline_id,
+                grant_dir,
             )
             return None
 
-        # 永久授权：locked 写面唯一系统通道（名单文件即时生效，工具层兜底
+        # 永久授权：locked 名单唯一系统通道（名单文件即时生效，工具层兜底
         # 校验每次调用重读名单，无需补参数）
         try:
-            from project_registry import add_write_zone  # noqa: PLC0415 — 共享根惰性导入
-            add_write_zone(grant_dir)
+            if write:
+                from project_registry import add_write_zone  # noqa: PLC0415 — 共享根惰性导入
+
+                add_write_zone(grant_dir)
+            else:
+                from project_registry import add_read_allow  # noqa: PLC0415 — 共享根惰性导入
+
+                add_read_allow(grant_dir)
         except ValueError as exc:
             return self._soft_block(ctx, tool_name, str(exc))
         except Exception as e:  # noqa: BLE001 — 名单模块不可用等降级可见
             logger.error("[%s] 永久授权落盘失败 | dir=%s | err=%s", self.name, grant_dir, e)
             return self._soft_block(ctx, tool_name, f"永久授权落盘失败: {e}")
-        logger.info("[%s] 永久写区授权落盘 | dir=%s", self.name, grant_dir)
+        logger.info("[%s] 永久%s授权落盘 | dir=%s", self.name, "写区" if write else "读取", grant_dir)
         return None
 
     async def _authorize_tool_calls(
@@ -1012,10 +1163,8 @@ class SecurityCheckPlugin(IInputPlugin):
         hi_cap = _get_human_interaction_cap()
         if hi_cap is None:
             logger.warning("[%s] human-interaction capability not injected; soft-block", self.name)
-            decision = self._soft_block(ctx, tool_name, "交互服务不可用，已拦截")
-            # 审批闸底座缺失显式落 state（软拦截决策可观测，不再无痕）
-            decision["security.decision"]["approval_channel_missing"] = True
-            return decision
+            # 审批闸底座缺失显式落条目 metadata（软拦截可观测，不再无痕）
+            return self._soft_block(ctx, tool_name, "交互服务不可用，已拦截", approval_channel_missing=True)
 
         # 提取工具调用的具体参数，显示给用户审批
         tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
@@ -1027,18 +1176,21 @@ class SecurityCheckPlugin(IInputPlugin):
         request_id = "-"
         # try 覆盖创建请求+等待响应，避免服务异常上抛中断管道。
         try:
-            create_res = await hi_cap.call("create_choice", {
-                "session_id": session_id,
-                "thread_id": session_id,
-                "tab_id": "",
-                "title": f"安全审批: {tool_name}",
-                "description": args_preview,
-                "options": list(_APPROVAL_OPTIONS),
-                "priority": "high",
-                # 归属归因（M2）：记录创建者用户，审批面归属校验据此放行
-                # 创建者本人（一用户一租户：user_id 即归属租户）。
-                "user_id": ctx.state.get("user_id", ""),
-            })
+            create_res = await hi_cap.call(
+                "create_choice",
+                {
+                    "session_id": session_id,
+                    "thread_id": session_id,
+                    "tab_id": "",
+                    "title": f"安全审批: {tool_name}",
+                    "description": args_preview,
+                    "options": list(_APPROVAL_OPTIONS),
+                    "priority": "high",
+                    # 归属归因（M2）：记录创建者用户，审批面归属校验据此放行
+                    # 创建者本人（一用户一租户：user_id 即归属租户）。
+                    "user_id": ctx.state.get("user_id", ""),
+                },
+            )
             if not isinstance(create_res, dict) or create_res.get("error"):
                 raise RuntimeError(f"create_choice failed: {create_res}")
             request_id = create_res.get("request_id", "-")
@@ -1112,13 +1264,7 @@ class SecurityCheckPlugin(IInputPlugin):
                         tool_name,
                         resolved_id,
                     )
-                return {
-                    "security.decision": {
-                        "allowed": True,
-                        "reason": "approved",
-                        "tool": tool_name,
-                    },
-                }
+                return {}
 
             logger.warning(
                 "[%s] Approval denied | request_id=%s | tool=%s | response=%s | raw=%s | resolved=%s",
@@ -1238,83 +1384,73 @@ class SecurityCheckPlugin(IInputPlugin):
         reason: str,
         *,
         retry_allowed: bool = False,
+        approval_channel_missing: bool = False,
     ) -> dict[str, Any]:
-        """软拦截：把拒绝原因作为 tool_result 返回给 LLM，不结束管道。
+        """软拦截：被拒调用直出预定结果（ADR 2026-09-28 结果预填）。
 
-        审批拒绝/路径遍历拦截等属于可恢复情况，不应直接结束整个管道。
-        通过清空 raw_tool_calls + 注入拒绝 tool_result，让管道走到 output
-        路由的 next_llm 分支，LLM 收到拒绝反馈后自行决定下一步策略。
-
-        关键：拒绝结果必须同步 append 为 role=tool 消息到 messages，且
-        tool_call_id 与被拒的 assistant(tool_calls) 配对。否则 messages 末尾
-        会留下无配对 tool 结果的孤儿 assistant，被 normalize Phase B 整条删除，
-        模型永远收不到拒绝反馈、反复重试同一请求 → 死循环。
+        只预填命中的调用（调用级粒度，用户裁定 2026-09-28：无辜调用照常
+        执行，旧整批"关联拒绝"随自建消息退役）；配对消息/事件由 tool_core
+        命中后统一整形——不再自建 role=tool 消息、不清空调用、不写
+        tool_results。
 
         连续拒绝保护：按工具签名计数，同一请求被连续拦截超阈值时，说明
-        模型无法自我纠正，直接终止管道并上报，避免无限重试。
+        模型无法自我纠正，直接终止管道并上报（熔断路径保持整批语义：清空
+        调用跳过本轮执行，终态文本不被 tool_core 覆写）。
 
         retry_allowed（BUG-41）：审批通道故障（wait 链路异常，人审结果未知）
-        时为 True——调用从未执行且用户可能已批准，拒绝结果带 retry_allowed +
-        arguments 标记，duplicate_check 据此把该次未执行的签名从重复窗口摘除
-        （人审后的重试不得被去重拦截）并不计失败熔断连败。用户拒绝/超时/
-        取消不是通道故障，不带标记（拒绝重试闸保留）。
+        时为 True——调用从未执行且用户可能已批准，条目带 retry_allowed +
+        arguments 扩展位，经 tool_core 随 tool_results 透传，duplicate_check
+        据此把该次未执行的签名从重复窗口摘除（人审后的重试不得被去重拦截）
+        并不计失败熔断连败。用户拒绝/超时/取消不是通道故障，不带标记
+        （拒绝重试闸保留）。
 
         Args:
             ctx: 插件执行上下文
             tool_name: 被拒绝的工具名称
             reason: 拒绝原因
             retry_allowed: 审批通道故障标记（该次调用未执行、可重试）
+            approval_channel_missing: 审批底座缺失标记（条目 metadata 可观测）
 
         Returns:
-            状态更新字典（raw_tool_calls 清空，tool_results 注入拒绝结果，
-            messages 追加配对的 tool 消息）
+            状态更新字典（pre_decided_results 合并写入；熔断时追加终态键）
         """
         tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
-        rejected_results: list[dict[str, Any]] = []
-        # 同步把拒绝结果写回 messages：每个被拒 tool_call 对应一条 role=tool 消息，
-        # tool_call_id 必须与 assistant(tool_calls) 的 id 一致，才能通过
-        # normalize 的配对校验（否则 assistant 会被当孤儿删除）。
-        messages = list(ctx.state.get("messages", []))
+        metadata: dict[str, Any] = {"decided_by": "security_check"}
+        if approval_channel_missing:
+            metadata["approval_channel_missing"] = True
+        entries: list[dict[str, Any]] = []
         for tc in tool_calls:
-            tc_name = tc.get("name", "")
-            tc_call_id = tc.get("id")
-            block_reason = f"[审批拒绝] {reason}" if tc_name == tool_name else f"[关联拒绝] {reason}"
-            entry: dict[str, Any] = {
-                "tool_name": tc_name,
-                "success": False,
-                "error": block_reason,
-                "call_id": tc_call_id,
-            }
+            if tc.get("name", "") != tool_name:
+                continue
+            extra: dict[str, Any] = {}
             if retry_allowed:
                 # 参数原样透传（dict/str JSON 均可），duplicate_check 侧归一定签名
-                entry["retry_allowed"] = True
-                entry["arguments"] = tc.get("arguments", tc.get("args", {}))
-            rejected_results.append(entry)
-            if tc_call_id:
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc_call_id,
-                        "content": f"Error: {block_reason}",
-                    }
+                extra["retry_allowed"] = True
+                extra["arguments"] = tc.get("arguments", tc.get("args", {}))
+            entries.append(
+                tool_result_entry(
+                    tool_name,
+                    call_id=tc.get("id"),
+                    success=False,
+                    error=f"[审批拒绝] {reason}",
+                    metadata=metadata,
+                    **extra,
                 )
+            )
+
+        updates: dict[str, Any] = {
+            "pre_decided_results": merge_pre_decided(ctx.state.get("pre_decided_results"), entries),
+        }
 
         # 连续拒绝计数：同一工具签名被反复拦截时累加，换请求即重置。
         signature = self._make_signature(tool_name, self._first_args(tool_calls, tool_name))
-        updates: dict[str, Any] = {
-            StateKeys.RAW_TOOL_CALLS: [],
-            StateKeys.TOOL_RESULTS: rejected_results,
-            StateKeys.RAW_RESULT: f"工具 {tool_name} 被拒绝: {reason}",
-            "messages": messages,
-            "security.decision": {"allowed": True, "reason": f"soft_block: {reason}", "tool": tool_name},
-        }
         if signature:
             count = self._rejected_signatures.get(signature, 0) + 1
             self._rejected_signatures[signature] = count
             if count >= self._reject_threshold:
                 # 同一请求连续被拦超阈值：模型已陷入死循环、无法自我纠正。
                 # 明确终止管道并上报，而非无限重试。这是"工具重复上限"的最终防线：
-                # P0 的 messages 写回已保证偶发拒绝能反馈给模型改正；到这一步说明
+                # 拒绝反馈已能到达模型（tool_core 统一整形配对消息）；到这一步说明
                 # 模型无视反馈反复提交同一被拦请求，继续重试只会空耗资源。
                 fatal_reason = (
                     f"工具 {tool_name} 连续被安全检查拦截 {count} 次"
@@ -1329,11 +1465,19 @@ class SecurityCheckPlugin(IInputPlugin):
                 updates[StateKeys.RAW_RESULT] = fatal_reason
                 updates[StateKeys.RAW_ERROR] = fatal_reason
                 updates[StateKeys.ENDED] = True
+                # 终态署名（控制状态键契约 ADR 2026-08-30：谁写终止谁署名）：
+                # 内核 RunStatus::from_control_state 按 FAILED_STOP_REASONS 词表
+                # 映射终态，未署名的 ended 折算 completed——熔断 run 必须署名
+                # tool_fail_loop 落 failed（事故 2026-09-28：熔断 run 落
+                # completed，与错误信息"终止任务"矛盾，观感即"任务没中止"）。
+                updates["router.stop_reason"] = "tool_fail_loop"
+                # 熔断即终局：本轮不再执行（终态文本不被 tool_core 覆写）。
+                updates[StateKeys.RAW_TOOL_CALLS] = []
                 # 重置该签名计数：管道即将结束，避免残留
                 self._rejected_signatures[signature] = 0
 
         logger.info(
-            "[%s] Soft-block: 拒绝转为 tool_result 反馈给 LLM | tool=%s",
+            "[%s] Soft-block: 拒绝预定结果待 tool_core 整形反馈 LLM | tool=%s",
             self.name,
             tool_name,
         )
@@ -1597,6 +1741,7 @@ class SecurityCheckPlugin(IInputPlugin):
         差异，不改变 token 语义；未命中时再比对裸 casefold 子串（覆盖模式串
         含引号等 shlex 会剥离的字符的场景，取并集 = fail-closed 方向）。
         """
+
         def _norm(text: str) -> str:
             try:
                 tokens = shlex.split(text, posix=False)
@@ -1670,7 +1815,6 @@ class SecurityCheckPlugin(IInputPlugin):
                         e,
                     )
                     return f"Encoded path traversal detected (decode failed): {path}"
-
 
         return ""
 
@@ -1829,8 +1973,19 @@ class SecurityCheckPlugin(IInputPlugin):
                         return True
         return False
 
-    def _is_isolated(self, execution_contexts: list[dict[str, Any]]) -> bool:
-        """判断当前任务是否为隔离模式。
+    def _is_isolated(self, ctx: PluginContext, execution_contexts: list[dict[str, Any]]) -> bool:
+        """判断当前批次是否按隔离任务处置（免审批默认准入，单点判定）。
+
+        两条件同时成立（ADR 2026-09-29-isolated-subtask-approval-card-batch-credit，
+        修订 2026-09-24-security-check-hardening-s1-s4 的批次 all() 语义）：
+        1. 任务级隔离：批次中任一 context 携带 task_isolated=True（writer 语义 =
+           任务隔离 AND provider≠host——非隔离任务全 False；隔离任务纯宿主批次
+           判非，回落所选档，fail-closed 方向）；
+        2. 批次级执行平面：不存在「宿主裸跑的命令执行类调用」。只读/文件类等
+           宿主路由辅助工具（policy host_direct）不拖垮整批——2026-09-15「隔离
+           容器即安全边界」裁定的免审批默认归队；其读写风险由基础检查、位置闸
+           （全档执法）与非旁路档规则轨道独立覆盖。宿主裸跑 bash（主 agent L1
+           路由/宿主路径/force_host/降级）仍回落所选档审批（S1 保持）。
 
         isolation_level 是隔离的唯一真相源：隔离任务（isolated/None/空）豁免
         「环境类」检查（危险工具分类门槛，未命中规则的参数不弹审批）——但
@@ -1839,12 +1994,33 @@ class SecurityCheckPlugin(IInputPlugin):
         每个 context。
 
         Args:
+            ctx: 插件执行上下文（命令执行类判定经 policy loader，读服务面降级安全）
             execution_contexts: isolation_guard 写入的工具执行上下文列表
 
         Returns:
-            True=隔离任务（环境类检查豁免），False=非隔离任务（危险工具需授权）
+            True=按隔离任务处置（环境类检查豁免），False=非隔离任务（危险工具需授权）
         """
-        return bool(execution_contexts) and all(c.get("task_isolated") for c in execution_contexts)
+        if not execution_contexts:
+            return False
+        if not any(c.get("task_isolated") for c in execution_contexts):
+            return False
+        return not any(
+            c.get("provider") == "host" and self._carries_host_execution(ctx, c)
+            for c in execution_contexts
+        )
+
+    def _carries_host_execution(self, ctx: PluginContext, context: dict[str, Any]) -> bool:
+        """判断单个宿主 context 是否承载执行平面（批次判定的决定性子集）。
+
+        - tool_name 缺失（非 isolation_guard 写面/未知形态）→ 保守按执行平面
+          处理（fail-closed）；
+        - 命令执行类工具（policy execution == command_in_container，args 级
+          dangerous_operations 判定不在本判定——参数级风险归规则/位置闸轨道）。
+        """
+        tool_name = str(context.get("tool_name") or "")
+        if not tool_name:
+            return True
+        return self._is_dangerous_tool(ctx, tool_name)
 
     def _get_dangerous_operations(self, ctx: PluginContext, tool_name: str) -> list[str]:
         """获取工具声明的 dangerous_operations（危险工具判定轨道 2 数据源）。

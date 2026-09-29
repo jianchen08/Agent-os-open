@@ -60,13 +60,13 @@ metrics:
           description: 用户意图列表（check=intent 时使用）
         expected:
           type: string
-          description: 期望的语义描述（check=match 时使用）
+          description: 期望的语义描述（验收期望，评估 agent 对照工作区产出判定）
         references:
           type: array
           items:
             type: string
           description: 参考资料（check=hallucination 时使用）
-      required: [output]
+      required: [expected]
     tags: [semantic, intent, match, hallucination]
 
   # ========== 命令检查 ==========

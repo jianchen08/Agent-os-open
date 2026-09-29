@@ -321,7 +321,8 @@ async def test_payload_diag_dir_rotation_cap(
         def _locked(*_a: Any, **_k: Any) -> None:
             raise PermissionError("file locked")
 
-        monkeypatch.setattr(adapter_mod.os, "remove", _locked)
+        # 轮转删除原语是 Path.unlink（adapter 侧 pathlib 化后），失败模拟打同一删除点
+        monkeypatch.setattr(Path, "unlink", _locked)
 
     adapter_mod._install_payload_diag_hook()
     _TransformStub.transform_request(_TransformStub(), "m", [{"role": "user", "content": "x"}], None, None, None)
@@ -1160,3 +1161,58 @@ async def test_direct_call_worker_stops_iterating_after_close(
             pytest.fail("worker 未在 close 后关闭底层流")
         await asyncio.sleep(0.05)
     assert underlying.aclose_called == 1
+
+
+# ─────────────── _accumulate_tool_call_deltas：tool_call id 单一关联键 ───────────────
+
+
+def _tc_chunk(idx: int, id: str | None, name: str = "", arguments: str = "") -> SimpleNamespace:
+    """构造 litellm 形态的 tool_calls delta chunk。"""
+    return SimpleNamespace(index=idx, id=id, function=SimpleNamespace(name=name, arguments=arguments))
+
+
+def test_stream_tool_call_late_id_adopts_placeholder() -> None:
+    """首个 chunk 无 id → 占位；迟到的真实 id 覆盖占位（与流事件同键）。
+
+    单一关联键（ADR 2026-09-28-tool-call-live-card）：translator 取首个非空
+    chunk id 发流事件，最终结果必须同键——占位不覆盖会让同一工具调用以
+    两个 id 分叉（前端双卡）。
+    """
+    state = adapter_mod._StreamState()
+    acc = adapter_mod._BaseLiteLLMAdapter._accumulate_tool_call_deltas
+
+    acc(None, [_tc_chunk(0, None, name="f", arguments='{"a"')], state)
+    placeholder = state.tool_calls_map[0]["id"]
+    assert placeholder  # 占位存在（tc_ 前缀形态）
+    assert state.tool_calls_map[0]["_id_fabricated"] is True
+
+    acc(None, [_tc_chunk(0, "call-real-1")], state)
+
+    assert state.tool_calls_map[0]["id"] == "call-real-1"
+    assert state.tool_calls_map[0]["_id_fabricated"] is False
+
+
+def test_stream_tool_call_first_id_not_overwritten() -> None:
+    """首个 chunk 已带真实 id → 后续 chunk 携带不同 id 不覆盖（首非空赢，
+    与 translator 的 not state.id 语义一致）。"""
+    state = adapter_mod._StreamState()
+    acc = adapter_mod._BaseLiteLLMAdapter._accumulate_tool_call_deltas
+
+    acc(None, [_tc_chunk(0, "call-first", name="f")], state)
+    acc(None, [_tc_chunk(0, "call-second")], state)
+
+    assert state.tool_calls_map[0]["id"] == "call-first"
+    assert state.tool_calls_map[0]["_id_fabricated"] is False
+
+
+def test_stream_tool_call_no_id_keeps_placeholder() -> None:
+    """全程无 id → 占位保留（占位 id 即最终 id，流事件侧无 id 不建卡，无双卡面）。"""
+    state = adapter_mod._StreamState()
+    acc = adapter_mod._BaseLiteLLMAdapter._accumulate_tool_call_deltas
+
+    acc(None, [_tc_chunk(0, None, name="f", arguments="{}")], state)
+    acc(None, [_tc_chunk(0, None, arguments="{}")], state)
+
+    tid = state.tool_calls_map[0]["id"]
+    assert tid.startswith("tc_0_")
+    assert state.tool_calls_map[0]["_id_fabricated"] is True

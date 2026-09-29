@@ -1095,6 +1095,16 @@ impl PipelineExecutor {
             for key in REDUNDANT_KEYS {
                 obj.remove(*key);
             }
+            // 工具结果 staging 键定位符化（ADR 2026-09-29-trace-mirror-dedup）：
+            // 全文权威副本在工具缓存（tool_cache_writer 同 run 落缓存）与展示
+            // 信封（messages 截断版），轨迹镜像只留摘要定位符——装机实测该两键
+            // 单补丁可达 250KB+（traces 53.9MB 的主要成分）。
+            for key in TRACE_MIRROR_DIGEST_KEYS {
+                if let Some(v) = obj.get(*key) {
+                    let digest = trace_mirror_digest(v);
+                    obj.insert((*key).to_string(), digest);
+                }
+            }
         }
 
         // 取走本窗口的 messages 实录，拼进 patch_data。引擎窗口无插件运行、
@@ -1354,6 +1364,13 @@ impl PipelineExecutor {
         // （plugin_metrics_class），未收录 id = Other 不计（编排类插件）。
         let class = plugin_metrics_class(plugin_id);
         let invoke_start = std::time::Instant::now();
+        // 堆栈级诊断插桩：invoke await 即既有等待点（LLM 流式 / 工具阻塞——
+        // human_interaction 在插件进程内等回复也显形于此），标签经任务本地
+        // 槽 O(1) 更新（无槽上下文 no-op）。
+        let pipeline_id = state_str(state, "pipeline_id").unwrap_or_default();
+        agentos_core::task_activity::set_current_label(format!(
+            "invoking plugin {plugin_id} (pipeline {pipeline_id})"
+        ));
         let result = self.invoker.invoke_pipeline_plugin(plugin_id, &ctx).await;
         let elapsed = invoke_start.elapsed().as_micros() as u64;
         match class {
@@ -1956,6 +1973,39 @@ fn last_role(state: &serde_json::Value, role: &str) -> Option<serde_json::Value>
 /// 全量数组 diff 推断不适用（零兼容）。
 /// step 顶层键首触实录：记录写前旧值（首触即定格——后续同键再写不覆盖，
 /// diff 只关心 step 边界前后的变化）。调用方在写 state 前调用。
+/// 轨迹镜像定位符化的工具结果 staging 键（ADR 2026-09-29-trace-mirror-dedup）。
+///
+/// 这两键是 tool_core 每个工具调用 step 的 state_updates 全量重写体（数组整体
+/// 换新），journal diff 按键忠实镜像即整份原文进 trace 补丁。全文权威副本：
+/// `_full_tool_results` → tool_cache_writer 同 run 落工具缓存（缓存真值源）；
+/// `tool_results` → 展示截断版随 messages 信封。轨迹只留摘要定位符。
+/// DR 无损：回放消费链（merge_patch → merge_recovered_scalars）对这两键
+/// （`_` 前缀键被跳过、展示版不参与恢复）零读取。
+const TRACE_MIRROR_DIGEST_KEYS: &[&str] = &["_full_tool_results", "tool_results"];
+
+/// 构造工具结果数组的轨迹摘要定位符：逐项留 tool_name + 序列化字节数，
+/// 不留任何结果内容。数组输入 → `{"_trace_digest":true,count,items:[..]}`；
+/// 非数组输入原样透传（防御：键值形状契约外的值不做有损变换）。
+pub fn trace_mirror_digest(v: &serde_json::Value) -> serde_json::Value {
+    let Some(items) = v.as_array() else {
+        return v.clone();
+    };
+    let item_digests: Vec<serde_json::Value> = items
+        .iter()
+        .map(|it| {
+            serde_json::json!({
+                "tool_name": it.get("tool_name").and_then(|t| t.as_str()).unwrap_or(""),
+                "chars": serde_json::to_string(it).map(|s| s.len()).unwrap_or(0),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "_trace_digest": true,
+        "count": items.len(),
+        "items": item_digests,
+    })
+}
+
 fn state_diff_from_journal(
     journal: &HashMap<String, Option<serde_json::Value>>,
     after: &serde_json::Value,

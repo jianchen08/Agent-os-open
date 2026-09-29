@@ -152,8 +152,12 @@ describe('new_message 完整消息形态（冷热同构）', () => {
     const textParts = snap.parts.filter((p: any) => p.type === 'text')
     const allText = textParts.map((p: any) => p.content).join('')
     expect(allText).toContain('本地累积正文')
-    // 本地 streaming 态收敛为 done
-    expect(snap.parts.every((p: any) => p.state !== 'streaming')).toBe(true)
+    // 本地 text/thinking streaming 态收敛为 done；tool_call 无终态证据时保持
+    // 'streaming'（渲染 pending——new_message 在工具执行前到达，不宣称假终态；
+    // 终态由 tool_result 事件落地）
+    const textLike = snap.parts.filter((p: any) => p.type === 'text' || p.type === 'thinking')
+    expect(textLike.every((p: any) => p.state !== 'streaming')).toBe(true)
+    expect(toolParts[0].state).toBe('streaming')
   })
 
   it('场景3：流式中断（本地无内容）时 data.message 兜底填充完整形态', () => {

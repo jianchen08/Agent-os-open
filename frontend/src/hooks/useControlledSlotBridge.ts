@@ -20,11 +20,14 @@ export interface ControlledSlotBridgeSpec {
   /** 写值 */
   set: (field: string, value: unknown) => void
   /**
-   * 附加透传（如 disabled/placeholder）。
-   * 传函数时惰性求值——在 overrideProps 被调用（渲染期）才执行，规避宿主
-   * 组件里依赖后声明变量（TDZ）的问题；函数体保持与组件渲染同步。
+   * 附加透传（如 disabled/placeholder/宿主派生选项）。传函数时惰性求值——
+   * 在 overrideProps 被调用（渲染期）才执行，规避宿主组件里依赖后声明变量
+   * （TDZ）的问题；函数体保持与组件渲染同步。函数形态可读目标声明（如按
+   * 声明 fields 追加宿主派生选项），零参函数同样合法。
    */
-  extra?: Record<string, unknown> | (() => Record<string, unknown>)
+  extra?:
+    | Record<string, unknown>
+    | ((declaration: WidgetDeclaration) => Record<string, unknown>)
 }
 
 /**
@@ -64,7 +67,7 @@ export function useControlledSlotBridge(
       const field = controlledFieldOf(declaration, spec.field)
       if (!field) return undefined
       const extra =
-        typeof spec.extra === 'function' ? spec.extra() : spec.extra
+        typeof spec.extra === 'function' ? spec.extra(declaration) : spec.extra
       return {
         value: { [field]: spec.get(field) },
         onChange: (values: Record<string, unknown>) => spec.set(field, values?.[field]),

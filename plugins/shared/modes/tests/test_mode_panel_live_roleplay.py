@@ -55,9 +55,11 @@ def _call(
     method: str = "GET",
     raw_body: str = "",
     query: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     return asyncio.run(
-        module.http_handle(path=path, method=method, raw_body=raw_body, query=query or {})
+        module.http_handle(path=path, method=method, raw_body=raw_body,
+                           query=query or {}, headers=headers)
     )
 
 
@@ -214,8 +216,9 @@ def test_panel_html_theme_sync_receiver_and_host_tokens() -> None:
 
 def test_panel_html_sessionized_play_flow() -> None:
     """会话化开演面板契约（2026-09-25，扮演是对话不是任务）：fresh 走
-    roleplay.continue 宿主桥（无任务派发、无开演记录页签联动）；宿主会话锚
-    不出现在任何上行 body；possess/regenerate 派发中状态反馈保留。"""
+    mode.session 通用宿主桥（批 G-B②③ 去 roleplay 化，原 roleplay.continue；
+    无任务派发、无开演记录页签联动）；宿主会话锚不出现在任何上行 body；
+    possess/regenerate 派发中状态反馈保留。"""
     html = _panel_html()
     lowered = html.lower()
     # 三页签布局保持：角色卡 / 世界书 / 开演记录
@@ -223,9 +226,9 @@ def test_panel_html_sessionized_play_flow() -> None:
     # 宿主会话锚不再出现在任何上行 body（开演已会话化/重新生成不透传）
     assert "session_id" not in lowered
     assert "currentsessionid" not in lowered
-    # 会话化开演：roleplay.continue 桥 + 会话切换 toast；旧任务派发反馈
+    # 会话化开演：mode.session 桥 + 会话切换 toast；旧任务派发反馈
     # （任务号 toast/切开演记录页签/延迟补刷）随之移除
-    assert "roleplay.continue" in lowered
+    assert "mode.session" in lowered
     assert "扮演会话已创建，已切换" in html
     assert "已开演" not in html
     # possess/regenerate 派发中状态反馈保留
@@ -247,8 +250,8 @@ def test_panel_html_record_detail_renders_performance() -> None:
 def test_panel_html_wave_b_mature_contract() -> None:
     """角色扮演面板消费面契约（Wave B + 2026-09-25 会话化开演）：
     - 开演双按钮并列（possess/fresh，无默认不记忆）：possess 走 /data/actions/
-      play 回执 + roleplay.possess 宿主桥；fresh 走 roleplay.continue 宿主桥
-      建扮演会话（开演即对话），载荷携所选开场白 selectedGreetingText 与
+      play 回执 + mode.possess 宿主桥（批 G-B②③ 通用化）；fresh 走 mode.session
+      宿主桥建扮演会话（开演即对话），载荷携所选开场白 selectedGreetingText 与
       用户设定 resolvedUserPersonaText，成功 toast「扮演会话已创建，已切换」；
     - 卡库画廊网格 + 页签工具行（新建/导入）；来源徽标（出厂/自建）；
     - 卡 CRUD 面（save/import/export/delete）+ persona 档案面
@@ -260,16 +263,18 @@ def test_panel_html_wave_b_mature_contract() -> None:
     lowered = html.lower()
     # 双按钮 + 附身上行宿主桥动作 + 会话化开演桥
     assert "附身当前助手" in html and "新开扮演会话" in html
-    assert "已附身" in html and "roleplay.possess" in lowered
+    assert "已附身" in html and "mode.possess" in lowered
     assert "扮演会话已创建，已切换" in html
-    # 会话化开演：fresh 分支走 roleplay.continue，携开场白/用户设定文本
+    # 会话化开演：fresh 分支走 mode.session，携开场白/用户设定文本
     # （onclick 串在 JS 源里经 \' 转义，先归一再断言）
     unescaped = html.replace("\\'", "'")
     lowered_unescaped = unescaped.lower()
     assert "playcard('possess')" in lowered_unescaped and "playcard('fresh')" in lowered_unescaped
     assert "selectedgreetingtext(c)" in lowered and "resolveduserpersonatext()" in lowered
-    # 开场白/用户设定空则键缺省（桥 fail-closed：在场键须非空字符串）
-    assert "payload.greeting = greeting" in lowered and "payload.personatext = personatext" in lowered
+    # 开场白/用户设定空则键缺省（桥 fail-closed：在场键须非空字符串）——
+    # 批 G-B②③ 后经 extra_context.roleplay_greeting / roleplay_user_persona 承载
+    assert "extra.roleplay_greeting = greeting" in lowered
+    assert "payload.extra_context = extra" in lowered
     # 附身上行携带卡人设文本（cardPersonaText：description+personality+scenario
     # 拼接；宿主发送链经 execution_context.roleplay_persona 注入，主 agent 身份不变）
     assert "cardPersonaText" in html and "personaText: cardPersonaText(c)" in html
@@ -331,6 +336,68 @@ def _fake_invoke_capturing(captured: dict[str, Any], task_id: str) -> Any:
         return {"data": {"task_id": task_id}}
 
     return _fake_invoke
+
+
+def _access_token(user_id: str = "u-e2e") -> str:
+    """构造内核同形 access token（`base64url(payload).sig`，payload=
+    `access:<uid>:<username>:<exp>:<jti>:<h>`；签名段本端点不校验）。"""
+    import base64 as _b64
+
+    payload = f"access:{user_id}:tester:9999999999:jti:h"
+    raw = _b64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+    return f"{raw}.c2ln"
+
+
+def test_pipeline_open_resolves_user_and_state_identity() -> None:
+    """B8 pipeline/open 代理契约：user_id 从请求 token 解（内核 chat.send_message
+    契约非空，缺失 401 如实拒绝）；run 执行身份经 state.agent.id 透传（顶层
+    agent_id 只是派发簿记，内核测试
+    create_branch_persists_agent_identity_from_state_overlay 钉死的契约）。"""
+    module = _load_server()
+    captured: dict[str, Any] = {}
+
+    def _fake_bind(cap: Any, ns: str) -> Any:
+        async def _caller(method: str, args: dict[str, Any], timeout: float = 25.0):
+            captured.update({"method": method, "ns": ns, **args})
+            return {"status": "created", "pipeline_id": "pipe-e2e"}
+
+        return _caller
+
+    class _StubPlugin:
+        """未 bootstrap 测试环境的 capability 存根：get_capability 恒可取。"""
+
+        def get_capability(self, ns: str) -> Any:
+            return object()
+
+    module.plugin = _StubPlugin()
+    import agentos_plugin_sdk.capability as _capmod
+
+    original = _capmod.bind_capability_caller
+    _capmod.bind_capability_caller = _fake_bind
+    try:
+        # 坏/缺 token → 401 且零派发
+        bad = _call(module, "/ext/mode_roleplay/pipeline/open", method="POST",
+                    raw_body=json.dumps({"session_id": "thread-x"}),
+                    headers={"authorization": "Bearer not-a-token"})
+        assert _envelope_status(bad) == 401
+        assert captured == {}
+        # 合法 token → user_id 解析 + state.agent.id 透传 + create 分支参数
+        ok = _call(module, "/ext/mode_roleplay/pipeline/open", method="POST",
+                   raw_body=json.dumps({
+                       "session_id": "thread-e2e",
+                       "agent_id": "mode_roleplay/card_kael",
+                       "first_message": "（开始）",
+                   }),
+                   headers={"authorization": f"Bearer {_access_token('u-77')}"})
+        out = _body_json(ok)
+        assert out["status"] == "created" and out["pipeline_id"] == "pipe-e2e"
+        assert captured["user_id"] == "u-77", "user_id 应从 token 解出"
+        assert captured["thread_id"] == "thread-e2e"
+        assert captured["create"] is True
+        assert captured["pipeline_config_id"] == "roleplay"
+        assert captured["state"] == {"agent.id": "mode_roleplay/card_kael"}
+    finally:
+        _capmod.bind_capability_caller = original
 
 
 def test_play_action_possess_only_ignores_body_context_keys() -> None:

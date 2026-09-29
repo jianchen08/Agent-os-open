@@ -118,12 +118,20 @@ class TestUninitializedGuards:
         for coro in (
             server.isolation_create_env(task_id="t1"),
             server.isolation_execute(task_id="t1", operation={"cmd": "ls"}),
-            server.isolation_destroy_env(env_id="e1"),
             server.isolation_list_envs(),
             server.isolation_stats(),
         ):
             result = await coro
             assert result == {"error": "隔离服务未初始化"}
+
+    async def test_destroy_env_uninitialized_is_explicit_failure(self) -> None:
+        """destroy_env 失败显式 success=False——跨插件消费方（environment_lifecycle
+        经 tool-executor）按信封 error 键判定成败，裸 error 会被内核归一化包成
+        success=true 信封导致谎报已销毁。"""
+        assert await server.isolation_destroy_env(env_id="e1") == {
+            "success": False,
+            "error": "隔离服务未初始化",
+        }
 
     async def test_checkpoint_fails_closed_when_uninitialized(self) -> None:
         assert await server.isolation_checkpoint("create") == {"error": "检查点管理器未初始化"}
@@ -219,7 +227,10 @@ class TestDestroyEnv:
     async def test_destroy_without_target_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stub = _StubManager()
         monkeypatch.setattr(server, "_manager", stub)
-        assert await server.isolation_destroy_env() == {"error": "必须提供 env_id、task_id 或 container_name"}
+        assert await server.isolation_destroy_env() == {
+            "success": False,
+            "error": "必须提供 env_id、task_id 或 container_name",
+        }
         assert stub.calls == []
 
     async def test_destroy_by_container_name_reports_manager_verdict(

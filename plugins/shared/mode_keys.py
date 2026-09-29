@@ -1,13 +1,18 @@
-"""模式命名空间资源键解析：agent 键 `mode_X/<stem>` → 模式包内 yaml 路径。
+"""模式命名空间资源键解析：agent 键 `mode_X/<stem>` → 模式包内 yaml 路径，
+技能名 `mode_X/<skill>` → 模式包内技能目录（与 agent 键同构，批 E §3.1）。
 
 设计真值 docs/working/模式体系落地设计_20260915.md §2.3/§3.3：agent 键两级
 解析 = 系统注册表（config/agents）未命中 → 模式包目录注册表（约定子目录
 `mode_X/agents/*.yaml`，键 `mode_X/<文件名 stem>`，与内核 mode_registry
-同构）；两级未命中由调用方 fail-closed。
+同构）；两级未命中由调用方 fail-closed。技能插槽与 agents 完全同构
+（docs/working/模式包工作模式设计_20260928.md §3.1）：约定目录
+`mode_X/skills/<name>/SKILL.md` 免声明即注册，零内核（Rust 扫描不扩）。
 
 双根：用户副本 `<USER_ROOT>/plugins/modes` 优先，回落出厂
 `plugins/shared/modes`（plugin.json 为包标记，双根同 id 用户赢）。
-消费方：context_build（agent 配置装配）、task_submit（派发期磁盘回退）。
+消费方：context_build（agent 配置装配）、task_submit（派发期磁盘回退）；
+find_mode_skill_dir 是技能插槽的名→目录解析面（批 E §3.1），与 isolation
+工作空间技能同步源（_copy_skills_to_workspace）同一双根优先序。
 """
 
 from __future__ import annotations
@@ -22,6 +27,10 @@ logger = logging.getLogger(__name__)
 # MODE_ID_RE 同口径（小写标识）；stem 限字母数字下划线（杜绝路径分隔符与
 # `..` 穿越）。
 _MODE_AGENT_KEY_RE = re.compile(r"^mode_([a-z][a-z0-9_]{0,63})/([A-Za-z0-9_]+)$")
+
+# 技能名形态：字母数字开头 + 字母数字下划线连字符（技能目录事实命名形，
+# 如 code-implement/skill-test-infra；杜绝路径分隔符与 `..` 穿越）。
+_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 _SHARED_ROOT = Path(__file__).resolve().parent
 
@@ -73,3 +82,20 @@ def find_mode_agent_yaml(key: str) -> Path | None:
         return None
     path = pkg_dir / "agents" / f"{stem}.yaml"
     return path if path.is_file() else None
+
+
+def find_mode_skill_dir(mode: str, name: str) -> Path | None:
+    """技能目录解析：`mode_X/skills/<name>`；未命中 None。
+
+    与 find_mode_agent_yaml 完全同语义（§3.1 技能与 agents 同构）：先经
+    find_mode_package_dir 定包（双根同 id 用户副本赢），再在包内按名取
+    `skills/<name>/`（SKILL.md 存在为技能标记，约定即注册）；包内未命中
+    不跨根回落——双根胜负在包级已定，包内无此技能即不存在。
+    """
+    if not isinstance(name, str) or _SKILL_NAME_RE.match(name) is None:
+        return None
+    pkg_dir = find_mode_package_dir(mode)
+    if pkg_dir is None:
+        return None
+    skill_dir = pkg_dir / "skills" / name
+    return skill_dir if (skill_dir / "SKILL.md").is_file() else None

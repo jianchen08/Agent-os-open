@@ -27,13 +27,28 @@ __all__ = [
 class WorkspaceLifecycleManager(_GitOpsMixin):
     """工作空间统一生命周期管理器"""
 
-    def __init__(self, resource_merge: Any, config: dict[str, Any], task_tree: Any, ws_meta_store: Any, base_path: str):
-        """初始化工作空间生命周期管理器"""
+    def __init__(
+        self,
+        resource_merge: Any,
+        config: dict[str, Any],
+        task_tree: Any,
+        ws_meta_store: Any,
+        base_path: str,
+        mode_skill_sources: list[Path] | None = None,
+    ):
+        """初始化工作空间生命周期管理器。
+
+        mode_skill_sources：模式包技能源目录清单（每项为一个含技能子目录的
+        `skills/` 目录），None = 按仓内布局推导（出厂 `plugins/shared/modes/
+        mode_*/skills/` + 用户根 `<USER_ROOT>/plugins/modes/mode_*/skills/`）；
+        显式传入 = 测试/隔离环境的注入面（替换推导，不叠加）。
+        """
         self._resource_merge = resource_merge
         self._config = config
         self._task_tree = task_tree
         self._ws_meta_store = ws_meta_store
         self._base_path = Path(base_path)
+        self._mode_skill_sources = mode_skill_sources
         # 按 project_root 粒度的并发锁
         self._merge_locks: dict[str, Any] = {}
         self._global_lock = __import__("threading").Lock()
@@ -191,38 +206,91 @@ class WorkspaceLifecycleManager(_GitOpsMixin):
 
     # ── 技能文件复制 ──────────────────────────────────────────────
 
-    def _copy_skills_to_workspace(self, ws_path: str) -> None:
-        """将项目 skills/ 目录复制到工作空间（按技能粒度增量同步）。
+    def _skill_sources(self) -> list[Path]:
+        """技能同步源目录清单（升优先序：仓根 → 出厂模式包 → 用户根模式包 → 用户根 skills/）。
 
-        任务启动时调用一次，让 Agent 在 host / worktree / Docker 容器
-        所有模式下都能通过 skills/<技能名>/scripts/*.py 访问技能脚本。
+        批 E（§3.1 用户裁定）：源从「项目根 skills/ 单源」扩为「根 ∪ 模式包
+        skills/」。出厂包根由本文件位置绝对推导（plugins/shared/modes，与
+        mode_keys 出厂根同式，不依赖 cwd）；用户根经 user_space 解析（不可得
+        → 无用户源）。mode_skill_sources 注入时以注入清单替换两处包根推导
+        （注入 = 测试/隔离环境的封闭面，用户根 skills/ 推导同样跳过——注入
+        语义是"替换推导"而非"叠加"）。升优先序排列供调用方按技能名去重
+        （后源同名覆盖前源 = 用户副本赢）。
+
+        用户根 ``<USER_ROOT>/skills/`` 是装机形态的根技能权威源：装机包
+        resources/ 不含仓根 skills/（R300 实证：agentos.yaml 引用
+        skill-container-task-flow 而包内无实体 → 模型到用户根拼绝对路径
+        File not found），sync_installed_user_space --skills 把仓根技能镜像
+        到该目录，会话工作区经此源拿到全量技能。
         """
-        skills_src = self._base_path / "skills"
-        if not skills_src.exists() or not skills_src.is_dir():
-            logger.debug(
-                "[WorkspaceLifecycle] skills/ 目录不存在，跳过复制: %s",
-                skills_src,
+        sources: list[Path] = [self._base_path / "skills"]
+        if self._mode_skill_sources is not None:
+            return sources + list(self._mode_skill_sources)
+        factory_modes = Path(__file__).resolve().parents[2] / "modes"
+        sources.extend(
+            sorted(pkg / "skills" for pkg in factory_modes.glob("mode_*") if (pkg / "skills").is_dir())
+        )
+        user_modes = None
+        try:
+            import user_space  # noqa: PLC0415
+
+            user_plugins = user_space.user_plugins_dir()
+            user_modes = Path(user_plugins) / "modes" if user_plugins else None
+        except Exception as exc:  # user_space 不可得 → 无用户源（与 mode_keys 同口径）
+            logger.debug("[WorkspaceLifecycle] user_space 不可得（仅仓根+出厂包源）| err=%s", exc)
+        if user_modes is not None:
+            sources.extend(
+                sorted(pkg / "skills" for pkg in user_modes.glob("mode_*") if (pkg / "skills").is_dir())
             )
-            return
+        try:
+            import user_space  # noqa: PLC0415
+
+            user_root = user_space.user_root()
+            if user_root is not None:
+                sources.append(Path(user_root) / "skills")
+        except Exception as exc:  # 与上方用户根推导同口径：不可得即无此源
+            logger.debug("[WorkspaceLifecycle] 用户根 skills/ 源解析失败（跳过）| err=%s", exc)
+        return sources
+
+    def _copy_skills_to_workspace(self, ws_path: str) -> None:
+        """将技能快照同步到工作空间（按技能粒度增量）。
+
+        源 = 项目根 skills/ ∪ 模式包 skills/（出厂 + 用户根）∪ 用户根 skills/
+        （见 _skill_sources）；
+        同名优先序与双根解析一致：用户根包技能 > 出厂包技能 > 仓根。任务/
+        会话启动时调用一次，让 Agent 在 host / worktree / Docker 容器所有
+        模式下都能通过 skills/<技能名>/… 访问技能；已有技能保持原样仅补缺。
+        """
         skills_dst = Path(ws_path) / "skills"
-        # 工作空间就是项目目录本身时，源和目标相同，无需复制
-        if skills_src.resolve() == skills_dst.resolve():
+        base_skills = self._base_path / "skills"
+        if base_skills.is_dir() and base_skills.resolve() == skills_dst.resolve():
             logger.debug(
                 "[WorkspaceLifecycle] 工作空间即为项目目录，skills/ 已在原位，跳过复制: %s",
                 skills_dst,
             )
             return
+        # 名 → 源目录：升优先序遍历，后源同名覆盖前源（用户副本赢）
+        picked: dict[str, Path] = {}
+        for source in self._skill_sources():
+            if not source.is_dir() or source.resolve() == skills_dst.resolve():
+                continue
+            for skill_src in source.iterdir():
+                if skill_src.is_dir():
+                    picked[skill_src.name] = skill_src
+        if not picked:
+            logger.debug(
+                "[WorkspaceLifecycle] 无任何技能源（项目根与模式包均无 skills/），跳过复制"
+            )
+            return
         skills_dst.mkdir(parents=True, exist_ok=True)
         copied: list[str] = []
-        for skill_src in skills_src.iterdir():
-            if not skill_src.is_dir():
-                continue
-            skill_dst = skills_dst / skill_src.name
+        for name, skill_src in sorted(picked.items()):
+            skill_dst = skills_dst / name
             if skill_dst.exists():
                 continue  # 已有技能保持原样，仅补齐缺失项
             try:
                 shutil.copytree(skill_src, skill_dst, symlinks=True)
-                copied.append(skill_src.name)
+                copied.append(name)
             except Exception as exc:
                 logger.warning(
                     "[WorkspaceLifecycle] 技能复制失败: %s → %s | error=%s",
@@ -232,8 +300,7 @@ class WorkspaceLifecycleManager(_GitOpsMixin):
                 )
         if copied:
             logger.debug(
-                "[WorkspaceLifecycle] 技能已增量同步: %s → %s | new=%s",
-                skills_src,
+                "[WorkspaceLifecycle] 技能已增量同步 → %s | new=%s",
                 skills_dst,
                 copied,
             )

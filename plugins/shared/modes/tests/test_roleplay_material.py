@@ -243,8 +243,9 @@ class TestPersonaBypassAndDegradation:
         return tmp_path
 
     def test_persona_takeover_when_not_card_key(self, pkg) -> None:
-        """非卡键 + roleplay_persona 非空（附身场景，context_build 无卡数据）：
-        接管块全量必要——接管声明 + 人设文本。"""
+        """非卡键 + roleplay_persona 非空（附身场景）：组装器零人设段——
+        人设替换走 mode.yaml persona 声明的通用机制（context.persona_text →
+        {{persona:}} 占位符换源），追加式接管块已退役（2026-09-28）。"""
         state = {
             "agent.id": "agentos",
             "execution_context": {"roleplay_persona": "一位沉默寡言的老船长。"},
@@ -252,9 +253,7 @@ class TestPersonaBypassAndDegradation:
 
         text = material.build_injection(state, pkg)
 
-        assert "# 扮演接管" in text
-        assert "你将接管以下人设" in text
-        assert "一位沉默寡言的老船长。" in text
+        assert text == "", "旁路只剩开演档（无则空串）；人设替换不在组装器"
 
     def test_no_persona_no_card_key_returns_empty(self, pkg) -> None:
         """非卡键且无 persona = 零注入空串（通用步骤不追加）。"""
@@ -530,7 +529,8 @@ class TestOpeningSections:
         assert text.index("# 对话示例") < text.index("# 本场开场白")
 
     def test_bypass_path_injects_greeting_alongside_takeover(self, tmp_path) -> None:
-        """旁路（附身人设 + 开演档并存）：接管块与开场白段并存。"""
+        """旁路（附身人设 + 开演档并存）：人设不进组装器（通用机制接管），
+        开演档段照常注入。"""
         state = {
             "agent.id": "agentos",
             "execution_context": {
@@ -541,7 +541,7 @@ class TestOpeningSections:
 
         text = material.build_injection(state, tmp_path)
 
-        assert "# 扮演接管" in text
+        assert "# 扮演接管" not in text, "人设替换不在组装器（退役的追加块）"
         assert "# 本场开场白（用户已选定）" in text
         assert self._GREETING in text
 

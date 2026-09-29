@@ -275,6 +275,7 @@ fn make_sidecar_manifest(id: &str, entry: &str) -> PluginManifest {
         activation: None,
         persistent_fields: vec![],
         export_fields: vec![],
+        aux_venvs: Vec::new(),
         provides: None,
     }
 }

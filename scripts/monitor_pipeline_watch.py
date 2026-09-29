@@ -25,7 +25,7 @@ import os
 import sqlite3
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 DEFAULT_STUCK_MINS = 30
@@ -42,10 +42,10 @@ def _parse_ts(raw: str | None) -> datetime | None:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
-def _load_active_runs(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+def load_active_runs(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
         SELECT r.run_id, r.pipeline_id, r.status, r.created_at, r.ended_at, r.metadata,
@@ -124,9 +124,9 @@ def main() -> int:
         try:
             now = _now()
             cutoff = datetime.fromtimestamp(
-                now.timestamp() - args.stuck_mins * 60, tz=timezone.utc
+                now.timestamp() - args.stuck_mins * 60, tz=UTC
             )
-            for run in _load_active_runs(conn):
+            for run in load_active_runs(conn):
                 verdict = classify(run, cutoff)
                 if verdict == "RUNNING_STALE":
                     stuck = True

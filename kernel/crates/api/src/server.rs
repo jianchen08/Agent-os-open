@@ -43,12 +43,13 @@ use crate::auth::{
 };
 use crate::routes::{
     actions_execute_handler, get_pipeline_config_with_etag, get_plugin_config_with_etag,
-    health_handler, message_segment_get_handler, message_segments_list_handler,
-    metrics_prometheus_handler, pending_inputs_clear_handler, pending_inputs_delete_handler,
-    pending_inputs_list_handler, pending_inputs_update_handler, pipelines_handler,
-    pipelines_runs_handler, pipelines_state_handler, plugins_contract_status_handler,
-    plugins_dependents_handler, plugins_set_enabled_handler, plugins_status_handler,
-    put_pipeline_config_handler, put_plugin_config_handler, schema_handler, serve_upload_handler,
+    get_user_env_handler, health_handler, message_segment_get_handler,
+    message_segments_list_handler, metrics_prometheus_handler, pending_inputs_clear_handler,
+    pending_inputs_delete_handler, pending_inputs_list_handler, pending_inputs_update_handler,
+    pipelines_handler, pipelines_runs_handler, pipelines_state_handler,
+    plugins_contract_status_handler, plugins_dependents_handler, plugins_hosts_handler,
+    plugins_set_enabled_handler, plugins_status_handler, put_pipeline_config_handler,
+    put_plugin_config_handler, put_user_env_handler, schema_handler, serve_upload_handler,
     system_memstats_handler, system_restart_handler, tools_handler, validate_all_plugins_handler,
     AppState,
 };
@@ -137,6 +138,12 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/plugins/{id}/config/{file_id}",
             get(get_plugin_config_with_etag).put(put_plugin_config_handler),
         )
+        // 通用用户空间 .env 读写（2026-09-28 批次 A2：动态 provider key 等
+        // 无法走 manifest env-target 静态声明制的变量面；保留名 422 拒绝）
+        .route(
+            "/api/v1/config/env",
+            get(get_user_env_handler).put(put_user_env_handler),
+        )
         // 会话管理原生端点（task_kernel_cleanup_and_split 任务 2：compat threads 转正
         // 为 /api/v1/sessions*，实现与响应形状不变——前端 mappers 契约无感知）
         .route(
@@ -168,6 +175,8 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/plugins/contract-status",
             get(plugins_contract_status_handler),
         )
+        // 批次C 观测面：宿主盒子快照（只读；鉴权走 /api/v1/plugins* 白名单读面）
+        .route("/api/v1/plugins/hosts", get(plugins_hosts_handler))
         // G8 优雅重启（admin）：排空 running runs → exit 75，监督者拉起新进程
         .route(
             "/api/v1/system/restart",
@@ -176,6 +185,22 @@ pub fn build_router(state: AppState) -> Router {
         // M1 测量面：mimalloc 分配器统计快照（内核自有只读诊断端点，
         // 鉴权走 write_surface_auth 白名单读面）
         .route("/api/v1/system/memstats", get(system_memstats_handler))
+        // 堆栈级诊断面：内核活内存按结构分解 + 任务级活动转储（只读，
+        // 鉴权同 memstats 白名单读面）
+        .route(
+            "/api/v1/system/memory-breakdown",
+            get(crate::system_diagnostics::system_memory_breakdown_handler),
+        )
+        .route(
+            "/api/v1/system/task-dump",
+            get(crate::system_diagnostics::system_task_dump_handler),
+        )
+        // mimalloc 快照差分：POST 记基线 / GET 读与基线的逐字段差值
+        .route(
+            "/api/v1/system/memstats/snapshot",
+            axum::routing::post(crate::system_diagnostics::memstats_snapshot_record_handler)
+                .get(crate::system_diagnostics::memstats_snapshot_diff_handler),
+        )
         .route(
             "/api/v1/plugins/{id}/enabled",
             axum::routing::put(plugins_set_enabled_handler),
@@ -241,7 +266,9 @@ pub fn build_router(state: AppState) -> Router {
 /// （admin）；读面（GET）→ require_surface_role（admin/viewer）。白名单覆盖：
 /// - `/api/v1/sessions*`（会话 CRUD）
 /// - `/api/v1/plugins*`（status/enabled/config；注意 /api/v1/plugins 裸路径也需鉴权）
-/// - `/api/v1/system/restart`、`/api/v1/system/memstats`（读面：分配器统计快照）
+/// - `/api/v1/system/restart`、`/api/v1/system/memstats*`（读面：分配器统计
+///   快照 + 快照差分）、`/api/v1/system/memory-breakdown`、
+///   `/api/v1/system/task-dump`（堆栈级诊断读面）
 /// - `/api/v1/actions/execute`、`/api/v1/interaction/response`
 /// - `/api/v1/chat`（写面：消息触发管道执行/落库，未鉴权等于任意人
 ///   可驱动执行与消耗算力）
@@ -278,7 +305,9 @@ async fn write_surface_auth(
         || path.starts_with("/api/v1/message-segments")
         || path.starts_with("/api/v1/config/pipelines/")
         || path == "/api/v1/system/restart"
-        || path == "/api/v1/system/memstats"
+        || path.starts_with("/api/v1/system/memstats")
+        || path == "/api/v1/system/memory-breakdown"
+        || path == "/api/v1/system/task-dump"
         || path == "/api/v1/actions/execute"
         || path == "/api/v1/interaction/response"
         || path == "/api/v1/chat"
@@ -769,57 +798,190 @@ pub fn load_and_compile_by_name(
 // 管道编译缓存（PipelineCache）：显式指定的管道配置按需加载编译
 // ═════════════════════════════════════════════════════════════════
 
-/// 进程级编译缓存：键 = 管道配置 id（config/pipelines/{id}.yaml 的文件名主干）。
+/// 单个管道配置名的编译产物版本集（D9 版本钉住，批 H）。
 ///
-/// autonomous 启动期预入（bin/agentos-kernel.rs，现状行为不变）；其余配置
-/// **用什么加载什么**——首次显式指定时按需加载+编译+入缓存，绝不启动期全量
-/// 扫描。失效唯一路径 = PUT 管道配置热更端点显式失效（一期不校验 mtime，
-/// 磁盘改动不经 PUT 不生效）。生产单 config_root，键取管道 id 即可区分。
-static PIPELINE_COMPILED_CACHE: OnceLock<
-    ParkingRwLock<HashMap<String, Arc<agentos_engine::compiler::CompiledPipeline>>>,
-> = OnceLock::new();
+/// - `versions`：按 config_hash 双键保留全部历史版本产物——PUT 热更不删旧
+///   条目（已钉实例按 (name, config_hash) 恒取出生版本）；
+/// - `latest`：当前盘面最新版的 config_hash，PUT 热更后置 None（下次未钉
+///   取用按盘面重编译产新版本入集）。
+///
+/// 版本集合进程内只增不删：每次 PUT 至多新增一个版本，产物为配置规模的
+/// 小结构（无 messages 等大字段），进程生命周期内不做淘汰——淘汰会让已钉
+/// 实例被迫走盘面重编译路径，配置已改时误触 fail-closed（旧产物必须保留）。
+struct PipelineVersionSet {
+    latest: Option<String>,
+    versions: HashMap<String, Arc<agentos_engine::compiler::CompiledPipeline>>,
+}
 
-fn pipeline_compiled_cache(
-) -> &'static ParkingRwLock<HashMap<String, Arc<agentos_engine::compiler::CompiledPipeline>>> {
+impl PipelineVersionSet {
+    fn empty() -> Self {
+        Self {
+            latest: None,
+            versions: HashMap::new(),
+        }
+    }
+
+    /// 收录一个编译产物；`as_latest` = 同时设为当前盘面最新版。同 hash 已有
+    /// 产物时保持原 Arc（身份稳定：盘面改回旧内容后与既有实例共享同产物）。
+    fn upsert_version(
+        &mut self,
+        compiled: Arc<agentos_engine::compiler::CompiledPipeline>,
+        as_latest: bool,
+    ) -> Arc<agentos_engine::compiler::CompiledPipeline> {
+        if as_latest {
+            self.latest = Some(compiled.config_hash.clone());
+        }
+        self.versions
+            .entry(compiled.config_hash.clone())
+            .or_insert(compiled)
+            .clone()
+    }
+}
+
+static PIPELINE_COMPILED_CACHE: OnceLock<ParkingRwLock<HashMap<String, PipelineVersionSet>>> =
+    OnceLock::new();
+
+fn pipeline_compiled_cache() -> &'static ParkingRwLock<HashMap<String, PipelineVersionSet>> {
     PIPELINE_COMPILED_CACHE.get_or_init(|| ParkingRwLock::new(HashMap::new()))
 }
 
-/// 启动期预入编译产物（autonomous 单例；现状行为的缓存面）。
-pub fn pipeline_cache_seed(name: &str, compiled: Arc<agentos_engine::compiler::CompiledPipeline>) {
-    pipeline_compiled_cache()
-        .write()
-        .insert(name.to_string(), compiled);
+/// 编译产物缓存驻留快照（堆栈级诊断面 memory-breakdown 消费）：
+/// (管道配置数, 版本产物总数)。版本集随配置热更只增（D9 钉住契约要求
+/// 保活）——观测项，条目数为实测计数。
+pub fn pipeline_compiled_cache_stats() -> (usize, usize) {
+    let cache = pipeline_compiled_cache().read();
+    (
+        cache.len(),
+        cache.values().map(|set| set.versions.len()).sum(),
+    )
 }
 
-/// 失效缓存对应键（PUT 管道配置热更写盘后调用）：下次显式指定该配置时
-/// 按需重载新内容。不存在的键幂等。
+/// 启动期预入编译产物（autonomous 单例；现状行为的缓存面）：入版本集并设为
+/// 当前最新版。
+pub fn pipeline_cache_seed(name: &str, compiled: Arc<agentos_engine::compiler::CompiledPipeline>) {
+    let mut cache = pipeline_compiled_cache().write();
+    let set = cache
+        .entry(name.to_string())
+        .or_insert_with(PipelineVersionSet::empty);
+    set.upsert_version(compiled, true);
+}
+
+/// PUT 管道配置热更写盘后调用：清该配置的"当前盘面最新版"指针——下次未钉
+/// 取用按盘面重编译产新版本入集；**不删任何历史版本产物**（D9：已钉实例继续
+/// 按 (name, config_hash) 取出生版本，热更只对之后出生的实例生效）。不存在的
+/// 键幂等。
 pub fn pipeline_cache_invalidate(name: &str) {
-    if pipeline_compiled_cache().write().remove(name).is_some() {
-        info!(pipeline_config = %name, "Pipeline compiled cache invalidated (config updated)");
+    if let Some(set) = pipeline_compiled_cache().write().get_mut(name) {
+        if set.latest.take().is_some() {
+            info!(pipeline_config = %name, "Pipeline latest version invalidated (config updated; historical versions kept)");
+        }
     }
 }
 
 /// 管道编译产物选择收敛点（CompiledPipeline 唯一运行时取用面）。
 ///
-/// - `None` → autonomous 单例（[`maybe_reload_compiled_pipeline`] 热重载路径，
-///   缺省行为与历史逐字节一致）；
-/// - `Some(id)` → 缓存命中返回；未命中 → 按名加载+校验+编译+入缓存返回；
-///   任一步失败 → `Err`（带管道名）——**不回落 autonomous**：用哪个管道就是
+/// - `config_id = None` → autonomous 单例（[`maybe_reload_compiled_pipeline`]
+///   热重载路径，缺省行为与历史逐字节一致）——默认会话不参与版本钉住
+///   （D9 范围 = 显式绑定与任务派生管道，dev 迭代面保持热更）；
+/// - `Some(id)` 且未钉（`pinned_hash = None`）→ 当前最新版：缓存 latest 命中
+///   直接返回，未命中按盘面加载+编译+入集返回（调用方据返回产物的
+///   `config_hash` 落钉 = 出生即钉）；
+/// - `Some(id)` 且已钉 → 恒取钉住版本：缓存按 (name, hash) 命中直接返回；
+///   未命中（进程重启后缓存已空）按盘面重编译并比对 hash——一致复用（正常
+///   恢复），不一致 → `Err` fail-closed（含期望/当前盘面 hash，提示新开会话
+///   或重派任务，不静默换版本）；
+/// - 任一步失败 → `Err`（带管道名）——**不回落 autonomous**：用哪个管道就是
 ///   哪个，静默回落 = 用错管道。
+///
+/// `pinned_hash` 仅对显式配置生效（`None` 缺省路径无视它，由调用方
+/// [`resolve_config_pin`] 保证不出现在缺省轮）。
 pub(crate) async fn compiled_for(
     state: &AppState,
     config_root: &std::path::Path,
     config_id: Option<&str>,
+    pinned_hash: Option<&str>,
 ) -> Result<Arc<agentos_engine::compiler::CompiledPipeline>, String> {
     let Some(name) = config_id.filter(|s| !s.is_empty()) else {
         return Ok(maybe_reload_compiled_pipeline(state, config_root).await);
     };
-    if let Some(hit) = pipeline_compiled_cache().read().get(name) {
-        return Ok(Arc::clone(hit));
+    if let Some(expected) = pinned_hash {
+        return compiled_for_pinned(state, config_root, name, expected).await;
     }
-    // 显式指定的配置必须存在：缺文件 = Err（不降级空管道、不回落 autonomous
-    // ——静默跑错管道比报错更糟）。缺文件降级仅属 autonomous 启动加载
-    // （load_pipeline_config 的缺省启动契约）。
+    // 未钉（出生轮）：当前最新版命中零重编译（磁盘直改不经 PUT 不生效的
+    // 既有契约不变）。
+    let latest_hit = pipeline_compiled_cache().read().get(name).and_then(|set| {
+        set.latest
+            .as_ref()
+            .and_then(|hash| set.versions.get(hash).cloned())
+    });
+    if let Some(hit) = latest_hit {
+        return Ok(hit);
+    }
+    let compiled = compile_explicit_config(state, config_root, name).await?;
+    let mut cache = pipeline_compiled_cache().write();
+    let set = cache
+        .entry(name.to_string())
+        .or_insert_with(PipelineVersionSet::empty);
+    Ok(set.upsert_version(compiled, true))
+}
+
+/// 钉住取用：恒按 (name, expected) 版本取产物；缓存未命中（重启后）按盘面
+/// 重编译比对——hash 一致复用（正常恢复），不一致 fail-closed。
+async fn compiled_for_pinned(
+    state: &AppState,
+    config_root: &std::path::Path,
+    name: &str,
+    expected: &str,
+) -> Result<Arc<agentos_engine::compiler::CompiledPipeline>, String> {
+    let pinned_hit = pipeline_compiled_cache()
+        .read()
+        .get(name)
+        .and_then(|set| set.versions.get(expected).cloned());
+    if let Some(hit) = pinned_hit {
+        return Ok(hit);
+    }
+    // 重启恢复：缓存无该版本，按盘面重编译比对（与 compiled_for 缺配置
+    // "不回落 autonomous、用错管道不如报错"同精神——盘面已无同内容时
+    // fail-closed，不静默换版本）。
+    let path =
+        crate::pipeline_loader::resolve_pipeline_config_path(config_root, &format!("{name}.yaml"));
+    if !path.exists() {
+        return Err(format!(
+            "管道配置 '{name}' 已不存在（{}），实例钉住版本（config_hash={expected}）\
+             不可恢复——请新开会话或重派任务",
+            path.display()
+        ));
+    }
+    let compiled = compile_explicit_config(state, config_root, name).await?;
+    if compiled.config_hash != expected {
+        return Err(format!(
+            "管道配置 '{name}' 已被修改，钉住版本不可恢复：期望 config_hash={expected}，\
+             当前盘面 config_hash={}——请新开会话或重派任务（不静默换版本）",
+            compiled.config_hash
+        ));
+    }
+    info!(
+        pipeline_config = %name,
+        config_hash = %expected,
+        "Pinned pipeline version recovered from disk (hash matched)"
+    );
+    let mut cache = pipeline_compiled_cache().write();
+    let set = cache
+        .entry(name.to_string())
+        .or_insert_with(PipelineVersionSet::empty);
+    Ok(set.upsert_version(compiled, true))
+}
+
+/// 按名加载 + 编译一个显式配置（未钉/钉住恢复共用底座）。
+///
+/// 显式指定的配置必须存在：缺文件 = Err（不降级空管道、不回落 autonomous
+/// ——静默跑错管道比报错更糟）。缺文件降级仅属 autonomous 启动加载
+/// （load_pipeline_config 的缺省启动契约）。
+async fn compile_explicit_config(
+    state: &AppState,
+    config_root: &std::path::Path,
+    name: &str,
+) -> Result<Arc<agentos_engine::compiler::CompiledPipeline>, String> {
     let path =
         crate::pipeline_loader::resolve_pipeline_config_path(config_root, &format!("{name}.yaml"));
     if !path.exists() {
@@ -827,11 +989,60 @@ pub(crate) async fn compiled_for(
     }
     let known_ids = live_plugin_ids(state).await;
     let compiled = Arc::new(load_and_compile_by_name(config_root, name, &known_ids)?);
-    pipeline_compiled_cache()
-        .write()
-        .insert(name.to_string(), Arc::clone(&compiled));
     info!(pipeline_config = %name, "Pipeline config lazily loaded and compiled");
     Ok(compiled)
+}
+
+// ── D9 版本钉住（实例级）：出生即钉的读写面 ──────────────────────────
+//
+// 机制选择（免跨层传 hash）：不扩 modeBinding 快照/发送链帧，kernel 侧按
+// pipeline_id（管道实例唯一坐标）钉——实例首次解析显式配置时把
+// (name, config_hash) 落管道 state 持久键，后续轮次恢复合并回 initial_state
+// 后恒按钉住版本取产物。前端/插件零改动。
+
+/// 管道实例版本钉住的 state 持久键（D9 出生即钉，批 H）。点号键，与 task.id
+/// 同款约定；两键恒成对写入（出生轮一次），消费面 = stage_execute 逐轮读取。
+pub(crate) const PIPELINE_CONFIG_PIN_NAME_KEY: &str = "pipeline_config_pin.name";
+pub(crate) const PIPELINE_CONFIG_PIN_HASH_KEY: &str = "pipeline_config_pin.config_hash";
+
+/// 从恢复后的 initial_state 解析实例钉住记录（热路径 registry 快照 / 冷路径
+/// pipeline_state 表，两路恢复均进 state 顶层键）。任一键缺席/非字符串 →
+/// None（未钉：出生轮或默认会话）。
+fn pinned_config_from_state(initial_state: &serde_json::Value) -> Option<(String, String)> {
+    let name = initial_state
+        .get(PIPELINE_CONFIG_PIN_NAME_KEY)?
+        .as_str()?
+        .to_string();
+    let hash = initial_state
+        .get(PIPELINE_CONFIG_PIN_HASH_KEY)?
+        .as_str()?
+        .to_string();
+    Some((name, hash))
+}
+
+/// D9 钉住裁定（出生即钉）：
+/// - 显式配置 + 已钉同名 → `Ok(Some(hash))`：恒用钉住版本；
+/// - 显式配置 + 未钉 → `Ok(None)`：出生轮，调用方取到产物后落钉；
+/// - 显式配置 + 钉住异名 → `Err`：实例出生即钉，中途换绑配置名 = fail-closed
+///   （换配置请新开会话/重派任务，与内容层 fail-closed 同精神）；
+/// - 无显式配置 → `Ok(None)`：默认会话 autonomous 热重载，不参与钉住。
+fn resolve_config_pin(
+    explicit: Option<&str>,
+    pinned: Option<(&str, &str)>,
+) -> Result<Option<String>, String> {
+    let Some(name) = explicit else {
+        return Ok(None);
+    };
+    match pinned {
+        Some((pinned_name, pinned_hash)) if pinned_name == name => {
+            Ok(Some(pinned_hash.to_string()))
+        }
+        Some((pinned_name, _)) => Err(format!(
+            "管道实例已钉住配置 '{pinned_name}'，拒绝中途改绑 '{name}'\
+             （出生即钉：换配置请新开会话或重派任务）"
+        )),
+        None => Ok(None),
+    }
 }
 
 /// 空编译产物（配置缺失/首次编译失败时的安全降级：空管道执行，语义与
@@ -1064,7 +1275,7 @@ async fn process_via_engine_inner(
     // 注：任务状态（task.status/ended_at）由任务域插件裁决写入（task_evaluate
     // 评估终态经 pipeline-state.update 落 state），内核只广播 run 终态事件，
     // 不写任务状态（职责边界：内核只管管道运行域，任务状态由任务域插件裁决）。
-    emit_run_terminal_domain_events(state, &final_state, outcome.failed).await;
+    emit_run_terminal_domain_events(state, &final_state, &run_id, outcome.failed).await;
     outcome
 }
 
@@ -1159,13 +1370,27 @@ fn terminal_event_state_payload(final_state: &serde_json::Value) -> serde_json::
 }
 
 /// 广播 run 终态域事件（GAP-2：fire-and-forget，不阻塞引擎出口）。
+///
+/// run.failed 额外镜像一帧 `run_failed` 推前端（ADR 2026-09-28-run-failure-
+/// frontend-notification）：域事件只达总线/订阅插件，前端不知情——署名失败
+/// 路径（stop_reason 命中 FAILED_STOP_REASONS，DSL 正常收束 failed=false）与
+/// 任务/注入管道的引擎失败此前对前端完全静默。completed/suspended/cancelled
+/// 不镜像（每轮一帧 completed 是噪音，挂起/取消有既有通道）。
 async fn emit_run_terminal_domain_events(
     state: &AppState,
     terminal_state: &serde_json::Value,
+    run_id: &str,
     failed: bool,
 ) {
-    for (name, tags) in derive_run_terminal_events(terminal_state, failed) {
+    let events = derive_run_terminal_events(terminal_state, failed);
+    let run_failed = events.iter().any(|(name, _)| *name == "run.failed");
+    for (name, tags) in events {
         crate::plugin_lifecycle::broadcast_domain_event(state, name, tags).await;
+    }
+    if run_failed {
+        if let Some(session) = state.session.as_ref() {
+            emit_run_failed_frontend_event(session, terminal_state, run_id).await;
+        }
     }
     // 刀3（2026-09-09 内存驻留归因）：run 终态（非 suspended）注销该管道的
     // 热路径 state 缓存——final_state（含 messages 全历史）是单管道最有分量
@@ -1208,6 +1433,46 @@ async fn emit_run_terminal_domain_events(
                 .remove(&tenant_id, pipeline_id);
         }
     }
+}
+
+/// run.failed 前端镜像帧：`run_failed` WS 事件（streaming.json 契约条目）。
+///
+/// 载荷坐标从终态 state 提取（session_id/pipeline_id 出生契约键；引擎 Err
+/// 防御路径用预捕获的初始 state 剥离版，同样携带）。stop_reason 原值透传
+/// （FAILED_STOP_REASONS 命中词；引擎 Err 无署名为 null）——内核只转发不
+/// 解释。run_id 是前端通知幂等键（emit_event 进 thread 级重放缓冲，重放
+/// 不重复弹卡）。会话坐标缺失 → 丢弃（无 WS 投递目标；域事件照发）。
+async fn emit_run_failed_frontend_event(
+    session: &agentos_session::SessionCoordinator,
+    terminal_state: &serde_json::Value,
+    run_id: &str,
+) {
+    let thread_id = terminal_state
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let pipeline_id = terminal_state
+        .get("pipeline_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if thread_id.is_empty() || pipeline_id.is_empty() {
+        return;
+    }
+    let _ = session
+        .emit_event(
+            thread_id,
+            "run_failed",
+            serde_json::json!({
+                "pipeline_id": pipeline_id,
+                "_threadId": thread_id,
+                "status": "failed",
+                "stop_reason": terminal_state.get("router.stop_reason")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                "run_id": run_id,
+            }),
+        )
+        .await;
 }
 
 /// 前置依赖缺失时的 echo 降级应答（invoker/store/project_root 任一缺席）。
@@ -1685,6 +1950,63 @@ mod stage_refresh_registry_snapshot_tests {
         let pid = "pipe_refresh_absent";
         stage_refresh_registry_snapshot(tenant, pid, &serde_json::json!({"run_status": "running"}));
         assert!(!reg.contains(tenant, pid), "不得为不存在的条目抢先建项");
+    }
+}
+
+#[cfg(test)]
+mod stage_finalize_residency_tests {
+    use super::*;
+
+    /// 常驻快照剥离 `_` 前缀引擎私有 staging 键（ADR 2026-09-29-trace-mirror-
+    /// dedup）：`_full_tool_results` 等是 per-run 中间态（同 run 内被
+    /// tool_cache_writer 消费，跨轮零消费——恢复链 merge_recovered_scalars 跳过
+    /// `_` 键），不得随 final_state 滞留内存注册表。messages 驻留是设计正确
+    /// （队列跨轮延续），不动；tool_schemas 剥离是既有契约。
+    #[test]
+    fn residency_snapshot_strips_underscore_staging_keys_and_keeps_messages() {
+        let reg = agentos_session::pipeline_state_registry::global_registry();
+        let tenant = "tenant_finalize_us";
+        let pid = "pipe_finalize_us";
+        let final_state = serde_json::json!({
+            "pipeline_id": pid,
+            "run_status": "completed",
+            "task.status": "done",
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a"},
+            ],
+            "_full_tool_results": [{"tool_name": "bash_execute", "data": "X".repeat(256)}],
+            "_executed_tool_calls": [{"name": "bash_execute"}],
+            "_plugin_errors": [],
+            "tool_schemas": {"bash_execute": {"type": "object"}},
+        });
+        let _ = stage_finalize(&final_state, tenant, pid, "thread_fu", "agentos");
+
+        let entry = reg.get(tenant, pid).expect("收尾应补建条目");
+        let e = entry.read();
+        assert!(
+            e.state.get("_full_tool_results").is_none(),
+            "全文 staging 键不得驻留"
+        );
+        assert!(
+            e.state.get("_executed_tool_calls").is_none(),
+            "执行记录 staging 键不得驻留"
+        );
+        assert!(
+            e.state.get("_plugin_errors").is_none(),
+            "引擎私有键不得驻留"
+        );
+        assert!(
+            e.state.get("tool_schemas").is_none(),
+            "tool_schemas 剥离是既有契约"
+        );
+        assert_eq!(e.state["task.status"], "done", "合法标量保留");
+        assert_eq!(
+            e.state["messages"].as_array().map(Vec::len),
+            Some(2),
+            "messages 队列驻留是设计正确，不动"
+        );
+        reg.remove(tenant, pid);
     }
 }
 
@@ -2191,11 +2513,37 @@ async fn stage_execute(
     });
 
     // ── Pull 热加载（在 project_root 被 move 给 executor 之前算出 config_root）──
-    // 管道编译产物选择收敛点：None = autonomous 热重载单例（现状路径）；
-    // Some(id) = 按需加载编译缓存（失败 Err 透传，不回落 autonomous——
-    // 用哪个管道就是哪个，静默回落 = 用错管道）。
+    // 管道编译产物选择收敛点：None = autonomous 热重载单例（默认会话现状路径，
+    // D9 范围外不钉）；Some(id) = 版本化取用（D9 出生即钉：实例首次取用把
+    // (name, config_hash) 钉进管道 state 持久键，后续轮次恒用钉住版本，PUT
+    // 热更只对之后出生的实例生效）。
     let config_root = project_root.join("config");
-    let compiled = match compiled_for(state, &config_root, pipeline_config_id).await {
+    let pinned = pinned_config_from_state(&initial_state);
+    let explicit_name = pipeline_config_id.filter(|s| !s.is_empty());
+    let pinned_hash = match resolve_config_pin(
+        explicit_name,
+        pinned.as_ref().map(|(n, h)| (n.as_str(), h.as_str())),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            warn!(pipeline_config = ?pipeline_config_id, error = %e, "Pipeline config pin rejected");
+            return Err(EngineOutcome {
+                content: format!("[error] 管道配置加载失败: {e}"),
+                final_assistant: None,
+                failed: true,
+                degraded: false,
+                plugin_errors: Vec::new(),
+            });
+        }
+    };
+    let compiled = match compiled_for(
+        state,
+        &config_root,
+        pipeline_config_id,
+        pinned_hash.as_deref(),
+    )
+    .await
+    {
         Ok(c) => c,
         Err(e) => {
             warn!(pipeline_config = ?pipeline_config_id, error = %e, "Pipeline config select failed");
@@ -2221,6 +2569,53 @@ async fn stage_execute(
         }
         if !obj.contains_key("core_type") {
             obj.insert("core_type".into(), serde_json::json!("llm_call"));
+        }
+    }
+    // D9 出生即钉（写入面）：实例首次解析显式配置 → (name, config_hash) 落
+    // 管道 state 持久键，两路写：
+    // - pipeline_state 表直写（冷路径/重启恢复面）：project_state_snapshot 只
+    //   投影 persistent_fields 声明键，内核自有簿记键走直写——record_run_start
+    //   同通道；
+    // - initial_state 点号键（热路径）：随 final_state 进 registry 快照，下轮
+    //   merge_recovered_scalars 恢复。
+    // 表写失败终止本轮（B3 同精神）：钉住簿记缺失 = 重启后版本钉住静默失效。
+    if let (Some(name), None) = (explicit_name, pinned.as_ref()) {
+        let mut pin_fields = serde_json::Map::new();
+        pin_fields.insert(
+            PIPELINE_CONFIG_PIN_NAME_KEY.to_string(),
+            serde_json::json!(name),
+        );
+        pin_fields.insert(
+            PIPELINE_CONFIG_PIN_HASH_KEY.to_string(),
+            serde_json::json!(compiled.config_hash),
+        );
+        let pin_pipeline_id = initial_state
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if pin_pipeline_id.is_empty() {
+            warn!("版本钉住落库跳过：initial_state 缺 pipeline_id（不可达防御）");
+        } else if let Err(e) = store
+            .upsert_state_fields(pin_pipeline_id, &tenant.tenant_id, &pin_fields)
+            .await
+        {
+            warn!(
+                pipeline_id = %pin_pipeline_id,
+                error = %e,
+                "版本钉住落库失败，终止本轮（重发可恢复）"
+            );
+            return Err(EngineOutcome {
+                content: format!("[error] 管道版本钉住写入失败: {e}（本轮未执行，请重发消息重试）"),
+                final_assistant: None,
+                failed: true,
+                degraded: false,
+                plugin_errors: Vec::new(),
+            });
+        }
+        if let Some(obj) = initial_state.as_object_mut() {
+            for (k, v) in &pin_fields {
+                obj.insert(k.clone(), v.clone());
+            }
         }
     }
     let known_ids = live_plugin_ids(state).await;
@@ -2329,7 +2724,7 @@ async fn stage_execute(
         Err(e) => {
             warn!(run_id = %run_id, error = %e, "PipelineExecutor run failed");
             // GAP-2：run.failed 终态事件（引擎 Err 防御网；task.* 派生经预捕获标签）
-            emit_run_terminal_domain_events(state, &failed_emit_state, true).await;
+            emit_run_terminal_domain_events(state, &failed_emit_state, run_id, true).await;
             // B2：引擎失败兜底——把 run 标记 failed + ended_at，避免永远卡 running、
             // 历史悬空。（PipelineExecutor::run 当前不返回 Err，这是防御网；崩溃留下的
             // running 孤儿由内核启动 reap_orphan_runs 清扫。）
@@ -2363,8 +2758,11 @@ async fn stage_execute(
 /// 回写：final_state 含完整 messages 历史（LLM 插件 append 了 assistant 回复），
 /// 按 (tenant_id, effective_pipeline_id) 常驻：下一轮热路径直接复用，
 /// 免 DB 查询；重启/内存丢失时冷路径从 messages 表恢复（见 stage_recover_history）。
-/// 常驻副本剥离 `tool_schemas`（每轮 prepare 链 tool_schema 插件经
-/// tool-surface capability 重新拉取，跨轮无意义——不随 final_state 滞留内存）。
+/// 常驻副本剥离大对象：`tool_schemas`（每轮 prepare 链 tool_schema 插件经
+/// tool-surface capability 重新拉取，跨轮无意义）与 `_` 前缀引擎私有 staging
+/// 键（`_full_tool_results`/`_executed_tool_calls` 等——per-run 中间态，全文
+/// 权威副本在工具缓存，跨轮零消费；见 ADR 2026-09-29-trace-mirror-dedup）。
+/// messages 驻留是设计正确（管道持有队列省每轮拼装），不动。
 fn stage_finalize(
     final_state: &serde_json::Value,
     tenant_id: &str,
@@ -2374,12 +2772,14 @@ fn stage_finalize(
 ) -> EngineOutcome {
     if !effective_pipeline_id.is_empty() {
         let reg = agentos_session::global_registry();
-        // 常驻快照剥离 tool_schemas（每轮 prepare 链重新拉取的 LLM 工具面，
-        // 跨轮无意义）——否则整树 schema 随 final_state 滞留内存注册表
-        // （90 工具 62KB 声明被反复持有放大）。
         let mut persisted = final_state.clone();
         if let Some(obj) = persisted.as_object_mut() {
             obj.remove("tool_schemas");
+            let underscore_keys: Vec<String> =
+                obj.keys().filter(|k| k.starts_with('_')).cloned().collect();
+            for k in underscore_keys {
+                obj.remove(&k);
+            }
         }
         if !reg.contains(tenant_id, effective_pipeline_id) {
             reg.get_or_init(
@@ -2724,5 +3124,7 @@ async fn shutdown_signal(invoker: Option<Arc<dyn agentos_core::traits::PluginInv
     }
 }
 
+#[cfg(test)]
+mod pipeline_version_tests;
 #[cfg(test)]
 mod tests;

@@ -171,6 +171,28 @@ class TestToolMetricLocal:
         assert r.results[0].passed is False
         assert "未知检查类型" in (r.results[0].error or "")
 
+    def test_flat_expanded_instance_key_resolves_definition(
+        self, mod_exec: Any, metrics_path: str, tmp_path: Path
+    ) -> None:
+        """白话展开多实例键（file_check::<路径>，task_submit 生成）按首段解析定义，
+        真实执行 not_empty 检查；未定义指标仍诚实失败（对照）。"""
+        f = tmp_path / "chapter_025.md"
+        f.write_text("正文内容", encoding="utf-8")
+        ex = _make_executor(mod_exec, metrics_path=metrics_path)
+        r = _run(
+            ex.run_evaluation(
+                "t1",
+                ["file_check::chapters/chapter_025.md"],
+                {
+                    "file_check::chapters/chapter_025.md": {
+                        "path": str(f),
+                        "check": "not_empty",
+                    }
+                },
+            )
+        )
+        assert r.results[0].passed is True
+
 
 # ── 指标定义面：未定义/缺配置 → 诚实失败 ─────────────────────
 

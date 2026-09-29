@@ -53,7 +53,7 @@ declare global {
 /**
  * 通过真实浏览器表单完成登录
  *
- * 打开登录页 → 填写用户名密码 → 点击登录 → 等待跳转
+ * 打开首页（未认证呈现登录模态）→ 填写用户名密码 → 点击登录 → 等待模态收口
  * 使用 Playwright page.fill/click 模拟真实用户操作，而非 API 注入。
  *
  * @param page Playwright Page 实例
@@ -68,34 +68,34 @@ export async function loginViaUI(
   // 先通过 API 注册（如已存在则忽略），复用 auth.ts 的注册逻辑
   await registerUser(page);
 
-  // 打开登录页
-  await page.goto(`${APP_URL}/login`);
+  // 打开首页：未认证时 ProtectedRoute 原位呈现认证闸登录模态（ADR 2026-09-28）
+  await page.goto(APP_URL);
   await page.waitForLoadState('domcontentloaded');
 
-  // 等待登录表单可见
-  const loginForm = page.locator('[data-testid="login-form"]');
-  await expect(loginForm, '登录表单应可见').toBeVisible({ timeout: 10_000 });
+  // 等待登录模态表单可见
+  const loginForm = page.locator('[data-testid="login-modal-form"]');
+  await expect(loginForm, '登录模态应可见').toBeVisible({ timeout: 10_000 });
 
   // 填写用户名
-  const usernameInput = page.locator('[data-testid="login-username-input"]');
+  const usernameInput = page.locator('[data-testid="login-modal-username"]');
   await expect(usernameInput, '用户名输入框应可见').toBeVisible();
   await usernameInput.fill(username);
 
   // 填写密码
-  const passwordInput = page.locator('[data-testid="login-password-input"]');
+  const passwordInput = page.locator('[data-testid="login-modal-password"]');
   await expect(passwordInput, '密码输入框应可见').toBeVisible();
   await passwordInput.fill(password);
 
   // 点击登录按钮
-  const submitBtn = page.locator('[data-testid="login-submit-button"]');
+  const submitBtn = page.locator('[data-testid="login-modal-submit"]');
   await expect(submitBtn, '登录按钮应可见').toBeVisible();
   await submitBtn.click();
 
-  // 等待页面跳转到首页
-  await page.waitForURL(APP_URL + '/', { timeout: 30_000 });
+  // 等待登录模态收口（登录成功后 ProtectedRoute 原位放行，无路由跳转）
+  await expect(loginForm, '登录成功后模态应收口').toBeHidden({ timeout: 30_000 });
   await page.waitForLoadState('networkidle');
 
-  console.log('✅ UI 级登录成功，已跳转到首页');
+  console.log('✅ UI 级登录成功，已通过认证闸');
 }
 
 /**

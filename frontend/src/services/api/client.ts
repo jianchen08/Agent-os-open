@@ -57,7 +57,7 @@ function parseRefreshTokenFromBody(data: unknown): string | null {
   }
 }
 
-/** 清除认证状态：停止 growth loop 轮询、清令牌、通知 store 并重定向登录页 */
+/** 清除认证状态：停止 growth loop 轮询、清令牌、通知 store 并整页刷新回 HOME */
 async function clearAuthAndRedirect(): Promise<void> {
   try {
     const { destroyGrowthLoop } = await import('../modules/GrowthLoop')
@@ -81,9 +81,11 @@ async function clearAuthAndRedirect(): Promise<void> {
   })
 
   // 注意：window.location.href 是整页刷新，会丢失内存中的 zustand 状态。
-  // 此处仅在「真正认证失效」时才到达，故整页刷新可接受。
-  if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
-    window.location.href = '/login'
+  // 此处仅在「真正认证失效」时才到达，故整页刷新可接受；落点 HOME（/login
+  // 路由已退役，ADR 2026-09-28）——重载后由 ProtectedRoute 呈现认证闸模态，
+  // 装机版则由 initializeAuth 自动登录恢复会话。
+  if (typeof window !== 'undefined') {
+    window.location.href = '/'
   }
 }
 

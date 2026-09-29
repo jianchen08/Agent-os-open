@@ -186,11 +186,15 @@ impl PathContentLru {
     }
 }
 
+/// `{{path:}}` 内容缓存进程级单例（read_path_file 与 path_cache_stats 共享；
+/// 模块级 static——函数内 static 各自独立，放函数里会读成两张表）。
+static PATH_CONTENT_CACHE: OnceLock<Mutex<PathContentLru>> = OnceLock::new();
+
 /// 生产读取入口：进程内单例缓存 + 真实文件系统读取。
 /// 失败降级为空串并 warn（path + error），与无缓存时行为一致。
 fn read_path_file(full: &Path, trimmed: &str) -> String {
-    static CACHE: OnceLock<Mutex<PathContentLru>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(PathContentLru::new(PATH_CACHE_CAPACITY)));
+    let cache =
+        PATH_CONTENT_CACHE.get_or_init(|| Mutex::new(PathContentLru::new(PATH_CACHE_CAPACITY)));
     // 中毒锁就地取值：临界区内无 panic 源，不因既往线程展开永久丢缓存。
     let mut cache = cache
         .lock()
@@ -202,6 +206,23 @@ fn read_path_file(full: &Path, trimmed: &str) -> String {
             String::new()
         }
     }
+}
+
+/// `{{path:}}` 内容缓存的驻留快照（堆栈级诊断面 memory-breakdown 消费）：
+/// (条目数, 缓存内容字节实测和)。
+///
+/// 诊断读面：锁内逐条 `content.len()` 求和（LLM 上下文装配的模板/persona
+/// 文件面驻留）。缓存未初始化（进程尚无渲染）→ (0, 0)。
+pub fn path_cache_stats() -> (usize, usize) {
+    let cache =
+        PATH_CONTENT_CACHE.get_or_init(|| Mutex::new(PathContentLru::new(PATH_CACHE_CAPACITY)));
+    let cache = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    (
+        cache.entries.len(),
+        cache.entries.values().map(|e| e.content.len()).sum(),
+    )
 }
 
 /// 从 `state` 按 `a.b.c` 点链逐层取值，返回字符串化结果。
@@ -275,6 +296,23 @@ mod tests {
             },
             reads,
         )
+    }
+
+    #[test]
+    fn path_cache_stats_reflects_shared_cache_fill() {
+        // 经真实读取入口填充共享缓存 → 诊断读面必须见到同一张表
+        // （读面与生产表共用 PATH_CONTENT_CACHE——函数内 static 会各自成表，
+        // 本测试即防该回归）。
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("stats-probe.md");
+        let body = "stats probe body";
+        fs::write(&path, body).expect("write");
+        let rendered = read_path_file(&path, "stats-probe.md");
+        assert_eq!(rendered, body, "读取入口返回文件内容");
+
+        let (entries, bytes) = path_cache_stats();
+        assert!(entries >= 1, "共享缓存至少含刚读入的条目");
+        assert!(bytes >= body.len(), "字节实测和须覆盖刚读入内容");
     }
 
     #[test]

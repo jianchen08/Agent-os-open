@@ -2,7 +2,6 @@
  * 消息系统组件类型定义
  */
 
-import type { TaskMode } from '@/services/schema/modeOptions'
 import type { Message, MessageRole, MessageToolCall, ThinkingContent } from '@/types/models'
 
 /**
@@ -66,9 +65,9 @@ export interface SendMessageParams {
   enableThinking?: boolean
   /** 思考强度（off/low/medium/high，随消息传给后端 llm_core 路由到模型参数） */
   thinkingStrength?: 'off' | 'low' | 'medium' | 'high'
-  /** 任务模式（模式体系契约键：coding|writing|roleplay|research；「自动」= 缺席
+  /** 任务模式（模式体系契约键，开放标签 = registry 模式键；「默认」= 缺席
    *  不带键，经消息级 execution_context.mode 落任务上下文） */
-  mode?: TaskMode
+  mode?: string
   /** 子 Tab 发消息时的目标管道 ID，后端直接用它路由 */
   pipelineId?: string
 }

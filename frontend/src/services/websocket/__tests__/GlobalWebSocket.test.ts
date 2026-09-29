@@ -599,7 +599,7 @@ describe('GlobalWebSocketService', () => {
       disconnect()
     })
 
-    it('收到 heartbeat_ack 应清除超时定时器', async () => {
+    it('收到 heartbeat_ack 应刷新 pong 新鲜度（阈值内不误断）', async () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
 
       const ws = await connectAndOpen({ connect, getLatestWs })
@@ -612,10 +612,10 @@ describe('GlobalWebSocketService', () => {
         ws.onmessage({ data: JSON.stringify({ type: 'heartbeat_ack' }) })
       }
 
-      // 推进到超时时间（30s），因为已经清除了超时，不应关闭连接
+      // 再推进一个周期（距 ack 30s < 90s 判死阈值）：新鲜度尚足，不应关闭连接
       await vi.advanceTimersByTimeAsync(30000)
 
-      // 连接应仍然存在（ws.close 未因超时被调用）
+      // 连接应仍然存在（ws.close 未因心跳判死被调用）
       expect(service.status).toBe('connected')
 
       disconnect()
@@ -635,10 +635,9 @@ describe('GlobalWebSocketService', () => {
       })
       expect(heartbeatSent).toBe(true)
 
-      // 注意：HEARTBEAT_TIMEOUT(90s) > HEARTBEAT_INTERVAL(30s)，且需连续 2 次超时才断。
-      // 单次超时只会累加 _heartbeatMissCount 并打 warn，不会 close。
-      // 因此此处直接模拟连接因心跳超时被关闭（ws.close 2002）的行为，
-      // 验证 onclose 对心跳超时关闭的处理是否正确（走普通重连，不触发 token 刷新）。
+      // 心跳判死由 pong 新鲜度驱动（距最近 ack ≥ 90s，见 GlobalWebSocketHeartbeat.test.ts）。
+      // 此处直接以 close(2002) 模拟判死产物，验证 onclose 对心跳超时关闭的处理
+      // 是否正确（走普通重连，不触发 token 刷新）。
       ws.close(2002, '心跳超时')
 
       // ws.close(4001) → onclose → _scheduleReconnect → status = 'reconnecting'
@@ -651,25 +650,25 @@ describe('GlobalWebSocketService', () => {
       disconnect()
     })
 
-    it('心跳超时应给 ack 留容错：单次超时不断连，收到 ack 恢复', async () => {
+    it('心跳超时应给 ack 留容错：阈值内收到 ack 刷新新鲜度不断连', async () => {
       // LLM 流式期间后端事件循环负载高，heartbeat_ack 响应极易突破 30s。
-      // 修复: TIMEOUT=90s 且需连续 2 次未收到 ack 才断（HEARTBEAT_MAX_MISS=2）。
-      // 回归契约: 单次超时（missCount=1）不触发 close；收到 ack 后 missCount 清零。
+      // 修复: 判死 = pong 新鲜度，距最近 ack 90s（连续 3 个周期）才断。
+      // 回归契约: 阈值内迟到的 ack 刷新判死截止期，连接不因单周期延迟被断。
       const { service, connect, getLatestWs, disconnect } = await createService()
 
       const ws = await connectAndOpen({ connect, getLatestWs })
 
-      // 推进 30s → 心跳发出，超时定时器启动（45s 后到期）
+      // 推进 30s → 心跳发出
       await vi.advanceTimersByTimeAsync(30000)
       const closeCallsBefore = ws.close.mock.calls.length
 
-      // 再推进 10s（累计距心跳发送 10s，距超时还有 5s）→ 模拟 ack 稍慢但仍在容错内
+      // 再推进 10s（建连后累计 40s，距 90s 阈值尚余 50s）→ ack 稍慢但仍在容错内
       await vi.advanceTimersByTimeAsync(10000)
       if (ws.onmessage) {
         ws.onmessage({ data: JSON.stringify({ type: 'heartbeat_ack' }) })
       }
 
-      // ack 清除超时后，再推进超过原 30s 阈值（验证旧 30s 零容错已不复存在）
+      // ack 刷新新鲜度后，再推进超过原 90s 窗口（验证旧 45s 零容错已不复存在）
       await vi.advanceTimersByTimeAsync(35000)
 
       // 容错窗口内收到 ack：连接不应因心跳超时被关闭
@@ -1123,7 +1122,7 @@ describe('GlobalWebSocketService', () => {
       disconnect()
     })
 
-    it('TTL 内重连成功并 flush 后，不应广播 send_timeout', async () => {
+    it('TTL 内重连成功并 flush 后，收到 ack 即撤销计时（不广播 send_timeout）', async () => {
       const { service, connect, getLatestWs, disconnect } = await createService()
       const onTimeout = vi.fn()
       service.subscribe('user_input_send_timeout', onTimeout)
@@ -1145,7 +1144,11 @@ describe('GlobalWebSocketService', () => {
       })
       expect(sent).toBe(true)
 
-      // 推进远超 TTL：定时器已被 flush 撤销，无超时广播
+      // ADR 2026-09-29：flush ≠ 送达（直发同样可能进僵尸 TCP），内核回执才是
+      // 撤销点——健康内核 ms 级 ack，计时撤销后 TTL 到点不广播
+      ws.onmessage?.({
+        data: JSON.stringify({ type: 'user_input_ack', client_message_id: 'cmid-2', ok: true }),
+      })
       await vi.advanceTimersByTimeAsync(60000)
       expect(onTimeout).not.toHaveBeenCalled()
 
@@ -1161,6 +1164,139 @@ describe('GlobalWebSocketService', () => {
       disconnect()
       await vi.advanceTimersByTimeAsync(60000)
       expect(onTimeout).not.toHaveBeenCalled()
+    })
+  })
+
+  // ──────────────────────────────────────────────
+  // user_input 恒挂超时 + ack 撤销（ADR 2026-09-29 回执契约）
+  // 直发路径（status==='connected' 的 ws.send）与入队路径同样挂 TTL：僵尸 TCP 上
+  // ws.send 不抛错不入队（R302 实证 8 分钟无声），唯一有界失败 = 客户端计时器。
+  // ──────────────────────────────────────────────
+  describe('user_input 恒挂超时与 ack 撤销', () => {
+    it('connected 直发路径同样挂超时：TTL 内未收 ack 应广播 user_input_send_timeout', async () => {
+      const { service, ws, disconnect } = await setupConnected()
+      const onTimeout = vi.fn()
+      service.subscribe('user_input_send_timeout', onTimeout)
+
+      service.sendUserInput('thread-1', '直发消息', {
+        pipelineId: 'pipe-1',
+        clientMessageId: 'cmid-direct-1',
+      })
+      // 直发成功（帧已过 ws.send），但超时保护必须同样在位
+      expect(ws.send).toHaveBeenCalled()
+      expect(onTimeout).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(20000 - 1)
+      expect(onTimeout).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(onTimeout).toHaveBeenCalledTimes(1)
+      const payload = onTimeout.mock.calls[0][0]
+      expect(payload.data).toMatchObject({
+        thread_id: 'thread-1',
+        pipeline_id: 'pipe-1',
+        client_message_id: 'cmid-direct-1',
+      })
+      // 直发路径与队列路径 reason 可辨：已发未收回执 ≠ 排队未发出
+      expect(payload.data.reason).toContain('回执')
+      expect(payload.data.serverAware).toBeUndefined()
+      disconnect()
+    })
+
+    it('收到 user_input_ack(ok:true) 即撤超时，后续不再广播', async () => {
+      const { service, ws, disconnect } = await setupConnected()
+      const onTimeout = vi.fn()
+      service.subscribe('user_input_send_timeout', onTimeout)
+
+      service.sendUserInput('thread-1', 'hello', {
+        pipelineId: 'pipe-1',
+        clientMessageId: 'cmid-ack-1',
+      })
+      ws.onmessage?.({
+        data: JSON.stringify({
+          type: 'user_input_ack',
+          client_message_id: 'cmid-ack-1',
+          thread_id: 'thread-1',
+          ok: true,
+        }),
+      })
+
+      await vi.advanceTimersByTimeAsync(60000)
+      expect(onTimeout).not.toHaveBeenCalled()
+      disconnect()
+    })
+
+    it('收到 user_input_ack(ok:false) 立即广播 send_timeout（serverAware + 内核 error 原文），不等 TTL', async () => {
+      const { service, ws, disconnect } = await setupConnected()
+      const onTimeout = vi.fn()
+      service.subscribe('user_input_send_timeout', onTimeout)
+
+      service.sendUserInput('thread-1', 'hello', {
+        pipelineId: 'pipe-1',
+        clientMessageId: 'cmid-rej-1',
+      })
+      ws.onmessage?.({
+        data: JSON.stringify({
+          type: 'user_input_ack',
+          client_message_id: 'cmid-rej-1',
+          thread_id: 'thread-1',
+          ok: false,
+          error: '会话无可派发管道：pipeline_id 缺失或不属于该会话（拒绝静默换管道）',
+        }),
+      })
+
+      // 立即透传（零等待），带 serverAware 标记与内核 error 原文
+      expect(onTimeout).toHaveBeenCalledTimes(1)
+      const payload = onTimeout.mock.calls[0][0]
+      expect(payload.data.serverAware).toBe(true)
+      expect(payload.data.reason).toContain('会话无可派发管道')
+      expect(payload.data.client_message_id).toBe('cmid-rej-1')
+      // 撤销后 TTL 到点不二次广播（一消息至多一次失败可见）
+      await vi.advanceTimersByTimeAsync(60000)
+      expect(onTimeout).toHaveBeenCalledTimes(1)
+      disconnect()
+    })
+
+    it('stream_start 按 pipeline_id 撤销在途超时', async () => {
+      const { service, ws, disconnect } = await setupConnected()
+      const onTimeout = vi.fn()
+      service.subscribe('user_input_send_timeout', onTimeout)
+
+      service.sendUserInput('thread-1', 'hello', {
+        pipelineId: 'pipe-stream-9',
+        clientMessageId: 'cmid-ss-1',
+      })
+      ws.onmessage?.({
+        data: JSON.stringify({
+          type: 'stream_start',
+          data: { pipeline_id: 'pipe-stream-9', message_id: 'a_test' },
+        }),
+      })
+
+      await vi.advanceTimersByTimeAsync(60000)
+      expect(onTimeout).not.toHaveBeenCalled()
+      disconnect()
+    })
+
+    it('ack 只撤销匹配 cmid 的计时，不误伤其他在途消息', async () => {
+      const { service, ws, disconnect } = await setupConnected()
+      const onTimeout = vi.fn()
+      service.subscribe('user_input_send_timeout', onTimeout)
+
+      service.sendUserInput('thread-1', 'a', { pipelineId: 'pipe-1', clientMessageId: 'cmid-a' })
+      service.sendUserInput('thread-1', 'b', { pipelineId: 'pipe-1', clientMessageId: 'cmid-b' })
+      ws.onmessage?.({
+        data: JSON.stringify({
+          type: 'user_input_ack',
+          client_message_id: 'cmid-a',
+          ok: true,
+        }),
+      })
+
+      await vi.advanceTimersByTimeAsync(20000)
+      // 只有未被 ack 的 cmid-b 触发超时
+      expect(onTimeout).toHaveBeenCalledTimes(1)
+      expect(onTimeout.mock.calls[0][0].data.client_message_id).toBe('cmid-b')
+      disconnect()
     })
   })
 })

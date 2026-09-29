@@ -183,6 +183,28 @@ fn run(state: &Value, config: &Value, host: Option<&dyn HostServices>) -> HashMa
         }
     };
 
+    // 预定结果索引（ADR 2026-09-28 结果预填）：guards 预填的拒绝结果按
+    // call_id 索引命中即跳过执行（幂等——有结果就不执行）；无 call_id 的
+    // 条目按工具名兜底索引（对齐旧按名执法对幻觉调用的拦截面）。本轮无人
+    // 写该键时两表皆空，行为与机制引入前完全一致。
+    let mut pre_decided: HashMap<String, Value> = HashMap::new();
+    let mut pre_decided_by_name: HashMap<String, Value> = HashMap::new();
+    if let Some(arr) = state.get(StateKey::PRE_DECIDED_RESULTS).and_then(|v| v.as_array()) {
+        for e in arr {
+            match e.get("call_id").and_then(|v| v.as_str()) {
+                Some(id) if !id.is_empty() => {
+                    pre_decided.insert(id.to_string(), e.clone());
+                }
+                _ => {
+                    if let Some(name) = e.get("tool_name").and_then(|v| v.as_str()) {
+                        pre_decided_by_name.insert(name.to_string(), e.clone());
+                    }
+                }
+            }
+        }
+    }
+    let has_pre_decided = !(pre_decided.is_empty() && pre_decided_by_name.is_empty());
+
     let limits = ToolOutputLimits::from_config(config);
     let mut results: Vec<ToolResult> = Vec::with_capacity(tool_calls_raw.len());
     let mut last_result_text = String::new();
@@ -197,12 +219,20 @@ fn run(state: &Value, config: &Value, host: Option<&dyn HostServices>) -> HashMa
             }
         };
 
-        // 拦截检查（对齐 plugin.py:698 _check_tool_blocked）。
-        if let Some(blocked) = types::check_tool_blocked(&tc.name, state) {
+        // 预定结果命中（guards 直出的拦截结果，ADR 2026-09-28）：有 id 按
+        // call_id、无 id 按工具名兜底。事件照发（tool_start/tool_result，与
+        // 旧拦截路径 UX 一致），不调 tool-executor——执行下沉唯一入口，
+        // 预填结果不进内核执行面。
+        let pre_hit = match tc.call_id.as_deref() {
+            Some(id) if !id.is_empty() => pre_decided.get(id),
+            _ => pre_decided_by_name.get(&tc.name),
+        };
+        if let Some(entry) = pre_hit {
+            let result = ToolResult::from_pre_decided_entry(&tc, entry);
             emit_tool_event(host, state, "tool_start", &tc, None, &limits);
-            emit_tool_event(host, state, "tool_result", &tc, Some(&blocked), &limits);
-            last_result_text = format!("Error: {}", blocked.error.as_deref().unwrap_or("unknown"));
-            results.push(blocked);
+            emit_tool_event(host, state, "tool_result", &tc, Some(&result), &limits);
+            last_result_text = result_text_for(&result, &limits);
+            results.push(result);
             continue;
         }
 
@@ -250,6 +280,12 @@ fn run(state: &Value, config: &Value, host: Option<&dyn HostServices>) -> HashMa
 
     // 聚合错误 + 任务级副作用（对齐 plugin.py:965-1017）。
     collect_side_effects(state, &results, &mut updates);
+
+    // 消费即清：预定结果已并入 results，清空杜绝跨轮陈旧命中（guards 每轮
+    // 全量重写，此清为兜底）。
+    if has_pre_decided {
+        updates.insert(StateKey::PRE_DECIDED_RESULTS.into(), json!([]));
+    }
 
     updates
 }
@@ -877,78 +913,229 @@ mod tests {
         assert!(output_validate::validation_enabled(&json!({})));
     }
 
-    // ══ check_tool_blocked 契约（从 Python TestCheckToolBlocked 迁移，0.2 native 化）══
+    // ══ 预定结果幂等（ADR 2026-09-28 结果预填机制）══
 
-    /// level_guard 拦截 → 失败结果含权限原因；同 blocked_tools 外的工具不拦截。
-    #[test]
-    fn test_level_guard_block_returns_failure() {
-        let state = json!({
-            "security.level_decision": {
-                "allowed": false,
-                "reason": "Agent level L1 not allowed to call: file_write",
-                "blocked_tools": ["file_write"],
-            },
-        });
-        let r = types::check_tool_blocked("file_write", &state);
-        assert!(r.is_some());
-        let r = r.unwrap();
-        assert!(!r.success);
-        assert!(r.error.unwrap_or_default().contains("权限"));
-        // 不在 blocked_tools 的工具不受影响。
-        assert!(types::check_tool_blocked("file_read", &state).is_none());
+    /// 记录全部 capability 调用的 mock：tool-executor 返回成功体（若被调用，
+    /// 测试通过调用计数断言它不该被调）。
+    struct RecordingHost {
+        calls: std::sync::Mutex<Vec<(String, String)>>,
     }
 
-    /// blocked_tools 缺失 = 全拦（fail-closed）。
-    #[test]
-    fn test_level_guard_missing_blocked_tools_blocks_all() {
-        let state = json!({
-            "security.level_decision": {"allowed": false, "reason": "deny all"},
-        });
-        let r = types::check_tool_blocked("file_write", &state);
-        assert!(r.is_some());
-        assert!(!r.unwrap().success);
+    impl HostServices for RecordingHost {
+        fn call_capability(
+            &self,
+            capability: &str,
+            _method: &str,
+            _params_json: &str,
+        ) -> Result<&str, &str> {
+            self.calls.lock().unwrap().push((capability.to_string(), _method.to_string()));
+            if capability == "tool-executor" {
+                Ok(r#"{"success":true,"data":{"ran":true}}"#)
+            } else {
+                Ok("{}")
+            }
+        }
     }
 
-    /// isolation_guard 拦截 → 失败结果含隔离原因。
+    impl RecordingHost {
+        fn count(&self, capability: &str) -> usize {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(c, _)| c == capability)
+                .count()
+        }
+    }
+
+    /// 命中预定结果：零 tool-executor 调用（幂等跳过执行），事件照发，
+    /// 结果并入 tool_results，键消费即清。
     #[test]
-    fn test_isolation_block_returns_failure() {
+    fn test_pre_decided_hit_skips_execution() {
+        let host = RecordingHost { calls: std::sync::Mutex::new(Vec::new()) };
         let state = json!({
-            "execution_contexts": [
-                {"tool_name": "bash_execute", "provider": "denied",
-                 "blocked": true, "reason": "policy_fallback_denied"},
+            "raw_tool_calls": [
+                {"name": "bash_execute", "id": "call_x", "args": {"command": "ls"}},
+            ],
+            "pre_decided_results": [
+                {
+                    "call_id": "call_x",
+                    "tool_name": "bash_execute",
+                    "success": false,
+                    "error": "Agent level L1 not allowed to call: bash_execute",
+                    "data": null,
+                    "metadata": {"decided_by": "level_guard"},
+                    "duration_ms": 0.0,
+                },
             ],
         });
-        let r = types::check_tool_blocked("bash_execute", &state);
-        assert!(r.is_some());
-        let r = r.unwrap();
-        assert!(!r.success);
-        assert!(r.error.unwrap_or_default().contains("隔离"));
-        // 同 context 内其它工具不受影响。
-        assert!(types::check_tool_blocked("file_read", &state).is_none());
+        let updates = run(&state, &json!({}), Some(&host));
+        // 幂等核心断言：有结果就不执行。
+        assert_eq!(host.count("tool-executor"), 0, "预定命中不得调 tool-executor");
+        // 事件照发（start + result）。
+        assert_eq!(host.count("event-bus"), 2);
+        let results = updates[StateKey::TOOL_RESULTS].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["success"], false);
+        assert!(results[0]["error"].as_str().unwrap().contains("L1"));
+        // 键消费即清 + 调用清空（本轮已收尾）。
+        assert_eq!(updates[StateKey::PRE_DECIDED_RESULTS], json!([]));
+        assert_eq!(updates[StateKey::RAW_TOOL_CALLS], json!([]));
+        // 全文留档同含预定结果（cache writer 统一面）。
+        let full = updates["_full_tool_results"].as_array().unwrap();
+        assert_eq!(full.len(), 1);
     }
 
-    /// security_check 拦截 → 失败结果含安全原因。
+    /// 混合批：预定的拒绝、无辜的照常执行（调用级粒度），两个结果都进整形。
     #[test]
-    fn test_security_check_block_returns_failure() {
+    fn test_pre_decided_mixed_batch_executes_innocent() {
+        let host = RecordingHost { calls: std::sync::Mutex::new(Vec::new()) };
         let state = json!({
-            "security.decision": {"allowed": false, "reason": "危险操作 rm -rf /"},
+            "raw_tool_calls": [
+                {"name": "bash_execute", "id": "call_x", "args": {"command": "rm -rf /"}},
+                {"name": "file_read", "id": "call_y", "args": {"path": "a.txt"}},
+            ],
+            "pre_decided_results": [
+                {
+                    "call_id": "call_x",
+                    "tool_name": "bash_execute",
+                    "success": false,
+                    "error": "危险操作被拦截",
+                    "data": null,
+                    "metadata": {"decided_by": "security_check"},
+                    "duration_ms": 0.0,
+                },
+            ],
         });
-        let r = types::check_tool_blocked("bash_execute", &state);
-        assert!(r.is_some());
-        let r = r.unwrap();
-        assert!(!r.success);
-        assert!(r.error.unwrap_or_default().contains("安全"));
+        let updates = run(&state, &json!({}), Some(&host));
+        // 只有无辜调用进执行面。
+        assert_eq!(host.count("tool-executor"), 1);
+        let results = updates[StateKey::TOOL_RESULTS].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["success"], false, "预定拒绝在前");
+        assert_eq!(results[1]["success"], true, "无辜执行成功");
+        assert_eq!(results[1]["data"]["ran"], true);
     }
 
-    /// 无拦截决策 / allowed=true → None（正常执行）。
+    /// call_id 不匹配（本轮 LLM 未发该调用）：预定结果不消费不误用，照常执行。
     #[test]
-    fn test_no_block_decision_returns_none() {
-        assert!(types::check_tool_blocked("file_read", &json!({})).is_none());
-        let allowed = json!({
-            "security.level_decision": {"allowed": true, "reason": "ok"},
-            "security.decision": {"allowed": true, "reason": "ok"},
+    fn test_pre_decided_call_id_mismatch_executes_normally() {
+        let host = RecordingHost { calls: std::sync::Mutex::new(Vec::new()) };
+        let state = json!({
+            "raw_tool_calls": [
+                {"name": "file_read", "id": "call_y", "args": {"path": "a.txt"}},
+            ],
+            "pre_decided_results": [
+                {
+                    "call_id": "call_stale",
+                    "tool_name": "bash_execute",
+                    "success": false,
+                    "error": "过期预填",
+                    "duration_ms": 0.0,
+                },
+            ],
         });
-        assert!(types::check_tool_blocked("file_write", &allowed).is_none());
+        let updates = run(&state, &json!({}), Some(&host));
+        assert_eq!(host.count("tool-executor"), 1, "call_id 不匹配照常执行");
+        let results = updates[StateKey::TOOL_RESULTS].as_array().unwrap();
+        assert_eq!(results[0]["success"], true);
+    }
+
+    /// 名字兜底：无 id 调用按工具名命中名字条目（对齐旧按名执法的幻觉调用
+    /// 拦截面）；有 id 调用不受名字条目影响（guard 为其单判）。
+    #[test]
+    fn test_pre_decided_name_fallback_for_idless_call() {
+        let host = RecordingHost { calls: std::sync::Mutex::new(Vec::new()) };
+        let state = json!({
+            "raw_tool_calls": [
+                {"name": "bash_execute", "args": {"command": "ls"}, "id": "call_a"},
+                {"name": "file_write", "args": {"path": "x"}},
+            ],
+            "pre_decided_results": [
+                {
+                    "tool_name": "file_write",
+                    "success": false,
+                    "error": "工具被权限策略拦截: 幻觉调用",
+                    "metadata": {"decided_by": "level_guard"},
+                    "duration_ms": 0.0,
+                },
+            ],
+        });
+        let updates = run(&state, &json!({}), Some(&host));
+        // 无 id 的 file_write 按名命中被拒；有 id 的 bash_execute 不受名字条目影响照常执行。
+        assert_eq!(host.count("tool-executor"), 1);
+        let results = updates[StateKey::TOOL_RESULTS].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["success"], true, "call_a 照常执行");
+        assert_eq!(results[1]["success"], false, "无 id 的 file_write 名字兜底被拒");
+        assert!(results[1]["error"].as_str().unwrap().contains("幻觉调用"));
+    }
+
+    /// entry 解析：success 缺省 fail-closed 为 false；tool_name 回退 tc.name；
+    /// metadata null 归一 None。
+    #[test]
+    fn test_from_pre_decided_entry_fail_closed_defaults() {
+        let tc = ToolCall {
+            name: "bash_execute".into(),
+            args: json!({}),
+            call_id: Some("call_z".into()),
+        };
+        // 残缺 entry（缺 success/tool_name/error）：按失败处理、名字回退。
+        let r = ToolResult::from_pre_decided_entry(&tc, &json!({"data": {"x": 1}}));
+        assert!(!r.success, "success 缺省 fail-closed");
+        assert_eq!(r.tool_name, "bash_execute");
+        assert!(r.error.is_none());
+        assert_eq!(r.data, json!({"x": 1}));
+        assert!(r.metadata.is_none());
+        // 完整 entry：字段逐一直达。
+        let r2 = ToolResult::from_pre_decided_entry(
+            &tc,
+            &json!({
+                "tool_name": "bash_execute",
+                "success": false,
+                "error": "权限不足",
+                "metadata": {"decided_by": "level_guard"},
+                "duration_ms": 3.0,
+            }),
+        );
+        assert_eq!(r2.error.as_deref(), Some("权限不足"));
+        assert_eq!(r2.metadata, Some(json!({"decided_by": "level_guard"})));
+        assert_eq!(r2.duration_ms, 3.0);
+    }
+
+    /// 协议扩展位透传（BUG-41）：retry_allowed/arguments 收入 extra 随
+    /// tool_results 输出（duplicate_check 认读），不进 messages envelope
+    /// （七键封闭）。
+    #[test]
+    fn test_pre_decided_extras_passthrough_to_tool_results_only() {
+        let host = RecordingHost { calls: std::sync::Mutex::new(Vec::new()) };
+        let state = json!({
+            "raw_tool_calls": [
+                {"name": "bash_execute", "id": "call_r", "args": {"command": "ls"}},
+            ],
+            "pre_decided_results": [
+                {
+                    "call_id": "call_r",
+                    "tool_name": "bash_execute",
+                    "success": false,
+                    "error": "审批通道故障",
+                    "data": null,
+                    "metadata": null,
+                    "duration_ms": 0.0,
+                    "retry_allowed": true,
+                    "arguments": {"command": "ls"},
+                },
+            ],
+        });
+        let updates = run(&state, &json!({}), Some(&host));
+        assert_eq!(host.count("tool-executor"), 0);
+        let results = updates[StateKey::TOOL_RESULTS].as_array().unwrap();
+        assert_eq!(results[0]["retry_allowed"], true, "扩展位随 tool_results 透传");
+        assert_eq!(results[0]["arguments"]["command"], "ls");
+        // envelope 七键封闭：配对消息不带扩展位。
+        let ops = updates["messages"].as_object().unwrap()["_ops"].as_array().unwrap();
+        let tool_msg = ops.iter().map(|o| &o["msg"]).find(|m| m["role"] == "tool").unwrap();
+        assert!(tool_msg["tool_result"].get("retry_allowed").is_none(), "envelope 不带扩展位");
     }
 }
 
@@ -1039,6 +1226,7 @@ mod truncation_tests {
             data: serde_json::json!({"big": "x".repeat(50_000), "small": "ok"}),
             metadata: None,
             duration_ms: 1.0,
+            extra: None,
         };
         let d = truncated_clone(&r, &ToolOutputLimits::default());
         let s = d.data["big"].as_str().unwrap();
@@ -1059,6 +1247,7 @@ mod truncation_tests {
             data: serde_json::json!({"items": [long, "ok"]}),
             metadata: None,
             duration_ms: 1.0,
+            extra: None,
         };
         let d = truncated_clone(&r, &ToolOutputLimits::default());
         let item0 = d.data["items"][0].as_str().unwrap();

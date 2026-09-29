@@ -181,10 +181,16 @@ async def task_manage(**kwargs: dict[str, Any]) -> dict[str, Any]:
     """任务管理。"""
     task_tool = tool_mod.TaskTool()
     result = await task_tool.execute(kwargs)
-    if result.success:
+    # 返回完整执行结果信封（success/output/error），不得解包直返裸业务 dict：
+    # 内核 invoker 归一化（normalize_mcp_tool_result 分支①）把「无 success 键 +
+    # 顶层 error 非空字符串」判为工具执行失败，而 get 详情的成功载荷恰好带
+    # 任务域 error 键（下级任务失败原因）——裸返会把成功查询翻转成失败，
+    # LLM 与前端都看到工具报错（事故 2026-09-28：查询失败过的下级任务恒红卡）。
+    # 信封形态命中分支②-b，成败由显式 success 键承载，与内核同构。
+    if result.success and (result.output is None or not isinstance(result.output, dict)):
         # output 类型是 T | None：成功但无输出载荷 → 空 dict（契约仍是 object）
-        return result.output if isinstance(result.output, dict) else {}
-    return {"error": result.error}
+        result.output = {}
+    return result.to_dict()
 
 
 if __name__ == "__main__":

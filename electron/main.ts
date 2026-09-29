@@ -14,6 +14,7 @@ import {
   ipcMain,
   Menu,
   Notification,
+  screen,
   shell,
 } from "electron";
 import { createHash } from "crypto";
@@ -23,12 +24,17 @@ import {
   APP_BASE_URL,
   APP_LOADING_URL,
   installAppProtocolHandler,
+  isAppSource,
   registerAppSchemePrivileges,
+  shouldBlockTopFrameNavigation,
 } from "./app-protocol";
 import {
   ensurePackagedKernelRunning,
+  getPackagedAdminCredential,
   shutdownManagedKernel,
 } from "./kernel-manager";
+import { updateAdminCredential } from "./admin-credential";
+import { attachEditMenu } from "./edit-menu";
 import { createTray, destroyTray } from "./tray";
 import { loadAuthSession, saveAuthSession } from "./auth-session";
 import {
@@ -36,6 +42,16 @@ import {
   stopWindowInfoPolling,
   WindowInfoPoller,
 } from "./window-info";
+import {
+  captureWindowState,
+  loadWindowState,
+  restoredWindowOptions,
+  saveWindowState,
+} from "./window-state";
+import {
+  isVisibilityWatchdogEnabled,
+  VisibilityRecovery,
+} from "./visibility-recovery";
 
 // 协议特权注册必须在 app ready 之前（模块加载即执行）
 registerAppSchemePrivileges();
@@ -77,6 +93,9 @@ let mainWindow: BrowserWindow | null = null;
 
 /** 窗口信息轮询器引用 */
 let windowInfoPoller: WindowInfoPoller | null = null;
+
+/** 渲染层可见性自愈控制器（主窗口一个实例，见 visibility-recovery.ts） */
+let visibilityRecovery: VisibilityRecovery | null = null;
 
 /**
  * 子窗口/悬浮窗注册表
@@ -129,8 +148,20 @@ const DEFAULT_CHILD_HEIGHT = 480;
  *
  * 不接触 BrowserWindow，故可在无 Electron 运行时环境下测试。
  */
-export function resolveChildWindowOptions(opts: ChildWindowOptions): Required<
-  Pick<ChildWindowOptions, "id" | "url" | "width" | "height" | "frame" | "transparent" | "alwaysOnTop" | "skipTaskbar">
+export function resolveChildWindowOptions(
+  opts: ChildWindowOptions,
+): Required<
+  Pick<
+    ChildWindowOptions,
+    | "id"
+    | "url"
+    | "width"
+    | "height"
+    | "frame"
+    | "transparent"
+    | "alwaysOnTop"
+    | "skipTaskbar"
+  >
 > &
   Pick<ChildWindowOptions, "title" | "x" | "y"> {
   return {
@@ -154,45 +185,16 @@ export function resolveChildWindowOptions(opts: ChildWindowOptions): Required<
  * 通过 ELECTRON_IS_DEV 环境变量或 app.isPackaged 属性判断。
  */
 function isDevelopment(): boolean {
-  return (
-    process.env.ELECTRON_IS_DEV === "1" || !app.isPackaged
-  );
+  return process.env.ELECTRON_IS_DEV === "1" || !app.isPackaged;
 }
 
 /**
- * 应用自身源判定（安全审查 2026-08-19 B-5）：
- *  - dev：Vite dev server（localhost:5188 / 127.0.0.1:5188，兼容 5173 默认口）；
- *  - prod：app://（打包件自定义协议源，见 app-protocol.ts）。
- * 用于 window:open 子窗口 URL 白名单与 will-navigate 导航拦截。
- */
-const APP_DEV_ORIGINS = new Set([
-  "localhost:5188",
-  "127.0.0.1:5188",
-  "localhost:5173",
-  "127.0.0.1:5173",
-]);
-
-function isAppSource(rawUrl: string): boolean {
-  try {
-    const u = new URL(rawUrl);
-    if (u.protocol === "app:") {
-      return true;
-    }
-    if (u.protocol !== "http:" && u.protocol !== "https:") {
-      return false;
-    }
-    return APP_DEV_ORIGINS.has(u.host);
-  } catch {
-    return false;
-  }
-}
-
-/**
- * 窗口导航硬化（安全审查 B-5）：
+ * 窗口导航硬化（安全审查 B-5 + 死页类级清理）：
  *  - setWindowOpenHandler：target=_blank 类新窗请求一律拦截，http(s) 外链交给
  *    系统浏览器（协议白名单），其余协议（file:/javascript: 等）静默拒绝；
- *  - will-navigate：主 frame 导航离开应用源即阻止（防导航劫持后 preload
- *    随新页面存活）。
+ *  - will-navigate：非 app/dev 源阻止（防导航劫持）；app/dev 源命中内核代理面
+ *    （/api /ext /media /uploads）同样阻止——裸内核响应（404 "not found" 等）
+ *    不得整窗替换应用 UI。政策单一来源见 app-protocol.shouldBlockTopFrameNavigation。
  */
 function hardenWindowNavigation(win: BrowserWindow): void {
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -202,10 +204,22 @@ function hardenWindowNavigation(win: BrowserWindow): void {
     return { action: "deny" };
   });
   win.webContents.on("will-navigate", (event, url) => {
-    if (!isAppSource(url)) {
+    if (shouldBlockTopFrameNavigation(url)) {
       event.preventDefault();
     }
   });
+}
+
+/**
+ * 窗口状态存档（关闭/退出前调用）。失败只留告警不阻断：状态记忆是尽力而为
+ * 的旁路，绝不能反过来卡住关窗/退出主链。
+ */
+function persistMainWindowState(win: BrowserWindow): void {
+  try {
+    saveWindowState(app.getPath("userData"), captureWindowState(win));
+  } catch (err) {
+    console.warn("[Electron] 窗口状态存档失败:", err);
+  }
 }
 
 /**
@@ -219,9 +233,19 @@ function hardenWindowNavigation(win: BrowserWindow): void {
 function createMainWindow(
   loadContent: (win: BrowserWindow) => void = loadInitialContent,
 ): BrowserWindow {
+  // 窗口状态恢复：跨启动记忆位置/尺寸/最大化（存档点见 persistMainWindowState）；
+  // 无有效存档（首启/档案损坏/显示器校验不过）回落默认 1200×800 居中
+  const restored = restoredWindowOptions(
+    loadWindowState(app.getPath("userData")),
+    screen.getAllDisplays().map((d) => d.workArea),
+    { width: 1200, height: 800 },
+  );
   const win = new BrowserWindow({
-    width: 1200,
-    height: 800,
+    width: restored.width,
+    height: restored.height,
+    ...(restored.x !== undefined && restored.y !== undefined
+      ? { x: restored.x, y: restored.y }
+      : {}),
     minWidth: 800,
     minHeight: 600,
     // 自定义标题栏：Windows/macOS 隐藏原生标题栏（保留系统边框/缩放/Snap），
@@ -245,6 +269,15 @@ function createMainWindow(
   });
 
   hardenWindowNavigation(win);
+  // 编辑面：右键剪切/复制/粘贴/全选菜单 + 生产环境 Ctrl/Cmd 快捷键兜底
+  //（应用菜单已移除，无加速器；见 edit-menu.ts 头注释）
+  attachEditMenu(win, { withShortcuts: !isDevelopment() });
+
+  // 存档为最大化时先最大化再显示（窗口此刻隐藏，无闪动）；TitleBar 挂载时
+  // 经 window:self:is-maximized 同步图标，maximize 事件推送照常覆盖
+  if (restored.isMaximized) {
+    win.maximize();
+  }
 
   // 最大化状态变化推送前端（TitleBar 的最大化/还原图标切换；
   // 双击拖拽区、Win+方向键等系统路径触发的变化同样覆盖）
@@ -256,6 +289,22 @@ function createMainWindow(
   win.on("maximize", () => sendMaximized(true));
   win.on("unmaximize", () => sendMaximized(false));
 
+  // 渲染层可见性自愈：显示/还原后延迟校验 visibilityState（控制器随窗口
+  // 创建并挂兜底巡检；"show" 在 ready-to-show 之后才首次触发，届时引用已
+  // 就绪。微抖自身的 hide→show 回声由控制器 inFlight 挡住）
+  const notifyVisibilityRecovery = (): void => {
+    visibilityRecovery?.onWindowShown();
+  };
+  win.on("show", notifyVisibilityRecovery);
+  win.on("restore", notifyVisibilityRecovery);
+  // 控制器与窗口同生命周期（macOS activate 重建窗口时旧实例随替换）
+  visibilityRecovery?.stop();
+  visibilityRecovery = null;
+  if (isVisibilityWatchdogEnabled(process.env)) {
+    visibilityRecovery = new VisibilityRecovery(win);
+    visibilityRecovery.startPolling();
+  }
+
   // 窗口准备好后显示
   win.once("ready-to-show", () => {
     win.show();
@@ -264,8 +313,10 @@ function createMainWindow(
   // 加载前端页面
   loadContent(win);
 
-  // 窗口关闭时隐藏而非退出（配合托盘使用）
+  // 窗口关闭时隐藏而非退出（配合托盘使用）；关闭即存档（hide-to-tray 是
+  // 最频繁的状态存档点，后续托盘重开/再次启动都能拿到最新边界）
   win.on("close", (event) => {
+    persistMainWindowState(win);
     event.preventDefault();
     win.hide();
   });
@@ -287,35 +338,31 @@ function createMainWindow(
  * @param win - BrowserWindow 实例
  * @param opts - 可选，url 为子窗口深链 URL
  */
-function loadFrontend(
-  win: BrowserWindow,
-  opts?: { url?: string },
-): void {
+function loadFrontend(win: BrowserWindow, opts?: { url?: string }): void {
   if (opts?.url) {
-    win
-      .loadURL(opts.url)
-      .catch((err) => {
-        console.error("[Electron] 加载子窗口页面失败:", err);
-      });
+    win.loadURL(opts.url).catch((err) => {
+      console.error("[Electron] 加载子窗口页面失败:", err);
+    });
     console.info(`[Electron] 子窗口加载: ${opts.url}`);
     return;
   }
 
   if (isDevelopment()) {
-    win
-      .loadURL(VITE_DEV_SERVER_URL)
-      .catch((err) => {
-        console.error(`[Electron] 加载 Vite dev server 失败（dev server 未起？）: ${VITE_DEV_SERVER_URL}`, err);
-      });
+    win.loadURL(VITE_DEV_SERVER_URL).catch((err) => {
+      console.error(
+        `[Electron] 加载 Vite dev server 失败（dev server 未起？）: ${VITE_DEV_SERVER_URL}`,
+        err,
+      );
+    });
     // 开发环境打开 DevTools
     win.webContents.openDevTools({ mode: "detach" });
-    console.info(`[Electron] 开发模式，加载 Vite dev server: ${VITE_DEV_SERVER_URL}`);
+    console.info(
+      `[Electron] 开发模式，加载 Vite dev server: ${VITE_DEV_SERVER_URL}`,
+    );
   } else {
-    win
-      .loadURL(`${APP_BASE_URL}/index.html`)
-      .catch((err) => {
-        console.error("[Electron] 加载前端页面失败:", err);
-      });
+    win.loadURL(`${APP_BASE_URL}/index.html`).catch((err) => {
+      console.error("[Electron] 加载前端页面失败:", err);
+    });
     console.info(`[Electron] 生产模式，加载: ${APP_BASE_URL}/index.html`);
   }
 }
@@ -329,7 +376,10 @@ function showKernelLoadingPage(win: BrowserWindow): void {
   win.loadURL(APP_LOADING_URL).catch((err) => {
     // ERR_ABORTED = 加载态被后续真实内容导航取代（内核秒就绪时），属预期
     if ((err as { code?: string })?.code !== "ERR_ABORTED") {
-      console.error("[Electron] 加载内核启动加载态失败（不阻断内核拉起）:", err);
+      console.error(
+        "[Electron] 加载内核启动加载态失败（不阻断内核拉起）:",
+        err,
+      );
       if (!win.isDestroyed()) {
         win.show();
       }
@@ -353,7 +403,9 @@ function loadInitialContent(win: BrowserWindow): void {
  * 拉起打包件内核（只 spawn 包内内核，见 kernel-manager）并在健康就绪后载入前端。
  * 失败（安装损坏/启动失败/就绪超时）一律显式错误对话框 + 退出，不静默白屏。
  */
-export async function bootPackagedKernelThenLoad(win: BrowserWindow): Promise<void> {
+export async function bootPackagedKernelThenLoad(
+  win: BrowserWindow,
+): Promise<void> {
   try {
     const result = await ensurePackagedKernelRunning({
       resourcesPath: process.resourcesPath,
@@ -364,7 +416,9 @@ export async function bootPackagedKernelThenLoad(win: BrowserWindow): Promise<vo
       // 安装目录不再落库，静默卸载不再删用户数据
       appDataDir: app.getPath("appData"),
     });
-    console.info(`[Electron] 内核就绪（已拉起打包内核 pid=${result.pid ?? "?"}），加载前端`);
+    console.info(
+      `[Electron] 内核就绪（已拉起打包内核 pid=${result.pid ?? "?"}），加载前端`,
+    );
   } catch (err) {
     // 错误消息自带用户指引（缺失→重装 / 超时→看日志重试），此处原样呈现
     const message = err instanceof Error ? err.message : String(err);
@@ -489,6 +543,26 @@ export function showSystemNotification(opts: {
 }
 
 /**
+ * 应用壳进程树内存指标（监控页「插件」tab 全口径内存的应用壳段）。
+ *
+ * 汇总 app.getAppMetrics() 的全部 Electron 进程（主/渲染/GPU/utility）物理
+ * 内存：workingSetSize 为 KB 口径（Electron MemoryInfo），Windows 上与任务
+ * 管理器 working set 同义，与插件段 RSS / 内核段 RSS 同口径可加和。
+ *
+ * 不接触 ipcMain，便于单测。
+ */
+export function collectAppMetrics(): {
+  processCount: number;
+  totalWorkingSetKb: number;
+} {
+  const metrics = app.getAppMetrics();
+  return {
+    processCount: metrics.length,
+    totalWorkingSetKb: metrics.reduce((sum, m) => sum + m.memory.workingSetSize, 0),
+  };
+}
+
+/**
  * 弹出系统目录选择对话框（资源管理器），供渲染进程声明工作空间/项目目录。
  *
  * - 以发起调用的窗口为父窗模态弹出；发起窗口缺失（webContents 已销毁等）
@@ -563,6 +637,8 @@ function createChildWindow(opts: ChildWindowOptions): {
   });
 
   hardenWindowNavigation(win);
+  // 主窗口同款编辑面（子窗口输入区同样要能复制粘贴）
+  attachEditMenu(win, { withShortcuts: !isDevelopment() });
 
   win.once("ready-to-show", () => {
     win.show();
@@ -633,12 +709,35 @@ function registerIpcHandlers(): void {
     if (refreshToken !== null && typeof refreshToken !== "string") {
       return false;
     }
-    saveAuthSession(app.getPath("userData"), typeof refreshToken === "string" ? refreshToken : null);
+    saveAuthSession(
+      app.getPath("userData"),
+      typeof refreshToken === "string" ? refreshToken : null,
+    );
     return true;
   });
   ipcMain.handle("auth:session:load", () => {
     return loadAuthSession(app.getPath("userData"));
   });
+
+  // 装机版自动登录凭据（ADR 2026-09-28）：load 仅 app.isPackaged 且包内内核
+  // ensure 已解析存档后非空——dev/浏览器形态恒 null，渲染进程据此跳过自动
+  // 登录；sync 接受渲染进程改密后的回写（非 admin 账号主进程拒收）。
+  ipcMain.handle("auth:admin-credential:load", () => {
+    return app.isPackaged ? getPackagedAdminCredential() : null;
+  });
+  ipcMain.handle(
+    "auth:admin-credential:sync",
+    (_event, username: unknown, password: unknown) => {
+      if (!app.isPackaged) {
+        return false;
+      }
+      return updateAdminCredential(
+        app.getPath("userData"),
+        typeof username === "string" ? username : "",
+        typeof password === "string" ? password : "",
+      );
+    },
+  );
 
   // ===== P2/P3 多窗口 IPC（ipcMain.handle,支持 async 返回）=====
 
@@ -693,7 +792,13 @@ function registerIpcHandlers(): void {
     "window:move",
     (_event, id: string, pos: { x: number; y: number }) => {
       const win = childWindows.get(id);
-      if (win && !win.isDestroyed() && pos && typeof pos.x === "number" && typeof pos.y === "number") {
+      if (
+        win &&
+        !win.isDestroyed() &&
+        pos &&
+        typeof pos.x === "number" &&
+        typeof pos.y === "number"
+      ) {
         win.setPosition(Math.trunc(pos.x), Math.trunc(pos.y));
       }
     },
@@ -728,6 +833,11 @@ function registerIpcHandlers(): void {
   ipcMain.handle("dialog:pick-directory", (event) => {
     return pickDirectoryViaDialog(event);
   });
+
+  // ===== 应用壳进程树内存 IPC（监控页全口径内存的应用壳段）=====
+  ipcMain.handle("app:metrics", () => {
+    return collectAppMetrics();
+  });
 }
 
 /**
@@ -761,6 +871,12 @@ function cleanup(): void {
   if (windowInfoPoller !== null) {
     stopWindowInfoPolling(windowInfoPoller);
     windowInfoPoller = null;
+  }
+
+  // 停止可见性自愈巡检
+  if (visibilityRecovery !== null) {
+    visibilityRecovery.stop();
+    visibilityRecovery = null;
   }
 
   // 销毁托盘
@@ -881,6 +997,11 @@ app.on("window-all-closed", () => {
 
 // 应用退出前清理资源
 app.on("before-quit", () => {
+  // 窗口状态最后存档点：close 监听随本钩子移除，托盘退出等真退出路径
+  // （不经 hide-to-tray 的 close 事件）只有这里能补存
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    persistMainWindowState(mainWindow);
+  }
   // 收受管内核进程树（taskkill /F /T 连带 sidecar；electron 崩溃路径孤儿兜底为遗留项）
   shutdownManagedKernel();
   // 移除 close 事件的 preventDefault，允许窗口真正关闭

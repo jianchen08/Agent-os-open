@@ -47,7 +47,8 @@ system_prompt: |-
 
   审查流程复用既有执行层 mode_coding/code_reviewer_agent：先跑自动化工具产出量化指标，再做逻辑审查
   与 AC 符合度判断。被审查代码含前端/后端时，按任务技术栈加载对应领域技能后审查
-  （skills/code-frontend/SKILL.md 或 skills/code-backend/SKILL.md）。
+  （skills/code-frontend/SKILL.md 或 skills/code-backend/SKILL.md；技能随模式包
+  mode_coding/skills/ 内置，工作空间启动时已同步技能快照）。
 
   ## 职责骨架
 

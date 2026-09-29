@@ -7,14 +7,16 @@
  * （插件禁用/无关会话 §5.3）一律不渲染——零 mode 零渲染。
  */
 
+import { useModesRegistry } from '@/services/api/modes'
 import { getModePanelIcon, getModePanelLabel, getModePanelTarget } from '@/services/schema/modePanel'
 import { openPluginPage } from '@/services/workspacePanelOpener'
 
 export function ModePanelBadge({ mode }: { mode: string }) {
+  const registry = useModesRegistry()
   const target = getModePanelTarget(mode)
   if (!target) return null
-  const label = getModePanelLabel(mode)
-  const icon = getModePanelIcon(mode)
+  const label = getModePanelLabel(mode, registry)
+  const icon = getModePanelIcon(mode, registry)
   return (
     <button
       type="button"

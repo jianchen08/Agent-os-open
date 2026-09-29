@@ -234,7 +234,7 @@
   // agentosFetch：经 window.agentos.postMessage（宿主代发 REST 带 token）+ Promise 化。
   // webview iframe 是 opaque-origin 沙箱（CSP connect-src 'none'），直接 fetch 不可行。
   // path 两形态：/ext/** REST 路由（宿主代发）与 'xxx.yyy' 宿主桥动作（theme.apply /
-  // roleplay.possess 同机制，error 下行走同一 .error 后缀配对）。
+  // mode.possess 同机制，error 下行走同一 .error 后缀配对）。
   function agentosFetch(path, params) {
     return new Promise(function (resolve, reject) {
       if (!window.agentos) { reject(new Error('window.agentos 桥不可用')); return; }
@@ -687,7 +687,7 @@
   }
 
   // ── 开演（双按钮：possess 附身 / fresh 新开会话，用户裁定并列无默认）──
-  // fresh = 会话化开演（开演即对话）：roleplay.continue 宿主桥建「扮演·<卡名>」
+  // fresh = 会话化开演（开演即对话）：mode.session 宿主桥建「扮演·<卡名>」
   // 会话并绑定卡身份、切到聊天区，载荷携带所选开场白与用户设定文本；首条开场
   // 触发消息由宿主自动发送——不再走任务派发（无开演记录、无评估语义）。
   function playCard(mode) {
@@ -711,21 +711,33 @@
         toast('已附身：' + c.name + '——在聊天区发送的消息将以该角色身份回应');
         // 宿主桥动作：通知宿主聊天区进入该角色附身态，personaText 携带卡人设
         //（cardPersonaText 拼接）。失败只提示不阻断（附身派发本身已成功）。
-        agentosFetch('roleplay.possess', {
-          card_id: c.id, name: c.name, avatar: c.avatar, personaText: cardPersonaText(c)
+        agentosFetch('mode.possess', {
+          mode: 'roleplay', card_id: c.id, name: c.name, avatar: c.avatar,
+          personaText: cardPersonaText(c)
         })
           .catch(function (e) { toast('附身宿主通知失败：' + unwrapErrorMessage(e), 'error'); });
       }).catch(function (e) { setStatus(''); toast('派发失败：' + e, 'error'); });
       return;
     }
-    var payload = { card_id: c.id, name: c.name, avatar: c.avatar };
-    // 开场白/用户设定为空则键缺省（桥 fail-closed：在场键须非空字符串）
+    var payload = {
+      mode: 'roleplay',
+      agent_id: 'mode_roleplay/' + c.id,
+      name: c.name,
+      title: '扮演·' + c.name,
+      first_message: '（开始）'
+    };
+    // 开演档：开场白/用户设定为空则键缺省（桥 fail-closed：在场键须非空字符串）
+    var extra = {};
     var greeting = selectedGreetingText(c);
-    if (greeting.trim()) payload.greeting = greeting;
+    if (greeting.trim()) extra.roleplay_greeting = greeting;
     var personaText = resolvedUserPersonaText();
-    if (personaText) payload.personaText = personaText;
+    if (personaText) extra.roleplay_user_persona = personaText;
+    if (Object.keys(extra).length) payload.extra_context = extra;
+    // 通用会话出生桥（mode.session）：mode 键 + 模式包特有扩展位——agent_id
+    // （卡=本包 agents 命名空间执行者）、title、extra_context（开演档键）、
+    // first_message（首条触发，宿主据此开演）。宿主零模式知识。
     setStatus('创建会话中...');
-    agentosFetch('roleplay.continue', payload).then(function () {
+    agentosFetch('mode.session', payload).then(function () {
       setStatus('');
       toast('扮演会话已创建，已切换');
     }).catch(function (e) { setStatus(''); toast('扮演会话创建失败：' + unwrapErrorMessage(e), 'error'); });
@@ -1184,14 +1196,14 @@
     loadPerformance(pipelineId);
   }
 
-  // ── 转续演（roleplay.continue 宿主桥，与 playCard 会话化开演同桥）──
-  // 契约：载荷 {card_id, name, avatar}（开场白/用户设定键缺省），宿主建
-  // 「扮演·<卡名>」会话并绑定卡身份后切换聊天区（持续对话入口）；「新开扮演
-  // 会话」同桥另携所选开场白与用户设定。avatar 随载荷上行与附身桥对称
-  // （卡已删容缺）。
+  // ── 转续演（mode.session 宿主桥，与 playCard 会话化开演同桥）──
+  // 契约：载荷 {mode, agent_id, name, title}（开演档缺省——转续演=纯净会话），
+  // 宿主建「扮演·<卡名>」会话并绑定卡身份后切换聊天区（持续对话入口）；「新
+  // 开扮演会话」同桥另携所选开场白与用户设定（extra_context/first_message）。
   function continuePlay(cardId, name) {
-    var c = findCard(cardId);
-    agentosFetch('roleplay.continue', { card_id: cardId, name: name, avatar: c ? c.avatar : undefined })
+    agentosFetch('mode.session', {
+      mode: 'roleplay', agent_id: 'mode_roleplay/' + cardId, name: name, title: '扮演·' + name
+    })
       .then(function () {
         toast('已创建扮演会话，已为你切换到聊天区');
       })

@@ -213,7 +213,7 @@ class TestPluginRefResolution:
         r = await plugin.execute(_tool_ctx("bash_execute", {"command": "rm -rf /gap-ref-probe"}))
 
         assert len(cap.requests) == 1, "审批请求应经 plugin 引用自动解析发出"
-        assert r.state_updates["security.decision"]["reason"] == "approved"
+        assert r.state_updates == {}, "批准=零产出（无预定结果）"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("exc_type", [KeyError, AttributeError])
@@ -231,10 +231,11 @@ class TestPluginRefResolution:
 
         r = await plugin.execute(_tool_ctx("bash_execute", {"command": "rm -rf /gap-broken-ref"}))
 
-        decision = r.state_updates["security.decision"]
-        assert decision["approval_channel_missing"] is True
-        assert "soft_block" in decision["reason"]
-        assert r.state_updates["raw_tool_calls"] == []
+        entries = r.state_updates["pre_decided_results"]
+        assert entries and entries[0]["metadata"]["approval_channel_missing"] is True
+        assert "交互服务不可用" in entries[0]["error"]
+        # 调用级：不清空调用（tool_core 命中预定结果跳过执行）
+        assert "raw_tool_calls" not in r.state_updates
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -336,10 +337,7 @@ class TestExecuteShortCircuits:
     async def test_disabled_plugin_allows(self) -> None:
         plugin = SecurityCheckPlugin(config={"enabled": False, "rules": _GUARD_RM})
         r = await plugin.execute(_tool_ctx("bash_execute", {"command": "rm -rf /x"}))
-        d = r.state_updates["security.decision"]
-        assert d["allowed"] is True
-        assert d["reason"] == "security check disabled"
-        assert "tool_results" not in r.state_updates
+        assert r.state_updates == {}, "停用=零产出（决策键已随 ADR 2026-09-28 退役）"
 
     @pytest.mark.asyncio
     async def test_non_tool_core_skips_check(self) -> None:
@@ -347,9 +345,7 @@ class TestExecuteShortCircuits:
         ctx = _tool_ctx("bash_execute", {"command": "rm -rf /x"})
         ctx.state["core_type"] = "llm_call"
         r = await plugin.execute(ctx)
-        d = r.state_updates["security.decision"]
-        assert d["allowed"] is True
-        assert d["reason"] == "not a tool execution"
+        assert r.state_updates == {}, "LLM 轮零产出"
 
     @pytest.mark.asyncio
     async def test_no_tool_calls_allows(self) -> None:
@@ -357,9 +353,7 @@ class TestExecuteShortCircuits:
         ctx = _tool_ctx("bash_execute", {"command": "rm -rf /x"})
         ctx.state["raw_tool_calls"] = []
         r = await plugin.execute(ctx)
-        d = r.state_updates["security.decision"]
-        assert d["allowed"] is True
-        assert d["reason"] == "no tool calls to check"
+        assert r.state_updates == {}, "无调用零产出"
 
     def test_priority_from_config(self) -> None:
         """priority 缺省 70，config 可覆盖。"""
@@ -396,9 +390,8 @@ class TestDegradedNoticeEmitFailure:
                 _tool_ctx("bash_execute", {"command": "rm -rf /gap-emit-probe"})
             )
 
-        d = r.state_updates["security.decision"]
-        assert d["allowed"] is True
-        assert "soft_block" in d["reason"], "emit 失败不得改变安全决策（命中默认规则→审批链→cap 缺席→软拦截）"
+        entries = r.state_updates["pre_decided_results"]
+        assert entries, "emit 失败不得改变安全决策（命中默认规则→审批链→cap 缺席→软拦截）"
         assert any("事件推送失败" in rec.getMessage() for rec in caplog.records)
 
 
@@ -461,10 +454,8 @@ class TestNulRedirectBuiltin:
                 _tool_ctx("bash_execute", {"command": "echo probe 2>nul"})
             )
 
-        d = r.state_updates["security.decision"]
-        assert "soft_block" in d["reason"]
-        assert "CMD 风格重定向被拦截" in r.state_updates["raw_result"]
-        assert r.state_updates["raw_tool_calls"] == []
+        entries = r.state_updates["pre_decided_results"]
+        assert entries and "CMD 风格重定向被拦截" in entries[0]["error"]
         assert any("nul redirect" in rec.getMessage() for rec in caplog.records)
 
     @pytest.mark.asyncio
@@ -477,8 +468,7 @@ class TestNulRedirectBuiltin:
         r = await plugin.execute(
             _tool_ctx("bash_execute", {"command": "wc -l a.txt 2>/dev/null"})
         )
-        d = r.state_updates["security.decision"]
-        assert d == {"allowed": True, "reason": "all checks passed"}
+        assert r.state_updates == {}, "合法习惯走完检查链零产出"
         assert "tool_results" not in r.state_updates
 
 
@@ -525,10 +515,8 @@ class TestDangerousToolAuthorizationPasses:
                 {"command": "echo gap-allow-probe && curl http://example.com"},
             )
         )
-        d = r.state_updates["security.decision"]
-        assert d == {"allowed": True, "reason": "all checks passed"}
+        assert r.state_updates == {}, "allow 优先放行零产出"
         assert cap.requests == [], "allow 白名单命中不得发起审批"
-        assert "tool_results" not in r.state_updates
 
     @pytest.mark.asyncio
     async def test_same_command_without_allow_hits_approval(
@@ -559,7 +547,7 @@ class TestDangerousToolAuthorizationPasses:
             )
         )
         assert len(cap.requests) == 1, "无 allow 命中时必须弹审批"
-        assert r.state_updates["security.decision"]["reason"] == "approved"
+        assert r.state_updates == {}, "批准零产出"
 
     def _file_write_plugin(self, monkeypatch: pytest.MonkeyPatch) -> Any:
         """构造 file_write 危险判定就绪的插件（host_direct + 声明 write:/tmp/）。"""
@@ -595,8 +583,7 @@ class TestDangerousToolAuthorizationPasses:
             _tool_ctx("file_write", {"path": "/tmp/gap-target/x.txt", "content": "hi"})
         )
 
-        d = r.state_updates["security.decision"]
-        assert d == {"allowed": True, "reason": "all checks passed"}
+        assert r.state_updates == {}, "accept_edits 文件类放行零产出"
         assert cap.requests == [], "accept_edits 文件类放行不得发起审批"
 
     @pytest.mark.asyncio
@@ -613,7 +600,7 @@ class TestDangerousToolAuthorizationPasses:
         )
 
         assert len(cap.requests) == 1
-        assert r.state_updates["security.decision"]["reason"] == "approved"
+        assert r.state_updates == {}, "批准零产出"
         assert "path" in cap.requests[0]["description"], "审批描述应包含待审路径"
 
 
@@ -639,10 +626,8 @@ class TestApprovalFailureSurface:
             _tool_ctx("bash_execute", {"command": "rm -rf /gap-create-fail"})
         )
 
-        d = r.state_updates["security.decision"]
-        assert d["allowed"] is True
-        assert "审批服务异常" in d["reason"]
-        assert "soft_block" in d["reason"]
+        entries = r.state_updates["pre_decided_results"]
+        assert entries and "审批服务异常" in entries[0]["error"]
         assert cap.wait_calls == [], "请求未创建成功不得进入等待"
 
     @pytest.mark.asyncio
@@ -658,9 +643,8 @@ class TestApprovalFailureSurface:
             _tool_ctx("bash_execute", {"command": "rm -rf /gap-wait-shape"})
         )
 
-        d = r.state_updates["security.decision"]
-        assert "审批服务异常" in d["reason"]
-        assert r.state_updates["raw_tool_calls"] == []
+        entries = r.state_updates["pre_decided_results"]
+        assert entries and "审批服务异常" in entries[0]["error"]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -687,12 +671,10 @@ class TestApprovalFailureSurface:
             _tool_ctx("bash_execute", {"command": "rm -rf /gap-wait-error"})
         )
 
-        d = r.state_updates["security.decision"]
-        assert d["allowed"] is True
-        assert expected_fragment in d["reason"], (
-            f"error={error_msg!r} 应映射为 {expected_fragment}，实际 reason={d['reason']!r}"
+        entries = r.state_updates["pre_decided_results"]
+        assert entries and expected_fragment in entries[0]["error"], (
+            f"error={error_msg!r} 应映射为 {expected_fragment}，实际 error={entries[0]['error']!r}"
         )
-        assert "soft_block" in d["reason"]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -718,9 +700,8 @@ class TestApprovalFailureSurface:
             _tool_ctx("bash_execute", {"command": "rm -rf /gap-exc-surface"})
         )
 
-        d = r.state_updates["security.decision"]
-        assert expected_fragment in d["reason"]
-        assert "soft_block" in d["reason"]
+        entries = r.state_updates["pre_decided_results"]
+        assert entries and expected_fragment in entries[0]["error"]
 
     @pytest.mark.asyncio
     async def test_denied_with_empty_reason_falls_back_to_rule_name(
@@ -735,9 +716,9 @@ class TestApprovalFailureSurface:
             _tool_ctx("bash_execute", {"command": "rm -rf /gap-empty-reason"})
         )
 
-        reason = r.state_updates["security.decision"]["reason"]
+        entries = r.state_updates["pre_decided_results"]
         # 回退值是发起审批时的 reason 文案（"参数命中安全规则: <规则名>"）
-        assert "用户拒绝执行: 参数命中安全规则: guard_rm" in reason
+        assert "用户拒绝执行: 参数命中安全规则: guard_rm" in entries[0]["error"]
 
 
 class TestApprovalChannelErrorRetryMarker:
@@ -760,11 +741,10 @@ class TestApprovalChannelErrorRetryMarker:
             _tool_ctx("bash_execute", {"command": "rm -rf /gap-retry-marker"})
         )
 
-        d = r.state_updates["security.decision"]
-        assert "审批服务异常" in d["reason"]
-        results = r.state_updates["tool_results"]
-        assert results, "软拦截必须产出拒绝 tool_result"
-        for entry in results:
+        entries = r.state_updates["pre_decided_results"]
+        assert entries, "软拦截必须产出预定拒绝结果"
+        assert "审批服务异常" in entries[0]["error"]
+        for entry in entries:
             assert entry["success"] is False
             assert entry.get("retry_allowed") is True
             assert entry["arguments"] == {"command": "rm -rf /gap-retry-marker"}
@@ -790,7 +770,7 @@ class TestApprovalChannelErrorRetryMarker:
             _tool_ctx("bash_execute", {"command": "rm -rf /gap-no-retry"})
         )
 
-        for entry in r.state_updates["tool_results"]:
+        for entry in r.state_updates["pre_decided_results"]:
             assert "retry_allowed" not in entry
             assert "arguments" not in entry
 

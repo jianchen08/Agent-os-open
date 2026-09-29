@@ -29,6 +29,11 @@ from typing import Any
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import StateKeys
 
+from agentos_plugin_sdk.tool_result_protocol import (
+    merge_pre_decided,
+    tool_result_entry,
+)
+
 logger = logging.getLogger(__name__)
 
 # 能力调用器（server.py on_load 经 wiring.make_capability_caller 注入）：
@@ -197,6 +202,7 @@ class ToolSchemaValidator(IInputPlugin):
         schema_errors: list[dict[str, Any]] = []
         validated_calls: list[dict[str, Any]] = []
         all_fix_messages: list[dict[str, Any]] = []
+        pre_entries: list[dict[str, Any]] = []
         state_updates: dict[str, Any] = {}
 
         # 本轮输出是否被 max_tokens 截断（finish_reason=length，由 llm_core 写入）。
@@ -219,32 +225,34 @@ class ToolSchemaValidator(IInputPlugin):
             # 让 LLM 立即知道哪些字段丢失并重试。
             truncation_result = await self._check_args_truncation(args, tool_name)
             if truncation_result:
-                # 将截断诊断作为 tool result 消息注入对话历史，
-                # 模拟工具已执行并返回截断错误，LLM 可据此重试
-                messages = list(ctx.state.get("messages", []))
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc_call_id,
-                        "content": json.dumps(
-                            {
-                                "success": False,
-                                "error": truncation_result["error"],
-                                "error_code": "ARGS_TRUNCATED",
-                                "lost_keys": truncation_result["lost_keys"],
-                            },
-                            ensure_ascii=False,
+                # 截断诊断经结果预填直出（ADR 2026-09-28）：调用保留在
+                # raw_tool_calls，tool_core 命中预定结果跳过执行并统一整形
+                # （配对消息/事件），LLM 据诊断重试——不再自建 role=tool 消息。
+                lost = truncation_result["lost_keys"]
+                pre_entries.append(
+                    tool_result_entry(
+                        tool_name,
+                        call_id=tc_call_id or None,
+                        success=False,
+                        error=(
+                            f"工具 {tool_name} 参数 JSON 截断（ARGS_TRUNCATED）: "
+                            f"{truncation_result['error']}; 丢失字段: {', '.join(lost)}。"
+                            "请补齐后重新调用。"
                         ),
-                    }
+                        metadata={
+                            "decided_by": "tool_schema_validator",
+                            "error_code": "ARGS_TRUNCATED",
+                            "lost_keys": lost,
+                        },
+                    )
                 )
-                state_updates["messages"] = messages
+                validated_calls.append(tc)
                 logger.warning(
-                    "[%s] 截断 tool_call %s 已注入诊断结果，丢失字段: %s",
+                    "[%s] 截断 tool_call %s 已预填拒绝结果，丢失字段: %s",
                     self.name,
                     tool_name,
-                    truncation_result["lost_keys"],
+                    lost,
                 )
-                # 不加入 validated_calls → tool_core 不会重复执行此调用
                 continue
 
             tool_def = tool_definitions.get(tool_name)
@@ -261,6 +269,21 @@ class ToolSchemaValidator(IInputPlugin):
                         self.name,
                         tool_name,
                     )
+                    # 严格模式未注册工具：预填拒绝（调用保留配对，LLM 收到
+                    # 反馈——旧路径静默丢弃调用会留孤儿 assistant tool_call）
+                    pre_entries.append(
+                        tool_result_entry(
+                            tool_name,
+                            call_id=tc_call_id or None,
+                            success=False,
+                            error=f"工具 {tool_name} 未注册（TOOL_NOT_FOUND），无法执行。请改用已注册工具。",
+                            metadata={
+                                "decided_by": "tool_schema_validator",
+                                "error_code": "TOOL_NOT_FOUND",
+                            },
+                        )
+                    )
+                    validated_calls.append(tc)
                 else:
                     validated_calls.append(tc)
                 continue
@@ -295,8 +318,9 @@ class ToolSchemaValidator(IInputPlugin):
                 re_errors = self._validate_args(fixed_args, input_schema)
                 if re_errors:
                     # 参数校验失败（缺 required / 类型不匹配且无法修复）：
-                    # 拦截该调用并注入 role=tool 诊断消息——保持 assistant(tool_calls)
-                    # →tool 消息序列完整，同时把缺失明细反馈给 LLM。
+                    # 经结果预填直出拒绝结果（ADR 2026-09-28）——调用保留在
+                    # raw_tool_calls，tool_core 命中预定结果跳过执行并统一
+                    # 整形配对消息，缺失明细反馈 LLM 自我修正。
                     # 截断场景额外提示「文件太大请分块」，让模型改用 append 续写。
                     schema_errors.append(
                         {
@@ -313,29 +337,26 @@ class ToolSchemaValidator(IInputPlugin):
                             "截断中丢失（文件/参数过大）。建议拆分为多次小批量调用："
                             "如 file_write 先写入前半部分，再用 action=append 续写后续内容。"
                         )
-                    messages = list(ctx.state.get("messages", []))
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc_call_id,
-                            "content": json.dumps(
-                                {
-                                    "success": False,
-                                    "error": (
-                                        f"工具 {tool_name} 参数校验失败："
-                                        + "; ".join(re_errors)
-                                        + "。请补齐/修正对应参数后重新调用。"
-                                        + truncated_hint
-                                    ),
-                                    "error_code": "SCHEMA_VALIDATION_FAILED",
-                                    "validation_errors": re_errors,
-                                    "output_truncated": tc_truncated,
-                                },
-                                ensure_ascii=False,
+                    pre_entries.append(
+                        tool_result_entry(
+                            tool_name,
+                            call_id=tc_call_id or None,
+                            success=False,
+                            error=(
+                                f"工具 {tool_name} 参数校验失败（SCHEMA_VALIDATION_FAILED）："
+                                + "; ".join(re_errors)
+                                + "。请补齐/修正对应参数后重新调用。"
+                                + truncated_hint
                             ),
-                        }
+                            metadata={
+                                "decided_by": "tool_schema_validator",
+                                "error_code": "SCHEMA_VALIDATION_FAILED",
+                                "validation_errors": re_errors,
+                                "output_truncated": tc_truncated,
+                            },
+                        )
                     )
-                    state_updates["messages"] = messages
+                    validated_calls.append(tc)
                     logger.warning(
                         "[%s] Schema validation failed, blocked call | tool=%s | errors=%s | truncated=%s",
                         self.name,
@@ -355,7 +376,12 @@ class ToolSchemaValidator(IInputPlugin):
         state_updates["schema_validated"] = validated_calls
         if all_fix_messages:
             state_updates["schema_fixes"] = all_fix_messages
-        # 始终用验证后的调用列表更新 RAW_TOOL_CALLS，
+        if pre_entries:
+            state_updates["pre_decided_results"] = merge_pre_decided(
+                ctx.state.get("pre_decided_results"), pre_entries
+            )
+        # 用验证后的调用列表更新 RAW_TOOL_CALLS（被拒调用保留在内——tool_core
+        # 按 pre_decided_results 命中跳过执行并统一整形配对消息），
         # 确保下游插件拿到的是经过验证和修复的数据
         state_updates[StateKeys.RAW_TOOL_CALLS] = validated_calls
 

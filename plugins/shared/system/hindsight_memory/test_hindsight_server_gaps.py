@@ -176,6 +176,8 @@ class TestApplyLlmEnvEmptyApiBase:
         (tmp_path / "config" / "plugins" / "llm").mkdir(parents=True, exist_ok=True)
         (tmp_path / "config" / "plugins" / "llm" / "llm.yaml").write_text(_LLM_YAML_NO_BASE, encoding="utf-8")
         monkeypatch.setattr(srv, "_THIS_DIR", str(root))
+        # llm.yaml 读侧用户空间优先（2026-09-28 配置热感知批次）：钉进沙箱防真机用户配置漏入
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path / "user_root"))
 
         with caplog.at_level("WARNING"):
             srv._apply_llm_env()

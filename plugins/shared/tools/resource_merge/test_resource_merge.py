@@ -33,7 +33,8 @@ def _load_git_helpers() -> Any:
     if mod_name in sys.modules:
         return sys.modules[mod_name]
     spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_DIR / "git_helpers.py")
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module
     spec.loader.exec_module(module)
@@ -45,7 +46,8 @@ def _load_tool() -> Any:
     if mod_name in sys.modules:
         del sys.modules[mod_name]
     spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_DIR / "tool.py")
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module
     spec.loader.exec_module(module)
@@ -163,7 +165,8 @@ class TestGitHelpersRepo:
         not_repo.mkdir()
         helpers2 = GitHelpers(not_repo)
         result = _run(helpers2.ensure_project_repo())
-        assert result is not None and result.error_code == "NOT_A_GIT_REPO"
+        assert result is not None
+        assert result.error_code == "NOT_A_GIT_REPO"
 
     def test_ensure_git_repo(self, tmp_path: Path) -> None:
         """目录不存在 → 创建并 git init。"""
@@ -219,7 +222,8 @@ class TestGitHelpersOps:
         plain.mkdir()
         helpers = GitHelpers(tmp_path)
         result = _run(helpers.git_status({}, plain))
-        assert not result.success and result.error_code == "NOT_INITIALIZED"
+        assert not result.success
+        assert result.error_code == "NOT_INITIALIZED"
 
     def test_git_status_parses_states(self, tmp_path: Path) -> None:
         ws, helpers = self._worktree(tmp_path)
@@ -261,7 +265,8 @@ class TestGitHelpersOps:
         plain.mkdir()
         helpers = GitHelpers(tmp_path)
         result = _run(helpers.git_commit({}, plain))
-        assert not result.success and result.error_code == "NOT_INITIALIZED"
+        assert not result.success
+        assert result.error_code == "NOT_INITIALIZED"
 
     def test_git_diff_against_head(self, tmp_path: Path) -> None:
         ws, helpers = self._worktree(tmp_path)
@@ -269,7 +274,8 @@ class TestGitHelpersOps:
         (ws / "f.txt").write_text("v2", encoding="utf-8")
         result = _run(helpers.git_diff({}, ws))
         assert result.success
-        assert "-v1" in result.output["diff"] and "+v2" in result.output["diff"]
+        assert "-v1" in result.output["diff"]
+        assert "+v2" in result.output["diff"]
 
     def test_git_diff_without_head(self, tmp_path: Path) -> None:
         """无 HEAD 提交 → 回退 --cached。"""
@@ -326,7 +332,8 @@ class TestGitHelpersOps:
         plain.mkdir()
         helpers = GitHelpers(plain)
         result = _run(helpers.git_merge_abort({}, plain))
-        assert not result.success and result.error_code == "NOT_A_GIT_REPO"
+        assert not result.success
+        assert result.error_code == "NOT_A_GIT_REPO"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -338,17 +345,20 @@ class TestToolDispatch:
     def test_missing_action(self, tmp_path: Path) -> None:
         tool = _load_tool().ResourceMergeTool(base_path=str(tmp_path))
         r = _run(tool.execute({"workspace": str(tmp_path)}))
-        assert not r.success and r.error_code == "MISSING_ACTION"
+        assert not r.success
+        assert r.error_code == "MISSING_ACTION"
 
     def test_missing_workspace(self, tmp_path: Path) -> None:
         tool = _load_tool().ResourceMergeTool(base_path=str(tmp_path))
         r = _run(tool.execute({"action": "git_status"}))
-        assert not r.success and r.error_code == "MISSING_WORKSPACE"
+        assert not r.success
+        assert r.error_code == "MISSING_WORKSPACE"
 
     def test_invalid_action(self, tmp_path: Path) -> None:
         tool = _load_tool().ResourceMergeTool(base_path=str(tmp_path))
         r = _run(tool.execute({"action": "teleport", "workspace": str(tmp_path)}))
-        assert not r.success and r.error_code == "INVALID_ACTION"
+        assert not r.success
+        assert r.error_code == "INVALID_ACTION"
 
     def test_resolve_relative_path(self, tmp_path: Path) -> None:
         tool = _load_tool().ResourceMergeTool(base_path=str(tmp_path))
@@ -390,7 +400,8 @@ class TestToolWorkflow:
     def test_prepare_not_git_repo(self, tmp_path: Path) -> None:
         tool = _load_tool().ResourceMergeTool(base_path=str(tmp_path))
         r = _run(tool.execute({"action": "prepare", "workspace": str(tmp_path / "ws")}))
-        assert not r.success and r.error_code == "NOT_A_GIT_REPO"
+        assert not r.success
+        assert r.error_code == "NOT_A_GIT_REPO"
 
     def test_merge_copy_strategy(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
@@ -464,7 +475,8 @@ class TestToolWorkflow:
                 {"action": "merge", "workspace": str(ws), "merge_strategy": "rsync", "target_files": []}
             )
         )
-        assert not r.success and r.error_code == "INVALID_MERGE_STRATEGY"
+        assert not r.success
+        assert r.error_code == "INVALID_MERGE_STRATEGY"
 
     def test_git_merge_success(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
@@ -497,7 +509,8 @@ class TestToolWorkflow:
         ws.mkdir()
         tool = _load_tool().ResourceMergeTool(base_path=str(repo))
         r = _run(tool.execute({"action": "merge", "workspace": str(ws), "merge_strategy": "git_merge"}))
-        assert not r.success and r.error_code == "NOT_A_WORKTREE"
+        assert not r.success
+        assert r.error_code == "NOT_A_WORKTREE"
 
     def test_git_merge_conflict(self, tmp_path: Path) -> None:
         """冲突 → 自动 abort + MERGE_CONFLICT + 冲突文件列表。"""
@@ -539,7 +552,8 @@ class TestToolWorkflow:
         ws.mkdir()
         tool = _load_tool().ResourceMergeTool(base_path=str(repo))
         r = _run(tool.execute({"action": "rollback", "workspace": str(ws)}))
-        assert not r.success and r.error_code == "NOT_INITIALIZED"
+        assert not r.success
+        assert r.error_code == "NOT_INITIALIZED"
 
     def test_cleanup_worktree(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
@@ -553,7 +567,8 @@ class TestToolWorkflow:
         assert not ws.exists()
         # 分支已删除
         rc, out, _ = _run(helpers.run_git("branch", "--list", f"task/{ws.name}", cwd=repo))
-        assert rc == 0 and out.strip() == ""
+        assert rc == 0
+        assert out.strip() == ""
 
     def test_cleanup_plain_dir_with_git(self, tmp_path: Path) -> None:
         """非 worktree 但含 .git 的目录 → 移除 .git。"""
@@ -642,7 +657,8 @@ class TestGitHelpersFailureBranches:
 
         monkeypatch.setattr(helpers, "run_git", _FailHelpers().run_git)
         result = _run(helpers.ensure_git_repo(target))
-        assert result is not None and result.error_code == "GIT_INIT_FAILED"
+        assert result is not None
+        assert result.error_code == "GIT_INIT_FAILED"
 
     def test_git_status_git_failure(self, tmp_path: Path, monkeypatch) -> None:
         """git_status 命令非零 → GIT_STATUS_FAILED。"""
@@ -653,7 +669,8 @@ class TestGitHelpersFailureBranches:
 
         monkeypatch.setattr(helpers, "run_git", _fail)
         result = _run(helpers.git_status({}, ws))
-        assert not result.success and result.error_code == "GIT_STATUS_FAILED"
+        assert not result.success
+        assert result.error_code == "GIT_STATUS_FAILED"
 
     def test_git_status_exception(self, tmp_path: Path, monkeypatch) -> None:
         ws, helpers = _make_worktree(tmp_path)
@@ -663,7 +680,8 @@ class TestGitHelpersFailureBranches:
 
         monkeypatch.setattr(helpers, "run_git", _raise)
         result = _run(helpers.git_status({}, ws))
-        assert not result.success and result.error_code == "GIT_STATUS_FAILED"
+        assert not result.success
+        assert result.error_code == "GIT_STATUS_FAILED"
         assert "git_status 操作失败" in (result.error or "")
 
     def test_git_commit_add_failure(self, tmp_path: Path, monkeypatch) -> None:
@@ -678,14 +696,16 @@ class TestGitHelpersFailureBranches:
 
         monkeypatch.setattr(helpers, "run_git", _fail_add)
         result = _run(helpers.git_commit({"message": "m"}, ws))
-        assert not result.success and result.error_code == "GIT_ADD_FAILED"
+        assert not result.success
+        assert result.error_code == "GIT_ADD_FAILED"
 
     def test_git_diff_not_worktree(self, tmp_path: Path) -> None:
         plain = tmp_path / "plain"
         plain.mkdir()
         helpers = GitHelpers(tmp_path)
         result = _run(helpers.git_diff({}, plain))
-        assert not result.success and result.error_code == "NOT_INITIALIZED"
+        assert not result.success
+        assert result.error_code == "NOT_INITIALIZED"
 
     def test_git_diff_exception(self, tmp_path: Path, monkeypatch) -> None:
         ws, helpers = _make_worktree(tmp_path)
@@ -695,7 +715,8 @@ class TestGitHelpersFailureBranches:
 
         monkeypatch.setattr(helpers, "run_git", _raise)
         result = _run(helpers.git_diff({}, ws))
-        assert not result.success and result.error_code == "GIT_DIFF_FAILED"
+        assert not result.success
+        assert result.error_code == "GIT_DIFF_FAILED"
 
     def test_git_log_failure(self, tmp_path: Path, monkeypatch) -> None:
         ws, helpers = _make_worktree(tmp_path)
@@ -705,7 +726,8 @@ class TestGitHelpersFailureBranches:
 
         monkeypatch.setattr(helpers, "run_git", _fail)
         result = _run(helpers.git_log({}, ws))
-        assert not result.success and result.error_code == "GIT_LOG_FAILED"
+        assert not result.success
+        assert result.error_code == "GIT_LOG_FAILED"
 
     def test_git_log_exception(self, tmp_path: Path, monkeypatch) -> None:
         ws, helpers = _make_worktree(tmp_path)
@@ -715,7 +737,8 @@ class TestGitHelpersFailureBranches:
 
         monkeypatch.setattr(helpers, "run_git", _raise)
         result = _run(helpers.git_log({}, ws))
-        assert not result.success and result.error_code == "GIT_LOG_FAILED"
+        assert not result.success
+        assert result.error_code == "GIT_LOG_FAILED"
 
 
 class TestCleanupEdgePaths:
@@ -779,7 +802,8 @@ class TestPrepareMergeFailureBranches:
 
         monkeypatch.setattr(tool._git_helpers, "run_git", _fail)
         r = _run(tool.execute({"action": "prepare", "workspace": str(ws)}))
-        assert not r.success and r.error_code == "WORKTREE_ADD_FAILED"
+        assert not r.success
+        assert r.error_code == "WORKTREE_ADD_FAILED"
 
     def test_prepare_exception(self, tmp_path: Path, monkeypatch) -> None:
         repo = tmp_path / "repo"
@@ -791,7 +815,8 @@ class TestPrepareMergeFailureBranches:
 
         monkeypatch.setattr(tool._git_helpers, "run_git", _raise)
         r = _run(tool.execute({"action": "prepare", "workspace": str(tmp_path / "ws")}))
-        assert not r.success and r.error_code == "PREPARE_FAILED"
+        assert not r.success
+        assert r.error_code == "PREPARE_FAILED"
 
     def test_merge_git_merge_failure(self, tmp_path: Path, monkeypatch) -> None:
         """git_merge 策略：merge 非冲突失败 → MERGE_FAILED。"""
@@ -818,7 +843,8 @@ class TestPrepareMergeFailureBranches:
                 }
             )
         )
-        assert not r2.success and r2.error_code in ("MERGE_FAILED", "MERGE_CONFLICT")
+        assert not r2.success
+        assert r2.error_code in ("MERGE_FAILED", "MERGE_CONFLICT")
 
     def test_merge_exception(self, tmp_path: Path, monkeypatch) -> None:
         repo = tmp_path / "repo"
@@ -842,7 +868,8 @@ class TestPrepareMergeFailureBranches:
                 }
             )
         )
-        assert not r2.success and r2.error_code == "MERGE_FAILED"
+        assert not r2.success
+        assert r2.error_code == "MERGE_FAILED"
 
     def test_rollback_checkout_failure(self, tmp_path: Path, monkeypatch) -> None:
         """rollback 走 git checkout -- .：非零 → GIT_CHECKOUT_FAILED。"""
@@ -860,7 +887,8 @@ class TestPrepareMergeFailureBranches:
 
         monkeypatch.setattr(tool._git_helpers, "run_git", _fail_checkout)
         r2 = _run(tool.execute({"action": "rollback", "workspace": str(ws), "merge_strategy": "git_merge"}))
-        assert not r2.success and r2.error_code == "GIT_CHECKOUT_FAILED"
+        assert not r2.success
+        assert r2.error_code == "GIT_CHECKOUT_FAILED"
 
     def test_rollback_exception(self, tmp_path: Path, monkeypatch) -> None:
         repo = tmp_path / "repo"
@@ -875,7 +903,8 @@ class TestPrepareMergeFailureBranches:
 
         monkeypatch.setattr(tool._git_helpers, "run_git", _raise)
         r2 = _run(tool.execute({"action": "rollback", "workspace": str(ws)}))
-        assert not r2.success and r2.error_code == "ROLLBACK_FAILED"
+        assert not r2.success
+        assert r2.error_code == "ROLLBACK_FAILED"
 
     def test_cleanup_exception(self, tmp_path: Path, monkeypatch) -> None:
         repo = tmp_path / "repo"
@@ -896,7 +925,8 @@ class TestPrepareMergeFailureBranches:
         monkeypatch.setattr(tool._git_helpers, "is_worktree", _is_wt)
         monkeypatch.setattr(tool._git_helpers, "run_git", _raise)
         r2 = _run(tool.execute({"action": "cleanup", "workspace": str(ws)}))
-        assert not r2.success and r2.error_code == "CLEANUP_FAILED"
+        assert not r2.success
+        assert r2.error_code == "CLEANUP_FAILED"
 
 
 class TestGitHelpersFailureBranches2:
@@ -911,7 +941,8 @@ class TestGitHelpersFailureBranches2:
             return (1, "", "diff exploded")
         monkeypatch.setattr(helpers, "run_git", _fail_all)
         result = _run(helpers.git_diff({}, ws))
-        assert not result.success and result.error_code == "GIT_DIFF_FAILED"
+        assert not result.success
+        assert result.error_code == "GIT_DIFF_FAILED"
 
     def test_git_commit_failure(self, tmp_path: Path, monkeypatch) -> None:
         ws, helpers = _make_worktree(tmp_path)
@@ -924,7 +955,8 @@ class TestGitHelpersFailureBranches2:
 
         monkeypatch.setattr(helpers, "run_git", _fail_commit)
         result = _run(helpers.git_commit({"message": "m"}, ws))
-        assert not result.success and result.error_code == "GIT_COMMIT_FAILED"
+        assert not result.success
+        assert result.error_code == "GIT_COMMIT_FAILED"
 
     def test_git_commit_exception(self, tmp_path: Path, monkeypatch) -> None:
         ws, helpers = _make_worktree(tmp_path)
@@ -935,7 +967,8 @@ class TestGitHelpersFailureBranches2:
 
         monkeypatch.setattr(helpers, "run_git", _raise)
         result = _run(helpers.git_commit({"message": "m"}, ws))
-        assert not result.success and result.error_code == "GIT_COMMIT_FAILED"
+        assert not result.success
+        assert result.error_code == "GIT_COMMIT_FAILED"
 
     def test_git_merge_abort_command_failure(self, tmp_path: Path, monkeypatch) -> None:
         """merge --abort 命令非零 → MERGE_ABORT_FAILED（在真 worktree 上打）。"""
@@ -953,7 +986,8 @@ class TestGitHelpersFailureBranches2:
 
         monkeypatch.setattr(helpers, "run_git", _fail)
         result = _run(helpers.git_merge_abort({}, repo))
-        assert not result.success and result.error_code == "MERGE_ABORT_FAILED"
+        assert not result.success
+        assert result.error_code == "MERGE_ABORT_FAILED"
 
     def test_git_merge_abort_no_merge_failure(self, tmp_path: Path, monkeypatch) -> None:
         """无 merge 且命令失败（非无 merge 的正常输出）→ 按返回码走 MERGE_ABORT_FAILED。"""
@@ -1057,6 +1091,7 @@ class TestCohostShadowing:
 
             result = _run(server.resource_merge(**bad_params))
             assert isinstance(result, dict)
+            assert result["success"] is False, "失败路径应显式 success=False"
             assert "error" in result, "失败路径应返回 error 字段"
             assert expect_marker in result["error"]
         finally:

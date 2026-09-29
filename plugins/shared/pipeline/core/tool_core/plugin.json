@@ -34,9 +34,7 @@
       "raw_thinking",
       "tool_output_contracts",
       "tool_output_validation",
-      "security.level_decision",
-      "security.decision",
-      "execution_contexts",
+      "pre_decided_results",
       "submitted_task_ids",
       "output_truncated",
       "llm_supports_vision"

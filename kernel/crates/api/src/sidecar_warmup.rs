@@ -93,7 +93,9 @@ pub fn spawn_pipeline_sidecar_warmup(
         concurrency = WARMUP_CONCURRENCY,
         "Boot sidecar 预热启动（管道引用的 sidecar 宿主提前 spawn 进缓存）"
     );
-    tokio::spawn(async move {
+    let activity = agentos_core::task_activity::global_registry().register("sidecar-warmup");
+    tokio::spawn(agentos_core::task_activity::scope(activity, async move {
+        agentos_core::task_activity::set_current_label("warming sidecar hosts");
         let results: Vec<(String, Result<(), agentos_core::types::PluginError>)> =
             stream::iter(targets)
                 .map(|m| {
@@ -125,7 +127,7 @@ pub fn spawn_pipeline_sidecar_warmup(
             failed = failed.len(),
             "Boot sidecar 预热完成"
         );
-    });
+    })); // 任务随进程生命周期，handle 丢弃（与既有 spawn 语句同语义）
 }
 
 #[cfg(test)]
@@ -169,6 +171,7 @@ mod tests {
             provides: None,
             persistent_fields: vec![],
             export_fields: vec![],
+            aux_venvs: Vec::new(),
         }
     }
 

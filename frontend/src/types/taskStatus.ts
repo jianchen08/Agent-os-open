@@ -35,6 +35,13 @@ export const TASK_STATUS_ALIASES: Record<string, TaskStatus> = {
 }
 
 /**
+ * 评估闸门未决值：run 已终、评估证据未决时由 tasks/reconcile.py 托底补落
+ * （ADR 2026-09-28-task-completed-eval-gate-only；完成唯一判据=评估通过）。
+ * 非生命周期态、不进 TaskStatus 枚举——展示有专属文案，归一投影按 unknown。
+ */
+export const TASK_STATUS_EVAL_GATE_VALUE = 'pending_evaluation'
+
+/**
  * 状态 → 中文展示文案。覆盖七态 + 别名（旧数据按原义展示）+
  * pending_evaluation（评估闸门未决值，读面见 tasks/reconcile.py 未决集）。
  * 展示文案单一出口，组件不得自备任务状态中文映射。
@@ -52,7 +59,7 @@ export const TASK_STATUS_LABELS: Record<string, string> = {
   paused: '已暂停',
   cancelled: '已取消',
   // 评估未决（读面值）
-  pending_evaluation: '待评估',
+  [TASK_STATUS_EVAL_GATE_VALUE]: '待评估',
 }
 
 /** 已告警过的未知状态值（同一未知值只警告一次） */

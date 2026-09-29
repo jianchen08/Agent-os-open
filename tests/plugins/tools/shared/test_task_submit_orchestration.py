@@ -1,16 +1,17 @@
 # @feature: FP-MIGR 模式体系测试补标 | @ci: python-coverage
 # @feature: 模式体系P2 编排运行面 | @ci: python-coverage
-"""task_submit 编排解析 + 完备性闸门行为测试（P2：三级解析/H3/H4/审计键）。
+"""task_submit 编排解析 + 完备性闸门行为测试（P2：两级解析/H3/审计键）。
 
-断输入→输出与结构化错误形状；解析域逻辑（三级链）单测见
+断输入→输出与结构化错误形状；解析域逻辑（两级链）单测见
 plugins/shared/system/tasks/test_orchestration.py，本文件验证工具侧接线：
 
-1. 旧调用兼容：不带 orchestration_key/mode 的提交走③ autonomous，行为不变
+1. 旧调用兼容：不带 orchestration_key 的提交走② autonomous，行为不变
    （真实仓库编排发现，autonomous 派发成功 + 出生 state 记编排键）；
 2. ① 显式键：命中即用；未命中 fail-closed（ORCHESTRATION_KEY_NOT_FOUND，
-   含可用编排提示，不实例化——sender 零调用）；显式键优先于 mode；
-3. ② mode 键：限定候选（task_kinds 匹配优先/唯一候选选定）；无自有编排或
-   意图不明落③（H4：约束非门槛）；
+   含可用编排提示，不实例化——sender 零调用）；
+3. mode 键不参与编排选择（D6：模式控制经 execution_context.mode 透传给
+   消费面）——带 mode 的提交仍兜底 autonomous 且 mode 原样落
+   execution_context；
 4. 完备性（§3.5 派发期门口拒派）：agent 基座缺身份性字段 / target_type
    非 agent（bypass schema 直调）→ INCOMPLETE_INITIAL_INPUTS 结构化拒绝
    （{missing_fields, orchestration_key, suggestion}，不实例化）。
@@ -104,10 +105,7 @@ def _make_tool(mod: Any) -> Any:
 def _fake_defs(**raws: dict[str, Any]) -> dict[str, Any]:
     return {
         key: orchestration_mod.OrchestrationDefinition(
-            key=key,
-            path=f"<{key}>",
-            raw=raw,
-            task_kinds=tuple(raw.get("task_kinds", ())),
+            key=key, path=f"<{key}>", raw=raw
         )
         for key, raw in raws.items()
     }
@@ -138,12 +136,12 @@ async def _run_submit(mod: Any, inputs: dict[str, Any]) -> Any:
     return result, sender
 
 
-# ── 旧调用兼容（③ 兜底）──
+# ── 旧调用兼容（② 兜底）──
 
 
 class TestLegacyCalls:
     async def test_old_call_resolves_autonomous_and_records_key(self) -> None:
-        """无编排键/mode 的旧调用走③ autonomous：派发成功 + 出生 state 记键。"""
+        """无编排键的旧调用走② autonomous：派发成功 + 出生 state 记键。"""
         mod = _load_module()
         result, sender = await _run_submit(mod, _base_inputs())
         assert result.success, result.error
@@ -192,7 +190,7 @@ class TestExplicitKey:
         assert sender.calls[0]["state"]["task.orchestration"] == "autonomous"
 
     async def test_explicit_unknown_key_fails_closed_without_fallback(self) -> None:
-        """① 显式键未命中 = fail-closed 结构化报错（含可用编排），不落③不实例化。"""
+        """① 显式键未命中 = fail-closed 结构化报错（含可用编排），不落②不实例化。"""
         mod = _load_module()
         result, sender = await _run_submit(
             mod, _base_inputs(orchestration_key="mode_writing/nope")
@@ -204,106 +202,43 @@ class TestExplicitKey:
         assert "autonomous" in result.error
         assert sender.calls == []
 
-    async def test_explicit_key_takes_precedence_over_mode(
+
+# ── mode 键与编排选择解耦（D6：模式控制经 execution_context.mode 透传）──
+
+
+class TestModeKeyDecoupled:
+    async def test_mode_does_not_limit_candidates(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """① 显式键优先：带 mode 限定也无视——主 agent 显式选择是最高意图。"""
+        """回归：带 mode 的提交不再按 mode 选编排——即便候选集里有该模式
+        前缀的编排键，仍兜底 autonomous（mode 限定候选路径已随包内编排
+        清单退役，D2/D6）。"""
         mod = _load_module()
         patched = _fake_defs(
             autonomous={},
-            **{"mode_writing/chapter": {"task_kinds": ["chapter"]}},
+            **{"mode_writing/chapter": {}},
         )
         monkeypatch.setattr(
             orchestration_mod,
             "discover_orchestrations",
             lambda *_args, **_kwargs: patched,
         )
-        result, sender = await _run_submit(
-            mod,
-            _base_inputs(orchestration_key="autonomous", mode="mode_writing"),
-        )
+        result, sender = await _run_submit(mod, _base_inputs(mode="writing"))
         assert result.success, result.error
         assert sender.calls[0]["state"]["task.orchestration"] == "autonomous"
 
-
-# ── ② mode 键（H4：约束非门槛）──
-
-
-class TestModeKey:
-    async def _run_with_defs(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        defs: dict[str, Any],
-        **over: Any,
-    ) -> Any:
-        monkeypatch.setattr(
-            orchestration_mod, "discover_orchestrations", lambda *_args, **_kwargs: defs
-        )
-        return await _run_submit(_load_module(), _base_inputs(**over))
-
-    async def test_mode_single_candidate_selected(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """② mode 包唯一编排即选定，出生 state 记全限定键。"""
-        result, sender = await self._run_with_defs(
-            monkeypatch,
-            _fake_defs(
-                autonomous={},
-                **{"mode_writing/chapter": {"task_kinds": ["chapter"]}},
-            ),
-            mode="mode_writing",
-        )
+    async def test_mode_passes_through_to_execution_context(self) -> None:
+        """mode 透传不受编排解耦影响：出生 execution_context 带 mode（子任务
+        受该模式控制，D6）；空白视同未声明。"""
+        mod = _load_module()
+        result, sender = await _run_submit(mod, _base_inputs(mode="writing"))
         assert result.success, result.error
-        assert sender.calls[0]["state"]["task.orchestration"] == "mode_writing/chapter"
+        dispatch = sender.calls[2]
+        assert dispatch["execution_context"]["mode"] == "writing"
 
-    async def test_mode_task_kind_match_wins(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """② 多候选：task_kinds 与 task_kind 唯一命中者优先。"""
-        result, sender = await self._run_with_defs(
-            monkeypatch,
-            _fake_defs(
-                autonomous={},
-                **{
-                    "mode_writing/chapter": {"task_kinds": ["chapter"]},
-                    "mode_writing/review": {"task_kinds": ["review"]},
-                },
-            ),
-            mode="mode_writing",
-            task_kind="review",
-        )
-        assert result.success, result.error
-        assert sender.calls[0]["state"]["task.orchestration"] == "mode_writing/review"
-
-    async def test_mode_ambiguous_falls_to_autonomous(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """② 多候选且无法区分意图 → 落③（H4：③只接意图不明）。"""
-        result, sender = await self._run_with_defs(
-            monkeypatch,
-            _fake_defs(
-                autonomous={},
-                **{
-                    "mode_writing/chapter": {},
-                    "mode_writing/review": {},
-                },
-            ),
-            mode="mode_writing",
-        )
-        assert result.success, result.error
-        assert sender.calls[0]["state"]["task.orchestration"] == "autonomous"
-
-    async def test_mode_without_own_pipelines_falls_to_autonomous(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """② mode 无自有编排 → 落③：mode 是约束非门槛，共享默认仍有效。"""
-        result, sender = await self._run_with_defs(
-            monkeypatch,
-            _fake_defs(autonomous={}),
-            mode="mode_coding",
-        )
-        assert result.success, result.error
-        assert sender.calls[0]["state"]["task.orchestration"] == "autonomous"
+        result_blank, sender_blank = await _run_submit(mod, _base_inputs(mode="  "))
+        assert result_blank.success, result_blank.error
+        assert "mode" not in sender_blank.calls[2]["execution_context"]
 
 
 # ── 完备性闸门（派发期门口拒派）──

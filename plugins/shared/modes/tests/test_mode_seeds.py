@@ -28,11 +28,12 @@ SEEDS = [
     ("mode_research", "research", "research_desk"),
     ("mode_godot", "godot", "godot_dev"),
     ("mode_planning", "planning", "planning_desk"),
+    ("mode_evolution", "evolution", "evolution_panel"),
 ]
 
 DESCRIBE_KEYS = {"mode", "name", "chain", "weights", "budget", "profile_path", "panel_page_id"}
 PROFILE_REQUIRED_KEYS = {
-    "mode", "name", "panel_page_id", "chain", "pipeline_profile", "suite",
+    "mode", "name", "panel_page_id", "chain", "suite",
     "material_scope", "levers", "verifier_families", "weights", "budget",
 }
 
@@ -51,7 +52,7 @@ def _load_server(plugin_id: str):
 
 
 def _load_profile(plugin_id: str) -> dict:
-    path = os.path.join(MODES_DIR, plugin_id, "profile.yaml")
+    path = os.path.join(MODES_DIR, plugin_id, "mode.yaml")
     with open(path, encoding="utf-8") as fh:
         return yaml.safe_load(fh)
 
@@ -65,7 +66,7 @@ def test_describe_returns_contract_fields(plugin_id: str, mode: str, panel_page_
     assert describe["panel_page_id"] == panel_page_id
     assert describe["name"]
     # profile_path 透出包内打包位置（种子单元自包含的可验证面）
-    assert describe["profile_path"] == os.path.join(MODES_DIR, plugin_id, "profile.yaml")
+    assert describe["profile_path"] == os.path.join(MODES_DIR, plugin_id, "mode.yaml")
     assert os.path.isfile(describe["profile_path"])
 
 
@@ -137,7 +138,7 @@ def test_corrupt_profile_fails_closed(plugin_id: str, mode: str, panel_page_id: 
                                       tmp_path) -> None:
     """profile 种子损坏（缺 mode 键）必须报错，不得静默返回半残 profile。"""
     module = _load_server(plugin_id)
-    bad = tmp_path / "profile.yaml"
+    bad = tmp_path / "mode.yaml"
     bad.write_text("name: 空壳\n", encoding="utf-8")
     with pytest.raises(ValueError):
         module.load_profile(str(bad))

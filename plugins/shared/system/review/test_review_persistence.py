@@ -443,13 +443,13 @@ class TestGetReportColdRead:
         mod.set_memory_backend(stub)
 
         got = await mod.get_report("review-missing")
-        assert got == {"error": "review not found", "review_id": "review-missing"}
+        assert got == {"success": False, "error": "review not found", "review_id": "review-missing"}
         assert "review-missing" not in mod._reports
 
     async def test_cold_read_without_backend_still_not_found(self, mod: Any) -> None:
         """红3：_memory_backend=None（降级）→ not found 且不抛异常。"""
         got = await mod.get_report("review-none")
-        assert got == {"error": "review not found", "review_id": "review-none"}
+        assert got == {"success": False, "error": "review not found", "review_id": "review-none"}
 
     async def test_cold_read_search_failure_degrades_to_not_found(self, mod: Any) -> None:
         """检索异常（HindsightBackend.search 上抛 RuntimeError 形态）→ 退回
@@ -459,7 +459,7 @@ class TestGetReportColdRead:
         mod.set_memory_backend(stub)
 
         got = await mod.get_report("review-err")
-        assert got == {"error": "review not found", "review_id": "review-err"}
+        assert got == {"success": False, "error": "review not found", "review_id": "review-err"}
         assert "review-err" not in mod._reports
 
 
@@ -585,7 +585,7 @@ class TestColdReadViaDocuments:
         mod.set_memory_backend(stub)
 
         got = await mod.get_report("review-d2")
-        assert got == {"error": "review not found", "review_id": "review-d2"}
+        assert got == {"success": False, "error": "review not found", "review_id": "review-d2"}
         assert "review-d2" not in mod._reports
 
     async def test_cold_read_documents_error_falls_back_gracefully(
@@ -597,7 +597,7 @@ class TestColdReadViaDocuments:
         mod.set_memory_backend(stub)
 
         got = await mod.get_report("review-d3")
-        assert got == {"error": "review not found", "review_id": "review-d3"}
+        assert got == {"success": False, "error": "review not found", "review_id": "review-d3"}
 
     async def test_cold_read_legacy_search_still_works_without_documents(
         self, mod: Any

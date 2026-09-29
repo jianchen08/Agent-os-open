@@ -164,12 +164,15 @@ export function useRealtimeEvents(): void {
         pipeline_id?: string
         client_message_id?: string
         reason?: string
+        /** ADR 2026-09-29：true=内核 user_input_ack(ok:false) 透传——消息已达服务器被拒收，文案不谎报"后端无记录" */
+        serverAware?: boolean
       }
     }) => {
       const info = eventData?.data || {}
       const pipelineId = info.pipeline_id || ''
       const cmid = info.client_message_id || ''
       const reason = info.reason || '连接断开，消息未送达'
+      const serverAware = info.serverAware === true
 
       const ps = usePipelineMessageStore.getState()
       if (pipelineId) {
@@ -188,7 +191,9 @@ export function useRealtimeEvents(): void {
           id: `send_failed_${cmid}`,
           sessionId: info.thread_id || '',
           role: 'system',
-          content: `⚠ ${reason}。这条消息没有发到服务器（后端无记录），请检查连接状态后重新发送。`,
+          content: serverAware
+            ? `⚠ ${reason}（消息已到达服务器但被拒绝派发），请重试或检查会话状态。`
+            : `⚠ ${reason}。这条消息没有发到服务器（后端无记录），请检查连接状态后重新发送。`,
           timestamp: new Date().toISOString(),
           status: 'error',
         } as never)
@@ -196,7 +201,9 @@ export function useRealtimeEvents(): void {
 
       useNotificationStore.getState().addNotification({
         title: '消息发送失败',
-        message: `${reason}，请检查连接状态后重新发送。`,
+        message: serverAware
+          ? `${reason}，请重试或检查会话状态。`
+          : `${reason}，请检查连接状态后重新发送。`,
         priority: 'high',
         category: 'error',
         isBlocking: false,

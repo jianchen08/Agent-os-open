@@ -11,7 +11,7 @@ import { login } from './auth';
 /** 路由路径常量（与 frontend/src/constants/routes.ts 同步） */
 export const ROUTES = {
   HOME: '/',
-  LOGIN: '/login',
+  // LOGIN 已退役（ADR 2026-09-28）：/login 整页路由并入认证闸登录模态
   REGISTER: '/register',
   SETTINGS: '/settings',
   SETTINGS_API: '/settings/api',

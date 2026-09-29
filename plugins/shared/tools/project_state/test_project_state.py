@@ -1,13 +1,13 @@
 # @feature: FP-0.2.二 项目状态门 | @ci: python-coverage
-"""project_state 工具测试（方案工作流状态查询与门控迁移，ADR 2026-09-17）。
+"""project_state 工具测试（方案工作流状态查询/列举与门控迁移，ADR 2026-09-17）。
 
-覆盖：query 快照；transition 合法边（plan→running / running→plan）+ 持久化；
-缺 target/reason 拒绝；非法边 fail-closed；done 终态不可迁；同态幂等拒绝；
-项目不存在拒绝；工具定义形状。
+覆盖：query 快照；list 全量列举（空登记/多项目倒序/无需 project_id）；
+transition 合法边（plan→running / running→plan）+ 持久化；缺 target/reason
+拒绝；非法边 fail-closed；done 终态不可迁；同态幂等拒绝；项目不存在拒绝；
+工具定义形状 + manifest 声明一致性。
 """
 from __future__ import annotations
 
-import asyncio
 import importlib.util
 import os
 import sys
@@ -86,6 +86,39 @@ class TestProjectStateQuery:
         assert r.error_code == "MISSING_PROJECT_ID"
 
 
+class TestProjectStateList:
+    async def test_list_empty_registry(self, env: Path) -> None:
+        r = await _tool().execute({"action": "list"})
+        assert r.success, r.error
+        assert r.output["projects"] == []
+        assert r.output["total"] == 0
+
+    async def test_list_returns_all_sorted_desc(self, env: Path) -> None:
+        ids = {
+            _mk_project("旧", updated_at="2026-09-01T00:00:00"),
+            _mk_project("中", updated_at="2026-09-10T00:00:00"),
+            _mk_project("新", updated_at="2026-09-20T00:00:00", workflow_state="running"),
+        }
+        r = await _tool().execute({"action": "list"})
+        assert r.success, r.error
+        assert r.output["total"] == 3
+        rows = r.output["projects"]
+        assert {row["project_id"] for row in rows} == ids
+        stamps = [row["updated_at"] for row in rows]
+        assert stamps == sorted(stamps, reverse=True), "list 须按 updated_at 倒序"
+        by_title = {row["title"]: row for row in rows}
+        assert by_title["新"]["workflow_state"] == "running"
+        assert by_title["旧"]["workflow_state"] == "plan"
+
+    async def test_list_without_id_ignores_bogus_project_id(self, env: Path) -> None:
+        """list 不依赖 project_id——带错误 id 也不应被拒（发现面与单查面独立）。"""
+        _mk_project("P1")
+        r = await _tool().execute({"action": "list", "project_id": "deadbeef0000"})
+        assert r.success, r.error
+        assert r.output["total"] == 1
+        assert r.output["projects"][0]["title"] == "P1"
+
+
 class TestProjectStateTransition:
     async def test_plan_to_running_persists(self, env: Path) -> None:
         pid = _mk_project()
@@ -150,7 +183,21 @@ class TestProjectStateDefinition:
         mod = _load_module()
         d = mod.ProjectStateTool.get_tool_definition()
         assert d.name == "project_state"
-        assert d.input_schema.get("required") == ["project_id"]
+        # project_id 按 action 条件必填（query/transition 运行时校验），schema 不再整表必填
+        assert d.input_schema.get("required") is None
         enum_vals = d.input_schema["properties"]["action"]["enum"]
-        assert enum_vals == ["query", "transition"]
-        assert d.output_schema["required"] == ["project_id", "workflow_state"]
+        assert enum_vals == ["query", "list", "transition"]
+        assert d.output_schema.get("required") is None
+        assert "projects" in d.output_schema["properties"]
+
+    def test_manifest_declaration_matches_definition(self) -> None:
+        """manifest 声明与 tool.py 单源一致（声明单源化护栏）。"""
+        import json
+
+        mod = _load_module()
+        d = mod.ProjectStateTool.get_tool_definition()
+        manifest = json.loads((_PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+        decl = manifest["capabilities"]["tools"][0]
+        assert decl["description"] == d.description
+        assert decl["input_schema"] == d.input_schema
+        assert decl["output_schema"] == d.output_schema

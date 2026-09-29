@@ -1,9 +1,11 @@
 /**
  * 呈现档案解析 hook（模式包插槽协议的数据层，渲染侧消费）
  *
- * 消息 agent_id（如 `mode_roleplay/card_luna`）的呈现名/头像解析：
- * - 无 `/` 或前缀不在 MODE_PRESENTER_SOURCES → 返回 null，调用方走 agents
- *   注册表老路（本协议不接管）；
+ * 消息 agent_id（模式包执行者键，如 `mode_X/card_y`）的呈现名/头像解析：
+ * - 数据源映射 = modes registry 声明派生（mode.yaml presenter.source=data_cards
+ *   → /ext/{plugin_id}/data/cards，2026-09-28 设计 D5 声明化；无硬编码模式键）；
+ * - 无 `/` 或前缀不在映射内 → 返回 null，调用方走 agents 注册表老路（本协议
+ *   不接管）；
  * - 命中 `mode_X/card_y` → 经插件数据端点取 {cards:[...]}，按 id===card_y
  *   匹配抽出 {name, avatar, origin}（origin=模式前缀，供渲染侧区分数据来源）；
  * - 请求失败不抛（呈现档案是装饰性数据，缺档回退 null 由调用方兜底）。
@@ -12,7 +14,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { apiClient } from '@/services/api/client'
 import { queryKeys } from '@/services/query/queryKeys'
-import { MODE_PRESENTER_SOURCES } from '@/services/schema/modePanel'
+import { presenterSourcesFromModes, useModesRegistry } from '@/services/api/modes'
 
 /** 卡目录变化频率低（改卡 yaml / 热发现才变），新鲜窗口 5 分钟 */
 const PRESENTER_STALE_TIME = 5 * 60_000
@@ -31,7 +33,7 @@ export interface PresenterCard {
 export interface PresenterProfile {
   name: string
   avatar: PresenterAvatar
-  /** 数据来源模式前缀（如 mode_roleplay） */
+  /** 数据来源模式包前缀（registry plugin_id，如 mode_X） */
   origin: string
 }
 
@@ -43,10 +45,13 @@ function splitModeAgentId(agentId: string): { prefix: string; cardId: string } |
 }
 
 /** agentId 命中呈现数据端点；形态不符/前缀不在映射内返回 null */
-export function modePresenterEndpoint(agentId: string): string | null {
+export function modePresenterEndpoint(
+  agentId: string,
+  sources: Record<string, string>,
+): string | null {
   const parts = splitModeAgentId(agentId)
-  if (!parts || !(parts.prefix in MODE_PRESENTER_SOURCES)) return null
-  return MODE_PRESENTER_SOURCES[parts.prefix]
+  if (!parts || !(parts.prefix in sources)) return null
+  return sources[parts.prefix]
 }
 
 /**
@@ -56,32 +61,39 @@ export function modePresenterEndpoint(agentId: string): string | null {
 export function resolvePresenterFromCards(
   agentId: string,
   cards: PresenterCard[],
+  sources: Record<string, string>,
 ): PresenterProfile | null {
   const parts = splitModeAgentId(agentId)
-  if (!parts || !(parts.prefix in MODE_PRESENTER_SOURCES)) return null
+  if (!parts || !(parts.prefix in sources)) return null
   const card = cards.find((c) => c.id === parts.cardId)
   if (!card) return null
   return { name: card.name, avatar: card.avatar ?? null, origin: parts.prefix }
 }
 
 /** 拉卡目录并解析（gate 不过零请求直接 null，与 hook 的 enabled 同口径） */
-async function fetchPresenterProfile(agentId: string): Promise<PresenterProfile | null> {
-  const endpoint = modePresenterEndpoint(agentId)
+async function fetchPresenterProfile(
+  agentId: string,
+  sources: Record<string, string>,
+): Promise<PresenterProfile | null> {
+  const endpoint = modePresenterEndpoint(agentId, sources)
   if (!endpoint) return null
   const res = await apiClient.get<{ cards?: PresenterCard[] }>(endpoint)
-  return resolvePresenterFromCards(agentId, res.data.cards ?? [])
+  return resolvePresenterFromCards(agentId, res.data.cards ?? [], sources)
 }
 
 /**
  * usePresenterProfile — agent_id 的呈现档案（{name, avatar, origin} | null）。
  * null 语义双关：非模式包 agent（走 agents 注册表老路）或模式包暂查不到档
- * （请求失败/卡不存在），调用方统一回退注册表/agent_id 兜底展示。
+ * （请求失败/卡不存在/registry 未就绪），调用方统一回退注册表/agent_id 兜底展示。
  */
 export function usePresenterProfile(agentId: string | undefined): PresenterProfile | null {
-  const resolvable = !!agentId && modePresenterEndpoint(agentId) !== null
+  // agentId 缺席连 registry 都不拉（enabled=false 零请求语义）
+  const sources = presenterSourcesFromModes(useModesRegistry(!!agentId))
+  const resolvable =
+    !!agentId && Object.keys(sources).length > 0 && modePresenterEndpoint(agentId, sources) !== null
   const query = useQuery({
     queryKey: queryKeys.presenterProfile(agentId ?? ''),
-    queryFn: () => fetchPresenterProfile(agentId ?? ''),
+    queryFn: () => fetchPresenterProfile(agentId ?? '', sources),
     enabled: resolvable,
     staleTime: PRESENTER_STALE_TIME,
     // 装饰性数据失败即回退 null，不重试轰打插件端点

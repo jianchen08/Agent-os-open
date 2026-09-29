@@ -121,29 +121,32 @@ def _metric_to_response(raw: dict[str, Any]) -> dict[str, Any]:
 # 经共享件 BoundedDict 收敛（读取面零变化，条目多一个 ts 字段）。
 _results: BoundedDict = BoundedDict()
 
-# 内置指标注册表
-_metric_registry: dict[str, dict[str, Any]] = {
-    "file_check": {
-        "type": "file_check",
-        "description": "Check file existence/content",
-        "params_schema": {"path": {"type": "string"}},
-    },
-    "bash_check": {
-        "type": "bash_check",
-        "description": "Run shell command and check exit code",
-        "params_schema": {"command": {"type": "string"}},
-    },
-    "semantic_check": {
-        "type": "semantic_check",
-        "description": "Semantic evaluation of content",
-        "params_schema": {"criteria": {"type": "string"}},
-    },
-    "human_review": {
-        "type": "human_review",
-        "description": "Human review gate",
-        "params_schema": {"reviewer": {"type": "string"}},
-    },
-}
+def _load_metric_registry() -> dict[str, dict[str, Any]]:
+    """指标类型注册表（name → 注册项），单源 = 汇总 yaml。
+
+    注册项的 params_schema/required 直接取自指标定义 input_schema，与提交期
+    校验（task_submit）消费同一份定义，杜绝双源口径漂移（如 semantic_check
+    曾在此硬编码 {"criteria"} 而定义实为 required=[output]）。读失败 → 空表
+    （调用方按未注册诚实判失败，与 http 读面的 5xx 错误信封分立）。
+    """
+    try:
+        raw_metrics = _load_metrics()
+    except (OSError, yaml.YAMLError):
+        return {}
+    registry: dict[str, dict[str, Any]] = {}
+    for m in raw_metrics:
+        name = str(m.get("name", ""))
+        if not name:
+            continue
+        raw_schema = m.get("input_schema")
+        schema: dict[str, Any] = raw_schema if isinstance(raw_schema, dict) else {}
+        registry[name] = {
+            "type": name,
+            "description": str(m.get("description", "")),
+            "params_schema": schema.get("properties") or {},
+            "required": list(schema.get("required") or []),
+        }
+    return registry
 
 
 @plugin.tool(
@@ -191,8 +194,9 @@ async def evaluation_run(
         metric_type = metric.get("type", "unknown")
         params = metric.get("params", {})
 
-        # Check if metric type is registered
-        if metric_type not in _metric_registry:
+        # Check if metric type is registered（注册表 = 汇总 yaml 单源）
+        registry = _load_metric_registry()
+        if metric_type not in registry:
             results.append({
                 "metric_id": metric_id,
                 "type": metric_type,
@@ -358,8 +362,8 @@ async def http_handle(
 
 # 资源暴露（函数式调用——SDK register_resource 签名要求 handler 必填）
 def _metric_registry_resource() -> dict[str, Any]:
-    """Expose registered metric types as MCP resource."""
-    return {"metrics": _metric_registry}
+    """Expose registered metric types as MCP resource（yaml 单源）。"""
+    return {"metrics": _load_metric_registry()}
 
 
 plugin.register_resource(

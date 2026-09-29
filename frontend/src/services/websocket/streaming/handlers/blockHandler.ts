@@ -11,11 +11,12 @@
  * - 块索引 (index) 是同一消息内块的全局递增序号（text/reasoning/tool-call 共享）。
  * - text/reasoning 块：delta 按块索引缓冲，RAF 批处理追加到对应 part（part 按
  *   块索引精确路由；渲染顺序 = part 追加顺序 = 块打开顺序）。
- * - tool-call 块：增量事件无消费面——工具卡面由契约事件 tool_start/tool_result
- *   创建与更新（call_id/args/result/containerTaskId 完整信封），块协议不建卡
- *   （三源建卡导致同一工具出现两张卡，见 handleToolCallDelta 注释）。
- * - block_end 闭合块：text/reasoning → state=done；tool-call → state=done（带
- *   解析后的 args）。闭合前先 flush 该消息缓冲，保证末尾 delta 不丢。
+ * - tool-call 块：首个携带 id+name 的增量即建 tool_call part（state='calling'，
+ *   输出阶段即 running 可见）；block_end 按累积载荷回填 args。同一工具调用与
+ *   契约事件 tool_start/tool_result/new_message 按 call_id 归并进同一张卡
+ *   （单键 upsert，无双卡——卡从输出阶段贯穿到结果落地）。
+ * - block_end 闭合块：text/reasoning → state=done；tool-call → 回填 args（见上）。
+ *   闭合前先 flush 该消息缓冲，保证末尾 delta 不丢。
  * - finish 结束流：flush 残留缓冲 + 清理块状态（stream_end 仍由内核收尾裁决
  *   补发，权威合并逻辑不变）。
  * - usage 落入 usage store（与 stream_end 携带 usage 的既有路径同构）。
@@ -41,13 +42,12 @@ function partTypeOf(blockType: 'text' | 'reasoning'): 'text' | 'thinking' {
   return blockType === 'text' ? 'text' : 'thinking'
 }
 
-/** 单个 tool-call 块的累积状态（按块索引独立，并行工具互不污染） */
+/** 单个 tool-call 块的累积状态（按块索引独立，并行工具互不污染）。
+ * id/name 跨增量累积（provider 可能分片到达），凑齐即建卡；建卡后归并
+ * 键全走 store 的 callId 查卡，不再依赖块内状态。 */
 interface ToolBlockAccum {
   id?: string
   name?: string
-  argumentsChunks: string[]
-  /** 已创建的 tool_call part 下标（-1 = 尚未创建） */
-  partIndex: number
 }
 
 /** 单条消息的块累积状态 */
@@ -255,7 +255,7 @@ export function handleBlockStart(eventData: any) {
 
   if (blockType === 'tool_call') {
     if (!st.toolBlocks.has(blockIndex)) {
-      st.toolBlocks.set(blockIndex, { id: undefined, name: undefined, argumentsChunks: [], partIndex: -1 })
+      st.toolBlocks.set(blockIndex, { id: undefined, name: undefined })
     }
     return
   }
@@ -297,14 +297,43 @@ export function handleReasoningDelta(eventData: any) {
   bufferTextDelta(eventData, pipelineId, messageId, blockIndex, 'reasoning', text)
 }
 
+/** 输出阶段建工具卡（state='calling'）。建卡前 flush 残留正文缓冲并关闭当前
+ * streaming text part——与 handleToolStart 同一边界纪律：否则 RAF 缓冲里的正文
+ * 会落到卡后新建的 text part，文本被劈到工具卡后面。 */
+function createToolCardPart(
+  pipelineId: string,
+  messageId: string,
+  callId: string,
+  name: string,
+  args?: Record<string, unknown>,
+): void {
+  flushBlockBuffers()
+  const store = pipelineStore.getState()
+  const streamingIdx = store.findStreamingPartIndex(pipelineId, messageId)
+  if (streamingIdx >= 0) {
+    const streamingPart = store
+      .getMessages(pipelineId)
+      .find((m) => m.id === messageId)?.parts?.[streamingIdx]
+    if (streamingPart && streamingPart.type === 'text') {
+      store.updatePart(pipelineId, messageId, streamingIdx, { state: 'done' })
+    }
+  }
+  store.appendPart(pipelineId, messageId, {
+    type: 'tool_call',
+    callId,
+    name,
+    args: args ?? {},
+    state: 'calling',
+  })
+}
+
 /** 处理工具调用增量事件。
  *
- * 不建 tool_call part：工具卡面的唯一创建方是契约事件 tool_start/tool_result
- * （携带 call_id/args/result/containerTaskId 完整信封）。tool_call 增量不得
- * 再建卡——首个 delta 未带 id 时按兜底名 `tool-<index>` 建卡、tool_start 再按
- * call_id 建卡，同一工具会出现两张卡（末端增量还被 new_message 合并当作
- * 「基底缺失」补到气泡底部）。增量消费无落点（工具参数以 tool_start.args
- * 为准），仅 debug 留痕供排查协议形态。
+ * 首个携带 id+name 的增量建卡（OpenAI 兼容流首增量即带 id+name+arguments_delta，
+ * 见 llm_service streaming.py 契约）；后续增量按 call_id 归并（findToolCallPartIndex
+ * 命中即不建第二张卡）。id/name 缺席时不建卡（等 block_end 兜底或契约事件，
+ * 降级同旧形态）。参数不在增量中逐条解析（O(n²) store churn）——args 在
+ * block_end 一次填入，tool_start 的全量 args 为最终权威。
  */
 export function handleToolCallDelta(eventData: any) {
   const p = eventPayload(eventData)
@@ -316,13 +345,21 @@ export function handleToolCallDelta(eventData: any) {
 
   const st = getBlockState(pipelineId, messageId)
   if (st.closedBlocks.has(blockIndex)) return
-  if (!st.toolBlocks.has(blockIndex)) {
-    st.toolBlocks.set(blockIndex, { id: undefined, name: undefined, argumentsChunks: [], partIndex: -1 })
+  const accum = st.toolBlocks.get(blockIndex)
+    ?? { id: undefined, name: undefined }
+  st.toolBlocks.set(blockIndex, accum)
+  if (typeof p.id === 'string' && p.id) accum.id = p.id
+  if (typeof p.name === 'string' && p.name) accum.name = p.name
+
+  if (accum.id && accum.name
+    && pipelineStore.getState().findToolCallPartIndex(pipelineId, messageId, accum.id) < 0) {
+    ensurePlaceholder(eventData, pipelineId, messageId, 'TOOL_CALL_DELTA')
+    createToolCardPart(pipelineId, messageId, accum.id, accum.name)
+    _debugLogger.debug(
+      '[TOOL_CALL_DELTA] 输出阶段建卡: tool=%s callId=%s index=%s',
+      accum.name, accum.id.slice(0, 12), blockIndex,
+    )
   }
-  _debugLogger.debug(
-    '[TOOL_CALL_DELTA] 块协议工具增量无消费面（工具卡由 tool_start/tool_result 建）: index=%s',
-    blockIndex,
-  )
 }
 
 /** 处理块闭合事件：flush 缓冲 → 闭合对应 part（tool-call 解析 args） */
@@ -342,11 +379,35 @@ export function handleBlockEnd(eventData: any) {
   const blockType = String(block.block_type || '')
 
   if (blockType === 'tool_call') {
-    // 该块无消费面（工具卡由 tool_start/tool_result 契约事件建与更新，
-    // 见 handleToolCallDelta 注释）：只 flush 残留正文 delta（tool 块闭合是
-    // part 结构边界点）+ 清除累积态。
+    // 块闭合 = 参数流完：按块累积载荷 upsert 工具卡——delta 已建卡则回填
+    // name/args（arguments 为原始 JSON 串，解析失败保持既有 args，tool_start
+    // 全量 args 为最终权威）；未建卡（id 延发到 block_end）则此刻建。
+    // 先 flush 残留正文 delta（tool 块闭合是 part 结构边界点）。
     flushPendingForMessage(messageId)
     st.toolBlocks.delete(blockIndex)
+    const blockId = typeof block.id === 'string' ? block.id : ''
+    if (!blockId) return
+    const blockName = typeof block.name === 'string' ? block.name : ''
+    const rawArgs = typeof block.arguments === 'string' ? block.arguments : ''
+    let parsedArgs: Record<string, unknown> | undefined
+    if (rawArgs) {
+      try {
+        const v: unknown = JSON.parse(rawArgs)
+        if (v && typeof v === 'object' && !Array.isArray(v)) parsedArgs = v as Record<string, unknown>
+      } catch {
+        // 参数串非法/不完整：不覆盖既有 args
+      }
+    }
+    const partIndex = pipelineStore.getState().findToolCallPartIndex(pipelineId, messageId, blockId)
+    if (partIndex >= 0) {
+      pipelineStore.getState().updatePart(pipelineId, messageId, partIndex, {
+        ...(blockName ? { name: blockName } : {}),
+        ...(parsedArgs ? { args: parsedArgs } : {}),
+      } as any)
+    } else {
+      ensurePlaceholder(eventData, pipelineId, messageId, 'BLOCK_END')
+      createToolCardPart(pipelineId, messageId, blockId, blockName, parsedArgs)
+    }
     return
   }
 

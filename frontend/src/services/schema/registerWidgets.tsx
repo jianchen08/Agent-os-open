@@ -26,6 +26,7 @@ import {
   PipelineManagerPanel,
   SettingsHubPanel,
 } from '@/components/schema/widgets/PanelHostWidget'
+import { PluginHostsWidget } from '@/components/schema/widgets/PluginHostsWidget'
 import { ReviewDocumentWidget } from '@/components/schema/widgets/ReviewDocumentWidget'
 import { SortableListWidget } from '@/components/schema/widgets/SortableListWidget'
 import { StatusCardWidget } from '@/components/schema/widgets/StatusCardWidget'
@@ -46,6 +47,7 @@ import { DebugTasksPage } from '@/pages/debug/DebugTasksPage'
 import { DebugUsersPage } from '@/pages/debug/DebugUsersPage'
 import { MemoryPage } from '@/pages/memory/MemoryPage'
 import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
+import { contributionRegistry } from './ContributionRegistry'
 import { widgetRegistry } from './WidgetRegistry'
 import type { WidgetComponent } from './WidgetRegistry'
 import type { Annotation } from '@/types/review'
@@ -185,6 +187,10 @@ const WIDGETS: WidgetEntry[] = [
   // 引导清单页（onboarding_service 声明页承载，memory_panel 同判据：
   // 巡礼/向导/宿主页签导航超出 webview 沙箱能力，内容面插件化）
   { name: 'onboarding_panel', component: OnboardingPanel, spaces: ['workspace'] },
+  // 插件进程观测视图（前端预置声明进监控页现有「插件」组——数据面是
+  // 内核 /api/v1/plugins/hosts 直连端点而非 monitoring 插件 datasource，
+  // 声明由前端组合根自持，注册通道见 registerPresetWidgets）
+  { name: 'plugin_hosts', component: PluginHostsWidget, spaces: ['workspace'] },
   // 统一导航页（新标签页按钮与空标签态同一内容源：workspace 卡片主体验 +
   // 顶部搜索 + 非 workspace 空间「更多」折叠区，长尾页面全量收录）
   { name: 'workspace_nav_page', component: WorkspaceNavPage, spaces: ['workspace'] },
@@ -208,4 +214,19 @@ export function initializeWidgets(): void {
       fallbackWidget: fallback,
     })
   }
+
+  // 前端预置 widget 声明（后端 ui_schema 之外的声明面，与插件声明同源消费）：
+  // 监控页现有「插件」组（用户裁定：宿主盒子就是插件，不开独立组、界面不用
+  // 内核术语）。order 55 位于「任务」组（50）之后；组内唯一渲染——同组既有
+  // 「插件运行」表已按用户裁定下架（同源数据不并存，声明摘除见
+  // ContributionRegistry.RETIRED_WIDGET_IDS，列数据迁入卡片）
+  contributionRegistry.registerPresetWidgets([
+    {
+      id: 'plugin_hosts',
+      type: 'plugin_hosts',
+      space: 'monitoring',
+      group: '插件',
+      order: 55,
+    },
+  ])
 }

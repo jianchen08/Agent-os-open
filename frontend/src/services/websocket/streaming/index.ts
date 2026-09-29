@@ -13,6 +13,7 @@ import {
   handleStreamError,
   handleStreamStart,
   handlePipelineRoundFinished,
+  handleRunFailed,
   handleTextDelta,
   handleToolCallDelta,
   handleToolProgress,
@@ -80,6 +81,13 @@ export function initStreamingEvents(): void {
   )
   _handlers[WS_SERVER_EVENTS.STREAM_ERROR] = _logWrap(WS_SERVER_EVENTS.STREAM_ERROR, handleStreamError)
   _handlers[WS_SERVER_EVENTS.PLUGIN_ERROR] = _logWrap(WS_SERVER_EVENTS.PLUGIN_ERROR, handlePluginError)
+  // run 级失败终态镜像（ADR 2026-09-28-run-failure-frontend-notification）：
+  // 绕过相关性门控直订——后台/未注册管道的失败正是要通知的场景，门控会丢弃
+  // 未关注管道的事件；通知自携带路由坐标，注册表更新对未知管道 no-op。
+  _handlers[WS_SERVER_EVENTS.RUN_FAILED] = (data) => {
+    _logEvent(WS_SERVER_EVENTS.RUN_FAILED, data)
+    handleRunFailed(data)
+  }
   _handlers[WS_SERVER_EVENTS.NEW_MESSAGE] = _logWrap(WS_SERVER_EVENTS.NEW_MESSAGE, handleNewMessage)
   _handlers[WS_SERVER_EVENTS.TOOL_START] = _logWrap(WS_SERVER_EVENTS.TOOL_START, handleToolStart)
   _handlers[WS_SERVER_EVENTS.TOOL_RESULT] = _logWrap(WS_SERVER_EVENTS.TOOL_RESULT, handleToolResult)

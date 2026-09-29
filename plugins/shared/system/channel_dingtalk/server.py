@@ -129,9 +129,9 @@ async def dingtalk_send_message(
         DingTalk API response dictionary
     """
     if _adapter is None or _adapter.stream_client is None:
-        return {"error": "DingTalk adapter not initialized"}
+        return {"success": False, "error": "DingTalk adapter not initialized"}
     if _adapter.stream_client._session is None:
-        return {"error": "DingTalk stream client not connected"}
+        return {"success": False, "error": "DingTalk stream client not connected"}
     result = await _adapter.stream_client.send_message(user_id, content, msg_type)
     return result
 

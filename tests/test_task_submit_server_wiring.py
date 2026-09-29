@@ -291,13 +291,17 @@ def test_task_submit_success_returns_output_payload(wiring, monkeypatch):
 
 
 def test_task_submit_failure_passes_error_without_code(wiring, monkeypatch):
-    """失败无 error_code → 载荷只有 error 键。"""
+    """失败无 error_code → 信封仅 success=False + error 文案，无多余键。
+
+    失败载荷必须显式 success=False：内核 invoker 成败只认显式 success 键，
+    裸 {"error": …} 会被判成功信封（契约见 ADR 2026-09-28）。
+    """
     server_mod, _ = wiring
     _patch_tool_class(server_mod, monkeypatch, _failed("目标不存在"))
 
     out = asyncio.run(server_mod.task_submit(goal_title="g"))
 
-    assert out == {"error": "目标不存在"}
+    assert out == {"success": False, "error": "目标不存在"}
 
 
 def test_task_submit_failure_hoists_error_code_and_metadata(wiring, monkeypatch):
@@ -310,6 +314,7 @@ def test_task_submit_failure_hoists_error_code_and_metadata(wiring, monkeypatch)
 
     out = asyncio.run(server_mod.task_submit(goal_title="g"))
 
+    assert out["success"] is False
     assert out["error"] == "编排键不存在"
     assert out["error_code"] == "ORCHESTRATION_NOT_FOUND"
     assert out["missing_fields"] == ["target_id"]

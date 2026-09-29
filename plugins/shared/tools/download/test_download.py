@@ -767,6 +767,7 @@ class TestCohostShadowing:
 
             result = _run(server.download(**bad_params))
             assert isinstance(result, dict)
+            assert result["success"] is False, "失败路径应显式 success=False"
             assert "error" in result, "失败路径应返回 error 字段"
             assert expect_marker in result["error"]
         finally:

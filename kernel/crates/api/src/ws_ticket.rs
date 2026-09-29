@@ -81,6 +81,17 @@ impl WsTicketStore {
             .remove(ticket)
             .map(|(user_id, username, _)| (user_id, username))
     }
+
+    /// 当前持票条目数（堆栈级诊断面 memory-breakdown 消费；签发时顺带
+    /// 清理过期，读数 = 在飞未消费票据）。
+    pub fn len(&self) -> usize {
+        self.tickets.lock().len()
+    }
+
+    /// 是否无持票。
+    pub fn is_empty(&self) -> bool {
+        self.tickets.lock().is_empty()
+    }
 }
 
 impl Default for WsTicketStore {

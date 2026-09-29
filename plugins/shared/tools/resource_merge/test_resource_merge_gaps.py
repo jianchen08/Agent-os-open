@@ -631,7 +631,7 @@ class TestServerHandlerSuccess:
                 sys.modules["tool"] = saved_tool
 
     def test_handler_returns_error_on_failure(self, repo: Path, tmp_path: Path) -> None:
-        """对照组：失败路径返回 {"error": ...}（非 output）。"""
+        """对照组：失败路径返回 {"success": False, "error": ...}（非 output）。"""
         mod_name = "resource_merge_server_gaps2"
         sys.modules.pop(mod_name, None)
         spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_DIR / "server.py")
@@ -639,6 +639,7 @@ class TestServerHandlerSuccess:
         server = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(server)
         result = _run(server.resource_merge(action="git_diff", workspace=str(tmp_path / "nope")))
+        assert result["success"] is False
         assert "error" in result
 
 

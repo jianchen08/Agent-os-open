@@ -45,8 +45,6 @@ BASE_TEST_PATHS: list[str] = [
     # 模式插件出厂种子契约测试（2026-09-15 四模式种子接线：缺此条目则
     # plugins/shared/modes/ 下 server.py 不进插桩车道、覆盖率失真）。
     "plugins/shared/modes/",
-    # eval_harness 纯函数面（题集展开/聚合/提案校验，2026-09-15 模式服务化接线）。
-    "plugins/shared/system/eval_harness/",
     # context_build 双根自举/sidecar 复用测试（2026-09-18 登记：目录内 7 用例
     # 此前不在基集，plugin.py sys.path 守卫缺行失真——覆盖率批十修正）。
     "plugins/shared/pipeline/input/context_build/",
@@ -260,6 +258,9 @@ BASE_TEST_PATHS: list[str] = [
     "tests/test_metrics_admin_server_gaps.py",  # metrics_admin/server.py
     "tests/test_task_form_server_gaps.py",      # task_form/server.py
     "tests/test_tool_cache_gaps.py",            # pipeline/input/tool_cache
+    # 工具结果配对消息仓扫守卫（ADR 2026-09-28 固定函数路径：SDK 外零自建
+    # role=tool 配对消息，允许清单自清洁）。
+    "tests/test_tool_result_protocol_sweep.py",
     # 2026-09-16 覆盖率收官批：artifacts 缺口测试接线（版本链断点截断等，
     # 此前文件不在车道 → artifact_service.py 覆盖率失真）。
     "tests/test_artifacts_gaps.py",

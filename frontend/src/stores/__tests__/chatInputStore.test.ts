@@ -2,8 +2,9 @@
 /**
  * chatInputStore 测试
  *
- * chatInputStore：pendingInsert 桥接（request/consume）、草稿 CRUD + 持久化、
- * 激活任务模式的会话级记忆（taskModes）。
+ * chatInputStore：pendingInsert 桥接（request/consume）、草稿 CRUD + 持久化。
+ * （激活任务模式的会话级记忆已随批 G④ 出生语义退役——选择器选择 = 经
+ * modeSessionBinder 开新会话，无内存态档位。）
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type * as chatInputStoreMod from '@/stores/chatInputStore'
@@ -54,25 +55,5 @@ describe('chatInputStore - 输入框桥接与草稿', () => {
     const parsed = JSON.parse(raw)
     expect(parsed.state.drafts['persist-key']).toBe('持久化内容')
     expect(parsed.state.pendingInsert).toBeUndefined()
-  })
-
-  it('setTaskMode 按 key 记忆激活模式；null 清除且不占位（缺键 = 自动）', () => {
-    expect(store.getState().taskModes['tab-1']).toBeUndefined()
-    store.getState().setTaskMode('tab-1', 'writing')
-    store.getState().setTaskMode('tab-2', 'coding')
-    expect(store.getState().taskModes).toEqual({ 'tab-1': 'writing', 'tab-2': 'coding' })
-    store.getState().setTaskMode('tab-1', null)
-    expect(store.getState().taskModes).toEqual({ 'tab-2': 'coding' })
-    // 同 key 覆盖切换
-    store.getState().setTaskMode('tab-2', 'research')
-    expect(store.getState().taskModes['tab-2']).toBe('research')
-  })
-
-  it('taskModes 为内存态，不随 persist 落盘（partialize 仅草稿）', () => {
-    store.getState().setTaskMode('k', 'writing')
-    store.getState().saveDraft('d', '正文')
-    const parsed = JSON.parse(localStorage.getItem('chat-input-drafts') || '{}')
-    expect(parsed.state.drafts['d']).toBe('正文')
-    expect(parsed.state.taskModes).toBeUndefined()
   })
 })

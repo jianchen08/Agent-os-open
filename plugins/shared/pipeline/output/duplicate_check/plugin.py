@@ -240,6 +240,17 @@ class DuplicateCheckPlugin(IOutputPlugin):
                 if streaks.pop(tool, None) is not None:
                     changed = True
                 continue
+            # 不可恢复才计连败（用户裁定 2026-09-28）：连败熔断针对"工具坏
+            # 了"（未注册/无法执行/网络不通），不针对"执行成功但结果未命中"。
+            # error_code 形如 HTTP_404（数字状态码）= 请求已送达并拿到响应
+            # ——工具执行正常，目标资源不存在/不可达是 LLM 可自愈的业务反馈
+            # （换 URL/换信源），计入连败会把探索性 404 误判成工具故障（事故
+            # 2026-09-28：web_operate 连探 5 条 GitHub 死链被禁用断网，模型被
+            # 逼去撞读黑名单）。TIMEOUT/HTTP_ERROR（网络层执行不了）与无
+            # error_code 的裸失败（执行异常）照旧计入。
+            error_code = str(res.get("error_code") or "")
+            if error_code.startswith("HTTP_") and error_code[5:].isdigit():
+                continue
             # success=False / 缺失均按失败计；结构化业务失败（success=True 但
             # data.valid=false 等）不算——那是 LLM 可自愈的正常反馈
             streaks[tool] = streaks.get(tool, 0) + 1
@@ -269,10 +280,7 @@ class DuplicateCheckPlugin(IOutputPlugin):
                 stop_reason="tool_fail_loop",
             )
 
-        newly_banned = [
-            t for t, c in streaks.items()
-            if c >= self._fail_break_threshold and t not in banned
-        ]
+        newly_banned = [t for t, c in streaks.items() if c >= self._fail_break_threshold and t not in banned]
         if newly_banned:
             updates["router.tool_fail_banned"] = banned + newly_banned
             tool_ids = ctx.state.get("tool_ids")

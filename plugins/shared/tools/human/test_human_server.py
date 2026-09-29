@@ -420,10 +420,10 @@ async def test_human_interaction_mode_alias_and_invalid(server: Any, spy: _SpySe
     assert spy.calls[0][1]["title"] == "审批"
 
     assert await server.human_interaction(mode="blocking", title="T") == {
-        "error": "参数 mode 必填，取值 choice/conversation/notification"
+        "success": False, "error": "参数 mode 必填，取值 choice/conversation/notification"
     }
     assert await server.human_interaction(title="T") == {
-        "error": "参数 mode 必填，取值 choice/conversation/notification"
+        "success": False, "error": "参数 mode 必填，取值 choice/conversation/notification"
     }
 
 
@@ -431,12 +431,16 @@ async def test_human_interaction_exception_mapping(server: Any, spy: _SpyService
     """异常映射：超时/取消/拒绝/未知异常 → 结构化错误返回。"""
     spy.wait_error = server.InteractionTimeoutError("rid", 30)
     assert await server.human_interaction(mode="choice", title="T", pipeline_id="p1") == {
-        "error": "人类交互超时（30秒）", "error_code": "INTERACTION_TIMEOUT",
+        "success": False,
+        "error": "人类交互超时（30秒）",
+        "error_code": "INTERACTION_TIMEOUT",
     }
 
     spy.wait_error = server.InteractionCancelledError("rid", "用户取消")
     assert await server.human_interaction(mode="choice", title="T", pipeline_id="p1") == {
-        "error": "交互已取消: 用户取消", "error_code": "INTERACTION_CANCELLED",
+        "success": False,
+        "error": "交互已取消: 用户取消",
+        "error_code": "INTERACTION_CANCELLED",
     }
 
     spy.wait_error = server.InteractionDeniedError("rid", "理由不充分")
@@ -470,7 +474,10 @@ async def test_human_interaction_service_never_initialized(server: Any, monkeypa
     """冷启动自愈：10s 内 on_load 未完成 → 明确 error（不误判工具不可用）。"""
     monkeypatch.setattr(server, "asyncio", _StubASyncIO())
     result = await server.human_interaction(mode="choice", title="T")
-    assert result == {"error": "service not initialized (on_load not finished in 10s)"}
+    assert result == {
+        "success": False,
+        "error": "service not initialized (on_load not finished in 10s)",
+    }
 
 
 async def test_human_interaction_waits_for_service_initialization(

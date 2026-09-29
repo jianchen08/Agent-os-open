@@ -39,6 +39,18 @@ except (FileNotFoundError, OSError, yaml.YAMLError):
     _SECURITY_RULES = []
 
 
+def _decision_view(result: Any) -> dict[str, Any]:
+    """旧 security.decision 观测面的等价视图（键已随 ADR 2026-09-28 退役）。
+
+    放行/批准 = allowed True（reason "all checks passed"）；拦截 = 预定拒绝
+    条目在场（reason "soft_block: <error>"，语义同旧 soft_block 记录行）。
+    """
+    entries = result.state_updates.get("pre_decided_results") or []
+    if entries:
+        return {"allowed": True, "reason": f"soft_block: {entries[0]['error']}"}
+    return {"allowed": True, "reason": "all checks passed"}
+
+
 def _make_plugin() -> SecurityCheckPlugin:
     """构造带真实安全规则的 SecurityCheckPlugin（规则直接注入，不依赖 config_center）。"""
     return SecurityCheckPlugin(config={"rules": _SECURITY_RULES})

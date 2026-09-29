@@ -8,6 +8,7 @@
 - StorageError：StorageError类
 """
 
+# config-write-surface-exempt: 多模态上传存储=用户数据面,非配置
 import json
 import os
 import re

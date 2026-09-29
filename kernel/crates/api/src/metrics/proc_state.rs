@@ -26,10 +26,11 @@ impl ProcStateSnapshot {
     }
 }
 
-/// 采集一个进程的 RSS（RSS 字节数）。
+/// 采集一个进程的内存占用（字节数）。
 ///
-/// - Linux：读 /proc/<pid>/status 的 VmRSS（kB）。
-/// - Windows：调 tasklist /fi "PID eq <pid>" /fo csv /nh，解析 MEM 字段（如 "12,345 K"）。
+/// - Linux：/proc/<pid>/status 的 VmRSS（RSS 口径，系统监视器/htop 同款）。
+/// - Windows：专用工作集（private working set，任务管理器「内存（活动的
+///   专用工作集）」同源同口径）。
 /// - 其他/失败：None。
 ///
 /// 本函数纯同步、可移植；失败返回 None（不 panic）。
@@ -63,42 +64,71 @@ fn collect_memory_rss_linux(pid: u32) -> Option<u64> {
     None
 }
 
-/// 解析 tasklist /fo csv 单行输出，取末列 MEM 字段的 KB 数 × 1024 得字节 RSS。
+/// 解析 SystemProcessInformation 全表缓冲，取目标 pid 的专用工作集字节数。
 ///
-/// MEM 字段是最后一个引号字段且数字含千分位逗号（如 `"python.exe","1234",
-/// "Console","1","111,768 K"`），必须按 `","` 字段边界取整列；裸 split(',')
-/// 会把字段截成末三位（111,768 K → "768 K"）。畸形行返回 None。
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn parse_tasklist_mem_line(line: &str) -> Option<u64> {
-    let line = line.trim();
-    if !line.starts_with('"') || !line.ends_with('"') {
-        return None;
+/// x64 头部布局自 Vista 稳定：`+0 NextEntryOffset(u32)` /
+/// `+8 WorkingSetPrivateSize(i64)` / `+80 UniqueProcessId(usize)`，
+/// 中间字段无需解读。负值（非法态）视为不可信返回 None；畸形缓冲（短表/
+/// 偏移越界）一律 None 不 panic。
+#[cfg(target_os = "windows")]
+fn extract_private_working_set(buf: &[u8], pid: u32) -> Option<u64> {
+    fn read_le_u64(b: &[u8]) -> Option<u64> {
+        Some(u64::from_le_bytes(b.get(..8)?.try_into().ok()?))
     }
-    let mem_field = line
-        .strip_suffix('"')?
-        .rsplit("\",\"")
-        .next()?
-        .trim_matches('"')
-        .trim();
-    let cleaned: String = mem_field.chars().filter(|c| c.is_ascii_digit()).collect();
-    let kb: u64 = cleaned.parse().ok()?;
-    Some(kb * 1024)
+    let mut off = 0usize;
+    loop {
+        let cur = buf.get(off..)?;
+        if cur.len() < 88 {
+            return None;
+        }
+        let next = u32::from_le_bytes(cur[0..4].try_into().ok()?) as usize;
+        let entry_pid = read_le_u64(&cur[80..88])? as u32;
+        if entry_pid == pid {
+            let private_ws = read_le_u64(&cur[8..16])? as i64;
+            return u64::try_from(private_ws).ok();
+        }
+        if next == 0 {
+            return None;
+        }
+        off += next;
+    }
 }
 
+/// Windows 内存采集：专用工作集（private working set）——任务管理器「进程」页
+/// 「内存（活动的专用工作集）」列同 API 同字段（NtQuerySystemInformation
+/// SystemProcessInformation 的 WorkingSetPrivateSize），监控值与任务管理器
+/// 同 pid 直接对得上；替代旧 tasklist 子进程方案（其 MEM 口径=工作集全集，
+/// 含共享映像，恒大于任务管理器默认列，且每宿主每轮 spawn 一个子进程）。
+///
+/// 进程表动态变化，缓冲不足（STATUS_INFO_LENGTH_MISMATCH）翻倍重试，上限
+/// 64MB 防失控；失败返回 None（不 panic）。
 #[cfg(target_os = "windows")]
 fn collect_memory_rss_windows(pid: u32) -> Option<u64> {
-    use std::process::Command;
-    // tasklist /fi "PID eq <pid>" /fo csv /nh
-    let output = Command::new("tasklist")
-        .args(["/fi", &format!("PID eq {pid}"), "/fo", "csv", "/nh"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    use windows_sys::Wdk::System::SystemInformation::{
+        NtQuerySystemInformation, SystemProcessInformation,
+    };
+    const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004u32 as i32;
+    let mut size: usize = 1 << 20;
+    loop {
+        let mut buf = vec![0u8; size];
+        let mut ret_len: u32 = 0;
+        let status = unsafe {
+            NtQuerySystemInformation(
+                SystemProcessInformation,
+                buf.as_mut_ptr().cast(),
+                size as u32,
+                &mut ret_len,
+            )
+        };
+        if status == 0 {
+            return extract_private_working_set(&buf, pid);
+        }
+        if status == STATUS_INFO_LENGTH_MISMATCH && size < (1 << 26) {
+            size *= 2;
+            continue;
+        }
         return None;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout.lines().next()?;
-    parse_tasklist_mem_line(line)
 }
 
 // ── 跳板下探（uv venv trampoline）────────────────────────────────────────
@@ -303,25 +333,48 @@ fn write_host_snapshots(agg: &MetricsAggregator, hosts: &[agentos_invoker::HostP
     }
 }
 
+/// 宿主盒子快照的 RSS 富化（只读端点 `GET /api/v1/plugins/hosts` 的 api 侧半刀）。
+///
+/// RSS 采集面归 api crate（invoker 不持），盒子按 pid 就地补 `rss_mb`：进程
+/// 索引一轮一建（与 [`write_host_snapshots`] 同款下探——uv venv trampoline 场景
+/// 跳板空壳 ≠ 真实解释器，pid/memory 两列同步取真实进程），下探失败回落宿主
+/// pid 原样；无 pid（HTTP transport / 未连接）恒 None。
+pub fn enrich_host_boxes_rss(hosts: &mut [agentos_core::traits::HostBox]) {
+    let proc_index = build_process_index();
+    for host in hosts.iter_mut() {
+        let Some(pid) = host.pid else {
+            continue;
+        };
+        let observed = proc_index
+            .as_ref()
+            .map_or(pid, |idx| resolve_worker_pid(pid, idx));
+        host.rss_mb = collect_memory_rss(observed).map(|b| b as f64 / (1024.0 * 1024.0));
+    }
+}
+
 /// 进程态周期轮询任务（监控设计 §三 通道3 的拉起半刀——M3 此前只挂了崩溃回调）。
 ///
 /// 每 `interval` 遍历 invoker 全部活宿主（含 light 合宿分组），对每成员插件
 /// 写 process.alive/pid/memory_rss_bytes/uptime_seconds；last_crash_ts 由崩溃
-/// 回调单独写，本任务不覆盖（快照恒 None）。采集失败（tasklist 无进程等）
+/// 回调单独写，本任务不覆盖（快照恒 None）。采集失败（进程表查无该 pid 等）
 /// 返回 None 跳过该字段，不 panic。
 pub fn spawn_proc_state_poller(
     invoker: Arc<agentos_invoker::PluginInvokerImpl>,
     agg: MetricsAggregator,
     interval: std::time::Duration,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    let activity = agentos_core::task_activity::global_registry().register("host-proc-sampler");
+    tokio::spawn(agentos_core::task_activity::scope(activity, async move {
         let mut tick = tokio::time::interval(interval);
         tick.tick().await; // 跳过首次立即触发（与 M2 flush 任务同款）
+        agentos_core::task_activity::set_current_label("idle: next tick");
         loop {
             tick.tick().await;
+            agentos_core::task_activity::set_current_label("sampling host proc snapshots");
             write_host_snapshots(&agg, &invoker.host_proc_snapshots().await);
+            agentos_core::task_activity::set_current_label("idle: next tick");
         }
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -424,47 +477,49 @@ mod tests {
     }
 
     #[test]
-    fn parse_tasklist_mem_returns_actual_full_value() {
-        // 真实 tasklist /fo csv /nh 输出形状（MEM 含千分位逗号），断言解析值
-        // 等于实际字节数——而非被逗号截断的末三位（旧 bug：恒 < 1 MB）
-        let cases = [
-            (
-                r#""python.exe","21120","Console","1","111,768 K""#,
-                111_768 * 1024,
-            ),
-            (
-                r#""python.exe","43236","Console","1","67,456 K""#,
-                67_456 * 1024,
-            ),
-            (r#""python.exe","123","Console","1","984 K""#, 984 * 1024),
-            (
-                r#""python.exe","1","Services","0","1,234,567 K""#,
-                1_234_567 * 1024,
-            ),
-        ];
-        for (line, expected) in cases {
-            assert_eq!(parse_tasklist_mem_line(line), Some(expected), "{line}");
-        }
+    #[cfg(target_os = "windows")]
+    fn extract_private_working_set_hits_target_entry() {
+        // 多节点链表：目标 pid 在第二节的命中路径——遍历必须跨过首节点；
+        // 两节点各命中一次（非单点输入拟合）
+        let mut buf = Vec::new();
+        push_snap_entry(&mut buf, 88, 111, 10_000_000);
+        push_snap_entry(&mut buf, 0, 222, 55_500_000);
+        assert_eq!(extract_private_working_set(&buf, 222), Some(55_500_000));
+        assert_eq!(extract_private_working_set(&buf, 111), Some(10_000_000));
+        // 未命中（链尾无此 pid）→ None
+        assert_eq!(extract_private_working_set(&buf, 999), None);
     }
 
     #[test]
-    fn parse_tasklist_mem_properties_and_malformed() {
-        // 性质：KB→bytes 恒为 1024 倍；含千分位逗号的真实进程（≥1 MB）解析值
-        // 必须 ≥ 1 MB——旧 split(',') bug 下该性质恒假
-        let real = parse_tasklist_mem_line(r#""a","21120","Console","1","111,768 K""#).unwrap();
-        assert_eq!(real % 1024, 0);
-        assert!(real >= 1024 * 1024, "含千分位的进程 RSS 不可能 < 1 MB");
-        // 性质：解析值随真实 KB 单调
-        let small = parse_tasklist_mem_line(r#""a","1","Console","1","999 K""#).unwrap();
-        assert!(real > small);
-        // 畸形行：空行 / 无引号 / 末字段非 MEM
-        assert_eq!(parse_tasklist_mem_line(""), None);
-        assert_eq!(parse_tasklist_mem_line("no quotes here"), None);
-        assert_eq!(parse_tasklist_mem_line(r#""a","1","Console""#), None);
-        assert_eq!(
-            parse_tasklist_mem_line(r#""a","1","Console","1"," K""#),
-            None
-        );
+    #[cfg(target_os = "windows")]
+    fn extract_private_working_set_malformed_buffers_return_none() {
+        // 畸形缓冲族：空表 / 头部不足 88 字节 / next 偏移越界——一律 None 不 panic
+        assert_eq!(extract_private_working_set(&[], 1), None);
+        assert_eq!(extract_private_working_set(&[0u8; 16], 1), None);
+        let mut buf = Vec::new();
+        push_snap_entry(&mut buf, 4096, 1, 1024);
+        // 表内 pid 命中正常返回（越界路径只对表外 pid 走到）
+        assert_eq!(extract_private_working_set(&buf, 1), Some(1024));
+        // next 偏移(4096)越出缓冲 → 遍历中断返回 None，不 panic
+        assert_eq!(extract_private_working_set(&buf, 999), None);
+        // 负值（该字段非法态）视为不可信 → None，而非回绕成巨值
+        let mut neg = Vec::new();
+        push_snap_entry(&mut neg, 0, 7, -5);
+        assert_eq!(extract_private_working_set(&neg, 7), None);
+    }
+
+    /// 造一节 SystemProcessInformation 链表条目（只填解析所需偏移：
+    /// +0 NextEntryOffset / +8 WorkingSetPrivateSize / +80 UniqueProcessId，
+    /// x64 布局；中间字段补零）。
+    #[cfg(target_os = "windows")]
+    fn push_snap_entry(buf: &mut Vec<u8>, next_off: u32, pid: usize, private_ws: i64) {
+        let start = buf.len();
+        buf.extend_from_slice(&next_off.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&private_ws.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 64]);
+        buf.extend_from_slice(&(pid as u64).to_le_bytes());
+        debug_assert_eq!(buf.len() - start, 88);
     }
 
     /// 无插件空加载器（poller 只需一个可构造的 invoker，不触达 loader）。
@@ -551,6 +606,46 @@ mod tests {
         assert!(agg
             .query(None, Some("process.last_crash_ts"), None, &Labels::new())
             .is_empty());
+    }
+
+    /// 宿主盒子 RSS 富化：活 pid 采到则必为正（自身进程恒活）；不存在的 pid
+    /// 与无 pid（HTTP transport）恒 None——三组有区分度输入共用同一采集面。
+    #[test]
+    fn enrich_host_boxes_rss_fills_living_pid_and_skips_pidless() {
+        use agentos_core::traits::{HostBox, HostBoxKind};
+        let make_box = |host_key: &str, kind: HostBoxKind, pid: Option<u32>| HostBox {
+            host_key: host_key.to_string(),
+            kind,
+            pid,
+            alive: true,
+            rss_mb: None,
+            uptime_secs: None,
+            spawned_members: vec![],
+            members: vec![],
+            slot_used: 1,
+            slot_cap: 1,
+            in_flight: 0,
+            member_in_flight: Default::default(),
+            last_call_at: None,
+            starting: false,
+            starting_members: vec![],
+        };
+        let mut hosts = vec![
+            make_box("plugin:self", HostBoxKind::Solo, Some(std::process::id())),
+            make_box("plugin:ghost", HostBoxKind::Solo, Some(u32::MAX - 1)),
+            make_box("group:http:1", HostBoxKind::Group, None),
+        ];
+        super::enrich_host_boxes_rss(&mut hosts);
+        // 自身进程必活：RSS 采到则必为正
+        assert!(
+            hosts[0].rss_mb.is_none_or(|v| v > 0.0),
+            "活进程 RSS 采到必须 > 0，got {:?}",
+            hosts[0].rss_mb
+        );
+        // 不可能存在的进程 → 采集失败 → None
+        assert_eq!(hosts[1].rss_mb, None);
+        // 无 pid（HTTP transport）恒 None
+        assert_eq!(hosts[2].rss_mb, None);
     }
 
     // ── 跳板下探 ──

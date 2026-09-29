@@ -62,7 +62,10 @@ pub fn spawn_lifecycle_metrics_subscriber(
 ) -> JoinHandle<()> {
     let handles = LifecycleMetricsHandles::register(&counters);
     let mut rx = bus.subscribe();
-    tokio::spawn(async move {
+    let activity =
+        agentos_core::task_activity::global_registry().register("metrics-lifecycle-subscriber");
+    tokio::spawn(agentos_core::task_activity::scope(activity, async move {
+        agentos_core::task_activity::set_current_label("waiting lifecycle events");
         info!("lifecycle metrics subscriber started");
         loop {
             match rx.recv().await {
@@ -89,7 +92,7 @@ pub fn spawn_lifecycle_metrics_subscriber(
                 }
             }
         }
-    })
+    }))
 }
 
 #[cfg(test)]

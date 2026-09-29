@@ -4,7 +4,7 @@
     "packaging"
   ],
   "name": "Workspace Service",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",

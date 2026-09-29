@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import sys
 from functools import lru_cache
+from typing import Any
 
 from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
@@ -24,16 +25,40 @@ from plugin import PromptBuildPlugin, set_memory_backend  # noqa: E402
 from wiring import build_memory_backend  # noqa: E402  （共享裸名模块，共享根经 bootstrap 入 path）
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
+from agentos_plugin_sdk.capability import bind_capability_caller  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("prompt_build_pipeline")
+
+
+def _tool_executor_caller() -> Any:
+    """tool-executor 能力句柄的 async caller（跨插件服务调用的既有通道）。
+
+    惰性解析：句柄由内核 initialize 附送，未附送（KeyError）延迟到调用点，
+    由消费方的降级路径统一处理。
+    """
+    te = plugin.get_capability("tool-executor")
+    return bind_capability_caller(te, "tool-executor")
+
+
+async def fetch_mode_catalog() -> Any:
+    """经内核服务调用取 agent_manager 的 mode.list（registry 单源，设计 D5）。
+
+    返回原始信封，解析/校验归插件侧消费边界（plugin._unwrap_mode_catalog），
+    失败由其降级路径统一处理（{{mode_catalog}} → 空串 + warning）。
+    """
+    invoke = _tool_executor_caller()
+    return await invoke(
+        "tool-executor.invoke",
+        {"tool_name": "mode.list", "plugin_id": "agent_manager", "args": {}},
+    )
 
 
 @lru_cache(maxsize=1)
 def get_instance() -> PromptBuildPlugin:
     """懒构建并缓存插件单例（线程安全；替代模块级可变 `_instance` 全局）。"""
     config = plugin.get_config()
-    return PromptBuildPlugin(config=config)
+    return PromptBuildPlugin(config=config, catalog_fetcher=fetch_mode_catalog)
 
 
 @plugin.on_load

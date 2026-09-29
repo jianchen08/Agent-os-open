@@ -6,8 +6,9 @@
    probe_error（subprocess 异常，携带异常摘要）——mock 的是 shutil/subprocess
    外部边界，不是插件内部方法。
 2. probe_error → 容器要求型工具 fail-closed 拒绝，拒绝原因携带探测异常原文
-   （tool_core check_tool_blocked 按 execution_contexts[].blocked 拦截并把
-   reason 回传 LLM）；error 级日志留痕。
+   （isolation_guard 按 execution_contexts[].blocked 直出预定拒绝结果
+   [ADR 2026-09-28 结果预填]，tool_core 命中即跳过执行并把 reason 回传
+   LLM）；error 级日志留痕。
 3. absent → 维持既有不可用处置（容器要求型拒绝），host 执行上下文显式标记
    isolation_mode=host（降级不再无痕）+ warn 日志。
 4. probe_error 后 daemon 恢复 → 冷却复检解除（恢复链路不受三态化影响）。

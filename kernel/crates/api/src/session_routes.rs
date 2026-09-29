@@ -1638,6 +1638,7 @@ mod delete_session_tests {
             activation: None,
             persistent_fields: vec![],
             export_fields: vec![],
+            aux_venvs: Vec::new(),
             provides: None,
         }
     }

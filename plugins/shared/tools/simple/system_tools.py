@@ -164,16 +164,17 @@ async def read_execution_detail(
             复盘兼容。
     """
     if _capability_caller is None:
-        return {"error": "capability 未注入，无法查询内核执行记录"}
+        return {"success": False, "error": "capability 未注入，无法查询内核执行记录"}
 
     if not pipeline_run_id:
-        return {"error": "pipeline_run_id 不能为空"}
+        return {"success": False, "error": "pipeline_run_id 不能为空"}
     if not level:
-        return {"error": "level 不能为空"}
+        return {"success": False, "error": "level 不能为空"}
 
     # 查询边界执法：登记集合非空即生效，越界拒绝且不发内核查询。
     if allowed_pipelines and pipeline_run_id not in allowed_pipelines:
         return {
+            "success": False,
             "error": f"pipeline {pipeline_run_id} 不在本复盘登记的被复盘集合内（查询越界）",
             "error_code": "PIPELINE_OUT_OF_SCOPE",
         }
@@ -195,7 +196,10 @@ async def read_execution_detail(
         turns = _group_turns(cast(list[dict[str, Any]], messages))
         if iteration is not None:
             if iteration < 1 or iteration > len(turns):
-                return {"error": f"未找到 iteration={iteration} 的对话轮次（共 {len(turns)} 轮）"}
+                return {
+                    "success": False,
+                    "error": f"未找到 iteration={iteration} 的对话轮次（共 {len(turns)} 轮）",
+                }
             turns = [turns[iteration - 1]]
         return _render_l1(pipeline_run_id, turns)
 
@@ -209,7 +213,7 @@ async def read_execution_detail(
             return records
         return _render_l0(pipeline_run_id, cast(list[dict[str, Any]], records))
 
-    return {"error": f"不支持的 level: {level}"}
+    return {"success": False, "error": f"不支持的 level: {level}"}
 
 
 async def _fetch_traces_by_pipeline(pipeline_run_id: str) -> list[dict[str, Any]]:
@@ -258,7 +262,7 @@ async def _fetch_messages(pipeline_run_id: str) -> list[dict[str, Any]] | dict[s
             pipeline_run_id,
             exc,
         )
-        return {"error": f"内核 messages.list 调用失败: {exc}"}
+        return {"success": False, "error": f"内核 messages.list 调用失败: {exc}"}
     if isinstance(result, list):
         return result
     if isinstance(result, dict) and isinstance(result.get("messages"), list):
@@ -497,7 +501,10 @@ def _select_l0_records(
         return messages
     turns = _group_turns(messages)
     if iteration < 1 or iteration > len(turns):
-        return {"error": f"未找到 iteration={iteration} 的对话轮次（共 {len(turns)} 轮）"}
+        return {
+            "success": False,
+            "error": f"未找到 iteration={iteration} 的对话轮次（共 {len(turns)} 轮）",
+        }
     return turns[iteration - 1]
 
 

@@ -13,13 +13,10 @@ os.replace/open 属文件系统外部边界，失败注入用 monkeypatch。
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
-import yaml
 
 pytestmark = pytest.mark.unit
 
@@ -92,72 +89,3 @@ class TestAtomicWriteText:
         assert calls["n"] == 2
         assert target.read_text(encoding="utf-8") == "new\n"
         assert not (tmp_path / "llm.yaml.tmp").exists()
-
-
-def _load_routes_llm_config() -> Any:
-    """按显式路径加载 routes_llm_config（裸名防劫持；plugins/shared 已入 path）。"""
-    mod_name = "atomic_io_rlc_test"
-    if mod_name in sys.modules:
-        del sys.modules[mod_name]
-    src = _SHARED_DIR / "system" / "llm" / "routes_llm_config.py"
-    spec = importlib.util.spec_from_file_location(mod_name, src)
-    assert spec is not None and spec.loader is not None
-    m = importlib.util.module_from_spec(spec)
-    sys.modules[mod_name] = m
-    spec.loader.exec_module(m)
-    # 隔离副作用：缓存与 ConfigCenter reload 指向测试外全局态
-    m.invalidate_all_llm_caches = None
-    m.get_config_center = None
-    return m
-
-
-class TestIntegrationPaths:
-    """yaml（_write_yaml）与 .env（_update_env_var）两条真实写入路径。"""
-
-    def test_write_yaml_roundtrip(self, tmp_path: Path) -> None:
-        """_write_yaml 原子写后落盘 yaml 可解析 round-trip（6 个调用点共用）。"""
-        rlc = _load_routes_llm_config()
-        path = tmp_path / "nested" / "llm.yaml"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"providers": {"deepseek": {"api_base": "https://x"}}}
-        rlc._write_yaml(path, data)
-        assert yaml.safe_load(path.read_text(encoding="utf-8")) == data
-        assert list(path.parent.iterdir()) == [path]  # 无 tmp 残留
-
-    def test_write_yaml_failure_keeps_old_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """_write_yaml 落盘失败：磁盘上旧 llm.yaml 原样保留（配置不截断）。"""
-        rlc = _load_routes_llm_config()
-        path = tmp_path / "llm.yaml"
-        path.write_text("providers: {}\n", encoding="utf-8")
-        monkeypatch.setattr(rlc, "_atomic_write_text", _raise_permission_error)
-        with pytest.raises(PermissionError):
-            rlc._write_yaml(path, {"providers": None})
-        assert path.read_text(encoding="utf-8") == "providers: {}\n"
-
-    def test_update_env_var_creates_and_updates(self, tmp_path: Path) -> None:
-        """.env 路径：新建 + 更新既有变量（保留注释），内容完整非截断。"""
-        rlc = _load_routes_llm_config()
-        env = tmp_path / ".env"
-        env.write_text("# 注释保留\nEXISTING=v0\n", encoding="utf-8")
-        rlc._update_env_var(env, "EXISTING", "v1")
-        rlc._update_env_var(env, "NEW_KEY", "secret")
-        text = env.read_text(encoding="utf-8")
-        assert "# 注释保留" in text
-        assert "EXISTING=v1" in text
-        assert "NEW_KEY=secret" in text
-        assert "EXISTING=v0" not in text
-
-    def test_update_env_var_failure_keeps_old_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """.env 落盘失败：旧 .env 原样保留（丢 key 面被原子写兜住）。"""
-        rlc = _load_routes_llm_config()
-        env = tmp_path / ".env"
-        env.write_text("API_KEY=keep-me\n", encoding="utf-8")
-        monkeypatch.setattr(rlc, "_atomic_write_text", _raise_permission_error)
-        with pytest.raises(PermissionError):
-            rlc._update_env_var(env, "API_KEY", "overwritten")
-        assert env.read_text(encoding="utf-8") == "API_KEY=keep-me\n"
-        assert not (tmp_path / ".env.tmp").exists()
-
-
-def _raise_permission_error(path: object, text: str, encoding: str = "utf-8") -> None:
-    raise PermissionError("injected write failure")

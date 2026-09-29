@@ -77,7 +77,10 @@ pub struct TransientEntry {
 
 /// 近似 Value 序列化字节数（O(n) 递归：字符串按 UTF-8 长度 + 结构开销），
 /// 供字节预算记账——只求量级正确，不做精确序列化。
-fn approx_value_bytes(v: &Value) -> usize {
+///
+/// pub 供诊断面复用（memory-breakdown 对 pipeline state 等内存 Value 面
+/// 估算字节）——与 A 区预算记账同一口径，两处数值可直接对照。
+pub fn approx_value_bytes(v: &Value) -> usize {
     match v {
         Value::Null => 4,
         Value::Bool(_) => 5,
@@ -516,6 +519,44 @@ impl TransientStateRegistry {
         self.key_bytes.store(0, Ordering::Relaxed);
         self.accum_bytes.store(0, Ordering::Relaxed);
     }
+
+    /// 内存驻留快照（堆栈级诊断面 GET /api/v1/system/memory-breakdown 消费）。
+    ///
+    /// 字节数读自预算记账原子量（与逐出判据同源 = 实测口径）；条目数为
+    /// 实测计数（锁内 len）。
+    pub fn memory_stats(&self) -> TransientMemoryStats {
+        let keys = self.keys.read();
+        let bindings = self.bindings.read();
+        let accum = self.chunk_accum.lock();
+        TransientMemoryStats {
+            pipelines: keys.len(),
+            keys: keys.values().map(|pm| pm.len()).sum(),
+            key_bytes: self.key_bytes.load(Ordering::Relaxed),
+            binding_pipelines: bindings.len(),
+            binding_messages: bindings.values().map(|m| m.len()).sum(),
+            chunk_accumulators: accum.len(),
+            accum_bytes: self.accum_bytes.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// [`TransientStateRegistry::memory_stats`] 快照。
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TransientMemoryStats {
+    /// A 区有键的管道数。
+    pub pipelines: usize,
+    /// A 区键总数。
+    pub keys: usize,
+    /// A 区近似字节（预算记账原子量，与逐出判据同源）。
+    pub key_bytes: usize,
+    /// B 区有登记的管道数。
+    pub binding_pipelines: usize,
+    /// B 区 message 绑定总数。
+    pub binding_messages: usize,
+    /// chunk 累积节流档数。
+    pub chunk_accumulators: usize,
+    /// chunk 累积缓冲近似字节（记账原子量）。
+    pub accum_bytes: usize,
 }
 
 impl Default for TransientStateRegistry {
@@ -649,6 +690,38 @@ mod tests {
         reg.clear_all();
         assert!(reg.get("tenant_a", "pipe_1", "chunk:mc_a").is_none());
         assert!(reg.resolve_step_of("tenant_b", "pipe_2", "m1").is_none());
+    }
+
+    #[test]
+    fn memory_stats_reflects_injected_entries() {
+        let reg = TransientStateRegistry::new();
+        assert_eq!(
+            reg.memory_stats(),
+            TransientMemoryStats::default(),
+            "空寄存器全零"
+        );
+        // 注入：A 区 2 键（1 管道）+ B 区 1 绑定 + chunk 累积档 1。
+        let payload = "x".repeat(100);
+        reg.set(TENANT, "pipe_1", "k1", json!({"text_len": 1}));
+        reg.set(TENANT, "pipe_1", "k2", json!({"text_len": &payload}));
+        reg.register_message_binding(TENANT, "pipe_1", "m1", "core");
+        reg.accumulate_chunk(TENANT, "pipe_1", "m1", "hello", "");
+        let s = reg.memory_stats();
+        assert_eq!(s.pipelines, 1);
+        assert_eq!(s.keys, 2);
+        assert_eq!(s.binding_pipelines, 1);
+        assert_eq!(s.binding_messages, 1);
+        assert_eq!(s.chunk_accumulators, 1);
+        // 字节 = 预算记账原子量（与逐出判据同源）：≥ 注入 payload 实际量级。
+        assert!(
+            s.key_bytes > 100,
+            "A 区字节应覆盖注入 payload（实际 {}）",
+            s.key_bytes
+        );
+        assert!(s.accum_bytes >= "hello".len());
+        // clear_all 归零（回收语义与记账一致）。
+        reg.clear_all();
+        assert_eq!(reg.memory_stats(), TransientMemoryStats::default());
     }
 
     // ── chunk 累积 + 节流（方案 §2.4）──────────────────────────

@@ -33,6 +33,8 @@ import {
 import { toast } from '@/components/ui/sonner'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { useLlmConfigQuery, useLlmPresetsQuery } from '@/hooks/queries/useLlmQueries'
+import { useQueryClient } from '@tanstack/react-query'
+import { queryKeys } from '@/services/query/queryKeys'
 import { useAsyncResource } from '@/hooks/useAsyncResource'
 import {
   getProviderTypes,
@@ -138,6 +140,17 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
     fallbackErrorText: '无法连接服务器，请检查网络后重试',
   })
 
+  // 保存成功后把增量切片直写共享 query 缓存（queryKeys.llmConfig）：其他消费方
+  // （ChatContainer 模型显示/思考强度映射）即时热更新。不走 invalidate——refetch
+  // 以服务器全量态覆盖本地可编辑副本，会打断其他字段编辑；直写与下方 setConfig
+  // 同一切片，缓存与本地副本保持一致。
+  const queryClient = useQueryClient()
+  const syncConfigCache = useCallback((patch: Partial<LLMConfigResponse>) => {
+    queryClient.setQueryData<LLMConfigResponse>(queryKeys.llmConfig, (prev) =>
+      prev ? { ...prev, ...patch } : prev,
+    )
+  }, [queryClient])
+
   useEffect(() => {
     if (configResource.data) {
       setConfig(configResource.data)
@@ -163,6 +176,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
     try {
       const defaults = await saveDefaults(defaultsDraft)
       setConfig((prev) => (prev ? { ...prev, defaults } : prev))
+      syncConfigCache({ defaults })
       toast.success('默认模型已保存')
     } catch (e) {
       toast.error('保存默认模型失败', { description: getApiMsg(e, '保存默认模型失败') })
@@ -181,6 +195,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
         ...buildModelFields(addParams),
       })
       setConfig((prev) => (prev ? { ...prev, models } : prev))
+      syncConfigCache({ models })
       setNewModelConfig({ provider: '', model_name: '', display_name: '' })
       setAddParams(emptyModelParamsDraft(strengthLevels))
       if (added_ids[0] !== modelName) {
@@ -197,6 +212,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
     try {
       const models = await deleteModel(modelId)
       setConfig((prev) => (prev ? { ...prev, models } : prev))
+      syncConfigCache({ models })
     } catch (e) {
       toast.error('删除模型失败', { description: getApiMsg(e, '删除模型失败') })
     }
@@ -209,6 +225,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
       try {
         const models = await updateModel(modelId, settings)
         setConfig((prev) => (prev ? { ...prev, models } : prev))
+        syncConfigCache({ models })
         toast.success(`已保存 ${modelId} 的模型设置`)
       } catch (e) {
         toast.error('保存模型设置失败', { description: getApiMsg(e, '保存模型设置失败') })
@@ -229,6 +246,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
         }
         const providers = await updateProviderConfig(providerId, { keys: [entry] })
         setConfig((prev) => (prev ? { ...prev, providers } : prev))
+        syncConfigCache({ providers })
         toast.success(`已保存 ${providerId} 的 Key（写入 .env，立即生效）`)
       } catch (e) {
         toast.error('保存密钥失败', { description: getApiMsg(e, '保存密钥失败') })
@@ -249,6 +267,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
         }
         const providers = await updateProviderConfig(providerId, { keys: [entry] })
         setConfig((prev) => (prev ? { ...prev, providers } : prev))
+        syncConfigCache({ providers })
         toast.success(`已保存 ${providerId} 的并发设置`)
       } catch (e) {
         toast.error('保存并发设置失败', { description: getApiMsg(e, '保存并发设置失败') })
@@ -267,6 +286,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
       if (newProviderApiKey.trim()) providerConfig.api_key = newProviderApiKey.trim()
       const providers = await addProvider(newProviderId.trim(), providerConfig)
       setConfig((prev) => (prev ? { ...prev, providers } : prev))
+      syncConfigCache({ providers })
       setNewProviderId('')
       setNewProviderType('openai')
       setNewProviderApiBase('')
@@ -280,6 +300,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
     try {
       const providers = await deleteProvider(providerId)
       setConfig((prev) => (prev ? { ...prev, providers } : prev))
+      syncConfigCache({ providers })
     } catch (e) {
       toast.error('删除提供商失败', { description: getApiMsg(e, '删除提供商失败') })
     }
@@ -305,7 +326,10 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
           failed.push(name)
         }
       }
-      if (lastModels) setConfig((prev) => (prev ? { ...prev, models: lastModels! } : prev))
+      if (lastModels) {
+        setConfig((prev) => (prev ? { ...prev, models: lastModels! } : prev))
+        syncConfigCache({ models: lastModels })
+      }
       if (failed.length > 0) {
         toast.warning(`已添加 ${modelNames.length - failed.length} 个模型`, {
           description: `添加失败（可能已存在）: ${failed.join(', ')}`,

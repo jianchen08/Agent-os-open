@@ -232,8 +232,12 @@ async def test_mixed_tool_calls_only_closed_kept() -> None:
     assert ops[1]["msg"]["tool_call_id"] == "call_00000000000000000000000b"
 
 
-async def test_invalid_tool_call_id_normalized() -> None:
-    """partial 携带非标准 tool_call_id → 标准化为 call_<hex>（与正常路径同规则）。"""
+async def test_provider_tool_call_id_passthrough() -> None:
+    """partial 携带非 call_<hex> 形态的 provider id → 原样透传（不重造）。
+
+    单一关联键契约（ADR 2026-09-28-tool-call-live-card）：流事件/持久化/前端
+    渲染全程同一 id；按格式白名单重造会让流事件（原始 id）与落库 id 分叉。
+    """
     caller = _FakeCaller(
         _partial_response(
             tool_calls=[
@@ -245,8 +249,7 @@ async def test_invalid_tool_call_id_normalized() -> None:
 
     ops = result["messages"]["_ops"]
     tc_id = ops[0]["msg"]["tool_calls"][0]["id"]
-    assert tc_id.startswith("call_")
-    assert tc_id != "call_function_xxx_1"
+    assert tc_id == "call_function_xxx_1"
     assert ops[1]["msg"]["tool_call_id"] == tc_id
 
 
@@ -281,8 +284,12 @@ async def test_interrupted_passthrough_run_id_all_pipelines() -> None:
 # ─────────────────── plugin：成功路径 id 标准化（重构回归） ───────────────────
 
 
-async def test_success_tool_calls_ids_normalized_inplace() -> None:
-    """成功路径 tool_calls → 非标准 id 标准化并回写 raw_tool_calls 与 assistant 消息。"""
+async def test_success_tool_calls_provider_id_passthrough() -> None:
+    """成功路径 provider id 原样透传，raw_tool_calls 与 assistant 消息共用同一 id。
+
+    单一关联键契约（ADR 2026-09-28-tool-call-live-card）：不按 call_<hex> 白名单
+    重造——流式事件已用原始 id 建卡，重造即分叉双卡。
+    """
     caller = _FakeCaller(
         {
             "status": "streamed",
@@ -301,9 +308,8 @@ async def test_success_tool_calls_ids_normalized_inplace() -> None:
     result = await plugin.execute(_make_ctx(_base_state()))
 
     raw_tc = result["raw_tool_calls"][0]
-    assert raw_tc["id"].startswith("call_")
-    assert raw_tc["id"] != "call_function_xxx_9"
-    # assistant 消息与 raw_tool_calls 共用同一解析 id（tool_core 配对一致性）
+    assert raw_tc["id"] == "call_function_xxx_9"
+    # assistant 消息与 raw_tool_calls 共用同一 id（tool_core 配对一致性）
     assistant = result["messages"]["_ops"][0]["msg"]
     assert assistant["tool_calls"][0]["id"] == raw_tc["id"]
     assert assistant["tool_calls"][0]["function"]["arguments"] == '{"cmd":"ls"}'

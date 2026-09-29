@@ -338,6 +338,14 @@ class ParamInjectPlugin(IInputPlugin):
             authorized_zones = ctx.state.get("authorized_write_zones", "")
             if authorized_zones:
                 args["authorized_zones"] = authorized_zones
+
+            # 管道级授权读取（读授权卡「仅本管道」写入，用户裁定 2026-09-28）：
+            # 读黑名单命中经用户批准的前缀，读面工具（file_read/list_directory/
+            # enhanced_search）签名声明者消费。state 键与落盘键同名同前缀
+            # （task.authorized_read_zones），不复制写侧的前缀漂移形态。
+            authorized_read = ctx.state.get("task.authorized_read_zones", "")
+            if authorized_read:
+                args["authorized_read_zones"] = authorized_read
         else:
             # parent_ws_meta：子任务出生契约经它携带父工作空间坐标，使
             # workspace_lifecycle 的共享决策不依赖发起瞬间的聚合读可见性

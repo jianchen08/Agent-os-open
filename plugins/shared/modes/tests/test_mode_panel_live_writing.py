@@ -62,8 +62,8 @@ def _envelope_status(result: dict[str, Any]) -> int:
 
 
 def _profile_chain_target() -> str:
-    """派发目标期望值从 profile.yaml 真值推导（不硬编码 agent 键）。"""
-    with open(os.path.join(MODES_DIR, "mode_writing", "profile.yaml"), encoding="utf-8") as fh:
+    """派发目标期望值从 mode.yaml 真值推导（不硬编码 agent 键）。"""
+    with open(os.path.join(MODES_DIR, "mode_writing", "mode.yaml"), encoding="utf-8") as fh:
         profile = yaml.safe_load(fh)
     pool = profile["chain"]["executor_pool"]
     assert isinstance(pool, list) and pool

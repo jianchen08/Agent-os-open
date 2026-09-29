@@ -1,10 +1,12 @@
 # @feature: FP-T07 llm api | @ci: python-coverage
-"""思考参数 extra_body 透传通道测试（litellm type=openai/zai）。
+"""思考参数 extra_body 透传通道测试（litellm type=openai/zai/minimax）。
 
 背景：litellm 对 reasoning_effort/thinking 顶层 kwargs——模型不在其注册表时
 抛 UnsupportedParamsError，在注册表时原样转发（OpenAI SDK create() 无此形参
 → TypeError）。这类 OpenAI 兼容端点的上游直接接受它们作为 body 字段，必须
-经 extra_body 透传。
+经 extra_body 透传。minimax 同通道：M3.1 系模型不在 litellm 注册表，
+drop_params=True 下 thinking/reasoning_effort 被静默丢弃（档位映射零效果），
+extra_body 直进请求体，对注册表内的 M3 线上字节等价。
 
 覆盖：
 - _needs_extra_body_transport：前缀形态 / provider type 形态（生产传 model_id，
@@ -60,7 +62,8 @@ def _seed_provider_maps(
         ("openai/gpt-4o", True),
         ("zai/glm-5.3-flash", True),
         ("ZAI/GLM-5.3-Flash", True),
-        ("minimax/MiniMax-M3", False),
+        ("minimax/MiniMax-M3", True),
+        ("minimax/MiniMax-M3.1-Flash-Preview", True),
         ("deepseek/deepseek-v4-pro", False),
     ],
 )
@@ -76,13 +79,18 @@ def test_provider_type_form_model_id_without_prefix(monkeypatch: pytest.MonkeyPa
 
 
 def test_non_channel_provider_type(monkeypatch: pytest.MonkeyPatch) -> None:
-    """minimax/deepseek 等原生通道 provider 不走 extra_body。"""
+    """通道内 provider type（minimax）命中；通道外（fake type deepseek）不走 extra_body。"""
     _seed_provider_maps(
         monkeypatch,
-        {"MiniMax-M3": "minimax", "deepseek-v4-pro": "deepseek"},
+        {
+            "MiniMax-M3": "minimax",
+            "MiniMax-M3.1-Flash-Preview": "minimax",
+            "deepseek-v4-pro": "deepseek",
+        },
         {"minimax": "minimax", "deepseek": "deepseek"},
     )
-    assert adapter_mod._needs_extra_body_transport("MiniMax-M3") is False
+    assert adapter_mod._needs_extra_body_transport("MiniMax-M3") is True
+    assert adapter_mod._needs_extra_body_transport("MiniMax-M3.1-Flash-Preview") is True
     assert adapter_mod._needs_extra_body_transport("deepseek-v4-pro") is False
 
 
@@ -160,15 +168,48 @@ async def test_completion_merges_into_existing_extra_body(
 
 
 @pytest.mark.asyncio
-async def test_completion_keeps_top_level_for_other_providers(
+async def test_completion_moves_thinking_to_extra_body_for_minimax(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """非 extra_body 通道 provider：thinking 保持顶层（MiniMax 原生接受）。"""
+    """minimax 通道：thinking/reasoning_effort 落 extra_body。
+
+    M3.1 系不在 litellm 注册表，顶层 kwargs 会被 drop_params 静默丢弃；
+    M3 虽在注册表，extra_body 与顶层在线上字节等价（同入 JSON body）。
+    """
     _seed_provider_maps(monkeypatch, {"MiniMax-M3": "minimax"}, {"minimax": "minimax"})
     stub = _CapturingAdapter()
 
     await stub.completion(
         model="MiniMax-M3",
+        messages=[{"role": "user", "content": "hi"}],
+        temperature=0.7,
+        thinking={"type": "adaptive"},
+        reasoning_effort="max",
+    )
+
+    assert stub.captured["extra_body"] == {
+        "thinking": {"type": "adaptive"},
+        "reasoning_effort": "max",
+    }
+    assert "thinking" not in stub.captured
+    assert "reasoning_effort" not in stub.captured
+    assert stub.captured["temperature"] == 0.7
+
+
+@pytest.mark.asyncio
+async def test_completion_keeps_top_level_for_other_providers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非 extra_body 通道 provider：thinking 保持顶层不动。"""
+    _seed_provider_maps(
+        monkeypatch,
+        {"deepseek-v4-pro": "deepseek"},
+        {"deepseek": "deepseek"},
+    )
+    stub = _CapturingAdapter()
+
+    await stub.completion(
+        model="deepseek-v4-pro",
         messages=[{"role": "user", "content": "hi"}],
         thinking={"type": "adaptive"},
     )

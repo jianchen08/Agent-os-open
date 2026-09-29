@@ -7,7 +7,7 @@
 2. _executor.py 的 `sys.path.insert(0, _SHARED_ROOT)` 自举（35 行）：以唯一模块名
    装载前把 plugins/shared 从 sys.path 移除，装载后应被自举回、`state_fields` 可用；
 3. server.py `task_evaluate` handler 的兜底返回（111 行）：result 无 to_dict 且
-   success=False → {"error": result.error}。
+   success=False → {"success": False, "error": result.error}。
 
 外部面打桩：state 读面（跨进程 capability）以抛异常替身注入；tool 模块面以
 无 to_dict 的假模块注入。模块装载/dispatch 走真实实现。
@@ -189,7 +189,7 @@ class TestExecutorSharedRootBootstrap:
 
 
 class TestServerHandlerFallbackReturn:
-    """server.py 111 行：无 to_dict 的 result + success=False → {"error"}。"""
+    """server.py 111 行：无 to_dict 的 result + success=False → 显式失败信封。"""
 
     @staticmethod
     def _load_server() -> Any:
@@ -225,7 +225,7 @@ class TestServerHandlerFallbackReturn:
 
         out = await asyncio.wait_for(server_mod.task_evaluate(action="auto_complete"), timeout=5)
 
-        assert out == {"error": "评估执行器未注入"}
+        assert out == {"success": False, "error": "评估执行器未注入"}
 
     @pytest.mark.asyncio
     async def test_envelope_capable_result_still_preferred(self, monkeypatch) -> None:

@@ -61,7 +61,7 @@
       },
       {
         "name": "mode.get_profile",
-        "description": "返回角色扮演模式包内 profile.yaml 解析后的内容",
+        "description": "返回角色扮演模式包内 mode.yaml 解析后的内容",
         "input_schema": {
           "type": "object",
           "properties": {}
@@ -264,6 +264,16 @@
       "timeout_ms": 20000,
       "max_concurrency": 4,
       "description": "写动作：重新生成末条回复变体（swipe 一期裁定，task_submit 派发）"
+    },
+    {
+      "route_id": "pipeline_open",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/pipeline/open",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 30000,
+      "max_concurrency": 4,
+      "description": "B8 管道标签：向既有会话开通扮演子管道（chat.send_message 创建分支薄代理）——{session_id, agent_id?, first_message?} 返回 {pipeline_id}"
     }
   ],
   "contributes": {
@@ -296,22 +306,25 @@
             "h": 480
           }
         }
-      }
-    ]
-  },
-  "ui_schema": {
-    "widgets": [
+      },
       {
-        "id": "mode_opt_roleplay",
-        "type": "select-option",
-        "space": "chat-input",
-        "order": 10,
+        "id": "roleplay_state_card",
+        "title": "状态变化",
+        "icon": "📊",
+        "space": "chat",
+        "slot": "message-style",
+        "widget": "webview",
         "props": {
-          "target": "task_mode",
-          "value": "roleplay",
-          "label": "角色扮演",
-          "icon": "🎭"
+          "htmlPath": "webview/state_card.html"
         }
+      }
+    ],
+    "message_cards": [
+      {
+        "match": {
+          "marker": "state"
+        },
+        "style_id": "roleplay_state_card"
       }
     ]
   },

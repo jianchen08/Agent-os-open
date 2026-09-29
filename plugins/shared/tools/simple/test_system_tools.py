@@ -97,6 +97,7 @@ class TestReadExecutionDetailDegradation:
             pipeline_run_id="pipe-1", level="skeleton"
         )
         assert isinstance(result, dict)
+        assert result["success"] is False
         assert "error" in result
         # 错误信息表明能力未注入
         assert "capability" in result["error"] or "未注入" in result["error"]

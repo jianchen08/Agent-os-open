@@ -674,7 +674,9 @@ async fn test_metrics_prometheus_no_aggregator_404() {
 
 /// 模拟 LLM 插件：读取 state["messages"]，append assistant 回复后写回。
 /// 记录每次收到的 messages（按调用顺序），供测试断言。
-struct RecordingInvoker {
+/// 测试 invoker（server::pipeline_version_tests 复用）：记录 LLM 调用入参
+/// history / 完整 state 快照 / 生命周期钩子，回复以增量 op emit。
+pub(crate) struct RecordingInvoker {
     seen: std::sync::Mutex<Vec<serde_json::Value>>,
     /// GAP-1：记录每次收到的完整 state 快照（断言 state overlay / lineage
     /// 是否进入插件可见 state）。
@@ -853,7 +855,7 @@ async fn compiled_for_lazy_loads_caches_and_invalidates() {
     let state = AppState::new();
 
     // 首次：磁盘加载 + 编译 + 入缓存
-    let first = crate::server::compiled_for(&state, &config_root, Some(&name))
+    let first = crate::server::compiled_for(&state, &config_root, Some(&name), None)
         .await
         .expect("首次按需加载应成功");
     assert_eq!(first.bodies.len(), 1);
@@ -861,7 +863,7 @@ async fn compiled_for_lazy_loads_caches_and_invalidates() {
 
     // 磁盘内容改变（mtime 必然变化）→ 二次调用仍命中缓存（旧内容）
     write_lazy_config(&root, &name, "body_v2");
-    let second = crate::server::compiled_for(&state, &config_root, Some(&name))
+    let second = crate::server::compiled_for(&state, &config_root, Some(&name), None)
         .await
         .expect("缓存命中应成功");
     assert!(
@@ -875,7 +877,7 @@ async fn compiled_for_lazy_loads_caches_and_invalidates() {
 
     // 失效（PUT 热更唯一失效路径）→ 下次按需重载新内容
     crate::server::pipeline_cache_invalidate(&name);
-    let third = crate::server::compiled_for(&state, &config_root, Some(&name))
+    let third = crate::server::compiled_for(&state, &config_root, Some(&name), None)
         .await
         .expect("失效后重载应成功");
     assert_eq!(third.bodies[0].id, "body_v2", "失效后必须读到磁盘新内容");
@@ -893,7 +895,7 @@ async fn compiled_for_explicit_config_failure_errors_without_fallback() {
     std::fs::create_dir_all(config_root.join("pipelines")).unwrap();
 
     let missing = format!("ghost_{}", uuid::Uuid::new_v4().simple());
-    let err = crate::server::compiled_for(&state, &config_root, Some(&missing))
+    let err = crate::server::compiled_for(&state, &config_root, Some(&missing), None)
         .await
         .expect_err("不存在的配置必须报错（回落 autonomous 会返回 Ok）");
     assert!(err.contains(&missing), "错误必须带管道名便于定位: {err}");
@@ -905,7 +907,7 @@ async fn compiled_for_explicit_config_failure_errors_without_fallback() {
         "name: [unclosed\n",
     )
     .unwrap();
-    let err = crate::server::compiled_for(&state, &config_root, Some(&broken))
+    let err = crate::server::compiled_for(&state, &config_root, Some(&broken), None)
         .await
         .expect_err("坏配置必须报错");
     assert!(err.contains(&broken), "错误必须带管道名: {err}");
@@ -926,7 +928,7 @@ async fn compiled_for_none_returns_hot_reload_singleton() {
     let config_root = root.join("config");
     let state = AppState::new();
 
-    let via_none = crate::server::compiled_for(&state, &config_root, None)
+    let via_none = crate::server::compiled_for(&state, &config_root, None, None)
         .await
         .expect("缺省路径应成功");
     let via_reload = crate::server::maybe_reload_compiled_pipeline(&state, &config_root).await;
@@ -983,7 +985,9 @@ async fn seed_session_with_pipeline(
         .unwrap();
 }
 
-fn make_engine_state() -> (
+/// 带真实内存 SqliteStore + RecordingInvoker 的引擎执行夹具
+/// （server::pipeline_version_tests 复用，D9 版本钉住）。
+pub(crate) fn make_engine_state() -> (
     AppState,
     Arc<RecordingInvoker>,
     Arc<dyn agentos_core::traits::StorageBackend>,
@@ -1707,6 +1711,7 @@ fn thread_field_manifest(
         activation: None,
         persistent_fields: vec![],
         export_fields: vec![],
+        aux_venvs: Vec::new(),
         provides: None,
     }
 }
@@ -2369,6 +2374,115 @@ fn test_derive_run_terminal_events_signature_vocabulary() {
     }
 }
 
+// ── run.failed 前端镜像事件（run_failed，ADR 2026-09-28） ──────────────
+
+/// 帧捕获 EventSink（ws_session 同款模式）：捕获推到 thread 的 WS 帧。
+struct RunFailedCaptureSink {
+    frames: Arc<std::sync::Mutex<Vec<String>>>,
+}
+#[async_trait::async_trait]
+impl agentos_session::EventSink for RunFailedCaptureSink {
+    async fn send_text(&self, text: &str) -> bool {
+        self.frames.lock().unwrap().push(text.to_string());
+        true
+    }
+    fn id(&self) -> u64 {
+        46
+    }
+}
+
+/// 装配仅含 session 的 AppState（CaptureSink 已注册目标 thread）。
+fn run_failed_mirror_state(
+    frames: Arc<std::sync::Mutex<Vec<String>>>,
+    thread_id: &str,
+) -> AppState {
+    let coord = Arc::new(agentos_session::SessionCoordinator::new());
+    coord.register("u-rf", Arc::new(RunFailedCaptureSink { frames }));
+    coord.register_thread(thread_id, "u-rf");
+    let mut state = AppState::new();
+    state.session = Some(coord);
+    state
+}
+
+/// 引擎 Err 防御路径（failed=true，无署名）→ 恰好一帧 run_failed，
+/// 载荷含 pipeline/thread 路由坐标 + status/stop_reason(null)/run_id。
+#[tokio::test]
+async fn run_failed_mirrored_on_engine_error() {
+    let frames = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let state = run_failed_mirror_state(frames.clone(), "thread-rf-eng");
+    let st = json!({
+        "pipeline_id": "pipe-rf-eng",
+        "session_id": "thread-rf-eng",
+    });
+    emit_run_terminal_domain_events(&state, &st, "run-eng-1", true).await;
+    let captured = frames.lock().unwrap();
+    assert_eq!(captured.len(), 1, "失败终态必须镜像一帧 run_failed");
+    let parsed: serde_json::Value = serde_json::from_str(&captured[0]).unwrap();
+    assert_eq!(parsed["type"], "run_failed");
+    assert_eq!(parsed["data"]["pipeline_id"], "pipe-rf-eng");
+    assert_eq!(parsed["data"]["_threadId"], "thread-rf-eng");
+    assert_eq!(parsed["data"]["status"], "failed");
+    assert!(
+        parsed["data"]["stop_reason"].is_null(),
+        "无署名失败 stop_reason 为 null"
+    );
+    assert_eq!(parsed["data"]["run_id"], "run-eng-1");
+}
+
+/// stop_reason 署名失败（failed=false，DSL 正常收束——「被插件判定终止」路径）
+/// → 同样镜像 run_failed，stop_reason 原值透传（与引擎 Err 路径构成第二组
+/// 有区分度输入：failed 参数与署名有无双轴互异）。
+#[tokio::test]
+async fn run_failed_mirrored_on_signed_stop_reason() {
+    for reason in ["tool_fail_loop", "duplicate_loop"] {
+        let frames = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let state = run_failed_mirror_state(frames.clone(), "thread-rf-sig");
+        let st = json!({
+            "pipeline_id": "pipe-rf-sig",
+            "session_id": "thread-rf-sig",
+            "router.stop_reason": reason,
+        });
+        emit_run_terminal_domain_events(&state, &st, "run-sig-1", false).await;
+        let captured = frames.lock().unwrap();
+        assert_eq!(captured.len(), 1, "{reason} 应镜像 run_failed");
+        let parsed: serde_json::Value = serde_json::from_str(&captured[0]).unwrap();
+        assert_eq!(parsed["type"], "run_failed");
+        assert_eq!(parsed["data"]["stop_reason"], reason, "署名原值透传");
+    }
+}
+
+/// 成功/挂起/取消终态不镜像（completed 每轮一帧是噪音；suspended/cancelled
+/// 有既有通道）——性质断言：非 failed 终态零帧。
+#[tokio::test]
+async fn run_failed_not_mirrored_on_non_failed_terminals() {
+    for st in [
+        json!({"pipeline_id": "p", "session_id": "thread-rf-ok"}),
+        json!({"pipeline_id": "p", "session_id": "thread-rf-ok", "suspended": true}),
+        json!({"pipeline_id": "p", "session_id": "thread-rf-ok", "router.stop_reason": "user_requested"}),
+        json!({"pipeline_id": "p", "session_id": "thread-rf-ok", "router.stop_reason": "task_cancelled"}),
+    ] {
+        let frames = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let state = run_failed_mirror_state(frames.clone(), "thread-rf-ok");
+        emit_run_terminal_domain_events(&state, &st, "run-ok-1", false).await;
+        assert_eq!(
+            frames.lock().unwrap().len(),
+            0,
+            "非 failed 终态不得镜像 run_failed: {st}"
+        );
+    }
+}
+
+/// 会话坐标缺失（session_id 空——无 WS 投递目标）→ 丢弃不 panic（域事件
+/// 照发，镜像仅是前端通道）。
+#[tokio::test]
+async fn run_failed_dropped_without_thread_coord() {
+    let frames = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let state = run_failed_mirror_state(frames.clone(), "thread-rf-elsewhere");
+    let st = json!({"pipeline_id": "pipe-rf-nothread"});
+    emit_run_terminal_domain_events(&state, &st, "run-nothread-1", true).await;
+    assert_eq!(frames.lock().unwrap().len(), 0, "无 thread 坐标不得投帧");
+}
+
 #[tokio::test]
 async fn test_process_via_engine_emits_run_terminal_domain_events() {
     // wiring：真实引擎跑一轮 → 声明 domain_event hook 的启用插件收到
@@ -2408,6 +2522,7 @@ async fn test_process_via_engine_emits_run_terminal_domain_events() {
             ui_schema: None,
             persistent_fields: vec![],
             export_fields: vec![],
+            aux_venvs: Vec::new(),
             http_endpoints: vec![],
             contributes: Default::default(),
             enabled: Some(true),

@@ -180,12 +180,10 @@ def test_llm_yaml_carries_vendor_strength_mappings() -> None:
     }
     assert providers["zhipu"]["thinking_strength_params"] == glm_params
     assert providers["zhipu_coding"]["thinking_strength_params"] == glm_params
-    assert providers["minimax"]["thinking_strength_params"] == {
-        "high": {"thinking": {"type": "adaptive"}},
-        "low": {"thinking": {"type": "disabled"}},
-        "medium": {"thinking": {"type": "adaptive"}},
-        "off": {"thinking": {"type": "disabled"}},
-    }
+    # minimax 无厂商级映射：M3 与 M3.1 两代契约不同（M3 认 thinking.type，
+    # M3.1-Flash-Preview 只认 reasoning_effort 且强制 adaptive 无关闭档，
+    # 2026-09-28 接口实测），单一厂商级表无法同时为真，映射落模型级。
+    assert "thinking_strength_params" not in providers["minimax"]
     assert providers["deepseek"]["thinking_strength_params"] == {
         "high": {"reasoning_effort": "max"},
         "low": {"reasoning_effort": "low"},
@@ -196,6 +194,31 @@ def test_llm_yaml_carries_vendor_strength_mappings() -> None:
         "high": {"reasoning_effort": "high"},
         "low": {"reasoning_effort": "low"},
         "medium": {"reasoning_effort": "medium"},
+    }
+
+
+def test_llm_yaml_minimax_model_level_strength_mappings() -> None:
+    """minimax 模型级映射：M3 保 thinking 形态（M3 忽略 reasoning_effort，
+    2026-09-28 接口实测）；M3.1-Flash-Preview 用 effort 档位，内部四档映射
+    到厂商 effort 值（high→max 同 deepseek 先例；off 无厂商关闭形态，落最低档
+    low——厂商强制 adaptive thinking，none/disabled 均 400）。"""
+    import yaml
+
+    data = yaml.safe_load(
+        (_REPO_ROOT / "config" / "plugins" / "llm" / "llm.yaml").read_text(encoding="utf-8")
+    )
+    models = data["models"]
+    assert models["minimax-m3"]["thinking_strength_params"] == {
+        "high": {"thinking": {"type": "adaptive"}},
+        "low": {"thinking": {"type": "disabled"}},
+        "medium": {"thinking": {"type": "adaptive"}},
+        "off": {"thinking": {"type": "disabled"}},
+    }
+    assert models["minimax-m3.1-flash-preview"]["thinking_strength_params"] == {
+        "high": {"reasoning_effort": "max"},
+        "low": {"reasoning_effort": "low"},
+        "medium": {"reasoning_effort": "medium"},
+        "off": {"reasoning_effort": "low"},
     }
 
 

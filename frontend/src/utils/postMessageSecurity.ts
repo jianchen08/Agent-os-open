@@ -100,13 +100,14 @@ export function validateWebviewEvent(
 // WebviewWidget 路由分支 + 校验器，禁止散落 handler。
 // - '__ready'：面板就绪信号（宿主以此恢复下行桥推送）；
 // - 'theme.apply'：会话主题档推送（sessionThemeStore 深校验 fail-closed）；
-// - 'roleplay.possess'：附身卡上行（roleplayPossessStore，载荷 fail-closed）。
-// - 'roleplay.continue'：以卡开扮演会话上行（roleplayContinue 服务：建会话 +
-//   会话执行选项绑定卡身份，载荷 fail-closed）。
+// - 'mode.possess'：人设接管附身上行（personaPossessStore，载荷 fail-closed，
+//   注入键按 registry decl.persona.from 派生，批 G② 通用化）。
+// - 'mode.session'：模式会话出生上行（modeSessionBinder：建会话 + 快照绑定 +
+//   跳转，载荷 fail-closed，模式特有语义经扩展位承载）。
 // 表外 method 分两类：'/' 前缀 = 本插件 /ext REST 数据面约定（自带前缀
 // 白名单，见 WebviewWidget）；其余 = 命令调用，走本插件命令白名单（同处）。
 
-export const WEBVIEW_UPLINK_METHODS = ['__ready', 'theme.apply', 'roleplay.possess', 'roleplay.continue'] as const
+export const WEBVIEW_UPLINK_METHODS = ['__ready', 'theme.apply', 'mode.possess', 'mode.session'] as const
 
 export type WebviewUplinkMethod = (typeof WEBVIEW_UPLINK_METHODS)[number]
 

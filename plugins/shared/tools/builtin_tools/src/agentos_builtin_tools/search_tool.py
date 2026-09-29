@@ -24,7 +24,13 @@ from agentos_builtin_tools.result import ToolResult
 ENHANCED_SEARCH_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "query": {"type": "string", "description": "搜索关键词或正则表达式"},
+        "query": {
+            "type": "string",
+            "description": (
+                "搜索关键词或正则表达式（字面子串匹配，use_regex=true 才是正则；"
+                "不支持 * 通配符，filename 搜索直接用文件名子串，勿带 * 或 ?）"
+            ),
+        },
         "path": {"type": "string", "description": "搜索起始路径", "default": "."},
         "search_type": {
             "type": "string",
@@ -38,7 +44,11 @@ ENHANCED_SEARCH_SCHEMA: dict[str, Any] = {
         "context_lines": {"type": "integer", "description": "上下文行数", "default": 2},
         "max_results": {"type": "integer", "description": "最大结果数", "default": 100},
         "max_depth": {"type": "integer", "description": "最大递归深度", "default": 20},
-        "timeout_seconds": {"type": "number", "description": "遍历墙钟预算（秒），超时返回部分结果", "default": 30.0},
+        "timeout_seconds": {
+            "type": "number",
+            "description": "遍历墙钟预算（秒），超时返回部分结果",
+            "default": 60.0,
+        },
     },
     "required": ["query"],
 }
@@ -46,6 +56,41 @@ ENHANCED_SEARCH_SCHEMA: dict[str, Any] = {
 # 二进制闸预算：NUL 探测只看文件头；命中扫描有界（防大文件全文进正则）。
 _BINARY_SNIFF_BYTES = 64 * 1024
 _BINARY_SCAN_BYTES = 4 * 1024 * 1024
+
+# 遍历剪枝名单（按 basename 全深度生效，镜像本仓 .gitignore 重目录 +
+# rg 同款默认 .git）：依赖与构建产物树单层精确剪枝（repo_walk_prune 只覆盖
+# 仓根一级）拦不住嵌套形态——.zctmp/.wt-* 内的 npm 依赖循环链可达数十万
+# 目录，实测本仓仓根无此剪枝 380s 走不到 docs/，有此剪枝 1.5s 命中。
+_WALK_SKIP_DIR_NAMES = frozenset(
+    {
+        "node_modules",
+        ".git",
+        ".venv",
+        "venv",
+        ".venv-hindsight",
+        ".zctmp",
+        "__pycache__",
+        "target",
+        "dist",
+        "dist-electron",
+    }
+)
+_WALK_SKIP_DIR_NAMES_NORMED = frozenset(
+    os.path.normcase(n) for n in _WALK_SKIP_DIR_NAMES
+)
+
+
+def _walk_prune_dirs(root: str, dirs: list[str], prune: set[str]) -> list[str]:
+    """walk 剪枝：basename 全深度名单 + .wt- 前缀 + 仓根一级精确集。"""
+    kept: list[str] = []
+    for d in dirs:
+        nd = os.path.normcase(d)
+        if nd in _WALK_SKIP_DIR_NAMES_NORMED or nd.startswith(".wt-"):
+            continue
+        if prune and os.path.normcase(os.path.join(root, d)) in prune:
+            continue
+        kept.append(d)
+    return kept
 
 
 def _binary_contains(file_path: Path, pattern: re.Pattern[str]) -> bool:
@@ -68,15 +113,19 @@ async def enhanced_search(
     context_lines: int = 2,
     max_results: int = 100,
     max_depth: int = 20,
-    timeout_seconds: float = 30.0,
+    timeout_seconds: float = 60.0,
     workspace: str | None = None,
     project_root: str | None = None,
+    authorized_read_zones: str | None = None,
 ) -> ToolResult:
     """搜索文件内容或文件名（相对路径以注入根锚定；无注入报错）。
 
     双闸与其他文件工具同源（fs_tools）：① 路径边界 fail-closed（根外绝对
     路径/``..`` 逃逸拒绝、/workspace 挂载点重映射）；② 目标路径自身命中
     凭据黑名单（.env/私钥等）直接拒绝。
+
+    遍历按 basename 全深度跳过 node_modules/.git/target 等依赖与构建产物
+    目录（rg 同款默认；直接以这些目录为 path 起搜仍可进入）。
     """
     import fnmatch
 
@@ -84,7 +133,11 @@ async def enhanced_search(
     pattern = re.compile(query if use_regex else re.escape(query), flags)
 
     allowed, reason, resolved = _check_workspace_path(
-        path, workspace, project_root, operation="search"
+        path,
+        workspace,
+        project_root,
+        operation="search",
+        authorized_read_zones=authorized_read_zones,
     )
     if not allowed or resolved is None:
         return ToolResult.failure_result(reason)
@@ -119,29 +172,31 @@ async def enhanced_search(
                 nonlocal truncated_reason
                 truncated_reason = f"遍历超时（>{timeout_seconds:.0f}s），结果可能不完整"
                 return
-            if prune:
-                dirs[:] = [d for d in dirs if os.path.normcase(str(Path(root) / d)) not in prune]
+            dirs[:] = _walk_prune_dirs(root, dirs, prune)
             if search_type == "filename":
                 for fname in files:
                     if not fnmatch.fnmatch(fname, file_pattern):
                         continue
-                    file_path = Path(root) / fname
+                    # 先匹配后敏感判定（纯换序，输出等价）：匹配是纯内存操作，
+                    # 敏感判定每文件一次 resolve 系统调用——十万级文件树下
+                    # 先判定会把整树遍历从秒级拖到近墙钟预算。
+                    if not pattern.search(fname):
+                        continue
                     # 凭据类文件不进结果（遍历场景跳过而非整体失败：walk 会
                     # 顺路碰到 .env，跳过才符合"搜索不回传凭据"）
-                    if _sensitive_file_reason(file_path.resolve()) is not None:
+                    if _sensitive_file_reason((Path(root) / fname).resolve()) is not None:
                         continue
-                    if pattern.search(fname):
-                        results.append(
-                            {
-                                "file_path": str(file_path),
-                                "line_number": 0,
-                                "content": fname,
-                                "context_before": [],
-                                "context_after": [],
-                            }
-                        )
-                        if len(results) >= max_results:
-                            return
+                    results.append(
+                        {
+                            "file_path": str(Path(root) / fname),
+                            "line_number": 0,
+                            "content": fname,
+                            "context_before": [],
+                            "context_after": [],
+                        }
+                    )
+                    if len(results) >= max_results:
+                        return
             else:
                 for fname in files:
                     if not fnmatch.fnmatch(fname, file_pattern):

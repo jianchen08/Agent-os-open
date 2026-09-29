@@ -4,11 +4,13 @@
 域界定（docs/working/U13终态两写域界定_20260906.md §二）：分歧行仲裁依据 =
 pipeline_state.task.status 投影（谁持证据谁裁决）。断行为不断实现：
 
-- classify_orphan_run 纯函数断 输入(runs 侧终态, 投影终态) → 调和裁决三值
-  （completed 权威 / failed 对齐 / 不裁），参数化 ≥2 组有区分度输入。
-- ADR 2026-09-14 翻案扩规：runs 侧权威终态 × 投影未决 → 裁决收束
-  （completed → completed 补落+补通知；cancelled/failed → failed 对齐）；
-  真最新 run 在飞（running）/可恢复（suspended）不裁。
+- classify_orphan_run 纯函数断 输入(runs 侧终态, 投影终态) → 调和裁决四值
+  （completed 权威 / failed 对齐 / pending_evaluation 待评估 / 不裁），
+  参数化 ≥2 组有区分度输入。
+- ADR 2026-09-14 翻案扩规的 failed/cancelled 对齐面保留；ADR 2026-09-28
+  修订：runs completed × 投影未决不再托底裁 completed（完成唯一判据 =
+  评估通过，用户裁定）→ 落 pending_evaluation 零派发；真最新 run 在飞
+  （running）/可恢复（suspended）不裁。
 - reconcile_startup 断 能力调用 → emit_domain 载荷与投影补落（合成假件只替
   内核能力通道——外部依赖）；healthy 行零调和、多 run 历史取最新不误伤。
 - events 派生仲裁：run.failed + 投影 completed/cancelled 终态证据 → 不派生
@@ -193,22 +195,24 @@ def test_classify_healthy_or_ambiguous_rows_never_touched(mod, run_status: str, 
 
 
 @pytest.mark.parametrize(
-    ("run_status", "task_status"),
+    ("run_status", "task_status", "expected"),
     [
-        # ADR 2026-09-14 翻案扩规：runs 侧权威终态 completed × 投影未决 →
-        # completed 裁决（run 真做完而收尾投影写丢失；评估闸门对死 run 永不再
-        # 结论，保守不裁 = 幽灵「执行中」永久悬挂——BUG-2b 面板幽灵残留根因）
-        ("completed", "running"),
-        ("completed", "pending"),
-        ("completed", "evaluating"),
-        ("completed", "pending_evaluation"),
-        ("completed", ""),
+        # ADR 2026-09-28 修订（废 0914 runs 托底）：run 正常收尾 × 投影未决 →
+        # pending_evaluation——完成唯一判据 = 评估通过，run completed 不是完成
+        # 证据（事故 2026-09-28：熔断收尾的 run 被托底裁 completed 并向父管道
+        # 假通知「已完成 ✅」，而验收产物从未产出、task_evaluate 从未被调）
+        ("completed", "running", "pending_evaluation"),
+        ("completed", "pending", "pending_evaluation"),
+        ("completed", "evaluating", "pending_evaluation"),
+        ("completed", "", "pending_evaluation"),
+        # 已调和产物幂等跳过（on_load 高频触发——合宿成员集变化即 respawn，不 churn）
+        ("completed", "pending_evaluation", None),
     ],
 )
-def test_classify_authoritative_run_completed_adjudicates_completed(
-    mod, run_status: str, task_status: str
+def test_classify_run_completed_undecided_lands_pending_evaluation(
+    mod, run_status: str, task_status: str, expected: str | None
 ) -> None:
-    assert mod.reconcile.classify_orphan_run(run_status, task_status) == "completed"
+    assert mod.reconcile.classify_orphan_run(run_status, task_status) == expected
 
 
 @pytest.mark.parametrize(
@@ -246,21 +250,24 @@ def test_classify_inflight_or_resumable_run_never_adjudicated(
 
 
 def test_classify_output_domain_and_authority_invariant(mod) -> None:
-    # 性质断言：裁决值域封闭于 {completed, failed, None}；completed 裁决来源
-    # 二值封闭——投影 completed 权威（runs failed/suspended）∨ runs 侧权威
-    # completed × 未决投影（ADR 2026-09-14），其余组合造不出 completed
+    # 性质断言：裁决值域封闭；completed 裁决唯一来源 = 投影 completed（评估
+    # 通过证据）× runs failed/suspended——runs completed 永远造不出 completed
+    # （ADR 2026-09-28：run 正常收尾不是完成证据）；pending_evaluation 唯一
+    # 来源 = runs completed × 未决投影（不含已调和的 pending_evaluation 自身）
     for run_status in ("running", "suspended", "failed", "completed", "cancelled"):
-        for task_status in ("running", "completed", "failed", "stopped", ""):
+        for task_status in (
+            "running", "completed", "failed", "stopped", "",
+            "pending", "evaluating", "pending_evaluation",
+        ):
             verdict = mod.reconcile.classify_orphan_run(run_status, task_status)
-            assert verdict in ("completed", "failed", None)
+            assert verdict in ("completed", "failed", "pending_evaluation", None)
             if verdict == "completed":
-                assert (
-                    task_status == "completed" and run_status in ("failed", "suspended")
-                ) or (
-                    run_status == "completed"
-                    and task_status in ("", "running", "pending", "evaluating", "pending_evaluation")
-                )
-    assert mod.reconcile.classify_orphan_run("completed", "completed") != "completed"
+                assert task_status == "completed"
+                assert run_status in ("failed", "suspended")
+            if verdict == "pending_evaluation":
+                assert run_status == "completed"
+                assert task_status in ("", "running", "pending", "evaluating")
+    assert mod.reconcile.classify_orphan_run("completed", "completed") is None
 
 
 # ═══════════════════════════════════════════════════════════
@@ -316,25 +323,21 @@ async def test_reconcile_stop_suspend_scenario_aligns_completed(mod) -> None:
     assert emitted[0][1]["event"] == "task_completed"
 
 
-async def test_reconcile_authoritative_completed_run_backfills_and_notifies(mod) -> None:
-    # BUG-2b 幽灵面（ADR 2026-09-14）：run 真做完（runs 侧权威 completed）而
-    # 收尾投影写丢失（投影停 running）→ 补落 completed + 补派完成通知
-    #（合成事件携带调和后投影 state 载荷，派生链免回查）
+async def test_reconcile_run_completed_undecided_lands_pending_evaluation_no_notify(mod) -> None:
+    # 事故 2026-09-28 回归（ADR 2026-09-28 废 0914 runs 托底）：run 正常收尾
+    # 而投影未决 → 只落 pending_evaluation，零派发不清挂号——完成通知唯一
+    # 来源 = 评估通过的 task_completed 派生链
     state, runs_cap, bus = _caps(
         rows=[_task_row("pipe-k", "running")],
         runs=[_run("completed", "pipe-k")],
     )
     reconciled = await mod.reconcile.reconcile_startup(state, runs_cap, bus)
-    assert [r["verdict"] for r in reconciled] == ["completed"]
+    assert [r["verdict"] for r in reconciled] == ["pending_evaluation"]
     updates = [c for c in state.calls if c[0] == "update"]
-    assert any(
-        c[1] == {"pipeline_id": "pipe-k", "fields": {"task.status": "completed"}}
-        for c in updates
-    )
-    emitted = [c for c in bus.calls if c[0] == "emit_domain"]
-    assert len(emitted) == 1
-    assert emitted[0][1]["event"] == "task_completed"
-    assert emitted[0][1]["tags"]["task_id"] == "pipe-k"
+    assert updates == [
+        ("update", {"pipeline_id": "pipe-k", "fields": {"task.status": "pending_evaluation"}})
+    ]
+    assert [c for c in bus.calls if c[0] == "emit_domain"] == []
 
 
 async def test_reconcile_cancelled_run_aligns_failed_projection_and_notifies(mod) -> None:
@@ -492,12 +495,11 @@ def test_derive_run_failed_without_terminal_evidence_still_reports(mod) -> None:
     assert [name for name, _ in derived] == ["task_failed"]
 
 
-async def test_reconcile_completed_backfill_failure_skips_row(mod) -> None:
-    """completed 权威裁决但投影补落失败 → 该行留痕跳过，不派发合成事件（155-160）。
+async def test_reconcile_pending_evaluation_backfill_failure_skips_row(mod) -> None:
+    """待评估补落失败 → 该行留痕跳过，不计数已调和（幂等续扫语义）。
 
-    契约：补落失败时投影仍是旧值（未决），若继续派发完成通知会出现
-    「通知说完成、投影读不到 completed」的两套账；故失败即 continue，
-    留待下一轮扫描重试（启动扫描是兜底面，不阻断装载）。
+    契约：写失败时投影仍是旧值（未决），留待下一轮扫描重试（启动扫描是
+    兜底面，不阻断装载）；该形态本就零派发，无「两套账」风险。
     """
     state, runs_cap, bus = _caps(
         rows=[_task_row("pipe-fail", "running")],
@@ -510,13 +512,11 @@ async def test_reconcile_completed_backfill_failure_skips_row(mod) -> None:
     assert reconciled == [], "补落失败的行不得计入已调和"
     # 补落尝试确实发生过（失败不是「压根没写」）
     assert any(c[0] == "update" for c in state.calls)
-    assert [c for c in bus.calls if c[0] == "emit_domain"] == [], (
-        "补落失败后不得派发完成通知（否则两套账）"
-    )
+    assert [c for c in bus.calls if c[0] == "emit_domain"] == []
 
 
 async def test_reconcile_continues_scan_after_backfill_failure(mod) -> None:
-    """对照组：一行补落失败不影响后续行调和（留痕续扫语义）。"""
+    """对照组：一行待评估补落失败不影响后续行调和（留痕续扫语义）。"""
     class _PartialUpdateCapability(_FakeCapability):
         """update 对指定 pipeline 抛错，其余成功（同一能力面的局部故障）。"""
 
@@ -542,4 +542,5 @@ async def test_reconcile_continues_scan_after_backfill_failure(mod) -> None:
     reconciled = await mod.reconcile.reconcile_startup(state, runs_cap, bus)
 
     assert [r["pipeline_id"] for r in reconciled] == ["pipe-good"]
-    assert [r["verdict"] for r in reconciled] == ["completed"]
+    assert [r["verdict"] for r in reconciled] == ["pending_evaluation"]
+    assert [c for c in bus.calls if c[0] == "emit_domain"] == []

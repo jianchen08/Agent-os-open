@@ -13,15 +13,13 @@ add_plugin_dir("core", "tool_core")
 
 修复:
   1. 删除这三条 target=end 路由
-  2. tool_core 新增 _check_tool_blocked：执行工具前统一检查 level/isolation/
-     security 三类拦截决策，被拦截的工具转为 success=False 的失败结果返回
-     给 LLM，让 LLM 自行调整策略，管道继续流转。
+  2. 拦截的工具转为 success=False 的失败结果返回给 LLM，让 LLM 自行调整
+     策略，管道继续流转。
 
-2026-08-21 更新：旧 default.yaml 等 0.1 过渡期管道配置已整体删除，
-现役唯一管道为 autonomous.yaml（G10 DSL）。原 TestCheckToolBlocked 六个
-Python 行为用例随 ToolCore Python 实现退役（0.2 迁移为 Rust native 插件，
-拦截逻辑在 plugins/shared/pipeline/core/tool_core/src/types.rs::check_tool_blocked）
-一并删除，契约由 Rust 侧单测承接。
+现状（ADR 2026-09-28 结果预填）：拦截方（guards/tool_schema_validator）直出
+预定拒绝结果 pre_decided_results，tool_core 命中即跳过执行并统一整形——
+执法查表（check_tool_blocked）已随机制退役，工具级拦截不终结管道的契约
+由 tool_core Rust 侧幂等单测 + 各拦截方插件测试承接。
 """
 from pathlib import Path
 

@@ -1,18 +1,18 @@
 """编排解析与完备性校验 —— task_submit 编排运行面的域逻辑（模式体系 P2）。
 
-职责与真值（docs/working/模式体系落地设计_20260915.md §3.3/§3.5/§4.5/§十一）：
+职责与真值（docs/working/模式包工作模式设计_20260928.md D2/一管一配置）：
 
-- **编排键 vs pipeline_id 概念分离**：编排键（``mode_X/<编排名>`` 或
-  ``autonomous``）= 管道**定义**（函数）；pipeline_id = 运行**实例** ID
+- **编排键 vs pipeline_id 概念分离**：编排键（``config/pipelines`` 登记名
+  或 ``autonomous``）= 管道**定义**（函数）；pipeline_id = 运行**实例** ID
   （实例化后才由引擎生成）。本模块只解析编排键，从不生成 pipeline_id。
-- **三级解析**（§3.3）：
+- **两级解析**：
   - ① 任务显式带编排键 → 直接命中使用；未命中（键不存在/插件禁用）=
     fail-closed 结构化报错（含「编排键不存在」+ 当前可用编排提示），
-    **禁止静默落③**（显式意图落错管道比报错糟，§十一 H3①）；
-  - ② 无显式键但有 mode 键 → 编排候选 = 该模式包 pipelines（文件头
-    task_kinds 与任务 kind 匹配优先）；mode 键是用户显式约束（限定候选）
-    而非门槛（§十一 H4）——候选为空或意图不明（多个候选无法区分）时落③；
-  - ③ 兜底 ``autonomous``（共享默认管道是系统侧唯一真值）。
+    **禁止静默落②**（显式意图落错管道比报错糟）；
+  - ② 兜底 ``autonomous``（共享默认管道是系统侧唯一真值）。
+  包内 ``pipelines/`` 编排清单目录已退役（D2 同名异物消除）——编排候选
+  唯一来源 = ``config/pipelines`` 登记处，mode 键不再限定候选（模式控制
+  经 execution_context.mode 透传，设计 D6）。
 - **完备性校验**（§3.5，派发期、实例化前）：初始输入集 ⊇ 所选编排的
   派生输入集；派生输入集 = 编排 yaml 引用的 step 集合并集其 manifest
   ``capabilities.steps[].required_state_inputs`` 静态声明（H2 地基）。
@@ -20,19 +20,13 @@
   由调用方门口拒派。
 - **任务记录增记编排键**（§4.5）：解析结果由调用方写入出生 state
   （``task.orchestration``）作审计/回放/归因锚点。
-
-取数边界（与内核侧并行工作的让行约定）：模式包目录扫描注册（agents/
-pipelines 约定子目录）在内核侧另行开发——注册表可用前，本模块以本地读
-目录方式实现编排键发现与 step 声明索引（factory + 用户插件根双根，用户赢；
-yaml 解析失败降级跳过并留 warning 痕迹）。内核扫描注册接线后，本模块的
-发现/索引两函数应切换为 registry 取数（函数签名不变，调用方无感）。
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -41,9 +35,6 @@ import yaml
 logger = logging.getLogger(__name__)
 
 AUTONOMOUS_ORCHESTRATION_KEY = "autonomous"
-
-# 编排定义 yaml 的文件头路由标注（§2.3：文件头 task_kinds 标注参与解析链②路由）。
-_TASK_KINDS_KEY = "task_kinds"
 
 # 管道 DSL 的动态核心步骤键（P1-1 声明驱动缺省：initial_state.core_plugin 缺省、
 # post 路由 set.core_plugin 每轮重写——值即 step 引用，与 steps 列表同 vocabulary）。
@@ -81,35 +72,28 @@ class OrchestrationDefinition:
     key: str
     path: str
     raw: dict[str, Any]
-    task_kinds: tuple[str, ...] = field(default=())
 
 
 def discover_orchestrations(
     *,
     pipelines_dir: str | os.PathLike[str] | None = None,
-    modes_root: str | os.PathLike[str] | None = None,
-    user_modes_root: str | os.PathLike[str] | None = None,
 ) -> dict[str, OrchestrationDefinition]:
-    """发现全部可用编排键 → 定义（本地目录扫描；注册表可用后切 registry 取数）。
+    """发现全部可用编排键 → 定义（config/pipelines 登记处扫描，一管一配置唯一来源）。
 
-    三个来源（后写覆盖先写，用户赢——对齐 §2.2 双根兜底）：
-    - ``pipelines_dir``（缺省仓库 ``config/pipelines/*.yaml``）→ 系统键 = 文件名 stem
-      （如 ``autonomous``，系统命名空间裸键，§十一 M6）；
-    - ``modes_root``（缺省出厂种子 ``plugins/shared/modes/*/pipelines/*.yaml``）
-      → 模式键 = ``<模式包目录名>/<文件名 stem>``；
-    - ``user_modes_root``（缺省 ``<USER_ROOT>/plugins/modes/*/pipelines``）→ 同键名
-      覆盖 factory（同 id 用户赢）。
+    ``pipelines_dir``（缺省仓库 ``config/pipelines/*.yaml``）→ 系统键 = 文件名
+    stem（如 ``autonomous``/``roleplay``，登记名即编排键）。包内 ``pipelines/``
+    编排清单目录已退役（D2）——本函数不扫描模式包目录。
 
     yaml 解析失败 → warning 留痕后跳过该文件（发现面聚合的既有降级口径，
     与 reconcile 读面故障同风格）；解析成功的键恒可解析使用。
     """
     definitions: dict[str, OrchestrationDefinition] = {}
 
-    def _collect(directory: Path, key_prefix: str) -> None:
+    def _collect(directory: Path) -> None:
         if not directory.is_dir():
             return
         for yaml_path in sorted(directory.glob("*.yaml")):
-            key = f"{key_prefix}{yaml_path.stem}"
+            key = yaml_path.stem
             try:
                 raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
             except (OSError, yaml.YAMLError) as exc:
@@ -125,51 +109,29 @@ def discover_orchestrations(
                     key, yaml_path,
                 )
                 continue
-            kinds = raw.get(_TASK_KINDS_KEY)
             definitions[key] = OrchestrationDefinition(
-                key=key,
-                path=str(yaml_path),
-                raw=raw,
-                task_kinds=tuple(
-                    str(k) for k in kinds if isinstance(k, str)
-                ) if isinstance(kinds, list) else (),
+                key=key, path=str(yaml_path), raw=raw,
             )
 
-    root = Path(pipelines_dir) if pipelines_dir is not None else _repo_pipelines_dir()
-    _collect(root, "")
-    factory_modes = Path(modes_root) if modes_root is not None else _factory_modes_root()
-    if factory_modes.is_dir():
-        for package in sorted(factory_modes.iterdir()):
-            if package.is_dir():
-                _collect(package / "pipelines", f"{package.name}/")
-    if user_modes_root is None:
-        user_root = _user_modes_root()
-    else:
-        user_root = Path(user_modes_root)
-    if user_root is not None and user_root.is_dir():
-        for package in sorted(user_root.iterdir()):
-            if package.is_dir():
-                _collect(package / "pipelines", f"{package.name}/")
+    _collect(Path(pipelines_dir) if pipelines_dir is not None else _repo_pipelines_dir())
     return definitions
 
 
 def resolve_orchestration(
     *,
     explicit_key: str = "",
-    mode_key: str = "",
-    task_kind: str = "",
     orchestrations: dict[str, OrchestrationDefinition] | None = None,
 ) -> OrchestrationDefinition:
-    """三级解析编排键（§3.3）：① 显式 → ② mode 限定候选 → ③ autonomous。
+    """两级解析编排键：① 显式 → ② autonomous 兜底。
 
     - ① ``explicit_key`` 非空：命中即用；未命中抛
-      OrchestrationKeyNotFoundError（fail-closed，含可用编排提示，不落③）。
+      OrchestrationKeyNotFoundError（fail-closed，含可用编排提示，不落②）。
       主 agent 意图分析产出的键经 task_submit 显式提交，走本路同款校验——
       本函数不实现意图分析本身（提示词物料层，不在解析面）。
-    - ② ``mode_key`` 非空（且无显式键）：候选 = 该模式包名下编排；task_kinds
-      含 ``task_kind`` 者优先；唯一候选/唯一命中才选定——候选为空或意图不明
-      （多候选无法区分）落③（H4：mode 键是约束非门槛，③只接意图不明）。
-    - ③ ``autonomous``；缺失同样抛错（不静默造兜底）。
+    - ② ``autonomous``；缺失同样抛错（不静默造兜底）。
+
+    mode 键不再限定编排候选（包内编排清单退役，D2）：模式控制经
+    execution_context.mode 透传给消费面（设计 D6），与管道选择解耦。
     """
     definitions = orchestrations if orchestrations is not None else discover_orchestrations()
     if explicit_key:
@@ -182,28 +144,6 @@ def resolve_orchestration(
                 available_orchestrations=sorted(definitions),
             )
         return definition
-
-    if mode_key:
-        candidates = [
-            key
-            for key in definitions
-            if key == mode_key or key.startswith(f"{mode_key}/")
-        ]
-        matched = (
-            [k for k in candidates if task_kind in definitions[k].task_kinds]
-            if task_kind
-            else []
-        )
-        if len(matched) == 1:
-            return definitions[matched[0]]
-        if not matched and len(candidates) == 1:
-            return definitions[candidates[0]]
-        if len(candidates) > 1:
-            logger.info(
-                "[orchestration] mode 键下编排候选无法区分意图，落兜底 %s"
-                " | mode=%s | candidates=%s | task_kind=%s",
-                AUTONOMOUS_ORCHESTRATION_KEY, mode_key, candidates, task_kind or "-",
-            )
 
     fallback = definitions.get(AUTONOMOUS_ORCHESTRATION_KEY)
     if fallback is None:
@@ -360,22 +300,8 @@ def _repo_pipelines_dir() -> Path:
     return _repo_root() / "config" / "pipelines"
 
 
-def _factory_modes_root() -> Path:
-    return _repo_root() / "plugins" / "shared" / "modes"
-
-
 def _factory_pipeline_plugins_root() -> Path:
     return _repo_root() / "plugins" / "shared" / "pipeline"
-
-
-def _user_modes_root() -> Path | None:
-    """用户模式包根（``<USER_ROOT>/plugins/modes``）；用户空间不可得 → None。"""
-    try:
-        import user_space  # noqa: PLC0415 — plugins/shared 平铺模块（sidecar 自举注入）
-    except ImportError:
-        return None
-    plugins_root = user_space.user_plugins_dir()
-    return plugins_root / "modes" if plugins_root is not None else None
 
 
 def json_load(path: Path) -> dict[str, Any]:

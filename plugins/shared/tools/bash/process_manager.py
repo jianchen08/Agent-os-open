@@ -65,6 +65,24 @@ def _wsl_bridge_env_pairs() -> list[str]:
     return pairs
 
 
+def _wsl_runtime_env_pairs(exec_backend: dict[str, Any]) -> list[str]:
+    """任务运行时 env：副作用约束进 workspace（与 WslNativeProvider 同语义）。
+
+    发行版 home 是持久面（VHDX），pip --user / XDG / npm 缓存写进去无清理。
+    注入后主流工具副作用落 workspace/.task_runtime/（NTFS，随任务空间管理）。
+    workspace_wsl 空（异常形态）不注入，防 env 值指向文件系统根。
+    """
+    workspace_wsl = str(exec_backend.get("workspace_wsl", "") or "")
+    if not workspace_wsl:
+        return []
+    rt = f"{workspace_wsl.rstrip('/')}/.task_runtime"
+    return [
+        f"XDG_CACHE_HOME={rt}/cache",
+        f"npm_config_cache={rt}/npm-cache",
+        f"PYTHONUSERBASE={rt}/pyuser",
+    ]
+
+
 class ProcessLogReadError(RuntimeError):
     """日志文件存在但读取失败（IO 层故障）。
 
@@ -473,9 +491,11 @@ class ProcessManager:
         # 被外层改写——后台进程 echo $$ 协议全依赖逐字传递，禁用 `--`）
         argv = [*_wsl_transport(exec_backend), "--cd", working_dir_mapped, "--exec"]
         bridge_pairs = _wsl_bridge_env_pairs()
-        if bridge_pairs:
+        runtime_pairs = _wsl_runtime_env_pairs(exec_backend)
+        if bridge_pairs or runtime_pairs:
             argv.append("env")
             argv.extend(bridge_pairs)
+            argv.extend(runtime_pairs)
         argv.extend(str(x) for x in exec_backend.get("sandbox_cmd", []))
         # 执行壳 bash：发行版 dash 对 set -o pipefail 致命退出（2026-09-14 实测）
         argv.extend(["bash", "-c", self._wrap_container_command(command, shell="bash")])

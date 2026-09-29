@@ -170,6 +170,44 @@ describe('T11：面板入口声明驱动', () => {
     expect(openWorkspacePanelByPath('/agents')).toBe(false)
   })
 
+  it('onboarding_service 声明：/p/get_started → onboarding_panel 页签（引导入口跳转链）', () => {
+    contributionRegistry.loadFromSchema({
+      plugin_contributes: [
+        {
+          plugin_id: 'onboarding_service',
+          plugin_name: 'Onboarding Service',
+          contributes: {
+            pages: [
+              {
+                id: 'get_started',
+                title: '开始使用',
+                icon: '🚀',
+                space: 'workspace',
+                slot: 'tab',
+                order: 1,
+                path: '/p/get_started',
+                widget: 'onboarding_panel',
+              },
+            ],
+          },
+        },
+      ],
+      plugin_configs: [],
+    })
+    expect(openWorkspacePanelByPath('/p/get_started')).toBe(true)
+    const tab = useLayoutModeStore.getState().workspaceTabs.find((t) =>
+      t.id.startsWith('ws-plugin-get_started'),
+    )
+    expect(tab).toBeDefined()
+    expect(tab?.component).toBe('onboarding_panel')
+    expect(tab?.moduleId).toBe('__plugin_onboarding_service__')
+  })
+
+  it('onboarding_service 禁用（声明移除）→ /p/get_started 不再命中', () => {
+    seedSchema('none')
+    expect(openWorkspacePanelByPath('/p/get_started')).toBe(false)
+  })
+
   it('BUG-11 回归：先注册的无 path 同名页不吞掉 /tasks → 点「打开任务管理」面板展开', () => {
     // 生产 schema 实况：debug_center（id=tasks，无 path）在 plugin_contributes 中
     // 先于 task_service（id=tasks，path=/tasks）。裸 id 去重会把后者静默丢弃，

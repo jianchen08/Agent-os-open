@@ -24,6 +24,9 @@ retrieval/tags（走 _retrieve_by_tags）。
 基础设施接线（与兄弟插件共享同一形态）：
 - 模块级 ``_memory_backend: IMemoryBackend`` 由 server.py on_load 注入，
   供 {{vector:path}}/{{hybrid:...}} 等变量模式的语义检索使用（_memory_backend.search）。
+- 构造参数 ``catalog_fetcher``（server.py 接线）经 tool-executor 调
+  agent_manager 的 mode.list 服务，供 {{mode_catalog}} 模式目录渲染
+  （registry 单源，设计 D5；未接线/取数失败降级空串）。
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ import asyncio
 import fnmatch
 import logging
 import re
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -63,6 +67,91 @@ def set_memory_backend(backend: Any | None) -> None:
     """
     global _memory_backend
     _memory_backend = backend
+
+
+# 模式目录取数通道：async () -> mode.list 服务原始返回；实现 = server.py 经
+# tool-executor 显式 plugin_id 调 agent_manager 的 mode.list（registry 单源，
+# 设计 D5）。None = 通道未接线（{{mode_catalog}} 降级空串）。
+CatalogFetcher = Callable[[], Awaitable[Any]]
+
+
+def _unwrap_mode_catalog(res: Any) -> list[dict[str, Any]]:
+    """mode.list 返回信封解析：容忍 {"modes": [...]} / {"data": {"modes": [...]}}。
+
+    非 dict / modes 非列表 = 服务返回无效，抛 ValueError（调用方降级空串）；
+    条目须含非空字符串 mode 键，其余坏条目剔除。
+    """
+    data = res.get("data") if isinstance(res, Mapping) else None
+    payload = data if isinstance(data, Mapping) else res
+    modes = payload.get("modes") if isinstance(payload, Mapping) else None
+    if not isinstance(modes, list):
+        raise ValueError(f"mode.list 返回无效目录: {str(res)[:200]}")
+    return [
+        m
+        for m in modes
+        if isinstance(m, dict) and isinstance(m.get("mode"), str) and m["mode"].strip()
+    ]
+
+
+# 管道消费情境 → 渲染标签（D2 多管列表化；固定序：对话链在前，任务链在后）
+_PIPELINE_CONTEXT_LABELS: list[tuple[str, str]] = [("conversation", "对话链"), ("task", "任务链")]
+_KNOWN_PIPELINE_CONTEXTS = frozenset(context for context, _label in _PIPELINE_CONTEXT_LABELS)
+
+
+def _render_pipeline_route(entry: dict[str, Any]) -> str:
+    """目录条目路由段：pipelines 按 context 分组（声明序无关，固定序渲染），
+    附 chain.entry 入口执行者；未声明 pipelines → 缺省 pipeline=autonomous。"""
+    pipelines = entry.get("pipelines")
+    declared = [
+        (str(p.get("context") or ""), str(p.get("name") or ""))
+        for p in pipelines
+        if isinstance(p, Mapping) and isinstance(p.get("name"), str)
+    ] if isinstance(pipelines, list) else []
+    if declared:
+        ordered = [
+            (label, name)
+            for context, label in _PIPELINE_CONTEXT_LABELS
+            for ctx, name in declared
+            if ctx == context
+        ]
+        # 声明面 schema 已拒未知 context；渲染侧容忍兜底（原样透出，不静默丢）
+        ordered.extend((ctx, name) for ctx, name in declared if ctx not in _KNOWN_PIPELINE_CONTEXTS)
+        route = "路由: " + "，".join(f"{label}={name}" for label, name in ordered)
+    else:
+        route = "路由: pipeline=autonomous"
+    chain = entry.get("chain")
+    chain_entry = chain.get("entry") if isinstance(chain, Mapping) else None
+    if isinstance(chain_entry, str) and chain_entry.strip():
+        route += f"，入口执行者={chain_entry.strip()}"
+    return route
+
+
+def _render_mode_catalog(entries: list[dict[str, Any]], current_mode: str) -> str:
+    """渲染模式目录文本（纯函数；{{mode_catalog}} 唯一模式知识注入面，设计 D10）。
+
+    条目 = mode 键 + name + description + 路由（pipelines 列表按消费情境分组 +
+    chain.entry 入口执行者）——仅此两件；description/chain.entry 缺席的段
+    自然省略。按 mode 键排序确定性渲染（同一输入恒同一输出——system prompt
+    前缀缓存稳定依赖此）。路由按 context 固定序（对话链→任务链）分组列出；
+    pipelines 未声明 = 空列表 → 渲染缺省 pipeline=autonomous（共享管道不啰嗦）。
+    current_mode 非空 → 顶部一行当前模式标记（主 agent 编排聚焦）；目录为空 =
+    空串（无模式包的合法形态零注入）。
+    """
+    if not entries:
+        return ""
+    lines = ["## 模式目录"]
+    if current_mode:
+        lines.append(f"本会话/任务以 {current_mode} 模式执行，按该模式条目路由编排。")
+    lines.append("")
+    for e in sorted(entries, key=lambda item: str(item.get("mode") or "")):
+        mode = str(e.get("mode") or "")
+        parts = [mode, str(e.get("name") or mode)]
+        desc = e.get("description")
+        if isinstance(desc, str) and desc.strip():
+            parts.append(desc.strip())
+        parts.append(_render_pipeline_route(e))
+        lines.append("- " + " | ".join(parts))
+    return "\n".join(lines)
 
 
 # 占位符正则：匹配 {{xxx}} 或 {{xxx:yyy}} 格式
@@ -102,7 +191,11 @@ class PromptBuildPlugin(IInputPlugin):
         _config: 插件配置字典
     """
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        catalog_fetcher: CatalogFetcher | None = None,
+    ) -> None:
         """初始化提示词构建插件。
 
         Args:
@@ -112,8 +205,11 @@ class PromptBuildPlugin(IInputPlugin):
                 - placeholder_max_depth: 占位符递归解析最大深度（默认 5）
                   用于支持 {{path:partial.md}} 中嵌套 {{timestamp}} 这种组合。
                   0 表示关闭递归（单趟扁平替换，行为与旧版一致）。
+            catalog_fetcher: 模式目录取数通道（server.py 接线 mode.list 服务
+                调用；缺省 None = 通道未接线，{{mode_catalog}} 降级空串）。
         """
         self._config = config or {}
+        self._catalog_fetcher = catalog_fetcher
         self._placeholder_max_depth: int = int(self._config.get("placeholder_max_depth", 5))
 
     @property
@@ -131,7 +227,8 @@ class PromptBuildPlugin(IInputPlugin):
         """解析占位符内容，返回 (类型名, 参数字典)。
 
         支持的格式：
-          - 无参数：{{session}}、{{timestamp}}、{{workspace}}、{{project_root}}
+          - 无参数：{{session}}、{{timestamp}}、{{workspace}}、{{project_root}}、
+            {{session_workspace}}、{{mode_catalog}}
           - 带参数：{{timestamp:%Y-%m-%d}}、{{path:文件路径}}、{{content:文本}}
           - 键值对：{{retrieval:tags=a,b|top_k=5}}、{{vector:path:x|top_k=3}} 等
 
@@ -141,7 +238,7 @@ class PromptBuildPlugin(IInputPlugin):
         Returns:
             (类型名, 参数字典) 二元组
         """
-        if content in ("session", "workspace", "project_root"):
+        if content in ("session", "workspace", "project_root", "session_workspace", "mode_catalog"):
             return content, {}
         if content == "timestamp":
             return "timestamp", {}
@@ -164,6 +261,13 @@ class PromptBuildPlugin(IInputPlugin):
             else:
                 params["path"] = args_str
             return "path", params
+        if type_name == "persona":
+            # {{persona:缺省路径}} = 人设注入点（state.context.persona_text 接管优先）
+            return "persona", {"persona": args_str}
+        if type_name == "state":
+            # {{state:键}} = 读 state 任意键文本（值由上游步骤写入，2026-09-28
+            # 状态统一标记机制注入面：解析步 render 回写 → 动态变量 items 引用）
+            return "state", {"state": args_str}
         if type_name == "content":
             return "content", {"content": args_str}
         params = {}
@@ -407,8 +511,8 @@ class PromptBuildPlugin(IInputPlugin):
                 content = "\n".join(result_parts)
 
         elif var_type == "path":
-            # path 类型：文件注入（base=系统项目根，见 _resolve_target_path）
-            # 绝对路径直接使用；相对路径基于系统项目根解析
+            # path 类型：文件注入（base=系统项目根；`./` 前缀=模式包根，
+            # 见 _resolve_target_path）。绝对路径直接使用。
             file_path = var_def.get("path", "")
             target = self._resolve_target_path(ctx, file_path)
             if target is not None and target.is_file():
@@ -430,16 +534,29 @@ class PromptBuildPlugin(IInputPlugin):
                     content = f'<files dir="{file_path}">\n{dir_content}\n</files>'
             else:
                 # 配置声明的注入路径不存在 = 注入落空，非空 path 须 warning 留痕
-                # （与本插件"未识别占位符""memory_service 缺失致知识注入落空"同口径）
+                # （与本插件"未识别占位符""memory_service 缺失致知识注入落空"同口径）。
+                # `./` 包内相对形态失败单列（包根缺失/包内目标不存在），
+                # 与系统根形态的"文件/目录不存在"可辨。
                 log_missing = logger.warning if file_path.strip() else logger.debug
-                log_missing(
-                    "[%s] path 类型变量解析失败（文件/目录不存在），知识注入落空"
-                    " | name=%s | path=%s | system_root=%s",
-                    self.name,
-                    var_name,
-                    file_path,
-                    self._system_root(),
-                )
+                if file_path.startswith("./"):
+                    log_missing(
+                        "[%s] path 类型变量解析失败（包内相对形态：state 包根缺失"
+                        "或包内文件/目录不存在），知识注入落空"
+                        " | name=%s | path=%s | agent_pack_root=%s",
+                        self.name,
+                        var_name,
+                        file_path,
+                        ctx.state.get("context.agent_pack_root", ""),
+                    )
+                else:
+                    log_missing(
+                        "[%s] path 类型变量解析失败（文件/目录不存在），知识注入落空"
+                        " | name=%s | path=%s | system_root=%s",
+                        self.name,
+                        var_name,
+                        file_path,
+                        self._system_root(),
+                    )
 
         elif var_type in ("reference", "content", ""):
             content = var_def.get("content", "") or var_def.get("value", "")
@@ -557,13 +674,16 @@ class PromptBuildPlugin(IInputPlugin):
     def _resolve_target_path(self, ctx: PluginContext, rel_path: str) -> Path | None:
         """把相对路径解析为最终目标 Path。
 
-        相对路径统一以系统项目根（_system_root）解析——配置声明的注入路径
+        `./` 前缀 = 包内相对形态：相对该 agent 所属模式包目录（context_build
+        经模式包注册表命中时写入 state.context.agent_pack_root）解析——包私有
+        物料随包分发，不落系统 config/ 树；无包根键/包根为空 → None。其余相对
+        路径统一以系统项目根（_system_root）解析——配置声明的注入路径
         （config/...、docs/...、skills/...）都相对系统仓库根，不随任务/会话
         工作空间漂移。绝对路径原样使用。解析后不存在 → None（由调用方
         warning 留痕）。
 
         Args:
-            ctx: 插件执行上下文（保留参数兼容签名；解析不依赖 state 路径键）
+            ctx: 插件执行上下文（`./` 形态读 state.context.agent_pack_root）
             rel_path: 相对或绝对路径
 
         Returns:
@@ -574,6 +694,12 @@ class PromptBuildPlugin(IInputPlugin):
         p = Path(rel_path)
         if p.is_absolute():
             return p
+        if rel_path.startswith("./"):
+            # 包内相对形态：包根缺失按不可解析处理（调用方按包内形态留痕）
+            pack_root = str(ctx.state.get("context.agent_pack_root", "") or "")
+            if not pack_root:
+                return None
+            return Path(pack_root) / rel_path[2:]
 
         root = self._system_root()
         if root is None:
@@ -594,12 +720,73 @@ class PromptBuildPlugin(IInputPlugin):
         """
         var_type, params = self._parse_placeholder(placeholder_content)
 
+        if var_type == "state":
+            # {{state:键}} = 读 state 任意键文本（通用出口，2026-09-28 状态统一
+            # 标记机制注入面：解析步写 context.character_state_text，动态变量
+            # items 引用此占位符每轮取新鲜值——消息尾部形态零前缀缓存损失）。
+            # 键无值/非字符串 = 空串。
+            raw = ctx.state.get(params.get("state", ""))
+            return raw if isinstance(raw, str) else ""
+
+        if var_type == "persona":
+            # {{persona:<缺省路径>}} = 人设注入点（通用机制，2026-09-28）：
+            # state.context.persona_text 优先（模式接管——mode_material_inject 按
+            # mode.yaml persona 声明从 execution_context 携带文本写入），缺省读
+            # 声明路径文件（主 agent 人设）。替换发生在占位符位置：提示词骨架/
+            # 其余段落不动，人设段单点换源。
+            override = str(ctx.state.get("context.persona_text", "") or "")
+            if override.strip():
+                return override
+            default_path = str(params.get("persona", "") or "")
+            target = self._resolve_target_path(ctx, default_path)
+            if target is not None and target.is_file():
+                try:
+                    return await asyncio.to_thread(target.read_text, "utf-8")
+                except Exception as e:  # noqa: BLE001 — 读失败降级空串（不阻断管道）
+                    logger.warning(
+                        "[%s] persona 缺省路径读取失败，已替换为空串 | path=%s | err=%s",
+                        self.name,
+                        default_path,
+                        e,
+                    )
+                    return ""
+            logger.warning(
+                "[%s] persona 缺省路径不可读且无接管文本，已替换为空串 | path=%s",
+                self.name,
+                default_path,
+            )
+            return ""
+
+        if var_type == "mode_catalog":
+            # {{mode_catalog}} = 模式目录（唯一模式知识注入面，设计 D10）：
+            # 条目 = 描述 + 路由，两态渲染（无 mode = 全目录 / 有 mode = 目录 +
+            # 当前模式标记），registry 单源取数（mode.list 服务），取数失败
+            # 降级空串 + warning（与模式物料降级同口径，不阻断提示词构建）。
+            return await self._resolve_mode_catalog(ctx)
+
         if var_type in ("workspace", "project_root"):
             # {{workspace}} / {{project_root}} = 实际项目目录（系统根，配置注入
             # 基准与 _resolve_target_path 同源）。state.workspace / state.project_root
             # 是任务/会话工作区（工具读写面），提示词语义要的是前者。
             pr = self._system_root()
             return str(pr) if pr else ""
+
+        if var_type == "session_workspace":
+            # {{session_workspace}} = 当前会话/任务工作空间（state.workspace，
+            # workspace_lifecycle init 写入、param_inject 注入工具参数的同源
+            # 锚点）。与 {{workspace}}（系统根）严格分名：种子提示词的工作空间
+            # 锚点行引用本占位符，模型对"我的工作空间在哪"的知情从工具结果
+            # 回显的偶发副作用变为稳定契约。state 无 workspace（管道未挂
+            # workspace_lifecycle / 解析失败）→ 空串（未知名静默清空同契约，
+            # 不注入错误锚点）+ warning 留痕。
+            ws = ctx.state.get("workspace", "")
+            if not ws:
+                logger.warning(
+                    "[%s] state.workspace 缺失，{{session_workspace}} 已替换为空串",
+                    self.name,
+                )
+                return ""
+            return str(ws)
 
         if var_type == "user_root":
             # {{user_root}} = 用户数据根（AGENTOS_USER_ROOT，装机版回落
@@ -630,6 +817,43 @@ class PromptBuildPlugin(IInputPlugin):
 
         session_id = ctx.state.get("context.session_id", "")
         return await self._resolve_single_var_content(ctx, var_def, session_id)
+
+    async def _resolve_mode_catalog(self, ctx: PluginContext) -> str:
+        """解析 {{mode_catalog}}：取数（mode.list 单源）→ 两态确定性渲染。
+
+        两态：state 无 execution_context.mode → 全模式目录；有 mode X →
+        目录 + 顶部当前模式标记（主 agent 编排聚焦）。两态各自稳定——
+        条目按 mode 键排序确定性渲染，system prompt 前缀缓存不受影响（设计
+        D10 缓存终局：前缀内替换点只有人设接管）。
+
+        取数通道未接线 / 调用失败 / 信封无效 → 空串 + warning 一次（降级
+        不阻断，与模式物料降级同口径）。
+
+        Args:
+            ctx: 插件执行上下文（读 execution_context.mode 判定两态）
+
+        Returns:
+            渲染后的目录文本，或空串（降级/无模式包）
+        """
+        if self._catalog_fetcher is None:
+            logger.warning(
+                "[%s] 模式目录取数通道未接线，{{mode_catalog}} 降级为空串", self.name
+            )
+            return ""
+        try:
+            raw = await self._catalog_fetcher()
+            entries = _unwrap_mode_catalog(raw)
+        except Exception as exc:  # noqa: BLE001 — 降级语义：取数失败不阻断提示词构建
+            logger.warning(
+                "[%s] mode.list 取数失败，{{mode_catalog}} 降级为空串 | err=%s",
+                self.name,
+                exc,
+            )
+            return ""
+        ec = ctx.state.get("execution_context")
+        mode = ec.get("mode") if isinstance(ec, Mapping) else None
+        current_mode = mode.strip() if isinstance(mode, str) else ""
+        return _render_mode_catalog(entries, current_mode)
 
     @staticmethod
     def _placeholder_var_def(var_type: str, params: dict[str, Any]) -> dict[str, Any] | None:

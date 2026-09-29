@@ -334,17 +334,12 @@ def test_http_handle_unexpected_error_returns_500(monkeypatch: pytest.MonkeyPatc
         raise RuntimeError("disk gone")
 
     fake_routes = types.ModuleType("routes_llm_config")
-    for name in (
-        "get_llm_config", "get_providers", "add_provider", "get_provider_types",
-        "get_llm_presets", "get_models", "add_model", "get_defaults", "save_defaults",
-        "get_remote_models", "update_provider", "delete_provider", "update_model",
-        "delete_model",
-    ):
+    for name in ("get_provider_types", "get_llm_presets", "get_remote_models"):
         setattr(fake_routes, name, _boom)
     monkeypatch.setitem(sys.modules, "routes_llm_config", fake_routes)
 
     result = _run(
-        mod.http_handle(path="/ext/llm_service/config/llm", method="GET")
+        mod.http_handle(path="/ext/llm_service/config/llm/presets", method="GET")
     )
 
     assert result["success"] is True  # 协议面成功信封，错误经 HTTP status 表达

@@ -147,14 +147,31 @@ async fn frame_loop_confirms_acks_tolerates_garbage_and_closes_gracefully() {
         other => panic!("畸形帧不得断连，实际: {other:?}"),
     }
 
-    // ④ 业务帧分发（no-op dispatcher）：路由正常，连接继续
+    // ④ 业务帧分发（no-op dispatcher）：路由正常，先回 user_input_ack(ok:true)
+    // （ADR 2026-09-29 回执契约），随后连接继续（心跳仍回 ack）。
     ws.send(Message::Text(
-        json!({"type": "user_input", "thread_id": "t-loop", "content": "hi"})
-            .to_string()
-            .into(),
+        json!({
+            "type": "user_input",
+            "thread_id": "t-loop",
+            "content": "hi",
+            "client_message_id": "cm-loop-1",
+        })
+        .to_string()
+        .into(),
     ))
     .await
     .unwrap();
+    let ua = next_frame(&mut ws).await;
+    match &ua {
+        Message::Text(t) => {
+            let v: Value = serde_json::from_str(t).unwrap();
+            assert_eq!(v["type"], "user_input_ack", "受理必须回执: {v}");
+            assert_eq!(v["ok"], true, "no-op 分发=受理: {v}");
+            assert_eq!(v["client_message_id"], "cm-loop-1");
+            assert_eq!(v["thread_id"], "t-loop");
+        }
+        other => panic!("user_input 应回 user_input_ack 文本帧，实际: {other:?}"),
+    }
     ws.send(Message::Text(
         json!({"type": "heartbeat"}).to_string().into(),
     ))

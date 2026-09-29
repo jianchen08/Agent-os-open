@@ -53,6 +53,7 @@ fn test_manifest(
         activation: None,
         persistent_fields: vec![],
         export_fields: vec![],
+        aux_venvs: Vec::new(),
         provides: None,
     }
 }
@@ -248,6 +249,7 @@ fn test_plugin_status_data_from_manifest() {
         activation: Some(agentos_core::traits::ActivationPolicy::Eager),
         persistent_fields: vec![],
         export_fields: vec![],
+        aux_venvs: Vec::new(),
         provides: None,
     };
 
@@ -326,6 +328,7 @@ fn test_eager_vs_lazy_distinction() {
         activation: Some(agentos_core::traits::ActivationPolicy::Eager),
         persistent_fields: vec![],
         export_fields: vec![],
+        aux_venvs: Vec::new(),
         provides: None,
     };
     let manifest_lazy = test_manifest("lazy_p", PluginType::Tool, None, vec![]);

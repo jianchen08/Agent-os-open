@@ -18,14 +18,17 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 from collections.abc import Callable
 from typing import Any
 
 from agentos_plugin_sdk.capability import CapabilityHandle
-from agentos_plugin_sdk.server import KernelChannel, McpServer
+from agentos_plugin_sdk.server import CALL_CONFIG_TRANSIENT_KEYS, KernelChannel, McpServer
 from agentos_plugin_sdk.types import LifecycleEvent, ResourceDef, ToolDef
+
+logger = logging.getLogger(__name__)
 
 
 class AgentOSPlugin:
@@ -56,6 +59,12 @@ class AgentOSPlugin:
         self.steps: dict[str, Callable[..., Any]] = {}
         # 管道钩子注册表：event → handler 列表（同一事件多 handler 顺序调用）
         self.pipe_hooks: dict[str, list[Callable[..., Any]]] = {}
+        # 配置变更感知钩子：内核每调用现算并携带注入 config，本表 handler 在调用
+        # 边界收到「与上次不同的配置视图」，自行刷新自身缓存（如 _config_models /
+        # router 单例）——插件配置消费从进程启动快照变为随调用热更新
+        self._config_change_handlers: list[Callable[..., Any]] = []
+        # 配置对比基线（剔除调用瞬态键后的视图）；initialize 时以握手配置立基线
+        self._config_view_baseline: dict[str, Any] | None = None
         # sidecar→内核反向调用通道（与 McpServer 共享，复用 stdin 多路复用）
         self._kernel_channel: KernelChannel | None = None
 
@@ -239,6 +248,24 @@ class AgentOSPlugin:
         self._lifecycle_handlers[LifecycleEvent.DOMAIN_EVENT.value] = func
         return func
 
+    def on_config_changed(self, func: Callable[..., Any]) -> Callable[..., Any]:
+        """装饰器——注册配置变更感知钩子。
+
+        内核每次调用都现算并携带最新注入 config（用户空间叠加后的生效视图）。
+        本钩子在调用边界收到「与上次不同的配置视图」（已剔除 ``inputs`` /
+        ``_step_method`` / ``_pipe_hook`` 等调用瞬态键），语义是"配置视图可能
+        已变"——钩子内自行刷新自身缓存（如 ``_config_models.set_config`` /
+        router 重建）。进程首个调用不触发（initialize 握手配置即基线）；
+        不注册即维持旧行为（快照消费），存量插件零感知。
+
+        Usage:
+            @plugin.on_config_changed
+            def handle_config(config: dict) -> None:
+                set_config(config)
+        """
+        self._config_change_handlers.append(func)
+        return func
+
     # ── 能力句柄 ──────────────────────────────────────────
 
     def get_capability(self, name: str) -> CapabilityHandle:
@@ -260,6 +287,33 @@ class AgentOSPlugin:
     def get_config(self) -> dict[str, Any]:
         """获取内核注入的插件配置。"""
         return self._injected_config
+
+    async def _apply_call_config(self, config: Any, tool_name: str | None = None) -> None:
+        """每调用分发单点（McpServer 回调）：刷新配置视图并按需触发钩子。
+
+        ``config`` 为内核本次调用现算下发的注入配置（用户空间叠加后的生效
+        视图）。剔除调用瞬态键后与基线对比：不同则更新 ``_injected_config``
+        并按注册顺序调用 ``on_config_changed`` 钩子（sync/async 均可）；
+        相同或非 dict（旧内核不携带 config）静默跳过。钩子内异常不让其
+        中断本次工具调用——配置感知是旁路增强，主流程失败面必须隔离。
+
+        ``tool_name`` 为本次调用工具名（McpServer 接缝统一携带）：独占形态
+        全体工具同属本插件，本参数仅接缝对齐合宿路由签名，此处不消费。
+        """
+        if not isinstance(config, dict):
+            return
+        view = {k: v for k, v in config.items() if k not in CALL_CONFIG_TRANSIENT_KEYS}
+        self._injected_config = config
+        if self._config_view_baseline is not None and view == self._config_view_baseline:
+            return
+        self._config_view_baseline = view
+        for handler in self._config_change_handlers:
+            try:
+                result = handler(view)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:  # noqa: BLE001 — 旁路增强，失败不阻断主流程
+                logger.exception("[sdk] on_config_changed handler failed")
 
     async def record_metric(
         self,
@@ -353,8 +407,13 @@ class AgentOSPlugin:
                 context=injected_caps.get(cap_name, {}) or {},
             )
 
-        # 注入配置
+        # 注入配置（同步以握手配置立对比基线：首个调用不触发变更钩子）
         self._injected_config = params.get("config", {})
+        self._config_view_baseline = (
+            {k: v for k, v in self._injected_config.items() if k not in CALL_CONFIG_TRANSIENT_KEYS}
+            if isinstance(self._injected_config, dict)
+            else None
+        )
 
     def run(self) -> None:
         """启动 MCP 服务端，阻塞运行。
@@ -384,6 +443,7 @@ class AgentOSPlugin:
             kernel_channel=self._kernel_channel,
             steps=self.steps,
             pipe_hooks=self.pipe_hooks,
+            on_call_config=self._apply_call_config,
         )
 
         async def _heartbeat() -> None:

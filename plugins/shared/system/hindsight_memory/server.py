@@ -350,9 +350,7 @@ def _thread_tag_filters(tags: list[str]) -> list[str]:
     return out
 
 
-def _build_tag_groups(
-    merged_tags: list[str], thread_tags: list[str], tags_match: str
-) -> list[dict[str, Any]]:
+def _build_tag_groups(merged_tags: list[str], thread_tags: list[str], tags_match: str) -> list[dict[str, Any]]:
     """thread-tag 召回的服务端布尔 tag 组（组间 AND，组内按各自 match）。
 
     - 组 1（会话归属）：thread tag 双形态（"thread-X" 原生注入 /
@@ -411,17 +409,13 @@ async def _recall_target_banks(own_bank: str) -> list[str]:
         {
             str(b)
             for b in (listing.get("banks") or [])
-            if b
-            and str(b) != own_bank
-            and (str(b) == default_bank or str(b).startswith(_THREAD_BANK_PREFIX))
+            if b and str(b) != own_bank and (str(b) == default_bank or str(b).startswith(_THREAD_BANK_PREFIX))
         }
     )
     return (banks + extras)[:_RECALL_BANK_FANOUT_CAP]
 
 
-async def _recall_across_banks(
-    own_bank: str, query: str, tag_groups: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
+async def _recall_across_banks(own_bank: str, query: str, tag_groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """thread-tag 跨 bank 召回：逐 bank arecall（tag_groups 服务端过滤）合并。
 
     并发扇出（每 bank 一次向量检索，总耗时≈最慢 bank）；单 bank 失败诚实
@@ -430,9 +424,7 @@ async def _recall_across_banks(
     处理。
     """
     banks = await _recall_target_banks(own_bank)
-    responses = await asyncio.gather(
-        *(_client.arecall(bank_id=b, query=query, tag_groups=tag_groups) for b in banks)
-    )
+    responses = await asyncio.gather(*(_client.arecall(bank_id=b, query=query, tag_groups=tag_groups) for b in banks))
     merged: dict[str, dict[str, Any]] = {}
     for response in responses:
         for item in _recall_items(response):
@@ -464,7 +456,7 @@ async def _recall_across_banks(
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Optional server-side tag filter. A thread tag "
-                "(\"thread-X\" or \"session:thread-X\") triggers cross-bank "
+                '("thread-X" or "session:thread-X") triggers cross-bank '
                 "recall: fan out over session banks (capped) with boolean tag "
                 "groups, so session-X memories match wherever they landed.",
             },
@@ -515,12 +507,10 @@ async def hindsight_recall(
         # A4 thread-tag 召回：tags 含 thread tag（"thread-X"/"session:thread-X"）
         # → 跨 bank 扇出 + tag_groups 布尔过滤（agent 传自己的 thread tag 即可
         # 查到自己会话的记忆，无论落在哪个 bank）；否则维持单 bank 现行为
-        #（含 pipeline:{id} 等业务 tag 的既有平铺过滤面不触发扇出）。
+        # （含 pipeline:{id} 等业务 tag 的既有平铺过滤面不触发扇出）。
         thread_tags = _thread_tag_filters(merged_tags)
         if thread_tags:
-            items = await _recall_across_banks(
-                bank, query, _build_tag_groups(merged_tags, thread_tags, tags_match)
-            )
+            items = await _recall_across_banks(bank, query, _build_tag_groups(merged_tags, thread_tags, tags_match))
         else:
             kwargs: dict[str, Any] = {"bank_id": bank, "query": query}
             if merged_tags:
@@ -678,8 +668,7 @@ async def hindsight_summarize(
             },
             "memory_id": {
                 "type": "string",
-                "description": "Optional specific memory id to delete; "
-                "if omitted deletes the whole bank",
+                "description": "Optional specific memory id to delete; if omitted deletes the whole bank",
             },
         },
     },
@@ -707,9 +696,7 @@ async def hindsight_delete(bank_id: str = "", memory_id: str = "") -> dict[str, 
                 return {"deleted": False, "error": "client has no documents.delete_document"}
             # 先按文档直删（delete_document 级联删 document + 全部记忆单元）
             try:
-                resp = await documents_api.delete_document(
-                    bank_id=bank, document_id=memory_id
-                )
+                resp = await documents_api.delete_document(bank_id=bank, document_id=memory_id)
                 deleted = _deleted_from_response(resp)
                 doc_error: str | None = None
             except Exception as e:
@@ -721,9 +708,7 @@ async def hindsight_delete(bank_id: str = "", memory_id: str = "") -> dict[str, 
             # 文档 id——按单元解析父文档后级联删除（残留条目可清理）。
             doc_id = await _resolve_unit_document_id(bank, memory_id)
             if doc_id:
-                resp = await documents_api.delete_document(
-                    bank_id=bank, document_id=doc_id
-                )
+                resp = await documents_api.delete_document(bank_id=bank, document_id=doc_id)
                 return {
                     "deleted": _deleted_from_response(resp),
                     "memory_id": memory_id,
@@ -733,8 +718,7 @@ async def hindsight_delete(bank_id: str = "", memory_id: str = "") -> dict[str, 
                 "deleted": False,
                 "memory_id": memory_id,
                 "error": (
-                    f"memory id 既非文档也查不到所属记忆单元（不存在或已删除）"
-                    f"| detail={doc_error or 'not found'}"
+                    f"memory id 既非文档也查不到所属记忆单元（不存在或已删除）| detail={doc_error or 'not found'}"
                 ),
             }
         # 无 memory_id：删整个 bank
@@ -781,7 +765,9 @@ async def _resolve_unit_document_id(bank_id: str, memory_id: str) -> str | None:
     try:
         unit = await getter(bank_id=bank_id, memory_id=memory_id)
     except Exception as exc:  # noqa: BLE001 — 解析失败按"不可解析"降级，删除面照常诚实失败
-        logger.debug("[hindsight] unit 文档 id 解析失败（按不可解析处理）| bank=%s memory=%s error=%s", bank_id, memory_id, exc)
+        logger.debug(
+            "[hindsight] unit 文档 id 解析失败（按不可解析处理）| bank=%s memory=%s error=%s", bank_id, memory_id, exc
+        )
         return None
     if hasattr(unit, "model_dump"):
         unit = unit.model_dump()
@@ -837,8 +823,7 @@ async def hindsight_import_document(
         ext = os.path.splitext(file_path)[1].lower()
         if ext not in _ALLOWED_DOC_EXTS:
             return {
-                "error": f"unsupported file type: {ext or '(none)'}. "
-                f"Only {_ALLOWED_DOC_EXTS} are allowed.",
+                "error": f"unsupported file type: {ext or '(none)'}. Only {_ALLOWED_DOC_EXTS} are allowed.",
                 "chunks_imported": 0,
             }
         try:
@@ -872,7 +857,9 @@ async def hindsight_import_document(
             }
             async with sem:
                 await _client.aretain(
-                    bank_id=bank, content=chunk, metadata=meta,
+                    bank_id=bank,
+                    content=chunk,
+                    metadata=meta,
                     tags=["type:semantic"],
                 )
 
@@ -894,8 +881,7 @@ async def hindsight_import_document(
             },
             "document_id": {
                 "type": "string",
-                "description": "Exact document id for single-document fetch "
-                "(when given, tags/q are ignored)",
+                "description": "Exact document id for single-document fetch (when given, tags/q are ignored)",
             },
             "tags": {
                 "type": "array",
@@ -958,9 +944,7 @@ async def hindsight_get_documents(
         documents: list[dict[str, Any]] = []
         if document_id:
             try:
-                doc = await _client.documents.get_document(
-                    bank_id=bank, document_id=document_id
-                )
+                doc = await _client.documents.get_document(bank_id=bank, document_id=document_id)
             except Exception as e:
                 if getattr(e, "status", None) == 404:
                     return {"documents": [], "total": 0}
@@ -982,9 +966,7 @@ async def hindsight_get_documents(
                     documents.append(doc_dict)
                     continue
                 try:
-                    full = await _client.documents.get_document(
-                        bank_id=bank, document_id=doc_id
-                    )
+                    full = await _client.documents.get_document(bank_id=bank, document_id=doc_id)
                 except Exception:
                     # 单条原文取失败不炸整个列举（降级返回条目本身）
                     documents.append(doc_dict)
@@ -1003,8 +985,7 @@ async def hindsight_get_documents(
 @plugin.tool(
     name="hindsight.list_banks",
     schema={"type": "object", "properties": {}, "required": []},
-    description="List all memory bank ids in the hindsight instance "
-    "(bank discovery for cross-bank listing surfaces)",
+    description="List all memory bank ids in the hindsight instance (bank discovery for cross-bank listing surfaces)",
 )
 async def hindsight_list_banks() -> dict[str, Any]:
     """列举实例全部 bank id（跨 bank 列表面的发现通路，只读）。
@@ -1053,49 +1034,76 @@ def _project_root() -> str:
     return os.path.abspath(os.path.join(_THIS_DIR, "..", "..", "..", ".."))
 
 
+def _user_space_path(*parts: str) -> str | None:
+    """用户空间落点（统一用户空间公理：读侧恒用户层优先）；不可用返回 None。"""
+    try:
+        from user_space import user_root  # noqa: PLC0415
+    except ImportError:
+        return None
+    root = user_root()
+    return os.path.join(str(root), *parts) if root else None
+
+
 def _load_env_file() -> dict[str, str]:
-    """从项目根 .env 直读全量 key=value（sidecar 自足，不依赖内核 env 覆盖）。
+    """读 .env 全量 key=value（用户空间 .env 优先，项目根 .env 为旧版回落）。
 
     供应商 key 解析链（_resolve_env_ref）：进程环境优先，.env 兜底——invoker 的
     env_delta_overlay 不保证把供应商 key 泡进 sidecar 进程环境。此处仅补读取，
     不改写任何内核/全局配置，未找到 key 返回空继续（health server 照起，
-    向量写入时才失败）。
+    向量写入时才失败）。安装形态下项目根指向安装目录，直读会漏掉设置页写入
+    用户空间的 key（2026-09-28 配置读写单源化审计）。
     """
-    env_path = os.path.join(_project_root(), ".env")
+    candidates = [p for p in (_user_space_path(".env"), os.path.join(_project_root(), ".env")) if p]
     out: dict[str, str] = {}
-    try:
-        with open(env_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, _, v = line.partition("=")
-                out[k.strip()] = v.strip().strip('"').strip("'")
-    except OSError as exc:
-        logger.debug("[hindsight] .env 读取失败（按无附加配置处理）| path=%s error=%s", env_path, exc)
+    for env_path in candidates:
+        if not os.path.isfile(env_path):
+            continue
+        try:
+            with open(env_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, _, v = line.partition("=")
+                    out[k.strip()] = v.strip().strip('"').strip("'")
+        except OSError as exc:
+            logger.debug("[hindsight] .env 读取失败（按无附加配置处理）| path=%s error=%s", env_path, exc)
+            continue
+        break
     return out
 
 
 def _load_llm_yaml() -> dict[str, Any] | None:
-    """读系统模型注册真值 config/plugins/llm/llm.yaml（LLM 设置页写回的单一真值）。
+    """读系统模型注册真值 llm.yaml（用户空间优先，安装目录为旧版回落）。
 
     缺失/损坏返回 None，调用方按段降级（不阻塞启动）。
     """
     import yaml  # noqa: PLC0415  # SDK 传递依赖，插件 venv 必有
 
-    try:
-        with open(
-            os.path.join(_project_root(), "config", "plugins", "llm", "llm.yaml"), encoding="utf-8"
-        ) as f:
-            data = yaml.safe_load(f)
-    except (OSError, yaml.YAMLError) as exc:
-        logger.warning(
-            "[hindsight] llm.yaml 读取失败（按段降级，本段返回 None）: %s | %s",
+    user_path = _user_space_path("config", "plugins", "llm", "llm.yaml")
+    candidates = [
+        p
+        for p in (
+            user_path,
             os.path.join(_project_root(), "config", "plugins", "llm", "llm.yaml"),
-            exc,
         )
-        return None
-    return data if isinstance(data, dict) else None
+        if p
+    ]
+    for path in candidates:
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+        except (OSError, yaml.YAMLError) as exc:
+            logger.warning(
+                "[hindsight] llm.yaml 读取失败（按段降级，本段返回 None）: %s | %s",
+                path,
+                exc,
+            )
+            return None
+        return data if isinstance(data, dict) else None
+    return None
 
 
 def _resolve_env_ref(ref: str, env_file: dict[str, str]) -> str:
@@ -1179,8 +1187,7 @@ def _apply_llm_env() -> None:
     llm_cfg = _load_llm_yaml()
     if llm_cfg is None:
         log.warning(
-            "hindsight 配置: config/plugins/llm/llm.yaml 缺失或损坏，LLM/嵌入段不注入"
-            "（可用 HINDSIGHT_API_* 显式指定）"
+            "hindsight 配置: config/plugins/llm/llm.yaml 缺失或损坏，LLM/嵌入段不注入（可用 HINDSIGHT_API_* 显式指定）"
         )
     else:
         defaults = llm_cfg.get("defaults") or {}
@@ -1210,13 +1217,8 @@ def _apply_llm_env() -> None:
             ),
         )
         for section, cfg_field, sys_default, envs in sections:
-            chosen = (
-                model_cfg.get(cfg_field, "").strip()
-                or str(defaults.get(sys_default) or "").strip()
-            )
-            resolved = (
-                _resolve_model_endpoint(chosen, llm_cfg, env_file) if chosen else None
-            )
+            chosen = model_cfg.get(cfg_field, "").strip() or str(defaults.get(sys_default) or "").strip()
+            resolved = _resolve_model_endpoint(chosen, llm_cfg, env_file) if chosen else None
             if resolved is None:
                 if chosen:
                     log.warning(
@@ -1355,8 +1357,7 @@ def _start_api_server(port: int, data_dir: str) -> tuple[subprocess.Popen[bytes]
     _api_env = os.environ.copy()
     _api_env.setdefault("OPENBLAS_NUM_THREADS", "1")
     process = subprocess.Popen(
-        [_venv_python, "-m", "hindsight_api.main",
-         "--port", str(port), "--host", "127.0.0.1"],
+        [_venv_python, "-m", "hindsight_api.main", "--port", str(port), "--host", "127.0.0.1"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         env=_api_env,
@@ -1364,7 +1365,9 @@ def _start_api_server(port: int, data_dir: str) -> tuple[subprocess.Popen[bytes]
     _spawn_stderr_drain(process, _stderr_path)
     logger.info(
         "[hindsight] hindsight-api 子进程已启动 PID=%s port=%s stderr_log=%s",
-        process.pid, port, _stderr_path,
+        process.pid,
+        port,
+        _stderr_path,
     )
     return process, _stderr_path
 
@@ -1399,10 +1402,7 @@ async def _wait_api_ready(
                         _tail = _f.read()[-800:].decode("utf-8", errors="replace")
                 except Exception:  # noqa: BLE001
                     pass
-                raise RuntimeError(
-                    f"hindsight-api 子进程已退出 code={process.returncode}"
-                    f" stderr_tail={_tail!r}"
-                )
+                raise RuntimeError(f"hindsight-api 子进程已退出 code={process.returncode} stderr_tail={_tail!r}")
     raise RuntimeError("hindsight-api 服务器 60s 内未就绪")
 
 
@@ -1416,11 +1416,28 @@ _AUX_PROVISION_TIMEOUT_S = 900  # 冷缓存装 numpy/pg0 级依赖可到分钟�
 
 
 def _aux_venv_python(plugin_dir: str) -> str:
-    """辅助 venv 解释器路径（win/unix 双布局，与 _start_api_server 同口径）。"""
+    """辅助 venv 解释器路径（win/unix 双布局，与 _start_api_server 同口径）。
+
+    解析序与内核供给落点同源（ADR 2026-09-28-aux-venv-autoprovision）：
+    ① 插件目录内 `.venv-hindsight`（dev/可写原地）；② 用户空间登记处
+    `plugin-venvs/<插件 id>--<目录名剥前导点>`（装机只读重定向——内核
+    autoprovision 按同键装配，插件侧按同键回读）。
+    """
     win = os.path.join(plugin_dir, ".venv-hindsight", "Scripts", "python.exe")
     if os.path.isfile(win):
         return win
-    return os.path.join(plugin_dir, ".venv-hindsight", "bin", "python")
+    unix = os.path.join(plugin_dir, ".venv-hindsight", "bin", "python")
+    if os.path.isfile(unix):
+        return unix
+    registry = _user_space_path("plugin-venvs", f"hindsight_memory_service--venv-hindsight")
+    if registry:
+        for candidate in (
+            os.path.join(registry, "Scripts", "python.exe"),
+            os.path.join(registry, "bin", "python"),
+        ):
+            if os.path.isfile(candidate):
+                return candidate
+    return unix
 
 
 def _needs_aux_provision(plugin_dir: str) -> bool:
@@ -1435,8 +1452,15 @@ def _aux_provision_cmds(plugin_dir: str) -> list[list[str]]:
     venv_dir = os.path.join(plugin_dir, ".venv-hindsight")
     return [
         ["uv", "venv", venv_dir, "--python", "3.12"],
-        ["uv", "pip", "install", "--python", _aux_venv_python(plugin_dir),
-         "-r", os.path.join(plugin_dir, "requirements.txt")],
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            _aux_venv_python(plugin_dir),
+            "-r",
+            os.path.join(plugin_dir, "requirements.txt"),
+        ],
     ]
 
 
@@ -1536,7 +1560,9 @@ async def _connect_backend(port: str, data_dir: str) -> None:
 
     logger.info(
         "[hindsight] on_load 完成 | base_url=%s bank=%s model=%s",
-        base_url, _DEFAULT_BANK_ID, os.environ.get("HINDSIGHT_API_LLM_MODEL"),
+        base_url,
+        _DEFAULT_BANK_ID,
+        os.environ.get("HINDSIGHT_API_LLM_MODEL"),
     )
 
 
@@ -1554,9 +1580,7 @@ async def _on_load_init() -> None:
 
     # 数据目录(pg0 数据存放)
     data_dir = (
-        config.get("data_dir")
-        or os.environ.get("HINDSIGHT_DATA_DIR")
-        or os.path.join(_THIS_DIR, "data", "hindsight")
+        config.get("data_dir") or os.environ.get("HINDSIGHT_DATA_DIR") or os.path.join(_THIS_DIR, "data", "hindsight")
     )
     os.makedirs(data_dir, exist_ok=True)
 
@@ -1572,9 +1596,7 @@ async def _on_load_init() -> None:
             "[hindsight] 辅助 venv 缺失（%s），后台自愈启动；完成前记忆工具降级",
             os.path.join(_THIS_DIR, ".venv-hindsight"),
         )
-        asyncio.get_running_loop().create_task(
-            _provision_then_connect(_THIS_DIR, str(port), data_dir)
-        )
+        asyncio.get_running_loop().create_task(_provision_then_connect(_THIS_DIR, str(port), data_dir))
         return
 
     try:
@@ -1582,7 +1604,8 @@ async def _on_load_init() -> None:
     except Exception as e:
         _client = None
         logger.warning(
-            "[hindsight] 初始化失败,sidecar 进入降级模式 | error=%s", e,
+            "[hindsight] 初始化失败,sidecar 进入降级模式 | error=%s",
+            e,
         )
 
 
@@ -1615,8 +1638,6 @@ async def _on_unload(params: dict[str, Any]) -> None:
                 failures,
             )
         _api_process = None
-
-
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1671,7 +1692,7 @@ async def _handle_memory_domain(path: str, method: str, raw_body: str, query: di
     prefix = "/ext/hindsight_memory_service/memory"
     if not path.startswith(prefix):
         return _ok(_json_response({"error": "not a memory path", "path": path}, 404))
-    sub = path[len(prefix):]  # "" / "/search" / "/episodes" / "/{memory_id}" ...
+    sub = path[len(prefix) :]  # "" / "/search" / "/episodes" / "/{memory_id}" ...
 
     def _qint(key: str, default: int) -> int:
         try:
@@ -1682,30 +1703,43 @@ async def _handle_memory_domain(path: str, method: str, raw_body: str, query: di
     try:
         # GET ""（list，query: memory_type/limit/offset）
         if sub in ("", "/") and method == "GET":
-            return _ok(_json_response(await rmm.list_memories(
-                memory_type=query.get("memory_type"),
-                limit=_qint("limit", 20),
-                offset=_qint("offset", 0),
-            )))
+            return _ok(
+                _json_response(
+                    await rmm.list_memories(
+                        memory_type=query.get("memory_type"),
+                        limit=_qint("limit", 20),
+                        offset=_qint("offset", 0),
+                    )
+                )
+            )
         # GET /search（query: query/top_k/method）
         if sub == "/search" and method == "GET":
-            return _ok(_json_response(await rmm.search_memories(
-                query=query.get("query", ""),
-                top_k=_qint("top_k", 5),
-                method=query.get("method", "keyword"),
-            )))
+            return _ok(
+                _json_response(
+                    await rmm.search_memories(
+                        query=query.get("query", ""),
+                        top_k=_qint("top_k", 5),
+                        method=query.get("method", "keyword"),
+                    )
+                )
+            )
         # POST /search（body: query/top_k）
         if sub == "/search" and method == "POST":
             body = _decode_body(raw_body) or None
             return _ok(_json_response(await rmm.search_memories_post(body)))
         # GET /episodes（query: page/page_size）
         if sub == "/episodes" and method == "GET":
-            return _ok(_json_response(await rmm.list_episodes(
-                page=_qint("page", 1), page_size=_qint("page_size", 20),
-            )))
+            return _ok(
+                _json_response(
+                    await rmm.list_episodes(
+                        page=_qint("page", 1),
+                        page_size=_qint("page_size", 20),
+                    )
+                )
+            )
         # GET /episodes/{episode_id}
         if sub.startswith("/episodes/") and method == "GET":
-            episode_id = sub[len("/episodes/"):]
+            episode_id = sub[len("/episodes/") :]
             return _ok(_json_response(await rmm.get_episode(episode_id)))
         # GET /semantic
         if sub == "/semantic" and method == "GET":
@@ -1752,7 +1786,7 @@ async def _handle_kb_domain(
     prefix = "/ext/hindsight_memory_service/knowledge-base"
     if not path.startswith(prefix):
         return _ok(_json_response({"error": "not a knowledge-base path", "path": path}, 404))
-    sub = path[len(prefix):]  # "" / "/stats" / "/upload" / "/search" / "/{item_id}" ...
+    sub = path[len(prefix) :]  # "" / "/stats" / "/upload" / "/search" / "/{item_id}" ...
 
     def _qint(key: str, default: int) -> int:
         try:
@@ -1772,12 +1806,16 @@ async def _handle_kb_domain(
             return _ok(_json_response(await kb.check_available()))
         # GET /search（query: query/top_k/category/tag）
         if sub == "/search" and method == "GET":
-            return _ok(_json_response(await kb.search(
-                query=query.get("query", ""),
-                top_k=_qint("top_k", 10),
-                category=query.get("category"),
-                tag=query.get("tag"),
-            )))
+            return _ok(
+                _json_response(
+                    await kb.search(
+                        query=query.get("query", ""),
+                        top_k=_qint("top_k", 10),
+                        category=query.get("category"),
+                        tag=query.get("tag"),
+                    )
+                )
+            )
         # POST /upload（multipart/form-data，file 字段）
         if sub == "/upload" and method == "POST":
             try:
@@ -1790,9 +1828,12 @@ async def _handle_kb_domain(
                     content_type = str(v)
                     break
             if "multipart/form-data" not in content_type:
-                return _ok(_json_response(
-                    {"error": "upload requires multipart/form-data", "content_type": content_type}, 400,
-                ))
+                return _ok(
+                    _json_response(
+                        {"error": "upload requires multipart/form-data", "content_type": content_type},
+                        400,
+                    )
+                )
             try:
                 fields = _parse_multipart(content_type, body_bytes)
             except Exception as exc:  # noqa: BLE001
@@ -1803,9 +1844,15 @@ async def _handle_kb_domain(
             filename = file_field.get("filename") or "upload"
             mime_type = file_field.get("content_type") or "application/octet-stream"
             data = file_field.get("data") or b""
-            return _ok(_json_response(await kb.upload_document(
-                filename=str(filename), content=data, mime_type=str(mime_type),
-            )))
+            return _ok(
+                _json_response(
+                    await kb.upload_document(
+                        filename=str(filename),
+                        content=data,
+                        mime_type=str(mime_type),
+                    )
+                )
+            )
         # GET/POST /categories（列表 / 创建）
         if sub == "/categories" and method == "GET":
             return _ok(_json_response(kb.list_categories()))
@@ -1814,7 +1861,7 @@ async def _handle_kb_domain(
             return _ok(_json_response(kb.create_category(str(body.get("name", "")))))
         # DELETE /categories/{name}
         if sub.startswith("/categories/") and method == "DELETE":
-            name = sub[len("/categories/"):]
+            name = sub[len("/categories/") :]
             return _ok(_json_response(kb.delete_category(name)))
         # GET /tags
         if sub == "/tags" and method == "GET":

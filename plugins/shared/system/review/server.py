@@ -415,7 +415,7 @@ async def get_report(review_id: str) -> dict[str, Any]:
     if report is None:
         report = await _cold_read_report(review_id)
         if report is None:
-            return {"error": "review not found", "review_id": review_id}
+            return {"success": False, "error": "review not found", "review_id": review_id}
     # 子管道进行中：轮询复盘管道状态，真实完成才落 completed。
     if report.get("status") == "running" and report.get("pipeline_id"):
         await _maybe_finalize_on_pipeline_completion(report)
@@ -944,7 +944,7 @@ async def _reviews_add_attachments(review_id: str, body: dict[str, Any]) -> dict
         "required": ["cases"],
     },
     description=(
-        "复盘改进建议：按分诊规则（config/self_evolve/rules/triage_rules.yaml）"
+        "复盘改进建议：按分诊规则（config/plugins/review/triage_rules.yaml）"
         "对失败面做机制前置检查、三向分诊与杠杆映射，产出结构化改进建议。"
         "评估原则的数据化承载——改原则改 yaml，不改代码。"
     ),

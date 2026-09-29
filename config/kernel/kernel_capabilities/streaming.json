@@ -453,6 +453,48 @@
       }
     },
     {
+      "method": "run_failed",
+      "description": "run 级失败终态前端镜像（run.failed 域事件同源派生，单点=emit_run_terminal_domain_events，ADR 2026-09-28-run-failure-frontend-notification）。引擎 Err 防御路径或 stop_reason 署名失败（FAILED_STOP_REASONS）时推前端，通知中心弹「管道运行失败」卡片（绕过前端相关性门控——后台/未关注管道的失败正是要通知的场景）。与聊天路径 stream_error 的关系：ENGINE_RUN_FAILED 轮两事件同现，前端按管道短窗去重（先到者弹卡）。completed/suspended/cancelled 不镜像。",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "pipeline_id",
+          "thread_id",
+          "status",
+          "run_id"
+        ],
+        "properties": {
+          "pipeline_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "管道坐标（失败 run 归属；前端注册表标 failed + 通知点击路由）"
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "WS 投递路由键 + 会话坐标（thread- 前缀）。内核转写为前端信封的 _threadId"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["failed"],
+            "description": "终态（本事件只承载 failed——镜像面词表收窄，非 failed 终态不镜像）"
+          },
+          "stop_reason": {
+            "type": ["string", "null"],
+            "description": "router.stop_reason 署名（FAILED_STOP_REASONS 命中词）原值透传；引擎 Err 防御路径无署名为 null"
+          },
+          "run_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "run 幂等键：前端通知 id 派生源（事件进 thread 级重放缓冲，重放不重复弹卡）"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object"
+      }
+    },
+    {
       "method": "stream_error",
       "description": "流式失败（终止信号）。前端只标记目标消息 status='failed' + error（不删除、不合成气泡、不启动重试）。",
       "input_schema": {

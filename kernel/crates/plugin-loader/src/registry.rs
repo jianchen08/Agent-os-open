@@ -59,6 +59,35 @@ impl CapabilityRegistryImpl {
             mode_pipelines: RwLock::new(HashMap::new()),
         }
     }
+
+    /// 内存驻留快照（堆栈级诊断面 GET /api/v1/system/memory-breakdown 消费）。
+    ///
+    /// 各维度条目数为实测计数（锁内 len）；描述符本体字节不逐条序列化
+    /// （诊断读面不做全量深拷）。
+    pub fn memory_stats(&self) -> RegistryMemoryStats {
+        RegistryMemoryStats {
+            tools: self.tools.read().len(),
+            route_signal_plugins: self.route_signals_by_plugin.read().len(),
+            http_routes: self.http_routes.read().len(),
+            mode_agents: self.mode_agents.read().len(),
+            mode_pipelines: self.mode_pipelines.read().len(),
+        }
+    }
+}
+
+/// [`CapabilityRegistryImpl::memory_stats`] 快照。
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct RegistryMemoryStats {
+    /// 已注册工具描述符数。
+    pub tools: usize,
+    /// 声明路由信号的插件数。
+    pub route_signal_plugins: usize,
+    /// 已注册插件 HTTP 端点数。
+    pub http_routes: usize,
+    /// 模式包 agent 键数。
+    pub mode_agents: usize,
+    /// 模式包编排键数。
+    pub mode_pipelines: usize,
 }
 
 impl Default for CapabilityRegistryImpl {
@@ -1582,6 +1611,7 @@ mod tests {
             provides: None,
             persistent_fields: vec![],
             export_fields: vec![],
+            aux_venvs: Vec::new(),
         }
     }
 

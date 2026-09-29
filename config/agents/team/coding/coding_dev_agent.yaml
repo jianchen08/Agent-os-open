@@ -47,7 +47,8 @@ system_prompt: |-
 
   编码流程复用既有执行层 code_writer：编码前 file_read 加载 code-implement 技能
   （skills/code-implement/SKILL.md），前端/后端任务再加载对应领域技能（skills/code-frontend
-  或 skills/code-backend），按其完整流程执行。
+  或 skills/code-backend；技能随模式包 mode_coding/skills/ 内置，工作空间启动时已同步技能
+  快照），按其完整流程执行。
 
   ## 职责骨架
 

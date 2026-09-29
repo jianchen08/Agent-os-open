@@ -290,9 +290,12 @@ async def isolation_destroy_env(
 
     container_name 是 state 真值通道（pipeline_state.isolation.container_name）：
     服务重启后内存登记为空也能按名删除，杜绝"登记丢失=销毁谎报成功=泄漏"。
+    失败显式 success=False（内核归一化只认显式 success 键，裸 {"error": …}
+    会被包成 success=true 信封——environment_lifecycle 按信封 error 键判定
+    销毁成败，裸返会谎报 environment_released=True）。
     """
     if _manager is None:
-        return {"error": "隔离服务未初始化"}
+        return {"success": False, "error": "隔离服务未初始化"}
 
     if container_name:
         destroyed = await _manager.destroy_environment(container_name, success=success)
@@ -301,9 +304,9 @@ async def isolation_destroy_env(
         await _manager.destroy_by_task_id(task_id, success=success)
         return {"destroyed": True, "task_id": task_id}
     if env_id:
-        await _manager.destroy_environment(env_id, success=success)
+        destroyed = await _manager.destroy_environment(env_id, success=success)
         return {"destroyed": True, "env_id": env_id}
-    return {"error": "必须提供 env_id、task_id 或 container_name"}
+    return {"success": False, "error": "必须提供 env_id、task_id 或 container_name"}
 
 
 @plugin.tool(

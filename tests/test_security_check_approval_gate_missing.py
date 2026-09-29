@@ -30,6 +30,18 @@ from plugin import SecurityCheckPlugin  # noqa: E402
 pytestmark = pytest.mark.unit
 
 
+def _decision_view(result: Any) -> dict[str, Any]:
+    """旧 security.decision 观测面的等价视图（键已随 ADR 2026-09-28 退役）。
+
+    放行/批准 = allowed True（reason "all checks passed"）；拦截 = 预定拒绝
+    条目在场（reason "soft_block: <error>"，语义同旧 soft_block 记录行）。
+    """
+    entries = result.state_updates.get("pre_decided_results") or []
+    if entries:
+        return {"allowed": True, "reason": f"soft_block: {entries[0]['error']}"}
+    return {"allowed": True, "reason": "all checks passed"}
+
+
 @pytest.fixture(autouse=True)
 def _restore_globals():
     """测试后恢复模块级注入态（plugin 引用 / 审批通道 / 模式表）。"""
@@ -109,11 +121,10 @@ class TestApprovalChannelMissingMarker:
         with caplog.at_level(logging.WARNING, logger=sc_mod.__name__):
             result = await p.execute(_dangerous_ctx())
 
-        decision = result.state_updates["security.decision"]
-        assert decision["approval_channel_missing"] is True
-        assert "soft_block" in decision["reason"]
-        # 软拦截契约保持：工具调用清空，拒绝结果回传 LLM
-        assert result.state_updates[StateKeys.RAW_TOOL_CALLS] == []
+        entries = result.state_updates["pre_decided_results"]
+        assert entries and entries[0]["metadata"]["approval_channel_missing"] is True
+        # 软拦截契约保持：预定拒绝在场（调用级，tool_core 幂等跳过并回传 LLM）
+        assert entries[0]["success"] is False
         assert any("解析失败" in r.getMessage() for r in caplog.records)
 
 

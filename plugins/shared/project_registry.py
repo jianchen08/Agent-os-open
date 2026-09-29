@@ -347,9 +347,7 @@ def _load_zone_policy(tenant_id: str, base: str | Path | None) -> dict[str, Any]
     return data if isinstance(data, dict) else {}
 
 
-def load_registration_whitelist(
-    tenant_id: str = DEFAULT_TENANT, base: str | Path | None = None
-) -> list[str]:
+def load_registration_whitelist(tenant_id: str = DEFAULT_TENANT, base: str | Path | None = None) -> list[str]:
     """项目登记白名单＝写区名单（``config/users/{tenant}/project_whitelist.yaml`` entries）。
 
     前缀授权：条目授权自身及任意层级后代（含登记时新建的目录，授权看路径
@@ -362,9 +360,7 @@ def load_registration_whitelist(
     return [str(e) for e in entries if str(e or "").strip()]
 
 
-def load_read_deny(
-    tenant_id: str = DEFAULT_TENANT, base: str | Path | None = None
-) -> list[str]:
+def load_read_deny(tenant_id: str = DEFAULT_TENANT, base: str | Path | None = None) -> list[str]:
     """读排除前缀（同名单文件 ``read_deny`` 节，ADR 2026-09-24-read-deny-write-zones 决策1）。
 
     黑名单制读面的用户排除区：命中前缀的路径拒绝读取（凭据黑名单与仓库
@@ -375,9 +371,7 @@ def load_read_deny(
     return [str(e) for e in entries if str(e or "").strip()]
 
 
-def add_write_zone(
-    path: str, tenant_id: str = DEFAULT_TENANT, base: str | Path | None = None
-) -> list[str]:
+def add_write_zone(path: str, tenant_id: str = DEFAULT_TENANT, base: str | Path | None = None) -> list[str]:
     """授权卡永久落盘（ADR 2026-09-24-read-deny-write-zones 决策3②）：追加写区前缀。
 
     locked 写面的唯一系统通道：仅供位置闸（security_check）在用户批准卡片后
@@ -393,9 +387,7 @@ def add_write_zone(
     return _mutate_zone_section("entries", path, add=True, tenant_id=tenant_id, base=base)
 
 
-def add_read_deny(
-    path: str, tenant_id: str = DEFAULT_TENANT, base: str | Path | None = None
-) -> list[str]:
+def add_read_deny(path: str, tenant_id: str = DEFAULT_TENANT, base: str | Path | None = None) -> list[str]:
     """追加读排除前缀（同名单文件 ``read_deny`` 节；设置页/授权卡共用通道）。
 
     播种与归一化语义同 :func:`add_write_zone`；整盘根同样拒绝（整盘 deny
@@ -407,6 +399,28 @@ def add_read_deny(
     return _mutate_zone_section("read_deny", path, add=True, tenant_id=tenant_id, base=base)
 
 
+def load_read_allow(tenant_id: str = DEFAULT_TENANT, base: str | Path | None = None) -> list[str]:
+    """读授权前缀（同名单文件 ``read_allow`` 节，用户裁定 2026-09-28）。
+
+    读黑名单（仓库拒绝集/read_deny）命中路径的用户放行口子：读授权卡
+    「永久写入配置」批准后落盘。解析与回退规则同 :func:`load_read_deny`；
+    缺节 = 无授权（黑名单照常拒绝）。
+    """
+    entries = _load_zone_policy(tenant_id, base).get("read_allow") or []
+    return [str(e) for e in entries if str(e or "").strip()]
+
+
+def add_read_allow(path: str, tenant_id: str = DEFAULT_TENANT, base: str | Path | None = None) -> list[str]:
+    """追加读授权前缀（同名单文件 ``read_allow`` 节；读授权卡永久通道）。
+
+    播种与归一化语义同 :func:`add_write_zone`；整盘根同样拒绝。
+
+    Returns:
+        落盘后的完整 read_allow 条目列表。
+    """
+    return _mutate_zone_section("read_allow", path, add=True, tenant_id=tenant_id, base=base)
+
+
 def remove_zone(
     path: str,
     section: str = "entries",
@@ -416,12 +430,13 @@ def remove_zone(
     """移除名单条目（设置页管理面；幂等——条目不存在时无变化直接返回）。
 
     Args:
-        section: ``"entries"``（写区）或 ``"read_deny"``（读排除）。
+        section: ``"entries"``（写区）、``"read_deny"``（读排除）或
+            ``"read_allow"``（读授权）。
 
     Returns:
         移除后的该节完整条目列表（真值文件缺失 = 空列表，无操作）。
     """
-    if section not in ("entries", "read_deny"):
+    if section not in ("entries", "read_deny", "read_allow"):
         raise ValueError(f"非法名单节: {section!r}")
     return _mutate_zone_section(section, path, add=False, tenant_id=tenant_id, base=base)
 
@@ -457,9 +472,7 @@ def _mutate_zone_section(
         and legacy_config_users_base().joinpath(tenant_id, "project_whitelist.yaml").is_file()
     ):
         target_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(
-            legacy_config_users_base() / tenant_id / "project_whitelist.yaml", target_file
-        )
+        shutil.copyfile(legacy_config_users_base() / tenant_id / "project_whitelist.yaml", target_file)
 
     data: dict[str, Any] = {}
     if target_file.is_file():
@@ -475,18 +488,12 @@ def _mutate_zone_section(
         if normalized not in [os.path.normcase(os.path.normpath(e)) for e in entries]:
             entries.append(stored)
     else:
-        entries = [
-            e for e in entries if os.path.normcase(os.path.normpath(e)) != normalized
-        ]
+        entries = [e for e in entries if os.path.normcase(os.path.normpath(e)) != normalized]
     data[section] = entries
 
     target_dir.mkdir(parents=True, exist_ok=True)
-    target_file.write_text(
-        yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8"
-    )
-    logger.info(
-        "[zone_policy] 名单节变更 | section=%s | add=%s | entry=%s", section, add, stored
-    )
+    target_file.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    logger.info("[zone_policy] 名单节变更 | section=%s | add=%s | entry=%s", section, add, stored)
     return entries
 
 
@@ -640,9 +647,7 @@ def purge_legacy_container_data(task_storage: Any) -> dict[str, int]:
     """
     import shutil
 
-    container_ids = {
-        t.id for t in task_storage.list_all() if (t.metadata or {}).get("task_scope") == "container"
-    }
+    container_ids = {t.id for t in task_storage.list_all() if (t.metadata or {}).get("task_scope") == "container"}
     removed_containers = 0
     for cid in container_ids:
         if task_storage.delete(cid):

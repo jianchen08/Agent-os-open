@@ -112,7 +112,7 @@ class TestDefinitionTool:
     def test_gateway_not_initialized(self, server_mod: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(server_mod, "_gateway", None)
         result = asyncio.run(server_mod.lsp_definition("a.py", 1))
-        assert result == {"error": "LSP gateway not initialized"}
+        assert result == {"success": False, "error": "LSP gateway not initialized"}
 
     def test_serializes_locations(self, server_mod: Any, lsp_types_mod: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         loc = lsp_types_mod.Location(
@@ -148,7 +148,7 @@ class TestReferencesTool:
     def test_gateway_not_initialized(self, server_mod: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(server_mod, "_gateway", None)
         result = asyncio.run(server_mod.lsp_references("a.py", 1))
-        assert result == {"error": "LSP gateway not initialized"}
+        assert result == {"success": False, "error": "LSP gateway not initialized"}
 
     def test_serializes_references(self, server_mod: Any, lsp_types_mod: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         loc = lsp_types_mod.Location(
@@ -173,7 +173,7 @@ class TestDiagnosticsTool:
     def test_gateway_not_initialized(self, server_mod: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(server_mod, "_gateway", None)
         result = asyncio.run(server_mod.lsp_diagnostics("a.py"))
-        assert result == {"error": "LSP gateway not initialized"}
+        assert result == {"success": False, "error": "LSP gateway not initialized"}
 
     def test_serializes_diagnostics(self, server_mod: Any, lsp_types_mod: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         diag = lsp_types_mod.Diagnostic(

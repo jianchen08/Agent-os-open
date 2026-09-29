@@ -3,7 +3,7 @@
 
 server.py：
 - on_load 装配默认执行器（PipelineEvaluationExecutor 经 set_default_executor 注入）；
-- task_evaluate 工具入口：成功/失败两条返回分支（错误路径返回 {"error": ...}）。
+- task_evaluate 工具入口：成功/失败两条返回分支（错误路径返回 {"success": False, "error": ...}）。
 
 execute 编排（沿用真实 TaskService + tmp 存储，外部依赖仅 state 读面/写面与
 执行器注入替身）：
@@ -161,7 +161,8 @@ class TestServerAssembly:
             assert tool_mod._default_executor is not None, "on_load 应装配默认评估执行器"
             # 注入的默认执行器应带 chat_send/state_rows（真实验证它可被构造）
             ex = tool_mod._default_executor
-            assert callable(ex._chat_send) and callable(ex._state_rows)
+            assert callable(ex._chat_send)
+            assert callable(ex._state_rows)
         finally:
             tool_mod.set_default_executor(before)
 
@@ -208,7 +209,8 @@ class TestEvaluateSingle:
         result = await tool.execute({"action": "evaluate_single", "metric_id": "m1", "task_id": task.id, "summary": "我做完了"})
         assert result.success is True
         assert result.metadata["result"] == "partial_pass"
-        assert "进度：1/2" in result.metadata["message"] and "m2" in result.metadata["message"]
+        assert "进度：1/2" in result.metadata["message"]
+        assert "m2" in result.metadata["message"]
         # summary 透传给执行器
         assert executor.calls[0]["input_params"] == {"m1": {"summary": "我做完了"}}
         assert executor.calls[0]["metric_ids"] == ["m1"]
@@ -464,8 +466,11 @@ class TestHandleEvaluationResult:
         assert out.metadata["result"] == "retry"
         assert out.metadata["retry_remaining"] == 1
         msg = out.metadata["message"]
-        assert "[m1] 未通过" in msg and "文件不对" in msg and "得分: 20.0" in msg
-        assert "剩余重试：1 次" in msg and "已调用 7/15" in msg
+        assert "[m1] 未通过" in msg
+        assert "文件不对" in msg
+        assert "得分: 20.0" in msg
+        assert "剩余重试：1 次" in msg
+        assert "已调用 7/15" in msg
 
     @pytest.mark.asyncio
     async def test_passed_metric_resets_retry_count(self, mod: Any, service: Any, monkeypatch: Any) -> None:
@@ -506,7 +511,8 @@ class TestMergeAndRegister:
         monkeypatch.setattr(mod, "_state_reader", None)
         err = await mod.TaskEvaluateTool()._try_merge_before_complete(MagicMock(id="t1"))
         assert err is not None
-        assert "t1" in err and "ws_meta" in err
+        assert "t1" in err
+        assert "ws_meta" in err
 
     @pytest.mark.asyncio
     async def test_try_merge_delegates_to_local_mechanism(self, mod: Any, monkeypatch: Any) -> None:
@@ -665,8 +671,8 @@ class TestExecuteExtraPaths:
         assert result.success is True
         assert result.metadata["result"] == "completed"
         assert ex.calls == [], "无 criteria 直接通过，不应调用执行器"
-        # 通过来源如实标注：未配置 criteria 直接通过，而非任务描述兜底
-        assert "未配置 criteria 直接通过" in result.output["summary"]
+        # 通过来源如实标注：未配置评估依据直接通过，而非任务描述兜底
+        assert "未配置评估依据直接通过" in result.output["summary"]
         assert "所有 1 个指标均已通过" in result.output["summary"]
 
     @pytest.mark.asyncio
@@ -1059,7 +1065,8 @@ class TestServerClosures:
         """
         # 裸名槽位预置为本插件 tool.py（loader 在成员 exec 期交付的同源实例）
         own_tool = importlib.import_module("tool")
-        assert own_tool.__file__ is not None and str(_TE_DIR) in str(own_tool.__file__)
+        assert own_tool.__file__ is not None
+        assert str(_TE_DIR) in str(own_tool.__file__)
 
         server_mod = self._fresh_server()
 

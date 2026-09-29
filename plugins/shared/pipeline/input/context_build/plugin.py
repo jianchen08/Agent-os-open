@@ -57,6 +57,9 @@ class ContextBuildPlugin(IInputPlugin):
         # 透传落库），加载 config/agents/**/<agent_id>.yaml 是本插件（sidecar）
         # 的职责。缓存：yaml 路径 → 解析结果（mtime 失效），进程内复用。
         self._agent_yaml_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        # 当前 agent 命中模式包注册表时的包根绝对路径（每次 _load_agent_config
+        # 复位，_do_work 据此写 context.agent_pack_root）。
+        self._mode_pack_root = ""
 
     def _find_agent_yaml(self, agents_dir, agent_id: str):
         """在 agents_dir 下解析 agent_id → yaml；未命中回退按 config_id 匹配。
@@ -110,6 +113,9 @@ class ContextBuildPlugin(IInputPlugin):
 
         import yaml as _yaml
 
+        # 包根键只随模式包注册表命中出现（用户/factory config 命中保持缺席
+        # 语义）；每次装载先复位，防同实例跨管道残留前一 agent 的包根。
+        self._mode_pack_root = ""
         if not agent_id:
             return {}
         # 双根解析（ADR 2026-09-14 §2.4）：用户配置层的 agents/ 优先——用户层
@@ -141,6 +147,9 @@ class ContextBuildPlugin(IInputPlugin):
             mode_yaml = find_mode_agent_yaml(agent_id)
             if mode_yaml is not None:
                 found = (mode_yaml, mode_yaml.stat().st_mtime)
+                # 包根 = 命中 yaml 所在包目录（注册表契约 agents/<stem>.yaml 的
+                # 祖父即包根，与 find_mode_package_dir 双根结果同源，免二次解析）。
+                self._mode_pack_root = str(mode_yaml.parent.parent)
         if found is None:
             logger.debug(
                 "[context_build] 未找到 agent yaml（系统与模式包注册表均未命中，"
@@ -226,6 +235,11 @@ class ContextBuildPlugin(IInputPlugin):
             or str(agent_cfg.get("system_prompt", "") or "")
             or self._system_prompt
         )
+        # 模式包私有物料锚点：agent yaml 经模式包注册表命中时携带包根，
+        # prompt_build 的 {{path:./...}} 包内相对形态据此解析（包随包分发，
+        # 不随用户空间同步丢物料）；用户/factory config 命中不写该键（缺席语义）。
+        if self._mode_pack_root:
+            updates["context.agent_pack_root"] = self._mode_pack_root
         # agent 名称每次执行按当前管道 agent 重新解析（不缓存到实例属性——
         # 同 sidecar 进程内多个管道复用本插件实例，缓存会造成 agent_name
         # 跨管道污染）。实例属性只作配置默认值，不缓存解析结果。
@@ -235,8 +249,8 @@ class ContextBuildPlugin(IInputPlugin):
         # 断链告警）；"inherit" = 继承基线全量工具面（附身等场景：执行者身份
         # 换、工具能力保留），不写本键——主 agent 工具清单更新自动跟随；其余
         # （未声明/断链）同样不写。本键唯一供给方是本插件，tool_schema 经
-        # tool-surface capability 据此过滤工具面；模式物料收窄（如有）由
-        # mode_material_inject 步骤在 state.tool_ids 基线上叠加。
+        # tool-surface capability 据此过滤工具面（工具面单真值 = agent yaml
+        # tool_ids 三态，模式级收窄已退役——设计 D10）。
         _tool_ids = agent_cfg.get("tool_ids")
         if isinstance(_tool_ids, list):
             updates["tool_ids"] = _tool_ids

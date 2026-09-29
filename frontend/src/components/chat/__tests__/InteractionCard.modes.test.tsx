@@ -219,3 +219,17 @@ describe('选项缺 id 的 fail-closed 处置（FE13 改判：人工确认核心
     expect(props.onRespondChoice).not.toHaveBeenCalled()
   })
 })
+
+describe('归属标签', () => {
+  it('originLabel 非空：标题下方渲染「来自：」行', () => {
+    render(
+      <InteractionCard {...cardProps(makeInteraction())} originLabel="帮我看代码 · 子代理A" />,
+    )
+    expect(screen.getByText(/来自：帮我看代码 · 子代理A/)).toBeInTheDocument()
+  })
+
+  it('originLabel 缺省：不渲染「来自：」行', () => {
+    render(<InteractionCard {...cardProps(makeInteraction())} />)
+    expect(screen.queryByText(/来自：/)).not.toBeInTheDocument()
+  })
+})

@@ -27,6 +27,7 @@ import signal
 import subprocess
 import threading
 import time
+from collections import OrderedDict, deque
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any, cast
@@ -47,6 +48,15 @@ TRIGGER_STATE_KEY_PREFIX = "task.trigger.registry."
 
 # 工作线程落 state 的阻塞等待上限（触发频度 ≥ 间隔秒级，远低于此）。
 _STATE_WRITE_TIMEOUT = 10.0
+
+# 自动父通知自激熔断参数（2026-09-29/30 夜实证：task=9677f0f1c58a 失败通知
+# 以 18 秒周期重复注入 23 次——父层自动重派→子任务再失败→再通知闭环）。
+# 同键 (parent_pipeline_id, task_id, event) 滑动窗内：第 1 次正常注入、
+# 第 2 次注入附重复计数提示、第 3 次起熔断不再注入；窗滚过后重新计数。
+_AUTO_NOTIFY_WINDOW_SECONDS = 600.0
+_AUTO_NOTIFY_BREAK_THRESHOLD = 3
+# 熔断窗口键 LRU 上限（防键空间无界增长；逐出即状态重置，重新从首报起算）。
+_AUTO_NOTIFY_MAX_KEYS = 500
 
 
 class TriggerManager:
@@ -70,8 +80,8 @@ class TriggerManager:
 
     """
 
-    def __init__(self) -> None:
-        """初始化管理器。"""
+    def __init__(self, clock: Callable[[], float] | None = None) -> None:
+        """初始化管理器。``clock`` 供时序测试注入可推进单调钟，默认 time.monotonic。"""
 
         self._triggers: dict[str, TriggerConfig] = {}
 
@@ -104,6 +114,13 @@ class TriggerManager:
         # GAP-2 EVENT：域事件桥就绪标记（server.py on_load 注册 on_domain_event
         # 处理器后置 True——manifest 声明 domain_event hook 内核才会推送）。
         self._event_bridge_ready: bool = False
+
+        # 自动父通知熔断状态：键 (parent_pipeline_id, task_id, event) → 窗内
+        # 注入时刻 deque。内存态即可（sidecar 进程内；跨重启丢失可接受——
+        # 重启后重新从第 1 次起算，影响有限）。OrderedDict 兼作 LRU（上限
+        # _AUTO_NOTIFY_MAX_KEYS），deque 老化按滑动窗 _AUTO_NOTIFY_WINDOW_SECONDS。
+        self._auto_notify_windows: OrderedDict[tuple[str, str, str], deque[float]] = OrderedDict()
+        self._clock: Callable[[], float] = clock or time.monotonic
 
     def register(self, config: TriggerConfig) -> None:
         """注册触发器。
@@ -1375,6 +1392,30 @@ class TriggerManager:
 
         return fired
 
+    def _auto_notify_gate(self, key: tuple[str, str, str]) -> tuple[bool, int]:
+        """自动父通知自激熔断闸：返回 (是否放行, 本事件为窗内第几次)。
+
+        同键滑动窗（_AUTO_NOTIFY_WINDOW_SECONDS）内第 1/2 次放行、第 3 次
+        （_AUTO_NOTIFY_BREAK_THRESHOLD）起熔断。熔断事件不入窗——窗内只记
+        实际注入时刻，窗内全部时刻老化后自然重新计数。键按访问序 LRU 淘汰
+        （上限 _AUTO_NOTIFY_MAX_KEYS，逐出即该键熔断状态重置）。
+        """
+        now = self._clock()
+        window = self._auto_notify_windows.get(key)
+        if window is None:
+            window = deque()
+            self._auto_notify_windows[key] = window
+        while window and now - window[0] >= _AUTO_NOTIFY_WINDOW_SECONDS:
+            window.popleft()
+        self._auto_notify_windows.move_to_end(key)
+        if len(self._auto_notify_windows) > _AUTO_NOTIFY_MAX_KEYS:
+            self._auto_notify_windows.popitem(last=False)
+        attempt = len(window) + 1
+        if attempt >= _AUTO_NOTIFY_BREAK_THRESHOLD:
+            return False, attempt
+        window.append(now)
+        return True, attempt
+
     async def _auto_notify_parent(self, event_name: str, event_data: dict[str, Any]) -> None:
         """GAP-1：子任务终态自动通知父管道（等效"提交后自动注册触发器"）。
 
@@ -1388,6 +1429,12 @@ class TriggerManager:
         （task.error）、重试计数（task.eval_total_calls）、评估结论
         （task.eval_summary）、上下文使用率（track.llm_usage + context_window）
         ——由 tasks 插件事件派生时从 state 摘要行带出，缺键空串兜底。
+
+        自激熔断：同键 (parent, task, event) 滑动窗（10 分钟）内第 1 次正常
+        注入、第 2 次注入附重复计数提示、第 3 次起不再注入（WARNING 留痕），
+        窗滚过后重新计数——防"失败通知→自动重派→再失败→再通知"闭环
+        （ADR 2026-09-30）。编排上下文侧的对应衰减在 llm_core 出站装配
+        （_decay_system_notifications，每 task 至多存活末条未消费通知）。
 
         Returns:
             None（注入失败仅记录，不阻断域事件桥主流程）。
@@ -1449,6 +1496,30 @@ class TriggerManager:
                 event_name,
             )
             return
+
+        # 自激熔断：同键 (parent, task, event) 滑动窗内第 3 次起不再注入
+        # （缺陷实证：失败通知→自动重派→再失败的 18 秒自激圈）。task_id 为空
+        # 无法定维度，退回无熔断行为（与修复前一致，不误伤无法归键的通知）。
+        if task_id:
+            allowed, attempt = self._auto_notify_gate((parent_pipeline_id, task_id, event_name))
+            if not allowed:
+                logger.warning(
+                    "[TriggerManager] 子任务自动通知熔断: 同键(parent=%s task=%s event=%s) "
+                    "%d 分钟窗内第 %d 次事件达到阈值 %d，不再注入（自动重派自激防护；窗滚过后重新计数）",
+                    parent_pipeline_id,
+                    task_id,
+                    event_name,
+                    int(_AUTO_NOTIFY_WINDOW_SECONDS // 60),
+                    attempt,
+                    _AUTO_NOTIFY_BREAK_THRESHOLD,
+                )
+                return
+            if attempt == 2:
+                message += (
+                    f"\n⚠️ 系统提示: 这是 {int(_AUTO_NOTIFY_WINDOW_SECONDS // 60)} 分钟内"
+                    f"同一子任务的第 {attempt} 次重复通知"
+                    f"（自动重派自激防护: 第 {_AUTO_NOTIFY_BREAK_THRESHOLD} 次起将暂停注入直至窗口滚过）。"
+                )
 
         try:
             await self._injector(parent_pipeline_id, message, user_id)

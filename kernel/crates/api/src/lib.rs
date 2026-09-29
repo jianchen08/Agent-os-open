@@ -28,6 +28,7 @@ pub mod run_chain;
 pub mod server;
 pub mod session_routes;
 pub mod sidecar_warmup;
+pub mod system_diagnostics;
 #[cfg(test)]
 pub(crate) mod test_env;
 pub mod tools;

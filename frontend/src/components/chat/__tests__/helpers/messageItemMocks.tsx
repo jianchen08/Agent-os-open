@@ -44,10 +44,11 @@ export function errorReportingMock() {
   }
 }
 
-/** attachmentOpener：一次性 openAttachment */
+/** fileLoaderRegistry：一次性 openFileWithLoader（附件打开走加载器路由） */
 export function attachmentOpenerMock() {
   return {
-    openAttachment: vi.fn(),
+    openFileWithLoader: vi.fn(),
+    markdownLinkInterceptor: () => () => false,
   }
 }
 

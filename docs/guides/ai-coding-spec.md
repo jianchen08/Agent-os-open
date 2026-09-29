@@ -18,7 +18,7 @@
 ## 三、审查规则（审查 AI，一票否决）
 
 - 需求追溯：每行新增代码在需求/AC 清单中找依据，无依据强制删除。
-- 架构四问：散点 / 分叉点 / 信息泄漏 / 变化方向，违者驳回。权威条目见 `config/rules/per_agent/code_reviewer_rules.md` §0。
+- 架构四问：散点 / 分叉点 / 信息泄漏 / 变化方向，违者驳回。权威条目见 `plugins/shared/modes/mode_coding/rules/code_reviewer_rules.md` §0（包专属物料，随 ADR 2026-09-29-pack-prompt-material-self-contained 迁入包）。
 - 铁面裁决：只认规则与自动化工具的客观结果，不接受"为了好看/稳妥"的主观辩解。
 
 ## 四、模式体系约束（横切，2026-09-15 定稿）

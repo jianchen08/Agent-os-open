@@ -2,6 +2,7 @@
  * 协议（blockHandler.ts，方案 2026-08-26 定稿）：stream_chunk / thinking_*
  * 旧事件退役，本模块只保留内核生命周期事件（stream_start / stream_end /
  * stream_error）与收尾清理。 */
+import { invalidatePipelineStates } from '@/hooks/queries/usePipelineRunsQuery'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useNotificationStore } from '@/stores/notificationStore'
@@ -187,6 +188,28 @@ export function handleStreamEnd(eventData: any) {
   }
 }
 
+/** 管道失败卡短窗去重：run_failed 与 stream_error 在 ENGINE_RUN_FAILED 场景
+ * 两事件同现（run_failed 在引擎出口先发、stream_error 在 ws 收尾后发），
+ * 同管道短窗内只弹一张失败卡——先到者弹卡记时，后到者静默（消息级失败
+ * 标记与注册表更新不受去重影响）。窗口须覆盖两事件的最大间隔抖动。 */
+const FAILURE_CARD_DEDUP_MS = 15_000
+const failureCardAt = new Map<string, number>()
+
+function shouldSuppressFailureCard(pipelineId: string): boolean {
+  const at = failureCardAt.get(pipelineId)
+  return at != null && Date.now() - at < FAILURE_CARD_DEDUP_MS
+}
+
+function noteFailureCard(pipelineId: string): void {
+  failureCardAt.set(pipelineId, Date.now())
+  if (failureCardAt.size > 100) {
+    const cutoff = Date.now() - FAILURE_CARD_DEDUP_MS
+    for (const [pid, at] of failureCardAt) {
+      if (at < cutoff) failureCardAt.delete(pid)
+    }
+  }
+}
+
 /** 处理流式错误事件 */
 export function handleStreamError(eventData: any) {  // 先刷写缓冲区，确保错误前的内容不丢失
   flushStreamChunkBuffer()
@@ -258,6 +281,12 @@ export function handleStreamError(eventData: any) {  // 先刷写缓冲区，确
     }
   }
 
+  if (shouldSuppressFailureCard(pipelineId)) {
+    // 同管道失败卡刚弹过（run_failed 先到）：stream_error 不再重复弹卡，
+    // 消息级失败标记（上方 updateMessage）照常生效。
+    return
+  }
+  noteFailureCard(pipelineId)
   useNotificationStore.getState().addNotification({
     title: '流式响应错误',
     message: errorText,
@@ -291,6 +320,71 @@ export function handlePipelineRoundFinished(eventData: any) {
   const failed = eventData?.data?.failed === true
   terminatePipeline(pipelineId)
   usePipelineRegistryStore.getState().applyStreamStatus(pipelineId, failed ? 'failed' : 'completed')
+}
+
+/** run_failed 事件最小形态（streaming.json 契约条目 run_failed：载荷字段
+ * pipeline_id/thread_id（信封转写 _threadId）/status/stop_reason/run_id，
+ * 可选键宽容）。 */
+interface RunFailedEvent {
+  data?: {
+    pipeline_id?: string
+    _threadId?: string
+    status?: string
+    stop_reason?: string | null
+    run_id?: string
+  }
+  _threadId?: string
+}
+
+/** 处理 run 级失败终态镜像事件（run_failed）——管道异常退出通知卡的唯一信号源。
+ *
+ * 内核 run 终态单点镜像（ADR 2026-09-28-run-failure-frontend-notification）：
+ * 引擎 Err 防御路径与 stop_reason 署名失败（tool_fail_loop/duplicate_loop 等
+ * FAILED_STOP_REASONS——「被插件判定终止」类异常退出）此前对前端完全静默，
+ * 本事件补通知链路。经 index.ts 绕过相关性门控直订（后台/未注册管道的失败
+ * 正是要通知的场景）。
+ *
+ * 副作用：注册表标 failed + streamingState 收尾（幂等）+ runs/states 失效化；
+ * 通知 id 以 run_id 派生（事件进 thread 级重放缓冲，重放不重复弹卡）；
+ * 与聊天路径 stream_error 的双弹窗由 FAILURE_CARD_DEDUP 短窗去重兜住。
+ */
+export function handleRunFailed(eventData: RunFailedEvent) {
+  const pipelineId = resolvePipelineId(eventData)
+  if (!pipelineId) {
+    _debugLogger.error(
+      '[RUN_FAILED] pipeline_id 缺失，跳过处理: _threadId=%s',
+      eventData?.data?._threadId?.slice(0, 12) || eventData?._threadId?.slice(0, 12) || 'null',
+    )
+    return
+  }
+  const data = eventData?.data || {}
+  const threadId = data._threadId || eventData?._threadId
+  const runId = typeof data.run_id === 'string' && data.run_id ? data.run_id : 'unknown'
+  const stopReason = typeof data.stop_reason === 'string' && data.stop_reason ? data.stop_reason : ''
+
+  _debugLogger.warn(
+    '[RUN_FAILED] pipelineId=%s runId=%s stopReason=%s',
+    pipelineId.slice(0, 12), runId.slice(0, 12), stopReason || '(unsigned)',
+  )
+
+  terminatePipeline(pipelineId)
+  usePipelineRegistryStore.getState().applyStreamStatus(pipelineId, 'failed')
+  invalidatePipelineStates()
+
+  if (shouldSuppressFailureCard(pipelineId)) return
+  noteFailureCard(pipelineId)
+  useNotificationStore.getState().addNotification({
+    id: `run-failed-${pipelineId}-${runId}`,
+    title: '管道运行失败',
+    message: stopReason
+      ? `管道异常退出（${stopReason}），点击可定位到对应会话查看详情`
+      : '管道异常退出，点击可定位到对应会话查看详情',
+    priority: 'high',
+    category: 'error',
+    isBlocking: false,
+    sessionId: threadId,
+    sourceLabel: '系统',
+  })
 }
 
 /** 处理插件执行错误事件（非终止信号）

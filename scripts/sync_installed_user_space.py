@@ -21,6 +21,10 @@
 - ``--config <config/下相对路径>``：整文件覆盖到 ``<user_root>/config/<同路径>``
   （用户空间配置惯例=文件级整体替换；如 pipelines/autonomous.yaml 改挂
   pipeline_host_context）。
+- ``--skills [skills/下相对路径]``：skills/ 子树镜像到 ``<user_root>/skills/``
+  （缺省整库）——装机包 resources/ 不含技能权威源（extraResources 未收录），
+  仓根技能经此补种到用户空间，装机版会话工作区从该源同步全量技能（R300
+  悬空引用根治的存量装机通道）。
 - ``--addon <Godot项目根>``：把 hosts/godot-addons/agentos 镜像到
   ``<项目>/addons/agentos``——修旧项目播种副本推死端点（插件改名后旧端点
   404）的存量问题。
@@ -34,6 +38,7 @@
       --plugin shared/pipeline/input/host_context
   python scripts/sync_installed_user_space.py --user-root "%APPDATA%\\agentos" \\
       --config pipelines/autonomous.yaml --config kernel/default_profile.yaml
+  python scripts/sync_installed_user_space.py --user-root "%APPDATA%\\agentos" --skills
   python scripts/sync_installed_user_space.py --addon "D:\\my-godot-project"
   任意动作加 --dry-run 只列计划不落盘。
 """
@@ -101,11 +106,19 @@ def resolve_user_root(args_user_root: str | None) -> Path:
     return root
 
 
-def _mirror_tree(src: Path, dst: Path, *, preserve: tuple[str, ...] = ()) -> list[tuple[str, str]]:
+def _mirror_tree(
+    src: Path,
+    dst: Path,
+    *,
+    preserve: tuple[str, ...] = (),
+    skip_suffixes: tuple[str, ...] = (),
+) -> list[tuple[str, str]]:
     """镜像 src→dst：复制/覆盖源侧文件，删除源里已消失的条目。
 
     返回 [(动作, 相对路径)]（copy/delete）。PRESERVE 名单内的 dst 子树只增
-    不删（用户数据）。调用方负责排除目录（.venv 等不入镜像）。
+    不删（用户数据）。调用方负责排除目录（.venv 等不入镜像）；
+    skip_suffixes 命中的源文件不复制、dst 侧对应残留删除（按名精确匹配，
+    供技能面剔除 .bak/.tmp 编辑残渣）。
     """
     actions: list[tuple[str, str]] = []
     dst.mkdir(parents=True, exist_ok=True)
@@ -118,7 +131,7 @@ def _mirror_tree(src: Path, dst: Path, *, preserve: tuple[str, ...] = ()) -> lis
         cur_dst = dst / rel
         cur_dst.mkdir(parents=True, exist_ok=True)
         for f in files:
-            if f.endswith(".pyc"):
+            if f.endswith(".pyc") or f.lower().endswith(skip_suffixes):
                 continue
             shutil.copy2(src_dir / f, cur_dst / f)
             actions.append(("copy", str((rel / f).as_posix())))
@@ -133,7 +146,7 @@ def _mirror_tree(src: Path, dst: Path, *, preserve: tuple[str, ...] = ()) -> lis
         if any(part in EXCLUDED_DIR_NAMES for part in rel.parts):
             continue
         for f in list(files):
-            if not (src / rel / f).exists():
+            if not (src / rel / f).exists() or f.lower().endswith(skip_suffixes):
                 (dst_dir / f).unlink()
                 actions.append(("delete", str((rel / f).as_posix())))
         for d in list(dirs):
@@ -227,6 +240,36 @@ def sync_config(repo_rel: str, user_root: Path, dry_run: bool) -> None:
         shutil.copy2(src, dst)
 
 
+#: 技能镜像剔除的文件后缀（prompt 注入物料不留编辑残渣；.bak 历史副本
+#: 常含开发机旧路径，R295 同类污染源）。
+SKILLS_SKIP_SUFFIXES = (".bak", ".tmp")
+
+
+def sync_skills(repo_rel: str, user_root: Path, dry_run: bool) -> None:
+    """skills/ 子树镜像到 <user_root>/skills/<同路径>（装机根技能权威源）。
+
+    装机包 resources/ 不含仓根 skills/（extraResources 未收录，R300 实证
+    agentos.yaml 引用悬空），装机版会话工作区经 _skill_sources 的用户根
+    skills/ 源从此目录拿全量技能。镜像语义与 --plugin 同（源里已消失的
+    条目删除）；文本物料逐一过开发机路径指纹检查（技能会被 file_read 注入
+    提示词，dev 绝对路径进用户空间即复现 R295「提示词锚定 dev 路径」链）。
+    """
+    skills_root = _REPO_ROOT / "skills"
+    src = skills_root / repo_rel.replace("\\", "/")
+    if not src.is_dir():
+        raise SystemExit(f"[REFUSE] {src} 不存在——--skills 传 skills/ 下相对路径（整库传 .）")
+    for f in sorted(src.rglob("*")):
+        if f.is_file() and f.suffix.lower() in (".md", ".yaml", ".yml", ".txt"):
+            _assert_no_dev_paths(f)
+    dst = user_root / "skills"
+    if src != skills_root:
+        dst = dst / src.relative_to(skills_root)
+    print(f"[skills] {src} -> {dst}")
+    if not dry_run:
+        for act, rel in _mirror_tree(src, dst, skip_suffixes=SKILLS_SKIP_SUFFIXES):
+            print(f"    {act}: {rel}")
+
+
 def sync_addon(project_root: str, dry_run: bool) -> None:
     """宿主 addon 镜像到 <Godot项目>/addons/agentos（修存量项目死端点）。"""
     src = _REPO_ROOT / "hosts" / "godot-addons" / "agentos"
@@ -252,14 +295,16 @@ def main(argv: list[str] | None = None) -> int:
                         help="仓内插件目录（plugins/ 下相对路径），可多次")
     parser.add_argument("--config", action="append", default=[],
                         help="config/ 下相对路径单文件，可多次")
+    parser.add_argument("--skills", nargs="?", const=".", default=None,
+                        help="skills/ 下相对子路径镜像到 <user_root>/skills/（缺省值 . = 整库），可与其他动作并用")
     parser.add_argument("--addon", help="Godot 项目根（同步 hosts/godot-addons/agentos 到其 addons/）")
     parser.add_argument("--dry-run", action="store_true", help="只列计划不落盘")
     args = parser.parse_args(argv)
 
-    if not (args.plugin or args.config or args.addon):
-        parser.error("至少给一个动作：--plugin / --config / --addon（--dry-run 预览同样要先选动作）")
+    if not (args.plugin or args.config or args.addon or args.skills is not None):
+        parser.error("至少给一个动作：--plugin / --config / --skills / --addon（--dry-run 预览同样要先选动作）")
 
-    if args.addon and not (args.plugin or args.config):
+    if args.addon and not (args.plugin or args.config or args.skills is not None):
         # addon 目标是外部 Godot 项目，与 user_root 无关——允许不给 --user-root
         sync_addon(args.addon, args.dry_run)
         return 0
@@ -270,6 +315,8 @@ def main(argv: list[str] | None = None) -> int:
         sync_plugin(rel, user_root, args.dry_run)
     for rel in args.config:
         sync_config(rel, user_root, args.dry_run)
+    if args.skills is not None:
+        sync_skills(args.skills, user_root, args.dry_run)
     if args.addon:
         sync_addon(args.addon, args.dry_run)
     print("[OK] 完成。内核重启或插件热发现后生效（配置覆盖需重启内核的步骤以装机版形态为准）。")

@@ -16,7 +16,9 @@ human_interaction 等通用执行工具）一律软放行：本插件不拦截�
 （L2 需要写文件时不会被误拦），又能精确守住任务委托边界。
 
 State 命名空间：
-    - security.level_decision : 本插件写入的层级权限决策结果
+    - pre_decided_results : 拦截方直出的预定结果（ADR 2026-09-28 结果预填：
+      本插件对越权任务类工具调用直写拒绝结果，tool_core 命中即跳过执行；
+      多 guard 经 SDK merge_pre_decided 按 call_id 合并，无 id 按工具名兜底）
     - tool_ids : Agent 配置的可见工具集合（由 tool_schema 写入）
 """
 
@@ -27,6 +29,11 @@ from typing import Any
 
 from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import StateKeys
+
+from agentos_plugin_sdk.tool_result_protocol import (
+    merge_pre_decided,
+    tool_result_entry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,31 +98,32 @@ class LevelGuardPlugin(IInputPlugin):
         result = await self._do_work(ctx)
         return PluginResult(state_updates=result)
 
-    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:  # noqa: PLR0911
+    async def _do_work(self, ctx: PluginContext) -> dict[str, Any]:
         """执行层级权限检查逻辑。
 
         只对任务类工具（TASK_CONTROL_TOOLS）做硬限制：检查它是否在
         Agent 的 tool_ids 授权集合内。其余工具一律软放行，由 tool_schema
-        的可见性过滤和提示词约束兜底（软限制）。
+        的可见性过滤和提示词约束兜底（软限制）。越权调用经结果预填直出
+        拒绝结果（ADR 2026-09-28），tool_core 幂等跳过执行。
 
         Args:
             ctx: 插件执行上下文
 
         Returns:
-            权限决策结果字典
+            状态更新（拦截时含 pre_decided_results；无拦截零产出）
         """
         if not self._enabled:
-            return {"security.level_decision": {"allowed": True, "reason": "level guard disabled"}}
+            return {}
 
         core_type = ctx.state.get(StateKeys.CORE_TYPE, "llm_call")
 
         # 非 tool_execute 不需要权限检查
         if core_type != "tool_execute":
-            return {"security.level_decision": {"allowed": True, "reason": "not a tool execution"}}
+            return {}
 
         tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
         if not tool_calls:
-            return {"security.level_decision": {"allowed": True, "reason": "no tool calls to check"}}
+            return {}
 
         agent_level = ctx.state.get(StateKeys.AGENT_LEVEL, "unknown")
 
@@ -124,49 +132,58 @@ class LevelGuardPlugin(IInputPlugin):
         # 职责由 yaml 提示词约束，无需本插件硬拦。
         task_tool_calls = [tc for tc in tool_calls if tc.get("name", "") in TASK_CONTROL_TOOLS]
         if not task_tool_calls:
-            return {
-                "security.level_decision": {
-                    "allowed": True,
-                    "reason": "no task-control tools to check (others are soft-gated by tool_schema visibility)",
-                },
-            }
+            return {}
 
         # 从 state 读取 Agent 的 tool_ids（SSOT，由 tool_schema 插件写入）
         tool_ids = ctx.state.get("tool_ids", None)
         if tool_ids is None:
-            # tool_ids 缺失：严格模式拦截，非严格模式放行
+            # tool_ids 缺失：严格模式全量预填拒绝（fail-closed，对齐旧
+            # 决策键缺 blocked_tools = 全拦语义），非严格模式放行
             if self._strict:
-                reason = f"tool_ids not found in state, cannot verify task-control permissions for level {agent_level}"
+                reason = (
+                    f"tool_ids not found in state, cannot verify task-control "
+                    f"permissions for level {agent_level}"
+                )
                 logger.warning("[%s] %s", self.name, reason)
-                return {"security.level_decision": {"allowed": False, "reason": reason}}
-            return {"security.level_decision": {"allowed": True, "reason": "tool_ids missing but strict=False"}}
+                return self._prefill_rejections(ctx, tool_calls, reason, agent_level)
+            return {}
 
         # tool_ids 是任务类工具授权的唯一事实源
         allowed_tools = set(tool_ids)
+        blocked = [tc for tc in task_tool_calls if tc.get("name", "") not in allowed_tools]
+        if not blocked:
+            return {}
 
-        # 逐个检查任务类工具调用
-        blocked_tools: list[str] = []
-        for tc in task_tool_calls:
-            tool_name = tc.get("name", "")
-            if tool_name not in allowed_tools:
-                blocked_tools.append(tool_name)
+        names = ", ".join(tc.get("name", "") for tc in blocked)
+        reason = f"Agent level {agent_level} not allowed to call task tools: {names}"
+        logger.warning(
+            "[%s] Blocked by level guard | level=%s | tools=%s",
+            self.name,
+            agent_level,
+            names,
+        )
+        return self._prefill_rejections(ctx, blocked, reason, agent_level)
 
-        if blocked_tools:
-            reason = f"Agent level {agent_level} not allowed to call task tools: {', '.join(blocked_tools)}"
-            logger.warning(
-                "[%s] Blocked by level guard | level=%s | tools=%s",
-                self.name,
-                agent_level,
-                blocked_tools,
+    def _prefill_rejections(
+        self,
+        ctx: PluginContext,
+        calls: list[dict[str, Any]],
+        reason: str,
+        agent_level: str,
+    ) -> dict[str, Any]:
+        """对被拦调用直出预定拒绝结果（有 id 按 call_id，无 id 名字兜底）。"""
+        entries = [
+            tool_result_entry(
+                tc.get("name", ""),
+                call_id=tc.get("id"),
+                success=False,
+                error=f"工具被权限策略拦截: {reason}",
+                metadata={"decided_by": "level_guard", "agent_level": agent_level},
             )
-            decision = {
-                "allowed": False,
-                "reason": reason,
-                "blocked_tools": blocked_tools,
-                "agent_level": agent_level,
-            }
-            return {"security.level_decision": decision}
-
+            for tc in calls
+        ]
         return {
-            "security.level_decision": {"allowed": True, "reason": "task-control tools within tool_ids authorization"}
+            "pre_decided_results": merge_pre_decided(
+                ctx.state.get("pre_decided_results"), entries
+            )
         }

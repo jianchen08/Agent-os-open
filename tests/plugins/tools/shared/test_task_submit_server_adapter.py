@@ -2,11 +2,12 @@
 # @feature: 模式体系P2 编排运行面 | @ci: python-coverage
 """task_submit MCP 适配层（server.py）失败载荷契约测试。
 
-覆盖：失败结果透传 error_code 与结构化 metadata（H3/M2：编排键不存在/
-完备性失败等错误携 {missing_fields, orchestration_key, suggestion,
-available_orchestrations} 随载荷可编程消费——错误是值，不只给人读文本）；
-成功原样返回 output；无 error_code/metadata 的失败保持 ``{"error": …}``
-旧形态（additive，旧消费方不破）。
+覆盖：失败载荷显式 success=False（内核归一化只认显式 success 键——裸
+{"error": …} 会被包成 success=true 信封，tasks/http_api 等按 success 判定的
+消费方会把拒绝载荷当成功 data）+ 透传 error_code 与结构化 metadata
+（H3/M2：编排键不存在/完备性失败等错误携 {missing_fields, orchestration_key,
+suggestion, available_orchestrations} 随载荷可编程消费——错误是值，不只给人
+读文本）；成功原样返回 output。
 
 装配同 test_task_server.py 先例：importlib 显式路径加载 + 唯一模块名 +
 裸名 "tool" 槽位治理。
@@ -77,7 +78,8 @@ class _FakeTool:
 async def test_failure_payload_carries_structured_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """H3 结构化错误随载荷透传：error/error_code + metadata 字段可编程消费。"""
+    """H3 结构化错误随载荷透传：显式 success=False + error/error_code +
+    metadata 字段可编程消费。"""
     from agentos_plugin_sdk import create_failure_result
 
     fake = _FakeTool(
@@ -93,6 +95,7 @@ async def test_failure_payload_carries_structured_fields(
     )
     monkeypatch.setattr(_server_mod, "TaskSubmitTool", lambda: fake)
     out = await _server_mod.task_submit(goal_title="t", goal_description="d")
+    assert out["success"] is False
     assert out["error_code"] == "ORCHESTRATION_KEY_NOT_FOUND"
     assert out["orchestration_key"] == "mode_writing/nope"
     assert out["available_orchestrations"] == ["autonomous"]
@@ -146,10 +149,10 @@ async def test_success_returns_output_verbatim(
 async def test_plain_failure_keeps_legacy_shape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """无 error_code/metadata 的失败保持旧形态 {"error": …}（additive 不破旧）。"""
+    """无 error_code/metadata 的失败仍显式 success=False（成败只认该键）。"""
     from agentos_plugin_sdk import create_failure_result
 
     fake = _FakeTool(create_failure_result(error="必须提供 goal（含 title 字段）"))
     monkeypatch.setattr(_server_mod, "TaskSubmitTool", lambda: fake)
     out = await _server_mod.task_submit(goal_title="t", goal_description="d")
-    assert out == {"error": "必须提供 goal（含 title 字段）"}
+    assert out == {"success": False, "error": "必须提供 goal（含 title 字段）"}

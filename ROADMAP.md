@@ -3,11 +3,22 @@
 > 本文档描述灵汐 AgentOS 的**未来演进方向**。路线图是规划性的，会根据社区反馈和优先级动态调整。
 > 想影响路线图？欢迎在 [Discussions](https://github.com/jianchen08/Agent-os-open/discussions) 发起讨论。
 
-> **现状（2026-08）**：0.2 核心地基层已落地——Rust 微内核 + Python 插件 + 一切皆插件
+> **现状（2026-09-29 快照）**：0.2 核心地基层已落地——Rust 微内核 + Python 插件 + 一切皆插件
 >（manifest 统一协议、双根发现、热插拔均在生产路径）。当前架构见
 > [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，现状速览见 [README.md](README.md)；
 > 本文正文中的「已上线 / 现状」字样如无特别说明指 **0.1 基线**，各规划条目的实际落地
 > 状态以上述两份文档为准。
+>
+> **较上一快照（2026-08）的主要进度差异**（规划条目因此与实况脱节，逐条修订待专门对账）：
+> - **0.3.0 打包交付面已实装，整体处于调试/验证阶段**：NSIS 装机（覆盖/卸装重装）、自动登录+凭据存档、
+>   装后冒烟 post_install_smoke、技能装机链（skills 随包 + 装机用户空间同步 + 实体校验门禁）、
+>   发版方案台账与任务交接约定（write_handoff）——均已在真实安装上演练，稳定性尚未收敛；
+> - **0.4.0 的模式包体系与技能面已落地原型，调试打磨中**：六模式包（coding / writing / learning / livestream 等）
+>   + 技能按需注入 + 技能交付链修复；
+> - **评估闸门/复盘自进化闭环进入长周期验证**：500 章连载长跑 soak 进行中（调试/验证性质：
+>   任务交接/监控/处置链在真实长跑中暴露问题即修）；
+> - **对外新增面（筹备中）**：MCP 工具小仓（bashflow-mcp / omnisearch-mcp），
+>   宣传与拆仓路线见 [docs/working/GitHub热榜增长前100筛选与借鉴评估_20260929.md](docs/working/GitHub热榜增长前100筛选与借鉴评估_20260929.md)。
 
 ---
 
@@ -250,7 +261,8 @@
 
 | 类别 | 条目 | 说明 |
 |------|------|------|
-| 首次启动向导 | 引导式问答生成首个可用 Agent | 从"我想要什么"到"可运行的 Agent"全流程引导 |
+| 首次启动向导 | 引导式问答生成首个可用 Agent | 从"我想要什么"到"可运行的 Agent"全流程引导（onboarding_service 已上线：声明式 walkthrough，见 2026-09-24 ADR） |
+| **手机远程访问（agent 代装）** | 向导收尾可选步：agent 自动配置 Tailscale/隧道并验通 | 用户一句话派发，agent 选型→安装→授权→安全清单；relay 通道部署后优先走 relay（见 GitHub 热榜调研报告 §7.5） |
 | 场景模板 | 按场景（办公 / 开发 / 创作 / 角色扮演）推荐起点配置 | 选模板 → 微调 → 即用 |
 | 配置校验 | 向导内实时校验配置合理性 | 错配即时提示，不等到运行报错 |
 
@@ -683,6 +695,7 @@ DSH 进程内的真实 service / 装载的第三方 cordis 插件
 | 工具失败连击熔断闸门 | 三信号收束闸门（连击门误杀可自愈任务，已退役） | [2026-08-30-retire-tool-fail-streak-gate.md](docs/decisions/2026-08-30-retire-tool-fail-streak-gate.md) |
 | 保留系统分配器硬扛 Windows 段堆并发高水位滞留 | 内核全局分配器换 mimalloc（实测滞留根因为段堆线程本地缓存惰性 decommit） | [2026-08-31-mimalloc-global-allocator.md](docs/decisions/2026-08-31-mimalloc-global-allocator.md) |
 | FFI 边界跨堆 `free` / 外层装箱归属模糊 | 对称借用协议：`Result<&str,_>` + 实现方自持缓冲，杜绝跨堆释放 | [2026-09-01-native-ffi-cross-heap-free-fix.md](docs/decisions/2026-09-01-native-ffi-cross-heap-free-fix.md) |
+| 模式面板承载形态=整体 webview 单通道教条 | 承载按功能在三通道内组合（UI 所有权仍随包播种；host 件声明即注册+grants 准入） | [2026-09-28-mode-panel-carrier-composition.md](docs/decisions/2026-09-28-mode-panel-carrier-composition.md) |
 
 ---
 

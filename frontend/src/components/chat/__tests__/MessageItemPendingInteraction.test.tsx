@@ -29,7 +29,7 @@ vi.mock('@/hooks/queries/useAgentsQuery', () => ({
   useAgentsQuery: () => ({ data: [] }),
 }))
 vi.mock('@/services/errorReporting', async () => (await import('./helpers/messageItemMocks')).errorReportingMock())
-vi.mock('@/services/attachmentOpener', async () => (await import('./helpers/messageItemMocks')).attachmentOpenerMock())
+vi.mock('@/services/fileLoaderRegistry', async () => (await import('./helpers/messageItemMocks')).attachmentOpenerMock())
 vi.mock('@/components/chat/MessageContentRenderer', () => ({ default: () => null }))
 vi.mock('@/components/chat/MessageActions', () => ({ MessageActions: () => null }))
 vi.mock('@/components/chat/hooks/useMessageRender', async () => (await import('./helpers/messageItemMocks')).useMessageRenderStubMock())

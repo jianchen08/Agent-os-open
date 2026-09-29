@@ -3,7 +3,7 @@
 
 服务契约（manifest capabilities.services；wire = MCP tools/call）：
 - mode.describe：返回 {mode, name, chain, weights, budget, profile_path, panel_page_id}
-- mode.get_profile：返回包内 profile.yaml 解析后的完整 dict
+- mode.get_profile：返回包内 mode.yaml 解析后的完整 dict
 
 profile 与本插件同目录内打包（种子单元自包含，目录级播种/升级/回退的结构前提）；
 消费方（eval_harness 等）经内核服务调用获取（tool-executor 显式 plugin_id 通道），
@@ -45,13 +45,13 @@ plugin = AgentOSPlugin("mode_writing")
 
 bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根入 sys.path
 
-_PROFILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profile.yaml")
+_PROFILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mode.yaml")
 
 _DESCRIBE_FIELDS = ("mode", "name", "chain", "weights", "budget", "panel_page_id")
 
 
 def load_profile(path: str = _PROFILE_PATH) -> dict[str, Any]:
-    """读取包内 profile.yaml；空文件或缺 mode 键视为种子损坏（fail-closed）。"""
+    """读取包内 mode.yaml；空文件或缺 mode 键视为种子损坏（fail-closed）。"""
     with open(path, encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
     if not isinstance(data, dict) or not data.get("mode"):
@@ -87,7 +87,7 @@ async def mode_describe() -> dict[str, Any]:
 @plugin.tool(
     name="mode.get_profile",
     schema={"type": "object", "properties": {}},
-    description="返回写作模式包内 profile.yaml 解析后的内容",
+    description="返回写作模式包内 mode.yaml 解析后的内容",
     output_schema={
         "type": "object",
         "required": ["mode"],

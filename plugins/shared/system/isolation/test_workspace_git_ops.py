@@ -255,6 +255,7 @@ class TestInitAndInitialCommit:
         assert host._git_init_and_initial_commit(ws, "init msg") is True
         assert (ws / ".git").exists()
         assert (ws / ".gitignore").exists()  # 缺失时生成最小保护版本
+        assert ".task_runtime/" in (ws / ".gitignore").read_text(encoding="utf-8")
         assert _git(["rev-parse", "--abbrev-ref", "HEAD"], ws) == "main"
         assert _git(["log", "--oneline"], ws)  # 有提交
 
@@ -436,3 +437,33 @@ class TestDetectScenario:
         (ws / "src" / "m.py").write_text("x", encoding="utf-8")
         scenario, _ = host._detect_scenario(str(ws), {"task_id": "t"})
         assert scenario == "existing_project"
+
+
+class TestEnsureGitignore:
+    """任务运行时目录排除行：缺失播种 / 存量幂等追加 / 已含不重复。"""
+
+    def test_missing_writes_minimal_version_with_runtime_dir(self, tmp_path: Path) -> None:
+        host = _GitOpsHost(tmp_path, {})
+        ws = tmp_path / "ws_a"
+        ws.mkdir()
+        host._ensure_gitignore(ws)
+        text = (ws / ".gitignore").read_text(encoding="utf-8")
+        assert text.startswith("data/\n")
+        assert ".task_runtime/\n" in text
+
+    def test_existing_without_line_appends_and_preserves_content(self, tmp_path: Path) -> None:
+        host = _GitOpsHost(tmp_path, {})
+        ws = tmp_path / "ws_b"
+        ws.mkdir()
+        (ws / ".gitignore").write_text("dist/\n", encoding="utf-8")
+        host._ensure_gitignore(ws)
+        text = (ws / ".gitignore").read_text(encoding="utf-8")
+        assert text == "dist/\n.task_runtime/\n"
+
+    def test_existing_with_line_is_idempotent(self, tmp_path: Path) -> None:
+        host = _GitOpsHost(tmp_path, {})
+        ws = tmp_path / "ws_c"
+        ws.mkdir()
+        (ws / ".gitignore").write_text("data/\n.task_runtime/\n", encoding="utf-8")
+        host._ensure_gitignore(ws)
+        assert (ws / ".gitignore").read_text(encoding="utf-8") == "data/\n.task_runtime/\n"

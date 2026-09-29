@@ -77,9 +77,7 @@ def test_needs_provision_false_when_venv_present(srv: Any, tmp_path: Path) -> No
     assert not srv._needs_aux_provision(str(tmp_path))
 
 
-def test_needs_provision_true_when_venv_missing_requirements_present(
-    srv: Any, tmp_path: Path
-) -> None:
+def test_needs_provision_true_when_venv_missing_requirements_present(srv: Any, tmp_path: Path) -> None:
     (tmp_path / "requirements.txt").write_text("# pinned stack\n", encoding="utf-8")
     assert srv._needs_aux_provision(str(tmp_path))
 
@@ -120,25 +118,39 @@ def test_aux_venv_python_prefers_win_layout(srv: Any, tmp_path: Path) -> None:
 def test_aux_venv_python_falls_back_to_unix_layout(srv: Any, tmp_path: Path) -> None:
     venv_bin = tmp_path / ".venv-hindsight" / "bin"
     venv_bin.mkdir(parents=True)
-    assert srv._aux_venv_python(str(tmp_path)).replace("\\", "/").endswith(
-        ".venv-hindsight/bin/python"
-    )
+    assert srv._aux_venv_python(str(tmp_path)).replace("\\", "/").endswith(".venv-hindsight/bin/python")
+
+
+def test_aux_venv_python_falls_back_to_user_space_registry(
+    srv: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """插件目录缺 venv（装机只读重定向形态）→ 用户空间登记处按内核同键回读。
+
+    键 = plugin-venvs/<插件 id>--<目录名剥前导点>，与内核
+    select_missing_aux_venvs 的登记键同源（ADR 2026-09-28-aux-venv-autoprovision）。
+    """
+    user_root = tmp_path / "usroot"
+    key_dir = user_root / "plugin-venvs" / "hindsight_memory_service--venv-hindsight"
+    scripts = key_dir / "Scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "python.exe").write_text("", encoding="utf-8")
+    monkeypatch.setattr(srv, "_user_space_path", lambda *parts: str(user_root.joinpath(*parts)))
+
+    resolved = srv._aux_venv_python(str(tmp_path / "plugin_dir"))
+
+    assert resolved == str(scripts / "python.exe"), "登记处解释器必须按内核同键命中"
 
 
 # ---------- 真实 uv 的执行面 ----------
 
 
-def test_provision_aux_venv_real_uv_creates_venv(
-    srv: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_provision_aux_venv_real_uv_creates_venv(srv: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """关键路径真实依赖：真实 uv venv 建出解释器（uv 缺席显式跳过，同内核测试口径）。"""
     if shutil.which("uv") is None:
         pytest.skip("uv 不在 PATH")
     (tmp_path / "requirements.txt").write_text("", encoding="utf-8")
     venv_dir = tmp_path / ".venv-hindsight"
-    monkeypatch.setattr(
-        srv, "_aux_provision_cmds", lambda d: [["uv", "venv", str(venv_dir)]]
-    )
+    monkeypatch.setattr(srv, "_aux_provision_cmds", lambda d: [["uv", "venv", str(venv_dir)]])
     _run(srv._provision_aux_venv(str(tmp_path)))
     py = srv._aux_venv_python(str(tmp_path))
     assert Path(py).is_file(), f"真实 uv venv 后解释器应就位: {py}"
@@ -161,9 +173,7 @@ async def _noop_async(*a: Any, **k: Any) -> None:
     return None
 
 
-def test_on_load_init_defers_to_background_provision(
-    srv: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_on_load_init_defers_to_background_provision(srv: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """缺辅助 venv：on_load 不 spawn api、快速返回，自愈任务被调度。"""
     (tmp_path / "requirements.txt").write_text("", encoding="utf-8")
     monkeypatch.setattr(srv, "_THIS_DIR", str(tmp_path))
@@ -189,18 +199,14 @@ def test_provision_failure_keeps_degraded(
     srv: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """供给失败：warn 留痕、_client 保持 None（诚实降级，不假成功）。"""
-    monkeypatch.setattr(
-        srv, "_provision_aux_venv", AsyncMock(side_effect=RuntimeError("uv 缺席"))
-    )
+    monkeypatch.setattr(srv, "_provision_aux_venv", AsyncMock(side_effect=RuntimeError("uv 缺席")))
     with caplog.at_level(logging.WARNING):
         _run(srv._provision_then_connect(str(tmp_path), "8420", str(tmp_path / "data")))
     assert srv._client is None
     assert any("自愈失败" in r.getMessage() for r in caplog.records)
 
 
-def test_provision_success_connects_backend(
-    srv: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_provision_success_connects_backend(srv: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """供给成功即自连后端（_connect_backend 被以原 port/data_dir 调用）。"""
     monkeypatch.setattr(srv, "_provision_aux_venv", AsyncMock())
     connect = AsyncMock()
@@ -224,9 +230,7 @@ def test_connect_failure_after_provision_degrades(
 # ---------- 补扫残余分支（diff-cov 100% 执法） ----------
 
 
-def test_provision_aux_venv_uv_missing_raises(
-    srv: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_provision_aux_venv_uv_missing_raises(srv: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """uv 不在 PATH：可读错误上抛（同内核 autoprovision 前提缺失的降级口径）。"""
     import shutil as _shutil
 
@@ -235,9 +239,7 @@ def test_provision_aux_venv_uv_missing_raises(
         _run(srv._provision_aux_venv(str(tmp_path)))
 
 
-def test_provision_aux_venv_timeout_kills_and_raises(
-    srv: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_provision_aux_venv_timeout_kills_and_raises(srv: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """命令挂死：按宽上限超时 kill 并上抛（上限注入为 0.2s，不真等 900s）。"""
     import shutil as _shutil
 
@@ -249,9 +251,7 @@ def test_provision_aux_venv_timeout_kills_and_raises(
         _run(srv._provision_aux_venv(str(tmp_path)))
 
 
-def test_connect_backend_spawns_when_api_down(
-    srv: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_connect_backend_spawns_when_api_down(srv: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """_connect_backend 的 spawn 路径：api 不在位 → 起 api + 建客户端 + 建 bank。"""
     proc = SimpleNamespace(pid=4242)
     spawned: dict[str, Any] = {}

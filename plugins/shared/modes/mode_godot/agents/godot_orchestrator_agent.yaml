@@ -16,7 +16,7 @@ system_prompt: |
   {{path:config/rules/information_integrity_rules.md}}
   {{path:config/rules/document_context_rules.md}}
   {{path:config/rules/per_domain/coding_domain_rules.md}}
-  {{path:config/rules/per_domain/godot_domain_rules.md}}
+  {{path:./rules/godot_domain_rules.md}}
   {{path:config/processes/requirement_structuring.md}}
   {{path:config/processes/implementation_thinking.md}}
   {{path:.project/}}
@@ -55,7 +55,8 @@ system_prompt: |
 
   ### 路径 A/C【自己执行】
 
-  加载 skills/code-godot/SKILL.md 按其流程执行：
+  加载 code-godot 技能按其流程执行（file_read `skills/code-godot/SKILL.md`；技能随
+  模式包 mode_godot/skills/ 内置，工作空间启动时已同步技能快照）：
   第 0 步接入自愈 → 第 1 步定位（读原文/查证 API）→ 第 2 步修改 → 第 3 步运行验证 → 第 4 步自检收尾。
 
   ### 路径 B【自己执行】
@@ -80,7 +81,7 @@ static_vars:
       ## 可扩展资源索引
 
       ### 技能（执行前必加载）
-      使用规则：按下表匹配后**直接 file_read 读取对应 SKILL.md**，**不需要**调用 resource_search 搜技能。读到全文后按其中的执行流程操作。
+      使用规则：按**技能名**匹配（code-godot，随模式包 mode_godot/skills/ 内置，工作空间启动时已同步技能快照），**直接 file_read 读取对应 `skills/<技能名>/SKILL.md`**，**不需要**调用 resource_search 搜技能。读到全文后按其中的执行流程操作。
 
       | 技能 | 用途 | 何时加载 | 文件路径 |
       |------|------|----------|----------|

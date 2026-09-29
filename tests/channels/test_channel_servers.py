@@ -164,7 +164,7 @@ class TestWeComServer:
         assert stopped == [1]
         # 卸载后的公共观察面：发送工具回到"未初始化"哨兵值
         r = await load_server.wecom_send_message("u1", "hi")
-        assert r == {"error": "WeCom adapter not initialized"}
+        assert r == {"success": False, "error": "WeCom adapter not initialized"}
 
     @pytest.mark.parametrize("load_server", ["wecom"], indirect=True)
     async def test_on_unload_no_adapter(self, load_server) -> None:
@@ -175,13 +175,13 @@ class TestWeComServer:
     async def test_send_message_not_initialized(self, load_server) -> None:
         load_server._adapter = None
         r = await load_server.wecom_send_message("u1", "hi")
-        assert r == {"error": "WeCom adapter not initialized"}
+        assert r == {"success": False, "error": "WeCom adapter not initialized"}
 
     @pytest.mark.parametrize("load_server", ["wecom"], indirect=True)
     async def test_send_message_stream_client_missing(self, load_server) -> None:
         load_server._adapter = SimpleNamespace(stream_client=None)
         r = await load_server.wecom_send_message("u1", "hi")
-        assert r == {"error": "WeCom adapter not initialized"}
+        assert r == {"success": False, "error": "WeCom adapter not initialized"}
 
     @pytest.mark.parametrize("load_server", ["wecom"], indirect=True)
     async def test_send_message_not_connected(self, load_server) -> None:
@@ -204,7 +204,7 @@ class TestWeComServer:
     async def test_handle_callback_not_initialized(self, load_server) -> None:
         load_server._adapter = None
         r = await load_server.wecom_handle_callback("t", "n", "s", "b")
-        assert r == {"error": "WeCom adapter not initialized"}
+        assert r == {"success": False, "error": "WeCom adapter not initialized"}
 
     @pytest.mark.parametrize("load_server", ["wecom"], indirect=True)
     async def test_handle_callback_success(self, load_server) -> None:
@@ -255,13 +255,13 @@ class TestQQServer:
         assert stopped == [1]
         # 卸载后的公共观察面：发送工具回到"未初始化"哨兵值
         r = await load_server.qq_send_message(1, "hi")
-        assert r == {"error": "QQ adapter not initialized"}
+        assert r == {"success": False, "error": "QQ adapter not initialized"}
 
     @pytest.mark.parametrize("load_server", ["qq"], indirect=True)
     async def test_send_message_not_initialized(self, load_server) -> None:
         load_server._adapter = None
         r = await load_server.qq_send_message(1, "hi")
-        assert r == {"error": "QQ adapter not initialized"}
+        assert r == {"success": False, "error": "QQ adapter not initialized"}
 
     @pytest.mark.parametrize("load_server", ["qq"], indirect=True)
     async def test_send_message_not_connected(self, load_server) -> None:
@@ -317,13 +317,13 @@ class TestDingTalkServer:
         assert stopped == [1]
         # 卸载后的公共观察面：发送工具回到"未初始化"哨兵值
         r = await load_server.dingtalk_send_message("u1", "hi")
-        assert r == {"error": "DingTalk adapter not initialized"}
+        assert r == {"success": False, "error": "DingTalk adapter not initialized"}
 
     @pytest.mark.parametrize("load_server", ["dingtalk"], indirect=True)
     async def test_send_message_not_initialized(self, load_server) -> None:
         load_server._adapter = None
         r = await load_server.dingtalk_send_message("u1", "hi")
-        assert r == {"error": "DingTalk adapter not initialized"}
+        assert r == {"success": False, "error": "DingTalk adapter not initialized"}
 
     @pytest.mark.parametrize("load_server", ["dingtalk"], indirect=True)
     async def test_send_message_not_connected(self, load_server) -> None:

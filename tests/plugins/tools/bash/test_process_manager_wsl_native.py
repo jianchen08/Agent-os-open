@@ -139,6 +139,48 @@ class TestWslNativeStart:
         assert "AGENTOS_BRIDGE_TOKEN=tok" in after_sep
         assert "bwrap" in after_sep
 
+    def test_start_injects_task_runtime_env_before_sandbox(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """任务运行时 env 注入：副作用（缓存/npm/用户包）约束进 workspace。
+
+        与 WslNativeProvider._build_exec_argv 同语义（漂移钉）：bridge 之后、
+        sandbox 之前，值由 exec_backend.workspace_wsl 派生；workspace_wsl 空
+        时（异常形态）不注入。
+        """
+        argvs = _patch_exec(monkeypatch)
+        pm = ProcessManager()
+        _run(
+            pm.start_process(
+                "cargo build",
+                working_dir=None,
+                log_dir=tmp_path,
+                container_id="cua-ws1",
+                exec_backend=dict(_BACKEND_BASE),
+            )
+        )
+        argv = argvs[0]
+        idx = argv.index("--exec")
+        assert argv[idx + 1 : idx + 5] == [
+            "env",
+            "XDG_CACHE_HOME=/mnt/d/ws/.task_runtime/cache",
+            "npm_config_cache=/mnt/d/ws/.task_runtime/npm-cache",
+            "PYTHONUSERBASE=/mnt/d/ws/.task_runtime/pyuser",
+        ]
+
+    def test_start_no_runtime_env_without_workspace_wsl(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        argvs = _patch_exec(monkeypatch)
+        pm = ProcessManager()
+        _run(
+            pm.start_process(
+                "ls",
+                working_dir="D:\\host\\dir",
+                log_dir=tmp_path,
+                container_id="cua-ws1",
+                exec_backend=dict(_BACKEND_BASE, workspace_wsl=""),
+            )
+        )
+        argv = argvs[0]
+        assert not any(a.startswith(("XDG_CACHE_HOME=", "PYTHONUSERBASE=")) for a in argv)
+
     def test_working_dir_backslash_workspace_mapped(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # 工具层 ntpath 规整产物 \workspace → 应映射到 workspace_wsl（2026-09-14 管道实测 E_INVALIDARG 根因）
         argvs = _patch_exec(monkeypatch)

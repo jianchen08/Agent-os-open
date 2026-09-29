@@ -23,6 +23,7 @@ import plugin as sc_mod  # noqa: E402
 不仅是返回值。
 """
 
+from typing import Any  # noqa: E402
 from unittest.mock import AsyncMock
 
 import pytest
@@ -51,6 +52,18 @@ def _approval_svc(sequence: list[dict]):
     counter.calls 为 create_choice 次数（审批发起次数的可观测计数）。
     """
     return wire_approval_cap(sc_mod, sequence)
+
+
+def _decision_view(result: Any) -> dict[str, Any]:
+    """旧 security.decision 观测面的等价视图（键已随 ADR 2026-09-28 退役）。
+
+    拦截 = 预定拒绝条目在场（reason "soft_block: <error>"）；放行/批准 =
+    allowed True（无预定拒绝即过）。
+    """
+    entries = result.state_updates.get("pre_decided_results") or []
+    if entries:
+        return {"allowed": True, "reason": f"soft_block: {entries[0]['error']}"}
+    return {"allowed": True, "reason": "all checks passed"}
 
 
 def _ctx_for(tool_name: str, command: str, *, provider: str = "host") -> PluginContext:
@@ -85,7 +98,7 @@ class TestPerRoundApproval:
         # 第一轮：危险命令 A
         ctx1 = _ctx_for("bash_execute", "rm -rf /tmp/a")
         r1 = await plugin.execute(ctx1)
-        assert r1.state_updates.get("security.decision", {}).get("allowed") is True
+        assert _decision_view(r1)["allowed"] is True
         assert create.calls == 1
 
         # 第二轮：危险命令 B（不同路径）—— 关键：必须再次审批
@@ -142,7 +155,7 @@ class TestSignatureMemory:
         ctx2 = _ctx_for("bash_execute", "rm -rf /tmp/x")
         r2 = await plugin.execute(ctx2)
         assert create.calls == 1, "同命令已记忆，不应再次发起审批"
-        assert r2.state_updates.get("security.decision", {}).get("allowed") is True
+        assert _decision_view(r2)["allowed"] is True
 
     @pytest.mark.asyncio
     async def test_approved_once_does_not_remember(self):
@@ -208,7 +221,7 @@ class TestSignatureMemory:
         ctx2 = _ctx_for("bash_execute", "rm -rf /tmp/x")
         r2 = await plugin.execute(ctx2)
         assert create.calls == 1, "空白归一化后应视为同命令，免审批"
-        assert r2.state_updates.get("security.decision", {}).get("allowed") is True
+        assert _decision_view(r2)["allowed"] is True
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -246,7 +259,7 @@ class TestLabelBasedSelection:
         ctx2 = _ctx_for("bash_execute", "rm -rf /tmp/x")
         r2 = await plugin.execute(ctx2)
         assert create.calls == 1, "label 路径记忆后，同命令应免审批"
-        assert r2.state_updates.get("security.decision", {}).get("allowed") is True
+        assert _decision_view(r2)["allowed"] is True
 
     @pytest.mark.asyncio
     async def test_label_once_does_not_remember(self):
@@ -280,7 +293,7 @@ class TestLabelBasedSelection:
 
         ctx = _ctx_for("bash_execute", "rm -rf /tmp/x")
         r = await plugin.execute(ctx)
-        decision = r.state_updates.get("security.decision", {})
+        decision = _decision_view(r)
         # _soft_block 返回 allowed=True（软拦截：拒绝结果反馈给 LLM，
         # 不结束管道），靠 reason 标记区分是否被拒。
         assert "soft_block" in decision.get("reason", ""), (
@@ -308,7 +321,7 @@ class TestLabelBasedSelection:
         ctx1 = _ctx_for("bash_execute", "rm -rf /tmp/x")
         r1 = await plugin.execute(ctx1)
         assert create.calls == 1
-        assert "soft_block" in r1.state_updates.get("security.decision", {}).get("reason", "")
+        assert "soft_block" in _decision_view(r1).get("reason", "")
 
         # 同命令第二轮：拒绝没有记忆指纹 → 必须再次发起审批
         ctx2 = _ctx_for("bash_execute", "rm -rf /tmp/x")
@@ -348,7 +361,7 @@ class TestApprovalServiceErrorContract:
         result = await plugin.execute(_ctx_for("bash_execute", "rm -rf /tmp/err"))
 
         assert create.calls == 1
-        decision = result.state_updates["security.decision"]
+        decision = _decision_view(result)
         assert expected_reason_prefix in decision.get("reason", ""), (
             f"error={error_msg!r} 应转换为 {expected_reason_prefix}，实际 {decision!r}"
         )
@@ -364,7 +377,7 @@ class TestApprovalServiceErrorContract:
         result = await plugin.execute(_ctx_for("bash_execute", "rm -rf /tmp/err"))
 
         assert create.calls == 1
-        decision = result.state_updates["security.decision"]
+        decision = _decision_view(result)
         assert "审批服务异常" in decision.get("reason", "")
         assert "wait_for_choice returned non-dict" in decision.get("reason", "")
 
@@ -382,7 +395,7 @@ class TestApprovalServiceErrorContract:
         plugin = sc_mod.SecurityCheckPlugin(config={"enabled": True, "rules": []})
         result = await plugin.execute(_ctx_for("bash_execute", "rm -rf /tmp/err"))
 
-        decision = result.state_updates["security.decision"]
+        decision = _decision_view(result)
         assert "审批服务异常" in decision.get("reason", "")
         assert "create_choice failed" in decision.get("reason", "")
 
@@ -429,7 +442,7 @@ class TestApprovalDescriptionPreview:
         )
         result = await plugin.execute(ctx)
 
-        assert result.state_updates["security.decision"]["reason"] == "approved"
+        assert not result.state_updates.get("pre_decided_results"), "批准即放行（reason=approved 键已退役）"
         assert len(requests) == 1
         desc = requests[0]["description"]
         assert "命令:" in desc
@@ -485,5 +498,5 @@ class TestApprovalFormatsStringArgsToolCalls:
         )
         result = await plugin.execute(ctx)
 
-        assert result.state_updates["security.decision"]["reason"] == "approved"
+        assert not result.state_updates.get("pre_decided_results"), "批准即放行（reason=approved 键已退役）"
         assert "工具: helper_tool" in requests[0]["description"]

@@ -8,6 +8,10 @@ import { cn } from '@/lib/utils'
 import { useChatInputStore } from '@/stores/chatInputStore'
 import { subscribeFileChange, unsubscribeFileChange } from '@/stores/fileEditorRegistry'
 import { LobeChatMarkdown } from '../chat/LobeChatMarkdown'
+import { markdownLinkInterceptor } from '@/services/fileLoaderRegistry'
+
+/** md 预览内 /uploads 附件链接拦截（改走加载器，防整窗导航死页） */
+const attachmentLinkInterceptor = markdownLinkInterceptor()
 
 /** Markdown 扩展名集合 */
 const MARKDOWN_EXTENSIONS = new Set(['.md', '.markdown'])
@@ -739,7 +743,7 @@ export function CodeEditor({
             onMouseUp={handlePreviewMouseUp}
             onClick={handlePreviewClick}
           >
-            <LobeChatMarkdown content={localContent} />
+            <LobeChatMarkdown content={localContent} onLinkClick={attachmentLinkInterceptor} />
             {floatingQuote.visible && (
               <FloatingQuoteButton
                 position={floatingQuote.position}

@@ -63,6 +63,14 @@
         }
       },
       {
+        "name": "mode.list",
+        "description": "List mode catalog entries [{mode, name, description, pipeline, chain:{entry}}] sorted by mode key (single source for the {{mode_catalog}} prompt placeholder)",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
         "name": "http.handle",
         "description": "HTTP endpoint handler for /ext/agent_manager/** (agent config management)",
         "input_schema": {
@@ -153,6 +161,16 @@
       "timeout_ms": 10000,
       "max_concurrency": 4,
       "description": "写模式包 agent 用户副本 <USER_ROOT>/plugins/modes/mode_X/agents/<stem>.yaml（首写以出厂种子内容为 If-Match 基线；语法 400/乐观锁 409/路径越界 fail-closed；落盘后 <USER_ROOT>/.git 在场则 git add/commit，失败 warn 不阻断）"
+    },
+    {
+      "route_id": "agent_manager_modes",
+      "method": "GET",
+      "path": "/ext/agent_manager/modes",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "模式声明面聚合（各包 mode.yaml：mode/name/pipeline/panel_page_id/presenter/tool_card，schema 校验 fail-closed；mode.yaml 单一真值）"
     }
   ],
   "contributes": {

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<!-- 角色状态变化卡（message-style=roleplay_state_card）：宿主桥注入 message.data
+     （content=剥离后正文 + metadata.state_updates 载荷），本卡只渲染
+     state_updates.entries.state 的键值行——沉浸化状态小卡，主题跟随宿主 token。 -->
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; font: 13px/1.6 system-ui, sans-serif; }
+  .card { padding: 6px 10px; }
+  .title { font-weight: 600; opacity: 0.85; margin-bottom: 4px; }
+  .row { display: flex; gap: 6px; }
+  .k { opacity: 0.65; }
+  .v { font-weight: 500; }
+</style>
+</head>
+<body>
+<div class="card" data-testid="state-card">
+  <div class="title">📊 状态变化</div>
+  <div id="rows">（等待状态载荷…）</div>
+</div>
+<script>
+  function render(payload) {
+    try {
+      var meta = payload && payload.metadata || {};
+      var su = meta.state_updates || {};
+      var state = (su.entries && su.entries.state) || {};
+      var keys = Object.keys(state);
+      var rows = document.getElementById('rows');
+      if (!keys.length) { rows.textContent = '（无状态变化）'; return; }
+      rows.innerHTML = '';
+      keys.forEach(function (k) {
+        var row = document.createElement('div');
+        row.className = 'row';
+        var ke = document.createElement('span'); ke.className = 'k'; ke.textContent = k + '：';
+        var ve = document.createElement('span'); ve.className = 'v'; ve.textContent = String(state[k]);
+        row.appendChild(ke); row.appendChild(ve);
+        rows.appendChild(row);
+      });
+    } catch (e) { document.getElementById('rows').textContent = '载荷解析失败'; }
+  }
+  // 宿主注入信封：window.message（injectMessage 下行）或 widget.event 通道
+  if (window.message) render(window.message);
+  window.addEventListener('message', function (ev) {
+    var d = ev.data || {};
+    if (d.type === 'message' && d.payload) render(d.payload);
+    if (d.message) render(d.message);
+  });
+</script>
+</body>
+</html>

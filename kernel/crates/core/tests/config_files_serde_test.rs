@@ -127,6 +127,7 @@ fn test_empty_config_files_omitted_in_serialization() {
         activation: None,
         persistent_fields: vec![],
         export_fields: vec![],
+        aux_venvs: Vec::new(),
         provides: None,
     };
 

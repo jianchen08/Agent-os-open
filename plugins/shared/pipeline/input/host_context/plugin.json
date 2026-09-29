@@ -5,10 +5,11 @@
   ],
   "name": "Host Context",
   "description": "通用宿主连接桥：外部宿主（Godot/VSCode 等）选中引用推送、转发前端、引用与用户消息合并；连接者身份由配置指定",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "plugin_type": "pipeline",
   "language": "python",
   "host_type": "sidecar",
+  "host_group": "light",
   "entry": "python server.py",
   "invoke_entry": "host_context.execute",
   "lifecycle": {

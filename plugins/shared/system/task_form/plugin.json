@@ -101,10 +101,10 @@
               "default": "",
               "options": [
                 {
-                  "label": "自动",
+                  "label": "默认",
                   "value": "",
                   "icon": "✨",
-                  "description": "发送不带模式键，归属由后端自然语言分类裁决"
+                  "description": "发送不带模式键，主 agent 按模式目录自行归类派发（不指定模式）"
                 }
               ]
             }

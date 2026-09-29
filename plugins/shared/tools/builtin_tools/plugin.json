@@ -5,7 +5,7 @@
   ],
   "name": "Builtin Tools",
   "description": "8 个高频内置工具（文件读写/代码文件搜索/目录与文件管理）MCP 封装",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "plugin_type": "tool",
   "language": "python",
   "host_type": "sidecar",
@@ -217,7 +217,7 @@
       },
       {
         "name": "enhanced_search",
-        "description": "代码/文件搜索",
+        "description": "代码/文件搜索（search_type=filename 按文件名搜、text 按内容搜）。遍历为深度优先，自动跳过 node_modules/.git/target 等依赖与构建产物目录（.gitignore 同款口径，这些目录内文件不可搜；直接以该类目录为 path 起搜可进入）；其余目录受 timeout_seconds 墙钟预算约束（默认 60s），超时只返回已遍历到的部分——空结果≠文件不存在，可能只是尚未遍历到。未命中时优先把 path 缩小到更具体的目录重搜，或调大 timeout_seconds，勿仅凭一次空结果断定文件不存在。",
         "render": {
           "card": "search"
         },
@@ -253,8 +253,8 @@
               "type": "string"
             },
             "query": {
-              "description": "搜索关键词或正则表达式",
-              "type": "string"
+              "type": "string",
+              "description": "搜索关键词或正则表达式（字面子串匹配，use_regex=true 才是正则；不支持 * 通配符，filename 搜索直接用文件名子串，勿带 * 或 ?）"
             },
             "search_type": {
               "default": "text",
@@ -266,7 +266,7 @@
               "type": "string"
             },
             "timeout_seconds": {
-              "default": 30.0,
+              "default": 60.0,
               "description": "遍历墙钟预算（秒），超时返回部分结果",
               "type": "number"
             },

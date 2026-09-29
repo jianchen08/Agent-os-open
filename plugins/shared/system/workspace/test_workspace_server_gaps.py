@@ -2,8 +2,9 @@
 """workspace server.py 缺口分支补测（HEAD coverage.xml 缺行，2026-09-14）。
 
 覆盖目标（行号语义经源码逐行确认）：
-- server.py:323-324（get_file_content 的已合并 worktree 死路径重定位命中后
-  以 project_root 副本继续读取）、
+- server.py get_file_content 的已合并 worktree 死路径重定位命中后
+  以 project_root 副本继续读取（后置 is_file 兜底位）、
+  路径形态契约（绝对直读/相对守卫，用户裁定 2026-09-28）、
   613-615 与 620（open_workspace_in_ide 无 tool-executor 能力时走系统文件
   管理器兜底：成功与失败两态）、
   705（_resolve_workspace_path 项目登记通道的 sys.path 自举插入）、
@@ -248,6 +249,71 @@ class TestFileContentWorktreeRelocation:
                 "p-gone", str(wt_root / "never.txt"), caller={"sub": "user-a"}
             )
         )
+        assert result["success"] is False
+        assert "文件不存在" in result["message"]
+
+
+# ═══════════════════════════════════════════════════════════
+# get_file_content：绝对路径直读 / 相对路径守卫（用户裁定 2026-09-28）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestFileContentPathFormContract:
+    """路径形态契约：绝对路径直读不套边界，相对路径锚定后守卫不变。
+
+    删值实验锚点：若绝对路径重新套上边界守卫，前两条（界外既有文件直读）
+    必红；若相对路径守卫被拆，第三条（../ 穿越）必红。
+    """
+
+    def _seed_workspace(self, tmp_path: Path, pipeline_id: str = "p-direct") -> Path:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        _WS.set_state_reader(lambda: [
+            {"pipeline_id": pipeline_id, "workspace": str(ws), "task.submitted_by": "user-a"}
+        ])
+        return ws
+
+    def test_existing_file_outside_workspace_reads_directly(
+        self, srv: Any, tmp_path: Path
+    ) -> None:
+        """工作空间兄弟目录下的既有文件 → 直读成功（界外拒绝已废）。"""
+        self._seed_workspace(tmp_path)
+        outside = tmp_path / "elsewhere" / "docs" / "项目介绍问答.md"
+        outside.parent.mkdir(parents=True)
+        outside.write_text("界外内容", encoding="utf-8")
+
+        result = _run(srv.get_file_content("p-direct", str(outside), caller={"sub": "user-a"}))
+
+        assert result["success"] is True
+        assert result["content"] == "界外内容"
+        assert result["size"] == len("界外内容".encode())
+
+    def test_existing_file_sharing_workspace_prefix_reads_directly(
+        self, srv: Any, tmp_path: Path
+    ) -> None:
+        """与工作空间同名前缀的界外文件（字符串前缀易误判形态）→ 直读成功。"""
+        ws = self._seed_workspace(tmp_path)
+        sibling = tmp_path / "ws-backup.md"  # 与 ws 同前缀、非界内
+        sibling.write_text("前缀相邻", encoding="utf-8")
+
+        result = _run(srv.get_file_content("p-direct", str(sibling), caller={"sub": "user-a"}))
+
+        assert result["success"] is True
+        assert result["content"] == "前缀相邻"
+        assert result["size"] == len("前缀相邻".encode())
+        assert ws.is_dir()
+
+    def test_relative_escape_still_rejected(
+        self, srv: Any, tmp_path: Path
+    ) -> None:
+        """相对路径 ../ 穿越 → 越界守卫不变（锚定是相对路径解析前提）。"""
+        self._seed_workspace(tmp_path)
+        (tmp_path / "secret.txt").write_text("机密", encoding="utf-8")
+
+        result = _run(
+            srv.get_file_content("p-direct", "../secret.txt", caller={"sub": "user-a"})
+        )
+
         assert result["success"] is False
         assert "路径超出工作空间范围" in result["message"]
 

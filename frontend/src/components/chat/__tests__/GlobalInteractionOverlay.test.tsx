@@ -3,21 +3,24 @@
  * GlobalInteractionOverlay 全局交互浮层测试
  *
  * 覆盖：待处理列表过滤（仅 pending）、多卡片导航（上一个/下一个 + 边界禁用 +
- * 索引自动重置）、最小化徽标（含审批倒计时，BUG-43）与恢复、按钮/ESC 关闭、
- * 三类响应回调的参数投影与失败提示、跨卡片提交互斥守卫、浮层不拦截 composer
- * （BUG-43：右下悬浮锚定 composer 上缘 + 宽度有界，接替 BUG-14 遮罩不拦截
- * 契约——遮罩已随横贯底部布局一并移除）。
+ * 索引自动重置）、最小化徽标（含审批倒计时）与恢复、按钮/ESC 关闭、
+ * 三类响应回调的参数投影与失败提示、跨卡片提交互斥守卫、底部停靠布局契约
+ * （ADR 2026-09-29：底部居中 + 遮罩仅视觉不拦截 + 宽度视口内加宽；
+ * BUG-43 右下悬浮锚定方案被否回退）。
  *
  * mock 约定：useInteractionHandler（WebSocket 编排层）、toast、logger 为外部
  * 边界整模块 mock；InteractionCard 以按钮桩替身回放回调参数；两个 zustand
  * store 走真实现。
  */
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { updateSessionsCache } from '@/hooks/queries/useSessionsQuery'
 import { useInteractionStore } from '@/stores/interactionStore'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { GlobalInteractionOverlay } from '../GlobalInteractionOverlay'
 import type { PendingInteraction } from '@/stores/interactionStore'
+import type { Session } from '@/types/models'
 
 // ---------------------------------------------------------------------------
 //  Mock：外部边界
@@ -45,10 +48,11 @@ vi.mock('@/utils/logger', async (importOriginal) => {
   }
 })
 
-/** InteractionCard 桩：暴露回调触发按钮与 isSubmitting/requestId 可观察面 */
+/** InteractionCard 桩：暴露回调触发按钮与 isSubmitting/requestId/originLabel 可观察面 */
 vi.mock('@/components/chat/InteractionCard', () => ({
   InteractionCard: ({
     interaction,
+    originLabel,
     onRespondChoice,
     onRespondText,
     onNavigateToTab,
@@ -56,13 +60,19 @@ vi.mock('@/components/chat/InteractionCard', () => ({
     isSubmitting,
   }: {
     interaction: PendingInteraction
+    originLabel?: string
     onRespondChoice: (optionId: string, optionLabel?: string) => void
     onRespondText: (text: string) => void
     onNavigateToTab: () => void
     onDismiss: () => void
     isSubmitting: boolean
   }) => (
-    <div data-testid="interaction-card" data-request-id={interaction.requestId} data-submitting={String(isSubmitting)}>
+    <div
+      data-testid="interaction-card"
+      data-request-id={interaction.requestId}
+      data-submitting={String(isSubmitting)}
+      data-origin-label={originLabel}
+    >
       <span>{interaction.title}</span>
       <button onClick={() => onRespondChoice('opt-1', '批准')}>fire-choice-labeled</button>
       <button onClick={() => onRespondChoice('opt-2')}>fire-choice-id</button>
@@ -225,8 +235,7 @@ describe('GlobalInteractionOverlay 关闭与最小化', () => {
     expect(useInteractionStore.getState().isMinimized).toBe(false)
   })
 
-  // BUG-43：横贯底部的半透明遮罩随旧布局移除——非阻断改为结构性保证
-  // （浮层右下悬浮锚定 composer 上缘，见「BUG-43 浮层不拦截 composer」组）。
+  // 遮罩仅视觉不拦截的指针分层契约见「浮层底部停靠」组（ADR 2026-09-29）。
 })
 
 describe('GlobalInteractionOverlay 响应回调', () => {
@@ -367,122 +376,69 @@ describe('GlobalInteractionOverlay 响应回调', () => {
 })
 
 describe('BUG-40 卡片宽度自适应', () => {
-  it('浮层宽度有界不横向溢出：min(26rem, 视口-2rem)，右锚定不横贯底部', () => {
+  it('浮层宽度视口内加宽：w-full + mx-4 至多 视口-32px，max-w-4xl 封顶', () => {
     setInteractions([makeInteraction()])
     render(<GlobalInteractionOverlay />)
-    // 宽度上限容器：宽度 = min(26rem, 视口-32px)，长选项卡片在窄视口不横向溢出；
-    // 右锚定（无 inset-x-0/w-full）——不再横贯底部（BUG-43 非阻断定位）
+    // 宽度上限容器：w-full + mx-4 保证长选项卡片宽度至多 视口-32px 不横向溢出，
+    // max-w-4xl 宽视口封顶（底部停靠居中，ADR 2026-09-29）
     const panel = document.querySelector('[data-testid="interaction-overlay-panel"]')
     expect(panel).not.toBeNull()
-    expect(panel!.className).toMatch(/w-\[min\(26rem,calc\(100vw-2rem\)\)\]/)
-    expect(panel!.className).toMatch(/right-4/)
-    expect(panel!.className).not.toMatch(/inset-x-0/)
-    expect(panel!.className).not.toMatch(/(^|\s)w-full(\s|$)/)
+    expect(panel!.className).toMatch(/w-full/)
+    expect(panel!.className).toMatch(/max-w-4xl/)
+    expect(panel!.className).toMatch(/mx-4/)
   })
 })
 
 // ---------------------------------------------------------------------------
-//  BUG-43 浮层不拦截 composer
+//  浮层底部停靠（ADR 2026-09-29）
 //
-//  composer 全宽横贯底部（ChatContainer px-3 + ChatInput w-full），浮层贴底
-//  必压输入区（含发送按钮）——契约：浮层实测 composer 几何抬升至其上缘；
-//  收起徽标同样避让。jsdom 无布局引擎（getBoundingClientRect 全零、
-//  elementFromPoint 未实现），注入受控几何的最小命中测试：
-//  矩形取自 1440×900 视口的真实布局推算，命中语义与真实 DOM 一致
-//  （矩形包含该点的最上层元素胜出，注册序靠后 = 更上层，对应 z-[10000]）。
+//  展开卡停靠底部居中，允许覆盖输入区——遮挡由用户可控手段化解
+//  （决策即消 / 收起成徽标 / 关闭 / ESC），不迁移卡片位置；BUG-43 右下
+//  悬浮锚定 composer 上缘方案被否回退。非阻断由指针分层保证：外层与
+//  遮罩 pointer-events-none（仅视觉半透明），仅卡片容器 pointer-events-auto。
 // ---------------------------------------------------------------------------
-type HitRect = { left: number; top: number; right: number; bottom: number }
-
-function installHitTest(rects: Array<[Element, HitRect]>) {
-  const doc = document as unknown as {
-    elementFromPoint?: (x: number, y: number) => Element | null
-  }
-  doc.elementFromPoint = (x: number, y: number) => {
-    let hit: Element | null = null
-    for (const [el, r] of rects) {
-      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) hit = el
-    }
-    return hit
-  }
-}
-
-function uninstallHitTest() {
-  delete (document as unknown as { elementFromPoint?: unknown }).elementFromPoint
-}
-
-function stubViewport() {
-  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 })
-  Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 })
-}
-
-/** composer 桩：全宽贴底、顶缘 y=770（高 130px），须在浮层挂载前入 DOM */
-function stubComposer(): HTMLElement {
-  const el = document.createElement('div')
-  el.setAttribute('data-testid', 'chat-composer')
-  Object.defineProperty(el, 'getBoundingClientRect', {
-    value: () =>
-      ({
-        x: 0,
-        y: 770,
-        top: 770,
-        bottom: 900,
-        left: 0,
-        right: 1440,
-        width: 1440,
-        height: 130,
-        toJSON: () => ({}),
-      }) as DOMRect,
-  })
-  document.body.appendChild(el)
-  return el
-}
-
-describe('BUG-43 浮层不拦截 composer', () => {
-  afterEach(() => {
-    uninstallHitTest()
-    document.querySelector('[data-testid="chat-composer"]')?.remove()
-    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 })
-    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 768 })
-  })
-
-  it('composer 在场：浮层抬升至其上缘，composer 中心点/发送按钮区命中 composer 而非卡片', () => {
-    stubViewport()
-    const composer = stubComposer()
+describe('浮层底部停靠（ADR 2026-09-29）', () => {
+  it('展开卡底部停靠居中：容器 inset-x-0 bottom-0，卡片 w-full max-w-4xl，无内联抬升', () => {
     setInteractions([makeInteraction()])
     render(<GlobalInteractionOverlay />)
 
     const panel = document.querySelector(
       '[data-testid="interaction-overlay-panel"]',
     ) as HTMLElement
-    expect(panel).not.toBeNull()
-    // 抬升锚定：内联 bottom = 视口高 - composer 顶缘 + 间距 = 900-770+8
-    expect(panel.style.bottom).toBe('138px')
-
-    // 浮层矩形按锚定契约推算：底缘 900-138=762 < composer 顶缘 770（无纵向交叠）
-    const panelRect: HitRect = { left: 1008, top: 462, right: 1424, bottom: 762 }
-    installHitTest([
-      [composer, { left: 0, top: 770, right: 1440, bottom: 900 }],
-      [panel, panelRect],
-    ])
-    // composer 中心点（旧横贯底部布局下该点命中卡片子树——本用例的回归锁）
-    expect(document.elementFromPoint!(720, 835)).toBe(composer)
-    // 发送按钮区（composer 右缘内）同样不被覆盖
-    expect(document.elementFromPoint!(1350, 835)).toBe(composer)
-    // 正对照：浮层自身区域内命中浮层（卡片在该区域保持可交互）
-    expect(document.elementFromPoint!(1300, 600)).toBe(panel)
-    // 结构分离：composer 不在浮层子树内
-    expect(panel.contains(composer)).toBe(false)
-  })
-
-  it('无 composer 页面：浮层回退贴底右下（bottom-4 right-4），无内联抬升', () => {
-    setInteractions([makeInteraction()])
-    render(<GlobalInteractionOverlay />)
-    const panel = document.querySelector(
-      '[data-testid="interaction-overlay-panel"]',
-    ) as HTMLElement
+    expect(panel.className).toMatch(/w-full/)
+    expect(panel.className).toMatch(/max-w-4xl/)
+    expect(panel.className).toMatch(/pointer-events-auto/)
     expect(panel.style.bottom).toBe('')
-    expect(panel.className).toMatch(/bottom-4/)
-    expect(panel.className).toMatch(/right-4/)
+
+    // 外层容器横贯底部居中，不拦截指针
+    const wrapper = panel.parentElement as HTMLElement
+    expect(wrapper.className).toMatch(/inset-x-0/)
+    expect(wrapper.className).toMatch(/bottom-0/)
+    expect(wrapper.className).toMatch(/justify-center/)
+    expect(wrapper.className).toMatch(/pointer-events-none/)
+  })
+
+  it('遮罩仅视觉半透明不拦截指针：pointer-events-none（侧栏/停止按钮等保持可点）', () => {
+    setInteractions([makeInteraction()])
+    render(<GlobalInteractionOverlay />)
+
+    const panel = document.querySelector(
+      '[data-testid="interaction-overlay-panel"]',
+    ) as HTMLElement
+    const mask = panel.previousElementSibling as HTMLElement
+    expect(mask.className).toMatch(/pointer-events-none/)
+    expect(mask.className).toMatch(/overlay-bg/)
+  })
+
+  it('卡片高度上限 80vh（底部停靠自留 20vh 头部余量），无内联 maxHeight', () => {
+    setInteractions([makeInteraction()])
+    render(<GlobalInteractionOverlay />)
+
+    const cardWrap = document.querySelector(
+      '[data-testid="interaction-overlay-card"]',
+    ) as HTMLElement
+    expect(cardWrap.className).toMatch(/max-h-\[80vh\]/)
+    expect(cardWrap.style.maxHeight).toBe('')
   })
 
   it('收起徽标带审批倒计时（N 项待决策 + 剩余时间），点击展开恢复卡片', () => {
@@ -502,24 +458,115 @@ describe('BUG-43 浮层不拦截 composer', () => {
     expect(useInteractionStore.getState().isMinimized).toBe(false)
     expect(card()).toBeInTheDocument()
   })
-})
 
-describe('GlobalInteractionOverlay — composer 间距跟随（resize）', () => {
-  it('窗口 resize 且 composer 在挂时重新测量（onResize 分支）', async () => {
-    setInteractions([makeInteraction()])
+  it('收起徽标右下角停靠（bottom-4 right-4），不占内容区中部', () => {
+    setInteractions([makeInteraction({ requestId: 'req-badge' })])
+    useInteractionStore.setState({ isMinimized: true })
     render(<GlobalInteractionOverlay />)
 
-    // 挂一个符合 composer 选择器的假元素，触发 MutationObserver 换绑
-    const composer = document.createElement('textarea')
-    composer.setAttribute('data-testid', 'chat-composer')
-    composer.className = 'fake-x'
-    document.body.appendChild(composer)
-    // jsdom 无布局：top 恒 0 → clearance 落 COMPOSER_GAP_PX 分支之外也属已测量；
-    // 本用例只锁「resize 时 watched 存在则重测不抛错」这一行为契约
-    expect(() => {
-      window.dispatchEvent(new Event('resize'))
-    }).not.toThrow()
+    const badge = screen.getByText(/个待处理交互/).parentElement as HTMLElement
+    expect(badge.className).toMatch(/bottom-4/)
+    expect(badge.className).toMatch(/right-4/)
+  })
+})
+// ---------------------------------------------------------------------------
+//  归属标签：多会话/子任务并行时卡片可辨来源（会话标题 · Agent/管道名）
+// ---------------------------------------------------------------------------
+describe('GlobalInteractionOverlay — 卡片归属标签', () => {
+  afterEach(() => {
+    usePipelineMessageStore.setState({ pipelines: {} })
+    updateSessionsCache(() => [])
+  })
 
-    composer.remove()
+  it('会话缓存与管道元数据齐备：originLabel = 会话标题 · Agent 名', () => {
+    updateSessionsCache((prev) => [
+      ...prev,
+      { id: 'sess-origin', title: '帮我看代码' } as unknown as Session,
+    ])
+    usePipelineMessageStore.setState((s) => ({
+      pipelines: {
+        ...s.pipelines,
+        'pip-origin': {
+          pipelineId: 'pip-origin',
+          sessionId: 'sess-origin',
+          level: 2,
+          tabId: null,
+          agentName: '子代理A',
+          status: 'running',
+        },
+      },
+    }))
+    setInteractions([
+      makeInteraction({
+        requestId: 'req-origin',
+        sessionId: 'sess-origin',
+        threadId: 'sess-origin',
+        pipelineId: 'pip-origin',
+      }),
+    ])
+    render(<GlobalInteractionOverlay />)
+
+    expect(card().getAttribute('data-origin-label')).toBe('帮我看代码 · 子代理A')
+  })
+
+  it('会话/管道均解析不到：回退 agentId 原文（与通知 sourceLabel 同一约定）', () => {
+    setInteractions([makeInteraction({ requestId: 'req-unknown' })])
+    render(<GlobalInteractionOverlay />)
+
+    expect(card().getAttribute('data-origin-label')).toBe('agent-1')
+  })
+
+  it('会话标题与 Agent 名同名：去重只显示一份', () => {
+    updateSessionsCache((prev) => [
+      ...prev,
+      { id: 'sess-dup', title: '子代理A' } as unknown as Session,
+    ])
+    usePipelineMessageStore.setState((s) => ({
+      pipelines: {
+        ...s.pipelines,
+        'pip-dup': {
+          pipelineId: 'pip-dup',
+          sessionId: 'sess-dup',
+          level: 2,
+          tabId: null,
+          agentName: '子代理A',
+          status: 'running',
+        },
+      },
+    }))
+    setInteractions([
+      makeInteraction({
+        requestId: 'req-dup',
+        sessionId: 'sess-dup',
+        threadId: 'sess-dup',
+        pipelineId: 'pip-dup',
+      }),
+    ])
+    render(<GlobalInteractionOverlay />)
+
+    expect(card().getAttribute('data-origin-label')).toBe('子代理A')
+  })
+
+  it('交互切换时归属标签跟随当前卡片（act 内换卡同步重渲染）', () => {
+    updateSessionsCache((prev) => [
+      ...prev,
+      { id: 'sess-a', title: '会话甲' } as unknown as Session,
+      { id: 'sess-b', title: '会话乙' } as unknown as Session,
+    ])
+    setInteractions([
+      makeInteraction({ requestId: 'req-a', sessionId: 'sess-a', threadId: 'sess-a' }),
+      makeInteraction({ requestId: 'req-b', sessionId: 'sess-b', threadId: 'sess-b' }),
+    ])
+    render(<GlobalInteractionOverlay />)
+
+    expect(card().getAttribute('data-request-id')).toBe('req-a')
+    // 无 pipelineId → Agent 名走 agents 缓存未命中回退原文（与通知 sourceLabel 同约定）
+    expect(card().getAttribute('data-origin-label')).toBe('会话甲 · agent-1')
+
+    act(() => {
+      fireEvent.click(screen.getByTitle('下一个'))
+    })
+    expect(card().getAttribute('data-request-id')).toBe('req-b')
+    expect(card().getAttribute('data-origin-label')).toBe('会话乙 · agent-1')
   })
 })

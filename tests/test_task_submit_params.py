@@ -617,7 +617,73 @@ def test_metric_required_params_data_driven_across_metrics(tool_module):
     )
     assert fail is not None
     assert fail.error_code == "INVALID_METRIC_PARAMS"
-    assert "output" in fail.error
+    assert "expected" in fail.error
+
+
+# ─────────────────── semantic_check 口径统一（yaml 单源回归锚） ───────────────────
+
+
+def test_semantic_check_expected_only_passes_output_optional(tool_module):
+    """semantic_check 带 yaml 必填的 expected（expect 映射形态，output 可选）→ 放行。"""
+    normalized, fail = tool_module.TaskSubmitTool._normalize_acceptance_criteria(
+        {
+            "semantic_check": {
+                "input_params": {
+                    "expected": "1200-1800字剧情连续",
+                    "check": "match",
+                }
+            }
+        }
+    )
+    assert fail is None
+    assert normalized["semantic_check"]["input_params"]["expected"] == "1200-1800字剧情连续"
+
+
+def test_semantic_check_missing_expected_rejected_with_real_required(tool_module):
+    """semantic_check 缺 expected → 拒绝；文案含动态生成的真实必填示例。"""
+    _, fail = tool_module.TaskSubmitTool._normalize_acceptance_criteria(
+        {"semantic_check": {"input_params": {"output": "第二十五章正文"}}}
+    )
+    assert fail is not None
+    assert fail.error_code == "INVALID_METRIC_PARAMS"
+    assert "expected" in fail.error
+    assert '"expected"' in fail.error
+    assert "期望的语义描述" in fail.error
+
+
+def test_metric_required_examples_skips_unknown_and_optional(tool_module):
+    """示例生成器：定义缺失/无必填的指标不生成条目；正常指标占位说明来自属性描述。"""
+    assert tool_module._metric_required_examples(["ghost_metric"]) == ""
+    examples = tool_module._metric_required_examples(["file_check"])
+    assert '"path"' in examples
+    assert "文件或目录路径" in examples
+    assert "criteria" not in examples
+
+
+def test_error_examples_follow_yaml_definitions(tool_module, monkeypatch):
+    """错误文案示例动态跟随指标定义（required/description 改动即生效，零硬编码）。"""
+    monkeypatch.setattr(
+        tool_module,
+        "_load_metric_definitions",
+        lambda: {
+            "custom_metric": {
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"foo": {"type": "string", "description": "自定义必填字段"}},
+                    "required": ["foo"],
+                }
+            }
+        },
+    )
+    _, fail = tool_module.TaskSubmitTool._normalize_acceptance_criteria(
+        {"custom_metric": {"input_params": {}}}
+    )
+    assert fail is not None
+    assert fail.error_code == "INVALID_METRIC_PARAMS"
+    assert '"foo"' in fail.error
+    assert "自定义必填字段" in fail.error
+    # 内置指标示例不出现（示例只随本次问题指标生成，不硬编码清单）
+    assert "file_check" not in fail.error
 
 
 def test_metric_params_validation_skips_without_definitions(tool_module, monkeypatch):

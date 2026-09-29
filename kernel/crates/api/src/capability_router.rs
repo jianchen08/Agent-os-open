@@ -2011,6 +2011,12 @@ impl KernelCapabilityRouter {
         let invoker = self.invoker.as_ref().ok_or_else(|| McpError::Protocol {
             message: "tool-executor 未配置 invoker".to_string(),
         })?;
+        tracing::info!(
+            target: "tool-executor",
+            plugin = %plugin_id,
+            tool = %tool_name,
+            "tool-executor.invoke 经路由进入工具执行"
+        );
         match invoker.invoke_tool(&plugin_id, tool_name, &tool_args).await {
             Ok(result) => {
                 // 工具连续失败告警：结果 success=false（参数校验失败/执行错误，

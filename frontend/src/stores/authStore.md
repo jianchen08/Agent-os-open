@@ -72,7 +72,7 @@ Zustand 认证状态管理 Store，使用真实后端 API 进行登录、注册�
 ```tsx
 import { useAuthStore } from '@/stores/authStore'
 
-function LoginPage() {
+function LoginModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { login, isLoading, error, isAuthenticated, clearError } = useAuthStore()
 
   const handleSubmit = async (username: string, password: string) => {

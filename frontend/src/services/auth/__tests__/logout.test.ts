@@ -30,16 +30,14 @@ describe('performLogout 统一登出编排', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     disconnectSpy = vi.spyOn(globalWS, 'disconnect').mockImplementation(() => {})
-    logoutSpy = vi
-      .spyOn(useAuthStore.getState(), 'logout')
-      .mockImplementation(async () => {})
+    logoutSpy = vi.spyOn(useAuthStore.getState(), 'logout').mockImplementation(async () => {})
     disconnectWsSpy = vi
       .spyOn(useSessionStore.getState(), 'disconnectWebSocket')
       .mockImplementation(() => {})
     navigate = vi.fn()
   })
 
-  it('清理 → logout → 跳转登录页，顺序固定', async () => {
+  it('清理 → logout → 跳转 HOME（认证闸接管），顺序固定', async () => {
     await performLogout(navigate)
 
     expect(mockDestroyStreamingEvents).toHaveBeenCalledTimes(1)
@@ -47,7 +45,7 @@ describe('performLogout 统一登出编排', () => {
     expect(disconnectSpy).toHaveBeenCalledTimes(1)
     expect(logoutSpy).toHaveBeenCalledTimes(1)
     expect(navigate).toHaveBeenCalledTimes(1)
-    expect(navigate).toHaveBeenCalledWith(ROUTES.LOGIN)
+    expect(navigate).toHaveBeenCalledWith(ROUTES.HOME)
 
     // 清理步骤先于 logout，跳转在 logout 之后
     expect(mockDestroyStreamingEvents.mock.invocationCallOrder[0]).toBeLessThan(

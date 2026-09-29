@@ -188,6 +188,25 @@ impl ConnectionRegistry {
         self.connections.read().len()
     }
 
+    /// 内存驻留快照（堆栈级诊断面 GET /api/v1/system/memory-breakdown 消费）。
+    ///
+    /// 连接数/三张 thread 映射条目数为实测计数；`outbound_queued_frames`
+    /// 为各连接出站队列在飞帧数实测和（sink 未披露队列深度时该连接按 0 计）。
+    pub fn memory_stats(&self) -> ConnectionMemoryStats {
+        let connections = self.connections.read();
+        let mut stats = ConnectionMemoryStats {
+            connections: connections.len(),
+            thread_user: self.thread_user_map.read().len(),
+            thread_pipeline: self.thread_pipeline_map.read().len(),
+            thread_agent: self.thread_agent_map.read().len(),
+            outbound_queued_frames: 0,
+        };
+        for sink in connections.values() {
+            stats.outbound_queued_frames += sink.pending_frames().unwrap_or(0);
+        }
+        stats
+    }
+
     /// 枚举当前 thread_id → user_id 映射（供 REST 会话列表端点使用）。
     ///
     /// 只反映当前活跃连接名下的线程：连接注销（含 broadcast 清理死连接）
@@ -199,6 +218,21 @@ impl ConnectionRegistry {
             .map(|(tid, uid)| (tid.clone(), uid.clone()))
             .collect()
     }
+}
+
+/// [`ConnectionRegistry::memory_stats`] 快照。
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct ConnectionMemoryStats {
+    /// 活跃连接数（user_id → sink）。
+    pub connections: usize,
+    /// thread → user 映射条目数。
+    pub thread_user: usize,
+    /// thread → pipeline 映射条目数。
+    pub thread_pipeline: usize,
+    /// thread → agent 映射条目数。
+    pub thread_agent: usize,
+    /// 全部连接出站队列在飞帧数实测和。
+    pub outbound_queued_frames: usize,
 }
 
 impl Default for ConnectionRegistry {

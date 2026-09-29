@@ -195,6 +195,26 @@ fn resolve_bind_host() -> String {
     }
 }
 
+/// 日志目录解析（装机态用户空间化，ADR 2026-09-28-venv-user-space-provisioning）。
+///
+/// 解析序：① CWD 相对 `logs` 可写（dev 常态）→ 原样相对路径（dev 行为零变化）；
+/// ② 不可写（装机态 CWD=只读安装目录，appender 建目录/写 IO 必败且静默）→
+/// `<user_root>/logs`（用户空间，venv 同源惯例；目录在此确保创建）；③ 用户根
+/// 不可用或创建失败 → 回落相对 `logs`（行为不劣于现状：构建失败走既有 stdout
+/// 降级 + stderr 告警）。
+fn resolve_log_dir(cwd_logs_writable: bool, user_root: Option<&std::path::Path>) -> PathBuf {
+    if cwd_logs_writable {
+        return PathBuf::from("logs");
+    }
+    if let Some(root) = user_root {
+        let dir = root.join("logs");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            return dir;
+        }
+    }
+    PathBuf::from("logs")
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 线程治理：#[tokio::main] 宏暴露不了 max_blocking_threads / thread_stack_size，
     // 手动构建等价 multi-thread runtime（enable_all = 宏默认；worker_threads 不设
@@ -213,26 +233,34 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     agentos_api::allocator::install_global_allocator();
 
     // 日志契约（2026-09-15 单日志面）：文件层是唯一常驻日志——tracing-appender
-    // daily 轮转写 logs/kernel.log.YYYY-MM-DD（相对进程工作目录），保留上限
-    // 30 份（D3：daily 轮转无限累积会让 logs/ 目录随运行时长无界增长）。
-    // 轮转口径为纯 UTC（BUG-71 裁决 2026-09-23）：文件名 = 写入时刻的 UTC 日期，
-    // 轮转边界 = UTC 午夜 = 本地 08:00（UTC+8）；本地日 X 的日志行因此横跨两个
-    // 文件，且本地午夜 00:00 时最新文件仍叫 X-1——按本地日期找文件会扑空，外部
-    // 判活统一走 logs/kernel.liveness（见 log_liveness）。
+    // daily 轮转写 logs/kernel.log.YYYY-MM-DD，保留上限 30 份（D3：daily 轮转
+    // 无限累积会让 logs/ 目录随运行时长无界增长）。轮转口径为纯 UTC（BUG-71
+    // 裁决 2026-09-23）：文件名 = 写入时刻的 UTC 日期，轮转边界 = UTC 午夜 =
+    // 本地 08:00（UTC+8）；本地日 X 的日志行因此横跨两个文件，且本地午夜
+    // 00:00 时最新文件仍叫 X-1——按本地日期找文件会扑空，外部判活统一走
+    // <日志目录>/kernel.liveness（见 log_liveness）。
     // stdout 不再双写（supervisor 侧重定向已退役：OS 级追加重定向是无界
     // 增长面，内核只持有无路径的 fd、无法自轮替）；仅当文件层构建失败
     // （只读盘/无目录权限）时才挂 stdout 层降级——此时它是唯一诊断面。
+    // 日志目录解析（ADR 2026-09-28-venv-user-space-provisioning）：dev（CWD
+    // 可写）落相对 `logs`（现状零变化）；装机态 CWD=只读安装目录（electron
+    // spawn cwd=resources/kernel，建目录/写 IO 必败且静默）→ 落用户空间
+    // `<USER_ROOT>/logs`——与 venv 同批用户空间化的同源惯例。
+    let log_dir = resolve_log_dir(
+        agentos_api::venv_provision::is_dir_writable(std::path::Path::new("logs")),
+        agentos_core::user_space::user_root().as_deref(),
+    );
     let (file_layer, log_guard) = match tracing_appender::rolling::RollingFileAppender::builder()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
         .filename_prefix("kernel.log")
         // D3：保留上限 30 份——daily 轮转无限累积会让 logs/ 目录随运行时长
         // 无界增长（长期驻留内核的磁盘治理面）。
         .max_log_files(30)
-        .build("logs")
+        .build(&log_dir)
     {
         Ok(appender) => {
             // 活性面（BUG-71 裁决）：成功写打点、写失败显式告警（上游 worker 对
-            // IO 错误全静默）、持续静默超阈值报警并停止刷新 logs/kernel.liveness。
+            // IO 错误全静默）、持续静默超阈值报警并停止刷新 kernel.liveness。
             // 告警面 stderr 在装机部署被丢弃（electron stdio=ignore），标记文件
             // 是外部判活权威面。
             let liveness = agentos_api::log_liveness::LogLiveness::new();
@@ -244,7 +272,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             );
             agentos_api::log_liveness::spawn_silence_watchdog(
                 liveness,
-                std::path::Path::new("logs"),
+                &log_dir,
                 agentos_api::log_liveness::WatchdogConfig::production(),
                 Arc::new(|msg: String| eprintln!("{msg}")),
             );
@@ -503,6 +531,32 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         "Discovered {} plugin manifests",
         manifests.len()
     );
+
+    // ── 启动期按 manifest 声明面播种用户空间配置（2026-09-28 批次 A3）──
+    // 读写同源公理：配置已迁移用户空间，则一切读取出自用户空间。对每个
+    // manifest config_files 声明的引用形态文件（target != env）做「用户层
+    // 缺失即播种 + 接管登记」，使运行时读（用户空间叠加）恒命中用户层。
+    // 幂等（已存在/已登记跳过）；单文件失败告警不阻断启动。
+    {
+        let project_root = config_root
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| config_root.clone());
+        let (seeded, failures) =
+            agentos_api::config_service::seed_declared_configs(&project_root, &manifests);
+        for (path, err) in &failures {
+            warn!(
+                target: "agentos-kernel",
+                "config seeding skipped: {path} : {err}"
+            );
+        }
+        if seeded > 0 {
+            info!(
+                target: "agentos-kernel",
+                "config seeding: {seeded} 个声明配置文件播种至用户空间"
+            );
+        }
+    }
 
     // 创建能力注册表
     let registry = Arc::new(CapabilityRegistryImpl::new());
@@ -770,39 +824,51 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                 retention_days,
                 "traces/blobs 保留清扫启用（启动清一次 + 每 6h 周期）"
             );
-            tokio::spawn(async move {
-                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(6 * 60 * 60));
-                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                loop {
-                    ticker.tick().await;
-                    // retention_days 经 trace_retention_days 钳制（≤36_500 天），
-                    // cutoff 必在 DateTime 值域内。
-                    let cutoff = chrono::Utc::now()
-                        - chrono::Duration::seconds(retention_days as i64 * 86_400);
-                    match sqlite.purge_traces_older_than(cutoff).await {
-                        Ok(0) => {}
-                        Ok(purged) => {
-                            info!(target: "agentos-kernel", purged, "trace 保留清扫完成")
+            // 堆栈级诊断插桩：任务槽 + 等待点标签（tick await = 空闲等待）。
+            let sweep_activity = agentos_core::task_activity::global_registry()
+                .register("trace-blob-retention-sweep");
+            tokio::spawn(agentos_core::task_activity::scope(
+                sweep_activity,
+                async move {
+                    let mut ticker =
+                        tokio::time::interval(std::time::Duration::from_secs(6 * 60 * 60));
+                    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    agentos_core::task_activity::set_current_label("idle: next tick 6h");
+                    loop {
+                        ticker.tick().await;
+                        agentos_core::task_activity::set_current_label(
+                            "sweeping traces/orphan blobs",
+                        );
+                        // retention_days 经 trace_retention_days 钳制（≤36_500 天），
+                        // cutoff 必在 DateTime 值域内。
+                        let cutoff = chrono::Utc::now()
+                            - chrono::Duration::seconds(retention_days as i64 * 86_400);
+                        match sqlite.purge_traces_older_than(cutoff).await {
+                            Ok(0) => {}
+                            Ok(purged) => {
+                                info!(target: "agentos-kernel", purged, "trace 保留清扫完成")
+                            }
+                            Err(e) => warn!(
+                                target: "agentos-kernel",
+                                error = %e,
+                                "trace 保留清扫失败（下周期重试）"
+                            ),
                         }
-                        Err(e) => warn!(
-                            target: "agentos-kernel",
-                            error = %e,
-                            "trace 保留清扫失败（下周期重试）"
-                        ),
-                    }
-                    match sqlite.purge_orphan_blobs().await {
-                        Ok(0) => {}
-                        Ok(purged) => {
-                            info!(target: "agentos-kernel", purged, "孤儿 blob 清扫完成")
+                        match sqlite.purge_orphan_blobs().await {
+                            Ok(0) => {}
+                            Ok(purged) => {
+                                info!(target: "agentos-kernel", purged, "孤儿 blob 清扫完成")
+                            }
+                            Err(e) => warn!(
+                                target: "agentos-kernel",
+                                error = %e,
+                                "孤儿 blob 清扫失败（下周期重试）"
+                            ),
                         }
-                        Err(e) => warn!(
-                            target: "agentos-kernel",
-                            error = %e,
-                            "孤儿 blob 清扫失败（下周期重试）"
-                        ),
+                        agentos_core::task_activity::set_current_label("idle: next tick 6h");
                     }
-                }
-            });
+                },
+            ));
         }
     }
 
@@ -816,6 +882,9 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // venv 自愈（装机形态，BUG-55 方向③，ADR 2026-09-20 决策②）：门开时 boot
     // 后台对缺 venv 解释器的 Python sidecar 跑 `uv sync` 重建——打包资源排除
     // .venv 且装机链没有 dev launcher，不自愈则 sidecar spawn 期永久 fail-closed。
+    // 重建落点（ADR 2026-09-28-venv-user-space-provisioning）：插件目录可写
+    // 原地重建；只读（装机态）重定向用户空间登记处 plugin-venvs/<键>，spawn
+    // 期解析序②据此命中。
     // 共享合宿宿主（_host）优先重建：合宿成员 spawn 只认它（HOST_VENV_MISSING
     // 无回退）；合宿成员自身 venv 不建（运行期零消费，去重 ADR 2026-09-07）。
     // dev 门不开（重建权在 launcher）。uv 缺席/失败只 warn 降级，不阻断启动。
@@ -823,16 +892,25 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         let targets =
             agentos_api::venv_provision::select_missing_venv_plugins(&manifests, &plugin_dirs);
         let host = agentos_api::venv_provision::select_shared_host_target(&manifests, &plugin_dirs);
-        if !targets.is_empty() || host.is_some() {
+        let aux = agentos_api::venv_provision::select_missing_aux_venvs(&manifests, &plugin_dirs);
+        if !targets.is_empty() || host.is_some() || !aux.is_empty() {
             info!(
                 target: "agentos-kernel",
                 count = targets.len(),
                 host = host.as_ref().map(|d| d.display().to_string()),
+                aux = aux.len(),
                 "检测到缺 venv 解释器的 Python sidecar，boot 后台 uv sync 自愈（共享合宿宿主优先；完成前相应 sidecar spawn 仍会失败）"
             );
-            tokio::spawn(agentos_api::venv_provision::provision_and_log(
-                targets, host,
-            ));
+            agentos_core::task_activity::spawn_named(
+                "venv-provision",
+                agentos_api::venv_provision::provision_and_log(targets, host),
+            );
+            if !aux.is_empty() {
+                agentos_core::task_activity::spawn_named(
+                    "venv-provision-aux",
+                    agentos_api::venv_provision::provision_aux_and_log(aux),
+                );
+            }
         }
     }
     let loader_arc = Arc::new(loader);
@@ -944,7 +1022,8 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             let reg2 = registry.clone();
             let scopes2 = plugin_scopes.clone();
             let ledger2 = contract_states.clone();
-            tokio::spawn(async move {
+            let reverify_fut = async move {
+                agentos_core::task_activity::set_current_label("waiting 30s re-verify delay");
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 for manifest in &observe_incomplete {
                     let outcome = g2_verify_and_sanitize(inv2.as_ref(), manifest.clone()).await;
@@ -984,7 +1063,8 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                     }
                 }
-            });
+            };
+            agentos_core::task_activity::spawn_named("g2-boot-reverify", reverify_fut);
         }
     }
 
@@ -1559,17 +1639,25 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             Arc::new(metrics_aggregator.clone());
         let kc_bcast = kernel_counters.clone();
         let session_bcast = session.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
-            tick.tick().await; // 跳过首次立即触发
-            loop {
-                tick.tick().await;
-                // M2：内核自采计数器快照 → 聚合器
-                kc_flush.flush_to(&agg_flush);
-                // M1：滚动桶降采样（1s→10s 合并 + 超 2h 清理）
-                agg_rollup.rollup();
-            }
-        });
+        let flush_activity =
+            agentos_core::task_activity::global_registry().register("metrics-flush-rollup");
+        tokio::spawn(agentos_core::task_activity::scope(
+            flush_activity,
+            async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+                tick.tick().await; // 跳过首次立即触发
+                agentos_core::task_activity::set_current_label("idle: next tick 1s");
+                loop {
+                    tick.tick().await;
+                    agentos_core::task_activity::set_current_label("flushing counters + rollup");
+                    // M2：内核自采计数器快照 → 聚合器
+                    kc_flush.flush_to(&agg_flush);
+                    // M1：滚动桶降采样（1s→10s 合并 + 超 2h 清理）
+                    agg_rollup.rollup();
+                    agentos_core::task_activity::set_current_label("idle: next tick 1s");
+                }
+            },
+        ));
         // M6：每秒采样关键指标广播（widget_event → 前端 statusBar）
         let _bcast_handle = agentos_api::metrics::MetricBroadcaster::spawn(
             agg_bcast,
@@ -1696,28 +1784,38 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let mut maint = tokio::time::interval(std::time::Duration::from_secs(60));
         let mut ticks: u64 = 0;
-        tokio::spawn(async move {
-            loop {
-                maint.tick().await;
-                ticks += 1;
-                let stats = agentos_api::allocator::snapshot_stats();
-                info!(
-                    target: "agentos-kernel",
-                    committed_mb = stats.committed_bytes.map(|b| b / (1024 * 1024)),
-                    rss_mb = stats.process_rss_bytes.map(|b| b / (1024 * 1024)),
-                    commit_mb = stats.process_commit_bytes.map(|b| b / (1024 * 1024)),
-                    purged_mb = stats.purged_bytes.map(|b| b / (1024 * 1024)),
-                    reserved_mb = stats.reserved_bytes.map(|b| b / (1024 * 1024)),
-                    abandoned_pages = stats.abandoned_pages,
-                    live_mb = stats.in_use_bytes.map(|b| b / (1024 * 1024)),
-                    allocs = stats.total_allocs,
-                    "mimalloc stats snapshot"
-                );
-                if ticks % 5 == 1 {
-                    unsafe { libmimalloc_sys::mi_collect(true) };
+        let maint_activity =
+            agentos_core::task_activity::global_registry().register("memory-maintenance");
+        tokio::spawn(agentos_core::task_activity::scope(
+            maint_activity,
+            async move {
+                agentos_core::task_activity::set_current_label("idle: next tick 60s");
+                loop {
+                    maint.tick().await;
+                    ticks += 1;
+                    agentos_core::task_activity::set_current_label(
+                        "sampling mimalloc stats + mi_collect",
+                    );
+                    let stats = agentos_api::allocator::snapshot_stats();
+                    info!(
+                        target: "agentos-kernel",
+                        committed_mb = stats.committed_bytes.map(|b| b / (1024 * 1024)),
+                        rss_mb = stats.process_rss_bytes.map(|b| b / (1024 * 1024)),
+                        commit_mb = stats.process_commit_bytes.map(|b| b / (1024 * 1024)),
+                        purged_mb = stats.purged_bytes.map(|b| b / (1024 * 1024)),
+                        reserved_mb = stats.reserved_bytes.map(|b| b / (1024 * 1024)),
+                        abandoned_pages = stats.abandoned_pages,
+                        live_mb = stats.in_use_bytes.map(|b| b / (1024 * 1024)),
+                        allocs = stats.total_allocs,
+                        "mimalloc stats snapshot"
+                    );
+                    if ticks % 5 == 1 {
+                        unsafe { libmimalloc_sys::mi_collect(true) };
+                    }
+                    agentos_core::task_activity::set_current_label("idle: next tick 60s");
                 }
-            }
-        });
+            },
+        ));
     }
 
     // 内存水位监控（可选自愈兜底，**默认关闭**——2026-09-10 用户裁定：水位
@@ -1728,55 +1826,66 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let watermark_db = state.db.clone();
         let watermark_invoker = state.invoker.clone();
-        tokio::spawn(async move {
-            const SAMPLE_INTERVAL_SECS: u64 = 60;
-            let Some((threshold_mb, sustain_minutes)) = resolve_watermark_config() else {
+        let wm_activity =
+            agentos_core::task_activity::global_registry().register("memory-watermark-watch");
+        tokio::spawn(agentos_core::task_activity::scope(
+            wm_activity,
+            async move {
+                agentos_core::task_activity::set_current_label("resolving config");
+                const SAMPLE_INTERVAL_SECS: u64 = 60;
+                let Some((threshold_mb, sustain_minutes)) = resolve_watermark_config() else {
+                    info!(
+                        target: "agentos-kernel",
+                        "内存水位监控默认关闭（不会触发重启）；显式设置 AGENTOS_MEM_WATERMARK_MB=<MB> 可启用自愈"
+                    );
+                    agentos_core::task_activity::set_current_label("disabled");
+                    return;
+                };
+                let consecutive = ((sustain_minutes * 60) / SAMPLE_INTERVAL_SECS).max(1) as usize;
                 info!(
                     target: "agentos-kernel",
-                    "内存水位监控默认关闭（不会触发重启）；显式设置 AGENTOS_MEM_WATERMARK_MB=<MB> 可启用自愈"
+                    threshold_mb,
+                    consecutive,
+                    sample_interval_secs = SAMPLE_INTERVAL_SECS,
+                    "内存水位监控已启动（持续超限即排空重启自愈）"
                 );
-                return;
-            };
-            let consecutive = ((sustain_minutes * 60) / SAMPLE_INTERVAL_SECS).max(1) as usize;
-            info!(
-                target: "agentos-kernel",
-                threshold_mb,
-                consecutive,
-                sample_interval_secs = SAMPLE_INTERVAL_SECS,
-                "内存水位监控已启动（持续超限即排空重启自愈）"
-            );
-            let mut recent: Vec<u64> = Vec::with_capacity(consecutive);
-            let mut tick =
-                tokio::time::interval(std::time::Duration::from_secs(SAMPLE_INTERVAL_SECS));
-            loop {
-                tick.tick().await;
-                let Some(usage_bytes) = sample_private_bytes() else {
-                    continue; // 采样不可用（非 Windows/API 失败）：缺数不判，绝不误自愈
-                };
-                recent.push(usage_bytes / (1024 * 1024));
-                // 滑动窗口只留判定所需样本，长运行监控自身不积内存
-                let keep_from = recent.len().saturating_sub(consecutive);
-                recent.drain(..keep_from);
-                if watermark_breach(&recent, threshold_mb, consecutive) {
-                    warn!(
-                        target: "agentos-kernel",
-                        threshold_mb,
-                        consecutive,
-                        latest_mb = recent.last().copied().unwrap_or(0),
-                        "内存水位持续超限（自愈）：排空在途 runs 后 exit 75，监督脚本拉起新进程"
-                    );
-                    agentos_api::routes::drain_and_exit75(
-                        watermark_db.as_ref(),
-                        watermark_invoker.clone(),
-                        "memory watermark self-heal: private bytes 持续超阈值",
-                    )
-                    .await;
-                    // 逃生门（AGENTOS_DISABLE_SELF_EXIT=1）下 drain 只排空不退出：
-                    // 停止本监控，避免每 60s 重复排空；进程交人工处置。
-                    break;
+                let mut recent: Vec<u64> = Vec::with_capacity(consecutive);
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_secs(SAMPLE_INTERVAL_SECS));
+                agentos_core::task_activity::set_current_label("idle: next tick 60s");
+                loop {
+                    tick.tick().await;
+                    agentos_core::task_activity::set_current_label("sampling private bytes");
+                    let Some(usage_bytes) = sample_private_bytes() else {
+                        agentos_core::task_activity::set_current_label("idle: next tick 60s");
+                        continue; // 采样不可用（非 Windows/API 失败）：缺数不判，绝不误自愈
+                    };
+                    recent.push(usage_bytes / (1024 * 1024));
+                    // 滑动窗口只留判定所需样本，长运行监控自身不积内存
+                    let keep_from = recent.len().saturating_sub(consecutive);
+                    recent.drain(..keep_from);
+                    if watermark_breach(&recent, threshold_mb, consecutive) {
+                        warn!(
+                            target: "agentos-kernel",
+                            threshold_mb,
+                            consecutive,
+                            latest_mb = recent.last().copied().unwrap_or(0),
+                            "内存水位持续超限（自愈）：排空在途 runs 后 exit 75，监督脚本拉起新进程"
+                        );
+                        agentos_api::routes::drain_and_exit75(
+                            watermark_db.as_ref(),
+                            watermark_invoker.clone(),
+                            "memory watermark self-heal: private bytes 持续超阈值",
+                        )
+                        .await;
+                        // 逃生门（AGENTOS_DISABLE_SELF_EXIT=1）下 drain 只排空不退出：
+                        // 停止本监控，避免每 60s 重复排空；进程交人工处置。
+                        break;
+                    }
+                    agentos_core::task_activity::set_current_label("idle: next tick 60s");
                 }
-            }
-        });
+            },
+        ));
     }
 
     start_server(addr, state).await?;
@@ -2156,6 +2265,37 @@ pub(crate) fn build_plugin_loader(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 日志目录解析·dev 态不变：CWD 可写 → 恒为相对 `logs`
+    ///（现状路径逐位不变，用户根即使可用也不参与）。
+    #[test]
+    fn log_dir_dev_stays_cwd_relative() {
+        assert_eq!(resolve_log_dir(true, None), PathBuf::from("logs"));
+        let user = tempfile::tempdir().unwrap();
+        assert_eq!(
+            resolve_log_dir(true, Some(user.path())),
+            PathBuf::from("logs"),
+            "dev 态用户根不参与解析"
+        );
+    }
+
+    /// 日志目录解析·只读 CWD 态落用户空间：目录在解析时确保创建，
+    /// 返回绝对路径（性质：用户根为其前缀）。
+    #[test]
+    fn log_dir_readonly_cwd_falls_to_user_space() {
+        let user = tempfile::tempdir().unwrap();
+        let resolved = resolve_log_dir(false, Some(user.path()));
+        assert_eq!(resolved, user.path().join("logs"));
+        assert!(resolved.is_absolute(), "用户空间落点必须是绝对路径");
+        assert!(resolved.is_dir(), "解析时必须确保日志目录已创建");
+    }
+
+    /// 日志目录解析·用户根不可用 → 回落相对 `logs`（不劣于现状：构建失败
+    /// 走既有 stdout 降级），绝不 panic。
+    #[test]
+    fn log_dir_without_user_root_degrades_to_cwd_relative() {
+        assert_eq!(resolve_log_dir(false, None), PathBuf::from("logs"));
+    }
 
     /// 管理员初始口令解析（D1）：AGENTOS_ADMIN_PASSWORD 设置时原样生效；
     /// 未设置时生成随机口令——绝不等于任何硬编码值，且每次生成互不相同

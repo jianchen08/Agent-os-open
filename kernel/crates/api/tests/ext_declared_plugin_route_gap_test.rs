@@ -93,6 +93,7 @@ fn manifest_without_endpoints(plugin_id: &str) -> PluginManifest {
         activation: None,
         persistent_fields: vec![],
         export_fields: vec![],
+        aux_venvs: Vec::new(),
         provides: None,
     }
 }

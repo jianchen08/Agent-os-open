@@ -137,6 +137,17 @@ impl HookEventBus {
     pub fn handle(&self) -> broadcast::Sender<LifecycleEvent> {
         self.tx.clone()
     }
+
+    /// 广播队列当前滞留事件数（堆栈级诊断面 memory-breakdown 消费；
+    /// tokio broadcast 原生 len——无订阅者时恒 0）。
+    pub fn queued_len(&self) -> usize {
+        self.tx.len()
+    }
+
+    /// 活跃订阅者数（诊断面；容量 1024 上限 × 每事件体积 = 缓冲上界）。
+    pub fn receiver_count(&self) -> usize {
+        self.tx.receiver_count()
+    }
 }
 
 #[cfg(test)]

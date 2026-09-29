@@ -273,6 +273,7 @@ class TestQueryBoundary:
             pipeline_run_id="pipe-999", level="skeleton", allowed_pipelines=["pipe-1"]
         )
 
+        assert result["success"] is False
         assert "error" in result
         assert caller.await_count == 0
 

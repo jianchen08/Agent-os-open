@@ -201,25 +201,13 @@ def _repair_truncation(s: str) -> str | None:
     return None
 
 
-def _is_valid_tool_call_id(tc_id: str | None) -> bool:
-    """检查 tool_call_id 是否符合系统标准格式 call_<hex>。"""
-    if not tc_id or not isinstance(tc_id, str):
-        return False
-    # 标准格式: call_ + 仅含十六进制字符（至少1位）
-    # 拒绝 call_function_xxx_1 等含非hex字符或下划线的格式
-    if not tc_id.startswith("call_") or len(tc_id) < 6:
-        return False
-    hex_part = tc_id[5:]  # "call_" 之后的部分
-    return bool(re.fullmatch(r"[0-9a-f]+", hex_part))
-
-
 def standardize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> list[int]:
     """标准化 tool_calls 为 OpenAI API 格式（公共入口）。
 
     Returns:
-        被改写的消息下标列表（结构重建 / id remap 触发过的 assistant 消息，
-        以及 tool_call_id 被 remap 的 tool 消息）。无改写返回空列表。
-        消息本身仍就地改写（向后兼容旧调用方忽略返回值）。
+        被改写的消息下标列表（结构重建触发过的 assistant 消息；仅缺失
+        id 在结构重建时兜底生成，非空 id 一律保留原值）。无改写返回
+        空列表。消息本身仍就地改写（向后兼容旧调用方忽略返回值）。
     """
     return _normalize_tool_calls_in_messages(messages)
 
@@ -231,8 +219,6 @@ def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> list[in
         被就地改写的消息下标列表（保持插入顺序）。调用方可据此对相应槽位
         emit 增量 op（set(seq, 新内容)）。忽略返回值时行为与旧版完全一致。
     """
-    # id_remap: 记录非标准 id -> 新标准 id 的映射，用于同步修正 tool 消息
-    id_remap: dict[str, str] = {}
     changed: list[int] = []
 
     def _mark(idx: int) -> None:
@@ -273,34 +259,13 @@ def _normalize_tool_calls_in_messages(messages: list[dict[str, Any]]) -> list[in
                     }
                 )
             msg["tool_calls"] = normalized
-            raw_tcs = normalized
             _mark(_msg_idx)
 
-        # ── 修正 2: tool_call_id 格式统一 ──
-        for tc in raw_tcs:
-            if not isinstance(tc, dict):
-                continue
-            old_id = tc.get("id")
-            if old_id and not _is_valid_tool_call_id(old_id):
-                new_id = f"call_{uuid.uuid4().hex[:24]}"
-                tc["id"] = new_id
-                id_remap[old_id] = new_id
-                _mark(_msg_idx)
-                logger.debug(
-                    "tool_call_id 格式修正: %s → %s",
-                    old_id,
-                    new_id,
-                )
-
-    # 同步修正 tool 消息中对应的 tool_call_id，保持 assistant↔tool 配对一致
-    if id_remap:
-        for _msg_idx, msg in enumerate(messages):
-            if msg.get("role") != "tool":
-                continue
-            tc_id = msg.get("tool_call_id")
-            if tc_id and tc_id in id_remap:
-                msg["tool_call_id"] = id_remap[tc_id]
-                _mark(_msg_idx)
+        # tool_call_id 不做格式统一重造（ADR 2026-09-28-tool-call-live-card）：
+        # provider 的 id（含 call-<uuid> 连字符、call_function_xxx_1 等任意形态）
+        # 原样透传——它是流式增量/工具事件/持久化/前端渲染的单一关联键，中途
+        # 重造会让同一工具调用以两个 id 出现两张卡。仅在修正 1 结构重建时对
+        # 缺失 id 兜底生成 call_<hex>。
 
     return changed
 

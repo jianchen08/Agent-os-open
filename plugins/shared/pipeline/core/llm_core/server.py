@@ -50,6 +50,19 @@ def get_instance() -> LLMCore:
     return LLMCore(config=config)
 
 
+@plugin.on_config_changed
+def _on_config_changed(config: dict) -> None:
+    """每调用配置变更感知：刷新 _config_models 注入视图。
+
+    内核每次调用现算下发用户空间叠加后的最新配置——不刷新则 tier→模型
+    解析冻结在 sidecar 启动快照，设置页改模型/改参数须重启才生效
+    （2026-09-28 事故根因之二）。set_config 幂等，钩子仅在视图真变时触发。
+    """
+    from _config_models import set_config  # noqa: PLC0415
+
+    set_config(config)
+
+
 @plugin.on_load
 async def _on_load(params: dict) -> None:
     """Initialize llm_core plugin.

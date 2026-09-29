@@ -64,6 +64,7 @@ fn manifest_with_commands(plugin_id: &str, commands: Vec<Value>) -> PluginManife
         activation: None,
         persistent_fields: vec![],
         export_fields: vec![],
+        aux_venvs: Vec::new(),
         provides: None,
     }
 }

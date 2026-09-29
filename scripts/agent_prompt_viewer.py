@@ -139,6 +139,7 @@ def _run_worker(agent_cfg: dict, workspace_path: str) -> dict:
         env=env,
         cwd=str(PROJECT_ROOT),
         timeout=120,
+        check=False,
     )
     if proc.returncode != 0:
         err = proc.stderr.decode("utf-8", errors="replace")
@@ -304,7 +305,7 @@ def _worker_main() -> None:
     import asyncio  # noqa: F401  (在 -I 隔离模式下，需要显式 import)
     import importlib
     import io
-    import site
+    import site  # noqa: F401  (在 -I 隔离模式下，需要显式 import)
 
     # 强制 stdout/stderr 用 utf-8 编码（-I 隔离模式下 PYTHONIOENCODING 可能失效，
     # Windows 默认 GBK 写入 emoji/中文时会抛 UnicodeEncodeError）
@@ -352,7 +353,6 @@ def _worker_main() -> None:
         import inspect as _inspect
 
         from pipeline.plugin import PluginContext
-
         from plugin import PromptBuildPlugin  # noqa: I001  (prompt_build 插件平铺模块)
         loaded_file = _inspect.getfile(PromptBuildPlugin._build_dynamic_vars)
         if not Path(loaded_file).resolve().is_relative_to(PROJECT_ROOT.resolve()):
@@ -531,7 +531,8 @@ def _build_inject_map(system_message, yaml_data):
                             p = system_message.find(fc2)
                             if p >= 0:
                                 total += len(fc2)
-                                if sp < 0: sp = p
+                                if sp < 0:
+                                    sp = p
                         except OSError as exc:
                             # 单个文件不可读只跳过该文件并留痕，不阻断其余文件扫描
                             logger.warning("跳过不可读文件 %s: %s", f2, exc)
@@ -1415,7 +1416,6 @@ def main() -> None:
         return
 
     # 主进程模式
-    import asyncio  # only needed for worker; lazy import keeps main mode clean
     workspace_path = args.workspace.strip()
 
     print("Agent 提示词拼接查看器（调真实接口）")

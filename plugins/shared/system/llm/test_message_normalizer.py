@@ -6,9 +6,9 @@
 - repair_json_string：markdown 包裹提取、嵌套对象提取、尾逗号/单引号修复、
   截断修复状态机（字符串内截断闭合 / 仅缺右括号 / 回退最后完整字段）、
   注释剔除、彻底无法修复返回 None、转义边界；
-- _is_valid_tool_call_id：call_<hex> 标准格式判定；
-- standardize_tool_calls_in_messages：旧结构 → OpenAI 格式、非标准 id remap
-  并同步 tool 消息、无改写返回空列表；
+- standardize_tool_calls_in_messages：旧结构 → OpenAI 格式（缺失 id 兜底生成）、
+  provider id 原样透传（不按格式白名单重造——单一关联键，ADR 2026-09-28）、
+  无改写返回空列表；
 - normalize_messages_for_provider：配对 fail-closed（失配 tool result 整轮
   丢弃，绝不 positional 改写）、非 minimax 直通、MiniMax Phase 1/2/3。
 
@@ -40,7 +40,8 @@ def _load_module() -> Any:
     module_path = _PLUGIN_DIR / "_message_normalizer.py"
     assert module_path.exists(), f"module missing at {module_path}"
     spec = importlib.util.spec_from_file_location(_MOD_NAME, module_path)
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[_MOD_NAME] = module
     spec.loader.exec_module(module)
@@ -161,28 +162,8 @@ class TestRepairJsonString:
         assert json.loads(fixed)["path"] == "/tmp/f"
 
 
-class TestIsValidToolCallId:
-    """call_<hex> 标准格式判定（normalize id remap 的依据）。"""
-
-    @pytest.mark.parametrize(
-        ("tc_id", "expected"),
-        [
-            ("call_abc123", True),
-            ("call_123", True),
-            ("call_", False),  # 无 hex 部分
-            ("call_ZZZ", False),  # 非 hex 字符
-            ("call_function_read_1", False),  # 函数式命名（含下划线/非 hex）
-            ("", False),
-            (None, False),
-            (123, False),  # type: ignore[arg-type]
-        ],
-    )
-    def test_id_validity(self, mod, tc_id, expected) -> None:
-        assert mod._is_valid_tool_call_id(tc_id) is expected
-
-
 class TestStandardizeToolCalls:
-    """tool_calls 结构标准化：旧结构转换 + 非标准 id remap 同步。"""
+    """tool_calls 结构标准化：旧结构转换；非空 id 原样透传（不重造）。"""
 
     def test_standard_format_untouched(self, mod) -> None:
         messages = [_assistant("call_abc123")]
@@ -207,9 +188,9 @@ class TestStandardizeToolCalls:
         assert tc["function"]["name"] == "read_file"
         # args 按原样搬入 arguments（不序列化）
         assert tc["function"]["arguments"] == {"p": 1}
-        # 补生成的 id 必须是合法标准格式
+        # 缺失 id 兜底生成 call_<hex> 形态
         assert tc["id"].startswith("call_")
-        assert mod._is_valid_tool_call_id(tc["id"])
+        assert tc["id"][5:].isalnum()
 
     def test_legacy_arguments_key_fallback(self, mod) -> None:
         messages: list[dict[str, Any]] = [
@@ -223,22 +204,30 @@ class TestStandardizeToolCalls:
         assert changed == [0]
         assert messages[0]["tool_calls"][0]["function"]["arguments"] == '{"x": 1}'
 
-    def test_nonstandard_id_remap_syncs_tool_message(self, mod) -> None:
+    @pytest.mark.parametrize(
+        "provider_id",
+        [
+            # MiniMax 实测形态（call-<uuid> 连字符，双卡事故复发根因）
+            "call-65c4f72b-b49a-425f-bebf-cc1231a3397b",
+            # gemini/litellm 函数式命名形态
+            "call_function_read_1",
+        ],
+    )
+    def test_provider_id_passthrough_no_remap(self, mod, provider_id) -> None:
+        """非 call_<hex> 形态的 provider id 原样透传（不重造、tool 消息配对不动）。
+
+        单一关联键契约：流式事件/持久化/前端渲染用同一 id——中途重造会分叉。"""
         messages = [
             _assistant("call_abc123", arguments="{}"),
             _tool_result("call_abc123"),
         ]
-        # 直接构造非标准 id（绕过 _assistant 的标准格式）验证 remap 同步
-        messages[0]["tool_calls"][0]["id"] = "call_function_read_1"
-        messages[1]["tool_call_id"] = "call_function_read_1"
+        messages[0]["tool_calls"][0]["id"] = provider_id
+        messages[1]["tool_call_id"] = provider_id
 
         changed = mod.standardize_tool_calls_in_messages(messages)
-        assert changed == [0, 1]  # assistant 与 tool 消息都被改写
-        new_id = messages[0]["tool_calls"][0]["id"]
-        assert mod._is_valid_tool_call_id(new_id)
-        assert new_id != "call_function_read_1"
-        # 配对一致：tool 消息同步指向新 id
-        assert messages[1]["tool_call_id"] == new_id
+        assert changed == []  # 零改写
+        assert messages[0]["tool_calls"][0]["id"] == provider_id
+        assert messages[1]["tool_call_id"] == provider_id
 
     def test_mixed_structure_fix_keeps_standard_tc(self, mod) -> None:
         """混合 tool_calls：标准 tc（type=function+function dict）原样保留。"""
@@ -279,8 +268,8 @@ class TestStandardizeToolCalls:
         assert len(tcs) == 1  # 非 dict 条目被剔除
         assert tcs[0]["function"]["name"] == "f"
 
-    def test_non_dict_entry_skipped_in_id_remap(self, mod) -> None:
-        """tool_calls 含非 dict 条目：结构检查跳过、id remap 循环跳过（不崩溃）。"""
+    def test_non_dict_entry_kept_untouched(self, mod) -> None:
+        """tool_calls 含非 dict 条目：结构检查跳过、原样保留（不崩溃）。"""
         messages = [
             {
                 "role": "assistant",

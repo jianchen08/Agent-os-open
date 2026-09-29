@@ -17,6 +17,8 @@ uuid.workspace = true
 chrono.workspace = true
 # 用户空间解析（user_space.rs）：OS 标准数据目录（%APPDATA% / XDG / Library）
 dirs.workspace = true
+arc-swap.workspace = true
+parking_lot = "0.12"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 # 模式种子版本对账（user_space.rs）：种子 version 按 semver 语义比较

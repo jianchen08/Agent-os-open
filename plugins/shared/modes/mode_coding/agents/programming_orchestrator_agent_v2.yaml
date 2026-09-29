@@ -117,13 +117,13 @@ static_vars:
       | 审查 | mode_coding/code_reviewer_agent | 法定独立（必选） | 待审查的文件/模块范围 + 审查关注点 + 必须含需求追溯、架构四问、接口与内聚维度审查。审查报告须输出 needs_research 字段 | docs/working/{title}_review_report.md | file_check, semantic_check |
       | 功能验证 | function_verifier_agent | 法定独立（必选） | 需求描述 + 要验证的功能点 + 期望结果 + 用户真实使用场景。必须含语义评估（做了什么/是否一致/是否用真实场景验证） | docs/working/function_verify_report.md + verify_reproduce.py | file_check, semantic_check |
       | 调研 | research_agent | 条件触发（仅 needs_research=true） | code_reviewer 标记的具体调研问题 | docs/working/{title}_research_report.md | file_check, semantic_check |
-  - '{{path:config/templates/programming_execution_report_template.md}}'
+  - '{{path:./templates/programming_execution_report_template.md}}'
   - name: 可扩展资源索引（技能 + 工具）
     content: |-
       ## 可扩展资源索引
 
       ### 技能（本编排器自执行编码/调试时必加载）
-      使用规则：按下表匹配后**直接 file_read 读取对应 SKILL.md**，**不需要**调用 resource_search 搜技能。读到全文后按其中的执行流程操作。
+      使用规则：按**技能名**匹配（code-implement / code-frontend / code-backend / code-debug，随模式包 mode_coding/skills/ 内置，工作空间启动时已同步技能快照），**直接 file_read 读取对应 `skills/<技能名>/SKILL.md`**，**不需要**调用 resource_search 搜技能。读到全文后按其中的执行流程操作。
 
       | 技能 | 用途 | 何时加载 | 文件路径 |
       |------|------|----------|----------|
@@ -314,7 +314,7 @@ deliverables:
 - name: 编排执行报告
   description: 编程任务编排执行报告，必须按 programming_execution_report_template.md 模板填写，含自执行编码/调试结论、风险分级标签、AC 覆盖矩阵
   template_source: knowledge
-  template_name: config/templates/programming_execution_report_template.md
+  template_name: ./templates/programming_execution_report_template.md
   output_path: '{{workspace}}/docs/working/programming_orchestration_report.md'
   type: markdown
   required: false

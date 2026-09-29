@@ -50,7 +50,6 @@ describe('RegisterPage', () => {
         <Routes>
           <Route path="/register" element={<RegisterPage />} />
           <Route path="/" element={<div>首页</div>} />
-          <Route path="/login" element={<div>登录页</div>} />
         </Routes>
       </MemoryRouter>,
     )
@@ -91,9 +90,7 @@ describe('RegisterPage', () => {
       await userEvent.clear(input)
       await userEvent.type(input, 'bad name!')
       fireEventBlur(input)
-      expect(await screen.findByTestId('register-username-error')).toHaveTextContent(
-        '仅支持字母',
-      )
+      expect(await screen.findByTestId('register-username-error')).toHaveTextContent('仅支持字母')
     })
 
     it('无效邮箱失焦报错；修正后错误消失', async () => {
@@ -107,9 +104,7 @@ describe('RegisterPage', () => {
       await userEvent.clear(input)
       await userEvent.type(input, 'a@b.co')
       fireEventBlur(input)
-      await waitFor(() =>
-        expect(screen.queryByTestId('email-error')).not.toBeInTheDocument(),
-      )
+      await waitFor(() => expect(screen.queryByTestId('email-error')).not.toBeInTheDocument())
     })
 
     it('密码不足 6 位报错；两次密码不一致报错', async () => {
@@ -118,16 +113,12 @@ describe('RegisterPage', () => {
       const pwd = screen.getByTestId('register-password-input')
       await userEvent.type(pwd, '12345')
       fireEventBlur(pwd)
-      expect(await screen.findByTestId('register-password-error')).toHaveTextContent(
-        '至少6个字符',
-      )
+      expect(await screen.findByTestId('register-password-error')).toHaveTextContent('至少6个字符')
 
       const confirm = screen.getByTestId('confirm-password-input')
       await userEvent.type(confirm, '123456')
       fireEventBlur(confirm)
-      expect(await screen.findByTestId('confirm-password-error')).toHaveTextContent(
-        '不一致',
-      )
+      expect(await screen.findByTestId('confirm-password-error')).toHaveTextContent('不一致')
     })
   })
 

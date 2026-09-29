@@ -1,36 +1,62 @@
 /** @feature FP-T12 前端适配 | @ci: frontend-test */
 /**
- * ChatInput × task_mode 声明式任务模式选择器 — 端到端发送测试（通用选择器契约）
+ * ChatInput × task_mode 声明式任务模式选择器 — 出生语义端到端测试（批 G④）
  *
  * 架构：任务模式选择器 = 通用表单选择器（task_form 插件的 task_mode form select
- * 声明 + FormWidget compact 渲染 + 宿主受控桥接 chatInputStore），无专属组件；
- * 模式选项由各模式插件 select-option 声明追加（DeclaredWidgetLayer 合并）。
+ * 声明 + FormWidget compact 渲染），无专属组件；模式项 = modes registry 派生
+ * （taskModeOptionsFromModes，D1 标签裁定）经宿主桥注入。选择语义（§3.2）：
+ * 显示值 = 会话执行选项 modeBinding.mode（出生即定）；选择非当前档 = 经
+ * modeSessionBinder 开新管道会话并跳转（同档重选零动作）。
  *
- * 核验：选择器常驻底部工具栏，触发器显示当前档（自动/模式名）；菜单切换后
- * chatInputStore 更新、发送形态随变——带 mode 键/不带键（SendMessageParams
- * 出口）；激活状态按 draftKey 会话保持。execution_context 并入逻辑在
- * modeOptions.withTaskMode 车道覆盖。
+ * 核验：默认会话选择器显示「默认」；registry 派生模式项可选中并触发出生通道
+ * （mode 参数）；同档重选零动作；模式会话（快照 modeBinding）触发器显示模式名，
+ * 选「默认」= 出生默认会话；registry 不可达降级仅「默认」档。发送链 mode 键
+ * 并入逻辑在 modeOptions/modeSessionBinder 车道覆盖。
  *
  * mock 仅外部依赖：管道 state 查询（网络）、会话查询（网络）、语音输入 hook
- * （浏览器媒体 API）。
+ * （浏览器媒体 API）、modes registry（网络）、出生通道（会话创建编排）。
  */
 
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
-import { useChatInputStore } from '@/stores/chatInputStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import { ChatInput } from '../ChatInput'
 import type { SendMessageParams } from '../types'
 
 const mocks = vi.hoisted(() => ({
   fetchPipelineStates: vi.fn(),
+  registryGet: vi.fn(),
+  openModeSession: vi.fn(),
 }))
 
 vi.mock('@/services/api/pipelines', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   fetchPipelineStates: mocks.fetchPipelineStates,
+}))
+// modes registry（选择器选项数据源，D1 registry 驱动）：默认合成两模式；
+// 其余端点拒答（ChatInput 本域零外呼，fail-closed）
+vi.mock('@/services/api/client', async (importOriginal) => {
+  const original = await importOriginal<Record<string, unknown>>()
+  const originalClient = original.apiClient as Record<string, unknown>
+  return {
+    ...original,
+    apiClient: {
+      ...originalClient,
+      get: (url: string) =>
+        url === '/ext/agent_manager/modes'
+          ? mocks.registryGet()
+          : Promise.reject(new Error(`unexpected get: ${url}`)),
+    },
+  }
+})
+// 出生通道（建会话+跳转编排）：mock 记录 mode 参数（WS/store 编排在
+// modeSessionBinder 车道覆盖）
+vi.mock('@/services/modeSessionBinder', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  openModeSession: (...args: unknown[]) => mocks.openModeSession(...args),
 }))
 // FormWidget 现消费会话隔离形态（useSessionsQuery）计算权限档显示默认；
 // 聊天输入域无会话列表上下文，mock 为空集
@@ -52,10 +78,33 @@ vi.mock('@/hooks/useVoiceInput', () => ({
   }),
 }))
 
-/** 测试用会话键（ChatInput 状态提升后的 draftKey = tabId/sessionId） */
-const TAB_KEY = 'test-tab'
+/** registry 合成载荷（多模式态：writing 带 icon/description，godot 无声明字段） */
+const REGISTRY_MODES = {
+  modes: [
+    {
+      mode: 'writing',
+      name: '写作模式',
+      description: '长文创作与连载',
+      pipelines: [],
+      presenter: { source: 'none' },
+      tool_card: 'native',
+      icon: '✍️',
+      plugin_id: 'mode_writing',
+    },
+    {
+      mode: 'godot',
+      name: 'Godot 模式',
+      pipelines: [],
+      presenter: { source: 'none' },
+      tool_card: 'native',
+      plugin_id: 'mode_godot',
+    },
+  ],
+  total: 2,
+  errors: [],
+}
 
-/** 种子声明链：task_mode 选择器本体（仅「自动」兜底档）+ 插件追加的选项声明 */
+/** 种子声明：task_mode 选择器本体（仅「默认」兜底档，模式项归 registry 派生） */
 function seedTaskModeDeclarations(): void {
   contributionRegistry.loadFromSchema({
     plugin_contributes: [
@@ -79,41 +128,11 @@ function seedTaskModeDeclarations(): void {
                     label: '任务模式',
                     default: '',
                     options: [
-                      { label: '自动', value: '', icon: '✨' },
+                      { label: '默认', value: '', icon: '✨' },
                     ],
                   },
                 ],
               },
-            },
-          ],
-        },
-      },
-      {
-        plugin_id: 'mode_writing',
-        plugin_name: 'ModeWriting',
-        ui_schema: {
-          widgets: [
-            {
-              id: 'mode_opt_writing',
-              type: 'select-option',
-              space: 'chat-input',
-              order: 10,
-              props: { target: 'task_mode', value: 'writing', label: '写作', icon: '✍️' },
-            },
-          ],
-        },
-      },
-      {
-        plugin_id: 'mode_research',
-        plugin_name: 'ModeResearch',
-        ui_schema: {
-          widgets: [
-            {
-              id: 'mode_opt_research',
-              type: 'select-option',
-              space: 'chat-input',
-              order: 10,
-              props: { target: 'task_mode', value: 'research', label: '研究', icon: '🔎' },
             },
           ],
         },
@@ -131,9 +150,9 @@ function openDropdown(trigger: HTMLElement): void {
 }
 
 /** 渲染 ChatInput 并填入正文（发送前置态） */
-function setupInput(onSendMessage: (params: SendMessageParams) => boolean, draftKey = TAB_KEY) {
+function setupInput(onSendMessage: (params: SendMessageParams) => boolean) {
   const utils = renderWithProviders(
-    <ChatInput onSendMessage={onSendMessage} modelName={undefined} draftKey={draftKey} />,
+    <ChatInput onSendMessage={onSendMessage} modelName={undefined} draftKey="test-tab" />,
   )
   fireEvent.change(screen.getByTestId('chat-input-textarea'), {
     target: { value: '修复登录超时问题' },
@@ -142,80 +161,85 @@ function setupInput(onSendMessage: (params: SendMessageParams) => boolean, draft
 }
 
 beforeEach(() => {
+  vi.clearAllMocks()
   initializeWidgets()
   mocks.fetchPipelineStates.mockResolvedValue({})
+  mocks.registryGet.mockResolvedValue({ data: REGISTRY_MODES })
+  mocks.openModeSession.mockResolvedValue({ sessionId: 'th-new' })
   seedTaskModeDeclarations()
-  useChatInputStore.setState({ taskModes: {} })
+  localStorage.clear()
+  useSessionStore.setState({ activeSessionId: null })
 })
 
-describe('ChatInput — 任务模式选择器（声明式，底部工具栏）', () => {
-  it('自动态 → 选择器渲染且显示「自动」，发送不带 mode 键', async () => {
+describe('ChatInput — 任务模式选择器（出生语义，registry 派生选项）', () => {
+  it('默认会话 → 选择器显示「默认」；发送不带 mode 键', async () => {
     const onSendMessage = vi.fn(() => true)
     setupInput(onSendMessage)
 
-    const trigger = screen.getByTestId('compact-select-trigger')
-    // 可见文案只留裸值；设置名在可访问名（BUG-6 自标识）
-    expect(trigger).toHaveTextContent('自动')
-    expect(trigger).not.toHaveTextContent('任务模式')
-    expect(screen.getByRole('button', { name: '任务模式：自动' })).toBeInTheDocument()
+    const trigger = await screen.findByTestId('compact-select-trigger')
+    expect(trigger).toHaveTextContent('默认')
+    expect(screen.getByRole('button', { name: '任务模式：默认' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByTestId('chat-send-button'))
     await waitFor(() => expect(onSendMessage).toHaveBeenCalledTimes(1))
     expect((onSendMessage.mock.calls[0][0] as SendMessageParams).mode).toBeUndefined()
+    // 默认会话选「默认」（同档重选）→ 零出生动作
+    openDropdown(trigger)
+    fireEvent.click(screen.getByRole('menuitem', { name: /默认/ }))
+    expect(mocks.openModeSession).not.toHaveBeenCalled()
   })
 
-  it('外部入口预置激活模式 → 触发器显示「写作」，发送 mode=writing', async () => {
-    useChatInputStore.getState().setTaskMode(TAB_KEY, 'writing')
-    const onSendMessage = vi.fn(() => true)
-    setupInput(onSendMessage)
+  it('选「写作模式」→ 触发出生通道（mode=writing）', async () => {
+    setupInput(vi.fn(() => true))
 
-    expect(screen.getByTestId('compact-select-trigger')).toHaveTextContent('写作')
+    const trigger = await screen.findByTestId('compact-select-trigger')
+    openDropdown(trigger)
+    const item = await screen.findByRole('menuitem', { name: /写作模式/ })
+    fireEvent.click(item)
 
-    fireEvent.click(screen.getByTestId('chat-send-button'))
-    await waitFor(() => expect(onSendMessage).toHaveBeenCalledTimes(1))
-    expect((onSendMessage.mock.calls[0][0] as SendMessageParams).mode).toBe('writing')
+    expect(mocks.openModeSession).toHaveBeenCalledWith('writing')
   })
 
-  it('菜单选「研究」→ store 更新，发送 mode=research（select-option 追加选项可选中）', async () => {
-    const onSendMessage = vi.fn(() => true)
-    setupInput(onSendMessage)
+  it('registry 派生项含图标与描述（icon=decl.icon、description=decl.description）', async () => {
+    setupInput(vi.fn(() => true))
 
-    openDropdown(screen.getByTestId('compact-select-trigger'))
-    fireEvent.click(screen.getByRole('menuitem', { name: /研究/ }))
-    expect(screen.getByTestId('compact-select-trigger')).toHaveTextContent('研究')
-
-    fireEvent.click(screen.getByTestId('chat-send-button'))
-    await waitFor(() => expect(onSendMessage).toHaveBeenCalledTimes(1))
-    expect((onSendMessage.mock.calls[0][0] as SendMessageParams).mode).toBe('research')
+    openDropdown(await screen.findByTestId('compact-select-trigger'))
+    const item = await screen.findByRole('menuitem', { name: /写作模式/ })
+    expect(item).toHaveTextContent('✍️')
+    expect(item).toHaveTextContent('长文创作与连载')
   })
 
-  it('激活后菜单选「自动」→ 回兜底档，发送不带 mode 键', async () => {
-    useChatInputStore.getState().setTaskMode(TAB_KEY, 'writing')
-    const onSendMessage = vi.fn(() => true)
-    setupInput(onSendMessage)
+  it('模式会话（快照 modeBinding）→ 触发器显示模式名；选「默认」= 出生默认会话', async () => {
+    useSessionStore.setState({ activeSessionId: 'th-mode' })
+    localStorage.setItem(
+      'session-exec-options:th-mode',
+      JSON.stringify({
+        values: {},
+        modeBinding: { mode: 'writing', pipelineConfigId: 'writing' },
+      }),
+    )
+    setupInput(vi.fn(() => true))
 
-    openDropdown(screen.getByTestId('compact-select-trigger'))
-    fireEvent.click(screen.getByRole('menuitem', { name: /自动/ }))
-
-    fireEvent.click(screen.getByTestId('chat-send-button'))
-    await waitFor(() => expect(onSendMessage).toHaveBeenCalledTimes(1))
-    expect((onSendMessage.mock.calls[0][0] as SendMessageParams).mode).toBeUndefined()
+    const trigger = await screen.findByTestId('compact-select-trigger')
+    await waitFor(() => expect(trigger).toHaveTextContent('写作模式'))
+    // 同档（writing）重选零动作
+    openDropdown(trigger)
+    fireEvent.click(screen.getByRole('menuitem', { name: /写作模式/ }))
+    expect(mocks.openModeSession).not.toHaveBeenCalled()
+    // 选「默认」→ 出生默认会话（mode 空串）
+    openDropdown(trigger)
+    fireEvent.click(screen.getByRole('menuitem', { name: /默认/ }))
+    expect(mocks.openModeSession).toHaveBeenCalledWith('')
   })
 
-  it('激活状态按会话保持：tab-a 激活、tab-b 自动画，切回恢复', () => {
-    useChatInputStore.getState().setTaskMode('tab-a', 'writing')
-    const onSendMessage = vi.fn(() => true)
+  it('registry 不可达 → 降级仅「默认」档（不报错阻断，菜单无模式项）', async () => {
+    mocks.registryGet.mockRejectedValue(new Error('registry down'))
+    setupInput(vi.fn(() => true))
 
-    const first = setupInput(onSendMessage, 'tab-a')
-    expect(screen.getByTestId('compact-select-trigger')).toHaveTextContent('写作')
-    first.unmount()
-
-    const second = setupInput(onSendMessage, 'tab-b')
-    expect(screen.getByTestId('compact-select-trigger')).toHaveTextContent('自动')
-    second.unmount()
-
-    const back = setupInput(onSendMessage, 'tab-a')
-    expect(screen.getByTestId('compact-select-trigger')).toHaveTextContent('写作')
-    back.unmount()
+    const trigger = await screen.findByTestId('compact-select-trigger')
+    expect(trigger).toHaveTextContent('默认')
+    openDropdown(trigger)
+    expect(screen.queryByRole('menuitem', { name: /写作模式/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: /默认/ })).toBeInTheDocument()
   })
 })

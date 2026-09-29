@@ -129,9 +129,9 @@ async def feishu_send_message(
         Feishu API response dictionary
     """
     if _adapter is None or _adapter.stream_client is None:
-        return {"error": "Feishu adapter not initialized"}
+        return {"success": False, "error": "Feishu adapter not initialized"}
     if _adapter.stream_client._session is None:
-        return {"error": "Feishu stream client not connected"}
+        return {"success": False, "error": "Feishu stream client not connected"}
     result = await _adapter.stream_client.send_message(user_id, content, msg_type)
     return result
 
@@ -162,9 +162,9 @@ async def feishu_send_card(user_id: str, card_config: dict[str, Any]) -> dict[st
         Feishu API response dictionary
     """
     if _adapter is None or _adapter.stream_client is None:
-        return {"error": "Feishu adapter not initialized"}
+        return {"success": False, "error": "Feishu adapter not initialized"}
     if _adapter.stream_client._session is None:
-        return {"error": "Feishu stream client not connected"}
+        return {"success": False, "error": "Feishu stream client not connected"}
     result = await _adapter.stream_client.send_card(user_id, card_config)
     return result
 

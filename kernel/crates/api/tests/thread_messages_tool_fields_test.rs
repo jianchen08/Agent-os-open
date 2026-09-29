@@ -96,6 +96,7 @@ async fn app_with_deps() -> (
         activation: None,
         persistent_fields: vec![],
         export_fields: vec![],
+        aux_venvs: Vec::new(),
         provides: None,
     };
 

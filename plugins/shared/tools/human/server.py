@@ -312,7 +312,7 @@ async def human_interaction(**kwargs: Any) -> dict[str, Any]:
             if _service is not None:
                 break
     if _service is None:
-        return {"error": "service not initialized (on_load not finished in 10s)"}
+        return {"success": False, "error": "service not initialized (on_load not finished in 10s)"}
 
     # 兼容 LLM 偶发的参数别名（type→mode、message→title），避免参数名错配
     # 把 notification 误判成阻塞 choice。notification 语义为非阻塞；
@@ -324,7 +324,7 @@ async def human_interaction(**kwargs: Any) -> dict[str, Any]:
 
     mode = kwargs.get("mode")
     if mode not in ("choice", "conversation", "notification"):
-        return {"error": "参数 mode 必填，取值 choice/conversation/notification"}
+        return {"success": False, "error": "参数 mode 必填，取值 choice/conversation/notification"}
 
     pipeline_id = kwargs.get("pipeline_id") or kwargs.get("session_id") or ""
     session_id = kwargs.get("session_id") or pipeline_id
@@ -341,14 +341,22 @@ async def human_interaction(**kwargs: Any) -> dict[str, Any]:
         # 显式 fail-closed 满足路径完备性，不静默落空
         raise AssertionError(f"mode 未收敛到三值分支: {mode!r}")
     except InteractionTimeoutError as e:
-        return {"error": f"人类交互超时（{e.timeout}秒）", "error_code": "INTERACTION_TIMEOUT"}
+        return {
+            "success": False,
+            "error": f"人类交互超时（{e.timeout}秒）",
+            "error_code": "INTERACTION_TIMEOUT",
+        }
     except InteractionCancelledError as e:
-        return {"error": f"交互已取消: {e.reason or '用户取消'}", "error_code": "INTERACTION_CANCELLED"}
+        return {
+            "success": False,
+            "error": f"交互已取消: {e.reason or '用户取消'}",
+            "error_code": "INTERACTION_CANCELLED",
+        }
     except InteractionDeniedError as e:
         return {"status": "denied", "selected_option": "用户拒绝", "reason": e.reason or "用户拒绝"}
     except Exception as exc:
         logger.exception("[human_interaction] 执行失败")
-        return {"error": f"人类交互执行失败: {exc}"}
+        return {"success": False, "error": f"人类交互执行失败: {exc}"}
 
 
 async def _do_notification(kwargs: dict[str, Any], session_id: str) -> dict[str, Any]:

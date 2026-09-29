@@ -38,6 +38,19 @@ def get_instance() -> SecurityCheckPlugin:
     return SecurityCheckPlugin(config=config)
 
 
+@plugin.on_config_changed
+def _on_config_changed(config: dict) -> None:
+    """每调用配置变更感知：重导注入配置派生面（llm_core 同范式）。
+
+    合宿握手只送触发成员的命名空间，本插件常以空配置构造并降级（降级保守
+    审批固化在构造期快照上）；内核每调用现算下发的正确配置到站时在此重载
+    安全规则与 dangerous_operations——钩子先于工具分发执行（SDK 中间件序，
+    合宿经 CohostServer._route_call_config 按工具名路由到站），本次调用的
+    规则匹配即用新规则。
+    """
+    get_instance().refresh_injected_config(config)
+
+
 @plugin.on_load
 async def _on_load(params: dict) -> None:
     """Initialize security_check plugin."""

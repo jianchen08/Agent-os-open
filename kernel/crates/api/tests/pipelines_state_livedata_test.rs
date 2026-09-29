@@ -88,6 +88,7 @@ fn llm_manifest() -> agentos_core::traits::PluginManifest {
         enabled: None,
         activation: None,
         persistent_fields: vec![],
+        aux_venvs: Vec::new(),
         export_fields: vec![
             "llm_model".to_string(),
             "context_window".to_string(),

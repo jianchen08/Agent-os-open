@@ -5,7 +5,6 @@ import { useNavigate } from 'react-router-dom'
 import { API_ENDPOINTS } from '@/constants/api'
 import { ROUTES } from '@/constants/routes'
 import { WS_LOCAL_EVENTS, WS_SERVER_EVENTS } from '@/constants/websocket'
-import { readAgents } from '@/hooks/queries/useAgentsQuery'
 import apiClient from '@/services/api/client'
 import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
@@ -17,6 +16,7 @@ import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useUIStore } from '@/stores/uiStore'
 import { playNotificationSound } from '@/utils/audioNotification'
+import { resolveInteractionSourceLabel } from '@/utils/interactionOrigin'
 import { showSystemNotification } from '@/utils/systemNotification'
 import type { PendingInteraction } from '@/stores/interactionStore'
 
@@ -30,28 +30,6 @@ let _isSubscribed = false
  * ingest 去重保证幂等；间隔既不形成请求风暴，也不让用户干等一个超时窗口。
  */
 export const INTERACTION_PENDING_POLL_INTERVAL_MS = 10_000
-
-/**
- * 解析交互请求的人类可读来源：优先管道元数据里的 Agent 名称（sub_agent_created
- * 事件下发），其次 agents 缓存按 agentId/configId 匹配，最后回退 agentId 原文。
- * 解析不到时返回空串（渲染层不显示来源标签）。
- */
-function resolveInteractionSourceLabel(parsed: {
-  agentId: string
-  pipelineId?: string
-}): string {
-  const pipelineMeta = parsed.pipelineId
-    ? usePipelineMessageStore.getState().pipelines[parsed.pipelineId]
-    : undefined
-  if (pipelineMeta?.agentName) return pipelineMeta.agentName
-  if (parsed.agentId) {
-    const matched = readAgents().find(
-      (a) => a.id === parsed.agentId || a.configId === parsed.agentId,
-    )
-    return matched?.name || parsed.agentId
-  }
-  return ''
-}
 
 /**
  * 把后端 `/interaction/pending` 返回的 record（嵌套结构）适配为 `parseInteractionEvent` 期望的扁平结构。

@@ -225,8 +225,18 @@ describe('ChatInput 文件选择与上传管线', () => {
     const { container } = renderInput({ onSendMessage })
     fireEvent.change(fileInputEl(container), { target: { files: [textFile()] } })
     await screen.findByText('notes.txt')
-    fireEvent.click(screen.getByTestId('chat-send-button'))
-    expect(onSendMessage).toHaveBeenCalledTimes(1)
+    // 上传在途窗口发送键按设计禁用（canSend=!isUploading）——附件预览出现
+    // 早于上传落定，先等「可发送」再点击（与用户可交互契约一致）
+    const sendBtn = await waitFor(
+      () => {
+        const btn = screen.getByTestId('chat-send-button') as HTMLButtonElement
+        expect(btn).not.toBeDisabled()
+        return btn
+      },
+      { timeout: 5000 },
+    )
+    fireEvent.click(sendBtn)
+    await waitFor(() => expect(onSendMessage).toHaveBeenCalledTimes(1), { timeout: 5000 })
     expect(onSendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         content: '',
@@ -261,10 +271,18 @@ describe('ChatInput 文件选择与上传管线', () => {
     expect(typeof previewUrl).toBe('string')
     // 图片走 img 缩略图而非图标占位
     expect(screen.getByAltText('pic.png')).toHaveAttribute('src', previewUrl)
-    // 移除 → 预览消失并释放预览 URL
+    // 移除 → 预览消失并释放预览 URL（上传在途窗口移除键禁用，先等可交互）
     const revokeCountBefore = vi.mocked(URL.revokeObjectURL).mock.calls.length
-    fireEvent.click(screen.getByRole('button', { name: '移除附件 pic.png' }))
-    await waitFor(() => expect(screen.queryByText('pic.png')).toBeNull())
+    const removeBtn = await waitFor(
+      () => {
+        const btn = screen.getByRole('button', { name: '移除附件 pic.png' }) as HTMLButtonElement
+        expect(btn).not.toBeDisabled()
+        return btn
+      },
+      { timeout: 5000 },
+    )
+    fireEvent.click(removeBtn)
+    await waitFor(() => expect(screen.queryByText('pic.png')).toBeNull(), { timeout: 5000 })
     expect(vi.mocked(URL.revokeObjectURL).mock.calls.length).toBeGreaterThan(revokeCountBefore)
   })
 

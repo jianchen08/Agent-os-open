@@ -14,12 +14,11 @@ import { render, screen } from '@testing-library/react'
 import React from 'react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-// 断掉 router.tsx 静态依赖图的重量链（Sidebar/MessageItem → @lobehub/ui →
-// fluent-emoji，vitest 无法解析其 ESM 目录导入）——被测对象是 LazyRoute 边界
-// 行为，UI 库不在渲染路径上。
-vi.mock('@lobehub/ui', () => ({}))
-vi.mock('@/components/layout/Sidebar', () => ({ Sidebar: () => null }))
-import { LazyRoute } from '../router'
+// 被测装配件已自 router.tsx 抽出为轻量模块（行为零变化）：直接导入小依赖图，
+// 不再拖 router 全量静态链（40+ 模块含异步副作用，全量车道 worker 回收竞态
+// 下污染邻接文件——EnvironmentTeardownError 实证）。@lobehub/Sidebar 的
+// mock 兜底随全量链退役一并移除。
+import { LazyRoute } from '../router/lazyRoute'
 import { useAuthStore } from '../stores/authStore'
 
 /** 渲染即抛错的子组件（模拟 lazy chunk 加载失败/渲染崩溃） */

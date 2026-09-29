@@ -60,6 +60,22 @@ pub fn merge_injected_with_step_config(injected: Value, step_config: &Value) -> 
     Value::Object(merged)
 }
 
+/// 给内部 sidecar 工具/服务调用参数附加每调用注入配置（`config` 键）。
+///
+/// 与管道路径（[`merge_injected_with_step_config`]）同源：SDK 在调用分发
+/// 单点按 `arguments["config"]` 做配置变更感知（`on_config_changed`）——
+/// 不附带则插件配置冻结在 MCP 握手快照，设置页改配置须重启才生效
+/// （2026-09-28 装机版新模型 no healthy deployments 事故根因）。`config`
+/// 是内核保留键：插件工具入参不得声明同名参数（工具面零声明，已核）。
+/// 非对象入参原样返回不注入（工具入参恒为对象，纯防御形态）。
+pub fn tool_arguments_with_config(inputs: &Value, injected: Value) -> Value {
+    let Some(mut obj) = inputs.as_object().cloned() else {
+        return inputs.clone();
+    };
+    obj.insert("config".to_string(), injected);
+    Value::Object(obj)
+}
+
 /// 按 manifest 的 `config_files` 命名空间合并配置（ADR §4.3，P6：只走 config_files）。
 ///
 /// - 声明了 `config_files`：按 `config_files[].id` 命名空间合并（B3）。
@@ -326,6 +342,7 @@ mod tests {
             activation: None,
             provides: None,
             persistent_fields: vec![],
+            aux_venvs: Vec::new(),
             export_fields: vec![],
         }
     }
@@ -481,6 +498,39 @@ mod tests {
         assert_eq!(merged["context_window"]["compress_trigger_ratio"], 0.06);
         assert_eq!(merged["inputs"]["a"], 1);
         assert_eq!(merged["_step_method"], "execute");
+    }
+
+    /// tool_arguments_with_config：注入配置以 config 键附加，原入参键原样保留
+    /// （性质断言：键集合 = 原键 ∪ {config}，原值不变）。
+    #[test]
+    fn tool_arguments_with_config_attaches_and_preserves_inputs() {
+        let inputs = json!({"path": "a.txt", "content": "x"});
+        let out = tool_arguments_with_config(&inputs, json!({"llm": {"chat": "minimax-m3"}}));
+        assert_eq!(out["config"]["llm"]["chat"], "minimax-m3");
+        assert_eq!(out["path"], "a.txt");
+        assert_eq!(out["content"], "x");
+        assert_eq!(out.as_object().map(|o| o.len()), Some(3));
+        // 原入参不被变异（调用方仍可复用）
+        assert!(inputs.get("config").is_none());
+    }
+
+    /// 同名覆盖语义：入参残留旧 config（如上游中转）时注入值赢——每调用
+    /// 现算注入是唯一真值源。
+    #[test]
+    fn tool_arguments_with_config_replaces_stale_config_key() {
+        let inputs = json!({"config": {"llm": {"chat": "stale"}}, "q": 1});
+        let out = tool_arguments_with_config(&inputs, json!({"llm": {"chat": "fresh"}}));
+        assert_eq!(out["config"]["llm"]["chat"], "fresh");
+        assert_eq!(out["q"], 1);
+    }
+
+    /// 非对象入参（防御形态）：原样返回，不注入不破坏。
+    #[test]
+    fn tool_arguments_with_config_non_object_passthrough() {
+        for odd in [json!("raw"), json!(7), json!(null)] {
+            let out = tool_arguments_with_config(&odd, json!({"llm": {}}));
+            assert_eq!(out, odd, "non-object inputs must pass through unchanged");
+        }
     }
 
     /// P6：未声明 config_files 的插件收空配置，全量配置里的 secrets 不泄漏。

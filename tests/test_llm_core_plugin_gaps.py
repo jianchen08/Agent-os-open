@@ -321,27 +321,33 @@ async def test_tool_call_message_keeps_reasoning_and_long_args():
     assert result["raw_tool_calls"][0]["id"] == msg["tool_calls"][0]["id"]
 
 
-async def test_nonstandard_tool_call_ids_are_rewritten():
-    """非标准 id（call_function_x_1）统一重写为 call_<hex> 标准格式。"""
+async def test_provider_tool_call_ids_pass_through_unchanged():
+    """provider 原始 id 透传不改写（单一 call_id 关联键，f0a74e297 批次）。
+
+    曾按 call_<hex> 白名单重造 id（R297 双卡根因之一）；MiniMax 等发
+    call-<uuid> 连字符形态，重写=前后端各说各话。现契约 = 前后端同一 id
+    贯穿建卡/流式/结果全链。
+    """
+    provider_ids = [
+        "call_function_write_1",           # 非标准下划线形态
+        "call-" + "0123456789abcdef" * 2,  # MiniMax 连字符 uuid 形态
+    ]
     caller = _RecordingCaller(
         _llm_data(
             text=None,
             tool_calls=[
-                {"id": "call_function_write_1", "name": "write_file", "args": "{}"},
-                {"id": "call_" + "0123456789abcdef" * 2, "name": "read_file", "args": "{}"},
+                {"id": provider_ids[0], "name": "write_file", "args": "{}"},
+                {"id": provider_ids[1], "name": "read_file", "args": "{}"},
             ],
-        )
+        ),
     )
     plugin = _make_plugin(caller)
 
     result = await plugin.execute(_Ctx({"messages": []}))
 
     ids = [tc["id"] for tc in result["raw_tool_calls"]]
-    import re
-
-    pattern = re.compile(r"call_[0-9a-f]+\Z")
-    assert all(pattern.fullmatch(tc_id) for tc_id in ids)  # 性质：全部标准化
-    assert len(set(ids)) == 2  # 重写不碰撞
+    assert ids == provider_ids  # 逐字节透传
+    assert len(set(ids)) == len(ids)  # 不碰撞（provider id 唯一性保持）
 
 
 # ── 请求装配：multimodal / dynamic_vars / tool_schemas / 序列化兜底 ──

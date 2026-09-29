@@ -19,6 +19,11 @@ impl StateKey {
     pub const RAW_THINKING: &'static str = "raw_thinking";
     pub const TOOL_RESULTS: &'static str = "tool_results";
     pub const ENDED: &'static str = "ended";
+    /// guards 预填的预定结果（ADR 2026-09-28 结果预填机制）：拦截方直出拒绝
+    /// 结果，本插件命中即跳过执行（幂等）。写入纪律：多 guard 各自读现值经
+    /// SDK merge_pre_decided 合并后整体写回（有 call_id 后写赢、无 id 按工具
+    /// 名去重兜底），本插件消费即清——键里永远只有本轮条目，无跨轮陈旧命中面。
+    pub const PRE_DECIDED_RESULTS: &'static str = "pre_decided_results";
 }
 
 /// 解析后的工具调用（对齐 Python tool_call dict）。
@@ -79,6 +84,12 @@ pub struct ToolResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
     pub duration_ms: f64,
+    /// 协议扩展位（pre_decided_results entry 七键之外的字段，如
+    /// security_check 的 retry_allowed/arguments [BUG-41]）：仅随
+    /// tool_results 状态输出透传（duplicate_check 等下游按键认读），
+    /// 不进 messages envelope（envelope 七键封闭，rebuild 显式构造）。
+    #[serde(default, flatten)]
+    pub extra: Option<serde_json::Map<String, Value>>,
 }
 
 impl ToolResult {
@@ -90,6 +101,7 @@ impl ToolResult {
             data,
             metadata: None,
             duration_ms,
+            extra: None,
         }
     }
 
@@ -101,6 +113,49 @@ impl ToolResult {
             data: Value::Null,
             metadata: None,
             duration_ms,
+            extra: None,
+        }
+    }
+
+    /// 从 pre_decided_results 的单个 entry 构造结果（ADR 2026-09-28）。
+    ///
+    /// entry 形状由 SDK `tool_result_entry` 构造（七键 + 扩展位）；七键直达
+    /// 对应字段，扩展位整体收入 `extra` 随 tool_results 透传（envelope 封闭
+    /// 不受影响）。`success` 缺省 false（fail-closed：形状残缺按失败处理，
+    /// 不带进执行）。
+    pub fn from_pre_decided_entry(tc: &ToolCall, entry: &Value) -> Self {
+        const KNOWN_ENTRY_KEYS: [&str; 7] = [
+            "call_id",
+            "tool_name",
+            "success",
+            "error",
+            "data",
+            "metadata",
+            "duration_ms",
+        ];
+        let extra = entry.as_object().and_then(|o| {
+            let leftover: serde_json::Map<String, Value> = o
+                .iter()
+                .filter(|(k, _)| !KNOWN_ENTRY_KEYS.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            (!leftover.is_empty()).then_some(leftover)
+        });
+        Self {
+            tool_name: entry
+                .get("tool_name")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| tc.name.clone()),
+            success: entry.get("success").and_then(|v| v.as_bool()).unwrap_or(false),
+            error: entry.get("error").and_then(|v| v.as_str()).map(String::from),
+            data: entry.get("data").cloned().unwrap_or(Value::Null),
+            metadata: entry
+                .get("metadata")
+                .cloned()
+                .filter(|m: &Value| !m.is_null()),
+            duration_ms: entry.get("duration_ms").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            extra,
         }
     }
 }
@@ -119,62 +174,6 @@ fn args_parse_failed(tool_name: &str) -> ToolResult {
         data: Value::Null,
         metadata: None,
         duration_ms: 0.0,
+        extra: None,
     }
-}
-
-/// 拦截检查：被安全/隔离/权限策略拦截的工具返回失败结果（对齐 plugin.py:160-204）。
-///
-/// 三层判定：
-/// 1. level_guard：security.level_decision.allowed == false 且 tool 在 blocked_tools
-/// 2. isolation_guard：execution_contexts 中该 tool 被 blocked
-/// 3. security_check：security.decision.allowed == false
-pub fn check_tool_blocked(tool_name: &str, state: &Value) -> Option<ToolResult> {
-    // level_guard
-    if let Some(ld) = state.get("security.level_decision").and_then(|v| v.as_object()) {
-        if ld.get("allowed").and_then(|v| v.as_bool()) == Some(false) {
-            let blocked_tools = ld.get("blocked_tools").and_then(|v| v.as_array());
-            let blocked = match blocked_tools {
-                Some(arr) => arr.iter().any(|v| v.as_str() == Some(tool_name)),
-                None => true, // 空列表 = 全拦
-            };
-            if blocked {
-                let reason = ld.get("reason").and_then(|v| v.as_str()).unwrap_or("权限不足");
-                return Some(ToolResult::failed(
-                    tool_name,
-                    &format!("工具被权限策略拦截: {reason}"),
-                    0.0,
-                ));
-            }
-        }
-    }
-
-    // isolation_guard
-    if let Some(ctxs) = state.get("execution_contexts").and_then(|v| v.as_array()) {
-        for ctx in ctxs {
-            if ctx.get("tool_name").and_then(|v| v.as_str()) == Some(tool_name) {
-                if ctx.get("blocked").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    let reason = ctx.get("reason").and_then(|v| v.as_str()).unwrap_or("隔离策略阻止");
-                    return Some(ToolResult::failed(
-                        tool_name,
-                        &format!("工具被隔离策略拦截: {reason}"),
-                        0.0,
-                    ));
-                }
-            }
-        }
-    }
-
-    // security_check
-    if let Some(sd) = state.get("security.decision").and_then(|v| v.as_object()) {
-        if sd.get("allowed").and_then(|v| v.as_bool()) == Some(false) {
-            let reason = sd.get("reason").and_then(|v| v.as_str()).unwrap_or("安全检查拦截");
-            return Some(ToolResult::failed(
-                tool_name,
-                &format!("工具被安全检查拦截: {reason}"),
-                0.0,
-            ));
-        }
-    }
-
-    None
 }

@@ -41,9 +41,8 @@ vi.mock('@/stores/pipelineMessageStore', async () => {
   )
   return { usePipelineMessageStore: hook, __pipelineMockState: state }
 })
-vi.mock('@/services/api/config', () => ({
-  getDefaults: () => new Promise(() => {}),
-  getLLMConfig: () => new Promise(() => {}),
+vi.mock('@/hooks/queries/useLlmQueries', () => ({
+  useLlmConfigQuery: () => ({ data: undefined, isError: false }),
 }))
 vi.mock('@/hooks/queries/useAgentsQuery', async () => {
   const { queryKeys } = await import('@/services/query/queryKeys')

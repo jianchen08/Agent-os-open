@@ -1,0 +1,44 @@
+# 角色扮演模式声明面 mode.yaml（2026-09-28 升格自 profile.yaml；设计真值 docs/working/模式包工作模式设计_20260928.md D3。B 部类物料：由用户维护；出厂种子随 mode_roleplay 插件内打包，
+# 经 mode.get_profile 服务透出；suite 路径相对项目根）
+# 对标酒馆范式：行为断言族（边界遵守/语气合规/保密红线，规则+语义双判）；
+# 链路 main 即时响应（链最短，main 自身即执行者，不派发）
+mode: roleplay
+name: 角色扮演模式
+icon: 🎭                # 选择器选项图标（批 G⑤；emoji 随声明面透出 modes API/mode.list）
+panel_page_id: roleplay_studio
+# ── 运行时声明（五插槽，设计 D2/D3）──
+pipelines:                       # 专属管道列表（多管合法，D2；缺省 = 共享 autonomous）
+  - name: roleplay               # config/pipelines/ 登记名（一管一配置，模式只持引用）
+    context: conversation        # 消费情境：conversation=对话链（会话路由）/ task=任务链（派发路由）
+presenter:                        # 前端呈现来源：卡库（角色卡头像/名字随卡）
+  source: data_cards
+tool_card: collapse               # 工具卡片折叠叙事（沉浸优先）；native|collapse|hide
+persona:                          # 人设接管（通用机制：{{persona:}} 占位符换源，设计 2026-09-28）
+  replace: true                   # 附身即整段替换主 agent 人设（骨架不动）；注意破坏前缀缓存命中
+  from: roleplay_persona          # execution_context 携带卡人设文本的键（前端 withRoleplayPersona）
+material: material.py::build_injection   # 提示词物料组装器（声明驱动发现，设计 D3）
+# ── 评估域字段（eval_harness 经 mode.get_profile 消费；对账归评估台账）──
+chain:
+  entry: main
+  expected_path: [main]
+  executor_pool: []
+  entry_override: null
+suite:
+  smoke: config/self_evolve/suites/dev/roleplay.yaml
+  full: null          # 二期补全
+material_scope:
+  dispatch_stage:
+    - config/agents/main/task_dispatch_guide.md
+  execution_stage:
+    - config/agents/main/persona/
+levers:
+  boundary_violation: {execution_stage: [persona, prompt_skeleton]}
+  tone_violation: {execution_stage: [persona]}
+  confidentiality_leak: {execution_stage: [persona, tool_ids]}
+  agent_misdispatch: {dispatch_stage: [task_dispatch_guide]}
+verifier_families: [behavior_rule, behavior_semantic]
+weights: {success: 1.0, cost: 0.2, rounds: 0.1}
+budget:
+  case_timeout: 600
+  round_tokens: 1000000
+  proposals_per_session: 3

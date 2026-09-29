@@ -29,7 +29,6 @@ import os
 import urllib.error
 import urllib.request
 
-import pytest
 from e2e_helpers import KERNEL_URL, http_post_json, http_post_json_auth
 
 
@@ -258,18 +257,10 @@ class TestPluginToolLoading:
         for i, tool in enumerate(body["items"]):
             assert "source" in tool, f"第 {i} 个工具缺少 source 字段"
 
-    def test_schema_has_pipelines_field(self, auth_token):
-        """2.3a GET /api/v1/schema 应包含 pipelines 字段。"""
-        status, body, _ = http_get_with_auth(f"{KERNEL_URL}/api/v1/schema", auth_token)
-        assert status == 200
-        assert isinstance(body, dict), "schema 响应应为 dict"
-        assert "pipelines" in body, "schema 响应缺少 pipelines 字段"
+    # schema 聚合端点（agents/pipelines/tools/routes 四字段）由
+    # test_01 TestKernelApiSchema 持有，此处不重复。
 
-    def test_schema_has_tools_field(self, auth_token):
-        """2.3b GET /api/v1/schema 应包含 tools 字段。"""
-        status, body, _ = http_get_with_auth(f"{KERNEL_URL}/api/v1/schema", auth_token)
-        assert status == 200
-        assert "tools" in body, "schema 响应缺少 tools 字段"
+
 # ============================================================
 # 用户旅程3：Chat 管道引擎验证（0.2 契约：需登录态 + message 信封）
 # "[pipeline:"/"Response to:" 是 0.1 stub 期标记——非 echo 性质以

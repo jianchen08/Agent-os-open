@@ -143,3 +143,64 @@ def test_resolve_project_roots_rebootstraps_shared_root(monkeypatch):
     assert roots == ["/tmp/proj-one"]
     assert shared_root in sys.path  # 守卫已把 shared_root 插回
     assert mod.ContextBuildPlugin._resolve_project_roots("no-such") == []
+
+
+class TestModePackRootKey:
+    """模式包注册表命中的 agent 携带 context.agent_pack_root（包内相对
+    形态 {{path:./...}} 的包根锚点）；用户/factory config 命中不写该键
+    （缺席语义）。"""
+
+    def _write_mode_package(self, user_root: Path, mode: str, stem: str, text: str) -> Path:
+        pkg = user_root / "plugins" / "modes" / f"mode_{mode}"
+        (pkg / "agents").mkdir(parents=True, exist_ok=True)
+        (pkg / "plugin.json").write_text("{}", encoding="utf-8")
+        (pkg / "agents" / f"{stem}.yaml").write_text(text, encoding="utf-8")
+        return pkg
+
+    def test_mode_registry_hit_writes_pack_root(
+        self, isolated_roots: tuple[Path, Path]
+    ) -> None:
+        """模式包注册表命中 → state_updates 含包根键且值指向该包目录。"""
+        user_root, _factory = isolated_roots
+        pkg = self._write_mode_package(
+            user_root, "ztest", "packagent", "display_name: 包内执行者\nlevel: L3\n"
+        )
+
+        mod = _load_plugin_module()
+        plugin = mod.ContextBuildPlugin(config={})
+        res = _run(plugin.execute(_ctx({"agent.id": "mode_ztest/packagent"})))
+        assert Path(res.state_updates["context.agent_pack_root"]) == pkg
+        assert res.state_updates["context.agent_name"] == "包内执行者", (
+            "包根键与配置内容同源于包内 yaml"
+        )
+
+    def test_factory_config_hit_no_pack_root(
+        self, isolated_roots: tuple[Path, Path]
+    ) -> None:
+        """factory config 命中 → 包根键缺席（保持缺席语义）。"""
+        _user_root, factory = isolated_roots
+        _write_agent(factory, "l2coder", "display_name: factory执行者\n")
+
+        mod = _load_plugin_module()
+        plugin = mod.ContextBuildPlugin(config={})
+        res = _run(plugin.execute(_ctx({"agent.id": "l2coder"})))
+        assert "context.agent_pack_root" not in res.state_updates
+
+    def test_user_config_shadowing_mode_key_no_pack_root(
+        self, isolated_roots: tuple[Path, Path]
+    ) -> None:
+        """agent 键为模式键形态但被用户 config 层接管 → 不写包根键
+        （键只随模式包注册表命中出现，双根优先级不被包根键污染）。"""
+        user_root, _factory = isolated_roots
+        self._write_mode_package(user_root, "ztest", "packagent", "display_name: 包内执行者\n")
+        user_agents = user_root / "config" / "agents" / "mode_ztest"
+        user_agents.mkdir(parents=True)
+        (user_agents / "packagent.yaml").write_text(
+            "display_name: 用户接管\n", encoding="utf-8"
+        )
+
+        mod = _load_plugin_module()
+        plugin = mod.ContextBuildPlugin(config={})
+        res = _run(plugin.execute(_ctx({"agent.id": "mode_ztest/packagent"})))
+        assert res.state_updates["context.agent_name"] == "用户接管"
+        assert "context.agent_pack_root" not in res.state_updates

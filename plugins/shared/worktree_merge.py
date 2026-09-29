@@ -22,6 +22,7 @@ add/commit/merge/verify 叠加可阻塞数分钟）——调用方必须丢线�
 失败原因原样返回调用方裁决）。
 """
 
+# config-write-surface-exempt: 写动作针对任务工作区;命中串为gitignore内容
 from __future__ import annotations
 
 import contextlib

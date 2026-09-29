@@ -17,6 +17,14 @@ export const queryKeys = {
   schema: ['schema'] as const,
   /** 插件列表（状态+能力面组合） */
   plugins: ['plugins'] as const,
+  /** 插件进程观测快照（GET /api/v1/plugins/hosts，监控页「插件」tab） */
+  pluginHosts: ['plugin-hosts'] as const,
+  /** 插件运行态表行（GET /ext/monitoring/plugins，进程观测卡片 join 源） */
+  pluginRuntime: ['plugin-runtime'] as const,
+  /** 内核 memstats 快照（GET /api/v1/system/memstats，全口径内存内核段） */
+  kernelMemStats: ['kernel-memstats'] as const,
+  /** 应用壳进程树内存指标（Electron IPC app:metrics，全口径内存应用壳段） */
+  appMetrics: ['app-metrics'] as const,
   /** 单条管道配置（按配置名分条缓存） */
   pipelineConfig: (name: string) => ['pipeline-config', name] as const,
   /** LLM 服务配置 */
@@ -66,7 +74,9 @@ export const queryKeys = {
   projectsRegistry: ['projects', 'registry'] as const,
   /** 项目登记 key 前缀（登记写操作后批量失效用） */
   projectsPrefix: ['projects'] as const,
-  /** 呈现档案（模式包卡，按 agentId 分条；前缀不在 MODE_PRESENTER_SOURCES 的
+  /** 模式声明面 registry（GET /ext/agent_manager/modes，mode.yaml 单一真值聚合） */
+  modesRegistry: ['modes-registry'] as const,
+  /** 呈现档案（模式包卡，按 agentId 分条；前缀无呈现数据端点的
    *  agent 走 agents 注册表，不入此缓存） */
   presenterProfile: (agentId: string) => ['presenterProfiles', agentId] as const,
 } as const

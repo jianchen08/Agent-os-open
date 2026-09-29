@@ -288,6 +288,12 @@ async def get_file_content(
 
     优先通过 container_task_id 解析工作空间根路径（兼容文件树点击场景），
     解析失败时直接按传入的路径读取（兼容交互场景的绝对路径）。
+
+    路径形态裁定（用户裁定 2026-09-28，ADR 2026-09-28-file-content-absolute-
+    direct-read）：相对路径必须锚定（工作空间/项目根）且锚定后受越界守卫；
+    绝对路径直读不套边界——路径自足无需锚定，本端点消费方是经内核 token
+    鉴权的前端用户打开面（用户决策），agent 文件读链走 fs_tools 自有守卫，
+    不经此端点。
     """
     workspace_path_str = await _resolve_workspace_path(container_task_id, caller)
     raw_path = Path(path)
@@ -295,24 +301,6 @@ async def get_file_content(
 
     if raw_path.is_absolute():
         full_path = raw_path.resolve()
-        # 绝对路径与相对路径同受边界守卫（豁免不对称 = 任意文件读）：
-        # 有工作空间以工作空间为界，无工作空间以项目根为界，越界显式拒绝。
-        boundary = Path(workspace_path_str).resolve() if workspace_path_str else project_root
-        if not full_path.is_relative_to(boundary):
-            # 唯一界外放行 = 已合并 worktree 死路径重定位：重定位锚定 state
-            # 的 worktree 元数据（登记过的副本前缀 → project_root），非用户
-            # 可控豁免；无命中或目标不存在仍拒绝。
-            remapped = await get_workspace_service().resolve_merged_worktree_target(
-                str(full_path)
-            )
-            if remapped and Path(remapped).is_file():
-                logger.info("已合并 worktree 路径重定位 | %s -> %s", full_path, remapped)
-                full_path = Path(remapped)
-            else:
-                return {
-                    "success": False,
-                    "message": "路径超出工作空间范围",
-                }
     elif workspace_path_str:
         workspace_root = Path(workspace_path_str).resolve()
         full_path = (workspace_root / path).resolve()

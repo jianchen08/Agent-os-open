@@ -437,14 +437,40 @@ class WslNativeProvider(IsolationProvider):
         （调用方 _popen_run 强制），不进入 argv。
         """
         args = self._wsl_argv(["--cd", self._map_working_dir(working_dir), "--exec"])
-        if bridge_env:
+        bridge_pairs = [f"{k}={v}" for k, v in bridge_env.items()]
+        runtime_pairs = self._runtime_env_pairs()
+        if bridge_pairs or runtime_pairs:
             args.append("env")
-            args.extend(f"{k}={v}" for k, v in bridge_env.items())
+            args.extend(bridge_pairs)
+            args.extend(runtime_pairs)
         args.extend(self._sandbox_cmd)
         # 执行壳 bash：dash 对 set -o pipefail 致命退出（2026-09-14 实测），
         # bash 语义与 docker 路径的复合命令预期一致
         args.extend(["bash", "-c", command])
         return args
+
+    def _runtime_env_pairs(self) -> list[str]:
+        """任务运行时 env：副作用约束进 workspace（发行版 home 治本）。
+
+        发行版 home 是持久面（VHDX），pip --user / XDG 缓存 / npm 缓存写进去
+        无清理机制且 Windows 侧不可见。注入后主流工具的副作用落到 workspace
+        的 .task_runtime/（NTFS，随任务工作空间管理）：
+        - XDG_CACHE_HOME：pip/huggingface/torch/matplotlib 等缓存（自动建目录）
+        - npm_config_cache：npm 缓存（npm 自建，不认 XDG）
+        - PYTHONUSERBASE：pip install --user 落点（pip/python site 自建自识别）
+        workspace_wsl 未知（异常形态）不注入，防 env 值指向文件系统根。
+        TMPDIR/HOME/工具链（cargo/rustup/git/ssh）不动：/tmp 随 WSL 重启清空；
+        后四者是有意共享面（工具链复用、git 身份、凭据），重定向得不偿失。
+        """
+        base = self._workspace_wsl
+        if not base:
+            return []
+        rt = f"{base.rstrip('/')}/.task_runtime"
+        return [
+            f"XDG_CACHE_HOME={rt}/cache",
+            f"npm_config_cache={rt}/npm-cache",
+            f"PYTHONUSERBASE={rt}/pyuser",
+        ]
 
     def _build_kill_argv(self, pid: int, signal: int = 9) -> list[str]:
         """进程杀 argv：环境内 sh -c kill（kill 在沙箱外发——bwrap 默认不隔离

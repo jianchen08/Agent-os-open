@@ -114,7 +114,7 @@ export function RegisterPage() {
       submitTestId="register-submit-button"
       switchPrompt="已有账号？"
       switchLinkText="登录"
-      switchLinkTo={ROUTES.LOGIN}
+      switchLinkTo={ROUTES.HOME}
       switchLinkTestId="login-link"
       onSubmit={handleSubmit}
     >

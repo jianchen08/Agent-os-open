@@ -61,7 +61,7 @@
       },
       {
         "name": "mode.get_profile",
-        "description": "返回研究模式包内 profile.yaml 解析后的内容",
+        "description": "返回研究模式包内 mode.yaml 解析后的内容",
         "input_schema": {
           "type": "object",
           "properties": {}
@@ -195,22 +195,6 @@
             "w": 860,
             "h": 520
           }
-        }
-      }
-    ]
-  },
-  "ui_schema": {
-    "widgets": [
-      {
-        "id": "mode_opt_research",
-        "type": "select-option",
-        "space": "chat-input",
-        "order": 10,
-        "props": {
-          "target": "task_mode",
-          "value": "research",
-          "label": "研究",
-          "icon": "🔎"
         }
       }
     ]

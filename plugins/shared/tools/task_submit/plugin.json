@@ -47,28 +47,7 @@
             },
             "acceptance_criteria": {
               "type": "object",
-              "description": "验收标准字典（可选，但推荐填写）。key 为评估指标 ID，value 为配置对象。评估指标 ID 必须从下列内置指标中选取，按验证强度递增：\n- file_check：文件检查（工具自动，验证文件存在性/非空/内容匹配）\n- bash_check：命令检查（工具自动，通过命令退出码判定结果）\n- semantic_check：语义检查（agent 自动，验证意图覆盖/匹配/幻觉等语义层面）\n- human_review：人工审核（人类执行，验证需要人工审批/复核的主观或不可逆判断）\n选用规则：用户要求'人类评估/人工审核/人工确认'时必须用 human_review，不得用 semantic_check 替代；semantic_check 是 agent 自动语义判断，不涉及人类。指标 ID 必须精确匹配，禁止自创或用 value 子字段名（如 pass_threshold）充当 key。",
-              "additionalProperties": {
-                "type": "object",
-                "description": "评估指标配置对象",
-                "properties": {
-                  "input_params": {
-                    "type": "object",
-                    "description": "传递给评估工具的参数。不同指标所需参数不同：file_check 需要 {\"path\": \"src/main.py\"}；bash_check 需要 {\"command\": \"pytest tests/\"}；semantic_check 需要 {\"criteria\": \"评估要求描述\"}；human_review 需要 {\"title\": \"审核标题\", \"mode\": \"choice\"}。"
-                  },
-                  "expected_output": {
-                    "type": "object",
-                    "description": "预期输出，用于验证评估结果（可选）"
-                  },
-                  "pass_threshold": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 100,
-                    "description": "任务级别的通过阈值（0-100），优先级高于指标默认阈值"
-                  }
-                },
-                "required": []
-              }
+              "description": "验收标准（可选，推荐填写）。扁平白话字段，任选组合：\n- files：产出文件相对路径数组，逐文件检查存在且非空，如 [\"chapters/chapter_025.md\"]\n- expect：验收期望的白话描述（评估 agent 在工作区内核对产出），如 \"总纲与25章每章1200-1800字剧情连续，progress.md 记录完整\"\n- command：验收命令（退出码 0 = 通过），如 \"pytest tests/ -q\"\n示例：{\"files\": [\"chapters/chapter_025.md\"], \"expect\": \"总纲与25章每章1200-1800字剧情连续，progress.md 记录完整\"}\n不要写指标名或嵌套对象。"
             },
             "project_id": {
               "type": "string",
@@ -128,15 +107,11 @@
             },
             "orchestration_key": {
               "type": "string",
-              "description": "编排键（可选）。显式指定管道定义（函数），如 autonomous 或 mode_X/<编排名>。注意这是编排定义键，不是运行实例 pipeline_id。显式键不存在或提供插件被禁用 = 结构化报错（不会静默改走默认编排）。未指定时按 mode 限定候选解析，仍无候选则兜底 autonomous。"
+              "description": "编排键（可选）。显式指定管道定义（函数）= config/pipelines 登记名（如 autonomous、roleplay）。注意这是管道配置登记名，不是运行实例 pipeline_id。显式键不存在或提供插件被禁用 = 结构化报错（不会静默改走默认编排）。未指定时兜底 autonomous。"
             },
             "mode": {
               "type": "string",
-              "description": "模式键（可选）。用户显式约束：把编排候选限定为该模式包的 pipelines（文件头 task_kinds 与 task_kind 匹配者优先）；该模式包无自有编排或候选无法区分意图时仍兜底 autonomous（约束非门槛）。"
-            },
-            "task_kind": {
-              "type": "string",
-              "description": "任务型标注（可选）。与模式编排文件头 task_kinds 匹配，用于同模式多编排时的优先选择；不影响 autonomous 兜底。"
+              "description": "模式身份键（可选，[a-z][a-z0-9_]{0,63}，小写标识）。派发带 mode → 子任务出生即受该模式包控制（模式物料/人设接管按该模式解析，设计 D6）；与管道选择解耦（管道由 orchestration_key / 兜底决定）。"
             }
           },
           "required": [

@@ -1003,8 +1003,8 @@ mod tests {
             .expect("streaming 契约必须存在");
         assert_eq!(
             streaming.capabilities.len(),
-            12,
-            "streaming 事件数漂移（stream_start/chunk/end + pipeline_round_finished + thinking_*3 + tool_*2 + new_message + stream_error + plugin_error）"
+            13,
+            "streaming 事件数漂移（stream_start/chunk/end + pipeline_round_finished + thinking_*3 + tool_*2 + new_message + stream_error + plugin_error + run_failed）"
         );
         // run 级收尾事件必须在列（前端生成态终止唯一信号，缺失即终止断链）
         assert!(
@@ -1013,6 +1013,15 @@ mod tests {
                 .iter()
                 .any(|c| c.method == "pipeline_round_finished"),
             "pipeline_round_finished 契约条目缺失"
+        );
+        // run 级失败终态镜像事件必须在列（ADR 2026-09-28-run-failure-frontend-notification：
+        // 前端管道失败通知卡的唯一信号源，缺失即失败静默）
+        assert!(
+            streaming
+                .capabilities
+                .iter()
+                .any(|c| c.method == "run_failed"),
+            "run_failed 契约条目缺失"
         );
         // 四命名空间条目（真值源 x-message-id-namespaces）
         let owners: Vec<&str> = streaming

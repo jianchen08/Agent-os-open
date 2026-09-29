@@ -2,22 +2,52 @@
 # 依据 ADR 2026-09-14-config-ownership-plugin-lifecycle §2.6
 # 存量为历史欠账：新增直读即红，存量随触碰逐文件清偿
 # 键必须是仓库相对 posix 路径（绝对路径键属历史缺陷形态，检查器拒判）
+#
+# 2026-09-28 键随迁 + 测试夹具豁免归因（commit acd830547 后续）：
+# - eval_harness 七文件整体迁 mode_evolution（批E 模式包化），直读处数 1:1 随迁
+#   （7/2/1/3/2/1/6），非新增直读；治本=套件清单改 config_files 注入，随该插件
+#   触碰批次清偿。
+# - 下列测试文件增量均为「测试引用真实配置路径」夹具/文档字面量，非运行时直读：
+#   test_zone_gate 4→7（危险路径规则表新增 config/ 夹具行）、
+#   test_routes_llm_config_gaps 1→2 与 test_orchestration 2→3 与
+#   test_fs_read_whitelist 9→11（配置单源化/白名单场景新引用真实路径）、
+#   test_persona_placeholder 1 与 test_session_workspace_placeholder 2
+#   （docstring 提及种子配置路径，非 IO）。
+#
+# 2026-09-29 评估指标路径三布局批次豁免归因（commit 32e1228b8，装机版
+# file_check 全判死修复；用户裁定=指标定义属全局 config 非工作空间）：
+# - _executor.py 2→4：default_metrics_path 祖先逐级探测三布局（仓库嵌套/
+#   用户空间平铺/装机资源树），指标文件不在本插件 config_files 注入面
+#   （跨插件全局语义，内核无该注入通道），布局发现是合法读取通道；
+# - test_metrics_path_layouts 0→2 / test_evaluation_server 4→7 /
+#   test_context_build_dual_root 3→4 / test_pack_relative_path 0→1：
+#   均为构造三布局 config 夹具目录或包内相对路径字面量，非运行时直读。
 plugins/sdk/src/agentos_plugin_sdk/adapter_config.py: 7
 plugins/sdk/src/agentos_plugin_sdk/bridge_client.py: 1
 plugins/sdk/src/agentos_plugin_sdk/isolation_policy.py: 3
 plugins/sdk/src/agentos_plugin_sdk/permission_policy.py: 1
 plugins/shared/kernel_db.py: 1
+plugins/shared/modes/mode_evolution/batch_run.py: 7
+plugins/shared/modes/mode_evolution/fetch_external_trajectories.py: 2
+plugins/shared/modes/mode_evolution/harvest_trajectories.py: 1
+plugins/shared/modes/mode_evolution/test_eval_harness.py: 3
+plugins/shared/modes/mode_evolution/test_eval_harness_server_gaps.py: 2
+plugins/shared/modes/mode_evolution/verify_round.py: 1
+plugins/shared/modes/mode_evolution/ws_batch.py: 6
 plugins/shared/modes/mode_research/server.py: 1
 plugins/shared/pipeline/core/tool_core/src/lib.rs: 3
-plugins/shared/pipeline/input/context_build/test_context_build_dual_root.py: 3
+plugins/shared/pipeline/input/context_build/test_context_build_dual_root.py: 4
 plugins/shared/pipeline/input/context_window_guard/test_manifest_inline_config.py: 1
 plugins/shared/pipeline/input/context_window_guard/test_plugin_branches.py: 1
 plugins/shared/pipeline/input/isolation_guard/plugin.py: 1
 plugins/shared/pipeline/input/mode_material_inject/test_mode_material_inject.py: 2
 plugins/shared/pipeline/input/multimodal_preprocessor/test_multimodal_preprocessor_plugin.py: 1
+plugins/shared/pipeline/input/prompt_build/test_persona_placeholder.py: 1
+plugins/shared/pipeline/input/prompt_build/test_session_workspace_placeholder.py: 2
+plugins/shared/pipeline/input/prompt_build/test_pack_relative_path.py: 1
 plugins/shared/pipeline/input/security_check/plugin.py: 7
 plugins/shared/pipeline/input/security_check/test_dangerous_operations_config.py: 1
-plugins/shared/pipeline/input/security_check/test_zone_gate.py: 4
+plugins/shared/pipeline/input/security_check/test_zone_gate.py: 7
 plugins/shared/pipeline/input/workspace_lifecycle/test_plugin.py: 2
 plugins/shared/pipeline/output/spill_guard/src/lib.rs: 1
 plugins/shared/project_registry.py: 2
@@ -32,16 +62,10 @@ plugins/shared/system/cost_control/test_cost_control_branch_gaps.py: 5
 plugins/shared/system/dsh_adapter/tests/test_dsh_adapter.py: 4
 plugins/shared/system/dsh_adapter/tests/test_dsh_server_branches.py: 2
 plugins/shared/system/dsh_adapter/translator.py: 2
-plugins/shared/system/eval_harness/batch_run.py: 7
-plugins/shared/system/eval_harness/fetch_external_trajectories.py: 2
-plugins/shared/system/eval_harness/harvest_trajectories.py: 1
-plugins/shared/system/eval_harness/test_eval_harness.py: 3
-plugins/shared/system/eval_harness/test_eval_harness_server_gaps.py: 2
-plugins/shared/system/eval_harness/verify_round.py: 1
-plugins/shared/system/eval_harness/ws_batch.py: 6
+# 退役键：plugins/shared/system/eval_harness/* 七条已随批E迁移删除（键随迁见上方 mode_evolution 组）
 plugins/shared/system/evaluation/server.py: 2
-plugins/shared/system/evaluation/test_evaluation_server.py: 4
-plugins/shared/system/hindsight_memory/server.py: 5
+plugins/shared/system/evaluation/test_evaluation_server.py: 7
+plugins/shared/system/hindsight_memory/server.py: 4
 plugins/shared/system/hindsight_memory/test_hindsight_server_gaps.py: 3
 plugins/shared/system/hindsight_memory/test_hindsight_server_lifecycle.py: 3
 plugins/shared/system/isolation/_workspace_git_ops.py: 2
@@ -57,13 +81,13 @@ plugins/shared/system/isolation/test_workspace_root.py: 5
 plugins/shared/system/isolation/workspace.py: 4
 plugins/shared/system/llm/_config_models.py: 1
 plugins/shared/system/llm/adapter.py: 1
-plugins/shared/system/llm/routes_llm_config.py: 3
+plugins/shared/system/llm/routes_llm_config.py: 2
 plugins/shared/system/llm/routes_thinking_mode.py: 3
 plugins/shared/system/llm/test_adapter_branches.py: 2
 plugins/shared/system/llm/test_config_injection.py: 3
 plugins/shared/system/llm/test_llm_keypool_router_config_gaps.py: 1
 plugins/shared/system/llm/test_llm_thinking_mode_gaps.py: 2
-plugins/shared/system/llm/test_routes_llm_config_gaps.py: 1
+plugins/shared/system/llm/test_routes_llm_config_gaps.py: 2
 plugins/shared/system/monitoring/server.py: 1
 plugins/shared/system/multimodal/asr.py: 3
 plugins/shared/system/multimodal/capabilities.py: 3
@@ -75,10 +99,10 @@ plugins/shared/system/review/test_review_service_gaps.py: 2
 plugins/shared/system/task_form/server.py: 3
 plugins/shared/system/task_form/test_task_form_server.py: 2
 plugins/shared/system/tasks/orchestration.py: 1
-plugins/shared/system/tasks/test_orchestration.py: 2
+plugins/shared/system/tasks/test_orchestration.py: 3
 plugins/shared/system/tasks/timer_manager.py: 1
 plugins/shared/tenant_data.py: 1
-plugins/shared/tools/builtin_tools/tests/test_fs_read_whitelist.py: 9
+plugins/shared/tools/builtin_tools/tests/test_fs_read_whitelist.py: 11
 plugins/shared/tools/builtin_tools/tests/test_fs_uploads_readonly.py: 1
 plugins/shared/tools/builtin_tools/tests/test_fs_workspace.py: 1
 plugins/shared/tools/builtin_tools/tests/test_repo_read_anchor.py: 5
@@ -92,8 +116,9 @@ plugins/shared/tools/resource_merge/test_resource_merge_gaps.py: 6
 plugins/shared/tools/resource_merge/tool.py: 4
 plugins/shared/tools/search/tool.py: 1
 plugins/shared/tools/task/test_task_submit.py: 1
-plugins/shared/tools/task_evaluate/_executor.py: 2
+plugins/shared/tools/task_evaluate/_executor.py: 4
+plugins/shared/tools/task_evaluate/test_metrics_path_layouts.py: 2
 plugins/shared/tools/task_evaluate/server.py: 1
 plugins/shared/tools/task_evaluate/tool.py: 1
-plugins/shared/tools/task_submit/tool.py: 4
+plugins/shared/tools/task_submit/tool.py: 3
 plugins/shared/worktree_merge.py: 2

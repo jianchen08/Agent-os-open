@@ -25,7 +25,10 @@ use crate::{HookEventBus, LifecycleEvent};
 /// 返回 `JoinHandle` 供调用方管理任务生命周期（生产环境通常丢弃 handle，任务随进程退出）。
 pub fn spawn_audit_subscriber(bus: Arc<HookEventBus>) -> JoinHandle<()> {
     let mut rx = bus.subscribe();
-    tokio::spawn(async move {
+    let activity =
+        agentos_core::task_activity::global_registry().register("hooks-audit-subscriber");
+    tokio::spawn(agentos_core::task_activity::scope(activity, async move {
+        agentos_core::task_activity::set_current_label("waiting lifecycle events");
         info!("lifecycle audit subscriber started");
         loop {
             match rx.recv().await {
@@ -42,7 +45,7 @@ pub fn spawn_audit_subscriber(bus: Arc<HookEventBus>) -> JoinHandle<()> {
                 }
             }
         }
-    })
+    }))
 }
 
 /// 单个事件的审计日志输出。

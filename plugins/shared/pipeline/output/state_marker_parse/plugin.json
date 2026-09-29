@@ -1,0 +1,32 @@
+{
+  "id": "pipeline_state_marker_parse",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "name": "State Marker Parse",
+  "description": "状态统一标记解析步（2026-09-28 设计，通用管道步骤）：提取本轮 assistant 回复尾部的 <state> 标记（单标记容器 JSON，键=目标账本）→ 账本白名单分发落账（state=character_state.update / memory=memory 工具 store）→ character_state.render 回写 state 供下轮动态变量注入（消息尾部形态，零前缀缓存损失）→ 写 context.state_updates 结构化载荷+原文区间（前端 pull-from-state 渲染状态小卡并隐藏标记原文）。零标记=零动作；落账/服务失败 warning 降级不阻断管道。状态类变更统一走本标记通道，不进工具面。",
+  "version": "1.0.0",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load"
+    ]
+  },
+  "priority": 50,
+  "host_group": "pipeline",
+  "http_endpoints": [
+    {
+      "route_id": "state_marker_latest",
+      "method": "GET",
+      "path": "/ext/pipeline_state_marker_parse/latest",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "该管道最近一轮 state_updates 载荷（?pipeline_id=；无 = 空载荷——前端状态小卡拉取源，零内核边界下的唯一通道）"
+    }
+  ],
+  "invoke_entry": "state_marker_parse.execute"
+}

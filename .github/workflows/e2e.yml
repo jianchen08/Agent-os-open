@@ -176,7 +176,7 @@ jobs:
             tests/e2e_02/test_06_ws_stream.py \
             tests/e2e_02/test_07_plugin_lifecycle_e2e.py \
             tests/e2e_02/test_08_task_state_flow.py \
-            tests/e2e_02/test_09_godot_selection_bridge.py \
+            tests/e2e_02/test_09_host_selection_bridge.py \
             tests/e2e_02/test_10_cohost_host_grouping.py \
             tests/e2e_02/test_11_chat_order_parity.py             tests/e2e_02/test_12_pipeline_completion_e2e.py             tests/e2e_02/test_13_workspace_modes_e2e.py             tests/e2e_02/test_14_artifact_preservation_e2e.py             tests/e2e_02/test_task_lifecycle_paths_e2e.py
 

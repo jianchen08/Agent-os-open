@@ -105,6 +105,18 @@ def _clear_session_modes() -> None:
     sc_mod._PERMISSION_MODES.clear()
 
 
+def _decision_view(result: Any) -> dict[str, Any]:
+    """旧 security.decision 观测面的等价视图（键已随 ADR 2026-09-28 退役）。
+
+    拦截 = 预定拒绝条目在场（reason "soft_block: <error>"）；放行/批准 =
+    allowed True（无预定拒绝即过）。
+    """
+    entries = result.state_updates.get("pre_decided_results") or []
+    if entries:
+        return {"allowed": True, "reason": f"soft_block: {entries[0]['error']}"}
+    return {"allowed": True, "reason": "all checks passed"}
+
+
 class TestDefaultMode:
     @pytest.mark.asyncio
     async def test_危险命令弹审批(self) -> None:
@@ -112,7 +124,7 @@ class TestDefaultMode:
         p = _make_plugin()
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
         assert len(svc.requests) >= 1
-        assert result.state_updates["security.decision"]["allowed"] is True
+        assert _decision_view(result)["allowed"] is True
 
     @pytest.mark.asyncio
     async def test_无会话模式时用配置默认(self) -> None:
@@ -122,9 +134,9 @@ class TestDefaultMode:
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
         # 配置默认模式为 default：危险命令走审批链，交互服务恰好收到一次审批请求
         assert len(svc.requests) == 1
-        decision = result.state_updates["security.decision"]
+        decision = _decision_view(result)
         assert decision["allowed"] is True
-        assert decision["reason"] == "approved"
+        assert not result.state_updates.get("pre_decided_results"), "批准即放行（reason=approved 键已退役）"
 
 
 class TestAcceptEdits:
@@ -136,7 +148,7 @@ class TestAcceptEdits:
         # 普通文件路径（临时目录内）：/etc/hosts 在 Linux 上命中敏感系统目录
         # 硬拦截（设计内安全底线，优先于 accept_edits 放行），不代表"文件类"
         result = await p.execute(_ctx(_tool_state("file_write", {"path": str(tmp_path / "x.txt"), "content": "x"})))
-        assert result.state_updates["security.decision"]["allowed"] is True
+        assert _decision_view(result)["allowed"] is True
         assert "tool_results" not in result.state_updates
         assert len(svc.requests) == 0, "accept_edits 下文件类放行不得发起审批请求"
 
@@ -147,7 +159,7 @@ class TestAcceptEdits:
         _set_session_mode("s1", "accept_edits")
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
         assert len(svc.requests) >= 1
-        assert result.state_updates["security.decision"]["allowed"] is True
+        assert _decision_view(result)["allowed"] is True
 
 
 class TestAutoMode:
@@ -168,8 +180,8 @@ class TestAutoMode:
         _set_session_mode("s1", "auto")
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf danger-x /a"})))
         assert len(svc.requests) == 0, "block 规则自动拒绝不得发起审批请求"
-        assert result.state_updates["security.decision"]["allowed"] is True
-        assert "tool_results" in result.state_updates
+        assert _decision_view(result)["allowed"] is True
+        assert "pre_decided_results" in result.state_updates, "block 规则自动拒绝须预定拒绝（tool_core 幂等跳过执行）"
 
     @pytest.mark.asyncio
     async def test_needs_approval规则弹审批(self) -> None:
@@ -188,7 +200,7 @@ class TestAutoMode:
         _set_session_mode("s1", "auto")
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
         assert len(svc.requests) >= 1
-        assert result.state_updates["security.decision"]["allowed"] is True
+        assert _decision_view(result)["allowed"] is True
 
 
 class TestBypassMode:
@@ -199,7 +211,7 @@ class TestBypassMode:
         _set_session_mode("s1", "bypass")
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
         assert len(svc.requests) == 0
-        assert result.state_updates["security.decision"]["allowed"] is True
+        assert _decision_view(result)["allowed"] is True
         assert "tool_results" not in result.state_updates
 
 
@@ -231,12 +243,12 @@ class TestEarlyExitBranches:
 
     @pytest.mark.asyncio
     async def test_disabled_plugin_allows_everything(self) -> None:
-        """enabled=False → 直接放行，reason 标注 disabled。"""
+        """enabled=False → 直接放行（零检查副作用；reason 标注键已退役）。"""
         p = SecurityCheckPlugin(config={"enabled": False})
         result = await p.execute(_ctx(_tool_state("bash_execute", {"command": "rm -rf /x"})))
-        decision = result.state_updates["security.decision"]
+        decision = _decision_view(result)
         assert decision["allowed"] is True
-        assert decision["reason"] == "security check disabled"
+        assert not result.state_updates, "disabled 早退零状态写入"
 
     @pytest.mark.asyncio
     async def test_non_tool_execute_skips_check(self) -> None:
@@ -245,9 +257,9 @@ class TestEarlyExitBranches:
         state = _tool_state("bash_execute", {"command": "rm -rf /x"})
         state[StateKeys.CORE_TYPE] = "llm_call"
         result = await p.execute(_ctx(state))
-        decision = result.state_updates["security.decision"]
+        decision = _decision_view(result)
         assert decision["allowed"] is True
-        assert decision["reason"] == "not a tool execution"
+        assert not result.state_updates, "非工具核早退零状态写入"
 
     @pytest.mark.asyncio
     async def test_empty_tool_calls_skips_check(self) -> None:
@@ -258,9 +270,9 @@ class TestEarlyExitBranches:
             StateKeys.RAW_TOOL_CALLS: [],
         }
         result = await p.execute(_ctx(state))
-        decision = result.state_updates["security.decision"]
+        decision = _decision_view(result)
         assert decision["allowed"] is True
-        assert decision["reason"] == "no tool calls to check"
+        assert not result.state_updates, "空工具调用早退零状态写入"
 
     def test_priority_from_config(self) -> None:
         """priority 缺省 70，可经 config 覆盖。"""
@@ -338,7 +350,7 @@ class TestDispatchShortCircuits:
         p._dangerous_ops_by_tool["file_read"] = ["read:/data/secret/"]
         result = await p.execute(_ctx(_tool_state("file_read", {"path": "/data/secret/x"})))
         assert len(svc.requests) == 0, "只读白名单工具不得发起审批"
-        assert result.state_updates["security.decision"] == {
+        assert _decision_view(result) == {
             "allowed": True,
             "reason": "all checks passed",
         }
@@ -359,7 +371,7 @@ class TestDispatchShortCircuits:
             _ctx(_tool_state("bash_execute", {"command": "curl --help | head"}))
         )
         assert len(svc.requests) == 0, "allow 白名单命中不得发起审批"
-        assert result.state_updates["security.decision"]["reason"] == "all checks passed"
+        assert _decision_view(result)["reason"] == "all checks passed"
 
     @pytest.mark.asyncio
     async def test_accept_edits_passes_dangerous_file_tools(self) -> None:
@@ -375,4 +387,4 @@ class TestDispatchShortCircuits:
             ))
         )
         assert len(svc.requests) == 0, "accept_edits 下文件类放行不得发起审批"
-        assert result.state_updates["security.decision"]["reason"] == "all checks passed"
+        assert _decision_view(result)["reason"] == "all checks passed"

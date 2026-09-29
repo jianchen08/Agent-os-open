@@ -1,6 +1,6 @@
 /** 统一的聊天输入组件 支持三种模式： */
 
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import {
   AlertCircle,
   Maximize2,
@@ -18,15 +18,19 @@ import { useModelCapabilities } from '@/hooks/useModelCapabilities'
 import { useVoiceInput } from '@/hooks/useVoiceInput'
 import { cn } from '@/lib/utils'
 import { uploadFile, validateFile } from '@/services/api/files'
+import { taskModeOptionsFromModes, useModesRegistry, type TaskModeOption } from '@/services/api/modes'
 import { ErrorSeverity, ErrorType, reportError } from '@/services/errorReporting'
-import { getReferenceProviders, buildReferenceBlock, type ReferenceSelection } from '@/services/references'
 import {
-  clearSessionAgent,
-  readSessionAgent,
+  clearSessionAgentBinding,
+  openModeSession,
+  readSessionAgentBinding,
   type SessionAgentBinding,
-} from '@/services/roleplayContinue'
+} from '@/services/modeSessionBinder'
+import { getReferenceProviders, buildReferenceBlock, type ReferenceSelection } from '@/services/references'
+import { loadSessionExecutionOptions } from '@/services/sessionExecutionOptions'
 import { useChatInputStore } from '@/stores/chatInputStore'
-import { useRoleplayPossessStore } from '@/stores/roleplayPossessStore'
+import { useNotificationStore } from '@/stores/notificationStore'
+import { usePersonaPossessStore } from '@/stores/personaPossessStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import {
   DEFAULT_THINKING_STRENGTH,
@@ -38,7 +42,29 @@ import { AttachmentPreview } from './ChatInputAttachmentPreview'
 import { ChatInputPossessChip } from './ChatInputPossessChip'
 import { VoiceInputButton } from './VoiceInputButton'
 import type { Attachment, ChatInputProps, PendingFile, SendMessageParams } from './types'
-import type { TaskMode } from '@/services/schema/modeOptions'
+import type { WidgetDeclaration } from '@/services/schema/ContributionRegistry'
+
+/**
+ * 声明 fields 首字段（select）追加宿主派生选项（registry 模式项）：同 value
+ * 去重——声明项（兜底「默认」档与插件 select-option 追加）优先，派生项补位。
+ * 非 form/select 形态返回 undefined（零注入）。
+ */
+function derivedSelectFields(
+  declaration: WidgetDeclaration,
+  options: TaskModeOption[],
+): Array<Record<string, unknown>> | undefined {
+  const fields = (declaration.props as { fields?: Array<Record<string, unknown>> } | undefined)?.fields
+  if (!Array.isArray(fields) || fields.length === 0 || fields[0]?.type !== 'select') return undefined
+  const base = (fields[0].options as Array<Record<string, unknown>> | undefined) ?? []
+  const seen = new Set(base.map((o) => String(o.value)))
+  const merged = [...base]
+  for (const option of options) {
+    if (seen.has(option.value)) continue
+    seen.add(option.value)
+    merged.push({ ...option })
+  }
+  return [{ ...fields[0], options: merged }, ...fields.slice(1)]
+}
 
 /** 格式化录音时长为 mm:ss */
 const formatDuration = (seconds: number): string => {
@@ -83,30 +109,55 @@ export const ChatInput = ({
    *  下一次受理发送自动清除 */
   const [inputError, setInputError] = useState<string | null>(null)
   const [isExpanded, setIsExpanded] = useState(false)
-  /** 任务模式（task_mode 声明式选择器）：null = 自动，发送不带 mode 键。
-   *  状态提升在 chatInputStore 按 draftKey（tabId/sessionId）记忆——切换
-   *  会话/标签各自保持，模式面板等外部入口（Wave2）同源写入 */
-  const taskMode = useChatInputStore((s) => s.taskModes[draftKey ?? ''] ?? null)
-  const setTaskMode = useCallback(
-    (m: TaskMode | null) => useChatInputStore.getState().setTaskMode(draftKey ?? '', m),
-    [draftKey],
+  /** 任务模式（task_mode 声明式选择器，出生语义 §3.2 批 G④）：显示值 = 会话
+   *  执行选项 modeBinding.mode（出生即定，D1/D9）；选择非当前档 = 经
+   *  modeSessionBinder 开新管道会话并跳转，同档重选零动作。选择器不再有
+   *  消息级 mode 键形态（选择即出生，发送链身份归快照绑定）。 */
+  /** 选择器模式项 = modes registry 派生（D1 标签裁定：选项=registry 全量，
+   *  「默认」兜底档在声明面）；registry 不可达降级空数组（仅「默认」不阻断） */
+  const modesRegistry = useModesRegistry()
+  const modeSelectorOptions = useMemo(
+    () => taskModeOptionsFromModes(modesRegistry),
+    [modesRegistry],
   )
-  /** 附身档（roleplay.possess 桥写入，全局态不按会话分）：null = 未附身 */
-  const possessed = useRoleplayPossessStore((s) => s.possessed)
-  /** 扮演会话绑定（roleplay.continue 桥写入会话执行选项，按活跃会话分）：null = 未绑定 */
+  const openModeSessionNotify = useCallback((mode: string) => {
+    openModeSession(mode).catch((e) => {
+      // 出生失败落通知中心（拒绝必须反馈；输入区不阻断用户继续当前会话）
+      useNotificationStore.getState().addNotification({
+        title: '模式会话创建失败',
+        message: e instanceof Error ? e.message : String(e),
+        priority: 'high',
+        category: 'error',
+        isBlocking: false,
+        autoDismissMs: 8000,
+        sourceLabel: '前端',
+      })
+    })
+  }, [])
+  /** 附身档（mode.possess 桥写入，全局态不按会话分）：null = 未附身 */
+  const possessed = usePersonaPossessStore((s) => s.possessed)
+  /** 会话绑定（mode.session 桥写入会话执行选项，按活跃会话分）：
+   *  执行者绑定（指示条）+ 模式绑定（选择器显示值），均随活跃会话切换重读 */
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const [sessionAgent, setSessionAgent] = useState<SessionAgentBinding | null>(null)
+  const [sessionMode, setSessionMode] = useState<string | null>(null)
   useEffect(() => {
-    setSessionAgent(activeSessionId ? readSessionAgent(activeSessionId) : null)
+    if (!activeSessionId) {
+      setSessionAgent(null)
+      setSessionMode(null)
+      return
+    }
+    setSessionAgent(readSessionAgentBinding(activeSessionId))
+    setSessionMode(loadSessionExecutionOptions(activeSessionId)?.modeBinding?.mode ?? null)
   }, [activeSessionId])
-  /** 退出扮演会话：清该会话执行选项的 agentId（发送链随之不带身份） */
-  const handleExitRoleplaySession = useCallback(() => {
+  /** 退出绑定会话：清该会话执行选项的 agentId（发送链随之不带身份） */
+  const handleExitSessionBinding = useCallback(() => {
     if (!activeSessionId) return
     try {
-      clearSessionAgent(activeSessionId)
+      clearSessionAgentBinding(activeSessionId)
     } catch (e) {
       // 本地存储不可用属环境故障：落在操作点显式提示，不静默假退出
-      setInputError(`退出扮演会话失败：${e instanceof Error ? e.message : String(e)}`)
+      setInputError(`退出会话身份绑定失败：${e instanceof Error ? e.message : String(e)}`)
       return
     }
     setSessionAgent(null)
@@ -138,13 +189,24 @@ export const ChatInput = ({
     extra: () => ({ disabled: disabled || isExecuting || !modelName || modelName === 'unknown' }),
   })
 
-  // 任务模式桥：'' = 自动（store 存 null，发送不带 mode 键）；声明在 task_form
-  // 插件（task_mode form select），值/回调由本宿主注入——与思考强度同构
+  // 任务模式桥（出生语义）：'' = 默认档；显示值随会话 modeBinding（出生即定），
+  // 选择不同档 = 经出生通道开新会话（同档重选零动作）。声明在 task_form 插件
+  // （task_mode form select，持「默认」兜底档），模式项由 registry 派生注入。
   const taskModeBridge = useControlledSlotBridge('task_mode', {
     field: 'mode',
-    get: () => taskMode ?? '',
-    set: (_f, v) => setTaskMode((v as TaskMode | null) || null),
-    extra: () => ({ disabled: disabled || isExecuting }),
+    get: () => sessionMode ?? '',
+    set: (_f, v) => {
+      const value = typeof v === 'string' ? v : ''
+      if (value === (sessionMode ?? '')) return
+      openModeSessionNotify(value)
+    },
+    extra: (declaration) => {
+      const fields = derivedSelectFields(declaration, modeSelectorOptions)
+      return {
+        disabled: disabled || isExecuting,
+        ...(fields ? { fields } : {}),
+      }
+    },
   })
 
   /** 必须声明在使用它的回调（handleVoiceInterim / handleVoiceTranscriptionComplete 等）之前，
@@ -485,7 +547,6 @@ export const ChatInput = ({
       attachments: allAttachments.length > 0 ? allAttachments : undefined,
       enableThinking: STRENGTH_TO_ENABLE[currentThinkingStrength],
       thinkingStrength: currentThinkingStrength,
-      mode: taskMode ?? undefined,
     }
 
     // 受理协议：false = 未受理（无会话/令牌、管道未就绪、子标签不支持等），保留
@@ -520,7 +581,7 @@ export const ChatInput = ({
       textareaRef.current.style.height = 'auto'
     }
     setIsExpanded(false)
-  }, [text, attachments, pendingFiles, disabled, isExecuting, onSendMessage, currentThinkingStrength, taskMode, setTaskMode])
+  }, [text, attachments, pendingFiles, disabled, isExecuting, onSendMessage, currentThinkingStrength])
 
   /** 处理文件输入变化 */
   const handleFileInputChange = useCallback(
@@ -867,26 +928,26 @@ export const ChatInput = ({
               />
             )}
 
-        {/* 附身指示条 chip（roleplay.possess 桥）：附身档由本组件订阅传入，
+        {/* 附身指示条 chip（mode.possess 桥）：附身档由本组件订阅传入，
             未附身零渲染；解除与展示契约见 ChatInputPossessChip */}
         <ChatInputPossessChip possessed={possessed} />
 
-        {/* 扮演会话指示条（roleplay.continue 桥落地的会话执行选项绑定）：绑定存在
-            且未附身时常驻展示 + 一键退出；与附身 chip 互斥（附身是显式全局态，
-            优先展示——发送链同序：附身独占时会话绑定全让位） */}
+        {/* 会话身份绑定指示条（mode.session 桥落地的会话执行选项绑定）：绑定
+            存在且未附身时常驻展示 + 一键退出；与附身 chip 互斥（附身是显式
+            全局态，优先展示——发送链同序：附身独占时会话绑定全让位） */}
         {!possessed && sessionAgent && (
           <div
-            data-testid="roleplay-session-indicator"
+            data-testid="session-agent-indicator"
             className="bg-muted text-muted-foreground flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium"
           >
-            <span aria-hidden="true">🎭</span>
-            <span>扮演会话：{sessionAgent.name}</span>
+            <span aria-hidden="true">👤</span>
+            <span>会话身份：{sessionAgent.name}</span>
             <button
               type="button"
               className="hover:text-foreground ml-0.5 rounded px-0.5 text-sm leading-none"
-              onClick={handleExitRoleplaySession}
-              aria-label="退出扮演会话"
-              title="退出扮演会话"
+              onClick={handleExitSessionBinding}
+              aria-label="退出会话身份绑定"
+              title="退出会话身份绑定"
             >
               ×
             </button>

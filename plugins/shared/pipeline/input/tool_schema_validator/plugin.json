@@ -26,7 +26,8 @@
       "_tool_definitions",
       "messages_tail:10",
       "output_truncated",
-      "raw_tool_calls"
+      "raw_tool_calls",
+      "pre_decided_results"
     ]
   }
 }

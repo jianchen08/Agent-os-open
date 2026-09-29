@@ -14,7 +14,11 @@
 5. enhanced_search 以仓库根为起点时拒绝目录被剪枝（零命中且不报错），
    直接以拒绝目录为起点时整体拒绝；
 6. 仓库/根外普通路径读放行（读黑名单制，区域不设限）；自身工作区
-   不受影响。
+   不受影响；
+7. 内建工作空间地界白名单（用户裁定 2026-09-29：工作空间根必须在白
+   名单内）：workspace/project_root 锚落在仓库 .ai_workspaces 下时，其
+   最近 .ai_workspaces 祖先作为内建 read_allow 前缀参与读判定——兄弟
+   工作树读放行；锚不在 .ai_workspaces 下时零变化（条目 2 照拒）。
 """
 
 from __future__ import annotations
@@ -220,3 +224,41 @@ class TestRepoSearchPrune:
         ws.mkdir()
         result = await enhanced_search(query="needle", path="../outside", workspace=str(ws))
         assert result.success is False
+
+
+class TestBuiltinWorkspaceZonePrefix:
+    """内建工作空间地界白名单（用户裁定 2026-09-29）：兄弟工作树读放行。"""
+
+    async def test_sibling_worktree_read_allowed(
+        self, fake_repo: Path
+    ) -> None:
+        """workspace 在 .ai_workspaces 下：sessions 兄弟工作树读放行（装机
+        事故 2026-09-29 同构布局；修复前该读撞仓库拒绝集被拒）。"""
+        ws = fake_repo / ".ai_workspaces" / "proj__wt_x" / "sessions" / "thread-1"
+        ws.mkdir(parents=True)
+        sibling = fake_repo / ".ai_workspaces" / "proj__wt_x" / "docs" / "working"
+        sibling.mkdir(parents=True)
+        (sibling / "note.md").write_text("sibling doc", encoding="utf-8")
+
+        allowed, reason, _ = _check_workspace_path(
+            str(sibling / "note.md"), str(ws), None, operation="read"
+        )
+
+        assert allowed, f"兄弟工作树读应放行，实际拒绝: {reason}"
+
+    async def test_workspace_outside_ai_workspaces_zero_change(
+        self, fake_repo: Path, tmp_path: Path
+    ) -> None:
+        """workspace 不在 .ai_workspaces 下：.ai_workspaces 读照拒（契约2 保持）。"""
+        ws = tmp_path / "plain_ws"
+        ws.mkdir()
+
+        allowed, reason, _ = _check_workspace_path(
+            str(fake_repo / ".ai_workspaces" / "sessions" / "other" / "a.txt"),
+            str(ws),
+            None,
+            operation="read",
+        )
+
+        assert not allowed
+        assert "运行时/产物区" in reason

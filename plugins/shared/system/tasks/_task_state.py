@@ -526,7 +526,18 @@ class _TaskStateMixin:
         """
         try:
             from isolation.manager import get_isolation_manager  # noqa: PLC0415
+        except ImportError as exc:
+            # 显式可选依赖：isolation 插件未装载时其平铺模块（decider 等）
+            # 不在 sys.path，此处导入失败 = 本环境无隔离面、无容器可清理——
+            # 跳过并 DEBUG 说明，不作故障告警；运行期真实失败仍走下方 WARNING。
+            logger.debug(
+                "TaskService: isolation 面不可用，跳过终态容器清理 | task=%s, error=%s",
+                task_id,
+                exc,
+            )
+            return
 
+        try:
             manager = await get_isolation_manager()
             await manager.destroy_if_workspace_idle(task_id)
         except Exception as e:

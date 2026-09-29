@@ -943,6 +943,7 @@ mod tests {
             provides: None,
             persistent_fields: vec![],
             export_fields: vec![],
+            aux_venvs: Vec::new(),
         }
     }
 

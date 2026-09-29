@@ -8,6 +8,7 @@ tasks 域逻辑承载于 service.py（组合 _task_crud/_task_state/_task_cleanu
 from __future__ import annotations
 
 import logging
+from dataclasses import asdict
 from typing import Any
 
 from agentos_plugin_sdk.bootstrap import bootstrap_plugin
@@ -20,6 +21,7 @@ _paths = bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根入 sys.
 import events as task_events  # noqa: E402,PLC0415
 import http_api  # noqa: E402,PLC0415
 from service import TaskService  # noqa: E402
+from service_access import get_project_registry  # noqa: E402
 from task_types import TaskStatus  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
@@ -365,6 +367,23 @@ async def task_get_transitions(task_id: str) -> dict[str, Any]:
     svc = _get_service()
     transitions = svc.get_valid_transitions(task_id)
     return {"transitions": transitions, "task_id": task_id}
+
+
+@plugin.tool(
+    name="projects.list",
+    schema={"type": "object", "properties": {}},
+    description=(
+        "List registered projects (登记行直读：id/title/path/status/"
+        "workflow_state/auto_execute；与 /ext/task_service/projects 同源)"
+    ),
+)
+async def projects_list() -> dict[str, Any]:
+    """项目登记簿全量列举——跨插件读服务（mode_planning 面板等经 tool-executor 消费）。"""
+    registry = get_project_registry()
+    if registry is None:
+        raise RuntimeError("ProjectRegistry 不可用（projects.list）")
+    rows = [asdict(p) for p in registry.list()]
+    return {"projects": rows, "total": len(rows)}
 
 
 # ──────────────────────────────────────────────

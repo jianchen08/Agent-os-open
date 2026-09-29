@@ -42,6 +42,12 @@ pub trait EventSink: Send + Sync {
     /// （收不到事件也断不开），对端批量断连时才集中暴露。
     /// 默认空实现，测试 mock sink 无需实现。
     fn shutdown(&self) {}
+
+    /// 出站队列在飞帧数（堆栈级诊断面：消费端停滞积压观测）。
+    /// 默认 None = 该 sink 不披露队列深度（测试 mock / 无队列实现）。
+    fn pending_frames(&self) -> Option<usize> {
+        None
+    }
 }
 
 #[cfg(test)]

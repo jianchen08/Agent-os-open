@@ -289,7 +289,7 @@ describe('client.ts 覆盖缺口（批九）', () => {
       expect(replayed.headers.Authorization).toBe('Bearer stale')
     })
 
-    it('刷新失败且分类为认证失败 → 登出（/login 路径不再重定向）', async () => {
+    it('刷新失败且分类为认证失败 → 登出（整页刷新落点恒为 HOME）', async () => {
       h.refresh.mockImplementation(() => Promise.reject(new Error('refresh boom')))
       window.history.pushState({}, '', '/login')
       localStorage.setItem('auth_user', '{"id":1}')
@@ -307,14 +307,13 @@ describe('client.ts 覆盖缺口（批九）', () => {
         '认证已过期，请重新登录',
         expect.objectContaining({ type: 'authentication', code: '401' }),
       )
-      // 不重定向：不再改写 location
+      // 登出副作用齐全（location.href 赋值在 jsdom 中不导航，pathname 不变）
       expect(window.location.pathname).toBe('/login')
       expect(h.instance).not.toHaveBeenCalled()
     })
 
     it('refresh 请求自身 401 + body 非法 JSON → 无法判定竞争 → 登出且不触发 refresh()', async () => {
-      // 断言点在登出副作用而非重定向（重定向弧由 client401 真实链路覆盖），
-      // 置于 /login 路径避免 jsdom 无效导航噪音
+      // 断言点在登出副作用而非重定向（重定向弧由 client401 真实链路覆盖）
       window.history.pushState({}, '', '/login')
       const handler = responseErrorHandler
       await expect(

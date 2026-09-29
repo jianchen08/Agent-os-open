@@ -48,6 +48,7 @@ fn manifest_with_ui(
         activation: None,
         persistent_fields: vec![],
         export_fields: vec![],
+        aux_venvs: Vec::new(),
         provides: None,
     }
 }

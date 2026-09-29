@@ -70,16 +70,25 @@ def test_s1_all_container_contexts_keep_isolated():
         {"provider": "docker", "level": "isolated", "task_isolated": True},
         {"provider": "docker", "level": "isolated", "task_isolated": True},
     ]
-    assert plugin._is_isolated(contexts) is True
+    assert plugin._is_isolated(_ctx([], contexts), contexts) is True
 
 
 def test_s1_any_host_context_fails_closed():
+    """S1 保持（批次判定收窄修订见 ADR 2026-09-29-isolated-subtask-approval-card-
+    batch-credit）：宿主裸跑的「命令执行类」调用仍整批回落所选档审批；
+    未知形态（无 tool_name）保守按执行平面处理。宿主路由的只读辅助工具
+    （file_read）不拖垮整批——归 2026-09-29 ADR 行为锁。"""
     plugin = _plugin()
-    mixed = [
+    host_bash = [
+        {"tool_name": "bash_execute", "provider": "docker", "level": "isolated", "task_isolated": True},
+        {"tool_name": "bash_execute", "provider": "host", "level": "non_isolated", "task_isolated": False},
+    ]
+    assert plugin._is_isolated(_ctx([], host_bash), host_bash) is False
+    unknown_host = [
         {"provider": "docker", "level": "isolated", "task_isolated": True},
         {"provider": "host", "level": "non_isolated", "task_isolated": False},
     ]
-    assert plugin._is_isolated(mixed) is False
+    assert plugin._is_isolated(_ctx([], unknown_host), unknown_host) is False
 
 
 def test_s1_isolation_guard_marks_host_context_not_isolated():

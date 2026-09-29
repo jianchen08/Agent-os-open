@@ -4,10 +4,18 @@
     "packaging"
   ],
   "name": "Hindsight Memory Service",
-  "version": "1.0.0",
+  "version": "1.0.2",
+  "aux_venvs": [
+    {
+      "dir": ".venv-hindsight",
+      "requirements": "requirements.txt",
+      "python": "3.12"
+    }
+  ],
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",
+  "host_group": "light_stable",
   "entry": "python server.py",
   "capabilities": {
     "tools": [],

@@ -1,9 +1,7 @@
 # @feature: FP-0.2.二 管道插件服务接缝 | @ci: python-coverage
 """context_build server.py 服务接缝测试。
 
-context_build 回归纯上下文构建后（2026-09-24 模式物料架构重构），取数通道
-fetch_mode_profile 归 mode_material_inject 插件（其接缝测试随插件目录），
-本文件锁单例接线语义：
+context_build 是纯上下文构建（不持任何模式取数通道），本文件锁单例接线语义：
 1. **get_instance 接线**：单例按插件配置构造，lru_cache 幂等，on_unload
    复位后重建。
 

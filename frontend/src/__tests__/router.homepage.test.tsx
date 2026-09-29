@@ -120,7 +120,7 @@ import { useInteractionStore, type PendingInteraction } from '../stores/interact
 import { useNotificationStore } from '../stores/notificationStore'
 import { usePendingInputStore } from '../stores/pendingInputStore'
 import { usePipelineMessageStore } from '../stores/pipelineMessageStore'
-import { useRoleplayPossessStore } from '../stores/roleplayPossessStore'
+import { usePersonaPossessStore } from '../stores/personaPossessStore'
 import { useSessionListStore } from '../stores/sessionListStore'
 import { useSessionStore } from '../stores/sessionStore'
 import { useUIStore } from '../stores/uiStore'
@@ -209,7 +209,7 @@ beforeEach(() => {
   useAuthStore.setState(initial.auth, true)
   useNotificationStore.setState(initial.notification, true)
   // 附身态是模块级持久 store（persist localStorage）：显式归零防用例间串档
-  useRoleplayPossessStore.setState({ possessed: null })
+  usePersonaPossessStore.setState({ possessed: null })
   updateSessionsCache(() => [])
   mockApiGet.mockResolvedValue({ data: { items: [], threads: [], children: [], tree: [], tasks: [] } })
 })
@@ -297,6 +297,12 @@ describe('handleCreateSession（欢迎页入口）', () => {
     await renderHome()
     fireEvent.click(screen.getByRole('button', { name: /浏览智能体/ }))
     expect(mockOpenWorkspacePanel).toHaveBeenCalledWith('/agents')
+  })
+
+  it('欢迎页「开始使用」按钮跳转引导页（/p/get_started）', async () => {
+    await renderHome()
+    fireEvent.click(screen.getByRole('button', { name: /开始使用/ }))
+    expect(mockOpenWorkspacePanel).toHaveBeenCalledWith('/p/get_started')
   })
 })
 
@@ -471,14 +477,16 @@ describe('handleSendMessage', () => {
     })
   })
 
-  // 附身注入走消息级 execution_context（withRoleplayPersona，2026-09-25 审计裁定）：
-  // 附身期间注入卡人设 roleplay_persona + 强制 mode=roleplay（附身即激活模式物料）；
-  // 主 agent 身份不变——帧无 agentId（内核 WS 聊天入口不读该键，反向锁定防回归）。
-  it('附身期间：executionContext 并入 roleplay_persona+mode=roleplay，帧无 agentId', async () => {
-    useRoleplayPossessStore.setState({
+  // 附身注入走消息级 execution_context（withPossession，批 G② 通用化）：
+  // 附身期间注入人设键（personaKey=registry decl.persona.from 派生随档钉住）
+  // + mode=<附身模式键>（附身即激活模式物料）；主 agent 身份不变——帧无
+  // agentId（内核 WS 聊天入口不读该键，反向锁定防回归）。
+  it('附身期间：executionContext 并入人设键+mode=附身模式键，帧无 agentId', async () => {
+    usePersonaPossessStore.setState({
       possessed: {
-        card_id: 'card_luna', name: '月见', avatar: '🌙',
+        mode: 'roleplay', card_id: 'card_luna', name: '月见', avatar: '🌙',
         personaText: '银发碧眼的月精灵法师，月光神殿的最后一位守望者。',
+        personaKey: 'roleplay_persona',
       },
     })
     await renderHomeWithSession()
@@ -497,8 +505,11 @@ describe('handleSendMessage', () => {
       values: {},
       executionContext: { workspace: { source_path: '/w' } },
     })
-    useRoleplayPossessStore.setState({
-      possessed: { card_id: 'card_rin', name: '凛', avatar: '🎭', personaText: '北地佣兵，沉默寡言。' },
+    usePersonaPossessStore.setState({
+      possessed: {
+        mode: 'roleplay', card_id: 'card_rin', name: '凛', avatar: '🎭',
+        personaText: '北地佣兵，沉默寡言。', personaKey: 'roleplay_persona',
+      },
     })
     await renderHomeWithSession()
     await sendAndCapture({ content: '附身发言', pipelineId: 'p1' })
@@ -512,8 +523,11 @@ describe('handleSendMessage', () => {
   })
 
   it('busy 分支：附身键同样透传且帧无 agentId', async () => {
-    useRoleplayPossessStore.setState({
-      possessed: { card_id: 'card_rin', name: '凛', avatar: '🎭', personaText: '北地佣兵，沉默寡言。' },
+    usePersonaPossessStore.setState({
+      possessed: {
+        mode: 'roleplay', card_id: 'card_rin', name: '凛', avatar: '🎭',
+        personaText: '北地佣兵，沉默寡言。', personaKey: 'roleplay_persona',
+      },
     })
     await renderHomeWithSession()
     usePipelineMessageStore.setState((s) => ({
@@ -538,34 +552,36 @@ describe('handleSendMessage', () => {
     expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toBeUndefined()
   })
 
-  // 扮演会话绑定链（roleplay.continue 桥 → 会话执行选项 agentId）：帧带 agentId
-  // （内核透传管道 state agent.id，卡 yaml 窄工具面生效）+ context 并入
-  // mode=roleplay；会话化开演档键（快照 roleplayGreeting/roleplayUserPersona）
-  // 随绑定逐消息并入 execution_context.roleplay_greeting/roleplay_user_persona
-  // （2026-09-25 会话化开演，material.py 据此组开场注入段）。
-  it('扮演会话绑定：帧带 agentId，context 并入 mode=roleplay', async () => {
+  // 模式会话绑定链（mode.session 桥 → modeSessionBinder 出生通道写会话执行
+  // 选项快照）：帧带 agentId（内核透传管道 state agent.id，卡 yaml 窄工具面
+  // 生效）+ pipelineConfigId（出生钉住的专属管道）+ context 并入
+  // mode=<modeBinding.mode>；扩展上下文键（快照 extraContext）随绑定逐消息
+  // 并入 execution_context（开演档，material.py 据此组开场注入段）。
+  it('模式会话绑定：帧带 agentId/pipelineConfigId，context 并入 mode 键', async () => {
     saveSessionExecutionOptions('s1', {
       values: {},
       agentId: 'mode_roleplay/card_luna',
       agentName: '月见',
+      modeBinding: { mode: 'roleplay', pipelineConfigId: 'roleplay' },
     })
     await renderHomeWithSession()
     await sendAndCapture({ content: '（开始）', pipelineId: 'p1' })
     expect(mockWs.sendUserInput).toHaveBeenCalledTimes(1)
     const [, , opts] = mockWs.sendUserInput.mock.calls[0]
     expect((opts as { agentId?: string }).agentId).toBe('mode_roleplay/card_luna')
+    expect((opts as { pipelineConfigId?: string }).pipelineConfigId).toBe('roleplay')
     expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toEqual({
       mode: 'roleplay',
     })
   })
 
-  it('扮演会话开演档：快照开场白/用户设定并入消息 execution_context', async () => {
+  it('模式会话扩展上下文：快照 extraContext 键并入消息 execution_context', async () => {
     saveSessionExecutionOptions('s1', {
       values: {},
       agentId: 'mode_roleplay/card_luna',
       agentName: '月见',
-      roleplayGreeting: '「欢迎光临！」',
-      roleplayUserPersona: '北地来的佣兵。',
+      modeBinding: { mode: 'roleplay', pipelineConfigId: 'roleplay' },
+      extraContext: { roleplay_greeting: '「欢迎光临！」', roleplay_user_persona: '北地来的佣兵。' },
     })
     await renderHomeWithSession()
     await sendAndCapture({ content: '继续演出', pipelineId: 'p1' })

@@ -71,6 +71,7 @@ def _make_manager(
     tasks: dict[str, _FakeTask] | None = None,
     meta_store: dict | None = None,
     config: dict | None = None,
+    mode_skill_sources: list[Path] | None = None,
 ) -> WorkspaceLifecycleManager:  # type: ignore[valid-type]  # importlib 动态加载的类别名不可作注解
     cfg = {"workspace": {"default_mode": "worktree", "root": str(ws_root)}}
     if config:
@@ -81,6 +82,9 @@ def _make_manager(
         task_tree=_FakeTree(tasks),
         ws_meta_store=meta_store or {},
         base_path=str(tmp_path),
+        # 默认钉空模式包源 = 仅仓根单源（既有行为基线，不依赖真实仓内模式
+        # 包布局）；包源并集/优先序由 TestSkillsCopy 显式注入覆盖。
+        mode_skill_sources=[] if mode_skill_sources is None else mode_skill_sources,
     )
 
 
@@ -316,6 +320,104 @@ class TestSkillsCopy:
         m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
         m._copy_skills_to_workspace(str(ws))
         assert (ws / "skills" / "skill_a" / "SKILL.md").read_text(encoding="utf-8") == "old"
+
+    def test_declared_skills_all_delivered(self, tmp_path: Path) -> None:
+        """同步完整性：权威源并集声明的技能全部落盘工作空间（R300 缺交付反例：
+        装机包无根技能源时 agentos.yaml 引用悬空）。"""
+        (tmp_path / "skills" / "s_root").mkdir(parents=True)
+        (tmp_path / "skills" / "s_root" / "SKILL.md").write_text("r", encoding="utf-8")
+        pack = tmp_path / "pack" / "skills"
+        (pack / "s_mode").mkdir(parents=True)
+        (pack / "s_mode" / "SKILL.md").write_text("m", encoding="utf-8")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot", mode_skill_sources=[pack])
+        m._copy_skills_to_workspace(str(ws))
+        assert (ws / "skills" / "s_root" / "SKILL.md").is_file()
+        assert (ws / "skills" / "s_mode" / "SKILL.md").is_file()
+
+
+class TestUserRootSkillsSource:
+    """用户根 skills/ 源（R300 装机悬空引用根治）：推导加入并集、同名用户赢、
+    注入模式（mode_skill_sources 显式传入）不叠加——注入语义 = 替换推导。"""
+
+    def _make_deriv_manager(self, tmp_path: Path) -> Any:
+        """推导模式 manager（mode_skill_sources=None，与生产同构）。"""
+        return WorkspaceLifecycleManager(
+            resource_merge=None,
+            config={"workspace": {"default_mode": "worktree", "root": str(tmp_path / "wsroot")}},
+            task_tree=_FakeTree(),
+            ws_meta_store={},
+            base_path=str(tmp_path),
+        )
+
+    def test_user_root_skills_synced_to_workspace(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        user_root = tmp_path / "userroot"
+        (user_root / "skills" / "skill_container_flow").mkdir(parents=True)
+        (user_root / "skills" / "skill_container_flow" / "SKILL.md").write_text(
+            "# 容器任务链", encoding="utf-8"
+        )
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(user_root))
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        # base_path 无 skills/（装机形态：包内无根技能）→ 仅用户根源可达
+        m = self._make_deriv_manager(tmp_path)
+        m._copy_skills_to_workspace(str(ws))
+        assert (ws / "skills" / "skill_container_flow" / "SKILL.md").read_text(
+            encoding="utf-8"
+        ) == "# 容器任务链"
+
+    def test_user_root_same_name_wins(self, tmp_path: Path, monkeypatch: Any) -> None:
+        (tmp_path / "skills" / "skill_a").mkdir(parents=True)
+        (tmp_path / "skills" / "skill_a" / "SKILL.md").write_text("base", encoding="utf-8")
+        user_root = tmp_path / "userroot"
+        (user_root / "skills" / "skill_a").mkdir(parents=True)
+        (user_root / "skills" / "skill_a" / "SKILL.md").write_text("user", encoding="utf-8")
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(user_root))
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        m = self._make_deriv_manager(tmp_path)
+        m._copy_skills_to_workspace(str(ws))
+        # 升优先序末位 = 用户副本赢（与双根插件/模式包同序）
+        assert (ws / "skills" / "skill_a" / "SKILL.md").read_text(encoding="utf-8") == "user"
+
+    def test_injection_mode_skips_user_root_derivation(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        user_root = tmp_path / "userroot"
+        (user_root / "skills" / "skill_a").mkdir(parents=True)
+        (user_root / "skills" / "skill_a" / "SKILL.md").write_text("user", encoding="utf-8")
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(user_root))
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        # 注入模式（测试封闭面）：用户根推导不叠加（_make_manager 缺省钉 []）
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
+        m._copy_skills_to_workspace(str(ws))
+        assert not (ws / "skills").exists()
+
+    def test_user_root_env_unset_no_source(self, tmp_path: Path, monkeypatch: Any) -> None:
+        # AGENTOS_USER_ROOT 与 OS 数据目录皆不可得 → 用户根 skills/ 源不入并集
+        monkeypatch.delenv("AGENTOS_USER_ROOT", raising=False)
+        monkeypatch.delenv("APPDATA", raising=False)
+        m = self._make_deriv_manager(tmp_path)
+        sources = m._skill_sources()
+        assert not any(p.parent.name in ("agentos", "userroot") for p in sources)
+
+    def test_user_space_import_failure_degrades_without_source(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """user_space 不可得（import 失败）→ 用户根 skills/ 源静默降级（与
+        用户根模式包推导同口径），仓根与模式包源不受影响。"""
+        import types
+
+        monkeypatch.setitem(sys.modules, "user_space", None)  # None → import 抛 ImportError
+        m = self._make_deriv_manager(tmp_path)
+        sources = m._skill_sources()
+        assert not any(p.parent.name in ("agentos", "userroot") for p in sources)
+        # 仓根源仍在（降级不清场）
+        assert tmp_path / "skills" in sources
 
 
 class TestMetaPersist:

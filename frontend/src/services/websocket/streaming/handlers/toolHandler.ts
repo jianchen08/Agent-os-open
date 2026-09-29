@@ -1,4 +1,5 @@
 /** 工具调用事件处理器（start / result） 仅使用 parts[] 统一路径，已移除旧 toolCalls / contentBlocks 兼容代码。 */
+import type { ToolCallPart } from '@/types/messageParts'
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { loggers } from '@/utils/logger'
 import { resolvePipelineId } from '../router'
@@ -87,11 +88,28 @@ export function handleToolStart(eventData: any) {
     ensureStreamingPlaceholder(pipelineId, messageId, extractThreadId(eventData))
   }
 
-  // 去重：检查 parts[] 中是否已存在相同 call_id 的 tool_call part
-  const parts: any[] = msg?.parts || []
-  const existingToolParts = parts.filter((p: any) => p.type === 'tool_call')
-  if (parts.some((p: any) => p.type === 'tool_call' && p.callId === callId)) {
-    _debugLogger.debug('[TOOL_DEDUP] SKIPPED duplicate: tool=%s callId=%s', toolName, callId?.slice(0, 12))
+  // 同 call_id 的卡已存在（block 协议输出阶段建卡 / new_message 映射 / FIXUP）：
+  // upsert 归并进这张卡，不建第二张。执行开始置 'calling'（state='streaming'
+  // 的映射卡也收拢进 calling）；已有终态证据（result/error）的迟到事件不回退。
+  const existingIdx = pipelineStore.getState().findToolCallPartIndex(pipelineId, messageId, callId)
+  if (existingIdx >= 0) {
+    const cur = pipelineStore.getState().getMessages(pipelineId)
+      .find((m) => m.id === messageId)?.parts?.[existingIdx] as ToolCallPart | undefined
+    if (cur) {
+      const hasTerminal = cur.result !== undefined || cur.resultData !== undefined || cur.error !== undefined
+      const eventArgs = eventData.args || eventData.data?.args || eventData.data?.tool_args || {}
+      pipelineStore.getState().updatePart(pipelineId, messageId, existingIdx, {
+        state: hasTerminal ? cur.state : 'calling',
+        name: !cur.name || cur.name === 'unknown' ? toolName : cur.name,
+        args: cur.args && Object.keys(cur.args).length > 0 ? cur.args : eventArgs,
+        containerTaskId: cur.containerTaskId
+          ?? (eventData.container_task_id || eventData.data?.container_task_id || undefined),
+      })
+      _debugLogger.debug(
+        '[TOOL_START] upsert 既有卡: tool=%s callId=%s state=%s',
+        toolName, callId?.slice(0, 12), hasTerminal ? cur.state : 'calling',
+      )
+    }
     return
   }
 
@@ -108,6 +126,7 @@ export function handleToolStart(eventData: any) {
   }
 
   // 追加 tool_call part
+  const existingToolParts = (msg?.parts || []).filter((p) => p.type === 'tool_call')
   _debugLogger.debug(
     '[TOOL_CREATE] tool=%s callId=%s msgId=%s totalToolParts=%d',
     toolName, callId?.slice(0, 12), messageId?.slice(0, 12), existingToolParts.length + 1,

@@ -3,11 +3,12 @@
 
 use super::*;
 use agentos_core::traits::{
-    LoadedPlugin, McpConfig, McpEndpoint, McpTransport, PluginLifecycle, PluginManifest,
-    PluginStatus,
+    ConfigFileMapping, EnvConfigField, LoadedPlugin, McpConfig, McpEndpoint, McpTransport,
+    PluginLifecycle, PluginManifest, PluginStatus,
 };
 use agentos_core::types::TenantContext;
 use serde_json::json;
+use std::path::PathBuf;
 use uuid::Uuid;
 
 /// 串行化 cdylib 加载的 native e2e 测试。
@@ -130,6 +131,7 @@ fn make_sidecar_manifest(id: &str, entry: &str) -> PluginManifest {
         activation: None,
         provides: None,
         persistent_fields: vec![],
+        aux_venvs: Vec::new(),
         export_fields: vec![],
     }
 }
@@ -174,6 +176,7 @@ fn make_inprocess_manifest(id: &str) -> PluginManifest {
         activation: None,
         provides: None,
         persistent_fields: vec![],
+        aux_venvs: Vec::new(),
         export_fields: vec![],
     }
 }
@@ -562,6 +565,7 @@ async fn test_lifecycle_hook_composite_skipped() {
         activation: None,
         provides: None,
         persistent_fields: vec![],
+        aux_venvs: Vec::new(),
         export_fields: vec![],
     };
     loader.add_manifest(manifest);
@@ -935,6 +939,286 @@ async fn wait_until_killed(client: &tokio::sync::RwLock<McpClient>, why: &str) {
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
+}
+
+// ── 宿主启动窗独立时间界（ADR 2026-09-28）────────────────────────────────
+
+/// `AGENTOS_MCP_START_TIMEOUT_SECS` 是进程级全局，本组用例串行消费（值各不同，
+/// 并行下互踩会假红）。锁必须护住整个用例体（生产注入面即 env，env 需在全程
+/// await 中保持注入值）——async 用例跨 await 持锁是刻意行为，见各用例 allow。
+static HOST_START_TIMEOUT_ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// 绝对路径 python 解释器（启动窗组用例的 sidecar 替身进程）。
+///
+/// 显式路径（含分隔符）刻意绕过 venv 单轨（见 `resolve_sidecar_command`）；
+/// 路径含空白时返回 None——entry 按空白切分，无法承载（调用方响亮跳过）。
+fn abs_python_interpreter() -> Option<String> {
+    std::process::Command::new(python_exe())
+        .arg("-c")
+        .arg("import sys; print(sys.executable)")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|p| !p.is_empty() && !p.chars().any(|c| c.is_whitespace()))
+}
+
+#[test]
+fn host_start_timeout_env_parsing_invalid_falls_back_to_default() {
+    // 配置注入四组区分度输入：未设置/合法值/非法值（非数字、≤0）——非法一律
+    // 回退默认 120s，合法值生效；不 panic、不产生 0 窗（0 窗 = 永远超时）。
+    let _env_guard = HOST_START_TIMEOUT_ENV_LOCK.lock();
+
+    // 未设置 → 默认（先取值再恢复环境，断言失败不污染并行测试）
+    let original = std::env::var("AGENTOS_MCP_START_TIMEOUT_SECS").ok();
+    std::env::remove_var("AGENTOS_MCP_START_TIMEOUT_SECS");
+    let unset_value = host_start_timeout();
+    if let Some(v) = original {
+        std::env::set_var("AGENTOS_MCP_START_TIMEOUT_SECS", v);
+    }
+    assert_eq!(
+        unset_value,
+        Duration::from_secs(120),
+        "未设置必须回退默认 120s"
+    );
+
+    let _env = EnvVarGuard::set("AGENTOS_MCP_START_TIMEOUT_SECS", "45");
+    assert_eq!(
+        host_start_timeout(),
+        Duration::from_secs(45),
+        "合法值必须生效"
+    );
+    drop(_env);
+
+    let _zero = EnvVarGuard::set("AGENTOS_MCP_START_TIMEOUT_SECS", "0");
+    assert_eq!(
+        host_start_timeout(),
+        Duration::from_secs(120),
+        "≤0 必须回退默认（0 窗 = 永远超时）"
+    );
+    drop(_zero);
+
+    let _junk = EnvVarGuard::set("AGENTOS_MCP_START_TIMEOUT_SECS", "abc");
+    assert_eq!(
+        host_start_timeout(),
+        Duration::from_secs(120),
+        "非数字必须回退默认"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // 刻意跨 await：串行锁护住进程级 env 注入全程（组注释见 HOST_START_TIMEOUT_ENV_LOCK）
+async fn get_or_create_silent_handshake_fails_fast_with_host_start_timeout() {
+    // 启动窗独立时间界（ADR 2026-09-28）：存活但永不应答 initialize 的假
+    // sidecar 必须在注入的短窗（1s）内 fail-fast 返回 HOST_START_TIMEOUT——
+    // 而非挂在 request_timeout（默认 86400s）上钉死 per-host spawn 锁。
+    // 超时后 starting_plugins RAII 出窗、spawn 锁释放（后续调用可立即重试
+    // respawn，再有界返回不悬挂）。
+    //
+    // 僵尸形态（A0 复现 §九.1）：sidecar 读走 initialize 请求但不应答也不退出
+    // ——stdout 保持打开（无 EOF 快败）、无任何应答 → 挂在等应答。
+    let _env_guard = HOST_START_TIMEOUT_ENV_LOCK.lock();
+    let window = 1u64;
+    let _env = EnvVarGuard::set("AGENTOS_MCP_START_TIMEOUT_SECS", "1");
+    let Some(interpreter) = abs_python_interpreter() else {
+        eprintln!("python 不可用或解释器路径含空白，跳过挂死超时用例");
+        return;
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("plugin.json"), br#"{"id": "start_to"}"#).unwrap();
+    std::fs::write(
+        tmp.path().join("silent_server.py"),
+        concat!(
+            "import sys, time\n",
+            "sys.stdin.readline()\n", // 读走 initialize 请求，不应答
+            "time.sleep(30)\n",       // 存活不退出（stdout 无 EOF）
+        ),
+    )
+    .unwrap();
+    let entry = format!("{interpreter} silent_server.py");
+
+    let loader = Arc::new(MockLoader::new());
+    let manifest = make_sidecar_manifest("start_to", &entry);
+    loader.add_manifest(manifest.clone());
+    loader.plugin_dirs.write().insert(
+        "start_to".to_string(),
+        tmp.path().to_string_lossy().into_owned(),
+    );
+    let invoker = Arc::new(PluginInvokerImpl::new(loader));
+
+    // 挂在握手窗内时 starting_plugins 必须在集（D1 宽限面记账先行）
+    let m2 = manifest.clone();
+    let invoker2 = Arc::clone(&invoker);
+    let task = tokio::spawn(async move { invoker2.get_or_create_mcp_client(&m2).await });
+    let started = Instant::now();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let result = loop {
+        if invoker.starting_plugins.read().contains("start_to") {
+            // 在窗记账已观察到；等任务走完超时路径
+            break task.await.expect("spawn 任务不得 panic");
+        }
+        if task.is_finished() {
+            // 任务已结束却从未观察到在窗记账——把真实结果带进断言，定位前置断裂点
+            let r = task.await.expect("spawn 任务不得 panic");
+            panic!(
+                "任务已结束仍未观察到 spawn 窗记账（starting_plugins 轮询全失）——结果 = {:?}",
+                r.as_ref()
+                    .err()
+                    .map(|e| (e.code.clone(), e.message.clone()))
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "10s 内未进入 spawn 窗记账（前置不成立）"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let elapsed = started.elapsed();
+
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => panic!("永不应答 initialize 的 sidecar 必须超时，不得成功"),
+    };
+    assert_eq!(
+        err.code.as_deref(),
+        Some("HOST_START_TIMEOUT"),
+        "必须返回可辨识 code（区别于 MCP_INIT_FAILED/MCP_CONNECT_FAILED）：{err}"
+    );
+    // 性质断言：≥ 注入窗长（窗真实生效）、≪ request_timeout 默认（fail-fast）
+    assert!(
+        elapsed >= Duration::from_secs(window),
+        "耗时必须 ≥ 注入窗长（实际 {elapsed:?}）"
+    );
+    assert!(
+        elapsed < Duration::from_secs(20),
+        "必须 fail-fast（实际 {elapsed:?}；对照 request_timeout 默认 86400s）"
+    );
+
+    // RAII 出窗：starting_plugins 必已清空（超时 drop future → guard drop）
+    assert!(
+        invoker.starting_plugins.read().is_empty(),
+        "超时路径 starting_plugins 必须出窗即清（泄漏 = 端点宽限常开）"
+    );
+    // 半开客户端未入缓存
+    assert!(
+        invoker.mcp_clients.read().get("plugin:start_to").is_none(),
+        "超时客户端不得入缓存"
+    );
+
+    // spawn 锁已释放：后续调用立即重试 respawn 并同样 fail-fast（若锁被
+    // 挂死持锁者钉住，本调用将无限悬挂）
+    let started2 = Instant::now();
+    let result2 = invoker.get_or_create_mcp_client(&manifest).await;
+    let elapsed2 = started2.elapsed();
+    assert_eq!(
+        result2.err().and_then(|e| e.code).as_deref(),
+        Some("HOST_START_TIMEOUT"),
+        "第二次调用必须可立即重新 spawn（锁已释放）并同样 fail-fast"
+    );
+    assert!(
+        elapsed2 < Duration::from_secs(20),
+        "第二次调用必须有界返回（实际 {elapsed2:?}）"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // 刻意跨 await：串行锁护住进程级 env 注入全程（组注释见 HOST_START_TIMEOUT_ENV_LOCK）
+async fn get_or_create_fast_death_sidecar_keeps_own_error_not_masked_as_start_timeout() {
+    // 区分度输入（符号相反）：速死 sidecar（spawn 后立即退出 → stdout EOF
+    // 快败）走既有失败路径，code 保持 MCP_INIT_FAILED——启动窗超时包裹不得
+    // 把既有快败分支误标为 HOST_START_TIMEOUT（可辨识码要求逐分支保真）。
+    let _env_guard = HOST_START_TIMEOUT_ENV_LOCK.lock();
+    let _env = EnvVarGuard::set("AGENTOS_MCP_START_TIMEOUT_SECS", "1");
+
+    #[cfg(windows)]
+    let entry = "cmd /c exit 0";
+    #[cfg(unix)]
+    let entry = "/bin/sh -c exit 0";
+
+    let loader = Arc::new(MockLoader::new());
+    let manifest = make_sidecar_manifest("fast_death", entry);
+    loader.add_manifest(manifest.clone());
+    let invoker = PluginInvokerImpl::new(loader);
+
+    let err = match invoker.get_or_create_mcp_client(&manifest).await {
+        Err(e) => e,
+        Ok(_) => panic!("速死命令完不成 initialize 握手，必须失败"),
+    };
+    assert_eq!(
+        err.code.as_deref(),
+        Some("MCP_INIT_FAILED"),
+        "速死快败不得被启动窗超时误标：{err}"
+    );
+    assert!(
+        invoker.starting_plugins.read().is_empty(),
+        "快败路径同样 RAII 出窗即清"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // 刻意跨 await：串行锁护住进程级 env 注入全程（组注释见 HOST_START_TIMEOUT_ENV_LOCK）
+async fn get_or_create_responsive_sidecar_completes_handshake_within_short_window() {
+    // 正常路径不受影响：能应答 initialize 的真 sidecar 在同样短的启动窗内
+    // 照常握手成功入缓存——超时包裹只分叉挂死路径，成功路径语义逐字节不变。
+    // （python 不可用 / 解释器路径含空白时响亮跳过——entry 按空白切分，
+    //  带分隔符的显式解释器路径刻意绕过 venv 单轨，见 resolve_sidecar_command。）
+    let _env_guard = HOST_START_TIMEOUT_ENV_LOCK.lock();
+    let Some(interpreter) = abs_python_interpreter() else {
+        eprintln!("python 不可用或解释器路径含空白，跳过正常握手回归");
+        return;
+    };
+    let _env = EnvVarGuard::set("AGENTOS_MCP_START_TIMEOUT_SECS", "10");
+
+    // stdlib 最小 MCP responder：应答 initialize（回显 id）→ 消费 initialized
+    // 通知 → 存活待调用（无 SDK 依赖，真 stdio 协议帧）。
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("plugin.json"), br#"{"id": "resp_ok"}"#).unwrap();
+    std::fs::write(
+        tmp.path().join("server.py"),
+        concat!(
+            "import sys, json, time\n",
+            "line = sys.stdin.readline()\n",
+            "req = json.loads(line)\n",
+            "resp = {'jsonrpc': '2.0', 'id': req['id'], 'result': {'protocolVersion': '2024-11-05'}}\n",
+            "sys.stdout.write(json.dumps(resp) + '\\n')\n",
+            "sys.stdout.flush()\n",
+            "sys.stdin.readline()\n",
+            "time.sleep(30)\n",
+        ),
+    )
+    .unwrap();
+
+    let loader = Arc::new(MockLoader::new());
+    let manifest = make_sidecar_manifest("resp_ok", &format!("{interpreter} server.py"));
+    loader.add_manifest(manifest.clone());
+    loader.plugin_dirs.write().insert(
+        "resp_ok".to_string(),
+        tmp.path().to_string_lossy().into_owned(),
+    );
+    let invoker = PluginInvokerImpl::new(loader);
+
+    let started = Instant::now();
+    let result = invoker.get_or_create_mcp_client(&manifest).await;
+    assert!(
+        result.is_ok(),
+        "可应答 sidecar 必须在短窗内握手成功（正常路径不受影响）：{:?}",
+        result.err()
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "正常握手必须远短于注入窗（实际 {:?}）",
+        started.elapsed()
+    );
+    assert!(
+        invoker.mcp_clients.read().get("plugin:resp_ok").is_some(),
+        "成功客户端必须按宿主键入缓存"
+    );
+    assert!(
+        invoker.starting_plugins.read().is_empty(),
+        "成功路径同样出窗即清"
+    );
+    invoker.shutdown_all().await;
 }
 
 /// 构造「长驻不退出」的 stdio 假 sidecar（§3.3 测试辅助）。
@@ -1740,15 +2024,24 @@ fn test_normalize_mcp_result_python_toolresult_shapes() {
 
 #[test]
 fn test_normalize_mcp_result_error_and_plain_data_shapes() {
-    // ① isError=true 提取产物 {"error": "..."}（无 success）→ failure
-    let fail = normalize_mcp_tool_result(json!({"error": "isError"}), "t1").unwrap();
+    // ③ 纯业务数据 → success(data=inner)。顶层 error 键**不是**失败信号——
+    // 业务载荷的 error 字段（如 task_manage get 详情返回的下级任务失败原因）
+    // 与执行失败信封必须可区分，否则成功查询被翻转成工具报错（事故
+    // 2026-09-28：废除按结果文本猜失败的兼容分支，成败只认显式 success 键）。
+    let plain = normalize_mcp_tool_result(json!({"error": "payload-level error"}), "t1").unwrap();
+    assert!(plain.success, "无 success 键的载荷不得因 error 键被判失败");
+    assert_eq!(plain.data, json!({"error": "payload-level error"}));
+
+    let plain2 = normalize_mcp_tool_result(json!({"result": [1, 2]}), "t1").unwrap();
+    assert!(plain2.success);
+    assert_eq!(plain2.data, json!({"result": [1, 2]}));
+
+    // MCP isError=true 的协议层失败：extract 提取点已显式转 {success, error}
+    // （extract_mcp_content），走 ②-b 失败分支。
+    let fail =
+        normalize_mcp_tool_result(json!({"success": false, "error": "isError"}), "t1").unwrap();
     assert!(!fail.success);
     assert_eq!(fail.error.as_deref(), Some("isError"));
-
-    // ③ 纯业务数据 → success(data=inner)
-    let plain = normalize_mcp_tool_result(json!({"result": [1, 2]}), "t1").unwrap();
-    assert!(plain.success);
-    assert_eq!(plain.data, json!({"result": [1, 2]}));
 }
 
 #[test]
@@ -1822,6 +2115,8 @@ fn test_extract_mcp_content_is_error() {
         "isError": true
     });
     let extracted = extract_mcp_content(&mcp_result);
+    // 协议层失败在提取点显式转 {success: false, error}（归一化只认显式 success）
+    assert_eq!(extracted["success"], false);
     assert_eq!(extracted["error"], "something went wrong");
 }
 
@@ -1959,6 +2254,7 @@ fn make_pipeline_sidecar_manifest(id: &str, invoke_entry: Option<&str>) -> Plugi
         provides: None,
         invoke_entry: invoke_entry.map(str::to_string),
         persistent_fields: vec![],
+        aux_venvs: Vec::new(),
         export_fields: vec![],
     }
 }
@@ -2431,8 +2727,11 @@ fn test_resolve_sidecar_command_venv_without_pyproject_fails_closed() {
 fn test_resolve_sidecar_command_no_venv_fails_closed() {
     // 有 pyproject 无 .venv → Err（VENV_INTERPRETER_MISSING），错误含
     // `uv venv`/`uv sync` 重建指引——不再回退 PATH 裸 python。
+    // 用户根钉到空目录：登记处兜底缺席的判定必须与机器环境无关（确定性）。
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("pyproject.toml"), b"[project]\n").unwrap();
+    let empty_user = tempfile::tempdir().unwrap();
+    let _guard = UserRootGuard::pin_to(empty_user.path());
 
     let loader = Arc::new(MockLoader::new());
     loader.plugin_dirs.write().insert(
@@ -2457,6 +2756,262 @@ fn test_resolve_sidecar_command_no_venv_fails_closed() {
         .resolve_sidecar_command(&manifest)
         .expect_err("半成品 .venv（无解释器）必须失败");
     assert_eq!(err2.code.as_deref(), Some("VENV_INTERPRETER_MISSING"));
+}
+
+// ── venv 直达真身解释器（Windows trampoline 消层）──
+
+/// 造带 pyvenv.cfg 的假 venv + 假 base 解释器目录，返回 (跳板路径, base 目录)。
+/// 空文件占位（直达解析只做 is_file 探测与文本读取，不执行解释器）。
+fn fake_trampoline_venv(
+    root: &std::path::Path,
+    venv_rel: &str,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let venv = root.join(venv_rel);
+    let trampoline = venv.join("Scripts").join("python.exe");
+    std::fs::create_dir_all(trampoline.parent().unwrap()).unwrap();
+    std::fs::write(&trampoline, b"").unwrap();
+    let base = root.join("base-cpython-3.12");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(base.join("python.exe"), b"").unwrap();
+    // 真实 uv pyvenv.cfg 格式：home 乱序 + 前缀相近干扰键 home-x86（不得误配）。
+    std::fs::write(
+        venv.join("pyvenv.cfg"),
+        format!(
+            "home-x86 = D:\\should\\not\\match\nimplementation = CPython\nversion_info = 3.12.12\ninclude-system-site-packages = false\nprompt = demo\nhome = {}\n",
+            base.display()
+        ),
+    )
+    .unwrap();
+    (trampoline, base)
+}
+
+#[test]
+fn test_venv_direct_interpreter_resolves_base_from_pyvenv_cfg() {
+    // trampoline 形态 + pyvenv.cfg home → 命令换 base 真身解释器，
+    // env 注入 __PYVENV_LAUNCHER__ 锚定 venv 身份，args 原样透传。
+    let tmp = tempfile::tempdir().unwrap();
+    let (trampoline, base) = fake_trampoline_venv(tmp.path(), "plugin-venvs/demo");
+    let args = vec![
+        "server.py".to_string(),
+        "--port".to_string(),
+        "8000".to_string(),
+    ];
+
+    let (cmd, args_out, env) =
+        resolve_venv_direct_interpreter(&trampoline.to_string_lossy(), args.clone(), true);
+
+    assert_eq!(cmd, base.join("python.exe").to_string_lossy());
+    assert_eq!(args_out, args, "args 必须原样透传");
+    assert_eq!(
+        env,
+        Some((
+            "__PYVENV_LAUNCHER__".to_string(),
+            trampoline.to_string_lossy().into_owned()
+        )),
+        "launcher 变量必须锚回 venv 解释器路径（身份锚点）"
+    );
+}
+
+#[test]
+fn test_venv_direct_interpreter_unix_untouched() {
+    // Unix venv python 是 symlink 单进程——恒原样，无 env 注入。
+    let tmp = tempfile::tempdir().unwrap();
+    let venv_py = tmp.path().join(".venv").join("bin").join("python");
+    std::fs::create_dir_all(venv_py.parent().unwrap()).unwrap();
+    std::fs::write(&venv_py, b"").unwrap();
+
+    let (cmd, args_out, env) = resolve_venv_direct_interpreter(
+        &venv_py.to_string_lossy(),
+        vec!["server.py".into()],
+        false,
+    );
+
+    assert_eq!(cmd, venv_py.to_string_lossy());
+    assert_eq!(args_out, vec!["server.py".to_string()]);
+    assert_eq!(env, None);
+}
+
+#[test]
+fn test_venv_direct_interpreter_unresolvable_falls_back_identically() {
+    // 性质断言：一切解析不了的情形——非 venv python 命令 / 缺 pyvenv.cfg /
+    // cfg 无 home / 真身缺席——输出与输入逐项恒等，回落即现状零行为漂移。
+    let tmp = tempfile::tempdir().unwrap();
+    let args = vec!["server.py".to_string()];
+    let trampoline = tmp.path().join("v").join("Scripts").join("python.exe");
+
+    let inputs = [
+        "npx".to_string(),
+        "C:/tools/standalone/python.exe".to_string(), // 无 Scripts 父目录
+        trampoline.to_string_lossy().into_owned(),    // 无 pyvenv.cfg
+    ];
+    for input in inputs {
+        let (cmd, a, env) = resolve_venv_direct_interpreter(&input, args.clone(), true);
+        assert_eq!(
+            (cmd.as_str(), a.as_slice(), env),
+            (input.as_str(), &args[..], None),
+            "不可解析输入必须恒等回落: {input}"
+        );
+    }
+
+    // 有 pyvenv.cfg 但无 home 键 → 回落。
+    std::fs::create_dir_all(trampoline.parent().unwrap()).unwrap();
+    std::fs::write(&trampoline, b"").unwrap();
+    std::fs::write(
+        tmp.path().join("v").join("pyvenv.cfg"),
+        "implementation = CPython\nversion = 3.12.0\n",
+    )
+    .unwrap();
+    let (cmd, _, env) =
+        resolve_venv_direct_interpreter(&trampoline.to_string_lossy(), args.clone(), true);
+    assert_eq!(cmd, trampoline.to_string_lossy());
+    assert_eq!(env, None);
+
+    // home 指向的解释器不存在 → 回落。
+    std::fs::write(
+        tmp.path().join("v").join("pyvenv.cfg"),
+        "home = D:\\no\\such\\base\n",
+    )
+    .unwrap();
+    let (cmd, _, env) =
+        resolve_venv_direct_interpreter(&trampoline.to_string_lossy(), args.clone(), true);
+    assert_eq!(cmd, trampoline.to_string_lossy());
+    assert_eq!(env, None);
+}
+
+#[test]
+fn test_venv_direct_interpreter_for_spawn_uses_platform_gate() {
+    // spawn 包装 = cfg!(windows) 门内的直达解析：Windows 上对 trampoline
+    // 形态命中直达；任意平台上非 trampoline 形态恒原样。
+    let tmp = tempfile::tempdir().unwrap();
+    let (trampoline, base) = fake_trampoline_venv(tmp.path(), "plugin-venvs/gated");
+
+    let (cmd, _, env) = resolve_venv_direct_interpreter_for_spawn("npx", vec!["-y".into()]);
+    assert_eq!(cmd, "npx");
+    assert_eq!(env, None);
+
+    let (cmd, _, env) =
+        resolve_venv_direct_interpreter_for_spawn(&trampoline.to_string_lossy(), vec![]);
+    if cfg!(windows) {
+        assert_eq!(cmd, base.join("python.exe").to_string_lossy());
+        assert!(env.is_some(), "Windows 命中必须注入 launcher 变量");
+    } else {
+        assert_eq!(cmd, trampoline.to_string_lossy());
+        assert_eq!(env, None);
+    }
+}
+
+// ── venv 解析序②：用户空间登记处兜底（装机态，ADR 2026-09-28）──
+
+/// 用户空间根环境变量是进程全局态：复用 [`EnvVarGuard`] 配对清场，并经
+/// [`ENV_SENSITIVE_LOCK`] 串行化（env 突变对并行测试全局可见；锁守卫作为
+/// 字段持有——Drop 先恢复 env 再随字段释放锁，恢复不落在串行窗之外）。
+struct UserRootGuard {
+    _inner: EnvVarGuard,
+    _serial: parking_lot::MutexGuard<'static, ()>,
+}
+
+impl UserRootGuard {
+    fn pin_to(path: &std::path::Path) -> Self {
+        let _serial = ENV_SENSITIVE_LOCK.lock();
+        Self {
+            _inner: EnvVarGuard::set("AGENTOS_USER_ROOT", path.to_string_lossy().as_ref()),
+            _serial,
+        }
+    }
+}
+
+/// 造一个用户空间登记处 venv：`<user_root>/plugin-venvs/<key>/` 下直接是
+/// Scripts|bin 占位解释器（UV_PROJECT_ENVIRONMENT 重定向的原生布局）。
+/// 双平台布局无条件同建（探测器按本平台优先序命中其一，占位文件无害），
+/// 返回即 spawn 期解析将命中的同一路径。
+fn fake_registered_venv(user_root: &std::path::Path, key: &str) -> PathBuf {
+    let venv_dir = user_root.join("plugin-venvs").join(key);
+    for interp in [
+        venv_dir.join("Scripts").join("python.exe"),
+        venv_dir.join("bin").join("python"),
+    ] {
+        std::fs::create_dir_all(interp.parent().unwrap()).unwrap();
+        std::fs::write(&interp, b"").unwrap();
+    }
+    find_registered_venv_interpreter(&venv_dir).expect("双布局占位必命中其一")
+}
+
+#[test]
+fn test_resolve_sidecar_command_falls_back_to_user_space_venv() {
+    // 解析序②：插件目录 .venv 缺席（装机态打包排除）+ 登记处有解释器
+    //（autoprovision 重定向产物）→ command = 登记处解释器绝对路径。
+    let plugin_dir = tempfile::tempdir().unwrap();
+    std::fs::write(plugin_dir.path().join("pyproject.toml"), b"[project]\n").unwrap();
+    let user_root = tempfile::tempdir().unwrap();
+    let _guard = UserRootGuard::pin_to(user_root.path());
+    let registered = fake_registered_venv(user_root.path(), "host_context");
+
+    let loader = Arc::new(MockLoader::new());
+    loader.plugin_dirs.write().insert(
+        "host_context".to_string(),
+        plugin_dir.path().to_string_lossy().into_owned(),
+    );
+    let invoker = PluginInvokerImpl::new(loader);
+    let manifest = make_sidecar_manifest("host_context", "python server.py");
+
+    let (cmd, args) = invoker.resolve_sidecar_command(&manifest).unwrap();
+    assert_eq!(
+        cmd,
+        registered.to_string_lossy().into_owned(),
+        "登记处解释器必须被命中（装机态兜底）"
+    );
+    assert_eq!(args, vec!["server.py"]);
+}
+
+#[test]
+fn test_resolve_sidecar_command_plugin_dir_venv_wins_over_user_space() {
+    // 解析序优先级：两级都有 → 插件目录 .venv 赢（纯 dev 路径零变化——
+    // dev 机器即使用户空间残留登记项也绝不改变解析结果）。
+    let plugin_dir = tempfile::tempdir().unwrap();
+    let local = fake_venv(plugin_dir.path(), true);
+    let user_root = tempfile::tempdir().unwrap();
+    let _guard = UserRootGuard::pin_to(user_root.path());
+    fake_registered_venv(user_root.path(), "demo_tool");
+
+    let loader = Arc::new(MockLoader::new());
+    loader.plugin_dirs.write().insert(
+        "demo_tool".to_string(),
+        plugin_dir.path().to_string_lossy().into_owned(),
+    );
+    let invoker = PluginInvokerImpl::new(loader);
+    let manifest = make_sidecar_manifest("demo_tool", "python server.py");
+
+    let (cmd, _) = invoker.resolve_sidecar_command(&manifest).unwrap();
+    assert_eq!(
+        cmd,
+        local.to_string_lossy().into_owned(),
+        "插件目录 .venv 恒优先于登记处"
+    );
+}
+
+#[test]
+fn test_resolve_sidecar_command_user_space_key_traversal_rejected() {
+    // 防御面：登记键含穿越形态（模拟 id 非法）→ 兜底直接 None，走 fail-closed，
+    // 绝不按注入路径探测用户空间。
+    let plugin_dir = tempfile::tempdir().unwrap();
+    std::fs::write(plugin_dir.path().join("pyproject.toml"), b"[project]\n").unwrap();
+    let user_root = tempfile::tempdir().unwrap();
+    let _guard = UserRootGuard::pin_to(user_root.path());
+    // 用户空间里恶意放置 ../ 形态可达位置的"venv"，合法键探测不得命中
+    fake_registered_venv(user_root.path().parent().unwrap(), "evil");
+
+    let loader = Arc::new(MockLoader::new());
+    loader.plugin_dirs.write().insert(
+        "../evil".to_string(),
+        plugin_dir.path().to_string_lossy().into_owned(),
+    );
+    let invoker = PluginInvokerImpl::new(loader);
+    let manifest = make_sidecar_manifest("../evil", "python server.py");
+
+    let err = invoker
+        .resolve_sidecar_command(&manifest)
+        .expect_err("非法键必须 fail-closed");
+    assert_eq!(err.code.as_deref(), Some("VENV_INTERPRETER_MISSING"));
 }
 
 #[test]
@@ -3497,6 +4052,146 @@ sys.exit(host.main(["--group", "light", "--slot", "1", "--members", "a_service,b
 }
 
 #[tokio::test]
+async fn test_idle_gc_skips_member_unload_while_host_serves_inflight_calls() {
+    // 宿主在飞门（用户裁定 2026-09-28）：合宿宿主有调用在飞（含停泊长等待的
+    // 交互调用）期间，任何成员不得被空闲软卸载——成员卸载即变更成员集 →
+    // 宿主指纹漂移 → 下一次任意调用触发整宿主 respawn（BUG-81 语义：旧进程
+    // 被放弃保留伺候在飞调用、新进程状态为空），同宿主上停泊的交互等待被拆
+    // 成「等待方旧进程 / 响应方新进程」，用户响应永远送达不了等待（装机版
+    // 2026-09-28 12:01-12:06 实测链路：human_interaction 等待 67s 被响应，
+    // 响应路由到重 spawn 后的新进程报「请求不存在」，等待死于 300s 桥面界）。
+    // 宿主排空后的下一轮 GC 必须照常软卸载（门是延后不是禁止）。
+    // python/SDK 不可用时跳过（与端到端用例同款探针）。
+    let ok = std::process::Command::new(python_exe())
+        .arg("-c")
+        .arg("import agentos_plugin_sdk, mcp")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("python 或 agentos_plugin_sdk 不可用，跳过 GC 宿主在飞门端到端");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    for (dirname, pid) in [("a_service", "a_service"), ("b_service", "b_service")] {
+        let member_dir = tmp.path().join("tools").join(dirname);
+        std::fs::create_dir_all(&member_dir).unwrap();
+        std::fs::write(
+            member_dir.join("plugin.json"),
+            format!(r#"{{"id": "{pid}"}}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            member_dir.join("server.py"),
+            format!(
+                concat!(
+                    "from agentos_plugin_sdk import AgentOSPlugin\n",
+                    "plugin = AgentOSPlugin(\"{pid}\")\n",
+                    "@plugin.tool(name='probe', schema={{'type': 'object'}})\n",
+                    "async def probe() -> dict:\n",
+                    "    return {{'value': 1}}\n",
+                ),
+                pid = pid,
+            ),
+        )
+        .unwrap();
+    }
+    let host_py = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../plugins/shared/_host/host.py");
+    let shared_root = tmp.path().to_string_lossy().replace('\\', "/");
+    let driver = format!(
+        r#"
+import sys
+sys.path.insert(0, r"{host_py_dir}")
+import host
+sys.exit(host.main(["--group", "light", "--slot", "1", "--members", "a_service,b_service"],
+                   shared_root=__import__("pathlib").Path(r"{shared_root}")))
+"#,
+        host_py_dir = host_py.parent().unwrap().display(),
+        shared_root = shared_root,
+    );
+
+    let loader = Arc::new(MockLoader::new());
+    loader.add_manifest(make_light_manifest("a_service", "python server.py"));
+    loader.add_manifest(make_light_manifest("b_service", "python server.py"));
+    let invoker = PluginInvokerImpl::new(loader);
+    invoker.assign_light_host_with("a_service", "light", 6);
+    invoker.assign_light_host_with("b_service", "light", 6);
+
+    let mut client = McpClient::new_stdio(python_exe().to_string(), vec!["-c".to_string(), driver]);
+    client.connect().await.expect("真宿主 spawn 应成功");
+    client
+        .initialize(&serde_json::json!({}))
+        .await
+        .expect("握手应成功");
+    let host_key = "group:light:1".to_string();
+    let shared = Arc::new(tokio::sync::RwLock::new(client));
+    invoker
+        .mcp_clients
+        .write()
+        .insert(host_key.clone(), Arc::clone(&shared));
+    invoker
+        .spawned_members
+        .write()
+        .insert(host_key.clone(), invoker.host_members(&host_key));
+    invoker.touch_member_last_used("a_service");
+    invoker.touch_member_last_used("b_service");
+    // a_service 空闲远超任何合理阈值（默认 300s；40_000s 对 env 覆盖也免疫）；
+    // b_service 活跃且其「停泊调用」以宿主面在飞 guard 表示（enter_sidecar_inflight
+    // 双面计数，宿主面足以代表）。
+    backdate_idle(&invoker, "a_service", 40_000);
+    let parked = invoker.enter_inflight(&host_key);
+    assert_eq!(
+        invoker.host_inflight(&host_key),
+        1,
+        "前置：宿主在飞计数在悬"
+    );
+
+    invoker.run_idle_gc_pass().await;
+
+    assert!(
+        invoker.member_last_used.read().contains_key("a_service"),
+        "宿主在飞期间空闲成员不得软卸载（卸载即拆散停泊等待的响应路由）"
+    );
+    assert_eq!(
+        invoker.spawned_members.read().get(&host_key).cloned(),
+        Some(vec!["a_service".to_string(), "b_service".to_string()]),
+        "成员集不得收缩（服务面保持双成员）"
+    );
+    assert!(
+        !invoker.light_host_members_drifted(&host_key),
+        "分配表 = 快照：不得制造待重加入漂移"
+    );
+    let tools = shared.read().await.list_tools().await.expect("tools/list");
+    let tools_str = serde_json::to_string(&tools).unwrap();
+    assert!(
+        tools_str.contains("a_service.probe"),
+        "被保护成员服务面必须完整: {tools_str}"
+    );
+
+    // 宿主排空：下一轮 GC 照常软卸载（门是延后不是禁止）
+    drop(parked);
+    assert_eq!(
+        invoker.host_inflight(&host_key),
+        0,
+        "前置：guard 释放计数归零"
+    );
+    invoker.run_idle_gc_pass().await;
+
+    assert!(
+        !invoker.member_last_used.read().contains_key("a_service"),
+        "宿主排空后空闲成员应被正常软卸载"
+    );
+    assert_eq!(
+        invoker.spawned_members.read().get(&host_key).cloned(),
+        Some(vec!["b_service".to_string()]),
+        "排空后成员集按既有语义收缩"
+    );
+    invoker.shutdown_all().await;
+}
+
+#[tokio::test]
 async fn test_reload_member_failure_branches_keep_fingerprint_stale() {
     // 失败两路（真进程应答）：宿主未注册 reload 请求 → 协议错误；宿主应答
     // 缺 reloaded=true → 判失败。两者都必须 Err（watcher 回退整组驱逐），且
@@ -4309,10 +5004,13 @@ async fn test_resolve_group_host_command_contract() {
     assert_eq!(err.code.as_deref(), Some("HOST_DIR_NOT_FOUND"));
 
     // fail-closed：_host 存在但共享 venv 缺失 → HOST_VENV_MISSING
+    // （用户根钉空目录：登记处 _host 兜底缺席的判定与机器环境无关）
     let bare_host = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(bare_host.path().join("_host")).unwrap();
     let bare_member = bare_host.path().join("m");
     std::fs::create_dir_all(&bare_member).unwrap();
+    let empty_user = tempfile::tempdir().unwrap();
+    let _guard = UserRootGuard::pin_to(empty_user.path());
     let loader3 = Arc::new(MockLoader::new());
     loader3
         .plugin_dirs
@@ -4323,6 +5021,40 @@ async fn test_resolve_group_host_command_contract() {
         .resolve_group_host_command("light", 1, &["m".to_string()], None)
         .expect_err("共享 venv 缺失必须 fail-closed");
     assert_eq!(err3.code.as_deref(), Some("HOST_VENV_MISSING"));
+}
+
+#[test]
+fn test_resolve_group_host_command_falls_back_to_user_space_venv() {
+    // 解析序②（共享宿主侧）：宿主目录 .venv 缺席（装机态）+ 登记处
+    // plugin-venvs/_host 有共享解释器 → 解释器取登记处，工作目录仍 = 宿主
+    // 目录（host.py 在包内是种子，venv 是派生数据——两者落点解耦）。
+    let tmp = tempfile::tempdir().unwrap();
+    let host_dir = tmp.path().join("_host");
+    std::fs::create_dir_all(&host_dir).unwrap();
+    std::fs::write(host_dir.join("host.py"), b"# host stub").unwrap();
+    let member_dir = tmp.path().join("pipeline").join("input").join("guard_a");
+    std::fs::create_dir_all(&member_dir).unwrap();
+
+    let user_root = tempfile::tempdir().unwrap();
+    let _guard = UserRootGuard::pin_to(user_root.path());
+    let registered = fake_registered_venv(user_root.path(), GROUP_HOST_DIR);
+
+    let loader = Arc::new(MockLoader::new());
+    loader.plugin_dirs.write().insert(
+        "a_guard".to_string(),
+        member_dir.to_string_lossy().into_owned(),
+    );
+    let invoker = PluginInvokerImpl::new(loader);
+
+    let (cmd, _args, workdir) = invoker
+        .resolve_group_host_command("light", 1, &["a_guard".to_string()], None)
+        .expect("登记处共享解释器必须被命中");
+    assert_eq!(cmd, registered.to_string_lossy().into_owned());
+    assert_eq!(
+        workdir,
+        host_dir.to_string_lossy().into_owned(),
+        "工作目录不变：host.py 仍在宿主目录（种子），仅解释器来自用户空间"
+    );
 }
 
 #[test]
@@ -4501,7 +5233,7 @@ async fn test_member_idle_thresholds_are_per_member() {
 
 #[test]
 fn test_light_host_max_members_env_and_default() {
-    // 上限配置（§4.5）：默认 6；AGENTOS_LIGHT_HOST_MAX_MEMBERS 覆盖；无效值回退。
+    // 上限配置（§4.5）：默认取 LIGHT_HOST_DEFAULT_MAX_MEMBERS；AGENTOS_LIGHT_HOST_MAX_MEMBERS 覆盖；无效值回退。
     // 仅本测试触碰该环境变量（其他测试全部走 assign_light_host_with 注入），无并发污染。
     std::env::set_var("AGENTOS_LIGHT_HOST_MAX_MEMBERS", "3");
     assert_eq!(light_host_max_members(), 3);
@@ -4730,8 +5462,11 @@ async fn preassign_host_key_batches_light_packing_before_spawn() {
     let loader = Arc::new(MockLoader::new());
     let invoker = PluginInvokerImpl::new(loader);
 
-    // 7 个 light 成员批量预分配（上限走默认 6）：前 6 填满 slot 1，第 7 溢出 slot 2
-    let members: Vec<_> = (0..7)
+    // 批量预分配按当前生效上限（默认或 AGENTOS_LIGHT_HOST_MAX_MEMBERS）定型装箱：
+    // 前 cap 个填满 slot 1，第 cap+1 个溢出 slot 2。容量从生产同源函数推导，
+    // 不锚字面量（默认随合宿扩容批次调整，6→10 漏改本测试即红）。
+    let cap = light_host_max_members();
+    let members: Vec<_> = (0..cap + 1)
         .map(|i| make_light_manifest(&format!("m{i}"), "python server.py"))
         .collect();
     for m in &members {
@@ -4749,8 +5484,8 @@ async fn preassign_host_key_batches_light_packing_before_spawn() {
         .filter(|hk| hk.as_str() == "group:light:2")
         .count();
     assert_eq!(
-        slot1, 6,
-        "预分配定型：slot 1 装满 6 成员（非边 spawn 边分配的单成员）"
+        slot1, cap,
+        "预分配定型：slot 1 装满 cap 成员（非边 spawn 边分配的单成员）"
     );
     assert_eq!(slot2, 1, "溢出成员开 slot 2");
     drop(assignments);
@@ -4761,7 +5496,7 @@ async fn preassign_host_key_batches_light_packing_before_spawn() {
     }
     assert_eq!(
         invoker.host_members("group:light:1").len(),
-        6,
+        cap,
         "重复预分配不改分配表"
     );
 
@@ -5738,6 +6473,17 @@ fn sweep_freeze_dump_dir_noop_under_limit_or_missing_dir() {
 /// content 信封，`content[0].text` = `tools_call_text`（业务载荷由用例决定）。
 /// 返回监听 url（127.0.0.1 随机端口，listener 随 task 结束关闭）。
 async fn spawn_mock_http_mcp(tools_call_text: String, tools_call_delay: Duration) -> String {
+    spawn_mock_http_mcp_with_capture(tools_call_text, tools_call_delay, None).await
+}
+
+/// [`spawn_mock_http_mcp`] 的捕获变体：`capture` 提供时，每条 tools/call 请求
+/// 的 params（name+arguments）追加进 sink——出站参数组装（每调用 config 注入）
+/// 的端到端断言用。
+async fn spawn_mock_http_mcp_with_capture(
+    tools_call_text: String,
+    tools_call_delay: Duration,
+    capture: Option<Arc<tokio::sync::Mutex<Vec<Value>>>>,
+) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     fn subseq(hay: &[u8], needle: &[u8]) -> Option<usize> {
         hay.windows(needle.len()).position(|w| w == needle)
@@ -5769,6 +6515,7 @@ async fn spawn_mock_http_mcp(tools_call_text: String, tools_call_delay: Duration
             let tools_payload = tools_payload.clone();
             let generic_payload = generic_payload.clone();
             let init_payload = init_payload.clone();
+            let capture = capture.clone();
             tokio::spawn(async move {
                 // 帧缓冲跨读保留：rmcp 并发发多请求，多帧可能挤进同一次 TCP
                 // 读——必须按 Content-Length 逐帧切分（处理完的帧 drain 掉，
@@ -5824,6 +6571,11 @@ async fn spawn_mock_http_mcp(tools_call_text: String, tools_call_delay: Duration
                             // 规范握手：协议版本 + 能力 + serverInfo（id 回显）
                             "initialize" => init_payload.clone(),
                             "tools/call" => {
+                                if let Some(sink) = &capture {
+                                    sink.lock()
+                                        .await
+                                        .push(body.get("params").cloned().unwrap_or(Value::Null));
+                                }
                                 tokio::time::sleep(tools_call_delay).await;
                                 tools_payload.clone()
                             }
@@ -5888,6 +6640,109 @@ async fn invoke_tool_sidecar_success_wraps_business_data() {
         0,
         "调用结束后 in-flight 必须归零"
     );
+}
+
+/// 每调用 config 注入的测试清单（内部 sidecar 声明 config_files）：
+/// inline 形态（path 空）真值 = fields.default，注入后 config 命名空间形如
+/// `{mapping.id: {field.name: default}}`。
+fn llm_config_files() -> Vec<ConfigFileMapping> {
+    vec![ConfigFileMapping {
+        id: "llm".to_string(),
+        path: String::new(),
+        label: "LLM 配置".to_string(),
+        target: None,
+        settings: None,
+        fields: vec![EnvConfigField {
+            name: "chat".to_string(),
+            label: "默认模型".to_string(),
+            field_type: "text".to_string(),
+            required: false,
+            description: None,
+            extra: Some(
+                json!({"default": "minimax-m3"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        }],
+    }]
+}
+
+#[tokio::test]
+async fn invoke_tool_sidecar_attaches_per_call_config() {
+    // 工具/服务路径每调用 config 注入（2026-09-28 批次 B 补刀）：内部 sidecar
+    // 的 tools/call 参数必须附带 manifest 命名空间注入配置——SDK 在调用分发
+    // 单点按 arguments["config"] 做配置变更感知，缺失则插件配置冻结在握手
+    // 快照（装机版新模型 no healthy deployments 事故根因）。原入参保留。
+    let captured: Arc<tokio::sync::Mutex<Vec<Value>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let url = spawn_mock_http_mcp_with_capture(
+        r#"{"result":"ok"}"#.to_string(),
+        Duration::from_millis(0),
+        Some(captured.clone()),
+    )
+    .await;
+    let loader = Arc::new(MockLoader::new());
+    let mut m = make_http_manifest("tool_cfg", &url);
+    m.capabilities.tools = vec![p12_tool_cap("biz", None)];
+    m.config_files = llm_config_files();
+    loader.add_manifest(m);
+    let invoker = PluginInvokerImpl::new(loader);
+
+    let r = invoker
+        .invoke_tool("tool_cfg", "biz", &json!({"x": 1}))
+        .await
+        .expect("注入不得影响调用成功");
+    assert!(r.success, "got: {r:?}");
+
+    let calls = captured.lock().await;
+    let args = calls
+        .iter()
+        .find_map(|p| p.get("arguments"))
+        .expect("mock 必须捕获到 tools/call arguments");
+    assert_eq!(args["x"], 1, "原入参键保留");
+    assert_eq!(
+        args["config"]["llm"]["chat"], "minimax-m3",
+        "每调用注入配置必须以 config 键附带（SDK 配置变更感知的输入）"
+    );
+}
+
+#[tokio::test]
+async fn invoke_tool_external_mcp_arguments_carry_no_config() {
+    // 区分度对照：外部 MCP（entry=mcp:external）走 sanitize 分支，不注入
+    // 配置——注入配置含凭证不得出境。
+    let captured: Arc<tokio::sync::Mutex<Vec<Value>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let url = spawn_mock_http_mcp_with_capture(
+        r#"{"result":"ok"}"#.to_string(),
+        Duration::from_millis(0),
+        Some(captured.clone()),
+    )
+    .await;
+    let loader = Arc::new(MockLoader::new());
+    let mut m = make_http_manifest("tool_ext", &url);
+    m.entry = "mcp:external".to_string();
+    m.capabilities.tools = vec![p12_tool_cap("biz", None)];
+    m.config_files = llm_config_files();
+    loader.add_manifest(m);
+    let invoker = PluginInvokerImpl::new(loader);
+
+    let r = invoker
+        .invoke_tool("tool_ext", "biz", &json!({"x": 1}))
+        .await
+        .expect("外部分支不受影响");
+    assert!(r.success, "got: {r:?}");
+
+    let calls = captured.lock().await;
+    let args = calls
+        .iter()
+        .find_map(|p| p.get("arguments"))
+        .expect("mock 必须捕获到 tools/call arguments");
+    assert!(
+        args.get("config").is_none(),
+        "外部 MCP 参数不得携带注入配置，got: {args}"
+    );
+    assert_eq!(args["x"], 1, "业务入参照常透传");
 }
 
 #[tokio::test]
@@ -6492,12 +7347,32 @@ fn make_host_services(
     plugin_id: &str,
     on_blocking_thread: bool,
 ) -> NativeHostServices {
+    make_host_services_with(
+        router,
+        plugin_id,
+        on_blocking_thread,
+        None,
+        Duration::from_secs(5),
+    )
+}
+
+/// 带等待界/慢阈注入的 NativeHostServices 构造（时序分支测试短阈注入面）。
+fn make_host_services_with(
+    router: Arc<dyn CapabilityRouter>,
+    plugin_id: &str,
+    on_blocking_thread: bool,
+    timeout_override_ms: Option<u64>,
+    slow_call_warn_after: Duration,
+) -> NativeHostServices {
     NativeHostServices {
         router,
         plugin_id: plugin_id.to_string(),
         on_blocking_thread,
         response_buf: std::cell::UnsafeCell::new(String::with_capacity(4096)),
         err_buf: std::cell::UnsafeCell::new(String::with_capacity(256)),
+        loader: Arc::new(MockLoader::new()),
+        bridge_timeout_override_ms: timeout_override_ms,
+        slow_call_warn_after,
     }
 }
 
@@ -6603,6 +7478,284 @@ async fn native_host_services_blocking_thread_bridge_delivers_calls() {
     out.expect("blocking 线程桥接应成功");
     assert_eq!(got[0].2["_plugin_id"], "native_blk");
     assert_eq!(got[0].2["cmd"], "echo", "原参数保留");
+}
+
+// ── 原生反调桥有界等待（ADR 2026-09-28-native-callback-bridge-bounded）──
+
+/// 永不完成的 router（桥面等待界路径用）：future 永挂——模拟目标 capability
+/// 挂死（装机 R297 实测：第二次反调 tool-executor.invoke 永不返回）。
+struct HungRouter;
+#[async_trait]
+impl CapabilityRouter for HungRouter {
+    async fn handle(&self, _c: &str, _m: &str, _p: Value) -> Result<Value, McpError> {
+        std::future::pending::<Result<Value, McpError>>().await
+    }
+}
+
+/// 延迟应答 router（慢调用分支用）：延迟由测试注入（非零可调，非真等长界）。
+struct DelayedRouter {
+    delay: Duration,
+}
+#[async_trait]
+impl CapabilityRouter for DelayedRouter {
+    async fn handle(&self, _c: &str, _m: &str, _p: Value) -> Result<Value, McpError> {
+        tokio::time::sleep(self.delay).await;
+        Ok(json!({"status": "slow-ok"}))
+    }
+}
+
+/// 全局事件捕获缓冲（进程一次安装）：桥面 warn 断言经唯一 marker 过滤共享
+/// 缓冲。tracing 的 callsite interest 缓存按**全局** default 计算一次——并行
+/// 测试下无订阅者线程先触达同一 warn 调用点会把 never 缓存进进程，
+/// `with_default` 局部订阅者拦不住（全量并行实证），故走全局捕获 + marker 过滤。
+fn captured_events() -> &'static Arc<std::sync::Mutex<Vec<String>>> {
+    static BUF: std::sync::OnceLock<Arc<std::sync::Mutex<Vec<String>>>> =
+        std::sync::OnceLock::new();
+    BUF.get_or_init(|| {
+        let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _ = tracing::subscriber::set_global_default(CaptureSubscriber {
+            events: Arc::clone(&buf),
+        });
+        buf
+    })
+}
+
+/// 共享缓冲捕获订阅者（测试进程全局 default，一次安装）：事件全字段拍平成
+/// `[LEVEL] field=value` 行，不注入控制台输出。
+struct CaptureSubscriber {
+    events: Arc<std::sync::Mutex<Vec<String>>>,
+}
+struct FieldFlattener(String);
+impl tracing::field::Visit for FieldFlattener {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write as _;
+        let _ = write!(self.0, "{}={:?} ", field.name(), value);
+    }
+}
+impl tracing::Subscriber for CaptureSubscriber {
+    fn register_callsite(
+        &self,
+        _metadata: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::always()
+    }
+    fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::Id {
+        tracing::Id::from_u64(1)
+    }
+    fn record(&self, _span: &tracing::Id, _values: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _span: &tracing::Id, _follows: &tracing::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut flat = FieldFlattener(format!("[{}] ", event.metadata().level()));
+        event.record(&mut flat);
+        self.events.lock().unwrap().push(flat.0);
+    }
+    fn enter(&self, _span: &tracing::Id) {}
+    fn exit(&self, _span: &tracing::Id) {}
+}
+
+/// 统计共享缓冲中命中 marker 的 warn 事件数（桥面慢告警断言面）。
+fn count_warn_events(marker: &str) -> usize {
+    captured_events()
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.starts_with("[WARN]") && e.contains(marker))
+        .count()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_bridge_hung_capability_returns_bounded_structured_error() {
+    // 有界路径：router 永挂 + 短超时注入（禁真等长延迟）→ 到点放弃内层
+    // future，结构化错误回传（含 capability/method/等待时长）。
+    use agentos_native_sdk::HostServices as _;
+    // 先安装全局捕获（本测试也发射 warn，callsite interest 须在发射前注册）。
+    let _ = captured_events();
+    let svc = make_host_services_with(
+        Arc::new(HungRouter),
+        "native_hang",
+        false,
+        Some(100),
+        Duration::from_millis(20),
+    );
+    let started = std::time::Instant::now();
+    let err = svc
+        .call_capability("tool-executor", "invoke", r#"{"tool_name":"hung_tool"}"#)
+        .expect_err("挂死 capability 必须有界返回错误而非静默驻留");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "有界返回不应真等长延迟（实际 {elapsed:?}）"
+    );
+    assert!(
+        err.contains("capability tool-executor.invoke"),
+        "错误应含 capability/method: {err}"
+    );
+    assert!(err.contains("timed out"), "错误应表明等待界到点: {err}");
+    // 等待时长口径：消息中的毫秒数 = 实际等待，≥ 注入界量级（≥100ms 量级）
+    let waited_ms: u64 = err
+        .rsplit("after ")
+        .next()
+        .and_then(|tail| tail.split("ms").next())
+        .and_then(|num| num.parse().ok())
+        .expect("错误应含机器可读的等待毫秒数");
+    assert!(
+        (100..=120_000).contains(&waited_ms),
+        "等待毫秒数应落在注入界量级（{waited_ms}ms）"
+    );
+
+    // 界 ≤ 慢阈形态：第一段即吃满总界，无第二段（total<=first 早出分支）。
+    // 生产对齐场景：被调工具声明 timeout_ms < 5s 时挂死——先慢告警再即到点。
+    let svc2 = make_host_services_with(
+        Arc::new(HungRouter),
+        "native_hang2",
+        false,
+        Some(50),
+        NATIVE_BRIDGE_SLOW_CALL_WARN_AFTER,
+    );
+    let err2 = svc2
+        .call_capability("tool-executor", "invoke", r#"{"tool_name":"hung_tool2"}"#)
+        .expect_err("界 ≤ 慢阈时同样必须有界返回");
+    assert!(
+        err2.contains("capability tool-executor.invoke") && err2.contains("timed out"),
+        "结构化错误契约不变: {err2}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_bridge_slow_call_emits_warn_once_then_transparent_result() {
+    // 慢调用 warn 触发分支：延迟(500ms) ≫ 慢阈(20ms) ≪ 总界(30s)——
+    // 恰好一次 warn，结果仍原样透传（有界不改变正常语义）。
+    use agentos_native_sdk::HostServices as _;
+    // 先安装全局捕获（callsite interest 按全局 default 注册一次，必须先装）。
+    let _ = captured_events();
+    // capability 串即本测试唯一 marker（全局捕获缓冲并行共享，按 marker 过滤）。
+    let marker = "native_bridge_slow_probe_capability";
+    let svc = make_host_services_with(
+        Arc::new(DelayedRouter {
+            delay: Duration::from_millis(500),
+        }),
+        "native_slow",
+        false,
+        Some(30_000),
+        Duration::from_millis(20),
+    );
+    let out = svc
+        .call_capability(marker, "invoke", r#"{"tool_name":"slow_tool"}"#)
+        .map(str::to_string)
+        .map_err(str::to_string)
+        .expect("总界内应答，调用应成功");
+    assert!(out.contains("slow-ok"), "结果应原样透传: {out}");
+    assert_eq!(
+        count_warn_events(marker),
+        1,
+        "慢调用应恰好发一次 warn（含 marker capability）"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_bridge_fast_call_emits_no_slow_warn_and_passes_through() {
+    // 未触发分支：立即应答 + 生产慢阈（5s，远大于任何调度抖动）→ 零 warn，
+    // 桥透明（结果原样）。兼作有界包装后的正常路径回归。
+    use agentos_native_sdk::HostServices as _;
+    // 先安装全局捕获（callsite interest 按全局 default 注册一次，必须先装）。
+    let _ = captured_events();
+    // capability 串即本测试唯一 marker（全局捕获缓冲并行共享，按 marker 过滤）。
+    let marker = "native_bridge_fast_probe_capability";
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let svc = make_host_services_with(
+        Arc::new(RecordRouter {
+            calls: calls.clone(),
+        }),
+        "native_fast",
+        false,
+        None,
+        NATIVE_BRIDGE_SLOW_CALL_WARN_AFTER,
+    );
+    let out = svc
+        .call_capability(marker, "invoke", r#"{"tool_name":"fast_tool"}"#)
+        .map(str::to_string)
+        .map_err(str::to_string)
+        .expect("立即应答应成功");
+    assert_eq!(out, r#"{"ok":true}"#, "router 立即应答时桥透明（结果原样）");
+    assert_eq!(count_warn_events(marker), 0, "快调用不应发慢调用 warn");
+    let got = calls.lock().unwrap().clone();
+    assert_eq!(got.len(), 1, "调用应到达 router");
+}
+
+#[test]
+fn bridge_timeout_ms_declared_wins_else_kernel_default() {
+    // 等待界解析序：工具声明 timeout_ms > 插件级 request_timeout_secs >
+    // 内核默认（既有 tool_timeout_ms 序的桥面复用）；豁免哨兵在桥面回落
+    // 默认界（护栏非业务超时）；注册表反查路径/非 tool-executor → 默认界。
+    let loader = MockLoader::new();
+
+    // ① 工具声明 timeout_ms 优先
+    let mut m1 = make_sidecar_manifest("callee_t1", "python server.py");
+    m1.capabilities.tools = vec![p12_tool_cap("long_tool", Some(12_345))];
+    loader.add_manifest(m1);
+    let p1 = json!({"tool_name": "long_tool", "plugin_id": "callee_t1", "args": {}});
+    assert_eq!(
+        bridge_timeout_ms(&loader, "tool-executor", "invoke", &p1),
+        12_345,
+        "被调工具声明 timeout_ms 应优先"
+    );
+
+    // ② 未声明工具级 → 插件级 request_timeout_secs 兜底（既有解析序中位）
+    let mut m2 = make_sidecar_manifest("callee_t2", "python server.py");
+    m2.capabilities.tools = vec![p12_tool_cap("plain_tool", None)];
+    m2.mcp = Some(McpConfig {
+        transport: McpTransport::Stdio,
+        endpoint: None,
+        idle_timeout_secs: 300,
+        protocol_version: "2025-06-18".to_string(),
+        request_timeout_secs: Some(7),
+    });
+    loader.add_manifest(m2);
+    let p2 = json!({"tool_name": "plain_tool", "plugin_id": "callee_t2", "args": {}});
+    assert_eq!(
+        bridge_timeout_ms(&loader, "tool-executor", "invoke", &p2),
+        7_000,
+        "插件级 request_timeout_secs 应按既有解析序兜底"
+    );
+
+    // ③ 豁免哨兵（Some(0)）在桥面回落默认界：桥面界是挂死护栏，
+    //    业务豁免不重开无界驻留
+    let mut m3 = make_sidecar_manifest("callee_t3", "python server.py");
+    m3.capabilities.tools = vec![p12_tool_cap("exempt_tool", Some(0))];
+    loader.add_manifest(m3);
+    let p3 = json!({"tool_name": "exempt_tool", "plugin_id": "callee_t3", "args": {}});
+    assert_eq!(
+        bridge_timeout_ms(&loader, "tool-executor", "invoke", &p3),
+        default_capability_timeout_ms(),
+        "豁免哨兵在桥面回落内核默认界"
+    );
+
+    // ④ 无显式 plugin_id（tool_core 注册表反查路径）→ 桥面同步不可解析 → 默认界
+    let p4 = json!({"tool_name": "long_tool", "args": {}});
+    assert_eq!(
+        bridge_timeout_ms(&loader, "tool-executor", "invoke", &p4),
+        default_capability_timeout_ms(),
+        "注册表反查路径取内核默认界"
+    );
+
+    // ⑤ 显式 plugin_id 但 manifest 不在册（get_manifest None）→ 默认界兜底
+    let p5 = json!({"tool_name": "long_tool", "plugin_id": "callee_absent", "args": {}});
+    assert_eq!(
+        bridge_timeout_ms(&loader, "tool-executor", "invoke", &p5),
+        default_capability_timeout_ms(),
+        "被调方 manifest 不可得取内核默认界"
+    );
+
+    // ⑥ 非 tool-executor capability（event-bus 等）→ 默认界
+    let p6 = json!({"channel": "x"});
+    assert_eq!(
+        bridge_timeout_ms(&loader, "event-bus", "emit", &p6),
+        default_capability_timeout_ms(),
+        "非 tool-executor capability 取内核默认界"
+    );
 }
 
 #[tokio::test]
@@ -7762,4 +8915,276 @@ sys.exit(host.main(["--group", "light", "--slot", "1", "--members", "a_service,b
         "其余成员工具保持可达: {tools_str}"
     );
     invoker.shutdown_all().await;
+}
+
+// ── 批次C 观测面：宿主盒子快照（host_boxes_snapshot） ──────────────────────
+
+#[tokio::test]
+async fn host_boxes_snapshot_empty_invoker_is_empty() {
+    let invoker = PluginInvokerImpl::new(Arc::new(MockLoader::new()));
+    let snap = invoker.host_boxes_snapshot().await;
+    assert!(snap.hosts.is_empty());
+    assert!(snap.pending_spawn.is_empty());
+    // 响应契约顶层形状冻结
+    assert_eq!(
+        serde_json::to_value(&snap).unwrap(),
+        json!({"hosts": [], "pending_spawn": []})
+    );
+}
+
+/// 组宿主盒子（待重加入成员/启动窗口/宿主与成员在飞/last_call 取成员最大值）
+/// + 独占盒子（服务面 = 键内嵌插件、无重加入概念）+ pending_spawn 差集含
+/// enabled 两态（loader 已知 / 记账残留）+ serde 序列化字段名冻结。
+#[tokio::test]
+async fn host_boxes_snapshot_group_and_solo_boxes_with_pending_rejoin() {
+    let loader = Arc::new(MockLoader::new());
+    // eager_p：记账可见（启动窗口）且 loader 已知 → pending_spawn enabled=true
+    loader.add_manifest(make_light_manifest("eager_p", "python server.py"));
+    let invoker = PluginInvokerImpl::new(loader);
+
+    // 组宿主：进程缓存 + spawn 记账 + spawn 快照（只含 bash_tool → member_x 待重加入）
+    invoker
+        .mcp_clients
+        .write()
+        .insert("group:light:1".to_string(), unconnected_stdio_client());
+    invoker
+        .host_spawned_at
+        .write()
+        .insert("group:light:1".to_string(), Instant::now());
+    invoker
+        .spawned_members
+        .write()
+        .insert("group:light:1".to_string(), vec!["bash_tool".to_string()]);
+    // 分配表：两成员同挂组宿主
+    invoker
+        .light_packing
+        .write()
+        .assignments
+        .insert("bash_tool".to_string(), "group:light:1".to_string());
+    invoker
+        .light_packing
+        .write()
+        .assignments
+        .insert("member_x".to_string(), "group:light:1".to_string());
+    // 独占宿主：仅进程缓存（独占无 spawned_members 记账面）
+    invoker
+        .mcp_clients
+        .write()
+        .insert("plugin:solo_a".to_string(), unconnected_stdio_client());
+
+    // 调用时钟：member_x 先、bash_tool 后（成员按字典序遍历，后触达者 epoch
+    // 更大 → last_call_at 必须取成员最大值 = bash_tool）
+    invoker.touch_member_last_used("member_x");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    invoker.touch_member_last_used("bash_tool");
+    invoker.touch_member_last_used("ghost");
+    invoker
+        .starting_plugins
+        .write()
+        .insert("bash_tool".to_string());
+    invoker
+        .starting_plugins
+        .write()
+        .insert("eager_p".to_string());
+    invoker
+        .inflight_calls
+        .write()
+        .insert("group:light:1".to_string(), Arc::new(AtomicUsize::new(2)));
+    invoker
+        .member_inflight_calls
+        .write()
+        .insert("bash_tool".to_string(), Arc::new(AtomicUsize::new(2)));
+
+    let snap = invoker.host_boxes_snapshot().await;
+
+    // hosts：组宿主 + 独占宿主，按 host_key 排序
+    assert_eq!(snap.hosts.len(), 2);
+    assert_eq!(snap.hosts[0].host_key, "group:light:1");
+    assert_eq!(snap.hosts[1].host_key, "plugin:solo_a");
+
+    let group = &snap.hosts[0];
+    assert_eq!(group.kind, HostBoxKind::Group);
+    // 未连接 stdio client = 判死（缓存残留语义），无 pid
+    assert!(!group.alive);
+    assert_eq!(group.pid, None);
+    assert_eq!(group.rss_mb, None, "rss 归 api 侧富化，invoker 恒 None");
+    let uptime = group.uptime_secs.expect("有 spawn 记账应有 uptime");
+    assert!(
+        uptime < 3600,
+        "刚 spawn 的宿主 uptime 应为小值，got {uptime}"
+    );
+    assert_eq!(group.spawned_members, vec!["bash_tool".to_string()]);
+    assert_eq!(group.members.len(), 2);
+    let bt = group
+        .members
+        .iter()
+        .find(|m| m.plugin_id == "bash_tool")
+        .unwrap();
+    assert!(!bt.pending_rejoin, "在 spawn 快照内的成员不待重加入");
+    let mx = group
+        .members
+        .iter()
+        .find(|m| m.plugin_id == "member_x")
+        .unwrap();
+    assert!(mx.pending_rejoin, "在分配表但不在快照 = 待重加入");
+    assert_eq!(group.in_flight, 2);
+    // 装箱余量观测面：分配表口径挂载数 + 快照时刻上限（≥ 当前环境覆盖值，
+    // 与装箱判定同源——全满才开新槽位）
+    assert_eq!(group.slot_used, 2, "分配表两成员同挂组宿主");
+    assert!(
+        group.slot_cap >= 2,
+        "组宿主 slot_cap 至少容纳现有挂载，got {}",
+        group.slot_cap
+    );
+    assert_eq!(group.member_in_flight.get("bash_tool"), Some(&2));
+    assert_eq!(group.member_in_flight.len(), 1, "零在飞成员不列");
+    assert!(group.starting);
+    assert_eq!(group.starting_members, vec!["bash_tool".to_string()]);
+    let last_call = group.last_call_at.expect("有调用时钟应有 last_call_at");
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    assert!(
+        last_call > 0.0 && last_call <= now,
+        "last_call_at 应落在 (0, now]，got {last_call}"
+    );
+
+    let solo = &snap.hosts[1];
+    assert_eq!(solo.kind, HostBoxKind::Solo);
+    assert_eq!(
+        solo.spawned_members,
+        vec!["solo_a".to_string()],
+        "独占无快照记账，服务面 = 键内嵌插件"
+    );
+    assert_eq!(solo.members.len(), 1);
+    assert_eq!(
+        (solo.slot_used, solo.slot_cap),
+        (1, 1),
+        "独占宿主结构性单成员，1/1"
+    );
+    assert!(!solo.members[0].pending_rejoin, "独占成员无重加入概念");
+    assert_eq!(solo.in_flight, 0);
+    assert!(solo.member_in_flight.is_empty());
+    assert!(!solo.starting);
+    assert_eq!(solo.last_call_at, None, "从未调用 = null");
+    assert_eq!(solo.uptime_secs, None, "无 spawn 记账 = null");
+
+    // pending_spawn：差集 = {eager_p, ghost}，按 plugin_id 排序
+    let ids: Vec<&str> = snap
+        .pending_spawn
+        .iter()
+        .map(|p| p.plugin_id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["eager_p", "ghost"],
+        "bash_tool/member_x 有分配表条目、solo_a 有宿主条目，不入差集"
+    );
+    let eager = &snap.pending_spawn[0];
+    assert!(eager.enabled, "loader 已知（manifest 可解析）= true");
+    assert_eq!(eager.last_call_at, None);
+    let ghost = &snap.pending_spawn[1];
+    assert!(!ghost.enabled, "记账残留（manifest 已不可得）= false");
+    assert!(ghost.last_call_at.is_some());
+
+    // serde 序列化形状冻结（前端逐字消费的字段名；集合断言不依赖键序）
+    let v = serde_json::to_value(&snap).unwrap();
+    let top = v.as_object().unwrap();
+    assert_eq!(top.len(), 2);
+    assert!(top.contains_key("hosts") && top.contains_key("pending_spawn"));
+    let mut box_keys: Vec<&str> = v["hosts"][0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    box_keys.sort_unstable();
+    assert_eq!(
+        box_keys,
+        vec![
+            "alive",
+            "host_key",
+            "in_flight",
+            "kind",
+            "last_call_at",
+            "member_in_flight",
+            "members",
+            "pid",
+            "rss_mb",
+            "slot_cap",
+            "slot_used",
+            "spawned_members",
+            "starting",
+            "starting_members",
+            "uptime_secs",
+        ]
+    );
+    assert_eq!(v["hosts"][0]["kind"], "group");
+    assert_eq!(v["hosts"][1]["kind"], "solo");
+    let mut member_keys: Vec<&str> = v["hosts"][0]["members"][0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    member_keys.sort_unstable();
+    assert_eq!(member_keys, vec!["pending_rejoin", "plugin_id"]);
+    let mut ps_keys: Vec<&str> = v["pending_spawn"][0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    ps_keys.sort_unstable();
+    assert_eq!(ps_keys, vec!["enabled", "last_call_at", "plugin_id"]);
+
+    // 性质断言（跨盒子不变量，不钉具体夹具值）
+    for h in &snap.hosts {
+        assert_eq!(h.starting, !h.starting_members.is_empty());
+        assert!(
+            h.member_in_flight.values().copied().sum::<u64>() <= h.in_flight,
+            "成员在飞之和不得超过宿主在飞"
+        );
+        if h.kind == HostBoxKind::Group {
+            for m in &h.members {
+                if !m.pending_rejoin {
+                    assert!(
+                        h.spawned_members.contains(&m.plugin_id),
+                        "非待重加入成员必须在 spawn 快照内"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// 组宿主 spawn 快照缺失（异常态）→ 全员按待重加入渲染 + spawned_members 空
+/// （fail-closed 显示，与漂移检测同口径）。
+#[tokio::test]
+async fn host_boxes_snapshot_group_without_spawn_snapshot_renders_all_pending_rejoin() {
+    let invoker = PluginInvokerImpl::new(Arc::new(MockLoader::new()));
+    invoker
+        .mcp_clients
+        .write()
+        .insert("group:light:1".to_string(), unconnected_stdio_client());
+    invoker
+        .light_packing
+        .write()
+        .assignments
+        .insert("m1".to_string(), "group:light:1".to_string());
+    invoker
+        .light_packing
+        .write()
+        .assignments
+        .insert("m2".to_string(), "group:light:1".to_string());
+
+    let snap = invoker.host_boxes_snapshot().await;
+    assert_eq!(snap.hosts.len(), 1);
+    let g = &snap.hosts[0];
+    assert!(g.spawned_members.is_empty(), "组宿主无快照 = 服务面未知");
+    assert!(
+        g.members.iter().all(|m| m.pending_rejoin),
+        "快照缺失按不在处理（fail-closed）"
+    );
 }
