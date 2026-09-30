@@ -31,6 +31,7 @@ LANES: list[tuple[str, str]] = [
     ("frontend-baseline.txt", "前端三键：vitest 失败/eslint 错误/覆盖率%"),
     ("frontend-any-baseline.txt", "前端 any 计数 + >1000 行文件冻结"),
     ("frontend-large-files-baseline.txt", "前端 >1000 行文件冻结清单"),
+    ("ui-color-pair-baseline.txt", "组件级颜色对违例清单（TSX 层级 × 全主题 WCAG<3.0，vitest 棘轮只减不增）"),
     ("knip-jscpd-baseline.txt", "前端死代码/重复率基线（CI 转正待跨平台验证）"),
     ("ruff-plugins-baseline.txt", "插件主体 ruff 违规基线（含 mcp-servers）"),
     ("ruff-scripts-baseline.txt", "scripts/ ruff 违规基线"),
@@ -50,6 +51,10 @@ def _values(path: Path) -> dict[str, str]:
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
+            continue
+        # 行式账本条目（ui-color-pair 的 path|bg=..|fg=.. 违例清单）非键值
+        # 口径——partition("=") 会把它误解析成超宽键值，跳过呈行为清单。
+        if "|" in line:
             continue
         key, _, val = line.partition("=")
         if val:

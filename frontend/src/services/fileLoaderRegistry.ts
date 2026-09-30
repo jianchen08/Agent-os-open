@@ -108,15 +108,9 @@ function matchExt(ext: string, binding?: FileLoaderBinding): LoaderId | null {
   return null
 }
 
-function matchMime(mime: string, binding?: FileLoaderBinding): LoaderId | null {
-  if (binding) {
-    if (binding.mimes?.some((m) => m.toLowerCase() === mime.toLowerCase())) return binding.loader
-    return null
-  }
-  for (const rule of BUILTIN_MIME_RULES) {
-    if (rule.matches(mime)) return rule.loader
-  }
-  return null
+/** 插件绑定 mime 匹配（内置 mime 兜底由 resolveLoader 内联 BUILTIN_MIME_RULES 环持有） */
+function matchPluginMime(mime: string, binding: FileLoaderBinding): LoaderId | null {
+  return binding.mimes?.some((m) => m.toLowerCase() === mime.toLowerCase()) ? binding.loader : null
 }
 
 /** 解析加载器：插件扩展名 → 内置扩展名 → 插件 mime → 内置 mime → null */
@@ -130,7 +124,7 @@ export function resolveLoader(fileName: string, mime?: string): ResolvedLoader |
   if (builtinByExt) return { loader: builtinByExt, source: 'builtin' }
   if (mime) {
     for (const { source, binding } of pluginBindings) {
-      const loader = matchMime(mime, binding)
+      const loader = matchPluginMime(mime, binding)
       if (loader) return { loader, source }
     }
     for (const rule of BUILTIN_MIME_RULES) {

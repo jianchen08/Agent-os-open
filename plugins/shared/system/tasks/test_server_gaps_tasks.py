@@ -91,7 +91,8 @@ def _load_server() -> Any:
     if mod_name in sys.modules:
         del sys.modules[mod_name]
     spec = importlib.util.spec_from_file_location(mod_name, str(_PLUGIN_DIR / "server.py"))
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = module
     spec.loader.exec_module(module)
@@ -150,12 +151,11 @@ class TestOnDomainEvent:
         "params",
         [
             {"event": "session.created"},
-            {"event": "run.started"},
             {},
         ],
     )
     def test_non_run_terminal_events_ignored(self, params: dict) -> None:
-        """非 run 终态事件在能力闸门前返回（冷插件无能力，闸门失效即 KeyError）。"""
+        """非 run.* 事件在能力闸门前返回（冷插件无能力，闸门失效即 KeyError）。"""
         mod = _load_server()
         assert asyncio.run(mod._on_domain_event(params)) is None
 
@@ -164,6 +164,44 @@ class TestOnDomainEvent:
         with caplog.at_level(logging.WARNING):
             assert asyncio.run(mod._on_domain_event({"event": "run.completed"})) is None
         assert any("能力句柄缺席" in r.getMessage() for r in caplog.records)
+
+    def test_run_started_missing_capability_warns_and_skips(self, caplog) -> None:
+        """run.started 复位闸门：能力缺席降级留痕，不抛（冷插件语义同终态派生）。"""
+        mod = _load_server()
+        with caplog.at_level(logging.WARNING):
+            assert (
+                asyncio.run(
+                    mod._on_domain_event({"event": "run.started", "pipeline_id": "p-1"})
+                )
+                is None
+            )
+        assert any("能力句柄缺席" in r.getMessage() for r in caplog.records)
+
+    def test_run_started_resets_stale_terminal_via_state_update(self, monkeypatch) -> None:
+        """新 run 启动 → 历史终态残留复位 running（写聚合投影，不派生终态事件）。"""
+        mod = _load_server()
+        state = _FakeCapHandle(
+            "pipeline-state",
+            results={
+                "list": [
+                    {
+                        "pipeline_id": "p-run-1",
+                        "task.id": "p-run-1",
+                        "task.status": "failed",
+                    }
+                ]
+            },
+        )
+        bus = _FakeCapHandle("event-bus")
+        monkeypatch.setattr(
+            mod.plugin, "get_capability", _fake_capability_lookup({"pipeline-state": state, "event-bus": bus})
+        )
+        asyncio.run(mod._on_domain_event({"event": "run.started", "pipeline_id": "p-run-1"}))
+        assert (
+            "update",
+            {"pipeline_id": "p-run-1", "fields": {"task.status": "running"}},
+        ) in state.calls, "run.started 必须经 pipeline-state.update 复位历史终态"
+        assert bus.calls == [], "run.started 不是终态事件，不派生任务域事件"
 
     def test_run_completed_payload_derives_task_completed(self, monkeypatch) -> None:
         """completed 投影权威：派生 task_completed 发射，且无 task.status 对账写。"""

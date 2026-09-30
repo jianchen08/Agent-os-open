@@ -71,10 +71,12 @@ describe('presenterSourcesFromModes — 声明派生数据源映射', () => {
     expect(presenterSourcesFromModes(undefined)).toEqual({})
   })
 
-  it('modePresenterEndpointOf 逐条声明同源', () => {
-    expect(modePresenterEndpointOf(declOf({ plugin_id: 'm', presenter: { source: 'data_cards' } }))).toBe(
-      '/ext/m/data/cards',
-    )
+  it('modePresenterEndpointOf 逐条声明同源（生成物查表，未声明即 null）', () => {
+    expect(
+      modePresenterEndpointOf(declOf({ plugin_id: 'mode_roleplay', presenter: { source: 'data_cards' } })),
+    ).toBe('/ext/mode_roleplay/data/cards')
+    // 未在 plugin.json 声明 data_cards 端点的插件：无该面（不盲拼 URL 请求死端点）
+    expect(modePresenterEndpointOf(declOf({ plugin_id: 'm', presenter: { source: 'data_cards' } }))).toBeNull()
     expect(modePresenterEndpointOf(declOf({ presenter: { source: 'none' } }))).toBeNull()
   })
 })

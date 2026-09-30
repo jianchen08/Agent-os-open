@@ -13,6 +13,7 @@
  */
 
 import { fetchModesRegistry, type ModeDeclaration } from '@/services/api/modes'
+import { MODE_ROLEPLAY_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { getPresetTheme } from '@/services/themeService'
 import { queryClient } from '@/services/query/queryClient'
 import { queryKeys } from '@/services/query/queryKeys'
@@ -207,7 +208,7 @@ async function openModePipelineIntoSession(
     pipeline_id: string
     thread_id: string
     pipeline_config_id: string
-  }>('/ext/mode_roleplay/pipeline/open', {
+  }>(MODE_ROLEPLAY_ENDPOINTS.pipeline_open, {
     session_id: intoSessionId,
     mode,
     agent_id: ext.agentId,

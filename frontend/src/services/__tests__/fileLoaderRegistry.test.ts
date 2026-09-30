@@ -83,6 +83,24 @@ describe('resolveLoader', () => {
     )
     expect(resolveLoader('f.weird')).toBeNull()
   })
+
+  it('插件 mime 命中：扩展名未知时按声明 mime 归属', () => {
+    registerFileLoaderBindings([{ loader: 'text', mimes: ['application/x-ndjson'] }], 'mime_plugin')
+    expect(resolveLoader('export.data', 'application/x-ndjson')).toEqual({
+      loader: 'text',
+      source: 'mime_plugin',
+    })
+  })
+
+  it('插件 mime 不命中：落回内置 mime 兜底（声明不吞内置面）', () => {
+    registerFileLoaderBindings([{ loader: 'text', mimes: ['application/x-custom'] }], 'mime_plugin')
+    expect(resolveLoader('blobbin', 'application/pdf')).toEqual({ loader: 'pdf', source: 'builtin' })
+  })
+
+  it('插件声明 extensions 不含该扩展名：该绑定不命中，落回内置', () => {
+    registerFileLoaderBindings([{ loader: 'text', extensions: ['.ndjson'] }], 'ext_plugin')
+    expect(resolveLoader('a.png')).toEqual({ loader: 'image', source: 'builtin' })
+  })
 })
 
 describe('openFileWithLoader', () => {

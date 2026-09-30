@@ -197,7 +197,7 @@ export function OnboardingPanel(): ReactNode {
               className={cn(
                 'mb-1 w-full rounded-md px-2 py-2 text-left transition-colors',
                 w.id === active.id
-                  ? 'bg-accent text-foreground'
+                  ? 'bg-accent text-accent-foreground'
                   : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',
               )}
             >
@@ -206,7 +206,7 @@ export function OnboardingPanel(): ReactNode {
                 <span
                   className={cn(
                     'shrink-0 font-mono text-[10px]',
-                    done === all ? 'text-green-600' : 'text-muted-foreground',
+                    done === all ? 'text-green-600' : w.id === active.id ? 'text-accent-foreground/70' : 'text-muted-foreground',
                   )}
                   data-testid={`progress-${w.id}`}
                 >

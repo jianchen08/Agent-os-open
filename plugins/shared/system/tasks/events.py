@@ -34,6 +34,12 @@ logger = logging.getLogger(__name__)
 _TASK_PREFIX = "task."
 _OWNED_PREFIX = "task.owned."
 
+# 用户侧终态（新 run 启动复位豁免）：completed = 用户手动完成（评估通过完成
+# 同值，复活走新建任务）；cancelled/canceled/deleted = 用户侧取消/删除署名。
+# 可重入状态（failed/timeout/stopped/suspended 等）不在豁免列——与
+# state_machine._TASK_TRANSITIONS 一致（completed 无 → running 边）。
+_USER_TERMINAL_STATUSES = frozenset({"completed", "cancelled", "canceled", "deleted"})
+
 
 def is_task_state(row: dict[str, Any]) -> bool:
     """任务管道判据：含 task.* 自身键且不含 task.owned.* 登记键。
@@ -197,6 +203,52 @@ async def _lookup_state_row(
         (r for r in rows if isinstance(r, dict) and str(r.get("pipeline_id") or "") == pipeline_id),
         None,
     )
+
+
+async def handle_run_started_event(params: dict[str, Any], state_capability: Any) -> bool:
+    """新 run 启动 → 任务激活：task.status 复位 running（复活语义单点）。
+
+    复活语义（用户裁定 2026-09-30）：continue/重新执行一个任务后，任务状态
+    必须是 running。task.status 的聚合投影承载上一次运行的终态（failed 等），
+    state 聚合读面（stop_check 判死依据）不随新 run 启动自动刷新——历史
+    终态会把刚启动的新 run 立即判死，故任务激活时在此单点复位。
+
+    写面 = pipeline-state.update（DB pipeline_state 表 + 内存 registry，聚合
+    读面同源）。running 不重复写（幂等省写）；用户侧终态豁免（completed =
+    用户手动完成，cancelled/canceled/deleted = 用户侧取消/删除署名——新 run
+    不推翻用户显式裁决）；chat 会话管道（is_task_state 判据）与读/写面故障
+    均不写不抛——复位失败仅留痕，不阻断 run。
+
+    Returns:
+        是否发生了复位写。
+    """
+    pipeline_id = str(params.get("pipeline_id") or "")
+    if not pipeline_id:
+        return False
+    row = await _lookup_state_row(pipeline_id, state_capability)
+    if row is None or not is_task_state(row):
+        return False
+    status = str(row.get("task.status") or "")
+    if status == "running" or status in _USER_TERMINAL_STATUSES:
+        return False
+    try:
+        await state_capability.call(
+            "update",
+            {"pipeline_id": pipeline_id, "fields": {"task.status": "running"}},
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "[task_service] 新 run 启动复位写失败（不阻断 run）| pipeline=%s | prev=%s",
+            pipeline_id,
+            status,
+        )
+        return False
+    logger.info(
+        "[task_service] 新 run 启动复位任务状态（历史终态残留清除）| pipeline=%s | %s → running",
+        pipeline_id,
+        status,
+    )
+    return True
 
 
 async def handle_run_terminal_event(

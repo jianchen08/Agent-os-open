@@ -135,7 +135,7 @@ const MessageEditor = ({ content, onSave, onCancel, disabled = false }: MessageE
         onChange={handleChange}
         onKeyDown={handleKeyDown}
         disabled={disabled}
-        className="border-input bg-background focus:ring-ring min-h-[100px] w-full resize-none rounded-md border p-3 text-sm focus:ring-2 focus:outline-none"
+        className="border-input bg-background text-foreground focus:ring-ring min-h-[100px] w-full resize-none rounded-md border p-3 text-sm focus:ring-2 focus:outline-none"
         placeholder="编辑消息内容..."
       />
       <div className="flex items-center justify-between">
@@ -209,7 +209,7 @@ function PresenterAvatarBadge({ name, avatar }: { name: string; avatar: Presente
       data-testid="presenter-avatar"
       style={{
         background: emoji ? 'var(--secondary)' : (pair?.bg ?? 'var(--secondary)'),
-        color: emoji ? undefined : pair?.fg,
+        color: emoji ? undefined : (pair?.fg ?? 'var(--secondary-foreground)'),
       }}
     >
       <span className={emoji ? 'text-base leading-none' : 'text-sm font-medium leading-none'}>
@@ -733,7 +733,7 @@ export const MessageItem = memo(function MessageItem({
                                   })
                                 }
                               }}
-                              className="bg-background/60 hover:bg-background flex w-full items-center gap-2 rounded-lg border border-border/30 px-2 py-1.5 text-left text-sm transition-colors"
+                              className="bg-background/60 hover:bg-background text-foreground flex w-full items-center gap-2 rounded-lg border border-border/30 px-2 py-1.5 text-left text-sm transition-colors"
                             >
                               <Icon className="text-muted-foreground h-icon-md w-icon-md shrink-0" />
                               <span className="truncate">{att.name || '文件'}</span>

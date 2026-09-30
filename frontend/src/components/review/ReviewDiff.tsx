@@ -70,7 +70,7 @@ export function ReviewDiff({
         <div className="ml-auto flex items-center gap-1 rounded-md border border-border p-0.5">
           <button
             className={`flex items-center gap-1 rounded px-2 py-0.5 text-xs transition-colors ${
-              mode === 'side-by-side' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'
+              mode === 'side-by-side' ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:text-foreground'
             }`}
             onClick={() => setMode('side-by-side')}
             title="左右对比"
@@ -80,7 +80,7 @@ export function ReviewDiff({
           </button>
           <button
             className={`flex items-center gap-1 rounded px-2 py-0.5 text-xs transition-colors ${
-              mode === 'unified' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'
+              mode === 'unified' ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:text-foreground'
             }`}
             onClick={() => setMode('unified')}
             title="统一视图"

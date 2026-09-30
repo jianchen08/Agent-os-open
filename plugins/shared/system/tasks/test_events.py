@@ -12,6 +12,7 @@ import asyncio
 from typing import Any, cast
 
 import events
+import pytest
 
 
 def _task_row(status: str = "completed", **extra: Any) -> dict:
@@ -470,3 +471,124 @@ def test_handle_root_task_terminal_writes_no_registration():
     )
     assert emitted == 1
     assert state_cap.updates == []
+
+
+# ── 新 run 启动复位（continue/重新执行复活：历史终态残留复位 running）──
+
+
+def test_run_started_resets_failed_to_running():
+    """核心复现（真机实证 2026-09-30）：failed 任务的新 run 启动 → 复位 running。
+
+    failed 任务被自己的历史终态锁死：重新执行后 stop_check 聚合读面读到
+    残留 failed 判死新 run（三次重试三次秒死）。复位必须走 pipeline-state
+    .update（DB + registry 写面 = 聚合读面同源），且不得派生终态事件。
+    """
+    cap = _RecordingStateCap([_task_row("failed")])
+    bus = _FakeBusCap()
+    reset = asyncio.run(
+        events.handle_run_started_event({"pipeline_id": "pipe_t1"}, cap)
+    )
+    assert reset is True
+    assert cap.updates == [
+        {"pipeline_id": "pipe_t1", "fields": {"task.status": "running"}}
+    ]
+    assert bus.calls == [], "run.started 复位不得派生任务域终态事件"
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["timeout", "stopped", "suspended", "pending", "pending_evaluation", "evaluating"],
+)
+def test_run_started_resets_reactivatable_statuses(status: str):
+    """可重入状态（含历史别名/未决态）同样复位——新 run 启动即任务激活。"""
+    cap = _RecordingStateCap([_task_row(status)])
+    reset = asyncio.run(
+        events.handle_run_started_event({"pipeline_id": "pipe_t1"}, cap)
+    )
+    assert reset is True, f"task.status={status!r} 应复位 running"
+    assert cap.updates == [
+        {"pipeline_id": "pipe_t1", "fields": {"task.status": "running"}}
+    ]
+
+
+@pytest.mark.parametrize("status", ["completed", "cancelled", "canceled", "deleted"])
+def test_run_started_exempts_user_side_terminal(status: str):
+    """用户侧终态豁免（现状契约）：completed = 用户手动完成；cancelled/
+    canceled/deleted = 用户侧取消/删除署名——新 run 不得推翻用户显式裁决
+    （与 _TASK_TRANSITIONS 一致：completed 无 → running 边）。"""
+    cap = _RecordingStateCap([_task_row(status)])
+    reset = asyncio.run(
+        events.handle_run_started_event({"pipeline_id": "pipe_t1"}, cap)
+    )
+    assert reset is False, f"task.status={status!r} 不得被复位"
+    assert cap.updates == []
+
+
+def test_run_started_noop_when_already_running():
+    """running 不重复写（幂等省写：常规续跑轮零写放大）。"""
+    cap = _RecordingStateCap([_task_row("running")])
+    reset = asyncio.run(
+        events.handle_run_started_event({"pipeline_id": "pipe_t1"}, cap)
+    )
+    assert reset is False
+    assert cap.updates == []
+
+
+def test_run_started_non_task_pipeline_noop():
+    """chat 会话管道（无 task.* 自身键）不复位——复位只作用于任务管道。"""
+    cap = _RecordingStateCap([{"pipeline_id": "chat_main", "messages": []}])
+    reset = asyncio.run(
+        events.handle_run_started_event({"pipeline_id": "chat_main"}, cap)
+    )
+    assert reset is False
+    assert cap.updates == []
+
+
+def test_run_started_missing_pipeline_id_never_touches_capability():
+    """缺 pipeline_id（事件标签异常）：不动能力面（读也不该有）。"""
+
+    class _AnyCallFails:
+        async def call(self, method: str, params: dict) -> None:
+            raise AssertionError(f"缺 pipeline_id 不得触达能力面（收到 {method}）")
+
+    assert (
+        asyncio.run(events.handle_run_started_event({"event": "run.started"}, _AnyCallFails()))
+        is False
+    )
+    assert asyncio.run(events.handle_run_started_event({}, _AnyCallFails())) is False
+
+
+def test_run_started_row_not_found_noop():
+    """聚合行不存在（冷管道/坐标错）：不写。"""
+    cap = _RecordingStateCap([])
+    assert (
+        asyncio.run(
+            events.handle_run_started_event({"pipeline_id": "ghost"}, cap)
+        )
+        is False
+    )
+    assert cap.updates == []
+
+
+def test_run_started_state_read_failure_does_not_raise():
+    """读面故障：降级为不复位，不裸抛（复位失败不阻断 run）。"""
+
+    class _BoomCap:
+        async def call(self, method: str, params: dict) -> None:
+            raise RuntimeError("state read down")
+
+    assert (
+        asyncio.run(
+            events.handle_run_started_event({"pipeline_id": "pipe_t1"}, _BoomCap())
+        )
+        is False
+    )
+
+
+def test_run_started_write_failure_reports_false_without_raising():
+    """写面故障：返回 False（未复位），异常留日志不外抛。"""
+    cap = _BrokenUpdateStateCap([_task_row("failed")])
+    reset = asyncio.run(
+        events.handle_run_started_event({"pipeline_id": "pipe_t1"}, cap)
+    )
+    assert reset is False

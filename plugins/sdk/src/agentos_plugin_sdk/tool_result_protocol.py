@@ -85,9 +85,7 @@ def serialize_for_content(data: Any) -> str:
     if data is None:
         return ""
     try:
-        dumped = str(
-            yaml.safe_dump(data, default_flow_style=False, allow_unicode=True, sort_keys=True)
-        )
+        dumped = str(yaml.safe_dump(data, default_flow_style=False, allow_unicode=True, sort_keys=True))
     except yaml.YAMLError:
         return str(data)
     if dumped.endswith("...\n"):
@@ -116,6 +114,7 @@ def merge_pre_decided(
     Returns:
         合并后的完整列表（整体写回 ``pre_decided_results``）。
     """
+
     def dedup_key(e: dict[str, Any]) -> str:
         cid = e.get("call_id")
         if cid is not None:
@@ -146,7 +145,7 @@ def build_tool_result_ops(
     Returns:
         ``{"_ops": [{"op": "set", "msg": {role/tool_call_id/content/
         tool_result}}]}``——set 无 seq = 引擎 append；tool_result envelope
-        七键（call_id/tool_name/success/error/data/metadata/duration_ms），
+        七键（call_id、tool_name、success、error、data、metadata、duration_ms），
         形状 = tool_core ``messages::rebuild`` 追加段（契约夹具锚定）。
     """
     if len(tool_calls) != len(results):
@@ -159,11 +158,7 @@ def build_tool_result_ops(
         call_id = entry.get("call_id") or tc.get("id") or f"call_{i}"
         success = bool(entry.get("success", True))
         error = entry.get("error")
-        content = (
-            serialize_for_content(entry.get("data"))
-            if success
-            else f"Error: {error or 'unknown'}"
-        )
+        content = serialize_for_content(entry.get("data")) if success else f"Error: {error or 'unknown'}"
         envelope = {
             "call_id": call_id,
             "tool_name": entry.get("tool_name") or tc.get("name", ""),

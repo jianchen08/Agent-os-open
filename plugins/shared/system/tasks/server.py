@@ -46,12 +46,24 @@ def _get_service() -> TaskService:
 
 @plugin.on_domain_event
 async def _on_domain_event(params: dict) -> None:
-    """任务域事件派生入口：订阅 run 终态，派生 task_completed/task_failed。
+    """任务域事件入口：run.started 复位 + run 终态派生 task_completed/task_failed。
 
     判定与发射语义见 events.py（ADR 2026-08-28 事件下沉——任务域裁决词汇
     归本插件，内核只发 run.*）。
     """
     event_name = str(params.get("event") or "")
+    if event_name == "run.started":
+        # 新 run 启动复位：任务激活时历史终态残留（failed 等）复位 running。
+        # 缺此复位，stop_check 聚合读面会把刚启动的新 run 立即判死（failed
+        # 任务被自己的历史终态锁死，无法重新运行）。复位语义见
+        # events.handle_run_started_event（用户侧终态豁免）。
+        try:
+            state_cap = plugin.get_capability("pipeline-state")
+        except (KeyError, AttributeError):
+            logger.warning("[task_service] 能力句柄缺席，跳过新 run 启动复位")
+            return
+        await task_events.handle_run_started_event(params, state_cap)
+        return
     if event_name not in ("run.completed", "run.failed"):
         return
     try:

@@ -13,6 +13,7 @@
  * 后半正文不可丢）。
  */
 import { useEffect, useState } from 'react'
+import { PIPELINE_STATE_MARKER_PARSE_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { queryClient } from '@/services/query/queryClient'
 import { apiClient } from '@/services/api/client'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
@@ -41,7 +42,7 @@ import { matchStateCardStyleId as _matchStyleId } from '@/services/schema/messag
 
 async function fetchLatestPayload(pipelineId: string): Promise<StateUpdatesPayload | null> {
   const res = await apiClient.get<{ state_updates: StateUpdatesPayload | null }>(
-    `/ext/pipeline_state_marker_parse/latest?pipeline_id=${encodeURIComponent(pipelineId)}`,
+    `${PIPELINE_STATE_MARKER_PARSE_ENDPOINTS.state_marker_latest}?pipeline_id=${encodeURIComponent(pipelineId)}`,
   )
   return res.data.state_updates ?? null
 }

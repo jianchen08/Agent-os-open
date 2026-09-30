@@ -199,7 +199,7 @@
     'mode_research_panel_page': '/ext/mode_research/page/research-panel',
   } as const
 
-  /** mode_roleplay（Mode Roleplay）：plugin.json 声明 18 端点 */
+  /** mode_roleplay（Mode Roleplay）：plugin.json 声明 19 端点 */
   export const MODE_ROLEPLAY_ENDPOINTS = {
     'mode_roleplay_action_play': '/ext/mode_roleplay/data/actions/play',
     'mode_roleplay_action_regenerate': '/ext/mode_roleplay/data/actions/regenerate',
@@ -219,6 +219,7 @@
     'mode_roleplay_persona_save': '/ext/mode_roleplay/data/personas/save',
     'mode_roleplay_data_sessions': '/ext/mode_roleplay/data/sessions',
     'mode_roleplay_panel_page': '/ext/mode_roleplay/page/roleplay-panel',
+    'pipeline_open': '/ext/mode_roleplay/pipeline/open',
   } as const
 
   /** mode_writing（Mode Writing）：plugin.json 声明 8 端点 */
@@ -292,6 +293,11 @@
     'zone_policy_get': '/ext/pipeline_security_check/zones',
     'zone_policy_add': '/ext/pipeline_security_check/zones/add',
     'zone_policy_remove': '/ext/pipeline_security_check/zones/remove',
+  } as const
+
+  /** pipeline_state_marker_parse（State Marker Parse）：plugin.json 声明 1 端点 */
+  export const PIPELINE_STATE_MARKER_PARSE_ENDPOINTS = {
+    'state_marker_latest': '/ext/pipeline_state_marker_parse/latest',
   } as const
 
   /** review_service（Review Service）：plugin.json 声明 9 端点 */
@@ -398,3 +404,8 @@
     'workspaces_open': '/ext/workspace_service/workspaces/{container_task_id}/open',
     'workspaces_rename_entry': '/ext/workspace_service/workspaces/{container_task_id}/rename-entry',
   } as const
+
+  /** 模式包呈现数据端点按插件聚合（路径以 /data/cards 结尾的声明投影，未声明即无此面） */
+  export const MODE_DATA_CARDS_ENDPOINTS: Record<string, string> = {
+    'mode_roleplay': '/ext/mode_roleplay/data/cards',
+  }

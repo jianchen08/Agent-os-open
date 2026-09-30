@@ -332,7 +332,7 @@ export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
                 onClick={() => handleSelectTable(t)}
                 className={`block w-full rounded-md px-3 py-2 text-left text-sm transition-colors ${
                   activeTable === t.name
-                    ? 'bg-accent text-foreground'
+                    ? 'bg-accent text-accent-foreground'
                     : 'text-muted-foreground hover:bg-accent/50'
                 }`}
               >
@@ -539,7 +539,7 @@ export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
               <button
                 onClick={handleRunSql}
                 disabled={isSqlRunning || !sqlInput.trim()}
-                className="bg-accent text-foreground disabled:opacity-40 rounded px-3 py-1 text-xs"
+                className="bg-accent text-accent-foreground disabled:opacity-40 rounded px-3 py-1 text-xs"
               >
                 {isSqlRunning ? '执行中...' : '执行'}
               </button>

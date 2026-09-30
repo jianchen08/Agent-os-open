@@ -71,6 +71,31 @@ def build_export_block(plugin_id: str, plugin_name: str, endpoints: list[dict]) 
     return "\n".join(lines)
 
 
+def build_data_cards_block(plugin_groups: list[tuple[str, str, list[dict]]]) -> str:
+    """模式包呈现数据端点按插件聚合：路径以 /data/cards 结尾的声明投影。
+
+    键 = plugin_id（跨插件唯一），供前端按插件 id 动态查呈现数据端点
+    （modes.ts modePresenterEndpointOf——运行时 /ext/ 字符串拼接退役，
+    手写棘轮闸清零；插件未声明即查无此面，fail-closed）。
+    """
+    entries: list[str] = []
+    for plugin_id, _, endpoints in plugin_groups:
+        hits = [e["path"] for e in endpoints if str(e.get("path", "")).endswith("/data/cards")]
+        if hits:
+            entries.append(f"    '{plugin_id}': '{hits[0]}',")
+    if not entries:
+        return ""
+    return "\n".join(
+        [
+            "",
+            "  /** 模式包呈现数据端点按插件聚合（路径以 /data/cards 结尾的声明投影，未声明即无此面） */",
+            "  export const MODE_DATA_CARDS_ENDPOINTS: Record<string, string> = {",
+            *entries,
+            "  }",
+        ]
+    )
+
+
 def render_ts(plugin_groups: list[tuple[str, str, list[dict]]]) -> str:
     header = """/**
  * 生成物：插件 http_endpoints 声明的投影 —— 勿手改！
@@ -88,6 +113,7 @@ def render_ts(plugin_groups: list[tuple[str, str, list[dict]]]) -> str:
     blocks = [header]
     for plugin_id, plugin_name, endpoints in plugin_groups:
         blocks.append(build_export_block(plugin_id, plugin_name, endpoints))
+    blocks.append(build_data_cards_block(plugin_groups))
     blocks.append("")
     return "\n".join(blocks)
 
@@ -118,10 +144,7 @@ def main() -> int:
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(text, encoding="utf-8")
-    print(
-        f"[gen-endpoints] 已生成 {output}：{len(groups)} 个插件 / {total} 个端点"
-
-    )
+    print(f"[gen-endpoints] 已生成 {output}：{len(groups)} 个插件 / {total} 个端点")
     return 0
 
 

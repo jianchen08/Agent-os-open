@@ -7,6 +7,7 @@
  */
 
 import { useQuery } from '@tanstack/react-query'
+import { AGENT_MANAGER_ENDPOINTS, MODE_DATA_CARDS_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { apiClient } from '@/services/api/client'
 import { queryKeys } from '@/services/query/queryKeys'
 
@@ -55,10 +56,10 @@ export interface ModesRegistryResponse {
   errors: string[]
 }
 
-/** 声明 → 呈现数据端点；source 非 data_cards 无插件数据端点，返回 null */
+/** 声明 → 呈现数据端点；source 非 data_cards 或插件未声明该端点 = 无数据面，返回 null */
 export function modePresenterEndpointOf(decl: ModeDeclaration): string | null {
   if (decl.presenter.source !== 'data_cards') return null
-  return `/ext/${decl.plugin_id}/data/cards`
+  return MODE_DATA_CARDS_ENDPOINTS[decl.plugin_id] ?? null
 }
 
 /** registry 响应 → {模式包前缀 → 呈现数据端点}（呈现档案数据源映射，声明派生） */
@@ -106,7 +107,7 @@ const MODES_STALE_TIME = 5 * 60_000
 
 /** registry 拉取（hook 与非组件方 fetchQuery 共用同一 queryFn） */
 export async function fetchModesRegistry(): Promise<ModesRegistryResponse> {
-  const res = await apiClient.get<ModesRegistryResponse>('/ext/agent_manager/modes')
+  const res = await apiClient.get<ModesRegistryResponse>(AGENT_MANAGER_ENDPOINTS.agent_manager_modes)
   return res.data
 }
 
