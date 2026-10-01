@@ -8,7 +8,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { WS_SERVER_EVENTS } from '@/constants/websocket'
+import { RECONNECT_DEGRADE_ATTEMPTS, WS_SERVER_EVENTS } from '@/constants/websocket'
 import { useBudgetStatus } from '@/hooks/useCostControl'
 import { cn } from '@/lib/utils'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
@@ -24,6 +24,8 @@ export interface AlertBannerItem {
   tone?: 'error' | 'warning' | 'info'
   /** 点击横幅时的动作文案（如「查看监控」） */
   actionLabel?: string
+  /** 点击横幅执行的动作（上层 onAction 据此分发；缺省按 kind 走面板跳转） */
+  action?: 'open-monitoring' | 'reconnect'
 }
 
 /** 异常解除后横幅保留时长（提示"已恢复"再消失） */
@@ -176,7 +178,9 @@ function deriveBudgetAlert(status: BudgetStatusResponse | null): AlertBannerItem
 
 /**
  * 从 layoutModeStore + cost_control 派生系统告警：
- * - connection：断开/失败（重连中不打扰）
+ * - connection：断开/失败；重连中显示「正在重连（第 N 次）」动态进度，
+ *   连续失败达 RECONNECT_DEGRADE_ATTEMPTS 降级为「多次重连失败 + 立即重连」
+ *   （自动重连不停止，一键重连是唯一用户干预形态）
  * - approval：审批待处理
  * - budget：预算超限（真源 cost_control 插件 budget/status 的
  *   alert_level；monitoring 插件 token 累计恒 0 不可用——勿接错源）
@@ -203,7 +207,26 @@ export function useLayoutAlerts(): AlertBannerItem[] {
 
   return useMemo(() => {
     const items: AlertBannerItem[] = []
-    if (connectionStatus.state === 'disconnected' || connectionStatus.state === 'failed') {
+    if (connectionStatus.state === 'reconnecting') {
+      const attempt = connectionStatus.reconnectAttempt
+      if (attempt >= RECONNECT_DEGRADE_ATTEMPTS) {
+        items.push({
+          id: 'connection',
+          kind: 'connection',
+          tone: 'error',
+          message: `多次重连失败（已尝试 ${attempt} 次），自动重连仍在继续`,
+          actionLabel: '立即重连',
+          action: 'reconnect',
+        })
+      } else {
+        items.push({
+          id: 'connection',
+          kind: 'connection',
+          tone: 'warning',
+          message: `连接断开，正在重连（第 ${attempt} 次）…`,
+        })
+      }
+    } else if (connectionStatus.state === 'disconnected' || connectionStatus.state === 'failed') {
       items.push({
         id: 'connection',
         kind: 'connection',
@@ -213,6 +236,7 @@ export function useLayoutAlerts(): AlertBannerItem[] {
             ? '内核连接失败，请检查内核是否运行'
             : '内核连接已断开，正在尝试恢复…',
         actionLabel: '查看监控',
+        action: 'open-monitoring',
       })
     }
     if (pendingInteractions.length > 0) {
@@ -227,5 +251,5 @@ export function useLayoutAlerts(): AlertBannerItem[] {
     const budgetAlert = deriveBudgetAlert(budgetStatus)
     if (budgetAlert) items.push(budgetAlert)
     return items
-  }, [connectionStatus.state, pendingInteractions.length, budgetStatus])
+  }, [connectionStatus.state, connectionStatus.reconnectAttempt, pendingInteractions.length, budgetStatus])
 }

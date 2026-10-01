@@ -519,3 +519,17 @@ class TestSensitiveFileNameNormalization:
     def test_normal_files_unaffected(self, tmp_path: Path) -> None:
         assert fs_tools._sensitive_file_reason(tmp_path / "readme.md") is None
         assert fs_tools._sensitive_file_reason(tmp_path / "environment") is None
+
+
+    async def test_mixed_mount_path_read_normalized(self, tmp_path: Path) -> None:
+        r"""WSL 挂载混入形态（`<X>:\mnt\<d>\...`）读归一到真实路径（事故 2026-09-30）。"""
+        ws = tmp_path / "ws"
+        (ws / "docs").mkdir(parents=True)
+        (ws / "docs" / "note.md").write_text("hello", encoding="utf-8")
+        drive = tmp_path.drive[0]
+        dirty = rf"{tmp_path.drive}\mnt\{drive}\{str(ws / 'docs' / 'note.md')[3:]}"
+
+        result = await file_read(path=dirty, workspace=str(ws))
+
+        assert result.success is True
+        assert "hello" in str(result.output.get("content", ""))

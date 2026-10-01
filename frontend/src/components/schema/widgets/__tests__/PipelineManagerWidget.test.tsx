@@ -845,6 +845,80 @@ describe('PipelineManagerWidget', () => {
     })
   })
 
+  it('项目行工作空间入口带裸登记 id 开工作区页（key 的 project- 前缀不得进数据源）', async () => {
+    // 缺陷①回归锚（用户实报 2026-10-01）：项目条目无 taskId/pipelineId，wsId
+    // 曾落 entry.key=project-<id>——后端项目登记通道按裸 id 查不中，工作区页
+    // 永远 no_workspace，文件树空还报「任务树加载失败」
+    seedProjectQueries({ id: 'proj-ws-a', goal: '工作区项目A', metadata: { path: 'D:/repos/a' } })
+
+    renderPanelAllStatuses(<PipelineManagerWidget />)
+    const btns = await screen.findAllByTitle('打开工作空间: D:/repos/a')
+    fireEvent.click(btns[0])
+
+    const tabs = useLayoutModeStore.getState().workspaceTabs
+    expect(tabs.some((t) => t.dataSource === 'workspace://proj-ws-a')).toBe(true)
+    expect(tabs.some((t) => t.dataSource === 'workspace://project-proj-ws-a')).toBe(false)
+  })
+
+  it('列表视图项目行工作空间入口同样带裸登记 id', async () => {
+    // 第二组输入（不同视图 + 不同 id）：裸 id 契约在列表视图同构成立
+    seedProjectQueries({ id: 'proj-ws-b', goal: '工作区项目B', metadata: { path: 'D:/repos/b' } })
+
+    renderPanelAllStatuses(<PipelineManagerWidget />)
+    await screen.findByText('工作区项目B')
+    fireEvent.click(screen.getByTitle('列表视图'))
+    fireEvent.click((await screen.findAllByTitle('打开工作空间: D:/repos/b'))[0])
+
+    const tabs = useLayoutModeStore.getState().workspaceTabs
+    expect(tabs.some((t) => t.dataSource === 'workspace://proj-ws-b')).toBe(true)
+    expect(tabs.some((t) => t.dataSource === 'workspace://project-proj-ws-b')).toBe(false)
+  })
+
+  it('打开文件夹成功：成功通知回显后端 message（操作必有着落）', async () => {
+    seedProjectQueries({ id: 'proj-ok', goal: '成功项目' })
+    pmSeed.workspaceOpen.mockResolvedValueOnce({
+      data: { success: true, message: '已在系统文件管理器中打开工作空间' },
+    })
+    const addNotification = vi
+      .spyOn(useNotificationStore.getState(), 'addNotification')
+      .mockImplementation(() => {})
+    await renderAndOpenFirstFolderButton()
+
+    await waitFor(() => {
+      expect(addNotification).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: '已打开文件夹',
+          message: '已在系统文件管理器中打开工作空间',
+        }),
+      )
+    })
+    // 成功路径不得误触发失败通道
+    expect(
+      addNotification,
+    ).not.toHaveBeenCalledWith(expect.objectContaining({ title: '打开文件夹失败' }))
+    addNotification.mockRestore()
+  })
+
+  it('打开文件夹成功（信封无 message）：通知落项目名兜底文案', async () => {
+    // 第二组输入：200 信封无 message——成功通知仍须可读（带项目名）
+    seedProjectQueries({ id: 'proj-ok-plain', goal: '朴素成功项目' })
+    pmSeed.workspaceOpen.mockResolvedValueOnce({ data: {} })
+    const addNotification = vi
+      .spyOn(useNotificationStore.getState(), 'addNotification')
+      .mockImplementation(() => {})
+    await renderAndOpenFirstFolderButton()
+
+    await waitFor(() => {
+      expect(addNotification).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: '已打开文件夹',
+          message: '项目「朴素成功项目」文件夹已在文件管理器中打开',
+        }),
+      )
+    })
+    addNotification.mockRestore()
+  })
+
   it('项目登记行无管道语义：无运行态/无归属徽标，详情卡出项目字段', async () => {
     // 回归锚（真机 2026-09-21）：旧实现给项目行硬编码 status:'running'，
     // 登记时间被当开始时间 → 「运行中 45h22m + 管道 ID project-xxx + 无归属」

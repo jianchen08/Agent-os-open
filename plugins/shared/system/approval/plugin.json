@@ -1,7 +1,7 @@
 {
   "id": "approval_service",
   "name": "Approval Service",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "plugin_type": "system",
   "language": "python",
   "host_type": "sidecar",

@@ -54,6 +54,9 @@ from proc_tree import kill_process_tree  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+# `<X>:/mnt/<d>/Y`（污染变体）或 `/mnt/<d>/Y`（反斜杠归一后形态）。
+_WS_MOUNT_RE = re.compile(r"^(?:[A-Za-z]:)?/mnt/([A-Za-z])/(.*)$", re.DOTALL)
+
 # metadata 档文件名后缀（state_dir/<env名>.json）
 _METADATA_SUFFIX = ".json"
 
@@ -495,6 +498,12 @@ class WslNativeProvider(IsolationProvider):
             return self._workspace_wsl
         if normalized.startswith("/workspace/"):
             return self._workspace_wsl + normalized[len("/workspace"):]
+        # WSL 挂载形态归一（与 process_manager._map_wsl_working_dir 同语义，
+        # 漂移钉 tests/test_wsl_native_wiring.py）：`\mnt\d\X` / `D:\mnt\d\X`
+        # 直透 wsl --cd 会被按盘符相对路径解析为不存在的 D:\mnt\d\X。
+        m = _WS_MOUNT_RE.match(normalized)
+        if m:
+            return f"/mnt/{m.group(1).lower()}/{m.group(2)}"
         return working_dir
 
     def _bridge_env(self) -> dict[str, str]:

@@ -249,3 +249,177 @@ class TestDenyPriority:
 def os_norm(p: Path | str) -> str:
     """前缀比较同规归一（_path_under_prefix 消费形态）。"""
     return os.path.normcase(os.path.normpath(str(p)))
+
+
+# ── 用户根形态地界（ADR 2026-10-01-workspace-root-user-root-anchor）──────────
+
+
+@pytest.fixture
+def user_root(tmp_path: Path, fake_repo: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """用户根钉桩（AGENTOS_USER_ROOT → tmp 仓外独立子树，装机形态同构）。
+
+    fake_repo 依赖提供名单/env 钉桩与仓库锚缓存复位；用户根放 tmp_path 下
+    与 repo 平级的独立子树（复现 %APPDATA%\\agentos 不在任何仓库内）。
+    """
+    (tmp_path / "empty_appdata").mkdir()  # OS 目录推导兜底钉空（env 缺失分支用）
+    monkeypatch.setenv("APPDATA", str(tmp_path / "empty_appdata"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty_appdata"))
+    ur = tmp_path / "userroot" / "agentos"
+    ur.mkdir(parents=True)
+    monkeypatch.setenv("AGENTOS_USER_ROOT", str(ur))
+    return ur
+
+
+class TestUserRootFormBoundary:
+    """用户根形态地界识别（装机工作空间根迁 ``<user_root>/workspaces``）。
+
+    锁定契约：
+    1. 锚在 ``<user_root>/workspaces/<task>`` 下（任务根/会话子目录/项目树
+       三种布局）：派生 ``<user_root>/workspaces`` 地界前缀（用户根锚定命中，
+       大小写不敏感与旧形态同规）；
+    2. 地界内（锚外兄弟树）读放行——read_deny 命中被内建白名单压过（与旧
+       形态同位同权），不携锚则照拒（delta 即修复面）；
+    3. 地界外（``<user_root>/config``）：不派生、写面仍在写区外（位置闸弹
+       授权卡 = 拦截待授权，不误判为地界内）；
+    4. 任意项目下同名 ``workspaces``（非用户根直下）：不误判为地界；
+    5. 旧形态 ``.ai_workspaces`` 不回退；用户根不可得时仅用户根形态收缩
+       （fail-closed，范围收缩不发散）。
+    """
+
+    @pytest.mark.parametrize(
+        "anchor_tail",
+        [
+            "01ed89f3952e",  # 任务根直锚（装机形态 workspace = workspaces/<task>）
+            "01ed89f3952e/sessions/thread-1",  # 会话子目录锚
+            "d8f8c75463c6/projects/demo",  # 会话登记项目树（sessions 兄弟形态）
+        ],
+    )
+    def test_anchor_under_user_root_derives_boundary(
+        self, user_root: Path, anchor_tail: str
+    ) -> None:
+        anchor = user_root / "workspaces" / anchor_tail
+        anchor.mkdir(parents=True)
+
+        prefixes = builtin_read_allow_prefixes(str(anchor), str(anchor))
+
+        assert [os_norm(p) for p in prefixes] == [os_norm(user_root / "workspaces")]
+        # 性质断言：锚在地界前缀子树内，且地界不等于锚自身
+        p, pre = os_norm(anchor), os_norm(prefixes[0])
+        assert p.startswith(pre + os.sep)
+        assert Path(prefixes[0]) != anchor
+
+    def test_read_inside_boundary_overrides_deny(
+        self, user_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """地界内兄弟树读：read_deny 命中被内建白名单压过；不携锚照拒。"""
+        ws = user_root / "workspaces" / "01ed89f3952e" / "sessions" / "thread-1"
+        sibling = user_root / "workspaces" / "01ed89f3952e" / "docs"
+        sibling.mkdir(parents=True)
+        ws.mkdir(parents=True)
+        note = sibling / "note.md"
+        note.write_text("sibling doc", encoding="utf-8")
+        monkeypatch.setattr(zone_policy, "_load_read_deny", lambda: [str(sibling)])
+
+        allow, reason = read_verdict(note, workspace=str(ws), project_root=str(ws))
+        assert allow, f"地界内兄弟树读应被内建白名单放行，实际拒绝: {reason}"
+        assert reason is None
+
+        allow_no_anchor, reason_no_anchor = read_verdict(note)
+        assert not allow_no_anchor
+        assert reason_no_anchor is not None
+
+    def test_write_in_own_task_workspace_via_root_anchor(
+        self, user_root: Path
+    ) -> None:
+        """自己任务工作区内写：根锚覆盖（位置闸锚内先行放行的判定输入）。"""
+        ws = user_root / "workspaces" / "01ed89f3952e"
+        ws.mkdir(parents=True)
+        target = zone_policy.resolve_anchored("tests/a.txt", str(ws), str(ws))
+
+        assert zone_policy.within_root_anchors(target, str(ws), str(ws))
+
+    def test_write_outside_boundary_still_gated(self, user_root: Path) -> None:
+        """地界外（<user_root>/config）：根锚不覆盖、不在任何写区（= 位置闸
+        弹授权卡的拦截路径），且不因新集合误判为地界内。"""
+        ws = user_root / "workspaces" / "01ed89f3952e"
+        ws.mkdir(parents=True)
+        config_file = user_root / "config" / "kernel.yaml"
+        config_file.parent.mkdir(parents=True)
+        resolved = zone_policy.resolve_anchored(str(config_file), str(ws), str(ws))
+
+        assert not zone_policy.within_root_anchors(resolved, str(ws), str(ws))
+        assert write_verdict(resolved) == (False, None)
+        # 地界前缀覆盖边界性质：派生前缀不覆盖 config 子树
+        prefixes = builtin_read_allow_prefixes(str(ws), str(ws))
+        assert len(prefixes) == 1
+        assert os_norm(resolved) != os_norm(prefixes[0])
+        assert not os_norm(resolved).startswith(os_norm(prefixes[0]) + os.sep)
+
+    @pytest.mark.parametrize("layout", ["in_repo", "random_project"])
+    def test_same_named_workspaces_outside_user_root_not_boundary(
+        self, tmp_path: Path, fake_repo: Path, user_root: Path, layout: str
+    ) -> None:
+        """任意项目下同名 ``workspaces``（非用户根直下）不是地界。"""
+        base = fake_repo if layout == "in_repo" else tmp_path / "randomproj"
+        anchor = base / "workspaces" / "t1"
+        anchor.mkdir(parents=True)
+
+        assert builtin_read_allow_prefixes(str(anchor), None) == []
+
+    def test_name_case_insensitive_same_as_legacy(self, user_root: Path) -> None:
+        """目录名大小写不敏感（与旧形态 .lower() 同规）。"""
+        anchor = user_root / "WORKSPACES" / "t1"
+        anchor.mkdir(parents=True)
+
+        prefixes = builtin_read_allow_prefixes(str(anchor), None)
+
+        assert len(prefixes) == 1
+        assert Path(prefixes[0]).name.lower() == "workspaces"
+
+    def test_env_user_root_pointing_elsewhere_no_hit(
+        self, tmp_path: Path, user_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AGENTOS_USER_ROOT 指向别处：同名目录不命中（锚定条件生效）。"""
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path / "elsewhere"))
+        anchor = user_root / "workspaces" / "t1"
+        anchor.mkdir(parents=True)
+
+        assert builtin_read_allow_prefixes(str(anchor), None) == []
+
+    def test_user_root_missing_degrades_closed_but_legacy_still_hits(
+        self, tmp_path: Path, fake_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """用户根不可得：workspaces 形态不命中（范围收缩），旧形态照常命中
+        （fail-closed 不扩大化为全局失明）。"""
+        ws = tmp_path / "orphan" / "agentos" / "workspaces" / "t1"
+        ws.mkdir(parents=True)
+        monkeypatch.delenv("AGENTOS_USER_ROOT", raising=False)
+
+        assert builtin_read_allow_prefixes(str(ws), None) == []
+        legacy = fake_repo / ".ai_workspaces" / "s1"
+        legacy.mkdir(parents=True)
+        assert builtin_read_allow_prefixes(str(legacy), None) != []
+
+    def test_user_root_unresolvable_none_degrades_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """user_root() 返回 None（OS 目录推导不可得）：workspaces 形态不命中
+        （跨平台钉桩模块缝，覆盖 Windows 专属的 None 分支）。"""
+        ws = tmp_path / "nohost" / "agentos" / "workspaces" / "t1"
+        ws.mkdir(parents=True)
+        monkeypatch.setattr(zone_policy, "user_root", lambda: None)
+
+        assert builtin_read_allow_prefixes(str(ws), None) == []
+
+    def test_legacy_form_unregressed_with_user_root_set(
+        self, fake_repo: Path, user_root: Path
+    ) -> None:
+        """旧形态放行不回退：用户根在场时 .ai_workspaces 祖先照常派生。"""
+        legacy = fake_repo / ".ai_workspaces" / "proj__wt_x" / "sessions" / "t1"
+        legacy.mkdir(parents=True)
+
+        prefixes = builtin_read_allow_prefixes(str(legacy), str(legacy))
+
+        assert [os_norm(p) for p in prefixes] == [
+            os_norm(fake_repo / ".ai_workspaces")
+        ]

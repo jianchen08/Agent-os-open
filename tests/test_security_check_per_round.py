@@ -337,25 +337,29 @@ class TestLabelBasedSelection:
 class TestApprovalServiceErrorContract:
     """wait_for_choice 返回 error dict / 非 dict、create_choice 失败时的处置契约。
 
-    error 文案按关键词转换：denied → 用户拒绝、cancel → 审批取消、
-    timeout → 审批超时；其余一律按审批服务异常。全部走软拦截反馈 LLM。
+    error 按 error_code 分类（ADR 2026-10-01 决策 8）：INTERACTION_DENIED →
+    用户拒绝、INTERACTION_CANCELLED → 审批取消、INTERACTION_TIMEOUT → 审批超时；
+    其余（含码缺失）一律按审批服务异常——消息文案不再参与分类（反嗅探）。
+    全部走软拦截反馈 LLM。
     """
 
     @pytest.mark.parametrize(
-        ("error_msg", "expected_reason_prefix"),
+        ("error_code", "expected_reason_prefix"),
         [
-            ("user denied this request", "用户拒绝执行"),
-            ("cancelled by user", "审批被取消"),
-            ("timeout after 86400s", "审批超时未响应"),
-            ("quantum flux failure", "审批服务异常"),
+            ("INTERACTION_DENIED", "用户拒绝执行"),
+            ("INTERACTION_CANCELLED", "审批被取消"),
+            ("INTERACTION_TIMEOUT", "审批超时未响应"),
+            ("QUANTUM_FLUX_FAILURE", "审批服务异常"),
         ],
     )
     @pytest.mark.asyncio
     async def test_wait_error_converted_to_soft_block(
-        self, error_msg: str, expected_reason_prefix: str
+        self, error_code: str, expected_reason_prefix: str
     ) -> None:
-        """wait error 文案关键词决定软拦截原因（denied/cancel/timeout/其他）。"""
-        _cap, create = _approval_svc([{"error": error_msg}])
+        """wait error 的 error_code 决定软拦截原因（denied/cancel/timeout/其他）。"""
+        _cap, create = _approval_svc([
+            {"error": f"denied by code {error_code}", "error_code": error_code}
+        ])
 
         plugin = sc_mod.SecurityCheckPlugin(config={"enabled": True, "rules": []})
         result = await plugin.execute(_ctx_for("bash_execute", "rm -rf /tmp/err"))
@@ -363,7 +367,7 @@ class TestApprovalServiceErrorContract:
         assert create.calls == 1
         decision = _decision_view(result)
         assert expected_reason_prefix in decision.get("reason", ""), (
-            f"error={error_msg!r} 应转换为 {expected_reason_prefix}，实际 {decision!r}"
+            f"error_code={error_code!r} 应转换为 {expected_reason_prefix}，实际 {decision!r}"
         )
         assert "soft_block" in decision.get("reason", "")
 
@@ -413,7 +417,7 @@ class TestApprovalDescriptionPreview:
                 requests.append(dict(params))
                 return {"request_id": "req-desc-1"}
             if name == "wait_for_choice":
-                return {"selected_option": "approved_once"}
+                return {"selected_option": "approved_once", "selected_semantics": "approve_once"}
             raise AssertionError(f"unexpected cap.call: {name}")
 
         fake_cap = AsyncMock()
@@ -475,7 +479,7 @@ class TestApprovalFormatsStringArgsToolCalls:
                 requests.append(dict(params))
                 return {"request_id": "req-str-args"}
             if name == "wait_for_choice":
-                return {"selected_option": "approved_once"}
+                return {"selected_option": "approved_once", "selected_semantics": "approve_once"}
             raise AssertionError(f"unexpected cap.call: {name}")
 
         fake_cap = AsyncMock()

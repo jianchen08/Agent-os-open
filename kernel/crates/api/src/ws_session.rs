@@ -29,13 +29,14 @@ use tracing::{debug, info, warn};
 
 use crate::routes::AppState;
 
-/// 全局 WS sink id 生成器（连接注册表去重/踢旧用）。
+/// 全局 WS sink id 生成器（连接注册表去重/超限踢旧 LRU 比较用；全局单调递增，
+/// 最小 id = 最早建立的连接）。
 static SINK_ID_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// 关闭信号值：无。
 const CLOSE_NONE: u8 = 0;
-/// 关闭信号值：B10 踢旧（同用户新连接替换）——前端对 CLOSE_CODE_KICKED 判
-/// "被替换"跳过重连。
+/// 关闭信号值：超限踢旧（每 user 连接数超限 LRU 踢最旧，ADR 2026-10-01）——
+/// 前端对 CLOSE_CODE_KICKED 判"被替换"跳过重连。
 const CLOSE_KICKED: u8 = 1;
 /// 关闭信号值：出站队列满载自愈——普通关闭，前端按掉线自动重连，经重放/
 /// 整树刷新恢复（区别于踢旧：这里要鼓励重连）。
@@ -257,10 +258,11 @@ pub async fn run_ws_session_with_auth(
     };
     *user_id_out = Some(user_id.clone());
 
-    // 注册连接（含出站通道 sink）
+    // 注册连接（含出站通道 sink）：多端并存（ADR 2026-10-01），仅每 user
+    // 连接数超限时由 coordinator LRU 踢最旧并关闭。
     let (sink, out_rx, close_rx) = WsSink::new();
-    if let Some(old_id) = session.register(&user_id, sink.clone()) {
-        info!(user = %user_id, kicked_old = old_id, "WS 踢旧连接（B10 单连接）");
+    if let Some(evicted_id) = session.register(&user_id, sink.clone()) {
+        info!(user = %user_id, evicted = evicted_id, "WS 连接数超限，踢最旧连接");
     }
 
     run_socket_loop(
@@ -325,7 +327,7 @@ async fn run_socket_loop(
         replayed_for_task.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    // 出站排空任务：从 channel 取消息写入 socket；关闭信号（B10 踢旧 /
+    // 出站排空任务：从 channel 取消息写入 socket；关闭信号（超限踢旧 /
     // 出站满载自愈）→ 按原因分路收尾。
     // 堆栈级诊断插桩：per-connection 任务注册活动槽（标签 = 既有等待点
     // select! 的等待语义），断开自动注销——task-dump 可见每连接任务。
@@ -341,13 +343,14 @@ async fn run_socket_loop(
                         let signal = *close_rx.borrow_and_update();
                         match signal {
                             CLOSE_KICKED => {
-                                // 踢旧关闭（WsSink::shutdown，B10）：两段式通知——先发
-                                // 应用层 kicked 文本帧，再发带 CLOSE_CODE_KICKED 状态码的
-                                // Close 帧。前端 GlobalWebSocket 对 4000 判"被新连接替换"
-                                // 跳过重连；若按普通掉线处理，A/B 双客户端会各自退避重连
-                                // 互踢，形成循环。代理链（Vite dev proxy 等）可能吞掉
-                                // Close 帧状态码（浏览器端退化为 1006），文本帧先于 Close
-                                // 送达即可让前端照常置位防重连——两段缺一不可。
+                                // 超限踢旧关闭（WsSink::shutdown，每 user 连接数超限
+                                // LRU 踢最旧）：两段式通知——先发应用层 kicked 文本帧，
+                                // 再发带 CLOSE_CODE_KICKED 状态码的 Close 帧。前端
+                                // GlobalWebSocket 对 4000 判"被替换"跳过重连；若按普通
+                                // 掉线处理，被踢端退避重连又超限再被踢，形成循环。代理链
+                                // （Vite dev proxy 等）可能吞掉 Close 帧状态码（浏览器端
+                                // 退化为 1006），文本帧先于 Close 送达即可让前端照常置位
+                                // 防重连——两段缺一不可。
                                 let kicked = json!({
                                     "type": "kicked",
                                     "data": {"reason": "replaced_by_new_connection"},
@@ -427,7 +430,8 @@ async fn run_socket_loop(
         _ = &mut send_task => { recv_task.abort(); }
         _ = &mut recv_task => { send_task.abort(); }
     }
-    // 清理：注销连接（仅当仍是当前 sink 时）
+    // 清理：注销本连接（按 sink id 比对；已被逐出/未注册时 no-op，
+    // 不影响同 user 其余连接）
     session_for_unreg.registry().unregister(&user_id, sink_id);
 }
 
@@ -2762,9 +2766,15 @@ mod tests {
 
         // 注销连接走 id() 比对路径（ConnectionRegistry::unregister）——补齐
         // sink 身份方法覆盖（非核心断言，注册表清理语义由 session crate 保证）
-        coordinator
-            .registry()
-            .unregister("u1", coordinator.registry().get_by_user("u1").unwrap().id());
+        coordinator.registry().unregister(
+            "u1",
+            coordinator
+                .registry()
+                .sinks_of_user("u1")
+                .first()
+                .expect("连接应仍注册")
+                .id(),
+        );
 
         // 表侧截断：seq 0 保留，1/2 成洞
         let rows = sqlite
@@ -3982,7 +3992,7 @@ mod tests {
     }
 
     /// 出站队列有界：容量内投递成功；超容 → send_text=false（registry 据此
-    /// 注销连接）+ 背压关闭信号；shutdown（B10 踢旧）在队列满时仍可达
+    /// 注销连接）+ 背压关闭信号；shutdown（超限踢旧）在队列满时仍可达
     /// （watch 不依赖队列容量）。
     #[tokio::test]
     async fn ws_sink_bounded_queue_full_signals_backpressure_and_shutdown_reachable() {
@@ -5444,32 +5454,34 @@ mod tests {
         let _ = ws.send(WsMessage::Close(None)).await;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         while tokio::time::Instant::now() < deadline {
-            if coord.registry().get_by_user("u-e2e-1").is_none() {
+            if coord.registry().sinks_of_user("u-e2e-1").is_empty() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert!(
-            coord.registry().get_by_user("u-e2e-1").is_none(),
+            coord.registry().sinks_of_user("u-e2e-1").is_empty(),
             "连接关闭后必须从注册表注销"
         );
     }
 
     #[tokio::test]
     async fn ws_second_connection_kicks_first_with_two_stage_close() {
-        let coord = Arc::new(agentos_session::SessionCoordinator::new());
+        // 配额 1：同用户第二连接触发超限 LRU 踢旧（ADR 2026-10-01：配额内多端
+        // 并存不踢，超限才踢最旧——两段式协议转作超限踢旧通道）
+        let coord = Arc::new(agentos_session::SessionCoordinator::with_max_conns(1));
         let addr = spawn_ws_server(ws_e2e_state(coord.clone())).await;
         let token = mint_access_token("u-kick-1", "Kicked");
         let mut first = ws_connect(format!("ws://{addr}/ws/chat?token={token}")).await;
         let conf = next_text_frame(&mut first, "first confirmation").await;
         assert_eq!(conf["type"], "connection_confirmation");
 
-        // 同用户第二连接：踢旧（B10 单连接）
+        // 同用户第二连接：超限踢最旧
         let mut second = ws_connect(format!("ws://{addr}/ws/chat?token={token}")).await;
         let conf2 = next_text_frame(&mut second, "second confirmation").await;
         assert_eq!(conf2["type"], "connection_confirmation");
 
-        // 旧连接两段式收尾：先应用层 kicked 文本帧，再 Close(4000)
+        // 被逐出的旧连接两段式收尾：先应用层 kicked 文本帧，再 Close(4000)
         let kicked = next_text_frame(&mut first, "kicked text").await;
         assert_eq!(kicked["type"], "kicked");
         assert_eq!(kicked["data"]["reason"], "replaced_by_new_connection");
@@ -5477,9 +5489,62 @@ mod tests {
         assert_eq!(
             code,
             agentos_session::auth::CLOSE_CODE_KICKED,
-            "踢旧 Close 必须带 4000（前端据此跳过重连）"
+            "超限踢旧 Close 必须带 4000（前端据此跳过重连）"
         );
         let _ = second.send(WsMessage::Close(None)).await;
+    }
+
+    #[tokio::test]
+    async fn ws_two_connections_same_user_both_receive_frames() {
+        // 多端并存主路径（ADR 2026-10-01）：配额内同用户两条连接并存，事件按
+        // 连接扇出——两端各收一份（心跳 ack 为最轻量可观察扇出帧）。
+        let coord = Arc::new(agentos_session::SessionCoordinator::new());
+        let addr = spawn_ws_server(ws_e2e_state(coord.clone())).await;
+        let token = mint_access_token("u-multi-1", "MultiFrontend");
+
+        let mut ws1 = ws_connect(format!("ws://{addr}/ws/chat?token={token}")).await;
+        let conf1 = next_text_frame(&mut ws1, "ws1 confirmation").await;
+        assert_eq!(conf1["type"], "connection_confirmation");
+
+        let mut ws2 = ws_connect(format!("ws://{addr}/ws/chat?token={token}")).await;
+        let conf2 = next_text_frame(&mut ws2, "ws2 confirmation").await;
+        assert_eq!(conf2["type"], "connection_confirmation");
+
+        assert_eq!(
+            coord.registry().sinks_of_user("u-multi-1").len(),
+            2,
+            "同用户两条连接必须并存（不互踢）"
+        );
+
+        // 一端心跳 → ack 扇出到两端（各收一份）
+        ws1.send(WsMessage::text(json!({"type": "heartbeat"}).to_string()))
+            .await
+            .unwrap();
+        let ack1 = next_text_frame(&mut ws1, "ws1 heartbeat_ack").await;
+        assert_eq!(ack1["type"], "heartbeat_ack");
+        let ack2 = next_text_frame(&mut ws2, "ws2 heartbeat_ack").await;
+        assert_eq!(ack2["type"], "heartbeat_ack");
+
+        // 一端断开：他端不受影响（注册表仍持有一条连接，心跳继续有 ack）
+        let _ = ws1.send(WsMessage::Close(None)).await;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if coord.registry().sinks_of_user("u-multi-1").len() == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            coord.registry().sinks_of_user("u-multi-1").len(),
+            1,
+            "一端断开后另一端应保留"
+        );
+        ws2.send(WsMessage::text(json!({"type": "heartbeat"}).to_string()))
+            .await
+            .unwrap();
+        let ack3 = next_text_frame(&mut ws2, "ws2 post-peer-exit heartbeat_ack").await;
+        assert_eq!(ack3["type"], "heartbeat_ack", "存活连接不受他端断开影响");
+        let _ = ws2.send(WsMessage::Close(None)).await;
     }
 
     #[tokio::test]
@@ -5946,7 +6011,7 @@ mod tests {
 
     #[tokio::test]
     async fn ws_sink_shutdown_signals_kicked_before_queue_pressure() {
-        // 队列未满时 shutdown → watch 置 kicked（B10 踢旧信号不依赖队列容量）
+        // 队列未满时 shutdown → watch 置 kicked（超限踢旧信号不依赖队列容量）
         let (sink, _rx, mut close_rx) = WsSink::new();
         assert!(sink.send_text("normal").await);
         sink.shutdown();

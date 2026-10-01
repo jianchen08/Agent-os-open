@@ -36,9 +36,11 @@ from __future__ import annotations
 import logging
 import os
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 from agentos_plugin_sdk import AgentOSPlugin
+from agentos_plugin_sdk.approval_contract import OptionSemantics, is_valid_semantics
 from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
 bootstrap_plugin(__file__)  # plugins/shared 根（http_json）入 sys.path
@@ -84,27 +86,84 @@ def _lookup_run_tenant(run_id: str) -> str:
 
     库不可用 / run 不存在 → 空串（不可归因，approve/deny 侧按 admin-only 收口）。
     """
-    if not run_id:
-        return ""
+    row = _query_run_anchor(run_id)
+    return str(row[1]) if row else ""
+
+
+# 审批卡来源展示所需的状态标量键（run 归属管道行内直取）。
+_ORIGIN_STATE_KEYS = ("session_id", "agent.id", "agent_level", "context.agent_name")
+
+
+def _query_state_rows(
+    sql: str, params: tuple[Any, ...], log_ctx: str
+) -> list[tuple[Any, ...]] | None:
+    """内核库只读查询单点：库缺失/查询失败返回 None（调用方按缺省降级，
+    不阻塞审批主链路）。"""
     import sqlite3
 
     try:
         db_path = _kernel_db_path()
         if not db_path.is_file():
-            return ""
+            return None
         conn = sqlite3.connect(db_path)
         try:
-            # runs 表退役（ADR 2026-09-18）：run_id 是 state 标量键，反查归属租户
-            row = conn.execute(
-                "SELECT tenant_id FROM pipeline_state WHERE field_key = 'run_id' AND value = ?",
-                (run_id,),
-            ).fetchone()
+            return conn.execute(sql, params).fetchall()
         finally:
             conn.close()
     except sqlite3.Error as exc:
-        logger.warning("[approval] state 租户查询失败 | run_id=%s | err=%s", run_id, exc)
-        return ""
-    return str(row[0]) if row else ""
+        logger.warning("[approval] state 查询失败 | %s | err=%s", log_ctx, exc)
+        return None
+
+
+def _query_run_anchor(run_id: str) -> tuple[Any, ...] | None:
+    """按 run_id 反查归属管道行（pipeline_id, tenant_id）；库不可用返回 None。"""
+    if not run_id:
+        return None
+    # runs 表退役（ADR 2026-09-18）：run_id 是 state 标量键，反查归属管道
+    rows = _query_state_rows(
+        "SELECT pipeline_id, tenant_id FROM pipeline_state"
+        " WHERE field_key = 'run_id' AND value = ?",
+        (run_id,),
+        f"run_id={run_id}",
+    )
+    return rows[0] if rows else None
+
+
+def _lookup_run_origin(run_id: str) -> dict[str, str]:
+    """按 run_id 反查管道来源上下文（审批卡来源展示数据面）。
+
+    返回 {pipeline_id, thread_id, agent_id, agent_level, agent_name}，缺项为
+    空串（前端按缺省不显示该段）。库不可用/反查失败全空——不阻塞审批主链路。
+    """
+    origin: dict[str, str] = dict.fromkeys(
+        ("pipeline_id", "thread_id", "agent_id", "agent_level", "agent_name"), ""
+    )
+    row = _query_run_anchor(run_id)
+    if row is None:
+        return origin
+    pipeline_id, _tenant = str(row[0]), str(row[1])
+    origin["pipeline_id"] = pipeline_id
+    if not pipeline_id:
+        return origin
+    placeholders = ",".join("?" for _ in _ORIGIN_STATE_KEYS)
+    rows = _query_state_rows(
+        f"SELECT field_key, value FROM pipeline_state"
+        f" WHERE pipeline_id = ? AND field_key IN ({placeholders})",  # noqa: S608 — 键集为常量白名单
+        (pipeline_id, *_ORIGIN_STATE_KEYS),
+        f"pipeline_id={pipeline_id}",
+    )
+    if rows is None:
+        return origin
+    for field_key, value in rows:
+        if field_key == "session_id":
+            origin["thread_id"] = str(value or "")
+        elif field_key == "agent.id":
+            origin["agent_id"] = str(value or "")
+        elif field_key == "agent_level":
+            origin["agent_level"] = str(value or "")
+        elif field_key == "context.agent_name":
+            origin["agent_name"] = str(value or "")
+    return origin
 
 
 def _record_ownership(request_id: str, run_id: str, user_id: str | None) -> None:
@@ -277,32 +336,81 @@ def _get_cap(name: str) -> Any | None:
 
 
 async def _emit_approval_created(
-    request_id: str, title: str, options: list[str], run_id: str | None = None
+    request_id: str,
+    title: str,
+    options: list[str],
+    run_id: str | None = None,
+    origin: dict[str, str] | None = None,
+    choice_options: list[dict[str, str]] | None = None,
 ) -> None:
     """通知前端审批已创建（fire-and-forget，失败不影响审批主链路）。
 
     前端 SchemaFullscreenHost 订阅 ``approval.created`` 事件（ui_schema 声明
     ``trigger: "on_event:approval.created"`` + ``space: "fullscreen"``），
-    据此打开全屏审批浮层。payload 与前端 ApprovalCreatedPayload 对齐。
+    据此打开全屏审批浮层。payload 与前端 ApprovalCreatedPayload 对齐；
+    ``origin``（_lookup_run_origin 反查）携带来源五元组——审批卡必须可见
+    发起 agent/会话/管道/时间，缺项省略键。
+    ``options``（label 串）维持旧形状只增不改；``choice_options`` 为结构化
+    选项（id/label/semantics，ADR 2026-10-01 决策 4）——前端提交选项 id 的
+    契约数据源，缺省回退旧 options（id=索引为旧 _build_options 的既定形状）。
     """
     bus = _get_cap("event-bus")
     if bus is None:
         logger.warning("[approval] event-bus not injected; skip approval.created")
         return
+    payload: dict[str, Any] = {
+        "request_id": request_id,
+        "title": title,
+        "options": options,
+        "mode": "choice",
+        "run_id": run_id or "",
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    if choice_options:
+        payload["choice_options"] = choice_options
+    for key in ("pipeline_id", "thread_id", "agent_id", "agent_level", "agent_name"):
+        val = (origin or {}).get(key, "")
+        if val:
+            payload[key] = val
     try:
         await bus.notify("emit", {
             "event": "approval.created",
-            "payload": {
-                "request_id": request_id,
-                "title": title,
-                "options": options,
-                "mode": "choice",
-                "run_id": run_id or "",
-            },
-            "thread_id": run_id or "",
+            "payload": payload,
+            "thread_id": payload.get("thread_id") or run_id or "",
         })
     except Exception:
         logger.exception("[approval] emit approval.created failed")
+
+
+async def _emit_approval_taken(
+    request_id: str,
+    run_id: str | None = None,
+    summary: dict[str, Any] | None = None,
+) -> None:
+    """通知前端审批已结算（多前端并发应答对账，fire-and-forget，失败不影响主链路）。
+
+    前端 useInteractionHandler 订阅 ``approval.taken``：收到后按 request_id
+    清除本地 pending 交互并提示"已在别处处理"（ADR 2026-10-01 多前端连接
+    决策 5）。payload 携带 request_id + 结算摘要；路由键与 approval.created
+    同构：thread_id 空时回落 run 会话坐标，供内核 thread scope 扇出该 user
+    全部前端连接。
+    """
+    bus = _get_cap("event-bus")
+    if bus is None:
+        logger.warning("[approval] event-bus not injected; skip approval.taken")
+        return
+    payload: dict[str, Any] = {"request_id": request_id}
+    for key, val in (summary or {}).items():
+        if val is not None:
+            payload[key] = val
+    try:
+        await bus.notify("emit", {
+            "event": "approval.taken",
+            "payload": payload,
+            "thread_id": (summary or {}).get("thread_id") or run_id or "",
+        })
+    except Exception:
+        logger.exception("[approval] emit approval.taken failed")
 
 
 async def _suspend_pipeline(run_id: str, approval_id: str) -> dict[str, Any] | None:
@@ -344,9 +452,23 @@ async def _resume_pipeline(handle: dict[str, Any], approval_id: str, result: Any
         return False
 
 
-def _build_options(label_list: list[str]) -> list[dict[str, str]]:
-    """把字符串选项列表转成 human-interaction 的 [{id, label}] 格式。"""
-    return [{"id": str(i), "label": label} for i, label in enumerate(label_list)]
+def _build_options(
+    label_list: list[str],
+    semantics_list: list[str] | None = None,
+) -> list[dict[str, str]]:
+    """把字符串选项列表转成 human-interaction 的 [{id, label}] 格式。
+
+    semantics_list（ADR 2026-10-01 决策 2/3，按索引对齐，只增）：创建方声明的
+    选项语义（封闭枚举成员）——approve/deny 便利路由据此查 id 提交，路由不再
+    自造词形。未声明/非法值的选项退化为无语义（路由对其 fail-closed）。
+    """
+    out: list[dict[str, str]] = []
+    for i, label in enumerate(label_list):
+        entry: dict[str, str] = {"id": str(i), "label": label}
+        if semantics_list and i < len(semantics_list) and is_valid_semantics(semantics_list[i]):
+            entry["semantics"] = semantics_list[i]
+        out.append(entry)
+    return out
 
 
 def _classify_reject(wait_res: dict[str, Any]) -> str:
@@ -376,6 +498,12 @@ def _classify_reject(wait_res: dict[str, Any]) -> str:
         "properties": {
             "title": {"type": "string"},
             "options": {"type": "array", "items": {"type": "string"}},
+            "option_semantics": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "各选项的语义声明（封闭枚举，按索引对齐 options；"
+                "声明后 /approve 便利路由才能按 approve_once 语义代批）",
+            },
             "run_id": {"type": "string", "description": "管道运行 ID（用于挂起管道）"},
             "user_id": {
                 "type": "string",
@@ -395,6 +523,7 @@ def _classify_reject(wait_res: dict[str, Any]) -> str:
 async def create_choice(
     title: str,
     options: list[str],
+    option_semantics: list[str] | None = None,
     run_id: str | None = None,
     user_id: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
@@ -416,7 +545,14 @@ async def create_choice(
     if hi is None:
         return {"error": "human-interaction capability not injected"}
 
-    # 第一步：经 human-interaction 创建交互请求
+    # 来源上下文先行反查：审批卡必须可见发起 agent/会话/管道（run 反查管道
+    # state 权威值；反查失败全空，卡片按缺省省略来源段，不阻塞审批主链路）。
+    origin = _lookup_run_origin(run_id or "")
+    built_options = _build_options(options, option_semantics)
+
+    # 第一步：经 human-interaction 创建交互请求（thread_id 维持 run 会话坐标
+    # 不变——交互响应路由与挂起唤醒依赖它；真实会话线程仅供来源展示，走
+    # _emit_approval_created 的 payload.thread_id）
     session_id = run_id or "approval"
     create_res = await hi.call("create_choice", {
         "session_id": session_id,
@@ -424,8 +560,12 @@ async def create_choice(
         "tab_id": session_id,
         "title": title,
         "description": "",
-        "options": _build_options(options),
+        "options": built_options,
         "timeout_seconds": int(timeout),
+        "agent_id": origin.get("agent_id", ""),
+        "agent_level": origin.get("agent_level", ""),
+        "pipeline_id": origin.get("pipeline_id", ""),
+        "agent_name": origin.get("agent_name", ""),
     })
     if not isinstance(create_res, dict) or create_res.get("error"):
         return {"error": f"create_choice failed: {create_res}"}
@@ -436,7 +576,14 @@ async def create_choice(
     _record_ownership(request_id, run_id or "", user_id)
 
     # 通知前端全屏审批浮层（SchemaFullscreenHost）；fire-and-forget，失败不阻塞。
-    await _emit_approval_created(request_id=request_id, title=title, options=options, run_id=run_id)
+    await _emit_approval_created(
+        request_id=request_id,
+        title=title,
+        options=options,
+        run_id=run_id,
+        origin=origin,
+        choice_options=built_options,
+    )
 
     # 第二步：挂起管道（approval 独有职责）
     suspend_handle = None
@@ -558,11 +705,15 @@ async def submit(request_id: str, result: str) -> dict[str, Any]:
     if record is None:
         return {"error": "no suspended approval for this request_id", "request_id": request_id}
 
+    run_id = record.get("run_id") or ""
     handle = record.get("suspend_handle")
     if handle is None:
         # 无句柄：无管道可恢复，直接落已决断终态
         _suspended.pop(request_id, None)
         _record_decision(request_id, {"approved": True, "reason": "submitted", "resumed": False})
+        await _emit_approval_taken(
+            request_id, run_id, {"status": "resolved", "resumed": False, "result": result}
+        )
         logger.info("[approval] submitted (no handle) | id=%s", request_id)
         return {"request_id": request_id, "status": "resolved", "result": result, "resumed": False}
 
@@ -579,6 +730,9 @@ async def submit(request_id: str, result: str) -> dict[str, Any]:
 
     _suspended.pop(request_id, None)
     _record_decision(request_id, {"approved": True, "reason": "submitted", "resumed": True})
+    await _emit_approval_taken(
+        request_id, run_id, {"status": "resolved", "resumed": True, "result": result}
+    )
     logger.info("[approval] submitted | id=%s | resumed=True", request_id)
     return {"request_id": request_id, "status": "resolved", "result": result, "resumed": True}
 
@@ -796,6 +950,21 @@ def _match_request_route(sub: str) -> tuple[str, str] | None:
     return rid, action
 
 
+def _find_option_id_by_semantics(record: dict[str, Any], semantics: str) -> str | None:
+    """从创建方选项声明中查目标语义的选项 id（ADR 2026-10-01 决策 3）。
+
+    卡面无该语义声明（旧卡/创建方未声明）返回 None——路由 fail-closed，
+    绝不自造词形代批。
+    """
+    options = (record.get("message_data") or {}).get("options") or []
+    for opt in options:
+        if isinstance(opt, dict) and opt.get("semantics") == semantics:
+            oid = str(opt.get("id", ""))
+            if oid:
+                return oid
+    return None
+
+
 async def _dispatch_request_action(
     service: Any,
     rid: str,
@@ -833,16 +1002,45 @@ async def _dispatch_request_action(
                 "status": "approved" if action == "approve" else "denied",
             }))
         body = _decode_body(raw_body)
+        feedback = body.get("feedback") if body else None
+        if action == "deny":
+            # 拒绝不需要卡面词汇：response_type=denied 本身即显式拒绝语义
+            #（human 侧按直接拒绝结算并武装拒绝记忆），路由零词形生产。
+            result = await service.submit_response(
+                request_id=rid,
+                response_type="denied",
+                selected_option=None,
+                feedback=feedback,
+            )
+            return _ok(_json_response({
+                "success": result,
+                "request_id": rid,
+                "status": "denied",
+            }))
+        # 批准 = 查创建方 options 中 approve_once 语义的 id 提交（最小授权）；
+        # 卡面未声明该语义 → 422 显式失败，绝不自造 approved/approve 词形。
+        record = await service.get_request(rid)
+        if not record:
+            return _ok(_json_response({"detail": "审批不存在或已结算"}, 404))
+        option_id = _find_option_id_by_semantics(
+            record, OptionSemantics.APPROVE_ONCE.value
+        )
+        if option_id is None:
+            return _ok(_json_response({
+                "success": False,
+                "request_id": rid,
+                "detail": "该审批卡未声明 approve_once 语义选项，API 无法代批",
+            }, 422))
         result = await service.submit_response(
             request_id=rid,
-            response_type="approved" if action == "approve" else "denied",
-            selected_option="approve" if action == "approve" else "reject",
-            feedback=body.get("feedback") if body else None,
+            response_type="answered",
+            selected_option=option_id,
+            feedback=feedback,
         )
         return _ok(_json_response({
             "success": result,
             "request_id": rid,
-            "status": "approved" if action == "approve" else "denied",
+            "status": "approved",
         }))
 
     if action == "cancel" and method == "POST":

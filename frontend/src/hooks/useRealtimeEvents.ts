@@ -43,6 +43,9 @@ export function useRealtimeEvents(): void {
       // 断线期间可能有管道出生（任务提交/子任务派发）——会话列表无出生事件源，
       // 唯有在此失效重拉，否则 pipelineIds 陈旧导致任务管道跳转报"找不到"。
       invalidateSessions()
+      // 长期任务列表同样可能错过断线期间的状态迁移（无全量出生/变更事件源），
+      // 重连即失效重拉，不等 5s 兜底轮询。
+      invalidateLongTermTasks()
       // 防抖：1 秒内不重复调用 fetchMessages
       const now = Date.now()
       if (now - lastFetchTimeRef.current < 1000) {
@@ -366,14 +369,14 @@ export function useRealtimeEvents(): void {
     globalWS.subscribe(WS_SERVER_EVENTS.SEGMENT_ACTIVATED, handleSegmentActivated)
 
     /**
-     * 被同账号新连接替换（B10 单连接踢旧，code=4000）：本页已永久失联且不再
-     * 自动重连——必须明示用户，否则页面静默装死、消息全黑洞。典型成因：
-     * 同一浏览器开了多个前端标签页互踢。
+     * 被超限踢旧（同账号连接数已满，最旧连接被替换，code=4000）：本页已永久
+     * 失联且不再自动重连——必须明示用户，否则页面静默装死、消息全黑洞。
+     * 多前端连接下配额内并存不踢（ADR 2026-10-01），仅连接数超上限时触发。
      */
     const handleKickedByReplacement = () => {
       useNotificationStore.getState().addNotification({
-        title: '本页连接已被其他页面替换',
-        message: '检测到同一账号在其他页面建立了新连接，本页已停止接收消息。请关闭多余页面，或刷新本页重新接管连接。',
+        title: '连接数已满，本页连接被替换',
+        message: '同一账号的前端连接数已达上限，最旧连接（本页）被替换，本页已停止接收消息。请关闭多余前端页面，或刷新本页重新接管连接。',
         priority: 'high',
         category: 'error',
         isBlocking: false,
@@ -390,10 +393,10 @@ export function useRealtimeEvents(): void {
     const handleVisibilityChange = () => {
       if (document.visibilityState !== 'visible') return
       if (globalWS.status === 'connected') return
-      // 被 4000 踢旧（本页已被其他连接替换）：不自动重连，避免互踢环
-      // （connect() 内部同样拦截，此处显式短路 + 留痕便于排查）
+      // 被 4000 踢旧（本页已被超限踢旧替换）：不自动重连，避免重连后再超限
+      // 循环（connect() 内部同样拦截，此处显式短路 + 留痕便于排查）
       if (globalWS.wasKickedByReplacement()) {
-        console.info('[useRealtimeEvents] 本页被新连接替换(code=4000)，回前台不自动重连（刷新页面可恢复）')
+        console.info('[useRealtimeEvents] 本页被超限踢旧(code=4000)，回前台不自动重连（刷新页面可恢复）')
         return
       }
       // 「用前保证新鲜」（tokenLifecycle 唯一实现）：未过期直接返回当前 token；

@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -79,7 +80,7 @@ def classify_dsh_plugin(root: str | Path) -> dict[str, Any]:
     if hook_events and (_HOOK_SPAWN_RE.search(blob) or "hooks" in blob):
         kinds["hook"] = {
             "events": hook_events,
-            "lingxi": "triggers_ext EVENT + action=command（translate_hooks_config 产出 trigger_setup 参数）",
+            "lingxi": "pipeline 链位步骤 pipeline_dsh_hook（translate_hooks_config 产出步骤条目，粘入管道 yaml 对应链位）",
         }
 
     # service 服务类：Service 子类注册（super(ctx, name)）或 dsh.plugin.json entry.inject
@@ -154,40 +155,36 @@ def map_dsh_slot(slot_name: str) -> dict[str, str]:
     return DSH_SLOT_LINGXI_MAP.get(slot_name, dict(_DSH_SLOT_FALLBACK))
 
 
-# ── DSH hook 事件 → 灵汐域事件映射表（钩子翻译的单一事实源） ──────────────
+# ── DSH hook 事件 → 灵汐管道链位映射表（钩子翻译的单一事实源） ────────────
 #
-# DSH hooks 是声明式「事件→命令」（{on, when?, run, timeoutMs}）。灵汐等价
-# 物 = triggers_ext 的 EVENT 触发器（域事件总线输入）+ action=command。
-# turn/end 的 when（结束原因）直接映射到 run 终态事件名；aborted/blocked/
-# max-tokens/interrupted 域事件无细分（run.suspended 不携带 reason 标签），
-# 以 run.suspended 近似——诚实标注。
-HOOK_EVENT_LINGXI_MAP: dict[str, str] = {
-    "turn/start": "run.started",
-    "approval/asked": "approval.created",
-    "agent/created": "session.created",
-    "agent/disposed": "session.deleted",
-    "agent/error": "run.failed",
-}
-TURN_END_REASON_MAP: dict[str, str] = {
-    "completed": "run.completed",
-    "error": "run.failed",
-    "aborted": "run.suspended",
-    "blocked": "run.suspended",
-    "max-tokens": "run.suspended",
-    "interrupted": "run.suspended",
+# DSH hooks 是声明式「事件→命令」（{on, when?, run, timeoutMs?}）。灵汐等价
+# 物 = 管道 yaml 链位步骤（钩子→钩子，scope 对 scope：DSH 钩子按会话/管道
+# 配置生效，灵汐管道钩子按管道配置生效）。产物是 name=pipeline_dsh_hook 的
+# 步骤条目（per-plugin inputs 携带 argv/timeout_ms，经内核 config 通道传给
+# 执行插件，不进 state、不落 trace）。
+#
+# 无链位的事件诚实 unmapped：approval/asked（审批点在轮中，prepare/post 是
+# 轮边界）、agent/disposed（会话结束无链位）、agent/error（post 每轮都跑，
+# 无 per-reason 门会过度触发）。turn/end 带 when 同理：链位无 per-reason 门，
+# 宁可 unmapped也不过度触发。
+HOOK_CHAIN_MAP: dict[str, str] = {
+    "agent/created": "init",  # 管道启动段（init 链，一次性语义）
+    "turn/start": "prepare",  # 每轮前
+    "turn/end": "post",  # 每轮后
 }
 
 
 def translate_hooks_config(hooks: list[dict[str, Any]] | str | None) -> dict[str, Any]:
-    """DSH hooks 配置（[{on, when?, run, timeoutMs?}]）→ 灵汐触发器参数列表。
+    """DSH hooks 配置（[{on, when?, run, timeoutMs?}]）→ 管道链位步骤条目。
 
     Returns:
-        ``{"triggers": [...], "mapped": n, "unmapped": [{on, when, run, reason}]}``。
-        每条 trigger 可直接作为 trigger_setup 工具的输入（trigger_type=event /
-        event_type / action=command / action_params / message）。
+        ``{"steps": [{"chain", "step"}], "mapped": n, "unmapped": [{on, when, run, reason}]}``。
+        每条 step 可直接粘入目标管道 yaml 的对应链位（init/prepare/post）：
+        ``{"name": "pipeline_dsh_hook", "inputs": {...}}``；链位归属 = 承载
+        该钩子的管道配置本身（配置变更即显式动作，无静默注册）。
     """
     if hooks is None:
-        return {"triggers": [], "mapped": 0, "unmapped": []}
+        return {"steps": [], "mapped": 0, "unmapped": []}
     if isinstance(hooks, str):
         try:
             parsed = yaml.safe_load(hooks) or []
@@ -199,7 +196,7 @@ def translate_hooks_config(hooks: list[dict[str, Any]] | str | None) -> dict[str
     # profile 的 config 块包装）
     if isinstance(parsed, dict) and isinstance(parsed.get("hooks"), list):
         parsed = parsed["hooks"]
-    triggers: list[dict[str, Any]] = []
+    steps: list[dict[str, Any]] = []
     unmapped: list[dict[str, Any]] = []
     for spec in parsed if isinstance(parsed, list) else []:
         if not isinstance(spec, dict):
@@ -211,25 +208,47 @@ def translate_hooks_config(hooks: list[dict[str, Any]] | str | None) -> dict[str
             on = spec[True]
         when = spec.get("when")
         run = spec.get("run")
-        timeout_ms = spec.get("timeoutMs", 10000)
-        if on == "turn/end":
-            event = TURN_END_REASON_MAP.get(when) if when is not None else "run.completed"
-            if event is None:
-                unmapped.append({"on": on, "when": when, "run": run, "reason": "unknown turn/end reason"})
-                continue
-        else:
-            event = HOOK_EVENT_LINGXI_MAP.get(on) if on is not None else None
-            if event is None:
-                unmapped.append({"on": on, "when": when, "run": run, "reason": "no lingxi domain event equivalent"})
-                continue
-        triggers.append({
-            "trigger_type": "event",
-            "event_type": event,
-            "action": "command",
-            "action_params": {"command": run, "timeout_ms": int(timeout_ms or 10000)},
-            "message": f"[DSH hook {on}] {run}",
+        chain = HOOK_CHAIN_MAP.get(on) if on is not None else None
+        if chain is None:
+            unmapped.append({"on": on, "when": when, "run": run,
+                             "reason": "no pipeline chain position for event"})
+            continue
+        if on == "turn/end" and when is not None:
+            unmapped.append({"on": on, "when": when, "run": run,
+                             "reason": "turn-end reason gate has no chain equivalent"})
+            continue
+        if not isinstance(run, str) or not run.strip():
+            unmapped.append({"on": on, "when": when, "run": run, "reason": "empty or non-string run"})
+            continue
+        try:
+            argv = shlex.split(run)
+        except ValueError:
+            unmapped.append({"on": on, "when": when, "run": run, "reason": "unquotable run command"})
+            continue
+        if not argv:
+            unmapped.append({"on": on, "when": when, "run": run, "reason": "empty or non-string run"})
+            continue
+        try:
+            raw_timeout = spec.get("timeoutMs", 10000)
+            timeout_ms = int(raw_timeout)
+        except (TypeError, ValueError):
+            timeout_ms = 0
+        # 显式非法值（非数字串/负数）fail-visible 进 unmapped 携原值证据；
+        # falsy 形态（缺省/None/0）回退默认 10s——与执行端 dsh_hook 校验同口径。
+        if raw_timeout and timeout_ms <= 0:
+            unmapped.append({"on": on, "when": when, "run": run,
+                             "reason": f"invalid timeoutMs: {raw_timeout!r}"})
+            continue
+        if timeout_ms <= 0:
+            timeout_ms = 10000
+        steps.append({
+            "chain": chain,
+            "step": {
+                "name": "pipeline_dsh_hook",
+                "inputs": {"event": str(on), "command": argv, "timeout_ms": timeout_ms},
+            },
         })
-    return {"triggers": triggers, "mapped": len(triggers), "unmapped": unmapped}
+    return {"steps": steps, "mapped": len(steps), "unmapped": unmapped}
 
 
 # slots.register/inject 的 name 声明（任意槽位名，不限于 toolview）

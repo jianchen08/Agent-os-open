@@ -5,11 +5,16 @@
 - InteractionMode：InteractionMode类
 - InteractionStatus：InteractionStatus类
 - ResponseType：ResponseType类
+- OptionSemantics：选项语义封闭枚举（单一真值源在 SDK approval_contract，此处再出口）
 - Priority：Priority类
 - TimeoutAction：TimeoutAction类
 """
 
 from enum import Enum
+
+from agentos_plugin_sdk.approval_contract import (
+    OptionSemantics,  # noqa: F401 — 再出口（插件内统一从 human.models 取语义枚举）
+)
 
 
 class InteractionMode(str, Enum):

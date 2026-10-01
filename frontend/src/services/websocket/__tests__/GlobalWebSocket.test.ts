@@ -1,3 +1,4 @@
+/** @feature FP-0.2.可观测性 WS 连接生命周期 | @ci frontend-test */
 /** GlobalWebSocket 单元测试 测试全局 WebSocket 服务的重连参数、状态转换、心跳机制。 */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -232,7 +233,7 @@ describe('GlobalWebSocketService', () => {
       service.disconnect()
     })
 
-    it('重连延迟不应超过最大值 60 秒（RECONNECT_MAX_DELAY）', async () => {
+    it('重连延迟不应超过最大值 30 秒（RECONNECT_MAX_DELAY）', async () => {
       const { service, connect, getLatestWs } = await createService()
 
       const ws = await connectAndOpen({ connect, getLatestWs })
@@ -941,6 +942,20 @@ describe('GlobalWebSocketService', () => {
       disconnect()
     })
 
+    it('sendSegmentActivate：‹i/n› 段切换帧参数投影（thread/管道/段）', async () => {
+      const { service, ws, disconnect } = await setupConnected()
+
+      service.sendSegmentActivate('thread-9', { pipelineId: 'p-1', segmentId: 's-2' })
+
+      const frame = getSentMessages(ws).find((m: any) => m?.type === 'segment_activate')
+      expect(frame).toBeDefined()
+      expect(frame.thread_id).toBe('thread-9')
+      expect(frame.pipeline_id).toBe('p-1')
+      expect(frame.segment_id).toBe('s-2')
+
+      disconnect()
+    })
+
     it('传入 pipelineId 时，消息中 pipeline_id 正确携带', async () => {
       const { service, ws, disconnect } = await setupConnected()
 
@@ -1083,6 +1098,129 @@ describe('GlobalWebSocketService', () => {
       expect(mockUpdateConnectionStatus).toHaveBeenCalledWith(
         expect.objectContaining({ state: 'reconnecting' }),
       )
+
+      disconnect()
+    })
+  })
+
+  // ──────────────────────────────────────────────
+  // 8b. 自动重连闭环（断线恢复/重连进度上报/降级/手动立即重连）
+  // ──────────────────────────────────────────────
+  describe('自动重连闭环', () => {
+    it('每次重连调度向 store 上报累计尝试次数（第 1、2 次递增）', async () => {
+      const { service, connect, getLatestWs } = await createService()
+
+      const ws = await connectAndOpen({ connect, getLatestWs })
+      expect(service.status).toBe('connected')
+
+      mockUpdateConnectionStatus.mockClear()
+      simulateClose(ws, 1006, 'error')
+      expect(mockUpdateConnectionStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ state: 'reconnecting', reconnectAttempt: 1 }),
+      )
+
+      // 第一次重连尝试再失败 → 第二次调度 attempt=2（横幅「第 N 次」的数据源）
+      await vi.advanceTimersByTimeAsync(4000 + 100)
+      const ws2 = getLatestWs()!
+      simulateClose(ws2, 1006, 'error')
+      expect(mockUpdateConnectionStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ state: 'reconnecting', reconnectAttempt: 2 }),
+      )
+
+      service.disconnect()
+    })
+
+    it('重连成功向 store 上报 connected 且尝试次数清零（横幅自动消除）', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+
+      const ws = await connectAndOpen({ connect, getLatestWs })
+      simulateClose(ws, 1006, 'error')
+      await vi.advanceTimersByTimeAsync(4000 + 100)
+      const ws2 = getLatestWs()!
+      simulateSuccessfulOpen(ws2)
+
+      expect(mockUpdateConnectionStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ state: 'connected', reconnectAttempt: 0 }),
+      )
+      expect(service.status).toBe('connected')
+
+      disconnect()
+    })
+
+    it('退避等待期内 forceReconnect 立即建连，不等退避到点', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+
+      const ws = await connectAndOpen({ connect, getLatestWs })
+      simulateClose(ws, 1006, 'error')
+      expect(service.status).toBe('reconnecting')
+
+      // 4s 退避只走了 1s 时手动立即重连
+      await vi.advanceTimersByTimeAsync(1000)
+      const countBefore = instances.length
+      service.forceReconnect()
+      await vi.advanceTimersByTimeAsync(100)
+      expect(instances.length).toBe(countBefore + 1)
+
+      // 原退避计时器已被清除：推进剩余退避时间不再产生第二个连接
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(instances.length).toBe(countBefore + 1)
+
+      disconnect()
+    })
+
+    it('forceReconnect 解除 refresh 等待期对 connect 的封锁（用户显式介入优先）', async () => {
+      const { service, connect, getLatestWs, disconnect } = await createService()
+
+      const ws = await connectAndOpen({ connect, getLatestWs })
+      // 4001 掉线自然进入 refresh 等待窗：refresh 挂起不决期间自动路径 connect 被拦
+      mockRefresh.mockImplementationOnce(() => new Promise(() => {}))
+      simulateClose(ws, 4001)
+      await vi.advanceTimersByTimeAsync(100)
+      const countBefore = instances.length
+
+      service.forceReconnect()
+      await vi.advanceTimersByTimeAsync(100)
+      expect(instances.length).toBe(countBefore + 1)
+
+      disconnect()
+    })
+
+    it('forceReconnect 无 token（未登录）时不动作', async () => {
+      const { service } = await createService()
+
+      service.forceReconnect()
+      expect(instances.length).toBe(0)
+    })
+
+    it('连续失败达上限后退避恒为 30s 且不放弃（持续按上限重试）', async () => {
+      const { service, connect, disconnect } = await createService()
+
+      // 票据持续签发失败：真实失败链把退避推到触顶（4s×2^n 封顶 30s）。
+      // finally 恢复默认签发——afterEach 的 restoreAllMocks 不还原 vi.fn 的
+      // 持久实现，泄漏会让后续车道永远连不上。
+      const originalTicket = mockFetchWsTicket.getMockImplementation()
+      const attemptTimes: number[] = []
+      mockFetchWsTicket.mockImplementation(async () => {
+        attemptTimes.push(Date.now())
+        throw new Error('net down')
+      })
+      try {
+        connect('token-a')
+        let guard = 0
+        while (attemptTimes.length < 30 && guard++ < 6000) {
+          await vi.advanceTimersByTimeAsync(1000)
+        }
+        expect(attemptTimes.length).toBe(30)
+
+        // 触顶后单次重连间隔不超过 30s：29s 无新尝试，30s 必有（无限重试不放弃）
+        const count = attemptTimes.length
+        await vi.advanceTimersByTimeAsync(29_000)
+        expect(attemptTimes.length).toBe(count)
+        await vi.advanceTimersByTimeAsync(1_000 + 100)
+        expect(attemptTimes.length).toBe(count + 1)
+      } finally {
+        if (originalTicket) mockFetchWsTicket.mockImplementation(originalTicket)
+      }
 
       disconnect()
     })

@@ -1,7 +1,9 @@
 workspace:
   # 工作空间基目录（所有 worktree/container/plain 工作区的父目录）。
-  # 相对路径相对项目根解析（隔离插件 get_workspace_base_dir 的代码缺省即
-  # ".ai_workspaces"）；绝对路径原样使用。禁止把开发者本机绝对路径入库。
+  # 相对路径锚点按形态：dev 相对项目根；装机形态相对用户根
+  # （user_space.user_root()，卸载抹除面之外——BUG-85 同款动因；
+  # 隔离插件 get_workspace_base_dir 的代码缺省即 ".ai_workspaces"）；
+  # 绝对路径原样使用。禁止把开发者本机绝对路径入库。
   # root 指到仓库内位置时无需手工配 .gitignore：解析本根时系统自动把实际
   # 路径写入 .git/info/exclude（本地排除，不入库，随 root 改配动态跟随）；
   # .gitignore 里的 ".ai_workspaces/" 只是缺省值的静态兜底。

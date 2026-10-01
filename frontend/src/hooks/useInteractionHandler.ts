@@ -160,6 +160,7 @@ async function parseInteractionEvent(
     createdAt: (inner.created_at as string) || undefined,
     timestamp: new Date().toISOString(),
     agentLevel: rawAgentLevel || undefined,
+    agentName: (inner.agent_name as string) || undefined,
     fileContents,
     sessionId,
   }
@@ -367,10 +368,36 @@ export function useInteractionHandler(sessionId: string | undefined) {
 
     globalWS.subscribe(WS_LOCAL_EVENTS.STATUS, handleWsStatusChange)
 
+    /**
+     * 审批已在他端结算（approval.taken；多前端并发应答对账，ADR 2026-10-01
+     * 决策 5）：按 request_id 清除本地 pending 交互并提示"已在别处处理"。
+     * 本页没有该 pending 卡时静默（对账提示只面向持卡端，不无故打扰）。
+     */
+    const handleApprovalTaken = (data: Record<string, unknown>) => {
+      const inner = (data.data as Record<string, unknown>) || data
+      const requestId = typeof inner.request_id === 'string' ? inner.request_id : ''
+      if (!requestId) return
+      const existed = useInteractionStore
+        .getState()
+        .pendingInteractions.some((i) => i.requestId === requestId)
+      if (!existed) return
+      dismissInteraction(requestId)
+      useNotificationStore.getState().addNotification({
+        title: '审批已在别处处理',
+        message: '该审批已在其他前端页面处理，本页卡片已同步关闭。',
+        priority: 'normal',
+        category: 'info',
+        isBlocking: false,
+        autoDismissMs: 8000,
+        sourceLabel: '审批',
+      })
+    }
+
     globalWS.subscribe(
       WS_SERVER_EVENTS.INTERACTION_REQUEST,
       handleInteractionRequest,
     )
+    globalWS.subscribe(WS_SERVER_EVENTS.APPROVAL_TAKEN, handleApprovalTaken)
     // WS 重连后恢复 pending 交互（断线期间可能错过推送，或刷新后内存已清空）
     globalWS.subscribe(WS_LOCAL_EVENTS.RECONNECTED, restorePendingInteractions)
 
@@ -388,6 +415,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
       clearInterval(pendingPollTimer)
       globalWS.unsubscribe(WS_LOCAL_EVENTS.STATUS, handleWsStatusChange)
       globalWS.unsubscribe(WS_SERVER_EVENTS.INTERACTION_REQUEST, handleInteractionRequest)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.APPROVAL_TAKEN, handleApprovalTaken)
       globalWS.unsubscribe(WS_LOCAL_EVENTS.RECONNECTED, restorePendingInteractions)
       _isSubscribed = false
     }

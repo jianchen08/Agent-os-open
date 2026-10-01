@@ -330,3 +330,47 @@ describe("VisibilityRecovery：巡检路径", () => {
     expect(counters.hide).toBe(0);
   });
 });
+
+describe("VisibilityRecovery：诊断落盘与读取超时", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("微抖链决策点逐行上报 sink（nudge-start/attempt/result）", async () => {
+    const lines: string[] = [];
+    const { win } = makeFakeWindow({ states: ["hidden", "hidden", "visible"] });
+    const recovery = new VisibilityRecovery(win, {
+      delay: immediateDelay,
+      sink: (l) => lines.push(l),
+    });
+    recovery.onWindowShown();
+    await vi.advanceTimersByTimeAsync(1500);
+
+    const events = lines.map((l) => l.split(" ")[1]);
+    expect(events).toContain("nudge-start");
+    expect(events).toContain("nudge-attempt");
+    expect(events).toContain("nudge-result");
+    expect(lines.every((l) => l.length > 0)).toBe(true);
+  });
+
+  it("读取超时：永挂的渲染层查询被超时截断为 null，不微抖且 sink 留痕", async () => {
+    const lines: string[] = [];
+    const { win } = makeFakeWindow({ states: [] });
+    const recovery = new VisibilityRecovery(win, {
+      delay: immediateDelay,
+      sink: (l) => lines.push(l),
+      readTimeoutMs: 20,
+      readRendererState: () => new Promise<string | null>(() => {}),
+    });
+    recovery.onWindowShown();
+    await vi.advanceTimersByTimeAsync(1500 + 20);
+
+    const events = lines.map((l) => l.split(" ")[1]);
+    expect(events).toContain("read-timeout");
+    expect(lines.some((l) => l.includes("nudge-attempt"))).toBe(false);
+  });
+});

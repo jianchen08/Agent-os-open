@@ -2,7 +2,8 @@
 // @feature: FP-0.2.八 多租户 | @ci: rust-test
 //!
 //! 承接 0.1 `src/channels/websocket/` 全部职责，Rust 重写。模块对应：
-//! - [`connection_registry`]：user_id/thread_id → 连接，单连接踢旧（B10）
+//! - [`connection_registry`]：user_id/thread_id → 连接，多端并存 + 配额超限踢旧
+//!   （ADR 2026-10-01-multi-frontend-connection）
 //! - [`auth`]：token 校验，握手拒绝码（4001）
 //! - [`event_bus`]：FrontendEventBus，唯一出口 `push_to_*`，背压 + per-plugin 限流
 //! - [`replay`]：per-thread 环形缓冲，断线重放 + 溢出 `resync_required`（B9 交互族不进重放）
@@ -35,11 +36,11 @@ pub trait EventSink: Send + Sync {
     /// 异步发送一条文本消息，返回是否成功（失败 = 连接已断/发送超时）。
     async fn send_text(&self, text: &str) -> bool;
 
-    /// 返回 sink 的唯一身份标识（用于连接注册表去重/踢旧比较）。
+    /// 返回 sink 的唯一身份标识（连接注册表去重/超限踢旧 LRU 比较用）。
     fn id(&self) -> u64;
 
-    /// 关闭底层连接。B10 踢旧时必须调用——否则旧 socket 残留为幽灵连接
-    /// （收不到事件也断不开），对端批量断连时才集中暴露。
+    /// 关闭底层连接。每 user 连接数超限踢最旧时必须调用——否则旧 socket
+    /// 残留为幽灵连接（收不到事件也断不开），对端批量断连时才集中暴露。
     /// 默认空实现，测试 mock sink 无需实现。
     fn shutdown(&self) {}
 

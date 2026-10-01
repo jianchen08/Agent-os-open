@@ -25,7 +25,7 @@ interface PendingMessage {
 type EventHandler = (data: any) => void
 
 const RECONNECT_BASE_DELAY = 4_000
-const RECONNECT_MAX_DELAY = 60_000
+const RECONNECT_MAX_DELAY = 30_000
 const RECONNECT_MAX_RETRIES = 30
 const HEARTBEAT_INTERVAL = 30_000
 // 判死阈值 = pong 新鲜度上限：距最近一次心跳 ack 超过 90s（连续 3 个 30s 周期
@@ -75,11 +75,12 @@ class GlobalWebSocketService {
    */
   private _refreshingForReconnect: boolean = false
   /**
-   * 被 4000 踢旧标记：本页连接被同一账号的新连接替换（B10 单连接）。
+   * 被 4000 踢旧标记：本页连接被超限踢旧替换（同账号连接数已满，最旧连接
+   * 被替换——ADR 2026-10-01 多前端连接：配额内多端并存不踢，仅超限触发）。
    *
-   * 内核踢旧会发带 4000 状态码的 Close 帧；onclose(4000) 置位后，任何自动
+   * 内核超限踢旧会发带 4000 状态码的 Close 帧；onclose(4000) 置位后，任何自动
    * 重连路径（visibilitychange 回前台、router token 变化等）都不得再 connect
-   * ——否则 A/B 两页互相踢旧重连形成互踢环（双客户端风暴的残余
+   * ——否则被踢端退避重连后再度超限被踢，形成循环（双客户端风暴的残余
    * 触发源）。刷新页面（新模块实例）或登出（disconnect 复位）后恢复。
    */
   private _kickedByReplacement: boolean = false
@@ -114,7 +115,7 @@ class GlobalWebSocketService {
     return this._hasAttemptedConnect
   }
 
-  /** 本页是否被新连接替换（4000 踢旧）：true 时自动路径不得重连。 */
+  /** 本页是否被超限踢旧替换（4000 踢旧）：true 时自动路径不得重连。 */
   wasKickedByReplacement(): boolean {
     return this._kickedByReplacement
   }
@@ -136,10 +137,11 @@ class GlobalWebSocketService {
       _wsLogger.debug('[GlobalWS] 正在刷新 token 重连，跳过外部 connect（避免用过期 token 打断 refresh）')
       return
     }
-    // 被 4000 踢旧（本页已被其他连接替换）：禁止自动重连，否则会反过来踢掉
-    // 当前持有者，形成互踢环。用户刷新页面（新实例）或登出（disconnect 复位）后恢复。
+    // 被 4000 踢旧（本页已被超限踢旧替换）：禁止自动重连，否则重连后再度
+    // 超限又踢掉当前持有者，形成循环。用户刷新页面（新实例）或登出
+    // （disconnect 复位）后恢复。
     if (this._kickedByReplacement) {
-      _wsLogger.debug('[GlobalWS] 本页被新连接替换(code=4000)，跳过自动重连（刷新页面可恢复）')
+      _wsLogger.debug('[GlobalWS] 本页被超限踢旧(code=4000)，跳过自动重连（刷新页面可恢复）')
       return
     }
     if (this._status === 'connected') {
@@ -243,6 +245,7 @@ class GlobalWebSocketService {
       useLayoutModeStore.getState().updateConnectionStatus({
         state: 'connected',
         lastConnectedAt: new Date().toISOString(),
+        reconnectAttempt: 0,
       })
     }
 
@@ -271,9 +274,10 @@ class GlobalWebSocketService {
           _wsLogger.warn('[GlobalWS] 收到 resync_required，触发全量消息重同步')
           this._emit('resync_required', data)
         }
-        // 应用层踢旧通知（内核踢旧两段式：kicked 文本帧先于 Close(4000) 送达）。
-        // 代理链可能吞掉 Close 帧状态码（浏览器端退化为 1006），文本帧先行送达
-        // 即可置位防重连，避免 A/B 双客户端互踢循环——处置与 onclose(4000) 一致。
+        // 应用层踢旧通知（内核超限踢旧两段式：kicked 文本帧先于 Close(4000)
+        // 送达）。代理链可能吞掉 Close 帧状态码（浏览器端退化为 1006），文本帧
+        // 先行送达即可置位防重连，避免被踢端重连后再超限循环——处置与
+        // onclose(4000) 一致。
         if (data.type === 'kicked') {
           this._handleKickedByReplacement()
           return
@@ -341,7 +345,7 @@ class GlobalWebSocketService {
       }
 
       // 应用层 kicked 帧已先行置位（Close 帧被代理吞掉状态码、浏览器端退化为
-      // 1006 的场合）：本页已被替换，任何掉线路径都不得重连
+      // 1006 的场合）：本页已被超限踢旧替换，任何掉线路径都不得重连
       if (this._kickedByReplacement) {
         return
       }
@@ -385,6 +389,19 @@ class GlobalWebSocketService {
     this._userInputTimers.forEach((armed) => clearTimeout(armed.timer))
     this._userInputTimers.clear()
     this._handlers.clear()
+  }
+
+  /**
+   * 手动立即重连（断开横幅降级态「立即重连」按钮的唯一入口）：不等退避计时
+   * 到点，用当前 token 立即发起一次连接尝试。用户显式介入解除 refresh 等待期
+   * 对 connect 的封锁（该封锁只针对自动路径防 4001 打断刷新；tokenLifecycle
+   * 的 refresh 单飞互斥，与在途刷新并发最终收敛于 connect 的幂等守卫）。
+   * 无 token（未登录）时不动作。重连成功/失败后仍走既有自动重连状态机。
+   */
+  forceReconnect(): void {
+    if (!this._token) return
+    this._refreshingForReconnect = false
+    this.connect(this._token)
   }
 
   sendUserInput(threadId: string, content: string, opts?: {
@@ -727,9 +744,10 @@ class GlobalWebSocketService {
    * 清空滞留队列、广播 kicked_by_replacement。幂等——kicked 帧与 Close(4000)
    * 先后到达时只处置一次。
    *
-   * 被踢页面已永久失联：滞留队列的消息永远不会发出（连接不再重建），立即
-   * 清空并撤销其排队超时计时，再广播让 UI 明示用户——否则静默装死，用户
-   * 以为页面在线，实际消息全部黑洞。
+   * 多前端连接下仅超限触发（同账号连接数已满，LRU 踢最旧）；被踢页面已
+   * 永久失联：滞留队列的消息永远不会发出（连接不再重建），立即清空并撤销
+   * 其排队超时计时，再广播让 UI 明示用户——否则静默装死，用户以为页面在线，
+   * 实际消息全部黑洞。
    */
   private _handleKickedByReplacement(): void {
     if (this._kickedByReplacement) return
@@ -737,21 +755,16 @@ class GlobalWebSocketService {
     this._queue = []
     this._userInputTimers.forEach((armed) => clearTimeout(armed.timer))
     this._userInputTimers.clear()
-    _wsLogger.info('[GlobalWS] 被新连接替换，跳过重连')
+    _wsLogger.info('[GlobalWS] 被超限踢旧（连接数已满），跳过重连')
     this._emit(WS_LOCAL_EVENTS.KICKED_BY_REPLACEMENT, {
       type: WS_LOCAL_EVENTS.KICKED_BY_REPLACEMENT,
-      data: { reason: '本页连接已被同账号的其他页面替换' },
+      data: { reason: '连接数已满，最旧连接被替换' },
     })
   }
 
   /** 调度重连 - true：需先刷新 token 再连；刷新真失效则登出并停止重连。 */
   private _scheduleReconnect(authRejected: boolean = false): void {
     if (this._disposed) return
-
-    // 标记为重连中，更新 UI 状态
-    this._status = 'reconnecting'
-    this._emit(WS_LOCAL_EVENTS.STATUS, { status: 'reconnecting' })
-    useLayoutModeStore.getState().updateConnectionStatus({ state: 'reconnecting' })
 
     let delay: number
     if (this._reconnectAttempts >= RECONNECT_MAX_RETRIES) {
@@ -765,6 +778,14 @@ class GlobalWebSocketService {
     }
     this._reconnectAttempts++
     _wsLogger.info('[GlobalWS] %dms 后重连（第 %d 次, authRejected=%s）', delay, this._reconnectAttempts, authRejected)
+    // 标记为重连中，更新 UI 状态：带上累计尝试次数，供断开横幅呈现
+    // 「正在重连（第 N 次）」动态进度与降级阈值（RECONNECT_DEGRADE_ATTEMPTS）判定
+    this._status = 'reconnecting'
+    this._emit(WS_LOCAL_EVENTS.STATUS, { status: 'reconnecting' })
+    useLayoutModeStore.getState().updateConnectionStatus({
+      state: 'reconnecting',
+      reconnectAttempt: this._reconnectAttempts,
+    })
     // 认证拒绝需先 refresh：置标志，防止退避期间外部 connect(oldToken) 打断 refresh
     if (authRejected) {
       this._refreshingForReconnect = true

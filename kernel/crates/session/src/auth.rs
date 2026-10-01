@@ -7,8 +7,10 @@
 pub const REJECT_CODE_NO_TOKEN: u16 = 4001;
 /// 拒绝码：token 无效或已过期。
 pub const REJECT_CODE_INVALID_TOKEN: u16 = 4001;
-/// 踢旧关闭码：本账号被新连接替换（B10 单连接，前端 GlobalWebSocket 对 4000
-/// 判"被新连接替换"跳过重连——与前端协议码对齐，防止双客户端互踢风暴）。
+/// 踢旧关闭码：本账号连接数超限被 LRU 踢最旧（ADR 2026-10-01 多前端连接：
+/// 配额内多端并存不踢，仅超限触发；沿用既有两段式协议——kicked 文本帧先于
+/// Close 4000。前端 GlobalWebSocket 对 4000 判"被替换"跳过重连——与前端协议
+/// 码对齐，防止双客户端互踢风暴）。
 pub const CLOSE_CODE_KICKED: u16 = 4000;
 
 /// 握手鉴权结果。

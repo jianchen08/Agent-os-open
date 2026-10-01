@@ -208,6 +208,11 @@ rules:
   # 正则匹配 D:/、D:\、C:\Users 等盘符绝对路径；负向后视 (?<![A-Za-z0-9])
   # 限定盘符单字母前非字母数字——http:// 的 p:/ 这类 URL scheme 片段不误命中
   # （否则白名单内 grep "http://..." 的良性只读也被弹审批）。
+  # workspace_boundary_exempt: true —— 匹配面剔除用户根 workspaces 地界内路径
+  #（ADR 2026-10-01-workspace-root-user-root-anchor）：工作空间根迁
+  # <user_root>/workspaces 后，地界内盘符路径是 agent 合法工作区而非"宿主
+  # 路径"（真机 2026-10-01 实证：cd 进自己工作空间即命中 → 连续拒绝 → bash
+  # 熔断）。边界单源 zone_policy（与位置闸同锚定）；安装目录/系统目录仍命中。
   # priority: 1 —— 位置闸优先级高于白名单（默认 0）：引擎按优先级裁决 allow 与
   # 拦截并存，平级 allow 生效（白名单豁免关键词子串噪音），高优先级审批不被掩蔽。
   - name: "host_path_access"
@@ -215,6 +220,7 @@ rules:
     params: ["command", "working_dir"]
     action: needs_approval
     priority: 1
+    workspace_boundary_exempt: true
     patterns:
       - type: regex
         value: "(?<![A-Za-z0-9])[A-Za-z]:[\\\\/]"

@@ -66,7 +66,15 @@ def _mock_approval(selected: str = "approved_once") -> Any:
             requests.append(dict(params))
             return {"request_id": f"req-{len(requests)}"}
         if name == "wait_for_choice":
-            return {"selected_option": selected}
+            # 按 human 归一点后的形状回放：规范 id + 封闭语义（消费端只读语义）
+            return {
+                "selected_option": selected,
+                "selected_semantics": {
+                    "approved_once": "approve_once",
+                    "approved_remember": "approve_and_remember",
+                    "denied": "deny",
+                }.get(selected, "cancel"),
+            }
         raise AssertionError(f"unexpected cap.call: {name}")
 
     fake_cap = AsyncMock()
@@ -343,17 +351,29 @@ class TestDispatchShortCircuits:
         _clear_session_modes()
 
     @pytest.mark.asyncio
-    async def test_read_only_tool_skips_dangerous_judgment(self) -> None:
-        """file_read 属只读白名单：即使参数命中危险声明也不弹审批。"""
+    async def test_read_only_tool_declaration_derived_exempt(self) -> None:
+        """免审判定=声明推导（ADR 2026-10-01 决策 5）：file_read 参数未命中
+        dangerous_operations 声明 → 免审放行（旧 _READ_ONLY_TOOLS 名单退役，
+        豁免由"无声明命中"推导，不再按工具名单）。"""
         svc = _mock_approval()
         p = _make_plugin()
         p._dangerous_ops_by_tool["file_read"] = ["read:/data/secret/"]
-        result = await p.execute(_ctx(_tool_state("file_read", {"path": "/data/secret/x"})))
-        assert len(svc.requests) == 0, "只读白名单工具不得发起审批"
+        result = await p.execute(_ctx(_tool_state("file_read", {"path": "/workspace/normal/x"})))
+        assert len(svc.requests) == 0, "参数未命中声明 → 免审放行"
         assert _decision_view(result) == {
             "allowed": True,
             "reason": "all checks passed",
         }
+
+    @pytest.mark.asyncio
+    async def test_declared_hit_enters_rule_track_in_degraded_rules(self) -> None:
+        """参数命中声明 → 进规则轨道：降级保守审批兜底（声明命中的读取按危险处置）。"""
+        svc = _mock_approval()
+        p = _make_plugin()
+        p._dangerous_ops_by_tool["file_read"] = ["read:/data/secret/"]
+        result = await p.execute(_ctx(_tool_state("file_read", {"path": "/data/secret/x"})))
+        assert len(svc.requests) == 1, "声明命中且规则缺位 → 降级保守审批"
+        assert _decision_view(result)["allowed"] is True
 
     @pytest.mark.asyncio
     async def test_allow_rule_whitelists_dangerous_tool(self) -> None:

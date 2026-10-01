@@ -366,3 +366,150 @@ class TestRulePriorityAdjudication:
             action, rule = plugin._match_rules("bash_execute", {"command": "probe"})
         assert (action, rule) == ("allow", "safe"), "非法 priority 按 0 处理 → 平级 allow"
         assert any("Invalid priority" in r.getMessage() for r in caplog.records)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 2026-10-01 用户根工作空间地界误报修复（ADR 2026-10-01-workspace-root-
+# user-root-anchor）：规则轨道放行合法工作区命令，安装/系统目录仍拦
+# ═══════════════════════════════════════════════════════════════
+
+_USER_ROOT = "C:\\Users\\alice\\AppData\\Roaming\\agentos"
+_WS_ROOT = _USER_ROOT + "\\workspaces"
+
+
+@pytest.fixture
+def pinned_user_root(monkeypatch: pytest.MonkeyPatch) -> str:
+    """用户根钉到典型装机形态（user_root() 每次调用读 env，目录无需真实存在）。"""
+    monkeypatch.setenv("AGENTOS_USER_ROOT", _USER_ROOT)
+    return _USER_ROOT
+
+
+class TestWorkspaceBoundaryExemption:
+    """host_path_access 匹配面剔除用户根 workspaces 地界内路径。
+
+    误报机制（真机 2026-10-01 实证）：工作空间根迁 <user_root>/workspaces 后，
+    agent 在自己工作空间跑 bash——命令/working_dir 里的地界内盘符路径照旧
+    命中 host_path_access（priority 1）→ 连续拒绝 → tool_fail_loop 熔断 bash。
+    立法本意是拦安装目录/系统目录等真宿主路径，地界内是合法工作区。
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cd " + _WS_ROOT + "\\01ed89f3952e && pytest -x tests/",  # Windows 形态
+            # WSL 形态（真机事故原样形态：agent cd 进自己工作空间跑测试）
+            "cd /mnt/c/Users/alice/AppData/Roaming/agentos/workspaces/01ed89f3952e"
+            " && python -m pytest tests/ -x",
+        ],
+    )
+    def test_workspace_cd_command_released_by_rule_track(
+        self, pinned_user_root: str, command: str
+    ) -> None:
+        """地界内盘符路径不命中任何规则（cd 非白名单命令 → action 空 = 默认档放行）。"""
+        plugin = _make_plugin()
+        assert plugin._match_rules("bash_execute", {"command": command}) == ("", "")
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat " + _WS_ROOT + "\\t01\\report.md",  # 工作区内文件只读
+            "ls " + (_WS_ROOT + "/t01/out.log").lower(),  # 小写盘符 + 正斜杠变体
+        ],
+    )
+    def test_workspace_read_command_hits_allow(
+        self, pinned_user_root: str, command: str
+    ) -> None:
+        """地界内路径剔除后只剩白名单命令 → safe_commands 平级 allow 放行。"""
+        plugin = _make_plugin()
+        assert plugin._match_rules("bash_execute", {"command": command}) == (
+            "allow",
+            "safe_commands",
+        )
+
+    def test_workspace_working_dir_alone_hits_allow(
+        self, pinned_user_root: str
+    ) -> None:
+        """working_dir 单独指向工作空间 → 剔除后只剩白名单命令，allow 放行。"""
+        plugin = _make_plugin()
+        args = {"command": "ls -la", "working_dir": _WS_ROOT + "\\01ed89f3952e"}
+        assert plugin._match_rules("bash_execute", args) == ("allow", "safe_commands")
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "ls D:\\agentos-r297-main\\resources\\app",  # 安装目录（真宿主程序区）
+            # 混合命令：地界内路径剔除后安装目录路径仍命中
+            "cd " + _WS_ROOT + "\\t01 && ls D:\\agentos-r297-main\\resources",
+            "cat C:\\Windows\\System32\\drivers\\etc\\hosts",  # 系统目录
+            "ls " + _WS_ROOT + "-backup\\x",  # 地界兄弟目录（同名前缀）不是地界
+            "ls " + _USER_ROOT + "\\plugins\\foo",  # 用户根其他区（非 workspaces 子树）
+            "ls " + _WS_ROOT + "X\\file",  # 地界名后紧跟单词字符（前缀伪匹配不豁免）
+        ],
+    )
+    def test_install_and_system_dirs_still_blocked(
+        self, pinned_user_root: str, command: str
+    ) -> None:
+        plugin = _make_plugin()
+        assert plugin._match_rules("bash_execute", {"command": command}) == (
+            "needs_approval",
+            "host_path_access",
+        )
+
+    def test_user_root_absent_shrinks_exemption(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """用户根不可得（AGENTOS_USER_ROOT 与 OS 目录均缺）→ 豁免收缩 fail-closed。"""
+        monkeypatch.delenv("AGENTOS_USER_ROOT", raising=False)
+        monkeypatch.delenv("APPDATA", raising=False)
+        plugin = _make_plugin()
+        args = {"command": "ls " + _WS_ROOT + "\\t01"}
+        assert plugin._match_rules("bash_execute", args) == (
+            "needs_approval",
+            "host_path_access",
+        )
+
+
+class TestKeywordWordBoundary:
+    """带首尾空白的关键词按整词匹配——"at " 不再以二元子串误伤 AppData。
+
+    "at " 的立法对象是 at 调度器；argv 归一化吃掉尾空格后退化为子串 "at"，
+    工作空间根迁用户根后命令常驻 AppData 路径，WSL 形态 cd 命令即被连续误拒
+    （真机 2026-10-01，与 host_path_access 并列的第二条误报轨道）。
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "at now -f /tmp/job",  # at 调度器仍命中
+            "echo x && at -l",  # 组合命令中的 at 仍命中
+        ],
+    )
+    def test_at_scheduler_still_detected(self, command: str) -> None:
+        plugin = _make_plugin()
+        assert plugin._match_rules("bash_execute", {"command": command}) == (
+            "needs_approval",
+            "dangerous_commands",
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # AppData 片段（新工作空间根常驻路径）不再被二元子串误伤
+            "cd /mnt/c/Users/alice/AppData/Roaming/agentos/workspaces/t01 && pytest",
+            # cat/stat 的 "at " 裸子串兜底仍命中，但 safe_commands 平级 allow
+            # 豁免（既有语义，行为不变）
+            "cat " + _WS_ROOT + "\\t01\\data.csv",
+            "stat report.md",
+        ],
+    )
+    def test_appdata_bigram_not_detected(self, pinned_user_root: str, command: str) -> None:
+        action, _ = _make_plugin()._match_rules("bash_execute", {"command": command})
+        assert action in ("", "allow")
+
+    def test_curl_variant_still_detected_by_raw_substring(self) -> None:
+        """带空白模式的字符变体（"scurl "）经裸子串兜底仍命中（fail-closed 不收口）。"""
+        plugin = _make_plugin()
+        assert plugin._match_rules("bash_execute", {"command": "scurl http://x"}) == (
+            "needs_approval",
+            "dangerous_commands",
+        )

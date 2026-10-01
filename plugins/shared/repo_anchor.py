@@ -116,6 +116,12 @@ def repo_write_denied(resolved: Path) -> str | None:
     路径：workspace/project_root 锚内写不经本判定（任务工作区常驻仓库
     ``.ai_workspaces``，锚内行为保持现状，不新开也不收口）。
 
+    ``.ai_workspaces/sessions/`` 会话子树豁免：会话登记项目工作树常驻其下
+    （sessions/thread-*/projects/*），对根锚不在同树的任务管道而言是"自己
+    的项目"，不豁免则撞硬拒且不可授权（无卡路径）。豁免后落入写区链正常
+    判定（名单/根锚/授权卡），跨会话污染防线不变：无授权依旧写不进其他
+    会话工作树。任务运行时面（.ai_workspaces/<task_id>）不在豁免内，恒拒。
+
     Returns:
         拒绝原因；None = 不拒绝（不在仓库根内，或在一等源码/文档区）。
     """
@@ -128,6 +134,8 @@ def repo_write_denied(resolved: Path) -> str | None:
         return None
     first = rel.parts[0] if rel.parts else ""
     if first in REPO_READ_DENIED_DIRS:
+        if first == ".ai_workspaces" and len(rel.parts) >= 2 and rel.parts[1] == "sessions":
+            return None
         return (
             f"路径位于仓库 {first}/ 目录（运行时/产物区，不可写），"
             "写操作被拒绝；写区覆盖仓库源码与文档目录"

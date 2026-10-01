@@ -62,6 +62,8 @@ class _RecorderNotifier:
         self.timeout_calls: list[tuple[str, str]] = []
         self.reminder_calls: list[dict[str, Any]] = []
         self.conversation_calls: list[dict[str, Any]] = []
+        self.settled_calls: list[dict[str, Any]] = []
+        self.anomaly_calls: list[dict[str, Any]] = []
         self.fail_reminder = False
 
     async def notify_request(self, request: Any) -> bool:
@@ -120,6 +122,31 @@ class _RecorderNotifier:
                 "initial_message": initial_message,
                 "suggestions": suggestions,
             }
+        )
+        return True
+
+    async def notify_settled(
+        self, request_id: str, *,
+        response_type: str, selected_option: str | None, selected_semantics: str,
+        session_id: str = "", thread_id: str = "",
+    ) -> bool:
+        self.settled_calls.append(
+            {
+                "request_id": request_id,
+                "response_type": response_type,
+                "selected_option": selected_option,
+                "selected_semantics": selected_semantics,
+                "session_id": session_id,
+                "thread_id": thread_id,
+            }
+        )
+        return True
+
+    async def notify_anomaly(
+        self, request_id: str, *, anomaly: str, detail: str, thread_id: str = "",
+    ) -> bool:
+        self.anomaly_calls.append(
+            {"request_id": request_id, "anomaly": anomaly, "detail": detail, "thread_id": thread_id}
         )
         return True
 
@@ -267,6 +294,7 @@ async def test_wait_for_choice_approved_returns_full_response(make_svc: Any) -> 
         "request_id": rid,
         "response_type": "approved",
         "selected_option": "批准",
+        "selected_semantics": "",
         "answers": ["a1"],
         "feedback": "同意",
     }
@@ -1002,8 +1030,9 @@ async def test_approval_does_not_arm_reject_memory(make_svc: Any) -> None:
     assert rid3 in svc._pending_events
 
 
-async def test_timeout_verdict_also_blocks_repop(make_svc: Any, svc_mod: Any) -> None:
-    """超时=拒绝裁决：choice 超时同样武装拒绝记忆，重试不再弹卡。"""
+async def test_timeout_does_not_arm_reject_memory(make_svc: Any, svc_mod: Any) -> None:
+    """拒绝记忆降格（ADR 2026-10-01 决策 6）：超时 ≠ 用户拒绝，不武装记忆——
+    重试正常弹卡（超时=拒绝裁决的语义只作用于本次 wait，不跨请求放大）。"""
     svc, notifier = make_svc(choice_max_wait_seconds=0.1, reject_memory_ttl_seconds=60)
     rid1 = await svc.create_choice_request(
         "s1", "t1", "tab1", "审批", options=_approval_options(), timeout_seconds=0.1,
@@ -1014,9 +1043,10 @@ async def test_timeout_verdict_also_blocks_repop(make_svc: Any, svc_mod: Any) ->
     rid2 = await svc.create_choice_request(
         "s1", "t1", "tab1", "审批", options=_approval_options(), timeout_seconds=30,
     )
-    assert len(notifier.request_calls) == 1  # 超时后重试不弹卡
-    with pytest.raises(svc_mod.InteractionDeniedError):
-        await svc.wait_for_choice(rid2, timeout=5)
+    assert len(notifier.request_calls) == 2, "超时后重试必须弹卡（超时不武装记忆）"
+    record = await svc.get_request(rid2)
+    assert record is not None, "超时后重试请求必须存在"
+    assert record["status"] == "pending"
 
 
 async def test_reject_memory_expires_after_ttl(make_svc: Any) -> None:
@@ -1080,10 +1110,11 @@ async def test_wait_resolves_immediately_for_predenied_request(make_svc: Any, sv
         "s1", "t1", "tab1", "审批", options=_approval_options(), timeout_seconds=30,
     )
     await svc.submit_response(rid1, "answered", selected_option="拒绝执行")
-    # 已终态请求再 wait：直读已存响应（answered 原样返回，与并发等待同形）
+    # 已终态请求再 wait：直读已存响应——label 词形已归一为规范 id + 语义落记录
     resp = await svc.wait_for_choice(rid1, timeout=5)
     assert resp["response_type"] == "answered"
-    assert resp["selected_option"] == "拒绝执行"
+    assert resp["selected_option"] == "denied", "label 提交归一为规范选项 id"
+    assert resp["selected_semantics"] == "deny", "拒绝选项按声明/回退表归一语义"
 
     # 取消终态 + 无 response：收敛为取消而非超时（异标题避开拒绝记忆）
     rid2 = await svc.create_choice_request("s1", "t1", "tab1", "审批B", timeout_seconds=30)
@@ -1148,18 +1179,22 @@ async def test_reject_memory_disablable_via_ttl_zero(
     assert rid2 in svc._pending_events
 
 
-def test_is_denial_submission_tolerates_malformed_options(svc_mod: Any) -> None:
-    """拒绝选项判定对畸形 options 容错：非 dict 条目跳过、空选中值非拒绝。"""
+def test_normalize_selection_tolerates_malformed_options(svc_mod: Any) -> None:
+    """语义归一对畸形 options 容错：非 dict 条目跳过；id/label 命中即归一；空词形透传。"""
     record = {
         "message_data": {
             "options": ["not-a-dict", {"id": "denied", "label": "拒绝执行"}],
         },
     }
-    is_denial = svc_mod.HumanInteractionService._is_denial_submission
-    assert is_denial(record, "answered", "拒绝执行") is True
-    assert is_denial(record, "answered", "denied") is True  # 按 id 命中
-    assert is_denial(record, "answered", "") is False
-    assert is_denial(record, "answered", "仅本次执行") is False
+    normalize = svc_mod.HumanInteractionService._normalize_selection
+    assert normalize(record, "拒绝执行") == ("denied", "deny", True)  # label 命中 → id + 语义
+    assert normalize(record, "denied") == ("denied", "deny", True)  # id 命中
+    assert normalize(record, "") == ("", "", True)  # 空词形不归一
+    assert normalize(record, "仅本次执行") == (
+        "仅本次执行",
+        "cancel",
+        False,
+    )  # 未命中任何选项/别名 → 未知词形（调用方按取消+告警）
 
 
 async def test_env_config_overrides_defaults(
@@ -1203,3 +1238,191 @@ async def test_wait_for_conversation_arrival_states(make_svc: Any) -> None:
     assert await svc.wait_for_conversation_arrival(rid2, timeout=5) == {
         "status": "arrived", "message": "用户已到达对话页面",
     }
+
+
+# ════════════════════════════════════════════════════════════
+# ADR 2026-10-01 语义归一点 / response_type fail-closed / 结算广播
+# ════════════════════════════════════════════════════════════
+
+
+def _contract_approval_options() -> list[dict[str, str]]:
+    """契约审批卡选项（security_check 新形：声明 semantics）。"""
+    return [
+        {"id": "approved_once", "label": "仅本次执行", "semantics": "approve_once"},
+        {"id": "approved_remember", "label": "本管道内同命令免批", "semantics": "approve_and_remember"},
+        {"id": "denied", "label": "拒绝执行", "semantics": "deny"},
+    ]
+
+
+def _contract_grant_options(axis: str) -> list[dict[str, str]]:
+    """契约授权卡选项（写/读两轴各一组，区分度输入）。"""
+    if axis == "write":
+        return [
+            {"id": "pipeline", "label": "仅本管道", "semantics": "grant_write"},
+            {"id": "permanent", "label": "永久写入配置", "semantics": "grant_write_permanent"},
+        ]
+    return [
+        {"id": "pipeline", "label": "仅本管道", "semantics": "grant_read"},
+        {"id": "permanent", "label": "永久读取配置", "semantics": "grant_read_permanent"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("options", "raw", "want_id", "want_sem"),
+    [
+        # 审批卡：id / label / 历史别名 三词形同一归一落点
+        (_contract_approval_options(), "approved_once", "approved_once", "approve_once"),
+        (_contract_approval_options(), "仅本次执行", "approved_once", "approve_once"),
+        (_contract_approval_options(), "approve", "approved_once", "approve_once"),
+        (_contract_approval_options(), "approved", "approved_once", "approve_once"),
+        (_contract_approval_options(), "拒绝执行", "denied", "deny"),
+        (_contract_approval_options(), "本管道内同命令免批", "approved_remember", "approve_and_remember"),
+        # 授权卡写轴
+        (_contract_grant_options("write"), "pipeline", "pipeline", "grant_write"),
+        (_contract_grant_options("write"), "永久写入配置", "permanent", "grant_write_permanent"),
+        # 授权卡读轴（同 label 词形按创建方声明归一出不同语义）
+        (_contract_grant_options("read"), "仅本管道", "pipeline", "grant_read"),
+        (_contract_grant_options("read"), "permanent", "permanent", "grant_read_permanent"),
+    ],
+)
+async def test_semantics_declared_card_normalizes_all_word_forms(
+    make_svc: Any, options: list[dict[str, str]], raw: str, want_id: str, want_sem: str
+) -> None:
+    """契约卡归一：id/label/历史别名一律收敛为 规范 id + 声明语义，落响应记录。"""
+    svc, _ = make_svc()
+    rid = await svc.create_choice_request("s1", "t1", "tab1", "审批", options=options, timeout_seconds=30)
+    assert await svc.submit_response(rid, "answered", selected_option=raw) is True
+    stored = svc._responses[rid]["message_data"]
+    assert stored["selected_option"] == want_id
+    assert stored["selected_semantics"] == want_sem
+    resp = await svc.wait_for_choice(rid, timeout=5)
+    assert resp["selected_option"] == want_id
+    assert resp["selected_semantics"] == want_sem
+
+
+async def test_alias_resolves_to_declared_option_id(make_svc: Any) -> None:
+    """历史别名归一消费面：approve → 卡上 approve_once 语义选项的规范 id（路由词形不再漏到消费方）。"""
+    svc, _ = make_svc()
+    rid = await svc.create_choice_request(
+        "s1", "t1", "tab1", "审批", options=_contract_approval_options(), timeout_seconds=30,
+    )
+    await svc.submit_response(rid, "answered", selected_option="approved")
+    assert svc._responses[rid]["message_data"]["selected_option"] == "approved_once"
+    assert svc._responses[rid]["message_data"]["selected_semantics"] == "approve_once"
+
+
+async def test_unknown_word_form_fails_closed_as_cancel_with_anomaly(
+    make_svc: Any, svc_mod: Any
+) -> None:
+    """未知词形 fail-closed：按取消结算 + anomaly 告警事件（不静默吞、不按 answered 宽口径放行）。"""
+    svc, notifier = make_svc()
+    rid = await svc.create_choice_request(
+        "s1", "t1", "tab1", "审批", options=_contract_approval_options(), timeout_seconds=30,
+    )
+    assert await svc.submit_response(rid, "answered", selected_option="approve_all_please") is True
+    stored = svc._responses[rid]["message_data"]
+    assert stored["response_type"] == "cancelled", "未知词形按取消处理"
+    assert stored["selected_semantics"] == "cancel"
+    assert stored["selected_option"] == "approve_all_please", "原词形保留备查"
+    assert len(notifier.anomaly_calls) == 1
+    assert notifier.anomaly_calls[0]["anomaly"] == "unknown_option_word_form"
+    with pytest.raises(svc_mod.InteractionCancelledError):
+        await svc.wait_for_choice(rid, timeout=5)
+
+
+async def test_declared_cancel_option_settles_without_anomaly(make_svc: Any) -> None:
+    """卡上显式声明的 cancel 选项：按取消结算但不发未知词形告警（契约内行为）。"""
+    svc, notifier = make_svc()
+    rid = await svc.create_choice_request(
+        "s1", "t1", "tab1", "审批",
+        options=[{"id": "abort", "label": "取消", "semantics": "cancel"}], timeout_seconds=30,
+    )
+    assert await svc.submit_response(rid, "answered", selected_option="取消") is True
+    stored = svc._responses[rid]["message_data"]
+    assert stored["response_type"] == "cancelled"
+    assert stored["selected_option"] == "abort"
+    assert notifier.anomaly_calls == [], "契约内 cancel 选项不是异常"
+
+
+@pytest.mark.parametrize("bad_type", ["approved_once", "APPROVED", "maybe", "deny", ""])
+async def test_unknown_response_type_fails_closed_as_cancel(make_svc: Any, bad_type: str) -> None:
+    """response_type fail-closed：枚举外词形（含别名形状的 approved_once）按取消 + 告警，废宽口径。"""
+    svc, notifier = make_svc()
+    rid = await svc.create_choice_request("s1", "t1", "tab1", "问答", timeout_seconds=30)
+    assert await svc.submit_response(rid, bad_type) is True
+    stored = svc._responses[rid]["message_data"]
+    assert stored["response_type"] == "cancelled"
+    assert len(notifier.anomaly_calls) == 1
+    assert notifier.anomaly_calls[0]["anomaly"] == "unknown_response_type"
+
+
+async def test_settlement_broadcasts_approval_taken_on_respond(make_svc: Any) -> None:
+    """结算广播：应答定局即发 approval.taken（携规范 id + 语义），多端对账数据面。"""
+    svc, notifier = make_svc()
+    rid = await svc.create_choice_request(
+        "s1", "t1", "tab1", "审批", options=_contract_approval_options(), timeout_seconds=30,
+    )
+    await svc.submit_response(rid, "answered", selected_option="仅本次执行")
+    assert len(notifier.settled_calls) == 1
+    settled = notifier.settled_calls[0]
+    assert settled["request_id"] == rid
+    assert settled["response_type"] == "answered"
+    assert settled["selected_option"] == "approved_once"
+    assert settled["selected_semantics"] == "approve_once"
+
+
+async def test_settlement_broadcasts_on_cancel_and_timeout(make_svc: Any, svc_mod: Any) -> None:
+    """取消与超时同样是结算点：各广播一次 approval.taken（取消=cancel、超时=timeout）。"""
+    svc, notifier = make_svc(choice_max_wait_seconds=0.1)
+    rid1 = await svc.create_choice_request("s1", "t1", "tab1", "审批A", timeout_seconds=30)
+    await svc.cancel_request(rid1, reason="user_abort")
+    rid2 = await svc.create_choice_request("s1", "t1", "tab1", "审批B", timeout_seconds=0.1)
+    with pytest.raises(svc_mod.InteractionTimeoutError):
+        await svc.wait_for_choice(rid2, timeout=0.1)
+    kinds = [(c["request_id"], c["response_type"]) for c in notifier.settled_calls]
+    assert (rid1, "cancelled") in kinds
+    assert (rid2, "timeout") in kinds
+
+
+async def test_memory_key_scopes_reject_memory_precisely(make_svc: Any) -> None:
+    """记忆键精确化（决策 6）：memory_key（工具+指纹）相同跨标题也命中；不同指纹同标题不牵连。"""
+    svc, notifier = make_svc(reject_memory_ttl_seconds=60)
+
+    # 同 memory_key、不同标题：仍命中（键随创建方声明，不再随展示标题漂移）
+    rid1 = await svc.create_choice_request(
+        "s1", "t1", "tab1", "安全审批: bash", options=_contract_approval_options(),
+        timeout_seconds=30, memory_key="bash_execute:abc123",
+    )
+    await svc.submit_response(rid1, "answered", selected_option="拒绝执行")
+    rid2 = await svc.create_choice_request(
+        "s1", "t1", "tab1", "安全审批: bash（重试）", options=_contract_approval_options(),
+        timeout_seconds=30, memory_key="bash_execute:abc123",
+    )
+    record2 = await svc.get_request(rid2)
+    assert record2 is not None, "记忆命中请求必须存在"
+    assert record2["status"] == "completed", "同指纹重试直接拒绝不弹卡"
+
+    # 同标题、不同 memory_key（换了命令）：不牵连，正常弹卡
+    rid3 = await svc.create_choice_request(
+        "s1", "t1", "tab1", "安全审批: bash", options=_contract_approval_options(),
+        timeout_seconds=30, memory_key="bash_execute:def456",
+    )
+    record3 = await svc.get_request(rid3)
+    assert record3 is not None, "不同指纹请求必须存在"
+    assert record3["status"] == "pending", "不同指纹不受同工具拒绝牵连"
+    assert len(notifier.request_calls) == 2, "rid1/rid3 弹卡（rid2 记忆命中不弹）"
+
+
+async def test_approve_and_cancel_do_not_arm_reject_memory(make_svc: Any) -> None:
+    """批准/取消/超时都不武装拒绝记忆：仅显式拒绝（语义=deny 或 response_type=denied）武装。"""
+    svc, _ = make_svc(reject_memory_ttl_seconds=60)
+    for sem_id in ("approved_once", "approved_remember"):
+        rid = await svc.create_choice_request(
+            "s1", "t1", "tab1", "审批", options=_contract_approval_options(), timeout_seconds=30,
+        )
+        await svc.submit_response(rid, "answered", selected_option=sem_id)
+    rid_cancel = await svc.create_choice_request(
+        "s1", "t1", "tab1", "审批", options=_contract_approval_options(), timeout_seconds=30,
+    )
+    await svc.cancel_request(rid_cancel, reason="x")
+    assert svc._reject_memory == {}, "非显式拒绝一律不武装记忆"

@@ -142,6 +142,89 @@ class TestFindProjectRoot:
         assert find_project_root() == _REPO_ROOT
 
 
+class TestInstalledFormAnchor:
+    """装机形态相对 root 锚点（用户根）。
+
+    契约（2026-10-01 工作空间 root 迁用户根）：
+    - 装机链标记（AGENTOS_PLUGIN_SOURCE_PRIORITY=builtin）在场 + 相对 root
+      → 锚 user_space.user_root()（安装目录随卸载整体删除，工作空间不得
+      锚进抹除面——BUG-85 同款动因）；
+    - 绝对 root 原样使用，两种形态都不改（用户显式配置尊重）；
+    - dev 形态（标记缺省/非 builtin）相对 root 仍锚项目根（既有语义）；
+    - 用户根不可用/user_space 缺失 → 回落项目根，不 panic。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _shared_on_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """user_space 位于 plugins/shared/，与本测试目录无包含关系，显式入 path。"""
+        shared_dir = str(_PLUGIN_DIR.parents[1])  # plugins/shared/
+        monkeypatch.syspath_prepend(shared_dir)
+
+    def _fake_user_space(self, monkeypatch: pytest.MonkeyPatch, root: Path | None) -> None:
+        import user_space
+
+        monkeypatch.setattr(user_space, "user_root", lambda: root)
+
+    @pytest.mark.parametrize("root_val", [_default_ws_root, "custom_ws"])
+    def test_installed_relative_root_anchors_user_root(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, root_val: str
+    ) -> None:
+        """装机形态 + 相对 root → 锚用户根（两组 root 值同契约）。"""
+        monkeypatch.setenv("AGENTOS_PLUGIN_SOURCE_PRIORITY", "builtin")
+        uroot = tmp_path / "uroot"
+        self._fake_user_space(monkeypatch, uroot)
+        mod = _load_ws()
+        monkeypatch.setattr(mod, "_load_isolation_config", lambda: {"workspace": {"root": root_val}})
+        base = Path(mod.get_workspace_base_dir())
+        assert base == uroot / root_val
+        assert base.is_absolute(), f"锚定结果必须是绝对路径，实际: {base}"
+        assert base.relative_to(uroot) == Path(root_val)
+
+    def test_installed_absolute_root_used_as_is(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """装机形态 + 绝对 root → 原样使用（用户显式配置尊重，不切锚）。"""
+        monkeypatch.setenv("AGENTOS_PLUGIN_SOURCE_PRIORITY", "builtin")
+        self._fake_user_space(monkeypatch, Path(r"C:\fake\uroot"))
+        mod = _load_ws()
+        monkeypatch.setattr(
+            mod, "_load_isolation_config", lambda: {"workspace": {"root": "D:/some/abs/dir"}}
+        )
+        assert mod.get_workspace_base_dir() == Path("D:/some/abs/dir")
+
+    @pytest.mark.parametrize("marker", [None, "user", ""])
+    def test_non_installed_chain_keeps_project_root(
+        self, monkeypatch: pytest.MonkeyPatch, marker: str | None
+    ) -> None:
+        """非装机链（标记缺省/非 builtin 值/空白）相对 root 仍锚项目根。"""
+        if marker is None:
+            monkeypatch.delenv("AGENTOS_PLUGIN_SOURCE_PRIORITY", raising=False)
+        else:
+            monkeypatch.setenv("AGENTOS_PLUGIN_SOURCE_PRIORITY", marker)
+        self._fake_user_space(monkeypatch, Path(r"C:\fake\uroot"))
+        mod = _load_ws()
+        monkeypatch.setattr(mod, "_load_isolation_config", lambda: {"workspace": {"root": "my_ws"}})
+        assert mod.get_workspace_base_dir() == mod.find_project_root() / "my_ws"
+
+    def test_installed_user_root_unavailable_falls_back_to_project_root(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """装机形态 + 用户根不可得（None）→ 回落项目根，不 panic。"""
+        monkeypatch.setenv("AGENTOS_PLUGIN_SOURCE_PRIORITY", "builtin")
+        self._fake_user_space(monkeypatch, None)
+        mod = _load_ws()
+        monkeypatch.setattr(mod, "_load_isolation_config", lambda: {"workspace": {"root": "my_ws"}})
+        assert mod.get_workspace_base_dir() == mod.find_project_root() / "my_ws"
+
+    def test_installed_user_space_module_missing_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """装机形态 + user_space 模块缺失（ImportError）→ 回落项目根，不 panic。"""
+        monkeypatch.setenv("AGENTOS_PLUGIN_SOURCE_PRIORITY", "builtin")
+        monkeypatch.setitem(sys.modules, "user_space", None)
+        mod = _load_ws()
+        monkeypatch.setattr(mod, "_load_isolation_config", lambda: {"workspace": {"root": "my_ws"}})
+        assert mod.get_workspace_base_dir() == mod.find_project_root() / "my_ws"
+
+
 class TestWorkspaceBaseDir:
     def test_absolute_root_used_as_is(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """配置 root 为绝对路径 → 原样返回（不拼项目根）。"""

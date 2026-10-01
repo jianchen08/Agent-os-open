@@ -19,10 +19,28 @@ vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({
 }))
 
 // 详情弹窗薄壳 mock：跳过 radix Dialog 的 jsdom 不兼容面（portal/动画），
-// 只保留「open 时渲染内容」的行为断言所需
+// 只保留「open 时渲染内容」的行为断言所需；onOpenChange 透出关闭按钮供
+// 复位回调路径断言
 vi.mock('@/components/ui/dialog', () => ({
-  Dialog: ({ open, children }: { open?: boolean; children?: React.ReactNode }) =>
-    open ? <div data-testid="dialog-root">{children}</div> : null,
+  Dialog: ({
+    open,
+    children,
+    onOpenChange,
+  }: {
+    open?: boolean
+    children?: React.ReactNode
+    onOpenChange?: (open: boolean) => void
+  }) =>
+    open ? (
+      <div data-testid="dialog-root">
+        {children}
+        {onOpenChange ? (
+          <button type="button" data-testid="dialog-close" onClick={() => onOpenChange(false)}>
+            close
+          </button>
+        ) : null}
+      </div>
+    ) : null,
   DialogContent: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
   DialogHeader: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
   DialogTitle: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
@@ -171,6 +189,30 @@ describe('InteractionCard 特性驱动渲染', () => {
     expect(props.onRespondChoice).not.toHaveBeenCalled()
     expect(screen.getByText('确认选择')).toBeInTheDocument()
   })
+
+  it('详情弹窗关闭回调复位弹窗（onOpenChange(false) → 弹窗消失、选项可重点）', () => {
+    const props = cardProps(
+      makeInteraction({
+        options: [
+          {
+            id: 'a',
+            label: '方案A',
+            description: '这是一个非常长的描述文案用于触发详情弹窗逻辑分支的行为验证',
+          },
+        ],
+      }),
+    )
+    render(<InteractionCard {...props} />)
+    fireEvent.click(screen.getByText('方案A'))
+    expect(screen.getByTestId('dialog-root')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('dialog-close'))
+    expect(screen.queryByTestId('dialog-root')).not.toBeInTheDocument()
+    // 复位后可重新打开：状态清干净而非一次性
+    fireEvent.click(screen.getByText('方案A'))
+    expect(screen.getByTestId('dialog-root')).toBeInTheDocument()
+    expect(props.onRespondChoice).not.toHaveBeenCalled()
+  })
 })
 
 describe('选项缺 id 的 fail-closed 处置（FE13 改判：人工确认核心流程不猜测提交）', () => {
@@ -220,16 +262,21 @@ describe('选项缺 id 的 fail-closed 处置（FE13 改判：人工确认核心
   })
 })
 
-describe('归属标签', () => {
-  it('originLabel 非空：标题下方渲染「来自：」行', () => {
+describe('来源标签', () => {
+  it('originLabel 非空：标题下方渲染「来源：」行', () => {
     render(
-      <InteractionCard {...cardProps(makeInteraction())} originLabel="帮我看代码 · 子代理A" />,
+      <InteractionCard
+        {...cardProps(makeInteraction())}
+        originLabel="子代理A（L2） · 管道 pipeline-1 · 帮我看代码 · 12:30"
+      />,
     )
-    expect(screen.getByText(/来自：帮我看代码 · 子代理A/)).toBeInTheDocument()
+    expect(
+      screen.getByText(/来源：子代理A（L2） · 管道 pipeline-1 · 帮我看代码 · 12:30/),
+    ).toBeInTheDocument()
   })
 
-  it('originLabel 缺省：不渲染「来自：」行', () => {
+  it('originLabel 缺省：不渲染「来源：」行', () => {
     render(<InteractionCard {...cardProps(makeInteraction())} />)
-    expect(screen.queryByText(/来自：/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/来源：/)).not.toBeInTheDocument()
   })
 })

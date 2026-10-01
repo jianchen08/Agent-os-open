@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import types
 from collections.abc import Iterator
@@ -61,17 +62,31 @@ class FakeHICap:
         self.fail = fail
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
+    def _declared_semantics(self) -> str:
+        """按卡上声明回显语义（对齐 human 归一点：选中项声明什么语义就回什么）。"""
+        for method, params in reversed(self.calls):
+            if method == "create_choice":
+                for opt in params.get("options", []):
+                    if isinstance(opt, dict) and opt.get("id") == self.selected:
+                        return str(opt.get("semantics", ""))
+                break
+        return "cancel"  # 未命中任何选项 = 未知词形（human 归一点按取消回语义）
+
     async def call(self, method: str, params: dict[str, Any], **_kwargs: Any) -> Any:
         self.calls.append((method, params))
         if method == "create_choice":
             if self.fail:
                 return {"error": "boom"}
             assert [o["id"] for o in params["options"]] == ["pipeline", "permanent"]
+            assert all(o.get("semantics") for o in params["options"]), "授权卡必须声明语义"
             return {"request_id": "req-1"}
         if method == "wait_for_choice":
             if self.selected is None:
                 return {"error": "timeout", "error_code": "INTERACTION_TIMEOUT"}
-            return {"selected_option": self.selected}
+            return {
+                "selected_option": self.selected,
+                "selected_semantics": self._declared_semantics(),
+            }
         raise AssertionError(f"unexpected method {method}")
 
 
@@ -527,3 +542,224 @@ async def test_no_interaction_cap_fails_closed(zone_env: dict[str, Path]) -> Non
     assert blocked is not None
     assert "交互服务不可用" in blocked["pre_decided_results"][0]["error"]
     assert zone_policy.STATE_KEY not in updates
+
+
+# ── WSL 挂载混入形态归一 + sessions 子树豁免 + 批准别名 ──
+
+
+def test_normalize_windows_mixed_path_parametrized() -> None:
+    """污染形态 → Windows 形态；正常路径原样（POSIX 形态仅 nt 重写）。"""
+    f = zone_policy.normalize_windows_mixed_path
+    assert f(r"D:\mnt\d\repo\docs\a.md") == r"D:\repo\docs\a.md"
+    assert f("D:/mnt/e/work/x.txt") == r"E:\work\x.txt"
+    assert f(r"\mnt\z\root.md") == r"Z:\root.md"
+    if os.name == "nt":
+        assert f("/mnt/d/repo/f.txt") == r"D:\repo\f.txt"
+    else:
+        assert f("/mnt/d/repo/f.txt") == "/mnt/d/repo/f.txt"
+    # 非命中原样：普通 Windows 路径 / /workspace 约定 / 相对路径 / 空串
+    assert f(r"D:\repo\f.txt") == r"D:\repo\f.txt"
+    assert f("/workspace/sub/f.txt") == "/workspace/sub/f.txt"
+    assert f("relative/f.txt") == "relative/f.txt"
+    assert f("") == ""
+
+
+async def test_mixed_mount_write_within_workspace_no_card(
+    zone_env: dict[str, Path],
+) -> None:
+    r"""脏形态 `T:\mnt\t\...` 归一后落在根锚内 → 放行且不弹卡。"""
+    tmp = zone_env["tmp"]
+    drive = tmp.drive[0]
+    target = tmp / "sessions" / "s1" / "docs" / "out.md"
+    dirty = rf"{tmp.drive}\mnt\{drive}\{str(target)[3:]}"
+    cap = FakeHICap(selected="pipeline")
+    ctx, _ = _ctx(
+        {
+            "raw_tool_calls": _tool_calls("file_write", {"path": dirty}),
+            "workspace": str(zone_env["ws"]),
+            "project_root": "",
+        },
+        cap,
+    )
+    updates: dict[str, Any] = {}
+
+    blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], updates)
+
+    assert blocked is None
+    assert cap.calls == []  # 锚内不弹卡
+
+
+async def test_repo_sessions_tree_write_grantable_not_hard_rejected(
+    zone_env: dict[str, Path],
+) -> None:
+    """`.ai_workspaces/sessions/` 会话项目树：不再自保硬拒，落入写区链弹卡可授权。"""
+    target = (
+        zone_env["repo"] / ".ai_workspaces" / "sessions" / "thread-1" / "projects" / "proj" / "docs"
+    )
+    cap = FakeHICap(selected="pipeline")
+    ctx, _ = _ctx(
+        {
+            "raw_tool_calls": _tool_calls("file_write", {"path": str(target / "a.md")}),
+            "workspace": str(zone_env["ws"]),
+            "project_root": "",
+        },
+        cap,
+    )
+    updates: dict[str, Any] = {}
+
+    blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], updates)
+
+    assert blocked is None
+    assert cap.calls[0][0] == "create_choice"
+
+
+async def test_repo_task_runtime_dir_write_still_hard_rejected(
+    zone_env: dict[str, Path],
+) -> None:
+    """任务运行时面 `.ai_workspaces/<task_id>/` 维持自保恒拒（不弹卡）。"""
+    target = zone_env["repo"] / ".ai_workspaces" / "abc123task" / "out.txt"
+    cap = FakeHICap(selected="pipeline")
+    ctx, _ = _ctx(
+        {
+            "raw_tool_calls": _tool_calls("file_write", {"path": str(target)}),
+            "workspace": str(zone_env["ws"]),
+            "project_root": "",
+        },
+        cap,
+    )
+    updates: dict[str, Any] = {}
+
+    blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], updates)
+
+    assert blocked is not None
+    assert "运行时/产物区" in blocked["pre_decided_results"][0]["error"]
+    assert cap.calls == []  # 硬拒不弹卡
+
+
+async def test_grant_semantics_axis_mismatch_fails_closed(
+    zone_env: dict[str, Path],
+) -> None:
+    """跨轴语义违约 fail-closed（ADR 2026-10-01 决策 2）：读卡收到 grant_write
+    语义按拒绝结算，不落授权。approve/approved 等历史别名在 human 归一点收敛，
+    消费端只读语义——别名回归用例随别名表退役（归一行为由 human 契约测试覆盖）。"""
+    denied = zone_env["repo"] / "config"
+
+    class _CrossAxisCap(FakeHICap):
+        """读卡但回写轴语义（模拟契约违约通道）。"""
+
+        def _declared_semantics(self) -> str:
+            return "grant_write"
+
+    cross = _CrossAxisCap(selected="pipeline")
+    ctx, _ = _ctx(
+        {
+            "raw_tool_calls": _tool_calls("file_read", {"path": str(denied / "llm.yaml")}),
+            "workspace": str(zone_env["ws"]),
+        },
+        cross,
+    )
+    updates: dict[str, Any] = {}
+
+    blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], updates)
+
+    assert blocked is not None, "跨轴语义必须按拒绝软拦截"
+    assert zone_policy.STATE_KEY_READ not in updates
+    assert zone_policy.STATE_KEY not in updates
+
+
+# ── 用户根形态地界（ADR 2026-10-01-workspace-root-user-root-anchor）──────────
+
+
+class TestUserRootWorkspacesGate:
+    """装机形态工作空间根迁 ``<user_root>/workspaces`` 后的位置闸回归。
+
+    判定单源 zone_policy 地界识别含 ``workspaces`` 用户根锚定，位置闸零改动
+    自动继承——
+    1. 自己任务工作区内写放行不弹卡（根锚内先行）；
+    2. 其他任务工作树写仍弹授权卡（跨任务写污染防线）；
+    3. 同任务兄弟树读经内建地界放行不弹卡（读授权链携锚派生）。
+    """
+
+    @pytest.fixture
+    def user_workspaces(self, zone_env: dict[str, Path]) -> Path:
+        """用户根下 workspaces 树（zone_env 已钉 AGENTOS_USER_ROOT）。"""
+        ur = zone_env["tmp"] / "usroot" / "workspaces"
+        ur.mkdir(parents=True)
+        return ur
+
+    async def test_write_in_own_task_workspace_no_card(
+        self, zone_env: dict[str, Path], user_workspaces: Path
+    ) -> None:
+        """自己任务工作区内 file_write：根锚内放行，零卡片（事故回归）。"""
+        ws = user_workspaces / "01ed89f3952e"
+        ws.mkdir()
+        cap = FakeHICap(selected=None)  # 若误走卡片路径 → 超时软拦截
+        ctx, _ = _ctx(
+            {
+                "raw_tool_calls": _tool_calls(
+                    "file_write", {"path": str(ws / "tests" / "a.txt")}
+                ),
+                "workspace": str(ws),
+                "project_root": "",
+            },
+            cap,
+        )
+        updates: dict[str, Any] = {}
+
+        blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], updates)
+
+        assert blocked is None
+        assert cap.calls == [], "锚内写不得弹任何卡片"
+        assert zone_policy.STATE_KEY not in updates
+
+    async def test_write_other_task_tree_still_cards(
+        self, zone_env: dict[str, Path], user_workspaces: Path
+    ) -> None:
+        """其他任务工作树写（地界内但锚外）：仍弹授权卡待批。"""
+        own = user_workspaces / "taskA"
+        own.mkdir()
+        other = user_workspaces / "taskB"
+        other.mkdir()
+        cap = FakeHICap(selected=None)
+        ctx, _ = _ctx(
+            {
+                "raw_tool_calls": _tool_calls("file_write", {"path": str(other / "x.txt")}),
+                "workspace": str(own),
+            },
+            cap,
+        )
+        updates: dict[str, Any] = {}
+
+        blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], updates)
+
+        assert blocked is not None, "跨任务写必须弹卡（跨会话写污染防线）"
+        assert blocked["pre_decided_results"]
+        assert zone_policy.STATE_KEY not in updates
+
+    async def test_read_sibling_tree_in_own_task_no_card(
+        self, zone_env: dict[str, Path], user_workspaces: Path
+    ) -> None:
+        """同任务兄弟树读（锚外地界内）：内建地界放行，零卡片。"""
+        ws = user_workspaces / "taskA" / "sessions" / "thread-1"
+        sibling = user_workspaces / "taskA" / "docs"
+        sibling.mkdir(parents=True)
+        ws.mkdir(parents=True)
+        (sibling / "note.md").write_text("sibling doc", encoding="utf-8")
+        cap = FakeHICap(selected=None)
+        ctx, _ = _ctx(
+            {
+                "raw_tool_calls": _tool_calls(
+                    "file_read", {"path": str(sibling / "note.md")}
+                ),
+                "workspace": str(ws),
+                "project_root": str(ws),
+            },
+            cap,
+        )
+        updates: dict[str, Any] = {}
+
+        blocked = await _plugin()._enforce_zone_policy(ctx, ctx.state["raw_tool_calls"], updates)
+
+        assert blocked is None
+        assert cap.calls == [], "地界内读不得弹读授权卡"
+        assert zone_policy.STATE_KEY_READ not in updates

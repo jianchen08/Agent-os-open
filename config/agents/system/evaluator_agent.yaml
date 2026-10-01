@@ -1,5 +1,6 @@
 config_id: evaluator_agent
 name: 通用评估专家
+model_tier: small
 display_name: 通用评估专家
 description: '通用评估专家，负责对任务产出物进行语义级别的质量评估。
 

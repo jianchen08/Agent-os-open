@@ -237,6 +237,10 @@ def test_get_interaction_not_found_404(server: Any) -> None:
 
 def test_approve(server: Any) -> None:
     svc = FakeService()
+    svc.pending = [{
+        "id": "r1",
+        "message_data": {"options": [{"id": "0", "label": "同意", "semantics": "approve_once"}]},
+    }]
     _inject_service(server, svc)
 
     status, body = _decode(_call(
@@ -247,9 +251,27 @@ def test_approve(server: Any) -> None:
     assert status == 200
     assert body == {"success": True, "request_id": "r1", "status": "approved"}
     rid, rtype, kw = svc.submits[0]
-    assert (rid, rtype) == ("r1", "approved")
-    assert kw["selected_option"] == "approve"
+    # 路由查创建方 options 中 approve_once 语义的 id 提交（ADR 2026-10-01 决策 3），
+    # 不再固定提交 approved/approve 词形
+    assert (rid, rtype) == ("r1", "answered")
+    assert kw["selected_option"] == "0"
     assert kw["feedback"] == "同意"
+
+
+def test_approve_without_declared_semantics_returns_422(server: Any) -> None:
+    """卡面未声明 approve_once 语义 → 422 显式失败零副作用（路由不自造词形）。"""
+    svc = FakeService()
+    svc.pending = [{"id": "r1", "message_data": {"options": [{"id": "0", "label": "同意"}]}}]
+    _inject_service(server, svc)
+
+    status, body = _decode(_call(
+        server, "/ext/approval_service/interaction/r1/approve", "POST",
+        raw_body=_b64("{}"), headers=_ADMIN_HEADERS,
+    ))
+
+    assert status == 422
+    assert body["success"] is False
+    assert svc.submits == [], "未声明语义不得代批（无副作用）"
 
 
 def test_deny(server: Any) -> None:
@@ -265,7 +287,7 @@ def test_deny(server: Any) -> None:
     assert body == {"success": True, "request_id": "r1", "status": "denied"}
     rid, rtype, kw = svc.submits[0]
     assert (rid, rtype) == ("r1", "denied")
-    assert kw["selected_option"] == "reject"
+    assert kw["selected_option"] is None, "拒绝路由零词形生产（response_type=denied 即显式拒绝）"
 
 
 def test_approve_degraded_false(server: Any) -> None:
@@ -346,7 +368,16 @@ def test_proxy_pending_via_bridge(server: Any) -> None:
 
 
 def test_proxy_approve_via_bridge(server: Any) -> None:
-    bridge = FakeBridge({"respond": {"ok": True, "request_id": "r1", "status": "submitted"}})
+    bridge = FakeBridge({
+        "get_pending": {
+            "requests": [{
+                "id": "r1",
+                "message_data": {"options": [{"id": "1", "label": "同意", "semantics": "approve_once"}]},
+            }],
+            "count": 1,
+        },
+        "respond": {"ok": True, "request_id": "r1", "status": "submitted"},
+    })
     _inject_bridge(server, bridge)
 
     status, body = _decode(_call(
@@ -356,11 +387,13 @@ def test_proxy_approve_via_bridge(server: Any) -> None:
 
     assert status == 200
     assert body["success"] is True
-    method, params, _ = bridge.calls[0]
+    respond_calls = [c for c in bridge.calls if c[0] == "respond"]
+    assert respond_calls, "approve 必须经桥提交应答"
+    method, params, _ = respond_calls[0]
     assert method == "respond"
     assert params["request_id"] == "r1"
-    assert params["response"]["response_type"] == "approved"
-    assert params["response"]["selected_option"] == "approve"
+    assert params["response"]["response_type"] == "answered"
+    assert params["response"]["selected_option"] == "1", "按 approve_once 语义查 id 提交"
 
 
 def test_proxy_cancel_via_bridge(server: Any) -> None:
@@ -381,7 +414,16 @@ def test_proxy_cancel_via_bridge(server: Any) -> None:
 
 def test_proxy_tool_error_is_false(server: Any) -> None:
     """桥回 error 信封 → RuntimeError 收敛 → 变更类端点 success False（转发失败不崩）。"""
-    bridge = FakeBridge({"respond": {"error": "service not initialized"}})
+    bridge = FakeBridge({
+        "get_pending": {
+            "requests": [{
+                "id": "r1",
+                "message_data": {"options": [{"id": "0", "label": "同意", "semantics": "approve_once"}]},
+            }],
+            "count": 1,
+        },
+        "respond": {"error": "service not initialized"},
+    })
     _inject_bridge(server, bridge)
 
     status, body = _decode(_call(

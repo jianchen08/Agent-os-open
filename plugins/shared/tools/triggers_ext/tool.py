@@ -274,8 +274,8 @@ class TriggerSetupTool(BuiltinTool):
         action = inputs.get("action", "setup")
         pipeline_id = inputs.get("pipeline_id")
 
-        # shell 字符串形态（action=command + action_params.command，如 dsh_adapter
-        # translate_hooks_config 产出）已停用；不静默降级为 notify（触发意图会静默丢失）。
+        # shell 字符串形态（action=command + action_params.command）已停用；
+        # 不静默降级为 notify（触发意图会静默丢失）。
         if action not in ("setup", "cancel", "update"):
             return create_failure_result(
                 error=(
@@ -470,7 +470,8 @@ class TriggerSetupTool(BuiltinTool):
             return False, f"command 动作审批未通过（{err}），已拒绝注册"
 
         raw_selected = wait_res.get("selected_option", "")
-        # 前端传 label、自动路径传 id，两者都归一到 id（security_check 同款）
+        # 词形归一回退：human 归一点常规路径已回写规范 id，此处兜底旧前端
+        # label 词形（升级窗口期），未命中封闭集合即空（fail-closed）
         resolved = _COMMAND_APPROVAL_LABEL_TO_ID.get(raw_selected) or (
             raw_selected if raw_selected in _COMMAND_APPROVAL_IDS else ""
         )

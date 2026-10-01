@@ -155,10 +155,18 @@ describe('SchemaFullscreenHost 队列导航与 conversation 提交', () => {
     warnSpy.mockRestore()
   })
 
-  it('review 模式：点「批准」→ 以 approved 经 interaction 通道提交（与拒绝成对）', () => {
+  it('review 模式：点「批准」→ 提交 approve_once 语义选项 id（与拒绝成对）', () => {
     render(<SchemaFullscreenHost declarations={[approvalDecl]} />)
 
-    fire('approval.created', { request_id: 'r-ok', title: '待批准文档', mode: 'review' })
+    fire('approval.created', {
+      request_id: 'r-ok',
+      title: '待批准文档',
+      mode: 'review',
+      choice_options: [
+        { id: 'ok-opt', label: '同意', semantics: 'approve_once' },
+        { id: 'no-opt', label: '驳回', semantics: 'deny' },
+      ],
+    })
 
     const approveBtn = screen.getByRole('button', { name: '批准' })
     expect(approveBtn).not.toBeDisabled()
@@ -167,7 +175,7 @@ describe('SchemaFullscreenHost 队列导航与 conversation 提交', () => {
     expect(sendInteractionResponseMock).toHaveBeenCalledWith(
       'session-1',
       'r-ok',
-      expect.objectContaining({ response_type: 'answered', selected_option: 'approved' }),
+      expect.objectContaining({ response_type: 'answered', selected_option: 'ok-opt' }),
     )
     expect(screen.queryByTestId('fullscreen-toolbar')).toBeNull()
   })
@@ -189,6 +197,37 @@ describe('SchemaFullscreenHost 队列导航与 conversation 提交', () => {
     expect(item?.requestId).toBe('r-norm')
     expect(item?.options).toEqual([])
     expect(item?.mode).toBe('review')
+  })
+
+  it('来源行（用户裁定 2026-10-01）：payload 带来源 → 导航行渲染「来源：agent(级别) · 管道 · 会话 · 时间」', () => {
+    render(<SchemaFullscreenHost declarations={[approvalDecl]} />)
+
+    fire('approval.created', {
+      request_id: 'r-origin',
+      title: '待批准文档',
+      mode: 'review',
+      agent_id: 'coding_dev_agent',
+      agent_name: '编码开发代理',
+      agent_level: 'L3',
+      pipeline_id: 'pipe-42',
+      thread_id: 'th-77',
+      created_at: '2026-10-01T04:30:00Z',
+    })
+
+    const origin = screen.getByText(/来源：编码开发代理（L3） · 管道 pipe-42 · th-77 · /)
+    expect(origin).toBeTruthy()
+    // 完整来源进 title 提示（窄屏截断可悬停全读）
+    expect((origin as HTMLElement).getAttribute('title')).toContain('编码开发代理（L3）')
+  })
+
+  it('来源行：payload 无来源字段 → 不渲染「来源：」（旧事件兼容，不显示空来源）', () => {
+    render(<SchemaFullscreenHost declarations={[approvalDecl]} />)
+
+    fire('approval.created', { request_id: 'r-noorigin', title: '旧事件', mode: 'review' })
+
+    expect(screen.queryByText(/来源：/)).toBeNull()
+    // 浮层主链路不受影响
+    expect(screen.getByText('旧事件')).toBeTruthy()
   })
 })
 

@@ -12,7 +12,7 @@
 
 import { act, render, renderHook, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { WS_SERVER_EVENTS } from '@/constants/websocket'
+import { RECONNECT_DEGRADE_ATTEMPTS, WS_SERVER_EVENTS } from '@/constants/websocket'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { AlertBanner, useLayoutAlerts, type AlertBannerItem } from '../AlertBanner'
@@ -140,6 +140,45 @@ describe('useLayoutAlerts — 从 layoutModeStore 派生告警', () => {
     expect(result.current).toHaveLength(1)
     expect(result.current[0].kind).toBe('connection')
     expect(result.current[0].tone).toBe('error')
+  })
+
+  it('重连中（未达阈值）→ warning 横幅动态显示第 N 次，无按钮', () => {
+    useLayoutModeStore.setState({
+      connectionStatus: { ...CONNECTED, state: 'reconnecting', reconnectAttempt: 2 },
+    })
+    const { result } = renderHook(() => useLayoutAlerts())
+    expect(result.current).toHaveLength(1)
+    expect(result.current[0].kind).toBe('connection')
+    expect(result.current[0].tone).toBe('warning')
+    expect(result.current[0].message).toContain('正在重连')
+    expect(result.current[0].message).toContain('第 2 次')
+    expect(result.current[0].actionLabel).toBeUndefined()
+  })
+
+  it('连续失败达阈值 → 降级 error 横幅 + 立即重连动作（自动重连不停止的提示）', () => {
+    useLayoutModeStore.setState({
+      connectionStatus: { ...CONNECTED, state: 'reconnecting', reconnectAttempt: 12 },
+    })
+    const { result } = renderHook(() => useLayoutAlerts())
+    expect(result.current).toHaveLength(1)
+    expect(result.current[0].tone).toBe('error')
+    expect(result.current[0].message).toContain('多次重连失败')
+    expect(result.current[0].actionLabel).toBe('立即重连')
+    expect(result.current[0].action).toBe('reconnect')
+  })
+
+  it('重连次数恰达阈值等值（attempt === RECONNECT_DEGRADE_ATTEMPTS）→ 已降级 error（>= 边界）', () => {
+    useLayoutModeStore.setState({
+      connectionStatus: {
+        ...CONNECTED,
+        state: 'reconnecting',
+        reconnectAttempt: RECONNECT_DEGRADE_ATTEMPTS,
+      },
+    })
+    const { result } = renderHook(() => useLayoutAlerts())
+    expect(result.current).toHaveLength(1)
+    expect(result.current[0].tone).toBe('error')
+    expect(result.current[0].message).toContain('多次重连失败')
   })
 
   it('审批待处理 → approval 告警（含数量）', () => {

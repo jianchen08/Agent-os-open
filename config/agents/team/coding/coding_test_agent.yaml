@@ -12,7 +12,7 @@ description: 'coding 模式包的测试角色：测试设计、运行验证、�
 agent_type: atomic
 category: code
 level: L3
-model_tier: medium
+model_tier: small
 plugins:
   disabled: []
   enabled:

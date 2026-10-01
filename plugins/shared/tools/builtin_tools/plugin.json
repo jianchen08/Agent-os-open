@@ -5,7 +5,7 @@
   ],
   "name": "Builtin Tools",
   "description": "8 个高频内置工具（文件读写/代码文件搜索/目录与文件管理）MCP 封装",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "plugin_type": "tool",
   "language": "python",
   "host_type": "sidecar",

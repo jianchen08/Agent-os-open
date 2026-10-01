@@ -31,12 +31,11 @@ import { useSessionsQuery, readSessions, ensureSessionsLoaded } from '@/hooks/qu
 import { useAsyncResource } from '@/hooks/useAsyncResource'
 import { useElementVisible } from '@/hooks/useElementVisible'
 import { useVisibleRefetch } from '@/hooks/useVisibleRefetch'
-import apiClient from '@/services/api/client'
-import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { mapStateInfoToViewModel, type PipelineStateEntryViewModel } from '@/services/api/pipelines'
 import { deleteProject, pauseTask, resumeTask, cancelTask } from '@/services/api/tasks'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { queryKeys } from '@/services/query/queryKeys'
+import { openFolderWithFeedback } from '@/services/workspaceFolderOpener'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useNotificationStore } from '@/stores/notificationStore'
@@ -796,43 +795,15 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         // 项目文件夹打开：workspaces open 端点的项目登记通道按 id 解析文件夹，
         // 有 IDE 连接器走连接器、否则系统文件管理器（与工作区标签内按钮同链路）
         if (!entry.projectId) return
-        try {
-          const resp = await apiClient.post(
-            WORKSPACE_SERVICE_ENDPOINTS.workspaces_open.replace(
-              '{container_task_id}',
-              entry.projectId,
-            ),
-          )
-          const data = resp?.data as { success?: boolean; message?: string } | undefined
-          if (data && data.success === false) {
-            useNotificationStore.getState().addNotification({
-              title: '打开文件夹失败',
-              message: data.message || '后端未能打开项目文件夹',
-              priority: 'normal',
-              category: 'alert',
-              isBlocking: false,
-              autoDismissMs: 6000,
-              sourceLabel: '前端',
-            })
-          }
-        } catch (e) {
-          console.error('[PipelineManager] 打开项目文件夹失败', e)
-          useNotificationStore.getState().addNotification({
-            title: '打开文件夹失败',
-            message: `项目 ${entry.name} 打开失败，请稍后重试`,
-            priority: 'normal',
-            category: 'alert',
-            isBlocking: false,
-            autoDismissMs: 6000,
-            sourceLabel: '前端',
-          })
-        }
+        await openFolderWithFeedback(entry.projectId, '文件夹', entry.name)
         return
       }
       if (action === 'workspace') {
-        // R3：所有有工作区坐标的管道都可打开——任务条目用 taskId（任务镜像
-        // 解析），非任务条目用 pipelineId（state 行解析通道）
-        const wsId = entry.taskId || entry.pipelineId || entry.key
+        // R3：所有有工作区坐标的条目都可打开——任务条目用 taskId（任务镜像
+        // 解析），非任务管道条目用 pipelineId（state 行解析通道），项目条目用
+        // 裸登记 projectId（后端项目登记通道按键解析文件夹；条目 key 是
+        // project-<id> 前缀形态，进 workspace:// 数据源后登记通道查不到）
+        const wsId = entry.taskId || entry.pipelineId || entry.projectId || entry.key
         if (!wsId) return
         openWorkspaceTab(wsId, entry.name)
         return

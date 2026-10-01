@@ -244,6 +244,9 @@ def _check_workspace_path(
         )
 
     root = Path(root_str).resolve()
+    # WSL 挂载混入形态归一（zone_policy 单源同语义）：脏形态 `D:\mnt\d\X`
+    # 不归一则锚匹配失败、存在性检查恒 404。
+    path = _zone_policy.normalize_windows_mixed_path(path)
     # 容器挂载点翻译：bash 在容器内以 /workspace 为工作目录（isolation_guard
     # 固定挂载约定），LLM 会沿用该绝对路径调文件工具——宿主侧把 /workspace/
     # 前缀重映射到注入的宿主工作空间，否则写到不存在的宿主绝对路径。

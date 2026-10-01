@@ -25,9 +25,10 @@ import type { InteractionOption, PendingInteraction } from '@/stores/interaction
 
 export interface InteractionCardProps {
   interaction: PendingInteraction
-  /** 归属标签（会话标题 · Agent/管道名，浮层解析注入）；空串不显示 */
+  /** 来源标签（agent(级别) · 管道 · 会话 · 时间，浮层解析注入）；空串不显示 */
   originLabel?: string
-  onRespondChoice: (optionId: string, optionLabel?: string) => void
+  /** 只提交选项 id（ADR 2026-10-01：label 词形不回传，重复 label 防选错项） */
+  onRespondChoice: (optionId: string) => void
   onRespondText: (text: string) => void
   onNavigateToTab: () => void
   onDismiss: () => void
@@ -141,10 +142,11 @@ export function InteractionCard({
             </button>
           )}
         </div>
-        {/* 归属标签：多会话/子任务并行时区分卡片来自哪个会话（管道） */}
+        {/* 来源标签（用户裁定 2026-10-01）：所有交互卡必须可见完整来源——
+            发起 agent（名+级别）· 管道（id+名）· 会话 · 时间；缺段自动省略 */}
         {originLabel && (
           <p className="text-muted-foreground mt-0.5 truncate text-xs" title={originLabel}>
-            来自：{originLabel}
+            来源：{originLabel}
           </p>
         )}
         {interaction.description && (

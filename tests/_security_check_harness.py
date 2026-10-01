@@ -48,9 +48,24 @@ def wire_approval_cap(
                 return {"request_id": f"req-{counter.calls}"}
             if name == "wait_for_choice":
                 try:
-                    return next(it)
+                    item = next(it)
                 except StopIteration as e:
                     raise AssertionError("审批被发起次数超出预期 sequence") from e
+                # 按 human 归一点后的应答形状回放：规范 id + 封闭语义
+                # （ADR 2026-10-01 决策 2；scripted 项未声明语义时按选项值推导）
+                if isinstance(item, dict) and "selected_semantics" not in item:
+                    item = {
+                        **item,
+                        "selected_semantics": {
+                            "approved_once": "approve_once",
+                            "approved_remember": "approve_and_remember",
+                            "denied": "deny",
+                            "拒绝执行": "deny",
+                            "仅本次执行": "approve_once",
+                            "本管道内同命令免批": "approve_and_remember",
+                        }.get(str(item.get("selected_option", "")), "cancel"),
+                    }
+                return item
             raise AssertionError(f"unexpected cap.call: {name}")
 
     cap = _FakeCap()

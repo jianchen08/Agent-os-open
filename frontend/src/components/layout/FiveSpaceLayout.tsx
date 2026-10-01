@@ -12,10 +12,11 @@ import { WORKSPACE_SERVICE_ENDPOINTS as W } from '@/services/api/endpoints.gener
 import { safeLoadLayout } from '@/services/layout/resolver'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
+import { openFolderWithFeedback } from '@/services/workspaceFolderOpener'
 import { getFileEditorData, registerFileEditor, removeFileEditorData, updateFileEditorData, emitFileChange } from '@/stores/fileEditorRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
-import { useNotificationStore } from '@/stores/notificationStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
 import { taskStatusToAgentTabStatus } from '@/types/taskStatus'
@@ -246,8 +247,12 @@ export function FiveSpaceLayout({
   }, [viewportWidth, sidebarRatio, workspacePanelRatio])
 
 
-  /** 异常提示条点击：连接 → 打开监控面板；预算 → 成本面板；审批 → 审批弹窗全局可见，无需跳转 */
+  /** 异常提示条点击：重连降级态 → 立即重连；连接/预算 → 打开监控面板；审批 → 审批弹窗全局可见，无需跳转 */
   const handleAlertAction = useCallback((item: AlertBannerItem) => {
+    if (item.action === 'reconnect') {
+      globalWS.forceReconnect()
+      return
+    }
     if (item.kind === 'connection' || item.kind === 'budget') {
       // 监控页已声明化（monitoring 插件 contributes.pages path /monitoring），
       // 成本卡并入监控页（cost_control ui_schema space=monitoring，独立 /cost 页已撤）；
@@ -456,27 +461,7 @@ export function FiveSpaceLayout({
           const handleOpenFolder = async () => {
             const containerId = tab.dataSource?.replace('workspace://', '') || ''
             if (!containerId) return
-            try {
-              const resp = await apiClient.post(
-                W.workspaces_open.replace('{container_task_id}', containerId),
-              )
-              // 业务级失败如实透传（目录缺失/无连接器等）——后端 200 信封
-              // 携带 success:false + message，静默会让用户以为打开了
-              const data = resp?.data as { success?: boolean; message?: string } | undefined
-              if (data && data.success === false) {
-                useNotificationStore.getState().addNotification({
-                  title: '打开文件夹失败',
-                  message: data.message || '后端未能打开工作区目录',
-                  priority: 'normal',
-                  category: 'alert',
-                  isBlocking: false,
-                  autoDismissMs: 6000,
-                  sourceLabel: '前端',
-                })
-              }
-            } catch {
-              // 传输层失败：与面板操作一致的静默降级
-            }
+            await openFolderWithFeedback(containerId, '工作区目录')
           }
 
           const folderContainerId = tab.dataSource?.replace('workspace://', '') || ''

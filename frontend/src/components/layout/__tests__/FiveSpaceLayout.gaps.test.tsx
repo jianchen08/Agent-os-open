@@ -691,17 +691,53 @@ describe('FiveSpaceLayout 文件树 Tab（file_tree widget 联动）', () => {
     addNotification.mockRestore()
   })
 
-  it('打开文件夹传输失败 → 静默降级', async () => {
+  it('打开文件夹成功 → 成功通知回显后端 message（操作必有着落）', async () => {
     seedTreeTab('workspace://ct-7')
-    apiMock.post.mockRejectedValueOnce(new Error('down'))
+    apiMock.post.mockResolvedValueOnce({
+      data: { success: true, message: '已在系统文件管理器中打开工作空间' },
+    })
     const addNotification = vi
       .spyOn(useNotificationStore.getState(), 'addNotification')
       .mockImplementation(() => {})
     renderLayout()
     fireEvent.click(screen.getByTitle('在系统文件管理器中打开'))
 
-    await act(async () => {})
-    expect(addNotification).not.toHaveBeenCalled()
+    await waitFor(() =>
+      expect(addNotification).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: '已打开文件夹',
+          message: '已在系统文件管理器中打开工作空间',
+        }),
+      ),
+    )
+    // 成功路径不得误触发失败通道
+    expect(
+      addNotification,
+    ).not.toHaveBeenCalledWith(expect.objectContaining({ title: '打开文件夹失败' }))
+    addNotification.mockRestore()
+  })
+
+  it('打开文件夹传输失败 → 失败通知落到用户可见通道（不静默）', async () => {
+    // 缺陷②回归锚（用户实报 2026-10-01）：传输层失败曾静默吞掉——点击后
+    // 无任何提示，违反"操作必有着落"
+    seedTreeTab('workspace://ct-7')
+    apiMock.post.mockRejectedValueOnce(new Error('down'))
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const addNotification = vi
+      .spyOn(useNotificationStore.getState(), 'addNotification')
+      .mockImplementation(() => {})
+    renderLayout()
+    fireEvent.click(screen.getByTitle('在系统文件管理器中打开'))
+
+    await waitFor(() =>
+      expect(addNotification).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: '打开文件夹失败',
+          message: '工作区目录打开失败，请稍后重试',
+        }),
+      ),
+    )
+    consoleError.mockRestore()
     addNotification.mockRestore()
   })
 })
@@ -836,6 +872,29 @@ describe('FiveSpaceLayout 异常提示条动作分流', () => {
     fireEvent.click(await screen.findByRole('alert'))
 
     expect(openWorkspacePanelByPath).toHaveBeenCalledWith('/monitoring')
+  })
+
+  it('重连降级态告警点击 → globalWS.forceReconnect（一键重连，不打开监控面板）', async () => {
+    const globalWsMod = await import('@/services/websocket/GlobalWebSocket')
+    const forceSpy = vi.spyOn(globalWsMod.globalWS, 'forceReconnect').mockImplementation(() => {})
+    useLayoutModeStore.setState({
+      connectionStatus: {
+        state: 'reconnecting',
+        latencyMs: null,
+        reconnectAttempt: 12,
+        lastConnectedAt: null,
+        queuedMessages: 0,
+      },
+    })
+    renderLayout()
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('多次重连失败')
+    expect(alert).toHaveTextContent('立即重连')
+    fireEvent.click(alert)
+
+    expect(forceSpy).toHaveBeenCalledTimes(1)
+    expect(openWorkspacePanelByPath).not.toHaveBeenCalled()
   })
 
   it('审批待处理告警点击不跳转（审批弹窗全局可见）', async () => {

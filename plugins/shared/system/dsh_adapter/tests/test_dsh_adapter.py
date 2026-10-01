@@ -569,7 +569,7 @@ class TestClassifyPlugin:
         })
         kinds = translate_package(pkg)["kinds"]
         assert kinds["hook"]["events"] == ["agent/created", "session/event"]
-        assert "triggers_ext" in kinds["hook"]["lingxi"]
+        assert "pipeline_dsh_hook" in kinds["hook"]["lingxi"]
 
     def test_service_kind(self, tmp_path: Path):
         pkg = self._make_pkg(tmp_path, "dsh-interconnect", {
@@ -631,49 +631,85 @@ class TestClassifyPlugin:
         assert "service" in kinds and "tool" in kinds
 
 
-# ── DSH hooks 配置翻译（事件 → 灵汐触发器参数） ─────────────────────────
+# ── DSH hooks 配置翻译（事件 → 管道链位步骤条目） ─────────────────────────
 
 
 class TestTranslateHooksConfig:
-    def test_turn_end_reason_mapping(self):
-        r = translate_hooks_config([
-            {"on": "turn/end", "when": "completed", "run": "node a.mjs"},
-            {"on": "turn/end", "when": "error", "run": "node b.mjs"},
-            {"on": "turn/end", "when": "aborted", "run": "node c.mjs"},
-            {"on": "turn/end", "when": "max-tokens", "run": "node d.mjs"},
-        ])
-        assert r["mapped"] == 4
-        events = [t["event_type"] for t in r["triggers"]]
-        assert events == ["run.completed", "run.failed", "run.suspended", "run.suspended"]
-
-    def test_direct_event_mapping(self):
-        r = translate_hooks_config([
-            {"on": "turn/start", "run": "echo s"},
-            {"on": "approval/asked", "run": "echo a"},
-            {"on": "agent/created", "run": "echo c"},
-            {"on": "agent/disposed", "run": "echo d"},
-            {"on": "agent/error", "run": "echo e"},
-        ])
-        events = [t["event_type"] for t in r["triggers"]]
-        assert events == ["run.started", "approval.created", "session.created", "session.deleted", "run.failed"]
-
-    def test_command_action_params(self):
-        r = translate_hooks_config([{"on": "turn/end", "when": "completed", "run": "node n.mjs", "timeoutMs": 5000}])
-        t = r["triggers"][0]
-        assert t["action"] == "command"
-        assert t["action_params"] == {"command": "node n.mjs", "timeout_ms": 5000}
-
-    def test_unmapped_honest(self):
-        r = translate_hooks_config([{"on": "mystery/event", "run": "echo x"}])
-        assert r["mapped"] == 0
-        assert r["unmapped"][0]["reason"] == "no lingxi domain event equivalent"
-
-    def test_yaml_input(self):
-        r = translate_hooks_config(
-            "hooks:\n  - on: 'turn/end'\n    when: 'completed'\n    run: 'node n.mjs'\n"
-        )
+    @pytest.mark.parametrize(
+        ("on", "chain"),
+        [
+            ("turn/start", "prepare"),
+            ("agent/created", "init"),
+            ("turn/end", "post"),
+        ],
+    )
+    def test_chain_mapping(self, on: str, chain: str):
+        r = translate_hooks_config([{"on": on, "run": "node n.mjs"}])
         assert r["mapped"] == 1
-        assert r["triggers"][0]["event_type"] == "run.completed"
+        assert r["steps"][0]["chain"] == chain
+        step = r["steps"][0]["step"]
+        assert step["name"] == "pipeline_dsh_hook"
+        assert step["inputs"]["event"] == on
+        assert step["inputs"]["command"] == ["node", "n.mjs"]
+
+    def test_command_quoted_argv_split(self):
+        r = translate_hooks_config([{"on": "turn/start", "run": "bash 'my hook.sh' --x=1"}])
+        assert r["steps"][0]["step"]["inputs"]["command"] == ["bash", "my hook.sh", "--x=1"]
+
+    def test_timeout_custom_and_default(self):
+        r = translate_hooks_config([{"on": "turn/end", "run": "node a.mjs", "timeoutMs": 5000}])
+        assert r["steps"][0]["step"]["inputs"]["timeout_ms"] == 5000
+        r2 = translate_hooks_config([{"on": "turn/end", "run": "node a.mjs"}])
+        assert r2["steps"][0]["step"]["inputs"]["timeout_ms"] == 10000
+
+    def test_turn_end_with_reason_not_translated(self):
+        # 链位无 per-reason 门：带 when 的 turn/end 宁可 unmapped 也不过度触发
+        # （post 链每轮都跑，gate 缺失 = 钩子在错误轮之外的所有轮都会响）。
+        r = translate_hooks_config([{"on": "turn/end", "when": "error", "run": "node b.mjs"}])
+        assert r["mapped"] == 0
+        assert r["steps"] == []
+        assert r["unmapped"][0]["reason"] == "turn-end reason gate has no chain equivalent"
+
+    @pytest.mark.parametrize(
+        "on",
+        ["approval/asked", "agent/disposed", "agent/error", "mystery/event"],
+    )
+    def test_unmapped_no_chain_position(self, on: str):
+        r = translate_hooks_config([{"on": on, "run": "echo x"}])
+        assert r["mapped"] == 0
+        assert r["unmapped"][0]["on"] == on
+        assert r["unmapped"][0]["reason"]
+
+    def test_unbalanced_quotes_unmapped(self):
+        r = translate_hooks_config([{"on": "turn/start", "run": "bash 'unclosed.mjs"}])
+        assert r["mapped"] == 0
+
+    def test_yaml_input_bare_on_key(self):
+        # PyYAML YAML 1.1：裸键 on 解析为布尔 True，翻译器必须回取
+        r = translate_hooks_config("hooks:\n  - on: turn/end\n    run: 'node n.mjs'\n")
+        assert r["mapped"] == 1
+        assert r["steps"][0]["chain"] == "post"
+
+    def test_hooks_wrapper_and_none(self):
+        r = translate_hooks_config({"hooks": [{"on": "turn/start", "run": "echo s"}]})
+        assert r["mapped"] == 1
+        assert translate_hooks_config(None) == {"steps": [], "mapped": 0, "unmapped": []}
+
+    def test_shape_invariants(self):
+        # 性质断言：mapped==len(steps)；每条步骤引用执行插件且参数完备
+        r = translate_hooks_config([
+            {"on": "turn/start", "run": "node a.mjs"},
+            {"on": "agent/created", "run": "bash 'x y.sh'", "timeoutMs": 500},
+        ])
+        assert r["mapped"] == len(r["steps"])
+        for item in r["steps"]:
+            step = item["step"]
+            assert step["name"] == "pipeline_dsh_hook"
+            cmd = step["inputs"]["command"]
+            assert isinstance(cmd, list)
+            assert cmd
+            assert all(isinstance(c, str) for c in cmd)
+            assert step["inputs"]["timeout_ms"] > 0
 
 
 # ── 皮肤：位置路由转译（CSS + hooks 同源映射表，2026-08-22） ────────────

@@ -216,7 +216,17 @@ class TestDispatchGuardsDecision:
         mod._ownership["req-1"] = {"tenant": "tenant-a", "user": "u-creator"}
 
         class FakeService:
+            async def get_request(self, rid: str) -> dict[str, Any]:
+                # approve 查创建方 options 中 approve_once 语义的 id（ADR 2026-10-01）
+                return {
+                    "id": rid,
+                    "message_data": {
+                        "options": [{"id": "0", "label": "同意", "semantics": "approve_once"}]
+                    },
+                }
+
             async def submit_response(self, **kwargs: Any) -> bool:
+                FakeService.submitted = kwargs
                 return True
 
         resp = await mod._dispatch_request_action(
@@ -229,6 +239,73 @@ class TestDispatchGuardsDecision:
         )
         assert _resp_status(resp) == 200
         assert _resp_payload(resp)["success"] is True
+        # 路由不自造词形（ADR 2026-10-01 决策 3）：按 approve_once 语义查 id 提交，
+        # 不固定提交 approved/approve 词形。
+        assert FakeService.submitted["response_type"] == "answered"
+        assert FakeService.submitted["selected_option"] == "0"
+
+    @pytest.mark.asyncio
+    async def test_approve_without_declared_semantics_fails_closed(self) -> None:
+        """卡面未声明 approve_once 语义 → 422 显式失败，无决策副作用（fail-closed）。"""
+        mod = _load_server()
+        mod._ownership.clear()
+        mod._ownership["req-2"] = {"tenant": "tenant-a", "user": "u-creator"}
+        calls: list[tuple[str, dict]] = []
+
+        class FakeService:
+            async def get_request(self, rid: str) -> dict[str, Any]:
+                return {
+                    "id": rid,
+                    "message_data": {
+                        "options": [{"id": "0", "label": "同意"}]  # 无语义声明
+                    },
+                }
+
+            async def submit_response(self, **kwargs: Any) -> bool:  # noqa: ARG002
+                calls.append(("submit_response", kwargs))
+                return True
+
+        resp = await mod._dispatch_request_action(
+            FakeService(),
+            "req-2",
+            "approve",
+            "POST",
+            "{}",
+            _headers("tenant-a", "u-creator"),
+        )
+        assert _resp_status(resp) == 422
+        assert _resp_payload(resp)["success"] is False
+        assert calls == [], "未声明语义不得代批（无副作用）"
+
+    @pytest.mark.asyncio
+    async def test_denies_via_response_type_without_word_form(self) -> None:
+        """deny 路由零词形生产：response_type=denied 即显式拒绝，不提交 reject 词形。"""
+        mod = _load_server()
+        mod._ownership.clear()
+        mod._ownership["req-3"] = {"tenant": "tenant-a", "user": "u-creator"}
+        calls: list[tuple[str, dict]] = []
+
+        class FakeService:
+            async def get_request(self, rid: str) -> dict[str, Any]:  # noqa: ARG002
+                return {"id": rid, "message_data": {"options": []}}
+
+            async def submit_response(self, **kwargs: Any) -> bool:
+                calls.append(("submit_response", kwargs))
+                return True
+
+        resp = await mod._dispatch_request_action(
+            FakeService(),
+            "req-3",
+            "deny",
+            "POST",
+            "{}",
+            _headers("tenant-a", "u-creator"),
+        )
+        assert _resp_status(resp) == 200
+        assert _resp_payload(resp)["success"] is True
+        assert calls, "deny 必须提交显式拒绝"
+        assert calls[0][1]["response_type"] == "denied"
+        assert calls[0][1]["selected_option"] is None, "拒绝路由不再自造 reject 词形"
 
 
 # ═══════════════════════════════════════════════════════════

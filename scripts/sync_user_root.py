@@ -86,7 +86,7 @@ def _same_file(a: Path, b: Path) -> bool:
     """两路径是否指向同一目录（源即目标时同步无意义）。"""
     if not (a.exists() and b.exists()):
         return False
-    return bool(os.path.samefile(a, b))
+    return a.samefile(b)
 
 
 def iter_plugin_dirs(shared_root: Path) -> list[Path]:

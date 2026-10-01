@@ -91,7 +91,24 @@ describe('trigger 求值与声明收集', () => {
     })
     expect(flat?.requestId).toBe('req-1')
     expect(flat?.mode).toBe('choice')
-    expect(flat?.options).toEqual(['批准', '拒绝'])
+    // 旧 options 字符串数组按 id=索引回退（提交契约：结构化 {id,label}）
+    expect(flat?.options).toEqual([
+      { id: '0', label: '批准' },
+      { id: '1', label: '拒绝' },
+    ])
+
+    const structured = toSchemaEventItem('approval_panel', 'approval.created', {
+      request_id: 'req-s',
+      mode: 'choice',
+      choice_options: [
+        { id: 'yes', label: '同意', semantics: 'approve_once' },
+        { id: 'no', label: '不同意', semantics: 'deny' },
+      ],
+    })
+    expect(structured?.options).toEqual([
+      { id: 'yes', label: '同意', semantics: 'approve_once' },
+      { id: 'no', label: '不同意', semantics: 'deny' },
+    ])
 
     const nested = toSchemaEventItem('approval_panel', 'approval.created', {
       data: { approval_id: 'req-2', mode: 'review' },
@@ -152,16 +169,41 @@ describe('SchemaFullscreenHost 组件', () => {
     const approveBtn = await screen.findByRole('button', { name: '批准' })
     act(() => approveBtn.click())
 
+    // 提交契约（ADR 2026-10-01）：只提交选项 id（旧字符串 options 按 id=索引回退）
     expect(sendInteractionResponseMock).toHaveBeenCalledWith(
       'session-1',
       'req-1',
-      expect.objectContaining({ response_type: 'answered', selected_option: '批准' }),
+      expect.objectContaining({ response_type: 'answered', selected_option: '0' }),
     )
     // 提交后条目移除 → 浮层关闭
     expect(screen.queryByTestId('fullscreen-toolbar')).toBeNull()
   })
 
-  it('review 模式：批准/拒绝 → sendInteractionResponse（内核不收 type:approval，统一走 interaction 通道）', async () => {
+  it('choice 模式（结构化 choice_options）：提交声明 id 而非 label', async () => {
+    render(<SchemaFullscreenHost declarations={[approvalDecl]} />)
+
+    fireApprovalCreated({
+      request_id: 'req-3',
+      title: '请选择',
+      mode: 'choice',
+      run_id: 'run-8',
+      choice_options: [
+        { id: 'yes', label: '同意', semantics: 'approve_once' },
+        { id: 'no', label: '不同意', semantics: 'deny' },
+      ],
+    })
+
+    const yesBtn = await screen.findByRole('button', { name: '同意' })
+    act(() => yesBtn.click())
+
+    expect(sendInteractionResponseMock).toHaveBeenCalledWith(
+      'session-1',
+      'req-3',
+      expect.objectContaining({ response_type: 'answered', selected_option: 'yes' }),
+    )
+  })
+
+  it('review 模式：批准/拒绝提交声明 semantics 的标准选项 id（内核不收 type:approval）', async () => {
     render(<SchemaFullscreenHost declarations={[approvalDecl]} />)
 
     fireApprovalCreated({
@@ -169,6 +211,10 @@ describe('SchemaFullscreenHost 组件', () => {
       title: '文档审阅',
       mode: 'review',
       run_id: 'run-7',
+      choice_options: [
+        { id: 'approve-opt', label: '同意发布', semantics: 'approve_once' },
+        { id: 'reject-opt', label: '驳回', semantics: 'deny' },
+      ],
     })
 
     const rejectBtn = await screen.findByRole('button', { name: '拒绝' })
@@ -177,11 +223,29 @@ describe('SchemaFullscreenHost 组件', () => {
     expect(sendInteractionResponseMock).toHaveBeenCalledWith(
       'session-1',
       'req-2',
-      expect.objectContaining({ response_type: 'answered', selected_option: 'rejected' }),
+      expect.objectContaining({ response_type: 'answered', selected_option: 'reject-opt' }),
     )
     // 修复回归断言：不再使用内核会静默忽略的 sendApproval
     expect(sendApprovalMock).not.toHaveBeenCalled()
     expect(screen.queryByTestId('fullscreen-toolbar')).toBeNull()
+  })
+
+  it('review 模式：卡面未声明语义选项 → 批准/拒绝禁用（fail-closed，不自造词形）', async () => {
+    render(<SchemaFullscreenHost declarations={[approvalDecl]} />)
+
+    fireApprovalCreated({
+      request_id: 'req-4',
+      title: '文档审阅',
+      mode: 'review',
+      run_id: 'run-9',
+      choice_options: [{ id: 'x', label: '仅展示' }],
+    })
+
+    const rejectBtn = await screen.findByRole('button', { name: '拒绝' })
+    const approveBtn = await screen.findByRole('button', { name: '批准' })
+    expect(rejectBtn).toBeDisabled()
+    expect(approveBtn).toBeDisabled()
+    expect(sendInteractionResponseMock).not.toHaveBeenCalled()
   })
 
   it('同一 requestId 去重：重复事件只入队一次', async () => {

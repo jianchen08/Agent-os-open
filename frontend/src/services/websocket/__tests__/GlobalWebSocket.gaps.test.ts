@@ -382,7 +382,7 @@ describe('GlobalWebSocketService 缺口补测', () => {
     disconnect()
   })
 
-  it('重连次数超过上限后退避封顶 60s：第 31 次重连恰在第 30 次失败 60s 后', async () => {
+  it('重连次数超过上限后退避封顶 30s：第 31 次重连恰在第 30 次失败 30s 后', async () => {
     const { service, connect, disconnect } = await createService()
     const attemptTimes: number[] = []
     mockFetchWsTicket.mockImplementation(async () => {
@@ -392,22 +392,24 @@ describe('GlobalWebSocketService 缺口补测', () => {
 
     connect('token-a')
     let guard = 0
-    while (attemptTimes.length < 30 && guard++ < 100) {
-      await vi.advanceTimersByTimeAsync(61000)
+    // 1s 步进推进：单步不跨越重连计时边界，attemptTimes 恰停在 30（退避 ≤30s 后
+    // 单步大推进会在一次 advance 内连发多次尝试，无法精确断言第 30/31 次的落点）
+    while (attemptTimes.length < 30 && guard++ < 6000) {
+      await vi.advanceTimersByTimeAsync(1000)
     }
     expect(attemptTimes.length).toBe(30)
-    // 逐次退避 4s/8s/16s/32s 后，从第 5 次起全部触及 60s 上限
+    // 逐次退避 4s/8s/16s 后，第 4 次（4×2³=32s>30s）起全部触及 30s 上限
     const gaps = attemptTimes.slice(1).map((t, i) => t - attemptTimes[i])
-    expect(gaps.slice(0, 4)).toEqual([4_000, 8_000, 16_000, 32_000])
-    expect(Math.min(...gaps.slice(4))).toBe(60_000)
+    expect(gaps.slice(0, 3)).toEqual([4_000, 8_000, 16_000])
+    expect(Math.min(...gaps.slice(3))).toBe(30_000)
 
-    // 第 31 次重连恰在第 30 次失败 60s 后：差 1ms 不触发、到点必触发
-    const remaining = 60_000 - (Date.now() - attemptTimes[29])
+    // 第 31 次重连恰在第 30 次失败 30s 后：差 1ms 不触发、到点必触发
+    const remaining = 30_000 - (Date.now() - attemptTimes[29])
     await vi.advanceTimersByTimeAsync(remaining - 1)
     expect(attemptTimes.length).toBe(30)
     await vi.advanceTimersByTimeAsync(1)
     expect(attemptTimes.length).toBe(31)
-    expect(attemptTimes[30] - attemptTimes[29]).toBe(60_000)
+    expect(attemptTimes[30] - attemptTimes[29]).toBe(30_000)
 
     disconnect()
   })

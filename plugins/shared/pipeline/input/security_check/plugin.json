@@ -4,7 +4,7 @@
     "packaging"
   ],
   "name": "Security Check",
-  "version": "1.0.4",
+  "version": "1.1.0",
   "plugin_type": "pipeline",
   "language": "python",
   "host_type": "sidecar",

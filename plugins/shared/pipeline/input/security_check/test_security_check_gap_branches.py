@@ -206,7 +206,9 @@ class TestPluginRefResolution:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """生产行为：on_load 注入 plugin 引用后审批链自动可用并完成一次审批。"""
-        cap = _ScriptedApprovalCap(wait_result={"selected_option": "approved_once"})
+        cap = _ScriptedApprovalCap(
+            wait_result={"selected_option": "approved_once", "selected_semantics": "approve_once"}
+        )
         _mod._set_plugin_ref(SimpleNamespace(get_capability=lambda _name: cap))
         plugin = _approval_plugin(monkeypatch)
 
@@ -214,6 +216,40 @@ class TestPluginRefResolution:
 
         assert len(cap.requests) == 1, "审批请求应经 plugin 引用自动解析发出"
         assert r.state_updates == {}, "批准=零产出（无预定结果）"
+
+    @pytest.mark.asyncio
+    async def test_approval_semantics_grant_and_missing_semantics_fail_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """消费端只读语义（ADR 2026-10-01 决策 2）：approve_once 语义放行；
+        语义缺空（无契约透传/未知词形已被 human 按取消收敛）按拒绝 fail-closed。
+
+        历史别名（approve/approved）回归用例随别名表退役——别名在 human
+        respond 入口归一为规范 id+语义（human 契约测试覆盖），本插件不再
+        收到裸别名词形。
+        """
+        _mod._set_plugin_ref(
+            SimpleNamespace(
+                get_capability=lambda _name: _ScriptedApprovalCap(
+                    wait_result={"selected_option": "approved_once", "selected_semantics": "approve_once"}
+                )
+            )
+        )
+        plugin = _approval_plugin(monkeypatch)
+        r = await plugin.execute(_tool_ctx("bash_execute", {"command": "rm -rf /gap-sem-probe"}))
+        assert r.state_updates == {}, "approve_once 语义=零产出（不得软拦截）"
+
+        _mod._set_plugin_ref(
+            SimpleNamespace(
+                get_capability=lambda _name: _ScriptedApprovalCap(
+                    wait_result={"selected_option": "approved_once"}
+                )
+            )
+        )
+        r2 = await plugin.execute(_tool_ctx("bash_execute", {"command": "rm -rf /gap-nosem-probe"}))
+        entries = r2.state_updates["pre_decided_results"]
+        assert entries, "语义缺空必须软拦截落预定结果"
+        assert "用户拒绝执行" in entries[0]["error"], "语义缺空按拒绝 fail-closed"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("exc_type", [KeyError, AttributeError])
@@ -524,7 +560,9 @@ class TestDangerousToolAuthorizationPasses:
     ) -> None:
         """对照：移除 allow 规则后同一命令走审批链（needs_approval 命中）。"""
         _stub_policy(monkeypatch, "command_in_container")
-        cap = _ScriptedApprovalCap(wait_result={"selected_option": "approved_once"})
+        cap = _ScriptedApprovalCap(
+            wait_result={"selected_option": "approved_once", "selected_semantics": "approve_once"}
+        )
         _mod.set_human_interaction_cap(cap)
         plugin = SecurityCheckPlugin(
             config={
@@ -591,7 +629,9 @@ class TestDangerousToolAuthorizationPasses:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """对照：default 模式下同参数弹审批（accept_edits 与 default 有真实差异）。"""
-        cap = _ScriptedApprovalCap(wait_result={"selected_option": "approved_once"})
+        cap = _ScriptedApprovalCap(
+            wait_result={"selected_option": "approved_once", "selected_semantics": "approve_once"}
+        )
         _mod.set_human_interaction_cap(cap)
         plugin = self._file_write_plugin(monkeypatch)
 
@@ -650,10 +690,10 @@ class TestApprovalFailureSurface:
     @pytest.mark.parametrize(
         ("error_msg", "expected_fragment"),
         [
-            ("request denied by user", "用户拒绝执行"),
-            ("request cancelled by user", "审批被取消"),
-            ("timeout reached", "审批超时未响应"),
-            ("backend exploded", "审批服务异常"),
+            ("INTERACTION_DENIED", "用户拒绝执行"),
+            ("INTERACTION_CANCELLED", "审批被取消"),
+            ("INTERACTION_TIMEOUT", "审批超时未响应"),
+            ("UNKNOWN_BACKEND_EXPLODED", "审批服务异常"),
         ],
     )
     async def test_wait_error_dict_converts_to_matching_soft_block(
@@ -662,9 +702,12 @@ class TestApprovalFailureSurface:
         error_msg: str,
         expected_fragment: str,
     ) -> None:
-        """等待返回 error dict：按语义（denied/cancel/timeout/其它）转换处置。"""
+        """等待返回 error dict：按 error_code 分类（ADR 2026-10-01 决策 8），
+        不再对 error 消息做子串嗅探——消息含 denied 字样但码不符不得按拒绝分类。"""
         plugin = _approval_plugin(monkeypatch)
-        cap = _ScriptedApprovalCap(wait_result={"error": error_msg})
+        cap = _ScriptedApprovalCap(
+            wait_result={"error": f"request denied by user ({error_msg})", "error_code": error_msg}
+        )
         _mod.set_human_interaction_cap(cap)
 
         r = await plugin.execute(
@@ -788,7 +831,9 @@ class TestApprovalDescriptionRendering:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """命令/路径/内容/代码/URL 全渲染，超长项截断并标注。"""
-        cap = _ScriptedApprovalCap(wait_result={"selected_option": "approved_once"})
+        cap = _ScriptedApprovalCap(
+            wait_result={"selected_option": "approved_once", "selected_semantics": "approve_once"}
+        )
         _mod.set_human_interaction_cap(cap)
         plugin = _approval_plugin(monkeypatch)
 
@@ -818,7 +863,9 @@ class TestApprovalDescriptionRendering:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """对照：短参数完整渲染，无截断标注。"""
-        cap = _ScriptedApprovalCap(wait_result={"selected_option": "approved_once"})
+        cap = _ScriptedApprovalCap(
+            wait_result={"selected_option": "approved_once", "selected_semantics": "approve_once"}
+        )
         _mod.set_human_interaction_cap(cap)
         plugin = _approval_plugin(monkeypatch)
 

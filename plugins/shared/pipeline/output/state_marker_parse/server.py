@@ -10,6 +10,7 @@ import base64
 import json
 import logging
 from functools import lru_cache
+from typing import Any
 
 from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
@@ -18,24 +19,33 @@ bootstrap_plugin(__file__)  # 插件目录（本地 plugin.py）+ plugins/shared
 from plugin import StateMarkerParsePlugin  # noqa: E402
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
+from agentos_plugin_sdk.capability import bind_capability_caller  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("state_marker_parse_pipeline")
 
 
-def _tool_executor_caller():
-    """tool-executor 能力句柄的 async caller（跨插件工具/服务调用的既有通道）。"""
-    te = plugin.get_capability("tool-executor")
-    from agentos_plugin_sdk.capability import bind_capability_caller
+async def _tool_executor_caller(
+    tool_name: str, plugin_id: str, args: dict[str, Any]
+) -> Any:
+    """tool-executor 跨插件调用通道：(tool, plugin_id, args) → invoke 信封。
 
-    return bind_capability_caller(te, "tool-executor")
+    句柄延迟到调用时解析——on_load 预热不依赖能力注入顺序（该能力可能晚于
+    本插件注册，探针/生产同险）。
+    """
+    te = plugin.get_capability("tool-executor")
+    caller = bind_capability_caller(te, "tool-executor")
+    return await caller(
+        "tool-executor.invoke",
+        {"tool_name": tool_name, "plugin_id": plugin_id, "args": args},
+    )
 
 
 @lru_cache(maxsize=1)
 def get_instance() -> StateMarkerParsePlugin:
     """懒构建并缓存插件单例（线程安全）。"""
     config = plugin.get_config()
-    return StateMarkerParsePlugin(config=config, invoke_caller=_tool_executor_caller())
+    return StateMarkerParsePlugin(config=config, invoke_caller=_tool_executor_caller)
 
 
 @plugin.on_load

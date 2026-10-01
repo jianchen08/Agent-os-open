@@ -24,8 +24,20 @@ import { FullscreenOverlay } from '@/components/layout/FullscreenOverlay'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { useSessionStore } from '@/stores/sessionStore'
+import {
+  formatInteractionOriginLabel,
+  rawPayloadToOriginInput,
+  resolveInteractionOriginDetail,
+} from '@/utils/interactionOrigin'
 import { DeclaredWidgetLayer } from './DeclaredWidgetLayer'
 import type { WidgetDeclaration } from '@/services/schema/ContributionRegistry'
+
+/** 结构化选项（提交契约：只提交 id，label 仅展示，semantics 驱动 review 标准按钮） */
+export interface SchemaChoiceOption {
+  id: string
+  label: string
+  semantics?: string
+}
 
 /** 事件驱动浮层的标准化条目 */
 interface SchemaEventItem {
@@ -39,7 +51,7 @@ interface SchemaEventItem {
   requestId: string
   title: string
   mode: 'review' | 'choice' | 'conversation'
-  options: string[]
+  options: SchemaChoiceOption[]
 }
 
 /** 从声明 trigger（"on_event:xxx"）求值事件名；非 on_event 触发返回 null */
@@ -68,6 +80,29 @@ function extractRawPayload(rawData: Record<string, unknown>): Record<string, unk
   return (rawData.data as Record<string, unknown>) || rawData
 }
 
+/** 结构化选项解析：choice_options 优先（id/label/semantics），旧 options 字符串数组
+ * 按 id=索引回退（旧 _build_options 的既定形状）——保证升级窗口期旧卡可点 */
+function parseChoiceOptions(data: Record<string, unknown>): SchemaChoiceOption[] {
+  const detailed = data.choice_options
+  if (Array.isArray(detailed)) {
+    return detailed
+      .filter((o): o is Record<string, unknown> => typeof o === 'object' && o !== null)
+      .map((o, i) => ({
+        id: typeof o.id === 'string' && o.id ? o.id : String(i),
+        label: typeof o.label === 'string' ? o.label : String(o.label ?? ''),
+        ...(typeof o.semantics === 'string' && o.semantics ? { semantics: o.semantics } : {}),
+      }))
+  }
+  const legacy = data.options
+  if (Array.isArray(legacy)) {
+    return legacy.map((label, i) => ({
+      id: String(i),
+      label: typeof label === 'string' ? label : String(label ?? ''),
+    }))
+  }
+  return []
+}
+
 /** 事件 payload → 标准化条目（与后端 approval.created payload 对齐） */
 export function toSchemaEventItem(
   declarationId: string,
@@ -89,7 +124,7 @@ export function toSchemaEventItem(
       (data.message as string) ||
       (mode === 'choice' ? '请选择' : mode === 'conversation' ? '请回复' : '审阅请求'),
     mode,
-    options: Array.isArray(data.options) ? (data.options as string[]) : [],
+    options: parseChoiceOptions(data),
   }
 }
 
@@ -147,6 +182,16 @@ export function SchemaFullscreenHost({
   }, [eventDecls])
 
   const current = queue[currentIndex] || null
+
+  // 来源行（用户裁定 2026-10-01）：审批浮层必须可见发起 agent（名+级别）·
+  // 管道 · 会话 · 时间；payload 缺权威段时由 interactionOrigin 缓存解析，全空不显示
+  const originLabel = useMemo(
+    () =>
+      current
+        ? formatInteractionOriginLabel(resolveInteractionOriginDetail(rawPayloadToOriginInput(current.payload)))
+        : '',
+    [current],
+  )
 
   // 自动校正索引（队尾移除后回退）
   useEffect(() => {
@@ -231,9 +276,16 @@ export function SchemaFullscreenHost({
               <ChevronRight className="h-4 w-4" />
             </button>
           </div>
-          <span className="text-muted-foreground text-xs">
-            {current.mode} · {current.eventName}
-          </span>
+          <div className="flex items-center gap-3">
+            {originLabel && (
+              <span className="text-muted-foreground max-w-[50vw] truncate text-xs" title={originLabel}>
+                来源：{originLabel}
+              </span>
+            )}
+            <span className="text-muted-foreground text-xs">
+              {current.mode} · {current.eventName}
+            </span>
+          </div>
         </div>
 
         {/* 声明 widget 渲染（payload 已并入 props） */}
@@ -253,13 +305,13 @@ export function SchemaFullscreenHost({
             <div className="flex flex-wrap gap-2">
               {current.options.map((opt) => (
                 <button
-                  key={opt}
+                  key={opt.id}
                   type="button"
-                  onClick={() => handleSubmit(opt)}
+                  onClick={() => handleSubmit(opt.id)}
                   disabled={isSubmitting}
                   className="bg-primary/10 text-primary hover:bg-primary/20 rounded-md px-4 py-2 text-sm disabled:opacity-50"
                 >
-                  {opt}
+                  {opt.label}
                 </button>
               ))}
             </div>
@@ -290,22 +342,36 @@ export function SchemaFullscreenHost({
 
           {current.mode === 'review' && (
             <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => handleSubmit('rejected')}
-                disabled={isSubmitting}
-                className="bg-destructive/10 text-destructive hover:bg-destructive/20 rounded-md px-4 py-2 text-sm disabled:opacity-50"
-              >
-                拒绝
-              </button>
-              <button
-                type="button"
-                onClick={() => handleSubmit('approved')}
-                disabled={isSubmitting}
-                className="bg-primary text-primary-foreground hover:bg-primary/90 rounded-md px-4 py-2 text-sm disabled:opacity-50"
-              >
-                {isSubmitting ? '提交中...' : '批准'}
-              </button>
+              {(() => {
+                // review 的批准/拒绝落为两个声明 semantics 的标准选项（ADR 2026-10-01）：
+                // 按语义查卡面选项提交 id，不再自造 approved/rejected 固定词；
+                // 卡面未声明对应语义 → 按钮禁用（fail-closed，契约违约可见）
+                const denyOption = current.options.find((o) => o.semantics === 'deny')
+                const approveOption = current.options.find((o) => o.semantics === 'approve_once')
+                const missingHint = '该审批未声明对应语义选项（后端契约违约），已禁用'
+                return (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => denyOption && handleSubmit(denyOption.id)}
+                      disabled={isSubmitting || !denyOption}
+                      title={!denyOption ? missingHint : undefined}
+                      className="bg-destructive/10 text-destructive hover:bg-destructive/20 rounded-md px-4 py-2 text-sm disabled:opacity-50"
+                    >
+                      拒绝
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => approveOption && handleSubmit(approveOption.id)}
+                      disabled={isSubmitting || !approveOption}
+                      title={!approveOption ? missingHint : undefined}
+                      className="bg-primary text-primary-foreground hover:bg-primary/90 rounded-md px-4 py-2 text-sm disabled:opacity-50"
+                    >
+                      {isSubmitting ? '提交中...' : '批准'}
+                    </button>
+                  </>
+                )
+              })()}
             </div>
           )}
         </div>

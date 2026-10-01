@@ -308,6 +308,23 @@ describe('mode 分流与去重', () => {
     view.unmount()
   })
 
+  it('notification 重复事件不重复入列：幂等闸兜住 pending 兜底轮询重放', async () => {
+    const view = await mountHandler()
+    const payload = {
+      request_id: 'req-ndup', interaction_mode: 'notification', title: '进度',
+      session_id: 's', thread_id: 't', pipeline_id: 'p',
+    }
+    ws.emit('interaction_request', payload)
+    await waitFor(() => expect(useNotificationStore.getState().notifications).toHaveLength(1))
+    // 同 request_id 重放（兜底轮询形态）：wasListed=true → 不算新交互
+    ws.emit('interaction_request', payload)
+    await act(async () => {})
+    const list = useNotificationStore.getState().notifications
+    expect(list).toHaveLength(1)
+    expect(list[0].id).toBe('req-ndup')
+    view.unmount()
+  })
+
   it('缺 request_id 的推送被丢弃', async () => {
     const view = await mountHandler()
     ws.emit('interaction_request', { interaction_mode: 'choice', title: '无 id' })
@@ -822,6 +839,66 @@ describe('file_paths 附件：已存在 Tab 跳过注册', () => {
     // 新文件正常注册
     expect(tabs.filter((t) => t.title === '新文件.md')).toHaveLength(1)
     expect(tabs).toHaveLength(2)
+    view.unmount()
+  })
+})
+
+describe('approval.taken 他端结算对账（ADR 2026-10-01 多前端连接决策 5）', () => {
+  it('本地有同 request_id pending → 摘除该卡并提示"已在别处处理"', async () => {
+    const view = await mountHandler()
+    useInteractionStore.setState({
+      pendingInteractions: [
+        makeParsed({ requestId: 'req-taken' }) as PendingInteraction,
+        makeParsed({ requestId: 'req-keep' }) as PendingInteraction,
+      ],
+    })
+
+    ws.emit('approval.taken', {
+      type: 'approval.taken',
+      data: { request_id: 'req-taken', status: 'resolved', resumed: true },
+    })
+
+    await waitFor(() =>
+      expect(
+        useInteractionStore.getState().pendingInteractions.map((i) => i.requestId),
+      ).toEqual(['req-keep']),
+    )
+    const notif = useNotificationStore
+      .getState()
+      .notifications.find((n) => n.title === '审批已在别处处理')
+    expect(notif).toBeDefined()
+    view.unmount()
+  })
+
+  it('本地无该 pending → 静默（不发对账通知）', async () => {
+    const view = await mountHandler()
+
+    ws.emit('approval.taken', {
+      type: 'approval.taken',
+      data: { request_id: 'req-ghost' },
+    })
+    await act(async () => {})
+
+    expect(
+      useNotificationStore.getState().notifications.find(
+        (n) => n.title === '审批已在别处处理',
+      ),
+    ).toBeUndefined()
+    view.unmount()
+  })
+
+  it('事件体缺 request_id → 忽略（不摘除任何卡）', async () => {
+    const view = await mountHandler()
+    useInteractionStore.setState({
+      pendingInteractions: [makeParsed({ requestId: 'req-safe' }) as PendingInteraction],
+    })
+
+    ws.emit('approval.taken', { type: 'approval.taken', data: {} })
+    await act(async () => {})
+
+    expect(
+      useInteractionStore.getState().pendingInteractions.map((i) => i.requestId),
+    ).toEqual(['req-safe'])
     view.unmount()
   })
 })

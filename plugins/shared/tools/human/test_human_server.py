@@ -520,7 +520,11 @@ async def test_interaction_send_notification_tool(server: Any, real_service: Any
 
 
 async def test_interaction_create_choice_and_respond_roundtrip(server: Any, real_service: Any) -> None:
-    """interaction.create_choice → interaction.respond → interaction.wait_for_choice 全真实往返。"""
+    """interaction.create_choice → interaction.respond → interaction.wait_for_choice 全真实往返。
+
+    ADR 2026-10-01 语义归一：label 提交在 respond 入口归一为规范选项 id 落响应
+    记录（无语义声明的卡不造语义，selected_semantics 为空）。
+    """
     created = await server.interaction_create_choice(
         "s1", "t1", "tab1", "审批", options=[{"id": "1", "label": "批准"}], timeout_seconds=30,
     )
@@ -535,7 +539,8 @@ async def test_interaction_create_choice_and_respond_roundtrip(server: Any, real
 
     waited = await server.interaction_wait_for_choice(rid, timeout=5)
     assert waited["response_type"] == "approved"
-    assert waited["selected_option"] == "批准"
+    assert waited["selected_option"] == "1", "label 词形归一为规范选项 id"
+    assert waited["selected_semantics"] == "", "无语义声明的卡不造语义"
     assert waited["feedback"] == "同意"
 
 

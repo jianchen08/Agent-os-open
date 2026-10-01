@@ -3,6 +3,15 @@
 
 使用内存 dict 存储请求和响应，无外部数据库依赖。
 
+本服务是审批/交互的**唯一持卡方与结算单点**（ADR 2026-10-01）：
+- 语义归一点在 respond/submit_response 入口——任何通道（前端卡/HTTP 路由/
+  自动化器）的应答先按创建方 options 的 semantics 声明归一为封闭枚举
+  （id/label/历史别名一律收敛于此），归一结果（规范 id + 语义）落响应记录；
+  消费方只读语义。未知词形 fail-closed 按取消处理并发告警事件，不静默吞。
+- response_type fail-closed：未知值按取消处理 + 告警，废"其余=answered"宽口径。
+- 拒绝记忆仅显式拒绝武装（超时≠拒绝），记忆键 (session, memory_key or title)。
+- 结算（应答/取消/超时）即广播 ``approval.taken``，配合多端对账。
+
 暴露接口：
 - get_human_interaction_service：获取全局单例
 - set_human_interaction_service：设置全局单例
@@ -33,6 +42,11 @@ from human.models import (
     ResponseType,
 )
 
+from agentos_plugin_sdk.approval_contract import (
+    OptionSemantics,
+    is_valid_semantics,
+)
+
 logger = logging.getLogger(__name__)
 
 # choice 请求拒绝记忆的硬上限：异常灌写下逐出最旧（长驻 sidecar 无界增长治理）。
@@ -44,6 +58,35 @@ REJECT_MEMORY_FEEDBACK = (
     "该命令/操作已被用户拒绝，不要再次尝试相同或变体命令；"
     "如确有需要，请先向用户说明理由并获得新的明确指示。"
 )
+
+# 旧卡回退 label 表（ADR 2026-10-01 决策 2：无 semantics 声明的历史 pending 卡）。
+# 仅服务升级过渡期消费：契约卡（options 带 semantics）永远走声明归一，不进本表。
+# 已知词形覆盖 security_check 审批卡/授权卡两族与 approval_service 别名路由；
+# 表外词形（LLM 自选卡等非契约卡）不造语义，透传原词形。
+_LEGACY_OPTION_SEMANTICS: dict[str, str] = {
+    "approved_once": OptionSemantics.APPROVE_ONCE.value,
+    "仅本次执行": OptionSemantics.APPROVE_ONCE.value,
+    "approved_remember": OptionSemantics.APPROVE_AND_REMEMBER.value,
+    "本管道内同命令免批": OptionSemantics.APPROVE_AND_REMEMBER.value,
+    "denied": OptionSemantics.DENY.value,
+    "拒绝执行": OptionSemantics.DENY.value,
+    "pipeline": OptionSemantics.GRANT_WRITE.value,
+    "仅本管道": OptionSemantics.GRANT_WRITE.value,
+    "permanent": OptionSemantics.GRANT_WRITE_PERMANENT.value,
+    "永久写入配置": OptionSemantics.GRANT_WRITE_PERMANENT.value,
+}
+
+# 历史别名表（ADR 2026-10-01 决策 3 的事故词形：approval_service HTTP 便利路由
+# 固定提交 approve/approved——入口收敛为语义，消费方永不再见裸别名）。
+_LEGACY_ALIASES: dict[str, str] = {
+    "approve": OptionSemantics.APPROVE_ONCE.value,
+    "approved": OptionSemantics.APPROVE_ONCE.value,
+}
+
+
+def _response_types() -> frozenset[str]:
+    """合法 response_type 词形集（ResponseType 枚举值）。"""
+    return frozenset(rt.value for rt in ResponseType)
 
 
 def _read_env_seconds(name: str, default: float) -> float:
@@ -57,12 +100,14 @@ def _read_env_seconds(name: str, default: float) -> float:
         return default
 
 
-def _is_deny_option(option_id: str, label: str) -> bool:
-    """判断选项是否表达"拒绝"语义（按 id 或 label 文案）。"""
-    norm_label = label.strip().lower()
-    if norm_label.startswith("拒绝") or "reject" in norm_label or "deny" in norm_label:
-        return True
-    return option_id.strip().lower() in ("denied", "reject", "rejected")
+def _option_semantics(opt: dict[str, Any]) -> str:
+    """单选项的生效语义：声明值合法即用；未声明/非法回退旧卡 label 表，表外为空。"""
+    raw = opt.get("semantics")
+    if is_valid_semantics(raw):
+        return str(raw)
+    oid = str(opt.get("id", ""))
+    label = str(opt.get("label", ""))
+    return _LEGACY_OPTION_SEMANTICS.get(oid) or _LEGACY_OPTION_SEMANTICS.get(label) or ""
 
 
 class InteractionTimeoutError(Exception):
@@ -199,6 +244,8 @@ class HumanInteractionService(IHumanInteractionService):
         agent_id: str | None = None,
         file_paths: list[str] | None = None,
         user_id: str | None = None,
+        agent_level: str | None = None,
+        pipeline_id: str | None = None,
     ) -> str:
         """发送非阻塞通知，不等待用户响应，立即返回 request_id。"""
         request_id = str(uuid4())
@@ -216,6 +263,8 @@ class HumanInteractionService(IHumanInteractionService):
                 "progress": progress,
                 "priority": priority.value,
                 "file_paths": file_paths,
+                **({"agent_level": agent_level} if agent_level else {}),
+                **({"pipeline_id": pipeline_id} if pipeline_id else {}),
             },
         )
         self._requests[request_id] = record
@@ -246,19 +295,27 @@ class HumanInteractionService(IHumanInteractionService):
         file_paths: list[str] | None = None,
         agent_level: str | None = None,
         pipeline_id: str | None = None,
+        agent_name: str | None = None,
+        memory_key: str | None = None,
     ) -> str:
         """创建选择模式请求，返回 request_id。
 
         BUG-14 有界等待：timeout_seconds 收敛到 choice 等待上限（默认 86400s=24h，
         BUG-40 放宽），审批卡不再永久等待；超时按拒绝裁决（见 wait_for_choice/_handle_timeout）。
-        BUG-14 拒绝记忆：同 (session_id, title) 的请求在拒绝记忆窗口内重试时，
+        BUG-14 拒绝记忆：同记忆作用域的请求在拒绝记忆窗口内重试时，
         不再弹卡（不通知前端、不建等待事件），直接落已拒绝终态——wait_for_choice
         对其立即抛 InteractionDeniedError（携带终局反馈）。
+        记忆作用域（ADR 2026-10-01 决策 6 精确化）：创建方传入 memory_key
+        （工具+指纹）时按 (session, memory_key)，否则回退 (session, title)。
+        options 契约（决策 2，只增不改）：选项可携带 semantics 封闭枚举声明，
+        应答归一点据此映射；无声明的历史卡回退 label 表。
         """
         request_id = str(uuid4())
         timeout: float = timeout_seconds or int(self._default_timeout)
         if self._choice_max_wait_seconds > 0:
             timeout = min(timeout, self._choice_max_wait_seconds)
+
+        reject_scope = memory_key or title
 
         record = self._make_request_record(
             request_id=request_id,
@@ -277,13 +334,15 @@ class HumanInteractionService(IHumanInteractionService):
                 "priority": priority.value,
                 "timeout_reminded": False,
                 "file_paths": file_paths,
+                **({"memory_key": memory_key} if memory_key else {}),
                 **({"agent_level": agent_level} if agent_level else {}),
                 **({"pipeline_id": pipeline_id} if pipeline_id else {}),
+                **({"agent_name": agent_name} if agent_name else {}),
             },
         )
 
         # 拒绝记忆命中：直接按拒绝裁决（滑窗刷新），不弹卡不等待
-        if self._reject_memory_hit(session_id, title):
+        if self._reject_memory_hit(session_id, reject_scope):
             record["status"] = InteractionStatus.COMPLETED.value
             self._requests[request_id] = record
             self._responses[request_id] = self._make_response_record(
@@ -334,6 +393,7 @@ class HumanInteractionService(IHumanInteractionService):
         file_paths: list[str] | None = None,
         agent_level: str | None = None,
         pipeline_id: str | None = None,
+        agent_name: str | None = None,
     ) -> str:
         """创建对话模式请求，返回 request_id。"""
         request_id = str(uuid4())
@@ -354,6 +414,7 @@ class HumanInteractionService(IHumanInteractionService):
                 "file_paths": file_paths,
                 **({"agent_level": agent_level} if agent_level else {}),
                 **({"pipeline_id": pipeline_id} if pipeline_id else {}),
+                **({"agent_name": agent_name} if agent_name else {}),
             },
         )
         self._requests[request_id] = record
@@ -429,6 +490,7 @@ class HumanInteractionService(IHumanInteractionService):
                     "request_id": request_id,
                     "response_type": resp_type,
                     "selected_option": resp_data.get("selected_option"),
+                    "selected_semantics": resp_data.get("selected_semantics", ""),
                     "answers": resp_data.get("answers"),
                     "feedback": resp_data.get("feedback"),
                 }
@@ -492,6 +554,7 @@ class HumanInteractionService(IHumanInteractionService):
             "request_id": request_id,
             "response_type": resp_type,
             "selected_option": resp_data.get("selected_option"),
+            "selected_semantics": resp_data.get("selected_semantics", ""),
             "answers": resp_data.get("answers"),
             "feedback": resp_data.get("feedback"),
         }
@@ -507,51 +570,65 @@ class HumanInteractionService(IHumanInteractionService):
             resolved = min(resolved, self._choice_max_wait_seconds)
         return resolved
 
-    def _memorize_rejection(self, session_id: str, title: str) -> None:
-        """记录一次拒绝判定（用户拒绝或超时按拒绝裁决），滑窗起点 = 现在。"""
+    def _memorize_rejection(self, session_id: str, scope: str) -> None:
+        """记录一次显式拒绝判定（ADR 2026-10-01 决策 6：超时≠拒绝，不武装），滑窗起点 = 现在。"""
         if self._reject_memory_ttl_seconds <= 0:
             return
         if len(self._reject_memory) >= _REJECT_MEMORY_MAX_ENTRIES:
             oldest = min(self._reject_memory.items(), key=lambda kv: kv[1])
             self._reject_memory.pop(oldest[0], None)
-        self._reject_memory[(session_id, title)] = time.monotonic()
+        self._reject_memory[(session_id, scope)] = time.monotonic()
 
-    def _reject_memory_hit(self, session_id: str, title: str) -> bool:
-        """拒绝记忆是否命中（TTL 内有拒绝判定）；命中即滑窗刷新。"""
-        ts = self._reject_memory.get((session_id, title))
+    def _reject_memory_hit(self, session_id: str, scope: str) -> bool:
+        """拒绝记忆是否命中（TTL 内有显式拒绝判定）；命中即滑窗刷新。"""
+        ts = self._reject_memory.get((session_id, scope))
         if ts is None:
             return False
         active = (time.monotonic() - ts) < self._reject_memory_ttl_seconds
         if active:
-            self._reject_memory[(session_id, title)] = time.monotonic()
+            self._reject_memory[(session_id, scope)] = time.monotonic()
         else:
-            self._reject_memory.pop((session_id, title), None)
+            self._reject_memory.pop((session_id, scope), None)
         return active
 
     @staticmethod
-    def _is_denial_submission(
+    def _normalize_selection(
         record: dict[str, Any],
-        response_type: str,
-        selected_option: str | None,
-    ) -> bool:
-        """判定一次响应是否为用户拒绝（choice 记录的拒绝记忆触发器）。
+        raw_selected: str,
+    ) -> tuple[str, str, bool]:
+        """语义归一（ADR 2026-10-01 决策 2，respond 入口单点）：词形 → (规范选项 id, 语义, 是否命中)。
 
-        两条路径：response_type=denied（不经前端的直接拒绝）；或前端审批卡的
-        answered + 选中"拒绝"语义选项（label/id 命中拒绝词汇）。
+        三级收敛，任何通道（前端卡/HTTP 路由/自动化器）的应答都经此：
+        1. 精确匹配创建方选项 id 或 label → 规范 id；语义取该选项声明值，
+           未声明的历史卡回退 label 表，表外（LLM 自选卡）为空串（不造语义）；
+        2. 历史别名（approve/approved 等事故词形）→ 语义，规范 id 取卡上首个
+           同语义选项（查不到保留原词形备查）；
+        3. 其余（匹配不上任何选项/别名的非空词形）→ (原词形, cancel, False)——
+           调用方按取消处理并发告警事件（fail-closed，不静默吞）；
+           卡上显式声明的 cancel 选项走第 1 级（matched=True），不算未知词形。
+
+        空词形（answers 型应答/非 choice 交互）不归一，返回 ("", "", True)；
+        卡面无 options（创建方未声明契约面）时无契约可违约，词形透传
+        (原词形, "", True)——fail-closed 只作用于已声明选项面的卡。
         """
-        if response_type == ResponseType.DENIED.value:
-            return True
-        if not selected_option:
-            return False
+        if not raw_selected:
+            return "", "", True
         options = (record.get("message_data") or {}).get("options") or []
+        if not options:
+            return raw_selected, "", True
         for opt in options:
             if not isinstance(opt, dict):
                 continue
             oid = str(opt.get("id", ""))
-            label = str(opt.get("label", ""))
-            if selected_option in (oid, label) and _is_deny_option(oid, label):
-                return True
-        return False
+            if raw_selected in (oid, str(opt.get("label", ""))):
+                return oid, _option_semantics(opt), True
+        alias_sem = _LEGACY_ALIASES.get(raw_selected)
+        if alias_sem is not None:
+            for opt in options:
+                if isinstance(opt, dict) and _option_semantics(opt) == alias_sem:
+                    return str(opt.get("id", "")), alias_sem, True
+            return raw_selected, alias_sem, True
+        return raw_selected, OptionSemantics.CANCEL.value, False
 
     @staticmethod
     def _make_response_record(
@@ -562,8 +639,13 @@ class HumanInteractionService(IHumanInteractionService):
         answers: list[str] | None,
         feedback: str | None,
         user_id: str | None = None,
+        selected_semantics: str = "",
     ) -> dict[str, Any]:
-        """构建响应记录（submit_response 与拒绝记忆自动拒绝共用同一形状）。"""
+        """构建响应记录（submit_response 与拒绝记忆自动拒绝共用同一形状）。
+
+        selected_semantics：归一后的选项语义（ADR 2026-10-01 决策 2，只增不改）；
+        空串 = 无语义契约（LLM 自选卡透传词形）或非选项型应答。
+        """
         return {
             "id": str(uuid4()),
             "session_id": session_id,
@@ -574,6 +656,7 @@ class HumanInteractionService(IHumanInteractionService):
                 "request_id": request_id,
                 "response_type": response_type,
                 "selected_option": selected_option,
+                "selected_semantics": selected_semantics,
                 "answers": answers,
                 "feedback": feedback,
                 "user_id": user_id,
@@ -622,7 +705,16 @@ class HumanInteractionService(IHumanInteractionService):
         feedback: str | None = None,
         user_id: str | None = None,
     ) -> bool:
-        """提交响应。"""
+        """提交响应（语义归一点，ADR 2026-10-01 决策 2/7）。
+
+        任何通道（前端卡/HTTP 便利路由/自动化器）的应答都收敛于此：
+        1. response_type fail-closed：未知词形按取消处理 + 告警事件，废
+           "其余=answered"宽口径；
+        2. choice 记录的 selected_option 按创建方 semantics 声明归一
+           （id/label/历史别名→规范 id + 语义），归一结果落响应记录；
+           未知词形按取消处理 + 告警事件（不静默吞）；
+        3. 拒绝记忆仅显式拒绝武装（语义=deny 或 response_type=denied）。
+        """
         request_record = self._requests.get(request_id)
         if not request_record:
             logger.warning(
@@ -640,16 +732,58 @@ class HumanInteractionService(IHumanInteractionService):
             )
             return False
 
-        # BUG-14 拒绝记忆：choice 请求被用户拒绝（直接 denied 或选中拒绝选项）
-        # 即武装记忆——同 (session_id, title) 的后续请求不再弹卡，直接按拒绝裁决。
-        if (
-            (request_record.get("message_data") or {}).get("interaction_mode")
-            == InteractionMode.CHOICE.value
-            and self._is_denial_submission(request_record, response_type, selected_option)
-        ):
+        msg_data = request_record.get("message_data") or {}
+        is_choice = msg_data.get("interaction_mode") == InteractionMode.CHOICE.value
+        thread_id = str(msg_data.get("thread_id") or "")
+
+        # ── response_type fail-closed：未知值按取消 + 告警（不静默吞）──
+        raw_response_type = response_type
+        if response_type not in _response_types():
+            await self._notify_anomaly(
+                request_id,
+                anomaly="unknown_response_type",
+                detail=f"未知 response_type={response_type!r}，按取消处理",
+                thread_id=thread_id,
+            )
+            response_type = ResponseType.CANCELLED.value
+            if not feedback:
+                feedback = f"未知响应类型 {raw_response_type!r}，已按取消处理"
+
+        # ── 语义归一：词形（id/label/历史别名）→ 规范 id + 封闭语义 ──
+        selected_semantics = ""
+        raw_selected = selected_option
+        if is_choice and selected_option:
+            selected_option, selected_semantics, matched = self._normalize_selection(
+                request_record, selected_option
+            )
+            if selected_semantics == OptionSemantics.CANCEL.value:
+                # 未知词形（未命中任何选项/别名）：fail-closed 按取消 + 告警；
+                # 声明的 cancel 选项（matched）只结算不告警。原词形留 anomaly 备查。
+                if not matched:
+                    await self._notify_anomaly(
+                        request_id,
+                        anomaly="unknown_option_word_form",
+                        detail=f"未知选项词形={raw_selected!r}，按取消处理",
+                        thread_id=thread_id,
+                    )
+                    if not feedback:
+                        feedback = f"未知选项词形 {raw_selected!r}，已按取消处理"
+                response_type = ResponseType.CANCELLED.value
+
+        # BUG-14 拒绝记忆（决策 6 降格）：仅显式拒绝武装——语义=deny 的选项
+        # 或 response_type=denied；超时/取消不武装。作用域 = memory_key（工具+
+        # 指纹）优先，回退 title。
+        explicit_deny = (
+            is_choice
+            and (
+                response_type == ResponseType.DENIED.value
+                or selected_semantics == OptionSemantics.DENY.value
+            )
+        )
+        if explicit_deny:
             self._memorize_rejection(
                 str(request_record.get("session_id") or ""),
-                str((request_record.get("message_data") or {}).get("title") or ""),
+                str(msg_data.get("memory_key") or msg_data.get("title") or ""),
             )
 
         now = datetime.now(UTC).isoformat()
@@ -662,11 +796,11 @@ class HumanInteractionService(IHumanInteractionService):
             answers=answers,
             feedback=feedback,
             user_id=user_id,
+            selected_semantics=selected_semantics,
         )
 
         request_record["status"] = InteractionStatus.COMPLETED.value
-        msg_data = request_record.setdefault("message_data", {})
-        msg_data["responded_at"] = now
+        request_record.setdefault("message_data", {})["responded_at"] = now
 
         async with self._lock:
             event_exists = request_id in self._pending_events
@@ -687,10 +821,21 @@ class HumanInteractionService(IHumanInteractionService):
                 self._timeout_tasks[request_id].cancel()
                 del self._timeout_tasks[request_id]
 
+        # 结算广播（多端对账）：卡已被应答定局，其他前端据此下卡
+        await self._notify_settled(
+            request_id,
+            response_type=response_type,
+            selected_option=selected_option,
+            selected_semantics=selected_semantics,
+            session_id=str(request_record.get("session_id") or ""),
+            thread_id=thread_id,
+        )
+
         logger.info(
-            "[HumanInteraction] 响应已提交 | request_id=%s | response_type=%s",
+            "[HumanInteraction] 响应已提交 | request_id=%s | response_type=%s | semantics=%s",
             request_id,
             response_type,
+            selected_semantics,
         )
         return True
 
@@ -745,6 +890,17 @@ class HumanInteractionService(IHumanInteractionService):
                 reason,
                 thread_id=msg_data.get("thread_id", ""),
             )
+
+        # 结算广播（多端对账）：卡已被取消定局
+        msg_data = record.get("message_data") or {}
+        await self._notify_settled(
+            request_id,
+            response_type=ResponseType.CANCELLED.value,
+            selected_option=None,
+            selected_semantics=OptionSemantics.CANCEL.value,
+            session_id=str(record.get("session_id") or ""),
+            thread_id=str(msg_data.get("thread_id") or ""),
+        )
 
         logger.info(
             "[HumanInteraction] 请求已取消 | request_id=%s | reason=%s",
@@ -874,6 +1030,71 @@ class HumanInteractionService(IHumanInteractionService):
         """设置通知器。"""
         self._notifier = notifier
 
+    async def _notify_settled(
+        self,
+        request_id: str,
+        *,
+        response_type: str,
+        selected_option: str | None,
+        selected_semantics: str,
+        session_id: str,
+        thread_id: str,
+    ) -> None:
+        """结算广播 ``approval.taken``（ADR 2026-10-01 决策 4，多端对账）。
+
+        卡被应答/取消/超时定局时触发（fire-and-forget），其他前端连接据此
+        下卡，杜绝多端重复决策。通知器缺失/失败只留日志，不阻断结算。
+        """
+        if self._notifier is None:
+            return
+        try:
+            await self._notifier.notify_settled(
+                request_id,
+                response_type=response_type,
+                selected_option=selected_option,
+                selected_semantics=selected_semantics,
+                session_id=session_id,
+                thread_id=thread_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — 广播是增强能力，失败不阻断结算
+            logger.warning(
+                "[HumanInteraction] approval.taken 广播失败 | request_id=%s | error=%s",
+                request_id,
+                exc,
+            )
+
+    async def _notify_anomaly(
+        self,
+        request_id: str,
+        *,
+        anomaly: str,
+        detail: str,
+        thread_id: str = "",
+    ) -> None:
+        """归一/校验异常告警事件 ``interaction_anomaly``（fail-closed 可观测面）。
+
+        未知词形、未知 response_type 等契约违约在此显式发声（warning 日志 +
+        前端事件双通道），服务 24h 观测的采集点（归一命中率/未知词形告警）。
+        """
+        logger.warning(
+            "[HumanInteraction] 交互应答异常 | request_id=%s | anomaly=%s | %s",
+            request_id,
+            anomaly,
+            detail,
+        )
+        if self._notifier is None:
+            return
+        try:
+            await self._notifier.notify_anomaly(
+                request_id, anomaly=anomaly, detail=detail, thread_id=thread_id
+            )
+        except Exception as exc:  # noqa: BLE001 — 告警通道失败不阻断主流程
+            logger.warning(
+                "[HumanInteraction] interaction_anomaly 推送失败 | request_id=%s | error=%s",
+                request_id,
+                exc,
+            )
+
     def _make_request_record(
         self,
         request_id: str,
@@ -981,6 +1202,11 @@ class HumanInteractionService(IHumanInteractionService):
         进入本方法（审批闭环最常见的竞态窗口）。状态检查与置位之间无 await 间隙
         （仅同步代码），先到者把 status 置 TIMEOUT 并通知，后到者直接返回——
         notify_timeout 恰好只触发一次。
+
+        拒绝记忆降格（ADR 2026-10-01 决策 6）：超时 ≠ 用户拒绝，不武装拒绝记忆
+        ——武装会把"没来得及点批准"放大成"重试不弹卡直接拒"，卡死审批闭环。
+        调用方（wait_for_choice 侧）超时按拒绝
+        裁决的语义不变——降格只作用于跨请求的记忆面。
         """
         record = self._requests.get(request_id)
         thread_id = ""
@@ -990,11 +1216,6 @@ class HumanInteractionService(IHumanInteractionService):
             if record.get("status") != InteractionStatus.PENDING.value:
                 return  # 幂等：已被响应/取消/已超时处理
             record["status"] = InteractionStatus.TIMEOUT.value
-            # BUG-14：choice 超时 = 按拒绝裁决，同样武装拒绝记忆（重试不弹卡）
-            if msg_data.get("interaction_mode") == InteractionMode.CHOICE.value:
-                self._memorize_rejection(
-                    str(record.get("session_id") or ""), str(msg_data.get("title") or "")
-                )
 
         async with self._lock:
             if request_id in self._pending_events:
@@ -1002,6 +1223,16 @@ class HumanInteractionService(IHumanInteractionService):
 
         if self._notifier:
             await self._notifier.notify_timeout(request_id, thread_id=thread_id)
+
+        # 结算广播（多端对账）：卡已被超时定局
+        await self._notify_settled(
+            request_id,
+            response_type=ResponseType.TIMEOUT.value,
+            selected_option=None,
+            selected_semantics="",
+            session_id=str((record or {}).get("session_id") or ""),
+            thread_id=thread_id,
+        )
 
         logger.info("[HumanInteraction] 请求超时 | request_id=%s", request_id)
 

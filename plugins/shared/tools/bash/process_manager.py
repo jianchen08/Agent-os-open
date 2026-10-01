@@ -37,11 +37,20 @@ def _wsl_transport(backend: dict[str, Any]) -> list[str]:
     return args
 
 
+# `<X>:/mnt/<d>/Y`（污染变体，去伪盘符前缀）或 `/mnt/<d>/Y`（反斜杠已归一）。
+_WS_MOUNT_ARGV_RE = re.compile(r"^(?:[A-Za-z]:)?/mnt/([A-Za-z])/(.*)$", re.DOTALL)
+
+
 def _map_wsl_working_dir(backend: dict[str, Any], working_dir: str | None) -> str:
     r"""/workspace 约定路径 → 环境 workspace 的 WSL 路径；其余原样透传。
 
     反斜杠形态（`\workspace`，工具层 ntpath 规整产物）同樣映射——与
     WslNativeProvider._map_working_dir 同语义（漂移钉 TestArgvDriftPin）。
+
+    WSL 挂载形态归一：`\mnt\d\X` / `D:\mnt\d\X` 类污染形态直透
+    `wsl --cd` 会被 wsl.exe 按盘符相对路径解析为不存在的目录，随后 pwd/
+    报错把脏形态回灌 LLM 上下文，读链写链全线挂污。归一为合法 POSIX
+    `/mnt/d/X` 后透传（wsl --cd 原生接受）。
     """
     workspace_wsl = str(backend.get("workspace_wsl", "") or "")
     normalized = working_dir.replace("\\", "/") if working_dir else ""
@@ -50,6 +59,9 @@ def _map_wsl_working_dir(backend: dict[str, Any], working_dir: str | None) -> st
         return workspace_wsl
     if normalized.startswith("/workspace/"):
         return workspace_wsl + normalized[len("/workspace"):]
+    m = _WS_MOUNT_ARGV_RE.match(normalized)
+    if m:
+        return f"/mnt/{m.group(1).lower()}/{m.group(2)}"
     return working_dir or ""
 
 

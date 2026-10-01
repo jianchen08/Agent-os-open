@@ -44,6 +44,7 @@ from human.service import (  # noqa: E402
 )
 
 from agentos_plugin_sdk import AgentOSPlugin  # noqa: E402
+from agentos_plugin_sdk.approval_contract import InteractionErrorCode, is_valid_semantics  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plugin = AgentOSPlugin("human_interaction_tool")
@@ -98,7 +99,7 @@ class _EventBusNotifier(IInteractionNotifier):
         }
         for key in ("options", "questions", "initial_message", "suggestions",
                     "file_paths", "progress", "priority", "timeout_seconds",
-                    "agent_level", "pipeline_id", "agent_id"):
+                    "agent_level", "pipeline_id", "agent_id", "agent_name"):
             if msg.get(key) is not None:
                 payload[key] = msg[key]
         return await self._emit("interaction_request", payload, payload.get("thread_id", ""))
@@ -134,6 +135,31 @@ class _EventBusNotifier(IInteractionNotifier):
         return await self._emit("interaction_conversation_start", {
             "request_id": request_id, "thread_id": thread_id, "tab_id": tab_id,
             "title": title, "initial_message": initial_message, "suggestions": suggestions,
+        }, thread_id)
+
+    async def notify_settled(
+        self, request_id: str, *,
+        response_type: str, selected_option: str | None, selected_semantics: str,
+        session_id: str = "", thread_id: str = "",
+    ) -> bool:
+        """结算广播 approval.taken（多端对账：其他前端连接据此下卡）。"""
+        return await self._emit("approval.taken", {
+            "request_id": request_id,
+            "response_type": response_type,
+            "selected_option": selected_option,
+            "selected_semantics": selected_semantics,
+            "session_id": session_id,
+        }, thread_id)
+
+    async def notify_anomaly(
+        self, request_id: str, *,
+        anomaly: str, detail: str, thread_id: str = "",
+    ) -> bool:
+        """交互应答异常告警（归一命中率/未知词形 24h 观测采集面）。"""
+        return await self._emit("interaction_anomaly", {
+            "request_id": request_id,
+            "anomaly": anomaly,
+            "detail": detail,
         }, thread_id)
 
 
@@ -181,6 +207,10 @@ def _normalize_options(raw: Any) -> list[dict[str, Any]] | None:
             entry: dict[str, Any] = {"id": str(item.get("id", i)), "label": label}
             if item.get("description"):
                 entry["description"] = item["description"]
+            # semantics 建卡契约（ADR 2026-10-01 决策 2，只增不改）：声明值须为
+            # 封闭枚举成员，非法值丢弃不带病入卡（该选项退化为无语义透传）。
+            if is_valid_semantics(item.get("semantics")):
+                entry["semantics"] = item["semantics"]
             out.append(entry)
     return out or None
 
@@ -369,8 +399,27 @@ async def _do_notification(kwargs: dict[str, Any], session_id: str) -> dict[str,
         message=kwargs.get("description") or kwargs.get("initial_message") or "",
         priority=Priority(kwargs.get("priority", "normal")),
         agent_id=kwargs.get("pipeline_id"),
+        pipeline_id=kwargs.get("pipeline_id"),
+        agent_level=_agent_level_from_kwargs(kwargs),
     )
     return {"status": "sent", "request_id": rid}
+
+
+def _agent_level_from_kwargs(kwargs: dict[str, Any]) -> str | None:
+    """从注入参数归一 Agent 层级（卡片来源展示用）。
+
+    param_inject 注入 ``parent_agent_level``（int 形态，task_submit 等既有消费
+    契约）——归一为 "L2" 字符串；调用方已带字符串形态（L1/l1/2）同样归一。
+    缺失/非法 → None（payload 不带该键，前端不显示级别）。
+    """
+    raw = kwargs.get("agent_level") or kwargs.get("parent_agent_level")
+    if raw is None or raw == "":
+        return None
+    level_str = str(raw).upper().lstrip("L")
+    try:
+        return f"L{int(level_str)}"
+    except ValueError:
+        return None
 
 
 async def _do_choice(
@@ -392,6 +441,7 @@ async def _do_choice(
         pipeline_id=pipeline_id,
         file_paths=_resolved_file_paths(kwargs),
         user_id=kwargs.get("user_id") or None,
+        agent_level=_agent_level_from_kwargs(kwargs),
     )
     response = await _service.wait_for_choice(rid, timeout=timeout)
     result: dict[str, Any] = {"status": "completed", "response_type": response.get("response_type")}
@@ -420,6 +470,7 @@ async def _do_conversation(
         agent_id=pipeline_id,
         pipeline_id=pipeline_id,
         file_paths=_resolved_file_paths(kwargs),
+        agent_level=_agent_level_from_kwargs(kwargs),
     )
     response = await _service.wait_for_choice(rid, timeout=timeout)
     resp_type = response.get("response_type", "")
@@ -483,6 +534,26 @@ async def interaction_send_notification(
                 "type": "string",
                 "description": "创建者用户（param_inject/调用方服务端注入，用于审批归属归因）",
             },
+            "agent_id": {
+                "type": "string",
+                "description": "发起 Agent 坐标（state agent.id / config_id，卡片来源展示）",
+            },
+            "agent_level": {
+                "type": "string",
+                "description": "发起 Agent 层级（L1/L2/L3，卡片来源展示）",
+            },
+            "pipeline_id": {
+                "type": "string",
+                "description": "所属管道 ID（卡片来源展示与路由）",
+            },
+            "agent_name": {
+                "type": "string",
+                "description": "发起 Agent 显示名（卡片来源展示，缺省由前端缓存解析）",
+            },
+            "memory_key": {
+                "type": "string",
+                "description": "拒绝记忆作用域键（创建方声明，推荐 工具+指纹 精确键；缺省回退标题）",
+            },
         },
         "required": ["session_id", "thread_id", "tab_id", "title"],
     },
@@ -492,6 +563,8 @@ async def interaction_create_choice(
     session_id: str, thread_id: str, tab_id: str, title: str, description: str = "",
     options: list[dict[str, Any]] | None = None, questions: list[str] | None = None,
     timeout_seconds: int = 86400, priority: str = "normal", user_id: str = "",
+    agent_id: str = "", agent_level: str = "", pipeline_id: str = "", agent_name: str = "",
+    memory_key: str = "",
 ) -> dict[str, Any]:
     if _service is None:
         return {"error": "service not initialized"}
@@ -500,6 +573,9 @@ async def interaction_create_choice(
         description=description, options=options, questions=questions,
         timeout_seconds=timeout_seconds, priority=Priority(priority),
         user_id=user_id or None,
+        agent_id=agent_id or None, agent_level=agent_level or None,
+        pipeline_id=pipeline_id or None, agent_name=agent_name or None,
+        memory_key=memory_key or None,
     )
     return {"request_id": rid, "status": "pending"}
 
@@ -522,17 +598,25 @@ async def interaction_wait_for_choice(request_id: str, timeout: float = 86400) -
     try:
         return await _service.wait_for_choice(request_id, timeout)
     except InteractionTimeoutError as e:
-        # error 消息携带 ASCII 标记（timeout/denied/cancel）：调用方（security_check
-        # 等）按子串把 error 分类为对应拒绝语义（BUG-14 超时=按拒绝裁决反馈链路）。
+        # 错误分类统一 error_code（ADR 2026-10-01 决策 8，词源 SDK
+        # InteractionErrorCode）：消费方按码分类，禁止对 error 消息做子串嗅探。
         return {
             "error": f"审批等待超时，已按拒绝裁决 (interaction timeout): {e}",
-            "error_code": "INTERACTION_TIMEOUT",
+            "error_code": InteractionErrorCode.INTERACTION_TIMEOUT.value,
             "request_id": request_id,
         }
     except InteractionDeniedError as e:
-        return {"error": f"denied: {e}", "error_code": "INTERACTION_DENIED", "request_id": request_id}
+        return {
+            "error": f"denied: {e}",
+            "error_code": InteractionErrorCode.INTERACTION_DENIED.value,
+            "request_id": request_id,
+        }
     except InteractionCancelledError as e:
-        return {"error": f"cancelled: {e}", "error_code": "INTERACTION_CANCELLED", "request_id": request_id}
+        return {
+            "error": f"cancelled: {e}",
+            "error_code": InteractionErrorCode.INTERACTION_CANCELLED.value,
+            "request_id": request_id,
+        }
 
 
 @plugin.tool(

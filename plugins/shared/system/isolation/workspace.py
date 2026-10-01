@@ -247,14 +247,45 @@ def ensure_workspace_git_ignored(base: Path) -> bool:
         return False
 
 
+def _is_installed_chain() -> bool:
+    """装机链判定：装机链（electron buildKernelEnv）独有注入
+    ``AGENTOS_PLUGIN_SOURCE_PRIORITY=builtin``（与 agentos-kernel.rs 的装机链
+    口径注释同源；dev launcher 从不设它，sidecar 继承内核进程环境）。
+    """
+    return os.environ.get("AGENTOS_PLUGIN_SOURCE_PRIORITY", "").strip() == "builtin"
+
+
+def _relative_root_anchor() -> Path:
+    """相对 workspace.root 的锚点目录（形态感知）。
+
+    - 装机形态 → **用户根**（``user_space.user_root()``——与 AGENTOS_USER_ROOT /
+      用户插件根 / 用户空间 .env 同一解析源，跨 OS 目录推导由该机制保证，本处
+      不拼任何 OS 特定路径）：安装目录随卸载整体删除（BUG-85 同款动因），相对
+      root 锚项目根会把工作空间拖进卸载抹除面。
+    - dev 形态 → **项目根**（find_project_root()，既有语义不变）。
+    - 用户根不可用（无 OS 数据目录）→ 回落项目根（缺省兜底，不 panic）。
+    """
+    if _is_installed_chain():
+        try:
+            from user_space import user_root  # noqa: PLC0415
+
+            resolved = user_root()
+            if resolved is not None:
+                return Path(resolved)
+        except ImportError:
+            logger.warning("[workspace] user_space 不可用，相对 root 回落项目根锚定")
+    return find_project_root()
+
+
 def get_workspace_base_dir() -> Path:
     """统一解析工作空间基目录（配置驱动，返回绝对路径）。
 
     所有工作空间（worktree/container/plain 占位）的父目录。语义：
     - workspace.root 为**绝对路径** → 原样使用（如 "D:/myproject"）；
-    - 相对路径 → 相对**项目根**（find_project_root()，不是 cwd——sidecar 的
-      cwd 是插件目录，拼 cwd 会把工作空间建错位置）解析，缺省
-      ".ai_workspaces" 即项目根下隐藏目录。
+    - 相对路径 → 锚点按形态（_relative_root_anchor）：dev 相对**项目根**
+      （find_project_root()，不是 cwd——sidecar 的 cwd 是插件目录，拼 cwd 会
+      把工作空间建错位置）；装机形态相对**用户根**。缺省 ".ai_workspaces"
+      即锚点下隐藏目录。
 
     服务层（_workspace_git_ops._get_workspace_root）与插件降级路径
     （workspace_lifecycle/plugin.py）统一走本函数，杜绝各自硬编码推导。
@@ -269,7 +300,7 @@ def get_workspace_base_dir() -> Path:
     if _WIN_ABS_PATH.match(raw_str) or Path(raw_str).is_absolute():
         base = Path(os.path.normpath(raw_str))
     else:
-        base = Path(os.path.normpath(str(find_project_root() / raw_str)))
+        base = Path(os.path.normpath(str(_relative_root_anchor() / raw_str)))
     try:
         ensure_workspace_git_ignored(base)
     except Exception:  # noqa: BLE001

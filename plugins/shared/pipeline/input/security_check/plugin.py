@@ -100,6 +100,10 @@ from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
 from pipeline.types import StateKeys
 from sensitive_paths import is_sensitive_path
 
+from agentos_plugin_sdk.approval_contract import (  # noqa: E402 — sys.path 装配后导入（与同块一致）
+    InteractionErrorCode,
+    OptionSemantics,
+)
 from agentos_plugin_sdk.isolation_policy import IsolationPolicyLoader
 from agentos_plugin_sdk.tool_result_protocol import (
     merge_pre_decided,
@@ -163,23 +167,6 @@ _PERMISSION_MODES_FILE = _resolve_permission_modes_file()
 # accept_edits 放行的文件类工具
 _FILE_TOOLS: frozenset[str] = frozenset({"file_read", "file_write"})
 
-# 只读工具白名单：只读操作默认不拦截（不判危险、不弹审批、不进审批链），
-# 第一道内置底线（路径遍历/敏感系统目录）仍生效；写类/命令类工具不在此列。
-_READ_ONLY_TOOLS: frozenset[str] = frozenset(
-    {
-        "file_read",
-        "enhanced_search",
-        "web_search",
-        "fetch",
-        "resource_search",
-        "memory",
-        "yaml_validate",
-        "schema_evaluator",
-        "resource_evaluator",
-        "compatibility_checker",
-    }
-)
-
 # 位置闸参数操作表（ADR 2026-09-24-read-deny-write-zones 修订：位置轴管道层
 # 统一执法）：工具 → {路径参数名: 操作类}。操作类 "read" 走读黑名单链，其余
 # （write/delete/move）走写区链。config ``path_param_operations`` 可覆盖/扩充。
@@ -241,21 +228,14 @@ def _save_permission_modes() -> None:
 _policy_loader = IsolationPolicyLoader()
 
 # 审批选项单一事实源：发起处（create_choice_request）与消费处（wait_for_choice 返回值
-# 解析）共用这一份常量，消除两处硬编码漂移。
-#
-# 消费侧约定：前端优先提交选项 label（见 InteractionPanel.tsx 的
-# respondChoice：optionLabel || optionId），因此 wait_for_choice 返回的
-# selected_option 通常是 label。消费处先按 label 反查出稳定 id 再做分支判断，
-# label 文案随意调整都不影响指纹记忆等内部逻辑。auto_confirm_runner 等不经
-# 前端的路径仍提交 id，反查时回退按 id 直接匹配兜底。
+# 解析）共用这一份常量。选项携带 semantics 封闭语义声明（ADR 2026-10-01 决策 2），
+# 词形归一由 human 服务在 respond 入口完成——本插件消费端只读 selected_semantics，
+# 不再自持 label/别名反查表（别名表随语义契约退役，防开集追加复发）。
 _APPROVAL_OPTIONS: list[dict[str, str]] = [
-    {"id": "approved_once", "label": "仅本次执行"},
-    {"id": "approved_remember", "label": "本管道内同命令免批"},
-    {"id": "denied", "label": "拒绝执行"},
+    {"id": "approved_once", "label": "仅本次执行", "semantics": "approve_once"},
+    {"id": "approved_remember", "label": "本管道内同命令免批", "semantics": "approve_and_remember"},
+    {"id": "denied", "label": "拒绝执行", "semantics": "deny"},
 ]
-# label → id 反查表（消费处用）。
-_APPROVAL_LABEL_TO_ID = {opt["label"]: opt["id"] for opt in _APPROVAL_OPTIONS}
-_APPROVAL_ID_TO_LABEL = {opt["id"]: opt["label"] for opt in _APPROVAL_OPTIONS}
 
 
 class SecurityCheckPlugin(IInputPlugin):
@@ -821,12 +801,22 @@ class SecurityCheckPlugin(IInputPlugin):
         if write:
             title = f"授权写入 {grant_dir}"
             description = f"工具 {tool_name} 要写的路径在写区外。批准后写操作按会话权限档执行；拒绝则本次申请作废。"
+            # 选项语义声明（ADR 2026-10-01 决策 2）：human 归一点据此把任何词形
+            # 归一到这两个 id/语义；消费端只认 grant_write* 语义。
+            options: list[dict[str, str]] = [
+                {"id": "pipeline", "label": "仅本管道", "semantics": "grant_write"},
+                {"id": "permanent", "label": "永久写入配置", "semantics": "grant_write_permanent"},
+            ]
         else:
             title = f"授权读取 {grant_dir}"
             description = (
                 f"工具 {tool_name} 要读的路径位于读黑名单（运行时/产物区或"
                 "用户排除区）。批准后授权范围内读取放行；拒绝则本次申请作废。"
             )
+            options = [
+                {"id": "pipeline", "label": "仅本管道", "semantics": "grant_read"},
+                {"id": "permanent", "label": "永久读取配置", "semantics": "grant_read_permanent"},
+            ]
 
         session_id = ctx.state.get(StateKeys.SESSION_ID, "")
         try:
@@ -838,12 +828,15 @@ class SecurityCheckPlugin(IInputPlugin):
                     "tab_id": "",
                     "title": title,
                     "description": description,
-                    "options": [
-                        {"id": "pipeline", "label": "仅本管道"},
-                        {"id": "permanent", "label": "永久写入配置"},
-                    ],
+                    "options": options,
                     "priority": "high",
                     "user_id": ctx.state.get("user_id", ""),
+                    # 卡片来源四元组（管道 state 权威值）：授权卡与审批卡同族，
+                    # 必须可见发起 agent（名/层级）/会话/管道，缺项由 human 侧省略。
+                    "agent_id": str(ctx.state.get("agent.id", "") or ""),
+                    "agent_level": str(ctx.state.get(StateKeys.AGENT_LEVEL, "") or ""),
+                    "pipeline_id": str(ctx.state.get("pipeline_id", "") or ""),
+                    "agent_name": str(ctx.state.get("context.agent_name", "") or ""),
                 },
             )
             if not isinstance(create_res, dict) or create_res.get("error"):
@@ -858,7 +851,6 @@ class SecurityCheckPlugin(IInputPlugin):
                 raise RuntimeError(f"wait_for_choice returned non-dict: {wait_res}")
             if wait_res.get("error"):
                 raise RuntimeError(str(wait_res["error"]))
-            selected = str(wait_res.get("selected_option", "") or "")
         except Exception as e:  # noqa: BLE001 — 拒绝/超时/取消/通道故障统一软拦截
             if write:
                 logger.warning(
@@ -886,20 +878,35 @@ class SecurityCheckPlugin(IInputPlugin):
                 f"读授权未批准（拒绝/超时/取消）：路径 {grant_dir} 位于读黑名单，读取被拒绝",
             )
 
-        if selected not in ("pipeline", "permanent"):
+        # 消费端只读语义（ADR 2026-10-01 决策 2）：human 归一点已把任何词形
+        # （id/label/历史别名 approve/approved 等）收敛为规范 id + 封闭语义；
+        # 授权语义按卡的轴校验——写卡只认 grant_write*，读卡只认 grant_read*
+        #（跨轴语义=契约违约，按拒绝 fail-closed）。语义缺空（无契约的旧卡/异常
+        # 通道）一律按拒绝结算。
+        semantics = str(wait_res.get("selected_semantics", "") or "")
+        grant_write_sem = semantics in (
+            OptionSemantics.GRANT_WRITE.value,
+            OptionSemantics.GRANT_WRITE_PERMANENT.value,
+        )
+        grant_read_sem = semantics in (
+            OptionSemantics.GRANT_READ.value,
+            OptionSemantics.GRANT_READ_PERMANENT.value,
+        )
+        if (write and not grant_write_sem) or (not write and not grant_read_sem):
             logger.warning(
-                "[%s] %s授权未知选项（按拒绝） | tool=%s | selected=%s",
+                "[%s] %s授权语义不匹配（按拒绝） | tool=%s | selected=%s | semantics=%s",
                 self.name,
                 "写区" if write else "读",
                 tool_name,
-                selected,
+                wait_res.get("selected_option", ""),
+                semantics,
             )
             if write:
                 return self._soft_block(ctx, tool_name, f"写区授权未批准：路径 {grant_dir} 不在写区内")
             return self._soft_block(ctx, tool_name, f"读授权未批准：路径 {grant_dir} 位于读黑名单")
 
         state_key = zone_policy.STATE_KEY if write else zone_policy.STATE_KEY_READ
-        if selected == "pipeline":
+        if semantics in (OptionSemantics.GRANT_WRITE.value, OptionSemantics.GRANT_READ.value):
             pipeline_id = ctx.state.get("pipeline_id", "")
             if not pipeline_id:
                 return self._soft_block(
@@ -953,7 +960,13 @@ class SecurityCheckPlugin(IInputPlugin):
         isolated: bool,
         mode: str,
     ) -> dict[str, Any] | None:
-        """逐工具授权：只读白名单 → 环境门槛（隔离豁免）→ 规则/指纹/权限模式。
+        """逐工具授权：免审判定声明推导制 → 规则/指纹/权限模式（ADR 2026-10-01 决策 5）。
+
+        免审判定为**声明推导**：无 dangerous_operations 声明 ∧ 非
+        command_in_container = 免审（数据源唯一：builtin_tools_config 注入 +
+        isolation_policy.yaml 执行环境，无独立工具名词汇表）。参数命中声明的
+        工具进规则轨道——未命中
+        规则的参数照常放行，常规读写不因"存在声明"而弹审批。
 
         隔离豁免「环境类」检查：isolated=True 时跳过危险工具分类门槛
         （命令执行类 / dangerous_operations 声明），隔离边界承担执行环境风险，
@@ -973,12 +986,8 @@ class SecurityCheckPlugin(IInputPlugin):
             tool_name = tc.get("name", "")
             args = tc.get("args", {})
 
-            # 只读工具白名单：默认不拦截（第一道内置底线已过，此处直接放行）
-            if tool_name in _READ_ONLY_TOOLS:
-                continue
-
-            # 环境类门槛（隔离豁免）：非隔离任务只对危险工具做参数授权；
-            # 隔离任务不判危险，所有非只读工具直接进规则匹配。
+            # 免审判定（声明推导）：非隔离 ∧ 无危险声明命中 → 直接放行；
+            # 第一道内置底线（路径遍历/敏感目录/nul）已在本闸之前强制执行。
             if not isolated and not self._is_dangerous_tool(ctx, tool_name, args):
                 continue
 
@@ -1171,6 +1180,10 @@ class SecurityCheckPlugin(IInputPlugin):
         args_preview = self._format_args_for_approval(tool_calls, tool_name)
 
         session_id = ctx.state.get(StateKeys.SESSION_ID, "")
+        # 拒绝记忆作用域（ADR 2026-10-01 决策 6 精确化）：工具+指纹精确键——
+        # 同命令拒绝压制重试，换命令不牵连；指纹不可算时退化为工具键（与旧
+        # 标题键同粒度）。指纹复用调用方已算好的 signature。
+        memory_key = signature or tool_name
         # request_id 预初始化：create_choice_request 抛异常时尚未赋值，
         # 但 except 链日志需引用它，占位为 "-" 表示请求未创建成功。
         request_id = "-"
@@ -1186,9 +1199,16 @@ class SecurityCheckPlugin(IInputPlugin):
                     "description": args_preview,
                     "options": list(_APPROVAL_OPTIONS),
                     "priority": "high",
+                    "memory_key": memory_key,
                     # 归属归因（M2）：记录创建者用户，审批面归属校验据此放行
                     # 创建者本人（一用户一租户：user_id 即归属租户）。
                     "user_id": ctx.state.get("user_id", ""),
+                    # 卡片来源四元组（管道 state 权威值）：安全审批卡与授权卡
+                    # 同族，必须可见发起 agent（名/层级）/会话/管道，缺项省略。
+                    "agent_id": str(ctx.state.get("agent.id", "") or ""),
+                    "agent_level": str(ctx.state.get(StateKeys.AGENT_LEVEL, "") or ""),
+                    "pipeline_id": str(ctx.state.get("pipeline_id", "") or ""),
+                    "agent_name": str(ctx.state.get("context.agent_name", "") or ""),
                 },
             )
             if not isinstance(create_res, dict) or create_res.get("error"):
@@ -1215,39 +1235,37 @@ class SecurityCheckPlugin(IInputPlugin):
                 # mcp.request_timeout_secs=86400（BUG-60 审批族统一值）等待响应。
                 timeout=86500.0,
             )
-            # capability 返回 error dict 时转换成对应异常（与原 service 行为对齐）
+            # capability 返回 error dict 时按 error_code 分类（ADR 2026-10-01
+            # 决策 8，词源 SDK InteractionErrorCode；human 侧 interaction.wait_for_choice
+            # 产出），不再对 error 消息做子串嗅探。
             if not isinstance(wait_res, dict):
                 raise RuntimeError(f"wait_for_choice returned non-dict: {wait_res}")
             if wait_res.get("error"):
-                err_msg = wait_res["error"]
-                if "denied" in err_msg.lower():
+                err_msg = str(wait_res["error"])
+                code = wait_res.get("error_code", "")
+                if code == InteractionErrorCode.INTERACTION_DENIED.value:
                     raise InteractionDeniedError(request_id, err_msg)
-                if "cancel" in err_msg.lower():
+                if code == InteractionErrorCode.INTERACTION_CANCELLED.value:
                     raise InteractionCancelledError(request_id, err_msg)
-                if "timeout" in err_msg.lower():
+                if code == InteractionErrorCode.INTERACTION_TIMEOUT.value:
                     raise InteractionTimeoutError(request_id, 86400)
                 raise RuntimeError(err_msg)
             result = wait_res
             response_type = result.get("response_type", "")
             # response_type 表示响应类型（answered/denied/cancelled），
-            # 用户的具体选择在 selected_option 字段中。
+            # 用户的具体选择在 selected_option / selected_semantics 字段中。
             # DENIED 和 CANCELLED 已由 wait_for_choice 抛异常处理，
-            # 到这里 response_type 通常是 "answered"，需检查 selected_option。
+            # 到这里 response_type 通常是 "answered"。
             #
-            # selected_option 可能是 label（前端优先传 label）也可能是 id
-            # （auto_confirm_runner 等不经前端的路径传 id）。这里归一到稳定 id
-            # 再做分支判断——文案怎么改都不影响指纹记忆逻辑。
-            raw_selected = result.get("selected_option", "")
-            # 归一到稳定 id：前端传 label（走 _LABEL_TO_ID），不经前端的路径传 id
-            # （raw_selected 本身就是 id，直接用）。两者都查不到则保守视为拒绝。
-            resolved_id = _APPROVAL_LABEL_TO_ID.get(raw_selected) or (
-                raw_selected if raw_selected in _APPROVAL_ID_TO_LABEL else ""
-            )
+            # 消费端只读语义（决策 2）：human 归一点已把任何词形（id/label/
+            # 历史别名 approve/approved）收敛为规范 id + 封闭语义；本插件不再
+            # 自持 label/别名反查表。语义缺空（无契约卡的透传）按拒绝 fail-closed。
+            semantics = str(result.get("selected_semantics", "") or "")
 
-            if resolved_id in ("approved_once", "approved_remember"):
+            if semantics in (OptionSemantics.APPROVE_ONCE.value, OptionSemantics.APPROVE_AND_REMEMBER.value):
                 # "同命令免批"：记忆精确指纹，本管道内同工具+同命令后续免审批。
                 # 仅当指纹可计算时才记忆；无指纹（如无法归一化的参数）退化为"仅本次"。
-                if resolved_id == "approved_remember" and signature:
+                if semantics == OptionSemantics.APPROVE_AND_REMEMBER.value and signature:
                     self._approved_signatures.add(signature)
                     logger.info(
                         "[%s] Approval granted (remember signature) | request_id=%s | tool=%s | sig=%s",
@@ -1262,18 +1280,18 @@ class SecurityCheckPlugin(IInputPlugin):
                         self.name,
                         request_id,
                         tool_name,
-                        resolved_id,
+                        result.get("selected_option", ""),
                     )
                 return {}
 
             logger.warning(
-                "[%s] Approval denied | request_id=%s | tool=%s | response=%s | raw=%s | resolved=%s",
+                "[%s] Approval denied | request_id=%s | tool=%s | response=%s | selected=%s | semantics=%s",
                 self.name,
                 request_id,
                 tool_name,
                 response_type,
-                raw_selected,
-                resolved_id,
+                result.get("selected_option", ""),
+                semantics,
             )
             # 审批拒绝属于软拦截——用户主观选择拒绝，不应结束管道，
             # 而是把拒绝结果作为 tool_result 返回给 LLM，让 LLM 决定下一步。
@@ -1663,6 +1681,12 @@ class SecurityCheckPlugin(IInputPlugin):
         priority: 1 压过 safe_commands，`ls D:/secret` 照常弹审批）。
         无 allow 命中时，返回优先级最高的 block/needs_approval 规则。
 
+        规则可声明 ``workspace_boundary_exempt: true``（host_path_access 立法
+        本意是拦安装目录/系统目录等真宿主路径；用户根 workspaces 地界内路径
+        是 agent 合法工作区，ADR 2026-10-01 锚点）——匹配前先把参数值中工作
+        空间地界内的路径剔除，地界内盘符路径不再命中（见
+        :meth:`_scrub_workspace_boundary_paths`）。
+
         Args:
             tool_name: 工具名称
             args: 工具参数字典
@@ -1685,11 +1709,14 @@ class SecurityCheckPlugin(IInputPlugin):
                 continue
 
             params = rule.get("params", [])
+            boundary_exempt = bool(rule.get("workspace_boundary_exempt"))
             for param_name in params:
                 value = args.get(param_name)
                 if value is None:
                     continue
                 value_str = str(value)
+                if boundary_exempt:
+                    value_str = self._scrub_workspace_boundary_paths(value_str)
 
                 patterns = rule.get("patterns", [])
                 for pattern_def in patterns:
@@ -1733,13 +1760,45 @@ class SecurityCheckPlugin(IInputPlugin):
             return best_allow
         return first_reject
 
+    def _scrub_workspace_boundary_paths(self, value: str) -> str:
+        """剔除参数值中用户根 workspaces 地界内的路径（声明豁免规则的匹配面收缩）。
+
+        host_path_access 的立法本意是盘符绝对路径 = 摸安装目录/系统目录（真
+        宿主程序区）；工作空间根迁 <user_root>/workspaces（ADR 2026-10-01 锚点）
+        后，地界内盘符路径是 agent 的合法工作区，照旧弹审批即误伤（真机
+        2026-10-01：cd 进自己工作空间 → 连续拒绝 → bash 被 tool_fail_loop
+        熔断）。边界单源 zone_policy.user_root_workspace_boundary()（与位置闸
+        同一地界锚定）；正则大小写不敏感、路径分隔符归一（\\ 与 / 等价），
+        边界后随的路径 token 一并剔除；地界兄弟目录（workspaces-backup/
+        workspacesX）经词边界守卫不误剔。用户根不可得时原样返回（fail-closed，
+        规则照旧全量匹配）。
+        """
+        boundary = zone_policy.user_root_workspace_boundary()
+        if boundary is None:
+            return value
+        segments = [re.escape(part.rstrip("\\/")) for part in boundary.parts]
+        pattern = (
+            r"(?<![A-Za-z0-9])" + r"[\\\\/]+".join(segments) + r"(?![A-Za-z0-9_.\-])(?:[\\\\/]+[\w.\-/]*)?"
+        )
+        return re.sub(pattern, "", value, flags=re.IGNORECASE)
+
     def _keyword_in(self, pattern: str, value: str) -> bool:
         """argv 归一化关键词命中判定（S4）。
 
         归一化：shlex.split 分词（posix=False 保留 Windows 反斜杠；解析失败
         回退按任意空白切分）→ 单空格重 join → casefold。只消除空白与大小写
-        差异，不改变 token 语义；未命中时再比对裸 casefold 子串（覆盖模式串
-        含引号等 shlex 会剥离的字符的场景，取并集 = fail-closed 方向）。
+        差异，不改变 token 语义。
+
+        词边界保留：归一化会吃掉模式串首尾空白——"at "（at 调度器）退化为
+        二元子串 "at"，命令串里 AppData 路径片段全部误命中（工作空间根迁用户
+        根后命令常驻 AppData，真机 2026-10-01：WSL 形态 cd 命令被连续拒绝至
+        bash 熔断）。原模式带首尾空白 = 立法锚定了词边界，归一化值上按整词
+        匹配；无首尾空白的模式（"dd if=" 等子串语义）照旧子串匹配。裸子串
+        兜底分支不变：带空白模式的字符变体（"scurl " 含 "curl "）仍命中
+        （fail-closed 方向不收口）。
+
+        未命中时再比对裸 casefold 子串（覆盖模式串含引号等 shlex 会剥离的
+        字符的场景，取并集 = fail-closed 方向）。
         """
 
         def _norm(text: str) -> str:
@@ -1750,8 +1809,13 @@ class SecurityCheckPlugin(IInputPlugin):
             return " ".join(tokens).casefold()
 
         norm_pat = _norm(pattern)
-        if norm_pat and norm_pat in _norm(value):
-            return True
+        if norm_pat:
+            norm_val = _norm(value)
+            if pattern != pattern.strip():
+                if re.search(rf"(?<!\w){re.escape(norm_pat)}(?!\w)", norm_val):
+                    return True
+            elif norm_pat in norm_val:
+                return True
         return pattern.casefold() in value.casefold()
 
     def _rule_priority(self, rule: dict[str, Any]) -> int:

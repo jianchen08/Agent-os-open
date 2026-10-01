@@ -40,6 +40,17 @@ beforeEach(() => {
   useInteractionStore.setState({ pendingInteractions: [] })
 })
 
+describe('addInteraction 重复请求幂等', () => {
+  it('同 requestId 二次注入不重复入列（重连重放/多前端扇出重复事件）', () => {
+    const { addInteraction } = useInteractionStore.getState()
+    addInteraction(conv({ requestId: 'dup-1' }))
+    addInteraction(conv({ requestId: 'dup-1' }))
+    const list = useInteractionStore.getState().pendingInteractions
+    expect(list).toHaveLength(1)
+    expect(list[0].requestId).toBe('dup-1')
+  })
+})
+
 describe('getPendingConversationsForPipeline 精确归属', () => {
   it('pipelineId 精确命中 pending conversation 交互', () => {
     seed(conv({ requestId: 'a', pipelineId: 'P1' }))

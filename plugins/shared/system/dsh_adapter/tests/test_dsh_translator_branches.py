@@ -123,11 +123,11 @@ class TestClassifyPluginDecls:
 
 class TestTranslateHooksConfigEdges:
     def test_none_returns_empty(self) -> None:
-        assert translate_hooks_config(None) == {"triggers": [], "mapped": 0, "unmapped": []}
+        assert translate_hooks_config(None) == {"steps": [], "mapped": 0, "unmapped": []}
 
     def test_invalid_yaml_maps_nothing(self) -> None:
         out = translate_hooks_config("%%%")
-        assert out == {"triggers": [], "mapped": 0, "unmapped": []}
+        assert out == {"steps": [], "mapped": 0, "unmapped": []}
 
     def test_mapping_without_hooks_key_maps_nothing(self) -> None:
         assert translate_hooks_config("a: b")["mapped"] == 0
@@ -139,17 +139,30 @@ class TestTranslateHooksConfigEdges:
         assert [u["spec"] for u in out["unmapped"]] == ["junk", 42]
 
     @pytest.mark.parametrize("when", ["wat", 3.14])
-    def test_unknown_turn_end_reason_unmapped(self, when: Any) -> None:
+    def test_turn_end_with_reason_unmapped(self, when: Any) -> None:
+        # 链位无 per-reason 门：任何带 when 的 turn/end 都不翻译（不过度触发）
         out = translate_hooks_config([{"on": "turn/end", "when": when, "run": "r"}])
         assert out["mapped"] == 0
-        assert out["unmapped"][0]["reason"] == "unknown turn/end reason"
+        assert out["unmapped"][0]["reason"] == "turn-end reason gate has no chain equivalent"
         assert out["unmapped"][0]["when"] == when
 
     def test_falsy_timeout_falls_back_to_default(self) -> None:
-        out = translate_hooks_config(
-            [{"on": "turn/end", "when": "completed", "run": "r", "timeoutMs": None}]
-        )
-        assert out["triggers"][0]["action_params"]["timeout_ms"] == 10000
+        out = translate_hooks_config([{"on": "turn/end", "run": "r", "timeoutMs": None}])
+        assert out["steps"][0]["step"]["inputs"]["timeout_ms"] == 10000
+
+    def test_zero_timeout_falls_back_to_default(self) -> None:
+        out = translate_hooks_config([{"on": "turn/end", "run": "r", "timeoutMs": 0}])
+        assert out["steps"][0]["step"]["inputs"]["timeout_ms"] == 10000
+
+    @pytest.mark.parametrize("bad", ["abc", -5])
+    def test_invalid_timeout_unmapped_with_evidence(self, bad: object) -> None:
+        """显式非法 timeoutMs 不静默改默认——fail-visible 进 unmapped（与
+        执行端 dsh_hook 校验同口径）；falsy 形态才回退默认。"""
+        out = translate_hooks_config([{"on": "turn/end", "run": "r", "timeoutMs": bad}])
+        assert out["steps"] == []
+        assert out["mapped"] == 0
+        assert "invalid timeoutMs" in out["unmapped"][0]["reason"]
+        assert repr(bad) in out["unmapped"][0]["reason"]
 
 
 # ── 工具契约出口：DSL/分类边界 ────────────────────────────────────────

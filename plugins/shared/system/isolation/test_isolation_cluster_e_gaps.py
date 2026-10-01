@@ -20,7 +20,6 @@
 7. checkpoint.py 107/130-131/146/344：盘符相对路径字面量拒绝、`_rel_or_none`
    越界 ValueError 出口、`_collect_workspace_files` 的 project_root 回退、
    `.git` 部件忽略。
-8. approval.py 336-338/371-372：HOST 命令执行类叠加危险操作（风险分封顶 1.0）/
    非 HOST 检测到危险操作风险分累加 0.4。
 9. hardware_profile.py 170/174：docker info 字段数异常、数值非正 → None。
 10. wsl_health.py 275-276：保活会话 terminate 失败升级 kill、kill 再抛 OSError
@@ -64,7 +63,7 @@ subprocess 替身），不依赖真实 docker/容器；FS 用真实 tmp_path（�
 自动随 BASE_TEST_PATHS 的 `plugins/shared/system/isolation/` 进插桩车道。
 
 本文件落地后整条 plugins-coverage 车道实测（--cov=plugins）：
-  approval/checkpoint/decider/hardware_profile/sensitive_paths/wsl_health/
+  checkpoint/decider/hardware_profile/sensitive_paths/wsl_health/
   docker_provider/host_provider 缺行 = 0；
   manager.py 仅余 1483-1531（上述死分支，其 wsl_native 委托面 858-865、
   1101-1106 与跳过面 398-399/482/601-602 已清零）；
@@ -600,103 +599,6 @@ class TestCheckpointPathGaps:
         (tmp_path / "ws" / "src.py").write_text("print(1)", encoding="utf-8")
         cp = mgr.create_checkpoint("t-git", "ws")
         assert [f.original_path for f in cp.files] == ["src.py"]
-
-
-# ═══════════════════════════════════════════════════════════
-# 8. approval（336-338/371-372）
-# ═══════════════════════════════════════════════════════════
-
-
-class _ToolDef:
-    """工具定义替身：仅暴露 DangerChecker 读取的 dangerous_operations。"""
-
-    def __init__(self, ops: list[str]) -> None:
-        self.dangerous_operations = ops
-
-
-def _approval_ctx(
-    mod: Any,
-    *,
-    level: IsolationLevel,
-    execution: str,
-    command: str,
-    ops: list[str] | None = None,
-) -> Any:
-    from agentos_plugin_sdk.isolation_policy import ToolIsolationPolicy
-
-    return mod.ApprovalContext(
-        tool_name="bash_execute",
-        tool_definition=_ToolDef(ops if ops is not None else ["rm -rf"]),
-        inputs={"command": command},
-        isolation_level=level,
-        policy=ToolIsolationPolicy(isolation=level, execution=execution),
-    )
-
-
-class TestApprovalEngineDangerBranches:
-    def _engine(self) -> Any:
-        mod = _load("isolation_approval_gaps_test", "approval.py")
-        return mod, mod.ApprovalDecisionEngine()
-
-    def test_host_command_with_dangerous_op_caps_risk(self) -> None:
-        """HOST 命令执行类 + 危险操作 → 风险分封顶 1.0，双因子并明示危险操作名。"""
-        mod, engine = self._engine()
-        decision = _run(
-            engine.decide(
-                _approval_ctx(
-                    mod,
-                    level=IsolationLevel.HOST,
-                    execution="command_in_container",
-                    command="rm -rf /tmp/x",
-                )
-            )
-        )
-        assert decision.requires_approval is True
-        assert decision.risk_score == 1.0
-        assert decision.risk_factors == ["HOST_MODE", "DANGEROUS_OPERATION"]
-        assert "rm -rf" in decision.reason
-        assert decision.details["dangerous_operation"] == "rm -rf"
-
-    def test_host_command_without_dangerous_op(self) -> None:
-        """对照组：同级无危险操作 → COMMAND_EXECUTION 因子、风险分 0.9。"""
-        mod, engine = self._engine()
-        decision = _run(
-            engine.decide(
-                _approval_ctx(
-                    mod,
-                    level=IsolationLevel.HOST,
-                    execution="command_in_container",
-                    command="ls -la",
-                )
-            )
-        )
-        assert decision.requires_approval is True
-        assert decision.risk_score == 0.9
-        assert decision.risk_factors == ["HOST_MODE", "COMMAND_EXECUTION"]
-        assert decision.details["dangerous_operation"] is None
-
-    @pytest.mark.parametrize(
-        ("command", "dangerous"),
-        [("rm -rf /", True), ("echo hi", False)],
-    )
-    def test_non_host_risk_score_reflects_danger(self, command: str, dangerous: bool) -> None:
-        """非 HOST：检测到危险操作 → 风险分 +0.4 且带因子；否则 0 分无因子。"""
-        mod, engine = self._engine()
-        decision = _run(
-            engine.decide(
-                _approval_ctx(
-                    mod,
-                    level=IsolationLevel.CONTAINER,
-                    execution="command_in_container",
-                    command=command,
-                )
-            )
-        )
-        assert decision.requires_approval is False
-        assert decision.decision_type == "AUTO_APPROVED"
-        expected = pytest.approx(0.4) if dangerous else 0.0
-        assert decision.risk_score == expected
-        assert ("DANGEROUS_OPERATION" in decision.risk_factors) is dangerous
 
 
 # ═══════════════════════════════════════════════════════════

@@ -175,7 +175,6 @@ BASE_TEST_PATHS: list[str] = [
     # 真后端车道不进本车道）。bash conftest 裸名逐出改条件化（仅逐出指向
     # bash 目录之外的缓存），否则模块双实例让 isinstance 恒假。
     "tests/test_agent_config_fix.py",
-    "tests/test_approval_policy_source.py",
     "tests/test_asr_service.py",
     "tests/test_autonomous_context_build_wiring.py",
     "tests/test_context_build_agent_yaml_observability.py",

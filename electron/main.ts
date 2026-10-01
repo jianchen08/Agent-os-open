@@ -18,6 +18,7 @@ import {
   shell,
 } from "electron";
 import { createHash } from "crypto";
+import * as fs from "fs";
 import * as path from "path";
 
 import {
@@ -301,7 +302,19 @@ function createMainWindow(
   visibilityRecovery?.stop();
   visibilityRecovery = null;
   if (isVisibilityWatchdogEnabled(process.env)) {
-    visibilityRecovery = new VisibilityRecovery(win);
+    // 诊断落盘：决策点事件进 userData/logs/visibility-recovery.log——主进程
+    // stdout 脱管启动即丢，R371 现场失效（17 分钟未自愈）无据可查的教训；
+    // 写失败不阻断自愈，但必须留痕（诊断面失明即回到无据可查）。
+    const visibilitySink = (line: string): void => {
+      try {
+        const dir = path.join(app.getPath("userData"), "logs");
+        fs.mkdirSync(dir, { recursive: true });
+        fs.appendFileSync(path.join(dir, "visibility-recovery.log"), line + "\n");
+      } catch (err) {
+        console.warn("[Electron] visibility 诊断落盘失败:", err);
+      }
+    };
+    visibilityRecovery = new VisibilityRecovery(win, { sink: visibilitySink });
     visibilityRecovery.startPolling();
   }
 

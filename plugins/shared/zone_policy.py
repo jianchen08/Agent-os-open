@@ -21,11 +21,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from repo_anchor import repo_read_verdict, repo_write_denied
+from user_space import user_root
 
 logger = logging.getLogger(__name__)
 
@@ -36,33 +38,76 @@ STATE_KEY = "task.authorized_write_zones"
 # 注入读键同名，杜绝写侧 authorized_write_zones 的前缀漂移形态）。
 STATE_KEY_READ = "task.authorized_read_zones"
 
-# 工作空间地界目录名（任务工作空间常驻其下会话子目录，项目工作树是
-# sessions 的兄弟目录）。
-AI_WORKSPACES_DIR = ".ai_workspaces"
+# 工作空间地界目录名集合（自锚向上找的命中名，大小写不敏感）：
+# - ``.ai_workspaces``：dev 仓库形态，任何项目下的同名祖先均命中（既有语义）；
+# - ``workspaces``：用户根形态（ADR 2026-10-01-workspace-root-user-root-anchor，
+#   装机工作空间根迁 ``<user_root>/workspaces``），仅当其父目录即用户根
+#   （:func:`user_space.user_root`，与该 ADR 锚点同源）才命中——任意项目下
+#   同名 ``workspaces`` 目录不得误判为地界。
+ZONE_BOUNDARY_DIR_NAMES = frozenset({".ai_workspaces", "workspaces"})
+
+# 集合内需要位置锚定的成员：用户根形态目录名（其余成员名字命中即地界）。
+_USER_ROOT_FORM_DIR = "workspaces"
+
+
+def _is_zone_boundary_dir(cur: Path, user_root_dir: Path | None) -> bool:
+    """目录是否构成工作空间地界根：名字 ∈ 集合，且用户根形态须锚定用户根。"""
+    name = cur.name.lower()
+    if name not in ZONE_BOUNDARY_DIR_NAMES:
+        return False
+    if name != _USER_ROOT_FORM_DIR:
+        return True
+    if user_root_dir is None:
+        return False
+    return os.path.normcase(os.path.normpath(str(cur.parent))) == os.path.normcase(
+        os.path.normpath(str(user_root_dir))
+    )
+
+
+def user_root_workspace_boundary() -> Path | None:
+    """用户根形态工作空间地界根：<user_root>/workspaces（ADR 2026-10-01 锚点）。
+
+    地界目录名与用户根锚定的单源出口（:func:`_is_zone_boundary_dir` 的用户根
+    形态成员，同一 :data:`_USER_ROOT_FORM_DIR` 常量）。消费方：security_check
+    规则轨道 host_path_access 的匹配面豁免——工作空间根迁用户根后，地界内
+    盘符路径是 agent 合法工作区，不再按"宿主路径"弹审批（真机 2026-10-01
+    实证：cd 进自己工作空间即被连续拒绝，bash 熔断）。用户根不可得时返回
+    None——豁免随之收缩（fail-closed，规则照旧全量匹配），与内建 read_allow
+    派生同一收缩方向。
+    """
+    root = user_root()
+    if root is None:
+        return None
+    return root / _USER_ROOT_FORM_DIR
 
 
 def builtin_read_allow_prefixes(workspace: str | None, project_root: str | None) -> list[str]:
     """内建 read_allow 派生前缀：工作空间地界（用户裁定 2026-09-29）。
 
-    任务工作空间常驻仓库 ``.ai_workspaces`` 下的会话子目录，项目工作树是
-    sessions 的**兄弟目录**——workspace/project_root 锚覆盖不到，读兄弟
-    工作树撞仓库拒绝集弹读授权卡（事故 2026-09-29：无人值守停泊）。用户
-    裁定："工作空间根必须在白名单内，不能在黑名单内"——从两锚向上找最近
-    的 ``.ai_workspaces`` 祖先（大小写不敏感），命中即作为内建白名单前缀
-    参与放行链，与显式 read_allow 同位同权；两锚均不在 .ai_workspaces 下
-    则不追加（dev 仓库工作区在别处时零影响）。
+    任务工作空间常驻地界根下的会话子目录，项目工作树是 sessions 的**兄弟
+    目录**——workspace/project_root 锚覆盖不到，读兄弟工作树撞仓库拒绝集
+    弹读授权卡（事故 2026-09-29：无人值守停泊）。用户裁定："工作空间根必须
+    在白名单内，不能在黑名单内"——从两锚向上找最近的地界根祖先（大小写
+    不敏感），命中即作为内建白名单前缀参与放行链，与显式 read_allow 同位
+    同权；两锚均不在地界下则不追加（dev 仓库工作区在别处时零影响）。
+
+    地界根识别（ADR 2026-10-01-workspace-root-user-root-anchor）：目录名 ∈
+    :data:`ZONE_BOUNDARY_DIR_NAMES`，其中 ``.ai_workspaces`` 沿用 dev 形态
+    （任意项目下同名祖先均命中），``workspaces`` 仅当父目录即用户根才命中
+    （装机根迁 ``<user_root>/workspaces`` 后锚点同源识别）。
 
     仅读链消费：写链若同扩，agent 可写其他会话的工作树（跨会话污染）；
-    黑名单保护的运行时/产物区（config/data/logs）均不在 .ai_workspaces 下，
-    读面扩展不触碰它们。
+    黑名单保护的运行时/产物区（config/data/logs）均不在地界下，读面扩展
+    不触碰它们。
     """
+    user_root_dir = user_root()
     prefixes: list[str] = []
     for root_str in (project_root, workspace):
         if not root_str:
             continue
         cur = Path(root_str).resolve()
         while True:
-            if cur.name.lower() == AI_WORKSPACES_DIR:
+            if _is_zone_boundary_dir(cur, user_root_dir):
                 prefixes.append(str(cur))
                 break
             if cur.parent == cur:
@@ -95,6 +140,35 @@ def load_session_read_grants(state: Mapping[str, Any]) -> list[str]:
     return parse_zones_raw(state.get(STATE_KEY_READ, ""))
 
 
+# WSL 挂载形态归一（消费面单源）：`<X>:\mnt\<d>\Y` / `\mnt\<d>\Y` /
+# `/mnt/<d>/Y` → `<d>:\Y`。脏形态直透 wsl --cd 会被按盘符相对路径解析为
+# 不存在的目录、再经 pwd/报错回灌 LLM 上下文（读链 404、写区匹配失败
+# 弹卡），故消费面前必须归一。纯 POSIX 形态仅 nt 平台重写（POSIX 宿主上
+# /mnt/d 是真实路径）。
+_WS_MOUNT_WIN_RE = re.compile(r"^(?:([A-Za-z]):)?[\\/]+mnt[\\/]+([A-Za-z])[\\/]+(.*)$", re.DOTALL)
+_WS_MOUNT_POSIX_RE = re.compile(r"^/mnt/([A-Za-z])/(.*)$", re.DOTALL)
+
+
+def normalize_windows_mixed_path(path: str) -> str:
+    r"""归一 WSL 挂载混入路径为 Windows 形态（判定与 IO 共用的消费面单点）。
+
+    `<X>:\mnt\<d>\Y`（含正斜杠/无盘符根相对变体）在任何平台都是污染形态，
+    无条件重写；`/mnt/<d>/Y` 仅 nt 重写。非命中原样返回。
+    """
+    if not path:
+        return path
+    m = _WS_MOUNT_WIN_RE.match(path)
+    if m:
+        rest = m.group(3).replace("/", "\\")
+        return f"{m.group(2).upper()}:\\{rest}"
+    if os.name == "nt":
+        m = _WS_MOUNT_POSIX_RE.match(path)
+        if m:
+            rest = m.group(2).replace("/", "\\")
+            return f"{m.group(1).upper()}:\\{rest}"
+    return path
+
+
 def resolve_anchored(path: str, workspace: str | None, project_root: str | None) -> Path:
     """把工具路径参数解析为绝对路径（与 fs_tools 同一套锚定语义）。
 
@@ -102,6 +176,7 @@ def resolve_anchored(path: str, workspace: str | None, project_root: str | None)
     - 相对路径以 project_root（优先）/workspace 为锚；
     - 无锚 fail-closed（ValueError）——相对路径禁止落到进程 cwd。
     """
+    path = normalize_windows_mixed_path(path)
     root_str = project_root or workspace
     if not root_str:
         raise ValueError("workspace/project_root 未注入，无法锚定路径（相对路径禁止以进程 cwd 解析）")

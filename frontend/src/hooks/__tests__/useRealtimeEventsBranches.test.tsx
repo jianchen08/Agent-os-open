@@ -181,6 +181,21 @@ describe('useRealtimeEvents — 重连补漏 handleWsReconnect', () => {
     invalidateSpy.mockRestore()
   })
 
+  it('重连即失效长期任务列表缓存（不等 5s 兜底轮询）', () => {
+    useSessionStore.setState({ activeSessionId: null })
+    const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
+    const { unmount } = renderHook(() => useRealtimeEvents())
+
+    act(() => emit(WS_LOCAL_EVENTS.RECONNECTED, {}))
+
+    const invalidatedKeys = invalidateSpy.mock.calls.map(
+      (call) => (call[0] as { queryKey?: readonly unknown[] } | undefined)?.queryKey,
+    )
+    expect(invalidatedKeys).toContainEqual(queryKeys.longTermTasks)
+    unmount()
+    invalidateSpy.mockRestore()
+  })
+
   it('有活跃会话与主管道时以 backfill 模式补拉该主管道', async () => {
     const loadSpy = seedSessionWithLoadSpy(
       [{ id: 'sess-1', activePipelineId: 'pipe-main', pipelineIds: ['pipe-main', 'pipe-sub'] }],
@@ -557,7 +572,7 @@ describe('useRealtimeEvents — 通知类事件', () => {
 
     const notif = useNotificationStore
       .getState()
-      .notifications.find((n) => n.title === '本页连接已被其他页面替换')
+      .notifications.find((n) => n.title === '连接数已满，本页连接被替换')
     expect(notif).toBeDefined()
     expect(notif?.autoDismissMs).toBe(0)
     expect(notif?.priority).toBe('high')

@@ -1,14 +1,16 @@
 // @feature: FP-0.2.七 路由收敛 | @ci: rust-test
-//! WS 单连接踢旧（B10）两段式通知测试：同一 user 第二连接注册时，第一连接
-//! 必须先收到应用层 `{"type":"kicked"}` 文本帧，再收到带`CLOSE_CODE_KICKED`
-//! （4000）状态码的 Close 帧。
+//! WS 超限踢旧两段式通知测试（ADR 2026-10-01 多前端连接：配额内多端并存不踢，
+//! 仅每 user 连接数超限时 LRU 踢最旧；既有两段式协议转作超限踢旧通道）。
+//! 本测试以配额 1 复现超限：同 user 第二连接注册时，第一连接必须先收到应用层
+//! `{"type":"kicked"}` 文本帧，再收到带 `CLOSE_CODE_KICKED`（4000）状态码的
+//! Close 帧。
 //!
 //! 背景：踢旧若走空串哨兵 → `sender.close()` 发空 Close（浏览器 onclose=1000/1005）
-//! → 前端 GlobalWebSocket 按普通掉线 4s 退避重连 → 双客户端（ZCode webview +
-//! Edge 标签页）互踢无限循环。前端对 4000 已有"被新连接替换
-//! 跳过重连"分支（GlobalWebSocket.ts onclose），内核补齐带码关闭即可断根。
-//! 两段式（2026-09-04）：代理链可能吞掉 Close 帧状态码（浏览器端退化 1006），
-//! 应用层文本帧先行送达，前端照常置位防重连——文本帧 + Close 缺一不可。
+//! → 前端 GlobalWebSocket 按普通掉线 4s 退避重连 → 重连后再度超限被踢，
+//! 循环不止。前端对 4000 已有"被替换跳过重连"分支（GlobalWebSocket.ts
+//! onclose），内核补齐带码关闭即可断根。两段式（2026-09-04）：代理链可能吞掉
+//! Close 帧状态码（浏览器端退化 1006），应用层文本帧先行送达，前端照常置位
+//! 防重连——文本帧 + Close 缺一不可。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -73,7 +75,9 @@ async fn admin_token(app: &axum::Router) -> String {
 #[tokio::test]
 async fn ws_second_connection_kicks_old_with_coded_close() {
     let mut state = AppState::new();
-    state.session = Some(Arc::new(SessionCoordinator::new()));
+    // 配额 1：第二连接注册即触发超限 LRU 踢旧（多端并存主路径由
+    // ws_session::tests::ws_two_connections_same_user_both_receive_frames 覆盖）
+    state.session = Some(Arc::new(SessionCoordinator::with_max_conns(1)));
     state.inbound_router = Some(Arc::new(InboundRouter::new(Arc::new(NoopDispatcher))));
     let app = build_router(state.clone());
 
@@ -89,7 +93,7 @@ async fn ws_second_connection_kicks_old_with_coded_close() {
 
     let url = |t: &str| format!("ws://{addr}/ws/chat?token={t}");
 
-    // 连接 A：首个注册，无踢旧，应收到 connection_confirmation
+    // 连接 A：首个注册，无逐出，应收到 connection_confirmation
     let (mut ws_a, _resp) = tokio_tungstenite::connect_async(url(&token))
         .await
         .expect("A 应能建立 WS");
@@ -103,8 +107,8 @@ async fn ws_second_connection_kicks_old_with_coded_close() {
         "A 首帧应为 connection_confirmation，实际: {first_a:?}"
     );
 
-    // 连接 B：同一 user 注册 → 踢旧 A。A 先收到应用层 kicked 文本帧（先于
-    // Close：代理链可能吞 Close 码，文本帧先行让前端置位防重连）。
+    // 连接 B：同一 user 注册 → 超限 LRU 踢最旧（A）。A 先收到应用层 kicked
+    // 文本帧（先于 Close：代理链可能吞 Close 码，文本帧先行让前端置位防重连）。
     let (_ws_b, _) = tokio_tungstenite::connect_async(url(&token))
         .await
         .expect("B 应能建立 WS");
@@ -140,7 +144,7 @@ async fn ws_second_connection_kicks_old_with_coded_close() {
             assert_eq!(
                 u16::from(frame.code),
                 agentos_session::auth::CLOSE_CODE_KICKED,
-                "踢旧必须带 CLOSE_CODE_KICKED 关闭码（前端据 4000 跳过重连，断互踢风暴）"
+                "超限踢旧必须带 CLOSE_CODE_KICKED 关闭码（前端据 4000 跳过重连，断重连-超限循环）"
             );
         }
         other => panic!("A 应收到 Close 帧，实际: {other:?}"),

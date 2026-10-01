@@ -61,7 +61,7 @@ vi.mock('@/components/chat/InteractionCard', () => ({
   }: {
     interaction: PendingInteraction
     originLabel?: string
-    onRespondChoice: (optionId: string, optionLabel?: string) => void
+    onRespondChoice: (optionId: string) => void
     onRespondText: (text: string) => void
     onNavigateToTab: () => void
     onDismiss: () => void
@@ -74,7 +74,7 @@ vi.mock('@/components/chat/InteractionCard', () => ({
       data-origin-label={originLabel}
     >
       <span>{interaction.title}</span>
-      <button onClick={() => onRespondChoice('opt-1', '批准')}>fire-choice-labeled</button>
+      <button onClick={() => onRespondChoice('opt-1')}>fire-choice-labeled</button>
       <button onClick={() => onRespondChoice('opt-2')}>fire-choice-id</button>
       <button onClick={() => onRespondText('自定义回复')}>fire-text</button>
       <button onClick={() => onNavigateToTab()}>fire-navigate</button>
@@ -243,17 +243,17 @@ describe('GlobalInteractionOverlay 响应回调', () => {
     setInteractions([makeInteraction()])
   })
 
-  it('选项响应：带 label 时以 label 发送', async () => {
+  it('选项响应：只提交选项 id（ADR 2026-10-01，label 词形不再回传）', async () => {
     handlers.respondChoice.mockResolvedValue(undefined)
     render(<GlobalInteractionOverlay />)
     await act(async () => {
       fireEvent.click(screen.getByText('fire-choice-labeled'))
     })
     expect(handlers.respondChoice).toHaveBeenCalledTimes(1)
-    expect(handlers.respondChoice).toHaveBeenCalledWith('req-1', '批准')
+    expect(handlers.respondChoice).toHaveBeenCalledWith('req-1', 'opt-1')
   })
 
-  it('选项响应：无 label 时回退 optionId', async () => {
+  it('选项响应：第二个选项同样只提交 id', async () => {
     handlers.respondChoice.mockResolvedValue(undefined)
     render(<GlobalInteractionOverlay />)
     await act(async () => {
@@ -371,7 +371,7 @@ describe('GlobalInteractionOverlay 响应回调', () => {
       fireEvent.click(screen.getByText('fire-choice-labeled'))
     })
     expect(handlers.respondChoice).toHaveBeenCalledTimes(2)
-    expect(handlers.respondChoice).toHaveBeenLastCalledWith('req-2', '批准')
+    expect(handlers.respondChoice).toHaveBeenLastCalledWith('req-2', 'opt-1')
   })
 })
 
@@ -470,15 +470,16 @@ describe('浮层底部停靠（ADR 2026-09-29）', () => {
   })
 })
 // ---------------------------------------------------------------------------
-//  归属标签：多会话/子任务并行时卡片可辨来源（会话标题 · Agent/管道名）
+//  来源标签（用户裁定 2026-10-01）：卡片必须可见完整来源——
+//  agent（名+级别）· 管道（id+名）· 会话（标题/thread id）· 时间
 // ---------------------------------------------------------------------------
-describe('GlobalInteractionOverlay — 卡片归属标签', () => {
+describe('GlobalInteractionOverlay — 卡片来源标签', () => {
   afterEach(() => {
     usePipelineMessageStore.setState({ pipelines: {} })
     updateSessionsCache(() => [])
   })
 
-  it('会话缓存与管道元数据齐备：originLabel = 会话标题 · Agent 名', () => {
+  it('会话缓存与管道元数据齐备：originLabel = agent（级别）· 管道 · 会话', () => {
     updateSessionsCache((prev) => [
       ...prev,
       { id: 'sess-origin', title: '帮我看代码' } as unknown as Session,
@@ -506,17 +507,56 @@ describe('GlobalInteractionOverlay — 卡片归属标签', () => {
     ])
     render(<GlobalInteractionOverlay />)
 
-    expect(card().getAttribute('data-origin-label')).toBe('帮我看代码 · 子代理A')
+    // 管道名（子代理A）与 agent 名同名 → 管道段省略名称只留 id；时间无 createdAt 不显示
+    expect(card().getAttribute('data-origin-label')).toBe(
+      '子代理A（L2） · 管道 pip-origin · 帮我看代码',
+    )
   })
 
-  it('会话/管道均解析不到：回退 agentId 原文（与通知 sourceLabel 同一约定）', () => {
+  it('payload 权威 agentName + createdAt：优先于缓存，管道异名补名称段，时间显示时分', () => {
+    setInteractions([
+      makeInteraction({
+        requestId: 'req-authoritative',
+        agentName: '编码开发代理',
+        agentLevel: 'L3',
+        pipelineId: 'pip-auth',
+        threadId: 'th-77',
+        createdAt: '2026-10-01T04:30:00Z',
+      }),
+    ])
+    usePipelineMessageStore.setState((s) => ({
+      pipelines: {
+        ...s.pipelines,
+        'pip-auth': {
+          pipelineId: 'pip-auth',
+          sessionId: 'sess-auth',
+          level: 2,
+          tabId: null,
+          agentName: '子任务B',
+          status: 'running',
+        },
+      },
+    }))
+    render(<GlobalInteractionOverlay />)
+
+    const label = card().getAttribute('data-origin-label') ?? ''
+    // 权威名不查缓存；管道名（子任务B）与 agent 名异名 → 补（名称）
+    expect(label).toContain('编码开发代理（L3）')
+    expect(label).toContain('管道 pip-auth（子任务B）')
+    // 会话缓存 miss → 回退 threadId 原文（thread id 形态合法）
+    expect(label).toContain('th-77')
+    // 时间段：本地时分（跨时区只断形态不断绝对值）
+    expect(label).toMatch(/· \d{2}:\d{2}$/)
+  })
+
+  it('会话/管道均解析不到：管道段显示 id，agent 不冒充（pipelineId 在场时 agentId 为管道键）', () => {
     setInteractions([makeInteraction({ requestId: 'req-unknown' })])
     render(<GlobalInteractionOverlay />)
 
-    expect(card().getAttribute('data-origin-label')).toBe('agent-1')
+    expect(card().getAttribute('data-origin-label')).toBe('管道 pipeline-1 · thread-1')
   })
 
-  it('会话标题与 Agent 名同名：去重只显示一份', () => {
+  it('会话标题与 Agent 名同名：会话段省略（与 agent 段重复只增噪音）', () => {
     updateSessionsCache((prev) => [
       ...prev,
       { id: 'sess-dup', title: '子代理A' } as unknown as Session,
@@ -544,29 +584,29 @@ describe('GlobalInteractionOverlay — 卡片归属标签', () => {
     ])
     render(<GlobalInteractionOverlay />)
 
-    expect(card().getAttribute('data-origin-label')).toBe('子代理A')
+    expect(card().getAttribute('data-origin-label')).toBe('子代理A（L2） · 管道 pip-dup')
   })
 
-  it('交互切换时归属标签跟随当前卡片（act 内换卡同步重渲染）', () => {
+  it('交互切换时来源标签跟随当前卡片（act 内换卡同步重渲染）', () => {
     updateSessionsCache((prev) => [
       ...prev,
       { id: 'sess-a', title: '会话甲' } as unknown as Session,
       { id: 'sess-b', title: '会话乙' } as unknown as Session,
     ])
     setInteractions([
-      makeInteraction({ requestId: 'req-a', sessionId: 'sess-a', threadId: 'sess-a' }),
-      makeInteraction({ requestId: 'req-b', sessionId: 'sess-b', threadId: 'sess-b' }),
+      makeInteraction({ requestId: 'req-a', sessionId: 'sess-a', threadId: 'sess-a', pipelineId: undefined }),
+      makeInteraction({ requestId: 'req-b', sessionId: 'sess-b', threadId: 'sess-b', pipelineId: undefined }),
     ])
     render(<GlobalInteractionOverlay />)
 
     expect(card().getAttribute('data-request-id')).toBe('req-a')
-    // 无 pipelineId → Agent 名走 agents 缓存未命中回退原文（与通知 sourceLabel 同约定）
-    expect(card().getAttribute('data-origin-label')).toBe('会话甲 · agent-1')
+    // 无 pipelineId → agent 走 agents 缓存未命中回退 agentId 原文（与通知 sourceLabel 同约定）
+    expect(card().getAttribute('data-origin-label')).toBe('agent-1（L2） · 会话甲')
 
     act(() => {
       fireEvent.click(screen.getByTitle('下一个'))
     })
     expect(card().getAttribute('data-request-id')).toBe('req-b')
-    expect(card().getAttribute('data-origin-label')).toBe('会话乙 · agent-1')
+    expect(card().getAttribute('data-origin-label')).toBe('agent-1（L2） · 会话乙')
   })
 })

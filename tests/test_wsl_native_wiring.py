@@ -346,5 +346,9 @@ class TestArgvDriftPin:
         backend = {"backend": "wsl_native", "workspace_wsl": "/mnt/d/ws"}
         provider = WslNativeProvider({"state_dir": "x"})
         provider._workspace_wsl = "/mnt/d/ws"
-        for wd in ("/workspace", "/workspace/sub", "/tmp/other", None, "", "\workspace"):
+        for wd in (
+            "/workspace", "/workspace/sub", "/tmp/other", None, "", "\\workspace",
+            # WSL 挂载混入形态：两实现同语义归一
+            r"\mnt\d\repo", r"D:\mnt\e\x", "/mnt/d/repo",
+        ):
             assert pm._map_wsl_working_dir(backend, wd) == provider._map_working_dir(wd)

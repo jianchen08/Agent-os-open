@@ -133,6 +133,7 @@ repos:
               config/templates/.*|
               scripts/agent_prompt_viewer\.py|
               docs/.*|
+              \.packtest/.*|
           )$
 
       # Format 格式化（在 lint 之后）
@@ -186,6 +187,7 @@ repos:
               docs/.*|
               config/templates/.*|
               scripts/agent_prompt_viewer\.py|
+              \.packtest/.*|
               .*tests/.*|
               .*test_.*\.py$
           )$

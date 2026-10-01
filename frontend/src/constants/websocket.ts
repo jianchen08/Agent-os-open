@@ -182,6 +182,9 @@ export const WS_SERVER_EVENTS = {
   WIDGET_EVENT: 'widget_event',
   /** 宿主选中引用变化（pipeline_host_context 插件转发外部宿主推送） */
   HOST_SELECTION_CHANGED: 'host_selection_changed',
+  /** 审批已在他端结算（approval.submit 成功路径广播：request_id + 结算摘要；
+   *  多前端并发应答对账——收到后清除对应 pending 并提示"已在别处处理"） */
+  APPROVAL_TAKEN: 'approval.taken',
 } as const
 
 /**
@@ -196,18 +199,26 @@ export const WS_LOCAL_EVENTS = {
   STATUS: '_status',
   /** 排队 user_input 超 TTL 未送达（撤占位气泡 + 原位错误消息） */
   USER_INPUT_SEND_TIMEOUT: 'user_input_send_timeout',
-  /** 被同账号新连接替换（B10 单连接踢旧，Close code=4000，不自动重连） */
+  /** 被超限踢旧（同账号连接数已满，最旧连接被替换；Close code=4000，不自动重连） */
   KICKED_BY_REPLACEMENT: 'kicked_by_replacement',
 } as const
+
+/**
+ * 连续重连失败降级阈值：reconnectAttempt 达此次数后，断开横幅从「正在重连
+ * （第 N 次）」升级为「多次重连失败 + 立即重连」按钮（自动重连不停止，这是
+ * 唯一允许用户干预的形态）。消费方 = AlertBanner 的 useLayoutAlerts。
+ */
+export const RECONNECT_DEGRADE_ATTEMPTS = 10
 
 /**
  * WebSocket关闭码（仅收录后端实际发送的应用层关闭码）
  *
  * CONNECTION_REPLACED 对齐内核 CLOSE_CODE_KICKED = 4000
- * （kernel/crates/session/src/auth.rs，B10 单连接踢旧）；前端据 4000 置位
- * 防重连标记，避免 A/B 双客户端互踢循环。
+ * （kernel/crates/session/src/auth.rs，超限踢旧：同账号连接数已满 LRU 踢最旧，
+ * ADR 2026-10-01 多前端连接——配额内多端并存不踢）；前端据 4000 置位防重连
+ * 标记，避免被踢端退避重连后再度超限被踢的循环。
  */
 export enum WebSocketErrorCode {
-  /** 连接被新连接替换（内核踢旧两段式：kicked 文本帧先于 Close(4000)） */
+  /** 连接被超限踢旧替换（内核两段式：kicked 文本帧先于 Close(4000)） */
   CONNECTION_REPLACED = 4000,
 }

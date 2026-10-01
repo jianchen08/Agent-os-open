@@ -110,4 +110,34 @@ describe('FileTreeWidget 远程加载失败错误态（FE8）', () => {
     expect(await screen.findByTestId('file-tree-error')).toBeInTheDocument()
     expect(screen.getByText(/无工作区坐标/)).toBeInTheDocument()
   })
+
+  it('后端业务信封错误（response.data.error）优先于异常概况消息——如实透传', async () => {
+    mockGet.mockRejectedValueOnce({
+      response: { data: { error: '归属闸拒绝：区域外路径' } },
+    })
+    render(<FileTreeWidget dataSource="task://tree" />)
+    expect(await screen.findByTestId('file-tree-error')).toBeInTheDocument()
+    expect(screen.getByText('归属闸拒绝：区域外路径')).toBeInTheDocument()
+    // 信封优先：不落 Error.message 概况，也不落兜底文案
+    expect(screen.queryByText('加载失败')).not.toBeInTheDocument()
+  })
+
+  it('workspace:// 数据源失败 → 标题「文件树加载失败」（文案与加载对象一致）', async () => {
+    // 缺陷①文案半边（用户实报 2026-10-01）：项目工作区打不开曾报「任务树加载失败」
+    mockGet.mockRejectedValueOnce(new Error('no workspace'))
+    render(<FileTreeWidget dataSource="workspace://proj-1" nodeTitleField="name" />)
+    expect(await screen.findByTestId('file-tree-error')).toBeInTheDocument()
+    expect(screen.getByText('文件树加载失败')).toBeInTheDocument()
+    expect(screen.queryByText('任务树加载失败')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('重试加载文件树')).toBeInTheDocument()
+  })
+
+  it('task:// 数据源失败 → 标题仍「任务树加载失败」（分域不误伤）', async () => {
+    mockGet.mockRejectedValueOnce(new Error('api down'))
+    render(<FileTreeWidget dataSource="task://tree" />)
+    expect(await screen.findByTestId('file-tree-error')).toBeInTheDocument()
+    expect(screen.getByText('任务树加载失败')).toBeInTheDocument()
+    expect(screen.queryByText('文件树加载失败')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('重试加载任务树')).toBeInTheDocument()
+  })
 })

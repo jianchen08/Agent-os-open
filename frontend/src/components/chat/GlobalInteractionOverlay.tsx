@@ -87,12 +87,14 @@ export function GlobalInteractionOverlay() {
   }, [currentInteraction, dismissInteraction])
 
   const handleRespondChoice = useCallback(
-    async (optionId: string, optionLabel?: string) => {
+    async (optionId: string) => {
       if (!currentInteraction) return
       if (submittingId && submittingId !== currentInteraction.requestId) return
       setSubmittingId(currentInteraction.requestId)
       try {
-        await respondChoice(currentInteraction.requestId, optionLabel || optionId)
+        // 契约（ADR 2026-10-01）：前端只提交选项 id——label 词形在 human 归一点
+        // 虽可收敛，但 label 重复时选错项的风险在提交端即应消除（与 InteractionCard 同契约）
+        await respondChoice(currentInteraction.requestId, optionId)
       } catch (error) {
         logger.module('InteractionOverlay').error('交互选项响应发送失败', { error })
         toast.error('交互响应发送失败，请重试')

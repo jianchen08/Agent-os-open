@@ -27,6 +27,7 @@ import apiClient from '@/services/api/client'
 import { parseDataSourceRef, resolveDataSource } from '@/services/schema/parser'
 import { CreateTaskFormModal } from './CreateTaskFormModal'
 import { getFileTreeDomainBinding, type FileTreeStatusConfigItem as StatusConfigItem } from './fileTreeActions'
+import { extractRequestError, loadErrorDomain } from './fileTreeErrors'
 import {
   FileTreeContextMenu,
   type ContextMenuContext,
@@ -37,17 +38,6 @@ import { openWorkspaceTreeTab } from './workspaceTreeTab'
 
 /** 树展开状态的 localStorage 持久化工具 */
 const TREE_EXPANDED_PREFIX = 'tree_expanded_'
-
-/** 请求失败的可读原因：后端业务信封（error/detail）优先于 axios 概况消息
- *  （"Request failed with status code 404"）——归属闸等 404 的真实原因在
- *  响应体里，截断它会让用户只看到状态码概况。 */
-function extractRequestError(e: unknown): string {
-  const data = (e as { response?: { data?: { error?: unknown; detail?: unknown } } } | null)
-    ?.response?.data
-  if (typeof data?.error === 'string' && data.error) return data.error
-  if (typeof data?.detail === 'string' && data.detail) return data.detail
-  return e instanceof Error ? e.message : '任务树加载失败'
-}
 
 /** 获取树展开状态的 localStorage key */
 function getExpandedStorageKey(treeKey: string): string {
@@ -829,18 +819,19 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
 
   /** 远程加载失败态：显式错误 + 重试（失败不得伪装成"无数据"空树） */
   if (rawProps.dataSource && remoteError && effectiveData.length === 0 && !isLoadingRemote) {
+    const domain = loadErrorDomain(ds)
     return (
       <div data-testid="file-tree-error" className="w-full rounded-lg border">
         <div className="flex flex-col items-center justify-center p-8">
           <FolderTree className="mb-3 h-12 w-12 text-status-error" />
-          <p className="text-sm text-status-error">任务树加载失败</p>
+          <p className="text-sm text-status-error">{domain}加载失败</p>
           <p className="mt-1 max-w-md break-all text-center text-xs text-muted-foreground">{remoteError}</p>
           <Button
             variant="outline"
             size="sm"
             className="mt-3"
             onClick={triggerRefresh}
-            aria-label="重试加载任务树"
+            aria-label={`重试加载${domain}`}
           >
             重试
           </Button>

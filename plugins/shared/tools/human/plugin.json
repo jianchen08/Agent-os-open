@@ -5,7 +5,7 @@
   ],
   "name": "Human Interaction Tool",
   "description": "用户交互插件（双角色：LLM 工具 + 交互服务。choice/conversation/notification 三模式）",
-  "version": "2.0.1",
+  "version": "2.2.0",
   "plugin_type": "tool",
   "language": "python",
   "host_type": "sidecar",
@@ -311,6 +311,26 @@
                 "critical"
               ],
               "default": "normal"
+            },
+            "user_id": {
+              "type": "string",
+              "description": "创建者用户（param_inject/调用方服务端注入，用于审批归属归因）"
+            },
+            "agent_id": {
+              "type": "string",
+              "description": "发起 Agent 坐标（state agent.id / config_id，卡片来源展示）"
+            },
+            "agent_level": {
+              "type": "string",
+              "description": "发起 Agent 层级（L1/L2/L3，卡片来源展示）"
+            },
+            "pipeline_id": {
+              "type": "string",
+              "description": "所属管道 ID（卡片来源展示与路由）"
+            },
+            "agent_name": {
+              "type": "string",
+              "description": "发起 Agent 显示名（卡片来源展示，缺省由前端缓存解析）"
             }
           },
           "required": [

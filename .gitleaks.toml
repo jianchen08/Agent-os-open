@@ -66,3 +66,25 @@ paths = [
 regexes = [
   '''sk-test-1234567890''',
 ]
+
+[[allowlists]]
+description = "api/auth 故障路径与登录持久化测试：改密/注册流程断言用的哑口令（可读占位形态，非真实凭据）"
+paths = [
+  '''^kernel/crates/api/src/auth\.rs$''',
+  '''^frontend/src/services/api/__tests__/client401\.test\.ts$''',
+]
+regexes = [
+  '''brand-new-pw-9''',
+  '''reg-pw-12345''',
+  '''rt-vanished-12345''',
+]
+
+[[allowlists]]
+description = "llm adapter/路由补测：脱敏断言用的哑 key（sk-abcd123456 为顺字面量，断言其不得回显）"
+paths = [
+  '''^plugins/shared/system/llm/test_routes_llm_config_gaps\.py$''',
+  '''^tests/test_llm_adapter_units\.py$''',
+]
+regexes = [
+  '''sk-abcd123456''',
+]

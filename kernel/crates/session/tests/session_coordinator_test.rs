@@ -85,7 +85,7 @@ async fn replay_missed_delivers_buffered_events_to_current_connection() {
             .await;
     }
 
-    // 模拟重连：新连接（踢旧），replay_missed(last=1) → 投递 seq 2,3
+    // 模拟第二端接入（多端并存，原连接保持）：replay_missed(last=1) → 投递 seq 2,3
     let (sink2, recv2) = MockSink::online();
     coord.register("user-A", sink2);
     coord.register_thread("thread-1", "user-A");
@@ -502,25 +502,86 @@ async fn broadcast_widget_counts_deliveries() {
     assert_eq!(recv_b.lock().unwrap().len(), 1);
 }
 
-/// register 踢旧：旧连接被 shutdown（幽灵连接不得残留）。
+/// 多端并存（ADR 2026-10-01）：配额内同 user 多连接不踢旧，emit_event 按
+/// 连接扇出——每条连接各收一份。
 #[tokio::test]
-async fn register_kicks_previous_connection() {
+async fn emit_event_fans_out_to_all_user_connections() {
     let coord = SessionCoordinator::default();
+    let (sink1, recv1) = MockSink::online();
+    let (sink2, recv2) = MockSink::online();
+    assert!(
+        coord.register("user-A", sink1).is_none() && coord.register("user-A", sink2).is_none(),
+        "配额内注册不逐出任何连接"
+    );
+    coord.register_thread("thread-1", "user-A");
+
+    let delivered = coord
+        .emit_event("thread-1", "new_message", serde_json::json!({"m": 1}))
+        .await;
+    assert!(delivered, "≥1 连接成功即 delivered");
+    assert_eq!(recv1.lock().unwrap().len(), 1, "连接 1 应各收一份");
+    assert_eq!(recv2.lock().unwrap().len(), 1, "连接 2 应各收一份");
+    assert_eq!(coord.registry().active_count(), 2);
+}
+
+/// 一端断开（显式注销，等价真实 socket 的 finally 收尾）不影响他端：
+/// 存活连接继续收全后续事件，thread 映射保留（最后一条注销才清）。
+#[tokio::test]
+async fn one_connection_disconnecting_does_not_affect_the_other() {
+    let coord = SessionCoordinator::default();
+    let (dying, _recv_dying) = MockSink::online();
+    let (live, recv_live) = MockSink::online();
+    coord.register("user-A", dying.clone());
+    coord.register("user-A", live.clone());
+    coord.register_thread("thread-1", "user-A");
+
+    // 一端断开：真实 socket 路径经 finally 块显式注销（等价 unregister）
+    coord.registry().unregister("user-A", dying.id());
+    assert_eq!(coord.registry().active_count(), 1, "仅断开端被注销");
+
+    // 存活连接继续收全后续事件，不受断开端影响
+    coord
+        .emit_event("thread-1", "new_message", serde_json::json!({"m": 1}))
+        .await;
+    let msgs = recv_live.lock().unwrap();
+    assert_eq!(msgs.len(), 1, "存活连接应正常收到事件");
+}
+
+/// 配额超限 LRU 踢最旧：上限 1 时第 2 条注册逐出第 1 条并真正 shutdown
+/// （超限踢旧沿用 CLOSE_CODE_KICKED 通道；配额内注册不关闭任何连接）。
+#[tokio::test]
+async fn over_quota_register_shuts_down_oldest() {
+    let coord = SessionCoordinator::with_max_conns(1);
     let (old, _old_recv) = MockSink::online();
     assert!(
         coord.register("user-A", old.clone()).is_none(),
         "首次注册无旧连接"
     );
-    assert!(!old.is_shutdown(), "活跃连接不应被关闭");
+    assert!(!old.is_shutdown(), "配额内连接不应被关闭");
 
     let (new_sink, _new_recv) = MockSink::online();
-    let kicked_id = coord.register("user-A", new_sink);
-    assert_eq!(kicked_id, Some(old.id()), "返回被踢旧连接的 id");
+    let evicted_id = coord.register("user-A", new_sink);
+    assert_eq!(evicted_id, Some(old.id()), "返回被逐出旧连接的 id");
     assert!(
         old.is_shutdown(),
-        "被踢连接必须真正关闭（CLOSE_CODE_KICKED 语义）"
+        "被逐出连接必须真正关闭（超限踢旧通道语义）"
     );
-    assert_eq!(coord.registry().active_count(), 1, "单连接不变量");
+    assert_eq!(coord.registry().active_count(), 1, "超限逐出后回到配额内");
+}
+
+/// 配额放宽（缺省多端并存）：同 user 两条连接注册互不关闭。
+#[tokio::test]
+async fn within_quota_register_shuts_down_nothing() {
+    let coord = SessionCoordinator::with_max_conns(2);
+    let (first, _r1) = MockSink::online();
+    let (second, _r2) = MockSink::online();
+    coord.register("user-A", first.clone());
+    coord.register("user-A", second.clone());
+    assert!(
+        !first.is_shutdown() && !second.is_shutdown(),
+        "配额内不踢旧"
+    );
+    assert_eq!(coord.registry().active_count(), 2);
 }
 
 /// list_threads 透传注册表的 thread→user 映射（REST 会话列表的数据源）。

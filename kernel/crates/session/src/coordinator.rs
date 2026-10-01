@@ -27,6 +27,17 @@ impl SessionCoordinator {
     /// 用默认配置创建（限流 20msg/s 突发 50，重放 1000 条/5min）。
     pub fn new() -> Self {
         let registry = Arc::new(ConnectionRegistry::new());
+        Self::with_registry(registry)
+    }
+
+    /// 以指定每 user 连接数上限创建（测试/嵌入式注入配额用）。
+    pub fn with_max_conns(max_conns_per_user: usize) -> Self {
+        Self::with_registry(Arc::new(ConnectionRegistry::with_max_conns(
+            max_conns_per_user,
+        )))
+    }
+
+    fn with_registry(registry: Arc<ConnectionRegistry>) -> Self {
         let bus = FrontendEventBus::new(registry.clone());
         let replay = Arc::new(ReplayBuffer::new(ReplayConfig::default()));
         let metrics = Arc::new(crate::metrics::SessionMetrics::new());
@@ -53,19 +64,22 @@ impl SessionCoordinator {
         self.registry.list_threads()
     }
 
-    /// 注册连接（单连接踢旧）。
+    /// 注册连接（多端并存；仅每 user 连接数超限时 LRU 踢最旧）。
+    ///
+    /// 超限被踢的旧连接必须真正关闭（两段式 kicked 帧 + Close 4000 语义，
+    /// 经 sink.shutdown() 触发出站分路收尾）——只从注册表逐出会让旧 socket
+    /// 变幽灵连接：收不到事件、也永不退出。配额内注册不关闭任何连接
+    /// （ADR 2026-10-01 多前端连接，取代 B10 单连接互踢）。
     pub fn register(&self, user_id: &str, sink: Arc<dyn crate::EventSink>) -> Option<u64> {
-        let kicked = self.registry.register(user_id, sink);
-        if let Some(old) = &kicked {
-            // 踢旧必须真正关闭旧连接（connection_registry 注释要求的 CLOSE_CODE_KICKED 语义落地），
-            // 只换注册表会让旧 socket 变幽灵连接：收不到事件、也永不退出。
+        let evicted = self.registry.register(user_id, sink);
+        for old in &evicted {
             old.shutdown();
             self.metrics.inc_kick_old();
         }
-        // 活跃连接数 = 注册表大小（gauge，每次 register 后同步真实值）
+        // 活跃连接数 = 注册表连接总数（gauge，每次 register 后同步真实值）
         self.metrics
             .set_connections(self.registry.active_count() as u64);
-        kicked.map(|k| k.id())
+        evicted.first().map(|old| old.id())
     }
 
     /// 建立 thread→user 映射。
@@ -94,6 +108,8 @@ impl SessionCoordinator {
             "sequence": sequence,
         });
         let payload_str = serde_json::to_string(&payload).unwrap_or_default();
+        // delivered = 该 user ≥1 条连接投递成功（多端并存按连接扇出，ADR
+        // 2026-10-01）；metrics 的 push/dropped 按"≥1 成功即 emitted"口径。
         let delivered = self.registry.send_to_thread(thread_id, &payload_str).await;
         if delivered {
             self.metrics.inc_event_bus_push(1);
@@ -143,7 +159,8 @@ impl SessionCoordinator {
         match self.replay.replay(thread_id, last_sequence).await {
             ReplayResult::Events { events, .. } => {
                 for ev in events {
-                    // 该 thread 已 register_thread → send_to_thread 能定位到当前连接的 sink
+                    // 该 thread 已 register_thread → send_to_thread 扇出该 user
+                    // 全部活跃连接（多端各收一份）
                     self.registry.send_to_thread(thread_id, &ev.payload).await;
                 }
                 self.metrics.inc_replay_hit();

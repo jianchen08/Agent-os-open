@@ -58,6 +58,32 @@ class IInteractionNotifier(ABC):
         """通知对话模式开始"""
         ...
 
+    @abstractmethod
+    async def notify_settled(
+        self,
+        request_id: str,
+        *,
+        response_type: str,
+        selected_option: str | None,
+        selected_semantics: str,
+        session_id: str = "",
+        thread_id: str = "",
+    ) -> bool:
+        """结算广播 ``approval.taken``（ADR 2026-10-01：卡被应答/取消/超时定局，多端对账下卡）"""
+        ...
+
+    @abstractmethod
+    async def notify_anomaly(
+        self,
+        request_id: str,
+        *,
+        anomaly: str,
+        detail: str,
+        thread_id: str = "",
+    ) -> bool:
+        """交互应答异常告警 ``interaction_anomaly``（未知词形/未知 response_type，fail-closed 可观测）"""
+        ...
+
 
 class IHumanInteractionService(ABC):
     """
@@ -98,8 +124,9 @@ class IHumanInteractionService(ABC):
         agent_id: str | None = None,
         file_paths: list[str] | None = None,
         agent_level: str | None = None,
+        memory_key: str | None = None,
     ) -> str:
-        """创建选择模式请求"""
+        """创建选择模式请求（memory_key：拒绝记忆作用域，工具+指纹精确键）"""
         ...
 
     @abstractmethod

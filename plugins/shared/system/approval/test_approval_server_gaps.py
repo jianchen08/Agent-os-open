@@ -443,6 +443,24 @@ async def test_on_unload_runs_clean_with_suspended_state() -> None:
 # ═══════════════════════════════════════════════════════════
 
 
+def test_build_options_assigns_declared_semantics() -> None:
+    """选项语义声明（ADR 2026-10-01 决策 2/3）：按索引对齐赋值；非法值丢弃不带病入卡。"""
+    mod = _load_server()
+    out = mod._build_options(
+        ["同意", "拒绝", "搁置"], ["approve_once", "deny", "not-a-semantics"]
+    )
+    assert out == [
+        {"id": "0", "label": "同意", "semantics": "approve_once"},
+        {"id": "1", "label": "拒绝", "semantics": "deny"},
+        {"id": "2", "label": "搁置"},
+    ], "非法语义值必须丢弃（该选项退化为无语义）"
+    # 未声明：形状与旧契约逐字节同形（只增不改）
+    assert mod._build_options(["a", "b"]) == [
+        {"id": "0", "label": "a"},
+        {"id": "1", "label": "b"},
+    ]
+
+
 @pytest.mark.parametrize(
     "sub,expected",
     [
