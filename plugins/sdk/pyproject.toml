@@ -30,6 +30,8 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.5",
     "mypy>=1.10",
+    # 测试专用：multimodal 用例以 PIL 合成 PNG 字节（生产 src 零 PIL 引用）
+    "pillow>=10",
 ]
 
 [tool.setuptools.packages.find]
