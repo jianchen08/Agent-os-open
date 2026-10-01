@@ -30,10 +30,7 @@ def parse_state_value(raw: Any) -> Any:
 
 def state_fields_to_dict(fields: list[dict[str, Any]]) -> dict[str, Any]:
     """fields 行数组 → {field_key: 解析后的值}。"""
-    return {
-        str(f.get("field_key") or ""): parse_state_value(f.get("field_value"))
-        for f in fields
-    }
+    return {str(f.get("field_key") or ""): parse_state_value(f.get("field_value")) for f in fields}
 
 
 def _tool_call_name(call: dict[str, Any]) -> str:
@@ -85,9 +82,7 @@ def aggregate_traces(traces: list[dict[str, Any]]) -> dict[str, Any]:
         usage = patch.get("llm_usage")
         if isinstance(usage, dict) and usage.get("total_tokens"):
             model = str(usage.get("model") or "unknown")
-            bucket = by_model.setdefault(
-                model, {"input": 0, "output": 0, "cached": 0, "total": 0}
-            )
+            bucket = by_model.setdefault(model, {"input": 0, "output": 0, "cached": 0, "total": 0})
             bucket["input"] += int(usage.get("input_tokens") or 0)
             bucket["output"] += int(usage.get("output_tokens") or 0)
             bucket["cached"] += int(usage.get("cached_tokens") or 0)
@@ -147,9 +142,20 @@ def collect_pipeline_metrics(client: Any, pipeline_id: str) -> dict[str, Any]:
         "task_status": summary.get("task.status") or fields.get("task.status"),
         "run_statuses": [str(r.get("status") or "") for r in runs if isinstance(r, dict)],
         "settled": all(s in TERMINAL_RUN_STATUS for s in run_statuses) and bool(run_statuses),
-        **{k: agg[k] for k in ("error_steps", "timeout_steps", "llm_rounds", "tool_calls",
-                               "tool_retries", "by_model", "echo_fail_seen",
-                               "echo_ok_seen", "echo_call_count")},
+        **{
+            k: agg[k]
+            for k in (
+                "error_steps",
+                "timeout_steps",
+                "llm_rounds",
+                "tool_calls",
+                "tool_retries",
+                "by_model",
+                "echo_fail_seen",
+                "echo_ok_seen",
+                "echo_call_count",
+            )
+        },
     }
 
 

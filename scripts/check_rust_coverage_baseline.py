@@ -139,10 +139,7 @@ def main() -> int:
     # lcov 95→96 事件 + 本次 90→96 即时复发）。收紧 = --init 手动 + commit 归因。
     suggested = next_pressure_line(pct)
     if suggested != baseline:
-        print(
-            f"[rust-cov] 💡 可收紧：--init 锚定实测（建议下一压力线 {suggested:.1f}），"
-            "基线改动走 commit 留归因。"
-        )
+        print(f"[rust-cov] 💡 可收紧：--init 锚定实测（建议下一压力线 {suggested:.1f}），基线改动走 commit 留归因。")
     return 0
 
 

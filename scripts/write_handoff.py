@@ -26,6 +26,7 @@ import argparse
 import re
 import sys
 from datetime import UTC, datetime
+from io import TextIOWrapper
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[1]
@@ -33,10 +34,22 @@ TEMPLATE = _REPO / "docs" / "working" / "templates" / "task_handoff.md"
 DEFAULT_OUT_DIR = _REPO / ".agentos" / "handoff"
 #: 模板占位符全集（task_id/generated_at 由脚本自动填充）
 _TOKENS = (
-    "task_id", "generated_at", "title", "source", "acceptance",
-    "status", "done", "commits", "in_flight",
-    "secrets", "processes", "workspace",
-    "risks", "unverified", "next", "handover",
+    "task_id",
+    "generated_at",
+    "title",
+    "source",
+    "acceptance",
+    "status",
+    "done",
+    "commits",
+    "in_flight",
+    "secrets",
+    "processes",
+    "workspace",
+    "risks",
+    "unverified",
+    "next",
+    "handover",
 )
 _AUTO_TOKENS = ("task_id", "generated_at")
 _TBD = "（待补）"
@@ -50,13 +63,18 @@ def parse_set(raw: str) -> tuple[str, str]:
 
 
 def main() -> int:
-    sys.stdout.reconfigure(encoding="utf-8")
+    if isinstance(sys.stdout, TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="生成任务交接档案（五要素模板填充）")
     parser.add_argument("--task-id", required=True, help="任务 id（决定默认文件名 <task_id>.md）")
-    parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
-                        help=f"填充字段，可重复；可用键：{', '.join(t for t in _TOKENS if t not in _AUTO_TOKENS)}")
-    parser.add_argument("--out", type=Path, default=None,
-                        help="输出路径（默认 .agentos/handoff/<task_id>.md）")
+    parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=f"填充字段，可重复；可用键：{', '.join(t for t in _TOKENS if t not in _AUTO_TOKENS)}",
+    )
+    parser.add_argument("--out", type=Path, default=None, help="输出路径（默认 .agentos/handoff/<task_id>.md）")
     parser.add_argument("--force", action="store_true", help="覆盖已存在的档案（里程碑回写用）")
     args = parser.parse_args()
 
@@ -82,9 +100,11 @@ def main() -> int:
     # 模板与脚本占位符全集一致性（模板漂移即红，fail-closed）
     template_tokens = set(re.findall(r"\{\{(\w+)\}\}", text))
     if template_tokens != set(_TOKENS):
-        print(f"[handoff] 模板占位符与脚本全集不一致："
-              f"模板多出 {sorted(template_tokens - set(_TOKENS))}，"
-              f"缺失 {sorted(set(_TOKENS) - template_tokens)}")
+        print(
+            f"[handoff] 模板占位符与脚本全集不一致："
+            f"模板多出 {sorted(template_tokens - set(_TOKENS))}，"
+            f"缺失 {sorted(set(_TOKENS) - template_tokens)}"
+        )
         return 1
     for key, value in values.items():
         text = text.replace("{{" + key + "}}", value)
@@ -96,8 +116,7 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
     filled = sum(1 for t in _TOKENS if values[t] != _TBD) - len(_AUTO_TOKENS)
-    print(f"[handoff] 已生成 {out}（显式填充 {filled} 项，待补 "
-          f"{len(_TOKENS) - len(_AUTO_TOKENS) - filled} 项）")
+    print(f"[handoff] 已生成 {out}（显式填充 {filled} 项，待补 {len(_TOKENS) - len(_AUTO_TOKENS) - filled} 项）")
     return 0
 
 

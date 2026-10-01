@@ -63,8 +63,10 @@ def main() -> int:
         return 0
 
     if SYNTAX_RE.search(log):
-        print(f"ruff-{ns.name}: 日志含 invalid-syntax——语法错误使文件落入 lint 盲区，"
-              "基线计数不可信；先修语法（参照 trajectory_harvest 先例）。")
+        print(
+            f"ruff-{ns.name}: 日志含 invalid-syntax——语法错误使文件落入 lint 盲区，"
+            "基线计数不可信；先修语法（参照 trajectory_harvest 先例）。"
+        )
         return 1
 
     if current > baseline:

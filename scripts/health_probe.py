@@ -36,6 +36,7 @@ import sys
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
+from io import TextIOWrapper
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,7 @@ def _human_mb(num_bytes: int | None) -> str:
 
 
 # ── L0 进程面 ────────────────────────────────────────────────────────────────
+
 
 def _probe_processes() -> dict[str, Any]:
     """psutil 扫内核/electron 进程树；孤儿 = 内核的 ParentProcessId 不在活进程表。"""
@@ -122,10 +124,15 @@ def _probe_processes() -> dict[str, Any]:
 
 # ── L1 端口面 ────────────────────────────────────────────────────────────────
 
+
 def _probe_ports() -> dict[str, Any]:
     out = subprocess.run(
-        ["netstat", "-ano", "-p", "tcp"], capture_output=True, text=True,
-        encoding="utf-8", errors="replace", check=False,
+        ["netstat", "-ano", "-p", "tcp"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
     ).stdout
     listeners: dict[int, list[int]] = {port: [] for port in KERNEL_PORTS}
     for line in out.splitlines():
@@ -139,7 +146,7 @@ def _probe_ports() -> dict[str, Any]:
 
     def owner_name(pid: int) -> str:
         try:
-            return (psutil.Process(pid).name() or "?")
+            return psutil.Process(pid).name() or "?"
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return "?"
 
@@ -154,6 +161,7 @@ def _probe_ports() -> dict[str, Any]:
 
 
 # ── L2 日志面 ────────────────────────────────────────────────────────────────
+
 
 def _log_roots() -> list[Path]:
     roots = [_REPO / "logs"]
@@ -200,26 +208,28 @@ def _probe_logs(now: datetime) -> dict[str, Any]:
 
 # ── L3 业务面 ────────────────────────────────────────────────────────────────
 
+
 def _probe_login(base: str, listening_ports: list[int]) -> dict[str, Any]:
     password = os.environ.get("AGENTOS_ADMIN_PASSWORD")
     if not password:
-        return {"status": "no-password",
-                "note": "未设 AGENTOS_ADMIN_PASSWORD，登录探活无法执行（非红项）"}
+        return {"status": "no-password", "note": "未设 AGENTOS_ADMIN_PASSWORD，登录探活无法执行（非红项）"}
     if 9101 not in listening_ports:
         if 9100 in listening_ports:
-            return {"status": "dev-only",
-                    "note": "9101 无监听而 9100 在——dev 形态，装机业务面未起（非红项）"}
+            return {"status": "dev-only", "note": "9101 无监听而 9100 在——dev 形态，装机业务面未起（非红项）"}
         return {"status": "unreachable", "note": "9100/9101 均无监听"}
     body = json.dumps({"username": "admin", "password": password}).encode("utf-8")
-    req = urllib.request.Request(base + "/api/v1/auth/login", data=body,
-                                 headers={"Content-Type": "application/json"}, method="POST")
+    req = urllib.request.Request(
+        base + "/api/v1/auth/login", data=body, headers={"Content-Type": "application/json"}, method="POST"
+    )
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
             ok = resp.status == 200 and json.loads(resp.read().decode("utf-8")).get("access_token")
             return {"status": "ok" if ok else f"http-{resp.status}"}
     except urllib.error.HTTPError as exc:
-        return {"status": f"http-{exc.code}", "red": f"登录探活失败：HTTP {exc.code}"
-                + ("（口令不匹配）" if exc.code == 401 else "")}
+        return {
+            "status": f"http-{exc.code}",
+            "red": f"登录探活失败：HTTP {exc.code}" + ("（口令不匹配）" if exc.code == 401 else ""),
+        }
     except (urllib.error.URLError, OSError) as exc:
         return {"status": "unreachable", "red": f"登录探活不可达（{base}）：{exc}"}
 
@@ -237,11 +247,14 @@ def _probe_runs(db: Path, now: datetime) -> dict[str, Any] | None:
         cutoff = datetime.fromtimestamp(now.timestamp() - _mpw.DEFAULT_STUCK_MINS * 60, tz=UTC)
         verdicts = []
         for run in _mpw.load_active_runs(conn):
-            verdicts.append({
-                "run_id": run["run_id"], "pipeline_id": run["pipeline_id"],
-                "verdict": _mpw.classify(run, cutoff),
-                "task_status": run["task_status"],
-            })
+            verdicts.append(
+                {
+                    "run_id": run["run_id"],
+                    "pipeline_id": run["pipeline_id"],
+                    "verdict": _mpw.classify(run, cutoff),
+                    "task_status": run["task_status"],
+                }
+            )
         return {"db": str(db), "runs": verdicts}
     except sqlite3.Error as exc:
         return {"db": str(db), "error": f"读活跃 run 失败：{exc}"}
@@ -264,12 +277,15 @@ def _probe_business(now: datetime, listening_ports: list[int]) -> dict[str, Any]
     for runs in dbs:
         for v in runs.get("runs", []):
             if v["verdict"] == "RUNNING_STALE":
-                red.append(f"长跑疑似 STUCK：pipeline={v['pipeline_id']} run={v['run_id']}"
-                           f"（Running 无 trace 停滞超过 {_mpw.DEFAULT_STUCK_MINS} 分钟）")
+                red.append(
+                    f"长跑疑似 STUCK：pipeline={v['pipeline_id']} run={v['run_id']}"
+                    f"（Running 无 trace 停滞超过 {_mpw.DEFAULT_STUCK_MINS} 分钟）"
+                )
     return {"login": {k: v for k, v in login.items() if k != "red"}, "runs": dbs, "red": red}
 
 
 # ── L4 资源面 ────────────────────────────────────────────────────────────────
+
 
 def _probe_resources(proc_face: dict[str, Any]) -> dict[str, Any]:
     import psutil
@@ -280,11 +296,16 @@ def _probe_resources(proc_face: dict[str, Any]) -> dict[str, Any]:
     red = []
     if mem.percent >= MEM_WARN_PCT:
         red.append("内存水位越过告警线（E3 面：资源高位，检查 reasoning=max 档位与并发会话数）")
-    return {"mem_percent": round(mem.percent, 1), "kernel_rss_bytes": kernel_rss,
-            "electron_rss_bytes": electron_rss, "red": red}
+    return {
+        "mem_percent": round(mem.percent, 1),
+        "kernel_rss_bytes": kernel_rss,
+        "electron_rss_bytes": electron_rss,
+        "red": red,
+    }
 
 
 # ── 输出与退出码 ─────────────────────────────────────────────────────────────
+
 
 def _render(faces: dict[str, Any], now: datetime) -> None:
     def mark(bad: bool) -> str:
@@ -296,10 +317,14 @@ def _render(faces: dict[str, Any], now: datetime) -> None:
     pf = faces["L0_process"]
     for item in pf["items"]:
         if item["kind"] == "kernel":
-            line = (f"  {mark(item['orphan'])} 内核 pid={item['pid']} rss={_human_mb(item['rss_bytes'])}"
-                    f" exe={item['exe']}")
-            line += f" 父={item['parent']}（pid={item['ppid']}）" if item["parent"] \
+            line = (
+                f"  {mark(item['orphan'])} 内核 pid={item['pid']} rss={_human_mb(item['rss_bytes'])} exe={item['exe']}"
+            )
+            line += (
+                f" 父={item['parent']}（pid={item['ppid']}）"
+                if item["parent"]
                 else f" 孤儿（ParentProcessId={item['ppid']} 已死）"
+            )
             print(line)
         else:
             print(f"  ✓ 电子壳 pid={item['pid']} rss={_human_mb(item['rss_bytes'])} exe={item['exe']}")
@@ -318,8 +343,7 @@ def _render(faces: dict[str, Any], now: datetime) -> None:
     print("[L2 日志面]")
     for item in faces["L2_logs"]["items"]:
         age = f"{item['liveness_age_s']:.0f}s 前" if item["liveness_age_s"] is not None else "无标记"
-        print(f"  {mark(not item['fresh'])} {item['root']} kernel.liveness={age}"
-              f"（阈值 {LIVENESS_FRESH_S}s）")
+        print(f"  {mark(not item['fresh'])} {item['root']} kernel.liveness={age}（阈值 {LIVENESS_FRESH_S}s）")
         size = _human_mb(item["current_log_bytes"]) if item["current_log_bytes"] else "缺失"
         print(f"    当前 UTC 日志：{item['current_log']}（{size}）")
     for r in faces["L2_logs"]["red"]:
@@ -330,15 +354,19 @@ def _render(faces: dict[str, Any], now: datetime) -> None:
     # no-password / dev-only 属无法判定或合法形态（·），非 ok 的其余状态为红（✗）
     login_soft = login["status"] in {"no-password", "dev-only"}
     login_sym = "·" if login_soft else ("✓" if login["status"] == "ok" else "✗")
-    print(f"  {login_sym} 登录探活（{LOGIN_BASE}）：{login['status']}"
-          + (f"——{login['note']}" if login.get("note") else ""))
+    print(
+        f"  {login_sym} 登录探活（{LOGIN_BASE}）：{login['status']}"
+        + (f"——{login['note']}" if login.get("note") else "")
+    )
     for runs in faces["L3_business"]["runs"]:
         if "error" in runs:
             print(f"  · {runs['db']}：{runs['error']}")
             continue
         for v in runs["runs"]:
-            print(f"  {mark(v['verdict'] == 'RUNNING_STALE')} 长跑判定：[{v['verdict']}]"
-                  f" pipeline={v['pipeline_id']} task={v['task_status'] or '-'}（{runs['db']}）")
+            print(
+                f"  {mark(v['verdict'] == 'RUNNING_STALE')} 长跑判定：[{v['verdict']}]"
+                f" pipeline={v['pipeline_id']} task={v['task_status'] or '-'}（{runs['db']}）"
+            )
         if not runs["runs"]:
             print(f"  ✓ 无活跃 run（{runs['db']}）")
     for r in faces["L3_business"]["red"]:
@@ -347,14 +375,16 @@ def _render(faces: dict[str, Any], now: datetime) -> None:
     print("[L4 资源面]")
     rf = faces["L4_resources"]
     print(f"  {mark(bool(rf['red']))} 系统内存 {rf['mem_percent']}%（告警线 {MEM_WARN_PCT}%）")
-    print(f"  · 内核 RSS 合计 {_human_mb(rf['kernel_rss_bytes'])}，"
-          f"电子壳 RSS 合计 {_human_mb(rf['electron_rss_bytes'])}")
+    print(
+        f"  · 内核 RSS 合计 {_human_mb(rf['kernel_rss_bytes'])}，电子壳 RSS 合计 {_human_mb(rf['electron_rss_bytes'])}"
+    )
     for r in rf["red"]:
         print(f"  ✗ {r}")
 
 
 def main() -> int:
-    sys.stdout.reconfigure(encoding="utf-8")
+    if isinstance(sys.stdout, TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="五层 readiness 一键健康探针（只读）")
     parser.add_argument("--json", action="store_true", help="输出机读 JSON（替代一页纸文本）")
     args = parser.parse_args()
@@ -367,14 +397,18 @@ def main() -> int:
     faces["L3_business"] = _probe_business(now, faces["L1_ports"]["listening_ports"])
     faces["L4_resources"] = _probe_resources(faces["L0_process"])
 
-    core_down = (faces["L0_process"]["kernel_count"] == 0
-                 and not faces["L1_ports"]["listening_ports"])
+    core_down = faces["L0_process"]["kernel_count"] == 0 and not faces["L1_ports"]["listening_ports"]
     all_red = [r for f in faces.values() for r in f.get("red", [])]
     exit_code = 2 if core_down else (1 if all_red else 0)
 
     if args.json:
-        print(json.dumps({"generated_at": now.isoformat(timespec="seconds"),
-                          "exit": exit_code, "faces": faces}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {"generated_at": now.isoformat(timespec="seconds"), "exit": exit_code, "faces": faces},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     else:
         _render(faces, now)
         verdict = {0: "全绿", 1: "有红项（见 ✗ 行）", 2: "核心面不可达（无内核进程且 9100/9101 均无监听）"}

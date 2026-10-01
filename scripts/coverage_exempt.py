@@ -253,17 +253,17 @@ BASE_TEST_PATHS: list[str] = [
     "plugins/shared/pipeline/core/llm_core/test_llm_core_server_execute.py",
     # 2026-09-14 覆盖率补测批十（簇 B/C）：shared 根散模块 + 三个未登记插件目录
     # 的缺口补测——这些文件不在任何已登记目录下，缺此条目则模块覆盖率失真。
-    "tests/test_host_shared_modules_gaps.py",   # project_registry/tenant_data/repo_anchor/proc_tree/user_space/state_fields/bounded_dict/uploads_path
+    "tests/test_host_shared_modules_gaps.py",  # project_registry/tenant_data/repo_anchor/proc_tree/user_space/state_fields/bounded_dict/uploads_path
     "tests/test_metrics_admin_server_gaps.py",  # metrics_admin/server.py
-    "tests/test_task_form_server_gaps.py",      # task_form/server.py
-    "tests/test_tool_cache_gaps.py",            # pipeline/input/tool_cache
+    "tests/test_task_form_server_gaps.py",  # task_form/server.py
+    "tests/test_tool_cache_gaps.py",  # pipeline/input/tool_cache
     # 工具结果配对消息仓扫守卫（ADR 2026-09-28 固定函数路径：SDK 外零自建
     # role=tool 配对消息，允许清单自清洁）。
     "tests/test_tool_result_protocol_sweep.py",
     # 2026-09-16 覆盖率收官批：artifacts 缺口测试接线（版本链断点截断等，
     # 此前文件不在车道 → artifact_service.py 覆盖率失真）。
     "tests/test_artifacts_gaps.py",
-    "tests/test_workspace_lifecycle_gaps.py",   # pipeline/input/workspace_lifecycle
+    "tests/test_workspace_lifecycle_gaps.py",  # pipeline/input/workspace_lifecycle
 ]
 
 # 车道 marker 过滤：@pytest.mark.timing 用例唯一归 timing-gate（独立 stage，

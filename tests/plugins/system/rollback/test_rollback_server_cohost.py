@@ -195,4 +195,3 @@ class TestServerToolSurface:
                 sys.modules.pop(n, None)
                 if m is not None:
                     sys.modules[n] = m
-

@@ -43,9 +43,7 @@ def parse_failures(output: str) -> int:
         m2 = re.search(r"(\d+) test(?:s)? failed", output)
         if m2:
             failed_count = int(m2.group(1))
-    if failed_count == 0 and (
-        re.search(r"^error\[", output, re.M) or re.search(r"^error:", output, re.M)
-    ):
+    if failed_count == 0 and (re.search(r"^error\[", output, re.M) or re.search(r"^error:", output, re.M)):
         # 编译失败（非测试失败，但 CI 应红）
         failed_count = max(failed_count, 1)
     return failed_count

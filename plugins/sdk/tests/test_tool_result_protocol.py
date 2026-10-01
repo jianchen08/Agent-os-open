@@ -75,12 +75,16 @@ def test_entry_extras_passthrough_top_level() -> None:
     assert entry["retry_allowed"] is True
     assert entry["arguments"] == {"command": "ls"}
     # 扩展位不进 envelope（七键封闭）：经 build_tool_result_ops 验证。
-    ops = build_tool_result_ops(
-        [{"name": "bash_execute", "id": "c2", "args": {}}], [entry]
-    )
+    ops = build_tool_result_ops([{"name": "bash_execute", "id": "c2", "args": {}}], [entry])
     envelope = ops["_ops"][0]["msg"]["tool_result"]
     assert set(envelope.keys()) == {
-        "call_id", "tool_name", "success", "error", "data", "metadata", "duration_ms",
+        "call_id",
+        "tool_name",
+        "success",
+        "error",
+        "data",
+        "metadata",
+        "duration_ms",
     }
 
 
@@ -115,8 +119,7 @@ def test_ops_failure_without_error_says_unknown() -> None:
     """失败 entry 缺 error：content 归一为 Error: unknown（不抛错）。"""
     ops = build_tool_result_ops(
         [{"name": "f", "id": "c9", "args": {}}],
-        [{"tool_name": "f", "success": False, "error": None, "data": None,
-          "metadata": None, "duration_ms": 0.0}],
+        [{"tool_name": "f", "success": False, "error": None, "data": None, "metadata": None, "duration_ms": 0.0}],
     )
     assert ops["_ops"][0]["msg"]["content"] == "Error: unknown"
 

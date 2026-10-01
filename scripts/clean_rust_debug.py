@@ -29,7 +29,6 @@ kernel/target/release/agentos-kernel(.exe)，debug 产物与覆盖率插桩
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import shutil
 import stat
@@ -121,9 +120,7 @@ def _delete_entry(entry: Path, stats: SweepStats) -> None:
         stats.skipped += 1
 
 
-def _drop_stale_clusters(
-    clusters: dict[tuple[str, str], list[Path]], cutoff: float, stats: SweepStats
-) -> None:
+def _drop_stale_clusters(clusters: dict[tuple[str, str], list[Path]], cutoff: float, stats: SweepStats) -> None:
     """删掉各 stem 下「非最新 hash 簇且冷置早于 cutoff」的簇。
 
     最新簇（该 stem 内 mtime 最大者）与冷置未满阈值的簇一律保留——

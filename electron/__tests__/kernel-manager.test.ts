@@ -14,6 +14,11 @@ import { describe, expect, it, vi } from "vitest";
 import * as fs from "fs";
 import * as os from "os";
 
+// electron 包在 ELECTRON_SKIP_BINARY_DOWNLOAD=1 的 CI 环境 require 即抛
+// （index.js 顶层自检二进制路径）；本套件是 node 纯函数层，依赖链上的
+// auth-session 经空对象桩落 safeStorage=null → 文件内建回退密码学。
+vi.mock("electron", () => ({}));
+
 import {
   KERNEL_DEFAULT_PORT,
   KERNEL_HEALTH_URL,

@@ -60,13 +60,9 @@ class TestCohostCallConfigRouting:
         )
 
         beta = server._members["beta"]
-        assert beta.get_config().get("b_ns") == {"rules": [1, 2]}, (
-            "属主成员必须在分发前收到本次调用的注入配置"
-        )
+        assert beta.get_config().get("b_ns") == {"rules": [1, 2]}, "属主成员必须在分发前收到本次调用的注入配置"
         alpha = server._members["alpha"]
-        assert "b_ns" not in alpha.get_config(), (
-            "非属主成员的配置视图不得被串写（命名空间隔离）"
-        )
+        assert "b_ns" not in alpha.get_config(), "非属主成员的配置视图不得被串写（命名空间隔离）"
 
     def test_call_config_fires_owner_config_changed_hook(self) -> None:
         """属主成员的 on_config_changed 钩子在配置真变时触发。"""
@@ -84,9 +80,7 @@ class TestCohostCallConfigRouting:
             )
         )
 
-        assert fired == [{"b_ns": {"rules": ["x"]}}], (
-            "合宿下属主成员的配置变更钩子必须可用（独占同语义）"
-        )
+        assert fired == [{"b_ns": {"rules": ["x"]}}], "合宿下属主成员的配置变更钩子必须可用（独占同语义）"
 
     def test_unknown_tool_name_no_member_contaminated(self) -> None:
         """工具名不匹配任何成员：不串写任何成员配置视图（调用本身按未知工具报错）。"""
@@ -113,14 +107,8 @@ class TestCohostCallConfigRouting:
         server = _cohost()
         import asyncio
 
-        asyncio.run(
-            server._server._handle_tools_call({"name": "beta.beta_echo", "arguments": {}})
-        )
-        asyncio.run(
-            server._server._handle_tools_call(
-                {"name": "beta.beta_echo", "arguments": {"config": "junk"}}
-            )
-        )
+        asyncio.run(server._server._handle_tools_call({"name": "beta.beta_echo", "arguments": {}}))
+        asyncio.run(server._server._handle_tools_call({"name": "beta.beta_echo", "arguments": {"config": "junk"}}))
 
         for pid, plugin in server._members.items():
             assert "b_ns" not in plugin.get_config(), f"成员 {pid} 视图不得被垃圾输入污染"

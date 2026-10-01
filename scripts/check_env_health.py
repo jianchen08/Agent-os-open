@@ -31,8 +31,8 @@ MIN_HEALTHY_ENTRIES = 2  # 少于 2 个键视为可疑（事故现场是 1 个�
 
 def _parse_env(text: str) -> dict[str, str]:
     entries: dict[str, str] = {}
-    for line in text.splitlines():
-        line = line.strip()
+    for raw in text.splitlines():
+        line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")

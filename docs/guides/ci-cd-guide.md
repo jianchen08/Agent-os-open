@@ -288,9 +288,9 @@ markers = [
 ```python
 def test_example(log_collector):
     log_collector.start(min_level=logging.DEBUG)
-    
+
     # ... 被测逻辑 ...
-    
+
     result = log_collector.get_result()
     assert result.error_count == 0, result.format_errors()
     assert result.warning_count < 5
@@ -302,7 +302,7 @@ def test_example(log_collector):
 ```python
 def test_with_context(log_context):
     log_context.bind(request_id="test-req-123")
-    
+
     # ... 被测逻辑（日志中会携带 rid=test-req-123）...
 ```
 
@@ -611,11 +611,11 @@ pytest 启动
 def test_with_log_capture(log_collector):
     # 开始收集（可指定最低级别）
     log_collector.start(min_level=logging.DEBUG)
-    
+
     # ... 执行被测逻辑 ...
-    
+
     result = log_collector.get_result()
-    
+
     # 收集到的数据：
     # result.entries: list[LogEntry]  — 所有日志条目
     # result.error_count: int         — ERROR + CRITICAL 数量
@@ -623,7 +623,7 @@ def test_with_log_capture(log_collector):
     # result.errors(): list[LogEntry] — 仅 ERROR 及以上
     # result.warnings(): list[LogEntry] — 仅 WARNING
     # result.for_logger("src.pipeline") — 按 logger 前缀过滤
-    
+
     assert result.error_count == 0, result.format_errors()
 ```
 
@@ -961,13 +961,13 @@ import pytest
 def test_with_logs(log_collector):
     """测试功能并验证没有异常日志。"""
     log_collector.start(min_level=logging.WARNING)
-    
+
     # 执行被测逻辑
     result = some_function()
-    
+
     # 验证结果
     assert result.success
-    
+
     # 验证没有错误日志
     logs = log_collector.get_result()
     assert logs.error_count == 0, logs.format_errors()
@@ -983,7 +983,7 @@ def test_with_logs(log_collector):
 def test_with_context(log_context):
     """测试时绑定追踪字段。"""
     log_context.bind(request_id="test-123", task_id="task-456")
-    
+
     # 被测逻辑中的日志会携带 rid=test-123 tid=task-456
     result = pipeline_function()
     assert result.ok

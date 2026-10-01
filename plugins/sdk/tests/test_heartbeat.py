@@ -53,9 +53,7 @@ def test_heartbeat_line_format_contract() -> None:
     # 1000 量纲换算），偏差超 5s 即视为量纲/时钟源漂移。
     value = eval(expr, {"int": int, "_time": _time})  # noqa: S307 —— 表达式取自本仓被测源码
     assert isinstance(value, int), f"心跳插值须产出整型毫秒，实得 {type(value).__name__}"
-    assert abs(value - _time.time() * 1000) < 5_000, (
-        f"心跳插值须为当前 unix 毫秒，实得 {value!r}"
-    )
+    assert abs(value - _time.time() * 1000) < 5_000, f"心跳插值须为当前 unix 毫秒，实得 {value!r}"
     # 行帧与解析面性质：模板固定前缀 "#HB "、以 \n 结尾（内核按行读）；
     # 实例化后的行整体匹配内核解析面 `#HB <纯数字>`。
     assert template == f"#HB {{{expr}}}", f"#HB 前缀漂移：{template!r}"

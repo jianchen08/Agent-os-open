@@ -45,9 +45,7 @@ class ApprovalBot:
         try:
             self.client.respond_interaction(request_id, selected)
         except Exception as exc:  # noqa: BLE001 — 记账后继续收流（挂起超时会在报告暴露）
-            self.ledger["response_errors"].append(
-                {"request_id": request_id, "error": str(exc)}
-            )
+            self.ledger["response_errors"].append({"request_id": request_id, "error": str(exc)})
             logger.warning("[approval-bot] 响应提交失败 request_id=%s: %s", request_id, exc)
             return f"error: {exc}"
         if self.policy == "approve":

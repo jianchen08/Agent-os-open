@@ -45,9 +45,20 @@ EXEMPT_MARK = "config-write-surface-exempt:"
 
 # 目录/文件名排除：生成物、第三方 vendored、测试（测试允许造临时配置现场）
 EXCLUDE_DIR_NAMES = {
-    "__pycache__", ".venv", "venv", "node_modules", "runtime", ".git",
-    ".mypy_cache", ".pytest_cache", ".ruff_cache", "target", "dist", "build",
-    "htmlcov", ".wt-debug",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "node_modules",
+    "runtime",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "target",
+    "dist",
+    "build",
+    "htmlcov",
+    ".wt-debug",
 }
 EXCLUDE_DIR_PREFIXES = (".venv", ".wt-")
 EXCLude_test_re = re.compile(r"(^test_[^/\\]*\.py$|conftest\.py$)")
@@ -57,10 +68,7 @@ def iter_plugin_py_files(root: Path) -> list[Path]:
     """os.walk + 剪枝遍历（rglob 会先走完 .venv/node_modules 才过滤，慢到不可用）。"""
     files: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in EXCLUDE_DIR_NAMES and not d.startswith(EXCLUDE_DIR_PREFIXES)
-        ]
+        dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIR_NAMES and not d.startswith(EXCLUDE_DIR_PREFIXES)]
         for name in filenames:
             if not name.endswith(".py"):
                 continue

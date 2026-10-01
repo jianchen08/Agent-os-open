@@ -648,5 +648,3 @@ def test_regenerate_retired_gone_410(rp: Any) -> None:
     assert "收编" in body["error"]
 
 # ── 开演记录语义（轻改）────────────────────────────────────────────────────────────
-
-

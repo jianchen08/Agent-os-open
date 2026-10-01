@@ -34,7 +34,7 @@ import shutil
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -101,8 +101,8 @@ def deep_merge_config(
 def parse_env_text(text: str) -> dict[str, str]:
     """KEY=VALUE 行解析（首 个 = 切分；注释/空行跳过）。"""
     vars_: dict[str, str] = {}
-    for line in text.splitlines():
-        line = line.strip()
+    for raw in text.splitlines():
+        line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
@@ -147,9 +147,7 @@ class KernelClient:
 
     def _login(self, username: str, password: str) -> str:
         body = json.dumps({"username": username, "password": password}).encode()
-        req = urllib.request.Request(
-            f"{self.base}/api/v1/auth/login", data=body, method="POST"
-        )
+        req = urllib.request.Request(f"{self.base}/api/v1/auth/login", data=body, method="POST")
         req.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
@@ -189,7 +187,7 @@ class KernelClient:
 
 
 def _backup(path: Path) -> Path:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
     target = path.with_name(f"{path.name}.bak-migrate-{stamp}")
     shutil.copy2(path, target)
     return target
@@ -208,7 +206,11 @@ def main() -> int:
     parser.add_argument("--username", default="admin")
     parser.add_argument("--password", default=os.environ.get("AGENTOS_ADMIN_PASSWORD", ""))
     parser.add_argument("--factory-config", required=True, help="安装包 config 目录（resources/config）")
-    parser.add_argument("--user-config", default="", help="用户空间 config 目录（缺省 AGENTOS_USER_ROOT/config 或 %%APPDATA%%/agentos/config）")
+    parser.add_argument(
+        "--user-config",
+        default="",
+        help="用户空间 config 目录（缺省 AGENTOS_USER_ROOT/config 或 %%APPDATA%%/agentos/config）",
+    )
     parser.add_argument("--plugin", default="llm_service")
     parser.add_argument("--file-id", default="llm")
     parser.add_argument("--defaults-policy", choices=["factory", "user"], default="factory")
@@ -253,7 +255,9 @@ def main() -> int:
         merged, report = deep_merge_config(user_data, factory_data, args.defaults_policy)
         print(f"[merge] factory 独有 models: {report['factory_only_models'] or '无'}")
         print(f"[merge] factory 独有 providers: {report['factory_only_providers'] or '无'}")
-        print(f"[merge] 同名冲突（用户赢）models={report['conflict_models_user_won'] or '无'} providers={report['conflict_providers_user_won'] or '无'}")
+        print(
+            f"[merge] 同名冲突（用户赢）models={report['conflict_models_user_won'] or '无'} providers={report['conflict_providers_user_won'] or '无'}"
+        )
         print(f"[merge] defaults 取侧: {report['defaults_from']}（--defaults-policy={args.defaults_policy}）")
         print(f"[merge] factory 独有顶层键: {report['factory_only_top_keys'] or '无'}")
         if args.dry_run:

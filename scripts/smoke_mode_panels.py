@@ -122,8 +122,7 @@ def main() -> int:
         check(
             f"A 面板页 {path}",
             ok,
-            f"HTTP {status} {len(body)}B {elapsed:.0f}ms"
-            + ("" if ok else "（期望 200 且 <!DOCTYPE html> 开头）"),
+            f"HTTP {status} {len(body)}B {elapsed:.0f}ms" + ("" if ok else "（期望 200 且 <!DOCTYPE html> 开头）"),
         )
 
     # ── B 段：核心 GET 数据端点 ────────────────────────────────────────────────
@@ -145,9 +144,7 @@ def main() -> int:
     for plugin_id, suffix in WRITE_ACTIONS:
         path = f"/ext/{plugin_id}{suffix}"
         started = time.perf_counter()
-        status, body = _request(
-            base, "POST", path, token=token, body=b"{}", timeout=35.0
-        )
+        status, body = _request(base, "POST", path, token=token, body=b"{}", timeout=35.0)
         elapsed = (time.perf_counter() - started) * 1000
         try:
             payload = json.loads(body)

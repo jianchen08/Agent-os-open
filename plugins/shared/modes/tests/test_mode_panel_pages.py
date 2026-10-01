@@ -459,5 +459,3 @@ def test_live_roleplay_regenerate_retired_410() -> None:
     )
     assert _envelope_status(result) == 410
     assert "收编" in _body_json(result)["error"]
-
-

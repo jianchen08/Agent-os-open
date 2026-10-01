@@ -31,8 +31,9 @@ BASE = os.environ.get("AGENTOS_KERNEL_URL", "http://127.0.0.1:9100")
 MAIN_AGENT_HEADER = {"X-Main-Agent-Request": "true"}
 
 
-def _request(path: str, payload: dict | None, token: str | None = None,
-             method: str = "POST", timeout: int = 20) -> dict:
+def _request(
+    path: str, payload: dict | None, token: str | None = None, method: str = "POST", timeout: int = 20
+) -> dict:
     data = json.dumps(payload or {}).encode("utf-8")
     headers = {"Content-Type": "application/json", **MAIN_AGENT_HEADER}
     if token:
@@ -93,9 +94,7 @@ def check_state(token: str, pipeline_id: str) -> str:
     try:
         import sqlite3
 
-        conn = sqlite3.connect(
-            f"file:{Path(__file__).resolve().parent.parent / 'agentos_kernel.db'}?mode=ro", uri=True
-        )
+        conn = sqlite3.connect(f"file:{Path(__file__).resolve().parent.parent / 'agentos_kernel.db'}?mode=ro", uri=True)
         row = conn.execute(
             "SELECT status FROM runs WHERE pipeline_id=? ORDER BY created_at DESC LIMIT 1",
             (pipeline_id,),
@@ -155,9 +154,16 @@ def dispatch(token: str, thread_id: str, text: str, wait_seconds: int) -> None:
                 print(f"[frame] {ftype}: {json.dumps(frame, ensure_ascii=False)[:200]}")
 
 
-def dispatch_root_task(token: str, title: str, description: str, target_id: str,
-                       ac_marker: str, thread_id: str,
-                       ws_path: str = "", ws_mode: str = "") -> None:
+def dispatch_root_task(
+    token: str,
+    title: str,
+    description: str,
+    target_id: str,
+    ac_marker: str,
+    thread_id: str,
+    ws_path: str = "",
+    ws_mode: str = "",
+) -> None:
     """直派根任务（绕过 L1 会话链）：POST /ext/task_service/tasks/root。
 
     契约对齐 eval_harness/batch_run.py 与 tasks/http_api.py TaskRootCreate
@@ -171,8 +177,7 @@ def dispatch_root_task(token: str, title: str, description: str, target_id: str,
         "description": description,
         "target_id": target_id,
         "acceptance_criteria": {
-            "file_check": {"input_params": {"path": "report.md", "check": "contains",
-                                            "pattern": ac_marker}},
+            "file_check": {"input_params": {"path": "report.md", "check": "contains", "pattern": ac_marker}},
         },
         "thread_id": thread_id,
         "workspace": ws_path,
@@ -183,9 +188,17 @@ def dispatch_root_task(token: str, title: str, description: str, target_id: str,
     print(f"[ok] task_id={task_id} target={target_id} ws={ws_path or '(default)'}")
 
 
-def ws_drive_task(token: str, title: str, description: str, target_id: str,
-                  thread_id: str | None, ws_path: str, ws_mode: str,
-                  wait_seconds: int, steer: bool = True) -> str:
+def ws_drive_task(
+    token: str,
+    title: str,
+    description: str,
+    target_id: str,
+    thread_id: str | None,
+    ws_path: str,
+    ws_mode: str,
+    wait_seconds: int,
+    steer: bool = True,
+) -> str:
     """WS 直驱：建会话 → PATCH 绑定执行者 → user_input 带 execution_context。
 
     背景：直派与会话链都存在"首轮纯文本应答即终局"假绿（1 次 llm_call 后
@@ -197,8 +210,7 @@ def ws_drive_task(token: str, title: str, description: str, target_id: str,
             "【执行纪律（最高优先，先读这里）】本会话是任务执行会话，不是问答："
             "你的第一轮回复就必须调用工具（推荐先 list_directory 看仓库结构），"
             "之后每轮持续调用工具推进，直到产出交付物并 commit。"
-            "纯文本应答会立即触发管道终局——那等于任务失败。\n\n"
-            + description
+            "纯文本应答会立即触发管道终局——那等于任务失败。\n\n" + description
         )
     if thread_id:
         print(f"[ws] 复用线程 {thread_id}")
@@ -206,15 +218,16 @@ def ws_drive_task(token: str, title: str, description: str, target_id: str,
         data = _request("/api/v1/sessions", {"title": title, "intent": title}, token)
         thread_id = data.get("thread_id") or (data.get("data") or {}).get("thread_id")
         print(f"[ws] 建会话 {thread_id}")
-    _request(f"/api/v1/sessions/{thread_id}/agent", {"agent_id": target_id}, token,
-             method="PATCH")
+    if not thread_id:
+        raise SystemExit("[err] 建会话响应无 thread_id（无法进入 WS 投递）")
+    _request(f"/api/v1/sessions/{thread_id}/agent", {"agent_id": target_id}, token, method="PATCH")
     print(f"[ws] 绑定执行者 {target_id}")
 
     from websockets.sync.client import connect
 
     ticket = _request("/api/v1/ws-ticket", {}, token)["ticket"]
     ws_url = BASE.replace("http", "ws", 1) + f"/ws/chat?ticket={ticket}"
-    message = {
+    message: dict[str, object] = {
         "type": "user_input",
         "thread_id": thread_id,
         "content": description,
@@ -225,8 +238,7 @@ def ws_drive_task(token: str, title: str, description: str, target_id: str,
         "client_message_id": f"zcode-{int(time.time() * 1000)}",
     }
     if ws_path:
-        message["execution_context"] = {"workspace": {"source_path": ws_path,
-                                                      "mode": ws_mode or "plain"}}
+        message["execution_context"] = {"workspace": {"source_path": ws_path, "mode": ws_mode or "plain"}}
     with connect(ws_url, open_timeout=15) as ws:
         ws.send(json.dumps(message, ensure_ascii=False))
         print(f"[ws] 已投递（{len(description)} 字），等 {wait_seconds}s 观察受理帧")
@@ -265,18 +277,22 @@ def main() -> None:
     parser.add_argument("--task-thread", help="直派模式：任务挂靠 thread_id（合成 id 即可）")
     parser.add_argument("--ws-path", default="", help="直派模式：工作空间 source_path（写仓任务=仓库根）")
     parser.add_argument("--ws-mode", default="", help="直派模式：worktree/plain（写仓任务=plain）")
-    parser.add_argument("--ws-drive", action="store_true",
-                        help="WS 直驱模式：建会话+PATCH 绑执行者+user_input（绕开 tasks/root 直派缺陷）")
-    parser.add_argument("--check", metavar="PIPELINE_ID",
-                        help="状态门：查 task/run 状态并给 TERMINAL/ACTIONABLE 判定（动作前必过）")
+    parser.add_argument(
+        "--ws-drive",
+        action="store_true",
+        help="WS 直驱模式：建会话+PATCH 绑执行者+user_input（绕开 tasks/root 直派缺陷）",
+    )
+    parser.add_argument(
+        "--check", metavar="PIPELINE_ID", help="状态门：查 task/run 状态并给 TERMINAL/ACTIONABLE 判定（动作前必过）"
+    )
     args = parser.parse_args()
 
     try:
-        token = _request("/api/v1/auth/login",
-                         {"username": "admin", "password": load_password()})
+        token = _request("/api/v1/auth/login", {"username": "admin", "password": load_password()})
     except urllib.error.URLError as exc:
-        raise SystemExit(f"[err] 内核不可达（{BASE}）：{exc.reason}\n"
-                         "内核可能在重启/停止中——状态门与派发须等内核健康后执行")
+        raise SystemExit(
+            f"[err] 内核不可达（{BASE}）：{exc.reason}\n内核可能在重启/停止中——状态门与派发须等内核健康后执行"
+        ) from exc
     token = token["access_token"]
 
     if args.check:
@@ -295,14 +311,22 @@ def main() -> None:
         title = Path(args.task_file).stem
         desc = Path(args.task_file).read_text(encoding="utf-8")
         if args.ws_drive:
-            ws_drive_task(token, title, desc, args.target, args.task_thread,
-                          args.ws_path, args.ws_mode, args.wait_seconds)
+            ws_drive_task(
+                token, title, desc, args.target, args.task_thread, args.ws_path, args.ws_mode, args.wait_seconds
+            )
         else:
             if not args.task_thread:
                 raise SystemExit("[err] 直派模式需要 --task-thread")
-            dispatch_root_task(token, title, desc,
-                               args.target, args.ac_marker, args.task_thread,
-                               ws_path=args.ws_path, ws_mode=args.ws_mode)
+            dispatch_root_task(
+                token,
+                title,
+                desc,
+                args.target,
+                args.ac_marker,
+                args.task_thread,
+                ws_path=args.ws_path,
+                ws_mode=args.ws_mode,
+            )
         return
 
     if not args.thread:

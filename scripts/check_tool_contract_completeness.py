@@ -108,7 +108,9 @@ def main() -> int:
             print(f"  - {d}")
         return 1
     if miss_schema < base_schema or miss_render < base_render:
-        print(f"tool-contract: 通过（{miss_schema}/{miss_render} < 基线 {base_schema}/{base_render}，可 --init 收紧并 commit 留归因）。")
+        print(
+            f"tool-contract: 通过（{miss_schema}/{miss_render} < 基线 {base_schema}/{base_render}，可 --init 收紧并 commit 留归因）。"
+        )
     else:
         print(f"tool-contract: 通过（缺 output_schema {miss_schema} / 缺 render {miss_render}，= 基线）。")
     return 0

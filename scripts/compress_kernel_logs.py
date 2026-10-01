@@ -37,7 +37,7 @@ import dataclasses
 import gzip
 import re
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -63,7 +63,7 @@ def default_log_dirs() -> list[Path]:
 
 
 def today_utc() -> date:
-    return datetime.now(timezone.utc).date()
+    return datetime.now(UTC).date()
 
 
 def age_days(name_date: date, today: date) -> int:
@@ -79,10 +79,13 @@ def gzip_file(src: Path, dst_dir: Path) -> Path:
     tmp = dst_dir / (src.name + ".gz.tmp")
     original_size = src.stat().st_size
     try:
-        with open(src, "rb") as fin, open(tmp, "wb") as fout:
-            with gzip.GzipFile(filename=src.name, fileobj=fout, mode="wb") as gz:
-                while chunk := fin.read(1024 * 1024):
-                    gz.write(chunk)
+        with (
+            open(src, "rb") as fin,
+            open(tmp, "wb") as fout,
+            gzip.GzipFile(filename=src.name, fileobj=fout, mode="wb") as gz,
+        ):
+            while chunk := fin.read(1024 * 1024):
+                gz.write(chunk)
         # 读回校验：uncompressed 字节数与原文件一致才承认归档成立
         with gzip.open(tmp, "rb") as check:
             verified = sum(len(c) for c in iter(lambda: check.read(1024 * 1024), b""))
@@ -95,8 +98,7 @@ def gzip_file(src: Path, dst_dir: Path) -> Path:
     return dst
 
 
-def process_dir(log_dir: Path, today: date, compress_age: int, retain_days: int,
-                apply: bool, stats: Stats) -> None:
+def process_dir(log_dir: Path, today: date, compress_age: int, retain_days: int, apply: bool, stats: Stats) -> None:
     if not log_dir.is_dir():
         stats.failures.append((str(log_dir), "目录不存在"))
         return
@@ -177,12 +179,8 @@ def main() -> int:
         default=None,
         help="日志目录（可重复）；缺省扫仓库 logs/。装机版示例见文档",
     )
-    parser.add_argument(
-        "--compress-age-days", type=int, default=3, help="超过该天数（UTC 口径）才压缩"
-    )
-    parser.add_argument(
-        "--retain-days", type=int, default=30, help="归档 .gz 保留窗口（超龄删除）"
-    )
+    parser.add_argument("--compress-age-days", type=int, default=3, help="超过该天数（UTC 口径）才压缩")
+    parser.add_argument("--retain-days", type=int, default=30, help="归档 .gz 保留窗口（超龄删除）")
     parser.add_argument("--apply", action="store_true", help="执行变更（默认 dry-run）")
     args = parser.parse_args()
 
@@ -190,12 +188,10 @@ def main() -> int:
     today = today_utc()
     stats = Stats()
     for log_dir in dirs:
-        process_dir(log_dir, today, args.compress_age_days, args.retain_days,
-                    args.apply, stats)
+        process_dir(log_dir, today, args.compress_age_days, args.retain_days, args.apply, stats)
 
     mode = "APPLY" if args.apply else "DRY-RUN"
-    print(f"[{mode}] 压缩窗口 >{args.compress_age_days}d，归档保留 {args.retain_days}d"
-          f"（UTC 今日 {today.isoformat()}）")
+    print(f"[{mode}] 压缩窗口 >{args.compress_age_days}d，归档保留 {args.retain_days}d（UTC 今日 {today.isoformat()}）")
     for item in stats.compressed:
         print(f"  压缩: {item}")
     for item in stats.stale_archives:

@@ -53,9 +53,7 @@ def llm_model_ids(providers: list[str]) -> list[str]:
     data = yaml.safe_load((ROOT / "config" / "models" / "llm.yaml").read_text(encoding="utf-8"))
     models = data.get("models", {}) if isinstance(data, dict) else {}
     return sorted(
-        model_id
-        for model_id, conf in models.items()
-        if isinstance(conf, dict) and conf.get("provider") in providers
+        model_id for model_id, conf in models.items() if isinstance(conf, dict) and conf.get("provider") in providers
     )
 
 

@@ -100,8 +100,7 @@ def resolve_user_root(args_user_root: str | None) -> Path:
     for install_dir in _existing_install_dirs():
         if _is_under(root, install_dir):
             raise SystemExit(
-                f"[REFUSE] 目标 {root} 落在装机包安装目录 {install_dir} 内——"
-                "本脚本只写用户空间，绝不动装机包。"
+                f"[REFUSE] 目标 {root} 落在装机包安装目录 {install_dir} 内——本脚本只写用户空间，绝不动装机包。"
             )
     return root
 
@@ -175,16 +174,27 @@ def _provision_venv(src_plugin: Path, dst_plugin: Path, dry_run: bool) -> str:
         return "venv: [dry-run] uv venv + uv pip install -e plugins/sdk + 清单依赖"
     subprocess.run(
         ["uv", "venv", "--python", "3.12"],
-        cwd=dst_plugin, check=True, capture_output=True,
+        cwd=dst_plugin,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
-        ["uv", "pip", "install", "--python", str(dst_venv / "Scripts" / "python.exe"),
-         "-e", str(_REPO_ROOT / "plugins" / "sdk")],
-        check=True, capture_output=True,
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(dst_venv / "Scripts" / "python.exe"),
+            "-e",
+            str(_REPO_ROOT / "plugins" / "sdk"),
+        ],
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["uv", "pip", "install", "--python", str(dst_venv / "Scripts" / "python.exe"), "aiohttp"],
-        check=True, capture_output=True,
+        check=True,
+        capture_output=True,
     )
     return "venv: uv 现建（sdk editable + aiohttp）"
 
@@ -291,12 +301,15 @@ def main(argv: list[str] | None = None) -> int:
         description="开发侧一键更新装机版用户空间（插件/配置/宿主addon），不动装机包",
     )
     parser.add_argument("--user-root", help="装机版用户空间根（必填才可写，如 %%APPDATA%%\\agentos）")
-    parser.add_argument("--plugin", action="append", default=[],
-                        help="仓内插件目录（plugins/ 下相对路径），可多次")
-    parser.add_argument("--config", action="append", default=[],
-                        help="config/ 下相对路径单文件，可多次")
-    parser.add_argument("--skills", nargs="?", const=".", default=None,
-                        help="skills/ 下相对子路径镜像到 <user_root>/skills/（缺省值 . = 整库），可与其他动作并用")
+    parser.add_argument("--plugin", action="append", default=[], help="仓内插件目录（plugins/ 下相对路径），可多次")
+    parser.add_argument("--config", action="append", default=[], help="config/ 下相对路径单文件，可多次")
+    parser.add_argument(
+        "--skills",
+        nargs="?",
+        const=".",
+        default=None,
+        help="skills/ 下相对子路径镜像到 <user_root>/skills/（缺省值 . = 整库），可与其他动作并用",
+    )
     parser.add_argument("--addon", help="Godot 项目根（同步 hosts/godot-addons/agentos 到其 addons/）")
     parser.add_argument("--dry-run", action="store_true", help="只列计划不落盘")
     args = parser.parse_args(argv)

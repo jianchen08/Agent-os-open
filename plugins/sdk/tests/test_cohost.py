@@ -70,9 +70,5 @@ async def test_fan_out_isolates_member_failure(
     with caplog.at_level(logging.ERROR, logger="agentos_plugin_sdk.cohost"):
         await server._server._handle_notification("notifications/on_load", {})
 
-    assert received == ["healthy_first", "healthy_last"], (
-        "故障成员之后的成员 on_load 不得被饥饿"
-    )
-    assert any("broken" in rec.message for rec in caplog.records), (
-        "成员 handler 异常必须留痕（含成员标识）"
-    )
+    assert received == ["healthy_first", "healthy_last"], "故障成员之后的成员 on_load 不得被饥饿"
+    assert any("broken" in rec.message for rec in caplog.records), "成员 handler 异常必须留痕（含成员标识）"

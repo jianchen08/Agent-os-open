@@ -210,4 +210,3 @@ class ModelPromptAdapterPlugin(IInputPlugin):
                 continue
             out.append(msg)
         return out
-

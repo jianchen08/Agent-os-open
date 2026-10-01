@@ -42,6 +42,7 @@ import re
 import subprocess
 import sys
 import time
+from io import TextIOWrapper
 from pathlib import Path
 from typing import Any
 
@@ -103,8 +104,14 @@ def _judge(prev: dict[str, Any], now: float) -> tuple[str, str]:
 
 def _create_lock(path: Path, op: str, holder: str, lease_s: int, now: float) -> bool:
     """O_EXCL 原子建锁；已被并发抢占返回 False。"""
-    payload = {"op": op, "holder": holder, "pid": os.getpid(),
-               "started_at": round(now, 3), "heartbeat_at": round(now, 3), "lease_s": lease_s}
+    payload = {
+        "op": op,
+        "holder": holder,
+        "pid": os.getpid(),
+        "started_at": round(now, 3),
+        "heartbeat_at": round(now, 3),
+        "lease_s": lease_s,
+    }
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
@@ -132,10 +139,13 @@ def cmd_acquire(directory: Path, op: str, holder: str, lease_s: int, command: li
         else:
             verdict, why = _judge(prev, _now())
             if verdict == "held":
-                remain = float(prev.get("lease_s") or DEFAULT_LEASE_S) - (_now() - float(
-                    prev.get("heartbeat_at") or prev.get("started_at") or 0))
-                print(f"[ops-lock] 拒绝：op={op} 已被持有 holder={prev.get('holder')} "
-                      f"pid={prev.get('pid')} 剩余租约≈{max(0.0, remain):.0f}s")
+                remain = float(prev.get("lease_s") or DEFAULT_LEASE_S) - (
+                    _now() - float(prev.get("heartbeat_at") or prev.get("started_at") or 0)
+                )
+                print(
+                    f"[ops-lock] 拒绝：op={op} 已被持有 holder={prev.get('holder')} "
+                    f"pid={prev.get('pid')} 剩余租约≈{max(0.0, remain):.0f}s"
+                )
                 return 1
             # 抢占：删旧锁 → 原子重建 → 审计
             try:
@@ -171,8 +181,10 @@ def cmd_release(directory: Path, op: str, holder: str) -> int:
         print(f"[ops-lock] 释放失败：op={op} 无锁文件")
         return 1
     if prev.get("holder") != holder:
-        print(f"[ops-lock] 释放失败：op={op} 持有人是 {prev.get('holder')!r} 而非 {holder!r}"
-              "（比对 holder 身份防误删他人锁）")
+        print(
+            f"[ops-lock] 释放失败：op={op} 持有人是 {prev.get('holder')!r} 而非 {holder!r}"
+            "（比对 holder 身份防误删他人锁）"
+        )
         _audit(directory, "release-refused", op, holder=holder, owner=prev.get("holder"))
         return 1
     path.unlink()
@@ -199,33 +211,43 @@ def cmd_status(directory: Path, op: str | None) -> int:
             continue
         verdict, _why = _judge(prev, _now())
         if verdict == "held":
-            print(f"[ops-lock] op={one}: held holder={prev.get('holder')} pid={prev.get('pid')} "
-                  f"lease_s={prev.get('lease_s')} started={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(prev.get('started_at', 0)))}")
+            print(
+                f"[ops-lock] op={one}: held holder={prev.get('holder')} pid={prev.get('pid')} "
+                f"lease_s={prev.get('lease_s')} started={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(prev.get('started_at', 0)))}"
+            )
         else:
-            print(f"[ops-lock] op={one}: stale（{verdict}，可抢占）holder={prev.get('holder')} "
-                  f"pid={prev.get('pid')}")
+            print(f"[ops-lock] op={one}: stale（{verdict}，可抢占）holder={prev.get('holder')} pid={prev.get('pid')}")
     return 0
 
 
 def main() -> int:
-    sys.stdout.reconfigure(encoding="utf-8")
+    if isinstance(sys.stdout, TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="运维操作互斥锁（O_EXCL + PID 探活 + 租约抢占）")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     def common(p: argparse.ArgumentParser, *, need_op: bool) -> None:
-        p.add_argument("--op", required=need_op, metavar="NAME",
-                       help="操作名（[A-Za-z0-9._-] 1-64，锁文件 <op>.lock）" + ("" if need_op else "（缺省列全部锁）"))
+        p.add_argument(
+            "--op",
+            required=need_op,
+            metavar="NAME",
+            help="操作名（[A-Za-z0-9._-] 1-64，锁文件 <op>.lock）" + ("" if need_op else "（缺省列全部锁）"),
+        )
         p.add_argument("--lock-dir", default=None, help=f"锁目录（默认 {_REPO_DEFAULT / '.zctmp' / 'ops'}）")
 
-    p_acq = sub.add_parser("acquire", help="取锁（活锁被拒 exit 1；死锁/过期锁抢占）；"
-                            "带 `-- 命令` 时锁 pid 挂子进程并自动 release")
+    p_acq = sub.add_parser(
+        "acquire", help="取锁（活锁被拒 exit 1；死锁/过期锁抢占）；带 `-- 命令` 时锁 pid 挂子进程并自动 release"
+    )
     common(p_acq, need_op=True)
-    p_acq.add_argument("--holder", default=os.environ.get("USERNAME") or "unknown",
-                       help="持锁者身份（release 比对用，默认环境变量 USERNAME）")
-    p_acq.add_argument("--lease", type=int, default=DEFAULT_LEASE_S,
-                       help=f"租约秒数（默认 {DEFAULT_LEASE_S}）")
-    p_acq.add_argument("command", nargs="*", metavar="CMD",
-                       help="带命令形态：`-- <命令> [参数...]`，取锁后执行、结束自动 release")
+    p_acq.add_argument(
+        "--holder",
+        default=os.environ.get("USERNAME") or "unknown",
+        help="持锁者身份（release 比对用，默认环境变量 USERNAME）",
+    )
+    p_acq.add_argument("--lease", type=int, default=DEFAULT_LEASE_S, help=f"租约秒数（默认 {DEFAULT_LEASE_S}）")
+    p_acq.add_argument(
+        "command", nargs="*", metavar="CMD", help="带命令形态：`-- <命令> [参数...]`，取锁后执行、结束自动 release"
+    )
 
     p_rel = sub.add_parser("release", help="释放（仅持有人）")
     common(p_rel, need_op=True)
@@ -240,12 +262,16 @@ def main() -> int:
     if op is not None and not _OP_RE.match(op):
         print(f"[ops-lock] 非法操作名 {op!r}（须匹配 {_OP_RE.pattern}）")
         return 1
+    if args.cmd in ("acquire", "release") and op is None:
+        print("[ops-lock] acquire/release 需要 --op（互斥粒度）")
+        return 1
+    op_name = str(op) if op is not None else ""
     directory.mkdir(parents=True, exist_ok=True)
 
     if args.cmd == "acquire":
-        return cmd_acquire(directory, op, args.holder, args.lease, list(args.command))
+        return cmd_acquire(directory, op_name, args.holder, args.lease, list(args.command))
     if args.cmd == "release":
-        return cmd_release(directory, op, args.holder)
+        return cmd_release(directory, op_name, args.holder)
     return cmd_status(directory, op)
 
 

@@ -197,12 +197,11 @@ async def test_reload_request_invokes_handler_and_swaps() -> None:
 
 async def test_reload_request_unknown_member_raises() -> None:
     """未知成员：处理器抛错（协议错误应答），内核据此回退 force_unload。"""
+
     async def fake_loader(plugin_id: str) -> AgentOSPlugin:
         raise AssertionError("未知成员不得触发加载")
 
-    server = CohostServer(
-        {"a": _plugin_with_tool("a", "probe", "v1")}, reload_handler=fake_loader
-    )
+    server = CohostServer({"a": _plugin_with_tool("a", "probe", "v1")}, reload_handler=fake_loader)
     handler = _sdk_handler(server)
     with pytest.raises(ValueError):
         await handler(_FakeCtx({"plugin_id": "ghost"}), None)
@@ -210,12 +209,11 @@ async def test_reload_request_unknown_member_raises() -> None:
 
 async def test_reload_request_missing_plugin_id_raises() -> None:
     """缺 plugin_id：处理器抛错（fail-closed，不猜目标）。"""
+
     async def fake_loader(plugin_id: str) -> AgentOSPlugin:
         raise AssertionError("缺参不得触发加载")
 
-    server = CohostServer(
-        {"a": _plugin_with_tool("a", "probe", "v1")}, reload_handler=fake_loader
-    )
+    server = CohostServer({"a": _plugin_with_tool("a", "probe", "v1")}, reload_handler=fake_loader)
     handler = _sdk_handler(server)
     with pytest.raises(ValueError):
         await handler(_FakeCtx({}), None)

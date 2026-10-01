@@ -21,6 +21,7 @@
 用法：python scripts/check_mode_registry_parity.py [--modes-dir PATH]
 默认仓根相对路径；CI 挂 python-lint 车道同源运行环境（仅标准库 + PyYAML）。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -39,11 +40,24 @@ _MODE_DECL_ENUMS = {
     "pipeline_source": {"registry"},
 }
 _MODE_DECL_KNOWN = {
-    "mode", "name", "description", "pipelines", "panel_page_id",
-    "presenter", "tool_card", "material", "persona",
-    "theme", "icon",
-    "chain", "suite", "material_scope",
-    "levers", "verifier_families", "weights", "budget",
+    "mode",
+    "name",
+    "description",
+    "pipelines",
+    "panel_page_id",
+    "presenter",
+    "tool_card",
+    "material",
+    "persona",
+    "theme",
+    "icon",
+    "chain",
+    "suite",
+    "material_scope",
+    "levers",
+    "verifier_families",
+    "weights",
+    "budget",
 }
 _PIPELINE_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 
@@ -92,18 +106,15 @@ def validate_declaration(data: object) -> str:
                 return f"pipelines[].source 须为 registry: {source!r}"
     presenter = data.get("presenter")
     if presenter is not None and (
-        not isinstance(presenter, dict)
-        or presenter.get("source") not in _MODE_DECL_ENUMS["presenter_source"]
+        not isinstance(presenter, dict) or presenter.get("source") not in _MODE_DECL_ENUMS["presenter_source"]
     ):
-        return f"presenter.source 枚举非法"
+        return "presenter.source 枚举非法"
     tool_card = data.get("tool_card")
     if tool_card is not None and tool_card not in _MODE_DECL_ENUMS["tool_card"]:
         return "tool_card 枚举非法"
     persona = data.get("persona")
     if persona is not None and (
-        not isinstance(persona, dict)
-        or not isinstance(persona.get("from"), str)
-        or not persona.get("from", "").strip()
+        not isinstance(persona, dict) or not isinstance(persona.get("from"), str) or not persona.get("from", "").strip()
     ):
         return "persona 须为 {replace: bool, from: <execution_context 键>}"
     for key in ("theme", "icon"):
@@ -158,24 +169,18 @@ def main() -> int:
                     except OSError as exc:
                         errors.append(f"{pkg.name}: agent 文件不可读（{exc}）")
             for skill in sorted((pkg / "skills").iterdir()):
-                if (
-                    skill.is_dir()
-                    and (skill / "SKILL.md").is_file()
-                    and skill.name not in agents_text
-                ):
-                    errors.append(
-                        f"{pkg.name}: 技能 {skill.name} 存在但未被包内 agents 提示词引用（孤儿技能）"
-                    )
+                if skill.is_dir() and (skill / "SKILL.md").is_file() and skill.name not in agents_text:
+                    errors.append(f"{pkg.name}: 技能 {skill.name} 存在但未被包内 agents 提示词引用（孤儿技能）")
 
     # 豁免台账外的运行时声明字段须有消费佐证（评估域字段豁免于 eval_harness 消费）
     runtime_fields = {"pipelines", "panel_page_id", "presenter", "material", "icon", "theme"}
     consumed = {
-        "pipelines": True,    # mode.list 目录路由渲染（按 context 分组）+ 前端 modeBinding 会话路由
-        "panel_page_id": True, # 前端 modePanel（contributes.pages 声明驱动同义）
-        "presenter": True,     # 前端 presenterSourcesFromModes
-        "material": True,      # mode_material_inject._read_material_decl
-        "icon": True,          # 前端选择器选项/模式徽标（taskModeOptionsFromModes/modePanel，批 G⑦ 起消费）
-        "theme": True,         # 前端模式主题通道（modeSessionBinder ensureModeTheme/sync，批 G⑤ 起消费；零包声明防空转不改）
+        "pipelines": True,  # mode.list 目录路由渲染（按 context 分组）+ 前端 modeBinding 会话路由
+        "panel_page_id": True,  # 前端 modePanel（contributes.pages 声明驱动同义）
+        "presenter": True,  # 前端 presenterSourcesFromModes
+        "material": True,  # mode_material_inject._read_material_decl
+        "icon": True,  # 前端选择器选项/模式徽标（taskModeOptionsFromModes/modePanel，批 G⑦ 起消费）
+        "theme": True,  # 前端模式主题通道（modeSessionBinder ensureModeTheme/sync，批 G⑤ 起消费；零包声明防空转不改）
     }
     for key, data in mode_keys.items():
         for field in runtime_fields:

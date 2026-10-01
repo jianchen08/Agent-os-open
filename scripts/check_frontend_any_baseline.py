@@ -62,8 +62,8 @@ def read_any_baseline(path: Path) -> int:
     """读 any 基线（`frontend_any=N` 行）。基线缺失 = 度量链断裂，fail-loud。"""
     if not path.exists():
         raise RuntimeError(f"any 基线文件缺失：{path}（护栏被绕开即失效，拒绝放行）")
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
         if line.startswith("frontend_any="):
             return int(line.split("=", 1)[1])
     raise RuntimeError(f"any 基线文件无 frontend_any= 行：{path}")
@@ -74,8 +74,8 @@ def read_large_files_baseline(path: Path) -> dict[str, int]:
     if not path.exists():
         raise RuntimeError(f"大文件冻结基线缺失：{path}（护栏被绕开即失效，拒绝放行）")
     frozen: dict[str, int] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
         if not line or line.startswith("#"):
             continue
         rel, _, n = line.rpartition(" ")
@@ -160,11 +160,7 @@ def write_baselines(scan_dir: Path, any_file: Path, large_file: Path) -> None:
         lines = count_lines(p)
         if lines > LINE_LIMIT:
             frozen[p.relative_to(ROOT).as_posix()] = lines
-    raised = {
-        rel: lines
-        for rel, lines in frozen.items()
-        if rel in old_frozen and lines > old_frozen[rel]
-    }
+    raised = {rel: lines for rel, lines in frozen.items() if rel in old_frozen and lines > old_frozen[rel]}
     if raised:
         for rel, lines in raised.items():
             print(f"❌ --init 拒绝放宽冻结上限：{rel} {old_frozen[rel]} → {lines}（冻结不可逆）")

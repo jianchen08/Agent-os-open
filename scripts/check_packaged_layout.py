@@ -116,7 +116,8 @@ def pyproject_dep_names(plugin_dir: Path) -> set[str]:
     try:
         import tomllib
 
-        data = tomllib.load(open(pp, "rb"))
+        with open(pp, "rb") as fh:
+            data = tomllib.load(fh)
     except (OSError, tomllib.TOMLDecodeError):
         return set()
     deps = data.get("project", {}).get("dependencies", []) or []
@@ -173,9 +174,7 @@ def check_host_venv_deps(shared: Path, host_venv: Path) -> list[Finding]:
         return findings
     for rel, plugin_dir in members:
         missing = sorted(
-            name
-            for name in pyproject_dep_names(plugin_dir)
-            if name not in installed and name not in EDITABLE_DEPS
+            name for name in pyproject_dep_names(plugin_dir) if name not in installed and name not in EDITABLE_DEPS
         )
         if missing:
             findings.append(
@@ -195,11 +194,7 @@ def check_resources(root: Path) -> list[Finding]:
     findings: list[Finding] = []
     shared = root / SHARED_REL
     if not shared.is_dir():
-        return [
-            Finding(
-                "error", "SHARED_DIR_MISSING", str(shared), "打包资源缺 plugins/shared"
-            )
-        ]
+        return [Finding("error", "SHARED_DIR_MISSING", str(shared), "打包资源缺 plugins/shared")]
 
     # 1/2. 共享合宿基座 + 共享 venv 解释器
     host_dir = root / HOST_DIR_REL
@@ -210,8 +205,7 @@ def check_resources(root: Path) -> list[Finding]:
                     "error",
                     "HOST_BASE_MISSING",
                     str(host_dir / name),
-                    "合宿基座文件缺失——host.py 由宿主侧任务承载，缺它则 "
-                    "light 合宿宿主无法 spawn（连带全部内置模式包）",
+                    "合宿基座文件缺失——host.py 由宿主侧任务承载，缺它则 light 合宿宿主无法 spawn（连带全部内置模式包）",
                 )
             )
     host_venv = host_dir / ".venv"
@@ -267,8 +261,7 @@ def check_resources(root: Path) -> list[Finding]:
                             "info",
                             "INDEPENDENT_VENV_PRESENT",
                             str(venv),
-                            "independent 类插件真实 .venv（合法：与共享环境同卷"
-                            "硬链接或装机自愈重建所得）",
+                            "independent 类插件真实 .venv（合法：与共享环境同卷硬链接或装机自愈重建所得）",
                         )
                     )
             # 残留半成品 venv（.venv-*）同口径检查

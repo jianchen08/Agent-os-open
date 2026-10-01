@@ -119,6 +119,7 @@ STANDARD_CAPABILITIES = [
     "frontend",
 ]
 
+
 # capability_caller 约定：接收**完整** wire method（如 ``tool-executor.invoke``）
 # 或短方法名均可（见 bind_capability_caller 的前缀剥离）；timeout 可选，
 # 传 None = SDK 默认 30s。
@@ -152,7 +153,7 @@ def bind_capability_caller(handle: CapabilityHandle, cap_name: str) -> Capabilit
     prefix = f"{cap_name}."
 
     async def _call(method: str, params: dict[str, Any], timeout: float | None = None) -> Any:
-        stripped = method[len(prefix):] if method.startswith(prefix) else method
+        stripped = method[len(prefix) :] if method.startswith(prefix) else method
         return await handle.call(stripped, params, timeout)
 
     return _call

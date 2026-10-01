@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from io import TextIOWrapper
 from pathlib import Path
 
 _REPO_DEFAULT = Path(__file__).resolve().parents[1]
@@ -65,10 +66,12 @@ def _warn_banner() -> None:
 
 
 def main() -> int:
-    sys.stdout.reconfigure(encoding="utf-8")
+    if isinstance(sys.stdout, TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="打包前脏树检查（A2 止血闸）")
-    parser.add_argument("--allow-dirty", action="store_true",
-                        help="逃生口：放行脏树但产物带 unverified 语义（测试包专用）")
+    parser.add_argument(
+        "--allow-dirty", action="store_true", help="逃生口：放行脏树但产物带 unverified 语义（测试包专用）"
+    )
     parser.add_argument("--repo", type=Path, default=_REPO_DEFAULT, help="仓库根（默认脚本所在仓）")
     args = parser.parse_args()
 

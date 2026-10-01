@@ -224,10 +224,7 @@ class CohostServer:
         if plugin_id not in self._members:
             raise ValueError(f"unload_member: unknown member: {plugin_id}")
         if len(self._members) <= 1:
-            raise ValueError(
-                "unload_member: refusing to unload the last member "
-                "(kernel must use whole-host unload)"
-            )
+            raise ValueError("unload_member: refusing to unload the last member (kernel must use whole-host unload)")
         await self._dispatch_member_unload(plugin_id)
         del self._members[plugin_id]
         # 子集聚合不可能产生新重名（原表合法的子集），聚合期异常在此不可达。

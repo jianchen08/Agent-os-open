@@ -117,20 +117,13 @@ def find_test_files() -> list[Path]:
     files: list[Path] = []
 
     def excluded(p: Path) -> bool:
-        return any(
-            part in EXCLUDE_DIRS or part.startswith(EXCLUDE_DIR_PREFIXES)
-            for part in p.parts
-        )
+        return any(part in EXCLUDE_DIRS or part.startswith(EXCLUDE_DIR_PREFIXES) for part in p.parts)
 
     def iter_pruned(root: Path):
         """带剪枝的递归文件枚举——`rglob` 会钻进 dsh_adapter 的递归 node_modules
         无限卡死；此处遍历时即剪枝 EXCLUDE_DIRS。"""
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [
-                d
-                for d in dirnames
-                if d not in EXCLUDE_DIRS and not d.startswith(EXCLUDE_DIR_PREFIXES)
-            ]
+            dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS and not d.startswith(EXCLUDE_DIR_PREFIXES)]
             for fn in filenames:
                 yield Path(dirpath) / fn
 

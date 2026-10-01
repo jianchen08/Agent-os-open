@@ -207,9 +207,7 @@ def _legacy_plugin_plan(
     return moves, skipped_existing, skipped_links
 
 
-def _migrate_plugin_dirs(
-    moves: list[tuple[str, Path, Path]], user_plugins_dir: Path
-) -> None:
+def _migrate_plugin_dirs(moves: list[tuple[str, Path, Path]], user_plugins_dir: Path) -> None:
     """执行插件目录迁移并输出迁移前后清单核验对比。
 
     moves 由 ``_legacy_plugin_plan`` 产出——目标必不存在（已有同名目录在计划期
@@ -258,11 +256,7 @@ def _backfill_ownership(user_root: Path, config_rels: list[str], dry_run: bool) 
                 file=sys.stderr,
             )
             return
-    known = {
-        str(e.get("path")).replace("\\", "/")
-        for e in entries
-        if isinstance(e, dict) and e.get("path")
-    }
+    known = {str(e.get("path")).replace("\\", "/") for e in entries if isinstance(e, dict) and e.get("path")}
 
     def _factory_sha(rel: str) -> str | None:
         try:
@@ -292,9 +286,7 @@ def _backfill_ownership(user_root: Path, config_rels: list[str], dry_run: bool) 
         )
         added += 1
         if dry_run:
-            print(
-                f"  [登记] {rel_norm}（基线 sha256={'有' if sha else '未知，漂移提示将为弱提示'}）"
-            )
+            print(f"  [登记] {rel_norm}（基线 sha256={'有' if sha else '未知，漂移提示将为弱提示'}）")
 
     if dry_run or added == 0:
         return
@@ -351,10 +343,7 @@ def main() -> int:
             if plugin_existing:
                 print(f"  已存在跳过 {len(plugin_existing)} 个：{', '.join(plugin_existing)}")
             if plugin_links:
-                print(
-                    f"  跳过链接项 {len(plugin_links)} 个（junction/symlink 不随迁）："
-                    f"{', '.join(plugin_links)}"
-                )
+                print(f"  跳过链接项 {len(plugin_links)} 个（junction/symlink 不随迁）：{', '.join(plugin_links)}")
         config_rels = [r for r in (_config_rel_of(src) for _, src, _ in moves) if r]
         if config_rels:
             print(f"\n[migrate] 迁移后将补接管登记 {len(config_rels)} 条（ADR 2026-09-14）：")
@@ -390,10 +379,7 @@ def main() -> int:
 
     if plugin_moves:
         print()
-        print(
-            f"[migrate] 用户插件迁移：{len(plugin_moves)} 个目录"
-            f"（源 {plugin_src}，已有同名不覆盖）"
-        )
+        print(f"[migrate] 用户插件迁移：{len(plugin_moves)} 个目录（源 {plugin_src}，已有同名不覆盖）")
         _migrate_plugin_dirs(plugin_moves, user_plugins_dir)
         print(f"[migrate] 旧插件目录已保留（未删除）：{plugin_src}")
 

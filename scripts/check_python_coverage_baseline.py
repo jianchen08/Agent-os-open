@@ -144,10 +144,7 @@ def main() -> int:
     # 达不到正是当年 --skip 的成因）；收紧 = --init 手动 + commit 归因。
     suggested = next_pressure_line(pct)
     if suggested != baseline:
-        print(
-            f"[python-cov] 💡 可收紧：--init 锚定实测（建议下一压力线 {suggested:.2f}%），"
-            "基线改动走 commit 留归因。"
-        )
+        print(f"[python-cov] 💡 可收紧：--init 锚定实测（建议下一压力线 {suggested:.2f}%），基线改动走 commit 留归因。")
     return 0
 
 

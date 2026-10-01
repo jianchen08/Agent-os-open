@@ -207,11 +207,7 @@ def main() -> int:
             if not (plugin_dir / "plugin.json").exists():
                 continue
             cls = classify(plugin_dir, shared)
-            over_deps = (
-                sorted(pyproject_dep_names(plugin_dir) - set(shared))
-                if cls == "light"
-                else []
-            )
+            over_deps = sorted(pyproject_dep_names(plugin_dir) - set(shared)) if cls == "light" else []
             venv_path = plugin_dir / ".venv"
             rows.append(
                 Row(
@@ -244,15 +240,22 @@ def main() -> int:
                 make_link(plugin_dir, actions, warnings)
             elif row.cls == "independent" and row.venv == "junction":
                 venv.unlink()
-                warnings.append(
-                    f"依赖已超出共享环境，junction摘除，请回独立环境: uv sync --project {row.dir}"
-                )
+                warnings.append(f"依赖已超出共享环境，junction摘除，请回独立环境: uv sync --project {row.dir}")
 
-    freed = sum(
-        r.size_mb for r in rows if r.cls in ("light", "linkable") and r.venv == "real"
-    )
+    freed = sum(r.size_mb for r in rows if r.cls in ("light", "linkable") and r.venv == "real")
     if args.json:
-        print(json.dumps({"rows": [dataclasses.asdict(r) for r in rows], "actions": actions, "warnings": warnings, "freed_mb": freed}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {
+                    "rows": [dataclasses.asdict(r) for r in rows],
+                    "actions": actions,
+                    "warnings": warnings,
+                    "freed_mb": freed,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     else:
         by_class: dict[str, int] = {}
         for r in rows:

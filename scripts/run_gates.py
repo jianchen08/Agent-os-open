@@ -375,7 +375,7 @@ GATES: list[Gate] = [
             + ' 2>&1 || true ) | tee "$T"; '
             'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage --from-file "$T" '
             # D1 拍板（2026-09-24）：整体基线 100.00→90.0 并摘除 --skip 恢复执法
-            #（插桩基集实测 ~98.5 绿）；旧挂起理由（Windows/Linux 恒差 vs 100
+            # （插桩基集实测 ~98.5 绿）；旧挂起理由（Windows/Linux 恒差 vs 100
             # 压力线）随 90 目标口径失效。
             "&& python scripts/check_python_coverage_baseline.py"
         ),
@@ -590,7 +590,7 @@ GATES: list[Gate] = [
             # Windows（Git Bash）下 kill npm 收不到 node 孙进程，残留监听会让
             # 下轮 strictPort 起不来——起服前按端口清残留（仅 MINGW/MSYS 分支，
             # Linux CI 无此问题走原路径）。
-            "  case \"$(uname -s)\" in MINGW*|MSYS*|CYGWIN*)\n"
+            '  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*)\n'
             "    for pid in $(netstat -ano | grep ':5188' | grep -i listen | awk '{print $NF}' | sort -u); do\n"
             "      taskkill //F //PID $pid >/dev/null 2>&1 || true\n"
             "    done ;;\n"
@@ -603,7 +603,7 @@ GATES: list[Gate] = [
             "  npx playwright test e2e/specs/ci-smoke.spec.ts e2e/specs/design_tokens.spec.ts\n"
             "  RC=$?\n"
             "  kill $PREVIEW_PID || true\n"
-            "  case \"$(uname -s)\" in MINGW*|MSYS*|CYGWIN*)\n"
+            '  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*)\n'
             "    for pid in $(netstat -ano | grep ':5188' | grep -i listen | awk '{print $NF}' | sort -u); do\n"
             "      taskkill //F //PID $pid >/dev/null 2>&1 || true\n"
             "    done ;;\n"

@@ -26,6 +26,7 @@ ci.yml 引用——未接线时红在自己身上。
     python scripts/check_gate_wiring.py            # 八项校验
     python scripts/check_gate_wiring.py --init     # 打印当前基线值（供收紧）
 """
+
 from __future__ import annotations
 
 import argparse
@@ -169,11 +170,7 @@ def v5_fast_budget(gates: list[dict]) -> list[str]:
 def _ledger_files(tracked: list[str]) -> list[str]:
     """基线账本族 = 文件名含 baseline 且为 .txt/.json（检查器/测试/文档的
     .py/.md/.yaml 不算账本——首跑实证误报 lint-baseline.md 等同名词面）。"""
-    return [
-        p
-        for p in tracked
-        if "baseline" in p.rsplit("/", 1)[-1] and p.rsplit(".", 1)[-1] in ("txt", "json")
-    ]
+    return [p for p in tracked if "baseline" in p.rsplit("/", 1)[-1] and p.rsplit(".", 1)[-1] in ("txt", "json")]
 
 
 def v6_files(tracked: list[str]) -> list[str]:
@@ -187,9 +184,7 @@ def v6_files(tracked: list[str]) -> list[str]:
     return out
 
 
-def v7_orphan_baseline(
-    gates: list[dict], tracked: list[str], workflow_texts: dict[str, str]
-) -> list[str]:
+def v7_orphan_baseline(gates: list[dict], tracked: list[str], workflow_texts: dict[str, str]) -> list[str]:
     baseline_files = _ledger_files(tracked)
     gate_cmds = [g.get("command", "") for g in gates]
     # 两跳链：gate 命令引用的 scripts 检查器，其源码消费基线
@@ -206,9 +201,7 @@ def v7_orphan_baseline(
     for p in sorted(baseline_files):
         name = p.rsplit("/", 1)[-1]
         consumed = (
-            any(name in cmd for cmd in gate_cmds)
-            or any(name in src for src in script_sources)
-            or (name in wf_text)
+            any(name in cmd for cmd in gate_cmds) or any(name in src for src in script_sources) or (name in wf_text)
         )
         if not consumed:
             out.append(f"V7 基线文件无消费方（孤儿账本）: {p}")
@@ -277,8 +270,10 @@ def run_all() -> tuple[list[str], list[str]]:
     for g in gates:
         ok = "✓" if (g["wiring"] != "ci" or g["id"] in referenced) else "✗"
         table.append(f"{g['id']:<28} {g['wiring']:<12} {ok}")
-    table.append(f"fast 估时 {sum(g['est_seconds'] or 0 for g in gates if g['fast'])}s / {FAST_BUDGET_SECONDS}s；"
-                 f"missing 能力 {sum(1 for r in rows if r['status'] == 'missing')}")
+    table.append(
+        f"fast 估时 {sum(g['est_seconds'] or 0 for g in gates if g['fast'])}s / {FAST_BUDGET_SECONDS}s；"
+        f"missing 能力 {sum(1 for r in rows if r['status'] == 'missing')}"
+    )
     return violations, table
 
 

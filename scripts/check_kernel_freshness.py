@@ -29,6 +29,7 @@ import argparse
 import subprocess
 import sys
 import time
+from io import TextIOWrapper
 from pathlib import Path
 
 _REPO_DEFAULT = Path(__file__).resolve().parents[1]
@@ -52,7 +53,8 @@ def _fmt_ts(epoch_s: float) -> str:
 
 
 def main() -> int:
-    sys.stdout.reconfigure(encoding="utf-8")
+    if isinstance(sys.stdout, TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="打包前置内核新鲜度校验（A1 阶段一判据）")
     parser.add_argument(
         "--exe",

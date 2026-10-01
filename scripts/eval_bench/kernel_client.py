@@ -11,10 +11,10 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
-import urllib.request
 
 import websockets
 
@@ -29,14 +29,12 @@ _TRANSIENT_RETRIES = 3
 _TRANSIENT_BACKOFF = 5.0
 
 
-def _http_json(method: str, url: str, body: dict | None = None, token: str | None = None,
-               timeout: float = 30) -> Any:
+def _http_json(method: str, url: str, body: dict | None = None, token: str | None = None, timeout: float = 30) -> Any:
     """发起 HTTP 请求并解析 JSON；非 2xx 抛 KernelClientError（带响应体摘要）。"""
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    last_error: Exception | None = None
     for attempt in range(_TRANSIENT_RETRIES + 1):
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
@@ -46,14 +44,12 @@ def _http_json(method: str, url: str, body: dict | None = None, token: str | Non
             detail = exc.read().decode("utf-8", errors="replace")[:300]
             err = KernelClientError(f"{method} {url} -> {exc.code}: {detail}")
             if exc.code >= 500 and attempt < _TRANSIENT_RETRIES:
-                last_error = err
                 time.sleep(_TRANSIENT_BACKOFF * (attempt + 1))
                 continue
             raise err from exc
         except urllib.error.URLError as exc:
             err = KernelClientError(f"无法连接 {url}: {exc}")
             if attempt < _TRANSIENT_RETRIES:
-                last_error = err
                 time.sleep(_TRANSIENT_BACKOFF * (attempt + 1))
                 continue
             raise err from exc
@@ -78,8 +74,7 @@ class KernelClient:
         self.token = token
         self._credentials: tuple[str, str] | None = None  # (username, password)
 
-    def _authed_json(self, method: str, url: str, body: dict | None = None,
-                     timeout: float = 30) -> Any:
+    def _authed_json(self, method: str, url: str, body: dict | None = None, timeout: float = 30) -> Any:
         """带令牌过期的自动续期：401 → re-login → 重放一次（长评测 > token TTL）。"""
         try:
             return _http_json(method, url, body, token=self.token, timeout=timeout)
@@ -92,8 +87,7 @@ class KernelClient:
     # ── 鉴权与会话 ──────────────────────────────────────────────
 
     def login(self, username: str, password: str) -> str:
-        body = _http_json("POST", f"{self.base_url}/api/v1/auth/login",
-                          {"username": username, "password": password})
+        body = _http_json("POST", f"{self.base_url}/api/v1/auth/login", {"username": username, "password": password})
         token = body.get("access_token")
         if not token:
             raise KernelClientError(f"登录响应缺少 access_token: {body}")
@@ -102,8 +96,7 @@ class KernelClient:
         return token
 
     def create_session(self, title: str) -> dict[str, Any]:
-        body = self._authed_json("POST", f"{self.base_url}/api/v1/sessions",
-                                 {"title": title})
+        body = self._authed_json("POST", f"{self.base_url}/api/v1/sessions", {"title": title})
         if not body.get("thread_id"):
             raise KernelClientError(f"创建会话响应缺少 thread_id: {body}")
         return body
@@ -119,8 +112,7 @@ class KernelClient:
         from urllib.parse import urlencode
 
         qs = urlencode({"pipeline_id": pipeline_id})
-        return self._authed_json("GET",
-                                 f"{self.base_url}/ext/monitoring/pipeline-state?{qs}")
+        return self._authed_json("GET", f"{self.base_url}/ext/monitoring/pipeline-state?{qs}")
 
     def get_traces(self, pipeline_id: str, limit: int = 500) -> dict[str, Any]:
         from urllib.parse import urlencode
@@ -140,8 +132,7 @@ class KernelClient:
 
         真实信封形态：``{has_more, messages: [...]}``（兼容 items 兜底）。
         """
-        body = self._authed_json("GET",
-                                 f"{self.base_url}/api/v1/sessions/{session_id}/messages")
+        body = self._authed_json("GET", f"{self.base_url}/api/v1/sessions/{session_id}/messages")
         items = None
         if isinstance(body, dict):
             items = body.get("messages") or body.get("items")
@@ -175,16 +166,15 @@ class KernelClient:
         defaults = data.get("defaults") or {}
         defaults["chat"] = model
         data["defaults"] = defaults
-        return self._authed_json("PUT", detail_url,
-                                 {"data": data, "if_match": current.get("etag")})
+        return self._authed_json("PUT", detail_url, {"data": data, "if_match": current.get("etag")})
 
     # ── 审批响应（与前端同一条道：内核 interaction 门面） ────────
 
     def respond_interaction(self, request_id: str, selected_option: str) -> dict[str, Any]:
         return self._authed_json(
-            "POST", f"{self.base_url}/api/v1/interaction/response",
-            {"request_id": request_id, "response_type": "answered",
-             "selected_option": selected_option},
+            "POST",
+            f"{self.base_url}/api/v1/interaction/response",
+            {"request_id": request_id, "response_type": "answered", "selected_option": selected_option},
         )
 
     # ── WebSocket ──────────────────────────────────────────────
@@ -205,16 +195,20 @@ async def send_stop_generation(ws_url: str, thread_id: str, pipeline_id: str) ->
         async with websockets.connect(ws_url, open_timeout=15) as ws:
             try:
                 await asyncio.wait_for(ws.recv(), timeout=3)
-            except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — 确认帧缺失不阻断
+            except (TimeoutError, Exception):  # noqa: BLE001 — 确认帧缺失不阻断
                 pass
-            await ws.send(json.dumps({
-                "type": "stop_generation",
-                "thread_id": thread_id,
-                "pipeline_id": pipeline_id,
-            }))
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "stop_generation",
+                        "thread_id": thread_id,
+                        "pipeline_id": pipeline_id,
+                    }
+                )
+            )
             try:
                 await asyncio.wait_for(ws.recv(), timeout=2)
-            except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — 回执不保证，忽略
+            except (TimeoutError, Exception):  # noqa: BLE001 — 回执不保证，忽略
                 pass
 
     await _run()
@@ -255,7 +249,7 @@ async def dispatch_and_collect(
             # 消费连接确认帧（与前端/e2e 同构）
             try:
                 await asyncio.wait_for(ws.recv(), timeout=5)
-            except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — 确认帧缺失不阻断
+            except (TimeoutError, Exception):  # noqa: BLE001 — 确认帧缺失不阻断
                 pass
             frame = {
                 "type": "user_input",
@@ -279,7 +273,7 @@ async def dispatch_and_collect(
                     return
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     return
                 try:
                     event = json.loads(raw)
@@ -298,10 +292,12 @@ async def dispatch_and_collect(
                     action = None
                     if on_interaction is not None:
                         action = on_interaction(payload)
-                    result.interactions.append({
-                        "request_id": payload.get("request_id") or payload.get("id") or "",
-                        "action": action,
-                    })
+                    result.interactions.append(
+                        {
+                            "request_id": payload.get("request_id") or payload.get("id") or "",
+                            "action": action,
+                        }
+                    )
                 elif etype in ("stream_end", "stream_error", "error"):
                     result.terminal = etype
                     return

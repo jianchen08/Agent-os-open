@@ -129,9 +129,7 @@ def main() -> int:
                 step = m.group(1)
                 # pipeline_xxx 形态：目录名带 pipeline_ 前缀的插件，或 id 即该名
                 if step not in known:
-                    errors.append(
-                        f"管道步骤引用未知插件: {yf.relative_to(ROOT)} :: {step}"
-                    )
+                    errors.append(f"管道步骤引用未知插件: {yf.relative_to(ROOT)} :: {step}")
 
     if errors:
         print(f"config-static: {len(errors)} 项违规：", file=sys.stderr)

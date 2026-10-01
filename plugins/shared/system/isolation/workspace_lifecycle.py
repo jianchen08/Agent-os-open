@@ -607,4 +607,3 @@ class WorkspaceLifecycleManager(_GitOpsMixin):
                     self._ws_meta_store[task_id] = saved
         except Exception as e:
             logger.warning("[WorkspaceLifecycle] restore_ws_meta 失败: task_id=%s, error=%s", task_id, e)
-

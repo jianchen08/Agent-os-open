@@ -227,9 +227,7 @@ def _anchor_sdk_to_fake_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     return shared
 
 
-def test_bootstrap_flat_copy_resolves_via_sdk_anchor(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_bootstrap_flat_copy_resolves_via_sdk_anchor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """扁平单插件副本（plugins/<名>，祖先无指纹）：SDK 位置锚解析回仓库共享根。"""
     shared = _anchor_sdk_to_fake_repo(tmp_path, monkeypatch)
     plugin_dir = _make_flat_user_root(tmp_path)
@@ -260,9 +258,7 @@ def test_bootstrap_flat_copies_grouped_and_flat_shapes_same_root(
     assert sys.path.count(str(shared)) == 1
 
 
-def test_bootstrap_flat_copy_nonrepo_sdk_keeps_legacy_fallback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_bootstrap_flat_copy_nonrepo_sdk_keeps_legacy_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """SDK 非仓库安装（site-packages 平拷贝）：锚不可用，保持旧上三级回退。"""
     fake_pkg = tmp_path / "venv" / "Lib" / "site-packages" / "agentos_plugin_sdk"
     fake_pkg.mkdir(parents=True)
@@ -276,9 +272,7 @@ def test_bootstrap_flat_copy_nonrepo_sdk_keeps_legacy_fallback(
     assert sys.path[:2] == [str(tmp_path), str(plugin_dir)]
 
 
-def test_find_shared_root_exposes_single_point(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_find_shared_root_exposes_single_point(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """find_shared_root 公开单点：与 bootstrap_plugin 同一判定（fs_tools 复用面）。"""
     shared = _anchor_sdk_to_fake_repo(tmp_path, monkeypatch)
     plugin_dir = _make_flat_user_root(tmp_path)

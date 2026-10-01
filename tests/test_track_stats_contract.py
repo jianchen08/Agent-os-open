@@ -223,7 +223,7 @@ class TestSwitches:
         """enabled=False → 两路都关，且观察出口零调用。"""
         metrics = _FakeService()
         frontend = _FakeService()
-        updates = _sync(TrackStats({"enabled": False}), 
+        updates = _sync(TrackStats({"enabled": False}),
             _ctx(_llm_state(), {"metrics": metrics, "frontend": frontend})
         )
         assert updates == {}
@@ -234,7 +234,7 @@ class TestSwitches:
         """track_token_usage=False → token 块与两个观察出口都不动，耗时块保留。"""
         metrics = _FakeService()
         frontend = _FakeService()
-        updates = _sync(TrackStats({"track_token_usage": False}), 
+        updates = _sync(TrackStats({"track_token_usage": False}),
             _ctx(_llm_state(), {"metrics": metrics, "frontend": frontend})
         )
         assert updates == {}, "token 追踪关 + 耗时块已退役 → 无任何产出"

@@ -80,9 +80,7 @@ def main() -> int:
         bad = True
     if bad:
         return 1
-    print(
-        f"bundle-size: 通过（vendor {size:,}B ≤ 基线；无效动态导入 {warnings} ≤ 基线）。"
-    )
+    print(f"bundle-size: 通过（vendor {size:,}B ≤ 基线；无效动态导入 {warnings} ≤ 基线）。")
     return 0
 
 

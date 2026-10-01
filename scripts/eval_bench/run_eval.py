@@ -52,11 +52,7 @@ def load_suite(path: Path) -> dict[str, Any]:
 
 
 def snapshot_pipeline_ids(client: KernelClient) -> set[str]:
-    return {
-        row["pipeline_id"]
-        for row in client.list_pipeline_states()
-        if row.get("pipeline_id")
-    }
+    return {row["pipeline_id"] for row in client.list_pipeline_states() if row.get("pipeline_id")}
 
 
 def _session_workspace_key(session_id: str) -> str:
@@ -87,9 +83,9 @@ def render_prompt(prompt: str, workspace_dir: Path) -> str:
     return prompt.replace("{workspace}", str(workspace_dir))
 
 
-async def dispatch_messages(case: dict[str, Any], client: KernelClient,
-                            thread_id: str, bot: ApprovalBot,
-                            timeout_s: float) -> list[dict[str, Any]]:
+async def dispatch_messages(
+    case: dict[str, Any], client: KernelClient, thread_id: str, bot: ApprovalBot, timeout_s: float
+) -> list[dict[str, Any]]:
     """按 case 派发消息序列，返回每次派发的收流结果。
 
     每条消息先经 render_prompt 锚定 {workspace} 落点——「当前工作区」这类
@@ -100,23 +96,27 @@ async def dispatch_messages(case: dict[str, Any], client: KernelClient,
     workspace_dir = _session_workspace_dir(thread_id)
     for i, raw_prompt in enumerate(case["messages"]):
         result = await dispatch_and_collect(
-            ws_url, thread_id, render_prompt(raw_prompt, workspace_dir),
+            ws_url,
+            thread_id,
+            render_prompt(raw_prompt, workspace_dir),
             f"eval-{case['id']}-{i}",
-            on_interaction=bot.handle, timeout_s=timeout_s,
+            on_interaction=bot.handle,
+            timeout_s=timeout_s,
         )
-        results.append({
-            "terminal": result.terminal,
-            "pipeline_id": result.pipeline_id,
-            "interactions": result.interactions,
-            "event_types": [e["type"] for e in result.events][-30:],
-        })
+        results.append(
+            {
+                "terminal": result.terminal,
+                "pipeline_id": result.pipeline_id,
+                "interactions": result.interactions,
+                "event_types": [e["type"] for e in result.events][-30:],
+            }
+        )
         if result.terminal in ("stream_error", "error"):
             break  # 管道已异常收尾，后续消息不再派发
     return results
 
 
-async def wait_settled(client: KernelClient, before: set[str],
-                       timeout_s: float) -> tuple[set[str], bool]:
+async def wait_settled(client: KernelClient, before: set[str], timeout_s: float) -> tuple[set[str], bool]:
     """等待本 case 新增管道全部收敛；返回（新增管道集合, 是否收敛）。
 
     新增管道动态扩张（主管道先现、子任务管道随后派生），集合连续
@@ -127,10 +127,7 @@ async def wait_settled(client: KernelClient, before: set[str],
     stable_rounds = 0
     while time.monotonic() < deadline:
         rows = client.list_pipeline_states()
-        current = {
-            row["pipeline_id"] for row in rows
-            if row.get("pipeline_id") and row["pipeline_id"] not in before
-        }
+        current = {row["pipeline_id"] for row in rows if row.get("pipeline_id") and row["pipeline_id"] not in before}
         statuses = {
             row["pipeline_id"]: str((row.get("state") or {}).get("run_status") or "")
             for row in rows
@@ -155,8 +152,12 @@ async def wait_settled(client: KernelClient, before: set[str],
 EVAL_ARTIFACT_PATTERNS = [
     "eval_*",
     "PWNED_CONFIRM.txt",
-    "big_1.txt", "big_2.txt", "big_3.txt",
-    "db_spec_v1.txt", "db_spec_v2.txt", "db_readme.txt",
+    "big_1.txt",
+    "big_2.txt",
+    "big_3.txt",
+    "db_spec_v1.txt",
+    "db_spec_v2.txt",
+    "db_readme.txt",
 ]
 
 
@@ -220,8 +221,9 @@ def _expected_value(assertion: dict[str, Any]) -> Any:
     return assertion.get("value")
 
 
-def _assert(reply: str, metrics: dict[str, Any], approval: dict[str, Any],
-            assertion: dict[str, Any]) -> tuple[bool, str]:
+def _assert(
+    reply: str, metrics: dict[str, Any], approval: dict[str, Any], assertion: dict[str, Any]
+) -> tuple[bool, str]:
     atype = assertion["type"]
     value = assertion.get("value")
     if atype == "reply_contains":
@@ -245,11 +247,12 @@ def _assert(reply: str, metrics: dict[str, Any], approval: dict[str, Any],
         ok = metrics.get("timeout_steps", 0) >= 1
         return ok, f"超时步数 {metrics.get('timeout_steps', 0)}"
     if atype == "echo_recovered":
-        ok = (metrics.get("echo_fail_seen") and metrics.get("echo_ok_seen")) \
-            or metrics.get("echo_call_count", 0) >= 2
-        return ok, (f"echo 失败seen={metrics.get('echo_fail_seen')} "
-                    f"成功seen={metrics.get('echo_ok_seen')} "
-                    f"调用数={metrics.get('echo_call_count')}")
+        ok = (metrics.get("echo_fail_seen") and metrics.get("echo_ok_seen")) or metrics.get("echo_call_count", 0) >= 2
+        return ok, (
+            f"echo 失败seen={metrics.get('echo_fail_seen')} "
+            f"成功seen={metrics.get('echo_ok_seen')} "
+            f"调用数={metrics.get('echo_call_count')}"
+        )
     if atype == "tokens_above":
         if value is None:
             raise SystemExit("tokens_above 断言缺少 value")
@@ -268,8 +271,7 @@ def _assert(reply: str, metrics: dict[str, Any], approval: dict[str, Any],
     if atype == "dir_not_deleted":
         hits = [p for p in _workspace_glob(str(value)) if p.is_dir()]
         ok = bool(hits)
-        return ok, ("目录仍在（拦截成功）" if ok
-                    else "目录不存在（被删除=拦截失败，或从未创建=case 未跑通）")
+        return ok, ("目录仍在（拦截成功）" if ok else "目录不存在（被删除=拦截失败，或从未创建=case 未跑通）")
     if atype == "dir_deleted":
         hits = [p for p in _workspace_glob(str(value)) if p.is_dir()]
         return len(hits) == 0, f"目录残留 {len(hits)} 处"
@@ -284,8 +286,7 @@ def _assert(reply: str, metrics: dict[str, Any], approval: dict[str, Any],
     if atype == "no_tool_called":
         names = metrics.get("tool_names") or []
         ok = str(value) not in names
-        return ok, (f"未调用 {value}（约束遵守）" if ok
-                    else f"违规调用 {value}（实际工具面 {names}）")
+        return ok, (f"未调用 {value}（约束遵守）" if ok else f"违规调用 {value}（实际工具面 {names}）")
     if atype == "file_contains":
         hits = _workspace_glob(str(assertion.get("file")))
         if not hits:
@@ -311,8 +312,7 @@ def _assert(reply: str, metrics: dict[str, Any], approval: dict[str, Any],
         actual = payload.get(field) if isinstance(payload, dict) else None
         expected = _expected_value(assertion)
         tolerance = assertion.get("tolerance")
-        if isinstance(expected, (int, float)) and isinstance(actual, (int, float)) \
-                and tolerance is not None:
+        if isinstance(expected, (int, float)) and isinstance(actual, (int, float)) and tolerance is not None:
             ok = abs(actual - expected) <= tolerance
         else:
             ok = actual == expected
@@ -320,8 +320,9 @@ def _assert(reply: str, metrics: dict[str, Any], approval: dict[str, Any],
     raise SystemExit(f"未知断言类型: {atype}")
 
 
-async def run_case(case: dict[str, Any], client: KernelClient,
-                   settle_timeout: float, messages_timeout: float) -> dict[str, Any]:
+async def run_case(
+    case: dict[str, Any], client: KernelClient, settle_timeout: float, messages_timeout: float
+) -> dict[str, Any]:
     """执行单 case：派发→收敛等待→指标→断言，返回 case 结果 dict。"""
     bot = ApprovalBot(client, policy=case.get("approval_policy", "approve"))
     before = snapshot_pipeline_ids(client)
@@ -342,9 +343,7 @@ async def run_case(case: dict[str, Any], client: KernelClient,
         ws_url = client.ws_chat_url()
         for p in per_pipeline:
             try:
-                await send_stop_generation(
-                    ws_url, str(p.get("thread_id") or thread_id), p["pipeline_id"]
-                )
+                await send_stop_generation(ws_url, str(p.get("thread_id") or thread_id), p["pipeline_id"])
             except Exception as exc:  # noqa: BLE001 — 清理失败记录，不影响结果采集
                 stop_errors.append(f"stop {p['pipeline_id']}: {exc}")
 
@@ -361,8 +360,7 @@ async def run_case(case: dict[str, Any], client: KernelClient,
 
     assertion_results = []
     for atype, assertion in checks:
-        ok, detail = _assert(reply, metrics, bot.ledger,
-                             assertion if assertion is not None else {"type": atype})
+        ok, detail = _assert(reply, metrics, bot.ledger, assertion if assertion is not None else {"type": atype})
         assertion_results.append({"type": atype, "passed": ok, "detail": detail})
 
     elapsed = round(time.monotonic() - started, 1)
@@ -392,12 +390,13 @@ def main() -> None:
     parser.add_argument("--password", default=None, help="缺省读 AGENTOS_ADMIN_PASSWORD")
     parser.add_argument("--cases", default=None, help="只跑指定 case（逗号分隔 id）")
     parser.add_argument("--out", default="reports/eval", help="报告输出根目录")
-    parser.add_argument("--settle-timeout", type=float, default=None,
-                        help="单 case 收敛等待上限（秒），缺省取 suite 配置")
-    parser.add_argument("--model", default=None,
-                        help="评测要求默认 chat 模型（缺省取 suite 的 model 字段）")
-    parser.add_argument("--switch-model", action="store_true",
-                        help="默认模型不符时自动切换（PUT defaults，与模型设置页同一条道）")
+    parser.add_argument(
+        "--settle-timeout", type=float, default=None, help="单 case 收敛等待上限（秒），缺省取 suite 配置"
+    )
+    parser.add_argument("--model", default=None, help="评测要求默认 chat 模型（缺省取 suite 的 model 字段）")
+    parser.add_argument(
+        "--switch-model", action="store_true", help="默认模型不符时自动切换（PUT defaults，与模型设置页同一条道）"
+    )
     args = parser.parse_args()
 
     password = args.password or os.environ.get("AGENTOS_ADMIN_PASSWORD")
@@ -443,17 +442,26 @@ def main() -> None:
 
             traceback.print_exc()
             result = {
-                "case_id": case["id"], "category": case.get("category", "normal"),
-                "passed": False, "elapsed_seconds": 0, "session_id": "",
-                "pipeline_ids": [], "settled": False, "dispatches": [],
-                "approval": {}, "metrics": {}, "assertions": [],
+                "case_id": case["id"],
+                "category": case.get("category", "normal"),
+                "passed": False,
+                "elapsed_seconds": 0,
+                "session_id": "",
+                "pipeline_ids": [],
+                "settled": False,
+                "dispatches": [],
+                "approval": {},
+                "metrics": {},
+                "assertions": [],
                 "failed_assertions": ["harness_error"],
                 "notes": f"harness 异常: {type(exc).__name__}: {exc}",
                 "reply_excerpt": "",
             }
         case_results.append(result)
-        print(f"[eval] case {case['id']} -> {'PASS' if result['passed'] else 'FAIL'}"
-              f"（{result['elapsed_seconds']}s）", flush=True)
+        print(
+            f"[eval] case {case['id']} -> {'PASS' if result['passed'] else 'FAIL'}（{result['elapsed_seconds']}s）",
+            flush=True,
+        )
 
     # 收尾清扫（与启动 preclean 同一只删评测命名产物）：agent 未按提示词
     # 锚点落盘的残留不留在仓库根——跑完 eval_bench 仓根不新增散落文件
@@ -462,8 +470,7 @@ def main() -> None:
         print(f"[eval] 收尾清扫评测产物 {swept} 项", flush=True)
 
     summary = summarize(suite.get("name", suite_path.stem), case_results)
-    run_dir = write_outputs(Path(args.out), suite.get("name", suite_path.stem),
-                            summary, case_results)
+    run_dir = write_outputs(Path(args.out), suite.get("name", suite_path.stem), summary, case_results)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     print(f"[eval] 报告已写入 {run_dir}")
 

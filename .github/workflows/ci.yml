@@ -344,7 +344,9 @@ jobs:
           uv pip install -e ./plugins/sdk
 
       - name: Run gates (sdk-lint, sdk-mypy, config-direct-reads, scripts-lint, plugins-lint, tool-contract-completeness)
-        run: python scripts/run_gates.py --filter sdk-lint,sdk-mypy,config-direct-reads,scripts-lint,plugins-lint,tool-contract-completeness,config-static
+        # uv run：config-static 的检查器 import yaml，依赖在 uv venv 内——
+        # 裸 setup-python 解释器无 pyyaml（2026-10-01 CI 实红 ModuleNotFoundError）
+        run: uv run --frozen python scripts/run_gates.py --filter sdk-lint,sdk-mypy,config-direct-reads,scripts-lint,plugins-lint,tool-contract-completeness,config-static
 
   # ── Python Test（插件 SDK）─────────────────────────────────
   python-test:

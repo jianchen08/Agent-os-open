@@ -997,4 +997,3 @@ class TestTruncationDetectionBoundaries:
         remaining = result.state_updates.get(StateKeys.RAW_TOOL_CALLS, [])
         assert [t["id"] for t in remaining] == ["c1"]
         assert remaining[0]["args"] == '{"goal": "x"'  # 原样透传，不猜测内容
-

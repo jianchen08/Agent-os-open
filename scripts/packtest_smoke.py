@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """打包件启动探针（BUG-9 回归门禁）。
 
 对 electron-builder --dir 产物做 CDP 只读冒烟：
@@ -40,9 +39,7 @@ def fail(msg: str) -> None:
 
 def exe_running(name: str) -> bool:
     # tasklist 在中文 Windows 输出 GBK（exe 名含中文），按字节解码兼容
-    raw = subprocess.run(
-        ["tasklist", "/FI", f"IMAGENAME eq {name}"], capture_output=True
-    ).stdout
+    raw = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {name}"], capture_output=True, check=False).stdout
     out = raw.decode("utf-8", errors="replace")
     return name in out or name in raw.decode("gbk", errors="replace")
 
@@ -61,7 +58,7 @@ def wait_cdp(port: int, timeout_s: float) -> None:
 
 
 def kill_tree(pid: int) -> None:
-    subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True)
+    subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, check=False)
 
 
 def js(page, expr: str):
@@ -91,12 +88,12 @@ def main() -> None:
             browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{args.cdp_port}")
             ctx = browser.contexts[0]
             # 优先选 app:// 目标；CDP 初始可能附带 about:blank 空页
-            page = next(
-                (p for p in ctx.pages if p.url.startswith("app://")), None
-            ) or (ctx.pages[0] if ctx.pages else ctx.wait_for_page())
+            page = next((p for p in ctx.pages if p.url.startswith("app://")), None) or (
+                ctx.pages[0] if ctx.pages else ctx.wait_for_page()
+            )
 
             deadline = time.time() + args.timeout
-            root_children = 0
+
             while time.time() < deadline:
                 state = js(
                     page,
@@ -107,11 +104,7 @@ def main() -> None:
                     "bodyTextLen: (document.body?.innerText || '').trim().length"
                     "})",
                 )
-                if (
-                    state["ready"] == "complete"
-                    and state["rootChildren"] > 0
-                    and state["bodyTextLen"] > 0
-                ):
+                if state["ready"] == "complete" and state["rootChildren"] > 0 and state["bodyTextLen"] > 0:
                     mounted = True
                     break
                 time.sleep(1.0)

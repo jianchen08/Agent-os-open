@@ -63,9 +63,7 @@ def load_active_runs(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         interaction_request_id = None
         if metadata:
             try:
-                interaction_request_id = (json.loads(metadata) or {}).get(
-                    "pending_interaction_request_id"
-                )
+                interaction_request_id = (json.loads(metadata) or {}).get("pending_interaction_request_id")
             except (json.JSONDecodeError, TypeError):
                 interaction_request_id = None
         active.append(
@@ -123,21 +121,13 @@ def main() -> int:
         conn = sqlite3.connect(args.db)
         try:
             now = _now()
-            cutoff = datetime.fromtimestamp(
-                now.timestamp() - args.stuck_mins * 60, tz=UTC
-            )
+            cutoff = datetime.fromtimestamp(now.timestamp() - args.stuck_mins * 60, tz=UTC)
             for run in load_active_runs(conn):
                 verdict = classify(run, cutoff)
                 if verdict == "RUNNING_STALE":
                     stuck = True
-                last_trace = (
-                    run["last_trace_at"].isoformat() if run["last_trace_at"] else "-"
-                )
-                extra = (
-                    f" request_id={run['interaction_request_id']}"
-                    if run["interaction_request_id"]
-                    else ""
-                )
+                last_trace = run["last_trace_at"].isoformat() if run["last_trace_at"] else "-"
+                extra = f" request_id={run['interaction_request_id']}" if run["interaction_request_id"] else ""
                 print(
                     f"[{verdict:>13}] pipeline={run['pipeline_id']} run={run['run_id']}"
                     f" task={run['task_status'] or '-'} last_trace={last_trace}{extra}"

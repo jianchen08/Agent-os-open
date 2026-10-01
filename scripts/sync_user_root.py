@@ -115,9 +115,7 @@ def iter_plugin_dirs(shared_root: Path) -> list[Path]:
     return found
 
 
-def _copy_newer(
-    src_file: Path, dst_file: Path, copied: list[str], dry_run: bool
-) -> None:
+def _copy_newer(src_file: Path, dst_file: Path, copied: list[str], dry_run: bool) -> None:
     """仓内较新则覆盖：size 不同或 src mtime 严格更新才复制（copy2 保留 mtime）。"""
     if dst_file.is_file():
         s_stat, d_stat = src_file.stat(), dst_file.stat()
@@ -130,9 +128,7 @@ def _copy_newer(
     shutil.copy2(src_file, dst_file)
 
 
-def sync_tree(
-    src_dir: Path, dst_dir: Path, copied: list[str], dry_run: bool
-) -> None:
+def sync_tree(src_dir: Path, dst_dir: Path, copied: list[str], dry_run: bool) -> None:
     """把 ``src_dir`` 增量并入 ``dst_dir``：只覆盖仓内较新文件，**永不删除**。
 
     dst 独有的文件/子目录一律原样保留（R158 教训：用户侧是活跃副本）。
@@ -148,9 +144,7 @@ def sync_tree(
             _copy_newer(entry, target, copied, dry_run)
 
 
-def sync_repo_plugins_to_user_root(
-    repo_shared: Path, user_plugins: Path, *, dry_run: bool = False
-) -> SyncOutcome:
+def sync_repo_plugins_to_user_root(repo_shared: Path, user_plugins: Path, *, dry_run: bool = False) -> SyncOutcome:
     """执行一次单向同步，返回可观测结果。源即目标（同目录）时无操作。
 
     ``dry_run=True`` 只列计划不落盘（``copied`` 为将写入清单）。
@@ -187,9 +181,7 @@ def _env_plugins_dir() -> Path | None:
     return None
 
 
-def _resolve_user_plugins_dir(
-    user_root: Path | None, dry_run: bool
-) -> tuple[Path | None, bool]:
+def _resolve_user_plugins_dir(user_root: Path | None, dry_run: bool) -> tuple[Path | None, bool]:
     """解析写目标；返回 (目标, 是否 OS 默认回退)。
 
     优先级：``--user-root`` > 环境变量 > OS 默认（仅 ``dry_run`` 预览可得）。
@@ -232,9 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     if not repo_shared.is_dir():
         print(f"[sync-user-root] [ERROR] 仓内插件根不存在：{repo_shared}")
         return 1
-    user_plugins, is_os_default = _resolve_user_plugins_dir(
-        args.user_root, args.dry_run
-    )
+    user_plugins, is_os_default = _resolve_user_plugins_dir(args.user_root, args.dry_run)
     if user_plugins is None:
         print(
             "[sync-user-root] [ERROR] 未显式指定写目标（--user-root、"
@@ -247,9 +237,7 @@ def main(argv: list[str] | None = None) -> int:
         print("          请设置 AGENTOS_USER_ROOT（或传 --user-root）；仅预览可加 --dry-run。")
         return 1
 
-    outcome = sync_repo_plugins_to_user_root(
-        repo_shared, user_plugins, dry_run=args.dry_run
-    )
+    outcome = sync_repo_plugins_to_user_root(repo_shared, user_plugins, dry_run=args.dry_run)
     fallback_note = "（OS 默认回退，仅预览）" if is_os_default else ""
     print(f"[sync-user-root] 源 {repo_shared} → 目标 {user_plugins}{fallback_note}")
     action = "将写入" if args.dry_run else "写入"
@@ -262,15 +250,9 @@ def main(argv: list[str] | None = None) -> int:
     if not outcome.copied:
         print("[sync-user-root] 完成：用户空间已是最新，无文件变动。")
     elif args.dry_run:
-        print(
-            f"[sync-user-root] 完成：计划写入 {len(outcome.copied)} 个文件"
-            "（--dry-run，未落盘）。"
-        )
+        print(f"[sync-user-root] 完成：计划写入 {len(outcome.copied)} 个文件（--dry-run，未落盘）。")
     else:
-        print(
-            f"[sync-user-root] 完成：写入 {len(outcome.copied)} 个文件"
-            "（未删除任何用户侧内容）。"
-        )
+        print(f"[sync-user-root] 完成：写入 {len(outcome.copied)} 个文件（未删除任何用户侧内容）。")
     return 0
 
 

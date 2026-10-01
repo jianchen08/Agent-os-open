@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +20,9 @@ def summarize(suite_name: str, case_results: list[dict[str, Any]]) -> dict[str, 
     cases = len(case_results)
     passed = sum(1 for c in case_results if c["passed"])
     approval_ledgers = [c["approval"] for c in case_results if c.get("approval")]
-    requests_seen = sum(l.get("requests_seen", 0) for l in approval_ledgers)
-    approved = sum(l.get("approved", 0) for l in approval_ledgers)
-    denied = sum(l.get("denied", 0) for l in approval_ledgers)
+    requests_seen = sum(lg.get("requests_seen", 0) for lg in approval_ledgers)
+    approved = sum(lg.get("approved", 0) for lg in approval_ledgers)
+    denied = sum(lg.get("denied", 0) for lg in approval_ledgers)
 
     by_model: dict[str, dict[str, int]] = {}
     for c in case_results:
@@ -32,8 +32,7 @@ def summarize(suite_name: str, case_results: list[dict[str, Any]]) -> dict[str, 
                 target[key] += bucket.get(key, 0)
 
     def _avg(key: str) -> float | None:
-        values = [c["metrics"][key] for c in case_results
-                  if isinstance(c.get("metrics"), dict) and key in c["metrics"]]
+        values = [c["metrics"][key] for c in case_results if isinstance(c.get("metrics"), dict) and key in c["metrics"]]
         return round(sum(values) / len(values), 1) if values else None
 
     return {
@@ -67,8 +66,7 @@ def render_markdown(summary: dict[str, Any], case_results: list[dict[str, Any]])
     lines = [
         f"# 评测报告：{summary['suite']}",
         "",
-        f"- case 数：{summary['cases']}　通过：{summary['passed']}　"
-        f"成功率：{summary['pass_rate']}%",
+        f"- case 数：{summary['cases']}　通过：{summary['passed']}　成功率：{summary['pass_rate']}%",
         f"- 平均轮次：{summary['avg_iterations']}　平均工具重试：{summary['avg_tool_retries']}"
         f"　平均失败步：{summary['avg_error_steps']}",
         f"- 审批：请求 {approval['requests_seen']}（批准 {approval['approved']} / "
@@ -84,11 +82,7 @@ def render_markdown(summary: dict[str, Any], case_results: list[dict[str, Any]])
     for c in case_results:
         m = c.get("metrics", {})
         appr = c.get("approval") or {}
-        approval_text = (
-            f"{appr.get('denied', 0)}拒/{appr.get('approved', 0)}准"
-            if appr.get("requests_seen")
-            else "-"
-        )
+        approval_text = f"{appr.get('denied', 0)}拒/{appr.get('approved', 0)}准" if appr.get("requests_seen") else "-"
         lines.append(
             f"| {c['case_id']} | {c.get('category', '')} | "
             f"{'✅' if c['passed'] else '❌'} | {m.get('pipelines', '-')} | "
@@ -111,24 +105,19 @@ def render_markdown(summary: dict[str, Any], case_results: list[dict[str, Any]])
     return "\n".join(lines)
 
 
-def write_outputs(out_root: Path, suite_name: str,
-                  summary: dict[str, Any], case_results: list[dict[str, Any]]) -> Path:
+def write_outputs(out_root: Path, suite_name: str, summary: dict[str, Any], case_results: list[dict[str, Any]]) -> Path:
     """写 report.json / report.md / cases/*.json，返回运行目录。"""
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    run_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     run_dir = out_root / run_id
     (run_dir / "cases").mkdir(parents=True, exist_ok=True)
     payload = {
         "run_id": run_id,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "summary": summary,
         "cases": case_results,
     }
-    (run_dir / "report.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    (run_dir / "report.md").write_text(
-        render_markdown(summary, case_results), encoding="utf-8"
-    )
+    (run_dir / "report.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    (run_dir / "report.md").write_text(render_markdown(summary, case_results), encoding="utf-8")
     for c in case_results:
         (run_dir / "cases" / f"{c['case_id']}.json").write_text(
             json.dumps(c, ensure_ascii=False, indent=2), encoding="utf-8"

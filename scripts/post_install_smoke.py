@@ -30,6 +30,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from io import TextIOWrapper
 
 DEFAULT_BASE = "http://127.0.0.1:9101"
 DEFAULT_CHAT_TIMEOUT = 300
@@ -43,15 +44,20 @@ def log(msg: str) -> None:
     print(f"[smoke] {msg}", flush=True)
 
 
-def _request(base: str, path: str, payload: dict | None = None, token: str | None = None,
-             method: str | None = None, timeout: int = 15) -> tuple[int, dict | str]:
+def _request(
+    base: str,
+    path: str,
+    payload: dict | None = None,
+    token: str | None = None,
+    method: str | None = None,
+    timeout: int = 15,
+) -> tuple[int, dict | str]:
     """单次 HTTP 往返；返回 (status, body)。HTTPError 展开为元组返回（非异常）。"""
     data = json.dumps(payload or {}).encode("utf-8") if method == "POST" or payload else None
     headers = {"Content-Type": "application/json", **MAIN_AGENT_HEADER}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(base + path, data=data, headers=headers,
-                                 method=method or ("POST" if data else "GET"))
+    req = urllib.request.Request(base + path, data=data, headers=headers, method=method or ("POST" if data else "GET"))
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
@@ -71,20 +77,29 @@ def smoke_chat(base: str, token: str, timeout_s: float) -> None:
     from websockets.exceptions import WebSocketException
     from websockets.sync.client import connect
 
-    status, body = _request(base, "/api/v1/sessions", {"title": "post-install-smoke", "intent": "post-install-smoke"}, token, "POST")
-    if status != 200:
+    status, body = _request(
+        base, "/api/v1/sessions", {"title": "post-install-smoke", "intent": "post-install-smoke"}, token, "POST"
+    )
+    if status != 200 or not isinstance(body, dict):
         raise AssertionError(f"建会话失败：HTTP {status} {str(body)[:200]}")
     thread_id = body.get("thread_id") or (body.get("data") or {}).get("thread_id")
     if not thread_id:
         raise AssertionError(f"建会话响应无 thread_id：{str(body)[:200]}")
 
     status, body = _request(base, "/api/v1/ws-ticket", {}, token, "POST")
-    if status != 200 or not body.get("ticket"):
+    if status != 200 or not isinstance(body, dict) or not body.get("ticket"):
         raise AssertionError(f"取 ws-ticket 失败：HTTP {status} {str(body)[:200]}")
     ws_url = base.replace("http", "ws", 1) + f"/ws/chat?ticket={body['ticket']}"
-    message = {"type": "user_input", "thread_id": thread_id, "content": SMOKE_PROMPT,
-               "pipeline_id": "", "attachments": [], "enable_thinking": False,
-               "thinking_strength": "", "client_message_id": f"smoke-{int(time.time() * 1000)}"}
+    message = {
+        "type": "user_input",
+        "thread_id": thread_id,
+        "content": SMOKE_PROMPT,
+        "pipeline_id": "",
+        "attachments": [],
+        "enable_thinking": False,
+        "thinking_strength": "",
+        "client_message_id": f"smoke-{int(time.time() * 1000)}",
+    }
     try:
         with connect(ws_url, open_timeout=15) as ws:
             ws.send(json.dumps(message, ensure_ascii=False))
@@ -93,7 +108,9 @@ def smoke_chat(base: str, token: str, timeout_s: float) -> None:
             while True:
                 remain = deadline - time.time()
                 if remain <= 0:
-                    raise AssertionError(f"聊天超时 {timeout_s:.0f}s 未等到 stream_end（LLM 链路疑断——正是冒烟要抓的面）")
+                    raise AssertionError(
+                        f"聊天超时 {timeout_s:.0f}s 未等到 stream_end（LLM 链路疑断——正是冒烟要抓的面）"
+                    )
                 try:
                     raw = ws.recv(timeout=remain)
                 except TimeoutError as exc:
@@ -113,13 +130,18 @@ def smoke_chat(base: str, token: str, timeout_s: float) -> None:
 
 
 def main() -> int:
-    sys.stdout.reconfigure(encoding="utf-8")
+    if isinstance(sys.stdout, TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="装后冒烟：登录探活 + 插件宿主面 + 纯聊天一轮")
     parser.add_argument("--base", default=DEFAULT_BASE, help=f"内核基址（默认 {DEFAULT_BASE}）")
     parser.add_argument("--password", default=None, help="内核口令（默认环境变量 AGENTOS_ADMIN_PASSWORD）")
     parser.add_argument("--skip-chat", action="store_true", help="跳过纯聊天一轮（只验登录+宿主面）")
-    parser.add_argument("--chat-timeout", type=float, default=DEFAULT_CHAT_TIMEOUT,
-                        help=f"等 stream_end 的秒数（默认 {DEFAULT_CHAT_TIMEOUT}）")
+    parser.add_argument(
+        "--chat-timeout",
+        type=float,
+        default=DEFAULT_CHAT_TIMEOUT,
+        help=f"等 stream_end 的秒数（默认 {DEFAULT_CHAT_TIMEOUT}）",
+    )
     args = parser.parse_args()
 
     password = args.password or os.environ.get("AGENTOS_ADMIN_PASSWORD")
@@ -129,14 +151,14 @@ def main() -> int:
 
     # 1. 登录探活
     try:
-        status, body = _request(args.base, "/api/v1/auth/login",
-                                {"username": "admin", "password": password}, method="POST")
+        status, body = _request(
+            args.base, "/api/v1/auth/login", {"username": "admin", "password": password}, method="POST"
+        )
     except ConnectionError as exc:
         log(f"FAIL 内核不可达（{args.base}）：{exc}")
         return 2
     if status != 200 or not (isinstance(body, dict) and body.get("access_token")):
-        log(f"FAIL 登录探活：HTTP {status} {str(body)[:200]}"
-            "（口令不匹配——装机 user_root 口令与所给不符时即此形态）")
+        log(f"FAIL 登录探活：HTTP {status} {str(body)[:200]}（口令不匹配——装机 user_root 口令与所给不符时即此形态）")
         return 1
     token = body["access_token"]
     log(f"PASS 登录探活（{args.base}）")
@@ -148,11 +170,12 @@ def main() -> int:
         log(f"FAIL 宿主面查询不可达：{exc}")
         return 2
     if status != 200:
-        log(f"FAIL GET /api/v1/plugins/hosts：HTTP {status} {str(body)[:200]}"
-            "（合宿 venv/插件面结构漂移的业务面投影，A3）")
+        log(
+            f"FAIL GET /api/v1/plugins/hosts：HTTP {status} {str(body)[:200]}"
+            "（合宿 venv/插件面结构漂移的业务面投影，A3）"
+        )
         return 1
-    log(f"PASS 插件宿主面：GET /api/v1/plugins/hosts 200"
-        f"（hosts={len(body) if isinstance(body, list) else 'N/A'}）")
+    log(f"PASS 插件宿主面：GET /api/v1/plugins/hosts 200（hosts={len(body) if isinstance(body, list) else 'N/A'}）")
 
     # 3. 纯聊天一轮
     if args.skip_chat:

@@ -13,6 +13,7 @@ Python/Rust 源码中的硬编码配置路径字面量，新违规即红（存�
 
 用法：python scripts/check_config_direct_reads.py
 """
+
 from __future__ import annotations
 
 import re
@@ -28,8 +29,14 @@ SCAN_ROOTS = [
 ]
 SCAN_SUFFIXES = {".py", ".rs"}
 EXCLUDE_DIRS = {
-    "__pycache__", "node_modules", "runtime", "target", ".venv", "venv",
-    ".venv-hindsight", ".ai_workspaces",
+    "__pycache__",
+    "node_modules",
+    "runtime",
+    "target",
+    ".venv",
+    "venv",
+    ".venv-hindsight",
+    ".ai_workspaces",
     # 纯测试对直读回退的夹具/断言由对应插件测试车道治理，不进本闸
 }
 
@@ -79,8 +86,8 @@ def main() -> int:
     baseline_path = Path(__file__).resolve().parent.parent / ".github" / "check_config_direct_reads_baseline.txt"
     baseline: dict[str, int] = {}
     if baseline_path.exists():
-        for line in baseline_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
+        for raw in baseline_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
             if not line or line.startswith("#"):
                 continue
             path, _, cnt = line.rpartition(":")
@@ -95,11 +102,7 @@ def main() -> int:
                 return 2
             baseline[path] = int(cnt)
 
-    new_violations = {
-        path: cnt
-        for path, cnt in found.items()
-        if baseline.get(path, 0) < cnt
-    }
+    new_violations = {path: cnt for path, cnt in found.items() if baseline.get(path, 0) < cnt}
 
     if new_violations:
         print("配置直读机械闸：发现基线外新增违规（禁止直读 config/，走 config_files 注入）：")
