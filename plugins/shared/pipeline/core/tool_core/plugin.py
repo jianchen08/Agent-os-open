@@ -30,7 +30,7 @@ from typing import Any
 # tool_core/，上溯 3 级；`pipeline` 包经它解析（llm_core 同款）。必须在
 # 首方 import 之前注入。
 _SHARED_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-if _SHARED_ROOT not in sys.path:
+if _SHARED_ROOT not in sys.path:  # pragma: no cover —— 幂等守卫（conftest/先行插件已注入时为假）
     sys.path.insert(0, _SHARED_ROOT)
 
 from agentos_plugin_sdk.tool_result_protocol import (  # noqa: E402

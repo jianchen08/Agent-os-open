@@ -48,6 +48,13 @@ BASE_TEST_PATHS: list[str] = [
     # agent_config_load 双根自举/sidecar 复用测试（2026-09-18 登记：目录内 7 用例
     # 此前不在基集，plugin.py sys.path 守卫缺行失真——覆盖率批十修正）。
     "plugins/shared/pipeline/input/agent_config_load/",
+    # tool_core 单调用契约测试（2026-10-02 静态化迁移：Rust cdylib 收窄为
+    # Python sidecar 单调用插件——plugin/server/分支矩阵三文件进插桩基集，
+    # 否则 diff-cov 对 server.py/plugin.py fail-loud）。
+    "plugins/shared/pipeline/core/tool_core/",
+    # result_format 门判据测试（2026-10-02 迁移：core_type 门改 tool_results
+    # 判据，目录内测试进基集补度量面）。
+    "plugins/shared/pipeline/output/result_format/",
     # 模式物料通用步骤测试（2026-09-24 架构重构：自 context_build 抽出为独立
     # 管道插件，原 tests/test_context_build_mode_material.py 断言随迁目录内）。
     "plugins/shared/pipeline/input/mode_material_inject/",
