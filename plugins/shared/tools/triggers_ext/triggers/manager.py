@@ -1,12 +1,9 @@
 """触发器管理器。
 
-
-
-管理触发器的注册、评估和执行，支持事件触发、条件触发和定时触发。
-
-通过 ServiceProvider 获取管道引擎实例，触发时使用 inject_message 唤醒管道。
-
-
+管理触发器的注册、评估和执行，支持事件触发和定时触发（延迟/定时/周期）。
+CONDITION 触发器的条件求值上收内核 trigger-svc（M1）：本管理器只负责
+注册面转调与点火消费（trigger.fired → 动作分发 + ack），不再持有
+条件表达式求值、边沿簿记与 state 轮询。
 
 公共 API:
 
@@ -28,9 +25,9 @@ import subprocess
 import threading
 import time
 from collections import OrderedDict, deque
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from .types import TriggerConfig, TriggerStatus, TriggerType
 
@@ -44,6 +41,9 @@ _TRIGGER_CHECK_INTERVAL = 5.0
 
 # 触发器注册表在目标管道 state 中的键前缀（task.* 是 pipeline-state.update
 # 写面的任务域白名单前缀；每触发器一键，覆盖写免读改写竞态）。
+# 一次性迁移依据（M1 求值上收内核）：dev 库 agentos_kernel.db 核查
+# `task.trigger.registry.*` 行为 0 条（2026-10-02 只读查询），插件侧 CONDITION
+# 求值退役无存量迁移面；注册表持久化机制本身保留（触发器定义仍归插件持久化）。
 TRIGGER_STATE_KEY_PREFIX = "task.trigger.registry."
 
 # 工作线程落 state 的阻塞等待上限（触发频度 ≥ 间隔秒级，远低于此）。
@@ -70,7 +70,7 @@ class TriggerManager:
 
     - 评估事件触发器
 
-    - 评估条件触发器
+    - CONDITION 触发器：注册转调内核 trigger-svc，点火消费（trigger.fired）
 
     - 检查定时/延迟/周期触发器
 
@@ -99,10 +99,12 @@ class TriggerManager:
         # （pipeline.message_bus 已删，注入时显式记录错误后放弃）。
         self._injector: Callable[..., Any] | None = None
 
-        # GAP-2 CONDITION：state 聚合行提供者（server.py on_load 注入，经内核
-        # pipeline-state capability 读 /api/v1/pipelines/state 同构数据）。
-        # 返回 list[dict]（扁平点号键行，如 {"pipeline_id": ..., "task.status": ...}），
-        # 可为 sync 或 async 可调用。None = 桥未就绪（条件触发器无法求值）。
+        # state 聚合行读面（server.py on_load 注入，经内核 pipeline-state
+        # capability 读 /api/v1/pipelines/state 同构数据）。M1 起仅供
+        # load_from_state 重灌与 http_api GET /pipelines 消费——CONDITION
+        # 求值已上收内核 trigger-svc，不再服务条件轮询。
+        # 返回 list[dict]（扁平点号键行），可为 sync 或 async 可调用。
+        # None = 桥未就绪（重灌 fail-visible 报错）。
         self._state_provider: Callable[..., Any] | None = None
 
         # P25 state 权威持久化写面（server.py on_load 注入，经内核
@@ -125,33 +127,15 @@ class TriggerManager:
     def register(self, config: TriggerConfig) -> None:
         """注册触发器。
 
-
-
         注册后自动将状态设为 ACTIVE，并启动后台检查循环（如果未运行）。
-
-
+        CONDITION 触发器的条件表达式校验与求值在内核 trigger-svc
+        （注册期由 ``register_kernel_condition`` 转调内核完成，语法错误在
+        注册点显式报错），本方法不再做本地编译校验。
 
         Args:
 
             config: 触发器配置。
-
-        Raises:
-
-            ValueError: 条件表达式语法错误（注册期编译校验，拒绝静默永假触发器）。
         """
-
-        # 注册期编译校验：语法错误的条件若被接受，运行期每轮静默求值为
-        # False，触发器永不触发且零报错——必须在注册点显式拒绝
-        condition_expr = (getattr(config, "condition_expression", "") or "").strip()
-        if condition_expr:
-            from .condition_parser import compile_condition  # noqa: PLC0415
-
-            try:
-                compile_condition(condition_expr)
-            except Exception as exc:
-                raise ValueError(
-                    f"触发器 {config.trigger_id} 条件表达式语法错误，拒绝注册: {exc}"
-                ) from exc
 
         config.status = TriggerStatus.ACTIVE
 
@@ -175,8 +159,6 @@ class TriggerManager:
 
     def unregister(self, trigger_id: str) -> bool:
         """注销触发器。
-
-
 
         Args:
 
@@ -257,84 +239,6 @@ class TriggerManager:
             self.persist(trigger)
 
             logger.debug(f"事件触发器触发: {trigger.trigger_id} (事件: {event_name}, 第 {trigger.fire_count} 次)")
-
-        return fired
-
-    def evaluate_condition(self, context: dict[str, Any]) -> list[str]:
-        """评估条件触发器（单上下文便捷入口，等价 evaluate_condition_rows([context])）。
-
-        在 context 命名空间中执行条件表达式，求值为 True 时触发。
-
-        Args:
-
-            context: 上下文变量字典，作为条件表达式的求值环境。
-
-        Returns:
-
-            被触发的 trigger_id 列表。
-
-        """
-        return self.evaluate_condition_rows([context])
-
-    def evaluate_condition_rows(self, rows: list[dict[str, Any]]) -> list[str]:
-        """评估条件触发器（state 聚合行 + 边沿检测，GAP-2 定案）。
-
-        对每个 CONDITION 触发器：任一行满足表达式即视为电平为真；
-        **仅 false→true 翻转（含注册时 unknown→true）触发一次**，
-        持续满足不重复注入（``task_status == 'failed'`` 持续为真不应
-        每 5s 重复消费）。上次电平记录在 ``metadata["cond_last_value"]``。
-
-        Args:
-
-            rows: 管道 state 聚合行列表（扁平点号键）。
-
-        Returns:
-
-            被触发的 trigger_id 列表。
-
-        """
-        fired: list[str] = []
-
-        for trigger in self._triggers.values():
-            if trigger.trigger_type != TriggerType.CONDITION:
-                continue
-
-            if trigger.status != TriggerStatus.ACTIVE:
-                continue
-
-            if not trigger.condition_expression:
-                continue
-
-            if not self._check_stop_conditions(trigger):
-                continue
-
-            try:
-                current = any(
-                    self._eval_condition(trigger.condition_expression, row)
-                    for row in rows
-                )
-            except Exception as e:
-                logger.warning(f"条件评估失败: {trigger.trigger_id}, 表达式: {trigger.condition_expression}, 错误: {e}")
-                continue
-
-            previous = trigger.metadata.get("cond_last_value")
-            trigger.metadata["cond_last_value"] = current
-
-            if current and previous is not True:
-                trigger.fire_count += 1
-
-                trigger.metadata["last_fire_time"] = datetime.datetime.now(datetime.UTC).isoformat()
-
-                fired.append(trigger.trigger_id)
-
-                if self._is_max_fires_reached(trigger):
-                    trigger.status = TriggerStatus.FIRED
-
-                self.persist(trigger)
-
-                logger.info(
-                    f"条件触发器触发(边沿): {trigger.trigger_id} (表达式: {trigger.condition_expression})"
-                )
 
         return fired
 
@@ -599,14 +503,13 @@ class TriggerManager:
         logger.info("[TriggerManager] 触发消息注入器已设置 (chat.send_message)")
 
     def set_state_provider(self, provider: Callable[..., Any]) -> None:
-        """注入 state 聚合行提供者（GAP-2 CONDITION 求值上下文）。
+        """注入 state 聚合行读面（M1 起仅供注册表重灌与 REST 管道选项消费）。
 
-        server.py on_load 时注入，经内核 ``pipeline-state`` capability 读取
-        管道 state 聚合（/api/v1/pipelines/state 同构数据）。约定签名：
-        ``provider() -> list[dict]``（sync 或 async；行为扁平点号键行，
-        如 ``{"pipeline_id": ..., "task.status": ...}``）。检查线程每轮
-        CONDITION 轮询调用一次；None（未注入）时条件触发器无法求值，
-        ``trigger_setup`` 注册期给出明确警告。
+        CONDITION 求值已上收内核 trigger-svc，state 读面不再服务条件轮询；
+        现存消费方：``load_from_state``（sidecar 重启后从 pipeline_state 表
+        重灌注册表）与 http_api ``GET /pipelines``（目标管道下拉选项）。
+        约定签名：``provider() -> list[dict]``（sync 或 async；行为扁平点号
+        键行，如 ``{"pipeline_id": ..., "task.status": ...}``）。
 
         Args:
 
@@ -614,10 +517,10 @@ class TriggerManager:
 
         """
         self._state_provider = provider
-        logger.info("[TriggerManager] state 聚合提供者已设置 (pipeline-state)")
+        logger.info("[TriggerManager] state 聚合读面已设置 (pipeline-state.list)")
 
     def is_state_provider_ready(self) -> bool:
-        """CONDITION 求值桥是否就绪（state provider 已注入）。"""
+        """state 读面是否就绪（重灌与 REST 管道选项依赖）。"""
         return self._state_provider is not None
 
     def set_state_writer(self, writer: Callable[..., Any]) -> None:
@@ -867,14 +770,6 @@ class TriggerManager:
                             exc_info=True,
                         )
 
-                # GAP-2：CONDITION 触发器轮询（state 聚合 + 边沿检测）。
-                # evaluate/fire 簿记在 _poll_conditions 内完成，注入复用同一路径。
-                try:
-                    self._poll_conditions()
-
-                except Exception as e:
-                    logger.error(f"[TriggerManager] 条件轮询异常: {e}", exc_info=True)
-
             except Exception as e:
                 logger.error(f"[TriggerManager] 检查循环异常: {e}", exc_info=True)
 
@@ -882,90 +777,14 @@ class TriggerManager:
 
         logger.info("[TriggerManager] 后台检查循环已退出(线程)")
 
-    def _poll_conditions(self) -> None:
-        """CONDITION 触发器轮询（GAP-2：state 聚合求值 + 边沿检测 + 注入）。
-
-        检查线程每轮（5s）调用：无活跃 CONDITION 触发器时直接返回（省一次
-        内核往返）；有则经 state provider 拉聚合行，任一行满足表达式且发生
-        false→true 翻转时注入触发消息（持续满足不重复）。
-        """
-        if not any(
-            t.trigger_type == TriggerType.CONDITION and t.status == TriggerStatus.ACTIVE
-            for t in self._triggers.values()
-        ):
-            return
-
-        rows = self._fetch_state_rows()
-        if rows is None:
-            return
-
-        for trigger_id in self.evaluate_condition_rows(rows):
-            trigger = self._triggers.get(trigger_id)
-
-            if trigger is None:
-                continue
-
-            # 动作分发：command 走 daemon 线程（不依赖注入字段）
-            if self._dispatch_trigger_action(trigger):
-                continue
-
-            if not trigger.pipeline_id or not trigger.message:
-                continue
-
-            try:
-                self._inject_trigger_message(trigger)
-
-            except Exception as e:
-                logger.error(
-                    f"[TriggerManager] 条件触发注入异常: {trigger_id}, {e}",
-                    exc_info=True,
-                )
-
-    def _fetch_state_rows(self) -> list[dict[str, Any]] | None:
-        """经 state provider 拉取管道 state 聚合行（不可用/失败返回 None）。
-
-        sync provider 直接调用；async provider（server.py 生产形态）经
-        run_coroutine_threadsafe 调度到主事件循环求值（15s 超时）。
-        """
-        if self._state_provider is None:
-            return None
-
-        try:
-            result = self._state_provider()
-
-            if inspect.isawaitable(result):
-                loop = self._main_loop
-                if loop is None or loop.is_closed():
-                    logger.warning(
-                        "[TriggerManager] 主事件循环不可用，跳过本轮条件轮询"
-                    )
-                    return None
-                # isawaitable 只收窄到 Awaitable；state provider 返回协程，
-                # run_coroutine_threadsafe 形参要求 Coroutine。
-                result = asyncio.run_coroutine_threadsafe(
-                    cast("Coroutine[Any, Any, Any]", result), loop
-                ).result(timeout=15)
-
-        except Exception as e:
-            logger.error(f"[TriggerManager] state 聚合读取失败，跳过本轮: {e}")
-            return None
-
-        if not isinstance(result, list):
-            logger.warning(
-                "[TriggerManager] state provider 返回非列表（%s），跳过本轮",
-                type(result).__name__,
-            )
-            return None
-
-        return [row for row in result if isinstance(row, dict)]
-
     async def collect_state_rows(self) -> list[dict[str, Any]]:
-        """事件循环内直调 state provider 拉管道 state 聚合行（REST 消费形态）。
+        """事件循环内直调 state provider 拉管道 state 聚合行。
 
-        与条件轮询的 ``_fetch_state_rows``（后台线程经 run_coroutine_threadsafe
-        调度）同源；本方法在插件主事件循环内执行（http.handle 上下文），
-        awaitable provider 直接 await。桥未接通/返回形状异常抛错（fail-visible，
-        由调用方转 5xx，不静默空列表）。
+        M1 起的消费方：``load_from_state``（注册表重灌）与 http_api
+        ``GET /pipelines``（目标管道下拉选项）。本方法在插件主事件循环内
+        执行（http.handle / on_load 上下文），awaitable provider 直接 await。
+        桥未接通/返回形状异常抛错（fail-visible，由调用方转 5xx，不静默
+        空列表）。
         """
         if self._state_provider is None:
             raise RuntimeError("state provider 未注入（server.py on_load 接线缺失）")
@@ -1784,33 +1603,6 @@ class TriggerManager:
             return value in str(actual)
 
         return False
-
-    def _eval_condition(self, expression: str, context: dict[str, Any]) -> bool:
-        """安全地评估条件表达式。
-
-
-
-        使用 condition_parser 替代 eval()，杜绝代码注入风险。
-
-
-
-        Args:
-
-            expression: 条件表达式字符串。
-
-            context: 上下文变量字典。
-
-
-
-        Returns:
-
-            表达式求值结果。
-
-        """
-
-        from .condition_parser import parse_condition  # noqa: PLC0415
-
-        return parse_condition(expression, context)
 
     def _check_delay(self, trigger: TriggerConfig, now: datetime.datetime) -> bool:
         """检查延迟触发器是否到期。

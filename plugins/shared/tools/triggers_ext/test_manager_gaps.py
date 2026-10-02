@@ -2,9 +2,10 @@
 """triggers/manager.py 行覆盖缺口补充测试。
 
 聚焦既有 test_triggers.py 未触达的守卫分支：事件过滤不匹配/类型守卫、
-条件评估跳过族、persist 序列化失败、load_from_state 脏数据跳过族、
-检查循环与条件轮询的注入守卫、域事件桥的注入器缺失/竞态注销、
-自动父通知的上下文分档提示、定时/周期检查的脏时间戳兜底。
+persist 序列化失败、load_from_state 脏数据跳过族、检查循环的注入守卫、
+域事件桥的注入器缺失/竞态注销、自动父通知的上下文分档提示、
+定时/周期检查的脏时间戳兜底。（CONDITION 求值上收内核 trigger-svc 后，
+插件侧条件评估跳过族/条件轮询守卫随退休链路删除。）
 外部依赖（注入器/state 读写面/调度检查）沿用同款假件手法，断言
 可观察行为（返回值/state 副作用/投递内容），不断言调用计数等内部细节。
 """
@@ -116,25 +117,6 @@ class TestEvaluateEventGuards:
 # 条件触发评估：类型/停止条件守卫
 # ═══════════════════════════════════════════════════════════
 
-
-class TestEvaluateConditionGuards:
-    def test_non_condition_and_expired_skipped(self) -> None:
-        """非 CONDITION 类型与超 max_time 的条件触发器均不参与评估。"""
-        mgr = TriggerManager()
-        try:
-            mgr.register(_make_config(trigger_id="t-event", event_name="e", max_fires=3))
-            past = (_utc_now() - datetime.timedelta(hours=2)).isoformat()
-            stopped = _make_config(
-                trigger_id="t-cond", trigger_type=TriggerType.CONDITION,
-                condition_expression="x == 1", max_fires=3,
-                max_time_seconds=60, metadata={"register_time": past},
-            )
-            mgr.register(stopped)
-            assert mgr.evaluate_condition({"x": 1}) == []
-            assert stopped.fire_count == 0
-            assert stopped.metadata.get("cond_last_value") is None, "被跳过的触发器不得记录电平"
-        finally:
-            mgr.stop_check_loop()
 
 
 class TestFireManually:
@@ -317,77 +299,6 @@ class TestCheckLoopGuards:
         assert "" not in injected, "缺 pipeline_id 的触发器不得触碰注入器"
         assert "p-bad" in injected, "注入故障触发器应到达注入器并留痕"
 
-
-class TestPollConditionsGuards:
-    def test_command_noinfo_and_inject_failure_guards(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """条件轮询：命令分发/缺投递信息跳过/注入故障留痕，互不妨碍。"""
-        monkeypatch.chdir(tmp_path)
-        out = tmp_path / "cond_cmd.txt"
-        code = f"open(r'{out}', 'w').write('fired')"
-        injected: list[str] = []
-
-        def broken_injector(pipeline_id: str, message: str, user_id: str) -> Any:
-            injected.append(pipeline_id)
-            raise RuntimeError("kernel down")
-
-        mgr = TriggerManager()
-        mgr.set_injector(broken_injector)
-        mgr.set_state_provider(lambda: [{"ready": True, "x": 1}])
-        now = _utc_now().isoformat()
-        cmd_cfg = _make_config(
-            trigger_id="t-cmd", trigger_type=TriggerType.CONDITION,
-            condition_expression="ready == true", max_fires=0, action="command",
-            action_params={"cmd": [sys.executable, "-c", code], "timeout_ms": 10000},
-            metadata={"register_time": now},
-        )
-        noinfo_cfg = _make_config(
-            trigger_id="t-noinfo", trigger_type=TriggerType.CONDITION,
-            condition_expression="x == 1", max_fires=0, pipeline_id="", message="",
-            metadata={"register_time": now},
-        )
-        bad_cfg = _make_config(
-            trigger_id="t-badinject", trigger_type=TriggerType.CONDITION,
-            condition_expression="x == 1", max_fires=0, pipeline_id="p-bad", message="m",
-            metadata={"register_time": now},
-        )
-        for cfg in (cmd_cfg, noinfo_cfg, bad_cfg):
-            mgr.register(cfg)
-        with _LoopThread() as lt:
-            mgr.set_main_loop(lt.loop)
-            try:
-                mgr._poll_conditions()  # 不抛异常
-                assert _wait_for(lambda: out.exists()), "command 条件触发器未执行命令"
-            finally:
-                mgr.stop_check_loop()
-        # 三个触发器均计一次边沿；守卫决定后续动作路径
-        assert cmd_cfg.fire_count == 1
-        assert noinfo_cfg.fire_count == 1
-        assert bad_cfg.fire_count == 1
-        assert "" not in injected, "缺 pipeline_id 的触发器不得触碰注入器"
-        assert "p-bad" in injected, "注入故障触发器应到达注入器并留痕"
-
-    @pytest.mark.parametrize("loop_mode", ["none", "closed"], ids=["no-loop", "closed-loop"])
-    def test_async_provider_without_usable_loop_skips(self, loop_mode: str) -> None:
-        """async provider 但主循环缺失/已关闭 → 跳过本轮，不触发不炸。"""
-        async def provider() -> list[dict]:
-            return [{"x": 1}]
-
-        mgr = TriggerManager()
-        if loop_mode == "closed":
-            loop = asyncio.new_event_loop()
-            loop.close()
-            mgr.set_main_loop(loop)
-        mgr.set_state_provider(provider)
-        cfg = _make_config(
-            trigger_type=TriggerType.CONDITION, condition_expression="x == 1", max_fires=0,
-            metadata={"register_time": _utc_now().isoformat()},
-        )
-        mgr.register(cfg)
-        try:
-            mgr._poll_conditions()
-            assert cfg.fire_count == 0, "主循环不可用时条件轮询必须跳过"
-        finally:
-            mgr.stop_check_loop()
 
 
 class TestCollectStateRows:

@@ -2,13 +2,13 @@
 """triggers_ext 插件（触发器管理 + 设置工具）单元测试。
 
 覆盖（对齐 plugins/shared/tools/triggers_ext/）：
-1. triggers/manager.py —— 注册/注销、事件/条件评估、定时/延迟/周期检查、
+1. triggers/manager.py —— 注册/注销、事件评估、定时/延迟/周期检查、
    停止条件、事件总线订阅、触发消息注入（0.2 injector 路径 + 0.1 回退降级）
 2. tool.py —— TriggerSetupTool 五种触发类型 + cancel/update + 参数校验
 3. server.py —— on_load/on_unload 接线 + trigger_setup 工具转发
 
-外部依赖：pipeline.condition_parser（0.2 不存在）用 sys.modules 伪模块注入
-验证条件触发主路径；消息注入用伪 injector + 独立线程事件循环，不依赖内核。
+CONDITION 求值已上收内核 trigger-svc（M1）：插件侧解析器/轮询/边沿测试
+随退休链路删除；外部依赖用伪 injector + 独立线程事件循环，不依赖内核。
 """
 
 from __future__ import annotations
@@ -241,48 +241,6 @@ class TestEvaluateEvent:
         assert mgr._compare(2, "lte", 2) is True
         assert mgr._compare("abc", "contains", "b") is True
         assert mgr._compare(1, "bogus", 1) is False
-
-
-class TestEvaluateCondition:
-    def test_condition_with_local_parser(self) -> None:
-        """本地 condition_parser（triggers/condition_parser.py，GAP-2 回移）→ 条件评估主路径。"""
-        mgr = TriggerManager()
-        cfg = _make_config(trigger_type=TriggerType.CONDITION, condition_expression="ready == true")
-        mgr.register(cfg)
-        assert mgr.evaluate_condition({"ready": True}) == ["t1"]
-        assert cfg.fire_count == 1
-        # 条件不满足 → 不触发（且不产生新边沿）
-        assert mgr.evaluate_condition({"ready": False}) == []
-
-    def test_condition_invalid_syntax_rejected_at_register(self) -> None:
-        """P4（兜底反模式审查）：语法错误注册期编译校验拒绝注册。
-
-        旧缺陷：语法错误的 condition 被接受 → 每轮静默求值 False →
-        触发器永不触发且零报错。
-        """
-        mgr = TriggerManager()
-        cfg = _make_config(trigger_type=TriggerType.CONDITION, condition_expression="!!!invalid")
-        with pytest.raises(ValueError, match="语法错误"):
-            mgr.register(cfg)
-        assert "t1" not in mgr._triggers, "被拒绝的触发器不得进入注册表"
-
-        # 未闭合字符串同属语法错误（tokenize/parse 阶段可捕获）
-        cfg2 = _make_config(trigger_id="t2", trigger_type=TriggerType.CONDITION,
-                            condition_expression="name == 'foo")
-        with pytest.raises(ValueError):
-            mgr.register(cfg2)
-
-    def test_condition_invalid_syntax_eval_degrades(self) -> None:
-        """求值期语法异常安全兜底为 False（纵深防御；注册期已拦截）。"""
-        from triggers.condition_parser import parse_condition
-
-        assert parse_condition("!!!invalid", {"x": 1}) is False
-
-    def test_condition_skipped_without_expression(self) -> None:
-        mgr = TriggerManager()
-        cfg = _make_config(trigger_type=TriggerType.CONDITION, condition_expression="")
-        mgr.register(cfg)
-        assert mgr.evaluate_condition({}) == []
 
 
 # ═══════════════════════════════════════════════════════════
@@ -805,246 +763,11 @@ class TestServer:
 
 
 # ═══════════════════════════════════════════════════════════
-# GAP-2：EVENT/CONDITION 触发器接线
-# - condition_parser 本地回移（triggers/condition_parser.py，无动态求值）
-# - 边沿检测（false→true 翻转才触发，持续满足不重复）
-# - state 聚合轮询（set_state_provider + _poll_conditions）
+# GAP-2：EVENT 触发器接线
 # - 域事件桥（handle_domain_event + server on_domain_event 接线）
 # - 注册防御（桥未就绪 → 明确警告，不静默）
+# - CONDITION 求值已上收内核 trigger-svc（M1），插件侧求值/轮询测试随退休链路删除
 # ═══════════════════════════════════════════════════════════
-
-
-class TestConditionParserGAP2:
-    """本地安全条件求值器（Rust engine/condition.rs 的 Python 回移 + 扁平键支持）。"""
-
-    def test_flat_dotted_keys(self) -> None:
-        """state 聚合行是扁平点号键（task.status / track.total_tokens 同款）。"""
-        from triggers.condition_parser import parse_condition
-
-        ctx = {"task.status": "failed", "task.goal": "喝水提醒"}
-        assert parse_condition("task.status == 'failed'", ctx) is True
-        assert parse_condition("task.status == 'completed'", ctx) is False
-        assert parse_condition("task.goal == '喝水提醒'", ctx) is True
-
-    def test_nested_dotted_path(self) -> None:
-        """嵌套 dict 点链访问（与 0.1/Rust 版一致的解析语义）。"""
-        from triggers.condition_parser import parse_condition
-
-        ctx = {"execution_context": {"workspace": {"mode": "worktree"}}}
-        assert parse_condition("execution_context.workspace.mode == 'worktree'", ctx) is True
-        assert parse_condition("execution_context.workspace.mode == 'plain'", ctx) is False
-
-    def test_operators_and_logic(self) -> None:
-        from triggers.condition_parser import parse_condition
-
-        ctx = {"n": 5, "a": True, "b": False, "xs": [1, 2, 3]}
-        assert parse_condition("n > 3", ctx) is True
-        assert parse_condition("n >= 5 and n <= 5", ctx) is True
-        assert parse_condition("n < 3 or a == true", ctx) is True
-        assert parse_condition("not b", ctx) is True
-        assert parse_condition("xs == [1, 2, 3]", ctx) is True
-        assert parse_condition("xs != []", ctx) is True
-
-    def test_missing_var_and_literals(self) -> None:
-        from triggers.condition_parser import parse_condition
-
-        assert parse_condition("missing == None", {}) is True
-        assert parse_condition("missing == 'x'", {}) is False
-        assert parse_condition("", {}) is True  # 空表达式恒真（与 0.1 一致）
-        assert parse_condition("True", {}) is True
-
-    def test_invalid_or_unsafe_expression_is_false(self) -> None:
-        """语法错误 / 注入尝试 → 安全兜底 False，绝不 eval。"""
-        from triggers.condition_parser import parse_condition
-
-        assert parse_condition("!!!invalid", {}) is False
-        assert parse_condition("__import__('os').system('rm -rf')", {}) is False
-        assert parse_condition("a == ", {}) is False
-
-    def test_flat_key_preferred_over_nested(self) -> None:
-        """同名时扁平键优先（STATE_SUMMARY_KEYS 约定），嵌套结构仍可回退。"""
-        from triggers.condition_parser import parse_condition
-
-        ctx = {"task.status": "running", "task": {"status": "failed"}}
-        assert parse_condition("task.status == 'running'", ctx) is True
-
-
-class TestConditionEdgeDetection:
-    """CONDITION 边沿检测：仅 false→true 翻转触发一次（GAP-2 定案）。"""
-
-    def _cond_mgr(self) -> tuple[TriggerManager, TriggerConfig]:
-        mgr = TriggerManager()
-        cfg = _make_config(
-            trigger_type=TriggerType.CONDITION,
-            condition_expression="task.status == 'failed'",
-            max_fires=0,
-        )
-        mgr.register(cfg)
-        return mgr, cfg
-
-    def test_unknown_to_true_fires_once(self) -> None:
-        """注册时已为真 → 计一次边沿（追溯性）。"""
-        mgr, cfg = self._cond_mgr()
-        try:
-            assert mgr.evaluate_condition({"task.status": "failed"}) == ["t1"]
-            # 持续满足 → 不重复注入
-            assert mgr.evaluate_condition({"task.status": "failed"}) == []
-            assert mgr.evaluate_condition({"task.status": "failed"}) == []
-            assert cfg.fire_count == 1
-        finally:
-            mgr.stop_check_loop()
-
-    def test_false_to_true_edge_fires(self) -> None:
-        mgr, cfg = self._cond_mgr()
-        try:
-            assert mgr.evaluate_condition({"task.status": "running"}) == []
-            assert mgr.evaluate_condition({"task.status": "failed"}) == ["t1"]
-            # true → false → true：新边沿，再次触发（max_fires=0 不限次）
-            assert mgr.evaluate_condition({"task.status": "running"}) == []
-            assert mgr.evaluate_condition({"task.status": "failed"}) == ["t1"]
-            assert cfg.fire_count == 2
-        finally:
-            mgr.stop_check_loop()
-
-    def test_rows_any_match_single_edge(self) -> None:
-        """多管道聚合行：任一行满足即真，仍按触发器粒度计一次边沿。"""
-        mgr, cfg = self._cond_mgr()
-        try:
-            rows = [
-                {"pipeline_id": "p1", "task.status": "running"},
-                {"pipeline_id": "p2", "task.status": "failed"},
-            ]
-            assert mgr.evaluate_condition_rows(rows) == ["t1"]
-            rows2 = [
-                {"pipeline_id": "p1", "task.status": "failed"},
-                {"pipeline_id": "p2", "task.status": "failed"},
-            ]
-            # 两行都满足仍是同一电平 → 不重复
-            assert mgr.evaluate_condition_rows(rows2) == []
-            assert cfg.fire_count == 1
-        finally:
-            mgr.stop_check_loop()
-
-
-class TestConditionPolling:
-    """检查循环条件轮询：state provider 注入 + _poll_conditions 驱动注入。"""
-
-    def test_poll_conditions_fires_and_injects(self) -> None:
-        received: list[tuple] = []
-
-        async def fake_injector(pipeline_id: str, message: str, user_id: str) -> str:
-            received.append((pipeline_id, message, user_id))
-            return "ok"
-
-        def provider() -> list[dict]:
-            return [{"pipeline_id": "p9", "task.status": "failed", "task.goal": "修 bug"}]
-
-        with _LoopThread() as lt:
-            mgr = TriggerManager()
-            mgr.set_main_loop(lt.loop)
-            mgr.set_injector(fake_injector)
-            mgr.set_state_provider(provider)
-            cfg = _make_config(
-                trigger_type=TriggerType.CONDITION,
-                condition_expression="task.status == 'failed'",
-                max_fires=0,
-                metadata={"user_id": "u-1"},
-            )
-            mgr.register(cfg)
-            try:
-                mgr._poll_conditions()
-                assert len(received) == 1
-                assert received[0][0] == "pipe-1"
-                assert "[触发器通知]" in received[0][1]
-                assert received[0][2] == "u-1"
-                # 持续满足 → 不重复注入
-                mgr._poll_conditions()
-                assert len(received) == 1
-            finally:
-                mgr.stop_check_loop()
-
-    def test_async_provider_via_main_loop(self) -> None:
-        """async provider（server.py 生产形态）→ 经 run_coroutine_threadsafe 求值。"""
-
-        async def provider() -> list[dict]:
-            return [{"task.status": "completed"}]
-
-        calls: list[tuple] = []
-
-        async def fake_injector(pipeline_id: str, message: str, user_id: str) -> str:
-            calls.append((pipeline_id, message))
-            return "ok"
-
-        with _LoopThread() as lt:
-            mgr = TriggerManager()
-            mgr.set_main_loop(lt.loop)
-            mgr.set_injector(fake_injector)
-            mgr.set_state_provider(provider)
-            cfg = _make_config(
-                trigger_type=TriggerType.CONDITION,
-                condition_expression="task.status == 'completed'",
-                max_fires=1,
-            )
-            mgr.register(cfg)
-            try:
-                mgr._poll_conditions()
-                assert len(calls) == 1
-            finally:
-                mgr.stop_check_loop()
-
-    def test_no_condition_triggers_skips_provider(self) -> None:
-        """无活跃 CONDITION 触发器 → 不调 provider（省一次内核往返）。"""
-        provider_calls: list[int] = []
-
-        def provider() -> list[dict]:
-            provider_calls.append(1)
-            return []
-
-        mgr = TriggerManager()
-        mgr.set_state_provider(provider)
-        cfg = _make_config(trigger_type=TriggerType.DELAY, delay_seconds=3600)
-        mgr.register(cfg)
-        try:
-            mgr._poll_conditions()
-            assert provider_calls == []
-        finally:
-            mgr.stop_check_loop()
-
-    def test_provider_error_degrades(self) -> None:
-        def bad_provider() -> list[dict]:
-            raise RuntimeError("kernel down")
-
-        mgr = TriggerManager()
-        mgr.set_state_provider(bad_provider)
-        cfg = _make_config(trigger_type=TriggerType.CONDITION, condition_expression="x == 1")
-        mgr.register(cfg)
-        try:
-            mgr._poll_conditions()  # 不抛异常
-            assert cfg.fire_count == 0
-        finally:
-            mgr.stop_check_loop()
-
-    def test_provider_not_set_degrades(self) -> None:
-        mgr = TriggerManager()
-        cfg = _make_config(trigger_type=TriggerType.CONDITION, condition_expression="x == 1")
-        mgr.register(cfg)
-        try:
-            mgr._poll_conditions()  # 不抛异常
-            assert cfg.fire_count == 0
-            assert mgr.is_state_provider_ready() is False
-        finally:
-            mgr.stop_check_loop()
-
-    def test_provider_non_list_return_degrades(self) -> None:
-        mgr = TriggerManager()
-        mgr.set_state_provider(lambda: {"not": "a list"})
-        cfg = _make_config(trigger_type=TriggerType.CONDITION, condition_expression="x == 1")
-        mgr.register(cfg)
-        try:
-            mgr._poll_conditions()
-            assert cfg.fire_count == 0
-        finally:
-            mgr.stop_check_loop()
 
 
 class TestDomainEventBridge:
@@ -1353,22 +1076,6 @@ class TestSetupToolBridgeWarnings:
         finally:
             fresh.stop_check_loop()
 
-    def test_condition_without_provider_warns(self) -> None:
-        mod = _load_tool()
-        fresh = TriggerManager()
-        mod.get_trigger_manager = lambda: fresh
-        try:
-            inst = mod.TriggerSetupTool()
-            r = _run(inst.execute({"trigger_type": "condition", "condition": "a == 1", "message": "m", "pipeline_id": "p"}))
-            assert r.success
-            assert "warning" in r.output
-            # provider 就绪 → 无警告
-            fresh.set_state_provider(lambda: [])
-            r2 = _run(inst.execute({"trigger_type": "condition", "condition": "a == 1", "message": "m", "pipeline_id": "p2"}))
-            assert r2.success
-            assert "warning" not in r2.output
-        finally:
-            fresh.stop_check_loop()
 
 
 class TestServerGAP2Wiring:

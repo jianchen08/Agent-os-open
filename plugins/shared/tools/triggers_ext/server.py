@@ -51,11 +51,13 @@ def _make_trigger_injector() -> Any:
 
 
 def _make_state_provider() -> Any:
-    """构造 state 聚合行提供者（GAP-2 CONDITION 求值上下文）。
+    """构造 state 聚合行读面（M1 起仅供注册表重灌与 REST 管道选项消费）。
 
     经内核 ``pipeline-state`` capability 读管道 state 聚合（与
-    /api/v1/pipelines/state 同构：扁平点号键行）。能力句柄懒解析
-    （协程内 get_capability），读取失败由 manager 记录并跳过本轮。
+    /api/v1/pipelines/state 同构：扁平点号键行）。CONDITION 求值已上收
+    内核 trigger-svc，本读面现存消费方：on_load 重灌（load_from_state）
+    与 http_api ``GET /pipelines``（目标管道下拉选项）。能力句柄懒解析
+    （协程内 get_capability），读取失败由调用方留痕/转 5xx。
     """
 
     async def _provide() -> list[dict[str, Any]]:
@@ -89,7 +91,8 @@ async def _on_load(_params: dict[str, Any]) -> None:
 
     1. set_main_loop 注入运行循环 → 触发器到期可调度；
     2. 注入器经内核 chat capability 投递触发消息；
-    3. state provider 注入 → CONDITION 触发器有了求值上下文（state 聚合轮询）；
+    3. state 读面注入 → 注册表重灌（load_from_state）与 REST 管道选项
+       （GET /pipelines）可用（CONDITION 求值已上收内核 trigger-svc）；
     4. 域事件桥就绪标记 → manifest 声明 domain_event hook + 下方
        ``_on_domain_event`` 处理器注册后，内核终态事件可达 evaluate_event；
     5. capability provider 注入 → trigger_setup 写入 command 类动作时经

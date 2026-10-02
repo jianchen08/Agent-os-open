@@ -2,32 +2,18 @@
 """Python 簇 H 缺口补测（triggers_ext 触发器族）——coverage.xml 2026-09-14 口径缺行。
 
 靶单（逐条对应下方测试）：
-- triggers/manager.py 299-301（条件求值异常 → 警告并跳过该触发器）、659-661
-  （循环内落盘的 done 回调：落盘任务异常 → error 留痕）、674,678（非循环上下文
-  且主循环缺失/已关闭 → 暂缓落盘警告）、858-859（检查循环对条件轮询异常的包含）、
-  889（条件轮询：命中 ID 在评估期间被注销 → 跳过投递）；
-- triggers/condition_parser.py 357（_eval_value 未知节点类型兜底 None）；
+- triggers/manager.py（循环内落盘的 done 回调：落盘任务异常 → error 留痕；
+  非循环上下文且主循环缺失/已关闭 → 暂缓落盘警告）；
 - triggers/types.py 206（to_state_dict 容器字段 None → {} 兜底）；
 - tool.py 529（update 命中已取消触发器 → TRIGGER_UPDATE_FAILED）;
 - server.py 109（on_load 重灌成功分支）、132（域事件缺 event 名 → 早退）;
 - http_api.py 27（首次导入时把 plugins/shared 推入 sys.path）。
 
-不可达行说明（逐条）：
-- manager.py 299-301 在**不改注入**的前提下不可达：`_eval_condition` 委托的
-  condition_parser.parse_condition 契约上是 total（编译/求值异常一律吞并返回
-  False，绝不外抛），故该 except 只可能在协作模块违反契约时触发（如依赖方向
-  的导入级故障或未来版本改动）。本文件以 monkeypatch 把该协作模块的
-  parse_condition 替换为抛错实现（**协作者故障注入**，非 mock 被测对象内部），
-  锁定"单触发器求值炸裂不得中断其余触发器"的包含行为；这是该分支唯一可执行的
-  验证方式。
-- manager.py 858-859 同理属包含性防御，但其可达路径**真实存在**：state 重灌
-  （load_from_state，公共 API）会把 `"metadata": null` 的腐败 state 值还原成
-  metadata=None 的触发器，条件轮询在边沿检测处 `.get` 抛 AttributeError。
-  本文件用该真实输入驱动，不做任何注入。
+（原条件求值异常包含/条件轮询注销竞态/轮询循环包含/解析器未知节点四簇
+随 CONDITION 求值上收内核 trigger-svc 的退休链路删除，M1。）
 
-外部依赖替身：注入器/state 读写面用假件（闭包），主循环用独立线程事件循环
-（既有 _LoopThread 同款）；检查循环以 monkeypatch 缩短间隔 + 事件驱动退出，
-不空转真等待。
+外部依赖替身：state 读写面用假件（闭包），主循环用独立线程事件循环
+（既有 _LoopThread 同款）；事件驱动等待，不空转真等待。
 """
 
 from __future__ import annotations
@@ -37,7 +23,6 @@ import logging
 import os
 import sys
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -96,15 +81,6 @@ def _run(coro: Any) -> Any:
         loop.close()
 
 
-def _wait_for(cond: Any, timeout: float = 5.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if cond():
-            return True
-        time.sleep(0.01)
-    return False
-
-
 class _LoopThread:
     """独立线程运行事件循环（供 persist 的 run_coroutine_threadsafe 使用）。"""
 
@@ -126,55 +102,6 @@ class _LoopThread:
 # manager.evaluate_condition_rows：求值异常包含（协作模块故障注入）
 # ═══════════════════════════════════════════════════════════
 
-
-class TestConditionEvaluationFailureContainment:
-    """299-301：单触发器条件求值异常 → 警告跳过，其余触发器照常评估。"""
-
-    def test_failing_evaluation_does_not_block_other_triggers(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """故障注入：parse_condition 抛错 → 该触发器不点火，健康触发器仍点火。
-
-        断言可观察行为（fired 列表 / fire_count / 状态），不断言调用计数；
-        对照组健康触发器证明包含而非"整轮放弃"。
-        """
-        import triggers.condition_parser as parser_mod
-
-        bad = _make_config(trigger_id="t-bad", condition_expression="explode == true")
-        good = _make_config(trigger_id="t-good", condition_expression="ready == true")
-
-        mgr = TriggerManager()
-        mgr.register(bad)
-        mgr.register(good)
-        try:
-            def _boom(expression: str, context: dict[str, Any]) -> bool:
-                # 仅对故障触发器的表达式违约（健康触发器走原解析器语义）
-                if "explode" in expression:
-                    raise RuntimeError("parser contract violated")
-                return bool(context.get("ready"))
-
-            monkeypatch.setattr(parser_mod, "parse_condition", _boom)
-            fired = mgr.evaluate_condition_rows([{"ready": True, "explode": True}])
-        finally:
-            mgr.stop_check_loop()
-
-        assert fired == ["t-good"], "异常触发器被跳过，健康触发器不受影响"
-        assert bad.fire_count == 0
-        assert bad.status == TriggerStatus.ACTIVE
-        assert good.fire_count == 1
-
-    def test_healthy_parser_evaluates_both_triggers(self) -> None:
-        """对照支（真实依赖）：未注入时两个触发器均在边沿点火。"""
-        mgr = TriggerManager()
-        first = _make_config(trigger_id="t-a", condition_expression="ready == true")
-        second = _make_config(trigger_id="t-b", condition_expression="flag == 1")
-        mgr.register(first)
-        mgr.register(second)
-        try:
-            fired = mgr.evaluate_condition_rows([{"ready": True, "flag": 1}])
-        finally:
-            mgr.stop_check_loop()
-        assert sorted(fired) == ["t-a", "t-b"]
 
 
 # ═══════════════════════════════════════════════════════════
@@ -267,132 +194,6 @@ class TestPersistLoopBranches:
 # ═══════════════════════════════════════════════════════════
 
 
-class TestPollConditionsUnregisterRace:
-    """889：条件命中后在投递阶段前被注销 → 跳过该 ID（不崩、不投递）。"""
-
-    def test_trigger_unregistered_between_evaluate_and_dispatch_is_skipped(self) -> None:
-        """评估结果与派发之间注册表已无该 ID → 派发阶段跳过，注入器零触达。
-
-        接缝说明：evaluate → dispatch 之间不存在可注入的异步窗口；真实跨线程
-        竞态（如 HTTP DELETE /triggers/{id} 在检查循环线程迭代期间 unregister）
-        会先在 evaluate_condition_rows 的 ``for trigger in self._triggers.values()``
-        处抛 ``RuntimeError: dictionary changed size during iteration``，无法稳定
-        落在 889——该跨线程变更窗口已记入本次补测回报（疑似真缺陷，未改生产
-        代码）。本用例以子类覆写评估钩子（子类 + super() 保留真实评估与记账），
-        只制造"ID 已不在注册表"这一前置状态，不改生产代码。
-        """
-        received: list[tuple[str, str]] = []
-
-        class _VanishingManager(TriggerManager):
-            """评估后立刻经公共 unregister 注销命中项（模拟派发前消失）。"""
-
-            def evaluate_condition_rows(self, rows: list[dict[str, Any]]) -> list[str]:
-                fired = super().evaluate_condition_rows(rows)
-                for trigger_id in fired:
-                    self.unregister(trigger_id)
-                return fired
-
-        async def injector(pipeline_id: str, message: str, user_id: str) -> str:
-            received.append((pipeline_id, message))
-            return "ok"
-
-        mgr = _VanishingManager()
-        mgr.set_injector(injector)
-        mgr.set_state_provider(lambda: [{"ready": True}])
-        config = _make_config(trigger_id="t-gone", max_fires=0)
-        mgr.register(config)
-        try:
-            mgr._poll_conditions()  # 不得抛异常（889 守卫的契约）
-        finally:
-            mgr.stop_check_loop()
-
-        assert config.fire_count == 1, "评估/记账先于注销，命中结果保留"
-        assert mgr.get("t-gone") is None, "前置状态：注册表已无该触发器"
-        assert received == [], "派发阶段不得向注入器投递已消失的触发器"
-
-    def test_registered_trigger_is_dispatched(self) -> None:
-        """对照支：触发器仍在注册表时派发照常到达注入器（区分"跳过"非普遍行为）。"""
-        received: list[tuple[str, str]] = []
-
-        async def injector(pipeline_id: str, message: str, user_id: str) -> str:
-            received.append((pipeline_id, message))
-            return "ok"
-
-        mgr = TriggerManager()
-        mgr.set_injector(injector)
-        mgr.set_state_provider(lambda: [{"ready": True}])
-        with _LoopThread() as lt:
-            mgr.set_main_loop(lt.loop)
-            config = _make_config(trigger_id="t-live", max_fires=0)
-            mgr.register(config)
-            try:
-                mgr._poll_conditions()
-                assert _wait_for(lambda: bool(received)), "命中触发器必须完成投递"
-            finally:
-                mgr.stop_check_loop()
-        assert received[0][0] == "pipe-1"
-        assert "触发器通知" in received[0][1]
-
-
-class TestCheckLoopContainsPollFailure:
-    """858-859：条件轮询抛异常 → 检查循环记录并继续（真实腐败 state 驱动）。"""
-
-    def test_corrupt_metadata_state_does_not_kill_check_loop(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """metadata=null 的重灌触发器在边沿检测处抛 AttributeError → 循环存活。
-
-        输入来自公共重灌路径（load_from_state + 腐败 state 值），无任何注入；
-        断言循环线程退出（可停）且错误被留痕——包含性即"异常不终止循环"。
-        """
-        monkeypatch.setattr(manager_mod, "_TRIGGER_CHECK_INTERVAL", 0.01)
-        corrupt_state = {
-            "trigger_id": "t-corrupt",
-            "trigger_type": "condition",
-            "status": "active",
-            "condition_expression": "ready == true",
-            "metadata": None,
-        }
-        mgr = TriggerManager()
-        mgr.set_state_provider(lambda: [
-            {"pipeline_id": "pipe-x", "task.trigger.registry.t-corrupt": corrupt_state}
-        ])
-        restored = _run(mgr.load_from_state())
-        assert restored == 1, "腐败 state 值仍以现状还原（不静默丢弃）"
-
-        thread = threading.Thread(target=mgr._check_loop_sync, daemon=True)
-        with caplog.at_level(logging.ERROR):
-            thread.start()
-            try:
-                assert _wait_for(
-                    lambda: any("条件轮询异常" in r.getMessage() for r in caplog.records)
-                ), "条件轮询异常必须被检查循环记录"
-            finally:
-                mgr.stop_check_loop()
-                thread.join(timeout=5)
-
-        assert not thread.is_alive(), "记录异常后检查循环必须可正常退出"
-        assert mgr.get("t-corrupt") is not None, "循环不因单触发器异常丢失注册表"
-
-    def test_healthy_poll_keeps_loop_silent(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """对照支：健康触发器轮询不产生循环级错误日志。"""
-        monkeypatch.setattr(manager_mod, "_TRIGGER_CHECK_INTERVAL", 0.01)
-        mgr = TriggerManager()
-        mgr.set_state_provider(lambda: [{"ready": True}])
-        mgr.register(_make_config(trigger_id="t-ok", condition_expression="ready == true"))
-
-        thread = threading.Thread(target=mgr._check_loop_sync, daemon=True)
-        with caplog.at_level(logging.ERROR):
-            thread.start()
-            assert _wait_for(lambda: _run(mgr.collect_state_rows()) is not None)
-            time.sleep(0.03)  # 至少跑过两轮轮询
-            mgr.stop_check_loop()
-            thread.join(timeout=5)
-
-        assert not thread.is_alive()
-        assert not any("条件轮询异常" in r.getMessage() for r in caplog.records)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -436,35 +237,6 @@ class TestStateDictContainerFallback:
         assert state["metadata"]["user_id"] == "u1"
         assert state["action_params"]["cmd"] == ["echo"]
 
-
-class TestConditionParserUnknownNode:
-    """condition_parser.py 357：_eval_value 对非 AST 输入兜底 None（不炸）。"""
-
-    @pytest.mark.parametrize(
-        ("foreign", "expected"),
-        [
-            (object(), False),
-            ({"a": 1}, False),
-            ("not-an-ast", False),
-        ],
-        ids=["object", "dict", "str"],
-    )
-    def test_foreign_node_evaluates_falsy(self, foreign: Any, expected: bool) -> None:
-        """三组非 AST 输入（对象/字典/字符串）→ 求值 False，不抛异常。
-
-        性质断言：任何非识别节点都不会被 truthy 化（安全兜底方向恒为"不触发"）。
-        """
-        from triggers.condition_parser import eval_compiled
-
-        assert eval_compiled(foreign, {"a": 1}) is expected
-
-    def test_compiled_ast_still_evaluates(self) -> None:
-        """对照支：真实编译产物仍正常求值（兜底分支不影响正常路径）。"""
-        from triggers.condition_parser import compile_condition, eval_compiled
-
-        ast = compile_condition("a == 1")
-        assert eval_compiled(ast, {"a": 1}) is True
-        assert eval_compiled(ast, {"a": 2}) is False
 
 
 # ═══════════════════════════════════════════════════════════

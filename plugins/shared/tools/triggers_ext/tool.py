@@ -1028,18 +1028,4 @@ class TriggerSetupTool(BuiltinTool):
             "message": f"条件触发器已设置，条件: {condition}",
         }
 
-        # GAP-2 防御：state 聚合桥未就绪（server.py 未注入 state provider）时
-        # CONDITION 触发器没有求值上下文——明确警告，不静默注册成功。
-        if not self._manager.is_state_provider_ready():
-            data["warning"] = (
-                "条件求值桥未就绪：当前 sidecar 未接通管道 state 聚合读取，"
-                "此 CONDITION 触发器可能永远不会触发（请检查 server.py 的 "
-                "state provider 注入与内核 pipeline-state capability）"
-            )
-            logger.warning(
-                "[TriggerSetupTool] CONDITION 触发器注册于 state 聚合桥未就绪状态 | trigger_id=%s | condition=%s",
-                trigger_id,
-                condition,
-            )
-
         return create_success_result(data=data)
