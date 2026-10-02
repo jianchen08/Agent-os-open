@@ -85,26 +85,47 @@ def _make_state_writer() -> Any:
     return _write
 
 
+def _make_trigger_svc_provider() -> Any:
+    """构造内核 trigger-svc 能力提供者（CONDITION 注册转调/点火 ack 的通道）。
+
+    能力句柄懒解析（调用时 get_capability）：内核未注入该 capability（G6
+    白名单未声明 / 内核版本不含 trigger-svc）时返回 None，由 manager 转为
+    fail-visible 报错——注册/取消/对账路径绝不静默降级。
+    """
+
+    def _resolve() -> Any:
+        try:
+            return plugin.get_capability("trigger-svc")
+        except KeyError:
+            return None
+
+    return _resolve
+
+
 @plugin.on_load
 async def _on_load(_params: dict[str, Any]) -> None:
     """sidecar 启动（主事件循环内）：接通触发检查循环 + 注入器 + 双桥 + 审批闸。
 
-    1. set_main_loop 注入运行循环 → 触发器到期可调度；
+    1. set_main_loop 注入运行循环 → 触发器到期可调度、reconcile 对账循环可挂载；
     2. 注入器经内核 chat capability 投递触发消息；
     3. state 读面注入 → 注册表重灌（load_from_state）与 REST 管道选项
        （GET /pipelines）可用（CONDITION 求值已上收内核 trigger-svc）；
     4. 域事件桥就绪标记 → manifest 声明 domain_event hook + 下方
-       ``_on_domain_event`` 处理器注册后，内核终态事件可达 evaluate_event；
+       ``_on_domain_event`` 处理器注册后，内核终态事件可达 evaluate_event，
+       内核 CONDITION 点火通知（trigger.fired）可达动作分发；
     5. capability provider 注入 → trigger_setup 写入 command 类动作时经
        human-interaction 审批闸（manifest granted_capabilities 须含 human-interaction）；
     6. state 写面注入 + 全量重灌 → sidecar 重启/迁移/回收后从管道 state
-       恢复触发器注册表（P25 根治 P21/P24 内存态丢失）。
+       恢复触发器注册表（P25 根治 P21/P24 内存态丢失）；
+    7. trigger-svc 通道接线 + reconcile 对账循环启动 → CONDITION 注册转调、
+       点火 ack 与 60s（可配）未 ack 火补分发（M1 求值上收内核）。
     """
     mgr = get_trigger_manager()
     mgr.set_main_loop(asyncio.get_running_loop())
     mgr.set_injector(_make_trigger_injector())
     mgr.set_state_provider(_make_state_provider())
     mgr.set_state_writer(_make_state_writer())
+    mgr.set_trigger_svc_provider(_make_trigger_svc_provider(), owner_plugin_id=plugin.name)
     mgr.set_event_bridge_ready()
     set_capability_provider(plugin.get_capability)
     try:
@@ -113,25 +134,33 @@ async def _on_load(_params: dict[str, Any]) -> None:
     except Exception as exc:  # noqa: BLE001 - 重灌失败不阻断启动，本轮以空注册表运行
         logger.error("[triggers_ext] 触发器 state 重灌失败（本轮以空注册表运行）: %s", exc)
     mgr.start_check_loop()
+    mgr.start_reconcile_loop()
 
 
 @plugin.on_unload
 async def _on_unload(_params: dict[str, Any]) -> None:
-    """sidecar 卸载：停止后台检查线程 + 复位审批闸能力接入。"""
+    """sidecar 卸载：停止后台检查线程 + reconcile 对账循环 + 复位审批闸能力接入。"""
     set_capability_provider(None)
-    get_trigger_manager().stop_check_loop()
+    mgr = get_trigger_manager()
+    mgr.stop_reconcile_loop()
+    mgr.stop_check_loop()
 
 
 @plugin.on_domain_event
 async def _on_domain_event(params: dict[str, Any]) -> None:
-    """域事件入口（GAP-2 EVENT 接线）。
+    """域事件入口（GAP-2 EVENT 接线 + M1 内核点火消费）。
 
     内核在 run 终态（completed/failed/suspended）经 broadcast_domain_event
     推送域事件（state 带 ``task.*`` 字段时派生 ``task_completed`` /
-    ``task_failed``）；此处转发给 TriggerManager.evaluate_event 匹配触发器。
+    ``task_failed``）；此处转发给 TriggerManager.handle_domain_event 匹配
+    EVENT 触发器。``trigger.fired``（内核 CONDITION 求值命中，M1 求值上收）
+    转发 handle_trigger_fired：动作分发 + 成功后 ack。
     """
     event_name = params.get("event") or ""
     if not event_name:
+        return
+    if event_name == "trigger.fired":
+        await get_trigger_manager().handle_trigger_fired(params)
         return
     await get_trigger_manager().handle_domain_event(event_name, params)
 

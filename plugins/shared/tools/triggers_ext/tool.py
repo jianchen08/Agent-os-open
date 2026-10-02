@@ -590,6 +590,23 @@ class TriggerSetupTool(BuiltinTool):
                     error_code="TRIGGER_PIPELINE_MISMATCH",
                 )
 
+        if trigger.trigger_type == TriggerType.CONDITION:
+            # 求值上收内核（M1）：取消须同步注销内核 trigger-svc 注册，否则
+            # 内核继续求值点火。注销失败 → 中止取消（本地注册不动，可重试），
+            # 不静默留下"本地已取消、内核继续点火"的不一致。
+            try:
+                await self._manager.unregister_kernel_condition(trigger_id)
+            except Exception as e:
+                logger.error(
+                    "[TriggerSetupTool] 内核 trigger-svc 注销失败，取消中止 | trigger_id=%s | error=%s",
+                    trigger_id,
+                    e,
+                )
+                return create_failure_result(
+                    error=f"内核 trigger-svc 注销失败，触发器未取消: {e}",
+                    error_code="TRIGGER_KERNEL_UNREGISTER_FAILED",
+                )
+
         success = self._manager.cancel(trigger_id)
         if not success:
             return create_failure_result(
@@ -993,6 +1010,14 @@ class TriggerSetupTool(BuiltinTool):
 
         trigger_id = f"trigger_condition_{uuid.uuid4().hex[:12]}"
 
+        # 求值上收内核（M1）：CONDITION 触发器必须先在内核 trigger-svc 注册
+        # 成功（注册期表达式校验 + 种子求值）。内核不可用/表达式非法 → 显式
+        # 报错，绝不静默注册一个永不触发的触发器。M1 已知限制：求值仅
+        # committed 视图（staged 视图属 M2）。
+        seed_fired = await self._manager.register_kernel_condition(
+            trigger_id, condition, pipeline_id or ""
+        )
+
         config = TriggerConfig(
             trigger_id=trigger_id,
             name=inputs.get("name", f"条件触发器-{condition[:30]}"),
@@ -1027,5 +1052,14 @@ class TriggerSetupTool(BuiltinTool):
             "trigger_type": "condition",
             "message": f"条件触发器已设置，条件: {condition}",
         }
+
+        # seed_fired：注册时种子求值即命中，内核已按边沿语义点火一次
+        if seed_fired:
+            data["warning"] = "条件在注册时即已满足，本次注册已触发一次"
+            logger.info(
+                "[TriggerSetupTool] CONDITION 触发器种子命中 | trigger_id=%s | condition=%s",
+                trigger_id,
+                condition,
+            )
 
         return create_success_result(data=data)

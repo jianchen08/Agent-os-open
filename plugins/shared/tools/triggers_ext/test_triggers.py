@@ -107,6 +107,46 @@ class _LoopThread:
         self.loop.close()
 
 
+class _FakeTriggerSvc:
+    """内核 trigger-svc capability 替身（外部依赖 mock）：记录方法调用并回放预设响应。
+
+    register 默认回 ``{"ok": True, "seed_fired": False}``；其余方法回
+    ``{"ok": True}``。``reconcile_fires`` 预设对账返回的火记录；
+    ``register_results`` 队列可逐次覆盖 register 响应（含异常注入）。
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self.reconcile_fires: list[dict] = []
+        self.register_results: list[Any] = []  # 非空时逐次弹出（Exception 直抛）
+
+    async def call(self, method: str, params: dict) -> Any:
+        self.calls.append((method, dict(params)))
+        if method == "register":
+            if self.register_results:
+                item = self.register_results.pop(0)
+                if isinstance(item, Exception):
+                    raise item
+                return item
+            return {"ok": True, "seed_fired": False}
+        if method == "reconcile":
+            return {"fires": list(self.reconcile_fires)}
+        return {"ok": True}
+
+    def methods(self, name: str) -> list[dict]:
+        return [params for method, params in self.calls if method == name]
+
+
+def _wait_until(cond: Any, timeout: float = 10.0) -> bool:
+    """轮询等待条件成立（事件驱动，不空睡固定时长）。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if cond():
+            return True
+        time.sleep(0.05)
+    return False
+
+
 # ═══════════════════════════════════════════════════════════
 # TriggerManager：注册 / 注销 / 查询
 # ═══════════════════════════════════════════════════════════
@@ -621,6 +661,10 @@ class TestSetupTool:
         assert _run(tool.execute({"trigger_type": "event", "message": "m", "pipeline_id": "p"})).error_code == "MISSING_EVENT_TYPE"
 
     def test_condition_setup_success(self, tool: Any) -> None:
+        """CONDITION 创建经内核 trigger-svc 注册（M1 求值上收）。"""
+        tool._manager.set_trigger_svc_provider(
+            _FakeTriggerSvc, owner_plugin_id="trigger_setup_tool"
+        )
         r = _run(tool.execute({"trigger_type": "condition", "condition": "a == 1", "message": "m", "pipeline_id": "p"}))
         assert r.success
         assert _run(tool.execute({"trigger_type": "condition", "message": "m", "pipeline_id": "p"})).error_code == "MISSING_CONDITION"
@@ -1142,6 +1186,69 @@ class TestServerGAP2Wiring:
             del mgr.handle_domain_event
             mgr.stop_check_loop()
 
+    def test_on_load_wires_trigger_svc_and_reconcile_loop(self) -> None:
+        """M1：on_load 接线 trigger-svc 通道并启动 reconcile 对账循环，on_load 卸载停止。"""
+        import triggers.manager as manager_mod
+
+        server = _load_server()
+        real_mgr = manager_mod.get_trigger_manager()
+        real_mgr.stop_check_loop()
+        real_mgr.stop_reconcile_loop()
+        try:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(server._on_load({}))
+                assert real_mgr.is_trigger_svc_ready() is True
+                assert real_mgr.is_reconcile_loop_running() is True
+                loop.run_until_complete(server._on_unload({}))
+                assert real_mgr.is_reconcile_loop_running() is False
+            finally:
+                loop.close()
+        finally:
+            real_mgr.stop_check_loop()
+            real_mgr.stop_reconcile_loop()
+
+    def test_domain_event_routes_trigger_fired_to_fired_handler(self) -> None:
+        """trigger.fired（内核 CONDITION 点火）路由 handle_trigger_fired，不走 evaluate_event 桥。"""
+        server = _load_server()
+        handler = server.plugin._lifecycle_handlers.get("domain_event")
+        assert handler is not None
+
+        import triggers.manager as manager_mod
+
+        mgr = manager_mod.get_trigger_manager()
+        mgr.stop_check_loop()
+        routed: list[dict] = []
+        legacy: list[tuple] = []
+
+        async def fake_fired(params: dict) -> None:
+            routed.append(dict(params))
+
+        async def fake_legacy(event_name: str, event_data: dict) -> list[str]:
+            legacy.append((event_name, dict(event_data)))
+            return []
+
+        mgr.handle_trigger_fired = fake_fired  # type: ignore[method-assign]
+        mgr.handle_domain_event = fake_legacy  # type: ignore[method-assign]
+        try:
+            _run(handler({"event": "trigger.fired", "trigger_id": "t9", "fire_seq": 1}))
+            assert routed == [{"event": "trigger.fired", "trigger_id": "t9", "fire_seq": 1}]
+            assert legacy == []
+            # 非 trigger.fired 事件照旧走 EVENT 桥
+            _run(handler({"event": "task_completed"}))
+            assert legacy == [("task_completed", {"event": "task_completed"})]
+        finally:
+            del mgr.handle_trigger_fired
+            del mgr.handle_domain_event
+            mgr.stop_check_loop()
+
+    def test_plugin_json_grants_trigger_svc(self) -> None:
+        """manifest granted_capabilities 含 trigger-svc（G6 白名单，反向调用授权单点）。"""
+        import json
+
+        manifest = json.loads((_PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
+        assert "trigger-svc" in manifest.get("granted_capabilities", [])
+
     def test_plugin_json_declares_domain_event_hook(self) -> None:
         """manifest 补 domain_event lifecycle hook（内核才会点对点推送域事件）。"""
         import json
@@ -1149,6 +1256,427 @@ class TestServerGAP2Wiring:
         manifest = json.loads((_PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
         hooks = manifest.get("capabilities", {}).get("lifecycle_hooks", [])
         assert "domain_event" in hooks
+
+
+# ═══════════════════════════════════════════════════════════
+# M1 求值上收内核：trigger-svc 注册转调 / trigger.fired 消费 / reconcile 对账
+# （内核 capability 属外部依赖，用替身 mock）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestKernelTriggerSvcBridge:
+    """CONDITION 注册/取消转调内核 trigger-svc；内核不可用 fail-visible。"""
+
+    def _tool(self, mod: Any) -> Any:
+        fresh = TriggerManager()
+        mod.get_trigger_manager = lambda: fresh
+        return mod.TriggerSetupTool(), fresh
+
+    def _load(self) -> Any:
+        return _load_tool()
+
+    def test_condition_register_forwards_kernel_params(self) -> None:
+        """注册参数契约：trigger_id/condition/pipeline_id/owner_plugin_id 如实转调。"""
+        tool, fresh = self._tool(self._load())
+        try:
+            svc = _FakeTriggerSvc()
+            fresh.set_trigger_svc_provider(lambda: svc, owner_plugin_id="trigger_setup_tool")
+            r = _run(tool.execute({"trigger_type": "condition", "condition": "task.status == 'failed'", "message": "m", "pipeline_id": "p-1"}))
+            assert r.success
+            registers = svc.methods("register")
+            assert len(registers) == 1
+            params = registers[0]
+            assert params["condition"] == "task.status == 'failed'"
+            assert params["pipeline_id"] == "p-1"
+            assert params["owner_plugin_id"] == "trigger_setup_tool"
+            assert params["trigger_id"] == r.output["trigger_id"]
+            # 本地注册表同步落地（触发器定义仍归插件持久化）
+            assert fresh.get(r.output["trigger_id"]) is not None
+        finally:
+            fresh.stop_check_loop()
+
+    def test_condition_register_seed_fired_warns(self) -> None:
+        """内核种子求值即命中（seed_fired=true）→ 成功结果携带明确 warning。"""
+        tool, fresh = self._tool(self._load())
+        try:
+            svc = _FakeTriggerSvc()
+            svc.register_results = [{"ok": True, "seed_fired": True}]
+            fresh.set_trigger_svc_provider(lambda: svc, owner_plugin_id="trigger_setup_tool")
+            r = _run(tool.execute({"trigger_type": "condition", "condition": "a == 1", "message": "m", "pipeline_id": "p"}))
+            assert r.success
+            assert "已触发一次" in r.output["warning"]
+        finally:
+            fresh.stop_check_loop()
+
+    def test_condition_register_kernel_unavailable_fails_visibly(self) -> None:
+        """内核未注入 trigger-svc → 注册失败报给调用方，触发器不进注册表。"""
+        tool, fresh = self._tool(self._load())
+        try:
+            fresh.set_trigger_svc_provider(lambda: None, owner_plugin_id="trigger_setup_tool")
+            r = _run(tool.execute({"trigger_type": "condition", "condition": "a == 1", "message": "m", "pipeline_id": "p"}))
+            assert not r.success and r.error_code == "TRIGGER_SETUP_FAILED"
+            assert "trigger-svc" in r.error
+            assert fresh.list_all() == [], "内核注册失败的触发器不得进入注册表"
+        finally:
+            fresh.stop_check_loop()
+
+    def test_condition_register_kernel_error_propagates(self) -> None:
+        """内核注册期拒绝（如表达式语法错误）→ 工具返回错误（不静默）。"""
+        tool, fresh = self._tool(self._load())
+        try:
+            svc = _FakeTriggerSvc()
+            svc.register_results = [RuntimeError("invalid expression")]
+            fresh.set_trigger_svc_provider(lambda: svc, owner_plugin_id="trigger_setup_tool")
+            r = _run(tool.execute({"trigger_type": "condition", "condition": "!!!invalid", "message": "m", "pipeline_id": "p"}))
+            assert not r.success and r.error_code == "TRIGGER_SETUP_FAILED"
+            assert "invalid expression" in r.error
+            assert fresh.list_all() == []
+        finally:
+            fresh.stop_check_loop()
+
+    def test_condition_cancel_forwards_unregister(self) -> None:
+        """取消 CONDITION 触发器：先内核 unregister 再本地取消。"""
+        tool, fresh = self._tool(self._load())
+        try:
+            svc = _FakeTriggerSvc()
+            fresh.set_trigger_svc_provider(lambda: svc, owner_plugin_id="trigger_setup_tool")
+            setup = _run(tool.execute({"trigger_type": "condition", "condition": "a == 1", "message": "m", "pipeline_id": "p"}))
+            tid = setup.output["trigger_id"]
+            r = _run(tool.execute({"action": "cancel", "trigger_id": tid, "pipeline_id": "p"}))
+            assert r.success
+            unregisters = svc.methods("unregister")
+            assert unregisters == [{"trigger_id": tid}]
+            cancelled = fresh.get(tid)
+            assert cancelled is not None and cancelled.status == TriggerStatus.CANCELLED
+        finally:
+            fresh.stop_check_loop()
+
+    def test_condition_cancel_kernel_unavailable_fails_visibly(self) -> None:
+        """内核注销失败 → 取消中止（本地注册保留，可重试），不静默。"""
+        tool, fresh = self._tool(self._load())
+        try:
+            svc = _FakeTriggerSvc()
+            fresh.set_trigger_svc_provider(lambda: svc, owner_plugin_id="trigger_setup_tool")
+            setup = _run(tool.execute({"trigger_type": "condition", "condition": "a == 1", "message": "m", "pipeline_id": "p"}))
+            tid = setup.output["trigger_id"]
+            # 内核此后不可用
+            fresh.set_trigger_svc_provider(lambda: None, owner_plugin_id="trigger_setup_tool")
+            r = _run(tool.execute({"action": "cancel", "trigger_id": tid, "pipeline_id": "p"}))
+            assert not r.success and r.error_code == "TRIGGER_KERNEL_UNREGISTER_FAILED"
+            assert fresh.get(tid) is not None, "内核注销失败的触发器本地注册保留"
+        finally:
+            fresh.stop_check_loop()
+
+    def test_non_condition_types_skip_kernel(self) -> None:
+        """delay 等类型不经 trigger-svc（M1 只上收 CONDITION 求值）。"""
+        tool, fresh = self._tool(self._load())
+        try:
+            svc = _FakeTriggerSvc()
+            fresh.set_trigger_svc_provider(lambda: svc, owner_plugin_id="trigger_setup_tool")
+            r = _run(tool.execute({"trigger_type": "delay", "delay_seconds": 60, "message": "m", "pipeline_id": "p"}))
+            assert r.success
+            assert svc.calls == []
+        finally:
+            fresh.stop_check_loop()
+
+
+class TestTriggerFiredConsumption:
+    """trigger.fired 点火消费：分发 → 簿记 → ack；去重/失败/越限路径。"""
+
+    def _cond_mgr(self, svc: _FakeTriggerSvc, **overrides: Any) -> TriggerManager:
+        mgr = TriggerManager()
+        mgr.set_trigger_svc_provider(lambda: svc, owner_plugin_id="trigger_setup_tool")
+        mgr.register(_make_config(
+            trigger_type=TriggerType.CONDITION,
+            condition_expression="task.status == 'failed'",
+            max_fires=0,
+            **overrides,
+        ))
+        return mgr
+
+    def test_fired_notify_dispatches_and_acks(self) -> None:
+        received: list[tuple] = []
+
+        async def injector(pipeline_id: str, message: str, user_id: str) -> str:
+            received.append((pipeline_id, message, user_id))
+            return "ok"
+
+        svc = _FakeTriggerSvc()
+        mgr = self._cond_mgr(svc, metadata={"user_id": "u-1"})
+        mgr.set_injector(injector)
+        try:
+            _run(mgr.handle_trigger_fired({"trigger_id": "t1", "fire_seq": 7, "view": "committed", "keys": ["task.status"]}))
+            assert len(received) == 1
+            assert received[0][0] == "pipe-1"
+            assert "[触发器通知]" in received[0][1]
+            assert received[0][2] == "u-1"
+            cfg = mgr.get("t1")
+            assert cfg is not None and cfg.fire_count == 1
+            assert svc.methods("ack") == [{"fire_ids": [7]}]
+        finally:
+            mgr.stop_check_loop()
+
+    def test_fired_duplicate_seq_no_redispatch(self) -> None:
+        """同 (trigger_id, fire_seq) 二次到达（通知+对账双通道）→ 只补 ack 不重复分发。"""
+        received: list[str] = []
+
+        async def injector(pipeline_id: str, message: str, user_id: str) -> str:
+            received.append(pipeline_id)
+            return "ok"
+
+        svc = _FakeTriggerSvc()
+        mgr = self._cond_mgr(svc)
+        mgr.set_injector(injector)
+        try:
+            fire = {"trigger_id": "t1", "fire_seq": 3}
+            _run(mgr.handle_trigger_fired(fire))
+            _run(mgr.handle_trigger_fired(fire))
+            assert len(received) == 1
+            assert svc.methods("ack") == [{"fire_ids": [3]}, {"fire_ids": [3]}]
+            cfg = mgr.get("t1")
+            assert cfg is not None and cfg.fire_count == 1
+        finally:
+            mgr.stop_check_loop()
+
+    def test_fired_unknown_trigger_acked_without_dispatch(self) -> None:
+        received: list[str] = []
+
+        async def injector(pipeline_id: str, message: str, user_id: str) -> str:
+            received.append(pipeline_id)
+            return "ok"
+
+        svc = _FakeTriggerSvc()
+        mgr = self._cond_mgr(svc)
+        mgr.set_injector(injector)
+        try:
+            _run(mgr.handle_trigger_fired({"trigger_id": "ghost", "fire_seq": 1}))
+            assert received == []
+            assert svc.methods("ack") == [{"fire_ids": [1]}]
+        finally:
+            mgr.stop_check_loop()
+
+    def test_fired_max_fires_reached_acks_without_dispatch(self) -> None:
+        """已达 max_fires：不计数不分发，ack 终结重投（内核无插件侧停止语义）。"""
+        received: list[str] = []
+
+        async def injector(pipeline_id: str, message: str, user_id: str) -> str:
+            received.append(pipeline_id)
+            return "ok"
+
+        svc = _FakeTriggerSvc()
+        mgr = TriggerManager()
+        mgr.set_trigger_svc_provider(lambda: svc, owner_plugin_id="trigger_setup_tool")
+        mgr.set_injector(injector)
+        cfg = _make_config(trigger_type=TriggerType.CONDITION, condition_expression="a == 1", max_fires=1)
+        mgr.register(cfg)
+        cfg.fire_count = 1
+        cfg.status = TriggerStatus.FIRED
+        try:
+            _run(mgr.handle_trigger_fired({"trigger_id": "t1", "fire_seq": 9}))
+            assert received == []
+            assert cfg.fire_count == 1
+            assert svc.methods("ack") == [{"fire_ids": [9]}]
+        finally:
+            mgr.stop_check_loop()
+
+    def test_fired_inject_failure_no_ack_and_retryable(self) -> None:
+        """注入失败 → 不 ack（RuntimeError 外抛），恢复后重投可再次分发。"""
+        calls: list[str] = []
+
+        async def flaky_injector(pipeline_id: str, message: str, user_id: str) -> str:
+            calls.append(pipeline_id)
+            if len(calls) == 1:
+                raise RuntimeError("kernel down")
+            return "ok"
+
+        svc = _FakeTriggerSvc()
+        mgr = self._cond_mgr(svc)
+        mgr.set_injector(flaky_injector)
+        try:
+            fire = {"trigger_id": "t1", "fire_seq": 5}
+            with pytest.raises(RuntimeError, match="kernel down"):
+                _run(mgr.handle_trigger_fired(fire))
+            assert svc.methods("ack") == [], "注入失败不得 ack"
+            cfg = mgr.get("t1")
+            assert cfg is not None and cfg.fire_count == 0
+            # 注入器恢复后（模拟 reconcile 重投）分发成功并 ack
+            _run(mgr.handle_trigger_fired(fire))
+            assert len(calls) == 2
+            assert cfg.fire_count == 1
+            assert svc.methods("ack") == [{"fire_ids": [5]}]
+        finally:
+            mgr.stop_check_loop()
+
+    def test_fired_inactive_trigger_acked_without_dispatch(self) -> None:
+        """停用（PENDING）触发器收到火：不分发不计数，ack 终结。"""
+        received: list[str] = []
+
+        async def injector(pipeline_id: str, message: str, user_id: str) -> str:
+            received.append(pipeline_id)
+            return "ok"
+
+        svc = _FakeTriggerSvc()
+        mgr = TriggerManager()
+        mgr.set_trigger_svc_provider(lambda: svc, owner_plugin_id="trigger_setup_tool")
+        mgr.set_injector(injector)
+        cfg = _make_config(trigger_type=TriggerType.CONDITION, condition_expression="a == 1", max_fires=0)
+        cfg.status = TriggerStatus.PENDING
+        mgr._triggers[cfg.trigger_id] = cfg
+        try:
+            _run(mgr.handle_trigger_fired({"trigger_id": "t1", "fire_seq": 2}))
+            assert received == []
+            assert cfg.fire_count == 0
+            assert svc.methods("ack") == [{"fire_ids": [2]}]
+        finally:
+            mgr.stop_check_loop()
+
+    def test_fired_command_action_executes_and_acks(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """command 动作：daemon 线程执行宿主命令 + ack。"""
+        monkeypatch.chdir(tmp_path)
+        out = tmp_path / "fired_cmd.txt"
+        code = f"open(r'{out}', 'w').write('fired')"
+        svc = _FakeTriggerSvc()
+        mgr = TriggerManager()
+        mgr.set_trigger_svc_provider(lambda: svc, owner_plugin_id="trigger_setup_tool")
+        mgr.register(_make_config(
+            trigger_type=TriggerType.CONDITION,
+            condition_expression="a == 1",
+            max_fires=0,
+            action="command",
+            action_params={"cmd": [sys.executable, "-c", code], "timeout_ms": 10000},
+        ))
+        try:
+            _run(mgr.handle_trigger_fired({"trigger_id": "t1", "fire_seq": 11}))
+            assert _wait_until(lambda: out.exists()), "command 动作未执行"
+            cfg = mgr.get("t1")
+            assert cfg is not None and cfg.fire_count == 1
+            assert svc.methods("ack") == [{"fire_ids": [11]}]
+        finally:
+            mgr.stop_check_loop()
+
+
+class TestReconcileBackstop:
+    """reconcile 对账兜底：未 ack 火补分发、去重、失败包含、循环存活。"""
+
+    def _mgr(self, svc: _FakeTriggerSvc) -> TriggerManager:
+        mgr = TriggerManager(reconcile_interval=0.05)
+        mgr.set_trigger_svc_provider(lambda: svc, owner_plugin_id="trigger_setup_tool")
+        return mgr
+
+    def test_reconcile_dispatches_unacked_fires(self) -> None:
+        received: list[str] = []
+
+        async def injector(pipeline_id: str, message: str, user_id: str) -> str:
+            received.append(pipeline_id)
+            return "ok"
+
+        svc = _FakeTriggerSvc()
+        svc.reconcile_fires = [
+            {"trigger_id": "t1", "fire_seq": 3, "fired_at": "2026-10-02T00:00:00", "keys": ["task.status"]},
+            {"trigger_id": "t1", "fire_seq": 4, "fired_at": "2026-10-02T00:00:01", "keys": ["task.status"]},
+        ]
+        mgr = self._mgr(svc)
+        mgr.set_injector(injector)
+        mgr.register(_make_config(trigger_type=TriggerType.CONDITION, condition_expression="a == 1", max_fires=0))
+        try:
+            assert _run(mgr.reconcile_once()) == 2
+            assert len(received) == 2
+            assert svc.methods("ack") == [{"fire_ids": [3]}, {"fire_ids": [4]}]
+        finally:
+            mgr.stop_check_loop()
+
+    def test_reconcile_dedup_same_fire_seq_across_rounds(self) -> None:
+        """两轮对账同一条火（未及时 ack/内核重排）→ 只分发一次，ack 幂等补。"""
+        received: list[str] = []
+
+        async def injector(pipeline_id: str, message: str, user_id: str) -> str:
+            received.append(pipeline_id)
+            return "ok"
+
+        svc = _FakeTriggerSvc()
+        svc.reconcile_fires = [{"trigger_id": "t1", "fire_seq": 3}]
+        mgr = self._mgr(svc)
+        mgr.set_injector(injector)
+        mgr.register(_make_config(trigger_type=TriggerType.CONDITION, condition_expression="a == 1", max_fires=0))
+        try:
+            assert _run(mgr.reconcile_once()) == 1
+            assert _run(mgr.reconcile_once()) == 1
+            assert len(received) == 1
+            assert len(svc.methods("ack")) == 2, "两轮各补一次 ack（幂等）"
+        finally:
+            mgr.stop_check_loop()
+
+    def test_reconcile_single_fire_failure_does_not_block_others(self) -> None:
+        """一条火补投失败 → 留痕继续处理其余；恢复后下轮重投成功。"""
+        calls: list[str] = []
+
+        async def flaky_injector(pipeline_id: str, message: str, user_id: str) -> str:
+            calls.append(pipeline_id)
+            if len(calls) == 1:
+                raise RuntimeError("kernel down")
+            return "ok"
+
+        svc = _FakeTriggerSvc()
+        svc.reconcile_fires = [
+            {"trigger_id": "t1", "fire_seq": 3},
+            {"trigger_id": "t1", "fire_seq": 4},
+        ]
+        mgr = self._mgr(svc)
+        mgr.set_injector(flaky_injector)
+        mgr.register(_make_config(trigger_type=TriggerType.CONDITION, condition_expression="a == 1", max_fires=0))
+        try:
+            assert _run(mgr.reconcile_once()) == 2
+            assert svc.methods("ack") == [{"fire_ids": [4]}], "失败的火 3 不 ack，成功的火 4 照常 ack"
+            # 下轮：火 3 重投成功（第 3 次注入）；火 4 已去重不再注入、只补 ack。
+            # 老到新处理序下 ack 全序列 = 轮1[4] → 轮2[3, 4]。
+            svc.reconcile_fires = [
+                {"trigger_id": "t1", "fire_seq": 3},
+                {"trigger_id": "t1", "fire_seq": 4},
+            ]
+            assert _run(mgr.reconcile_once()) == 2
+            assert len(calls) == 3, "火 3 重投恰好多一次注入，火 4 去重零注入"
+            assert svc.methods("ack") == [
+                {"fire_ids": [4]},
+                {"fire_ids": [3]},
+                {"fire_ids": [4]},
+            ], "重投成功 ack 3；去重的火 4 补 ack（否则内核火清单永不收敛）"
+        finally:
+            mgr.stop_check_loop()
+
+    def test_reconcile_loop_survives_svc_errors_and_delivers(self) -> None:
+        """对账循环：svc 故障轮留痕继续，恢复轮补投成功（循环不退出）。"""
+        received: list[str] = []
+
+        async def injector(pipeline_id: str, message: str, user_id: str) -> str:
+            received.append(pipeline_id)
+            return "ok"
+
+        class _FlakySvc(_FakeTriggerSvc):
+            def __init__(self) -> None:
+                super().__init__()
+                self._reconcile_calls = 0
+
+            async def call(self, method: str, params: dict) -> Any:
+                if method == "reconcile":
+                    self._reconcile_calls += 1
+                    if self._reconcile_calls == 1:
+                        raise RuntimeError("kernel down")
+                return await super().call(method, params)
+
+        svc = _FlakySvc()
+        svc.reconcile_fires = [{"trigger_id": "t1", "fire_seq": 6}]
+        mgr = self._mgr(svc)
+        mgr.set_injector(injector)
+        mgr.register(_make_config(trigger_type=TriggerType.CONDITION, condition_expression="a == 1", max_fires=0))
+        with _LoopThread() as lt:
+            mgr.set_main_loop(lt.loop)
+            mgr.start_reconcile_loop()
+            try:
+                assert _wait_until(lambda: bool(received)), "对账循环未在超时内补投"
+            finally:
+                mgr.stop_reconcile_loop()
+        assert mgr.is_reconcile_loop_running() is False
+        assert svc.methods("ack") == [{"fire_ids": [6]}]
 
 
 # ═══════════════════════════════════════════════════════════

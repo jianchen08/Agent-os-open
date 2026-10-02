@@ -235,7 +235,8 @@
   "granted_capabilities": [
     "chat",
     "pipeline-state",
-    "human-interaction"
+    "human-interaction",
+    "trigger-svc"
   ],
   "export_fields": [
     "task.trigger.registry.*"

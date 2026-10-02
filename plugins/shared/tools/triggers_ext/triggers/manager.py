@@ -58,6 +58,40 @@ _AUTO_NOTIFY_BREAK_THRESHOLD = 3
 # 熔断窗口键 LRU 上限（防键空间无界增长；逐出即状态重置，重新从首报起算）。
 _AUTO_NOTIFY_MAX_KEYS = 500
 
+# 内核 trigger-svc reconcile 对账周期（秒）。可靠性职责：替代原 5s 条件轮询的
+# 兜底重投（at-least-once），轻量 RPC 无 state 拉取。可经环境变量覆盖。
+_RECONCILE_INTERVAL_SECS = 60.0
+_RECONCILE_INTERVAL_ENV = "AGENTOS_TRIGGER_RECONCILE_SECS"
+
+# 已处理点火 (trigger_id, fire_seq) 去重缓存上限（LRU；防对账重投重复分发）。
+_DELIVERED_FIRE_CACHE_MAX = 1024
+
+
+def _reconcile_interval_from_env() -> float:
+    """读取对账周期配置：环境变量优先，非法/非正值回退默认。"""
+    raw = os.environ.get(_RECONCILE_INTERVAL_ENV, "").strip()
+    if not raw:
+        return _RECONCILE_INTERVAL_SECS
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "[TriggerManager] %s=%r 非法，回退默认 %.0fs",
+            _RECONCILE_INTERVAL_ENV,
+            raw,
+            _RECONCILE_INTERVAL_SECS,
+        )
+        return _RECONCILE_INTERVAL_SECS
+    if value <= 0:
+        logger.warning(
+            "[TriggerManager] %s=%r 必须为正，回退默认 %.0fs",
+            _RECONCILE_INTERVAL_ENV,
+            raw,
+            _RECONCILE_INTERVAL_SECS,
+        )
+        return _RECONCILE_INTERVAL_SECS
+    return value
+
 
 class TriggerManager:
     """触发器管理器。
@@ -80,8 +114,17 @@ class TriggerManager:
 
     """
 
-    def __init__(self, clock: Callable[[], float] | None = None) -> None:
-        """初始化管理器。``clock`` 供时序测试注入可推进单调钟，默认 time.monotonic。"""
+    def __init__(
+        self,
+        clock: Callable[[], float] | None = None,
+        reconcile_interval: float | None = None,
+    ) -> None:
+        """初始化管理器。
+
+        ``clock`` 供时序测试注入可推进单调钟，默认 time.monotonic；
+        ``reconcile_interval`` 供测试注入对账周期（秒），默认读环境变量
+        （``AGENTOS_TRIGGER_RECONCILE_SECS``），未配置取 60。
+        """
 
         self._triggers: dict[str, TriggerConfig] = {}
 
@@ -123,6 +166,24 @@ class TriggerManager:
         # _AUTO_NOTIFY_MAX_KEYS），deque 老化按滑动窗 _AUTO_NOTIFY_WINDOW_SECONDS。
         self._auto_notify_windows: OrderedDict[tuple[str, str, str], deque[float]] = OrderedDict()
         self._clock: Callable[[], float] = clock or time.monotonic
+
+        # M1 求值上收内核：trigger-svc capability 提供者（server.py on_load 注入，
+        # 约定 ``provider() -> handle | None``，句柄懒解析）。None = 未接线，
+        # CONDITION 注册转调/点火 ack 一律 fail-visible 报错。
+        self._trigger_svc_provider: Callable[[], Any] | None = None
+        # 内核注册的归属插件 id（register.owner_plugin_id，内核按此归因/鉴权）。
+        self._trigger_svc_owner: str = ""
+
+        # 已处理点火缓存：(trigger_id, fire_seq) → None（OrderedDict 兼作 LRU）。
+        # 分发成功（或判定无需分发）才标记；命中即跳过分发、只补 ack。
+        self._delivered_fires: OrderedDict[tuple[str, int], None] = OrderedDict()
+
+        # reconcile 对账循环（主事件循环上的 asyncio 任务；60s 可配）。
+        self._reconcile_task: asyncio.Task[Any] | None = None
+        self._reconcile_running = False
+        self._reconcile_interval = (
+            _reconcile_interval_from_env() if reconcile_interval is None else reconcile_interval
+        )
 
     def register(self, config: TriggerConfig) -> None:
         """注册触发器。
@@ -537,6 +598,268 @@ class TriggerManager:
         """
         self._state_writer = writer
         logger.info("[TriggerManager] state 持久化写面已设置 (pipeline-state.update)")
+
+    # ── M1 求值上收内核：trigger-svc 注册转调 + 点火消费 + 对账兜底 ─────
+    #
+    # 契约（capability "trigger-svc"，与内核侧共同钉死）：
+    #   register   {trigger_id, condition, pipeline_id?, watched_keys?, owner_plugin_id}
+    #              → {ok, seed_fired}（注册时种子求值即命中 → seed_fired=true）
+    #   unregister {trigger_id} → {ok}
+    #   reconcile  {} → {fires: [{trigger_id, fire_seq, fired_at, keys}]}（未 ack 的火，老→新）
+    #   ack        {fire_ids: [i64]} → {ok}
+    #   点火通知：域事件 "trigger.fired"，tags {trigger_id, fire_seq, view, keys}
+    # 语义：边沿 false→true 才点火（内核注册时种子求值）；求值异常内核侧视为
+    # False + debug 留痕。watched_keys 需解析表达式提取键——Python 侧解析器已随
+    # 求值上收退休，M1 不传（交给内核默认求值节奏，键级索引优化属内核侧）。
+    # M1 已知限制：CONDITION 求值仅 committed 视图（staged 视图属 M2）。
+
+    def set_trigger_svc_provider(self, provider: Callable[[], Any] | None, owner_plugin_id: str) -> None:
+        """注入内核 trigger-svc 能力提供者与归属插件 id（server.py on_load 接线）。
+
+        Args:
+            provider: ``provider() -> handle | None``（句柄懒解析；内核未注入
+                该 capability 时返回 None）。
+            owner_plugin_id: 本插件 manifest id（register.owner_plugin_id）。
+        """
+        self._trigger_svc_provider = provider
+        self._trigger_svc_owner = owner_plugin_id
+        logger.info("[TriggerManager] trigger-svc 能力通道已接线 (owner=%s)", owner_plugin_id)
+
+    def is_trigger_svc_ready(self) -> bool:
+        """trigger-svc 通道是否接线（provider 已注入）。"""
+        return self._trigger_svc_provider is not None
+
+    def _trigger_svc_handle(self) -> Any:
+        """解析 trigger-svc 能力句柄；未接线/内核未注入一律 fail-visible 抛错。"""
+        if self._trigger_svc_provider is None:
+            raise RuntimeError(
+                "trigger-svc 通道未接线（server.py on_load 缺 set_trigger_svc_provider）"
+            )
+        handle = self._trigger_svc_provider()
+        if handle is None:
+            raise RuntimeError(
+                "内核未注入 trigger-svc capability（请检查 plugin.json granted_capabilities "
+                "与内核版本）"
+            )
+        return handle
+
+    async def register_kernel_condition(self, trigger_id: str, condition: str, pipeline_id: str) -> bool:
+        """CONDITION 触发器创建：转调内核 trigger-svc.register。
+
+        内核在注册期做表达式语法校验并对当前 state 种子求值一次；表达式非法
+        或内核不可用 → 抛 RuntimeError（调用方把注册失败报给调用者，绝不静默
+        注册一个永不触发的触发器）。
+
+        Args:
+            trigger_id: 触发器 ID。
+            condition: 条件表达式（内核 condition.rs 文法）。
+            pipeline_id: 目标管道 ID（内核按管道 state 求值）。
+
+        Returns:
+            seed_fired：注册时种子求值即命中（条件当前已为真，内核已按边沿
+            语义点火一次，随 trigger.fired 通知送达）。
+        """
+        params: dict[str, Any] = {
+            "trigger_id": trigger_id,
+            "condition": condition,
+            "owner_plugin_id": self._trigger_svc_owner,
+        }
+        if pipeline_id:
+            params["pipeline_id"] = pipeline_id
+        result = await self._trigger_svc_handle().call("register", params)
+        if not isinstance(result, dict) or not result.get("ok"):
+            raise RuntimeError(f"trigger-svc.register 返回异常: {result!r}")
+        return bool(result.get("seed_fired"))
+
+    async def unregister_kernel_condition(self, trigger_id: str) -> None:
+        """CONDITION 触发器取消/删除：转调内核 trigger-svc.unregister。
+
+        失败抛 RuntimeError——调用方中止本地取消（两侧保持一致，用户可重试），
+        避免留下"本地已取消、内核继续点火"的静默漏注册。
+        """
+        result = await self._trigger_svc_handle().call("unregister", {"trigger_id": trigger_id})
+        if not isinstance(result, dict) or not result.get("ok"):
+            raise RuntimeError(f"trigger-svc.unregister 返回异常: {result!r}")
+
+    async def _ack_fires(self, fire_ids: list[int]) -> None:
+        """确认内核点火（fire log 出队，终止 reconcile 重投）。"""
+        result = await self._trigger_svc_handle().call("ack", {"fire_ids": fire_ids})
+        if not isinstance(result, dict) or not result.get("ok"):
+            raise RuntimeError(f"trigger-svc.ack 返回异常: {result!r}")
+
+    def _is_fire_delivered(self, key: tuple[str, int]) -> bool:
+        return key in self._delivered_fires
+
+    def _mark_fire_delivered(self, key: tuple[str, int]) -> None:
+        """标记点火已处理（LRU 有界；逐出后如遇重投将再次尝试分发+ack）。"""
+        self._delivered_fires[key] = None
+        self._delivered_fires.move_to_end(key)
+        while len(self._delivered_fires) > _DELIVERED_FIRE_CACHE_MAX:
+            self._delivered_fires.popitem(last=False)
+
+    async def handle_trigger_fired(self, params: dict[str, Any]) -> None:
+        """内核 ``trigger.fired`` 点火消费：动作分发 + 成功后 ack（at-least-once）。
+
+        通知 tags / reconcile fire 记录同形：``{trigger_id, fire_seq, fired_at?,
+        keys?, view?}``。分发语义与既有检查循环一致：command → daemon 线程
+        （``_dispatch_trigger_action``），notify → await 注入器。
+
+        ack 时机：分发成功（或判定无需/无法经重投自愈：触发器已消失、已达
+        上限、缺投递信息）后 ack；注入失败不 ack 不标记——reconcile 周期重投，
+        语义至少触发一次（重复注入在 at-least-once 语义内）。去重缓存命中
+        （同 fire_seq 已分发）只补 ack，不重复分发。
+
+        Raises:
+            RuntimeError: fire_seq 缺失/不可解析、注入器未设置、注入失败、
+                trigger-svc 不可用——调用方留痕，reconcile 下一轮重投。
+        """
+        trigger_id = str(params.get("trigger_id") or "")
+        fire_seq_raw = params.get("fire_seq")
+        try:
+            fire_seq = int(fire_seq_raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"trigger.fired 缺少可解析的 fire_seq: {fire_seq_raw!r}") from exc
+
+        key = (trigger_id, fire_seq)
+        if self._is_fire_delivered(key):
+            # 同一火经通知与 reconcile 双通道到达：只补 ack，不重复分发
+            await self._ack_fires([fire_seq])
+            return
+
+        trigger = self._triggers.get(trigger_id)
+        if trigger is None:
+            # 本地注册表无此触发器（已取消/未重灌）：重投不会自愈，ack 终结
+            logger.warning(
+                "[TriggerManager] trigger.fired 指向未知触发器，ack 终结重投: trigger=%s fire_seq=%s",
+                trigger_id,
+                fire_seq,
+            )
+            self._mark_fire_delivered(key)
+            await self._ack_fires([fire_seq])
+            return
+
+        if not self._check_stop_conditions(trigger):
+            trigger.status = TriggerStatus.FIRED
+            self.persist(trigger)
+            self._mark_fire_delivered(key)
+            await self._ack_fires([fire_seq])
+            return
+
+        if trigger.status != TriggerStatus.ACTIVE or self._is_max_fires_reached(trigger):
+            # 停用/已达上限：不计数不分发，ack 终结重投（内核无插件侧停止语义）
+            self._mark_fire_delivered(key)
+            await self._ack_fires([fire_seq])
+            return
+
+        if not self._dispatch_trigger_action(trigger):
+            if not trigger.pipeline_id or not trigger.message:
+                logger.error(
+                    "[TriggerManager] 触发器缺 pipeline_id/message，无法投递，ack 终结重投: "
+                    "trigger=%s fire_seq=%s",
+                    trigger_id,
+                    fire_seq,
+                )
+                self._mark_fire_delivered(key)
+                await self._ack_fires([fire_seq])
+                return
+            if self._injector is None:
+                raise RuntimeError(
+                    "注入器未设置，trigger.fired 无法投递（不 ack，留待 reconcile 重投）"
+                )
+            user_id = (trigger.metadata or {}).get("user_id", "")
+            try:
+                await self._injector(
+                    trigger.pipeline_id,
+                    self._format_fire_info(trigger),
+                    user_id,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"触发消息注入失败（不 ack，留待 reconcile 重投）: {exc}"
+                ) from exc
+            logger.info(
+                "[TriggerManager] 条件触发消息已注入: pipeline=%s trigger=%s fire_seq=%s",
+                trigger.pipeline_id,
+                trigger_id,
+                fire_seq,
+            )
+
+        # 分发成功：簿记 + 持久化 + 去重标记 + ack
+        trigger.fire_count += 1
+        trigger.metadata["last_fire_time"] = datetime.datetime.now(datetime.UTC).isoformat()
+        if self._is_max_fires_reached(trigger):
+            trigger.status = TriggerStatus.FIRED
+        self.persist(trigger)
+        self._mark_fire_delivered(key)
+        await self._ack_fires([fire_seq])
+
+    async def reconcile_once(self) -> int:
+        """对账兜底单轮：拉取内核未 ack 的火并逐条补分发（去重后）。
+
+        轻量 RPC，无 state 拉取——替代原 5s 条件轮询的可靠性职责。单条火
+        处理失败留痕继续（下一轮 reconcile 重投），返回本轮内核给出的火数。
+        """
+        result = await self._trigger_svc_handle().call("reconcile", {})
+        fires = result.get("fires") if isinstance(result, dict) else None
+        if not isinstance(fires, list):
+            raise RuntimeError(f"trigger-svc.reconcile 返回形状异常: {result!r}")
+        for fire in fires:
+            if not isinstance(fire, dict):
+                logger.warning("[TriggerManager] reconcile 火记录形状非法，跳过: %r", fire)
+                continue
+            try:
+                await self.handle_trigger_fired(fire)
+            except Exception as exc:
+                logger.error(
+                    "[TriggerManager] reconcile 补投失败（下一轮重试）: fire=%s error=%s",
+                    fire,
+                    exc,
+                )
+        return len(fires)
+
+    def start_reconcile_loop(self) -> None:
+        """启动 reconcile 对账循环（主事件循环上的 asyncio 任务；安全重复调用）。"""
+        if self._reconcile_task is not None and not self._reconcile_task.done():
+            return
+        loop = self._main_loop
+        if loop is None or loop.is_closed():
+            logger.warning("[TriggerManager] 主事件循环未设置，reconcile 对账循环未启动")
+            return
+        self._reconcile_running = True
+        self._reconcile_task = loop.create_task(self._reconcile_loop())
+
+    def stop_reconcile_loop(self) -> None:
+        """停止 reconcile 对账循环（取消在途任务，尽快退出）。"""
+        self._reconcile_running = False
+        task = self._reconcile_task
+        self._reconcile_task = None
+        if task is not None and not task.done() and not task.get_loop().is_closed():
+            task.cancel()
+
+    def is_reconcile_loop_running(self) -> bool:
+        """对账循环是否在运行（on_load 启动 / on_unload 停止）。"""
+        return self._reconcile_running
+
+    async def _reconcile_loop(self) -> None:
+        """对账循环主体：周期调 reconcile_once，失败留痕下一轮重试。"""
+        logger.info(
+            "[TriggerManager] reconcile 对账循环已启动 (间隔 %.0fs)", self._reconcile_interval
+        )
+        while self._reconcile_running:
+            await asyncio.sleep(self._reconcile_interval)
+            if not self._reconcile_running:
+                break
+            try:
+                count = await self.reconcile_once()
+                if count:
+                    logger.info(
+                        "[TriggerManager] reconcile 对账: %d 条未 ack 火已补分发", count
+                    )
+            except Exception as e:
+                logger.error(
+                    "[TriggerManager] reconcile 对账失败（下一轮重试）: %s", e
+                )
+        logger.info("[TriggerManager] reconcile 对账循环已退出")
 
     def persist(self, config: TriggerConfig) -> None:
         """触发器配置同步落目标管道 state（权威持久层，覆盖写单键）。

@@ -35,7 +35,7 @@ from http_json import (  # noqa: E402
 from kernel_token import decode_kernel_token  # noqa: E402
 from tool import TriggerSetupTool
 from triggers.manager import get_trigger_manager
-from triggers.types import TriggerConfig, TriggerStatus
+from triggers.types import TriggerConfig, TriggerStatus, TriggerType
 
 PREFIX = "/ext/trigger_setup_tool/triggers"
 PIPELINES_PATH = "/ext/trigger_setup_tool/pipelines"
@@ -165,8 +165,19 @@ async def delete_trigger(trigger_id: str) -> dict[str, Any]:
 
     删除语义 = 注销而非取消：列表重拉条目消失（清残留），单发已触发（FIRED）
     也可删；state 写面按 unregister 既有契约以 CANCELLED 终态落（重灌跳过终态）。
+    CONDITION 触发器删除须同步注销内核 trigger-svc 注册（M1 求值上收内核）——
+    内核注销失败回 502 且本地注册不动（可重试），不留"本地已删、内核继续点火"
+    的静默不一致。
     """
     mgr = get_trigger_manager()
+    cfg = mgr.get(trigger_id)
+    if cfg is None:
+        return _error(f"trigger not found: {trigger_id}", 404)
+    if cfg.trigger_type == TriggerType.CONDITION:
+        try:
+            await mgr.unregister_kernel_condition(trigger_id)
+        except Exception as exc:
+            return _error(f"内核 trigger-svc 注销失败，触发器未删除: {exc}", 502)
     if not mgr.unregister(trigger_id):
         return _error(f"trigger not found: {trigger_id}", 404)
     return _ok(_json_response({"deleted": True, "trigger_id": trigger_id}))
