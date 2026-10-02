@@ -35,14 +35,20 @@ merge（merge_and_project）；messages 只接受 op 声明（`{_ops:[...]}`）�
 - `as`：迭代变量名，每个迭代把当前元素写入迭代局部 state 顶层；
 - `max_concurrency`：缺省 1 = 串行链式；>1 = 有界并行快照；-1 = 不限；
   0 非法，编译期报错；
-- `collect`：键名列表，并行归并策略 = 按迭代序拼接数组；
+- `collect`（每轮置换键）：循环开始清 `[]`，各迭代写的数组按迭代序拼接
+  （用于 tool_results/_full_tool_results/_executed_tool_calls 这类
+  「本轮新鲜产出」键）；
+- `collect_append`（累计追加键）：不清空，父键现值 + 各迭代增量按迭代序
+  拼接（用于 submitted_task_ids 这类会话累计键——单调用插件写**增量**
+  （对快照去重后的新 id），父侧追加）。拆两语义的原因：累计型键若随
+  循环开始清空，会破坏跨轮去重；
 - `consume`：true = 循环收尾把 over 源键清成 `[]`；
 - `consume_keys`：额外在循环收尾清 `[]` 的键（如 `pre_decided_results`）。
 
 `over` 存在时该 step 是 **for-each**；`over` 缺省时维持既有串行重复循环
 语义，一字不变。编译期校验（compiler.rs）：`over` 必须带 `as`；
-`max_concurrency=0` 或 `<-1` 报错；`collect`/`consume`/`consume_keys`
-仅 for-each 支持；`as` 禁用保留名（messages/ended/suspended/next_phase/
+`max_concurrency=0` 或 `<-1` 报错；`collect`/`collect_append`/`consume`/
+`consume_keys` 仅 for-each 支持；`as` 禁用保留名（messages/ended/suspended/next_phase/
 current_phase）与含点名字。全部字段 serde default，旧 YAML 零变化
 （G10 DSL 冻结下的 additive 扩展）。
 
@@ -61,7 +67,9 @@ current_phase）与含点名字。全部字段 serde default，旧 YAML 零变�
 - messages ops 逐迭代「一次 apply」——seq 分配 / 落库 / 实录全在父侧，
   迭代内只缓冲不 apply；迭代内跨 step 的写后读 messages 不保证（v1 已知
   限制）；
-- `collect` 键按迭代序拼接（循环开始时先清 `[]`，杜绝陈旧）；
+- `collect`（置换）键：循环开始先清 `[]`（杜绝陈旧），各迭代写的数组按
+  迭代序拼接；`collect_append`（追加）键：不清空，父键现值 + 各迭代增量
+  按迭代序拼接；
 - 其余顶层键 last-index-wins；`_plugin_errors` 拼接；
 - `ended`/`suspended` 任一迭代置位即父置位。
 
@@ -81,8 +89,9 @@ tool-executor capability 调内核唯一执行漏斗
 16384/12288/2048）→ 发 tool_start/tool_result 事件（event-bus.emit）→
 产单条 tool 消息 op（复用 SDK agentos_plugin_sdk.tool_result_protocol，
 契约夹具 `sdk/tests/contracts/tool_result_messages.fixture.json` 双车道）
-→ 写 collect 键（tool_results/_full_tool_results/_executed_tool_results
-各自单元素数组）与 `submitted_task_ids` 增量。
+→ 写 collect 键（tool_results/_full_tool_results/_executed_tool_calls
+各自单元素数组）与 `submitted_task_ids` 增量（collect_append 键，父侧
+追加）。
 
 选 Python sidecar 的原因：`NativePlugin.exec_lock`
 （`kernel/crates/plugin-loader/src/native_loader.rs`）把同一 cdylib 的
@@ -98,8 +107,9 @@ main 体静态化：
 - prepare 链原序保留；
 - core 组变为：pipeline_tool_cache（when 门保留）→ **for-each step**
   （`over: state.raw_tool_calls`, `as: current_call`, max_concurrency
-  配置化, collect 四键, `consume: true`,
-  `consume_keys: [pre_decided_results]`，体内唯一 step
+  配置化, `collect: [tool_results, _full_tool_results,
+  _executed_tool_calls]`, `collect_append: [submitted_task_ids]`,
+  `consume: true`, `consume_keys: [pre_decided_results]`，体内唯一 step
   pipeline_tool_core）→ pipeline_spill_guard；
 - `{{state.core_plugin}}` 动态槽、core_plugin/core_type 分发键、post 链里
   raw_tool_calls→tool_core 的 set 路由全部退役；initial_state 的
