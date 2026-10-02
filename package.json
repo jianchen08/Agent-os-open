@@ -103,7 +103,7 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "include": "electron/nsis/bug12-uninstaller.nsh"
+      "include": "electron/nsis/installer-custom.nsh"
     },
     "mac": {
       "target": [

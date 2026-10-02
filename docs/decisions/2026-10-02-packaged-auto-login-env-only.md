@@ -52,7 +52,11 @@ launcher/安装器播种该变量是部署契约，未播种（含空白串）�
 
 - 装机版部署契约（新增，硬性）：launcher/安装器必须为应用进程播种
   `AGENTOS_ADMIN_PASSWORD`（用户级环境变量或启动链注入均可）；未播种的应用实例无自动
-  登录，主进程 warn，渲染进程回落登录框。该契约须同步进装机 launcher 仓。
+  登录，主进程 warn，渲染进程回落登录框。**安装器侧播种已落地本仓**：NSIS
+  `customInstall` 首装生成 128bit 密码学随机口令（CryptGenRandom→32 hex）写
+  `HKCU\Environment` 并广播 `WM_SETTINGCHANGE`（已存在则原样保留——升级不换口令；
+  生成失败不播种宁缺毋弱）；`customUnInstall` 卸载清场（见
+  `electron/nsis/installer-custom.nsh`，由 `bug12-uninstaller.nsh` 更名）。
 - 内核行为变更（影响所有部署形态）：`AGENTOS_ADMIN_PASSWORD` 播种的 admin 不再触发
   首登强制改密（此前 env 播种同样置标记）。随机播种（未设 env）行为不变。
 - `auth:admin-credential:sync` IPC 与 `window.electronAPI.adminCredential.sync` 前端
