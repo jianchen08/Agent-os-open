@@ -36,13 +36,42 @@ loop_bodies:
     - pipeline_isolation_guard
     - pipeline_level_guard
     - pipeline_security_check
-  - context:
-      temperature: 0.7
-    id: core
+  # 工具轮缓存查询（命中即直出结果 + 清调用，跳过执行）。
+  - id: core
     steps:
     - name: pipeline_tool_cache
       when: raw_tool_calls != [] and raw_tool_calls != None
-    - '{{state.core_plugin}}'
+  # 工具执行核 = 并行 for-each（ADR 2026-10-02-loopconfig-parallel-foreach）：
+  # 对上一轮 LLM 产出的 raw_tool_calls 逐元素执行 pipeline_tool_core（单调用
+  # 契约，当前调用由引擎注入迭代局部键 current_call）。collect 键循环开始清
+  # []、各迭代产出按迭代序拼接（本轮新鲜产出）；submitted_task_ids 是会话
+  # 累计键，走 collect_append（父键现值 + 各迭代增量追加，不随循环清空）；
+  # consume/consume_keys 循环收尾清源（对齐旧批执行插件的消费即清）。
+  # max_concurrency 4 = 有界并行，迭代从同一父快照隔离执行。
+  - id: tool_exec
+    loop_config:
+      as: current_call
+      collect:
+      - tool_results
+      - _full_tool_results
+      - _executed_tool_calls
+      collect_append:
+      - submitted_task_ids
+      consume: true
+      consume_keys:
+      - pre_decided_results
+      enabled: true
+      max_concurrency: 4
+      over: state.raw_tool_calls
+    steps:
+    - pipeline_tool_core
+  # LLM 轮：消费工具结果产出下一轮响应；spill_guard 保留在核器官尾
+  # （旧 core 组序 cache → 执行核 → spill_guard 的等价平铺）。
+  - context:
+      temperature: 0.7
+    id: llm
+    steps:
+    - pipeline_llm_core
     - pipeline_spill_guard
   - id: post
     next:
@@ -54,28 +83,11 @@ loop_bodies:
       when: conversation_mode == True and raw_tool_calls == []
     - set:
         conversation_mode: false
-        core_plugin: pipeline_tool_core
-        core_type: tool_execute
       then: loop
       when: conversation_mode == True and raw_tool_calls != []
-    - set:
-        core_plugin: pipeline_tool_core
-        core_type: tool_execute
-      then: loop
-      when: raw_tool_calls != [] and raw_tool_calls != None
-    - set:
-        core_plugin: pipeline_llm_core
-        core_type: llm_call
-      then: loop
-      when: core_type == 'tool_execute'
-    - set:
-        core_plugin: pipeline_llm_core
-        core_type: llm_call
-      then: loop
+    - then: loop
       when: _has_new_llm_input == true
     - set:
-        core_plugin: pipeline_llm_core
-        core_type: llm_call
         router.duplicate_back_llm: false
       then: loop
       when: router.duplicate_back_llm == True
@@ -85,10 +97,7 @@ loop_bodies:
     # 兜底 end 使第 1 轮纯文本即整管终局（假绿 completed/task 恒 running，
     # 2026-09-13 批次实锤多例）。task.id != none 限定任务管道；会话聊天管道
     # （无 task.id）保持"文本即停"会话语义不变。
-    - set:
-        core_plugin: pipeline_llm_core
-        core_type: llm_call
-      then: loop
+    - then: loop
       when: task.id != none and conversation_mode != True and task.status != 'completed' and task.status != 'failed' and task.status != 'cancelled'
     - then: end
     steps:
@@ -111,9 +120,3 @@ loop_bodies:
     - pipeline_workspace_lifecycle
     - pipeline_environment_lifecycle
 name: autonomous
-# P1-1 声明驱动缺省：core 器官执行态开轮缺省（post 路由每轮按 DSL 重写）。
-# core_type 是引擎迭代形态语义标志（llm_call | tool_execute）；core_plugin 是
-# 动态核心步骤的插件选择——两者由管道配置声明，内核零插件 id 知识。
-initial_state:
-  core_plugin: pipeline_llm_core
-  core_type: llm_call

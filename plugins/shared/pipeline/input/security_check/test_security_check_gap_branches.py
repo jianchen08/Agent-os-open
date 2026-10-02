@@ -376,12 +376,14 @@ class TestExecuteShortCircuits:
         assert r.state_updates == {}, "停用=零产出（决策键已随 ADR 2026-09-28 退役）"
 
     @pytest.mark.asyncio
-    async def test_non_tool_core_skips_check(self) -> None:
+    async def test_core_type_no_longer_gates_check(self) -> None:
+        """执行门只认 raw_tool_calls 非空：遗留 core_type 键不再拦截检查
+        （core_type 随管道静态化退役，ADR 2026-10-02-loopconfig-parallel-foreach）。"""
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": _GUARD_RM})
         ctx = _tool_ctx("bash_execute", {"command": "rm -rf /x"})
         ctx.state["core_type"] = "llm_call"
         r = await plugin.execute(ctx)
-        assert r.state_updates == {}, "LLM 轮零产出"
+        assert r.state_updates != {}, "有调用即检查（core_type 不再是门）"
 
     @pytest.mark.asyncio
     async def test_no_tool_calls_allows(self) -> None:

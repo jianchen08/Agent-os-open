@@ -1,27 +1,33 @@
 {
   "id": "pipeline_tool_core",
   "name": "Tool Core",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "plugin_type": "pipeline",
   "pipeline_role": "core",
-  "language": "rust",
-  "host_type": "in_process",
-  "entry": "pipeline_tool_core_native.dll",
-  "invoke_entry": "plugin_execute",
-  "native": {
-    "artifact": "pipeline_tool_core_native"
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "invoke_entry": "tool_core.execute",
+  "mcp": {
+    "transport": "stdio",
+    "request_timeout_secs": 900
   },
   "capabilities": {
     "tools": [],
     "route_signals": [],
-    "lifecycle_hooks": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
     "streaming": {
       "conduit": true
     },
     "steps": [
       {
         "name": "pipeline_tool_core",
-        "required_state_inputs": []
+        "required_state_inputs": [
+          "current_call"
+        ]
       }
     ]
   },
@@ -29,17 +35,27 @@
   "priority": 50,
   "state": {
     "reads": [
-      "raw_tool_calls",
+      "current_call",
+      "pre_decided_results",
       "messages",
       "raw_thinking",
       "tool_output_contracts",
       "tool_output_validation",
-      "pre_decided_results",
       "submitted_task_ids",
+      "task_id",
+      "workspace",
       "output_truncated",
-      "llm_supports_vision"
+      "llm_supports_vision",
+      "session_id",
+      "thread_id",
+      "pipeline_id",
+      "message_id"
     ]
   },
+  "granted_capabilities": [
+    "tool-executor",
+    "event-bus"
+  ],
   "lifecycle": {
     "idle_timeout_secs": 0
   },
@@ -47,7 +63,29 @@
     {
       "id": "tool_output",
       "path": "config/system/tool_core_config.yaml",
-      "label": "tool_core 工具输出截断配置"
+      "label": "tool_core 工具输出截断配置",
+      "fields": [
+        {
+          "name": "tool_output.max_chars",
+          "type": "number",
+          "label": "单条工具结果最大字符数（超出触发头尾截断）"
+        },
+        {
+          "name": "tool_output.head_chars",
+          "type": "number",
+          "label": "截断保留头部字符数"
+        },
+        {
+          "name": "tool_output.tail_chars",
+          "type": "number",
+          "label": "截断保留尾部字符数"
+        },
+        {
+          "name": "tool_output.invoke_timeout_s",
+          "type": "number",
+          "label": "tool-executor invoke 超时秒数（缺省 600）"
+        }
+      ]
     }
   ]
 }

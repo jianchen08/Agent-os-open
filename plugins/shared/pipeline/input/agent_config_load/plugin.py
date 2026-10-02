@@ -344,9 +344,8 @@ class AgentConfigLoadPlugin(IInputPlugin):
             for key, value in self._extra_context.items():
                 updates[f"context.{key}"] = value
 
-        # 6. 工具执行标记（从 core_type 推断）
-        core_type = ctx.state.get(StateKeys.CORE_TYPE, "llm_call")
-        updates["context.is_tool_execution"] = core_type == "tool_execute"
+        # 6. 工具执行标记（本轮有待执行调用 ⟺ raw_tool_calls 非空）
+        updates["context.is_tool_execution"] = bool(ctx.state.get(StateKeys.RAW_TOOL_CALLS))
 
         # 7. 项目级标记
         updates["context.is_project"] = self._agent_level == "L1"

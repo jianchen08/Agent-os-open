@@ -145,13 +145,17 @@ class TestRoundGates:
         assert "router.recent_tool_sigs" in live
 
     @pytest.mark.parametrize("core_type", ["unknown_target", "tool_result", ""])
-    def test_unknown_core_type_returns_no_updates(self, core_type: str) -> None:
-        """非 llm_call / 非 tool_execute 的轮次零产出（重复判定只属 LLM 产出轮）。"""
+    def test_core_type_leftover_does_not_gate(self, core_type: str) -> None:
+        """core_type 已随管道静态化退役：遗留取值不再构成零产出门，
+        判定产出与 llm_call 轮基线一致。"""
         updates = _updates(
             DuplicateCheckPlugin(),
             self._dup_prone_state(core_type=core_type),
         )
-        assert updates == {}
+        baseline = _updates(
+            DuplicateCheckPlugin(), self._dup_prone_state(core_type="llm_call")
+        )
+        assert updates == baseline, "遗留 core_type 不改变判定产出"
 
     def test_llm_call_round_is_judged(self) -> None:
         """对照：同一 state 标 llm_call 后判定生效。"""
@@ -171,11 +175,13 @@ class TestFailBreakerInputs:
 
     @pytest.mark.parametrize("state", [{}, {"tool_results": []}])
     def test_no_tool_results_is_noop(self, state: dict[str, Any]) -> None:
-        """键缺失/空表 → 空更新（不动既有状态）。"""
+        """键缺失/空表 → 连败账零动作（不动既有状态；无工具结果也不摘面）。"""
         updates = _updates(
             DuplicateCheckPlugin(), {"core_type": "tool_execute", "messages": [], **state}
         )
-        assert updates == {}
+        assert "router.tool_fail_streak" not in updates
+        assert "router.tool_fail_banned" not in updates
+        assert "router.recent_tool_sigs" not in updates
 
     def test_existing_streak_preserved_when_no_results(self) -> None:
         """对照：连败账已在 state 时，空结果轮不写回（不重置也不重复落账）。"""
@@ -186,7 +192,8 @@ class TestFailBreakerInputs:
             "messages": [],
             "router.tool_fail_streak": {"a": 2},
         }
-        assert _updates(plugin, state) == {}
+        updates = _updates(plugin, state)
+        assert "router.tool_fail_streak" not in updates
         assert state["router.tool_fail_streak"] == {"a": 2}
 
     @pytest.mark.parametrize("junk", ["junk", 42, None, ["d"]])

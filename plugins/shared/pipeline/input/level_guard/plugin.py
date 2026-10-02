@@ -115,12 +115,8 @@ class LevelGuardPlugin(IInputPlugin):
         if not self._enabled:
             return {}
 
-        core_type = ctx.state.get(StateKeys.CORE_TYPE, "llm_call")
-
-        # 非 tool_execute 不需要权限检查
-        if core_type != "tool_execute":
-            return {}
-
+        # 无待执行调用（纯文本轮）不需要权限检查；raw_tool_calls 非空 ⟺ 本轮
+        # 有调用待执行（静态化管道下的调用轮判据）。
         tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
         if not tool_calls:
             return {}

@@ -59,9 +59,9 @@ class TaskReminder(IOutputPlugin):
         判定契约：本轮 raw_result 指纹与记账基线一致（llm_core 未覆盖写）
         且本 run 存在 llm_core 错误条目 → 系统失败轮，短路重试不计额度；
         其余轮交 `_execute_inner` 三信号判据（ADR
-        2026-08-28-task-closure-three-signal-gate）。产出基线只在 llm_call 轮
-        推进（基线语义 = 最近一次 LLM 产出；失败轮冻结，连续失败按同一基线
-        持续识别）。
+        2026-08-28-task-closure-three-signal-gate）。产出基线每轮推进
+        （合并轮 LLM 恒产出，基线语义 = 最近一次 LLM 产出；失败轮冻结，
+        连续失败按同一基线持续识别）。
         """
         state = ctx.state
         stale_output = self._is_stale_output(state)
@@ -69,8 +69,6 @@ class TaskReminder(IOutputPlugin):
         updates = result.state_updates
         if updates.pop(_FAILURE_ROUND_FLAG, False):
             # 失败轮基线冻结：连续失败轮按同一基线持续识别（不推进）。
-            return result
-        if str(state.get("core_type") or "") != "llm_call":
             return result
         new_fp = self._result_fingerprint(state.get("raw_result"))
         if state.get(_RESULT_FP_KEY) != new_fp:
@@ -111,15 +109,6 @@ class TaskReminder(IOutputPlugin):
         advanced = self._advance_pending_status(state)
         if advanced is not None:
             return advanced
-
-        core_type = state.get("core_type", "")
-        if core_type != "llm_call":
-            logger.debug(
-                "TaskReminder[iter=%s]: skip, core_type=%s (need llm_call)",
-                iteration,
-                core_type,
-            )
-            return OutputResult()
 
         # ── L1 调度层永不触发 ──
         # L1（灵汐）的纯文本输出是正常的调度/沟通汇报，不代表"忘了提交评估"。

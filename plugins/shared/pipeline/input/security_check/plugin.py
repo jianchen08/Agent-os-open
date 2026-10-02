@@ -517,12 +517,9 @@ class SecurityCheckPlugin(IInputPlugin):
         if not self._enabled:
             return {}
 
-        core_type = ctx.state.get(StateKeys.CORE_TYPE, "llm_call")
-
-        # LLM 调用不需要安全检查
-        if core_type != "tool_execute":
-            return {}
-
+        # 本轮无待执行调用（LLM 纯文本轮）不需要安全检查；raw_tool_calls 非空
+        # ⟺ 本轮有调用待执行（静态化管道下的调用轮判据，ADR
+        # 2026-10-02-loopconfig-parallel-foreach）。
         tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
         if not tool_calls:
             return {}

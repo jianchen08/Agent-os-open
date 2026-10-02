@@ -750,9 +750,10 @@ class TestToolFailBreaker:
         assert updates.get("should_stop") is not True
 
     def test_llm_call_round_skips_fail_breaker(self) -> None:
-        """llm_call 轮不做失败判定（既有重复判定语义不变）。"""
+        """无本轮工具结果（纯 LLM 轮，for-each collect 置换键恒空）不做失败
+        判定；遗留 core_type 键不参与门控。"""
         plugin = DuplicateCheckPlugin()
-        state = {"core_type": "llm_call", "tool_results": [_fail("a")] * 6, "messages": []}
+        state = {"core_type": "llm_call", "tool_results": [], "messages": []}
         updates = _exec_updates(plugin, state)
         assert "router.tool_fail_streak" not in updates
 
@@ -904,14 +905,16 @@ class TestApprovalChannelRetryExemption:
 
     def test_retry_allowed_refusal_not_counted_as_tool_failure(self) -> None:
         """审批通道故障不计失败熔断连败（工具从未执行 ≠ 工具坏）：
-        连发 6 次通道故障拒绝不触发摘工具面，也不留连败账。"""
+        连发 6 次通道故障拒绝不触发摘工具面，也不留连败账/动窗口。"""
         plugin = DuplicateCheckPlugin()
         call = dict(_TRANSITION_CALL)
         state = _tool_exec_state([_refusal(call, retry_allowed=True)] * 6)
         updates = _exec_updates(plugin, state)
         assert updates.get("should_stop") is not True
         assert "tool_ids" not in updates
-        assert updates == {}, f"通道故障不得留连败账/动窗口：{updates}"
+        assert "router.tool_fail_streak" not in updates, "通道故障不得留连败账"
+        assert "router.tool_fail_banned" not in updates
+        assert "router.recent_tool_sigs" not in updates, "通道故障不动签名窗口"
 
     def test_unknown_sig_refusal_leaves_window_untouched(self) -> None:
         """摘除目标是窗口外签名 → 不动窗口、不产无关更新。"""

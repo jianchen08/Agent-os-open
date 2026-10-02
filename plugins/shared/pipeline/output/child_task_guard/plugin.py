@@ -74,16 +74,13 @@ class ChildTaskGuard(IOutputPlugin):
         """检测子任务状态，决定是否挂起管道。
 
         触发条件：
-        1. core_type 为 llm_call
-        2. LLM 只输出了纯文本（raw_tool_calls 为空）
-        3. 当前管道有 pending/running 子任务
+        1. LLM 只输出了纯文本（raw_tool_calls 为空）
+        2. 当前管道有 pending/running 子任务
 
         满足条件时返回 wait 信号挂起管道。
         """
         state = ctx.state
         iteration = state.get("iteration", -1)
-
-        core_type = state.get("core_type", "")
 
         task_id = state.get("task.id")
         pipeline_id = state.get("pipeline_id", "")
@@ -91,20 +88,9 @@ class ChildTaskGuard(IOutputPlugin):
 
         if not has_active:
             logger.debug(
-                "ChildTaskGuard[iter=%s][pipeline=%s]: no active children (%s)",
+                "ChildTaskGuard[iter=%s][pipeline=%s]: no active children",
                 iteration,
                 pipeline_id[:8] if pipeline_id else "none",
-                core_type,
-            )
-            return OutputResult()
-
-        if core_type != "llm_call":
-            logger.debug(
-                "ChildTaskGuard[iter=%s][pipeline=%s]: active children found but "
-                "core_type=%s, deferring suspension to next LLM call",
-                iteration,
-                pipeline_id[:8] if pipeline_id else "none",
-                core_type,
             )
             return OutputResult()
 
@@ -118,11 +104,10 @@ class ChildTaskGuard(IOutputPlugin):
             return OutputResult()
 
         logger.debug(
-            "ChildTaskGuard[iter=%s][pipeline=%s]: ACTIVE children found (%s), "
+            "ChildTaskGuard[iter=%s][pipeline=%s]: ACTIVE children found, "
             "suspending pipeline (wait signal), child_ids=%s",
             iteration,
             pipeline_id[:8] if pipeline_id else "none",
-            core_type,
             active_ids,
         )
         return OutputResult(

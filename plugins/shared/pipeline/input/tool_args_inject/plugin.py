@@ -196,11 +196,8 @@ class ToolArgsInjectPlugin(IInputPlugin):
         """执行参数注入逻辑。"""
         updates: dict[str, Any] = self._check_declared_injected_params(ctx)
 
-        core_type = ctx.state.get(StateKeys.CORE_TYPE, "llm_call")
-        if core_type != "tool_execute":
-            updates["tool.params_injected"] = False
-            return updates
-
+        # 无待执行调用（纯文本轮）不注入；raw_tool_calls 非空 ⟺ 本轮有调用
+        # 待执行（静态化管道下的调用轮判据）。
         tool_calls = ctx.state.get(StateKeys.RAW_TOOL_CALLS, [])
         if not tool_calls:
             updates["tool.params_injected"] = False

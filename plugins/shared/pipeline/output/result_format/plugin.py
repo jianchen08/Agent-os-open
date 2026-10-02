@@ -139,11 +139,8 @@ class ResultFormatPlugin(IOutputPlugin):
         Returns:
             格式化结果字典
         """
-        core_type = ctx.state.get(StateKeys.CORE_TYPE, "llm_call")
-
-        if core_type != "tool_execute":
-            return {}  # 只格式化工具执行结果
-
+        # 只在有工具结果时格式化/截断（for-each collect 置换键，tool_results
+        # 非空 ⟺ 本轮执行过工具；无工具轮零产出）。
         tool_results = ctx.state.get(StateKeys.TOOL_RESULTS, [])
         if not tool_results:
             return {}

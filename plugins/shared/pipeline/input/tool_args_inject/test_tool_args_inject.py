@@ -90,9 +90,11 @@ async def _run(state: dict[str, Any], config: dict | None = None) -> dict[str, A
 
 
 async def test_non_tool_execute_and_empty_calls_not_injected() -> None:
-    """core_type=llm_call / 无工具调用 → 不注入。"""
-    assert await _run(_state(core_type="llm_call")) == {"tool.params_injected": False}
+    """无工具调用（纯文本轮）→ 不注入；core_type 已退役，不再是门
+    （有调用即注入，与 core_type 取值无关）。"""
     assert await _run(_state(raw_tool_calls=[])) == {"tool.params_injected": False}
+    result = await _run(_state(core_type="llm_call"))
+    assert result.get("tool.params_injected") is True, "core_type 不再拦截注入"
 
 
 async def test_context_params_injected_when_absent() -> None:

@@ -101,12 +101,16 @@ class TestStatusAdvance:
 
 
 class TestSkipBranches:
-    def test_non_llm_call_core_type_skipped(self) -> None:
+    def test_core_type_leftover_does_not_skip(self) -> None:
+        """core_type 已随管道静态化退役：遗留取值不再跳过评判（合并轮 LLM
+        恒产出，评判轮判据 = 轮次内容本身）。"""
         import asyncio
 
-        result = asyncio.run(TaskReminder().execute(_ctx(_base_task_state(core_type="tool_call")))
+        leftover = asyncio.run(
+            TaskReminder().execute(_ctx(_base_task_state(core_type="tool_call")))
         )
-        assert set(result.state_updates) - {_FP_KEY} == set()
+        baseline = asyncio.run(TaskReminder().execute(_ctx(_base_task_state())))
+        assert set(leftover.state_updates) - {_FP_KEY} == set(baseline.state_updates) - {_FP_KEY}
 
     def test_tool_calls_present_skipped(self) -> None:
         import asyncio

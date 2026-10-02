@@ -174,13 +174,14 @@ class TestExecuteFlow:
         assert result.state_updates == {}
         assert result.skip_remaining is False
 
-    def test_active_but_non_llm_core_type_passes_through(self) -> None:
-        """活跃子任务但 core_type 非 llm_call → 延后挂起。"""
+    def test_active_with_core_type_leftover_suspends(self) -> None:
+        """core_type 已随管道静态化退役：遗留取值不再延后挂起，
+        挂起判据 = LLM 无挂起工具调用（纯文本轮）。"""
         guard = ChildTaskGuard(config={})
         ctx = _make_ctx(state={"pipeline_id": "p", "core_type": "tool_execute"})
         guard._get_active_children = _async_stub((True, ["c1"]))  # type: ignore[method-assign]
         result = _run(guard.execute(ctx))
-        assert result.state_updates == {}
+        assert result.state_updates == {"submitted_task_ids": ["c1"], "suspended": True}
 
     def test_active_with_raw_tool_calls_passes_through(self) -> None:
         """活跃子任务但 LLM 有挂起工具调用 → 继续。"""

@@ -107,13 +107,12 @@ def test_disabled_short_circuits_even_with_blocked_tool() -> None:
     assert _run(plugin.execute(ctx)).state_updates == {}
 
 
-@pytest.mark.parametrize("core_type", ["llm_call", "tool_response", ""])
-def test_non_tool_execute_phase_never_checked(core_type: str) -> None:
+def test_non_tool_execute_phase_never_checked() -> None:
+    """无待执行调用（纯文本轮）零产出；core_type 已随管道静态化退役，不再
+    构成执行门（ADR 2026-10-02-loopconfig-parallel-foreach）。"""
     mod = _load_plugin()
     plugin = mod.LevelGuardPlugin()
-    state: dict[str, Any] = {"raw_tool_calls": [{"name": "task_submit", "arguments": {}}]}
-    if core_type:
-        state["core_type"] = core_type
+    state: dict[str, Any] = {"raw_tool_calls": [], "core_type": "llm_call"}
     assert _run(plugin.execute(_make_ctx(state))).state_updates == {}
 
 

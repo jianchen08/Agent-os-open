@@ -147,21 +147,18 @@ class DuplicateCheckPlugin(IOutputPlugin):
         if ctx.state.get(StateKeys.ENDED, False):
             return {}
 
-        # 仅在 llm_call 阶段判定输出重复：工具结果不是 LLM 输出，不参与重复判定。
-        # 若在 tool_execute 阶段触发，工具结果文本会被误判为"输出重复"，
-        # 并在 tool 消息后追加提示，打断 assistant(tool_calls)→tool 序列。
-        core_type = ctx.state.get(StateKeys.CORE_TYPE, "llm_call")
+        # 失败熔断（ADR 2026-09-09）：本轮刚产出 tool_results（for-each collect
+        # 置换键，恒新鲜）即是连败计数的判定时机。触发熔断（禁工具/终止）时
+        # 独占本轮输出；未触发则计数簿记随轮合并、继续 LLM 输出重复判定——
+        # 合并轮 LLM 恒有产出，重复判定对 LLM 输出面生效，工具结果文本不参与
+        # （不会在 tool 消息后追加提示打断 assistant(tool_calls)→tool 序列）。
+        breaker_updates = self._check_tool_failures(ctx)
+        if breaker_updates.get("router.tool_fail_banned") or breaker_updates.get(
+            "router.stop_reason"
+        ):
+            return breaker_updates
 
-        # 失败熔断（ADR 2026-09-09）：tool_execute 轮 tool_results 刚产出，是
-        # 连败计数的判定时机。触发熔断时独占本轮输出（摘工具面/终止），否则
-        # 保持既有语义（tool 轮不做重复判定）。
-        if core_type == "tool_execute":
-            return self._check_tool_failures(ctx)
-
-        if core_type != "llm_call":
-            return {}
-
-        updates: dict[str, Any] = {}
+        updates: dict[str, Any] = dict(breaker_updates)
 
         # 1. 工具调用重复检查
         dup_result = self._check_duplicate_calls(ctx)
