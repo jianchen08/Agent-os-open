@@ -723,6 +723,9 @@ impl Compiler<'_> {
             }
         }
         let routes = compile_routes(&step.routes, &location)?;
+        if let Some(lc) = &step.loop_config {
+            Self::validate_loop_config(lc, &format!("{location} / loop_config"))?;
+        }
         Ok(CompiledStep {
             id: id.to_string(),
             when,
@@ -731,6 +734,78 @@ impl Compiler<'_> {
             routes,
             loop_config: step.loop_config.clone(),
         })
+    }
+
+    /// loop_config 校验（编译期 fail-closed，ADR 2026-10-02-loopconfig-parallel-foreach）：
+    /// over/as 成对且为合法形态、max_concurrency 取值域、for-each 专属字段不出现在
+    /// 重复循环上、归并键为单个顶层键名、迭代变量名不与引擎保留键冲突。
+    fn validate_loop_config(lc: &LoopConfig, location: &str) -> Result<(), CompileError> {
+        let err = |message: String| CompileError {
+            location: location.to_string(),
+            message,
+        };
+        if lc.over.is_some() != lc.as_iter.is_some() {
+            return Err(err(
+                "over 与 as 必须成对声明（for-each 循环缺一不可）".into()
+            ));
+        }
+        if lc.over.is_none()
+            && (!lc.collect.is_empty()
+                || !lc.collect_append.is_empty()
+                || lc.consume
+                || !lc.consume_keys.is_empty())
+        {
+            return Err(err(
+                "collect/collect_append/consume/consume_keys 仅 for-each（over）循环支持".into(),
+            ));
+        }
+        if lc.max_concurrency == 0 || lc.max_concurrency < -1 {
+            return Err(err(format!(
+                "max_concurrency={} 非法（0 与 <-1 已禁用；1 = 串行链式，>1 = 有界并行，-1 = 不限）",
+                lc.max_concurrency
+            )));
+        }
+        if let Some(over) = &lc.over {
+            let Some(src_key) = over.strip_prefix("state.") else {
+                return Err(err(format!(
+                    "over='{over}' 非法：必须是 'state.<顶层键>' 字面形式（非模板渲染）"
+                )));
+            };
+            if src_key.is_empty() || src_key.contains('.') || src_key.contains('{') {
+                return Err(err(format!(
+                    "over='{over}' 非法：键必须是单个顶层键（不含点号/花括号）"
+                )));
+            }
+            let as_name = lc.as_iter.as_deref().unwrap_or_default();
+            if as_name.is_empty() || as_name.contains('.') {
+                return Err(err(format!(
+                    "as='{as_name}' 非法：迭代变量名必须是非空、不含点号的顶层键名"
+                )));
+            }
+            const RESERVED: [&str; 5] = [
+                "messages",
+                "ended",
+                "suspended",
+                "next_phase",
+                "current_phase",
+            ];
+            if RESERVED.contains(&as_name) {
+                return Err(err(format!("as='{as_name}' 与引擎保留键冲突，请换名")));
+            }
+        }
+        for key in lc
+            .collect
+            .iter()
+            .chain(&lc.collect_append)
+            .chain(&lc.consume_keys)
+        {
+            if key.is_empty() || key.contains('.') {
+                return Err(err(format!(
+                    "归并键 '{key}' 非法：必须是单个顶层键名（不含点号）"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// 编译循环体。

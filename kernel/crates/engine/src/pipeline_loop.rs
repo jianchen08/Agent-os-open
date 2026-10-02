@@ -96,6 +96,12 @@ pub struct PipelineExecutor {
     /// 与 ops_ledger 同边界清空/消费，替代 step 前 state 全量克隆算 diff
     /// （内核内 state 只借用不克隆；克隆仅存在于内核→进程边界的序列化点）。
     step_key_journal: parking_lot::Mutex<HashMap<String, Option<serde_json::Value>>>,
+    /// 并行 for-each 迭代局部的延迟 messages ops（ADR 2026-10-02）：迭代内不
+    /// apply——seq 分配/内存数组/落库/实录/记账全由父循环按迭代序统一一次 apply。
+    deferred_ops: parking_lot::Mutex<Vec<serde_json::Value>>,
+    /// 并行迭代深度（0 = 顶层执行器；>0 = for-each 迭代执行器）：迭代内跳过
+    /// step 轨迹/checkpoint/投影（父 step 收尾统一落，轨迹颗粒度=配置 step）。
+    iteration_depth: u8,
     /// 声明了 `on_pipeline_end` 生命周期钩子的插件 id（manifest 收集）。
     ///
     /// run 结束时逐个 best-effort 分发 [`LifecycleHook::OnPipelineEnd`]（HookContext
@@ -147,6 +153,8 @@ impl PipelineExecutor {
             total_step_no: AtomicI64::new(0),
             ops_ledger: parking_lot::Mutex::new(Vec::new()),
             step_key_journal: parking_lot::Mutex::new(HashMap::new()),
+            deferred_ops: parking_lot::Mutex::new(Vec::new()),
+            iteration_depth: 0,
             pipeline_end_hooks: Vec::new(),
             round_events: None,
             round_counter: AtomicI64::new(0),
@@ -798,6 +806,24 @@ impl PipelineExecutor {
                         ),
                     });
                 }
+                // 并行 for-each（over 存在，编译期已保证与 as 成对、字段合法）：
+                // 对集合逐元素执行——单调用 ≡ 循环单元素展开
+                //（ADR 2026-10-02-loopconfig-parallel-foreach）。
+                if loop_cfg.over.is_some() {
+                    self.execute_parallel_for(step, body_id, state, compiled, ignore_ended)
+                        .await?;
+                    // 与串行循环分支同一收尾路径：step 级轨迹 + step_end hooks
+                    self.persist_step_trace(&step.id, &compiled.checkpoint, state)
+                        .await?;
+                    self.dispatch_boundary_hooks(
+                        compiled,
+                        state,
+                        &HookScope::Step(format!("{body_id}:{}", step.id)),
+                        "step_end",
+                    )
+                    .await;
+                    return Ok(None);
+                }
                 let max_iters = loop_cfg.max_iterations;
                 let mut i: i32 = 0;
                 loop {
@@ -866,6 +892,257 @@ impl PipelineExecutor {
         )
         .await;
         Ok(routed)
+    }
+
+    /// 并行 for-each 迭代执行器：共享 Arc 资源、独立日志/实录/延迟缓冲。
+    ///
+    /// 与父执行器共享 invoker/store/metrics/hook_bus 等 Arc 资源；键实录与 ops
+    /// 实录换新（迭代写面按迭代隔离提取归并），`iteration_depth` +1 使迭代内
+    /// persist_step_trace 跳过、messages ops 走延迟缓冲（见两处定义）。
+    fn clone_for_iteration(&self) -> Self {
+        Self {
+            invoker: Arc::clone(&self.invoker),
+            project_root: self.project_root.clone(),
+            default_tenant: self.default_tenant.clone(),
+            plugin_ids: self.plugin_ids.clone(),
+            store: Arc::clone(&self.store),
+            run_id: self.run_id.clone(),
+            metrics: Arc::clone(&self.metrics),
+            persistent_fields: self.persistent_fields.clone(),
+            steps_since_checkpoint: AtomicI64::new(0),
+            total_step_no: AtomicI64::new(0),
+            ops_ledger: parking_lot::Mutex::new(Vec::new()),
+            step_key_journal: parking_lot::Mutex::new(HashMap::new()),
+            deferred_ops: parking_lot::Mutex::new(Vec::new()),
+            iteration_depth: self.iteration_depth + 1,
+            pipeline_end_hooks: self.pipeline_end_hooks.clone(),
+            round_events: self.round_events.clone(),
+            round_counter: AtomicI64::new(0),
+            hook_bus: self.hook_bus.clone(),
+            max_rounds: self.max_rounds,
+        }
+    }
+
+    /// 单个迭代的产出归并进父 state（按迭代下标/链式序调用，确定性归并）。
+    ///
+    /// 策略（ADR 2026-10-02-loopconfig-parallel-foreach）：
+    /// ① messages ops 父侧统一"一次 apply"（seq 分配/落库/实录/记账全在父）；
+    /// ② collect/collect_append 按迭代序拼接（迭代写的是该迭代的数组，逐项追加）；
+    /// ③ 其余顶层键 last-迭代-wins（迭代实录为写面清单；as 变量/collect 键/
+    ///    终止标志/插件错误走专属策略，不在此列）；
+    /// ④ _plugin_errors 拼接；⑤ ended/suspended 任一迭代置位即父置位。
+    async fn merge_iteration(
+        &self,
+        state: &mut serde_json::Value,
+        iter_exec: PipelineExecutor,
+        iter_state: &serde_json::Value,
+        loop_cfg: &agentos_core::types::LoopConfig,
+        as_name: &str,
+    ) {
+        // ① messages ops
+        let ops = std::mem::take(&mut *iter_exec.deferred_ops.lock());
+        if !ops.is_empty() {
+            let mut updates = HashMap::new();
+            updates.insert("messages".to_string(), serde_json::json!({ "_ops": ops }));
+            self.merge_and_project(state, &updates).await;
+        }
+        // ② collect / collect_append 拼接
+        for key in loop_cfg.collect.iter().chain(&loop_cfg.collect_append) {
+            if let Some(entries) = iter_state.get(key).and_then(|v| v.as_array()) {
+                if entries.is_empty() {
+                    continue;
+                }
+                self.journal_top_key(state, key);
+                let mut arr = state
+                    .get(key)
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                arr.extend(entries.iter().cloned());
+                set_key(state, key, serde_json::Value::Array(arr));
+            }
+        }
+        // ③ 其余顶层键 last-迭代-wins
+        let journal = std::mem::take(&mut *iter_exec.step_key_journal.lock());
+        for (key, _) in &journal {
+            if key == "messages"
+                || key == as_name
+                || key == "ended"
+                || key == "suspended"
+                || key == "_plugin_errors"
+                || loop_cfg.collect.contains(key)
+                || loop_cfg.collect_append.contains(key)
+                || loop_cfg.consume_keys.contains(key)
+            {
+                continue;
+            }
+            if let Some(v) = iter_state.get(key) {
+                self.journal_top_key(state, key);
+                set_key(state, key, v.clone());
+            }
+        }
+        // ④ _plugin_errors 拼接（引擎内部键，迭代错误逐迭代累积可见）
+        if let Some(errs) = iter_state.get("_plugin_errors").and_then(|v| v.as_array()) {
+            if !errs.is_empty() {
+                let mut all = state
+                    .get("_plugin_errors")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                all.extend(errs.iter().cloned());
+                set_key(state, "_plugin_errors", serde_json::Value::Array(all));
+            }
+        }
+        // ⑤ 终止/挂起标志：任一迭代置位即父置位
+        for flag in ["ended", "suspended"] {
+            if truthy_flag(iter_state, flag) && !truthy_flag(state, flag) {
+                self.journal_top_key(state, flag);
+                set_key(state, flag, serde_json::Value::Bool(true));
+            }
+        }
+    }
+
+    /// 并行 for-each 执行（LoopConfig.over 存在，ADR 2026-10-02）。
+    ///
+    /// - max_concurrency=1：串行链式——每迭代从上一迭代合并后的 state 取快照
+    ///   （等价重复循环的链式可见性），迭代完即归并，终止/挂起即停（同串行循环）；
+    /// - max_concurrency>1 / -1：有界并行快照——所有迭代从循环开始时的同一快照
+    ///   克隆（迭代隔离），buffer_unordered 有界并发，全部完成后按迭代下标序归并。
+    /// 收尾：consume 清 over 源键、consume_keys 清 []（消费即清，杜绝跨轮陈旧）。
+    async fn execute_parallel_for(
+        &self,
+        step: &CompiledStep,
+        body_id: &str,
+        state: &mut serde_json::Value,
+        compiled: &CompiledPipeline,
+        ignore_ended: bool,
+    ) -> Result<(), EngineError> {
+        let loop_cfg = step
+            .loop_config
+            .as_ref()
+            .expect("caller ensured loop_config");
+        let as_name = loop_cfg.as_iter.as_deref().expect("compile-time validated");
+        let src_key = loop_cfg
+            .over
+            .as_deref()
+            .and_then(|o| o.strip_prefix("state."))
+            .expect("compile-time validated")
+            .to_string();
+
+        // 迭代元素：缺键视为空批（when 门通常已拦截）；max_iterations 安全阀截断。
+        let items: Vec<serde_json::Value> = state
+            .get(&src_key)
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let items: Vec<serde_json::Value> = if loop_cfg.max_iterations > 0 {
+            items
+                .into_iter()
+                .take(loop_cfg.max_iterations.max(0) as usize)
+                .collect()
+        } else {
+            items
+        };
+
+        // 每轮置换键先清 []（本轮新鲜产出语义；写前实录进父 step 轨迹）。
+        for key in &loop_cfg.collect {
+            self.journal_top_key(state, key);
+            set_key(state, key, serde_json::Value::Array(vec![]));
+        }
+
+        if !items.is_empty()
+            && !truthy_flag(state, "suspended")
+            && (ignore_ended || !truthy_flag(state, "ended"))
+        {
+            let concurrency = if loop_cfg.max_concurrency < 0 {
+                items.len().max(1)
+            } else {
+                (loop_cfg.max_concurrency as usize).max(1)
+            };
+            if concurrency == 1 {
+                // 串行链式：迭代完即归并，下一迭代看到合并后的 state。
+                for item in items {
+                    if truthy_flag(state, "suspended")
+                        || (!ignore_ended && truthy_flag(state, "ended"))
+                    {
+                        break;
+                    }
+                    let iter_exec = self.clone_for_iteration();
+                    let mut iter_state = state.clone();
+                    set_key(&mut iter_state, as_name, item);
+                    iter_exec
+                        .execute_step_inner(step, body_id, &mut iter_state, compiled, ignore_ended)
+                        .await?;
+                    if !step.routes.is_empty() {
+                        iter_exec.apply_routes(&step.routes, &mut iter_state);
+                    }
+                    self.merge_iteration(state, iter_exec, &iter_state, loop_cfg, as_name)
+                        .await;
+                }
+            } else {
+                // 有界并行快照：统一快照 + buffer_unordered，完成后按下标序归并。
+                // 单迭代执行错误不炸整批：记为该迭代错误，归并照常，全部完成后上抛。
+                let base_snapshot = state.clone();
+                use futures::StreamExt;
+                let results = futures::stream::iter(items.into_iter().enumerate())
+                    .map(|(idx, item)| {
+                        let iter_exec = self.clone_for_iteration();
+                        let mut iter_state = base_snapshot.clone();
+                        set_key(&mut iter_state, as_name, item);
+                        async move {
+                            let outcome = iter_exec
+                                .execute_step_inner(
+                                    step,
+                                    body_id,
+                                    &mut iter_state,
+                                    compiled,
+                                    ignore_ended,
+                                )
+                                .await;
+                            let err_msg = match outcome {
+                                Ok(()) => {
+                                    if !step.routes.is_empty() {
+                                        iter_exec.apply_routes(&step.routes, &mut iter_state);
+                                    }
+                                    None
+                                }
+                                Err(e) => Some(e.to_string()),
+                            };
+                            (idx, iter_exec, iter_state, err_msg)
+                        }
+                    })
+                    .buffer_unordered(concurrency)
+                    .collect::<Vec<_>>()
+                    .await;
+                let mut results = results;
+                results.sort_by_key(|(idx, _, _, _)| *idx);
+                let mut first_err: Option<String> = None;
+                for (_, iter_exec, iter_state, err_msg) in results {
+                    self.merge_iteration(state, iter_exec, &iter_state, loop_cfg, as_name)
+                        .await;
+                    if err_msg.is_some() && first_err.is_none() {
+                        first_err = err_msg;
+                    }
+                }
+                if let Some(msg) = first_err {
+                    return Err(EngineError::Other {
+                        message: format!("并行 for-each step '{}' 迭代执行失败: {msg}", step.id),
+                    });
+                }
+            }
+        }
+
+        // 收尾：消费即清（over 源键 + consume_keys）——与批执行插件「消费即清」
+        // 同语义（预填结果批内共享、消费后清除，杜绝跨轮陈旧命中）。
+        if loop_cfg.consume {
+            self.journal_top_key(state, &src_key);
+            set_key(state, &src_key, serde_json::Value::Array(vec![]));
+        }
+        for key in &loop_cfg.consume_keys {
+            self.journal_top_key(state, key);
+            set_key(state, key, serde_json::Value::Array(vec![]));
+        }
+        Ok(())
     }
 
     /// hooks 同步边界分发（服务化提案 §3.6 同步边界事件）。
@@ -1060,6 +1337,11 @@ impl PipelineExecutor {
         ckpt: &agentos_core::types::CheckpointConfig,
         state_after: &serde_json::Value,
     ) -> Result<(), EngineError> {
+        if self.iteration_depth > 0 {
+            // 并行 for-each 迭代局部：不落轨迹/不计 checkpoint/不投影——迭代
+            // 写面经父归并在父 step 收尾统一落（轨迹颗粒度 = 配置 step，不钻迭代）。
+            return Ok(());
+        }
         // checkpoint 按配置 step 计数（在轨迹入口统一推进，含无产出 step——
         // 无产出也消耗了一步；0/禁用 + pipeline_id 为空时内部跳过）。
         self.count_step_and_maybe_checkpoint(ckpt, state_after)
@@ -1593,6 +1875,17 @@ impl PipelineExecutor {
     ) {
         for (k, v) in updates {
             if k == "messages" {
+                if self.iteration_depth > 0 {
+                    // 并行 for-each 迭代局部：ops 只缓冲不 apply（ADR 2026-10-02）——
+                    // 父循环按迭代序统一"一次 apply"。已知限制：迭代内后续步骤对
+                    // messages 的写后读不保证。
+                    if let Some(ops) = v.get("_ops").and_then(|o| o.as_array()) {
+                        self.deferred_ops.lock().extend(ops.iter().cloned());
+                    } else {
+                        warn!("messages 更新未携带 _ops（全量数组已退役，零兼容），该更新被忽略");
+                    }
+                    continue;
+                }
                 if let Some(ops) = v.get("_ops").and_then(|o| o.as_array()) {
                     let tenant_id = self.default_tenant.tenant_id.clone();
                     // 归属标记：每个 op 带上 run_id（表侧写 message_slots.run_id，

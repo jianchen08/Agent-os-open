@@ -8,6 +8,9 @@ description = "Lingxi AgentOS 0.2 pipeline engine — minimal scheduler + SQLite
 
 [dependencies]
 tokio.workspace = true
+# 并行 for-each 的有界并发流（buffer_unordered）：借用友好的并发组合子——
+# JoinSet 要求 'static（step/compiled 计划是借用），futures 的 stream 组合不受此限。
+futures = "0.3"
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

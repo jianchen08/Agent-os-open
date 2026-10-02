@@ -1857,6 +1857,7 @@ async fn test_step_level_loop() {
                 loop_config: Some(agentos_core::types::LoopConfig {
                     enabled: true,
                     max_iterations: -1,
+                    ..Default::default()
                 }),
             }],
             while_cond: None,
@@ -3863,5 +3864,480 @@ async fn empty_pending_message_ops_records_no_user_input_trace() {
     assert!(
         !traces2.iter().any(|p| p == "user_input"),
         "非数组形态不得产生实录，实际 {traces2:?}"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════
+// 并行 for-each（LoopConfig over/as，ADR 2026-10-02-loopconfig-parallel-foreach）
+// ════════════════════════════════════════════════════════════════
+
+use agentos_core::types::LoopConfig;
+
+/// for-each 测试 invoker：捕获每次 invoke 的迭代变量与链式可见键，
+/// 回声式产出 state_updates（归并顺序断言的依据）。
+struct ForeachInvoker {
+    /// 每次 invoke 捕获的 current_call（invoke 顺序；并行下乱序，只做集合断言）。
+    seen_calls: Mutex<Vec<serde_json::Value>>,
+    /// 每次 invoke 捕获的 state.chain（串行链式可见性断言）。
+    seen_chain: Mutex<Vec<serde_json::Value>>,
+    /// 是否返回 messages op（消息归并序断言用）。
+    emit_ops: bool,
+    /// 命中该 current_call 时置 ended=true（终止传播断言用）。
+    end_on: Option<serde_json::Value>,
+}
+
+impl ForeachInvoker {
+    fn new(emit_ops: bool) -> Self {
+        Self {
+            seen_calls: Mutex::new(Vec::new()),
+            seen_chain: Mutex::new(Vec::new()),
+            emit_ops,
+            end_on: None,
+        }
+    }
+}
+
+#[async_trait]
+impl PluginInvoker for ForeachInvoker {
+    async fn invoke_pipeline_plugin<'a>(
+        &self,
+        _plugin_id: &str,
+        ctx: &PluginContext<'a>,
+    ) -> Result<PluginResult, PluginError> {
+        let call = ctx
+            .state
+            .get("current_call")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        self.seen_chain.lock().unwrap().push(
+            ctx.state
+                .get("chain")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        );
+        self.seen_calls.lock().unwrap().push(call.clone());
+        let mut ups = updates(&[
+            ("tool_results", json!([{ "echo": call }])),
+            ("_full_tool_results", json!([{ "full": call }])),
+            ("_executed_tool_calls", json!([call.clone()])),
+            ("submitted_task_ids", json!([call])),
+            ("chain", json!(call)),
+        ]);
+        if self.emit_ops {
+            ups.insert(
+                "messages".into(),
+                json!({"_ops": [{"op": "set", "msg": {"role": "tool", "tool_call_id": call, "content": call}}]}),
+            );
+        }
+        if self.end_on.as_ref() == Some(&call) {
+            ups.insert("ended".into(), json!(true));
+        }
+        Ok(PluginResult {
+            state_updates: ups,
+            ..Default::default()
+        })
+    }
+    async fn invoke_tool(
+        &self,
+        _p: &str,
+        _t: &str,
+        _i: &serde_json::Value,
+    ) -> Result<ToolExecutionResult, PluginError> {
+        Ok(ToolExecutionResult::success(serde_json::Value::Null))
+    }
+    async fn send_lifecycle_hook(
+        &self,
+        _p: &str,
+        _h: agentos_core::traits::LifecycleHook,
+        _c: &agentos_core::traits::HookContext,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
+fn foreach_loop_config(max_concurrency: i32) -> LoopConfig {
+    LoopConfig {
+        enabled: true,
+        max_iterations: -1,
+        over: Some("state.raw_tool_calls".into()),
+        as_iter: Some("current_call".into()),
+        max_concurrency,
+        collect: vec![
+            "tool_results".into(),
+            "_full_tool_results".into(),
+            "_executed_tool_calls".into(),
+        ],
+        collect_append: vec!["submitted_task_ids".into()],
+        consume: true,
+        consume_keys: vec!["pre_decided_results".into()],
+    }
+}
+
+fn foreach_step(loop_config: LoopConfig) -> PipelineStep {
+    PipelineStep {
+        id: "tool_exec".into(),
+        steps: vec!["tc".into()],
+        when: None,
+        context: HashMap::new(),
+        routes: vec![],
+        loop_config: Some(loop_config),
+    }
+}
+
+fn foreach_pipeline(step: PipelineStep) -> PipelineConfig {
+    PipelineConfig {
+        name: "foreach_test".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![step],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
+    }
+}
+
+fn foreach_initial(calls: &[&str]) -> serde_json::Value {
+    json!({
+        "raw_tool_calls": calls.iter().map(|c| json!({"name": "bash", "id": c})).collect::<Vec<_>>(),
+        "pre_decided_results": [{"call_id": "a", "tool_name": "bash", "success": false, "error": "denied"}],
+        "submitted_task_ids": ["t0"],
+    })
+}
+
+#[tokio::test]
+async fn test_foreach_parallel_collect_order_and_consume() {
+    // 有界并行：每迭代一次调用；collect 键按迭代下标序拼接（确定性）；
+    // consume 清 over 源键；consume_keys 清预填结果；迭代变量不泄漏。
+    let inv = Arc::new(ForeachInvoker::new(false));
+    let executor = make_executor(inv.clone(), &["tc"]);
+    let state = executor
+        .run_compiled(
+            &compile_pipeline(
+                &foreach_pipeline(foreach_step(foreach_loop_config(4))),
+                &StepLibrary::default(),
+                &executor.plugin_ids,
+            )
+            .expect("compile"),
+            foreach_initial(&["a", "b", "c"]),
+        )
+        .await
+        .unwrap();
+    let mut seen = inv.seen_calls.lock().unwrap().clone();
+    seen.sort_by(|x, y| {
+        x["id"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(y["id"].as_str().unwrap_or(""))
+    });
+    let want: Vec<serde_json::Value> = ["a", "b", "c"]
+        .iter()
+        .map(|c| json!({"name": "bash", "id": c}))
+        .collect();
+    assert_eq!(seen, want, "每迭代恰好一次，元素即 current_call");
+    // 归并顺序 = 迭代下标序（确定性），与完成顺序无关
+    assert_eq!(
+        state["tool_results"],
+        json!([{"echo": {"name": "bash", "id": "a"}}, {"echo": {"name": "bash", "id": "b"}}, {"echo": {"name": "bash", "id": "c"}}]),
+        "collect 按迭代序拼接"
+    );
+    assert_eq!(state["_full_tool_results"][0]["full"]["id"], json!("a"));
+    assert_eq!(
+        state["_executed_tool_calls"].as_array().map(Vec::len),
+        Some(3)
+    );
+    // consume：源键清空；consume_keys：预填结果清除
+    assert_eq!(state["raw_tool_calls"], json!([]), "consume 清 over 源键");
+    assert_eq!(
+        state["pre_decided_results"],
+        json!([]),
+        "consume_keys 清预填"
+    );
+    assert!(
+        state.get("current_call").is_none() || state["current_call"].is_null(),
+        "迭代变量不得泄漏进共享 state"
+    );
+}
+
+#[tokio::test]
+async fn test_foreach_serial_chain_visibility() {
+    // max_concurrency=1 串行链式：第 N 迭代能看到第 N-1 迭代归并后的写面。
+    let inv = Arc::new(ForeachInvoker::new(false));
+    let executor = make_executor(inv.clone(), &["tc"]);
+    executor
+        .run_compiled(
+            &compile_pipeline(
+                &foreach_pipeline(foreach_step(foreach_loop_config(1))),
+                &StepLibrary::default(),
+                &executor.plugin_ids,
+            )
+            .expect("compile"),
+            foreach_initial(&["a", "b", "c"]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        *inv.seen_chain.lock().unwrap(),
+        vec![
+            json!(null),
+            json!({"name": "bash", "id": "a"}),
+            json!({"name": "bash", "id": "b"})
+        ],
+        "链式可见：迭代读到上一迭代的 chain 写面"
+    );
+}
+
+#[tokio::test]
+async fn test_foreach_serial_breaks_on_ended() {
+    // 串行链式：某迭代置 ended → 后续迭代不再执行（同串行循环 break 语义）。
+    let mut inv2 = ForeachInvoker::new(false);
+    inv2.end_on = Some(json!({"name": "bash", "id": "b"}));
+    let inv = Arc::new(inv2);
+    let executor = make_executor(inv.clone(), &["tc"]);
+    let state = executor
+        .run_compiled(
+            &compile_pipeline(
+                &foreach_pipeline(foreach_step(foreach_loop_config(1))),
+                &StepLibrary::default(),
+                &executor.plugin_ids,
+            )
+            .expect("compile"),
+            foreach_initial(&["a", "b", "c"]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(inv.seen_calls.lock().unwrap().len(), 2, "ended 后 c 不执行");
+    assert_eq!(state["ended"], json!(true), "ended 传播到父 state");
+}
+
+#[tokio::test]
+async fn test_foreach_parallel_ended_propagates() {
+    // 并行快照：全部迭代照跑，任一迭代置 ended → 父置位（OR 归并）。
+    let mut inv2 = ForeachInvoker::new(false);
+    inv2.end_on = Some(json!({"name": "bash", "id": "b"}));
+    let inv = Arc::new(inv2);
+    let executor = make_executor(inv.clone(), &["tc"]);
+    let state = executor
+        .run_compiled(
+            &compile_pipeline(
+                &foreach_pipeline(foreach_step(foreach_loop_config(4))),
+                &StepLibrary::default(),
+                &executor.plugin_ids,
+            )
+            .expect("compile"),
+            foreach_initial(&["a", "b", "c"]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        inv.seen_calls.lock().unwrap().len(),
+        3,
+        "并行下全部迭代照跑"
+    );
+    assert_eq!(state["ended"], json!(true));
+}
+
+#[tokio::test]
+async fn test_foreach_max_iterations_caps_items() {
+    // 安全阀：迭代元素数被 max_iterations 截断。
+    let inv = Arc::new(ForeachInvoker::new(false));
+    let executor = make_executor(inv.clone(), &["tc"]);
+    let mut lc = foreach_loop_config(-1);
+    lc.max_iterations = 2;
+    executor
+        .run_compiled(
+            &compile_pipeline(
+                &foreach_pipeline(foreach_step(lc)),
+                &StepLibrary::default(),
+                &executor.plugin_ids,
+            )
+            .expect("compile"),
+            foreach_initial(&["a", "b", "c", "d", "e"]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        inv.seen_calls.lock().unwrap().len(),
+        2,
+        "max_iterations 截断迭代数"
+    );
+}
+
+#[tokio::test]
+async fn test_foreach_empty_over_still_consumes() {
+    // 空批：零调用；consume/consume_keys 清 [] 照常生效（幂等收尾）。
+    let inv = Arc::new(ForeachInvoker::new(false));
+    let executor = make_executor(inv.clone(), &["tc"]);
+    let state = executor
+        .run_compiled(
+            &compile_pipeline(
+                &foreach_pipeline(foreach_step(foreach_loop_config(4))),
+                &StepLibrary::default(),
+                &executor.plugin_ids,
+            )
+            .expect("compile"),
+            json!({"raw_tool_calls": [], "pre_decided_results": [{"tool_name": "bash"}]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(inv.seen_calls.lock().unwrap().len(), 0);
+    assert_eq!(state["raw_tool_calls"], json!([]));
+    assert_eq!(state["pre_decided_results"], json!([]));
+    assert_eq!(state["tool_results"], json!([]), "collect 键清空占位");
+}
+
+#[tokio::test]
+async fn test_foreach_messages_ops_applied_in_iteration_order() {
+    // messages ops 父侧按迭代序统一 apply：数组顺序 = 迭代下标序（确定性）。
+    let inv = Arc::new(ForeachInvoker::new(true));
+    let executor = make_executor(inv.clone(), &["tc"]);
+    let state = executor
+        .run_compiled(
+            &compile_pipeline(
+                &foreach_pipeline(foreach_step(foreach_loop_config(4))),
+                &StepLibrary::default(),
+                &executor.plugin_ids,
+            )
+            .expect("compile"),
+            foreach_initial(&["a", "b", "c"]),
+        )
+        .await
+        .unwrap();
+    let msgs = state["messages"].as_array().expect("messages array");
+    let ids: Vec<&str> = msgs
+        .iter()
+        .map(|m| {
+            m["tool_call_id"]["id"]
+                .as_str()
+                .unwrap_or(m["tool_call_id"].as_str().unwrap_or(""))
+        })
+        .collect();
+    assert_eq!(ids, vec!["a", "b", "c"], "messages 归并序 = 迭代下标序");
+}
+
+#[tokio::test]
+async fn test_foreach_collect_append_cumulative() {
+    // collect_append 累计键：不清空，父现值 + 各迭代增量按迭代序拼接。
+    let inv = Arc::new(ForeachInvoker::new(false));
+    let executor = make_executor(inv.clone(), &["tc"]);
+    let state = executor
+        .run_compiled(
+            &compile_pipeline(
+                &foreach_pipeline(foreach_step(foreach_loop_config(4))),
+                &StepLibrary::default(),
+                &executor.plugin_ids,
+            )
+            .expect("compile"),
+            foreach_initial(&["a", "b", "c"]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        state["submitted_task_ids"],
+        json!([
+            "t0",
+            {"name": "bash", "id": "a"},
+            {"name": "bash", "id": "b"},
+            {"name": "bash", "id": "c"}
+        ]),
+        "累计键 = 父现值 + 增量（快照基不丢失）"
+    );
+}
+
+#[tokio::test]
+async fn test_foreach_plugin_errors_appended() {
+    // 插件错误：warn+继续语义逐迭代成立，_plugin_errors 按迭代拼接，run 不中断。
+    let fixture_inv = Arc::new(MockInvoker::new());
+    fixture_inv.set_err(
+        "tc",
+        PluginError {
+            message: "sidecar unreachable".into(),
+            code: None,
+            source: None,
+        },
+    );
+    let executor = make_executor(fixture_inv.clone(), &["tc"]);
+    let state = executor
+        .run_compiled(
+            &compile_pipeline(
+                &foreach_pipeline(foreach_step(foreach_loop_config(2))),
+                &StepLibrary::default(),
+                &executor.plugin_ids,
+            )
+            .expect("compile"),
+            foreach_initial(&["a", "b", "c"]),
+        )
+        .await
+        .unwrap();
+    let errs = state["_plugin_errors"].as_array().expect("errors array");
+    assert_eq!(errs.len(), 3, "每迭代一条错误记录");
+}
+
+#[test]
+fn test_foreach_compile_validation() {
+    let plugin_ids: std::collections::HashSet<String> = ["tc".to_string()].into();
+    let mk = |lc: LoopConfig| foreach_pipeline(foreach_step(lc));
+    let compile = |config: &PipelineConfig| {
+        compile_pipeline(config, &StepLibrary::default(), &plugin_ids)
+            .err()
+            .expect("expect compile error")
+            .to_string()
+    };
+    // over 缺 as
+    let lc = LoopConfig {
+        enabled: true,
+        max_iterations: -1,
+        over: Some("state.raw_tool_calls".into()),
+        ..Default::default()
+    };
+    assert!(compile(&mk(lc)).contains("成对"), "over/as 必须成对");
+    // max_concurrency=0
+    let lc = LoopConfig {
+        enabled: true,
+        max_iterations: -1,
+        over: Some("state.x".into()),
+        as_iter: Some("c".into()),
+        max_concurrency: 0,
+        ..Default::default()
+    };
+    assert!(compile(&mk(lc)).contains("max_concurrency"), "0 非法");
+    // collect 出现在重复循环上
+    let lc = LoopConfig {
+        enabled: true,
+        max_iterations: -1,
+        collect: vec!["k".into()],
+        ..Default::default()
+    };
+    assert!(compile(&mk(lc)).contains("仅 for-each"), "collect 需 over");
+    // over 非 state. 形式
+    let lc = LoopConfig {
+        enabled: true,
+        max_iterations: -1,
+        over: Some("{{state.x}}".into()),
+        as_iter: Some("c".into()),
+        ..Default::default()
+    };
+    assert!(compile(&mk(lc)).contains("state."), "over 必须字面形式");
+    // as 撞保留键
+    let lc = LoopConfig {
+        enabled: true,
+        max_iterations: -1,
+        over: Some("state.x".into()),
+        as_iter: Some("messages".into()),
+        ..Default::default()
+    };
+    assert!(compile(&mk(lc)).contains("保留键"), "as 禁用保留名");
+    // 合法配置编译通过（回归护栏：校验不误伤）
+    assert!(
+        compile_pipeline(
+            &mk(foreach_loop_config(4)),
+            &StepLibrary::default(),
+            &plugin_ids
+        )
+        .is_ok(),
+        "合法 for-each 配置必须编译通过"
     );
 }

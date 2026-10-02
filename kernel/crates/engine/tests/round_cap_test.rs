@@ -333,6 +333,7 @@ async fn dsl_loop_zero_iterations_rejected() {
         Some(LoopConfig {
             enabled: true,
             max_iterations: 0,
+            ..Default::default()
         }),
     );
     let executor = make_executor(Arc::clone(&invoker));
@@ -354,6 +355,7 @@ async fn dsl_loop_positive_bound_still_works() {
         Some(LoopConfig {
             enabled: true,
             max_iterations: 2,
+            ..Default::default()
         }),
     );
     let executor = make_executor(Arc::clone(&invoker));

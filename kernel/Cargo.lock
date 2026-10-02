@@ -115,6 +115,7 @@ dependencies = [
  "agentos-tenant",
  "async-trait",
  "chrono",
+ "futures",
  "parking_lot",
  "rusqlite",
  "serde",

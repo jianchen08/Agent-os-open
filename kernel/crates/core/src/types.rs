@@ -845,6 +845,12 @@ pub struct Route {
 }
 
 /// 循环配置（step 级：组合节点自带循环，如批量处理；循环体级循环用 `while`）。
+///
+/// 两种形态（ADR 2026-10-02-loopconfig-parallel-foreach）：
+/// - 重复循环（`over` 缺省）：对 steps 重复执行至多 max_iterations 轮（既有语义）；
+/// - 并行 for-each（`over` 存在）：对 over 数组逐元素执行 steps——单调用 ≡ 循环
+///   的单元素展开，逐调用控制就是循环体内的普通 step。缺省字段下行为与引入
+///   前完全一致（additive 扩展）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopConfig {
     /// 是否启用循环
@@ -853,10 +859,42 @@ pub struct LoopConfig {
     /// 最大迭代次数（-1=无限循环；>0=安全阀）
     #[serde(default = "default_max_iterations")]
     pub max_iterations: i32,
+    /// for-each 迭代集合（YAML `over`）：`"state.<顶层键>"` 字面形式（编译期校验，
+    /// 非模板渲染）。存在时本 step 是 for-each；缺省 = 重复循环。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub over: Option<String>,
+    /// 迭代变量名（YAML `as`，Rust 关键字规避 serde rename）：当前元素写入迭代
+    /// 局部 state 顶层该键，循环体内插件读取；并行迭代之间互不可见。
+    #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+    pub as_iter: Option<String>,
+    /// 并行上限（仅 for-each）：1 = 串行链式（每迭代从上一迭代合并后的 state
+    /// 取快照，等价重复循环的链式可见性）；>1 = 有界并行快照（迭代隔离）；
+    /// -1 = 不限；0 非法（编译期拒绝）。缺省 1。
+    #[serde(default = "default_max_concurrency")]
+    pub max_concurrency: i32,
+    /// 每轮置换归并键（仅 for-each）：循环开始清 []，各迭代对该键写的数组按
+    /// 迭代序拼接——「本轮新鲜产出」语义（如 tool_results）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collect: Vec<String>,
+    /// 累计追加归并键（仅 for-each）：不清空，父键现值 + 各迭代增量按迭代序
+    /// 拼接——会话累计键（如 submitted_task_ids，迭代写增量、父侧追加）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collect_append: Vec<String>,
+    /// 循环收尾把 over 源键清成 []（消费即清——对齐批执行插件「消费即清」语义）。
+    #[serde(default)]
+    pub consume: bool,
+    /// 循环收尾额外清 [] 的键（如 pre_decided_results——预填结果批内共享、
+    /// 消费后清除，杜绝跨轮陈旧命中）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consume_keys: Vec<String>,
 }
 
 fn default_max_iterations() -> i32 {
     -1
+}
+
+fn default_max_concurrency() -> i32 {
+    1
 }
 
 impl Default for LoopConfig {
@@ -864,6 +902,13 @@ impl Default for LoopConfig {
         Self {
             enabled: false,
             max_iterations: -1,
+            over: None,
+            as_iter: None,
+            max_concurrency: 1,
+            collect: Vec::new(),
+            collect_append: Vec::new(),
+            consume: false,
+            consume_keys: Vec::new(),
         }
     }
 }
