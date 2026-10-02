@@ -60,6 +60,10 @@ loop_bodies:
     - pipeline_spill_guard
   - id: post
     next:
+    # 本迭代 llm 产出了调用 → loop（下一迭代 tool_exec 执行）；纯文本或
+    # 已执行完（consume 后 raw==[]）→ 终局。
+    - then: loop
+      when: raw_tool_calls != [] and raw_tool_calls != None
     - then: end
     steps:
     # 状态统一标记解析步（2026-09-28 设计）：提取 <state> 标记 → 账本落账
