@@ -326,6 +326,24 @@ impl KernelCapabilityRouter {
         }
     }
 
+    /// trigger-svc：触发器注册面（M1 内核侧，ADR 2026-10-02-trigger-eval-unification）。
+    /// 注册表/边沿簿记/fire log 在 `agentos_engine::trigger`（全局单例）；
+    /// committed 求值锚点在 store 提交写入口（SqliteStore upsert 提交后）。
+    /// 条件语法 = 内核 condition.rs（与管道 when/routes/while 同源）。
+    async fn dispatch_trigger_svc(
+        &self,
+        method: &str,
+        params: &Value,
+    ) -> Option<Result<Value, McpError>> {
+        match method {
+            "register" => Some(self.handle_trigger_register(params.clone()).await),
+            "unregister" => Some(self.handle_trigger_unregister(params.clone()).await),
+            "reconcile" => Some(self.handle_trigger_reconcile().await),
+            "ack" => Some(self.handle_trigger_ack(params.clone()).await),
+            _ => None,
+        }
+    }
+
     /// 创建带指标聚合器的路由器（生产用，启用 metrics.record 反向调用）。
     pub fn with_metrics(metrics: MetricsAggregator) -> Self {
         Self {
@@ -559,6 +577,14 @@ impl CapabilityRouter for KernelCapabilityRouter {
 
             ("transient", m) => self
                 .dispatch_transient(m, &params)
+                .await
+                .unwrap_or_else(|| self.unhandled(capability, method, &params)),
+
+            // ── trigger-svc：触发器注册面（M1 内核侧）——注册/注销/对账/ack，
+            // 求值锚点在 store 提交写入口（engine trigger.rs），G6 信封闸由
+            // handle() 单点覆盖。──
+            ("trigger-svc", m) => self
+                .dispatch_trigger_svc(m, &params)
                 .await
                 .unwrap_or_else(|| self.unhandled(capability, method, &params)),
 
@@ -2350,6 +2376,134 @@ impl KernelCapabilityRouter {
         agentos_engine::global_registry().clear(&tenant_id, pipeline_id, key);
         Ok(json!({"status": "cleared", "pipeline_id": pipeline_id, "key": key}))
     }
+
+    // ── trigger-svc.*：触发器注册面（M1 内核侧，ADR 2026-10-02-trigger-eval-
+    // unification）。注册表/边沿/fire log 在 agentos_engine::trigger（全局单例）；
+    // committed 求值锚点在 store 提交写入口。owner_plugin_id 以注册声明为准
+    // （G6 白名单已限定调用方；允许代理注册——注册面插件代业务插件挂触发器）。
+
+    /// trigger-svc.register：注册触发器并对当前 committed 行 state 种子求值一次。
+    /// 条件注册期编译为 AST（运行时零解析，G10 同款）；语法错误显式报错
+    /// （对齐管道加载期暴露语义），求值期由 eval fail-soft 折假兜底。
+    /// 种子求值命中只初始化边沿簿记（不点火），seed_fired 如实返回调用方处置。
+    async fn handle_trigger_register(&self, params: Value) -> Result<Value, McpError> {
+        let trigger_id = trigger_param_str(&params, "trigger_id")?;
+        let owner_plugin_id = trigger_param_str(&params, "owner_plugin_id")?;
+        let condition_src = params
+            .get("condition")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::Protocol {
+                message: "trigger-svc.register 缺少 condition 字符串参数".to_string(),
+            })?;
+        let condition = agentos_engine::condition::parse_condition(condition_src).map_err(|e| {
+            McpError::Protocol {
+                message: format!("trigger-svc.register 条件语法错误: {e}"),
+            }
+        })?;
+        // watched_keys 缺省 = 不筛键（任意提交写都进入求值候选）；注册方应
+        // 声明条件引用的全部键，漏声明 = 相关变化不触发求值（求值准入，
+        // 非求值语义）。
+        let watched_keys: Vec<String> = params
+            .get("watched_keys")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let pipeline_id = params
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
+        // 种子求值上下文：作用域触发器读当前 committed 行 state；全局触发器
+        // 无单行上下文 = 空 state。行加载失败即注册失败——种子错置会产生幽灵
+        // 边沿，不静默降级。
+        let seed_state = match (&self.store, pipeline_id.as_deref()) {
+            (Some(store), Some(pid)) => {
+                let row = store
+                    .load_pipeline_state(pid, &tenant_id)
+                    .await
+                    .map_err(|e| McpError::Protocol {
+                        message: format!("trigger-svc.register 种子行 state 读取失败: {e}"),
+                    })?;
+                Value::Object(row.into_iter().collect())
+            }
+            _ => Value::Object(Default::default()),
+        };
+        let seed_fired = agentos_engine::trigger::global_registry().register(
+            agentos_engine::trigger::TriggerRegistration {
+                trigger_id: trigger_id.to_string(),
+                tenant_id,
+                pipeline_id,
+                condition,
+                watched_keys,
+                owner_plugin_id: owner_plugin_id.to_string(),
+            },
+            &seed_state,
+        );
+        Ok(json!({"ok": true, "seed_fired": seed_fired}))
+    }
+
+    /// trigger-svc.unregister：注销触发器（边沿簿记随注册项清除；未 ack 的
+    /// fire log 保留至 ack，at-least-once 不因注销丢账）。
+    async fn handle_trigger_unregister(&self, params: Value) -> Result<Value, McpError> {
+        let trigger_id = trigger_param_str(&params, "trigger_id")?;
+        agentos_engine::trigger::global_registry().unregister(trigger_id);
+        Ok(json!({"ok": true}))
+    }
+
+    /// trigger-svc.reconcile：未 ack 的火（老→新）。幂等可重复——ack 前每次
+    /// 轮询全量返回；通知投递失败不重试，本方法是兜底重投面。
+    async fn handle_trigger_reconcile(&self) -> Result<Value, McpError> {
+        let fires = agentos_engine::trigger::global_registry()
+            .reconcile()
+            .into_iter()
+            .map(|f| {
+                json!({
+                    "trigger_id": f.trigger_id,
+                    "fire_seq": f.fire_seq,
+                    "fired_at": f.fired_at,
+                    "keys": f.keys,
+                    "pipeline_id": f.pipeline_id,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({"fires": fires}))
+    }
+
+    /// trigger-svc.ack：清账已确认投递的火（fire_ids = reconcile 返回的
+    /// fire_seq；未知 id 忽略不报错——重投与 ack 并发时天然幂等）。
+    async fn handle_trigger_ack(&self, params: Value) -> Result<Value, McpError> {
+        let ids = params
+            .get("fire_ids")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| McpError::Protocol {
+                message: "trigger-svc.ack 缺少 fire_ids 数组参数".to_string(),
+            })?;
+        let fire_ids: Vec<i64> = ids
+            .iter()
+            .map(|v| v.as_i64())
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| McpError::Protocol {
+                message: "trigger-svc.ack 的 fire_ids 必须全为整数".to_string(),
+            })?;
+        agentos_engine::trigger::global_registry().ack(&fire_ids);
+        Ok(json!({"ok": true}))
+    }
+}
+
+/// trigger-svc 参数取非空字符串（缺失/非字符串/空串统一报错）。
+fn trigger_param_str<'a>(params: &'a Value, name: &str) -> Result<&'a str, McpError> {
+    params
+        .get(name)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| McpError::Protocol {
+            message: format!("trigger-svc 缺少 {name} 非空字符串参数"),
+        })
 }
 
 /// 钩子装载表查询挂桩（ADR 2026-08-27 决策7 / 方案 §2.4 协作点）。

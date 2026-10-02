@@ -5473,3 +5473,250 @@ async fn unhandled_capability_emits_diagnostics() {
         "残留调用须留痕: {text}"
     );
 }
+
+// ── trigger-svc：触发器注册面（M1 内核侧）────────────────────────
+//
+// 全局注册表进程级共享：trigger_id/pipeline/键全测试域唯一 + 结束清场
+// （unregister + ack）防跨测试串扰。通知闭包测试进程不接线——fire 只落
+// fire log，经 reconcile 断言（通知分发契约在 engine trigger.rs 单测覆盖）。
+
+#[tokio::test]
+async fn trigger_svc_register_seed_reconcile_ack_roundtrip() {
+    let router = router_with_store();
+    let pid = format!("pipe_tsvc_{}", uuid::Uuid::new_v4().simple());
+    let trigger_id = format!("t_tsvc_{}", uuid::Uuid::new_v4().simple());
+
+    // 预置 committed 行（种子求值上下文）：task.status=running
+    let seeded_row = router
+        .handle(
+            "pipeline-state",
+            "update",
+            json!({"pipeline_id": pid, "fields": {"task.status": "running"}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(seeded_row["status"], "updated");
+
+    // 注册：条件尚未满足 → seed_fired=false
+    let out = router
+        .handle(
+            "trigger-svc",
+            "register",
+            json!({
+                "trigger_id": trigger_id,
+                "condition": "task.status == 'done'",
+                "pipeline_id": pid,
+                "watched_keys": ["task.status"],
+                "owner_plugin_id": "triggers_ext",
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(out["ok"], true);
+    assert_eq!(
+        out["seed_fired"], false,
+        "种子行 task.status=running 不应命中"
+    );
+
+    // 无关写（watched 未命中）不点火
+    router
+        .handle(
+            "pipeline-state",
+            "update",
+            json!({"pipeline_id": pid, "fields": {"task.goal": "x"}}),
+        )
+        .await
+        .unwrap();
+    let fires = router
+        .handle("trigger-svc", "reconcile", json!({}))
+        .await
+        .unwrap();
+    assert!(
+        fires["fires"].as_array().unwrap().is_empty(),
+        "watched 未命中不得点火: {fires}"
+    );
+
+    // 命中写：task.status=done → 边沿 false→true 点火
+    router
+        .handle(
+            "pipeline-state",
+            "update",
+            json!({"pipeline_id": pid, "fields": {"task.status": "done"}}),
+        )
+        .await
+        .unwrap();
+    let fires = router
+        .handle("trigger-svc", "reconcile", json!({}))
+        .await
+        .unwrap();
+    let arr = fires["fires"].as_array().unwrap();
+    let mine: Vec<_> = arr
+        .iter()
+        .filter(|f| f["trigger_id"] == trigger_id.as_str())
+        .collect();
+    assert_eq!(mine.len(), 1, "边沿命中应恰好一火: {fires}");
+    assert_eq!(mine[0]["keys"], json!(["task.status"]));
+    assert_eq!(mine[0]["pipeline_id"], pid.as_str());
+    assert!(mine[0]["fire_seq"].as_i64().is_some());
+    assert!(mine[0]["fired_at"].as_str().is_some());
+
+    // ack 前 reconcile 幂等可见；ack 后消失
+    let again = router
+        .handle("trigger-svc", "reconcile", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(again["fires"].as_array().unwrap().len(), arr.len());
+    let seq = mine[0]["fire_seq"].as_i64().unwrap();
+    let acked = router
+        .handle("trigger-svc", "ack", json!({"fire_ids": [seq]}))
+        .await
+        .unwrap();
+    assert_eq!(acked["ok"], true);
+    let after = router
+        .handle("trigger-svc", "reconcile", json!({}))
+        .await
+        .unwrap();
+    assert!(
+        after["fires"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["trigger_id"] != trigger_id.as_str()),
+        "ack 后不得再返回: {after}"
+    );
+
+    // 清场
+    router
+        .handle(
+            "trigger-svc",
+            "unregister",
+            json!({"trigger_id": trigger_id}),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn trigger_svc_register_seed_fired_true_when_condition_holds() {
+    let router = router_plain();
+    let trigger_id = format!("t_tsvc_seed_{}", uuid::Uuid::new_v4().simple());
+    // 全局触发器（无 pipeline_id）：种子上下文 = 空 state，恒真条件命中
+    let out = router
+        .handle(
+            "trigger-svc",
+            "register",
+            json!({
+                "trigger_id": trigger_id,
+                "condition": "True",
+                "watched_keys": ["tsv.never_written"],
+                "owner_plugin_id": "triggers_ext",
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(out["ok"], true);
+    assert_eq!(out["seed_fired"], true, "恒真条件种子应命中");
+    // 种子命中只初始化边沿簿记：不点火（fire log 无该触发器条目）
+    let fires = router
+        .handle("trigger-svc", "reconcile", json!({}))
+        .await
+        .unwrap();
+    assert!(
+        fires["fires"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["trigger_id"] != trigger_id.as_str()),
+        "种子命中不落 fire log: {fires}"
+    );
+    router
+        .handle(
+            "trigger-svc",
+            "unregister",
+            json!({"trigger_id": trigger_id}),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn trigger_svc_register_rejects_syntax_error() {
+    let router = router_plain();
+    let err = router
+        .handle(
+            "trigger-svc",
+            "register",
+            json!({
+                "trigger_id": "t_bad_syntax",
+                "condition": "a = 1",
+                "owner_plugin_id": "triggers_ext",
+            }),
+        )
+        .await
+        .expect_err("语法错误须注册期显式报错");
+    assert!(format!("{err}").contains("条件语法错误"), "{err}");
+}
+
+#[tokio::test]
+async fn trigger_svc_register_missing_params_rejected() {
+    let router = router_plain();
+    for missing in ["trigger_id", "owner_plugin_id"] {
+        let mut body = json!({
+            "trigger_id": "t_x",
+            "condition": "a == 1",
+            "owner_plugin_id": "p",
+        });
+        body.as_object_mut().unwrap().remove(missing);
+        let err = router
+            .handle("trigger-svc", "register", body)
+            .await
+            .expect_err("缺参数须拒绝");
+        assert!(format!("{err}").contains(missing), "{missing}: {err}");
+    }
+    let err = router
+        .handle(
+            "trigger-svc",
+            "register",
+            json!({"trigger_id": "t_x", "owner_plugin_id": "p"}),
+        )
+        .await
+        .expect_err("缺 condition 须拒绝");
+    assert!(format!("{err}").contains("condition"), "{err}");
+}
+
+#[tokio::test]
+async fn trigger_svc_ack_shape_validated() {
+    let router = router_plain();
+    let err = router
+        .handle("trigger-svc", "ack", json!({"fire_ids": ["x"]}))
+        .await
+        .expect_err("非整数 fire_ids 须拒绝");
+    assert!(format!("{err}").contains("整数"), "{err}");
+    let err = router
+        .handle("trigger-svc", "ack", json!({}))
+        .await
+        .expect_err("缺 fire_ids 须拒绝");
+    assert!(format!("{err}").contains("fire_ids"), "{err}");
+}
+
+#[tokio::test]
+async fn g6_trigger_svc_denied_without_grant() {
+    // trigger-svc 与其他反向能力同过 G6 单点：白名单不含即拒。
+    let lookup: GrantsLookupFn = Arc::new(|_| Some(vec!["other-capability".to_string()]));
+    let router =
+        KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_grants_lookup(lookup);
+    let err = router
+        .handle(
+            "trigger-svc",
+            "register",
+            json!({
+                "_plugin_id": "p1",
+                "trigger_id": "t_g6",
+                "condition": "True",
+                "owner_plugin_id": "triggers_ext",
+            }),
+        )
+        .await
+        .expect_err("未授权调用须拒绝");
+    assert!(format!("{err}").contains("not granted"), "{err}");
+}

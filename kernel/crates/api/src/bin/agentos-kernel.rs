@@ -1259,6 +1259,50 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
 
+    // trigger-svc 点火通知接线（M1，ADR 2026-10-02-trigger-eval-unification）：
+    // fire → 域事件 "trigger.fired"（组件版广播：点对点投递给声明 domain_event
+    // 的启用插件——owner 声明订阅即达；观察总线由 broadcast_domain_event_from
+    // 一并 emit，best-effort）。投递失败不重试——reconcile 周期轮询兜底，
+    // fire log 在 ack 前保留。通知闭包由 store 提交锚点在 DB 专用线程池线程上
+    // 调用（无 tokio 上下文），用构造期 Handle spawn，不依赖线程局部上下文。
+    {
+        let inv_for_trigger: Arc<dyn agentos_core::traits::PluginInvoker> = invoker.clone();
+        let enabled_for_trigger = enabled_plugin_ids.clone();
+        let manifests_for_trigger = manifests_shared.clone();
+        let spawn_handle = tokio::runtime::Handle::current();
+        agentos_engine::trigger::global_registry().set_notifier(Arc::new(
+            move |fire: agentos_engine::trigger::TriggerFire| {
+                let tags = vec![
+                    ("trigger_id".to_string(), serde_json::json!(fire.trigger_id)),
+                    ("fire_seq".to_string(), serde_json::json!(fire.fire_seq)),
+                    ("view".to_string(), serde_json::json!(fire.view)),
+                    ("keys".to_string(), serde_json::json!(fire.keys)),
+                    (
+                        "pipeline_id".to_string(),
+                        serde_json::json!(fire.pipeline_id),
+                    ),
+                    (
+                        "owner_plugin_id".to_string(),
+                        serde_json::json!(fire.owner_plugin_id),
+                    ),
+                ];
+                let inv = inv_for_trigger.clone();
+                let enabled = enabled_for_trigger.clone();
+                let manifests = manifests_for_trigger.clone();
+                spawn_handle.spawn(async move {
+                    agentos_api::plugin_lifecycle::broadcast_domain_event_from(
+                        &inv,
+                        &enabled,
+                        &manifests,
+                        "trigger.fired",
+                        tags,
+                    )
+                    .await;
+                });
+            },
+        ));
+    }
+
     // 流式声明查询闭包（ADR 2026-08-22）：capability_router 收到流式事件时查
     // 插件 capabilities.streaming 声明（未声明即拒，fail-closed）。manifests 用
     // 共享 RwLock（与 domain_broadcaster 同源）——watcher 热发现同步可见。

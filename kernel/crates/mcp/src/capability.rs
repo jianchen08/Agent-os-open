@@ -44,6 +44,11 @@ pub const STANDARD_CAPABILITIES: &[&str] = &[
     "tool-surface",
     "service-registry",
     "frontend",
+    // trigger-svc：触发器注册面（M1 内核侧，ADR 2026-10-02-trigger-eval-
+    // unification）——注册/注销/对账/ack，求值锚点在 store 提交写入口。
+    // initialize 握手据此给 sidecar 建 CapabilityHandle（SDK 名单两端同步，
+    // Python 侧同步由触发器插件侧承担）。
+    "trigger-svc",
 ];
 
 /// Capability 路由器——处理 sidecar 反向调用内核能力。
