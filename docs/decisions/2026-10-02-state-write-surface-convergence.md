@@ -20,6 +20,8 @@
 3. **持久写面保留但收窄为声明制**：终态/持久计数/注册表等持久类键保留窄化的 `pipeline-state.update` 通道——**删除 `task.*` 前缀特判**，改为 manifest `state.writes` 声明 + `_plugin_id`（invoker 注入信任锚点，插件不可伪造）在 G6 授权单点同域校验；未声明即拒绝。内核只执行"声明才可写"机制，不执行"哪个域存在"语义。
 4. **观察权与提交权分离**：committed 视图触发求值锚 store 统一写入口（两条写路径已汇合 `upsert_state_field(s)`：pipeline_loop.rs:1164/:1530 与 capability handler）；staged 视图挂 `transient.set` 进程内挂钩。观察不破坏边界不变量——不变量管辖的是提交权。
 5. 触发器注册表持久层（`task.trigger.registry.*`）随触发求值统一模型上收内核 trigger-svc，triggers_ext 的直写点随之消失。
+6. **过程态键离开 `task.*` 命名空间**（前置核查 2 的硬约束 R-stop）：`task.status` 在 committed 层只承载终态/持久值（声明制持久写面写入）；过程态（`evaluating` 等）写 transient 暂存键（如 `eval.state`）。若过程态沿用 `task.status`，合并视图会出现 staged 中间值遮蔽 committed 终值——stop_check 的终态严格等值判定（`_TERMINAL_STATUSES`）将延迟乃至空转。键面分离后无遮蔽类冲突，stop_check 无需改动。
+7. **读面两轨同批翻转**：`pipeline-state.list` 与 `GET /pipelines/state`（routes.rs:1404-1520，与 capability 共用语义）同批改为 staged∪committed 合并视图——只翻一面会造成插件与前端所见不一致（两轨同判同语义原则）。因键面分离（决策 6），合并视图对 `task.status` 消费方无感知；transient 寄存器按已有管道键控不产生新行，结构键消费方无感。
 
 ## Alternatives Considered
 
@@ -31,7 +33,7 @@
 ## 影响
 
 - 正面：重建两条路径一致（暂存不承诺持久；持久写有声明、有边界、有迹可循）；内核业务域特判清零；触发器 committed 锚点一处覆盖全部提交变化；统一审计（一份 state 历史 + 一套 traces）保住。
-- 迁移面：`task_evaluate` 11 个写点按两类拆分（过程态→transient 暂存；终态/持久计数→声明制持久写面）；task_service / workspace_lifecycle 事件驱动与镜像写补 `state.writes` 声明；聚合读面（`pipeline-state.list`，GAP-2）语义改 staged∪committed 合并视图（消费方盘点见前置核查 2）。
+- 迁移面：`task_evaluate` 11 个写点按两类拆分（**过程态→transient 暂存键（离开 task.* 命名空间）**；终态/持久计数→声明制持久写面）；task_service / workspace_lifecycle 事件驱动与镜像写补 `state.writes` 声明；聚合读面（`pipeline-state.list`，GAP-2）与 `GET /pipelines/state` 同批改 staged∪committed 合并视图——消费方 26 个点位（核查 2），因键面分离对 `task.status` 终态消费方（stop_check、前端任务树）无感知；`pipeline-state.update` 保留故 plugin-loader 方法表维持 `["list","update"]` 不变。
 - 崩溃语义写死：暂存 = 易失是特性（事实可由会话重放再得出）；需要持久的写必须声明走持久写面。
 - 兼容：内部代码一刀切，不留兼容层；存量触发器注册表随 trigger-svc 上收一次性迁移。
 
