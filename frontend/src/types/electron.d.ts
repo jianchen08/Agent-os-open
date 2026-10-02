@@ -144,10 +144,8 @@ export interface ElectronAuthSessionAPI {
 
 /** 装机版自动登录凭据子 API：admin 口令由主进程存档持有（ADR 2026-09-28） */
 export interface ElectronAdminCredentialAPI {
-  /** 读取自动登录凭据；dev/浏览器形态为 null（渲染进程据此跳过自动登录） */
+  /** 读取自动登录凭据；dev/浏览器形态或 launcher 未播种 AGENTOS_ADMIN_PASSWORD 时为 null */
   load: () => Promise<{ username: string; password: string } | null>
-  /** 改密后回写存档；非存档账号（非 admin）主进程拒收返回 false */
-  sync: (username: string, password: string) => Promise<boolean>
 }
 
 /** 前端通过 window.electronAPI 访问（Electron 环境下存在，Web 下为 undefined） */

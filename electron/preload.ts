@@ -87,10 +87,9 @@ export interface ElectronAPI {
     save(refreshToken: string | null): Promise<boolean>;
     load(): Promise<string | null>;
   };
-  /** 装机版自动登录凭据（ADR 2026-09-28）：load 仅装机形态返回非空；sync 供改密后回写存档 */
+  /** 装机版自动登录凭据（ADR 2026-10-02-packaged-auto-login-env-only）：load 仅装机形态且 launcher 已播种 AGENTOS_ADMIN_PASSWORD 时返回非空 */
   adminCredential: {
     load(): Promise<{ username: string; password: string } | null>;
-    sync(username: string, password: string): Promise<boolean>;
   };
   windowControls: {
     /** 最小化 */
@@ -183,20 +182,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
       return ipcRenderer.invoke("auth:session:load") as Promise<string | null>;
     },
   },
-  /** 装机版自动登录凭据（ADR 2026-09-28）：load 仅装机形态返回非空；sync 供改密后回写存档 */
+  /** 装机版自动登录凭据（ADR 2026-10-02-packaged-auto-login-env-only）：load 仅装机形态且 launcher 已播种 AGENTOS_ADMIN_PASSWORD 时返回非空 */
   adminCredential: {
     load: () => {
       return ipcRenderer.invoke("auth:admin-credential:load") as Promise<{
         username: string;
         password: string;
       } | null>;
-    },
-    sync: (username: string, password: string) => {
-      return ipcRenderer.invoke(
-        "auth:admin-credential:sync",
-        username,
-        password,
-      ) as Promise<boolean>;
     },
   },
 

@@ -79,7 +79,7 @@ done
 | `AGENTOS_KERNEL_HOST` | **弃用中**的监听地址别名（过渡期仍采纳，打弃用告警） | 未设 | 同上 |
 | `AGENTOS_CORS_ORIGINS` | 生产 CORS 白名单：逗号分隔的**完整 origin**，精确匹配（无子域/前缀模糊） | 未设 = 仅本地源放行 | `kernel/crates/api/src/server.rs`（`origin_matches_allowlist`） |
 | `AGENTOS_TOKEN_SECRET` | token 签名密钥；**未设 = 进程随机，重启即全量会话失效** | 未设（随机） | `kernel/crates/http/src/auth.rs`（`TOKEN_SECRET_ENV`） |
-| `AGENTOS_ADMIN_PASSWORD` | 内置 admin 口令；未设 = 首启生成随机口令并**仅打印一次**，置非空值可重置已有 admin 口令 | 未设（随机） | `bin/agentos-kernel.rs`（`resolve_admin_password`） |
+| `AGENTOS_ADMIN_PASSWORD` | 内置 admin 口令（播种口令唯一事实源，不置 `must_change_password`）；未设 = 首启生成随机口令并**仅打印一次**（置 `must_change_password`，首登强制改密），置非空值可重置已有 admin 口令 | 未设（随机） | `bin/agentos-kernel.rs`（`resolve_admin_password`） |
 | `AGENTOS_PLUGINS_DIR` | 内置插件根目录（只读） | `<项目根>/plugins/shared` | 同上 |
 | `AGENTOS_USER_PLUGINS_DIR` | 用户插件根目录（可写，第三方插件安装位；同 id 覆盖内置根） | `<USER_ROOT>/plugins` | 同上（`resolve_user_plugins_dir`） |
 | `AGENTOS_CONFIG_ROOT` | 工厂配置根目录（只读基线，用户层优先见上行 `AGENTOS_USER_CONFIG_DIR`） | `<项目根>/config` | 同上 |
@@ -232,7 +232,9 @@ nssm start AgentOSKernel
 - [ ] 跨域部署设 `AGENTOS_CORS_ORIGINS` 为精确 origin 白名单（逗号分隔，无通配）。
 - [ ] `AGENTOS_TOKEN_SECRET` 显式注入（长随机串）——缺省随机时每次重启全部会话失效。
 - [ ] 首启随机 admin 口令只在控制台打印一次，登录后前端强制改密
-      （`must_change_password`）；遗忘时设 `AGENTOS_ADMIN_PASSWORD=<新口令>` 重启重置。
+      （`must_change_password`）；显式设 `AGENTOS_ADMIN_PASSWORD` 播种的口令是
+      操作员自选事实源，不置改密标记；遗忘时设 `AGENTOS_ADMIN_PASSWORD=<新口令>`
+      重启重置。
 - [ ] `/health` 为无鉴权存活探针；`/api/v1/*` 业务面与 `/metrics`（Prometheus）
       均在鉴权/token 门后，反代不要把 `/metrics` 暴露到公网。
 - [ ] 插件 venv 只从锁文件构建（`uv sync --frozen`），禁止生产在线重解析依赖。

@@ -65,10 +65,12 @@ fn resolve_admin_password() -> (String, bool) {
 /// tenant_id = "default"（与多租户隔离地基的默认租户一致），保证旧数据
 /// （0.5.0 前以 default 写入的会话/消息）仍归 admin 可见。
 ///
-/// D1：口令 argon2id 哈希落库，播种账号 `must_change_password = true`
-/// （login 响应携带标记，前端拦截强制改密）。对已存在的 admin，若
-/// `AGENTOS_ADMIN_PASSWORD` 与当前口令不符即重置（操作员恢复通道：
-/// 迁移失败/口令遗失时设置该变量重启）。
+/// D1：口令 argon2id 哈希落库。`must_change_password` 只对随机生成的口令
+/// 置位（console 一次性打印、无人持久持有 → 首登强制改密）；来自
+/// `AGENTOS_ADMIN_PASSWORD` 的口令是操作员/launcher 自选的事实源（装机版
+/// 自动登录契约，ADR 2026-10-02-packaged-auto-login-env-only），不置改密
+/// 标记。对已存在的 admin，若环境变量与当前口令不符即重置（操作员恢复
+/// 通道：迁移失败/口令遗失时设置该变量重启）。
 async fn seed_admin_user(store: Arc<dyn agentos_core::traits::StorageBackend>) {
     const ADMIN_ID: &str = "00000000-0000-0000-0000-000000000001";
     let (password, generated) = resolve_admin_password();
@@ -111,7 +113,7 @@ async fn seed_admin_user(store: Arc<dyn agentos_core::traits::StorageBackend>) {
                 tenant_id: "default".to_string(),
                 created_at: now,
                 last_login_at: None,
-                must_change_password: true,
+                must_change_password: generated,
             };
             match store.create_user(&admin).await {
                 Ok(()) => {
@@ -780,7 +782,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     let store_dyn: Arc<dyn agentos_core::traits::StorageBackend> = store.clone();
 
     // 播种内置 admin 用户（0.5.0 最小持久化地基）：argon2 哈希落库 +
-    // must_change_password=true；存量明文口令行启动迁移哈希化（D1，fail-closed）。
+    // 随机口令置 must_change_password；存量明文口令行启动迁移哈希化（D1，fail-closed）。
     seed_admin_user(store.clone()).await;
     if let Err(e) = migrate_plaintext_passwords(store.clone()).await {
         eprintln!(
@@ -2707,7 +2709,7 @@ mod tests {
             "已哈希行不应被改写"
         );
 
-        // ── 播种 A：首启 + 显式口令 → 播种 admin（哈希、must_change）──
+        // ── 播种 A：首启 + 显式口令 → 播种 admin（哈希、无改密标记）──
         std::env::set_var("AGENTOS_ADMIN_PASSWORD", "seed-phase-pw");
         let store = fresh_store();
         seed_admin_user(store.clone()).await;
@@ -2718,7 +2720,10 @@ mod tests {
             .expect("首启必须播种 admin");
         assert_eq!(admin.username, "admin");
         assert_eq!(admin.tenant_id, "default");
-        assert!(admin.must_change_password, "播种 admin 须标记改密");
+        assert!(
+            !admin.must_change_password,
+            "env 播种口令是操作员自选事实源，不得强制改密"
+        );
         assert!(
             agentos_http::auth::verify_password("seed-phase-pw", &admin.password),
             "播种口令须与环境变量一致"
@@ -2761,6 +2766,10 @@ mod tests {
         assert!(
             agentos_http::auth::is_password_hash(&admin.password),
             "随机口令同样落哈希"
+        );
+        assert!(
+            admin.must_change_password,
+            "随机生成口令无人持久持有，须标记首登强制改密"
         );
         std::env::remove_var("AGENTOS_ADMIN_PASSWORD");
     }

@@ -34,7 +34,6 @@ import {
   getPackagedAdminCredential,
   shutdownManagedKernel,
 } from "./kernel-manager";
-import { updateAdminCredential } from "./admin-credential";
 import { attachEditMenu } from "./edit-menu";
 import { createTray, destroyTray } from "./tray";
 import { loadAuthSession, saveAuthSession } from "./auth-session";
@@ -732,25 +731,13 @@ function registerIpcHandlers(): void {
     return loadAuthSession(app.getPath("userData"));
   });
 
-  // 装机版自动登录凭据（ADR 2026-09-28）：load 仅 app.isPackaged 且包内内核
-  // ensure 已解析存档后非空——dev/浏览器形态恒 null，渲染进程据此跳过自动
-  // 登录；sync 接受渲染进程改密后的回写（非 admin 账号主进程拒收）。
+  // 装机版自动登录凭据（ADR 2026-10-02-packaged-auto-login-env-only）：load
+  // 仅 app.isPackaged 且 launcher 已播种 ambient AGENTOS_ADMIN_PASSWORD 时
+  // 非空——dev/浏览器形态恒 null，渲染进程据此跳过自动登录；env 即口令
+  // 事实源，无回写通道（应用内改密由内核「env 不符即重置」语义对齐）。
   ipcMain.handle("auth:admin-credential:load", () => {
     return app.isPackaged ? getPackagedAdminCredential() : null;
   });
-  ipcMain.handle(
-    "auth:admin-credential:sync",
-    (_event, username: unknown, password: unknown) => {
-      if (!app.isPackaged) {
-        return false;
-      }
-      return updateAdminCredential(
-        app.getPath("userData"),
-        typeof username === "string" ? username : "",
-        typeof password === "string" ? password : "",
-      );
-    },
-  );
 
   // ===== P2/P3 多窗口 IPC（ipcMain.handle,支持 async 返回）=====
 

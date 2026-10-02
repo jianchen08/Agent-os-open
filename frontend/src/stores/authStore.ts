@@ -256,15 +256,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       mustChangePassword: false,
       error: null,
     })
-    // 改密成功即回写装机版凭据存档（ADR 2026-09-28）：下次启动内核注入值
-    // 与真实口令保持一致。非存档账号（非 admin）主进程拒收；回写失败容忍
-    // ——内核重置语义会把口令对齐回存档值，自动登录不因此失能。
-    const username = get().user?.username
-    if (username) {
-      void window.electronAPI?.adminCredential?.sync?.(username, newPassword)?.catch(() => {
-        // 回写失败不影响本次改密结果
-      })
-    }
   },
 
   /**
@@ -340,9 +331,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         }
       }
 
-      // 没有任何可恢复凭据：装机版自动登录（ADR 2026-09-28）——宿主提供
-      // 凭据（仅 app.isPackaged 非空）时以主进程存档的 admin 凭据走既有
-      // 登录链（首启播种账号照常触发强制改密闸）；失败回落手动登录。
+      // 没有任何可恢复凭据：装机版自动登录（ADR 2026-10-02-packaged-auto-login-env-only）
+      // ——宿主提供凭据（仅 app.isPackaged 且 launcher 已播种
+      // AGENTOS_ADMIN_PASSWORD 时非空，env 即口令事实源）时走既有登录链；
+      // 未播种=部署 bug，回落手动登录。失败同样回落，不阻断初始化。
       const credential = await window.electronAPI?.adminCredential?.load?.()
       if (credential?.username && credential.password) {
         try {

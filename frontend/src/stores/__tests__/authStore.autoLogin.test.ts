@@ -1,12 +1,13 @@
 // @feature: FP-0.2.四 认证链(装机自动登录) | @ci: frontend-test
 /**
- * 装机版自动登录 + 改密同步测试（ADR 2026-09-28）
+ * 装机版自动登录测试（ADR 2026-10-02-packaged-auto-login-env-only）
  *
- * - initializeAuth 无任何可恢复凭据时：宿主提供 admin 凭据（仅装机形态非空）
- *   → 走既有 login 链自动认证；宿主为 null（Web/dev）→ 保持未认证；自动登录
- *   失败（内核侧口令不一致等）→ 回落未认证，初始化正常收尾。
- * - changePassword 成功 → 经 electronAPI.adminCredential.sync 回写存档（当前
- *   用户名 + 新口令）；无宿主/回写拒绝/回写异常均不影响改密结果。
+ * - initializeAuth 无任何可恢复凭据时：宿主提供 admin 凭据（仅装机形态且
+ *   launcher 已播种 AGENTOS_ADMIN_PASSWORD 时非空）→ 走既有 login 链自动
+ *   认证；宿主为 null（Web/dev/未播种）→ 保持未认证；自动登录失败（内核侧
+ *   口令不一致等）→ 回落未认证，初始化正常收尾。
+ * - env 即口令事实源：无凭据存档、无改密回写通道（改密回写语义已随存档
+ *   一并移除，内核「env 不符即重置」承担对齐）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -74,7 +75,6 @@ const USER_INFO = {
 
 type AdminCredentialAPI = {
   load: ReturnType<typeof vi.fn>
-  sync: ReturnType<typeof vi.fn>
 }
 
 /** 挂载/摘除 window.electronAPI.adminCredential 桩 */
@@ -85,7 +85,7 @@ function stubHost(api: AdminCredentialAPI | null): void {
 }
 
 function hostStubs(): AdminCredentialAPI {
-  return { load: vi.fn(), sync: vi.fn() }
+  return { load: vi.fn() }
 }
 
 beforeEach(() => {
@@ -118,7 +118,7 @@ beforeEach(() => {
 })
 
 describe('initializeAuth 装机版自动登录分支', () => {
-  it('宿主提供凭据 → 以存档账号自动登录成功', async () => {
+  it('宿主提供凭据 → 以 env 事实源口令自动登录成功', async () => {
     const host = hostStubs()
     host.load.mockResolvedValue({ username: 'admin', password: 'seed-pw' })
     stubHost(host)
@@ -132,7 +132,7 @@ describe('initializeAuth 装机版自动登录分支', () => {
     expect(s.user?.username).toBe('admin')
   })
 
-  it('宿主无凭据（Web/dev 形态）→ 不触发登录，保持未认证', async () => {
+  it('宿主无凭据（Web/dev/未播种 env）→ 不触发登录，保持未认证', async () => {
     const host = hostStubs()
     host.load.mockResolvedValue(null)
     stubHost(host)
@@ -167,65 +167,5 @@ describe('initializeAuth 装机版自动登录分支', () => {
 
     expect(host.load).not.toHaveBeenCalled()
     expect(authApi.login).not.toHaveBeenCalled()
-  })
-})
-
-describe('changePassword 改密后回写凭据存档', () => {
-  function seedAuthenticatedUser(username: string): void {
-    useAuthStore.setState({
-      user: {
-        id: 'u-admin',
-        username,
-        email: 'admin@agentos.dev',
-        role: 'admin',
-        createdAt: '2025-01-01T00:00:00Z',
-      },
-      isAuthenticated: true,
-    })
-  }
-
-  it('admin 改密成功 → sync 收到当前用户名与新口令', async () => {
-    seedAuthenticatedUser('admin')
-    const host = hostStubs()
-    host.sync.mockResolvedValue(true)
-    stubHost(host)
-
-    await useAuthStore.getState().changePassword('old-pw', 'new-pw-123')
-
-    expect(authApi.changePassword).toHaveBeenCalledWith('old-pw', 'new-pw-123')
-    expect(host.sync).toHaveBeenCalledWith('admin', 'new-pw-123')
-    expect(useAuthStore.getState().mustChangePassword).toBe(false)
-  })
-
-  it('非 admin 用户改密 → 同样上报（主进程侧拒收非存档账号）', async () => {
-    seedAuthenticatedUser('alice')
-    const host = hostStubs()
-    host.sync.mockResolvedValue(false)
-    stubHost(host)
-
-    await useAuthStore.getState().changePassword('old-pw', 'new-pw-456')
-
-    expect(host.sync).toHaveBeenCalledWith('alice', 'new-pw-456')
-  })
-
-  it('无宿主（Web 形态）→ 改密正常完成，不报错', async () => {
-    seedAuthenticatedUser('admin')
-    stubHost(null)
-
-    await expect(
-      useAuthStore.getState().changePassword('old-pw', 'new-pw-789'),
-    ).resolves.toBeUndefined()
-    expect(useAuthStore.getState().mustChangePassword).toBe(false)
-  })
-
-  it('sync 异常 → 吞掉不失败改密（回写尽力而为）', async () => {
-    seedAuthenticatedUser('admin')
-    const host = hostStubs()
-    host.sync.mockRejectedValue(new Error('ipc boom'))
-    stubHost(host)
-
-    await expect(
-      useAuthStore.getState().changePassword('old-pw', 'new-pw-abc'),
-    ).resolves.toBeUndefined()
   })
 })

@@ -22,10 +22,6 @@
 
 import { spawn, type ChildProcess } from "child_process";
 
-import {
-  ensureAdminCredential,
-  type AdminCredential,
-} from "./admin-credential";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
@@ -277,7 +273,10 @@ export function seedZonePolicyFiles(
  * - AGENTOS_PLUGIN_VENV_AUTOPROVISION=1：boot 后台对缺 .venv 的 Python sidecar
  *   跑 `uv sync` 自愈（打包资源排除 .venv 且装机链没有 dev launcher；同 ADR
  *   决策②；uv 缺席/失败仅 warn 降级）；
- * - AGENTOS_PLUGIN_IDLE_TIMEOUT_SECS=300：硬设（打包件行为固定）。
+ * - AGENTOS_PLUGIN_IDLE_TIMEOUT_SECS=300：硬设（打包件行为固定）；
+ * - AGENTOS_ADMIN_PASSWORD：不注入——ambient 值经原样继承直达内核（ADR
+ *   2026-10-02-packaged-auto-login-env-only：env 是自动登录口令唯一事实源，
+ *   launcher 播种是部署契约，缺失即部署 bug，应用绝不自造口令）。
  *
  * 其余变量原样继承（Windows 子进程需要 SystemRoot 等系统环境）。
  */
@@ -287,7 +286,6 @@ export function buildKernelEnv(
   tokenSecret?: string,
   dbPath?: string,
   configUsersDir?: string,
-  adminPassword?: string,
 ): NodeJS.ProcessEnv {
   return {
     ...base,
@@ -301,10 +299,6 @@ export function buildKernelEnv(
     // token 签名密钥持久化（每安装身份一份）：不注入时内核每进程随机签名，
     // 重启后全部 token 失效=每次打开应用都要重新登录
     ...(tokenSecret ? { AGENTOS_TOKEN_SECRET: tokenSecret } : {}),
-    // admin 口令注入（ADR 2026-09-28）：主进程凭据存档为唯一事实源，内核
-    // 「与当前口令不符即重置」语义成为存档损坏/丢失后的自愈通道；ambient
-    // 显式值已在 ensure 时收编进存档，注入值与内核实际生效口令恒一致
-    ...(adminPassword ? { AGENTOS_ADMIN_PASSWORD: adminPassword } : {}),
     // 库位置钉用户根（BUG-85）：ambient 显式设置优先（覆盖能力保留）
     ...(dbPath && !envValue(base, "AGENTOS_DB_PATH")
       ? { AGENTOS_DB_PATH: dbPath }
@@ -391,7 +385,29 @@ let tokenSecret: string | null = null;
 let packagedDbPath: string | null = null;
 /** 当前安装身份的授权名单真值目录（ensure 时解析并播种一次；ADR 2026-09-24 决策5） */
 let packagedConfigUsersDir: string | null = null;
-/** 当前安装身份的 admin 凭据（ensure 时解析一次，重启复用同一份；ADR 2026-09-28） */
+/** 装机版自动登录凭据：username 固定内置 admin，password 即 env 事实源值 */
+export interface AdminCredential {
+  username: string;
+  password: string;
+}
+
+/**
+ * 解析装机版自动登录凭据（ADR 2026-10-02-packaged-auto-login-env-only）：
+ * 只认 ambient `AGENTOS_ADMIN_PASSWORD`——launcher/安装器播种该变量是部署
+ * 契约，未播种（含空白串）即部署 bug，返回 null（不自动登录，回落登录框），
+ * 绝不自造口令。trim 对齐内核 resolve_admin_password 的「空白即未设」语义。
+ */
+export function resolveAutoLoginCredential(
+  ambient: string | null | undefined,
+): AdminCredential | null {
+  const password = ambient?.trim();
+  if (!password) {
+    return null;
+  }
+  return { username: "admin", password };
+}
+
+/** 当前安装身份的自动登录凭据（ensure 时解析一次，重启复用同一份；env 事实源） */
 let adminCredential: AdminCredential | null = null;
 
 /** 自动登录用的当前 admin 凭据（未走包内内核 ensure 前为 null；仅装机路径有值） */
@@ -409,7 +425,6 @@ function spawnKernelProcess(paths: KernelResourcePaths): ChildProcess {
       tokenSecret ?? undefined,
       packagedDbPath ?? undefined,
       packagedConfigUsersDir ?? undefined,
-      adminCredential?.password,
     ),
     stdio: "ignore",
     windowsHide: true,
@@ -581,13 +596,14 @@ export async function ensurePackagedKernelRunning(opts: {
   }
   tokenSecret = opts.userDataDir ? resolveTokenSecret(opts.userDataDir) : null;
   adminCredential = opts.userDataDir
-    ? // ambient AGENTOS_ADMIN_PASSWORD 显式设置时收编为存档值（恢复通道与
-      // 存档不分叉，ADR 2026-09-28）；存档损坏/丢失即重新生成自愈
-      ensureAdminCredential(
-        opts.userDataDir,
-        process.env.AGENTOS_ADMIN_PASSWORD,
-      )
+    ? resolveAutoLoginCredential(process.env.AGENTOS_ADMIN_PASSWORD)
     : null;
+  if (opts.userDataDir && !adminCredential) {
+    console.warn(
+      "[Kernel] 装机版未设置 AGENTOS_ADMIN_PASSWORD，自动登录不可用" +
+        "（部署契约：launcher/安装器须播种该变量；现回落手动登录）",
+    );
+  }
   packagedDbPath = opts.appDataDir
     ? resolvePackagedDbPath(process.env, opts.appDataDir)
     : null;

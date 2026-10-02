@@ -480,20 +480,13 @@ describe("buildKernelEnv AGENTOS_DB_PATH 注入（BUG-85：装机形态默认库
   });
 });
 
-describe("buildKernelEnv AGENTOS_ADMIN_PASSWORD 注入（ADR 2026-09-28 自动登录）", () => {
+describe("buildKernelEnv AGENTOS_ADMIN_PASSWORD 透传（ADR 2026-10-02 自动登录 env 事实源）", () => {
   const paths = kernelResourcePaths("C:\app\resources", "win32");
-  it("提供存档口令时注入 AGENTOS_ADMIN_PASSWORD（内核按存档值播种/对齐）", () => {
-    const env = buildKernelEnv(
-      {},
-      paths,
-      undefined,
-      undefined,
-      undefined,
-      "cred-pw",
-    );
-    expect(env.AGENTOS_ADMIN_PASSWORD).toBe("cred-pw");
+  it("ambient 值经原样继承直达内核（env 是自动登录口令唯一事实源）", () => {
+    const env = buildKernelEnv({ AGENTOS_ADMIN_PASSWORD: "env-pw" }, paths);
+    expect(env.AGENTOS_ADMIN_PASSWORD).toBe("env-pw");
   });
-  it("不提供时不注入该键（dev 形态零变化，内核保持随机播种语义）", () => {
+  it("未设时该键不存在（绝不自造口令，内核保持随机播种语义）", () => {
     const env = buildKernelEnv({}, paths);
     expect(env.AGENTOS_ADMIN_PASSWORD).toBeUndefined();
   });
