@@ -432,14 +432,25 @@ async fn roleplay_yaml_text_round_ends_without_tools() {
         .expect("run 成功");
     assert_eq!(inv.count("pipeline_llm_core"), 1);
     assert_eq!(inv.count("pipeline_tool_core"), 0, "纯文本轮零工具迭代");
-    assert_eq!(final_state["ended"], json!(true), "纯文本轮即终局");
+    // 单次执行体（无 while）：靠 body 耗尽自然完成，不走 end 路由（ended
+    // 是 while 循环的控制标志，单 pass 体恒 false）。
+    assert_eq!(
+        inv.count("pipeline_state_marker_parse"),
+        1,
+        "角色状态标记解析恰好一次"
+    );
 }
 
 #[tokio::test]
-async fn roleplay_yaml_tool_round_executes_then_ends_without_llm() {
-    // 工具轮：执行过的迭代跳过 llm（旧行为「执行完即终局、结果不回灌」）。
+async fn roleplay_yaml_is_single_pass_without_tool_phase() {
+    // 2026-10-03 用户裁定：防御工具轮撤销——管道无工具面、无 tool_exec 核，
+    // main 体不声明 while（单次执行）；即使 mock 异常产出调用也无人执行。
     let config = load_pipeline("roleplay");
     let plugin_ids = collect_plugin_refs(&config);
+    assert!(
+        !plugin_ids.contains("pipeline_tool_core"),
+        "roleplay 不得引用工具执行核"
+    );
     let inv = Arc::new(ScriptedInvoker::default());
     inv.script(
         "pipeline_llm_core",
@@ -449,20 +460,13 @@ async fn roleplay_yaml_tool_round_executes_then_ends_without_llm() {
             "messages": {"_ops": [{"op": "set", "msg": {"role": "assistant", "content": "calling"}}]},
         })],
     );
-    inv.script("pipeline_tool_core", vec![tool_core_updates()]);
     let executor = make_executor(Arc::clone(&inv), &plugin_ids);
     let compiled = compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids())
-        .expect("compile");
+        .expect("真 roleplay.yaml 必须通过编译校验");
     let final_state = executor
         .run_compiled(&compiled, json!({"session_id": "s1"}))
         .await
         .expect("run 成功");
-    assert_eq!(
-        inv.count("pipeline_llm_core"),
-        1,
-        "工具执行过的迭代不得再进 llm"
-    );
-    assert_eq!(inv.count("pipeline_tool_core"), 1);
-    assert_eq!(final_state["raw_tool_calls"], json!([]));
-    assert_eq!(final_state["ended"], json!(true), "工具执行完本轮即终局");
+    assert_eq!(inv.count("pipeline_llm_core"), 1, "单次执行：恰一轮 llm");
+    assert_eq!(inv.count("pipeline_tool_core"), 0, "工具核不在链上");
 }

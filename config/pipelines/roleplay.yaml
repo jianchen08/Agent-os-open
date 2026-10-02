@@ -1,12 +1,16 @@
 # 角色扮演专用管道（纯对话精简链）——经管道配置 ID `roleplay` 显式选用
 # （WS user_input 帧 / HTTP chat params / task_submit orchestration_key）。
 # 与 autonomous 的差异（一切为了沉浸感，扮演是对话不是任务）：
+# - 无工具面：tool_schema / tool_args_inject / isolation_guard / level_guard /
+#   security_check 等工具域 prepare 步骤与 tool_exec 执行核整体不在链上——
+#   模型无 tools 可调，扮演卡 tool_ids 配置不生效（2026-10-03 用户裁定：
+#   防御工具轮撤销，纯对话单轮即终局）；
 # - 无任务域步骤：task_reminder（评估提醒）/duplicate_check（签名去重）/
 #   sensitive_checker（任务终检）/tool_cache 系列全部不在链上；
 # - 无多模态/godot 上下文等任务向装配；
-# - 对话循环：纯文本轮即本轮回复结束（会话语义），工具轮保留（防御，
-#   出厂卡 tool_ids: [] 时不触达）——工具执行过的迭代跳过 LLM，本轮即终局；
-# - 收尾无评估：无 task_reminder 即无提醒/裁决，文本落定即本轮完成。
+# - 收尾无评估：无 task_reminder 即无提醒/裁决，文本落定即本轮完成；角色
+#   状态经 state_marker_parse 落账（<state> 标记 → 账本/前端状态小卡）。
+# 单轮执行：main 体不声明 while（DSL 缺省 = 单次），无工具轮故循环退役。
 loop_bodies:
 - id: init
   steps:
@@ -23,54 +27,20 @@ loop_bodies:
     - pipeline_pause_guard
     - pipeline_agent_config_load
     - pipeline_mode_material_inject
-    - pipeline_tool_schema
-    - pipeline_tool_args_inject
     - pipeline_model_prompt_adapter
     - pipeline_prompt_build
-    - pipeline_isolation_guard
-    - pipeline_level_guard
-    - pipeline_security_check
-  # 工具执行核 = 并行 for-each（ADR 2026-10-02-loopconfig-parallel-foreach），
-  # 与 autonomous 同构；本轮无调用时空转滑过（over 空 + consume 收尾）。
-  - id: tool_exec
-    loop_config:
-      as: current_call
-      collect:
-      - tool_results
-      - _full_tool_results
-      - _executed_tool_calls
-      collect_append:
-      - submitted_task_ids
-      consume: true
-      consume_keys:
-      - pre_decided_results
-      enabled: true
-      max_concurrency: 4
-      over: state.raw_tool_calls
-    steps:
-    - pipeline_tool_core
   - context:
       temperature: 0.8
     id: llm
     steps:
-    # 执行过工具的迭代跳过 LLM（旧流程工具轮无 LLM——调用执行完本轮即终局，
-    # 结果不回灌；_executed_tool_calls 由 tool_exec 每迭代清 []，纯文本轮恒 []）。
-    - name: pipeline_llm_core
-      when: _executed_tool_calls == []
+    - pipeline_llm_core
     - pipeline_spill_guard
   - id: post
-    next:
-    # 本迭代 llm 产出了调用 → loop（下一迭代 tool_exec 执行）；纯文本或
-    # 已执行完（consume 后 raw==[]）→ 终局。
-    - then: loop
-      when: raw_tool_calls != [] and raw_tool_calls != None
-    - then: end
     steps:
     # 状态统一标记解析步（2026-09-28 设计）：提取 <state> 标记 → 账本落账
     # （character_state/memory）→ render 回写下轮动态变量注入源 →
     # context.state_updates 载荷（前端状态小卡 + span 隐藏）。零标记零动作。
     - pipeline_state_marker_parse
-  while: 'True'
 - id: exit
   run_on_error: true
   steps:
