@@ -1834,15 +1834,19 @@ impl SqliteStore {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), StorageError> {
-        let conn = self.conn.lock();
-        let (value_text, value_kind) = encode_state_value(value);
-        let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO pipeline_state (pipeline_id, field_key, value, value_kind, tenant_id, updated_at) \
-             VALUES (?1,?2,?3,?4,?5,?6) \
-             ON CONFLICT(pipeline_id, field_key, tenant_id) DO UPDATE SET value=?3, value_kind=?4, updated_at=?6",
-            rusqlite::params![pipeline_id, key, value_text, value_kind, tenant_id, now],
-        )?;
+        {
+            let conn = self.conn.lock();
+            let (value_text, value_kind) = encode_state_value(value);
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO pipeline_state (pipeline_id, field_key, value, value_kind, tenant_id, updated_at) \
+                 VALUES (?1,?2,?3,?4,?5,?6) \
+                 ON CONFLICT(pipeline_id, field_key, tenant_id) DO UPDATE SET value=?3, value_kind=?4, updated_at=?6",
+                rusqlite::params![pipeline_id, key, value_text, value_kind, tenant_id, now],
+            )?;
+        }
+        let key = key.to_string();
+        self.trigger_anchor_committed(tenant_id, pipeline_id, std::slice::from_ref(&key));
         Ok(())
     }
 
@@ -1857,17 +1861,48 @@ impl SqliteStore {
         tenant_id: &str,
         fields: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), StorageError> {
-        let mut conn = self.conn.lock();
-        let tx = conn
-            .transaction()
-            .map_err(|e| StorageError::Database(format!("begin tx: {e}")))?;
-        match Self::upsert_state_fields_tx(&tx, pipeline_id, tenant_id, fields) {
-            Ok(()) => tx
-                .commit()
-                .map(|_| ())
-                .map_err(|e| StorageError::Database(format!("commit: {e}"))),
-            Err(e) => Err(e),
-        }
+        let result = {
+            let mut conn = self.conn.lock();
+            let tx = conn
+                .transaction()
+                .map_err(|e| StorageError::Database(format!("begin tx: {e}")))?;
+            match Self::upsert_state_fields_tx(&tx, pipeline_id, tenant_id, fields) {
+                Ok(()) => tx
+                    .commit()
+                    .map(|_| ())
+                    .map_err(|e| StorageError::Database(format!("commit: {e}"))),
+                Err(e) => Err(e),
+            }
+        };
+        result?;
+        self.trigger_anchor_committed(
+            tenant_id,
+            pipeline_id,
+            &fields.keys().cloned().collect::<Vec<_>>(),
+        );
+        Ok(())
+    }
+
+    /// committed 视图触发求值锚点（trigger-svc，观察权与提交权分离）。
+    ///
+    /// 为什么锚在这里：引擎侧 merge 投影（pipeline_loop 的 project_state_snapshot /
+    /// persist_run_end）与 capability 侧直写（pipeline-state.update）两条提交写
+    /// 路径已汇于 `StorageBackend::upsert_state_field(s)`，生产唯一实现即本类型
+    /// 这两个函数——在写库提交点之后挂一处锚即覆盖全部提交变化，后续新增写路径
+    /// 自动纳入（单锚点；按调用点枚举挂点被 ADR 2026-10-02 否决）。StorageBackend
+    /// trait 面过宽，装饰器逐方法转发维护代价高（trait 新增默认方法会静默旁路
+    /// 包装层），故锚落驱动层——接入其他存储驱动时须在其 upsert 提交点挂同一
+    /// `on_committed_write`。求值上下文 = 写入后的完整行 state，惰性加载：
+    /// 无触发器命中零读零求值，写路径零成本。已知例外：G8 排空
+    /// （suspend_running_runs）直改 SQL 不经本入口——进程行将退出，点火无投递
+    /// 窗口，M1 接受。锚点自身失败只降级留痕，不得回滚已提交的写（观察不破坏
+    /// 提交权）。
+    fn trigger_anchor_committed(&self, tenant_id: &str, pipeline_id: &str, keys: &[String]) {
+        crate::trigger::global_registry().on_committed_write(tenant_id, pipeline_id, keys, &|| {
+            self.load_pipeline_state(pipeline_id, tenant_id)
+                .ok()
+                .map(|map| serde_json::Value::Object(map.into_iter().collect()))
+        });
     }
 
     /// [`Self::upsert_state_fields`] 的事务体（tx 由调用方开启并提交/回滚）。
@@ -5259,6 +5294,61 @@ mod tests {
         );
         assert_eq!(loaded.get("track.llm_usage"), Some(&json!({"prompt": 10})));
         assert_eq!(loaded.len(), 2, "应有 2 个字段");
+    }
+
+    /// committed 视图触发求值锚点（trigger-svc M1）：upsert_state_field(s) 提交
+    /// 成功后，触发器以写入后的完整行 state 做边沿求值——单键与批量两条 upsert
+    /// 路径同锚。走全局注册表（锚点访问形态），id/键全测试域唯一防串扰，结束清场。
+    #[test]
+    fn test_upsert_anchor_fires_committed_trigger() {
+        let store = SqliteStore::open_memory().unwrap();
+        let pid = "pipe_trigger_anchor";
+        let registry = crate::trigger::global_registry();
+        let trigger_id = "t-anchor-store";
+        let seeded = registry.register(
+            crate::trigger::TriggerRegistration {
+                trigger_id: trigger_id.to_string(),
+                tenant_id: "default".to_string(),
+                pipeline_id: Some(pid.to_string()),
+                condition: Some(
+                    crate::condition::parse_condition("tgx.a == 1 and tgx.b == 2")
+                        .unwrap()
+                        .unwrap(),
+                ),
+                watched_keys: vec!["tgx.b".to_string()],
+                owner_plugin_id: "owner_ext".to_string(),
+            },
+            &serde_json::Value::Object(Default::default()),
+        );
+        assert!(!seeded, "空行种子不应命中");
+        let fire_seqs = |registry: &crate::trigger::TriggerRegistry| -> Vec<i64> {
+            registry
+                .reconcile()
+                .into_iter()
+                .filter(|f| f.trigger_id == trigger_id)
+                .map(|f| f.fire_seq)
+                .collect()
+        };
+        // 单键写 a：watched 未命中，不求值不点火
+        store
+            .upsert_state_field(pid, "default", "tgx.a", &json!(1))
+            .unwrap();
+        assert!(fire_seqs(registry).is_empty());
+        // 单键写 b：watched 命中 → 完整行（a=1 已在行内）求值边沿命中 → 点火
+        store
+            .upsert_state_field(pid, "default", "tgx.b", &json!(2))
+            .unwrap();
+        let first = fire_seqs(registry);
+        assert_eq!(first.len(), 1, "提交后锚点应以完整行求值并点火");
+        // 批量写（B6 路径同锚）：b 持续满足不重复点火
+        let mut fields = serde_json::Map::new();
+        fields.insert("tgx.b".into(), json!(2));
+        fields.insert("tgx.c".into(), json!(3));
+        store.upsert_state_fields(pid, "default", &fields).unwrap();
+        assert_eq!(fire_seqs(registry).len(), 1, "持续满足不重复");
+        // 清场：注销 + ack（全局注册表不留跨测试残留）
+        assert!(registry.unregister(trigger_id));
+        assert_eq!(registry.ack(&first), 1);
     }
 
     // ── 域11：pending 输入队列（ADR-2026-08-26）──────────────────────
