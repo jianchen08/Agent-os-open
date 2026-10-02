@@ -45,9 +45,9 @@ BASE_TEST_PATHS: list[str] = [
     # 模式插件出厂种子契约测试（2026-09-15 四模式种子接线：缺此条目则
     # plugins/shared/modes/ 下 server.py 不进插桩车道、覆盖率失真）。
     "plugins/shared/modes/",
-    # context_build 双根自举/sidecar 复用测试（2026-09-18 登记：目录内 7 用例
+    # agent_config_load 双根自举/sidecar 复用测试（2026-09-18 登记：目录内 7 用例
     # 此前不在基集，plugin.py sys.path 守卫缺行失真——覆盖率批十修正）。
-    "plugins/shared/pipeline/input/context_build/",
+    "plugins/shared/pipeline/input/agent_config_load/",
     # 模式物料通用步骤测试（2026-09-24 架构重构：自 context_build 抽出为独立
     # 管道插件，原 tests/test_context_build_mode_material.py 断言随迁目录内）。
     "plugins/shared/pipeline/input/mode_material_inject/",
@@ -176,10 +176,10 @@ BASE_TEST_PATHS: list[str] = [
     # bash 目录之外的缓存），否则模块双实例让 isinstance 恒假。
     "tests/test_agent_config_fix.py",
     "tests/test_asr_service.py",
-    "tests/test_autonomous_context_build_wiring.py",
-    "tests/test_context_build_agent_yaml_observability.py",
-    "tests/test_context_build_dynamic_vars.py",
-    "tests/test_context_build_runtime_params.py",
+    "tests/test_autonomous_agent_config_load_wiring.py",
+    "tests/test_agent_config_load_agent_yaml_observability.py",
+    "tests/test_agent_config_load_dynamic_vars.py",
+    "tests/test_agent_config_load_runtime_params.py",
     "tests/test_duplicate_check_merge.py",
     "tests/test_host_context_plugin.py",
     "tests/test_host_mode_security.py",
@@ -211,17 +211,18 @@ BASE_TEST_PATHS: list[str] = [
     # 2026-09-13 覆盖率补测批九：cost_control 目录接线（既有并发测试在
     # tests/plugins/ 下、目录内缺口测试 38 用例车道口径绿后纳入）。
     "plugins/shared/system/cost_control/",
-    # 2026-09-13 覆盖率补测批九：param_inject 目录接线——既有 test_param_inject.py
-    # 9 用例此前从未进车道（目录不在名单）、车道口径全绿后随缺口测试一并纳入。
-    "plugins/shared/pipeline/input/param_inject/",
-    # 2026-09-14 覆盖率补测批九：context_build 缺口分支补测（config_id 回退/
+    # 2026-09-13 覆盖率补测批九：tool_args_inject 目录接线（2026-10-02 改名自
+    # param_inject）——既有 9 用例此前从未进车道（目录不在名单）、车道口径全绿
+    # 后随缺口测试一并纳入。
+    "plugins/shared/pipeline/input/tool_args_inject/",
+    # 2026-09-14 覆盖率补测批九：agent_config_load 缺口分支补测（config_id 回退/
     # 缓存失效/非 dict yaml/priority/血缘投影/static_vars 装载/层级覆盖），
     # 缺此条目则新文件不进插桩车道、plugin.py 覆盖率失真。
-    "tests/test_context_build_gaps.py",
+    "tests/test_agent_config_load_gaps.py",
     # 2026-09-15 模式体系 P3：mode 键两级解析第二级（§3.3 系统注册表未命中 →
     # 模式包 agents/<stem>.yaml）装配测试，缺此条目则 plugin.py 模式分支
     # 不进插桩车道、改动行覆盖率失真。
-    "tests/test_context_build_mode_agent_key.py",
+    "tests/test_agent_config_load_mode_agent_key.py",
     # 2026-09-14 覆盖率补测批九：review 缺口测试接线（逐文件登记——目录内
     # test_review_hindsight_e2e.py 是环境门槛 e2e，不进插桩车道）。
     "plugins/shared/system/review/test_review_gaps.py",

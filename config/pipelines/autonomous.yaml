@@ -12,13 +12,12 @@ loop_bodies:
     id: prepare
     steps:
     - pipeline_pause_guard
-    - pipeline_context_build
-    # 模式物料通用步骤（2026-09-24 架构重构：自 context_build 抽出）——
+    - pipeline_agent_config_load
+    # 模式物料通用步骤（2026-09-24 架构重构：自 agent 配置装载步抽出）——
     # 须先于 tool_schema（tool_ids 收窄）与 prompt_build（模式段追加）。
     - pipeline_mode_material_inject
-    - pipeline_injected_param_validator
     - pipeline_tool_schema
-    - pipeline_param_inject
+    - pipeline_tool_args_inject
     - pipeline_multimodal_preprocessor
     - pipeline_model_prompt_adapter
     - pipeline_host_context

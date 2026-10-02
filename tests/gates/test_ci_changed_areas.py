@@ -91,7 +91,7 @@ class TestComputeLanesRootOpsScripts:
         assert lanes["related"] is True
         assert lanes["full"] is False
         assert lanes["python_full"] is False
-        lanes_core = changed_areas.compute_lanes(["plugins/shared/pipeline/input/context_build/x.py"])
+        lanes_core = changed_areas.compute_lanes(["plugins/shared/pipeline/input/agent_config_load/x.py"])
         assert lanes_core["python_full"] is True
         assert lanes_core["related"] is False
 

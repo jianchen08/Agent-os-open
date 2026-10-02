@@ -219,7 +219,7 @@ impl StorageBackend for NullStorage {
 fn make_engine_config() -> PipelineConfig {
     let prepare_plugins = [
         "pipeline_tool_schema",
-        "pipeline_param_inject",
+        "pipeline_tool_args_inject",
         "pipeline_security_check",
         "pipeline_multimodal_preprocessor",
         "pipeline_context_window_guard",
@@ -330,7 +330,7 @@ fn make_executor_with_store(
 /// 默认插件 id 集合（对齐 make_engine_config 的 prepare/core/post 引用）。
 const DEFAULT_PLUGIN_IDS: [&str; 10] = [
     "pipeline_tool_schema",
-    "pipeline_param_inject",
+    "pipeline_tool_args_inject",
     "pipeline_security_check",
     "pipeline_multimodal_preprocessor",
     "pipeline_context_window_guard",
@@ -453,7 +453,7 @@ async fn test_pipeline_routes_tool_calls_to_loop() {
 
     let plugin_ids = [
         "pipeline_tool_schema",
-        "pipeline_param_inject",
+        "pipeline_tool_args_inject",
         "pipeline_security_check",
         "pipeline_multimodal_preprocessor",
         "pipeline_context_window_guard",

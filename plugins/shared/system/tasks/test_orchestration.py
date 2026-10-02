@@ -74,7 +74,7 @@ _AUTONOMOUS_RAW: dict[str, Any] = {
                 {
                     "id": "prepare",
                     "steps": [
-                        "pipeline_context_build",
+                        "pipeline_agent_config_load",
                         {"name": "pipeline_context_window_guard", "when": "x > 1"},
                     ],
                 }
@@ -264,7 +264,7 @@ class TestStepRefsAndCompleteness:
     def test_real_autonomous_refs_and_real_declarations(self) -> None:
         """真依赖：真实 autonomous.yaml 引用抽取 + 真实管道 manifest 声明索引。
 
-        锁首批 H2 声明（context_build/tool_schema/prompt_build/llm_core）与
+        锁首批 H2 声明（agent_config_load/tool_schema/prompt_build/llm_core）与
         动态核心键（initial_state / post 路由 set）的引用抽取。
         """
         from orchestration import (
@@ -280,13 +280,13 @@ class TestStepRefsAndCompleteness:
             )
         )
         refs = iter_step_refs(raw)
-        assert "pipeline_context_build" in refs
+        assert "pipeline_agent_config_load" in refs
         assert "pipeline_context_window_guard" in refs  # 条件步骤 name 形态
         assert "pipeline_llm_core" in refs  # initial_state + post 路由 set
         assert "pipeline_tool_core" in refs
 
         step_required = load_step_required_inputs()
-        assert step_required["pipeline_context_build"] == ["agent.id"]
+        assert step_required["pipeline_agent_config_load"] == ["agent.id"]
         assert step_required["pipeline_tool_schema"] == ["tool_ids"]
         assert step_required["pipeline_prompt_build"] == ["context.system_prompt"]
         assert step_required["pipeline_llm_core"] == ["messages"]
@@ -315,7 +315,7 @@ class TestStepRefsAndCompleteness:
             key="autonomous", path="<repo>", raw=_AUTONOMOUS_RAW
         )
         step_required = {
-            "pipeline_context_build": ["agent.id", "tool_ids"],
+            "pipeline_agent_config_load": ["agent.id", "tool_ids"],
             "pipeline_context_window_guard": [],
             "pipeline_llm_core": ["messages", "context.system_prompt"],
         }

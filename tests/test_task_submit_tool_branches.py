@@ -1229,7 +1229,7 @@ async def test_dispatch_execution_context_carries_mode(tool_module, monkeypatch,
     """mode 输入随派发透传进 execution_context（与聊天主链消息级 EC 同形）。
 
     内核 1a2 把消息级 execution_context 并入出生管道 initial state 后，
-    context_build 据 execution_context.mode 回写 state.mode；模式面板
+    mode_material_inject 据 execution_context.mode 回写 state.mode；模式面板
     （mode_coding 等）的会话/看板行源按 state.mode 过滤——派发链丢键即
     全面板零呈现（BUG-61 根因）。
     """

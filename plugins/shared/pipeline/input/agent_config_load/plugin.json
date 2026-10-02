@@ -1,0 +1,65 @@
+{
+  "id": "pipeline_agent_config_load",
+  "name": "Agent Config Load",
+  "version": "1.0.1",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "host_group": "light",
+  "entry": "python server.py",
+  "invoke_entry": "agent_config_load.execute",
+  "requires_services": [
+    "packaging"
+  ],
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "steps": [
+      {
+        "name": "pipeline_agent_config_load",
+        "required_state_inputs": [
+          "agent.id"
+        ]
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 50,
+  "export_fields": [
+    "task.id",
+    "tool_ids",
+    "project_roots",
+    "context.*",
+    "model_tier",
+    "max_iterations",
+    "max_reminders",
+    "timeout_seconds",
+    "agent_level"
+  ],
+  "persistent_fields": [
+    "task.id",
+    "project_roots",
+    "model_tier",
+    "max_iterations",
+    "max_reminders",
+    "timeout_seconds",
+    "agent_level"
+  ],
+  "description": "\n\n[state 出口口径] 本插件真实产出键 = task.id / tool_ids（agent yaml 声明白名单；\"inherit\" = 不写键、继承基线全量工具面）/ project_roots（挂靠项目时项目根列表）/ context.*（含 extra_context 与 agent 配置运行时键）；模式物料段与 mode 键回写由 pipeline_mode_material_inject 步骤承载（本插件零模式知识）；lineage.* 仅读（出生写面在 task_birth 出生 state，经 chat_send_handler/task_submit 一次写全），display_name/name/tags 取自 agent 配置非本插件写入。",
+  "state": {
+    "reads": [
+      "agent.id",
+      "core_type",
+      "iteration",
+      "lineage.parent_pipeline_id",
+      "pipeline_id",
+      "session_id",
+      "system_prompt",
+      "task.id"
+    ]
+  }
+}

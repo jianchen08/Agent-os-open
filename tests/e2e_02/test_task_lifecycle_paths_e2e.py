@@ -1440,7 +1440,7 @@ class TestP1ProjectAttachWorkspace:
     def test_project_attached_task_runs_in_project_worktree(
         self, stub_kernel, matrix_token, stub_llm, matrix_sessions
     ):
-        # 项目标题不得含任何场景 marker：子任务挂靠项目后 context_build 注入
+        # 项目标题不得含任何场景 marker：子任务挂靠项目后 agent_config_load 注入
         # 项目上下文进管道消息，marker 串台会让 stub 误命中父脚本（fallback
         # 循环 → stalled）。
         project_goal = "P1项目e2e"

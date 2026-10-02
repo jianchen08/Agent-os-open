@@ -48,7 +48,7 @@ commit**，不要留到"最后一起提交"。commit 前的调查/验证工作�
   output 步骤 task_reminder（提醒耗尽仍无评估证据 → `task.status =
   pending_evaluation`，不落 completed；有证据内核才补落默认 completed）；内核不
   做判定，只经 pipeline-state 写面记录结果。agent 配置加载同样已移出内核，由
-  管道输入插件 `context_build` 自持（`plugins/shared/pipeline/input/context_build/`）。
+  管道输入插件 `agent_config_load` 自持（`plugins/shared/pipeline/input/agent_config_load/`）。
 - **任务默认隔离执行**：默认工作空间 `workspace/{task_id}` + isolated。
 - **工具面过滤**：LLM 可见工具由 `config/agents/main/agentos.yaml`（及
   `executor/general_agent.yaml`）的 `tool_ids` 白名单控制，新工具记得加入。
@@ -66,7 +66,7 @@ commit**，不要留到"最后一起提交"。commit 前的调查/验证工作�
   cdylib 集合变更走 G8 自动重启（同 id 换产物保守重启）；已知插件面取自共享
   manifests 活集合（新插件热注册后管道引用即可编译）；前端 schema 需刷新页面才更新。
 - **多循环体/执行上下文**：`execution_context` 贯穿任务链；agent_id 的本质是执行上下文
-  键——内核无 Agent 运行时对象，语义由插件按键展开（context_build 按键加载配置，
+  键——内核无 Agent 运行时对象，语义由插件按键展开（agent_config_load 按键加载配置，
   工具面 `tool_ids` 同属这份执行上下文，与提示词同源注入）；内核零 agent 配置
   知识（不读 `config/agents/**`）——工具面过滤 = tool_schema 插件读 state.tool_ids
   经内核 `tool-surface` capability 服务完成（ADR 2026-09-02）。

@@ -65,7 +65,7 @@ const sampleV2 = {
       steps: [
         {
           id: 'prepare',
-          steps: ['pipeline_tool_schema', 'pipeline_param_inject'],
+          steps: ['pipeline_tool_schema', 'pipeline_tool_args_inject'],
           context: { agent_id: '{{state.agent_id}}' },
         },
         {
@@ -107,7 +107,7 @@ const sampleCatalog = [
     configFiles: [],
   },
   {
-    id: 'pipeline_param_inject',
+    id: 'pipeline_tool_args_inject',
     name: 'Param Inject',
     role: 'input',
     hostType: 'sidecar',
@@ -232,7 +232,7 @@ describe('PipelineSettingsPage', () => {
 
       // 插件短名（去 pipeline_ 前缀）
       expect(screen.getByText('tool_schema')).toBeInTheDocument()
-      expect(screen.getByText('param_inject')).toBeInTheDocument()
+      expect(screen.getByText('tool_args_inject')).toBeInTheDocument()
       expect(screen.getByText('spill_guard')).toBeInTheDocument()
       // 动态模板引用原样展示
       expect(screen.getByText('{{state.core_plugin}}')).toBeInTheDocument()
@@ -278,7 +278,7 @@ describe('PipelineSettingsPage', () => {
       })
       const saved = mockSavePipelineConfig.mock.calls[0][1] as typeof sampleV2
       const prepare = saved.loop_bodies[1].steps[0]
-      expect(prepare.steps).toEqual(['pipeline_param_inject'])
+      expect(prepare.steps).toEqual(['pipeline_tool_args_inject'])
     })
 
     it('通过选择弹窗向 step 添加插件', async () => {
@@ -301,7 +301,7 @@ describe('PipelineSettingsPage', () => {
       const saved = mockSavePipelineConfig.mock.calls[0][1] as typeof sampleV2
       expect(saved.loop_bodies[1].steps[0].steps).toEqual([
         'pipeline_tool_schema',
-        'pipeline_param_inject',
+        'pipeline_tool_args_inject',
         'pipeline_track',
       ])
     })
@@ -412,7 +412,7 @@ describe('PipelineSettingsPage', () => {
       await waitFor(() => expect(mockSavePipelineConfig).toHaveBeenCalled())
       const saved = mockSavePipelineConfig.mock.calls[0][1] as typeof sampleV2
       expect(saved.loop_bodies[1].steps[0].steps).toEqual([
-        'pipeline_param_inject',
+        'pipeline_tool_args_inject',
         'pipeline_tool_schema',
       ])
     })

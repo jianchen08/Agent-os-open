@@ -85,7 +85,7 @@ def test_missing_plugin_dirs_copied_whole_across_layouts(
     _write(repo / "db_admin" / "plugin.json", "{}")
     _write(repo / "system" / "llm" / "plugin.json", "{}")
     _write(repo / "tools" / "file_read" / "plugin.json", "{}")
-    _write(repo / "pipeline" / "input" / "context_build" / "plugin.json", "{}")
+    _write(repo / "pipeline" / "input" / "agent_config_load" / "plugin.json", "{}")
     _write(repo / "system" / "llm" / "core.py", "VERSION = 1")
     _write(repo / "system" / "llm" / "sub" / "impl.py", "IMPL = 1")
     _write(repo / "system" / "llm" / "__pycache__" / "core.pyc", "junk")
@@ -97,7 +97,7 @@ def test_missing_plugin_dirs_copied_whole_across_layouts(
         "db_admin/plugin.json",
         "llm/plugin.json",
         "file_read/plugin.json",
-        "context_build/plugin.json",
+        "agent_config_load/plugin.json",
         "llm/core.py",
         "llm/sub/impl.py",
     ):

@@ -82,11 +82,11 @@ def test_no_drift_no_warning(caplog):
 def test_empty_tool_ids_warns_config_break(caplog):
     """K10 配套：state 完全无 tool_ids → warning（配置加载断链信号）+ 空工具面。
 
-    agent 配置唯一事实源在 context_build 插件（按 agent yaml 注入
+    agent 配置唯一事实源在 agent_config_load 插件（按 agent yaml 注入
     state.tool_ids）；缺键 = 断链，fail-closed 置空而非全量兜底。
     """
     state = {
-        # 无 tool_ids 键（context_build 未装载/agent yaml 断链）
+        # 无 tool_ids 键（agent_config_load 未装载/agent yaml 断链）
     }
     plugin = tool_schema_mod.ToolSchemaPlugin(config={})
     with caplog.at_level(logging.WARNING, logger=plugin.name):

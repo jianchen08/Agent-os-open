@@ -1,0 +1,51 @@
+{
+  "id": "pipeline_tool_args_inject",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Tool Args Inject",
+  "version": "1.0.0",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "host_group": "light",
+  "entry": "python server.py",
+  "invoke_entry": "tool_args_inject.execute",
+  "description": "工具参数注入 Input 插件：仅 tool_execute 轮激活，把 LLM 产出的工具调用参数归一化（残缺 JSON 经 llm.repair_json 兜底修复）、剥离 _ 前缀伪造键、注入服务端权威参数（身份/工作空间/层级）、展开 {{project_root}} 模板、按 config default_params 补缺，写回 raw_tool_calls 供 tool_core 执行。另承担首轮声明自检（原 injected_param_validator 并入，ADR 2026-10-02）：校验全部工具的 injected_params 声明是否有注入来源，警告不阻断，注入知识由本插件自持。\n\n[state 出口口径] tool.params_injected（本轮是否发生注入）/ tool.injected_params_checked（首轮自检完成标记）/ raw_tool_calls（注入后写回）。",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "export_fields": [
+    "raw_tool_calls"
+  ],
+  "state": {
+    "volatile_keys": [
+      "raw_tool_calls",
+      "tool.params_injected",
+      "tool.injected_params_checked"
+    ],
+    "reads": [
+      "_tool_definitions",
+      "agent_config_id",
+      "agent_level",
+      "core_type",
+      "isolation_level",
+      "pipeline_id",
+      "project_root",
+      "raw_tool_calls",
+      "session_id",
+      "task.id",
+      "tool.injected_params_checked",
+      "user_id",
+      "workspace",
+      "ws_meta"
+    ]
+  },
+  "permissions": {},
+  "priority": 50
+}

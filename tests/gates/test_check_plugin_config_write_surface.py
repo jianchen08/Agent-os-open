@@ -66,7 +66,7 @@ def test_exempt_marker_passes_with_reason(tmp_path: Path) -> None:
 
 
 def test_read_only_config_literal_does_not_flag(tmp_path: Path) -> None:
-    """只读不违规（合法读面：context_build/evaluation 等不误伤）。"""
+    """只读不违规（合法读面：agent_config_load/evaluation 等不误伤）。"""
     ok = tmp_path / "reader"
     ok.mkdir()
     target = ok / "reader.py"

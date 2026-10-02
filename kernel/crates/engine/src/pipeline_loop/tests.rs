@@ -3182,7 +3182,7 @@ fn test_plugin_metrics_class_locked_to_current_plugin_set() {
     // 诊断面，含与词表前缀相近的条目如 pipeline_tool_schema 的近邻
     // pipeline_context_window_guard）
     for id in [
-        "pipeline_context_build",
+        "pipeline_agent_config_load",
         "pipeline_context_window_guard",
         "pipeline_prompt_build",
         "pipeline_stop_check",

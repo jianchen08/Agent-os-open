@@ -52,7 +52,7 @@
 | 监控与成本 | `monitoring` + `pipeline_cost_control`（token 统计由 `pipeline_llm_core` 每轮自持，见 ADR 2026-09-15-track-merged-into-llm-core） |
 | 任务域 | `tasks`（task_service）+ `task_form` + `project_create_tool`（项目） |
 | 主题 / 皮肤 / 页面 | `contributes.themes` / `ui_schema` / `http_endpoints`（如 `dsh_adapter`、`agent_manager`） |
-| Agent 配置加载 | `pipeline_context_build`（按 agent_id 自持加载 YAML） |
+| Agent 配置加载 | `pipeline_agent_config_load`（按 agent_id 自持加载 YAML） |
 
 判定口径：**改任何业务行为 = 加/改插件或配置，不动内核**。本文档的一切叙述——分层、子系统、数据流、扩展点——都从这条公理推导；其余三原则也建立在其上。
 
@@ -126,7 +126,7 @@ Agent 配置 mtime 缓存热生效；插件目录与 manifest 变更热发现自
 
 ```
 init 循环体（单次）  workspace/environment 解析
-main 循环体（while） prepare：Input 插件链（context_build → tool_schema → … → prompt_build → 守卫链）
+main 循环体（while） prepare：Input 插件链（agent_config_load → tool_schema → … → prompt_build → 守卫链）
                      core：  pipeline_llm_core ↔ pipeline_tool_core（动态切换）
                      post：  Output 插件链（track → task_reminder → stop_check → …）+ 出口路由
 exit 循环体（单次）  workspace 收尾 + 环境释放（run_on_error，提前终止必经）
@@ -177,7 +177,7 @@ plugins:
 ```
 
 - **agent_id 的本质是执行上下文**：Agent 在内核中**没有运行时对象**——`agent_id` 只是执行上下文（pipeline state / `execution_context`）里的一个键，会话创建时写入 initial_state，随 `execution_context` 贯穿任务链全链传导。引擎对它只透传；agent 的全部语义由插件按这个键展开（见下条）。切换会话 Agent = 换一个上下文键，下一轮管道自然整体切换人设/工具/约束——不存在"注册/反注册 Agent"这类内核动作。
-- **消费分权（按 agent_id 展开的执行上下文）**：全量配置由管道 prepare 步的 `pipeline_context_build` 插件自持加载——按 `state.agent_id` 定位 YAML，注入 `context.system_prompt` / `tool_ids` / `context.agent_level` 等；工具面同属这份执行上下文（LLM 请求构建按已展开的 `tool_ids` 过滤工具 schema），内核不解析 Agent 配置、对 `agent_id` 只透传。
+- **消费分权（按 agent_id 展开的执行上下文）**：全量配置由管道 prepare 步的 `pipeline_agent_config_load` 插件自持加载——按 `state.agent_id` 定位 YAML，注入 `context.system_prompt` / `tool_ids` / `context.agent_level` 等；工具面同属这份执行上下文（LLM 请求构建按已展开的 `tool_ids` 过滤工具 schema），内核不解析 Agent 配置、对 `agent_id` 只透传。
 - **多层协作**：主管（灵汐，L1）面向用户负责任务分类与派发；编排（L2）做多步骤编排与审查节点；执行（L3）是具体执行单元。
 
 配置方法见 [guides/execution-semantics.md](guides/execution-semantics.md)。
@@ -255,7 +255,7 @@ plugins:
    └─ workspace/environment 插件解析执行上下文 → state.workspace / state.environment_basis
 
 3. main 循环体 · prepare（Input 插件链）
-   ├─ context_build：按 state.agent_id 加载 Agent yaml → context.system_prompt / tool_ids
+   ├─ agent_config_load：按 state.agent_id 加载 Agent yaml → context.system_prompt / tool_ids
    ├─ tool_schema：按 tool_ids 白名单注入工具 schema
    ├─ memory_read：检索记忆（hindsight.recall）
    └─ prompt_build：分层组装提示词（system_prompt / tools / static_vars / 记忆 / 历史 / dynamic_vars）
@@ -311,7 +311,7 @@ plugins:
 ### 3. 找"谁该知道"——每个概念，谁需要知道它？
 > 不该知道的人知道了 → 边界泄漏，需收回。
 
-**例**：Agent 全量配置（含工具面 `tool_ids`）只有 context_build 等管道插件按 agent_id 展开——内核不需要知道提示词骨架、静态变量与工具白名单。
+**例**：Agent 全量配置（含工具面 `tool_ids`）只有 agent_config_load 等管道插件按 agent_id 展开——内核不需要知道提示词骨架、静态变量与工具白名单。
 
 ### 4. 找"变化方向"——什么会变，什么不会变？
 > 把"会变的"封装在内部，"不变的"暴露为接口。

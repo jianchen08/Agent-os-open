@@ -182,7 +182,7 @@ impl PluginInvoker for MockInvoker {
 fn make_engine_config() -> PipelineConfig {
     let prepare_plugins = [
         "pipeline_tool_schema",
-        "pipeline_param_inject",
+        "pipeline_tool_args_inject",
         "pipeline_multimodal_preprocessor",
         "pipeline_context_window_guard",
         "pipeline_prompt_build",
@@ -265,7 +265,7 @@ async fn run_pipeline_emit_ops(
 
     let plugin_ids = [
         "pipeline_tool_schema",
-        "pipeline_param_inject",
+        "pipeline_tool_args_inject",
         "pipeline_multimodal_preprocessor",
         "pipeline_context_window_guard",
         "pipeline_prompt_build",

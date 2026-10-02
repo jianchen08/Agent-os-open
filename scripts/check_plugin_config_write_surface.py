@@ -7,7 +7,7 @@
 用户空间解析器（plugins/shared/user_space.py）。
 
 规则（锚定**写动作**，非函数名——_resolve_project_root 等解析器本身被
-context_build/param_inject 等合法读面复用，按名扫会误伤）：
+agent_config_load/tool_args_inject 等合法读面复用，按名扫会误伤）：
   同一文件同时命中
   a) 写动作调用（write_text/write_bytes/os.replace/shutil.copy*/atomic_write*/
      yaml.(safe_)dump/open(w 模式)）

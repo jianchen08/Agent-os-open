@@ -1586,8 +1586,8 @@ async fn stage_build_initial_state(
         "pipeline_id": effective_pipeline_id,
         "session_id": thread_id,
         // user_id：触发器（trigger_setup）等工具在 0.2 需它做上下文绑定（触发时
-        // 经 chat.send_message 回派发需要 user_id 解析 tenant）。param_inject 据此
-        // 注入到工具 args；空串时 param_inject 自动跳过注入，不影响既有行为。
+        // 经 chat.send_message 回派发需要 user_id 解析 tenant）。tool_args_inject 据
+        // 此注入到工具 args；空串时 tool_args_inject 自动跳过注入，不影响既有行为。
         "user_id": user_id,
         // assistant message_id：内核权威生成，sidecar 流式 chunk 携带它，
         // 前端 handleStreamChunk 据此把 chunk 路由到 stream_start 建立的占位气泡。

@@ -5,7 +5,7 @@
 意图（WHY）：工具 schema 声明 file_paths 且描述承诺"系统会自动读取文件内容
 并在交互面板中展示"——链路为 handler → service.create_*_request(file_paths=)
 → 事件 payload file_paths → 前端 useInteractionHandler 拉内容建工作区 Tab。
-handler 必须把 kwargs["file_paths"] 传给 service，且利用 param_inject 注入的
+handler 必须把 kwargs["file_paths"] 传给 service，且利用 tool_args_inject 注入的
 workspace/project_root（宿主绝对路径）把 agent 视角路径（容器挂载路径
 /workspace/*、工作区相对路径）翻译成宿主绝对路径——前端按绝对路径直读宿主
 文件系统，原样回传容器路径将读不到文件（工作区不显示）。

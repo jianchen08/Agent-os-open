@@ -1900,12 +1900,12 @@ impl KernelCapabilityRouter {
                 message: "tool-executor.invoke 缺少 tool_name 参数".to_string(),
             })?;
         let tool_args_raw = params.get("args").cloned().unwrap_or(json!({}));
-        // 越权防护（治理）：0.2 工具调用应携带会话身份。会话身份由 param_inject
+        // 越权防护（治理）：0.2 工具调用应携带会话身份。会话身份由 tool_args_inject
         // 插件从 pipeline state 注入 session_id 到 args（state.session_id 来自
         // server.rs 构造的 initial_state），所有走 LLM 工具调用链的工具都带得上。
         // 缺失时告警不阻断——bash 等有状态工具插件侧用 _owner/session_id fallback
         // 链（bash/tool.py::_owner_from_inputs）做 pid 级越权兜底；此告警用于发现
-        // 绕过 param_inject 的调用方（如 hindsight 经 memory_read 直接调用）。
+        // 绕过 tool_args_inject 的调用方（如 hindsight 经 memory_read 直接调用）。
         let has_owner = tool_args_raw
             .get("_owner")
             .and_then(|v| v.as_str())
@@ -1929,8 +1929,8 @@ impl KernelCapabilityRouter {
         // 不应透传给工具 handler。
         //
         // 注意：session_id / pipeline_id / task_id 必须保留——它们是工具在
-        // injected_params 中显式声明的参数，由 param_inject 插件从 pipeline state
-        // 注入到 args；task/trigger 系工具（task_manage / trigger_setup /
+        // injected_params 中显式声明的参数，由 tool_args_inject 插件从 pipeline
+        // state 注入到 args；task/trigger 系工具（task_manage / trigger_setup /
         // trigger_review 等）依赖它们做权限校验与会话/管道/任务绑定。剥离它们会导致
         // sidecar 收到空值，报 MISSING_PIPELINE_ID / missing task_id 等。
         // 纯函数工具（file_read 等）不受影响：SDK 的 _filter_handler_kwargs

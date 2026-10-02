@@ -21,11 +21,10 @@ loop_bodies:
     id: prepare
     steps:
     - pipeline_pause_guard
-    - pipeline_context_build
+    - pipeline_agent_config_load
     - pipeline_mode_material_inject
-    - pipeline_injected_param_validator
     - pipeline_tool_schema
-    - pipeline_param_inject
+    - pipeline_tool_args_inject
     - pipeline_model_prompt_adapter
     - pipeline_prompt_build
     - pipeline_isolation_guard

@@ -36,7 +36,7 @@ plugins/shared/modes/mode_evolution/verify_round.py: 1
 plugins/shared/modes/mode_evolution/ws_batch.py: 6
 plugins/shared/modes/mode_research/server.py: 1
 plugins/shared/pipeline/core/tool_core/src/lib.rs: 3
-plugins/shared/pipeline/input/context_build/test_context_build_dual_root.py: 4
+plugins/shared/pipeline/input/agent_config_load/test_agent_config_load_dual_root.py: 4
 plugins/shared/pipeline/input/context_window_guard/test_manifest_inline_config.py: 1
 plugins/shared/pipeline/input/context_window_guard/test_plugin_branches.py: 1
 plugins/shared/pipeline/input/isolation_guard/plugin.py: 1

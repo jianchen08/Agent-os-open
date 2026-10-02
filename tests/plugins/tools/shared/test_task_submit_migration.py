@@ -304,7 +304,7 @@ class TestTaskSubmitCoreSubmit:
 
 @pytest.mark.asyncio
 async def test_birth_contract_carries_inherited_parent_ws_meta(mod):
-    """有父提交：出生契约携带 lineage.parent_ws_meta（param_inject 权威注入值）。
+    """有父提交：出生契约携带 lineage.parent_ws_meta（tool_args_inject 权威注入值）。
 
     子任务 workspace_lifecycle 的共享决策优先消费该出生坐标——父管道运行中
     registry 行尚未建立，仅靠聚合解析存在发起瞬间的可见性时序窗口
@@ -344,7 +344,7 @@ async def test_birth_contract_carries_inherited_parent_ws_meta(mod):
 
 @pytest.mark.asyncio
 async def test_birth_contract_omits_parent_ws_meta_when_absent(mod):
-    """父无 ws_meta（param_inject 注入 None）→ 出生契约不含该键，子任务侧对缺失显式报错。"""
+    """父无 ws_meta（tool_args_inject 注入 None）→ 出生契约不含该键，子任务侧对缺失显式报错。"""
     calls: list[dict] = []
 
     async def fake_sender(params: dict) -> dict:

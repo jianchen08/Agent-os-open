@@ -71,7 +71,7 @@ async def test_workspace_init_resolves_from_execution_context(plugins):
     assert updates["ws_meta"]["mode"] == "plain"
     assert updates["ws_meta"]["path"] == "D:/proj/x"
     # project_root 语义 = 实际项目目录，工作区路径不再伪装写它（工作区由
-    # workspace/ws_meta.path 独立承载，param_inject 工具锚点只认 workspace）
+    # workspace/ws_meta.path 独立承载，tool_args_inject 工具锚点只认 workspace）
     assert "project_root" not in updates
 
 

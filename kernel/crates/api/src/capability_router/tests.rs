@@ -912,7 +912,7 @@ async fn test_tool_executor_internal_keys_stripped_from_args() {
         inputs.get("plugin_id").is_none(),
         "args 级 plugin_id 应被剥离（防伪造）"
     );
-    // 业务字段保留（session_id/pipeline_id 是 param_inject 注入的显式参数）
+    // 业务字段保留（session_id/pipeline_id 是 tool_args_inject 注入的显式参数）
     assert_eq!(inputs["command"], "echo hi");
     assert_eq!(inputs["session_id"], "sess-1");
     assert_eq!(inputs["pipeline_id"], "pipe-1");

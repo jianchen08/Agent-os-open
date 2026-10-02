@@ -2,7 +2,7 @@
 
 契约：这些代码路径不得因依赖缺失而静默跳过——
 
-- tool_schema_validator 截断检测 / param_inject 兜底修复依赖 llm_service 的
+- tool_schema_validator 截断检测 / tool_args_inject 兜底修复依赖 llm_service 的
   ``llm.repair_json`` 能力（repair_json_string 单一真值源在
   llm_service._message_normalizer，2026-09-06 T7 起跨插件共享经能力面收敛）。
   本测试用桩替身模拟 capability 传输层（外部进程边界），修复逻辑走真实实现，
@@ -134,9 +134,9 @@ def test_tool_schema_validator_detect_truncation_runs(monkeypatch: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Site 2: param_inject._do_work 兜底修复路径（兜底修复必须保住可用字段）
+# Site 2: tool_args_inject._do_work 兜底修复路径（兜底修复必须保住可用字段）
 # ---------------------------------------------------------------------------
-def test_param_inject_repair_path_runs(monkeypatch: Any) -> None:
+def test_tool_args_inject_repair_path_runs(monkeypatch: Any) -> None:
     """参数注入对畸形 arguments 的兜底修复必须真正执行。
 
     WHY：json.loads 失败的兜底分支必须能经 llm.repair_json 修复——可修复的
@@ -145,9 +145,9 @@ def test_param_inject_repair_path_runs(monkeypatch: Any) -> None:
     from pipeline.plugin import PluginContext  # noqa: PLC0415
 
     stub = _RepairCapabilityStub()
-    mod = _load_plugin_module("input", "param_inject", "pi_plugin_p0_test")
+    mod = _load_plugin_module("input", "tool_args_inject", "pi_plugin_p0_test")
     monkeypatch.setattr(mod, "_capability_caller", stub)
-    plugin = mod.ParamInjectPlugin()
+    plugin = mod.ToolArgsInjectPlugin()
 
     # tool_execute 路径 + 一个 arguments 为畸形 JSON 字符串的 tool_call
     ctx = PluginContext(
