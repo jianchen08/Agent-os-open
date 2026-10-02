@@ -4,8 +4,8 @@
 # - 无任务域步骤：task_reminder（评估提醒）/duplicate_check（签名去重）/
 #   sensitive_checker（任务终检）/tool_cache 系列全部不在链上；
 # - 无多模态/godot 上下文等任务向装配；
-# - 对话循环：纯文本轮即本轮回复结束（会话语义），工具轮保留路由（防御，
-#   出厂卡 tool_ids: [] 时不触达）；
+# - 对话循环：纯文本轮即本轮回复结束（会话语义），工具轮保留（防御，
+#   出厂卡 tool_ids: [] 时不触达）——工具执行过的迭代跳过 LLM，本轮即终局；
 # - 收尾无评估：无 task_reminder 即无提醒/裁决，文本落定即本轮完成。
 loop_bodies:
 - id: init
@@ -30,26 +30,36 @@ loop_bodies:
     - pipeline_isolation_guard
     - pipeline_level_guard
     - pipeline_security_check
+  # 工具执行核 = 并行 for-each（ADR 2026-10-02-loopconfig-parallel-foreach），
+  # 与 autonomous 同构；本轮无调用时空转滑过（over 空 + consume 收尾）。
+  - id: tool_exec
+    loop_config:
+      as: current_call
+      collect:
+      - tool_results
+      - _full_tool_results
+      - _executed_tool_calls
+      collect_append:
+      - submitted_task_ids
+      consume: true
+      consume_keys:
+      - pre_decided_results
+      enabled: true
+      max_concurrency: 4
+      over: state.raw_tool_calls
+    steps:
+    - pipeline_tool_core
   - context:
       temperature: 0.8
-    id: core
+    id: llm
     steps:
-    - pipeline_llm_core
+    # 执行过工具的迭代跳过 LLM（旧流程工具轮无 LLM——调用执行完本轮即终局，
+    # 结果不回灌；_executed_tool_calls 由 tool_exec 每迭代清 []，纯文本轮恒 []）。
+    - name: pipeline_llm_core
+      when: _executed_tool_calls == []
     - pipeline_spill_guard
   - id: post
     next:
-    - then: end
-      when: raw_tool_calls == [] or raw_tool_calls == None
-    - set:
-        core_plugin: pipeline_tool_core
-        core_type: tool_execute
-      then: loop
-      when: raw_tool_calls != [] and raw_tool_calls != None
-    - set:
-        core_plugin: pipeline_llm_core
-        core_type: llm_call
-      then: loop
-      when: core_type == 'tool_execute'
     - then: end
     steps:
     # 状态统一标记解析步（2026-09-28 设计）：提取 <state> 标记 → 账本落账
@@ -65,6 +75,3 @@ loop_bodies:
     - pipeline_workspace_lifecycle
     - pipeline_environment_lifecycle
 name: roleplay
-initial_state:
-  core_plugin: pipeline_llm_core
-  core_type: llm_call
