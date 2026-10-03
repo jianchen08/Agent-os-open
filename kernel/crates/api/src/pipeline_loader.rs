@@ -1213,8 +1213,9 @@ loop_bodies:
             "bodies: {:?}",
             cfg.loop_bodies.iter().map(|b| &b.id).collect::<Vec<_>>()
         );
-        // main / post：DSL next 归一为 routes（8 条：任务终态收束 + 对话挂起 +
-        // 对话结束 + 工具循环 + 回 LLM×3 + 缺省 end）
+        // main / post：DSL next 归一为 routes（7 条：任务终态收束 + 对话挂起 +
+        // 对话结束 + 新输入回 LLM + duplicate 回 LLM + 纯文本轮不终局 + 缺省
+        // end；工具循环已并入 tool_exec 并行 for-each，post 无 raw_tool_calls 路由）
         let main = cfg
             .loop_bodies
             .iter()
@@ -1227,7 +1228,7 @@ loop_bodies:
             .iter()
             .find(|s| s.id == "post")
             .expect("post step");
-        assert_eq!(post.routes.len(), 9, "post next 九条");
+        assert_eq!(post.routes.len(), 7, "post next 七条");
         // 任务终态当轮收束置顶（用户裁定 2026-08-29：成功/失败/取消立即 end）
         assert_eq!(post.routes[0].then.next, RouteNext::End);
         assert_eq!(
@@ -1249,39 +1250,58 @@ loop_bodies:
             post.routes[2].when,
             "conversation_mode == True and raw_tool_calls != []"
         );
-        // 既有工具调用/回 LLM 分支顺序不变
-        assert_eq!(
-            post.routes[3].when,
-            "raw_tool_calls != [] and raw_tool_calls != None"
-        );
+        // 新输入回 LLM（result_format 置位 _has_new_llm_input）
+        assert_eq!(post.routes[3].when, "_has_new_llm_input == true");
         // duplicate_check 二级拦截回 LLM（控制状态键契约 ADR 2026-08-30）
-        assert_eq!(post.routes[6].then.next, RouteNext::Loop);
-        assert_eq!(post.routes[6].when, "router.duplicate_back_llm == True");
+        assert_eq!(post.routes[4].then.next, RouteNext::Loop);
+        assert_eq!(post.routes[4].when, "router.duplicate_back_llm == True");
         assert_eq!(
-            post.routes[6].then.set.get("router.duplicate_back_llm"),
+            post.routes[4].then.set.get("router.duplicate_back_llm"),
             Some(&serde_json::json!(false)),
             "回 LLM 分支自清路由键防残留"
         );
         // 任务管道纯文本轮不终局（D2 一次性终局修复 221a776d6，兜底 end 前置轮回规则）
-        assert_eq!(post.routes[7].then.next, RouteNext::Loop);
+        assert_eq!(post.routes[5].then.next, RouteNext::Loop);
         assert_eq!(
-            post.routes[7].when,
+            post.routes[5].when,
             "task.id != none and conversation_mode != True and task.status != 'completed' and task.status != 'failed' and task.status != 'cancelled'"
         );
-        assert_eq!(post.routes[8].then.next, RouteNext::End);
-        assert_eq!(post.routes[8].when, "True", "缺省 when 归一为 True");
-        // 动态 core_plugin 项保留（引擎动态点；tool_cache 接线后位于其前列）
+        assert_eq!(post.routes[6].then.next, RouteNext::End);
+        assert_eq!(post.routes[6].when, "True", "缺省 when 归一为 True");
+        // core 步骤静态化：动态 core_plugin 项退役，只余工具缓存命中的门控直出；
+        // 工具执行核移至 tool_exec 并行 for-each（单调用契约，ADR
+        // 2026-10-02-loopconfig-parallel-foreach）
         let core = main
             .steps
             .iter()
             .find(|s| s.id == "core")
             .expect("core step");
-        assert!(
-            core.steps
-                .iter()
-                .any(|s| s.name() == "{{state.core_plugin}}"),
-            "core 步骤应保留动态 core_plugin 项"
-        );
+        let cache_when = core
+            .steps
+            .iter()
+            .find_map(|s| match s {
+                StepItem::Gated { name, when, .. } if name == "pipeline_tool_cache" => when.clone(),
+                _ => None,
+            })
+            .expect("core 应为 pipeline_tool_cache 门控项");
+        assert!(cache_when.contains("raw_tool_calls"));
+        let tool_exec = main
+            .steps
+            .iter()
+            .find(|s| s.id == "tool_exec")
+            .expect("tool_exec step");
+        let lc = tool_exec
+            .loop_config
+            .as_ref()
+            .expect("tool_exec 应带 for-each loop_config");
+        assert_eq!(lc.over.as_deref(), Some("state.raw_tool_calls"));
+        assert_eq!(lc.as_iter.as_deref(), Some("current_call"));
+        assert_eq!(lc.max_concurrency, 4, "有界并行上限配置域可调");
+        assert!(lc.consume, "收尾清源 raw_tool_calls");
+        assert!(lc.collect.contains(&"tool_results".to_string()));
+        assert!(lc
+            .collect_append
+            .contains(&"submitted_task_ids".to_string()));
         // W2a 压缩粗门：prepare 的 context_window_guard 为带 when 的门控项，
         // 公式（百分比阈值）经 condition DSL 编译期可解析（加载面断言；语义
         // 真假两侧由 engine 测试锁定）
