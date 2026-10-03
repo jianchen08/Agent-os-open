@@ -126,11 +126,12 @@
     'hindsight_stats': '/ext/hindsight_memory_service/stats',
   } as const
 
-  /** llm_service（LLM Service）：plugin.json 声明 9 端点 */
+  /** llm_service（LLM Service）：plugin.json 声明 10 端点 */
   export const LLM_SERVICE_ENDPOINTS = {
     'config_llm_presets_get': '/ext/llm_service/config/llm/presets',
     'config_llm_provider_types_get': '/ext/llm_service/config/llm/provider-types',
     'config_llm_providers_remote_models_get': '/ext/llm_service/config/llm/providers/{provider_id}/remote-models',
+    'config_llm_thinking_levels': '/ext/llm_service/config/llm/thinking-levels',
     'thinking_mode_check': '/ext/llm_service/thinking-mode/check/{model_name}',
     'thinking_mode_health': '/ext/llm_service/thinking-mode/healthz',
     'thinking_mode_models_list': '/ext/llm_service/thinking-mode/models',

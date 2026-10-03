@@ -175,14 +175,17 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
     expect(indicator.className).toContain('min-w-0')
   })
 
-  it('发送消息携带思考强度：enableThinking + thinkingStrength 透传', () => {
+  it.each([
+    ['思考参数组', '{"reasoning_effort":"max"}'],
+    ['关闭形态参数组（同一条透传路径，无档位特判）', '{"thinking":{"type":"disabled"}}'],
+  ])('发送消息携带思考选择：%s 原样透传', (_name, strength) => {
     const onSendMessage = vi.fn()
     render(
       <ChatInput
         mode="full"
         onSendMessage={onSendMessage}
         modelName="deepseek-v3"
-        thinkingStrength="high"
+        thinkingStrength={strength}
       />,
     )
 
@@ -193,28 +196,22 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
     expect(onSendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         content: '你好',
-        enableThinking: true,
-        thinkingStrength: 'high',
+        thinkingStrength: strength,
       }),
     )
   })
 
-  it('关闭强度 → enableThinking=false', () => {
+  it('未选择（thinkingStrength 缺省）→ 发送空串（后端不覆盖参数）', () => {
     const onSendMessage = vi.fn()
     render(
-      <ChatInput
-        mode="full"
-        onSendMessage={onSendMessage}
-        modelName="deepseek-v3"
-        thinkingStrength="off"
-      />,
+      <ChatInput mode="full" onSendMessage={onSendMessage} modelName="deepseek-v3" />,
     )
 
     fireEvent.change(screen.getByTestId('chat-input-textarea'), { target: { value: 'hi' } })
     fireEvent.click(screen.getByTestId('chat-send-button'))
 
     expect(onSendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ enableThinking: false, thinkingStrength: 'off' }),
+      expect.objectContaining({ thinkingStrength: '' }),
     )
   })
 
@@ -226,7 +223,7 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
         onSendMessage={onSendMessage}
         modelName="deepseek-v3"
         enableThinkingMode
-        thinkingStrength="medium"
+        thinkingStrength='{"reasoning_effort":"medium"}'
       />,
     )
 
@@ -235,7 +232,7 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
     fireEvent.keyDown(textarea, { key: 'Enter' })
 
     expect(onSendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ content: '回车发送', enableThinking: true }),
+      expect.objectContaining({ content: '回车发送' }),
     )
     // 发送成功后清空输入（发送语义：消息已交出发送，输入框不留残文）
     expect((textarea as HTMLTextAreaElement).value).toBe('')
@@ -249,7 +246,7 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
         onSendMessage={onSendMessage}
         modelName="deepseek-v3"
         enableThinkingMode
-        thinkingStrength="medium"
+        thinkingStrength='{"reasoning_effort":"medium"}'
       />,
     )
 
@@ -269,15 +266,33 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
         onSendMessage={() => {}}
         modelName="deepseek-v3"
         enableThinkingMode
-        thinkingStrength="medium"
+        thinkingStrength='{"reasoning_effort":"medium"}'
+        thinkingLevels={[
+          { value: '{"reasoning_effort":"medium"}', label: 'reasoning_effort=medium' },
+          { value: '{"reasoning_effort":"max"}', label: 'reasoning_effort=max' },
+        ]}
         onThinkingStrengthChange={onThinkingStrengthChange}
       />,
     )
 
     const toggle = screen.getByTestId('mock-thinking-toggle')
-    expect(toggle).toHaveAttribute('data-strength', 'medium')
+    expect(toggle).toHaveAttribute('data-strength', '{"reasoning_effort":"medium"}')
     fireEvent.click(toggle)
     expect(onThinkingStrengthChange).toHaveBeenCalledWith('high')
+  })
+
+  it('模型未配置思考档位（thinkingLevels 空）→ 选择器隐藏', () => {
+    render(
+      <ChatInput
+        mode="full"
+        onSendMessage={() => {}}
+        modelName="deepseek-v3"
+        enableThinkingMode
+        thinkingStrength='{"reasoning_effort":"medium"}'
+        onThinkingStrengthChange={() => {}}
+      />,
+    )
+    expect(screen.queryByTestId('mock-thinking-toggle')).toBeNull()
   })
 
   it('双态按钮：执行中且输入框有文字 → 发送按钮（可继续排队输入）', () => {

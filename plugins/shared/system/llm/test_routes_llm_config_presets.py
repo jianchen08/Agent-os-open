@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import ast
 import importlib.util
-import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -100,37 +99,6 @@ def test_allowed_keys_matches_llm_core_whitelist(rlc: Any) -> None:
     payload = rlc.get_llm_presets()
     declared = set(payload["thinking_strength"]["allowed_keys"])
     assert declared == _llm_core_thinking_allowed_keys()
-
-
-def test_levels_covers_chat_input_gears(rlc: Any) -> None:
-    """对账闸：声明 levels 必须覆盖聊天页全部档位（含 off）。
-
-    设置页按本清单重写模型的 thinking_strength_params——清单缺某档位时，
-    该档映射会在保存时被静默删除（off 缺失曾使"关闭"档配置无法持久）。
-    """
-    payload = rlc.get_llm_presets()
-    declared = set(payload["thinking_strength"]["levels"])
-    chat_gears = _chat_input_thinking_gears()
-    missing = chat_gears - declared
-    assert not missing, (
-        f"声明 levels 缺聊天页档位 {sorted(missing)}——设置页保存会静默删除这些档的映射"
-    )
-
-
-def _chat_input_thinking_gears() -> set[str]:
-    """聊天输入框思考强度档位（llm_core 插件 widget 声明的 select options）。"""
-    manifest = json.loads(
-        (
-            _REPO_ROOT / "plugins" / "shared" / "pipeline" / "core" / "llm_core" / "plugin.json"
-        ).read_text(encoding="utf-8")
-    )
-    for widget in manifest["ui_schema"]["widgets"]:
-        if widget.get("id") != "thinking_strength":
-            continue
-        for field in widget["props"]["fields"]:
-            if field.get("name") == "strength":
-                return {str(opt["value"]) for opt in field["options"]}
-    raise AssertionError("llm_core manifest 未声明 thinking_strength widget 档位")
 
 
 def test_missing_declaration_fails_closed(rlc: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

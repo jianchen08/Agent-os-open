@@ -238,6 +238,16 @@
       "description": "LLM 配置面预置声明下发（provider 分组/常用类型/思考强度白名单；P2-5 数据下发，前端零硬编码）"
     },
     {
+      "route_id": "config_llm_thinking_levels",
+      "method": "GET",
+      "path": "/ext/llm_service/config/llm/thinking-levels",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "当前模型生效的思考档位选项下发（厂商级映射优先、模型级补位，聊天页选择器选项真值源；前端零硬编码）"
+    },
+    {
       "route_id": "config_llm_providers_remote_models_get",
       "method": "GET",
       "path": "/ext/llm_service/config/llm/providers/{provider_id}/remote-models",

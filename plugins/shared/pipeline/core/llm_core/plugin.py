@@ -77,28 +77,20 @@ class PartialStreamOutcome:
     def __init__(self, result: dict[str, Any]) -> None:
         self.result = result
 
-# ── 思考强度 → 模型参数（思考强度全链路）────────────────────────────
-# 前端 user_input 携带 thinking_strength（off/low/medium/high），内核透传注入
-# state；llm_core 在请求构造时按档位覆盖**思考相关参数**（reasoning_effort /
-# thinking），与 default_params 合并后进 kwargs。reasoning_effort 的
-# extra_body 透传（DeepSeek 等 OpenAI 兼容中转）由 llm_service adapter 侧
-# 处理。
+# ── 思考参数覆盖（思考全链路）────────────────────────────────────────
+# 前端 user_input 携带 thinking_strength = 参数组 JSON 串（选项即
+# thinking_strength_params 配置的参数组本身，llm_service thinking-levels
+# 端点下发、选中即透传；"" = 不覆盖），内核透传注入 state；llm_core 解析后
+# 按**思考参数白名单**过滤，与 default_params 合并后进 kwargs。
+# reasoning_effort 的 extra_body 透传（DeepSeek 等 OpenAI 兼容中转）由
+# llm_service adapter 侧处理。
 #
-# off 是与其他档位同级的档位（不是"跳过覆盖"的哨兵值）：模型默认参数常自带
-# 思考开启（default_params 的 thinking / reasoning_effort），off 若短路成
-# "不覆盖"，用户选「关闭」时默认的开启值原样出站，思考照跑。故 off 走同一条
-# 映射查找——命中该档位即覆盖为厂商的关闭形态，未配置则同其余档位不覆盖。
+# 关闭思考 = 选中的参数组本身是关闭形态（如 thinking.type=disabled）——
+# 与其他参数组同一条覆盖路径：模型默认参数常自带思考开启，不覆盖即照跑，
+# 用户选关闭组就覆盖为关闭值。
 #
-# 决策（用户确认）：temperature / max_tokens 等采样参数**不随强度覆盖**——
-# 强度只路由思考参数，采样参数始终用模型 default_params。
-#
-# 路由优先级（2026-09-03 用户裁定：所有映射显式，不在代码里靠推断兜底）：
-# 厂商级映射（llm.yaml providers.<name>.thinking_strength_params，即各厂商 API
-# 真实接受的参数形态，经 _config_models 桥接为 provider_thinking_strength_params
-# 注入）> 模型级手填映射（models.<id>.thinking_strength_params）。两级都未配置
-# 的模型 → 强度不覆盖任何参数（保持 default_params 现状）；无内置兜底表。
-# 思考强度允许覆盖的参数白名单：只含思考相关字段；
-# temperature/max_tokens 等采样参数不随强度覆盖（即使用户配置里写了也过滤）。
+# 白名单只含思考相关字段：temperature/max_tokens 等采样参数不随消息覆盖
+# （参数组里写了也过滤），采样参数始终用模型 default_params。
 _THINKING_STRENGTH_ALLOWED = {"reasoning_effort", "thinking"}
 
 # 出站载荷内部字段黑名单：管道持久化态携带、但不属于任何 provider wire 契约
@@ -173,33 +165,25 @@ def _decay_system_notifications(messages: list[dict[str, Any]]) -> list[dict[str
     ]
 
 
-def resolve_thinking_strength_params(
-    strength: str,
-    model_params: dict[str, dict[str, Any]] | None = None,
-    *,
-    provider_params: dict[str, dict[str, Any]] | None = None,
-) -> dict[str, Any] | None:
-    """思考强度 → 思考参数覆盖集；空/未知/无显式映射 → None（不覆盖）。
+def resolve_thinking_params(raw: str) -> dict[str, Any] | None:
+    """消息携带的思考参数覆盖集（JSON 串）→ 白名单过滤后的 dict；空/非法 → None。
 
-    off 与 low/medium/high 同级：同为查表档位，命中即覆盖为厂商关闭形态
-    （映射未配 off 的模型同其余档位不覆盖）。
-
-    Args:
-        strength: 思考强度档位（off/low/medium/high）
-        model_params: 模型级手填映射（llm.yaml models.<id>.thinking_strength_params），
-            仅无厂商级映射（或厂商映射缺该档位）时参与路由。
-        provider_params: 厂商级映射（llm.yaml providers.<name>.
-            thinking_strength_params，经 _config_models 桥接注入）。命中该档位
-            → 直接映射（厂商参数即上游真实契约）。
+    ``thinking_strength`` 线上形态 = 参数组 JSON 串（llm_service
+    thinking-levels 端点下发的选项 value，选中即透传；"" = 不覆盖）：本侧
+    只做白名单过滤（只允许思考相关键），无档位查表——选项即参数组，映射
+    语义在配置侧（thinking_strength_params），执行端零推断。
     """
-    if not strength:
+    if not raw:
         return None
-    for params in (provider_params, model_params):
-        if isinstance(params, dict):
-            override = params.get(strength)
-            if isinstance(override, dict):
-                return {k: v for k, v in override.items() if k in _THINKING_STRENGTH_ALLOWED}
-    return None
+    try:
+        params = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("thinking_strength 非 JSON 参数组，忽略: %.80s", raw)
+        return None
+    if not isinstance(params, dict):
+        return None
+    filtered = {k: v for k, v in params.items() if k in _THINKING_STRENGTH_ALLOWED}
+    return filtered or None
 
 
 class LLMCore(ICorePlugin):
@@ -250,16 +234,6 @@ class LLMCore(ICorePlugin):
         self._model: str = self._config.get("model_name", "gpt-4")
         self._api_base: str | None = self._config.get("api_base")
         self._api_key: str | None = self._config.get("api_key")
-        # 模型级思考强度手填映射（llm.yaml models.<id>.thinking_strength_params）
-        # 与厂商级映射（providers.<name>.thinking_strength_params，桥接键
-        # provider_thinking_strength_params）：由 _apply_model_from_state 解析
-        # 模型时更新；路由优先级 厂商 > 手填，两级都未配置 → 强度不覆盖。
-        self._thinking_strength_params: dict[str, dict[str, Any]] | None = (
-            self._config.get("thinking_strength_params")
-        )
-        self._provider_thinking_strength_params: dict[str, dict[str, Any]] | None = (
-            self._config.get("provider_thinking_strength_params")
-        )
         # 视觉能力缺省 False（fail-closed）：_apply_model_from_state 解析模型
         # 时按 llm.yaml multimodal 声明覆盖。
         self._supports_vision: bool = bool(self._config.get("supports_vision", False))
@@ -379,12 +353,6 @@ class LLMCore(ICorePlugin):
         self._api_key = llm_conf.get("api_key") or ""
         self._context_window = llm_conf.get("context_window")
         self._default_params = llm_conf.get("default_params") or {}
-        # 模型级手填映射与厂商级映射（桥接键 provider_thinking_strength_params）
-        # 随模型解析更新；路由优先级 厂商 > 手填，两级都未配置 → 强度不覆盖。
-        self._thinking_strength_params = llm_conf.get("thinking_strength_params")
-        self._provider_thinking_strength_params = llm_conf.get(
-            "provider_thinking_strength_params"
-        )
         # 模型视觉能力（llm.yaml models.<id>.multimodal.supports_image）：写入
         # state 供 tool_core inject_multimodal 作注图闸门——模型不支持时不注图，
         # 工具截图走文本引导路径（消费键 state.llm_supports_vision）。
@@ -1146,16 +1114,11 @@ class LLMCore(ICorePlugin):
         # kwargs 显式接收落位（llm_service complete_stream 侧配套）。
         kwargs["agent_level"] = ctx.state.get("agent_level", "L3")
 
-        # 思考强度 → 模型参数覆盖：state.thinking_strength（off/low/medium/high）
-        # 命中映射即覆盖思考参数（与 default_params 合并）；缺失/未知档位不覆盖。
-        # 路由优先级：厂商级映射（provider_thinking_strength_params）> 模型级
-        # 手填（thinking_strength_params）；两级都未配置 → 不覆盖（无代码兜底）。
+        # 思考参数覆盖：state.thinking_strength = 参数组 JSON 串（选项即配置
+        # 参数组，选中即透传）；解析+白名单过滤后与 default_params 合并，
+        # 空/非法不覆盖。
         thinking_strength = str(ctx.state.get("thinking_strength") or "")
-        strength_params = resolve_thinking_strength_params(
-            thinking_strength,
-            self._thinking_strength_params,
-            provider_params=self._provider_thinking_strength_params,
-        )
+        strength_params = resolve_thinking_params(thinking_strength)
         if strength_params:
             kwargs.update(strength_params)
             logger.info(

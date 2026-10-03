@@ -5,12 +5,11 @@ import { createPortal } from 'react-dom'
 import { useShallow } from 'zustand/react/shallow'
 import { Loader2 } from '@/assets/icons'
 import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
-import { useLlmConfigQuery } from '@/hooks/queries/useLlmQueries'
+import { useLlmConfigQuery, useThinkingLevelsQuery } from '@/hooks/queries/useLlmQueries'
 import { usePipelineRunsQuery } from '@/hooks/queries/usePipelineRunsQuery'
 import { forceReloadSessions, readSessions } from '@/hooks/queries/useSessionsQuery'
 import { useSessionThemeScope } from '@/hooks/useSessionThemeScope'
 import { type LLMDefaults } from '@/services/api/config'
-import { switchThinkingMode } from '@/services/api/thinkingMode'
 import { syncModeThemeForSession } from '@/services/modeSessionBinder'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useNotificationStore } from '@/stores/notificationStore'
@@ -22,14 +21,9 @@ import {
 } from '@/stores/thinkingModeStore'
 import { useUIStore } from '@/stores/uiStore'
 import { useVotingStore } from '@/stores/votingStore'
-import {
-  DEFAULT_THINKING_STRENGTH,
-  STRENGTH_TO_ENABLE,
-  type ThinkingStrength,
-} from '@/types/thinkingMode'
+import { type ThinkingStrength } from '@/types/thinkingMode'
 import { mainPipelineIdOf } from '@/utils/mappers'
 import { resolveModelDisplayName } from '@/utils/modelName'
-import { findModelParams, mapParamsToStrength } from '@/utils/thinkingStrength'
 import { AgentTabBar } from './AgentTabBar'
 import { ChatInput } from './ChatInput'
 import { MessageList } from './MessageList'
@@ -148,11 +142,10 @@ export const ChatContainer = ({
   })
 
   /**
-   * LLM 配置（共享 query 缓存，queryKeys.llmConfig）：模型显示 tiers 与思考
-   * 强度反向映射同源消费。挂载期一次性快照（useEffect+useState）会在设置页
-   * 改配置后过期——输入框兜底模型名随缓存更新热更新（2026-09-28 批次 C）。
-   * 失败降级：tiers 缺失时 resolveModelDisplayName 原样返回键名，models 缺失
-   * 时思考强度回退默认档位，一次性提示。
+   * LLM 配置（共享 query 缓存，queryKeys.llmConfig）：仅消费模型显示 tiers
+   * （P8 分级键 → 具体模型名）。挂载期一次性快照（useEffect+useState）会在
+   * 设置页改配置后过期——输入框兜底模型名随缓存更新热更新（2026-09-28 批次 C）。
+   * 失败降级：tiers 缺失时 resolveModelDisplayName 原样返回键名，一次性提示。
    */
   const { data: llmConfig, isError: llmConfigError } = useLlmConfigQuery()
   const llmDefaults: LLMDefaults | null = llmConfig?.defaults ?? null
@@ -160,7 +153,7 @@ export const ChatContainer = ({
     if (!llmConfigError) return
     notifyDegradedOnce('chat-llm-config', {
       title: 'LLM 配置获取失败',
-      message: '模型分级与思考强度映射不可用，已回退显示原始模型键与默认档位',
+      message: '模型分级信息不可用，已回退显示原始模型键',
     })
   }, [llmConfigError])
 
@@ -246,39 +239,32 @@ export const ChatContainer = ({
   )
 
 
-  /** 思考强度：显式设置（标签记忆）优先；未设置时从当前管道模型参数反向映射
-   *  （新会话/切标签自动应用管道实际档位），映射不出回退默认。 */
+  /** 思考选择（宿主零业务知识，全部后端下发）：选项 = thinking_strength_params
+   *  配置的参数组本身（llm_service thinking-levels 端点派生，标签=参数渲染）；
+   *  未配置 → 空（选择器隐藏，空值发送不覆盖参数）。显示值 = 标签显式记忆
+   *  （∈ 选项时生效）?? 端点当前参数组 ?? 未选择（''）。 */
   const explicitThinkingStrength = useExplicitThinkingStrength()
-  const pipelineParams = useMemo(
-    () => findModelParams(llmConfig?.models, effectiveModelName),
-    [llmConfig, effectiveModelName],
-  )
-  const activeThinkingStrength: ThinkingStrength =
-    explicitThinkingStrength ??
-    mapParamsToStrength(pipelineParams) ??
-    DEFAULT_THINKING_STRENGTH
+  const { data: thinkingLevelsData } = useThinkingLevelsQuery(effectiveModelName)
+  const thinkingLevels = thinkingLevelsData?.options ?? []
+  const activeThinkingStrength: ThinkingStrength = useMemo(() => {
+    if (explicitThinkingStrength && thinkingLevels.some((o) => o.value === explicitThinkingStrength)) {
+      return explicitThinkingStrength
+    }
+    return thinkingLevelsData?.current ?? ''
+  }, [explicitThinkingStrength, thinkingLevels, thinkingLevelsData])
   const setThinkingStrength = useThinkingModeStore((s) => s.setStrength)
 
   /**
-   * 切换思考强度（覆盖当前标签对应管道的思考模式）：
-   * 1. 本地标签级记忆（localStorage，随路由联动）
-   * 2. 调后端 switchThinkingMode 覆盖管道思考模式（参谋接口）——失败不影响
-   *    本地强度记忆（实际参数由消息级 thinking_strength 路由），一次性提示用户。
+   * 切换思考档位：本地标签级记忆（localStorage，随路由联动）。实际参数由
+   * 消息级 thinking_strength 路由（llm_core 按 thinking_strength_params 解析），
+   * 无需后端伴随调用。
    */
   const handleThinkingStrengthChange = useCallback(
     (strength: ThinkingStrength) => {
       const tabId = useAgentTabStore.getState().activeTabId
       if (tabId) setThinkingStrength(tabId, strength)
-      if (tabId && effectiveModelName && effectiveModelName !== 'unknown') {
-        switchThinkingMode(effectiveModelName, STRENGTH_TO_ENABLE[strength]).catch(() => {
-          notifyDegradedOnce('chat-thinking-sync', {
-            title: '思考强度同步失败',
-            message: '本次切换仅保存在本地，下轮请求可能沿用管道原档位',
-          })
-        })
-      }
     },
-    [setThinkingStrength, effectiveModelName],
+    [setThinkingStrength],
   )
 
   /**
@@ -500,6 +486,7 @@ export const ChatContainer = ({
           onStopGenerate={onStopGenerate}
           enableThinkingMode={true}
           modelName={effectiveModelName}
+          thinkingLevels={thinkingLevels}
           thinkingStrength={activeThinkingStrength}
           onThinkingStrengthChange={handleThinkingStrengthChange}
         />

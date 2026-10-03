@@ -7,8 +7,8 @@
 2. .env 读取：注释/空行/引号剥离、mtime 缓存命中与失效、无根/无文件降级；
 3. ModelConfigLoaderShim：llm/embedding 命名空间读取（缺失/非 dict 降级空表）、
    大小写不敏感模型查找、provider/keys 回退链、tier 解析、defaults 合并
-   （超时三参数模型级覆盖 defaults 级）、thinking_strength_params 仅在
-   配置时携带。
+   （超时三参数模型级覆盖 defaults 级）、thinking_strength_params 不注入
+   llm_core 配置（选项=参数组语义，llm_core 零查表）。
 """
 from __future__ import annotations
 
@@ -207,7 +207,9 @@ class TestLoaderShim:
         shim = self._shim(mod, {"models": {}})
         assert shim.get_llm_core_config("ghost") is None
 
-    def test_thinking_strength_params_passthrough(self, mod: Any) -> None:
+    def test_thinking_strength_params_not_bridged(self, mod: Any) -> None:
+        """thinking_strength_params 不再注入 llm_core 配置（选项=参数组语义下
+        llm_core 零查表，参数组选项由 llm_service thinking-levels 端点直读下发）。"""
         shim = self._shim(
             mod,
             {
@@ -216,34 +218,11 @@ class TestLoaderShim:
                         "provider": "p3",
                         "thinking_strength_params": {"high": {"enabled": True}},
                     }
-                }
+                },
+                "providers": {"p3": {"thinking_strength_params": {"low": {}}}},
             },
         )
         got = shim.get_llm_core_config("m3")
         assert got is not None
-        assert got["thinking_strength_params"] == {"high": {"enabled": True}}
-
-    def test_provider_thinking_strength_params_passthrough(self, mod: Any) -> None:
-        """providers.<name>.thinking_strength_params → provider_thinking_strength_params
-        桥接透出（厂商级映射）；未配置的 provider 键省略。"""
-        provider_mapping = {
-            "high": {"thinking": {"type": "enabled"}},
-            "low": {"thinking": {"type": "disabled"}},
-        }
-        shim = self._shim(
-            mod,
-            {
-                "models": {"glm-x": {"provider": "zhipu"}},
-                "providers": {
-                    "zhipu": {"type": "zai", "thinking_strength_params": provider_mapping}
-                },
-            },
-        )
-        got = shim.get_llm_core_config("glm-x")
-        assert got is not None
-        assert got["provider_thinking_strength_params"] == provider_mapping
-
-        shim2 = self._shim(mod, {"models": {"m": {"provider": "plain"}}})
-        got2 = shim2.get_llm_core_config("m")
-        assert got2 is not None
-        assert "provider_thinking_strength_params" not in got2
+        assert "thinking_strength_params" not in got
+        assert "provider_thinking_strength_params" not in got

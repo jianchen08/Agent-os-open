@@ -117,30 +117,7 @@
           "fields": [
             {
               "name": "strength",
-              "type": "select",
-              "default": "medium",
-              "options": [
-                {
-                  "label": "关闭",
-                  "value": "off",
-                  "description": "普通模式，不启用思考"
-                },
-                {
-                  "label": "低",
-                  "value": "low",
-                  "description": "轻量思考，响应更快"
-                },
-                {
-                  "label": "中",
-                  "value": "medium",
-                  "description": "标准思考（默认）"
-                },
-                {
-                  "label": "高",
-                  "value": "high",
-                  "description": "深度思考，耗时更长"
-                }
-              ]
+              "type": "select"
             }
           ]
         }

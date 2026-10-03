@@ -144,6 +144,8 @@ export const API_ENDPOINTS = {
     LLM_PROVIDER_TYPES: LLM_SERVICE_ENDPOINTS.config_llm_provider_types_get,
     /** LLM 配置面预置声明（provider 分组/常用类型/思考强度白名单，插件下发） */
     LLM_PRESETS: LLM_SERVICE_ENDPOINTS.config_llm_presets_get,
+    /** 当前模型生效的思考档位选项（厂商级映射优先、模型级补位，聊天页选择器真值源） */
+    LLM_THINKING_LEVELS: LLM_SERVICE_ENDPOINTS.config_llm_thinking_levels,
     /** 从提供商 API 实时拉取可用模型（需先配置 Key） */
     LLM_REMOTE_MODELS: (providerId: string) =>
       LLM_SERVICE_ENDPOINTS.config_llm_providers_remote_models_get.replace('{provider_id}', providerId),
@@ -230,23 +232,6 @@ export const API_ENDPOINTS = {
       TASK_SERVICE_ENDPOINTS.task_ac_result
         .replace('{task_id}', taskId)
         .replace('{ac_id}', acId),
-  },
-  /** 思考模式相关 - llm_service 插件端点（生成物投影，原 channel_api thinking-mode 域） */
-  THINKING_MODE: {
-    /** 获取所有支持思考模式的模型 */
-    MODELS: LLM_SERVICE_ENDPOINTS.thinking_mode_models_list,
-    /** 获取指定模型的思考模式信息 */
-    MODEL_INFO: (modelName: string) =>
-      LLM_SERVICE_ENDPOINTS.thinking_mode_model_info.replace('{model_name}', modelName),
-    /** 切换思考模式 */
-    SWITCH: LLM_SERVICE_ENDPOINTS.thinking_mode_switch,
-    /** 获取思考模式推荐 */
-    RECOMMENDATIONS: LLM_SERVICE_ENDPOINTS.thinking_mode_recommendations,
-    /** 检查模型是否支持思考模式 */
-    CHECK_SUPPORT: (modelName: string) =>
-      LLM_SERVICE_ENDPOINTS.thinking_mode_check.replace('{model_name}', modelName),
-    /** 思考模式服务健康检查 */
-    HEALTH: LLM_SERVICE_ENDPOINTS.thinking_mode_health,
   },
   /** 成本控制相关 - cost_control 插件端点（生成物投影，已从内核 compat_routes 迁出） */
   COST_CONTROL: {

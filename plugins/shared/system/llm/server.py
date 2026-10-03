@@ -778,8 +778,10 @@ async def _handle_thinking_mode(path: str, method: str, raw_body: str) -> dict[s
     return _ok(_json_response({"error": "not found", "path": path}, 404))
 
 
-async def _handle_config_llm(path: str, method: str, raw_body: str) -> dict[str, Any]:
-    """config/llm 段 13 端点：字面量 (sub,method) 表 + providers/models 参数族。"""
+async def _handle_config_llm(
+    path: str, method: str, raw_body: str, query: dict[str, str] | None = None
+) -> dict[str, Any]:
+    """config/llm 段端点：字面量 (sub,method) 表 + providers/thinking-levels 参数族。"""
     import routes_llm_config as rlc  # noqa: PLC0415
 
     sub = path[len(_CONFIG_LLM_PREFIX):]  # "" / "/provider-types" / "/presets" / ...
@@ -798,6 +800,10 @@ async def _handle_config_llm(path: str, method: str, raw_body: str) -> dict[str,
     if method == "GET" and sub.startswith("/providers/") and sub.endswith("/remote-models"):
         provider_id = sub[len("/providers/"):-len("/remote-models")]
         return _ok(_json_response(rlc.get_remote_models(provider_id)))
+    # 思考档位选项（聊天页选择器选项真值源）：model 走 query（模型名可能含
+    # `/`，不进路径段）
+    if method == "GET" and sub == "/thinking-levels":
+        return _ok(_json_response(rlc.get_thinking_levels((query or {}).get("model", ""))))
     logger.warning("llm http.handle: no config/llm route for sub=%s method=%s", sub, method)
     return _ok(_json_response({"error": "not found", "path": path}, 404))
 
@@ -825,9 +831,9 @@ async def http_handle(
     headers: dict[str, str] | None = None,
     query: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """按 path 分发：thinking-mode 域 6 端点 + config/llm 段 3 只读端点
-    （presets / provider-types / remote-models；文件 IO 端点已于批次 A1
-    退役，收口到内核单一配置面）。
+    """按 path 分发：thinking-mode 域 6 端点 + config/llm 段只读端点
+    （presets / provider-types / thinking-levels / remote-models；文件 IO 端点
+    已于批次 A1 退役，收口到内核单一配置面）。
 
     路径语义与原 /ext/channel_api/thinking-mode/** 与 /ext/channel_api/
     config/llm/** 逐项对齐（前端消费同一响应形态）；auth 由 http_endpoints
@@ -835,12 +841,12 @@ async def http_handle(
     （status_code 属性）转对应 HTTP 状态，错误 body 形态与 FastAPI 版一致
     （``{"detail": ...}``）。域内匹配委托 _handle_thinking_mode/_handle_config_llm。
     """
-    del plugin_id, query
+    del plugin_id
     try:
         if path.startswith(_THINKING_MODE_PREFIX):
             return await _handle_thinking_mode(path, method, raw_body)
         if path.startswith(_CONFIG_LLM_PREFIX):
-            return await _handle_config_llm(path, method, raw_body)
+            return await _handle_config_llm(path, method, raw_body, query)
         return _ok(_json_response({"error": "not found", "path": path}, 404))
     except Exception as exc:  # noqa: BLE001
         if hasattr(exc, "status_code"):

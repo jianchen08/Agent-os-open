@@ -354,7 +354,6 @@ function HomePage(): ReactNode {
     // 到达 → 现有流式协议接管（占位气泡 → 认领 → 回复）。
     if (pipelineStore.isStreaming(targetPipelineId)) {
       globalWS.sendUserInput(sid, contentWithRefs, {
-        enableThinking: params.enableThinking,
         thinkingStrength: params.thinkingStrength,
         pipelineId: targetPipelineId,
         clientMessageId: userMessageId,
@@ -398,7 +397,6 @@ function HomePage(): ReactNode {
     // 否则入队待重连），发送失败由 user_input_send_timeout（20s TTL）显式
     // 撤下 pending + 插入错误气泡 + 高优通知兜底（诚实状态机，无静默容忍）。
     globalWS.sendUserInput(sid, contentWithRefs, {
-      enableThinking: params.enableThinking,
       thinkingStrength: params.thinkingStrength,
       pipelineId: targetPipelineId,
       clientMessageId: userMessageId,

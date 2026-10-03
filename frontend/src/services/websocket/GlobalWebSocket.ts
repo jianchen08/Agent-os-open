@@ -407,9 +407,8 @@ class GlobalWebSocketService {
   sendUserInput(threadId: string, content: string, opts?: {
     pipelineId?: string
     attachments?: unknown[]
-    enableThinking?: boolean
-    /** 思考强度（off/low/medium/high；内核透传 → llm_core 路由模型参数） */
-    thinkingStrength?: 'off' | 'low' | 'medium' | 'high'
+    /** 思考选择 = 参数组 JSON 串（'' = 不覆盖；内核透传 → llm_core 解析覆盖模型参数） */
+    thinkingStrength?: string
     clientMessageId?: string
     /**
      * 消息级 execution_context（{workspace:{source_path,mode}, isolation:{level}}）：
@@ -438,7 +437,6 @@ class GlobalWebSocketService {
       content,
       pipeline_id: opts?.pipelineId || '',
       attachments: opts?.attachments || [],
-      enable_thinking: opts?.enableThinking || false,
       thinking_strength: opts?.thinkingStrength || '',
       client_message_id: opts?.clientMessageId || '',
       ...(opts?.executionContext ? { execution_context: opts.executionContext } : {}),

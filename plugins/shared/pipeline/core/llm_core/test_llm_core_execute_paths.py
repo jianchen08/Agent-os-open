@@ -142,7 +142,6 @@ def _inject_llm_config(monkeypatch: Any) -> None:
                         "api_key": "k1",
                         "context_window": 64000,
                         "default_params": {"temperature": 0.3},
-                        "thinking_strength_params": {"high": {"reasoning_effort": "max"}},
                     }
                 },
                 "defaults": {"tiers": {"large": "deepseek-v4-pro"}, "chat": "deepseek-v4-pro"},
@@ -152,7 +151,7 @@ def _inject_llm_config(monkeypatch: Any) -> None:
 
 
 async def test_model_tier_resolves_and_updates_self(monkeypatch: Any) -> None:
-    """state.model_tier → defaults.tiers 解析 → llm.yaml 配置更新 self（含强度路由）。"""
+    """state.model_tier → defaults.tiers 解析 → llm.yaml 配置更新 self。"""
     _inject_llm_config(monkeypatch)
     caller = _FakeCaller({"success": True, "data": _ok_response()})
     plugin = _make_plugin(caller)
@@ -167,7 +166,6 @@ async def test_model_tier_resolves_and_updates_self(monkeypatch: Any) -> None:
     assert plugin._api_key == "k1"  # noqa: SLF001
     assert plugin._context_window == 64000  # noqa: SLF001
     assert plugin._default_params == {"temperature": 0.3}  # noqa: SLF001
-    assert plugin._thinking_strength_params == {"high": {"reasoning_effort": "max"}}  # noqa: SLF001
     # 调用通道：model 用 yaml key（model_id）做 deployment 匹配
     assert caller.calls[0][1]["args"]["model"] == "deepseek-v4-pro"
 

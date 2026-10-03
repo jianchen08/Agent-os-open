@@ -8,7 +8,7 @@
  * - 会话初始化（initSessionTabs 仅在无激活 Tab 时触发）
  * - 生成态双来源（流式状态 + runs 快照）
  * - 模型名解析（agentId / pipelineAgentName → tiers 显示名）
- * - 思考强度（显式记忆优先、管道参数反向映射、默认回退、切换分发与失败降级）
+ * - 思考强度（显式记忆优先、管道参数反向映射、默认回退、配置驱动档位选项与收束、切换分发）
  * - 投票面板过滤、子标签完成禁用、待发送队列条渲染条件、hasMore 透传
  */
 import { act, render } from '@testing-library/react'
@@ -59,8 +59,9 @@ const stubs = vi.hoisted(() => ({
     disabled?: boolean
     isGenerating?: boolean
     modelName?: string
-    thinkingStrength?: 'off' | 'low' | 'medium' | 'high'
-    onThinkingStrengthChange?: (strength: 'off' | 'low' | 'medium' | 'high') => void
+    thinkingStrength?: string
+    thinkingLevels?: Array<{ value: string; label: string; description?: string }>
+    onThinkingStrengthChange?: (strength: string) => void
     onSendMessage?: (params: SendMessageParams) => boolean | void
   },
   pendingBarPipelineId: '' as string,
@@ -80,9 +81,12 @@ const stubs = vi.hoisted(() => ({
     defaults: { chat: string; embedding: string; tiers: Record<string, string> }
   },
   llmError: false as boolean,
+  thinkingLevels: null as null | {
+    model: string
+    options: Array<{ value: string; label: string }>
+    current: string | null
+  },
 }))
-
-const switchModeMock = vi.hoisted(() => vi.fn(() => Promise.resolve({})))
 
 vi.mock('../AgentTabBar', () => ({
   AgentTabBar: (props: NonNullable<typeof stubs.tabBar>) => {
@@ -130,9 +134,7 @@ vi.mock('@/hooks/queries/usePipelineRunsQuery', () => ({
 }))
 vi.mock('@/hooks/queries/useLlmQueries', () => ({
   useLlmConfigQuery: () => ({ data: stubs.llmView, isError: stubs.llmError }),
-}))
-vi.mock('@/services/api/thinkingMode', () => ({
-  switchThinkingMode: switchModeMock,
+  useThinkingLevelsQuery: () => ({ data: stubs.thinkingLevels }),
 }))
 
 vi.mock('@/stores/agentTabStore', async () => (await import('./helpers/chatFlowMocks')).agentTabStoreDouble())
@@ -246,8 +248,7 @@ beforeEach(() => {
     defaults: { chat: 'chat-model', embedding: 'emb-model', tiers: {} },
   }
   stubs.llmError = false
-  switchModeMock.mockClear()
-  switchModeMock.mockImplementation(() => Promise.resolve({}))
+  stubs.thinkingLevels = null
   localStorage.clear()
   outerSend.mockClear()
   useUIStore.setState({ messageSearchQuery: '', messageJump: null })
@@ -495,55 +496,93 @@ describe('ChatContainer — 模型名解析', () => {
   })
 })
 
-describe('ChatContainer — 思考强度', () => {
-  it('未显式设置 → 从管道模型 default_params 反向映射（reasoning_effort=low → low）', async () => {
+const HIGH = '{"reasoning_effort":"max"}'
+const LOW = '{"reasoning_effort":"low"}'
+const OFF = '{"thinking":{"type":"disabled"}}'
+
+describe('ChatContainer — 思考选择（宿主零业务知识，选项/当前值由端点下发）', () => {
+  it('未显式设置 → 显示端点下发的当前参数组（current）', async () => {
     stubs.agents = [{ id: 'agent-1', model: 'large', config: {} }]
     stubs.llmView = { models: {}, providers: {}, defaults: { chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } } }
-    stubs.llmView = {
-      models: {
-        'deepseek-max': {
-          provider: 'ds',
-          model_name: 'deepseek-max',
-          display_name: 'DS Max',
-          default_params: { reasoning_effort: 'low' },
-        },
-      },
-      providers: {},
-      defaults: { chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } },
+    stubs.thinkingLevels = {
+      model: 'deepseek-max',
+      options: [{ value: LOW, label: 'reasoning_effort=low' }],
+      current: LOW,
     }
     useAgentTabStore.setState({ tabs: [makeMainTab({ agentId: 'agent-1' })], activeTabId: 'main-1' })
     await mountContainer()
-    expect(stubs.chatInput?.thinkingStrength).toBe('low')
+    expect(stubs.chatInput?.thinkingStrength).toBe(LOW)
   })
 
-  it('标签显式记忆优先于参数反推', async () => {
+  it('标签显式记忆 ∈ 选项时优先于端点当前值', async () => {
     stubs.agents = [{ id: 'agent-1', model: 'large', config: {} }]
     stubs.llmView = { models: {}, providers: {}, defaults: { chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } } }
-    stubs.llmView = {
-      models: {
-        'deepseek-max': {
-          provider: 'ds',
-          model_name: 'deepseek-max',
-          display_name: 'DS Max',
-          default_params: { reasoning_effort: 'low' },
-        },
-      },
-      providers: {},
-      defaults: { chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } },
+    stubs.thinkingLevels = {
+      model: 'deepseek-max',
+      options: [
+        { value: LOW, label: 'reasoning_effort=low' },
+        { value: HIGH, label: 'reasoning_effort=max' },
+      ],
+      current: LOW,
     }
     useAgentTabStore.setState({ tabs: [makeMainTab({ agentId: 'agent-1' })], activeTabId: 'main-1' })
-    useThinkingModeStore.getState().setStrength('main-1', 'high')
+    useThinkingModeStore.getState().setStrength('main-1', HIGH)
     await mountContainer()
-    expect(stubs.chatInput?.thinkingStrength).toBe('high')
+    expect(stubs.chatInput?.thinkingStrength).toBe(HIGH)
   })
 
-  it('反推不出（无模型配置）→ 回退默认档 medium', async () => {
+  it('端点数据未达（无 current）→ 显示空（未选择，发送不覆盖参数）', async () => {
     setupActivePipeline([])
     await mountContainer()
-    expect(stubs.chatInput?.thinkingStrength).toBe('medium')
+    expect(stubs.chatInput?.thinkingStrength).toBe('')
   })
 
-  it('切换强度：写入标签记忆并调用 switchThinkingMode（off → 不启用思考）', async () => {
+  it('选项透传 thinking-levels 端点下发数据（选项=参数组，标签真值源在后端）', async () => {
+    stubs.agents = [{ id: 'agent-1', model: 'large', config: {} }]
+    stubs.llmView = {
+      models: {},
+      providers: {},
+      defaults: { chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } },
+    }
+    stubs.thinkingLevels = {
+      model: 'deepseek-max',
+      options: [
+        { value: HIGH, label: 'reasoning_effort=max' },
+        { value: OFF, label: 'thinking={"type":"disabled"}' },
+      ],
+      current: HIGH,
+    }
+    useAgentTabStore.setState({ tabs: [makeMainTab({ agentId: 'agent-1' })], activeTabId: 'main-1' })
+    await mountContainer()
+    expect(stubs.chatInput?.thinkingLevels).toEqual([
+      { value: HIGH, label: 'reasoning_effort=max' },
+      { value: OFF, label: 'thinking={"type":"disabled"}' },
+    ])
+  })
+
+  it('显式记忆不在下发选项内（如换模型后旧记忆失效）→ 回落端点当前值', async () => {
+    stubs.agents = [{ id: 'agent-1', model: 'large', config: {} }]
+    stubs.llmView = {
+      models: {},
+      providers: {},
+      defaults: { chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } },
+    }
+    stubs.thinkingLevels = {
+      model: 'deepseek-max',
+      options: [
+        { value: HIGH, label: 'reasoning_effort=max' },
+        { value: OFF, label: 'thinking={"type":"disabled"}' },
+      ],
+      current: HIGH,
+    }
+    useAgentTabStore.setState({ tabs: [makeMainTab({ agentId: 'agent-1' })], activeTabId: 'main-1' })
+    useThinkingModeStore.getState().setStrength('main-1', LOW)
+    await mountContainer()
+    // LOW 不在下发选项 {HIGH, OFF} 内 → 回落端点当前参数组
+    expect(stubs.chatInput?.thinkingStrength).toBe(HIGH)
+  })
+
+  it('切换选择：写入标签记忆（参数组随消息级 thinking_strength 透传，无后端伴随调用）', async () => {
     stubs.agents = [{ id: 'agent-1', model: 'large', config: {} }]
     stubs.llmView = { models: {}, providers: {}, defaults: { chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } } }
     useAgentTabStore.setState({
@@ -553,56 +592,18 @@ describe('ChatContainer — 思考强度', () => {
     await mountContainer()
 
     await act(async () => {
-      stubs.chatInput?.onThinkingStrengthChange?.('off')
+      stubs.chatInput?.onThinkingStrengthChange?.(OFF)
     })
-    expect(useThinkingModeStore.getState().strengthByTabId['main-1']).toBe('off')
-    expect(switchModeMock).toHaveBeenCalledWith('deepseek-max', false)
+    expect(useThinkingModeStore.getState().strengthByTabId['main-1']).toBe(OFF)
   })
 
-  it('切换强度失败 → 一次性提示「思考强度同步失败」，本地记忆不受影响', async () => {
-    stubs.agents = [{ id: 'agent-1', model: 'large', config: {} }]
-    stubs.llmView = { models: {}, providers: {}, defaults: { chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } } }
-    useAgentTabStore.setState({
-      tabs: [makeMainTab({ agentId: 'agent-1' })],
-      activeTabId: 'main-1',
-    })
-    switchModeMock.mockRejectedValue(new Error('网络异常'))
+  it('无激活 Tab（tabId 为空）→ 切换不落标签记忆', async () => {
     await mountContainer()
 
     await act(async () => {
-      stubs.chatInput?.onThinkingStrengthChange?.('high')
-      await Promise.resolve()
-    })
-    expect(notificationCountByTitle('思考强度同步失败')).toBe(1)
-
-    // 重复失败不重复弹（生命周期一次性）
-    await act(async () => {
-      stubs.chatInput?.onThinkingStrengthChange?.('low')
-      await Promise.resolve()
-    })
-    expect(notificationCountByTitle('思考强度同步失败')).toBe(1)
-    expect(useThinkingModeStore.getState().strengthByTabId['main-1']).toBe('low')
-  })
-
-  it('模型名缺失 → 仅本地记忆，不调用后端切换', async () => {
-    setupActivePipeline([])
-    await mountContainer()
-
-    await act(async () => {
-      stubs.chatInput?.onThinkingStrengthChange?.('high')
-    })
-    expect(useThinkingModeStore.getState().strengthByTabId['main-1']).toBe('high')
-    expect(switchModeMock).not.toHaveBeenCalled()
-  })
-
-  it('无激活 Tab（tabId 为空）→ 切换不落标签记忆也不调后端', async () => {
-    await mountContainer()
-
-    await act(async () => {
-      stubs.chatInput?.onThinkingStrengthChange?.('high')
+      stubs.chatInput?.onThinkingStrengthChange?.(HIGH)
     })
     expect(useThinkingModeStore.getState().strengthByTabId).toEqual({})
-    expect(switchModeMock).not.toHaveBeenCalled()
   })
 })
 

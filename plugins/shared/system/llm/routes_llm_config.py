@@ -23,6 +23,7 @@ http_endpoints.auth=user 完成，handler 不读身份。
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -214,6 +215,107 @@ def get_llm_presets() -> dict[str, Any]:
         "common_provider_types": data.get("common_provider_types", []),
         "thinking_strength": data.get("thinking_strength", {"levels": [], "allowed_keys": []}),
     }
+
+
+# 已知思考档位的显示文案（聊天页选择器选项真值源；原 llm_core ui_schema
+# 声明 options 静态四档，2026-10-03 改配置驱动后迁此）。未知/自定义档位
+# 以配置键为标签。
+_THINKING_LEVEL_TEXT: dict[str, dict[str, str]] = {
+    "off": {"label": "关闭", "description": "普通模式，不启用思考"},
+    "low": {"label": "低", "description": "轻量思考，响应更快"},
+    "medium": {"label": "中", "description": "标准思考（默认）"},
+    "high": {"label": "高", "description": "深度思考，耗时更长"},
+}
+
+
+def _find_model_entry(models: dict[str, Any], model: str) -> dict[str, Any] | None:
+    """按 model_name 精确匹配定位模型条目，再按 key（model_id）兜底。"""
+    if not model:
+        return None
+    for entry in models.values():
+        if isinstance(entry, dict) and entry.get("model_name") == model:
+            return entry
+    entry = models.get(model)
+    return entry if isinstance(entry, dict) else None
+
+
+def _render_params(params: dict[str, Any]) -> str:
+    """参数组 → 选项标签：标量直接展示，嵌套值紧凑 JSON（如
+    ``reasoning_effort=max`` / ``thinking={"type": "disabled"}``）。"""
+    parts = []
+    for key, value in params.items():
+        text = value if isinstance(value, (str, int, float, bool)) else json.dumps(
+            value, ensure_ascii=False, separators=(",", ":")
+        )
+        parts.append(f"{key}={text}")
+    return ", ".join(parts)
+
+
+def get_thinking_levels(model: str) -> dict[str, Any]:
+    """当前模型可切的思考参数组（聊天页选择器真值源，前端零硬编码零映射）。
+
+    选项 = thinking_strength_params 配置的**参数组本身**（无档位词汇映射层）：
+    厂商级（providers.<provider>）参数组在前、模型级（models.<id>）补位，按
+    参数内容去重、配置顺序即选项顺序；标签 = 参数渲染（_render_params）。
+
+    ``current`` = 模型 default_params 思考参数命中的参数组（reasoning_effort
+    精确相等优先，其次 thinking.type），未匹配为 None——前端显示值只剩
+    「标签显式记忆 ?? current」，无任何推断。
+
+    ``value`` = 参数组的 JSON 串（紧凑序），即消息 thinking_strength 的线上
+    形态：选中即透传，llm_core 解析后白名单过滤直覆盖（无档位查表）。
+
+    模型未命中 / 两侧均未配置 → ``options=[]``（前端选择器隐藏：选了也没有
+    参数可覆盖）。
+    """
+    data = _read_yaml(_llm_yaml_path())
+    entry = _find_model_entry(data.get("models", {}) or {}, model)
+    if entry is None:
+        return {"model": model, "options": [], "current": None}
+    provider_conf = (data.get("providers", {}) or {}).get(entry.get("provider") or "", {})
+    provider_levels = (
+        provider_conf.get("thinking_strength_params") if isinstance(provider_conf, dict) else None
+    ) or {}
+    model_levels = entry.get("thinking_strength_params") or {}
+
+    # 参数组按内容去重（厂商组在前），插入顺序 = 选项顺序
+    seen: set[str] = set()
+    options: list[dict[str, Any]] = []
+    for mapping in (provider_levels, model_levels):
+        for params in mapping.values():
+            if not isinstance(params, dict) or not params:
+                continue
+            value = json.dumps(params, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if value in seen:
+                continue
+            seen.add(value)
+            options.append({"value": value, "params": params, "label": _render_params(params)})
+
+    current = _match_params(options, entry.get("default_params") or {})
+    return {"model": model, "options": options, "current": current}
+
+
+def _match_params(
+    options: list[dict[str, Any]], default_params: dict[str, Any]
+) -> str | None:
+    """模型 default_params 思考参数 → 命中参数组的 value（JSON 串；不匹配 None）。
+
+    reasoning_effort 精确相等优先；其次 thinking.type 精确相等（覆盖厂商
+    关闭形态 thinking.type=disabled 的参数组）。
+    """
+    effort = default_params.get("reasoning_effort")
+    thinking = default_params.get("thinking")
+    thinking_type = thinking.get("type") if isinstance(thinking, dict) else None
+    if effort is not None:
+        for option in options:
+            if option["params"].get("reasoning_effort") == effort:
+                return option["value"]
+    if thinking_type is not None:
+        for option in options:
+            thinking = option["params"].get("thinking")
+            if isinstance(thinking, dict) and thinking.get("type") == thinking_type:
+                return option["value"]
+    return None
 
 
 def get_provider_types() -> dict[str, Any]:

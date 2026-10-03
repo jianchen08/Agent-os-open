@@ -251,15 +251,6 @@ class ModelConfigLoaderShim:
         # （参数缺省由 llm.complete_stream 按 llm.yaml 回填，缺即不发，
         # 上游按模型自身默认运行）
         default_params = model_conf.get("default_params", {})
-        # 模型级思考强度手填映射（models.<id>.thinking_strength_params）：
-        # 不同模型的 think 参数不一致（DeepSeek reasoning_effort / MiniMax adaptive
-        # thinking / 无 reasoning 的普通模型），每个模型可配置自己的档位参数。
-        # 无配置时省略（不破坏旧配置）。
-        thinking_strength_params = model_conf.get("thinking_strength_params")
-        # 厂商级思考强度映射（providers.<name>.thinking_strength_params）：
-        # 该厂商 API 真实接受的参数形态，llm_core 路由优先级为 厂商 > 手填 >
-        # 内置默认表。无配置时省略。
-        provider_thinking_strength_params = provider_conf.get("thinking_strength_params")
 
         defaults = self._load_llm_data().get("defaults", {})
         call_timeout = model_conf.get("call_timeout", defaults.get("call_timeout", 300))
@@ -282,8 +273,4 @@ class ModelConfigLoaderShim:
             "first_token_timeout": first_token_timeout,
             "stream_idle_timeout": stream_idle_timeout,
         }
-        if thinking_strength_params:
-            result["thinking_strength_params"] = thinking_strength_params
-        if provider_thinking_strength_params:
-            result["provider_thinking_strength_params"] = provider_thinking_strength_params
         return result
