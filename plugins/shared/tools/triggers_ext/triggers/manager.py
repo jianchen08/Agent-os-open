@@ -942,10 +942,10 @@ class TriggerManager:
         或腐败值时按统一读取契约还原/跳过留痕。重灌以 state 为权威整体替换
         内存注册表（含清理已消失管道的陈旧内存项）。
 
-        已知限制（M1）：重灌仅恢复本地注册表，**不回注内核 trigger-svc**——
-        内核注册表本身不跨重启，内核重启后存续的 CONDITION 触发器在两侧都
-        不再求值（工具仍显示 active，属误导面）。升级触发条件：M2 staged
-        视图接入时一并补「重灌即回注」（register_kernel_condition 逐条重放）。
+        CONDITION 触发器重灌即回注：逐条重放 ``register_kernel_condition``
+        （内核 trigger-svc 注册表不跨内核重启，回注是 CONDITION 求值存续的
+        唯一途径——event/delay/schedule/interval 求值在插件侧，重灌即恢复，
+        无此步骤）。单条回注失败留痕继续，不阻断其余触发器恢复。
 
         Returns:
             灌入的触发器数量。
@@ -990,6 +990,30 @@ class TriggerManager:
                 restored[cfg.trigger_id] = cfg
 
         self._triggers = restored
+
+        # CONDITION 回注内核（重灌即回注）：内核 trigger-svc 注册表不跨内核
+        # 重启，重灌恢复的 CONDITION 触发器必须逐条重放注册，否则永不再求值
+        # （本地/state 有定义而内核注册表空，工具面 active 属误导面）。
+        # 单条失败留痕继续——一条坏触发器不得拖垮其余触发器的重灌恢复。
+        rearmed = 0
+        for cfg in restored.values():
+            if cfg.trigger_type != TriggerType.CONDITION:
+                continue
+            try:
+                await self.register_kernel_condition(
+                    cfg.trigger_id, cfg.condition_expression, cfg.pipeline_id
+                )
+                rearmed += 1
+            except Exception as e:
+                logger.error(
+                    "[TriggerManager] CONDITION 触发器回注内核失败（该触发器在内核"
+                    "重启后不会求值，可删除重建恢复）: trigger=%s error=%s",
+                    cfg.trigger_id,
+                    e,
+                )
+        if rearmed:
+            logger.info("[TriggerManager] CONDITION 触发器已回注内核: %d 个", rearmed)
+
         logger.info(
             "[TriggerManager] state 重灌完成: %d 个触发器（扫描 %d 行）",
             len(restored),

@@ -1555,6 +1555,85 @@ class TestTriggerFiredConsumption:
             mgr.stop_check_loop()
 
 
+class TestConditionRearmOnRehydrate:
+    """重灌即回注：load_from_state 恢复的 CONDITION 触发器逐条重放内核注册。
+
+    内核 trigger-svc 注册表不跨内核重启——重灌不回注 = 触发器永不再求值
+    （本地/state 有定义而内核注册表空）。单条回注失败留痕继续。
+    """
+
+    def _rows(self, *configs: dict) -> list[dict]:
+        row: dict = {"pipeline_id": "pipe-1"}
+        for c in configs:
+            row[f"task.trigger.registry.{c['trigger_id']}"] = json.dumps(c, ensure_ascii=False)
+        return [row]
+
+    def test_rehydrate_re_registers_condition_to_kernel(self) -> None:
+        cfg = _make_config(
+            trigger_id="trigger_condition_aaa111222333",
+            trigger_type=TriggerType.CONDITION,
+            condition_expression="a == 1",
+            max_fires=0,
+        )
+        svc = _FakeTriggerSvc()
+        mgr = TriggerManager(reconcile_interval=60)
+        mgr.set_trigger_svc_provider(lambda: svc, owner_plugin_id="trigger_setup_tool")
+        mgr.set_state_provider(lambda: self._rows(cfg.to_state_dict()))
+        try:
+            assert _run(mgr.load_from_state()) == 1
+            registers = svc.methods("register")
+            assert len(registers) == 1, "CONDITION 重灌必须回注内核一次"
+            assert registers[0]["trigger_id"] == "trigger_condition_aaa111222333"
+            assert registers[0]["condition"] == "a == 1"
+            assert registers[0]["pipeline_id"] == "pipe-1"
+            assert registers[0]["owner_plugin_id"] == "trigger_setup_tool"
+        finally:
+            mgr.stop_check_loop()
+
+    def test_rehydrate_skips_non_condition_triggers(self) -> None:
+        cfg = _make_config(
+            trigger_id="trigger_interval_aaa111222333",
+            trigger_type=TriggerType.INTERVAL,
+            interval_seconds=900,
+            max_fires=0,
+        )
+        svc = _FakeTriggerSvc()
+        mgr = TriggerManager(reconcile_interval=60)
+        mgr.set_trigger_svc_provider(lambda: svc, owner_plugin_id="trigger_setup_tool")
+        mgr.set_state_provider(lambda: self._rows(cfg.to_state_dict()))
+        try:
+            assert _run(mgr.load_from_state()) == 1
+            assert svc.methods("register") == [], "插件侧求值的触发器不回注内核"
+        finally:
+            mgr.stop_check_loop()
+
+    def test_rehydrate_single_register_failure_does_not_block_others(self) -> None:
+        ok_cfg = _make_config(
+            trigger_id="trigger_condition_aaa111222333",
+            trigger_type=TriggerType.CONDITION,
+            condition_expression="a == 1",
+            max_fires=0,
+        )
+        bad_cfg = _make_config(
+            trigger_id="trigger_condition_bbb222333444",
+            trigger_type=TriggerType.CONDITION,
+            condition_expression="b == 2",
+            max_fires=0,
+        )
+        svc = _FakeTriggerSvc()
+        svc.register_results = [RuntimeError("kernel down"), {"ok": True, "seed_fired": False}]
+        mgr = TriggerManager(reconcile_interval=60)
+        mgr.set_trigger_svc_provider(lambda: svc, owner_plugin_id="trigger_setup_tool")
+        mgr.set_state_provider(lambda: self._rows(ok_cfg.to_state_dict(), bad_cfg.to_state_dict()))
+        try:
+            assert _run(mgr.load_from_state()) == 2, "回注失败不减少重灌恢复数"
+            assert len(svc.methods("register")) == 2, "两条都尝试回注（第二条成功）"
+            assert mgr.get("trigger_condition_aaa111222333") is not None
+            assert mgr.get("trigger_condition_bbb222333444") is not None
+        finally:
+            mgr.stop_check_loop()
+
+
 class TestReconcileBackstop:
     """reconcile 对账兜底：未 ack 火补分发、去重、失败包含、循环存活。"""
 
