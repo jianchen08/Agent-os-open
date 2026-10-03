@@ -79,7 +79,7 @@ const ThinkingStrengthStub = (props: Record<string, unknown>) => {
   )
 }
 
-function registerThinkingSlot() {
+function registerThinkingSlot(fields?: Array<Record<string, unknown>>) {
   widgetRegistry.register('test_thinking_stub', ThinkingStrengthStub, {
     name: 'test_thinking_stub',
     supportedSpaces: ['chat', 'workspace'],
@@ -90,13 +90,30 @@ function registerThinkingSlot() {
         id: 'pipeline_llm_core',
         ui_schema: {
           widgets: [
-            { id: 'thinking_strength', type: 'test_thinking_stub', space: 'chat-input' },
+            {
+              id: 'thinking_strength',
+              type: 'test_thinking_stub',
+              space: 'chat-input',
+              ...(fields ? { props: { fields } } : {}),
+            },
           ],
         },
       },
     ],
   } as never)
 }
+
+/** 与 thinking-levels 端点下发的 fields 形态同构（参数组选项） */
+const THINKING_FIELDS: Array<Record<string, unknown>> = [
+  {
+    name: 'strength',
+    type: 'select',
+    options: [
+      { value: '{"reasoning_effort":"max"}', label: 'reasoning_effort=max' },
+      { value: '{"thinking":{"type":"disabled"}}', label: 'thinking={"type":"disabled"}' },
+    ],
+  },
+]
 
 // 插件动作容器：模拟声明了多个动作，验证其可收缩且不挤出发送按钮
 vi.mock('../ChatInputActions', () => ({
@@ -130,7 +147,7 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
     vi.clearAllMocks()
     widgetRegistry.clear()
     contributionRegistry.clear()
-    registerThinkingSlot()
+    registerThinkingSlot(THINKING_FIELDS)
   })
 
   it('底部工具栏：左组可收缩（min-w-0 flex-1），发送按钮 shrink-0', () => {
@@ -267,10 +284,6 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
         modelName="deepseek-v3"
         enableThinkingMode
         thinkingStrength='{"reasoning_effort":"medium"}'
-        thinkingLevels={[
-          { value: '{"reasoning_effort":"medium"}', label: 'reasoning_effort=medium' },
-          { value: '{"reasoning_effort":"max"}', label: 'reasoning_effort=max' },
-        ]}
         onThinkingStrengthChange={onThinkingStrengthChange}
       />,
     )
@@ -279,20 +292,6 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
     expect(toggle).toHaveAttribute('data-strength', '{"reasoning_effort":"medium"}')
     fireEvent.click(toggle)
     expect(onThinkingStrengthChange).toHaveBeenCalledWith('high')
-  })
-
-  it('模型未配置思考档位（thinkingLevels 空）→ 选择器隐藏', () => {
-    render(
-      <ChatInput
-        mode="full"
-        onSendMessage={() => {}}
-        modelName="deepseek-v3"
-        enableThinkingMode
-        thinkingStrength='{"reasoning_effort":"medium"}'
-        onThinkingStrengthChange={() => {}}
-      />,
-    )
-    expect(screen.queryByTestId('mock-thinking-toggle')).toBeNull()
   })
 
   it('双态按钮：执行中且输入框有文字 → 发送按钮（可继续排队输入）', () => {

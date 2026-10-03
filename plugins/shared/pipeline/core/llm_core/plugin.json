@@ -114,6 +114,7 @@
         "props": {
           "title": "思考强度",
           "icon": "brain",
+          "fieldsUri": "/ext/llm_service/config/llm/thinking-levels?model={model}",
           "fields": [
             {
               "name": "strength",

@@ -42,18 +42,14 @@ export function useLlmPresetsQuery() {
   })
 }
 
-/** 思考参数组选项（后端下发：选项 = thinking_strength_params 配置的参数组本身） */
-export interface ThinkingLevelOption {
-  /** 参数组 JSON 串（紧凑序）——选中即随消息 thinking_strength 透传的线上形态 */
-  value: string
-  /** 参数渲染标签（如 reasoning_effort=max），真值源在后端 */
-  label: string
-}
-
+/** 思考选择端点响应（选项 = thinking_strength_params 配置的参数组本身，
+ *  fields 即声明渲染层 fieldsUri 数据源契约的同构形态） */
 export interface ThinkingLevelsResponse {
   model: string
-  /** 参数组选项（厂商级在前、模型级补位，配置顺序）；空 = 未配置（选择器隐藏） */
-  options: ThinkingLevelOption[]
+  /** 表单字段声明（select，options 即参数组选项）；空 = 未配置（声明层不渲染） */
+  fields: Array<Record<string, unknown>>
+  /** 参数组选项平铺（value = 参数组 JSON 串，选中即随消息 thinking_strength 透传） */
+  options: Array<{ value: string; label: string }>
   /** 当前参数组：模型 default_params 思考参数命中的选项 value，未匹配为 null */
   current: string | null
 }

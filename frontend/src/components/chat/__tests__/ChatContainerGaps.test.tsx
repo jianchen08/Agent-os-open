@@ -60,7 +60,6 @@ const stubs = vi.hoisted(() => ({
     isGenerating?: boolean
     modelName?: string
     thinkingStrength?: string
-    thinkingLevels?: Array<{ value: string; label: string; description?: string }>
     onThinkingStrengthChange?: (strength: string) => void
     onSendMessage?: (params: SendMessageParams) => boolean | void
   },
@@ -83,6 +82,7 @@ const stubs = vi.hoisted(() => ({
   llmError: false as boolean,
   thinkingLevels: null as null | {
     model: string
+    fields: Array<Record<string, unknown>>
     options: Array<{ value: string; label: string }>
     current: string | null
   },
@@ -506,6 +506,7 @@ describe('ChatContainer — 思考选择（宿主零业务知识，选项/当前
     stubs.llmView = { models: {}, providers: {}, defaults: { chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } } }
     stubs.thinkingLevels = {
       model: 'deepseek-max',
+      fields: [],
       options: [{ value: LOW, label: 'reasoning_effort=low' }],
       current: LOW,
     }
@@ -519,6 +520,7 @@ describe('ChatContainer — 思考选择（宿主零业务知识，选项/当前
     stubs.llmView = { models: {}, providers: {}, defaults: { chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } } }
     stubs.thinkingLevels = {
       model: 'deepseek-max',
+      fields: [],
       options: [
         { value: LOW, label: 'reasoning_effort=low' },
         { value: HIGH, label: 'reasoning_effort=max' },
@@ -537,29 +539,6 @@ describe('ChatContainer — 思考选择（宿主零业务知识，选项/当前
     expect(stubs.chatInput?.thinkingStrength).toBe('')
   })
 
-  it('选项透传 thinking-levels 端点下发数据（选项=参数组，标签真值源在后端）', async () => {
-    stubs.agents = [{ id: 'agent-1', model: 'large', config: {} }]
-    stubs.llmView = {
-      models: {},
-      providers: {},
-      defaults: { chat: 'c', embedding: 'e', tiers: { large: 'deepseek-max' } },
-    }
-    stubs.thinkingLevels = {
-      model: 'deepseek-max',
-      options: [
-        { value: HIGH, label: 'reasoning_effort=max' },
-        { value: OFF, label: 'thinking={"type":"disabled"}' },
-      ],
-      current: HIGH,
-    }
-    useAgentTabStore.setState({ tabs: [makeMainTab({ agentId: 'agent-1' })], activeTabId: 'main-1' })
-    await mountContainer()
-    expect(stubs.chatInput?.thinkingLevels).toEqual([
-      { value: HIGH, label: 'reasoning_effort=max' },
-      { value: OFF, label: 'thinking={"type":"disabled"}' },
-    ])
-  })
-
   it('显式记忆不在下发选项内（如换模型后旧记忆失效）→ 回落端点当前值', async () => {
     stubs.agents = [{ id: 'agent-1', model: 'large', config: {} }]
     stubs.llmView = {
@@ -569,6 +548,7 @@ describe('ChatContainer — 思考选择（宿主零业务知识，选项/当前
     }
     stubs.thinkingLevels = {
       model: 'deepseek-max',
+      fields: [],
       options: [
         { value: HIGH, label: 'reasoning_effort=max' },
         { value: OFF, label: 'thinking={"type":"disabled"}' },

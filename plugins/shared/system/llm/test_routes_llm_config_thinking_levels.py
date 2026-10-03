@@ -84,6 +84,11 @@ def test_provider_options_first_model_fill_dedup(rlc: Any, llm_yaml: Any) -> Non
         {"reasoning_effort": "low"},
         {"thinking": {"type": "disabled"}},
     ]
+    # fields = 表单字段声明（fieldsUri 数据源契约同构），options 即参数组
+    assert len(result["fields"]) == 1
+    assert result["fields"][0]["name"] == "strength"
+    assert result["fields"][0]["type"] == "select"
+    assert result["fields"][0]["options"] == result["options"]
     # 标签 = 参数渲染：标量直显、嵌套紧凑 JSON
     assert result["options"][0]["label"] == "reasoning_effort=max"
     assert result["options"][2]["label"] == 'thinking={"type":"disabled"}'
@@ -193,7 +198,17 @@ def test_no_mapping_or_missing_model_empty(rlc: Any, llm_yaml: Any) -> None:
             },
         }
     )
-    empty = {"model": "ds-max", "options": [], "current": None}
+    empty = {"model": "ds-max", "fields": [], "options": [], "current": None}
     assert rlc.get_thinking_levels("ds-max") == empty
-    assert rlc.get_thinking_levels("no-such") == {"model": "no-such", "options": [], "current": None}
-    assert rlc.get_thinking_levels("") == {"model": "", "options": [], "current": None}
+    assert rlc.get_thinking_levels("no-such") == {
+        "model": "no-such",
+        "fields": [],
+        "options": [],
+        "current": None,
+    }
+    assert rlc.get_thinking_levels("") == {
+        "model": "",
+        "fields": [],
+        "options": [],
+        "current": None,
+    }

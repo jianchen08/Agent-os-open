@@ -4,7 +4,6 @@
 
 import type { Message, MessageRole, MessageToolCall, ThinkingContent } from '@/types/models'
 import type { ThinkingStrength } from '@/types/thinkingMode'
-import type { ThinkingLevelOption } from '@/hooks/queries/useLlmQueries'
 
 /**
  * 消息内容类型
@@ -227,9 +226,6 @@ export interface ChatInputProps {
   thinkingStrength?: ThinkingStrength
   /** 切换思考强度回调（调用方负责本地记忆） */
   onThinkingStrengthChange?: (strength: ThinkingStrength) => void
-  /** 思考档位选项（调用方按当前模型 thinking_strength_params 派生，厂商级优先；
-   *  空/缺省 = 选择器隐藏） */
-  thinkingLevels?: ThinkingLevelOption[]
   /** 自定义类名 */
   className?: string
   /** 草稿保存的 key（通常是 tabId 或 sessionId），切换 Tab 时保留未发送文本 */

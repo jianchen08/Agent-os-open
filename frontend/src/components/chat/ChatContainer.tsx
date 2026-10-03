@@ -239,19 +239,20 @@ export const ChatContainer = ({
   )
 
 
-  /** 思考选择（宿主零业务知识，全部后端下发）：选项 = thinking_strength_params
-   *  配置的参数组本身（llm_service thinking-levels 端点派生，标签=参数渲染）；
-   *  未配置 → 空（选择器隐藏，空值发送不覆盖参数）。显示值 = 标签显式记忆
-   *  （∈ 选项时生效）?? 端点当前参数组 ?? 未选择（''）。 */
+  /** 思考选择值（宿主只持值通道，选项归声明数据源 fieldsUri 下发）：
+   *  显示值 = 标签显式记忆（∈ 下发选项时生效，换模型旧记忆自动失效）
+   *  ?? 端点当前参数组 ?? 未选择（''）。 */
   const explicitThinkingStrength = useExplicitThinkingStrength()
   const { data: thinkingLevelsData } = useThinkingLevelsQuery(effectiveModelName)
-  const thinkingLevels = thinkingLevelsData?.options ?? []
   const activeThinkingStrength: ThinkingStrength = useMemo(() => {
-    if (explicitThinkingStrength && thinkingLevels.some((o) => o.value === explicitThinkingStrength)) {
+    if (
+      explicitThinkingStrength &&
+      thinkingLevelsData?.options.some((o) => o.value === explicitThinkingStrength)
+    ) {
       return explicitThinkingStrength
     }
     return thinkingLevelsData?.current ?? ''
-  }, [explicitThinkingStrength, thinkingLevels, thinkingLevelsData])
+  }, [explicitThinkingStrength, thinkingLevelsData])
   const setThinkingStrength = useThinkingModeStore((s) => s.setStrength)
 
   /**
@@ -486,7 +487,6 @@ export const ChatContainer = ({
           onStopGenerate={onStopGenerate}
           enableThinkingMode={true}
           modelName={effectiveModelName}
-          thinkingLevels={thinkingLevels}
           thinkingStrength={activeThinkingStrength}
           onThinkingStrengthChange={handleThinkingStrengthChange}
         />

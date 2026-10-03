@@ -17,9 +17,10 @@
  *       docs/working/design/frontend-design-unification-execution-plan.md §三 M0.1
  */
 
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { EventWatchBox } from '@/components/schema/EventWatchBox'
 import { RefreshBox, type RefreshDecl } from '@/components/schema/RefreshBox'
+import { apiClient } from '@/services/api/client'
 import { cn } from '@/lib/utils'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { resolveDeclaredWidgets } from '@/services/schema/widgetChain'
@@ -50,6 +51,11 @@ export interface DeclaredWidgetLayerProps {
    * 仍是插件的，value/onChange 由宿主注入
    */
   overrideProps?: (declaration: WidgetDeclaration) => Record<string, unknown> | undefined
+  /**
+   * 声明数据源占位符变量（渲染上下文，非业务知识）：声明 props.fieldsUri 中的
+   * `{key}` 占位符以此替换（如 {model} = 当前标签模型名），宿主按需提供
+   */
+  contextVars?: Record<string, string>
   className?: string
 }
 
@@ -177,6 +183,64 @@ function mergeSelectOptions(source: WidgetDeclaration[]): WidgetDeclaration[] {
   })
 }
 
+/**
+ * 声明 fieldsUri 数据源解析（通用契约，响应 {fields: [...]}，与 FormWidget
+ * datasource 模式同构）：渲染前 GET 拉取字段声明并入声明 props（fieldsUri
+ * 键随即摘除，目标组件拿到的是纯 fields，不感知 datasource 形态）。
+ *
+ * 渲染语义：拉取中/fields 空 → 不渲染（选项面空的声明无内容可渲染，如
+ * 模型未配置思考参数组时思考选择器整体隐藏）；拉取失败同空（渲染容器不
+ * 因数据源故障阻塞工具栏）。
+ *
+ * uri 中的 `{key}` 占位符以 contextVars 替换（渲染上下文变量由宿主提供）。
+ */
+function FieldsUriResolver({
+  uri,
+  declaration,
+  Component,
+  injected,
+}: {
+  uri: string
+  declaration: WidgetDeclaration
+  Component: WidgetComponent
+  injected?: Record<string, unknown>
+}) {
+  const [fields, setFields] = useState<unknown[] | null>(null)
+  useEffect(() => {
+    let alive = true
+    apiClient
+      .get(uri)
+      .then((resp) => {
+        if (!alive) return
+        const data = resp.data as { fields?: unknown } | unknown[] | null
+        const f = Array.isArray(data) ? data : data?.fields
+        setFields(Array.isArray(f) ? f : [])
+      })
+      .catch(() => {
+        if (alive) setFields([])
+      })
+    return () => {
+      alive = false
+    }
+  }, [uri])
+
+  if (fields === null || fields.length === 0) return null
+  const { fieldsUri: _consumed, ...restProps } = declaration.props as Record<string, unknown>
+  return (
+    <ResolvedItem
+      declaration={{ ...declaration, props: { ...restProps, fields } }}
+      Component={Component}
+      injected={injected}
+    />
+  )
+}
+
+/** fieldsUri 占位符替换：{key} → contextVars[key]（缺失替换为空串） */
+function substituteVars(uri: string, vars?: Record<string, string>): string {
+  if (!vars) return uri
+  return uri.replace(/\{(\w+)\}/g, (_, key: string) => vars[key] ?? '')
+}
+
 export function DeclaredWidgetLayer({
   space,
   declarations,
@@ -185,6 +249,7 @@ export function DeclaredWidgetLayer({
   fallback,
   fallbackProps,
   overrideProps,
+  contextVars,
   className,
 }: DeclaredWidgetLayerProps): ReactNode {
   // 读取移入 useMemo：getAllWidgets() 每次返回新数组引用，放内部避免记忆化失效
@@ -251,14 +316,30 @@ export function DeclaredWidgetLayer({
       data-space={space}
       data-slot={slotId}
     >
-      {resolved.map(({ declaration, component }) => (
-        <ResolvedItem
-          key={declaration.id}
-          declaration={declaration}
-          Component={component}
-          injected={overrideProps?.(declaration)}
-        />
-      ))}
+      {resolved.map(({ declaration, component }) => {
+        const fieldsUri = (
+          declaration.props as { fieldsUri?: string } | undefined
+        )?.fieldsUri
+        if (fieldsUri) {
+          return (
+            <FieldsUriResolver
+              key={declaration.id}
+              uri={substituteVars(fieldsUri, contextVars)}
+              declaration={declaration}
+              Component={component}
+              injected={overrideProps?.(declaration)}
+            />
+          )
+        }
+        return (
+          <ResolvedItem
+            key={declaration.id}
+            declaration={declaration}
+            Component={component}
+            injected={overrideProps?.(declaration)}
+          />
+        )
+      })}
     </div>
   )
 }

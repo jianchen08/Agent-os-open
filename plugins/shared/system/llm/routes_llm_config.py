@@ -258,20 +258,21 @@ def get_thinking_levels(model: str) -> dict[str, Any]:
     厂商级（providers.<provider>）参数组在前、模型级（models.<id>）补位，按
     参数内容去重、配置顺序即选项顺序；标签 = 参数渲染（_render_params）。
 
-    ``current`` = 模型 default_params 思考参数命中的参数组（reasoning_effort
-    精确相等优先，其次 thinking.type），未匹配为 None——前端显示值只剩
-    「标签显式记忆 ?? current」，无任何推断。
+    响应 ``fields`` = 表单字段声明（select，options 即参数组）——声明渲染层
+    fieldsUri 数据源的通用契约（前端选择器直接消费，渲染容器零适配）；
+    ``current`` = 模型 default_params 思考参数命中的参数组 value，未匹配为
+    None（前端显示值只剩「标签显式记忆 ?? current」，无任何推断）。
 
-    ``value`` = 参数组的 JSON 串（紧凑序），即消息 thinking_strength 的线上
-    形态：选中即透传，llm_core 解析后白名单过滤直覆盖（无档位查表）。
+    选项 ``value`` = 参数组的 JSON 串（紧凑序），即消息 thinking_strength 的
+    线上形态：选中即透传，llm_core 解析后白名单过滤直覆盖（无档位查表）。
 
-    模型未命中 / 两侧均未配置 → ``options=[]``（前端选择器隐藏：选了也没有
-    参数可覆盖）。
+    模型未命中 / 两侧均未配置 → ``fields=[]``（声明层不渲染选择器：选了也
+    没有参数可覆盖）。
     """
     data = _read_yaml(_llm_yaml_path())
     entry = _find_model_entry(data.get("models", {}) or {}, model)
     if entry is None:
-        return {"model": model, "options": [], "current": None}
+        return {"model": model, "fields": [], "options": [], "current": None}
     provider_conf = (data.get("providers", {}) or {}).get(entry.get("provider") or "", {})
     provider_levels = (
         provider_conf.get("thinking_strength_params") if isinstance(provider_conf, dict) else None
@@ -292,7 +293,10 @@ def get_thinking_levels(model: str) -> dict[str, Any]:
             options.append({"value": value, "params": params, "label": _render_params(params)})
 
     current = _match_params(options, entry.get("default_params") or {})
-    return {"model": model, "options": options, "current": current}
+    fields = (
+        [{"name": "strength", "type": "select", "options": options}] if options else []
+    )
+    return {"model": model, "fields": fields, "options": options, "current": current}
 
 
 def _match_params(

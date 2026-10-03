@@ -41,20 +41,18 @@ import type { Attachment, ChatInputProps, PendingFile, SendMessageParams } from 
 import type { WidgetDeclaration } from '@/services/schema/ContributionRegistry'
 
 /**
- * 声明 fields 首字段（select）注入宿主选项：
- * - append（task_mode）：声明项优先（兜底「默认」档），宿主派生项同 value 去重补位；
- * - replace（thinking_strength）：选项整体替换为宿主派生（模型/厂商配置驱动）。
- * 非 form/select 形态返回 undefined（零注入）。
+ * 声明 fields 首字段（select）追加宿主派生选项（task_mode）：声明项优先
+ * （兜底「默认」档），宿主派生项同 value 去重补位。非 form/select 形态
+ * 返回 undefined（零注入）。thinking_strength 的选项不经此通道——其声明
+ * fieldsUri 数据源由声明渲染层解析下发。
  */
 function selectFieldsWith(
   declaration: WidgetDeclaration,
   options: Array<{ label: string; value: string; description?: string }>,
-  mode: 'append' | 'replace',
 ): Array<Record<string, unknown>> | undefined {
   const fields = (declaration.props as { fields?: Array<Record<string, unknown>> } | undefined)?.fields
   if (!Array.isArray(fields) || fields.length === 0 || fields[0]?.type !== 'select') return undefined
-  const base =
-    mode === 'append' ? ((fields[0].options as Array<Record<string, unknown>> | undefined) ?? []) : []
+  const base = (fields[0].options as Array<Record<string, unknown>> | undefined) ?? []
   const seen = new Set(base.map((o) => String(o.value)))
   const merged = [...base]
   for (const option of options) {
@@ -87,7 +85,6 @@ export const ChatInput = ({
   modelName,
   enableThinkingMode = false,
   thinkingStrength: _externalThinkingStrength,
-  thinkingLevels: thinkingLevelsProp,
   onThinkingStrengthChange,
   className = '',
   draftKey,
@@ -171,9 +168,8 @@ export const ChatInput = ({
   const interimVoiceStartRef = useRef(-1)
 
   /** 思考选择：优先使用外部传入值（随标签路由自动变化），'' = 未选择。
-   *  选项 = 宿主透传的端点下发参数组（thinkingLevels），本侧零思考业务知识。 */
+   *  选项由声明数据源（fieldsUri）下发，本侧只持值通道，零思考业务知识。 */
   const currentThinkingStrength: ThinkingStrength = _externalThinkingStrength ?? ''
-  const thinkingLevels = thinkingLevelsProp ?? []
   const handleStrengthChange = useCallback(
     (strength: ThinkingStrength) => {
       onThinkingStrengthChange?.(strength)
@@ -187,15 +183,10 @@ export const ChatInput = ({
     field: 'strength',
     get: () => currentThinkingStrength,
     set: (_f, v) => handleStrengthChange(v as ThinkingStrength),
-    // 选项整体替换为配置驱动档位（llm_core 声明不再内置静态四档）；
     // 惰性求值：isExecuting 在下方声明，渲染期回调时才读取（规避 TDZ）
-    extra: (declaration) => {
-      const fields = selectFieldsWith(declaration, thinkingLevels, 'replace')
-      return {
-        disabled: disabled || isExecuting || !modelName || modelName === 'unknown',
-        ...(fields ? { fields } : {}),
-      }
-    },
+    extra: () => ({
+      disabled: disabled || isExecuting || !modelName || modelName === 'unknown',
+    }),
   })
 
   // 任务模式桥（出生语义）：'' = 默认档；显示值随会话 modeBinding（出生即定），
@@ -210,7 +201,7 @@ export const ChatInput = ({
       openModeSessionNotify(value)
     },
     extra: (declaration) => {
-      const fields = selectFieldsWith(declaration, modeSelectorOptions, 'append')
+      const fields = selectFieldsWith(declaration, modeSelectorOptions)
       return {
         disabled: disabled || isExecuting,
         ...(fields ? { fields } : {}),
@@ -973,15 +964,16 @@ export const ChatInput = ({
           excludeIds={['voice_input', 'context_usage', 'thinking_strength']}
           overrideProps={taskModeBridge}
         />
-            {/* 思考档位槽位（chat-input 空间，数据归属 llm_core——reasoning_effort
-                由其路由解释）：渲染 llm_core 声明的 form（select），值/回调由宿主
-                注入，选项整体替换为当前模型 thinking_strength_params 配置档位
-                （厂商级优先，与后端路由同源）；模型未配置档位 → 选择器隐藏 */}
-            {enableThinkingMode && !isCompactMode && thinkingLevels.length > 0 && (
+            {/* 思考选择槽位（chat-input 空间，数据归属 llm_core）：渲染 llm_core
+                声明的 form（select），值/回调由宿主注入；选项由声明 fieldsUri
+                数据源下发（当前模型 thinking_strength_params 参数组，配置空时
+                声明层整体不渲染） */}
+            {enableThinkingMode && !isCompactMode && (
               <DeclaredWidgetLayer
                 space="chat-input"
                 slotId="thinking_strength"
                 overrideProps={thinkingStrengthBridge}
+                contextVars={{ model: modelName ?? '' }}
                 className="flex-row items-center"
               />
             )}
