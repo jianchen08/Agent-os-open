@@ -942,6 +942,11 @@ class TriggerManager:
         或腐败值时按统一读取契约还原/跳过留痕。重灌以 state 为权威整体替换
         内存注册表（含清理已消失管道的陈旧内存项）。
 
+        已知限制（M1）：重灌仅恢复本地注册表，**不回注内核 trigger-svc**——
+        内核注册表本身不跨重启，内核重启后存续的 CONDITION 触发器在两侧都
+        不再求值（工具仍显示 active，属误导面）。升级触发条件：M2 staged
+        视图接入时一并补「重灌即回注」（register_kernel_condition 逐条重放）。
+
         Returns:
             灌入的触发器数量。
 
