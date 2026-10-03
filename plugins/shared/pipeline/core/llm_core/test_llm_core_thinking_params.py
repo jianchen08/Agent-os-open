@@ -38,7 +38,7 @@ def rtp() -> Any:
     return m.resolve_thinking_params
 
 
-def _json(params: dict[str, Any]) -> str:
+def _json(params: Any) -> str:
     return json.dumps(params, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 

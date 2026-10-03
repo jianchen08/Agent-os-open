@@ -248,10 +248,62 @@ def derived_input_set(
     definition: OrchestrationDefinition,
     step_required: dict[str, list[str]],
 ) -> frozenset[str]:
-    """编排的派生输入集 = 引用 step 集合并集其 required_state_inputs（§3.1①）。"""
+    """编排的派生输入集 = 引用 step 集合并集其 required_state_inputs（§3.1①）。
+
+    循环局部键豁免：loop_bodies[].loop_config.as 声明的迭代键由引擎每次迭代
+    注入（并行 for-each，ADR 2026-10-02-loopconfig-parallel-foreach），不属
+    初始输入——体内 step 的 required_state_inputs 与之相交部分不计（否则
+    tool_core 的 current_call 会把任务派发永久拒之门外）。
+    """
     derived: set[str] = set()
-    for ref in iter_step_refs(definition.raw):
-        derived.update(step_required.get(ref, ()))
+
+    def _add_ref(ref: Any, loop_locals: frozenset[str]) -> None:
+        if isinstance(ref, str) and ref:
+            derived.update(set(step_required.get(ref, ())) - loop_locals)
+
+    def _walk_steps(items: Any, loop_locals: frozenset[str]) -> None:
+        if not isinstance(items, list):
+            return
+        for item in items:
+            if isinstance(item, str):
+                _add_ref(item, loop_locals)
+            elif isinstance(item, dict):
+                _add_ref(item.get("name"), loop_locals)
+                # step 级循环声明（autonomous.yaml 形态：loop_config 内嵌在
+                # 带 steps 的 step 字典上，如 tool_exec 的 as: current_call）
+                item_cfg = item.get("loop_config")
+                item_as = (
+                    item_cfg.get("as") if isinstance(item_cfg, dict) else None
+                )
+                item_locals = loop_locals
+                if isinstance(item_as, str) and item_as:
+                    item_locals = loop_locals | {item_as}
+                _walk_steps(item.get("steps"), item_locals)
+                for route in item.get("next") or []:
+                    if isinstance(route, dict):
+                        route_set = route.get("set")
+                        if isinstance(route_set, dict):
+                            _add_ref(route_set.get(_CORE_PLUGIN_KEY), loop_locals)
+
+    def _walk_bodies(bodies: Any, inherited: frozenset[str]) -> None:
+        for body in bodies or []:
+            if not isinstance(body, dict):
+                continue
+            cfg = body.get("loop_config")
+            as_decl = cfg.get("as") if isinstance(cfg, dict) else None
+            as_keys = (
+                (as_decl,) if isinstance(as_decl, str) and as_decl else tuple()
+            )
+            locals_ = inherited | frozenset(as_keys)
+            _walk_steps(body.get("steps"), locals_)
+            _walk_bodies(body.get("loop_bodies"), locals_)
+
+    _walk_bodies(definition.raw.get("loop_bodies"), frozenset())
+    initial_state = definition.raw.get("initial_state")
+    if isinstance(initial_state, dict):
+        core = initial_state.get(_CORE_PLUGIN_KEY)
+        if isinstance(core, str) and core:
+            derived.update(step_required.get(core, ()))
     return frozenset(derived)
 
 

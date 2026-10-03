@@ -198,7 +198,7 @@ def test_no_mapping_or_missing_model_empty(rlc: Any, llm_yaml: Any) -> None:
             },
         }
     )
-    empty = {"model": "ds-max", "fields": [], "options": [], "current": None}
+    empty: dict[str, Any] = {"model": "ds-max", "fields": [], "options": [], "current": None}
     assert rlc.get_thinking_levels("ds-max") == empty
     assert rlc.get_thinking_levels("no-such") == {
         "model": "no-such",

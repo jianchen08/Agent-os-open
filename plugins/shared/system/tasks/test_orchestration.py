@@ -343,6 +343,112 @@ class TestStepRefsAndCompleteness:
         )
         assert derived_input_set(definition, {"pipeline_other": ["k"]}) == frozenset()
 
+    def test_loop_local_keys_exempt_from_derived_inputs(self) -> None:
+        """回归：loop_config.as 声明的迭代键不计入派生输入集。
+
+        并行 for-each（ADR 2026-10-02-loopconfig-parallel-foreach）下引擎每次
+        迭代注入 as 键（如 tool_core 的 current_call）；完备性校验若把它当
+        初始输入要求，任务派发被 400 永久拒绝（e2e_02 test_13/14 + 任务矩阵
+        6 用例实测事故源）。同一 step 在循环外（无 loop_config.as）仍正常
+        计入——豁免只对声明体内键。autonomous.yaml 真实形态 = loop_config
+        内嵌在带 steps 的 step 字典上（tool_exec 层级）。
+        """
+        from orchestration import (
+            OrchestrationDefinition,
+            derived_input_set,
+        )
+
+        step_required = {"pipeline_tool_core": ["current_call", "raw_tool_calls"]}
+        in_loop = OrchestrationDefinition(
+            key="x",
+            path="<x>",
+            raw={
+                "loop_bodies": [
+                    {
+                        "id": "main",
+                        "steps": [
+                            {
+                                "id": "tool_exec",
+                                "loop_config": {"as": "current_call"},
+                                "steps": ["pipeline_tool_core"],
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        # current_call 由迭代注入豁免；raw_tool_calls 非 loop 局部键仍要求。
+        assert derived_input_set(in_loop, step_required) == frozenset(
+            {"raw_tool_calls"}
+        )
+
+        outside = OrchestrationDefinition(
+            key="y", path="<y>", raw={"loop_bodies": [{"steps": ["pipeline_tool_core"]}]}
+        )
+        assert derived_input_set(outside, step_required) == frozenset(
+            {"current_call", "raw_tool_calls"}
+        )
+
+    def test_nested_loop_locals_inherited(self) -> None:
+        """嵌套循环的 as 键向内层继承（外层迭代键在内层 step 同样豁免），
+        body 级 loop_config.as（装载器形态）与 step 级（yaml 原文形态）皆支持。"""
+        from orchestration import (
+            OrchestrationDefinition,
+            derived_input_set,
+        )
+
+        nested_step_level = OrchestrationDefinition(
+            key="x",
+            path="<x>",
+            raw={
+                "loop_bodies": [
+                    {
+                        "id": "outer",
+                        "steps": [
+                            {
+                                "id": "outer_loop",
+                                "loop_config": {"as": "current_call"},
+                                "steps": [
+                                    {
+                                        "id": "inner_loop",
+                                        "loop_config": {"as": "iteration_item"},
+                                        "steps": ["pipeline_tool_core"],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        assert derived_input_set(
+            nested_step_level,
+            {"pipeline_tool_core": ["current_call", "iteration_item"]},
+        ) == frozenset()
+
+        body_level = OrchestrationDefinition(
+            key="y",
+            path="<y>",
+            raw={
+                "loop_bodies": [
+                    {
+                        "id": "outer",
+                        "loop_config": {"as": "current_call"},
+                        "loop_bodies": [
+                            {
+                                "id": "inner",
+                                "loop_config": {"as": "iteration_item"},
+                                "steps": ["pipeline_tool_core"],
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        assert derived_input_set(
+            body_level, {"pipeline_tool_core": ["current_call", "iteration_item"]}
+        ) == frozenset()
+
 
 class TestStepDeclarationIndex:
     """load_step_required_inputs 的发现面防御分支（坏 manifest/形态漂移）。"""
