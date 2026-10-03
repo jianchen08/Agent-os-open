@@ -3,14 +3,14 @@ concurrency:
   max_concurrent_pipelines: 5
 defaults:
   call_timeout: 600
-  chat: glm-5.2
+  chat: glm-5.3-flash
   embedding: bge-m3
   first_token_timeout: 120
   stream_idle_timeout: 180
   tiers:
-    large: minimax-m3
-    medium: minimax-m3
-    small: minimax-m3
+    large: glm-5.3
+    medium: minimax-m3.1-flash-preview
+    small: glm-5.3-flash
 embeddings: {}
 models:
   bge-m3:
@@ -190,6 +190,20 @@ models:
     api_base: https://open.bigmodel.cn/api/coding/paas/v4/
     model_name: glm-5.3-flash
     display_name: glm-5.3-flash
+    context_window: 1000000
+    reasoning_model: true
+    default_params:
+      temperature: 0.7
+      max_tokens: 100000
+      top_p: 1
+      thinking:
+        type: enabled
+      reasoning_effort: max
+  glm-5.3:
+    provider: zhipu_coding
+    api_base: https://open.bigmodel.cn/api/coding/paas/v4/
+    model_name: glm-5.3
+    display_name: glm-5.3
     context_window: 1000000
     reasoning_model: true
     default_params:
