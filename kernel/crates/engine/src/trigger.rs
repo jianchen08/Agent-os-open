@@ -1,4 +1,4 @@
-// @feature: trigger-svc M1 内核侧 | @ci: rust-test
+// @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: rust-test
 //! 触发器注册表与 committed 视图求值（capability `trigger-svc` 的内核执行面）。
 //!
 //! 求值统一模型（ADR 2026-10-02-trigger-eval-unification）：条件触发器的求值、

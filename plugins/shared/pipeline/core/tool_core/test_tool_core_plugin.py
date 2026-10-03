@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
 """tool_core 单调用契约的行为测试。
 
 mock 两个 capability delegate（tool-executor / event-bus），不连内核；

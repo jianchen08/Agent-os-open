@@ -92,14 +92,23 @@ def _llm_yaml() -> dict[str, Any]:
 def test_llm_yaml_carries_vendor_strength_param_sets() -> None:
     """真实配置源：llm.yaml providers 段承载厂商级参数组（选项真值源）。"""
     providers = _llm_yaml()["providers"]
+    # GLM-5 系思考档位 = reasoning_effort low/high/max（BigModel coding-plan
+    # 实际参数面，thinking.type 旧 4 档词汇废弃；键 = 设置页 levels 词汇）
     glm_params = {
-        "high": {"thinking": {"type": "enabled"}},
-        "low": {"thinking": {"type": "disabled"}},
-        "medium": {"thinking": {"type": "enabled"}},
-        "off": {"thinking": {"type": "disabled"}, "reasoning_effort": "none"},
+        "high": {"reasoning_effort": "max"},
+        "medium": {"reasoning_effort": "high"},
+        "low": {"reasoning_effort": "low"},
     }
     assert providers["zhipu"]["thinking_strength_params"] == glm_params
     assert providers["zhipu_coding"]["thinking_strength_params"] == glm_params
+    # 性质断言：档位键 = 设置页 levels 清单，值域 ⊆ GLM-5 实际 effort 档
+    for pid in ("zhipu", "zhipu_coding"):
+        params = providers[pid]["thinking_strength_params"]
+        assert set(params) == {"high", "medium", "low"}
+        assert all(
+            set(v) == {"reasoning_effort"} and v["reasoning_effort"] in {"low", "high", "max"}
+            for v in params.values()
+        )
     # minimax 无厂商级参数组：M3 与 M3.1 两代契约不同（M3 认 thinking.type，
     # M3.1-Flash-Preview 只认 reasoning_effort 且强制 adaptive 无关闭档，
     # 2026-09-28 接口实测），单一厂商级表无法同时为真，参数组落模型级。

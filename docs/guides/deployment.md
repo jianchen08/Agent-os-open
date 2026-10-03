@@ -69,7 +69,7 @@ done
 
 | 变量 | 作用 | 默认 | 来源 |
 |---|---|---|---|
-| `AGENTOS_USER_ROOT` | **用户空间根**：用户可写资产（插件/配置/数据/密钥）统一住这里，整体位于仓库之外——仓内 `config/`、`data/` 处于工作区还原的抹除风险面内，用户空间不受影响。 | OS 标准数据目录下 `agentos/`（Windows `%APPDATA%`、macOS `~/Library/Application Support`、Linux `$XDG_DATA_HOME`） | `kernel/crates/core/src/user_space.rs`（`user_root`）；ADR `docs/decisions/2026-09-13-unified-user-root.md` |
+| `AGENTOS_USER_ROOT` | **用户空间根**：用户可写资产（插件/配置/数据/密钥）统一住这里，整体位于仓库之外——仓内 `config/`、`data/` 处于工作区还原的抹除风险面内，用户空间不受影响。 | OS 标准数据目录下 `agentos/`（Windows `%APPDATA%`、macOS `~/Library/Application Support`、Linux `$XDG_DATA_HOME`） | `kernel/crates/core/src/user_space.rs`（`user_root`）；ADR 2026-09-13-unified-user-root（源仓，未随开源裁剪入库） |
 | `AGENTOS_USER_CONFIG_DIR` | 用户配置层根（分区覆盖；镜像 factory `config/` 的相对路径） | `<USER_ROOT>/config` | 同上（`user_config_dir`） |
 | `AGENTOS_DATA_DIR` | 用户数据根（多租户树 / uploads / DB 默认位） | `<USER_ROOT>/data` | 同上（`user_data_dir`） |
 | `AGENTOS_DB_PATH` | SQLite 库文件路径；`:memory:` = 内存库 | `<USER_ROOT>/data/agentos_kernel.db`（用户空间不可得时回落项目根） | `storage_factory.rs`（`ENV_DB_PATH`） |
@@ -83,7 +83,7 @@ done
 | `AGENTOS_PLUGINS_DIR` | 内置插件根目录（只读） | `<项目根>/plugins/shared` | 同上 |
 | `AGENTOS_USER_PLUGINS_DIR` | 用户插件根目录（可写，第三方插件安装位；同 id 覆盖内置根） | `<USER_ROOT>/plugins` | 同上（`resolve_user_plugins_dir`） |
 | `AGENTOS_CONFIG_ROOT` | 工厂配置根目录（只读基线，用户层优先见上行 `AGENTOS_USER_CONFIG_DIR`） | `<项目根>/config` | 同上 |
-| `AGENTOS_DB_AUTO_REBUILD` | `=1` 显式允许损坏库自动备份后重建空库继续启动；**默认坏库 fail-closed 拒启** | 未设（拒启） | `kernel/crates/engine/src/store.rs`；ADR `docs/decisions/2026-09-11-corrupt-db-fail-closed.md` |
+| `AGENTOS_DB_AUTO_REBUILD` | `=1` 显式允许损坏库自动备份后重建空库继续启动；**默认坏库 fail-closed 拒启** | 未设（拒启） | `kernel/crates/engine/src/store.rs`；ADR 2026-09-11-corrupt-db-fail-closed（源仓，未随开源裁剪入库） |
 | `AGENTOS_ALLOW_EMPTY_PLUGINS` | `=1` 插件 discover 失败时以空插件集启动（嵌入式/最小化部署逃生门） | 未设（discover 失败拒启） | `bin/agentos-kernel.rs` |
 | `AGENTOS_GRANTS_STRICT` | `=1` 插件未声明 `granted_capabilities` 时反向能力调用一律拒绝 | 未设（未声明默认全授予） | 同上 |
 | `AGENTOS_MAX_BLOCKING_THREADS` | tokio 阻塞池上限 | `512` | 同上（`resolve_max_blocking_threads`） |
@@ -106,7 +106,7 @@ done
 ### 用户空间（哪些东西不写回仓库）
 
 用户在界面上做的改动默认**落在用户空间**，不覆写仓库里 git 跟踪的工厂文件
-（ADR `docs/decisions/2026-09-13-unified-user-root.md`）：
+（ADR 2026-09-13-unified-user-root，源仓未随开源裁剪入库）：
 
 ```text
 <USER_ROOT>/                 # 默认 <OS 数据目录>/agentos

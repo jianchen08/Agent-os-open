@@ -194,6 +194,6 @@
 | 部署/环境变量 | `docs/guides/deployment.md` |
 | 执行语义（Agent/管道） | `docs/guides/execution-semantics.md` |
 | CI/门禁 | `docs/guides/ci-cd-guide.md`、`docs/working/机械门禁统一入口与覆盖率豁免.md` |
-| 关键 ADR | `docs/decisions/2026-09-09-approval-lifecycle-invariants.md`、`2026-08-18-plugin-dependency-package.md`、`2026-09-11-corrupt-db-fail-closed.md`、`2026-09-07-plugin-venv-dedup.md`、`2026-09-03-subtask-inherit-parent-workspace.md` |
+| 关键 ADR | `2026-09-09-approval-lifecycle-invariants.md`（源仓）、`2026-08-18-plugin-dependency-package.md`、`2026-09-11-corrupt-db-fail-closed.md`、`2026-09-07-plugin-venv-dedup.md`、`2026-09-03-subtask-inherit-parent-workspace.md` |
 | 诊断实证 | `docs/working/B15_watcher热重载失灵根因_20260906.md`、`docs/working/`（20260913 批次档案）、`docs/working/test_traceability.md` |
 | 组件契约 | `.project/widget_contracts.md` |

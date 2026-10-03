@@ -1,3 +1,4 @@
+// @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: rust-test
 //! M1 e2e 场景复现：CONDITION 触发器「值不等」条件经 store 提交锚点的边沿点火。
 //!
 //! 复刻生产链路：注册 T2（其持久化即 state 写源）→ 注册 T1（条件 `K2 != '<v1>'`，

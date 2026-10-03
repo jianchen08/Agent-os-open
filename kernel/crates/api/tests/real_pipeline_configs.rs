@@ -1,3 +1,4 @@
+// @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: rust-test
 //! 真实管道配置（config/pipelines/*.yaml）过「归一加载 → 引擎编译 → 运行」的
 //! 端到端集成测试（内核启动同一条路径）。
 //!

@@ -77,8 +77,8 @@ commit**，不要留到"最后一起提交"。commit 前的调查/验证工作�
   （背景/决策/Alternatives Considered/影响/归档五段），**强制记录被否方案**。
 - **契约冻结**：0.2 定型后接口契约尽量冻结（能不动就不动）；动契约需 ADR + 兼容机制。
 - **被否方案**：记录在各 ADR 的 Alternatives Considered 节（`docs/decisions/`，按日期排序），动手前先查。
-- **决策记录**：DSH 借鉴 → 本仓 `docs/working/dsh_decision_records.md`；插件生态评估 →
-  `docs/guides/plugin-protocol.md` 等。
+- **决策记录**：DSH 借鉴决策记录在源仓 docs/working/dsh_decision_records.md（未随开源
+  裁剪入库）；插件生态评估 → `docs/guides/plugin-protocol.md` 等。
 - **门禁**：机械门禁优先（测试/格式/覆盖率）；改造后必须本地补跑全部可验证车道，
   并如实区分"门禁绿"与"测试绿"。
 - **触碰即清（治理债随模块清，2026-08-19 用户要求）**：改动触碰某模块
@@ -161,5 +161,5 @@ commit**，不要留到"最后一起提交"。commit 前的调查/验证工作�
   `AGENTOS_ADMIN_PASSWORD` 环境变量重启 launcher（播种/重置同源恢复通道）。
 - 查架构决策：`docs/decisions/` 按日期排序；被否方案查各 ADR 的 Alternatives Considered 节。
 - DSH 适配器（源码零改动、插件装载、升级）：`plugins/shared/system/dsh_adapter/`，
-  操作路径与决策见 `docs/working/dsh_decision_records.md`。
+  操作路径与决策记录见源仓 docs/working/dsh_decision_records.md（未随开源裁剪入库）。
 - 本项目文档入口：`docs/` 下 ARCHITECTURE.md / vision.md / plugin-protocol.md 等。

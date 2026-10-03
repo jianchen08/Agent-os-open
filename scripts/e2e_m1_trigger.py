@@ -12,9 +12,10 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 
 BASE = os.environ.get("AGENTOS_KERNEL_URL", "http://127.0.0.1:9100")
 PASSWORD = os.environ["AGENTOS_ADMIN_PASSWORD"]
@@ -113,15 +114,18 @@ def main() -> None:
     k2key = f"task.trigger.registry.{t2id}"
 
     import sqlite3
-    db = os.environ.get("AGENTOS_E2E_DB", "C:/Users/Administrator/AppData/Local/Temp/agentos-e2e/trigger.db")
+    db = os.environ.get(
+        "AGENTOS_E2E_DB", os.path.join(tempfile.gettempdir(), "agentos-e2e", "trigger.db")
+    )
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     row = conn.execute(
         "SELECT value FROM pipeline_state WHERE pipeline_id=? AND field_key=?",
         (pipe, f"task.trigger.registry.{t2id}"),
     ).fetchone()
-    assert row, f"DB 无 {k2key if False else ''}K2 行"
+    assert row, f"DB 无 {k2key} 行"
     v1 = row[0]
-    assert isinstance(v1, str) and "'" not in v1, f"K2 值不可用作条件字面量: {v1[:120]}"
+    assert isinstance(v1, str), f"K2 值非字符串: {v1!r:.120}"
+    assert "'" not in v1, f"K2 值不可用作条件字面量: {v1[:120]}"
     print(f"[4] K2 value read (len={len(v1)})")
 
     t1 = _request("/ext/trigger_setup_tool/triggers", {
