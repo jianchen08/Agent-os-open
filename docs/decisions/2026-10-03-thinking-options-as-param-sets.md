@@ -30,8 +30,10 @@ DeepSeek reasoning_effort / MiniMax adaptive thinking / 无推理普通模型）
    thinking-levels?model=<name>`，`get_thinking_levels`）：
    - 选项 = `thinking_strength_params` 配置的**参数组本身**（厂商级在前、
      模型级补位，按参数内容去重，配置顺序即选项顺序）；
-   - `label` = 参数渲染（`reasoning_effort=max`、`thinking={"type":"disabled"}`），
-     无档位中文文案表；
+   - `label` = 参数**实际字段值**直显（`_render_params`：嵌套取标量叶子，
+     如 `reasoning_effort=max` → `max`、`thinking={"type":"adaptive"}` →
+     `adaptive`；多键按配置序 " / " 连接），无档位中文文案表（同日复核
+     界面后补裁定：标签不得是 JSON 信封形态）；
    - `value` = 参数组紧凑 JSON 串（sort_keys）——即消息线上形态；
    - `current` = 模型 `default_params` 思考参数（reasoning_effort 精确相等
      优先，其次 thinking.type）命中的选项 value，未匹配 null——反向推断

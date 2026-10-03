@@ -239,16 +239,24 @@ def _find_model_entry(models: dict[str, Any], model: str) -> dict[str, Any] | No
     return entry if isinstance(entry, dict) else None
 
 
+def _param_leaf_values(value: Any) -> list[str]:
+    """参数值 → 标量叶子值列表（嵌套字典递归展开，保持配置序）。"""
+    if isinstance(value, dict):
+        leaves: list[str] = []
+        for child in value.values():
+            leaves.extend(_param_leaf_values(child))
+        return leaves
+    return [str(value)]
+
+
 def _render_params(params: dict[str, Any]) -> str:
-    """参数组 → 选项标签：标量直接展示，嵌套值紧凑 JSON（如
-    ``reasoning_effort=max`` / ``thinking={"type": "disabled"}``）。"""
-    parts = []
-    for key, value in params.items():
-        text = value if isinstance(value, (str, int, float, bool)) else json.dumps(
-            value, ensure_ascii=False, separators=(",", ":")
-        )
-        parts.append(f"{key}={text}")
-    return ", ".join(parts)
+    """参数组 → 选项标签：**实际字段值**直显（嵌套取标量叶子），如
+    ``reasoning_effort=max`` → ``max``、``thinking={"type": "adaptive"}`` →
+    ``adaptive``；多键按配置序以 " / " 连接（如 off 组 → ``disabled / none``）。"""
+    parts: list[str] = []
+    for value in params.values():
+        parts.extend(_param_leaf_values(value))
+    return " / ".join(parts)
 
 
 def get_thinking_levels(model: str) -> dict[str, Any]:

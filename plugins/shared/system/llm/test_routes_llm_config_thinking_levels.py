@@ -4,7 +4,8 @@
 聊天页思考选择器真值源（前端零硬编码、零映射）：选项 = thinking_strength_params
 配置的**参数组本身**（无档位词汇映射层）。
 1. 厂商级参数组在前、模型级补位，按参数内容去重，配置顺序即选项顺序；
-2. 标签 = 参数渲染（_render_params：标量直显、嵌套紧凑 JSON）；
+2. 标签 = 实际字段值直显（_render_params：嵌套取标量叶子，多键按配置序
+   " / " 连接；不得是 JSON 信封）；
 3. value = 参数组紧凑 JSON 串（sort_keys）= 消息 thinking_strength 线上形态；
 4. current = 模型 default_params 思考参数（reasoning_effort 优先、其次
    thinking.type）命中的选项 value，未匹配 None；
@@ -46,7 +47,10 @@ def llm_yaml(rlc: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
 
     def _write(content: dict[str, Any]) -> None:
         path = tmp_path / "llm.yaml"
-        path.write_text(yaml.safe_dump(content, allow_unicode=True), encoding="utf-8")
+        # sort_keys=False：保留配置书写序——参数组键序即选项标签叶子序（契约面）
+        path.write_text(
+            yaml.safe_dump(content, allow_unicode=True, sort_keys=False), encoding="utf-8"
+        )
         monkeypatch.setattr(rlc, "_llm_yaml_path", lambda: path)
 
     return _write
@@ -89,13 +93,41 @@ def test_provider_options_first_model_fill_dedup(rlc: Any, llm_yaml: Any) -> Non
     assert result["fields"][0]["name"] == "strength"
     assert result["fields"][0]["type"] == "select"
     assert result["fields"][0]["options"] == result["options"]
-    # 标签 = 参数渲染：标量直显、嵌套紧凑 JSON
-    assert result["options"][0]["label"] == "reasoning_effort=max"
-    assert result["options"][2]["label"] == 'thinking={"type":"disabled"}'
+    # 标签 = 实际字段值直显（嵌套取叶子），非 JSON 信封
+    assert result["options"][0]["label"] == "max"
+    assert result["options"][2]["label"] == "disabled"
     # value = 紧凑 JSON 串（sort_keys）
     assert result["options"][2]["value"] == json.dumps(
         {"thinking": {"type": "disabled"}}, sort_keys=True, separators=(",", ":")
     )
+
+
+def test_label_renders_actual_field_values(rlc: Any, llm_yaml: Any) -> None:
+    """标签 = 字段实际值直显（用户裁定 2026-10-03）：嵌套取叶子、多键按
+    配置序 " / " 连接；标签面不出现 JSON 结构字符。"""
+    llm_yaml(
+        {
+            "models": {
+                "m-1": {
+                    "provider": "p",
+                    "model_name": "m",
+                    "display_name": "M",
+                    "thinking_strength_params": {
+                        "high": {"thinking": {"type": "adaptive"}},
+                        "low": {"thinking": {"type": "disabled"}},
+                        "off": {
+                            "thinking": {"type": "disabled"},
+                            "reasoning_effort": "none",
+                        },
+                    },
+                },
+            },
+        }
+    )
+    options = rlc.get_thinking_levels("m")["options"]
+    assert [o["label"] for o in options] == ["adaptive", "disabled", "disabled / none"]
+    # 性质断言：任何标签都是裸值形态，不携带 JSON 信封（thinking={"type":...}）
+    assert all("{" not in o["label"] and "=" not in o["label"] for o in options)
 
 
 def test_current_from_default_params_effort(rlc: Any, llm_yaml: Any) -> None:
