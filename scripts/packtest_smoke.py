@@ -21,10 +21,11 @@ import subprocess
 import sys
 import time
 import urllib.request
+from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-REPO = r"D:\myproject\container_e17cc5927dfd"
+REPO = str(Path(__file__).resolve().parent.parent)
 DEFAULT_EXE = REPO + r"\release\win-unpacked\灵汐助手.exe"
 
 

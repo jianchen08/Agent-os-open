@@ -64,7 +64,10 @@ Var /GLOBAL AgentOsAdminPassword
 !macroend
 
 ; 卸载清场：移除播种的环境变量（重装会重新播种，内核重置语义自对齐）。
+; ReadRegStr 为惰性引用：卸载器脚本不含 customInstall（Var 声明在此上下文
+; 无使用点），不引用即触发 makensis 6001 警告；builder 新版按 error 处理。
 !macro customUnInstall
+  ReadRegStr $AgentOsAdminPassword HKCU "Environment" "AGENTOS_ADMIN_PASSWORD"
   DeleteRegValue HKCU "Environment" "AGENTOS_ADMIN_PASSWORD"
   System::Call 'user32::SendMessageTimeout(p 0xFFFF, i 0x001A, p 0, t "Environment", i 2, i 10000, *p .r7)'
 !macroend
