@@ -76,18 +76,25 @@ def main() -> None:
     print("[2b] 任务已派发（LLM 失败不影响管道 id 产生）")
     time.sleep(2)
 
-    # 从聚合读面解析该会话的 12-hex 管道 id。
-    state = _request("/api/v1/pipelines/state", None, token, method="GET")
-    items = state.get("items") or (state.get("data") or {}).get("items") or []
-    pipe = next(
-        (
-            r.get("pipeline_id")
-            for r in items
-            if (r.get("state") or {}).get("session_id") == thread_id
-        ),
-        None,
-    )
-    assert pipe, f"聚合读面未找到会话对应管道: {json.dumps(state)[:300]}"
+    # 从聚合读面解析该会话的 12-hex 管道 id。管道创建与 session_id 落读面
+    # 有先后（真实 LLM 轮次下管道先以 running 出现），轮询等待而非单查。
+    pipe = None
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        state = _request("/api/v1/pipelines/state", None, token, method="GET")
+        items = state.get("items") or (state.get("data") or {}).get("items") or []
+        pipe = next(
+            (
+                r.get("pipeline_id")
+                for r in items
+                if (r.get("state") or {}).get("session_id") == thread_id
+            ),
+            None,
+        )
+        if pipe:
+            break
+        time.sleep(2)
+    assert pipe, f"聚合读面 30s 内未找到会话对应管道: {json.dumps(state)[:300]}"
     print(f"[2c] pipeline_id={pipe}")
 
     t2 = _request("/ext/trigger_setup_tool/triggers", {
