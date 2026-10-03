@@ -276,7 +276,7 @@ class ToolArgsInjectPlugin(IInputPlugin):
         try:
             registry = ctx.get_service("tool_registry")
         except Exception:  # noqa: BLE001
-            registry = None
+            logger.debug("[tool_args_inject] tool_registry 服务不可用，回退 state[_tool_definitions]")
 
         defs: dict[str, Any] = {}
         if registry is not None:

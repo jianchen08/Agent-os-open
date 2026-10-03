@@ -153,17 +153,18 @@ def _b64(payload: Any) -> str:
 # ── manifest ↔ 分发对齐 ───────────────────────────────────────────────
 
 
-def test_manifest_declares_9_http_endpoints() -> None:
-    """plugin.json http_endpoints 声明 9 端点（6 thinking-mode + 3 config/llm）。
+def test_manifest_declares_10_http_endpoints() -> None:
+    """plugin.json http_endpoints 声明 10 端点（6 thinking-mode + 4 config/llm）。
 
     批次 A1 后 llm.yaml 文件 IO 收口内核单一配置面（/api/v1/plugins/llm_service/
-    config/llm + /api/v1/config/env），插件 /ext 文件 IO 端点全部退役；仍存
-    config/llm 三端点 = provider-types / presets / remote-models（无状态读）。
+    config/llm + /api/v1/config/env），插件 /ext 文件 IO 端点全部退役；config/llm
+    四端点 = provider-types / presets / remote-models / thinking-levels
+    （无状态读；thinking-levels 下发当前模型思考档位选项，选择器真值源）。
     """
     manifest = json.loads((_PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
     eps = manifest["http_endpoints"]
     by_id = {e["route_id"]: e for e in eps}
-    assert len(by_id) == 9
+    assert len(by_id) == 10
     # thinking-mode 6
     assert by_id["thinking_mode_health"]["path"] == "/ext/llm_service/thinking-mode/healthz"
     assert by_id["thinking_mode_models_list"]["path"] == "/ext/llm_service/thinking-mode/models"
@@ -171,8 +172,18 @@ def test_manifest_declares_9_http_endpoints() -> None:
     assert by_id["thinking_mode_check"]["path"] == "/ext/llm_service/thinking-mode/check/{model_name}"
     assert by_id["thinking_mode_switch"]["method"] == "POST"
     assert by_id["thinking_mode_recommendations"]["method"] == "POST"
-    # config/llm 3（文件 IO 已收口内核）
+    # config/llm 4（文件 IO 已收口内核）
     assert by_id["config_llm_provider_types_get"]["path"] == "/ext/llm_service/config/llm/provider-types"
+    assert by_id["config_llm_thinking_levels"] == {
+        "route_id": "config_llm_thinking_levels",
+        "method": "GET",
+        "path": "/ext/llm_service/config/llm/thinking-levels",
+        "auth": "user",
+        "handler_capability": "http.handle",
+        "timeout_ms": 5000,
+        "max_concurrency": 8,
+        "description": "当前模型生效的思考档位选项下发（厂商级映射优先、模型级补位，聊天页选择器选项真值源；前端零硬编码）",
+    }
     assert by_id["config_llm_presets_get"]["path"] == "/ext/llm_service/config/llm/presets"
     remote = by_id["config_llm_providers_remote_models_get"]
     assert remote["path"] == "/ext/llm_service/config/llm/providers/{provider_id}/remote-models"

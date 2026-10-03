@@ -11,6 +11,7 @@ tool-executor.invoke（内核唯一工具执行漏斗）与 event-bus.emit（事
 from __future__ import annotations
 
 import logging
+from typing import Any, Awaitable
 
 from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 from agentos_plugin_sdk import AgentOSPlugin
@@ -43,10 +44,10 @@ async def _on_load(params: dict) -> None:
     30s 面向短调用，长任务工具会先于完成被掐断。
     """
 
-    def _tool_delegate(call_params: dict, timeout: float | None = None):  # noqa: ANN202
+    def _tool_delegate(call_params: dict[str, Any], timeout: float | None = None) -> Awaitable[Any]:
         return plugin.get_capability("tool-executor").call("invoke", call_params, timeout)
 
-    def _event_delegate(call_params: dict):  # noqa: ANN202
+    def _event_delegate(call_params: dict[str, Any]) -> Awaitable[Any]:
         return plugin.get_capability("event-bus").call("emit", call_params, None)
 
     instance = get_instance()

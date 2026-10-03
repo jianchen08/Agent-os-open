@@ -358,8 +358,8 @@ export const MessageItem = memo(function MessageItem({
 
   // 插件消息卡（模式体系 §5.0 通用能力）：判定已归路由层——非流式
   // assistant/system 携带 metadata.message_style 且声明命中；system 覆盖
-  // 压缩块消息（消息段模型 §5.1），卡渲染 + 宿主桥数据注入 + 宿主侧
-  // 「查看原始」入口均在卡组件内。
+  // 压缩块消息（消息段模型 §5.1）——卡只展示压缩结果，原始段落保留在
+  // 消息流中正常显示。
   if (cardRoute?.kind === 'style-card') {
     return (
       <StyleMessageCard message={message} styleId={cardRoute.styleId} className={className} />

@@ -216,7 +216,9 @@ function FieldsUriResolver({
         const f = Array.isArray(data) ? data : data?.fields
         setFields(Array.isArray(f) ? f : [])
       })
-      .catch(() => {
+      .catch((err: unknown) => {
+        // best-effort 降级为不渲染该声明；留痕区分“端点故障”与“未配置”
+        console.warn('[DeclaredWidgetLayer] fieldsUri 拉取失败（不渲染该声明）:', uri, err)
         if (alive) setFields([])
       })
     return () => {

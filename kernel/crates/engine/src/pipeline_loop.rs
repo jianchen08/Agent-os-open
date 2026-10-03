@@ -1038,7 +1038,7 @@ impl PipelineExecutor {
         let items: Vec<serde_json::Value> = if loop_cfg.max_iterations > 0 {
             items
                 .into_iter()
-                .take(loop_cfg.max_iterations.max(0) as usize)
+                .take(loop_cfg.max_iterations as usize)
                 .collect()
         } else {
             items
@@ -1084,7 +1084,7 @@ impl PipelineExecutor {
                 // 单迭代执行错误不炸整批：记为该迭代错误，归并照常，全部完成后上抛。
                 let base_snapshot = state.clone();
                 use futures::StreamExt;
-                let results = futures::stream::iter(items.into_iter().enumerate())
+                let mut results = futures::stream::iter(items.into_iter().enumerate())
                     .map(|(idx, item)| {
                         let iter_exec = self.clone_for_iteration();
                         let mut iter_state = base_snapshot.clone();
@@ -1114,7 +1114,6 @@ impl PipelineExecutor {
                     .buffer_unordered(concurrency)
                     .collect::<Vec<_>>()
                     .await;
-                let mut results = results;
                 results.sort_by_key(|(idx, _, _, _)| *idx);
                 let mut first_err: Option<String> = None;
                 for (_, iter_exec, iter_state, err_msg) in results {

@@ -580,10 +580,6 @@ class TriggerManager:
         self._state_provider = provider
         logger.info("[TriggerManager] state 聚合读面已设置 (pipeline-state.list)")
 
-    def is_state_provider_ready(self) -> bool:
-        """state 读面是否就绪（重灌与 REST 管道选项依赖）。"""
-        return self._state_provider is not None
-
     def set_state_writer(self, writer: Callable[..., Any]) -> None:
         """注入 state 权威持久化写面（P25：注册表落目标管道 state）。
 
@@ -715,8 +711,10 @@ class TriggerManager:
         """
         trigger_id = str(params.get("trigger_id") or "")
         fire_seq_raw = params.get("fire_seq")
+        if fire_seq_raw is None:
+            raise RuntimeError(f"trigger.fired 缺少可解析的 fire_seq: {fire_seq_raw!r}")
         try:
-            fire_seq = int(fire_seq_raw)  # type: ignore[arg-type]
+            fire_seq = int(fire_seq_raw)
         except (TypeError, ValueError) as exc:
             raise RuntimeError(f"trigger.fired 缺少可解析的 fire_seq: {fire_seq_raw!r}") from exc
 

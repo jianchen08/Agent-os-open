@@ -761,7 +761,7 @@ impl Compiler<'_> {
         }
         if lc.max_concurrency == 0 || lc.max_concurrency < -1 {
             return Err(err(format!(
-                "max_concurrency={} 非法（0 与 <-1 已禁用；1 = 串行链式，>1 = 有界并行，-1 = 不限）",
+                "max_concurrency={} 非法（0 与 <-1 禁用；1=串行链式，>1=有界并行，-1=不限）",
                 lc.max_concurrency
             )));
         }

@@ -147,20 +147,14 @@ pub fn parse_env_text_for_read(text: &str) -> HashMap<String, String> {
 
 /// 计算 sidecar 子进程的环境增量叠加。
 ///
-/// 返回 (key, value) 列表，直接经 `Command::env` 注入子进程：
-/// - 环境中缺失的 .env 变量 → 注入（新填写的 key 属于此类）
-/// - 环境值与上次快照一致但 .env 已更新 → 注入新值（key 轮换）
-/// - 环境值与 .env 不同且不在快照中 → 跳过（系统环境变量优先）
-///
-/// 首次调用建立快照基线；读取失败静默返回空（spawn 走默认继承）。
-/// 计算 sidecar 子进程的环境增量叠加。
-///
-/// 返回 (key, value) 列表，直接经 `Command::env` 注入子进程：
-/// - .env 中出现的变量**一律注入**（用户数据为准，ADR
-///   2026-10-03-packaged-user-data-first：设置页写入的用户 .env 是 key 的
-///   唯一真值，ambient/系统环境不得压过它——否则 UI「已配置」与运行时
-///   实际解析分叉）；
-/// - 与 .env 一致仍注入（幂等，覆盖 ambient 残留同值）；
+/// 返回 (key, value) 列表，直接经 `Command::env` 注入子进程。
+/// .env 是 key 的唯一真值（用户数据为准，ADR
+/// 2026-10-03-packaged-user-data-first：设置页写入的用户 .env 优先，
+/// ambient/系统环境不得压过它——否则 UI「已配置」与运行时实际解析分叉）：
+/// - ambient 与 .env 不同 → 注入 .env 值；
+/// - ambient 同值且该值在 .env 快照在册 → 仍注入（幂等，覆盖 ambient
+///   残留同值的来源不确定）；
+/// - ambient 同值且非 .env 来源 → 无需叠加（子进程继承同值，等价）；
 /// - 保留名（AGENTOS_* / PATH 等系统关键变量，与内核配置面写侧
 ///   is_reserved_env_name 同名单）不叠加——.env 写面已 422 拒绝，读侧
 ///   兜底防手改文件越权改内核行为。

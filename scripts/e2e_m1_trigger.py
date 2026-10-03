@@ -26,8 +26,7 @@ def _request(path: str, payload: dict | None, token: str | None = None, method: 
     headers = {"Content-Type": "application/json", "X-Main-Agent-Request": "true"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(BASE + path, data=data if method == "POST" else None,
-                                 headers=headers, method=method)
+    req = urllib.request.Request(BASE + path, data=data if method == "POST" else None, headers=headers, method=method)
     with urllib.request.urlopen(req, timeout=20) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -85,11 +84,7 @@ def main() -> None:
         state = _request("/api/v1/pipelines/state", None, token, method="GET")
         items = state.get("items") or (state.get("data") or {}).get("items") or []
         pipe = next(
-            (
-                r.get("pipeline_id")
-                for r in items
-                if (r.get("state") or {}).get("session_id") == thread_id
-            ),
+            (r.get("pipeline_id") for r in items if (r.get("state") or {}).get("session_id") == thread_id),
             None,
         )
         if pipe:
@@ -98,14 +93,19 @@ def main() -> None:
     assert pipe, f"聚合读面 30s 内未找到会话对应管道: {json.dumps(state)[:300]}"
     print(f"[2c] pipeline_id={pipe}")
 
-    t2 = _request("/ext/trigger_setup_tool/triggers", {
-        "trigger_type": "condition",
-        "condition": "1 == 2",
-        "pipeline_id": pipe,
-        "message": "[e2e] T2",
-        "name": "M1-e2e-T2",
-    }, token)
-    t2body = t2.get("data") if isinstance(t2.get("data"), dict) else t2
+    t2 = _request(
+        "/ext/trigger_setup_tool/triggers",
+        {
+            "trigger_type": "condition",
+            "condition": "1 == 2",
+            "pipeline_id": pipe,
+            "message": "[e2e] T2",
+            "name": "M1-e2e-T2",
+        },
+        token,
+    )
+    t2data = t2.get("data")
+    t2body = t2data if isinstance(t2data, dict) else t2
     t2id = (t2body.get("trigger") or {}).get("trigger_id") or t2body.get("trigger_id")
     assert t2id, f"T2 注册失败: {json.dumps(t2)[:300]}"
     print(f"[3] T2 registered: {t2id}")
@@ -114,9 +114,8 @@ def main() -> None:
     k2key = f"task.trigger.registry.{t2id}"
 
     import sqlite3
-    db = os.environ.get(
-        "AGENTOS_E2E_DB", os.path.join(tempfile.gettempdir(), "agentos-e2e", "trigger.db")
-    )
+
+    db = os.environ.get("AGENTOS_E2E_DB", os.path.join(tempfile.gettempdir(), "agentos-e2e", "trigger.db"))
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     row = conn.execute(
         "SELECT value FROM pipeline_state WHERE pipeline_id=? AND field_key=?",
@@ -128,16 +127,21 @@ def main() -> None:
     assert "'" not in v1, f"K2 值不可用作条件字面量: {v1[:120]}"
     print(f"[4] K2 value read (len={len(v1)})")
 
-    t1 = _request("/ext/trigger_setup_tool/triggers", {
-        "trigger_type": "condition",
-        # 读面会把 JSON 文本解码回对象——下钻字段比较（勿与原始序列化串比较，
-        # 对象 != 字符串恒真会让种子=true、边沿死锁）。
-        "condition": f"{k2key}.fire_count != 0",
-        "pipeline_id": pipe,
-        "message": "[M1-e2e] T1 FIRED",
-        "name": "M1-e2e-T1",
-    }, token)
-    t1body = t1.get("data") if isinstance(t1.get("data"), dict) else t1
+    t1 = _request(
+        "/ext/trigger_setup_tool/triggers",
+        {
+            "trigger_type": "condition",
+            # 读面会把 JSON 文本解码回对象——下钻字段比较（勿与原始序列化串比较，
+            # 对象 != 字符串恒真会让种子=true、边沿死锁）。
+            "condition": f"{k2key}.fire_count != 0",
+            "pipeline_id": pipe,
+            "message": "[M1-e2e] T1 FIRED",
+            "name": "M1-e2e-T1",
+        },
+        token,
+    )
+    t1data = t1.get("data")
+    t1body = t1data if isinstance(t1data, dict) else t1
     t1id = (t1body.get("trigger") or {}).get("trigger_id") or t1body.get("trigger_id")
     assert t1id, f"T1 注册失败: {json.dumps(t1)[:300]}"
     print(f"[5] T1 registered: {t1id} (armed on K2 change)")
@@ -154,7 +158,8 @@ def main() -> None:
             q = _request(f"/ext/trigger_setup_tool/triggers/{t1id}", None, token, method="GET")
         except urllib.error.HTTPError:
             continue
-        d = q.get("data") if isinstance(q.get("data"), dict) else q
+        qdata = q.get("data")
+        d = qdata if isinstance(qdata, dict) else q
         trig = d.get("trigger") or d
         detail = trig
         fc = trig.get("fire_count") or 0

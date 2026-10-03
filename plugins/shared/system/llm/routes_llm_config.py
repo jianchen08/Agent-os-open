@@ -217,17 +217,6 @@ def get_llm_presets() -> dict[str, Any]:
     }
 
 
-# 已知思考档位的显示文案（聊天页选择器选项真值源；原 llm_core ui_schema
-# 声明 options 静态四档，2026-10-03 改配置驱动后迁此）。未知/自定义档位
-# 以配置键为标签。
-_THINKING_LEVEL_TEXT: dict[str, dict[str, str]] = {
-    "off": {"label": "关闭", "description": "普通模式，不启用思考"},
-    "low": {"label": "低", "description": "轻量思考，响应更快"},
-    "medium": {"label": "中", "description": "标准思考（默认）"},
-    "high": {"label": "高", "description": "深度思考，耗时更长"},
-}
-
-
 def _find_model_entry(models: dict[str, Any], model: str) -> dict[str, Any] | None:
     """按 model_name 精确匹配定位模型条目，再按 key（model_id）兜底。"""
     if not model:
