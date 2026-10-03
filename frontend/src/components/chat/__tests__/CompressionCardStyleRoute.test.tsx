@@ -12,7 +12,7 @@
  * 压缩块真实形态（P 车道确认）：role=system + name=compressed/state_snapshot +
  * metadata.message_style="compression_card"——路由条件覆盖非流式 system（流式不
  * 路由；无样式 system 仍走默认渲染）。带 compression_ref.segment_id 的 system 块
- * 消息另有宿主侧「查看原始 N 条」入口（CompressionOriginalsButton）。
+
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -125,7 +125,7 @@ describe('compression_card 压缩卡经 registry 归一化命中 message-style �
     expect(hit?.htmlPath).toBe('/webview/compression_card.html')
   })
 
-  it('压缩块真实形态（role=system 块消息）→ 渲染消息卡容器 + 宿主侧查看原始入口', async () => {
+  it('压缩块真实形态（role=system 块消息）→ 渲染消息卡容器（卡只展示压缩结果，无查看原始入口）', async () => {
     contributionRegistry.registerFromSchema({
       plugin_contributes: [COMPRESSION_CARD_DECLARATION],
     })
@@ -136,8 +136,9 @@ describe('compression_card 压缩卡经 registry 归一化命中 message-style �
     expect(card).toHaveAttribute('data-message-style', 'compression_card')
     const item = screen.getByTestId('message-item')
     expect(item).toHaveAttribute('data-role', 'system')
-    // 宿主侧「查看原始 N 条」：N = compression_ref.seq_range 跨度（40-55 → 16）
-    expect(screen.getByTestId('compression-originals-button')).toHaveTextContent('查看原始 16 条')
+    // 卡只展示压缩结果（2026-10-03 裁定）：无查看原始入口——压缩不改启用
+    // 序列，原始段落保留在流中上翻即达，宿主零特例
+    expect(screen.queryByTestId('compression-originals-button')).toBeNull()
     // 卡片 HTML 按声明从插件包内拉取（/ext/<pluginId><htmlPath>）
     await waitFor(() => {
       expect(apiClient.get).toHaveBeenCalledWith(
@@ -160,8 +161,6 @@ describe('compression_card 压缩卡经 registry 归一化命中 message-style �
     const card = screen.getByTestId('plugin-message-card')
     expect(card).toHaveAttribute('data-message-style', 'compression_card')
     expect(screen.getByTestId('message-item')).toHaveAttribute('data-role', 'assistant')
-    // assistant 无宿主侧查看原始入口（仅 system 块消息）
-    expect(screen.queryByTestId('compression-originals-button')).not.toBeInTheDocument()
   })
 
   it('流式 system 块消息不路由（正文仍在到达，完成后接管）', () => {

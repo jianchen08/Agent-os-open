@@ -20,9 +20,10 @@
   被压区间槽位数；被压批次槽位连续时即精确成员数）。精确成员数以段取数
   （compression_ref.segment_id → message-segments/{id} 的 members）为准。
 
-  取数缺口（现状契约）：容器上行桥只放行 /ext/{pluginId}/** 前缀（插件自有
-  端点），段读取端点（内核 REST）不在白名单——「查看原始 N 条」点击后展示
-  segment 提示，不做取数（宿主侧补齐桥接后接入，前端车道登记）。
+  卡职责边界（2026-10-03 裁定）：卡只展示压缩结果字段（计数/过程/快照）。
+  压缩不改启用序列（freeze_segment 仅冻结段档案），原始消息段落保留在
+  消息流中正常显示（时间线 = 段落-压缩卡-段落），上翻即达——卡内不设
+  「查看原始」入口。
 -->
 <html lang="zh-CN">
 <head>
@@ -93,15 +94,6 @@
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
   .kv dt { color: var(--ag-muted); }
   .kv dd { margin: 0; }
-  .seg-hint {
-    margin-top: 10px;
-    padding: 6px 10px;
-    border-radius: var(--ag-radius);
-    border: 1px dashed var(--ag-border);
-    color: var(--ag-muted);
-    font-size: 12px;
-  }
-  .seg-hint code { color: var(--ag-accent); }
   .hidden { display: none; }
 </style>
 </head>
@@ -112,7 +104,6 @@
     <span class="card-note hidden" id="pending-note">等待消息数据</span>
     <span class="card-actions">
       <button id="toggle-btn" class="hidden">展开</button>
-      <button id="raw-btn" class="hidden">查看原始</button>
     </span>
   </div>
   <div id="expanded" class="hidden">
@@ -125,7 +116,6 @@
       <div class="section-body" id="snapshot-body"></div>
     </div>
   </div>
-  <div id="seg-hint" class="seg-hint hidden"></div>
 <script>
 (function () {
   'use strict';
@@ -133,13 +123,11 @@
   var titleEl = document.getElementById('title');
   var pendingNote = document.getElementById('pending-note');
   var toggleBtn = document.getElementById('toggle-btn');
-  var rawBtn = document.getElementById('raw-btn');
   var expandedEl = document.getElementById('expanded');
   var processSection = document.getElementById('process-section');
   var processBody = document.getElementById('process-body');
   var snapshotSection = document.getElementById('snapshot-section');
   var snapshotBody = document.getElementById('snapshot-body');
-  var segHint = document.getElementById('seg-hint');
 
   var collapsed = true;
   var segmentId = '';
@@ -219,8 +207,6 @@
     titleEl.textContent = memberCount > 0
       ? '已压缩 ' + memberCount + ' 条对话'
       : '已压缩对话';
-    rawBtn.textContent = memberCount > 0 ? '查看原始 ' + memberCount + ' 条' : '查看原始';
-
     processSection.classList.toggle('hidden', !process);
     processBody.innerHTML = '';
     processBody.appendChild(prettyBody(process ? process.inner : ''));
@@ -230,8 +216,7 @@
 
     pendingNote.classList.add('hidden');
     toggleBtn.classList.remove('hidden');
-    rawBtn.classList.remove('hidden');
-  }
+    }
 
   // ── 交互 ─────────────────────────────────────────────────────
 
@@ -239,16 +224,6 @@
     collapsed = !collapsed;
     expandedEl.classList.toggle('hidden', collapsed);
     toggleBtn.textContent = collapsed ? '展开' : '收起';
-    if (collapsed) segHint.classList.add('hidden');
-  });
-
-  // 取数缺口（现状契约，见文件头）：容器上行白名单只放行插件自有 /ext 端点，
-  // 段读取端点不可达——按契约展示 segment 提示，不做取数。
-  rawBtn.addEventListener('click', function () {
-    segHint.textContent = segmentId
-      ? '原始消息已冻结为段 ' + segmentId + '（取数桥接未开放，暂不可在卡内查看原文）'
-      : '原始消息段编号未知（消息数据未注入）';
-    segHint.classList.remove('hidden');
   });
 
   // ── 容器下行桥 ────────────────────────────────────────────────

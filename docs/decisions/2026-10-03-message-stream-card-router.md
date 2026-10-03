@@ -25,7 +25,7 @@ react-virtuoso（届时 overflow-anchor 失效需以 firstItemIndex/followOutput
    单点可测，新卡形态 = router 加 kind + 一个卡组件文件。
 2. **卡组件抽取**：`ToolMessageCard`（activity 构造 + PresenterScope +
    ToolMessageBody 呈现态叙事）、`StyleMessageCard`（webview 卡容器 +
-   头像 + 压缩块「查看原始」入口）各自成文件；`presenterScope.tsx` 抽出
+   头像）各自成文件；`presenterScope.tsx` 抽出
    PresenterContext/PresenterScope 共享（MessageItem 骨架与卡组件共用）。
 3. **MessageItem 瘦身为分发器调用 + fallback 骨架**：气泡/编辑器/操作菜单/
    状态卡追加/呈现作用域不动（这是"最基本的宿主职责"）。
@@ -61,7 +61,7 @@ react-virtuoso（届时 overflow-anchor 失效需以 firstItemIndex/followOutput
 - 新消息卡接入路径：卡组件文件 + router 一个 kind（+ 必要时端点/声明），
   宿主主文件零改动。
 - 后续刀（未排期）：状态卡追加块、呈现作用域随插件需求评估是否入卡；
-  webview 卡上行桥放行段端点后，「查看原始」入口可收进卡内。
+  压缩卡不设「查看原始」入口（2026-10-03 裁定）：压缩不改启用序列，原始段落保留在流中上翻即达，宿主 CompressionOriginalsButton Modal 与卡内占位按钮已退役。
 
 ## 归档
 

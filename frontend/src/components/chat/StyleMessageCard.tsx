@@ -1,12 +1,10 @@
 /**
  * 插件消息卡容器（message_style 路由卡组件，自 MessageItem 绞杀者迁移）：
  * 非流式 assistant/system 携带 metadata.message_style 且声明命中 → 通用
- * webview 消息卡（PluginMessageCard）+ 角色头像；system 覆盖压缩块消息时
- * 另有宿主侧「查看原始 N 条」入口（段取数暂由宿主承担，卡上行桥未放行）。
- * 路由判定归 messageCardRouter，本组件只渲染。
+ * webview 消息卡（PluginMessageCard）+ 角色头像。路由判定归
+ * messageCardRouter，本组件只渲染。
  */
 import { memo } from 'react'
-import { CompressionOriginalsButton } from './CompressionOriginalsButton'
 import { PluginMessageCard } from './PluginMessageCard'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Bell, Bot } from '@/assets/icons'
@@ -56,9 +54,6 @@ export const StyleMessageCard = memo(function StyleMessageCard({
           styleId={styleId}
           message={{ content: message.content, metadata: message.metadata }}
         />
-        {/* 宿主侧「查看原始 N 条」：卡上行桥未放行内核段端点（web/cards/
-            compression.html 取数缺口），段取数由宿主承担（只读，不激活） */}
-        {isSystemMessage && <CompressionOriginalsButton message={message} />}
       </div>
     </div>
   )
