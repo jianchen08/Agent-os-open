@@ -1455,6 +1455,19 @@ class TestTriggerFiredConsumption:
         finally:
             mgr.stop_check_loop()
 
+    def test_fired_missing_fire_seq_raises_not_acked(self) -> None:
+        """fire_seq 缺失/不可解析：抛 RuntimeError 留痕（不 ack，reconcile 重投）。"""
+        svc = _FakeTriggerSvc()
+        mgr = self._cond_mgr(svc)
+        try:
+            with pytest.raises(RuntimeError, match="fire_seq"):
+                _run(mgr.handle_trigger_fired({"trigger_id": "t1"}))
+            with pytest.raises(RuntimeError, match="fire_seq"):
+                _run(mgr.handle_trigger_fired({"trigger_id": "t1", "fire_seq": "abc"}))
+            assert svc.methods("ack") == []
+        finally:
+            mgr.stop_check_loop()
+
     def test_fired_max_fires_reached_acks_without_dispatch(self) -> None:
         """已达 max_fires：不计数不分发，ack 终结重投（内核无插件侧停止语义）。"""
         received: list[str] = []
