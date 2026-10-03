@@ -184,9 +184,7 @@ export const ChatInput = ({
     get: () => currentThinkingStrength,
     set: (_f, v) => handleStrengthChange(v as ThinkingStrength),
     // 惰性求值：isExecuting 在下方声明，渲染期回调时才读取（规避 TDZ）
-    extra: () => ({
-      disabled: disabled || isExecuting || !modelName || modelName === 'unknown',
-    }),
+    extra: () => ({ disabled: disabled || isExecuting || !modelName || modelName === 'unknown' }),
   })
 
   // 任务模式桥（出生语义）：'' = 默认档；显示值随会话 modeBinding（出生即定），
