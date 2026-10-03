@@ -96,16 +96,6 @@ models:
       supports_image: true
     provider: zhipu_coding
     reasoning_model: true
-    thinking_strength_params:
-      high:
-        thinking:
-          type: enabled
-      low:
-        thinking:
-          type: disabled
-      medium:
-        thinking:
-          type: enabled
   minimax-m3:
     api_base: https://api.minimaxi.com/v1
     context_window: 1000000
@@ -535,20 +525,15 @@ providers:
       max_concurrent: 6
       rpm: 10
       token_quota: 0
+    # GLM-5 系思考档位 = reasoning_effort low/high/max（与 zhipu_coding 同源，
+    # thinking.type 旧词汇已废弃，见 zhipu_coding 注释）
     thinking_strength_params:
       high:
-        thinking:
-          type: enabled
-      low:
-        thinking:
-          type: disabled
+        reasoning_effort: max
       medium:
-        thinking:
-          type: enabled
-      'off':
-        thinking:
-          type: disabled
-        reasoning_effort: none
+        reasoning_effort: high
+      low:
+        reasoning_effort: low
     type: zai
   zhipu_coding:
     api_base: https://open.bigmodel.cn/api/coding/paas/v4/
@@ -558,20 +543,16 @@ providers:
       max_concurrent: 6
       rpm: 10
       token_quota: 0
+    # GLM-5 系思考档位 = reasoning_effort low/high/max（BigModel coding-plan
+    # 实际参数面；thinking.type enabled/disabled 是旧 4 档词汇，2026-10-03 用户
+    # 裁定废弃）。键 = 设置页档位词汇（levels 清单），值 = 真实 effort 值。
     thinking_strength_params:
       high:
-        thinking:
-          type: enabled
-      low:
-        thinking:
-          type: disabled
+        reasoning_effort: max
       medium:
-        thinking:
-          type: enabled
-      'off':
-        thinking:
-          type: disabled
-        reasoning_effort: none
+        reasoning_effort: high
+      low:
+        reasoning_effort: low
     type: zai
   ollama-oline:
     type: openai
