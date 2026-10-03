@@ -1217,7 +1217,11 @@ impl KernelCapabilityRouter {
             .get("payload")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        tracing::debug!(target: "capability:event-bus", event = %event_name, "收到 event-bus.emit");
+        tracing::debug!(target: "capability:event-bus", event = %event_name,
+            thread = %payload.get("thread_id").and_then(|v| v.as_str()).unwrap_or(""),
+            pipeline = %payload.get("pipeline_id").and_then(|v| v.as_str()).unwrap_or(""),
+            message = %payload.get("message_id").and_then(|v| v.as_str()).unwrap_or(""),
+            "收到 event-bus.emit");
 
         let plugin_id = params.get("_plugin_id").and_then(|v| v.as_str());
         if let Some(rejection) = self.streaming_gateway_rejection(event_name, &payload, plugin_id) {
