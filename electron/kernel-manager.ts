@@ -218,21 +218,35 @@ export function resolvePackagedConfigUsersDir(
 }
 
 /**
- * 播种授权名单（幂等，非破坏性）：把包内 `configRoot/users` 子树复制到用户
- * 空间真值目录——仅补缺失文件，绝不覆盖/删除既有内容（用户空间是活跃真值，
- * 用户批准的永久授权都在这里）。包内无 users 子树（异常包）时不动作。
- * fsMod 注入便于测试（与 probeKernelHealth 的 fetch 注入同款）。
+ * 装机形态配置根（用户数据为准，ADR 2026-10-03-packaged-user-data-first）：
+ * `<userRoot>/config`——全配置树（agents/pipelines/llm.yaml/models…）的真值
+ * 在用户空间（可写、升级不丢），包内 `resources\config` 降级为首次播种源
+ * （seedTreeMissingOnly 补缺，绝不覆盖既有）。ambient AGENTOS_CONFIG_ROOT
+ * 显式设置时原样继承（覆盖能力保留）。
  */
-export function seedZonePolicyFiles(
+export function resolvePackagedUserConfigDir(
+  env: NodeJS.ProcessEnv,
+  appDataDir: string,
+): string {
+  const userRoot =
+    envValue(env, "AGENTOS_USER_ROOT") ?? path.join(appDataDir, "agentos");
+  return path.join(userRoot, "config");
+}
+
+/**
+ * 播种目录树（幂等，非破坏性）：把 srcRoot 子树复制到 dstRoot——仅补缺失
+ * 文件，绝不覆盖/删除既有内容（用户空间是活跃真值）。srcRoot 不存在时
+ * 不动作。fsMod 注入便于测试（与 seedZonePolicyFiles 同款）。
+ */
+export function seedTreeMissingOnly(
   fsMod: Pick<
     typeof fs,
     "existsSync" | "mkdirSync" | "readdirSync" | "statSync" | "copyFileSync"
   >,
-  configRoot: string,
-  targetUsersDir: string,
+  srcRoot: string,
+  dstRoot: string,
 ): void {
-  const sourceUsersDir = path.join(configRoot, "users");
-  if (!fsMod.existsSync(sourceUsersDir)) {
+  if (!fsMod.existsSync(srcRoot)) {
     return;
   }
   const walk = (src: string, dst: string): void => {
@@ -247,7 +261,24 @@ export function seedZonePolicyFiles(
       }
     }
   };
-  walk(sourceUsersDir, targetUsersDir);
+  walk(srcRoot, dstRoot);
+}
+
+/**
+ * 播种授权名单（幂等，非破坏性）：把包内 `configRoot/users` 子树复制到用户
+ * 空间真值目录——仅补缺失文件，绝不覆盖/删除既有内容（用户空间是活跃真值，
+ * 用户批准的永久授权都在这里）。包内无 users 子树（异常包）时不动作。
+ * fsMod 注入便于测试（与 probeKernelHealth 的 fetch 注入同款）。
+ */
+export function seedZonePolicyFiles(
+  fsMod: Pick<
+    typeof fs,
+    "existsSync" | "mkdirSync" | "readdirSync" | "statSync" | "copyFileSync"
+  >,
+  configRoot: string,
+  targetUsersDir: string,
+): void {
+  seedTreeMissingOnly(fsMod, path.join(configRoot, "users"), targetUsersDir);
 }
 
 /**
@@ -265,10 +296,10 @@ export function seedZonePolicyFiles(
  * - AGENTOS_CONFIG_USERS_DIR：授权名单真值钉用户空间（ADR 2026-09-24 决策5，
  *   恒为 `<userRoot>/config/users`）——包内 resources 名单经 seedZonePolicyFiles
  *   首次播种，授权卡永久项写用户空间，升级不丢；ambient 显式设置优先；
- * - AGENTOS_PLUGIN_SOURCE_PRIORITY=builtin：双源同 id 裁决置内置优先——装机版
- *   用户空间的共享插件副本是旧安装/旧迁移遗留（陈旧/扁平布局/.venv 缺失），
- *   不得压过包内版本匹配的新版（BUG-55，ADR
- *   2026-09-20-packaged-dual-source-adjudication）；用户根仍承载内置没有的
+ * - AGENTOS_PLUGIN_SOURCE_PRIORITY=user：双源同 id 裁决置用户优先——用户数据
+ *   为准（ADR 2026-10-03-packaged-user-data-first）：用户空间插件副本是安装
+ *   身份的活跃真值（sync_installed_user_space 维护），升级由同步流程治理，
+ *   不再以「防陈旧」（BUG-55）为由压过用户数据；用户根仍承载内置没有的
  *   额外插件；
  * - AGENTOS_PLUGIN_VENV_AUTOPROVISION=1：boot 后台对缺 .venv 的 Python sidecar
  *   跑 `uv sync` 自愈（打包资源排除 .venv 且装机链没有 dev launcher；同 ADR
@@ -293,7 +324,7 @@ export function buildKernelEnv(
     AGENTOS_KERNEL_PORT: String(KERNEL_PORT),
     AGENTOS_PLUGINS_DIR: paths.pluginsDir,
     AGENTOS_CONFIG_ROOT: paths.configRoot,
-    AGENTOS_PLUGIN_SOURCE_PRIORITY: "builtin",
+    AGENTOS_PLUGIN_SOURCE_PRIORITY: "user",
     AGENTOS_PLUGIN_VENV_AUTOPROVISION: "1",
     AGENTOS_PLUGIN_IDLE_TIMEOUT_SECS: PLUGIN_IDLE_TIMEOUT_SECS,
     // token 签名密钥持久化（每安装身份一份）：不注入时内核每进程随机签名，
@@ -616,6 +647,25 @@ export async function ensurePackagedKernelRunning(opts: {
     } catch (err) {
       // 播种失败不阻断启动：名单读取侧对缺失文件按空名单处理（安全侧）
       console.warn("[kernel-manager] 授权名单播种失败（按空白名单降级）:", err);
+    }
+  }
+  // 配置根用户数据为准（ADR 2026-10-03-packaged-user-data-first）：全配置树
+  // 真值在用户空间；包内 resources/config 首启补缺播种（绝不覆盖既有），
+  // 之后内核读用户空间配置——包内那份只当出厂种子，永不直接消费。
+  if (opts.appDataDir) {
+    const userConfigDir = resolvePackagedUserConfigDir(
+      process.env,
+      opts.appDataDir,
+    );
+    try {
+      seedTreeMissingOnly(fs, paths.configRoot, userConfigDir);
+      paths.configRoot = userConfigDir;
+    } catch (err) {
+      // 播种失败不阻断启动：回退读包内配置（出厂种子），与旧行为一致
+      console.warn(
+        "[kernel-manager] 用户配置树播种失败（回退包内配置）:",
+        err,
+      );
     }
   }
 

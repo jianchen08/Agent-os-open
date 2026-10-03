@@ -153,6 +153,20 @@ pub fn parse_env_text_for_read(text: &str) -> HashMap<String, String> {
 /// - 环境值与 .env 不同且不在快照中 → 跳过（系统环境变量优先）
 ///
 /// 首次调用建立快照基线；读取失败静默返回空（spawn 走默认继承）。
+/// 计算 sidecar 子进程的环境增量叠加。
+///
+/// 返回 (key, value) 列表，直接经 `Command::env` 注入子进程：
+/// - .env 中出现的变量**一律注入**（用户数据为准，ADR
+///   2026-10-03-packaged-user-data-first：设置页写入的用户 .env 是 key 的
+///   唯一真值，ambient/系统环境不得压过它——否则 UI「已配置」与运行时
+///   实际解析分叉）；
+/// - 与 .env 一致仍注入（幂等，覆盖 ambient 残留同值）；
+/// - 保留名（AGENTOS_* / PATH 等系统关键变量，与内核配置面写侧
+///   is_reserved_env_name 同名单）不叠加——.env 写面已 422 拒绝，读侧
+///   兜底防手改文件越权改内核行为。
+///
+/// 首次调用建立快照基线（快照仅用于 delta 日志判定，不参与注入裁剪）；
+/// 读取失败静默返回空（spawn 走默认继承）。
 pub fn env_delta_overlay() -> Vec<(String, String)> {
     let Some(env_path) = project_env_path() else {
         return Vec::new();
@@ -160,42 +174,70 @@ pub fn env_delta_overlay() -> Vec<(String, String)> {
     let Ok(text) = std::fs::read_to_string(&env_path) else {
         return Vec::new();
     };
-    let current = parse_env_text(&text);
-
-    let Ok(mut snapshot) = ENV_SNAPSHOT.lock() else {
-        return Vec::new();
-    };
-    let prev = snapshot.as_ref();
+    let current: HashMap<String, String> = parse_env_text(&text)
+        .into_iter()
+        .filter(|(k, _)| !is_reserved_env_name(k))
+        .collect();
 
     let mut overlay = Vec::new();
-    for (key, value) in &current {
-        match std::env::var(key) {
-            // 环境缺失：注入（等价于内核启动时的「仅设缺失变量」规则）
-            Err(_) => overlay.push((key.clone(), value.clone())),
-            // 与 .env 一致：无需叠加
-            Ok(cur) if cur == *value => {}
-            // 与 .env 不一致：仅当当前值来自上次 .env 快照（.env 自身更新）才覆盖
-            Ok(cur) => {
-                let env_sourced = prev.map(|p| p.get(key) == Some(&cur)).unwrap_or(false);
-                if env_sourced {
-                    overlay.push((key.clone(), value.clone()));
-                }
+    {
+        let Ok(mut snapshot) = ENV_SNAPSHOT.lock() else {
+            return Vec::new();
+        };
+        let prev = snapshot.as_ref();
+
+        for (key, value) in &current {
+            // 用户数据为准：.env 出现即注入（覆盖 ambient/系统环境同值）。
+            // 快照仅判定「值是否自上次 .env 变化」供 delta 日志，不影响注入。
+            let env_sourced = prev.map(|p| p.get(key) == Some(value)).unwrap_or(false);
+            let ambient = std::env::var(key).ok();
+            let changed = ambient.as_deref() != Some(value.as_str());
+            if changed || env_sourced {
+                overlay.push((key.clone(), value.clone()));
             }
         }
-    }
 
-    if overlay.is_empty() {
-        debug!(target: "agentos-mcp::env_file", "env delta: none");
-    } else {
-        debug!(
-            target: "agentos-mcp::env_file",
-            "env delta: {} var(s) overlaid onto sidecar env",
-            overlay.len()
-        );
-    }
+        if overlay.is_empty() {
+            debug!(target: "agentos-mcp::env_file", "env delta: none");
+        } else {
+            debug!(
+                target: "agentos-mcp::env_file",
+                "env delta: {} var(s) overlaid onto sidecar env",
+                overlay.len()
+            );
+        }
 
-    *snapshot = Some(current);
+        *snapshot = Some(current);
+    }
     overlay
+}
+
+/// 用户 .env 注入侧的保留名兜底（与内核配置面写侧 is_reserved_env_name 同
+/// 名单语义）：AGENTOS_* 是内核行为开关、系统关键变量不得被配置文件改写。
+fn is_reserved_env_name(name: &str) -> bool {
+    let upper = name.to_uppercase();
+    if upper.starts_with("AGENTOS_") {
+        return true;
+    }
+    matches!(
+        upper.as_str(),
+        "PATH"
+            | "PATHEXT"
+            | "SYSTEMROOT"
+            | "SYSTEMDRIVE"
+            | "WINDIR"
+            | "COMSPEC"
+            | "HOMEDRIVE"
+            | "HOMEPATH"
+            | "USERPROFILE"
+            | "TEMP"
+            | "TMP"
+            | "PROGRAMFILES"
+            | "PROGRAMDATA"
+            | "APPDATA"
+            | "LOCALAPPDATA"
+            | "USERDOMAIN"
+    )
 }
 
 #[cfg(test)]
@@ -282,6 +324,72 @@ pub(crate) mod tests {
         std::env::remove_var("AGENTOS_CONFIG_ROOT");
         assert!(project_env_path().is_none());
         assert!(env_delta_overlay().is_empty());
+    }
+
+    #[test]
+    fn overlay_user_data_wins_and_reserved_names_guarded() {
+        // 用户数据为准（ADR 2026-10-03-packaged-user-data-first）：
+        //  - .env 与 ambient 同名不同值 → .env 值注入（用户赢）；
+        //  - .env 独有变量 → 注入；
+        //  - ambient 独有变量（不在 .env）→ 不出现（overlay 只承载 .env 面）；
+        //  - 保留名（AGENTOS_* / PATH）即便被手改进 .env 也不叠加。
+        let _guard = TEST_ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let user_var = format!("MCP_OV_USER_{}", uuid::Uuid::new_v4().simple());
+        let amb_var = format!("MCP_OV_AMB_{}", uuid::Uuid::new_v4().simple());
+        std::fs::create_dir_all(tmp.path().join("config")).unwrap();
+        std::fs::write(
+            tmp.path().join(".env"),
+            format!(
+                "{user_var}=from_dotenv\n{amb_var}=from_dotenv\nAGENTOS_OV_EVIL=x\nPATH=/evil\n"
+            ),
+        )
+        .unwrap();
+
+        struct Restore(Vec<(String, Option<String>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (k, v) in &self.0 {
+                    match v {
+                        Some(v) => std::env::set_var(k, v),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(vec![
+            (
+                "AGENTOS_CONFIG_ROOT".to_string(),
+                std::env::var("AGENTOS_CONFIG_ROOT").ok(),
+            ),
+            (
+                agentos_core::user_space::USER_ROOT_ENV.to_string(),
+                std::env::var(agentos_core::user_space::USER_ROOT_ENV).ok(),
+            ),
+            (user_var.clone(), std::env::var(&user_var).ok()),
+            (amb_var.clone(), std::env::var(&amb_var).ok()),
+        ]);
+
+        std::env::set_var("AGENTOS_CONFIG_ROOT", tmp.path().join("config"));
+        std::env::set_var(agentos_core::user_space::USER_ROOT_ENV, tmp.path());
+        // ambient 显式设一个与 .env 不同的值——用户数据必须赢
+        std::env::set_var(&user_var, "from_ambient");
+
+        let overlay = env_delta_overlay().into_iter().collect::<HashMap<_, _>>();
+        assert_eq!(
+            overlay.get(&user_var).map(String::as_str),
+            Some("from_dotenv"),
+            "ambient 同名不同值不得压过用户 .env"
+        );
+        assert_eq!(
+            overlay.get(&amb_var).map(String::as_str),
+            Some("from_dotenv"),
+            ".env 独有变量应注入"
+        );
+        assert!(
+            !overlay.contains_key("AGENTOS_OV_EVIL") && !overlay.contains_key("PATH"),
+            "保留名不得经 .env overlay 越权: {overlay:?}"
+        );
     }
 
     #[test]

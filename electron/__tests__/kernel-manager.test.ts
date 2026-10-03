@@ -36,7 +36,9 @@ import {
   resolvePackagedConfigUsersDir,
   resolvePackagedDbPath,
   resolveTokenSecret,
+  seedTreeMissingOnly,
   seedZonePolicyFiles,
+  resolvePackagedUserConfigDir,
   shutdownManagedKernel,
   waitForKernelHealth,
 } from "../kernel-manager";
@@ -92,9 +94,9 @@ describe("buildKernelEnv", () => {
     expect(env.AGENTOS_PLUGIN_IDLE_TIMEOUT_SECS).toBe("300");
   });
 
-  it("双源裁决置内置优先（BUG-55：用户空间陈旧副本不得压过打包新版）", () => {
+  it("双源裁决置用户优先（ADR 2026-10-03-packaged-user-data-first：用户空间副本是安装身份活跃真值）", () => {
     const env = buildKernelEnv({}, paths);
-    expect(env.AGENTOS_PLUGIN_SOURCE_PRIORITY).toBe("builtin");
+    expect(env.AGENTOS_PLUGIN_SOURCE_PRIORITY).toBe("user");
   });
 
   it("venv 自愈门开（装机链无 dev launcher，boot 后台 uv sync 重建缺 .venv 的 sidecar）", () => {
@@ -651,5 +653,66 @@ describe("seedZonePolicyFiles（包内名单首次播种，幂等非破坏）", 
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+describe("resolvePackagedUserConfigDir / seedTreeMissingOnly（用户数据为准，ADR 2026-10-03）", () => {
+  it("用户配置根 = <userRoot>/config；AGENTOS_USER_ROOT 显式生效", () => {
+    expect(resolvePackagedUserConfigDir({}, "C:/appdata")).toBe(
+      ["C:", "appdata", "agentos", "config"].join(path.sep),
+    );
+    expect(
+      resolvePackagedUserConfigDir({ AGENTOS_USER_ROOT: "D:/uroot" }, "C:/appdata"),
+    ).toBe(["D:", "uroot", "config"].join(path.sep));
+  });
+
+  it("播种补缺不覆盖：目标已有文件原样保留、缺失文件补齐、源缺失不动作", () => {
+    const exists = new Set<string>();
+    const copied: Array<[string, string]> = [];
+    const tree: Record<string, Array<{ name: string; isDirectory: () => boolean }>> = {};
+    const fsMod = {
+      existsSync: (p: fs.PathLike) => exists.has(String(p)),
+      mkdirSync: (p: fs.PathLike) => void exists.add(String(p)),
+      readdirSync: (p: fs.PathLike) => tree[String(p)] ?? [],
+      statSync: ((p: fs.PathLike) => ({
+        isDirectory: () => {
+          const e = tree[String(p)];
+          return Array.isArray(e);
+        },
+      })) as unknown as typeof fs.statSync,
+      copyFileSync: (a: fs.PathLike, b: fs.PathLike) =>
+        void copied.push([String(a), String(b)]),
+    } as unknown as typeof fs;
+
+    // 键一律 path.join 产出（与实现的逐层 join 同源，跨平台分隔符一致）
+    const cfg = ["C:", "res", "config"].join(path.sep);
+    const dst = ["C:", "uroot", "config"].join(path.sep);
+    const agentsDir = path.join(cfg, "agents");
+    exists.add(cfg);
+    tree[cfg] = [
+      { name: "agents", isDirectory: () => true },
+      { name: "llm.yaml", isDirectory: () => false },
+    ];
+    exists.add(path.join(dst, "llm.yaml")); // 用户已有 → 不覆盖
+    tree[agentsDir] = [
+      { name: "main.yaml", isDirectory: () => false },
+    ];
+
+    // 源根不存在 → 不动作、不抛错
+    expect(() =>
+      seedTreeMissingOnly(fsMod, ["C:", "nope"].join(path.sep), dst),
+    ).not.toThrow();
+
+    seedTreeMissingOnly(fsMod, cfg, dst);
+    expect(
+      copied.some(
+        ([, b]) => b === path.join(dst, "llm.yaml"),
+      ),
+    ).toBe(false);
+    expect(
+      copied.some(
+        ([, b]) => b === path.join(dst, "agents", "main.yaml"),
+      ),
+    ).toBe(true);
   });
 });

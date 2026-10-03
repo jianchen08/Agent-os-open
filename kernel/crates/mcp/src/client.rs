@@ -1906,11 +1906,13 @@ fn resolve_windows_command(command: &str) -> String {
 
 /// 把字符串里的 `${ENV_VAR}` 占位替换为环境变量值（含 `.env` overlay 回退）。
 ///
-/// 查找顺序（GAP-4a，与 stdio sidecar 的 spawn 叠加同语义）：**进程环境 →
-/// 项目 `.env` overlay**（[`crate::env_file::env_delta_overlay`] 的增量——只补
-/// 进程环境缺失的变量，绝不用 `.env` 覆盖系统显式设置的环境变量）。用户经
-/// 设置页把 key 写入 `.env` 后，HTTP MCP connect 时即可解析，无需重启内核
-/// （配合 invoker 的 `.env` mtime 指纹触发客户端重建，改动下次调用即生效）。
+/// 查找顺序（GAP-4a，与 stdio sidecar 的 spawn 叠加同语义）：**项目 `.env`
+/// overlay（用户数据为准）→ 进程环境**。`.env` 中出现的变量一律以 .env 值
+/// 解析（ADR 2026-10-03-packaged-user-data-first：设置页写入的用户 .env 是
+/// key 唯一真值，ambient/系统环境不得压过——否则 UI「已配置」与运行时实际
+/// 解析分叉）；保留名（AGENTOS_*/PATH 等）不参与 overlay。用户经设置页把
+/// key 写入 `.env` 后，HTTP MCP connect 时即可解析，无需重启内核（配合
+/// invoker 的 `.env` mtime 指纹触发客户端重建，改动下次调用即生效）。
 ///
 /// 引用的变量两处均未设置时报错（早暴露，不静默放行）——外部 MCP 端点的鉴权值
 /// 缺失通常意味着配置未就绪，连出去也会被 401 拒绝，不如在 connect 时直接失败。
@@ -1991,15 +1993,17 @@ fn resolve_env_placeholders_with(
     Ok(out)
 }
 
-/// 单变量查找：进程环境优先，缺失时回退 `.env` overlay（增量）。
+/// 单变量查找：`.env` overlay（用户数据为准）优先，缺失时回退进程环境。
 ///
-/// overlay 来自 [`crate::env_file::env_delta_overlay`]——其本身已按「系统环境
-/// 变量 > .env」过滤（只含进程环境缺失的变量），此处再显式按 进程环境 →
-/// overlay 的顺序查找，与 stdio sidecar 继承的子进程环境同语义。
+/// overlay 来自 [`crate::env_file::env_delta_overlay`]——其自身已按
+/// 「.env 一律覆盖 ambient（保留名除外）」产出，此处再显式按 overlay →
+/// 进程环境 的顺序查找，与 stdio sidecar 继承的子进程环境同语义
+/// （ADR 2026-10-03-packaged-user-data-first）。
 fn lookup_env_var(var: &str, overlay: &HashMap<String, String>) -> Option<String> {
-    std::env::var(var)
-        .ok()
-        .or_else(|| overlay.get(var).cloned())
+    overlay
+        .get(var)
+        .cloned()
+        .or_else(|| std::env::var(var).ok())
 }
 
 #[cfg(test)]
@@ -2801,20 +2805,23 @@ sys.stdin.readline()
     }
 
     #[test]
-    fn test_resolve_placeholders_process_env_priority_over_overlay() {
-        // 两者都有 → 进程环境优先（mock overlay）
+    fn test_resolve_placeholders_overlay_user_data_wins_over_process_env() {
+        // 两者都有 → .env（用户数据）优先（ADR 2026-10-03-packaged-user-data-first：
+        // 设置页写入的用户 .env 是 key 唯一真值，ambient 环境不得压过——否则
+        // UI「已配置」与运行时实际解析分叉）。
         std::env::set_var("MCP_PH_BOTH", "from_process");
         let overlay = HashMap::from([("MCP_PH_BOTH".to_string(), "from_dotenv".to_string())]);
         assert_eq!(
             resolve_env_placeholders_with("${MCP_PH_BOTH}", &overlay).unwrap(),
-            "from_process"
-        );
-        // 性质断言（优先级可逆）：进程环境删除后，同输入改取 overlay 值
-        std::env::remove_var("MCP_PH_BOTH");
-        assert_eq!(
-            resolve_env_placeholders_with("${MCP_PH_BOTH}", &overlay).unwrap(),
             "from_dotenv"
         );
+        // 性质断言（优先级可逆）：.env 移除该项后，同输入回落进程环境值
+        let empty: HashMap<String, String> = HashMap::new();
+        assert_eq!(
+            resolve_env_placeholders_with("${MCP_PH_BOTH}", &empty).unwrap(),
+            "from_process"
+        );
+        std::env::remove_var("MCP_PH_BOTH");
     }
 
     #[test]
@@ -2883,12 +2890,12 @@ sys.stdin.readline()
             resolve_env_placeholders(&format!("Bearer ${{{var}}}")).unwrap(),
             "Bearer from_dotenv"
         );
-        // 2) 两者都有 → 进程环境优先（真实 env_delta_overlay 语义：系统环境
-        //    显式设置的变量不进 overlay，此处非 vacuous 断言）
+        // 2) 两者都有 → .env（用户数据）优先（ADR 2026-10-03-packaged-user-data-first：
+        //    真实 env_delta_overlay 语义：.env 值覆盖 ambient，非 vacuous 断言）
         std::env::set_var(&var, "from_process");
         assert_eq!(
             resolve_env_placeholders(&format!("Bearer ${{{var}}}")).unwrap(),
-            "Bearer from_process"
+            "Bearer from_dotenv"
         );
 
         std::env::remove_var(&var);
@@ -4435,18 +4442,14 @@ sys.stdin.readline()
             "python 不可用——本用例依赖真实 python sidecar"
         );
         std::env::remove_var("AGENTOS_MCP_IT_EXTRA");
-        std::env::remove_var("AGENTOS_MCP_IT_DOTENV");
+        std::env::remove_var("MCP_IT_DOTENV");
 
         let workdir = tempfile::tempdir().expect("工作目录临时创建");
         let envroot = tempfile::tempdir().expect("项目根临时创建");
         std::fs::create_dir_all(envroot.path().join("config")).unwrap();
         // .env 落点＝<USER_ROOT>/.env（ADR 2026-09-13-unified-user-root）：
         // 临时目录同时充当项目根与用户空间根
-        std::fs::write(
-            envroot.path().join(".env"),
-            "AGENTOS_MCP_IT_DOTENV=from_dotenv\n",
-        )
-        .unwrap();
+        std::fs::write(envroot.path().join(".env"), "MCP_IT_DOTENV=from_dotenv\n").unwrap();
 
         // panic 安全地恢复两个进程级环境变量
         struct RestoreConfigRoot {
@@ -4476,7 +4479,7 @@ sys.stdin.readline()
         let script = concat!(
             "import sys, json, os\n",
             "req = json.loads(sys.stdin.readline())\n",
-            "sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': {'cwd': os.getcwd(), 'extra': os.environ.get('AGENTOS_MCP_IT_EXTRA', ''), 'dotenv': os.environ.get('AGENTOS_MCP_IT_DOTENV', '')}}) + '\\n'); sys.stdout.flush()\n",
+            "sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': {'cwd': os.getcwd(), 'extra': os.environ.get('AGENTOS_MCP_IT_EXTRA', ''), 'dotenv': os.environ.get('MCP_IT_DOTENV', '')}}) + '\\n'); sys.stdout.flush()\n",
         );
         let mut client = McpClient::new_stdio(
             python_exe().to_string(),
