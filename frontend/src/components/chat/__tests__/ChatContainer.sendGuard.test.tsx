@@ -78,6 +78,9 @@ vi.mock('@/hooks/queries/usePipelineRunsQuery', () => ({
 // 挂起态：避免挂载期网络调用在测试结束后 resolve 触发 act() 告警
 vi.mock('@/hooks/queries/useLlmQueries', () => ({
   useLlmConfigQuery: () => ({ data: undefined, isError: false }),
+  // 思考档位选项面（ChatContainer 声明数据源消费）：无数据 = 选择器隐藏，
+  // 本套件不断言思考面
+  useThinkingLevelsQuery: () => ({ data: undefined }),
 }))
 
 vi.mock('@/stores/agentTabStore', async () => {

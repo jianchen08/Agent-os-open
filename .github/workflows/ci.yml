@@ -490,8 +490,9 @@ jobs:
       # sccache，全局 env 的 RUSTC_WRAPPER 指向不存在二进制会直接失败。
       - name: Build native plugin artifacts (cdylib)
         run: |
+          # tool_core 已收窄为 Python sidecar（plugin.json 无 native 声明），
+          # 不再构建 cdylib；仅存 native 契约的两 output 插件在此列
           for crate in \
-            plugins/shared/pipeline/core/tool_core \
             plugins/shared/pipeline/output/sensitive_checker \
             plugins/shared/pipeline/output/spill_guard; do
             echo "::group::cargo build $crate"
@@ -775,8 +776,8 @@ jobs:
   #   --report-format json --report-path .github/gitleaks-baseline.json。
   # - fetch-depth: 0 必须：gitleaks 按 git log -p 全历史扫描，浅克隆下基线
   #   fingerprint（commit:file:rule:line）对不上会整体误红。
-  # - 本地生成基线与 CI 同参验证过（gitleaks 8.28.0，--log-opts=--all
-  #   → no leaks found）；改扫描参数须同步重生成基线。
+  # - 基线与 CI 同参验证（gitleaks 8.30.1，--log-opts=--all → no leaks
+  #   found）；改扫描参数须同步重生成基线。
   secret-scan:
     name: Secret scan (gitleaks)
     runs-on: ubuntu-latest
@@ -785,9 +786,11 @@ jobs:
         with:
           fetch-depth: 0  # 全历史扫描 + 基线 fingerprint 对齐
 
-      - name: Install gitleaks (pinned 8.28.0)
+      # 8.28.0 linux 构建在本仓 runner 上 10s 快速失败（8.28.0/8.30.1
+      # windows 二进制同参同基线复验均通过）；升级钉版 8.30.1。
+      - name: Install gitleaks (pinned 8.30.1)
         run: |
-          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_linux_x64.tar.gz -o /tmp/gitleaks.tgz
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o /tmp/gitleaks.tgz
           tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
           sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
           gitleaks version

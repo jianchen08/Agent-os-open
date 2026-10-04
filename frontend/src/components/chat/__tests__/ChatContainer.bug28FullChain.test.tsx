@@ -43,6 +43,9 @@ vi.mock('@/stores/pipelineMessageStore', async () => {
 })
 vi.mock('@/hooks/queries/useLlmQueries', () => ({
   useLlmConfigQuery: () => ({ data: undefined, isError: false }),
+  // 思考档位选项面（ChatContainer 声明数据源消费）：无数据 = 选择器隐藏，
+  // 本套件不断言思考面
+  useThinkingLevelsQuery: () => ({ data: undefined }),
 }))
 vi.mock('@/hooks/queries/useAgentsQuery', async () => {
   const { queryKeys } = await import('@/services/query/queryKeys')

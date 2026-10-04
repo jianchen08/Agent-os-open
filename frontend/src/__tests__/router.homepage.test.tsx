@@ -378,11 +378,13 @@ describe('handleSendMessage', () => {
     usePipelineMessageStore.setState((s) => ({
       streamingState: { ...s.streamingState, p1: { isStreaming: true, messageId: 'm-st' } },
     }))
-    await sendAndCapture({ content: '排队', pipelineId: 'p1', enableThinking: true, thinkingStrength: 'high' })
+    await sendAndCapture({ content: '排队', pipelineId: 'p1', thinkingStrength: 'high' })
     expect(mockWs.sendUserInput).toHaveBeenCalledTimes(1)
     const [, content, opts] = mockWs.sendUserInput.mock.calls[0]
     expect(content).toBe('排队')
-    expect(opts).toMatchObject({ pipelineId: 'p1', enableThinking: true, thinkingStrength: 'high' })
+    expect(opts).toMatchObject({ pipelineId: 'p1', thinkingStrength: 'high' })
+    // enableThinking 已随思考参数组化退役：出站载荷不得再携带该键
+    expect(opts).not.toHaveProperty('enableThinking')
     expect((opts as { clientMessageId: string }).clientMessageId).toBeTruthy()
     const pipeline = usePipelineMessageStore.getState()
     expect(pipeline.messagesByPipeline['p1'] ?? []).toHaveLength(0)

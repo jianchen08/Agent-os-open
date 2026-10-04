@@ -134,12 +134,6 @@ describe('constants/api — 参数化端点构造', () => {
     expect(result).not.toContain('{ac_id}')
   })
 
-  it('THINKING_MODE 两个参数化端点替换 {model_name}', () => {
-    expect(API_ENDPOINTS.THINKING_MODE.MODEL_INFO('claude/x')).toContain('claude/x')
-    expect(API_ENDPOINTS.THINKING_MODE.MODEL_INFO('claude/x')).not.toContain('{model_name}')
-    expect(API_ENDPOINTS.THINKING_MODE.CHECK_SUPPORT('claude/x')).not.toContain('{model_name}')
-  })
-
   it('INTERACTION 五个动作端点都替换 {request_id} 且路径互不相同', () => {
     const urls = [
       API_ENDPOINTS.INTERACTION.APPROVE('r1'),
