@@ -19,7 +19,7 @@
 /components/chat/ChatInputAttachmentPreview.tsx|bg=muted|fg=primary
 /components/chat/ContextUsageIndicator.tsx|bg=primary|fg=primary
 /components/chat/MessageItem.tsx|bg=background|fg=muted-foreground
-/components/chat/MessageItem.tsx|bg=background|fg=status-warning
+/components/chat/ToolMessageCard.tsx|bg=background|fg=status-warning
 /components/chat/MessageItem.tsx|bg=bubble-user|fg=status-error
 /components/chat/MessageItem.tsx|bg=bubble-user|fg=status-info
 /components/chat/NotificationCenter.tsx|bg=background|fg=primary

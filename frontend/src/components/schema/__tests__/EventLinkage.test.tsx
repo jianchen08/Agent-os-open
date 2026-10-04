@@ -27,6 +27,11 @@ vi.mock('@/hooks/queries/useSessionsQuery', () => ({
 const apiGet = vi.fn()
 const apiPost = vi.fn()
 const apiRequest = vi.fn()
+// 命名导出 apiClient：DeclaredWidgetLayer 的 FieldsUriResolver 用它拉取
+// fieldsUri 声明数据源（返回 form 可渲染的字段声明，与真端点响应同构）
+const apiClientGet = vi.fn(() =>
+  Promise.resolve({ data: { fields: [{ name: 'title', type: 'input', label: '标题' }] } }),
+)
 vi.mock('@/services/api/client', () => ({
   default: Object.assign(
     (...args: unknown[]) => apiRequest(...args),
@@ -35,6 +40,7 @@ vi.mock('@/services/api/client', () => ({
       post: (...args: unknown[]) => apiPost(...args),
     },
   ),
+  apiClient: { get: (...args: unknown[]) => apiClientGet(...args) },
 }))
 vi.mock('@/components/ui/sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn() },
