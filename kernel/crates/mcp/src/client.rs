@@ -245,6 +245,25 @@ fn is_outbound_url_allowed(url: &str) -> Result<(), McpError> {
             Ok(())
         };
     }
+    // 方括号 IPv6（url::host_str 保留括号，直接 parse 必失败）：去括号后按
+    // 字面 IP 同判。否则落到主机名解析分支——Linux glibc 对带括号串解析失败
+    // 走 fail-open 放行（[::1]/[fc00::] 特殊段绕过拦截；Windows 解析器反而
+    // 认得括号数值地址，故仅 Linux CI 暴露）。
+    let bare = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
+    if let Some(bare) = bare {
+        if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+            return if ip_address_blocked(ip, block_loopback) {
+                Err(McpError::ConnectionFailed {
+                    message: format!(
+                        "MCP http 出网被拒：{url} 命中禁止网段（私网/元数据/特殊段，环回{}放行）",
+                        if block_loopback { "不" } else { "" },
+                    ),
+                })
+            } else {
+                Ok(())
+            };
+        }
+    }
     // 主机名：解析后逐个 IP 校验
     use std::net::ToSocketAddrs;
     match (host.as_str(), 0).to_socket_addrs() {
@@ -396,9 +415,18 @@ mod outbound_guard_tests {
 
     /// 加固模式（AGENTOS_MCP_BLOCK_LOOPBACK=1）连环回一并拒绝——
     /// 环境变量经进程 globals，故本用例串行化在自身内完成（设置-断言-恢复）。
+    /// 恢复走 Drop 守卫：窗口内断言 panic 不得遗留 env=1 毒化后续并发用例
+    /// （一次实证：IPv6 方括号判缺失致本用例 panic，16 个环回 mock 用例连坐）。
     #[test]
     fn test_outbound_url_guard_block_loopback_env_hardens() {
+        struct EnvRestore;
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                std::env::remove_var("AGENTOS_MCP_BLOCK_LOOPBACK");
+            }
+        }
         let _guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        let _restore = EnvRestore;
         // 先确保未加固时环回放行（对照基线）
         std::env::remove_var("AGENTOS_MCP_BLOCK_LOOPBACK");
         assert!(is_outbound_url_allowed("http://127.0.0.1:11434").is_ok());
@@ -414,8 +442,7 @@ mod outbound_guard_tests {
         );
         // 公网不受加固影响
         assert!(is_outbound_url_allowed("https://api.openai.com/v1").is_ok());
-
-        std::env::remove_var("AGENTOS_MCP_BLOCK_LOOPBACK");
+        // env 恢复由 _restore Drop 守卫兜底（panic 安全）
     }
 }
 
