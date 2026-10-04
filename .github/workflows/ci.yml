@@ -382,16 +382,17 @@ jobs:
   #   由 python-heavy-suites job 免插桩并排执行，正确性信号不缩水。
   # 阈值守护：fail-under=50 会自动验证豁免名单正确性——若豁免套件实际
   # 独家贡献了覆盖率，本 job 当场红（misconfiguration fails loud）。
-  # 插桩车道拆 A/B 两 job（2026-10-04）：单 job 跑全量插桩套件（无论单/双
-  # pytest 进程）在标准 runner 上恒定 ~48 分钟墙处「runner lost communication」
-  # （#177/#178/#180/#188 与两轮探针实证；探针 meminfo 显示 14.8GB 可用，
-  # 非内存、非进程结构）。每 job 约 25 分钟控在墙内：A 半（前半测试集 +
-  # 失败数基线锁）产出 .coverage 经 artifact 传递；B 半（--cov-append 续跑
-  # 后半 + 失败锁 + 覆盖率基线 + 渠道 per-file + 改动行 100%）。测试集与
-  # 阈值承诺不变；本地串联 = 先跑 plugins-coverage 再跑 plugins-coverage-b
-  # （B 直接读 A 落盘的 .coverage）。
-  python-coverage:
-    name: Python Coverage A 半 (插桩 + 失败数基线)
+  # 插桩车道 4 并行分片 + 合并（2026-10-04）：单 CI job 跑全量插桩套件恒定
+  # ~48 分钟墙处「runner lost communication」（五轮实证 + 探针 meminfo 排除
+  # 内存）；根因 = 输出体量（-v 逐行 + term-missing 全表 + VERBOSE 全量打印
+  # 灌爆 job log 上传管道）。分片后每 job 只跑 ~1/4 测试集、pytest -q 静默、
+  # 只出 .coverage 不出 term 报表，输出体量与时长同时降一个量级。各分片
+  # .coverage 经 artifact 交给 merge job：coverage combine + xml + 覆盖率
+  # 地板锁 + 渠道 per-file + 改动行 100%。测试集与阈值承诺不变。四 job 显式
+  # 展开（元门禁 V1 按 workflow 文本字面匹配 --filter 引用，matrix 动态拼
+  # 无法过闸）。
+  python-coverage-a:
+    name: Python Coverage 插桩分片 a
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.python_full == 'true'
@@ -412,30 +413,152 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Sync dependencies from uv.lock (frozen, reproducible)
+        # --extra isolation：isolation docker timeout/manager 系测试 patch
+        #   ('docker.from_env')，需 docker 包（2026-09-01 实证）。
         run: |
           uv sync --frozen --extra dev --extra isolation
           uv pip install -e ./plugins/sdk
 
-      # 门禁：plugins-coverage-pairing（名单配对校验，瞬时）
-      #     + channel-copy-guard（渠道共享拷贝守卫，瞬时）
-      #     + plugins-mypy-baseline（plugins/shared mypy 只减不增；放 A 半填时，
-      #       与插桩互不依赖）
-      #     + plugins-coverage（插桩 A 半：pytest || true 经 tee 捕获 → 失败数
-      #       基线锁 .github/pytest-failure-baseline.txt 只减不增）
-      - name: Run gates (pairing + copy-guard + mypy baseline + coverage A-half)
-        run: python scripts/run_gates.py --filter plugins-coverage-pairing,channel-copy-guard,plugins-mypy-baseline,plugins-coverage
+      # 插桩分片 gate：pytest -q || true 经 tee 捕获 → 失败数基线锁
+      #   .github/pytest-failure-baseline.txt（lane plugins-coverage-a）。
+      # 瞬时闸（配对/渠道守卫）各分片均摊；mypy 基线锁（~8min）挂 a 分片。
+      - name: Run gates (shard a)
+        run: python scripts/run_gates.py --filter plugins-coverage-a,plugins-coverage-pairing,channel-copy-guard,plugins-mypy-baseline
 
-      - name: Upload coverage data (A 半 .coverage)
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Upload coverage data (shard a .coverage)
+        uses: actions/upload-artifact@v4
         with:
-          name: plugins-coverage-data
+          name: plugins-coverage-a
           path: .coverage
           retention-days: 1
-
+          if-no-files-found: error
   python-coverage-b:
-    name: Python Coverage B 半 (续插桩 + 覆盖率/改动行基线)
+    name: Python Coverage 插桩分片 b
     runs-on: ubuntu-latest
-    needs: python-coverage
+    needs: changes
+    if: needs.changes.outputs.python_full == 'true'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Sync dependencies from uv.lock (frozen, reproducible)
+        # --extra isolation：isolation docker timeout/manager 系测试 patch
+        #   ('docker.from_env')，需 docker 包（2026-09-01 实证）。
+        run: |
+          uv sync --frozen --extra dev --extra isolation
+          uv pip install -e ./plugins/sdk
+
+      # 插桩分片 gate：pytest -q || true 经 tee 捕获 → 失败数基线锁
+      #   .github/pytest-failure-baseline.txt（lane plugins-coverage-b）。
+      # 瞬时闸（配对/渠道守卫）各分片均摊；mypy 基线锁（~8min）挂 a 分片。
+      - name: Run gates (shard b)
+        run: python scripts/run_gates.py --filter plugins-coverage-b,plugins-coverage-pairing,channel-copy-guard
+
+      - name: Upload coverage data (shard b .coverage)
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugins-coverage-b
+          path: .coverage
+          retention-days: 1
+          if-no-files-found: error
+  python-coverage-c:
+    name: Python Coverage 插桩分片 c
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.python_full == 'true'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Sync dependencies from uv.lock (frozen, reproducible)
+        # --extra isolation：isolation docker timeout/manager 系测试 patch
+        #   ('docker.from_env')，需 docker 包（2026-09-01 实证）。
+        run: |
+          uv sync --frozen --extra dev --extra isolation
+          uv pip install -e ./plugins/sdk
+
+      # 插桩分片 gate：pytest -q || true 经 tee 捕获 → 失败数基线锁
+      #   .github/pytest-failure-baseline.txt（lane plugins-coverage-c）。
+      # 瞬时闸（配对/渠道守卫）各分片均摊；mypy 基线锁（~8min）挂 a 分片。
+      - name: Run gates (shard c)
+        run: python scripts/run_gates.py --filter plugins-coverage-c,plugins-coverage-pairing,channel-copy-guard
+
+      - name: Upload coverage data (shard c .coverage)
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugins-coverage-c
+          path: .coverage
+          retention-days: 1
+          if-no-files-found: error
+  python-coverage-d:
+    name: Python Coverage 插桩分片 d
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.python_full == 'true'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Sync dependencies from uv.lock (frozen, reproducible)
+        # --extra isolation：isolation docker timeout/manager 系测试 patch
+        #   ('docker.from_env')，需 docker 包（2026-09-01 实证）。
+        run: |
+          uv sync --frozen --extra dev --extra isolation
+          uv pip install -e ./plugins/sdk
+
+      # 插桩分片 gate：pytest -q || true 经 tee 捕获 → 失败数基线锁
+      #   .github/pytest-failure-baseline.txt（lane plugins-coverage-d）。
+      # 瞬时闸（配对/渠道守卫）各分片均摊；mypy 基线锁（~8min）挂 a 分片。
+      - name: Run gates (shard d)
+        run: python scripts/run_gates.py --filter plugins-coverage-d,plugins-coverage-pairing,channel-copy-guard
+
+      - name: Upload coverage data (shard d .coverage)
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugins-coverage-d
+          path: .coverage
+          retention-days: 1
+          if-no-files-found: error
+  python-coverage-merge:
+    name: Python Coverage 合并 (combine + 覆盖率/改动行基线)
+    runs-on: ubuntu-latest
+    needs: [python-coverage-a, python-coverage-b, python-coverage-c, python-coverage-d]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -458,22 +581,28 @@ jobs:
           uv sync --frozen --extra dev --extra isolation
           uv pip install -e ./plugins/sdk
 
-      - name: Download coverage data (A 半 .coverage)
-        uses: actions/download-artifact@d3d869066794cf05e42c09d2b9f6750cdd6d5b6f # v4
+      - name: Download coverage data (四分片 .coverage)
+        uses: actions/download-artifact@v4
         with:
-          name: plugins-coverage-data
+          pattern: plugins-coverage-?
+          merge-multiple: false
+          path: coverage-shards
 
-      # 门禁：plugins-coverage-b（插桩 B 半：--cov-append 续 A 半 .coverage →
-      #       失败数基线锁（lane plugins-coverage-b）→ 整体覆盖率基线锁
-      #       （2026-09-01 用户裁定 --skip 挂起恢复执法，D1 拍板 90 地板））
-      #     + channel-per-file-coverage（渠道三件逐文件 100%，消费本 job 产出的
-      #       coverage.xml）
+      - name: Place shard coverage files
+        run: |
+          for s in a b c d; do
+            mv "coverage-shards/plugins-coverage-$s/.coverage" ".coverage-$s"
+          done
+
+      # 门禁：plugins-coverage-merge（coverage combine + xml → 整体覆盖率基线锁，
+      #       D1 拍板 90 地板恢复执法）
+      #     + channel-per-file-coverage（渠道三件逐文件 100%，消费 coverage.xml）
       #     + plugins-diff-coverage（改动行 100%：PR 按 merge-base、push 查最后
       #       一个提交；[skip-diff-cov] 逃生口，ADR 2026-08-20）
-      - name: Run gates (coverage B-half + channel per-file + diff-coverage)
+      - name: Run gates (merge + channel per-file + diff-coverage)
         env:
           GITHUB_BASE_REF: ${{ github.base_ref }}
-        run: python scripts/run_gates.py --filter plugins-coverage-b,channel-per-file-coverage,plugins-diff-coverage
+        run: python scripts/run_gates.py --filter plugins-coverage-merge,channel-per-file-coverage,plugins-diff-coverage
 
 
   # ── Python Heavy Suites（免插桩 gate：重型套件并排执行）────────────────
@@ -934,8 +1063,11 @@ jobs:
       - rust-deny
       - python-lint
       - python-test
-      - python-coverage
+      - python-coverage-a
       - python-coverage-b
+      - python-coverage-c
+      - python-coverage-d
+      - python-coverage-merge
       - python-heavy-suites
       - python-related
       - frontend-endpoints-sync

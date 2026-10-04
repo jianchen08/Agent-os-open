@@ -12,7 +12,7 @@
 4. **有界并行**——按依赖图调度，AGENTOS_GATE_CONCURRENCY 控制上限；
    默认 cap 4（cargo/npm/pytest 同跑防内存爆）。
 
-覆盖率豁免：plugins-coverage（插桩，阈值守护）与 plugins-heavy（免插桩，
+覆盖率豁免：plugins-coverage-a..d（插桩四分片，合并 gate 过阈值）与 plugins-heavy（免插桩，
 94 插件子进程冒烟矩阵）拆两个并行 gate，全部测试仍执行——名单与配对
 校验见 scripts/coverage_exempt.py（单一名单点）。
 
@@ -21,7 +21,7 @@
     python scripts/run_gates.py --mode fast               # 本地廉价检查
     python scripts/run_gates.py --mode all                # 穷尽集
     python scripts/run_gates.py --mode kernel|plugins|frontend
-    python scripts/run_gates.py --filter kernel-fmt,plugins-coverage   # CI job 精确选择
+    python scripts/run_gates.py --filter kernel-fmt,plugins-coverage-a  # CI job 精确选择
 
 环境变量：
     AGENTOS_GATE_CONCURRENCY=N   并行上限（默认 min(CPU, 4)）
@@ -115,11 +115,12 @@ def _shell_join_pytest(args: list[str]) -> str:
     return " ".join(out)
 
 
-def _pytest_argv_halves(args: list[str]) -> tuple[list[str], list[str]]:
-    """按路径中点把 argv 一分为二；尾部选项（-m/--ignore）两段都携带。
+def _pytest_argv_shards(args: list[str], n: int) -> list[list[str]]:
+    """把 pytest argv 按路径中点切成 n 份；尾部选项（-m/--ignore）每份都携带。
 
-    用于把超长插桩套件拆成两个 pytest 进程顺序执行（CI 标准 runner 单
-    进程 ~49 分钟处资源耗尽失联，多轮实证），测试集合不变。
+    用于把超长插桩套件拆成 n 个 pytest 进程分片执行（CI 标准 runner 单
+    job 跑全量恒定 ~48 分钟「runner lost communication」，多轮实证），
+    测试集合不变。
     """
     tail_opts = len(args)
     for i, a in enumerate(args):
@@ -127,8 +128,8 @@ def _pytest_argv_halves(args: list[str]) -> tuple[list[str], list[str]]:
             tail_opts = i
             break
     paths, opts = args[:tail_opts], args[tail_opts:]
-    mid = len(paths) // 2
-    return paths[:mid] + opts, paths[mid:] + opts
+    size = -(-len(paths) // n)  # ceil
+    return [paths[i : i + size] + opts for i in range(0, len(paths), size)]
 
 
 GATES: list[Gate] = [
@@ -380,38 +381,84 @@ GATES: list[Gate] = [
             'python scripts/check_ruff_baseline.py --name plugins --from-file "$T"'
         ),
     ),
+    # ── 插桩车道 4 分片 + 合并（2026-10-04）─────────────────────────────
+    # 单 CI job 跑全量插桩套件（无论单/双 pytest 进程、无论测试集大小）恒定
+    # ~48 分钟墙处「runner lost communication」（#177/#178/#180/#188/#190 五
+    # 轮实证；探针 meminfo 14.8GB 可用排除内存）。根因=输出体量：-v 逐行 +
+    # term-missing 全表 + VERBOSE 把整段 pytest 流灌进 job log（AGENTS
+    # GATE_VERBOSE=1 下通过门禁也全量打印，run_gates._print_result），log
+    # 上传管道耗尽 → runner 失联；A 半只有一半测试仍撞同墙、探针看门狗 2 分
+    # 钟后心跳全灭皆与该假说自洽。故 4 并行分片（每片 ~1/4 测试集、静默输出
+    # -q、只出 .coverage 不出 term 报表）+ 合并 job（coverage combine + xml +
+    # 覆盖率地板锁）。测试集与阈值承诺不变；本地串联 = 依次跑 a/b/c/d（各落
+    # .coverage，merge 前 coverage combine 合并）。
     Gate(
-        id="plugins-coverage",
-        label="插件测试（插桩 A 半，免豁免重型套件）+ 失败数基线锁",
+        id="plugins-coverage-a",
+        label="插件测试（插桩分片 a）+ 失败数基线锁",
         domain="plugins",
-        # 插桩套件拆 A/B 两 gate 两 CI job（2026-10-04）：单 job 跑全量 12k+
-        # 用例（无论单/双进程）在 GitHub 标准 runner 上恒定 ~48 分钟墙处
-        # 「runner lost communication」（#177/#178/#180/#188 + 两轮探针实证；
-        # 探针 meminfo 显示 14.8GB 可用，非内存）。每 job 控制在墙内
-        # （各约 25 分钟）：A 半跑前半 + 失败锁；B 半（plugins-coverage-b）
-        # --cov-append 续跑后半 + 失败锁 + 覆盖率基线锁。测试集与阈值承诺
-        # 不变；.coverage 经 CI artifact 在两 job 间传递（本地串联两 gate
-        # 同样成立——B 直接读 A 落盘的 .coverage）。
         shell=(
-            "T=$(mktemp); ( uv run --frozen python -m pytest -v "
-            + _shell_join_pytest(_pytest_argv_halves(coverage_exempt.instrumented_args())[0])
-            + " --cov=plugins --cov-report=term-missing"
+            "T=$(mktemp); ( uv run --frozen python -m pytest -q "
+            + _shell_join_pytest(_pytest_argv_shards(coverage_exempt.instrumented_args(), 4)[0])
+            + " --cov=plugins"
             + ' 2>&1 || true ) | tee "$T"; '
-            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage --from-file "$T"'
+            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage-a --from-file "$T"'
         ),
         env=_PLUGINS_ENV,
     ),
     Gate(
         id="plugins-coverage-b",
-        label="插件测试（插桩 B 半，续 .coverage）+ 失败数/覆盖率基线锁",
+        label="插件测试（插桩分片 b）+ 失败数基线锁",
         domain="plugins",
-        needs=("plugins-coverage",),
         shell=(
-            "T=$(mktemp); ( uv run --frozen python -m pytest -v "
-            + _shell_join_pytest(_pytest_argv_halves(coverage_exempt.instrumented_args())[1])
-            + " --cov=plugins --cov-append --cov-report=term-missing --cov-report=xml:coverage.xml"
+            "T=$(mktemp); ( uv run --frozen python -m pytest -q "
+            + _shell_join_pytest(_pytest_argv_shards(coverage_exempt.instrumented_args(), 4)[1])
+            + " --cov=plugins"
             + ' 2>&1 || true ) | tee "$T"; '
-            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage-b --from-file "$T" '
+            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage-b --from-file "$T"'
+        ),
+        env=_PLUGINS_ENV,
+    ),
+    Gate(
+        id="plugins-coverage-c",
+        label="插件测试（插桩分片 c）+ 失败数基线锁",
+        domain="plugins",
+        shell=(
+            "T=$(mktemp); ( uv run --frozen python -m pytest -q "
+            + _shell_join_pytest(_pytest_argv_shards(coverage_exempt.instrumented_args(), 4)[2])
+            + " --cov=plugins"
+            + ' 2>&1 || true ) | tee "$T"; '
+            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage-c --from-file "$T"'
+        ),
+        env=_PLUGINS_ENV,
+    ),
+    Gate(
+        id="plugins-coverage-d",
+        label="插件测试（插桩分片 d）+ 失败数基线锁",
+        domain="plugins",
+        shell=(
+            "T=$(mktemp); ( uv run --frozen python -m pytest -q "
+            + _shell_join_pytest(_pytest_argv_shards(coverage_exempt.instrumented_args(), 4)[3])
+            + " --cov=plugins"
+            + ' 2>&1 || true ) | tee "$T"; '
+            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage-d --from-file "$T"'
+        ),
+        env=_PLUGINS_ENV,
+    ),
+    Gate(
+        id="plugins-coverage-merge",
+        label="覆盖率合并（coverage combine + xml）+ 整体基线锁",
+        domain="plugins",
+        needs=(
+            "plugins-coverage-a",
+            "plugins-coverage-b",
+            "plugins-coverage-c",
+            "plugins-coverage-d",
+        ),
+        # 四分片各自落 .coverage；合并前置条件 = 工作树已备好 .coverage-a..d
+        # （CI 由 merge job 的 artifact 下载步落位；本地 = 依次跑四分片后改名）。
+        shell=(
+            "uv run --frozen coverage combine .coverage-a .coverage-b .coverage-c .coverage-d && "
+            "uv run --frozen coverage xml -o coverage.xml "
             # D1 拍板（2026-09-24）：整体基线 100.00→90.0 并摘除 --skip 恢复执法
             # （插桩基集实测 ~98.5 绿）；旧挂起理由（Windows/Linux 恒差 vs 100
             # 压力线）随 90 目标口径失效。

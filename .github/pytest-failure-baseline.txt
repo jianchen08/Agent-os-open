@@ -40,5 +40,7 @@
 # 实测全绿；构成含新接入 tests/suites/connectors/unit/monitoring/multimodal
 # 等 9 条白名单后无回归）。当前生效值即本段下方 0/0 两行。
 plugins-heavy_failed=0
-plugins-coverage_failed=0
+plugins-coverage-a_failed=0
 plugins-coverage-b_failed=0
+plugins-coverage-c_failed=0
+plugins-coverage-d_failed=0

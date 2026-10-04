@@ -18,11 +18,11 @@ lint-frontend | frontend-lint | covered |
 typecheck-python | sdk-mypy,plugins-mypy-baseline | covered |
 typecheck-frontend | frontend-typecheck,electron-compile | covered |
 tests-rust | kernel-test | covered |
-tests-python | plugins-coverage,plugins-heavy | covered |
+tests-python | plugins-coverage-a,plugins-coverage-b,plugins-coverage-c,plugins-coverage-d,plugins-heavy | covered |
 tests-frontend | frontend-coverage | covered |
 build | kernel-build,kernel-build-release | covered |
 coverage-rust | kernel-coverage | covered | 执法挂起（--skip，批次3恢复）；车道在跑
-coverage-python | plugins-coverage | covered | 同上
+coverage-python | plugins-coverage-merge | covered | 插桩四分片合并后过覆盖率地板（分片 gate 见 tests-python 行）
 dep-vuln-rust | rust-deny | covered |
 secret-scan | ci:secret-scan | covered | CI 内联 job（gitleaks 全历史，恒跑）
 license-rust | rust-deny | covered | 仅 Rust；Py/JS 许可证扫描行业可选级未单列
