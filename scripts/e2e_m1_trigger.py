@@ -10,12 +10,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import tempfile
 import time
 import urllib.error
 import urllib.request
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+log = logging.getLogger("e2e-m1")
 
 BASE = os.environ.get("AGENTOS_KERNEL_URL", "http://127.0.0.1:9100")
 PASSWORD = os.environ["AGENTOS_ADMIN_PASSWORD"]
@@ -37,12 +41,12 @@ def _login() -> str:
 
 def main() -> None:
     token = _login()
-    print("[1] login ok")
+    log.info("[1] login ok")
 
     thread = _request("/api/v1/sessions", {"title": "M1-e2e-v5", "intent": "e2e"}, token)
     thread_id = thread.get("thread_id") or (thread.get("data") or {}).get("thread_id")
     assert thread_id, f"建线程响应无 thread_id: {json.dumps(thread)[:200]}"
-    print(f"[2] thread_id={thread_id}")
+    log.info(f"[2] thread_id={thread_id}")
 
     # 派发最小任务 → 产生真实 12-hex 管道（chat.send_message 契约要求 12-hex）。
     ticket = _request("/api/v1/ws-ticket", {}, token)["ticket"]
@@ -73,7 +77,7 @@ def main() -> None:
                 continue
             if frame.get("type") in ("stream_end", "stream_error", "error"):
                 break
-    print("[2b] 任务已派发（LLM 失败不影响管道 id 产生）")
+    log.info("[2b] 任务已派发（LLM 失败不影响管道 id 产生）")
     time.sleep(2)
 
     # 从聚合读面解析该会话的 12-hex 管道 id。管道创建与 session_id 落读面
@@ -91,7 +95,7 @@ def main() -> None:
             break
         time.sleep(2)
     assert pipe, f"聚合读面 30s 内未找到会话对应管道: {json.dumps(state)[:300]}"
-    print(f"[2c] pipeline_id={pipe}")
+    log.info(f"[2c] pipeline_id={pipe}")
 
     t2 = _request(
         "/ext/trigger_setup_tool/triggers",
@@ -108,7 +112,7 @@ def main() -> None:
     t2body = t2data if isinstance(t2data, dict) else t2
     t2id = (t2body.get("trigger") or {}).get("trigger_id") or t2body.get("trigger_id")
     assert t2id, f"T2 注册失败: {json.dumps(t2)[:300]}"
-    print(f"[3] T2 registered: {t2id}")
+    log.info(f"[3] T2 registered: {t2id}")
     time.sleep(1)
 
     k2key = f"task.trigger.registry.{t2id}"
@@ -125,7 +129,7 @@ def main() -> None:
     v1 = row[0]
     assert isinstance(v1, str), f"K2 值非字符串: {v1!r:.120}"
     assert "'" not in v1, f"K2 值不可用作条件字面量: {v1[:120]}"
-    print(f"[4] K2 value read (len={len(v1)})")
+    log.info(f"[4] K2 value read (len={len(v1)})")
 
     t1 = _request(
         "/ext/trigger_setup_tool/triggers",
@@ -144,10 +148,10 @@ def main() -> None:
     t1body = t1data if isinstance(t1data, dict) else t1
     t1id = (t1body.get("trigger") or {}).get("trigger_id") or t1body.get("trigger_id")
     assert t1id, f"T1 注册失败: {json.dumps(t1)[:300]}"
-    print(f"[5] T1 registered: {t1id} (armed on K2 change)")
+    log.info(f"[5] T1 registered: {t1id} (armed on K2 change)")
 
     fired_manual = _request(f"/ext/trigger_setup_tool/triggers/{t2id}/trigger", {}, token)
-    print(f"[6] manual fire T2: {json.dumps(fired_manual)[:150]}")
+    log.info(f"[6] manual fire T2: {json.dumps(fired_manual)[:150]}")
 
     ok = False
     detail: dict = {}
@@ -156,7 +160,8 @@ def main() -> None:
         try:
             token = _login()  # token 过期自愈
             q = _request(f"/ext/trigger_setup_tool/triggers/{t1id}", None, token, method="GET")
-        except urllib.error.HTTPError:
+        except urllib.error.HTTPError as exc:
+            log.info("[poll] HTTP %s（轮询继续）", exc.code)
             continue
         qdata = q.get("data")
         d = qdata if isinstance(qdata, dict) else q
@@ -166,7 +171,7 @@ def main() -> None:
         if isinstance(fc, int) and fc >= 1:
             ok = True
             break
-    print(f"[7] T1 fired={ok} fire_count={detail.get('fire_count')} status={detail.get('status')}")
+    log.info(f"[7] T1 fired={ok} fire_count={detail.get('fire_count')} status={detail.get('status')}")
     sys.exit(0 if ok else 1)
 
 
