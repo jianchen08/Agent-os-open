@@ -715,4 +715,43 @@ describe("resolvePackagedUserConfigDir / seedTreeMissingOnly（用户数据为�
       ),
     ).toBe(true);
   });
+
+  it("升级场景：包内配置变更/新增，用户已有文件内容一字节不动（打包后不覆盖用户已有配置）", () => {
+    const userWritten = new Map<string, string>(); // 目标已有内容（用户数据）
+    const copied: Array<[string, string]> = [];
+    const tree: Record<string, Array<{ name: string; isDirectory: () => boolean }>> = {};
+    const files = new Map<string, string>(); // 源侧文件内容
+    const fsMod = {
+      existsSync: (p: fs.PathLike) =>
+        files.has(String(p)) || userWritten.has(String(p)) || tree[String(p)] !== undefined,
+      mkdirSync: () => void 0,
+      readdirSync: (p: fs.PathLike) => tree[String(p)] ?? [],
+      statSync: ((p: fs.PathLike) => ({
+        isDirectory: () => tree[String(p)] !== undefined,
+      })) as unknown as typeof fs.statSync,
+      copyFileSync: (a: fs.PathLike, b: fs.PathLike) => {
+        copied.push([String(a), String(b)]);
+        userWritten.set(String(b), files.get(String(a)) ?? "");
+      },
+    } as unknown as typeof fs;
+
+    const cfg = ["C:", "res", "config"].join(path.sep);
+    const dst = ["C:", "uroot", "config"].join(path.sep);
+    const userKey = path.join(dst, "llm.yaml");
+    // 用户既有：自定义 key（用户数据，非出厂内容）
+    userWritten.set(userKey, "providers: my-own: sk-user-own");
+    tree[cfg] = [
+      { name: "llm.yaml", isDirectory: () => false },
+      { name: "new-feature.yaml", isDirectory: () => false },
+    ];
+    files.set(path.join(cfg, "llm.yaml"), "providers: factory: placeholder");
+    files.set(path.join(cfg, "new-feature.yaml"), "flag: true");
+
+    seedTreeMissingOnly(fsMod, cfg, dst);
+
+    // 新出厂文件补进来；用户已有文件既不在 copy 名单、内容一字节不变
+    expect(userWritten.get(path.join(dst, "new-feature.yaml"))).toBe("flag: true");
+    expect(copied.some(([, b]) => b === userKey)).toBe(false);
+    expect(userWritten.get(userKey)).toBe("providers: my-own: sk-user-own");
+  });
 });
