@@ -115,6 +115,22 @@ def _shell_join_pytest(args: list[str]) -> str:
     return " ".join(out)
 
 
+def _pytest_argv_halves(args: list[str]) -> tuple[list[str], list[str]]:
+    """按路径中点把 argv 一分为二；尾部选项（-m/--ignore）两段都携带。
+
+    用于把超长插桩套件拆成两个 pytest 进程顺序执行（CI 标准 runner 单
+    进程 ~49 分钟处资源耗尽失联，多轮实证），测试集合不变。
+    """
+    tail_opts = len(args)
+    for i, a in enumerate(args):
+        if a == "-m" or a.startswith("--"):
+            tail_opts = i
+            break
+    paths, opts = args[:tail_opts], args[tail_opts:]
+    mid = len(paths) // 2
+    return paths[:mid] + opts, paths[mid:] + opts
+
+
 GATES: list[Gate] = [
     # ── 内核（Rust，kernel/）──────────────────────────────────────────
     Gate(
@@ -368,12 +384,23 @@ GATES: list[Gate] = [
         id="plugins-coverage",
         label="插件测试（插桩，免豁免重型套件）+ 失败数基线锁 + 覆盖率基线锁",
         domain="plugins",
+        # 两段顺序执行（2026-10-04）：单进程插桩 12k+ 用例在 GitHub 标准
+        # runner 上 ~49 分钟处资源耗尽失联（#177/#178/#180 三轮实证）；拆两
+        # 个 pytest 进程各跑一半——失败数基线各查一次（基线 0，语义等价；
+        # 解析器只认最后一段汇总行，故不可合并两段到同一文件判），覆盖率第
+        # 二段 --cov-append 合并后统一过覆盖率基线锁；测试集与阈值承诺不变。
         shell=(
-            "T=$(mktemp); ( uv run --frozen python -m pytest -v "
-            + _shell_join_pytest(coverage_exempt.instrumented_args())
+            "T1=$(mktemp); T2=$(mktemp); "
+            "( uv run --frozen python -m pytest -v "
+            + _shell_join_pytest(_pytest_argv_halves(coverage_exempt.instrumented_args())[0])
             + " --cov=plugins --cov-report=term-missing --cov-report=xml:coverage.xml"
-            + ' 2>&1 || true ) | tee "$T"; '
-            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage --from-file "$T" '
+            + ' 2>&1 || true ) | tee "$T1"; '
+            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage --from-file "$T1" && '
+            "( uv run --frozen python -m pytest -v "
+            + _shell_join_pytest(_pytest_argv_halves(coverage_exempt.instrumented_args())[1])
+            + " --cov=plugins --cov-append --cov-report=term-missing --cov-report=xml:coverage.xml"
+            + ' 2>&1 || true ) | tee "$T2"; '
+            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage --from-file "$T2" '
             # D1 拍板（2026-09-24）：整体基线 100.00→90.0 并摘除 --skip 恢复执法
             # （插桩基集实测 ~98.5 绿）；旧挂起理由（Windows/Linux 恒差 vs 100
             # 压力线）随 90 目标口径失效。
