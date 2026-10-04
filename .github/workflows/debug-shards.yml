@@ -21,8 +21,7 @@ jobs:
       - name: Run shard a
         run: |
           T=$(mktemp)
-          ( uv run --frozen python -m pytest -q plugins/test_system_plugins.py --co -q > /dev/null 2>&1 || true )
-          ( uv run --frozen python -m pytest -q plugins/shared/system/llm/ plugins/shared/system/tasks/ plugins/shared/modes/ plugins/shared/pipeline/input/agent_config_load/ plugins/shared/pipeline/core/tool_core/ plugins/shared/pipeline/output/result_format/ plugins/shared/pipeline/input/mode_material_inject/ plugins/shared/pipeline/input/environment_lifecycle/ plugins/shared/pipeline/input/level_guard/ plugins/shared/pipeline/input/multimodal_preprocessor/ plugins/shared/pipeline/input/tool_schema/ plugins/shared/pipeline/output/duplicate_check/ plugins/shared/tools/task/ plugins/shared/tools/human/ plugins/shared/tools/lsp/ plugins/shared/tools/task_evaluate/ plugins/shared/tools/web_ext/ plugins/shared/tools/builtin_tools/tests/ plugins/shared/system/dsh_adapter/tests/ tests/plugins/ tests/suites/plugins/ tests/channels/ tests/gates/ --cov=plugins 2>&1 || true ) | tee "$T"
+          ( uv run --frozen python -m pytest -q plugins/shared/system/llm/ plugins/shared/system/tasks/ plugins/shared/modes/ plugins/shared/pipeline/input/agent_config_load/ plugins/shared/pipeline/core/tool_core/ plugins/shared/pipeline/output/result_format/ plugins/shared/pipeline/input/mode_material_inject/ plugins/shared/pipeline/input/environment_lifecycle/ plugins/shared/pipeline/input/level_guard/ plugins/shared/pipeline/input/multimodal_preprocessor/ plugins/shared/pipeline/input/tool_schema/ plugins/shared/pipeline/output/duplicate_check/ plugins/shared/tools/task/ plugins/shared/tools/human/ plugins/shared/tools/lsp/ plugins/shared/tools/task_evaluate/ plugins/shared/tools/web_ext/ plugins/shared/tools/builtin_tools/tests/ plugins/shared/system/dsh_adapter/tests/ tests/plugins/ tests/suites/plugins/ tests/channels/ tests/gates/ tests/test_security_check_allow_priority.py tests/test_security_check_isolation.py tests/test_track_stats_contract.py tests/test_process_watchdog_integration.py tests/test_isolation_docker_timeout.py tests/test_isolation_container_self_heal.py tests/test_isolation_checkpoint_security.py tests/test_isolation_concurrent_create.py tests/test_isolation_docker_provider_injection.py tests/test_isolation_io_error_self_heal.py tests/test_isolation_prune_throttle.py tests/test_isolation_sandbox.py --cov=plugins 2>&1 || true ) | tee "$T"
           grep -E "^(FAILED|ERROR)" "$T" | head -40 > /tmp/fails.txt || true
           grep -E "=+ .*(passed|failed|error)" "$T" | tail -2 >> /tmp/fails.txt || true
       - name: Post failures
@@ -33,6 +32,40 @@ jobs:
           body = pathlib.Path('/tmp/fails.txt').read_text(errors='replace')
           sha = os.environ["GITHUB_SHA"]; token = os.environ["GITHUB_TOKEN"]
           data = json.dumps({"body": "shard-a failures:\n```\n" + body[:50000] + "\n```"}).encode()
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/jianchen08/Agent-os-open/commits/{sha}/comments",
+              data=data, headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}, method="POST")
+          with urllib.request.urlopen(req) as r:
+              print("status", r.status)
+          PYEOF
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  shard-d:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with: { enable-cache: true, cache-dependency-glob: "uv.lock" }
+      - run: |
+          uv sync --frozen --extra dev --extra isolation
+          uv pip install -e ./plugins/sdk
+      - name: Run shard d
+        run: |
+          T=$(mktemp)
+          ( uv run --frozen python -m pytest -q tests/test_security_check_permission_modes.py tests/test_security_check_signature.py tests/test_security_check_soft_block_loop.py tests/test_sensitive_paths.py tests/test_startup_env_adaptation.py tests/test_startup_scripts_fix.py tests/test_tool_block_not_end_pipeline.py tests/test_tool_schema_drift_detection.py tests/test_tool_schema_validator.py tests/test_watchdog_per_process_memory.py tests/test_workspace_frontend.py tests/test_utils/ tests/tools/builtin/ plugins/shared/system/cost_control/ plugins/shared/pipeline/input/tool_args_inject/ tests/test_agent_config_load_gaps.py tests/test_agent_config_load_mode_agent_key.py plugins/shared/system/review/test_review_gaps.py plugins/shared/system/review/test_improvement.py tests/test_host_shared_gaps.py tests/test_model_prompt_adapter_gaps.py plugins/shared/system/review/test_review_service_gaps.py tests/test_pipeline_base_gaps.py tests/test_llm_core_track_wiring.py tests/test_llm_core_track_manifest.py plugins/shared/pipeline/core/llm_core/test_llm_core_server_execute.py tests/test_host_shared_modules_gaps.py tests/test_metrics_admin_server_gaps.py tests/test_task_form_server_gaps.py tests/test_tool_cache_gaps.py tests/test_tool_result_protocol_sweep.py tests/test_artifacts_gaps.py tests/test_workspace_lifecycle_gaps.py --cov=plugins 2>&1 || true ) | tee "$T"
+          grep -E "^(FAILED|ERROR)" "$T" | head -40 > /tmp/fails.txt || true
+          grep -E "=+ .*(passed|failed|error)" "$T" | tail -2 >> /tmp/fails.txt || true
+      - name: Post failures
+        if: always()
+        run: |
+          python3 - <<'PYEOF'
+          import os, json, urllib.request, pathlib
+          body = pathlib.Path('/tmp/fails.txt').read_text(errors='replace')
+          sha = os.environ["GITHUB_SHA"]; token = os.environ["GITHUB_TOKEN"]
+          data = json.dumps({"body": "shard-d failures:\n```\n" + body[:50000] + "\n```"}).encode()
           req = urllib.request.Request(
               f"https://api.github.com/repos/jianchen08/Agent-os-open/commits/{sha}/comments",
               data=data, headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}, method="POST")
