@@ -5981,6 +5981,12 @@ async fn test_run_freeze_dump_writes_report_with_fake_spy() {
         std::fs::write(&fake, "@echo off\r\necho Thread 0x1 (idle): run_loop\r\n").unwrap();
     } else {
         std::fs::write(&fake, "#!/bin/sh\necho 'Thread 0x1 (idle): run_loop'\n").unwrap();
+        // unix 直接执行脚本须带执行位（Windows .cmd 无此语义）
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
     let out_dir = dir.path().join("dumps");
     let got = PluginInvokerImpl::run_freeze_dump(
