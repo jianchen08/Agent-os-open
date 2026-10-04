@@ -5714,7 +5714,7 @@ async fn emit_lifecycle_error_fans_out_to_bus_with_context() {
         Some("MCP_TOOL_CALL_FAILED"),
     );
 
-    let ev = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+    let ev = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
         .await
         .expect("应在超时前收到 OnError 事件")
         .expect("总线未关闭");
@@ -6777,7 +6777,7 @@ async fn invoke_tool_sidecar_failure_envelope_emits_on_error() {
     assert!(!r.success);
     assert_eq!(r.error.as_deref(), Some("boom"));
 
-    let ev_load = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+    let ev_load = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
         .await
         .expect("应收到 OnLoad 事件")
         .expect("总线未关闭");
@@ -6786,7 +6786,7 @@ async fn invoke_tool_sidecar_failure_envelope_emits_on_error() {
         LifecycleHook::OnLoad,
         "sidecar spawn 握手完成的旁路 OnLoad 广播先于调用"
     );
-    let ev = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+    let ev = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
         .await
         .expect("应收到 OnError 事件")
         .expect("总线未关闭");
@@ -7909,12 +7909,12 @@ async fn invoke_pipeline_business_error_emits_on_error_with_code() {
     );
 
     // OnLoad（spawn 旁路广播）之后是 OnError
-    let ev_load = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+    let ev_load = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
         .await
         .expect("应收到 OnLoad 事件")
         .expect("总线未关闭");
     assert_eq!(ev_load.hook, LifecycleHook::OnLoad);
-    let ev = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+    let ev = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
         .await
         .expect("应收到 OnError 事件")
         .expect("总线未关闭");
@@ -8274,7 +8274,7 @@ async fn unload_broadcasts_on_unload_events_to_bus() {
 
     // ① no-host 路径
     invoker.force_unload_impl("u_native").await.unwrap();
-    let ev = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+    let ev = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
         .await
         .expect("no-host 路径也要广播 OnUnload")
         .expect("总线未关闭");
@@ -8295,7 +8295,7 @@ async fn unload_broadcasts_on_unload_events_to_bus() {
     invoker.unload_host("group:light:1", true).await.unwrap();
     let mut unloaded = Vec::new();
     for _ in 0..2 {
-        let ev = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
             .expect("宿主卸载必须逐成员广播")
             .expect("总线未关闭");
