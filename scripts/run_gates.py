@@ -382,25 +382,36 @@ GATES: list[Gate] = [
     ),
     Gate(
         id="plugins-coverage",
-        label="插件测试（插桩，免豁免重型套件）+ 失败数基线锁 + 覆盖率基线锁",
+        label="插件测试（插桩 A 半，免豁免重型套件）+ 失败数基线锁",
         domain="plugins",
-        # 两段顺序执行（2026-10-04）：单进程插桩 12k+ 用例在 GitHub 标准
-        # runner 上 ~49 分钟处资源耗尽失联（#177/#178/#180 三轮实证）；拆两
-        # 个 pytest 进程各跑一半——失败数基线各查一次（基线 0，语义等价；
-        # 解析器只认最后一段汇总行，故不可合并两段到同一文件判），覆盖率第
-        # 二段 --cov-append 合并后统一过覆盖率基线锁；测试集与阈值承诺不变。
+        # 插桩套件拆 A/B 两 gate 两 CI job（2026-10-04）：单 job 跑全量 12k+
+        # 用例（无论单/双进程）在 GitHub 标准 runner 上恒定 ~48 分钟墙处
+        # 「runner lost communication」（#177/#178/#180/#188 + 两轮探针实证；
+        # 探针 meminfo 显示 14.8GB 可用，非内存）。每 job 控制在墙内
+        # （各约 25 分钟）：A 半跑前半 + 失败锁；B 半（plugins-coverage-b）
+        # --cov-append 续跑后半 + 失败锁 + 覆盖率基线锁。测试集与阈值承诺
+        # 不变；.coverage 经 CI artifact 在两 job 间传递（本地串联两 gate
+        # 同样成立——B 直接读 A 落盘的 .coverage）。
         shell=(
-            "T1=$(mktemp); T2=$(mktemp); "
-            "( uv run --frozen python -m pytest -v "
+            "T=$(mktemp); ( uv run --frozen python -m pytest -v "
             + _shell_join_pytest(_pytest_argv_halves(coverage_exempt.instrumented_args())[0])
-            + " --cov=plugins --cov-report=term-missing --cov-report=xml:coverage.xml"
-            + ' 2>&1 || true ) | tee "$T1"; '
-            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage --from-file "$T1" && '
-            "( uv run --frozen python -m pytest -v "
+            + " --cov=plugins --cov-report=term-missing"
+            + ' 2>&1 || true ) | tee "$T"; '
+            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage --from-file "$T"'
+        ),
+        env=_PLUGINS_ENV,
+    ),
+    Gate(
+        id="plugins-coverage-b",
+        label="插件测试（插桩 B 半，续 .coverage）+ 失败数/覆盖率基线锁",
+        domain="plugins",
+        needs=("plugins-coverage",),
+        shell=(
+            "T=$(mktemp); ( uv run --frozen python -m pytest -v "
             + _shell_join_pytest(_pytest_argv_halves(coverage_exempt.instrumented_args())[1])
             + " --cov=plugins --cov-append --cov-report=term-missing --cov-report=xml:coverage.xml"
-            + ' 2>&1 || true ) | tee "$T2"; '
-            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage --from-file "$T2" '
+            + ' 2>&1 || true ) | tee "$T"; '
+            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage-b --from-file "$T" '
             # D1 拍板（2026-09-24）：整体基线 100.00→90.0 并摘除 --skip 恢复执法
             # （插桩基集实测 ~98.5 绿）；旧挂起理由（Windows/Linux 恒差 vs 100
             # 压力线）随 90 目标口径失效。

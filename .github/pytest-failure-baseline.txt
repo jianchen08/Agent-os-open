@@ -41,3 +41,4 @@
 # 等 9 条白名单后无回归）。当前生效值即本段下方 0/0 两行。
 plugins-heavy_failed=0
 plugins-coverage_failed=0
+plugins-coverage-b_failed=0
