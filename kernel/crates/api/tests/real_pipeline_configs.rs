@@ -315,7 +315,7 @@ async fn autonomous_yaml_compiles_and_runs_merged_round() {
         vec![tool_core_updates(), tool_core_updates()],
     );
     let executor = make_executor(Arc::clone(&inv), &plugin_ids);
-    let compiled = compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids())
+    let compiled = compile_pipeline(&config, &StepLibrary::default(), executor.plugin_ids())
         .expect("真 autonomous.yaml 必须通过编译校验（含 loop_config）");
     let final_state = executor
         .run_compiled(
@@ -393,8 +393,8 @@ async fn autonomous_yaml_for_each_five_calls_batch() {
         .collect();
     inv.script("pipeline_tool_core", tool_script);
     let executor = make_executor(Arc::clone(&inv), &plugin_ids);
-    let compiled = compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids())
-        .expect("compile");
+    let compiled =
+        compile_pipeline(&config, &StepLibrary::default(), executor.plugin_ids()).expect("compile");
     let final_state = executor
         .run_compiled(
             &compiled,
@@ -425,9 +425,9 @@ async fn roleplay_yaml_text_round_ends_without_tools() {
         })],
     );
     let executor = make_executor(Arc::clone(&inv), &plugin_ids);
-    let compiled = compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids())
+    let compiled = compile_pipeline(&config, &StepLibrary::default(), executor.plugin_ids())
         .expect("真 roleplay.yaml 必须通过编译校验");
-    let final_state = executor
+    executor
         .run_compiled(&compiled, json!({"session_id": "s1"}))
         .await
         .expect("run 成功");
@@ -462,9 +462,9 @@ async fn roleplay_yaml_is_single_pass_without_tool_phase() {
         })],
     );
     let executor = make_executor(Arc::clone(&inv), &plugin_ids);
-    let compiled = compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids())
+    let compiled = compile_pipeline(&config, &StepLibrary::default(), executor.plugin_ids())
         .expect("真 roleplay.yaml 必须通过编译校验");
-    let final_state = executor
+    executor
         .run_compiled(&compiled, json!({"session_id": "s1"}))
         .await
         .expect("run 成功");

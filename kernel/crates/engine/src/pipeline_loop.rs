@@ -964,7 +964,7 @@ impl PipelineExecutor {
         }
         // ③ 其余顶层键 last-迭代-wins
         let journal = std::mem::take(&mut *iter_exec.step_key_journal.lock());
-        for (key, _) in &journal {
+        for key in journal.keys() {
             if key == "messages"
                 || key == as_name
                 || key == "ended"
@@ -1008,7 +1008,7 @@ impl PipelineExecutor {
     ///   （等价重复循环的链式可见性），迭代完即归并，终止/挂起即停（同串行循环）；
     /// - max_concurrency>1 / -1：有界并行快照——所有迭代从循环开始时的同一快照
     ///   克隆（迭代隔离），buffer_unordered 有界并发，全部完成后按迭代下标序归并。
-    /// 收尾：consume 清 over 源键、consume_keys 清 []（消费即清，杜绝跨轮陈旧）。
+    /// - 收尾：consume 清 over 源键、consume_keys 清 []（消费即清，杜绝跨轮陈旧）。
     async fn execute_parallel_for(
         &self,
         step: &CompiledStep,

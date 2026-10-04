@@ -4282,8 +4282,7 @@ fn test_foreach_compile_validation() {
     let mk = |lc: LoopConfig| foreach_pipeline(foreach_step(lc));
     let compile = |config: &PipelineConfig| {
         compile_pipeline(config, &StepLibrary::default(), &plugin_ids)
-            .err()
-            .expect("expect compile error")
+            .expect_err("expect compile error")
             .to_string()
     };
     // over 缺 as
