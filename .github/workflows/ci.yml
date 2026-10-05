@@ -422,8 +422,36 @@ jobs:
       # 插桩分片 gate：pytest -q || true 经 tee 捕获 → 失败数基线锁
       #   .github/pytest-failure-baseline.txt（lane plugins-coverage-a）。
       # 瞬时闸（配对/渠道守卫）各分片均摊；mypy 基线锁（~8min）挂 a 分片。
-      - name: Run gates (shard a)
-        run: python scripts/run_gates.py --filter plugins-coverage-a,plugins-coverage-pairing,channel-copy-guard,plugins-mypy-baseline
+      - name: Run gates (shard a) with stderr capture
+        run: |
+          T=$(mktemp); E=$(mktemp)
+          set +e
+          python scripts/run_gates.py --filter plugins-coverage-a,plugins-coverage-pairing,channel-copy-guard,plugins-mypy-baseline 2> "$E" 1> "$T"
+          echo "=== last 80 stdout ===" && tail -80 "$T"
+          echo "=== last 40 stderr ===" && tail -40 "$E"
+          cp "$E" /tmp/err.log || true
+          cp "$T" /tmp/out.log || true
+          test ! -s "$E"
+
+      - name: Post stderr to comment
+        if: always()
+        run: |
+          python3 - <<'PYEOF'
+          import os, json, urllib.request, pathlib
+          out = []
+          p = pathlib.Path('/tmp/err.log')
+          if p.exists():
+              out.append('stderr tail:' + chr(10) + '```' + chr(10) + p.read_text(errors='replace')[-25000:] + chr(10) + '```')
+          p2 = pathlib.Path('/tmp/out.log')
+          if p2.exists():
+              out.append('stdout tail:' + chr(10) + '```' + chr(10) + p2.read_text(errors='replace')[-25000:] + chr(10) + '```')
+          sha = os.environ["GITHUB_SHA"]; token = os.environ["GITHUB_TOKEN"]
+          data = json.dumps({"body": chr(10).join(out)}).encode()
+          req = urllib.request.Request(f"https://api.github.com/repos/jianchen08/Agent-os-open/commits/{sha}/comments", data=data, headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}, method="POST")
+          with urllib.request.urlopen(req) as r: print("status", r.status)
+          PYEOF
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload coverage data (shard a .coverage)
         uses: actions/upload-artifact@v4
