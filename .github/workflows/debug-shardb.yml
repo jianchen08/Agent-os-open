@@ -1,0 +1,79 @@
+name: Debug shardb watchdog
+on:
+  push:
+    branches: [debug/**]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with: { enable-cache: true, cache-dependency-glob: "uv.lock" }
+      - run: |
+          uv sync --frozen --extra dev --extra isolation
+          uv pip install -e ./plugins/sdk
+      - name: Start watchdog
+        run: |
+          cat > /tmp/watchdog.py <<'PYW'
+          import os, json, time, urllib.request, pathlib
+          sha = os.environ["GITHUB_SHA"]; token = os.environ["GITHUB_TOKEN"]
+          cid = None
+          def post(body):
+              global cid
+              data = json.dumps({"body": body[:60000]}).encode()
+              url = (f"https://api.github.com/repos/jianchen08/Agent-os-open/comments/{cid}" if cid
+                     else f"https://api.github.com/repos/jianchen08/Agent-os-open/commits/{sha}/comments")
+              req = urllib.request.Request(url, data=data,
+                  headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+                  method="PATCH" if cid else "POST")
+              with urllib.request.urlopen(req) as r:
+                  if cid is None: cid = json.load(r)["id"]
+          while True:
+              time.sleep(120)
+              try:
+                  p = pathlib.Path('/tmp/cur.log')
+                  lines = p.read_text(errors='replace').splitlines() if p.exists() else []
+                  tail = chr(10).join(lines[-6:])
+                  mem = pathlib.Path('/proc/meminfo').read_text().splitlines()[1]
+                  disk = os.popen('df -h / /tmp 2>/dev/null | tail -2').read()
+                  post(f"progress @ {time.strftime('%H:%M:%S')} {mem}" + chr(10) + disk + chr(10) + "```" + chr(10) + tail + chr(10) + "```")
+              except Exception:
+                  pass
+          PYW
+          nohup python3 /tmp/watchdog.py > /tmp/watchdog.out 2>&1 &
+          echo "watchdog pid $!"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run shard b verbose
+        run: |
+          export PYTHONUNBUFFERED=1
+          T=$(mktemp)
+          ( uv run --frozen python -m pytest -v tests/test_isolation_skills_copy.py tests/test_docker_provider_wsl_mount_check.py tests/test_isolation_guard_dangling_workspace.py plugins/shared/system/python_packager/ plugins/shared/system/monitoring/ plugins/shared/tools/download/ plugins/shared/tools/triggers_ext/ tests/suites/ tests/unit/ tests/monitoring/ tests/multimodal/ tests/test_delete_task_cascade_pipeline.py tests/test_task_submit_tool_branches.py tests/test_task_submit_server_wiring.py tests/test_isolation_service_server.py tests/test_db_admin_server_gaps.py tests/test_rollback_reversers_gaps.py tests/test_browser_tool_gaps.py tests/test_bash_tool_gaps.py tests/test_llm_core_plugin_gaps.py tests/tools/test_task_submit_permission_p0.py tests/tools/test_task_permission_p0.py tests/tools/test_memory_idor_p0.py plugins/shared/pipeline/input/context_window_guard/ plugins/shared/pipeline/input/prompt_build/ plugins/shared/pipeline/input/security_check/ plugins/shared/pipeline/output/child_task_guard/tests/ plugins/shared/pipeline/output/task_reminder/ plugins/shared/pipeline/output/tool_cache_writer/ plugins/shared/system/agent_manager/ plugins/shared/system/approval/ plugins/shared/system/evaluation/ plugins/shared/system/isolation/ plugins/shared/system/scene/ plugins/shared/system/task_form/ plugins/shared/system/workspace/ --durations=60 --cov=plugins 2>&1 || true ) | tee "$T" | tee /tmp/cur.log > /dev/null
+          echo "done"
+      - name: Post durations and tail
+        if: always()
+        run: |
+          pkill -f watchdog.py || true
+          python3 - <<'PYEOF'
+          import os, json, urllib.request, pathlib
+          out = []
+          p = pathlib.Path('/tmp/cur.log')
+          if p.exists():
+              lines = p.read_text(errors='replace').splitlines()
+              out.append("last lines:" + chr(10) + chr(10).join(lines[-25:]))
+          sha = os.environ["GITHUB_SHA"]; token = os.environ["GITHUB_TOKEN"]
+          data = json.dumps({"body": "shard-b postmortem:" + chr(10) + "```" + chr(10) + chr(10).join(out)[:40000] + chr(10) + "```"}).encode()
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/jianchen08/Agent-os-open/commits/{sha}/comments",
+              data=data, headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}, method="POST")
+          with urllib.request.urlopen(req) as r:
+              print("status", r.status)
+          PYEOF
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
