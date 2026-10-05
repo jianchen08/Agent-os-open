@@ -1,0 +1,24 @@
+name: Debug pre-commit probe
+on:
+  push:
+    branches: [debug/**]
+  workflow_dispatch:
+permissions: {}
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install ruff==0.15.20 mypy==2.1.0 pre-commit==3.5.0
+      - name: Run pre-commit capture
+        run: |
+          set -x
+          pre-commit --version
+          echo "--- run --all-files ---"
+          pre-commit run --all-files 2>&1 | tail -40
+          echo "--- exit=$? ---"
