@@ -486,8 +486,29 @@ jobs:
       # 插桩分片 gate：pytest -q || true 经 tee 捕获 → 失败数基线锁
       #   .github/pytest-failure-baseline.txt（lane plugins-coverage-b）。
       # 瞬时闸（配对/渠道守卫）各分片均摊；mypy 基线锁（~8min）挂 a 分片。
-      - name: Run gates (shard b)
-        run: python scripts/run_gates.py --filter plugins-coverage-b,plugins-coverage-pairing,channel-copy-guard
+      - name: Run gates (shard b) with stderr capture
+        run: |
+          T=$(mktemp); E=$(mktemp)
+          set +e
+          python scripts/run_gates.py --filter plugins-coverage-b,plugins-coverage-pairing,channel-copy-guard 2> "$E" 1> "$T"
+          {
+            echo "## shard b — last 60 stdout"
+            tail -60 "$T"
+            echo "## shard b — last 40 stderr"
+            tail -40 "$E"
+          } >> "$GITHUB_STEP_SUMMARY" || true
+          cp "$E" "$GITHUB_WORKSPACE/shard_b.stderr" || true
+          cp "$T" "$GITHUB_WORKSPACE/shard_b.stdout" || true
+          test ! -s "$E"
+
+      - name: Upload shard b debug outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-b-debug
+          path: |
+            shard_b.stdout
+            shard_b.stderr
 
       - name: Upload coverage data (shard b .coverage)
         uses: actions/upload-artifact@v4
@@ -568,8 +589,29 @@ jobs:
       # 插桩分片 gate：pytest -q || true 经 tee 捕获 → 失败数基线锁
       #   .github/pytest-failure-baseline.txt（lane plugins-coverage-d）。
       # 瞬时闸（配对/渠道守卫）各分片均摊；mypy 基线锁（~8min）挂 a 分片。
-      - name: Run gates (shard d)
-        run: python scripts/run_gates.py --filter plugins-coverage-d,plugins-coverage-pairing,channel-copy-guard
+      - name: Run gates (shard d) with stderr capture
+        run: |
+          T=$(mktemp); E=$(mktemp)
+          set +e
+          python scripts/run_gates.py --filter plugins-coverage-d,plugins-coverage-pairing,channel-copy-guard 2> "$E" 1> "$T"
+          {
+            echo "## shard d — last 60 stdout"
+            tail -60 "$T"
+            echo "## shard d — last 40 stderr"
+            tail -40 "$E"
+          } >> "$GITHUB_STEP_SUMMARY" || true
+          cp "$E" "$GITHUB_WORKSPACE/shard_d.stderr" || true
+          cp "$T" "$GITHUB_WORKSPACE/shard_d.stdout" || true
+          test ! -s "$E"
+
+      - name: Upload shard d debug outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-d-debug
+          path: |
+            shard_d.stdout
+            shard_d.stderr
 
       - name: Upload coverage data (shard d .coverage)
         uses: actions/upload-artifact@v4
@@ -610,8 +652,29 @@ jobs:
       # 插桩分片 gate：pytest -q || true 经 tee 捕获 → 失败数基线锁
       #   .github/pytest-failure-baseline.txt（lane plugins-coverage-e）。
       # 瞬时闸（配对/渠道守卫）各分片均摊；mypy 基线锁（~8min）挂 a 分片。
-      - name: Run gates (shard e)
-        run: python scripts/run_gates.py --filter plugins-coverage-e,plugins-coverage-pairing,channel-copy-guard
+      - name: Run gates (shard e) with stderr capture
+        run: |
+          T=$(mktemp); E=$(mktemp)
+          set +e
+          python scripts/run_gates.py --filter plugins-coverage-e,plugins-coverage-pairing,channel-copy-guard 2> "$E" 1> "$T"
+          {
+            echo "## shard e — last 60 stdout"
+            tail -60 "$T"
+            echo "## shard e — last 40 stderr"
+            tail -40 "$E"
+          } >> "$GITHUB_STEP_SUMMARY" || true
+          cp "$E" "$GITHUB_WORKSPACE/shard_e.stderr" || true
+          cp "$T" "$GITHUB_WORKSPACE/shard_e.stdout" || true
+          test ! -s "$E"
+
+      - name: Upload shard e debug outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-e-debug
+          path: |
+            shard_e.stdout
+            shard_e.stderr
 
       - name: Upload coverage data (shard e .coverage)
         uses: actions/upload-artifact@v4
