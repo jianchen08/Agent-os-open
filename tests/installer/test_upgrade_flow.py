@@ -159,6 +159,22 @@ class TestUpgradeFlowNsiCustom:
             "!macro customInstall"
         ), "customInit 定义应先于 customInstall（时机契约的静态可读性）"
 
+    def test_defender_var_gated_out_of_uninstaller_build(self, nsis_text: str) -> None:
+        """DefenderExecResult 声明必须带 BUILD_UNINSTALLER 门控（makensis 6001 防回归）。
+
+        卸载器构建（BUILD_UNINSTALLER）不含 customInit/customInstall，宏不展开 →
+        无条件声明的 Var 在卸载器脚本零引用 → warning 6001 → builder 按 error
+        处理（2026-10-06 实锤首例：12 分钟构建死于该警告）。同 Var 声明里
+        AgentOsAdminPassword 靠 customUnInstall 的 ReadRegStr 惰性引用、pid/
+        IsPowerShellAvailable 靠 customCheckAppRunning（卸载器也展开）豁免，
+        DefenderExecResult 是唯一仅安装器侧引用的 Var，必须门控。
+        """
+        assert re.search(
+            r"!ifndef BUILD_UNINSTALLER\s*\nVar /GLOBAL DefenderExecResult\s*\n!endif",
+            nsis_text,
+        ), "DefenderExecResult 声明缺 !ifndef BUILD_UNINSTALLER 门控——卸载器构建将因 "
+        "warning 6001 被当 error 而失败"
+
     def test_custom_uninstall_does_not_touch_user_root(self, nsis_text: str) -> None:
         """customUnInstall 不应主动删 $APPDATA\agentos。
 

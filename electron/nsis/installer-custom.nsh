@@ -59,7 +59,12 @@
 Var /GLOBAL pid
 Var /GLOBAL IsPowerShellAvailable
 Var /GLOBAL AgentOsAdminPassword
+; DefenderExecResult 仅安装器侧宏（customInit/customInstall →
+; _writeDefenderExclusions）引用；卸载器构建不含这两个宏，若无条件声明即触发
+; makensis 6001（builder 按 error 处理，同 AgentOsAdminPassword 惰性引用教训）。
+!ifndef BUILD_UNINSTALLER
 Var /GLOBAL DefenderExecResult
+!endif
 
 ; 写 Defender 排除（$INSTDIR + per-user 默认装位 + 用户数据根）。
 ; 仅 admin 可写（HKLM）；nsExec 结果必须 Pop，防 NSIS 栈失衡。
