@@ -10,7 +10,22 @@ related:
 
 # AgentOS 角色扮演子系统设计
 
-> **核心架构立场**：本系统提供**两个独立可调的轴**，由角色卡与玩家按需声明，不强推任何单一路线：
+> **核心定位**：AgentOS 角色扮演子系统 = **「酒馆（SillyTavern）的增强」**。
+>
+> SillyTavern（中文俗称「酒馆」）是全球最大的角色扮演前端生态：V2/V3 PNG 角色卡、Lorebook、Regex、STscript、Slash Commands、Group Chat、Variables、Extensions。AgentOS **不取代 SillyTavern**，而是：
+>
+> 1. **完全兼容 ST 资产** —— 导入导出 V2/V3 PNG 角色卡、STscript、Regex、Lorebook、Variables
+> 2. **补齐 ST 缺的部分** —— 状态机 schema 化、叙事图、规则引擎、结构化输出、模式谱（无 LLM 也可玩）
+> 3. **接入 AgentOS 内核生态** —— 持久化、agent_config_load、MCP 协议、Multi-agent、task system
+> 4. **保留 ST 用户的创作习惯** —— prompt + Mod 写法继续可用（`none + with_llm` cell）
+>
+> 用户路径：SillyTavern 用户 → 导入 PNG 到 AgentOS → 选择 "开启规则引擎" → 享受结构化增强。
+>
+> ---
+>
+> ## 设计概要（二轴谱 + ST 兼容）
+>
+> 提供**两个独立可调的轴**，由角色卡与玩家按需声明，不强推任何单一路线：
 >
 > | 轴 | 取值 | 含义 |
 > |---|---|---|
@@ -32,11 +47,13 @@ related:
 > 3. **规则是连续变量而非离散开关** —— 创作者声明的规则可多可少，自动适配到对应"模式"。`core` 与 `full` 之间没有硬边界
 > 4. **契约松紧可调** —— 输出格式不是单一 JSON Schema，而是由创作者声明的**结构化等级（contract level）**：从纯文本到全结构化，每一档都是合法选项
 > 5. **记忆复用 AgentOS 现有基础设施** —— 不重新发明轮子（详见 §8）
+> 6. **SillyTavern 资产完全兼容** —— V2/V3 PNG、STscript、Regex、Lorebook、Variables、Slash Commands 必须 100% 可用（详见 §X）
 >
 > ## 目录
 
 0. [设计哲学与架构原则](#0-设计哲学与架构原则)
 1. [角色卡标准（Character Card）](#1-角色卡标准character-card)
+1.5. [SillyTavern 生态兼容与增强](#15-sillytavern-生态兼容与增强)
 2. [游戏引擎核心：状态机子系统](#2-游戏引擎核心状态机子系统)
 3. [世界书 / Lorebook 子系统](#3-世界书--lorebook-子系统)
 4. [叙事图（Narrative Graph）](#4-叙事图narrative-graph)
@@ -359,6 +376,253 @@ agentos creator import-st <file.png>               # 从 SillyTavern PNG 导入
 agentos creator export my_card.yaml --format png-v3 # 导出 PNG-V3
 agentos creator publish my_card.yaml               # 打包发布到市场
 ```
+
+---
+
+## 1.5. SillyTavern 生态兼容与增强
+
+> **本节是 §1 与后续 §2-§10 之间的桥梁。** 它定义 AgentOS **与 ST 的兼容边界**，以及**ST 缺什么、AgentOS 给什么**。
+
+### 1.5.1 ST 是什么、AgentOS 与 ST 的关系
+
+**SillyTavern**（中文俗称「酒馆」）：
+- 全球最大的 LLM RP 前端生态
+- 角色卡 V2/V3 PNG 标准（事实标准）
+- Lorebook（关键词触发世界书）
+- Regex Scripts（前后处理）
+- STscript（JS 脚本引擎）
+- Slash Commands（聊天内命令）
+- Group Chat（多角色房间）
+- Variables（脚本维护的变量）
+- Extensions（社区插件）
+- Data Bank（RAG 文档库）
+
+**AgentOS 与 ST 的关系**：
+
+```
+SillyTavern  ←→  兼容层  ←→  AgentOS 增强
+ (现状 100% 可用)        (补齐 ST 缺的部分)
+```
+
+**兼容层** = 读 / 写 ST 资产文件、与 ST 用户无缝迁移。
+**增强** = 在 ST 之上加：状态机 schema、叙事图、规则引擎、结构化输出、模式谱、AgentOS 内核生态。
+
+### 1.5.2 ST 资产兼容性清单
+
+| ST 资产 | 兼容性 | 备注 |
+|---|---|---|
+| **角色卡 V2** | ✓ 100% 读取 + 100% 写出 | PNG tEXt chunk 中 chara 字段 |
+| **角色卡 V3** | ✓ 100% 读取 + 100% 写出 | PNG tEXt chunk 中 chara + V3 扩展字段 |
+| **Lorebook（World Info）** | ✓ 100% 读取 + 写出 | ST 关键词 / 触发 / 优先级 / 递归扫描全部支持 |
+| **Regex Scripts** | ✓ 100% 读取 + 写出 + 兼容执行 | ST 的正则脚本语法直接运行 |
+| **STscript** | ✓ 读取 + 编译执行 | ST 的 `/cmd` 命令在 AgentOS chat 中识别 |
+| **Slash Commands** | ✓ 100% 识别 | `/sys`, `/let`, `/add`, `/setvar` 等原生支持 |
+| **Group Chat** | ✓ 100% 兼容 | 多角色房间直接迁移 |
+| **Variables** | ✓ 100% 兼容 + **提升**（见 §1.5.3） | STscript 维护的 variables 在 AgentOS 中由状态机持有 |
+| **Data Bank (RAG)** | ✓ 100% 兼容 + **提升**（见 §1.5.4） | AgentOS 提供更稳定的本地嵌入 |
+| **Extensions** | ✓ 加载兼容层 + **原生增强**（见 §1.5.5） | ST extension 能在 AgentOS 中跑；AgentOS 提供更稳的 SDK |
+
+### 1.5.3 ST Variables → AgentOS 状态机（核心增强）
+
+**ST 的痛点**：Variables 由 STscript 维护，靠作者写脚本 set/get，不声明类型，容易漂移。
+
+**AgentOS 的增强**：导入 ST 角色卡时，**自动扫描 STscript 中的 variable 操作**，推断 schema 建议：
+
+```python
+# STscript 中作者写的：
+# /let affection = 0
+# /let hp = 100
+# /add affection 5
+
+# AgentOS 导入时自动推断：
+inferred_schema = {
+    'affection': {'type': 'int', 'default': 0, 'min': 0, 'max': 100},
+    'hp':        {'type': 'int', 'default': 100, 'min': 0, 'max': 100},
+}
+# 写入角色卡 agentos.variables[] 中
+# 同时保留原 STscript（用户可手动修正 schema）
+```
+
+**结果**：ST 用户的脚本继续跑（STscript 兼容层），但 AgentOS 提供**强 schema 校验**作为增强。
+
+### 1.5.4 ST Data Bank → AgentOS RAG（核心增强）
+
+**ST 的现状**：Data Bank 依赖云端嵌入 API，本地嵌入支持弱。
+
+**AgentOS 的增强**：
+- 内置本地嵌入（FastEmbed / BGE 等）
+- 支持**关键词 + 嵌入双轨召回**（ST 仅关键词）
+- 提供 lorebook_rag 插件（详见 §3）
+
+**ST 资产导入后**，AgentOS 自动接管 Data Bank，用更稳的本地检索。
+
+### 1.5.5 ST Extension → AgentOS 插件（生态升级）
+
+**ST Extension 的特点**：JavaScript 写，无类型约束，依赖 ST 内部 API。
+
+**AgentOS 的兼容策略**：
+
+| 阶段 | 兼容性 |
+|---|---|
+| **M1（MVP）** | ST Extension 通过 `agentos.rp.st.compat` 适配层加载；提供 ST 内部 API 的 stub |
+| **M2** | 鼓励 ST 作者迁移到 AgentOS 原生插件（Python，更稳） |
+| **M3** | ST Extension 进入维护模式，新功能走 AgentOS 原生 |
+
+**ST Extension 适配层示例**（M1 实现）：
+
+```python
+# plugins/shared/rp/st_compat/loader.py
+
+class STExtensionLoader:
+    """加载 ST 的 JS Extension，提供 ST 内部 API stub"""
+
+    def __init__(self, agentos_kernel, llm_invoker):
+        self.kernel = agentos_kernel
+        self.llm = llm_invoker
+        # ST 内部 API stub（最小集）
+        self.st_api = {
+            'getContext': self._stub_get_context,
+            'setExtensionPrompt': self._stub_set_extension_prompt,
+            'injectScript': self._stub_inject_script,
+            'eventOn': self._stub_event_on,
+            'eventOff': self._stub_event_off,
+            # ... 大约 30+ 个 ST API 的 stub
+        }
+
+    def load(self, extension_path: str):
+        """加载 ST 扩展的 JS 代码，在 stub 化的 ST API 环境中运行"""
+        js_code = read_file(extension_path)
+        # 用 quickjs 或 pyexecjs 执行
+        runtime = QuickJSRuntime()
+        runtime.set_global('ST', self.st_api)
+        runtime.set_global('AgentOS_Rpc', self.kernel.get_kernels())
+        runtime.execute(js_code)
+```
+
+### 1.5.6 ST 用户路径（M1 即可用）
+
+```bash
+# 1. ST 用户已有角色卡（V2/V3 PNG）
+ls ~/SillyTavern/data/default/user/characters/
+#   - 仙侠角色.png
+#   - 现代角色.png
+
+# 2. 一键导入
+agentos rp import ~/SillyTavern/data/default/user/characters/仙侠角色.png
+# 自动转换：V3 JSON → AgentOS YAML 角色卡
+# 自动推断：variables schema、lorebook、regex
+# 输出：~/.agentos/characters/xianxia.yaml
+
+# 4. 选择是否开启"结构化增强"
+agentos rp upgrade xianxia.yaml
+# 提供：
+#   1. 保留 STscript + 加 schema 校验（推荐）
+#   2. 保留 STscript + 加叙事图（可选）
+#   3. 完全迁移到 AgentOS 原生（高级）
+
+# 5. 启动 AgentOS 预览
+agentos creator preview xianxia.yaml
+# 浏览器打开：左侧 ST 风格 chat + 右侧状态栏
+# 享受：HP/物品/任务不再漂移
+
+# 6. 导出回 ST（可逆）
+agentos rp export xianxia.yaml --format png-v3
+# 输出：xianxia-agentos-enhanced.png
+# 在 SillyTavern 中可继续使用（兼容）
+```
+
+### 1.5.7 ST 用户的"渐进增强"路径
+
+| 阶段 | 改动 | 体验 |
+|---|---|---|
+| **0. 导入即用** | 一键导入 ST 角色卡 | 与 ST 100% 一致 |
+| **1. 开启 schema** | 一键升级 → 加 schema 校验 | HP/位置不漂移；STscript 继续跑 |
+| **2. 开启叙事图** | 加 `engine.narrative_graph` | 分支不再漂移；模板叙事兜底 |
+| **3. 开启规则引擎** | 加 `engine.rules.combat` | 战斗确定性；掉落/事件可控 |
+| **4. 完全原生** | 把 STscript 翻译成 AgentOS 原生插件 | 性能 + 稳定性 + MCP 接入 |
+
+**关键**：每一步都是**可逆的、向后兼容的**。用户不需要一次迁移。
+
+### 1.5.8 AgentOS 给 ST 的"补强"清单
+
+| ST 有 | ST 没有 | AgentOS 提供 |
+|---|---|---|
+| V2/V3 PNG 角色卡 | **状态机 schema 化** | `engine.variables` 强类型 |
+| Lorebook | **阈值 / 场景 / 任务 / 正则触发** | 5 种触发模式 |
+| Regex | **结构化输出（pre-parser）** | `contract_level` 4 档 |
+| STscript（JS） | **强 schema 校验** | State Contract Validator |
+| Slash Commands | **叙事图（节点 + 决策 + 触发器）** | `engine.narrative_graph` |
+| Variables（弱类型） | **持久化保证** | 内核 SQLite 持久化 |
+| Data Bank（云端嵌入） | **本地稳定嵌入** | FastEmbed / BGE 等 |
+| Group Chat | **自动 NPC 角色切换** | Action 协议 |
+| 无模式谱（必须有 LLM） | **无 LLM 也能玩** | 模式谱（无 LLM = visual novel） |
+| 无 MCP / 多 Agent | **AgentOS 多 Agent / MCP / 持久化** | 内核生态 |
+| 无审计 / 重放 | **审计日志 + 会话重放** | 内核 session 复用 |
+
+### 1.5.9 STscript 兼容子集（AgentOS 原生支持的 ST 指令）
+
+| ST 指令 | AgentOS 实现 |
+|---|---|
+| `/set name = X` | ✓ 映射到 `state.X = ...` |
+| `/add hp -5` | ✓ 映射到 schema 校验的状态变更 |
+| `/let affection = X` | ✓ 推断 schema |
+| `/getvar name` | ✓ 读 state |
+| `/trigger X` | ✓ 跳到叙事图节点 |
+| `/sys <prompt>` | ✓ 注入 system prompt 片段 |
+| `/run <script>` | ✓ 调用 Python 插件 |
+| `/?` | ✓ 帮助文档 |
+| `/abort` | ✓ 中止当前回合 |
+| `/continue` | ✓ 让 LLM 继续生成 |
+| `/goonreply` | ✓ 同 ST |
+
+### 1.5.10 STscript → AgentOS 原生插件的迁移路径
+
+```python
+# ST 用户的 STscript:
+# /let hp = 100
+# /let gold = 0
+# /let location = "剑冢"
+# /set hp = 100
+# /add gold 5
+# /trigger "地点：剑冢"
+
+# AgentOS 等价的 character_card YAML:
+character_card:
+  engine:
+    variables:
+      player:
+        hp:    { type: int, default: 100, min: 0, max: 100 }
+        gold:  { type: int, default: 0 }
+      world:
+        location: { type: enum, values: [剑冢, 集市, 客栈] }
+    narrative_graph:
+      triggers:
+        - when: "state.world.location == '剑冢'"
+          jump_to: "剑冢_节点"
+
+# 用户不必立刻迁移——STscript 在 AgentOS 中继续有效
+# 但用 YAML 表达后，享受 schema 校验 + 持久化 + 可视化
+```
+
+### 1.5.11 与 ST 社区的协作建议
+
+| 行动 | 价值 |
+|---|---|
+| **官方文档**加 ST 迁移指南 | ST 用户群（最大潜在用户）可无障碍切换 |
+| **Discord/RSS 同步** ST 社区 | 让 ST 作者知道"AgentOS 是 ST 增强，不是替代" |
+| **赞助 ST 上游** | 与社区共赢 |
+| **接收 ST 贡献** | 鼓励 ST 作者在 AgentOS 中再发布 |
+
+### 1.5.12 关键承诺
+
+**对 ST 用户的承诺**：
+
+1. **零迁移成本** —— 导入 ST 角色卡 = 在 AgentOS 中使用
+2. **可逆迁移** —— 导出回 ST 仍可用
+3. **增量增强** —— 一项项加引擎功能，不强推
+4. **保留 prompt 习惯** —— ST 创作者的 prompt / Mod 继续生效
+5. **保留脚本** —— STscript 直接运行
+6. **ST 插件继续工作** —— 通过 compat 层加载
 
 ---
 
@@ -1942,20 +2206,41 @@ class TaskConfig:
 
 ---
 
-按"**默认推荐模式先行**"原则 —— **Phase 1 先把「核心模式专攻 + 默认 case」做出来**（80% 创作者用的 `core + with_llm`），再扩展到其他三个 cell。
+按"**酒馆兼容 → 默认推荐模式 → 离线 → 复杂 → 生态迁移**"5 个阶段。
+
+### Phase 0（M0，2 周）：SillyTavern 资产兼容（地基）
+
+> **M0 是后续一切的根基。** 不做完 M0，M1+ 用户无法从 ST 迁移，所有"扩展市场"都是空谈。
+>
+> 目标：让 SillyTavern 用户的角色卡、STscript、Regex、Lorebook、Slash Commands 100% 在 AgentOS 中跑。
+
+- `agentos.rp.character_card`：YAML 角色卡 + V2/V3 PNG 双向导入导出（PNG tEXt chunk 读写）
+- `agentos.rp.st_compat`：ST 内部 API stub 适配层（~30+ 个核心 API）
+- `agentos.rp.stscript_runtime`：STscript 解释器（支持 `/set`, `/let`, `/add`, `/trigger`, `/sys`, `/run`, `/?` 等）
+- `agentos.rp.lorebook`：完整 ST World Info 兼容（关键词、优先级、递归扫描、常驻/蓝灯/灰灯）
+- `agentos.rp.regex`：ST Regex Scripts 兼容执行
+- `agentos.rp.extension_loader`：ST Extension 通过 compat 层加载
+- 创作者工具：
+  - `agentos rp import <file.png>` —— V2/V3 PNG → AgentOS YAML
+  - `agentos rp export <card.yaml> --format png-v3` —— 反向导出
+  - `agentos rp upgrade <card.yaml>` —— 推断 schema + 建议增强
+- 前端：ST 风格 `<ChatStream>`、`<StatusBar>`、`<ChoicesPanel>`、`<QuickReplyBar>`
+- **里程碑**：ST 用户"导入即用"，体验与 ST 100% 一致
+- **关键不变量**：导入的角色卡**可重新导出回 ST**，不丢失数据
 
 ### Phase 1（M1，3 周）：核心模式（`core + with_llm`）—— 80% 用户
 
 > 目标：让 80% 的创作者能用 —— 只需声明 HP/MP/位置/时间等基础规则 + 一段 prompt。
 
-- `agentos.rp.character_card`：YAML 角色卡（含 `engine.llm`、`engine.rule_complexity`、`engine.variables`）
+- `agentos.rp.character_card` 增强：YAML 角色卡（含 `engine.llm`、`engine.rule_complexity`、`engine.variables`）
 - `agentos.rp.state_machine`：仅常规状态 schema + 校验（HP/MP/位置/时间/物品）
-- `agentos.rp.lorebook`：基础关键词触发（5 种模式中实现核心 2 种：keyword + threshold）
+- `agentos.rp.lorebook` 增强：5 种触发模式（keyword + threshold + scene + quest + regex）
 - `agentos.rp.llm.narrator`：档位 0-2 输出契约（纯文本/文本+choices/文本+actions），档位 3 暂缓
 - `agentos.rp.actions`：基础 action 注册与执行
 - 前端：`<ChatStream>`、`<StatusBar>`、`<CustomCSSSandbox>`（基础）
 - 创作者工具：`agentos creator new/lint/preview`
 - **差异化点（与 afengy 对比）**：HP/位置/时间等常规状态由代码持有——即便 LLM "忘了"也不会漂移
+- **差异化点（与 ST 对比）**：schema 化变量（无需 STscript 维护）、状态校验、模板渲染
 
 ### Phase 2（M2，2 周）：离线小型流程游戏（`core + without_llm`）—— LLM 不可用时
 
@@ -1985,23 +2270,77 @@ class TaskConfig:
 
 ### Phase 4（M4，2 周）：生态与迁移
 
-> 目标：让现有 RP 资产（afengy / SillyTavern / character.ai）能迁入。
+> 目标：让现有 RP 资产（afengy / character.ai）能迁入；发布 AgentOS 原生作品。
 
 - `agentos.rp.adapter.afengy`：afengy memory_palace 适配器
-- `agentos.rp.adapter.sillytavern`：V2/V3 PNG 双向导入
+- `agentos.rp.adapter.character_ai`：character.ai 资产转换
 - `agentos creator market`：发布到市场
 - 前端：`<Marketplace>`、`<ImportWizard>`
 
 ### 实施优先级总结
 
-| 阶段 | 模式 cell | 用户群 | 优先级 |
+| 阶段 | 内容 | 用户群 | 优先级 |
 |---|---|---|---|
+| **M0** | **SillyTavern 兼容** | **ST 用户（最大潜在群体）** | ★★★★★ |
 | M1 | `core + with_llm` | 80% 创作者 | ★★★★★ |
 | M2 | `core + without_llm` | 离线 / 节省 / 视觉小说爱好者 | ★★★★ |
 | M3 | `full + with_llm` | 复杂 RP 创作者 | ★★★ |
 | M4 | `full + without_llm` + 生态迁移 | 高级 + 老用户 | ★★ |
 
-**关键**：M1 不做完不开始 M3 —— M1 是地基，M2 是地基的镜像（无 LLM），M3 在 M1 基础上加复杂度，M4 是收尾。
+**关键**：**M0 不做完不开始 M1** —— 没有 ST 兼容，后续所有"扩展市场"都是空谈。
+
+### M0 实施细节（M0 的最详细计划）
+
+```
+M0.1 (3 天) PNG 解析器
+  - 用 Pillow 或自定义 PNG 解码器读 tEXt chunk
+  - 解析 V2 JSON / V3 JSON（带扩展字段）
+  - 输出 AgentOS 内部结构
+
+M0.2 (3 天) ST 内部 API stub 清单
+  - 列出 ST 内部 API（getContext, setExtensionPrompt, eventOn, etc）
+  - 实现 stub（80% 用默认值，其余 not-implemented）
+  - 写兼容性测试（用 ST 文档对照）
+
+M0.3 (3 天) STscript 解释器
+  - 解析 /cmd 命令
+  - 映射到 AgentOS 状态变更
+  - 支持变量、流程控制、触发器
+
+M0.4 (2 天) Lorebook 兼容
+  - 完整支持 ST World Info 字段
+  - 关键词、优先级、递归扫描
+
+M0.5 (2 天) Regex 兼容执行
+  - 与 ST Regex Script 引擎一致
+  - 输出可重新导出
+
+M0.6 (2 天) Extension 加载器
+  - QuickJS 运行时
+  - ST API stub 注入
+  - 基础 extension 测试用例
+
+M0.7 (1 天) PNG 写出器
+  - 写 V2/V3 JSON 到 tEXt chunk
+  - PNG 字节完整往返（无数据丢失）
+```
+
+### 用户路径示例：ST → AgentOS → 增强
+
+```
+Week 0：ST 用户有 100 个角色卡（PNG）
+Week 1：用户安装 AgentOS
+         运行 agentos rp import *.png
+         → 100 个 YAML 角色卡
+Week 2：用户选择 5 个最爱角色，运行 agentos rp upgrade
+         → 自动推断 schema + 建议增强
+         → 用户接受 3 个角色的 schema 增强
+Week 3：用户在新角色卡上写 YAML 角色卡
+         → 享受：状态机 schema、叙事图、模式谱
+Week 4：用户导出回 ST
+         → ST 用户社区看到"AAA-增强版"
+         → 新用户开始尝试 AgentOS
+```
 
 ---
 
