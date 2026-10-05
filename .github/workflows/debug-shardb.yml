@@ -80,6 +80,17 @@ jobs:
           if p.exists():
               lines = p.read_text(errors='replace').splitlines()
               out.append("last lines:" + chr(10) + chr(10).join(lines[-25:]))
+          src = pathlib.Path('/tmp/cur.log')
+          if src.exists():
+              logt = src.read_text(errors='replace')
+              import re as _re
+              blocks = []
+              for m in _re.finditer(r'(_+ (?:test_|Test).+? _+)' , logt[:400000]):
+                  seg = logt[m.start():m.start()+1200]
+                  if 'assert' in seg or 'Error' in seg:
+                      blocks.append(seg[:900])
+                  if len(blocks) >= 6: break
+              out.append('failure blocks:' + chr(10) + (chr(10) + '---' + chr(10)).join(blocks))
           errp = pathlib.Path('/tmp/watchdog.err')
           if errp.exists():
               out.append('watchdog.err:' + chr(10) + errp.read_text(errors='replace')[-3000:])
