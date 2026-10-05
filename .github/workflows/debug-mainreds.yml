@@ -1,0 +1,28 @@
+name: Debug main reds probe
+on:
+  push:
+    branches: [debug/**]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  shard-c-ctx:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with: { enable-cache: true, cache-dependency-glob: "uv.lock" }
+      - run: |
+          uv sync --frozen --extra dev --extra isolation
+          uv pip install -e ./plugins/sdk
+      - name: Probe shard b context before INTERNALERROR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          uv run --frozen python -m pytest -v --tb=no tests/test_bash_tool_gaps.py tests/test_llm_core_plugin_gaps.py tests/tools/test_task_submit_permission_p0.py tests/tools/test_task_permission_p0.py tests/tools/test_memory_idor_p0.py plugins/shared/pipeline/input/context_window_guard/ plugins/shared/pipeline/input/prompt_build/ plugins/shared/pipeline/input/security_check/ plugins/shared/pipeline/output/child_task_guard/tests/ plugins/shared/pipeline/output/task_reminder/ plugins/shared/pipeline/output/tool_cache_writer/ plugins/shared/system/agent_manager/ plugins/shared/system/approval/ plugins/shared/system/evaluation/ plugins/shared/system/isolation/ plugins/shared/system/scene/ plugins/shared/system/task_form/ plugins/shared/system/workspace/ plugins/shared/system/hindsight_memory/ plugins/shared/system/review/test_review_persistence.py plugins/shared/tools/memory/ plugins/shared/tools/resource_merge/ plugins/shared/tools/simple/ plugins/shared/tools/spill_retrieve/ tests/test_llm_core_thinking_strength.py tests/test_llm_adapter_call_streaming.py tests/test_model_prompt_adapter_plugin.py tests/test_pipeline_tool_calls_standardization_imports.py tests/test_workspace_lifecycle_mode.py > /tmp/list.log 2>&1
+          echo "== done =="
+          python .github/workflows/probe_ctx.py /tmp/list.log "shard-c-ctx"
