@@ -181,8 +181,10 @@ class TestUpgradeFlowNsiCustom:
         assert re.search(
             r"!ifndef BUILD_UNINSTALLER\s*\nVar /GLOBAL DefenderExecResult\s*\n!endif",
             nsis_text,
-        ), "DefenderExecResult 声明缺 !ifndef BUILD_UNINSTALLER 门控——卸载器构建将因 "
-        "warning 6001 被当 error 而失败"
+        ), (
+            "DefenderExecResult 声明缺 !ifndef BUILD_UNINSTALLER 门控——卸载器构建将因 "
+            "warning 6001 被当 error 而失败"
+        )
 
     def test_custom_uninstall_does_not_touch_user_root(self, nsis_text: str) -> None:
         """customUnInstall 不应主动删 $APPDATA\agentos。
