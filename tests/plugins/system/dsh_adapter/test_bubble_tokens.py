@@ -14,12 +14,23 @@ import re
 
 import pytest
 
-pytestmark = pytest.mark.unit
 
 from translator import (  # noqa: E402,I001 - 裸名导入经 conftest sys.path 注入
     _parse_css_color,
+    list_available_skins,
     skins_to_plugin_themes,
 )
+
+# 开源仓裁剪：DSH 皮肤语料真值位 ~/.dsh/skins 不随开源仓分发（源仓 3df61eba
+# 起移出仓内），CI/纯净 checkout 为空集——THEMES 在导入期求值为空 dict，硬编
+# id 用例会在执行期 KeyError，模块级 skipif 拦住；有语料的机器全量跑。
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.skipif(
+        not list_available_skins(),
+        reason="DSH 皮肤语料未随开源仓分发（真值位 ~/.dsh/skins），语料缺失时整模块跳过",
+    ),
+]
 
 THEMES = {t["id"]: t for t in skins_to_plugin_themes()}
 ALL_SKIN_IDS = sorted(THEMES.keys())

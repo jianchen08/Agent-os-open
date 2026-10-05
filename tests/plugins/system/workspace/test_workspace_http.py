@@ -1905,24 +1905,26 @@ class TestAbsolutePathBoundary:
     以项目根为界，越界显式报错。
     """
 
-    def test_read_absolute_kernel_db_denied(self, server: Any, ws_dir: str) -> None:
-        """项目根真实 agentos_kernel.db 经任务工作空间绝对路径必须拒读。
+    def test_read_oversized_file_denied(self, server: Any, ws_dir: str, tmp_path: Path) -> None:
+        """超限文件经任务工作空间绝对路径必须拒读（体积闸确定性探针）。
 
-        读面黑名单制（ADR 2026-09-24 zone-rw：默认全放、黑名单拒绝）+ 体积闸
-        双重防线，内核数据库形态必拒——拒绝原因随先命中的闸位（黑名单/体积），
-        不断言具体文案只断「必拒」语义。
+        绝对路径直读无黑名单，唯一确定性闸位 = 10MB 体积闸（ADR
+        2026-09-28 file-content 绝对路径裁定）。原探针用项目根真实
+        agentos_kernel.db，依赖运行环境的文件锁定/体积偶然性，CI 纯净
+        checkout 无该文件——改用构造的超限文件钉同一「必拒」语义。
         """
         _inject_workspace_path(server, ws_dir)
-        db_path = Path(__file__).resolve().parents[4] / "agentos_kernel.db"
-        assert db_path.is_file(), "测试前置：项目根应有真实 agentos_kernel.db"
+        big = tmp_path / "oversized.bin"
+        big.write_bytes(b"\0" * (10 * 1024 * 1024 + 1))
         status, body = _decode_http(_call(
             server,
             path="/ext/workspace_service/workspaces/t1/file-content",
             method="GET",
-            query={"path": str(db_path)},
+            query={"path": str(big)},
         ))
         assert status == 200
-        assert body["success"] is False, "内核数据库文件任何读面都必拒"
+        assert body["success"] is False, "超 10MB 体积闸必拒"
+        assert "过大" in body.get("message", ""), "拒绝原因应来自体积闸"
 
     def test_read_absolute_sibling_file_allowed(self, server: Any, ws_dir: str, tmp_path: Path) -> None:
         """工作空间外普通文件绝对路径读 = 放行（读黑名单制默认全放，

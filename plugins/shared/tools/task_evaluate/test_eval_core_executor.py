@@ -150,6 +150,13 @@ class TestSanitizeEvalPaths:
         # POSIX 相对 cwd 产出 ../.. 前缀（home/u 被层级消化）——断言兼容两形
         assert ("home/u/f.txt" in s or "u/f.txt" in s) and "var/log/x" in s
 
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="跨盘 relpath ValueError→掩码分支依赖 ntpath 盘符语义：POSIX 上 "
+               "os.path.relpath 对反斜杠串恒成功且原样保留 E: 前缀（docstring 自述），"
+               "仅 Windows 主机可观察；掩码 fail-safe 已由 "
+               "test_relpath_failure_masks_instead_of_leak 平台无关覆盖",
+    )
     def test_cross_drive_win_path_valueerror_masked(self, core: Any) -> None:
         """跨盘符相对化抛 ValueError → 打掩码，不静默放行宿主绝对路径。
 

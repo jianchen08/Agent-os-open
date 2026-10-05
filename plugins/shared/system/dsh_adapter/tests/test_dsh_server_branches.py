@@ -277,7 +277,20 @@ class TestAnchorToWorkspace:
 
     @pytest.mark.parametrize(
         "path",
-        ["../outside.txt", "sub/../../outside.txt", "C:/Windows/win.ini", "/etc/passwd"],
+        [
+            "../outside.txt",
+            "sub/../../outside.txt",
+            pytest.param(
+                "C:/Windows/win.ini",
+                marks=pytest.mark.skipif(
+                    sys.platform != "win32",
+                    reason="POSIX 上 'C:/Windows/win.ini' 是以 'C:' 为目录名的相对路径，"
+                           "锚定后仍在工作区内（不构成逃逸，拒绝即误杀）；仅 nt 语义下"
+                           "它是绝对路径才应被拒",
+                ),
+            ),
+            "/etc/passwd",
+        ],
     )
     def test_escape_rejected(self, srv: Any, tmp_path: Path, path: str) -> None:
         assert srv._anchor_to_workspace(path, str(tmp_path), None) is None

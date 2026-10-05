@@ -148,9 +148,13 @@ class TestExecuteEarlyReturn:
         assert result.state_updates == {}
 
     async def test_non_tool_execute_skipped(self) -> None:
-        """纯 LLM 轮（无工具调用）不触发 docker 决策。"""
+        """纯 LLM 轮（无工具调用）不触发 docker 决策。
+
+        静态化管道契约（ADR 2026-10-02-loopconfig-parallel-foreach）：早退判据
+        = raw_tool_calls 为空（非空 ⟺ 本轮有调用待执行），core_type 不参与；
+        故本用例须同时清空调用列表，否则守卫照常决策（fixture 陈旧语义）。"""
         guard = _make_guard(docker_available=False)
-        state = _base_state(**{StateKeys.CORE_TYPE: "llm_call"})
+        state = _base_state(**{StateKeys.CORE_TYPE: "llm_call", StateKeys.RAW_TOOL_CALLS: []})
         result = await guard.execute(_ctx(state))
         assert result.state_updates == {}
 

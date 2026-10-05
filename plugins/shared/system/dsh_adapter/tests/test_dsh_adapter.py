@@ -27,6 +27,7 @@ sys.path.insert(0, str(PLUGIN_DIR))
 from bridge import DshRuntimeBridge  # noqa: E402
 from translator import (  # noqa: E402
     DSH_SOURCE_COMMIT,
+    SKIN_CENTER_SKINS_DIR,
     DSH_SOURCE_VERSION,
     discover_dsh_plugins,
     dsh_params_to_json_schema,
@@ -40,6 +41,11 @@ from translator import (  # noqa: E402
     translate_package,
     translate_packages,
 )
+
+# 开源仓裁剪：DSH 皮肤语料（16 套）真值位在 ~/.dsh/skins（translator 的
+# SKIN_CENTER_SKINS_DIR），不随开源仓分发（源仓 3df61eba 同步起移出仓内）；
+# CI/纯净 checkout 为空集，依赖真语料的用例按此守卫跳过，有语料的机器全量跑。
+HAS_SKIN_CORPUS = len(list_available_skins()) >= 15
 
 # ── translator：纯函数 ─────────────────────────────────────────────────
 
@@ -714,8 +720,12 @@ class TestTranslateHooksConfig:
 
 # ── 皮肤：位置路由转译（CSS + hooks 同源映射表，2026-08-22） ────────────
 
+@pytest.mark.skipif(
+    not HAS_SKIN_CORPUS,
+    reason="DSH 皮肤语料未随开源仓分发（真值位 ~/.dsh/skins，源仓 3df61eba 起裁剪）；需源仓或装有 skin-center 语料的机器",
+)
 class TestSkinCenterResolution:
-    """translator 皮肤解析纯函数（对真实 skin-center 资产跑，仓库内自带 16 套）。"""
+    """translator 皮肤解析纯函数（对真实 skin-center 资产跑，真值位 ~/.dsh/skins）。"""
 
     def test_list_available_skins(self):
         skins = list_available_skins()
@@ -858,6 +868,10 @@ class TestSkinPositionRoutingCss:
         assert self._rw('[data-pane="sidebar"] > div > :last-child{a:b}') == '[data-testid="sidebar-footer"]{a:b}'
 
 
+@pytest.mark.skipif(
+    not HAS_SKIN_CORPUS,
+    reason="DSH 皮肤语料未随开源仓分发（真值位 ~/.dsh/skins）；需源仓或装有 skin-center 语料的机器",
+)
 class TestSkinPositionRoutingDelivery:
     """merged.css / hooks.mjs 递送端点：对真实 skin-center 资产跑位置转译。"""
 
@@ -917,7 +931,7 @@ class TestSkinPositionRoutingDelivery:
         node = shutil.which("node")
         if node is None:
             pytest.skip("node 不可用，跳过 JS 语法冒烟")
-        for hook in (PLUGIN_DIR / "dsh_plugins" / "skin-center" / "skins").glob("*/hooks.mjs"):
+        for hook in (SKIN_CENTER_SKINS_DIR).glob("*/hooks.mjs"):
             translated = self._server()._sub_position(hook.read_text(encoding="utf-8"))
             tmp_file = tmp_path / f"{hook.parent.name}-hooks.mjs"
             tmp_file.write_text(translated, encoding="utf-8")
@@ -939,6 +953,10 @@ class TestSkinPositionRoutingDelivery:
             assert resp["body"] == ""
 
 
+@pytest.mark.skipif(
+    not HAS_SKIN_CORPUS,
+    reason="DSH 皮肤语料未随开源仓分发（真值位 ~/.dsh/skins）；需源仓或装有 skin-center 语料的机器",
+)
 class TestSkinPluginThemes:
     """皮肤 → contributes.themes 声明（形态路由终态：插件主题通道原生渲染）。"""
 
@@ -994,6 +1012,10 @@ class TestSkinAssetRoute:
     def _serve(self, path: str) -> dict:
         return asyncio.run(self._server()._http_handle_style(path=path, method="GET"))
 
+    @pytest.mark.skipif(
+        not HAS_SKIN_CORPUS,
+        reason="DSH 皮肤语料未随开源仓分发（真值位 ~/.dsh/skins）；需源仓或装有 skin-center 语料的机器",
+    )
     def test_serve_image_asset(self):
         resp = self._serve("/ext/dsh_adapter/styles/skin-assets/miku/assets/miku-art.webp")
         assert resp["status"] == 200

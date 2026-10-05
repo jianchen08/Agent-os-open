@@ -500,6 +500,10 @@ class TestTenantDataBaseResolution:
                                        monkeypatch: pytest.MonkeyPatch) -> None:
         td = importlib.import_module("tenant_data")
         monkeypatch.delenv("AGENTOS_CONFIG_USERS_DIR", raising=False)
+        # legacy 兜底的前置是"用户空间不可得"；Linux 上 _os_data_dir 恒回落
+        # Path.home()（user_space POSIX 分支），必须显式钉死才能触发仓库回退
+        # （写法同 test_default_data_base_repo_fallback_when_user_space_unresolved）
+        monkeypatch.setattr(td.user_space, "user_config_dir", lambda: None)
 
         assert td._default_config_users_base() == _REPO_ROOT / "config" / "users"
 

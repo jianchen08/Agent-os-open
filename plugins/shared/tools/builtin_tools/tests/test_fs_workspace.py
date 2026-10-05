@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -521,6 +522,13 @@ class TestSensitiveFileNameNormalization:
         assert fs_tools._sensitive_file_reason(tmp_path / "environment") is None
 
 
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason=r"WSL 挂载混入脏形态 <X>:\mnt\<d>\... 是 Windows 宿主专属：Linux 上 "
+               "tmp_path.drive 为空串无法构造，归一目标也是 nt 盘符路径、POSIX FS "
+               "无从落地；归一化逻辑由 test_zone_gate.py::"
+               "test_normalize_windows_mixed_path_parametrized 平台无关覆盖",
+    )
     async def test_mixed_mount_path_read_normalized(self, tmp_path: Path) -> None:
         r"""WSL 挂载混入形态（`<X>:\mnt\<d>\...`）读归一到真实路径（事故 2026-09-30）。"""
         ws = tmp_path / "ws"

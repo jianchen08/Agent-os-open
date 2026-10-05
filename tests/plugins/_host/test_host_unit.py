@@ -201,7 +201,7 @@ class TestMemberDiscovery:
             assert rc == 1
             assert nested_id in capsys.readouterr().err
 
-    def test_symlink_dir_not_followed(self, shared_tree: Path) -> None:
+    def test_symlink_dir_not_followed(self, shared_tree: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """符号链接目录不进入扫描——目录遍历必须剪枝，junction 循环不得使遍历不终止。"""
         if not hasattr(os, "symlink"):
             pytest.skip("平台无 symlink")

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import logging
 from types import SimpleNamespace
 from typing import Any
@@ -394,6 +395,13 @@ class TestDispatchShortCircuits:
         assert _decision_view(result)["reason"] == "all checks passed"
 
     @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="Linux 上 /etc 属 OS 核心目录：_run_base_safety_scan 第一道（任何模式"
+               "都必须执行，安全底线）先于 accept_edits 文件类短路软拦截 /etc/hosts——"
+               "设计内行为（sensitive_paths 按 os.name 选名单）；短路覆盖在 Linux 由 "
+               "TestAcceptEdits.test_文件类放行 承担",
+    )
     async def test_accept_edits_passes_dangerous_file_tools(self) -> None:
         """accept_edits 下文件类工具即使参数危险也放行（档位语义）。"""
         svc = _mock_approval()

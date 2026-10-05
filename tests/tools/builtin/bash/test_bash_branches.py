@@ -461,6 +461,12 @@ def spawn_recorder(monkeypatch: pytest.MonkeyPatch) -> _SpawnRecorder:
     return rec
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="WSL bash 分支判据 shutil.which('wsl') 要求 wsl.exe 在 PATH——仅 "
+           "Windows 宿主存在；Linux 上该分支结构性不可达（is_windows 恒 "
+           "False），POSIX 回落 bash -c 分支是正确行为且已有独立覆盖",
+)
 async def test_spawn_local_wsl_bash_injects_lang(
     tmp_path: Path, spawn_recorder: _SpawnRecorder
 ) -> None:
