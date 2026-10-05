@@ -2750,6 +2750,7 @@ class TestKillProcessTree:
         def _boom(*args: Any, **kwargs: Any) -> None:
             raise RuntimeError("taskkill unavailable")
 
+        monkeypatch.setattr(manager_mod.os, "name", "nt")
         monkeypatch.setattr(manager_mod.subprocess, "run", _boom)
         with caplog.at_level("WARNING", logger=manager_mod.logger.name):
             TriggerManager._kill_process_tree(_KillableProc(4321))
@@ -2757,9 +2758,15 @@ class TestKillProcessTree:
 
     def test_windows_taskkill_success_path_no_warning(self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
         """Windows 正常路径（taskkill 可用）：无告警（≥2 组区分输入）。"""
+        import subprocess as subprocess_mod
+
         import triggers.manager as manager_mod
 
+        def _ok(*args: Any, **kwargs: Any) -> Any:
+            return subprocess_mod.CompletedProcess(args=args, returncode=0)
+
         monkeypatch.setattr(manager_mod.os, "name", "nt")
+        monkeypatch.setattr(manager_mod.subprocess, "run", _ok)
         with caplog.at_level("WARNING", logger=manager_mod.logger.name):
             TriggerManager._kill_process_tree(_KillableProc(4326))
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
