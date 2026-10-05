@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -176,16 +178,32 @@ class TestTerminateProcess:
 
     @pytest.mark.asyncio
     async def test_terminate_running(self, pm):
-        """启动 sleep → terminate → 验证状态"""
-        pid, _ = await pm.start_process("sleep 30")
+        """启动 sleep → terminate → 验证回收契约。
+
+        可观察契约 = 终止后读面任务收尾即把记录从活跃表清除（立即清内存，
+        process_manager 输出读取任务完成时回收 terminated 条目）；原断言
+        「表内可见 terminated 状态」与回收竞速（Linux 上原进程秒退先清表，
+        CI 恒红本地靠慢管道侥幸绿），改为轮询等待回收完成。"""
+        alive_cmd = "sleep 30"
+        pid, _ = await pm.start_process(alive_cmd)
         await asyncio.sleep(0.5)
+
+        # 本机 bash 可能是 WSL 垫片（未装 WSL 时一切命令秒退，进程秒结束即被
+        # 回收）——存活前置不成立则跳过：真实终止生命周期由 CI Linux 验证。
+        info = pm.get_process_info(pid)
+        if info is None or info.status != "running":
+            pytest.skip(
+                "本机 shell 无法维持存活进程（bash 为 WSL 垫片且未装 WSL）；"
+                "真实终止生命周期由 CI Linux 车道验证"
+            )
 
         ok, err = await pm.terminate_process(pid, force=True)
         assert ok, f"terminate failed: {err}"
 
-        proc_info = pm.get_process_info(pid)
-        assert proc_info is not None
-        assert proc_info.status == "terminated"
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and pm.get_process_info(pid) is not None:
+            await asyncio.sleep(0.05)
+        assert pm.get_process_info(pid) is None, "终止后的进程应从活跃表回收"
 
     @pytest.mark.asyncio
     async def test_terminate_nonexistent(self, pm):
