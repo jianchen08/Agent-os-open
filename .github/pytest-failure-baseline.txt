@@ -44,3 +44,4 @@ plugins-coverage-a_failed=0
 plugins-coverage-b_failed=0
 plugins-coverage-c_failed=0
 plugins-coverage-d_failed=0
+plugins-coverage-e_failed=0

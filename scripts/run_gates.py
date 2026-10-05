@@ -381,7 +381,7 @@ GATES: list[Gate] = [
             'python scripts/check_ruff_baseline.py --name plugins --from-file "$T"'
         ),
     ),
-    # ── 插桩车道 4 分片 + 合并（2026-10-04）─────────────────────────────
+    # ── 插桩车道 5 分片 + 合并（2026-10-05）─────────────────────────────
     # 单 CI job 跑全量插桩套件（无论单/双 pytest 进程、无论测试集大小）恒定
     # ~48 分钟墙处「runner lost communication」（#177/#178/#180/#188/#190 五
     # 轮实证；探针 meminfo 14.8GB 可用排除内存）。根因=输出体量：-v 逐行 +
@@ -398,7 +398,7 @@ GATES: list[Gate] = [
         domain="plugins",
         shell=(
             "T=$(mktemp); ( uv run --frozen python -m pytest -q "
-            + _shell_join_pytest(_pytest_argv_shards(coverage_exempt.instrumented_args(), 4)[0])
+            + _shell_join_pytest(_pytest_argv_shards(coverage_exempt.instrumented_args(), 5)[0])
             + " --cov=plugins"
             + ' 2>&1 || true ) | tee "$T"; '
             'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage-a --from-file "$T"'
@@ -411,7 +411,7 @@ GATES: list[Gate] = [
         domain="plugins",
         shell=(
             "T=$(mktemp); ( uv run --frozen python -m pytest -q "
-            + _shell_join_pytest(_pytest_argv_shards(coverage_exempt.instrumented_args(), 4)[1])
+            + _shell_join_pytest(_pytest_argv_shards(coverage_exempt.instrumented_args(), 5)[1])
             + " --cov=plugins"
             + ' 2>&1 || true ) | tee "$T"; '
             'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage-b --from-file "$T"'
@@ -424,10 +424,23 @@ GATES: list[Gate] = [
         domain="plugins",
         shell=(
             "T=$(mktemp); ( uv run --frozen python -m pytest -q "
-            + _shell_join_pytest(_pytest_argv_shards(coverage_exempt.instrumented_args(), 4)[2])
+            + _shell_join_pytest(_pytest_argv_shards(coverage_exempt.instrumented_args(), 5)[2])
             + " --cov=plugins"
             + ' 2>&1 || true ) | tee "$T"; '
             'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage-c --from-file "$T"'
+        ),
+        env=_PLUGINS_ENV,
+    ),
+    Gate(
+        id="plugins-coverage-e",
+        label="插件测试（插桩分片 e）+ 失败数基线锁",
+        domain="plugins",
+        shell=(
+            "T=$(mktemp); ( uv run --frozen python -m pytest -q "
+            + _shell_join_pytest(_pytest_argv_shards(coverage_exempt.instrumented_args(), 5)[4])
+            + " --cov=plugins"
+            + ' 2>&1 || true ) | tee "$T"; '
+            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage-e --from-file "$T"'
         ),
         env=_PLUGINS_ENV,
     ),
@@ -437,7 +450,7 @@ GATES: list[Gate] = [
         domain="plugins",
         shell=(
             "T=$(mktemp); ( uv run --frozen python -m pytest -q "
-            + _shell_join_pytest(_pytest_argv_shards(coverage_exempt.instrumented_args(), 4)[3])
+            + _shell_join_pytest(_pytest_argv_shards(coverage_exempt.instrumented_args(), 5)[3])
             + " --cov=plugins"
             + ' 2>&1 || true ) | tee "$T"; '
             'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage-d --from-file "$T"'

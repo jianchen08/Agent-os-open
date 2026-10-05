@@ -555,10 +555,53 @@ jobs:
           path: .coverage
           retention-days: 1
           if-no-files-found: error
-  python-coverage-merge:
+
+  python-coverage-e:
+    name: Python Coverage 插桩分片 e
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.python_full == 'true'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Sync dependencies from uv.lock (frozen, reproducible)
+        # --extra isolation：isolation docker timeout/manager 系测试 patch
+        #   ('docker.from_env')，需 docker 包（2026-09-01 实证）。
+        run: |
+          uv sync --frozen --extra dev --extra isolation
+          uv pip install -e ./plugins/sdk
+
+      # 插桩分片 gate：pytest -q || true 经 tee 捕获 → 失败数基线锁
+      #   .github/pytest-failure-baseline.txt（lane plugins-coverage-e）。
+      # 瞬时闸（配对/渠道守卫）各分片均摊；mypy 基线锁（~8min）挂 a 分片。
+      - name: Run gates (shard e)
+        run: python scripts/run_gates.py --filter plugins-coverage-e,plugins-coverage-pairing,channel-copy-guard
+
+      - name: Upload coverage data (shard e .coverage)
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugins-coverage-e
+          path: .coverage
+          retention-days: 1
+          if-no-files-found: error
+
+    python-coverage-merge:
     name: Python Coverage 合并 (combine + 覆盖率/改动行基线)
     runs-on: ubuntu-latest
-    needs: [python-coverage-a, python-coverage-b, python-coverage-c, python-coverage-d]
+    needs: [python-coverage-a, python-coverage-b, python-coverage-c, python-coverage-d, python-coverage-e]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -590,7 +633,7 @@ jobs:
 
       - name: Place shard coverage files
         run: |
-          for s in a b c d; do
+          for s in a b c d e; do
             mv "coverage-shards/plugins-coverage-$s/.coverage" ".coverage-$s"
           done
 
@@ -1067,6 +1110,7 @@ jobs:
       - python-coverage-b
       - python-coverage-c
       - python-coverage-d
+      - python-coverage-e
       - python-coverage-merge
       - python-heavy-suites
       - python-related
