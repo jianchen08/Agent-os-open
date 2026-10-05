@@ -1764,7 +1764,9 @@ class TestReconcileBackstop:
             mgr.set_main_loop(lt.loop)
             mgr.start_reconcile_loop()
             try:
-                assert _wait_until(lambda: bool(received)), "对账循环未在超时内补投"
+                # 裕度 30s：故障轮 + 恢复轮两拍，CI 插桩慢机（2 vCPU + --cov）
+                # 实测一拍可超 10s；不变量是「存活且补投」，不是墙钟快慢
+                assert _wait_until(lambda: bool(received), timeout=30.0), "对账循环未在超时内补投"
             finally:
                 mgr.stop_reconcile_loop()
         assert mgr.is_reconcile_loop_running() is False
