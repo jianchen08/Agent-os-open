@@ -10,17 +10,30 @@ related:
 
 # AgentOS 角色扮演子系统设计
 
-> **核心架构立场**：本系统首先是一台**游戏机**（game engine），其次才是一个**故事生成器**（narrative generator）。
+> **核心架构立场**：本系统提供**两个独立可调的轴**，由角色卡与玩家按需声明，不强推任何单一路线：
 >
-> 把 LLM 当成游戏机的"美术 / 配音 / 编剧"，而不是当主角。状态、规则、逻辑、确定性流程全部由代码承载，LLM 只负责把这些事实翻译成自然语言、生成情绪色彩、提供选项灵感。
+> | 轴 | 取值 | 含义 |
+> |---|---|---|
+> | **LLM 可用性** | `with_llm` / `without_llm` | 是否调用 LLM |
+> | **规则复杂度** | `none` / `core` / `full` | 创作者声明多少规则（连续可调） |
 >
-> **对比市面上常见路线**（afengy.com / character.ai / JanitorAI / SpicyChat / 筑梦岛等）：它们都是 **LLM-first** —— 先有聊天，再让玩家自己用「好感度 + 状态栏 + Mod」缝缝补补。本设计是 **Engine-first** —— 先有完整的状态机、规则引擎、叙事图，再让 LLM 来给这辆车装内饰。
+> **轴 1（LLM 可用性）**：
+> - **`with_llm`**：常规模式，调用 LLM 生成叙事
+> - **`without_llm`**：LLM 不可用 / 离线 / 节省时使用。**这一档不是完整的 RPG**，而是一个**小型流程化角色扮演游戏**（visual novel / 选择剧情）—— 叙事图走预设节点，文本用占位符模板拼装，状态机仍工作但纯确定性。够"小游戏"用，不追求 CRPG 复杂度。
 >
-> **直接对标**：Convai（叙事图 + Agentic Actions + State of Mind）、Inworld（Goals + Actions + Memories + Knowledge Graph）、Hidden Door（世界结构 + 多 NPC）、Charisma.ai（脚本场景 + AI 混合）、SillyTavern 的 Variables + STscript（作为"工具侧"参考）。
-
----
-
-## 目录
+> **轴 2（规则复杂度）**：
+> - **`none`**：0 规则 → 等价 afengy 现状，LLM 自维护状态（HTML 状态栏、Mod、jailbreak 等）
+> - **`core`**：只声明基础规则（HP/MP/位置/时间/基础战斗公式）→ **这是 AgentOS 默认模式**。LLM 写叙事，**常规状态由代码决定**；只有"模糊状态"（好感、心情、剧情冲突）由 LLM 自由发挥
+> - **`full`**：声明一切规则（叙事图、世界书、战斗、事件、好感判定等）→ Convai 风格，最强结构化
+>
+> **关键设计原则**：
+> 1. **常规状态永远由代码决定** —— HP、MP、位置、时间、基础战斗数值：这是角色卡上的"客观事实"。即使规则复杂度为 `none`，只要声明了，就由代码持有；LLM 不能自由改（这是与 afengy 的关键差异）
+> 2. **模糊状态可由 LLM 自由发挥** —— 好感度变化、剧情冲突、NPC 情绪细节：LLM 在 `core` 模式下可自由输出（输出到 HTML 状态栏或专门的 `<narrative_state>` 块），代码层不校验
+> 3. **规则是连续变量而非离散开关** —— 创作者声明的规则可多可少，自动适配到对应"模式"。`core` 与 `full` 之间没有硬边界
+> 4. **契约松紧可调** —— 输出格式不是单一 JSON Schema，而是由创作者声明的**结构化等级（contract level）**：从纯文本到全结构化，每一档都是合法选项
+> 5. **记忆复用 AgentOS 现有基础设施** —— 不重新发明轮子（详见 §8）
+>
+> ## 目录
 
 0. [设计哲学与架构原则](#0-设计哲学与架构原则)
 1. [角色卡标准（Character Card）](#1-角色卡标准character-card)
@@ -28,12 +41,12 @@ related:
 3. [世界书 / Lorebook 子系统](#3-世界书--lorebook-子系统)
 4. [叙事图（Narrative Graph）](#4-叙事图narrative-graph)
 5. [规则引擎（战斗 / 数值 / 事件）](#5-规则引擎战斗--数值--事件)
-6. [LLM 增强层（不是基础）](#6-llm-增强层不是基础)
+6. [LLM 增强层（多模式可调契约）](#6-llm-增强层多模式可调契约)
 7. [Action 协议（代码执行 LLM 的指令）](#7-action-协议代码执行-llm-的指令)
 8. [记忆系统（三层架构）](#8-记忆系统三层架构)
 9. [UI 与可视化](#9-ui-与可视化)
 10. [AgentOS 插件蓝图](#10-agentos-插件蓝图)
-11. [降级模式：LLM 不可用时也能跑](#11-降级模式llm-不可用时也能跑)
+11. [三模式谱：可切换、可降级](#11-三模式谱可切换可降级)
 12. [与 afengy.com 创作指南逐条对照](#12-与-afengycom-创作指南逐条对照)
 13. [实施路线](#13-实施路线)
 14. [ADR 决策清单](#14-adr-决策清单)
@@ -43,38 +56,152 @@ related:
 
 ## 0. 设计哲学与架构原则
 
-### 0.1 四个核心公理
+### 0.1 设计公理
 
-1. **游戏机是本体** —— 没有 LLM，系统也要能跑（用模板叙事）；有 LLM，系统跑得更好。
-2. **状态是事实，叙述是表达** —— HP / 好感 / 位置 / 任务进度是「事实」，必须在数据库；LLM 只能读事实、提议修改、由代码校验落库。
-3. **LLM 永远只是「故事生成器」** —— 不参与规则判定、不持有数值权威、不替代逻辑门。LLM 的输出必须是结构化契约（JSON Schema），其中 `narration` 字段才是给玩家看的。
-4. **一次 LLM 调用 = 一个事实增量** —— 不是"聊一整段"。一次 LLM 调用只产出：①`narration`（故事文本）②`proposed_state_changes`（提议改动）③`suggested_actions`（建议动作）④`suggested_choices`（建议选项）。其它都是代码层的事。
+1. **二轴独立可调** —— LLM 可用性（with/without）和规则复杂度（none/core/full）是两个独立轴。角色卡声明当前轴上的位置，玩家可运行时切换轴上的滑点。**没有"模式"枚举**，只有连续的位置。
+2. **常规状态由代码决定** —— HP、MP、位置、时间、基础战斗数值：声明了就别少，不允许 LLM 自由改。这是与 afengy 的根本区别。
+3. **模糊状态由 LLM 自由发挥** —— 好感度变化、剧情冲突、NPC 情绪细节：LLM 在 `core` 模式下可自由输出（写到 HTML 状态栏或专门的 `<narrative_state>` 块），代码层不校验；`full` 模式下走 schema 提议 → 校验 → 落库。
+4. **LLM 的输出契约是「宽进严出」** —— LLM 可以输出任意自然语言，但**能被解析成什么**是契约说了算。契约有等级（见 §6），创作者/玩家选档；架构容忍「契约失败时退回宽松模式」。
+5. **记忆复用 AgentOS 现有基础设施** —— 不重建轮子。AgentOS 0.2 已有 session 内存 / agent_config_load / 持久化内核，应按"内嵌"原则接入。
 
-### 0.2 与「LLM-first」路线对比
+### 0.2 二轴 × 二档完整图
 
-| 维度 | LLM-first（afengy 等） | Engine-first（本设计） |
-|---|---|---|
-| 状态归属 | 让 LLM 自由发挥，状态栏 HTML 由 LLM 自己输出 | 状态由代码 DB 持有，LLM 无权直接改 |
-| 数值来源 | 提示词写"好感度 0-100，请更新" | `variables_schema` 声明，代码校验 |
-| 战斗 | 用 prompt + 思维链硬写 | 战斗由规则引擎跑，LLM 只写叙事 |
-| 分支 | 用 prompt 模拟状态机 | 真正的状态图（节点 + 触发器） |
-| 重玩性 | 每次都不同，依赖运气 | 由确定性分支 + 可变叙事组合 |
-| 反作弊 | 靠 jailbreak / Mod 防御 | 代码层硬校验 |
-| Token 消耗 | 全部塞 prompt | 世界书按需检索 + 状态摘要 |
+```
+                    LLM 可用性
+                  with_llm            without_llm
+规则 none    ┌──────────────────┐  ┌──────────────────┐
+复杂度       │ 等价 afengy 现状 │  │ 无意义（不可用）  │
+             │ LLM 全权         │  │ 跳过              │
+             └──────────────────┘  └──────────────────┘
 
-### 0.3 术语表
+规则 core    ┌──────────────────┐  ┌──────────────────┐
+（默认）      │ ★ AgentOS 默认模式│  │ ★ 离线小型流程游戏│
+             │ 常规状态 = 代码    │  │ narrative_graph + │
+             │ 模糊状态 = LLM    │  │ 模板叙事          │
+             └──────────────────┘  └──────────────────┘
+
+规则 full    ┌──────────────────┐  ┌──────────────────┐
+             │ Convai 风格       │  │ 离线完整游戏      │
+             │ 全部状态 = 代码    │  │ visual novel-lite │
+             │ LLM 只生成叙事    │  │                  │
+             └──────────────────┘  └──────────────────┘
+```
+
+★ **两个核心 cell**：
+- **`core + with_llm`**：AgentOS 默认推荐模式。LLM 写故事，常规游戏状态（HP/位置/时间/基础战斗）由代码持有——这是与 afengy 现状的本质差异。
+- **`core + without_llm`**：LLM 不可用时的降级形态：**一个可独立运行的小型流程化游戏**（visual novel / 文字冒险），不需要玩家会写 prompt，玩家点选项推进剧情。
+
+### 0.3 「常规状态 vs 模糊状态」明确边界
+
+**常规状态**（always code-enforced）—— 创作者在 `engine.variables` 声明，**任何模式都不能被 LLM 改**：
+
+| 字段 | 原因 |
+|---|---|
+| `player.hp, mp, gold, stamina` | 数值化、有上限、需要精确 |
+| `world.location, time_of_day, weather` | 离散状态、影响事件触发 |
+| `player.inventory` | 物品数量与唯一性必须强校验 |
+| `tasks.completed[], progress[]` | 任务进度需要持久化 |
+
+**模糊状态**（LLM 自由发挥；`full` 模式才校验）：
+
+| 字段 | 原因 |
+|---|---|
+| `npcs.X.affection, .mood, .attitude` | 情感维度，LLM 写得最自然 |
+| `narrative.conflict, .secret, .revealed` | 剧情变量，本来就是叙事一部分 |
+| `narrative.tone, .pace, .themes[]` | 文学性维度，schema 化会失味 |
+
+> 设计要点：**模糊状态本身就是叙事的一部分**，强行让 LLM 输出 `affection +15` 而不属于 narration 流，会破坏体验。**让 LLM 在 narration 里直接说"好感提升"**，前端按需解析（HTML `<details>` 标签或模糊正则），比强行 schema 更自然。
+
+### 0.4 角色卡声明
+
+```yaml
+character_card:
+  spec: "agentos-character-card-v1"
+  spec_version: "1.0.0"
+  
+  engine:
+    # === 二轴声明 ===
+    llm: "with_llm"                # "with_llm" | "without_llm"
+    rule_complexity: "core"         # "none" | "core" | "full"
+    
+    # === 运行时切换偏好 ===
+    allow_runtime_switch: true      # 允许玩家切轴上的滑点
+    fallbacks:
+      on_llm_unavailable: "without_llm"   # LLM 挂时降级
+      on_engine_failure: "with_llm:core"  # 引擎故障时降级
+    
+    # === 契约松紧档（按模式自动选默认值） ===
+    contract_level: 2               # 见 §6
+    
+    # === 常规状态：永远由代码持有 ===
+    variables:
+      player:
+        hp:   { type: int, default: 100, min: 0, max: 100 }
+        mp:   { type: int, default: 50,  min: 0, max: 50 }
+        gold: { type: int, default: 0 }
+      world:
+        location:    { type: enum, values: [剑冢, 集市, 客栈, 山门] }
+        time_of_day: { type: enum, values: [子时..亥时], default: 申时 }
+    
+    # === 基础战斗规则（可选） ===
+    combat:
+      formula: "atk * (1 + rand(-0.1, 0.1)) - def * 0.5"
+    
+    # === 叙事图（`full` 模式可选）===
+    narrative_graph:
+      nodes: [...]
+      events: []
+    
+    # === LLM 拼装的 prompt 元素（无则省略）===
+    lorebook:
+      entries: []
+    
+    # === UI 配置 ===
+    ui:
+      status_bar_template: |
+        <div class="status-bar">
+          HP: {{ state.player.hp }}/100 | {{ state.world.location }}
+          {% if state.narrative %}
+          | {{ state.narrative | safe }}    {# LLM 自由输出的模糊状态 #}
+          {% endif %}
+        </div>
+```
+
+### 0.5 合法切换路径
+
+```
+                LLM 健康度变化 / 用户偏好变化
+                          ▼
+    with_llm(core)  ◄──────►  without_llm(core)
+        ▲   │                      ▲   │
+        │   ▼                      │   ▼
+    with_llm(full)  ◄──────►  without_llm(full)
+        ▲   
+        │  用户主动开启更多规则
+        ▼
+     with_llm(none)  =  afengy 等价物
+```
+
+- **`core` ↔ `full`**：玩家可一键开关「启用严格规则」
+- **`with` ↔ `without_llm`**：LLM 健康度触发自动降级，或玩家切离线模式
+- **`core ↔ none`**：玩家主动关闭引擎，LLM 接管一切（afengy 模式）
+- **`full → none`**：被禁止——一旦声明了规则就不能脱钩（防止玩家作弊）
+
+### 0.6 术语表
 
 | 术语 | 含义 |
 |---|---|
-| **Engine Tick** | 引擎时钟的一"回合"：玩家输入 → 解析 → 规则引擎 → LLM 叙事 → Action 执行 → 状态落库 |
-| **State Machine** | 状态机：确定性数值状态 |
-| **Schema** | 状态变量声明（类型、范围、tag） |
-| **Narrative Graph** | 叙事图：节点（目标）+ 边（决策）+ 触发器 |
+| **LLM Rule** | 角色卡顶部 `llm` 轴声明（with/without） |
+| **Rule Complexity** | `engine.rule_complexity`（none / core / full） |
+| **Engine Tick** | 引擎一回合：玩家输入 → 解析 → 规则引擎 → LLM（可选）→ Action → 状态落库 |
+| **Regular State** | 常规状态：永远由代码持有的字段（HP/位置/时间/物品/任务） |
+| **Fuzzy State** | 模糊状态：LLM 自由发挥的字段（好感/剧情冲突/文学维度） |
+| **Schema** | 状态变量声明（类型、范围、tag）—— 只描述常规状态 |
+| **Narrative Graph** | 叙事图：节点（目标）+ 边（决策）+ 触发器（`full` 模式） |
 | **Trigger** | 触发器：位置/时间/事件/阈值 → 切换节点 |
-| **Action** | 动作：LLM 输出中可由客户端执行的原子操作 |
-| **Narrator** | 叙事者：LLM 的角色身份，仅产出文本与提议 |
-| **Rules Engine** | 规则引擎：战斗/随机/事件/掉落/好感判定等纯逻辑模块 |
-| **Degraded Mode** | 降级模式：LLM 不可用时，用模板拼接叙事 |
+| **Action** | 动作：可由客户端执行的原子操作 |
+| **Contract Level** | 输出契约松紧档：0=纯文本 / 1=+choices / 2=+actions / 3=+state_changes |
+| **Fallback Path** | 不可用时的降级路径 |
 
 ---
 
@@ -82,13 +209,15 @@ related:
 
 ### 1.1 角色卡哲学
 
-角色卡不是"一段 prompt"，而是一个**游戏规则包**：
-- 它声明这个世界有哪些变量（HP、位置、好感…）
-- 它声明这个世界有哪些动作（移动、攻击、对话…）
-- 它声明这个世界有哪些 NPC、剧情节点、触发器
-- 它声明 LLM 的"语气与风格"约束
+角色卡不是"一段 prompt"，而是一个**声明游戏规则的文档**——告诉系统：
 
-LLM 看到这张卡，理解的是"我是一名旁白，要为这个游戏的当前状态生成一段文字"。
+- LLM 是否调用（轴 1）
+- 多少规则（轴 2）
+- 哪些字段是常规状态（代码持有）
+- 哪些字段是模糊状态（LLM 自由发挥）
+- 哪些 prompt 元素要喂给 LLM
+
+LLM 看到这张卡，理解的是"我要为这个游戏的当前快照生成一段文字，**不要写常规状态栏**——那是代码的事——专心写叙事和模糊情感"。
 
 ### 1.2 角色卡结构（AgentOS 标准 V1）
 
@@ -793,168 +922,349 @@ class RandomEventScheduler:
 
 ---
 
-## 6. LLM 增强层（不是基础）
+## 6. LLM 增强层（多模式 + 可调契约）
 
-### 6.1 LLM 的角色定位
+### 6.1 LLM 的角色定位（按模式分支）
 
-> **LLM 是「故事生成器」，不是「游戏机」。**
+> LLM 的「角色」完全取决于当前模式：
+
+| 模式 | LLM 角色 | LLM 工作 | LLM 不工作 |
+|---|---|---|---|
+| **A. 纯 LLM** | 全权叙述者 + 状态自维护者 | 一切（含状态） | 无 |
+| **B. 引擎 + LLM** | 故事生成器 | `narration` + 提议 | 规则判定、状态持久化 |
+| **C. 纯引擎** | 不参与 | — | — |
+
+> **模式 A 是 afengy 现状的等价物**——LLM 自己维护 HTML 状态栏、Mod、jailbreak 等。系统应当**等价支持**，而不是只把它视为"不完整"模式。
 >
-> 它的工作：
-> 1. 把状态机快照翻译成「玩家可读的故事」
-> 2. 提议「下一回合可能的选项」
-> 3. 提议「NPC 的情绪反应」
->
-> 它不工作：
-> 1. 计算伤害（那是规则引擎的事）
-> 2. 判定合法性（那是代码校验的事）
-> 3. 持久化状态（那是数据库的事）
-> 4. 触发事件（那是事件调度器的事）
+> **模式 C 等价于一个 CRPG**——LLM 完全不参与，确定性叙事、确定性分支、确定性战斗。
 
-### 6.2 LLM 输入拼装（明确顺序）
+### 6.2 LLM 输入拼装（按模式分支）
+
+模式 A、B、C 的 prompt 拼装规则不同：
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│ [1] SYSTEM PROMPT                                        │
-│     - 角色卡的 flavor.style_guide                        │
-│     - 角色卡的 engine.actions 的清单（仅供 LLM 知道）    │
-│     - 全局规则（禁用违禁内容、输出格式等）               │
-│                                                          │
-│ [2] SCENE INJECTION（按叙事图）                          │
-│     - 当前节点：nodes                                    │
-│     - 节点 hint：节点.narrator_hint                  │
-│     - 节点 objectives：节点.objectives              │
-│                                                          │
-│ [3] LOREBOOK HITS（按世界书）                            │
-│     - 关键词触发条目（按 position 插入）                 │
-│     - 场景/任务/阈值触发条目                             │
-│                                                          │
-│ [4] STATE SNAPSHOT（实时状态）                           │
-│     - 玩家 HP/MP/物品                                   │
-│     - NPC 好感/位置/情绪                                │
-│     - 世界时间/天气                                      │
-│                                                          │
-│ [5] ACTION CHOICES（可选）                              │
-│     - 玩家本回合可执行的动作清单                         │
-│                                                          │
-│ [6] HISTORY（历史对话 + 摘要）                          │
-│     - 最近 N 轮原始对话                                   │
-│     - 早期对话的 LLM 摘要                                │
-│                                                          │
-│ [7] PLAYER INPUT                                         │
-│     - 玩家本回合输入                                     │
-│                                                          │
-│ [8] EVENT CONTEXT（本回合发生的事实）                    │
-│     - 战斗事件流                                        │
-│     - 随机事件 ID                                        │
-│     - 状态变更记录（已落库的事实）                       │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│ 模式 A（纯 LLM）—— 极简拼装                                            │
+│ [1] SYSTEM: 角色卡 flavor.description + flavor.style_guide           │
+│ [2] HISTORY: 全部历史对话 + 摘要                                       │
+│ [3] PLAYER INPUT                                                       │
+│ —— 不注入 state/lorebook/node，因为状态由 LLM 自维护                  │
+│ —— Mod 由创作者在 flavor.system_prompt 里覆盖                          │
+├──────────────────────────────────────────────────────────────────────┤
+│ 模式 B（引擎 + LLM）—— 全量拼装                                         │
+│ [1] SYSTEM: style_guide + actions 清单 + 全局规则                     │
+│ [2] SCENE: 当前节点 hint + objectives                                  │
+│ [4] LOREBOOK HITS                                                       │
+│ [5] STATE SNAPSHOT                                                      │
+│ [6] ACTION CHOICES（可选）                                            │
+│ [7] HISTORY: 最近 N 轮 + L2 摘要                                       │
+│ [8] PLAYER INPUT                                                       │
+│ [9] EVENT CONTEXT（已落库的事实）                                      │
+├──────────────────────────────────────────────────────────────────────┤
+│ 模式 C（纯引擎）—— 无 LLM，跳过                                          │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-### 6.3 LLM 输出契约
+### 6.3 输出契约松紧档（Contract Levels）
+
+**核心设计**：契约不是单一固定 Schema，而是**由创作者 / 玩家声明的档位**。
+
+```yaml
+# 角色卡顶部
+character_card:
+  engine:
+    contract_level: 2     # 0~3 四档
+```
+
+| 档位 | 必含字段 | 可选字段 | 适用场景 |
+|---|---|---|---|
+| **0 — 纯文本** | `narration` (纯字符串) | — | 自由聊天 / 文学共创 / 情感陪伴 |
+| **1 — 文本 + 选项** | `narration` | `choices[]` | 简单 RP（afengy 大多数作品） |
+| **2 — 文本 + 选项 + 动作** | `narration` | `choices[]`, `actions[]` | 中度结构化 RP（带 BGM/立绘/动效） |
+| **3 — 全结构化** | `narration`, `state_changes[]` | `choices[]`, `actions[]`, `thinking` | 引擎 + LLM 模式（最大约束） |
+
+**关键点**：
+
+- **契约宽松性 = 创造力空间**。档位 0 给最大叙事自由（LLM 完全自由发挥）；档位 3 给最大结构化（适合游戏机制）。
+- **档位可动态切换** —— 同一角色卡可"这回合档位 0，下回合档位 3"，由系统根据玩家动作自动判断（玩家点击选项 → 档位 0；玩家输入开放动作 → 档位 3）。
+- **档位越高，prompt 越长**（要教 LLM 输出结构）—— 但能换取更强的状态机集成。
+
+### 6.4 输出契约 JSON Schema（按档位）
 
 ```python
-# plugins/shared/rp/llm/narrator_contract.py
+# plugins/shared/rp/llm/contract_schemas.py
 
-NARRATOR_OUTPUT_SCHEMA = {
-    "type": "object",
-    "required": ["narration", "proposed_state_changes"],
-    "properties": {
-        "narration": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 4000,
-        },
-        "narration_meta": {
-            "type": "object",
-            "properties": {
-                "mood": {"enum": ["neutral", "tense", "sad", "happy", "angry"]},
-                "pace":  {"enum": ["slow", "normal", "fast"]},
+CONTRACT_SCHEMAS = {
+    0: {  # 纯文本
+        "type": "object",
+        "required": ["narration"],
+        "properties": {
+                "narration": {"type": "string", "minLength": 1, "maxLength": 4000},
             },
         },
-        "proposed_state_changes": {
-            "type": "array",
-            "maxItems": 8,
-            "items": {
-                "type": "object",
-                "required": ["path", "op", "value", "reason"],
-                "properties": {
-                    "path":   {"type": "string"},
-                    "op":     {"enum": ["+", "-", "*", "/", "=", "set", "unset", "toggle", "append", "remove"]},
-                    "value":  {},
-                    "reason": {"type": "string"},
+        "additionalProperties": False,  # 严格——禁止额外字段
+    },
+
+    1: {  # +choices
+        "type": "object",
+        "required": ["narration"],
+        "properties": {
+                "narration": {"type": "string"},
+                "choices": {
+                    "type": "array",
+                    "maxItems": 6,
+                    "items": {
+                        "type": "object",
+                        "required": ["text"],
+                        "properties": {
+                            "id":    {"type": "string"},
+                            "text":  {"type": "string"},
+                            "hint":  {"type": "string"},
+                        },
+                    },
                 },
             },
         },
-        "suggested_actions":  {"type": "array"},
-        "suggested_choices":  {"type": "array"},
-        "thinking": {"type": "string"},
-        "_metadata": {"type": "object"},
+        "additionalProperties": True,  # 宽松——允许 LLM 多输出字段
+    },
+
+    2: {  # +actions
+        "type": "object",
+        "required": ["narration"],
+        "properties": {
+                "narration": {"type": "string"},
+                "choices": {"type": "array"},
+                "actions": {  # 仅可调用角色卡 engine.actions 中声明的 action
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["type"],
+                        "properties": {"type": {"type": "string"}, "params": {"type": "object"}},
+                    },
+                },
+                "narration_meta": {
+                    "type": "object",
+                    "properties": {
+                        "mood": {"type": "string"},
+                        "pace": {"type": "string"},
+                    },
+                },
+            },
+        },
+        "additionalProperties": True,
+    },
+
+    3: {  # 全结构化
+        "type": "object",
+        "required": ["narration", "state_changes"],
+        "properties": {
+                "narration": {"type": "string"},
+                "choices": {"type": "array"},
+                "actions": {"type": "array"},
+                "state_changes": {
+                    "type": "array",
+                    "maxItems": 8,
+                    "items": {
+                        "type": "object",
+                        "required": ["path", "op", "value"],
+                        "properties": {
+                            "path":   {"type": "string"},
+                            "op":     {"enum": ["+", "-", "*", "/", "=", "set", "unset", "toggle", "append", "remove"]},
+                            "value":  {},
+                            "reason": {"type": "string"},
+                        },
+                    },
+                },
+                "thinking": {"type": "string"},
+                "narration_meta": {"type": "object"},
+            },
+        },
+        "additionalProperties": True,
     },
 }
 ```
 
-### 6.4 LLM 调用栈
+### 6.5 「宽进严出」解析器（关键！）
+
+> **关键设计**：契约失败的回退是**模式内降档**，不是**整体错误**。
+
+```python
+# plugins/shared/rp/llm/contract_resilient_parser.py
+
+class ResilientContractParser:
+    """尝试用最高档解析，失败就降档，最终兜底纯文本"""
+
+    def parse(self, raw_text: str, target_level: int, declared_actions: list[str]) -> ParseResult:
+        # 1. 提取 JSON（即使 LLM 输出混入自然语言也尝试）
+        json_candidate = self._extract_json(raw_text)
+        
+        parsed = None
+        used_level = None
+
+        # 2. 从目标档往下试
+        for level in range(target_level, -1, -1):
+            schema = CONTRACT_SCHEMAS[level]
+            try:
+                validate(instance=json_candidate, schema=schema)
+                parsed = json_candidate
+                used_level = level
+                break
+            except (ValidationError, json.JSONDecodeError):
+                continue
+
+        # 3. 全部失败 → 整段文本当 narration（模式 A 等价）
+        if parsed is None:
+            return ParseResult(
+                narration=raw_text.strip(),
+                level=0,
+                choices=[],
+                actions=[],
+                state_changes=[],
+                fallback_reason='all_levels_failed',
+            )
+
+        # 4. Action 白名单校验（仅档位 2/3）
+        if 'actions' in parsed:
+            parsed['actions'] = [a for a in parsed['actions'] if a['type'] in declared_actions]
+
+        # 5. State changes 校验（仅档位 3）
+        if 'state_changes' in parsed:
+            parsed['state_changes'] = self._filter_valid_changes(parsed['state_changes'])
+
+        return ParseResult(
+            narration=parsed['narration'],
+            level=used_level,
+            choices=parsed.get('choices', []),
+            actions=parsed.get('actions', []),
+            state_changes=parsed.get('state_changes', []),
+            thinking=parsed.get('thinking'),
+            narration_meta=parsed.get('narration_meta'),
+        )
+
+    def _extract_json(self, text: str):
+        """从混杂文本中提取 JSON 对象（即使外层有散文）"""
+        # 尝试直接 parse
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # 尝试找 ```json ... ``` 代码块
+        m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        # 尝试找首个 { 到末尾的 }（处理 LLM 在 JSON 后追加说明的情况）
+        m = re.search(r'\{', text)
+        if m:
+            start = m.start()
+            depth = 0
+            for i in range(start, len(text)):
+                if text[i] == '{':
+                    depth += 1
+                elif text[i] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(text[start:i+1])
+                        except json.JSONDecodeError:
+                            break
+
+        raise json.JSONDecodeError('no JSON found', text, 0)
+```
+
+### 6.6 调用栈（按模式分支）
 
 ```python
 # plugins/shared/rp/llm/narrator.py
 
 class LLMNarrator:
-    def __init__(self, llm_invoker, prompt_assembler, validator, action_executor):
+    def __init__(self, llm_invoker, prompt_assembler, parser, action_executor, state_validator):
         self.llm = llm_invoker
         self.assembler = prompt_assembler
-        self.validator = validator
+        self.parser = parser
         self.actions = action_executor
+        self.validator = state_validator
 
-    async def narrate(self, state, history, event_context, current_node):
-        # 1. 拼 prompt
+    async def narrate(self, mode: str, contract_level: int, state, history, event_context, current_node):
+        # 1. 按模式拼 prompt
         prompt = self.assembler.assemble(
+            mode=mode,
+            level=contract_level,
             state=state,
             history=history,
             event_context=event_context,
             current_node=current_node,
         )
 
-        # 2. 调用 LLM
-        response = await self.llm.invoke(
-            prompt,
-            response_format=NARRATOR_OUTPUT_SCHEMA,
-            stream=True,
-        )
+        # 2. 调用 LLM（让 LLM 自由发挥）
+        raw = await self.llm.invoke(prompt, stream=True)
 
-        # 3. 解析 + 校验
-        parsed = parse_json(response)
-        validation = self.validator.validate(state, parsed['proposed_state_changes'])
+        # 3. 宽进严出解析（关键：契约失败时回退宽松档）
+        declared_actions = self.actions.list_ids()
+        parsed = self.parser.parse(raw, target_level=contract_level, declared_actions=declared_actions)
 
-        # 4. 执行 actions（不影响落库顺序）
-        for action in parsed.get('suggested_actions', []):
+        # 4. 按模式处理 state_changes
+        if mode == 'engine_llm' and parsed.state_changes:
+            validation = self.validator.validate(state, parsed.state_changes)
+            accepted_changes = validation.accepted
+            rejected = validation.rejected
+        else:
+            # 模式 A：LLM 提议的状态变更不被代码采纳，
+            # 但 LLM 自己输出的 HTML 状态栏照样渲染（HTML 渲染器自己处理）
+            accepted_changes = []
+            rejected = []
+
+        # 5. 执行 actions（不影响落库顺序）
+        for action in parsed.actions:
             self.actions.execute(action, context={'state': state, 'node': current_node})
 
         return NarratorResult(
-            narration=parsed['narration'],
-            narration_meta=parsed.get('narration_meta'),
-            validated_changes=validation.accepted,
-            rejected_changes=validation.rejected,
-            suggested_choices=parsed.get('suggested_choices', []),
+            narration=parsed.narration,
+            level_used=parsed.level,           # 实际用的契约档（可能低于目标档）
+            choices=parsed.choices,
+            validated_changes=accepted_changes,
+            rejected_changes=rejected,
+            actions_executed=parsed.actions,
+            fallback_reason=parsed.fallback_reason,
+            thinking=parsed.thinking,
+            narration_meta=parsed.narration_meta,
         )
 ```
 
-### 6.5 流式输出
-
-LLM 的 `narration` 字段是唯一面向玩家的内容，应该流式推送：
+### 6.7 流式输出策略
 
 ```python
 async def narrate_streaming(self, ...):
-    prompt = self.assembler.assemble(...)
-    async for chunk in self.llm.stream_invoke(prompt, response_format=NARRATOR_OUTPUT_SCHEMA):
-        # LLM 在流式输出 JSON 时，逐 token 出来
-        # 我们需要：等 JSON 完整闭合，再执行 action
-        # 但 narration 部分可以提前推送到前端
-        if chunk.json_complete:
-            yield NarrationChunk(text=chunk.narration_so_far, done=True)
-            return
+    """流式推送 narration，但延迟落库直到契约解析完成"""
+
+    # 1. 流式收 narration（玩家文本）
+    raw_buf = ""
+    async for token in self.llm.stream_invoke(prompt):
+        raw_buf += token
+        # 启发式：若 LLM 还没输出 {，说明是纯文本模式 A，直接流推送
+        if '"narration"' not in raw_buf and '{' not in raw_buf:
+            yield StreamChunk(text=token, kind='token', done=False)
+
+    # 2. 完整文本拿到 → 解析契约
+    parsed = self.parser.parse(raw_buf, target_level=contract_level, ...)
+
+    # 3. 把解析后的 narration 标 is-done=True（前端拼装完成）
+    yield StreamChunk(text=parsed.narration, kind='final', done=True,
+                      choices=parsed.choices, level=parsed.level)
 ```
 
-或者用 structured outputs（OpenAI/Anthropic 的 grammar-constrained decoding）一次性拿到完整 JSON，再异步推流。
+### 6.8 与"afengy 创作指南 §06 输出要求"对应
+
+| afengy 创作指南原话 | AgentOS 实现 |
+|---|---|
+| "AI 实际收到的数据长什么样" | `agentos creator trace --level=2` 输出完整 prompt 拼装 |
+| "权重优先级总结" | 模式 B 固定拼装顺序（§6.2）；模式 A 极简（仅 system + history） |
+| "思维链" | 仅档位 3 可选 `thinking` 字段；模式 A 默认无（创作者可在 prompt 自加） |
+| "Markdown/XML 格式" | 创作者在 prompt 里写；LLM 自由使用 |
 
 ---
 
@@ -1029,33 +1339,60 @@ afengy 的【生成存档】【功法创建】【宗门创建】【法宝创建�
 
 ---
 
-## 8. 记忆系统（三层架构）
+## 8. 记忆系统（复用 AgentOS 现有基础设施）
 
-### 8.1 三层结构
+> **设计原则**：记忆**不重新发明**。AgentOS 0.2 内核已有 session / agent_config_load / 持久化引擎 / 上下文管理。RP 插件作为**消费者**，只做 RP 特有的"摘要+检索"附加值。
 
-| 层 | 范围 | 存储 | 触发时机 |
-|---|---|---|---|
-| **L0 短期** | 最近 N 轮对话 | 内存 / Redis | 每回合直接进 prompt |
-| **L1 中期** | 当前会话的摘要 | SQLite | 每 5-10 轮由 LLM 二次摘要 |
-| **L2 长期** | 跨会话的玩家档案 | 向量数据库 + 关系表 | 跨会话 / 关键时刻 |
+### 8.1 AgentOS 现有可复用设施
 
-### 8.2 记忆子系统的实现
+| 设施 | 位置 | RP 用法 |
+|------|------|--------|
+| **Session 内存** | 内核 session crate | 存储每回合 LLM 调用、玩家输入、玩家回复 |
+| **agent_config_load** | 管道输入插件 `plugins/shared/pipeline/input/agent_config_load/` | 角色卡加载 = 注入 LLM 上下文 + 引擎配置 |
+| **Kernel 存储** | `kernel/crates/db-admin` | 常规状态（HP/位置/物品/任务）落库 |
+| **task.status 状态机** | 内核 task crate | 任务进度（pending / running / completed） |
+| **tool-surface capability** | 内核 | 工具面过滤（角色卡声明的 actions 自动暴露给 LLM） |
+| **多循环体 execution_context** | 内核 | agent_id 作为执行上下文键，与"装备"的工具/插件/状态同源 |
+| **existing memory_palace**（afengy 等下游） | 第三方兼容 | 通过 adapter 接入，作为 L2 长期记忆的可选格式 |
+
+### 8.2 三层记忆（与传统设计的对比）
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ AgentOS 内核已有                                                 │
+│  - Session 内存：最近 N 轮 LLM 调用（input/output 元数据）       │
+│  - Kernel 存储：常规状态（HP/位置/物品/任务进度）                 │
+│  - agent_config_load：每次任务启动从磁盘读角色卡                  │
+├─────────────────────────────────────────────────────────────────┤
+│ RP 插件新增（仅做"附加值"）                                  │
+│  - L1 摘要：把内核 session 的 N 轮调用压成 200 字（成本控制）    │
+│  - L2 检索：跨会话时检索关键摘要（玩家档案 + 关键选择）          │
+│  - lorebook 检索：按需加载设定条目（与 memory 解耦）             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**为什么不自己存？** 因为内核已经存了，**重用而不是增新**才符合 AgentOS 的"一切皆插件"原则 —— RP 插件是消费者而非提供者。
+
+### 8.3 RP 插件需要做的"附加值"
 
 ```python
-# plugins/shared/rp/memory/system.py
+# plugins/shared/rp/memory/augmenter.py
+# ——本类只做"摘要 + 检索"两件事，不持有原始数据
 
-class MemorySystem:
-    def __init__(self, llm, store, vector_store):
+class RPMemoryAugmenter:
+    """消费 AgentOS 内核的 session / storage，提供 RP 特有的 memory 增强"""
+
+    def __init__(self, session_service, kernel_storage, llm, vector_store):
+        self.session = session_service      # 来自 kernel session crate
+        self.storage = kernel_storage       # 来自 kernel db-admin
         self.llm = llm
-        self.store = store                # SQLite
-        self.vector_store = vector_store  # 本地嵌入 + 检索
+        self.vector = vector_store
 
-    def load_short_term(self, task_id, limit=20):
-        return self.store.get_messages(task_id, limit=limit)
-
-    def summarize_to_long_term(self, task_id):
-        """每 10 回合触发一次"""
-        recent = self.store.get_messages(task_id, limit=20)
+    def summarize_session(self, task_id: str) -> str:
+        """每 10 回合触发一次：把内核 session 中的 N 轮调用压成摘要"""
+        # 1. 从 session 服务取最近 20 轮
+        recent = self.session.get_messages(task_id, limit=20)
+        # 2. 调用 LLM 生成摘要
         prompt = f"""基于以下对话，生成 200 字内的结构化摘要：
   
   - 关键选择与后果
@@ -1066,32 +1403,91 @@ class MemorySystem:
   对话：
   {self._format(recent)}"""
         summary = self.llm.invoke(prompt)
-        self.store.append_summary(task_id, summary)
-        # 同时写入向量库
-        self.vector_store.add(
-            id=f'{task_id}:summary:{now()}',
-            text=summary,
-            metadata={'task_id': task_id, 'type': 'summary'},
-        )
+        # 3. 摘要存到内核 storage 的 metadata 字段（不是新建表）
+        self.storage.append_task_metadata(task_id, key='summary', value=summary, ts=now())
+        # 4. 同时写入向量库（用于跨会话检索）
+        self.vector.add(text=summary, metadata={'task_id': task_id, 'kind': 'summary'})
+        return summary
 
-    def retrieve_long_term(self, query, task_id, top_k=3):
-        """玩家输入 → 检索相关历史摘要"""
-        emb = self.vector_store.embed(query)
-        results = self.vector_store.query(emb, top_k=top_k, filter={'task_id': task_id})
-        return [r['text'] for r in results]
+    def load_into_prompt(self, task_id: str, query: str = None, max_tokens: int = 800) -> str:
+        """从内核 session + 摘要 + 向量库组成给 LLM 的 memory 段"""
+        # 1. 最近 20 轮（直接从 session 服务读）
+        recent = self.session.get_messages(task_id, limit=20)
+        recent_text = self._format(recent)
+        # 2. 早期对话的摘要（从内核 storage 的 metadata 读）
+        summaries = self.storage.get_task_metadata(task_id, key='summary', limit=5)
+        summary_text = '\n'.join(s.value for s in summaries)
+        # 3. 跨会话相关性检索（仅在跨任务时使用）
+        related = []
+        if query:
+            related_hits = self.vector.query(query, top_k=3, filter={'user_id': self.session.get_user_id(task_id)})
+            related = [h.text for h in related_hits]
+        # 4. 按 token 预算拼装
+        return self._pack_within_budget(
+            recent=recent_text,
+            summaries=summary_text,
+            related=related,
+            max_tokens=max_tokens,
+        )
 ```
 
-### 8.3 与 afengy 「记忆区」对比
+### 8.4 与 afengy 「记忆区」对比
 
-afengy 让作者用 `<details><summary>记忆区</summary>...</details>` 让 LLM 自己维护记忆（在 prompt 里）：
-- ❌ 高 token 浪费
-- ❌ 易漂移（LLM 改了前面的"事实"）
-- ❌ 不可调试
+| 维度 | afengy 现状（LLM 自维护） | AgentOS（本设计） |
+|---|---|---|
+| 存储 | LLM 输出到 prompt 的 `<details>` 块 | **AgentOS 内核 session/storage 持久化** |
+| Token 浪费 | 高（每回合全文塞入 prompt） | 低（按需加载摘要 + 检索） |
+| 漂移风险 | 高（LLM 改了"事实"） | 零（事实由内核持久，摘要仅辅助） |
+| 跨会话 | 难（仅靠 prompt 拼接） | 易（向量库检索） |
+| 可调试 | 难（散落在对话中） | 易（结构化 metadata + summary） |
+| 与 AgentOS 集成 | 无（外部系统） | **原生**（复用 session/storage） |
 
-本设计的优势：
-- ✅ 记忆由代码 + LLM 摘要共同管理，结构化
-- ✅ 关键选择进入 L2 长期，可跨会话
-- ✅ 摘要可被检索
+### 8.5 第三方记忆系统接入（如 memory_palace）
+
+afengy 等下游使用的「memory_palace」是**自定义格式**（黑盒存储 LLM 状态）。AgentOS 通过 adapter 接入而非替换：
+
+```python
+# plugins/shared/rp/memory/adapters/memory_palace.py
+
+class MemoryPalaceAdapter:
+    """把 afengy 风格的 memory_palace 转换为 AgentOS session 调用"""
+
+    def __init__(self, rp_memory):
+        self.rp = rp_memory
+
+    def import_from_palace(self, palace_data: dict, task_id: str):
+        """从 afengy memory_palace 格式导入到 AgentOS session"""
+        for entry in palace_data.get('items', []):
+            self.rp.session.append_message(
+                task_id=task_id,
+                role='system',
+                content=f"[imported from memory_palace] {entry['summary']}",
+                metadata={'origin': 'memory_palace', 'id': entry.get('id')},
+            )
+
+    def export_to_palace(self, task_id: str) -> dict:
+        """导出为 afengy 兼容格式（用于跨平台迁移）"""
+        return {
+            'format': 'memory_palace-v1',
+            'items': [
+                {
+                    'id': m.metadata.get('id', str(uuid4())),
+                    'summary': m.content,
+                    'created_at': m.ts,
+                }
+                for m in self.rp.session.get_messages(task_id, kind='summary')
+            ],
+        }
+```
+
+### 8.6 记忆子系统边界（明确划定）
+
+| 谁负责 | 不归谁 |
+|---|---|
+| AgentOS 内核：session 内存、task storage、agent_config_load | RP 插件不重写这些 |
+| RP 插件：摘要生成、向量检索、跨会话关联 | 不自己存原始对话 |
+| 创作者：声明「需要持久化的关键选择类型」 | LLM 不能改 kernel storage 中的常规状态 |
+| LLM：仅生成摘要与建议标签 | 不能直接改 kernel 数据库 |
 
 ---
 
@@ -1219,157 +1615,393 @@ class StateMachinePlugin(Plugin):
 
 ---
 
-## 11. 降级模式：LLM 不可用时也能跑
+## 11. 三模式谱：可切换、可降级
 
-### 11.1 设计原则
+### 11.1 重新定位：从「降级」到「模式谱」
 
-游戏机本体（状态机 + 规则引擎 + 叙事图 + Action）在没有 LLM 时**必须能跑**。这时用**模板叙事**代替 LLM 生成。
+之前的 §11 把「无 LLM」叫「降级模式」，**这是误导**——它不是降级，它是**第一类公民**。
 
-### 11.2 降级模式实现
+> 「无 LLM」不是「LLM 失败后的兜底」，而是**一个独立可用的微型游戏类型**：玩家点选项推进剧情，narrative_graph 跳节点，状态机推进，纯确定性流程。它是「视觉小说」「选择剧情」「互动小说」——这些是 RPG 大品类中独立的一支。
 
-```python
-class NarratorEngine:
-    """叙事引擎——抽象基类"""
+「降级」只在**同一个角色卡内**有意义：玩家正在玩 LLM 模式，LLM API 挂了，自动切到同一角色卡的「无 LLM」分支（前提是角色卡有 narrative_graph + templates）。
 
-    def narrate(self, state, history, event_context, current_node) -> NarratorResult: ...
+### 11.2 三个最常使用的组合
 
+#### A. 默认推荐：`core + with_llm`（首选，80% 创作者用这个）
 
-class LLMNarrator(NarratorEngine):
-    """正常模式：调用 LLM"""
-    ...
-
-
-class TemplateNarrator(NarratorEngine):
-    """降级模式：用模板拼接"""
-
-    def __init__(self, template_pack):
-        self.template_pack = template_pack  # 角色卡 flavor.template_pack
-
-    def narrate(self, state, history, event_context, current_node):
-        # 1. 选择模板
-        template = self._choose_template(current_node, event_context)
-
-        # 2. 填占位符
-        narration = template.format(
-            player_name=state.player.get('name', '你'),
-            npc_name=event_context.get('npc_name', '她'),
-            location=state.world.location,
-            time_of_day=state.world.time_of_day,
-            event=event_context.get('summary', ''),
-            ...
-        )
-
-        # 3. 从模板中提取可选的 state_changes / actions（声明式）
-        declared = self._extract_declared_effects(template)
-
-        return NarratorResult(
-            narration=narration,
-            narration_meta={'mood': 'neutral', 'pace': 'normal'},
-            validated_changes=declared.get('state_changes', []),
-            suggested_actions=declared.get('actions', []),
-            suggested_choices=declared.get('choices', []),
-        )
+```
+LLM 写故事（narration + 模糊情感）
+        ↓ 状态机永远决定
+常规状态（HP/位置/时间/物品/基础战斗）
+        ↓ 即便 LLM 挂掉
+也能切到 B（用同一角色卡的 narrative_graph + templates）
 ```
 
-### 11.3 模板 Pack
+**适用**：90% 的 RP 场景。需要玩家**轻量声明**（HP/MP/基础规则），不需要复杂的叙事图。
+
+#### B. 离线/节省：`core + without_llm`（小型流程化游戏）
+
+```
+narrative_graph 跳节点（玩家选项 → 决策 → 下一节点）
+        ↓ 模板拼接
+node_template → 占位符替换 → 输出给玩家
+        ↓ 状态机永远决定
+所有状态（HP/位置/好感/物品）
+```
+
+**不是 CRPG**——是 visual novel / 文字冒险 / 选择剧情。够"小游戏"用，**不强求复杂度**。
+
+**适用**：
+- LLM API 挂了 / 超时 / 限流时的自动降级
+- 玩家主动切"离线模式"（如飞行模式、节省 token）
+- LLM 完全不可用的环境（局域网部署、企业内网）
+- 创作者只想做一个简单的"剧情选择"小游戏，不想写 prompt
+
+#### C. 完全规则化：`full + with_llm`（复杂 RP）
+
+**适用**：复杂 RP（CRPG-like）+ LLM 美化叙事。Convai 风格。
+
+#### D. 完全规则化无 LLM：`full + without_llm`（CRPG-lite）
+
+**适用**：完整的 deterministic CRPG（无叙事变化，每次重玩相同）。
+
+### 11.3 「无 LLM」的具体形态
+
+不是抽象概念，是**具体的游戏类型**——参考已有视觉小说/文字冒险：
+
+**最小可用特性集**：
+
+```
+1. 启动：玩家点「开始」
+   ↓
+2. 节点 intro：展示开场叙述
+   ↓
+3. 展示 3-4 个选项
+   ↓
+4. 玩家点选项
+   ↓
+5. narrative_graph 跳转到目标节点
+   ↓
+6. 状态机更新（HP -5 if 走危险路径，+5 if 走安全路径）
+   ↓
+7. 节点展示一段模板化叙述
+   ↓
+8. 回到第 3 步（循环）
+```
+
+**示例：苏清婉剑冢奇缘（无 LLM 版）**
+
+```yaml
+# character_card.yaml —— 仅核心字段
+character_card:
+  spec: "agentos-character-card-v1"
+  
+  engine:
+    llm: "without_llm"              # 离线模式
+    rule_complexity: "core"
+    
+    variables:
+      player:
+        hp: { type: int, default: 100, min: 0, max: 100 }
+      world:
+        location: { type: enum, values: [剑冢, 集市, 客栈] }
+        time_of_day: { type: enum, values: [子时..亥时], default: 申时 }
+  
+  # 核心规则
+  combat:
+    formula: "atk * (1 + rand(-0.1, 0.1)) - def * 0.5"
+  
+  # 叙事图（小型流程化）
+  narrative_graph:
+    nodes:
+      - id: intro
+        template: |
+          暮色四合，你在剑冢洞口遇到白衣女子苏清婉。
+          她的眼神冷如寒冰：「你来这里做什么？」
+          当前 HP: {{ state.player.hp }} | 位置: {{ state.world.location }}
+        choices:
+          - { text: "恭敬回答：「路过此地」", next: polite }
+          - { text: "沉默不语",              next: silent }
+          - { text: "反问：「你是谁？」",   next: question }
+      
+      - id: polite
+        template: "苏清婉微微皱眉，但语气稍缓：「既然如此，请便。」"
+        effects:
+          - { path: "npcs.suqingwan.affection", op: "+", value: 3 }
+        choices:
+          - { text: "继续赶路", next: leave }
+          - { text: "问她是否需要帮助", next: help }
+      
+      - id: silent
+        template: "苏清婉上下打量你一眼，转身离开。"
+        effects:
+          - { path: "npcs.suqingwan.affection", op: "+", value: 1 }
+        next: leave
+      
+      - id: question
+        template: "苏清婉冷笑：「问人名字之前，先报上自己的。」"
+        choices:
+          - { text: "自报姓名",   next: self_intro }
+          - { text: "继续沉默",   next: silent }
+      
+      - id: self_intro
+        template: "苏清婉听完后点点头：「某乃苏清婉，这剑冢是我的地方。」"
+        effects:
+          - { path: "npcs.suqingwan.affection", op: "+", value: 5 }
+        next: help
+      
+      - id: help
+        template: |
+          苏清婉微微叹息：「我在寻一柄失落此地的剑。
+          你若能助我，我必重谢。」
+          当前好感: {{ state.npcs.suqingwan.affection }}/100
+        choices:
+          - { text: "答应帮她", next: quest_accept }
+          - { text: "婉拒",     next: leave }
+      
+      - id: quest_accept
+        template: "（开启支线任务：在剑冢中寻找失落之剑）"
+        effects:
+          - { path: "quests.lost_sword.status", op: "=", value: "active" }
+          - { path: "world.location",           op: "=", value: "剑冢" }
+        next: leave
+      
+      - id: leave
+        template: |
+          你们分道扬镳。江湖路远，后会有期。
+          --- 故事未完待续 ---
+          最终 HP: {{ state.player.hp }} | 最终好感: {{ state.npcs.suqingwan.affection }}
+        ending: true
+```
+
+**这就是「无 LLM」的完整形态**——一段可独立发布的、有意义的小游戏。**够小才真实**。
+
+### 11.4 模板 Pack（与 narrative_graph 配合）
 
 ```yaml
 # 角色卡 flavor.template_pack
 templates:
-  intro:
-    text: "{time_of_day}时分，{player_name}走进{location}。{npc_name}正{action}。"
-    variables:
-        - name: action
-          choices: ["独自发呆", "低头研读古籍", "擦拭手中的剑"]
-  combat_win:
-    text: "{player_name}的剑招凌厉，{enemy}应声倒地。"
-  combat_lose:
-    text: "{enemy}的攻击命中，{player_name}踉跄后退。"
+  default:
+    location_label: "位置"
+    time_label:     "时辰"
+    hp_label:       "气血"
+    status_template: |
+      <div class="status-bar">
+        <span>{{ state.player.hp }}/100 气血</span>
+        <span>{{ state.world.location }}</span>
+        {% if state.npcs.suqingwan %}
+        <span>好感 {{ state.npcs.suqingwan.affection }}/100</span>
+        {% endif %}
+      </div>
 ```
 
-### 11.4 自动降级触发
+### 11.5 LLM 健康度检测与自动切换
 
 ```python
-class NarratorWithFallback:
-    def __init__(self, llm_narrator, template_narrator, llm_health):
-        self.llm = llm_narrator
-        self.template = template_narrator
+class LLMHealthMonitor:
+    """监测 LLM API 健康度，触发自动切换"""
+
+    def __init__(self, window=20):
+        self.window = window
+        self.recent_results = deque(maxlen=window)  # 最近 N 次结果
+
+    def record(self, success: bool, latency_ms: int):
+        self.recent_results.append({'success': success, 'latency': latency_ms, 'ts': now()})
+
+    def is_available(self) -> bool:
+        """连续失败 3 次或成功率 < 50% 视为不可用"""
+        if len(self.recent_results) < 3:
+            return True
+        recent_3 = list(self.recent_results)[-3:]
+        if not all(r['success'] for r in recent_3):
+            return False
+        success_rate = sum(1 for r in self.recent_results if r['success']) / len(self.recent_results)
+        return success_rate >= 0.5
+
+    def avg_latency_ms(self) -> float:
+        if not self.recent_results:
+            return 0
+        return sum(r['latency'] for r in self.recent_results) / len(self.recent_results)
+
+
+class ModeAutoSwitcher:
+    """根据健康度自动在轴上切换"""
+
+    def __init__(self, character_card, llm_health, mode_with_llm, mode_without_llm):
+        self.card = character_card
         self.health = llm_health
+        self.mode_with = mode_with_llm
+        self.mode_without = mode_without_llm
+
+    def current_mode(self):
+        declared = self.card.engine.llm
+        if declared == 'with_llm':
+            if self.health.is_available():
+                return self.mode_with
+            else:
+                # LLM 不可用，但角色卡声明需要 LLM —— 切到 without_llm（如果可能）
+                if self.card.engine.narrative_graph:
+                    return self.mode_without
+                # 没有 narrative_graph —— 没法降级
+                raise LLMUnavailableError('no fallback for this character card')
+        return self.mode_with  # declared 'without_llm'
 
     def narrate(self, ...):
-        if self.health.is_available() and self.health.success_rate() > 0.9:
-            try:
-                return self.llm.narrate(...)
-            except LLMAvailabilityError:
-                pass
-        return self.template.narrate(...)
+        mode = self.current_mode()
+        return mode.narrate(...)
 ```
 
-**降级模式价值**：当 LLM API 不可用 / 超时 / 限流时，游戏不停摆——玩家仍能玩，只是叙事变成模板化。这对稳定性和玩家体验是关键差异化。
+### 11.6 「无 LLM」 vs 「CRPG」 的边界
+
+> **重要：不要把「无 LLM」做得过重。**
+>
+> 「无 LLM」是**轻量级**的小型流程化游戏，玩家点选项，节点跳转，状态机推进。够用就行。
+>
+> 如果创作者想做真正的 CRPG（复杂战斗系统、复杂 AI、复杂事件），**需要 LLM**。让规则复杂度进入 `full` + with_llm 模式（用 LLM 处理 NPC 对话、事件描述、剧情推进）。
+>
+> **架构上的取舍**：无 LLM 模式不追求"完整游戏体验"，只追求"游戏还能玩"。这是 LLM 不可用时的兜底，不是 fail-over 到一个完整 RPG 的追求。
+
+### 11.7 与 AgentOS 内核的协同
+
+模式切换与 AgentOS 内核的契约：
+
+```python
+# 内核 task crate 暴露的模式声明
+@dataclass
+class TaskConfig:
+    mode: Literal['with_llm', 'without_llm']
+    rule_complexity: Literal['none', 'core', 'full']
+    # 内核根据此决定：
+    #   - 是否调用 LLM invoker
+    #   - 是否启用状态机
+    #   - 是否执行 lorebook 检索
+    # RP 插件作为 consumer 接收这些参数
+```
+
+**内核不需要知道 RP 细节**——它只看到 with_llm / without_llm、none/core/full 两个轴。RP 插件解释这两个轴的具体含义（启用哪些子系统）。
 
 ---
 
 ## 12. 与 afengy.com 创作指南逐条对照
 
-| afengy 创作指南原话 | 现状（LLM-only） | AgentOS 实现 |
+> **关键变化**：之前的设计文档试图把 afengy 当成「不完整」模式去覆盖——这是错的。**正确的对照是：afengy 的每一条建议都可以在二轴框架的某个 cell 上找到对应实现，但**不会强行套用到所有 cell**。
+
+### 12.1 对照表（按 afengy 创作指南章节）
+
+| afengy 创作指南原话 | afengy 现状（LLM-only） | AgentOS 实现（按 cell 分流） |
 |---|---|---|
-| "提示词是写给 AI 看的工作手册" | ✓ 一段文字，全给 LLM | ✗ 改成"游戏规则包"，LLM 只看其中一部分 |
-| "消除重复表述" | ✓ 作者手动精简 | `agentos creator lint --check=duplicates` 自动检测 |
-| "善用结构化格式 (Markdown/XML)" | ✓ 用 Markdown 增强 LLM 阅读 | ✓ 强制 YAML / JSON Schema，YAML 段落填空模板 |
-| "好感度系统" | ✓ 提示词写"好感度 0-100" | `engine.variables.npcs.X.affection` 强 schema |
-| "随机事件" | ✓ 提示词写"3-5 回合后触发" | `engine.rules.random_events.pool` + 调度器 |
-| "分支与记忆" | ✓ 提示词写"关键选择记录" | `engine.narrative_graph` + `memory_system` |
-| "思维链" | ✓ LLM 自己 <thinking> | `narrator.thinking` 字段，前后端分离渲染 |
-| "正向指令优于否定指令" | ✗ 容易写成"不要 X" | ✓ 代码层强制：negative instruction lint 警告 + 规则引擎拒绝 |
-| "Token 消耗" | ✓ 作者手动估算 | `agentos creator lint --token-estimate` 自动 |
-| "世界书按需加载" | ✓ 关键词触发 | ✓ + 场景触发 + 任务触发 + 阈值触发 + RAG |
-| "状态栏 HTML 模板" | ✓ LLM 自由输出 HTML | ✓ `ui.status_bar_template` + 自动从 state 渲染 |
-| "HTML/CSS 美化" | ✓ 作者写 CSS | ✓ + 沙箱（iframe + CSP + 白名单） |
-| "玩家/NPC 信息栏" | ✓ LLM 自己维护 | ✓ `engine.variables` 多 group |
-| "记忆区维护" | ✓ LLM 在 prompt 里维护 | ✓ 代码 + LLM 摘要协作 |
-| "AI 实际收到的数据长什么样" | ✓ 创作者看不见 | ✓ `agentos creator trace` 显示完整拼装 |
-| "权重优先级总结" | ✓ 作者凭经验 | ✓ `system → scene → lorebook → state → history → event` 代码固定 |
-| "快捷指令按钮" | ✓ 字符串模板提示词 | ✓ `engine.actions` 显式声明 + handler |
-| "破甲词" | ✓ 作者字符串拼接 | ✗ 不做（合规优先） |
-| "HTML 详细介绍" | ✓ 作者写 HTML | ✓ `flavor.description_long` HTML + 沙箱渲染 |
+| **Vol.01 §02 基础篇**：前后置词 + 提示词是核心 | ✓ 三段 prompt 拼装 | `core + with_llm`：拆为 system + lorebook + state + history；`none + with_llm`：等价 afengy（仍支持） |
+| "提示词是写给 AI 看的工作手册" | ✓ 整段 | `core+`：拆分为「常规状态」由代码持有 + 「模糊状态」由 LLM 自由发挥；`none+`：LLM 全权 |
+| **Vol.01 §03 Markdown/格式**：消除重复、结构化 | ✓ Markdown 提示 | `agentos creator lint --check=duplicates` 自动检测 |
+| **Vol.01 §03 玩法设计**：好感度、随机事件、分支 | ✓ 提示词硬写 | `core+`：`engine.variables` + `engine.rules.random_events`；`full+`：`engine.narrative_graph` |
+| **Vol.01 §03 思维链** | ✓ LLM 自加 | `narrator.thinking` 字段（档位 3） |
+| **Vol.02 §01 上下文是什么**：主提示词 + 前后置词 + 世界书 + 历史 = token | ✓ 拼装 | `agentos creator trace` 显示完整拼装；按 cell 自动裁剪 |
+| **Vol.02 §02-03 世界观 / 角色设定** | ✓ Markdown 段落 | `flavor.description`（文学性） + `engine.variables`（状态性） 分离 |
+| **Vol.02 §04 输出要求**：文风、思维链、约束 | ✓ 全在 prompt | `core+`：LLM 自由（`flavor.style_guide`）；`full+`：state_changes 走 schema |
+| **Vol.02 §05 状态栏与记忆区**：状态栏 + 记忆区 | ✓ LLM 自维护 + HTML | `core+`：`ui.status_bar_template` + 模板渲染（HTML 沙箱）；`full+`：状态机 + 摘要 |
+| **Vol.02 §06 组装**：排列顺序 | ✓ 作者凭经验 | `core+`：固定拼装顺序（`system → scene → lorebook → state → history → event`）；`none+`：极简（system + history） |
+| **Vol.02 §07 世界书进阶**：插入顺序 + 扫描深度 | ✓ 配置项 | `lorebook.position` + `sql.scan_depth`，与 afengy 同义 |
+| **Vol.02 §08 UI 与美化**：HTML/CSS | ✓ 作者手写 | `core+` + `CustomCSSSandbox`（iframe + CSP + 白名单） |
+| **Vol.03 §04 阶段性总结**：平台规范 + 内容分级 | ✓ 创作者守则 | 沿用 AgentOS 的"公序良俗"框架；不照搬 RTA 等 |
+
+### 12.2 哪些是 AgentOS 真正新增的？
+
+| afengy 没有 / 弱 | AgentOS 新增 |
+|---|---|
+| ❌ 状态机 / 数值校验 | `engine.variables` schema + State Contract Validator |
+| ❌ 规则引擎（战斗/事件/掉落） | `engine.rules` 配置 + `agentos.rp.combat` |
+| ❌ 叙事图（节点 + 触发器） | `engine.narrative_graph` + 可视化编辑器 |
+| ❌ Action 协议 | `engine.actions` 显式声明 + 客户端执行 |
+| ❌ 离线小型流程游戏 | `core + without_llm` 第一类公民（visual novel 级） |
+| ❌ LLM 健康度检测 + 自动切换 | `LLMHealthMonitor` + `ModeAutoSwitcher` |
+| ❌ 跨会话记忆 | `RPMemoryAugmenter`（摘要 + 向量检索，复用内核） |
+| ❌ 契约松紧可调 | `contract_level` 4 档（0/1/2/3） |
+| ⚠️ 「好感度」「位置」「时间」靠 LLM 维护 | `engine.variables` + 代码校验（核心 cell 强制） |
+
+### 12.3 哪些是 afengy 强而 AgentOS 暂不强？
+
+| afengy 强 | AgentOS 暂不强 | 影响 |
+|---|---|---|
+| 海量现成作品（创作指南 + 大量 UGC） | 无 | 启动期需要靠创作者迁移 |
+| 积分/付费/月卡/礼包体系 | 无 | 商业化路径需独立设计 |
+| 多端 App / APK / iOS / Windows | 仅 Web | 装机版路径需独立设计 |
+| 论坛 / 社交矩阵 | 无 | 社区建设需独立设计 |
+| 破甲生态（Mod/jailbreak） | ❌ 不做 | 合规优先；LLM 用其他 LLM（合理） |
+
+### 12.4 与 afengy 的关系
+
+**不是替代，是共存 + 迁移**：
+- afengy 用户量大、内容多——他们的 Mod/作品应当能被 AgentOS 读
+- afengy 模式 (`none + with_llm`) 是 AgentOS 的合法 cell —— 用户想用 Mod 想用破甲，AgentOS 也支持
+- 但 AgentOS 的核心 cell (`core + with_llm`) 比 afengy 更稳定 —— HP/位置/时间不会漂移
+
+**迁移工具（M4 实施）**：
+- `agentos rp import afengy-character` —— 解析 afengy 作品页面 + 提示词
+- 自动转换：Markdown 提示词 → flavor.description；HTML 状态栏模板 → ui.status_bar_template；好感度规则 → engine.variables
+- memory_palace 数据 → Adapter 导入 AgentOS 内核 session
 
 ---
 
-## 13. 实施路线
+按"**默认推荐模式先行**"原则 —— **Phase 1 先把「核心模式专攻 + 默认 case」做出来**（80% 创作者用的 `core + with_llm`），再扩展到其他三个 cell。
 
-按"差异化最大化 + 借鉴 Convai"双轴，分 4 个阶段：
+### Phase 1（M1，3 周）：核心模式（`core + with_llm`）—— 80% 用户
 
-### Phase 1（M1，2 周）：角色卡 + 状态机基础
+> 目标：让 80% 的创作者能用 —— 只需声明 HP/MP/位置/时间等基础规则 + 一段 prompt。
 
-- `agentos.rp.character_card`：YAML/JSON + V2/V3 PNG 导入导出
-- `agentos.rp.state_machine`：schema 化状态 + 契约校验
-- `agentos creator lint`：静态检查
-- 前端：`<ChatStream>`、`<StatusBar>`
-- **差异化点**：状态由代码持有（afengy 缺失）
+- `agentos.rp.character_card`：YAML 角色卡（含 `engine.llm`、`engine.rule_complexity`、`engine.variables`）
+- `agentos.rp.state_machine`：仅常规状态 schema + 校验（HP/MP/位置/时间/物品）
+- `agentos.rp.lorebook`：基础关键词触发（5 种模式中实现核心 2 种：keyword + threshold）
+- `agentos.rp.llm.narrator`：档位 0-2 输出契约（纯文本/文本+choices/文本+actions），档位 3 暂缓
+- `agentos.rp.actions`：基础 action 注册与执行
+- 前端：`<ChatStream>`、`<StatusBar>`、`<CustomCSSSandbox>`（基础）
+- 创作者工具：`agentos creator new/lint/preview`
+- **差异化点（与 afengy 对比）**：HP/位置/时间等常规状态由代码持有——即便 LLM "忘了"也不会漂移
 
-### Phase 2（M2，3 周）：世界书 + 记忆
+### Phase 2（M2，2 周）：离线小型流程游戏（`core + without_llm`）—— LLM 不可用时
 
-- `agentos.rp.lorebook`：5 种触发模式
-- `agentos.rp.lorebook_rag`：嵌入检索（可选）
-- `agentos.rp.memory`：三层记忆
-- 前端：`<LorebookEditor>`、`<MemoryInspector>`
-- **差异化点**：RAG + 跨会话记忆
+> 目标：玩家点选项推进剧情，narrative_graph 跳节点，状态机推进 —— 一个"视觉小说"级别的体验。
 
-### Phase 3（M3，3 周）：叙事图 + Action
+- `agentos.rp.narrative_graph`：节点 + 决策 + effects + 触发器（轻量版，不做编辑器）
+- `agentos.rp.llm.template_narrator`：模板叙事器（jinja2 / 类似）
+- `agentos.rp.template_pack`：模板渲染（角色卡 `flavor.template_pack`）
+- `agentos.rp.mode_auto_switch`：LLM 健康度检测 + 模式自动切换
+- `agentos.rp.memory.augmenter`：摘要 + 检索（**复用 AgentOS 内核 session/storage**，不建新表）
+- 前端：`<NarrativeGraphRunner>`（轻量版）、`<ChoicesPanel>`
+- 创作者工具：`agentos creator export-visual-novel`
+- **差异化点**：把"无 LLM"做成第一类公民（视觉小说级别），不只当降级兜底
 
-- `agentos.rp.narrative_graph`：节点编辑器 + 触发器
-- `agentos.rp.actions`：结构化输出 + WebSocket
-- 前端：`<NarrativeEditor>`、`<RelationshipGraph>`
-- **差异化点**：可视化叙事图（afengy 无）
+### Phase 3（M3，3 周）：复杂 RP（`full + with_llm`）—— 高级创作者
 
-### Phase 4（M4，4 周）：规则引擎 + 战斗 + 降级模式
+> 目标：Convai 风格，复杂叙事图 + 完整 Action 协议 + 完整契约档位 3（含 `state_changes` schema 提议）。
 
-- `agentos.rp.combat`：战斗结算 + 数值化
+- `agentos.rp.narrative_graph`：完整版（含编辑器、触发器可视化）
+- `agentos.rp.llm.narrator`：档位 3（state_changes 提议 + 校验落库）
+- `agentos.rp.combat`：战斗规则引擎（确定性）
 - `agentos.rp.rules`：随机事件 / 掉落 / 好感判定
-- `agentos.rp.llm.narrator` 与 `agentos.rp.llm.template_narrator`：双模式
-- `agentos creator test`：模拟器测试
-- 前端：`<Marketplace>`、`<CreatorLinter>`
-- **差异化点**：降级模式（LLM 不可用时也能玩）
+- `agentos.rp.lorebook_rag`：嵌入检索（可选启用）
+- `agentos.rp.action_executor`：完整 action 注册表（前端可执行）
+- 前端：`<NarrativeEditor>`、`<RelationshipGraph>`、`<CombatUI>`、`<CustomCSSSandboxAdvanced>`
+- 创作者工具：`agentos creator test`（模拟器）
+
+### Phase 4（M4，2 周）：生态与迁移
+
+> 目标：让现有 RP 资产（afengy / SillyTavern / character.ai）能迁入。
+
+- `agentos.rp.adapter.afengy`：afengy memory_palace 适配器
+- `agentos.rp.adapter.sillytavern`：V2/V3 PNG 双向导入
+- `agentos creator market`：发布到市场
+- 前端：`<Marketplace>`、`<ImportWizard>`
+
+### 实施优先级总结
+
+| 阶段 | 模式 cell | 用户群 | 优先级 |
+|---|---|---|---|
+| M1 | `core + with_llm` | 80% 创作者 | ★★★★★ |
+| M2 | `core + without_llm` | 离线 / 节省 / 视觉小说爱好者 | ★★★★ |
+| M3 | `full + with_llm` | 复杂 RP 创作者 | ★★★ |
+| M4 | `full + without_llm` + 生态迁移 | 高级 + 老用户 | ★★ |
+
+**关键**：M1 不做完不开始 M3 —— M1 是地基，M2 是地基的镜像（无 LLM），M3 在 M1 基础上加复杂度，M4 是收尾。
 
 ---
 
@@ -1377,18 +2009,19 @@ class NarratorWithFallback:
 
 按 AGENTS.md「ADR 制度」，下列决策必须写 ADR（存到 `docs/decisions/`）：
 
-1. **角色卡 spec 选型** —— YAML vs JSON vs TOML？为什么？
-2. **状态机契约格式** —— JSON Schema vs Protobuf vs Pydantic？为什么？
-3. **状态变更来源边界** —— LLM 提议 vs 代码计算 vs 玩家操作的具体边界
-4. **世界书触发策略** —— 关键词 vs 嵌入 vs 混合？RAG 何时启用？
-5. **Action 协议** —— 是否有平台特定的扩展点？
-6. **持久化策略** —— per-task_id 还是 per-character_id？跨会话边界？
-7. **跨会话记忆边界** —— 哪些属于 L2 长期？需要 PII 过滤吗？
-8. **CustomCSS 沙箱** —— iframe vs CSP vs Worker 哪种？
-9. **角色卡导出格式** —— 哪些支持？与 SillyTavern 的兼容边界
-10. **降级模式触发条件** —— LLM 健康度如何定义？切换延迟？
-11. **叙事图 schema** —— 与 Convai Narrative Design 的兼容策略
-12. **状态变更审计** —— 留存多久？合规要求？
+1. **二轴模式框架** —— LLM 可用性 × 规则复杂度；为什么用二轴而非三模式枚举？[已写：`2026-10-06-rp-engine-first-architecture.md`]
+2. **角色卡 spec 选型** —— YAML vs JSON vs TOML？为什么？
+3. **状态机契约格式** —— JSON Schema vs Protobuf vs Pydantic？为什么？
+4. **常规状态 vs 模糊状态边界** —— 谁决定哪些字段归哪边？
+5. **世界书触发策略** —— 关键词 vs 嵌入 vs 混合？RAG 何时启用？
+6. **Action 协议** —— 是否有平台特定的扩展点？
+7. **持久化策略** —— per-task_id 还是 per-character_id？跨会话边界？
+8. **记忆复用策略** —— 如何对接 AgentOS 内核 session/storage？
+9. **CustomCSS 沙箱** —— iframe vs CSP vs Worker 哪种？
+10. **角色卡导出格式** —— 哪些支持？与 SillyTavern 的兼容边界
+11. **LLM 健康度检测** —— 健康度如何定义？切换延迟？
+12. **叙事图 schema** —— 与 Convai Narrative Design 的兼容策略
+13. **状态变更审计** —— 留存多久？合规要求？
 
 ---
 
