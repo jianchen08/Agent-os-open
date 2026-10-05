@@ -812,6 +812,9 @@ class TestOnLoad:
 
         monkeypatch.setattr(urllib.request, "urlopen", MagicMock(return_value=_FakeResponse()))
         monkeypatch.setattr(subprocess, "Popen", MagicMock())
+        # 辅助 venv 钉为在位（CI 全新 checkout 无 .venv-hindsight 但随包
+        # requirements.txt 在位，会走「缺失自愈」提前降级出口，复用断言失效）
+        monkeypatch.setattr(srv, "_needs_aux_provision", lambda _root: False)
         srv.plugin._injected_config = {"default_bank_id": "tenant-1"}
 
         _run(srv._on_load({}))

@@ -455,11 +455,13 @@ def _mutate_zone_section(
       （normpath 归一，展示友好）。
     - 播种：add 且真值文件缺失且 base=None（默认解析）时，从 legacy base
       整体接管后修改（remove 不播种——没有可移除的对象就无操作）。
-    - 整盘根（空路径/盘符根/UNC 根）拒绝：不给整盘授权，也不给整盘排除。
+    - 整盘根（空路径/盘符根/UNC 根/POSIX 根）与相对路径拒绝：不给整盘
+      授权也不给歧义锚点。POSIX 上 splitdrive 恒无盘符，盘符存在性不可
+      作判据，按「绝对 + 非根」语义判。
     """
     normalized = os.path.normcase(os.path.normpath(str(path or "").strip()))
-    drive, rest = os.path.splitdrive(normalized)
-    if not normalized or not drive or rest in ("", "\\", "/"):
+    _, rest = os.path.splitdrive(normalized)
+    if not normalized or not Path(normalized).is_absolute() or rest in ("", "\\", "/", "//"):
         raise ValueError(f"非法名单条目（空路径或整盘根）: {path!r}")
     stored = os.path.normpath(str(path).strip())
 

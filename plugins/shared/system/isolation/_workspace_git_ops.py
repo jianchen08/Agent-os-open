@@ -149,7 +149,12 @@ class _GitOpsMixin:
             return r.returncode, r.stdout.strip(), r.stderr.strip()
         except subprocess.TimeoutExpired:
             return -1, "", f"命令执行超时（{timeout}秒）"
-        except FileNotFoundError:
+        except FileNotFoundError as e:
+            # POSIX 上 cwd 不存在同样抛 FileNotFoundError（子进程 chdir ENOENT），
+            # 须与"git 可执行缺失"区分：cwd 确实不在即归因工作目录，与 Windows
+            # NotADirectoryError 走同一语义分支。
+            if cwd is not None and not os.path.isdir(cwd):
+                return -1, "", f"git 工作目录无效或不存在: {cwd} ({e})"
             return -1, "", "未找到 git 命令"
         except OSError as e:
             # Windows 上 cwd 不存在时 subprocess.run 抛 NotADirectoryError [WinError 267]。

@@ -816,7 +816,12 @@ class TriggerManager:
         return len(fires)
 
     def start_reconcile_loop(self) -> None:
-        """启动 reconcile 对账循环（主事件循环上的 asyncio 任务；安全重复调用）。"""
+        """启动 reconcile 对账循环（主事件循环上的 asyncio 任务；安全重复调用）。
+
+        任务创建经 call_soon_threadsafe 投递：跨线程直接 loop.create_task 只
+        入 ready 队列不写 self-pipe，对端循环若已睡在 select 中不会被唤醒
+        （任务创建后永不调度——CI 慢机实测必现，快机竞速侥幸通过）。
+        """
         if self._reconcile_task is not None and not self._reconcile_task.done():
             return
         loop = self._main_loop
@@ -824,7 +829,13 @@ class TriggerManager:
             logger.warning("[TriggerManager] 主事件循环未设置，reconcile 对账循环未启动")
             return
         self._reconcile_running = True
-        self._reconcile_task = loop.create_task(self._reconcile_loop())
+
+        def _spawn() -> None:
+            if self._reconcile_task is not None and not self._reconcile_task.done():
+                return
+            self._reconcile_task = loop.create_task(self._reconcile_loop())
+
+        loop.call_soon_threadsafe(_spawn)
 
     def stop_reconcile_loop(self) -> None:
         """停止 reconcile 对账循环（取消在途任务，尽快退出）。"""

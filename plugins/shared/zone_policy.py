@@ -144,8 +144,10 @@ def load_session_read_grants(state: Mapping[str, Any]) -> list[str]:
 # `/mnt/<d>/Y` → `<d>:\Y`。脏形态直透 wsl --cd 会被按盘符相对路径解析为
 # 不存在的目录、再经 pwd/报错回灌 LLM 上下文（读链 404、写区匹配失败
 # 弹卡），故消费面前必须归一。纯 POSIX 形态仅 nt 平台重写（POSIX 宿主上
-# /mnt/d 是真实路径）。
-_WS_MOUNT_WIN_RE = re.compile(r"^(?:([A-Za-z]):)?[\\/]+mnt[\\/]+([A-Za-z])[\\/]+(.*)$", re.DOTALL)
+# /mnt/d 是真实路径，误改写会破坏宿主文件 IO）。无盘符变体必须以反斜杠
+# 开头：[\\/]+ 若放行正斜杠会把 /mnt/<d>/Y 在 POSIX 宿主上无条件吞进本
+# 规则，绕过下面的 nt 门控。
+_WS_MOUNT_WIN_RE = re.compile(r"^(?:([A-Za-z]):)?(?:\\+|(?<=[\\/:]))[\\/]*mnt[\\/]+([A-Za-z])[\\/]+(.*)$", re.DOTALL)
 _WS_MOUNT_POSIX_RE = re.compile(r"^/mnt/([A-Za-z])/(.*)$", re.DOTALL)
 
 
