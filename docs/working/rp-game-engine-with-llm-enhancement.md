@@ -552,6 +552,121 @@ agentos creator export my_card.yaml --format png-v3 # 导出 PNG-V3
 agentos creator publish my_card.yaml               # 打包发布到市场
 ```
 
+### 1.4.1 向后兼容：原始 V2/V3 角色卡如何工作
+
+> **关键承诺**：原始 SillyTavern V2/V3 角色卡（**没有 extensions 字段**）**100% 可用**，不需要任何转换。
+
+当 AgentOS 加载一个 ST V2/V3 角色卡（`data.extensions` 缺失或为空）时，**所有 AgentOS 字段自动取默认值**：
+
+```yaml
+# 原始 V2 角色卡（最常见格式）
+{
+  "spec": "chara-card-v2",
+  "spec_version": "1.0",
+  "data": {
+    "name": "Some Character",
+    "description": "...",
+    "personality": "...",
+    "scenario": "...",
+    "first_mes": "..."
+  }
+}
+
+# ↓ AgentOS 加载时自动补全 extensions 字段
+
+# 等价于：
+{
+  "spec": "chara-card-v2",
+  "data": { ... },
+  "extensions": {
+    // 默认值（AgentOS 补全）
+    "engine":       { "llm": "with_llm", "rule_complexity": "none", "contract_level": 0 },
+    "variables":    {},        // 空——无 schema，状态完全由 LLM 自由维护
+    "actions":      [],        // 空——无声明 actions，LLM 输出纯文本
+    "lorebook":     { "entries": [] },  // 空
+    "narrative_graph": null,   // 不用
+    "rules":        {},
+    "ui":           {},
+    "llm_rules":    { "contract_level": 0 }
+  }
+}
+```
+
+**原始 V2/V3 卡的行为 = 模式 A（纯 LLM，自由聊天）**：
+
+| 维度 | 默认值 | 行为 |
+|---|---|---|
+| `engine.llm` | `"with_llm"` | 调用 LLM |
+| `engine.rule_complexity` | `"none"` | LLM 全权（afengy 等价） |
+| `engine.contract_level` | `0` | LLM 输出纯文本 |
+| `engine.allow_cheat` | `true` | 允许玩家 `/cheat` |
+| `engine.cheat_overrides` | `{}` | 无 |
+| `variables` | `{}` | 无 schema，状态全由 LLM 自维护 |
+| `actions` | `[]` | 无 action，LLM 输出纯文本 |
+| `narrative_graph` | `null` | 无叙事图 |
+
+### 1.4.2 mode 是资产级声明，不是用户 / 插件配置
+
+> **关键澄清**：角色卡的 `extensions.engine.llm`（用不用 LLM）是 **创作者资产级声明**，不是用户运行时开关，不是插件框架配置。
+
+```
+                 ┌─────────────────────────────────────┐
+                 │      Asset Level（角色卡）      │
+                 │  extensions.engine.llm:            │
+                 │    "with_llm" | "without_llm"       │
+                 │    由创作者在角色卡声明            │
+                 └────────────────┬────────────────────┘
+                                  │
+                                  ↓ 解析
+                                  │
+                 ┌─────────────────────────────────────┐
+                 │   Plugin Level（RP 插件）         │
+                 │  消费 asset 声明                  │
+                 │  决定具体如何调用 LLM invoker      │
+                 │  决定如何构建 narrator              │
+                 └────────────────┬────────────────────┘
+                                  │
+                                  ↓ 调用
+                                  │
+                 ┌─────────────────────────────────────┐
+                 │   Kernel Level（AgentOS 内核）    │
+                 │  llm_invoker                       │
+                 │  plugin_loader                      │
+                 │  storage_driver                    │
+                 └─────────────────────────────────────┘
+```
+
+**三者的边界**：
+
+| 层 | 谁决定什么 | 不能决定什么 |
+|---|---|---|
+| **Asset（角色卡）** | `llm: with/without`、`rule_complexity`、`contract_level`、`allow_cheat`、所有变量 schema、所有 actions、所有 triggers | 不能决定如何实现这些（实现是插件的工作） |
+| **Plugin（RP 插件）** | 如何实现 asset 的声明（调用哪个 LLM、何时调用、何时 fallback） | 不能改 asset 的 mode 声明 |
+| **Kernel（AgentOS 内核）** | LLM 路由、存储、任务调度 | 不能改 asset 的 mode 声明，也不能改 plugin 逻辑 |
+
+**重要：插件不能改 asset 的 mode 声明**。如果角色卡声明 `llm: with_llm`，插件**不能**因为 LLM API 故障就"自动降级"到 `without_llm` 模式（那违反创作者意图）。
+
+**LLM 故障时**（asset 声明 with_llm）：
+
+- 插件**展示错误**给用户（"这张卡需要 LLM，但当前不可用"）
+- 不**自动改 mode**
+- 玩家可 `/cheat`（如果 asset 允许）→ 进入 afengy 模式（ad-hoc）
+
+### 1.4.3 mode 字段含义（精确边界）
+
+| 字段 | 在哪儿声明 | 谁可改 | 含义 |
+|---|---|---|---|
+| `extensions.engine.llm` | 角色卡 YAML | 仅创作者（写作时） | 这张卡是否需要 LLM（与角色卡内容绑定） |
+| `extensions.engine.rule_complexity` | 角色卡 YAML | 仅创作者 | 创作者希望的规则严格度 |
+| `extensions.engine.contract_level` | 角色卡 YAML | 仅创作者 | 输出契约档（0-3） |
+| `extensions.engine.allow_cheat` | 角色卡 YAML | 仅创作者 | 是否允许玩家作弊 |
+| `extensions.variables` | 角色卡 YAML | 仅创作者 | 状态字段 schema |
+| `extensions.actions` | 角色卡 YAML | 仅创作者 | 可用 action 清单 |
+| `state.meta.cheating` | 运行时（task_id） | 仅玩家（/cheat） | 当前会话是否作弊 |
+| **plugin framework 自身配置** | AgentOS 配置 | AgentOS 运维 | RP 插件框架本身的运行参数 |
+
+**`llm: with_llm/without_llm` 是 asset 级（角色卡），不是 plugin 级（AgentOS）**。
+
 ---
 
 ## 1.5. SillyTavern 生态兼容与增强
