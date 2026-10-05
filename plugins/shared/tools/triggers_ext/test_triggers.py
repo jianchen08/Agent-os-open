@@ -2077,7 +2077,11 @@ class TestCommandAction:
         monkeypatch.chdir(tmp_path)
 
         class _TimeoutThenBrokenProc:
-            pid = 0
+            # pid 取超 Linux pid_max 的不可能值：0 在 POSIX killpg 语义里是
+            # 「调用者所在进程组」，超时杀树会 SIGKILL 整个 pytest 进程组
+            # （Windows taskkill 对 0 拒绝故本地绿，CI Linux 必挂——b 分片
+            # 恒死 45 分钟墙的元凶，探针 timeout 2400 硬杀定位）。
+            pid = 99999999
             returncode = None
 
             def __init__(self) -> None:
