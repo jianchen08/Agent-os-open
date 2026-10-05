@@ -6,7 +6,7 @@ on:
 permissions:
   contents: write
 jobs:
-  shard-b-deep:
+  shard-b-ctx:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -18,17 +18,11 @@ jobs:
       - run: |
           uv sync --frozen --extra dev --extra isolation
           uv pip install -e ./plugins/sdk
-      - name: Probe shard b (tb=no list + tb=short subset)
+      - name: Probe shard b context before INTERNALERROR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
-          uv run --frozen python -m pytest -q --tb=no -rf tests/test_isolation_container_self_heal.py tests/test_isolation_checkpoint_security.py tests/test_isolation_concurrent_create.py tests/test_isolation_docker_provider_injection.py tests/test_isolation_io_error_self_heal.py tests/test_isolation_prune_throttle.py tests/test_isolation_sandbox.py tests/test_isolation_skills_copy.py tests/test_docker_provider_wsl_mount_check.py tests/test_isolation_guard_dangling_workspace.py plugins/shared/system/python_packager/ plugins/shared/system/monitoring/ plugins/shared/tools/download/ plugins/shared/tools/triggers_ext/ tests/suites/core/ tests/suites/e2e/ tests/suites/llm/ tests/suites/plugins/ tests/suites/task/ tests/unit/ tests/monitoring/ tests/multimodal/ tests/test_delete_task_cascade_pipeline.py tests/test_task_submit_tool_branches.py tests/test_task_submit_server_wiring.py tests/test_isolation_service_server.py tests/test_db_admin_server_gaps.py tests/test_rollback_reversers_gaps.py tests/test_browser_tool_gaps.py -m "not timing" --ignore=tests/plugins/test_plugin_smoke_matrix.py > /tmp/list.log 2>&1
-          echo "== tb=no run done =="
-          grep -E "^FAILED" /tmp/list.log | sed 's/^FAILED //; s/ - .*//' | sed 's/\[.*\]//' | sort -u > /tmp/failed_tests.txt
-          wc -l /tmp/failed_tests.txt
-          cat /tmp/failed_tests.txt
-          uv run --frozen python -m pytest -q --tb=short $(cat /tmp/failed_tests.txt | tr '\n' ' ') -m "not timing" > /tmp/detail.log 2>&1
-          echo "== tb=short subset done =="
-          python .github/workflows/probe_post.py /tmp/list.log "shard-b-list"
-          python .github/workflows/probe_post.py /tmp/detail.log "shard-b-detail"
+          uv run --frozen python -m pytest -q --tb=no tests/test_isolation_container_self_heal.py tests/test_isolation_checkpoint_security.py tests/test_isolation_concurrent_create.py tests/test_isolation_docker_provider_injection.py tests/test_isolation_io_error_self_heal.py tests/test_isolation_prune_throttle.py tests/test_isolation_sandbox.py tests/test_isolation_skills_copy.py tests/test_docker_provider_wsl_mount_check.py tests/test_isolation_guard_dangling_workspace.py plugins/shared/system/python_packager/ plugins/shared/system/monitoring/ plugins/shared/tools/download/ plugins/shared/tools/triggers_ext/ tests/suites/core/ tests/suites/e2e/ tests/suites/llm/ tests/suites/plugins/ tests/suites/task/ tests/unit/ tests/monitoring/ tests/multimodal/ tests/test_delete_task_cascade_pipeline.py tests/test_task_submit_tool_branches.py tests/test_task_submit_server_wiring.py tests/test_isolation_service_server.py tests/test_db_admin_server_gaps.py tests/test_rollback_reversers_gaps.py tests/test_browser_tool_gaps.py -m "not timing" --ignore=tests/plugins/test_plugin_smoke_matrix.py > /tmp/list.log 2>&1
+          echo "== done =="
+          python .github/workflows/probe_ctx.py /tmp/list.log "shard-b-ctx"
