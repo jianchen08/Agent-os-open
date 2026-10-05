@@ -1,0 +1,38 @@
+name: Debug shardb watchdog
+on:
+  push:
+    branches: [debug/**]
+  workflow_dispatch:
+concurrency:
+  group: shardb-watch
+  cancel-in-progress: true
+permissions:
+  contents: write
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with: { enable-cache: true, cache-dependency-glob: "uv.lock" }
+      - run: |
+          uv sync --frozen --extra dev --extra isolation
+          uv pip install -e ./plugins/sdk
+      - name: Run shard a (debug)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          T=$(mktemp)
+          set +e
+          echo "::group::shard a pytest output" >> "$GITHUB_STEP_SUMMARY"
+          ( uv run --frozen python -m pytest -v plugins/test_system_plugins.py plugins/shared/system/llm/ plugins/shared/system/tasks/ plugins/shared/modes/ plugins/shared/pipeline/input/agent_config_load/ plugins/shared/pipeline/core/tool_core/ plugins/shared/pipeline/output/result_format/ plugins/shared/pipeline/input/mode_material_inject/ plugins/shared/pipeline/input/environment_lifecycle/ plugins/shared/pipeline/input/level_guard/ plugins/shared/pipeline/input/multimodal_preprocessor/ plugins/shared/pipeline/input/tool_schema/ plugins/shared/pipeline/output/duplicate_check/ plugins/shared/tools/task/ plugins/shared/tools/human/ plugins/shared/tools/lsp/ plugins/shared/tools/task_evaluate/ plugins/shared/tools/web_ext/ plugins/shared/tools/builtin_tools/tests/ plugins/shared/system/dsh_adapter/tests/ tests/plugins/ tests/suites/plugins/ tests/channels/ tests/gates/ tests/test_security_check_allow_priority.py tests/test_security_check_isolation.py tests/test_track_stats_contract.py tests/test_process_watchdog_integration.py tests/test_isolation_docker_timeout.py -m "not timing" --ignore=tests/plugins/test_plugin_smoke_matrix.py --timeout=120 2>&1 || true ) | tee "$T"
+          echo "::endgroup::" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## shard a pytest summary"
+            grep -E "^(FAILED|ERROR)" "$T" | head -40
+            echo "## tail 40"
+            tail -40 "$T"
+          } >> "$GITHUB_STEP_SUMMARY"
