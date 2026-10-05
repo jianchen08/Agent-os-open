@@ -13,7 +13,7 @@ with open(sys.argv[1], encoding="utf-8", errors="replace") as f:
 label = sys.argv[2]
 failed = [ln for ln in lines if ln.startswith(("FAILED", "ERROR"))]
 ie = [i for i, ln in enumerate(lines) if ln.startswith("INTERNALERROR")]
-ctx = lines[max(0, ie[0] - 150) : ie[0] + 5] if ie else []
+ctx = lines[max(0, ie[0] - 200) : ie[0] + 5] if ie else []
 tail = lines[-20:]
 nl = chr(10)
 body = (
