@@ -427,31 +427,26 @@ jobs:
           T=$(mktemp); E=$(mktemp)
           set +e
           python scripts/run_gates.py --filter plugins-coverage-a,plugins-coverage-pairing,channel-copy-guard,plugins-mypy-baseline 2> "$E" 1> "$T"
-          echo "=== last 80 stdout ===" && tail -80 "$T"
-          echo "=== last 40 stderr ===" && tail -40 "$E"
-          cp "$E" /tmp/err.log || true
-          cp "$T" /tmp/out.log || true
+          # 把失败上下文写入 step summary（公开可见）
+          {
+            echo "## shard a — last 60 stdout"
+            tail -60 "$T"
+            echo "## shard a — last 40 stderr"
+            tail -40 "$E"
+          } >> "$GITHUB_STEP_SUMMARY" || true
+          # 仍发 commit comment 留底
+          cp "$E" "$GITHUB_WORKSPACE/shard_a.stderr" || true
+          cp "$T" "$GITHUB_WORKSPACE/shard_a.stdout" || true
           test ! -s "$E"
 
-      - name: Post stderr to comment
+      - name: Upload shard a debug outputs
         if: always()
-        run: |
-          python3 - <<'PYEOF'
-          import os, json, urllib.request, pathlib
-          out = []
-          p = pathlib.Path('/tmp/err.log')
-          if p.exists():
-              out.append('stderr tail:' + chr(10) + '```' + chr(10) + p.read_text(errors='replace')[-25000:] + chr(10) + '```')
-          p2 = pathlib.Path('/tmp/out.log')
-          if p2.exists():
-              out.append('stdout tail:' + chr(10) + '```' + chr(10) + p2.read_text(errors='replace')[-25000:] + chr(10) + '```')
-          sha = os.environ["GITHUB_SHA"]; token = os.environ["GITHUB_TOKEN"]
-          data = json.dumps({"body": chr(10).join(out)}).encode()
-          req = urllib.request.Request(f"https://api.github.com/repos/jianchen08/Agent-os-open/commits/{sha}/comments", data=data, headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}, method="POST")
-          with urllib.request.urlopen(req) as r: print("status", r.status)
-          PYEOF
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-a-debug
+          path: |
+            shard_a.stdout
+            shard_a.stderr
 
       - name: Upload coverage data (shard a .coverage)
         uses: actions/upload-artifact@v4
