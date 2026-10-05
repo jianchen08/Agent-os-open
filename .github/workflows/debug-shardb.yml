@@ -21,88 +21,30 @@ jobs:
       - run: |
           uv sync --frozen --extra dev --extra isolation
           uv pip install -e ./plugins/sdk
-      - name: Start watchdog
-        run: |
-          cat > /tmp/watchdog.src <<'PYW'
-          import os, json, time, urllib.request, pathlib
-          sha = os.environ["GITHUB_SHA"]; token = os.environ["GITHUB_TOKEN"]
-          n = 0
-          def post(body):
-              global cid
-              data = json.dumps({"body": body[:60000]}).encode()
-              url = f"https://api.github.com/repos/jianchen08/Agent-os-open/commits/{sha}/comments"
-              req = urllib.request.Request(url, data=data,
-                  headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
-                  method="POST")
-              with urllib.request.urlopen(req) as r:
-                  n = n + 1
-          def errlog(msg):
-              with open('/tmp/watchdog.err', 'a') as f: f.write(msg + chr(10))
-          try:
-              post('watchdog alive @ start')
-          except Exception as e:
-              errlog('start post failed: ' + repr(e))
-          while True:
-              time.sleep(120)
-              try:
-                  p = pathlib.Path('/tmp/cur.log')
-                  lines = p.read_text(errors='replace').splitlines() if p.exists() else []
-                  tail = chr(10).join(lines[-6:])
-                  mem = pathlib.Path('/proc/meminfo').read_text().splitlines()[1]
-                  disk = os.popen('df -h / /tmp 2>/dev/null | tail -2').read()
-                  post(f"progress @ {time.strftime('%H:%M:%S')} {mem}" + chr(10) + disk + chr(10) + "```" + chr(10) + tail + chr(10) + "```")
-              except Exception as e:
-                  errlog(repr(e))
-          PYW
-          sed 's/^          //' /tmp/watchdog.src > /tmp/watchdog.py
-          python3 -c "import ast; ast.parse(open('/tmp/watchdog.py').read())" || { cat /tmp/watchdog.py | head -5; exit 1; }
-          echo "watchdog ready"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Run shard b verbose
+      - name: Run shard a (debug)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          export PYTHONUNBUFFERED=1
-          nohup python3 /tmp/watchdog.py > /tmp/watchdog.out 2>&1 &
-          echo "watchdog pid $!"
           T=$(mktemp)
-          ( timeout 2400 uv run --frozen python -m pytest -v tests/test_isolation_skills_copy.py tests/test_docker_provider_wsl_mount_check.py tests/test_isolation_guard_dangling_workspace.py plugins/shared/system/python_packager/ plugins/shared/system/monitoring/ plugins/shared/tools/download/ plugins/shared/tools/triggers_ext/ tests/suites/ tests/unit/ tests/monitoring/ tests/multimodal/ tests/test_delete_task_cascade_pipeline.py tests/test_task_submit_tool_branches.py tests/test_task_submit_server_wiring.py tests/test_isolation_service_server.py tests/test_db_admin_server_gaps.py tests/test_rollback_reversers_gaps.py tests/test_browser_tool_gaps.py tests/test_bash_tool_gaps.py tests/test_llm_core_plugin_gaps.py tests/tools/test_task_submit_permission_p0.py tests/tools/test_task_permission_p0.py tests/tools/test_memory_idor_p0.py plugins/shared/pipeline/input/context_window_guard/ plugins/shared/pipeline/input/prompt_build/ plugins/shared/pipeline/input/security_check/ plugins/shared/pipeline/output/child_task_guard/tests/ plugins/shared/pipeline/output/task_reminder/ plugins/shared/pipeline/output/tool_cache_writer/ plugins/shared/system/agent_manager/ plugins/shared/system/approval/ plugins/shared/system/evaluation/ plugins/shared/system/isolation/ plugins/shared/system/scene/ plugins/shared/system/task_form/ plugins/shared/system/workspace/ --durations=60 --timeout=90 --timeout-method=signal --durations=60 --cov=plugins 2>&1 || true ) | tee "$T" | tee /tmp/cur.log > /dev/null
-          echo "done"
-      - name: Post durations and tail
+          set +e
+          ( uv run --frozen python -m pytest -v plugins/test_system_plugins.py plugins/shared/system/llm/ plugins/shared/system/tasks/ plugins/shared/modes/ plugins/shared/pipeline/input/agent_config_load/ plugins/shared/pipeline/core/tool_core/ plugins/shared/pipeline/output/result_format/ plugins/shared/pipeline/input/mode_material_inject/ plugins/shared/pipeline/input/environment_lifecycle/ plugins/shared/pipeline/input/level_guard/ plugins/shared/pipeline/input/multimodal_preprocessor/ plugins/shared/pipeline/input/tool_schema/ plugins/shared/pipeline/output/duplicate_check/ plugins/shared/tools/task/ plugins/shared/tools/human/ plugins/shared/tools/lsp/ plugins/shared/tools/task_evaluate/ plugins/shared/tools/web_ext/ plugins/shared/tools/builtin_tools/tests/ plugins/shared/system/dsh_adapter/tests/ tests/plugins/ tests/suites/plugins/ tests/channels/ tests/gates/ tests/test_security_check_allow_priority.py tests/test_security_check_isolation.py tests/test_track_stats_contract.py tests/test_process_watchdog_integration.py tests/test_isolation_docker_timeout.py -m "not timing" --ignore=tests/plugins/test_plugin_smoke_matrix.py --timeout=120 2>&1 || true ) | tee "$T"
+          echo "--- FAILED lines ---"
+          grep -E "^(FAILED|ERROR)" "$T" | head -40 > /tmp/fails.txt
+          cat /tmp/fails.txt
+          echo "--- last 50 ---"
+          tail -50 "$T"
+      - name: Post comment
         if: always()
         run: |
-          pkill -f watchdog.py || true
-          cat > /tmp/poster.src <<'PYEOF'
+          T=$(mktemp)
+          ( uv run --frozen python -m pytest -v plugins/test_system_plugins.py plugins/shared/system/llm/ plugins/shared/system/tasks/ plugins/shared/modes/ plugins/shared/pipeline/input/agent_config_load/ plugins/shared/pipeline/core/tool_core/ plugins/shared/pipeline/output/result_format/ plugins/shared/pipeline/input/mode_material_inject/ plugins/shared/pipeline/input/environment_lifecycle/ plugins/shared/pipeline/input/level_guard/ plugins/shared/pipeline/input/multimodal_preprocessor/ plugins/shared/pipeline/input/tool_schema/ plugins/shared/pipeline/output/duplicate_check/ plugins/shared/tools/task/ plugins/shared/tools/human/ plugins/shared/tools/lsp/ plugins/shared/tools/task_evaluate/ plugins/shared/tools/web_ext/ plugins/shared/tools/builtin_tools/tests/ plugins/shared/system/dsh_adapter/tests/ tests/plugins/ tests/suites/plugins/ tests/channels/ tests/gates/ tests/test_security_check_allow_priority.py tests/test_security_check_isolation.py tests/test_track_stats_contract.py tests/test_process_watchdog_integration.py tests/test_isolation_docker_timeout.py -m "not timing" --ignore=tests/plugins/test_plugin_smoke_matrix.py --timeout=120 2>&1 || true ) | tee "$T"
+          python3 - <<'PYEOF'
           import os, json, urllib.request, pathlib
-          out = []
-          p = pathlib.Path('/tmp/cur.log')
-          if p.exists():
-              lines = p.read_text(errors='replace').splitlines()
-              out.append("last lines:" + chr(10) + chr(10).join(lines[-25:]))
-          src = pathlib.Path('/tmp/cur.log')
-          if src.exists():
-              logt = src.read_text(errors='replace')
-              import re as _re
-              blocks = []
-              for m in _re.finditer(r'(_+ (?:test_|Test).+? _+)' , logt[:400000]):
-                  seg = logt[m.start():m.start()+1200]
-                  if 'assert' in seg or 'Error' in seg:
-                      blocks.append(seg[:900])
-                  if len(blocks) >= 6: break
-              out.append('failure blocks:' + chr(10) + (chr(10) + '---' + chr(10)).join(blocks))
-          errp = pathlib.Path('/tmp/watchdog.err')
-          if errp.exists():
-              out.append('watchdog.err:' + chr(10) + errp.read_text(errors='replace')[-3000:])
-          sha = os.environ["GITHUB_SHA"]; token = os.environ["GITHUB_TOKEN"]
-          data = json.dumps({"body": "shard-b postmortem:" + chr(10) + "```" + chr(10) + chr(10).join(out)[:40000] + chr(10) + "```"}).encode()
-          req = urllib.request.Request(
-              f"https://api.github.com/repos/jianchen08/Agent-os-open/commits/{sha}/comments",
-              data=data, headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}, method="POST")
-          with urllib.request.urlopen(req) as r:
-              print("status", r.status)
+          p = pathlib.Path('/tmp/probe.log')
+          p = pathlib.Path(os.environ.get('GITHUB_STEP_SUMMARY', '/tmp/sum.txt')) if not p.exists() else p
+          t = p.read_text(errors='replace') if p.exists() else ''
+          out = 'shard a probe:' + chr(10) + '```' + chr(10) + t[-50000:] + chr(10) + '```'
+          data = json.dumps({'body': out}).encode()
+          req = urllib.request.Request('https://api.github.com/repos/jianchen08/Agent-os-open/commits/' + os.environ['GITHUB_SHA'] + '/comments', data=data, headers={'Authorization': f"Bearer {os.environ['GITHUB_TOKEN']}", 'Accept': 'application/vnd.github+json'}, method='POST')
+          with urllib.request.urlopen(req) as r: print('status', r.status)
           PYEOF
-          sed 's/^          //' /tmp/poster.src > /tmp/poster.py
-          python3 /tmp/poster.py
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
