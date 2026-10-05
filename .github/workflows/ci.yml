@@ -598,7 +598,7 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-    python-coverage-merge:
+  python-coverage-merge:
     name: Python Coverage 合并 (combine + 覆盖率/改动行基线)
     runs-on: ubuntu-latest
     needs: [python-coverage-a, python-coverage-b, python-coverage-c, python-coverage-d, python-coverage-e]
