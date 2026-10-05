@@ -26,17 +26,16 @@ jobs:
           cat > /tmp/watchdog.src <<'PYW'
           import os, json, time, urllib.request, pathlib
           sha = os.environ["GITHUB_SHA"]; token = os.environ["GITHUB_TOKEN"]
-          cid = None
+          n = 0
           def post(body):
               global cid
               data = json.dumps({"body": body[:60000]}).encode()
-              url = (f"https://api.github.com/repos/jianchen08/Agent-os-open/comments/{cid}" if cid
-                     else f"https://api.github.com/repos/jianchen08/Agent-os-open/commits/{sha}/comments")
+              url = f"https://api.github.com/repos/jianchen08/Agent-os-open/commits/{sha}/comments"
               req = urllib.request.Request(url, data=data,
                   headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
-                  method="PATCH" if cid else "POST")
+                  method="POST")
               with urllib.request.urlopen(req) as r:
-                  if cid is None: cid = json.load(r)["id"]
+                  n = n + 1
           def errlog(msg):
               with open('/tmp/watchdog.err', 'a') as f: f.write(msg + chr(10))
           try:
