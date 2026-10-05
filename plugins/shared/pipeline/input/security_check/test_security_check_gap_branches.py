@@ -1196,7 +1196,7 @@ class TestSensitivePathSharedModule:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """resolve 抛 OSError/ValueError（NUL、超长路径等）→ 回落原始串参与匹配
-        （fail-closed：宁可对原文比对，也不静默放行）。"""
+        （fail-closed：宁可对原文比对，也不静默放行；黑名单按当前平台取）。"""
         from pathlib import Path
 
         import sensitive_paths
@@ -1206,9 +1206,10 @@ class TestSensitivePathSharedModule:
 
         monkeypatch.setattr(Path, "resolve", _boom)
 
-        hit, prefix = sensitive_paths.is_sensitive_path("C:/Windows/System32")
+        bad = "C:/Windows/System32" if sys.platform == "win32" else "/etc/passwd"
+        hit, prefix = sensitive_paths.is_sensitive_path(bad)
 
-        assert hit is True, "回落原文后仍须命中黑名单（Windows 敏感目录）"
+        assert hit is True, "回落原文后仍须命中黑名单（当前平台敏感目录）"
         assert prefix
 
     @pytest.mark.parametrize(

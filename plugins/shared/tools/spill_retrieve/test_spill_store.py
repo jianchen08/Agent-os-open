@@ -117,10 +117,11 @@ def test_resolve_base_path_absolute_passthrough(tmp_path):
 
 
 def test_resolve_base_path_relative_to_project_root():
-    # 相对路径锚定项目根（从本文件向上找含 config/ + plugins/ 的目录）
+    # 相对路径锚定项目根（从本文件向上找含 config/ + plugins/ 的目录）；
+    # 只断锚定语义（= 项目根/data），不断 data/ 存在性——那是运行期产物，
+    # CI 全新 checkout 无此目录
     p = spill_store.resolve_base_path("./data/spill")
     assert p.is_absolute()
-    assert (p.parent).exists()  # 项目根存在
     assert (Path(__file__).resolve().parents[4] / "data") == p.parent
 
 
@@ -171,13 +172,15 @@ def test_on_pipeline_end_cleanup(tmp_path, monkeypatch):
 # ── G 簇缺口补测（2026-09-14 coverage 缺行）──────────────────────
 
 
-def test_infer_project_root_returns_none_when_no_layout(monkeypatch):
+def test_infer_project_root_returns_none_when_no_layout(monkeypatch, tmp_path):
     """_infer_project_root：向上找不到含 config/+plugins/ 的目录 → None（63）。
 
     把模块 __file__ 指向无 0.2 布局的隔离路径后父链穷尽即 None；对照组用
     真实文件位置验证正常推导非恒 None（防常量返回）。
     """
-    fake = Path("C:/nonexistent/isolated/spill_store.py")
+    fake = tmp_path / "isolated" / "spill_store.py"
+    fake.parent.mkdir(parents=True, exist_ok=True)
+    fake.write_text("", encoding="utf-8")
     monkeypatch.setattr(spill_store, "__file__", str(fake))
     assert spill_store._infer_project_root() is None
     monkeypatch.undo()

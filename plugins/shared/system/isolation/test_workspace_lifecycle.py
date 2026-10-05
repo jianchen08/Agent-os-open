@@ -398,9 +398,14 @@ class TestUserRootSkillsSource:
         assert not (ws / "skills").exists()
 
     def test_user_root_env_unset_no_source(self, tmp_path: Path, monkeypatch: Any) -> None:
-        # AGENTOS_USER_ROOT 与 OS 数据目录皆不可得 → 用户根 skills/ 源不入并集
+        # 用户根不可得（AGENTOS_USER_ROOT 与 OS 数据目录皆无）→ 用户根
+        # skills/ 源不入并集。POSIX 上 _os_data_dir 恒可推导（~/.local/share），
+        # 仅 delenv 模拟不出「不可得」，须钉 user_space.user_root → None
         monkeypatch.delenv("AGENTOS_USER_ROOT", raising=False)
         monkeypatch.delenv("APPDATA", raising=False)
+        import user_space
+
+        monkeypatch.setattr(user_space, "user_root", lambda: None)
         m = self._make_deriv_manager(tmp_path)
         sources = m._skill_sources()
         assert not any(p.parent.name in ("agentos", "userroot") for p in sources)

@@ -564,6 +564,7 @@ def test_normalize_windows_mixed_path_parametrized() -> None:
     assert f("") == ""
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="脏形态由真实 tmp 盘符构造（POSIX 无盘符），Windows 语义由本平台车道验证")
 async def test_mixed_mount_write_within_workspace_no_card(
     zone_env: dict[str, Path],
 ) -> None:

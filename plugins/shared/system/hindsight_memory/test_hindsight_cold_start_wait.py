@@ -182,6 +182,9 @@ class TestOnLoadColdStartLifecycle:
             await release.wait()
 
         monkeypatch.setattr(srv, "_hindsight_api_up", lambda _base_url: False)
+        # 辅助 venv 钉为在位（CI 全新 checkout 无 .venv-hindsight，不钉版
+        # _on_load_init 走提前降级出口，冷启动窗塌缩为 0，等待面断言失效）
+        monkeypatch.setattr(srv, "_needs_aux_provision", lambda _root: False)
         spawn_calls: list[tuple[int, str]] = []
 
         def _fake_spawn(port: int, data_dir: str) -> tuple[Any, str]:

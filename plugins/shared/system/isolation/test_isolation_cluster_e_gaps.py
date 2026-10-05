@@ -737,10 +737,14 @@ class TestSensitivePathResolveFailure:
         assert isinstance(prefix, str)
 
     def test_fallback_raw_string_still_matches_blacklist(self) -> None:
-        """回退字符串仍参与黑名单比对：含敏感前缀的坏路径命中（返回该平台前缀之一）。"""
+        """回退字符串仍参与黑名单比对：含敏感前缀的坏路径命中（返回该平台前缀之一）。
+
+        坏路径须带敏感前缀的子路径（前缀 + `/` 后再粘 NUL）——黑名单匹配
+        是「相等或前缀 + /」，NUL 直接粘在前缀尾部不构成命中。
+        """
         mod = _load("isolation_sensitive_paths_gaps_test", "sensitive_paths.py")
         blacklist = mod.SENSITIVE_DIRS_WINDOWS if sys.platform == "win32" else mod.SENSITIVE_DIRS_LINUX
-        bad = "c:/windows/system32\x00x" if sys.platform == "win32" else "/etc\x00x"
+        bad = "c:/windows/system32\x00x" if sys.platform == "win32" else "/etc/passwd\x00x"
         hit, prefix = mod.is_sensitive_path(bad)
         assert hit is True
         assert prefix in blacklist

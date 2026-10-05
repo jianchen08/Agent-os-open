@@ -207,14 +207,16 @@ class TestAvailability:
         assert ok is False
         assert "WSL" in (reason or "")
 
-    def test_distro_missing(self, tmp_path: Path) -> None:
+    def test_distro_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_MOD.shutil, "which", lambda name: f"/usr/local/bin/{name}")
         provider = _make_provider(tmp_path)
         provider._popen_run = _Recorder(script=lambda args: (0, b"Debian\n", b""))
         ok, reason = _run(provider.is_available())
         assert ok is False
         assert "Ubuntu" in (reason or "")
 
-    def test_distro_list_utf16_decode(self, tmp_path: Path) -> None:
+    def test_distro_list_utf16_decode(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_MOD.shutil, "which", lambda name: f"/usr/local/bin/{name}")
         provider = _make_provider(tmp_path)
         provider._popen_run = _Recorder(
             script=lambda args: (0, "Ubuntu\r\nDebian\r\n".encode("utf-16-le"), b"")
@@ -223,7 +225,8 @@ class TestAvailability:
         assert ok is True
         assert reason is None
 
-    def test_user_probe_failure(self, tmp_path: Path) -> None:
+    def test_user_probe_failure(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_MOD.shutil, "which", lambda name: f"/usr/local/bin/{name}")
         provider = _make_provider(tmp_path, user="agentos")
 
         def script(args: list[str]) -> tuple[int, bytes, bytes]:
@@ -236,7 +239,8 @@ class TestAvailability:
         assert ok is False
         assert "agentos" in (reason or "")
 
-    def test_sandbox_binary_missing(self, tmp_path: Path) -> None:
+    def test_sandbox_binary_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_MOD.shutil, "which", lambda name: f"/usr/local/bin/{name}")
         provider = _make_provider(tmp_path, sandbox_cmd=["bwrap"])
 
         def script(args: list[str]) -> tuple[int, bytes, bytes]:
