@@ -280,7 +280,7 @@ class TestLogSecurity:
     async def test_log_file_command_masked(self, bash_server_module, bash_handler):
         """日志头 # Command: 落盘的是掩码后的命令，输出不受影响。"""
         tool = bash_server_module._get_tool()
-        secret = "sk-super-secret-token"
+        secret = "sk-abcdef1234567890"
         result = await bash_handler(
             action="execute",
             command=f"echo API_KEY={secret}",
