@@ -1,0 +1,113 @@
+name: Debug main reds probe
+on:
+  push:
+    branches: [debug/**]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  shard-a:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with: { enable-cache: true, cache-dependency-glob: "uv.lock" }
+      - run: |
+          uv sync --frozen --extra dev --extra isolation
+          uv pip install -e ./plugins/sdk
+      - name: Run exact shard a gates
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          python scripts/run_gates.py --filter plugins-coverage-a,plugins-coverage-pairing,channel-copy-guard,plugins-mypy-baseline > /tmp/out.log 2>&1
+          tail -c 15000 /tmp/out.log > /tmp/tail.log
+          grep -E "^FAILED|^ERROR|失败|未通过|❌" /tmp/out.log | head -60 >> /tmp/tail.log || true
+          python .github/workflows/probe_post.py /tmp/tail.log "shard-a-gate"
+  shard-b:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with: { enable-cache: true, cache-dependency-glob: "uv.lock" }
+      - run: |
+          uv sync --frozen --extra dev --extra isolation
+          uv pip install -e ./plugins/sdk
+      - name: Run exact shard b gates
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          python scripts/run_gates.py --filter plugins-coverage-b,plugins-coverage-pairing,channel-copy-guard > /tmp/out.log 2>&1
+          tail -c 15000 /tmp/out.log > /tmp/tail.log
+          grep -E "^FAILED|^ERROR|失败|未通过|❌" /tmp/out.log | head -60 >> /tmp/tail.log || true
+          python .github/workflows/probe_post.py /tmp/tail.log "shard-b-gate"
+  shard-c:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with: { enable-cache: true, cache-dependency-glob: "uv.lock" }
+      - run: |
+          uv sync --frozen --extra dev --extra isolation
+          uv pip install -e ./plugins/sdk
+      - name: Run exact shard c gates
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          python scripts/run_gates.py --filter plugins-coverage-c,plugins-coverage-pairing,channel-copy-guard > /tmp/out.log 2>&1
+          tail -c 15000 /tmp/out.log > /tmp/tail.log
+          grep -E "^FAILED|^ERROR|失败|未通过|❌" /tmp/out.log | head -60 >> /tmp/tail.log || true
+          python .github/workflows/probe_post.py /tmp/tail.log "shard-c-gate"
+  shard-d:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with: { enable-cache: true, cache-dependency-glob: "uv.lock" }
+      - run: |
+          uv sync --frozen --extra dev --extra isolation
+          uv pip install -e ./plugins/sdk
+      - name: Run exact shard d gates
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          python scripts/run_gates.py --filter plugins-coverage-d,plugins-coverage-pairing,channel-copy-guard > /tmp/out.log 2>&1
+          tail -c 15000 /tmp/out.log > /tmp/tail.log
+          grep -E "^FAILED|^ERROR|失败|未通过|❌" /tmp/out.log | head -60 >> /tmp/tail.log || true
+          python .github/workflows/probe_post.py /tmp/tail.log "shard-d-gate"
+  shard-e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with: { enable-cache: true, cache-dependency-glob: "uv.lock" }
+      - run: |
+          uv sync --frozen --extra dev --extra isolation
+          uv pip install -e ./plugins/sdk
+      - name: Run exact shard e gates
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          python scripts/run_gates.py --filter plugins-coverage-e,plugins-coverage-pairing,channel-copy-guard > /tmp/out.log 2>&1
+          tail -c 15000 /tmp/out.log > /tmp/tail.log
+          grep -E "^FAILED|^ERROR|失败|未通过|❌" /tmp/out.log | head -60 >> /tmp/tail.log || true
+          python .github/workflows/probe_post.py /tmp/tail.log "shard-e-gate"
