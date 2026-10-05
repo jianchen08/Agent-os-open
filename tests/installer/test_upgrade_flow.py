@@ -131,6 +131,15 @@ class TestUpgradeFlowNsiCustom:
         assert "DetailPrint" in body, (
             "失败必须 DetailPrint 留痕不阻断（与 env 播种同一静默语义）"
         )
+        # NSIS $ 转义契约：PS 的 $_ 必须写 $$_——裸 $_ 被 NSIS 当变量解析触发
+        # warning 6000（"unknown variable/constant _)"，builder 按 error 处理，
+        # 2026-10-06 实锤；此前该行藏于编译期死代码内未被解析故未暴露）。
+        # 仅查非注释行（`;` 注释行 makensis 不展开，注释里解释该坑本身即含裸 $_）
+        code_lines = [l for l in body.splitlines() if not l.strip().startswith(";")]
+        code_body = "\n".join(code_lines)
+        assert "$$_" in code_body and not re.search(r"(?<!\$)\$_", code_body), (
+            "宏内 PS $_ 未按 NSIS 语法转义为 $$_——裸 $_ 触发 makensis 6000"
+        )
 
     def test_custom_init_writes_exclusion_before_file_copy(self, nsis_text: str) -> None:
         """customInit 必须在解包前写排除——copy 免扫的关键一手。
