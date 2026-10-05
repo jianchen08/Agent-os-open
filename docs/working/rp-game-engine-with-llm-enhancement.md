@@ -81,42 +81,48 @@ related:
 
 ### 0.1 设计公理
 
-1. **二轴独立可调** —— LLM 可用性（with/without）和规则复杂度（none/core/full）是两个独立轴。角色卡声明当前轴上的位置，玩家可运行时切换轴上的滑点。**没有"模式"枚举**，只有连续的位置。
-2. **常规状态由代码决定** —— HP、MP、位置、时间、基础战斗数值：声明了就别少，不允许 LLM 自由改。这是与 afengy 的根本区别。
-3. **模糊状态由 LLM 自由发挥** —— 好感度变化、剧情冲突、NPC 情绪细节：LLM 在 `core` 模式下可自由输出（写到 HTML 状态栏或专门的 `<narrative_state>` 块），代码层不校验；`full` 模式下走 schema 提议 → 校验 → 落库。
-4. **LLM 的输出契约是「宽进严出」** —— LLM 可以输出任意自然语言，但**能被解析成什么**是契约说了算。契约有等级（见 §6），创作者/玩家选档；架构容忍「契约失败时退回宽松模式」。
-5. **记忆复用 AgentOS 现有基础设施** —— 不重建轮子。AgentOS 0.2 已有 session 内存 / agent_config_load / 持久化内核，应按"内嵌"原则接入。
+1. **作者拥有规则权威（author authority）** —— 角色卡的 `rule_complexity`（none/core/full）与 `contract_level`（0/1/2/3）等规则严格度参数，**由作者在创建角色卡时一次性声明**。**玩家不可运行时切换**。这是与之前设计的关键差异——之前让玩家"自由切换严格度"实际上让玩家能轻易作弊（从 `core` 切到 `none` 来破坏游戏规则）。
+2. **作弊是显式命令，不是模式开关** —— 如果玩家想绕过规则（例如跳过校验、让 LLM 全权），必须输入 **作弊命令**（`/cheat`），这是一次**可审计的状态变更**，不是 UI 滑点。作弊是 per-task 的状态（`state.meta.cheating = true`），作者与审计能看到。
+3. **二轴上的 LLM 可用性轴仍然可调** —— `llm: with_llm ↔ without_llm` 这一轴**可以由玩家切换**（LLM 健康度触发自动降级 + 玩家主动切离线模式）；但 `rule_complexity` 这一轴**不可由玩家切换**。
+4. **常规状态由代码决定** —— HP、MP、位置、时间、基础战斗数值：作者声明了，就由代码持有。LLM 不能自由改。
+5. **模糊状态由 LLM 自由发挥** —— 好感度变化、剧情冲突、NPC 情绪细节：LLM 在 `core` 模式下可自由输出（写到 HTML 状态栏或专门的 `<narrative_state>` 块），代码层不校验；`full` 模式下走 schema 提议 → 校验 → 落库。
+6. **LLM 的输出契约是「宽进严出」** —— LLM 可以输出任意自然语言，但**能被解析成什么**是契约说了算。契约有等级（见 §6），由作者声明；架构容忍「契约失败时退回宽松模式」。
+7. **记忆复用 AgentOS 现有基础设施** —— 不重建轮子。
 
-### 0.2 二轴 × 二档完整图
+### 0.2 二轴 × 二档完整图（作者声明）
 
 ```
-                    LLM 可用性
+                     LLM 可用性（玩家可调）
                   with_llm            without_llm
 规则 none    ┌──────────────────┐  ┌──────────────────┐
-复杂度       │ 等价 afengy 现状 │  │ 无意义（不可用）  │
-             │ LLM 全权         │  │ 跳过              │
+复杂度       │   │ (作者声明)        │  (无意义)        │
+（作者声明）   │   │ afengy 等价物    │  跳过              │
              └──────────────────┘  └──────────────────┘
 
 规则 core    ┌──────────────────┐  ┌──────────────────┐
-（默认）      │ ★ AgentOS 默认模式│  │ ★ 离线小型流程游戏│
-             │ 常规状态 = 代码    │  │ narrative_graph + │
-             │ 模糊状态 = LLM    │  │ 模板叙事          │
+（作者声明）   │ ★ AgentOS 默认模式│  ★ 离线小型流程游戏│
+             │  常规状态 = 代码   │  narrative_graph + │
+             │  模糊状态 = LLM   │  模板叙事          │
              └──────────────────┘  └──────────────────┘
 
 规则 full    ┌──────────────────┐  ┌──────────────────┐
-             │ Convai 风格       │  │ 离线完整游戏      │
-             │ 全部状态 = 代码    │  │ visual novel-lite │
-             │ LLM 只生成叙事    │  │                  │
+（作者声明）   │  Convai 风格       │  离线完整游戏     │
+             │  全部状态 = 代码    │  visual novel-lite│
+             │  LLM 只生成叙事    │                   │
              └──────────────────┘  └──────────────────┘
 ```
 
-★ **两个核心 cell**：
-- **`core + with_llm`**：AgentOS 默认推荐模式。LLM 写故事，常规游戏状态（HP/位置/时间/基础战斗）由代码持有——这是与 afengy 现状的本质差异。
-- **`core + without_llm`**：LLM 不可用时的降级形态：**一个可独立运行的小型流程化游戏**（visual novel / 文字冒险），不需要玩家会写 prompt，玩家点选项推进剧情。
+**轴上的权力分布**：
+
+| 谁可以改 | LLM 可用性 | 规则复杂度 |
+|---|---|---|
+| **作者**（在角色卡 YAML） | ✓ | ✓ |
+| **玩家**（运行时） | ✓（LLM 健康度 / 主动离线） | ✗ **禁止** |
+| **作弊命令**（`/cheat`） | — | 一次性覆盖（可审计） |
 
 ### 0.3 「常规状态 vs 模糊状态」明确边界
 
-**常规状态**（always code-enforced）—— 创作者在 `engine.variables` 声明，**任何模式都不能被 LLM 改**：
+**常规状态**（always code-enforced）—— 作者在 `engine.variables` 声明，**任何模式都不能被 LLM 改**：
 
 | 字段 | 原因 |
 |---|---|
@@ -135,26 +141,21 @@ related:
 
 > 设计要点：**模糊状态本身就是叙事的一部分**，强行让 LLM 输出 `affection +15` 而不属于 narration 流，会破坏体验。**让 LLM 在 narration 里直接说"好感提升"**，前端按需解析（HTML `<details>` 标签或模糊正则），比强行 schema 更自然。
 
-### 0.4 角色卡声明
+### 0.4 角色卡声明（作者拥有）
 
 ```yaml
 character_card:
   spec: "agentos-character-card-v1"
   spec_version: "1.0.0"
+  author: "uuid-v4"
   
   engine:
-    # === 二轴声明 ===
-    llm: "with_llm"                # "with_llm" | "without_llm"
-    rule_complexity: "core"         # "none" | "core" | "full"
+    # === 作者声明的二轴（玩家不可改 rule_complexity）===
+    llm: "with_llm"                  # "with_llm" | "without_llm"（玩家可切）
+    rule_complexity: "core"          # "none" | "core" | "full"（**作者声明，玩家不可改**）
     
-    # === 运行时切换偏好 ===
-    allow_runtime_switch: true      # 允许玩家切轴上的滑点
-    fallbacks:
-      on_llm_unavailable: "without_llm"   # LLM 挂时降级
-      on_engine_failure: "with_llm:core"  # 引擎故障时降级
-    
-    # === 契约松紧档（按模式自动选默认值） ===
-    contract_level: 2               # 见 §6
+    # === 作者声明的契约松紧档 ===
+    contract_level: 2                # 见 §6（玩家可调 ±1 用于观感，核心不改）
     
     # === 常规状态：永远由代码持有 ===
     variables:
@@ -166,16 +167,16 @@ character_card:
         location:    { type: enum, values: [剑冢, 集市, 客栈, 山门] }
         time_of_day: { type: enum, values: [子时..亥时], default: 申时 }
     
-    # === 基础战斗规则（可选） ===
+    # === 基础战斗规则（作者可选） ===
     combat:
       formula: "atk * (1 + rand(-0.1, 0.1)) - def * 0.5"
     
-    # === 叙事图（`full` 模式可选）===
+    # === 叙事图（作者可选，`full` 时启用）===
     narrative_graph:
       nodes: [...]
       events: []
     
-    # === LLM 拼装的 prompt 元素（无则省略）===
+    # === LLM 拼装的 prompt 元素（作者可选）===
     lorebook:
       entries: []
     
@@ -185,37 +186,131 @@ character_card:
         <div class="status-bar">
           HP: {{ state.player.hp }}/100 | {{ state.world.location }}
           {% if state.narrative %}
-          | {{ state.narrative | safe }}    {# LLM 自由输出的模糊状态 #}
+          | {{ state.narrative | safe }}
           {% endif %}
+        </div>
+      
+      # 作者可以声明「本游戏规则严格度」badge 显示给玩家
+      rule_badge: |
+        <div class="rule-badge">
+          规则：{{ author_rule_complexity_label }}
+          {{ " · 已作弊" if state.meta.cheating }}
         </div>
 ```
 
-### 0.5 合法切换路径
+### 0.5 合法切换路径（玩家侧）
 
 ```
-                LLM 健康度变化 / 用户偏好变化
-                          ▼
-    with_llm(core)  ◄──────►  without_llm(core)
-        ▲   │                      ▲   │
-        │   ▼                      │   ▼
-    with_llm(full)  ◄──────►  without_llm(full)
-        ▲   
-        │  用户主动开启更多规则
-        ▼
-     with_llm(none)  =  afengy 等价物
+                  LLM 健康度变化 / 玩家主动切离线
+                              ▼
+       with_llm(core)  ◄──────────►  without_llm(core)
+           │   ▲                          │   ▲
+           ▼   │                          ▼   │
+       with_llm(full)  ◄──────────►  without_llm(full)
+           │
+           │      ✗ 玩家不可运行时切换 ✗
+           ▼
+       with_llm(none)  ←—— 等价 afengy（作者声明 none 时才是这个 cell）
+
+       ────────────────────────────────
+
+       /cheat ←—— 一次性作弊命令（可审计）
+                  │
+                  └── state.meta.cheating = true（per-task 持久化）
+                       │
+                       ├── 规则校验被旁路（但仍落 audit log）
+                       ├── LLM 全权（相当于 none 模式行为）
+                       └── 作者与审计可见（红线："本玩家被作弊"）
 ```
 
-- **`core` ↔ `full`**：玩家可一键开关「启用严格规则」
-- **`with` ↔ `without_llm`**：LLM 健康度触发自动降级，或玩家切离线模式
-- **`core ↔ none`**：玩家主动关闭引擎，LLM 接管一切（afengy 模式）
-- **`full → none`**：被禁止——一旦声明了规则就不能脱钩（防止玩家作弊）
+**玩家侧合法操作**：
 
-### 0.6 术语表
+| 操作 | 谁可以 | 效果 |
+|---|---|---|
+| 切换 `with_llm ↔ without_llm` | 玩家 | 正常切换（LLM 健康度 + 主动离线） |
+| 切 `core ↔ full` | ✗ 玩家不可 | 仅作者在创作卡时定 |
+| 输入 `/cheat` | 玩家 | 一次性作弊命令（可审计） |
+| 输入 `/uncheat` | 玩家 | 恢复作者规则 |
+| 输入 `/cheat` 后再 `/cheat` | 玩家 | 切换作弊状态 |
+
+**作者侧合法操作**（创作期）：
+
+| 操作 | 效果 |
+|---|---|
+| 在 YAML 设 `rule_complexity: "core"` | 玩家进入即 core 模式 |
+| 在 YAML 设 `rule_complexity: "full"` | 玩家进入即 full 模式 |
+| 在 YAML 不设 `rule_complexity` | 默认 `core` |
+| 在 YAML 设 `allow_cheat: false` | 玩家 `/cheat` 命令被拒绝 |
+
+### 0.6 作弊命令（`/cheat`）的详细定义
+
+#### 命令语法
+
+```bash
+/cheat                    # 启用作弊
+/cheat on                 # 同上（明确）
+/cheat off                # 关闭作弊（恢复作者规则）
+/cheat status             # 查看当前状态（是否作弊、规则严格度等）
+/cheat allow              # 一旦锁定后，玩家可再次允许（需要确认）
+/cheat deny               # 关闭作弊
+```
+
+#### 触发流程
+
+```
+玩家输入 /cheat
+   ↓
+系统检测：
+   - 角色卡 engine.allow_cheat 是否为 false？→ 拒绝 + 提示
+   - 角色卡 engine.allow_cheat 是否为 true？→ 进入确认流程
+   - 角色卡 engine.allow_cheat 未声明？→ 默认 true（创作者没禁用则允许）
+   ↓
+弹出确认对话框：
+   "您即将禁用本游戏的所有规则校验。
+    本次操作将记入审计日志。
+    作者与平台可在审计日志中查看此操作。
+    确认启用吗？"
+   ↓
+玩家确认
+   ↓
+state.meta.cheating = true（写入 task_id metadata）
+   ↓
+audit_log.append({ type: 'cheat_enabled', task_id, user_id, timestamp })
+   ↓
+前端右上角显示红色 "本会话已作弊" badge
+   ↓
+后续所有引擎校验被旁路（但仍落 log）
+后续所有 LLM 提议的 state_changes 被允许（不再 clamp）
+后续所有 actions 直接执行（不再校验）
+后续 narrative_graph 的触发器全部失效（玩家自由）
+```
+
+#### 作弊模式的边界
+
+**作弊 ≠ 删规则**：
+
+| 维度 | 作弊前 | 作弊后 |
+|---|---|---|
+| 规则代码 | 仍执行 | 仍执行但旁路校验 |
+| 状态机 | 仍记录 | 仍记录但允许超界 |
+| 审计日志 | 全程留痕 | 全程留痕（含作弊动作）|
+| LLM 全权 | ✗ | ✓ |
+| 数据持久化 | ✗（可保存）| ✓（可保存但带 [audit: cheat] 标签）|
+| 排行榜/成就 | 正常 | **排除**（作弊玩家的成就不上墙）|
+| 多人同步 | 正常 | 同步给同任务玩家（看得到 "X 已作弊"）|
+
+**为什么不让作弊"完全自由"**：
+
+1. **审计必须留痕** —— 否则破坏 RP 生态的信誉（参考电子游戏的金手指/作弊码会被记录）
+2. **成就要排除** —— 否则作弊玩家可以刷榜
+3. **数据不污染** —— 作弊 session 可被识别、回滚、隔离
+
+### 0.7 术语表
 
 | 术语 | 含义 |
 |---|---|
 | **LLM Rule** | 角色卡顶部 `llm` 轴声明（with/without） |
-| **Rule Complexity** | `engine.rule_complexity`（none / core / full） |
+| **Rule Complexity** | `engine.rule_complexity`（none / core / full）—— **作者声明，玩家不可改** |
 | **Engine Tick** | 引擎一回合：玩家输入 → 解析 → 规则引擎 → LLM（可选）→ Action → 状态落库 |
 | **Regular State** | 常规状态：永远由代码持有的字段（HP/位置/时间/物品/任务） |
 | **Fuzzy State** | 模糊状态：LLM 自由发挥的字段（好感/剧情冲突/文学维度） |
@@ -225,6 +320,10 @@ character_card:
 | **Action** | 动作：可由客户端执行的原子操作 |
 | **Contract Level** | 输出契约松紧档：0=纯文本 / 1=+choices / 2=+actions / 3=+state_changes |
 | **Fallback Path** | 不可用时的降级路径 |
+| **Author Authority** | 作者权威：作者在创作角色卡时一次性声明的规则，玩家不可运行时切换 |
+| **Cheat Command** | 作弊命令：`/cheat` 开/关，per-task 状态，可审计 |
+| **`allow_cheat`** | 角色卡 YAML 字段：作者允许玩家作弊？默认 true |
+| **`state.meta.cheating`** | 当前会话是否作弊（per-task 持久化） |
 
 ---
 
