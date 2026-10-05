@@ -143,59 +143,55 @@ related:
 
 ### 0.4 角色卡声明（作者拥有）
 
-```yaml
-character_card:
-  spec: "agentos-character-card-v1"
-  spec_version: "1.0.0"
-  author: "uuid-v4"
-  
-  engine:
-    # === 作者声明的二轴（玩家不可改 rule_complexity）===
-    llm: "with_llm"                  # "with_llm" | "without_llm"（玩家可切）
-    rule_complexity: "core"          # "none" | "core" | "full"（**作者声明，玩家不可改**）
-    
-    # === 作者声明的契约松紧档 ===
-    contract_level: 2                # 见 §6（玩家可调 ±1 用于观感，核心不改）
-    
-    # === 常规状态：永远由代码持有 ===
-    variables:
-      player:
-        hp:   { type: int, default: 100, min: 0, max: 100 }
-        mp:   { type: int, default: 50,  min: 0, max: 50 }
-        gold: { type: int, default: 0 }
-      world:
-        location:    { type: enum, values: [剑冢, 集市, 客栈, 山门] }
-        time_of_day: { type: enum, values: [子时..亥时], default: 申时 }
-    
-    # === 基础战斗规则（作者可选） ===
-    combat:
-      formula: "atk * (1 + rand(-0.1, 0.1)) - def * 0.5"
-    
-    # === 叙事图（作者可选，`full` 时启用）===
-    narrative_graph:
-      nodes: [...]
-      events: []
-    
-    # === LLM 拼装的 prompt 元素（作者可选）===
-    lorebook:
-      entries: []
-    
-    # === UI 配置 ===
-    ui:
-      status_bar_template: |
-        <div class="status-bar">
-          HP: {{ state.player.hp }}/100 | {{ state.world.location }}
-          {% if state.narrative %}
-          | {{ state.narrative | safe }}
-          {% endif %}
-        </div>
-      
-      # 作者可以声明「本游戏规则严格度」badge 显示给玩家
-      rule_badge: |
-        <div class="rule-badge">
-          规则：{{ author_rule_complexity_label }}
-          {{ " · 已作弊" if state.meta.cheating }}
-        </div>
+> **格式**：SillyTavern V3 JSON + AgentOS 扩展（详见 §1）
+>
+> 完整字段结构示例见 §1.2。这里只展示**关键扩展字段**：
+
+```json
+{
+  "spec": "chara-card-v3",
+  "spec_version": "3.0",
+  "data": {
+    "name": "苏清婉",
+    "description": "...",
+    "tags": ["古风", "修仙"],
+
+    "extensions": {
+      "agentos": {
+        "version": "1.0.0",
+
+        "engine": {
+          "llm": "with_llm",              // 玩家可切
+          "rule_complexity": "core",      // **作者定，玩家不可改**
+          "allow_cheat": true,            // 作者是否允许 /cheat？
+          "contract_level": 2             // 契约档（作者声明）
+        },
+
+        "variables": {                   // 常规状态（代码持有）
+          "player": {
+            "hp":   { "type": "int", "default": 100, "min": 0, "max": 100 },
+            "mp":   { "type": "int", "default": 50,  "min": 0, "max": 50 },
+            "gold": { "type": "int", "default": 0 }
+          },
+          "world": {
+            "location":    { "type": "enum", "values": ["剑冢","集市","客栈","山门"], "default": "剑冢" },
+            "time_of_day": { "type": "enum", "values": ["子时","丑时","...","亥时"], "default": "申时" }
+          }
+        },
+
+        "rules": {
+          "combat": { "formula": "atk * (1 + rand(-0.1, 0.1)) - def * 0.5" }
+        },
+
+        "narrative_graph": { "nodes": [...], "triggers": [...] },
+        "lorebook":        { "entries": [...] },
+        "actions":         [{ "id": "attack", ... }, { "id": "give_item", ... }],
+        "ui":              { "status_bar_template": "...", "rule_badge": "..." }
+      }
+    }
+  }
+}
+```
 ```
 
 ### 0.5 合法切换路径（玩家侧）
@@ -331,155 +327,241 @@ audit_log.append({ type: 'cheat_enabled', task_id, user_id, timestamp })
 
 ### 1.1 角色卡哲学
 
-角色卡不是"一段 prompt"，而是一个**声明游戏规则的文档**——告诉系统：
+> **格式 = SillyTavern V3 + AgentOS 扩展**。
+>
+> 不发明新格式。ST V3 已经在 `data.extensions` 字段预留了"任意扩展"的位置 —— AgentOS 把自己的扩展塞在那里。
+>
+> - 任何 ST 角色卡 = 合法 AgentOS 角色卡（AgentOS 扩展字段为空，走兼容默认）
+> - 任何 AgentOS 角色卡 = ST 可读（AgentOS 扩展被 ST 忽略）
+> - 字节级往返：导入导出无信息丢失
 
-- LLM 是否调用（轴 1）
-- 多少规则（轴 2）
-- 哪些字段是常规状态（代码持有）
-- 哪些字段是模糊状态（LLM 自由发挥）
-- 哪些 prompt 元素要喂给 LLM
+### 1.2 角色卡结构（SillyTavern V3 兼容）
 
-LLM 看到这张卡，理解的是"我要为这个游戏的当前快照生成一段文字，**不要写常规状态栏**——那是代码的事——专心写叙事和模糊情感"。
+**核心格式 = ST V3 JSON**（PNG 嵌 JSON 或纯 JSON）。AgentOS 扩展挂在 `data.extensions.agentos` 命名空间下。
 
-### 1.2 角色卡结构（AgentOS 标准 V1）
-
-```yaml
-# character_card.yaml
-character_card:
-  spec: "agentos-character-card-v1"
-  spec_version: "1.0.0"
-  
-  # === 身份信息 ===
-  meta:
-    id: "uuid-v4"
-    name: "苏清婉"
-    author: "author_id"
-    version: "1.2.3"
-    cover: "./cover.jpg"
-    tags: ["古风", "修仙", "女侠"]
+```json
+{
+  "spec": "chara-card-v3",
+  "spec_version": "3.0",
+  "data": {
+    "name": "苏清婉",
+    "description": "<世界观>...</世界观><角色设定>...</角色设定><输出规则>...</输出规则>",
+    "personality": "冷酷寡言，内心善良...",
+    "scenario": "暮色四合，你在剑冢洞口遇到一个白衣女子。",
+    "first_mes": "",
+    "mes_example": "",
     
-  # === 文学/风格信息（仅给 LLM 看的） ===
-  flavor:
-    scenario: "暮色四合，你在剑冢洞口遇到一个白衣女子。"  # 开场白
-    title: "剑冢奇缘"
-    description_short: "你失去了过去的20天记忆，而眼前这个自称了解一切的人..."  # 列表页展示
-    description_long: "..."  # 详情页 HTML
-    style_guide: |
-      文言白话混合，避免现代词汇。动作描写克制，对话精炼。
+    "creator_notes": "...",
+    "system_prompt": "",
+    "post_history_instructions": "",
+    "alternate_greetings": [],
     
-  # === 引擎核心：游戏规则定义 ===
-  engine:
-    # 1. 状态变量声明（Game Schema）
-    variables:
-      player:
-        hp:           { type: int,   default: 100, min: 0, max: 100 }
-        mp:           { type: int,   default: 50,  min: 0, max: 50 }
-        gold:         { type: int,   default: 0 }
-        inventory:    { type: list,  item_type: { id: str, qty: int } }
-      npcs:
-        suqingwan:
-          affection:  { type: int, default: 20, min: 0, max: 100, tags: [relationship] }
-          trust:      { type: int, default: 0,  min: 0, max: 100 }
-          location:   { type: enum, values: [剑冢, 集市, 客栈, 山门], default: 剑冢 }
-          mood:       { type: enum, values: [neutral, wary, gentle, angry], default: neutral }
-      world:
-        time_of_day:  { type: enum, values: [子时, 丑时, ..., 亥时], default: 申时 }
-        weather:      { type: enum, values: [晴, 阴, 雨, 雪], default: 晴 }
-        location:     { type: enum, values: [剑冢, 集市, 客栈, 山门], default: 剑冢 }
-        flags:        { type: dict, key_type: str, value_type: bool }
+    "tags": ["古风", "修仙", "女侠"],
+    "creator": "author_id",
+    "character_version": "1.2.3",
     
-    # 2. 可用 Action 清单
-    actions:
-      - id: "attack"
-        description: "用武器攻击目标"
-        params: { target: str, weapon: str }
-        handler: "agentos.rp.combat:resolve_attack"   # 代码层处理
-      - id: "give_item"
-        params: { item_id: str, target_npc: str }
-        handler: "agentos.rp.items:give"
-      - id: "talk"
-        params: { text: str, target_npc: str }
-        handler: "agentos.rp.dialog:talk"
-    
-    # 3. 世界书（按需加载）
-    lorebook:
-      entries:
-        - id: "npc_old_zhou"
-          keywords: ["老周", "周队长"]
-          logic: "OR"
-          scan_depth: 4
-          position: "after_system"
-          content: "老周，52岁，铁壁营地领袖..."
-    
-    # 4. 叙事图（可选）
-    narrative_graph:
-      nodes:
-        - id: "intro"
-          title: "初遇"
-          on_enter: "state.npcs.suqingwan.affection >= 10"
-          objectives: ["完成与苏清婉的第一次对话"]
-        - id: "branch_a"
-          title: "追问真相"
-          decisions:
-            - when: "player.text matches /你过去/"
-              next: "deep_dive"
-      triggers:
-        - type: "threshold"
-          when: "state.npcs.suqingwan.affection >= 90"
-          jump_to: "love_confession"
-    
-    # 5. 规则引擎配置（战斗、掉落、随机事件）
-    rules:
-      combat:
-        formula: "atk * (1 + rand(-0.1,0.1)) - def * 0.5"
-        crit_threshold: 0.1
-        crit_mult: 2.0
-      random_events:
-        pool:
-          - { id: "stranger_approach", weight: 0.2, cooldown_rounds: 5 }
-          - { id: "rain_starts",       weight: 0.15 }
-          - { id: "merchant_passby",   weight: 0.3 }
-        trigger_every_n_turns: 4
-    
-    # 6. UI 配置
-    ui:
-      custom_css: "./style.css"
-      bg_image: "./bg.jpg"
-      bgm: "./theme.mp3"
-      status_bar_template: |
-        <div class="status-bar">
-          {{ state.player.hp }} HP
-          | {{ state.npcs.suqingwan.name }}: 好感 {{ state.npcs.suqingwan.affection }}
-        </div>
-  
-  # === 创作者元数据 ===
-  extensions:
-    - "agentos.rp.narrative_graph"
-    - "agentos.rp.combat"
-    - "agentos.rp.lorebook_rag"
+    "extensions": {
+      
+      // ===== ST 官方扩展字段（不归 AgentOS 管）==
+      "talkativeness": "0.5",
+      "fav": false,
+      "world": null,
+      "depth_prompt": "0",
+      
+      // ===== AgentOS 扩展（命名空间隔离）==
+      "agentos": {
+        "spec": "agentos-character-card-extension",
+        "version": "1.0.0",
+        
+        // 作者声明的二轴（玩家不可改 rule_complexity，参见 §0.5）
+        "engine": {
+          "llm": "with_llm",                 // "with_llm" | "without_llm"
+          "rule_complexity": "core",          // "none" | "core" | "full"
+          "allow_cheat": true,                // 作者允许玩家 /cheat？
+          "contract_level": 2,                // 0=纯文本 / 1=+choices / 2=+actions / 3=+state_changes
+          
+          // cheat_overrides: 即便玩家作弊，作者可保留关键规则
+          // （如严肃剧情：HP 归零仍死亡不能复活）
+          "cheat_overrides": {
+            "keep_state_machine": false,
+            "keep_inventory": false,
+            "bypass_narrative_graph": true,
+            "bypass_state_validation": true
+          }
+        },
+        
+        // 常规状态（代码持有，永远不被 LLM 改）
+        "variables": {
+          "player": {
+            "hp":   { "type": "int",   "default": 100, "min": 0, "max": 100 },
+            "mp":   { "type": "int",   "default": 50,  "min": 0, "max": 50 },
+            "gold": { "type": "int",   "default": 0 }
+          },
+          "world": {
+            "location":    { "type": "enum", "values": ["剑冢", "集市", "客栈", "山门"], "default": "剑冢" },
+            "time_of_day": { "type": "enum", "values": ["子时","丑时","...","亥时"], "default": "申时" }
+          }
+        },
+        
+        // 战斗规则（作者可选）
+        "rules": {
+          "combat": {
+            "formula": "atk * (1 + rand(-0.1, 0.1)) - def * 0.5"
+          },
+          "random_events": {
+            "trigger_every_n_turns": 4,
+            "pool": [
+              { "id": "stranger_approach", "weight": 0.2 },
+              { "id": "rain_starts", "weight": 0.15 }
+            ]
+          }
+        },
+        
+        // Action 协议（作者声明的可执行 action）
+        "actions": [
+          { "id": "attack", "description": "攻击", "params": { "target": "string" } },
+          { "id": "give_item", "params": { "item_id": "string", "target_npc": "string" } },
+          { "id": "talk", "params": { "text": "string", "target_npc": "string" } }
+        ],
+        
+        // 世界书（兼容 ST World Info）
+        "lorebook": {
+          "entries": [
+            {
+              "uid": "npc_old_zhou",
+              "key": ["老周", "周队长"],
+              "keysecondary": [],
+              "comment": "老周人设",
+              "content": "老周，52岁，退役军人，铁壁营地领袖...",
+              "constant": false,
+              "selective": true,
+              "insertion_order": 2,
+              "position": "after",
+              "enabled": true,
+              "extensions": {
+                "agentos": {
+                  "trigger_threshold": "state.npcs.old_zhou.affection >= 70",
+                  "trigger_mode": "OR"
+                }
+              }
+            }
+          ]
+        },
+        
+        // 叙事图（作者可选，`full` 时启用）
+        "narrative_graph": {
+          "nodes": [
+            {
+              "id": "intro",
+              "title": "初遇",
+              "objectives": ["完成第一次对话"],
+              "narration_hint": "苏清婉冷淡戒备"
+            },
+            {
+              "id": "branch_a",
+              "title": "追问真相",
+              "decisions": [
+                { "when": "player.text matches /你过去/", "next": "deep_dive" }
+              ]
+            }
+          ],
+          "triggers": [
+            { "type": "threshold", "when": "state.npcs.suqingwan.affection >= 90", "jump_to": "love_confession" }
+          ]
+        },
+        
+        // UI 配置
+        "ui": {
+          "custom_css": "",
+          "bg_image": "",
+          "bgm": "",
+          "status_bar_template": "HP: {{ state.player.hp }}/100 | {{ state.world.location }}",
+          "rule_badge": "规则: {{ engine.rule_complexity_label }} {{ '· 已作弊' if state.meta.cheating }}"
+        }
+      }
+    }
+  }
+}
 ```
 
-### 1.3 与 SillyTavern / Convai 的对比
+### 1.3 与 SillyTavern V3 的字段映射
 
-| 维度 | SillyTavern V2/V3 | Convai | AgentOS V1 |
+| SillyTavern V3 字段 | AgentOS 用途 |
+|---|---|
+| `data.name`, `description`, `personality`, `scenario` | LLM 看的人设（无变化） |
+| `data.first_mes`, `mes_example` | 开场白 + 对话范例（无变化） |
+| `data.system_prompt`, `post_history_instructions` | LLM 系统提示（无变化） |
+| `data.tags`, `creator`, `character_version` | 元数据（无变化） |
+| `data.alternate_greetings[]` | 多开场白（无变化） |
+| `data.creator_notes` | 作者笔记（无变化） |
+| **`data.extensions.talkativeness`** | ST 用（AgentOS 不改） |
+| **`data.extensions.fav`** | ST 用（AgentOS 不改） |
+| **`data.extensions.agentos`** | **AgentOS 扩展**（ST 忽略） |
+| **`data.extensions.agentos.engine`** | 二轴声明 |
+| **`data.extensions.agentos.variables`** | 状态机 schema |
+| **`data.extensions.agentos.actions`** | Action 协议 |
+| **`data.extensions.agentos.lorebook`** | 世界书（含兼容字段 + AgentOS 扩展） |
+| **`data.extensions.agentos.narrative_graph`** | 叙事图 |
+| **`data.extensions.agentos.rules`** | 规则引擎 |
+| **`data.extensions.agentos.ui`** | UI 配置 |
+
+### 1.4 AgentOS 扩展规范
+
+**所有 AgentOS 字段都在 `data.extensions.agentos.*` 命名空间下**，避免与 ST 未来扩展字段冲突。
+
+```yaml
+# 命名空间规则
+data:
+  extensions:
+    agentos:        # ← AgentOS 专用
+      version: "1.0.0"   # AgentOS 扩展 schema 版本（独立于 ST spec_version）
+      engine:        # ← Author Authority 区域
+        rule_complexity: "core"
+        contract_level: 2
+      variables:     # 状态机
+      actions:       # Action 协议
+      lorebook:      # 世界书（包含兼容 ST 的条目结构）
+      narrative_graph:  # 叙事图
+      rules:         # 规则引擎
+      ui:            # UI 配置
+```
+
+**为什么这样命名**：
+
+1. **ST 保留 `extensions` 字段给第三方** —— RisuAI、other 等都加自定义键。AgentOS 用 `agentos` 命名空间隔离。
+2. **AgentOS 不污染 ST 标准字段** —— `data.name` 等 ST 标准字段不改。
+3. **版本管理独立** —— ST 升级（V4）不会破坏 AgentOS 扩展。
+4. **导入导出字节级往返** —— 完整保留 ST V3 的所有字段。
+
+### 1.5 与 SillyTavern / Convai 的对比
+
+| 维度 | SillyTavern V2/V3 | Conversai | AgentOS（基于 ST V3 扩展） |
 |---|---|---|---|
-| 格式 | PNG 嵌 JSON | 平台私有 | YAML / JSON 双格式 |
-| 状态变量 | 仅 `data.Variables`（运行时由扩展维护） | "Personality Traits" 滑块 | `engine.variables` 强 schema |
-| Action | 无 | 平台专属 | `engine.actions` 显式声明 |
-| 叙事图 | 无 | Narrative Design 独立子系统 | `engine.narrative_graph` |
-| 规则 | 无 | 仅"复杂动作" | `engine.rules` 配置化 |
-| 跨平台导入 | V2/V3 PNG 标准 | 私有 | **支持导入 V2 / V3 + 导出 PNG-V3 + JSON** |
+| 基础格式 | PNG 嵌 JSON（事实标准） | 平台私有 | **ST V3 JSON**（100% 兼容） |
+| 扩展位置 | `data.extensions.{key}` | N/A | `data.extensions.agentos.*` |
+| 状态变量 | 仅 `data.Variables`（运行时由扩展维护） | "Personality Traits" 滑块 | `extensions.agentos.variables` 强 schema |
+| Action | 无 | 平台专属 | `extensions.agentos.actions` |
+| 叙事图 | 无 | Narrative Design 独立子系统 | `extensions.agentos.narrative_graph` |
+| 规则 | 无 | 仅"复杂动作" | `extensions.agentos.rules` 配置化 |
+| 跨平台导入 | V2/V3 PNG 标准 | 私有 | **原生 V3 = ST** |
+| 字节级往返 | — | — | ✓（无信息丢失） |
 
-### 1.4 创作者工具（CLI + Web）
+### 1.6 创作者工具（CLI + Web）
 
 ```bash
-agentos creator new --template xianxia              # 新建（基于模板）
-agentos creator lint my_card.yaml                  # 静态检查
-agentos creator test my_card.yaml --simulator      # 模拟 5 回合
-agentos creator preview my_card.yaml               # 启动本地预览
-agentos creator import-st <file.png>               # 从 SillyTavern PNG 导入
-agentos creator export my_card.yaml --format png-v3 # 导出 PNG-V3
-agentos creator publish my_card.yaml               # 打包发布到市场
+agentos creator new --template xianxia              # 新建（基于 ST V3 模板）
+agentos creator lint <file.json>                    # 静态检查（含 ST 兼容检查）
+agentos creator test <file.json> --simulator        # 模拟 5 回合
+agentos creator preview <file.json>                 # 启动本地预览
+agentos creator publish <file.json>                 # 打包发布到市场
+
+# 导入 ST 资产（兼容层）
+agentos creator import-st <file.png>                 # 从 SillyTavern PNG 导入
+                                                  # 自动识别 V2/V3，扩展字段保留在 extensions.agentos
+
+# 导出（字节级往返）
+agentos creator export <file.json> --format png-v3   # 导出 PNG-V3
+agentos creator export <file.json> --format json      # 导出纯 JSON
 ```
 
 ---
@@ -509,203 +591,181 @@ agentos creator publish my_card.yaml               # 打包发布到市场
 ### 1.6.2 完整示例：Stardew Valley 的 Abigail
 
 > **目标**：让 AgentOS 扮演 Stardew Valley 的 Abigail，玩家可与她交互（聊天、送礼、约舞、求婚）。
+>
+> **格式**：SillyTavern V3 JSON + AgentOS 扩展（在 `data.extensions.agentos`）。
 
-```yaml
-# character_card.yaml —— Abigail
-character_card:
-  spec: "agentos-character-card-v1"
-  
-  meta:
-    name: "Abigail"
-    tags: ["Stardew", "小镇居民", "可攻略"]
-    version: "1.0.0"
-  
-  flavor:
-    description: |
-      Abigail 是鹈鹕镇的女孩，紫色头发，喜欢冒险、电子游戏和神秘事物。
-      她住在杂货店楼上，与母亲 Caroline 和父亲 Pierre 同住。
-    style_guide: |
-      - 紫色头发 / 性格大胆 / 说话直接
-      - 喜欢冒险题材（暗黑史等游戏）
-      - 在矿洞里打怪 / 喜欢水晶球占卜
-      - 与 Sebastian 是青梅竹马
-    
-  # ====== 1. 状态机：Abigail 的内部经济 ======
-  engine:
-    rule_complexity: "full"
-    llm: "with_llm"
-    
-    npc: {   # 注意：用 npc 标记这是 NPC 模式（区别于玩家视角）
-      abigail:
-        # 客观状态：永远代码持有
-        affection:       { type: int, default: 0, min: 0, max: 250 }
-                            # 0=陌生人, 100=好朋友(2 hearts), 200=恋人(4 hearts), 250=可求婚(8 hearts)
-        hearts_unlocked: { type: int, default: 0, min: 0, max: 8 }
-        location:        { type: enum, values: [家, 杂货店, 矿洞, 沙滩, 镇上, 神秘树丛], default: 家 }
-        schedule_offset: { type: int, default: 0 }    # 时间偏移（雨天换日）
-        is_at_work:       { type: bool, default: false }
-        
-        # 模糊状态：LLM 自由发挥
-        current_mood:    { type: enum, values: [开心, 平淡, 忧郁, 兴奋], default: 平淡 }
-        today_topic:     { type: string, default: "" }   # LLM 写
-        
-        # 记忆：跨会话
-        known_player_facts:  { type: list, item_type: str }   # ["玩家爱 Amethyst", "玩家生日是春15"]
-        favorite_gift_history: { type: list, item_type: str }
-        relationship_milestones: { type: dict, key_type: str, value_type: bool }
-        
-      # 玩家在场景中的状态
-      player:
-        gold:        { type: int, default: 0 }
-        inventory:   { type: list, item_type: { id: str, qty: int } }
-        energy:      { type: int, default: 100 }
-      
-      # 世界模拟器
-      world:
-        time_of_day:  { type: enum, values: [06:00..26:00], default: 09:00 }
-        day_of_year:  { type: int, default: 0 }                # 1-112（28 天 × 4 季）
-        season:       { type: enum, values: [春, 夏, 秋, 冬], default: 春 }
-        weather:      { type: enum, values: [晴, 雨, 风, 雷], default: 晴 }
-        festival_today: { type: enum, values: [none, 花舞, 夏至, 星露谷, 感恩, 冰雪, 婚礼], default: none }
-  
-  # ====== 2. World Book：游戏数据库 ======
-  lorebook:
-    entries:
-      # 物品条目
-      - id: "item_amethyst"
-        keywords: ["amethyst", "紫水晶"]
-        content: "Abigail 最喜欢的礼物。+50 好感。"
-      - id: "item_pumpkin"
-        keywords: ["南瓜", "pumpkin"]
-        content: "秋季作物。+15 好感。"
-      - id: "item_coffee"
-        keywords: ["咖啡", "coffee"]
-        content: "普通礼物。+5 好感。"
-      - id: "item_joja_cola"
-        keywords: ["joja可乐"]
-        content: "Abigail 不喜欢。-10 好感。"
-      
-      # 地区条目
-      - id: "location_mine"
-        keywords: ["矿洞", "mine", "矿"]
-        content: "Abigail 在某些日子会来矿洞探险。矿洞有 120 层，深层怪物危险。"
-      
-      # NPC 情感事件条目
-      - id: "event_2_hearts"
-        keywords: ["2 hearts", "2 颗心", "心"]
-        trigger:
-          type: "threshold"
-          when: "state.npc.abigail.affection >= 100"
-        content: |
-          触发 2-heart 事件：Jodi 邀请你到 Abigail 房间吃饭。
-          Abigail 吃你给的 Amethyst 时兴奋地跑上楼梯。
-          她给玩家一本关于冒险的书。
-  
-  # ====== 3. 叙事图：Abigail 的日程 + 心路历程 ======
-  narrative_graph:
-    # NPC 日程：每天的活动
-    schedule:
-      - day: "周一/周二/周三"
-        slots:
-          - "09:00-12:00": { location: 家, action: "吃早餐 / 玩游戏" }
-          - "12:00-14:00": { location: 杂货店, action: "帮 Pierre 看店" }
-          - "14:00-17:00": { location: 矿洞, action: "探险（雨后天晴时）" }
-      - day: "周六"
-        slots:
-          - "06:00-08:00": { location: 家 }
-          - "08:00-12:00": { location: 神秘树丛, action: "占卜" }
-          - "12:00-15:00": { location: 沙滩 }
-      
-      # NPC 情感事件（heart events）
-    heart_events:
-      - id: "abigail_2_hearts"
-        trigger:
-          type: "threshold"
-          when: "state.npc.abigail.affection >= 100 AND state.world.location == '家'"
-        narrative_hint: |
-          Abigail 在家。玩家第一次来她房间，看到占卜球、Amethyst、她的冒险小说。
-          玩家选择：
-          1. 拿起她的 Amethyst
-          2. 翻看她的冒险小说
-          3. 提议一起玩游戏
-        effects:
-          - type: "increment"
-            path: "npc.abigail.affection"
-            value: 50
-          - type: "set_flag"
-            flag: "abigail_room_visited"
-      
-      - id: "abigail_6_hearts"
-        trigger:
-          type: "threshold"
-          when: "state.npc.abigail.affection >= 200"
-        narrative_hint: |
-          Abigail 邀请玩家晚上去秘密森林。
-          抉择：是否前往？
-        effects_on_path_a: {  # 前往
-            type: "increment"; path: "npc.abigail.affection"; value: 30
-            type: "set_flag"; flag: "secret_woods_visited_with_abigail"
+```json
+{
+  "spec": "chara-card-v3",
+  "spec_version": "3.0",
+  "data": {
+    "name": "Abigail",
+    "description": "Abigail 是鹈鹕镇的女孩，紫色头发，喜欢冒险、电子游戏和神秘事物。她住在杂货店楼上，与母亲 Caroline 和父亲 Pierre 同住。",
+    "personality": "大胆、好奇、爱冒险",
+    "scenario": "你在鹈鹕镇的皮埃尔店门口遇到了 Abigail。",
+    "first_mes": "嘿，你看起来有点面生。来镇上做什么？",
+    "tags": ["Stardew", "小镇居民", "可攻略"],
+    "creator": "ConcernedApe_Fan",
+    "character_version": "1.0.0",
+
+    "extensions": {
+      "agentos": {
+        "version": "1.0.0",
+
+        "engine": {
+          "llm": "with_llm",
+          "rule_complexity": "full",
+          "allow_cheat": true,
+          "contract_level": 2,
+          "cheat_overrides": {
+            "keep_state_machine": true,
+            "keep_inventory": true,
+            "bypass_narrative_graph": true,
+            "bypass_state_validation": false
           }
-        effects_on_path_b: {  # 不去
-            type: "increment"; path: "npc.abigail.affection"; value: -10
+        },
+
+        "variables": {
+          "npc": {
+            "abigail": {
+              "affection":       { "type": "int", "default": 0, "min": 0, "max": 250 },
+              "hearts_unlocked": { "type": "int", "default": 0, "min": 0, "max": 8 },
+              "location":        { "type": "enum", "values": ["家","杂货店","矿洞","沙滩","镇上","神秘树丛"], "default": "家" },
+              "schedule_offset": { "type": "int", "default": 0 },
+              "is_at_work":       { "type": "bool", "default": false },
+
+              "current_mood":     { "type": "enum", "values": ["开心","平淡","忧郁","兴奋"], "default": "平淡" },
+              "today_topic":      { "type": "string", "default": "" },
+
+              "known_player_facts":    { "type": "list", "item_type": "string" },
+              "favorite_gift_history": { "type": "list", "item_type": "string" },
+              "relationship_milestones":{ "type": "dict", "key_type": "string", "value_type": "bool" }
+            }
+          },
+          "player": {
+            "gold":      { "type": "int", "default": 0 },
+            "inventory": { "type": "list", "item_type": { "id": "string", "qty": "int" } },
+            "energy":    { "type": "int", "default": 100 }
+          },
+          "world": {
+            "time_of_day":   { "type": "enum", "values": ["06:00","07:00","08:00","09:00","10:00","11:00","12:00","13:00","14:00","15:00","16:00","17:00","18:00","19:00","20:00","21:00","22:00","23:00","00:00","01:00","02:00"], "default": "09:00" },
+            "day_of_year":   { "type": "int", "default": 0 },
+            "season":        { "type": "enum", "values": ["春","夏","秋","冬"], "default": "春" },
+            "weather":       { "type": "enum", "values": ["晴","雨","风","雷"], "default": "晴" },
+            "festival_today":{ "type": "enum", "values": ["none","花舞","夏至","星露谷","感恩","冰雪","婚礼"], "default": "none" }
           }
-      
-      - id: "abigail_8_hearts_propose"
-        trigger:
-          type: "threshold"
-          when: "state.npc.abigail.affection >= 250 AND state.player.has_item('海蓝宝石')"
-        narrative_hint: |
-          Abigail 戴上了玩家的海蓝宝石，喜悦地接受求婚。
-          触发 8-heart 事件 + 婚礼事件 + 她搬进农场。
-        effects:
-          - type: "set_flag"
-            flag: "engaged_to_abigail"
-            value: true
-          - type: "emit_event"
-            event: "wedding_scheduled"
-  
-  # ====== 4. Action 协议：NPC 可执行的动作 ======
-  actions:
-    - id: "give_gift"
-      description: "玩家送 Abigail 礼物"
-      params: { item_id: str, target_npc: str }
-      handler: "agentos.rp.game_npc:gift_resolver"   # 引用礼物解析器
-    
-    - id: "talk_to_npc"
-      description: "玩家与 NPC 对话"
-      params: { target_npc: str, text: str }
-      handler: "agentos.rp.llm.narrator:talk"
-    
-    - id: "npc_action"
-      description: "NPC 自己执行的动作"
-      params: { npc_id: str, action_type: str, target: str }
-      handler: "agentos.rp.game_npc:npc_act"
-      # 示例：abigail.动作 = 移动 / 工作 / 接受任务 / 拒绝
-    
-    - id: "schedule_advance"
-      description: "推进世界时间 10 分钟"
-      params: {}
-      handler: "agentos.rp.world:advance_time"
-    
-    - id: "world_simulate"
-      description: "世界模拟器一步"
-      params: {}
-      handler: "agentos.rp.world:tick"
-      # 让所有 NPC 自主行动（按叙事图）
-    
-    - id: "festival_event"
-      description: "节日事件触发"
-      params: { festival: str }
-      handler: "agentos.rp.festival:trigger"
-  
-  # ====== 5. LLM 调用规则 ======
-  llm_rules:
-    contract_level: 2                # 文本 + choices + actions
-    flavor_prompt_injection: |
-      你扮演 Stardew Valley 的 Abigail：
-      - 紫发女孩，住在杂货店楼上
-      - 性格大胆，喜欢冒险和电子游戏
-      - 喜欢 Amethyst（紫水晶），讨厌 Joja可乐
+        },
+
+        "rules": {
+          "combat": { "formula": "atk * (1 + rand(-0.1, 0.1)) - def * 0.5" },
+          "random_events": {
+            "trigger_every_n_turns": 4,
+            "pool": [
+              { "id": "stranger_approach", "weight": 0.2 },
+              { "id": "rain_starts", "weight": 0.15 },
+              { "id": "merchant_passby", "weight": 0.3 }
+            ]
+          }
+        },
+
+        "actions": [
+          { "id": "give_gift",      "description": "玩家送礼物", "params": { "item_id": "string", "target_npc": "string" } },
+          { "id": "talk_to_npc",    "description": "玩家与 NPC 对话", "params": { "target_npc": "string", "text": "string" } },
+          { "id": "npc_action",     "description": "NPC 自己执行动作", "params": { "npc_id": "string", "action_type": "string", "target": "string" } },
+          { "id": "schedule_advance","description": "推进世界时间", "params": {} },
+          { "id": "world_simulate", "description": "世界模拟器一步", "params": {} },
+          { "id": "festival_event", "description": "节日事件触发", "params": { "festival": "string" } }
+        ],
+
+        "lorebook": {
+          "entries": [
+            {
+              "uid": "item_amethyst", "key": ["amethyst","紫水晶"], "keysecondary": [],
+              "comment": "Abigail 最喜欢的礼物",
+              "content": "Abigail 最喜欢的礼物。+50 好感。",
+              "constant": false, "selective": false, "insertion_order": 0, "position": "before",
+              "enabled": true,
+              "extensions": { "agentos": { "trigger_mode": "OR", "trigger_threshold": null } }
+            },
+            {
+              "uid": "item_joja_cola", "key": ["joja可乐"], "keysecondary": [],
+              "comment": "Abigail 不喜欢", "content": "Abigail 不喜欢。-10 好感。",
+              "constant": false, "selective": false, "insertion_order": 0, "position": "before",
+              "enabled": true,
+              "extensions": { "agentos": { "trigger_mode": "OR", "trigger_threshold": null } }
+            },
+            {
+              "uid": "event_2_hearts", "key": ["2 hearts","2 颗心"], "keysecondary": [],
+              "comment": "2-heart 事件", "content": "Jodi 邀请你到 Abigail 房间吃饭。Abigail 吃你给的 Amethyst 时兴奋地跑上楼梯。她给玩家一本关于冒险的书。",
+              "constant": false, "selective": true, "insertion_order": 1, "position": "after",
+              "enabled": true,
+              "extensions": { "agentos": { "trigger_mode": "AND", "trigger_threshold": "state.npc.abigail.affection >= 100" } }
+            }
+          ]
+        },
+
+        "narrative_graph": {
+          "schedule": [
+            {
+              "day": "周一/二/三",
+              "slots": {
+                "09:00-12:00": { "location": "家", "action": "吃早餐 / 玩游戏" },
+                "12:00-14:00": { "location": "杂货店", "action": "帮 Pierre 看店" },
+                "14:00-17:00": { "location": "矿洞", "action": "探险（雨后天晴时）" }
+              }
+            }
+          ],
+          "heart_events": [
+            {
+              "id": "abigail_2_hearts",
+              "trigger": { "type": "threshold", "when": "state.npc.abigail.affection >= 100 AND state.world.location == '家'" },
+              "narration_hint": "Abigail 在家。玩家第一次来她房间，看到占卜球、Amethyst、她的冒险小说。玩家选择：1) 拿起她的 Amethyst 2) 翻看她的冒险小说 3) 提议一起玩游戏",
+              "effects": [
+                { "type": "increment", "path": "npc.abigail.affection", "value": 50 },
+                { "type": "set_flag", "flag": "abigail_room_visited", "value": true }
+              ]
+            },
+            {
+              "id": "abigail_8_hearts_propose",
+              "trigger": { "type": "threshold", "when": "state.npc.abigail.affection >= 250 AND state.player.inventory has '海蓝宝石'" },
+              "narration_hint": "Abigail 戴上了玩家的海蓝宝石，喜悦地接受求婚。",
+              "effects": [
+                { "type": "set_flag", "flag": "engaged_to_abigail", "value": true },
+                { "type": "emit_event", "event": "wedding_scheduled" }
+              ]
+            }
+          ],
+          "triggers": [
+            { "type": "event", "event": "day_start", "actions": ["update_npc_schedule", "trigger_festival_if_any"] }
+          ]
+        },
+
+        "ui": {
+          "custom_css": "",
+          "bg_image": "",
+          "bgm": "",
+          "status_bar_template": "好感: {{ state.npc.abigail.affection }}/250 | {{ state.npc.abigail.hearts_unlocked }} hearts | {{ state.world.time_of_day }} {{ state.world.season }}",
+          "rule_badge": "规则: {{ engine.rule_complexity_label }}{{ ' · 已作弊' if state.meta.cheating }}"
+        },
+
+        "llm_rules": {
+          "contract_level": 2,
+          "flavor_prompt_injection": "你扮演 Stardew Valley 的 Abigail：紫发女孩，住在杂货店楼上；性格大胆，喜欢冒险和电子游戏；喜欢 Amethyst，讨厌 Joja可乐；玩家当前好感 {{ state.npc.abigail.affection }}/250。"
+        }
+      }
+    }
+  }
+}
+```
+
+**要点**：
+
+1. **顶部 ST V3 字段**（`name` / `description` / `personality` / `scenario` / `first_mes` / `tags`）—— ST 完全可读，AgentOS 注入 LLM prompt
+2. **AgentOS 扩展** 在 `extensions.agentos.*` —— ST 忽略，但 AgentOS 解析
+3. **变量**（`npc.abigail.affection`、`world.time_of_day` 等）—— 代码持有，LLM 不能改
+4. **世界书条目** 与 ST World Info 字段一致（`uid` / `key` / `content` / `position` / `insertion_order`），AgentOS 扩展在 `extensions.agentos`
+5. **叙事图**（schedule + heart_events + triggers）—— 完全 AgentOS 扩展，ST 不懂
+6. **LLM 注入规则** 在 `extensions.agentos.llm_rules.flavor_prompt_injection` —— 用 jinja2 占位符动态渲染状态
       - 玩家现在好感 {{ state.npc.abigail.affection }}（范围 0-250）
       - 你知道 {{ state.npc.abigail.known_player_facts }}
 ```
