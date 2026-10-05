@@ -10,7 +10,26 @@ related:
 
 # AgentOS 角色扮演子系统设计
 
-> **核心架构立场**：本系统提供**两个独立可调的轴**，由角色卡与玩家按需声明，不强推任何单一路线：
+> **核心愿景**：本系统是 **「AI 驱动交互角色 / 世界框架」**（Agent-Driven Interactive Characters & Worlds Framework），不是单纯的 RP 插件。
+>
+> **关键洞察**：**聊天型 RP 与「真人游戏 NPC / 世界模拟」是同一套架构**。
+>
+> | 应用场景 | 角色卡 | 状态机 | 世界书 | 叙事图 | Action |
+> |---|---|---|---|---|---|
+> | **聊天 RP**（afengy / SillyTavern） | 一个 NPC/人设 | HP/好感/位置/时间 | 世界设定条目 | 对话分支 | 表情/特效 |
+> | **游戏 NPC**（Stardew Valley / RPG） | NPC（Abigail 等）| 好感/库存/位置/日程 | 物品、地区、NPC 情感事件 | NPC 日程 + 心动事件 | 移动/送礼/对话 |
+> | **模拟经营**（模拟城市） | NPC 居民 | 资源/技能/需求 | 资源/建筑/历史 | 剧本需求触发 | 工作/交易 |
+> | **教育 NPC**（历史人物对话）| 老师 / 历史人物 | 知识掌握度/情绪 | 教材/历史事件 | 课程进度 | 讲解/提问 |
+>
+> **同一套原语（character card / state machine / lorebook / narrative graph / action / memory / LLM）**，用在不同领域。差别在 `rule_complexity` 与 LLM 喂的内容多少——但**架构是统一的**。
+>
+> **游戏 NPC 视角的具体化**：把角色卡当作 NPC 定义，把世界书当作物品/地区/历史条目，把叙事图当作 NPC 日程 + 心动事件（heart events），把 Action 当作 NPC 行为（move/gift/talk/...），把状态机当作 NPC 内部经济（库存/好感/需求），把 LLM 当作 NPC 性格表达（对话/情绪反应）。**Stardew Valley 的 NPC 完全可以由此框架扮演**。
+>
+> ---
+>
+> ## 设计概要（二轴谱 + ST 兼容 + 多领域）
+>
+> 提供**两个独立可调的轴**，由角色卡与玩家按需声明，不强推任何单一路线：
 >
 > | 轴 | 取值 | 含义 |
 > |---|---|---|
@@ -32,11 +51,15 @@ related:
 > 3. **规则是连续变量而非离散开关** —— 创作者声明的规则可多可少，自动适配到对应"模式"。`core` 与 `full` 之间没有硬边界
 > 4. **契约松紧可调** —— 输出格式不是单一 JSON Schema，而是由创作者声明的**结构化等级（contract level）**：从纯文本到全结构化，每一档都是合法选项
 > 5. **记忆复用 AgentOS 现有基础设施** —— 不重新发明轮子（详见 §8）
+> 6. **SillyTavern 资产完全兼容** —— V2/V3 PNG、STscript、Regex、Lorebook、Variables、Slash Commands 必须 100% 可用（详见 §1.5）
+> 7. **同一架构适用多领域** —— 聊天 RP、游戏 NPC、世界模拟、教育 NPC 共享同一套原语（详见 §1.6）
 >
 > ## 目录
 
 0. [设计哲学与架构原则](#0-设计哲学与架构原则)
 1. [角色卡标准（Character Card）](#1-角色卡标准character-card)
+1.5. [SillyTavern 生态兼容与增强](#15-sillytavern-生态兼容与增强)
+1.6. [应用领域：聊天 RP 与游戏 NPC 是同一套架构](#16-应用领域聊天-rp-与游戏-npc-是同一套架构)
 2. [游戏引擎核心：状态机子系统](#2-游戏引擎核心状态机子系统)
 3. [世界书 / Lorebook 子系统](#3-世界书--lorebook-子系统)
 4. [叙事图（Narrative Graph）](#4-叙事图narrative-graph)
@@ -359,6 +382,387 @@ agentos creator import-st <file.png>               # 从 SillyTavern PNG 导入
 agentos creator export my_card.yaml --format png-v3 # 导出 PNG-V3
 agentos creator publish my_card.yaml               # 打包发布到市场
 ```
+
+---
+
+## 1.6. 应用领域：聊天 RP 与游戏 NPC 是同一套架构
+
+> **本节是 §1.5 的姊妹**：§1.5 解决了"与 ST 兼容"，本节解决"框架的更广阔应用"。
+
+### 1.6.1 核心洞察
+
+**聊天型 RP 和「真人游戏 NPC / 世界模拟」是同一套架构。**
+
+差别只在 **state machine + worldbook + narrative_graph 的内容**，不在原语本身。
+
+| 原语 | 聊天 RP 视角 | 游戏 NPC 视角 |
+|---|---|---|
+| **Character Card** | 一个人设 / NPC | Stardew Valley 的 Abigail 完整定义 |
+| **State Machine** | HP/好感/位置/时间 | 好感/物品/位置/日程/需求/情绪 |
+| **World Book** | 设定条目（角色背景、世界规则） | 物品列表 / 地区 / NPC 情感事件 / 食谱 |
+| **Narrative Graph** | 对话分支 | NPC 日程 + 心路历程（heart events）+ 任务链 |
+| **Action Protocol** | 表情/特效 | 移动/送礼/对话/工作/接受任务 |
+| **Memory** | 对话摘要 | NPC 记忆玩家（玩家记得吗？玩家爱吃的食物？玩家生日？） |
+| **LLM** | 自由对话 | 个性化对话（Abigail 的语气 vs Sebastian 的语气）|
+
+**LLM 永远只写"叙事"或"对话"**——NPC 不会因为 LLM 输出"我不喜欢你了"就真的把好感扣 20。代码层负责扣，LLM 只负责让玩家看到「为什么」。这就是「**LLM 是叙事者，不是游戏机**」在游戏 NPC 场景的体现。
+
+### 1.6.2 完整示例：Stardew Valley 的 Abigail
+
+> **目标**：让 AgentOS 扮演 Stardew Valley 的 Abigail，玩家可与她交互（聊天、送礼、约舞、求婚）。
+
+```yaml
+# character_card.yaml —— Abigail
+character_card:
+  spec: "agentos-character-card-v1"
+  
+  meta:
+    name: "Abigail"
+    tags: ["Stardew", "小镇居民", "可攻略"]
+    version: "1.0.0"
+  
+  flavor:
+    description: |
+      Abigail 是鹈鹕镇的女孩，紫色头发，喜欢冒险、电子游戏和神秘事物。
+      她住在杂货店楼上，与母亲 Caroline 和父亲 Pierre 同住。
+    style_guide: |
+      - 紫色头发 / 性格大胆 / 说话直接
+      - 喜欢冒险题材（暗黑史等游戏）
+      - 在矿洞里打怪 / 喜欢水晶球占卜
+      - 与 Sebastian 是青梅竹马
+    
+  # ====== 1. 状态机：Abigail 的内部经济 ======
+  engine:
+    rule_complexity: "full"
+    llm: "with_llm"
+    
+    npc: {   # 注意：用 npc 标记这是 NPC 模式（区别于玩家视角）
+      abigail:
+        # 客观状态：永远代码持有
+        affection:       { type: int, default: 0, min: 0, max: 250 }
+                            # 0=陌生人, 100=好朋友(2 hearts), 200=恋人(4 hearts), 250=可求婚(8 hearts)
+        hearts_unlocked: { type: int, default: 0, min: 0, max: 8 }
+        location:        { type: enum, values: [家, 杂货店, 矿洞, 沙滩, 镇上, 神秘树丛], default: 家 }
+        schedule_offset: { type: int, default: 0 }    # 时间偏移（雨天换日）
+        is_at_work:       { type: bool, default: false }
+        
+        # 模糊状态：LLM 自由发挥
+        current_mood:    { type: enum, values: [开心, 平淡, 忧郁, 兴奋], default: 平淡 }
+        today_topic:     { type: string, default: "" }   # LLM 写
+        
+        # 记忆：跨会话
+        known_player_facts:  { type: list, item_type: str }   # ["玩家爱 Amethyst", "玩家生日是春15"]
+        favorite_gift_history: { type: list, item_type: str }
+        relationship_milestones: { type: dict, key_type: str, value_type: bool }
+        
+      # 玩家在场景中的状态
+      player:
+        gold:        { type: int, default: 0 }
+        inventory:   { type: list, item_type: { id: str, qty: int } }
+        energy:      { type: int, default: 100 }
+      
+      # 世界模拟器
+      world:
+        time_of_day:  { type: enum, values: [06:00..26:00], default: 09:00 }
+        day_of_year:  { type: int, default: 0 }                # 1-112（28 天 × 4 季）
+        season:       { type: enum, values: [春, 夏, 秋, 冬], default: 春 }
+        weather:      { type: enum, values: [晴, 雨, 风, 雷], default: 晴 }
+        festival_today: { type: enum, values: [none, 花舞, 夏至, 星露谷, 感恩, 冰雪, 婚礼], default: none }
+  
+  # ====== 2. World Book：游戏数据库 ======
+  lorebook:
+    entries:
+      # 物品条目
+      - id: "item_amethyst"
+        keywords: ["amethyst", "紫水晶"]
+        content: "Abigail 最喜欢的礼物。+50 好感。"
+      - id: "item_pumpkin"
+        keywords: ["南瓜", "pumpkin"]
+        content: "秋季作物。+15 好感。"
+      - id: "item_coffee"
+        keywords: ["咖啡", "coffee"]
+        content: "普通礼物。+5 好感。"
+      - id: "item_joja_cola"
+        keywords: ["joja可乐"]
+        content: "Abigail 不喜欢。-10 好感。"
+      
+      # 地区条目
+      - id: "location_mine"
+        keywords: ["矿洞", "mine", "矿"]
+        content: "Abigail 在某些日子会来矿洞探险。矿洞有 120 层，深层怪物危险。"
+      
+      # NPC 情感事件条目
+      - id: "event_2_hearts"
+        keywords: ["2 hearts", "2 颗心", "心"]
+        trigger:
+          type: "threshold"
+          when: "state.npc.abigail.affection >= 100"
+        content: |
+          触发 2-heart 事件：Jodi 邀请你到 Abigail 房间吃饭。
+          Abigail 吃你给的 Amethyst 时兴奋地跑上楼梯。
+          她给玩家一本关于冒险的书。
+  
+  # ====== 3. 叙事图：Abigail 的日程 + 心路历程 ======
+  narrative_graph:
+    # NPC 日程：每天的活动
+    schedule:
+      - day: "周一/周二/周三"
+        slots:
+          - "09:00-12:00": { location: 家, action: "吃早餐 / 玩游戏" }
+          - "12:00-14:00": { location: 杂货店, action: "帮 Pierre 看店" }
+          - "14:00-17:00": { location: 矿洞, action: "探险（雨后天晴时）" }
+      - day: "周六"
+        slots:
+          - "06:00-08:00": { location: 家 }
+          - "08:00-12:00": { location: 神秘树丛, action: "占卜" }
+          - "12:00-15:00": { location: 沙滩 }
+      
+      # NPC 情感事件（heart events）
+    heart_events:
+      - id: "abigail_2_hearts"
+        trigger:
+          type: "threshold"
+          when: "state.npc.abigail.affection >= 100 AND state.world.location == '家'"
+        narrative_hint: |
+          Abigail 在家。玩家第一次来她房间，看到占卜球、Amethyst、她的冒险小说。
+          玩家选择：
+          1. 拿起她的 Amethyst
+          2. 翻看她的冒险小说
+          3. 提议一起玩游戏
+        effects:
+          - type: "increment"
+            path: "npc.abigail.affection"
+            value: 50
+          - type: "set_flag"
+            flag: "abigail_room_visited"
+      
+      - id: "abigail_6_hearts"
+        trigger:
+          type: "threshold"
+          when: "state.npc.abigail.affection >= 200"
+        narrative_hint: |
+          Abigail 邀请玩家晚上去秘密森林。
+          抉择：是否前往？
+        effects_on_path_a: {  # 前往
+            type: "increment"; path: "npc.abigail.affection"; value: 30
+            type: "set_flag"; flag: "secret_woods_visited_with_abigail"
+          }
+        effects_on_path_b: {  # 不去
+            type: "increment"; path: "npc.abigail.affection"; value: -10
+          }
+      
+      - id: "abigail_8_hearts_propose"
+        trigger:
+          type: "threshold"
+          when: "state.npc.abigail.affection >= 250 AND state.player.has_item('海蓝宝石')"
+        narrative_hint: |
+          Abigail 戴上了玩家的海蓝宝石，喜悦地接受求婚。
+          触发 8-heart 事件 + 婚礼事件 + 她搬进农场。
+        effects:
+          - type: "set_flag"
+            flag: "engaged_to_abigail"
+            value: true
+          - type: "emit_event"
+            event: "wedding_scheduled"
+  
+  # ====== 4. Action 协议：NPC 可执行的动作 ======
+  actions:
+    - id: "give_gift"
+      description: "玩家送 Abigail 礼物"
+      params: { item_id: str, target_npc: str }
+      handler: "agentos.rp.game_npc:gift_resolver"   # 引用礼物解析器
+    
+    - id: "talk_to_npc"
+      description: "玩家与 NPC 对话"
+      params: { target_npc: str, text: str }
+      handler: "agentos.rp.llm.narrator:talk"
+    
+    - id: "npc_action"
+      description: "NPC 自己执行的动作"
+      params: { npc_id: str, action_type: str, target: str }
+      handler: "agentos.rp.game_npc:npc_act"
+      # 示例：abigail.动作 = 移动 / 工作 / 接受任务 / 拒绝
+    
+    - id: "schedule_advance"
+      description: "推进世界时间 10 分钟"
+      params: {}
+      handler: "agentos.rp.world:advance_time"
+    
+    - id: "world_simulate"
+      description: "世界模拟器一步"
+      params: {}
+      handler: "agentos.rp.world:tick"
+      # 让所有 NPC 自主行动（按叙事图）
+    
+    - id: "festival_event"
+      description: "节日事件触发"
+      params: { festival: str }
+      handler: "agentos.rp.festival:trigger"
+  
+  # ====== 5. LLM 调用规则 ======
+  llm_rules:
+    contract_level: 2                # 文本 + choices + actions
+    flavor_prompt_injection: |
+      你扮演 Stardew Valley 的 Abigail：
+      - 紫发女孩，住在杂货店楼上
+      - 性格大胆，喜欢冒险和电子游戏
+      - 喜欢 Amethyst（紫水晶），讨厌 Joja可乐
+      - 玩家现在好感 {{ state.npc.abigail.affection }}（范围 0-250）
+      - 你知道 {{ state.npc.abigail.known_player_facts }}
+```
+
+**这就是一个完整的游戏 NPC 角色卡**。同一套原语，与聊天 RP 角色卡的差别只在内容、不在结构。
+
+### 1.6.3 同一架构下的其他应用示例
+
+#### A. 模拟城市 NPC 居民
+
+```yaml
+character_card:
+  meta: { name: "Mr. Smith" }
+  engine:
+    variables:
+      npc.mr_smith:
+        # 客观
+        hunger:        { type: int, default: 100, min: 0, max: 100 }
+        energy:        { type: int, default: 80 }
+        money:         { type: int, default: 500 }
+        job:           { type: enum, values: [unemployed, teacher, engineer], default: teacher }
+        home:          { type: location_id }
+        # 模糊
+        happiness:     { type: int, default: 60 }
+    lorebook:
+      entries:
+        - { keywords: ["工资日", "payday"], content: "每月 25 日发工资。+2000 元" }
+        - { keywords: ["医院", "hospital"], content: "HP<10 时自动去" }
+    narrative_graph:
+      schedule:
+        - { time: "07:00", action: "起床吃早餐" }
+        - { time: "08:00", action: "通勤到学校" }
+        - { time: "16:00", action: "回家" }
+        - { time: "19:00", action: "做饭吃饭" }
+        - { time: "22:00", action: "睡觉" }
+```
+
+**规则引擎驱动 NPC 自主**——LLM 不参与自动循环，只在玩家交互时生成对话。
+
+#### B. 教育 NPC（历史人物对话）
+
+```yaml
+character_card:
+  meta: { name: "孔子" }
+  engine:
+    variables:
+      player:
+        knowledge_score: { type: int, default: 0, max: 2000 }
+        questions_asked: { type: int, default: 0 }
+      npc.confucius:
+        mood: { type: enum, default: 仁 }
+    lorebook:
+      entries:
+        - { keywords: ["仁", "礼"], content: "儒家核心思想..." }
+        - { keywords: ["论语"], content: "孔子言行记录..." }
+    llm_rules:
+      flavor_prompt_injection: |
+        你扮演孔子。回答学生问题时：
+        - 引经据典（《论语》原句优先）
+        - 简洁有力，不冗长
+        - 反问启发，不直接给答案
+```
+
+**LLM 角色严格** + **状态机追踪学习进度** = 教育 NPC。
+
+#### C. 客服 NPC
+
+```yaml
+character_card:
+  meta: { name: "客服小爱" }
+  engine:
+    variables:
+      player:
+        ticket_id: { type: string }
+        satisfaction: { type: int, default: 5, min: 1, max: 5 }
+      npc.cs_bot:
+        knowledge_access: { type: bool, default: true }
+    lorebook:
+      - { keywords: ["退款"], content: "退款流程..." }
+    llm_rules:
+      contract_level: 3   # 严格结构化（因为要执行 action：转人工 / 查订单）
+```
+
+**Action 协议在这里是工具调用（tool calling）**——查订单、退款、转人工。
+
+#### D. 心理陪伴 NPC
+
+```yaml
+character_card:
+  meta: { name: "树洞" }
+  engine:
+    rule_complexity: "core"  # 不要太多规则
+    variables:
+      player:
+        mood_log: { type: list, item_type: { date: date, mood: int } }
+        session_count: { type: int, default: 0 }
+    llm_rules:
+      contract_level: 0  # 纯文本，让 LLM 自由发挥
+```
+
+### 1.6.4 架构统一的根本
+
+为什么同一套原语能覆盖这么多领域？因为**核心原语是抽象的**：
+
+| 原语 | 抽象含义 |
+|---|---|
+| Character Card | 一个有名字、有身份、有目标的"智能体"定义 |
+| State Machine | 该智能体内部的可观测状态 |
+| World Book | 智能体所在的世界的知识条目 |
+| Narrative Graph | 智能体在世界中按时间/事件流转的剧本 |
+| Action Protocol | 智能体与世界交互的原子动作 |
+| Memory | 智能体的历史记忆 |
+| LLM | 让智能体能用自然语言表达 |
+
+**这些原语既适合"对话型 RP 角色"，也适合"游戏 NPC"，更扩展到"客服 / 教师 / 陪伴"等。**
+
+### 1.6.5 从 RP 到 NPC 的迁移路径
+
+| 阶段 | 改变 | 工作量 |
+|---|---|---|
+| 0. 角色卡只有 prompt（ST 风格） | — | 0 |
+| 1. 加 state.variables（HP / 好感等） | 1-2 小时 | ★ |
+| 2. 加 lorebook（物品 / 设定） | 1 小时 | ★ |
+| 3. 加 narrative_graph（日程 / 心路） | 2-3 小时 | ★★ |
+| 4. 加 action 协议（NPC 行为） | 1 小时 | ★ |
+| 5. 加 LLM 注入规则（人格 / 语气） | 1 小时 | ★ |
+
+**总工作量**：半天内把一个聊天 RP 角色变成完整游戏 NPC。
+
+### 1.6.6 对 AgentOS 内核的接口
+
+这套框架对内核的接口非常薄：
+
+```python
+# AgentOS 内核只需支持：
+# 1. 加载角色卡（plugin_loader）
+# 3. 调用 LLM（llm_invoker）
+# 4. 持久化状态（storage_driver）
+# 6. 调度任务（task system）
+# 7. 工具注册（tool-surface）
+```
+
+**RP / NPC / 教育 / 客服 / 陪伴** 都用同一个内核接口。差别在角色卡内容，不在内核。
+
+### 1.6.7 与 Convai / Inworld 的关系
+
+| 平台 | 定位 | 与本框架对比 |
+|---|---|---|
+| **Convai** | 游戏 NPC AI（Unity/Unreal 集成） | 同愿景；本框架对工具与生态更广（AgentOS 内核 + ST 兼容） |
+| **Inworld AI** | 同 Convai（已收缩到 TTS/STT）| 同上 |
+| **Hidden Door** | 故事世界 | 同愿景；本框架有 ST 兼容优势 |
+| **SillyTavern / RisuAI** | 聊天 RP | 本框架 = ST 增强（兼容 + 加游戏 NPC 能力） |
+| **afengy.com** | 中文成人 RP 聊天 | 本框架 = 增强（state machine + RAG） |
+| **character.ai** | 简单聊天 | 本框架太重，但 ST 资产可走 character.ai 风格 |
+
+**核心定位 = "Convai 之父 + SillyTavern 之母"**——结合游戏 NPC 的状态机严谨 + ST 的 UGC 生态。
 
 ---
 
