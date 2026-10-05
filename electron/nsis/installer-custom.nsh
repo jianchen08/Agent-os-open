@@ -34,15 +34,23 @@
 ; 「升级中，最长约 1 分钟，聊天记录与配置保留」。该路径默认 interactive 模式
 ; 下走，silent 模式（`/S`）直接跳过（避免装机 toast 阻塞 CI）。
 ;
-; ── Defender 排除路径（ADR 2026-10-05）──
+; ── Defender 排除路径（ADR 2026-10-05 / 2026-10-06 实机修正）──
 ;
-; 装机递归删盘 win-unpacked 700MB+ 时每文件经 Defender 实时扫描是实测到的真凶
-; （MsMpEng 163% CPU、67 线程、78 万次读累计），其它装机版（Chrome/Edge/VSCode
-; 等）都在安装路径或二进制上有 Defender 排除路径——我们空集。装机末 nsExec::Exec
-; PowerShell Add-MpPreference -ExclusionPath 写两条排除（perMachine 安装路径 +
-; 用户空间数据根）；失败只 DetailPrint 不中断安装（与 env 播种同一静默语义，
-; 失败为软而非硬）。perUser 装机状态本进程不写 HKLM Defender 排除（需提权），
-; docs/guides/deployment.md 加一段手动命令指引。
+; 装机递归解包 750MB 时每文件经 Defender 实时扫描是实测挂死真因（Setup 9 分钟
+; CPU 仅 3.2s = 纯阻塞等扫描返回；old-uninstaller 删盘烧 151s CPU 同因）。
+;
+; 时机契约：排除必须写在文件解包（installApplicationFiles）**之前**——
+; customInstall 在 copy 之后才跑，太晚；customInit 是 .onInit 内
+; initMultiUser 之后的钩点，先于卸载旧版与 copy，静默升级的 UAC 内层
+; 实例在此已是 admin，正是写排除的位置。
+;
+; 门控契约：以**运行期** ${UAC_IsAdmin} 为准，不用编译期
+; INSTALL_MODE_PER_ALL_USERS——本仓 nsis.perMachine 未设（=false），该编译期
+; 宏永不定义，2026-10-05 首版把它当门控 = 排除写入从未生效（死代码）。
+; per-user 非提权安装写不了 HKLM，属文档指引面（docs/guides/deployment.md）。
+;
+; 幂等性 Add-MpPreference -Force 同路径累加不报错；失败仅留痕不阻断安装
+; （与 env 播种同一静默语义，失败为软而非硬）。
 ;
 ; 注意：声明必须置于顶层（本文件在模板之前被 include，!include/Var 不能出现在
 ; Function 上下文内——即宏的展开点）。
@@ -51,13 +59,31 @@
 Var /GLOBAL pid
 Var /GLOBAL IsPowerShellAvailable
 Var /GLOBAL AgentOsAdminPassword
+Var /GLOBAL DefenderExecResult
+
+; 写 Defender 排除（$INSTDIR + per-user 默认装位 + 用户数据根）。
+; 仅 admin 可写（HKLM）；nsExec 结果必须 Pop，防 NSIS 栈失衡。
+!macro _writeDefenderExclusions
+  ${If} ${UAC_IsAdmin}
+    nsExec::ExecToLog `powershell.exe -NoProfile -NonInteractive -Command "try { Add-MpPreference -ExclusionPath '$INSTDIR','$LOCALAPPDATA\Programs\agent-os','$APPDATA\agentos' -Force } catch { Write-Host ('Add-MpPreference failed: ' + $_) }"`
+    Pop $DefenderExecResult
+    ${If} $DefenderExecResult != 0
+      DetailPrint `Defender exclusion write failed (exit $DefenderExecResult) — install continues`
+    ${EndIf}
+  ${EndIf}
+!macroend
+
+!macro customInit
+  ; 解包前写排除：copy 阶段即免扫（成熟软件安装分钟级的关键一手）
+  !insertmacro _writeDefenderExclusions
+!macroend
 
 !macro customCheckAppRunning
   StrCpy $IsPowerShellAvailable 1
   !insertmacro _CHECK_APP_RUNNING
 
-  ; 升级路径反馈：customCheckAppRunning 是 .onInit 阶段最早的用户可见 NSIS 钩点，
-  ; initMultiUser 尚未跑，此处直接读 INSTALL_REGISTRY_KEY 探测既有装机位。
+  ; 升级路径反馈：CHECK_APP_RUNNING 挂在 install Section 内、先于
+  ; uninstallOldVersion——此处读 INSTALL_REGISTRY_KEY 探测既有装机位，
   ReadRegStr $R6 HKLM "${INSTALL_REGISTRY_KEY}" "InstallLocation"
   ${If} $R6 == ""
     ReadRegStr $R6 HKCU "${INSTALL_REGISTRY_KEY}" "InstallLocation"
@@ -72,11 +98,7 @@ Var /GLOBAL AgentOsAdminPassword
 ; 自对齐）；CryptGenRandom 失败则不播种（宁缺毋弱——弱口令比未播种更危险，
 ; 后者走「未播种=部署 bug」的显式回落路径）。
 ;
-; 末尾新增 Defender 排除路径写入（perMachine 装机；perUser 装机走文档指引，
-; 本进程无权写 HKLM\Add-MpPreference）。两条排除使用常量与安装位注册变量：
-;   $INSTDIR                  — perMachine 安装根
-;   $APPDATA\agentos          — 用户数据根
-; 幂等性 Add-MpPreference -Force 同路径累加不报错；失败仅 DetailPrint 不中断。
+; 末尾经 _writeDefenderExclusions 兜底再写一次排除（幂等，见该宏注释）。
 !macro customInstall
   ReadRegStr $AgentOsAdminPassword HKCU "Environment" "AGENTOS_ADMIN_PASSWORD"
   ${If} $AgentOsAdminPassword == ""
@@ -100,13 +122,9 @@ Var /GLOBAL AgentOsAdminPassword
     ${EndIf}
   ${EndIf}
 
-  ; perMachine 装机写 Defender 排除路径（perUser 不写，本进程无权改 HKLM）。
-  ; InstallMode 通过 INIT_INSTALLMODE_FROM_REG 全局变量传入；SHELL_CONTEXT
-  ; 在 perMachine 装为 HKLM、perUser 装为 HKCU。此处仅在 perMachine 时落。
-  ; INSTALL_MODE_PER_ALL_USERS 由 app-builder-lib 模板 BUILD 时定义。
-  !ifdef INSTALL_MODE_PER_ALL_USERS
-    nsExec::ExecToLog 'powershell.exe -NoProfile -NonInteractive -Command "try { Add-MpPreference -ExclusionPath $\"$INSTDIR$\",$\"$APPDATA\agentos$\" -Force } catch { Write-Host $\"Add-MpPreference failed: $_\" }"'
-  !endif
+  ; 收尾兜底再写一次排除（幂等）：覆盖交互首装经 UI 选 all-users 提权后才
+  ; admin 的路径（该路径 customInit 时还不是 admin）；已写过则同路径累加无副作用。
+  !insertmacro _writeDefenderExclusions
 !macroend
 
 ; 卸载清场：移除播种的环境变量（重装会重新播种，内核重置语义自对齐）。

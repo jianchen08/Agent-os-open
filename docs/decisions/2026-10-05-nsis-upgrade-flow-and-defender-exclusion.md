@@ -58,6 +58,29 @@
 - **`seedTreeMissingOnly` add-only**：与本期正交，不动；引用既有 ADR `2026-10-03-packaged-user-data-first`。
 - **perUser 装机版的排除路径**：不自动加，文档指引；该承诺未达成（已知边界）。
 
+## 落地修正（2026-10-06 实机装机测试）
+
+首版实现经实机升级测试（旧版 Oct-2 → 新版 `/S /allusers`）暴露两处缺陷，
+当日修正：
+
+1. **排除写入是死代码**：首版把 Defender 排除写在 `customInstall` 内并以
+   **编译期宏** `!ifdef INSTALL_MODE_PER_ALL_USERS` 门控；本仓构建
+   `nsis.perMachine` 未设（build 日志实锤 `perMachine=false`），该编译期宏
+   永不定义 → 排除写入从未编译进安装器。实测装机后 `ExclusionPath` 为空。
+   修正：改**运行期** `${UAC_IsAdmin}` 门控（交互选 all-users 经 UAC 提权后、
+   静默 per-machine 升级的 UAC 内层实例均满足；per-user 非提权路径本就无权
+   写 HKLM，走文档指引不变）。
+2. **排除写入时机太晚**：`customInstall` 挂在 `installApplicationFiles`
+   （解包 copy）之后——即使生效，copy 阶段已被 Defender 逐文件扫描完毕
+   （实测 Setup 9 分钟 CPU 仅 3.2s = 纯阻塞等扫描返回；old-uninstaller 删盘
+   烧 151s CPU 同因）。修正：新增 `customInit` 钩点（.onInit 内
+   initMultiUser 之后、先于卸载旧版与 copy）前置写排除，`customInstall`
+   降级为幂等兜底（覆盖交互首装提权后才 admin 的路径）。nsExec 结果补
+   Pop（首版漏 Pop 属 NSIS 栈失衡隐患）。
+
+实机四契约复测口径：kernel hash 更新 / user data 保留 / `ExclusionPath`
+写入 / `AGENTOS_ADMIN_PASSWORD` 播种，全过即验收。
+
 ## 归档
 
 - 实测事故：2026-10-04 22:55 升级流程卡 25 分钟零 UI（PID 77616 / 109892 / 105812 三进程链）

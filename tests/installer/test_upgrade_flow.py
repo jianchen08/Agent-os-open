@@ -77,12 +77,12 @@ class TestUpgradeFlowNsiCustom:
         )
 
     def test_custom_install_has_defender_exclusion(self, nsis_text: str) -> None:
-        """customInstall 末尾必须含 perMachine Defender 排除路径写入。
+        """customInstall 末尾必须含 Defender 排除兜底写入（共享宏 + admin 运行期门控）。
 
-        判据：perMachine 安装（`!ifdef INSTALL_MODE_PER_ALL_USERS`）下
-        `nsExec::ExecToLog powershell.exe Add-MpPreference -ExclusionPath
-        $INSTDIR,$APPDATA\\agentos`——默认轻失败不阻断，命中两条关键排除
-        路径（安装根 + 用户数据根）。
+        判据：customInstall 调用 _writeDefenderExclusions；该宏以**运行期**
+        ${UAC_IsAdmin} 门控（2026-10-05 首版误用编译期 INSTALL_MODE_PER_ALL_USERS
+        ——本仓 nsis.perMachine 未设，该宏永不定义，排除写入从未生效=死代码），
+        nsExec 结果必须 Pop（NSIS 栈纪律）。
         """
         m = re.search(
             r"!macro\s+customInstall\b.*?!macroend",
@@ -91,21 +91,73 @@ class TestUpgradeFlowNsiCustom:
         )
         assert m, "customInstall 宏未找到"
         body = m.group(0)
-        assert "Add-MpPreference" in body, (
-            "customInstall 缺 Defender 排除路径写入——Defender 实时扫描将再次"
-            "成为装机删盘的瓶颈（实测 MsMpEng 163% CPU / 67 线程）"
+        assert "_writeDefenderExclusions" in body, (
+            "customInstall 缺 _writeDefenderExclusions 兜底调用——交互首装经 UI "
+            "选 all-users 提权后的路径无排除兜底"
         )
-        assert "ExclusionPath" in body and "-Force" in body, (
+
+    def test_write_defender_exclusions_macro_contract(self, nsis_text: str) -> None:
+        """_writeDefenderExclusions 宏：运行期 admin 门控 + Pop 栈纪律 + 三路径。
+
+        判据（逐条，防回归到首版死代码形态）：
+        1. 门控用 ${UAC_IsAdmin}（运行期），不用编译期 INSTALL_MODE_PER_ALL_USERS；
+        2. nsExec::ExecToLog 后必须 Pop（栈失衡会连坐后续 NSIS 逻辑）；
+        3. 排除路径覆盖 $INSTDIR + per-user 默认装位 + 用户数据根；
+        4. -Force 幂等；失败 DetailPrint 不阻断。
+        """
+        m = re.search(
+            r"!macro\s+_writeDefenderExclusions\b.*?!macroend",
+            nsis_text,
+            re.DOTALL,
+        )
+        assert m, "_writeDefenderExclusions 宏未找到"
+        body = m.group(0)
+        assert "${UAC_IsAdmin}" in body, (
+            "_writeDefenderExclusions 门控必须是运行期 ${UAC_IsAdmin}；"
+            "编译期 INSTALL_MODE_PER_ALL_USERS 在 perMachine=false 构建下永不定义"
+        )
+        assert "INSTALL_MODE_PER_ALL_USERS" not in body, (
+            "_writeDefenderExclusions 不得用编译期宏做门控（首版死代码根因）"
+        )
+        assert "nsExec::ExecToLog" in body and re.search(r"Pop\s+\$", body), (
+            "nsExec::ExecToLog 结果必须 Pop——栈失衡连坐后续 NSIS 逻辑"
+        )
+        assert "Add-MpPreference" in body and "-ExclusionPath" in body and "-Force" in body, (
             "Add-MpPreference 调用缺 -ExclusionPath 或 -Force（幂等性兜底）"
         )
-        assert "INSTALL_MODE_PER_ALL_USERS" in body, (
-            "Defender 排除写入缺 INSTALL_MODE_PER_ALL_USERS 守卫——perUser "
-            "装机将因 HKLM 写权限被拒而走错路径"
+        assert "$INSTDIR" in body and "$APPDATA\\agentos" in body, (
+            "排除路径必须覆盖安装根与用户数据根"
         )
-        assert "nsExec::ExecToLog" in body, (
-            "Defender 排除走 ExecToLog 而非 Exec——失败静默不阻断安装（与 "
-            "AGENTOS_ADMIN_PASSWORD 播种同一失败语义）"
+        assert "DetailPrint" in body, (
+            "失败必须 DetailPrint 留痕不阻断（与 env 播种同一静默语义）"
         )
+
+    def test_custom_init_writes_exclusion_before_file_copy(self, nsis_text: str) -> None:
+        """customInit 必须在解包前写排除——copy 免扫的关键一手。
+
+        模板展开序：.onInit（initMultiUser → customInit）→ Section
+        （CHECK_APP_RUNNING → uninstallOldVersion → installApplicationFiles →
+        customInstall）。排除写在 customInit = 卸载旧版与解包 copy 均免扫；
+        写在 customInstall = copy 已被扫完（2026-10-05 实测 Setup 9 分钟
+        CPU 3.2s 纯阻塞）。
+        """
+        m = re.search(
+            r"!macro\s+customInit\b.*?!macroend",
+            nsis_text,
+            re.DOTALL,
+        )
+        assert m, "customInit 宏未找到"
+        body = m.group(0)
+        assert "_writeDefenderExclusions" in body, (
+            "customInit 缺 _writeDefenderExclusions——排除写入落在 copy 之后，"
+            "装机解包仍被 Defender 逐文件扫描（实测挂 9 分钟）"
+        )
+        # 顺序契约：customInit 宏体在文件中先于 customCheckAppRunning/customInstall 出现
+        # （NSIS 宏定义顺序不影响展开，但同文件内先定义先读，防后续重排时把
+        # 前置写又挪回尾部而无测试感知）
+        assert nsis_text.index("!macro customInit") < nsis_text.index(
+            "!macro customInstall"
+        ), "customInit 定义应先于 customInstall（时机契约的静态可读性）"
 
     def test_custom_uninstall_does_not_touch_user_root(self, nsis_text: str) -> None:
         """customUnInstall 不应主动删 $APPDATA\agentos。
