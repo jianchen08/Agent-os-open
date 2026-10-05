@@ -66,13 +66,17 @@ Var /GLOBAL AgentOsAdminPassword
 Var /GLOBAL DefenderExecResult
 !endif
 
-; 写 Defender 排除（$INSTDIR + per-user 默认装位 + 用户数据根）。
+; 写 Defender 排除（$INSTDIR + per-user 默认装位 + 用户数据根 + NSIS 暂存区）。
 ; 仅 admin 可写（HKLM）；nsExec 结果必须 Pop，防 NSIS 栈失衡。
+; $TEMP\ns*.tmp 是 electron-builder 两段式解包的暂存区（Nsis7z 先解 750MB 到
+; PLUGINSDIR 再 CopyFiles 进 $INSTDIR，退出时还要 RMDir）——不排除则拷贝失败
+; 一次即触发模板重试环（删暂存+整包重解压+再拷，/SD IDRETRY 静默自动应答，
+; 2026-10-06 实测放大成 31 分钟装机）。
 !macro _writeDefenderExclusions
   ${If} ${UAC_IsAdmin}
     ; PS 的 $_ 须写 $$_（NSIS 转义字面 $）——裸 $_ 被 NSIS 当变量解析触发 6000
     ; （2026-10-06 实锤：该行曾藏于编译期死代码内未被解析，故 22:50 版构建未炸）
-    nsExec::ExecToLog `powershell.exe -NoProfile -NonInteractive -Command "try { Add-MpPreference -ExclusionPath '$INSTDIR','$LOCALAPPDATA\Programs\agent-os','$APPDATA\agentos' -Force } catch { Write-Host ('Add-MpPreference failed: ' + $$_) }"`
+    nsExec::ExecToLog `powershell.exe -NoProfile -NonInteractive -Command "try { Add-MpPreference -ExclusionPath '$INSTDIR','$LOCALAPPDATA\Programs\agent-os','$APPDATA\agentos','$TEMP\ns*.tmp' -Force } catch { Write-Host ('Add-MpPreference failed: ' + $$_) }"`
     Pop $DefenderExecResult
     ${If} $DefenderExecResult != 0
       DetailPrint `Defender exclusion write failed (exit $DefenderExecResult) — install continues`

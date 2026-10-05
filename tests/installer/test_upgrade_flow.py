@@ -128,6 +128,11 @@ class TestUpgradeFlowNsiCustom:
         assert "$INSTDIR" in body and "$APPDATA\\agentos" in body, (
             "排除路径必须覆盖安装根与用户数据根"
         )
+        assert "$TEMP\\ns*.tmp" in body, (
+            "排除路径必须覆盖 NSIS 暂存区 $TEMP\\ns*.tmp——两段式解包（Nsis7z 解到 "
+            "PLUGINSDIR 再 CopyFiles）暂存区在排除区外时，单次拷贝失败即触发模板"
+            "重试环（删暂存+整包重解压，/SD IDRETRY 静默自动应答），实测放大成 31 分钟"
+        )
         assert "DetailPrint" in body, (
             "失败必须 DetailPrint 留痕不阻断（与 env 播种同一静默语义）"
         )
