@@ -116,7 +116,14 @@ BASE_TEST_PATHS: list[str] = [
     # 根因已修：根 conftest 逐出名单去独占名 + 运行期路径守卫）、unit（含
     # channel_migration 六通道插件契约）、monitoring（0.2 监控模块）、multimodal
     # （storage 槽位收敛）、顶层任务契约与权限测试。
-    "tests/suites/",
+    # tests/suites 展开为子目录（2026-10-04）：整目录入参在分片调度下不可
+    # 拆分（_pytest_argv_shards 按路径中点切分），单目录过重时会撑爆单个
+    # 分片 job；子目录粒度让分片均衡成为可能。测试集不变。
+    "tests/suites/core/",
+    "tests/suites/e2e/",
+    "tests/suites/llm/",
+    "tests/suites/plugins/",
+    "tests/suites/task/",
     "tests/unit/",
     "tests/monitoring/",
     "tests/multimodal/",
