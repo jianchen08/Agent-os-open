@@ -37,6 +37,12 @@ jobs:
                   method="PATCH" if cid else "POST")
               with urllib.request.urlopen(req) as r:
                   if cid is None: cid = json.load(r)["id"]
+          def errlog(msg):
+              with open('/tmp/watchdog.err', 'a') as f: f.write(msg + chr(10))
+          try:
+              post('watchdog alive @ start')
+          except Exception as e:
+              errlog('start post failed: ' + repr(e))
           while True:
               time.sleep(120)
               try:
@@ -46,8 +52,8 @@ jobs:
                   mem = pathlib.Path('/proc/meminfo').read_text().splitlines()[1]
                   disk = os.popen('df -h / /tmp 2>/dev/null | tail -2').read()
                   post(f"progress @ {time.strftime('%H:%M:%S')} {mem}" + chr(10) + disk + chr(10) + "```" + chr(10) + tail + chr(10) + "```")
-              except Exception:
-                  pass
+              except Exception as e:
+                  errlog(repr(e))
           PYW
           sed 's/^          //' /tmp/watchdog.src > /tmp/watchdog.py
           python3 -c "import ast; ast.parse(open('/tmp/watchdog.py').read())" || { cat /tmp/watchdog.py | head -5; exit 1; }
@@ -72,6 +78,9 @@ jobs:
           if p.exists():
               lines = p.read_text(errors='replace').splitlines()
               out.append("last lines:" + chr(10) + chr(10).join(lines[-25:]))
+          errp = pathlib.Path('/tmp/watchdog.err')
+          if errp.exists():
+              out.append('watchdog.err:' + chr(10) + errp.read_text(errors='replace')[-3000:])
           sha = os.environ["GITHUB_SHA"]; token = os.environ["GITHUB_TOKEN"]
           data = json.dumps({"body": "shard-b postmortem:" + chr(10) + "```" + chr(10) + chr(10).join(out)[:40000] + chr(10) + "```"}).encode()
           req = urllib.request.Request(
