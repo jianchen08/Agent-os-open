@@ -61,6 +61,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Run shard b verbose
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           export PYTHONUNBUFFERED=1
           nohup python3 /tmp/watchdog.py > /tmp/watchdog.out 2>&1 &
