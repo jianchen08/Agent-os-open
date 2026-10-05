@@ -3,6 +3,9 @@ on:
   push:
     branches: [debug/**]
   workflow_dispatch:
+concurrency:
+  group: shardb-watch
+  cancel-in-progress: true
 permissions:
   contents: write
 jobs:
@@ -20,7 +23,7 @@ jobs:
           uv pip install -e ./plugins/sdk
       - name: Start watchdog
         run: |
-          cat > /tmp/watchdog.py <<'PYW'
+          cat > /tmp/watchdog.src <<'PYW'
           import os, json, time, urllib.request, pathlib
           sha = os.environ["GITHUB_SHA"]; token = os.environ["GITHUB_TOKEN"]
           cid = None
@@ -46,6 +49,8 @@ jobs:
               except Exception:
                   pass
           PYW
+          sed 's/^          //' /tmp/watchdog.src > /tmp/watchdog.py
+          python3 -c "import ast; ast.parse(open('/tmp/watchdog.py').read())" || { cat /tmp/watchdog.py | head -5; exit 1; }
           nohup python3 /tmp/watchdog.py > /tmp/watchdog.out 2>&1 &
           echo "watchdog pid $!"
         env:
@@ -60,7 +65,7 @@ jobs:
         if: always()
         run: |
           pkill -f watchdog.py || true
-          python3 - <<'PYEOF'
+          cat > /tmp/poster.src <<'PYEOF'
           import os, json, urllib.request, pathlib
           out = []
           p = pathlib.Path('/tmp/cur.log')
@@ -75,5 +80,7 @@ jobs:
           with urllib.request.urlopen(req) as r:
               print("status", r.status)
           PYEOF
+          sed 's/^          //' /tmp/poster.src > /tmp/poster.py
+          python3 /tmp/poster.py
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
