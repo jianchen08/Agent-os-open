@@ -1,0 +1,45 @@
+name: Debug main reds probe
+on:
+  push:
+    branches: [debug/**]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  shard-b-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with: { enable-cache: true, cache-dependency-glob: "uv.lock" }
+      - run: |
+          uv sync --frozen --extra dev --extra isolation
+          uv pip install -e ./plugins/sdk
+      - name: Run exact shard b gates
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          python scripts/run_gates.py --filter plugins-coverage-b,plugins-coverage-pairing,channel-copy-guard > /tmp/out.log 2>&1
+          echo "== exit=$? =="
+          tail -c 20000 /tmp/out.log > /tmp/tail.log
+          python .github/workflows/probe_post.py /tmp/tail.log "shard-b-gate"
+  precommit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install ruff==0.15.20 mypy==2.1.0 pre-commit==3.5.0
+      - name: Run pre-commit
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          pre-commit run --all-files > /tmp/out.log 2>&1
+          echo "== exit=$? =="
+          python .github/workflows/probe_post.py /tmp/out.log "precommit"
