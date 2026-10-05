@@ -108,26 +108,201 @@ related:
 - **`core + with_llm`**：AgentOS 默认推荐模式。LLM 写故事，常规游戏状态（HP/位置/时间/基础战斗）由代码持有——这是与 afengy 现状的本质差异。
 - **`core + without_llm`**：LLM 不可用时的降级形态：**一个可独立运行的小型流程化游戏**（visual novel / 文字冒险），不需要玩家会写 prompt，玩家点选项推进剧情。
 
-### 0.3 「常规状态 vs 模糊状态」明确边界
+### 0.3 「状态归属」明确原则（修订版）
 
-**常规状态**（always code-enforced）—— 创作者在 `engine.variables` 声明，**任何模式都不能被 LLM 改**：
+> **关键洞察**：
+>
+> **所有"状态"都是代码持有** —— 这是事实层（HP / 好感 / 位置 / 时间 / 物品 / 任务 等）。
+>
+> **所有状态都可通过 LLM 的行为改变** —— LLM 通过 **触发 Action**（如 `npc_gift_received`）→ 代码 Action handler 计算具体变化 → 状态落库。
+>
+> **不存在"LLM 直接改状态"这一通道**。LLM 必须经 Action → Handler → Validator → DB。
 
-| 字段 | 原因 |
+#### 取消"模糊状态"概念
+
+之前的设计有 `regular` / `fuzzy` 两类状态的划分。这是**误导**：
+
+| 旧划分 | 问题 |
 |---|---|
-| `player.hp, mp, gold, stamina` | 数值化、有上限、需要精确 |
-| `world.location, time_of_day, weather` | 离散状态、影响事件触发 |
-| `player.inventory` | 物品数量与唯一性必须强校验 |
-| `tasks.completed[], progress[]` | 任务进度需要持久化 |
+| `affection`（fuzzy，LLM 自由）| "好感 +15" 应该是怎么算的？+5 还是 +50？LLM 不知道 |
+| `mood`（fuzzy，LLM 自由）| "happy" vs "angry" 的边界？LLM 不确定 |
+| `narrative.conflict`（fuzzy）| 如果 LLM 把它改了就改变了叙事？难以回滚 |
 
-**模糊状态**（LLM 自由发挥；`full` 模式才校验）：
+**正确做法**：
 
-| 字段 | 原因 |
-|---|---|
-| `npcs.X.affection, .mood, .attitude` | 情感维度，LLM 写得最自然 |
-| `narrative.conflict, .secret, .revealed` | 剧情变量，本来就是叙事一部分 |
-| `narrative.tone, .pace, .themes[]` | 文学性维度，schema 化会失味 |
+1. **数值状态全部由代码持有**（含 affection、mood、conflict 等所有"看起来是模糊的"状态）
+2. **LLM 不直接改数值** —— 它**触发 Action**（如 `npc_gift_received(target: "abigail", gift: "amethyst")`）
+3. **Action handler 决定具体数值变化**（如 `affection += 50`，但 clamp 到 `[0, 250]`）
+4. **LLM 在 narration 里只是描述** "好感提升" —— 这是叙事，不是状态
+5. **前端显示**：narration 显示"好感提升"，状态条显示 `affection: 20 → 70` —— **两边都更新，但来源不同**
 
-> 设计要点：**模糊状态本身就是叙事的一部分**，强行让 LLM 输出 `affection +15` 而不属于 narration 流，会破坏体验。**让 LLM 在 narration 里直接说"好感提升"**，前端按需解析（HTML `<details>` 标签或模糊正则），比强行 schema 更自然。
+#### 所有状态的统一原则
+
+| 谁负责什么 | 数值状态 | 叙事表现 |
+|---|---|---|
+| **代码持有** | ✓（永远是事实） | ✗（不持有） |
+| **LLM 直接改** | ✗（不允许） | ✓（narration 内容） |
+| **LLM 通过 Action 改** | ✓（LLM 触发 → handler 计算 → 落库） | ✓（Action 可附 narration） |
+| **玩家直接改** | ✗（不允许） | ✓（聊天输入） |
+| **玩家通过 Action 改** | ✓（玩家触发 → handler 计算 → 落库） | ✓ |
+| **代码 Action handler** | ✓（计算具体数值变化） | 可选（生成叙事片段） |
+
+#### 例子：好感度变化
+
+```python
+# ❌ 错误：LLM 直接改数值（不可信）
+llm_output = {"proposed_state_changes": [{"path": "npc.abigail.affection", "op": "+", "value": 50}]}
+#   问题：LLM 怎么知道 +50？+5 还是 +500？哪个边界值？
+
+# ✅ 正确：LLM 触发 Action，代码计算
+llm_output = {"actions": [{"type": "npc_gift_received", "params": {"target": "abigail", "gift_id": "amethyst"}}]}
+#   ↓ handler:
+handler("npc_gift_received", {"target": "abigail", "gift_id": "amethyst"}):
+    item = GIFT_TABLE["amethyst"]  # 物品表（作者声明）
+    affection_delta = item.affection_effect  # amethyst → +50
+    abigail.affection += affection_delta
+    abigail.affection = clamp(abigail.affection, 0, 250)  # 边界
+    log(audit, "gift_received", abigail.affection)
+    # 同时生成 narration 片段给玩家看
+    emit_narration(f"Abigail 兴奋地接过了紫水晶，眼中闪着光。")
+```
+
+#### 例：HP 归零 → 死亡
+
+```python
+# LLM 触发 attack action
+action = {"type": "attack", "params": {"attacker": "player", "target": "goblin"}}
+
+# handler 走规则引擎
+handler("attack", ...):
+    damage = compute_damage(player.atk, goblin.def, rules.combat_formula)  # 确定性
+    goblin.hp -= damage  # 写状态
+    if goblin.hp <= 0:
+        goblin.hp = 0  # clamp
+        goblin.alive = False  # 标志
+        emit_narration("哥布林倒下了。")
+        emit_event("npc_killed", {"npc": "goblin"})
+
+# LLM 的 narration 也许会写："哥布林在你的剑下倒下"
+# 但 HP=0 与 alive=False 是代码持有的事实
+```
+
+#### 例：位置变化
+
+```python
+# 玩家说 "我进入客栈"
+player_action = {"type": "move", "params": {"from": "剑冢", "to": "客栈"}}
+
+# handler 检查合法性
+handler("move", ...):
+    if state.world.location != "剑冢":  # 必须从当前位置开始
+        reject("不在剑冢")
+    if "客栈" not in state.world.adjacent_locations:  # 必须在邻接区
+        reject("客栈不可达")
+    state.world.location = "客栈"  # 落库
+
+# 不允许 LLM 直接写 state.world.location = "客栈"
+```
+
+#### 校验层级
+
+每一层都有明确的职责：
+
+```
+┌─────────────────────────────────────────┐
+│ LLM 输出层                              │
+│  - actions: [...]                       │
+│  - narration: "..."                      │
+│  - LLM 不写数值（数据）                 │
+└────────────────┬────────────────────────┘
+                 ↓
+┌────────────────▼────────────────────────┐
+│ Action 层                              │
+│  - 接收 action                          │
+│  - 找 handler                           │
+│  - 验证 action 合法性                      │
+│  - 调用 handler                          │
+└────────────────┬────────────────────────┘
+                 ↓
+┌────────────────▼────────────────────────┐
+│ Handler 层                              │
+│  - 业务逻辑（compute damage / gift）     │
+│  - 调用 State Machine 写状态             │
+│  - 返回 narrative 片段                   │
+└────────────────┬────────────────────────┘
+                 ↓
+┌────────────────▼────────────────────────┐
+│ State Machine 层                       │
+│  - 写入状态（schema 校验）              │
+│  - 边界 clamp                            │
+│  - audit log                            │
+│  - 持久化到 DB                          │
+└─────────────────────────────────────────┘
+```
+
+**LLM 的合法输出**（3 个）：
+
+1. `narration`: 玩家看到的文本
+2. `suggested_actions`: 建议执行的动作（玩家可点击）
+3. `proposed_actions`: LLM 决定执行的动作（如自动攻击 NPC）
+
+**LLM 不能输出**：
+
+- `proposed_state_changes`（旧设计） —— 改用 actions
+- `proposed_npcs.abigail.affection` —— 必须通过 Action
+
+#### "LLM 决定的状态"实际是什么
+
+用户问"哪些状态由 LLM 决定"——答案：
+
+> **LLM 不"决定"任何状态数值**（除非作者在 handler 里让 LLM 决定，如随机事件权重由 LLM 选）。
+>
+> **LLM "决定"的是**：
+> - **触发哪个 Action**（如"我决定送礼"vs"我决定攻击"）
+> - **Action 的参数**（如 gift_id="amethyst"）
+> - **narration 内容**（如"我喜欢这个礼物"）
+>
+> **LLM 不"决定"的**：
+> - 数值变化幅度（由 handler 算）
+> - 边界 clamp（由 state machine 做）
+> - 持久化（由 DB 做）
+
+#### 玩家通过 Action 改状态
+
+**玩家也不直接改状态**。玩家通过 UI：
+- 点击 Action 按钮（LLM 建议的）
+- 输入自由文本（LLM 解析意图 → 选择 Action）
+
+**示例：**
+
+```python
+# 玩家输入："我把紫水晶送给 Abigail"
+player_input = "我把紫水晶送给 Abigail"
+
+# Input Parser 解析意图
+action = parse_intent(player_input, available_actions=[
+    {"id": "give_gift", "params_schema": {"target": "npc_id", "gift_id": "string"}},
+])
+
+# 解析结果
+action = {"id": "give_gift", "params": {"target": "abigail", "gift_id": "amethyst"}}
+
+# handler 处理
+handler("give_gift", ...):
+    # ... 如上节
+```
+
+#### 总结
+
+> **不存在"LLM 决定的状态"或"code 决定的状态"的区分。**
+>
+> 所有状态都是 **code 持有**。所有状态变化都通过 **Action → Handler → Validator**。
+>
+> LLM 与玩家的差别仅在 **触发 Action**：
+> - 玩家：UI 按钮 / 自由文本
+> - LLM：suggested_actions / proposed_actions
+>
+> 角色卡的 `variables` schema 是作者对**"游戏世界的事实"**的定义。LLM 与玩家都不直接定义或修改它们——只触发让它们变化的 Action。
 
 ### 0.4 角色卡声明
 
@@ -628,66 +803,74 @@ character_card:
 
 ## 2. 游戏引擎核心：状态机子系统
 
+> **核心原则（修订版）**：
+>
+> **状态变更的唯一通道 = Action → Handler → Validator → State Machine**。
+>
+> LLM **不直接**输出 `state.player.hp = 50`——必须触发 Action（如 `attack`），由 Handler 计算具体数值变化，由 Validator 校验，由 State Machine 落库。
+
 ### 2.1 状态机分类
 
-| 类别 | 字段示例 | 持久化 |
-|---|---|---|
-| **玩家属性** | `hp, mp, gold, stamina, energy` | per-task |
-| **位置/时间** | `world.location, world.time_of_day, world.weather` | 当前会话 |
-| **物品/资源** | `player.inventory` | per-task |
-| **关系网络** | `npcs[id].affection, .trust, .hostility` | per-task |
-| **任务进度** | `quests[id].stage, .flags[]` | per-task |
-| **剧情标记** | `flags[key] = bool` | per-task |
-| **行为痕迹** | `visited[], killed[], romanced[]` | per-task |
-| **跨会话档案** | `_id` 用户的统计 + 偏好 | per-user |
+| 类别 | 字段示例 | 持久化 | 谁能改 |
+|---|---|---|---|
+| **玩家属性** | `hp, mp, gold, stamina, energy` | per-task | 仅 Action（玩家行为触发） |
+| **位置/时间** | `world.location, world.time_of_day, world.weather` | 当前会话 | 仅 Action |
+| **物品/资源** | `player.inventory` | per-task | 仅 Action（give/buy/use） |
+| **关系网络** | `npcs[id].affection, .trust, .hostility` | per-task | **仅 Action**（之前误以为是 fuzzy） |
+| **情绪/态度** | `npcs[id].mood, .attitude` | per-task | **仅 Action**（之前误以为是 fuzzy） |
+| **剧情标记** | `flags[key] = bool` | per-task | 仅 Action |
+| **任务进度** | `quests[id].stage, .flags[]` | per-task | 仅 Action（advance / complete / fail） |
+| **行为痕迹** | `visited[], killed[], romanced[]` | per-task | 仅 Action |
+| **跨会话档案** | `_id` 用户的统计 + 偏好 | per-user | 仅 Action |
 
-### 2.2 状态变更的四种来源（这是关键设计）
+> **关键洞察**：affection / mood / conflict 这些**之前标记为"fuzzy"的状态，全部走 Action 通道**。LLM 触发 `npc_gift_received` Action，handler 计算具体数值变化（基于物品表 + Author 设定）。
+
+### 2.2 状态变更的单一通道（Action → Handler → Validator → Commit）
 
 ```
-            ┌─────────────────┐
-玩家输入 ───►│  1. Input Parser│──► 识别意图（攻击 / 移动 / 对话 / 物品）
-            └────────┬────────┘
-                     ▼
-            ┌─────────────────┐
-            │  2. Rules Engine│──► 跑战斗 / 随机事件 / 好感判定
-            └────────┬────────┘
-                     ▼
-            ┌─────────────────┐
-            │  3. State Trans │──► 计算 state_changes（确定性事实）
-            └────────┬────────┘
-                     ▼
-            ┌─────────────────┐
-            │  4. LLM Narrator│──► 拿到事实流，生成 narration + proposed_state_changes
-            └────────┬────────┘
-                     ▼
-            ┌─────────────────┐
-            │  5. Contract Val│──► 校验 LLM 提议（不越权 / 不超量 / 合法）
-            └────────┬────────┘
-                     ▼
-            ┌─────────────────┐
-            │  6. Action Exec │──► 执行 actions（动画/音效/UI 事件）
-            └────────┬────────┘
-                     ▼
-            ┌─────────────────┐
-            │  7. State Commit│──► 落库（per-task_id in SQLite）
-            └─────────────────┘
+玩家输入 ─────►┌─────────────────┐
+              │ 1. Input Parser │──► 解析意图 → Action（也可能让 LLM 解析）
+              └────────┬────────┘
+                       ▼
+LLM 触发 ─────►┌─────────────────┐
+              │ 2. Action Val  │──► 校验 action 是否在角色卡声明的 actions 清单中
+              └────────┬────────┘
+                       ▼
+              ┌─────────────────┐
+              │ 3. Handler     │──► 业务逻辑（计算数值变化、生成 narrative 片段）
+              └────────┬────────┘
+                       ▼
+              ┌─────────────────┐
+              │ 4. Schema Val  │──► 校验数值变化（类型 / 范围 / 唯一性）
+              └────────┬────────┘
+                       ▼
+              ┌─────────────────┐
+              │ 5. State Machine│──► 落库（per-task_id in SQLite）
+              └────────┬────────┘
+                       ▼
+              ┌─────────────────┐
+              │ 6. UI Sync      │──► 状态条更新 + animation 触发
+              └─────────────────┘
 ```
 
 | 步骤 | 谁负责 | 不变量 |
 |---|---|---|
-| 1. Input Parser | 代码 | 玩家输入必须能被解析成已知 intent，否则走 LLM 兜底 |
-| 2. Rules Engine | 代码 | 战斗/事件/掉落结果必须确定性（种子化随机） |
-| 3. State Transaction | 代码 | state_changes 是 application 级别的确定性事件流 |
-| 4. LLM Narrator | LLM | 只读 state，输出 narration + proposed_state_changes |
-| 5. Contract Validator | 代码 | LLM 的提议必须经过 schema 校验才能 merge |
-| 6. Action Executor | 代码 | 每个 action 一个 handler，失败不抛 |
-| 7. State Commit | 代码 | 事务化（要么全成要么全败） |
+| 1. Input Parser | 代码 | 玩家输入必须能解析成 Action（或让 LLM 解析） |
+| 2. Action Validator | 代码 | action 必须在角色卡 actions 清单里 |
+| 3. Handler | 代码 | 业务逻辑确定性（如 compute_damage） |
+| 4. Schema Validator | 代码 | 数值变化必须符合 schema（type/min/max） |
+| 5. State Machine | 代码 | 事务化（要么全成要么全败），持久化 |
+| 6. UI Sync | 代码 | 前端订阅，状态条 / 动画实时更新 |
 
-**LLM 永远在第 4 步，前后都是代码**。这是「Engine-first」的核心。
+**关键点**：
+- **LLM 永远不直接写 state_changes**（旧设计的 `proposed_state_changes` 字段已废弃）
+- **LLM 输出 actions + narration**（详见 §6）
+- **所有数值变化通过 Action handler 计算**
+- **Handler 决定"具体多少"**（如 gift = 金表 → +30 affection；gift = 草 → +2）
 
-### 2.3 状态变更契约（LLM 输出协议）
+### 2.3 LLM 输出契约（修订版）
 
-LLM 的输出必须是这个 JSON Schema（**严格固定，不允许破坏**）：
+LLM 输出 **actions + narration**，**不输出** state_changes：
 
 ```json
 {
@@ -696,98 +879,162 @@ LLM 的输出必须是这个 JSON Schema（**严格固定，不允许破坏**）
     "mood": "gentle",
     "pace": "slow"
   },
-  "proposed_state_changes": [
-    {
-      "path": "npcs.suqingwan.affection",
-      "op": "+",
-      "value": 8,
-      "reason": "玩家赠剑，主动示好"
+  
+  // LLM 触发的 action（必须执行）
+  "actions": [
+    { 
+      "type": "npc_gift_received", 
+      "params": { "target": "suqingwan", "gift_id": "wooden_sword" }
+    },
+    { 
+      "type": "npc_emote", 
+      "params": { "target": "suqingwan", "emotion": "gentle" }
+    },
+    { 
+      "type": "play_sfx",  
+      "params": { "track": "soft_chime.ogg" }
     }
   ],
-  "suggested_actions": [
-    { "type": "npc_emote", "target": "suqingwan", "emotion": "gentle" },
-    { "type": "play_sfx",  "track": "soft_chime.ogg" }
-  ],
+  
+  // LLM 建议玩家可选的下一个动作（仅 UI 渲染，不执行）
   "suggested_choices": [
     { "id": "a", "text": "追问她为何变脸" },
     { "id": "b", "text": "默默跟上" }
   ],
-  "thinking": "玩家提议建立信任，NPC 处于 70 好感区间...",
-  "_metadata": { "model": "deepseek-v3.2", "tokens": 642 }
+  
+  "thinking": "玩家赠剑，NPC 接收并信任增加。",
+  "_metadata": { "model": "deepseek-v3.2", "tokens": 542 }
 }
 ```
 
-### 2.4 契约校验（State Contract Validator）
+**`actions[]` 中的每个 action 由 Handler 处理**：
+- `npc_gift_received` → handler 查 `ITEMS_TABLE["wooden_sword"].affection_effect` → 计算 +8 → state.npc.suqingwan.affection += 8 → clamp to [0, 100]
+- `npc_emote` → handler 通知前端播放表情动画
+- `play_sfx` → handler 通知前端播放音效
+
+**`suggested_choices[]` 不改变状态**——只是 UI 按钮（玩家点击后才变成 action）。
+
+### 2.4 Action Handler 示例（核心代码）
 
 ```python
-# plugins/shared/rp/state_machine/contract_validator.py
+# plugins/shared/rp/actions/handlers.py
 
-class StateContractValidator:
-    """LLM 输出 → 校验 → 落库"""
+class NPCGiftReceivedHandler:
+    """处理玩家给 NPC 礼物的 action"""
 
-    def __init__(self, schema):
-        self.schema = schema  # 角色卡的 engine.variables
+    def __init__(self, items_table: dict, state_machine: StateMachine, audit: AuditLog):
+        self.items_table = items_table  # 角色卡声明的物品表
+        self.state_machine = state_machine
+        self.audit = audit
 
-    def validate_and_apply(self, current_state, proposed_changes, hard_rules):
-        audit = []
-        accepted = []
-        rejected = []
+    def __call__(self, action: dict, context: dict):
+        target = action['params']['target']      # "suqingwan"
+        gift_id = action['params']['gift_id']   # "wooden_sword"
 
-        for c in proposed_changes:
-            # 1. path 必须在 schema 声明过
-            if c['path'] not in self.schema:
-                rejected.append({'change': c, 'reason': 'unknown_path'})
-                continue
+        # 1. 校验物品存在
+        if gift_id not in self.items_table:
+            return ActionResult(
+                success=False,
+                reason=f'unknown gift: {gift_id}',
+            )
 
-            # 2. op 合法
-            if c['op'] not in {'+', '-', '*', '/', '=', 'set', 'unset', 'toggle', 'append', 'remove'}:
-                rejected.append({'change': c, 'reason': 'invalid_op'})
-                continue
+        # 2. 校验玩家物品数量
+        if not self.state_machine.has_item(context.get('inventory_key', 'player'), gift_id, qty=1):
+            return ActionResult(
+                success=False,
+                reason=f'player does not have {gift_id}',
+            )
 
-            # 3. 类型检查
-            try:
-                coerced = self.coerce(c['value'], self.schema[c['path']]['type'])
-            except (TypeError, ValueError):
-                rejected.append({'change': c, 'reason': 'type_mismatch'})
-                continue
+        # 3. 计算好感变化（基于物品表，作者声明）
+        item = self.items_table[gift_id]
+        affection_delta = item['affection_effect']  # 作者在角色卡声明：amethyst=+50, wood_sword=+8
 
-            # 4. 范围 clamp
-            old = self.resolve(current_state, c['path'])
-            new = self.apply(old, c['op'], coerced)
+        # 4. 找到 NPC 的好感字段 schema（作者声明的 bounds）
+        npc_state = self.state_machine.get_state(f'npcs.{target}')
+        affection_field = npc_state.get('affection_field', 'affection')  # 默认 'affection'
+        schema = self.state_machine.get_schema(f'npcs.{target}.{affection_field}')
+        
+        # 5. 计算新值（确定性，种子化随机可加）
+        old = npc_state[affection_field]
+        new = clamp(old + affection_delta, schema['min'], schema['max'])
 
-            sch = self.schema[c['path']]
-            if 'min' in sch and new < sch['min']:
-                audit.append({'type': 'clamp_low', 'path': c['path'], 'forced': new, 'limit': sch['min']})
-                new = sch['min']
-            if 'max' in sch and new > sch['max']:
-                audit.append({'type': 'clamp_high', 'path': c['path'], 'forced': new, 'limit': sch['max']})
-                new = sch['max']
+        # 6. 写状态（事务化）
+        self.state_machine.apply_atomic({
+            'changes': [
+                {'path': f'npcs.{target}.{affection_field}', 'op': '=', 'value': new},
+                {'path': f'player.inventory.{gift_id}',      'op': '-', 'value': 1},
+            ],
+            'audit': {
+                'event': 'gift_received',
+                'actor': context.get('user_id'),
+                'target': target,
+                'gift_id': gift_id,
+                'before': old,
+                'after': new,
+            },
+        })
 
-            # 5. 硬规则校验（最大变化量、最大并行变化数等）
-            delta = abs(new - old)
-            max_delta = hard_rules.get(c['path'], {}).get('max_delta_per_turn')
-            if max_delta is not None and delta > max_delta:
-                audit.append({'type': 'rate_limited', 'path': c['path'], 'attempted': delta, 'limit': max_delta})
-                new = old + math.copysign(max_delta, new - old)
+        # 7. 生成 narration 片段（让玩家看到发生了什么）
+        npc_name = self.state_machine.get_state(f'npcs.{target}.display_name', target)
+        narration = self._generate_narration(npc_name, item, affection_delta)
 
-            accepted.append({'path': c['path'], 'op': c['op'], 'value': new})
+        return ActionResult(
+            success=True,
+            state_changes={'applied': [f'npcs.{target}.{affection_field}={new}']},
+            narration_segment=narration,  # 可选，附加到 LLM 的 narration 后
+            effects={                        # 通知前端
+                'emote': {'target': target, 'emotion': 'happy'},
+                'sfx': 'gift_received.ogg',
+            },
+        )
 
-        return ValidationResult(accepted=accepted, rejected=rejected, audit=audit)
-
-    def commit(self, state, accepted_changes):
-        for c in accepted_changes:
-            self.resolve(state, c['path'])  # ensure path exists
-            self.apply(state, c['path'], c['op'], c['value'])
-        return state
+    def _generate_narration(self, npc_name, item, delta):
+        if delta >= 30:
+            return f"{npc_name} 兴奋地接过{item['name']}，眼中闪着光。"
+        elif delta >= 10:
+            return f"{npc_name} 微笑着说：「谢谢你送我{item['name']}。」"
+        else:
+            return f"{npc_name} 礼貌地接过{item['name']}。"
 ```
 
-### 2.5 状态机代码（Python）
+### 2.5 物品表示例（角色卡声明）
+
+```json
+{
+  "extensions": {
+    "items_table": {
+      "amethyst": {
+        "name": "紫水晶",
+        "type": "gift",
+        "affection_effect": 50,
+        "favorite_npcs": ["abigail"],
+        "disliked_by_npcs": ["pierre"]
+      },
+      "wooden_sword": {
+        "name": "木剑",
+        "type": "gift",
+        "affection_effect": 8
+      },
+      "joja_cola": {
+        "name": "Joja可乐",
+        "type": "gift",
+        "affection_effect": -10,
+        "disliked_by_npcs": ["abigail", "sam", "maru"]
+      }
+    }
+  }
+}
+```
+
+**所有数值（affection_effect、disliked_by_npcs 等）由作者声明，LLM 不参与计算**。
+
+### 2.6 状态机代码（与 Action 解耦）
 
 ```python
 # plugins/shared/rp/state_machine/engine.py
 
 class StateMachine:
-    """per-task 的状态机实例"""
+    """per-task 的状态机实例（只负责存储 + schema 校验，不负责业务逻辑）"""
 
     def __init__(self, task_id, schema, storage):
         self.task_id = task_id
@@ -801,11 +1048,39 @@ class StateMachine:
             self._set(s, path, sch.get('default'))
         return s
 
-    def apply_validated(self, event):
-        """应用一个已经被校验过的事务"""
-        for c in event['accepted']:
+    def apply_atomic(self, transaction: dict):
+        """事务化应用变更（要么全成要么全败）"""
+        for c in transaction['changes']:
+            # 1. schema 校验
+            self._validate_change(c)
+            # 2. 边界 clamp
+            self._clamp(c)
+        # 3. 应用所有变更
+        for c in transaction['changes']:
             self._set(self.state, c['path'], self._apply_op(self._get(self.state, c['path']), c['op'], c['value']))
-        self.storage.save_state(self.task_id, self.state, version=event.get('version'))
+        # 4. 持久化
+        self.storage.save_state(self.task_id, self.state)
+        # 5. audit log
+        if 'audit' in transaction:
+            self.storage.append_audit(self.task_id, transaction['audit'])
+
+    def _validate_change(self, c):
+        """校验：path 在声明里、op 合法、value 类型对"""
+        if c['path'] not in self.schema:
+            raise ValueError(f'unknown path: {c["path"]}')
+        if c['op'] not in {'+', '-', '*', '/', '=', 'set', 'unset', 'toggle', 'append', 'remove'}:
+            raise ValueError(f'invalid op: {c["op"]}')
+
+    def _clamp(self, c):
+        """边界 clamp"""
+        sch = self.schema[c['path']]
+        if 'min' in sch or 'max' in sch:
+            old = self._get(self.state, c['path'])
+            new = self._apply_op(old, c['op'], c['value'])
+            if 'min' in sch and new < sch['min']:
+                c['value'] = sch['min'] - old  # 调整 value 让结果 = min
+            if 'max' in sch and new > sch['max']:
+                c['value'] = sch['max'] - old  # 调整 value 让结果 = max
 
     def snapshot(self):
         """给 LLM 看的状态快照"""
@@ -815,57 +1090,54 @@ class StateMachine:
             'world':  self._get(self.state, 'world'),
         }
 
-    def _get(self, root, path, default=None):
-        parts = path.split('.')
-        cur = root
-        for p in parts:
-            if isinstance(cur, dict) and p in cur:
-                cur = cur[p]
-            else:
-                return default
-        return cur
-
-    def _set(self, root, path, value):
-        parts = path.split('.')
-        cur = root
-        for p in parts[:-1]:
-            cur = cur.setdefault(p, {})
-        cur[parts[-1]] = value
-
-    def _apply_op(self, old, op, value):
-        if op == '=':     return value
-        if op == '+':     return old + value
-        if op == '-':     return old - value
-        if op == '*':     return old * value
-        if op == '/':     return old / value
-        if op == 'set':   return value
-        if op == 'unset': return None
-        if op == 'toggle': return not old
-        if op == 'append':
-            return (old or []) + [value]
-        if op == 'remove':
-            return [x for x in (old or []) if x != value]
+    # ... _get / _set / _apply_op 同前
 ```
 
-### 2.6 反作弊规则清单
+### 2.7 反作弊规则清单
 
 ```yaml
-# 角色卡 engine.rules 扩展
+# 角色卡 extensions.hard_rules
 hard_rules:
   - path: "npcs.*.affection"
-    max_delta_per_turn: 10      # 单回合好感变化不超过 ±10
+    max_delta_per_turn: 10         # 单 Action 好感变化不超过 ±10（但 Author 物品表可破）
   - path: "npcs.*.trust"
     max_delta_per_turn: 5
   - path: "world.*"
-    max_delta_per_turn: 1       # 位置/时间单回合最多变 1 次
+    max_delta_per_turn: 1            # 位置/时间单 Action 最多变 1 次
   - path: "player.*"
-    require_player_action: true  # 玩家属性必须由玩家行为触发，LLM 不能直接改
+    require_action: true            # player 字段必须由 action 触发
   - global:
-    max_changes_per_turn: 8      # LLM 提议最多 8 个 changes
-    require_reason: true         # 每个 change 必须带 reason
-    banned_paths:                # LLM 永远不能改的字段
+    max_actions_per_turn: 5         # LLM 一回合最多触发 5 个 action
+    banned_paths:                    # LLM 永远不能改的字段
       - "player.account_id"
       - "task.*"
+```
+
+> **反作弊的本质：限制 Handler 不接收非法 action**，而不是限制 LLM 不写 state_changes（因为 LLM 已经不能写 state_changes 了）。
+
+### 2.8 状态机执行矩阵
+
+| 来源 | 直接写状态？ | 触发 Action？ | 备注 |
+|---|---|---|---|
+| LLM | ✗（不可能） | ✓（suggested / auto） | LLM 必须通过 action |
+| 玩家 | ✗（不可能） | ✓（UI 按钮 / 自由文本） | 玩家通过 action |
+| 系统（计时器） | ✗ | ✓（自动 schedule action） | 例如：每 30 分钟触发 NPC schedule_action |
+| 内部规则引擎 | ✗ | ✓（事件触发 action） | 例如：HP=0 → 触发 npc_killed |
+| Action Handler | ✓（唯一合法通道） | — | handler 写状态 |
+| State Machine | ✓（持久化） | — | State Machine 落库 |
+
+**所有写状态都通过 Action Handler**——这是不可绕过的唯一通道。
+
+### 2.9 LLM 自由度的精确边界**
+
+| 维度 | LLM 可做 | LLM 不可做 |
+|---|---|---|
+| **Narration** | ✓ 任意文本 | 无约束 |
+| **Action 选择** | ✓ 从角色卡 actions[] 选 | 不能选未声明的 action |
+| **Action 参数** | ✓ 在 schema 范围内 | 不能给无效参数 |
+| **数值变化幅度** | ✗（Handler 决定） | 不能直接写 +50 |
+| **路径/path** | ✗ | 不能引用未声明的字段 |
+| **Schema 校验** | ✗（代码做） | 不能突破 min/max |
       - "_internal.*"
 ```
 
