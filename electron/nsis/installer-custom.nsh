@@ -66,17 +66,18 @@ Var /GLOBAL AgentOsAdminPassword
 Var /GLOBAL DefenderExecResult
 !endif
 
-; 写 Defender 排除（$INSTDIR + per-user 默认装位 + 用户数据根 + NSIS 暂存区）。
+; 写 Defender 排除（$INSTDIR + NSIS 暂存区 + 全用户数据根 + shell 目录兜底）。
 ; 仅 admin 可写（HKLM）；nsExec 结果必须 Pop，防 NSIS 栈失衡。
-; $TEMP\ns*.tmp 是 electron-builder 两段式解包的暂存区（Nsis7z 先解 750MB 到
-; PLUGINSDIR 再 CopyFiles 进 $INSTDIR，退出时还要 RMDir）——不排除则拷贝失败
-; 一次即触发模板重试环（删暂存+整包重解压+再拷，/SD IDRETRY 静默自动应答，
-; 2026-10-06 实测放大成 31 分钟装机）。
+; 路径解析三坑（2026-10-06 二轮实测定位）：
+;   1) $TEMP 形态短名（ADMINI~1）——Defender 通配按字面匹配，短名通配对不上
+;      长路径暂存目录 → PS 侧 Resolve-Path 展开长路径后再拼 ns*.tmp；
+;   2) 提权上下文 $APPDATA/$LOCALAPPDATA 解析到 C:\ProgramData（实测）——
+;      用户数据根改用 C:\Users\*\AppData\Roaming\agentos 全用户通配（per-machine
+;      排除本就全局生效），shell 目录两项保留作兜底（多余不有害）；
+;   3) PS 的 $_ 须写 $$_（NSIS 转义字面 $）——裸 $_ 触发 makensis 6000。
 !macro _writeDefenderExclusions
   ${If} ${UAC_IsAdmin}
-    ; PS 的 $_ 须写 $$_（NSIS 转义字面 $）——裸 $_ 被 NSIS 当变量解析触发 6000
-    ; （2026-10-06 实锤：该行曾藏于编译期死代码内未被解析，故 22:50 版构建未炸）
-    nsExec::ExecToLog `powershell.exe -NoProfile -NonInteractive -Command "try { Add-MpPreference -ExclusionPath '$INSTDIR','$LOCALAPPDATA\Programs\agent-os','$APPDATA\agentos','$TEMP\ns*.tmp' -Force } catch { Write-Host ('Add-MpPreference failed: ' + $$_) }"`
+    nsExec::ExecToLog `powershell.exe -NoProfile -NonInteractive -Command "try { $$p = @('$INSTDIR'); $$t = (Resolve-Path $$env:TEMP).Path; $$p += ($$t + '\ns*.tmp'); $$p += 'C:\Users\*\AppData\Roaming\agentos'; $$p += '$APPDATA\agentos'; $$p += '$LOCALAPPDATA\Programs\agent-os'; Add-MpPreference -ExclusionPath $$p -Force } catch { Write-Host ('Add-MpPreference failed: ' + $$_) }"`
     Pop $DefenderExecResult
     ${If} $DefenderExecResult != 0
       DetailPrint `Defender exclusion write failed (exit $DefenderExecResult) — install continues`
