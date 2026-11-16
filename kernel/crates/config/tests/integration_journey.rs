@@ -25,6 +25,7 @@ use std::time::Duration;
 /// 步骤6: ConfigCenter 热重载 (reload + 哈希去重 + 回滚)
 /// 步骤7: load_all 批量加载 (.yaml + .yml)
 #[test]
+#[allow(clippy::too_many_lines)] // 存量吸收(2026-10-12 棘轮): 七步集成旅程断言内联,拆步骤降低可读性
 fn full_user_journey_config_pipeline() {
     let temp = tempfile::tempdir().unwrap();
     let project_root = temp.path();

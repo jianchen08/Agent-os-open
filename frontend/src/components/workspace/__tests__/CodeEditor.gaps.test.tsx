@@ -11,17 +11,30 @@
 
 import { act, fireEvent, screen } from '@testing-library/react'
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
+import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useChatInputStore } from '@/stores/chatInputStore'
+import { useSessionStore } from '@/stores/sessionStore'
+import { mockSelection } from '@/test/fakeSelection'
 import { renderWithProviders as render } from '@/test/renderWithProviders'
 import { CodeEditor } from '../CodeEditor'
 import type * as fileEditorRegistry from '@/stores/fileEditorRegistry'
 
 const onSaveMock = vi.fn()
-vi.mock('react-syntax-highlighter', () => ({
-  Prism: ({ children, language }: { children?: React.ReactNode; language?: string }) => (
+vi.mock('react-syntax-highlighter/dist/esm/prism-light', () => {
+  // prismLanguages 模块导入时会调用 registerLanguage/alias 注册语言，mock 上补齐静态方法
+  const MockHighlighter = ({
+    children,
+    language,
+  }: {
+    children?: React.ReactNode
+    language?: string
+  }) => (
     <pre data-testid="highlighter" data-language={language}>{children}</pre>
-  ),
-}))
+  )
+  ;(MockHighlighter as unknown as Record<string, unknown>).registerLanguage = () => {}
+  ;(MockHighlighter as unknown as Record<string, unknown>).alias = () => {}
+  return { default: MockHighlighter }
+})
 vi.mock('@/components/chat/LobeChatMarkdown', () => ({
   LobeChatMarkdown: ({ content }: { content: string }) => <div data-testid="md">{content}</div>,
 }))
@@ -35,55 +48,21 @@ vi.mock('@/stores/fileEditorRegistry', async (importOriginal) => ({
 
 const pyFile = { filePath: 'src/main.py', content: 'line1\nline2\nline3\n' }
 
+/** draftKey（CodeEditor 与 ChatContainer 同构：activeTabId || activeSessionId） */
+const DRAFT_KEY = 'session-1'
+const citationsOf = () => useChatInputStore.getState().citationsByDraftKey[DRAFT_KEY] ?? []
+
 beforeEach(() => {
   vi.clearAllMocks()
   subscribeMock.mockImplementation(() => () => {})
   onSaveMock.mockResolvedValue(true)
-  useChatInputStore.setState({ pendingInsert: null })
+  useSessionStore.setState({ activeSessionId: DRAFT_KEY })
+  useAgentTabStore.setState({ activeTabId: null, tabs: [] })
+  useChatInputStore.setState({ pendingInsert: null, citationsByDraftKey: {} })
 })
 afterEach(() => {
   vi.restoreAllMocks()
 })
-
-/** 在容器内对 `needle` 构造一个假 Selection（jsdom 无真实选区 API）。
- * range 暴露真实文本节点与偏移——被测代码用它回算行号；toString 返回
- * 容器内真实选中的子串（与 DOM 偏移一致，不是任意捏造值）。 */
-function fakeSelect(container: Element, needle: string): Selection {
-  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
-  let node = walker.nextNode() as Text | null
-  while (node) {
-    const idx = node.textContent?.indexOf(needle) ?? -1
-    if (idx >= 0) {
-      const selected = node.textContent!.substring(idx, idx + needle.length)
-      const rect = {
-        left: 10, top: 20, right: 60, bottom: 32, width: 50, height: 12,
-        x: 10, y: 20, toJSON: () => ({}),
-      }
-      const range = {
-        startContainer: node,
-        startOffset: idx,
-        endContainer: node,
-        endOffset: idx + needle.length,
-        collapsed: false,
-        commonAncestorContainer: node,
-        getBoundingClientRect: () => rect,
-      }
-      return {
-        isCollapsed: false,
-        toString: () => selected,
-        rangeCount: 1,
-        getRangeAt: () => range,
-        removeAllRanges: () => {},
-      } as unknown as Selection
-    }
-    node = walker.nextNode() as Text | null
-  }
-  throw new Error(`text not found in container: ${needle}`)
-}
-
-function mockSelection(container: Element, needle: string) {
-  vi.spyOn(window, 'getSelection').mockReturnValue(fakeSelect(container, needle))
-}
 
 /** 代码预览分支的内容容器（highlighter mock 的父 div） */
 function codePreviewContainer(): HTMLElement {
@@ -105,9 +84,12 @@ describe('CodeEditor 选中引用浮动按钮（代码预览）', () => {
     fireEvent.click(quoteBtn)
 
     // 行号来自 DOM 选区回算：line3 前有 2 个换行 → L3；向上扫描无函数定义 → 仅行号
-    expect(useChatInputStore.getState().pendingInsert).toBe(
-      '「src/main.py:L3:\nL3: line3」',
-    )
+    expect(citationsOf()).toHaveLength(1)
+    expect(citationsOf()[0]).toMatchObject({
+      kind: 'code',
+      title: 'src/main.py:L3',
+      excerpt: 'L3: line3',
+    })
     // 引用后按钮收起
     expect(screen.queryByRole('button', { name: /引用/ })).not.toBeInTheDocument()
   })
@@ -120,9 +102,12 @@ describe('CodeEditor 选中引用浮动按钮（代码预览）', () => {
     fireEvent.click(screen.getByRole('button', { name: /引用/ }))
 
     // def compute 向上命中 → funcName；选区跨 2~4 行 → 区间格式（L起-止）；逐行带行号前缀
-    expect(useChatInputStore.getState().pendingInsert).toBe(
-      '「src/calc.py:compute(L2-4):\nL2: return x + 1\nL3: \nL4: result = compute(2)」',
-    )
+    expect(citationsOf()).toHaveLength(1)
+    expect(citationsOf()[0]).toMatchObject({
+      kind: 'code',
+      title: 'src/calc.py:compute(L2-4)',
+      excerpt: 'L2: return x + 1\nL3: \nL4: result = compute(2)',
+    })
   })
 
   it('DOM 选区计算失败（createRange 抛错）→ indexOf 定位回退仍产出正确行号', () => {
@@ -136,7 +121,12 @@ describe('CodeEditor 选中引用浮动按钮（代码预览）', () => {
     fireEvent.click(screen.getByRole('button', { name: /引用/ }))
 
     // indexOf 命中 offset 6（'alpha\n' 后）→ L2
-    expect(useChatInputStore.getState().pendingInsert).toBe('「src/fb.py:L2:\nL2: beta」')
+    expect(citationsOf()).toHaveLength(1)
+    expect(citationsOf()[0]).toMatchObject({
+      kind: 'code',
+      title: 'src/fb.py:L2',
+      excerpt: 'L2: beta',
+    })
   })
 
   it('选中文字不在本地内容中（回退路径未命中）→ 引用退化为仅文件路径', () => {
@@ -158,7 +148,12 @@ describe('CodeEditor 选中引用浮动按钮（代码预览）', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /引用/ }))
 
-    expect(useChatInputStore.getState().pendingInsert).toBe('「src/main.py:\nomega」')
+    expect(citationsOf()).toHaveLength(1)
+    expect(citationsOf()[0]).toMatchObject({
+      kind: 'code',
+      title: 'src/main.py',
+      excerpt: 'omega',
+    })
   })
 
   it('折叠选区不弹浮动按钮', () => {

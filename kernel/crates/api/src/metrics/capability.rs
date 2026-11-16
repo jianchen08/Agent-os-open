@@ -26,6 +26,12 @@
 //! manifest 的 `http_endpoints[].auth: "admin"` 由内核 dispatcher 执行（W3-2/D2
 //! 第一刀），本 handler 内再校验一次（纵深防御，语义一致）。
 //!
+//! 系统读面（卡9，2026-10-18）：params 带 `_plugin_id`（invoker 注入信任锚点）
+//! 且**未**携带 `_authorization` → 内核可辨识的插件后台调用语境，免用户复权
+//! 放行读面——插件监控循环无用户凭证可采（装机插件组事故台账卡5 前置）。
+//! 凭证在场（含与 `_plugin_id` 并存）一律走角色复权，HTTP 面行为不变；
+//! 详见 ADR `docs/decisions/2026-10-18-metrics-admin-plugin-context-read.md`。
+//!
 //! ## 响应信封（与 db-admin 一致）
 //!
 //! 成功 `{status: 200, body}`；业务失败 `{status, error: {code, message}}`
@@ -47,7 +53,7 @@ use serde_json::{json, Value};
 use super::aggregator::MetricSeriesView;
 use super::{export_prometheus, Labels, MetricsAggregator};
 
-/// metrics-admin capability 的 namespace（manifest granted_capabilities 与此对齐）。
+/// metrics-admin capability 的 namespace。
 pub const NAMESPACE: &str = "metrics-admin";
 
 /// `metrics-admin` namespace 的 capability handler（读面 3 method）。
@@ -85,6 +91,34 @@ impl MetricsAdminCapabilityHandler {
         headers
     }
 
+    /// 系统读面判定（卡9）：调用参数带 `_plugin_id`（invoker 注入的信任锚点，
+    /// 插件不可伪造）且未携带用户凭证 → 内核可辨识的插件后台调用语境，免用户
+    /// 复权放行读面。凭证在场一律走 [`Self::require_read_role`] 复权——HTTP 面
+    /// （dispatcher 强制 manifest auth 后经插件转发凭证）行为不变：带 user 角色
+    /// 凭证的请求仍 403，未认证请求到不了插件 handler（/ext 鉴权闸 fail-closed）。
+    /// 安全边界：放行面 = 已装载启用插件经反向通道读运维遥测；不向任何
+    /// HTTP 调用方敞开 admin 复权。
+    fn plugin_context_read(params: &Value) -> bool {
+        let has_user_credential = params
+            .get("_authorization")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+        let has_plugin_identity = params
+            .get("_plugin_id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+        !has_user_credential && has_plugin_identity
+    }
+
+    /// 读面准入（三 method 共用）：插件系统读语境放行，其余走 admin/viewer 复权。
+    async fn authorize_read(&self, params: &Value) -> Result<(), ApiError> {
+        if Self::plugin_context_read(params) {
+            return Ok(());
+        }
+        let headers = Self::auth_headers(params);
+        self.require_read_role(&headers).await
+    }
+
     /// 读面角色校验：admin 或 viewer（对齐 db-admin require_read_role）。
     async fn require_read_role(&self, headers: &HeaderMap) -> Result<(), ApiError> {
         let (_, _, role, _) = resolve_request_user(self.store.as_ref(), headers).await?;
@@ -105,8 +139,7 @@ impl MetricsAdminCapabilityHandler {
 
     /// `query`：过滤查询（原 GET /api/v1/metrics，响应形状逐字段一致）。
     async fn query(&self, params: &Value) -> Result<(u16, Value), ApiError> {
-        let headers = Self::auth_headers(params);
-        self.require_read_role(&headers).await?;
+        self.authorize_read(params).await?;
         let agg = self.agg()?;
         let window = params
             .get("window")
@@ -130,8 +163,7 @@ impl MetricsAdminCapabilityHandler {
 
     /// `list`：枚举 series 元信息（不带 samples——目录面，避免大响应）。
     async fn list(&self, params: &Value) -> Result<(u16, Value), ApiError> {
-        let headers = Self::auth_headers(params);
-        self.require_read_role(&headers).await?;
+        self.authorize_read(params).await?;
         let agg = self.agg()?;
         let views = agg.query(
             params.get("plugin").and_then(|v| v.as_str()),
@@ -159,8 +191,7 @@ impl MetricsAdminCapabilityHandler {
 
     /// `prometheus`：Prometheus exposition format 全量快照（body 为文本字符串）。
     async fn prometheus(&self, params: &Value) -> Result<(u16, Value), ApiError> {
-        let headers = Self::auth_headers(params);
-        self.require_read_role(&headers).await?;
+        self.authorize_read(params).await?;
         let agg = self.agg()?;
         let views = agg.snapshot();
         Ok((200, Value::String(export_prometheus(&views))))
@@ -304,6 +335,67 @@ mod tests {
         let handler = handler_with_data();
         let envelope = handler.handle("query", json!({})).await.unwrap();
         assert_eq!(envelope["status"], 401, "无凭证应 401: {envelope}");
+    }
+
+    // ── 系统读面（卡9）：插件语境（_plugin_id 信任锚）免用户复权 ──
+
+    /// 插件后台调用语境（params 带 invoker 注入的 `_plugin_id`，无用户凭证）
+    /// → 三读面 method 全放行：monitoring 告警循环无凭证可采的数据通道。
+    #[tokio::test]
+    async fn plugin_context_read_allowed_without_user_credential() {
+        let handler = handler_with_data();
+        for method in ["query", "list", "prometheus"] {
+            let envelope = handler
+                .handle(method, json!({"_plugin_id": "monitoring"}))
+                .await
+                .unwrap();
+            assert_eq!(
+                envelope["status"], 200,
+                "{method} 插件语境系统读应放行: {envelope}"
+            );
+        }
+    }
+
+    /// 凭证与插件身份并存 → 凭证说了算：HTTP 面插件转发 user 角色凭证的
+    /// 请求不因自带 `_plugin_id` 而放行（免复权通道不得被 HTTP 面借用）。
+    #[tokio::test]
+    async fn plugin_identity_with_user_credential_still_requires_role() {
+        let (store, token) = store_with_role_user("user").await;
+        let handler =
+            MetricsAdminCapabilityHandler::new(Some(store), Some(MetricsAggregator::new()));
+        let envelope = handler
+            .handle(
+                "query",
+                json!({
+                    "_plugin_id": "metrics_admin",
+                    "_authorization": format!("Bearer {token}"),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(envelope["status"], 403, "user 角色凭证仍应 403: {envelope}");
+    }
+
+    /// 有凭证但无插件身份（纯 HTTP 形态）→ 复权路径不变：无有效凭证 401。
+    #[tokio::test]
+    async fn credential_shaped_call_without_plugin_identity_still_401() {
+        let handler = handler_with_data();
+        let envelope = handler
+            .handle("query", json!({"_authorization": "Bearer garbage"}))
+            .await
+            .unwrap();
+        assert_eq!(envelope["status"], 401, "非法凭证应 401: {envelope}");
+    }
+
+    /// 空 `_plugin_id`（非空串才是合法信任锚形态）不构成插件语境 → 401。
+    #[tokio::test]
+    async fn empty_plugin_id_is_not_plugin_context() {
+        let handler = handler_with_data();
+        let envelope = handler
+            .handle("query", json!({"_plugin_id": ""}))
+            .await
+            .unwrap();
+        assert_eq!(envelope["status"], 401, "空 _plugin_id 应 401: {envelope}");
     }
 
     #[tokio::test]

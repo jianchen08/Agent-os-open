@@ -1,37 +1,38 @@
 // @feature: FP-0.2.四 前端Schema | @ci: frontend-test
 /**
- * 文件编辑器配置 / 布局解析器 / 认证回调注册 测试
+ * 文件查看器路由 / 布局解析器 / 认证回调注册 测试
  *
- * 纯逻辑小模块：getEditorForFile 扩展名映射、safeLoadLayout 合并、
+ * 纯逻辑小模块：resolveFileViewer 扩展名映射（声明驱动查看器注册表，
+ * ADR 2026-10-24-file-viewer-declarative）、safeLoadLayout 合并、
  * registerAuthExpiredCallback / triggerAuthExpired 回调触发。
  */
 import { describe, it, expect, vi } from 'vitest'
-import { getEditorForFile } from '@/config/fileEditors'
+import { resolveFileViewer } from '@/services/fileViewerRegistry'
 import { registerAuthExpiredCallback, triggerAuthExpired } from '@/services/authCallbacks'
 import { safeLoadLayout, DEFAULT_LAYOUT_CONFIG } from '@/services/layout/resolver'
 
-describe('getEditorForFile - 扩展名到编辑器映射', () => {
+describe('resolveFileViewer - 扩展名到查看器映射（原 getEditorForFile 迁移）', () => {
   it('常见扩展名映射到文本编辑器/图片查看器/HTML 预览', () => {
-    expect(getEditorForFile('main.py').id).toBe('text_editor')
-    expect(getEditorForFile('README.md').id).toBe('text_editor')
-    expect(getEditorForFile('index.html').id).toBe('html_preview')
-    expect(getEditorForFile('photo.png').id).toBe('image_viewer')
-    expect(getEditorForFile('photo.JPG').id).toBe('image_viewer') // 大小写不敏感
+    expect(resolveFileViewer('main.py').viewer.render.widget).toBe('code_editor')
+    expect(resolveFileViewer('README.md').viewer.render.widget).toBe('code_editor')
+    expect(resolveFileViewer('index.html').viewer.render.widget).toBe('html_preview')
+    expect(resolveFileViewer('photo.png').viewer.render.widget).toBe('image_preview')
+    expect(resolveFileViewer('photo.JPG').viewer.render.widget).toBe('image_preview') // 大小写不敏感
   })
 
   it('无扩展名文件（Makefile/.gitignore）→ 按小写全名匹配或回退默认', () => {
-    expect(getEditorForFile('Makefile').id).toBe('text_editor')
-    expect(getEditorForFile('.gitignore').id).toBe('text_editor')
+    expect(resolveFileViewer('Makefile').viewer.render.widget).toBe('code_editor')
+    expect(resolveFileViewer('.gitignore').viewer.render.widget).toBe('code_editor')
   })
 
   it('未知扩展名 → 回退默认文本编辑器', () => {
-    expect(getEditorForFile('archive.zzz').id).toBe('text_editor')
-    expect(getEditorForFile('noext').id).toBe('text_editor')
+    expect(resolveFileViewer('archive.zzz').viewer.render.widget).toBe('code_editor')
+    expect(resolveFileViewer('noext').viewer.render.widget).toBe('code_editor')
   })
 
   it('带目录路径的文件名 → 只取 basename 匹配', () => {
-    expect(getEditorForFile('src/deep/nested/main.tsx').id).toBe('text_editor')
-    expect(getEditorForFile('C:\\work\\a\\b\\pic.webp').id).toBe('image_viewer')
+    expect(resolveFileViewer('src/deep/nested/main.tsx').viewer.render.widget).toBe('code_editor')
+    expect(resolveFileViewer('C:\\work\\a\\b\\pic.webp').viewer.render.widget).toBe('image_preview')
   })
 })
 

@@ -1,0 +1,32 @@
+# 个人助理模式声明面 mode.yaml（契约：docs/working/模式插件通用契约设计_20261012.md）
+# 单包自包含（十四轮公理）：加载即全功能——工具/REST/数据域全在包内，零包外配置；
+# chain 绑既有缺省会话管道（不声明 pipelines = 共享 autonomous，差异全在人设/说明与标签）；
+# 零 material.py（十六轮）：模式说明走 description 由 prompt_build 按 mode 标签直取。
+mode: personal
+name: 个人助理模式
+# description = 主 agent 唯一域路由知识（首句 = 选择器菜单域定义；其后 = 助理语义
+# 与呈报契约六条概要，渲染进"当前模式说明"段）
+description: 个人事务助理（待办/日程/习惯/日志/伙伴）。对话中用 pim 工具捕获、查询、执行个人事项，数据跨会话跨模式共享；出卡呈报契约六条概要：结论先行、选项+建议、截止显式、一次一事、无决策不弹卡、未决进晨报。到点事项由触发器注入事实消息，是否出卡/通知由你判断：已处理、同类免问或不紧急时可不打扰；免问先查 pim query scope=preference（<domain>:同意 → auto_approve），命中可直接 op=accept。番茄 op=focus_start 可带 duration_minutes，缺省取插件配置（默认 25 分钟）。
+icon: 🌱
+# 默认模式（至多一个，多标 = agent_manager 声明校验拒绝）：新会话出生无显式
+# 选择时经 modeSessionBinder 自动绑定本模式。
+default: true
+# 前台可选声明（R10③ 补充裁定 2026-10-14）：false = 不出现在前台模式选择面
+# 选项——本模式是出生兜底（default: true），已"包含在里面"，无需用户再选；
+# 缺省 = 可选（向后兼容），显式声明才隐藏。
+foreground_selectable: false
+# 包级工具并入声明（守卫 C，ADR 2026-10-12-personal-mode-package-form-and-
+# boundary）：本包 plugin.json capabilities.tools 声明工具参与非任务管道并入
+# （agent_config_load 加行制）。未声明包 = 注册式工具包（如 mode_evolution 八件
+# 只给包内执行者白名单），零贡献零变化。
+inject_tools: true
+# 人设接管声明（通用机制：{{persona:}} 占位符换源，替换提示词人设段骨架不动）：
+# 文本经 execution_context.personal_persona 携带（缺文本 = 零接管降级，fail-soft）。
+persona:
+  replace: true
+  from: personal_persona
+# ── 编排链（主会话链入口 main 即时响应，不派发；白名单三键，同六模式先例）──
+chain:
+  entry: main
+  expected_path: [main]
+  entry_override: null

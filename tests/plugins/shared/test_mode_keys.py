@@ -14,9 +14,11 @@ from pathlib import Path
 import pytest
 
 from mode_keys import (
+    collect_planning_executors,
     find_mode_agent_yaml,
     find_mode_package_dir,
     find_mode_skill_dir,
+    is_planning_executor_key,
     parse_mode_agent_key,
 )
 
@@ -104,7 +106,7 @@ class TestFindModeAgentYaml:
         assert path is not None
         assert path.name == f"{stem}.yaml"
         assert path.parent == Path(__file__).resolve().parents[3].joinpath(
-            "plugins", "shared", "modes", "mode_coding", "agents"
+            "plugins", "shared", "mode_coding", "agents"
         )
 
     @pytest.mark.parametrize("stem", ["godot_expert", "godot_orchestrator_agent"])
@@ -114,7 +116,7 @@ class TestFindModeAgentYaml:
         assert path is not None
         assert path.name == f"{stem}.yaml"
         assert path.parent == Path(__file__).resolve().parents[3].joinpath(
-            "plugins", "shared", "modes", "mode_godot", "agents"
+            "plugins", "shared", "mode_godot", "agents"
         )
 
     def test_user_copy_agent_hit(
@@ -209,3 +211,131 @@ class TestFindModeSkillDir:
     )
     def test_miss_returns_none(self, mode: str, name: str) -> None:
         assert find_mode_skill_dir(mode, name) is None
+
+
+class TestIsPlanningExecutorKey:
+    """plan 态执行者键形态闸（批 B4）：mode_X/<stem> 或系统 agent 裸名。"""
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "mode_coding/code_writer",     # 模式包注册执行者
+            "mode_a/x",                    # 最短合法模式键
+            "research_agent",              # 系统 agent 裸名（基线同形）
+            "environment_setup_agent",     # 裸名含数字
+        ],
+    )
+    def test_valid_keys(self, key: str) -> None:
+        assert is_planning_executor_key(key) is True
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "../evil",            # 穿越
+            "Mode_X/agent",       # 模式名大写
+            "mode_x/a-b",         # stem 连字符
+            "mode_x/a/b",         # 多级段
+            "",                   # 空串
+            "Research Agent",     # 含空格
+            42,                   # 非字符串
+            None,                 # None
+        ],
+    )
+    def test_invalid_keys(self, key) -> None:
+        assert is_planning_executor_key(key) is False
+
+
+class TestCollectPlanningExecutors:
+    """Σ 注册包 planning_executors 聚合（批 B4）：双根枚举 + 形态闸 + 去重，
+    缺省零贡献 fail-closed。文件面真实（临时用户根 / 真实出厂根），不 mock。"""
+
+    def test_real_factory_packages_zero_contribution(self) -> None:
+        """出厂六包本批均零声明（机制先行）→ 聚合空集（真实出厂根枚举）。"""
+        assert collect_planning_executors() == frozenset()
+
+    def test_user_package_declaration_collected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """用户根包声明 → 键入集（双根枚举用户侧）。"""
+        pkg = tmp_path / "plugins" / "modes" / "mode_custom"
+        pkg.mkdir(parents=True)
+        (pkg / "plugin.json").write_text("{}", encoding="utf-8")
+        (pkg / "mode.yaml").write_text(
+            "mode: custom\nname: C\n"
+            "planning_executors: [mode_custom/planner_agent, research_agent]\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path))
+
+        assert collect_planning_executors() == frozenset(
+            {"mode_custom/planner_agent", "research_agent"}
+        )
+
+    def test_invalid_entries_skipped_valid_kept(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """同声明内合法条目贡献、非法条目零贡献（fail-closed 逐条，不整包作废）。"""
+        pkg = tmp_path / "plugins" / "modes" / "mode_mixed"
+        pkg.mkdir(parents=True)
+        (pkg / "plugin.json").write_text("{}", encoding="utf-8")
+        (pkg / "mode.yaml").write_text(
+            "mode: mixed\nname: M\n"
+            "planning_executors: ['mode_mixed/planner', '../evil', 'Mode_X/agent']\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path))
+
+        assert collect_planning_executors() == frozenset({"mode_mixed/planner"})
+
+    def test_duplicates_deduped_across_packages(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """两包重复声明同一键 → 去重单贡献（聚合集合语义）。"""
+        for dirname, mode in (("mode_alpha", "alpha"), ("mode_beta", "beta")):
+            pkg = tmp_path / "plugins" / "modes" / dirname
+            pkg.mkdir(parents=True)
+            (pkg / "plugin.json").write_text("{}", encoding="utf-8")
+            (pkg / "mode.yaml").write_text(
+                f"mode: {mode}\nname: {mode}\n"
+                "planning_executors: [mode_gamma/shared_agent]\n",
+                encoding="utf-8",
+            )
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path))
+
+        assert collect_planning_executors() == frozenset({"mode_gamma/shared_agent"})
+
+    def test_corrupt_yaml_package_zero_contribution_others_untouched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """单包 mode.yaml 损坏 → 该包零贡献（warn 留痕），其余包聚合不受拖累。"""
+        bad = tmp_path / "plugins" / "modes" / "mode_bad"
+        bad.mkdir(parents=True)
+        (bad / "plugin.json").write_text("{}", encoding="utf-8")
+        (bad / "mode.yaml").write_text("{a: [unclosed", encoding="utf-8")
+        good = tmp_path / "plugins" / "modes" / "mode_good"
+        good.mkdir(parents=True)
+        (good / "plugin.json").write_text("{}", encoding="utf-8")
+        (good / "mode.yaml").write_text(
+            "mode: good\nname: G\nplanning_executors: [mode_good/planner]\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path))
+
+        assert collect_planning_executors() == frozenset({"mode_good/planner"})
+
+    def test_undeclared_and_malformed_decl_are_zero_contribution(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """未声明键 / 声明非列表（空列表、字符串）→ 零贡献（缺省语义不靠空值）。"""
+        for dirname, body in (
+            ("mode_quiet", "mode: quiet\nname: Q\n"),
+            ("mode_empty", "mode: empty\nname: E\nplanning_executors: []\n"),
+            ("mode_str", "mode: str\nname: S\nplanning_executors: research_agent\n"),
+        ):
+            pkg = tmp_path / "plugins" / "modes" / dirname
+            pkg.mkdir(parents=True)
+            (pkg / "plugin.json").write_text("{}", encoding="utf-8")
+            (pkg / "mode.yaml").write_text(body, encoding="utf-8")
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path))
+
+        assert collect_planning_executors() == frozenset()

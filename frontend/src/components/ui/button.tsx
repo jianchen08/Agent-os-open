@@ -29,15 +29,15 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default:
-          'bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)] border border-[var(--btn-primary-border)] shadow-[var(--btn-shadow,0_4px_6px_-1px_rgba(0,0,0,0.1))] hover:bg-[var(--btn-primary-hover-bg)] hover:shadow-[var(--btn-shadow-hover,0_6px_10px_-1px_rgba(0,0,0,0.15))] active:scale-[0.98]',
+          'bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)] border border-[var(--btn-primary-border)] shadow-[var(--shadow-md)] hover:bg-[var(--btn-primary-hover-bg)] hover:shadow-[var(--shadow-lg)] active:scale-[0.98]',
         destructive:
-          'bg-[var(--btn-destructive-bg)] text-[var(--btn-destructive-text)] border border-[var(--btn-destructive-border)] shadow-[var(--btn-shadow,0_4px_6px_-1px_rgba(0,0,0,0.1))] hover:bg-[var(--btn-destructive-hover-bg)] hover:shadow-[var(--btn-shadow-hover,0_6px_10px_-1px_rgba(0,0,0,0.15))] active:scale-[0.98]',
+          'bg-[var(--btn-destructive-bg)] text-[var(--btn-destructive-text)] border border-[var(--btn-destructive-border)] shadow-[var(--shadow-md)] hover:bg-[var(--btn-destructive-hover-bg)] hover:shadow-[var(--shadow-lg)] active:scale-[0.98]',
         outline:
-          'border border-[var(--btn-secondary-border,rgba(255,255,255,0.2))] bg-[var(--btn-secondary-bg,transparent)] text-[var(--btn-secondary-text)] hover:bg-[var(--btn-secondary-hover-bg,rgba(255,255,255,0.1))] hover:border-[var(--btn-secondary-border,rgba(255,255,255,0.3))] active:scale-[0.98]',
+          'border border-[var(--btn-secondary-border)] bg-[var(--btn-secondary-bg)] text-[var(--btn-secondary-text)] hover:bg-[var(--btn-secondary-hover-bg)] hover:border-[var(--btn-secondary-border)] active:scale-[0.98]',
         secondary:
-          'bg-[var(--btn-secondary-bg)] text-[var(--btn-secondary-text)] border border-[var(--btn-secondary-border)] shadow-[var(--btn-shadow,0_2px_4px_-1px_rgba(0,0,0,0.05))] hover:bg-[var(--btn-secondary-hover-bg)] hover:shadow-[var(--btn-shadow-hover,0_4px_6px_-1px_rgba(0,0,0,0.1))] active:scale-[0.98]',
+          'bg-[var(--btn-secondary-bg)] text-[var(--btn-secondary-text)] border border-[var(--btn-secondary-border)] shadow-[var(--shadow-sm)] hover:bg-[var(--btn-secondary-hover-bg)] hover:shadow-[var(--shadow-md)] active:scale-[0.98]',
         ghost:
-          'bg-[var(--btn-ghost-bg,transparent)] text-[var(--btn-ghost-text)] border border-transparent hover:bg-[var(--btn-ghost-hover-bg,rgba(255,255,255,0.05))] active:scale-[0.98]',
+          'bg-[var(--btn-ghost-bg)] text-[var(--btn-ghost-text)] border border-transparent hover:bg-[var(--btn-ghost-hover-bg)] active:scale-[0.98]',
         link: 'text-[var(--btn-primary-bg)] underline-offset-4 hover:underline',
       },
       size: {

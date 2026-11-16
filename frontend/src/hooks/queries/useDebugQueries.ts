@@ -18,7 +18,7 @@ import { useEffect, useRef } from 'react'
 import { fetchDbTables } from '@/services/api/dbAdmin'
 import { getEvaluationMetrics } from '@/services/api/evaluationMetrics'
 import { getExecutionRecordsSessions } from '@/services/api/executionRecords'
-import { getPayloadDiagList } from '@/services/api/llmPayload'
+import { getDiagnosticsSettings, getPayloadDiagList } from '@/services/api/llmPayload'
 import { getTaskList } from '@/services/api/monitoring'
 import { getPipelineStateFull, getPipelineTraces } from '@/services/api/pipelineDiagnostics'
 import { getUsers } from '@/services/api/users'
@@ -136,6 +136,15 @@ export function useLlmPayloadDiagQuery(page = 1) {
     // 零请求会恒显示上一轮列表）。staleTime 0 = 挂载即后台重取，缓存仅用于
     // 先渲染不闪 loading。
     staleTime: 0,
+  })
+}
+
+/** ── 诊断开关（settings.yaml diagnostics 段；写路径直接 apiClient.put + 本 query 失效） ── */
+export function useDiagnosticsSettingsQuery() {
+  return useQuery({
+    queryKey: queryKeys.diagnosticsSettings,
+    queryFn: () => getDiagnosticsSettings(),
+    staleTime: DEBUG_STALE_TIME,
   })
 }
 

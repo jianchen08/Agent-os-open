@@ -9,6 +9,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useLayoutModeStore } from '../layoutModeStore'
 import type { FloatingWindowInstance, WorkspaceTab, DockItem } from '@/types/layout'
+import { userScopedKey as pk } from '@/utils/userScopedStorage'
 
 const makeWindow = (id: string, extra: Partial<FloatingWindowInstance> = {}): FloatingWindowInstance => ({
   id,
@@ -371,7 +372,7 @@ describe('layoutModeStore — persist merge 迁移清洗', () => {
   /** 预置 localStorage 后重新加载模块，让 persist 走真实 rehydrate → merge */
   async function loadWithPersisted(state: Record<string, unknown>) {
     vi.resetModules()
-    localStorage.setItem('layout-mode', JSON.stringify({ state, version: 0 }))
+    localStorage.setItem(pk('layout-mode'), JSON.stringify({ state, version: 0 }))
     const mod = await import('../layoutModeStore')
     return mod.useLayoutModeStore
   }

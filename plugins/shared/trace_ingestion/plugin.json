@@ -1,0 +1,127 @@
+{
+  "id": "trace_ingestion",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Trace Ingestion",
+  "description": "E 事件汇聚云端接收插件：/ext/trace_ingestion/** 接收本机 exporter 批量上云的任务/管道轨迹。每宿主 token 鉴权（env AGENTOS_TRACE_INGEST_TOKENS，token↔origin_host 绑定防顶名）、协议版本宽容（未知字段按配置保留/丢弃）、ULID 幂等（重传零重复）、坏事件入死信不阻塞批次。存储为插件自有 SQLite（内核零改动）。写面 auth:none + 自管 token，读面 auth:admin（内核 JWT）。",
+  "version": "1.0.1",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "activation": "eager",
+  "lifecycle": {
+    "idle_timeout_secs": 0
+  },
+  "capabilities": {
+    "tools": [
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for /ext/trace_ingestion/**（E 轨迹汇聚接收面）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "raw_body": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "query": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "query_multi": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "integer"
+            },
+            "body": {
+              "type": "object"
+            }
+          }
+        },
+        "render": {
+          "card": "generic"
+        }
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": []
+  },
+  "permissions": {},
+  "priority": 50,
+  "http_endpoints": [
+    {
+      "route_id": "ingest_events",
+      "method": "POST",
+      "path": "/ext/trace_ingestion/events",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "description": "轨迹信封接收（webhook 验签自管：Bearer 对照 env 每宿主 token，token↔origin_host 绑定）"
+    },
+    {
+      "route_id": "query_events",
+      "method": "GET",
+      "path": "/ext/trace_ingestion/events",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "轨迹查询（origin_host 过滤 + after_ulid 游标 + limit；后续检索/召回集成预留）"
+    },
+    {
+      "route_id": "list_dead_letters",
+      "method": "GET",
+      "path": "/ext/trace_ingestion/dead_letters",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "死信队列查看（必需字段缺失/形态非法的事件，不阻塞批次的留痕面）"
+    }
+  ],
+  "config_files": [
+    {
+      "id": "settings",
+      "label": "轨迹接收配置",
+      "fields": [
+        {
+          "name": "unknown_fields",
+          "label": "未知字段策略",
+          "type": "string",
+          "required": false,
+          "description": "高协议版本事件的未知顶层字段：keep（保留进 extra）/ drop（丢弃）——协议版本协商配置（§3.2）"
+        }
+      ],
+      "path": "config/plugins/trace_ingestion/settings.yaml"
+    }
+  ]
+}

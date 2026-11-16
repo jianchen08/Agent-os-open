@@ -3,7 +3,7 @@
 
 单一事实源（C1 合流）：
 
-  - plugins/shared/system/channel_common/   —— 适配器三件
+  - plugins/shared/channel_common/         —— 适配器三件（拍平布局）
   - agentos_plugin_sdk.pipeline_types       —— 管道类型（SDK 子集归并）
 
 复制模式回潮的典型路径：新渠道开发时"顺手"从老渠道目录拷一份基础模块。
@@ -11,17 +11,17 @@
 
   1. 黑名单 = channel_common/ 下全部模块名 ∪ 四个历史拷贝名
      （pipeline_types / input_adapter / output_adapter / base_combo_adapter）；
-  2. 扫描 plugins/shared/system/channel_*/（channel_common 自身除外）顶层
+  2. 扫描 plugins/shared/channel_*/（channel_common 自身除外）顶层
      *.py，文件名（去扩展）命中黑名单 → 退出码 1，逐条列出；
   3. 自检：channel_common 缺失或为空 → 退出码 1（守卫空转变成本身就是错）。
 
 用法：
     python scripts/check_channel_copy_guard.py          # 绿：退出 0
     # 负样本演示：手工复制一份应被抓红——
-    cp plugins/shared/system/channel_common/input_adapter.py \
-       plugins/shared/system/channel_qq/input_adapter.py
+    cp plugins/shared/channel_common/input_adapter.py \
+       plugins/shared/channel_qq/input_adapter.py
     python scripts/check_channel_copy_guard.py          # 红：退出 1，列出违规
-    rm plugins/shared/system/channel_qq/input_adapter.py
+    rm plugins/shared/channel_qq/input_adapter.py
 
 门禁归属：run_gates.py 的 channel-copy-guard gate（fast），
 CI 经 .github/workflows/ci.yml python-coverage job 调度。
@@ -33,8 +33,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SYSTEM_DIR = ROOT / "plugins" / "shared" / "system"
-CHANNEL_COMMON_DIR = SYSTEM_DIR / "channel_common"
+SHARED_DIR = ROOT / "plugins" / "shared"  # 拍平布局（ADR 2026-10-13）
+CHANNEL_COMMON_DIR = SHARED_DIR / "channel_common"
 
 # 历史拷贝名（C1 合流前的四类基础模块；pipeline_types 已归并 SDK，渠道目录同样不得再现）
 HISTORICAL_COPY_NAMES = frozenset(
@@ -66,7 +66,7 @@ def build_blacklist() -> frozenset[str]:
 def find_violations(blacklist: frozenset[str]) -> list[Path]:
     """扫描全部 channel_* 目录（channel_common 除外），返回命中黑名单的文件。"""
     violations: list[Path] = []
-    for channel_dir in sorted(SYSTEM_DIR.glob("channel_*")):
+    for channel_dir in sorted(SHARED_DIR.glob("channel_*")):
         if not channel_dir.is_dir() or channel_dir.name == CHANNEL_COMMON_DIR.name:
             continue
         for py in sorted(channel_dir.glob("*.py")):

@@ -71,7 +71,7 @@ export default class ErrorBoundary extends Component<Props, State> {
           {this.state.error && (
             <details style={{ marginTop: '20px' }}>
               <summary style={{ cursor: 'pointer', marginBottom: '10px' }}>
-                错误详情（开发者用）
+                错误详情
               </summary>
               <pre
                 style={{

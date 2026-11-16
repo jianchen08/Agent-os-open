@@ -2,23 +2,28 @@
 
 import { createJSONStorage, type StateStorage } from 'zustand/middleware'
 import { loggers } from '@/utils/logger'
+import { userScopedKey } from '@/utils/userScopedStorage'
 
 const logger = loggers.storage
 
-/** 创建一个容错的 localStorage 包装，供 zustand persist 使用。 - getItem / removeItem：失败返回 null / 静默（存储被禁用或锁定时） */
+/** 创建一个容错的 localStorage 包装，供 zustand persist 使用。 - getItem / removeItem：失败返回 null / 静默（存储被禁用或锁定时）
+ *
+ * 键名经 userScopedKey 注入账户命名空间（隔离执法点①）：消费方传业务键名，
+ * 落盘键恒为 `ag-u:<userId>:<业务键>`（匿名态 `ag-anon:` 前缀）——不同账户
+ * 读写互不可达，消费方零感知。 */
 export function createTolerantStorage() {
   let quotaWarned = false
   const storage: StateStorage = {
     getItem: (name) => {
       try {
-        return window.localStorage.getItem(name)
+        return window.localStorage.getItem(userScopedKey(name))
       } catch {
         return null
       }
     },
     setItem: (name, value) => {
       try {
-        window.localStorage.setItem(name, value)
+        window.localStorage.setItem(userScopedKey(name), value)
       } catch (err) {
         // 配额满或禁用：仅记录一次 warn，避免每次 set 都刷屏
         if (!quotaWarned) {
@@ -33,7 +38,7 @@ export function createTolerantStorage() {
     },
     removeItem: (name) => {
       try {
-        window.localStorage.removeItem(name)
+        window.localStorage.removeItem(userScopedKey(name))
       } catch {
         /* 忽略清理失败 */
       }

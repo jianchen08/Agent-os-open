@@ -58,7 +58,7 @@ use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::{json, Value};
 use tokio::task::spawn_blocking;
 
-/// user-admin capability 的 namespace（manifest granted_capabilities 与此对齐）。
+/// user-admin capability 的 namespace。
 pub const NAMESPACE: &str = "user-admin";
 
 /// 允许的角色枚举（update_role 白名单——与 UserRecord.role 注释一致：

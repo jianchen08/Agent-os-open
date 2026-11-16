@@ -11,6 +11,7 @@
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { OnboardingPanel } from '../OnboardingPanel'
 import type { Walkthrough } from '@/services/onboarding/types'
 
 // ── 可控夹具（vi.mock 提升前声明，经 holder 间接引用） ─────────────────────────
@@ -74,6 +75,8 @@ const configApi = vi.hoisted(() => ({
   saveDefaults: vi.fn(),
 }))
 vi.mock('@/services/api/config', () => ({
+  // autoOpen（面板 import 图内）defaultDeps 引用；面板用例不触发其判定
+  getUserEnvVarSet: vi.fn(async () => new Set<string>()),
   getLLMConfig: (...a: unknown[]) => configApi.getLLMConfig(...a),
   getLLMPresets: (...a: unknown[]) => configApi.getLLMPresets(...a),
   getRemoteModels: (...a: unknown[]) => configApi.getRemoteModels(...a),
@@ -90,7 +93,6 @@ vi.mock('react-markdown', () => ({
   default: ({ children }: { children: string }) => <div>{children}</div>,
 }))
 
-import { OnboardingPanel } from '../OnboardingPanel'
 
 // ── 内容夹具 ──────────────────────────────────────────────────────────────────
 

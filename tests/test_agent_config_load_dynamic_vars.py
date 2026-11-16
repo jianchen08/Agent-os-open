@@ -20,15 +20,15 @@ import pytest
 
 from tests._pipeline_plugin_path import add_plugin_dir
 
-add_plugin_dir("input", "agent_config_load")
+add_plugin_dir("agent_config_load")
 import plugin as agent_config_load_mod  # noqa: E402
 
-add_plugin_dir("input", "prompt_build")
+add_plugin_dir("prompt_build")
 import plugin as prompt_build_mod  # noqa: E402
 
 
 def _ctx(state: dict):
-    from pipeline.plugin import PluginContext
+    from _libs.pipeline_base.plugin import PluginContext
 
     return PluginContext(state=state, config={})
 

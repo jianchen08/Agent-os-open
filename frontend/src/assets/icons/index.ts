@@ -1,6 +1,7 @@
 // Auto-generated icon exports (rolldown-compatible: default import + named export)
 // 说明：每个语义别名都指向符合业界惯例（lucide/antd 语义）的独立图形，
 // 避免「一个图形复用多个语义」造成的图标不直观（2026-08 图标重设计）。
+/* eslint-disable import-x/order -- 生成物按语义别名「import+export 对」逐段平铺（rolldown 兼容形态），import 分组排序规则不适用 */
 import type { FC, SVGProps } from 'react'
 
 /** 图标组件统一类型（与 lucide-react 的 LucideIcon 签名一致） */

@@ -1,0 +1,18 @@
+[package]
+name = "seedx"
+version = "0.1.0"
+edition = "2021"
+description = "AgentOS 移动端首启种子解包器（rootfs_seed.tar[.zst] → app 数据目录；jniLibs 装载避 app-data exec 限制）"
+license.workspace = true
+
+[dependencies]
+tar = "0.4"
+zstd = "0.14"
+
+[lib]
+name = "seedx"
+path = "src/lib.rs"
+
+[[bin]]
+name = "seedx"
+path = "src/main.rs"

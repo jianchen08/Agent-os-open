@@ -18,7 +18,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _PLUGIN_DIR = (
-    Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools" / "e2e_lifecycle_probe"
+    Path(__file__).resolve().parents[4] / "plugins" / "shared" / "e2e_lifecycle_probe"
 )
 
 

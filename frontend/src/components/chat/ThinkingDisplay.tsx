@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronRight, Loader2, CheckCircle2, Clock, XCircle } from '@/assets/icons'
 import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
 import { cn } from '@/lib/utils'
+import { StreamElapsedText, StreamSpinner } from './StreamActivityIndicator'
 import type { ThinkingContent, ThinkingStep } from '@/types/models'
 import type { FC } from 'react'
 
@@ -111,7 +112,10 @@ const ThinkingStepItem: FC<{
 export const ThinkingDisplay: FC<{
   thinking: ThinkingContent
   defaultExpanded?: boolean
-}> = ({ thinking, defaultExpanded = false }) => {
+  /** 流式总耗时锚点（触发消息发出时刻 ms）：思考中态头部实时总耗时用
+   *  （2026-11-06 用户裁定图标/耗时统一）；缺省不显示耗时 */
+  streamAnchorMs?: number | null
+}> = ({ thinking, defaultExpanded = false, streamAnchorMs }) => {
   const [expanded, setExpanded] = useState(defaultExpanded)
 
   // 流式思考内容贴底跟随：展开时定位到最新；用户上滑看历史时暂停跟随，滑回底部后恢复
@@ -142,7 +146,7 @@ export const ThinkingDisplay: FC<{
         onClick={() => setExpanded(!expanded)}
       >
         {thinking.isThinking ? (
-          <Loader2 className="h-icon-md w-icon-md animate-spin text-status-info" />
+          <StreamSpinner />
         ) : (
           <CheckCircle2 className="h-icon-md w-icon-md text-status-success" />
         )}
@@ -150,8 +154,12 @@ export const ThinkingDisplay: FC<{
         {thinking.steps && thinking.steps.length > 0 && (
           <span className="text-xs">{thinking.steps.length} 步</span>
         )}
-        {thinking.durationMs && (
-          <span className="text-xs">{(thinking.durationMs / 1000).toFixed(1)}s</span>
+        {thinking.isThinking ? (
+          <StreamElapsedText anchorMs={streamAnchorMs} />
+        ) : (
+          thinking.durationMs && (
+            <span className="text-xs">{(thinking.durationMs / 1000).toFixed(1)}s</span>
+          )
         )}
         <div className="flex-1" />
         {expanded ? <ChevronDown className="h-icon-md w-icon-md" /> : <ChevronRight className="h-icon-md w-icon-md" />}
@@ -192,7 +200,7 @@ export const ThinkingDisplay: FC<{
             </div>
           ) : thinking.isThinking ? (
             <div className="flex items-center gap-2 py-1 text-sm">
-              <Loader2 className="h-icon-xs w-icon-xs animate-spin" />
+              <StreamSpinner className="h-icon-xs w-icon-xs" />
               <span>正在思考中...</span>
             </div>
           ) : null}

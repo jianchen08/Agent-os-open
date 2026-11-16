@@ -27,7 +27,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_MODE_DIR = _REPO_ROOT / "plugins" / "shared" / "modes" / "mode_coding"
+_MODE_DIR = _REPO_ROOT / "plugins" / "shared" / "mode_coding"
 
 _MOD_NAME = "mode_coding_panel_test_mod"
 

@@ -9,16 +9,17 @@ editable 安装（根环境 / 各 sidecar .venv / 合宿 _host/.venv 的
 暴露接口：
 - bootstrap_plugin(entry_file, extra=())：注入插件目录与共享根并置于 sys.path
   最前（去重幂等，重复引导重申解析优先权），返回三键路径；
-  extra 为共享根相对子路径（如 "system"、"system/tasks"），供任务域等需要
-  组根/包目录的插件显式声明注入意图（替代各 server.py 手写注入块）；
+  extra 为共享根相对子路径（如 "tasks"、"channel_common"），供需要组内包目录/
+  兄弟目录的插件显式声明注入意图（替代各 server.py 手写注入块）；
 - find_shared_root(entry_file)：共享根判定的公开单点（供 fs_tools 等非
   server.py 入口的直接导入语境复用同一判定）；
 - Bootstrap：plugin_dir / group_root / shared_root（group_root 只返回不注入）。
 
-裸名安全边界（ADR 决策 1）：只注入插件目录与共享根两项；组根（system/、
-tools/、pipeline/input/ 等兄弟插件聚集目录）上 sys.path 会让兄弟插件的
-plugin.py/tool.py 等裸名跨插件可达（合宿裸名冲突家族），需要组根的文件从
-返回值派生路径后自行显式 insert，注入意图留在现场。
+裸名安全边界（ADR 决策 1）：只注入插件目录与共享根两项；组根（拍平前
+system/、tools/、pipeline/input/ 等兄弟插件聚集目录，拍平后与共享根合一）
+上 sys.path 会让兄弟插件的 plugin.py/tool.py 等裸名跨插件可达（合宿裸名冲突
+家族），需要组内目录的文件从返回值派生路径后自行显式 insert，注入意图留在
+现场。
 """
 
 from __future__ import annotations
@@ -30,8 +31,11 @@ from dataclasses import dataclass
 
 __all__ = ["Bootstrap", "bootstrap_plugin", "find_shared_root"]
 
-# 0.2 共享根布局指纹：同时含这三个分组子目录的祖先即 plugins/shared
-_LAYOUT_FINGERPRINT = ("system", "tools", "pipeline")
+# 共享根布局指纹（拍平 ADR 2026-10-13）：含 `_libs` 非插件区的祖先即 plugins/shared；
+# 旧类目录三件套（system/tools/pipeline 同时在）仍认——存量装机镜像（BuiltinFirst
+# 用户空间 shared/ 镜像）在重打包升级前保持旧布局，双指纹并存到装机链切换完成。
+_LAYOUT_FINGERPRINT_FLAT = "_libs"
+_LAYOUT_FINGERPRINT_LEGACY = ("system", "tools", "pipeline")
 
 
 @dataclass(frozen=True)
@@ -42,15 +46,17 @@ class Bootstrap:
     """插件目录（本地 plugin.py / tool.py 所在）。"""
 
     group_root: str
-    """组根（插件目录直接父目录，如 system/、pipeline/input/）。只返回不注入。"""
+    """插件目录直接父目录（拍平后即 plugins/shared 根）。只返回不注入。"""
 
     shared_root: str
     """plugins/shared 根（http_json / tenant_data 等共享裸模块所在）。"""
 
 
 def _has_fingerprint(directory: str) -> bool:
-    """目录是否同时含三分组子目录（0.2 共享根指纹）。"""
-    return all(os.path.isdir(os.path.join(directory, d)) for d in _LAYOUT_FINGERPRINT)
+    """目录是否命中共享根指纹（拍平布局含 _libs，或旧布局含三分组子目录）。"""
+    if os.path.isdir(os.path.join(directory, _LAYOUT_FINGERPRINT_FLAT)):
+        return True
+    return all(os.path.isdir(os.path.join(directory, d)) for d in _LAYOUT_FINGERPRINT_LEGACY)
 
 
 def _shared_root_from_sdk_anchor() -> str | None:
@@ -76,18 +82,18 @@ def find_shared_root(entry_file: str | os.PathLike[str]) -> str:
 
 
 def _find_shared_root(plugin_dir: str) -> str:
-    """自插件目录的父级向上找首个同时含 system/tools/pipeline 子目录的祖先。
+    """自插件目录的父级向上找首个命中共享根指纹的祖先。
 
-    从父级起扫（不含插件目录自身）：插件自带同名子目录布局时不误判；顶级
-    插件（plugins/shared/db_admin 等）的父级即共享根，同样命中。指纹失配时
+    从父级起扫（不含插件目录自身）：插件自带同名子目录布局时不误判；拍平后
+    标准深度为共享根直下（plugins/shared/<id>），父级即命中。指纹失配时
     分两种回退（BUG-56）：
 
     - 祖先含 plugins/（user_root 扁平单插件副本形态：plugins/<名> 或
       plugins/<分类>/<名>）——该形态没有本地共享根，走 SDK 位置锚
       （:func:`_shared_root_from_sdk_anchor`）回仓库 plugins/shared；锚不可用
       则继续上溯（最终落旧回退）；
-    - 其余非 0.2 布局目录树——保持旧回退：插件目录上三级（标准
-      ``{system,tools,pipeline}/<插件>`` 深度）。
+    - 其余非共享根布局目录树——保持旧回退：插件目录上一级（标准
+      ``shared/<插件>`` 深度）。
     """
     current = os.path.dirname(os.path.abspath(plugin_dir))
     while True:
@@ -99,7 +105,7 @@ def _find_shared_root(plugin_dir: str) -> str:
                 return anchored
         parent = os.path.dirname(current)
         if parent == current:
-            return os.path.abspath(os.path.join(plugin_dir, "..", "..", ".."))
+            return os.path.abspath(os.path.join(plugin_dir, ".."))
         current = parent
 
 
@@ -137,8 +143,8 @@ def bootstrap_plugin(
 
     Args:
         entry_file: server.py 的 ``__file__``（str 或 Path 均可）。
-        extra: 需要额外注入的共享根相对子路径（组根或包目录，如任务域的
-            ``"system"`` 与 ``"system/tasks"``）。存在性校验（非目录跳过）；
+        extra: 需要额外注入的共享根相对子路径（组内包目录或兄弟目录，如任务域
+            的 ``"tasks"``）。存在性校验（非目录跳过）；
             按序置前，终态序与调用序相反（与既有手写注入块逐条 insert 的
             语义一致）。
     """

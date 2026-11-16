@@ -13,8 +13,12 @@
 //!
 //! - 全局分配器换 mimalloc（`#[global_allocator]`），进程内所有 Rust 分配
 //!   （含 tokio/axum/serde_json/rusqlite 等）统一走 mimalloc。
-//! - `purge_delay=0`：空闲页立即 purge/decommit 归还 OS（mimalloc 默认
-//!   purge_delay=10ms 不主动归还，实测滞留全量峰值）。
+//! - `purge_delay=500ms`（2026-10-30 改判，旧值 0）：延迟保留窗——空闲页到期
+//!   才 decommit 归还 OS，窗内复用原地发生、零 decommit/recommit。旧值 0 是
+//!   08-31 事故（mimalloc 默认 10ms 滞留全量峰值）时的选择，彼时无周期
+//!   mi_collect 与水位自愈兜底；现兜底齐备，0 的副作用（装机实测空载
+//!   purged 累计 173GB 的 churn）远超收益。详见 install_global_allocator
+//!   现状契约节与 env 覆盖链。
 //! - `arena_eager_commit=0`：不做 arena 启动预提交——mimalloc 默认在
 //!   Windows 上 eager commit 大块 arena，全量启用内核实测启动峰值
 //!   931MB → 268MB（08-31 对照实验：同 exe 同树同 config，仅环境变量
@@ -48,6 +52,11 @@ const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
 /// mimalloc `mi_option_arena_reserve` 的枚举值（v2/v3 一致，KiB 单位）。
 const MI_OPTION_ARENA_RESERVE: libmimalloc_sys::mi_option_t = 23;
+/// mimalloc `mi_option_page_reclaim_on_free`（v3 枚举 35；v2 旧名
+/// `abandoned_reclaim_on_free`=26）。1 = 跨 theap 认领 abandoned 页——线程退休
+/// 后其他线程一 free 就能回收，配合周期 mi_collect 收敛页库存；-1 = 完全禁止，
+/// 0 = 仅认领本 theap 来源的页（默认）。
+const MI_OPTION_PAGE_RECLAIM_ON_FREE: libmimalloc_sys::mi_option_t = 35;
 
 /// arena 起步预留调小值：128MiB（KiB 单位）。mimalloc 默认 1GiB 起步预留
 /// （64 位），无大分配时过度预留虚拟地址空间——实测 405MB 单 arena 里非零
@@ -55,24 +64,59 @@ const MI_OPTION_ARENA_RESERVE: libmimalloc_sys::mi_option_t = 23;
 /// 同时高于 `MI_ARENA_MIN_SIZE`（32MiB）保证基本 arena 语义。
 const ARENA_RESERVE_DEFAULT_KIB: i64 = 128 * 1024;
 
-/// 安装全局分配器并设置内存策略：purge_delay=0（空闲页立即归还 OS）+
-/// arena_eager_commit=0（不预提交 arena，需要时按需提交）+
-/// arena_reserve=128MiB（起步预留从 1GiB 调小，不浪费虚拟地址空间）。
+/// 安装全局分配器并设置内存策略：purge_delay=延迟保留窗（空闲页到期才归还
+/// OS，窗内复用不发生 decommit/recommit）+ arena_eager_commit=0（不预提交
+/// arena，需要时按需提交）+ arena_reserve=128MiB（起步预留从 1GiB 调小，
+/// 不浪费虚拟地址空间）+ page_reclaim_on_free=1（线程退休后的 abandoned 页
+/// 可在其他线程 free 时认领）。
 ///
 /// 必须在任何分配发生前调用（main 第一行）。幂等：重复调用无害
 /// （mi_option_set 每次无条件生效）。
 ///
-/// 环境变量覆盖：mimalloc 在进程初始化（main 之前）从环境读选项，本函数的
-/// `mi_option_set` 晚于它执行会覆盖环境变量——因此 arena 两选项仅在环境
-/// 变量未显式设置时落调优值（部署侧可设 MIMALLOC_ARENA_EAGER_COMMIT=0 /
-/// MIMALLOC_ARENA_RESERVE=… 显式覆盖，与 purge_delay 的 env 覆盖语义一致）。
+/// ## purge_delay 现状契约（2026-10-30 改判）
+///
+/// v3 池语义原生实现：释放时 `mi_arena_schedule_purge` 若 delay==0 就地立即
+/// 清退（decommit），否则调度 `expire=now+delay`，窗口内原地复用、到期才还
+/// （arena.c:2057；arena 面实际延迟 = purge_delay × arena_purge_mult，默认
+/// ×10）。历史包袱：2026-10-30 前本值被钉 0——08-31 事故时无周期 mi_collect
+/// （60s，D3）与水位自愈兜底，delay=10 下「静置不归还」无法闭合，故以 0 换
+/// 「保证归还」，代价是大块 decommit/recommit churn（装机实测空载 purged 累计
+/// 173GB）。现兜底齐备，默认 500ms（arena 面 5s 保留窗）吸收热复用；冷页
+/// 由「到期 + 60s collect 强制清退访问」双保险归还，滞留不再可能无限化。
+///
+/// ## 环境变量覆盖
+///
+/// mimalloc 环境变量（MIMALLOC_PURGE_DELAY 等）在选项首次读取时生效，但
+/// `mi_option_set` 晚于它执行会**覆盖**环境变量（历史文档声称 env 可覆盖
+/// purge_delay，实为不生效——本版一并修正）。现役覆盖链（高→低）：
+/// `AGENTOS_PURGE_DELAY_MS` → `MIMALLOC_PURGE_DELAY` → 默认 500；显式 0 =
+/// 恢复「立即归还」旧语义，-1 = 从不清退（保留全部已提交页，慎用）。
+/// arena 两选项仅在环境变量未显式设置时落调优值（部署侧
+/// MIMALLOC_ARENA_EAGER_COMMIT=0 / MIMALLOC_ARENA_RESERVE=… 显式覆盖）。
 pub fn install_global_allocator() {
+    // purge 延迟保留窗：AGENTOS_PURGE_DELAY_MS > MIMALLOC_PURGE_DELAY > 500ms。
+    // 解析失败按缺省处理（fail-soft，不 panic）。
+    let purge_delay_ms: i64 = std::env::var("AGENTOS_PURGE_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .or_else(|| {
+            std::env::var("MIMALLOC_PURGE_DELAY")
+                .ok()
+                .and_then(|v| v.parse::<i64>().ok())
+        })
+        .unwrap_or(500);
+    // c_long 在 Windows 为 i32：钳到 [-1, i32::MAX]（mimalloc 对任意负值同为
+    // 「禁清退」语义，<-1 归 -1 等价；上限防御 env 垃圾值）。
+    let purge_delay_clamped: i64 = purge_delay_ms.clamp(-1, i32::MAX as i64);
     // SAFETY: mi_option_set 是 mimalloc C API 的线程安全选项设置函数；
     // 传入合法枚举值（15=purge_delay / 4=arena_eager_commit /
     // 23=arena_reserve，i64 在 32 位 c_long 上截断安全——KiB 值不超范围），
     // 无指针参数。
     unsafe {
-        libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0);
+        libmimalloc_sys::mi_option_set(
+            MI_OPTION_PURGE_DELAY,
+            purge_delay_clamped as core::ffi::c_long,
+        );
         if std::env::var("MIMALLOC_ARENA_EAGER_COMMIT").is_err() {
             libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0);
         }
@@ -83,6 +127,9 @@ pub fn install_global_allocator() {
                 MI_OPTION_ARENA_RESERVE,
                 ARENA_RESERVE_DEFAULT_KIB as core::ffi::c_long,
             );
+        }
+        if std::env::var("MIMALLOC_PAGE_RECLAIM_ON_FREE").is_err() {
+            libmimalloc_sys::mi_option_set(MI_OPTION_PAGE_RECLAIM_ON_FREE, 1);
         }
     }
 }
@@ -103,6 +150,33 @@ pub fn arena_eager_commit() -> i64 {
 pub fn arena_reserve_kib() -> i64 {
     // SAFETY: 同上，合法枚举值 23。
     unsafe { libmimalloc_sys::mi_option_get(MI_OPTION_ARENA_RESERVE) as i64 }
+}
+
+/// 读取当前 page_reclaim_on_free 选项值（诊断/测试用）。
+pub fn page_reclaim_on_free() -> i64 {
+    // SAFETY: 同上，合法枚举值 35（v3）/ 26（v2 旧名）。
+    unsafe { libmimalloc_sys::mi_option_get(MI_OPTION_PAGE_RECLAIM_ON_FREE) as i64 }
+}
+
+/// 设置 page_reclaim_on_free（诊断/压测用）：-1 = 完全禁止跨 theap 认领，
+/// 0 = 仅认领本 theap 来源，1 = 跨 theap 认领。生产默认 1（install 落值）；
+/// 压测用它对照"仅周期 collect"与"free 即认领"两条返还路径。
+pub fn set_page_reclaim_on_free(value: i64) {
+    // SAFETY: mi_option_set 线程安全；枚举值 35（v3）/26（v2 旧名），值为
+    // -1/0/1 合法语义。
+    unsafe {
+        libmimalloc_sys::mi_option_set(MI_OPTION_PAGE_RECLAIM_ON_FREE, value as core::ffi::c_long)
+    };
+}
+
+/// 主动 force collect：结算空闲页/退休线程留下的 abandoned 页并归还 OS。
+///
+/// 生产由内核内存维护循环周期调用（周期 = `AGENTOS_MEM_COLLECT_SECS`）；
+/// 压测/诊断可直接调用观察返还效果。
+pub fn collect_now() {
+    // SAFETY: mi_collect 是 mimalloc C API 的线程安全入口，force=true 表示
+    // 积极归还（官方文档标注「可能昂贵」——生产按分钟级周期调用）。
+    unsafe { libmimalloc_sys::mi_collect(true) };
 }
 
 /// mimalloc 分配器统计快照（调用时刻的进程级瞬时值；mimalloc 无增量
@@ -257,18 +331,21 @@ mod tests {
         unsafe { GLOBAL_ALLOC.dealloc(ptr, layout) };
     }
 
-    /// purge_delay 选项设置生效：install 后读取为 0（默认 10）。
+    /// purge_delay 延迟保留窗生效：install 后读取为 500（窗内复用、到期归还；
+    /// 旧默认 0=立即归还已于 2026-10-30 改判，见 install_global_allocator 的
+    /// 现状契约节）。
     ///
-    /// 行为断言（不依赖分配器身份）：mi_option_set(15, 0) → mi_option_get(15) == 0。
-    /// 测试进程未安装全局分配器（库消费者不安装），但选项 API 与分配器身份无关，
-    /// 直接可测。
+    /// 行为断言（不依赖分配器身份）：mi_option_set(15, 500) → mi_option_get(15)
+    /// == 500。env 覆盖链（AGENTOS_PURGE_DELAY_MS/MIMALLOC_PURGE_DELAY）不在
+    /// 本进程内断言：并行测试共享进程级选项与环境，无法稳定复现"先设 env 再
+    /// install"的时序。
     #[test]
-    fn install_sets_purge_delay_zero() {
+    fn install_sets_purge_delay_window() {
         install_global_allocator();
         assert_eq!(
             purge_delay(),
-            0,
-            "install 后 purge_delay 应为 0（立即归还）"
+            500,
+            "install 后 purge_delay 应为 500ms（延迟保留窗）"
         );
     }
 
@@ -287,6 +364,17 @@ mod tests {
             arena_reserve_kib(),
             128 * 1024,
             "install 后 reserve 应为 128MiB"
+        );
+    }
+
+    /// 线程退休后的 abandoned 页可在其他线程 free 时认领（install 落 1）。
+    #[test]
+    fn install_sets_page_reclaim_on_free() {
+        install_global_allocator();
+        assert_eq!(
+            page_reclaim_on_free(),
+            1,
+            "install 后 page_reclaim_on_free 应为 1（跨 theap 认领）"
         );
     }
 

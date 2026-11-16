@@ -1,0 +1,110 @@
+{
+  "case_id": "cap_model_inventory",
+  "category": "capability",
+  "passed": false,
+  "elapsed_seconds": 330.8,
+  "session_id": "thread-4de453ea-2df3-4691-bbbb-35a306510814",
+  "pipeline_ids": [
+    "29cf79dbf3b5",
+    "c90110229424"
+  ],
+  "settled": false,
+  "dispatches": [
+    {
+      "terminal": "stream_end",
+      "pipeline_id": "c90110229424",
+      "interactions": [],
+      "event_types": [
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "block_end",
+        "block_start",
+        "text_delta",
+        "widget_event",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "stream_end"
+      ]
+    }
+  ],
+  "approval": {
+    "requests_seen": 0,
+    "approved": 0,
+    "denied": 0,
+    "response_errors": []
+  },
+  "metrics": {
+    "pipelines": 2,
+    "iterations_total": 24,
+    "error_steps": 4,
+    "timeout_steps": 0,
+    "tool_calls": 15,
+    "tool_retries": 0,
+    "tool_names": [],
+    "tool_call_counts": {},
+    "task_statuses": [
+      "pending",
+      null
+    ],
+    "all_settled": false,
+    "any_failed": false,
+    "by_model": {
+      "glm-5.3-flash": {
+        "input": 35012,
+        "output": 1053,
+        "cached": 128,
+        "total": 36065
+      },
+      "MiniMax-M3": {
+        "input": 191139,
+        "output": 3166,
+        "cached": 151116,
+        "total": 194305
+      }
+    },
+    "tokens_total": 230370
+  },
+  "assertions": [
+    {
+      "type": "settled",
+      "passed": false,
+      "detail": "管道未收敛（挂起/超时）"
+    },
+    {
+      "type": "no_failed_task",
+      "passed": true,
+      "detail": "无 failed 任务"
+    },
+    {
+      "type": "file_json_field",
+      "passed": false,
+      "detail": "产物 eval_models.json 未找到"
+    }
+  ],
+  "failed_assertions": [
+    "settled",
+    "file_json_field"
+  ],
+  "reply_excerpt": "任务已经顺利派发出去啦～跟你同步一下进度：\n\n- **任务 ID**：29cf79dbf3b5\n- **执行者**：通用执行 Agent\n- **工作目录**：直接在你指定的会话目录下工作（plain 模式，不建隔离副本，文件会真实落在目标位置）\n- **验收标准**：完成后会自动检查 `eval_models.json` 是否存在\n\n它现在正在后台读取 `config/models/llm.yaml`、筛选 minimax 模型并按字母升序写入 JSON 文件。等它做完系统会通知我，到时候我马上确认结果再向你汇报哦～ 🌸"
+}

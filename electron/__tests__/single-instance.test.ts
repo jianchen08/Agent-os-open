@@ -20,6 +20,8 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as crypto from "crypto";
+import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import { focusMainWindow } from "../main";
 
@@ -179,12 +181,11 @@ describe("focusMainWindow（second-instance 聚焦已有主窗口，BUG-86）", 
     focus: vi.fn(),
   });
 
-  it("最小化窗口 → 还原→聚焦（restore 即恢复可见，无需 show 重复显示）", () => {
-    // 真实 BrowserWindow 语义：最小化窗口 isVisible()=true，restore() 后即回到原可见态
+  it("最小化窗口 → 还原→show→聚焦（show 无条件：Windows 前台锁下仅 focus() 置前被静默拒绝）", () => {
     const win = makeWin({ minimized: true, visible: true });
     focusMainWindow(win as never);
     expect(win.restore).toHaveBeenCalledTimes(1);
-    expect(win.show).not.toHaveBeenCalled();
+    expect(win.show).toHaveBeenCalledTimes(1);
     expect(win.focus).toHaveBeenCalledTimes(1);
     // 序列不变量：restore < focus
     expect(win.restore.mock.invocationCallOrder[0]).toBeLessThan(
@@ -200,11 +201,11 @@ describe("focusMainWindow（second-instance 聚焦已有主窗口，BUG-86）", 
     expect(win.focus).toHaveBeenCalledTimes(1);
   });
 
-  it("前台可见窗口 → 仅聚焦（不闪隐复显）", () => {
+  it("后台可见窗口 → 也 show（借激活语义置前，show 对可见窗口无隐藏复显）+ focus", () => {
     const win = makeWin({});
     focusMainWindow(win as never);
     expect(win.restore).not.toHaveBeenCalled();
-    expect(win.show).not.toHaveBeenCalled();
+    expect(win.show).toHaveBeenCalledTimes(1);
     expect(win.focus).toHaveBeenCalledTimes(1);
   });
 
@@ -218,6 +219,82 @@ describe("focusMainWindow（second-instance 聚焦已有主窗口，BUG-86）", 
       expect(w.restore).not.toHaveBeenCalled();
       expect(w.show).not.toHaveBeenCalled();
       expect(w.focus).not.toHaveBeenCalled();
+    }
+  });
+});
+
+describe("resolveAuthIdentityDir + migrateIdentityFile（认证身份与安装身份分家）", () => {
+  it("身份目录=机器级稳定位：不同安装目录exe映射到同一身份目录", async () => {
+    const { resolveAuthIdentityDir, resolvePackagedUserData } = await import("../main");
+    const appData = path.join("C:", "ad");
+    // 安装身份（Chromium profile）按安装目录哈希分家（BUG-50）
+    expect(
+      resolvePackagedUserData(path.join("C:", "inst", "a", "app.exe"), appData, "agent-os"),
+    ).not.toBe(
+      resolvePackagedUserData(path.join("C:", "inst", "b", "app.exe"), appData, "agent-os"),
+    );
+    // 认证身份（签名密钥/会话镜像）跨安装稳定：与安装目录无关
+    expect(resolveAuthIdentityDir(appData, "agent-os")).toBe(
+      path.join(appData, "agent-os", "identity"),
+    );
+  });
+
+  it("迁移：稳定位缺失而旧 userData 有文件→种子拷贝；稳定位已有→不覆盖；旧位缺失→no-op", async () => {
+    const { migrateIdentityFile } = await import("../main");
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "auth-identity-"));
+    try {
+      const legacy = path.join(root, "legacy");
+      const identity = path.join(root, "identity");
+      fs.mkdirSync(legacy);
+      fs.writeFileSync(path.join(legacy, "kernel-token-secret"), "legacy-secret-value-0123456789");
+
+      migrateIdentityFile("kernel-token-secret", legacy, identity);
+      expect(fs.readFileSync(path.join(identity, "kernel-token-secret"), "utf-8")).toBe(
+        "legacy-secret-value-0123456789",
+      );
+
+      // 稳定位已存在（现役密钥）：旧文件轮换不覆盖——已发令牌的验证真值以稳定位为准
+      fs.writeFileSync(path.join(legacy, "kernel-token-secret"), "rotated-legacy-0123456789");
+      migrateIdentityFile("kernel-token-secret", legacy, identity);
+      expect(fs.readFileSync(path.join(identity, "kernel-token-secret"), "utf-8")).toBe(
+        "legacy-secret-value-0123456789",
+      );
+
+      // 旧位无文件：不建目录不落文件
+      const identity2 = path.join(root, "identity2");
+      migrateIdentityFile("kernel-token-secret", path.join(root, "no-such-legacy"), identity2);
+      expect(fs.existsSync(identity2)).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("迁移源候选：现役优先，其余哈希身份按目标文件 mtime 新→旧，非哈希目录排除", async () => {
+    const { legacyIdentityCandidates } = await import("../main");
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "identity-candidates-"));
+    try {
+      const userdata = path.join(root, "userdata");
+      const own = path.join(userdata, "aaaaaaaaaaaa");
+      const older = path.join(userdata, "bbbbbbbbbbbb");
+      const newer = path.join(userdata, "cccccccccccc");
+      const plain = path.join(userdata, "not-a-hash");
+      for (const d of [own, older, newer, plain]) fs.mkdirSync(d, { recursive: true });
+      const fileName = "kernel-token-secret";
+      const write = (dir: string, when: Date) => {
+        fs.writeFileSync(path.join(dir, fileName), "x");
+        fs.utimesSync(path.join(dir, fileName), when, when);
+      };
+      write(older, new Date(1000));
+      write(newer, new Date(2000));
+      write(plain, new Date(3000)); // 非 12-hex 目录：永不入候选
+
+      expect(legacyIdentityCandidates(own, fileName)).toEqual([
+        own,
+        path.join(newer, fileName),
+        path.join(older, fileName),
+      ]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
     }
   });
 });

@@ -24,7 +24,7 @@ import sys
 from collections.abc import Callable
 from typing import Any
 
-from agentos_plugin_sdk.capability import CapabilityHandle
+from agentos_plugin_sdk.capability import CapabilityHandle, reverse_call_identity_params
 from agentos_plugin_sdk.server import CALL_CONFIG_TRANSIENT_KEYS, KernelChannel, McpServer
 from agentos_plugin_sdk.types import LifecycleEvent, ResourceDef, ToolDef
 
@@ -382,6 +382,13 @@ class AgentOSPlugin:
             async def _call(method: str, m_params: dict[str, Any], timeout: float | None = None) -> Any:
                 # 命名空间方法名：<capability>.<method>（与内核 parse_capability_method 对齐）
                 full_method = f"{_cap_name}.{method}"
+                # 反向调用身份透传（刀1）：调用边界捕获的内核下发身份自动回带；
+                # 插件手传同名键以内核下发为准（覆盖）——身份原头不可由插件指派。
+                identity_params = reverse_call_identity_params()
+                if identity_params and isinstance(m_params, dict):
+                    merged = dict(m_params)
+                    merged.update(identity_params)
+                    m_params = merged
                 return await channel.send_request(full_method, m_params, timeout)
 
             return _call

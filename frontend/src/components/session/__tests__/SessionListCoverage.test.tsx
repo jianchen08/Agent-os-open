@@ -141,26 +141,25 @@ describe('SessionList — 删除确认流程', () => {
 })
 
 describe('SessionList — 分组与元信息', () => {
-  it('置顶会话独立分组并带置顶徽标，普通会话在全部会话组', () => {
+  it('置顶会话独立分组浮顶（2026-11-06 用户裁定），带置顶徽标不入默认空间组', () => {
     renderList([
       makeSession({ id: 'p1', title: '置顶的', pinned: true }),
       makeSession({ id: 'n1', title: '普通的', pinned: false }),
     ])
 
     expect(screen.getByText('已置顶')).toBeInTheDocument()
-    expect(screen.getByText('全部会话')).toBeInTheDocument()
     const pinnedGroup = document.querySelector('[data-group="pinned"]') as HTMLElement
     expect(within(pinnedGroup).getByText('置顶的')).toBeInTheDocument()
     expect(within(pinnedGroup).getByTestId('pin-icon')).toBeInTheDocument()
-
     const normalGroup = document.querySelector('[data-group="normal"]') as HTMLElement
     expect(within(normalGroup).queryByText('置顶的')).toBeNull()
+    expect(within(normalGroup).getByText('普通的')).toBeInTheDocument()
   })
 
   it('无置顶会话时不渲染置顶分组', () => {
     renderList([makeSession({ title: '仅普通' })])
     expect(screen.queryByText('已置顶')).toBeNull()
-    expect(screen.getByText('全部会话')).toBeInTheDocument()
+    expect(screen.getByText('默认空间')).toBeInTheDocument()
   })
 
   it.each([
@@ -210,7 +209,7 @@ describe('SessionList — 分组与元信息', () => {
     expect(screen.getByRole('button', { name: /会话: 删除中/ })).toHaveClass('pointer-events-none')
   })
 
-  it('工作空间徽标显示目录末段与隔离图标', () => {
+  it('挂靠工作空间的条目不渲染目录徽标（用户裁定 2026-10-18：目录标识只在组头）', () => {
     renderList([
       makeSession({
         title: '带工作空间',
@@ -218,8 +217,9 @@ describe('SessionList — 分组与元信息', () => {
         isolationMode: 'isolated',
       }),
     ])
-    expect(screen.getByTitle(/工作空间: D:\\workspaces\\task-42/).textContent).toContain('task-42')
-    expect(screen.getByTitle(/工作空间: D:\\workspaces\\task-42/).textContent).toContain('🛡️')
+    // 行内不再出现 📁 徽标（其 title 属性唯一可寻址），标题完整可见不被挤占
+    expect(screen.queryByTitle(/工作空间: D:\\workspaces\\task-42/)).toBeNull()
+    expect(screen.getByTestId('session-title').textContent).toBe('带工作空间')
   })
 })
 

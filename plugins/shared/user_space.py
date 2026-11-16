@@ -5,19 +5,27 @@
 面内，而用户空间不受影响。目录布局::
 
     <USER_ROOT>/                  # 默认按 OS 不同（见 user_root）
-    ├── plugins/                  # 用户插件根（覆盖内置根：同 id 用户赢）
+    ├── plugins/                  # 用户插件根（双源 BuiltinFirst 版本裁决：semver 严格新版才接管）
     ├── config/                   # 用户配置层（镜像 factory config/ 相对路径）
     ├── data/                     # 运行时数据（多租户树 / uploads / DB）
     └── .env                      # 密钥与环境变量
 
 覆盖语义：**文件级整体替换**——用户层存在某文件时，factory 同路径文件不被读取、
 不被合并（见 ``docs/decisions/2026-09-13-unified-user-root.md``）。这是文件级所有权
-转移（与插件双根「同 id 用户赢」同构），不是被 ADR 2026-09-02 否决的
+转移（插件双源另有 BuiltinFirst 版本裁决，ADR 2026-09-20），不是被 ADR 2026-09-02 否决的
 「出厂默认 + 用户覆盖」字段级两层。
 
 **与 Rust 侧同规则**：本模块与 ``kernel/crates/core/src/user_space.rs`` 实现同一套
-解析（两侧注释互为引用，共享真值源契约），与 ``kernel_db.py`` ↔ ``storage_factory.rs``
-的先例同构。任何一侧改解析规则，另一侧必须同步。
+解析（两侧注释互为引用，共享真值源契约）。任何一侧改解析规则，另一侧必须同步。
+
+**Python 侧对齐副本登记**（多端平台差异普查 ⚠️-3，改动须与本模块同刀）：
+- ``plugins/sdk/src/agentos_plugin_sdk/diagnostics_settings.py::user_root``
+  （SDK 包边界，不可 import 本模块）
+- ``plugins/shared/acp_quota_pool/scripts/acp_ledger.py``（播种技能载荷，
+  播种副本对共享根裸模块不可达）
+两副本与本体同输入同输出由对齐断言测试钉死
+（``tests/plugins/shared/test_user_space.py`` /
+``acp_quota_pool/tests/test_acp_ledger.py`` 各 ``*CopyAlignment`` 组）。
 
 不依赖第三方库：插件 sidecar 的 venv 不保证有 ``platformdirs``（它只是 dev 传递
 依赖），故 OS 目录推导用标准库手写，与 ``dirs::data_dir()`` 的语义逐一对齐。

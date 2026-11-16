@@ -68,24 +68,23 @@ export async function getWorkspace(containerTaskId: string): Promise<WorkspacePa
   return response.data
 }
 
-/** 文件树节点原始载荷 */
+/** 文件树条目原始载荷（单层列举，无 children——子层按 path 懒加载另列） */
 export interface FileTreeNodePayload {
   name?: string
   type?: string
   path?: string
   artifactId?: string
-  children?: FileTreeNodePayload[]
   metadata?: Record<string, unknown>
 }
 
-/** 工作空间目录树（workspaces_file_tree） */
+/** 工作空间文件树根层（workspaces_file_tree；后端单层列举，truncated=超单层上限截断） */
 export async function getWorkspaceFileTree(
   containerTaskId: string,
-): Promise<{ tree: FileTreeNodePayload[] }> {
-  const response = await apiClient.get<{ tree?: FileTreeNodePayload[] }>(
+): Promise<{ entries: FileTreeNodePayload[]; truncated: boolean }> {
+  const response = await apiClient.get<{ entries?: FileTreeNodePayload[]; truncated?: boolean }>(
     W.workspaces_file_tree.replace('{container_task_id}', containerTaskId),
   )
-  return { tree: response.data?.tree ?? [] }
+  return { entries: response.data?.entries ?? [], truncated: !!response.data?.truncated }
 }
 
 /** 制品条目原始载荷 */

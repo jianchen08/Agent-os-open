@@ -110,27 +110,27 @@ class LoggerHelpers {
     if (typeof val !== 'object') return String(val)
 
     // Error / AxiosError：提取可读字段（避免打印整个响应体）
-    const anyVal = val as Record<string, unknown>
+    const errFields = val as Record<string, unknown>
     const isError = val instanceof Error
-    const isAxios = anyVal.isAxiosError === true
-    const hasResponse = 'response' in anyVal
+    const isAxios = errFields.isAxiosError === true
+    const hasResponse = 'response' in errFields
     if (isError || isAxios || hasResponse) {
       const summary: Record<string, unknown> = {
-        message: anyVal.message ?? (isError ? String(val) : undefined),
-        name: anyVal.name,
+        message: errFields.message ?? (isError ? String(val) : undefined),
+        name: errFields.name,
       }
-      const code = anyVal.code
+      const code = errFields.code
       if (code !== undefined) summary.code = code
       // HTTP 状态：axios 存在 response.status
-      const status = (anyVal.response as Record<string, unknown> | undefined)?.status
+      const status = (errFields.response as Record<string, unknown> | undefined)?.status
       if (status !== undefined) summary.status = status
       // URL / method（axios 请求信息）
-      const cfg = anyVal.config as Record<string, unknown> | undefined
+      const cfg = errFields.config as Record<string, unknown> | undefined
       if (cfg) {
         if (typeof cfg.url === 'string') summary.url = cfg.url
         if (typeof cfg.method === 'string') summary.method = cfg.method
       }
-      const stack = typeof anyVal.stack === 'string' ? (anyVal.stack as string) : ''
+      const stack = typeof errFields.stack === 'string' ? (errFields.stack as string) : ''
       if (stack) summary.stack = stack.split('\n').slice(0, 3).join('\n')
       const body = LoggerHelpers.safeStringify(summary)
       return isAxios || hasResponse ? `<AxiosError ${body}>` : `<Error ${body}>`

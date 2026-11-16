@@ -26,12 +26,13 @@ export interface SessionFieldSnapshot {
    */
   extraContext?: Record<string, string>
   /**
-   * 模式绑定（2026-09-28 设计 D1/D2，会话出生即定）：mode = 唯一模式身份键
-   * （发送链并入 execution_context.mode）；pipelineConfigId = mode.yaml 声明的
-   * 专属管道（config/pipelines/ 登记名，发送链并入 WS 帧 pipeline_config_id）。
-   * 非空 = 本会话逐消息以该模式/管道执行。
+   * 模式绑定（2026-09-28 设计 D1/D2，会话出生即定）：mode = **模式标签集**
+   * （字符串数组，有序去重——单标签 = 长度一特例，空集/缺省 = 默认兜底语义；
+   * 旧快照 string 形态由读取面 normalizeModeTags 兼容）。发送链并入
+   * execution_context.mode；pipelineConfigId = mode.yaml 声明的专属管道
+   * （config/pipelines/ 登记名，发送链并入 WS 帧 pipeline_config_id）。
    */
-  modeBinding?: { mode: string; pipelineConfigId?: string }
+  modeBinding?: { mode: string | string[]; pipelineConfigId?: string }
 }
 
 const STORAGE_PREFIX = 'session-exec-options:'

@@ -21,7 +21,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 HERE = Path(__file__).parent
-BROWSER_DIR = HERE.parents[3] / "plugins" / "shared" / "tools" / "browser"
+BROWSER_DIR = HERE.parents[3] / "plugins" / "shared" / "browser"
 
 
 def _evict_foreign_bare_modules() -> None:
@@ -63,7 +63,7 @@ class _StubBridgeClient:
     response: dict = {}
     last_call: tuple = ()
 
-    def __init__(self, config, session_id="", caller="host") -> None:
+    def __init__(self, config, session_id="", caller="host", container_id="", exec_backend=None) -> None:
         self._config = config
 
     def call(self, tool_name: str, arguments: dict) -> dict:

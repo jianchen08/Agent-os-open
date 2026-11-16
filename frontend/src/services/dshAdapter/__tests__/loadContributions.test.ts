@@ -46,6 +46,23 @@ describe('loadDshAdapterContributions — 装载契约', () => {
     expect(addRenderIntent).toHaveBeenCalledWith('run_cmd', { card: 'terminal' })
   })
 
+  it('校验面 = DSH 映射子集而非全量词表：form 在全量词表但非 DSH 面产出 → 拒注册', async () => {
+    vi.mocked(getSchema).mockResolvedValue({
+      plugin_contributes: [
+        { plugin_id: 'dsh_adapter', contributes: { dsh_adapter: { version: '1' }, renderers: [
+          { tool: 'form_tool', card: 'form' },
+          { tool: 'diff_tool', card: 'diff' },
+        ] } },
+      ],
+    })
+    const r = await loadDshAdapterContributions()
+    expect(r.renderersRegistered).toBe(1)
+    expect(r.failures).toHaveLength(1)
+    expect(r.failures[0]).toContain('form_tool')
+    expect(addRenderIntent).toHaveBeenCalledTimes(1)
+    expect(addRenderIntent).toHaveBeenCalledWith('diff_tool', { card: 'diff' })
+  })
+
   it('贡献空/无 dsh 条目 → loaded=false 零注册零失败', async () => {
     vi.mocked(getSchema).mockResolvedValue({ plugin_contributes: [] })
     const r = await loadDshAdapterContributions()

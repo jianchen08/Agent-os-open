@@ -1,7 +1,7 @@
 ## AgentOS 宿主接入插件（Godot 4 EditorPlugin）
 ##
 ## 作为灵汐 game_engine 连接器
-## (plugins/shared/system/connectors/creative/game_engine.py) 的"对端"：
+## （connectors creative 实现已随 5037bd01a 退役）原"对端"语义：
 ## 在 Godot 4 编辑器内启动一个极简 TCP/HTTP 服务，监听 127.0.0.1:9600。
 ##
 ## 端口 9600 与 game_engine.py 的默认 endpoint (http://127.0.0.1:9600) 对齐。

@@ -13,9 +13,7 @@ import { ChangePasswordGate } from '@/components/auth/ChangePasswordGate'
 import { GlobalInteractionOverlay } from '@/components/chat/GlobalInteractionOverlay'
 import { SchemaFullscreenHost } from '@/components/schema/SchemaFullscreenHost'
 import { useAuthStore } from '@/stores/authStore'
-
-/** 懒加载 fallback */
-const LazyFallback = <div className="text-muted-foreground p-4">加载中...</div>
+import { LazyFallback } from './lazyFallback'
 
 /**
  * 懒加载路由元素统一装配：ProtectedRoute → 路由级 ErrorBoundary → Suspense(lazy)。

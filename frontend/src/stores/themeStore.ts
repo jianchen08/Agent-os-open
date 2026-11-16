@@ -6,8 +6,15 @@
  */
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { themeList } from '@/config/themes'
+import { DEFAULT_TEXTURE_TINT, USER_THEME_FALLBACK_PREVIEW, themeList } from '@/config/themes'
+import {
+  applyRenderedBackdropContrast,
+  emitBackdropTokens,
+  fingerprintOf,
+  gatherBackdropContext,
+} from '@/services/backdropContrast'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { getShellLastTheme, notifyShellTheme } from '@/services/shellPlugins'
 import { applyPluginSkin, clearPluginSkin, isSkinTheme } from '@/services/skinRuntime'
 import {
   getPresetTheme,
@@ -19,10 +26,26 @@ import {
 } from '@/services/themeService'
 import { ThemeStorageService, mergeTheme } from '@/services/themeStorage'
 import { loggers } from '@/utils/logger'
+import { writeThemeAppearance } from '@/utils/themeAppearance'
 import { createTolerantStorage } from '@/utils/tolerantStorage'
+import { userScopedKey } from '@/utils/userScopedStorage'
+import type { BackdropTokens } from '@/services/backdropContrast'
 import type { PluginTheme, ThemeConfig, ThemeInfo, ThemeMode } from '@/types/theme'
 
 export type { ThemeMode } from '@/types/theme'
+
+/**
+ * 本次启动时 localStorage 是否已有 theme-storage（模块导入时快照——此刻先于
+ * persist 首次写回，是键缺失状态唯一可辨的时机；hydration 后 persist 会用
+ * 默认 state 写回键，缺失与存在不可再分）。壳侧主题恢复以此判定数据丢失。
+ */
+const themeStorageExistedAtBoot = (() => {
+  try {
+    return localStorage.getItem(userScopedKey('theme-storage')) !== null
+  } catch {
+    return false
+  }
+})()
 
 export interface ThemeState {
   /** 当前主题模式 */
@@ -41,12 +64,18 @@ export interface ThemeState {
   availableThemes: ThemeInfo[]
   /** 是否正在加载 */
   isLoading: boolean
+  /** 正在应用的主题 ID（setTheme → loadTheme await 窗口；主题卡据此转圈禁用，
+   *  防连点与并发应用）。运行时态，不持久化。 */
+  applyingThemeId: string | null
   /** AI 消息气泡形态（'flat'=平铺跟 DeepSeek/DSH 原生；'bubble'=气泡；主题声明可开关） */
   bubbleAiMode: 'flat' | 'bubble'
   /** 背景图激活信号（body.has-bg-image：背景图主题或皮肤激活）。平铺 AI 消息
       在背景图上需气泡面（用户裁决：文字不许裸贴背景图，但只框气泡区域）——
       React 内联样式无法被 CSS 覆盖，故由本状态驱动替换透明底 */
   bgImageActive: boolean
+  /** 实际渲染背景对比度强制结果（backdropContrast 管线产出，按内容指纹记忆：
+      主题输入不变只算一次，applyTheme 指纹命中即同步发射零重算） */
+  backdropResolved: BackdropTokens | null
 }
 
 export interface ThemeActions {
@@ -109,7 +138,7 @@ function isLightTheme(config: ThemeConfig): boolean {
 function generateTextureCSS(texture: ThemeConfig['backgrounds']['texture']): string {
   if (!texture || texture.type === 'none') return 'none'
 
-  const { type, color = 'rgba(255,255,255,0.03)', size = '24px' } = texture
+  const { type, color = DEFAULT_TEXTURE_TINT, size = '24px' } = texture
 
   switch (type) {
     case 'dots':
@@ -139,8 +168,7 @@ function applyMotionPreferences(root: HTMLElement): void {
   const reduceMotion =
     prefs.reducedMotion ||
     !prefs.enableAnimations ||
-    (typeof window !== 'undefined' &&
-      window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+    (typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches)
 
   if (reduceMotion) {
     root.style.setProperty('--transition-fast', '0ms')
@@ -155,16 +183,18 @@ function applyMotionPreferences(root: HTMLElement): void {
 export const useThemeStore = create<ThemeState & ThemeActions>()(
   persist(
     (set, get) => ({
-      mode: 'dark',
-      currentThemeId: 'dark',
-      resolvedTheme: 'dark',
+      mode: 'light',
+      currentThemeId: 'light',
+      resolvedTheme: 'light',
       themeConfig: null,
       activePluginTheme: null,
       pendingThemeId: null,
       availableThemes: [],
       isLoading: false,
+      applyingThemeId: null,
       bubbleAiMode: 'bubble',
       bgImageActive: false,
+      backdropResolved: null,
 
       setMode: (mode) => {
         const resolvedTheme = resolveThemeMode(mode)
@@ -179,8 +209,13 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
       },
 
       setTheme: async (themeId) => {
-        set({ currentThemeId: themeId, mode: themeId as ThemeMode })
-        await get().loadTheme(themeId)
+        set({ applyingThemeId: themeId })
+        try {
+          set({ currentThemeId: themeId, mode: themeId as ThemeMode })
+          await get().loadTheme(themeId)
+        } finally {
+          set({ applyingThemeId: null })
+        }
       },
 
       loadTheme: async (themeId) => {
@@ -313,13 +348,7 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
             name: theme.name,
             description: `基于 ${theme.basedOn} 的自定义主题`,
             category: 'special' as const,
-            preview: {
-              primary: '#8b5cf6',
-              background: '#0f172a',
-              surface: '#1e293b',
-              text: '#f8fafc',
-              accent: '#06b6d4',
-            },
+            preview: { ...USER_THEME_FALLBACK_PREVIEW },
           })),
         ]
 
@@ -336,7 +365,8 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
         if (pluginTheme) {
           // 当前主题是插件主题：若尚未应用（启动时序：主题初始化先于 schema 加载，
           // 或插件被重新启用），补一次 loadTheme 让变量生效。
-          const applied = activePluginTheme?.id === pluginTheme.id && themeConfig?.id === pluginTheme.id
+          const applied =
+            activePluginTheme?.id === pluginTheme.id && themeConfig?.id === pluginTheme.id
           if (!applied) {
             void get().loadTheme(currentThemeId)
           }
@@ -368,6 +398,10 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
         if (!themeConfig) return
         // 使用优化后的批量应用方法（含 effects → 全局过渡/动画变量）
         applyThemeToDOM(themeConfig)
+        // 首帧外观专用键同步写（P-74/P-75）：public/theme-init.js 首帧读它判定
+        // dark class，与 resolvedTheme 同一 isLightTheme 派生（单点覆盖插件/
+        // 用户深色主题；persist 的 currentThemeId 首帧无法静态判明暗）。
+        writeThemeAppearance(isLightTheme(themeConfig) ? 'light' : 'dark')
 
         const root = document.documentElement
         const body = document.body
@@ -434,7 +468,7 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
         // 内置主题经 colors.bubbles.ai_mode；默认 bubble 保既有行为）
         const bubbleAiMode: 'flat' | 'bubble' =
           activePluginTheme?.variables?.['--bubble-ai-mode'] === 'flat' ||
-          (themeConfig.colors?.bubble?.ai_mode === 'flat')
+          themeConfig.colors?.bubble?.ai_mode === 'flat'
             ? 'flat'
             : 'bubble'
         set({
@@ -453,6 +487,41 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
         } else {
           clearPluginSkin()
         }
+
+        // === 实际渲染背景对比度强制（全主题 × 全 UI 同一条数据链）===
+        // 声明值门禁管不住真实渲染面（背景图×overlay/渐变/玻璃面）：从内联
+        // 变量组装实际渲染上下文，管线对根级正文/次要 + 三区域 + 语义表面对 +
+        // 双气泡全量强制。主题数据槽指纹命中即同步发射（零解码零重算）；未命中
+        // 算一次，结果回写本槽 + 跨会话 localStorage（内容寻址，主题改了指纹变
+        // 自然失效）。fail-open：采样失败时还原本轮写入者值（applyThemeToDOM
+        // 幂等全量重写），回退既有静态层。
+        const backdropCtx = gatherBackdropContext({
+          // 残缺 fixture/声明缺 colors 时取空串：管线解析失败自然 fail-open
+          mainBg: backgrounds.main?.value || themeConfig.colors?.background?.main || '',
+          flatBubble: bubbleAiMode === 'flat',
+        })
+        const fingerprint = backdropCtx ? fingerprintOf(backdropCtx) : null
+        const memoed =
+          fingerprint && get().backdropResolved?.fingerprint === fingerprint
+            ? get().backdropResolved
+            : null
+        if (backdropCtx && memoed) {
+          emitBackdropTokens(memoed)
+        } else {
+          void applyRenderedBackdropContrast(backdropCtx, (tokens) => {
+            if (tokens) {
+              useThemeStore.setState({ backdropResolved: tokens })
+              return
+            }
+            // fail-open：仅当此前确有管线覆盖在 DOM 上时才还原（全量重写幂等）；
+            // 首次即失败则无覆盖可残留，不重复触发写入者
+            if (!get().backdropResolved) return
+            const cfg = get().themeConfig
+            if (cfg) applyThemeToDOM(cfg)
+            const pluginTheme = get().activePluginTheme
+            if (pluginTheme) applyPluginThemeVars(pluginTheme)
+          })
+        }
       },
     }),
     {
@@ -467,17 +536,28 @@ export const useThemeStore = create<ThemeState & ThemeActions>()(
   ),
 )
 
+// 壳主题上报单点：currentThemeId 实际变更（切换/回退落定/持久化恢复）即通知壳
+// 持久化，覆盖「切换后直接杀进程」的窗口（壳侧另有页面加载重拉兜底）。
+// 浏览器/桌面无壳桥 → notifyShellTheme 内部空转，零影响。
+useThemeStore.subscribe((state, prev) => {
+  if (state.currentThemeId !== prev.currentThemeId) {
+    void notifyShellTheme(state.currentThemeId)
+  }
+})
+
 /**
  * 等待 zustand persist 完成从 localStorage 恢复
  * 避免 initializeTheme 在 rehydrate 前用默认 dark 覆盖用户选择的 light
  */
 async function waitForThemeHydration(): Promise<void> {
-  const persistApi = (useThemeStore as unknown as {
-    persist?: {
-      hasHydrated?: () => boolean
-      onFinishHydration?: (fn: () => void) => () => void
+  const persistApi = (
+    useThemeStore as unknown as {
+      persist?: {
+        hasHydrated?: () => boolean
+        onFinishHydration?: (fn: () => void) => () => void
+      }
     }
-  }).persist
+  ).persist
 
   if (!persistApi?.hasHydrated) return
   if (persistApi.hasHydrated()) return
@@ -504,18 +584,34 @@ export async function initializeTheme() {
 
   const store = useThemeStore.getState()
 
+  // 壳侧主题恢复：启动时 storage 无主题键（新装/被清/WebView 存储孤儿化）且
+  // 壳持久化有最近主题 → 走 setTheme 全管线恢复（preset/用户主题/插件主题/
+  // 回退与持久化复用同一路径，不 reload 不闪屏）。有键（含本启动 persist 写回
+  // 的默认值场景）一律不动——用户在储选择恒优先于壳存值，壳旧值永不覆盖。
+  // 浏览器/桌面无壳桥 getShellLastTheme 返回 null 短路，整条链路零影响。
+  if (!themeStorageExistedAtBoot) {
+    const shellThemeId = await getShellLastTheme()
+    if (shellThemeId && shellThemeId !== store.currentThemeId) {
+      await store.setTheme(shellThemeId)
+    }
+  }
+
+  // 恢复可能已改写主题/模式：后续加载以最新快照为准（入口快照在恢复前，
+  // 直接续用会把恢复结果用旧 currentThemeId 打回）
+  const effectiveStore = useThemeStore.getState()
+
   // 先拉取动态主题（后端无状态清单 → fetch JSON → 存 localStorage），
   // 必须在 updateAvailableThemes 之前完成，否则新主题不会被合并进列表。
   // 内部已做降级：后端不可达时静默返回，不影响内置 preset。
   await fetchDynamicThemes()
 
   // 更新可用主题列表（preset + localStorage 用户主题，含上一步加载的动态主题）
-  store.updateAvailableThemes()
+  effectiveStore.updateAvailableThemes()
 
-  const resolvedTheme = resolveThemeMode(store.mode)
+  const resolvedTheme = resolveThemeMode(effectiveStore.mode)
   useThemeStore.setState({ resolvedTheme })
 
-  await store.loadTheme(store.currentThemeId)
+  await effectiveStore.loadTheme(effectiveStore.currentThemeId)
 
   if (typeof window !== 'undefined') {
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')

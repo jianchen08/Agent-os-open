@@ -37,7 +37,7 @@ _SHARED = _REPO_ROOT / "plugins" / "shared"
 if str(_SHARED) not in sys.path:
     sys.path.insert(0, str(_SHARED))
 
-from pipeline._base.plugin import (  # noqa: E402
+from _libs.pipeline_base.plugin import (  # noqa: E402
     ICorePlugin,
     IInputPlugin,
     IOutputPlugin,
@@ -47,7 +47,7 @@ from pipeline._base.plugin import (  # noqa: E402
     PluginResult,
     find_plugin_config,
 )
-from pipeline._base.types import (  # noqa: E402
+from _libs.pipeline_base.types import (  # noqa: E402
     StateKeys,
     TargetType,
     create_initial_state,

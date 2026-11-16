@@ -17,10 +17,22 @@ async fn g8_restart_suspends_running_runs() {
     std::env::set_var("AGENTOS_DISABLE_SELF_EXIT", "1");
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     store
-        .record_run_start("pipe_g8_r1", "default", "r1", "hash")
+        .record_run_start(
+            "pipe_g8_r1",
+            "default",
+            "r1",
+            "hash",
+            "2026-10-15T00:00:00+00:00",
+        )
         .unwrap();
     store
-        .record_run_start("pipe_g8_r2", "default", "r2", "hash")
+        .record_run_start(
+            "pipe_g8_r2",
+            "default",
+            "r2",
+            "hash",
+            "2026-10-15T00:00:00+00:00",
+        )
         .unwrap();
     // r2 先完成——不应被排空动到。
     store
@@ -63,7 +75,13 @@ async fn drain_and_exit75_suspends_without_exit_under_escape_hatch() {
     std::env::set_var("AGENTOS_DISABLE_SELF_EXIT", "1");
     let store = Arc::new(SqliteStore::open_memory().unwrap());
     store
-        .record_run_start("pipe_g8_d1", "default", "d1", "hash")
+        .record_run_start(
+            "pipe_g8_d1",
+            "default",
+            "d1",
+            "hash",
+            "2026-10-15T00:00:00+00:00",
+        )
         .unwrap();
     let suspended =
         agentos_api::routes::drain_and_exit75(Some(&store), None, "test: watcher cdylib change")
@@ -74,4 +92,30 @@ async fn drain_and_exit75_suspends_without_exit_under_escape_hatch() {
     // 无 db → 0（诚实降级，不 panic）
     let none = agentos_api::routes::drain_and_exit75(None, None, "test").await;
     assert_eq!(none, 0);
+}
+
+/// P-23 片1：排空落库挂起归因——reason 形参从 tracing 日志通到
+/// pipeline_state 表（`suspended_reason` 键），重启后归因可达（此前进程
+/// exit 75 后日志属上次启动日文件，与 DB 行无关联面）。
+#[tokio::test]
+async fn drain_and_exit75_persists_suspended_reason() {
+    std::env::set_var("AGENTOS_DISABLE_SELF_EXIT", "1");
+    let store = Arc::new(SqliteStore::open_memory().unwrap());
+    store
+        .record_run_start(
+            "pipe_g8_rz",
+            "default",
+            "rz",
+            "hash",
+            "2026-11-04T00:00:00+00:00",
+        )
+        .unwrap();
+    agentos_api::routes::drain_and_exit75(Some(&store), None, "test: watermark self-heal reason")
+        .await;
+    let fields = store.load_pipeline_state("pipe_g8_rz", "default").unwrap();
+    assert_eq!(
+        fields.get("suspended_reason"),
+        Some(&serde_json::json!("test: watermark self-heal reason")),
+        "排空行落 suspended_reason = 触发源 reason"
+    );
 }

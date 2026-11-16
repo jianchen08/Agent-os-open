@@ -34,7 +34,16 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_MON_DIR = Path(__file__).resolve().parents[2] / "plugins" / "shared" / "system" / "monitoring"
+from _libs.testing.db_read_fake import FakeDbRead  # noqa: E402 — db-read 契约替身
+
+
+def _install_db_read(db_path, token_tenants: dict[str, str] | None = None) -> FakeDbRead:
+    """db-read provider 注入 _server.kernel_reads 装配缝（C2 刀2 读面通道）。"""
+    fake = FakeDbRead(db_path, token_tenants or {"tok-t1": "t1", "tok-a": "tenant-a"})
+    _server.kernel_reads.set_provider("db-read", fake.provider)
+    return fake
+
+_MON_DIR = Path(__file__).resolve().parents[2] / "plugins" / "shared" / "monitoring"
 
 
 def _load(mod_name: str, filename: str) -> Any:
@@ -501,13 +510,15 @@ class TestContextTokenUsageTenantGuard:
         )
         conn.commit()
         conn.close()
-        monkeypatch.setattr(_server, "_kernel_db_path", lambda: str(db))
+        _install_db_read(db)
         return db
 
-    async def test_cross_tenant_context_usage_404(
+    async def test_cross_tenant_context_usage_degrades_to_business_layer(
         self, monkeypatch: pytest.MonkeyPatch, runs_db: Path
     ) -> None:
-        """918：context-token-usage 目标管道归属他租户 → 404，业务函数不调用。"""
+        """C2 刀2 语义重钉（原 918 404 守卫）：pipeline_state tenant 档收窄
+        内建——他租户锚行不可见，conflict 放行，跨租户隔离由业务层租户化读面
+        兜底（与未知会话同形，存在性不因守卫旁路而泄露）。"""
         import types
 
         called: list[Any] = []
@@ -524,10 +535,10 @@ class TestContextTokenUsageTenantGuard:
             path="/ext/monitoring/sessions/s-foreign/context-token-usage",
             method="GET",
             query={},
-            headers={"x-agentos-tenant": "t1"},
+            headers={"x-agentos-tenant": "t1", "authorization": "tok-t1"},
         )
-        assert _data(resp, 404)["error"] == "not found"
-        assert called == [], "跨租户拒绝须发生在业务查询前"
+        assert _data(resp, 200) == {"total_tokens": 1}  # 业务层（桩）承接
+        assert called, "守卫放行后业务层承接跨租户隔离（收窄读面无数据可泄）"
 
     async def test_owned_session_context_usage_passes_parent(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -543,7 +554,7 @@ class TestContextTokenUsageTenantGuard:
         )
         conn.commit()
         conn.close()
-        monkeypatch.setattr(_server, "_kernel_db_path", lambda: str(db))
+        _install_db_read(db)
 
         seen: list[dict[str, Any]] = []
 

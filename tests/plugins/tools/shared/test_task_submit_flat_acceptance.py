@@ -26,8 +26,8 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_TS_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools" / "task_submit"
-_SYSTEM_ROOT = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system"
+_TS_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "task_submit"
+_SYSTEM_ROOT = Path(__file__).resolve().parents[4] / "plugins" / "shared"
 
 for _d in [_SYSTEM_ROOT, _SYSTEM_ROOT / "tasks"]:
     if str(_d) not in sys.path:
@@ -55,6 +55,18 @@ def _load_module() -> Any:
 @pytest.fixture
 def mod() -> Any:
     return _load_module()
+
+
+@pytest.fixture(autouse=True)
+def _birth_ws(mod: Any) -> Any:
+    """出生协议第三段（提交期同步建工作空间）准备器替身——驱动真实派发的
+    用例必注入（ADR-2026-10-17-task-birth-workspace-inclusion：无跳过路径）。
+    """
+    from tests import _task_birth_workspace as _birth_ws_mod
+
+    _birth_ws_mod.inject_preparer(mod)
+    yield
+    _birth_ws_mod.reset_preparer(mod)
 
 
 def _normalize(mod: Any, criteria: Any):
@@ -374,6 +386,7 @@ def _base_inputs(**over: Any) -> dict:
         "parent_agent_level": 1,
         "pipeline_id": "pipe_parent_9",
         "user_id": "user-1",
+        "session_id": "sess-1",
         "acceptance_criteria": {
             "files": ["chapters/chapter_025.md"],
             "expect": "总纲与25章每章1200-1800字剧情连续，progress.md 记录完整",
@@ -392,13 +405,16 @@ def _make_tool(mod: Any) -> Any:
 
     tool._validate_target_agent = _ok  # type: ignore[method-assign]
 
-    async def _base_config(target_id: str) -> dict[str, Any] | None:
-        return {
-            "level": "L2",
-            "is_active": True,
-            "tool_ids": ["file_read"],
-            "system_prompt": "stub-persona",
-        }
+    async def _base_config(target_id: str) -> tuple[dict[str, Any] | None, None]:
+        return (
+            {
+                "level": "L2",
+                "is_active": True,
+                "tool_ids": ["file_read"],
+                "system_prompt": "stub-persona",
+            },
+            None,
+        )
 
     tool._get_agent_base_config = _base_config  # type: ignore[method-assign]
     return tool
@@ -456,3 +472,79 @@ class TestFlatDispatchEndToEnd:
             "acceptance_criteria"
         ]["description"]
         assert manifest_desc == prop["description"]
+
+
+# ── 单键包装 dict 容错（2026-10-16 二连败复盘） ─────────────
+
+
+class TestFilesWrapperDictTolerance:
+    """files 单键包装 dict → 与裸字符串同梯级容错解包。
+
+    实证背景：调度模型把单文件列表发射成 {"files": {"item": 路径}}
+    （LLM 常见形态走样：单元素数组误写为带通用键的对象），二连败后
+    靠放弃 files 才通过。多键/dict 值包装意图不明，仍走形态闸拒绝。
+    """
+
+    def test_scalar_valued_wrapper_unwrapped(self, mod: Any) -> None:
+        """{"item": 路径}（实证形态）→ 解包为单元素数组，逐文件检查不变。"""
+        normalized, fail = _normalize(
+            mod, {"files": {"item": "docs/plugin_layering_plan.md"}}
+        )
+        assert fail is None
+        assert set(normalized.keys()) == {"file_check::docs/plugin_layering_plan.md"}
+        entry = normalized["file_check::docs/plugin_layering_plan.md"]
+        assert entry["input_params"] == {"path": "docs/plugin_layering_plan.md", "check": "not_empty"}
+
+    @pytest.mark.parametrize(
+        "wrapper",
+        [
+            {"path": "reports/summary.md"},
+            {"item": "reports/summary.md"},
+        ],
+    )
+    def test_common_wrapper_keys_tolerated(self, mod: Any, wrapper: dict) -> None:
+        """常见通用键（item/path 等）一视同仁：解包看形态不看键名。"""
+        normalized, fail = _normalize(mod, {"files": wrapper})
+        assert fail is None
+        assert set(normalized.keys()) == {"file_check::reports/summary.md"}
+
+    def test_list_valued_wrapper_unwrapped(self, mod: Any) -> None:
+        """{"items": [a, b]} → 解包取列表，逐文件映射。"""
+        normalized, fail = _normalize(mod, {"files": {"items": ["a.md", "b.md"]}})
+        assert fail is None
+        assert set(normalized.keys()) == {"file_check::a.md", "file_check::b.md"}
+
+    def test_wrapper_element_count_property(self, mod: Any) -> None:
+        """性质断言：解包不丢元素——展开实例数 = 包装内元素数。"""
+        files = [f"chapters/chapter_{i:03d}.md" for i in range(4)]
+        normalized, fail = _normalize(mod, {"files": {"items": files}})
+        assert fail is None
+        assert len(normalized) == len(files)
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            {"a": "x.md", "b": "y.md"},   # 多键：包装意图不明
+            {"item": {"path": "x.md"}},   # dict 值：非路径标量
+            {},                           # 空对象：无内容可解
+        ],
+    )
+    def test_ambiguous_wrapper_still_rejected(self, mod: Any, bad: dict) -> None:
+        """歧义包装（多键/dict 值/空对象）不猜测 → 仍 INVALID_ACCEPTANCE_FIELD。"""
+        normalized, fail = _normalize(mod, {"files": bad})
+        assert fail is not None
+        assert fail.error_code == "INVALID_ACCEPTANCE_FIELD"
+        assert "files" in fail.error
+        assert normalized == {}
+
+    def test_numeric_indexed_wrapper_unwrapped(self, mod: Any) -> None:
+        """{"0": a, "1": b} 数字键顺序对象 → 按序解包（业界实证高频形态）。"""
+        normalized, fail = _normalize(mod, {"files": {"0": "a.md", "1": "b.md"}})
+        assert fail is None
+        assert set(normalized.keys()) == {"file_check::a.md", "file_check::b.md"}
+
+    def test_numeric_indexed_gap_rejected(self, mod: Any) -> None:
+        """数字键有空洞（0,2 缺 1）→ 序列化残缺不猜测，仍拒。"""
+        normalized, fail = _normalize(mod, {"files": {"0": "a.md", "2": "b.md"}})
+        assert fail is not None
+        assert fail.error_code == "INVALID_ACCEPTANCE_FIELD"

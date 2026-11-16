@@ -25,8 +25,8 @@ from __future__ import annotations
 
 import base64
 import json
+import shutil
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +34,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system" / "tasks"
+_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tasks"
 
 
 @pytest.fixture(autouse=True)
@@ -51,17 +51,24 @@ def _isolate_tasks_plugin_modules():
     http_api 而 ImportError）。
     """
     d = str(_PLUGIN_DIR)
-    # 共享根（plugins/shared 平铺模块：state_fields/task_birth/project_registry 等）
-    # ——对齐生产 sidecar sys.path 形态（自身目录 + shared 根），单文件可跑。
-    shared_root = str(_PLUGIN_DIR.parents[1])
+    # 共享根（plugins/shared 平铺模块：state_fields/task_birth 等）——对齐生产
+    # sidecar sys.path 形态（自身目录 + shared 根），单文件可跑。project_registry
+    # 平铺迁移后属主目录 = plugins/shared/project_manager（registry fixture 裸名
+    # 导入需要）。
+    shared_root = str(_PLUGIN_DIR.parents[0])  # plugins/shared（平铺共享根）
+    pm_dir = str(_PLUGIN_DIR.parents[0] / "project_manager")
     _was_present = d in sys.path
     _added_shared_root = False
+    _added_pm_dir = False
     if d in sys.path:
         sys.path.remove(d)
     sys.path.insert(0, d)
     if shared_root not in sys.path:
         sys.path.insert(1, shared_root)
         _added_shared_root = True
+    if pm_dir not in sys.path:
+        sys.path.insert(2, pm_dir)
+        _added_pm_dir = True
     _evict_names = (
         "task_types",
         "state_machine",
@@ -90,6 +97,8 @@ def _isolate_tasks_plugin_modules():
         sys.path.insert(0, d)
     if _added_shared_root:
         sys.path.remove(shared_root)
+    if _added_pm_dir and pm_dir in sys.path:
+        sys.path.remove(pm_dir)
     for m in _evict_names:
         if m in _evicted:
             sys.modules[m] = _evicted[m]
@@ -337,9 +346,10 @@ class TestTasksEndpoints:
         t = resp["payload"]["items"][0]
         assert t["metadata"]["ws_meta"]["path"] == "D:/ws/proj__wt_1"
 
-    async def test_list_tasks_ws_meta_fallback_to_bare_key(self, monkeypatch: pytest.MonkeyPatch,
+    async def test_list_tasks_ws_meta_bare_key_no_fallback(self, monkeypatch: pytest.MonkeyPatch,
                                                            hub: _FakeCapabilityHub) -> None:
-        """无任务镜像（主会话形态行）→ 回退裸 ws_meta，行为不变。"""
+        """单键单通道（W2 F3 收敛）：仅有裸 ws_meta 键（无 task.ws_meta 镜像）
+        → 不回退裸键，metadata.ws_meta = None。"""
         _seed_state(hub, [
             _state_row(
                 "pipe-plain", "仅有裸键的任务", "running",
@@ -348,7 +358,7 @@ class TestTasksEndpoints:
         ])
         resp = await _http(monkeypatch, hub, "/ext/task_service/tasks")
         t = resp["payload"]["items"][0]
-        assert t["metadata"]["ws_meta"]["path"] == "D:/ws/plain-dir"
+        assert t["metadata"]["ws_meta"] is None
 
     async def test_list_tasks_state_unavailable_empty(
             self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub) -> None:
@@ -360,15 +370,15 @@ class TestTasksEndpoints:
 
     async def test_list_tasks_state_status_filter(self, monkeypatch: pytest.MonkeyPatch,
                                                   hub: _FakeCapabilityHub) -> None:
-        """state 行参与 status 筛选（pending_evaluation 等细态原样透传）。"""
+        """state 行参与 status 筛选（evaluating 等细态原样透传）。"""
         _seed_state(hub, [
-            _state_row("pipe-eval", "待评估任务", "pending_evaluation"),
+            _state_row("pipe-eval", "评估中任务", "evaluating"),
             _state_row("pipe-run", "执行中", "running"),
         ])
         resp = await _http(monkeypatch, hub, "/ext/task_service/tasks",
-                           query={"status": "pending_evaluation"})
+                           query={"status": "evaluating"})
         assert resp["payload"]["total"] == 1
-        assert resp["payload"]["items"][0]["status"] == "pending_evaluation"
+        assert resp["payload"]["items"][0]["status"] == "evaluating"
 
     async def test_list_tasks_session_filter(self, monkeypatch: pytest.MonkeyPatch,
                                              hub: _FakeCapabilityHub) -> None:
@@ -386,12 +396,17 @@ class TestTasksEndpoints:
 
     async def test_list_tasks_merges_owned_registered_tasks(self, monkeypatch: pytest.MonkeyPatch,
                                                            hub: _FakeCapabilityHub) -> None:
-        """登记型任务（task.owned.<id>.* 键，如 review 复盘管道）从提交者管道聚合行组装。"""
+        """登记型任务（task.owned.<id>.* 键，如 review 复盘管道）从提交者管道聚合行组装。
+
+        登记键瘦身为 {title, created_at, submitted_by} 纯声明（owned.status
+        镜像退役，ADR 2026-11-02-state-key-governance）——登记型出口恒
+        active（登记不是运行态，有行任务状态 join 第一趟行真值）。
+        """
         _seed_state(hub, [
             {
                 "pipeline_id": "owner-pipe-1",
                 "task.owned.c1d2e3f4a5b6.title": "复盘 task-9",
-                "task.owned.c1d2e3f4a5b6.status": "running",
+                "task.owned.c1d2e3f4a5b6.created_at": "2026-11-02T10:00:00+00:00",
                 "task.owned.c1d2e3f4a5b6.submitted_by": "review_system",
                 "lineage.origin_session_id": "sess-owner",
                 "thread_id": "owner-pipe-1",
@@ -404,9 +419,13 @@ class TestTasksEndpoints:
         t = items[0]
         assert t["id"] == "c1d2e3f4a5b6"
         assert t["title"] == "复盘 task-9"
-        assert t["status"] == "running"
-        # 登记型任务无执行管道：pipeline_run_id 指向提交者管道（归属定位用）
-        assert t["pipeline_run_id"] == "owner-pipe-1"
+        # 登记声明无 status 键（镜像退役）：出口恒 active
+        assert t["status"] == "active"
+        assert t["created_at"] == "2026-11-02T10:00:00+00:00"
+        assert t["metadata"]["submitted_by"] == "review_system"
+        # 登记型任务无执行管道：登记不是管道运行，pipeline_run_id 置空不指回
+        # 提交者管道（a151658d2——否则前端按 run_id 建映射把主管道误判成任务行）
+        assert t["pipeline_run_id"] == ""
         assert t["thread_id"] == "sess-owner"
 
     async def test_get_task_ok_and_404(self, monkeypatch: pytest.MonkeyPatch,
@@ -457,6 +476,23 @@ class TestTasksEndpoints:
         resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/pipe-run-1/submit",
                            "POST")
         assert resp["status"] == 400
+
+    async def test_submit_rejects_session_row_404(self, monkeypatch: pytest.MonkeyPatch,
+                                                  hub: _FakeCapabilityHub) -> None:
+        """submit 注入身份门（ADR 2026-11-06 D5 N7）：会话主管道行（无 task.id
+        无 lineage.*，仅记账键/幽灵残留）不是任务 → 404 拒绝，不向会话注入
+        task.status=running 重跑 overlay。"""
+        _seed_state(hub, [{
+            "pipeline_id": "pipe_chat",
+            "thread_id": "pipe_chat",
+            "task.status": "failed",
+            "task.owned.t-child.title": "子任务",
+            "task.subtasks_pending.t-child": "2026-11-06T08:00:00+00:00",
+        }])
+        resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/pipe_chat/submit",
+                           "POST")
+        assert resp["status"] == 404
+        assert not hub.handles.get("chat"), "会话行不得注入重跑 overlay"
 
     @pytest.mark.parametrize(
         "task_exists",
@@ -527,10 +563,11 @@ class TestTasksEndpoints:
         assert resp["status"] == 200
         assert resp["payload"]["resumed_count"] == 1
 
-    async def test_resume_task_passes_caller_user_to_kernel(
+    async def test_resume_task_does_not_hand_carry_user_identity(
             self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub) -> None:
-        # 恢复续跑轮的租户/归属解析依赖调用方 user——resume_pipeline 调用
-        # 必须携带 user_id（缺省空串走内核 default 租户降级，带认证时须是真值）。
+        # params.user_id 已退役（内核刀3，commit 9e99313a2）：反调面身份由
+        # 内核执行上下文注入，插件手传不可指派身份——resume_pipeline 调用
+        # 不得携带 user_id 键（携带徒增伪造面，内核对该键已不读）。
         hub._responses["pipeline-executor"] = {"resume_pipeline": {"run_id": "r-9"}}
         headers = {"Authorization": f"Bearer {_make_token('u-9')}"}
         resp = await _http(monkeypatch, hub, "/ext/task_service/tasks/t-1/resume", "POST",
@@ -538,7 +575,10 @@ class TestTasksEndpoints:
         assert resp["status"] == 200
         calls = [(m, pr) for m, pr in hub.handles["pipeline-executor"].calls
                  if m == "resume_pipeline"]
-        assert calls[0][1]["user_id"] == "u-9"
+        assert "user_id" not in calls[0][1], (
+            f"params.user_id 已退役（身份走内核执行上下文注入）：{calls[0][1]!r}"
+        )
+        assert calls[0][1]["pipeline_id"] == "t-1"
 
     async def test_resume_task_carries_terminal_state_reset_overlay(
             self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub) -> None:
@@ -568,9 +608,11 @@ class TestTasksEndpoints:
                                        hub: _FakeCapabilityHub) -> None:
         hub._responses["pipeline-executor"] = {"suspend_pipeline": {"run_id": "r-1"}}
         _seed_state(hub, [
+            _state_row("pipe-parent", "父", "running"),
             {"pipeline_id": "pipe-child", "lineage.parent_pipeline_id": "pipe-parent",
              "task.goal": "子", "task.status": "running"},
         ])
+        hub._responses["pipeline-state"]["update"] = {"status": "updated"}
         resp = await _http(monkeypatch, hub,
                            "/ext/task_service/tasks/pipe-parent/cancel", "POST")
         assert resp["status"] == 200
@@ -582,6 +624,21 @@ class TestTasksEndpoints:
                        if m == "suspend_pipeline"]
         assert "pipe-parent" in suspend_ids
         assert "pipe-child" in suspend_ids
+        # 谁终态谁随写：父与被级联子任务都要落 task.status 终态（僵尸投影修复；
+        # 词汇 = stopped（ADR 2026-10-30-task-status-authority-vocabulary-
+        # convergence：cancelled 退役，用户停止与暂停同词，可重入由恢复守卫
+        # 接管）。owned 镜像已退役（ADR 2026-11-02-state-key-governance）：
+        # 父会话面板 join 子行真值——全部 update 都只落自身终态，零父镜像写。
+        updates = [(m, p) for m, p in hub.handles["pipeline-state"].calls if m == "update"]
+        wrote = {
+            p["pipeline_id"]: p["fields"]["task.status"]
+            for _, p in updates
+            if "task.status" in p["fields"]
+        }
+        assert wrote == {"pipe-parent": "stopped", "pipe-child": "stopped"}
+        assert all("task.status" in p["fields"] for _, p in updates), (
+            f"父镜像写面已退役，不得有非终态写：{updates!r}"
+        )
 
     async def test_create_root_task_maps_fields_to_tool(
             self, monkeypatch: pytest.MonkeyPatch, hub: _FakeCapabilityHub,
@@ -793,9 +850,18 @@ def registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     """临时目录 ProjectRegistry + 注入 http_api（避免触碰真实数据目录）。
 
     同时 patch 共享层 load_project_paths（task_submit 工具的登记解析通道）。
+    T6a 后 http_api 经 project.* 服务取登记簿——以真登记簿背书的
+    _project_call 桥注入（与 project_manager/server.py 载荷形态一致）。
     """
+    from dataclasses import asdict
+
     import project_registry as projects_mod
 
+    # 数据根重定向到 tmp（project_manager reg_env 夹具同款）：桥内
+    # ensure_project_registered 走生产同路径（不传 registry 实例），内部裸
+    # ProjectRegistry() 经此 env 落 tmp——缺省解析 = 用户空间 default 租户
+    # 登记簿（装机版 admin 账户名下），测试写面会漏进真实应用
+    monkeypatch.setenv("TASKS_STORAGE_DIR", str(tmp_path / "tasks"))
     # 登记白名单缺省成员（工作空间根）一并隔离到 tmp：显式路径建在 tmp 下
     # 即在缺省成员范围内（ADR 2026-09-17 登记白名单闸）
     monkeypatch.setattr(projects_mod, "workspace_base_dir", lambda: tmp_path)
@@ -807,8 +873,53 @@ def registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     )
     import http_api
 
-    monkeypatch.setattr(http_api, "get_project_registry", lambda: reg)
-    return reg
+    async def _registry_project_call(method: str, args: dict[str, Any]) -> dict[str, Any]:
+        if method == "create":
+            try:
+                proj, created = projects_mod.ensure_project_registered(
+                    title=str(args.get("title") or ""),
+                    explicit_path=str(args.get("path") or ""),
+                    session_id=str(args.get("session_id") or ""),
+                    submitted_by=str(args.get("submitted_by") or ""),
+                    auto_execute=bool(args.get("auto_execute", False)),
+                )
+            except (ValueError, RuntimeError) as exc:
+                raise http_api.APIError(
+                    status_code=400, error_code="API_REQ_4002", message=str(exc)
+                ) from exc
+            reg.save(proj)
+            return {"project": asdict(proj), "created": created}
+        if method == "get":
+            p = reg.get(str(args.get("project_id") or "").strip())
+            return {"found": p is not None, **({"project": asdict(p)} if p else {})}
+        if method == "list":
+            rows = [asdict(p) for p in reg.list()]
+            return {"items": rows, "total": len(rows)}
+        if method == "save":
+            row = args.get("project")
+            if not isinstance(row, dict):
+                return {"error": "project row required"}
+            try:
+                saved = reg.save(projects_mod.ProjectModel(**row))
+            except (TypeError, ValueError) as exc:
+                return {"error": str(exc)}
+            return {"project": asdict(saved)}
+        if method == "delete":
+            return {"deleted": reg.delete(str(args.get("project_id") or "").strip())}
+        if method == "remove_folder":
+            import shutil
+
+            path = str(args.get("path") or "")
+            removed = bool(path) and Path(path).is_dir()
+            if removed:
+                shutil.rmtree(path)
+            return {"removed": removed}
+        raise KeyError(f"project.{method}")
+
+    monkeypatch.setattr(http_api, "_project_call", _registry_project_call)
+    yield reg
+    # 测完即删：tmp 登记簿整体清除，不留任何账户名下残留
+    shutil.rmtree(tmp_path / "tasks", ignore_errors=True)
 
 
 class TestProjectsLifecycle:
@@ -912,7 +1023,7 @@ class TestProjectsLifecycle:
 
         p = registry.save(projects_mod.ProjectModel(title="项目D"))
         _seed_state(hub, [
-            {"pipeline_id": "child-1", "task.parent_project_id": p.id},
+            {"pipeline_id": "child-1", "task.id": "child-1", "task.parent_project_id": p.id},
         ])
         hub._responses["pipeline-executor"] = {
             "suspend_pipeline": {"run_id": "r-1"},
@@ -1201,33 +1312,34 @@ class TestEdgeAndDegradedBranches:
 
     async def test_cancel_cascade_rows_not_list(self, monkeypatch: pytest.MonkeyPatch,
                                                 hub: _FakeCapabilityHub) -> None:
+        """state 读面形状非法 → 存在性无法确权 404（终态随写面前置仲裁，
+        不确定对象存在就落终态 = 盲写）。"""
         hub._responses["pipeline-executor"] = {"suspend_pipeline": {"run_id": "r-1"}}
         hub._responses["pipeline-state"] = {"list": {"not": "a list"}}
         resp = await _http(monkeypatch, hub,
                            "/ext/task_service/tasks/pipe-x/cancel", "POST")
-        assert resp["status"] == 200
-        assert resp["payload"]["cancelled"] is True
-        assert resp["payload"]["cascaded_subtasks"] == 0
+        assert resp["status"] == 404
+        # 存在性闸在引擎之前：不触达引擎（句柄懒创建，零调用时不存在）
+        assert "pipeline-executor" not in hub.handles
 
     async def test_cancel_cascade_capability_missing(self, monkeypatch: pytest.MonkeyPatch,
                                                      hub: _FakeCapabilityHub) -> None:
+        """state 能力缺席 → 存在性读面故障 404（删除端点同款语义），
+        不触引擎不落终态。"""
         hub._responses["pipeline-executor"] = {"suspend_pipeline": {"run_id": "r-1"}}
-        # 无 pipeline-state 响应 → 级联异常 → 0，不阻断响应
         resp = await _http(monkeypatch, hub,
                            "/ext/task_service/tasks/pipe-x/cancel", "POST")
-        assert resp["status"] == 200
-        assert resp["payload"]["cancelled"] is True
+        assert resp["status"] == 404
+        assert "pipeline-executor" not in hub.handles
 
-    async def test_cancel_task_missing_fallback_shape(self, monkeypatch: pytest.MonkeyPatch,
-                                                      hub: _FakeCapabilityHub) -> None:
+    async def test_cancel_task_missing_404(self, monkeypatch: pytest.MonkeyPatch,
+                                           hub: _FakeCapabilityHub) -> None:
+        """取消不存在的任务 → 404（与 submit/delete 同款存在性语义；
+        旧契约对缺失 id 也回 200 cancelled=true = 谎报）。"""
         hub._responses["pipeline-executor"] = {"suspend_pipeline": {"run_id": "r-1"}}
         resp = await _http(monkeypatch, hub,
                            "/ext/task_service/tasks/no-such/cancel", "POST")
-        assert resp["status"] == 200
-        payload = resp["payload"]
-        assert payload["cancelled"] is True
-        assert payload["message"] == "任务已取消"
-        assert payload["cascaded_subtasks"] == 0
+        assert resp["status"] == 404
 
     async def test_submit_task_missing_404(self, monkeypatch: pytest.MonkeyPatch,
                                            hub: _FakeCapabilityHub) -> None:
@@ -1283,7 +1395,14 @@ class TestEdgeAndDegradedBranches:
         import http_api
 
         monkeypatch.setattr(http_api, "_capability", hub.get)
-        monkeypatch.setattr(http_api, "get_project_registry", lambda: None)
+
+        async def _no_project_service(method: str, args: dict[str, Any]) -> dict[str, Any]:
+            raise http_api.APIError(
+                status_code=503, error_code="API_TIME_2005",
+                message="project service unavailable",
+            )
+
+        monkeypatch.setattr(http_api, "_project_call", _no_project_service)
 
         # 读面：state 不可用 → 200 空降级
         r = await http_api.handle_http("/ext/task_service/tasks", "GET", "", {}, None)
@@ -1306,14 +1425,14 @@ class TestEdgeAndDegradedBranches:
                                        {}, None)
         assert r["data"]["status"] == 503
 
-        # 删除/取消不再依赖 task_service：删除走 state 存在性（缺失 404），
-        # 取消恒 200（挂起管线自行表达无 run）
+        # 删除/取消不再依赖 task_service：删除与取消都走 state 存在性闸
+        # （缺失 404）——取消带终态随写面，对未知 id 落终态会 upsert 出幽灵行
         monkeypatch.setattr(http_api, "_capability", hub.get)
         r = await http_api.handle_http("/ext/task_service/tasks/x", "DELETE", "", {}, None)
         assert r["data"]["status"] == 404
         hub._responses["pipeline-executor"] = {"suspend_pipeline": {"run_id": "r-1"}}
         r = await http_api.handle_http("/ext/task_service/tasks/x/cancel", "POST", "", {}, None)
-        assert r["data"]["status"] == 200
+        assert r["data"]["status"] == 404
 
         # projects 域：登记簿不可用 → 读写面均 503（fail-honest，不空降级）
         monkeypatch.setattr(http_api, "_capability", lambda name: (_ for _ in ()).throw(KeyError(name)))

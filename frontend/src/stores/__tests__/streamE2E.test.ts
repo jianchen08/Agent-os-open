@@ -167,7 +167,7 @@ describe('stream 端到端：handleStreamStart → handleStreamEnd', () => {
     expect(afterEnd.length).toBeGreaterThanOrEqual(1)
   })
 
-  it('场景D: 空轮次 stream_end（无 new_message 无内容）移除占位，后续事件不崩溃', () => {
+  it('场景D: 空轮次 stream_end（无 new_message 无内容）占位保留跨轮，滞后 delta 同泡回流不崩溃', () => {
     pipelineStore.getState().registerPipeline({
       pipelineId: PIPELINE_ID,
       sessionId: THREAD_ID,
@@ -190,10 +190,12 @@ describe('stream 端到端：handleStreamStart → handleStreamEnd', () => {
 
     const afterMidEnd = pipelineStore.getState().getMessages(PIPELINE_ID)
     const midMsg = afterMidEnd.find(m => m.id === MESSAGE_ID)
-    // 空轮次：消息未持久化，占位静默移除（不再补「回复内容为空」警示卡）
-    expect(midMsg).toBeUndefined()
+    // 空轮次但 run 仍在流式：占位保留（「思考中」指示跨轮延续不闪没；
+    // 消息未持久化，后续由下一轮 stream_start 的 orphan 清理或 run 终态清扫接手）
+    expect(midMsg).toBeDefined()
+    expect(midMsg!.status).toBe('streaming')
 
-    // 3. 后续 delta（滞后到达：按占位语义自动重建）→ stream_end 不崩溃
+    // 3. 后续 delta（滞后到达：落到同一条保留的占位上）→ stream_end 不崩溃
     handleTextDelta({
       pipeline_id: PIPELINE_ID,
       message_id: MESSAGE_ID,
@@ -210,7 +212,7 @@ describe('stream 端到端：handleStreamStart → handleStreamEnd', () => {
 
     const finalMsgs = pipelineStore.getState().getMessages(PIPELINE_ID)
     const finalMsg = finalMsgs.find(m => m.id === MESSAGE_ID)
-    // 滞后 delta 正常回流：有内容 → 保留并收尾 completed（空轮次移除仅针对零内容）
+    // 滞后 delta 正常回流：有内容 → 收尾 completed（保留与收尾仅按内容分流）
     expect(finalMsg).toBeDefined()
     expect(finalMsg!.status).toBe('completed')
     expect((finalMsg?.content || '') + finalMsg?.parts?.map((p: any) => p.content || '').join('')).toContain('final answer')

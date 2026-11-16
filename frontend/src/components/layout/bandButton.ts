@@ -20,8 +20,8 @@ export const BAND_BUTTON_CLASS =
 /** 激活态变体（当前所在区域/当前标签） */
 export const BAND_BUTTON_ACTIVE_CLASS = 'bg-primary/15 text-primary font-medium'
 
-/** 非激活变体 */
-export const BAND_BUTTON_IDLE_CLASS = 'text-muted-foreground hover:bg-accent hover:text-foreground'
+/** 非激活变体（hover 用 muted 微面，与激活态 primary/15 保持层级差） */
+export const BAND_BUTTON_IDLE_CLASS = 'text-muted-foreground hover:bg-muted hover:text-foreground'
 
 /** 顶带统一图标尺寸 */
 export const BAND_BUTTON_ICON_CLASS = 'h-3.5 w-3.5 shrink-0'

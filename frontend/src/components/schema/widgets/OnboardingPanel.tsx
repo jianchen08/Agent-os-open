@@ -14,8 +14,13 @@ import { CheckCircle2 } from '@/assets/icons'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { Button } from '@/components/ui/button'
+import { useWorkspaceTabs } from '@/hooks/useWorkspaceTabs'
 import { cn } from '@/lib/utils'
 import apiClient from '@/services/api/client'
+import {
+  consumeLlmWizardFocus,
+  subscribeLlmWizardFocus,
+} from '@/services/onboarding/llmWizardFocus'
 import {
   fetchOnboardingContent,
   fetchOnboardingProgress,
@@ -24,7 +29,6 @@ import {
 import { evaluateCondition, collectApiChecks } from '@/services/onboarding/evaluator'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { openWorkspacePanelByPath, TOP_NAV_PANELS } from '@/services/workspacePanelOpener'
-import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { LlmSetupWizard } from './onboarding/LlmSetupWizard'
 import type { EvaluationContext } from '@/services/onboarding/evaluator'
 import type { OnboardingProgress, Walkthrough, WalkthroughStep } from '@/services/onboarding/types'
@@ -49,15 +53,21 @@ export function OnboardingPanel(): ReactNode {
   const [apiResults, setApiResults] = useState<Map<string, unknown>>(new Map())
   const [activeId, setActiveId] = useState<string | null>(null)
   const [wizardOpen, setWizardOpen] = useState(false)
-  const workspaceTabs = useLayoutModeStore((s) => s.workspaceTabs)
+  /** 工作区页签集合（panel_visited 判定输入：开着的页签即已访问面板） */
+  const workspaceTabs = useWorkspaceTabs()
   /** 已发起自动落账的步骤键（防 effect 重复 POST） */
   const autoMarkedRef = useRef(new Set<string>())
+  /** 内容最新值引用（自动打开直达可能先于/晚于内容装载到达） */
+  const contentRef = useRef<Walkthrough[] | null>(null)
+  /** 自动打开直达意图（事件/闩先于内容装载到达时暂存，装载后应用） */
+  const pendingFocusRef = useRef(false)
 
   useEffect(() => {
     let cancelled = false
     Promise.all([fetchOnboardingContent(), fetchOnboardingProgress()])
       .then(([c, p]) => {
         if (cancelled) return
+        contentRef.current = c.walkthroughs
         setContent(c.walkthroughs)
         setProgress(p.progress)
         const first = c.walkthroughs.find((w) => w.default_open) ?? c.walkthroughs[0]
@@ -70,6 +80,30 @@ export function OnboardingPanel(): ReactNode {
       cancelled = true
     }
   }, [])
+
+  /** 自动打开直达：定位 llm_setup 向导所在 walkthrough 并展开向导（第 1 步=选供应商） */
+  const applyLlmWizardFocus = useCallback((walkthroughs: Walkthrough[]): void => {
+    const target = walkthroughs.find((w) => w.steps.some((s) => s.wizard === 'llm_setup'))
+    if (target) setActiveId(target.id)
+    setWizardOpen(true)
+  }, [])
+
+  // 自动打开直达（autoOpen 弹面板时发出）：挂载消费闩（事件先于挂载）+ 订阅
+  // 事件（面板已挂载）；内容未到先记意图，装载后由下方 effect 应用
+  useEffect(() => {
+    if (consumeLlmWizardFocus()) pendingFocusRef.current = true
+    return subscribeLlmWizardFocus(() => {
+      if (contentRef.current) applyLlmWizardFocus(contentRef.current)
+      else pendingFocusRef.current = true
+    })
+  }, [applyLlmWizardFocus])
+
+  useEffect(() => {
+    if (content && pendingFocusRef.current) {
+      pendingFocusRef.current = false
+      applyLlmWizardFocus(content)
+    }
+  }, [content, applyLlmWizardFocus])
 
   const refreshApi = useCallback(async (): Promise<void> => {
     if (!content) return
@@ -182,9 +216,9 @@ export function OnboardingPanel(): ReactNode {
   }
 
   return (
-    <div className="flex h-full min-h-0" data-testid="onboarding-panel">
-      {/* 左列：walkthrough 清单 + 进度 */}
-      <aside className="border-border w-64 shrink-0 overflow-y-auto border-r p-3">
+    <div className="flex h-full min-h-0 flex-col md:flex-row" data-testid="onboarding-panel">
+      {/* 左列：walkthrough 清单 + 进度（移动端横向堆叠为顶部列表，限高保步骤可见） */}
+      <aside className="border-border w-full shrink-0 overflow-y-auto border-b p-3 md:h-full md:w-64 md:border-b-0 md:border-r">
         <div className="text-foreground mb-2 px-1 text-sm font-semibold">使用引导</div>
         {content.map((w) => {
           const done = doneCount(w)
@@ -198,7 +232,7 @@ export function OnboardingPanel(): ReactNode {
                 'mb-1 w-full rounded-md px-2 py-2 text-left transition-colors',
                 w.id === active.id
                   ? 'bg-accent text-accent-foreground'
-                  : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',
+                  : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground',
               )}
             >
               <div className="flex items-center justify-between gap-2">

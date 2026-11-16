@@ -203,20 +203,21 @@ describe('工作空间读接口', () => {
     expect(res).toEqual({ id: 'w1' })
   })
 
-  it('getWorkspaceFileTree 有树 → 原样返回', async () => {
+  it('getWorkspaceFileTree 有条目 → 原样返回（单层 + 截断标记）', async () => {
     vi.mocked(apiClient.get).mockResolvedValueOnce(
-      okResponse({ tree: [{ name: 'a.txt', type: 'file' }] }),
+      okResponse({ entries: [{ name: 'a.txt', type: 'file' }], truncated: true }),
     )
 
     const res = await getWorkspaceFileTree('t2')
 
-    expect(res.tree).toEqual([{ name: 'a.txt', type: 'file' }])
+    expect(res.entries).toEqual([{ name: 'a.txt', type: 'file' }])
+    expect(res.truncated).toBe(true)
   })
 
-  it('getWorkspaceFileTree 响应缺 tree → 兜底空数组', async () => {
+  it('getWorkspaceFileTree 响应缺 entries → 兜底空数组 + 未截断', async () => {
     vi.mocked(apiClient.get).mockResolvedValueOnce(okResponse({}))
 
-    expect(await getWorkspaceFileTree('t2')).toEqual({ tree: [] })
+    expect(await getWorkspaceFileTree('t2')).toEqual({ entries: [], truncated: false })
   })
 
   it('getWorkspaceArtifacts 有制品 → 原样返回', async () => {

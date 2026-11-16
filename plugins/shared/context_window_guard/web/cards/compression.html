@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<!--
+  压缩段消息卡（chatMessages 声明 id=compression_card；消息段模型 §5.1 展示层）
+
+  形态契约（2026-10-17 用户裁定）：渲染本体归插件——本卡即压缩段的全部
+  卡面：折叠态 = 一行细条（标题写压缩条数，无框、融入对话流）；展开态 =
+  过程摘要 + 状态快照两字段统一平铺。被压原文的还原（段成员按聊天行渲染）
+  由宿主在本卡下方装配——卡面不做原文展开、不做段取数。
+
+  路由：消息 metadata.message_style 命中本样式 id → PluginMessageCard 通用
+  webview 消息卡容器（fit=auto 自适应高度，折叠约 28px、展开随内容）→
+  WebviewWidget 以 srcDoc 装载本页（CSP：default-src 'none'，connect-src
+  'none'——本页无任何外联，纯静态 + postMessage 桥）。
+
+  输入契约（容器下行桥，theme.sync/ctx.sync 同款信封 {__agentos_webview,
+  method, params}）：
+  - method "message.data"：params = { message: { content, metadata } }——
+    同段压缩块消息（过程块/快照块）由宿主归组后合并 content 下行（数据
+    路由归宿主），本卡从合并内容解析 <compressed>/<current_state> 两标签；
+  - method "widget.event"：params = AdaptedWidgetEvent { widget_id, event,
+    data }，取 data.message 同上（既有通用事件通道）；
+  - method "theme.sync"：params.tokens = --ag-* 主题 token map，应用为根变量。
+  未收到消息数据前卡片呈折叠占位态（不伪造计数）。
+
+  计数口径：N = metadata.compression_ref.seq_range 跨度（seq_end -
+  seq_start + 1）；缺失时退化解析 <compressed seq="a-b"> 属性。被压原文
+  的精确成员数以宿主段取数（compression_ref.segment_id → message-
+  segments/{id} 的 members）为准，不在本卡面。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --ag-bg: transparent;
+    --ag-fg: #1f2328;
+    --ag-muted: #656d76;
+    --ag-border: #d0d7de;
+    --ag-accent: #0969da;
+    --ag-accent-soft: rgba(9, 105, 218, 0.10);
+    /* 品牌主色（theme.sync 载荷 --ag-primary；旧宿主载荷无此键回退 accent） */
+    --ag-primary: var(--ag-accent);
+    --ag-primary-soft: var(--ag-accent-soft);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--ag-bg); }
+  body {
+    font: 12px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: var(--ag-muted);
+    padding: 2px 4px;
+  }
+  .strip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    padding: 7px 0;
+    cursor: pointer;
+    text-align: left;
+    border-radius: 6px;
+    transition: background-color 140ms ease;
+  }
+  .strip:hover { background: var(--ag-primary-soft, var(--ag-accent-soft)); }
+  .strip:focus-visible { outline: 1px solid var(--ag-primary, var(--ag-accent)); outline-offset: 2px; }
+  /* 分界发丝线：向标签方向渐隐，悬停微亮——「压缩/未压缩」分界的视觉锚 */
+  .strip .rule {
+    flex: 1;
+    height: 1px;
+    background: var(--ag-border);
+    opacity: 0.4;
+    transition: opacity 140ms ease;
+  }
+  .strip .rule.l { mask-image: linear-gradient(to right, transparent, #000 70%); }
+  .strip .rule.r { mask-image: linear-gradient(to left, transparent, #000 70%); }
+  .strip:hover .rule { opacity: 0.75; }
+  .strip .chev {
+    display: inline-block;
+    flex: none;
+    color: var(--ag-primary, var(--ag-accent));
+    font-size: 10px;
+    transition: transform 150ms ease;
+  }
+  .strip.open .chev { transform: rotate(90deg); }
+  .strip .badge {
+    flex: none;
+    background: var(--ag-primary-soft, var(--ag-accent-soft));
+    color: var(--ag-primary, var(--ag-accent));
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1;
+    padding: 3px 9px;
+    border-radius: 999px;
+    transition: filter 140ms ease;
+  }
+  .strip:hover .badge { filter: brightness(1.08); }
+  .strip .label {
+    flex: none;
+    color: var(--ag-fg);
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    transition: color 140ms ease;
+  }
+  .strip:hover .label { color: var(--ag-primary, var(--ag-accent)); }
+  .expanded {
+    margin: 4px 0 2px 18px;
+    animation: expand-in 160ms ease;
+  }
+  @keyframes expand-in {
+    from { opacity: 0; transform: translateY(-3px); }
+    to { opacity: 1; transform: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .strip, .strip .chev, .strip .rule, .strip .label { transition: none; }
+    .expanded { animation: none; }
+  }
+  .section { margin-top: 6px; }
+  .section:first-child { margin-top: 0; }
+  .section > h3 {
+    margin: 0 0 2px;
+    font-size: 12px;
+    color: var(--ag-muted);
+    font-weight: 600;
+  }
+  .section-body {
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--ag-fg);
+  }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+  <button type="button" class="strip" id="toggle-btn" aria-expanded="false">
+    <span class="rule l"></span>
+    <span class="badge">压缩</span>
+    <span class="label" id="title">对话记录</span>
+    <span class="chev">▸</span>
+    <span class="rule r"></span>
+  </button>
+  <div id="expanded" class="expanded hidden">
+    <div class="section hidden" id="process-section">
+      <h3>过程摘要</h3>
+      <div class="section-body" id="process-body"></div>
+    </div>
+    <div class="section hidden" id="snapshot-section">
+      <h3>状态快照</h3>
+      <div class="section-body" id="snapshot-body"></div>
+    </div>
+  </div>
+<script>
+(function () {
+  'use strict';
+
+  var stripBtn = document.getElementById('toggle-btn');
+  var titleEl = document.getElementById('title');
+  var expandedEl = document.getElementById('expanded');
+  var processSection = document.getElementById('process-section');
+  var processBody = document.getElementById('process-body');
+  var snapshotSection = document.getElementById('snapshot-section');
+  var snapshotBody = document.getElementById('snapshot-body');
+
+  var collapsed = true;
+
+  // 高度回报（webview.resize 通用上行桥，fit=auto 容器消费）。必须走 bootstrap
+  // 注入的 window.agentos.postMessage（携带实例令牌，裸 postMessage 被安全校验
+  // 拒收）；桥未注入（独立预览/测试）时静默跳过。
+  // 量高用 body 盒实测（height:auto=内容高）：documentElement.scrollHeight =
+  // max(内容, 视口)，被展开撑大的视口会把折叠后的读数托底——高度永远缩不回
+  // 去，展开→折叠留一块空白（1017 实测修复）。
+  function reportHeight() {
+    var post = window.agentos && window.agentos.postMessage;
+    if (typeof post !== 'function') return;
+    var h = Math.ceil(document.body.getBoundingClientRect().height);
+    if (h > 0) post('webview.resize', { height: h });
+  }
+
+  // 布局收敛后再补报一次（类切换/字体/首帧时序下 scroll 尺寸晚定）
+  function reportHeightSoon() {
+    reportHeight();
+    requestAnimationFrame(reportHeight);
+  }
+
+  // ── 数据注入（见文件头输入契约）───────────────────────────────
+
+  function extractMessage(params) {
+    if (!params || typeof params !== 'object') return null;
+    var candidates = [params.message, params.data && params.data.message, params];
+    for (var i = 0; i < candidates.length; i++) {
+      var c = candidates[i];
+      if (c && typeof c === 'object' && typeof c.content === 'string') return c;
+    }
+    return null;
+  }
+
+  function matchTag(content, tag) {
+    // 内联标签解析（<compressed seq="a-b" ...>…</compressed> / <current_state>…）
+    var re = new RegExp('<' + tag + '(?:\\s[^>]*)?>([\\s\\S]*?)</' + tag + '>', 'i');
+    var m = content.match(re);
+    if (!m) return null;
+    return { openTag: m[0].slice(0, m[0].indexOf('>')), inner: m[1].trim() };
+  }
+
+  function attrOf(openTag, name) {
+    var m = openTag.match(new RegExp(name + '="([^"]*)"'));
+    return m ? m[1] : '';
+  }
+
+  function setText(el, inner) {
+    // 摘要体剥段落后按纯文本渲染（kv 化交由宿主装配面，卡面保持轻）
+    el.textContent = inner.replace(/^##\s*过程摘要\s*/, '').trim();
+  }
+
+  function hydrate(message) {
+    var ref = message.metadata && message.metadata.compression_ref;
+
+    var process = matchTag(message.content, 'compressed');
+    var snapshot = matchTag(message.content, 'current_state');
+
+    // 计数口径见文件头：优先段引用 seq_range，退化解析内容 seq 属性
+    var range = ref && Array.isArray(ref.seq_range) && ref.seq_range.length === 2
+      ? ref.seq_range
+      : null;
+    if (!range && process) {
+      var seqAttr = attrOf(process.openTag, 'seq').split('-');
+      range = seqAttr.length === 2 ? [+seqAttr[0], +seqAttr[1]] : null;
+    }
+    var count = range && isFinite(range[0]) && isFinite(range[1])
+      ? range[1] - range[0] + 1
+      : 0;
+    titleEl.textContent = count > 0 ? count + ' 条消息' : '对话记录';
+
+    processSection.classList.toggle('hidden', !process);
+    setText(processBody, process ? process.inner : '');
+    snapshotSection.classList.toggle('hidden', !snapshot);
+    setText(snapshotBody, snapshot ? snapshot.inner : '');
+    reportHeightSoon();
+  }
+
+  // ── 交互 ─────────────────────────────────────────────────────
+
+  stripBtn.addEventListener('click', function () {
+    collapsed = !collapsed;
+    expandedEl.classList.toggle('hidden', collapsed);
+    stripBtn.classList.toggle('open', !collapsed);
+    stripBtn.setAttribute('aria-expanded', String(!collapsed));
+    reportHeightSoon();
+  });
+
+  // ── 容器下行桥 ────────────────────────────────────────────────
+
+  function applyTokens(tokens) {
+    if (!tokens || typeof tokens !== 'object') return;
+    Object.keys(tokens).forEach(function (key) {
+      if (key.indexOf('--') === 0) {
+        document.documentElement.style.setProperty(key, tokens[key]);
+      }
+    });
+  }
+
+  window.addEventListener('message', function (event) {
+    var msg = event.data;
+    if (!msg || msg.__agentos_webview !== true || typeof msg.method !== 'string') return;
+    if (msg.method === 'theme.sync') {
+      applyTokens(msg.params && msg.params.tokens);
+      reportHeight();
+      return;
+    }
+    if (msg.method === 'message.data' || msg.method === 'widget.event') {
+      var message = extractMessage(msg.params);
+      if (message) hydrate(message);
+    }
+  });
+})();
+</script>
+</body>
+</html>

@@ -22,7 +22,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared" / "system"
+_SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared"
 # 插件内部用 `from artifacts.models import ...`（包名 artifacts），
 # 故把 system/ 放到 sys.path 使包可解析（与 tests/plugins/system/artifacts/conftest.py 同源）。
 if str(_SYSTEM_DIR) not in sys.path:

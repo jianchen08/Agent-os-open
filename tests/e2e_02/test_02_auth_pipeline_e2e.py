@@ -29,7 +29,9 @@ import os
 import urllib.error
 import urllib.request
 
-from e2e_helpers import KERNEL_URL, http_post_json, http_post_json_auth
+import pytest
+
+from e2e_helpers import KERNEL_URL, create_session, http_post_json, http_post_json_auth
 
 
 # ============================================================
@@ -266,11 +268,23 @@ class TestPluginToolLoading:
 # "[pipeline:"/"Response to:" 是 0.1 stub 期标记——非 echo 性质以
 # content != 原文断言。
 # ============================================================
+@pytest.mark.skipif(
+    not os.environ.get("ZHIPU_API_KEY"),
+    reason="需要 ZHIPU_API_KEY（真实 LLM 回复；与 test_05 同口径）",
+)
 class TestChatPipelineEngine:
+    """3.x chat 走真实管道：会话须先建（当前契约 chat 拒绝静默换管道——
+    旧用例直接给裸 session_id 字符串，0.2 契约下恒 500）。"""
 
-    def test_chat_response_content_nonempty(self, auth_token):
+    @pytest.fixture(scope="class")
+    def chat_session_id(self, auth_token, cleanup_sessions):
+        session = create_session(auth_token, title="e2e-chat-engine")
+        cleanup_sessions(session["thread_id"])
+        return session["thread_id"]
+
+    def test_chat_response_content_nonempty(self, auth_token, chat_session_id):
         """3.1 chat 响应 content 为非空字符串（经管道引擎产出）。"""
-        payload = {"message": "hello", "session_id": "e2e-chat-engine"}
+        payload = {"message": "hello", "session_id": chat_session_id}
         status, body, _ = http_post_json_auth(
             f"{KERNEL_URL}/api/v1/chat", payload, auth_token, timeout=60
         )
@@ -279,9 +293,9 @@ class TestChatPipelineEngine:
         assert isinstance(body.get("content"), str), "content 应为字符串"
         assert body["content"].strip(), "content 不应为空"
 
-    def test_chat_content_not_echo_mode(self, auth_token):
+    def test_chat_content_not_echo_mode(self, auth_token, chat_session_id):
         """3.2 chat 响应 content 不等于原文（echo 模式特征是原样回显）。"""
-        payload = {"message": "hello", "session_id": "e2e-chat-engine"}
+        payload = {"message": "hello", "session_id": chat_session_id}
         status, body, _ = http_post_json_auth(
             f"{KERNEL_URL}/api/v1/chat", payload, auth_token, timeout=60
         )
@@ -290,9 +304,9 @@ class TestChatPipelineEngine:
             f"content 原样回显（echo 模式），实际: '{body['content'][:80]}'"
         )
 
-    def test_chat_response_type_is_message(self, auth_token):
+    def test_chat_response_type_is_message(self, auth_token, chat_session_id):
         """3.3a chat 响应应包含 type='message'。"""
-        payload = {"message": "hello", "session_id": "e2e-chat-engine"}
+        payload = {"message": "hello", "session_id": chat_session_id}
         status, body, _ = http_post_json_auth(
             f"{KERNEL_URL}/api/v1/chat", payload, auth_token, timeout=60
         )
@@ -301,9 +315,9 @@ class TestChatPipelineEngine:
             f"type 期望 'message'，实际 '{body.get('type')}'"
         )
 
-    def test_chat_response_has_session_id(self, auth_token):
+    def test_chat_response_has_session_id(self, auth_token, chat_session_id):
         """3.3b chat 响应应回显 session_id。"""
-        payload = {"message": "hello", "session_id": "e2e-chat-engine"}
+        payload = {"message": "hello", "session_id": chat_session_id}
         status, body, _ = http_post_json_auth(
             f"{KERNEL_URL}/api/v1/chat", payload, auth_token, timeout=60
         )
@@ -312,9 +326,9 @@ class TestChatPipelineEngine:
             f"session_id 期望 '{payload['session_id']}'，实际 '{body.get('session_id')}'"
         )
 
-    def test_chat_response_has_timestamp(self, auth_token):
+    def test_chat_response_has_timestamp(self, auth_token, chat_session_id):
         """3.3c chat 响应应包含 timestamp 字段。"""
-        payload = {"message": "hello", "session_id": "e2e-chat-engine"}
+        payload = {"message": "hello", "session_id": chat_session_id}
         status, body, _ = http_post_json_auth(
             f"{KERNEL_URL}/api/v1/chat", payload, auth_token, timeout=60
         )

@@ -6,9 +6,11 @@
  * track.llm_usage）与 run_status/ended/raw_error 三源状态推断只允许存在于
  * pipelines.ts 适配层——组件层只消费视图模型。本文件锁两件事：
  * 1. 键名映射与语义等值（改一个插件 export_fields 键名只需改 mapper 一处）；
- * 2. 归一运行状态的单一出口（run_status 五态直映，缺省/未知词汇回退
- *    raw_error→failed / ended→completed / running 推断——旧 checkpoint 数据
- *    无 run_status 键时不失真，内核新增状态词汇时前端不崩、走推断兜底）。
+ * 2. 归一运行状态的单一出口（run_status 五态直映；ended/raw_error 双源保留
+ *    终局推断；三源全缺或词汇未知 = 获取不到运行状态真值 → unknown，不猜
+ *    running——用户裁定 2026-11-02「前端状态显示与后端数据完全一致，获取
+ *    不到落 unknown」。装机活体 2026-11-01：pending 任务 state 出生行无任何
+ *    运行痕迹，旧推断兜底猜 running 显「运行中」，实际从未起跑）。
  *
  * 测试策略：纯函数直测（无网络、无 mock），多组有区分度输入 + 性质断言。
  */
@@ -27,6 +29,7 @@ const RUN_STATUS_VOCABULARY: PipelineStatus[] = [
   'completed',
   'failed',
   'cancelled',
+  'unknown',
 ]
 
 describe('mapStateSummaryToViewModel 归一运行状态（单一状态出口）', () => {
@@ -36,16 +39,17 @@ describe('mapStateSummaryToViewModel 归一运行状态（单一状态出口）'
     }
   })
 
-  it('旧 checkpoint 数据无 run_status：raw_error→failed / ended→completed / 全缺→running', () => {
+  it('三源状态键：raw_error→failed / ended→completed / 全缺→unknown（不猜 running）', () => {
     expect(mapStateSummaryToViewModel({ raw_error: 'boom' }).status).toBe('failed')
     expect(mapStateSummaryToViewModel({ ended: true }).status).toBe('completed')
-    expect(mapStateSummaryToViewModel({}).status).toBe('running')
+    // 三源全缺 = 无运行状态真值（如从未起跑的任务管道出生行）→ 诚实落 unknown
+    expect(mapStateSummaryToViewModel({}).status).toBe('unknown')
     // 两者同时在：错误优先于结束（失败态不被 completed 掩盖）
     expect(mapStateSummaryToViewModel({ raw_error: 'boom', ended: true }).status).toBe('failed')
   })
 
-  it('未知状态词汇（内核新增枚举）不崩：回退三源推断（前向兼容守护）', () => {
-    expect(mapStateSummaryToViewModel({ run_status: 'evolving' }).status).toBe('running')
+  it('未知状态词汇（内核新增枚举）不崩：落 unknown 不猜 running（前向兼容守护）', () => {
+    expect(mapStateSummaryToViewModel({ run_status: 'evolving' }).status).toBe('unknown')
     expect(
       mapStateSummaryToViewModel({ run_status: 'evolving', ended: true }).status,
     ).toBe('completed')
@@ -81,11 +85,11 @@ describe('mapStateSummaryToViewModel 扁平键 → 视图模型（键名只存�
     expect(view.workspacePath).toBe('/ws/task-copy')
   })
 
-  it('模式键映射：mode 有值透传，空串/缺失 → undefined（无 mode 键零渲染的取数前提）', () => {
-    expect(mapStateSummaryToViewModel({ mode: 'coding' }).mode).toBe('coding')
-    expect(mapStateSummaryToViewModel({ mode: 'roleplay' }).mode).toBe('roleplay')
-    expect(mapStateSummaryToViewModel({ mode: '' }).mode).toBeUndefined()
-    expect(mapStateSummaryToViewModel({}).mode).toBeUndefined()
+  it('模式键映射：标签集归一透传，空串/缺失 → 空集（无 mode 键零渲染的取数前提）', () => {
+    expect(mapStateSummaryToViewModel({ mode: 'coding' }).modeTags).toEqual(['coding'])
+    expect(mapStateSummaryToViewModel({ mode: 'roleplay' }).modeTags).toEqual(['roleplay'])
+    expect(mapStateSummaryToViewModel({ mode: '' }).modeTags).toEqual([])
+    expect(mapStateSummaryToViewModel({}).modeTags).toEqual([])
   })
 
   it('工作区坐标优先级：task.ws_meta.path > ws_meta.path > workspace（任务管道防会话投影污染）', () => {
@@ -123,6 +127,32 @@ describe('mapStateSummaryToViewModel 扁平键 → 视图模型（键名只存�
     expect(view.llmUsage).toEqual(usage)
   })
 
+  it('压缩终态映射：context.compression 只收 applied/failed（不发明状态）', () => {
+    const failed = mapStateSummaryToViewModel({
+      'context.compression': {
+        status: 'failed',
+        reason: 'no healthy deployments',
+        ended_at: '2026-10-28T07:50:48Z',
+      },
+    })
+    expect(failed.compressionStatus).toEqual({
+      status: 'failed',
+      reason: 'no healthy deployments',
+    })
+
+    const applied = mapStateSummaryToViewModel({
+      'context.compression': { status: 'applied' },
+    })
+    expect(applied.compressionStatus).toEqual({ status: 'applied', reason: undefined })
+
+    // 未知/缺失状态一律 undefined（不展示假状态）
+    expect(
+      mapStateSummaryToViewModel({ 'context.compression': { status: 'weird' } })
+        .compressionStatus,
+    ).toBeUndefined()
+    expect(mapStateSummaryToViewModel({}).compressionStatus).toBeUndefined()
+  })
+
   it('phase/message/end/error 展示字段映射；非真 ended 不置位', () => {
     const view = mapStateSummaryToViewModel({
       current_phase: 'main',
@@ -139,9 +169,82 @@ describe('mapStateSummaryToViewModel 扁平键 → 视图模型（键名只存�
     expect(ended.rawError).toBe('late failure')
   })
 
-  it('全空摘要：视图模型字段可选不炸（缺省字段 undefined，status 兜底 running）', () => {
+  it('错误兜底：raw_error 缺席时回退 run.plugin_errors 全量拼接（ADR 2026-10-27）', () => {
+    // 折叠失败轮真值形态：raw_error 恒缺席 + run_stop_reason 恒空串 + 镜像键在场
+    const view = mapStateSummaryToViewModel({
+      run_status: 'failed',
+      raw_error: null,
+      run_stop_reason: '',
+      'run.plugin_errors': [
+        { plugin_id: 'pipeline_llm_core', code: 'MCP_CALL_FAILED', message: '' },
+        {
+          plugin_id: 'pipeline_llm_core',
+          code: 'MCP_CALL_FAILED',
+          message: 'RateLimitError - [1302][您的账户已达到速率限制]',
+        },
+        {
+          plugin_id: 'pipeline_other',
+          code: 'PLUGIN_EXEC_FAILED',
+          message: '第二个错误原文',
+        },
+      ],
+    })
+    // 空文本条目跳过；多条逐行拼接全量透传不截断
+    expect(view.rawError).toBe(
+      'RateLimitError - [1302][您的账户已达到速率限制]\n第二个错误原文',
+    )
+    // raw_error 优先（引擎投影键在场时不做拼接回退）
+    const precedence = mapStateSummaryToViewModel({
+      raw_error: 'engine projected',
+      'run.plugin_errors': [{ message: 'mirror' }],
+    })
+    expect(precedence.rawError).toBe('engine projected')
+    // 镜像键全空/形态漂移 → undefined（不伪造空串语义）
+    expect(
+      mapStateSummaryToViewModel({ 'run.plugin_errors': [{ message: '  ' }] }).rawError,
+    ).toBeUndefined()
+    expect(mapStateSummaryToViewModel({}).rawError).toBeUndefined()
+  })
+
+  it('终局署名映射：非空透传，空串/缺失不渲染（run_stop_reason 基线出口 2026-10-25）', () => {
+    expect(
+      mapStateSummaryToViewModel({ run_stop_reason: 'empty_reply_exhausted' }).stopReason,
+    ).toBe('empty_reply_exhausted')
+    // 空串 = 未署名（每轮终态都写防跨 run 残留）→ 不伪造为有署名
+    expect(mapStateSummaryToViewModel({ run_stop_reason: '' }).stopReason).toBeUndefined()
+    expect(mapStateSummaryToViewModel({}).stopReason).toBeUndefined()
+  })
+
+  it('挂起归因映射（P-23 片2）：suspended_reason 非空透传，空串/缺失缺省（两向）', () => {
+    expect(
+      mapStateSummaryToViewModel({
+        suspended_reason: 'memory watermark self-heal: private bytes 持续超阈值',
+      }).suspendedReason,
+    ).toBe('memory watermark self-heal: private bytes 持续超阈值')
+    // 空串 = 未署名（drain 写面防跨 run 残留语义）→ 缺省不伪造为有归因
+    expect(mapStateSummaryToViewModel({ suspended_reason: '' }).suspendedReason).toBeUndefined()
+    expect(mapStateSummaryToViewModel({}).suspendedReason).toBeUndefined()
+  })
+
+  it('任务失败归因映射（P-21）：task.failure_* 非空透传，空串/缺失回退现状不伪造', () => {
+    const view = mapStateSummaryToViewModel({
+      'task.failure_class': 'run_stopped',
+      'task.failure_reason': '运行终止（LLM 连续同类失败循环）',
+    })
+    expect(view.failureClass).toBe('run_stopped')
+    expect(view.failureReason).toBe('运行终止（LLM 连续同类失败循环）')
+    // 空串/缺失 = 无归因（字段缺失回退现状：归因行不渲染，不伪造空值语义）
+    expect(mapStateSummaryToViewModel({ 'task.failure_class': '' }).failureClass).toBeUndefined()
+    expect(mapStateSummaryToViewModel({}).failureReason).toBeUndefined()
+    // 单键在场：只透传在场的键（分类与全文互不牵连）
+    const partial = mapStateSummaryToViewModel({ 'task.failure_class': 'run_aborted' })
+    expect(partial.failureClass).toBe('run_aborted')
+    expect(partial.failureReason).toBeUndefined()
+  })
+
+  it('全空摘要：视图模型字段可选不炸（缺省字段 undefined，status 诚实落 unknown）', () => {
     const view = mapStateSummaryToViewModel({})
-    expect(view.status).toBe('running')
+    expect(view.status).toBe('unknown')
     expect(view.currentPhase).toBeUndefined()
     expect(view.llmUsage).toBeUndefined()
   })

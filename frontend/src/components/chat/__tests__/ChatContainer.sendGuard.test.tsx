@@ -3,7 +3,7 @@
  * 功能测试：ChatContainer 发送受理护栏（B9）
  *
  * pid 解析失败不再静默丢消息——回调受理协议（SendMessageReceipt）：
- * - 主标签 pipelineRunId 空 + 会话无主管道可兜底 → 提示「会话管道未就绪，
+ * - 主标签 pipelineRunId 空 + 会话无主管道可兜底 → 提示「会话未就绪，
  *   请稍候重试」+ 返回未受理（false），不上抛外层；
  * - 主标签 pipelineRunId 空 + 会话有主管道 → 兜底解析后照常受理透传（回归）；
  * - 管道就绪 → 原样透传外层并携带管道 ID（受理结果双向透传）；
@@ -78,9 +78,7 @@ vi.mock('@/hooks/queries/usePipelineRunsQuery', () => ({
 // 挂起态：避免挂载期网络调用在测试结束后 resolve 触发 act() 告警
 vi.mock('@/hooks/queries/useLlmQueries', () => ({
   useLlmConfigQuery: () => ({ data: undefined, isError: false }),
-  // 思考档位选项面（ChatContainer 声明数据源消费）：无数据 = 选择器隐藏，
-  // 本套件不断言思考面
-  useThinkingLevelsQuery: () => ({ data: undefined }),
+  useThinkingLevelsQuery: () => ({ data: null }),
 }))
 
 vi.mock('@/stores/agentTabStore', async () => {
@@ -146,7 +144,7 @@ describe('ChatContainer 发送受理护栏（pid 未就绪不静默丢消息）'
     useNotificationStore.setState({ notifications: [] })
   })
 
-  it('主标签 pipelineRunId 空 + 会话无主管道可兜底 → 未受理 + 「会话管道未就绪」提示，不上抛外层', () => {
+  it('主标签 pipelineRunId 空 + 会话无主管道可兜底 → 未受理 + 「会话未就绪」提示，不上抛外层', () => {
     useAgentTabStore.setState({
       tabs: [makeMainTab({ pipelineRunId: '' })],
       activeTabId: 'main-1',
@@ -158,7 +156,7 @@ describe('ChatContainer 发送受理护栏（pid 未就绪不静默丢消息）'
     const receipt = chatInputSpy.onSendMessage!({ content: '你好' })
     expect(receipt).toBe(false)
     expect(outerSend).not.toHaveBeenCalled()
-    expect(notificationCountByTitle('会话管道未就绪')).toBe(1)
+    expect(notificationCountByTitle('会话未就绪')).toBe(1)
   })
 
   it('主标签 pipelineRunId 空 + 会话有主管道 → 兜底解析主管道后受理透传（回归）', () => {
@@ -220,7 +218,7 @@ describe('ChatContainer 发送受理护栏（pid 未就绪不静默丢消息）'
 
 /**
  * BUG-28（全局发送断链）自愈契约：主管道解析失败多为会话缓存陈旧/未就绪
- * （列表拉取失败、创建响应与列表重拉的竞态窗口）——「会话管道未就绪」只允许
+ * （列表拉取失败、创建响应与列表重拉的竞态窗口）——「会话未就绪」只允许
  * 出现在真正瞬态，且必须带自愈路径：拒发即触发会话列表强制重拉，重试可受理。
  */
 describe('发送自愈：主管道解析失败触发会话列表强制重拉（BUG-28）', () => {
@@ -235,7 +233,7 @@ describe('发送自愈：主管道解析失败触发会话列表强制重拉（B
     useAgentTabStore.setState({ tabs: [], activeTabId: null, unreadCounts: {} })
     useNotificationStore.setState({ notifications: [] })
     // 隔离铠甲：通知 store 的 30s 内容指纹去重表是模块级状态（setState 不清），
-    // 前一个 describe 刚入列同指纹的「会话管道未就绪」会吞掉本 describe 的入列——
+    // 前一个 describe 刚入列同指纹的「会话未就绪」会吞掉本 describe 的入列——
     // 把时钟推过去重窗，用例与文件内顺序解耦（同前 useRealtimeEventsBranches 做法）。
     vi.useFakeTimers({ now: Date.now() + 31_000 })
   })
@@ -256,7 +254,7 @@ describe('发送自愈：主管道解析失败触发会话列表强制重拉（B
     const receipt = chatInputSpy.onSendMessage!({ content: '第一条' })
     expect(receipt).toBe(false)
     expect(outerSend).not.toHaveBeenCalled()
-    expect(notificationCountByTitle('会话管道未就绪')).toBe(1)
+    expect(notificationCountByTitle('会话未就绪')).toBe(1)
     expect(sessionsRef.reloadCalls).toBe(1)
   })
 

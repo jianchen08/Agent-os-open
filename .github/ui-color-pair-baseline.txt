@@ -14,25 +14,31 @@
 /components/chat/ActivityCard.tsx|bg=primary|fg=primary
 /components/chat/AgentTabItem.tsx|bg=primary|fg=primary
 /components/chat/ChatContainer.tsx|bg=background|fg=primary
-/components/chat/ChatInput.tsx|bg=primary|fg=foreground
+/components/chat/ComposerSendButton.tsx|bg=primary|fg=foreground
 /components/chat/ChatInputAttachmentPreview.tsx|bg=destructive|fg=primary
 /components/chat/ChatInputAttachmentPreview.tsx|bg=muted|fg=primary
 /components/chat/ContextUsageIndicator.tsx|bg=primary|fg=primary
 /components/chat/MessageItem.tsx|bg=background|fg=muted-foreground
-/components/chat/ToolMessageCard.tsx|bg=background|fg=status-warning
+/components/chat/MessageItem.tsx|bg=background|fg=status-warning
 /components/chat/MessageItem.tsx|bg=bubble-user|fg=status-error
 /components/chat/MessageItem.tsx|bg=bubble-user|fg=status-info
 /components/chat/NotificationCenter.tsx|bg=background|fg=primary
-/components/chat/NotificationCenter.tsx|bg=primary|fg=primary
 /components/chat/NotificationItem.tsx|bg=background|fg=primary
 /components/chat/PendingInputQueueBar.tsx|bg=muted|fg=muted-foreground
 /components/chat/ReferenceChip.tsx|bg=primary|fg=primary
 /components/chat/VotingPanel.tsx|bg=muted|fg=primary
 /components/chat/VotingPanel.tsx|bg=primary|fg=primary
+# 2026-11-04 清偿：NotificationCenter 改单列时间线+渐进渲染后选中态 class 组合
+# 消失（原 bg-primary+fg-primary 组合不再出现）——按棘轮删残留行
+# 2026-10-25 挂账（主题色清偿轮）：录音态底色 status-error 与互斥状态字色类
+# （transcribing/permission_denied/继承 foreground）的静态组合——检测器 v1 不
+# 追踪条件互斥；实际渲染录音态图标自具白色（既有设计），三组合均不可达
+/components/chat/VoiceInputButton.tsx|bg=status-error|fg=destructive
+/components/chat/VoiceInputButton.tsx|bg=status-error|fg=foreground
+/components/chat/VoiceInputButton.tsx|bg=status-error|fg=muted-foreground
 /components/config/PluginConfigEditor.tsx|bg=background|fg=muted-foreground
 /components/layout/FiveSpaceLayout.tsx|bg=background|fg=muted-foreground
-/components/layout/Sidebar.tsx|bg=card|fg=primary
-/components/layout/Sidebar.tsx|bg=elevated|fg=#22d3ee
+/components/layout/SidebarUserMenu.tsx|bg=background|fg=primary
 /components/layout/WorkspaceNavPage.tsx|bg=background|fg=muted-foreground
 /components/media/ImageGallery.tsx|bg=background|fg=muted-foreground
 /components/media/ImageGallery.tsx|bg=card|fg=muted-foreground
@@ -50,28 +56,22 @@
 /components/schema/widgets/FormWidget.tsx|bg=background|fg=primary
 /components/schema/widgets/ModePanelBadge.tsx|bg=primary|fg=primary
 /components/schema/widgets/OnboardingPanel.tsx|bg=accent|fg=muted-foreground
+/components/schema/widgets/PipelineManagerFilterBar.tsx|bg=primary|fg=primary
 /components/schema/widgets/PipelineManagerTreeParts.tsx|bg=background|fg=muted-foreground
 /components/schema/widgets/PipelineManagerTreeParts.tsx|bg=muted|fg=muted-foreground
 /components/schema/widgets/PipelineManagerTreeParts.tsx|bg=primary|fg=muted-foreground
 /components/schema/widgets/PipelineManagerTreeParts.tsx|bg=primary|fg=primary
-/components/schema/widgets/PipelineManagerWidget.tsx|bg=primary|fg=primary
 /components/schema/widgets/ReviewDocumentWidget.tsx|bg=background|fg=primary
 /components/schema/widgets/ReviewDocumentWidget.tsx|bg=primary|fg=primary
-/components/schema/widgets/SettingsHubWidget.tsx|bg=background|fg=#22d3ee
-/components/schema/widgets/SettingsHubWidget.tsx|bg=elevated|fg=#22d3ee
 /components/schema/widgets/SortableListWidget.tsx|bg=background|fg=muted-foreground
+/components/schema/widgets/StatusCardWidget.tsx|bg=background|fg=primary
 /components/schema/widgets/StatusCardWidget.tsx|bg=primary|fg=primary
 /components/schema/widgets/TableWidget.tsx|bg=muted|fg=muted-foreground
 /components/schema/widgets/TableWidget.tsx|bg=muted|fg=primary
 /components/schema/widgets/WizardWidget.tsx|bg=primary|fg=primary
-/components/session/SessionList.tsx|bg=elevated|fg=#22d3ee
-/components/session/SessionList.tsx|bg=elevated|fg=#cbd5e1
 /components/shared/EmptyState.tsx|bg=background|fg=muted-foreground
 /components/shared/SkinConsentDialog.tsx|bg=black|fg=foreground
 /components/shared/TextDiffView.tsx|bg=background|fg=muted-foreground
-/components/ui/dialog.tsx|bg=#000000|fg=foreground
-/components/workspace/CodeEditor.tsx|bg=#2a2a2a|fg=foreground
-/components/workspace/FilePreview.tsx|bg=#1a1a2e|fg=muted-foreground
 /pages/auth/authForm.tsx|bg=background|fg=primary
 /pages/debug/DbAdminPage.tsx|bg=accent|fg=muted-foreground
 /pages/debug/DebugEvaluationMetricsPage.tsx|bg=primary|fg=primary
@@ -87,8 +87,10 @@
 /pages/knowledge-base/KnowledgeBaseContent.tsx|bg=primary|fg=primary
 /pages/memory/ConversationMemorySection.tsx|bg=background|fg=muted-foreground
 /pages/memory/ConversationMemorySection.tsx|bg=primary|fg=primary
-/pages/settings/PluginsSettingsPage.tsx|bg=#22d3ee|fg=foreground
-/pages/settings/PluginsSettingsPage.tsx|bg=elevated|fg=#22d3ee
+# 2026-10-25 挂账：设备卡错误行内 text-primary 链接按钮 × 页面底——pixel-art
+# 主题 2.23（既有潜在债，随 auto-save 入库未经门禁验证，与主题色清偿无关，
+# 归颜色对门禁自身的后续清偿轮）
+/pages/settings/devices/PeerDeviceCards.tsx|bg=background|fg=primary
 /pages/settings/PluginsSettingsPage.tsx|bg=status-pending|fg=foreground
 /pages/settings/ThemeSettingsPage.tsx|bg=background|fg=primary
 /pages/settings/ThemeSettingsPage.tsx|bg=primary|fg=primary

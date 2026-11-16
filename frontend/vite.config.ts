@@ -1,13 +1,82 @@
 /// <reference types="vitest/config" />
 import react from '@vitejs/plugin-react'
+import { execSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import path from 'path'
 import { defineConfig, loadEnv } from 'vite'
 
 /**
+ * 前端构建标识（关于页「前端构建」数据源，全局类型见 types/shell.d.ts）。
+ * git 短哈希取构建时 HEAD；无 git 环境（如云构建沙箱）降级 'unknown'，不阻塞构建。
+ */
+function resolveBuildInfo(): { git: string; time: string } {
+  let git = 'unknown'
+  try {
+    git = execSync('git rev-parse --short HEAD', {
+      cwd: __dirname,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .toString()
+      .trim()
+  } catch {
+    // 无 git 环境：构建标识仅剩时间戳
+  }
+  return { git, time: new Date().toISOString() }
+}
+const LINGXI_BUILD = resolveBuildInfo()
+
+/**
  * Vite 构建配置
  * 基于 Vite + React + TypeScript 模板，配置路径别名、代理和构建优化
  */
+/**
+ * PrismLight 按需语言子路径（noDiscovery 不自动发现子路径，须逐个列出）。
+ * 真值源 = src/components/shared/markdown/prismLanguages.ts 的 LANGUAGE_MODULES
+ * （markup 覆盖 xml/html/svg），两清单漂移时 dev 下对应语言文件会走裸源码加载。
+ */
+const PRISM_LANGUAGE_SUBPATHS = [
+  'bash',
+  'batch',
+  'c',
+  'cmake',
+  'cpp',
+  'csharp',
+  'css',
+  'dart',
+  'docker',
+  'go',
+  'graphql',
+  'groovy',
+  'ini',
+  'java',
+  'javascript',
+  'json',
+  'jsx',
+  'kotlin',
+  'less',
+  'lua',
+  'makefile',
+  'markdown',
+  'markup',
+  'perl',
+  'php',
+  'powershell',
+  'properties',
+  'protobuf',
+  'python',
+  'r',
+  'ruby',
+  'rust',
+  'scss',
+  'sql',
+  'swift',
+  'toml',
+  'typescript',
+  'tsx',
+  'yaml',
+  'zig',
+].map((lang) => `react-syntax-highlighter/dist/esm/languages/prism/${lang}`)
+
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   // 代理目标默认 127.0.0.1:9100（内核默认端口）——裸 `pnpm dev` 不带 env 时 proxy
@@ -21,6 +90,9 @@ export default defineConfig(({ mode }) => {
     || 'http://127.0.0.1:9100'
 
   return {
+    define: {
+      __LINGXI_BUILD__: JSON.stringify(LINGXI_BUILD),
+    },
     plugins: [
       react(),
       // 强制回退 esbuild：@vitejs/plugin-react 的 config hook 会强制设置 oxc（Vite 8
@@ -47,7 +119,7 @@ export default defineConfig(({ mode }) => {
       // 差异仅在于 dev 无 nginx 的 always/继承语义。
       headers: {
         'Content-Security-Policy':
-          "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; frame-src 'self' blob: data:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'",
+          "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' http: https: ws: wss:; font-src 'self' data:; frame-src 'self' blob: data:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'",
         'X-Content-Type-Options': 'nosniff',
         'X-Frame-Options': 'SAMEORIGIN',
         'Referrer-Policy': 'strict-origin-when-cross-origin',
@@ -127,10 +199,21 @@ export default defineConfig(({ mode }) => {
             if (id.includes('@lobehub') || id.includes('@emoji-mart')) return 'vendor-lobehub'
             if (id.includes('mermaid') || id.includes('d3-') || id.includes('cytoscape')) return 'vendor-mermaid'
             if (id.includes('highlight.js') || id.includes('lowlight') || id.includes('prismjs')) return 'vendor-syntax'
-            if (id.includes('react-syntax-highlighter')) return 'vendor-syntax'
+            // refractor 与 react-syntax-highlighter 同域归 vendor-syntax：refractor 经
+            // react-syntax-highlighter 被 entry 静态可达（ChatPanelShell→FiveSpaceLayout→
+            // FilePreview/CodeEditor），不得与下方纯异步的 vendor-shiki 同 chunk，否则
+            // 静态边把整个 vendor-shiki（≈10MB，含 shiki 引擎）拖回首屏 modulepreload
+            // （2026-10-15 shiki 懒化刀实测归因，基线 16 chunk preload 含 vendor-shiki）。
+            if (id.includes('react-syntax-highlighter') || id.includes('refractor')) return 'vendor-syntax'
             if (id.includes('antd') || id.includes('@ant-design') || id.includes('/rc-') || id.includes('@rc-component')) return 'vendor-antd'
             if (id.includes('lucide-react')) return 'vendor-icons'
             if (id.includes('/react/') || id.includes('react-dom') || id.includes('scheduler')) return 'vendor-react'
+            // shiki/@shikijs（@lobehub/ui Markdown 高亮引擎：元数据清单静态可达、引擎本体
+            // 经 useHighlight 的 import("shiki") 动态可达）、katex/leva 均为顶层 hoist 的
+            // 重库，路径不含 '@lobehub'，会漏进下方 catch-all vendor。单独拆成纯异步
+            // chunk：仅代码块渲染路径首次触达时加载（shiki 懒化，2026-10-15）；前提是
+            // refractor 不在此列（见上方 vendor-syntax 处的归因注）。
+            if (id.includes('shiki') || id.includes('@shikijs') || id.includes('katex') || id.includes('leva')) return 'vendor-shiki'
             return 'vendor'
           },
         },
@@ -173,7 +256,6 @@ export default defineConfig(({ mode }) => {
         '@lobehub/fluent-emoji',
         '@pierre/diffs',
         '@pierre/diffs/react',
-        'mermaid',
         'react-markdown',
         // react-markdown 的传递依赖在 node_modules 重铺（99132238 frozen 全新安装）
         // 后不再被其预构建产物内联，裸 /@fs 加载 CJS style-to-js 报
@@ -349,6 +431,11 @@ export default defineConfig(({ mode }) => {
         'delayed-stream',
         'dequal',
         'detect-node-es',
+        // elkjs/lib/elk.bundled.js：beautiful-mermaid（@lobehub/ui 传递依赖）裸引的
+        // CJS 子路径，noDiscovery 不自动发现 → 浏览器以 ESM 直接加载 CJS 源文件报
+        // "does not provide an export named 'default'"，React 挂载中断 → 整页白屏
+        // （2026-10-12 UI 走查实测，.vite 缓存清空后必现）。
+        'elkjs/lib/elk.bundled.js',
         'es-define-property',
         'es-errors',
         'es-object-atoms',
@@ -439,7 +526,8 @@ export default defineConfig(({ mode }) => {
         'react-router',
         'react-router-dom',
         'react-style-singleton',
-        'react-syntax-highlighter',
+        'react-syntax-highlighter/dist/esm/prism-light',
+        ...PRISM_LANGUAGE_SUBPATHS,
         'react-zoom-pan-pinch',
         'reselect',
         'resize-observer-polyfill',

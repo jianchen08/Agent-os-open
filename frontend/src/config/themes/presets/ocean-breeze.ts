@@ -272,6 +272,7 @@ export const oceanBreezeTheme: ThemeConfig = {
 
   effects: {
     glassmorphism: true,
+    messageGlass: true,
     animations: true,
     transitionDuration: 300,
     transitionEasing: 'cubic-bezier(0.34, 1.56, 0.64, 1)',

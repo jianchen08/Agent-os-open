@@ -44,9 +44,9 @@ logger = logging.getLogger(__name__)
 
 # hindsight_memory 插件目录（memory_backend.py 所在处）加入 sys.path，
 # 供 get_memory_backend 工厂导入。本模块寄居共享根，插件目录为其下
-# system/hindsight_memory 子目录。
+# hindsight_memory 平铺子目录（拍平布局，ADR 2026-10-13-plugin-flat-layout）。
 _HINDSIGHT_MEMORY_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "system", "hindsight_memory"),
+    os.path.join(os.path.dirname(__file__), "hindsight_memory"),
 )
 if _HINDSIGHT_MEMORY_DIR not in sys.path:
     sys.path.insert(0, _HINDSIGHT_MEMORY_DIR)

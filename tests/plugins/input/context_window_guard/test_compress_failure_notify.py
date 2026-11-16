@@ -23,7 +23,7 @@ def _load_cw_plugin() -> ModuleType:
     """唯一名动态加载 plugin.py（防兄弟插件 sys.modules 缓存串扰）。"""
     path = (
         Path(__file__).resolve().parents[4]
-        / "plugins" / "shared" / "pipeline" / "input" / "context_window_guard"
+        / "plugins" / "shared" / "context_window_guard"
         / "plugin.py"
     )
     name = "_cw_guard_plugin_notify_test"
@@ -88,8 +88,9 @@ class TestCompressFailureFrontendNotify:
     def test_first_failure_emits_once(self) -> None:
         plugin, service = _make_plugin_with_service(self.mod, None)
         _execute_once(self.mod, plugin, service)
-        assert len(self.emitted) == 1
-        event, payload, thread_id = self.emitted[0]
+        failed = [e for e in self.emitted if e[0] == "compression_failed"]
+        assert len(failed) == 1
+        event, payload, thread_id = failed[0]
         assert event == "compression_failed"
         assert thread_id == "thread-notify"
         assert payload["pipeline_id"] == "pipe-notify"
@@ -99,7 +100,7 @@ class TestCompressFailureFrontendNotify:
         plugin, service = _make_plugin_with_service(self.mod, None)
         for _ in range(3):
             _execute_once(self.mod, plugin, service)
-        assert len(self.emitted) == 1
+        assert len([e for e in self.emitted if e[0] == "compression_failed"]) == 1
 
     def test_success_resets_notify_state(self) -> None:
         """失败→成功→再失败：第二次故障周期可再次透传。
@@ -109,19 +110,26 @@ class TestCompressFailureFrontendNotify:
         """
         plugin, service = _make_plugin_with_service(self.mod, None)
         _execute_once(self.mod, plugin, service)
-        assert [e[0] for e in self.emitted] == ["compression_failed"]
+        assert [e[0] for e in self.emitted if e[0] == "compression_failed"] == [
+            "compression_failed"
+        ]
 
         # 成功一轮（有效收缩：返回比原消息 token 更少的短块消息序列）
         service.compress_messages = AsyncMock(
             return_value=[{"role": "system", "content": "<compressed>ok</compressed>", "seq": 1}]
         )
         _execute_once(self.mod, plugin, service)
-        assert [e[0] for e in self.emitted] == ["compression_failed", "compression_applied"]
+        assert [e[0] for e in self.emitted if e[0] in ("compression_failed", "compression_applied")] == [
+            "compression_failed",
+            "compression_applied",
+        ]
 
         # 再失败 → 新故障周期，再次透传
         service.compress_messages = AsyncMock(return_value=None)
         _execute_once(self.mod, plugin, service)
-        assert [e[0] for e in self.emitted] == [
+        assert [
+            e[0] for e in self.emitted if e[0] in ("compression_failed", "compression_applied")
+        ] == [
             "compression_failed",
             "compression_applied",
             "compression_failed",

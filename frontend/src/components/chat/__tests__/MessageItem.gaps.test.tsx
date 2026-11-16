@@ -11,6 +11,7 @@
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { lightTheme } from '@/config/themes'
 import { openFileWithLoader } from '@/services/fileLoaderRegistry'
 import { reportError } from '@/services/errorReporting'
 import { useThemeStore } from '@/stores/themeStore'
@@ -85,7 +86,12 @@ function setClipboard(writeText: ReturnType<typeof vi.fn> | undefined) {
 
 afterEach(() => {
   vi.clearAllMocks()
-  useThemeStore.setState({ bubbleAiMode: themePrev.bubbleAiMode, bgImageActive: themePrev.bgImageActive })
+  useThemeStore.setState({
+    bubbleAiMode: themePrev.bubbleAiMode,
+    bgImageActive: themePrev.bgImageActive,
+    themeConfig: themePrev.themeConfig,
+    activePluginTheme: themePrev.activePluginTheme,
+  })
   setClipboard(undefined)
 })
 
@@ -221,9 +227,49 @@ describe('MessageItem AI 平铺模式（主题声明）', () => {
     )
     const style = assistantBubble().getAttribute('style') ?? ''
     expect(style).toContain('background: var(--bubble-ai-bg')
+    // 无令牌回退面=卡面原样消费（hsl(var(--card))，兼容管线改写后的
+    // slash-alpha 形态与纯三元组形态；追加 alpha 会双斜杠非法）
+    expect(style).toContain('hsl(var(--card))')
+    expect(style).not.toMatch(/hsl\(var\(--card\) \//)
     expect(style).toContain('border-radius: 18px 18px 18px 6px')
     expect(style).toContain('backdrop-filter: blur(6px)')
+    expect(style).toContain('1px solid hsl(var(--border))')
     expect(style).toContain('padding: 0.5rem 0.75rem')
+  })
+
+  it('flat + 背景图 + 内置主题声明 messageGlass=false：留面去模糊去描边（不裸贴仍在）', () => {
+    useThemeStore.setState({ bubbleAiMode: 'flat', bgImageActive: true, themeConfig: lightTheme })
+    renderWithProviders(
+      <MessageItem message={makeMessage({ role: 'assistant', content: 'AI 回答' })} />,
+    )
+    const style = assistantBubble().getAttribute('style') ?? ''
+    // 关档：面与圆角保留（不裸贴裁决），blur/玻璃描边全撤
+    expect(style).toContain('hsl(var(--card))')
+    expect(style).not.toContain('backdrop-filter')
+    expect(style).not.toContain('1px solid')
+    expect(style).toContain('border-radius: 18px 18px 18px 6px')
+  })
+
+  it('flat + 背景图 + 皮肤激活：玻璃面缺省开（base 预设声明不牵连皮肤）', () => {
+    useThemeStore.setState({
+      bubbleAiMode: 'flat',
+      bgImageActive: true,
+      themeConfig: lightTheme, // base=light 声明关
+      activePluginTheme: {
+        id: 'dsh-skin-x',
+        name: '皮肤X',
+        base: 'light',
+        pluginId: 'dsh_adapter',
+        variables: {},
+      },
+    })
+    renderWithProviders(
+      <MessageItem message={makeMessage({ role: 'assistant', content: 'AI 回答' })} />,
+    )
+    const style = assistantBubble().getAttribute('style') ?? ''
+    expect(style).toContain('backdrop-filter: blur(6px)')
+    expect(style).toContain('hsl(var(--card))')
+    expect(style).toContain('1px solid hsl(var(--border))')
   })
 })
 
@@ -279,5 +325,33 @@ describe('MessageItem 用户附件', () => {
     renderWithProviders(<MessageItem message={makeMessage({ content: '' })} />)
     expect(screen.queryByTestId('user-markdown')).toBeNull()
     expect(screen.queryByTestId('gallery')).toBeNull()
+  })
+})
+
+describe('MessageItem 纵向布局（头像移至气泡上方）', () => {
+  it('头像在气泡上方（DOM 先序 + 行纵向排布），用户消息整体靠右', () => {
+    const { container } = renderWithProviders(
+      <MessageItem message={makeMessage({ role: 'user', content: '用户提问' })} />,
+    )
+    const row = container.querySelector('[data-testid="message-item"]') as HTMLElement
+    expect(row.className).toContain('flex-col')
+    expect(row.className).toContain('items-end')
+    expect(row.className).not.toContain('flex-row-reverse')
+    // 头像 = 行首子元素，气泡内容列在其后：flex-col 下头像显示在气泡上方
+    const avatar = row.firstElementChild as HTMLElement
+    const content = row.lastElementChild as HTMLElement
+    expect(avatar.className).toContain('h-8 w-8')
+    expect(content.textContent).toContain('用户提问')
+  })
+
+  it('AI 消息同样纵排靠左，行内 padding 收紧（py-1.5）', () => {
+    const { container } = renderWithProviders(
+      <MessageItem message={makeMessage({ role: 'assistant', content: 'AI 回答' })} />,
+    )
+    const row = container.querySelector('[data-testid="message-item"]') as HTMLElement
+    expect(row.className).toContain('flex-col')
+    expect(row.className).toContain('items-start')
+    expect(row.className).toContain('py-1.5')
+    expect(row.firstElementChild?.className).toContain('h-8 w-8')
   })
 })

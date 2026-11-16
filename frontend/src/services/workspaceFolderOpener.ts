@@ -36,7 +36,7 @@ export async function openFolderWithFeedback(
         category: 'alert',
         isBlocking: false,
         autoDismissMs: 6000,
-        sourceLabel: '前端',
+        sourceLabel: '系统',
       })
     } else {
       useNotificationStore.getState().addNotification({
@@ -46,7 +46,7 @@ export async function openFolderWithFeedback(
         category: 'info',
         isBlocking: false,
         autoDismissMs: 6000,
-        sourceLabel: '前端',
+        sourceLabel: '系统',
       })
     }
   } catch (e) {
@@ -58,7 +58,7 @@ export async function openFolderWithFeedback(
       category: 'alert',
       isBlocking: false,
       autoDismissMs: 6000,
-      sourceLabel: '前端',
+      sourceLabel: '系统',
     })
   }
 }

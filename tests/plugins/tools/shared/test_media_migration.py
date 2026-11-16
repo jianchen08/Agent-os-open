@@ -35,7 +35,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_MEDIA_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools" / "media"
+_MEDIA_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "media"
 
 
 def _load_module(name: str, filename: str) -> Any:

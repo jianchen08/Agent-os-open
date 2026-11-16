@@ -1,7 +1,7 @@
 # @feature: FP-0.2.五 审批闭环 | @ci: python-coverage
 """human 插件测试 conftest——把插件目录与父目录注入 sys.path。
 
-插件位于 plugins/shared/tools/human/，内部用包路径导入
+插件位于 plugins/shared/human/，内部用包路径导入
 （from human.service import ...），父目录 plugins/shared/tools 提供
 human 包命名空间；server.py 等装配模块用平铺 import
 （from service import ... / from interfaces import ... / from models import ...），
@@ -21,7 +21,7 @@ import pytest
 
 _PLUGIN_DIR = (
     Path(__file__).resolve().parents[4]
-    / "plugins" / "shared" / "tools" / "human"
+    / "plugins" / "shared" / "human"
 )
 _TOOLS_DIR = _PLUGIN_DIR.parent
 

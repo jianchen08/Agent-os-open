@@ -14,12 +14,15 @@ pub mod client;
 pub mod env_file;
 pub mod error;
 pub mod handler_registry;
+pub mod member_offline;
 
 pub use capability::{parse_capability_method_with, CapabilityRouter, STANDARD_CAPABILITIES};
 pub use client::{
     build_declared_capabilities, build_declared_capabilities_from_namespaces,
-    resolve_env_placeholders, McpClient, McpTransport,
+    resolve_env_placeholders, reverse_call_levels, sidecar_stdout_eof_total, McpClient,
+    McpTransport, ReverseGate, DEFAULT_REQUEST_TIMEOUT_SECS,
 };
 pub use env_file::{env_delta_overlay, project_env_path};
 pub use error::McpError;
 pub use handler_registry::{CapabilityHandler, CapabilityHandlerRegistry};
+pub use member_offline::{parse_member_offline_line, MemberOfflineNotice};

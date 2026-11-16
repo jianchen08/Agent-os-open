@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,23 @@ from typing import Any
 from agentos_plugin_sdk.isolation_types import IsolationLevel
 
 logger = logging.getLogger(__name__)
+
+
+def _import_config_center() -> Callable[..., Any] | None:
+    """导入 config_center 的 get_config_center；不可用返回 None（不抛）。
+
+    0.2 起 config 包已随 0.1 源码归档（reference/0.1_src），dev 与装机两布局的
+    sidecar 进程均无此模块——watcher 注册在两布局同为结构性不可用。先探测再
+    注册，避免每实例必败 import；未来重引 config_center 时自动恢复，无需改本文件。
+    """
+    try:
+        from config.config_center import get_config_center  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - 模块缺失/损坏统一按不可用降级
+        return None
+    # config 包已归档（reference/0.1_src），类型面解析不到该模块，导入名为 Any；
+    # 经显式类型局部变量收窄，保持返回类型契约可检
+    loaded: Callable[..., Any] = get_config_center
+    return loaded
 
 
 def default_policy_path() -> Path:
@@ -103,7 +121,7 @@ class IsolationPolicyLoader:
             # config_center 不可用（P1-7 迁移前，sidecar venv 无 config 包）→ 文件回退：
             # 直读 isolation_policy.yaml，避免策略空载导致默认策略全员放行/误判。
             try:
-                import yaml  # type: ignore[import-untyped]  # noqa: PLC0415（第三方 stubs 缺失，懒导入）
+                import yaml  # noqa: PLC0415  # 懒导入：策略面按需加载
 
                 with open(path, encoding="utf-8") as f:
                     self._config = yaml.safe_load(f) or {}
@@ -121,16 +139,27 @@ class IsolationPolicyLoader:
         logger.info(f"隔离策略加载完成: {len(self._tools)} 个工具策略, {len(self._categories)} 个分类策略")
 
     def _register_watcher(self) -> None:
-        """注册 config_center watcher，配置变更时自动 reload。"""
+        """注册 config_center watcher，配置变更时自动 reload。
+
+        config_center 不可用（0.2 起结构性缺失，dev/装机两布局一致）→ 显式降级：
+        策略保持文件加载态、热更新不可用，warning 留痕；模块在位而 watch 注册
+        失败同样告警。两条路径都不阻断构造。
+        """
+        get_config_center = _import_config_center()
+        if get_config_center is None:
+            logger.warning(
+                "[IsolationPolicyLoader] config_center 不可用，热更新降级为文件加载态: %s",
+                self._config_path,
+            )
+            return
         try:
-            from config.config_center import get_config_center  # noqa: PLC0415
             # P1-7 DEBT(task_11): 🔴 高危——隔离策略热重载 watcher。注入模型(plugin.get_config)
             # 无 watch 接口，P6 需改用 schema_updated WS 事件触发 reload。
             # 见 docs/working/p1_7_config_center_migration_checklist.md #6，延后 P6。
 
             get_config_center().watch("isolation/", self._on_config_changed)
             logger.debug("[IsolationPolicyLoader] 已注册 config_center watcher")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - 注册失败降级为文件加载态，不阻断构造
             logger.warning(f"[IsolationPolicyLoader] 注册 watcher 失败: {e}")
 
     def _on_config_changed(

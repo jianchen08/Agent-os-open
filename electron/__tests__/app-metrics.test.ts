@@ -1,12 +1,16 @@
 // @feature: FP-0.2.三 宿主接入 | @ci: frontend-test
 /**
- * 应用壳进程树内存链路测试（main.ts 的 app:metrics 支撑面）。
+ * 应用壳进程树内存/CPU 链路测试（main.ts 的 app:metrics 支撑面）。
  *
  * 行为契约：
  *  - collectAppMetrics 汇总 getAppMetrics 全部进程的 workingSetSize（KB 求和）
  *    与进程数，供监控页全口径内存的应用壳段消费；
- *  - 空进程树 → processCount 0 / totalWorkingSetKb 0（不虚构非零）；
- *  - 只取 workingSetSize，进程对象其余字段（cpu/creationTime 等）不进求和。
+ *  - totalCpuPercent = 各进程 cpu.percentCPUUsage 求和（Electron CPUUsage
+ *    口径：距上次查询的 CPU 百分比，首次查询为 0）；
+ *  - 空进程树 → processCount 0 / totalWorkingSetKb 0 / totalCpuPercent 0
+ *    （不虚构非零）；
+ *  - 只取 workingSetSize 与 percentCPUUsage，进程对象其余字段（creationTime
+ *    等）不进求和。
  *
  * Electron 运行时是本测试唯一 mock 的外部边界（与 dialog.test.ts 同口径）；
  * collectAppMetrics 为导出函数直接单测，不经 whenReady。
@@ -18,7 +22,7 @@ const electronMock = vi.hoisted(() => {
   const state = {
     metrics: [] as Array<{
       memory: { workingSetSize: number };
-      cpu?: unknown;
+      cpu?: { percentCPUUsage: number };
       type?: string;
     }>,
   };
@@ -68,25 +72,47 @@ describe("collectAppMetrics", () => {
 
   it("多进程 workingSetSize 逐项求和并报进程数（KB 口径原样透出）", () => {
     electronMock.state.metrics = [
-      { type: "browser", memory: { workingSetSize: 102400 }, cpu: {} },
-      { type: "renderer", memory: { workingSetSize: 204800 }, cpu: {} },
-      { type: "gpu-process", memory: { workingSetSize: 51200 }, cpu: {} },
+      { type: "browser", memory: { workingSetSize: 102400 }, cpu: { percentCPUUsage: 0.5 } },
+      { type: "renderer", memory: { workingSetSize: 204800 }, cpu: { percentCPUUsage: 12.25 } },
+      { type: "gpu-process", memory: { workingSetSize: 51200 }, cpu: { percentCPUUsage: 1.5 } },
     ];
 
     expect(collectAppMetrics()).toEqual({
       processCount: 3,
       totalWorkingSetKb: 102400 + 204800 + 51200,
+      totalCpuPercent: 0.5 + 12.25 + 1.5,
     });
   });
 
-  it("空进程树 → processCount 0 / totalWorkingSetKb 0（不虚构非零）", () => {
-    expect(collectAppMetrics()).toEqual({ processCount: 0, totalWorkingSetKb: 0 });
+  it("totalCpuPercent = 各进程 percentCPUUsage 求和（含 0 值进程不缺项）", () => {
+    electronMock.state.metrics = [
+      { memory: { workingSetSize: 1000 }, cpu: { percentCPUUsage: 0 } },
+      { memory: { workingSetSize: 1000 }, cpu: { percentCPUUsage: 3.75 } },
+      { memory: { workingSetSize: 1000 }, cpu: { percentCPUUsage: 0 } },
+    ];
+    const result = collectAppMetrics();
+    expect(result.totalCpuPercent).toBe(3.75);
+    expect(result.totalWorkingSetKb).toBe(3000);
   });
 
-  it("单进程原样透出；字段名与 preload 契约一致（processCount/totalWorkingSetKb）", () => {
-    electronMock.state.metrics = [{ memory: { workingSetSize: 716800 } }];
+  it("空进程树 → processCount 0 / totalWorkingSetKb 0 / totalCpuPercent 0（不虚构非零）", () => {
+    expect(collectAppMetrics()).toEqual({
+      processCount: 0,
+      totalWorkingSetKb: 0,
+      totalCpuPercent: 0,
+    });
+  });
+
+  it("单进程原样透出；字段名与 preload 契约一致（processCount/totalWorkingSetKb/totalCpuPercent）", () => {
+    electronMock.state.metrics = [
+      { memory: { workingSetSize: 716800 }, cpu: { percentCPUUsage: 2 } },
+    ];
     const result = collectAppMetrics();
-    expect(result).toEqual({ processCount: 1, totalWorkingSetKb: 716800 });
-    expect(Object.keys(result).sort()).toEqual(["processCount", "totalWorkingSetKb"]);
+    expect(result).toEqual({ processCount: 1, totalWorkingSetKb: 716800, totalCpuPercent: 2 });
+    expect(Object.keys(result).sort()).toEqual([
+      "processCount",
+      "totalCpuPercent",
+      "totalWorkingSetKb",
+    ]);
   });
 });

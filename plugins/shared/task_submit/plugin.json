@@ -1,0 +1,191 @@
+{
+  "id": "task_submit_tool",
+  "requires_services": [
+    "project.get",
+    "project.list_paths",
+    "workspace.prepare_task"
+  ],
+  "name": "Task Submit Tool",
+  "description": "任务提交 MCP 工具，将任务提交给指定 Agent 执行",
+  "version": "1.2.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "metrics_class": "tool",
+    "tools": [
+      {
+        "name": "task_submit",
+        "description": "任务提交工具，将任务提交给指定 Agent 执行",
+        "render": {
+          "card": "task_card",
+          "title": "任务提交"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "target_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "目标 Agent ID（必填）。如果系统提供了 Agent 映射表，直接使用映射表中的 ID，不要用 resource_search 搜索"
+            },
+            "goal": {
+              "type": "string",
+              "description": "任务目标（主形态，一段话）：标题取首行（超 60 字截断加省略号），描述为全文。需要精确控制标题/描述时改用 goal_title/goal_description",
+              "minLength": 1
+            },
+            "goal_title": {
+              "type": "string",
+              "minLength": 1,
+              "description": "任务标题（必填），简短明确"
+            },
+            "goal_description": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000,
+              "description": "任务描述（必填，1-2000 字符）。只写目标和背景，禁止写执行步骤/工具选择/流程顺序；引用文件只写路径（如 docs/report.md），让下级 Agent 自行读取，不要复制文件内容。"
+            },
+            "acceptance_criteria": {
+              "type": "object",
+              "description": "验收标准（可选，推荐填写）。扁平白话字段，任选组合：\n- files：产出文件相对路径数组，逐文件检查存在且非空，如 [\"chapters/chapter_025.md\"]\n- expect：验收期望的白话描述（评估 agent 在工作区内核对产出），如 \"总纲与25章每章1200-1800字剧情连续，progress.md 记录完整\"\n- command：验收命令（退出码 0 = 通过），如 \"pytest tests/ -q\"\n示例：{\"files\": [\"chapters/chapter_025.md\"], \"expect\": \"总纲与25章每章1200-1800字剧情连续，progress.md 记录完整\"}\n不要写指标名或嵌套对象。"
+            },
+            "project_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{12}$",
+              "description": "挂靠项目 ID（可选）。指定后任务在项目文件夹下执行（默认 worktree 从项目仓库分叉）；缺省为独立任务。项目经 project_create 工具创建（= 真实文件夹 + 登记），或由会话目录登记/前端表单创建后挂靠。"
+            },
+            "parent_task_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{12}$",
+              "description": "父任务 ID（task=pipeline 统一后即引擎管道身份，12 位 hex）。创建任务链子任务时指定此参数关联父任务（复盘/分层链）。"
+            },
+            "workspace": {
+              "type": "string",
+              "description": "目标项目路径。指定任务需要操作（读取或修改）的项目目录。**重要**：当任务需要对某个特定文件夹进行读取或修改时，必须设置此参数为该目标文件夹的路径，否则任务将无法定位到正确的目标目录。**不要用它表达'接续'——接续走 inherit_from；本参数只表示'在哪个目录干活'。**可用范围（按任务类型）：根任务可填；普通子任务不可填（继承父任务）。工作空间拓扑由 workspace_mode 决定（worktree=在目标项目上建隔离副本；plain=直接操作目标目录）；执行环境隔离由 isolation_level 决定，两者独立。"
+            },
+            "workspace_mode": {
+              "type": "string",
+              "enum": [
+                "worktree",
+                "plain"
+              ],
+              "description": "工作空间拓扑（根任务可选，默认 worktree）。worktree：在目标项目上创建 git worktree 隔离操作，不影响原项目（默认）。plain：直接在目标目录工作，不建 worktree、不切分支。与 isolation_level（执行环境容器/宿主）相互独立。普通子任务不可选（继承父任务空间）。"
+            },
+            "isolation_level": {
+              "type": "string",
+              "enum": [
+                "non_isolated",
+                "isolated"
+              ],
+              "description": "执行环境隔离级别（根任务可选，默认使用系统配置）。non_isolated：非隔离，直接在宿主环境执行。isolated：隔离，在容器执行环境中工作。只决定执行环境，不决定工作空间拓扑（拓扑由 workspace_mode 决定）。普通子任务不可选（继承父任务）。"
+            },
+            "inherit_from": {
+              "type": "string",
+              "description": "源任务 ID：填写即接续该任务的工作空间（整份复制其 worktree/分支/基座坐标），上下文重新开始；不填=普通新任务。"
+            },
+            "mode": {
+              "type": "string",
+              "description": "模式身份键（可选，[a-z][a-z0-9_]{0,63}，小写标识）。派发带 mode → 子任务出生即受该模式包控制（模式物料/人设接管按该模式解析，设计 D6）；执行编排由目标 Agent 确定后即随之确定（缺省 autonomous），派发时无需指定。轻校验（批 B8）：目标执行者为 mode_X/<stem> 键时 mode 必须等于 X；挂靠项目登记了 mode_tags 时 mode 必须 ∈ 该集合（未登记/不填 mode 不校验，零隐式填充——集合可经 project_create 携 mode_tags 登记）。"
+            },
+            "allowed_paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "任务书改动授权路径清单（可选）：本次任务被授权改动的文件/目录绑定表（相对工作区，/ 分隔，目录前缀匹配），如 [\"plugins/shared/task_submit/\"]。由评估侧 scope_consistency 指标消费（越界改动检测）；缺省=不启用改动范围约束。"
+            },
+            "signed_acceptance_tests": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "description": "签发验收测试文件路径（相对仓库根）"
+                  },
+                  "frozen_version": {
+                    "type": "string",
+                    "description": "签发时冻结的测试版本标识"
+                  },
+                  "issuer": {
+                    "type": "string",
+                    "description": "签发方标识（验收测试由谁签发）"
+                  }
+                },
+                "required": [
+                  "path",
+                  "frozen_version",
+                  "issuer"
+                ]
+              },
+              "description": "签发验收测试清单（可选）：签发方冻结版本的验收测试登记（path/frozen_version/issuer 三键），供评估侧核对产出验收测试未被签发后修改；缺省=无签发件。"
+            }
+          },
+          "required": [
+            "goal",
+            "target_id"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "task_id",
+            "title",
+            "status",
+            "message"
+          ],
+          "properties": {
+            "task_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "description": "任务投影真实状态（提交返回时为出生态 pending；终态由评估闸门写 completed/failed）"
+            },
+            "message": {
+              "type": "string"
+            },
+            "target_id": {
+              "type": "string"
+            },
+            "pipeline_id": {
+              "type": "string"
+            },
+            "workspace": {
+              "type": "string"
+            },
+            "warning": {
+              "type": "string",
+              "description": "管道未创建降级"
+            },
+            "project_id": {
+              "type": "string",
+              "description": "挂靠项目 id（未挂项目为空）"
+            }
+          }
+        }
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "permissions": {},
+  "priority": 10,
+  "export_fields": [
+    "lineage.parent_pipeline_id",
+    "lineage.origin_session_id",
+    "lineage.parent_ws_meta",
+    "lineage.root",
+    "lineage.origin.kind",
+    "lineage.origin.source",
+    "task.allowed_paths",
+    "task.signed_acceptance_tests"
+  ],
+  "host_group": "light"
+}

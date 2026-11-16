@@ -76,7 +76,7 @@ describe('ContributionRegistry — 归一化 space/slot 映射', () => {
     ['dockItems', 'dock', 'item'],
     ['statusBarItems', 'dock', 'status'],
     ['floating', 'floating', 'panel'],
-    ['modal', 'floating', 'overlay'],
+    // modal 不再归一化（C4 存量收敛：SlotRegistry 翻译为 shell.overlay 槽条目）
     ['menus', 'chat', 'inline'],
     ['commands', 'chat', 'input-action'],
     ['shortcuts', 'chat', 'input-action'],
@@ -384,30 +384,14 @@ describe('ContributionRegistry — 注销与薄视图', () => {
     expect(registry.getMenus('chat/context').map((m) => m.id)).toEqual(['m1'])
   })
 
-  it('getCommands/getShortcuts/getModals 按 legacyFrom 分别检索', () => {
+  it('getCommands/getShortcuts 按 legacyFrom 分别检索；modal 不再归一化（C4 收敛）', () => {
     seed()
     expect(registry.getCommands().map((p) => p.id)).toEqual(['c1'])
     expect(registry.getShortcuts().map((p) => p.id)).toEqual(['s1'])
-    expect(registry.getModals().map((p) => p.id)).toEqual(['mo1'])
-  })
-
-  it('findModalByTrigger 命中 trigger 与 openOn 两种写法，未命中 undefined', () => {
-    registry.registerFromSchema({
-      plugin_contributes: [
-        {
-          plugin_id: 'p',
-          contributes: {
-            modal: [
-              { id: 'mo-trigger', trigger: 'on_command:a' },
-              { id: 'mo-openon', openOn: 'on_command:b' },
-            ],
-          },
-        },
-      ],
-    })
-    expect(registry.findModalByTrigger('on_command:a')?.id).toBe('mo-trigger')
-    expect(registry.findModalByTrigger('on_command:b')?.id).toBe('mo-openon')
-    expect(registry.findModalByTrigger('on_command:c')).toBeUndefined()
+    // modal 声明不再进 pages：SlotRegistry 翻译为 shell.overlay 槽条目
+    // （触发查询 = slotRegistry.findOverlayByTrigger，覆盖见
+    //  services/slots/__tests__/slotRegistry.test.ts）
+    expect(registry.getPages().some((p) => p.legacyFrom === 'modal')).toBe(false)
   })
 })
 

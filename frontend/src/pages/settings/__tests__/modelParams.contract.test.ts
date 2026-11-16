@@ -15,7 +15,7 @@ import { describe, it, expect } from 'vitest'
 import { STRENGTH_PARAM_KEYS, emptyModelParamsDraft, buildModelFields } from '../modelParams'
 
 const REPO_ROOT = resolve(__dirname, '../../../../..')
-const LLM_CORE = 'plugins/shared/pipeline/core/llm_core/plugin.py'
+const LLM_CORE = 'plugins/shared/llm_core/plugin.py'
 
 /** 从 llm_core 源码解析 _THINKING_STRENGTH_ALLOWED 集合字面量 */
 function parseBackendAllowedKeys(): string[] {

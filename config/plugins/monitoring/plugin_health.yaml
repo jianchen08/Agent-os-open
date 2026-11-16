@@ -1,0 +1,14 @@
+# 插件组健康告警阈值（monitoring 插件 config_files[id=plugin_health] 的真值，
+# 引用形态：真值在本文件，manifest fields 仅表单 schema）。
+# 卡5（装机插件组事故 2026-10-17）+ 卡9（2026-10-18 内核计数器/读面补齐）：
+# 四条规则全量，数据源 = 内核聚合器 process.last_crash_ts gauge 跳变 +
+# 内核自采 counter（mcp.sidecar_stdout_eof_total / tools_list 双键）；
+# 评估入口两轨：GET /ext/monitoring/plugin-health（Authorization 透传内核复权）
+# + 插件后台轮询循环（插件语境系统读，无用户凭证）。
+respawn_failure_threshold: 3 # 窗口内跳变 ≥3 → high（插件可能 crash-loop）
+group_start_failure_threshold: 1 # 窗口内跳变 ≥1 → medium（首次即告）
+sidecar_eof_rate_threshold: 10 # EOF 速率 ≥10 次/分 → high（通道死亡/疑似 crash-loop）
+tools_list_invalid_threshold: 1 # 观测失败终态+malformed 条目合计 ≥1 → high
+window: 5m # 评估窗口（内核 parse_window 只认 5m/1h/24h）
+cooldown_secs: 300 # 同（规则, 插件）告警日志/回调冷却
+poll_interval_secs: 60 # 后台自动轮询间隔（插件语境系统读）

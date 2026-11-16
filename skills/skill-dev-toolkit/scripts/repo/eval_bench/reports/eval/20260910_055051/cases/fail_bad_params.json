@@ -1,0 +1,115 @@
+{
+  "case_id": "fail_bad_params",
+  "category": "bad_params",
+  "passed": false,
+  "elapsed_seconds": 76.1,
+  "session_id": "thread-2aa011e8-309b-4851-89dc-cc9d7e66eb4f",
+  "pipeline_ids": [
+    "fa8a39f211e1"
+  ],
+  "settled": true,
+  "dispatches": [
+    {
+      "terminal": "stream_end",
+      "pipeline_id": "fa8a39f211e1",
+      "interactions": [],
+      "event_types": [
+        "pending_inputs_changed",
+        "pending_inputs_changed",
+        "stream_start",
+        "widget_event",
+        "widget_event",
+        "stream_end"
+      ]
+    },
+    {
+      "terminal": "stream_end",
+      "pipeline_id": "fa8a39f211e1",
+      "interactions": [],
+      "event_types": [
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "block_end",
+        "block_start",
+        "tool_call_delta",
+        "block_end",
+        "usage",
+        "finish",
+        "widget_event",
+        "cost_update",
+        "new_message",
+        "stream_end"
+      ]
+    }
+  ],
+  "approval": {
+    "requests_seen": 0,
+    "approved": 0,
+    "denied": 0,
+    "response_errors": []
+  },
+  "metrics": {
+    "pipelines": 1,
+    "iterations_total": 4,
+    "error_steps": 0,
+    "timeout_steps": 0,
+    "tool_calls": 1,
+    "tool_retries": 0,
+    "tool_names": [],
+    "tool_call_counts": {},
+    "task_statuses": [
+      null
+    ],
+    "all_settled": false,
+    "any_failed": false,
+    "by_model": {
+      "glm-5.3-flash": {
+        "input": 27826,
+        "output": 558,
+        "cached": 0,
+        "total": 28384
+      }
+    },
+    "tokens_total": 28384
+  },
+  "assertions": [
+    {
+      "type": "settled",
+      "passed": false,
+      "detail": "管道未收敛（挂起/超时）"
+    },
+    {
+      "type": "no_failed_task",
+      "passed": true,
+      "detail": "无 failed 任务"
+    },
+    {
+      "type": "echo_recovered",
+      "passed": false,
+      "detail": "echo 失败seen=None 成功seen=None 调用数=None"
+    }
+  ],
+  "failed_assertions": [
+    "settled",
+    "echo_recovered"
+  ],
+  "reply_excerpt": "刚才工具返回的是**校验拒绝**：`valid: false`，错误提示说 query 必须是 `<name>@eval-probe.local` 邮箱形态，还给了示例 `zhang.san@eval-probe.local`。\n\n现在你授权我按它的格式提示修正重试，我这就把参数修正为 `zhang.san@eval-probe.local` 重新调用～"
+}

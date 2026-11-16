@@ -61,3 +61,14 @@ config/
   （机械闸 `check_config_direct_reads.py` 执法，落地见 ADR）
 - `tools/builtin_tools_config.yaml` 为自动生成物（`scripts/tools/collect_tool_info.py`），
   勿手改
+
+## 唯一真源声明（P-16，2026-10-29）
+
+仓内曾存在 `config-e2e/`（本机 e2e 场景用的 config/ 逐字副本，曾按「config 同刀」
+人工镜像维护）。因无任何脚本/workflow/生产码消费、镜像对主源实质漂移（缺
+rules §1.7/§1.8/enforcement_tiers.yaml 等），已于 2026-10-29 整体删除（提案
+P-16/E3-6，「消灭副本优先于守护」）。四域模型「任一相对路径任一时刻生效文件
+恰好一份」公理恢复成立；e2e 测试的临时配置副本由测试自建（复制主 `config/`
+改写，见 `tests/e2e_02/test_task_lifecycle_paths_e2e.py` _build_tmp_config_root），
+不依赖仓内副本。如需再建沙箱副本，放 `tests/fixtures/` 并在本文件登记，
+禁止回仓根。

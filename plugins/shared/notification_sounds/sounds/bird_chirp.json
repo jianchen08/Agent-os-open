@@ -1,0 +1,60 @@
+{
+  "id": "bird_chirp",
+  "label": "鸟鸣双哨",
+  "engine": "web_audio_synth",
+  "params": {
+    "partials": [
+      {
+        "ratio": 1.0,
+        "gain": 1.0,
+        "decayRatio": 1.0
+      },
+      {
+        "ratio": 2.0,
+        "gain": 0.05,
+        "decayRatio": 0.5
+      },
+      {
+        "ratio": 3.0,
+        "gain": 0.02,
+        "decayRatio": 0.3
+      }
+    ],
+    "attack": 0.006,
+    "wet": 0.45,
+    "taps": [
+      {
+        "delay": 0.083,
+        "feedback": 0.42,
+        "lowpass": 5200.0
+      },
+      {
+        "delay": 0.127,
+        "feedback": 0.36,
+        "lowpass": 3800.0
+      }
+    ],
+    "notes": [
+      {
+        "freq": 1600.0,
+        "start": 0,
+        "peak": 0.6319,
+        "decay": 0.18,
+        "glideTo": 2600.0,
+        "glideTime": 0.07,
+        "vibratoHz": 38.0,
+        "vibratoDepth": 0.03
+      },
+      {
+        "freq": 1400.0,
+        "start": 0.15,
+        "peak": 0.674,
+        "decay": 0.3,
+        "glideTo": 2400.0,
+        "glideTime": 0.09,
+        "vibratoHz": 34.0,
+        "vibratoDepth": 0.03
+      }
+    ]
+  }
+}

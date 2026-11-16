@@ -2,6 +2,8 @@
  * 模型上下文信息 Hook
  *
  * 根据当前使用的模型名称，从后端 LLM 配置中获取对应的 context_window 大小。
+ * 匹配走三级容错：精确配置键 → 键忽略大小写 → 条目 model_name 真名
+ * （管道 state 行 llm_model 是真实模型名，与配置键的大小写形态可能不一致）。
  */
 
 import { useCallback, useEffect, useState } from 'react'
@@ -21,9 +23,26 @@ interface UseModelContextInfoResult {
 }
 
 /**
+ * 模型条目三级容错匹配：精确配置键 → 键忽略大小写 → 条目 model_name 真名
+ * （配置键如 minimax-m3 是小写形态，state 行 llm_model 如 MiniMax-M3 是真名；
+ * 三级都未命中返回 undefined，由调用方按无效模型处理）。
+ */
+function matchModelConfig(
+  models: Record<string, ModelConfig>,
+  modelName: string,
+): ModelConfig | undefined {
+  const exact = models[modelName]
+  if (exact) return exact
+  const lower = modelName.toLowerCase()
+  const key = Object.keys(models).find((k) => k.toLowerCase() === lower)
+  if (key) return models[key]
+  return Object.values(models).find((m) => m.model_name === modelName)
+}
+
+/**
  * 根据模型名称获取对应的 context_window
  *
- * 模型无效（空或未配置）时如实返回 contextWindow=0、isValid=false，
+ * 模型无效（空或三级匹配都未命中）时如实返回 contextWindow=0、isValid=false，
  * 由调用方决定如何显示，绝不用默认值冒充真实模型。
  *
  * @param modelName - 当前使用的模型名称
@@ -52,7 +71,7 @@ export function useModelContextInfo(modelName: string | undefined): UseModelCont
     fetchModels()
   }, [fetchModels])
 
-  const cached = modelName ? modelsCache[modelName] : undefined
+  const cached = modelName ? matchModelConfig(modelsCache, modelName) : undefined
   const isValid = Boolean(cached && cached.context_window)
 
   return {

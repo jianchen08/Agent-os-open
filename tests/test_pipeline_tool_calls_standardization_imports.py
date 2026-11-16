@@ -9,7 +9,7 @@
   断言「修复必须真正生效并应用」而非 import 语句本身。
 - context_window_guard 的压缩写回标准化已上移 llm_service 标准化唯一关卡，
   不再有调用方本地实现（行为覆盖见
-  plugins/shared/system/llm/test_complete_stream_normalize.py）。
+  plugins/shared/llm/test_complete_stream_normalize.py）。
 """
 from __future__ import annotations
 
@@ -25,32 +25,30 @@ pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
-_PIPELINE_DIR = _SHARED_DIR / "pipeline"
-_LLM_SERVICE_DIR = _SHARED_DIR / "system" / "llm"
+_LLM_SERVICE_DIR = _SHARED_DIR / "llm"
 
-# 与各 server.py 自身的 sys.path 注入对齐：plugins/shared/ 让 ``pipeline`` 包可解析，
-# 各插件源目录让平铺 ``from plugin import X`` 可解析。
+# 与各 server.py 自身的 sys.path 注入对齐：plugins/shared/ 让 _libs 与
+# state_fields 等平铺模块可解析，各插件源目录让平铺 from plugin import X 可解析。
 for _p in (str(_SHARED_DIR),):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
 
-def _load_plugin_module(category: str, name: str, mod_name: str) -> Any:
-    """按文件路径加载 pipeline 插件 plugin.py，返回全新模块实例。
+def _load_plugin_module(name: str, mod_name: str) -> Any:
+    """按文件路径加载平铺插件 plugin.py，返回全新模块实例。
 
     用唯一 mod_name 避免多个同名 ``plugin.py`` 互相污染 sys.modules 缓存。
 
     Args:
-        category: ``input`` / ``output`` / ``core``。
-        name: 插件目录名。
+        name: 插件目录名（plugins/shared/ 下平铺，如 "tool_schema_validator"）。
         mod_name: 注册进 sys.modules 的唯一模块名。
 
     Returns:
         已 exec 的模块对象。
     """
-    module_path = _PIPELINE_DIR / category / name / "plugin.py"
+    module_path = _SHARED_DIR / name / "plugin.py"
     assert module_path.exists(), f"plugin.py missing at {module_path}"
-    # 插件源目录也加入 sys.path，使平铺 from pipeline.types 可解析
+    # 插件源目录也加入 sys.path，使平铺模块（_libs.pipeline_base 等）可解析
     src_dir = str(module_path.parent)
     if src_dir not in sys.path:
         sys.path.insert(0, src_dir)
@@ -119,7 +117,7 @@ def test_tool_schema_validator_detect_truncation_runs(monkeypatch: Any) -> None:
     降级为"不可修复"。契约：截断必须被修复并报告丢失的顶层字段。
     """
     stub = _RepairCapabilityStub()
-    mod = _load_plugin_module("input", "tool_schema_validator", "tsv_plugin_p0_test")
+    mod = _load_plugin_module("tool_schema_validator", "tsv_plugin_p0_test")
     monkeypatch.setattr(mod, "_capability_caller", stub)
     validator = mod.ToolSchemaValidator()
 
@@ -142,10 +140,10 @@ def test_tool_args_inject_repair_path_runs(monkeypatch: Any) -> None:
     WHY：json.loads 失败的兜底分支必须能经 llm.repair_json 修复——可修复的
     半截 arguments 不得直接变成 {} 使下游拿不到内容。
     """
-    from pipeline.plugin import PluginContext  # noqa: PLC0415
+    from _libs.pipeline_base.plugin import PluginContext  # noqa: PLC0415
 
     stub = _RepairCapabilityStub()
-    mod = _load_plugin_module("input", "tool_args_inject", "pi_plugin_p0_test")
+    mod = _load_plugin_module("tool_args_inject", "pi_plugin_p0_test")
     monkeypatch.setattr(mod, "_capability_caller", stub)
     plugin = mod.ToolArgsInjectPlugin()
 

@@ -21,6 +21,7 @@
  */
 
 import { STORAGE_KEYS } from '@/constants/storage'
+import { refreshTokenStorageKey } from '@/services/shellApiBase'
 
 /** 判断错误是否为「真正认证失效」（应触发 logout） */
 export function isAuthFailureFromError(error: unknown): boolean {
@@ -50,6 +51,13 @@ let memoryAccessToken: string | null = null
 /** access token 过期时刻（毫秒时间戳，内存持有） */
 let memoryAccessTokenExpiry: number | null = null
 
+/**
+ * refresh token 落盘键（页面会话内稳定）：按后端基址分键（每后端登录态各自
+ * 保存，切换往返不互串，见 shellApiBase.refreshTokenStorageKey）。基址是模块
+ * 加载期事实（API_BASE_URL 同律），切换后端以整页刷新收尾，故模块级常量成立。
+ */
+const refreshTokenKey = refreshTokenStorageKey()
+
 /** 清擦令牌残留：access token 永不落盘（两键任何版本都非法）；
  *  sessionStorage 的 refresh 键是 D12-7 时代残留（现为 localStorage） */
 export function scrubLegacyTokenStorages(): void {
@@ -68,7 +76,7 @@ export function getAccessToken(): string | null {
 
 export function getRefreshTokenValue(): string | null {
   try {
-    return localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
+    return localStorage.getItem(refreshTokenKey)
   } catch {
     return null
   }
@@ -79,7 +87,7 @@ export function setTokens(accessToken: string, refreshToken: string, expiresIn: 
   memoryAccessToken = accessToken
   memoryAccessTokenExpiry = Date.now() + expiresIn * 1000
   try {
-    localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, refreshToken)
+    localStorage.setItem(refreshTokenKey, refreshToken)
   } catch {
     // localStorage 不可用：refresh 链路将按无凭据处理（重启浏览器后需重登），
     // access token 本轮仍有效，不阻塞当前会话
@@ -92,7 +100,7 @@ export function clearTokens(): void {
   memoryAccessToken = null
   memoryAccessTokenExpiry = null
   try {
-    localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
+    localStorage.removeItem(refreshTokenKey)
   } catch {
     // 同上：不可用时无残留可清
   }
@@ -105,9 +113,11 @@ export function clearTokens(): void {
  * refresh token 强杀耐久镜像：localStorage 走 Chromium 批量提交，进程被
  * 强杀时最近的轮换写入可能未落盘（服务端单次轮换已作废旧值）→ 重启后
  * 必然重新登录。主进程文件同步写立即落 OS 页缓存，进程强杀不丢。
- * Web / 旧版壳无 electronAPI 时为 no-op。
+ * Web / 旧版壳无 electronAPI 时为 no-op；自定义后端模式不分镜像（镜像文件
+ * 是桌面本机内核专属优化，单一镜像文件承载不了多后端各自的令牌）。
  */
 function mirrorAuthSession(refreshToken: string | null): void {
+  if (refreshTokenKey !== STORAGE_KEYS.REFRESH_TOKEN) return
   try {
     void window.electronAPI?.authSession?.save?.(refreshToken)?.catch(() => {
       // 镜像失败不阻塞令牌主链路（localStorage 仍是第一真值）
@@ -117,8 +127,9 @@ function mirrorAuthSession(refreshToken: string | null): void {
   }
 }
 
-/** 从主进程镜像回读 refresh token；无 electronAPI / 文件缺失返回 null */
+/** 从主进程镜像回读 refresh token；无 electronAPI / 文件缺失 / 自定义后端模式返回 null */
 export async function loadMirroredAuthSession(): Promise<string | null> {
+  if (refreshTokenKey !== STORAGE_KEYS.REFRESH_TOKEN) return null
   try {
     const token = await window.electronAPI?.authSession?.load?.()
     return typeof token === 'string' && token.length > 0 ? token : null
@@ -156,7 +167,7 @@ export async function refresh(): Promise<void> {
     // 上抛（不带 authNoCredentials），现态保留，调度器按退避重试。
     let currentRefreshToken: string | null
     try {
-      currentRefreshToken = localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)
+      currentRefreshToken = localStorage.getItem(refreshTokenKey)
     } catch (error) {
       console.error('[tokenLifecycle] refresh token 读取失败（存储异常，保留现态不登出）:', error)
       throw new Error('令牌存储读取失败', { cause: error })

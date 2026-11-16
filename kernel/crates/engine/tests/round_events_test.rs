@@ -332,6 +332,7 @@ async fn test_round_events_fire_per_iteration() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // 存量吸收(2026-10-12 棘轮): 旅程测试步骤内联,拆步骤降低可读性
 async fn test_tool_iteration_reuses_open_round() {
     // DSL 交替形态回归（用户复现的「尾部整段重复工具卡」根因锚）：
     // LLM 迭代 → 工具迭代（core_type=tool_execute，core_plugin=pipeline_tool_core）
@@ -578,6 +579,7 @@ async fn test_tool_iteration_reuses_open_round() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // 存量吸收(2026-10-12 棘轮): 旅程测试步骤内联,拆步骤降低可读性
 async fn test_tool_iteration_semantic_flag_with_custom_core_plugin() {
     // P1-1（F1+F3 去特判）：引擎迭代形态只读 core_type 语义标志（llm_call |
     // tool_execute），不比对插件 id——换 core 器官实现（自定义 id）后工具迭代

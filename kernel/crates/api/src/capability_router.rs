@@ -4,19 +4,27 @@
 //! - pipeline-executor.{suspend, resume, get_run_status} → 直接操作 runs 表
 //!   （审批挂起/恢复与复盘轮询走 StorageBackend；resume_pipeline 额外经
 //!   PipelineResumerFn 拉起续跑轮；任务执行统一走 chat.send_message →
-//!   PipelineExecutor）
+//!   PipelineExecutor）——处理器在子模块 [`pipeline_executor`]
 //! - event-bus.emit → 广播事件（当前记录日志，前端推送留 P1）
 //! - metrics.record → 写入指标聚合器（监控设计 §三 通道2，第 6 个 capability）
-//! - service-registry.<域>.<op> → 插件访问内核共享基础设施存储（execution-records/
-//!   pipeline-summaries/memory 三域，对应 M1 内核存储层）。基础设施下沉内核后，
-//!   插件不再各自持有进程内 ServiceProvider/store，统一经此 capability 调内核。
+//! - service-registry.<域>.<op> → 插件访问内核共享基础设施存储——处理器在
+//!   子模块 [`service_registry`]
+//! - tool-executor.invoke → 委托内核执行工具插件 sidecar——处理器在子模块
+//!   [`tool_executor`]
+//! - db-read.query/faces → 内核库读契约服务（执法核心在 db-admin crate
+//!   read_faces 模块，本路由持 handler 注入臂）
+//!
+//! 域处理器子模块（file-length 冻结件同刀拆分，loader.rs 三分先例：分发骨架
+//! 留母文件、按职责抽处理器）：[`pipeline_executor`] / [`service_registry`] /
+//! [`tool_executor`]。子模块经 `impl KernelCapabilityRouter` 挂方法，私有字段
+//! 对后代模块可见。
 //!
 //! [来源: ROADMAP.md 审批暂停/恢复、复盘调管道的前置地基]
 //! [来源: docs/working/重要设计/插件监控与指标机制设计.md §三 通道2]
 
 use std::sync::Arc;
 
-use agentos_core::traits::{CapabilityRegistry, MessageQueryOpts, StorageBackend};
+use agentos_core::traits::{CapabilityRegistry, StorageBackend};
 use agentos_mcp::{CapabilityRouter, McpError};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -25,7 +33,7 @@ use tracing::warn;
 use crate::metrics::{Labels, MetricType, MetricsAggregator};
 
 /// service-registry 能力错误码前缀（基础设施存储调用）。
-const ERR_SERVICE_REGISTRY: i64 = -32020;
+pub(crate) const ERR_SERVICE_REGISTRY: i64 = -32020;
 
 /// Capability 路由器实现。
 pub struct KernelCapabilityRouter {
@@ -53,20 +61,9 @@ pub struct KernelCapabilityRouter {
     /// 注册的 namespace 在这里路由。handle() 先查这里，miss 再走下方 match。
     /// None = 不支持插件自注册能力（仅内核内置能力可用）。
     handler_registry: Option<Arc<agentos_mcp::CapabilityHandlerRegistry>>,
-    /// 授权查询器（G6：granted_capabilities 白名单的查找通道）。
-    /// 闭包签名 (plugin_id) → Some(白名单) 当且仅当该插件声明了非空
-    /// granted_capabilities；None = 未声明。
-    /// None（字段）= 未装配授权查询 → 不做校验（兼容旧装配/测试）。
-    grants_lookup: Option<GrantsLookupFn>,
-    /// G6 strict 开关（AGENTOS_GRANTS_STRICT=1 时由装配方置位）：
-    /// strict = 未声明 granted_capabilities 的插件一律拒绝反向调用（fail-closed，
-    /// 新插件必须显式声明）；非 strict = 未声明默认全授予（存量插件零迁移）。
-    /// 判定语义见 [`Self::grants_lookup`] 与 handle() 的 G6 单点。
-    grants_strict: bool,
     /// 动态工具注册器（G3：registry.register_tool 的执行通道）。
     /// 闭包负责三道闸的后两道——enablement 校验（插件须 Enabled）+
     /// 写入注册表（经 M1 guarded 注册入 scope）+ 持久化（可重建性闸，写 DB）。
-    /// 信封闸（granted_capabilities 须含 "registry"）由上方 G6 单点校验覆盖。
     /// None = 动态注册不可用（返回显式错误）。
     dynamic_tool_registrar: Option<DynamicToolRegistrar>,
     /// 域事件广播闭包（DSH hook 翻译：event-bus.emit 的域事件名单事件同步
@@ -74,7 +71,7 @@ pub struct KernelCapabilityRouter {
     domain_broadcaster: Option<DomainBroadcaster>,
     /// 内核能力契约（定义驱动入口校验）：config/kernel/kernel_capabilities/
     /// *.json 声明的 input_schema（含 pattern 形态）在本路由入口逐条执行——
-    /// G6 授权之后、派发之前。None = 未装配契约 → 宽泛放行（兼容旧装配/测试）。
+    /// 派发之前。None = 未装配契约 → 宽泛放行（兼容旧装配/测试）。
     capability_contracts: Option<Arc<Vec<crate::kernel_capabilities::KernelCapabilityContract>>>,
     /// 流式声明查询器（ADR 2026-08-22 流式协议）：(plugin_id) → capabilities.streaming
     /// 声明。None = 未装配 → 声明闸放行（兼容旧装配/测试）。装配后未声明即拒。
@@ -92,16 +89,57 @@ pub struct KernelCapabilityRouter {
     /// state 出口声明查询闭包（manifest export_fields 并集，见 routes::ExportFields）。
     /// None = 无插件声明（仅内核基线出口，兼容旧装配/测试）。
     export_fields_lookup: Option<ExportFieldsLookupFn>,
+    /// state 持久写面声明查询闭包（manifest `state.writes`，按插件 id 查）。
+    /// None = 未装配 → 写面 fail-closed（无声明可放行，仅测试装配态需显式注入）。
+    state_writes_lookup: Option<StateWritesLookupFn>,
     /// 管道恢复派发闭包（resume_pipeline 拉起续跑轮，见 PipelineResumerFn）。
     /// None = 恢复派发不可用（resume_pipeline 降级为纯 runs 表簿记，兼容旧装配/测试）。
     pipeline_resumer: Option<PipelineResumerFn>,
     /// 调用路径注册表自愈闭包（BUG-37，见 [`ToolRegistryHealFn`]）。
     /// None = 无自愈，反查 miss 直接 fail-closed（测试装配态）。
     tool_registry_heal: Option<ToolRegistryHealFn>,
+    /// db-read 读契约服务 handler（C2 刀1：内核库只读数据面——face 注册表 +
+    /// 自由只读 SELECT + 租户内建收窄 + 权限分档；执法核心在 db-admin crate
+    /// read_faces 模块）。None = 不注入（非 SQLite driver / 未装配，臂诚实报错）。
+    db_read: Option<Arc<agentos_db_admin::DbReadCapabilityHandler>>,
 }
 
 /// state 出口声明查询闭包：() → 当前 manifest 集合的 export_fields 并集。
 pub type ExportFieldsLookupFn = Arc<dyn Fn() -> ExportFields + Send + Sync>;
+
+/// state 持久写面声明查询闭包：(plugin_id) → 该插件 manifest 的
+/// `state.writes` 声明（空 = 未声明/未找到 → 该插件无持久写权限）。
+/// 内核只按声明放行，不解释键所属域（ADR 2026-10-02）。
+/// 闭包实现方共享 manifests RwLock——watcher 热发现同步可见。
+pub type StateWritesLookupFn = Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>;
+
+/// 按调用方身份解析 `state.writes` 声明（合宿宿主键 → 成员并集）。
+///
+/// 反调 `_plugin_id` 身份 = 进程身份（独占 = manifest.id；合宿 =
+/// `group:<group>:<slot>`）——合宿宿主的写入必须归约到成员声明并集，否则
+/// 合宿插件全部被判"无持久写权限"（2026-11-04 e2e 实测：workspace_lifecycle
+/// 的 `task.ws_meta` 写被 group:light:2 身份拒绝，任务出生即卡 pending）。
+///
+/// 入参 `entries` = (插件 id, state.writes) 快照；`host_key_of` 提供插件 →
+/// 宿主键映射（真实装箱表；闭包内不得再持 manifests 锁）。
+pub fn state_writes_for_caller<F>(
+    entries: &[(String, Vec<String>)],
+    host_key_of: F,
+    caller: &str,
+) -> Vec<String>
+where
+    F: Fn(&str) -> String,
+{
+    if let Some((_, writes)) = entries.iter().find(|(id, _)| id == caller) {
+        return writes.clone();
+    }
+    // 合宿宿主键（group:*）+ 独占宿主键（plugin:*）统一按装箱表归约成员
+    entries
+        .iter()
+        .filter(|(id, _)| host_key_of(id) == caller)
+        .flat_map(|(_, writes)| writes.iter().cloned())
+        .collect()
+}
 
 pub use crate::routes::ExportFields;
 
@@ -175,106 +213,40 @@ pub type ToolRegistryHealFn = Arc<
 pub type DynamicToolRegistrar =
     Arc<dyn Fn(&str, agentos_core::traits::ToolDescriptor) -> Result<(), String> + Send + Sync>;
 
-/// G6：granted_capabilities 白名单查询闭包。
-///
-/// (plugin_id) → `Some(grants)` = 该插件声明了非空白名单（白名单制）；
-/// `None` = 未声明。未声明是否放行由 strict 开关决定（默认放行，存量零迁移；
-/// `AGENTOS_GRANTS_STRICT=1` 时拒绝）。
-pub type GrantsLookupFn = Arc<dyn Fn(&str) -> Option<Vec<String>> + Send + Sync>;
-
 impl KernelCapabilityRouter {
-    /// G6 授权单点校验：所有反向 capability 调用（sidecar JSON-RPC / native
-    /// HostServices）都经过本方法——在此一处校验 granted_capabilities 白名单，
-    /// 两轨同判同一拒绝语义。_plugin_id 是 invoker 注入的信任锚点（插件不可伪造）。
-    /// 判定：声明非空 = 白名单制，namespace 不在名单内即拒绝；未声明走开关——
-    /// 默认全授予（存量插件零迁移），AGENTOS_GRANTS_STRICT=1（装配方经
-    /// with_grants_strict 置位）时未声明 = 拒绝（fail-closed，新插件必须显式
-    /// 声明）。粒度 = namespace（§八.2 待评审项，现取粗粒度，
-    /// capability.method 级细化留 G3 信封评审一并定）。
-    async fn check_grant(&self, capability: &str, params: &Value) -> Result<(), McpError> {
-        if let (Some(lookup), Some(pid)) = (
-            self.grants_lookup.as_ref(),
-            params.get("_plugin_id").and_then(|v| v.as_str()),
-        ) {
-            match lookup(pid) {
-                Some(grants) => {
-                    if !grants.iter().any(|g| g == capability) {
-                        warn!(
-                            target: "capability_router",
-                            plugin = pid,
-                            capability = capability,
-                            "G6 授权拒绝：capability 不在 granted_capabilities 白名单"
-                        );
-                        return Err(McpError::Protocol {
-                            message: format!(
-                                "capability '{capability}' not granted to plugin '{pid}' (granted_capabilities)"
-                            ),
-                        });
-                    }
-                }
-                // 未声明 granted_capabilities：strict = 拒绝（fail-closed），
-                // 非 strict = 默认全授予（存量兼容）
-                None if self.grants_strict => {
-                    warn!(
-                        target: "capability_router",
-                        plugin = pid,
-                        capability = capability,
-                        "G6 授权拒绝（strict）：插件未声明 granted_capabilities"
-                    );
-                    return Err(McpError::Protocol {
-                        message: format!(
-                            "capability '{capability}' not granted to plugin '{pid}': no granted_capabilities declared (AGENTOS_GRANTS_STRICT=1)"
-                        ),
-                    });
-                }
-                None => {}
-            }
-        }
-        Ok(())
-    }
-
     /// 兜底：未注册/未实现的 capability.method（logger/config-reader 已作为
     /// 死能力从两端 STANDARD_CAPABILITIES 删除，残余调用会落到这里）。
     fn unhandled(&self, capability: &str, method: &str, params: &Value) -> Result<Value, McpError> {
+        // 运行时对账兜底（资源注册收敛 T5.5）：静态闸 + G2 闭包后的漏网情形
+        // （动态拼名等）落此处——显式失败信封（不假成功）+ 结构化日志（ns/
+        // method/调用方）+ 观测计数（service_unresolved，调用方作 series 归属，
+        // 与 metrics.record 同一聚合器；聚合器未启用则只留日志）。
+        let caller = params
+            .get("_plugin_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
         warn!(
-            "unhandled capability call: {}.{} (params={})",
-            capability, method, params
+            target: "agentos-kernel",
+            "service_unresolved: capability={capability} method={method} caller={caller}"
         );
+        if let Some(aggregator) = self.metrics.as_ref() {
+            let labels = Labels::from([
+                ("capability".to_string(), capability.to_string()),
+                ("method".to_string(), method.to_string()),
+            ]);
+            aggregator.record(
+                caller,
+                "service_unresolved",
+                MetricType::Counter,
+                1.0,
+                &labels,
+                None,
+                None,
+            );
+        }
         Err(McpError::Protocol {
             message: format!("capability method not implemented: {capability}.{method}"),
         })
-    }
-
-    /// pipeline-executor 域：runs 表状态簿记（审批挂起/恢复、复盘轮询、
-    /// 任务删除）；新引擎执行流由 state.suspended 插件机制控制，此处仅
-    /// 同步 runs 表状态供查询/恢复语义。None = 未命中（落兜底）。
-    async fn dispatch_pipeline_executor(
-        &self,
-        method: &str,
-        params: &Value,
-    ) -> Option<Result<Value, McpError>> {
-        match method {
-            "suspend" => Some(self.handle_pipeline_executor_suspend(params.clone()).await),
-            "resume" => Some(self.handle_pipeline_executor_resume(params.clone()).await),
-            // GAP-1 统一：按管道挂起/恢复（task_manage stop/resume 映射）
-            "suspend_pipeline" => Some(
-                self.handle_pipeline_executor_suspend_pipeline(params.clone())
-                    .await,
-            ),
-            "resume_pipeline" => Some(
-                self.handle_pipeline_executor_resume_pipeline(params.clone())
-                    .await,
-            ),
-            "get_run_status" => Some(
-                self.handle_pipeline_executor_get_run_status(params.clone())
-                    .await,
-            ),
-            "delete_pipeline" => Some(
-                self.handle_pipeline_executor_delete_pipeline(params.clone())
-                    .await,
-            ),
-            _ => None,
-        }
     }
 
     /// event-bus.emit：发事件/通知，流式 chunk 推送的核心出口。
@@ -295,8 +267,8 @@ impl KernelCapabilityRouter {
         }
     }
 
-    /// pipeline-state：state 聚合读面（GAP-2 CONDITION 求值上下文）与任务域
-    /// 写面（update 仅允许 task.* 前缀键）。
+    /// pipeline-state：state 聚合读面（GAP-2 CONDITION 求值上下文）与持久
+    /// 写面（update 按调用方 manifest state.writes 声明放行，ADR 2026-10-02）。
     async fn dispatch_pipeline_state(
         &self,
         method: &str,
@@ -326,24 +298,6 @@ impl KernelCapabilityRouter {
         }
     }
 
-    /// trigger-svc：触发器注册面（M1 内核侧，ADR 2026-10-02-trigger-eval-unification）。
-    /// 注册表/边沿簿记/fire log 在 `agentos_engine::trigger`（全局单例）；
-    /// committed 求值锚点在 store 提交写入口（SqliteStore upsert 提交后）。
-    /// 条件语法 = 内核 condition.rs（与管道 when/routes/while 同源）。
-    async fn dispatch_trigger_svc(
-        &self,
-        method: &str,
-        params: &Value,
-    ) -> Option<Result<Value, McpError>> {
-        match method {
-            "register" => Some(self.handle_trigger_register(params.clone()).await),
-            "unregister" => Some(self.handle_trigger_unregister(params.clone()).await),
-            "reconcile" => Some(self.handle_trigger_reconcile().await),
-            "ack" => Some(self.handle_trigger_ack(params.clone()).await),
-            _ => None,
-        }
-    }
-
     /// 创建带指标聚合器的路由器（生产用，启用 metrics.record 反向调用）。
     pub fn with_metrics(metrics: MetricsAggregator) -> Self {
         Self {
@@ -354,8 +308,6 @@ impl KernelCapabilityRouter {
             store: None,
             sqlite: None,
             handler_registry: None,
-            grants_lookup: None,
-            grants_strict: false,
             dynamic_tool_registrar: None,
             domain_broadcaster: None,
             capability_contracts: None,
@@ -364,8 +316,10 @@ impl KernelCapabilityRouter {
             shadowed_plugin_ids_lookup: None,
             tool_failure_tracker: None,
             export_fields_lookup: None,
+            state_writes_lookup: None,
             pipeline_resumer: None,
             tool_registry_heal: None,
+            db_read: None,
         }
     }
 
@@ -432,23 +386,17 @@ impl KernelCapabilityRouter {
         self
     }
 
+    /// 注入 state 持久写面声明查询器（ADR 2026-10-02 声明制）：
+    /// `pipeline-state.update` 按调用方 `_plugin_id` 查 manifest `state.writes`，
+    /// 未声明即拒绝。None = 未装配 → 写面 fail-closed。
+    pub fn with_state_writes_lookup(mut self, lookup: StateWritesLookupFn) -> Self {
+        self.state_writes_lookup = Some(lookup);
+        self
+    }
+
     /// 注入插件调用器（启用 tool-executor.invoke 反向调用）。
     pub fn with_invoker(mut self, invoker: Arc<dyn agentos_core::traits::PluginInvoker>) -> Self {
         self.invoker = Some(invoker);
-        self
-    }
-
-    /// 注入授权查询器（G6：启用 granted_capabilities 白名单单点校验）。
-    pub fn with_grants_lookup(mut self, lookup: GrantsLookupFn) -> Self {
-        self.grants_lookup = Some(lookup);
-        self
-    }
-
-    /// 启用 G6 strict 模式（AGENTOS_GRANTS_STRICT=1 语义）：未声明
-    /// granted_capabilities 的插件反向调用一律拒绝（fail-closed，新插件必须
-    /// 显式声明）；不调用保持默认——未声明 = 全授予（存量插件零迁移）。
-    pub fn with_grants_strict(mut self) -> Self {
-        self.grants_strict = true;
         self
     }
 
@@ -467,6 +415,12 @@ impl KernelCapabilityRouter {
     /// 注入调用路径注册表自愈闭包（BUG-37，见 [`ToolRegistryHealFn`]）。
     pub fn with_tool_registry_heal(mut self, heal: ToolRegistryHealFn) -> Self {
         self.tool_registry_heal = Some(heal);
+        self
+    }
+
+    /// 注入 db-read 读契约服务 handler（C2 刀1：启用 `("db-read", m)` 内置臂）。
+    pub fn with_db_read(mut self, handler: Arc<agentos_db_admin::DbReadCapabilityHandler>) -> Self {
+        self.db_read = Some(handler);
         self
     }
 
@@ -511,8 +465,6 @@ impl CapabilityRouter for KernelCapabilityRouter {
         method: &str,
         params: Value,
     ) -> Result<Value, McpError> {
-        // G6 授权单点校验（语义见 check_grant）。
-        self.check_grant(capability, &params).await?;
         // 定义驱动入口校验：契约声明了 (capability, method)
         // 时按 input_schema 逐条执行（required/类型/pattern 形态/enum/闭包参数面），
         // 未声明即宽泛放行——定义详细到什么程度，就校验到什么程度。这是"相同
@@ -536,6 +488,10 @@ impl CapabilityRouter for KernelCapabilityRouter {
                 .dispatch_pipeline_executor(m, &params)
                 .await
                 .unwrap_or_else(|| self.unhandled(capability, method, &params)),
+            // ── session.create：sidecar 兜底新建承载管道（日程触发器挂载，
+            // ADR 2026-11-03-pim-trigger-anchor）。身份 = 执行上下文注入，
+            // 无注入 fail-fast（同 resume_pipeline 刀3 契约）。
+            ("session", "create") => self.handle_session_create(&params).await,
             ("event-bus", m) => self
                 .dispatch_event_bus(m, &params)
                 .await
@@ -547,7 +503,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
             ("frontend", "emit") => self.handle_frontend_emit(params).await,
 
             // ── registry.register_tool：运行时动态注册（G3，VS Code 双层模型的
-            // 动态层）。信封闸已由 G6 单点覆盖；使能/写入/持久化都在装配闭包里。──
+            // 动态层）。使能/写入/持久化都在装配闭包里（作用域收窄到注册插件自身）。──
             ("registry", "register_tool") => self.handle_registry_register_tool(params).await,
 
             // ── metrics.record：插件上报指标（监控设计 §三 通道2）。plugin_id 作
@@ -559,7 +515,7 @@ impl CapabilityRouter for KernelCapabilityRouter {
             ("tool-executor", "invoke") => self.handle_tool_executor_invoke(params).await,
 
             // ── tool-surface.schemas：LLM 工具面过滤服务（K10 执行时契约）──
-            // agent 配置解析（读 yaml 取 tool_ids）归插件域：context_build 写
+            // agent 配置解析（读 yaml 取 tool_ids）归插件域：agent_config_load 写
             // state.tool_ids，tool_schema 管道插件转发本调用。内核零 agent 配置
             // 知识，只持"注册表过滤"这一纯执行面。
             ("tool-surface", "schemas") => self.handle_tool_surface_schemas(&params).await,
@@ -570,6 +526,23 @@ impl CapabilityRouter for KernelCapabilityRouter {
             // / memory 三表（M1 落地），不再各自持有进程内 ServiceProvider/store。
             ("service-registry", m) => self.handle_service_registry(m, params).await,
 
+            // ── db-read：内核库读契约服务（C2 刀1）─────────────────────────
+            // 数据面声明式注册（config/kernel/read_faces.yaml）+ 自由只读 SELECT
+            // + 租户内建收窄 + 权限分档（tenant | global-admin）。执法核心在
+            // db-admin crate read_faces 模块，身份走 _authorization 原头转发 +
+            // 内核复权（db-admin capability.rs 同款先例）；G6 授权闸已由本
+            // handle() 单点先行。
+            ("db-read", m) => {
+                let Some(handler) = self.db_read.as_ref() else {
+                    return Err(McpError::Protocol {
+                        message: "db-read disabled: read faces not injected（非 SQLite driver \
+                                  或 boot 未装配）"
+                            .to_string(),
+                    });
+                };
+                handler.call(m, params).await
+            }
+
             ("pipeline-state", m) => self
                 .dispatch_pipeline_state(m, &params)
                 .await
@@ -577,14 +550,6 @@ impl CapabilityRouter for KernelCapabilityRouter {
 
             ("transient", m) => self
                 .dispatch_transient(m, &params)
-                .await
-                .unwrap_or_else(|| self.unhandled(capability, method, &params)),
-
-            // ── trigger-svc：触发器注册面（M1 内核侧）——注册/注销/对账/ack，
-            // 求值锚点在 store 提交写入口（engine trigger.rs），G6 信封闸由
-            // handle() 单点覆盖。──
-            ("trigger-svc", m) => self
-                .dispatch_trigger_svc(m, &params)
                 .await
                 .unwrap_or_else(|| self.unhandled(capability, method, &params)),
 
@@ -673,6 +638,24 @@ impl KernelCapabilityRouter {
             .map(|lookup| lookup().into_iter().collect())
             .unwrap_or_default();
         let all_tools = registry.list_tools();
+        // F-min 属地替换（设计文档 §53）：调用方可传 workspace（任务工作空间
+        // 原样路径）；同名多实例工具按属地解析为宿主实例描述符（工具名不变，
+        // 仅 schema/description 面换成属地实例的）。单实例/未传 workspace =
+        // 主实例原样，既有行为逐字节一致。
+        let workspace = params.get("workspace").and_then(|v| v.as_str());
+        let all_tools: Vec<_> = match workspace {
+            Some(ws) => all_tools
+                .into_iter()
+                .map(|t| {
+                    let resolved = registry.resolve_tool_instance(&t.name, Some(ws));
+                    match resolved {
+                        Some(inst) if inst.plugin_id != t.plugin_id => inst,
+                        _ => t,
+                    }
+                })
+                .collect(),
+            None => all_tools,
+        };
         // tool_ids 条目等于插件 id → 该插件全部工具入面（一行接入的 agent 侧
         // 配法：白名单写插件名即透出其全部工具，动态导入的多工具 MCP 免逐个
         // 罗列；与精确工具名并存，同名时取并集）。
@@ -707,6 +690,7 @@ impl KernelCapabilityRouter {
                     json!({
                         "schema": t.output_schema.clone().unwrap_or(Value::Null),
                         "render": t.render.clone().unwrap_or(Value::Null),
+                        "isolation_capable": t.isolation_capable.unwrap_or(false),
                     }),
                 )
             })
@@ -717,494 +701,9 @@ impl KernelCapabilityRouter {
         }))
     }
 
-    /// 处理 service-registry.<域>.<op> 反向调用。
-    ///
-    /// method 形如 `execution-records.list`，先 split 出 (domain, op) 再分派。
-    /// store 未注入时统一返回 ERR_SERVICE_REGISTRY。
-    async fn handle_service_registry(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> Result<Value, McpError> {
-        let store = self.store.as_ref().ok_or_else(|| McpError::Protocol {
-            message: "service-registry disabled: kernel store not injected".to_string(),
-        })?;
-        // method = "<domain>.<op>"
-        let (domain, op) = method.split_once('.').ok_or_else(|| McpError::Protocol {
-            message: format!("invalid service-registry method (expect <domain>.<op>): {method}"),
-        })?;
-        match (domain, op) {
-            // ── messages 域（按 pipeline_id 查对话消息，复盘/压缩块恢复用）──
-            ("messages", "list") => {
-                let pipeline_id = params
-                    .get("pipeline_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| srv_err("missing pipeline_id".into()))?;
-                let opts = parse_message_query_opts(&params);
-                let rows = store
-                    .get_messages_by_pipeline(pipeline_id, opts)
-                    .await
-                    .map_err(|e| srv_err(format!("messages.list: {e}")))?;
-                serde_json::to_value(rows).map_err(|e| srv_err(format!("encode: {e}")))
-            }
-            // ── traces 域（按 thread_id 查插件 state 变更轨迹，复盘骨架用）──
-            ("traces", "list") => {
-                let thread_id = params
-                    .get("thread_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| srv_err("missing thread_id".into()))?;
-                let tenant_id = params
-                    .get("tenant_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("default");
-                let rows = store
-                    .get_step_traces_by_thread(thread_id, tenant_id)
-                    .await
-                    .map_err(|e| srv_err(format!("traces.list: {e}")))?;
-                serde_json::to_value(rows).map_err(|e| srv_err(format!("encode: {e}")))
-            }
-            // ── traces.list_by_pipeline：按 pipeline_id 直查单管道 step 轨迹 ──
-            // pipeline_id 是执行态唯一坐标；绑真会话的任务管道落映射
-            // (task→thread-xxx)，按 thread_id=pipeline_id 查恒空（task_manage
-            // recent_activities 数据源）——本读面绕开会话映射直查。
-            ("traces", "list_by_pipeline") => {
-                let pipeline_id = params
-                    .get("pipeline_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| srv_err("missing pipeline_id".into()))?;
-                let tenant_id = params
-                    .get("tenant_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("default");
-                let rows = store
-                    .get_step_traces_by_pipeline(pipeline_id, tenant_id)
-                    .await
-                    .map_err(|e| srv_err(format!("traces.list_by_pipeline: {e}")))?;
-                serde_json::to_value(rows).map_err(|e| srv_err(format!("encode: {e}")))
-            }
-            // ── pipeline-runs 域（runs 快照列表，调试中心会话/执行记录数据源）──
-            // 与 GET /api/v1/pipelines/runs 同查询（list_pipelines_inner 四表联结），
-            // 按 started_at 倒序；插件侧（channel_api）以此为「有执行记录的会话」清单。
-            ("pipeline-runs", "list") => {
-                let tenant_id = params
-                    .get("tenant_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("default");
-                let status = params
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty());
-                let limit = params
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(100)
-                    .min(500) as u32;
-                let rows = store
-                    .list_pipelines(tenant_id, status, limit)
-                    .await
-                    .map_err(|e| srv_err(format!("pipeline-runs.list: {e}")))?;
-                serde_json::to_value(rows).map_err(|e| srv_err(format!("encode: {e}")))
-            }
-            // ── pipeline-runs.list_by_pipeline：按 pipeline_id 列该管道全部 run ──
-            // 任务耗时起点数据源（task_manage elapsed_seconds：首 run created_at）。
-            ("pipeline-runs", "list_by_pipeline") => {
-                let pipeline_id = params
-                    .get("pipeline_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| srv_err("missing pipeline_id".into()))?;
-                let tenant_id = params
-                    .get("tenant_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("default");
-                let rows = store
-                    .list_runs_by_pipeline(pipeline_id, tenant_id)
-                    .await
-                    .map_err(|e| srv_err(format!("pipeline-runs.list_by_pipeline: {e}")))?;
-                serde_json::to_value(rows).map_err(|e| srv_err(format!("encode: {e}")))
-            }
-            (domain, op) => Err(McpError::Protocol {
-                message: format!("service-registry method not implemented: {domain}.{op}"),
-            }),
-        }
-    }
-
     // ── 内置能力域处理器：handle() 的 match 按域一行委托到这里 ─────────────
-
-    /// pipeline-executor.suspend：按 run_id 挂起。已挂起直接返回当前句柄（幂等）。
-    async fn handle_pipeline_executor_suspend(&self, params: Value) -> Result<Value, McpError> {
-        let run_id = params
-            .get("run_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::Protocol {
-                message: "suspend 缺少 run_id 参数".to_string(),
-            })?;
-        let store = self.store.as_ref().ok_or_else(|| McpError::Protocol {
-            message: "suspend disabled: kernel store not injected".to_string(),
-        })?;
-        let run = store
-            .get_run(run_id)
-            .await
-            .map_err(|e| McpError::Protocol {
-                message: format!("suspend 失败: {e}"),
-            })?;
-        // 已终态（completed/failed）的 run 不再挂起，直接返回当前句柄（幂等）
-        if run.status == agentos_core::types::RunStatus::Suspended {
-            return Ok(json!({
-                "status": "suspended",
-                "run_id": run.run_id,
-                "branch_id": run.current_branch,
-                "seq": run.current_seq,
-            }));
-        }
-        // runs 表退役（ADR 2026-09-18）：簿记 = state 运行键回写。
-        let Some(pipeline_id) = run.pipeline_id.clone() else {
-            return Err(McpError::Protocol {
-                message: format!("suspend 失败: run 无管道归属（run_id={run_id}）"),
-            });
-        };
-        store
-            .upsert_state_fields(
-                &pipeline_id,
-                &run.tenant_id,
-                &json!({ "run_status": "suspended" })
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            )
-            .await
-            .map_err(|e| McpError::Protocol {
-                message: format!("suspend 失败: {e}"),
-            })?;
-        // 挂起凭据落库（审批挂起恢复链写侧）：approval 插件 suspend 时携带
-        // 交互 request_id（形参名 approval_id 兼容），落 state 标量键
-        // `suspend_request_id` 供 interaction_response 按 request_id 反查唤醒
-        // （find_suspended_run_by_request_id）。失败降级 warn 不回滚挂起。
-        let request_id = params
-            .get("request_id")
-            .and_then(|v| v.as_str())
-            .or_else(|| params.get("approval_id").and_then(|v| v.as_str()))
-            .filter(|s| !s.is_empty());
-        if let (Some(db), Some(req_id)) = (self.sqlite.as_ref(), request_id) {
-            let mut fields = serde_json::Map::new();
-            fields.insert("suspend_request_id".to_string(), json!(req_id));
-            if let Err(e) = db.upsert_state_fields(&pipeline_id, &run.tenant_id, &fields) {
-                tracing::warn!(
-                    run_id = %run_id,
-                    request_id = %req_id,
-                    error = %e,
-                    "suspend 落挂起凭据失败（interaction_response 将反查不到此 run）"
-                );
-            }
-        }
-        // 返回完整 handle，sidecar resume 时需回传全部字段
-        Ok(json!({
-            "status": "suspended",
-            "run_id": run.run_id,
-            "branch_id": run.current_branch,
-            "seq": run.current_seq,
-        }))
-    }
-
-    /// pipeline-executor.resume：按 run_id 恢复为 Running。
-    async fn handle_pipeline_executor_resume(&self, params: Value) -> Result<Value, McpError> {
-        // resume 凭据 = suspend 返回的完整 handle JSON（run_id + branch_id + seq）。
-        // sidecar 在 suspend 时拿到 handle，resume 时回传完整字段。
-        let run_id = params
-            .get("run_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::Protocol {
-                message: "resume 缺少 run_id 参数".to_string(),
-            })?;
-        let store = self.store.as_ref().ok_or_else(|| McpError::Protocol {
-            message: "resume disabled: kernel store not injected".to_string(),
-        })?;
-        let run = store
-            .get_run(run_id)
-            .await
-            .map_err(|e| McpError::Protocol {
-                message: format!("resume 失败: {e}"),
-            })?;
-        let Some(pipeline_id) = run.pipeline_id.clone() else {
-            return Err(McpError::Protocol {
-                message: format!("resume 失败: run 无管道归属（run_id={run_id}）"),
-            });
-        };
-        store
-            .upsert_state_fields(
-                &pipeline_id,
-                &run.tenant_id,
-                &json!({ "run_status": "running" })
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            )
-            .await
-            .map_err(|e| McpError::Protocol {
-                message: format!("resume 失败: {e}"),
-            })?;
-        // 恢复即清挂起凭据：陈旧 suspend_request_id 留在 state 会让后续按凭据
-        // 的反查误判该 run 仍在等审批。
-        if let Some(db) = self.sqlite.as_ref() {
-            let mut fields = serde_json::Map::new();
-            fields.insert("suspend_request_id".to_string(), Value::Null);
-            if let Err(e) = db.upsert_state_fields(&pipeline_id, &run.tenant_id, &fields) {
-                tracing::warn!(
-                    run_id = %run_id,
-                    error = %e,
-                    "resume 清挂起凭据失败（凭据残留）"
-                );
-            }
-        }
-        Ok(json!({"status": "resumed", "run_id": run_id}))
-    }
-
-    /// pipeline-executor.suspend_pipeline：挂起该管道最新非终态 run
-    /// （task_manage stop 映射；GAP-1 统一）。幂等：无匹配 run 返回 ok。
-    async fn handle_pipeline_executor_suspend_pipeline(
-        &self,
-        params: Value,
-    ) -> Result<Value, McpError> {
-        let pipeline_id = params
-            .get("pipeline_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::Protocol {
-                message: "suspend_pipeline 缺少 pipeline_id 参数".to_string(),
-            })?;
-        let store = self.store.as_ref().ok_or_else(|| McpError::Protocol {
-            message: "suspend_pipeline disabled: kernel store not injected".to_string(),
-        })?;
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let runs = store
-            .list_runs_by_pipeline(pipeline_id, &tenant_id)
-            .await
-            .map_err(|e| McpError::Protocol {
-                message: format!("suspend_pipeline 查询失败: {e}"),
-            })?;
-        let target = runs.into_iter().find(|r| {
-            r.status == agentos_core::types::RunStatus::Running
-                || r.status == agentos_core::types::RunStatus::Suspended
-        });
-        match target {
-            Some(run) if run.status == agentos_core::types::RunStatus::Suspended => {
-                Ok(json!({"status": "suspended", "pipeline_id": pipeline_id, "run_id": run.run_id}))
-            }
-            Some(run) => {
-                store
-                    .upsert_state_fields(
-                        pipeline_id,
-                        &run.tenant_id,
-                        &json!({ "run_status": "suspended" })
-                            .as_object()
-                            .unwrap()
-                            .clone(),
-                    )
-                    .await
-                    .map_err(|e| McpError::Protocol {
-                        message: format!("suspend_pipeline 失败: {e}"),
-                    })?;
-                Ok(json!({"status": "suspended", "pipeline_id": pipeline_id, "run_id": run.run_id}))
-            }
-            None => Ok(json!({"status": "suspended", "pipeline_id": pipeline_id, "run_id": ""})),
-        }
-    }
-
-    /// pipeline-executor.resume_pipeline：恢复该管道执行。
-    ///
-    /// 恢复语义按 run 状态三分（状态簿记与执行拉起统一在此收口）：
-    /// - 最新 run **Running**：执行在飞，幂等空转不重复派发（RunChain 已有本轮）。
-    /// - 最新 run **Suspended + metadata.pending_interaction_request_id**：审批
-    ///   挂起在飞（引擎 run 未结束、human_interaction 工具进程内阻塞）——翻
-    ///   Running 簿记，真唤醒走 interaction.respond（回复载荷不经本能力）。
-    /// - **其余**（停泊挂起：child_task_guard/DSL Wait/G8 排空；或无在飞 run：
-    ///   历史已终态）：拉起一轮续跑——经恢复派发闭包走与聊天/催促同一条
-    ///   派发链，state 由 stage_recover_history 从快照/DB 全量恢复，调用方
-    ///   无需透传 state。旧 run 不翻状态（挂起即其真实收束史，新 run 另起
-    ///   一行承载执行，避免翻 Running 后无人收尾的幽灵 running）。
-    async fn handle_pipeline_executor_resume_pipeline(
-        &self,
-        params: Value,
-    ) -> Result<Value, McpError> {
-        let pipeline_id = params
-            .get("pipeline_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::Protocol {
-                message: "resume_pipeline 缺少 pipeline_id 参数".to_string(),
-            })?;
-        let user_id = params.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
-        // 可选状态复位指令（B13①：任务域 resume 链清 task.status 终态键）——
-        // 不透明透传给续跑派发，随派发 overlay 在恢复合并之后应用。
-        let state_overlay = params
-            .get("state_overlay")
-            .filter(|v| v.is_object())
-            .cloned();
-        let store = self.store.as_ref().ok_or_else(|| McpError::Protocol {
-            message: "resume_pipeline disabled: kernel store not injected".to_string(),
-        })?;
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        let runs = store
-            .list_runs_by_pipeline(pipeline_id, &tenant_id)
-            .await
-            .map_err(|e| McpError::Protocol {
-                message: format!("resume_pipeline 查询失败: {e}"),
-            })?;
-        let target = runs.into_iter().find(|r| {
-            r.status == agentos_core::types::RunStatus::Running
-                || r.status == agentos_core::types::RunStatus::Suspended
-        });
-        if let Some(run) = &target {
-            if run.status == agentos_core::types::RunStatus::Running {
-                // 执行在飞：幂等空转，不重复派发。
-                return Ok(json!({
-                    "status": "resumed", "pipeline_id": pipeline_id,
-                    "run_id": run.run_id, "dispatched": false,
-                }));
-            }
-            let approval_pending = run
-                .metadata
-                .as_ref()
-                .and_then(|m| m.get("pending_interaction_request_id"))
-                .is_some();
-            if approval_pending {
-                store
-                    .upsert_state_fields(
-                        pipeline_id,
-                        &run.tenant_id,
-                        &json!({ "run_status": "running" })
-                            .as_object()
-                            .unwrap()
-                            .clone(),
-                    )
-                    .await
-                    .map_err(|e| McpError::Protocol {
-                        message: format!("resume_pipeline 失败: {e}"),
-                    })?;
-                return Ok(json!({
-                    "status": "resumed", "pipeline_id": pipeline_id,
-                    "run_id": run.run_id, "dispatched": false,
-                }));
-            }
-        }
-        // 停泊挂起 / 无在飞 run：拉起续跑轮。管道须挂真实会话（thread 是派发
-        // 坐标；孤儿/伪造 id 拒绝——静默跑完会把回复发到无人订阅的频道）。
-        let thread_id = match store.get_thread_id_by_pipeline(pipeline_id).await {
-            Ok(Some(tid)) => tid,
-            Ok(None) => {
-                return Err(McpError::Protocol {
-                    message: format!(
-                        "resume_pipeline 的 pipeline_id（{pipeline_id}）不属于任何会话\
-                         （pipeline_sessions 未命中）：孤儿或伪造 id，拒绝派发"
-                    ),
-                });
-            }
-            Err(e) => {
-                return Err(McpError::Protocol {
-                    message: format!("resume_pipeline 解析管道会话坐标失败: {e}"),
-                });
-            }
-        };
-        let Some(resumer) = self.pipeline_resumer.as_ref() else {
-            // 恢复派发未装配：降级为既有簿记语义（suspended → running），留痕。
-            if let Some(run) = &target {
-                warn!(
-                    pipeline = %pipeline_id,
-                    run_id = %run.run_id,
-                    "resume_pipeline 恢复派发未装配，降级纯簿记（翻 Running 不拉起执行）"
-                );
-                store
-                    .upsert_state_fields(
-                        pipeline_id,
-                        &run.tenant_id,
-                        &json!({ "run_status": "running" })
-                            .as_object()
-                            .unwrap()
-                            .clone(),
-                    )
-                    .await
-                    .map_err(|e| McpError::Protocol {
-                        message: format!("resume_pipeline 失败: {e}"),
-                    })?;
-            }
-            return Ok(json!({
-                "status": "resumed", "pipeline_id": pipeline_id,
-                "run_id": target.as_ref().map(|r| r.run_id.clone()).unwrap_or_default(),
-                "dispatched": false,
-            }));
-        };
-        resumer(
-            pipeline_id.to_string(),
-            thread_id,
-            user_id.to_string(),
-            state_overlay,
-        )
-        .await
-        .map_err(|e| McpError::Protocol {
-            message: format!("resume_pipeline 续跑派发失败: {e}"),
-        })?;
-        Ok(json!({
-            "status": "resumed",
-            "pipeline_id": pipeline_id,
-            "run_id": target.as_ref().map(|r| r.run_id.clone()).unwrap_or_default(),
-            "dispatched": true,
-        }))
-    }
-
-    /// pipeline-executor.get_run_status：复盘侧轮询子管道真实完成状态
-    /// （F-REVIEW-2），直接查 runs 表并返回完整 RunRecord。
-    async fn handle_pipeline_executor_get_run_status(
-        &self,
-        params: Value,
-    ) -> Result<Value, McpError> {
-        let run_id = params
-            .get("run_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::Protocol {
-                message: "get_run_status 缺少 run_id 参数".to_string(),
-            })?;
-        let store = self.store.as_ref().ok_or_else(|| McpError::Protocol {
-            message: "get_run_status disabled: kernel store not injected".to_string(),
-        })?;
-        let run = store
-            .get_run(run_id)
-            .await
-            .map_err(|e| McpError::Protocol {
-                message: format!("get_run_status 失败: {e}"),
-            })?;
-        serde_json::to_value(&run).map_err(|e| McpError::Protocol {
-            message: format!("get_run_status 编码失败: {e}"),
-        })
-    }
-
-    /// pipeline-executor.delete_pipeline：任务删除语义（0.2 任务 = 管道），删除
-    /// 该管道全部执行数据并清内存 registry 条目。幂等：无记录返回 ok。
-    async fn handle_pipeline_executor_delete_pipeline(
-        &self,
-        params: Value,
-    ) -> Result<Value, McpError> {
-        let pipeline_id = params
-            .get("pipeline_id")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| McpError::Protocol {
-                message: "delete_pipeline 缺少 pipeline_id 参数".to_string(),
-            })?;
-        let store = self.store.as_ref().ok_or_else(|| McpError::Protocol {
-            message: "delete_pipeline disabled: kernel store not injected".to_string(),
-        })?;
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        // 返回值 = 实际删除清单（含血缘后代子任务管道），逐个逐出内存注册表
-        let deleted_ids =
-            store
-                .delete_pipeline(pipeline_id)
-                .await
-                .map_err(|e| McpError::Protocol {
-                    message: format!("delete_pipeline 失败: {e}"),
-                })?;
-        let registry = agentos_session::pipeline_state_registry::global_registry();
-        for pid in &deleted_ids {
-            registry.remove(&tenant_id, pid);
-        }
-        Ok(json!({"status": "deleted", "pipeline_id": pipeline_id}))
-    }
+    // （service-registry / tool-executor / pipeline-executor 三域处理器已按职责
+    //   平移至子模块 service_registry.rs / tool_executor.rs / pipeline_executor.rs。）
 
     /// event-bus.emit：插件事件统一入口。流式契约网关执法后按族路由：
     /// 流式族 → 工具族 → 交互族 → 其余透传（approval.created 同步广播域总线）。
@@ -1217,11 +716,7 @@ impl KernelCapabilityRouter {
             .get("payload")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        tracing::debug!(target: "capability:event-bus", event = %event_name,
-            thread = %payload.get("thread_id").and_then(|v| v.as_str()).unwrap_or(""),
-            pipeline = %payload.get("pipeline_id").and_then(|v| v.as_str()).unwrap_or(""),
-            message = %payload.get("message_id").and_then(|v| v.as_str()).unwrap_or(""),
-            "收到 event-bus.emit");
+        tracing::debug!(target: "capability:event-bus", event = %event_name, "收到 event-bus.emit");
 
         let plugin_id = params.get("_plugin_id").and_then(|v| v.as_str());
         if let Some(rejection) = self.streaming_gateway_rejection(event_name, &payload, plugin_id) {
@@ -1365,8 +860,9 @@ impl KernelCapabilityRouter {
         None
     }
 
-    /// 流式事件族（stream_chunk/thinking_*/stream_end/stream_error）。命中返回
-    /// Some(响应)，未命中返回 None 落下一族。0.1 协议信封必须含 pipeline_id +
+    /// 流式事件族（名单单源 = config/kernel/ws_events.yaml 的 stream_family 节，
+    /// ADR 2026-10-10：改名单改文件，勿在此登记）。命中返回 Some(响应)，
+    /// 未命中返回 None 落下一族。0.1 协议信封必须含 pipeline_id +
     /// message_id，否则前端 resolvePipelineId/extractMessageId 失败丢弃；
     /// thinking 系列驱动前端思考卡片渲染。
     async fn try_route_stream_family(
@@ -1374,15 +870,7 @@ impl KernelCapabilityRouter {
         event_name: &str,
         payload: &Value,
     ) -> Option<Result<Value, McpError>> {
-        let stream_events = [
-            "stream_chunk",
-            "thinking_start",
-            "thinking_chunk",
-            "thinking_end",
-            "stream_end",
-            "stream_error",
-        ];
-        if !stream_events.contains(&event_name) {
+        if !crate::ws_events::is_stream_family(event_name) {
             return None;
         }
         if let Some(session) = &self.session {
@@ -1644,10 +1132,12 @@ impl KernelCapabilityRouter {
         event_name: &str,
         payload: &Value,
     ) -> Result<Value, McpError> {
-        // 审批创建事件（approval.created）同步广播进域事件总线：除前端 WS 透传外，
-        // 生命周期订阅者（触发器/域事件插件）也能感知审批请求——插件只发一次
-        // event-bus，内核单点分流。
-        if event_name == "approval.created" {
+        // 域事件镜像（名单单源 = config/kernel/ws_events.yaml 的 domain_mirrors 节，
+        // ADR 2026-10-10）：名单内事件（现仅 approval.created）除前端 WS 透传外，
+        // 同步广播进域事件总线——生命周期订阅者（触发器/域事件插件）也能感知
+        // 审批请求，插件只发一次 event-bus，内核单点分流。二期升级路径：改
+        // plugin.json domain_events 声明驱动注册表分流（ADR 影响节登记）。
+        if crate::ws_events::is_domain_mirror(event_name) {
             if let Some(broadcaster) = &self.domain_broadcaster {
                 // tag 提取同 derive_run_terminal_events 的 v() 法：字段缺失以 Null 占位。
                 let tag = |k: &'static str| {
@@ -1657,7 +1147,7 @@ impl KernelCapabilityRouter {
                     )
                 };
                 broadcaster(
-                    "approval.created",
+                    event_name,
                     vec![
                         tag("request_id"),
                         tag("run_id"),
@@ -1834,6 +1324,7 @@ impl KernelCapabilityRouter {
             source: ToolSource::Dynamic,
             ui: params.get("ui").cloned(),
             render: params.get("render").cloned(),
+            isolation_capable: params.get("isolation_capable").and_then(|v| v.as_bool()),
         };
         let registrar = self
             .dynamic_tool_registrar
@@ -1917,181 +1408,6 @@ impl KernelCapabilityRouter {
             help.as_deref(),
         );
         Ok(json!({"status": "recorded", "plugin_id": plugin_id, "name": name}))
-    }
-
-    /// tool-executor.invoke：tool_core 反向委托内核执行工具插件 sidecar
-    /// （sidecar 进程内没有 ToolRegistry）。治理三段：会话身份告警 → 内部元数据
-    /// 剥离 → 目标插件解析（fail-closed）后经 invoker 执行；连续失败计入告警器。
-    async fn handle_tool_executor_invoke(&self, params: Value) -> Result<Value, McpError> {
-        let tool_name = params
-            .get("tool_name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::Protocol {
-                message: "tool-executor.invoke 缺少 tool_name 参数".to_string(),
-            })?;
-        let tool_args_raw = params.get("args").cloned().unwrap_or(json!({}));
-        // 越权防护（治理）：0.2 工具调用应携带会话身份。会话身份由 tool_args_inject
-        // 插件从 pipeline state 注入 session_id 到 args（state.session_id 来自
-        // server.rs 构造的 initial_state），所有走 LLM 工具调用链的工具都带得上。
-        // 缺失时告警不阻断——bash 等有状态工具插件侧用 _owner/session_id fallback
-        // 链（bash/tool.py::_owner_from_inputs）做 pid 级越权兜底；此告警用于发现
-        // 绕过 tool_args_inject 的调用方（如 hindsight 经 memory_read 直接调用）。
-        let has_owner = tool_args_raw
-            .get("_owner")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.is_empty())
-            || tool_args_raw
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| !s.is_empty());
-        if !has_owner {
-            warn!(
-                "tool-executor.invoke 缺少会话身份（_owner/session_id）| tool={} | args_keys={:?}",
-                tool_name,
-                tool_args_raw
-                    .as_object()
-                    .map(|m| m.keys().cloned().collect::<Vec<_>>()),
-            );
-        }
-        // 剥离纯内部元数据字段：_owner 是治理身份注入、_log_ctx 是日志上下文
-        // （SDK 在 _handle_tools_call 也会 pop _log_ctx）、tenant_id 是内核多租户
-        // 上下文（经 task_local 传递，不作为工具参数）。这些仅供内核/SDK 使用，
-        // 不应透传给工具 handler。
-        //
-        // 注意：session_id / pipeline_id / task_id 必须保留——它们是工具在
-        // injected_params 中显式声明的参数，由 tool_args_inject 插件从 pipeline
-        // state 注入到 args；task/trigger 系工具（task_manage / trigger_setup /
-        // trigger_review 等）依赖它们做权限校验与会话/管道/任务绑定。剥离它们会导致
-        // sidecar 收到空值，报 MISSING_PIPELINE_ID / missing task_id 等。
-        // 纯函数工具（file_read 等）不受影响：SDK 的 _filter_handler_kwargs
-        // (agentos_plugin_sdk/server.py:54) 按 handler 签名过滤参数——无 **kwargs
-        // 的工具自动丢弃这些字段，不会因 unexpected keyword argument 崩溃。
-        let internal_keys = [
-            "_owner",
-            "_log_ctx",
-            "tenant_id",
-            "_call_context",
-            "plugin_id",
-        ];
-        let mut tool_args = tool_args_raw;
-        if let Some(obj) = tool_args.as_object_mut() {
-            for k in internal_keys {
-                obj.remove(k);
-            }
-        }
-        // task_observability 任务 2：tool_core 在 params 级携带 _call_context
-        // （前端路由键 call_id/pipeline_id/message_id/thread_id），合入 tool args
-        // 透传给工具 sidecar——bash 等长任务工具据此经 frontend.emit 推
-        // tool_progress 执行中进度。args 级的同名字段已在上方剥离（防伪造）。
-        // 无 **kwargs 的纯函数工具由 SDK _filter_handler_kwargs 静默丢弃，无影响。
-        if let Some(call_ctx) = params.get("_call_context") {
-            if !call_ctx.is_null() {
-                if let Some(obj) = tool_args.as_object_mut() {
-                    obj.insert("_call_context".to_string(), call_ctx.clone());
-                }
-            }
-        }
-        // 解析目标插件：调用方可显式传 plugin_id（系统插件工具如 hindsight.recall
-        // 不在 CapabilityRegistry——ADR 附录D① 只注册 tool 类插件工具给 LLM，反查
-        // 必然失败）；缺省时从注册表反查 tool_name → plugin_id（tool_core 走 LLM
-        // 工具链的既有路径）。反查失败 = 工具未注册，fail-closed 直接报错（不得用
-        // "工具名当插件 ID"兜底——隐式契约"工具名==插件名才碰巧能用"会掩盖配置
-        // 错误，报出误导性的 plugin not found）。
-        let explicit_plugin_id = params
-            .get("plugin_id")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty());
-        let plugin_id = match explicit_plugin_id {
-            Some(pid) => pid.to_string(),
-            None => match self.registry.as_ref().and_then(|r| r.get_tool(tool_name)) {
-                Some(td) => td.plugin_id.clone(),
-                None => {
-                    // BUG-37 调用路径自愈（有界）：注册表条目可能因 G2 启动期
-                    // 观测误剔等注册面丢失而缺席，且 watcher 对无文件变更的插件
-                    // 不重扫——反查 miss 时先试一次"manifest 在册 → 重注册"，
-                    // 命中则按重注册结果路由；仍未命中保持 fail-closed（禁用/
-                    // 已删插件的既有拒绝语义不变）。
-                    let healed = match self.tool_registry_heal.as_ref() {
-                        Some(heal) => heal(tool_name).await,
-                        None => None,
-                    };
-                    match healed {
-                        Some(td) => {
-                            tracing::info!(
-                                target: "tool-executor",
-                                tool = %tool_name,
-                                plugin = %td.plugin_id,
-                                "工具注册表反查 miss 经调用路径自愈恢复（重注册后路由）"
-                            );
-                            td.plugin_id.clone()
-                        }
-                        None => {
-                            return Ok(json!({
-                                "success": false,
-                                "error": format!(
-                                    "工具 {} 未注册（不在插件工具注册表；可能被 G2 注册闸净化或插件未启用；非注册表工具请显式传 plugin_id）",
-                                    tool_name
-                                ),
-                            }));
-                        }
-                    }
-                }
-            },
-        };
-        let invoker = self.invoker.as_ref().ok_or_else(|| McpError::Protocol {
-            message: "tool-executor 未配置 invoker".to_string(),
-        })?;
-        tracing::info!(
-            target: "tool-executor",
-            plugin = %plugin_id,
-            tool = %tool_name,
-            "tool-executor.invoke 经路由进入工具执行"
-        );
-        match invoker.invoke_tool(&plugin_id, tool_name, &tool_args).await {
-            Ok(result) => {
-                // 工具连续失败告警：结果 success=false（参数校验失败/执行错误，
-                // 非网络 Err）计入同工具连续失败计数，达到阈值即告警——防止「同一
-                // 工具 100% 失败」在流水日志里被淹没。
-                if !result.success {
-                    if let Some(tracker) = &self.tool_failure_tracker {
-                        let sample = result
-                            .error
-                            .clone()
-                            .unwrap_or_else(|| result.data.to_string());
-                        if let Some(alert) = tracker.record(tool_name, false, &sample) {
-                            tracing::error!(
-                                target: "tool-executor",
-                                tool = %alert.tool_name,
-                                consecutive = alert.consecutive,
-                                since_secs = alert.since_secs,
-                                "工具连续失败 {} 次（校验/执行错误，非网络类），请检查工具声明与实现: {}",
-                                alert.consecutive,
-                                alert.error_sample
-                            );
-                        }
-                    }
-                } else if let Some(tracker) = &self.tool_failure_tracker {
-                    tracker.record(tool_name, true, "");
-                }
-                // 序列化失败 = ToolExecutionResult 信封无法编码（契约 bug 级异常）：
-                // 以 success=false 占位信封返回（sidecar 侧拿到显式失败而非挂起），
-                // 但必须 error 可见——伪造信封不允许静默。
-                Ok(serde_json::to_value(result).unwrap_or_else(|e| {
-                    tracing::error!(
-                        target: "tool-executor",
-                        tool = %tool_name,
-                        plugin = %plugin_id,
-                        error = %e,
-                        "工具结果序列化失败，降级 success=false 占位信封返回"
-                    );
-                    json!({"success": false})
-                }))
-            }
-            Err(e) => Ok(json!({
-                "success": false,
-                "error": format!("tool execution failed: {}", e.message),
-            })),
-        }
     }
 
     /// pipeline-state.list：当前租户全部管道的 state 摘要行（扁平点号键，task.*/
@@ -2191,32 +1507,14 @@ impl KernelCapabilityRouter {
                 if seen.contains(&pid) {
                     continue;
                 }
-                let Some(mut merged) =
-                    crate::routes::merge_cold_state(store, &pid, &tenant_id).await
+                // 运行状态 run_status 是表行簿记键，随 merge_cold_state 合并行
+                // 如实出口；投影缺失即如实缺键——读面不补写不伪造（谁终态谁
+                // 随写，runs 退役收尾 ADR 2026-10-08，旧 runs 表权威 overlay
+                // 已废：fill-if-absent 会把簿记缺键 fabrication 成 running）。
+                let Some(merged) = crate::routes::merge_cold_state(store, &pid, &tenant_id).await
                 else {
                     continue; // checkpoint 与表行双空的真孤儿不出口（表行可独立兜底）
                 };
-                // BUG-2 幽灵 running：仅当合并行缺 run_status 投影（崩溃/reap 形态）
-                // 才按 runs 表最新 run 的权威状态补齐（fill-if-absent）——插件侧
-                // reconcile/任务读面不再把死管道猜成 running。读面故障降级为不补
-                // （行照常出口，仅缺运行状态键）。
-                // 缺键或显式 null 都视为无投影，走补齐
-                let needs_run_status_overlay = merged.get("run_status").is_none_or(|v| v.is_null());
-                if needs_run_status_overlay {
-                    match store.list_runs_by_pipeline(&pid, &tenant_id).await {
-                        Ok(runs) => {
-                            if let Some(latest) = runs.first() {
-                                crate::routes::overlay_run_status(
-                                    &mut merged,
-                                    Some(crate::routes::run_status_str(&latest.status)),
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            warn!(pipeline_id = %pid, error = %e, "冷行最新 run 状态读取失败，run_status 不补齐");
-                        }
-                    }
-                }
                 let mut row = crate::routes::summarize_state(&merged, &export);
                 if let Some(obj) = row.as_object_mut() {
                     obj.insert("pipeline_id".to_string(), json!(pid));
@@ -2229,9 +1527,11 @@ impl KernelCapabilityRouter {
         Ok(Value::Array(rows))
     }
 
-    /// pipeline-state.update：任务域写面。仅允许 task.* 前缀键（管道运行域字段
-    /// 仍归引擎）；① 内存 registry 热路径 + ② pipeline_state 表冷路径双落点，
-    /// state 单一真值（评估裁决 task_evaluate / 放行检测 task_reminder 写入通道）。
+    /// pipeline-state.update：持久写面（ADR 2026-10-02 声明制）。按调用方
+    /// `_plugin_id`（invoker 注入的信任锚点）查 manifest `state.writes`，逐键
+    /// 校验精确键/`前缀.*` 通配；未声明即拒绝——内核只执行"声明才可写"机制，
+    /// 不解释键所属域（task.* 前缀特判已退役）。① 内存 registry 热路径 +
+    /// ② pipeline_state 表冷路径双落点，state 单一真值。
     async fn handle_pipeline_state_update(&self, params: Value) -> Result<Value, McpError> {
         let pipeline_id = params
             .get("pipeline_id")
@@ -2240,17 +1540,32 @@ impl KernelCapabilityRouter {
             .ok_or_else(|| McpError::Protocol {
                 message: "pipeline-state.update 缺少 pipeline_id 参数".to_string(),
             })?;
+        let plugin_id = params
+            .get("_plugin_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| McpError::Protocol {
+                message: "pipeline-state.update 需要 _plugin_id（插件上下文调用）".to_string(),
+            })?;
         let fields = params
             .get("fields")
             .and_then(|v| v.as_object())
             .ok_or_else(|| McpError::Protocol {
                 message: "pipeline-state.update 缺少 fields 对象参数".to_string(),
             })?;
+        // 声明制校验：只认调用方 manifest `state.writes`（精确键/前缀通配）。
+        // 未装配查询器或插件无声明 = 无持久写权限（fail-closed）。
+        let declared = self
+            .state_writes_lookup
+            .as_ref()
+            .map(|lookup| lookup(plugin_id))
+            .unwrap_or_default();
+        let writable = ExportFields::from_declarations(&declared);
         for k in fields.keys() {
-            if !k.starts_with("task.") {
+            if !writable.contains(k) {
                 return Err(McpError::Protocol {
                     message: format!(
-                        "pipeline-state.update 仅允许写 task.* 前缀键（任务域），收到: {k}"
+                        "pipeline-state.update 键未在 manifest state.writes 声明（plugin={plugin_id}），收到: {k}"
                     ),
                 });
             }
@@ -2380,134 +1695,6 @@ impl KernelCapabilityRouter {
         agentos_engine::global_registry().clear(&tenant_id, pipeline_id, key);
         Ok(json!({"status": "cleared", "pipeline_id": pipeline_id, "key": key}))
     }
-
-    // ── trigger-svc.*：触发器注册面（M1 内核侧，ADR 2026-10-02-trigger-eval-
-    // unification）。注册表/边沿/fire log 在 agentos_engine::trigger（全局单例）；
-    // committed 求值锚点在 store 提交写入口。owner_plugin_id 以注册声明为准
-    // （G6 白名单已限定调用方；允许代理注册——注册面插件代业务插件挂触发器）。
-
-    /// trigger-svc.register：注册触发器并对当前 committed 行 state 种子求值一次。
-    /// 条件注册期编译为 AST（运行时零解析，G10 同款）；语法错误显式报错
-    /// （对齐管道加载期暴露语义），求值期由 eval fail-soft 折假兜底。
-    /// 种子求值命中只初始化边沿簿记（不点火），seed_fired 如实返回调用方处置。
-    async fn handle_trigger_register(&self, params: Value) -> Result<Value, McpError> {
-        let trigger_id = trigger_param_str(&params, "trigger_id")?;
-        let owner_plugin_id = trigger_param_str(&params, "owner_plugin_id")?;
-        let condition_src = params
-            .get("condition")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::Protocol {
-                message: "trigger-svc.register 缺少 condition 字符串参数".to_string(),
-            })?;
-        let condition = agentos_engine::condition::parse_condition(condition_src).map_err(|e| {
-            McpError::Protocol {
-                message: format!("trigger-svc.register 条件语法错误: {e}"),
-            }
-        })?;
-        // watched_keys 缺省 = 不筛键（任意提交写都进入求值候选）；注册方应
-        // 声明条件引用的全部键，漏声明 = 相关变化不触发求值（求值准入，
-        // 非求值语义）。
-        let watched_keys: Vec<String> = params
-            .get("watched_keys")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let pipeline_id = params
-            .get("pipeline_id")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let tenant_id = agentos_tenant::current_or_default("default").tenant_id;
-        // 种子求值上下文：作用域触发器读当前 committed 行 state；全局触发器
-        // 无单行上下文 = 空 state。行加载失败即注册失败——种子错置会产生幽灵
-        // 边沿，不静默降级。
-        let seed_state = match (&self.store, pipeline_id.as_deref()) {
-            (Some(store), Some(pid)) => {
-                let row = store
-                    .load_pipeline_state(pid, &tenant_id)
-                    .await
-                    .map_err(|e| McpError::Protocol {
-                        message: format!("trigger-svc.register 种子行 state 读取失败: {e}"),
-                    })?;
-                Value::Object(row.into_iter().collect())
-            }
-            _ => Value::Object(Default::default()),
-        };
-        let seed_fired = agentos_engine::trigger::global_registry().register(
-            agentos_engine::trigger::TriggerRegistration {
-                trigger_id: trigger_id.to_string(),
-                tenant_id,
-                pipeline_id,
-                condition,
-                watched_keys,
-                owner_plugin_id: owner_plugin_id.to_string(),
-            },
-            &seed_state,
-        );
-        Ok(json!({"ok": true, "seed_fired": seed_fired}))
-    }
-
-    /// trigger-svc.unregister：注销触发器（边沿簿记随注册项清除；未 ack 的
-    /// fire log 保留至 ack，at-least-once 不因注销丢账）。
-    async fn handle_trigger_unregister(&self, params: Value) -> Result<Value, McpError> {
-        let trigger_id = trigger_param_str(&params, "trigger_id")?;
-        agentos_engine::trigger::global_registry().unregister(trigger_id);
-        Ok(json!({"ok": true}))
-    }
-
-    /// trigger-svc.reconcile：未 ack 的火（老→新）。幂等可重复——ack 前每次
-    /// 轮询全量返回；通知投递失败不重试，本方法是兜底重投面。
-    async fn handle_trigger_reconcile(&self) -> Result<Value, McpError> {
-        let fires = agentos_engine::trigger::global_registry()
-            .reconcile()
-            .into_iter()
-            .map(|f| {
-                json!({
-                    "trigger_id": f.trigger_id,
-                    "fire_seq": f.fire_seq,
-                    "fired_at": f.fired_at,
-                    "keys": f.keys,
-                    "pipeline_id": f.pipeline_id,
-                })
-            })
-            .collect::<Vec<_>>();
-        Ok(json!({"fires": fires}))
-    }
-
-    /// trigger-svc.ack：清账已确认投递的火（fire_ids = reconcile 返回的
-    /// fire_seq；未知 id 忽略不报错——重投与 ack 并发时天然幂等）。
-    async fn handle_trigger_ack(&self, params: Value) -> Result<Value, McpError> {
-        let ids = params
-            .get("fire_ids")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| McpError::Protocol {
-                message: "trigger-svc.ack 缺少 fire_ids 数组参数".to_string(),
-            })?;
-        let fire_ids: Vec<i64> = ids
-            .iter()
-            .map(|v| v.as_i64())
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| McpError::Protocol {
-                message: "trigger-svc.ack 的 fire_ids 必须全为整数".to_string(),
-            })?;
-        agentos_engine::trigger::global_registry().ack(&fire_ids);
-        Ok(json!({"ok": true}))
-    }
-}
-
-/// trigger-svc 参数取非空字符串（缺失/非字符串/空串统一报错）。
-fn trigger_param_str<'a>(params: &'a Value, name: &str) -> Result<&'a str, McpError> {
-    params
-        .get(name)
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| McpError::Protocol {
-            message: format!("trigger-svc 缺少 {name} 非空字符串参数"),
-        })
 }
 
 /// 钩子装载表查询挂桩（ADR 2026-08-27 决策7 / 方案 §2.4 协作点）。
@@ -2522,31 +1709,6 @@ fn trigger_param_str<'a>(params: &'a Value, name: &str) -> Result<&'a str, McpEr
 /// 返回：命中当前 (pipeline, thread, event) 作用域的钩子 id 列表（空 = 无钩子）。
 fn hook_dispatch_stub(_pipeline_id: &str, _thread_id: &str, _event_name: &str) -> Vec<String> {
     Vec::new()
-}
-
-/// 从 params 对象构造 MessageQueryOpts（before_sequence/after_sequence/limit）。
-fn parse_message_query_opts(params: &Value) -> MessageQueryOpts {
-    MessageQueryOpts {
-        before_sequence: params
-            .get("before_sequence")
-            .and_then(|v| v.as_u64())
-            .map(|s| s as u32),
-        after_sequence: params
-            .get("after_sequence")
-            .and_then(|v| v.as_u64())
-            .map(|s| s as u32),
-        limit: params
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .map(|l| l as usize),
-    }
-}
-
-/// service-registry 错误（带固定错误码前缀）。
-fn srv_err(msg: String) -> McpError {
-    McpError::Protocol {
-        message: format!("[{ERR_SERVICE_REGISTRY}] service-registry: {msg}"),
-    }
 }
 
 /// 解析 labels 并做注入防护（监控设计 §十）。
@@ -2586,6 +1748,15 @@ fn parse_labels_safe(raw: Option<&Value>) -> Result<Labels, McpError> {
     }
     Ok(out)
 }
+
+// 域处理器子模块（按职责拆分，见模块文档）：
+// - pipeline_executor：runs 表状态簿记（审批挂起/恢复/轮询/任务删除）
+// - service_registry：基础设施共享存储读面（messages/traces/pipeline-runs）
+// - tool_executor：工具插件 sidecar 委托执行（治理三段 + 失败告警）
+mod pipeline_executor;
+mod service_registry;
+mod session;
+mod tool_executor;
 
 #[cfg(test)]
 mod tests;

@@ -33,7 +33,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system" / "llm"
+_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "llm"
 
 # 确定性 llm.yaml 夹具（thinking-mode + config/llm 共用）
 _LLM_YAML_FIXTURE = """\
@@ -117,8 +117,12 @@ def llm_yaml(rtm: Any, rlc: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     yaml_path.write_text(_LLM_YAML_FIXTURE, encoding="utf-8")
     rtm._LLM_YAML = yaml_path  # type: ignore[attr-defined]
     monkeypatch.setattr(rlc, "_llm_yaml_path", lambda: yaml_path)
-    monkeypatch.setattr(rlc, "_env_file_path", lambda: tmp_path / ".env")
-    rlc._env_file_cache = None  # type: ignore[attr-defined]
+    # B3 归一后 env 单源 = _config_models（routes_llm_config 转发消费），
+    # 缓存 _env_cache 亦在其内——patch 必须落单源模块。
+    import _config_models  # noqa: PLC0415
+
+    monkeypatch.setattr(_config_models, "env_file_path", lambda: tmp_path / ".env")
+    _config_models._env_cache = None  # type: ignore[attr-defined]
     return yaml_path
 
 
@@ -158,8 +162,8 @@ def test_manifest_declares_10_http_endpoints() -> None:
 
     批次 A1 后 llm.yaml 文件 IO 收口内核单一配置面（/api/v1/plugins/llm_service/
     config/llm + /api/v1/config/env），插件 /ext 文件 IO 端点全部退役；config/llm
-    四端点 = provider-types / presets / remote-models / thinking-levels
-    （无状态读；thinking-levels 下发当前模型思考档位选项，选择器真值源）。
+    四端点 = provider-types / presets / thinking-levels（思考强度选项下发，
+    db6fc1419 思考链）/ remote-models（无状态读）。
     """
     manifest = json.loads((_PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
     eps = manifest["http_endpoints"]
@@ -174,17 +178,9 @@ def test_manifest_declares_10_http_endpoints() -> None:
     assert by_id["thinking_mode_recommendations"]["method"] == "POST"
     # config/llm 4（文件 IO 已收口内核）
     assert by_id["config_llm_provider_types_get"]["path"] == "/ext/llm_service/config/llm/provider-types"
-    assert by_id["config_llm_thinking_levels"] == {
-        "route_id": "config_llm_thinking_levels",
-        "method": "GET",
-        "path": "/ext/llm_service/config/llm/thinking-levels",
-        "auth": "user",
-        "handler_capability": "http.handle",
-        "timeout_ms": 5000,
-        "max_concurrency": 8,
-        "description": "当前模型生效的思考档位选项下发（厂商级映射优先、模型级补位，聊天页选择器选项真值源；前端零硬编码）",
-    }
     assert by_id["config_llm_presets_get"]["path"] == "/ext/llm_service/config/llm/presets"
+    assert by_id["config_llm_thinking_levels"]["path"] == "/ext/llm_service/config/llm/thinking-levels"
+    assert by_id["config_llm_thinking_levels"]["method"] == "GET"
     remote = by_id["config_llm_providers_remote_models_get"]
     assert remote["path"] == "/ext/llm_service/config/llm/providers/{provider_id}/remote-models"
     assert remote["timeout_ms"] == 15000

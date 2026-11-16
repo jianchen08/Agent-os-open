@@ -4,9 +4,9 @@
  *
  * 协议（下行消息信封同 buildWebviewMessage，不经 validateWebviewEvent——那是上行校验）：
  * - theme.sync：{ __agentos_webview:true, method:'theme.sync', params:{tokens} }，
- *   tokens 固定 12 键（--ag-*）；就绪时推当前生效主题，主题变化重推
- * - ctx.sync：{ method:'ctx.sync', params:{sessionId} }；就绪时推当前活跃会话，
- *   会话切换重推
+ *   tokens 固定 14 键（--ag-*）；就绪时推当前生效主题，主题变化重推
+ * - ctx.sync：{ method:'ctx.sync', params:{sessionId, pipelineId} }；就绪时推
+ *   当前活跃会话与激活管道，会话/管道切换重推
  * - bootstrapJs 预置 window.agentos.ctx = { sessionId: 挂载时活跃会话 }
  *
  * 生效主题口径：会话 override 栈顶 > 全局 themeConfig（base 配置 + 插件皮肤变量 overlay）。
@@ -23,6 +23,7 @@ import { apiClient } from '@/services/api/client'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useSessionThemeStore } from '@/stores/sessionThemeStore'
 import { useThemeStore } from '@/stores/themeStore'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { WebviewWidget } from '../WebviewWidget'
 import { allDownByMethod, postUp as bridgePostUp } from './webviewTestBridge'
 import type { ThemeConfig } from '@/types/theme'
@@ -40,6 +41,15 @@ vi.mock('@/stores/sessionStore', async () => {
     })),
   }
 })
+// 下行桥订阅激活管道（ctx.sync payload 第二坐标）：mock 用真 zustand store
+vi.mock('@/stores/pipelineMessageStore', async () => {
+  const { create } = await import('zustand')
+  return {
+    usePipelineMessageStore: create<{ activePipelineId: string | null }>(() => ({
+      activePipelineId: 'pipe-a',
+    })),
+  }
+})
 vi.mock('@/stores/themeStore', async () => {
   const { create } = await import('zustand')
   const { presetThemes: themes } = await import('@/config/themes')
@@ -54,7 +64,7 @@ vi.mock('@/stores/themeStore', async () => {
 const DARK = presetThemes['dark']
 const LIGHT = presetThemes['light']
 
-/** 下行桥协议固定 12 键 */
+/** 下行桥协议固定 14 键（--ag-primary 两键随 49b6afe6f 入载荷） */
 const TOKEN_KEYS = [
   '--ag-bg',
   '--ag-fg',
@@ -63,6 +73,8 @@ const TOKEN_KEYS = [
   '--ag-card',
   '--ag-accent',
   '--ag-accent-soft',
+  '--ag-primary',
+  '--ag-primary-soft',
   '--ag-chip',
   '--ag-ok',
   '--ag-warn',
@@ -108,6 +120,7 @@ beforeEach(() => {
   // mock store 状态跨用例留存：每例归零，保证用例顺序无关
   useThemeStore.setState({ themeConfig: DARK, activePluginTheme: null })
   useSessionStore.setState({ activeSessionId: 'sess-a' })
+  usePipelineMessageStore.setState({ activePipelineId: 'pipe-a' })
   document.documentElement.style.removeProperty('--bg-main')
   vi.mocked(apiClient.get).mockResolvedValue({ data: '<html><body></body></html>' })
 })
@@ -120,7 +133,7 @@ describe('WebviewWidget — 宿主下行桥（面板-宿主融合协议）', () 
     expect(srcDoc).toMatch(/window\.agentos = \{ postMessage: post, ctx: \{ sessionId: "sess-a" \} \}/)
   })
 
-  it('就绪即推初值：theme.sync 固定 12 键全非空且取生效主题；ctx.sync 推当前会话', async () => {
+  it('就绪即推初值：theme.sync 固定 14 键全非空且取生效主题；ctx.sync 推当前会话', async () => {
     const downSpy = await renderReady()
 
     const themeMsg = allDownByMethod(downSpy, 'theme.sync').at(-1)!
@@ -136,7 +149,7 @@ describe('WebviewWidget — 宿主下行桥（面板-宿主融合协议）', () 
     expect(tokens['--ag-radius']).toBe(DARK.components.borderRadius.md)
 
     const ctxMsg = allDownByMethod(downSpy, 'ctx.sync').at(-1)!
-    expect(ctxMsg.params).toEqual({ sessionId: 'sess-a' })
+    expect(ctxMsg.params).toEqual({ sessionId: 'sess-a', pipelineId: 'pipe-a' })
     expect(themeMsg.__agentos_webview).toBe(true)
   })
 
@@ -225,6 +238,31 @@ describe('WebviewWidget — 宿主下行桥（面板-宿主融合协议）', () 
     await waitFor(() => {
       expect(
         (allDownByMethod(downSpy, 'ctx.sync').at(-1)!.params as { sessionId: string }).sessionId,
+      ).toBe('')
+    })
+  })
+
+  it('激活管道切换 → ctx.sync 重推新 pipelineId；空管道推空串（角标按管道精确取桶依据）', async () => {
+    const downSpy = await renderReady()
+    expect(
+      (allDownByMethod(downSpy, 'ctx.sync').at(-1)!.params as { pipelineId: string }).pipelineId,
+    ).toBe('pipe-a')
+
+    act(() => {
+      usePipelineMessageStore.setState({ activePipelineId: 'pipe-b' })
+    })
+    await waitFor(() => {
+      expect(
+        (allDownByMethod(downSpy, 'ctx.sync').at(-1)!.params as { pipelineId: string }).pipelineId,
+      ).toBe('pipe-b')
+    })
+
+    act(() => {
+      usePipelineMessageStore.setState({ activePipelineId: null })
+    })
+    await waitFor(() => {
+      expect(
+        (allDownByMethod(downSpy, 'ctx.sync').at(-1)!.params as { pipelineId: string }).pipelineId,
       ).toBe('')
     })
   })

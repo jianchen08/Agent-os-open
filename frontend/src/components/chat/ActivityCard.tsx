@@ -19,7 +19,7 @@ import {
 } from '@/assets/icons'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { ErrorSourceBadge } from '@/components/shared/ErrorSourceBadge'
-import { TOOL_CONTENT_SCROLL_CLASS } from '@/lib/toolCardStyles'
+import { TOOL_CONTENT_SCROLL_CLASS, TOOL_DETAIL_PANEL_SCROLL_CLASS } from '@/lib/toolCardStyles'
 import { cn } from '@/lib/utils'
 import { formatDuration } from '@/types/activity'
 import { useConfirmDialog } from '@/utils/confirm'
@@ -51,33 +51,41 @@ function getStatusThemeVars(
     { color: string; border: string; bg: string; shadow: string }
   > = {
     pending: {
-      color: 'var(--accent-waiting, #f59e0b)',
-      border: 'var(--accent-waiting, #f59e0b)',
-      bg: 'color-mix(in srgb, var(--accent-waiting, #f59e0b) 8%, transparent)',
-      shadow: '0 0 8px color-mix(in srgb, var(--accent-waiting, #f59e0b) 15%, transparent)',
+      color: 'var(--accent-waiting)',
+      border: 'var(--accent-waiting)',
+      bg: 'color-mix(in srgb, var(--accent-waiting) 8%, transparent)',
+      shadow: '0 0 8px color-mix(in srgb, var(--accent-waiting) 15%, transparent)',
     },
     running: {
-      color: 'var(--accent-running, #00f0ff)',
-      border: 'var(--accent-running, #00f0ff)',
-      bg: 'color-mix(in srgb, var(--accent-running, #00f0ff) 8%, transparent)',
-      shadow: '0 0 8px color-mix(in srgb, var(--accent-running, #00f0ff) 15%, transparent)',
+      color: 'var(--accent-running)',
+      border: 'var(--accent-running)',
+      bg: 'color-mix(in srgb, var(--accent-running) 8%, transparent)',
+      shadow: '0 0 8px color-mix(in srgb, var(--accent-running) 15%, transparent)',
     },
     completed: {
-      color: 'var(--accent-success, #10b981)',
-      border: 'var(--accent-success, #10b981)',
-      bg: 'color-mix(in srgb, var(--accent-success, #10b981) 8%, transparent)',
-      shadow: '0 0 8px color-mix(in srgb, var(--accent-success, #10b981) 15%, transparent)',
+      color: 'var(--accent-success)',
+      border: 'var(--accent-success)',
+      bg: 'color-mix(in srgb, var(--accent-success) 8%, transparent)',
+      shadow: '0 0 8px color-mix(in srgb, var(--accent-success) 15%, transparent)',
     },
     failed: {
-      color: 'var(--accent-error, #ef4444)',
-      border: 'var(--accent-error, #ef4444)',
-      bg: 'color-mix(in srgb, var(--accent-error, #ef4444) 8%, transparent)',
-      shadow: '0 0 8px color-mix(in srgb, var(--accent-error, #ef4444) 15%, transparent)',
+      color: 'var(--accent-error)',
+      border: 'var(--accent-error)',
+      bg: 'color-mix(in srgb, var(--accent-error) 8%, transparent)',
+      shadow: '0 0 8px color-mix(in srgb, var(--accent-error) 15%, transparent)',
     },
     cancelled: {
-      color: 'var(--accent-pending, #94a3b8)',
-      border: 'var(--accent-pending, #94a3b8)',
-      bg: 'color-mix(in srgb, var(--accent-pending, #94a3b8) 6%, transparent)',
+      color: 'var(--accent-pending)',
+      border: 'var(--accent-pending)',
+      bg: 'color-mix(in srgb, var(--accent-pending) 6%, transparent)',
+      shadow: 'none',
+    },
+    // 中断终态（历史孤儿工具调用「已中断（无结果）」）：中性灰静态，无呼吸
+    // 无光晕——终态不宣称活动。与 cancelled 同色族，语义由头部标注文本区分。
+    interrupted: {
+      color: 'var(--accent-pending)',
+      border: 'var(--accent-pending)',
+      bg: 'color-mix(in srgb, var(--accent-pending) 6%, transparent)',
       shadow: 'none',
     },
   }
@@ -117,6 +125,8 @@ export function getStatusIcon(status: ActivityStatus): ReactNode {
     case 'failed':
       return <XCircle className="h-icon-xs w-icon-xs" style={breatheStyle} />
     case 'cancelled':
+      return <Ban className="h-icon-xs w-icon-xs" style={breatheStyle} />
+    case 'interrupted':
       return <Ban className="h-icon-xs w-icon-xs" style={breatheStyle} />
     default:
       return <Clock className="h-icon-xs w-icon-xs" style={breatheStyle} />
@@ -214,7 +224,7 @@ const ActivityCard: FC<ActivityCardProps> = ({
           {getActivityTypeIcon(activity.type, activity.customIcon)}
         </span>
 
-        {/* 文件名（可点击打开）或标题 */}
+        {/* 文件名（可点击打开）/ 任务名（可点击跳转执行管道）或标题 */}
         {activity.filePath && activity.onOpenFile ? (
           <span
             className="text-primary min-w-0 cursor-pointer truncate font-medium hover:underline"
@@ -223,6 +233,28 @@ const ActivityCard: FC<ActivityCardProps> = ({
               activity.onOpenFile?.(activity.filePath!)
             }}
             title={`点击打开文件: ${activity.filePath}`}
+          >
+            {activity.title}
+          </span>
+        ) : activity.pipelineId && activity.onOpenPipeline ? (
+          <span
+            className="text-primary min-w-0 cursor-pointer truncate font-medium hover:underline"
+            onClick={(e) => {
+              e.stopPropagation()
+              activity.onOpenPipeline?.(activity.pipelineId!)
+            }}
+            title={`点击打开任务执行管道: ${activity.title}`}
+          >
+            {activity.title}
+          </span>
+        ) : activity.panelPageId && activity.onOpenPanel ? (
+          <span
+            className="text-primary min-w-0 cursor-pointer truncate font-medium hover:underline"
+            onClick={(e) => {
+              e.stopPropagation()
+              activity.onOpenPanel?.(activity.panelPageId!, activity.panelPageItemId)
+            }}
+            title={`点击${activity.panelPageLabel || '打开页面'}: ${activity.title}`}
           >
             {activity.title}
           </span>
@@ -244,6 +276,12 @@ const ActivityCard: FC<ActivityCardProps> = ({
           <span className="text-muted-foreground/70 flex-shrink-0">
             {formatDuration(activity.durationMs)}
           </span>
+        )}
+
+        {/* 状态文本（中断终态「已中断（无结果）」等）：静态标注，位置与时长同槽互斥
+            （终态卡无时长，在途卡无标注） */}
+        {activity.statusText && (
+          <span className="text-muted-foreground/70 flex-shrink-0">{activity.statusText}</span>
         )}
 
         {/* 增删行数徽标（如 file_write 的 +X -Y），颜色跟随主题 status 语义色 */}
@@ -276,6 +314,36 @@ const ActivityCard: FC<ActivityCardProps> = ({
             className="text-muted-foreground/60 hover:text-primary flex-shrink-0 rounded p-0.5 transition-colors hover:bg-[var(--hover-overlay)]"
             title={`在工作区打开文件: ${activity.filePath}`}
             aria-label={`打开文件 ${activity.filePath}`}
+          >
+            <ExternalLink className="h-icon-sm w-icon-sm" />
+          </button>
+        )}
+
+        {/* 条目上的打开任务执行管道入口：显式图标按钮（不依赖标题 hover 提示） */}
+        {activity.pipelineId && activity.onOpenPipeline && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              activity.onOpenPipeline?.(activity.pipelineId!)
+            }}
+            className="text-muted-foreground/60 hover:text-primary flex-shrink-0 rounded p-0.5 transition-colors hover:bg-[var(--hover-overlay)]"
+            title={`打开任务执行管道: ${activity.title}`}
+            aria-label={`打开任务执行管道 ${activity.title}`}
+          >
+            <ExternalLink className="h-icon-sm w-icon-sm" />
+          </button>
+        )}
+
+        {/* 条目上的打开插件页面入口（render.open_page 声明驱动，同款先例位置） */}
+        {activity.panelPageId && activity.onOpenPanel && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              activity.onOpenPanel?.(activity.panelPageId!, activity.panelPageItemId)
+            }}
+            className="text-muted-foreground/60 hover:text-primary flex-shrink-0 rounded p-0.5 transition-colors hover:bg-[var(--hover-overlay)]"
+            title={`${activity.panelPageLabel || '打开页面'}: ${activity.title}`}
+            aria-label={`${activity.panelPageLabel || '打开页面'} ${activity.title}`}
           >
             <ExternalLink className="h-icon-sm w-icon-sm" />
           </button>
@@ -319,9 +387,15 @@ const ActivityCard: FC<ActivityCardProps> = ({
         </div>
       )}
 
-      {/* 展开的详情区域 */}
+      {/* 展开的详情区域：设视口相对高度上限，超出部分在面板内部滚动，不撑高外层对话流 */}
       {expanded && (
-        <div className="bg-muted/5 mx-1 mb-1 space-y-1.5 rounded-md px-2 py-1.5">
+        <div
+          data-testid="activity-detail-panel"
+          className={cn(
+            'bg-muted/5 mx-1 mb-1 space-y-1.5 rounded-md px-2 py-1.5',
+            TOOL_DETAIL_PANEL_SCROLL_CLASS,
+          )}
+        >
           {activity.partialOutput && activity.partialOutput.length > 0 && (
             <div>
               <div className="text-muted-foreground mb-1 text-xs font-medium">实时输出</div>

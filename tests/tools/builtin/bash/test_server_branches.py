@@ -29,7 +29,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_BASH_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "bash"
+_BASH_DIR = _REPO_ROOT / "plugins" / "shared" / "bash"
 _SERVER_PATH = _BASH_DIR / "server.py"
 
 # 平铺裸名逐出（server/tool/process_manager/bash_types 跨插件同名，仅逐出
@@ -53,7 +53,7 @@ server = importlib.util.module_from_spec(_spec)
 sys.modules["bash_tool_server_under_test"] = server
 _spec.loader.exec_module(server)
 
-from process_manager import ProcessManager  # noqa: E402
+from agentos_plugin_sdk.process_runtime import ProcessManager  # noqa: E402
 from tool import BashTool  # noqa: E402
 
 

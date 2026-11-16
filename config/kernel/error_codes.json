@@ -67,7 +67,7 @@
       "http_status": 500,
       "source": "kernel",
       "retryable": true,
-      "message": "内核内部错误",
+      "message": "系统内部错误",
       "description": "ApiError::Internal——message 原文透传不脱敏"
     },
     {
@@ -115,7 +115,7 @@
       "http_status": 200,
       "source": "kernel",
       "retryable": true,
-      "message": "管道执行失败",
+      "message": "任务执行失败",
       "description": "ws_session stream_error 事件（引擎 outcome.failed）"
     },
     {
@@ -123,7 +123,7 @@
       "http_status": 200,
       "source": "kernel",
       "retryable": true,
-      "message": "本轮管道结束但未产生任何回复",
+      "message": "本轮对话未产生回复",
       "description": "ws_session stream_error 事件（run 完成但 final_assistant 缺失——LLM 调用失败被 error_policy 吞掉或 core 无产出；fail-closed 不伪造 new_message）"
     },
     {
@@ -131,7 +131,7 @@
       "http_status": 0,
       "source": "frontend",
       "retryable": false,
-      "message": "前端运行时错误",
+      "message": "界面运行时错误",
       "description": "window.onerror / unhandledrejection / ErrorBoundary 上报"
     },
     {
@@ -141,6 +141,14 @@
       "retryable": true,
       "message": "网络错误",
       "description": "前端 axios 无响应/超时/连接失败"
+    },
+    {
+      "code": "LLM_KEY_FALLBACK",
+      "http_status": 200,
+      "source": "llm",
+      "retryable": true,
+      "message": "部分 API key 暂不可用，已自动切换备用",
+      "description": "KeyPool 所有 key 失败后经 Router fallback 续服务（非终止信号）——llm.complete_stream 流内以 plugin_error 事件通知（观测C：报错可见禁静默降级），消息正常收尾"
     }
   ]
 }

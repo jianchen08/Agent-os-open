@@ -696,6 +696,7 @@ DSH 进程内的真实 service / 装载的第三方 cordis 插件
 | 保留系统分配器硬扛 Windows 段堆并发高水位滞留 | 内核全局分配器换 mimalloc（实测滞留根因为段堆线程本地缓存惰性 decommit） | [2026-08-31-mimalloc-global-allocator.md](docs/decisions/2026-08-31-mimalloc-global-allocator.md) |
 | FFI 边界跨堆 `free` / 外层装箱归属模糊 | 对称借用协议：`Result<&str,_>` + 实现方自持缓冲，杜绝跨堆释放 | [2026-09-01-native-ffi-cross-heap-free-fix.md](docs/decisions/2026-09-01-native-ffi-cross-heap-free-fix.md) |
 | 模式面板承载形态=整体 webview 单通道教条 | 承载按功能在三通道内组合（UI 所有权仍随包播种；host 件声明即注册+grants 准入） | [2026-09-28-mode-panel-carrier-composition.md](docs/decisions/2026-09-28-mode-panel-carrier-composition.md) |
+| 多端同步"设备优先+云只做中继" / 按端定改动高低 / 裸墙钟 LWW / DB 文件级镜像同步 | 真值库=云端为主（在链降级，离线第一）+ 改动权威=HLC-LWW（后改必赢）；层级权威收窄三用；逻辑记录同步文件本体不出端 | [2026-10-15-multi-device-sync-hlc-lww.md](docs/decisions/2026-10-15-multi-device-sync-hlc-lww.md) |
 
 ---
 

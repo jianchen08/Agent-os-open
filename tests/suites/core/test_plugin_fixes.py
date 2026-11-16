@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import fields
 
 import pytest
-from pipeline.plugin import OutputResult, PluginResult
+from _libs.pipeline_base.plugin import OutputResult, PluginResult
 
 pytestmark = pytest.mark.unit
 
@@ -39,7 +39,7 @@ class TestRouteSignalRetired:
 
     @pytest.mark.unit
     def test_route_signal_not_reexported(self) -> None:
-        """pipeline.types 不再导出 RouteSignal。"""
-        import pipeline.types as types_mod
+        """pipeline_base.types 不再导出 RouteSignal。"""
+        from _libs.pipeline_base import types as types_mod
 
         assert not hasattr(types_mod, "RouteSignal")

@@ -12,7 +12,7 @@
 4. **有界并行**——按依赖图调度，AGENTOS_GATE_CONCURRENCY 控制上限；
    默认 cap 4（cargo/npm/pytest 同跑防内存爆）。
 
-覆盖率豁免：plugins-coverage-a..d（插桩四分片，合并 gate 过阈值）与 plugins-heavy（免插桩，
+覆盖率豁免：plugins-coverage（插桩，阈值守护）与 plugins-heavy（免插桩，
 94 插件子进程冒烟矩阵）拆两个并行 gate，全部测试仍执行——名单与配对
 校验见 scripts/coverage_exempt.py（单一名单点）。
 
@@ -21,7 +21,7 @@
     python scripts/run_gates.py --mode fast               # 本地廉价检查
     python scripts/run_gates.py --mode all                # 穷尽集
     python scripts/run_gates.py --mode kernel|plugins|frontend
-    python scripts/run_gates.py --filter kernel-fmt,plugins-coverage-a  # CI job 精确选择
+    python scripts/run_gates.py --filter kernel-fmt,plugins-coverage   # CI job 精确选择
 
 环境变量：
     AGENTOS_GATE_CONCURRENCY=N   并行上限（默认 min(CPU, 4)）
@@ -37,8 +37,9 @@ taiki-e/install-action）。
 
 门禁归属（非本入口持有、但同为非零退出命令的承诺）：
     pre-commit   → .github/workflows/ci.yml pre-commit job（pre-commit/action）
-    python-e2e   → .github/workflows/e2e.yml Python E2E job（需内核二进制 + LLM key，
-                   nightly/手动/push main 触发，CI 专用车道）
+    python-e2e   → .github/workflows/e2e.yml Python E2E job（需内核二进制；
+                   stub LLM 聊天轮 keyless 必跑，真实 LLM 用例有 key 才跑，
+                   nightly/手动/push 触发，CI 专用车道）
 """
 
 from __future__ import annotations
@@ -50,12 +51,40 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from concurrent.futures import FIRST_COMPLETED, Future, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+#: 本次 run 的临时目录命名空间（并发 run 互不干扰；清理只清自己）。
+_RUN_ID = uuid.uuid4().hex[:12]
+_GATE_TMP_ROOT = Path(".zctmp") / "gates"
+
+
+def _run_tmp_dir() -> Path:
+    """本 run 的门禁临时目录（相对仓库根；run id 为十六进制，无空格）。"""
+    return _GATE_TMP_ROOT / _RUN_ID
+
+
+def _cleanup_gate_tmp() -> None:
+    """清理本 run 的门禁输出临时目录（并发 run 各自独享，不整树删除）。
+
+    多会话/提交钩子并发跑 gate 时，整树删 ``.zctmp/gates`` 会把其它在跑 gate
+    的 tee 文件一并删掉——长车道（plugins-coverage ~27min）收尾读
+    ``--from-file`` 时 FileNotFoundError 误红（2026-11-04 实测两轮）。
+    """
+    run_dir = _run_tmp_dir()
+    shutil.rmtree(run_dir, ignore_errors=True)
+    parent = run_dir.parent
+    try:
+        if parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+    except OSError:
+        pass
+
 
 import coverage_exempt  # noqa: E402 —— 豁免名单单一名单点，防两侧漂移
 
@@ -99,6 +128,12 @@ class Gate:
     # fast 档估时（秒；V5 预算校验：所有 fast 门禁总和 ≤ FAST_BUDGET）。
     # fast=True 必须声明，防"未估时重门禁溜进 fast 档"的漏洞。
     est_seconds: int | None = None
+    # 变更模块过滤守护路径（方案 AI辅助编程体系落地AgentOS_20261022 §3.6
+    # 步骤 5）：该门禁守护的仓库相对路径前缀。空 = cross-cutting 恒跑；
+    # 非空 = 仅 --changed-files 过滤语境下，至少一个变更文件命中前缀才跑。
+    # 保守原则：只在归属 100% 确定时标注，不确定的留空恒跑（恒跑 = 保守
+    # 方向，多跑不漏检）。
+    paths: tuple[str, ...] = ()
 
 
 def _shell_join_pytest(args: list[str]) -> str:
@@ -115,23 +150,6 @@ def _shell_join_pytest(args: list[str]) -> str:
     return " ".join(out)
 
 
-def _pytest_argv_shards(args: list[str], n: int) -> list[list[str]]:
-    """把 pytest argv 按路径中点切成 n 份；尾部选项（-m/--ignore）每份都携带。
-
-    用于把超长插桩套件拆成 n 个 pytest 进程分片执行（CI 标准 runner 单
-    job 跑全量恒定 ~48 分钟「runner lost communication」，多轮实证），
-    测试集合不变。
-    """
-    tail_opts = len(args)
-    for i, a in enumerate(args):
-        if a == "-m" or a.startswith("--"):
-            tail_opts = i
-            break
-    paths, opts = args[:tail_opts], args[tail_opts:]
-    size = -(-len(paths) // n)  # ceil
-    return [paths[i : i + size] + opts for i in range(0, len(paths), size)]
-
-
 GATES: list[Gate] = [
     # ── 内核（Rust，kernel/）──────────────────────────────────────────
     Gate(
@@ -142,13 +160,17 @@ GATES: list[Gate] = [
         command=("cargo", "fmt", "--all", "--", "--check"),
         est_seconds=5,
         fast=True,
+        paths=("kernel/",),
     ),
     Gate(
+        # too-many-lines(阈值 200, kernel/clippy.toml)挂入执法（2026-10-12
+        # 文件规模棘轮，ADR 2026-10-12-file-length-mechanical-gate.md）：
+        # 函数体 >200 行即红；存量 6 处以 #[allow]+归因注释吸收，只减不增。
         id="kernel-clippy",
         label="cargo clippy -D warnings",
         domain="kernel",
         cwd="kernel",
-        command=("cargo", "clippy", "--all-targets", "--", "-D", "warnings"),
+        command=("cargo", "clippy", "--all-targets", "--", "-D", "warnings", "-D", "clippy::too-many-lines"),
     ),
     Gate(
         id="kernel-build",
@@ -171,10 +193,12 @@ GATES: list[Gate] = [
         domain="kernel",
         cwd="kernel",
         shell=(
-            'T=$(mktemp); cargo test --all 2>&1 | tee "$T"; '
+            'D=.zctmp/gates/$AGENTOS_GATE_RUN_ID; mkdir -p $D; T=$(mktemp $D/gate_tmp.XXXXXXXXXX); cargo test --all 2>&1 | tee "$T"; '
             'python ../scripts/check_rust_test_baseline.py --from-file "$T"'
         ),
-        needs=("kernel-build",),
+        # needs+=timing-gate：时序 lane 与重型 cargo 车道并行会被线程饥饿打死
+        # （2026-10-30 打包链两轮实锤）——timing 声明「独立阻塞」即须独占窗口。
+        needs=("kernel-build", "timing-gate"),
     ),
     Gate(
         id="kernel-coverage",
@@ -193,6 +217,7 @@ GATES: list[Gate] = [
             # --skip 摘除恢复执法；内核目标线 100% 见 rust-coverage-baseline.txt
             "&& python ../scripts/check_rust_coverage_baseline.py --lcov coverage.lcov"
         ),
+        needs=("timing-gate",),
     ),
     Gate(
         # Rust 改动行 100%（ADR 2026-08-20 覆盖率棘轮门禁）。scope 限
@@ -218,6 +243,25 @@ GATES: list[Gate] = [
             # kernel-coverage 注释），不进本 gate 的改动行口径。
             "--omit",
             r"^kernel/crates/api/src/bin/",
+            # 集成测试文件（crates/*/tests/）不在 llvm-cov lcov 度量面
+            # （cargo-llvm-cov 只归属被测源码行），改动行口径同样排除——
+            # 与 plugins-diff-coverage 的 /tests/ omit 同构；缺本 omit 时
+            # tip 提交一触碰测试文件即"度量面漂移"假红。
+            "--omit",
+            r"^kernel/crates/[^/]+/tests/",
+            # 嵌套测试模块（crates/*/src/**/tests/*.rs，#[cfg(test)] mod）同不在
+            # 逐行度量面：llvm-cov 对纯测试源文件只出 FN/FNDA 记录、无 SF/DA 行
+            # 数据（2026-10-29 实测 api ws_session/tests/cancel_poisoning.rs，
+            # FN 8 条 / SF 0 条），触碰即"度量面漂移"假红——与上方 tests/ omit
+            # 同理同构（测试代码不进改动行覆盖率口径）。
+            "--omit",
+            r"^kernel/crates/[^/]+/src/.*/tests/",
+            # 基准文件（crates/*/benches/，criterion harness=false）同不在
+            # 度量面：cargo llvm-cov 底层跑 cargo test，默认目标集不含
+            # bench（harness=false 不构建进测试集），lcov 无其行记录——
+            # 与上方 tests/ omit 同理，触碰即"度量面漂移"假红。
+            "--omit",
+            r"^kernel/crates/[^/]+/benches/",
         ),
         needs=("kernel-coverage",),
     ),
@@ -256,7 +300,36 @@ GATES: list[Gate] = [
         label="cargo deny check（RUSTSEC 公告 + licenses + bans + sources）",
         domain="kernel",
         cwd="kernel",
-        command=("cargo", "deny", "check"),
+        # 网络韧性：advisory-db fetch 走 GitHub，直连间歇 reset（2026-10-30
+        # 打包链两轮实锤）——重试两次后末次 --offline 兜底（本地库 fresh 度
+        # 由最近一次成功 fetch 承载，advisories 判定语义不变；全离线环境
+        # 下等价于按最近库执行，真实红仍会红，只兜网络抖）。
+        command=(
+            "bash",
+            "-c",
+            (
+                "cargo deny check "
+                "|| (sleep 10 && cargo deny check) "
+                "|| (sleep 30 && cargo deny check) "
+                "|| (sleep 20 && cargo deny --offline check)"
+            ),
+        ),
+    ),
+    Gate(
+        # 性能指标面契约门禁（性能监测补强 R1 O2，真值 docs/working/
+        # 性能监测补强_20261028.md §四）：scratch 真内核拉起（spawn_test_kernel
+        # 三隔离）→ 登录取 token → /metrics 断言常用性能指标齐活 + 无 token
+        # 被拒。指标清单单一真值在检查器 EXPECTED_METRICS（与观测看板、真值
+        # 文档三方对齐）。needs=kernel-build-release：resolve_kernel_binary
+        # release 优先于 debug——只链 debug 会烟测到陈旧 release 产物（首跑
+        # 实证：release 为 T5 落地前产物，kernel_proc_* 全缺）。CI job 用
+        # --filter 链式同跑，本地 mode all/kernel 经依赖图先建后烟测；二进制
+        # 缺失红（fail-loud 执法面，非 timing 车道的 skipif 观察语义）。
+        id="kernel-metrics-smoke",
+        label="真内核拉起 /metrics 常用性能指标契约（scratch 三隔离 + 登录取 token）",
+        domain="kernel",
+        command=(sys.executable, "scripts/check_kernel_metrics_smoke.py"),
+        needs=("kernel-build-release",),
     ),
     Gate(
         # 通道基准观察（批次 5）：既有 #[ignore] 手写基准的门禁化登记。
@@ -283,6 +356,7 @@ GATES: list[Gate] = [
         command=("ruff", "check", "."),
         est_seconds=3,
         fast=True,
+        paths=("plugins/sdk/",),
     ),
     Gate(
         id="sdk-mypy",
@@ -292,6 +366,7 @@ GATES: list[Gate] = [
         command=("mypy", "src/agentos_plugin_sdk"),
         est_seconds=30,
         fast=True,
+        paths=("plugins/sdk/",),
     ),
     Gate(
         id="sdk-test",
@@ -342,6 +417,43 @@ GATES: list[Gate] = [
         fast=True,
     ),
     Gate(
+        # 出厂播种版本闸（ADR 2026-10-24-config-seed-version-arbitration）：
+        # 受管出厂默认（config/pipelines/*.yaml 顶层 version:）必须声明 +
+        # 内容变更必抬版本——治「用户空间陈旧副本遮蔽包内修复」（2026-10-24
+        # 评估通过空转事故根因）。纯 git+正则，零第三方依赖。
+        id="config-seed-ver",
+        label="出厂播种版本（受管默认声明 + 变更必抬版本）",
+        domain="plugins",
+        command=(sys.executable, "scripts/check_config_seed_versions.py"),
+        est_seconds=2,
+        fast=True,
+    ),
+    Gate(
+        # 关键链 venv 健康闸（2026-10-23 用户令「打包 CI 之前必须保证所有插件
+        # 关键链路完整、能够运行、至少一轮 LLM」）：「.venv 目录存在」≠「可用」
+        # ——llm_core 陈旧 editable 实证（在场 spawn 即 ModuleNotFoundError，
+        # 主管道 LLM 死循环退避）。check-only fail-closed；判据零复制复用
+        # ensure_plugin_venvs。venv 缺席默认跳过（CI 冷检出形态），漂移在场即红。
+        id="plugin-venv-health",
+        label="关键链 venv 健康（解释器在+SDK 可 import，打包前置）",
+        domain="plugins",
+        command=(sys.executable, "scripts/check_plugin_venv_health.py"),
+        est_seconds=60,
+    ),
+    Gate(
+        # 步骤声明↔注册 parity 闸（2026-10-10 CI 防再犯清单 C 项）：
+        # 异名 steps 条目必须 @plugin.step 注册（否则调用即 STEP_NOT_FOUND
+        # fail-closed 潜伏雷）、已注册异名必须回写 manifest（③级索引仅聚合
+        # manifests，漏声明=死注册）；自名条目（name==插件 id）豁免。
+        # 非 fast：检查器逐插件 import 注册面实测 ~200s（首跑实证），进 fast
+        # 档会撑破 V5 预算（93s>90s）且估时严重失真。
+        id="step-declaration-parity",
+        label="步骤声明↔注册 parity（STEP_NOT_FOUND 潜伏雷静态清零）",
+        domain="plugins",
+        command=(sys.executable, "scripts/check_step_declaration_parity.py"),
+        est_seconds=200,
+    ),
+    Gate(
         # 配置直读机械闸（ADR 2026-09-14 §2.6）：插件代码禁止直读 config/，
         # 唯一合法入口 = manifest config_files 声明 + 内核注入。2026-09-24
         # 复活——此前从未注册车道且基线键为机器绝对路径（与相对 found 键
@@ -355,6 +467,20 @@ GATES: list[Gate] = [
         fast=True,
     ),
     Gate(
+        # 内核库直连机械闸（审查总册 20261014 C2 建闸，2026-10-15 刀3 收紧
+        # 终态口径）：插件禁止自开 sqlite3 连接读内核库——唯一合法入口 =
+        # 内核 db-read 契约服务（HTTP POST /api/v1/db/read 或 capability 面，
+        # 桥在 plugins/shared/db_read.py）。口径 = 内核库直连零 + 自有库显式
+        # 豁免名单（检查器 EXEMPT_FILES 带归因），测试文件豁免；基线只容
+        # 在途欠账（sync 三处，迁移后清偿归零），新增直连即红。
+        id="kernel-db-direct-reads",
+        label="内核库直连守卫（直连零 + 自有库豁免名单，基线只减不增）",
+        domain="plugins",
+        command=(sys.executable, "scripts/check_kernel_db_direct_reads.py"),
+        est_seconds=3,
+        fast=True,
+    ),
+    Gate(
         # 门禁基建自身的 lint（执行方案 0-6）：run_gates/检查器族 33 处存量
         # 入基线棘轮，新增即红。通用检查器 check_ruff_baseline.py 与
         # plugins-lint（批次 2）共用。
@@ -362,7 +488,7 @@ GATES: list[Gate] = [
         label="scripts/ ruff 基线锁（只减不增）",
         domain="cross",
         shell=(
-            'T=$(mktemp); ( ruff check scripts/ 2>&1 || true ) | tee "$T"; '
+            'D=.zctmp/gates/$AGENTOS_GATE_RUN_ID; mkdir -p $D; T=$(mktemp $D/gate_tmp.XXXXXXXXXX); ( ruff check scripts/ 2>&1 || true ) | tee "$T"; '
             'python scripts/check_ruff_baseline.py --name scripts --from-file "$T"'
         ),
         est_seconds=2,
@@ -377,107 +503,27 @@ GATES: list[Gate] = [
         label="插件主体 ruff 基线锁（plugins/ + mcp-servers/，只减不增）",
         domain="plugins",
         shell=(
-            'T=$(mktemp); ( ruff check plugins/ mcp-servers/ 2>&1 || true ) | tee "$T"; '
+            'D=.zctmp/gates/$AGENTOS_GATE_RUN_ID; mkdir -p $D; T=$(mktemp $D/gate_tmp.XXXXXXXXXX); ( ruff check plugins/ mcp-servers/ 2>&1 || true ) | tee "$T"; '
             'python scripts/check_ruff_baseline.py --name plugins --from-file "$T"'
         ),
     ),
-    # ── 插桩车道 5 分片 + 合并（2026-10-05）─────────────────────────────
-    # 单 CI job 跑全量插桩套件（无论单/双 pytest 进程、无论测试集大小）恒定
-    # ~48 分钟墙处「runner lost communication」（#177/#178/#180/#188/#190 五
-    # 轮实证；探针 meminfo 14.8GB 可用排除内存）。根因=输出体量：-v 逐行 +
-    # term-missing 全表 + VERBOSE 把整段 pytest 流灌进 job log（AGENTS
-    # GATE_VERBOSE=1 下通过门禁也全量打印，run_gates._print_result），log
-    # 上传管道耗尽 → runner 失联；A 半只有一半测试仍撞同墙、探针看门狗 2 分
-    # 钟后心跳全灭皆与该假说自洽。故 4 并行分片（每片 ~1/4 测试集、静默输出
-    # -q、只出 .coverage 不出 term 报表）+ 合并 job（coverage combine + xml +
-    # 覆盖率地板锁）。测试集与阈值承诺不变；本地串联 = 依次跑 a/b/c/d（各落
-    # .coverage，merge 前 coverage combine 合并）。
     Gate(
-        id="plugins-coverage-a",
-        label="插件测试（插桩分片 a）+ 失败数基线锁",
+        id="plugins-coverage",
+        label="插件测试（插桩，免豁免重型套件）+ 失败数基线锁 + 覆盖率基线锁",
         domain="plugins",
         shell=(
-            "T=$(mktemp); ( uv run --frozen python -m pytest -q "
-            + _shell_join_pytest(_pytest_argv_shards(coverage_exempt.instrumented_args(), 5)[0])
-            + " --cov=plugins"
+            "D=.zctmp/gates/$AGENTOS_GATE_RUN_ID; mkdir -p $D; T=$(mktemp $D/gate_tmp.XXXXXXXXXX); ( uv run --frozen python -m pytest -v "
+            + _shell_join_pytest(coverage_exempt.instrumented_args())
+            + " --cov=plugins --cov-report=term-missing --cov-report=xml:coverage.xml"
             + ' 2>&1 || true ) | tee "$T"; '
-            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage-a --from-file "$T"'
-        ),
-        env=_PLUGINS_ENV,
-    ),
-    Gate(
-        id="plugins-coverage-b",
-        label="插件测试（插桩分片 b）+ 失败数基线锁",
-        domain="plugins",
-        shell=(
-            "T=$(mktemp); ( uv run --frozen python -m pytest -q "
-            + _shell_join_pytest(_pytest_argv_shards(coverage_exempt.instrumented_args(), 5)[1])
-            + " --cov=plugins"
-            + ' 2>&1 || true ) | tee "$T"; '
-            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage-b --from-file "$T"'
-        ),
-        env=_PLUGINS_ENV,
-    ),
-    Gate(
-        id="plugins-coverage-c",
-        label="插件测试（插桩分片 c）+ 失败数基线锁",
-        domain="plugins",
-        shell=(
-            "T=$(mktemp); ( uv run --frozen python -m pytest -q "
-            + _shell_join_pytest(_pytest_argv_shards(coverage_exempt.instrumented_args(), 5)[2])
-            + " --cov=plugins"
-            + ' 2>&1 || true ) | tee "$T"; '
-            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage-c --from-file "$T"'
-        ),
-        env=_PLUGINS_ENV,
-    ),
-    Gate(
-        id="plugins-coverage-e",
-        label="插件测试（插桩分片 e）+ 失败数基线锁",
-        domain="plugins",
-        shell=(
-            "T=$(mktemp); ( uv run --frozen python -m pytest -q "
-            + _shell_join_pytest(_pytest_argv_shards(coverage_exempt.instrumented_args(), 5)[4])
-            + " --cov=plugins"
-            + ' 2>&1 || true ) | tee "$T"; '
-            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage-e --from-file "$T"'
-        ),
-        env=_PLUGINS_ENV,
-    ),
-    Gate(
-        id="plugins-coverage-d",
-        label="插件测试（插桩分片 d）+ 失败数基线锁",
-        domain="plugins",
-        shell=(
-            "T=$(mktemp); ( uv run --frozen python -m pytest -q "
-            + _shell_join_pytest(_pytest_argv_shards(coverage_exempt.instrumented_args(), 5)[3])
-            + " --cov=plugins"
-            + ' 2>&1 || true ) | tee "$T"; '
-            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage-d --from-file "$T"'
-        ),
-        env=_PLUGINS_ENV,
-    ),
-    Gate(
-        id="plugins-coverage-merge",
-        label="覆盖率合并（coverage combine + xml）+ 整体基线锁",
-        domain="plugins",
-        needs=(
-            "plugins-coverage-a",
-            "plugins-coverage-b",
-            "plugins-coverage-c",
-            "plugins-coverage-d",
-        ),
-        # 四分片各自落 .coverage；合并前置条件 = 工作树已备好 .coverage-a..d
-        # （CI 由 merge job 的 artifact 下载步落位；本地 = 依次跑四分片后改名）。
-        shell=(
-            "uv run --frozen coverage combine .coverage-a .coverage-b .coverage-c .coverage-d && "
-            "uv run --frozen coverage xml -o coverage.xml "
+            'python scripts/check_pytest_failure_baseline.py --lane plugins-coverage --from-file "$T" '
             # D1 拍板（2026-09-24）：整体基线 100.00→90.0 并摘除 --skip 恢复执法
             # （插桩基集实测 ~98.5 绿）；旧挂起理由（Windows/Linux 恒差 vs 100
             # 压力线）随 90 目标口径失效。
             "&& python scripts/check_python_coverage_baseline.py"
         ),
         env=_PLUGINS_ENV,
+        needs=("timing-gate",),
     ),
     Gate(
         # Python 改动行 100%（ADR 2026-08-20 覆盖率棘轮门禁）。omit 与
@@ -527,12 +573,13 @@ GATES: list[Gate] = [
         label="重型套件免插桩（94 插件子进程冒烟矩阵）+ 失败数基线锁",
         domain="plugins",
         shell=(
-            "T=$(mktemp); ( uv run --frozen python -m pytest -v "
+            "D=.zctmp/gates/$AGENTOS_GATE_RUN_ID; mkdir -p $D; T=$(mktemp $D/gate_tmp.XXXXXXXXXX); ( uv run --frozen python -m pytest -v "
             + _shell_join_pytest(coverage_exempt.heavy_args())
             + ' 2>&1 || true ) | tee "$T"; '
             'python scripts/check_pytest_failure_baseline.py --lane plugins-heavy --from-file "$T"'
         ),
         env=_PLUGINS_ENV,
+        needs=("timing-gate",),
     ),
     Gate(
         id="plugins-mypy-baseline",
@@ -585,12 +632,23 @@ GATES: list[Gate] = [
         fast=True,
     ),
     Gate(
+        # 主题色卫生（2026-10-25 用户裁定：文字/图标/背景一律随主题变量，
+        # 生产代码与插件声明模板禁硬编码颜色字面量；存量债基线棘轮只减不增）
+        id="frontend-theme-color-hygiene",
+        label="主题色卫生：hex/rgb()/hsl() 字面量扫描 + 基线棘轮（定义层豁免）",
+        domain="frontend",
+        command=(sys.executable, "scripts/check_theme_color_hygiene.py", "--baseline-monotonic"),
+        est_seconds=2,
+        fast=True,
+        paths=("frontend/",),
+    ),
+    Gate(
         id="frontend-lint",
         label="eslint + 基线锁（只减不增）",
         domain="frontend",
         cwd="frontend",
         shell=(
-            'T=$(mktemp); ( npm run lint 2>&1 || true ) | tee "$T"; '
+            'D=.zctmp/gates/$AGENTOS_GATE_RUN_ID; mkdir -p $D; T=$(mktemp $D/gate_tmp.XXXXXXXXXX); ( npm run lint 2>&1 || true ) | tee "$T"; '
             'python ../scripts/check_frontend_baseline.py --eslint-file "$T"'
         ),
     ),
@@ -600,7 +658,7 @@ GATES: list[Gate] = [
         domain="frontend",
         cwd="frontend",
         shell=(
-            'T=$(mktemp); ( npm run test:coverage 2>&1 || true ) | tee "$T"; '
+            'D=.zctmp/gates/$AGENTOS_GATE_RUN_ID; mkdir -p $D; T=$(mktemp $D/gate_tmp.XXXXXXXXXX); ( npm run test:coverage 2>&1 || true ) | tee "$T"; '
             'python ../scripts/check_frontend_baseline.py --vitest-file "$T"'
         ),
     ),
@@ -657,7 +715,7 @@ GATES: list[Gate] = [
         domain="frontend",
         cwd="frontend",
         shell=(
-            'T=$(mktemp); ( npm exec -- knip --no-progress 2>&1 || true ) | tee "$T"; '
+            'D=.zctmp/gates/$AGENTOS_GATE_RUN_ID; mkdir -p $D; T=$(mktemp $D/gate_tmp.XXXXXXXXXX); ( npm exec -- knip --no-progress 2>&1 || true ) | tee "$T"; '
             'python ../scripts/check_knip_jscpd_baseline.py --knip-file "$T"'
         ),
         wiring="local",
@@ -669,7 +727,7 @@ GATES: list[Gate] = [
         domain="frontend",
         cwd="frontend",
         shell=(
-            'T=$(mktemp); ( npm exec -- jscpd 2>&1 || true ) | tee "$T"; '
+            'D=.zctmp/gates/$AGENTOS_GATE_RUN_ID; mkdir -p $D; T=$(mktemp $D/gate_tmp.XXXXXXXXXX); ( npm exec -- jscpd 2>&1 || true ) | tee "$T"; '
             'python ../scripts/check_knip_jscpd_baseline.py --jscpd-file "$T"'
         ),
         wiring="local",
@@ -721,7 +779,7 @@ GATES: list[Gate] = [
         domain="frontend",
         cwd="frontend",
         shell=(
-            'T=$(mktemp); ( npm run build 2>&1 || true ) | tee "$T"; '
+            'D=.zctmp/gates/$AGENTOS_GATE_RUN_ID; mkdir -p $D; T=$(mktemp $D/gate_tmp.XXXXXXXXXX); ( npm run build 2>&1 || true ) | tee "$T"; '
             'python ../scripts/check_bundle_size.py --from-file "$T"'
         ),
         needs=("frontend-e2e-smoke",),
@@ -734,15 +792,16 @@ GATES: list[Gate] = [
         command=("npm", "run", "electron:compile"),
         est_seconds=5,
         fast=True,
+        paths=("electron/",),
     ),
     Gate(
-        # electron/__tests__ 11 文件 154 用例（主进程模块：app-protocol CSP/
-        # kernel-manager/auth-session/dialog/edit-menu 等）——2026-09-24 前零
-        # 车道接线（盲区审计发现），本 gate 补齐。运行口径 = frontend 的 vitest
-        # 二进制 + --root ../electron（electron 无独立 node_modules/配置，与
-        # 09-16 审查批手动验证口径一致）。实跑 0.65s。
+        # electron/__tests__ 23 文件 289 用例（主进程模块：app-protocol CSP/
+        # kernel-manager/auth-session/dialog/edit-menu/visibility-recovery 等）
+        # ——2026-09-24 前零车道接线（盲区审计发现），本 gate 补齐。运行口径 =
+        # frontend 的 vitest 二进制 + --root ../electron（electron 无独立
+        # node_modules/配置，与 09-16 审查批手动验证口径一致）。
         id="electron-test",
-        label="Electron 主进程 vitest（__tests__ 154 用例）",
+        label="Electron 主进程 vitest（__tests__ 289 用例）",
         domain="electron",
         cwd="frontend",
         command=("npm", "exec", "--", "vitest", "run", "--root", "../electron"),
@@ -773,6 +832,130 @@ GATES: list[Gate] = [
         command=(sys.executable, "scripts/check_doc_paths.py"),
         est_seconds=2,
         fast=True,
+        paths=("docs/",),
+    ),
+    Gate(
+        # 端口同步闸（全仓独立审查整改方案 §3-K4）：electron 侧
+        # KERNEL_DEFAULT_PORT 与前端打包件 PACKAGED_KERNEL_WS_ORIGIN 是两处
+        # 平行簿记（无生成物/共享常量，曾因端口不一致导致打包件 WS 连接
+        # 失败），本闸机械执法双值相等；抽取失败（文件/符号改名）同样红
+        # ——fail-closed 防闸退化成永绿假闸。
+        id="kernel-port-sync",
+        label="内核端口同步（electron KERNEL_DEFAULT_PORT ≡ 前端 PACKAGED_KERNEL_WS_ORIGIN）",
+        domain="cross",
+        command=(sys.executable, "scripts/check_kernel_port_sync.py"),
+        est_seconds=2,
+        fast=True,
+    ),
+    Gate(
+        # 前端插件页声明投影同步闸（审查总册 E6/P2-26）：contributes.pages
+        # 生成投影 pluginPages.generated.ts 唯一来源（E6 落地）。
+        id="frontend-plugin-pages-sync",
+        label="前端插件页声明投影同步（gen_frontend_plugin_pages 重渲染逐字节比对）",
+        domain="frontend",
+        command=(sys.executable, "scripts/check_frontend_plugin_pages_sync.py"),
+        est_seconds=3,
+        fast=True,
+    ),
+    Gate(
+        # 共享根裸名导入禁区闸（审查总册 E2/P1-10）：共享根 28 件经
+        # _root_api/ 显式出口消费（E2 落地），裸名 import 回流即红。
+        id="shared-root-imports",
+        label="共享根裸名导入禁区（_root_api 出口唯一消费面）",
+        domain="plugins",
+        command=(sys.executable, "scripts/check_shared_root_imports.py"),
+        est_seconds=3,
+        fast=True,
+    ),
+    Gate(
+        # 工具契约静态闸（2026-10-16 工具调用形态修复 ADR 执法面）：自由
+        # object 字段必须表态（additionalProperties / 非空 description），
+        # 同名工具同名字段跨插件声明须全等，manifest input_schema 与代码
+        # 内联 @plugin.tool schema 须全等（G2 注册闸 verify.rs 全等比对，
+        # 双源漂移=工具被拒注册）。plugin_check 安装期委托同一检查器。
+        id="tool-schema-contract",
+        label="工具 schema 契约（自由 object 表态 / 同名同形 / 双源一致）",
+        domain="plugins",
+        command=(sys.executable, "scripts/check_tool_schema_contracts.py"),
+        est_seconds=6,
+        fast=True,
+    ),
+    Gate(
+        # agent tool_ids 静态闸（2026-10-18 tool_ids 漂移归因刀）：config/agents/**
+        # 每条 tool_ids ⊆ 仓内 manifest 注册面 ∪ 整包插件 id ∪ 外部/用户空间提供方
+        # 清单（单源 = tool_schema.EXTERNAL_PROVIDED_TOOL_IDS）。引用面外 id 的
+        # agent 每轮 LLM 调用必败且只留运行期缩面痕迹（2026-10-17 日志 72 行/日
+        # 同类实证），本闸在静态期拦下。测试面并有同契约
+        # tests/plugins/test_tool_ids_contract.py。
+        id="agent-tool-ids",
+        label="agent tool_ids 白名单（注册面 ∪ 外部清单；缺注册即红）",
+        domain="plugins",
+        command=(sys.executable, "scripts/check_agent_tool_ids.py"),
+        est_seconds=2,
+        fast=True,
+    ),
+    Gate(
+        # 服务声明静态闸（资源注册收敛 T5.3，方案 §二 闭包第一层）：插件生产码
+        # 的 get_capability / 句柄 .call 字面调用 ns ⊄ requires_services ∪
+        # KERNEL_PROVIDED_SERVICES（registry.rs 表为单源，正则解析 fail-closed）
+        # 即红；共享库（channel_common 等）调用点按 import 闭包归消费插件；
+        # 声明无调用点（平台依赖豁免除外）→ 警告不阻断。动态拼名识别不到的
+        # 边界由运行时 capability router unresolved 对账兜底（T5.5）。
+        id="service-declaration",
+        label="服务声明闭包（调用点 ⊆ 声明 ∪ 内建表；共享库按 import 归属）",
+        domain="plugins",
+        command=(sys.executable, "scripts/check_service_declarations.py"),
+        est_seconds=8,
+        fast=True,
+    ),
+    Gate(
+        # render.card 卡型词汇表同步闸（审查总册 AR-M5/P1-20）：卡型词表真值
+        # = 插件侧声明面（plugins/shared/*/plugin.json render.card +
+        # dsh_adapter/translator.py DSH 卡型映射），生成物
+        # frontend/src/utils/renderCardVocabulary.generated.ts 是前端类型面
+        # 与声明校验的唯一词表来源（原 renderIntent.ts 两处手抄清单已删）。
+        # 执法核在生成器 --check（重渲染逐字节比对）：手改生成物 / 插件侧
+        # 增删卡型未再生成任一即红——fail-closed（单侧注入假卡型未再生成闸
+        # 红；再生成则 tsc 在 payload 构造器缺位处红，双向封死）。
+        id="render-card-sync",
+        label="卡型词汇表同步（插件侧声明面 ≡ 前端生成物）",
+        domain="cross",
+        command=(sys.executable, "scripts/check_render_card_vocabulary_sync.py"),
+        est_seconds=2,
+        fast=True,
+    ),
+    Gate(
+        # 移动壳 apiBase 漂移闸（审查总册 P1-14②，D1①②）：capacitor.config.json
+        # plugins.ShellConfig.apiBase 是壳基址声明单点，syncweb 生成 www/shell-config.js
+        # + 注入 index.html 标签；env 注入值（LINGXI_API_BASE，本机内核构建缝双
+        # 模式）残留在库即成漂移（127.0.0.1:9300 过期 dev 值实锤）。执法核在
+        # syncweb --check（生成器单源渲染逻辑零复制），声明面缺失/生成物漂移/
+        # 标签缺失任一即红——fail-closed。运行时免疫在壳内（MainActivity 换装的
+        # ShellConfigWebViewClient 用声明面/sidecar 现做现答），两道防线分工见
+        # ShellConfigResolver。
+        id="shell-config-sync",
+        label="移动壳 apiBase 同步（capacitor 声明面 ≡ syncweb 生成物 ≡ 注入标签）",
+        domain="cross",
+        command=(sys.executable, "scripts/check_shell_config_sync.py"),
+        est_seconds=2,
+        fast=True,
+    ),
+    Gate(
+        # OpenAPI 说明书漂移闸（整改方案 §6 企业级补课第 1 项）：
+        # scripts/gen_openapi.py 从 server.rs/http_dispatcher.rs 路由注册面
+        # 生成 docs/api/openapi.yaml（OpenAPI 3.1，外部工具可生成客户端/
+        # 导入 Postman/网关对接）；--check 重生成逐字节比对——改路由忘了
+        # 再生成即红。security 字段复用 P-2 鉴权分类单一真值源（AUTH_*
+        # 常量组 + classify_auth_surface，ADR 2026-10-10 枚举键锚定复用）；
+        # /ext 插件动态声明面不收录（info.description 注明经 /api/v1/schema
+        # 运行时发现）。解析退化（源缺失/常量抽不到/路由面条数过少/路径
+        # 未落入鉴权面）同样红——fail-closed 防永绿假闸。
+        id="openapi-drift",
+        label="OpenAPI 说明书漂移（docs/api/openapi.yaml ≡ 路由注册面再生成的）",
+        domain="cross",
+        command=(sys.executable, "scripts/gen_openapi.py", "--check"),
+        est_seconds=2,
+        fast=True,
     ),
     Gate(
         id="traceability-gate",
@@ -781,6 +964,40 @@ GATES: list[Gate] = [
         command=(sys.executable, "scripts/check_test_traceability.py"),
         est_seconds=5,
         fast=True,
+    ),
+    Gate(
+        # 文件长度机械闸（ADR docs/decisions/2026-10-12-file-length-mechanical-gate.md）：
+        # 新/存分档四档——新文件 1500/3000 硬（无基线可入）、存量未入册触线
+        # 2500/5000、冻结件天花板只减不增、软提醒 1000/2000 报表（2026-10-12
+        # 三次裁定：初拟统一 1500 → 统一 2500 → 新/存分档，见 ADR）
+        # + 触碰即拆第五维（2026-10-15 增补）：触碰拆分线 >5000（非测试/
+        # 测试同线；2500~5000 灰带不设闸）文件——含冻结件——被本次 diff
+        # 触碰即红，须同刀拆分或缩行；触碰范围解析复用
+        # check_diff_coverage 基底机制（--touch-range > GITHUB_BASE_REF
+        # merge-base > HEAD^..HEAD），逃生口 [skip-touch-split]。
+        # CI 侧 GITHUB_EVENT_BEFORE 供新文件判定、GITHUB_BASE_REF 供触碰
+        # 判定（checkout 需 fetch-depth: 0），--baseline-monotonic 执法账本棘轮。
+        # invoker.rs 8 月底 4215→2708 后 6 周长回 4780（约 345 行/周）实证
+        # "只拆不闸"不可持续，闸与拆必须配套。
+        id="file-length-baseline",
+        label="文件长度新/存分档闸（新1500/3000 硬 + 存量触线2500/5000 + 基线棘轮 + 触碰即拆）",
+        domain="cross",
+        command=(sys.executable, "scripts/check_file_length_baseline.py", "--baseline-monotonic"),
+        est_seconds=2,
+        fast=True,
+    ),
+    Gate(
+        # 观测配方契约门禁（性能监测补强 R1 O1/O2）：deploy/observability 的
+        # 抓取/鉴权/回环绑定/看板指标名/令牌不入库 五面契约，被改动时不得
+        # 静默漂移。stdlib-only（消费方 traceability-gate 恒跑 job 是裸
+        # setup-python，无 PyYAML），YAML 走行级断言、JSON 走真解析。
+        # 不入 fast 档：fast 预算满额（2026-10-28 并行在飞闸已超），CI 由
+        # traceability-gate 恒跑 job 承载，本地 --mode all 可跑。
+        id="observability-config",
+        label="观测配方契约（Prometheus 抓取/Grafana provisioning/看板指标/令牌不入库）",
+        domain="cross",
+        command=(sys.executable, "scripts/check_observability_config.py"),
+        paths=("deploy/observability/",),
     ),
     Gate(
         # 元门禁（批次 M，执行方案 09-24）：门禁体系的门禁 V1–V8。自举：
@@ -792,15 +1009,106 @@ GATES: list[Gate] = [
         est_seconds=3,
         fast=True,
     ),
+    Gate(
+        # 项目全景图三合一（方案 AI辅助编程体系落地AgentOS_20261022 §4.4，
+        # 2026-10-28 接线）：增量聚合 → 落盘 docs/graph/graph.js（gitignored
+        # 派生物）→ 校验红绿；校验与出图同一遍聚合，数据文件=校验顺手副产物，
+        # 无"只校验不出图"的独立入口。纯标准库，LLM 零参与。
+        id="graph-check",
+        label="项目全景图聚合+校验（增量，graph.js=校验副产物）",
+        domain="cross",
+        command=(sys.executable, "scripts/graph_aggregate.py"),
+        est_seconds=10,
+        fast=True,
+        paths=("docs/",),
+    ),
+    Gate(
+        # 新增文档 frontmatter 强制闸（提案 P-01/E2-1，gate-change ADR
+        # 2026-10-30-doc-frontmatter-gate）：变更集新增的 docs/**.md 必带
+        # doc_id/type/status 三字段，枚举真值单源 graph_model。存量不回填
+        # （方案已裁），docs/decisions/ 豁免（ADR 五段格式独立约定）。
+        # 变更集=暂存区新增 ∪（--base/GITHUB_BASE_REF 时）PR 范围新增，
+        # 刻意无 HEAD^ 兜底（多会话并行仓 false red）。
+        id="doc-frontmatter",
+        label="新增 docs 文档三字段强制（存量不回填）",
+        domain="docs",
+        command=(sys.executable, "scripts/check_doc_frontmatter.py"),
+        est_seconds=1,
+        fast=True,
+        paths=("docs/",),
+    ),
+    Gate(
+        # docs/working/INDEX.md 新鲜度闸（F3①，gate-change ADR
+        # docs/decisions/2026-11-04-gate-surface-hardening-index-freshness-
+        # and-schema-dual-source.md）：INDEX 是快照、无自动再生成触发（复核件
+        # _修复复核_F2F3F7.md F3 段活体演示：42194d443 提交前 2 分钟入库致
+        # INDEX 落地即滞后）。比对面=git 跟踪面条目覆盖与链接正确性（多会话
+        # 在飞未跟踪件不执法——磁盘语义会逼出含外来件条目的 INDEX，CI 干净
+        # 检出下永红）；红即指路跑 gen_working_index.py。
+        id="working-index-fresh",
+        label="docs/working 索引新鲜度（跟踪面条目覆盖 ≡ 生成器产出）",
+        domain="docs",
+        command=(sys.executable, "scripts/check_working_index_fresh.py"),
+        # est 0 = 实测次秒级（0.22s：collect+render 复用 + git ls-files）；
+        # fast 预算已满 140/140，秒粒度入档取 0——预算上调在 check_gate_wiring.py
+        # （本闸 ADR 批改动面外），移交后续 gate-change 随门禁面增长同前例处理。
+        est_seconds=0,
+        fast=True,
+        paths=("docs/",),
+    ),
+    Gate(
+        # 部署环境检测门（用户裁定 2026-10-28「CI 必含部署环境的检测和测试」）：
+        # deploy/**/*.sh 逐个 bash -n + deploy/*.service systemd-analyze verify
+        # （/opt 部署路径经临时 --root 沙箱补桩，本机路径缺失不误红）+
+        # deploy/nginx.conf server 片段经 events+http harness 过 nginx -t。
+        # Windows 本机 systemd/nginx 专属项显式 SKIP（CI ubuntu 车道执法），
+        # bash 缺失 FAIL；Linux 缺任一工具 FAIL（环境缺陷本身即本门标的）。
+        id="deploy-env",
+        label="部署环境检测（bash -n + systemd verify 沙箱 + nginx -t harness）",
+        domain="cross",
+        command=(sys.executable, "scripts/check_deploy_env.py"),
+    ),
+    Gate(
+        # 受保护清单检查（方案 AI辅助编程体系落地AgentOS_20261022 §3.6 件 2，
+        # 2026-10-28 接线）：门禁配置/基线棘轮/评估指标/渲染规定源码 diff 命中
+        # 即红——执法面被被执法面修改 = 博弈入口；唯一放行 = gate-change 独立
+        # 任务（ADR + [gate-change: 标记 + 全量档）。paths 空 = 恒跑（检查器
+        # 自身按变更集判定，不得被模块过滤掉）。
+        id="gate-protected",
+        label="机械闸受保护清单（门禁护门禁，gate-change 标记放行）",
+        domain="cross",
+        command=(sys.executable, "scripts/check_gate_protected.py"),
+        est_seconds=2,
+        fast=True,
+    ),
+    Gate(
+        # 规范执法档位（方案 §3.6 件 4）：每条规范必须标三档执法位之一
+        # （机械闸/评估指标/审查清单），注册表 + 基线棘轮（存量触碰即补）+
+        # 防悬空引用（gate id/指标 id/清单路径必须真实存在）。
+        id="enforcement-tier",
+        label="规范执法档位注册表（三档执法位 + 防悬空引用 + 基线棘轮）",
+        domain="cross",
+        command=(sys.executable, "scripts/check_rule_enforcement_tier.py"),
+        est_seconds=2,
+        fast=True,
+        paths=("config/rules/",),
+    ),
 ]
 
 # all = 穷尽集（本入口持有的全部门禁；pre-commit/python-e2e 见模块 docstring 归属说明）
 MODES: dict[str, list[str]] = {
     "fast": [g.id for g in GATES if g.fast],
     "kernel": [g.id for g in GATES if g.domain == "kernel"],
-    "plugins": [g.id for g in GATES if g.domain == "plugins"],
+    # 插件车道并入主题色卫生闸：plugin.json 声明模板在其扫描面内（2026-10-25
+    # 用户裁定文字/图标/背景一律随主题），插件开发本地验绿不漏该裁定
+    "plugins": [g.id for g in GATES if g.domain == "plugins"] + ["frontend-theme-color-hygiene"],
     "frontend": [g.id for g in GATES if g.domain == "frontend"],
     "all": [g.id for g in GATES],
+    # CI 接线全集（wiring=ci/inline-ci）：远端 Actions 跑的就是这个集合。
+    # 2026-10-30 用户裁定「CI 跟随执行空间」——本地提交+本地打包时由
+    # check_ci_gate --local 在本地执行同一集合作 CI 取证；新增门禁默认
+    # wiring=ci 自动并入，无需改此表。
+    "ci": [g.id for g in GATES if g.wiring in ("ci", "inline-ci")],
 }
 
 
@@ -876,7 +1184,7 @@ def run_gate(gate: Gate) -> tuple[str, int | None, str, float]:
         argv = build_argv(gate)
     except (FileNotFoundError, ValueError) as exc:
         return "failed", None, f"{exc}\n", 0.0
-    env = {**os.environ, **gate.env}
+    env = {**os.environ, **gate.env, "AGENTOS_GATE_RUN_ID": _RUN_ID}
     try:
         proc = subprocess.run(  # noqa: S603 —— argv 已按白名单构造
             argv,
@@ -918,6 +1226,18 @@ def run_selected(gates: list[Gate], max_active: int) -> int:
     results: dict[str, tuple[str, int | None, str, float]] = {}
     running: dict[Future, str] = {}
 
+    # timing 独占窗口（ADR 2026-10-30-timing-gate-exclusive-scheduling 升级）：
+    # timing-gate 在选中集内时**绝对第一**——其余车道一律 hold 到它出结果
+    # （passed 之外 failed/skipped 也放行，批已判死不再空转）。负载敏感的
+    # 时序断言族连 wave-1 轻邻居都吃不住（独立 CI B 轮实锤：S1 预算放宽后
+    # 仍被同波 sdk-test/tsc 打死三只兄弟）。
+    _exclusive_head = "timing-gate" if "timing-gate" in in_set else None
+
+    def head_released(gate: Gate) -> bool:
+        if _exclusive_head is None or gate.id == _exclusive_head:
+            return True
+        return state.get(_exclusive_head) in ("passed", "failed", "skipped")
+
     def deps_passed(gate: Gate) -> bool:
         return all(state[d] == "passed" for d in gate.needs if d in in_set)
 
@@ -936,7 +1256,7 @@ def run_selected(gates: list[Gate], max_active: int) -> int:
                     break
                 if state[gate.id] != "pending":
                     continue
-                if deps_passed(gate):
+                if deps_passed(gate) and head_released(gate):
                     state[gate.id] = "running"
                     print(f"run_gates: start {gate.label}", flush=True)
                     fut = pool.submit(run_gate, gate)
@@ -988,6 +1308,23 @@ def run_selected(gates: list[Gate], max_active: int) -> int:
     return 0
 
 
+def filter_by_changed(gates: list[Gate], changed: list[str] | None) -> list[Gate]:
+    """fast 档变更模块过滤（方案 AI辅助编程体系落地AgentOS_20261022 §3.6 步骤 5）。
+
+    changed=None（CI / 既有用法）→ 恒等返回全集，行为完全不变；
+    changed=list → paths 为空的门禁恒跑（cross-cutting），paths 非空的门禁
+    仅当至少一个变更文件命中其守护路径前缀才跑。过滤只缩不扩
+    （结果 ⊆ 全集），保守方向防漏检。
+    """
+    if changed is None:
+        return list(gates)
+    kept: list[Gate] = []
+    for g in gates:
+        if not g.paths or any(f.startswith(p) for f in changed for p in g.paths):
+            kept.append(g)
+    return kept
+
+
 def list_gates(as_json: bool = False) -> int:
     if as_json:
         # 元门禁消费的机器可读合同（check_gate_wiring.py 经 subprocess 取
@@ -1003,6 +1340,7 @@ def list_gates(as_json: bool = False) -> int:
                 "allow_failure": g.allow_failure,
                 "est_seconds": g.est_seconds,
                 "needs": list(g.needs),
+                "paths": list(g.paths),
                 "command": g.shell if g.shell else " ".join(g.command),
             }
             for g in GATES
@@ -1022,11 +1360,23 @@ def list_gates(as_json: bool = False) -> int:
 
 
 def main() -> int:
+    # Windows 控制台默认 GBK/cp1252，门禁 label 含数学符号（如 ⊆）时 print
+    # 直接 UnicodeEncodeError（2026-11-06 本机实证）——入口重配置 UTF-8，
+    # 与 CI（Linux UTF-8）行为对齐。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="统一机械门禁入口（quality-gates）")
     parser.add_argument("--list", action="store_true", help="列出全部门禁")
     parser.add_argument("--json", action="store_true", help="与 --list 连用：机器可读 JSON（元门禁消费）")
     parser.add_argument("--mode", choices=sorted(MODES), help="按模式选择门禁聚合")
     parser.add_argument("--filter", help="逗号分隔的门禁 id 精确选择（CI job 用）")
+    parser.add_argument(
+        "--changed-files",
+        nargs="*",
+        help="变更文件列表（pre-commit staged 变更集；fast 档仅跑变更模块的门禁）",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="只打印选中的门禁 id，不执行")
     ns = parser.parse_args()
 
     if ns.list:
@@ -1045,9 +1395,18 @@ def main() -> int:
     else:
         selected = [g for g in GATES if g.id in set(MODES[ns.mode])]
 
+    # fast 档变更模块过滤（pre-commit 提交即闸路径；CI / 既有用法传 None 不变）
+    if ns.changed_files is not None:
+        selected = filter_by_changed(selected, ns.changed_files)
+
     if not selected:
         print("run_gates: 未选中任何门禁", file=sys.stderr)
         return 2
+
+    if ns.dry_run:
+        for g in selected:
+            print(g.id)
+        return 0
 
     raw = os.environ.get("AGENTOS_GATE_CONCURRENCY", "")
     if raw:
@@ -1059,7 +1418,10 @@ def main() -> int:
         max_active = min(4, os.cpu_count() or 1, len(selected)) or 1
         source = "默认 cap 4"
     print(f"run_gates: 运行 {len(selected)} 个门禁，并行 {max_active}（{source}）。", flush=True)
-    return run_selected(selected, max_active)
+    try:
+        return run_selected(selected, max_active)
+    finally:
+        _cleanup_gate_tmp()
 
 
 if __name__ == "__main__":

@@ -12,8 +12,6 @@ manifest 必须同步承接原 track 声明的全部面——**漏一项都是�
    摘要面（前端与 monitoring/tasks 通知读不到）。``track.execution_stats`` 已
    随并入退役（无生产消费方、历史无业务数据，用户裁定 2026-09-15），两个名单
    均不得再声明它。
-3. ``granted_capabilities`` 缺 frontend/metrics → G6 单点授权拒绝
-   （capability_router.rs:check_grant 白名单制），两个观察出口恒 403。
 
 已知缺陷（本文件同时是回归闸）：llm_core 自 ed4f69fd2 起读
 ``track.messages_chars`` 落 W2a 锚，但该键从未进 ``state.reads``（切片投喂
@@ -32,7 +30,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _REPO = Path(__file__).resolve().parent.parent
-_MANIFEST = _REPO / "plugins" / "shared" / "pipeline" / "core" / "llm_core" / "plugin.json"
+_MANIFEST = _REPO / "plugins" / "shared" / "llm_core" / "plugin.json"
 
 
 @pytest.fixture(scope="module")
@@ -96,23 +94,6 @@ class TestPersistenceAndExport:
     def test_export_field_declared(self, manifest: dict, key: str) -> None:
         exported = manifest.get("export_fields", [])
         assert key in exported, f"export_fields 缺 {key}——state 摘要面读不到（前端/通知断供）"
-
-
-class TestCapabilityGrants:
-    """G6 白名单制：granted_capabilities 声明非空即白名单，未列出的 namespace 一律拒绝。"""
-
-    @pytest.mark.parametrize("cap", ["frontend", "metrics"])
-    def test_observation_exit_granted(self, manifest: dict, cap: str) -> None:
-        grants = manifest.get("granted_capabilities", [])
-        assert cap in grants, (
-            f"granted_capabilities 缺 {cap}——G6 单点授权拒绝（capability_router "
-            f"check_grant 白名单制），该观察出口恒不可用"
-        )
-
-    def test_tool_executor_grant_preserved(self, manifest: dict) -> None:
-        """原有授权不得在并入中丢失（LLM 调用通道）。"""
-        grants = manifest.get("granted_capabilities", [])
-        assert "tool-executor" in grants
 
 
 class TestTrackStepRetired:

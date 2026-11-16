@@ -1,0 +1,1310 @@
+# @feature: FP-0.2.二 内部模块 manifest（task_manage 读面：get 列表/详情 + delete 双路径） | @ci: python-coverage
+"""task_manage 读面与删除操作测试（行覆盖补全）。
+
+聚焦：get 列表过滤矩阵（状态/会话/层级/管道/父任务/task_scope/project/limit）、
+get 详情（含 evaluation_summary/elapsed/activities 组装）、
+delete 双路径（YAML 任务 / state 任务删管道）、耗时/活动摘要辅助函数。
+
+真实依赖：TaskService（tmp 数据目录）+ 真实 TaskStorage；仅 mock 跨进程
+capability（pipeline-executor / state 聚合 / service-registry
+traces.list_by_pipeline + pipeline-runs.list_by_pipeline——执行活动数据源
+在内核 traces 表、耗时起点终点在 runs 表，测试用假 reader 直连覆盖组装面）。
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import logging
+import sys
+from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+_HERE = Path(__file__).resolve().parent
+_PROJECT_ROOT = _HERE.parents[2]  # task → shared → plugins → 仓根（平铺布局）
+_PLUGIN_PATHS = tuple(
+    str(_d)
+    for _d in (
+        _HERE,
+        _PROJECT_ROOT / "plugins" / "shared" / "tasks",
+        _PROJECT_ROOT / "plugins" / "shared",
+    )
+)
+for _d in _PLUGIN_PATHS:
+    if _d not in sys.path:
+        sys.path.insert(0, _d)
+sys.modules.pop("tool", None)
+
+import tool as _task_mod  # noqa: E402
+
+# 模块级绑定（收集期路径已就位）：函数内裸名 import 在共跑车道里会因
+# sys.modules["state_machine"] 被前序套件替换而命中错误实现。
+from state_machine import InvalidTransitionError  # noqa: E402
+from tool import TaskTool  # noqa: E402
+
+pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _ensure_plugin_paths():
+    """平铺串扰自持：同 test_task_manage.py。"""
+    for _d in _PLUGIN_PATHS:
+        if _d in sys.path:
+            sys.path.remove(_d)
+        sys.path.insert(0, _d)
+    _saved = {n: sys.modules.get(n) for n in ("service", "http_api")}
+    for n in _saved:
+        sys.modules.pop(n, None)
+    try:
+        _server_py = _PROJECT_ROOT / "plugins" / "shared" / "tasks" / "server.py"
+        _spec = importlib.util.spec_from_file_location("tasks_server_preheat_listdel", _server_py)
+        if _spec is not None and _spec.loader is not None:
+            _mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+    except Exception:  # noqa: BLE001
+        pass
+    yield
+    for n, m in _saved.items():
+        sys.modules.pop(n, None)
+        if m is not None:
+            sys.modules[n] = m
+
+
+@pytest.fixture(autouse=True)
+def _capabilities():
+    """capability 全局注入点：接线用 setter，用例结束还原为 None。"""
+    prev_chat = _task_mod._chat_sender
+    prev_state = _task_mod._state_reader
+    prev_exec = _task_mod._pipeline_executor
+    prev_traces = _task_mod._traces_reader
+    prev_runs = _task_mod._runs_reader
+    yield
+    _task_mod._chat_sender = prev_chat
+    _task_mod._state_reader = prev_state
+    _task_mod._pipeline_executor = prev_exec
+    _task_mod._traces_reader = prev_traces
+    _task_mod._runs_reader = prev_runs
+
+
+@pytest.fixture
+def svc(tmp_path: Path) -> Any:
+    from service import TaskService
+
+    return TaskService(data_dir=str(tmp_path))
+
+
+@pytest.fixture
+def tool(svc: Any) -> TaskTool:
+    t = TaskTool()
+    t._task_service = svc
+    return t
+
+
+def _state_row(**overrides: Any) -> dict[str, Any]:
+    """典型任务管道聚合行（内核 STATE_SUMMARY_KEYS 白名单形状）。"""
+    row: dict[str, Any] = {
+        "pipeline_id": "pipe-shape",
+        "task.status": "running",
+        "task.goal": "全形状回归",
+        "task.submitted_by": "u1",
+        "task.scope": "non_container",
+        "task.ended_at": "2026-08-23T10:00:00",
+        "lineage.origin_session_id": "sess-shape",
+        "lineage.parent_pipeline_id": "pipe-parent",
+        "workspace": "workspace/pipe-shape",
+        "thread_id": "thread-shape",
+    }
+    row.update(overrides)
+    return row
+
+
+def _set_reader(tool: TaskTool, rows: list[dict[str, Any]] | None) -> None:
+    tool._read_state_rows = AsyncMock(return_value=rows)  # type: ignore[method-assign]
+
+
+# ─────────────────────────── get 列表过滤矩阵 ───────────────────────────
+
+
+async def test_get_list_state_priority_and_elapsed(tool: TaskTool) -> None:
+    """列表从 state 组装：priority 列取值、latest 动作降级 '-'、耗时 '-'。"""
+    _set_reader(tool, [_state_row()])
+    result = await tool.execute({"action": "get", "parent_agent_level": 1})
+    assert result.success, result.error
+    rows = result.output["d"]
+    assert len(rows) == 1
+    # 简表行形状：[短id, 标题, 状态, 优先级, target_name, 最新动作, 耗时]
+    assert rows[0][1] == "全形状回归"
+    assert rows[0][2] == "running"
+    assert rows[0][3] == 5, "默认 NORMAL 优先级数值=5"
+    assert rows[0][5] == "-"
+    assert rows[0][6] == "-"
+
+
+async def test_get_list_status_filter(tool: TaskTool) -> None:
+    """status 过滤：不匹配的行剔除、匹配的保留。"""
+    _set_reader(
+        tool,
+        [_state_row(pipeline_id="p-running"), _state_row(**{"pipeline_id": "p-completed", "task.status": "completed"})],
+    )
+    result = await tool.execute({"action": "get", "status": "completed", "parent_agent_level": 1})
+    assert result.success, result.error
+    rows = result.output["d"]
+    assert len(rows) == 1
+    assert rows[0][0] == "p-completed"
+    assert rows[0][2] == "completed"
+
+
+async def test_get_list_l1_session_filter(tool: TaskTool) -> None:
+    """L1 会话过滤：任务 session 与当前不符 → 剔除。"""
+    _set_reader(
+        tool,
+        [_state_row(pipeline_id="p-me"), _state_row(**{"pipeline_id": "p-other", "lineage.origin_session_id": "sess-other"})],
+    )
+    result = await tool.execute(
+        {"action": "get", "session_id": "sess-shape", "parent_agent_level": 1}
+    )
+    assert result.success, result.error
+    ids = {r[0] for r in result.output["d"]}
+    assert ids == {"p-me"[:12]}
+
+
+async def test_get_list_l1_show_all_uses_submitted_by_level(tool: TaskTool, svc: Any) -> None:
+    """L1 默认只显示自己提交（submitted_by_level≠1 剔除）；show_all 放行。"""
+    await svc.create_task(title="L1任务", metadata={"submitted_by_level": 1})
+    await svc.create_task(title="L2任务", metadata={"submitted_by_level": 2})
+    _set_reader(tool, None)  # state 桥未就绪 → 回落 YAML（metadata 才有 submitted_by_level）
+    result = await tool.execute({"action": "get", "parent_agent_level": 1})
+    assert result.success, result.error
+    assert {r[1] for r in result.output["d"]} == {"L1任务"}
+    _set_reader(tool, None)
+    result = await tool.execute({"action": "get", "show_all": True, "parent_agent_level": 1})
+    assert result.success, result.error
+    assert {r[1] for r in result.output["d"]} == {"L1任务", "L2任务"}
+
+
+async def test_get_list_l2_filters(tool: TaskTool) -> None:
+    """L2 过滤：pipeline 归属 / parent_task_id / 无上下文拒绝。"""
+    rows = [
+        _state_row(pipeline_id="pipe-a"),
+        _state_row(**{"pipeline_id": "pipe-child", "lineage.parent_pipeline_id": "pipe-a"}),
+        _state_row(**{"pipeline_id": "pipe-other", "lineage.parent_pipeline_id": "pipe-x"}),
+    ]
+    _set_reader(tool, rows)
+    result = await tool.execute(
+        {"action": "get", "pipeline_id": "pipe-a", "parent_agent_level": 2}
+    )
+    assert result.success, result.error
+    assert len(result.output["d"]) == 2
+    _set_reader(tool, rows)
+    result = await tool.execute(
+        {"action": "get", "parent_task_id": "pipe-a", "parent_agent_level": 2}
+    )
+    assert result.success, result.error
+    assert len(result.output["d"]) == 1
+    _set_reader(tool, rows)
+    result = await tool.execute({"action": "get", "parent_agent_level": 2})
+    assert result.success, result.error
+    assert len(result.output["d"]) == 0, "L2 无上下文 → _check_permission 拒绝全部"
+
+
+async def test_get_list_project_filter(tool: TaskTool) -> None:
+    """project_id 过滤（user parent_task_id 过滤在 actions 文件已测）。"""
+    rows = [
+        _state_row(pipeline_id="p-a"),
+        _state_row(pipeline_id="p-b"),
+    ]
+    _set_reader(tool, rows)
+    result = await tool.execute(
+        {"action": "get", "project_id": "proj-1", "parent_agent_level": 1}
+    )
+    assert result.success, result.error
+    assert len(result.output["d"]) == 0, "metadata 无 project_id → 全剔除"
+
+
+async def test_get_list_limit_truncates_tail(tool: TaskTool) -> None:
+    """limit 末端截断：全过滤通过后只留最新 N 条。"""
+    _set_reader(tool, [_state_row(pipeline_id=f"p{i}") for i in range(6)])
+    result = await tool.execute({"action": "get", "limit": 2, "parent_agent_level": 1})
+    assert result.success, result.error
+    assert len(result.output["d"]) == 2
+
+
+async def test_get_list_row_without_pipeline_id_skipped(tool: TaskTool) -> None:
+    """聚合行缺 pipeline_id（task.* 字段存在）→ 跳过不崩。"""
+    _set_reader(tool, [{"task.status": "running", "task.goal": "无 id 行"}])
+    result = await tool.execute({"action": "get", "parent_agent_level": 1})
+    assert result.success, result.error
+    assert result.output["d"] == []
+
+
+async def test_get_list_state_unavailable_falls_back_to_service(
+    tool: TaskTool, svc: Any
+) -> None:
+    """聚合桥未就绪（None）→ 回落旧 service 存储（全量拉取）。"""
+    await svc.create_task(title="A")
+    await svc.create_task(title="B")
+    _set_reader(tool, None)
+    result = await tool.execute({"action": "get", "parent_agent_level": 1})
+    assert result.success, result.error
+    assert {r[1] for r in result.output["d"]} == {"A", "B"}
+
+
+async def test_get_list_exception_returns_list_failed(tool: TaskTool) -> None:
+    """列表读取异常 → LIST_FAILED 结构化错误。"""
+    async def boom() -> list:
+        raise RuntimeError("state down")
+
+    tool._list_all_tasks_sorted = boom  # type: ignore[method-assign]
+    result = await tool.execute({"action": "get", "parent_agent_level": 1})
+    assert not result.success
+    assert result.error_code == "LIST_FAILED"
+    assert "state down" in (result.error or "")
+
+
+# ─────────────────────────── get 详情 ───────────────────────────
+
+
+async def test_get_detail_rich_assembly(tool: TaskTool, svc: Any) -> None:
+    """详情富组装：evaluation_history/fail_reason/ws_meta/计数全走真实任务对象。"""
+    task = await svc.create_task(
+        title="富详情",
+        metadata={
+            "workspace": "ws/1",
+            "ws_meta": {"path": "/data/ws"},
+            "fail_reason": "步骤 2 失败",
+            "retry_count": 2,
+            "max_retries": 4,
+            "evaluation_history": [
+                {"passed": False, "summary": "不通过", "evidence": ["e1"], "score": 0.3, "suggestions": ["重写"], "metrics": ["m1"]},
+                {"passed": True, "summary": "通过", "evidence": ["e2"], "score": 0.9, "suggestions": [], "metrics": ["m2"]},
+            ],
+        },
+    )
+    _set_reader(tool, None)  # state 桥未就绪 → 回落 YAML
+    result = await tool.execute(
+        {"action": "get", "task_id": task.id, "include_details": True, "parent_agent_level": 1}
+    )
+    assert result.success, result.error
+    data = result.output
+    assert data["workspace"] == "ws/1"
+    assert data["resolved_workspace"] == "/data/ws"
+    assert data["fail_reason"] == "步骤 2 失败"
+    assert data["retry_count"] == 2
+    assert data["max_retries"] == 4
+    ev = data["evaluation_summary"]
+    assert ev["passed"] is True
+    assert ev["summary"] == "通过"
+    assert ev["attempt_count"] == 2
+    assert ev["score"] == 0.9
+    assert data["hint"] is not None
+    assert data["elapsed_seconds"] is None, "无 started_at → 耗时 None"
+
+
+async def test_get_detail_task_not_found(tool: TaskTool) -> None:
+    """详情任务不存在（state/YAML 双缺）→ TASK_NOT_FOUND。"""
+    _set_reader(tool, [])
+    result = await tool.execute(
+        {"action": "get", "task_id": "ghost-123456", "parent_agent_level": 1}
+    )
+    assert not result.success
+    assert result.error_code == "TASK_NOT_FOUND"
+
+
+async def test_get_detail_permission_denied(tool: TaskTool, svc: Any) -> None:
+    """详情越权：L2 访问非本管道任务 → INSUFFICIENT_PERMISSION。"""
+    task = await svc.create_task(title="L1 私有")
+    _set_reader(tool, None)
+    result = await tool.execute(
+        {
+            "action": "get",
+            "task_id": task.id,
+            "parent_agent_level": 2,
+            "pipeline_id": "other-pipe",
+        }
+    )
+    assert not result.success
+    assert result.error_code == "INSUFFICIENT_PERMISSION"
+
+
+async def test_get_detail_exception_returns_get_failed(tool: TaskTool) -> None:
+    """详情读取异常 → GET_FAILED 结构化错误。"""
+    async def broken(task_id: str) -> None:
+        raise RuntimeError("read broken")
+
+    tool._get_task_from_state = broken  # type: ignore[method-assign]
+    result = await tool.execute(
+        {"action": "get", "task_id": "x", "parent_agent_level": 1}
+    )
+    assert not result.success
+    assert result.error_code == "GET_FAILED"
+    assert "read broken" in (result.error or "")
+
+
+# ─────────────────────────── 活动摘要（fake traces reader） ───────────────────────────
+
+
+def _trace(plugin_id: str, patch: dict[str, Any], at: str) -> dict[str, Any]:
+    """内核 traces.list 返回形状（TraceEntry serde JSON；patch_data 为 JSON 字符串）。"""
+    return {
+        "trace_id": f"t_{plugin_id}_{at}",
+        "run_id": "run-uuid",
+        "branch_id": "main",
+        "seq_in_branch": 0,
+        "plugin_id": plugin_id,
+        "patch_type": "state_update",
+        "patch_data": json.dumps(patch, ensure_ascii=False),
+        "tenant_id": "default",
+        "created_at": at,
+    }
+
+
+def _core_trace(at: str, *, tool_calls: list[dict] | None = None, results: list[dict] | None = None) -> dict[str, Any]:
+    patch: dict[str, Any] = {"messages": {"_ops": []}}
+    if tool_calls is not None:
+        patch["_executed_tool_calls"] = tool_calls
+        patch["tool_results"] = results or []
+    else:
+        patch["llm_usage"] = {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
+    return _trace("core", patch, at)
+
+
+def _post_trace(at: str, text: str) -> dict[str, Any]:
+    return _trace("post", {"router.last_response_text": text}, at)
+
+
+def _set_traces(tool: TaskTool, traces: list[dict[str, Any]] | None) -> None:
+    if traces is None:
+        _task_mod.set_traces_reader(None)
+    else:
+        _task_mod.set_traces_reader(AsyncMock(return_value=traces))
+
+
+async def test_latest_and_recent_activities_assembly(tool: TaskTool) -> None:
+    """活动组装：core 工具/思考条目 + post 回复条目；倒序、限长、摘要来源。"""
+    traces = [
+        _core_trace("2026-08-29T10:00:01"),  # 第1轮：无工具 → thinking（llm_usage 概括）
+        _core_trace(  # 第2轮：2 个工具，结果带 metadata.message
+            "2026-08-29T10:00:02",
+            tool_calls=[{"name": "bash", "args": {"command": "ls"}}, {"name": "file_read", "args": {"path": "a"}}],
+            results=[{"metadata": {"message": "执行成功"}}, {"data": {"lines": 3}}],
+        ),
+        _core_trace(  # 第3轮：1 个工具，结果无 metadata → data 摘要
+            "2026-08-29T10:00:03",
+            tool_calls=[{"name": "task_evaluate", "args": {"summary": "x" * 120}}],
+            results=[],
+        ),
+        _post_trace("2026-08-29T10:00:04", "y" * 120),  # LLM 回复摘要截 100
+    ]
+    _set_traces(tool, traces)
+    task = _set_model()
+
+    recent = await tool._get_recent_activities(task, limit=10)
+    assert len(recent) == 5, f"1 思考 + 2 工具 + 1 工具 + 1 回复 = 5，实得 {len(recent)}"
+    assert [a["iteration"] for a in recent] == [3, 3, 2, 2, 1], "倒序（最新在前）；post 收尾归属当前轮次"
+    assert recent[-1]["action"] == "thinking"
+    assert recent[-1]["action_type"] == "ai"
+    assert "输入 100" in recent[-1]["summary"], "无工具轮次用 llm_usage 概括"
+
+    by_action = {a["action"]: a for a in recent if a["action_type"] == "tool"}
+    assert set(by_action) == {"bash", "file_read", "task_evaluate"}
+    assert by_action["bash"]["summary"] == "执行成功", "摘要优先取 tool_result 的 metadata.message"
+    assert by_action["file_read"]["summary"] == '{"lines": 3}', "无 message 时参数/结果摘要兜底"
+    assert len(by_action["task_evaluate"]["summary"]) == 100, "摘要截 100"
+
+    latest = await tool._get_latest_activity(task)
+    assert latest is not None
+    assert latest["action"] == "thinking", "latest 取时间末条（post 回复）"
+    assert latest["at"] == "2026-08-29T10:00:04"
+
+    narrow = await tool._get_recent_activities(task, limit=2)
+    assert len(narrow) == 2
+    assert narrow[0]["at"] == "2026-08-29T10:00:04", "截断保留最新"
+
+    assert await tool._get_recent_activities(task, limit=0) == [], "limit≤0 → 空（防 [-0:] 全量）"
+
+
+async def test_activities_without_reader_or_pipeline(tool: TaskTool) -> None:
+    """reader 未注入 / 无 pipeline_run_id → 摘要 None / 空列表（优雅降级）。"""
+    _set_traces(tool, None)
+    assert await tool._get_latest_activity(_set_model()) is None
+    assert await tool._get_recent_activities(_set_model()) == []
+    bare = _set_model(pipeline_run_id=None)
+    assert await tool._get_latest_activity(bare) is None
+    assert await tool._get_recent_activities(bare) == []
+
+
+async def test_activities_reader_failure_degrades(tool: TaskTool) -> None:
+    """traces 读取失败 → warning 降级空列表，不阻断任务主数据。"""
+    _task_mod.set_traces_reader(AsyncMock(side_effect=RuntimeError("kernel down")))
+    assert await tool._get_recent_activities(_set_model()) == []
+    assert await tool._get_latest_activity(_set_model()) is None
+
+
+async def test_get_detail_include_agent_calls_filters(tool: TaskTool, svc: Any) -> None:
+    """include_agent_calls → 仅 tool 类型活动（与 include_details 同传时也过滤）。"""
+    traces = [
+        _core_trace(
+            "2026-08-29T10:00:01",
+            tool_calls=[{"name": "toolcall", "args": {}}],
+            results=[{"metadata": {"message": "run"}}],
+        ),
+        _post_trace("2026-08-29T10:00:02", "think"),
+    ]
+    _set_traces(tool, traces)
+    task = await svc.create_task(title="调用过滤")
+    await svc.bind_pipeline_run(task.id, "pipe-run")
+    _set_reader(tool, None)
+    result = await tool.execute(
+        {"action": "get", "task_id": task.id, "include_agent_calls": True, "parent_agent_level": 1}
+    )
+    assert result.success, result.error
+    acts = result.output["recent_activities"]
+    assert len(acts) == 1
+    assert acts[0]["action_type"] == "tool"
+
+    result2 = await tool.execute(
+        {
+            "action": "get",
+            "task_id": task.id,
+            "include_details": True,
+            "include_agent_calls": True,
+            "parent_agent_level": 1,
+        }
+    )
+    assert result2.success, result2.error
+    acts2 = result2.output["recent_activities"]
+    assert len(acts2) == 1
+    assert acts2[0]["action_type"] == "tool", "agent_calls 恒过滤，不被 include_details 抵消"
+
+
+async def test_get_detail_limit_wiring(tool: TaskTool, svc: Any) -> None:
+    """详情模式 limit = 活动条数上限；未传默认 5。"""
+    traces = [_core_trace(f"2026-08-29T10:00:0{i}") for i in range(1, 8)]  # 7 条 thinking
+    _set_traces(tool, traces)
+    task = await svc.create_task(title="limit 接线")
+    await svc.bind_pipeline_run(task.id, "pipe-run")
+    _set_reader(tool, None)
+
+    result = await tool.execute(
+        {"action": "get", "task_id": task.id, "include_details": True, "limit": 2, "parent_agent_level": 1}
+    )
+    assert result.success, result.error
+    assert len(result.output["recent_activities"]) == 2, "limit 接线到活动条数"
+
+    result_default = await tool.execute(
+        {"action": "get", "task_id": task.id, "include_details": True, "parent_agent_level": 1}
+    )
+    assert result_default.success, result_default.error
+    assert len(result_default.output["recent_activities"]) == 5, "未传 limit 默认 5"
+
+
+# ─────────────────────────── 耗时与展示格式 ───────────────────────────
+
+
+async def test_elapsed_seconds_calculation(tool: TaskTool, monkeypatch: Any) -> None:
+    """_calc_elapsed_seconds：无 started_at → None；完成任务用完成时间差；运行中用当前时间。"""
+    import datetime as dt
+
+    from task_types import TaskModel
+
+    done = TaskModel(started_at="2026-08-25T10:00:00", completed_at="2026-08-25T10:00:30")
+    assert TaskTool._calc_elapsed_seconds(done) == 30.0
+    assert TaskTool._calc_elapsed_seconds(TaskModel()) is None
+    running = TaskModel(started_at="2026-08-25T10:00:00")
+    _set_utc_fake_now(
+        monkeypatch, dt.datetime(2026, 8, 25, 10, 1, 0, tzinfo=dt.UTC)
+    )
+    assert TaskTool._calc_elapsed_seconds(running) == 60.0
+
+
+def _run(run_id: str, created_at: str, *, status: str = "completed", ended_at: str | None = None) -> dict[str, Any]:
+    """内核 pipeline-runs.list_by_pipeline 返回形状（RunRecord serde JSON）。"""
+    d: dict[str, Any] = {
+        "run_id": run_id,
+        "config_hash": "h",
+        "status": status,
+        "tenant_id": "default",
+        "created_at": created_at,
+        "current_branch": "main",
+        "current_seq": 0,
+    }
+    if ended_at is not None:
+        d["ended_at"] = ended_at
+    return d
+
+
+def _set_runs(tool: TaskTool, runs: list[dict[str, Any]] | None) -> None:
+    if runs is None:
+        _task_mod.set_runs_reader(None)
+    else:
+        _task_mod.set_runs_reader(AsyncMock(return_value=runs))
+
+
+def _set_utc_fake_now(monkeypatch: Any, fake_now: Any) -> None:
+    """假时钟：now(tz) 忽略时区参数返回固定 aware 时刻（now() 已统一 aware UTC）。"""
+    import datetime as dt
+
+    monkeypatch.setattr(
+        "datetime.datetime",
+        type(
+            "FakeDT",
+            (),
+            {
+                "now": staticmethod(lambda tz=None: fake_now),
+                "fromisoformat": staticmethod(dt.datetime.fromisoformat),
+            },
+        ),
+    )
+
+
+async def test_elapsed_seconds_mixed_tz_inputs(tool: TaskTool, monkeypatch: Any) -> None:
+    """_calc_elapsed_seconds 时区归一：state/DB 时间串 naive/aware 混用不得崩溃。
+
+    内核侧 RFC3339 带偏移（aware），旧数据/local 写入可能不带（naive），
+    混用曾抛 'can't subtract offset-naive and offset-aware datetimes'。
+    """
+    import datetime as dt
+
+    from task_types import TaskModel
+
+    # 混合：aware 起点 + naive 完成时间（补 UTC 后差值不变）
+    mixed = TaskModel(
+        started_at="2026-08-25T10:00:00+00:00", completed_at="2026-08-25T10:00:30"
+    )
+    assert TaskTool._calc_elapsed_seconds(mixed) == 30.0
+    # 混合（反向）：naive 起点 + aware 完成时间
+    mixed_rev = TaskModel(
+        started_at="2026-08-25T10:00:00", completed_at="2026-08-25T10:00:45+00:00"
+    )
+    assert TaskTool._calc_elapsed_seconds(mixed_rev) == 45.0
+    # 纯 aware 完成 + 运行中撞当前时间（崩溃原场景：naive now - aware started）
+    aware_done = TaskModel(
+        started_at="2026-08-25T10:00:00+00:00",
+        completed_at="2026-08-25T10:00:30+00:00",
+    )
+    assert TaskTool._calc_elapsed_seconds(aware_done) == 30.0
+    aware_running = TaskModel(started_at="2026-08-25T10:00:00+00:00")
+    _set_utc_fake_now(
+        monkeypatch, dt.datetime(2026, 8, 25, 10, 1, 0, tzinfo=dt.UTC)
+    )
+    assert TaskTool._calc_elapsed_seconds(aware_running) == 60.0
+
+
+async def test_elapsed_from_runs_mixed_tz_inputs(tool: TaskTool, monkeypatch: Any) -> None:
+    """_calc_elapsed_from_runs 时区归一：run 起点/终点 naive/aware 混用不得崩溃。"""
+    import datetime as dt
+
+    # 混合：aware 起点 + naive 终点（min/max 比较与相减均须归一后成立）
+    _set_runs(
+        tool,
+        [
+            _run("r1", "2026-08-25T10:00:05+00:00", ended_at="2026-08-25T10:01:00"),
+            _run("r2", "2026-08-25T10:00:00", ended_at="2026-08-25T10:00:30+00:00"),
+        ],
+    )
+    assert await tool._calc_elapsed_from_runs("pipe-run") == 60.0
+    # 运行中：aware 起点 + 当前时间（崩溃原场景：naive now - aware created_at）
+    _set_runs(tool, [_run("r1", "2026-08-25T10:00:00+00:00", status="running")])
+    _set_utc_fake_now(
+        monkeypatch, dt.datetime(2026, 8, 25, 10, 2, 0, tzinfo=dt.UTC)
+    )
+    assert await tool._calc_elapsed_from_runs("pipe-run") == 120.0
+
+
+async def test_elapsed_from_runs_completed_diff(tool: TaskTool) -> None:
+    """完成态：起点=最早 run created_at，终点=最晚 ended_at，取差值。"""
+    _set_runs(
+        tool,
+        [
+            _run("r1", "2026-08-25T10:00:05", ended_at="2026-08-25T10:01:00"),
+            _run("r2", "2026-08-25T10:00:00", ended_at="2026-08-25T10:00:30"),
+        ],
+    )
+    # 最早起点 10:00:00，最晚终点 10:01:00 → 60s（非首行起点/末行终点的行序无关性）
+    assert await tool._calc_elapsed_from_runs("pipe-run") == 60.0
+
+
+async def test_elapsed_from_runs_running_uses_now(tool: TaskTool, monkeypatch: Any) -> None:
+    """运行态：存在未终态 run → 用当前时间；ended_at 缺失的终态 run 同样按运行中。"""
+    import datetime as dt
+
+    _set_runs(
+        tool,
+        [
+            _run("r1", "2026-08-25T10:00:00", status="running"),
+            _run("r2", "2026-08-25T09:59:00", status="completed", ended_at="2026-08-25T09:59:30"),
+        ],
+    )
+    _set_utc_fake_now(
+        monkeypatch, dt.datetime(2026, 8, 25, 10, 1, 0, tzinfo=dt.UTC)
+    )
+    # 最早起点 09:59:00 → 120s；r1 在跑，不取 ended_at 差值
+    assert await tool._calc_elapsed_from_runs("pipe-run") == 120.0
+
+
+async def test_elapsed_from_runs_reader_missing_or_fails(tool: TaskTool) -> None:
+    """reader 未注入 / 查询失败 / 空记录 / 无管道 id → None（优雅降级）。"""
+    _set_runs(tool, None)
+    assert await tool._calc_elapsed_from_runs("pipe-run") is None
+    _set_runs(tool, [])
+    assert await tool._calc_elapsed_from_runs("pipe-run") is None
+    assert await tool._calc_elapsed_from_runs("") is None
+    _task_mod.set_runs_reader(AsyncMock(side_effect=RuntimeError("kernel down")))
+    assert await tool._calc_elapsed_from_runs("pipe-run") is None
+
+
+async def test_elapsed_from_runs_all_created_at_missing(tool: TaskTool) -> None:
+    """全部 run 无 created_at → 无起点可用 → None。"""
+    _set_runs(tool, [{"run_id": "r1", "status": "completed"}])
+    assert await tool._calc_elapsed_from_runs("pipe-run") is None
+
+
+def test_format_elapsed_cases() -> None:
+    """_format_elapsed 全分支：None/秒/分/小时+余分。"""
+    assert TaskTool._format_elapsed(None) == "-"
+    assert TaskTool._format_elapsed(0) == "0s"
+    assert TaskTool._format_elapsed(59.7) == "59s"
+    assert TaskTool._format_elapsed(60) == "1m"
+    assert TaskTool._format_elapsed(3599) == "59m"
+    assert TaskTool._format_elapsed(3600) == "1h0m"
+    assert TaskTool._format_elapsed(3660) == "1h1m"
+    assert TaskTool._format_elapsed(7260) == "2h1m"
+
+
+# ─────────────────────────── delete 双路径 ───────────────────────────
+
+
+async def test_delete_missing_task_id(tool: TaskTool) -> None:
+    """delete 缺 task_id → MISSING_TASK_ID。"""
+    result = await tool.execute({"action": "delete", "parent_agent_level": 1})
+    assert not result.success
+    assert result.error_code == "MISSING_TASK_ID"
+
+
+async def test_delete_non_container_task(tool: TaskTool, svc: Any) -> None:
+    """delete YAML 非容器任务 → hard_delete_task 全链路（记录删除）。"""
+    task = await svc.create_task(title="硬删")
+    result = await tool.execute(
+        {"action": "delete", "task_id": task.id, "reason": "清理", "parent_agent_level": 1}
+    )
+    assert result.success, result.error
+    assert result.output["deleted"] is True
+    assert svc.get_task(task.id) is None
+
+
+async def test_delete_container_metadata_task_hard_deletes(tool: TaskTool, svc: Any) -> None:
+    """遗留容器元数据行同样走硬删（软删路径已随容器任务退役）。"""
+    task = await svc.create_task(title="遗留容器", metadata={"task_scope": "container"})
+    result = await tool.execute(
+        {"action": "delete", "task_id": task.id, "parent_agent_level": 1}
+    )
+    assert result.success, result.error
+    assert result.output["deleted"] is True
+    assert svc.get_task(task.id) is None
+
+
+async def test_delete_state_task_via_pipeline_executor(tool: TaskTool) -> None:
+    """delete state 任务（YAML 无记录）→ 调 delete_pipeline 删管道数据。"""
+    _set_reader(tool, [_state_row(pipeline_id="pipe-state")])
+    executor = AsyncMock()
+    _task_mod.set_pipeline_executor(executor)
+    result = await tool.execute(
+        {"action": "delete", "task_id": "pipe-state", "parent_agent_level": 1}
+    )
+    assert result.success, result.error
+    assert result.output["deleted"] is True
+    executor.assert_awaited_once()
+    assert executor.await_args is not None
+    call_params = executor.await_args.args[0]
+    assert call_params["method"] == "delete_pipeline"
+    assert call_params["params"]["pipeline_id"] == "pipe-state"
+
+
+async def test_delete_state_task_without_executor(tool: TaskTool) -> None:
+    """state 任务删除但 executor 未注入 → SERVICE_UNAVAILABLE。"""
+    _set_reader(tool, [_state_row(pipeline_id="pipe-x")])
+    _task_mod.set_pipeline_executor(None)
+    result = await tool.execute(
+        {"action": "delete", "task_id": "pipe-x", "parent_agent_level": 1}
+    )
+    assert not result.success
+    assert result.error_code == "SERVICE_UNAVAILABLE"
+
+
+async def test_delete_state_task_executor_raises(tool: TaskTool) -> None:
+    """delete_pipeline 抛异常 → DELETE_FAILED 留痕。"""
+    _set_reader(tool, [_state_row(pipeline_id="pipe-y")])
+    _task_mod.set_pipeline_executor(AsyncMock(side_effect=RuntimeError("kernel down")))
+    result = await tool.execute(
+        {"action": "delete", "task_id": "pipe-y", "parent_agent_level": 1}
+    )
+    assert not result.success
+    assert result.error_code == "DELETE_FAILED"
+    assert "kernel down" in (result.error or "")
+
+
+async def test_delete_permission_denied(tool: TaskTool, svc: Any) -> None:
+    """delete 越权 → INSUFFICIENT_PERMISSION。"""
+    task = await svc.create_task(title="私有")
+    result = await tool.execute(
+        {
+            "action": "delete",
+            "task_id": task.id,
+            "parent_agent_level": 2,
+            "pipeline_id": "other-pipe",
+        }
+    )
+    assert not result.success
+    assert result.error_code == "INSUFFICIENT_PERMISSION"
+
+
+async def test_delete_service_exception_returns_delete_failed(tool: TaskTool, svc: Any) -> None:
+    """删除过程异常 → DELETE_FAILED（服务层真实异常被结构化包装）。"""
+    task = await svc.create_task(title="删失败")
+
+    async def boom(task_id: str, reason: str = "用户请求删除") -> dict[str, Any]:
+        raise RuntimeError("disk error")
+
+    from unittest import mock
+
+    with mock.patch.object(svc, "hard_delete_task", boom):
+        result = await tool.execute(
+            {"action": "delete", "task_id": task.id, "parent_agent_level": 1}
+        )
+    assert not result.success
+    assert result.error_code == "DELETE_FAILED"
+    assert "disk error" in (result.error or "")
+
+
+async def test_delete_state_priority_over_yaml_mirror(tool: TaskTool, svc: Any) -> None:
+    """镜像遮蔽回归：YAML 镜像（metadata 无 session_id）+ state 真任务同 id。
+
+    0.2 任务真值在 state（lineage.origin_session_id 带会话锚点），YAML 仅是
+    评估写面残留镜像（缺 session_id）。state 优先 → L1 会话校验通过并走
+    delete_pipeline；镜像不再抢先命中导致「任务不属于当前会话」误拒。
+    """
+    mirror = await svc.create_task(title="镜像任务")  # YAML 存储里的镜像（无 session_id）
+    executor = AsyncMock()
+    _task_mod.set_pipeline_executor(executor)
+    _set_reader(
+        tool,
+        [
+            _state_row(
+                pipeline_id=mirror.id,
+                **{"task.status": "completed", "lineage.origin_session_id": "sess-me"},
+            )
+        ],
+    )
+    result = await tool.execute(
+        {
+            "action": "delete",
+            "task_id": mirror.id,
+            "session_id": "sess-me",
+            "parent_agent_level": 1,
+        }
+    )
+    assert result.success, result.error
+    assert result.output["deleted"] is True
+    executor.assert_awaited_once()
+    assert executor.await_args is not None  # mypy 窄化：assert_awaited_once 保证非 None
+    call_params = executor.await_args.args[0]
+    assert call_params["method"] == "delete_pipeline"
+
+
+async def test_delete_state_task_cleans_yaml_mirror(tool: TaskTool, svc: Any) -> None:
+    """state 任务删除后清同名 YAML 镜像，防「删了又见」。"""
+    mirror = await svc.create_task(title="镜像待清")
+    executor = AsyncMock()
+    _task_mod.set_pipeline_executor(executor)
+    _set_reader(
+        tool,
+        [_state_row(pipeline_id=mirror.id, **{"lineage.origin_session_id": "sess-me"})],
+    )
+    result = await tool.execute(
+        {"action": "delete", "task_id": mirror.id, "parent_agent_level": 1}
+    )
+    assert result.success, result.error
+    assert svc.get_task(mirror.id) is None, "同名 YAML 镜像应从存储中清除"
+
+
+async def test_delete_state_task_requires_permission(tool: TaskTool) -> None:
+    """state 兜底路径权限收口：L2 无归属参数 → INSUFFICIENT_PERMISSION。
+
+    回归护栏：state 任务删除此前绕过 _check_permission 直接删管道。
+    """
+    _set_reader(tool, [_state_row(pipeline_id="pipe-guard")])
+    executor = AsyncMock()
+    _task_mod.set_pipeline_executor(executor)
+    result = await tool.execute(
+        {"action": "delete", "task_id": "pipe-guard", "parent_agent_level": 2}
+    )
+    assert not result.success
+    assert result.error_code == "INSUFFICIENT_PERMISSION"
+    executor.assert_not_awaited()
+
+
+async def test_batch_delete_state_priority_over_mirror(tool: TaskTool, svc: Any) -> None:
+    """批量预检 state 优先：镜像任务（无 session_id）+ state 真值同 id → 预检通过。"""
+    mirror = await svc.create_task(title="批量镜像")
+    executor = AsyncMock()
+    _task_mod.set_pipeline_executor(executor)
+    _set_reader(
+        tool,
+        [
+            _state_row(
+                pipeline_id=mirror.id,
+                **{"task.status": "completed", "lineage.origin_session_id": "sess-me"},
+            )
+        ],
+    )
+    result = await tool.execute(
+        {
+            "action": "delete",
+            "task_ids": [mirror.id],
+            "session_id": "sess-me",
+            "parent_agent_level": 1,
+        }
+    )
+    assert result.success, result.error
+    assert result.output["summary"]["success"] == 1
+    assert result.output["results"][0]["success"] is True
+    assert result.output["results"][0]["data"]["deleted"] is True
+
+
+async def test_batch_output_schema_allows_null_data() -> None:
+    """批量条目 data 允许 null（与失败条目 data=None 实现锁步）。
+
+    回归护栏：此前 data 声明 object 不允许 null，批量中任意一条失败即
+    output_schema validation failed 整体被拒（本仓 G2 契约同源比对）。
+    """
+    manifest = json.loads(
+        (_HERE / "plugin.json").read_text(encoding="utf-8")
+    )
+    item_schema = manifest["capabilities"]["tools"][0]["output_schema"]["properties"]["results"]["items"]
+    assert item_schema["properties"]["data"]["type"] == ["object", "null"]
+
+
+# ─────────────────────────── 其它控制面分支 ───────────────────────────
+
+
+async def test_continue_permission_denied(tool: TaskTool, svc: Any) -> None:
+    """continue 越权 → INSUFFICIENT_PERMISSION。"""
+    task = await svc.create_task(title="私有")
+    result = await tool.execute(
+        {
+            "action": "continue",
+            "task_id": task.id,
+            "parent_agent_level": 2,
+            "pipeline_id": "other-pipe",
+        }
+    )
+    assert not result.success
+    assert result.error_code == "INSUFFICIENT_PERMISSION"
+
+
+async def test_stop_permission_denied(tool: TaskTool, svc: Any) -> None:
+    """stop 越权（state 任务）→ INSUFFICIENT_PERMISSION。"""
+    task = await svc.create_task(title="私有")
+    _set_reader(tool, [_state_row(pipeline_id=task.id, task_scope="non_container")])
+    result = await tool.execute(
+        {
+            "action": "stop",
+            "task_id": task.id,
+            "parent_agent_level": 2,
+            "pipeline_id": "other-pipe",
+        }
+    )
+    assert not result.success
+    assert result.error_code == "INSUFFICIENT_PERMISSION"
+
+
+async def test_continue_invalid_transition_wrapped(tool: TaskTool) -> None:
+    """continue 链内抛 InvalidTransitionError → INVALID_TRANSITION 结构化错误。"""
+
+    async def broken(task_id: str) -> None:
+        raise InvalidTransitionError("running", "pending")
+
+    tool._get_task_from_state = broken  # type: ignore[method-assign]
+    result = await tool.execute(
+        {"action": "continue", "task_id": "t1", "parent_agent_level": 1}
+    )
+    assert not result.success
+    assert result.error_code == "INVALID_TRANSITION"
+    assert "状态转换不合法" in (result.error or "")
+
+
+async def test_inject_permission_denied_direct(tool: TaskTool) -> None:
+    """_inject_to_running 入口显式校验：越权直接调用也不裸奔。"""
+    from task_types import TaskModel, TaskStatus
+
+    task = TaskModel(id="t-inj", title="注入", status=TaskStatus.RUNNING, metadata={})
+    result = await tool._inject_to_running(task, "消息", 2, {"pipeline_id": "x"})
+    assert not result.success
+    assert result.error_code == "INSUFFICIENT_PERMISSION"
+
+
+async def test_resume_permission_denied_direct(tool: TaskTool, svc: Any) -> None:
+    """_resume_from_stopped 入口前置校验：越权直接调用被拒。"""
+    from task_types import TaskModel, TaskStatus
+
+    task = TaskModel(id="t-resume", title="恢复", status=TaskStatus.STOPPED, metadata={})
+    result = await tool._resume_from_stopped(task, "", svc, 2, {"pipeline_id": "x"})
+    assert not result.success
+    assert result.error_code == "INSUFFICIENT_PERMISSION"
+
+
+async def test_retry_permission_denied_direct(tool: TaskTool, svc: Any) -> None:
+    """_retry_from_terminal 入口前置校验：越权直接调用被拒。"""
+    from task_types import TaskModel, TaskStatus
+
+    task = TaskModel(id="t-retry", title="重试", status=TaskStatus.FAILED, metadata={})
+    result = await tool._retry_from_terminal(task, "", svc, 2, {"pipeline_id": "x"})
+    assert not result.success
+    assert result.error_code == "INSUFFICIENT_PERMISSION"
+
+
+async def test_resume_with_none_metadata_and_message(tool: TaskTool) -> None:
+    """metadata=None 的 stopped 任务带 message 恢复 → 不崩且 message_injected。"""
+    from task_types import TaskModel, TaskStatus
+
+    task = TaskModel(id="t-meta", title="无元数据", status=TaskStatus.STOPPED, metadata=None)
+    _task_mod.set_pipeline_executor(AsyncMock())
+    result = await tool._resume_from_stopped(task, "恢复提示", MagicMock(), 1, {})
+    assert result.success, result.error
+    assert task.metadata == {"retry_message": "恢复提示"}
+    assert result.output["message_injected"] is True
+
+
+async def test_retry_chat_sender_raises_warns(tool: TaskTool, caplog: Any) -> None:
+    """重试时 chat 注入抛异常 → warning 留痕 + 结果含 warning 字段。"""
+    from task_types import TaskModel, TaskStatus
+
+    task = TaskModel(id="t-rc", title="重试崩", status=TaskStatus.FAILED, metadata={})
+    _task_mod.set_chat_sender(AsyncMock(side_effect=RuntimeError("chat down")))
+    with caplog.at_level(logging.WARNING):
+        result = await tool._retry_from_terminal(task, "", MagicMock(), 1, {})
+    assert result.success, result.error
+    assert "chat down" in result.output["warning"]
+    assert any("retry 注入失败" in r.getMessage() for r in caplog.records)
+
+
+async def test_stop_parent_suspend_raises_warning(tool: TaskTool, svc: Any, caplog: Any) -> None:
+    """父管道挂起失败 → warning 留痕，继续级联。"""
+    parent = await svc.create_task(title="父")
+    _set_reader(
+        tool,
+        [
+            {"pipeline_id": parent.id, "task.id": parent.id, "task.status": "running", "task.goal": "父"},
+            {"pipeline_id": "child-1", "task.status": "running", "lineage.parent_pipeline_id": parent.id},
+        ],
+    )
+    calls: list[str] = []
+
+    async def flaky(params: dict[str, Any]) -> dict[str, Any]:
+        calls.append(params["params"]["pipeline_id"])
+        if params["params"]["pipeline_id"] == parent.id:
+            raise RuntimeError("suspend down")
+        return {}
+
+    _task_mod.set_pipeline_executor(flaky)
+    with caplog.at_level(logging.WARNING):
+        result = await tool.execute(
+            {"action": "stop", "task_id": parent.id, "parent_agent_level": 1}
+        )
+    assert result.success, result.error
+    assert result.output["cascaded_subtasks"] == 1
+    assert calls == [parent.id, "child-1"]
+    assert any("suspend_pipeline 失败" in r.getMessage() for r in caplog.records)
+
+
+async def test_stop_child_row_without_pipeline_id_skipped(tool: TaskTool, svc: Any) -> None:
+    """级联行缺 pipeline_id → 跳过（不调 executor）。"""
+    parent = await svc.create_task(title="父")
+    _set_reader(
+        tool,
+        [
+            {"pipeline_id": parent.id, "task.id": parent.id, "task.status": "running", "task.goal": "父"},
+            {"lineage.parent_pipeline_id": parent.id, "task.status": "running"},
+        ],
+    )
+    executor = AsyncMock()
+    _task_mod.set_pipeline_executor(executor)
+    result = await tool.execute(
+        {"action": "stop", "task_id": parent.id, "parent_agent_level": 1}
+    )
+    assert result.success, result.error
+    assert result.output.get("cascaded_subtasks", 0) == 0
+    assert executor.await_count == 1, "仅父管道一次挂起"
+
+
+async def test_stop_generic_exception_wrapped(tool: TaskTool) -> None:
+    """stop 未知异常 → STOP_FAILED 结构化错误。"""
+    async def broken(task_id: str) -> None:
+        raise RuntimeError("state broken")
+
+    tool._get_task_from_state = broken  # type: ignore[method-assign]
+    result = await tool.execute({"action": "stop", "task_id": "x", "parent_agent_level": 1})
+    assert not result.success
+    assert result.error_code == "STOP_FAILED"
+    assert "state broken" in (result.error or "")
+
+
+async def test_change_suspend_executor_raises(tool: TaskTool) -> None:
+    """change 挂起 executor 抛异常 → INVALID_TRANSITION。"""
+    _task_mod.set_pipeline_executor(AsyncMock(side_effect=RuntimeError("suspend down")))
+    result = await tool.execute(
+        {"action": "change", "task_id": "t1", "target_status": "suspended", "parent_agent_level": 1}
+    )
+    assert not result.success
+    assert result.error_code == "INVALID_TRANSITION"
+    assert "挂起任务失败" in (result.error or "")
+
+
+async def test_change_resume_executor_missing(tool: TaskTool) -> None:
+    """change 恢复但 executor 未注入 → CONTINUE_FAILED。"""
+    _task_mod.set_pipeline_executor(None)
+    result = await tool.execute(
+        {"action": "change", "task_id": "t1", "target_status": "running", "parent_agent_level": 1}
+    )
+    assert not result.success
+    assert result.error_code == "CONTINUE_FAILED"
+
+
+# ─────────────────────────── 其它内部入口 ───────────────────────────
+
+
+async def test_read_state_rows_exception_raises_read_error(
+    tool: TaskTool, caplog: Any
+) -> None:
+    """state 读面抛异常 → StateRowsReadError（与"无任务"显式区分）+ warning 留痕。"""
+
+    async def broken() -> list[dict[str, Any]]:
+        raise RuntimeError("read rows broken")
+
+    _task_mod.set_state_reader(broken)
+    with caplog.at_level(logging.WARNING), pytest.raises(
+        _task_mod.StateRowsReadError
+    ) as exc_info:
+        await tool._read_state_rows()
+    assert "read rows broken" in str(exc_info.value)
+    assert any("state 聚合读取失败" in r.getMessage() for r in caplog.records)
+
+
+async def test_read_state_rows_non_list_raises_read_error(tool: TaskTool) -> None:
+    """读面返回非 list（如 dict）→ 形状违约按读取故障处理，不降级成"无任务"。"""
+    _task_mod.set_state_reader(lambda: {"pipeline_id": "x"})
+    with pytest.raises(_task_mod.StateRowsReadError):
+        await tool._read_state_rows()
+
+
+async def test_get_all_tasks_uses_service(tool: TaskTool, svc: Any) -> None:
+    """_get_all_tasks：service 拉取（limit + reverse）。"""
+    await svc.create_task(title="A")
+    await svc.create_task(title="B")
+    tasks = await tool._get_all_tasks(limit=5)
+    assert {t.title for t in tasks} == {"A", "B"}
+    assert len(tasks) == 2
+
+
+async def test_list_all_tasks_fallback_to_service(tool: TaskTool, svc: Any) -> None:
+    """_list_all_tasks_sorted：state 桥未就绪回落 service（limit=10_000）。"""
+    await svc.create_task(title="C")
+    _set_reader(tool, None)
+    tasks = await tool._list_all_tasks_sorted()
+    assert [t.title for t in tasks] == ["C"]
+
+
+async def test_get_task_service_init_failure(tool: TaskTool, monkeypatch: Any) -> None:
+    """_get_task_service 初始化失败 → RuntimeError（execute 层转 SERVICE_UNAVAILABLE）。"""
+    import service_access
+
+    monkeypatch.setattr(service_access, "get_task_service", lambda: None)
+    fresh = TaskTool()
+    with pytest.raises(RuntimeError):
+        fresh._get_task_service()
+
+
+async def test_resolve_ambiguous_via_execute(tool: TaskTool) -> None:
+    """execute 入口：短 id 多命中 → AMBIGUOUS_TASK_ID。"""
+    _set_reader(
+        tool,
+        [
+            {"pipeline_id": "pipe-shared-aaaa", "task.status": "running"},
+            {"pipeline_id": "pipe-shared-bbbb", "task.status": "running"},
+        ],
+    )
+    result = await tool.execute(
+        {"action": "get", "task_id": "pipe-shared", "parent_agent_level": 1}
+    )
+    assert not result.success
+    assert result.error_code == "AMBIGUOUS_TASK_ID"
+    assert "匹配到多个任务" in (result.error or "")
+
+
+async def test_resolve_task_ids_non_str_passthrough(tool: TaskTool) -> None:
+    """task_ids 列表含非 str 元素 → 原样透传（不崩）。"""
+    _set_reader(tool, [{"pipeline_id": "p1", "task.status": "running"}])
+    inputs = {"task_ids": [123, "p1"]}
+    err = await tool._resolve_input_ids(inputs)
+    assert err is None
+    assert inputs["task_ids"] == [123, "p1"]
+
+
+def test_state_reader_setter_registered() -> None:
+    """set_state_reader 接线：全局读面被替换。"""
+    _task_mod.set_state_reader(lambda: [{"pipeline_id": "x"}])
+    assert _task_mod._state_reader is not None
+    assert _task_mod._state_reader() == [{"pipeline_id": "x"}]
+
+
+# ─────────────────────────── 末段补全（行覆盖 98% 余分支） ───────────────────────────
+
+
+def test_get_tool_definition_shape() -> None:
+    """get_tool_definition：静态定义形状（name/action 枚举/权限级别限制）。"""
+    from agentos_plugin_sdk import ToolCategory, ToolLevel, ToolSource
+
+    tdef = TaskTool.get_tool_definition()
+    assert tdef.name == "task_manage"
+    assert tdef.category == ToolCategory.TASK
+    assert tdef.level == ToolLevel.SYSTEM
+    assert tdef.source == ToolSource.CODE
+    assert "action" in tdef.input_schema["properties"]
+    assert tdef.param_level_restrictions["action"]["enum_restrictions"]["change"] == 1
+
+
+async def test_get_list_user_parent_task_id_filter(tool: TaskTool) -> None:
+    """user parent_task_id（L1）过滤：父不匹配的行被剔除。"""
+    rows = [
+        _state_row(**{"pipeline_id": "p-a", "lineage.parent_pipeline_id": "root-a"}),
+        _state_row(**{"pipeline_id": "p-b", "lineage.parent_pipeline_id": "root-b"}),
+    ]
+    _set_reader(tool, rows)
+    result = await tool.execute(
+        {"action": "get", "parent_task_id": "root-a", "parent_agent_level": 1}
+    )
+    assert result.success, result.error
+    ids = {r[0] for r in result.output["d"]}
+    assert ids == {"p-a"[:12]}
+
+
+async def test_get_detail_from_state_with_ws_meta(tool: TaskTool) -> None:
+    """state 详情：坐标单键 task.ws_meta dict 透传进 metadata → resolved_workspace。"""
+    _set_reader(
+        tool,
+        [_state_row(**{"task.ws_meta": {"path": "/data/ws2", "id": 1}})],
+    )
+    result = await tool.execute(
+        {"action": "get", "task_id": "pipe-shape", "parent_agent_level": 1}
+    )
+    assert result.success, result.error
+    assert result.output["resolved_workspace"] == "/data/ws2"
+
+
+async def test_get_list_from_state_with_ws_meta(tool: TaskTool) -> None:
+    """state 列表组装时 ws_meta dict 进 metadata（简表不展示但组装不崩）。"""
+    _set_reader(tool, [_state_row(**{"ws_meta": {"path": "/data/ws"}})])
+    result = await tool.execute({"action": "get", "parent_agent_level": 1})
+    assert result.success, result.error
+    assert len(result.output["d"]) == 1
+
+
+async def test_latest_activity_empty_records(tool: TaskTool) -> None:
+    """reader 正常返回但 traces 为空 → latest 返回 None。"""
+    _set_traces(tool, [])
+    assert await tool._get_latest_activity(_set_model()) is None
+    assert await tool._get_recent_activities(_set_model()) == []
+
+
+async def test_continue_generic_exception_wrapped(tool: TaskTool) -> None:
+    """continue 链内未知异常 → CONTINUE_FAILED（不透传裸异常）。"""
+    async def broken(task_id: str) -> None:
+        raise ValueError("boom")
+
+    tool._get_task_from_state = broken  # type: ignore[method-assign]
+    result = await tool.execute(
+        {"action": "continue", "task_id": "t1", "parent_agent_level": 1}
+    )
+    assert not result.success
+    assert result.error_code == "CONTINUE_FAILED"
+    assert "boom" in (result.error or "")
+
+
+async def test_stop_invalid_transition_wrapped(tool: TaskTool) -> None:
+    """stop 链内抛 InvalidTransitionError → INVALID_TRANSITION。"""
+
+    _set_reader(tool, [])  # resolve 阶段读面正常
+
+    async def broken(task_id: str) -> None:
+        raise InvalidTransitionError("running", "stopped")
+
+    tool._get_task_from_state = broken  # type: ignore[method-assign]
+    result = await tool.execute(
+        {"action": "stop", "task_id": "t1", "parent_agent_level": 1}
+    )
+    assert not result.success
+    assert result.error_code == "INVALID_TRANSITION"
+    assert "状态转换不合法" in (result.error or "")
+
+
+async def test_delete_state_task_not_found(tool: TaskTool) -> None:
+    """delete 双缺（YAML 无记录 + state 无行）→ TASK_NOT_FOUND。"""
+    _set_reader(tool, [])
+    result = await tool.execute(
+        {"action": "delete", "task_id": "ghost-123456", "parent_agent_level": 1}
+    )
+    assert not result.success
+    assert result.error_code == "TASK_NOT_FOUND"
+
+
+def _set_model(**overrides: Any) -> Any:
+    from task_types import TaskModel, TaskStatus
+
+    return TaskModel(
+        id="t-full",
+        title="活动任务",
+        status=TaskStatus.RUNNING,
+        metadata={},
+        pipeline_run_id=overrides.pop("pipeline_run_id", "pipe-run"),
+        **overrides,
+    )
+
+
+async def test_delete_state_task_clears_parent_owned_registration(tool: TaskTool) -> None:
+    """谁删除谁随清（ADR 2026-11-02-state-key-governance）：state 任务删除后，
+    父管道的 owned 登记键与提交挂号键同批写 null——不留幽灵登记（离线兜底
+    = reconcile 第六刀幽灵清扫）。"""
+    row = _state_row(
+        pipeline_id="pipe-del",
+        **{
+            "lineage.parent_pipeline_id": "parent-del",
+            "task.owned.pipe-del.title": "待删任务",
+            "task.owned.pipe-del.created_at": "2026-11-02T10:00:00",
+        },
+    )
+    _set_reader(tool, [row])
+    _task_mod.set_pipeline_executor(AsyncMock())
+    parent_writes: list[dict[str, Any]] = []
+    prev_writer = _task_mod._state_writer
+
+    async def writer_fn(pipeline_id: str, fields: dict[str, Any]) -> dict[str, Any]:
+        if pipeline_id == "parent-del":
+            parent_writes.append(dict(fields))
+        return {}
+
+    try:
+        _task_mod._state_writer = writer_fn
+        result = await tool.execute(
+            {"action": "delete", "task_id": "pipe-del", "parent_agent_level": 1}
+        )
+    finally:
+        _task_mod._state_writer = prev_writer
+    assert result.success, result.error
+    assert len(parent_writes) == 1
+    fields = parent_writes[0]
+    assert fields["task.owned.pipe-del.title"] is None
+    assert fields["task.owned.pipe-del.created_at"] is None
+    assert fields["task.subtasks_pending.pipe-del"] is None

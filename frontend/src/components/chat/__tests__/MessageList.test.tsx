@@ -16,6 +16,7 @@ import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { MessageList } from '../MessageList'
 import type { ExtendedMessageListProps } from '../MessageList'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import type { Message } from '@/types/models'
 
 // Mock MessageItem（避免深入渲染依赖）
@@ -352,6 +353,18 @@ describe('MessageList', () => {
       )
       const listEl = container.querySelector('.custom-class')
       expect(listEl).toBeInTheDocument()
+    })
+
+    it('相邻消息间距收紧：非末条 marginBottom 用收紧的 gap 变量，末条为 0', () => {
+      const messages = [
+        makeMessage({ id: 'msg-a', sequence: 1, role: 'user' }),
+        makeMessage({ id: 'msg-b', sequence: 2, role: 'assistant' }),
+      ]
+      const { container } = render(<MessageList {...defaultProps} messages={messages} />)
+      const first = screen.getByTestId('message-item-msg-a').parentElement as HTMLElement
+      const last = screen.getByTestId('message-item-msg-b').parentElement as HTMLElement
+      expect(first.getAttribute('style')).toContain('var(--layout-chatpanel-message-gap, 6px)')
+      expect(last.getAttribute('style')).toContain('margin-bottom: 0px')
     })
   })
 
@@ -763,7 +776,7 @@ describe('MessageList', () => {
       expect(listEl.scrollTop).toBe(900)
     })
 
-    it('用户上滑翻历史后滚回底部附近，恢复跟随', () => {
+    it('用户上滑翻历史后滚回底部附近（距底≤40px），恢复跟随', () => {
       const ro = makeTriggerableResizeObserver()
 
       const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
@@ -773,8 +786,8 @@ describe('MessageList', () => {
       // 上滑到中部 → 停止跟随
       listEl.scrollTop = 300
       fireEvent.scroll(listEl)
-      // 滚回底部附近（距底 50px ≤ 150 阈值）→ 恢复跟随
-      listEl.scrollTop = 750
+      // 滚回底部附近（距底 20px ≤ 40 恢复阈值）→ 恢复跟随
+      listEl.scrollTop = 780
       fireEvent.scroll(listEl)
 
       const grown = [...messages, makeMessage({ id: 'msg-2', sequence: 2 })]
@@ -784,6 +797,105 @@ describe('MessageList', () => {
 
       // 跟随已恢复：内容变化重新钉底
       expect(listEl.scrollTop).toBe(1200)
+    })
+
+    it('滚回到恢复阈值外（距底>40px）不恢复跟随（阈值收紧回归锁）', () => {
+      const ro = makeTriggerableResizeObserver()
+
+      const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
+      const { listEl, rerender } = renderListWithMetrics("recover-far", messages, 1000, defaultProps)
+      flushRaf()
+
+      // 上滑到中部 → 停止跟随
+      listEl.scrollTop = 300
+      fireEvent.scroll(listEl)
+      // 下移但距底仍有 50px（>40 阈值）→ 不恢复
+      listEl.scrollTop = 750
+      fireEvent.scroll(listEl)
+
+      const grown = [...messages, makeMessage({ id: 'msg-2', sequence: 2 })]
+      rerender(<MessageList {...defaultProps} messages={grown} tabId="recover-far" />)
+      mockScrollMetrics(listEl, 1200)
+      ro.cb?.()
+
+      // 停在用户位置，不被钉底拽回
+      expect(listEl.scrollTop).toBe(750)
+    })
+
+    it('底部阈值区内上滑（触摸动量首帧）跟随不被同事件恢复，不被拽回', () => {
+      // 真机"上滑被钉底压回"根因回归锁：旧逻辑上移暂停后被同事件 150px 距底
+      // 恢复覆盖，随后的内容变化钉底把视图拽回；修复后方向暂停优先于阈值恢复。
+      const ro = makeTriggerableResizeObserver()
+
+      const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
+      const { listEl, rerender } = renderListWithMetrics("momentum-pause", messages, 1000, defaultProps)
+      flushRaf()
+      expect(listEl.scrollTop).toBe(1000)
+
+      // 上滑首帧：距底仅 50px（在旧 150px 阈值区内）
+      listEl.scrollTop = 750
+      fireEvent.scroll(listEl)
+
+      // 内容变化（渲染窗口化改高/流式增长）触发钉底 observer——跟随已暂停，不拽回
+      const grown = [...messages, makeMessage({ id: 'msg-2', sequence: 2 })]
+      rerender(<MessageList {...defaultProps} messages={grown} tabId="momentum-pause" />)
+      mockScrollMetrics(listEl, 1200)
+      ro.cb?.()
+
+      expect(listEl.scrollTop).toBe(750)
+      // 距底超出恢复阈值：「回到底部」浮钮出现
+      expect(screen.getByTestId('message-list-scroll-to-bottom')).toBeInTheDocument()
+    })
+
+    it('回到底部浮钮：超阈值出现，点击平滑回底并恢复跟随', () => {
+      const ro = makeTriggerableResizeObserver()
+
+      const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
+      const { listEl, rerender } = renderListWithMetrics("scroll-btn", messages, 1000, defaultProps)
+      flushRaf()
+
+      // 在底部：浮钮不出现
+      expect(screen.queryByTestId('message-list-scroll-to-bottom')).not.toBeInTheDocument()
+
+      // 上滑翻历史 → 浮钮出现
+      listEl.scrollTop = 300
+      fireEvent.scroll(listEl)
+      expect(screen.getByTestId('message-list-scroll-to-bottom')).toBeInTheDocument()
+
+      // 点击：平滑滚到最底 + 恢复跟随
+      const scrollToSpy = vi.fn()
+      listEl.scrollTo = scrollToSpy
+      fireEvent.click(screen.getByTestId('message-list-scroll-to-bottom'))
+      expect(scrollToSpy).toHaveBeenCalledWith({ top: 1000, behavior: 'smooth' })
+      expect(screen.queryByTestId('message-list-scroll-to-bottom')).not.toBeInTheDocument()
+
+      // 跟随已恢复：内容增长仍钉底（回底落点不被打断）
+      const grown = [...messages, makeMessage({ id: 'msg-2', sequence: 2 })]
+      rerender(<MessageList {...defaultProps} messages={grown} tabId="scroll-btn" />)
+      mockScrollMetrics(listEl, 1400)
+      ro.cb?.()
+      expect(listEl.scrollTop).toBe(1400)
+    })
+
+    it('回底平滑滚动受阻兜底：800ms 未到底直接钉底', () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
+        const { listEl } = renderListWithMetrics('snap-guard', messages, 1000, defaultProps)
+        flushRaf()
+
+        // 上滑翻历史 → 浮钮出现 → 点击回底（spy 模拟平滑滚动不推进的环境）
+        listEl.scrollTop = 300
+        fireEvent.scroll(listEl)
+        listEl.scrollTo = vi.fn()
+        fireEvent.click(screen.getByTestId('message-list-scroll-to-bottom'))
+
+        // 800ms 兜底：仍距底 500px（>阈值）→ 直接钉底
+        vi.advanceTimersByTime(800)
+        expect(listEl.scrollTop).toBe(1000)
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     it('首次钉底轮询窗口内上滑，轮询终止不再强制钉底', () => {
@@ -963,6 +1075,179 @@ describe('MessageList', () => {
 
       // 定位已置 isFollowingBottom=false，内容变化不把视图拉回底部
       expect(listEl.scrollTop).toBe(700)
+    })
+  })
+
+  describe('段视图换装滚动保持与切会话锚点恢复', () => {
+    afterEach(() => {
+      usePipelineMessageStore.setState({
+        activePipelineId: null,
+        segmentViewByPipeline: {},
+      })
+      cleanup()
+    })
+
+    /** 物理仿真行几何：行视口 top = 文档坐标(i×100) - scrollTop（容器顶=0） */
+    function mockRowRects(container: HTMLElement, scrollEl: HTMLElement) {
+      const rows = Array.from(container.querySelectorAll<HTMLElement>('[data-msg-id]'))
+      rows.forEach((row, i) => {
+        vi.spyOn(row, 'getBoundingClientRect').mockImplementation(
+          () =>
+            ({
+              top: i * 100 - scrollEl.scrollTop,
+              bottom: (i + 1) * 100 - scrollEl.scrollTop,
+              left: 0,
+              right: 100,
+              width: 100,
+              height: 100,
+              x: 0,
+              y: i * 100 - scrollEl.scrollTop,
+              toJSON: () => ({}),
+            }) as DOMRect,
+        )
+      })
+      vi.spyOn(scrollEl, 'getBoundingClientRect').mockImplementation(
+        () =>
+          ({
+            top: 0,
+            bottom: 200,
+            left: 0,
+            right: 100,
+            width: 100,
+            height: 200,
+            x: 0,
+            y: 0,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      )
+      return rows
+    }
+
+    it('列表挂载即刷新该管道的段清单（分支切换器的数据源：boot 恢复路径不经过任何加载入口）', () => {
+      // 用户实证：重试多次 + F5 仍无左右切换按钮——装机包实证 fetchSegments 仅
+      // 两处调用点（loadPipelineMessages + 段激活 ack），boot 恢复路径两处都
+      // 不执行（消息从 IndexedDB 恢复 → 桶非空 → initSessionTabs 跳过加载；
+      // restoreActiveSession 因持久化选中已有效直接返回）→ 段清单永不拉。
+      const fetchSegments = vi.fn().mockResolvedValue(undefined)
+      usePipelineMessageStore.setState({
+        activePipelineId: 'pipe-seg',
+        fetchSegments: fetchSegments as never,
+      })
+      const { listEl } = renderListWithMetrics(
+        'seg-fetch',
+        [makeMessage({ id: 'msg-1', sequence: 1 })],
+        1000,
+        defaultProps,
+      )
+      expect(listEl).toBeInTheDocument()
+      expect(fetchSegments).toHaveBeenCalledWith('pipe-seg')
+    })
+
+    it('换装窗口（‹i/n› 切分支）内内容变化不钉底，视口保持原位；用户滚动后交还控制权', () => {
+      const ro = makeTriggerableResizeObserver()
+      // 乐观段视图标记在场 = 换装窗口（后缀整段换 id 重挂载进行中）
+      usePipelineMessageStore.setState({
+        activePipelineId: 'pipe-hold',
+        segmentViewByPipeline: { 'pipe-hold': { baseSeq: 2, segmentId: 'seg-gen2' } },
+      })
+
+      const messages = [makeMessage({ id: 'msg-1', sequence: 1 })]
+      const { listEl, rerender } = renderListWithMetrics('seg-hold', messages, 1000, defaultProps)
+      flushRaf()
+      expect(listEl.scrollTop).toBe(1000)
+
+      // 乐观换装：后缀换 id（新 React 元素，真实场景 content-visibility 按 150px
+      // 占位计高）+ 内容变高；跟随态下旧逻辑钉底把视口拽到新内容底部 = 跳动
+      const swapped = [
+        makeMessage({ id: 'msg-1', sequence: 1 }),
+        makeMessage({ id: 'gen2-a', sequence: 2 }),
+      ]
+      rerender(<MessageList {...defaultProps} messages={swapped} tabId="seg-hold" />)
+      mockScrollMetrics(listEl, 1400)
+      ro.cb?.()
+      flushRaf()
+
+      // 换装窗口内钉底挂起：视口保持原位（前缀行不动的零位移语义）
+      expect(listEl.scrollTop).toBe(1000)
+
+      // 用户滚动 = 交还控制权：挂起解除，后续内容变化恢复钉底
+      fireEvent.scroll(listEl)
+      const grown = [...swapped, makeMessage({ id: 'gen2-b', sequence: 3 })]
+      rerender(<MessageList {...defaultProps} messages={grown} tabId="seg-hold" />)
+      mockScrollMetrics(listEl, 1600)
+      ro.cb?.()
+
+      expect(listEl.scrollTop).toBe(1600)
+    })
+
+    it('卸载拆除期幽灵 scroll 事件（零尺寸）不污染卸载缓存', () => {
+      const messages = [makeMessage({ id: 'msg-1' })]
+      const { container, unmount } = render(
+        <MessageList {...defaultProps} messages={messages} tabId="ghost-guard" />,
+      )
+      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl, 1000)
+      flushRaf()
+      // 用户滚到 400 处（距底 400）
+      listEl.scrollTop = 400
+      fireEvent.scroll(listEl)
+
+      // 模拟拆除：React 清空消息 DOM → scrollHeight/clientHeight 归 0 + scrollTop
+      // 钳 0，浏览器派发幽灵 scroll 事件（先于 unmount cleanup）
+      mockScrollMetrics(listEl, 0, 0)
+      listEl.scrollTop = 0
+      fireEvent.scroll(listEl)
+      unmount()
+
+      // 重进：恢复到用户离开的 400，而非幽灵事件写入的垃圾值（0=底部语义 → 800）
+      const { container: container2 } = render(
+        <MessageList {...defaultProps} messages={messages} tabId="ghost-guard" />,
+      )
+      const listEl2 = container2.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl2, 1000)
+      flushRaf()
+      expect(listEl2.scrollTop).toBe(400)
+    })
+
+    it('重进按锚点行收敛恢复：占位估计 scrollHeight 低估不再钳到顶部', () => {
+      const tabId = 'anchor-restore'
+      const messages = Array.from({ length: 10 }, (_, i) =>
+        makeMessage({
+          id: `msg-${i}`,
+          sequence: i + 1,
+          role: i % 2 ? 'assistant' : 'user',
+        }),
+      )
+
+      // 第一次进入：真实几何（行高 100、容器高 200、内容高 2000）
+      const { container, unmount } = render(
+        <MessageList {...defaultProps} messages={messages} tabId={tabId} />,
+      )
+      const listEl = container.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl, 2000)
+      mockRowRects(container, listEl)
+      flushRaf()
+
+      // 用户上滑翻历史：视口顶压在 msg-9 行顶（scrollTop=900）后切走
+      listEl.scrollTop = 900
+      fireEvent.scroll(listEl)
+      flushRaf() // 锚点采样 rAF
+      unmount()
+
+      // 重进：content-visibility 占位形态——scrollHeight 严重低估（300 << 2000）。
+      // 旧距底恢复 max(0, 300-200-900)=0 → 钳到顶部；锚点恢复逐帧校正回 900
+      const { container: container2 } = render(
+        <MessageList {...defaultProps} messages={messages} tabId={tabId} />,
+      )
+      const listEl2 = container2.querySelector('[data-testid="message-list"]') as HTMLElement
+      mockScrollMetrics(listEl2, 300)
+      mockRowRects(container2, listEl2)
+      flushRaf() // 恢复首帧（锚点命中 → 收敛循环起步）
+      flushRaf() // 粗定位（delta=900 → scrollTop=900）
+      flushRaf() // 校验帧（delta=0，stable=1）
+      flushRaf() // 收敛帧（stable=2，循环结束）
+
+      expect(listEl2.scrollTop).toBe(900)
     })
   })
 })

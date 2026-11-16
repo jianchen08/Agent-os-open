@@ -22,8 +22,8 @@
   --ant-color-border: hsl(var(--border));
   --ant-color-border-secondary: hsl(var(--border));
   --ant-color-fill-quaternary: hsl(var(--muted));
-  --ant-color-fill-tertiary: hsl(var(--muted) / 0.7);
-  --ant-color-fill-secondary: hsl(var(--muted) / 0.5);
+  --ant-color-fill-tertiary: hsl(var(--muted-t, var(--muted)) / calc(0.7 * var(--muted-a, 1)));
+  --ant-color-fill-secondary: hsl(var(--muted-t, var(--muted)) / calc(0.5 * var(--muted-a, 1)));
   --ant-color-bg-container: hsl(var(--muted));
   --ant-border-radius-lg: var(--radius-lg, 0.5rem);
 }
@@ -91,4 +91,61 @@
   text-align: left;
   color: hsl(var(--foreground));
   border: 1px solid hsl(var(--border));
+}
+
+/* 用户气泡内链接色：lobehub Markdown 链接色绑 antd info token 桥
+   （--ant-color-info→accent，饱和品牌色），在用户气泡面上对比度失效
+   （浅色主题对比度 1.06:1、深色主题 1.53:1，附件引用即此形态）。
+   主题服务已按用户气泡面预算可读链接色 --bubble-link（markdown.css .md-link
+   同源契约），此处仅对用户气泡作用域对齐该契约，AI 气泡与全局 lobe 链接不动。
+   两条消费径同治：变量重定义（antd token 消费者，特异性不可枚举的动态规则
+   只能这样压）+ 锚级 color 直写（非 token 路径的普通链接）。 */
+[data-bubble='user'] .lobe-chat-isolated {
+  --ant-color-info: var(--bubble-link, hsl(var(--primary)));
+  --ant-color-info-text: var(--bubble-link, hsl(var(--primary)));
+  --ant-color-info-hover: var(--bubble-link, hsl(var(--primary)));
+  --ant-color-link: var(--bubble-link, hsl(var(--primary)));
+  --ant-color-primary: var(--bubble-link, hsl(var(--primary)));
+}
+
+[data-bubble='user'] .lobe-chat-isolated a {
+  color: var(--bubble-link, hsl(var(--primary)));
+}
+
+
+/* 任务清单默认折叠（2026-10-24 用户裁定：markdown 渲染层匹配形态） */
+.task-list-fold {
+  margin: 0.5em 0;
+}
+.task-list-fold-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--muted);
+  color: var(--foreground);
+  font-size: 0.85em;
+  cursor: pointer;
+  user-select: none;
+}
+.task-list-fold-header:hover {
+  background: var(--accent);
+}
+.task-list-fold-count {
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.task-list-fold-icon,
+.task-list-fold-chevron {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.15s ease;
+}
+.task-list-fold-chevron.is-open {
+  transform: rotate(180deg);
+}
+.task-list-fold ul.contains-task-list {
+  margin-top: 0.5em;
 }

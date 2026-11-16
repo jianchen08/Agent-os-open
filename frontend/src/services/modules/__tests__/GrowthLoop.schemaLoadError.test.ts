@@ -50,7 +50,7 @@ describe('GrowthLoop schema 加载失败可见降级（FE11）', () => {
       )
       expect(addNotificationSpy).toHaveBeenCalledTimes(1)
       const notification = addNotificationSpy.mock.calls[0][0]
-      expect(notification.title).toBe('插件贡献加载失败')
+      expect(notification.title).toBe('插件功能加载失败')
       expect(notification.isBlocking).toBe(false)
       expect(notification.message).toContain('schema endpoint down')
     } finally {

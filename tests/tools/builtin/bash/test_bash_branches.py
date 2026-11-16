@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -31,13 +32,15 @@ from typing import Any
 
 import pytest
 
-from bash_types import LogCompressorConfig, OutputType, ProcessInfo, WorkUnit
-from log_compressor import LogCompressor
-from process_manager import (
+from agentos_plugin_sdk.process_runtime import LogCompressorConfig, OutputType, ProcessInfo, WorkUnit
+from agentos_plugin_sdk.process_runtime import LogCompressor
+from agentos_plugin_sdk.process_runtime import (
     ContainerProcessBackend,
     LocalProcessBackend,
     ProcessManager,
 )
+# 本地 shell 五级路由单源（自 process_manager 抽出，普查 ⚠️-6）
+import agentos_plugin_sdk.process_runtime.shell_route as shell_route
 
 pytestmark = pytest.mark.unit
 
@@ -418,7 +421,7 @@ def test_normalize_local_command_passthrough_branches(
     ],
 )
 def test_is_compound_command_extra_cases(command: str, expected: bool) -> None:
-    assert ProcessManager._is_compound_command(command) is expected
+    assert shell_route.is_compound_command(command) is expected
 
 
 @pytest.mark.parametrize(
@@ -431,7 +434,7 @@ def test_is_compound_command_extra_cases(command: str, expected: bool) -> None:
 def test_parse_wsl_args_flags_with_and_without_value(
     command: str, expected: list[str]
 ) -> None:
-    assert ProcessManager._parse_wsl_args(command) == expected
+    assert shell_route.parse_wsl_args(command) == expected
 
 
 # ─────────────────────── 本地 spawn：WSL bash LANG 注入 ───────────────────────
@@ -454,27 +457,25 @@ class _SpawnRecorder:
 @pytest.fixture
 def spawn_recorder(monkeypatch: pytest.MonkeyPatch) -> _SpawnRecorder:
     rec = _SpawnRecorder()
-    import process_manager as pm
+    import agentos_plugin_sdk.process_runtime.manager as pm
 
     monkeypatch.setattr(pm.asyncio, "create_subprocess_exec", rec.exec)
     monkeypatch.setattr(pm.asyncio, "create_subprocess_shell", rec.shell)
     return rec
 
 
-@pytest.mark.skipif(
-    sys.platform != "win32",
-    reason="WSL bash 分支判据 shutil.which('wsl') 要求 wsl.exe 在 PATH——仅 "
-           "Windows 宿主存在；Linux 上该分支结构性不可达（is_windows 恒 "
-           "False），POSIX 回落 bash -c 分支是正确行为且已有独立覆盖",
-)
 async def test_spawn_local_wsl_bash_injects_lang(
-    tmp_path: Path, spawn_recorder: _SpawnRecorder
+    tmp_path: Path, spawn_recorder: _SpawnRecorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """WSL bash 分支：无 LANG 的环境注入 en_US.UTF-8 后再拉起。"""
-    mgr = _make_manager(tmp_path)
+    """WSL bash 分支：无 LANG 的环境注入 en_US.UTF-8 后再拉起。
+
+    分支选择探测宿主工具链（shutil.which("wsl")，仅 Windows 装有 WSL）：
+    钉 which 替身让分支契约跨平台可断言（与 process_manager 守卫矩阵同款）。
+    """
+    monkeypatch.setattr(shutil, "which", lambda name: "wsl.exe" if name == "wsl" else None)
     env: dict[str, str] = {"PATH": "x"}
 
-    await mgr._spawn_local_process("echo hi", None, env, is_windows=True)
+    await shell_route.spawn_local_process("echo hi", None, env, is_windows=True)
 
     assert env["LANG"] == "en_US.UTF-8"
     assert spawn_recorder.exec_calls == [("wsl", "-e", "bash", "-c", "echo hi")]
@@ -520,7 +521,7 @@ async def test_container_compound_command_wraps_in_sh_c_with_owner(
     tmp_path: Path, monkeypatch
 ) -> None:
     """复合命令套 exec sh -c（pipefail 兜底）；owner 写入 metadata 与日志头。"""
-    import process_manager as pm
+    import agentos_plugin_sdk.process_runtime.manager as pm
 
     mgr = _make_manager(tmp_path)
     fake_proc = _FakeContainerProc(host_pid=42, container_pid=100)
@@ -610,7 +611,12 @@ async def test_on_output_callback_receives_lines_real_subprocess(tmp_path: Path)
     )
     try:
         await mgr.wait_output_settled(pid, timeout=10)
-        await asyncio.sleep(0.05)
+        # 回调投递经读线程派发，与 settled 判定存在调度竞态（高负载实测
+        # >50ms）：轮询等待而非定长睡眠，断言语义不变（必须收到该行）。
+        for _ in range(60):
+            if any("callback_sees_me" in line for line in received):
+                break
+            await asyncio.sleep(0.05)
         content = log_file.read_text(encoding="utf-8")
         assert any("callback_sees_me" in line for line in received)
         assert "callback_sees_me" in content
@@ -715,7 +721,12 @@ async def test_terminate_process_kills_when_graceful_wait_times_out(
         coro.close()
         raise TimeoutError()
 
-    monkeypatch.setattr("process_manager.asyncio.wait_for", fake_wait_for)
+    # 模块对象直 patch（与 459/518 行同姿势）：pytest 字符串目标只 import 顶层
+    # 包再逐级 getattr、不回退 import 子模块——满套件下包属性链未物化即
+    # AttributeError（单跑时本文件顶层 import 恰好物化过才绿）。
+    import agentos_plugin_sdk.process_runtime.manager as pm
+
+    monkeypatch.setattr(pm.asyncio, "wait_for", fake_wait_for)
 
     ok, err = await mgr.terminate_process(181, force=False)
 
@@ -725,7 +736,10 @@ async def test_terminate_process_kills_when_graceful_wait_times_out(
     assert backend.killed == [(181, False)]
 
 
-async def test_reap_after_kill_survives_kill_and_wait_failures(tmp_path: Path) -> None:
+async def test_reap_after_kill_failure_does_not_report_terminated(tmp_path: Path) -> None:
+    """状态保真（审查 P1-23）：优雅等待与强杀收尸全失败 → reap 抛错交调用方
+    记账，不得吞掉后仍置 terminated（谎报进程已死会脱离 running 快照、
+    失去看门狗兜底巡检），退出码也不得被静默补成 terminated。"""
     mgr = _make_manager(tmp_path)
 
     class ZombieProc:
@@ -739,8 +753,13 @@ async def test_reap_after_kill_survives_kill_and_wait_failures(tmp_path: Path) -
             raise RuntimeError("kill exploded")
 
     info = _register(mgr, 191, process=ZombieProc())
-    await mgr._reap_after_kill(191, info)
-    assert info.status == "terminated"
+    info.log_file.write_text("# Bash Command Log\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError):
+        await mgr._reap_after_kill(191, info)
+
+    assert info.status == "running", "reap 失败不得谎报 terminated"
+    assert "terminated by watchdog" not in info.log_file.read_text(encoding="utf-8")
 
 
 async def test_shutdown_all_swallows_watchdog_teardown_error(tmp_path: Path) -> None:
@@ -861,7 +880,10 @@ async def test_wait_output_settled_swallows_wait_failure(
     async def broken_wait(*args: Any, **kwargs: Any) -> None:
         raise ValueError("wait exploded")
 
-    monkeypatch.setattr("process_manager.asyncio.wait", broken_wait)
+    # 模块对象直 patch，理由同上（字符串目标的属性链解析在满套件下不稳）。
+    import agentos_plugin_sdk.process_runtime.manager as pm
+
+    monkeypatch.setattr(pm.asyncio, "wait", broken_wait)
     await mgr.wait_output_settled(231, timeout=1.0)  # 不抛
 
     task.cancel()
@@ -922,7 +944,10 @@ async def test_on_output_task_done_with_raised_task_cleans_entry(tmp_path: Path)
 
 
 def _psutil_stub() -> SimpleNamespace:
+    # 异常层级与真库对齐：NoSuchProcess/AccessDenied 均为 Error 子类
+    # （process_manager 采样方法的显式 except 集合按 Error 收窄，审查 P1-23）。
     return SimpleNamespace(
+        Error=type("Error", (Exception,), {}),
         NoSuchProcess=type("NoSuchProcess", (Exception,), {}),
         AccessDenied=type("AccessDenied", (Exception,), {}),
     )

@@ -1,8 +1,8 @@
 """
 权限策略与检查器（SDK 单一真值源）。
 
-isolation 服务（system）与 download 工具插件共用的路径权限策略/校验集中于此，
-消除「download sidecar 无法 import 其他插件包」被迫镜像的双副本漂移。
+isolation 服务（system）与工具插件共用的路径权限策略/校验集中于此，
+消除双副本漂移。
 
 权限策略管理器
 

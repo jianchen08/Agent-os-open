@@ -1,0 +1,543 @@
+{
+  "id": "mode_evolution",
+  "name": "Mode Evolution",
+  "version": "1.3.4",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "description": "自进化模式包（自洽整体）：负责整个系统的改进与执行闭环——题集展开/批次派发/结果聚合/失败归因（经复盘插件 triage_rules）/提案校验应用（staging→主仓 G2+热重载；出厂内容提案类型=mode_roleplay 三内容目录 agents/lorebooks/packs 的 yaml，安检经 card 质检服务（判定单源 mode_roleplay card_lint）三面+suspicious 阻断+HTML 标注落账，apply 落出厂目录+装机版本 bump 注记，扩展波 B-Ⅱ）/held-out 保密裁决/保留率哨兵/熔断一票否决，外加 evolution_panel 双线监控面板（① 日常体验循环：供页时经 service-registry.pipeline-runs.list 拉真实任务流量出完成率/失败信号/进化日志；② 基线评测验证：轮次时间线（T1-T8）/scorecard 走势/假设清单/杠杆命中率/健康度五指标/熔断状态）。T1-T8 流程物料随包打包（包内 rules/，B 部类），模式声明面 mode.yaml 自持（suite/levers/budget），evolution 引擎 agent 在包内 agents/ 注册表（mode_evolution/evolution）。",
+  "requires_services": [
+    "packaging",
+    "card.lint_extensions",
+    "card.scan_suspicious",
+    "card.scan_html_card",
+    "card.scan_html_texts",
+    "card.texts_of_tree"
+  ],
+  "permissions": {},
+  "priority": 56,
+  "host_group": "light",
+  "http_endpoints": [
+    {
+      "route_id": "mode_evolution_panel_page",
+      "method": "GET",
+      "path": "/ext/mode_evolution/page/evolution-panel",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "Webview HTML page: 自进化监控面板（插件自带 webview 页，供页时内联账本数据快照）"
+    }
+  ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "evolution_panel",
+        "title": "自进化",
+        "icon": "🧬",
+        "space": "workspace",
+        "slot": "tab",
+        "path": "/p/evolution_panel",
+        "widget": "webview",
+        "props": {
+          "pluginId": "mode_evolution",
+          "htmlPath": "/page/evolution-panel",
+          "widgetId": "evolution_panel"
+        },
+        "order": 63,
+        "description": "自进化双线面板：① 日常体验循环（真实任务流量/失败信号/改进循环管道/进化日志，全体用户）；② 基线评测验证（模式分组下钻轮次时间线（T1-T8）/scorecard 走势/假设清单/杠杆命中率/健康度五指标/熔断状态，开发者/管理员）"
+      }
+    ]
+  },
+  "capabilities": {
+    "tools": [
+      {
+        "name": "eval_query",
+        "description": "评测查询面（三读合一）。domain='suite'：按模式取题集展开为 task_submit 批次清单（模式 profile 经服务调用获取，你无需知道题集路径；派发由你用自己的 task_submit 执行）。最小示例：eval_query(domain='suite', mode='coding', tier='smoke')。domain='screen'：轨迹库先行筛选——假设失败簇对轨迹样本库核查证据量（命中 ≥2 条失败轨迹才允许立项；不足先复跑确认或继续采集，省真实题集运行预算；verdict='insufficient' 是裁决不是错误）。最小示例：eval_query(domain='screen', mode='coding', title_substring='导出')。domain='health'：流程健康度（轮次/提案命中率/杠杆账）+ 自进化指标 P0-P3 裁决（学习率/迁移/保留率/方差/效率/回滚/一票否决，看 evolution.verdict 字段；熔断 verdict='vetoed' 后停止提案）。最小示例：eval_query(domain='health', mode='coding')。",
+        "render": {
+          "card": "form",
+          "title": "评测·查询"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "domain": {
+              "type": "string",
+              "enum": [
+                "suite",
+                "screen",
+                "health"
+              ],
+              "description": "查询域（必填枚举）：suite=题集展开为 task_submit 批次清单（用 tier/cases）；screen=轨迹库先行筛选证据量（用 title_substring）；health=流程健康度与 P0-P3 进化裁决（全账本口径，只用 mode 一个参数）"
+            },
+            "mode": {
+              "type": "string",
+              "description": "任务模式（全仓一个含义=模式包 id；suite/screen 经该模式插件的 mode.get_profile 服务解析，health 为调用定位参数）"
+            },
+            "tier": {
+              "type": "string",
+              "description": "仅 domain='suite'：profile.suite 档位（缺省 smoke）"
+            },
+            "cases": {
+              "type": "string",
+              "description": "仅 domain='suite'：逗号分隔 case id 过滤"
+            },
+            "title_substring": {
+              "type": "string",
+              "description": "仅 domain='screen'：题名子串过滤（缺省按模式全量计）"
+            }
+          },
+          "required": [
+            "domain",
+            "mode"
+          ],
+          "oneOf": [
+            {
+              "properties": {
+                "domain": {
+                  "const": "suite"
+                },
+                "mode": {},
+                "tier": {},
+                "cases": {}
+              },
+              "required": [
+                "domain"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "properties": {
+                "domain": {
+                  "const": "screen"
+                },
+                "mode": {},
+                "title_substring": {}
+              },
+              "required": [
+                "domain"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "properties": {
+                "domain": {
+                  "const": "health"
+                },
+                "mode": {}
+              },
+              "required": [
+                "domain"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "description": "按 domain 返回对应域结构：suite={mode,suite,batches,note}；screen={mode,failure_samples,matched,replayable,threshold,verdict,reason}；health={rounds,hit_rate,breaker_tripped,evolution}；参数/域错误返回 {success:false,error}（error 教改法）",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "description": "任务模式（回显）"
+            },
+            "suite": {
+              "type": "string",
+              "description": "suite 域：题集相对路径"
+            },
+            "batches": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "suite 域：task_submit 批次清单"
+            },
+            "failure_samples": {
+              "type": "number",
+              "description": "screen 域：轨迹库失败样本数"
+            },
+            "matched": {
+              "type": "number",
+              "description": "screen 域：命中失败轨迹数"
+            },
+            "replayable": {
+              "type": "number",
+              "description": "screen 域：可复放轨迹数"
+            },
+            "threshold": {
+              "type": "number",
+              "description": "screen 域：立项阈值（≥2）"
+            },
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "sufficient",
+                "insufficient"
+              ],
+              "description": "screen 域：证据量裁决（insufficient 是裁决不是错误）"
+            },
+            "reason": {
+              "type": "string",
+              "description": "screen 域：裁决理由"
+            },
+            "rounds": {
+              "type": "number",
+              "description": "health 域：账本轮次数"
+            },
+            "hit_rate": {
+              "type": "number",
+              "description": "health 域：提案命中率"
+            },
+            "breaker_tripped": {
+              "type": "boolean",
+              "description": "health 域：熔断状态（evolution.verdict=vetoed 即 true，一票否决）"
+            },
+            "evolution": {
+              "type": "object",
+              "description": "health 域：P0-P3 裁决 {metrics_version, verdict, reason, p0, p1, p2, p3}"
+            }
+          }
+        }
+      },
+      {
+        "name": "eval_summarize",
+        "description": "聚合各 case 任务终态与验收结果出 scorecard（失败分类为复盘深分析预处理；判定谓词=终态∧AC∧budget_ok，声明预算须附 metrics 采集）",
+        "render": {
+          "card": "form",
+          "title": "评测·聚合"
+        },
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "mode",
+            "results"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string",
+              "description": "本轮执行模型 id（重放键）"
+            },
+            "round_type": {
+              "type": "string",
+              "enum": [
+                "treatment",
+                "control"
+              ],
+              "description": "treatment=进化进程轮（缺省）；control=零变更对照轮（不入基线链）"
+            },
+            "results": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "passed",
+            "total"
+          ],
+          "properties": {
+            "passed": {
+              "type": "number"
+            },
+            "total": {
+              "type": "number"
+            },
+            "delta": {
+              "type": "number"
+            }
+          }
+        }
+      },
+      {
+        "name": "eval_run_heldout",
+        "description": "held-out 隐藏集保密派发：内部经任务系统派发（题面不进 agent 上下文），返回 case↔task 映射；查终态后喂 eval_summarize 聚合",
+        "render": {
+          "card": "form",
+          "title": "评测·隐藏集派发"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "dispatched"
+          ],
+          "properties": {
+            "dispatched": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "proposal",
+        "description": "提案动作面（三写合一）。action='submit'：提交物料更改提案（冻结面/白名单/原子性/base 校验，不过即拒；target 落 mode_roleplay 三内容目录 yaml = 出厂内容提案，安检经 card 质检服务（判定单源 card_lint）：结构+suspicious 阻断、HTML 标注落账）。最小示例：proposal(action='submit', layer='L2', target='config/agents/main/agentos.yaml', change_type='tool_ids', content='<变更全文>', motivation='<动机>')。action='apply'：应用已受理提案——content 写入主仓目标文件（系统自动校验并热生效）并 pathspec commit；出厂内容提案落 mode_roleplay 内容目录，装机生效须 bump 种子插件版本（提示随 note，实际 bump 人审批准环节执行）。最小示例：proposal(action='apply', proposal_id='p20260101_120000')。action='reject'：驳回提案：记录原因与分类（失败经验入账）；已应用的提案被用户裁决回滚时同样走本 action（outcome=reverted，存档保留供审计）。最小示例：proposal(action='reject', proposal_id='p20260101_120000', reason='<原因>', category='prediction_miss')。",
+        "render": {
+          "card": "form",
+          "title": "提案"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "submit",
+                "apply",
+                "reject"
+              ],
+              "description": "提案动作（必填枚举）：submit=提交物料更改提案（冻结面/白名单/原子性/base 校验，不过即拒）；apply=应用已受理提案（content 写主仓目标文件并 pathspec commit，应用前复核）；reject=驳回提案记账（已应用提案被用户裁决回滚同样走本 action，outcome=reverted 存档保留供审计）"
+            },
+            "layer": {
+              "type": "string",
+              "enum": [
+                "L1",
+                "L2",
+                "L3"
+              ],
+              "description": "仅 action='submit'：提案层"
+            },
+            "target": {
+              "type": "string",
+              "description": "仅 action='submit'：目标物料路径"
+            },
+            "change_type": {
+              "type": "string",
+              "description": "仅 action='submit'：变更类型"
+            },
+            "content": {
+              "type": "string",
+              "description": "仅 action='submit'：变更内容全文"
+            },
+            "motivation": {
+              "type": "string",
+              "description": "仅 action='submit'：动机/杠杆说明"
+            },
+            "base_hash": {
+              "type": "string",
+              "description": "仅 action='submit'：基线 git short HEAD（可选，防漂移）"
+            },
+            "proposal_id": {
+              "type": "string",
+              "description": "仅 action='apply'/'reject'：提案 id（submit 返回的 proposal_id）"
+            },
+            "message": {
+              "type": "string",
+              "description": "仅 action='apply'：commit message（缺省 'evolve: apply <proposal_id>'）"
+            },
+            "reason": {
+              "type": "string",
+              "description": "仅 action='reject'：驳回/回滚原因"
+            },
+            "category": {
+              "type": "string",
+              "enum": [
+                "external_cause",
+                "harness_defect",
+                "heldout_gap",
+                "judgment_failure",
+                "other",
+                "prediction_miss",
+                "sentry_regression",
+                "system_fault",
+                "user_veto"
+              ],
+              "description": "仅 action='reject'：驳回/回滚分类（判定证据账：归因准确率与 P3 一票否决的数据源；缺省 other）"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "oneOf": [
+            {
+              "properties": {
+                "action": {
+                  "const": "submit"
+                },
+                "layer": {},
+                "target": {},
+                "change_type": {},
+                "content": {},
+                "motivation": {},
+                "base_hash": {}
+              },
+              "required": [
+                "action",
+                "layer",
+                "target",
+                "change_type",
+                "content",
+                "motivation"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "apply"
+                },
+                "proposal_id": {},
+                "message": {}
+              },
+              "required": [
+                "action",
+                "proposal_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "reject"
+                },
+                "proposal_id": {},
+                "reason": {},
+                "category": {}
+              },
+              "required": [
+                "action",
+                "proposal_id",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "description": "按 action 返回对应结构：submit={accepted,proposal_id,violations,content?}；apply={applied,commit,target,note}；reject={ok,proposal_id,outcome?}；参数/动作错误返回 {success:false,error}（error 教改法）",
+          "properties": {
+            "accepted": {
+              "type": "boolean",
+              "description": "submit：校验是否通过"
+            },
+            "proposal_id": {
+              "type": "string",
+              "description": "submit：提案 id（apply/reject 据此引用）"
+            },
+            "violations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "submit：违规清单（accepted=false 时给出修正方向）"
+            },
+            "content": {
+              "type": "object",
+              "description": "submit：出厂内容提案面（kind/annotations/version_bump_required/version_note）"
+            },
+            "applied": {
+              "type": "boolean",
+              "description": "apply：是否已应用"
+            },
+            "commit": {
+              "type": "string",
+              "description": "apply：落仓 commit short hash"
+            },
+            "target": {
+              "type": "string",
+              "description": "apply：目标物料路径"
+            },
+            "note": {
+              "type": "string",
+              "description": "apply：生效链路提示（配置热生效/内容提案装机 bump）"
+            },
+            "ok": {
+              "type": "boolean",
+              "description": "reject：记账是否成功"
+            },
+            "outcome": {
+              "type": "string",
+              "description": "reject：reverted 分支返回（已应用提案回滚标记）"
+            }
+          }
+        }
+      }
+    ],
+    "services": [
+      {
+        "name": "mode.describe",
+        "description": "返回自进化模式元数据（chain/权重/预算/profile 路径/panel_page_id）",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "mode",
+            "name",
+            "chain",
+            "weights",
+            "budget",
+            "profile_path",
+            "panel_page_id"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "chain": {
+              "type": "object"
+            },
+            "weights": {
+              "type": "object"
+            },
+            "budget": {
+              "type": "object"
+            },
+            "profile_path": {
+              "type": "string"
+            },
+            "panel_page_id": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "mode.get_profile",
+        "description": "返回自进化模式包内 mode.yaml 解析后的内容",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load"
+    ]
+  }
+}

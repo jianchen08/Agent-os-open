@@ -6,7 +6,7 @@
 //!
 //! 路径划分(对应任务规格 A-E):
 //! - A:agent 配置 CRUD 闭环——已插件化(2026-08-20 ADR),语义由
-//!   plugins/shared/system/agent_manager/test_server.py 承接(掩码/etag/409/.bak)
+//!   plugins/shared/agent_manager/test_server.py 承接(掩码/etag/409/.bak)
 //! - B:schema 透传多 key contributes 完整性(pages/commands/viewsContainers 同时存在)
 //! - C:actions 执行 + command 查找边界(tool 字段/命名空间边界/空 args)
 //! - D:静态资源 + dispatcher 共存(同插件 assets 静态文件 + http_endpoints 各走各的)
@@ -103,7 +103,6 @@ fn manifest_base(plugin_id: &str) -> PluginManifest {
         description: None,
         version: "1.0.0".to_string(),
         plugin_type: PluginType::System,
-        pipeline_role: None,
         language: "python".to_string(),
         host_type: HostType::Sidecar,
         host_group: None,
@@ -115,7 +114,6 @@ fn manifest_base(plugin_id: &str) -> PluginManifest {
         mcp: None,
         lifecycle: None,
         native: None,
-        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],
@@ -410,9 +408,18 @@ async fn path_c_empty_args_executes_normally() {
 // ════════════════════════════════════════════════════════════════
 
 /// 构造一个临时插件目录:web/index.html + web/app.js(静态资源)。
-fn make_plugin_with_web_assets() -> tempfile::TempDir {
+fn make_plugin_with_web_assets(plugin_id: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    let web = dir.path().join("web");
+    // <root>/<id>/{plugin.json,web/} 布局（loader discover 可发现的活真源形态）
+    let pkg = dir.path().join(plugin_id);
+    fs::create_dir_all(&pkg).unwrap();
+    let manifest = format!(
+        r#"{{"id":"{plugin_id}","name":"{plugin_id}","version":"1.0.0",
+            "plugin_type":"tool","language":"python","host_type":"sidecar",
+            "entry":"python server.py","capabilities":{{}}}}"#
+    );
+    fs::write(pkg.join("plugin.json"), manifest).unwrap();
+    let web = pkg.join("web");
     fs::create_dir_all(&web).unwrap();
     fs::write(
         web.join("index.html"),
@@ -445,7 +452,7 @@ fn http_endpoint(route_id: &str, method: &str, path: &str) -> HttpEndpoint {
 #[tokio::test]
 async fn path_d_static_assets_and_dispatcher_coexist() {
     const PLUGIN_ID: &str = "coexist_plugin";
-    let tmp = make_plugin_with_web_assets();
+    let tmp = make_plugin_with_web_assets(PLUGIN_ID);
 
     // 注册 dispatcher 路由:/ext/{PLUGIN_ID}/api/hello GET(在 PLUGIN_ID 命名空间下)
     let registry = Arc::new(CapabilityRegistryImpl::new());
@@ -459,9 +466,7 @@ async fn path_d_static_assets_and_dispatcher_coexist() {
     let mut state = AppState::new();
     state.capability_registry = Some(registry);
     state.http_handler = Some(Arc::new(NopHandler));
-    let mut dirs = HashMap::new();
-    dirs.insert(PLUGIN_ID.to_string(), tmp.path().to_path_buf());
-    state.plugin_dirs = Arc::new(dirs);
+    state.plugin_loader = Some(agentos_api::test_env::discovered_plugin_loader(tmp.path()).await);
 
     // 1) 静态资源:GET /ext/{id}/assets/index.html → 200 + 文件内容
     let app = build_router(state.clone());
@@ -542,7 +547,7 @@ async fn path_d_static_assets_and_dispatcher_coexist() {
 #[tokio::test]
 async fn path_d_assets_missing_file_returns_static_404_not_dispatcher() {
     const PLUGIN_ID: &str = "assets_missing_plugin";
-    let tmp = make_plugin_with_web_assets();
+    let tmp = make_plugin_with_web_assets(PLUGIN_ID);
 
     // 即便注册了一个看起来像它的 dispatcher 路由,也不应被命中(因为 /assets/ 命名空间归静态)
     let registry = Arc::new(CapabilityRegistryImpl::new());
@@ -560,9 +565,7 @@ async fn path_d_assets_missing_file_returns_static_404_not_dispatcher() {
     let mut state = AppState::new();
     state.capability_registry = Some(registry);
     state.http_handler = Some(Arc::new(NopHandler));
-    let mut dirs = HashMap::new();
-    dirs.insert(PLUGIN_ID.to_string(), tmp.path().to_path_buf());
-    state.plugin_dirs = Arc::new(dirs);
+    state.plugin_loader = Some(agentos_api::test_env::discovered_plugin_loader(tmp.path()).await);
 
     let app = build_router(state);
     let resp = app

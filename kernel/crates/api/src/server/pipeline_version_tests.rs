@@ -134,8 +134,7 @@ async fn pinned_recovery_reuses_when_hash_matches() {
     let (name, config_root, state, _guard) = pin_fixture("rc", "body_v1");
 
     // 盘面直接编译取 hash（不经 compiled_for，缓存保持空 = 重启后状态）
-    let empty_ids = std::collections::HashSet::new();
-    let disk_compiled = crate::server::load_and_compile_by_name(&config_root, &name, &empty_ids)
+    let disk_compiled = crate::server::load_and_compile_by_name(&config_root, &name, &[])
         .expect("盘面内容应可编译");
     let disk_hash = disk_compiled.config_hash;
 
@@ -160,12 +159,11 @@ async fn pinned_recovery_reuses_when_hash_matches() {
 async fn pinned_recovery_fail_closed_when_disk_changed() {
     let (name, config_root, state, _guard) = pin_fixture("fc", "body_v1");
     let root = config_root.parent().unwrap().to_path_buf();
-    let empty_ids = std::collections::HashSet::new();
 
     // 出生版本 hash（v1 内容）与当前盘面 hash（v2 内容）分属两代
-    let born = crate::server::load_and_compile_by_name(&config_root, &name, &empty_ids).unwrap();
+    let born = crate::server::load_and_compile_by_name(&config_root, &name, &[]).unwrap();
     write_pin_config(&root, &name, "body_v2", "");
-    let changed = crate::server::load_and_compile_by_name(&config_root, &name, &empty_ids).unwrap();
+    let changed = crate::server::load_and_compile_by_name(&config_root, &name, &[]).unwrap();
     assert_ne!(born.config_hash, changed.config_hash, "两代内容 hash 必异");
 
     // 钉住 v1 hash × 盘面 v2 → fail-closed（性质：错误同时含名/期望/当前 hash）
@@ -211,7 +209,9 @@ async fn none_config_returns_autonomous_singleton_ignoring_pin() {
     let via_none = crate::server::compiled_for(&state, &config_root, None, Some("deadbeef"))
         .await
         .expect("缺省路径应成功");
-    let via_reload = crate::server::maybe_reload_compiled_pipeline(&state, &config_root).await;
+    let via_reload = crate::server::maybe_reload_compiled_pipeline(&state, &config_root)
+        .await
+        .expect("热重载路径应有产物");
     assert!(
         std::sync::Arc::ptr_eq(&via_none, &via_reload),
         "None 必须收敛到既有热重载单例（同一 Arc），钉住入参无效"
@@ -328,15 +328,8 @@ async fn process_via_engine_pins_birth_version_through_cold_recovery() {
         .and_then(|v| v.as_str())
         .expect("出生钉住 hash 键须落库")
         .to_string();
-    let run_hash1 = fields1
-        .get("run_config_hash")
-        .and_then(|v| v.as_str())
-        .expect("run 记账 hash 须落库")
-        .to_string();
-    assert_eq!(
-        run_hash1, pin_hash,
-        "run 记账 hash 与钉住 hash 同指纹（同编译产物）"
-    );
+    // run_config_hash 已退役（ADR 2026-11-02-state-key-governance，零决策读点）；
+    // 版本钉住行为的权威证据 = pipeline_config_pin 钉住键本身。
 
     // PUT 热更：盘面 v2 + 失效；摘除 registry 热缓存（下一轮走冷恢复 =
     // 重启后从 pipeline_state 表读钉住键的路径）
@@ -369,12 +362,13 @@ async fn process_via_engine_pins_birth_version_through_cold_recovery() {
         .await
         .unwrap();
     let run_hash2 = fields2
-        .get("run_config_hash")
+        .get(PIPELINE_CONFIG_PIN_HASH_KEY)
         .and_then(|v| v.as_str())
-        .expect("第二轮 run 记账 hash 须落库");
+        .expect("第二轮钉住 hash 键须在库")
+        .to_string();
     assert_eq!(
-        run_hash2, run_hash1,
-        "PUT 热更 + 冷恢复后已钉实例恒用出生版本（记账不漂移）"
+        run_hash2, pin_hash,
+        "PUT 热更 + 冷恢复后已钉实例钉住键恒为出生版本（记账不漂移）"
     );
 
     // 对照：PUT 之后出生的新实例 → 新版本（hash ≠ 出生版本）
@@ -403,18 +397,12 @@ async fn process_via_engine_pins_birth_version_through_cold_recovery() {
         .await
         .unwrap();
     let run_hash3 = fields3
-        .get("run_config_hash")
+        .get(PIPELINE_CONFIG_PIN_HASH_KEY)
         .and_then(|v| v.as_str())
-        .expect("新实例 run 记账 hash 须落库");
+        .expect("新实例钉住 hash 键须在库")
+        .to_string();
     assert_ne!(
-        run_hash3, run_hash1,
+        run_hash3, pin_hash,
         "PUT 后出生的新实例必须用新版（热更只对之后出生的实例生效）"
-    );
-    assert_eq!(
-        fields3
-            .get(PIPELINE_CONFIG_PIN_HASH_KEY)
-            .and_then(|v| v.as_str()),
-        Some(run_hash3),
-        "新实例钉住的就是新版 hash"
     );
 }

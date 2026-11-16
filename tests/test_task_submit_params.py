@@ -15,11 +15,11 @@
 from __future__ import annotations
 
 import importlib.util
-import os
 import sys
 import tempfile
 from pathlib import Path
 
+from tests import _task_birth_workspace as _birth_ws  # noqa: E402
 from tests._stdlib_guard import ensure_stdlib_module
 
 # 车道共跑防线：某条导入链会让插件同名模块（pipeline/types.py，包内相对
@@ -33,10 +33,10 @@ pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SDK_DIR = _REPO_ROOT / "plugins" / "sdk" / "src"
-_TASKS_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "tasks"
-_TOOL_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "task_submit"
+_TASKS_DIR = _REPO_ROOT / "plugins" / "shared" / "tasks"
+_TOOL_DIR = _REPO_ROOT / "plugins" / "shared" / "task_submit"
 # isolation 是包（import isolation.workspace），需其父目录入 sys.path
-_SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared" / "system"
+_SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared"
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -113,6 +113,7 @@ def make_tool(tool_module, service: FakeTaskService):
     GAP-1 统一后：提交不再走 YAML/task_service 写路径，workspace/隔离语义经
     chat.send_message 的 execution_context 透传（执行管道 workspace_lifecycle
     消费）——测试注入假 chat sender 捕获派发 params，断言 execution_context。
+    service 参数为历史脚手架（GAP-1 后无消费方，保留签名降低用例面改动）。
     2026-08-22：任务 id 统一写提交者管道 state（task.owned.*）——普通任务
     创建后追加一次 no_dispatch 登记调用；captured["params"] 保留首次（创建）
     调用，captured["calls"] 为全部调用。
@@ -125,7 +126,7 @@ def make_tool(tool_module, service: FakeTaskService):
             # workspace_lifecycle_manager 等 0.2 sidecar 不可达 → 文档化降级
             return None
 
-    tool_module._get_service_provider = lambda: _ProviderShim()
+    tool_module._get_service_provider = _ProviderShim
     tool._get_task_service = lambda: service
 
     # _validate_target_agent 已 async 化（P4：registry 路径经 agent_manager
@@ -134,7 +135,12 @@ def make_tool(tool_module, service: FakeTaskService):
         return (True, "", "")
 
     tool._validate_target_agent = _fake_validate_target
-    tool._check_parent_ownership = lambda level, pid: (True, None)
+
+    # 归属闸已 async 化（state 层级键读面）——归属行为矩阵另测
+    async def _allow_ownership(level, pid):
+        return (True, None)
+
+    tool._check_parent_ownership = _allow_ownership
 
     async def fake_sender(params: dict) -> dict:
         captured["calls"].append(params)
@@ -152,6 +158,20 @@ def make_tool(tool_module, service: FakeTaskService):
         return {"status": "dispatched", "pipeline_id": params.get("pipeline_id", "")}
 
     tool_module.set_chat_sender(fake_sender)
+    # 出生协议第三段（工作空间同步创建，ADR-2026-10-17）：准备器缺席即出生失败
+    _birth_ws.inject_preparer(tool_module)
+
+    # agent 配置查询钩子缺省注入（配置单源 = 注入钩子，无磁盘回退）：完备性
+    # 左值的身份字段源——需要特定配置/故障形态的用例自行覆盖注入
+    async def _default_lookup(agent_id: str):
+        return {
+            "level": "L3",
+            "is_active": True,
+            "tool_ids": ["file_write"],
+            "system_prompt": "persona-stub",
+        }
+
+    tool_module.set_agent_registry_lookup(_default_lookup)
     return tool, captured
 
 
@@ -164,6 +184,8 @@ def _reset_chat_sender(tool_module, tmp_path_factory, monkeypatch):
     monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path_factory.mktemp("user-root")))
     yield
     tool_module._chat_sender = None
+    tool_module._workspace_preparer = None
+    tool_module._agent_registry_lookup = None
 
 
 def base_inputs(**overrides):
@@ -173,6 +195,11 @@ def base_inputs(**overrides):
         "target_type": "agent",
         "target_id": "mode_coding/code_writer",
         "parent_agent_level": 2,
+        # 提交者会话坐标（生产由 param_inject 注入；完备性闸门按 state 键
+        # 计必需）——无会话锚场景的用例显式覆盖
+        "session_id": "sess-1",
+        # 提交者身份（生产由调用上下文注入；内核 chat.send_message 出生硬校验非空）
+        "user_id": "u_test",
     }
     inputs.update(overrides)
     return inputs
@@ -202,24 +229,41 @@ def project_registry_env(tool_module, monkeypatch, tmp_path):
 
     返回 (登记 id→path 映射 dict 可变引用, captured rows 设置器)。
     """
-    _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
-    if str(_SHARED_DIR) not in sys.path:
-        sys.path.insert(0, str(_SHARED_DIR))
-    import project_registry as pr
+    shared_dir = _REPO_ROOT / "plugins" / "shared"
+    if str(shared_dir) not in sys.path:
+        sys.path.insert(0, str(shared_dir))
 
     folder = tmp_path / "proj_folder"
     folder.mkdir()
     paths = {"proj00112233": str(folder)}
-    monkeypatch.setattr(pr, "load_project_paths", lambda: dict(paths))
 
     rows: list[dict] = []
 
     async def fake_reader():
         return list(rows)
 
+    # project.* 服务桩（T6a）：登记读面（list_paths）+ 项目行读面（get，
+    # plan 态闸/mode 闸消费——登记外 id 按 found=false 放行非项目流）。
+    # plan 态闸对 rows 中带 task.parent_project_id 且该 id 登记外（found=false）
+    # 的派发不过闸，与"未挂靠项目"同语义。
+    async def fake_project_service(method: str, args: dict):
+        if method == "list_paths":
+            return {"paths": dict(paths)}
+        if method == "get":
+            pid = str(args.get("project_id") or "")
+            known = pid in paths
+            return {
+                "found": known,
+                "project": {"id": pid, "workflow_state": "running", "mode_tags": []}
+                if known
+                else {},
+            }
+        raise AssertionError(f"unexpected method: {method}")
+
     # 规范 monkeypatch（自动还原）：替换读取源而非整个 getter 函数，
     # 防止泄漏到同文件后续用例（顺序耦合）。
     monkeypatch.setattr(tool_module, "_state_reader", fake_reader)
+    monkeypatch.setattr(tool_module, "_project_service", fake_project_service)
     return paths, rows
 
 
@@ -391,46 +435,62 @@ async def test_panel_thread_id_takes_precedence_over_injected_session(tool_modul
 
 
 @pytest.mark.asyncio
+# sync_agent 1.5.1 已松声明（session_id 移出 required_state_inputs——运行时本就
+# 空转容错，无会话锚出生=合法派发形态）：xfail 退役转正式回归护栏
 async def test_subtask_without_session_anchor_keeps_independent_birth(tool_module):
     """两键皆缺（无会话根任务）：thread_id 省略——出生保持独立自环。"""
     service = ordinary_child_service()
     tool, captured = make_tool(tool_module, service)
 
-    inputs = base_inputs(task_id="parent_p")
+    inputs = base_inputs(task_id="parent_p", session_id=None)
     result = await tool.execute(inputs)
     assert result.success, result.error
     assert "thread_id" not in captured["params"]
 
 
 @pytest.mark.asyncio
-async def test_ordinary_subtask_inherit_workspace_rejected(tool_module, tmp_proj):
-    """普通子任务：inherit workspace 拒绝（只能继承管道）。"""
-    old = FakeTask("old_task", {"task_scope": "non_container", "ws_meta": ws_meta(tmp_proj)})
-    service = ordinary_child_service({"old_task": old})
-    tool, _ = make_tool(tool_module, service)
+async def test_ordinary_subtask_can_inherit_failed_task_workspace(tool_module, tmp_proj, monkeypatch):
+    """普通子任务：inherit_from 接续失败任务的工作空间——放行（闸门不对称消解）。
 
-    inputs = base_inputs(task_id="parent_p", inherit_from="old_task", inherit_mode="workspace")
-    result = await tool.execute(inputs)
-    assert not result.success
-    assert result.error_code == "SUBTASK_INHERITS_PARAMS", result.error
+    2026-10-20 用户裁定：旧闸门只放行「继承管道」、工作空间继承一律拒绝，
+    同一参数组合在主会话路径放行、子任务路径报错——接续失败任务恰恰是子任务
+    的高频场景，闸门按任务类型分叉即行为不可预期。
+    """
+    service = ordinary_child_service()
+    tool, captured = make_tool(tool_module, service)
+    monkeypatch.setattr(
+        tool_module,
+        "_state_reader",
+        lambda: [
+            {
+                "pipeline_id": "old_task",
+                "task.id": "old_task",
+                "run_status": "failed",
+                "task.status": "failed",
+                "task.ws_meta": ws_meta(tmp_proj),
+            }
+        ],
+    )
 
-    # 组合模式含 workspace 同样拒绝
-    inputs = base_inputs(task_id="parent_p", inherit_from="old_task", inherit_mode=["pipe", "workspace"])
+    inputs = base_inputs(task_id="parent_p", inherit_from="old_task")
     result = await tool.execute(inputs)
-    assert not result.success
-    assert result.error_code == "SUBTASK_INHERITS_PARAMS", result.error
+    assert result.success, result.error
+    ec = captured["dispatch"]["execution_context"]
+    assert ec["workspace"]["source_path"] == tmp_proj
+    assert ec["workspace"]["inherit"]["source_task_id"] == "old_task"
 
 
 @pytest.mark.asyncio
-async def test_ordinary_subtask_inherit_pipe_allowed(tool_module, tmp_proj):
-    """普通子任务：inherit pipe（对话历史）是唯一允许的继承，放行。"""
-    old = FakeTask("old_task", {"task_scope": "non_container", "ws_meta": ws_meta(tmp_proj)})
-    service = ordinary_child_service({"old_task": old})
+async def test_ordinary_subtask_inherit_missing_source_rejected(tool_module, tmp_proj, monkeypatch):
+    """普通子任务：inherit_from 查无源任务 → 显式报错（不静默当普通任务）。"""
+    service = ordinary_child_service()
     tool, _ = make_tool(tool_module, service)
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
 
-    inputs = base_inputs(task_id="parent_p", inherit_from="old_task", inherit_mode="pipe")
+    inputs = base_inputs(task_id="parent_p", inherit_from="ghost_task")
     result = await tool.execute(inputs)
-    assert result.success, f"inherit pipe 应放行: {result.error}"
+    assert not result.success
+    assert result.error_code == "INHERIT_SOURCE_NOT_FOUND", result.error
 
 
 # ── 普通根任务（L1，无父任务）：三者均可填 ─────────────────────
@@ -528,20 +588,24 @@ async def test_ordinary_task_registers_owned_to_owner_pipeline(tool_module):
     )
     result = await tool.execute(inputs)
     assert result.success, result.error
-    # 四次调用：出生三段（①出生登记 ②身份登记 ③执行派发）+ ④no_dispatch
-    # 登记到提交者管道
-    assert len(captured["calls"]) == 4, captured["calls"]
+    # 五次调用：出生四段（①出生登记 ②身份登记 ③工作空间登记 ④执行派发，
+    # ADR 2026-10-17 增工作空间段）+ ⑤no_dispatch 登记到提交者管道
+    assert len(captured["calls"]) == 5, captured["calls"]
     create_call = captured["calls"][0]
     assert create_call.get("create") is True
     assert captured["calls"][1]["state"] == {"task.id": "a1b2c3d4e5f6"}
-    reg = captured["calls"][3]
+    reg = captured["calls"][4]
     assert reg["no_dispatch"] is True
     assert reg["pipeline_id"] == "owner-pipe-1"
     # state 键用全 id（引擎生成即 12 位短 id）；LLM 面返回同值（不再截断）
     full_pid = "a1b2c3d4e5f6"
     assert result.output["pipeline_id"] == full_pid
     assert reg["state"][f"task.owned.{full_pid}.title"] == "测试任务"
-    assert reg["state"][f"task.owned.{full_pid}.status"] == "running"
+    assert reg["state"][f"task.owned.{full_pid}.submitted_by"] == "u_test"
+    # owned.status 镜像退役（ADR 2026-11-02-state-key-governance，6d8375003）：
+    # 登记键 = {title, created_at, submitted_by} 纯声明，任务状态单一真源
+    # = 子管道行 task.status
+    assert f"task.owned.{full_pid}.status" not in reg["state"]
 
 
 @pytest.mark.asyncio
@@ -620,6 +684,24 @@ def test_metric_required_params_data_driven_across_metrics(tool_module):
     assert "expected" in fail.error
 
 
+def test_format_valid_registered_and_submittable(tool_module):
+    """format_valid 已注册（审查报告 20261018 §6 第一批 4a）：合法指标 ID 可提交。
+
+    code_writer.yaml recommended_metrics 与执行报告模板引用该指标；注册前该 key
+    按 INVALID_METRIC_ID 全拒（合法集合来自 evaluation_metrics.yaml 单源）。
+    required=[path] 与 code_writer 默认参数形态（path + type）对位。
+    """
+    valid = tool_module._get_valid_metric_ids()
+    assert valid is not None
+    assert "format_valid" in valid, "format_valid 须在 evaluation_metrics.yaml 注册"
+    assert "ghost_metric_xyz" not in valid, "集合来自 yaml 单源（非硬编码清单）"
+    normalized, fail = tool_module.TaskSubmitTool._normalize_acceptance_criteria(
+        {"format_valid": {"input_params": {"path": "src/", "type": "python"}}}
+    )
+    assert fail is None
+    assert normalized["format_valid"]["input_params"]["path"] == "src/"
+
+
 # ─────────────────── semantic_check 口径统一（yaml 单源回归锚） ───────────────────
 
 
@@ -695,26 +777,56 @@ def test_metric_params_validation_skips_without_definitions(tool_module, monkeyp
     assert fail is None
     assert normalized == {"file_check": {}}
 
-
 # ─────────────────── inherit 源解析（state 单一真值） ───────────────────
+#
+# 2026-10-20 用户裁定《继承机制简化方案》：inherit_from 单参数 = 源任务 ID →
+# 工具按 id 正向查源任务 state 行 → 整份复制其 task.ws_meta（mode/path/
+# project_root/branch/tree_path 一字不改）；三道校验 = 源已终态 / 坐标活着
+# （目录存在 + git 身份有效）/ 同 project_root 基座；坐标已死显式报错不静默
+# 回落（旧实现的 worktree→project_root 无条件降级已被裁定否决）。
 
 
 def test_inherit_source_missing_rejected(tool_module, monkeypatch):
-    """state 聚合无源任务 → 失败信封（不再读 YAML 存量，0.2 任务可被解析）。"""
+    """state 聚合无源任务 → 失败信封（不静默当普通任务）。"""
     monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
     import asyncio
 
     tool = tool_module.TaskSubmitTool()
-    path, fail = asyncio.run(tool._extract_inherited_workspace("ffffffffffff"))
-    assert path is None
+    meta, fail = asyncio.run(tool._resolve_inherit_coordinate("ffffffffffff"))
+    assert meta is None
     assert fail is not None
-    assert "不存在或无元数据" in fail.error
+    assert "不存在" in fail.error
+
+
+def test_inherit_running_source_rejected(tool_module, monkeypatch, tmp_path_factory):
+    """源任务仍在运行 → 拒绝继承（防同树双写）。"""
+    import asyncio
+
+    ws = tmp_path_factory.mktemp("running_src_ws")
+    monkeypatch.setattr(
+        tool_module,
+        "_state_reader",
+        lambda: [
+            {
+                "pipeline_id": "runsrc123456",
+                "task.id": "runsrc123456",
+                "run_status": "running",
+                "task.status": "running",
+                "task.ws_meta": {"mode": "plain", "path": str(ws), "project_root": str(ws)},
+            }
+        ],
+    )
+    tool = tool_module.TaskSubmitTool()
+    meta, fail = asyncio.run(tool._resolve_inherit_coordinate("runsrc123456"))
+    assert meta is None
+    assert fail is not None
+    assert "仍在运行" in fail.error
 
 
 def test_inherit_source_state_row_serves_ws_meta(tool_module, monkeypatch):
-    """源任务 state 行带 ws_meta（JSON 字符串形态）→ 取出路径；plain 模式无 git 校验。
+    """源任务 state 行带 task.ws_meta（JSON 字符串形态）→ 整份取出坐标。
 
-    路径取容器内真实目录（仓库根）——跨容器守卫按真实容器根判定。
+    无父链坐标可判归属（inputs 未带基座）→ 不做跨项目判定，放行。
     """
     import asyncio
     import json as _json
@@ -723,14 +835,177 @@ def test_inherit_source_state_row_serves_ws_meta(tool_module, monkeypatch):
         {
             "pipeline_id": "srcfull123456",
             "task.id": "srcfull123456",
-            "ws_meta": _json.dumps({"path": str(_REPO_ROOT), "mode": "plain"}),
+            "run_status": "failed",
+            "task.ws_meta": _json.dumps({"path": str(_REPO_ROOT), "mode": "plain"}),
         }
     ]
     monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
     tool = tool_module.TaskSubmitTool()
-    path, fail = asyncio.run(tool._extract_inherited_workspace("srcfull123456"))
+    meta, fail = asyncio.run(tool._resolve_inherit_coordinate("srcfull123456"))
     assert fail is None
-    assert path == str(_REPO_ROOT)
+    assert meta is not None
+    assert meta["path"] == str(_REPO_ROOT)
+    assert meta["mode"] == "plain"
+
+
+def _ws_rows(task_id: str, ws: Path, project_root: Path | None = None) -> list[dict]:
+    """构造带 task.ws_meta 的 state 行（JSON 字符串形态，同真实写面）。
+
+    project_root 缺省 = ws 自身（plain 源：项目目录即工作目录）。
+    """
+    import json as _json
+
+    root = str(project_root or ws)
+    return [
+        {
+            "pipeline_id": task_id,
+            "task.id": task_id,
+            "run_status": "failed",
+            "task.status": "failed",
+            "task.ws_meta": _json.dumps({"mode": "plain", "path": str(ws), "project_root": root}),
+        }
+    ]
+
+
+def test_inherit_same_project_root_allowed_outside_plugin_layout(
+    tool_module, monkeypatch, tmp_path_factory
+):
+    """源与本任务同 project_root（仓外，如 D 盘项目）→ 放行继承。
+
+    归属判据只能来自工作空间坐标：装机用户空间插件目录是平铺的
+    （<user_root>/plugins/task_submit/tool.py，无 shared/ 这层），按插件代码
+    文件层级数推导出的"容器根"落到 <user_root> 的上级（如 AppData/Roaming），
+    于是任何不在该目录下的工作空间（用户在 D 盘的项目）一律被误判跨容器拒绝。
+    """
+    import asyncio
+
+    project = tmp_path_factory.mktemp("d_drive_project") / "proj"
+    ws = project / "workspace"
+    ws.mkdir(parents=True)
+    monkeypatch.setattr(
+        tool_module,
+        "_state_reader",
+        lambda: _ws_rows("samebase1234", ws, project_root=project),
+    )
+    tool = tool_module.TaskSubmitTool()
+    meta, fail = asyncio.run(
+        tool._resolve_inherit_coordinate(
+            "samebase1234",
+            {"parent_ws_meta": {"mode": "plain", "path": str(ws), "project_root": str(project)}},
+        )
+    )
+    assert fail is None
+    assert meta is not None
+    assert meta["path"] == str(ws)
+
+
+def test_inherit_sibling_workspace_same_project_allowed(
+    tool_module, monkeypatch, tmp_path_factory
+):
+    """同项目下的兄弟任务工作空间 → 放行（基座按 project_root 坐标对坐标比）。
+
+    性质断言：基座取 project_root 时，同项目兄弟任务的工作空间不会被误判
+    跨项目（旧判据按路径包含关系比，worktree 源在 .agentos-workspaces 之下
+    必然被判死）。
+    """
+    import asyncio
+
+    project = tmp_path_factory.mktemp("proj_with_ws")
+    parent_ws = project / "workspace" / "parent"
+    sibling_ws = project / "workspace" / "sibling"
+    parent_ws.mkdir(parents=True)
+    sibling_ws.mkdir(parents=True)
+    monkeypatch.setattr(
+        tool_module,
+        "_state_reader",
+        lambda: _ws_rows("sibling1234", sibling_ws, project_root=project),
+    )
+    tool = tool_module.TaskSubmitTool()
+    meta, fail = asyncio.run(
+        tool._resolve_inherit_coordinate(
+            "sibling1234",
+            {"parent_ws_meta": {"mode": "plain", "path": str(parent_ws), "project_root": str(project)}},
+        )
+    )
+    assert fail is None
+    assert meta is not None
+    assert meta["path"] == str(sibling_ws)
+
+
+def test_inherit_foreign_project_root_rejected(tool_module, monkeypatch, tmp_path_factory):
+    """源工作空间属于另一个项目基座 → 拒绝继承，防产物落错项目。
+
+    文案回归防线：不得把工作空间路径当"容器名"打印（路径是坐标不是容器标识）。
+    """
+    import asyncio
+
+    base = tmp_path_factory.mktemp("proj_a")
+    other = tmp_path_factory.mktemp("proj_b") / "unrelated"
+    other.mkdir(parents=True)
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: _ws_rows("otherbase123", other))
+    tool = tool_module.TaskSubmitTool()
+    meta, fail = asyncio.run(
+        tool._resolve_inherit_coordinate(
+            "otherbase123",
+            {"parent_ws_meta": {"mode": "plain", "path": str(base), "project_root": str(base)}},
+        )
+    )
+    assert meta is None
+    assert fail is not None
+    assert "另一个项目基座" in fail.error
+    assert "属于其它容器" not in fail.error
+
+
+def test_inherit_workspace_under_repo_root_but_other_project_rejected(
+    tool_module, monkeypatch, tmp_proj
+):
+    """回归防线：仓内目录不再因"在插件代码布局之下"而被放行。
+
+    性质断言：归属判据与插件代码位置解耦——基座恒取坐标里的 project_root。
+    """
+    import asyncio
+
+    project = Path(tmp_proj) / "proj"
+    other = Path(tmp_proj) / "unrelated_dir"
+    project.mkdir()
+    other.mkdir()
+    monkeypatch.setattr(
+        tool_module,
+        "_state_reader",
+        lambda: _ws_rows("inrepo12345", other, project_root=other),
+    )
+    tool = tool_module.TaskSubmitTool()
+    meta, fail = asyncio.run(
+        tool._resolve_inherit_coordinate(
+            "inrepo12345",
+            {
+                "parent_ws_meta": {
+                    "mode": "plain",
+                    "path": str(Path(tmp_proj) / "base_dir"),
+                    "project_root": str(project),
+                }
+            },
+        )
+    )
+    assert meta is None
+    assert fail is not None
+    assert "另一个项目基座" in fail.error
+
+
+def test_inherit_without_any_base_allowed(tool_module, monkeypatch, tmp_path_factory):
+    """无父链坐标、无显式 workspace → 无基座可比，不做跨项目判定。
+
+    判据缺失不得退化成"按代码布局猜一个容器根"（那正是本缺陷本身）。
+    """
+    import asyncio
+
+    ws = tmp_path_factory.mktemp("no_base_ws")
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: _ws_rows("nobase1234567", ws))
+    tool = tool_module.TaskSubmitTool()
+    meta, fail = asyncio.run(tool._resolve_inherit_coordinate("nobase1234567", {}))
+    assert fail is None
+    assert meta is not None
+    assert meta["path"] == str(ws)
 
 
 def test_inherit_state_bridge_down_fail_honest(tool_module, monkeypatch):
@@ -739,16 +1014,17 @@ def test_inherit_state_bridge_down_fail_honest(tool_module, monkeypatch):
     import asyncio
 
     tool = tool_module.TaskSubmitTool()
-    path, fail = asyncio.run(tool._extract_inherited_workspace("ffffffffffff"))
-    assert path is None
+    meta, fail = asyncio.run(tool._resolve_inherit_coordinate("ffffffffffff"))
+    assert meta is None
     assert fail is not None
     assert "state 聚合不可用" in fail.error
 
 
-def test_inherit_worktree_source_serves_project_root(tool_module, monkeypatch, tmp_proj):
-    """worktree 源任务 → 继承坐标取 project_root（持久基座），不取合并后即删的副本。
+def test_inherit_worktree_source_serves_own_path(tool_module, monkeypatch, tmp_proj):
+    """worktree 源任务 → 继承坐标取其 worktree 自身路径（不再降级 project_root）。
 
-    性质断言：返回路径不含 __wt_（临时副本段），且与 project_root 相等。
+    性质断言：返回路径含 __wt_ 段且等于源 worktree 路径——旧实现把 worktree
+    源悄悄换成 project_root，"接续失败任务现场"语义落空（2026-10-20 事故根因）。
     """
     import asyncio
     import json as _json
@@ -758,11 +1034,14 @@ def test_inherit_worktree_source_serves_project_root(tool_module, monkeypatch, t
     project.mkdir()
     (project / ".git").mkdir()
     wt.mkdir()
+    (wt / ".git").write_text("gitdir: x", encoding="utf-8")
     rows = [
         {
             "pipeline_id": "wtsrc12345678",
             "task.id": "wtsrc12345678",
-            "ws_meta": _json.dumps(
+            "run_status": "failed",
+            "task.status": "failed",
+            "task.ws_meta": _json.dumps(
                 {
                     "path": str(wt),
                     "mode": "worktree",
@@ -774,14 +1053,16 @@ def test_inherit_worktree_source_serves_project_root(tool_module, monkeypatch, t
     ]
     monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
     tool = tool_module.TaskSubmitTool()
-    path, fail = asyncio.run(tool._extract_inherited_workspace("wtsrc12345678"))
+    meta, fail = asyncio.run(tool._resolve_inherit_coordinate("wtsrc12345678"))
     assert fail is None
-    assert path == str(project)
-    assert "__wt_" not in path
+    assert meta is not None
+    assert meta["path"] == str(wt)
+    assert "__wt_" in meta["path"]
+    assert meta["branch"] == "task/wtsrc12345678"
 
 
 def test_inherit_worktree_source_lost_git_rejected(tool_module, monkeypatch, tmp_proj):
-    """worktree 源 project_root 无 .git → git 身份失效拒绝（后续合并找不到仓库）。"""
+    """worktree 源 .git 失效 → git 身份失效拒绝（后续合并找不到分支）。"""
     import asyncio
     import json as _json
 
@@ -793,17 +1074,51 @@ def test_inherit_worktree_source_lost_git_rejected(tool_module, monkeypatch, tmp
         {
             "pipeline_id": "bare123456789",
             "task.id": "bare123456789",
-            "ws_meta": _json.dumps(
+            "run_status": "failed",
+            "task.status": "failed",
+            "task.ws_meta": _json.dumps(
                 {"path": str(wt), "mode": "worktree", "project_root": str(project)}
             ),
         }
     ]
     monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
     tool = tool_module.TaskSubmitTool()
-    path, fail = asyncio.run(tool._extract_inherited_workspace("bare123456789"))
-    assert path is None
+    meta, fail = asyncio.run(tool._resolve_inherit_coordinate("bare123456789"))
+    assert meta is None
     assert fail is not None
     assert "git 身份已失效" in fail.error
+
+
+def test_inherit_dead_coordinate_rejected_not_downgraded(tool_module, monkeypatch, tmp_proj):
+    """坐标已死（源已合并清理，目录不存在）→ 显式报错，不静默回落 project_root。"""
+    import asyncio
+    import json as _json
+
+    project = Path(tmp_proj) / "proj"
+    wt = Path(tmp_proj) / "proj__wt_gone"
+    project.mkdir()
+    rows = [
+        {
+            "pipeline_id": "dead123456789",
+            "task.id": "dead123456789",
+            "run_status": "completed",
+            "task.status": "completed",
+            "task.ws_meta": _json.dumps(
+                {
+                    "path": str(wt),
+                    "mode": "worktree",
+                    "branch": "task/dead123456789",
+                    "project_root": str(project),
+                }
+            ),
+        }
+    ]
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
+    tool = tool_module.TaskSubmitTool()
+    meta, fail = asyncio.run(tool._resolve_inherit_coordinate("dead123456789"))
+    assert meta is None
+    assert fail is not None
+    assert "工作空间已不存在" in fail.error
 
 
 def test_inherit_parent_ws_meta_never_serves_as_source_coordinates(
@@ -821,6 +1136,8 @@ def test_inherit_parent_ws_meta_never_serves_as_source_coordinates(
         {
             "pipeline_id": "owncoord12345",
             "task.id": "owncoord12345",
+            "run_status": "failed",
+            "task.status": "failed",
             "lineage.parent_ws_meta": _json.dumps(
                 {"path": str(Path(tmp_proj) / "sessions"), "mode": "plain"}
             ),
@@ -828,7 +1145,7 @@ def test_inherit_parent_ws_meta_never_serves_as_source_coordinates(
     ]
     monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
     tool = tool_module.TaskSubmitTool()
-    path, fail = asyncio.run(tool._extract_inherited_workspace("owncoord12345"))
-    assert path is None
+    meta, fail = asyncio.run(tool._resolve_inherit_coordinate("owncoord12345"))
+    assert meta is None
     assert fail is not None
-    assert "没有工作空间信息" in fail.error
+    assert "没有工作空间坐标" in fail.error

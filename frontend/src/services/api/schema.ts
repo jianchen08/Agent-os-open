@@ -26,6 +26,8 @@ export interface PluginUiWidget {
   trigger?: string
   /** 组件属性 */
   props?: Record<string, unknown>
+  /** 动作声明（动作名 → {uri, method?}；ContributionRegistry 声明期白名单校验，ADR 2026-10-10） */
+  actions?: Record<string, unknown>
 }
 
 /** 插件 ui_schema 结构 */

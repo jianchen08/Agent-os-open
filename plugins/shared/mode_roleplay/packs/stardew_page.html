@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>星露谷好感 · 玩法页</title>
+</head>
+<!--
+  自包含玩法页示范件（RP 面板 v3.1 刀1；刀4 起「工作区玩法页全 webview 化」
+  ——开演设置与游玩渲染都在本页内，面板只做入口）。
+  setup 阶段（无会话注入 + 包上下文在场）：读 data/packs 的 init_ui 声明渲染
+  （title/intro/show_variables/路线单选/词条多选），执行身份=包绑定卡（内定
+  免选角色卡，2026-10-17 用户裁定），
+  提交 = rp_init 快照串（`\,`/`\\` 转义契约走 rp-core 单源装配）+ 路线/词条
+  profile 拼 wizard_profile + wizard_pack_ids 玩法归属，走 mode.session 既有
+  开演路径；开演成功页内切游玩视图并广播 rp:session-bound（挂载方同窗同步）。
+  游玩数据面只消费既有载荷形态：GET /game/config（会话声明，回显卡 id）、
+  GET /game/state（宿主快照渲染状态条）、POST /game/turn（输入派发），零新
+  端点。会话 id 由宿主 document 注入通道 window.__RP_PAGE_SESSION__ 提供，
+  包上下文由 window.__RP_PAGE_PACK__ 提供（game_host / 面板挂载前写入；直开
+  本文件时两者皆空=只读空态）。serve-time 由 mode server 注入 rpSanitizeHtml /
+  agentosFetch / rp-core 单源（下方三装配标记）。
+-->
+<body class="rp-theme-stardew pg-root">
+<header class="pg-head">🌱 星露谷好感<span class="pg-sub" id="pg-session">未绑定会话</span></header>
+<section class="pg-setup" id="pg-setup"></section>
+<div class="pg-status" id="pg-status">状态条随宿主快照渲染（尚未获取）</div>
+<div class="pg-choices" id="pg-choices"></div>
+<main class="pg-log" id="pg-log"><div class="pg-empty">农场要点：送礼大增好感、交谈小增好感、入睡推进日期（阈值解锁见玩法规则）。</div></main>
+<div class="pg-input">
+  <input id="pg-text" placeholder="和镇民说点什么 / 送份礼物 / 入睡过夜……">
+  <button id="pg-send" type="button">送出</button>
+</div>
+<div class="pg-err" id="pg-err"></div>
+<script>
+/*@agentos-include:rp-sanitize*/
+/*@agentos-include:rp-bridge*/
+/*@agentos-include:rp-core*/
+(function () {
+  var session = String(window.__RP_PAGE_SESSION__ || '');
+  var packId = String(window.__RP_PAGE_PACK__ || '');
+  var polling = null;
+  // setup 选择态（页内自持，随重渲染回填）
+  var setupSel = { pack: null, cards: [], cardId: '', routeId: null, traitIds: [] };
+
+  function pgEsc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function showError(msg) { $('pg-err').textContent = msg || ''; }
+  function $(id) { return document.getElementById(id); }
+
+  // ── setup 阶段（无会话注入 + 包上下文在场）：init_ui 声明渲染 + 角色卡选择 ──
+  // 显隐切换只动页内元素类（#pg-setup.pg-live；主题 css 按其兄弟选择器收起
+  // 状态/日志/输入区）——不碰 document.body（document 注入形态下 body 根类由
+  // 挂载方自页面原文补挂，页脚本对 body 的类写入会污染宿主且作用域不成立）。
+  function setupShow() {
+    $('pg-setup').classList.add('pg-live');
+    $('pg-session').textContent = '开演设置';
+    agentosFetch('/ext/mode_roleplay/data/packs').then(function (res) {
+      var packs = (unwrap(res) || {}).packs || [];
+      packs.forEach(function (p) { if (p.id === packId) setupSel.pack = p; });
+      if (!setupSel.pack) {
+        showError('玩法包清点中找不到本页所属包（' + packId + '）：可点面板「刷新」重试');
+        return;
+      }
+      renderSetup();
+    }).catch(function (err) { showError('玩法包清点读取失败: ' + err.message); });
+    agentosFetch('/ext/mode_roleplay/data/cards').then(function (res) {
+      setupSel.cards = (unwrap(res) || {}).cards || [];
+      renderSetup();
+    }).catch(function () { setupSel.cards = []; renderSetup(); });
+  }
+
+  function renderSetup() {
+    var pack = setupSel.pack;
+    if (!pack) return;
+    var init = pack.init_ui || {};
+    var routes = init.routes || [];
+    var pools = init.trait_pools || [];
+    // 玩法内定角色（2026-10-17 用户裁定）：本包固定卡司，执行身份=包绑定卡
+    // （卡顶层 pack_ids 引用本包），开演免选角色卡——角色卡选择只存在于
+    // 「世界+角色」组合玩法（面板向导）。无绑定卡=显式报错不静默。
+    var boundCards = setupSel.cards.filter(function (c) {
+      return (c.pack_ids || []).indexOf(pack.id) > -1;
+    });
+    if (boundCards.length && boundCards.map(function (c) { return c.id; }).indexOf(setupSel.cardId) < 0) {
+      setupSel.cardId = boundCards[0].id;  // 内定身份锁定
+    }
+    var html = boundCards.length
+      ? '<div class="sd-row"><span class="sd-note">角色：内定（' + pgEsc(boundCards[0].name || boundCards[0].id) +
+        '）——本玩法固定卡司，无需选卡</span></div>'
+      : '<div class="sd-row"><span class="sd-note" style="color:#c0392b">本包未声明内定角色（包绑定卡缺席）：请在面板「向导开演」以组合玩法开局。</span></div>';
+    if (init.title || init.intro) {
+      html += '<h3>' + pgEsc(init.title || '开演设置') + '</h3>' +
+        (init.intro ? '<div class="sd-note">' + pgEsc(init.intro) + '</div>' : '');
+    }
+    if (init.show_variables) {
+      html += '<div class="sd-note">本包声明 ' + (pack.variables_count || 0) +
+        ' 个状态变量，开局按缺省档起算。</div>';
+    }
+    if (routes.length) {
+      html += '<h3>开局路线（单选）</h3><div class="sd-opts">' + routes.map(function (r) {
+        return '<label class="sd-opt"><input type="radio" name="pg-setup-route" value="' + pgEsc(r.id) + '"' +
+          (setupSel.routeId === r.id ? ' checked' : '') + ' data-testid="play-route-opt">' +
+          '<b>' + pgEsc(r.label || r.id) + '</b>' +
+          (r.profile ? '<span class="sd-note">' + pgEsc(r.profile) + '</span>' : '') + '</label>';
+      }).join('') + '</div>';
+    }
+    pools.forEach(function (pool) {
+      var opts = (pool.options || []).map(function (opt) {
+        var effects = opt.effects
+          ? '<span class="sd-note">' + pgEsc(Object.keys(opt.effects).map(function (k) {
+              return k + ' ' + opt.effects[k];
+            }).join('、')) + '</span>'
+          : '';
+        return '<label class="sd-opt"><input type="checkbox" data-trait="' + pgEsc(opt.id) + '"' +
+          (setupSel.traitIds.indexOf(opt.id) > -1 ? ' checked' : '') +
+          ' data-testid="play-trait-opt">' +
+          '<b>' + pgEsc(opt.label || opt.id) + '</b>' +
+          (opt.profile ? '<span class="sd-note">' + pgEsc(opt.profile) + '</span>' : '') + effects + '</label>';
+      }).join('');
+      html += '<h3>' + pgEsc(pool.label || pool.id) + '（多选）</h3><div class="sd-opts">' + opts + '</div>';
+    });
+    if (!routes.length && !pools.length && !init.title && !init.intro && init.show_variables === undefined) {
+      html += '<div class="sd-note">该玩法包未声明开演配置（init_ui）——内定角色直接开演即可。</div>';
+    }
+    html += '<div class="sd-row"><button id="pg-setup-start" class="sd-start" data-testid="pg-setup-start"' +
+      (boundCards.length ? '' : ' disabled') + '>🎬 开 新的一局</button>' +
+      '<span class="sd-note">开演后在本页游玩；对话在系统对话页进行。</span></div>';
+    $('pg-setup').innerHTML = html;
+  }
+
+  function setupStart() {
+    var pack = setupSel.pack;
+    var card = null;
+    setupSel.cards.forEach(function (c) { if (c.id === setupSel.cardId) card = c; });
+    if (!card) { showError('本包内定角色缺席（包绑定卡未装载）：可在面板「向导开演」以组合玩法开局'); return; }
+    var payload = {
+      mode: 'roleplay',
+      agent_id: 'mode_roleplay/' + card.id,
+      name: card.name,
+      title: '扮演·' + card.name,
+      first_message: '（开始）'
+    };
+    var extra = {};
+    if (card.first_mes) extra.roleplay_greeting = String(card.first_mes);
+    // 玩法归属：卡声明在前，本场包增量并入（会话跟着玩法走——继续上局归属面）
+    var packIds = (card.pack_ids || []).slice();
+    if (pack && packIds.indexOf(pack.id) < 0) packIds.push(pack.id);
+    if (packIds.length) extra.wizard_pack_ids = packIds.join(',');
+    // 玩法级管道绑定（批次一，调研 §6.4）：本场包声明管道透传（清点键
+    // pipeline，服务端已过登记校验）；无声明 = 键缺省（现役回落态零变化）
+    if (pack && pack.pipeline) payload.pipeline_config_id = pack.pipeline;
+    var init = (pack && pack.init_ui) || {};
+    var route = findRoute(init, setupSel.routeId);
+    var traits = findTraitOptions(init, setupSel.traitIds);
+    var profile = rpProfileFromSelection(route, traits, '');
+    if (profile) extra.wizard_profile = profile;
+    var initSnap = rpInitSnapshot(rpInitPairs(route, traits));
+    if (initSnap) extra.rp_init = initSnap;
+    if (Object.keys(extra).length) payload.extra_context = extra;
+    // 卡主题随扮演会话出生（批次四，与面板开演同键同语义）：无主题卡 = 键缺席
+    if (card.theme) payload.card_theme = card.theme;
+    showError('');
+    $('pg-setup-start').disabled = true;
+    agentosFetch('mode.session', payload).then(function (res) {
+      var out = unwrap(res) || {};
+      var sid = String(out.session_id || '');
+      if (!sid) {
+        $('pg-setup-start').disabled = false;
+        showError('开演回执缺会话 id：会话可能已创建，可刷新后从面板「继续上局」进入');
+        return;
+      }
+      session = sid;
+      // 挂载方同窗同步（面板/宿主更新会话锚；无监听者=无副作用）
+      try {
+        window.dispatchEvent(new CustomEvent('rp:session-bound', { detail: { sid: sid } }));
+      } catch (e) { /* 老宿主无 CustomEvent=表现层降级 */ }
+      enterPlay();
+    }).catch(function (err) {
+      $('pg-setup-start').disabled = false;
+      showError('开演失败: ' + err.message);
+    });
+  }
+
+  function renderStatus(snapState) {
+    var box = $('pg-status');
+    if (!snapState || !Object.keys(snapState).length) {
+      box.textContent = '暂无宿主快照（宿主接入后随快照渲染状态条）';
+      return;
+    }
+    var chips = [];
+    Object.keys(snapState).forEach(function (key) {
+      if (key.indexOf('npc.') === 0 && key.indexOf('.好感度') > 0) {
+        var name = key.slice(4, -3);
+        var val = snapState[key];
+        chips.push('<span class="sd-chip">' + pgEsc(name) +
+          ' <span class="sd-heart">♥</span> ' + pgEsc(val) + '/100</span>');
+      }
+    });
+    if (typeof snapState['world.季节'] === 'string' || typeof snapState['world.日期'] !== 'undefined') {
+      chips.push('<span class="sd-chip">' + pgEsc(snapState['world.季节'] || '') +
+        '·第 ' + pgEsc(snapState['world.日期'] || '?') + ' 天</span>');
+    }
+    box.innerHTML = chips.length ? chips.join('') : pgEsc(JSON.stringify(snapState));
+  }
+
+  // 挂载代际守卫：document 注入形态下本脚本随重挂载多次执行，旧实例的
+  // interval 不随旧 DOM 销毁而停——非当前代际的轮询自清（否则旧会话状态经
+  // getElementById 渗入新页面 DOM，且轮询请求数随重挂载次数叠加）。
+  var epoch = (window.__RP_PG_EPOCH__ = (window.__RP_PG_EPOCH__ || 0) + 1);
+
+  function poll() {
+    if (epoch !== window.__RP_PG_EPOCH__) {
+      if (polling) { clearInterval(polling); polling = null; }
+      return;
+    }
+    if (!session) return;
+    agentosFetch('/ext/mode_roleplay/game/state?session_id=' + encodeURIComponent(session))
+      .then(function (res) {
+        var out = unwrap(res) || {};
+        if (out.error) { showError(out.error); return; }
+        showError('');
+        renderStatus(out.snapshot && out.snapshot.state);
+      })
+      .catch(function (err) { showError('状态拉取失败: ' + err.message); });
+  }
+
+  function send() {
+    var input = $('pg-text');
+    var text = String(input.value || '').trim();
+    if (!session) { showError('未绑定会话（请从游戏宿主进入本页）'); return; }
+    if (!text) return;
+    $('pg-send').disabled = true;
+    agentosFetch('/ext/mode_roleplay/game/turn', {
+      session_id: session, text: text, service: 'main'
+    }).then(function (res) {
+      $('pg-send').disabled = false;
+      var out = unwrap(res) || {};
+      if (out.error) { showError(out.error); return; }
+      showError('');
+      input.value = '';
+      var log = $('pg-log');
+      var empty = log.querySelector('.pg-empty');
+      if (empty) empty.remove();
+      var line = document.createElement('div');
+      line.innerHTML = '<b>›</b> ' + rpSanitizeHtml(pgEsc(text));
+      log.appendChild(line);
+      poll();
+    }).catch(function (err) {
+      $('pg-send').disabled = false;
+      showError('发送失败: ' + err.message);
+    });
+  }
+
+  // ── 游玩视图进入（既有所绑会话 / setup 开演成功页内切换共用）────────────────
+  function enterPlay() {
+    var setupBox = $('pg-setup');
+    setupBox.classList.remove('pg-live');
+    setupBox.innerHTML = '';
+    $('pg-session').textContent = '会话 ' + session;
+    // 选项契约清单（pack choices）：点击=文本入输入区+自动发送（与 game_host 4e
+    // 同语义）——「选项声明必有消费位」标杆件（2026-10-17 标杆补齐）。
+    agentosFetch('/ext/mode_roleplay/game/config?session_id=' + encodeURIComponent(session))
+      .then(function (res) {
+        var out = unwrap(res) || {};
+        if (out.card_id) $('pg-session').textContent += ' · ' + out.card_id;
+        renderChoices(out.choices || []);
+      })
+      .catch(function () { renderChoices([]); /* 声明面失败不影响状态条轮询 */ });
+    poll();
+    polling = setInterval(poll, 5000);
+  }
+
+  function renderChoices(choices) {
+    var box = $('pg-choices');
+    if (!box) return;
+    if (!choices.length) { box.innerHTML = ''; return; }
+    box.innerHTML = choices.map(function (c, i) {
+      var hint = c && c.hint ? ' title="' + pgEsc(c.hint) + '"' : '';
+      var cat = c && c.category ? '<span class="sd-cat">' + pgEsc(c.category) + '</span>' : '';
+      return '<button type="button" class="sd-choice" data-ci="' + i + '"' + hint + '>' +
+        cat + pgEsc((c && c.text) || '') + '</button>';
+    }).join('');
+    box.__choices = choices;
+  }
+
+  function useChoice(i) {
+    var box = $('pg-choices');
+    var c = box && box.__choices ? box.__choices[i] : null;
+    if (!c || !c.text) return;
+    $('pg-text').value = String(c.text);
+    send();
+  }
+
+  $('pg-send').addEventListener('click', send);
+  $('pg-text').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') send();
+  });
+  // choices 按钮委托（容器常驻，renderChoices 重绘不重挂）
+  $('pg-choices').addEventListener('click', function (e) {
+    var t = e.target;
+    if (t && t.getAttribute && t.getAttribute('data-ci') !== null) {
+      useChoice(parseInt(t.getAttribute('data-ci'), 10));
+    }
+  });
+  // setup 表单事件委托（容器常驻，重渲染不重挂；内定免选卡=无选卡件分支）
+  $('pg-setup').addEventListener('change', function (e) {
+    var t = e.target;
+    if (!t || typeof t.getAttribute !== 'function') return;
+    if (t.name === 'pg-setup-route') {
+      setupSel.routeId = t.value;
+      renderSetup();
+    } else if (t.type === 'checkbox' && t.getAttribute('data-trait') !== null) {
+      var v = t.getAttribute('data-trait');
+      var i = setupSel.traitIds.indexOf(v);
+      if (i > -1) setupSel.traitIds.splice(i, 1); else setupSel.traitIds.push(v);
+    }
+  });
+  $('pg-setup').addEventListener('click', function (e) {
+    if (e.target && e.target.id === 'pg-setup-start') setupStart();
+  });
+
+  // 页内分流（刀4）：有会话注入=游玩视图；无会话但有包上下文=setup 视图；
+  // 两者皆缺（直开本文件）=只读空态。
+  if (session) {
+    enterPlay();
+  } else if (packId) {
+    setupShow();
+  } else {
+    $('pg-session').textContent = '只读空态（无会话注入）';
+  }
+})();
+</script>
+</body>
+</html>

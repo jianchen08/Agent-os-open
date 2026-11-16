@@ -27,7 +27,7 @@ pub use aggregator::{
 };
 pub use broadcast::{collect_broadcast_snapshot, MetricBroadcaster, BROADCAST_PREFIXES};
 pub use capability::MetricsAdminCapabilityHandler;
-pub use counters::{KernelCounters, KernelCountersSnapshot};
+pub use counters::{CrateStaticCounterFlush, KernelCounters, KernelCountersSnapshot};
 pub use export::{export_prometheus, format_label_pairs};
 pub use lifecycle::spawn_lifecycle_metrics_subscriber;
 pub use plugin_widget_broadcast::{

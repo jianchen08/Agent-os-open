@@ -1,0 +1,7 @@
+# security_check settings 命名空间——经 manifest config_files（id=settings）
+# 注入 get_config()["settings"]（{"settings": {...}} 嵌套形态，notify_judge/
+# host_context 同款）。缺失项回落插件代码默认。
+# 权限模式持久化文件落点覆盖（permission_modes_file）：仅在用户空间
+# （user_space.user_data_dir）不可用的回落分支生效——主落点恒为用户数据根
+# （读写同源公理）。留空 = plugins/shared/data/permission_modes.json（历史缺省）。
+permission_modes_file: ""

@@ -1,4 +1,39 @@
 # plugins/ + mcp-servers/ ruff 基线棘轮（只减不增）——check_ruff_baseline.py 消费
 # 首跑基线 2026-09-24（执行方案批次2）：plugins 1554(py312修复后) + mcp-servers 36(0-6摘除排除后实测) = 1590
 # 实质项优先清偿：F401×43/PLW0108×38/F841×24；风格项大头 PT018/ARG005 随批滚动
-ruff_findings=1419
+# 批2-Ⅱ（2026-10-11）1419→1402：mode_roleplay/server.py PTH208/PTH122 触碰即清 + agent_config_load 声明面重排净减
+# B-Ⅱ（2026-10-11）1402→1396：扩展波B-Ⅱ 触碰即清——mode_roleplay/server.py 扫描器收编 card_lint 净减 + mode_evolution/proposal.py 重写净减
+# 审计低风险修复波（2026-10-14）1396→1394：_host/host.py PTH114 触碰即清 + isolation/hardware_profile.py PLW1510 显式 check=False
+# 推送前全量核账（2026-10-14）1394→1462：离线开发窗（未推送 153 提交）内测试文件风格项（PT018/ARG005 族为主）
+# 无门禁运行积累 +68，本会话触碰文件净增 0（HEAD 干净树实测同值）；按基线改动走 commit 留归因上调，
+# 测试文件风格项清偿记治理候选（拍平台账 R6）。
+# C2 契约刀（2026-10-14）1462→1458：monitoring/server.py 死 import（traces_usage 单点迁 kernel_db 契约）+ cost_control/server.py 触碰即清（F401 sys/os×2、B007×2、PLW2901×2、PTH105）净减 4。
+# C2/C3 刀3（2026-10-15）1458→1457：mode_evolution/final_collect.py 死 import yaml（F401，脚本 HTTP 化触碰即清）净减 1。
+# 推送前全量核账（2026-10-16）1457→1477：①记账失真更正——58e1a7ff9 记 1457 但其提交树
+# 今日实测 1480（ruff 0.15.20 两时点同版，口径漂移成因未复现，以实测为准）；②区间
+# （58e1a7ff9..HEAD）文件级对账净 -3：新增 +7（task_evaluate/test_tool_extra +3、
+# browser/test_browser_server +2、state_marker_parse/test_state_contract +1、llm/adapter +1，
+# 均测试/适配器风格项）对冲存量净减 -10（isolation/test_policy -3、hindsight_memory/
+# test_kb_sort_compat -2、browser/server -2、llm/test_env_read_observability -1、
+# web_ext/server -1、download/server -1）；③本会话触碰文件净增 0（metrics 单源化与
+# community_ops 注入两组触碰即清 N806/UP037 各 1）。测试文件风格项清偿续记治理候选。
+# E2 收账（2026-10-16）1477→1471：E2 共享根 API 化刀触碰即清净减 6（88 消费文件
+# import 切换面），调度方 --init 收紧留归因（E2 台账遗留④）。
+# 推送前核账（2026-10-17）1471→1462：区间改动 43 文件对账超基线 29（1500 实测），
+# 触碰即清自动修 39（PT018 断言拆分/PT006-007 parametrize 形态/F401-F841 死代码/
+# ARG005 下划线参数，集中于 mode_tests/human/notification_sounds/prompt_build/
+# workspace 测试文件），净收紧 9；CJK 测试名（workspace test_workspace_service）
+# 与 E402 引导导入族续记治理候选。
+# P-20/U-2 交互提醒接线刀（2026-10-29）1462→1460：human/test_human_server.py
+# 触碰即清 PT018 断言拆分×2（_load_server 与自插引导两处）净减 2。
+# payload-diag 锚定刀（2026-11-02）1460→1378：SDK payload_diag_dir 单源收敛，
+# monitoring/server.py 删 _resolve_project_root 净减 F401×1；余 81 条为前序
+# 提交已清偿但基线未跟的存量漂移归并（本刀未触碰那些行）。
+# 声明制持久写面 + 触发器键迁移刀（2026-11-04）1378→1375：triggers_ext/
+# tasks 触碰测试净减 3（新增迁移/判据用例未引入新违规）。
+# L5 超时后处置 + litellm 退役尾巴清零刀（2026-11-05）1370→1365：
+# llm 插件触碰即清（本刀新增文件零违规 + test_adapter_branches 死钩子桩域
+# 移除净减 2 + 测试改名重排净减 3），测试文件风格项清偿续记治理候选。
+ruff_findings=1365
+# X 批钩子/服务通道刀（2026-11-04）1375→1370：translator/bridge/server/manager
+# 新增用例触碰即清 PT018 断言拆分净减 5（无新增违规）。

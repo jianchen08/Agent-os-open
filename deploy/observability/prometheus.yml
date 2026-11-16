@@ -1,0 +1,15 @@
+# AgentOS 内核指标抓取（dev 9100 / 装机 9101，默认按装机写）
+# 令牌由 refresh_metrics_token.py 定时刷新（access token 30min 过期），
+# bearer_token_file 每次抓取重读文件，刷新无需重启 Prometheus。
+global:
+  scrape_interval: 15s
+  scrape_timeout: 5s
+
+scrape_configs:
+  - job_name: agentos-kernel
+    metrics_path: /metrics
+    scheme: http
+    bearer_token_file: /etc/prometheus/secrets/metrics_token
+    static_configs:
+      - targets:
+          - "host.docker.internal:9101"

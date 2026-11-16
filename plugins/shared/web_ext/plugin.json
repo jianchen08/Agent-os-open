@@ -1,0 +1,115 @@
+{
+  "id": "web_operate_tool",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Web Operate Tool",
+  "description": "Web 操作 MCP 工具（HTTP 请求和网页抓取）",
+  "version": "1.0.4",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "metrics_class": "tool",
+    "tools": [
+      {
+        "name": "web_operate",
+        "description": "Web 操作工具：执行 HTTP 请求和网页抓取。支持 GET/POST 请求和网页内容抓取。使用场景：调用外部 API；抓取网页内容；发送 HTTP 请求获取远程数据。限制：请求默认 30 秒超时；响应大小限制为 10MB；某些域名可能被安全策略阻止。",
+        "render": {
+          "card": "web"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "get",
+                "post",
+                "fetch"
+              ],
+              "default": "get",
+              "description": "操作类型：get（HTTP GET 请求）、post（HTTP POST 请求）、fetch（抓取网页并提取内容）"
+            },
+            "url": {
+              "type": "string",
+              "description": "目标 URL，支持 http 和 https 协议"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "请求头（可选），自定义 HTTP 请求头，如 {'Authorization': 'Bearer token'}"
+            },
+            "data": {
+              "type": [
+                "object",
+                "array"
+              ],
+              "description": "请求体数据（可选，仅 action=post 时使用），对象或数组，将作为 JSON 发送"
+            },
+            "params": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "URL 查询参数（可选），将自动附加到 URL 后"
+            },
+            "timeout": {
+              "type": "integer",
+              "default": 30,
+              "description": "超时时间（秒，可选），默认 30 秒"
+            },
+            "extract_text": {
+              "type": "boolean",
+              "default": true,
+              "description": "是否提取纯文本（可选，仅在 fetch 时有效），默认 true，将去除 HTML 标签返回纯文本"
+            }
+          },
+          "required": [
+            "url"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "type": "integer",
+              "description": "HTTP 状态码（<400 才走成功通道）"
+            },
+            "data": {
+              "description": "get/post：响应体（JSON 任意型或抽取正文串）"
+            },
+            "text": {
+              "type": "string",
+              "description": "fetch+extract_text"
+            },
+            "html": {
+              "type": "string",
+              "description": "fetch 未抽取正文"
+            }
+          }
+        }
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "permissions": {},
+  "priority": 30,
+  "config_files": [
+    {
+      "id": "web_operate",
+      "path": "config/plugins/web_ext/web_operate.yaml",
+      "label": "网页操作配置"
+    }
+  ],
+  "host_group": "light"
+}

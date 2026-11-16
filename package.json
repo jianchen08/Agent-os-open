@@ -1,6 +1,6 @@
 {
   "name": "agent-os",
-  "version": "0.1.0",
+  "version": "0.2.2",
   "description": "灵汐 AgentOS - 高度可配置化、自进化的 AI Agent 平台",
   "license": "Apache-2.0",
   "repository": {
@@ -12,8 +12,9 @@
   "scripts": {
     "electron": "electron .",
     "electron:dev": "concurrently \"npm run dev --prefix frontend\" \"wait-on http://localhost:5188 && electron .\"",
-    "electron:build": "node scripts/sanitize_packaged_config.mjs && python scripts/check_kernel_freshness.py && python scripts/check_clean_tree.py && npm run build --prefix frontend && tsc -p electron/tsconfig.json && electron-builder && python scripts/check_packaged_layout.py release/win-unpacked && python scripts/packtest_smoke.py --exe release/win-unpacked/灵汐助手.exe --cdp-port 9223 --timeout 420",
-    "electron:build:skip-packtest": "node scripts/sanitize_packaged_config.mjs && python scripts/check_kernel_freshness.py && python scripts/check_clean_tree.py && npm run build --prefix frontend && tsc -p electron/tsconfig.json && electron-builder && python scripts/check_packaged_layout.py release/win-unpacked",
+    "electron:build": "python scripts/check_ci_gate.py --kind package --local && node scripts/check_prereqs.mjs && npm run build:cdylibs && node scripts/sanitize_packaged_config.mjs && python scripts/check_kernel_freshness.py && python scripts/check_clean_tree.py && npm run build --prefix frontend && tsc -p electron/tsconfig.json && npm run check:cdylibs && electron-builder --publish never && python scripts/check_packaged_layout_gate.py && node scripts/place_release_artifacts.mjs",
+    "build:cdylibs": "node scripts/build_cdylibs.mjs",
+    "check:cdylibs": "node scripts/check_cdylibs_carried.mjs",
     "electron:compile": "tsc -p electron/tsconfig.json",
     "electron:compile:watch": "tsc -p electron/tsconfig.json --watch",
     "test": "python scripts/run_gates.py --mode fast",
@@ -21,6 +22,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
+    "@types/ws": "^8.18.2",
     "concurrently": "^9.1.0",
     "electron": "^39.2.0",
     "electron-builder": "^26.0.12",
@@ -39,6 +41,10 @@
       "frontend/public/**/*"
     ],
     "extraResources": [
+      {
+        "from": "frontend/dist",
+        "to": "frontend/dist"
+      },
       {
         "from": "plugins/shared",
         "to": "plugins/shared",
@@ -94,14 +100,34 @@
         {
           "from": "kernel/target/release/agentos-kernel.exe",
           "to": "kernel/agentos-kernel.exe"
+        },
+        {
+          "from": "electron/prereqs/rclone.exe",
+          "to": "bin/rclone.exe"
+        },
+        {
+          "from": "electron/prereqs/winfsp-2.1.25156.msi",
+          "to": "prereqs/winfsp-2.1.25156.msi"
+        },
+        {
+          "from": "electron/prereqs/uv.exe",
+          "to": "prereqs/uv.exe"
+        },
+        {
+          "from": "electron/prereqs/python",
+          "to": "prereqs/python"
+        },
+        {
+          "from": "electron/prereqs/wheels",
+          "to": "prereqs/wheels"
         }
       ]
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "include": "electron/nsis/installer-custom.nsh",
-      "artifactName": "${productName}-Setup-${version}.${ext}"
+      "perMachine": true,
+      "include": "electron/nsis/installer-custom.nsh"
     },
     "mac": {
       "target": [
@@ -135,5 +161,8 @@
   },
   "overrides": {
     "shell-quote": "1.9.0"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
   }
 }

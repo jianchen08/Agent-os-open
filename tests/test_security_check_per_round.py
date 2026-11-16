@@ -1,7 +1,7 @@
 # @feature: FP-0.2.二 | @vision: V2 安全
 from tests._pipeline_plugin_path import add_plugin_dir
 
-add_plugin_dir("input", "security_check")
+add_plugin_dir("security_check")
 import plugin as sc_mod  # noqa: E402
 
 """security_check 审批闸门回归测试。
@@ -27,7 +27,7 @@ from typing import Any  # noqa: E402
 from unittest.mock import AsyncMock
 
 import pytest
-from pipeline.plugin import PluginContext
+from _libs.pipeline_base.plugin import PluginContext
 
 from tests._security_check_harness import (
     make_tool_ctx,

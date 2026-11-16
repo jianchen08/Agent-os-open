@@ -4,15 +4,18 @@ import { API_ENDPOINTS } from '@/constants/api'
 import { fetchSchemaCached, invalidateSchemaCache } from '@/hooks/queries/useSchemaQuery'
 import apiClient from '@/services/api/client'
 import { loadDshAdapterContributions } from '@/services/dshAdapter'
+import { loadFileViewers } from '@/services/fileViewerRegistry'
 import { validatePluginDeclaration } from '@/services/pluginDeclarationValidate'
-import { syncPluginStyles, removeAllPluginStyles } from '@/services/pluginStyles'
+import { syncPluginStylesForSession, removeAllPluginStyles } from '@/services/pluginStyles'
 import { commandDispatcher } from '@/services/schema/commandDispatcher'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
 import { shortcutRegistry } from '@/services/schema/shortcutRegistry'
+import { slotRegistry } from '@/services/slots/slotRegistry'
 import { disposeResyncOnSchema, initResyncOnSchema } from '@/services/websocket/resync'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import { useThemeStore } from '@/stores/themeStore'
 import { loadChatCardDeclarations } from '@/utils/chatCardInterpreter'
 import { loadInteractionModes } from '@/utils/interactionModes'
@@ -123,6 +126,24 @@ async function reloadContributionRegistry(): Promise<void> {
           `插件声明降级警告（${declResult.warnings.length} 处）:\n${declResult.warnings.slice(0, 20).join('\n')}`,
         )
       }
+      // 文件查看器声明（ADR 2026-10-24-file-viewer-declarative）：插件
+      // contributes.file_viewers 装载到查看器注册表（插件声明优先于自带内置表，
+      // 未命中落默认文本编辑器）；打开链路（openFile/文件树点击）据此路由。
+      // 坏条目在注册表内 fail-closed 丢弃，不参与上方校验语义。
+      loadFileViewers(
+        ((schemaVal.plugin_contributes as Array<Record<string, unknown>> | undefined) ?? []) as Array<{
+          plugin_id?: string
+          contributes?: Record<string, unknown>
+        }>,
+      )
+      // C4 槽位扩展机制（设计真值 = docs/working/DSH生态嫁接通用机制设计_20261104.md
+      // §4.4）：contributes.slots 首类声明 + 存量收敛翻译（pages(space=workspace)→
+      // workspace.tab、modal→shell.overlay）。fail-closed 逐条校验；引用动态
+      // widget 的插件经 W 通用加载器装载后做声明↔注册一致性终验。坏条目报错跳过
+      // （getLoadErrors 可查），不影响同插件/他插件合法条目。
+      await slotRegistry.loadFromSchema(
+        schemaVal as Parameters<typeof slotRegistry.loadFromSchema>[0],
+      )
     } catch (err) {
       loggers.websocket.warn('插件声明校验异常:', err)
     }
@@ -134,9 +155,23 @@ async function reloadContributionRegistry(): Promise<void> {
 
     // 插件视觉贡献同步（contributes.themes / client_styles）：
     // - 主题：插件主题合入主题列表；当前用的插件主题被移除（插件禁用）→ 回退 base
-    // - CSS：以注册表为权威注入新样式 / 移除失效样式（禁用插件无残留）
+    // - CSS：以注册表为权威注入新样式 / 移除失效样式（禁用插件无残留）；
+    //   带 modes 会话域门的声明按活跃会话 modeBinding 裁决（ADR 2026-10-14
+    //   message-card-body-form——schema 重载不得把会话域内样式误清）
     useThemeStore.getState().syncPluginThemes()
-    syncPluginStyles(contributionRegistry.getClientStyles())
+    syncPluginStylesForSession(
+      contributionRegistry.getClientStyles(),
+      useSessionStore.getState().activeSessionId,
+    )
+    // 净装态自动引导（§5.2 配置缝呈现层）：声明面就绪后判定一次（内部
+    // sessionStorage 会话旗标保证每启动至多一弹）；自身失败不回传（引导是
+    // 便利路径，不得放大成插件功能整体不可用告警）
+    try {
+      const { maybeAutoOpenOnboarding } = await import('@/services/onboarding/autoOpen')
+      await maybeAutoOpenOnboarding()
+    } catch (err) {
+      loggers.websocket.warn('onboarding 自动引导判定失败（下次 schema 事件重试）:', err)
+    }
   } catch (error) {
     loggers.websocket.warn('ContributionRegistry 加载失败:', error)
     // 可见降级（FE11）：插件贡献（pages/导航/命令/卡片）单一装载点失败时
@@ -146,12 +181,12 @@ async function reloadContributionRegistry(): Promise<void> {
       _lastSchemaLoadNotifyAt = now
       useNotificationStore.getState().addNotification({
         category: 'error',
-        title: '插件贡献加载失败',
+        title: '插件功能加载失败',
         message: `页面/导航/命令等插件功能暂不可用（${error instanceof Error ? error.message : String(error)}），将在下次 schema 更新时自动重试。`,
         priority: 'normal',
         isBlocking: false,
         autoDismissMs: 10_000,
-        sourceLabel: '前端',
+        sourceLabel: '系统',
       })
     }
   }
@@ -173,6 +208,8 @@ export function destroyGrowthLoop(): void {
   // 先注销 resync 订阅并取消未触发的防抖（globalWS.disconnect 也会清 handler，双保险）
   disposeResyncOnSchema()
   contributionRegistry.clear()
+  // 槽声明注册表随闭环销毁清空（防跨会话幽灵条目）
+  slotRegistry.clear()
   // 插件注入样式随闭环销毁清除（防跨会话残留）
   removeAllPluginStyles()
   const store = useLayoutModeStore.getState()

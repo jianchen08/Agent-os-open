@@ -1,7 +1,8 @@
 """channels 测试公共配置。
 
-0.2 架构下通道插件位于 plugins/shared/system/channel_*，每个插件的 server.py
-把自身目录加入 sys.path 以支持平铺 import（如 `from adapter import ...`）。
+拍平布局（ADR 2026-10-13-plugin-flat-layout）下通道插件位于
+plugins/shared/channel_*，每个插件的 server.py 把自身目录加入 sys.path
+以支持平铺 import（如 `from adapter import ...`）。
 
 注意：多个通道插件各自都有 adapter.py / stream_client.py 等同名模块，
 若把多个通道目录同时加入 sys.path 会产生同名歧义（先入者胜），且
@@ -15,21 +16,21 @@ import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared" / "system"
+_SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
 
 # 通道插件名 → 目录
 _CHANNEL_DIRS: dict[str, Path] = {
-    "feishu": _SYSTEM_DIR / "channel_feishu",
-    "dingtalk": _SYSTEM_DIR / "channel_dingtalk",
-    "qq": _SYSTEM_DIR / "channel_qq",
-    "wecom": _SYSTEM_DIR / "channel_wecom",
-    "cli": _SYSTEM_DIR / "channel_cli",
+    "feishu": _SHARED_DIR / "channel_feishu",
+    "dingtalk": _SHARED_DIR / "channel_dingtalk",
+    "qq": _SHARED_DIR / "channel_qq",
+    "wecom": _SHARED_DIR / "channel_wecom",
+    "cli": _SHARED_DIR / "channel_cli",
 }
 
 # 渠道共享包（C1 合流 2026-08-20）：input_adapter/output_adapter/base_combo_adapter
 # 的单一事实源。镜像 server.py 的接线纪律：sys.path.**append**（绝不 insert(0)，
 # 避免遮蔽其他插件同名模块）。
-_CHANNEL_COMMON_DIR = _SYSTEM_DIR / "channel_common"
+_CHANNEL_COMMON_DIR = _SHARED_DIR / "channel_common"
 
 # 各通道目录下可能发生跨通道同名冲突的模块名（按需维护）。
 # 注：input_adapter/output_adapter/base_combo_adapter/pipeline_types 四名
@@ -45,7 +46,7 @@ _AMBIGUOUS_MODULES = {
     # helpers：wecom/qq 两通道目录各有 helpers.py，跨通道先入缓存会互相命中
     "helpers",
     # workspace：跨目录同名（tasks/workspace.py、isolation/workspace.py 模块
-    # vs system/workspace/ 包）——逐出确保重新解析到 system/workspace/ 包
+    # vs workspace/ 包）——逐出确保重新解析到 workspace/ 包
     "workspace",
     "workspace_service",
 }
@@ -73,10 +74,10 @@ def use_channel(channel: str) -> None:
         sys.modules.pop(m, None)
     # 移除含同名 workspace.py 的平铺目录（pytest 收集其它插件测试（tasks 等）时
     # 会把其目录插入 sys.path）：裸 `import workspace` 会命中 tasks/workspace.py
-    # 模块而压过 system/workspace/ 包（PathFinder 模块优先于 namespace 包）。
+    # 模块而压过 workspace/ 包（PathFinder 模块优先于 namespace 包）。
     # 此处移除保证通道测试的 `from workspace.workspace_service import`
-    # 解析到 0.2 真相源 system/workspace/ 包。
-    for _conflict in (_SYSTEM_DIR / "tasks", _SYSTEM_DIR / "isolation"):
+    # 解析到 0.2 真相源 workspace/ 包。
+    for _conflict in (_SHARED_DIR / "tasks", _SHARED_DIR / "isolation"):
         _s = str(_conflict)
         if _s in sys.path:
             sys.path.remove(_s)

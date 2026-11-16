@@ -55,16 +55,45 @@ const LOGIN_FAILURES_MAX_ENTRIES: usize = 10_000;
 // 进程内计数即全量状态，重启清零。多实例/反代横向扩容部署需外置限流
 // （网关或共享存储），本实现不覆盖——升级触发条件=部署形态变更。
 
+/// 滑动窗口起点：`now - window` 的饱和形式。Windows 上 Instant 自系统开机
+/// 起算，裸减法在开机未满窗口宽（15 min）时下溢 panic——生产实锤
+/// （2026-10-13 装机版 /auth/login 崩溃循环，全部落在开机 6~14.5 分钟）。
+/// `None` = 窗口起点早于单调时钟纪元：进程内限流计数重启即清零，现存记录
+/// 必然全部在窗口内，调用方按「全保留」消费（`is_none_or`）；误清（如
+/// `unwrap_or(now)` 式回退）= 窗口内爆破防护失效。
+fn sliding_window_cutoff(
+    now: std::time::Instant,
+    window: std::time::Duration,
+) -> Option<std::time::Instant> {
+    now.checked_sub(window)
+}
+
 /// 清理窗口外失败并判定：窗口内失败次数 ≥ 上限 → 429 + Retry-After。
 /// 表级设界：顺带清空窗口全滑出的条目；条目数超上限（未认证 DoS 面：
 /// 随机用户名刷失败）时逐出窗口起点最早的一条——限流对最旧用户名提前
 /// 失忆，属可用性微损，换取内存有界。
 fn login_rate_check(state: &AppState, username: &str) -> Result<(), ApiError> {
-    let now = std::time::Instant::now();
-    let cutoff = now - std::time::Duration::from_secs(LOGIN_FAILURE_WINDOW_SECS);
+    login_rate_check_at(
+        std::time::Instant::now(),
+        std::time::Duration::from_secs(LOGIN_FAILURE_WINDOW_SECS),
+        state,
+        username,
+    )
+}
+
+/// 限流判定核心（时钟/窗口注入点）：生产路径由外层供真实时钟与常量；
+/// 测试注入超宽窗口（u64::MAX 秒）即可确定性复现「开机未满窗口宽」的
+/// 下溢分支——std 无法构造开机前的 Instant，裸减法不可测且必 panic。
+fn login_rate_check_at(
+    now: std::time::Instant,
+    window: std::time::Duration,
+    state: &AppState,
+    username: &str,
+) -> Result<(), ApiError> {
+    let cutoff = sliding_window_cutoff(now, window);
     let mut failures = state.login_failures.lock();
     failures.retain(|_, queue| {
-        queue.retain(|t| *t > cutoff);
+        queue.retain(|t| cutoff.is_none_or(|c| *t > c));
         !queue.is_empty()
     });
     while failures.len() >= LOGIN_FAILURES_MAX_ENTRIES && !failures.contains_key(username) {
@@ -107,10 +136,22 @@ fn clear_login_failures(state: &AppState, username: &str) {
 
 /// 注册限频判定 + 占位：窗口内尝试 ≥ 上限 → 429 + Retry-After；否则记录本次。
 fn register_rate_check(state: &AppState) -> Result<(), ApiError> {
-    let now = std::time::Instant::now();
-    let cutoff = now - std::time::Duration::from_secs(REGISTER_WINDOW_SECS);
+    register_rate_check_at(
+        std::time::Instant::now(),
+        std::time::Duration::from_secs(REGISTER_WINDOW_SECS),
+        state,
+    )
+}
+
+/// 注册限频核心（时钟/窗口注入点）：注入契约同 `login_rate_check_at`。
+fn register_rate_check_at(
+    now: std::time::Instant,
+    window: std::time::Duration,
+    state: &AppState,
+) -> Result<(), ApiError> {
+    let cutoff = sliding_window_cutoff(now, window);
     let mut attempts = state.register_attempts.lock();
-    attempts.retain(|t| *t > cutoff);
+    attempts.retain(|t| cutoff.is_none_or(|c| *t > c));
     if attempts.len() >= REGISTER_MAX_ATTEMPTS {
         return Err(ApiError::TooManyRequests {
             message: format!("注册请求过于频繁，请 {REGISTER_WINDOW_SECS} 秒后重试"),
@@ -1399,7 +1440,6 @@ mod tests {
         let verified = verify_access_token(token).expect("有效 access token 应校验通过");
         assert_eq!(verified.username, "admin");
         assert!(!verified.user_id.is_empty());
-        assert_eq!(verified.tenant_id, DEFAULT_TENANT_ID);
     }
 
     #[test]
@@ -1429,10 +1469,11 @@ mod tests {
     }
 
     #[test]
-    fn verify_access_token_unknown_user_passes_handshake_with_empty_tenant() {
-        // 握手阶段 verify_access_token 同步上下文无法查 store，故不校验用户
-        // 存在性——签名合法 + 未过期 + access 类型即放行，tenant_id 对未知用户
-        // 留空。真正的用户存在性 + tenant 解析在 dispatch 时由
+    fn verify_access_token_unknown_user_passes_sync_token_check() {
+        // verify_access_token 是同步纯 token 面（无 store 可查）：签名合法 +
+        // 未过期 + access 类型即放行，不做用户存在性判定。存在性由 WS 会话入口
+        // run_ws_session_with_auth 握手后按 store 复用 find_user_by_id 权威校验
+        // （已删用户 4001 拒连），tenant 解析在 dispatch 时由
         // resolve_tenant_id_by_user（async，查 DB）权威完成。
         let ghost = scaffold_user("no-such-user-id", "ghost");
         let token =
@@ -1440,10 +1481,6 @@ mod tests {
         let verified = verify_access_token(&token).expect("格式合法的 access token 应通过握手");
         assert_eq!(verified.user_id, "no-such-user-id");
         assert_eq!(verified.username, "ghost");
-        assert_eq!(
-            verified.tenant_id, "",
-            "未知用户的 tenant_id 应为空（dispatch 时解析）"
-        );
     }
 
     // ── 持久化用户系统 + 多租户隔离 ──
@@ -2020,6 +2057,106 @@ mod tests {
         );
     }
 
+    // ── 开机未满窗口宽：Instant 减法下溢饱和回归（生产实锤 2026-10-13） ──
+    //
+    // Windows 上 Instant 自系统开机起算，裸 `now - 窗口宽` 在开机 15 分钟内
+    // 必下溢 panic（内核崩溃循环）。std 无法构造开机前的 Instant，测试以
+    // u64::MAX 秒超宽窗口确定性驱动同一下溢分支（任意机器、任意 uptime）。
+
+    #[test]
+    fn sliding_window_cutoff_saturates_instead_of_panicking() {
+        let now = std::time::Instant::now();
+        // 下溢分支：必然返回 None 而非 panic（修复前此处裸减法必炸）。
+        assert!(sliding_window_cutoff(now, std::time::Duration::from_secs(u64::MAX)).is_none());
+        // 常规分支：窗口起点不晚于判定时刻，且距今不超过窗口宽。
+        let cutoff = sliding_window_cutoff(now, std::time::Duration::from_secs(60)).unwrap();
+        assert!(cutoff <= now);
+        assert!(now.duration_since(cutoff) <= std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn login_rate_underflow_branch_counts_boot_failures() {
+        // cutoff 饱和为 None：现存记录必然全在窗口内 → 照常计数限流；
+        // 误清语义（unwrap_or(now) 式回退）会在同输入下漏放行为 Ok。
+        let state = AppState::new();
+        let now = std::time::Instant::now();
+        {
+            let mut failures = state.login_failures.lock();
+            failures.insert(
+                "boot_user".to_string(),
+                (0..LOGIN_MAX_FAILURES).map(|_| now).collect(),
+            );
+        }
+        let err = login_rate_check_at(
+            now,
+            std::time::Duration::from_secs(u64::MAX),
+            &state,
+            "boot_user",
+        )
+        .expect_err("下溢分支必须按窗口内满额照常限流");
+        assert!(matches!(err, ApiError::TooManyRequests { .. }));
+        assert!(
+            state.login_failures.lock().contains_key("boot_user"),
+            "全保留语义：纪元前（即全部）记录不得误清"
+        );
+    }
+
+    #[test]
+    fn login_rate_window_semantics_recent_counted_aged_slide_out() {
+        // 注入时钟的窗口语义两组对照（无真实等待，判定结果与机器 uptime 无关）：
+        // 5 分钟前记录 → 窗口内照常计数（cutoff 表示合法时走 Some，非法时走
+        // None 全保留——两条路径对「记录未滑出」必须同判 429）；
+        // 16 分钟前记录 → 滑出即过期放行（恒走 Some 分支）。
+        let state = AppState::new();
+        let t0 = std::time::Instant::now();
+        {
+            let mut failures = state.login_failures.lock();
+            failures.insert(
+                "u5m".to_string(),
+                (0..LOGIN_MAX_FAILURES).map(|_| t0).collect(),
+            );
+            failures.insert(
+                "u16m".to_string(),
+                (0..LOGIN_MAX_FAILURES).map(|_| t0).collect(),
+            );
+        }
+        let err = login_rate_check_at(
+            t0 + std::time::Duration::from_secs(5 * 60),
+            std::time::Duration::from_secs(LOGIN_FAILURE_WINDOW_SECS),
+            &state,
+            "u5m",
+        )
+        .expect_err("未滑出窗口的失败记录必须照常限流");
+        assert!(matches!(err, ApiError::TooManyRequests { .. }));
+        login_rate_check_at(
+            t0 + std::time::Duration::from_secs(16 * 60),
+            std::time::Duration::from_secs(LOGIN_FAILURE_WINDOW_SECS),
+            &state,
+            "u16m",
+        )
+        .expect("滑出窗口的历史失败必须放行（过期即过期）");
+    }
+
+    #[test]
+    fn register_rate_underflow_and_slide_out() {
+        let state = AppState::new();
+        let t0 = std::time::Instant::now();
+        for _ in 0..REGISTER_MAX_ATTEMPTS {
+            state.register_attempts.lock().push(t0);
+        }
+        // 下溢分支（超宽窗口）：不 panic 且照常限流。
+        let err = register_rate_check_at(t0, std::time::Duration::from_secs(u64::MAX), &state)
+            .expect_err("下溢分支必须按窗口内满额照常限流");
+        assert!(matches!(err, ApiError::TooManyRequests { .. }));
+        // 窗口滑出：历史尝试过期后放行。
+        register_rate_check_at(
+            t0 + std::time::Duration::from_secs(REGISTER_WINDOW_SECS + 1),
+            std::time::Duration::from_secs(REGISTER_WINDOW_SECS),
+            &state,
+        )
+        .expect("滑出窗口的历史尝试必须放行（过期即过期）");
+    }
+
     // ── 故障路径翻译：内部故障 500 / 未命中 404 / 口令绑定失配 401 ──────────
     //
     // 这些分支此前零命中：它们要求存储层在特定方法上报错或在关键步骤返回
@@ -2095,9 +2232,10 @@ mod tests {
             tenant_id: &str,
             run_id: &str,
             config_hash: &str,
+            started_at: &str,
         ) -> Result<(), agentos_core::types::StorageError> {
             self.inner
-                .record_run_start(pipeline_id, tenant_id, run_id, config_hash)
+                .record_run_start(pipeline_id, tenant_id, run_id, config_hash, started_at)
         }
         async fn store_blob(
             &self,

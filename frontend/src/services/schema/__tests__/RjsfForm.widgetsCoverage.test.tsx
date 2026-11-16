@@ -30,6 +30,19 @@ vi.mock('sonner', () => ({
   toast: { error: vi.fn(), success: vi.fn() },
 }))
 
+/** 目录树选择模态框替身（widget 接线隔离：open 时渲染即选按钮） */
+vi.mock('@/components/workspace/DirectoryTreePickerModal', () => ({
+  DirectoryTreePickerModal: (props: { open: boolean; onPick: (p: string) => void }) =>
+    props.open ? (
+      <button
+        data-testid="stub-tree-pick"
+        onClick={() => props.onPick('E:\\tree\\picked')}
+      >
+        stub-pick
+      </button>
+    ) : null,
+}))
+
 beforeEach(() => {
   vi.resetAllMocks()
   vi.mocked(apiClient.get).mockResolvedValue({ data: { options: [] } })
@@ -327,6 +340,38 @@ describe('RjsfForm — directoryPicker widget（工作空间/项目目录声明�
     fireEvent.click(screen.getByTestId('directory-browse'))
 
     await waitFor(() => expect(toast.error).toHaveBeenCalled())
+    expect(onChange).not.toHaveBeenCalled()
+  })
+})
+
+describe('RjsfForm — directoryPicker 目录树按钮（多端目录选择，不依赖系统资源管理器）', () => {
+  const treeField: UIInputFormField[] = [
+    { name: 'ws', type: 'directory', label: '工作空间' },
+  ]
+
+  it('Web（无 electronAPI）渲染「目录树」按钮；模态框选定路径回填表单值', async () => {
+    const onChange = vi.fn()
+    const { container } = render(<RjsfForm fields={treeField} onChange={onChange} />)
+
+    const treeBtn = screen.getByTestId('directory-tree-browse')
+    expect(treeBtn).toBeInTheDocument()
+    // 手输入口与树选入口并存
+    expect(container.querySelector('input[type="text"]')).not.toBeNull()
+
+    fireEvent.click(treeBtn)
+    fireEvent.click(screen.getByTestId('stub-tree-pick'))
+
+    await waitFor(() =>
+      expect(onChange.mock.calls.at(-1)?.[0]).toMatchObject({ ws: 'E:\\tree\\picked' }),
+    )
+  })
+
+  it('模态框取消（未选定）不回填表单值', async () => {
+    const onChange = vi.fn()
+    render(<RjsfForm fields={treeField} onChange={onChange} />)
+
+    // 只开不选：模态框替身仅在点 stub-pick 时回填
+    fireEvent.click(screen.getByTestId('directory-tree-browse'))
     expect(onChange).not.toHaveBeenCalled()
   })
 })

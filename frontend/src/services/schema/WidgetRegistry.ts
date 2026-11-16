@@ -20,6 +20,12 @@ export type WidgetProps = Record<string, unknown>
 /** Widget 组件类型定义 */
 export type WidgetComponent = ComponentType<WidgetProps>
 
+/** type 级动作词表条目（declareWidgetActions 声明面） */
+export interface WidgetActionMeta {
+  /** 动作说明（词表文档；动作语义由 host adapter 绑定承载） */
+  description?: string
+}
+
 /** Widget 元数据 */
 export interface WidgetMetadata {
   /** 组件显示名称 */
@@ -30,6 +36,14 @@ export interface WidgetMetadata {
   supportedSpaces: RenderingSpaceType[]
   /** 降级组件类型（当本组件不可用时回退到此组件） */
   fallbackWidget?: string
+  /** type 级动作词表（组件只能发词表内动作，[来源: docs/decisions/2026-10-10-widget-action-bus.md]） */
+  actions?: Record<string, WidgetActionMeta>
+  /**
+   * 注册来源（widgetRegistry 双源，C4 槽位机制）：缺省 = 静态内建白名单
+   * （registerWidgets 组合根）；'plugin' = W 通用递送动态注册
+   * （widgetLoader，命名空间 `<pluginId>/<name>`）。
+   */
+  source?: 'builtin' | 'plugin'
 }
 
 /** Widget 注册条目 */
@@ -118,6 +132,8 @@ class WidgetRegistry {
         description: metadata.description,
         supportedSpaces: metadata.supportedSpaces ?? ['chat', 'workspace'],
         fallbackWidget: metadata.fallbackWidget,
+        actions: metadata.actions,
+        source: metadata.source,
       },
     }
 

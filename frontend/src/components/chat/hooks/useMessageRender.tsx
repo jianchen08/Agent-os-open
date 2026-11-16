@@ -1,9 +1,15 @@
 /** 消息渲染 Hook 统一处理消息的渲染上下文 */
 
 import { useMemo } from 'react'
+import { deriveToolCallActivityStatus } from '@/types/activity'
 import { buildDefaultActions } from '@/utils/activityConverter'
 import { enhanceActivityWithToolConfig, getGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
-import type { ActivityData, ActivityDetailBlock } from '@/types/activity'
+import { expandTruncatedToolResult } from '@/utils/toolResultBackfill'
+import {
+  buildTruncatedResultDetailBlock,
+  resolveTruncatedToolResultForDisplay,
+} from '@/utils/toolResultTruncate'
+import type { ActivityData, ActivityDetailBlock, ActivityStatus } from '@/types/activity'
 import type { MessagePart, SystemLevel, ToolCallPart } from '@/types/messageParts'
 import type { Message, MessageToolCall, ThinkingContent } from '@/types/models'
 /** 渲染片段类型 */
@@ -86,27 +92,44 @@ function buildDefaultDetails(toolCall: MessageToolCall): ActivityDetailBlock[] {
   return details
 }
 
+/**
+ * 工具调用 part 状态推导单一出口（显式终态范式）。
+ *
+ * fragment 的 toolCall.status 与 activity.status 同源（两处内联映射是复制
+ * 漂移温床——'streaming' 曾一处落 pending 一处落 running）。历史孤儿工具
+ * 调用（无结果 + 非流式上下文）推导 interrupted 终态，不再由数据缺席
+ * 推导 pending/running（永动计时病灶，见 types/activity.ts 推导契约）。
+ */
+function toolCallPartStatus(
+  part: Pick<ToolCallPart, 'state' | 'result' | 'resultData' | 'error'>,
+  inStreamingContext: boolean,
+): ActivityStatus {
+  return deriveToolCallActivityStatus(
+    {
+      state: part.state,
+      hasResult: part.result != null || part.resultData != null || part.state === 'done',
+      hasError: part.error != null || part.state === 'error',
+    },
+    inStreamingContext,
+  )
+}
+
 /** 从 ToolCallPart 构建 ActivityData（parts[] 路径专用） */
 function buildActivityFromToolPart(
   part: ToolCallPart,
   toolCall: MessageToolCall,
   index: number,
+  inStreamingContext: boolean,
 ): ActivityData {
+  const status = toolCallPartStatus(part, inStreamingContext)
   return {
     type: 'tool_call',
     id: part.callId || `tool-${index}`,
     title: part.name,
     toolName: part.name,
-    status:
-      part.state === 'done'
-        ? 'completed'
-        : part.state === 'error'
-          ? 'failed'
-          : part.state === 'calling'
-            ? 'running'
-            : part.state === 'cancelled'
-              ? 'cancelled'
-              : 'pending',
+    status,
+    // 中断终态标注（ActivityCard 头部可见；终态卡无计时器无转圈）
+    ...(status === 'interrupted' ? { statusText: '已中断（无结果）' as const } : {}),
     durationMs: part.durationMs,
     progress: part.progress,
     currentStep: part.currentStep,
@@ -142,9 +165,16 @@ function makeStablePartKey(part: MessagePart, index: number): string {
   }
 }
 
-export function buildFragmentsFromParts(message: Message, taskId?: string): RenderFragment[] {
+export function buildFragmentsFromParts(
+  message: Message,
+  taskId?: string,
+  opts?: { streaming?: boolean },
+): RenderFragment[] {
   const fragments: RenderFragment[] = []
   const parts = message.parts!
+  // 活跃流式上下文（显式传入，缺省=非流式）：工具卡状态推导据此区分
+  // 「真在途」与「历史孤儿」（无结果工具调用在非流式上下文渲染中断终态）。
+  const inStreamingContext = opts?.streaming === true
 
   // part 渲染顺序 = 数组顺序（历史消息 part 已在 API 映射时用 seq++ 保证有序）。
   const toolCallCount = parts.filter((p) => p.type === 'tool_call').length
@@ -186,23 +216,19 @@ export function buildFragmentsFromParts(message: Message, taskId?: string): Rend
       }
 
       case 'tool_call': {
-        // 将 ToolCallPart 映射为 MessageToolCall 格式
+        // 截断标记解析（数据面瘦身批次 1.2）：part 的 result/resultData 超阈值时
+        // 是「预览+标记」对象，直接进渲染分支会产出垃圾视图——标记字段剔除、
+        // 截断信息收敛为详情块，展开经 expandTruncatedToolResult 单条回取回填。
+        const resolved = resolveTruncatedToolResultForDisplay(part.result, part.resultData)
+        // 将 ToolCallPart 映射为 MessageToolCall 格式（status 与 activity 同源
+        // 推导，见 toolCallPartStatus）
         const toolCall: MessageToolCall = {
           call_id: part.callId,
           tool_name: part.name,
           tool_args: part.args,
-          status:
-            part.state === 'done'
-              ? 'completed'
-              : part.state === 'error'
-                ? 'failed'
-                : part.state === 'calling'
-                  ? 'running'
-                  : part.state === 'cancelled'
-                    ? 'cancelled'
-                    : 'pending',
-          result: part.result,
-          resultData: part.resultData,
+          status: toolCallPartStatus(part, inStreamingContext),
+          result: resolved.result,
+          resultData: resolved.resultData,
           error: part.error,
           duration_ms: part.durationMs,
           progress: part.progress,
@@ -211,14 +237,30 @@ export function buildFragmentsFromParts(message: Message, taskId?: string): Rend
           containerTaskId: part.containerTaskId,
         }
         // 构建 ActivityData 并应用工具卡片注册表增强。
-        const activity = enhanceActivityWithToolConfig(
-          buildActivityFromToolPart(part, toolCall, i),
+        let activity = enhanceActivityWithToolConfig(
+          buildActivityFromToolPart(part, toolCall, i, inStreamingContext),
           toolCall,
           {
             onOpenFile: (filePath, _recordCtid) =>
               getGlobalOpenFileCallback()(filePath, taskId || _recordCtid),
           },
         )
+        if (resolved.mark) {
+          activity = {
+            ...activity,
+            details: [
+              ...(activity.details ?? []),
+              buildTruncatedResultDetailBlock(resolved.mark, () =>
+                expandTruncatedToolResult({
+                  messageId: message.id,
+                  partIndex: i,
+                  callId: part.callId,
+                  sequence: resolved.mark?.sequence,
+                }),
+              ),
+            ],
+          }
+        }
         fragments.push({
           type: 'tool_call',
           toolCall,
@@ -284,10 +326,16 @@ export interface UseMessageRenderOptions {
 export function useMessageRender(options: UseMessageRenderOptions): MessageRenderContext {
   const { message, isLast = false, isGenerating = false, versionContent, taskId } = options
 
+  // 流式判定先于片段构建：工具卡状态推导需要活跃流式上下文（历史孤儿工具
+  // 调用在非流式上下文渲染中断终态，见 buildFragmentsFromParts）。
+  const isStreaming = useMemo(() => {
+    return isGenerating && isLast && message.role === 'assistant'
+  }, [isGenerating, isLast, message.role])
+
   /** 从 parts[] 构建渲染片段（唯一路径） 所有消息（WS 流式消息和 API 历史消息）在进入渲染前均已构建 parts[]， */
   const { fragments, displayContent } = useMemo(() => {
     if (message.parts && message.parts.length > 0) {
-      const frags = buildFragmentsFromParts(message, taskId)
+      const frags = buildFragmentsFromParts(message, taskId, { streaming: isStreaming })
       const textContent = frags
         .filter((f): f is Extract<RenderFragment, { type: 'text' }> => f.type === 'text')
         .map((f) => f.content)
@@ -303,13 +351,10 @@ export function useMessageRender(options: UseMessageRenderOptions): MessageRende
     }
     // content 是 displayContent 的回退源：message.content 与 parts 内文本同源
     // （parts 缺失时 entire content 兜底），依赖缺失会导致编辑/流式更新后
-    // 显示旧内容。
+    // 显示旧内容。isStreaming 是工具卡终态推导输入：流式翻转后片段需重建
+    // （running→interrupted 收口）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [message.parts, message.content, versionContent, taskId])
-
-  const isStreaming = useMemo(() => {
-    return isGenerating && isLast && message.role === 'assistant'
-  }, [isGenerating, isLast, message.role])
+  }, [message.parts, message.content, versionContent, taskId, isStreaming])
 
   return {
     fragments,

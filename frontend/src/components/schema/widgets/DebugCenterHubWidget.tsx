@@ -51,7 +51,7 @@ export function DebugCenterHubWidget() {
             data-testid={`debug-hub-tab-${p.id}`}
             className={cn(
               'rounded-md px-2.5 py-1 text-xs transition-colors',
-              active?.id === p.id ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent/50',
+              active?.id === p.id ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted/50',
             )}
           >
             {p.icon ? <span aria-hidden="true">{p.icon}</span> : null} {p.title ?? p.id}
@@ -64,7 +64,7 @@ export function DebugCenterHubWidget() {
           renderPageContent(active)
         ) : (
           <div className="text-muted-foreground flex h-full items-center justify-center p-4 text-sm">
-            暂无声明子页（debug_center 插件 space=debug_center 页声明为空或未装载）
+            暂无子页
           </div>
         )}
       </div>

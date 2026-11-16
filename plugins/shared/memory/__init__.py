@@ -1,0 +1,6 @@
+"""memory 插件包标记。
+
+pytest 收集面与 agent_manager/ 同名 test_server.py 共存：无本标记时裸名
+模块冲突（import file mismatch），标记后按包限定名收集互不串扰。
+sidecar/合宿加载走路径 exec，不受本标记影响。
+"""

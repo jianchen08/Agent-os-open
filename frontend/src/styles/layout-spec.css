@@ -9,6 +9,15 @@
 :root {
   /* 顶层容器（其余布局尺寸变量已全站零消费，2026-08 清理，详见 docs/working/全仓冗余代码与规范扫描报告） */
   --layout-titlebar-height: 32px;
+  /* 安全区消费值（系统栏避让）：env() 与壳注入变量取大者——Android WebView
+     的 env() 恒 0，由壳写入 --safe-inset-*（见 app-mobile MainActivity）；
+     桌面浏览器/未注入时两者皆 0，零影响。 */
+  --safe-area-top: max(env(safe-area-inset-top, 0px), var(--safe-inset-top, 0px));
+  --safe-area-bottom: max(env(safe-area-inset-bottom, 0px), var(--safe-inset-bottom, 0px));
+  /* 聊天对话列上限：消息列与输入区消费同一居中列宽，宽视口下行长收敛到可读
+     区间；移动视口宽度低于上限零变化。消费点两处（MessageList 内容列 +
+     ChatContainer 输入区），调值两处同源自动一致。 */
+  --chat-content-max-w: 56rem;
 }
 
 /* === TitleBar === */

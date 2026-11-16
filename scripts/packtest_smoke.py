@@ -21,11 +21,10 @@ import subprocess
 import sys
 import time
 import urllib.request
-from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-REPO = str(Path(__file__).resolve().parent.parent)
+REPO = r"D:\myproject\container_e17cc5927dfd"
 DEFAULT_EXE = REPO + r"\release\win-unpacked\灵汐助手.exe"
 
 
@@ -67,7 +66,11 @@ def js(page, expr: str):
 
 
 def main() -> None:
-    sys.stdout.reconfigure(encoding="utf-8")
+    # sys.stdout 在重定向/管道下可能是 TextIOWrapper 之外的流（mypy union-attr），
+    # 运行时确有 reconfigure；先探能力再改，避免类型层与运行层二选一。
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser()
     parser.add_argument("--exe", default=DEFAULT_EXE)
     parser.add_argument("--cdp-port", type=int, default=9222)
@@ -96,15 +99,21 @@ def main() -> None:
             deadline = time.time() + args.timeout
 
             while time.time() < deadline:
-                state = js(
-                    page,
-                    "() => ({"
-                    "protocol: location.protocol, host: location.host,"
-                    "path: location.pathname, ready: document.readyState,"
-                    "rootChildren: document.getElementById('root')?.childElementCount ?? -1,"
-                    "bodyTextLen: (document.body?.innerText || '').trim().length"
-                    "})",
-                )
+                try:
+                    state = js(
+                        page,
+                        "() => ({"
+                        "protocol: location.protocol, host: location.host,"
+                        "path: location.pathname, ready: document.readyState,"
+                        "rootChildren: document.getElementById('root')?.childElementCount ?? -1,"
+                        "bodyTextLen: (document.body?.innerText || '').trim().length"
+                        "})",
+                    )
+                except Exception:
+                    # 应用启动期自路由跳转（AuthGate 守卫/自动登录重定向）会摧毁
+                    # 执行上下文——导航是瞬态，吞掉本轮继续轮询，不判失败
+                    time.sleep(1.0)
+                    continue
                 if state["ready"] == "complete" and state["rootChildren"] > 0 and state["bodyTextLen"] > 0:
                     mounted = True
                     break
@@ -121,7 +130,10 @@ def main() -> None:
             # 2. React 挂载 + 页面有可见内容
             log(f"PASS React 挂载: #root children={state['rootChildren']}, body 文本 {state['bodyTextLen']} 字符")
 
-            # 3. SPA 深链回落（history 路由直接命中）
+            # 3. SPA 深链回落（history 路由直接命中）。
+            # 契约（ADR 2026-09-28）：/login 独立页已退役并入 AuthGate 模态——
+            # 未认证会话落 /login 路由渲染壳、已认证会话（装机版 env 自动登录）
+            # 被守卫重定向回 /；两者都要求 React 挂载，停在非 SPA 路由才算断。
             page.goto("app://bundle/login")
             deep = js(
                 page,
@@ -135,9 +147,13 @@ def main() -> None:
                 "  tick();"
                 "})",
             )
-            if deep["path"] != "/login" or deep["root"] <= 0:
+            if deep["path"] not in ("/login", "/") or deep["root"] <= 0:
                 fail(f"SPA 深链回落失败：pathname={deep['path']}, #root children={deep['root']}")
-            log(f"PASS SPA 深链回落: /login 挂载成功（children={deep['root']}）")
+            log(
+                f"PASS SPA 深链回落: pathname={deep['path']}"
+                f"（{'已认证被守卫回主页' if deep['path'] == '/' else '未认证落登录路由'}，"
+                f"children={deep['root']}）"
+            )
 
             # 4. 内核代理路由（代理面内的 /api/v1/auth/me 无 token 应得内核 401 JSON；
             #    若命中静态回落会返回 text/html——代理未生效的反例）

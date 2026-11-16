@@ -1,0 +1,52 @@
+# 自进化模式声明面 mode.yaml（B 部类物料：由用户维护；出厂种子随 mode_evolution 插件内打包，
+# 经 mode.get_profile 服务透出；suite 路径相对项目根——与 mode_coding 先例同款，
+# 题集留 config/self_evolve/suites 共享评测治理区原位，流程规则物料已随包（包内 rules/），
+# ADR 2026-09-28-self-evolution-mode-pack）
+mode: evolution
+name: 自进化模式
+# description = 主 agent 唯一域路由知识（批 F3 接管口径：什么任务归我/直派谁/编排链要点；措辞定版 = 渲染缓存前缀稳定）
+description: 系统自进化任务（跑题评测/失败归因/进化提案校验应用）。进化任务入口即包内进化引擎 mode_evolution/evolution，单节点自执行评测编排
+icon: 🧬                # 选择器选项图标（批 G⑤；emoji 随声明面透出 modes API/mode.list）
+panel_page_id: evolution_panel
+# 前台可选声明（R10③ 补充裁定 2026-10-14）：false = 不出现在前台模式选择面
+# 选项——本模式只在后台运作（进化轮经宿主 cron/面板触发），不经前台选择出生；
+# 缺省 = 可选（向后兼容），显式声明才隐藏。
+foreground_selectable: false
+chain:
+  entry: evolution
+  # 评测编排照实声明（单节点自执行）：进化任务入口即包内进化引擎 agent
+  # （agents/evolution.yaml，T1 跑题 target 取 suite case.target，不经 chain）；
+  # 执行者池声明已全模式退役（P1，ADR 2026-10-09 决策 2）
+  expected_path: [mode_evolution/evolution]
+  entry_override: null
+suite:
+  # 进化引擎自身的冒烟题集（与 coding 冒烟同源——引擎改进后先自证不退步）；
+  # T1 对目标模式跑题时按目标模式包的 mode.yaml suite 声明取（跨包经
+  # mode.get_profile 服务），不在本文件重复各模式题集。
+  smoke: config/self_evolve/suites/dev/smoke.yaml
+  external: config/self_evolve/suites/external/swe_verified_seed.yaml
+  full: null
+# 全局杠杆表（T2 归因→T3 立项的候选杠杆域；分诊信号类与判据在
+# config/plugins/review/triage_rules.yaml——复盘插件消费，此处只声明杠杆域）
+material_scope:
+  # 派发阶段物料：进化流程/归因/提案契约规则（B 部类，随包打包——包内 rules/，
+  # 引用经包内相对形态 {{path:./rules/...}} 解析）
+  dispatch_stage:
+    - plugins/shared/mode_evolution/rules/
+  # 执行阶段物料：包内 agent 注册表（mode_evolution/evolution）
+  execution_stage:
+    - plugins/shared/mode_evolution/agents/
+levers:
+  tool_misselect: {execution_stage: [tool_ids, dispatch_guide]}
+  orchestration_runaway: {orchestration_stage: [pipeline_steps, breaker_params]}
+  format_violation: {execution_stage: [persona, prompt_skeleton]}
+  eval_no_settle: {evaluation_stage: [evaluation_params]}
+  cross_round_amnesia: {execution_stage: [persistent_fields, memory_config]}
+  approval_chain_miss: {evaluation_stage: [approval_rules_yaml]}
+verifier_families: [file_assert, bash_exit, semantic_check]
+weights: {success: 1.0, cost: 0.2, rounds: 0.1}
+budget:
+  case_timeout: 900
+  round_tokens: 2000000
+  # 每模式每会话提案轮次上限（evolution_flow.md T8 同源）
+  proposals_per_session: 3

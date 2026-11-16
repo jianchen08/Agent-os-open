@@ -32,6 +32,8 @@ pub const USER_CONFIG_DIR_ENV: &str = "AGENTOS_USER_CONFIG_DIR";
 pub const USER_DATA_DIR_ENV: &str = "AGENTOS_DATA_DIR";
 /// 用户插件根环境变量名（分区覆盖）。
 pub const USER_PLUGINS_DIR_ENV: &str = "AGENTOS_USER_PLUGINS_DIR";
+/// 用户空间 venv 登记处环境变量名（分区覆盖；移动端种子预烤布局用）。
+pub const PLUGIN_VENVS_DIR_ENV: &str = "AGENTOS_PLUGIN_VENVS_DIR";
 
 /// 读一个环境变量，空白值视为未设。
 fn env_path(name: &str) -> Option<PathBuf> {
@@ -65,15 +67,26 @@ pub fn user_plugins_dir() -> Option<PathBuf> {
     env_path(USER_PLUGINS_DIR_ENV).or_else(|| user_root().map(|r| r.join("plugins")))
 }
 
-/// 用户空间 venv 登记处：`<USER_ROOT>/plugin-venvs/`。
+/// 用户模式包根：`<user_plugins>/modes/`（装机布局契约，模式包二级嵌套
+/// `modes/<mode_id>/plugin.json` 的唯一落点——种子对账与插件发现根推导共用，
+/// E1 单点收敛，调用方不再自拼 `join("modes")`）。
+pub fn user_modes_dir(user_plugins: &Path) -> PathBuf {
+    user_plugins.join("modes")
+}
+
+/// 用户空间 venv 登记处：`AGENTOS_PLUGIN_VENVS_DIR` > `<USER_ROOT>/plugin-venvs/`。
 ///
 /// 装机态插件目录只读（TrustedInstaller ACL），sidecar venv 作为可变派生数据
 /// 落用户空间（用户裁定 2026-09-27：包内只留种子）：独占插件键 = 插件 id，
 /// 共享合宿宿主键 = `_host`（登记项本身即 venv 根，不是含 `.venv` 的插件目录）。
 /// 解析（spawn 期回退）与重定向（autoprovision 目标）的消费者在
 /// invoker / api::venv_provision。
+///
+/// env 覆盖供移动端使用（2026-11-01）：venv 在打包期以装配后布局预烤进种子
+/// `/opt/agentos/plugin-venvs`，`<USER_ROOT>/plugin-venvs` 在 proot 下被用户
+/// 数据 bind 遮蔽不可作预烤落点；env 未设 = 现行为不变（dev/装机零变化）。
 pub fn user_plugin_venvs_dir() -> Option<PathBuf> {
-    user_root().map(|r| r.join("plugin-venvs"))
+    env_path(PLUGIN_VENVS_DIR_ENV).or_else(|| user_root().map(|r| r.join("plugin-venvs")))
 }
 
 /// 解析一个配置相对路径应读/写的落点。
@@ -415,30 +428,44 @@ fn upsert_mode_seed_entry(
 
 /// 读一个插件目录的 manifest 版本（plugin.json `version`）；缺失/损坏 → None。
 fn read_manifest_version(dir: &Path) -> Option<String> {
-    let raw = std::fs::read_to_string(dir.join("plugin.json")).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    value.get("version")?.as_str().map(str::to_string)
+    read_manifest_str_field(dir, "version")
 }
 
-/// 枚举出厂种子：`factory_modes_dir` 下含可解析 plugin.json version 的子目录，
-/// 按目录名字典序（结果确定性）。无 version 真值的目录不可管理，跳过。
-fn enumerate_factory_seeds(factory_modes_dir: &Path) -> Vec<(String, String, PathBuf)> {
-    let mut seeds = Vec::new();
-    let Ok(entries) = std::fs::read_dir(factory_modes_dir) else {
-        return seeds;
-    };
-    for entry in entries.flatten() {
-        let dir = entry.path();
-        if dir.is_dir() {
-            if let Some(version) = read_manifest_version(&dir) {
-                if let Some(name) = entry.file_name().to_str() {
-                    seeds.push((name.to_string(), version, dir));
-                }
-            }
+/// 模式包识别前缀（ADR 2026-10-13 拍平定版）：manifest id 带 `mode_` 前缀即
+/// 模式包（名字承载语义），目录布局无关——种子对账（本模块）与模式包约定资源
+/// 视图聚合（api/src/mode_view.rs）共用这一条识别规则。
+pub const MODE_ID_PREFIX: &str = "mode_";
+
+/// 读出厂侧包 manifest 的字符串字段（plugin.json；与用户副本 version 读取
+/// 同一解析面）。文件缺失/不可解析/字段缺席或非字符串 → None。
+fn read_manifest_str_field(dir: &Path, field: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(dir.join("plugin.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    value.get(field)?.as_str().map(str::to_string)
+}
+
+/// 枚举出厂种子（发现面驱动，ADR 2026-10-13）：对发现面产出的插件目录逐一
+/// 探测——manifest id 带 [`MODE_ID_PREFIX`] 且 version 可解析的目录即出厂
+/// 种子，mode_id = 插件 id（唯一注册键），按 id 字典序（结果确定性）。同 id
+/// 多目录取首个（同 id 冲突由插件发现层裁决，种子面不重复执法）；无 version
+/// 真值/非 mode_ 前缀的目录不可管理，跳过。
+fn enumerate_factory_seeds(plugin_dirs: &[PathBuf]) -> Vec<(String, String, PathBuf)> {
+    let mut seen: std::collections::BTreeMap<String, (String, PathBuf)> = Default::default();
+    for dir in plugin_dirs {
+        let Some(version) = read_manifest_str_field(dir, "version") else {
+            continue;
+        };
+        let Some(id) = read_manifest_str_field(dir, "id") else {
+            continue;
+        };
+        if !id.starts_with(MODE_ID_PREFIX) {
+            continue;
         }
+        seen.entry(id).or_insert_with(|| (version, dir.clone()));
     }
-    seeds.sort_by(|a, b| a.0.cmp(&b.0));
-    seeds
+    seen.into_iter()
+        .map(|(id, (version, dir))| (id, version, dir))
+        .collect()
 }
 
 /// 递归计算目录内全部文件的内容哈希：`相对路径（/ 分隔）→ SHA-256（hex）`。
@@ -592,17 +619,18 @@ fn upgrade_seed_files(
     })
 }
 
-/// 启动对账：对 `factory_modes_dir` 下每个出厂种子，按账本判定播种/静默升级/
-/// 升级可用/补账/幂等 no-op（语义见本节头注）。只枚举出厂侧——用户自建模式
-/// （出厂无同名种子）不参与对账。逐模式落账，单个模式 IO 失败即返回 Err
-/// （已完成的模式保持已落盘状态，下次启动按账本续对）。
+/// 启动对账：对出厂侧模式种子（发现面产出的插件目录中 [`MODE_ID_PREFIX`]
+/// 前缀者）逐个按账本判定播种/静默升级/升级可用/补账/幂等 no-op（语义见本节
+/// 头注）。只枚举出厂侧——用户自建模式（出厂无同名种子）不参与对账。逐模式
+/// 落账，单个模式 IO 失败即返回 Err（已完成的模式保持已落盘状态，下次启动按
+/// 账本续对）。
 pub fn reconcile_mode_seeds(
-    factory_modes_dir: &Path,
+    factory_seed_dirs: &[PathBuf],
     user_modes_dir: &Path,
 ) -> Result<Vec<ModeSeedOutcome>, ModeSeedError> {
     let ledger = load_mode_seed_ledger(user_modes_dir)?;
     let mut outcomes = Vec::new();
-    for (mode_id, seed_version, seed_dir) in enumerate_factory_seeds(factory_modes_dir) {
+    for (mode_id, seed_version, seed_dir) in enumerate_factory_seeds(factory_seed_dirs) {
         let user_dir = user_modes_dir.join(&mode_id);
         if !user_dir.is_dir() {
             copy_tree_staged(&seed_dir, &user_dir)?;
@@ -943,6 +971,7 @@ mod tests {
         std::env::remove_var(USER_CONFIG_DIR_ENV);
         std::env::remove_var(USER_DATA_DIR_ENV);
         std::env::remove_var(USER_PLUGINS_DIR_ENV);
+        std::env::remove_var(PLUGIN_VENVS_DIR_ENV);
         (user, factory)
     }
 
@@ -972,6 +1001,41 @@ mod tests {
         // 分区覆盖：config 落到别处，其余仍随用户根
         assert_eq!(user_config_dir().unwrap(), tmp.path().join("elsewhere"));
         assert_eq!(user_plugins_dir().unwrap(), user.join("plugins"));
+    }
+
+    /// venv 登记处 env 覆盖（移动端种子预烤布局）：env 设/不设两态 + 登记键拼接。
+    #[test]
+    fn plugin_venvs_dir_env_override_with_default_fallback() {
+        let _lock = tests_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let (user, _f) = isolate(tmp.path());
+
+        // env 未设：登记处随用户根推导（dev/装机现行为，autoprovision 零变化）
+        assert_eq!(user_plugin_venvs_dir().unwrap(), user.join("plugin-venvs"));
+
+        // env 设定：覆盖用户根推导（登记处随种子落 /opt/agentos/plugin-venvs）
+        let baked = tmp.path().join("baked-venvs");
+        let _g = EnvGuard::set(PLUGIN_VENVS_DIR_ENV, baked.to_str().unwrap());
+        assert_eq!(user_plugin_venvs_dir().unwrap(), baked);
+        // 键拼接：spawn 期按 manifest id 在登记处根下取键
+        assert_eq!(
+            user_plugin_venvs_dir().unwrap().join("bash_tool"),
+            baked.join("bash_tool")
+        );
+    }
+
+    /// venv 登记处 env 空白值视为未设（与分区覆盖同律）。
+    #[test]
+    fn plugin_venvs_dir_blank_env_is_treated_as_unset() {
+        let _lock = tests_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let (user, _f) = isolate(tmp.path());
+        let _g = EnvGuard::set(PLUGIN_VENVS_DIR_ENV, "   ");
+        assert_eq!(
+            user_plugin_venvs_dir().unwrap(),
+            user.join("plugin-venvs"),
+            "空白值应视为未设（回退用户根推导）"
+        );
     }
 
     #[test]
@@ -1210,13 +1274,29 @@ mod tests {
         tmp.join("user-modes")
     }
 
+    /// 发现面替身：枚举出厂根下含 plugin.json 的插件目录（与内核侧
+    /// collect_plugin_dirs 同形的发现面产出），供发现面驱动的对账入口消费。
+    /// 根缺席 = 空集（与生产发现面同语义）。
+    fn factory_seeds(root: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return Vec::new();
+        };
+        let mut dirs: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir() && p.join("plugin.json").is_file())
+            .collect();
+        dirs.sort();
+        dirs
+    }
+
     #[test]
     fn mode_seed_seeds_missing_copy_and_writes_ledger() {
         let tmp = tempfile::tempdir().unwrap();
         let (f, u) = (factory_modes(tmp.path()), user_modes(tmp.path()));
         write_seed(&f, "mode_coding", "0.1.0", "chain: v1\n");
 
-        let outcomes = reconcile_mode_seeds(&f, &u).unwrap();
+        let outcomes = reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap();
         assert_eq!(
             outcomes,
             vec![ModeSeedOutcome::Seeded {
@@ -1247,10 +1327,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (f, u) = (factory_modes(tmp.path()), user_modes(tmp.path()));
         write_seed(&f, "mode_coding", "0.1.0", "chain: v1\n");
-        reconcile_mode_seeds(&f, &u).unwrap();
+        reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap();
 
         // 幂等：同版本重跑 → Current，账本不再变
-        let outcomes = reconcile_mode_seeds(&f, &u).unwrap();
+        let outcomes = reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap();
         assert_eq!(
             outcomes,
             vec![ModeSeedOutcome::Current {
@@ -1261,7 +1341,7 @@ mod tests {
         // 出厂内容变了但版本没变 → 版本闸优先，仍 Current，用户副本不动
         write_seed(&f, "mode_coding", "0.1.0", "chain: v1-modified\n");
         assert_eq!(
-            reconcile_mode_seeds(&f, &u).unwrap(),
+            reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap(),
             vec![ModeSeedOutcome::Current {
                 mode_id: "mode_coding".into()
             }]
@@ -1274,7 +1354,7 @@ mod tests {
         // 出厂降级（0.1.0 → 0.0.9）→ 同样 no-op（出厂 ≤ 账本）
         write_seed(&f, "mode_coding", "0.0.9", "chain: older\n");
         assert_eq!(
-            reconcile_mode_seeds(&f, &u).unwrap(),
+            reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap(),
             vec![ModeSeedOutcome::Current {
                 mode_id: "mode_coding".into()
             }]
@@ -1290,13 +1370,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (f, u) = (factory_modes(tmp.path()), user_modes(tmp.path()));
         write_seed(&f, "mode_writing", "0.9.0", "chain: v1\n");
-        reconcile_mode_seeds(&f, &u).unwrap();
+        reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap();
 
         // 出厂升到 0.10.0（0.10.0 > 0.9.0 仅在 semver 数值语义下成立——字典序
         // 会误判 "0.10.0" < "0.9.0"，此处同时验证比较走 semver）
         write_seed(&f, "mode_writing", "0.10.0", "chain: v2\n");
 
-        let outcomes = reconcile_mode_seeds(&f, &u).unwrap();
+        let outcomes = reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap();
         assert_eq!(
             outcomes,
             vec![ModeSeedOutcome::Upgraded {
@@ -1323,7 +1403,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (f, u) = (factory_modes(tmp.path()), user_modes(tmp.path()));
         write_seed(&f, "mode_roleplay", "1.0.0", "chain: v1\n");
-        reconcile_mode_seeds(&f, &u).unwrap();
+        reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap();
 
         // 用户在副本里自加文件（角色卡 + 笔记，均不在出厂清单/账本）
         std::fs::create_dir_all(u.join("mode_roleplay/agents")).unwrap();
@@ -1335,7 +1415,7 @@ mod tests {
         std::fs::write(f.join("mode_roleplay/assets/new_factory.txt"), "added").unwrap();
 
         assert_eq!(
-            reconcile_mode_seeds(&f, &u).unwrap(),
+            reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap(),
             vec![ModeSeedOutcome::Upgraded {
                 mode_id: "mode_roleplay".into(),
                 from: "1.0.0".into(),
@@ -1385,13 +1465,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (f, u) = (factory_modes(tmp.path()), user_modes(tmp.path()));
         write_seed(&f, "mode_writing", "1.0.0", "chain: v1\n");
-        reconcile_mode_seeds(&f, &u).unwrap();
+        reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap();
 
         // 出厂 v2 删除 assets/extra.txt（种子里不再有此文件）
         write_seed(&f, "mode_writing", "2.0.0", "chain: v2\n");
         std::fs::remove_file(f.join("mode_writing/assets/extra.txt")).unwrap();
         assert_eq!(
-            reconcile_mode_seeds(&f, &u).unwrap(),
+            reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap(),
             vec![ModeSeedOutcome::Upgraded {
                 mode_id: "mode_writing".into(),
                 from: "1.0.0".into(),
@@ -1411,7 +1491,7 @@ mod tests {
         write_seed(&f, "mode_writing", "3.0.0", "chain: v3\n");
         std::fs::write(f.join("mode_writing/assets/extra.txt"), "factory reborn").unwrap();
         assert_eq!(
-            reconcile_mode_seeds(&f, &u).unwrap(),
+            reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap(),
             vec![ModeSeedOutcome::Upgraded {
                 mode_id: "mode_writing".into(),
                 from: "2.0.0".into(),
@@ -1438,13 +1518,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (f, u) = (factory_modes(tmp.path()), user_modes(tmp.path()));
         write_seed(&f, "mode_coding", "1.0.0", "chain: v1\n");
-        reconcile_mode_seeds(&f, &u).unwrap();
+        reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap();
 
         std::fs::remove_file(u.join("mode_coding/assets/extra.txt")).unwrap();
         write_seed(&f, "mode_coding", "2.0.0", "chain: v2\n");
 
         assert_eq!(
-            reconcile_mode_seeds(&f, &u).unwrap(),
+            reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap(),
             vec![ModeSeedOutcome::UpgradeAvailable {
                 mode_id: "mode_coding".into(),
                 seeded_version: "1.0.0".into(),
@@ -1468,7 +1548,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (f, u) = (factory_modes(tmp.path()), user_modes(tmp.path()));
         write_seed(&f, "mode_coding", "1.0.0", "chain: v1\n");
-        reconcile_mode_seeds(&f, &u).unwrap();
+        reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap();
 
         let ledger_path = u.join(MODE_SEEDS_LEDGER_FILENAME);
         let tampered = serde_json::json!({
@@ -1484,7 +1564,7 @@ mod tests {
         write_seed(&f, "mode_coding", "2.0.0", "chain: v2\n");
 
         assert!(
-            reconcile_mode_seeds(&f, &u).is_err(),
+            reconcile_mode_seeds(&factory_seeds(&f), &u).is_err(),
             "越界账本路径必须报错"
         );
         assert_eq!(
@@ -1499,14 +1579,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (f, u) = (factory_modes(tmp.path()), user_modes(tmp.path()));
         write_seed(&f, "mode_research", "1.0.0", "chain: v1\n");
-        reconcile_mode_seeds(&f, &u).unwrap();
+        reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap();
 
         // 用户定制：改 profile + 新增自己的文件（任一偏离账本基线即算已定制）
         std::fs::write(u.join("mode_research/profile.yaml"), "chain: mine\n").unwrap();
         std::fs::write(u.join("mode_research/my_notes.yaml"), "note: x").unwrap();
 
         write_seed(&f, "mode_research", "2.0.0", "chain: v2\n");
-        let outcomes = reconcile_mode_seeds(&f, &u).unwrap();
+        let outcomes = reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap();
         assert_eq!(
             outcomes,
             vec![ModeSeedOutcome::UpgradeAvailable {
@@ -1543,7 +1623,7 @@ mod tests {
         .unwrap();
         std::fs::write(manual.join("profile.yaml"), "chain: mine\n").unwrap();
 
-        let outcomes = reconcile_mode_seeds(&f, &u).unwrap();
+        let outcomes = reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap();
         assert_eq!(
             outcomes,
             vec![ModeSeedOutcome::BaselineRegistered {
@@ -1562,7 +1642,7 @@ mod tests {
 
         // 补账后重跑：9.9.9 > 出厂 1.2.3 → 幂等 no-op，副本仍不动
         assert_eq!(
-            reconcile_mode_seeds(&f, &u).unwrap(),
+            reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap(),
             vec![ModeSeedOutcome::Current {
                 mode_id: "mode_roleplay".into()
             }]
@@ -1587,7 +1667,7 @@ mod tests {
         std::fs::write(manual.join("profile.yaml"), "chain: mine\n").unwrap();
 
         assert_eq!(
-            reconcile_mode_seeds(&f, &u).unwrap(),
+            reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap(),
             vec![ModeSeedOutcome::BaselineRegistered {
                 mode_id: "mode_roleplay".into(),
                 version: "1.0.0".into()
@@ -1605,7 +1685,7 @@ mod tests {
         let (f, u) = (factory_modes(tmp.path()), user_modes(tmp.path()));
         write_seed(&f, "mode_coding", "1.0.0", "chain: v1\n");
         write_seed(&f, "mode_writing", "1.0.0", "chain: w1\n");
-        reconcile_mode_seeds(&f, &u).unwrap();
+        reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap();
 
         assert!(reset_mode_seed(&u, "mode_coding").unwrap());
         assert!(!u.join("mode_coding").exists(), "恢复出厂删用户副本");
@@ -1615,7 +1695,7 @@ mod tests {
 
         // 回落链路：下次启动对账按出厂种子重播种
         assert_eq!(
-            reconcile_mode_seeds(&f, &u).unwrap(),
+            reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap(),
             vec![
                 ModeSeedOutcome::Seeded {
                     mode_id: "mode_coding".into(),
@@ -1638,14 +1718,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (f, u) = (factory_modes(tmp.path()), user_modes(tmp.path()));
         write_seed(&f, "mode_coding", "1.0.0", "chain: v1\n");
-        reconcile_mode_seeds(&f, &u).unwrap();
+        reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap();
 
         let ledger_path = u.join(MODE_SEEDS_LEDGER_FILENAME);
         std::fs::write(&ledger_path, "{not json").unwrap();
         write_seed(&f, "mode_coding", "2.0.0", "chain: v2\n");
 
         assert!(matches!(
-            reconcile_mode_seeds(&f, &u),
+            reconcile_mode_seeds(&factory_seeds(&f), &u),
             Err(ModeSeedError::Corrupt(_))
         ));
         // 账本损坏时用户副本绝不被替换（fail-closed），损坏内容原样保留交人工
@@ -1661,11 +1741,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (f, u) = (factory_modes(tmp.path()), user_modes(tmp.path()));
         write_seed(&f, "mode_coding", "not-semver", "chain: v1\n");
-        reconcile_mode_seeds(&f, &u).unwrap();
+        reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap();
 
         write_seed(&f, "mode_coding", "still-not", "chain: v2\n");
         assert_eq!(
-            reconcile_mode_seeds(&f, &u).unwrap(),
+            reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap(),
             vec![ModeSeedOutcome::VersionUnparseable {
                 mode_id: "mode_coding".into(),
                 factory_version: "still-not".into(),
@@ -1692,9 +1772,52 @@ mod tests {
         )
         .unwrap();
 
-        assert!(reconcile_mode_seeds(&f, &u).unwrap().is_empty());
+        assert!(reconcile_mode_seeds(&factory_seeds(&f), &u)
+            .unwrap()
+            .is_empty());
         assert!(custom.is_dir());
         assert!(load_mode_seed_ledger(&u).unwrap().is_empty());
+    }
+
+    /// 识别面（ADR 2026-10-13 拍平）：种子识别 = manifest id 带 [`MODE_ID_PREFIX`]
+    /// 前缀，与目录布局/目录名无关——非 mode_ 前缀的插件目录（即便带 version）
+    /// 不参与对账；目录名与 id 不一致时以 id 为准（mode_id = 插件 id）。
+    #[test]
+    fn mode_seed_identified_by_manifest_id_prefix_not_dir_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (f, u) = (factory_modes(tmp.path()), user_modes(tmp.path()));
+        // ① 非 mode_ 前缀：带 version 也不可管理
+        write_seed(&f, "tool_helper", "1.0.0", "chain: t\n");
+        // ② mode_ 前缀但 version 缺失：不可管理
+        let nover = f.join("mode_noversion");
+        std::fs::create_dir_all(&nover).unwrap();
+        std::fs::write(nover.join("plugin.json"), r#"{"id":"mode_noversion"}"#).unwrap();
+        // ③ mode_ 前缀且目录名与 id 不一致：以 id 为准
+        let renamed = f.join("legacy_dir_name");
+        std::fs::create_dir_all(renamed.join("assets")).unwrap();
+        std::fs::write(
+            renamed.join("plugin.json"),
+            r#"{"id":"mode_renamed","version":"0.2.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(renamed.join("profile.yaml"), "chain: r\n").unwrap();
+
+        let outcomes = reconcile_mode_seeds(&factory_seeds(&f), &u).unwrap();
+        assert_eq!(
+            outcomes,
+            vec![ModeSeedOutcome::Seeded {
+                mode_id: "mode_renamed".into(),
+                version: "0.2.0".into()
+            }],
+            "只有 mode_ 前缀种子参与对账，mode_id 取 manifest id"
+        );
+        assert!(u.join("mode_renamed/profile.yaml").is_file());
+        assert!(!u.join("tool_helper").exists());
+        assert!(!u.join("mode_noversion").exists());
+        assert!(
+            !u.join("legacy_dir_name").exists(),
+            "用户侧目录键 = mode id"
+        );
     }
 
     // ── 用户空间 git 化（§2.2；真实临时目录 + 真实 git 二进制，目录参数注入） ──
@@ -1873,7 +1996,7 @@ mod tests {
         let user_modes = root.join("plugins/modes");
         write_seed(&factory, "mode_x", "1.0.0", "chain: v1\n");
 
-        let _outcomes = reconcile_mode_seeds(&factory, &user_modes).unwrap();
+        let _outcomes = reconcile_mode_seeds(&factory_seeds(&factory), &user_modes).unwrap();
         ensure_user_repo(&root).unwrap();
         let _base = commit_user_changes(&root, "base").unwrap().unwrap();
 
@@ -1885,7 +2008,7 @@ mod tests {
         // 出厂升级 → 静默升级写盘 → 联动提交
         write_seed(&factory, "mode_x", "1.1.0", "chain: v2\n");
         std::fs::write(factory.join("mode_x/assets/new.txt"), "added").unwrap();
-        let upgraded = reconcile_mode_seeds(&factory, &user_modes).unwrap();
+        let upgraded = reconcile_mode_seeds(&factory_seeds(&factory), &user_modes).unwrap();
         assert!(matches!(upgraded[0], ModeSeedOutcome::Upgraded { .. }));
 
         let hash = commit_seed_reconciliation(&root, &upgraded)
@@ -1938,11 +2061,11 @@ mod tests {
         let user_modes = root.join("plugins/modes");
         write_seed(&factory, "mode_x", "1.0.0", "chain: v1\n");
 
-        let _outcomes = reconcile_mode_seeds(&factory, &user_modes).unwrap();
+        let _outcomes = reconcile_mode_seeds(&factory_seeds(&factory), &user_modes).unwrap();
         ensure_user_repo(&root).unwrap();
         commit_user_changes(&root, "base").unwrap();
 
-        let rerun = reconcile_mode_seeds(&factory, &user_modes).unwrap();
+        let rerun = reconcile_mode_seeds(&factory_seeds(&factory), &user_modes).unwrap();
         assert!(matches!(rerun[0], ModeSeedOutcome::Current { .. }));
         assert_eq!(commit_seed_reconciliation(&root, &rerun).unwrap(), None);
         assert_eq!(git_out(&root, &["rev-list", "--count", "HEAD"]), "1");

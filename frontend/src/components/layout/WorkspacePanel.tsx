@@ -1,8 +1,8 @@
 /** 工作区面板 管理工作区 Tab 切换，支持从悬浮窗拖拽吸附 */
 
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { FullscreenIcon, FullscreenExitIcon, PlusIcon } from '@/assets/icons'
+import { Eye, FullscreenIcon, FullscreenExitIcon, PlusIcon } from '@/assets/icons'
 import { isDetachable } from '@/components/schema/PageRenderer'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -13,6 +13,7 @@ import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { windowManager } from '@/services/window/WindowManager'
 import { WORKSPACE_NAV_TAB, openWorkspacePanel } from '@/services/workspacePanelOpener'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import {
   BAND_BUTTON_ACTIVE_CLASS,
   BAND_BUTTON_CLASS,
@@ -91,6 +92,38 @@ export function WorkspacePanel({
   const menuRef = useRef<HTMLDivElement>(null)
   /** 批量关签确认层（closeOther/closeAll 专用；关闭本标签单签可逆不拦） */
   const [closeConfirm, setCloseConfirm] = useState<CloseConfirmState | null>(null)
+
+  /** 「只看当前会话」开关（默认开）：会话派生页签按归属会话过滤显隐；组件内
+   *  状态不持久化——过滤只在视图层，隐藏≠关闭，store 的 workspaceTabs 不变 */
+  const [sessionOnly, setSessionOnly] = useState(true)
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  /** 可见页签集合：全局页签（无 ownerSessionId）任何会话下恒可见；会话派生
+   *  页签仅归属当前会话时可见（activeSessionId 为 null 时会话派生签全部隐藏） */
+  const visibleTabs = useMemo(
+    () =>
+      sessionOnly
+        ? tabs.filter((t) => !t.ownerSessionId || t.ownerSessionId === activeSessionId)
+        : tabs,
+    [tabs, sessionOnly, activeSessionId],
+  )
+  const hiddenCount = tabs.length - visibleTabs.length
+
+  // 激活页签被过滤隐藏时回退切换到第一个可见页签（沿用 setActiveTab 通道；
+  // 隐藏的页签原样保留在 store，重开开关/切回会话即回来）
+  useEffect(() => {
+    if (!sessionOnly || visibleTabs.length === 0) return
+    if (visibleTabs.some((t) => t.isActive)) return
+    onTabChange(visibleTabs[0].id)
+  }, [sessionOnly, visibleTabs, onTabChange])
+
+  // 激活签滚动可见：页签条横向可滚，窄幅（移动端）或页签多时激活签可能被裁在
+  // 条外——激活变化时滚回可见区，页签条反馈与内容保持一致；nearest 保证横向
+  // 对齐且不牵动纵向滚动
+  const activeTabRef = useRef<HTMLDivElement | null>(null)
+  const activeTabId = tabs.find((t) => t.isActive)?.id
+  useEffect(() => {
+    activeTabRef.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [activeTabId])
 
   /** 会话主题 override 作用域挂点（主题桥 §5.0：作用域仅聊天区+面板容器） */
   const panelThemeScopeRef = useSessionThemeScope<HTMLDivElement>()
@@ -188,7 +221,8 @@ export function WorkspacePanel({
   // 顶带形态（portal 进顶带槽位）：无面板边框、占满带高、垂直居中；
   // 标签行可收缩（min-w-0 + shrink）——带宽不足时标签先压到下限、文字省略，
   // 全压到下限后由 tablist 自身横向滚动；行本身不收缩会把按钮顶出窗口。
-  // 面板形态（无顶带槽位的回退/移动端）：保留底边框分隔，行不参与纵向收缩。
+  // 面板形态（无顶带槽位的回退/移动端）：保留底边框分隔，行不参与纵向收缩；
+  // 标签 shrink-0 不压缩（保持内容自然宽），横向空间不足走签条滚动，文字不压字。
   const tabBar = (
       <div
         className={cn(
@@ -205,9 +239,10 @@ export function WorkspacePanel({
           )}
           role="tablist"
         >
-        {tabs.map((tab) => (
+        {visibleTabs.map((tab) => (
           <div
             key={tab.id}
+            ref={tab.isActive ? activeTabRef : undefined}
             role="tab"
             aria-selected={tab.isActive}
             draggable
@@ -230,8 +265,14 @@ export function WorkspacePanel({
             className={cn(
               BAND_BUTTON_CLASS,
               'cursor-pointer overflow-hidden whitespace-nowrap',
-              BAND_TAB_WIDTH_CLASS,
-              BAND_TAB_MIN_WIDTH_CLASS,
+              // 压缩策略仅顶带形态：带宽与对话标签共享，压缩换同屏签数（shrink
+              // 本是 flex 默认，类作契约声明）；面板形态（移动端整行独占）显式
+              // shrink-0 保持内容自然宽，装不下由签条横向滚动承接（激活签自动
+              // 滚回可见）——压缩下限会把 CJK 标题压到遮罩从字中间切开
+              //（R9 巡检 #7 压字）。
+              bandTabsSlot
+                ? cn(BAND_TAB_WIDTH_CLASS, BAND_TAB_MIN_WIDTH_CLASS)
+                : 'shrink-0',
               BAND_TAB_MAX_WIDTH_CLASS,
               tab.isActive ? BAND_BUTTON_ACTIVE_CLASS : BAND_BUTTON_IDLE_CLASS,
             )}
@@ -243,7 +284,7 @@ export function WorkspacePanel({
             <TabLabel title={tab.title} />
             {!tab.isPinned && (
               <button
-                className="hover:bg-accent text-muted-foreground ml-1 flex h-4 w-4 shrink-0 items-center justify-center rounded text-xs"
+                className="hover:bg-muted text-muted-foreground ml-1 flex h-4 w-4 shrink-0 items-center justify-center rounded text-xs"
                 aria-label={`关闭 ${tab.title}`}
                 title={`关闭 ${tab.title}`}
                 data-testid={`workspace-tab-close-${tab.id}`}
@@ -270,6 +311,24 @@ export function WorkspacePanel({
           <PlusIcon className={BAND_BUTTON_ICON_CLASS} />
         </button>
         </div>
+        {/* 「只看当前会话」开关（页签条右端）：会话派生页签按归属会话过滤，
+            全局页签恒可见；title 提示当前被隐藏的标签数 */}
+        <button
+          type="button"
+          className={`${BAND_ICON_BUTTON_CLASS} ${sessionOnly ? BAND_BUTTON_ACTIVE_CLASS : BAND_BUTTON_IDLE_CLASS}`}
+          onClick={() => setSessionOnly((v) => !v)}
+          title={
+            sessionOnly
+              ? hiddenCount > 0
+                ? `已按当前会话隐藏 ${hiddenCount} 个标签（点击显示全部）`
+                : '只看当前会话（当前没有被隐藏的标签）'
+              : '显示全部标签（开启后按当前会话过滤）'
+          }
+          aria-label="只看当前会话"
+          data-testid="workspace-session-filter-toggle"
+        >
+          <Eye className={BAND_BUTTON_ICON_CLASS} />
+        </button>
         {/* 全屏按钮（全屏模式隐藏顶栏，故退出入口必须留在工作区内部） */}
         {onFullscreen && (
           <button
@@ -303,7 +362,7 @@ export function WorkspacePanel({
           {/* 声明 detachable 的页面页签 → 弹出浮窗入口（FloatingWindowManager 基建复用） */}
           {canPopout(tabMenu.page) && (
             <button
-              className="hover:bg-accent text-muted-foreground hover:text-foreground flex w-full items-center rounded px-2.5 py-1.5 text-left text-xs"
+              className="hover:bg-muted text-muted-foreground hover:text-foreground flex w-full items-center rounded px-2.5 py-1.5 text-left text-xs"
               onClick={() => handleMenuAction('popout')}
               data-testid="workspace-tab-menu-popout"
             >
@@ -311,7 +370,7 @@ export function WorkspacePanel({
             </button>
           )}
           <button
-            className="hover:bg-accent text-muted-foreground hover:text-foreground flex w-full items-center rounded px-2.5 py-1.5 text-left text-xs disabled:opacity-40"
+            className="hover:bg-muted text-muted-foreground hover:text-foreground flex w-full items-center rounded px-2.5 py-1.5 text-left text-xs disabled:opacity-40"
             disabled={tabMenu.isPinned}
             title={tabMenu.isPinned ? '固定标签不可关闭' : undefined}
             onClick={() => handleMenuAction('close')}
@@ -320,14 +379,14 @@ export function WorkspacePanel({
             关闭本标签
           </button>
           <button
-            className="hover:bg-accent text-muted-foreground hover:text-foreground flex w-full items-center rounded px-2.5 py-1.5 text-left text-xs"
+            className="hover:bg-muted text-muted-foreground hover:text-foreground flex w-full items-center rounded px-2.5 py-1.5 text-left text-xs"
             onClick={() => handleMenuAction('closeOther')}
             data-testid="workspace-tab-menu-close-other"
           >
             关闭其他标签
           </button>
           <button
-            className="hover:bg-accent text-muted-foreground hover:text-foreground flex w-full items-center rounded px-2.5 py-1.5 text-left text-xs"
+            className="hover:bg-muted text-muted-foreground hover:text-foreground flex w-full items-center rounded px-2.5 py-1.5 text-left text-xs"
             onClick={() => handleMenuAction('closeAll')}
             data-testid="workspace-tab-menu-close-all"
           >
@@ -358,13 +417,14 @@ export function WorkspacePanel({
         </DialogContent>
       </Dialog>
 
-      {/* Tab 内容 — 懒挂载：仅激活 Tab 或已访问 Tab 渲染真实内容 */}
+      {/* Tab 内容 — 懒挂载：仅激活 Tab 或已访问 Tab 渲染真实内容（与页签条同用
+          可见集合：被「只看当前会话」过滤的页签不渲染，原样保留在 store） */}
       <div ref={panelThemeScopeRef} className="min-h-0 flex-1 overflow-hidden">
-        {tabs.length === 0 ? (
-          // 无已开页签 → 导航页兜底（schema 声明的 workspace 页面分组导航）
+        {visibleTabs.length === 0 ? (
+          // 无可见页签 → 导航页兜底（schema 声明的 workspace 页面分组导航）
           <WorkspaceNavPage />
         ) : (
-          tabs.map((tab) => {
+          visibleTabs.map((tab) => {
             // 激活 Tab 或已访问过的 Tab 才渲染真实内容；其余 Tab 懒挂载，避免首屏卡死
             const shouldRender =
               tab.isActive || (visitedTabIds ?? []).includes(tab.id)

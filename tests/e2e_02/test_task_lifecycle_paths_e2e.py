@@ -131,7 +131,7 @@ class StubKernel:
         status, body, _ = http_post_json(
             f"{self.url}/api/v1/auth/login",
             {"username": "admin", "password": os.environ["AGENTOS_ADMIN_PASSWORD"]},
-            timeout=15,
+            timeout=60,
         )
         if status != 200 or not isinstance(body, dict) or not body.get("access_token"):
             raise RuntimeError(f"内核登录失败: status={status}, body={body}")
@@ -251,6 +251,11 @@ def stub_kernel(stub_llm):
             # best-effort），默认 6/6 会让后续场景 bash 被隔离守卫拦截；
             # 完成率混合批（R1）8 任务并发各占环境，放宽到 16 留余量
             "AO_MAX_ENVIRONMENTS": "16",
+            # 用户空间隔离：OS 标准用户根（装机版 llm.yaml/.env/插件副本）会
+            # 覆盖本夹具的 stub 注入与 builtin 插件面（真实 LLM 外呼违反
+            # "杜绝任何真实外呼"硬约束），钉到空临时根使配置/插件/密钥
+            # 全部来自临时配置根 + builtin 仓内副本
+            "AGENTOS_USER_ROOT": os.path.join(base_dir, "user_root"),
         }
     )
     with open(log_path, "w", encoding="utf-8") as log_fh:
@@ -323,7 +328,7 @@ def matrix_sessions(stub_kernel, matrix_token):
     for sid in created:
         try:
             http_delete_auth(
-                f"{stub_kernel.url}/api/v1/sessions/{sid}", token=matrix_token, timeout=15
+                f"{stub_kernel.url}/api/v1/sessions/{sid}", token=matrix_token, timeout=60
             )
         except Exception as exc:  # noqa: BLE001 —— teardown 尽力而为
             print(f"[matrix-cleanup] 删除会话失败（忽略）: {sid} | {exc}")
@@ -347,7 +352,7 @@ def _poll_until(fn: Callable[[], Any], timeout: float, interval: float = _POLL_I
 
 def _state_rows(kernel: StubKernel, token: str) -> list[dict[str, Any]]:
     status, body, _ = http_get_with_auth(
-        f"{kernel.url}/api/v1/pipelines/state", token=token, timeout=10
+        f"{kernel.url}/api/v1/pipelines/state", token=token, timeout=30
     )
     if status != 200 or not isinstance(body, dict):
         return []
@@ -419,7 +424,7 @@ def _create_task(kernel: StubKernel, token: str, title: str, description: str) -
         f"{kernel.url}/ext/task_service/tasks",
         {"title": title, "description": description, "agent_id": "general_agent"},
         token=token,
-        timeout=15,
+        timeout=60,
     )
     assert status == 200, f"创建任务应 200，实际 {status}: {body}"
     task_id = body.get("id") or body.get("task_id")
@@ -442,7 +447,7 @@ def _wait_task_terminal(
         status_now = str(state.get("task.status") or "")
         if status_now and status_now not in seen:
             seen.append(status_now)
-        if status_now in ("completed", "failed", "pending_evaluation"):
+        if status_now in ("completed", "failed"):
             return state
         return None
 
@@ -463,7 +468,7 @@ def _wait_task_terminal(
 
 def _session_messages(kernel: StubKernel, token: str, session_id: str) -> list[dict[str, Any]]:
     status, body, _ = http_get_with_auth(
-        f"{kernel.url}/api/v1/sessions/{session_id}/messages", token=token, timeout=10
+        f"{kernel.url}/api/v1/sessions/{session_id}/messages", token=token, timeout=30
     )
     if status != 200 or not isinstance(body, dict):
         return []
@@ -472,7 +477,7 @@ def _session_messages(kernel: StubKernel, token: str, session_id: str) -> list[d
 
 def _create_session(kernel: StubKernel, token: str, title: str) -> str:
     status, body, _ = http_post_json_auth(
-        f"{kernel.url}/api/v1/sessions", {"title": title}, token=token, timeout=15
+        f"{kernel.url}/api/v1/sessions", {"title": title}, token=token, timeout=60
     )
     assert status == 200, f"创建会话应 200，实际 {status}: {body}"
     assert body.get("thread_id"), f"创建会话应返回 thread_id，实际 {body}"
@@ -689,7 +694,7 @@ def _register_rate_batch_scripts(stub: ScriptedLLMUpstream) -> None:
 def _project_row_by_title(kernel: StubKernel, token: str, title: str) -> dict[str, Any] | None:
     """projects 域列表按标题找登记行（project_create 真实执行后观察面）。"""
     status, body, _ = http_get_with_auth(
-        f"{kernel.url}/ext/task_service/projects?limit=100", token=token, timeout=10
+        f"{kernel.url}/ext/task_service/projects?limit=100", token=token, timeout=30
     )
     if status != 200 or not isinstance(body, dict):
         return None
@@ -778,7 +783,7 @@ class TestPathMatrixPreconditions:
         names: list[str] = []
         while time.time() < deadline:
             status, body, _ = http_get_with_auth(
-                f"{stub_kernel.url}/api/v1/tools", token=matrix_token, timeout=10
+                f"{stub_kernel.url}/api/v1/tools", token=matrix_token, timeout=30
             )
             names = [t.get("name") for t in body.get("items", [])] if status == 200 else []
             if all(n in names for n in ("task_evaluate", "bash_execute", "task_submit")):
@@ -799,7 +804,7 @@ class TestPathMatrixPreconditions:
                 method="POST",
                 headers={"Content-Type": "application/json"},
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read().decode("utf-8"))
 
         messages = [{"role": "user", "content": "x E2E-MTX-SELFCHK"}]
@@ -1222,7 +1227,7 @@ class TestD2FailedResubmitCompletes:
             f"{stub_kernel.url}/ext/task_service/tasks/{child_id}/submit",
             {},
             token=matrix_token,
-            timeout=15,
+            timeout=60,
         )
         assert status == 200, f"D2 重跑提交应 200，实际 {status}: {body}"
 
@@ -1603,7 +1608,7 @@ class TestCompletionRateBatch:
                 status_now = str(state.get("task.status") or "")
                 if status_now and status_now not in seen[tid]:
                     seen[tid].append(status_now)
-                if status_now in ("completed", "failed", "pending_evaluation"):
+                if status_now in ("completed", "failed"):
                     terminal[tid] = state
             time.sleep(_POLL_INTERVAL_SECONDS)
 

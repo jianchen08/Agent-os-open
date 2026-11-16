@@ -23,6 +23,10 @@ export interface PipelineRunInfo {
   pipeline_id?: string
   /** 归属会话（thread）ID */
   thread_id?: string
+  /** 统一管道标题（state.title，ADR 2026-10-27-pipeline-title-field）：
+   *  启用方出生写入（任务管道=任务标题、会话主管道=会话标题随变更刷新）。
+   *  无键 = 未命名（旧数据），消费方走 ID 兜底（用户裁定无回退腿） */
+  title?: string
   /** 运行状态 */
   status: PipelineStatus
   /** 开始时间（ISO8601） */
@@ -57,10 +61,15 @@ export interface PipelineViewEntry {
   endedAt?: string
   /** 类型：任务管道 / 会话管道 / 项目分组节点（登记行合成，无管道本体） */
   kind: 'task' | 'session' | 'project'
-  /** 展示名称（任务标题 / 会话标题 / 短 ID 兜底） */
+  /** 展示名称（统一管道标题 state.title——ADR 2026-10-27；无键不再回退
+   *  短 ID（用户裁定 2026-11-06：代号 ID 不进行内），落「未命名」） */
   name: string
-  /** 执行者 Agent 名称（可空） */
+  /** 执行身份 agent.id 原值（state 真值优先，任务端点/会话登记回退；
+   *  关键词筛选数据面消费键，不作行内显示——显示走 agentLabel） */
   agentName?: string
+  /** Agent 行内显示名（agents 注册表按 id/config_id 命中配置名——主管道
+   *  「灵汐」；未命中回退 stem 短名。类型徽标位的替代渲染，可空） */
+  agentLabel?: string
   /** 关联任务 ID（kind=task 时有值） */
   taskId?: string
   /** 项目登记行 id（kind=project 时有值——文件夹打开面按登记 id 解析） */
@@ -87,12 +96,24 @@ export interface PipelineViewEntry {
   /** 任务域状态（task.status 原值；两态模型：仅任务条目有，与运行态图标
    * 分离展示，词汇经 TASK_STATUS_LABELS 中文化） */
   taskStatus?: string
-  /** 任务模式键（state.mode 出口；管道视图模式徽标取数源，无键零渲染） */
-  mode?: string
+  /** 子任务挂号未结算（§4.5「等待子任务」折算输入，仅任务条目有）：存在
+   * 未结算直接子任务 ⇔ state 挂号键 task.subtasks_pending.* 非空（键不在
+   * state 摘要出口，推导单源 types/taskStatus.taskPendingSubtaskParents） */
+  hasPendingSubtasks?: boolean
+  /** 任务模式标签集（state.mode 归一出口；管道视图模式徽标取数源，空集零渲染） */
+  modeTags?: string[]
   /** 管道 state 真值任务状态（state['task.status']） */
   stateStatus?: string
   /** 管道 state 是否已结束（state.ended） */
   stateEnded?: boolean
   /** 管道 state 原始错误（state.raw_error） */
   rawError?: string
+  /** 终局署名（state.run_stop_reason；非空才渲染停止原因行） */
+  stopReason?: string
+  /** 任务域失败分类（state task.failure_class；非空渲染归因分类） */
+  failureClass?: string
+  /** 任务域失败归因全文（state task.failure_reason；后端已译文本） */
+  failureReason?: string
+  /** 挂起归因（run 域 state.suspended_reason；非空才渲染挂起原因行） */
+  suspendedReason?: string
 }

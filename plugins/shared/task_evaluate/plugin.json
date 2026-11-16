@@ -1,0 +1,137 @@
+{
+  "id": "task_evaluate_tool",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Task Evaluate Tool",
+  "description": "任务评估 MCP 工具，评估任务的验收指标是否满足；完赛前按任务 metadata.required_files 声明前置校验交付文件证据（存在且晚于任务创建基线 + 基线后有新 commit），未声明 required_files 时仍校验工作空间基线后须有新 commit（无 git 记录拒绝完赛并要求先提交）",
+  "version": "1.0.8",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "state": {
+    "writes": [
+      "task.*"
+    ]
+  },
+  "capabilities": {
+    "metrics_class": "tool",
+    "tools": [
+      {
+        "name": "task_evaluate",
+        "description": "任务评估工具，评估任务的验收指标是否满足",
+        "render": {
+          "card": "form",
+          "title": "任务评估"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "evaluate_single",
+                "auto_complete"
+              ],
+              "description": "评估模式：evaluate_single-评估单个指标(需提供metric_id)，所有指标逐一通过后任务自动完成；auto_complete-评估所有未通过的指标(已通过的自动跳过)，默认",
+              "default": "auto_complete"
+            },
+            "metric_id": {
+              "type": "string",
+              "description": "评估指标ID，仅在evaluate_single模式时必填"
+            },
+            "summary": {
+              "type": "string",
+              "description": "任务完成摘要（推荐填写）。内容应包含：1) 完成了什么工作（简要说明实现思路和做了哪些改动）；2) 产出了什么（文件、配置、数据等产物）；3) 产物的存放路径（相对路径，如 src/auth/login.py、config/rules.yaml）。示例：'实现了用户登录功能，新增 JWT 认证模块。产出：src/auth/login.py、src/auth/jwt_handler.py、tests/test_login.py。'评估器将依据此摘要了解任务成果并验证产物。"
+            }
+          },
+          "required": []
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "task_id",
+            "overall_passed",
+            "summary",
+            "metrics"
+          ],
+          "properties": {
+            "task_id": {
+              "type": "string"
+            },
+            "overall_passed": {
+              "type": "boolean"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "metrics": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "metric_id",
+                  "passed"
+                ],
+                "properties": {
+                  "metric_id": {
+                    "type": "string"
+                  },
+                  "passed": {
+                    "type": "boolean"
+                  },
+                  "score": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "message": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "issues": {
+                    "type": "array"
+                  },
+                  "suggestions": {
+                    "type": "array"
+                  },
+                  "report_path": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "permissions": {},
+  "priority": 10,
+  "export_fields": [
+    "evaluation.of_task",
+    "evaluation.metric_id",
+    "evaluation.detected_result",
+    "task.evaluation",
+    "task.evaluation_history"
+  ],
+  "mcp": {
+    "transport": "stdio",
+    "request_timeout_secs": 1800
+  },
+  "host_group": "light"
+}

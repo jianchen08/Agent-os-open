@@ -2,17 +2,17 @@
 /**
  * useConnectionStatus 首连状态映射测试（回归：2026-08-20 用户真实反馈）。
  *
- * Bug 现象：每次刷新页面后，"内核连接已断开，正在尝试恢复…"横幅显示
- * 5-10s 才消失——用户感知"要等很久才能连上后端"。
+ * Bug 现象：每次刷新页面后，"内核连接已断开，正在尝试恢复…"通知条目
+ * 显示 5-10s 才消失——用户感知"要等很久才能连上后端"。
  *
  * 根因：layoutModeStore.connectionStatus 初始 state='disconnected'，且
  * useConnectionStatus 在「WS 尚未发起首次连接」（token 恢复/JS 加载期）
  * 时把 globalWS.status='disconnected'（从未连接≠断开）也映射成
- * 'disconnected'——页面刷新后横幅立即出现"已断开"；连上后 AlertBanner
- * 的 resolveHoldMs=4s 又让横幅多挂 4s。
+ * 'disconnected'——页面刷新后条目立即出现"已断开"；连上后 4s 解除
+ * 保留期又让条目多挂 4s。
  *
  * 契约（修复后）：从未发起过连接（hasAttemptedConnect=false）或正在
- * connecting 时，状态映射为 'connecting'（不出断开横幅）；只有真正
+ * connecting 时，状态映射为 'connecting'（不出断开条目）；只有真正
  * 连接过之后的断开才是 'disconnected'。
  */
 import { renderHook } from '@testing-library/react'

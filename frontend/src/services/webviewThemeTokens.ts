@@ -40,7 +40,9 @@ export function buildWebviewThemeTokens(
     '--ag-border': pick(c?.border?.default, '--border-default'),
     '--ag-card': pick(c?.background?.card, '--bg-card'),
     '--ag-accent': pick(c?.accent, '--accent'),
-    '--ag-accent-soft': accentSoftToken(c?.accent, cssVar),
+    '--ag-accent-soft': softToken(c?.accent, cssVar, '--accent'),
+    '--ag-primary': pick(c?.primary, '--primary'),
+    '--ag-primary-soft': softToken(c?.primary, cssVar, '--selection-bg'),
     '--ag-chip': pick(config?.components?.badge?.variants?.default?.bg, '--badge-default-bg'),
     '--ag-ok': pick(c?.status?.success, '--status-success'),
     '--ag-warn': pick(c?.status?.warning, '--status-warning'),
@@ -59,11 +61,15 @@ export function buildWebviewThemeTokens(
   return tokens
 }
 
-/** 强调浅底：accent 半透明派生；不可解析回退宿主选中底，再退 accent 原值 */
-function accentSoftToken(accent: string | undefined, cssVar: (name: string) => string): string {
-  if (accent) {
-    const rgb = colorToRgb(accent)
+/** 浅底派生：源色半透明；不可解析回退宿主 fallbackVar（选中底等已落地值），再退源色原值 */
+function softToken(
+  color: string | undefined,
+  cssVar: (name: string) => string,
+  fallbackVar: string,
+): string {
+  if (color) {
+    const rgb = colorToRgb(color)
     if (rgb) return `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.14)`
   }
-  return cssVar('--selection-bg') || accent || ''
+  return cssVar(fallbackVar) || color || ''
 }

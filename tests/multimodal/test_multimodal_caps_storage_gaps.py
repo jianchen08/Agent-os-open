@@ -49,7 +49,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_PLUGIN_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "multimodal"
+_PLUGIN_DIR = _REPO_ROOT / "plugins" / "shared" / "multimodal"
 _SHARED_ROOT = _REPO_ROOT / "plugins" / "shared"
 
 _YAML_PAYLOAD = """\

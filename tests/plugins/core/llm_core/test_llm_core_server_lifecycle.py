@@ -21,7 +21,7 @@ pytestmark = pytest.mark.unit
 
 _PLUGIN_DIR = (
     Path(__file__).resolve().parents[4]
-    / "plugins" / "shared" / "pipeline" / "core" / "llm_core"
+    / "plugins" / "shared" / "llm_core"
 )
 
 

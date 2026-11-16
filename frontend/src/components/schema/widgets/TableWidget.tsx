@@ -242,7 +242,7 @@ export function TableWidget(props: Record<string, unknown>) {
               {columns.map((col) => (
                 <th
                   key={col.key}
-                  className={`text-muted-foreground px-4 py-2.5 text-left text-xs font-medium uppercase tracking-wider ${
+                  className={`text-muted-foreground whitespace-nowrap px-4 py-2.5 text-left text-xs font-medium uppercase tracking-wider ${
                     col.sortable ? 'cursor-pointer select-none hover:text-foreground' : ''
                   }`}
                   style={col.width ? { width: col.width } : undefined}
@@ -276,7 +276,7 @@ export function TableWidget(props: Record<string, unknown>) {
                 </th>
               ))}
               {rowActions.length > 0 && (
-                <th className="text-muted-foreground px-4 py-2.5 text-right text-xs font-medium uppercase tracking-wider">
+                <th className="text-muted-foreground whitespace-nowrap px-4 py-2.5 text-right text-xs font-medium uppercase tracking-wider">
                   操作
                 </th>
               )}
@@ -297,7 +297,7 @@ export function TableWidget(props: Record<string, unknown>) {
                 <tr
                   key={ri}
                   className="border-b transition-colors last:border-b-0 hover:bg-muted/30"
-                  style={ri % 2 === 1 ? { backgroundColor: 'var(--muted, #f9fafb)' } : undefined}
+                  style={ri % 2 === 1 ? { backgroundColor: 'var(--muted)' } : undefined}
                 >
                   {columns.map((col) => (
                     <td key={col.key} className="px-4 py-2.5 text-sm">

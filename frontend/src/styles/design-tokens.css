@@ -7,7 +7,7 @@
  */
 
 :root {
-  color-scheme: dark light;
+  color-scheme: light dark;
 
   /* shadcn/ui 核心变量 - Light 默认 = Deep Space 反转 */
   --background: 214 40% 97%;           /* #F4F7FB */
@@ -162,7 +162,7 @@
 
   /* 头像样式 */
   --avatar-radius: 0.75rem;
-  --avatar-border: 1px solid hsl(var(--border) / 0.5);
+  --avatar-border: 1px solid hsl(var(--border-t, var(--border)) / calc(0.5 * var(--border-a, 1)));
   --avatar-shadow: 0 1px 3px rgb(0 0 0 / 0.08);
   --avatar-sm-size: 32px;
   --avatar-md-size: 40px;
@@ -177,7 +177,7 @@
   --card-backdrop-blur: 8px;
 
   /* 输入框样式 */
-  --input-bg: hsl(var(--input) / 0.5);
+  --input-bg: hsl(var(--input-t, var(--input)) / calc(0.5 * var(--input-a, 1)));
   --input-border: 1px solid hsl(var(--border));
   --input-radius: 0.5rem;
   --input-focus-border: hsl(var(--primary));
@@ -188,7 +188,7 @@
   --status-running-color: #0891B2;
   --status-running-shadow: 0 0 10px rgba(8, 145, 178, 0.15);
 
-  --status-waiting-color: #D97706;
+  --status-waiting-color: #92400E;
   --status-waiting-shadow: 0 0 10px rgba(217, 119, 6, 0.15);
 
   --status-success-color: #059669;
@@ -211,7 +211,7 @@
 
   /* 状态 rgb 三元组（tailwind alpha 修饰消费）与状态章前景（黑白择优，主题引擎运行时覆写） */
   --status-running-rgb: 8 145 178;
-  --status-warning-rgb: 217 119 6;
+  --status-warning-rgb: 146 64 14;
   --status-success-rgb: 5 150 105;
   --status-error-rgb: 220 38 38;
   --status-info-rgb: 59 130 246;
@@ -244,7 +244,7 @@
   /* 思考过程样式 */
   --thinking-text-color: rgba(100, 100, 115, 0.7);
   --thinking-border-color: rgba(59, 130, 246, 0.3);
-  --thinking-bg: hsl(var(--muted) / 0.3);
+  --thinking-bg: hsl(var(--muted-t, var(--muted)) / calc(0.3 * var(--muted-a, 1)));
 
   /* 代码块样式 */
   --code-bg: #1e1e1e;
@@ -267,6 +267,7 @@
 
 /* === Dark 模式覆盖 — Deep Space v2（设计稿 A 区默认主题规范）=== */
 .dark {
+  color-scheme: dark;
   /* shadcn/ui 核心变量 - 映射设计稿变量集 */
   --background: 229 58% 4%;          /* bg-canvas #04060F */
   --foreground: 210 40% 96.1%;       /* text-primary #F1F5F9 */

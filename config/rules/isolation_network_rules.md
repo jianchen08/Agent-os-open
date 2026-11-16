@@ -28,11 +28,11 @@
   - 例：`flask run --host 0.0.0.0 --port 5000`
 - **需被宿主/外部访问时**：server **必须绑 `0.0.0.0`**，绝不能只绑 `127.0.0.1`
   - 原因：`127.0.0.1` 是容器自己的 loopback，宿主（含宿主上的浏览器工具）打不到
-  - 即使配了端口映射，server 绑 `127.0.0.1` 时宿主依然 REFUSED（已验证）
+  - 即使配了端口映射，server 绑 `127.0.0.1` 时宿主依然 REFUSED
 
 ### 禁止的反模式
 
-- ❌ 容器内起 server（绑 `127.0.0.1`）+ 用宿主的 `browser_search`/`playwright_test` 工具去访问
+- ❌ 容器内起 server（绑 `127.0.0.1`）+ 从宿主侧用浏览器工具（browser_navigate 等）去访问
   → 宿主浏览器打 `localhost:端口` 会 ERR_CONNECTION_REFUSED
 - ❌ 假设容器里的 `localhost` 等于宿主的 `localhost` —— 它们是两个不同的 loopback
 - ❌ 在容器里探测宿主服务时写 `localhost` —— bridge 网络下要用 `host.docker.internal`

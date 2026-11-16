@@ -21,9 +21,10 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import {
   TASK_STATUSES,
   TASK_STATUS_ALIASES,
-  TASK_STATUS_EVAL_GATE_VALUE,
   TASK_STATUS_LABELS,
+  STOP_REASON_LABELS,
   normalizeTaskStatus,
+  stopReasonLabel,
   taskStatusLabel,
   taskStatusToPipelineStatus,
   taskStatusToAgentTabStatus,
@@ -77,7 +78,7 @@ function collectSourceText(root: string): string {
 describe('任务状态词表 ↔ 后端写面对账（契约）', () => {
   it('TASK_STATUSES 与 task_types.py TaskStatus enum 逐一相等', () => {
     const source = readFileSync(
-      join(REPO_ROOT, 'plugins/shared/system/tasks/task_types.py'),
+      join(REPO_ROOT, 'plugins/shared/tasks/task_types.py'),
       'utf-8',
     )
     const block = source.slice(
@@ -89,7 +90,7 @@ describe('任务状态词表 ↔ 后端写面对账（契约）', () => {
     expect([...TASK_STATUSES].sort()).toEqual([...new Set(enumValues)].sort())
   })
 
-  it('插件写面所有 task.status 字面量值都落在词表（七态+评估闸门值）内', () => {
+  it('插件写面所有 task.status 字面量值都落在词表（七态）内', () => {
     const source = collectSourceText('plugins/shared')
     expect(source.length).toBeGreaterThan(0)
     const written = new Set<string>()
@@ -97,20 +98,23 @@ describe('任务状态词表 ↔ 后端写面对账（契约）', () => {
       written.add(m[1])
     }
     expect(written.size).toBeGreaterThan(0)
-    // 写面收口集合 = 七态 + 评估闸门未决值（reconcile 托底补落，
-    // ADR 2026-09-28-task-completed-eval-gate-only 授权的记账态，非生命周期态）
-    const allowed = [...TASK_STATUSES, TASK_STATUS_EVAL_GATE_VALUE]
+    // 写面收口集合 = 七态 + 用户侧终态署名 cancelled（tasks/http_api.py
+    // cancel 随写，R2 实证；前端别名折叠 stopped，显示过渡映射「已暂停」——
+    // 词汇退役见 ADR 2026-10-30-task-status-authority-vocabulary-convergence）。
+    // 废弃值 pending_evaluation 已退役，回流即红。
+    const allowed = [...TASK_STATUSES, 'cancelled']
     const outside = [...written].filter((v) => !allowed.includes(v))
     expect(outside).toEqual([])
   })
 
   it('别名旧值在 tasks 插件源码中有读面/文档证据', () => {
-    const source = collectSourceText('plugins/shared/system/tasks')
+    const source = collectSourceText('plugins/shared/tasks')
     for (const alias of Object.keys(TASK_STATUS_ALIASES)) {
       expect(source.includes(`"${alias}"`) || source.includes(`'${alias}'`)).toBe(true)
     }
-    // pending_evaluation：评估未决读面值（reconcile 未决集）
-    expect(source.includes('pending_evaluation')).toBe(true)
+    // 废弃值零残留：pending_evaluation 口径已废弃（B 拍板 2026-10-16），
+    // tasks 插件源码不得再出现（回流即红）
+    expect(source.includes('pending_evaluation')).toBe(false)
   })
 
   it('死词零残留：无写面词汇不得回流标签词表', () => {
@@ -118,11 +122,10 @@ describe('任务状态词表 ↔ 后端写面对账（契约）', () => {
     for (const dead of ['planning', 'blocked', 'deleted', 'canceled']) {
       expect(labelKeys).not.toContain(dead)
     }
-    // 标签键集合 = 七态 ∪ 别名 ∪ pending_evaluation，不得有其他派生键
+    // 标签键集合 = 七态 ∪ 别名，不得有其他派生键
     const allowed = new Set([
       ...TASK_STATUSES,
       ...Object.keys(TASK_STATUS_ALIASES),
-      'pending_evaluation',
     ])
     for (const key of labelKeys) {
       expect(allowed.has(key)).toBe(true)
@@ -181,5 +184,37 @@ describe('任务状态归一行为（未知 ≠ running/completed）', () => {
     expect(taskStatusToAgentTabStatus('failed')).toBe('failed')
     expect(taskStatusToAgentTabStatus('timeout')).toBe('failed')
     expect(taskStatusToAgentTabStatus('completed')).toBe('completed')
+  })
+})
+
+describe('stopReasonLabel 终局署名人话对照（内核契约词表）', () => {
+  it('词表内：人话 + 原词并列；词表外：原词透传不猜语义', () => {
+    expect(stopReasonLabel('empty_reply_exhausted')).toBe(
+      '空回复耗尽（LLM 连续无内容回复）（empty_reply_exhausted）',
+    )
+    expect(stopReasonLabel('timeout')).toBe('墙钟预算耗尽（timeout）')
+    // 插件声明停机词不在前端词表——原词透传（与 tasks/reconcile.py 同口径）
+    expect(stopReasonLabel('some_plugin_signature')).toBe('some_plugin_signature')
+  })
+
+  it('契约：词表键 ⊆ 内核 FAILED_STOP_REASONS ∪ 两词第一方声明（kernel types.rs 对账）', () => {
+    // 从内核真源解析署名词表（taskStatus.ts 的 STOP_REASON_LABELS 与之对账，
+    // 与 tasks/reconcile.py _SIGNATURE_REASONS 同词表分面维护）
+    const kernelSource = readFileSync(
+      resolve(REPO_ROOT, 'kernel/crates/core/src/types.rs'),
+      'utf-8',
+    )
+    const block = kernelSource.match(
+      /pub const FAILED_STOP_REASONS[\s\S]*?= &\[([\s\S]*?)\];/,
+    )
+    expect(block).not.toBeNull()
+    const kernelWords = new Set<string>()
+    for (const m of block![1].matchAll(/"(\w+)"/g)) kernelWords.add(m[1])
+    // 第一方声明例外（ADR 2026-10-20-model-hot-swap-inflight-guard，reconcile 同款收录）
+    const firstParty = new Set(['model_unavailable', 'llm_fail_loop'])
+    const extras = Object.keys(STOP_REASON_LABELS).filter(
+      (k) => !kernelWords.has(k) && !firstParty.has(k),
+    )
+    expect(extras).toEqual([])
   })
 })

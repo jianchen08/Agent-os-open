@@ -37,8 +37,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 for _d in (
     _REPO_ROOT / "plugins" / "shared",
     _REPO_ROOT / "plugins" / "shared" / "system",
-    _REPO_ROOT / "plugins" / "shared" / "system" / "tasks",
-    _REPO_ROOT / "plugins" / "shared" / "system" / "isolation",
+    _REPO_ROOT / "plugins" / "shared" / "tasks",
+    _REPO_ROOT / "plugins" / "shared" / "isolation",
 ):
     _s = str(_d)
     if _s in sys.path:

@@ -31,7 +31,13 @@ const storage = vi.hoisted(() => ({
   })),
 }))
 
+const shellBridge = vi.hoisted(() => ({
+  notifyShellTheme: vi.fn(),
+  getShellLastTheme: vi.fn(),
+}))
+
 vi.mock('@/services/skinRuntime', () => skinRuntime)
+vi.mock('@/services/shellPlugins', () => shellBridge)
 vi.mock('@/services/schema/ContributionRegistry', () => ({ contributionRegistry: registry }))
 vi.mock('@/services/themeStorage', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>()
@@ -41,6 +47,7 @@ vi.mock('@/services/themeService', async (importOriginal) => themeServiceWiring(
 
 import { useThemeStore, initializeTheme } from '../themeStore'
 import { applyTheme as applyThemeToDOM } from '@/services/themeService'
+import { userScopedKey as pk } from '@/utils/userScopedStorage'
 
 const PLUGIN_THEME = {
   id: 'dsh-skin-x',
@@ -65,6 +72,7 @@ describe('themeStore', () => {
     storage.getUserTheme.mockReturnValue(null)
     storage.getUserThemes.mockReturnValue([])
     storage.deleteUserTheme.mockClear()
+    shellBridge.getShellLastTheme.mockResolvedValue(null)
     useThemeStore.setState({
       mode: 'dark',
       currentThemeId: 'dark',
@@ -109,6 +117,26 @@ describe('themeStore', () => {
       useThemeStore.getState().setMode('system')
       expect(useThemeStore.getState().resolvedTheme).toBe('dark')
       window.matchMedia = original
+    })
+  })
+
+  describe('壳主题上报', () => {
+    it('currentThemeId 变更 → notifyShellTheme 以生效 id 调用一次', async () => {
+      useThemeStore.getState().setTheme('light')
+      await flushLoad()
+      expect(shellBridge.notifyShellTheme).toHaveBeenCalledTimes(1)
+      expect(shellBridge.notifyShellTheme).toHaveBeenCalledWith('light')
+    })
+
+    it('currentThemeId 不变（同主题重放 applyTheme）→ 不上报', () => {
+      useThemeStore.setState({
+        currentThemeId: 'dark',
+        themeConfig: { id: 'dark', backgrounds: {} } as never,
+      })
+      // setState 铺底自身可能因前值不同触发上报（bookkeeping），清掉后只断言行为
+      shellBridge.notifyShellTheme.mockClear()
+      useThemeStore.getState().setMode('dark')
+      expect(shellBridge.notifyShellTheme).not.toHaveBeenCalled()
     })
   })
 
@@ -337,7 +365,7 @@ describe('themeStore', () => {
   describe('持久化与启动初始化', () => {
     it('partialize 只落 mode/currentThemeId', () => {
       useThemeStore.setState({ mode: 'light', currentThemeId: 'light' })
-      const raw = localStorage.getItem('theme-storage')
+      const raw = localStorage.getItem(pk('theme-storage'))
       expect(raw).toBeTruthy()
       const parsed = JSON.parse(raw!)
       expect(parsed.state).toEqual({ mode: 'light', currentThemeId: 'light' })
@@ -350,6 +378,31 @@ describe('themeStore', () => {
       expect(st.resolvedTheme).toBe('light')
       expect(st.themeConfig?.id).toContain('light')
       expect(st.availableThemes.length).toBeGreaterThan(0)
+    })
+
+    it('initializeTheme：boot 无主题键且壳有值 → 按壳值恢复（重装回暗）', async () => {
+      // 本文件顶层导入 themeStore 时 jsdom localStorage 为空 → boot 快照=无键成立
+      useThemeStore.setState({ mode: 'light', currentThemeId: 'light' })
+      shellBridge.getShellLastTheme.mockResolvedValue('dark')
+      try {
+        await initializeTheme()
+        expect(useThemeStore.getState().currentThemeId).toBe('dark')
+        expect(useThemeStore.getState().resolvedTheme).toBe('dark')
+      } finally {
+        shellBridge.getShellLastTheme.mockResolvedValue(null)
+      }
+    })
+
+    it('initializeTheme：boot 已有主题键 → 不查壳（用户在储选择恒优先于壳存值）', async () => {
+      vi.resetModules()
+      localStorage.setItem(
+        pk('theme-storage'),
+        JSON.stringify({ state: { mode: 'dark', currentThemeId: 'dark' }, version: 0 }),
+      )
+      const fresh = (await import('../themeStore')) as typeof import('../themeStore')
+      await fresh.initializeTheme()
+      expect(shellBridge.getShellLastTheme).not.toHaveBeenCalled()
+      expect(fresh.useThemeStore.getState().currentThemeId).toBe('dark')
     })
   })
 })

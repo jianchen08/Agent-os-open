@@ -24,7 +24,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system" / "artifacts"
+_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "artifacts"
 
 _BOUNDARY = "X-TEST-BOUNDARY-42"
 

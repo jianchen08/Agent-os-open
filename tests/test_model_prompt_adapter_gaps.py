@@ -31,7 +31,7 @@ import yaml
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_PLUGIN_DIR = _REPO_ROOT / "plugins" / "shared" / "pipeline" / "input" / "model_prompt_adapter"
+_PLUGIN_DIR = _REPO_ROOT / "plugins" / "shared" / "model_prompt_adapter"
 _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
 for _p in (str(_SHARED_DIR), str(_PLUGIN_DIR)):
     if _p in sys.path:

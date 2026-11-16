@@ -1,0 +1,111 @@
+{
+  "id": "acp_quota_pool",
+  "name": "ACP Quota Pool",
+  "description": "ACP 额度池——外部编码 agent 统一派发（技能包载荷形态）：载荷 = SKILL.md 路由口径（任务分级 S0/S1/S2、性能基础线、选型优先序）+ providers.toml 注册表 + scripts/acp_pool.py 派发与记账 CLI（双后端：acp=官方 agent-client-protocol SDK 原生握手，现役 opencode；oneshot=一次性 CLI spawn 如 zcode -p，无会话）。on_load 把载荷镜像到 <USER_ROOT>/skills/acp-quota-pool/（播种机制只认仓根/mode_* 包/用户根三类源，插件载荷经此入链）。额度账本 v0 落用户空间 JSON（被动记账：派发计数/最近会话/撞墙归类）。on_load 同刀托管 CPA 网关生命周期（健康检查→不在则静默拉起 start-gateway.bat→复验记日志，bat 端口守卫幂等）；插件页 acp_gateway_console = webview 直嵌网关管理页（网关不在时提供拉起按钮，登录由用户在页内完成，管理密钥不入仓不入前端）。网关参数单源 config_files[gateway]。",
+  "version": "0.2.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "config_files": [
+    {
+      "id": "gateway",
+      "path": "config/plugins/acp_quota_pool/gateway.yaml",
+      "label": "ACP 网关配置",
+      "fields": [
+        {
+          "name": "base_url",
+          "type": "string",
+          "label": "网关 base_url"
+        },
+        {
+          "name": "start_command",
+          "type": "string",
+          "label": "拉起命令"
+        }
+      ]
+    }
+  ],
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load"
+    ]
+  },
+  "http_endpoints": [
+    {
+      "route_id": "acp_gateway_status",
+      "method": "GET",
+      "path": "/ext/acp_quota_pool/gateway/status",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "网关健康状态（GET 管理页探活；返回 running/base_url/management_url/detail，密钥不参与）"
+    },
+    {
+      "route_id": "acp_gateway_start",
+      "method": "POST",
+      "path": "/ext/acp_quota_pool/gateway/start",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 15000,
+      "max_concurrency": 2,
+      "description": "拉起网关（与 on_load 同一段 ensure 逻辑：探活→不在则拉起 start_command→复验一次，幂等）"
+    },
+    {
+      "route_id": "acp_console_page",
+      "method": "GET",
+      "path": "/ext/acp_quota_pool/page/console",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "Webview HTML 页：网关控制台（状态检查→自导航嵌管理页/拉起按钮，零数据渲染）"
+    }
+  ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "acp_gateway_console",
+        "title": "额度网关",
+        "icon": "🏦",
+        "space": "workspace",
+        "slot": "tab",
+        "path": "/p/acp_gateway_console",
+        "widget": "webview",
+        "order": 63,
+        "props": {
+          "pluginId": "acp_quota_pool",
+          "htmlPath": "/page/console",
+          "widgetId": "acp_gateway_console"
+        },
+        "description": "CPA 网关管理控制台（webview 直嵌网关管理页；网关未运行时提供拉起按钮）"
+      }
+    ]
+  },
+  "permissions": {
+    "filesystem": {
+      "read_paths": ["*"],
+      "write_paths": ["*"]
+    },
+    "network": {
+      "allowed_hosts": ["127.0.0.1", "localhost"]
+    },
+    "env_vars": [
+      "PATH",
+      "APPDATA",
+      "SYSTEMROOT",
+      "TEMP",
+      "TMP",
+      "USERPROFILE",
+      "AGENTOS_USER_ROOT",
+      "AGENTOS_DATA_DIR",
+      "ACP_GATEWAY_BASE_URL",
+      "ACP_GATEWAY_START_COMMAND"
+    ],
+    "system_calls": ["opencode", "node", "cmd"]
+  },
+  "priority": 50
+}

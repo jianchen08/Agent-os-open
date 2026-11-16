@@ -113,6 +113,44 @@ describe('applyPluginThemeVars — 变量与背景覆盖', () => {
     // 第二次应用未声明的旧变量（如 --bubble-ai-mode）已被清理
     expect(document.documentElement.style.getPropertyValue('--bubble-ai-mode')).toBe('')
   })
+
+  it('区域 muted 变量归一化为 HSL 三元组（消费契约 hsl(var(--muted-foreground))，hex 进 hsl() 非法）', () => {
+    applyPluginThemeVars(
+      pluginTheme({
+        variables: {
+          '--region-sidebar-muted-fg': '#abafbd',
+          '--region-chat-muted-fg': 'rgba(9, 21, 23, 1)',
+          '--region-workspace-muted-fg': '#5d6373',
+        },
+      }),
+    )
+    const sidebar = document.documentElement.style.getPropertyValue('--region-sidebar-muted-fg')
+    // 三元组形态：三个空格分隔的分量（hsl() 桥接契约），非 hex/rgba 原文
+    expect(sidebar).not.toContain('#')
+    expect(sidebar.split(' ')).toHaveLength(3)
+    expect(document.documentElement.style.getPropertyValue('--region-chat-muted-fg').split(' ')).toHaveLength(3)
+    expect(document.documentElement.style.getPropertyValue('--region-workspace-muted-fg').split(' ')).toHaveLength(3)
+  })
+
+  it('区域 muted 变量已是三元组时原样保留（归一化幂等）', () => {
+    applyPluginThemeVars(
+      pluginTheme({ variables: { '--region-sidebar-muted-fg': '223 15% 38%' } }),
+    )
+    expect(document.documentElement.style.getPropertyValue('--region-sidebar-muted-fg')).toBe('223 15% 38%')
+  })
+
+  it('裸值消费的区域变量不经归一化（--region-*-fg/bg 按 var() 原文消费）', () => {
+    applyPluginThemeVars(
+      pluginTheme({
+        variables: {
+          '--region-sidebar-fg': '#a9adbb',
+          '--region-sidebar-bg': '#123456',
+        },
+      }),
+    )
+    expect(document.documentElement.style.getPropertyValue('--region-sidebar-fg')).toBe('#a9adbb')
+    expect(document.documentElement.style.getPropertyValue('--region-sidebar-bg')).toBe('#123456')
+  })
 })
 
 describe('derivePluginThemePreview — 预览色派生', () => {

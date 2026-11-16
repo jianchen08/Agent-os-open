@@ -36,16 +36,10 @@ SHARED_ENV = REPO / "plugins" / "shared" / "_host" / ".venv"
 SDK_DIST_NAME = "agentos-plugin-sdk"
 
 # 定深扫描（禁递归 glob：dsh_adapter 存在自嵌套 node_modules junction 会挂死）
+# 拍平布局（ADR 2026-10-13-plugin-flat-layout）：96 插件平铺至 plugins/shared/<id>，
+# 一级 glob 即全集（_host/_libs 无 plugin.json 天然不入）。
 PLUGIN_GLOBS = [
-    "plugins/shared/system/*",
-    "plugins/shared/tools/*",
-    "plugins/shared/pipeline/core/*",
-    "plugins/shared/pipeline/input/*",
-    "plugins/shared/pipeline/output/*",
-    "plugins/shared/modes/*",
-    "plugins/shared/db_admin",
-    "plugins/shared/metrics_admin",
-    "plugins/shared/user_admin",
+    "plugins/shared/*",
 ]
 # 永不触碰
 PROTECTED = {

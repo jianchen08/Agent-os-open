@@ -3,7 +3,7 @@
 
 覆盖缺口：
 - tool.py：BrowserTool 构造、execute 全分发链（未知工具名 / token 缺失 /
-  Bridge 不可达 / 成功路径含 sandbox caller 与容器 env 注入）、
+  Bridge 不可达 / 成功路径含 sandbox caller 与容器身份显式传参）、
   _build_arguments 透传过滤与截图默认值、_to_tool_result 的 isError 分支、
   截图超限拒收、截图落盘（mime→扩展名）、_content_text 提取；
 - bridge_client.py：token 从项目 .env 解析（含引号剥离）、_rpc 状态码错误
@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_BROWSER_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "browser"
+_BROWSER_DIR = _REPO_ROOT / "plugins" / "shared" / "browser"
 
 
 def _evict_foreign_bare_modules() -> None:
@@ -65,8 +65,8 @@ class _StubBridgeClient:
     last_call: tuple = ()
     response: dict = {}
 
-    def __init__(self, config, session_id="", caller="host"):
-        type(self).last_init = (config, session_id, caller)
+    def __init__(self, config, session_id="", caller="host", container_id="", exec_backend=None):
+        type(self).last_init = (config, session_id, caller, container_id, exec_backend)
 
     def call(self, tool_name, arguments):
         type(self).last_call = (tool_name, arguments)
@@ -113,30 +113,37 @@ class TestExecuteDispatch:
         assert r.success is False
         assert r.error_code == "BRIDGE_CALL_FAILED"
 
-    async def test_sandbox_dispatch_sets_container_env_and_caller(self, monkeypatch, tmp_path):
+    async def test_sandbox_dispatch_passes_container_id_and_caller(self, monkeypatch, tmp_path):
         ws = tmp_path / "ws"
         ws.mkdir()
-        monkeypatch.setenv("_CONTAINER_ID", "placeholder")
+        monkeypatch.delenv("_CONTAINER_ID", raising=False)
         _StubBridgeClient.response = {"content": [{"type": "text", "text": "snapshot body"}]}
         monkeypatch.setattr(browser_tool, "BridgeClient", _StubBridgeClient)
 
         tool = BrowserTool({"upstream": "browser"})
+        backend = {"backend": "wsl_native", "distro": "Ubuntu", "workspace_wsl": "/mnt/d/ws"}
         r = await tool.execute(
             {
                 "_tool_name": "browser_snapshot",
                 "session_id": "sess-9",
                 "_container_id": "cid-7",
+                "_exec_backend": backend,
                 "workspace": str(ws),
             }
         )
 
         assert r.success is True
         assert r.output["snapshot_text"] == "snapshot body"
-        # 容器上下文经环境变量传给 bridge_client，不进 MCP 参数
-        assert os.environ["_CONTAINER_ID"] == "cid-7"
-        config, session, caller = _StubBridgeClient.last_init
+        # exec_backend 透传 BridgeClient（wsl_native 沙箱内传输选路依据）
+        assert _StubBridgeClient.last_init[4] == backend
+        # 容器身份显式传参给 bridge_client（sidecar 多会话共享进程，
+        # 不得经进程级环境传递），不进 MCP 参数
+        assert os.environ.get("_CONTAINER_ID") is None
+        _, session, caller, container_id, exec_backend = _StubBridgeClient.last_init
         assert session == "sess-9"
         assert caller == "sandbox"
+        assert container_id == "cid-7"
+        assert exec_backend == backend
         assert _StubBridgeClient.last_call == ("browser_snapshot", {})
 
     async def test_host_dispatch_navigates_with_url_echo(self, monkeypatch):
@@ -296,12 +303,12 @@ class TestSendDirectSuccess:
 class TestContainerTransport:
     def _client(self, monkeypatch) -> BridgeClient:
         monkeypatch.setattr(BridgeClient, "_resolve_token", staticmethod(lambda cfg: "tok"))
-        monkeypatch.setenv("_CONTAINER_ID", "cid-9")
         monkeypatch.setattr(bc, "_docker_gateway_ip", lambda: "")  # 网关探测是外部面
         return BridgeClient(
             {"bridge_base": "http://127.0.0.1:8765", "upstream": "browser", "timeout_secs": 5},
             session_id="sess-2",
             caller="sandbox",
+            container_id="cid-9",
         )
 
     @staticmethod

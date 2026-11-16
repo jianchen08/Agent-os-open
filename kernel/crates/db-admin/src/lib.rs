@@ -9,12 +9,20 @@
 //! - [`db_routes`]：纯 SQL 构建与校验逻辑（白名单枚举/参数绑定/租户隔离/BLOB 安全/
 //!   SQL 执行器防线——check_dangerous/classify_sql 等全部保留）；
 //! - [`capability`]：capability handler（8 method）+ 鉴权（`_authorization` 转发，
-//!   内核侧 resolve_request_user 复用 api 管理面同一实现）。
+//!   内核侧 resolve_request_user 复用 api 管理面同一实现）；
+//! - [`read_faces`]：db-read 内核库读契约服务（数据面声明式注册 + 自由只读
+//!   SELECT + 租户内建收窄 + 权限分档；capability 面 db-read.query/faces 与
+//!   HTTP 端点 POST /api/v1/db/read 两入口同一执法核心）。
 //!
 //! 设计来源：docs/working/unified_db_admin_plan.md（表驱动动态枚举 + 安全约束）、
-//! docs/working/重要设计/boot-plugin内核能力插件化立项.md §三（第一刀方案）。
+//! docs/working/重要设计/boot-plugin内核能力插件化立项.md §三（第一刀方案）、
+//! docs/working/内核库读契约服务设计_spec_20261015.md（db-read 读契约）。
 
 pub mod capability;
 pub mod db_routes;
+pub mod read_faces;
 
 pub use capability::{DbAdminCapabilityHandler, DbAdminState, NAMESPACE};
+pub use read_faces::{
+    db_read_http_handler, install_http_service, DbReadCapabilityHandler, ReadFacesRegistry,
+};

@@ -3,7 +3,6 @@
  */
 
 import type { Message, MessageRole, MessageToolCall, ThinkingContent } from '@/types/models'
-import type { ThinkingStrength } from '@/types/thinkingMode'
 
 /**
  * 消息内容类型
@@ -62,13 +61,24 @@ export interface SendMessageParams {
   content: string
   /** 附件列表 */
   attachments?: Attachment[]
-  /** 思考选择 = 参数组 JSON 串（'' = 未选择；随消息透传，llm_core 白名单过滤后覆盖模型参数） */
-  thinkingStrength?: ThinkingStrength
+  /** 思考强度（参数组 JSON 串，llm_service thinking-levels 选项 value，随消息
+   *  透传给后端 llm_core 白名单过滤直覆盖；'' = 不覆盖） */
+  thinkingStrength?: string
+  /** 显式模型选择（llm.yaml models 键，随消息 model_id 字段透传；内核按
+   *  llm_core widget 声明的 frame_field 名单合成 state overlay，llm_core
+   *  解析链首位消费=最高优先级覆盖管道配置；'' / 缺省 = 不带字段，跟随配置） */
+  modelId?: string
   /** 任务模式（模式体系契约键，开放标签 = registry 模式键；「默认」= 缺席
    *  不带键，经消息级 execution_context.mode 落任务上下文） */
   mode?: string
   /** 子 Tab 发消息时的目标管道 ID，后端直接用它路由 */
   pipelineId?: string
+  /** 受理时输入框原文快照（ChatInput→router 内部契约）：随 beginSend 登记，
+   *  落定清空按「当前文本 == 快照」比对执行（不吞超时解锁后的新输入） */
+  composerText?: string
+  /** 受理时草稿键（ChatInput→router 内部契约）：随 beginSend 登记，落定清草稿
+   *  经草稿 store 按 key 生效（不依赖 ChatInput 组件存活） */
+  draftKey?: string
 }
 
 /**
@@ -83,6 +93,8 @@ export interface ChatContainerProps {
   onSendMessage: (params: SendMessageParams) => SendMessageReceipt
   /** 停止生成回调 */
   onStopGenerate?: () => void
+  /** 强制发送队列条目回调（停止当前回复并优先发送该条；参数 = 目标管道 ID + 条目 ID） */
+  onForceSendPending?: (pipelineId: string, inputId: string) => void
   /** 自定义类名 */
   className?: string
   /** 是否还有更多历史消息 */
@@ -156,6 +168,12 @@ export interface MessageItemProps {
   /** ‹i/n› 多代切换器锚点（消息段模型）：本消息为其锚点覆盖范围的轮末条
    *  assistant 时由 MessageList 标定，值为锚点 base_seq；null/缺省不显示切换器 */
   segmentSwitcherBaseSeq?: number | null
+  /** 只读行（压缩段成员原文等冻结副本）：不渲染操作钮——副本的 UI id 无
+   *  服务端落点，编辑/删除必然失败，入口直接不给 */
+  readOnly?: boolean
+  /** 流式总耗时锚点（触发消息发出时刻 ms，MessageList 按最近前置 user 消息
+   *  解析）：思考中/执行中指示行据此显示实时总耗时；缺省不显示耗时 */
+  streamAnchorMs?: number | null
 }
 
 /**
@@ -208,6 +226,10 @@ export interface ChatInputProps {
   disabled?: boolean
   /** 是否正在生成回复 */
   isGenerating?: boolean
+  /** 发送在途（chatInputStore.sendInFlightByPipeline 非空）：已点发送、消息未
+   *  落定（气泡认领/队列条出现）——发送按钮转圈、输入锁定；落定或超时/失败撤下
+   *  （2026-11-04 落定语义重定义：ack 受理回执不再撤发送态） */
+  sendInFlight?: boolean
   /** 执行状态（用于 smart 模式） */
   executionState?: ExecutionState
   /** 发送消息回调；返回是否受理（false=未受理，保留输入与草稿不清空） */
@@ -222,10 +244,14 @@ export interface ChatInputProps {
   modelName?: string
   /** 是否启用思考模式切换 */
   enableThinkingMode?: boolean
-  /** 当前思考强度（thinking_strength_params 配置键；随消息传给后端 llm_core 路由模型参数） */
-  thinkingStrength?: ThinkingStrength
-  /** 切换思考强度回调（调用方负责本地记忆） */
-  onThinkingStrengthChange?: (strength: ThinkingStrength) => void
+  /** 当前思考选择（参数组 JSON 串；随消息透传给后端 llm_core 直覆盖） */
+  thinkingStrength?: string
+  /** 切换思考选择回调（调用方负责标签级记忆） */
+  onThinkingStrengthChange?: (strength: string) => void
+  /** 当前显式模型选择（llm.yaml models 键；'' = 未选择，选择器占位显示配置模型） */
+  modelId?: string
+  /** 切换模型选择回调（调用方负责标签级记忆；'' = 清除显式选择回到跟随配置） */
+  onModelIdChange?: (modelId: string) => void
   /** 自定义类名 */
   className?: string
   /** 草稿保存的 key（通常是 tabId 或 sessionId），切换 Tab 时保留未发送文本 */

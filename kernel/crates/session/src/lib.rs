@@ -44,6 +44,12 @@ pub trait EventSink: Send + Sync {
     /// 默认空实现，测试 mock sink 无需实现。
     fn shutdown(&self) {}
 
+    /// 以 4001 族关闭连接（鉴权类拒绝：用户→租户解析存储故障 fail-closed，
+    /// K8 修订 ADR 2026-10-10）。与 [`EventSink::shutdown`]（超限踢旧，
+    /// Close 4000 两段式）区分：4001 前端走 refreshToken → 重连自愈。
+    /// 默认空实现，测试 mock sink 无需实现。
+    fn shutdown_auth_reject(&self) {}
+
     /// 出站队列在飞帧数（堆栈级诊断面：消费端停滞积压观测）。
     /// 默认 None = 该 sink 不披露队列深度（测试 mock / 无队列实现）。
     fn pending_frames(&self) -> Option<usize> {
@@ -72,6 +78,7 @@ mod tests {
     async fn default_shutdown_is_safe_noop() {
         let sink = BareSink;
         sink.shutdown(); // 默认实现：测试 mock sink 无需释放真实连接
+        sink.shutdown_auth_reject(); // 同上：鉴权类拒绝的默认空实现可安全调用
         assert!(sink.send_text("ping").await);
         assert_eq!(sink.id(), 1);
     }

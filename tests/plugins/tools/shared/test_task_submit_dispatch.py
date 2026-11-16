@@ -33,10 +33,12 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_TS_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools" / "task_submit"
-_SYSTEM_ROOT = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system"
+_TS_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "task_submit"
+_SHARED_ROOT = Path(__file__).resolve().parents[4] / "plugins" / "shared"
 
-for _d in [_SYSTEM_ROOT, _SYSTEM_ROOT / "tasks", _SYSTEM_ROOT / "channel_api"]:
+# 拍平布局（ADR 2026-10-13-plugin-flat-layout）：共享根平铺模块 + tasks 插件目录
+# （task_types/orchestration 裸名解析）。channel_api 已并入 tasks/http_api.py。
+for _d in [_SHARED_ROOT, _SHARED_ROOT / "tasks"]:
     if str(_d) not in sys.path:
         sys.path.insert(0, str(_d))
 
@@ -63,6 +65,18 @@ def mod() -> Any:
     return _load_module()
 
 
+@pytest.fixture(autouse=True)
+def _birth_ws(mod: Any) -> Any:
+    """出生协议第三段（提交期同步建工作空间）准备器替身——驱动真实派发的
+    用例必注入（ADR-2026-10-17-task-birth-workspace-inclusion：无跳过路径）。
+    """
+    from tests import _task_birth_workspace as _birth_ws_mod
+
+    _birth_ws_mod.inject_preparer(mod)
+    yield
+    _birth_ws_mod.reset_preparer(mod)
+
+
 class _FakeSender:
     """记录 chat.send_message 参数的派发器 fake。"""
 
@@ -87,6 +101,7 @@ def _base_inputs(**over: Any) -> dict:
         "pipeline_id": "pipe_parent_9",
         "user_id": "user-1",
         "execution_id": "exec-1",
+        "session_id": "sess-1",
     }
     base.update(over)
     return base
@@ -106,13 +121,16 @@ def _make_tool(mod: Any) -> Any:
 
     tool._validate_target_agent = _ok  # type: ignore[method-assign]
 
-    async def _base_config(target_id: str) -> dict[str, Any] | None:
-        return {
-            "level": "L2",
-            "is_active": True,
-            "tool_ids": ["file_read"],
-            "system_prompt": "stub-persona",
-        }
+    async def _base_config(target_id: str) -> tuple[dict[str, Any] | None, None]:
+        return (
+            {
+                "level": "L2",
+                "is_active": True,
+                "tool_ids": ["file_read"],
+                "system_prompt": "stub-persona",
+            },
+            None,
+        )
 
     tool._get_agent_base_config = _base_config  # type: ignore[method-assign]
     return tool
@@ -140,12 +158,13 @@ class TestTaskPipelineDispatch:
             mod._chat_sender = None
         assert r.success, r.error
 
-        # 统一出生协议（plugins/shared/task_birth.py）：四次 chat.send_message——
+        # 统一出生协议（plugins/shared/task_birth.py）：五次 chat.send_message——
         # ① 出生登记（create + no_dispatch 只登记不派发）；② 身份登记
-        # （task.id = 引擎管道 id，先于执行）；③ 执行派发（kickoff+background）；
-        # ④ no_dispatch 登记分支把新任务以 task.owned.<id>.* 写回提交者管道。
-        assert len(sender.calls) == 4
-        birth, identity, dispatch, reg = sender.calls
+        # （task.id = 引擎管道 id，先于执行）；③ 工作空间登记（出生协议第三段，
+        # 提交期同步建工作空间，坐标落任务管道）；④ 执行派发（kickoff+background）；
+        # ⑤ no_dispatch 登记分支把新任务以 task.owned.<id>.* 写回提交者管道。
+        assert len(sender.calls) == 5
+        birth, identity, workspace_reg, dispatch, reg = sender.calls
         # ① 出生登记：create + no_dispatch，出生 state 一次写全
         assert birth["create"] is True
         assert birth["no_dispatch"] is True
@@ -156,7 +175,8 @@ class TestTaskPipelineDispatch:
         assert "background" not in birth
         # 血缘：有父形式（state 扁平键出生即入，非顶层 lineage 字典）
         assert birth["state"]["lineage.parent_pipeline_id"] == "pipe_parent_9"
-        assert birth["state"]["lineage.origin_session_id"] == "pipe_parent_9"
+        # origin_session_id：param_inject 注入的 session_id 优先（无会话坐标才回退管道 id）
+        assert birth["state"]["lineage.origin_session_id"] == "sess-1"
         assert birth["user_id"] == "user-1"
 
         # ② 身份登记：task.id = 引擎返回的 pipeline_id（身份权威统一），
@@ -165,17 +185,30 @@ class TestTaskPipelineDispatch:
         assert identity["no_dispatch"] is True
         assert identity["state"] == {"task.id": "pipe_engine_gen_1"}
 
-        # ③ 执行派发：kickoff 指令 + background
+        # ③ 工作空间登记：坐标写任务管道（no_dispatch，不派发）
+        assert workspace_reg["pipeline_id"] == "pipe_engine_gen_1"
+        assert workspace_reg["no_dispatch"] is True
+
+        # ④ 执行派发：kickoff 指令 + background
         assert dispatch["pipeline_id"] == "pipe_engine_gen_1"
         assert "喝水提醒" in dispatch["message"]
         assert dispatch["user_id"] == "user-1"
         assert dispatch.get("background") is True
 
-        # ④ 登记分支：只写提交者管道 state，不派发
+        # ⑤ 登记分支：只写提交者管道 state，不派发
         assert reg["pipeline_id"] == "pipe_parent_9"
         assert reg["no_dispatch"] is True
-        assert reg["state"][f"task.owned.pipe_engine_gen_1.status"] == "running"
-        assert reg["state"][f"task.owned.pipe_engine_gen_1.title"] == "喝水提醒"
+        # 登记键瘦身（ADR 2026-11-02-state-key-governance，6d8375003）：
+        # {title, created_at, submitted_by} 纯声明 + 子任务挂号——status 镜像退役，
+        # 任务状态单一真源 = 子管道行 task.status
+        assert set(reg["state"]) == {
+            "task.owned.pipe_engine_gen_1.title",
+            "task.owned.pipe_engine_gen_1.created_at",
+            "task.owned.pipe_engine_gen_1.submitted_by",
+            "task.subtasks_pending.pipe_engine_gen_1",
+        }
+        assert reg["state"]["task.owned.pipe_engine_gen_1.title"] == "喝水提醒"
+        assert reg["state"]["task.owned.pipe_engine_gen_1.submitted_by"] == "user-1"
 
         # YAML 写路径清零：create_task/start_task/bind_pipeline_run 全不触碰
         service.create_task.assert_not_called()
@@ -214,12 +247,59 @@ class TestTaskPipelineDispatch:
         finally:
             mod._chat_sender = None
         assert r.success
-        ec = sender.calls[2]["execution_context"]
+        ec = sender.calls[3]["execution_context"]
         assert ec["workspace"]["source_path"] == "D:/proj/demo"
         assert ec["workspace"]["mode"] == "worktree"
         # 显式 workspace = 调用方显式声明（落位锚定该路径，不被父链继承覆盖）
         assert ec["workspace"]["explicit"] is True
         assert ec["isolation"]["level"] == "isolated"
+
+    async def test_submit_explicit_plain_birth_writes_task_ws_meta(self, mod: Any) -> None:
+        """显式 workspace + plain 拓扑：出生登记（阶段一）即写 task.ws_meta。
+
+        「任务 init 即写」单一真相源的创建段兑现——显式 plain 的最终坐标提交期
+        即确定（workspace_lifecycle._start_plain_root 同形：直接操作该目录，
+        path = project_root = source_path）。缺此预写，创建 → 管道 init 落
+        task.ws_meta 之间是首查时序窗：文件树首查 no_workspace、重试才命中
+        （2026-10-08 装机实锤 5dc60e00，tasks/root 直派）。
+        """
+        sender = _FakeSender()
+        mod.set_chat_sender(sender)
+        tool = _make_tool(mod)
+        try:
+            r = await tool.execute(
+                _base_inputs(workspace="D:/proj/demo", workspace_mode="plain")
+            )
+        finally:
+            mod._chat_sender = None
+        assert r.success
+        birth = sender.calls[0]
+        assert birth["state"]["task.ws_meta"] == {
+            "mode": "plain",
+            "path": "D:/proj/demo",
+            "project_root": "D:/proj/demo",
+        }
+
+    async def test_submit_non_plain_birth_does_not_prewrite_ws_meta(self, mod: Any) -> None:
+        """对照（有区分度输入）：worktree 与无声明拓扑不预写 task.ws_meta。
+
+        worktree 最终坐标（隔离副本路径）与默认拓扑（工作区根/{task_id} 目录
+        创建）提交期不可知——预写即谎报坐标，仍由 init 段权威落笔。
+        """
+        for over in (
+            {"workspace": "D:/proj/demo", "workspace_mode": "worktree"},
+            {},
+        ):
+            sender = _FakeSender()
+            mod.set_chat_sender(sender)
+            tool = _make_tool(mod)
+            try:
+                r = await tool.execute(_base_inputs(**over))
+            finally:
+                mod._chat_sender = None
+            assert r.success, r.error
+            assert "task.ws_meta" not in sender.calls[0]["state"]
+
 
     async def test_submit_dependency_check_reads_state_aggregation(self, mod: Any) -> None:
         """依赖校验读 state 聚合（pipeline-state.list）而非 YAML 树。"""
@@ -254,14 +334,16 @@ class TestTaskPipelineDispatch:
         assert not r2.success
         assert r2.error_code == "DEPENDENCY_NOT_FOUND"
 
-    async def test_submit_inherit_workspace_reads_birth_contract_coordinates(self, mod: Any) -> None:
-        """inherit_workspace_from 读源任务自身坐标（两路）：ws_meta（registry
-        快路径）与 task.ws_meta（出生即登记的 pipeline-state 镜像，运行初
-        回写窗口内恒可见）——不得误报"没有工作空间信息"。"""
+    async def test_submit_inherit_reads_source_task_coordinates(self, mod: Any) -> None:
+        """inherit_from 读源任务自身坐标（task.ws_meta）——不得误报"没有工作空间坐标"。
+
+        2026-10-20 用户裁定《继承机制简化方案》：inherit_from 单参数 = 源任务
+        ID，工具按 id 正向查表并整份复制其坐标。
+        """
         sender = _FakeSender()
         mod.set_chat_sender(sender)
         tool = _make_tool(mod)
-        # 源任务坐标目录须在容器内（同容器校验）+ 真实存在（目录存在校验）
+        # 源任务坐标目录须真实存在（坐标活性校验）
         ws = Path(
             tempfile.mkdtemp(prefix="test_inherit_ws_", dir=Path(__file__).resolve().parents[4])
         )
@@ -270,12 +352,15 @@ class TestTaskPipelineDispatch:
                 return [
                     {
                         "pipeline_id": "src-task-001",
+                        "task.id": "src-task-001",
+                        "run_status": "failed",
+                        "task.status": "failed",
                         "task.ws_meta": {"mode": "plain", "path": str(ws)},
                     }
                 ]
 
             tool._read_state_rows = _rows  # type: ignore[method-assign]
-            r = await tool.execute(_base_inputs(inherit_workspace_from="src-task-001"))
+            r = await tool.execute(_base_inputs(inherit_from="src-task-001"))
             assert r.success, r.error
             ec_call = next(c for c in sender.calls if "execution_context" in c)
             assert ec_call["execution_context"]["workspace"]["source_path"] == str(ws)
@@ -296,33 +381,43 @@ class TestTaskPipelineDispatch:
                 return [
                     {
                         "pipeline_id": "src-task-001",
+                        "task.id": "src-task-001",
+                        "run_status": "failed",
+                        "task.status": "failed",
                         "lineage.parent_ws_meta": {"mode": "plain", "path": str(ws2)},
                     }
                 ]
 
             tool2._read_state_rows = _rows_lineage_only  # type: ignore[method-assign]
-            r2 = await tool2.execute(_base_inputs(inherit_workspace_from="src-task-001"))
+            r2 = await tool2.execute(_base_inputs(inherit_from="src-task-001"))
             assert not r2.success
-            assert "没有工作空间信息" in (r2.error or "")
+            assert "没有工作空间坐标" in (r2.error or "")
         finally:
             shutil.rmtree(ws2, ignore_errors=True)
             mod._chat_sender = None
 
-    async def test_submit_inherit_workspace_all_sources_empty_fails_closed(self, mod: Any) -> None:
-        """源任务自身两路坐标全空（ws_meta/task.ws_meta）→ fail-closed
-        报"没有工作空间信息"，不猜测不虚构。"""
+    async def test_submit_inherit_source_without_coordinates_fails_closed(self, mod: Any) -> None:
+        """源任务无坐标（task.ws_meta 缺）→ fail-closed 报"没有工作空间坐标"，
+        不猜测不虚构。"""
         sender = _FakeSender()
         mod.set_chat_sender(sender)
         tool = _make_tool(mod)
 
         async def _rows() -> list[dict]:
-            return [{"pipeline_id": "src-task-002"}]
+            return [
+                {
+                    "pipeline_id": "src-task-002",
+                    "task.id": "src-task-002",
+                    "run_status": "failed",
+                    "task.status": "failed",
+                }
+            ]
 
         tool._read_state_rows = _rows  # type: ignore[method-assign]
         try:
-            r = await tool.execute(_base_inputs(inherit_workspace_from="src-task-002"))
+            r = await tool.execute(_base_inputs(inherit_from="src-task-002"))
             assert not r.success
-            assert "没有工作空间信息" in r.error
+            assert "没有工作空间坐标" in r.error
         finally:
             mod._chat_sender = None
 
@@ -382,10 +477,12 @@ class TestTaskPipelineDispatch:
 
 class TestDispatchInstructionRichness:
     """派发指令完整性（0.1 _build_full_task_input 移植）：评估指标详情、
-    工作空间模式提示、路径使用规则、待办工作法必须进入下级指令。
+    工作空间模式提示、路径使用规则必须进入下级指令。
 
     评估指标详情依赖真实 evaluation_metrics.yaml（与 task_evaluate 同源），
     断言取真实指标名与定义中的 description 前缀，不做任何 mock。
+    进度跟踪工作法注入已退役（2026-10-25 用户裁定：待办由 todo 插件跟踪，
+    派发任务不携带清单流程说明），派发消息以 not in 钉退役。
     """
 
     def test_kickoff_includes_evaluation_criteria_detail(self, mod: Any) -> None:
@@ -455,15 +552,8 @@ class TestDispatchInstructionRichness:
         """execution_context 无 workspace 声明 → 空串（不注入误导性提示）。"""
         assert mod._build_workspace_guidance({}) == ""
 
-    def test_kickoff_includes_task_progress_method(self, mod: Any) -> None:
-        """待办工作法注入（0.1 同职移植）。"""
-        msg = mod._build_task_progress_method()
-        assert "进度跟踪工作法" in msg
-        assert "- [ ]" in msg
-        assert "task_evaluate" in msg
-
     async def test_dispatch_message_contains_all_guidance(self, mod: Any) -> None:
-        """端到端：派发消息带评估详情/工作空间提示/路径规则/待办工作法。"""
+        """端到端：派发消息带评估详情/工作空间提示/路径规则，不带已退役的待办工作法。"""
         sender = _FakeSender()
         mod.set_chat_sender(sender)
         tool = _make_tool(mod)
@@ -484,15 +574,16 @@ class TestDispatchInstructionRichness:
         finally:
             mod._chat_sender = None
         assert r.success, r.error
-        msg = sender.calls[2]["message"]
+        msg = sender.calls[3]["message"]
         assert "执行任务「写报告」" in msg
         assert "任务描述：基于调研数据撰写报告 docs/report.md" in msg
         assert "验收标准：" in msg
-        # 增强段：评估详情 + 工作空间 + 路径规则 + 待办工作法
+        # 增强段：评估详情 + 工作空间 + 路径规则
         assert mod._EVALUATION_PROMPT_HEADER in msg
         assert "隔离副本" in msg
         assert "相对路径" in msg
-        assert "进度跟踪工作法" in msg
+        # 退役钉（2026-10-25 用户裁定）：待办归 todo 插件，派发不携带清单流程说明
+        assert "进度跟踪工作法" not in msg
 
 
 class TestPendingSubtaskRegistration:
@@ -513,13 +604,16 @@ class TestPendingSubtaskRegistration:
             mod._chat_sender = None
         assert r.success, r.error
 
-        reg = sender.calls[3]
+        reg = sender.calls[4]
         assert reg["no_dispatch"] is True
         child_id = "pipe_engine_gen_1"
         value = reg["state"][f"task.subtasks_pending.{child_id}"]
         assert isinstance(value, str) and value, "挂号值 = 提交时间戳（非空标量）"
-        # 与 task.owned 登记键同批发往提交者管道（一次 no_dispatch 写面）
-        assert f"task.owned.{child_id}.status" in reg["state"]
+        # 与 task.owned 登记键同批发往提交者管道（一次 no_dispatch 写面）；
+        # 登记键瘦身（ADR 2026-11-02-state-key-governance，6d8375003）：
+        # status 镜像退役，声明键只余 {title, created_at, submitted_by}
+        assert f"task.owned.{child_id}.title" in reg["state"]
+        assert f"task.owned.{child_id}.status" not in reg["state"]
 
     async def test_root_dispatch_without_parent_writes_no_registration(
         self, mod: Any
@@ -535,7 +629,7 @@ class TestPendingSubtaskRegistration:
         finally:
             mod._chat_sender = None
         assert r.success, r.error
-        assert len(sender.calls) == 3, "根任务只有出生三段，无登记分支"
+        assert len(sender.calls) == 4, "根任务出生四段（含工作空间登记），无登记分支"
 
 
 class TestProjectAttachOnly:
@@ -571,9 +665,11 @@ class TestWorkspaceExplicitness:
     def project_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> Iterator[dict[str, Any]]:
-        """登记项目 {pid: 项目文件夹}（仓库根下临时目录，过同容器路径闸）
-        并以 fake 模块替换 project_registry（tool.py 函数内 import）。"""
-        proj_dir = Path(tempfile.mkdtemp(prefix="test_proj_ws_", dir=Path(__file__).resolve().parents[4]))
+        """登记项目 {pid: 项目文件夹}（仓库根下临时目录，过同容器路径闸）并
+        以 fake 模块替换 project_registry（tool.py 函数内 import）。前缀禁
+        test_ 开头：并发收集期 pytest 会把根下 test_* 目录当测试包 lstat，
+        瞬态目录撞收集即 FileNotFoundError 中断整轮收集。"""
+        proj_dir = Path(tempfile.mkdtemp(prefix="proj_ws_tmp_", dir=Path(__file__).resolve().parents[4]))
         fake_reg = types.ModuleType("project_registry")
         fake_reg.load_project_paths = lambda: {"proj00000001": str(proj_dir)}  # type: ignore[attr-defined]
         fake_reg.PLAN_DISPATCH_WHITELIST = frozenset({  # type: ignore[attr-defined]
@@ -588,9 +684,23 @@ class TestWorkspaceExplicitness:
 
         fake_reg.ProjectRegistry = _FakeProjectRegistry  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, "project_registry", fake_reg)
+
+        async def _project_service(method: str, args: dict):
+            """project.* 服务替身（T6a 后 tool.py 经 _project_call 消费）：
+            list_paths 出登记映射；get 保持 fake 登记假面语义（id 不在登记 →
+            found=False，plan/mode 闸不生效）。"""
+            if method == "list_paths":
+                return {"paths": {"proj00000001": str(proj_dir)}}
+            if method == "get":
+                return {"found": False}
+            raise KeyError(method)
+
+        tool_mod = _load_module()
+        tool_mod.set_project_service(_project_service)
         try:
             yield {"id": "proj00000001", "dir": proj_dir}
         finally:
+            tool_mod.set_project_service(None)
             shutil.rmtree(proj_dir, ignore_errors=True)
 
     async def test_inherited_project_attach_is_not_explicit(
@@ -617,7 +727,7 @@ class TestWorkspaceExplicitness:
         finally:
             mod._chat_sender = None
         assert r.success, r.error
-        ec = sender.calls[2]["execution_context"]
+        ec = sender.calls[3]["execution_context"]
         # 项目归属继承成功：source_path 解析为项目文件夹供工具锚点使用，
         # 但不得标显式——否则子任务在项目根上另开副本、无视父链工作空间。
         assert ec["workspace"]["source_path"] == str(project_env["dir"])
@@ -639,7 +749,7 @@ class TestWorkspaceExplicitness:
         finally:
             mod._chat_sender = None
         assert r.success, r.error
-        ec = sender.calls[2]["execution_context"]
+        ec = sender.calls[3]["execution_context"]
         assert ec["workspace"]["source_path"] == str(project_env["dir"])
         assert ec["workspace"]["explicit"] is True
 
@@ -655,7 +765,7 @@ class TestWorkspaceExplicitness:
         finally:
             mod._chat_sender = None
         assert r.success, r.error
-        ec = sender.calls[2]["execution_context"]
+        ec = sender.calls[3]["execution_context"]
         assert ec["workspace"]["source_path"] == ""
         assert ec["workspace"]["explicit"] is False
 
@@ -672,7 +782,7 @@ class TestManifestSchemaLockstep:
         import json
 
         manifest = json.loads(
-            (Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools" / "task_submit" / "plugin.json").read_text(
+            (Path(__file__).resolve().parents[4] / "plugins" / "shared" / "task_submit" / "plugin.json").read_text(
                 encoding="utf-8"
             )
         )

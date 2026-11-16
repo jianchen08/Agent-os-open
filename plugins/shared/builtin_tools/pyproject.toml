@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentos-builtin-tools"
+version = "0.2.0"
+description = "Lingxi AgentOS 0.2 builtin tool plugins — MCP wrapped"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Lingxi AgentOS Contributors"}
+]
+dependencies = [
+    "agentos-plugin-sdk>=0.2.0",
+    # file_read 文档→markdown 回退复用 doc_tools 读取链（跨插件 sibling import，
+    # ADR 2026-10-16）：三依赖与 doc_tools pyproject 同约束，运行时惰性 import
+    "markdown-it-py>=3.0",
+    "python-docx>=1.1",
+    "pypdf>=4.0",
+]
+
+# 本地 SDK 源映射（uv lock 解析必需——agentos-plugin-sdk 不在任何 registry）：
+# editable 链接 plugins/sdk/src 源码目录（判据 2 案 A；批 D 补齐对齐 uv 单轨契约）。
+[tool.uv.sources]
+agentos-plugin-sdk = { path = "../../sdk", editable = true }
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[tool.setuptools.packages.find]
+where = ["."] # 包平铺在插件根（合宿平铺布局一致）
+include = ["agentos_builtin_tools*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true

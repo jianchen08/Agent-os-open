@@ -4,8 +4,8 @@
     "packaging"
   ],
   "name": "Metrics Admin HTTP Face",
-  "description": "指标读面的 HTTP 面层（boot-plugin 第三刀）：/ext/metrics_admin/** 端点经内核 dispatcher 进本插件 http.handle，反向调用内核 metrics-admin capability（查询/枚举/Prometheus 导出，逻辑与鉴权在内核 handler 内）。写面（metrics.record 热路径）仍为内核内置反向调用，不经本插件。鉴权凭证（Authorization 头）由本插件原样转发、内核侧解析，插件不做鉴权决策。内核 /metrics（Prometheus 抓取）作为运维契约保留在内核，不经本插件。",
-  "version": "1.0.0",
+  "description": "指标读面的 HTTP 面层：/ext/metrics_admin/** 端点经内核 dispatcher 进本插件 http.handle，反向调用内核 metrics-admin capability（查询/枚举/Prometheus 导出，逻辑与鉴权在内核 handler 内）。写面（metrics.record 热路径）仍为内核内置反向调用，不经本插件。鉴权凭证（Authorization 头）由本插件原样转发、内核侧解析，插件不做鉴权决策。内核 /metrics（Prometheus 抓取）作为运维契约保留在内核，不经本插件。",
+  "version": "1.0.2",
   "plugin_type": "tool",
   "language": "python",
   "host_type": "sidecar",
@@ -16,6 +16,35 @@
       {
         "name": "http.handle",
         "description": "HTTP endpoint handler for /ext/metrics_admin/**（metrics-admin capability 的 HTTP 面转发层）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "raw_body": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "query": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          }
+        },
         "output_schema": {
           "type": "object",
           "properties": {
@@ -30,10 +59,18 @@
         "render": {
           "card": "generic"
         }
-      },
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [],
+    "services": [
       {
         "name": "metrics_admin.status",
         "description": "插件状态（capability 句柄是否已注入）",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
         "output_schema": {
           "type": "object",
           "properties": {
@@ -44,20 +81,12 @@
               "type": "boolean"
             }
           }
-        },
-        "render": {
-          "card": "generic"
         }
       }
-    ],
-    "route_signals": [],
-    "lifecycle_hooks": []
+    ]
   },
   "permissions": {},
   "priority": 50,
-  "granted_capabilities": [
-    "metrics-admin"
-  ],
   "http_endpoints": [
     {
       "route_id": "query",
@@ -83,5 +112,6 @@
       "handler_capability": "http.handle",
       "description": "Prometheus exposition format 导出（text/plain；内核 /metrics 仍保留）"
     }
-  ]
+  ],
+  "host_group": "light_stable"
 }

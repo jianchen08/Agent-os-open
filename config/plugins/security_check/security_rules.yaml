@@ -259,11 +259,13 @@ rules:
         value: "comment"
 
   # ── 项目状态门：plan→running / running→plan 强制人工审批（ADR 2026-09-17）──
-  # project_state 的 transition 是方案冻结/解冻的人审门：action 参数含 "transition"
-  # 即命中（keyword 子串匹配），弹人工审批后执行；query 只读不受影响。
-  # done 由用户界面管理，不在工具可迁集合内。
-  - name: "project_state_gate"
-    tools: ["project_state"]
+  # project 合一工具的 transition 是方案冻结/解冻的人审门：action 参数含
+  # "transition" 即命中（keyword 子串匹配），弹人工审批后执行；query/list 只读、
+  # create 建项均不受影响。done 由用户界面管理，不在工具可迁集合内。
+  # （工具面退役任务C刀4：原 project_state_gate 按合并后工具名+action 参数改写，
+  # 审批语义不变——工具面审查 §十 前提核实：规则形态=tools+params+patterns。）
+  - name: "project_gate"
+    tools: ["project"]
     params: ["action"]
     action: needs_approval
     patterns:

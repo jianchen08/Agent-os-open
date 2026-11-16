@@ -5,7 +5,16 @@
  * Requirements: 4.1, 4.2
  */
 
+import { parseYamlStrict } from '@/services/schema/yaml'
 import { API_BASE_URL } from './api'
+// 打包件内核回源常量：生成物单源（scripts/generate_port_constants.py 真值区），
+// 与 electron KERNEL_DEFAULT_PORT 同一真值，闸 scripts/check_kernel_port_sync.py 执法。
+import { PACKAGED_KERNEL_HOST, PACKAGED_KERNEL_PORT } from './packagedKernelPort.generated'
+// WS 事件名单单源（ADR 2026-10-10-ws-events-single-source）：Vite ?raw 内嵌
+// 编译进产物（无 yaml 插件、无构建期生成物）；运行时 js-yaml 解析派生
+// WS_SERVER_EVENTS。内核侧 include_str! 同读本文件——双侧各自解析同一
+// 物理文件即真单源，事件名改动只改 yaml 一处。
+import wsEventsSource from '../../../config/kernel/ws_events.yaml?raw'
 
 export enum WebSocketStatus {
   DISCONNECTED = 'disconnected',
@@ -17,10 +26,12 @@ export enum WebSocketStatus {
  * 打包件（Electron 自定义协议 app://）下内核的固定回源地址。
  *
  * app:// 页面的 location 宿主是自定义协议而非内核，WS 无法从 location 派生；
- * 装机版内核默认监听 127.0.0.1:9101（与 electron/kernel-manager.ts 的
- * KERNEL_DEFAULT_PORT 一致，与 dev 栈 9100 错峰；改动两处须同刀同步）。
+ * host/port 取自生成物单源（packagedKernelPort.generated.ts，由
+ * scripts/generate_port_constants.py 真值区生成，与 electron
+ * KERNEL_DEFAULT_PORT 同一真值；闸 scripts/check_kernel_port_sync.py 执法），
+ * 与 dev 栈 9100 错峰（ADR 2026-09-20）。
  */
-const PACKAGED_KERNEL_WS_ORIGIN = 'ws://127.0.0.1:9101'
+const PACKAGED_KERNEL_WS_ORIGIN = `ws://${PACKAGED_KERNEL_HOST}:${PACKAGED_KERNEL_PORT}`
 
 /**
  * 从 API_BASE_URL 派生 WebSocket URL
@@ -55,7 +66,7 @@ const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || deriveWsUrl(API_BASE_URL
  *
  * 与后端 PROTOCOL_VERSION 保持一致，用于版本协商。
  */
-const PROTOCOL_VERSION = '3.0.0'
+export const PROTOCOL_VERSION = '3.0.0'
 
 /**
  * WS 握手凭据参数。
@@ -91,101 +102,101 @@ export const buildGlobalWebSocketUrl = (auth: WsHandshakeAuth, lastSequence?: nu
 }
 
 /**
- * WebSocket服务端事件类型（前端侧单一真值表）
+ * WS 服务端事件类型（事件名契约单源 = config/kernel/ws_events.yaml，
+ * ADR 2026-10-10-ws-events-single-source）
  *
- * 收录原则（P2-3 单一真值源）：只收录后端（内核 ws_session/capability_router/
- * chat_send_handler 事件族 + 插件 event-bus.emit 全集）有发射源的事件名；
- * 与内核的对账由 wsEventNames.contract.test 机械执行（内核改名/删事件即红）。
+ * 收录原则：只收录后端（内核 ws_session/capability_router/chat_send_handler
+ * 事件族 + 插件 event-bus.emit 全集）有发射源的事件名；事件名与逐条说明见
+ * 单源文件（本表不再持有事件名字面量）。键表是前端常量词汇表的镜像（TS
+ * 静态检查 `WS_SERVER_EVENTS.X` 拼写需要），与 yaml server_events 键集合在
+ * 模块加载期 fail-closed 对账——集合不等即抛错，相关测试全部变红。
  * 旧流式事件名已退役（LLM 流式服务契约 2026-08-26 定稿，DSH 8 事件协议）：
  * stream_chunk / thinking_start / thinking_chunk / thinking_end / stream_keepalive
  * 后端 llm_service 不再发射；前端 handler 对应删除（不留兼容层）。
  */
-export const WS_SERVER_EVENTS = {
-  /** 连接确认 */
-  CONNECTION_CONFIRMATION: 'connection_confirmation',
-  /** 任务完成 */
-  TASK_COMPLETED: 'task_completed',
-  /** 任务取消 */
-  TASK_CANCELLED: 'task_cancelled',
-  /** 任务状态实时更新（后端推送路径暂静默跳过，待 SDK frontend.emit 落地恢复） */
-  TASK_STATUS_UPDATE: 'task_status_update',
-  /** 任务状态变更（实时推送，同上待后端恢复） */
-  TASK_STATUS_CHANGED: 'task_status_changed',
-  /** 任务删除 */
-  TASK_DELETED: 'task_deleted',
-  /** 心跳响应（后端发送 heartbeat_ack） */
-  HEARTBEAT: 'heartbeat_ack',
-  /** 新消息 */
-  NEW_MESSAGE: 'new_message',
-  /** 流式输出开始 */
-  STREAM_START: 'stream_start',
-  /** 流式块开始（LLM 流式 8 事件协议：index=块索引，block_type=text/reasoning/tool-call） */
-  BLOCK_START: 'block_start',
-  /** 正文增量（LLM 流式 8 事件协议：按块索引归组追加） */
-  TEXT_DELTA: 'text_delta',
-  /** 思考增量（LLM 流式 8 事件协议：思考块起止由 block_start/block_end 表达） */
-  REASONING_DELTA: 'reasoning_delta',
-  /** 工具调用增量（LLM 流式 8 事件协议：arguments_delta 原始 JSON 串按块索引累积） */
-  TOOL_CALL_DELTA: 'tool_call_delta',
-  /** 块闭合（LLM 流式 8 事件协议：block 携带该块累积完整内容） */
-  BLOCK_END: 'block_end',
-  /** 用量（LLM 流式 8 事件协议：finish 前发出） */
-  USAGE_EVENT: 'usage',
-  /** 流式终结（LLM 流式 8 事件协议：reason=stop/length/tool_calls/error；断流由调用方补发 error） */
-  FINISH: 'finish',
-  /** 流式保活（LLM 流式 8 事件协议：超时探活，无业务载荷，前端无订阅消费面） */
-  KEEPALIVE: 'keepalive',
-  /** 流式输出结束（轮级：一轮 = 一条消息，不代表整次执行结束） */
-  STREAM_END: 'stream_end',
-  /** run 级收尾：一次用户输入触发的整次执行结束（生成态终止信号） */
-  PIPELINE_ROUND_FINISHED: 'pipeline_round_finished',
-  /** run 级失败终态（run.failed 域事件前端镜像：引擎 Err / stop_reason 署名失败，
-   *  通知中心弹「管道运行失败」卡片；ADR 2026-09-28-run-failure-frontend-notification） */
-  RUN_FAILED: 'run_failed',
-  /** 流式输出错误（LLM 调用失败等） */
-  STREAM_ERROR: 'stream_error',
-  /** 插件执行错误（非终止信号：引擎 warn+继续的插件失败，只弹通知不标记消息失败） */
-  PLUGIN_ERROR: 'plugin_error',
-  /** 工具调用开始（管道流式事件） */
-  TOOL_START: 'tool_start',
-  /** 工具调用结果（管道流式事件） */
-  TOOL_RESULT: 'tool_result',
-  /** 工具执行进度（bash 等长任务执行中的 stdout 增量，task_observability 任务 2） */
-  TOOL_PROGRESS: 'tool_progress',
-  /** 人类交互超时提醒 */
-  INTERACTION_TIMEOUT_REMINDER: 'interaction_timeout_reminder',
-  /** 人类交互请求 */
-  INTERACTION_REQUEST: 'interaction_request',
-  /** 系统通知（chat.send_message 后台派发失败补报，统一错误模型） */
-  SYSTEM_NOTIFICATION: 'system_notification',
-  /** 迭代事件（管道引擎迭代开始/结束） */
-  ITERATION: 'iteration',
-  /** 会话成本更新（Token 用量变化时推送） */
-  COST_UPDATE: 'cost_update',
-  /** pending 输入队列同步（ADR-2026-08-26：入队/消费/修改/删除时推全量列表） */
-  PENDING_INPUTS_CHANGED: 'pending_inputs_changed',
-  /** 上下文压缩彻底失败（context_window_guard 经 frontend.emit 透传，按故障周期去重） */
-  COMPRESSION_FAILED: 'compression_failed',
-  /**
-   * 压缩波次完成（context_window_guard 压缩成功时经 frontend.emit 透传）。
-   * 压缩原地重写 message_slots 槽位 → 内容寻址指纹变异，前端跨压缩持有的
-   * recordId 过期——收到后须按 API 权威全量对账刷新（BUG-72 A1）。
-   */
-  COMPRESSION_APPLIED: 'compression_applied',
-  /** 段激活 ack（消息段模型：‹i/n› 多代切换后服务端后缀整段替换完成的对账事件，
-   *  [来源: docs/working/消息历史双能力方案_多代切换与压缩原文_20260923.md §5.1]；
-   *  收到后对该 pipeline 增量重拉消息并刷新段清单） */
-  SEGMENT_ACTIVATED: 'segment_activated',
-  /** 需要全量重新同步（断线重连后后端告知 last_sequence 过期） */
-  RESYNC_REQUIRED: 'resync_required',
-  /** widget 事件（内核 PluginWidgetBroadcaster 周期快照 + 插件 widget 交互，ADR §3.5'） */
-  WIDGET_EVENT: 'widget_event',
-  /** 宿主选中引用变化（pipeline_host_context 插件转发外部宿主推送） */
-  HOST_SELECTION_CHANGED: 'host_selection_changed',
-  /** 审批已在他端结算（approval.submit 成功路径广播：request_id + 结算摘要；
-   *  多前端并发应答对账——收到后清除对应 pending 并提示"已在别处处理"） */
-  APPROVAL_TAKEN: 'approval.taken',
-} as const
+const WS_SERVER_EVENT_KEYS = [
+  'CONNECTION_CONFIRMATION',
+  'TASK_COMPLETED',
+  'TASK_CANCELLED',
+  'TASK_FAILED',
+  'TASK_STATUS_UPDATE',
+  'TASK_STATUS_CHANGED',
+  'TASK_DELETED',
+  'TRIGGER_FIRED',
+  'HEARTBEAT',
+  'NEW_MESSAGE',
+  'STREAM_START',
+  'BLOCK_START',
+  'TEXT_DELTA',
+  'REASONING_DELTA',
+  'TOOL_CALL_DELTA',
+  'BLOCK_END',
+  'USAGE_EVENT',
+  'FINISH',
+  'KEEPALIVE',
+  'STREAM_END',
+  'PIPELINE_ROUND_FINISHED',
+  'RUN_FAILED',
+  'STREAM_ERROR',
+  'PLUGIN_ERROR',
+  'TOOL_START',
+  'TOOL_RESULT',
+  'TOOL_PROGRESS',
+  'INTERACTION_TIMEOUT_REMINDER',
+  'INTERACTION_REQUEST',
+  'SYSTEM_NOTIFICATION',
+  'ITERATION',
+  'COST_UPDATE',
+  'PENDING_INPUTS_CHANGED',
+  'COMPRESSION_FAILED',
+  'COMPRESSION_STARTED',
+  'COMPRESSION_ENDED',
+  'COMPRESSION_APPLIED',
+  'SEGMENT_ACTIVATED',
+  'MESSAGES_TRUNCATED',
+  'USER_MESSAGE_CONFIRMED',
+  'RESYNC_REQUIRED',
+  'WIDGET_EVENT',
+  'HOST_SELECTION_CHANGED',
+  'APPROVAL_TAKEN',
+  'ROUTE_ERROR',
+] as const
+
+type WsServerEventKey = (typeof WS_SERVER_EVENT_KEYS)[number]
+
+export type WsServerEvents = Readonly<Record<WsServerEventKey, string>>
+
+/**
+ * 解析单源 yaml 文本并派生 server_events 名单（fail-closed 对账）：
+ * 键集合与词汇表镜像逐一对齐（缺键/多键均抛错），值必须是非空字符串。
+ * 解析失败不回落空对象——契约损坏必须显式可见。source 注入为纯函数
+ * （单测喂好/坏文档覆盖全部分支；生产以 ?raw 内嵌名单调用，模块加载期执行）。
+ */
+export function deriveWsServerEventsFromSource(source: string): WsServerEvents {
+  const doc = parseYamlStrict(source) as {
+    ws_events?: { server_events?: Record<string, unknown> }
+  }
+  const events = doc?.ws_events?.server_events
+  if (!events || typeof events !== 'object') {
+    throw new Error('ws_events.yaml 缺 ws_events.server_events 节（fail-closed）')
+  }
+  const expected = WS_SERVER_EVENT_KEYS as readonly string[]
+  const missing = expected.filter((k) => !(k in events))
+  const extra = Object.keys(events).filter((k) => !expected.includes(k))
+  if (missing.length > 0 || extra.length > 0) {
+    throw new Error(
+      `WS 事件名单单源键集合与前端词汇表漂移（fail-closed）：missing=[${missing.join(', ')}] extra=[${extra.join(', ')}]`,
+    )
+  }
+  for (const [key, value] of Object.entries(events)) {
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new Error(`ws_events.yaml server_events.${key} 必须是非空字符串（fail-closed）`)
+    }
+  }
+  return Object.freeze({ ...events }) as WsServerEvents
+}
+
+export const WS_SERVER_EVENTS: WsServerEvents = deriveWsServerEventsFromSource(wsEventsSource)
 
 /**
  * 前端本地服务事件（GlobalWebSocket 连接服务自有事件总线，非后端 WS 事件名）。
@@ -204,9 +215,10 @@ export const WS_LOCAL_EVENTS = {
 } as const
 
 /**
- * 连续重连失败降级阈值：reconnectAttempt 达此次数后，断开横幅从「正在重连
+ * 连续重连失败降级阈值：reconnectAttempt 达此次数后，断连通知从「正在重连
  * （第 N 次）」升级为「多次重连失败 + 立即重连」按钮（自动重连不停止，这是
- * 唯一允许用户干预的形态）。消费方 = AlertBanner 的 useLayoutAlerts。
+ * 唯一允许用户干预的形态）。消费方 = LayoutAlertNotifications 的
+ * useLayoutAlerts（通知中心承载）。
  */
 export const RECONNECT_DEGRADE_ATTEMPTS = 10
 

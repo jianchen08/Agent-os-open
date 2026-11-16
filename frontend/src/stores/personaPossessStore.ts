@@ -18,6 +18,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { createTolerantStorage } from '@/utils/tolerantStorage'
+import { userScopedKey } from '@/utils/userScopedStorage'
 import { isModeIdShape, type PersonaPossession } from '@/services/schema/modeOptions'
 
 /** avatar 合法形态：非空字符串（emoji）或 {fg,bg} 色对（卡画廊同款两形态） */
@@ -65,12 +66,17 @@ interface PersonaPossessState {
  * 迁移补 mode='roleplay' + personaKey 钉旧契约键 roleplay_persona（历史数据面
  * 兼容——字面量只出现在迁移 shim，非逻辑分支）；幂等（新档在场/旧键缺席零
  * 动作），迁移后旧键清除。store 创建前执行（persist 同步水合读新键）。
+ *
+ * 新家键走账户命名空间（隔离执法点①）：persist 读 ag-u:*:persona.possessed
+ * （匿名态 ag-anon:*），迁移写入必须同键才可见；roleplay.possessed 是真
+ * legacy 裸键（升级前形态），读扫均按裸名。
  */
 function migrateLegacyRoleplayPossession(): void {
   try {
     const legacyRaw = localStorage.getItem('roleplay.possessed')
     if (!legacyRaw) return
-    const nextRaw = localStorage.getItem('persona.possessed')
+    const nextKey = userScopedKey('persona.possessed')
+    const nextRaw = localStorage.getItem(nextKey)
     const next = nextRaw
       ? (JSON.parse(nextRaw) as { state?: { possessed?: unknown } })
       : null
@@ -87,7 +93,7 @@ function migrateLegacyRoleplayPossession(): void {
       return
     }
     localStorage.setItem(
-      'persona.possessed',
+      nextKey,
       JSON.stringify({
         state: {
           possessed: {
@@ -110,10 +116,15 @@ function migrateLegacyRoleplayPossession(): void {
 
 migrateLegacyRoleplayPossession()
 
+/** 账户数据初始片段（cacheBoundary 切户清账消费；与 persist partialize 字段同域） */
+export const PERSONA_POSSESS_ACCOUNT_RESET = {
+  possessed: null,
+}
+
 export const usePersonaPossessStore = create<PersonaPossessState>()(
   persist(
     (set) => ({
-      possessed: null,
+      ...PERSONA_POSSESS_ACCOUNT_RESET,
 
       setPossessed: (payload, personaKey) => {
         const base = parsePossessPayload(payload)

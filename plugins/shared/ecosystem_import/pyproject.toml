@@ -1,0 +1,14 @@
+[project]
+name = "agentos-plugin-ecosystem-import"
+version = "1.0.0"
+description = "Lingxi AgentOS 0.2 plugin — ecosystem_import（外部生态导入 A 批：Codex 翻译器 + 技能落地 + 来源/许可证治理）"
+requires-python = ">=3.11"
+dependencies = [
+    "agentos-plugin-sdk>=0.2.0",
+    "pyyaml",
+]
+
+# 本地 SDK 源映射（uv lock 解析必需——agentos-plugin-sdk 不在任何 registry）：
+# editable 链接 plugins/sdk/src 源码目录（判据 2 案 A）。
+[tool.uv.sources]
+agentos-plugin-sdk = { path = "../../sdk", editable = true }

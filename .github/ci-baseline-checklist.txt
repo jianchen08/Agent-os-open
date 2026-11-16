@@ -18,10 +18,11 @@ lint-frontend | frontend-lint | covered |
 typecheck-python | sdk-mypy,plugins-mypy-baseline | covered |
 typecheck-frontend | frontend-typecheck,electron-compile | covered |
 tests-rust | kernel-test | covered |
+tests-python | plugins-coverage,plugins-heavy | covered |
 tests-frontend | frontend-coverage | covered |
 build | kernel-build,kernel-build-release | covered |
 coverage-rust | kernel-coverage | covered | 执法挂起（--skip，批次3恢复）；车道在跑
-coverage-python | plugins-coverage-merge | covered | 插桩五分片合并后过覆盖率地板（分片 gate 见 tests-python 行）
+coverage-python | plugins-coverage | covered | 同上
 dep-vuln-rust | rust-deny | covered |
 secret-scan | ci:secret-scan | covered | CI 内联 job（gitleaks 全历史，恒跑）
 license-rust | rust-deny | covered | 仅 Rust；Py/JS 许可证扫描行业可选级未单列
@@ -34,5 +35,7 @@ dead-code-frontend | frontend-knip-baseline | missing | 批次0-1
 artifact-size | bundle-size | covered | 批次5 落地（vendor 字节基线锁+无效动态导入计数锁=2 处避环合法动态导入）
 docs | doc-baseline-sync,doc-paths | covered | 批次6 落地（基线总表生成式+活文档路径闸）
 config-validation | config-static | covered | 批次4-4 落地（81 yaml 可解析+管道引用存在性；G2 深校验仍由内核持有）
+port-sync | kernel-port-sync | covered | 整改K4 落地（electron KERNEL_DEFAULT_PORT ≡ 前端 PACKAGED_KERNEL_WS_ORIGIN，抽取失败 fail-closed）
+api-docs | openapi-drift | covered | 整改§6 落地（openapi.yaml 生成式+漂移闸；security 复用 P-2 鉴权分类；/ext 动态面经 /api/v1/schema 运行时发现）
+file-size | file-length-baseline | covered | 2026-10-12 落地（新/存分档四档：新文件 1500/3000 硬 + 存量触线 2500/5000 + 冻结件基线棘轮 + 豁免归因；同日三次裁定，ADR 2026-10-12-file-length-mechanical-gate.md）；2026-10-15 增补触碰即拆第五维（>5000 非测试/测试同线文件含冻结件被 diff 触碰即红，同 ADR 增补节）
 commit-convention | - | exempt | 行业可选；本仓 traceability-gate+tdd-gate 提供更高价值替代
-tests-python | plugins-coverage-a,plugins-coverage-b,plugins-coverage-c,plugins-coverage-d,plugins-coverage-e,plugins-heavy | covered | 同上

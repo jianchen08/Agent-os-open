@@ -1,6 +1,6 @@
 """URL 安全公共 helper（SSRF 防护原语，SDK 单一真值源）。
 
-download / web_ext 等工具插件共用的 SSRF 防护原语集中于此，
+web_ext 等工具插件共用的 SSRF 防护原语集中于此，
 避免各处各自维护内网网段表与 DNS 校验逻辑漂移。
 
 暴露接口：

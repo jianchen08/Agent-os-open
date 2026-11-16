@@ -8,6 +8,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react'
 import { renderPageContent } from '@/components/schema/PageRenderer'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { isDragReleased, suppressEmbeddedPointerEvents } from '@/utils/dragGuard'
 import type { FloatingWindowInstance } from '@/types/layout'
 import type { ReactNode } from 'react'
 
@@ -112,7 +113,10 @@ export function FloatingWindowManager({
   /**
    * 处理悬浮窗拖拽开始
    *
-   * 记录起始位置，注册全局 mousemove/mouseup 事件
+   * 记录起始位置，注册全局 mousemove/mouseup 事件。
+   * 收尾兜底同布局手柄（根因见 utils/dragGuard）：指针抬起落在内嵌文档
+   * （iframe/webview）上时宿主收不到 mouseup——浮窗此后会一直跟着鼠标跑；
+   * 判据=移动事件 buttons===0（按键已松开）立即收尾。
    */
   const handleDragStart = useCallback(
     (windowId: string, e: React.MouseEvent) => {
@@ -127,26 +131,42 @@ export function FloatingWindowManager({
         startPosY: win.position.y,
       })
 
-      const handleMove = (moveEvent: MouseEvent) => {
-        const dx = moveEvent.clientX - e.clientX
-        const dy = moveEvent.clientY - e.clientY
+      const restoreEmbedded = suppressEmbeddedPointerEvents()
+      // 拖拽基准值先取快照（函数声明会提升，收窄不被沿用）
+      const originX = win.position.x
+      const originY = win.position.y
+      const startClientX = e.clientX
+      const startClientY = e.clientY
+
+      function handleMove(moveEvent: MouseEvent) {
+        if (isDragReleased(moveEvent)) {
+          handleUp()
+          return
+        }
+        const dx = moveEvent.clientX - startClientX
+        const dy = moveEvent.clientY - startClientY
         onUpdateWindow(windowId, {
-          position: { x: win.position.x + dx, y: win.position.y + dy },
+          position: { x: originX + dx, y: originY + dy },
         })
       }
 
-      const handleUp = () => {
+      function handleUp() {
         dragCleanupRef.current?.()
         dragCleanupRef.current = null
         setDragState(null)
       }
 
-      document.addEventListener('mousemove', handleMove)
-      document.addEventListener('mouseup', handleUp)
-      dragCleanupRef.current = () => {
+      const cleanup = () => {
         document.removeEventListener('mousemove', handleMove)
         document.removeEventListener('mouseup', handleUp)
+        window.removeEventListener('blur', handleUp)
+        restoreEmbedded()
       }
+
+      document.addEventListener('mousemove', handleMove)
+      document.addEventListener('mouseup', handleUp)
+      window.addEventListener('blur', handleUp)
+      dragCleanupRef.current = cleanup
     },
     [windows, onUpdateWindow],
   )
@@ -180,7 +200,7 @@ export function FloatingWindowManager({
                 </span>
                 <div className="flex items-center gap-1">
                   <button
-                    className="hover:bg-accent text-muted-foreground flex h-8 w-8 items-center justify-center rounded-md text-base"
+                    className="hover:bg-muted text-muted-foreground flex h-8 w-8 items-center justify-center rounded-md text-base"
                     onClick={() => onCloseWindow(win.id)}
                     aria-label={`关闭${win.title ?? ''}`}
                     data-testid="floating-sheet-close"
@@ -226,7 +246,7 @@ export function FloatingWindowManager({
             </span>
             <div className="flex items-center gap-1">
               <button
-                className="hover:bg-accent text-muted-foreground flex h-5 w-5 items-center justify-center rounded text-xs"
+                className="hover:bg-muted text-muted-foreground flex h-5 w-5 items-center justify-center rounded text-xs"
                 onClick={() => onUpdateWindow(win.id, { isMinimized: !win.isMinimized })}
               >
                 {win.isMinimized ? '□' : '−'}

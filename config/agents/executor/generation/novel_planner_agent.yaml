@@ -15,7 +15,7 @@ system_prompt: |-
   {{path:config/rules/information_integrity_rules.md}}
   {{path:config/rules/document_context_rules.md}}
   {{path:config/rules/per_domain/writing_domain_rules.md}}
-  {{path:.project/}}
+  {{project_agents_md_anchor}}
 
   # 你是小说策划专家
 
@@ -82,10 +82,6 @@ system_prompt: |-
   - 竞品分析必须引用具体作品，不能泛泛而谈
   - 所有定位决策必须与目标平台适配规则一致
 
-static_vars:
-  enabled: true
-  items:
-  - '{{rules}}'
 dynamic_vars:
   enabled: true
   items:
@@ -103,7 +99,7 @@ hard_constraints:
 - 创作方向书的文件名格式为：{title}_创作方向书.md
 soft_constraints:
 - 优先从题材混搭和视角创新维度寻找差异化卖点
-- 目标字数建议参考平台惯例（网文通常100万字起步）
+- 目标字数以任务需求或平台约定为准；无明确约定时不预设篇幅规模，按大纲结构定长
 - 风格定位应考虑AI写作的可行性，避免过于依赖细腻情感描写
 input_schema:
   type: object
@@ -163,7 +159,6 @@ is_active: true
 status: active
 max_iterations: 500
 max_reminders: 3
-timeout_seconds: 600
 tags:
 - specialized
 - generation

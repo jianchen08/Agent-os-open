@@ -12,6 +12,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { WorkspaceTab } from '@/types/layout'
+import { userScopedKey as pk } from '@/utils/userScopedStorage'
 
 /** R241 恢复集同形的 5 签基线（任务管理/导航/直播导演台/主城/记忆） */
 const BASE_TAB_IDS = [
@@ -35,7 +36,7 @@ const makeTab = (id: string, extra: Partial<WorkspaceTab> = {}): WorkspaceTab =>
 async function loadWithPersisted(tabIds: string[]) {
   vi.resetModules()
   localStorage.setItem(
-    'layout-mode',
+    pk('layout-mode'),
     JSON.stringify({
       state: {
         mode: 'five-space',
@@ -49,7 +50,7 @@ async function loadWithPersisted(tabIds: string[]) {
 }
 
 function persistedTabIds(): string[] {
-  const raw = localStorage.getItem('layout-mode')
+  const raw = localStorage.getItem(pk('layout-mode'))
   expect(raw).toBeTruthy()
   const tabs = JSON.parse(raw!).state?.workspaceTabs
   return Array.isArray(tabs) ? tabs.map((t: WorkspaceTab) => t.id) : []
@@ -113,7 +114,7 @@ describe('layoutModeStore persist 缩容闸（BUG-79）', () => {
 
     store.getState().setActiveTab('ws-plugin-director')
     expect(persistedTabIds()).toEqual(BASE_TAB_IDS)
-    const stored = JSON.parse(localStorage.getItem('layout-mode')!).state.workspaceTabs
+    const stored = JSON.parse(localStorage.getItem(pk('layout-mode'))!).state.workspaceTabs
     expect(stored.find((t: WorkspaceTab) => t.id === 'ws-plugin-director').isActive).toBe(true)
 
     store.getState().addWorkspaceTab(makeTab('ws-plugin-triggers', { isActive: true }))
@@ -168,11 +169,11 @@ describe('layoutModeStore 换位与存储包装层', () => {
 
   it('clearStorage 经包装层 removeItem 清空持久化（透传内层 storage）', async () => {
     const store = await loadWithPersisted(BASE_TAB_IDS)
-    expect(localStorage.getItem('layout-mode')).not.toBeNull()
+    expect(localStorage.getItem(pk('layout-mode'))).not.toBeNull()
 
     store.persist.clearStorage()
 
-    expect(localStorage.getItem('layout-mode')).toBeNull()
+    expect(localStorage.getItem(pk('layout-mode'))).toBeNull()
   })
 })
 

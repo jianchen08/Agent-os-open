@@ -8,6 +8,7 @@
  * （[来源: docs/decisions/2026-08-21-channel-api-retire-plugin-owned-http.md]）。
  */
 
+import { resolveApiBase } from '../services/shellApiBase'
 import {
   AGENT_MANAGER_ENDPOINTS,
   APPROVAL_SERVICE_ENDPOINTS,
@@ -21,9 +22,11 @@ import {
 } from '../services/api/endpoints.generated'
 
 /**
- * API基础URL（从环境变量读取，空值时使用相对路径由Vite代理转发）
+ * API基础URL（从环境变量读取，空值时使用相对路径由Vite代理转发；
+ * 否则按连接基址优先级解析：用户设置 > 壳注入 ShellConfig.apiBase > 同源，
+ * 见 services/shellApiBase 的 resolveApiBase）
  */
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || resolveApiBase()
 
 /**
  * API端点路径（0.2 内核契约面）
@@ -135,6 +138,9 @@ export const API_ENDPOINTS = {
     SCHEMA: AGENT_MANAGER_ENDPOINTS.agent_manager_schema,
     /** 读写 Agent 配置 yaml 原文（PUT 写回前后端自动备份 + If-Match 乐观锁） */
     CONFIG: (id: string) => AGENT_MANAGER_ENDPOINTS.agent_manager_get_config.replace('{id}', id),
+    /** Agent 组装预览（prompt_build prompt.preview 服务透传：system_message + 动态变量消息） */
+    PROMPT_PREVIEW: (id: string) =>
+      AGENT_MANAGER_ENDPOINTS.agent_manager_prompt_preview.replace('{id}', id),
   },
   /** 配置管理相关 - llm_service/cost_control 插件端点（生成物投影，原 channel_api config 域）。
    *  2026-09-28 批次 A1：llm.yaml 文件 IO 端点退役——读写走内核单一配置面
@@ -144,7 +150,7 @@ export const API_ENDPOINTS = {
     LLM_PROVIDER_TYPES: LLM_SERVICE_ENDPOINTS.config_llm_provider_types_get,
     /** LLM 配置面预置声明（provider 分组/常用类型/思考强度白名单，插件下发） */
     LLM_PRESETS: LLM_SERVICE_ENDPOINTS.config_llm_presets_get,
-    /** 当前模型生效的思考档位选项（厂商级映射优先、模型级补位，聊天页选择器真值源） */
+    /** 当前模型生效的思考参数组选项（厂商级映射优先、模型级补位，聊天页选择器真值源） */
     LLM_THINKING_LEVELS: LLM_SERVICE_ENDPOINTS.config_llm_thinking_levels,
     /** 从提供商 API 实时拉取可用模型（需先配置 Key） */
     LLM_REMOTE_MODELS: (providerId: string) =>
@@ -289,13 +295,6 @@ export const API_ENDPOINTS = {
       HINDSIGHT_MEMORY_SERVICE_ENDPOINTS.kb_item_delete.replace('{item_id}', id),
     /** 检查知识库 */
     CHECK: HINDSIGHT_MEMORY_SERVICE_ENDPOINTS.kb_check,
-    /** 获取分类列表 */
-    CATEGORIES: HINDSIGHT_MEMORY_SERVICE_ENDPOINTS.kb_categories_list,
-    /** 创建分类 */
-    CREATE_CATEGORY: HINDSIGHT_MEMORY_SERVICE_ENDPOINTS.kb_category_create,
-    /** 删除分类 */
-    DELETE_CATEGORY: (name: string) =>
-      HINDSIGHT_MEMORY_SERVICE_ENDPOINTS.kb_category_delete.replace('{name}', name),
     /** 获取标签列表 */
     TAGS: HINDSIGHT_MEMORY_SERVICE_ENDPOINTS.kb_tags,
   },

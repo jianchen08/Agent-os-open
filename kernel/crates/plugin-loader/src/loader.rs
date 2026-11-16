@@ -19,6 +19,10 @@ use tracing::{info, warn};
 use crate::error::LoaderError;
 use crate::native_loader::NativePluginLoader;
 
+mod cache;
+use cache::DiscoverCandidate;
+pub use cache::{DiscoveryCacheOutcome, DISCOVERY_CACHE_ENV};
+
 /// 插件准入白名单模式。
 ///
 /// - `Permissive`（默认）：白名单为空或插件未列入时放行，开发友好；
@@ -186,8 +190,74 @@ pub struct PluginLoaderImpl {
     /// 粗判（同 id 换路径 = manifest 换源），watcher 热发现经 discover
     /// 重扫刷新。
     manifests: RwLock<HashMap<String, PathBuf>>,
+    /// 服务声明缓存 {完整服务名（含 ns.method 点式形态）: 声明提供方 id 列表}。
+    ///
+    /// discover 全量重扫时随路径缓存同刀重建（watcher 热发现自动刷新）。
+    /// 供 [`PluginLoader::service_provider_ids`] 消费——ensure 声明面依赖
+    /// 闭包展开（R7 F3）按点式条目解析提供方；bare 命名空间不入键。
+    service_providers: RwLock<HashMap<String, Vec<String>>>,
     /// 已加载的插件状态 {plugin_id: LoadedPlugin}
     loaded: RwLock<HashMap<String, LoadedPlugin>>,
+    /// 全量配置快照缓存（mtime 指纹）：`load_config` 的解析结果 + 扫描面
+    /// 指纹（文件集 × (路径, mtime, size)，factory 根 + 用户覆盖根并集）。
+    ///
+    /// 动因：load_config 在每次插件 spawn、每次管道步骤、每次跨插件工具
+    /// 调用时都会被走到（invoker 七处调用面），装机实测 76 分钟 2415 次全量
+    /// 扫描（105 文件读+YAML 解析/次）构成分配 churn 洪峰。指纹未变 → 直接
+    /// 返回快照，文件真变更（mtime 必 bump）→ 现场失效重载——变更检测在
+    /// 每次 load 时做，无 TTL 无延迟，watcher 语义不变。
+    ///
+    /// 已知不可检测窗口（如实声明）：同 mtime 同 size 的原位改写（正常
+    /// 编辑器/写入路径不会出现）。竞态窗口：指纹采集先于内容读取，二者
+    /// 之间发生写入最坏造成一次多余重载，绝不缓存"指纹新于内容"的快照。
+    config_cache: RwLock<Option<ConfigSnapshot>>,
+    /// 多源仲裁「用户副本未生效」清单（D4 显式告警面）：每轮 discover 全量
+    /// 重建，[`Self::ineffective_user_copies`] 消费（端点透出）。
+    ineffective_user_copies: RwLock<Vec<IneffectiveUserCopy>>,
+}
+
+/// [`PluginLoaderImpl::config_cache`] 的缓存条目。
+struct ConfigSnapshot {
+    /// 缓存键：排序后的文件指纹集。空集 = "不可指纹化"（用户覆盖层读取
+    /// 失败的降级装载），不与任何现场指纹匹配，迫使每次重载直到装载干净。
+    stamps: Vec<agentos_core::config_scan::YamlFileStamp>,
+    config: serde_json::Value,
+}
+
+/// 同 id 多源冲突记录：id → 全部候选 `(层标签, manifest version)`，按发现
+/// 序。仅发生同 id 冲突的插件入册（单源零开销），discover 尾部逐 id 打
+/// 裁决对账日志（装机版 boot 验证面）。
+type SameIdConflicts = HashMap<String, Vec<(&'static str, String)>>;
+
+/// 宽容 semver 解析：trim + strip 单个前导 `v`/`V` 前缀。sync 工作流/
+/// 人工编辑写出的 `v1.2.3` 形态不再静默判旧（D4/审查总册 P1-15 根修）；
+/// strip 后仍非 semver → None（走保守裁决 + 显式告警面）。
+fn parse_version(raw: &str) -> Option<semver::Version> {
+    let s = raw.trim();
+    let stripped = s
+        .strip_prefix('v')
+        .or_else(|| s.strip_prefix('V'))
+        .unwrap_or(s);
+    semver::Version::parse(stripped).ok()
+}
+
+/// 同 id 多源仲裁「用户副本未生效」条目（D4/审查总册 P1-15：BuiltinFirst
+/// 装机盲区显式告警面）。
+///
+/// 用户副本在同 id 冲突中输给内置（版本持平/更旧/不可解析）时入册——
+/// sync 写坏版本号由此从"仅裁决日志汇总行可查"变结构化可见，
+/// `GET /api/v1/plugins/source-arbitration` 消费；每轮 discover 全量重建
+/// （用户副本修复版本后清单收敛为空）。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct IneffectiveUserCopy {
+    pub plugin_id: String,
+    /// 用户副本 manifest `version`（原样，未 strip）。
+    pub user_version: String,
+    /// 胜出内置副本 manifest `version`（原样）。
+    pub builtin_version: String,
+    /// 用户副本版本经宽容解析（strip v/V 前缀）仍不可解析——sync 写错
+    /// 版本号格式的直接证据。
+    pub version_unparseable: bool,
 }
 
 impl PluginLoaderImpl {
@@ -204,7 +274,10 @@ impl PluginLoaderImpl {
             allowlist: AllowlistConfig::default(),
             dual_source_policy: DualSourcePolicy::default(),
             manifests: RwLock::new(HashMap::new()),
+            service_providers: RwLock::new(HashMap::new()),
             loaded: RwLock::new(HashMap::new()),
+            config_cache: RwLock::new(None),
+            ineffective_user_copies: RwLock::new(Vec::new()),
         }
     }
 
@@ -216,6 +289,19 @@ impl PluginLoaderImpl {
     pub fn with_dual_source_policy(mut self, policy: DualSourcePolicy) -> Self {
         self.dual_source_policy = policy;
         self
+    }
+
+    /// 当前双源同 id 裁决策略（端点透出用，语义见
+    /// [`DualSourcePolicy`]）。
+    pub fn dual_source_policy(&self) -> DualSourcePolicy {
+        self.dual_source_policy
+    }
+
+    /// 最近一轮 [`PluginLoader::discover`] 的「用户副本未生效」清单（D4
+    /// 显式告警面）：同 id 冲突中用户副本输给内置的条目，语义见
+    /// [`IneffectiveUserCopy`]。UserFirst（dev）恒空。
+    pub fn ineffective_user_copies(&self) -> Vec<IneffectiveUserCopy> {
+        self.ineffective_user_copies.read().clone()
     }
 
     /// 设置配置文件根目录，返回 self 供链式调用。
@@ -372,26 +458,11 @@ impl PluginLoaderImpl {
             .is_some_and(|user_root| p.starts_with(user_root))
     }
 
-    /// 路径是否落在用户模式种子区（`<user_root>/modes/`）。
-    ///
-    /// 模式区有自己的账本化对账（`reconcile_mode_seeds`：版本闸 + 内容哈希 +
-    /// 定制检测 H1），对「用户已定制副本」的判定远比 manifest version 精确——
-    /// 双源裁决对它整体让位：模式区同 id 恒用户赢（任何策略下），否则装机版
-    /// 会用打包副本压掉用户已定制的模式（违反 H1「用户定制必须存活」）。
-    fn is_user_modes_path(&self, p: &Path) -> bool {
-        self.user_root
-            .as_ref()
-            .is_some_and(|user_root| p.starts_with(user_root.join("modes")))
-    }
-
-    /// 用户副本 version 是否按 semver 严格大于内置副本。任一侧不可解析 →
-    /// false（不可判定时保守判「用户不新」——装机口径下内置为权威分发物）。
-    fn user_strictly_newer(user_ver: &str, builtin_ver: &str) -> bool {
-        match (
-            semver::Version::parse(user_ver.trim()),
-            semver::Version::parse(builtin_ver.trim()),
-        ) {
-            (Ok(user), Ok(builtin)) => user > builtin,
+    /// `a_ver` 是否按 semver 严格大于 `b_ver`。任一侧不可解析 →
+    /// false（不可判定时保守判「挑战者不新」——装机口径下内置为权威分发物）。
+    fn strictly_newer(a_ver: &str, b_ver: &str) -> bool {
+        match (parse_version(a_ver), parse_version(b_ver)) {
+            (Some(a), Some(b)) => a > b,
             _ => false,
         }
     }
@@ -400,13 +471,20 @@ impl PluginLoaderImpl {
     /// 2026-09-20-packaged-dual-source-adjudication）。
     ///
     /// - [`DualSourcePolicy::UserFirst`]（dev 默认）：历史口径——用户根子树赢，
-    ///   其余 last-wins；
-    /// - [`DualSourcePolicy::BuiltinFirst`]（装机）：跨根冲突按 semver 裁决——
-    ///   用户副本**严格更新**才用户赢，否则内置赢；同侧维持 last-wins。
+    ///   同侧 last-wins；
+    /// - [`DualSourcePolicy::BuiltinFirst`]（装机）：**全候选版本最高者赢**——
+    ///   用户副本 semver 严格更新才赢过内置；持平或任一侧不可解析 → 内置赢；
+    ///   同侧严格更新才换、持平保留在位者。
     ///
-    /// 模式种子区（[`Self::is_user_modes_path`]）两种策略下都保持用户赢。
-    /// 判定只依赖两侧（根归属， version）——与 root_paths 迭代序解耦，热路径
-    /// HashSet 乱序不会让胜者逐轮翻转（2026-09-18 翻转根修的延续）。
+    /// 用户模式种子区（`<user_root>/modes/`）不做路径豁免：该路径形态无法
+    /// 区分「已定制种子」与「旧布局残留」，豁免会让陈旧副本恒压过出厂新版。
+    /// 用户定制副本的存活由模式区账本对账（`reconcile_mode_seeds`：版本闸 +
+    /// 内容哈希 + 定制检测 H1）与双根同 id 用户赢裁决承载，不由本裁决承担。
+    ///
+    /// 判定只依赖两侧（根归属， version）且持平单调（挑战者不更优必不换）——
+    /// 多源（>2 份）逐对归约等价于取全候选中版本最高者，最终胜者与 root_paths
+    /// 迭代序解耦，热路径 HashSet 乱序不会让胜者逐轮翻转（2026-09-18 翻转
+    /// 根修在多源下继续成立）。
     fn should_replace(
         &self,
         incumbent_path: &Path,
@@ -416,33 +494,34 @@ impl PluginLoaderImpl {
     ) -> bool {
         let incumbent_user = self.is_user_rooted(incumbent_path);
         let challenger_user = self.is_user_rooted(challenger_path);
-        // 模式种子区让位：恒用户赢（= UserFirst 规则）。语义：在位者是用户根
-        // 且挑战者非用户根 → 保留在位者；其余换。
-        if (incumbent_user && self.is_user_modes_path(incumbent_path))
-            || (challenger_user && self.is_user_modes_path(challenger_path))
-        {
-            return !incumbent_user || challenger_user;
-        }
         match self.dual_source_policy {
             DualSourcePolicy::UserFirst => !incumbent_user || challenger_user,
             DualSourcePolicy::BuiltinFirst => match (incumbent_user, challenger_user) {
-                (true, false) => !Self::user_strictly_newer(incumbent_version, challenger_version),
-                (false, true) => Self::user_strictly_newer(challenger_version, incumbent_version),
-                // 同侧（内置×内置 / 用户×用户）维持 last-wins
-                _ => true,
+                (true, false) => !Self::strictly_newer(incumbent_version, challenger_version),
+                (false, true) => Self::strictly_newer(challenger_version, incumbent_version),
+                // 同侧（内置×内置 / 用户×用户）：严格更新才换，持平保留在位者
+                _ => Self::strictly_newer(challenger_version, incumbent_version),
             },
         }
     }
 
     /// 把一个扫描候选并入发现集：无在位者直接入；有在位者经
-    /// [`Self::should_replace`] 裁决。跨根换源时留一条 info（装机版 boot 日志
-    /// 验证面：同 id 双源最终由谁服务）。
+    /// [`Self::should_replace`] 裁决。冲突 id 的全部候选（层， version）记入
+    /// `conflicts`，由调用方在扫描完后统一输出裁决对账日志。
     fn admit(
         &self,
         all: &mut HashMap<String, (PluginManifest, PathBuf)>,
+        conflicts: &mut SameIdConflicts,
         manifest: PluginManifest,
         path: PathBuf,
     ) {
+        let layer_of = |p: &Path| {
+            if self.is_user_rooted(p) {
+                "user"
+            } else {
+                "builtin"
+            }
+        };
         let replace = match all.get(&manifest.id) {
             None => true,
             Some((incumbent, incumbent_path)) => {
@@ -452,16 +531,10 @@ impl PluginLoaderImpl {
                     &path,
                     &manifest.version,
                 );
-                if should && self.is_user_rooted(incumbent_path) != self.is_user_rooted(&path) {
-                    info!(
-                        "Dual-source same-id resolved: id={} winner={} user_version={} builtin_version={} policy={:?}",
-                        manifest.id,
-                        if self.is_user_rooted(&path) { "user" } else { "builtin" },
-                        if self.is_user_rooted(&path) { &manifest.version } else { &incumbent.version },
-                        if self.is_user_rooted(&path) { &incumbent.version } else { &manifest.version },
-                        self.dual_source_policy,
-                    );
-                }
+                conflicts
+                    .entry(manifest.id.clone())
+                    .or_insert_with(|| vec![(layer_of(incumbent_path), incumbent.version.clone())])
+                    .push((layer_of(&path), manifest.version.clone()));
                 should
             }
         };
@@ -642,21 +715,11 @@ impl PluginLoaderImpl {
         // ── P2-2 插件准入校验（白名单 + SHA256）──
         self.validate_allowlist(manifest, source_path)?;
 
-        // ── 准入分级（2026-09-25）：危险前端能力按授予剥权 ──
-        // 检测在前、剥权在后；剥权写入 manifest.restricted_capabilities 供
-        // /api/v1/plugins 与设置页可见（禁静默降级）。与 validate_allowlist
-        // 同点执法：每次扫描/热重扫都重算——授予变化或清单篡改即时生效。
-        let declared = detect_frontend_dangerous_caps(manifest.contributes.as_ref());
-        let not_granted = self.frontend_caps_not_granted(&manifest.id, source_path, &declared);
-        if !not_granted.is_empty() {
-            strip_frontend_capabilities(manifest, &not_granted);
-            manifest.restricted_capabilities =
-                not_granted.iter().map(|cap| (*cap).to_string()).collect();
-            warn!(
-                "Plugin '{}' dangerous frontend capabilities not granted by allowlist, stripped from registration face: {:?}",
-                manifest.id, not_granted
-            );
-        }
+        // 准入分级剥权不在本校验期执行（2026-10-23 修正）：校验期逐副本运行、
+        // 早于双源裁决，未胜出的播种副本也被剥权并打 "stripped from
+        // registration face" 警告（mode_roleplay 48 次/日实证）——而被剥的
+        // 副本对象随即被裁决丢弃，注册面（胜者）从未受影响，警告纯属噪声。
+        // 剥权已挪至 discover 裁决完成后，仅对胜者执行。
 
         // ── 配置单一真值校验（2026-09-02 用户裁定）：真值要么在 manifest
         // （内联形态，path 省略，fields.default 即真值），要么在引用文件
@@ -945,103 +1008,11 @@ impl PluginLoader for PluginLoaderImpl {
         &self,
         root_paths: &[&str],
     ) -> Result<Vec<PluginManifest>, agentos_core::types::PluginError> {
-        let mut all_manifests = HashMap::new();
-
-        // 标准 mcpServers 配置 → external MCP 插件目录同步（每轮先同步，
-        // 配置增删改即热生效；详见 sync_external_mcp_plugins）。
         self.sync_external_mcp_plugins();
-
-        // 扫描 root_paths（外部传入的路径）。同 id 双源裁决与内置根/用户根扫描段
-        // 同语义，统一经 [`Self::admit`] → [`Self::should_replace`]：UserFirst
-        // （dev 默认）下为历史口径「**用户根子树赢**」。root_paths 的迭代序来自
-        // 调用方（热路径 discover_new_plugins 把内置+用户根的父目录混装进每轮
-        // 新建的 HashSet，序不稳定），朴素 last-wins 会让双源同 id 的胜者逐轮
-        // 翻转——源码目录随之翻转 → 代码指纹每轮必变 → 复验驱逐/重注册循环
-        // （/ext 路由间歇 503/504，2026-09-18 根修）。故用户根条目一旦胜出即
-        // 不可被非用户根条目覆盖，与迭代序解耦；其余路径间维持 last-wins 不变。
-        // BuiltinFirst（装机）下同规则换边：跨根冲突按 semver 裁决（见 ADR）。
-        for root_str in root_paths {
-            let root = Path::new(root_str);
-            match self.scan_root(root) {
-                Ok(found) => {
-                    for (manifest, path) in found {
-                        self.admit(&mut all_manifests, manifest, path);
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to scan root {}: {}", root.display(), e);
-                }
-            }
-        }
-
-        // 扫描内置根（Err 记 warn 不吞——与 root_paths 分支同款：单根失败不阻断其余根）
-        match self.scan_root(&self.builtin_root) {
-            Ok(found) => {
-                for (manifest, path) in found {
-                    self.admit(&mut all_manifests, manifest, path);
-                }
-            }
-            Err(e) => {
-                warn!(
-                    root = %self.builtin_root.display(),
-                    error = %e,
-                    "Failed to scan builtin plugin root"
-                );
-            }
-        }
-
-        // 扫描用户根（同 id 冲突同样经 admit 按策略裁决）
-        if let Some(user_root) = &self.user_root {
-            match self.scan_root(user_root) {
-                Ok(found) => {
-                    for (manifest, path) in found {
-                        self.admit(&mut all_manifests, manifest, path);
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        root = %user_root.display(),
-                        error = %e,
-                        "Failed to scan user plugin root"
-                    );
-                }
-            }
-        }
-
-        // ADR 附录 D③/D.5（P6 命名治理）：启动期聚合校验 invoke_entry。
-        // pipeline 类型插件的 MCP 入口名必须显式声明（不再隐式回退 capabilities.tools）。
-        // 收集所有缺失项一次性报错——不逐个 panic，避免"修一个崩一个"的迁移体验。
-        // D.6 槽位拆分：capabilities.tools = LLM 工具（声明即
-        // 注册，不分类型）；capabilities.services = 内部服务方法。两者都不要求
-        // invoke_entry（那是管道入口的声明）。
-        let mut missing_invoke_entry: Vec<String> = all_manifests
-            .values()
-            .map(|(m, _)| m)
-            .filter(|m| m.plugin_type == PluginType::Pipeline && m.invoke_entry.is_none())
-            .map(|m| m.id.clone())
-            .collect();
-        if !missing_invoke_entry.is_empty() {
-            missing_invoke_entry.sort();
-            return Err(agentos_core::types::PluginError {
-                message: format!(
-                    "pipeline plugins missing manifest.invoke_entry (ADR 附录 D②): [{}]",
-                    missing_invoke_entry.join(", ")
-                ),
-                code: Some("MISSING_INVOKE_ENTRY".to_string()),
-                source: Some("plugin-loader".to_string()),
-            });
-        }
-
-        // 更新缓存（只存轻量路径摘要；完整 manifest 由调用方按需读盘解析）
-        let mut cache = self.manifests.write();
-        cache.clear();
-        for (id, (_, path)) in &all_manifests {
-            cache.insert(id.clone(), path.clone());
-        }
-
-        Ok(all_manifests.into_values().map(|(m, _)| m).collect())
+        let candidates = self.gather_candidates_live(root_paths);
+        let (manifests, _) = self.finalize_discovery(candidates)?;
+        Ok(manifests)
     }
-
     /// 验证 manifest 是否符合 Schema。
     fn validate_manifest(
         &self,
@@ -1157,6 +1128,28 @@ impl PluginLoader for PluginLoaderImpl {
             return Ok(serde_json::json!({}));
         }
 
+        // 指纹先行（免读内容）：factory 根失败传播（与下方扫描的 IO 语义
+        // 一致）；用户覆盖根失败降级为空段（与 apply_user_config_overlay
+        // 的 warn+跳过同语义，factory-only 结果不被用户层读失败放大为整体
+        // 失败）。TOCTOU 安全序：指纹早于内容读取，竞态窗口最坏一次多余
+        // 重载，绝不缓存"指纹新于内容"的快照。
+        let mut stamps = Vec::new();
+        agentos_core::config_scan::collect_yaml_stamps(config_root, &mut stamps).map_err(|e| {
+            agentos_core::types::PluginError {
+                message: format!("Failed to stat config dir {}: {}", config_root.display(), e),
+                code: Some("CONFIG_IO_ERROR".to_string()),
+                source: Some("plugin-loader".to_string()),
+            }
+        })?;
+        let user_stamp_count = collect_user_config_stamps(&mut stamps);
+        stamps.sort_by(|a, b| a.path.cmp(&b.path));
+
+        if let Some(snapshot) = self.config_cache.read().as_ref() {
+            if snapshot.stamps == stamps {
+                return Ok(snapshot.config.clone());
+            }
+        }
+
         let mut config_map = serde_json::Map::new();
 
         // 递归扫描经 agentos-core::config_scan 共用骨架；单文件读失败传播、
@@ -1208,12 +1201,35 @@ impl PluginLoader for PluginLoaderImpl {
         // 用户层存在的每个文件整体取代 factory 同路径文件，未被接管的文件仍读
         // factory。叠加点选在此（full_config 构建处）一处生效：所有走 config_files
         // 引用形态的插件经 build_injected_config 免费获得用户覆盖。
-        let user_replaced = apply_user_config_overlay(&mut config_map);
+        // 叠加硬失败（用户根不可读）降级照旧（factory-only 值返回），但本次
+        // 快照标记不可指纹化——指纹面缺失用户段时缓存会掩盖后续恢复，宁可靠
+        // 重载兜底。
+        let mut fingerprint_clean = user_stamp_count.is_ok();
+        let user_replaced = match apply_user_config_overlay(&mut config_map) {
+            Ok(replaced) => replaced,
+            Err(_) => {
+                fingerprint_clean = false;
+                0
+            }
+        };
 
-        let config_keys: Vec<String> = config_map.keys().cloned().collect();
+        let value = serde_json::Value::Object(config_map);
+        *self.config_cache.write() = Some(ConfigSnapshot {
+            stamps: if fingerprint_clean {
+                stamps
+            } else {
+                Vec::new()
+            },
+            config: value.clone(),
+        });
+
+        let config_keys: Vec<String> = value
+            .as_object()
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default();
         info!(
             "Loaded {} config entries from {}: [{}]{}",
-            config_map.len(),
+            config_keys.len(),
             config_root.display(),
             config_keys.join(", "),
             if user_replaced > 0 {
@@ -1223,7 +1239,7 @@ impl PluginLoader for PluginLoaderImpl {
             }
         );
 
-        Ok(serde_json::Value::Object(config_map))
+        Ok(value)
     }
 
     /// 获取插件的目录路径（包含 plugin.json/server.py 的目录）。
@@ -1256,6 +1272,258 @@ impl PluginLoader for PluginLoaderImpl {
                 e
             })
             .ok()
+    }
+
+    /// 服务条目 → 声明提供方 id 列表（discover 期缓存直读，零读盘）。
+    fn service_provider_ids(&self, service: &str) -> Vec<String> {
+        self.service_providers
+            .read()
+            .get(service)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+/// 发现候选收集与收口（live 与缓存两路径的共用底座；缓存消费入口
+/// [`Self::discover_boot_cached`] 在 `loader/cache.rs`）。
+impl PluginLoaderImpl {
+    /// 全量候选收集（现行路径）：逐根扫描产出候选流。根序 = root_paths →
+    /// 内置根 → 用户根（缓存路径 [`Self::gather_candidates_via_cache`] 同序，
+    /// admit 裁决语义依赖此序一致）。单根扫描失败 warn 不阻断其余根（与原
+    /// discover 内联循环逐字同款）。
+    fn gather_candidates_live(&self, root_paths: &[&str]) -> Vec<DiscoverCandidate> {
+        let mut candidates = Vec::new();
+        for root_str in root_paths {
+            let root = Path::new(root_str);
+            match self.scan_root(root) {
+                Ok(found) => {
+                    for (manifest, path) in found {
+                        candidates.push((manifest, path, false));
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to scan root {}: {}", root.display(), e);
+                }
+            }
+        }
+        match self.scan_root(&self.builtin_root) {
+            Ok(found) => {
+                for (manifest, path) in found {
+                    candidates.push((manifest, path, false));
+                }
+            }
+            Err(e) => {
+                warn!(
+                    root = %self.builtin_root.display(),
+                    error = %e,
+                    "Failed to scan builtin plugin root"
+                );
+            }
+        }
+        if let Some(user_root) = &self.user_root {
+            match self.scan_root(user_root) {
+                Ok(found) => {
+                    for (manifest, path) in found {
+                        candidates.push((manifest, path, false));
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        root = %user_root.display(),
+                        error = %e,
+                        "Failed to scan user plugin root"
+                    );
+                }
+            }
+        }
+        candidates
+    }
+
+    /// 发现收口（live 与缓存路径共用）：同 id admit 裁决 → 冲突对账日志 →
+    /// 装机盲区告警 → 前端危险能力剥权 → invoke_entry 聚合校验 → 路径/服务
+    /// 声明缓存重建。返回 (manifests, 缓存已验证胜者 id 集)——后者由候选流
+    /// 的 from_cache 标记按胜者归属推导，live 路径恒空集。
+    ///
+    /// candidates 元组第三位 = 候选是否出自预烤发现缓存（digest 对账已验证）。
+    fn finalize_discovery(
+        &self,
+        candidates: Vec<DiscoverCandidate>,
+    ) -> Result<(Vec<PluginManifest>, HashSet<String>), agentos_core::types::PluginError> {
+        let mut all_manifests = HashMap::new();
+        let mut winner_verified: HashMap<PathBuf, bool> = HashMap::new();
+        for (_manifest, path, from_cache) in &candidates {
+            winner_verified.entry(path.clone()).or_insert(*from_cache);
+        }
+
+        let mut conflicts: SameIdConflicts = HashMap::new();
+        for (manifest, path, _from_cache) in candidates {
+            self.admit(&mut all_manifests, &mut conflicts, manifest, path);
+        }
+        let cache_verified_winner_ids: HashSet<String> = all_manifests
+            .iter()
+            .filter_map(|(id, (_, path))| {
+                winner_verified
+                    .get(path)
+                    .filter(|verified| **verified)
+                    .map(|_| id.clone())
+            })
+            .collect();
+
+        // 裁决对账日志（装机 boot 验证面）：多源同 id 逐 id 如实打出全部候选
+        // （层:版本，发现序）与最终胜者。id 排序保证日志行序确定。
+        let mut conflict_ids: Vec<String> = conflicts.keys().cloned().collect();
+        conflict_ids.sort();
+        for id in &conflict_ids {
+            let candidates = &conflicts[id];
+            let Some((winner, winner_path)) = all_manifests.get(id) else {
+                continue;
+            };
+            let winner_layer = if self.is_user_rooted(winner_path) {
+                "user"
+            } else {
+                "builtin"
+            };
+            let candidate_list = candidates
+                .iter()
+                .map(|(layer, version)| format!("{layer}:{version}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            info!(
+                "Dual-source same-id resolved: id={} candidates=[{}] winner={}:{} policy={:?}",
+                id, candidate_list, winner_layer, winner.version, self.dual_source_policy,
+            );
+        }
+
+        // ── D4（审查总册 P1-15）：BuiltinFirst 装机盲区显式告警面 ──
+        // 每轮 discover 全量重建：①同 id 冲突中用户副本输给内置（持平/更旧/
+        // 不可解析）→ 逐 id 入册（端点结构化透出）；②任一候选版本宽容解析
+        // （strip v 前缀）仍失败 → 逐 id 显式 warn——sync 写坏版本号不再
+        // 静默失效（此前仅上方逐 id 汇总行可查，无告警面）。
+        let mut ineffective: Vec<IneffectiveUserCopy> = Vec::new();
+        for id in &conflict_ids {
+            let candidates = &conflicts[id];
+            let unparseable: Vec<String> = candidates
+                .iter()
+                .filter(|(_, version)| {
+                    self.dual_source_policy == DualSourcePolicy::BuiltinFirst
+                        && parse_version(version).is_none()
+                })
+                .map(|(layer, version)| format!("{layer}:{version}"))
+                .collect();
+            if !unparseable.is_empty() {
+                warn!(
+                    id = %id,
+                    unparseable = %unparseable.join(", "),
+                    winner_version = %all_manifests.get(id).map(|(m, _)| m.version.clone()).unwrap_or_default(),
+                    "多源仲裁遇到不可解析版本号（宽容 strip v/V 前缀后仍非 semver）——保守判「挑战者不新」（装机口径内置赢）；用户副本是否未生效见 GET /api/v1/plugins/source-arbitration"
+                );
+            }
+            let Some((winner, winner_path)) = all_manifests.get(id) else {
+                continue;
+            };
+            if self.is_user_rooted(winner_path) {
+                continue; // 用户副本生效，无盲区
+            }
+            // 多个用户副本同 id 冲突时取宽容解析最强的一份（最接近生效的
+            // 尝试仍输，才是如实告警）；全不可解析取首个。
+            let mut best_user: Option<&String> = None;
+            for (layer, version) in candidates {
+                if *layer != "user" {
+                    continue;
+                }
+                let better = match best_user {
+                    None => true,
+                    Some(cur) => match (parse_version(cur), parse_version(version)) {
+                        (cur_v, Some(v)) => cur_v.is_none_or(|c| v > c),
+                        (Some(_), None) => false,
+                        (None, None) => false,
+                    },
+                };
+                if better {
+                    best_user = Some(version);
+                }
+            }
+            if let Some(user_version) = best_user {
+                ineffective.push(IneffectiveUserCopy {
+                    plugin_id: id.clone(),
+                    user_version: user_version.clone(),
+                    builtin_version: winner.version.clone(),
+                    version_unparseable: parse_version(user_version).is_none(),
+                });
+            }
+        }
+        *self.ineffective_user_copies.write() = ineffective;
+
+        // ── 准入分级（2026-09-25；2026-10-23 剥权时机修正）──
+        // 危险前端能力按授予剥权：检测在前、剥权在后；剥权写入胜者 manifest
+        // 的 restricted_capabilities 供 /api/v1/plugins 与设置页可见（禁静默
+        // 降级）。每轮 discover 全量重建 all_manifests 后重算——授予变化或
+        // 清单篡改即时生效。仅对胜者执行：生效面恒为胜者，未胜出副本（播种
+        // 产物）不剥权不打警告——剥权曾在扫描校验期逐副本运行，未胜出副本
+        // 也被剥并打 "registration face" 警告，纯噪声（2026-10-23 实证）。
+        for (winner, winner_path) in all_manifests.values_mut() {
+            let declared = detect_frontend_dangerous_caps(winner.contributes.as_ref());
+            let not_granted = self.frontend_caps_not_granted(&winner.id, winner_path, &declared);
+            if !not_granted.is_empty() {
+                strip_frontend_capabilities(winner, &not_granted);
+                winner.restricted_capabilities =
+                    not_granted.iter().map(|cap| (*cap).to_string()).collect();
+                warn!(
+                    "Plugin '{}' dangerous frontend capabilities not granted by allowlist, stripped from registration face: {:?}",
+                    winner.id, not_granted
+                );
+            }
+        }
+
+        // ADR 附录 D③/D.5（P6 命名治理）：启动期聚合校验 invoke_entry。
+        // pipeline 类型插件的 MCP 入口名必须显式声明（不再隐式回退 capabilities.tools）。
+        // 收集所有缺失项一次性报错——不逐个 panic，避免"修一个崩一个"的迁移体验。
+        // D.6 槽位拆分：capabilities.tools = LLM 工具（声明即
+        // 注册，不分类型）；capabilities.services = 内部服务方法。两者都不要求
+        // invoke_entry（那是管道入口的声明）。
+        let mut missing_invoke_entry: Vec<String> = all_manifests
+            .values()
+            .map(|(m, _)| m)
+            .filter(|m| m.plugin_type == PluginType::Pipeline && m.invoke_entry.is_none())
+            .map(|m| m.id.clone())
+            .collect();
+        if !missing_invoke_entry.is_empty() {
+            missing_invoke_entry.sort();
+            return Err(agentos_core::types::PluginError {
+                message: format!(
+                    "pipeline plugins missing manifest.invoke_entry (ADR 附录 D②): [{}]",
+                    missing_invoke_entry.join(", ")
+                ),
+                code: Some("MISSING_INVOKE_ENTRY".to_string()),
+                source: Some("plugin-loader".to_string()),
+            });
+        }
+
+        // 更新缓存（只存轻量路径摘要；完整 manifest 由调用方按需读盘解析）
+        let mut cache = self.manifests.write();
+        cache.clear();
+        for (id, (_, path)) in &all_manifests {
+            cache.insert(id.clone(), path.clone());
+        }
+        drop(cache);
+        // 服务声明缓存同刀重建（winners 全集）：manifest 体在手，零额外读盘。
+        {
+            let mut services = self.service_providers.write();
+            services.clear();
+            for (id, (m, _)) in &all_manifests {
+                for svc in &m.capabilities.services {
+                    services
+                        .entry(svc.name.clone())
+                        .or_default()
+                        .push(id.clone());
+                }
+            }
+        }
+
+        Ok((
+            all_manifests.into_values().map(|(m, _)| m).collect(),
+            cache_verified_winner_ids,
+        ))
     }
 }
 
@@ -1317,14 +1585,28 @@ impl PluginLoaderImpl {
     ///
     /// HTTP dispatcher 据此把 `/ext/{plugin_id}/assets/{*path}`
     /// 解析到 `<plugin_dir>/web/<path>` 直读文件返回，免去为每个子资源单独声明
-    /// http_endpoints。由 agentos-kernel 启动期调用，把结果经
-    /// `AppState::with_plugin_dirs` 注入。
+    /// http_endpoints。AppState 经 `with_plugin_loader` 持本活对象句柄，
+    /// 消费点现取（本表每轮 discover 全量重建，watcher 热发现即时可见——
+    /// B1：boot 快照 `AppState.plugin_dirs` 已退役）。
     pub fn get_plugin_dirs(&self) -> std::collections::HashMap<String, std::path::PathBuf> {
         let manifests = self.manifests.read();
         manifests
             .iter()
             .filter_map(|(id, path)| path.parent().map(|p| (id.clone(), p.to_path_buf())))
             .collect()
+    }
+
+    /// 单查已发现插件的根目录（活路径表现取，零全表物化）。
+    pub fn plugin_dir(&self, plugin_id: &str) -> Option<std::path::PathBuf> {
+        let manifests = self.manifests.read();
+        manifests
+            .get(plugin_id)
+            .and_then(|path| path.parent().map(|p| p.to_path_buf()))
+    }
+
+    /// 已发现插件数（诊断面计数用，读锁 len 零物化）。
+    pub fn plugin_dir_count(&self) -> usize {
+        self.manifests.read().len()
     }
 }
 
@@ -1346,13 +1628,17 @@ impl PluginLoaderImpl {
 /// 键路径与注入侧 `resolve_config_path`（剥 `config/` 前缀与扩展名后按 `/` 下钻）
 /// 同构，保证"用户层写的文件"与"插件读的键"对得上。
 ///
-/// 返回被用户层接管的文件数（日志可观测性——"改了没生效"排查的第一线索）。
-fn apply_user_config_overlay(config_map: &mut serde_json::Map<String, serde_json::Value>) -> usize {
+/// 返回 `Ok(被用户层接管的文件数)`（日志可观测性——"改了没生效"排查的
+/// 第一线索）；`Err` = 用户根不可读的硬失败（内部已 warn，factory-only
+/// 结果照常可用，调用方须将对应快照标记不可指纹化）。
+fn apply_user_config_overlay(
+    config_map: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<usize, LoaderError> {
     let Some(user_root) = agentos_core::user_space::user_config_dir() else {
-        return 0;
+        return Ok(0);
     };
     if !user_root.is_dir() {
-        return 0;
+        return Ok(0);
     }
 
     // collect_yaml_dir 的回调能拿到每个文件的绝对路径与解析值——借它走既有
@@ -1395,7 +1681,7 @@ fn apply_user_config_overlay(config_map: &mut serde_json::Map<String, serde_json
             user_root.display(),
             e
         );
-        return 0;
+        return Err(e);
     }
 
     let mut replaced = 0usize;
@@ -1419,7 +1705,35 @@ fn apply_user_config_overlay(config_map: &mut serde_json::Map<String, serde_json
             replaced += 1;
         }
     }
-    replaced
+    Ok(replaced)
+}
+
+/// 用户覆盖根的装载面指纹采集（免读内容，best-effort）。
+///
+/// 目录不存在/非目录 → `Ok(0)`（与 [`apply_user_config_overlay`] 的准入
+/// 判定同源，本就不进叠加）；目录读取失败 → 已 warn + `Err(())`，调用方
+/// 须将本次快照标记不可指纹化（指纹面缺用户段时缓存会掩盖后续恢复）。
+fn collect_user_config_stamps(
+    out: &mut Vec<agentos_core::config_scan::YamlFileStamp>,
+) -> Result<usize, ()> {
+    let Some(user_root) = agentos_core::user_space::user_config_dir() else {
+        return Ok(0);
+    };
+    if !user_root.is_dir() {
+        return Ok(0);
+    }
+    let before = out.len();
+    match agentos_core::config_scan::collect_yaml_stamps(&user_root, out) {
+        Ok(()) => Ok(out.len() - before),
+        Err(e) => {
+            warn!(
+                "User config stamp scan skipped ({}): {}",
+                user_root.display(),
+                e
+            );
+            Err(())
+        }
+    }
 }
 
 /// 按键路径段写入配置叶（中间层不存在则建空对象）。
@@ -1534,12 +1848,80 @@ fn auto_generate_env_declarations(manifest: &mut PluginManifest) {
     );
 }
 
+/// 发现面收集原语（ADR 2026-10-13 拍平配套）：递归找直接含 plugin.json /
+/// plugin.yaml 的插件目录。目录布局无关（逐层下钻，不认目录名），是启动
+/// 扫描根推导（`discover_plugin_roots`）、模式包约定资源视图聚合
+/// （api/src/mode_view.rs，ADR 2026-10-15-mode-registry-retirement）共用的
+/// 同一份发现面真相；此前 kernel bin / invoker / watcher 三处各持一份拷贝，
+/// 收敛于此（复制必漂移）。
+pub fn collect_plugin_dirs(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    collect_plugin_dirs_into(dir, &mut dirs);
+    dirs
+}
+
+fn collect_plugin_dirs_into(dir: &std::path::Path, dirs: &mut Vec<std::path::PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            // 直接含 manifest 的目录即插件目录（不再下钻）；否则继续递归
+            if path.join("plugin.json").exists() || path.join("plugin.yaml").exists() {
+                dirs.push(path);
+            } else {
+                collect_plugin_dirs_into(&path, dirs);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_env::{user_space_env_lock, UserRootGuard, UserSpaceEnvGuard};
     use agentos_core::traits::{HostType, ProvidedCapabilityHost, StepCapability};
     use std::fs;
+
+    /// 发现面收集原语（ADR 2026-10-13 拍平配套）：布局无关递归下钻——平铺一级、
+    /// 旧类目录二级、三级深嵌套同样命中；无 manifest 的目录只作路径下钻；纯
+    /// 文件不干扰；plugin.yaml 兜底同识别。
+    #[test]
+    fn collect_plugin_dirs_is_layout_agnostic_and_yaml_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // ① 平铺：root/flat/plugin.json
+        fs::create_dir_all(root.join("flat")).unwrap();
+        fs::write(root.join("flat/plugin.json"), r#"{"id":"flat"}"#).unwrap();
+        // ② 二级：root/kinds/tools/nested/plugin.yaml
+        fs::create_dir_all(root.join("kinds/tools/nested")).unwrap();
+        fs::write(root.join("kinds/tools/nested/plugin.yaml"), "id: nested").unwrap();
+        // ③ 三级深嵌套：root/a/b/c/deep/plugin.json
+        fs::create_dir_all(root.join("a/b/c/deep")).unwrap();
+        fs::write(root.join("a/b/c/deep/plugin.json"), r#"{"id":"deep"}"#).unwrap();
+        // ④ 无 manifest 的目录（如 _libs）只下钻不命中；⑤ 散文件忽略
+        fs::create_dir_all(root.join("_libs")).unwrap();
+        fs::write(root.join("_libs/readme.txt"), "not a plugin").unwrap();
+        fs::write(root.join("loose.txt"), "x").unwrap();
+
+        let mut dirs = collect_plugin_dirs(root);
+        dirs.sort();
+        let names: Vec<String> = dirs
+            .iter()
+            .map(|d| d.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["deep", "flat", "nested"],
+            "三种布局同样命中；_libs 与散文件跳过"
+        );
+        // 性质断言：命中目录恰含 manifest（发现的定义面）
+        assert!(dirs
+            .iter()
+            .all(|d| d.join("plugin.json").is_file() || d.join("plugin.yaml").is_file()));
+    }
 
     fn create_test_plugin_dir(root: &Path, id: &str, plugin_type: &str) {
         create_test_plugin_dir_with_version(root, id, plugin_type, "1.0.0");
@@ -1854,7 +2236,6 @@ mod tests {
             description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Pipeline,
-            pipeline_role: None,
             language: "rust".to_string(),
             host_type: HostType::InProcess,
             host_group: None,
@@ -1866,7 +2247,6 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            granted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -1900,7 +2280,6 @@ mod tests {
                 description: None,
                 version: "1.0.0".to_string(),
                 plugin_type: PluginType::Pipeline,
-                pipeline_role: None,
                 language: "rust".to_string(),
                 host_type: HostType::InProcess,
                 host_group: None,
@@ -1912,7 +2291,6 @@ mod tests {
                 mcp: None,
                 lifecycle: None,
                 native: None,
-                granted_capabilities: vec![],
                 requires_content: None,
                 invoke_entry: None,
                 config_files: vec![],
@@ -1996,7 +2374,6 @@ mod tests {
             description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Pipeline,
-            pipeline_role: None,
             language: "rust".to_string(),
             host_type: HostType::InProcess,
             host_group: None,
@@ -2008,7 +2385,6 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            granted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -2052,7 +2428,6 @@ mod tests {
             description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Pipeline,
-            pipeline_role: None,
             language: "rust".to_string(),
             host_type: HostType::InProcess,
             host_group: None,
@@ -2064,7 +2439,6 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            granted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -2117,7 +2491,6 @@ mod tests {
             description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Pipeline,
-            pipeline_role: None,
             language: "rust".to_string(),
             host_type: HostType::InProcess,
             host_group: None,
@@ -2129,7 +2502,6 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            granted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -2203,7 +2575,6 @@ mod tests {
             description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Pipeline,
-            pipeline_role: None,
             language: "rust".to_string(),
             host_type: HostType::InProcess,
             host_group: None,
@@ -2215,7 +2586,6 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            granted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -2245,7 +2615,6 @@ mod tests {
             description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Composite,
-            pipeline_role: None,
             language: "yaml".to_string(),
             host_type: HostType::InProcess,
             host_group: None,
@@ -2257,7 +2626,6 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            granted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -2472,6 +2840,140 @@ mod tests {
         );
     }
 
+    // ── D4（审查总册 P1-15）：v 前缀版本号 + 未生效清单告警面 ──
+
+    /// 用户副本 `v` 前缀 semver（如 `v1.1.0`）宽容 strip 前缀后按 semver
+    /// 比较：严格大于内置 → 用户赢（此前解析失败保守判不新 → sync 写
+    /// `v` 前缀版本静默失效）。
+    #[tokio::test]
+    async fn test_builtin_first_v_prefixed_user_version_strictly_newer_user_wins() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        create_test_plugin_dir_with_version(builtin.path(), "vpfx", "system", "1.0.0");
+        create_test_plugin_dir_with_version(user.path(), "vpfx", "system", "v1.1.0");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
+            .with_dual_source_policy(DualSourcePolicy::BuiltinFirst);
+        loader.discover(&[]).await.unwrap();
+
+        let dir = loader.get_plugin_dir("vpfx").unwrap();
+        assert!(
+            std::path::Path::new(&dir).starts_with(user.path()),
+            "v 前缀版本 strip 后严格大于内置 → 用户副本必须赢，got: {dir}"
+        );
+    }
+
+    /// `v` 前缀与纯 semver 持平（`v1.0.0` vs `1.0.0`）→ 内置赢（持平单调
+    /// 不得因宽容解析被破坏）。
+    #[tokio::test]
+    async fn test_builtin_first_v_prefixed_equal_version_builtin_wins() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        create_test_plugin_dir_with_version(builtin.path(), "vpfx_tie", "system", "1.0.0");
+        create_test_plugin_dir_with_version(user.path(), "vpfx_tie", "system", "v1.0.0");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
+            .with_dual_source_policy(DualSourcePolicy::BuiltinFirst);
+        loader.discover(&[]).await.unwrap();
+
+        let dir = loader.get_plugin_dir("vpfx_tie").unwrap();
+        assert!(
+            std::path::Path::new(&dir).starts_with(builtin.path()),
+            "v 前缀持平内置 → 内置副本必须赢，got: {dir}"
+        );
+    }
+
+    /// 未生效清单：用户副本输给内置（纯 semver 更旧 / 不可解析 / v 前缀
+    /// strip 后仍更旧）→ 逐 id 入册，版本原样透出；纯 semver 组与 v 前缀组
+    /// 的 version_unparseable 判定可区分。
+    #[tokio::test]
+    async fn test_builtin_first_ineffective_user_copies_report() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        // 组 A（纯 semver）：用户更旧
+        create_test_plugin_dir_with_version(builtin.path(), "stale_pure", "system", "1.0.0");
+        create_test_plugin_dir_with_version(user.path(), "stale_pure", "system", "0.9.0");
+        // 组 B（v 前缀）：strip 后仍更旧（总册 v0.2.0 场景形状）
+        create_test_plugin_dir_with_version(builtin.path(), "stale_vpfx", "system", "1.0.0");
+        create_test_plugin_dir_with_version(user.path(), "stale_vpfx", "system", "v0.2.0");
+        // 组 C：彻底不可解析
+        create_test_plugin_dir_with_version(builtin.path(), "stale_bad", "system", "1.0.0");
+        create_test_plugin_dir_with_version(user.path(), "stale_bad", "system", "not-semver");
+        // 对照：用户严格更新，不入册
+        create_test_plugin_dir_with_version(builtin.path(), "eff_new", "system", "1.0.0");
+        create_test_plugin_dir_with_version(user.path(), "eff_new", "system", "v1.1.0");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
+            .with_dual_source_policy(DualSourcePolicy::BuiltinFirst);
+        loader.discover(&[]).await.unwrap();
+
+        let mut report = loader.ineffective_user_copies();
+        report.sort_by(|a, b| a.plugin_id.cmp(&b.plugin_id));
+        let ids: Vec<&str> = report.iter().map(|e| e.plugin_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["stale_bad", "stale_pure", "stale_vpfx"],
+            "恰好三个输给内置的 id 入册（生效对照不入册）"
+        );
+        let find = |id: &str| report.iter().find(|e| e.plugin_id == id).unwrap();
+        let pure = find("stale_pure");
+        assert_eq!(pure.user_version, "0.9.0", "用户版本原样透出");
+        assert_eq!(pure.builtin_version, "1.0.0", "内置版本原样透出");
+        assert!(!pure.version_unparseable, "纯 semver 组可解析");
+        let vpfx = find("stale_vpfx");
+        assert_eq!(vpfx.user_version, "v0.2.0");
+        assert!(!vpfx.version_unparseable, "v 前缀组宽容解析成功");
+        assert!(
+            find("stale_bad").version_unparseable,
+            "彻底不可解析组必须打 unparseable 标"
+        );
+    }
+
+    /// 删值实验面：清单随 discover 全量重建——用户副本修复版本后下一轮
+    /// 清单收敛为空（sync 修复可见）。
+    #[tokio::test]
+    async fn test_ineffective_user_copies_rebuilt_each_discover() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        create_test_plugin_dir_with_version(builtin.path(), "fixable", "system", "1.0.0");
+        create_test_plugin_dir_with_version(user.path(), "fixable", "system", "0.9.0");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
+            .with_dual_source_policy(DualSourcePolicy::BuiltinFirst);
+        loader.discover(&[]).await.unwrap();
+        assert_eq!(loader.ineffective_user_copies().len(), 1);
+
+        // 模拟 sync 修复：用户副本版本 bump 到严格更新，重扫后清单收敛
+        let manifest_path = user.path().join("fixable").join("plugin.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        manifest["version"] = serde_json::json!("1.1.0");
+        fs::write(&manifest_path, manifest.to_string()).unwrap();
+        loader.discover(&[]).await.unwrap();
+        assert!(
+            loader.ineffective_user_copies().is_empty(),
+            "用户副本修复后清单必须清空，got: {:?}",
+            loader.ineffective_user_copies()
+        );
+    }
+
+    /// UserFirst（dev 默认）不存在「用户副本未生效」问题（用户根恒赢）：
+    /// 清单恒空，即便版本更旧。
+    #[tokio::test]
+    async fn test_user_first_ineffective_list_always_empty() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        create_test_plugin_dir_with_version(builtin.path(), "dev_old", "system", "1.0.0");
+        create_test_plugin_dir_with_version(user.path(), "dev_old", "system", "0.1.0");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()));
+        loader.discover(&[]).await.unwrap();
+
+        let dir = loader.get_plugin_dir("dev_old").unwrap();
+        assert!(std::path::Path::new(&dir).starts_with(user.path()));
+        assert!(loader.ineffective_user_copies().is_empty());
+    }
+
     /// dev 默认（UserFirst，未设策略）：版本相同 → 用户赢——历史口径逐位不变
     /// （钉住回归：dev 用户工作副本压过仓内共享份的语义不得被本次改动破坏）。
     #[tokio::test]
@@ -2551,18 +3053,72 @@ mod tests {
         }
     }
 
-    /// 模式种子区让位：`<user_root>/modes/` 下的同 id 副本在任何策略下恒用户
-    /// 赢——模式区有自己的账本化对账（版本+内容哈希+定制检测），装机策略不得
-    /// 用打包副本压掉用户已定制的模式（H1「用户定制必须存活」）。modes 是二级
-    /// 嵌套，经 root_paths 进入（与生产 collect_boot_plugin_roots 同形）。
+    /// BuiltinFirst（装机）下模式种子区不豁免版本裁决：`<user_root>/modes/`
+    /// 的路径形态无法区分「已定制种子」与「旧布局残留」，无条件让位会让陈旧
+    /// 残留副本恒压过出厂新版。同 id 统一取全候选版本最高者、持平内置赢；
+    /// 用户定制副本的存活由模式区账本对账（reconcile_mode_seeds）与双根
+    /// 用户赢裁决承载。modes 是二级嵌套，经 root_paths 进入
+    /// （与生产 collect_boot_plugin_roots 同形）；每种形状都钉住双序稳定。
+    ///
+    /// 本例为三源生产形状：内置 0.2.0 + 用户平铺 0.1.0（sync 合法目标）+
+    /// 用户旧布局残留 0.1.0（`modes/` 下）→ 内置必须赢，与序无关。
     #[tokio::test]
-    async fn test_builtin_first_user_modes_subtree_stays_user_wins() {
+    async fn test_builtin_first_stale_modes_residual_builtin_wins() {
         let builtin = tempfile::tempdir().unwrap();
         let user = tempfile::tempdir().unwrap();
         let builtin_modes = builtin.path().join("modes");
         let user_modes = user.path().join("modes");
-        create_test_plugin_dir_with_version(&builtin_modes, "mode_y", "pipeline", "1.0.0");
-        create_test_plugin_dir_with_version(&user_modes, "mode_y", "pipeline", "1.0.0");
+        create_test_plugin_dir_with_version(&builtin_modes, "mode_personal", "pipeline", "0.2.0");
+        create_test_plugin_dir_with_version(user.path(), "mode_personal", "pipeline", "0.1.0");
+        create_test_plugin_dir_with_version(&user_modes, "mode_personal", "pipeline", "0.1.0");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
+            .with_dual_source_policy(DualSourcePolicy::BuiltinFirst);
+
+        // 三序覆盖三源交错：内置先 / 残留先 / 平铺先（用户根段只扫一级子
+        // 目录，平铺经根本身扫描进入）。
+        let orders = [
+            vec![builtin_modes.clone(), user_modes.clone()],
+            vec![user_modes.clone(), builtin_modes.clone()],
+            vec![
+                user.path().to_path_buf(),
+                builtin_modes.clone(),
+                user_modes.clone(),
+            ],
+        ];
+        for roots in &orders {
+            let root_strs: Vec<String> = roots
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            let root_refs: Vec<&str> = root_strs.iter().map(|s| s.as_str()).collect();
+            let manifests = loader.discover(&root_refs).await.unwrap();
+            assert_eq!(
+                manifests.len(),
+                1,
+                "同 id 三源必须合并为单 manifest（roots 序: {roots:?}）"
+            );
+            assert_eq!(
+                manifests[0].version, "0.2.0",
+                "胜者必须是版本最高的内置副本（roots 序: {roots:?}）"
+            );
+            let dir = loader.get_plugin_dir("mode_personal").unwrap();
+            assert!(
+                std::path::Path::new(&dir).starts_with(builtin.path()),
+                "残留副本不得压过版本更高的内置副本（roots 序: {roots:?}），got: {dir}"
+            );
+        }
+    }
+
+    /// BuiltinFirst 下版本持平（含 modes 子树内）→ 内置赢，与序无关。
+    #[tokio::test]
+    async fn test_builtin_first_equal_version_modes_tie_builtin_wins() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let builtin_modes = builtin.path().join("modes");
+        let user_modes = user.path().join("modes");
+        create_test_plugin_dir_with_version(&builtin_modes, "mode_tie", "pipeline", "1.0.0");
+        create_test_plugin_dir_with_version(&user_modes, "mode_tie", "pipeline", "1.0.0");
 
         let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
             .with_dual_source_policy(DualSourcePolicy::BuiltinFirst);
@@ -2578,10 +3134,154 @@ mod tests {
                 .collect();
             let root_refs: Vec<&str> = root_strs.iter().map(|s| s.as_str()).collect();
             loader.discover(&root_refs).await.unwrap();
-            let dir = loader.get_plugin_dir("mode_y").unwrap();
+            let dir = loader.get_plugin_dir("mode_tie").unwrap();
+            assert!(
+                std::path::Path::new(&dir).starts_with(builtin.path()),
+                "版本持平时内置副本必须赢，与路径层与序无关（roots 序: {roots:?}），got: {dir}"
+            );
+        }
+    }
+
+    /// BuiltinFirst 下用户 modes 副本 semver 严格更新 → 用户赢：裁决由版本
+    /// 驱动而非路径层驱动（用户真升级过的种子副本照常生效）。
+    #[tokio::test]
+    async fn test_builtin_first_newer_user_modes_copy_user_wins() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let builtin_modes = builtin.path().join("modes");
+        let user_modes = user.path().join("modes");
+        create_test_plugin_dir_with_version(&builtin_modes, "mode_up", "pipeline", "0.2.0");
+        create_test_plugin_dir_with_version(&user_modes, "mode_up", "pipeline", "0.3.0");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
+            .with_dual_source_policy(DualSourcePolicy::BuiltinFirst);
+
+        let orders = [
+            vec![builtin_modes.clone(), user_modes.clone()],
+            vec![user_modes.clone(), builtin_modes.clone()],
+        ];
+        for roots in &orders {
+            let root_strs: Vec<String> = roots
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            let root_refs: Vec<&str> = root_strs.iter().map(|s| s.as_str()).collect();
+            loader.discover(&root_refs).await.unwrap();
+            let dir = loader.get_plugin_dir("mode_up").unwrap();
             assert!(
                 std::path::Path::new(&dir).starts_with(&user_modes),
-                "模式种子区同 id 恒用户赢（账本对账让位），与序无关（roots 序: {roots:?}），got: {dir}"
+                "用户副本严格更新时必须赢，与序无关（roots 序: {roots:?}），got: {dir}"
+            );
+        }
+    }
+
+    /// BuiltinFirst 三源混合、最高版本在用户侧：用户平铺 1.1.0 赢过内置 1.0.0
+    /// 与用户 modes 残留 1.0.0，与序无关（多源逐对归约 = 取全候选最高版本）。
+    #[tokio::test]
+    async fn test_builtin_first_three_source_user_highest_wins() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let builtin_modes = builtin.path().join("modes");
+        let user_modes = user.path().join("modes");
+        create_test_plugin_dir_with_version(&builtin_modes, "mode_mix", "pipeline", "1.0.0");
+        create_test_plugin_dir_with_version(user.path(), "mode_mix", "pipeline", "1.1.0");
+        create_test_plugin_dir_with_version(&user_modes, "mode_mix", "pipeline", "1.0.0");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
+            .with_dual_source_policy(DualSourcePolicy::BuiltinFirst);
+
+        // 三序覆盖三源交错（同 test_builtin_first_stale_modes_residual_-
+        // builtin_wins 的根给法）。
+        let orders = [
+            vec![builtin_modes.clone(), user_modes.clone()],
+            vec![user_modes.clone(), builtin_modes.clone()],
+            vec![
+                user.path().to_path_buf(),
+                builtin_modes.clone(),
+                user_modes.clone(),
+            ],
+        ];
+        for roots in &orders {
+            let root_strs: Vec<String> = roots
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            let root_refs: Vec<&str> = root_strs.iter().map(|s| s.as_str()).collect();
+            loader.discover(&root_refs).await.unwrap();
+            let dir = loader.get_plugin_dir("mode_mix").unwrap();
+            assert!(
+                std::path::Path::new(&dir).starts_with(user.path())
+                    && !std::path::Path::new(&dir).starts_with(&user_modes),
+                "最高版本（用户平铺 1.1.0）必须赢，与序无关（roots 序: {roots:?}），got: {dir}"
+            );
+        }
+    }
+
+    /// BuiltinFirst 同侧多源（内置无此 id）：用户侧内部同样按版本裁决——
+    /// 嵌套平铺 0.2.0 赢过 modes 残留 0.1.0，与序无关。平铺副本放嵌套目录
+    /// （只经 root_paths 进入）：若退回 last-wins，两序会选出不同副本，
+    /// 本测试即红（版本裁决消除该序敏感）。
+    #[tokio::test]
+    async fn test_builtin_first_same_side_multi_source_newer_wins() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let user_modes = user.path().join("modes");
+        let user_flat = user.path().join("flat-layout");
+        create_test_plugin_dir_with_version(&user_flat, "mode_side", "pipeline", "0.2.0");
+        create_test_plugin_dir_with_version(&user_modes, "mode_side", "pipeline", "0.1.0");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
+            .with_dual_source_policy(DualSourcePolicy::BuiltinFirst);
+
+        let orders = [
+            vec![user_flat.clone(), user_modes.clone()],
+            vec![user_modes.clone(), user_flat.clone()],
+        ];
+        for roots in &orders {
+            let root_strs: Vec<String> = roots
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            let root_refs: Vec<&str> = root_strs.iter().map(|s| s.as_str()).collect();
+            loader.discover(&root_refs).await.unwrap();
+            let dir = loader.get_plugin_dir("mode_side").unwrap();
+            assert!(
+                std::path::Path::new(&dir).starts_with(&user_flat),
+                "同侧多源必须版本最高者赢（roots 序: {roots:?}），got: {dir}"
+            );
+        }
+    }
+
+    /// UserFirst（dev 默认）不变量：三源同 id（内置 + 用户平铺 + 用户 modes
+    /// 残留）下胜者恒在用户侧——dev 口径「用户根子树赢」逐位不变；同侧两个
+    /// 用户副本之间维持 last-wins（不锁具体副本，只锁层别与序稳定）。
+    #[tokio::test]
+    async fn test_user_first_three_source_winner_stays_user_side() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let builtin_modes = builtin.path().join("modes");
+        let user_modes = user.path().join("modes");
+        create_test_plugin_dir_with_version(&builtin_modes, "mode_seed", "pipeline", "1.0.0");
+        create_test_plugin_dir_with_version(user.path(), "mode_seed", "pipeline", "1.0.0");
+        create_test_plugin_dir_with_version(&user_modes, "mode_seed", "pipeline", "1.0.0");
+
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()));
+
+        let orders = [
+            vec![builtin_modes.clone(), user_modes.clone()],
+            vec![user_modes.clone(), builtin_modes.clone()],
+        ];
+        for roots in &orders {
+            let root_strs: Vec<String> = roots
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            let root_refs: Vec<&str> = root_strs.iter().map(|s| s.as_str()).collect();
+            loader.discover(&root_refs).await.unwrap();
+            let dir = loader.get_plugin_dir("mode_seed").unwrap();
+            assert!(
+                std::path::Path::new(&dir).starts_with(user.path()),
+                "UserFirst 下胜者必须在用户侧（与序无关，roots 序: {roots:?}），got: {dir}"
             );
         }
     }
@@ -2691,7 +3391,6 @@ mod tests {
             description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Pipeline,
-            pipeline_role: None,
             language: "rust".to_string(),
             host_type: HostType::InProcess,
             host_group: None,
@@ -2703,7 +3402,6 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            granted_capabilities: vec![],
             requires_content: Some(2),
             invoke_entry: None,
             config_files: vec![],
@@ -3075,6 +3773,138 @@ mod tests {
         let obj = config.as_object().unwrap();
         assert!(obj.contains_key("good"), "合法文件应正常加载");
         assert!(!obj.contains_key("bad"), "非法文件应被跳过,不让整体失败");
+    }
+
+    // ── 全量配置装载的 mtime 快照缓存（每次插件 spawn/工具调用都走
+    // load_config，装机实测 76 分钟 2415 次全量扫描构成分配 churn 洪峰）──
+
+    /// 缓存键语义（对外可观察契约）：指纹 = 文件集 × (路径, mtime, size)。
+    /// 指纹未变 → 返回快照（同长度同 mtime 原位改写不可检测）；真实改写
+    /// （mtime 必 bump）→ 下一次装载立见新值。watcher 语义保留：变更检测
+    /// 在每次 load 现场做，无 TTL 无延迟。
+    #[tokio::test]
+    async fn config_cache_hit_within_fingerprint_and_invalidates_on_real_edit() {
+        let _user_space = factory_only_user_space();
+        let config_dir = tempfile::tempdir().unwrap();
+        let file = config_dir.path().join("svc.yaml");
+        fs::write(&file, "k: one\n").unwrap();
+
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(config_dir.path());
+
+        let first = loader.load_config().await.unwrap();
+        assert_eq!(first["svc"]["k"], "one");
+
+        // 同字节长度改写 + 显式还原 mtime：指纹不可检测 → 快照窗口内
+        let mtime = fs::metadata(&file).unwrap().modified().unwrap();
+        fs::write(&file, "k: two\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        let second = loader.load_config().await.unwrap();
+        assert_eq!(
+            second["svc"]["k"], "one",
+            "指纹未变应命中缓存（不重读内容）"
+        );
+
+        // 真实改写（长度与 mtime 双变）→ 必须失效重载
+        fs::write(&file, "k: three-much-longer\n").unwrap();
+        let third = loader.load_config().await.unwrap();
+        assert_eq!(
+            third["svc"]["k"], "three-much-longer",
+            "mtime 变更必须失效重载"
+        );
+    }
+
+    /// 文件集变更（新增/删除）必然改指纹：新文件进下一次装载、被删文件退出。
+    #[tokio::test]
+    async fn config_cache_invalidates_on_file_add_and_remove() {
+        let _user_space = factory_only_user_space();
+        let config_dir = tempfile::tempdir().unwrap();
+        fs::write(config_dir.path().join("a.yaml"), "x: one\n").unwrap();
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(config_dir.path());
+
+        let cfg = loader.load_config().await.unwrap();
+        assert_eq!(cfg.as_object().unwrap().len(), 1);
+
+        fs::write(config_dir.path().join("b.yaml"), "y: two\n").unwrap();
+        let cfg = loader.load_config().await.unwrap();
+        assert_eq!(
+            cfg.as_object().unwrap().len(),
+            2,
+            "新增文件应进入下一次装载"
+        );
+        assert_eq!(cfg["b"]["y"], "two");
+
+        fs::remove_file(config_dir.path().join("b.yaml")).unwrap();
+        let cfg = loader.load_config().await.unwrap();
+        assert_eq!(
+            cfg.as_object().unwrap().len(),
+            1,
+            "删除文件应退出下一次装载"
+        );
+        assert!(cfg.get("b").is_none());
+    }
+
+    /// 用户覆盖层的变更同样经指纹失效：改写立见新值、删除回退 factory 值
+    /// （缓存不得把用户层冻结在旧快照——装机"改了没生效"排查依赖此语义）。
+    #[tokio::test]
+    async fn config_cache_invalidates_on_user_overlay_edit_and_removal() {
+        let _lock = user_space_env_lock();
+        let factory = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        fs::write(factory.path().join("llm.yaml"), "model: factory\n").unwrap();
+        let user_file = user.path().join("llm.yaml");
+        fs::write(&user_file, "model: user-v1\n").unwrap();
+
+        let _g = UserRootGuard::set(user.path());
+        let loader =
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(factory.path());
+
+        let cfg = loader.load_config().await.unwrap();
+        assert_eq!(cfg["llm"]["model"], "user-v1");
+
+        fs::write(&user_file, "model: user-v2\n").unwrap();
+        let cfg = loader.load_config().await.unwrap();
+        assert_eq!(cfg["llm"]["model"], "user-v2", "用户层改写应立即可见");
+
+        fs::remove_file(&user_file).unwrap();
+        let cfg = loader.load_config().await.unwrap();
+        assert_eq!(
+            cfg["llm"]["model"], "factory",
+            "用户层删除应回退 factory 值"
+        );
+    }
+
+    /// 多触发合并：同一 loader 上并发多次 load_config（spawn 洪峰形态），
+    /// 全部成功且结果一致——单份快照承载全部触发，无撕裂中间态。
+    #[tokio::test]
+    async fn config_cache_concurrent_loads_consistent() {
+        let _user_space = factory_only_user_space();
+        let config_dir = tempfile::tempdir().unwrap();
+        fs::write(config_dir.path().join("a.yaml"), "x: one\n").unwrap();
+        fs::create_dir_all(config_dir.path().join("sub")).unwrap();
+        fs::write(config_dir.path().join("sub/b.yaml"), "y: two\n").unwrap();
+
+        let loader = std::sync::Arc::new(
+            PluginLoaderImpl::new("/tmp/nonexistent", None).with_config_root(config_dir.path()),
+        );
+        let expected = loader.load_config().await.unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let loader = loader.clone();
+            handles.push(tokio::spawn(
+                async move { loader.load_config().await.unwrap() },
+            ));
+        }
+        for h in handles {
+            assert_eq!(h.await.unwrap(), expected, "并发装载结果应与首载一致");
+        }
     }
 
     /// 用户配置层：**文件级整体替换**（ADR 2026-09-13-unified-user-root）。
@@ -3630,6 +4460,40 @@ mod tests {
         );
     }
 
+    /// 播种副本（用户根同 id 同版本）不被剥权不打警告——剥权只对裁决胜者
+    /// 执行（2026-10-23 修正）：BuiltinFirst 持平内置赢，生效面=内置副本
+    /// （builtin 路径不走用户根判定），未胜出的播种副本早于裁决的剥权是
+    /// 纯噪声（mode_roleplay 48 次/日实证，功能从未丢失）。
+    #[tokio::test]
+    async fn seeded_user_copy_not_stripped_when_builtin_wins() {
+        let builtin = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        write_frontend_plugin(builtin.path(), "mode_seed", false, true);
+        write_frontend_plugin(user.path(), "mode_seed", false, true);
+
+        let allowlist = AllowlistConfig {
+            mode: AllowlistMode::Permissive,
+            plugins: vec![], // 无条目：若误剥，client_styles 必失
+            deployed: true,
+        };
+        let loader = PluginLoaderImpl::new(builtin.path(), Some(user.path().to_path_buf()))
+            .with_allowlist(allowlist)
+            .with_dual_source_policy(DualSourcePolicy::BuiltinFirst);
+        let manifests = loader.discover(&[]).await.unwrap();
+        let manifest = manifests.iter().find(|m| m.id == "mode_seed").unwrap();
+
+        assert!(
+            manifest.restricted_capabilities.is_empty(),
+            "内置胜者不剥权，实际: {:?}",
+            manifest.restricted_capabilities
+        );
+        let contributes = manifest.contributes.as_ref().unwrap();
+        assert!(
+            contributes.get("client_styles").is_some(),
+            "client_styles 应完整保留（注册面从未被剥）"
+        );
+    }
+
     // ── P6 命名治理（ADR 附录 D③/D.5）：discover 启动期聚合校验 invoke_entry ──
 
     /// 辅助：写一个 sidecar pipeline manifest（可指定 invoke_entry）。
@@ -3709,6 +4573,35 @@ mod tests {
         let manifests = loader.discover(&[]).await.unwrap();
         // tool 和 system 都不要求 invoke_entry，discover 成功
         assert_eq!(manifests.len(), 2);
+    }
+
+    /// R7 F3：discover 落服务声明缓存——service_provider_ids 按点式条目
+    /// （ns.method）解析提供方（llm.complete_stream → llm_service），供 ensure
+    /// 声明面依赖闭包展开。缓存键 = 完整服务名；bare 命名空间不入键（调用面
+    /// 展开只认点式精确声明，bare 属注册闸存在性语义）。
+    #[tokio::test]
+    async fn test_discover_populates_service_provider_cache() {
+        let builtin = tempfile::tempdir().unwrap();
+        let pdir = builtin.path().join("llm_service");
+        fs::create_dir_all(&pdir).unwrap();
+        fs::write(
+            pdir.join("plugin.json"),
+            r#"{"id":"llm_service","name":"LLM Service","version":"1.0.0","plugin_type":"system","language":"python","host_type":"sidecar","entry":"python server.py","capabilities":{"services":[{"name":"llm.complete_stream","description":"streaming completion"}]}}"#,
+        )
+        .unwrap();
+
+        let loader = PluginLoaderImpl::new(builtin.path(), None);
+        loader.discover(&[]).await.unwrap();
+
+        assert_eq!(
+            loader.service_provider_ids("llm.complete_stream"),
+            vec!["llm_service".to_string()],
+            "点式服务条目必须解析出声明提供方"
+        );
+        assert!(
+            loader.service_provider_ids("llm").is_empty(),
+            "bare 命名空间不入缓存键（不参与调用面展开）"
+        );
     }
 
     // ── GAP-4：env 声明自动生成（引用本身即声明）────────────────

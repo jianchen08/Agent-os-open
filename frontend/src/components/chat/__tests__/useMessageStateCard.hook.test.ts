@@ -2,8 +2,10 @@
 /**
  * useMessageStateCard hook 车道——三道门分发（active/载荷/声明）。
  *
- * mock 仅外部依赖（端点 apiClient、声明 registry、样式解析），会话列表走
+ * mock 仅外部依赖（端点 apiClient、声明 registry），会话列表走
  * readSessions 真实 query 缓存（写入后读取），hook 渲染经 renderHook 真链。
+ * 渲染形态注：webview 状态卡退役（2026-10-17）后 hook 只承载标记段切除数据面，
+ * 门 3 = message_cards 声明命中即分发（无 message-style 页声明门槛）。
  */
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -23,10 +25,6 @@ vi.mock('@/services/schema/ContributionRegistry', () => ({
       { match: { marker: 'state' }, style_id: 'roleplay_state_card' },
     ]),
   },
-}))
-
-vi.mock('@/components/chat/PluginMessageCard', () => ({
-  resolveMessageStyle: vi.fn((styleId: string) => (styleId === 'roleplay_state_card' ? {} : null)),
 }))
 
 import { apiClient } from '@/services/api/client'

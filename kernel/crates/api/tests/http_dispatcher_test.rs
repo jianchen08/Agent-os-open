@@ -512,7 +512,6 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
         description: None,
         version: "1.0.0".to_string(),
         plugin_type: PluginType::System,
-        pipeline_role: None,
         language: "python".to_string(),
         host_type: HostType::Sidecar,
         host_group: None,
@@ -524,7 +523,6 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
         mcp: None,
         lifecycle: None,
         native: None,
-        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],
@@ -547,7 +545,6 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
         description: None,
         version: "1.0.0".to_string(),
         plugin_type: PluginType::System,
-        pipeline_role: None,
         language: "python".to_string(),
         host_type: HostType::Sidecar,
         host_group: None,
@@ -559,7 +556,6 @@ async fn test_register_manifest_http_routes_aggregates_errors() {
         mcp: None,
         lifecycle: None,
         native: None,
-        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],
@@ -613,6 +609,25 @@ async fn test_datasource_proxy_forwards_to_ext_routes() {
     state.capability_registry = Some(registry);
     state.http_handler = Some(Arc::new(QueryEchoHandler));
     let app = build_router(state);
+    // /api/v1/datasource 代理面受 /api/v1/ 前缀 default-deny 保护（ADR
+    // 2026-10-10）——store=None 回退内置脚手架 admin token。
+    let bearer = format!(
+        "Bearer {}",
+        agentos_http::auth::encode_token(
+            agentos_http::auth::TokenType::Access,
+            &agentos_http::auth::BuiltInUser {
+                id: "00000000-0000-0000-0000-000000000001".to_string(),
+                username: "admin".to_string(),
+                password: String::new(),
+                email: String::new(),
+                role: "admin".to_string(),
+                tenant_id: "default".to_string(),
+                created_at: String::new(),
+                must_change_password: false,
+            },
+            3600,
+        )
+    );
 
     // 短形式（前端 fetchDatasourceOptions 非绝对 URI 的调用形态）
     let resp = app
@@ -621,6 +636,7 @@ async fn test_datasource_proxy_forwards_to_ext_routes() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/datasource/db_admin/table/memory?limit=5&filter=a&filter=b")
+                .header("authorization", &bearer)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -644,6 +660,7 @@ async fn test_datasource_proxy_forwards_to_ext_routes() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/datasource/ext/db_admin/table/memory")
+                .header("authorization", &bearer)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -657,6 +674,7 @@ async fn test_datasource_proxy_forwards_to_ext_routes() {
             Request::builder()
                 .method("GET")
                 .uri("/api/v1/datasource/nonexistent/foo")
+                .header("authorization", &bearer)
                 .body(Body::empty())
                 .unwrap(),
         )

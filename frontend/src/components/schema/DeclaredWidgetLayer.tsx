@@ -17,12 +17,13 @@
  *       docs/working/design/frontend-design-unification-execution-plan.md §三 M0.1
  */
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { EventWatchBox } from '@/components/schema/EventWatchBox'
 import { RefreshBox, type RefreshDecl } from '@/components/schema/RefreshBox'
-import { apiClient } from '@/services/api/client'
 import { cn } from '@/lib/utils'
+import { apiClient } from '@/services/api/client'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { WidgetActionContext, resolveWidgetAction } from '@/services/schema/widgetActionBus'
 import { resolveDeclaredWidgets } from '@/services/schema/widgetChain'
 import type { WidgetDeclaration } from '@/services/schema/ContributionRegistry'
 import type { FormEventWatch } from '@/services/schema/formEventBus'
@@ -57,6 +58,57 @@ export interface DeclaredWidgetLayerProps {
    */
   contextVars?: Record<string, string>
   className?: string
+  /**
+   * 布局形态（缺省 stack，全部既有消费者语义不变）：
+   * grid = 响应式卡片网格——`auto-fill minmax` 按容器宽自适应列数，与视口
+   * 断点无关（声明页多为分栏内嵌面，监控页 1280 视口下面板仅约 480px 宽，
+   * 视口断点会给出假列数）；紧凑卡型（GRID_COMPACT_TYPES）按格排布，其余
+   * 类型整行铺满（表格/表单/复杂宿主件最小可读宽度大于单格，fail-safe 全宽）。
+   * 整行提升走容器 `:has` 变体：带 refresh/watch 的声明在网格子项（RefreshBox
+   * 包裹 div）与标记层之间隔了一层裸 div，标记放深处类名打不到网格子项。
+   */
+  layout?: 'stack' | 'grid'
+}
+
+/** 网格布局下可进格的紧凑卡型（其余类型 col-span-full 整行） */
+const GRID_COMPACT_TYPES = new Set(['status_card', 'progress', 'task_card', 'chart'])
+
+/** 注册表订阅包装（稳定标识，useSyncExternalStore 要求） */
+const subscribeRegistry = (listener: () => void): (() => void) =>
+  contributionRegistry.subscribe(listener)
+const getRegistryVersion = (): number => contributionRegistry.getVersion()
+
+/** 网格容器：auto-fill 按容器宽出列 + 整行标记经 :has 提升到网格子项 */
+const GRID_CONTAINER_CLASS =
+  'grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-3 [&>*:has([data-grid-span=full])]:col-span-full'
+
+/**
+ * 逐 widget 注入 WidgetActionContext（ADR 2026-10-10 动作面）：
+ * value 携带当前声明 + 分发函数（内置域 host adapter 优先 → 声明 actionUri；
+ * 分发链在 services/schema/widgetActionBus，本层只做宿主注入）。
+ */
+function ActionScopedComponent({
+  declaration,
+  Component,
+  props,
+}: {
+  declaration: WidgetDeclaration
+  Component: WidgetComponent
+  props: Record<string, unknown>
+}) {
+  const ctx = useMemo(
+    () => ({
+      declaration,
+      dispatch: (actionName: string, payload?: unknown) =>
+        resolveWidgetAction(actionName, declaration, payload),
+    }),
+    [declaration],
+  )
+  return (
+    <WidgetActionContext.Provider value={ctx}>
+      <Component {...props} />
+    </WidgetActionContext.Provider>
+  )
 }
 
 /**
@@ -71,22 +123,34 @@ function ResolvedItem({
   declaration,
   Component,
   injected,
+  gridCell,
 }: {
   declaration: WidgetDeclaration
   Component: WidgetComponent
   injected?: Record<string, unknown>
+  /** 网格布局下本声明进格排布（非紧凑类型为 false → 包装层 col-span-full 整行） */
+  gridCell?: boolean
 }) {
   const rawWatch = (declaration.props as { watch?: FormEventWatch | FormEventWatch[] } | undefined)
     ?.watch
   const rawRefresh = (declaration.props as { refresh?: RefreshDecl } | undefined)?.refresh
   const props = { ...(declaration.props ?? {}), ...(injected ?? {}) }
+  // col-span-full：本层直挂网格时本 div 即网格子项；data-grid-span：隔 RefreshBox
+  // 裸 div 时由容器 :has 变体把整行提升到真正的网格子项（双保险互不冲突）
+  const wrapperClass = cn('min-h-0 min-w-0', gridCell === false && 'col-span-full')
+  const wrapperSpan = gridCell === false ? { 'data-grid-span': 'full' } : undefined
   const body = (
     <div
       data-testid={`declared-widget-${declaration.id}`}
       data-widget-type={declaration.type}
-      className="min-h-0"
+      {...wrapperSpan}
+      // min-w-0：本 div 是外层工具栏 flex 行的子项，min-width:auto 会锁死
+      // 内容宽——窄视口下声明 widget（模式/权限 chip 等）拒绝收缩直接压过
+      // 相邻控件（发送键实测被压 27px）；放行收缩配合 chip 内部 truncate
+      // 干净省略，无约束场景宽度照旧不受影响
+      className={wrapperClass}
     >
-      <Component {...props} />
+      <ActionScopedComponent declaration={declaration} Component={Component} props={props} />
     </div>
   )
   if (!rawWatch && !rawRefresh) return body
@@ -101,10 +165,16 @@ function ResolvedItem({
                 data-testid={`declared-widget-${declaration.id}`}
                 data-widget-type={declaration.type}
                 data-reload-key={reloadKey}
-                className="min-h-0"
+                {...wrapperSpan}
+                className={wrapperClass}
               >
                 {/* key 变化强制重挂载 → 重拉数据（事件联动 G3 / 定时轮询 G6-b 共用语义） */}
-                <Component key={reloadKey} {...props} />
+                <ActionScopedComponent
+                  key={reloadKey}
+                  declaration={declaration}
+                  Component={Component}
+                  props={props}
+                />
               </div>
             )
           }}
@@ -112,6 +182,69 @@ function ResolvedItem({
       )}
     </EventWatchBox>
   )
+}
+
+/**
+ * 声明 fieldsUri 数据源解析（通用契约，响应 {fields: [...]}，与 FormWidget
+ * datasource 模式同构）：渲染前 GET 拉取字段声明并入声明 props（fieldsUri
+ * 键随即摘除，目标组件拿到的是纯 fields，不感知 datasource 形态）。
+ *
+ * 渲染语义：拉取中/fields 空 → 不渲染（选项面空的声明无内容可渲染，如
+ * 模型未配置思考参数组时思考选择器整体隐藏）；拉取失败同空（渲染容器不
+ * 因数据源故障阻塞工具栏）。
+ *
+ * uri 中的 `{key}` 占位符以 contextVars 替换（渲染上下文变量由宿主提供）。
+ */
+function FieldsUriResolver({
+  uri,
+  declaration,
+  Component,
+  injected,
+  gridCell,
+}: {
+  uri: string
+  declaration: WidgetDeclaration
+  Component: WidgetComponent
+  injected?: Record<string, unknown>
+  gridCell?: boolean
+}) {
+  const [fields, setFields] = useState<unknown[] | null>(null)
+  useEffect(() => {
+    let alive = true
+    apiClient
+      .get(uri)
+      .then((resp) => {
+        if (!alive) return
+        const data = resp.data as { fields?: unknown } | unknown[] | null
+        const f = Array.isArray(data) ? data : data?.fields
+        setFields(Array.isArray(f) ? f : [])
+      })
+      .catch((err: unknown) => {
+        // best-effort 降级为不渲染该声明；留痕区分“端点故障”与“未配置”
+        console.warn('[DeclaredWidgetLayer] fieldsUri 拉取失败（不渲染该声明）:', uri, err)
+        if (alive) setFields([])
+      })
+    return () => {
+      alive = false
+    }
+  }, [uri])
+
+  if (fields === null || fields.length === 0) return null
+  const { fieldsUri: _consumed, ...restProps } = declaration.props as Record<string, unknown>
+  return (
+    <ResolvedItem
+      declaration={{ ...declaration, props: { ...restProps, fields } }}
+      Component={Component}
+      injected={injected}
+      gridCell={gridCell}
+    />
+  )
+}
+
+/** fieldsUri 占位符替换：{key} → contextVars[key]（缺失替换为空串） */
+function substituteVars(uri: string, vars?: Record<string, string>): string {
+  if (!vars) return uri
+  return uri.replace(/\{(\w+)\}/g, (_, key: string) => vars[key] ?? '')
 }
 
 /**
@@ -183,66 +316,6 @@ function mergeSelectOptions(source: WidgetDeclaration[]): WidgetDeclaration[] {
   })
 }
 
-/**
- * 声明 fieldsUri 数据源解析（通用契约，响应 {fields: [...]}，与 FormWidget
- * datasource 模式同构）：渲染前 GET 拉取字段声明并入声明 props（fieldsUri
- * 键随即摘除，目标组件拿到的是纯 fields，不感知 datasource 形态）。
- *
- * 渲染语义：拉取中/fields 空 → 不渲染（选项面空的声明无内容可渲染，如
- * 模型未配置思考参数组时思考选择器整体隐藏）；拉取失败同空（渲染容器不
- * 因数据源故障阻塞工具栏）。
- *
- * uri 中的 `{key}` 占位符以 contextVars 替换（渲染上下文变量由宿主提供）。
- */
-function FieldsUriResolver({
-  uri,
-  declaration,
-  Component,
-  injected,
-}: {
-  uri: string
-  declaration: WidgetDeclaration
-  Component: WidgetComponent
-  injected?: Record<string, unknown>
-}) {
-  const [fields, setFields] = useState<unknown[] | null>(null)
-  useEffect(() => {
-    let alive = true
-    apiClient
-      .get(uri)
-      .then((resp) => {
-        if (!alive) return
-        const data = resp.data as { fields?: unknown } | unknown[] | null
-        const f = Array.isArray(data) ? data : data?.fields
-        setFields(Array.isArray(f) ? f : [])
-      })
-      .catch((err: unknown) => {
-        // best-effort 降级为不渲染该声明；留痕区分“端点故障”与“未配置”
-        console.warn('[DeclaredWidgetLayer] fieldsUri 拉取失败（不渲染该声明）:', uri, err)
-        if (alive) setFields([])
-      })
-    return () => {
-      alive = false
-    }
-  }, [uri])
-
-  if (fields === null || fields.length === 0) return null
-  const { fieldsUri: _consumed, ...restProps } = declaration.props as Record<string, unknown>
-  return (
-    <ResolvedItem
-      declaration={{ ...declaration, props: { ...restProps, fields } }}
-      Component={Component}
-      injected={injected}
-    />
-  )
-}
-
-/** fieldsUri 占位符替换：{key} → contextVars[key]（缺失替换为空串） */
-function substituteVars(uri: string, vars?: Record<string, string>): string {
-  if (!vars) return uri
-  return uri.replace(/\{(\w+)\}/g, (_, key: string) => vars[key] ?? '')
-}
-
 export function DeclaredWidgetLayer({
   space,
   declarations,
@@ -253,9 +326,15 @@ export function DeclaredWidgetLayer({
   overrideProps,
   contextVars,
   className,
+  layout = 'stack',
 }: DeclaredWidgetLayerProps): ReactNode {
+  // 注册表是非响应式单例：订阅变更版本号，装载/清空（GrowthLoop 迟到装载、
+  // schema_updated 幂等重载）后重读 getAllWidgets——不订阅则挂载早于装载时
+  // memo 永远持有空解析，声明 widget 永不出现（pack17 真机回归实证）
+  const widgetStoreVersion = useSyncExternalStore(subscribeRegistry, getRegistryVersion)
   // 读取移入 useMemo：getAllWidgets() 每次返回新数组引用，放内部避免记忆化失效
   const { resolved, unresolved, fallbackResolved } = useMemo(() => {
+    void widgetStoreVersion
     let source = declarations ?? contributionRegistry.getAllWidgets()
     // select-option 合并在全量声明上做（先于 space/槽位过滤）——槽位式渲染
     // （如 thinking_strength）同样能吃到插件追加的选项
@@ -274,7 +353,7 @@ export function DeclaredWidgetLayer({
       unresolved: result.unresolved,
       fallbackResolved: result.resolved.filter((r) => r.viaFallback),
     }
-  }, [declarations, space, slotId, excludeIds])
+  }, [declarations, space, slotId, excludeIds, widgetStoreVersion])
 
   // 副作用与渲染分离（StrictMode 下渲染体副作用会双调）：
   // 未解析与降级命中都是断链早期信号，集中诊断输出
@@ -313,7 +392,7 @@ export function DeclaredWidgetLayer({
 
   return (
     <div
-      className={cn('flex flex-col gap-1', className)}
+      className={cn(layout === 'grid' ? GRID_CONTAINER_CLASS : 'flex flex-col gap-1', className)}
       data-testid="declared-widget-layer"
       data-space={space}
       data-slot={slotId}
@@ -330,6 +409,7 @@ export function DeclaredWidgetLayer({
               declaration={declaration}
               Component={component}
               injected={overrideProps?.(declaration)}
+              gridCell={layout === 'grid' ? GRID_COMPACT_TYPES.has(declaration.type) : undefined}
             />
           )
         }
@@ -339,6 +419,7 @@ export function DeclaredWidgetLayer({
             declaration={declaration}
             Component={component}
             injected={overrideProps?.(declaration)}
+            gridCell={layout === 'grid' ? GRID_COMPACT_TYPES.has(declaration.type) : undefined}
           />
         )
       })}

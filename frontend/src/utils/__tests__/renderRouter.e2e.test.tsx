@@ -8,7 +8,7 @@
  *   → GrowthLoop loadRenderIntents 装载
  *   → enhanceActivityWithToolConfig 声明路由 → ActivityCard form 块渲染
  *
- * 与 dsh_adapter 的 render 先例同构（dsh_read → read 卡），此处验证主工具链。
+ * 与插件 render 声明先例同构（tool → read 卡），此处验证主工具链。
  */
 import { render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -42,7 +42,7 @@ function makeToolCall(tool: string, args: Record<string, unknown>, resultData: R
 describe('声明路由 e2e：task_submit → form 卡（任务表单渲染提交参数与任务情况）', () => {
   it('schema 装载插件 render 声明 → 卡片表单展示目标/执行者/验收标准/任务ID/状态', () => {
     // 模拟 GrowthLoop：schema.tools 携带 task_submit 的 render 声明（与
-    // plugins/shared/tools/task_submit/plugin.json 一致）
+    // plugins/shared/task_submit/plugin.json 一致）
     loadRenderIntents([
       { name: 'task_submit', render: { card: 'form', title: '任务提交' } },
     ])

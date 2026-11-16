@@ -18,6 +18,7 @@
 //! - 静态函数 `output_schema_error` / `provides_methods_unbacked` 与注册闸**共用
 //!   同一份**（一份逻辑，杜绝双份漂移，方案 §1.8）。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use agentos_core::traits::{PluginManifest, PluginType};
@@ -31,6 +32,25 @@ struct CheckReport {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     errors: Vec<String>,
     checks: Vec<String>,
+}
+
+/// 服务声明闭包检查（T5.4）的语料级结果。
+///
+/// `ran=false` = 检查器不可用（仓外语料/无 python/检查器 fail-closed）——
+/// 跳过不阻塞（运行时 router 对账仍兜底）；`violations` 按 `plugin=<目录>`
+/// 归因（检查器违规行的机器可读键）。
+struct CorpusScan {
+    ran: bool,
+    violations: HashMap<String, Vec<String>>,
+}
+
+impl CorpusScan {
+    fn skipped() -> Self {
+        Self {
+            ran: false,
+            violations: HashMap::new(),
+        }
+    }
 }
 
 fn main() {
@@ -63,7 +83,10 @@ fn main() {
                      --deny        任一插件有错 → 退出码 1（CI 用）\n\
                      \n\
                      覆盖检查：必填字段 / entry（非 composite） / native 产物存在性 /\n\
-                     \x20          tools output_schema 声明合法性 / provides 未注册方法"
+                     \x20          tools output_schema 声明合法性 / provides 未注册方法 /\n\
+                     \x20          服务声明闭包（委托 scripts/check_service_declarations.py，\n\
+                     \x20          检查器不可用时跳过）/ 工具 schema 契约（委托\n\
+                     \x20          scripts/check_tool_schema_contracts.py，同款跳过语义）"
                 );
                 std::process::exit(0);
             }
@@ -78,9 +101,9 @@ fn main() {
     }
 
     // 收集待校验的 manifest 文件（--root 扫描）
-    if let Some(root_dir) = root {
+    if let Some(ref root_dir) = root {
         if manifests.is_empty() {
-            collect_manifests(&root_dir, &mut manifests);
+            collect_manifests(root_dir, &mut manifests);
         } else {
             eprintln!("--root 与显式 manifest 路径不能混用");
             std::process::exit(2);
@@ -92,8 +115,53 @@ fn main() {
     }
 
     let mut reports: Vec<CheckReport> = Vec::new();
+    // 语料级契约检查（T5.4 安装期）：服务声明闭包 + 工具 schema 契约，各委托
+    // Python 检查器全仓扫一次，违规按插件归因合并分发（单子进程每检查器，
+    // 非逐插件重复扫）。任一 ran 时每个报告都有该侧结论行（零违规也是结论）；
+    // 未 ran 的侧整体跳过。
+    let svc = contract_checker_scan(
+        SERVICE_DECL_CHECKER,
+        "AGENTOS_SERVICE_DECL_CHECKER",
+        root.as_deref(),
+        manifests.first(),
+    );
+    let tool_schema = contract_checker_scan(
+        TOOL_SCHEMA_CONTRACT_CHECKER,
+        "AGENTOS_TOOL_SCHEMA_CONTRACT_CHECKER",
+        root.as_deref(),
+        manifests.first(),
+    );
+    let mut corpus_violations = svc.violations.clone();
+    for (plugin, lines) in &tool_schema.violations {
+        corpus_violations
+            .entry(plugin.clone())
+            .or_default()
+            .extend(lines.clone());
+    }
+    let corpus_ran = svc.ran || tool_schema.ran;
     for path in &manifests {
-        reports.push(check_one(path));
+        let dir_key = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned());
+        let viol: Option<&[String]> = if corpus_ran {
+            Some(
+                dir_key
+                    .as_deref()
+                    .and_then(|k| corpus_violations.get(k))
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]),
+            )
+        } else {
+            None
+        };
+        reports.push(check_one(path, viol));
+    }
+    if !svc.ran {
+        eprintln!("提示: 服务声明闭包检查跳过（检查器或 python 不可用；运行时对账兜底）");
+    }
+    if !tool_schema.ran {
+        eprintln!("提示: 工具 schema 契约检查跳过（检查器或 python 不可用；CI 闸执法）");
     }
 
     if json {
@@ -151,8 +219,105 @@ fn collect_manifests(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// 语料级契约检查器定位锚名（仓根相对）：服务声明闭包 + 工具 schema 契约。
+const SERVICE_DECL_CHECKER: &str = "scripts/check_service_declarations.py";
+const TOOL_SCHEMA_CONTRACT_CHECKER: &str = "scripts/check_tool_schema_contracts.py";
+
+/// 全仓语料跑一次语料级契约检查器，违规按 `plugin=<目录>` 归因。
+///
+/// 检查器定位：`AGENTOS_<NAME>_CHECKER` 环境变量优先，否则从扫描根
+/// （--root 或首个 manifest 的祖先）向上找仓根 `scripts/` 锚。python 按
+/// `python` → `python3` 解析。任何基建缺位 → skipped（不阻塞其他检查）；
+/// 检查器 exit 2（fail-closed）同样降级为跳过并留痕——CI 静态闸直跑检查器，
+/// fail-closed 在那层执法。
+fn contract_checker_scan(
+    checker_relpath: &str,
+    env_override: &str,
+    root: Option<&Path>,
+    any_manifest: Option<&PathBuf>,
+) -> CorpusScan {
+    let anchor_root = root
+        .map(Path::to_path_buf)
+        .or_else(|| any_manifest.map(|p| p.parent().unwrap_or(p).to_path_buf()));
+    let Some(start) = anchor_root else {
+        return CorpusScan::skipped();
+    };
+    let checker: PathBuf = match std::env::var(env_override) {
+        Ok(v) if !v.is_empty() => PathBuf::from(v),
+        _ => {
+            let mut found = None;
+            let mut cur = Some(start.as_path());
+            while let Some(dir) = cur {
+                let candidate = dir.join(checker_relpath);
+                if candidate.is_file() {
+                    found = Some(candidate);
+                    break;
+                }
+                cur = dir.parent();
+            }
+            match found {
+                Some(c) => c,
+                None => return CorpusScan::skipped(),
+            }
+        }
+    };
+    let Some(mut cmd) = python_command() else {
+        return CorpusScan::skipped();
+    };
+    cmd.arg(&checker);
+    if let Some(root_dir) = root {
+        cmd.arg("--scan-root").arg(root_dir);
+    }
+    let output = match cmd.output() {
+        Ok(o) => o,
+        Err(_) => return CorpusScan::skipped(),
+    };
+    if output.status.code() == Some(2) {
+        // 检查器 fail-closed（内建表残缺/manifest 不可解析）——CI 闸层执法，此处留痕跳过
+        eprintln!("提示: 服务声明检查器 fail-closed（exit 2），本工具跳过该检查");
+        return CorpusScan::skipped();
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut violations: HashMap<String, Vec<String>> = HashMap::new();
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("VIOLATION: plugin=") else {
+            continue;
+        };
+        let (plugin, _tail) = rest.split_once(' ').unwrap_or((rest, ""));
+        if plugin.is_empty() {
+            continue;
+        }
+        violations
+            .entry(plugin.to_string())
+            .or_default()
+            .push(line.to_string());
+    }
+    CorpusScan {
+        ran: true,
+        violations,
+    }
+}
+
+/// 解析 python 解释器（`python` → `python3` 回落）；都不可用返回 None。
+fn python_command() -> Option<std::process::Command> {
+    for exe in ["python", "python3"] {
+        let mut cmd = std::process::Command::new(exe);
+        cmd.env("PYTHONIOENCODING", "utf-8");
+        // 探活：--version 快速失败即换下一个候选
+        if cmd.arg("--version").output().is_ok() {
+            cmd = std::process::Command::new(exe);
+            cmd.env("PYTHONIOENCODING", "utf-8");
+            return Some(cmd);
+        }
+    }
+    None
+}
+
 /// 对单个 manifest 文件跑静态校验，产出契约报告。
-fn check_one(manifest_path: &Path) -> CheckReport {
+///
+/// `service_violations` = T5.4 服务声明闭包检查器归因到本插件的违规行
+/// （None = 检查器未运行，跳过不阻塞）。
+fn check_one(manifest_path: &Path, service_violations: Option<&[String]>) -> CheckReport {
     let content = match std::fs::read_to_string(manifest_path) {
         Ok(c) => c,
         Err(e) => {
@@ -262,6 +427,19 @@ fn check_one(manifest_path: &Path) -> CheckReport {
         ));
     }
 
+    // 5. 服务声明闭包（T5.4 安装期，资源注册收敛方案 §二 第二层）：
+    // 调用点 ⊆ requires_services ∪ KERNEL_PROVIDED_SERVICES——检查器
+    // （scripts/check_service_declarations.py）归因到本插件的违规行逐条入 errors。
+    if let Some(viol) = service_violations {
+        if viol.is_empty() {
+            checks.push(
+                "服务声明闭包：调用点 ⊆ requires_services ∪ 内建表（检查器 0 违规）".to_string(),
+            );
+        } else {
+            errors.extend(viol.iter().cloned());
+        }
+    }
+
     // 生成排序稳定的 checks/errors（确定性输出）
     checks.sort();
     errors.sort();
@@ -301,7 +479,7 @@ mod tests {
                 "capabilities":{"tools":[{"name":"t1","description":"t1"}]}
             }"#,
         );
-        let r = check_one(&p);
+        let r = check_one(&p, None);
         assert!(r.valid, "期望通过: {:?}", r.errors);
         assert!(!r.checks.is_empty());
         assert_eq!(r.plugin_id, "p_ok");
@@ -321,7 +499,7 @@ mod tests {
                 "error_policy_legacy":"retry"
             }"#,
         );
-        let r = check_one(&p);
+        let r = check_one(&p, None);
         assert!(!r.valid, "未知字段应拒载: {:?}", r.checks);
         assert!(
             r.errors
@@ -348,7 +526,7 @@ mod tests {
                 }]}
             }"#,
         );
-        let r = check_one(&p);
+        let r = check_one(&p, None);
         assert!(!r.valid);
         assert!(
             r.errors.iter().any(|e| e.contains("output_schema")),
@@ -370,7 +548,7 @@ mod tests {
                 "entry":""
             }"#,
         );
-        let r = check_one(&p);
+        let r = check_one(&p, None);
         assert!(!r.valid);
         assert!(
             r.errors.iter().any(|e| e.contains("entry 为空")),
@@ -393,12 +571,43 @@ mod tests {
                 "provides":{"capabilities":[{"name":"ghost_svc","methods":["run"]}]}
             }"#,
         );
-        let r = check_one(&p);
+        let r = check_one(&p, None);
         assert!(!r.valid);
         assert!(
             r.errors.iter().any(|e| e.contains("provides")),
             "{:?}",
             r.errors
         );
+    }
+
+    #[test]
+    fn service_declaration_violations_injected() {
+        // T5.4 安装期闭包：检查器归因到本插件的违规行逐条入 errors →
+        // --deny 语义（任一 error 即 invalid）覆盖服务声明面。
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_manifest(
+            dir.path(),
+            "p_svc",
+            r#"{
+                "id":"p_svc","name":"p_svc","version":"1.0.0",
+                "plugin_type":"tool","language":"python","host_type":"sidecar",
+                "entry":"python server.py",
+                "capabilities":{"tools":[{"name":"t1","description":"t1"}]}
+            }"#,
+        );
+        let clean = check_one(&p, Some(&[]));
+        assert!(clean.valid, "0 违规不应红: {:?}", clean.errors);
+        assert!(
+            clean.checks.iter().any(|c| c.contains("服务声明闭包")),
+            "应有闭包通过 check 行: {:?}",
+            clean.checks
+        );
+        let viol = vec![
+            "VIOLATION: plugin=p_svc file=shared/p_svc/server.py:1 调用未声明能力 `ghost`"
+                .to_string(),
+        ];
+        let bad = check_one(&p, Some(&viol));
+        assert!(!bad.valid, "归因违规应红: {:?}", bad.errors);
+        assert_eq!(bad.errors, viol);
     }
 }

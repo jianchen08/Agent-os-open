@@ -31,6 +31,7 @@ vi.mock('@/services/api/pipelines', async (importOriginal) => ({
 fetchStatesMock.mockImplementation(() => new Promise(() => {}))
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { useChatInputStore } from '@/stores/chatInputStore'
 import { renderWithProviders as render } from '@/test/renderWithProviders'
 import { ChatInput } from '../ChatInput'
 
@@ -79,7 +80,7 @@ const ThinkingStrengthStub = (props: Record<string, unknown>) => {
   )
 }
 
-function registerThinkingSlot(fields?: Array<Record<string, unknown>>) {
+function registerThinkingSlot() {
   widgetRegistry.register('test_thinking_stub', ThinkingStrengthStub, {
     name: 'test_thinking_stub',
     supportedSpaces: ['chat', 'workspace'],
@@ -90,30 +91,13 @@ function registerThinkingSlot(fields?: Array<Record<string, unknown>>) {
         id: 'pipeline_llm_core',
         ui_schema: {
           widgets: [
-            {
-              id: 'thinking_strength',
-              type: 'test_thinking_stub',
-              space: 'chat-input',
-              ...(fields ? { props: { fields } } : {}),
-            },
+            { id: 'thinking_strength', type: 'test_thinking_stub', space: 'chat-input' },
           ],
         },
       },
     ],
   } as never)
 }
-
-/** 与 thinking-levels 端点下发的 fields 形态同构（参数组选项） */
-const THINKING_FIELDS: Array<Record<string, unknown>> = [
-  {
-    name: 'strength',
-    type: 'select',
-    options: [
-      { value: '{"reasoning_effort":"max"}', label: 'reasoning_effort=max' },
-      { value: '{"thinking":{"type":"disabled"}}', label: 'thinking={"type":"disabled"}' },
-    ],
-  },
-]
 
 // 插件动作容器：模拟声明了多个动作，验证其可收缩且不挤出发送按钮
 vi.mock('../ChatInputActions', () => ({
@@ -147,7 +131,7 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
     vi.clearAllMocks()
     widgetRegistry.clear()
     contributionRegistry.clear()
-    registerThinkingSlot(THINKING_FIELDS)
+    registerThinkingSlot()
   })
 
   it('底部工具栏：左组可收缩（min-w-0 flex-1），发送按钮 shrink-0', () => {
@@ -192,17 +176,14 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
     expect(indicator.className).toContain('min-w-0')
   })
 
-  it.each([
-    ['思考参数组', '{"reasoning_effort":"max"}'],
-    ['关闭形态参数组（同一条透传路径，无档位特判）', '{"thinking":{"type":"disabled"}}'],
-  ])('发送消息携带思考选择：%s 原样透传', (_name, strength) => {
+  it('发送消息携带思考选择（参数组 JSON 串透传，不带 enableThinking）', () => {
     const onSendMessage = vi.fn()
     render(
       <ChatInput
         mode="full"
         onSendMessage={onSendMessage}
         modelName="deepseek-v3"
-        thinkingStrength={strength}
+        thinkingStrength="high"
       />,
     )
 
@@ -213,15 +194,21 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
     expect(onSendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         content: '你好',
-        thinkingStrength: strength,
+        thinkingStrength: 'high',
       }),
     )
+    // enableThinking 业务链已退役：思考覆盖只走参数组 thinkingStrength 通道
+    expect(onSendMessage.mock.calls[0][0]).not.toHaveProperty('enableThinking')
   })
 
-  it('未选择（thinkingStrength 缺省）→ 发送空串（后端不覆盖参数）', () => {
+  it('未选择（空串）→ 消息不带思考覆盖（thinkingStrength 随帧为空串）', () => {
     const onSendMessage = vi.fn()
     render(
-      <ChatInput mode="full" onSendMessage={onSendMessage} modelName="deepseek-v3" />,
+      <ChatInput
+        mode="full"
+        onSendMessage={onSendMessage}
+        modelName="deepseek-v3"
+      />,
     )
 
     fireEvent.change(screen.getByTestId('chat-input-textarea'), { target: { value: 'hi' } })
@@ -232,7 +219,7 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
     )
   })
 
-  it('回车发送：Enter（无 Shift）触发发送并清空输入', () => {
+  it('回车发送：Enter（无 Shift）触发发送；受理后输入保留（清空只在落定）', () => {
     const onSendMessage = vi.fn()
     render(
       <ChatInput
@@ -240,7 +227,7 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
         onSendMessage={onSendMessage}
         modelName="deepseek-v3"
         enableThinkingMode
-        thinkingStrength='{"reasoning_effort":"medium"}'
+        thinkingStrength="medium"
       />,
     )
 
@@ -249,10 +236,11 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
     fireEvent.keyDown(textarea, { key: 'Enter' })
 
     expect(onSendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ content: '回车发送' }),
+      expect.objectContaining({ content: '回车发送', thinkingStrength: 'medium' }),
     )
-    // 发送成功后清空输入（发送语义：消息已交出发送，输入框不留残文）
-    expect((textarea as HTMLTextAreaElement).value).toBe('')
+    // 2026-11-04 落定语义重定义：受理 = 发送态开始，清空由落定订阅回调按
+    // 快照比对执行（见 ChatInput.sendLifecycle.test.tsx），此处输入保留
+    expect((textarea as HTMLTextAreaElement).value).toBe('回车发送')
   })
 
   it('Shift+Enter 不发送（仅换行，onSendMessage 不被调用）', () => {
@@ -263,7 +251,7 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
         onSendMessage={onSendMessage}
         modelName="deepseek-v3"
         enableThinkingMode
-        thinkingStrength='{"reasoning_effort":"medium"}'
+        thinkingStrength="medium"
       />,
     )
 
@@ -283,13 +271,13 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
         onSendMessage={() => {}}
         modelName="deepseek-v3"
         enableThinkingMode
-        thinkingStrength='{"reasoning_effort":"medium"}'
+        thinkingStrength="medium"
         onThinkingStrengthChange={onThinkingStrengthChange}
       />,
     )
 
     const toggle = screen.getByTestId('mock-thinking-toggle')
-    expect(toggle).toHaveAttribute('data-strength', '{"reasoning_effort":"medium"}')
+    expect(toggle).toHaveAttribute('data-strength', 'medium')
     fireEvent.click(toggle)
     expect(onThinkingStrengthChange).toHaveBeenCalledWith('high')
   })
@@ -370,5 +358,43 @@ describe('ChatInput 底部工具栏 — 发送按钮不被挤出', () => {
 
     expect(screen.queryByTestId('chat-stop-button')).toBeNull()
     expect(screen.getByTestId('chat-send-button')).toBeDisabled()
+  })
+})
+
+describe('ChatInput 引用卡片行挂载位置（R6：输入框容器内顶部）', () => {
+  beforeEach(() => {
+    useChatInputStore.setState({ citationsByDraftKey: {}, drafts: {} })
+  })
+
+  it('卡片行与 textarea 同容器（输入框本体），且位于 textarea 之前', () => {
+    type AddInput = Parameters<ReturnType<typeof useChatInputStore.getState>['addCitation']>[1]
+    useChatInputStore.getState().addCitation('layout-cit-k', {
+      kind: 'message',
+      title: '用户',
+      excerpt: '被引用文字',
+      createdAt: 1710000000000,
+    } as AddInput)
+
+    render(
+      <ChatInput
+        mode="full"
+        onSendMessage={() => {}}
+        enableFileUpload
+        enableDragDrop
+        modelName="deepseek-v3"
+        draftKey="layout-cit-k"
+      />,
+    )
+
+    const row = screen.getByTestId('citation-card-row')
+    const textarea = screen.getByTestId('chat-input-textarea')
+    // 祖先关系：卡片行挂在输入框容器（bordered 容器，textarea+底部工具条一体）内部
+    const box = textarea.closest('[data-testid="chat-input-box"]')
+    expect(box).not.toBeNull()
+    expect((box as HTMLElement).contains(row)).toBe(true)
+    // 顺序：卡片行在 textarea 之前（容器内顶部，邮件客户端收件人 chips 形态）
+    expect(
+      row.compareDocumentPosition(textarea) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
   })
 })

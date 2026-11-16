@@ -17,6 +17,17 @@ chat 信封见 test_02 TestChatPipelineEngine 与 test_05。
 from e2e_helpers import http_get, http_get_with_auth
 
 
+def _kernel_workspace_version() -> str:
+    """内核版本真值：kernel/Cargo.toml 的 workspace.package version。"""
+    import re
+    from pathlib import Path
+
+    cargo = Path(__file__).resolve().parents[2] / "kernel" / "Cargo.toml"
+    m = re.search(r'^version = "([^"]+)"', cargo.read_text(encoding="utf-8"), re.M)
+    assert m is not None, "kernel/Cargo.toml 缺 workspace.package version"
+    return m.group(1)
+
+
 class TestKernelApiHealth:
     """1.1 健康检查端点。"""
 
@@ -31,10 +42,16 @@ class TestKernelApiHealth:
         assert isinstance(body, dict), f"响应应为 dict，实际 {type(body)}"
         assert body.get("status") == "ok", f"status 期望 'ok'，实际 '{body.get('status')}'"
 
-    def test_health_version_field_is_0_2_0(self, kernel_url):
-        """测试: /health 响应中 version 字段为 "0.2.0"。"""
+    def test_health_version_matches_workspace(self, kernel_url):
+        """测试: /health 的 version 与 kernel/Cargo.toml workspace.package 版本一致。
+
+        版本真值住 kernel/Cargo.toml（升版只改那里）——旧断言硬编码 0.2.0，
+        0.2.2 升版后恒红（2026-11-04 e2e 实测）。
+        """
         status, body, _ = http_get(f"{kernel_url}/health")
-        assert body.get("version") == "0.2.0", f"version 期望 '0.2.0'，实际 '{body.get('version')}'"
+        assert body.get("version") == _kernel_workspace_version(), (
+            f"version 期望 '{_kernel_workspace_version()}'，实际 '{body.get('version')}'"
+        )
 
     def test_health_has_timestamp_field(self, kernel_url):
         """测试: /health 响应包含 timestamp 字段且为字符串。"""

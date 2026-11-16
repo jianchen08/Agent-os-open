@@ -11,6 +11,7 @@ import { ArtifactPreviewWidget } from '@/components/schema/widgets/ArtifactPrevi
 import { ChartWidget } from '@/components/schema/widgets/ChartWidget'
 import { CodeBlockWidget } from '@/components/schema/widgets/CodeBlockWidget'
 import { ContextUsageWidget } from '@/components/schema/widgets/ContextUsageWidget'
+import { ModelSelectWidget } from '@/components/schema/widgets/ModelSelectWidget'
 import { DebugCenterHubWidget } from '@/components/schema/widgets/DebugCenterHubWidget'
 import { DigitalHumanWidget } from '@/components/schema/widgets/DigitalHumanWidget'
 import { EditorWidget } from '@/components/schema/widgets/EditorWidget'
@@ -50,6 +51,7 @@ import { LlmSettingsPage } from '@/pages/settings/LlmSettingsPage'
 import { contributionRegistry } from './ContributionRegistry'
 import { widgetRegistry } from './WidgetRegistry'
 import type { WidgetComponent } from './WidgetRegistry'
+import type { ContentCardDeclaration } from './contentCard'
 import type { Annotation } from '@/types/review'
 import type { RenderingSpaceType } from '@/types/schema'
 
@@ -168,6 +170,10 @@ const WIDGETS: WidgetEntry[] = [
   // 提取 track.llm_usage / llm_model。spaces 用 'chat'——chat-input 不是
   // RenderingSpaceType 枚举值（槽位语义靠声明 space 过滤，解析只按 type 查表）
   { name: 'context_usage', component: ContextUsageWidget, spaces: ['chat'] },
+  // 输入框模型选择器（chat-input 空间 model_id 槽位，llm_core 声明
+  // frame_field=model_id）：显式选择随 user_input 帧 model_id 字段透传，
+  // 内核单键 state overlay → llm_core 解析链首位（最高优先级覆盖管道配置）
+  { name: 'model_select', component: ModelSelectWidget, spaces: ['chat'] },
   // 模型设置（llm_service 插件声明 settings 页，原内核导航「模型」迁移而来）
   { name: 'llm_settings', component: LlmSettingsWidget, spaces: ['workspace'] },
   // 调试中心子页（debug_center 插件 space=debug_center 声明 → debug_center_hub 组台；
@@ -197,6 +203,33 @@ const WIDGETS: WidgetEntry[] = [
   // 四模式面板已退役（模式体系 §2 末 2026-09-15 用户裁定：面板=模式插件自带
   // webview 页，contributes.pages 声明 widget:'webview' 走上方内建注册，前端
   // 不再持有具名面板 widget）
+]
+
+/** 内置首选内容卡集（ADR §5，first-party 声明本体——与插件卡完全同一注册/
+ *  查询/裁决/渲染路径，渲染层零类型 if；显式缺省 order 让位，插件可声明同
+ *  fences 卡扩展/覆盖）。导出仅测试与文档面消费。 */
+export const FIRST_PARTY_CONTENT_CARDS: ContentCardDeclaration[] = [
+  {
+    id: 'html_preview',
+    title: '网页预览',
+    match: { fences: ['html', 'htm', 'xhtml'] },
+    form: 'webview',
+    pluginId: 'host',
+  },
+  {
+    id: 'csv_table',
+    title: '数据表格',
+    match: { fences: ['csv'] },
+    form: 'template',
+    template: '{{csv_table}}',
+    pluginId: 'host',
+    css:
+      '.agentos-content-card table { border-collapse: collapse; width: 100%; font-size: 13px; }' +
+      '.agentos-content-card th, .agentos-content-card td { border: 1px solid var(--border); padding: 4px 10px; text-align: left; }' +
+      // thead 淡底双声明：前句 var(--muted) 供无 color-mix 内核（WebView 110）
+      // 保底，后句 currentColor 6% 在支持内核按文字色着色并覆盖前句
+      '.agentos-content-card thead { background: var(--muted); background: color-mix(in srgb, currentColor 6%, transparent); }',
+  },
 ]
 
 /**
@@ -229,4 +262,8 @@ export function initializeWidgets(): void {
       order: 55,
     },
   ])
+
+  // 内置首选内容卡集（ADR 2026-10-14-content-card-registry §5，registerPresetWidgets
+  // 同款前端静态配置先例）：声明本体见 FIRST_PARTY_CONTENT_CARDS。
+  contributionRegistry.registerFirstPartyContentCards(FIRST_PARTY_CONTENT_CARDS)
 }

@@ -187,11 +187,58 @@ export function extractMessageId(eventData: any): string | null {
 }
 
 /** 统一启动管道流式状态 pipelineStore.streamingState 是唯一数据源。 */
+
+// ── 停止已请求护栏 ──
+// 用户点停（router.handleStopGenerate）后、内核取消链路收尾（round_finished/
+// stream_error）前到达的迟到 chunk 会经 ensureStreamingPlaceholder →
+// startPipelineStreaming 把生成态重新点亮（Stop 按钮复活、正文继续增长的
+// 「点了没反应」体感）。护栏按 (pipelineId, messageId) 存续：同消息的迟到
+// 事件仍压制生成态（内容照常追加，不做数据丢弃）；新一轮 stream_start
+// （不同 message_id）到达即解除；TTL 兜底防泄漏。
+const STOP_REQUEST_TTL_MS = 15_000
+const stopRequestedByPipeline = new Map<string, { messageId: string; at: number }>()
+
+/** 用户请求停止：登记护栏（router.handleStopGenerate 调用）。 */
+export function markStopRequested(pipelineId: string, messageId: string | null): void {
+  if (!pipelineId) return
+  stopRequestedByPipeline.set(pipelineId, { messageId: messageId || '', at: Date.now() })
+}
+
+/** 查询护栏：该消息的迟到事件是否应压制生成态重点亮。TTL 过期自动失效。 */
+export function isStopRequested(pipelineId: string, messageId?: string): boolean {
+  const mark = stopRequestedByPipeline.get(pipelineId)
+  if (!mark) return false
+  if (Date.now() - mark.at > STOP_REQUEST_TTL_MS) {
+    stopRequestedByPipeline.delete(pipelineId)
+    return false
+  }
+  // 空 messageId 登记（点停时本地尚无流式消息）→ 压制该管道一切迟到事件；
+  // 有 id → 仅压制同消息（新轮次不同 id 不受影响）。
+  return !mark.messageId || !messageId || mark.messageId === messageId
+}
+
+/** 新一轮 stream_start：与护栏登记的不是同一消息 → 内核已在新轮次跑，解除护栏。 */
+export function noteFreshStreamStart(pipelineId: string, messageId: string): void {
+  const mark = stopRequestedByPipeline.get(pipelineId)
+  if (!mark) return
+  if (!mark.messageId || mark.messageId !== messageId) {
+    stopRequestedByPipeline.delete(pipelineId)
+  }
+}
+
+/** run 收尾（pipeline_round_finished / stream_error）：护栏使命完成，清除。 */
+export function clearStopRequested(pipelineId: string): void {
+  stopRequestedByPipeline.delete(pipelineId)
+}
+
+/** 启动管道流式传输（带停止护栏检查：护栏命中则只落数据不点亮生成态）。 */
 export function startPipelineStreaming(
   pipelineId: string,
   messageId: string,
 ): void {
-  pipelineStore.getState().startStreaming(pipelineId, messageId)
+  if (!isStopRequested(pipelineId, messageId)) {
+    pipelineStore.getState().startStreaming(pipelineId, messageId)
+  }
 
   // 轮次级安全兜底：单个消息的流式若超过 90s 仍未结束（说明 stream_end/new_message
   // 事件漏接或与 pipeline 未对齐），强制收尾，避免 UI 永久卡在
@@ -230,6 +277,28 @@ export function stopPipelineStreaming(pipelineId: string): void {
   pipelineStore.getState().stopStreaming(pipelineId)
 }
 
+/** run 终态清扫：移除残留的空流式占位（无内容、无 parts）。
+ *  空轮次占位（init 等无产出轮）在 run 仍在流式时被 stream_end 保留
+ *  （「思考中」指示跨轮延续），run 终止后即成孤儿——run 级终止出口
+ *  （pipeline_round_finished / run_failed）在 terminatePipeline 之前调此函数。
+ *  必须先于 terminate：stopStreaming 会把 streamingState.messageId 命中的
+ *  消息标 interrupted（渲染「生成已中断」假象），空占位先移除才不会被标。
+ *  有内容/有 parts 的流式消息不在此列：断流残留由 stopStreaming 的
+ *  interrupted 语义与 90s 兜底管辖，清扫不得越界。 */
+export function sweepEmptyStreamingPlaceholders(pipelineId: string): void {
+  const store = pipelineStore.getState()
+  for (const msg of store.getMessages(pipelineId)) {
+    if (
+      msg.role === 'assistant' &&
+      msg.status === 'streaming' &&
+      (msg.content || '').length === 0 &&
+      (msg.parts || []).length === 0
+    ) {
+      store.removeMessage(pipelineId, msg.id)
+    }
+  }
+}
+
 // allocateNextSequence（本地拼 localMax+1）已废除：客户端
 // 不再为 store 消息伪造 sequence——事件未携带权威 seq 时挂空（compareMessages
 // 回落 timestamp 排序），权威值到达后由对账纠正。
@@ -254,29 +323,35 @@ export function ensureStreamingPlaceholder(
   if (existing.some((m) => m.id === messageId)) return
 
   // orphan 清理：本轮 start 之前残留的 streaming assistant（上一轮 stream_end
-  // 丢失/断线遗留）。有完整内容 → completed 保留；有未解析 tool_call 或完全
-  // 无内容 → 移除（后端权威内容由对账补回）。
+  // 丢失/断线遗留）。有完整内容或未解析 tool_call → completed 保留；完全无内容
+  // → 移除（后端权威内容由对账补回）。
+  //
+  // 未解析 tool_call 的消息**绝不删除**（2026-10-29 跨轮残影根因）：工具事件
+  // 契约 message_id「晚一轮」（见 toolHandler 归并注释），迟到 tool_result 要靠
+  // 声明卡的 callId 归并回上一轮；消息被删后 findToolCallMessageId 找不到，
+  // FIXUP 会把工具卡建到下一轮气泡里。保留正文与声明卡，未完成卡按中断语义
+  // 标 error（迟到结果仍会覆盖为终态），跨轮归属不漂移。
   for (const msg of existing) {
     if (msg.role === 'assistant' && msg.status === 'streaming' && msg.id !== messageId) {
       const parts = msg.parts || []
       const hasTextContent = (msg.content || '').length > 0
-      const unresolvedToolCalls = parts.some(
-        (p: any) => p.type === 'tool_call' && (p.state === 'calling' || p.state === 'streaming')
-      )
-      const resolvedParts = parts.filter(
-        (p: any) => p.type !== 'tool_call' || (p.state !== 'calling' && p.state !== 'streaming')
-      )
-
-      if (unresolvedToolCalls) {
-        store.removeMessage(pipelineId, msg.id)
-      } else if (hasTextContent || resolvedParts.length > 0) {
-        const finalizedParts = resolvedParts.map((p: any) => {
-          if (p.type === 'tool_call') return { ...p, state: 'done' as const }
-          if (p.type === 'text' || p.type === 'thinking') {
-            return (p as any).state === 'streaming' ? { ...p, state: 'done' as const } : p
+      const finalizedParts = parts.map((p: any) => {
+        if (p.type === 'tool_call') {
+          const partState = (p as { state?: string }).state
+          // 未解析卡（仍在飞）→ error：让位给下一轮即视为中断；迟到结果覆盖
+          // 为终态。已解析卡保持原终态。
+          if (partState === 'calling' || partState === 'streaming') {
+            return { ...p, state: 'error' as const }
           }
           return p
-        })
+        }
+        if ((p.type === 'text' || p.type === 'thinking') && (p as any).state === 'streaming') {
+          return { ...p, state: 'done' as const }
+        }
+        return p
+      })
+
+      if (hasTextContent || finalizedParts.length > 0) {
         store.updateMessage(pipelineId, msg.id, {
           status: 'completed',
           parts: finalizedParts.length > 0 ? finalizedParts : undefined,

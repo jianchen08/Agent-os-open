@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- API 27+：刘海/挖孔屏窗口铺进 cutout 区（shortEdges），消除侧向黑边；
+         系统栏遮挡避让由前端顶栏消费 insets CSS 变量承担（MainActivity 注入
+         safe-inset 变量），WebView 不打 padding（全屏沉浸）。
+         属性仅 API 27+ 存在，按 -v27 资源目录隔离（minSdk 24）。 -->
+    <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:background">@drawable/splash</item>
+    </style>
+</resources>

@@ -25,13 +25,11 @@ FULL_PREFIXES = ("kernel/", ".github/workflows/", "scripts/")
 FULL_FILES = ("rust-toolchain.toml",)
 
 # 核心面：管道插件承载执行循环、SDK 是插件契约底座、依赖锁影响全部车道。
-PYTHON_CORE_PREFIXES = ("plugins/sdk/", "plugins/shared/pipeline/")
+PYTHON_CORE_PREFIXES = ("plugins/sdk/", "plugins/shared/")
 PYTHON_CORE_FILES = ("pyproject.toml", "uv.lock")
 
 # 非核心面：叶子能力插件与配置/测试/技能/MCP 清单 → 关联测试车道。
 RELATED_PREFIXES = (
-    "plugins/shared/system/",
-    "plugins/shared/tools/",
     "mcp-servers/",
     "skills/",
     "config/",
@@ -47,6 +45,14 @@ ELECTRON_FILES = ("package.json", "package-lock.json")
 
 ENDPOINTS_PREFIXES = ("plugins/", "frontend/src/")
 ENDPOINTS_FILES = ("scripts/check_frontend_endpoints_sync.py",)
+
+# 移动端面：Capacitor 安卓壳与同步引擎（打包触发面 = build:sync/APK 链）。
+MOBILE_PREFIXES = ("app-mobile/",)
+MOBILE_FILES = ()
+
+# 部署面：Linux 服务器部署实物（systemd/nginx/发布管线脚本）。
+DEPLOY_PREFIXES = ("deploy/",)
+DEPLOY_FILES = ()
 
 # 文档面：仅此类文件变更时重车道全跳（pre-commit 恒跑，md 格式防线不缩水）。
 DOC_SUFFIXES = (".md",)
@@ -84,6 +90,8 @@ def compute_lanes(files: list[str]) -> dict[str, bool]:
     full = _hits(files, FULL_PREFIXES, FULL_FILES)
     python_core = _hits(files, PYTHON_CORE_PREFIXES, PYTHON_CORE_FILES)
     related_sources = _hits(files, RELATED_PREFIXES, RELATED_FILES) or any(_is_root_ops_script(f) for f in files)
+    mobile = _hits(files, MOBILE_PREFIXES, MOBILE_FILES)
+    deploy = _hits(files, DEPLOY_PREFIXES, DEPLOY_FILES)
     return {
         "full": full,
         "python_full": full or python_core,
@@ -91,6 +99,8 @@ def compute_lanes(files: list[str]) -> dict[str, bool]:
         "frontend": _hits(files, FRONTEND_PREFIXES, FRONTEND_FILES),
         "electron": _hits(files, ELECTRON_PREFIXES, ELECTRON_FILES),
         "endpoints": _hits(files, ENDPOINTS_PREFIXES, ENDPOINTS_FILES),
+        "mobile": mobile,
+        "deploy": deploy,
         "docs_only": bool(files) and all(_is_doc(f) for f in files),
     }
 

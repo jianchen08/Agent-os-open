@@ -26,7 +26,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_TOOLS_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools"
+_TOOLS_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared"
 _RESOURCE_MERGE_DIR = _TOOLS_DIR / "resource_merge"
 
 if str(_RESOURCE_MERGE_DIR) not in sys.path:

@@ -1,0 +1,405 @@
+{
+  "id": "ecosystem_import",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Ecosystem Import",
+  "description": "外部 Agent 生态导入：Codex 与 Claude Code 插件清单翻译成 IR + 技能落地用户根 + 来源/版本/许可证治理。MCP 默认只报告；ecosystem_apply 加 apply_mcp=true 时把非 OAuth 条目合并进当前配置根（OAuth 条目需授权能力，暂不写）。",
+  "version": "1.2.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "metrics_class": "tool",
+    "tools": [
+      {
+        "name": "ecosystem_translate",
+        "description": "把外部 Agent 插件目录（Codex，或 Claude Code 三形态：插件目录/市场条目/裸技能目录）翻译成 IR 摘要：插件身份/技能清单/MCP 事实位/agents 与 commands 与 hooks 事实摘要/许可证闸门结论与 license_file 事实位。只读，不写任何文件。MCP 服务器只报告事实位与安装提示——安装由 ecosystem_apply 的 apply_mcp=true 完成。",
+        "render": {
+          "card": "generic",
+          "title": "外部生态翻译"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "source_dir": {
+              "type": "string",
+              "description": "外部插件目录绝对路径（Codex：含 .codex-plugin/plugin.json；Claude Code：插件目录/市场根/裸技能根，形态自动识别）"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "codex",
+                "claude_code"
+              ],
+              "default": "codex",
+              "description": "来源生态类型：codex=Codex 插件；claude_code=Claude Code（三形态自动识别）"
+            },
+            "entry": {
+              "type": "string",
+              "description": "Claude Code 市场条目名（仅形态 2 使用；缺省取第一条）"
+            }
+          },
+          "required": [
+            "source_dir"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "kind",
+            "source_dir",
+            "plugin",
+            "skills",
+            "mcp_servers",
+            "apps",
+            "agents",
+            "commands",
+            "hooks",
+            "license_file",
+            "license_gate",
+            "notes"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "description": "来源生态类型"
+            },
+            "source_dir": {
+              "type": "string",
+              "description": "源插件目录绝对路径"
+            },
+            "plugin": {
+              "type": "object",
+              "description": "插件身份（声明面原文）",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "author": {
+                  "type": "string"
+                },
+                "license": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "skills": {
+              "type": "array",
+              "description": "技能清单（SKILL.md frontmatter 真值；skill_id 缺失回落目录名）",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "skill_id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "mcp_servers": {
+              "type": "array",
+              "description": "MCP 服务器事实位（不含 url/command/凭据）",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "transport": {
+                    "type": "string",
+                    "description": "http 或 stdio"
+                  },
+                  "requires_oauth": {
+                    "type": "boolean",
+                    "description": "是否含 OAuth 块（本仓不支持 OAuth，需先解决鉴权）"
+                  }
+                }
+              }
+            },
+            "apps": {
+              "type": "array",
+              "description": "宿主托管应用指针（不可移植，本批不导入）",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "app_id": {
+                    "type": "string"
+                  },
+                  "portable": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            },
+            "agents": {
+              "type": "array",
+              "description": "子代理事实摘要（Claude Code agents/；本批不导入，不得成为可落地技能）",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "tools_count": {
+                    "type": "integer"
+                  }
+                }
+              }
+            },
+            "commands": {
+              "type": "array",
+              "description": "命令事实摘要（Claude Code commands/；本批不导入）",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "hooks": {
+              "type": "object",
+              "description": "钩子声明事实（是否声明 + 事件名清单；本批不导入）",
+              "properties": {
+                "declared": {
+                  "type": "boolean"
+                },
+                "events": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "license_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "源目录或所属仓库根发现的许可证文件名（事实位，不自动采用）"
+            },
+            "license_gate": {
+              "type": "object",
+              "description": "许可证闸门结论",
+              "properties": {
+                "allowed": {
+                  "type": "boolean"
+                },
+                "license": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reason": {
+                  "type": "string"
+                }
+              }
+            },
+            "notes": {
+              "type": "array",
+              "description": "人工/后续动作提示（如 MCP 需经 apply_mcp 安装）",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "ecosystem_apply",
+        "description": "把外部插件的技能整目录落地到用户根 skills/ 并登记来源/版本/许可证/commit。支持 Codex 与 Claude Code（三形态）。治理闸门 fail-closed：许可证、内容审查、技能 id 安全、同名存在任一不过即整批拒且零写入；未声明许可证可显式经 allow_undeclared_license 放行并留痕（已知排除的许可证不受该开关影响）。apply_mcp=true 时同刀把源 .mcp.json 的非 OAuth 服务器条目合并进当前配置根（同名以源为准、其余保留），OAuth 条目跳过并如实上报；实际写入的服务器名记入溯源登记册 mcp_written。",
+        "render": {
+          "card": "generic",
+          "title": "外部生态落地"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "source_dir": {
+              "type": "string",
+              "description": "外部插件目录绝对路径（Codex：含 .codex-plugin/plugin.json；Claude Code：插件目录/市场根/裸技能根，形态自动识别）"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "codex",
+                "claude_code"
+              ],
+              "default": "codex",
+              "description": "来源生态类型：codex=Codex 插件；claude_code=Claude Code（三形态自动识别）"
+            },
+            "entry": {
+              "type": "string",
+              "description": "Claude Code 市场条目名（仅形态 2 使用；缺省取第一条）"
+            },
+            "force": {
+              "type": "boolean",
+              "default": false,
+              "description": "覆盖同名已落地技能（默认 false：目标已存在即拒，不静默覆盖）"
+            },
+            "on_skill_reject": {
+              "type": "string",
+              "enum": [
+                "abort",
+                "skip"
+              ],
+              "default": "abort",
+              "description": "批内技能闸门失败策略：abort=任一技能失败即整批拒、零写入（默认）；skip=跳过该技能并如实上报，其余照常落地（显式选择）"
+            },
+            "allow_undeclared_license": {
+              "type": "boolean",
+              "default": false,
+              "description": "显式放行未声明许可证（默认 false 拒收）；只覆盖「缺席」，已知且被清单排除的许可证（如 Proprietary）照旧拒收"
+            },
+            "apply_mcp": {
+              "type": "boolean",
+              "default": false,
+              "description": "显式写 MCP 配置（默认 false 只报事实位）：true 时把源非 OAuth 服务器条目合并进当前配置根的 mcpServers（同名以源为准、其余条目保留；现值文件不可解析或缺 mcpServers 对象即拒写）；OAuth 条目本机暂无授权能力，跳过并如实上报"
+            }
+          },
+          "required": [
+            "source_dir"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "plugin",
+            "skills_written",
+            "skills_rejected",
+            "provenance_path",
+            "license_override",
+            "mcp"
+          ],
+          "properties": {
+            "plugin": {
+              "type": "object",
+              "description": "被导入插件身份",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                },
+                "license": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "skills_written": {
+              "type": "array",
+              "description": "逐条写入路径（用户根 skills/<skill_id>）",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "skill_id": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "provenance_path": {
+              "type": "string",
+              "description": "溯源登记册路径（<user_root>/ecosystem_imports.json）"
+            },
+            "license_override": {
+              "type": "boolean",
+              "description": "本次导入是否以显式开关放行了未声明许可证（用了开关才为 true，留痕）"
+            },
+            "skills_rejected": {
+              "type": "array",
+              "description": "被拒技能（skip 模式非空；abort 模式整批失败走失败信封，此处为空）",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "skill_id": {
+                    "type": "string"
+                  },
+                  "error_code": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "mcp": {
+              "type": "object",
+              "description": "MCP 写面结果（apply_mcp=true 时的写入与跳过；只带名字/transport/原因，不含凭据与端点）",
+              "properties": {
+                "written": {
+                  "type": "array",
+                  "description": "已写入配置根的服务器条目",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "transport": {
+                        "type": "string",
+                        "description": "http 或 stdio"
+                      }
+                    }
+                  }
+                },
+                "skipped": {
+                  "type": "array",
+                  "description": "未写入的服务器条目（如 OAuth 授权能力缺失）",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "reason": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    ],
+    "lifecycle_hooks": []
+  },
+  "permissions": {},
+  "priority": 30,
+  "host_group": "light"
+}

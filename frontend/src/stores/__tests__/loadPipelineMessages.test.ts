@@ -1,3 +1,4 @@
+// @feature: FP-T12 前端适配（loadPipelineMessages 管道消息装载） | @ci: frontend-test
 /**
  * loadPipelineMessages 统一加载入口测试
  *
@@ -543,5 +544,47 @@ describe('fetchMessages 同管道请求取消', () => {
     await promiseA
     expect(store.getMessages(PIPELINE_ID).map((m) => m.id)).toEqual(['a1'])
     expect(store.getMessages(PIPELINE_B).map((m) => m.id)).toEqual(['b1'])
+  })
+})
+
+describe('加载失败态标记（X1-F1）', () => {
+  let usePipelineMessageStore: pipelineMessageStoreMod.usePipelineMessageStore
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    vi.resetModules()
+    const mod = await import('@/stores/pipelineMessageStore')
+    usePipelineMessageStore = mod.usePipelineMessageStore
+    usePipelineMessageStore = await resetPipelineStoreState({ pipelineSessionMap: { [PIPELINE_ID]: THREAD_ID } })
+  })
+
+  it('加载成功后清除该管道的失败标记（会话切换失败态的自然清除点）', async () => {
+    const store = registeredStore(usePipelineMessageStore, 'idle')
+    // 前次会话切换失败留下的标记
+    usePipelineMessageStore.setState({
+      loadErrorByPipeline: { [PIPELINE_ID]: true },
+    })
+    setApiRecords(baseApiRecords())
+
+    const result = await store.loadPipelineMessages(PIPELINE_ID, { threadId: THREAD_ID })
+
+    expect(result.ok).toBe(true)
+    expect(usePipelineMessageStore.getState().loadErrorByPipeline[PIPELINE_ID]).toBeFalsy()
+  })
+
+  it('加载失败时失败标记保持不动（等下次成功或重试清除，本入口不背通知策略）', async () => {
+    const store = registeredStore(usePipelineMessageStore, 'idle')
+    usePipelineMessageStore.setState({
+      loadErrorByPipeline: { [PIPELINE_ID]: true },
+    })
+    const apiError = Object.assign(new Error('服务器错误'), {
+      response: { status: 500 },
+    })
+    mockGet.mockRejectedValue(apiError)
+
+    const result = await store.loadPipelineMessages(PIPELINE_ID, { threadId: THREAD_ID })
+
+    expect(result.ok).toBe(false)
+    expect(usePipelineMessageStore.getState().loadErrorByPipeline[PIPELINE_ID]).toBe(true)
   })
 })

@@ -171,6 +171,78 @@ impl KernelCounters {
     }
 }
 
+// ── crate 自采静态计数器的 flush 桥（卡9：监控面补采）──────────────────────
+
+/// 三条 crate 自采静态计数器在聚合器侧的 metric 名（plugin="kernel" 命名空间）。
+///
+/// inc 点不在本 crate 持有的 AtomicCounter（那些走 [`KernelCounters::flush_to`]），
+/// 而是各 crate 的进程级静态（mcp `sidecar_stdout_eof_total` /
+/// api `plugin_watcher::{g2_tools_list_observe_fail_total, tools_list_malformed_total}`，
+/// 采样源形态同 mcp `reverse_call_levels` 先例）。flush 桥把 cumulative → delta
+/// 换算后以 counter 类型写入聚合器，语义与 [`KernelCounters::flush_to`] 一致。
+pub const CRATE_STATIC_COUNTER_NAMES: [&str; 3] = [
+    "mcp.sidecar_stdout_eof_total",
+    "mcp.tools_list_observe_fail_total",
+    "mcp.tools_list_malformed_total",
+];
+
+/// crate 静态计数器 flush 的 cumulative 游标（main flush 循环持一个实例）。
+#[derive(Debug, Default)]
+pub struct CrateStaticCounterFlush {
+    last_eof: u64,
+    last_observe_fail: u64,
+    last_malformed: u64,
+}
+
+/// 单条 cumulative 计数器的 delta 入账：跳变（value > last）才 record，
+/// 停走/回退（进程重启致 cumulative 归零）不产生样本。counter 类型入账语义
+/// 同 [`KernelCounters::flush_to`]（聚合器桶内累加 delta → 窗口求和 = 窗口增量）。
+fn record_counter_delta(aggregator: &MetricsAggregator, name: &str, value: u64, last: &mut u64) {
+    let delta = value.saturating_sub(*last);
+    *last = value;
+    if delta == 0 {
+        return;
+    }
+    aggregator.record(
+        "kernel",
+        name,
+        MetricType::Counter,
+        delta as f64,
+        &Labels::new(),
+        None,
+        None,
+    );
+}
+
+impl CrateStaticCounterFlush {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 采样三条静态计数器，把各自增量以 counter 类型写入聚合器
+    /// （plugin="kernel"；delta 语义同 [`KernelCounters::flush_to`]）。
+    pub fn flush(&mut self, aggregator: &MetricsAggregator) {
+        record_counter_delta(
+            aggregator,
+            CRATE_STATIC_COUNTER_NAMES[0],
+            agentos_mcp::sidecar_stdout_eof_total(),
+            &mut self.last_eof,
+        );
+        record_counter_delta(
+            aggregator,
+            CRATE_STATIC_COUNTER_NAMES[1],
+            crate::plugin_watcher::g2_tools_list_observe_fail_total(),
+            &mut self.last_observe_fail,
+        );
+        record_counter_delta(
+            aggregator,
+            CRATE_STATIC_COUNTER_NAMES[2],
+            crate::plugin_watcher::tools_list_malformed_total(),
+            &mut self.last_malformed,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +286,68 @@ mod tests {
         let _c2 = kc.register_counter("b", Labels::new());
         let _c3 = kc.register_counter("c", Labels::new());
         assert_eq!(kc.snapshot().len(), 3);
+    }
+
+    /// 卡9 flush 桥·跳变计数（合成值驱动，不触进程级静态——静态被并行测试
+    /// 共享，直接驱动会有竞态假红）：cumulative 跳变入账 delta，停走不入账，
+    /// 回退（进程重启归零）不入账；多次跳变入账之和 = 总增量。
+    #[test]
+    fn record_counter_delta_records_jumps_and_skips_plateau_and_rollback() {
+        let agg = MetricsAggregator::new();
+        let name = "mcp.sidecar_stdout_eof_total";
+        let latest = |agg: &MetricsAggregator| {
+            agg.query(Some("kernel"), Some(name), None, &Labels::new())
+                .first()
+                .and_then(|v| v.latest)
+                .unwrap_or(0.0)
+        };
+        let mut last: u64 = 0;
+        // 跳变 0→5：入账 5
+        record_counter_delta(&agg, name, 5, &mut last);
+        assert_eq!(last, 5);
+        assert_eq!(latest(&agg), 5.0);
+        // 停走（5→5）：delta 0 不入账，latest 不变
+        record_counter_delta(&agg, name, 5, &mut last);
+        assert_eq!(latest(&agg), 5.0);
+        // 再跳变 5→8：入账 3 → 桶内累加 latest=8（= 总增量，cumulative 语义）
+        record_counter_delta(&agg, name, 8, &mut last);
+        assert_eq!(latest(&agg), 8.0);
+        // 回退（8→2，进程重启归零后再涨）：saturating 不入账负 delta
+        record_counter_delta(&agg, name, 2, &mut last);
+        assert_eq!(last, 2, "游标随采样值推进（下轮从新基线算 delta）");
+        assert_eq!(latest(&agg), 8.0, "回退不得入账负增量");
+        // 回退后再创新高（2→4）：正常入账 delta 2 → latest=10
+        record_counter_delta(&agg, name, 4, &mut last);
+        assert_eq!(latest(&agg), 10.0);
+    }
+
+    /// 卡9 flush 桥·多实例分键：三条计数器名是聚合器中三个独立 series，
+    /// 同一 flush 状态机分别追踪各自的 last 游标（互不串值）。
+    #[test]
+    fn crate_static_counter_names_form_distinct_series() {
+        let agg = MetricsAggregator::new();
+        let mut last_eof: u64 = 0;
+        let mut last_fail: u64 = 0;
+        let mut last_malformed: u64 = 0;
+        // 三键各入不同增量
+        record_counter_delta(&agg, CRATE_STATIC_COUNTER_NAMES[0], 3, &mut last_eof);
+        record_counter_delta(&agg, CRATE_STATIC_COUNTER_NAMES[1], 1, &mut last_fail);
+        record_counter_delta(&agg, CRATE_STATIC_COUNTER_NAMES[2], 7, &mut last_malformed);
+        for (name, want) in [
+            (CRATE_STATIC_COUNTER_NAMES[0], 3.0),
+            (CRATE_STATIC_COUNTER_NAMES[1], 1.0),
+            (CRATE_STATIC_COUNTER_NAMES[2], 7.0),
+        ] {
+            let views = agg.query(Some("kernel"), Some(name), None, &Labels::new());
+            assert_eq!(views.len(), 1, "{name} 应恰一条 series");
+            assert_eq!(views[0].name, name, "分键不串：{name}");
+            assert_eq!(views[0].latest, Some(want), "{name} 增量独立入账");
+        }
+        let all = agg.query(Some("kernel"), None, None, &Labels::new());
+        assert!(
+            all.len() >= 3,
+            "kernel 命名空间至少含三条卡9 计数器 series，实测 {}",
+            all.len()
+        );
     }
 }

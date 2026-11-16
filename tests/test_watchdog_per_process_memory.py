@@ -1,3 +1,4 @@
+# @feature: FP-0.2.内核内存治理 单进程 RSS 维度看门狗 | @ci: python-coverage
 """看门狗单进程内存维度测试(真实进程)。
 
 核心保障验证:一个进程自己吃内存到阈值(不是等整个系统快满),
@@ -19,13 +20,17 @@ from pathlib import Path
 
 import pytest
 
-# 0.2 架构：bash 工具位于 plugins/shared/tools/bash（平铺 import）。
-_BASH_DIR = str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "tools" / "bash")
+# 0.2 架构：bash 工具位于 plugins/shared/bash（平铺 import）。
+_BASH_DIR = str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "bash")
 if _BASH_DIR not in sys.path:
     sys.path.insert(0, _BASH_DIR)
 
-from bash_types import ProcessInfo, WorkUnit  # noqa: E402
-from process_manager import LocalProcessBackend, ProcessManager  # noqa: E402
+from agentos_plugin_sdk.process_runtime import (  # noqa: E402  # noqa: E402
+    LocalProcessBackend,
+    ProcessInfo,
+    ProcessManager,
+    WorkUnit,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -135,6 +140,11 @@ async def test_watchdog_no_kill_when_per_unit_memory_under_threshold():
     class Backend(LocalProcessBackend):
         async def kill(self, unit, force=True):
             killed_pids.append(unit.pid)
+
+        async def sample_memory(self) -> float:
+            # 水位观测隔离:固定低水位(<0.85 触发线),使本用例结论只取决于
+            # 单进程判据(50MB < 160MB 不杀),与宿主真实内存水位无关
+            return 0.40
 
     backend = Backend()
     pm._memory_backend = backend

@@ -1,3 +1,4 @@
+// @feature: FP-0.2.〇 管道主循环(A1 粘滞改写/看门狗) | @ci: rust-test
 //! # 配置驱动的管道执行器（Pipeline Executor）
 //!
 //! 0.2 引擎的"解释执行器"职责实现（ADR ⑥）：读 `PipelineConfig`，按 `steps` 顺序执行，
@@ -30,17 +31,18 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use agentos_hooks::{EventTarget, HookEventBus, LifecycleEvent};
 
-use agentos_core::traits::{PluginInvoker, StorageBackend};
+use agentos_core::traits::{PluginInvoker, StorageBackend, STEP_CALL_TIMEOUT_CODE};
 use agentos_core::types::{
     ContentLoader, EngineError, PluginContext, PluginError, PluginResult, RouteNext, TenantContext,
 };
 
 use crate::compiler::{
-    CompiledBody, CompiledItem, CompiledPipeline, CompiledRoute, CompiledStep, HookScope,
+    CheckAction, CheckTrigger, CompiledBody, CompiledCheck, CompiledItem, CompiledPipeline,
+    CompiledRoute, CompiledStep,
 };
 use crate::condition::eval_expr;
 use crate::template::{render_template, render_value};
@@ -56,6 +58,34 @@ const PERSIST_RETRY_BACKOFF_MS: &[u64] = &[100, 300];
 /// 而非只靠长期 running 异常扫描。内核自有 per-run 键（VOLATILE_RUN_KEYS
 /// 剥离集内）——只做观测面，不进 checkpoint、不回流下一轮 state。
 const TERMINAL_PERSIST_FAILED_KEY: &str = "terminal_persist_failed";
+
+/// 单次插件调用超时兜底缺省（秒）：`invoke_pipeline_plugin` 单次 invoke 在
+/// 配置/预算两档全部缺席时的唯一上界（冻结根因根修——缺省档恒在场，无界
+/// 单次调用即根因本身）。取值依据：与 LLM 插件自身超时缺省对齐
+/// （llm/_config_models.py：stream_idle_timeout 缺省 600s、非流式
+/// call_timeout 缺省 300s）——健康调用（LLM 流式/工具/sidecar 冷启动）自有
+/// 超时先于本值退路，本值只捕捉插件进程级挂死（自身超时机制失灵，装机
+/// 2026-10-15 实证形态）。出口：state `plugin_call_timeout_seconds`。
+/// run 墙钟预算内的 await 包装（超时看门狗执法点，见 [`PipelineExecutor::run_budget_remaining`]）：
+/// 预算在场 → `timeout_seconds` 剩余量包界该 await，到点署名终态化并展开为
+/// `None`（冻结的等待被放弃，run 按既有收尾路径折算 failed）；无预算 → 直通
+/// （`Some(输出)`，行为与旧版一致）。调用方对 `None` 短路（break/return）。
+/// 三段借用顺序化（预算读取共享借用 → future 可变借用 → 署名可变借用）故以
+/// 宏文本展开参数化，不能写成函数（future 与 state 的借用无法同时作实参）。
+macro_rules! budget_await {
+    ($self:expr, $run_started:expr, $state:expr, $fut:expr) => {
+        match $self.run_budget_remaining($run_started, $state) {
+            Some(remaining) => match ::tokio::time::timeout(remaining, $fut).await {
+                Ok(value) => Some(value),
+                Err(_elapsed) => {
+                    $self.force_timeout_signature($state);
+                    None
+                }
+            },
+            None => Some($fut.await),
+        }
+    };
+}
 
 /// 配置驱动的管道执行器。
 ///
@@ -96,12 +126,17 @@ pub struct PipelineExecutor {
     /// 与 ops_ledger 同边界清空/消费，替代 step 前 state 全量克隆算 diff
     /// （内核内 state 只借用不克隆；克隆仅存在于内核→进程边界的序列化点）。
     step_key_journal: parking_lot::Mutex<HashMap<String, Option<serde_json::Value>>>,
-    /// 并行 for-each 迭代局部的延迟 messages ops（ADR 2026-10-02）：迭代内不
-    /// apply——seq 分配/内存数组/落库/实录/记账全由父循环按迭代序统一一次 apply。
+    /// 并行 for-each 迭代局部的延迟 messages ops（内容移植自
+    /// sync/open-main-20261008 c2db32c26）：迭代内不 apply——seq 分配/内存
+    /// 数组/落库/实录/记账全由父循环按迭代序统一一次 apply。
     deferred_ops: parking_lot::Mutex<Vec<serde_json::Value>>,
     /// 并行迭代深度（0 = 顶层执行器；>0 = for-each 迭代执行器）：迭代内跳过
     /// step 轨迹/checkpoint/投影（父 step 收尾统一落，轨迹颗粒度=配置 step）。
     iteration_depth: u8,
+    /// 监控 M2 分类声明（K2 声明化）：plugin_id → `capabilities.metrics_class`
+    /// 声明解析结果。未注入/未声明 id 按 `Other` 计（编排类插件不计
+    /// LLM/tool 指标）。
+    metrics_classes: HashMap<String, PluginMetricsClass>,
     /// 声明了 `on_pipeline_end` 生命周期钩子的插件 id（manifest 收集）。
     ///
     /// run 结束时逐个 best-effort 分发 [`LifecycleHook::OnPipelineEnd`]（HookContext
@@ -113,6 +148,16 @@ pub struct PipelineExecutor {
     round_events: Option<Arc<dyn crate::round_events::RoundEvents>>,
     /// 轮次序号（per-run 从 1 递增，fetch_add 后取 1 基）。
     round_counter: AtomicI64,
+    /// checks 触发纪元计数器（钩子收敛终局）：check 动作 `run:<步>` 每触发
+    /// 一次 +1，触发步轨迹身份 = 模板步 id + 触发纪元（`"<步id>#<纪元>"`，
+    /// 多次触发多条目不混叠，设计 §4.3 State 单一写面纪律①）。
+    check_epoch: AtomicI64,
+    /// state_delta 键级事件待消费队列（state 写路径发射，观察通知不携带
+    /// 控制权）：journal_top_key 落点发射（窗口首触即记，含写前旧值），由
+    /// 步边界 checks 分发消费——state 触发的 check 只消费命中键的事件
+    /// （触发一次执行一次）。并行迭代执行器换新队列（迭代写面经父归并的
+    /// journal 落点回到父队列，见 [`Self::merge_iteration`]）。
+    pending_state_deltas: parking_lot::Mutex<Vec<StateDeltaEvent>>,
     /// 生命周期事件总线（观察路径）：run 开始/结束广播 OnPipelineStart/OnPipelineEnd
     /// 给审计/指标等订阅者。None = 零开销（未接线不发射）。
     hook_bus: Option<Arc<HookEventBus>>,
@@ -120,6 +165,52 @@ pub struct PipelineExecutor {
     /// 检查插件持续失败时的引擎层兜底，超限按 fail-closed 终止 run。0 = 非法
     /// 配置（run 入口报错拒绝）；缺省 [`DEFAULT_MAX_ROUNDS`]。
     max_rounds: usize,
+    /// run 起始锚点（tokio 单调时钟，`run_compiled` 入口写入——与看门狗的
+    /// `run_started` 同一 Instant 值，单一写入点无漂移）：单次调用超时的预算
+    /// 档读这里（`invoke_plugin` 深在调用链下游，不持 `run_started` 参数）。
+    /// None = 非 run 上下文（预算档缺席）；迭代执行器经 clone_for_iteration 继承。
+    run_anchor: parking_lot::Mutex<Option<tokio::time::Instant>>,
+}
+
+/// state_delta 键级事件（state 写路径发射点 = journal_top_key 落点，设计
+/// §4.3 引擎侧 P1 升级③）。仅通知不携带控制权：事件入待消费队列，由步边界
+/// checks 分发消费（state 触发的 check 命中键即触发）；`new` 不在发射点取——
+/// 窗口内多次写以消费时点的当前值为准（与轨迹 diff 的窗口语义一致）。
+#[derive(Debug, Clone)]
+struct StateDeltaEvent {
+    /// 被写的顶层键。
+    key: String,
+    /// 写前旧值（窗口首触实录；None = 新增键）。
+    old: Option<serde_json::Value>,
+}
+
+/// checks 分发边界（`execute_steps` 的步前/步后触发点）。
+#[derive(Debug, Clone, Copy)]
+enum CheckBoundary<'a> {
+    /// 步执行前（`pre:<步 id>`）。
+    Pre(&'a str),
+    /// 步执行后（`post:<步 id>`）。
+    Post(&'a str),
+}
+
+impl CheckBoundary<'_> {
+    /// 是否匹配编译触达（pre/post 精确匹配步 id；state 触发不按边界匹配，
+    /// 由 pending 事件命中判定）。
+    fn matches(&self, trigger: &CheckTrigger) -> bool {
+        match (self, trigger) {
+            (CheckBoundary::Pre(step), CheckTrigger::Pre(id)) => step == id,
+            (CheckBoundary::Post(step), CheckTrigger::Post(id)) => step == id,
+            _ => false,
+        }
+    }
+}
+
+/// check 动作的流控后果（分发返回给 `execute_steps` 消费）。
+enum CheckDivert {
+    /// `route:<步>` 声明式转移：跳到本循环体指定步（跳数护栏调用方计）。
+    Jump(String),
+    /// `terminate`：已置 `ended=true`，当前循环体立即短路。
+    Halted,
 }
 
 impl PipelineExecutor {
@@ -149,6 +240,7 @@ impl PipelineExecutor {
             run_id: run_id.into(),
             metrics: Arc::new(crate::metrics::EngineMetrics::new()),
             persistent_fields: HashSet::new(),
+            metrics_classes: HashMap::new(),
             steps_since_checkpoint: AtomicI64::new(0),
             total_step_no: AtomicI64::new(0),
             ops_ledger: parking_lot::Mutex::new(Vec::new()),
@@ -158,8 +250,11 @@ impl PipelineExecutor {
             pipeline_end_hooks: Vec::new(),
             round_events: None,
             round_counter: AtomicI64::new(0),
+            check_epoch: AtomicI64::new(0),
+            pending_state_deltas: parking_lot::Mutex::new(Vec::new()),
             hook_bus: None,
             max_rounds: DEFAULT_MAX_ROUNDS,
+            run_anchor: parking_lot::Mutex::new(None),
         }
     }
 
@@ -221,6 +316,29 @@ impl PipelineExecutor {
         self
     }
 
+    /// 监控 M2（K2 声明化）：注入插件 manifest `capabilities.metrics_class`
+    /// 声明（`(plugin_id, 声明值)` 对）。生产侧从全部插件 manifest 收集；
+    /// 不调用为空表（全部按 `Other` 计）。非法声明值 warn 后按未声明处理
+    /// （`Other`）——指标少计是可观测债务，不构成行为故障。
+    pub fn with_metrics_classes(
+        mut self,
+        declarations: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        for (plugin_id, declared) in declarations {
+            match PluginMetricsClass::from_declared(&declared) {
+                Some(class) => {
+                    self.metrics_classes.insert(plugin_id, class);
+                }
+                None => warn!(
+                    plugin = %plugin_id,
+                    declared = %declared,
+                    "capabilities.metrics_class 非法声明值，按 Other 计（合法值：llm/tool）"
+                ),
+            }
+        }
+        self
+    }
+
     /// 监控 M2：暴露计数器句柄（聚合器周期性 snapshot）。
     pub fn metrics(&self) -> &Arc<crate::metrics::EngineMetrics> {
         &self.metrics
@@ -245,14 +363,34 @@ impl PipelineExecutor {
     ) -> Result<serde_json::Value, EngineError> {
         // 监控 M2：pipeline 执行次数 + 耗时（监控设计 §三 通道1）
         let run_start = std::time::Instant::now();
+        // 超时看门狗锚点（tokio 单调时钟；paused-clock 测试经 advance 注入可调
+        // 延迟）：`timeout_seconds` 预算自 run 起始计（stop_check 同一契约：
+        // 单次 run 执行 ≤ timeout_seconds），每执法点现读剩余量。
+        let run_started = tokio::time::Instant::now();
+        // 单次调用超时的预算档同锚（见 run_anchor 字段文档）：与看门狗同一
+        // Instant 值复制，invoke_plugin 深层不持参数也能读剩余预算。
+        *self.run_anchor.lock() = Some(run_started);
         // 轮数硬上限非法值检查（fail-closed）：0 = 无限轮，拒绝执行。
         if self.max_rounds == 0 {
             return Err(EngineError::Config {
                 message: "max_rounds=0 非法（0 = 无限轮已被禁用；须为正整数）".to_string(),
             });
         }
+        // 请求路径整组并行 respawn（Phase 3 #1）：run 到达即并行拉起管道链
+        // 全部 sidecar 宿主并等就绪，后续步骤命中暖宿主——替代 idle GC 回收
+        // 后逐槽串行懒 respawn 级联（首调税 19.6s/76% 主因，Phase0 基线台账
+        // §八）。附加式 trait 方法默认 no-op；单宿主拉起失败只告警（步骤执行
+        // 期懒 spawn 兜底，既有语义）；空引用集零开销。
+        let referenced: Vec<String> = compiled.referenced_plugin_ids().into_iter().collect();
+        if !referenced.is_empty() {
+            self.invoker.ensure_hosts_ready(&referenced).await;
+        }
         let mut state = initial_state;
         ensure_object(&mut state);
+        // run 触发消息锚点（轮边界注入前捕获）：轮边界注入会把队列 user 消息
+        // append 到触发消息之后，round_end 的 user 认领回传必须仍指向触发
+        // 消息（前端乐观气泡按其 cmid 认领）——注入发生前在此定格。
+        let triggering_user = last_role(&state, "user");
         // 窗口账残留清零：跨轮复用 executor 时，上一轮死于窗口之间（Err 提前
         // 返回）的未冲洗 journal/实录不得混入本轮 run_init 轨迹。
         self.step_key_journal.lock().clear();
@@ -285,100 +423,116 @@ impl PipelineExecutor {
         self.persist_run_start(&mut state, &compiled.config_hash)
             .await;
 
+        // run 起手 sweep 前代流式占位行（ADR 2026-11-06-round-entry-slot-placeholder
+        // 决策6）：上一进程/上一 run 死在出口之前的占位行（blob status=streaming、
+        // run_id≠当前 run）在此收口——三空删行、有内容标 interrupted（内容保全，
+        // 2026-11-04 消息出口权）。best-effort：失败 warn 不阻断 run，残留行由
+        // 下一轮 run 起手重试收口。
+        let sweep_pipeline = state
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !sweep_pipeline.is_empty() {
+            match self
+                .store
+                .sweep_stale_streaming_slots(
+                    &sweep_pipeline,
+                    &self.default_tenant.tenant_id,
+                    &self.run_id,
+                )
+                .await
+            {
+                Ok(summary) => {
+                    if summary.deleted_empty + summary.marked_interrupted > 0 {
+                        info!(
+                            run_id = %self.run_id,
+                            pipeline = %sweep_pipeline,
+                            deleted_empty = summary.deleted_empty,
+                            marked_interrupted = summary.marked_interrupted,
+                            "run 起手 sweep 已收口前代流式占位行"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        run_id = %self.run_id,
+                        pipeline = %sweep_pipeline,
+                        error = %e,
+                        "前代流式占位行 sweep 失败（残留行待下轮 run 收口，继续执行）"
+                    );
+                }
+            }
+        }
+
+        // 首 token 前取消收口（缺陷A，台账 R1 ④immediate）：stop_generation 在
+        // run 建行前到达时，dispatch_stop 落管道级 pending_cancel 标记——run
+        // 创建起手在此消费：置 ended + user_requested 署名，循环体零执行直接
+        // 收尾（终态映射 → Cancelled）。取消在任何时点都必须生效，禁静默吞。
+        // 消费失败按未取消继续（best-effort，与 llm 起手检查同口径）。
+        let pending_cancel_pipeline = state
+            .get("pipeline_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !pending_cancel_pipeline.is_empty() {
+            match self
+                .store
+                .consume_pending_cancel(&pending_cancel_pipeline, &self.default_tenant.tenant_id)
+                .await
+            {
+                Ok(true) => {
+                    info!(
+                        run_id = %self.run_id,
+                        pipeline = %pending_cancel_pipeline,
+                        "run 起手检出待取消标记（stop 先于 run 建行到达）：取消生效，零执行收尾"
+                    );
+                    self.journal_top_key(&state, "ended");
+                    set_key(&mut state, "ended", serde_json::Value::Bool(true));
+                    self.journal_top_key(&state, "router.stop_reason");
+                    set_key(
+                        &mut state,
+                        "router.stop_reason",
+                        serde_json::json!("user_requested"),
+                    );
+                }
+                Ok(false) => {}
+                Err(e) => warn!(
+                    run_id = %self.run_id,
+                    pipeline = %pending_cancel_pipeline,
+                    error = %e,
+                    "待取消标记消费失败（按未取消继续）"
+                ),
+            }
+        }
+
         // 观察路径：run 开始广播 OnPipelineStart（审计/`lifecycle.pipeline_start_total`）。
         self.emit_pipeline_lifecycle(agentos_core::traits::LifecycleHook::OnPipelineStart, &state)
             .await;
 
         // ── 多循环体执行 ──
-        // 转移死循环防护：Phase 跳转/循环体数上限的乘积保险。
-        let max_guard = compiled.bodies.len().saturating_mul(4).max(16);
         // 轮数硬上限计数（per-run：全部循环体的 while 轮累计）。
         let mut rounds_used: usize = 0;
-        let mut idx: usize = 0;
-        let mut guard: usize = 0;
-        while idx < compiled.bodies.len() {
-            if guard > max_guard {
-                return Err(EngineError::Other {
-                    message: format!("循环体转移次数超限（{guard} 次，疑似 Phase 转移死循环）"),
-                });
-            }
-            let body = &compiled.bodies[idx];
-            // 挂起：整个管道等待恢复，不再推进任何循环体
-            if truthy_flag(&state, "suspended") {
-                break;
-            }
-            // 插件可读 state["current_phase"] 按循环体分发（如 workspace_lifecycle）
-            self.journal_top_key(&state, "current_phase");
-            set_key(&mut state, "current_phase", serde_json::json!(body.id));
-            // 体入口窗口：current_phase 切换进轨迹（凡 state 变更必可追溯）。
-            self.append_window_trace("body_enter", &state).await?;
-            // 收尾语义：管道已 ended 时，run_on_error 循环体仍照常执行（忽略 ended）
-            let ignore_ended = truthy_flag(&state, "ended") && body.run_on_error;
-            let iterations = self
-                .execute_body(body, &mut state, compiled, ignore_ended, &mut rounds_used)
-                .await?;
-            // 监控 M2：迭代轮数（仅 loop 模式计，按循环体累计）
-            if iterations > 0 {
-                self.metrics.inc_iterations(iterations as u64);
-            }
-
-            // ── 循环体间转移决策 ──
-            // 优先级：step 级路由设置的 next_phase > 本循环体 exit_routes > 顺序推进
-            let mut jump: Option<usize> = None;
-            let mut stop = false;
-            if let Some(id) = state
-                .get("next_phase")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-            {
-                // 消费一次性的 next_phase（不残留到 checkpoint/state）；消费删除
-                // 亦是变更，journal 定格旧值供 body_route 窗口记 null 标记。
-                self.journal_top_key(&state, "next_phase");
-                if let Some(obj) = state.as_object_mut() {
-                    obj.remove("next_phase");
-                }
-                match compiled.body_index(&id) {
-                    Some(i) => jump = Some(i),
-                    None => {
-                        return Err(EngineError::Other {
-                            message: format!("路由转移到不存在的循环体: {id}"),
-                        })
-                    }
-                }
-            } else if !body.exit_routes.is_empty() && !truthy_flag(&state, "suspended") {
-                if let Some(matched) = self.apply_routes(&body.exit_routes, &mut state) {
-                    // apply_routes 的 Phase 分支会写 state.next_phase；此处已消费
-                    // 返回值完成转移，立即移除，防止残留导致下一循环体结束时复跳。
-                    // 消费删除同样 journal 定格（body_route 窗口记 null 标记）。
-                    self.journal_top_key(&state, "next_phase");
-                    if let Some(obj) = state.as_object_mut() {
-                        obj.remove("next_phase");
-                    }
-                    match matched {
-                        RouteNext::Phase(id) => match compiled.body_index(&id) {
-                            Some(i) => jump = Some(i),
-                            None => {
-                                return Err(EngineError::Other {
-                                    message: format!("exit_routes 指向不存在的循环体: {id}"),
-                                })
-                            }
-                        },
-                        // End / Wait：终止推进（Wait 已在 apply_routes 置 suspended）
-                        RouteNext::End | RouteNext::Wait => stop = true,
-                        // Loop / Step：循环体级无意义，忽略走默认顺序推进
-                        _ => {}
-                    }
-                }
-            }
-            // 体间转移窗口：exit_routes 写入（apply_routes 内部首触实录）、
-            // next_phase 消费删除、execute_body 轮边界的 should_stop→ended 折算
-            // 统一在此落轨迹（此前体间变更不落任何轨迹）。
-            self.append_window_trace("body_route", &state).await?;
-            if stop {
-                break;
-            }
-            idx = jump.unwrap_or(idx + 1);
-            guard += 1;
+        // Err 终局同刀（孤儿工具卡合成）：循环体推进 Err（步骤护栏/路由死循环/
+        // 轮数上限/轨迹落库耗尽）时 run 以 Err 上抛、api 层标 failed——上抛前
+        // 先为在途 tool_calls 合成终态结果消息，error 终局与 interrupted 同刀
+        // 恢复 tool_calls/tool 配对。
+        if let Err(err) = self
+            .advance_bodies(
+                compiled,
+                &mut state,
+                &mut rounds_used,
+                run_started,
+                triggering_user,
+            )
+            .await
+        {
+            self.synthesize_orphan_tool_results(
+                &mut state,
+                &agentos_core::types::RunStatus::Failed,
+            )
+            .await;
+            return Err(err);
         }
 
         // 监控 M2：pipeline 执行累计耗时
@@ -391,7 +545,28 @@ impl PipelineExecutor {
         // （suspended/ended/router.stop_reason）经终态映射单点折算成 run_status
         // 写回 state——checkpoint / registry 快照 / runs 表三处同词汇同源，
         // 可观测性只读这一个字段。
+        // 异常终局闸（凡异常终止必须显式报错）：无署名终局带异常特征时先
+        // 署名失败词，再进终态映射——落库/轨迹/域事件三处同源折算 Failed。
+        if let Some(reason) = abnormal_end_signature(&state) {
+            error!(
+                pipeline = %compiled.name,
+                run_id = state.get("run_id").and_then(|v| v.as_str()).unwrap_or("?"),
+                stop_reason = reason,
+                "run 异常终局：无署名收束仍带未消费工具调用或未裁决空回复耗尽（多为 post 路由漏配），署名失败词折算 Failed",
+            );
+            self.journal_top_key(&state, "router.stop_reason");
+            set_key(
+                &mut state,
+                "router.stop_reason",
+                serde_json::Value::String(reason.to_string()),
+            );
+        }
         let terminal = agentos_core::types::RunStatus::from_control_state(&state);
+        // 终局孤儿工具卡合成：interrupted/error 终局为在途 tool_calls 补终态
+        // 结果消息（completed 不合成；suspended 等待恢复在途合法不合成）。
+        // 置于 run_finalize 窗口前，合成 ops 随同窗轨迹落档（凡变更必可追溯）。
+        self.synthesize_orphan_tool_results(&mut state, &terminal)
+            .await;
         self.journal_top_key(&state, "run_status");
         if let Some(obj) = state.as_object_mut() {
             obj.insert("run_status".into(), serde_json::json!(terminal));
@@ -415,6 +590,115 @@ impl PipelineExecutor {
         Ok(state)
     }
 
+    /// 多循环体推进主循环（自 run() 迁出的纯代码移动，行为零变化）：
+    /// while 轮推进 + 循环体间转移决策。转移死循环防护：Phase 跳转/循环体数
+    /// 上限的乘积保险。Err 上抛由调用方（run()）做 Err 终局合成后转发。
+    async fn advance_bodies(
+        &self,
+        compiled: &CompiledPipeline,
+        state: &mut serde_json::Value,
+        rounds_used: &mut usize,
+        run_started: tokio::time::Instant,
+        triggering_user: Option<serde_json::Value>,
+    ) -> Result<(), EngineError> {
+        let max_guard = compiled.bodies.len().saturating_mul(4).max(16);
+        let mut idx: usize = 0;
+        let mut guard: usize = 0;
+        while idx < compiled.bodies.len() {
+            if guard > max_guard {
+                return Err(EngineError::Other {
+                    message: format!("循环体转移次数超限（{guard} 次，疑似 Phase 转移死循环）"),
+                });
+            }
+            let body = &compiled.bodies[idx];
+            // 挂起：整个管道等待恢复，不再推进任何循环体
+            if truthy_flag(state, "suspended") {
+                break;
+            }
+            // 插件可读 state["current_phase"] 按循环体分发（如 workspace_lifecycle）
+            self.journal_top_key(state, "current_phase");
+            set_key(state, "current_phase", serde_json::json!(body.id));
+            // 体入口窗口：current_phase 切换进轨迹（凡 state 变更必可追溯）。
+            self.append_window_trace("body_enter", state).await?;
+            // 收尾语义：管道已 ended 时，run_on_error 循环体仍照常执行（忽略 ended）
+            let ignore_ended = truthy_flag(state, "ended") && body.run_on_error;
+            let iterations = self
+                .execute_body(
+                    body,
+                    state,
+                    compiled,
+                    ignore_ended,
+                    rounds_used,
+                    run_started,
+                    triggering_user.clone(),
+                )
+                .await?;
+            // 监控 M2：迭代轮数（仅 loop 模式计，按循环体累计）
+            if iterations > 0 {
+                self.metrics.inc_iterations(iterations as u64);
+            }
+
+            // ── 循环体间转移决策 ──
+            // 优先级：step 级路由设置的 next_phase > 本循环体 exit_routes > 顺序推进
+            let mut jump: Option<usize> = None;
+            let mut stop = false;
+            if let Some(id) = state
+                .get("next_phase")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+            {
+                // 消费一次性的 next_phase（不残留到 checkpoint/state）；消费删除
+                // 亦是变更，journal 定格旧值供 body_route 窗口记 null 标记。
+                self.journal_top_key(state, "next_phase");
+                if let Some(obj) = state.as_object_mut() {
+                    obj.remove("next_phase");
+                }
+                match compiled.body_index(&id) {
+                    Some(i) => jump = Some(i),
+                    None => {
+                        return Err(EngineError::Other {
+                            message: format!("路由转移到不存在的循环体: {id}"),
+                        })
+                    }
+                }
+            } else if !body.exit_routes.is_empty() && !truthy_flag(state, "suspended") {
+                if let Some(matched) = self.apply_routes(&body.exit_routes, state) {
+                    // apply_routes 的 Phase 分支会写 state.next_phase；此处已消费
+                    // 返回值完成转移，立即移除，防止残留导致下一循环体结束时复跳。
+                    // 消费删除同样 journal 定格（body_route 窗口记 null 标记）。
+                    self.journal_top_key(state, "next_phase");
+                    if let Some(obj) = state.as_object_mut() {
+                        obj.remove("next_phase");
+                    }
+                    match matched {
+                        RouteNext::Phase(id) => match compiled.body_index(&id) {
+                            Some(i) => jump = Some(i),
+                            None => {
+                                return Err(EngineError::Other {
+                                    message: format!("exit_routes 指向不存在的循环体: {id}"),
+                                })
+                            }
+                        },
+                        // End / Wait：终止推进（Wait 已在 apply_routes 置 suspended）
+                        RouteNext::End | RouteNext::Wait => stop = true,
+                        // Loop / Step：循环体级无意义，忽略走默认顺序推进
+                        _ => {}
+                    }
+                }
+            }
+            // 体间转移窗口：exit_routes 写入（apply_routes 内部首触实录）、
+            // next_phase 消费删除、execute_body 轮边界的 should_stop→ended 折算
+            // 统一在此落轨迹（此前体间变更不落任何轨迹）。
+            self.append_window_trace("body_route", state).await?;
+            if stop {
+                break;
+            }
+            idx = jump.unwrap_or(idx + 1);
+            guard += 1;
+        }
+        Ok(())
+    }
+
     /// 执行单个循环体：按自身 `loop_config` 循环或单次执行 steps。
     ///
     /// `ignore_ended`：收尾语义（exit 体在 `ended=true` 下照常执行）；挂起
@@ -427,6 +711,11 @@ impl PipelineExecutor {
     /// `rounds_used`：per-run 已执行 while 轮累计（跨循环体共享），达
     /// `max_rounds` 时 fail-closed 报错——while 条件恒真且终止检查插件持续
     /// 失败（插件错误统一 warn+continue，不终止循环）时的引擎层兜底。
+    ///
+    /// `run_started`：超时看门狗锚点（run 起始单调时钟），经
+    /// [`Self::run_budget_remaining`] 对轮次等待（轮次开/收事件、step 执行）
+    /// 包界执法。
+    #[allow(clippy::too_many_arguments)]
     async fn execute_body(
         &self,
         body: &CompiledBody,
@@ -434,6 +723,8 @@ impl PipelineExecutor {
         compiled: &CompiledPipeline,
         ignore_ended: bool,
         rounds_used: &mut usize,
+        run_started: tokio::time::Instant,
+        triggering_user: Option<serde_json::Value>,
     ) -> Result<i32, EngineError> {
         let mut iteration: i32 = 0;
         // 打开轮（LLM 回合）生命周期：轮次 = 一次 LLM 调用 + 其后紧跟的工具迭代
@@ -498,25 +789,58 @@ impl PipelineExecutor {
                     } else {
                         // 异常形态（无打开轮却先跑工具迭代）：兜底开一轮（记录完整
                         // 性优先；正常 DSL 流不会走到此处）。
-                        self.round_start_event(state).await
+                        let Some(triple) =
+                            budget_await!(self, run_started, state, self.round_start_event(state))
+                        else {
+                            break;
+                        };
+                        triple
                     }
                 } else {
-                    self.round_start_event(state).await
+                    // 待输入队列轮边界注入（设计真值
+                    // docs/working/待输入队列轮边界注入_方案_20261025.md）：
+                    // LLM 调用迭代开轮前原子消费队列至空，队列消息以 user 消息
+                    // 进入本轮请求。tool_execute 迭代不消费（该次不调大模型）。
+                    let Some(()) =
+                        budget_await!(self, run_started, state, self.inject_pending_inputs(state))
+                    else {
+                        break;
+                    };
+                    let Some(triple) =
+                        budget_await!(self, run_started, state, self.round_start_event(state))
+                    else {
+                        break;
+                    };
+                    triple
                 };
-                self.execute_steps(&body.steps, &body.id, state, compiled, ignore_ended)
-                    .await?;
+                self.execute_steps(
+                    &body.steps,
+                    &body.id,
+                    state,
+                    compiled,
+                    ignore_ended,
+                    run_started,
+                )
+                .await?;
                 if count_role(state, "assistant") > assistant_before {
                     // 本轮（LLM 回合）产出 assistant → 发终态事件（new_message/stream_end）。
                     // 回合保持「打开」直到下一个 LLM 迭代（随后的工具迭代仍沿用本轮
                     // message_id——工具事件挂本轮消息，与 new_message.toolCalls 同卡位）。
-                    self.round_end_event(
+                    let Some(()) = budget_await!(
+                        self,
+                        run_started,
                         state,
-                        round_index,
-                        round_id.clone(),
-                        &round_start,
-                        assistant_before,
-                    )
-                    .await;
+                        self.round_end_event(
+                            state,
+                            round_index,
+                            round_id.clone(),
+                            &round_start,
+                            assistant_before,
+                            triggering_user.clone(),
+                        )
+                    ) else {
+                        break;
+                    };
                 }
                 open_round = Some((round_index, round_id, round_start));
                 // 控制状态键契约（ADR 2026-08-30）：插件只写 state——should_stop
@@ -537,11 +861,35 @@ impl PipelineExecutor {
         } else {
             // 单次执行（前处理/后处理体）：同样构成一轮（消息事件语义与循环迭代一致）
             let assistant_before = count_role(state, "assistant");
-            let (round_index, round_id, round_start) = self.round_start_event(state).await;
-            self.execute_steps(&body.steps, &body.id, state, compiled, ignore_ended)
-                .await?;
-            self.round_end_event(state, round_index, round_id, &round_start, assistant_before)
-                .await;
+            let Some((round_index, round_id, round_start)) =
+                budget_await!(self, run_started, state, self.round_start_event(state))
+            else {
+                return Ok(iteration);
+            };
+            self.execute_steps(
+                &body.steps,
+                &body.id,
+                state,
+                compiled,
+                ignore_ended,
+                run_started,
+            )
+            .await?;
+            let Some(()) = budget_await!(
+                self,
+                run_started,
+                state,
+                self.round_end_event(
+                    state,
+                    round_index,
+                    round_id,
+                    &round_start,
+                    assistant_before,
+                    triggering_user,
+                )
+            ) else {
+                return Ok(iteration);
+            };
         }
         Ok(iteration)
     }
@@ -556,27 +904,129 @@ impl PipelineExecutor {
     ) -> (i64, String, crate::round_events::RoundStart) {
         let round_index = self.round_counter.fetch_add(1, Ordering::Relaxed) + 1;
         let round_id = format!("a_{}", uuid::Uuid::new_v4().simple());
+        // 入口槽位保留（ADR 2026-11-06-round-entry-slot-placeholder 决策1）：
+        // 保留值 = 内存消息 max+1，与出口 append 的 resolve（apply_messages_op_update
+        // 按 state 现有 max 分配 append seq）同基准——占位行只进 DB 不进内存数组，
+        // 内存 max 不被它推进，出口投影 ON CONFLICT(tenant,pipeline,seq) 同槽
+        // UPDATE 保入口 seq，绝不双行。seq 分配权单点（入口保留后投影不重排）。
+        let reserved_seq = state
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| m.get("seq").and_then(|s| s.as_i64()))
+                    .max()
+                    .unwrap_or(-1)
+                    + 1
+            })
+            .unwrap_or(0);
         if let Some(obj) = state.as_object_mut() {
             obj.insert("message_id".into(), serde_json::json!(round_id));
             obj.insert("_assistant_id_assigned".into(), serde_json::json!(false));
+            // 粘滞槽同步复位：上一轮认领槽位不得被本轮改写误粘滞（防跨轮 id 漂移）
+            obj.insert("_assistant_id_slot_seq".into(), serde_json::Value::Null);
         }
         let start = crate::round_events::RoundStart {
             round_index,
             message_id: round_id.clone(),
+            sequence: reserved_seq,
             pipeline_id: state_str(state, "pipeline_id").unwrap_or_default(),
             thread_id: state_str(state, "session_id")
                 .or_else(|| state_str(state, "thread_id"))
                 .unwrap_or_default(),
         };
+        // 入口占位行落账（消息身份铸造点 = 槽位落账点）：流式进行中持久层
+        // 从第一毫秒起有账——死在出口之前的尝试（Adapter/网关重试窗口、崩溃、
+        // 强杀）留下带 seq 的可对账实体。观察点接线时才建（占位行服务于流式面，
+        // 非流式路径零开销）。
+        if self.round_events.is_some() {
+            self.create_entry_placeholder(&start).await;
+        }
         if let Some(ev) = &self.round_events {
             ev.on_round_start(start.clone()).await;
         }
         (round_index, round_id, start)
     }
 
+    /// 入口占位行建行（ADR 2026-11-06 决策1）：message_slots 建占位行（blob
+    /// `status=streaming`、空 content、record_id=本轮 message_id、run_id=当前
+    /// run），经既有 op 通道 `apply_messages_ops_to_table` 单写入器落表——不走
+    /// `apply_messages_op_update`（不进内存数组、不进实录/轨迹：占位行是 DB 侧
+    /// 保留实体，轨迹回放重建不含它，崩溃残留由 run 起手 sweep 收口）。
+    ///
+    /// 失败不阻断轮次：error 留痕 + 计数后回落既有出口 INSERT 行为（降级 =
+    /// 等价旧世界，非吞错；占位面故障不得放大为对话面故障）。
+    async fn create_entry_placeholder(&self, start: &crate::round_events::RoundStart) {
+        if start.pipeline_id.is_empty() {
+            return;
+        }
+        let op = serde_json::json!({
+            "op": "set",
+            "seq": start.sequence,
+            "msg": { "role": "assistant", "content": "", "status": "streaming" },
+            "_message_id": start.message_id,
+            "_run_id": self.run_id,
+        });
+        if let Err(e) = self
+            .store
+            .apply_messages_ops_to_table(
+                &start.pipeline_id,
+                &self.default_tenant.tenant_id,
+                std::slice::from_ref(&op),
+            )
+            .await
+        {
+            error!(
+                run_id = %self.run_id,
+                pipeline = %start.pipeline_id,
+                message_id = %start.message_id,
+                seq = start.sequence,
+                error = %e,
+                "入口占位行建行失败（回落出口 INSERT 旧世界，占位面故障不放大为对话面故障）"
+            );
+            self.metrics.inc_persist_failure();
+        }
+    }
+
+    /// 轮无 assistant 的占位行收口删行（ADR 2026-11-06 决策4/5）：真零产出
+    /// （文本/思考/保留 tool_calls 三空，出口裁决在 llm_core，轮无 assistant 即
+    /// 零产出）删行，占位行生命周期封闭于单轮、不跨轮复用。seq + record_id
+    /// 双条件在 store 侧防误删（同槽被真实消息覆写时不命中）。失败 warn：残留
+    /// 行由下轮 run 起手 sweep 收口。
+    async fn delete_entry_placeholder(&self, start: &crate::round_events::RoundStart) {
+        if start.pipeline_id.is_empty() {
+            return;
+        }
+        match self
+            .store
+            .delete_streaming_placeholder(
+                &start.pipeline_id,
+                &self.default_tenant.tenant_id,
+                start.sequence,
+                &start.message_id,
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => {
+                warn!(
+                    run_id = %self.run_id,
+                    pipeline = %start.pipeline_id,
+                    message_id = %start.message_id,
+                    seq = start.sequence,
+                    error = %e,
+                    "零产出轮占位行删除失败（残留行由 run 起手 sweep 收口）"
+                );
+            }
+        }
+    }
+
     /// 轮次结束边界：本轮新增了 assistant 才携带其完整持久形态（None = 本轮
     /// 无产出，消费方只发 stream_end 收尾，不发 new_message）。user 消息在
     /// 每轮都携带——消费方（api 桥接）只在首个有产出的轮次附认领回传。
+    /// 发生过轮边界注入时携带 run 触发消息（注入会把队列消息排到触发消息
+    /// 之后，last user 不再是触发消息；`_consumed_pending_cmids` 非空即本轮
+    /// run 内发生过注入）；未注入 run 与既有行为逐字节一致。
     async fn round_end_event(
         &self,
         state: &serde_json::Value,
@@ -584,6 +1034,7 @@ impl PipelineExecutor {
         round_id: String,
         start: &crate::round_events::RoundStart,
         assistant_before: usize,
+        triggering_user: Option<serde_json::Value>,
     ) {
         if let Some(ev) = &self.round_events {
             let assistant = if count_role(state, "assistant") > assistant_before {
@@ -591,13 +1042,155 @@ impl PipelineExecutor {
             } else {
                 None
             };
+            // 出口收口对称臂（决策4/5）：轮无 assistant = 真零产出 → 删除本轮
+            // 占位行（生命周期必收口：fill 或 delete；不跨轮复用）。fill 臂由
+            // 出口投影管辖（同槽 UPDATE）；删行是零产出专属收口。api 事件桥同
+            // 判定点的删行为幂等双保险（行已删则桥侧不命中，no-op 不误删）。
+            if assistant.is_none() {
+                self.delete_entry_placeholder(start).await;
+            }
+            let user_message =
+                if triggering_user.is_some() && key_present(state, "_consumed_pending_cmids") {
+                    triggering_user
+                } else {
+                    last_role(state, "user")
+                };
             ev.on_round_end(crate::round_events::RoundEnd {
                 round_index,
                 message_id: round_id,
                 pipeline_id: start.pipeline_id.clone(),
                 thread_id: start.thread_id.clone(),
                 assistant,
-                user_message: last_role(state, "user"),
+                user_message,
+            })
+            .await;
+        }
+    }
+
+    /// 待输入队列轮边界注入（设计真值
+    /// docs/working/待输入队列轮边界注入_方案_20261025.md，用户裁定 2026-10-25）。
+    ///
+    /// LLM 调用迭代开轮前原子消费队列至空：每条记录以 user 消息 op append 进
+    /// state.messages（[`apply_messages_op_update`] 内存+message_slots 同步落，
+    /// 与 server.rs run 前 append op 同构），cmid 记入 run 内部键
+    /// `_consumed_pending_cmids`（stage_finalize 提取进 EngineOutcome，api 层
+    /// run 收尾据此批量通知 REST /chat 同步桥等待者），并即时回调
+    /// `on_pending_inputs_consumed`（前端据此把队列条移入主消息流）。
+    ///
+    /// 参数面裁定 = 内容注入参数忽略：记录的 agent_id/thinking_strength/
+    /// execution_context/state_overlay/pipeline_config_id 在注入场景不生效
+    /// （在途 run 配置已定），仅在链级 drain 独立轮消费时生效。
+    ///
+    /// 落库失败不静默丢条目：apply 失败即原记录回队（created_at 原值保 FIFO
+    /// 位）并停止本轮注入——下一轮边界自然重试；出队失败同理残留待下轮。
+    async fn inject_pending_inputs(&self, state: &mut serde_json::Value) {
+        let pipeline_id = state_str(state, "pipeline_id").unwrap_or_default();
+        if pipeline_id.is_empty() {
+            return;
+        }
+        let tenant_id = self.default_tenant.tenant_id.clone();
+        let mut cmids: Vec<String> = Vec::new();
+        let mut records: Vec<crate::round_events::ConsumedPendingRecord> = Vec::new();
+        let mut ledgers: Vec<serde_json::Value> = Vec::new();
+        loop {
+            let rec = match self.store.pop_pending_input(&tenant_id, &pipeline_id).await {
+                Ok(Some(rec)) => rec,
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::warn!(
+                        pipeline = %pipeline_id,
+                        error = %e,
+                        "待输入队列轮边界出队失败（本轮停止注入，队列残留待下轮）"
+                    );
+                    break;
+                }
+            };
+            let mut user_msg = serde_json::json!({ "role": "user", "content": rec.content });
+            if !rec.client_message_id.is_empty() {
+                user_msg["metadata"] =
+                    serde_json::json!({ "client_message_id": rec.client_message_id });
+            }
+            let ops = [serde_json::json!({ "op": "set", "msg": user_msg, "_run_id": self.run_id })];
+            match apply_messages_op_update(state, self.store.as_ref(), &tenant_id, &ops).await {
+                Ok(ledger) => {
+                    if !rec.client_message_id.is_empty() {
+                        // 单 op 调用：首条 ledger 即本条 set 的权威坐标（set 条目
+                        // 恒带 seq + message_id 内容指纹，op_ledger_entry）——认领
+                        // 回传载荷，前端据此走 claim（终态必携排序键）。
+                        let first = ledger.first();
+                        records.push(crate::round_events::ConsumedPendingRecord {
+                            client_message_id: rec.client_message_id.clone(),
+                            message_id: first
+                                .and_then(|e| e.get("message_id"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            sequence: first
+                                .and_then(|e| e.get("seq"))
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0),
+                            content: rec.content.clone(),
+                        });
+                        cmids.push(rec.client_message_id);
+                    }
+                    ledgers.extend(ledger);
+                }
+                Err(e) => {
+                    tracing::error!(
+                        pipeline = %pipeline_id,
+                        input = %rec.id,
+                        error = %e,
+                        "注入消息落库失败，原记录回队（防静默丢失）"
+                    );
+                    if let Err(re) = self
+                        .store
+                        .enqueue_pending_input(&tenant_id, &pipeline_id, &rec)
+                        .await
+                    {
+                        tracing::error!(
+                            pipeline = %pipeline_id,
+                            input = %rec.id,
+                            error = %re,
+                            "注入失败条目回队也失败，条目仅日志可追"
+                        );
+                    }
+                    break;
+                }
+            }
+        }
+        if ledgers.is_empty() {
+            return;
+        }
+        // 审计实录（对齐 persist_run_start 的 user_input 轨迹形态，ops 即轨迹）。
+        use agentos_core::types::{PatchType, TraceEntry};
+        let entry = TraceEntry {
+            trace_id: format!("t_{}", uuid::Uuid::new_v4().simple()),
+            pipeline_id: pipeline_id.clone(),
+            seq: 0,
+            plugin_id: "pending_input".to_string(),
+            patch_type: PatchType::StateUpdate,
+            patch_data: serde_json::json!({ "messages": { "_ops": ledgers } }),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        if let Err(e) = self.store.append_trace(entry).await {
+            tracing::warn!(error = %e, "pending 注入实录落轨迹失败（消息本体已落库）");
+        }
+        if cmids.is_empty() {
+            return;
+        }
+        if let Some(obj) = state.as_object_mut() {
+            let arr = obj
+                .entry("_consumed_pending_cmids".to_string())
+                .or_insert_with(|| serde_json::Value::Array(vec![]));
+            if let serde_json::Value::Array(a) = arr {
+                a.extend(cmids.iter().map(|c| serde_json::json!(c)));
+            }
+        }
+        if let Some(ev) = &self.round_events {
+            ev.on_pending_inputs_consumed(crate::round_events::PendingConsumed {
+                pipeline_id,
+                client_message_ids: cmids,
+                records,
             })
             .await;
         }
@@ -667,6 +1260,10 @@ impl PipelineExecutor {
     ///
     /// 跳转护栏：跳转次数上限 = steps 数 × 4（至少 16），与 run() 的循环体级
     /// 转移护栏同款语义——恒跳回自身的路由在此截断为 Err，而非无限执行。
+    ///
+    /// `run_started`：超时看门狗锚点——每个 step 执行（含其内部全部插件调用
+    /// 与并行 for-each）被 `timeout_seconds` 剩余预算包界，到点署名短路。
+    #[allow(clippy::too_many_arguments)]
     async fn execute_steps(
         &self,
         steps: &[CompiledStep],
@@ -674,6 +1271,7 @@ impl PipelineExecutor {
         state: &mut serde_json::Value,
         compiled: &CompiledPipeline,
         ignore_ended: bool,
+        run_started: tokio::time::Instant,
     ) -> Result<(), EngineError> {
         let max_jumps = steps.len().saturating_mul(4).max(16);
         let mut jumps: usize = 0;
@@ -694,9 +1292,77 @@ impl PipelineExecutor {
                     continue;
                 }
             }
-            let routed = self
-                .execute_step(step, body_id, state, compiled, ignore_ended)
+            // checks 统一分发·pre 边界（钩子收敛终局，设计 §4.3）：pre:<步>
+            // 触发的 check 在步执行前消费——when 过滤假则零效果；动作 run 先执行
+            // 触发步再落主步，route 立即转移（共享跳数护栏），terminate 置
+            // ended 短路本循环体。
+            match self
+                .dispatch_boundary_checks(
+                    compiled,
+                    body_id,
+                    state,
+                    CheckBoundary::Pre(step.id.as_str()),
+                    false,
+                    ignore_ended,
+                    run_started,
+                )
+                .await?
+            {
+                Some(CheckDivert::Halted) => return Ok(()),
+                Some(CheckDivert::Jump(target)) => {
+                    jumps += 1;
+                    if jumps > max_jumps {
+                        return Err(EngineError::Other {
+                            message: format!(
+                                "check 路由跳转超限（{jumps} 次，上限 {max_jumps}，疑似死循环）"
+                            ),
+                        });
+                    }
+                    debug!(step = %step.id, target = %target, "check pre 路由转移");
+                    match steps.iter().position(|s| s.id == target) {
+                        Some(j) => {
+                            i = j;
+                            continue;
+                        }
+                        // 编译期已校验目标存在；防御路径（热重载计划不一致）顺序推进
+                        None => warn!(
+                            step = %step.id,
+                            target = %target,
+                            "check 路由目标未在本循环体找到（编译期已校验；防御路径，继续顺序执行）"
+                        ),
+                    }
+                }
+                None => {}
+            }
+            // 超时看门狗执法点：step 执行（含内部全部插件调用/并行 for-each）被
+            // 剩余预算包界——到点放弃冻结等待（invoker in-flight guard 随 drop
+            // 回落），署名后短路执行，run 收尾按既有路径折算 failed。
+            let Some(routed) = budget_await!(
+                self,
+                run_started,
+                state,
+                self.execute_step(step, body_id, state, compiled, ignore_ended, None)
+            ) else {
+                return Ok(());
+            };
+            let routed = routed?;
+            // checks 统一分发·post 边界：post:<步> 触发的 check 在步轨迹落库后
+            // 消费；步产出路由（then/RouteNext）优先——check route 在步已产出
+            // 路由时抑制（`routed.is_some()`），run/terminate 不受抑制。
+            let check_divert = self
+                .dispatch_boundary_checks(
+                    compiled,
+                    body_id,
+                    state,
+                    CheckBoundary::Post(step.id.as_str()),
+                    routed.is_some(),
+                    ignore_ended,
+                    run_started,
+                )
                 .await?;
+            if let Some(CheckDivert::Halted) = check_divert {
+                return Ok(());
+            }
             // G10：step 级 Step 跳转（真跳转）——目标下标在本循环体内查找
             if let Some(RouteNext::Step(id)) = routed {
                 if let Some(j) = steps.iter().position(|s| s.id == id) {
@@ -720,6 +1386,29 @@ impl PipelineExecutor {
                     "Step 跳转目标未在本循环体找到（编译期已校验；防御路径，继续顺序执行）"
                 );
             }
+            // check post 路由转移（步自身未产出路由时才可能到达，护栏①优先级）
+            if let Some(CheckDivert::Jump(target)) = check_divert {
+                jumps += 1;
+                if jumps > max_jumps {
+                    return Err(EngineError::Other {
+                        message: format!(
+                            "check 路由跳转超限（{jumps} 次，上限 {max_jumps}，疑似死循环）"
+                        ),
+                    });
+                }
+                debug!(step = %step.id, target = %target, "check post 路由转移");
+                match steps.iter().position(|s| s.id == target) {
+                    Some(j) => {
+                        i = j;
+                        continue;
+                    }
+                    None => warn!(
+                        step = %step.id,
+                        target = %target,
+                        "check 路由目标未在本循环体找到（编译期已校验；防御路径，继续顺序执行）"
+                    ),
+                }
+            }
             i += 1;
         }
         Ok(())
@@ -731,8 +1420,11 @@ impl PipelineExecutor {
     /// 返回 step 级路由命中的 `RouteNext`（G10：`Step` 真跳转由 `execute_steps`
     /// 消费；`Phase` 已在 apply_routes 写 `state.next_phase`，循环体结束时消费）。
     ///
-    /// `body_id`：宿主循环体 id——step 级 hooks 的复合作用域键 `"<body>:<step>"`
-    /// 分发定位用（服务化提案 §3.6 声明位置即作用域）。
+    /// `body_id`：宿主循环体 id（复合递归与 B 区 message 归属定位用）。
+    ///
+    /// `check_trigger`：触发上下文（checks 统一机制的 `_pipe_check` 约定字段，
+    /// config 注入通道）——None = 顺序执行（零改动）；Some = 本步由 check 动作
+    /// `run:<步>` 触发执行（一次性触发步），触发上下文随本步全部插件调用透传。
     ///
     /// 由于 `execute_step` 与 `execute_step_inner` 相互递归调用（Composite 项会
     /// 递归执行），Rust async fn 无法直接表达无限大小的 future，
@@ -744,10 +1436,18 @@ impl PipelineExecutor {
         state: &'a mut serde_json::Value,
         compiled: &'a CompiledPipeline,
         ignore_ended: bool,
+        check_trigger: Option<serde_json::Value>,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Option<RouteNext>, EngineError>> + Send + 'a>,
     > {
-        Box::pin(self.execute_step_impl(step, body_id, state, compiled, ignore_ended))
+        Box::pin(self.execute_step_impl(
+            step,
+            body_id,
+            state,
+            compiled,
+            ignore_ended,
+            check_trigger,
+        ))
     }
 
     async fn execute_step_impl(
@@ -757,6 +1457,7 @@ impl PipelineExecutor {
         state: &mut serde_json::Value,
         compiled: &CompiledPipeline,
         ignore_ended: bool,
+        check_trigger: Option<serde_json::Value>,
     ) -> Result<Option<RouteNext>, EngineError> {
         // step 边界清空实录缓冲（messages ops 与顶层键 journal 同点位）。
         // 轨迹颗粒度 = 配置 step（prepare/core/post 等），不钻插件。
@@ -768,16 +1469,6 @@ impl PipelineExecutor {
         // 归属（流式窗口 = 本 step invoke 期间），守卫在 step 收尾自动清除。
         let _binding = self.bind_step_message(state, &step.id);
 
-        // hooks 同步边界分发（服务化提案 §3.6 同步边界事件）：step 进入时
-        // 分发 "step_start"（step 级 + body 级两档作用域查表直派，fire-and-forget）。
-        self.dispatch_boundary_hooks(
-            compiled,
-            state,
-            &HookScope::Step(format!("{body_id}:{}", step.id)),
-            "step_start",
-        )
-        .await;
-
         // 1. context 注入：渲染 step.context 模板（模板原文保留，动态点），merge 进 state
         let rendered = render_value(
             &serde_json::to_value(&step.context)
@@ -787,8 +1478,7 @@ impl PipelineExecutor {
         );
         if let Some(obj) = rendered.as_object() {
             for (k, v) in obj {
-                self.journal_top_key(state, k);
-                set_key(state, k, v.clone());
+                self.apply_state_key_update(state, k, v.clone());
             }
         }
 
@@ -808,20 +1498,13 @@ impl PipelineExecutor {
                 }
                 // 并行 for-each（over 存在，编译期已保证与 as 成对、字段合法）：
                 // 对集合逐元素执行——单调用 ≡ 循环单元素展开
-                //（ADR 2026-10-02-loopconfig-parallel-foreach）。
+                //（内容移植自 sync/open-main-20261008 c2db32c26）。
                 if loop_cfg.over.is_some() {
                     self.execute_parallel_for(step, body_id, state, compiled, ignore_ended)
                         .await?;
-                    // 与串行循环分支同一收尾路径：step 级轨迹 + step_end hooks
+                    // 与串行循环分支同一收尾路径：step 级轨迹
                     self.persist_step_trace(&step.id, &compiled.checkpoint, state)
                         .await?;
-                    self.dispatch_boundary_hooks(
-                        compiled,
-                        state,
-                        &HookScope::Step(format!("{body_id}:{}", step.id)),
-                        "step_end",
-                    )
-                    .await;
                     return Ok(None);
                 }
                 let max_iters = loop_cfg.max_iterations;
@@ -837,8 +1520,15 @@ impl PipelineExecutor {
                     if max_iters > 0 && i > max_iters {
                         break;
                     }
-                    self.execute_step_inner(step, body_id, state, compiled, ignore_ended)
-                        .await?;
+                    self.execute_step_inner(
+                        step,
+                        body_id,
+                        state,
+                        compiled,
+                        ignore_ended,
+                        check_trigger.as_ref(),
+                    )
+                    .await?;
                     // 循环体里也应用路由（及时结束/挂起）
                     if !step.routes.is_empty() {
                         self.apply_routes(&step.routes, state);
@@ -853,22 +1543,20 @@ impl PipelineExecutor {
                 // 循环 step 执行完，落 step 级轨迹后返回（循环内路由不参与跳转）
                 self.persist_step_trace(&step.id, &compiled.checkpoint, state)
                     .await?;
-                // hooks 同步边界分发（收尾）：step_end 两档作用域（与下方非循环
-                // 分支同一收尾路径，循环 step 不缺席）
-                self.dispatch_boundary_hooks(
-                    compiled,
-                    state,
-                    &HookScope::Step(format!("{body_id}:{}", step.id)),
-                    "step_end",
-                )
-                .await;
                 return Ok(None);
             }
         }
 
         // 3. 非循环：直接执行
-        self.execute_step_inner(step, body_id, state, compiled, ignore_ended)
-            .await?;
+        self.execute_step_inner(
+            step,
+            body_id,
+            state,
+            compiled,
+            ignore_ended,
+            check_trigger.as_ref(),
+        )
+        .await?;
 
         // 4. 路由处理：返回命中结果（Step 跳转由 execute_steps 消费）
         let routed = if !step.routes.is_empty() {
@@ -881,16 +1569,6 @@ impl PipelineExecutor {
         self.persist_step_trace(&step.id, &compiled.checkpoint, state)
             .await?;
 
-        // hooks 同步边界分发（收尾）：step 结束时分发 "step_end"；钩子返回
-        // `{"decision":"terminate"}` → 置 ended=true（与引擎既有 ended 语义
-        // 对齐：当前循环体立即终止，后续循环体/收尾体照常推进）。
-        self.dispatch_boundary_hooks(
-            compiled,
-            state,
-            &HookScope::Step(format!("{body_id}:{}", step.id)),
-            "step_end",
-        )
-        .await;
         Ok(routed)
     }
 
@@ -909,6 +1587,7 @@ impl PipelineExecutor {
             run_id: self.run_id.clone(),
             metrics: Arc::clone(&self.metrics),
             persistent_fields: self.persistent_fields.clone(),
+            metrics_classes: self.metrics_classes.clone(),
             steps_since_checkpoint: AtomicI64::new(0),
             total_step_no: AtomicI64::new(0),
             ops_ledger: parking_lot::Mutex::new(Vec::new()),
@@ -918,14 +1597,17 @@ impl PipelineExecutor {
             pipeline_end_hooks: self.pipeline_end_hooks.clone(),
             round_events: self.round_events.clone(),
             round_counter: AtomicI64::new(0),
+            check_epoch: AtomicI64::new(self.check_epoch.load(Ordering::Relaxed)),
+            pending_state_deltas: parking_lot::Mutex::new(Vec::new()),
             hook_bus: self.hook_bus.clone(),
             max_rounds: self.max_rounds,
+            run_anchor: parking_lot::Mutex::new(*self.run_anchor.lock()),
         }
     }
 
     /// 单个迭代的产出归并进父 state（按迭代下标/链式序调用，确定性归并）。
     ///
-    /// 策略（ADR 2026-10-02-loopconfig-parallel-foreach）：
+    /// 策略（并行 for-each 原语，内容移植自 sync/open-main-20261008 c2db32c26）：
     /// ① messages ops 父侧统一"一次 apply"（seq 分配/落库/实录/记账全在父）；
     /// ② collect/collect_append 按迭代序拼接（迭代写的是该迭代的数组，逐项追加）；
     /// ③ 其余顶层键 last-迭代-wins（迭代实录为写面清单；as 变量/collect 键/
@@ -1002,13 +1684,15 @@ impl PipelineExecutor {
         }
     }
 
-    /// 并行 for-each 执行（LoopConfig.over 存在，ADR 2026-10-02）。
+    /// 并行 for-each 执行（LoopConfig.over 存在；内容移植自
+    /// sync/open-main-20261008 c2db32c26）。
     ///
     /// - max_concurrency=1：串行链式——每迭代从上一迭代合并后的 state 取快照
     ///   （等价重复循环的链式可见性），迭代完即归并，终止/挂起即停（同串行循环）；
     /// - max_concurrency>1 / -1：有界并行快照——所有迭代从循环开始时的同一快照
     ///   克隆（迭代隔离），buffer_unordered 有界并发，全部完成后按迭代下标序归并。
-    /// - 收尾：consume 清 over 源键、consume_keys 清 []（消费即清，杜绝跨轮陈旧）。
+    ///
+    /// 收尾：consume 清 over 源键、consume_keys 清 []（消费即清，杜绝跨轮陈旧）。
     async fn execute_parallel_for(
         &self,
         step: &CompiledStep,
@@ -1071,7 +1755,14 @@ impl PipelineExecutor {
                     let mut iter_state = state.clone();
                     set_key(&mut iter_state, as_name, item);
                     iter_exec
-                        .execute_step_inner(step, body_id, &mut iter_state, compiled, ignore_ended)
+                        .execute_step_inner(
+                            step,
+                            body_id,
+                            &mut iter_state,
+                            compiled,
+                            ignore_ended,
+                            None,
+                        )
                         .await?;
                     if !step.routes.is_empty() {
                         iter_exec.apply_routes(&step.routes, &mut iter_state);
@@ -1097,6 +1788,7 @@ impl PipelineExecutor {
                                     &mut iter_state,
                                     compiled,
                                     ignore_ended,
+                                    None,
                                 )
                                 .await;
                             let err_msg = match outcome {
@@ -1144,114 +1836,216 @@ impl PipelineExecutor {
         Ok(())
     }
 
-    /// hooks 同步边界分发（服务化提案 §3.6 同步边界事件）。
+    /// checks 统一边界分发（钩子收敛终局，设计 §4.3：HookScope/
+    /// dispatch_boundary_hooks 泛化为此）。
     ///
-    /// 声明位置即作用域：step 边界事件（`step_start`/`step_end`）同时查
-    /// step 级（复合键 `"<body>:<step>"`）与 body 级（`Body(body_id)`）两档
-    /// 装载表，命中即 fire-and-forget 分发——经 invoker 对目标插件发起
-    /// execute 调用，config 注入约定字段 `_pipe_hook = {"event", "payload"}`，
-    /// payload 含 step_id/event/时间戳最小上下文。
+    /// 统一模型 = 管道 = 流（顺序 steps + then 跳转）+ checks（触发时机 ×
+    /// when × 动作）。分发点仅在触发边界（`execute_steps` 的步前/步后）消费：
     ///
-    /// 返回值收集：任一钩子返回 `{"decision": "terminate"}` → 置 `ended=true`
-    /// （与引擎既有 ended 语义对齐：当前循环体立即终止，后续循环体/收尾体
-    /// 照常推进——对齐 transient-register ADR §二.7 结构化否决指令模型，钩子
-    /// 只决策不路由）+ `tracing::warn` 留痕。分发失败仅 warn 不阻断（
-    /// fire-and-forget 语义：决策窗扩展点不得让主流程翻车）。
+    /// - **pre/post 触发**：`(循环体, 触发步)` 查分发表，按声明序逐条消费——
+    ///   when 谓词假则跳过（零效果）；动作 `run` 先执行触发步再落主步（顺序
+    ///   语义不变），`route` 立即转移（[`CheckDivert::Jump`]，跳数护栏由调用方
+    ///   计），`terminate` 置 `ended=true` 短路（[`CheckDivert::Halted`]，后续
+    ///   check 不再消费）。首个转移/终止动作之后的 check 不消费（单边界单转移）。
+    /// - **state 触发**：消费本边界的 state_delta 键级事件（写路径
+    ///   journal 落点发射、此处统一取走）——订阅键命中事件的 check 才触发
+    ///   （触发一次执行一次）；when 求值读当前 state（equals 值条件在此表达）。
+    ///   未被任何订阅命中的事件不残留（写路径通知不积压）。
+    /// - **护栏①优先级**：`step_routed=true`（post 边界步已产出路由）时 check
+    ///   route 抑制（步产出路由优先），run/terminate 不受抑制。
+    /// - **边界写归属**（State 单一写面纪律③）：terminate 的 ended 写落
+    ///   `check@<at>` 专属窗口轨迹（window_id 即来源标注）。
     ///
-    /// 空表短路：无任何命中（step_hooks 空或作用域不匹配）直接返回——
-    /// 无钩子配置的主干零开销（§3.6 空集短路）。
-    ///
-    /// 现状：生产编译产物 step_hooks 恒空（加载入口未接 hooks，ADR
-    /// 2026-09-09-kernel-dead-layer-adjudication）——本分发点当前运行时不命中，
-    /// 接线后自动生效。
-    async fn dispatch_boundary_hooks(
+    /// 空集短路：无 checks 且无 pending 事件 → 零开销返回。
+    #[allow(clippy::too_many_arguments)] // 分发参数面与 execute_steps 同族
+    async fn dispatch_boundary_checks(
         &self,
         compiled: &CompiledPipeline,
+        body_id: &str,
         state: &mut serde_json::Value,
-        step_scope: &HookScope,
-        event: &str,
-    ) {
-        let mut hit = compiled.hooks_for(step_scope, event);
-        if let HookScope::Step(step_key) = step_scope {
-            // body 级作用域：step 执行期间的同步边界事件同发 body 级钩子
-            // （body_id = 复合键 `"<body>:<step>"` 的前段）
-            if let Some((body_id, _)) = step_key.split_once(':') {
-                hit.extend(compiled.hooks_for(&HookScope::Body(body_id.to_string()), event));
-            }
+        boundary: CheckBoundary<'_>,
+        step_routed: bool,
+        ignore_ended: bool,
+        run_started: tokio::time::Instant,
+    ) -> Result<Option<CheckDivert>, EngineError> {
+        if compiled.checks.is_empty() && self.pending_state_deltas.lock().is_empty() {
+            return Ok(None); // 空集短路：无 checks 配置的主干零开销
         }
+        // 触发边界匹配 + state_delta 事件统一消费（state 触发在本循环体的每个
+        // 步边界都可消费——写后首个边界即触发；只对命中键触发；未命中事件就地
+        // 丢弃——写路径通知不积压）
+        let deltas = std::mem::take(&mut *self.pending_state_deltas.lock());
+        let hit: Vec<CompiledCheck> = compiled
+            .checks
+            .iter()
+            .filter(|c| {
+                c.body_id == body_id
+                    && (boundary.matches(&c.trigger)
+                        || match &c.trigger {
+                            // state 触发：仅当订阅键在待消费事件里才进入本边界
+                            CheckTrigger::State(key) => deltas.iter().any(|d| &d.key == key),
+                            _ => false,
+                        })
+            })
+            .cloned()
+            .collect();
         if hit.is_empty() {
-            return; // 空集短路：无钩子配置的主干零开销
+            return Ok(None);
         }
-        // 收集 step_id/pipeline_id 最小上下文（payload 字段）
-        let step_id = match step_scope {
-            HookScope::Step(key) => key.clone(),
-            HookScope::Body(id) => id.clone(),
-        };
-        let pipeline_id = state_str(state, "pipeline_id");
-        let content_loader = ContentLoader::new(
-            Arc::clone(&self.store),
-            self.run_id.clone(),
-            pipeline_id.clone().unwrap_or_default(),
-        );
-        let mut terminated = false;
-        for entry in hit {
-            let payload = serde_json::json!({
-                "step_id": step_id,
-                "event": event,
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-                "pipeline_id": pipeline_id,
-            });
-            let config =
-                serde_json::json!({ "_pipe_hook": { "event": event, "payload": payload } });
-            let hook_ctx = PluginContext::new(
-                &*state,
-                config,
-                self.default_tenant.clone(),
-                uuid::Uuid::nil(),
-                content_loader.clone(),
-            );
-            match self
-                .invoker
-                .invoke_pipeline_plugin(&entry.plugin_id, &hook_ctx)
-                .await
-            {
-                Ok(result) => {
-                    if result.error.is_none() {
-                        // 结构化否决指令（transient-register ADR §二.7）：钩子只
-                        // 决策不路由——返回 `{"decision":"terminate", ...}` →
-                        // 引擎置 ended=true（SDK 契约：state_updates 平铺键）
-                        if result
-                            .state_updates
-                            .get("decision")
-                            .and_then(|v| v.as_str())
-                            == Some("terminate")
-                        {
-                            terminated = true;
-                        }
-                    } else {
-                        warn!(
-                            plugin = %entry.plugin_id,
-                            event = %event,
-                            error = ?result.error,
-                            "hook dispatch plugin error (fire-and-forget, continue)"
-                        );
-                    }
+        let mut divert: Option<CheckDivert> = None;
+        let mut terminate_at: Option<String> = None;
+        for check in &hit {
+            // when 谓词（None = 恒真；求值读当前 state）
+            if let Some(cond) = &check.when {
+                if !eval_expr(cond, state) {
+                    debug!(body = %body_id, at = %check.at_label(), "check when 为假，不触发");
+                    continue;
                 }
-                Err(e) => {
+            }
+            // state 触发：订阅键须在本边界消费的事件里（触发一次执行一次）
+            if let CheckTrigger::State(key) = &check.trigger {
+                if !deltas.iter().any(|d| d.key == *key) {
+                    continue;
+                }
+            }
+            match &check.action {
+                CheckAction::Run(target) => {
+                    self.run_triggered_step(
+                        compiled,
+                        body_id,
+                        state,
+                        target,
+                        check,
+                        &deltas,
+                        ignore_ended,
+                        run_started,
+                    )
+                    .await?;
+                }
+                CheckAction::Route(target) => {
+                    if step_routed {
+                        // 护栏①：步产出路由优先，check route 仅在步未产出路由时消费
+                        debug!(
+                            body = %body_id,
+                            at = %check.at_label(),
+                            target = %target,
+                            "步已产出路由，check route 抑制（步产出路由优先）"
+                        );
+                        continue;
+                    }
+                    divert = Some(CheckDivert::Jump(target.clone()));
+                    break;
+                }
+                CheckAction::Terminate => {
                     warn!(
-                        plugin = %entry.plugin_id,
-                        event = %event,
-                        error = %e,
-                        "hook dispatch failed (fire-and-forget, continue)"
+                        body = %body_id,
+                        at = %check.at_label(),
+                        "check terminate——置 ended=true 终止当前循环体"
                     );
+                    self.journal_top_key(state, "ended");
+                    set_key(state, "ended", serde_json::Value::Bool(true));
+                    terminate_at = Some(check.at_label());
+                    divert = Some(CheckDivert::Halted);
+                    break;
                 }
             }
         }
-        if terminated {
-            warn!(event = %event, step = %step_id, "hook decision terminate——置 ended=true 终止当前循环体");
-            self.journal_top_key(state, "ended");
-            set_key(state, "ended", serde_json::Value::Bool(true));
+        // 边界写归属（State 单一写面纪律③）：触发所在边界事件带来源标注——
+        // check 引擎写（ended 等）落 `check@<at>` 专属窗口轨迹。
+        if let Some(at) = terminate_at {
+            self.append_window_trace(&format!("check@{at}"), state)
+                .await?;
         }
+        Ok(divert)
+    }
+
+    /// check 动作 `run:<步>` 的一次性触发步执行（设计 §4.3：触发一次执行一次，
+    /// 与顺序步同语义——经同一 invoke/轨迹/checkpoint 面）。
+    ///
+    /// 轨迹身份 = 模板步 id + 触发纪元（`"<步id>#<纪元>"`，State 单一写面纪律
+    /// ①：多次触发多条目不混叠）。触发上下文经 `_pipe_check` 约定字段随本步
+    /// 全部插件调用透传（at/动作/state_delta 键级 payload）。
+    ///
+    /// 本步自身路由的状态效果（ended/suspended/next_phase 的 set 写）照常落
+    /// state（同语义）；`RouteNext::Step` 跳转返回值不消费——触发边界无跳转
+    /// 宿主（run 步不在顺序流位置），warn 留痕。
+    #[allow(clippy::too_many_arguments)]
+    async fn run_triggered_step(
+        &self,
+        compiled: &CompiledPipeline,
+        body_id: &str,
+        state: &mut serde_json::Value,
+        target: &str,
+        check: &CompiledCheck,
+        deltas: &[StateDeltaEvent],
+        ignore_ended: bool,
+        run_started: tokio::time::Instant,
+    ) -> Result<(), EngineError> {
+        let Some(mut step) = compiled.find_step(target).cloned() else {
+            // 编译期已校验目标存在；防御路径（热重载后计划与配置不一致）
+            warn!(
+                body = %body_id,
+                target = %target,
+                "check run 目标步不在编译池（编译期已校验；防御路径，跳过触发）"
+            );
+            return Ok(());
+        };
+        let epoch = self.check_epoch.fetch_add(1, Ordering::Relaxed) + 1;
+        step.id = format!("{target}#{epoch}");
+        // 触发上下文（_pipe_check 约定字段）：at/动作/state_delta 键级 payload
+        // （new = 消费时点当前值；窗口内多次写以最终值为准，与轨迹 diff 同语义）
+        let state_delta = serde_json::Value::Array(
+            deltas
+                .iter()
+                .map(|d| {
+                    serde_json::json!({
+                        "key": d.key,
+                        "old": d.old,
+                        "new": state.get(&d.key).cloned().unwrap_or(serde_json::Value::Null),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        );
+        let trigger_ctx = serde_json::json!({
+            "at": check.at_label(),
+            "action": match check.action {
+                CheckAction::Run(_) => "run".to_string(),
+                _ => String::new(),
+            },
+            "target": target,
+            "epoch": epoch,
+            "state_delta": state_delta,
+        });
+        debug!(
+            body = %body_id,
+            step = %step.id,
+            at = %check.at_label(),
+            "check 触发一次性 run 步"
+        );
+        let Some(routed) = budget_await!(
+            self,
+            run_started,
+            state,
+            self.execute_step(
+                &step,
+                body_id,
+                state,
+                compiled,
+                ignore_ended,
+                Some(trigger_ctx)
+            )
+        ) else {
+            // 预算到点署名短路：触发步放弃，主流程按既有收尾路径折算 failed
+            return Ok(());
+        };
+        if let Some(RouteNext::Step(jump)) = routed? {
+            warn!(
+                step = %step.id,
+                target = %jump,
+                "check run 步自身产出 Step 跳转（触发边界无跳转宿主，不消费）"
+            );
+        }
+        Ok(())
     }
 
     /// 落 step 级轨迹：checkpoint 计步 + 窗口轨迹落库 + 分层投影的 step 入口。
@@ -1263,11 +2057,51 @@ impl PipelineExecutor {
     /// 顶层键首触实录（写前调用）：step 内首次触碰某键时定格其旧值，
     /// 供 [`Self::append_window_trace`] 算 diff——内核内 state 借用不克隆，
     /// 实录体积 ∝ 实际变更面而非 state 体积。
+    ///
+    /// 同时是 state_delta 键级事件的统一发射落点（设计 §4.3 引擎侧升级③，
+    /// journal_top_key/set_key 写路径落点）：窗口首触即记（含写前旧值），由
+    /// 步边界 checks 分发消费（state 触发命中即触发，未命中事件不残留）。
+    /// 同窗口重复写不重复发射（首触旧值 + 消费时点新值 = 窗口级 delta，
+    /// 与轨迹 diff 同语义）。
     fn journal_top_key(&self, state: &serde_json::Value, key: &str) {
         let mut journal = self.step_key_journal.lock();
-        journal
-            .entry(key.to_string())
-            .or_insert_with(|| state.get(key).cloned());
+        if let std::collections::hash_map::Entry::Vacant(entry) = journal.entry(key.to_string()) {
+            let old = state.get(key).cloned();
+            entry.insert(old.clone());
+            let mut deltas = self.pending_state_deltas.lock();
+            if !deltas.iter().any(|d| d.key == key) {
+                deltas.push(StateDeltaEvent {
+                    key: key.to_string(),
+                    old,
+                });
+            }
+        }
+    }
+
+    /// 单键状态更新统一入口（同值不更新，2026-10-30）：不变清单键且序列化
+    /// ≥[`INVARIANT_SUPPRESS_MIN_BYTES`] 且内容与本管道基线一致 → 跳过
+    /// journal——没有 journal 就没有 diff，也就没有轨迹（冗余在更新层消失，
+    /// 而非落库前剔除）。**set 不在抑制范围**：run state 每轮重建而基线跨
+    /// run 存活，跳写会让重建 state 永缺该键（2026-11-02 装机实证：tool_
+    /// schemas/system_message 断链 → LLM 裸请求无 tools 无系统提示）；同值
+    /// set 幂等，state 语义零影响。首写/真变更照常 journal 并刷新基线。
+    fn apply_state_key_update(
+        &self,
+        state: &mut serde_json::Value,
+        key: &str,
+        value: serde_json::Value,
+    ) {
+        let pipeline_id = state_str(state, "pipeline_id").unwrap_or_default();
+        let suppressed = invariant_update_suppressed(
+            &mut global_invariant_baseline().lock(),
+            &pipeline_id,
+            key,
+            &value,
+        );
+        if !suppressed {
+            self.journal_top_key(state, key);
+        }
+        set_key(state, key, value);
     }
 
     /// 维护平铺键 `track.messages_chars`（W2a 上下文估算账本）：messages ops
@@ -1456,7 +2290,9 @@ impl PipelineExecutor {
     ///
     /// 运行时只做：项级 when AST 求值（零解析）→ 按类别分派。composite 查统一步骤池
     /// 递归执行；动态模板项渲染后走同样的池/插件查找（显式保留的动态点）。
-    /// `body_id` 透传给递归 composite（hook 复合作用域键 `"<body>:<step>"` 定位）。
+    /// `body_id` 透传给递归 composite（B 区 message 归属定位）。
+    /// `check_trigger`：check 触发上下文（`_pipe_check` 约定字段，config 注入）——
+    /// 递归全程透传（触发步的整棵执行子树都携带）；None = 顺序执行零改动。
     async fn execute_step_inner(
         &self,
         step: &CompiledStep,
@@ -1464,6 +2300,7 @@ impl PipelineExecutor {
         state: &mut serde_json::Value,
         compiled: &CompiledPipeline,
         ignore_ended: bool,
+        check_trigger: Option<&serde_json::Value>,
     ) -> Result<(), EngineError> {
         for item in &step.items {
             if truthy_flag(state, "suspended") {
@@ -1495,8 +2332,15 @@ impl PipelineExecutor {
                             continue;
                         }
                     };
-                    self.execute_step(&target, body_id, state, compiled, ignore_ended)
-                        .await?;
+                    self.execute_step(
+                        &target,
+                        body_id,
+                        state,
+                        compiled,
+                        ignore_ended,
+                        check_trigger.cloned(),
+                    )
+                    .await?;
                 }
                 // 静态命中插件（per-plugin inputs 经 config 通道传给插件，
                 // 不 merge 进 state、不落 trace；具名步骤服务经 _step_method
@@ -1508,7 +2352,13 @@ impl PipelineExecutor {
                     ..
                 } => {
                     if self
-                        .invoke_item_plugin(plugin_id, method.as_deref(), inputs, state)
+                        .invoke_item_plugin(
+                            plugin_id,
+                            method.as_deref(),
+                            inputs,
+                            state,
+                            check_trigger,
+                        )
                         .await
                     {
                         break; // skip_remaining
@@ -1519,12 +2369,25 @@ impl PipelineExecutor {
                     let resolved = render_template(template, state, &self.project_root);
                     if let Some(target) = compiled.find_step(&resolved) {
                         let target = target.clone();
-                        self.execute_step(&target, body_id, state, compiled, ignore_ended)
-                            .await?;
+                        self.execute_step(
+                            &target,
+                            body_id,
+                            state,
+                            compiled,
+                            ignore_ended,
+                            check_trigger.cloned(),
+                        )
+                        .await?;
                     } else if self.lookup_plugin(&resolved) {
                         // 动态点无静态 inputs/method（模板运行时才定），传空
                         if self
-                            .invoke_item_plugin(&resolved, None, &HashMap::new(), state)
+                            .invoke_item_plugin(
+                                &resolved,
+                                None,
+                                &HashMap::new(),
+                                state,
+                                check_trigger,
+                            )
                             .await
                         {
                             break;
@@ -1552,10 +2415,13 @@ impl PipelineExecutor {
     /// config 携带约定字段 `_step_method`（invoker::shared::with_step_method），
     /// SDK 侧分发到对应注册函数；`None` = 默认 execute 入口（现状零改动）。
     ///
-    /// 错误可见性：插件失败（result.error / invoker Err）除 warn 外，追加到
-    /// state 的 `_plugin_errors` 键（`[{plugin_id, code, message}]` 数组）——
-    /// run 结束由 api 层提取为 EngineOutcome.plugin_errors，WS 路径发射
-    /// plugin_error 事件弹前端通知（引擎 warn+继续的假成功不再完全静默）。
+    /// `check_trigger`：check 触发上下文（Some 时 config 携带约定字段
+    /// `_pipe_check`，触发步的插件调用可读 at/动作/state_delta 键级 payload）。
+    ///
+    /// 错误可见性（错误面单点）：插件失败——业务失败（result.error）与
+    /// invoker 失败（Err，含 STEP_CALL_TIMEOUT）——统一收敛到
+    /// [`Self::handle_plugin_failure`] 单点处理；`_plugin_errors` 记账与
+    /// `plugin_step_failed` 域事件广播都从这一处出。
     /// 下划线前缀键不参与插件 state_updates 合并（merge 只写插件声明的键）。
     async fn invoke_item_plugin(
         &self,
@@ -1563,41 +2429,202 @@ impl PipelineExecutor {
         method: Option<&str>,
         inputs: &HashMap<String, serde_json::Value>,
         state: &mut serde_json::Value,
+        check_trigger: Option<&serde_json::Value>,
     ) -> bool {
-        match self.invoke_plugin(plugin_id, method, inputs, &*state).await {
+        match self
+            .invoke_plugin(plugin_id, method, inputs, &*state, check_trigger)
+            .await
+        {
             Ok(result) => {
-                if result.error.is_none() {
+                if let Some(err) = result.error.as_ref() {
+                    self.handle_plugin_failure(state, plugin_id, err).await;
+                    false
+                } else {
                     // merge state_updates（轨迹在 step 级统一落，不钻插件）
                     // 分层持久化：merge 的同时投影到业务表（messages 增量、声明字段 upsert）
                     self.merge_and_project(state, &result.state_updates).await;
                     result.skip_remaining
-                } else {
-                    // 引擎统一 warn + 继续（不按 error_policy 分发，ADR 2026-08-18）
-                    warn!(
-                        plugin = %plugin_id,
-                        error = ?result.error,
-                        "plugin returned error, continuing (error_policy unified, ADR 2026-08-18)"
-                    );
-                    record_plugin_error(state, plugin_id, result.error.as_ref().unwrap());
-                    false
                 }
             }
             Err(e) => {
-                // invoker 自身报错（如 sidecar 不可达）：warn + 继续
-                warn!(
-                    plugin = %plugin_id,
-                    error = %e,
-                    "plugin invoker error, continuing"
-                );
-                record_plugin_error(state, plugin_id, &e);
+                self.handle_plugin_failure(state, plugin_id, &e).await;
+                if e.code.as_deref() == Some(STEP_CALL_TIMEOUT_CODE) {
+                    self.force_run_signature_if_budget_exhausted(state);
+                }
                 false
             }
         }
     }
 
+    /// 插件失败单点处理（错误面单点收敛）：业务失败与 invoker 失败统一走此口
+    /// ——warn + `_plugin_errors` 记账 + `plugin_step_failed` 域事件广播，三件
+    /// 事只在这一处发生。步失败继续语义不变（ADR 2026-08-18：不按 error_policy
+    /// 分发）。
+    async fn handle_plugin_failure(
+        &self,
+        state: &mut serde_json::Value,
+        plugin_id: &str,
+        err: &PluginError,
+    ) {
+        warn!(
+            plugin = %plugin_id,
+            error = ?err,
+            "plugin step failed, continuing (error_policy unified, ADR 2026-08-18)"
+        );
+        record_plugin_error(state, plugin_id, err);
+        self.emit_plugin_failed_event(state, plugin_id, err);
+    }
+
+    /// 插件失败域事件广播（观察路径，best-effort、非阻塞）：`plugin_step_failed`
+    /// 通用域事件（hooks::domain_event 单一载体，tags 带明细）——api 侧订阅翻译
+    /// 为 WS `plugin_error` 实时面（此前该面只在 run 收尾结算，长跑 run 的步级
+    /// 失败全程不可见，2026-10-27 装机压缩死循环实证）。总线未注入时零操作。
+    fn emit_plugin_failed_event(
+        &self,
+        state: &serde_json::Value,
+        plugin_id: &str,
+        err: &PluginError,
+    ) {
+        let Some(bus) = self.hook_bus.as_ref() else {
+            return;
+        };
+        let tags: Vec<(String, serde_json::Value)> = [
+            ("pipeline_id", state_str(state, "pipeline_id")),
+            ("thread_id", state_str(state, "session_id")),
+            ("message_id", state_str(state, "message_id")),
+            ("plugin_id", Some(plugin_id.to_string())),
+            (
+                "code",
+                Some(
+                    err.code
+                        .clone()
+                        .unwrap_or_else(|| "PLUGIN_EXEC_FAILED".into()),
+                ),
+            ),
+            ("message", Some(err.message.clone())),
+            ("run_id", Some(self.run_id.clone())),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
+        .collect();
+        bus.emit(agentos_hooks::domain_event("plugin_step_failed", tags));
+    }
+
     /// 判定插件是否存在于已知插件集合（命中规则③）。
     fn lookup_plugin(&self, plugin_id: &str) -> bool {
         self.plugin_ids.contains(plugin_id)
+    }
+
+    /// run 墙钟预算剩余量（超时看门狗，`timeout_seconds` 语义：单次 run 执行
+    /// ≤ 该秒数；agent_config_load 注入 / stop_check 插件同一配置源）。
+    ///
+    /// 键缺席、负值（stop_check 的 -1 无限制哨兵同款）或非有限数 = 不设防
+    /// （`None`，行为与无看门狗完全一致）；0 = 立即到点。锚点 = run 起始
+    /// （tokio 单调时钟，paused-clock 测试经 `advance` 注入可调延迟）；预算
+    /// 每执法点现读——run 中途首次注入（首 prepare 的 agent_config_load）
+    /// 即生效。剩余量饱和到 0：已过点返回 `Some(0)`，下一次包装立即到点。
+    fn run_budget_remaining(
+        &self,
+        run_started: tokio::time::Instant,
+        state: &serde_json::Value,
+    ) -> Option<Duration> {
+        let limit_secs = match state.get("timeout_seconds").and_then(|v| v.as_f64()) {
+            Some(v) if v.is_finite() && v >= 0.0 => v,
+            _ => return None,
+        };
+        let limit = Duration::from_secs_f64(limit_secs);
+        Some(limit.saturating_sub(run_started.elapsed()))
+    }
+
+    /// 看门狗到点署名：写控制状态键（`ended` + `router.stop_reason="timeout"`
+    /// ——词表内既有失败词，core `FAILED_STOP_REASONS` 冻结单点，引擎只查表
+    /// 不加词），随 run 收尾既有路径（异常终局闸让位于已署名 →
+    /// `from_control_state` → persist_run_end）折算 failed 落库。幂等：多处
+    /// 到点重复调用重写同值。journal 进轨迹（凡 state 变更必可追溯）。
+    fn force_timeout_signature(&self, state: &mut serde_json::Value) {
+        error!(
+            run_id = %self.run_id,
+            "run 墙钟超时：timeout_seconds 预算耗尽，冻结的轮次等待被放弃，强制署名终态化（timeout）"
+        );
+        self.journal_top_key(state, "ended");
+        set_key(state, "ended", serde_json::Value::Bool(true));
+        self.journal_top_key(state, "router.stop_reason");
+        set_key(state, "router.stop_reason", serde_json::json!("timeout"));
+    }
+
+    /// 单次插件调用上界的 **run 级封顶层**（原三分支的引擎侧剩余，见 ADR 草稿
+    /// docs/working/2026-10-15-plugin-call-timeout-adr-draft.md）。基础策略档
+    /// （manifest 自报 ∩ 缺省 600s，含 L1 让位——M3 单一解析点）在 invoker
+    /// 单点（插件调用模块）——本层只管 run 级知识，二者嵌套合成、各管一事：
+    ///
+    /// - 配置档：state `plugin_call_timeout_seconds`（解析单源 =
+    ///   [`agentos_invoker::invoker::state_plugin_call_timeout`]，M3 收敛：
+    ///   state 键全仓只此一处解析，ADR 2026-11-05-timeout-taxonomy-and-merge；
+    ///   有限数且 ≥0，负值/-1、非有限数按未配置——单次层不提供无限制出口，
+    ///   无界单次调用即根因本身；载体与 `timeout_seconds` 同构：
+    ///   agent_config_load 可注入、任意管道步 state_updates 可写）。
+    /// - 预算档：run 剩余预算（`timeout_seconds` 看门狗同源同锚）。取 min
+    ///   的不变量：**单次调用永不越过 run 剩余预算**（预算耗尽整 run 必死，
+    ///   单次层先断只废一步）。
+    ///
+    /// 两档全缺席 → `None`（引擎不加壳，基础界由 invoker 恒在场兜底——
+    /// 「所有路径恒有界」不变量由两层合成保证）。
+    fn plugin_call_timeout(&self, state: &serde_json::Value) -> Option<Duration> {
+        let configured = agentos_invoker::invoker::state_plugin_call_timeout(state);
+        let budget = match *self.run_anchor.lock() {
+            Some(anchor) => self.run_budget_remaining(anchor, state),
+            None => None,
+        };
+        match (configured, budget) {
+            (Some(c), Some(b)) => Some(c.min(b)),
+            (Some(c), None) => Some(c),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
+    }
+
+    /// 单次调用超时的错误信封（步失败路径入口）：`code` 取
+    /// [`STEP_CALL_TIMEOUT_CODE`]，与 run 级 timeout 署名（`router.stop_reason`，
+    /// FAILED_STOP_REASONS 词表）分面可辨——本信封进 `_plugin_errors` 后 run
+    /// 继续推进（stop_check/熔断/轮上限接管），后者是 run 终态签名。
+    fn step_call_timeout_error(plugin_id: &str, limit: Duration) -> PluginError {
+        PluginError {
+            message: format!(
+                "单次插件调用超时（上界 {limit:?}）：invoke 等待被放弃（tokio drop 取消，\
+                 sidecar 子进程交既有 idle-unload/respawn 兜底），步记失败、run 继续"
+            ),
+            code: Some(STEP_CALL_TIMEOUT_CODE.to_string()),
+            source: Some(plugin_id.to_string()),
+        }
+    }
+
+    /// 单次调用超时且预算档同步耗尽（剩余预算恰为 0）时代行 run 级署名：
+    /// 复用看门狗 [`Self::force_timeout_signature`]（同签名同终态路径）。
+    ///
+    /// 为什么需要：单次包装是 step 级预算执法点的**内层** timeout，上界恰取
+    /// 自剩余预算时两层同刻到点——tokio `Timeout::poll` 先查内层，内层先行
+    /// 短路使外层看门狗执法点永远轮不到（其 inner 已就绪）。若无此代行，
+    /// `timeout_seconds` 预算耗尽的 run 级 timeout 终态契约被单次层遮蔽
+    /// （run 转由轮上限等兜底接管，署名失真）。配置/缺省档到点而预算未尽
+    /// （剩余 > 0）或预算缺席时：不触发，步失败、run 继续（单次层本语义）。
+    fn force_run_signature_if_budget_exhausted(&self, state: &mut serde_json::Value) {
+        let exhausted = match *self.run_anchor.lock() {
+            Some(anchor) => self.run_budget_remaining(anchor, state) == Some(Duration::ZERO),
+            None => false,
+        };
+        if exhausted {
+            self.force_timeout_signature(state);
+        }
+    }
+
+    /// 按声明分类插件 id（K2 声明化：读 `capabilities.metrics_class`
+    /// 装配的声明表；未声明 → `Other`，分类结果只进 metrics，不影响任何
+    /// 执行路径）。
+    fn plugin_metrics_class(&self, plugin_id: &str) -> PluginMetricsClass {
+        self.metrics_classes
+            .get(plugin_id)
+            .copied()
+            .unwrap_or(PluginMetricsClass::Other)
     }
 
     /// 构造 `PluginContext` 并调用 `invoker`。
@@ -1609,6 +2636,10 @@ impl PipelineExecutor {
     /// `method`：具名步骤服务时 config 注入约定字段 `_step_method`（与 inputs
     /// 同对象共存，SDK 侧按名分发；None = 默认 execute 入口零改动）。
     ///
+    /// `check_trigger`：checks 触发上下文（Some 时 config 注入约定字段
+    /// `_pipe_check`——触发 at/动作/state_delta 键级 payload；None = 顺序执行
+    /// 零改动）。
+    ///
     /// `state` 为借用：invoke 期间引擎不写 state（结果在返回后 merge），
     /// 消除每步整包深拷。
     async fn invoke_plugin(
@@ -1617,6 +2648,7 @@ impl PipelineExecutor {
         method: Option<&str>,
         inputs: &HashMap<String, serde_json::Value>,
         state: &serde_json::Value,
+        check_trigger: Option<&serde_json::Value>,
     ) -> Result<PluginResult, PluginError> {
         // 监控 M2：step 命中（每 invoke 一次 = 命中一个 step 的插件）
         self.metrics.inc_step_hit();
@@ -1633,6 +2665,11 @@ impl PipelineExecutor {
         if let Some(name) = method {
             config = agentos_invoker::shared::with_step_method(config, name);
         }
+        if let Some(trigger) = check_trigger {
+            if let Some(obj) = config.as_object_mut() {
+                obj.insert("_pipe_check".to_string(), trigger.clone());
+            }
+        }
         let ctx = PluginContext::new(
             state,
             config,
@@ -1641,9 +2678,10 @@ impl PipelineExecutor {
             content_loader,
         );
         // 监控 M2：LLM/工具调用次数 + 耗时（调度层视角 = invoke 前后差，
-        // 监控设计 §补引擎调度层）。类别按显式映射表登记
-        // （plugin_metrics_class），未收录 id = Other 不计（编排类插件）。
-        let class = plugin_metrics_class(plugin_id);
+        // 监控设计 §补引擎调度层）。类别按 plugin.json
+        // `capabilities.metrics_class` 声明（K2 声明化），未声明 = Other
+        // 不计（编排类插件）。
+        let class = self.plugin_metrics_class(plugin_id);
         let invoke_start = std::time::Instant::now();
         // 堆栈级诊断插桩：invoke await 即既有等待点（LLM 流式 / 工具阻塞——
         // human_interaction 在插件进程内等回复也显形于此），标签经任务本地
@@ -1652,7 +2690,27 @@ impl PipelineExecutor {
         agentos_core::task_activity::set_current_label(format!(
             "invoking plugin {plugin_id} (pipeline {pipeline_id})"
         ));
-        let result = self.invoker.invoke_pipeline_plugin(plugin_id, &ctx).await;
+        // 冻结根因根修（两层合成、恒有界）：基础策略档（manifest 自报 ∩ 缺省
+        // 600s）在 invoker 单点恒在场；本层只在 run 级配置/预算在场时加壳封顶
+        // （[`Self::plugin_call_timeout`]）。到点放弃（tokio timeout drop
+        // future = 最小取消语义），走步失败单点路径
+        // （[`Self::handle_plugin_failure`]，code=STEP_CALL_TIMEOUT 与 run 级
+        // timeout 署名可辨），run 不再被单次挂起冻结。
+        let invoke_fut = self.invoker.invoke_pipeline_plugin(plugin_id, &ctx);
+        let result = match self.plugin_call_timeout(state) {
+            Some(limit) => match tokio::time::timeout(limit, invoke_fut).await {
+                Ok(result) => result,
+                Err(_elapsed) => {
+                    warn!(
+                        plugin = %plugin_id,
+                        limit = ?limit,
+                        "单次插件调用超预算：run 级封顶到点，步失败路径接管（STEP_CALL_TIMEOUT）"
+                    );
+                    Err(Self::step_call_timeout_error(plugin_id, limit))
+                }
+            },
+            None => invoke_fut.await,
+        };
         let elapsed = invoke_start.elapsed().as_micros() as u64;
         match class {
             PluginMetricsClass::Llm => self.metrics.inc_llm_call(elapsed),
@@ -1675,6 +2733,9 @@ impl PipelineExecutor {
         // （compiler::pipeline_config_hash：serde_json 规范化 + SHA-256 前 16 hex）。
         // runs 表退役（ADR 2026-09-18）：运行簿记 = state 运行键（run_id /
         // run_status='running' / run_started_at / run_config_hash）。
+        // 单写者（刀5）：run_started_at 的唯一值 origin 是本函数上方 run_init
+        // 写入 state 的那一次 Utc::now()——此处读回同串传给 store（store 侧
+        // 不自产时间戳），保证 state 与 DB 两读面恒同值。
         let tenant_id = self.default_tenant.tenant_id.clone();
 
         // pipeline_id 从 state 读（stage_build_initial_state 注入，前端创建会话
@@ -1684,10 +2745,21 @@ impl PipelineExecutor {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let started_at = state
+            .get("run_started_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if !pipeline_id.is_empty() {
             if let Err(e) = self
                 .store
-                .record_run_start(&pipeline_id, &tenant_id, &self.run_id, config_hash)
+                .record_run_start(
+                    &pipeline_id,
+                    &tenant_id,
+                    &self.run_id,
+                    config_hash,
+                    &started_at,
+                )
                 .await
             {
                 warn!(run_id = %self.run_id, error = %e, "运行开始簿记落库失败（继续执行）");
@@ -1862,6 +2934,74 @@ impl PipelineExecutor {
         }
     }
 
+    /// 终局孤儿工具卡合成（interrupted/error 终局专用）：run 到达
+    /// Cancelled/Failed 终局时，扫描 messages 历史中已发起但尚无对应 role=tool
+    /// 结果消息的 tool_call_id，逐个合成终态 tool 结果消息（稳定标记
+    /// [`INTERRUPTED_TOOL_RESULT_MARKER`] + 人读文本，envelope success=false），
+    /// 经 [`apply_messages_op_update`] 同一通道落库（内存 state + message_slots
+    /// 表 + 实录 ledger 同落）——恢复 tool_calls/tool 一一配对，前端不再把
+    /// 孤儿卡渲染成永动计时。
+    ///
+    /// 同范式：LangGraph interrupt 恢复合成 ToolMessage("rejected by user")；
+    /// LibreChat v0.8.8 #15517 Forward Run Abort Signal to Foreground Tool Calls。
+    ///
+    /// 范围裁定：
+    /// - 只在 Cancelled（用户 stop/抢占中断）与 Failed（error 终局）合成；
+    ///   Completed 不合成（正常路径工具都已返回）；Suspended 非终局不合成
+    ///   （human_interaction 等待恢复期间工具调用合法在途）。
+    /// - 扫描整条 messages 历史（跨 run 累积数组）：历史孤儿一并治愈——配对
+    ///   是会话级不变量，已治愈者天然幂等（有了结果消息不再命中孤儿集）。
+    /// - 内核进程自身硬崩不经过本路径，孤儿由前端终态渲染兜底刀承接。
+    /// - 落库失败 warn + 计数软降级（对齐 merge_and_project 的 messages 写
+    ///   失败语义）：终局点不因合成消息写失败掩盖原始终态。
+    async fn synthesize_orphan_tool_results(
+        &self,
+        state: &mut serde_json::Value,
+        terminal: &agentos_core::types::RunStatus,
+    ) {
+        if !matches!(
+            terminal,
+            agentos_core::types::RunStatus::Cancelled | agentos_core::types::RunStatus::Failed
+        ) {
+            return;
+        }
+        let orphans = orphan_tool_call_ids(state);
+        if orphans.is_empty() {
+            return;
+        }
+        let ops: Vec<serde_json::Value> = orphans
+            .iter()
+            .map(|(call_id, tool_name)| {
+                serde_json::json!({
+                    "op": "set",
+                    "msg": synthetic_tool_result_message(call_id, tool_name),
+                })
+            })
+            .collect();
+        let tenant_id = self.default_tenant.tenant_id.clone();
+        let count = ops.len();
+        match apply_messages_op_update(state, self.store.as_ref(), &tenant_id, &ops).await {
+            Ok(ledger) => {
+                if !ledger.is_empty() {
+                    self.ops_ledger.lock().extend(ledger);
+                }
+                info!(
+                    run_id = %self.run_id,
+                    synthesized = count,
+                    "interrupted/error 终局：在途工具调用已合成终态 tool 结果消息（恢复配对）"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    run_id = %self.run_id,
+                    error = %e,
+                    "孤儿工具调用合成消息落库失败（软降级，终态不受影响）"
+                );
+                self.metrics.inc_persist_failure();
+            }
+        }
+    }
+
     /// merge 插件 state_updates 进 state（纯内存合并）。
     ///
     /// messages **只接受 op 声明**（`{_ops:[set/insert]}`）→ "一次 apply" 到内存、
@@ -1875,9 +3015,10 @@ impl PipelineExecutor {
         for (k, v) in updates {
             if k == "messages" {
                 if self.iteration_depth > 0 {
-                    // 并行 for-each 迭代局部：ops 只缓冲不 apply（ADR 2026-10-02）——
-                    // 父循环按迭代序统一"一次 apply"。已知限制：迭代内后续步骤对
-                    // messages 的写后读不保证。
+                    // 并行 for-each 迭代局部：ops 只缓冲不 apply（内容移植自
+                    // sync/open-main-20261008 c2db32c26）——父循环按迭代序统一
+                    // "一次 apply"。已知限制：迭代内后续步骤对 messages 的写后
+                    // 读不保证。
                     if let Some(ops) = v.get("_ops").and_then(|o| o.as_array()) {
                         self.deferred_ops.lock().extend(ops.iter().cloned());
                     } else {
@@ -1939,8 +3080,7 @@ impl PipelineExecutor {
                 warn!(key = %k, "插件试图写内核持有的 run_status，该更新被忽略");
                 continue;
             }
-            self.journal_top_key(state, k);
-            set_key(state, k, v.clone());
+            self.apply_state_key_update(state, k, v.clone());
         }
     }
 
@@ -2096,8 +3236,7 @@ impl PipelineExecutor {
             if matched {
                 // set 字段
                 for (k, v) in &route.set {
-                    self.journal_top_key(state, k);
-                    set_key(state, k, v.clone());
+                    self.apply_state_key_update(state, k, v.clone());
                 }
                 match &route.next {
                     RouteNext::Loop => { /* 继续，外层 while 会循环 */ }
@@ -2166,6 +3305,121 @@ impl Drop for StepBindingGuard {
 }
 
 // ── state 操作工具 ─────────────────────────────────────────────
+
+/// 合成 tool 结果消息的稳定机器标记（content 前缀）：interrupted/error 终局
+/// 为孤儿 tool_calls 合成的结果消息一律以它开头——前端终态渲染与测试断言的
+/// 共同锚点。措辞冻结：改动即破坏消费方契约。
+pub const INTERRUPTED_TOOL_RESULT_MARKER: &str = "[interrupted]";
+
+/// 收集 messages 历史中已发起但无对应 role=tool 结果消息的 tool_call_id
+/// （(call_id, tool_name) 按首现顺序，去重）。配对判定与 tool_core 同口径：
+/// role=tool 消息按 `tool_call_id` 字段认领。
+fn orphan_tool_call_ids(state: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(messages) = state.get("messages").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut issued: Vec<(String, String)> = Vec::new();
+    let mut returned: HashSet<String> = HashSet::new();
+    for msg in messages {
+        match msg.get("role").and_then(|v| v.as_str()) {
+            Some("assistant") => {
+                for call in msg
+                    .get("tool_calls")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    let Some(id) = call
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                    else {
+                        continue;
+                    };
+                    if issued.iter().any(|(i, _)| i == id) {
+                        continue;
+                    }
+                    let name = call
+                        .pointer("/function/name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    issued.push((id.to_string(), name));
+                }
+            }
+            Some("tool") => {
+                if let Some(id) = msg.get("tool_call_id").and_then(|v| v.as_str()) {
+                    returned.insert(id.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    issued
+        .into_iter()
+        .filter(|(id, _)| !returned.contains(id))
+        .collect()
+}
+
+/// 构造孤儿 tool_call 的合成终态结果消息：形状对齐 tool_core
+/// `tool_result_message`（envelope 七键封闭），content = 稳定标记 + 人读
+/// 文本；envelope success=false → 读时重建派生 status=failed（前端终态）。
+fn synthetic_tool_result_message(call_id: &str, tool_name: &str) -> serde_json::Value {
+    let content = format!(
+        "{INTERRUPTED_TOOL_RESULT_MARKER} run terminated before tool returned (tool: {tool_name})"
+    );
+    serde_json::json!({
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": content,
+        "tool_result": {
+            "call_id": call_id,
+            "tool_name": tool_name,
+            "success": false,
+            "error": content,
+            "data": serde_json::Value::Null,
+            "metadata": { "synthetic": true },
+            "duration_ms": serde_json::Value::Null,
+        },
+    })
+}
+
+/// 异常终局检测（凡异常终止必须显式报错，2026-10-08 用户裁定）：返回应
+/// 署名的失败词，None = 正常收束。
+///
+/// 只读引擎级控制键，零领域知识：
+/// - 挂起（等待恢复）非终局，不算异常；
+/// - `router.stop_reason` 已署名 = 终止方权威（含 task_* / user_requested /
+///   max_iterations 等），引擎不覆写；
+/// - 无署名却带未消费工具调用（`raw_tool_calls` 非空数组——post 路由表
+///   漏配回环路由致调用被吞）→ `dropped_tool_calls`；
+/// - 无署名且空回复耗尽未裁决（`llm_empty_exhausted`——会话管道无任务域
+///   收束方，agent 零产出即退出）→ `empty_reply_exhausted`。
+fn abnormal_end_signature(state: &serde_json::Value) -> Option<&'static str> {
+    if truthy_flag(state, "suspended") {
+        return None;
+    }
+    let unsigned = state
+        .get("router.stop_reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .is_empty();
+    if !unsigned {
+        return None;
+    }
+    let pending_calls = state
+        .get("raw_tool_calls")
+        .and_then(|v| v.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    if pending_calls {
+        return Some("dropped_tool_calls");
+    }
+    if truthy_flag(state, "llm_empty_exhausted") {
+        return Some("empty_reply_exhausted");
+    }
+    None
+}
 
 /// 确保 state 是 Object（非 Object 时替换为空 Object）。
 fn ensure_object(state: &mut serde_json::Value) {
@@ -2296,6 +3550,73 @@ pub fn trace_mirror_digest(v: &serde_json::Value) -> serde_json::Value {
         "count": items.len(),
         "items": item_digests,
     })
+}
+
+/// 管道不变上下文键清单：管道生命周期内内容不变的键。管道每轮 run 重建
+/// state，初始化重写（agent_config_load/tool_schema/tool_core 等落键）对
+/// step journal 恒为"新增键"→ 全值入 trace；实测 99.2% 实例为同管道字节级
+/// 重复（装机库 1125 份 system_message 集中在 96 管道）。`context.` 前缀族
+/// （context.agent_name 等）按前缀匹配，其余精确匹配。
+const INVARIANT_SUPPRESS_KEYS: &[&str] = &[
+    "system_message",
+    "tool_output_contracts",
+    "tool_schemas",
+    "tool_ids",
+];
+
+/// 参与同值跳过的最小序列化字节数：小值照常更新（比对收益不值），基线表
+/// 也不被海量小键污染。
+const INVARIANT_SUPPRESS_MIN_BYTES: usize = 4096;
+
+fn is_pipeline_invariant_key(key: &str) -> bool {
+    INVARIANT_SUPPRESS_KEYS.contains(&key) || key.starts_with("context.")
+}
+
+/// 每管道不变键基线：`(pipeline_id, key) -> 内容哈希`。进程内全局——执行器
+/// 每 run 重建，管道跨轮续用要求基线活过执行器实例；重启即清空自愈（重启后
+/// 各活跃管道下一轮真写一次全值）。基线只服务于"同值跳过更新"的比对，state
+/// 语义零影响；管道首条轨迹恒自含全值，本管道回放完整性不受影响（2026-08-30
+/// 管道身份裁定零改动，恢复面无感知）。
+fn global_invariant_baseline() -> &'static parking_lot::Mutex<HashMap<(String, String), u64>> {
+    static BASELINE: std::sync::OnceLock<parking_lot::Mutex<HashMap<(String, String), u64>>> =
+        std::sync::OnceLock::new();
+    BASELINE.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+}
+
+/// 同值不更新判定（更新层，2026-10-30）：不变清单键且序列化 ≥
+/// [`INVARIANT_SUPPRESS_MIN_BYTES`] 且内容哈希与该管道基线一致 → true
+/// （调用方**只跳 journal**——没有 journal 就没有 diff，也就没有轨迹，冗余
+/// 在更新层消失，而非落库前剔除；set 照常落地，run state 每轮重建，跳写会让
+/// 重建 state 永缺该键，见 [`Self::apply_state_key_update`]）。
+/// 哈希不一致（真变更）/首写 → 登记基线并返回 false 照常
+/// 更新。Null（删除标记）、小值、清单外键、空 pipeline_id（run 极早期，防
+/// 跨管道误吞）恒 false。
+fn invariant_update_suppressed(
+    baseline: &mut HashMap<(String, String), u64>,
+    pipeline_id: &str,
+    key: &str,
+    value: &serde_json::Value,
+) -> bool {
+    if pipeline_id.is_empty() || value.is_null() || !is_pipeline_invariant_key(key) {
+        return false;
+    }
+    let serialized =
+        serde_json::to_string(value).expect("serde_json Value serialization is infallible");
+    if serialized.len() < INVARIANT_SUPPRESS_MIN_BYTES {
+        return false;
+    }
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serialized.hash(&mut hasher);
+    let content_hash = hasher.finish();
+    let scope = (pipeline_id.to_string(), key.to_string());
+    match baseline.get(&scope) {
+        Some(&h) if h == content_hash => true,
+        _ => {
+            baseline.insert(scope, content_hash);
+            false
+        }
+    }
 }
 
 fn state_diff_from_journal(
@@ -2633,17 +3954,25 @@ pub async fn apply_messages_op_update(
     Ok(resolved.iter().filter_map(op_ledger_entry).collect())
 }
 
-/// A1：把内核 message_id 注入"本轮首个 assistant 追加 op"。
+/// A1：把内核 message_id 注入"本轮首个 assistant 追加 op"，并对该槽位本轮内的
+/// 后续改写粘滞携带同一 id。
 ///
 /// 注入以 `_message_id` 内部字段挂在 **op** 上而非消息体上：消息是不可变值
 /// （blob 内容寻址、LLM 上下文、指纹实录都不应携带它），仅表侧 record_id 消费。
 ///
-/// 命中条件（缺一不可，防止误注入历史消息）：
+/// 认领命中条件（缺一不可，防止误注入历史消息）：
 /// - `set` op 且 msg.role == "assistant" 且 msg 未自带 id；
 /// - 新槽位追加（op.seq > resolve 前旧 max）——context_window_guard 等对旧槽位的
 ///   modify op 带显式旧 seq，天然排除；
 /// - 每 run 仅一次：`state["_assistant_id_assigned"]` 置位后，多轮迭代的后续
 ///   assistant 追加（各自独立消息）不再注入，保证 id 与前端流式占位一一对应。
+///
+/// 粘滞改写：认领槽位 seq 记入 `state["_assistant_id_slot_seq"]`，本轮内对该槽
+/// 的显式 seq 改写（post 步骤 [来源:] 标注、收尾改写等）重新注入同一 id——否则
+/// 表侧 ON CONFLICT 改写把 record_id 回退成内容指纹，流式占位（a_）与 DB 重载
+/// （mc_）键断裂，前端精确对账去重失败成双气泡（2026-10-19 偶发双气泡根因，
+/// 装机库 pipeline 9b4da24d92e1 实证：最终回复 seq=11 record_id=mc_71eb12…）。
+/// 粘滞槽随 round_start 每轮复位；未认领槽位（真历史/压缩改写）仍走内容派生。
 fn inject_run_message_id(
     state: &mut serde_json::Value,
     resolved: &[serde_json::Value],
@@ -2656,50 +3985,65 @@ fn inject_run_message_id(
     else {
         return resolved.to_vec();
     };
-    if state
+    let assigned = state
         .get("_assistant_id_assigned")
         .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+        .unwrap_or(false);
+    let sticky_seq = state.get("_assistant_id_slot_seq").and_then(|v| v.as_i64());
+    // 快路径：本轮 id 已认领且无粘滞槽 → 原样透传
+    if assigned && sticky_seq.is_none() {
         return resolved.to_vec();
     }
     let mut out: Vec<serde_json::Value> = resolved.to_vec();
+    let mut claimed_slot = sticky_seq;
+    // 认领闸门：闩锁已置位或本批已认领一次即关闸（同批多轮 assistant 追加是
+    // 各自独立消息，只有首个认领——原实现 break 语义的等价保持）
+    let mut claim_open = !assigned;
+    let mut newly_claimed = false;
     for op in out.iter_mut() {
         if op.get("op").and_then(|v| v.as_str()) != Some("set") {
             continue;
         }
-        let is_new_slot = op
-            .get("seq")
-            .and_then(|v| v.as_i64())
-            .map(|s| s > entry_max_seq)
+        let op_seq = op.get("seq").and_then(|v| v.as_i64());
+        let is_assistant_obj = op
+            .get("msg")
+            .map(|m| m.is_object() && m.get("role").and_then(|v| v.as_str()) == Some("assistant"))
             .unwrap_or(false);
-        if !is_new_slot {
-            continue;
+        if claim_open {
+            // 认领分支：本轮首个 assistant 新槽追加（条件缺一不可）
+            let is_new_slot = op_seq.is_some_and(|s| s > entry_max_seq);
+            let has_own_id = op
+                .get("msg")
+                .and_then(|m| m.get("id"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty());
+            if is_new_slot && is_assistant_obj && !has_own_id {
+                if let Some(obj) = op.as_object_mut() {
+                    obj.insert("_message_id".to_string(), serde_json::json!(mid));
+                }
+                claimed_slot = op_seq;
+                newly_claimed = true;
+                claim_open = false;
+                continue;
+            }
         }
-        let Some(msg) = op.get("msg") else { continue };
-        if !msg.is_object() {
-            continue;
+        // 粘滞分支：已认领槽位在本轮内的后续改写重新注入同一 id
+        if claimed_slot.is_some() && op_seq == claimed_slot && is_assistant_obj {
+            if let Some(obj) = op.as_object_mut() {
+                obj.insert("_message_id".to_string(), serde_json::json!(mid));
+            }
         }
-        if msg.get("role").and_then(|v| v.as_str()) != Some("assistant") {
-            continue;
-        }
-        if msg
-            .get("id")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.is_empty())
-        {
-            continue;
-        }
-        if let Some(obj) = op.as_object_mut() {
-            obj.insert("_message_id".to_string(), serde_json::json!(mid));
-        }
+    }
+    if newly_claimed {
         if let Some(obj) = state.as_object_mut() {
             obj.insert(
                 "_assistant_id_assigned".to_string(),
                 serde_json::json!(true),
             );
+            if let Some(ss) = claimed_slot {
+                obj.insert("_assistant_id_slot_seq".to_string(), serde_json::json!(ss));
+            }
         }
-        break;
     }
     out
 }
@@ -2750,7 +4094,9 @@ pub(crate) fn op_ledger_entry(op: &serde_json::Value) -> Option<serde_json::Valu
     }
 }
 
-/// 监控 M2 插件指标类别（词表，替代已废的 plugin_id 子串猜测）。
+/// 监控 M2 插件指标类别（整改 K2 声明化：真值源 = plugin.json
+/// `capabilities.metrics_class` 声明；内核内置 id→类别映射表已退役，
+/// 内核零插件分类知识）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginMetricsClass {
     /// LLM 调用：计入 `llm_calls_total` / `llm_calls_micros`。
@@ -2761,50 +4107,22 @@ pub enum PluginMetricsClass {
     Other,
 }
 
-/// 插件 id → 指标类别显式映射（监控分类词表，非行为特判——分类结果只进
-/// metrics，不影响任何执行路径）。
-///
-/// 契约：
-/// - 键 = plugin.json 的 `id` 精确匹配（不做大小写归一、不做子串猜测）；
-/// - 覆盖现存承载 LLM/tool 调用语义的插件全集，未收录 id 一律 `Other`；
-/// - 新插件若承载 LLM/tool 调用语义须在此登记，漏登 = 指标少计（可观测
-///   债务），不构成行为故障；分类基线由
-///   `test_plugin_metrics_class_locked_to_current_plugin_set` 锁定。
-const METRICS_PLUGIN_CLASS: &[(&str, PluginMetricsClass)] = &[
-    // LLM 调用面
-    ("llm_service", PluginMetricsClass::Llm),
-    ("pipeline_llm_core", PluginMetricsClass::Llm),
-    // 工具调用面（管道工具核 + 工具插件）
-    ("agentos-builtin-tools", PluginMetricsClass::Tool),
-    ("bash_tool", PluginMetricsClass::Tool),
-    ("download_tool", PluginMetricsClass::Tool),
-    ("human_interaction_tool", PluginMetricsClass::Tool),
-    ("media_tools", PluginMetricsClass::Tool),
-    ("memory_tool", PluginMetricsClass::Tool),
-    ("pipeline_tool_cache", PluginMetricsClass::Tool),
-    ("pipeline_tool_cache_writer", PluginMetricsClass::Tool),
-    ("pipeline_tool_core", PluginMetricsClass::Tool),
-    ("pipeline_tool_schema", PluginMetricsClass::Tool),
-    ("pipeline_tool_schema_validator", PluginMetricsClass::Tool),
-    ("project_create_tool", PluginMetricsClass::Tool),
-    ("resource_merge_tool", PluginMetricsClass::Tool),
-    ("resource_search_tool", PluginMetricsClass::Tool),
-    ("simple_tools", PluginMetricsClass::Tool),
-    ("spill_retrieve_tool", PluginMetricsClass::Tool),
-    ("task_evaluate_tool", PluginMetricsClass::Tool),
-    ("task_manage_tool", PluginMetricsClass::Tool),
-    ("task_submit_tool", PluginMetricsClass::Tool),
-    ("trigger_setup_tool", PluginMetricsClass::Tool),
-    ("web_operate_tool", PluginMetricsClass::Tool),
-];
+/// `capabilities.metrics_class` 合法声明值常量组（单一真值源，对齐 P-2
+/// 鉴权常量组先例形态；`docs/schemas/plugin-manifest.schema.json` 的枚举
+/// 与此同步）。
+pub const METRICS_CLASS_LLM: &str = "llm";
+pub const METRICS_CLASS_TOOL: &str = "tool";
 
-/// 按显式映射表分类插件 id（未收录 → `Other`）。
-fn plugin_metrics_class(plugin_id: &str) -> PluginMetricsClass {
-    METRICS_PLUGIN_CLASS
-        .iter()
-        .find(|(id, _)| *id == plugin_id)
-        .map(|(_, class)| *class)
-        .unwrap_or(PluginMetricsClass::Other)
+impl PluginMetricsClass {
+    /// 声明值 → 类别（精确匹配、大小写敏感）。`None` = 非法声明值
+    /// （含显式 "other"——Other 是缺省语义，不是登记项）。
+    pub fn from_declared(declared: &str) -> Option<Self> {
+        match declared {
+            METRICS_CLASS_LLM => Some(PluginMetricsClass::Llm),
+            METRICS_CLASS_TOOL => Some(PluginMetricsClass::Tool),
+            _ => None,
+        }
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════
@@ -2863,6 +4181,156 @@ mod state_diff_journal_tests {
         journal.insert("x".to_string(), None);
         let diff = state_diff_from_journal(&journal, &json!({}));
         assert!(diff.as_object().is_some_and(|o| o.is_empty()));
+    }
+}
+
+#[cfg(test)]
+mod invariant_update_suppress_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 构造 ≥ 阈值的可序列化值（文本体 8KB）。
+    fn big_value(tag: &str) -> serde_json::Value {
+        json!({"text": format!("{tag}-{}", "x".repeat(8192))})
+    }
+
+    /// 同管道同值：首判不抑制（登记基线、照常更新），再判抑制（同值不更新）。
+    #[test]
+    fn same_pipeline_same_value_suppressed_on_second_judgement() {
+        let mut baseline = HashMap::new();
+        assert!(
+            !invariant_update_suppressed(&mut baseline, "p1", "system_message", &big_value("a")),
+            "管道首写照常更新"
+        );
+        assert!(
+            invariant_update_suppressed(&mut baseline, "p1", "system_message", &big_value("a")),
+            "同管道同值重写 → 跳过更新（没有 update 就没有轨迹）"
+        );
+    }
+
+    /// 值变更（哈希不一致）→ 不抑制且基线更新：同值跳过永不吞真变更。
+    #[test]
+    fn changed_value_not_suppressed_and_baseline_updates() {
+        let mut baseline = HashMap::new();
+        invariant_update_suppressed(&mut baseline, "p1", "system_message", &big_value("v1"));
+        assert!(invariant_update_suppressed(
+            &mut baseline,
+            "p1",
+            "system_message",
+            &big_value("v1")
+        ));
+        assert!(
+            !invariant_update_suppressed(&mut baseline, "p1", "system_message", &big_value("v2")),
+            "变更照常更新"
+        );
+        // 基线已更新为 v2：回写 v1 也视为变更（基线只认最近一次应用值）
+        assert!(!invariant_update_suppressed(
+            &mut baseline,
+            "p1",
+            "system_message",
+            &big_value("v1")
+        ));
+    }
+
+    /// 裁定守护（2026-08-30 管道身份）：基线严格按 pipeline_id 隔离——不同
+    /// 管道写同值互不影响，任何管道的首写恒更新，跨管道零耦合。
+    #[test]
+    fn different_pipeline_not_suppressed() {
+        let mut baseline = HashMap::new();
+        invariant_update_suppressed(&mut baseline, "p1", "system_message", &big_value("shared"));
+        assert!(
+            !invariant_update_suppressed(
+                &mut baseline,
+                "p2",
+                "system_message",
+                &big_value("shared")
+            ),
+            "他管道写过的同值不得抑制本管道更新"
+        );
+    }
+
+    /// 边界：小值（<4KB）不参与；清单外键不受影响；context. 前缀族与精确键
+    /// （tool_ids）命中；空 pipeline_id（run 极早期）恒不抑制（防跨管道误吞）。
+    #[test]
+    fn threshold_list_prefix_and_empty_pipeline_boundaries() {
+        let mut baseline = HashMap::new();
+        let small = json!({"text": "x".repeat(1024)});
+        assert!(!invariant_update_suppressed(
+            &mut baseline,
+            "p1",
+            "system_message",
+            &small
+        ));
+        assert!(!invariant_update_suppressed(
+            &mut baseline,
+            "p1",
+            "prompt",
+            &big_value("u")
+        ));
+        assert!(!invariant_update_suppressed(
+            &mut baseline,
+            "",
+            "system_message",
+            &big_value("e")
+        ));
+
+        assert!(!invariant_update_suppressed(
+            &mut baseline,
+            "p1",
+            "context.agent_name",
+            &big_value("灵汐")
+        ));
+        assert!(invariant_update_suppressed(
+            &mut baseline,
+            "p1",
+            "context.agent_name",
+            &big_value("灵汐")
+        ));
+        assert!(!invariant_update_suppressed(
+            &mut baseline,
+            "p1",
+            "tool_ids",
+            &json!({"pad": "a".repeat(4096)})
+        ));
+        assert!(invariant_update_suppressed(
+            &mut baseline,
+            "p1",
+            "tool_ids",
+            &json!({"pad": "a".repeat(4096)})
+        ));
+    }
+
+    /// Null（删除标记）恒不抑制：删除语义必须照常应用进 state 与轨迹。
+    #[test]
+    fn null_delete_marker_not_suppressed() {
+        let mut baseline = HashMap::new();
+        assert!(!invariant_update_suppressed(
+            &mut baseline,
+            "p1",
+            "system_message",
+            &serde_json::Value::Null
+        ));
+    }
+
+    /// 全局基线接线：跨调用持久（同进程模拟跨轮），与纯函数语义一致。
+    ///
+    /// 不 clear 全局：并发测试互清共享基线致第二次调用被并发 clear 打回首写
+    /// （llvm-cov 插桩窗口实测红，c4689c7b9 同族）。管道 scope ("pw", key)
+    /// 仅本测试写入——唯一 scope 下无 residue 可防，clear 反成唯一互踩源。
+    #[test]
+    fn global_baseline_persists_across_calls() {
+        assert!(!invariant_update_suppressed(
+            &mut global_invariant_baseline().lock(),
+            "pw",
+            "tool_schemas",
+            &big_value("w")
+        ));
+        assert!(invariant_update_suppressed(
+            &mut global_invariant_baseline().lock(),
+            "pw",
+            "tool_schemas",
+            &big_value("w")
+        ));
     }
 }
 

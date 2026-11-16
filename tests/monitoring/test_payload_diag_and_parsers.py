@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 _SERVER_PY = (
-    Path(__file__).resolve().parents[2] / "plugins" / "shared" / "system" / "monitoring" / "server.py"
+    Path(__file__).resolve().parents[2] / "plugins" / "shared" / "monitoring" / "server.py"
 )
 assert _SERVER_PY.is_file()
 _spec = importlib.util.spec_from_file_location("monitoring_server_diag_under_test", _SERVER_PY)
@@ -158,5 +158,7 @@ def test_payload_diag_dir_env_takes_priority(tmp_path: Path, monkeypatch: pytest
 
 
 def test_tenant_conflict_short_circuits_on_empty_args() -> None:
-    assert monitoring_server._pipeline_tenant_conflict("", "t1") is False
-    assert monitoring_server._pipeline_tenant_conflict("p1", "") is False
+    import asyncio
+
+    assert asyncio.run(monitoring_server._pipeline_tenant_conflict("", "t1")) is False
+    assert asyncio.run(monitoring_server._pipeline_tenant_conflict("p1", "")) is False

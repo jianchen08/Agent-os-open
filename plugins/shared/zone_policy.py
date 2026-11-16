@@ -12,8 +12,8 @@
   entries ∪ 管道级授权前缀命中放行 → 区外（管道层弹授权卡，工具层兜底拒绝）。
   内建地界**不进写链**（跨会话写污染防线）。
 
-名单真值与解析链见 project_registry/tenant_data（ADR 决策5：用户空间真值，
-legacy 读取回退）。
+名单真值与解析链在 project_manager（project.load_zones 服务，T6a 起消费方
+取妥传入；ADR 决策5：用户空间真值，legacy 读取回退）。
 """
 
 from __future__ import annotations
@@ -26,12 +26,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from repo_anchor import factory_skills_write_denied as _factory_skills_write_denied
 from repo_anchor import repo_read_verdict, repo_write_denied
 from user_space import user_root
 
 logger = logging.getLogger(__name__)
 
-# 管道级授权写区的 state 键（pipeline-state.update 仅允许 task.* 前缀）。
+# 管道级授权写区的 state 键（security_check 经引擎 state_updates 合并落盘，
+# 不走 pipeline-state.update；安全域沿用 task.* 命名空间与任务域读面同键）。
 STATE_KEY = "task.authorized_write_zones"
 
 # 管道级授权读取的 state 键（读授权卡「仅本管道」落盘；与 param_inject
@@ -211,36 +213,6 @@ def within_root_anchors(resolved: Path, workspace: str | None, project_root: str
     return False
 
 
-def _load_registration_whitelist() -> list[str]:
-    """写区名单加载（project_registry 惰性导入；降级 = 空名单，范围收缩）。"""
-    try:
-        from project_registry import load_registration_whitelist as _load
-    except Exception as exc:  # noqa: BLE001 — 共享根缺失降级可见（error 级留痕）
-        logger.error("[zone_policy] 写区名单模块不可用，按空名单处理: %s", exc)
-        return []
-    return _load()
-
-
-def _load_read_deny() -> list[str]:
-    """读排除前缀加载（同名单文件 read_deny 节；降级语义同写区名单）。"""
-    try:
-        from project_registry import load_read_deny as _load
-    except Exception as exc:  # noqa: BLE001 — 共享根缺失降级可见（error 级留痕）
-        logger.error("[zone_policy] 读排除名单模块不可用，按空排除处理: %s", exc)
-        return []
-    return _load()
-
-
-def _load_read_allow() -> list[str]:
-    """读授权前缀加载（同名单文件 read_allow 节；降级 = 空名单，范围收缩）。"""
-    try:
-        from project_registry import load_read_allow as _load
-    except Exception as exc:  # noqa: BLE001 — 共享根缺失降级可见（error 级留痕）
-        logger.error("[zone_policy] 读授权名单模块不可用，按空名单处理: %s", exc)
-        return []
-    return _load()
-
-
 def _path_under_prefix(path: Path, prefix: str) -> bool:
     """前缀判定（normcase/normpath 归一，Windows 大小写不敏感同规）。"""
     p = os.path.normcase(os.path.normpath(str(path)))
@@ -253,6 +225,9 @@ def read_verdict(
     extra_grants: list[str] | None = None,
     workspace: str | None = None,
     project_root: str | None = None,
+    *,
+    read_allow: list[str] | None = None,
+    read_deny: list[str] | None = None,
 ) -> tuple[bool, str | None]:
     """根外纯读判定链：授权前缀（用户裁定 2026-09-28）→ 仓库锚拒绝集 →
     read_deny 前缀 → 放行。
@@ -263,11 +238,16 @@ def read_verdict(
     既有语义（地界内 read_deny 条目被白名单压过，与显式 read_allow 同效）。
     未授权的黑名单路径由管道层弹读授权卡交用户裁定（工具层兜底维持拒绝）。
 
+    名单节（read_allow/read_deny）自 T6a 起由调用方经 project.load_zones
+    服务取妥后传入（本模块纯函数化，不再自持登记名单文件读面）。
+
     Args:
         resolved: 已解析的绝对路径。
         extra_grants: 管道级读授权前缀（读授权卡「仅本管道」落盘）。
         workspace: 工作空间锚（内建地界派生输入；不传 = 不派生，行为同前）。
         project_root: 项目根锚（同上）。
+        read_allow: 名单读授权前缀（project.load_zones 的 read_allow 节）。
+        read_deny: 名单读排除前缀（project.load_zones 的 read_deny 节）。
 
     Returns:
         (是否允许, 拒绝原因)；黑名单制无"无锚覆盖"态，拒绝恒带原因。
@@ -275,21 +255,28 @@ def read_verdict(
     for entry in [
         *(extra_grants or []),
         *builtin_read_allow_prefixes(workspace, project_root),
-        *_load_read_allow(),
+        *(read_allow or []),
     ]:
         if _path_under_prefix(resolved, entry):
             return True, None
     matched, deny_reason = repo_read_verdict(resolved)
     if matched:
         return deny_reason is None, deny_reason
-    for entry in _load_read_deny():
+    for entry in read_deny or []:
         if _path_under_prefix(resolved, entry):
             return False, f"路径位于用户只读排除区（read_deny 前缀 {entry}），读取被拒绝"
     return True, None
 
 
-def write_verdict(resolved: Path, extra_zones: list[str] | None = None) -> tuple[bool, str | None]:
+def write_verdict(
+    resolved: Path,
+    extra_zones: list[str] | None = None,
+    write_zones: list[str] | None = None,
+) -> tuple[bool, str | None]:
     """写区判定链：仓库自保目录恒拒 → 名单 entries ∪ 管道级授权前缀放行。
+
+    名单写区节（write_zones = project.load_zones 的 entries）自 T6a 起由调用
+    方取妥后传入（本模块纯函数化，不再自持登记名单文件读面）。
 
     Returns:
         (是否放行, 拒绝原因)；(False, None) = 不在任何写区（调用方决定弹授权卡
@@ -299,7 +286,22 @@ def write_verdict(resolved: Path, extra_zones: list[str] | None = None) -> tuple
     deny = repo_write_denied(resolved)
     if deny is not None:
         return False, deny
-    for entry in [*(extra_zones or []), *_load_registration_whitelist()]:
+    for entry in [*(extra_zones or []), *(write_zones or [])]:
         if _path_under_prefix(resolved, entry):
             return True, None
     return False, None
+
+
+def factory_skills_write_denied(resolved: Path) -> str | None:
+    """出厂 skills/ 写区收敛判定（判定单源出口，底层 = repo_anchor 同名判定）。
+
+    仓库根一级 ``skills/`` 下工具直写恒拒且不可授权（唯一写路径 = 自进化提案
+    管道，ADR 2026-10-09 批 C-a 红线①）；项目根 skills/ 播种与会话工作空间
+    skills/ 快照不收敛。消费方（security_check 位置闸 / fs_tools 兜底）须在
+    **根锚放行之前**调用——dev 场景 project_root 即仓库根，锚内快捷放行会
+    遮蔽本判定。
+
+    Returns:
+        拒绝原因；None = 不拒绝。
+    """
+    return _factory_skills_write_denied(resolved)

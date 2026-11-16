@@ -14,18 +14,13 @@
 import { create } from 'zustand'
 import type { AdaptedWidgetEvent } from '@/services/websocket/MessageAdapter'
 
-/** 每个 widget_id 最多保留的历史事件条数（防内存膨胀）。 */
-const MAX_EVENTS_PER_WIDGET = 50
-
 export interface WidgetEventState {
-  /** widget_id → 事件队列（最新在末尾，超过上限裁掉最早的） */
-  events: Record<string, AdaptedWidgetEvent[]>
-  /** widget_id → 最新一条事件（高频 widget 订阅 latest 即可，无需遍历队列） */
+  /** widget_id → 最新一条事件（消费者只读最新值，历史队列无人读不保留） */
   latest: Record<string, AdaptedWidgetEvent>
 }
 
 export interface WidgetEventActions {
-  /** 派发一条 widget 事件：按 widget_id 追加队列 + 更新 latest。widget_id 缺失则忽略。 */
+  /** 派发一条 widget 事件：按 widget_id 更新 latest。widget_id 缺失则忽略。 */
   dispatchWidgetEvent: (ev: AdaptedWidgetEvent) => void
   /** 清空（重载 schema 时调用，避免幽灵事件）。 */
   clear: () => void
@@ -34,7 +29,6 @@ export interface WidgetEventActions {
 export type WidgetEventStore = WidgetEventState & WidgetEventActions
 
 const initialState: WidgetEventState = {
-  events: {},
   latest: {},
 }
 
@@ -44,17 +38,7 @@ export const useWidgetEventStore = create<WidgetEventStore>((set) => ({
   dispatchWidgetEvent: (ev) => {
     const widgetId = ev.widget_id
     if (!widgetId) return // 无 widget_id 的事件无法路由，丢弃
-    set((state) => {
-      const prevQueue = state.events[widgetId] ?? []
-      const nextQueue =
-        prevQueue.length >= MAX_EVENTS_PER_WIDGET
-          ? [...prevQueue.slice(prevQueue.length - MAX_EVENTS_PER_WIDGET + 1), ev]
-          : [...prevQueue, ev]
-      return {
-        events: { ...state.events, [widgetId]: nextQueue },
-        latest: { ...state.latest, [widgetId]: ev },
-      }
-    })
+    set((state) => ({ latest: { ...state.latest, [widgetId]: ev } }))
   },
 
   clear: () => set({ ...initialState }),

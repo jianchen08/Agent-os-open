@@ -27,6 +27,7 @@ vi.mock('../agentTabStore', () => ({
       currentSessionId: agentTab.currentSessionId,
       initSessionTabs: agentTab.initSessionTabs,
       resetAllTabs: agentTab.resetAllTabs,
+      updateTab: agentTab.updateTab,
     }),
   },
 }))
@@ -35,6 +36,7 @@ const agentTab = {
   currentSessionId: null as string | null,
   initSessionTabs: vi.fn(),
   resetAllTabs: vi.fn(),
+  updateTab: vi.fn(),
 }
 
 vi.mock('@/services/api/session', () => ({
@@ -55,6 +57,7 @@ vi.mock('@/services/sessionExecutionOptions', () => ({
 }))
 
 import * as sessionApi from '@/services/api/session'
+import { userScopedKey as pk } from '@/utils/userScopedStorage'
 
 const makeSession = (id: string, extra: Partial<Session> = {}): Session =>
   ({
@@ -78,6 +81,8 @@ beforeEach(() => {
   queryClient.clear()
   useNotificationStore.getState().clearAll()
   useSessionStore.setState({ activeSessionId: null, deletingSessionIds: new Set() })
+  // R10② 冷进入直载一次语义锚：单例 store 跨用例共享，显式归零防前例消耗
+  useSessionListStore.setState({ coldStartRestoreDone: false })
   usePipelineMessageStore.setState({
     messagesByPipeline: {},
     pipelines: {},
@@ -87,6 +92,7 @@ beforeEach(() => {
     bottomCursorsByPipeline: {},
     hasMoreOlderByPipeline: {},
     isLoadingOlderByPipeline: {},
+    loadErrorByPipeline: {},
   })
   useAgentStore.setState({ currentAgentId: null })
   agentTab.currentSessionId = null
@@ -112,7 +118,7 @@ describe('sessionListStore — restoreActiveSessionIfNeeded', () => {
   it('当前活跃失效时用持久化的 last_active_session 恢复', async () => {
     seedSessions([makeSession('s1'), makeSession('s2')])
     useSessionStore.setState({ activeSessionId: 'stale' })
-    localStorage.setItem('last_active_session', JSON.stringify('s2'))
+    localStorage.setItem(pk('last_active_session'), JSON.stringify('s2'))
 
     await useSessionListStore.getState().restoreActiveSessionIfNeeded([
       makeSession('s1'),
@@ -122,23 +128,27 @@ describe('sessionListStore — restoreActiveSessionIfNeeded', () => {
     expect(useSessionStore.getState().activeSessionId).toBe('s2')
   })
 
-  it('无持久化记录时不恢复（保持 null）', async () => {
-    seedSessions([makeSession('s1')])
-    await useSessionListStore.getState().restoreActiveSessionIfNeeded([makeSession('s1')])
-    expect(useSessionStore.getState().activeSessionId).toBeNull()
+  it('无持久化记录时直载最近会话（R10②：有会话不停在欢迎页）', async () => {
+    // 传入顺序故意旧在前：排序真值看时间戳，不看传入顺序
+    const older = makeSession('s1', { updatedAt: '2026-01-01T00:00:00.000Z' })
+    const newer = makeSession('s2', { updatedAt: '2026-06-01T00:00:00.000Z' })
+    seedSessions([older, newer])
+    await useSessionListStore.getState().restoreActiveSessionIfNeeded([older, newer])
+    // 排序后第一个（最近使用）被直载
+    expect(useSessionStore.getState().activeSessionId).toBe('s2')
   })
 
-  it('持久化记录已不在列表中时不恢复（失效 id 被忽略）', async () => {
+  it('持久化记录已不在列表中时回落直载最近会话（失效 id 被忽略）', async () => {
     seedSessions([makeSession('s1')])
-    localStorage.setItem('last_active_session', JSON.stringify('gone'))
+    localStorage.setItem(pk('last_active_session'), JSON.stringify('gone'))
 
     await useSessionListStore.getState().restoreActiveSessionIfNeeded([makeSession('s1')])
 
-    expect(useSessionStore.getState().activeSessionId).toBeNull()
+    expect(useSessionStore.getState().activeSessionId).toBe('s1')
   })
 
-  it('空列表时不恢复（validSessionIds 为空集）', async () => {
-    localStorage.setItem('last_active_session', JSON.stringify('s1'))
+  it('空列表时不恢复（无会话保持欢迎页，validSessionIds 为空集）', async () => {
+    localStorage.setItem(pk('last_active_session'), JSON.stringify('s1'))
     await useSessionListStore.getState().restoreActiveSessionIfNeeded([])
     expect(useSessionStore.getState().activeSessionId).toBeNull()
   })
@@ -217,13 +227,13 @@ describe('sessionListStore — deleteSession 成功路径全量清理', () => {
   it('活跃会话被删时清空 activeSessionId 与持久化记录', async () => {
     seedSessions([makeSession('s1')])
     useSessionStore.setState({ activeSessionId: 's1' })
-    localStorage.setItem('last_active_session', JSON.stringify('s1'))
+    localStorage.setItem(pk('last_active_session'), JSON.stringify('s1'))
     vi.mocked(sessionApi.deleteSession).mockResolvedValue(undefined as never)
 
     await useSessionListStore.getState().deleteSession('s1')
 
     expect(useSessionStore.getState().activeSessionId).toBeNull()
-    expect(localStorage.getItem('last_active_session')).toBeNull()
+    expect(localStorage.getItem(pk('last_active_session'))).toBeNull()
   })
 
   it('当前标签页属于被删会话时重置标签并清理 localStorage', async () => {
@@ -361,10 +371,26 @@ describe('sessionListStore — setActiveSession 分支', () => {
     loadSpy.mockRestore()
   })
 
+  it('加载返回 ok:false 时标记主管道加载失败态（消息区错误提示数据源，X1-F1）', async () => {
+    seedSessions([makeSession('s1', { pipelineIds: ['p-main'] } as never)])
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const loadSpy = vi
+      .spyOn(usePipelineMessageStore.getState(), 'loadPipelineMessages')
+      .mockResolvedValue({ ok: false, error: new Error('load failed') })
+
+    await useSessionListStore.getState().setActiveSession('s1', true)
+
+    // 失败必须留下可观察标记：消息区据此渲染错误态而非误导性空态
+    expect(usePipelineMessageStore.getState().loadErrorByPipeline['p-main']).toBe(true)
+    expect(errSpy).toHaveBeenCalled()
+    errSpy.mockRestore()
+    loadSpy.mockRestore()
+  })
+
   it('持久化选中会话 id（刷新后可恢复）', async () => {
     seedSessions([makeSession('s1')])
     await useSessionListStore.getState().setActiveSession('s1', false)
-    expect(localStorage.getItem('last_active_session')).toBe(JSON.stringify('s1'))
+    expect(localStorage.getItem(pk('last_active_session'))).toBe(JSON.stringify('s1'))
   })
 
   it('空白 id（纯空格）不执行操作', async () => {
@@ -409,6 +435,8 @@ describe('sessionListStore — 写操作失败回滚与通知', () => {
     expect(
       useNotificationStore.getState().notifications.some((n) => n.message === '重命名同步失败，已恢复原标题'),
     ).toBe(true)
+    // 同步失败不碰标签（主标签名保持原标题，随缓存回滚口径一致）
+    expect(agentTab.updateTab).not.toHaveBeenCalled()
   })
 
   it('renameSession 成功后标题为 trim 后的值', async () => {
@@ -419,6 +447,11 @@ describe('sessionListStore — 写操作失败回滚与通知', () => {
 
     expect(queryClient.getQueryData<Session[]>(queryKeys.sessions)![0].title).toBe('新标题')
     expect(sessionApi.updateSession).toHaveBeenCalledWith('s1', { title: '新标题' })
+    // 主标签名/面包屑随会话标题同步（ADR 2026-10-16-subagent-tab-naming）
+    expect(agentTab.updateTab).toHaveBeenCalledWith('main-s1', {
+      agentName: '新标题',
+      path: ['新标题'],
+    })
   })
 
   it('renameSession 对不存在的会话仍调用 API（无本地快照用于回滚）', async () => {

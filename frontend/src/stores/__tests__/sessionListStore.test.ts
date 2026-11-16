@@ -10,6 +10,7 @@
  * - setActiveSession 空ID与不存在ID的防护
  * - copySession 正常复制与不存在会话错误
  * - deleteSession 先 API 后清本地（API 失败本地数据原封 + 失败提示）
+ * - rebuildSessionFromThread 从 thread 重建会话条目（幂等/不覆盖真实记录）
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
@@ -50,12 +51,18 @@ vi.mock('@/utils/logger', () => ({
   },
 }))
 
+let mockWatchlistStore: unknown[] = []
 const mockSetLastActiveSession = vi.fn()
 const mockGetLastActiveSession = vi.fn()
 vi.mock('@/utils/storage', () => ({
   uiStorage: {
     setLastActiveSession: (...args: unknown[]) => mockSetLastActiveSession(...args),
     getLastActiveSession: () => mockGetLastActiveSession(),
+    // 会话登记表（sessionWatchlist 消费）：内存假体，跟随真实接口面
+    setSessionWatchlist: (list: unknown[]) => {
+      mockWatchlistStore = list
+    },
+    getSessionWatchlist: () => mockWatchlistStore,
   },
   STORAGE_KEYS: { LAST_ACTIVE_SESSION: 'last_active_session' },
 }))
@@ -71,12 +78,14 @@ vi.mock('@/stores/agentStore', () => ({
 }))
 
 const mockInitSessionTabs = vi.fn()
+const mockUpdateTab = vi.fn()
 vi.mock('@/stores/agentTabStore', () => ({
   useAgentTabStore: {
     getState: () => ({
       initSessionTabs: mockInitSessionTabs,
       getTabIdByPipeline: vi.fn(),
       resetAllTabs: vi.fn(),
+      updateTab: mockUpdateTab,
       currentSessionId: null,
     }),
     setState: vi.fn(),
@@ -197,6 +206,7 @@ describe('sessionListStore', () => {
     mockRegisterPipeline.mockReset()
     mockActivatePipeline.mockReset()
     mockStopStreaming.mockReset()
+    mockWatchlistStore = []
     // vi.resetModules 不重置 mock 注册表：vi.mock 工厂内的 vi.fn()（setState/
     // sendCancel）跨测试共享同一实例，需手动清调用记录，防止上一用例的清理链
     // 调用泄入下一用例的「未发生」断言
@@ -235,17 +245,17 @@ describe('sessionListStore', () => {
       expect(result.every((s) => s.title.toLowerCase().includes('python'))).toBe(true)
     })
 
-    it('置顶会话排在前面（非空关键词触发排序）', () => {
+    it('排序只看最近活跃：置顶不浮顶（R10 单点排序，侧栏与搜索同序）', () => {
       const sessions = [
         makeSession({ id: 's1', title: '普通会话', pinned: false, updatedAt: '2026-06-01T00:00:00.000Z' }),
         makeSession({ id: 's2', title: '置顶会话', pinned: true, updatedAt: '2026-05-01T00:00:00.000Z' }),
       ]
       seedSessions(sessions)
 
-      // 现行契约：空关键词早退不排序，排序仅在非空关键词过滤后进行
+      // R10 契约：置顶/星标只作视觉标记不参与排序，更新的普通会话在前
       const result = useSessionListStore.getState().searchSessions('会话')
-      expect(result[0].id).toBe('s2')
-      expect(result[1].id).toBe('s1')
+      expect(result[0].id).toBe('s1')
+      expect(result[1].id).toBe('s2')
     })
 
     it('未置顶会话按更新时间倒序排列（非空关键词触发排序）', () => {
@@ -296,6 +306,56 @@ describe('sessionListStore', () => {
 
       const unchanged = readSessions().find((s) => s.id === 's1')
       expect(unchanged?.title).toBe('原始')
+    })
+  })
+
+  // ── updateSessionWorkspace ──
+
+  describe('updateSessionWorkspace', () => {
+    it('PATCH metadata 携带 workspace/workspace_mode，缓存同步更新（聚合真值源生效）', async () => {
+      const sessions = [makeSession({ id: 's1' })]
+      seedSessions(sessions)
+      mockUpdateSessionApi.mockResolvedValue({})
+
+      await useSessionListStore
+        .getState()
+        .updateSessionWorkspace('s1', 'D:/proj/demo', 'plain')
+
+      expect(mockUpdateSessionApi).toHaveBeenCalledWith('s1', {
+        metadata: { workspace: 'D:/proj/demo', workspace_mode: 'plain' },
+      })
+      const updated = readSessions().find((s) => s.id === 's1')
+      expect(updated?.workspace).toBe('D:/proj/demo')
+      expect(updated?.workspaceMode).toBe('plain')
+    })
+
+    it('未传 workspaceMode 时只 PATCH workspace 键（不虚构拓扑值）', async () => {
+      const sessions = [makeSession({ id: 's1' })]
+      seedSessions(sessions)
+      mockUpdateSessionApi.mockResolvedValue({})
+
+      await useSessionListStore.getState().updateSessionWorkspace('s1', 'D:/ws/only')
+
+      expect(mockUpdateSessionApi).toHaveBeenCalledWith('s1', {
+        metadata: { workspace: 'D:/ws/only' },
+      })
+      const updated = readSessions().find((s) => s.id === 's1')
+      expect(updated?.workspace).toBe('D:/ws/only')
+      expect(updated?.workspaceMode).toBeUndefined()
+    })
+
+    it('API 失败时拒绝且缓存不动（可重试）', async () => {
+      const sessions = [makeSession({ id: 's1' })]
+      seedSessions(sessions)
+      mockUpdateSessionApi.mockRejectedValue(new Error('网络失败'))
+
+      await expect(
+        useSessionListStore.getState().updateSessionWorkspace('s1', 'D:/proj/x'),
+      ).rejects.toThrow('网络失败')
+
+      const unchanged = readSessions().find((s) => s.id === 's1')
+      expect(unchanged?.workspace).toBeUndefined()
+      expect(unchanged?.pinned).toBe(false)
     })
   })
 
@@ -729,7 +789,7 @@ describe('sessionListStore', () => {
     })
   })
 
-  // ── restoreActiveSessionIfNeeded（query 化后的刷新恢复链） ──
+  // ── restoreActiveSessionIfNeeded（R10② 冷进入直载最近会话） ──
 
   describe('restoreActiveSessionIfNeeded', () => {
     it('无选中 + last_active 命中列表 → 恢复为活跃会话并持久化', async () => {
@@ -757,14 +817,125 @@ describe('sessionListStore', () => {
       expect(mockSetLastActiveSession).not.toHaveBeenCalled()
     })
 
-    it('last_active 不在列表（会话已删）→ 保持无选中', async () => {
-      seedSessions([makeSession({ id: 's1' })])
+    it('无持久化选中且有会话 → 直载最近会话（排序后第一个），不停在欢迎页', async () => {
+      // 列表乱序：s-old 更旧但排在数组前（排序真值不看传入顺序）
+      seedSessions([
+        makeSession({ id: 's-old', updatedAt: '2026-01-01T00:00:00.000Z' }),
+        makeSession({ id: 's-new', updatedAt: '2026-06-01T00:00:00.000Z' }),
+      ])
+      useSessionStore.setState(() => ({ activeSessionId: null }))
+      mockGetLastActiveSession.mockReturnValue(null)
+
+      await useSessionListStore.getState().restoreActiveSessionIfNeeded(readSessions())
+
+      expect(useSessionStore.getState().activeSessionId).toBe('s-new')
+    })
+
+    it('last_active 不在列表（会话已删）→ 回落直载最近会话', async () => {
+      seedSessions([makeSession({ id: 's1', updatedAt: '2026-03-01T00:00:00.000Z' })])
       useSessionStore.setState(() => ({ activeSessionId: null }))
       mockGetLastActiveSession.mockReturnValue('gone-session')
 
       await useSessionListStore.getState().restoreActiveSessionIfNeeded(readSessions())
 
+      expect(useSessionStore.getState().activeSessionId).toBe('s1')
+    })
+
+    it('无会话 → 保持无选中（欢迎页），不报错', async () => {
+      seedSessions([])
+      useSessionStore.setState(() => ({ activeSessionId: null }))
+      mockGetLastActiveSession.mockReturnValue(null)
+
+      await useSessionListStore.getState().restoreActiveSessionIfNeeded(readSessions())
+
       expect(useSessionStore.getState().activeSessionId).toBeNull()
+    })
+
+    it('直载只发生一次：机会消耗后回到无选中态（如删会话）不再自动抓会话', async () => {
+      seedSessions([makeSession({ id: 's1' }), makeSession({ id: 's2' })])
+      useSessionStore.setState(() => ({ activeSessionId: null }))
+      mockGetLastActiveSession.mockReturnValue(null)
+
+      await useSessionListStore.getState().restoreActiveSessionIfNeeded(readSessions())
+      expect(useSessionStore.getState().activeSessionId).toBe('s1')
+
+      // 用户回到无选中态（删除当前会话链路），后台刷新带重跑本函数
+      useSessionStore.setState(() => ({ activeSessionId: null }))
+      mockGetLastActiveSession.mockReturnValue(null)
+      await useSessionListStore.getState().restoreActiveSessionIfNeeded(readSessions())
+
+      // 不被劫持：保持无选中（欢迎页）
+      expect(useSessionStore.getState().activeSessionId).toBeNull()
+    })
+
+    it('加载失败：错误向上传播且选中保持空（主界面回落欢迎页，不吞异常）', async () => {
+      seedSessions([makeSession({ id: 's1' })])
+      useSessionStore.setState(() => ({ activeSessionId: null }))
+      mockGetLastActiveSession.mockReturnValue(null)
+      const originalSetActive = useSessionListStore.getState().setActiveSession
+      useSessionListStore.setState({
+        setActiveSession: vi.fn().mockRejectedValue(new Error('加载失败')),
+      } as never)
+
+      try {
+        await expect(
+          useSessionListStore.getState().restoreActiveSessionIfNeeded(readSessions()),
+        ).rejects.toThrow('加载失败')
+        expect(useSessionStore.getState().activeSessionId).toBeNull()
+      } finally {
+        useSessionListStore.setState({ setActiveSession: originalSetActive } as never)
+      }
+    })
+  })
+
+  // ── rebuildSessionFromThread（会话记录缺失补救面） ──
+
+  describe('rebuildSessionFromThread', () => {
+    it('缓存缺失 → 合成最小会话条目（标题/主管道绑定），可被 setActiveSession 消费', () => {
+      useSessionListStore.getState().rebuildSessionFromThread('thread-abc', {
+        title: '续棒2-推理框架调研',
+        pipelineId: 'pipe-task',
+      })
+
+      const rebuilt = readSessions().find((s) => s.id === 'thread-abc')
+      expect(rebuilt).toBeDefined()
+      expect(rebuilt!.title).toBe('续棒2-推理框架调研')
+      // 主管道真值 = pipelineIds[0]（mainPipelineIdOf 契约）：initSessionTabs
+      // 据此把主标签绑到任务管道，消息加载即任务对话
+      expect(rebuilt!.pipelineIds).toEqual(['pipe-task'])
+      expect(rebuilt!.createdAt).toBeTruthy()
+      expect(rebuilt!.updatedAt).toBeTruthy()
+    })
+
+    it('hints 缺省 → 标题回退「未命名会话」、pipelineIds 空数组', () => {
+      useSessionListStore.getState().rebuildSessionFromThread('thread-xyz')
+
+      const rebuilt = readSessions().find((s) => s.id === 'thread-xyz')
+      expect(rebuilt!.title).toBe('未命名会话')
+      expect(rebuilt!.pipelineIds).toEqual([])
+    })
+
+    it('同 id 已存在（真实记录）→ 跳过不覆盖', () => {
+      seedSessions([makeSession({ id: 'thread-dup', title: '真实会话', pipelineIds: ['pipe-real'] })])
+
+      useSessionListStore.getState().rebuildSessionFromThread('thread-dup', {
+        title: '合成标题',
+        pipelineId: 'pipe-fake',
+      })
+
+      const kept = readSessions().find((s) => s.id === 'thread-dup')
+      expect(kept!.title).toBe('真实会话')
+      expect(kept!.pipelineIds).toEqual(['pipe-real'])
+      expect(readSessions()).toHaveLength(1)
+    })
+
+    it('重复重建幂等（只写一条）', () => {
+      useSessionListStore.getState().rebuildSessionFromThread('thread-idem', { title: 'A' })
+      useSessionListStore.getState().rebuildSessionFromThread('thread-idem', { title: 'B' })
+
+      const hits = readSessions().filter((s) => s.id === 'thread-idem')
+      expect(hits).toHaveLength(1)
+      expect(hits[0].title).toBe('A')
     })
   })
 })

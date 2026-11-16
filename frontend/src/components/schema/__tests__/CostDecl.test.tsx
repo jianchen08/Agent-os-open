@@ -18,7 +18,7 @@ vi.mock('@/services/api/client', () => ({
 
 const PLUGIN = JSON.parse(
   fs.readFileSync(
-    path.resolve(__dirname, '../../../../../plugins/shared/system/cost_control/plugin.json'),
+    path.resolve(__dirname, '../../../../../plugins/shared/cost_control/plugin.json'),
     'utf-8',
   ),
 ) as { id: string; ui_schema?: unknown; contributes?: unknown }

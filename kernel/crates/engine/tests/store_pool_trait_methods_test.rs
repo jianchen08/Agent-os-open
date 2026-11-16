@@ -34,9 +34,16 @@ async fn trait_run_methods_carry_task_local_tenant_through_db_pool() {
 
     agentos_tenant::scope(TenantContext::new("tenant-a", "s"), async {
         // 簿记显式携带租户（trait 契约），运行投影落 tenant-a
-        StorageBackend::record_run_start(&*store, "pipe-a", "tenant-a", "run-a", "hash-a")
-            .await
-            .unwrap();
+        StorageBackend::record_run_start(
+            &*store,
+            "pipe-a",
+            "tenant-a",
+            "run-a",
+            "hash-a",
+            "2026-10-15T00:00:00+00:00",
+        )
+        .await
+        .unwrap();
         StorageBackend::append_trace(&*store, trace("pipe-a", 1))
             .await
             .unwrap();
@@ -90,9 +97,16 @@ async fn trait_run_methods_carry_task_local_tenant_through_db_pool() {
 #[tokio::test]
 async fn trait_pool_wrappers_preserve_semantics() {
     let store = Arc::new(SqliteStore::open_memory().unwrap());
-    StorageBackend::record_run_start(&*store, "pipe-1", "tenant-p", "run-p", "hash-p")
-        .await
-        .unwrap();
+    StorageBackend::record_run_start(
+        &*store,
+        "pipe-1",
+        "tenant-p",
+        "run-p",
+        "hash-p",
+        "2026-10-15T00:00:00+00:00",
+    )
+    .await
+    .unwrap();
 
     let runs = StorageBackend::list_runs_by_pipeline(&*store, "pipe-1", "tenant-p")
         .await
@@ -119,5 +133,54 @@ async fn trait_pool_wrappers_preserve_semantics() {
             Err(StorageError::NotFound(_))
         ),
         "缺失 blob 必须报 NotFound"
+    );
+}
+
+/// get_user_by_id 是 tenant-unscoped 主键查询（K8 修订 ADR 2026-10-10 的
+/// 载重不变量）：租户解析（resolve_tenant_id_by_user）正是求真租户，
+/// task_local 租户不得影响结果——否则非 default 租户用户的 WS dispatch
+/// 恒解析失败，按新契约会错杀（旧契约则静默串入 default 租户）。
+/// 双场景断言：无 scope 与异租户 scope 下同一 user_id 均可命中。
+#[tokio::test]
+async fn get_user_by_id_is_tenant_unscoped_for_token_resolution() {
+    let store = Arc::new(SqliteStore::open_memory().unwrap());
+    let user = agentos_core::types::UserRecord {
+        user_id: "u-tenant-b".to_string(),
+        username: "u-tenant-b".to_string(),
+        password: String::new(),
+        email: None,
+        role: "user".to_string(),
+        tenant_id: "tenant-b".to_string(),
+        created_at: "2026-10-10T00:00:00Z".to_string(),
+        last_login_at: None,
+        must_change_password: false,
+    };
+    store.create_user(&user).await.unwrap();
+
+    // ① 无租户 scope（解析场景常态：握手只透传 user_id，尚未确定租户）
+    let got = store.get_user_by_id("u-tenant-b").await.unwrap();
+    let got = got.expect("无 scope 下主键查询必须命中");
+    assert_eq!(got.tenant_id, "tenant-b");
+
+    // ② 异租户 scope：task_local 租户不参与该主键查询（对照输入——
+    // 消息/会话查询走 task_local，此处必须不受影响）
+    agentos_tenant::scope(TenantContext::new("default", "s"), async {
+        let got = store.get_user_by_id("u-tenant-b").await.unwrap();
+        assert_eq!(
+            got.expect("异租户 scope 下主键查询同样命中").tenant_id,
+            "tenant-b",
+            "求真租户的解析查询不得被 task_local 租户遮蔽"
+        );
+    })
+    .await;
+
+    // ③ 不存在的主键 = Ok(None)（查询成功的空结果，供上层 NotFound 分治）
+    assert!(
+        store
+            .get_user_by_id("no-such-user")
+            .await
+            .unwrap()
+            .is_none(),
+        "未命中是 Ok(None) 而非 Err"
     );
 }

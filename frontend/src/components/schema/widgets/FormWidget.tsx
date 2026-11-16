@@ -33,7 +33,7 @@
  * @module FormWidget
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { Check, ChevronDown } from '@/assets/icons'
 import { SessionEditModal, type SessionFormOptions } from '@/components/session/SessionEditModal'
 import {
@@ -51,6 +51,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { toast } from '@/components/ui/sonner'
+import { useActivePipelineId, useActiveSessionId } from '@/hooks/useActiveExecutionContext'
 import { useSessionsQuery } from '@/hooks/queries/useSessionsQuery'
 import { cn } from '@/lib/utils'
 import apiClient from '@/services/api/client'
@@ -59,9 +60,6 @@ import { RjsfForm } from '@/services/schema/RjsfForm'
 import { parseYamlObject, serializeYaml } from '@/services/schema/yaml'
 import { createSessionWithProject } from '@/services/sessionCreation'
 import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
-import { useAgentTabStore } from '@/stores/agentTabStore'
-import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
-import { useSessionStore } from '@/stores/sessionStore'
 import { resolveChatCardIcon } from '@/utils/chatCardIconRegistry'
 import { mergeFormValues } from '@/utils/configFormFields'
 import type { UIInputFormField } from '@/types/schema'
@@ -99,17 +97,34 @@ interface CompactOption {
   icon?: string
 }
 
-/** 当前选中管道标签的 pipeline id（通用表单端点的附加上文）。
- *  权限模式等会话级设置的键位是 session_id（BUG-15，2026-09-15 裁定），
- *  pipeline_id 同会话内随任务/子代理轮换、不作设置键。
- *  会话 id 是组织集合 id，绝不兜底进 pipeline_id 字段（2026-08-30 管道身份裁定）：
- *  无管道上下文时返回空串，由后端端点对空值显式处置。 */
-function useActivePipelineId(): string {
-  const activeTabId = useAgentTabStore((s) => s.activeTabId)
-  const tabs = useAgentTabStore((s) => s.tabs)
-  const activePipelineId = usePipelineMessageStore((s) => s.activePipelineId)
-  const tabPipelineId = tabs.find((t) => t.id === activeTabId)?.pipelineRunId
-  return tabPipelineId ?? activePipelineId ?? ''
+/**
+ * 触发器窄屏收口文案（≤2 字）：去括注（「默认（命中规则才确认）」→「默认」）→
+ * 去「模式」尾缀（「个人助理模式」→「个人助理」）→ 仍超 2 字取末 2 字
+ * （「个人助手」→「助手」）。3 字且以否定前缀「免」开头保留首 2 字
+ * （「免审批」→「免审」）——截成「审批」会把语义取反，比长标签更有害。
+ * 全称不丢：菜单项与可访问名恒为原文；本函数只服务窄屏触发器
+ * （桌面视口触发器走 triggerVisibleLabel 去括注，R10③）。
+ */
+export function compactTriggerLabel(label: string): string {
+  const stripped = label
+    .replace(/[（(][^）)]*[）)]/g, '')
+    .replace(/模式$/, '')
+    .trim()
+  if (stripped.length <= 2) return stripped
+  if (stripped.length === 3 && stripped.startsWith('免')) return stripped.slice(0, 2)
+  return stripped.slice(-2)
+}
+
+/**
+ * 触发器可见文案（R10③ 精简，用户原话"显示的描述太长了"）：去括注——
+ * 「默认（命中规则才确认）」→「默认」、「免审批（隔离默认）」→「免审批」、
+ * 「旁路（跳过审批）」→「旁路」。全称不丢：菜单项与可访问名恒为原文，
+ * 本函数只服务触发器可见文案（2026-09-21 的"桌面视口显示原文"契约由本裁定
+ * 收窄为"去括注"——括注说明活在菜单项 description/原文里，输入条只留裸档名）。
+ */
+export function triggerVisibleLabel(label: string): string {
+  const stripped = label.replace(/[（(][^）)]*[）)]/g, '').trim()
+  return stripped || label
 }
 
 /**
@@ -127,7 +142,7 @@ export function FormWidget(props: Record<string, unknown>) {
   // 与 endpoint 直连互斥使用；如思考强度跟随当前管道标签）
   const onChange = props.onChange as ((data: Record<string, unknown>) => void) | undefined
   const pipelineId = useActivePipelineId()
-  const sessionId = useSessionStore((s) => s.activeSessionId)
+  const sessionId = useActiveSessionId()
   // 会话列表（TanStack Query 缓存）：取当前会话的隔离形态（isolationMode/
   // workspaceMode），供权限模式选择器如实显示隔离免审批默认（生效档=旁路，
   // OBS-R255-1：免审批默认由旁路档承载，未显式选择仍区别于显式选旁路）
@@ -275,6 +290,10 @@ export function FormWidget(props: Record<string, unknown>) {
   const createSessionEnabled = props.createSession === true && Boolean(endpoint)
   const [sessionModalOpen, setSessionModalOpen] = useState(false)
   const [isCreatingSession, setIsCreatingSession] = useState(false)
+  // modal 壳的表单元素 id：主操作提交钮钉在弹窗 footer（高表单弹层主操作
+  // 视口可达，R14），经 form 属性原生关联表单——校验与 onSubmit 流不变
+  const reactId = useId()
+  const modalFormId = props.modal ? `formwidget-form-${reactId.replace(/:/g, '')}` : undefined
 
   const handleSessionModalSave = useCallback(
     async (
@@ -413,6 +432,11 @@ export function FormWidget(props: Record<string, unknown>) {
       return
     }
     if (onSubmit) {
+      // submitting 上浮到 FormWidget：modal 壳 footer 提交钮消费该态做禁用/
+      // 提交中文案（原表单内钮的 loading 由 RjsfForm 内部态承载，钮迁 footer
+      // 后宿主态必须可见）；提交中文案由 footer 钮承载，statusText 留空
+      setStatus('submitting')
+      setStatusText('')
       try {
         await onSubmit(values)
         setStatus('success')
@@ -442,6 +466,19 @@ export function FormWidget(props: Record<string, unknown>) {
     ? ({ ...compactField, label: compactField.label ?? (props.title as string | undefined) ?? '' })
     : undefined
 
+  // ── modal 壳模式（widget 化 T12）：受控 open/onClose 或 trigger 按钮 ──
+  const modalCfg = props.modal as { trigger?: string; title?: string } | undefined
+
+  // 提交状态反馈：非 modal 态落在表单体末尾；modal 态由 ModalShell 渲染在
+  // footer（主操作旁）——高表单弹层提交钮在 footer，反馈若留在表单体末尾
+  // 会落在滚动区外不可见（R14）
+  const statusEl =
+    status !== 'idle' ? (
+      <p className={cn('text-xs', statusClass(status))} data-testid="form-widget-status">
+        {statusText}
+      </p>
+    ) : null
+
   const formBody = (
     <div>
       {dsError && (
@@ -466,7 +503,8 @@ export function FormWidget(props: Record<string, unknown>) {
         <p className="text-muted-foreground py-4 text-center text-sm">加载表单数据…</p>
       ) : (
         <>
-          {/* key=dataUri 就绪态：异步初值到达后重挂载，使 RjsfForm 捕获 initialValues */}
+          {/* key=dataUri 就绪态：异步初值到达后重挂载，使 RjsfForm 捕获 initialValues。
+              modal 态：formId 落到 form 元素 + 收起表单内提交钮（主操作钉 footer） */}
           <RjsfForm
             key={String(dsReady)}
             fields={fields}
@@ -476,19 +514,15 @@ export function FormWidget(props: Record<string, unknown>) {
             initialValues={effectiveInitial}
             onSubmit={handleSubmit}
             disabled={props.disabled as boolean | undefined}
+            formId={modalFormId}
+            hideSubmit={modalFormId !== undefined}
           />
         </>
       )}
-      {status !== 'idle' && (
-        <p className={cn('mt-1 text-xs', statusClass(status))} data-testid="form-widget-status">
-          {statusText}
-        </p>
-      )}
+      {!modalCfg && statusEl}
     </div>
   )
 
-  // ── modal 壳模式（widget 化 T12）：受控 open/onClose 或 trigger 按钮 ──
-  const modalCfg = props.modal as { trigger?: string; title?: string } | undefined
   if (modalCfg) {
     return (
       <ModalShell
@@ -497,6 +531,11 @@ export function FormWidget(props: Record<string, unknown>) {
         open={props.open as boolean | undefined}
         onClose={props.onClose as (() => void) | undefined}
         closeOnSuccess={status === 'success'}
+        formId={modalFormId}
+        submitLabel={(props.submitLabel as string) ?? '提交'}
+        submitDisabled={!dsReady || fields.length === 0 || status === 'submitting' || props.disabled === true}
+        submitting={status === 'submitting'}
+        statusEl={statusEl}
       >
         {formBody}
       </ModalShell>
@@ -553,13 +592,21 @@ export function FormWidget(props: Record<string, unknown>) {
   )
 }
 
-/** modal 壳：受控 open/onClose（缺省 trigger 按钮自开关），成功态自动关闭 */
+/** modal 壳：受控 open/onClose（缺省 trigger 按钮自开关），成功态自动关闭。
+ *  主操作提交钮钉在 footer（sticky）：高表单弹层内容滚、footer 常驻，主操作
+ *  与提交反馈初始即在视口内（R14）；提交钮经 form 属性关联表单原生提交，
+ *  校验与 onSubmit 流不变。 */
 function ModalShell({
   trigger,
   title,
   open: controlledOpen,
   onClose,
   closeOnSuccess,
+  formId,
+  submitLabel = '提交',
+  submitDisabled = false,
+  submitting = false,
+  statusEl,
   children,
 }: {
   trigger?: string
@@ -567,6 +614,12 @@ function ModalShell({
   open?: boolean
   onClose?: () => void
   closeOnSuccess?: boolean
+  /** 表单元素 id（FormWidget modal 态必有）：footer 提交钮 form 关联的目标 */
+  formId?: string
+  submitLabel?: string
+  submitDisabled?: boolean
+  submitting?: boolean
+  statusEl?: React.ReactNode
   children: React.ReactNode
 }) {
   const [selfOpen, setSelfOpen] = useState(false)
@@ -604,12 +657,18 @@ function ModalShell({
           }
         }}
       >
-        <DialogContent className="max-w-2xl">
+        {/* 宽度自适应（R14 追加）：DialogContent 内联 width 缺省写死 500px 且
+            压过类侧 max-w-*（max-w-2xl 是死类）——桌面宽视口按 min(90vw,56rem)
+            放大（agent 配置/长提示词表单不再挤窄框），窄视口由 90vw 收口 */}
+        <DialogContent width="min(90vw, 56rem)">
           <DialogHeader>
             <DialogTitle>{title ?? '填写表单'}</DialogTitle>
           </DialogHeader>
           <div className="max-h-[65vh] overflow-y-auto p-6 pt-2">{children}</div>
-          <div className="flex justify-end gap-2 px-6 pb-4">
+          {/* sticky 底沿（同 ui/dialog DialogFooter R13 形态）：弹窗根溢出
+              （dvh 随键盘收缩等）时 footer 钉住；不溢出时 sticky 不生效 */}
+          <div className="bg-popover sticky bottom-0 z-10 flex items-center justify-end gap-2 rounded-b-[inherit] border-t px-6 pb-4 pt-3">
+            <div className="min-w-0 flex-1">{statusEl}</div>
             <button
               type="button"
               onClick={() => {
@@ -620,6 +679,17 @@ function ModalShell({
             >
               取消
             </button>
+            {formId && (
+              <button
+                type="submit"
+                form={formId}
+                disabled={submitDisabled}
+                data-testid="formwidget-modal-submit"
+                className="bg-primary text-primary-foreground hover:bg-primary/90 rounded-md px-3 py-1.5 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {submitting ? '提交中…' : submitLabel}
+              </button>
+            )}
           </div>
         </DialogContent>
       </Dialog>
@@ -715,9 +785,16 @@ function statusClass(status: SubmitStatus): string {
  * 用于插件声明式选择器（如权限模式切换 / 思考强度跟随管道标签），不占表单布局。
  * icon 为语义字符串（经 chatCardIconRegistry 解析，如 'shield'/'brain'），缺省 shield。
  *
- * 触发器可见文案 = 裸当前值（如「高」/「旁路（跳过审批）」）——输入条宽度有限，
- * 设置名前缀不进可见文案；自标识由可访问名承载（`${设置名}：${当前值}`，BUG-6），
- * 读屏与 GUI 脚本按带前缀的可访问名定位。设置名取 props.title，回退字段 label。
+ * 两种触发器形态（按声明 icon 是否在场判别，渲染层零 id 感知）：
+ * - icon 缺省 → 文字形态：可见文案 = 裸当前值（如「高」/「旁路（跳过审批）」）
+ *   ——输入条宽度有限，设置名前缀不进可见文案。
+ * - icon 在场 → icon-only：触发器只留声明图标 + 下拉箭头（用户原话"不要写
+ *   思考强度4个字"），当前值只在展开菜单勾选态可见；设置名退到 title 悬停。
+ *
+ * 自标识由可访问名承载（BUG-6，读屏与 GUI 脚本按带前缀的可访问名定位）：
+ * 有当前值（命中选项或隔离免审批显示档）→「`${设置名}：${当前值}`」；无值可示
+ * （未选择且无显示档，当前值兜底落在设置名本身）→ 只留设置名，不产生复读。
+ * 设置名取 props.title，回退字段 label。
  *
  * 声明短写（本形态专用，2026-09-21 裁定）：单 select 选择器的 props 只需
  * `title` + `fields`（+ endpoint/readbackUri 等行为键）。字段 label 与 title 同值时
@@ -759,9 +836,20 @@ function CompactSelectToggle({
   const Icon = resolveChatCardIcon(icon ?? 'shield')
   // 触发器自标识（BUG-6）：只显示裸值（如「高」）会与相邻权限档位混淆——
   // GUI/读屏按「高」找权限等级会误中思考强度。自标识由可访问名承载
-  // （「思考强度：高」），可见文案只留裸值以省输入条宽度。
+  // （「思考强度：高」），文字形态可见文案只留裸值以省输入条宽度（icon-only
+  // 形态可见文案整体退场，见组件 docblock）。文字可见文案按 R10③
+  // 精简（triggerVisibleLabel 去括注：桌面「默认（命中规则才确认）」→「默认」、
+  // 窄屏（<sm）再收口到 ≤2 字（compactTriggerLabel）），全称由可访问名与菜单承载。
   const settingLabel = title ?? field.label
-  const currentLabel = current?.label ?? unselectedLabel ?? field.label
+  const currentLabel = current?.label ?? unselectedLabel ?? field.label ?? ''
+  const visibleLabel = triggerVisibleLabel(currentLabel)
+  const compactLabel = compactTriggerLabel(currentLabel)
+  // icon 在场 → icon-only（机制判别见组件 docblock）；icon 缺省维持文字形态
+  const iconOnly = Boolean(icon)
+  const accessibleName =
+    current || unselectedLabel
+      ? [settingLabel, currentLabel].filter(Boolean).join('：')
+      : (settingLabel ?? currentLabel) || ''
 
   const handlePick = (value: string) => {
     if (onPick) {
@@ -772,28 +860,42 @@ function CompactSelectToggle({
   }
 
   return (
-    <div className="flex items-center gap-2">
+    // min-w-0 双落点（根 div + 触发按钮）：truncate 的 nowrap 会把 span 的
+    // 最小内容宽钉在全标签宽，min-width:auto 的祖先链上任一环不放行收缩，
+    // 窄视口下整颗 chip 就以自然宽溢出容器（实测压过发送键 27px）
+    <div className="flex min-w-0 items-center gap-2">
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <button
             type="button"
             data-testid="compact-select-trigger"
             className={cn(
-              'flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-all duration-200',
+              'flex h-8 min-w-0 items-center gap-1 rounded-lg px-2 text-xs font-medium transition-all duration-200 sm:gap-1.5 sm:px-2.5',
               'hover:shadow-sm',
               'bg-primary text-primary-foreground hover:bg-primary/90',
               disabled && 'cursor-not-allowed opacity-50',
             )}
             disabled={disabled}
-            aria-label={`${settingLabel}：${currentLabel}`}
+            aria-label={accessibleName || undefined}
             title={title ?? field.label}
           >
-            <Icon className="h-icon-md w-icon-md" />
-            <span>{currentLabel}</span>
-            <ChevronDown className="h-icon-xs w-icon-xs opacity-70" />
+            <Icon className="h-icon-md w-icon-md shrink-0" />
+            {!iconOnly && (
+              <>
+                <span className="min-w-0 truncate sm:hidden" aria-hidden="true">
+                  {compactLabel}
+                </span>
+                <span className="hidden min-w-0 truncate sm:inline">{visibleLabel}</span>
+              </>
+            )}
+            <ChevronDown className="h-icon-xs w-icon-xs shrink-0 opacity-70" />
           </button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" sideOffset={6} className="w-48">
+        <DropdownMenuContent
+          align="start"
+          sideOffset={6}
+          className="max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))] w-48 overflow-y-auto"
+        >
           <DropdownMenuLabel className="text-[11px]">{field.label}</DropdownMenuLabel>
           <DropdownMenuSeparator />
           {options.map((option) => (

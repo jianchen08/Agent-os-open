@@ -7,7 +7,8 @@
  * 本文件锁定通知入列幂等契约：
  * - 有稳定 id：重复 id 更新而非新增（内容/时间戳以最新投递为准，已读态保持）；
  *   已被用户移除/清空的通知同 id 重投不回弹。
- * - 无 id：同 title+message 短窗内按内容指纹只入一条；窗口外放行。
+ * - 无 id：同正文短窗内按内容指纹只入一条（标题不参与——同一失败经不同
+ *   上报层可能带不同标题）；窗口外放行。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { NotificationItem } from '@/types/notification'
@@ -15,6 +16,8 @@ import type { NotificationItem } from '@/types/notification'
 let store: typeof import('@/stores/notificationStore').useNotificationStore
 
 beforeEach(async () => {
+  // persist 落盘跨测试泄漏：先清存储再重建 store（chatInputStore.test.ts 同款隔离）
+  localStorage.clear()
   vi.resetModules()
   vi.useFakeTimers()
   const mod = await import('@/stores/notificationStore')
@@ -110,6 +113,24 @@ describe('BUG-74 无 id：内容指纹短窗兜底去重', () => {
 
     expect(second).toBe(first)
     expect(store.getState().notifications).toHaveLength(1)
+  })
+
+  it('同正文不同标题（同一失败多层上报）短窗内只入一条，保留先到条目的标题/优先级', () => {
+    // 真实形态：HTTP 拦截器先报「服务请求失败」（5xx→high），调用方 catch
+    // 再报「操作失败」（→normal），正文同为内核错误信封 message
+    addAt(1_000, makeInput({ title: '服务请求失败', message: '内核不可用', priority: 'high' }))
+    addAt(1_100, makeInput({ title: '操作失败', message: '内核不可用', priority: 'normal' }))
+
+    const list = store.getState().notifications
+    expect(list).toHaveLength(1)
+    expect(list[0].title).toBe('服务请求失败')
+    expect(list[0].priority).toBe('high')
+  })
+
+  it('同标题不同正文各自入列（标题不参与指纹不等于吞掉不同正文）', () => {
+    addAt(1_000, makeInput({ title: '操作失败', message: '会话加载失败' }))
+    addAt(2_000, makeInput({ title: '操作失败', message: '文件读取失败' }))
+    expect(store.getState().notifications).toHaveLength(2)
   })
 
   it('窗口外同内容重投放行（两条），重投后窗口以最新一次为准', () => {

@@ -33,7 +33,7 @@ from models import ImageReviewResult, VideoReviewResult
 
 pytestmark = pytest.mark.unit
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system" / "review"
+_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "review"
 
 
 def _load_server() -> Any:

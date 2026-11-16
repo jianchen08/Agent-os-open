@@ -1,0 +1,53 @@
+{
+  "id": "pipeline_mode_material_inject",
+  "name": "Mode Material Inject",
+  "version": "1.2.0",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "host_group": "light",
+  "entry": "python server.py",
+  "invoke_entry": "mode_material_inject.execute",
+  "requires_services": [
+    "packaging"
+  ],
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "steps": [
+      {
+        "name": "pipeline_mode_material_inject"
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 50,
+  "export_fields": [
+    "mode",
+    "context.*"
+  ],
+  "persistent_fields": [
+    "mode",
+    "meta.cheating"
+  ],
+  "description": "通用模式物料注入步骤（任何模式共用，零具体模式专属逻辑）：mode = 任务模式解析回写（前端模式面板/模式徽标同源取数）；context.persona_text = 人设接管文本（mode.yaml persona 声明 replace=true 且 execution_context 携带文本时写入，prompt_build 的 {{persona:}} 占位符据此换源）；context.system_prompt = 模式包 material.py::build_injection 追加段（非空时以空行衔接，基线提示词保留）。无 mode 键 = 零动作直通；全路径失败降级 warning 不阻断。另承载模式组装器消息变更过桥（regex 脚本用户输入面的落账通道）与 /cheat 命令守卫（on/off/status 命令回执与作弊生效态标志，allow_cheat=false 拒绝，命令审计落 <ws>/rp_state_audit.jsonl）。",
+  "state": {
+    "reads": [
+      "_cheat_guard",
+      "_cheat_pending_on",
+      "_material_message_ops",
+      "agent.id",
+      "context.rp_engine",
+      "context.system_prompt",
+      "execution_context",
+      "meta.cheating",
+      "messages",
+      "pipeline_id",
+      "workspace"
+    ]
+  }
+}

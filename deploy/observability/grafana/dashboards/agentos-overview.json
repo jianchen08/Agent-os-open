@@ -1,0 +1,56 @@
+{
+  "title": "AgentOS 内核概览",
+  "uid": "agentos-overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": { "from": "now-3h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "内核进程 CPU %",
+      "description": "内核自身进程 CPU 使用率（R1 T5 采样，10s 节奏；首个周期为 0 属预期）",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": null },
+      "targets": [
+        { "refId": "A", "expr": "kernel_proc_cpu_percent", "legendFormat": "kernel cpu %" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "title": "内核进程句柄/FD 数",
+      "description": "泄漏第二维度：Windows 句柄数 / Linux 打开 FD 数（R1 T5）",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": null },
+      "targets": [
+        { "refId": "A", "expr": "kernel_proc_handle_count", "legendFormat": "handles" }
+      ],
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "title": "MCP 反向调用水位",
+      "description": "排队等待 / 执行中（gauge，main.rs agg_flush 每秒落）",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": null },
+      "targets": [
+        { "refId": "A", "expr": "kernel_mcp_reverse_queued", "legendFormat": "queued" },
+        { "refId": "B", "expr": "kernel_mcp_reverse_active", "legendFormat": "active" }
+      ],
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "title": "指标发现",
+      "description": "完整指标清单以运行时为准：GET /ext/metrics_admin/list（带 Bearer）。管道/LLM/工具耗时直方图等指标按实际清单在此增补面板，不预猜名称。",
+      "type": "text",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "options": { "mode": "markdown", "content": "查询面：`/ext/metrics_admin/query` · 导出面：`/ext/metrics_admin/prometheus`\n\n- 内核指标命名：`<plugin_id>_<name>`（export.rs prom_metric_name）\n- 内核自采样例：`kernel_mcp_reverse_queued` / `kernel_mcp_reverse_active`\n- R1 新增：`kernel_proc_cpu_percent` / `kernel_proc_handle_count`" }
+    }
+  ]
+}

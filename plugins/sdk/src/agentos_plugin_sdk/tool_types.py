@@ -352,7 +352,7 @@ class Tool(BaseModel):
 
     def to_llm_yaml_format(self) -> str:
         """转换为 LLM 可用的 YAML 格式工具描述（节省 token）"""
-        import yaml  # type: ignore[import-untyped]  # noqa: PLC0415（第三方 stubs 缺失，懒导入）
+        import yaml  # noqa: PLC0415  # 懒导入：LLM 格式化按需加载
 
         llm_schema = self._get_llm_schema()
 
@@ -441,7 +441,7 @@ class Tool(BaseModel):
         依赖 0.1 ``core.runnable.ToolRunnable``（0.2 暂无对应物）。
         sidecar 工具不调用此方法；仅在显式调用时触发懒导入。
         """
-        from core.runnable import ToolRunnable  # type: ignore[import-not-found]  # noqa: PLC0415（0.1 依赖，懒导入）
+        from core.runnable import ToolRunnable  # type: ignore[import-not-found]  # noqa: PLC0415  # 0.1 依赖，懒导入
 
         return ToolRunnable(
             name=self.name,

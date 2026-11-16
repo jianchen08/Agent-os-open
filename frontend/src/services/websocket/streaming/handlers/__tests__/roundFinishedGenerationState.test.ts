@@ -107,6 +107,34 @@ describe('生成态生命周期：stream_end 轮级收尾 vs pipeline_round_fini
     expect(applyStreamStatusMock).not.toHaveBeenCalled()
   })
 
+  it('pipeline_round_finished(cancelled=true)：注册表标 cancelled（用户停止不显示成 completed）', () => {
+    handleStreamStart(makeEvent('stream_start', { message_id: MESSAGE_ID }))
+    handlePipelineRoundFinished(
+      makeEvent('pipeline_round_finished', { failed: false, cancelled: true }),
+    )
+    expect(isStreaming()).toBe(false)
+    expect(applyStreamStatusMock).toHaveBeenCalledWith(PIPELINE_ID, 'cancelled')
+  })
+
+  it('pipeline_round_finished(queue_depth>0)：保留队列深度快照并清除停止中（链尾 drain 未完成不算空闲）', () => {
+    usePipelineMessageStore.getState().setStopping(PIPELINE_ID, true)
+    handlePipelineRoundFinished(
+      makeEvent('pipeline_round_finished', { failed: false, queue_depth: 3 }),
+    )
+    const state = usePipelineMessageStore.getState()
+    expect(state.roundQueueDepthByPipeline[PIPELINE_ID]).toBe(3)
+    expect(state.stoppingByPipeline[PIPELINE_ID]).toBeFalsy()
+  })
+
+  it('stream_start 清除上一轮停止中/队列深度快照（新轮开始即证明链在跑）', () => {
+    usePipelineMessageStore.getState().setStopping(PIPELINE_ID, true)
+    usePipelineMessageStore.getState().setRoundQueueDepth(PIPELINE_ID, 2)
+    handleStreamStart(makeEvent('stream_start', { message_id: MESSAGE_ID_R2 }))
+    const state = usePipelineMessageStore.getState()
+    expect(state.stoppingByPipeline[PIPELINE_ID]).toBeFalsy()
+    expect(state.roundQueueDepthByPipeline[PIPELINE_ID]).toBe(0)
+  })
+
   it('90s 轮次兜底豁免：消息已随轮收尾（completed）时推进 90s 不掐生成态', async () => {
     handleStreamStart(makeEvent('stream_start', { message_id: MESSAGE_ID }))
     // 轮收尾：消息 completed（stream_end 消息收尾路径），工具开始执行

@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>任务计划</title>
+<style>
+  /* 主题 token：宿主下行桥 theme.sync 逐键落 --ag-*（缺省兜底深色值） */
+  :root { --ag-bg: rgba(15,23,42,0.6); --ag-fg: #e2e8f0; --ag-border: rgba(148,163,184,0.2); --ag-muted: rgba(148,163,184,0.6); }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 12px 14px; font: 13px/1.6 system-ui, sans-serif; color: var(--ag-fg); background: var(--ag-bg); }
+  header { display: flex; align-items: baseline; justify-content: space-between; border-bottom: 1px solid var(--ag-border); padding-bottom: 6px; margin-bottom: 8px; }
+  h1 { font-size: 13px; font-weight: 600; margin: 0; }
+  #progress { font-size: 12px; color: var(--ag-muted); }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { display: flex; gap: 8px; padding: 3px 0; align-items: flex-start; }
+  li.done { opacity: 0.5; text-decoration: line-through; }
+  .mark { font-family: ui-monospace, monospace; flex-shrink: 0; }
+  .text { min-width: 0; word-break: break-word; }
+  #updated { margin-top: 8px; font-size: 10px; color: var(--ag-muted); }
+  #empty { padding: 32px 0; text-align: center; color: var(--ag-muted); }
+  .hidden { display: none; }
+  #error { color: #f87171; font-size: 12px; padding: 8px 0; }
+</style>
+</head>
+<body>
+  <div id="plan" class="hidden">
+    <header>
+      <h1>任务计划</h1>
+      <span id="progress">0/0</span>
+    </header>
+    <ul id="items"></ul>
+    <div id="updated"></div>
+  </div>
+  <div id="empty">暂无任务计划</div>
+  <div id="error" class="hidden"></div>
+  <script>
+  (function () {
+    'use strict';
+    // 宿主下行桥：theme.sync 逐键落主题 token；ctx.sync 落会话上下文（v1 未用，
+    // latest 端点无参形态返回最近更新载荷，免 session→pipeline 映射）。
+    window.__agentosCtx = {};
+    window.addEventListener('message', function (e) {
+      var d = e.data;
+      if (!d || !d.__agentos_webview) return;
+      if (d.method === 'theme.sync' && d.params && d.params.tokens) {
+        Object.keys(d.params.tokens).forEach(function (k) {
+          document.documentElement.style.setProperty(k, d.params.tokens[k]);
+        });
+      } else if (d.method === 'ctx.sync' && d.params) {
+        window.__agentosCtx = d.params;
+      }
+    });
+
+    // 宿主桥 API 代理：'/' 开头 method = 本插件 /ext/ 端点（宿主路由白名单 +
+    // Bearer 鉴权）；无 params = GET。载荷信封同 coding_panel 先例。
+    var FETCH_TIMEOUT_MS = 30000;
+    function agentosFetch(path, params) {
+      return new Promise(function (resolve, reject) {
+        if (!window.agentos) { reject(new Error('window.agentos 桥不可用')); return; }
+        var id = window.agentos.postMessage(path, params);
+        var timer = setTimeout(function () {
+          window.removeEventListener('message', handler);
+          reject(new Error('桥响应超时: ' + path));
+        }, FETCH_TIMEOUT_MS);
+        function handler(ev) {
+          var d = ev.data;
+          if (!d || !d.__agentos_webview || d.id !== id) return;
+          window.removeEventListener('message', handler);
+          clearTimeout(timer);
+          if (d.method && d.method.indexOf('.error') > -1) reject(new Error(JSON.stringify(d.params || d.error)));
+          else resolve(d.params);
+        }
+        window.addEventListener('message', handler);
+      });
+    }
+    function unwrap(res) {
+      // 宿主代理回执形态：API 载荷或 {data: ...} 信封，两级兼容
+      if (res && typeof res.data !== 'undefined') {
+        var inner = typeof res.data === 'string' ? safeParse(res.data) : res.data;
+        return (inner && typeof inner.todo !== 'undefined') ? inner : res;
+      }
+      return res;
+    }
+    function safeParse(s) { try { return JSON.parse(s); } catch (e) { return null; } }
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+      });
+    }
+
+    var POLL_MS = 10000;
+    function refresh() {
+      agentosFetch('/ext/pipeline_todo_track/latest').then(function (res) {
+        var payload = unwrap(res);
+        var todo = payload && payload.todo;
+        showError('');
+        if (!todo || !todo.items || !todo.items.length) {
+          // 无计划 = 空态（页面层零渲染清单，仅空态提示）
+          show('empty');
+          return;
+        }
+        show('plan');
+        var done = todo.items.filter(function (i) { return i.done; }).length;
+        document.getElementById('progress').textContent = done + '/' + todo.items.length;
+        document.getElementById('items').innerHTML = todo.items.map(function (it) {
+          return '<li class="' + (it.done ? 'done' : '') + '">' +
+            '<span class="mark">' + (it.done ? '☑' : '☐') + '</span>' +
+            '<span class="text">' + esc(it.text) + '</span></li>';
+        }).join('');
+        document.getElementById('updated').textContent =
+          todo.updated_at ? '更新于 ' + new Date(todo.updated_at).toLocaleTimeString() : '';
+      }).catch(function (e) {
+        showError('拉取失败: ' + (e && e.message ? e.message : e));
+      });
+    }
+    function show(which) {
+      document.getElementById('plan').classList.toggle('hidden', which !== 'plan');
+      document.getElementById('empty').classList.toggle('hidden', which !== 'empty');
+    }
+    function showError(msg) {
+      var el = document.getElementById('error');
+      el.textContent = msg;
+      el.classList.toggle('hidden', !msg);
+    }
+    refresh();
+    setInterval(refresh, POLL_MS);
+  })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+[
+  "src/components/schema/widgets/FileTreeContextMenu.tsx",
+  "src/components/schema/widgets/PipelineManagerEntryOpen.ts",
+  "src/components/schema/widgets/PipelineManagerWidget.tsx",
+  "src/components/schema/widgets/WebviewWidget.tsx",
+  "src/components/schema/widgets/workspaceTreeTab.ts"
+]

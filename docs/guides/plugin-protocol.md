@@ -22,7 +22,7 @@ native（Rust）：`plugin.json`（`host_type: in_process`）+ `Cargo.toml`（`c
 ### 2.2 模式包四层结构（自包含能力包）
 
 ```
-mode_X/                     # 出厂种子 plugins/shared/modes/ → 播种 → <USER_ROOT>/plugins/modes/
+mode_X/                     # 出厂种子 plugins/shared/mode_X/（拍平布局） → 播种 → <USER_ROOT>/plugins/modes/mode_X/
 ├── plugin.json             # services(mode.describe/get_profile/http.handle) + contributes.pages
 │                           # + http_endpoints(页面路由) + requires（统一依赖声明）
 ├── profile.yaml            # 模式档（编排不进 profile——在 pipelines/）
@@ -69,7 +69,7 @@ mode_X/                     # 出厂种子 plugins/shared/modes/ → 播种 → 
 ### 4.1 必填字段
 
 `id`（全局唯一 snake_case）/ `name` / `version`（semver）/ `plugin_type`（`pipeline`/`tool`/`system`/`composite`）/ `host_type`（`sidecar` 默认 | `in_process`）/ `capabilities` / `language` / `entry`（composite 可空）。
-条件必填：`pipeline_role` + `invoke_entry`（plugin_type=pipeline）；`native`（in_process）。
+条件必填：`invoke_entry`（plugin_type=pipeline；`pipeline_role` 字段已退役删除）；`native`（in_process）。
 
 ### 4.2 可选字段速览
 
@@ -118,16 +118,16 @@ mode_X/                     # 出厂种子 plugins/shared/modes/ → 播种 → 
 ## 五、sidecar（Python）运行时规则
 
 - **uv venv 单轨**：entry 首词为裸 `python`/`python3` 时，内核强制使用**插件目录内**解释器；`pyproject.toml` 与 `.venv` 缺一启动即报（`PYPROJECT_MISSING` / `VENV_INTERPRETER_MISSING`），不回退 PATH 裸 python。初始化：`uv sync --project <插件目录>`。
-- **依赖声明**：SDK 不在任何 registry，必须本地源映射——`[tool.uv.sources] agentos-plugin-sdk = { path = "<相对 sdk>", editable = true }`（tools/ 下三级、pipeline/ 下四级）。
+- **依赖声明**：SDK 不在任何 registry，必须本地源映射——`[tool.uv.sources] agentos-plugin-sdk = { path = "<相对 sdk>", editable = true }`（拍平布局统一三级：`../../../sdk`）。
 - **stdout 被 JSON-RPC 独占**：插件日志一律走 stderr（SDK logger 已配好），`print()` 即破坏协议。
 - **生命周期**：懒启动（首次调用才 spawn）→ 握手按 `config_files` 注入 → `notifications/on_load` → 空闲 GC（默认 300s，`lifecycle.idle_timeout_secs` 覆盖）→ 崩溃自动 respawn 并重试一次 → 目录 mtime 变化热重载。内核透传 `LOG_LEVEL`/`LOG_JSON`/`LOG_FORMAT`。
-- **管道插件三层**：`plugin_type: "pipeline"` + `pipeline_role` + `invoke_entry`（必填，与 server.py 注册的工具名完全一致）。实现两层：`plugin.py` 业务类（基类在 `plugins/shared/pipeline/_base/`：`IInputPlugin`/`IOutputPlugin` 返回 `PluginResult{state_updates, skip_remaining, error}`；`ICorePlugin` 返回 dict 直接合并 state）+ `server.py` MCP 适配层。
+- **管道插件两层**：`plugin_type: "pipeline"` + `invoke_entry`（必填，与 server.py 注册的工具名完全一致；`pipeline_role` 死字段已随 P1 删除）。实现两层：`plugin.py` 业务类（基类在 `plugins/shared/_libs/pipeline_base/`：`IInputPlugin`/`IOutputPlugin` 返回 `PluginResult{state_updates, skip_remaining, error}`；`ICorePlugin` 返回 dict 直接合并 state）+ `server.py` MCP 适配层。
 - **出口裁决不走返回值**：插件经 `state_updates` 写入路由 DSL 条件依赖的字段参与裁决（如 task_reminder 写任务状态供评估闸门判定）。反例：期待 `OutputResult.route_signal` 参与路由（遗留字段，执行链不消费）。
 - **测试**：就地 `test_*.py` + 分层 marker（`--strict-markers` 强制）；`importlib.util.spec_from_file_location` 显式路径加载被测模块；`PluginContext(state=..., config=...)` 直测 execute；mock 只打外部依赖，关键路径走真实依赖。
 
 ## 六、种子生命周期与用户仓 git（模式包）
 
-- **播种**：出厂种子 `plugins/shared/modes/` 整目录拷贝到 `<USER_ROOT>/plugins/modes/`；用户从此拥有并直接改这份（不受工作区还原影响）。
+- **播种**：出厂种子 `plugins/shared/mode_*/`（拍平布局，mode_ 前缀识别）逐包拷贝到 `<USER_ROOT>/plugins/modes/mode_*/`（用户侧目录布局装机契约不动）；用户从此拥有并直接改这份（不受工作区还原影响）。
 - **账本**：`<USER_ROOT>/plugins/modes/.seeds.json` 每模式记 `{seeded_version, files: sha256}`。
 - **启动对账**（内核启动早期、插件扫描前）：出厂 version ≤ 账本 → no-op（幂等）；未定制（哈希==账本）→ 静默升级；已定制 → 保留 + 升级可用通知；手工副本 → 补账不替换；非 semver → 保守不动。
 - **恢复出厂**：删用户副本（同 id 用户赢回落 factory）+ 清账本条目。G2 对用户副本同样 fail-closed。
@@ -154,12 +154,12 @@ if __name__ == "__main__": plugin.run()   # stdin JSON-RPC / stdout 响应；Ker
 
 | 学什么 | 看哪里（真实插件即样板，不设玩具教程） |
 |---|---|
-| 最小工具插件 | `plugins/shared/tools/simple/` |
-| services + http_endpoints + config_files | `plugins/shared/system/llm/` |
-| requires_services + 审批闭环 | `plugins/shared/system/approval/` |
-| 管道 input 插件 / agent 配置自持加载 | `plugins/shared/pipeline/input/context_build/` |
-| 管道 output 插件 / 评估闸门 | `plugins/shared/pipeline/output/task_reminder/` |
-| native 插件（cdylib） | `plugins/shared/pipeline/output/sensitive_checker/`、`plugins/shared/pipeline/core/tool_core/` |
-| external MCP（HTTP / stdio / 零声明观测导入） | `plugins/shared/tools/external_mcp/`（接入规则见 [plugin-external-mcp.md](plugin-external-mcp.md)） |
-| 插件主题/皮肤声明 | `plugins/shared/system/dsh_adapter/`（主题规则见 [theme.md](theme.md)） |
-| 模式包结构 | `plugins/shared/modes/`（四模式种子；约定扫描注册规划中 P2） |
+| 最小工具插件 | `plugins/shared/simple/` |
+| services + http_endpoints + config_files | `plugins/shared/llm/` |
+| requires_services + 审批闭环 | `plugins/shared/approval/` |
+| 管道 input 插件 / agent 配置自持加载 | `plugins/shared/agent_config_load/` |
+| 管道 output 插件 / 评估闸门 | `plugins/shared/task_reminder/` |
+| native 插件（cdylib） | `plugins/shared/sensitive_checker/`、`plugins/shared/tool_core/` |
+| external MCP（HTTP / stdio / 零声明观测导入） | `plugins/shared/mcp_windows_mcp/`（接入规则见 [plugin-external-mcp.md](plugin-external-mcp.md)） |
+| 插件主题/皮肤声明 | `plugins/shared/dsh_adapter/`（主题规则见 [theme.md](theme.md)） |
+| 模式包结构 | `plugins/shared/mode_personal/` 等七个包（拍平平铺，mode_ 前缀识别） |

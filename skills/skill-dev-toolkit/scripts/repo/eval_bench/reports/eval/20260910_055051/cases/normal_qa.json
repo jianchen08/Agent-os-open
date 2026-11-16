@@ -1,0 +1,74 @@
+{
+  "case_id": "normal_qa",
+  "category": "normal",
+  "passed": true,
+  "elapsed_seconds": 35.1,
+  "session_id": "thread-6c3e6e89-54c8-4db8-a970-069dbdc47746",
+  "pipeline_ids": [
+    "a9ddede54f90"
+  ],
+  "settled": true,
+  "dispatches": [
+    {
+      "terminal": "stream_end",
+      "pipeline_id": "a9ddede54f90",
+      "interactions": [],
+      "event_types": [
+        "pending_inputs_changed",
+        "pending_inputs_changed",
+        "stream_start",
+        "widget_event",
+        "stream_end"
+      ]
+    }
+  ],
+  "approval": {
+    "requests_seen": 0,
+    "approved": 0,
+    "denied": 0,
+    "response_errors": []
+  },
+  "metrics": {
+    "pipelines": 1,
+    "iterations_total": 1,
+    "error_steps": 0,
+    "timeout_steps": 0,
+    "tool_calls": 0,
+    "tool_retries": 0,
+    "tool_names": [],
+    "tool_call_counts": {},
+    "task_statuses": [
+      null
+    ],
+    "all_settled": true,
+    "any_failed": false,
+    "by_model": {
+      "glm-5.3-flash": {
+        "input": 9026,
+        "output": 1,
+        "cached": 0,
+        "total": 9027
+      }
+    },
+    "tokens_total": 9027
+  },
+  "assertions": [
+    {
+      "type": "settled",
+      "passed": true,
+      "detail": "全链管道收敛"
+    },
+    {
+      "type": "no_failed_task",
+      "passed": true,
+      "detail": "无 failed 任务"
+    },
+    {
+      "type": "reply_contains",
+      "passed": true,
+      "detail": "回复含目标内容（候选 ['2']）"
+    }
+  ],
+  "failed_assertions": [],
+  "reply_excerpt": "2"
+}

@@ -12,6 +12,7 @@
 import { readAgents } from '@/hooks/queries/useAgentsQuery'
 import { readSessions } from '@/hooks/queries/useSessionsQuery'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
+import { sanitizeSessionTitle } from '@/utils/sessionTitle'
 import type { PendingInteraction } from '@/stores/interactionStore'
 
 /** 来源解析输入（camelCase，与 PendingInteraction 对齐；raw 载荷先适配） */
@@ -72,7 +73,7 @@ function resolveSessionTitle(input: InteractionOriginInput): string {
     : undefined
   const sid = input.sessionId || pipelineMeta?.sessionId || input.threadId || ''
   if (!sid) return ''
-  return readSessions().find((s) => s.id === sid)?.title || ''
+  return sanitizeSessionTitle(readSessions().find((s) => s.id === sid)?.title || '')
 }
 
 /** ISO 时刻 → 本地 "HH:mm"；缺失/非法返回空串 */

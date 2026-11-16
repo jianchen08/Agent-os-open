@@ -1265,11 +1265,24 @@ mod tests {
         assert!(log[0].success);
         assert_eq!(log[0].config_type, "agent");
 
-        // 内容未变 → 哈希去重，不新增审计
+        // 内容未变 → 哈希去重，不新增审计。去重断言用「静默观察窗」：写后
+        // 轮询满 2s 无新审计才算去重成立——裸 sleep+立即断言在 CI 慢机下
+        // watcher 尚未处理第二次写入即断言（假绿反转假红，2026-11-06 CI
+        // 实证）；窗口内若出现第二条 = 去重破坏被如实抓住。
         std::thread::sleep(Duration::from_millis(600));
         std::fs::write(temp.path().join("agents/hello.yaml"), "k: v\n").unwrap();
-        std::thread::sleep(Duration::from_millis(700));
-        assert_eq!(center.get_audit_log(10).len(), 1, "内容未变应去重");
+        let quiet_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < quiet_deadline {
+            if center.get_audit_log(10).len() > 1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            center.get_audit_log(10).len(),
+            1,
+            "内容未变应去重（2s 静默窗内到账的新审计即破坏去重）"
+        );
 
         // 非法 yaml → 失败审计（无旧缓存 → rolled_back=false）
         std::thread::sleep(Duration::from_millis(600));

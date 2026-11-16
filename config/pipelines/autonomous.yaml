@@ -3,52 +3,61 @@ loop_bodies:
   steps:
   - id: init
     steps:
-    - pipeline_workspace_lifecycle
+    # workspace 初始化按需执行：workspace 是持久字段（workspace_lifecycle
+    # persistent_fields），首轮 bootstrap 后跨 run 保留；后续 run 命中该键即
+    # 跳过整个插件调用（省一次跨进程 MCP + bootstrap 逻辑）。插件内部本就幂等
+    # （"state 已有 workspace 时跳过"），本条件把该判断提前到引擎侧，省掉调用。
+    # environment_lifecycle 不加条件：只从 execution_context.isolation 解析
+    # 基线（environment_basis 不持久、每轮 execution_context 可能变化），纯解析
+    # 无 IO，跳过反而丢基线。
+    - name: pipeline_workspace_lifecycle
+      when: workspace == none
     - pipeline_environment_lifecycle
+    # 会话级静态上下文构建（2026-10-10 形态拆分，ADR
+    # 2026-10-10-pipeline-shape-split-core-type：自 main 每轮重建上提为每 run
+    # 一次；聊天会话每条用户消息即新 run，语义不变）。成对约束：agent_config_load
+    # 与 mode_material_inject 必须成对——前者每 run 重建 system_prompt 基线，
+    # 后者非幂等追加、靠基线重建防重复，拆开单迁必膨胀。tool_schema/host_context
+    # 经用户裁定确认为动态（前者每 LLM 轮查活注册表、后者每条新用户消息合并
+    # 引用），留守 main.prepare 每轮执行。
+    - pipeline_agent_config_load
+    - pipeline_mode_material_inject
 - id: main
+  while: 'True'
   steps:
+  # ═══ 迭代形态契约（core_type，引擎 execute_body 消费）═══
+  # post 路由写 core_type 决定下一迭代形态：'tool_execute' = 工具迭代（引擎
+  # 沿用打开轮 message_id，工具事件与产生调用的 LLM 轮 new_message.toolCalls
+  # 同卡位，不开新轮不发 stream_start）；其余（'llm_call'/缺省）= LLM 迭代
+  # （新开轮）。两面组门（G9）互斥分流：假则整组零调用零轨迹。
+  #
+  # ── 工具迭代面 ──
   - context:
       model_tier: '{{state.model_tier}}'
-    id: prepare
+    id: tool_input
+    when: core_type == 'tool_execute'
     steps:
-    - pipeline_pause_guard
-    - pipeline_agent_config_load
-    # 模式物料通用步骤（2026-09-24 架构重构：自 agent 配置装载步抽出）——
-    # 须先于 tool_schema（tool_ids 收窄）与 prompt_build（模式段追加）。
-    - pipeline_mode_material_inject
-    - pipeline_tool_schema
+    # 调用轮守卫链（原 prepare 尾五步原序）：融合期靠插件内空轮早退自保、
+    # 每轮白付进程调用；形态拆分后只在工具迭代真实执行。
     - pipeline_tool_args_inject
-    - pipeline_multimodal_preprocessor
-    - pipeline_model_prompt_adapter
-    - pipeline_host_context
-    - pipeline_prompt_build
-    # W2a 上下文压缩粗门（引擎只算术，零领域知识）：占用比 =（上次真实
-    # input_tokens + 自锚以来字符增量 × 2.0）÷ 模型窗口。口径：token ≈ 紧凑
-    # JSON 字节/2（中文保守偏高）；窗口经 track.model_context_window 由
-    # llm_core 随 usage 写入。阈值 0.6 与 context_window_guard 的
-    # compress_trigger_ratio 缺省（manifest fields.default）同源语义，系数/
-    # 阈值均为本 YAML 配置域可调。窗口 0（未解析到）→ 除零 fail-soft 判假，
-    # 仅剩冷启动兜底支。冷启动兜底：无 token 锚（从未调用 LLM）且消息多
-    # （>40）也放行 guard 做精确判定。
-    - name: pipeline_context_window_guard
-      when: '(track.llm_usage.last_input_tokens + (track.messages_chars - track.messages_chars_at_llm) * 2.0) / track.model_context_window > 0.6 or (track.llm_usage.last_input_tokens == none and len(messages) > 40)'
     - pipeline_tool_schema_validator
     - pipeline_isolation_guard
     - pipeline_level_guard
     - pipeline_security_check
   # 工具轮缓存查询（命中即直出结果 + 清调用，跳过执行）。
   - id: core
+    when: core_type == 'tool_execute'
     steps:
     - name: pipeline_tool_cache
       when: raw_tool_calls != [] and raw_tool_calls != None
   # 工具执行核 = 并行 for-each（ADR 2026-10-02-loopconfig-parallel-foreach）：
-  # 对上一轮 LLM 产出的 raw_tool_calls 逐元素执行 pipeline_tool_core（单调用
-  # 契约，当前调用由引擎注入迭代局部键 current_call）。collect 键循环开始清
-  # []、各迭代产出按迭代序拼接（本轮新鲜产出）；submitted_task_ids 是会话
-  # 累计键，走 collect_append（父键现值 + 各迭代增量追加，不随循环清空）；
-  # consume/consume_keys 循环收尾清源（对齐旧批执行插件的消费即清）。
-  # max_concurrency 4 = 有界并行，迭代从同一父快照隔离执行。
+  # 对本迭代待执行调用逐元素执行 pipeline_tool_core（单调用契约，当前调用
+  # 由引擎注入迭代局部键 current_call）。collect 键循环开始清 []、各迭代产出
+  # 按迭代序拼接（本轮新鲜产出）；submitted_task_ids 是会话累计键，走
+  # collect_append（父键现值 + 各迭代增量追加）；consume/consume_keys 循环
+  # 收尾清源。max_concurrency 4 = 有界并行，迭代从同一父快照隔离执行。
   - id: tool_exec
+    when: core_type == 'tool_execute'
     loop_config:
       as: current_call
       collect:
@@ -65,30 +74,110 @@ loop_bodies:
       over: state.raw_tool_calls
     steps:
     - pipeline_tool_core
-  # LLM 轮：消费工具结果产出下一轮响应；spill_guard 保留在核器官尾
-  # （旧 core 组序 cache → 执行核 → spill_guard 的等价平铺）。
+  # ── LLM 迭代面（缺省形态：core_type 缺省或 'llm_call'）──
+  - context:
+      model_tier: '{{state.model_tier}}'
+    id: prepare
+    when: core_type != 'tool_execute'
+    steps:
+    # tool_schema 必须每 LLM 轮执行（动态，不入 init）：经内核 tool-surface
+    # capability 查活注册表（ADR 2026-09-02-agent-config-decouple-tool-surface），
+    # 插件热重载/GC 重装箱下 LLM 工具面与注册表保持同步——init 冻结快照会让
+    # 长任务用陈旧工具面。
+    - pipeline_tool_schema
+    # multimodal_preprocessor 必须每 LLM 轮执行：显式写 multimodal_content=[]
+    # 清上一轮残留块，跳过会让旧附件随每轮请求重发进 LLM。
+    - pipeline_multimodal_preprocessor
+    # 模型提示词适配只在首用户消息轮生效（与插件内 len(messages)<=1 早退等价）。
+    - name: pipeline_model_prompt_adapter
+      when: len(messages) <= 1
+    # host_context 必须每 LLM 轮在位（动态，不入 init）：每条新用户消息首轮
+    # 合并宿主选中引用（幂等键 host.injected_for=message_id），run 中途注入的
+    # 新消息依赖本步每轮执行才能被合并。
+    - pipeline_host_context
+    # prompt_build 必须每 LLM 轮：dynamic_vars 含当前时间戳，且全量重算
+    # track.messages_chars 作压缩门基线——llm_core 每轮直读这两个产物。
+    - pipeline_prompt_build
+    # todo 清单输入步（③级步骤服务接线，ADR
+    # 2026-10-08-step-service-level3-wiring）：静态指引幂等注入 + 当前清单
+    # 追加动态变量消息尾部——清单逐轮更新，不可门化。
+    - todo.fold
+    # W2a 上下文压缩粗门（引擎只算术，零领域知识）：占用比 =（上次真实
+    # input_tokens + 自锚以来字符增量 × 2.0）÷ 模型窗口。口径：token ≈ 紧凑
+    # JSON 字节/2（中文保守偏高）；窗口经 track.model_context_window 由
+    # llm_core 随 usage 写入。阈值 0.6 与 context_window_guard 的
+    # compress_trigger_ratio 缺省（manifest fields.default）同源语义，系数/
+    # 阈值均为本 YAML 配置域可调。窗口 0（未解析到）→ 除零 fail-soft 判假，
+    # 仅剩冷启动兜底支。冷启动兜底：无 token 锚（从未调用 LLM）且消息多
+    # （>40）也放行 guard 做精确判定。
+    - name: pipeline_context_window_guard
+      when: '(track.llm_usage.last_input_tokens + (track.messages_chars - track.messages_chars_at_llm) * 2.0) / track.model_context_window > 0.6 or (track.llm_usage.last_input_tokens == none and len(messages) > 40)'
+  # LLM 轮：消费工具结果产出下一轮响应。
+  # （原此处的单次调用上界止血键已退役：调用界由插件 manifest 自报派生——
+  # llm_core 声明 call_timeout_seconds（L3 公式取值）、context_window_guard
+  # 自报 1800，invoker 基础策略档单点执法 + L1 让位。设计真值：
+  # docs/working/超时体系分类设计_20261105.md §5.7 M3，
+  # ADR docs/decisions/2026-11-05-timeout-taxonomy-and-merge。）
   - context:
       temperature: 0.7
     id: llm
+    when: core_type != 'tool_execute'
     steps:
     - pipeline_llm_core
-    - pipeline_spill_guard
+    # spill_guard 只在携带工具产出时需要（Rust 侧空 tool_results 早退等价）；
+    # LLM 迭代此刻的 tool_results = 上一工具迭代产出（collect 键跨迭代保留）。
+    - name: pipeline_spill_guard
+      when: tool_results != [] and tool_results != None
   - id: post
     next:
+    # 任务自身终态收束（仅任务管道）：task.id 是任务管道判别键（血缘键存在时
+    # 由 agent_config_load 写入，与 task_reminder/stop_check 的门同源）——会话
+    # 管道的裸 task.status 是跨 run 残留（如用户侧取消误写），不带此守卫时本
+    # 路由先于 raw_tool_calls 回环命中，工具调用未消费即收束（dropped_tool_calls
+    # 异常终局，2026-10-21 会话死锁实锤）。
+    # task_evaluation_completed = tool_core 在 task_evaluate 评估通过当轮写入
+    # working state 的投影键（评估通过写面 pipeline-state.update 只落 DB/内存
+    # registry，在飞 state 的 task.status 当轮不同步）——不带此条件时评估通过
+    # 的工具轮命中不了本路由，回 LLM 空转一轮后才由 task_reminder 的 DB 权威
+    # 位收束（评估通过当轮直接收束，零空转 LLM 调用）。
     - then: end
-      when: task.status == 'completed' or task.status == 'failed' or task.status == 'cancelled'
+      when: task.id != none and (task.status == 'completed' or task.status == 'failed' or task.status == 'cancelled' or task_evaluation_completed == True)
+    # 工具迭代收尾：无条件回 LLM（执行完或缓存命中都回）。必须居对话路由
+    # 之前——工具迭代 post 时刻 raw_tool_calls 可能已被缓存命中清空，对话
+    # 挂起路由若先判会在 LLM 消费结果之前抢跑挂起；显式写回 llm_call。
     - set:
+        core_type: llm_call
+      then: loop
+      when: core_type == 'tool_execute'
+    # 对话模式纯文本轮挂起等待下一条输入；显式写 llm_call 保证恢复后续 run
+    # 首迭代形态确定（core_type 非 VOLATILE 残留场景兜底）。
+    - set:
+        core_type: llm_call
         suspended: true
       then: loop
       when: conversation_mode == True and raw_tool_calls == []
+    # 对话模式带调用：清标志 + 转工具形态回环（保持「先清 conversation_mode
+    # 再回环」原语义，core_type 随写）。
     - set:
         conversation_mode: false
+        core_type: tool_execute
       then: loop
       when: conversation_mode == True and raw_tool_calls != []
-    - then: loop
+    # 本迭代 llm 产出了调用 → 转 tool_execute 形态回环（下一迭代工具面消费；
+    # 引擎沿用本轮 message_id，工具事件与本轮 new_message.toolCalls 同卡位）。
+    # 缺此路由时聊天会话（task.id=none、conversation_mode 未激活）无回环
+    # 路径，兜底 end 吞掉未消费调用（引擎异常终局闸署名 dropped_tool_calls）。
+    - set:
+        core_type: tool_execute
+      then: loop
+      when: raw_tool_calls != [] and raw_tool_calls != None
+    - set:
+        core_type: llm_call
+      then: loop
       when: _has_new_llm_input == true
     - set:
         router.duplicate_back_llm: false
+        core_type: llm_call
       then: loop
       when: router.duplicate_back_llm == True
     # 任务管道纯文本轮不终局（D2 一次性终局修复）：叶子执行者用嘴回答而未调
@@ -97,21 +186,52 @@ loop_bodies:
     # 兜底 end 使第 1 轮纯文本即整管终局（假绿 completed/task 恒 running，
     # 2026-09-13 批次实锤多例）。task.id != none 限定任务管道；会话聊天管道
     # （无 task.id）保持"文本即停"会话语义不变。
-    - then: loop
+    - set:
+        core_type: llm_call
+      then: loop
       when: task.id != none and conversation_mode != True and task.status != 'completed' and task.status != 'failed' and task.status != 'cancelled'
     - then: end
     steps:
     # token / 耗时统计已并入 pipeline_llm_core 核心步骤（累加与
     # cost_update / metrics 出口同点位完成，ADR 2026-09-15-track-merged-into-llm-core），
-    # post 链不再需要独立统计步骤。
-    - pipeline_task_reminder
-    - pipeline_stop_check
-    - pipeline_duplicate_check
-    - pipeline_tool_cache_writer
-    - pipeline_conversation_mode
-    - pipeline_sensitive_checker
-    - pipeline_result_format
-  while: 'True'
+    # post 链不再需要独立统计步骤。post 组每迭代执行，项级 when 按迭代面
+    # 分流（假则 invoke 前短路零调用）。
+    - name: pipeline_task_reminder
+      when: core_type != 'tool_execute' and task.id != none
+    - name: pipeline_stop_check
+      when: core_type != 'tool_execute' and task.id != none
+    - name: pipeline_duplicate_check
+      when: core_type != 'tool_execute'
+    - name: pipeline_tool_cache_writer
+      when: _executed_tool_calls != [] and _executed_tool_calls != None
+    - name: pipeline_conversation_mode
+      when: tool_results != [] and tool_results != None
+    - name: pipeline_sensitive_checker
+      when: tool_results != [] and tool_results != None
+    - name: pipeline_result_format
+      when: tool_results != [] and tool_results != None
+    # todo 清单提取步：读 messages 尾条 assistant 的最后完整清单块 →
+    # context.todo_text（下轮 todo.fold 注入源）+ latest 端点载荷（前端计划卡）；
+    # 无块 = 状态停更零写入。工具迭代无新 assistant 消息，门掉零语义差。
+    - name: todo.extract
+      when: core_type != 'tool_execute'
+    # 通知判定步（v3 LLM 主判+快切）。适用面由 when 门控：只有主 agent（L1）
+    # 会话判定，任务管道/子 agent 轮次不进本步零打标（agent_config_load 每
+    # run 无条件写 agent_level 单一真值；用户裁定 2026-10-17 通知面单点归
+    # 主会话）。尾部 human_interaction 调用→不弹（防双响）、
+    # 最终文本命中强承诺/意图词→弹（跳过 LLM）、其余→LLM 分类「是否值得打断用户」、
+    # LLM 失败→弹（宁滥勿缺）。worthy=true 经 messages set-op 写尾条 assistant
+    # 消息 metadata.notify_worthy（前端 systemNotifier 契约键）；工具迭代无新
+    # assistant 消息，门掉零语义差。
+    - name: pipeline_notify_judge
+      when: core_type != 'tool_execute' and agent_level == 'L1'
+    # 多端同步捕获步（T1，ADR 2026-10-17-sync-two-channel-routing）：引擎投喂
+    # working state，sync_agent 做 DB 通道捕获（消息 diff/任务漂移/会话骨架 →
+    # sync_event 上行，outbox 断网不丢）。零 state_updates 零路由；捕获失败
+    # 零抛出（旁路面不阻塞管道）；未配对时空转零语义差。放 post 组末位——
+    # 吃满同组先行步（如 notify_worthy 元数据回写）后的最终轮态。
+    - name: sync_agent
+      when: core_type != 'tool_execute'
 - id: exit
   run_on_error: true
   steps:
@@ -119,4 +239,14 @@ loop_bodies:
     steps:
     - pipeline_workspace_lifecycle
     - pipeline_environment_lifecycle
+# 轮次预算唯一所有者 = stop_check（按 LLM 调用次数计，agent 配置
+# max_iterations；用户裁定 2026-10-17）。本键只是引擎机械硬顶兜底：形态拆分
+# （ADR 2026-10-10-pipeline-shape-split-core-type）下 500 次调用 ≤ 1000 迭代，
+# 1200 = 留 ~20% 余量（错误轮/重试也占迭代），确保硬顶永不先于预算触发；
+# 引擎缺省 200 保持不变，供未声明管道沿用旧口径。
+max_rounds: 1200
 name: autonomous
+# 出厂播种版本（ADR 2026-10-24-config-seed-version-arbitration）：装机播种按
+# 版本裁决覆盖用户空间陈旧副本（用户侧严格更大才保留）；改本文件内容必须
+# 抬此版本（CI 门禁 check_config_seed_versions.py 执法）。
+version: 3

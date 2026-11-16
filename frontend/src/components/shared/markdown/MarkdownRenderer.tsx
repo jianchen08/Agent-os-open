@@ -30,7 +30,16 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = memo(
   ({ content, isStreaming = false, className }) => {
     return (
       <div className={cn('markdown-content', className)}>
-        <Streamdown mode="static" parseIncompleteMarkdown={true}>
+        <Streamdown
+          mode="static"
+          parseIncompleteMarkdown={true}
+          // 0 = 关闭 Streamdown 内嵌限高（默认 code 400px / table 300px +
+          // overflow-y-auto）：那会在消息流里制造嵌套竖向滚动容器，滚轮悬停其上
+          // 被内层吃掉（页面不动，"代码块上滚不动"根因），流式重解析时内层
+          // scrollTop 重置即窗口内闪烁。关闭后消息列表是唯一竖向滚动面。
+          codeBlockMaxHeight={0}
+          tableMaxHeight={0}
+        >
           {content}
         </Streamdown>
         {isStreaming && <span className="md-cursor" />}

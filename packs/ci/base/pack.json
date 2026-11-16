@@ -1,0 +1,5 @@
+{
+  "name": "base",
+  "version": "1.0.0",
+  "description": "通用底座 CI 包（任何 git 项目）：runner + 语言无关卫生门 + pre-commit 薄壳"
+}

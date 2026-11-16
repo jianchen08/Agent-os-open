@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_BASH_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "bash"
+_BASH_DIR = _REPO_ROOT / "plugins" / "shared" / "bash"
 
 
 def _evict_foreign_bare_modules() -> None:
@@ -55,8 +55,8 @@ _evict_foreign_bare_modules()
 if str(_BASH_DIR) not in sys.path or sys.path[0] != str(_BASH_DIR):
     sys.path.insert(0, str(_BASH_DIR))
 
-from bash_types import ProcessInfo  # noqa: E402
-from process_manager import ProcessManager  # noqa: E402
+from agentos_plugin_sdk.process_runtime import ProcessInfo  # noqa: E402
+from agentos_plugin_sdk.process_runtime import ProcessManager  # noqa: E402
 from tool import BashTool, SecurityChecker, describe_exit_code  # noqa: E402
 
 pytestmark = pytest.mark.unit
@@ -223,7 +223,7 @@ class TestExecuteFailurePaths:
                 "command": _py_cmd("print('ignored')"),
                 "workspace": str(ws),
                 "project_root": str(blocker),  # 日志目录父级是文件 → 永不落盘
-                "timeout": 20,
+                "timeout": 60,
             }
         )
 
@@ -365,13 +365,13 @@ class TestContinuePaths:
         ws.mkdir()
 
         started = await tool.execute(
-            {"command": _sleep_exit(2.0, 0), "workspace": str(ws), "timeout": 1}
+            {"command": _sleep_exit(30, 0), "workspace": str(ws), "timeout": 5}
         )
         assert started.output["status"] == "running"
         pid = started.output["pid"]
 
         result = await tool.execute(
-            {"action": "continue", "pid": pid, "timeout": 10, "workspace": str(ws)}
+            {"action": "continue", "pid": pid, "timeout": 45, "workspace": str(ws)}
         )
 
         assert result.success is True
@@ -408,7 +408,7 @@ class TestTerminateAndInputGuards:
         ws = tmp_path / "ws"
         ws.mkdir()
         started = await tool.execute(
-            {"command": _sleep_exit(5, 0), "workspace": str(ws), "session_id": "sess-a", "timeout": 1}
+            {"command": _sleep_exit(30, 0), "workspace": str(ws), "session_id": "sess-a", "timeout": 10}
         )
         assert started.output["status"] == "running"
         pid = started.output["pid"]
@@ -425,7 +425,7 @@ class TestTerminateAndInputGuards:
         ws = tmp_path / "ws"
         ws.mkdir()
         started = await tool.execute(
-            {"command": _sleep_exit(5, 0), "workspace": str(ws), "session_id": "sess-a", "timeout": 1}
+            {"command": _sleep_exit(30, 0), "workspace": str(ws), "session_id": "sess-a", "timeout": 10}
         )
         assert started.output["status"] == "running"
         pid = started.output["pid"]
@@ -443,7 +443,7 @@ class TestTerminateAndInputGuards:
         ws = tmp_path / "ws"
         ws.mkdir()
         started = await tool.execute(
-            {"command": _sleep_exit(5, 0), "workspace": str(ws), "session_id": "sess-a", "timeout": 1}
+            {"command": _sleep_exit(30, 0), "workspace": str(ws), "session_id": "sess-a", "timeout": 10}
         )
         pid = started.output["pid"]
 

@@ -1,0 +1,12 @@
+[project]
+name = "agentos-plugin-mode-personal"
+version = "0.2.0"
+description = "Lingxi AgentOS 0.2 plugin — mode_personal（个人助理模式：pim 工具+实体域+REST+自持调度器+幕僚卡）"
+requires-python = ">=3.11"
+dependencies = [
+    "agentos-plugin-sdk>=0.2.0",
+    "pyyaml",
+]
+
+[tool.uv.sources]
+agentos-plugin-sdk = { path = "../../sdk", editable = true }

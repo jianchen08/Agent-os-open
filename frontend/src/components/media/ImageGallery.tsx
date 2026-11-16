@@ -30,7 +30,7 @@
  * ```
  */
 
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState, type CSSProperties, type FC } from 'react'
 import {
   ChevronLeft,
   ChevronRight,
@@ -40,6 +40,7 @@ import {
   X,
 } from '@/assets/icons'
 import { useNonPassiveWheel } from '@/hooks/useNonPassiveWheel'
+import { downloadAttachment, useAuthedAttachmentUrl } from '@/services/fileLoaderRegistry'
 import { formatDate } from '@/utils/format'
 
 const MIN_SCALE = 0.5
@@ -78,11 +79,60 @@ export interface ImageGalleryProps {
   columns?: number
 }
 
+/** 网格缩略图：/uploads 直链经鉴权取流（useAuthedAttachmentUrl → blob），
+ * 其余 src 透传；取流失败降级为图标占位（画廊无文字失败卡的既有形态）。 */
+const GalleryThumb: FC<{ src?: string; alt: string }> = ({ src, alt }) => {
+  const { url, failed } = useAuthedAttachmentUrl(src)
+  if (!url) {
+    return failed ? (
+      <div className="flex h-full w-full items-center justify-center" aria-label="图片加载失败">
+        <ImageIcon className="h-10 w-10 text-muted-foreground/60" />
+      </div>
+    ) : (
+      <div className="h-full w-full" />
+    )
+  }
+  return (
+    <img
+      src={url}
+      alt={alt}
+      className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+      loading="lazy"
+    />
+  )
+}
+
+/** Lightbox 大图：优先全图 url，取流后 DOM 渲染失败回退缩略图（鉴权解析后的
+ * 回退链路，与直连时代 onError 回退同契约）。 */
+const LightboxImage: FC<{ image: ImageItem; style?: CSSProperties }> = ({ image, style }) => {
+  const { url: fullUrl } = useAuthedAttachmentUrl(image.url)
+  const { url: thumbUrl } = useAuthedAttachmentUrl(image.thumbnailUrl)
+  const src = fullUrl || thumbUrl
+  if (!src) {
+    return <div className="max-h-[70vh] min-h-[30vh] w-[60vw] rounded-lg" />
+  }
+  return (
+    <img
+      src={src}
+      alt={image.title}
+      className="max-h-[70vh] rounded-lg object-contain select-none"
+      style={style}
+      onError={(e) => {
+        const img = e.currentTarget
+        if (thumbUrl && img.src !== thumbUrl) {
+          img.src = thumbUrl
+        }
+      }}
+      draggable={false}
+    />
+  )
+}
+
 /**
- * 图像画廊组件
+ * ImageGallery 组件
  *
  * 以网格布局展示图像，支持 Lightbox 大图查看、
- * 生成参数展示、下载和历史记录浏览。
+ * 生成参数信息展示、下载和历史浏览。
  */
 export const ImageGallery = memo<ImageGalleryProps>(
   ({ images, className = '', columns = 3 }) => {
@@ -204,17 +254,10 @@ export const ImageGallery = memo<ImageGalleryProps>(
       return () => document.removeEventListener('keydown', handleKeyDown)
     }, [lightboxIndex, closeLightbox, goToPrev, goToNext])
 
-    /** 下载指定图像 */
+    /** 下载指定图像（/uploads 直链经鉴权取流转 blob 下载，ADR 2026-10-10） */
     const handleDownload = useCallback(
       (image: ImageItem) => {
-        const link = document.createElement('a')
-        link.href = image.url
-        link.download = image.title || `image-${image.id}`
-        document.body.appendChild(link)
-        link.click()
-        // 判空移除：React 19 StrictMode/HMR/外部脚本可能在 click 后已移除 link，
-        // 直接 removeChild 会抛 NotFoundError，先检查 parentNode 避免报错
-        if (link.parentNode) link.parentNode.removeChild(link)
+        void downloadAttachment(image.url, image.title || `image-${image.id}`)
       },
       []
     )
@@ -222,13 +265,11 @@ export const ImageGallery = memo<ImageGalleryProps>(
     if (images.length === 0) {
       return (
         <div
-          className={`flex flex-col items-center justify-center rounded-xl border border-dashed border-[var(--border)] bg-[var(--muted)]/20 p-12 ${className}`}
+          className={`flex flex-col items-center justify-center rounded-xl border border-dashed border-[var(--border)] bg-muted/20 p-12 ${className}`}
         >
           <ImageIcon className="mb-3 h-12 w-12 text-[var(--muted-foreground)]" />
           <p className="text-sm text-[var(--muted-foreground)]">暂无图像</p>
-          <p className="mt-1 text-xs text-[var(--muted-foreground)]/60">
-            生成的图像将在此处展示
-          </p>
+          <p className="mt-1 text-xs text-muted-foreground/60">生成的图像将在此处展示</p>
         </div>
       )
     }
@@ -257,14 +298,9 @@ export const ImageGallery = memo<ImageGalleryProps>(
               className="group cursor-pointer overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card-bg,var(--card))] shadow-[var(--shadow-card,0_2px_8px_rgba(0,0,0,0.06))] transition-all hover:shadow-[var(--card-hover-shadow,0_4px_16px_rgba(0,0,0,0.1))]"
               onClick={() => openLightbox(index)}
             >
-              {/* 图像 */}
+              {/* 图像（/uploads 直链经 GalleryThumb 鉴权取流） */}
               <div className="relative aspect-square overflow-hidden bg-[var(--muted)]">
-                <img
-                  src={image.thumbnailUrl || image.url}
-                  alt={image.title}
-                  className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-                  loading="lazy"
-                />
+                <GalleryThumb src={image.thumbnailUrl || image.url} alt={image.title} />
 
                 {/* 悬停遮罩 */}
                 <div className="absolute inset-0 flex items-end bg-gradient-to-t from-[var(--on-image-caption)] via-transparent to-transparent opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
@@ -300,7 +336,7 @@ export const ImageGallery = memo<ImageGalleryProps>(
                 {image.createdAt && (
                   <time
                     data-testid="image-time"
-                    className="mt-1 block text-xs text-[var(--muted-foreground)]/60"
+                    className="mt-1 block text-xs text-muted-foreground/60"
                     dateTime={image.createdAt}
                   >
                     {formatDate(image.createdAt, 'datetime')}
@@ -357,7 +393,7 @@ export const ImageGallery = memo<ImageGalleryProps>(
               </button>
             )}
 
-            {/* 图像展示 */}
+            {/* 图像展示（/uploads 直链经 LightboxImage 鉴权取流） */}
             <div
               ref={wheelRef}
               className="relative flex max-h-[85vh] max-w-[85vw] flex-col items-center"
@@ -369,21 +405,12 @@ export const ImageGallery = memo<ImageGalleryProps>(
               onDoubleClick={handleDoubleClick}
               style={{ cursor: scale > 1 ? (isDragging.current ? 'grabbing' : 'grab') : 'zoom-in' }}
             >
-              <img
-                src={currentImage.url || currentImage.thumbnailUrl}
-                alt={currentImage.title}
-                className="max-h-[70vh] rounded-lg object-contain select-none"
+              <LightboxImage
+                image={currentImage}
                 style={{
                   transform: `translate(${translate.x}px, ${translate.y}px) scale(${scale})`,
                   transition: isDragging.current ? 'none' : 'transform 0.2s ease-out',
                 }}
-                onError={(e) => {
-                  const img = e.currentTarget
-                  if (img.src !== currentImage.thumbnailUrl && currentImage.thumbnailUrl) {
-                    img.src = currentImage.thumbnailUrl
-                  }
-                }}
-                draggable={false}
               />
 
               {/* 底部信息栏 */}

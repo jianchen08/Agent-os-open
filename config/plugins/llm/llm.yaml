@@ -2,15 +2,21 @@ concurrency:
   default_max_concurrent: 2
   max_concurrent_pipelines: 5
 defaults:
-  call_timeout: 600
-  chat: glm-5.3-flash
+  call_timeout: 1800
+  chat: glm-5.2
   embedding: bge-m3
-  first_token_timeout: 120
-  stream_idle_timeout: 180
+  first_token_timeout: 60
+  stream_idle_timeout: 90
   tiers:
-    large: glm-5.3
+    large: minimax-m3.1-flash-preview
     medium: minimax-m3.1-flash-preview
-    small: glm-5.3-flash
+    small: minimax-m3.1-flash-preview
+    # 自路由兜底链（2026-11-04 网关化第一步）：键=defaults 直键（build_fallbacks
+    # 按 defaults.get(键) 取主模型），Router fallback 按主模型 id 匹配——tiers
+    # 三档与 chat 同为 minimax，挂 chat 一条即全覆盖；兜底走异构 provider
+    # （cpa_gateway 本地车道 glm-5.3-flash），降级经 keypool_fallback_notice 可见。
+    fallback_chain:
+      chat: [glm-5.3-flash]
 embeddings: {}
 models:
   bge-m3:
@@ -37,12 +43,12 @@ models:
     provider: deepseek
     reasoning_model: true
     thinking_strength_params:
-      high:
-        reasoning_effort: max
       low:
         reasoning_effort: low
-      medium:
-        reasoning_effort: medium
+      high:
+        reasoning_effort: high
+      max:
+        reasoning_effort: max
   deepseek-v4-pro:
     api_base: https://api.deepseek.com/v1
     api_key: ${DEEPSEEK_API_KEY}
@@ -60,12 +66,12 @@ models:
     provider: deepseek
     reasoning_model: true
     thinking_strength_params:
-      high:
-        reasoning_effort: max
       low:
         reasoning_effort: low
-      medium:
-        reasoning_effort: medium
+      high:
+        reasoning_effort: high
+      max:
+        reasoning_effort: max
   embedding-3:
     api_base: https://open.bigmodel.cn/api/coding/paas/v4/
     context_window: 1000000
@@ -96,6 +102,18 @@ models:
       supports_image: true
     provider: zhipu_coding
     reasoning_model: true
+    thinking_strength_params:
+      "off":
+        thinking:
+          type: disabled
+      high:
+        thinking:
+          type: enabled
+        reasoning_effort: high
+      max:
+        thinking:
+          type: enabled
+        reasoning_effort: max
   minimax-m3:
     api_base: https://api.minimaxi.com/v1
     context_window: 1000000
@@ -153,12 +171,12 @@ models:
     provider: minimax
     reasoning_model: true
     thinking_strength_params:
-      high:
-        reasoning_effort: max
       low:
         reasoning_effort: low
-      medium:
-        reasoning_effort: medium
+      high:
+        reasoning_effort: high
+      max:
+        reasoning_effort: max
       'off':
         reasoning_effort: low
   mock-llm:
@@ -175,34 +193,6 @@ models:
     provider: siliconflow
     model_name: deepseek-ai/DeepSeek-V4-Pro
     display_name: deepseek-ai/DeepSeek-V4-Pro
-  glm-5.3-flash:
-    provider: zhipu_coding
-    api_base: https://open.bigmodel.cn/api/coding/paas/v4/
-    model_name: glm-5.3-flash
-    display_name: glm-5.3-flash
-    context_window: 1000000
-    reasoning_model: true
-    default_params:
-      temperature: 0.7
-      max_tokens: 100000
-      top_p: 1
-      thinking:
-        type: enabled
-      reasoning_effort: max
-  glm-5.3:
-    provider: zhipu_coding
-    api_base: https://open.bigmodel.cn/api/coding/paas/v4/
-    model_name: glm-5.3
-    display_name: glm-5.3
-    context_window: 1000000
-    reasoning_model: true
-    default_params:
-      temperature: 0.7
-      max_tokens: 100000
-      top_p: 1
-      thinking:
-        type: enabled
-      reasoning_effort: max
   deepseek-v4-flash-vision-exp:
     provider: deepseek
     model_name: deepseek-v4-flash-vision-exp
@@ -247,6 +237,53 @@ models:
       - image/gif
       - image/webp
       max_image_size: 20971520
+    thinking_strength_params:
+      low:
+        reasoning_effort: low
+      high:
+        reasoning_effort: high
+      max:
+        reasoning_effort: max
+  glm-5.3-flash-gift:
+    provider: cpa_gateway
+    model_name: glm-5.3-flash-gift
+    display_name: GLM-5.3-Flash (ZCode 礼包)
+    api_base: http://127.0.0.1:8317/v1
+    context_window: 200000
+    reasoning_model: true
+    default_params:
+      temperature: 0.7
+      max_tokens: 16000
+  glm-5.3-flash:
+    provider: cpa_gateway
+    model_name: glm-5.3-flash
+    display_name: GLM-5.3-Flash (礼包优先统一车道)
+    api_base: http://127.0.0.1:8317/v1
+    context_window: 200000
+    reasoning_model: true
+    default_params:
+      temperature: 0.7
+      max_tokens: 16000
+  glm-5.3:
+    provider: cpa_gateway
+    model_name: glm-5.3
+    display_name: GLM-5.3 (礼包优先统一车道)
+    api_base: http://127.0.0.1:8317/v1
+    context_window: 200000
+    reasoning_model: true
+    default_params:
+      temperature: 0.7
+      max_tokens: 16000
+  glm-5.3-gift:
+    provider: cpa_gateway
+    model_name: glm-5.3-gift
+    display_name: GLM-5.3 (ZCode 礼包)
+    api_base: http://127.0.0.1:8317/v1
+    context_window: 200000
+    reasoning_model: true
+    default_params:
+      temperature: 0.7
+      max_tokens: 16000
 providers:
   anthropic:
     api_base: https://api.anthropic.com
@@ -293,12 +330,12 @@ providers:
       rpm: 10
       token_quota: 0
     thinking_strength_params:
-      high:
-        reasoning_effort: max
       low:
         reasoning_effort: low
-      medium:
-        reasoning_effort: medium
+      high:
+        reasoning_effort: high
+      max:
+        reasoning_effort: max
       'off':
         thinking:
           type: disabled
@@ -363,7 +400,9 @@ providers:
     - api_key: ${MINIMAX_API_KEY}
       id: minimax_main
       max_concurrent: 6
-      rpm: 10
+      # MiniMax M3 官方发布口径 200 RPM（按账户分级）；10 在多任务并发下
+      # 每分钟即打满（rpm_left=0 重试刷屏 480 次/8 分钟，kernel.log.2026-10-23）。
+      rpm: 100
       token_quota: 0
     type: minimax
   mistral:
@@ -569,3 +608,26 @@ providers:
         reasoning_effort: medium
       'off':
         reasoning_effort: none
+  cpa_gateway:
+    # ACP 额度池 CPA 网关（127.0.0.1:8317）——glm-5.3-*-gift 走 ZCode start-plan
+    # 礼包额度（经 zcode-proxy 127.0.0.1:8080），密钥经环境变量 CPA_CLIENT_API_KEY
+    # 注入（真值在 cpa-gateway KEYS.txt，禁入仓）。
+    type: openai
+    api_base: http://127.0.0.1:8317/v1
+    keys:
+    - api_key: ${CPA_CLIENT_API_KEY}
+      id: cpa_gateway_main
+      max_concurrent: 6
+      rpm: 60
+      token_quota: 0
+    # GLM-5 系思考档位与 zhipu_coding 同源（同一 GLM 家族经 OpenAI 兼容 /v1
+    # 代理；参数面 = reasoning_effort low/high/max，2026-10-03 用户裁定）。
+    # 缺此块时 reasoning_model: true 的 glm-5.3* 在 thinking-levels 端点返回空面，
+    # 聊天页选择器空转（推理模型端到端闸红）。
+    thinking_strength_params:
+      high:
+        reasoning_effort: max
+      medium:
+        reasoning_effort: high
+      low:
+        reasoning_effort: low

@@ -52,6 +52,43 @@ export function getGlobalOpenFileCallback(): (filePath: string, containerTaskId?
   })
 }
 
+/** 打开任务执行管道时的任务附随信息（标签命名/任务定位用） */
+export interface TaskPipelineInfo {
+  /** 任务 ID（task=pipeline 统一后与管道 id 同值；透传给导航建标签） */
+  taskId?: string
+  /** 任务标题（导航后子标签名） */
+  title?: string
+}
+
+// ── 全局任务管道打开回调（task_card 协议宿主，与文件打开回调同范式）──
+let globalOnOpenTaskPipeline:
+  | ((pipelineId: string, info?: TaskPipelineInfo) => void | Promise<void>)
+  | null = null
+
+/**
+ * 注册全局任务管道打开回调
+ *
+ * 在应用启动时调用一次，宿主 = main.tsx（经 pipelineNavigator 跳转，
+ * 与任务管理页「打开对话」同一通道）。
+ */
+export function registerGlobalOpenTaskPipelineCallback(
+  callback: (pipelineId: string, info?: TaskPipelineInfo) => void | Promise<void>,
+): void {
+  globalOnOpenTaskPipeline = callback
+}
+
+/**
+ * 获取全局任务管道打开回调
+ */
+export function getGlobalOpenTaskPipelineCallback(): (
+  pipelineId: string,
+  info?: TaskPipelineInfo,
+) => void | Promise<void> {
+  return globalOnOpenTaskPipeline || ((_pipelineId: string, _info?: TaskPipelineInfo) => {
+    console.warn('[toolCardRegistry] 未注册任务管道打开回调，请在应用启动时调用 registerGlobalOpenTaskPipelineCallback')
+  })
+}
+
 // ── 全局图片预览回调（chat_card actions on_click preview_image 协议宿主，widget 化 T3）──
 let globalImagePreview: ((src: string) => void) | null = null
 
@@ -98,18 +135,113 @@ function injectFileOpen(
   }
 }
 
+// ── 全局插件页面打开回调（render.open_page 协议宿主，与文件打开回调同范式）──
+let globalOnOpenPanel: ((pageId: string, itemId?: string) => void | Promise<void>) | null = null
+
+/**
+ * 注册全局插件页面打开回调（宿主 = main.tsx：openPluginPage 幂等开页 +
+ * widget.event 下行定位条目）。
+ */
+export function registerGlobalOpenPanelCallback(
+  callback: (pageId: string, itemId?: string) => void | Promise<void>,
+): void {
+  globalOnOpenPanel = callback
+}
+
+/** 获取全局插件页面打开回调（未注册时告警，与文件打开回调同口径） */
+export function getGlobalOpenPanelCallback(): (pageId: string, itemId?: string) => void | Promise<void> {
+  return globalOnOpenPanel || ((_pageId: string, _itemId?: string) => {
+    console.warn('[toolCardRegistry] 未注册插件页面打开回调，请在应用启动时调用 registerGlobalOpenPanelCallback')
+  })
+}
+
+/**
+ * 从工具结果提取定位条目 id（open_page 跳转的目标条目）。
+ *
+ * 通用规则（不绑工具名）：结果对象按 `result.todo.id → result.record.id →
+ * result.item.id → todo.id → record.id → item.id → id` 顺序取首个非空字符串
+ * （pim capture 回执实体在 result.todo 内）；resultData（流式结构化完整数据）
+ * 优先，回退 result 文本字段（历史消息从 DB 加载的场景）。缺失 = 只开页不
+ * 定位（合法形态）。
+ */
+export function extractPanelItemId(toolCall: MessageToolCall): string | undefined {
+  const idPaths = [
+    ['result', 'todo', 'id'],
+    ['result', 'record', 'id'],
+    ['result', 'item', 'id'],
+    ['todo', 'id'],
+    ['record', 'id'],
+    ['item', 'id'],
+    ['id'],
+  ] as const
+  const candidates = [toolCall.resultData, toolCall.result]
+  for (const raw of candidates) {
+    let obj: unknown = raw
+    if (typeof raw === 'string') {
+      try {
+        obj = JSON.parse(raw)
+      } catch {
+        continue
+      }
+    }
+    if (!obj || typeof obj !== 'object') continue
+    const rec = obj as Record<string, unknown>
+    for (const path of idPaths) {
+      let current: unknown = rec
+      for (const key of path) {
+        if (!current || typeof current !== 'object') {
+          current = undefined
+          break
+        }
+        current = (current as Record<string, unknown>)[key]
+      }
+      if (typeof current === 'string' && current) return current
+    }
+  }
+  return undefined
+}
+
+/**
+ * 注入插件页面打开能力（panelPageId/panelPageItemId/panelPageLabel + onOpenPanel）。
+ *
+ * 声明驱动：pageId 来自工具 render.open_page 声明；条目 id 从结果实体提取
+ * （缺失 = 只开页不定位）。页面未装载/插件禁用时由调用方（applyCardMeta 的
+ * intent 分支）天然不走到这里——零注入零按钮。
+ */
+function injectPanelOpen(
+  activity: ActivityData,
+  page: { page: string; label?: string | undefined },
+  toolCall: MessageToolCall,
+  options?: { onOpenPanel?: (pageId: string, itemId?: string) => void | Promise<void> },
+): ActivityData {
+  const openPanelCallback = options?.onOpenPanel || getGlobalOpenPanelCallback()
+  const itemId = extractPanelItemId(toolCall)
+  return {
+    ...activity,
+    panelPageId: page.page,
+    panelPageLabel: page.label ?? '打开',
+    ...(itemId ? { panelPageItemId: itemId } : {}),
+    onOpenPanel: () => openPanelCallback(page.page, itemId),
+  }
+}
+
 /**
  * render 意图分支（声明/数据路由）的条目增强：标题人性化 + 摘要行 +
- * 文件打开入口注入。
+ * 文件打开入口注入 + 任务管道打开入口注入。
  *
- * 双路由落地后全量工具走 render 分支早退——filePath/onOpenFile 注入与
- * 标题人性化必须在此分支补齐（读文件卡片可打开文件、条目显示人性化标题）。
+ * 双路由落地后全量工具走 render 分支早退——filePath/onOpenFile 与
+ * pipelineId/onOpenPipeline 注入及标题人性化必须在此分支补齐（读文件卡片
+ * 可打开文件、任务卡片可跳转执行管道、条目显示人性化标题）。
  */
 function applyCardMeta(
   enhanced: ActivityData,
   base: ActivityData,
   toolCall: MessageToolCall,
-  options?: { onOpenFile?: (filePath: string, containerTaskId?: string) => void | Promise<void> },
+  options?: {
+    onOpenFile?: (filePath: string, containerTaskId?: string) => void | Promise<void>
+    onOpenTaskPipeline?: (pipelineId: string, info?: TaskPipelineInfo) => void | Promise<void>
+    onOpenPanel?: (pageId: string, itemId?: string) => void | Promise<void>
+  },
 ): ActivityData {
   const ctx = buildRenderContext(toolCall)
   // 声明意图优先；数据路由分支（applyDataDrivenIntent 产物）按数据形状重推
@@ -138,6 +270,20 @@ function applyCardMeta(
   if (meta.filePath) {
     return injectFileOpen(result, meta.filePath, toolCall, options)
   }
+  if (meta.pipelineId) {
+    const openTaskCallback = options?.onOpenTaskPipeline || getGlobalOpenTaskPipelineCallback()
+    const pipelineId = meta.pipelineId
+    return {
+      ...result,
+      pipelineId,
+      onOpenPipeline: () => openTaskCallback(pipelineId, { taskId: meta.taskId, title: meta.title }),
+    }
+  }
+  // render.open_page 声明 → 打开插件页面（条目定位 id 从结果实体提取；与
+  // filePath/pipelineId 同注入位，页面未装载时 intent 本身不存在=零注入）
+  if (intent?.openPage) {
+    return injectPanelOpen(result, intent.openPage, toolCall, options)
+  }
   return result
 }
 
@@ -154,6 +300,8 @@ export function enhanceActivityWithToolConfig(
   toolCall: MessageToolCall,
   options?: {
     onOpenFile?: (filePath: string, containerTaskId?: string) => void | Promise<void>
+    onOpenTaskPipeline?: (pipelineId: string, info?: TaskPipelineInfo) => void | Promise<void>
+    onOpenPanel?: (pageId: string, itemId?: string) => void | Promise<void>
   },
 ): ActivityData {
   const enhanced = enhanceWithDeclarations(activity, toolCall, options)
@@ -173,6 +321,8 @@ function enhanceWithDeclarations(
   toolCall: MessageToolCall,
   options?: {
     onOpenFile?: (filePath: string, containerTaskId?: string) => void | Promise<void>
+    onOpenTaskPipeline?: (pipelineId: string, info?: TaskPipelineInfo) => void | Promise<void>
+    onOpenPanel?: (pageId: string, itemId?: string) => void | Promise<void>
   },
 ): ActivityData {
   if (activity.type !== 'tool_call' || !activity.toolName) {
@@ -226,9 +376,11 @@ function enhanceWithDeclarations(
 
   // 工具契约结构化视图（widget 化 T4）：带 output_schema 但无 render/chat_card
   // 声明的工具，结果按 schema 渲染只读结构化表单 + 契约违规标警（fail-closed
-  // 前端镜像，权威校验在内核 tool_core）。显式声明已在上文优先返回。
+  // 前端镜像，权威校验在内核 tool_core）。有 render 声明的工具不进本分支——
+  // 声明卡产不出块（如 file_read 目录结果无 content）时级联数据路由按形状
+  // 重推，而非回落 schema 表单（一字段数组会被折叠成 json 区，表格视图丢失）。
   const outputSchema = getOutputSchema(activity.toolName)
-  if (outputSchema) {
+  if (outputSchema && !getRenderIntent(activity.toolName)) {
     const view = buildOutputSchemaView(
       outputSchema,
       toolCall.result,

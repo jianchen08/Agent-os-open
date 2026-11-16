@@ -1,0 +1,27 @@
+{
+  "capabilities": {},
+  "description": "F-min 本机算力（反向隧道 -> 本机 MCP server streamable-http）",
+  "entry": "mcp:external",
+  "host_type": "sidecar",
+  "id": "mcp_local_host",
+  "language": "external",
+  "mcp": {
+    "transport": "streamable_http",
+    "endpoint": {
+      "url": "http://127.0.0.1:9201/mcp",
+      "auth": {
+        "type": "bearer",
+        "value": "${AGENTOS_FMIN_LOCAL_TOKEN}",
+        "required": true
+      }
+    },
+    "allowed_roots": [
+      "D:\\myproject"
+    ]
+  },
+  "name": "F-min local host",
+  "permissions": {},
+  "plugin_type": "tool",
+  "priority": 30,
+  "version": "1.0.0"
+}

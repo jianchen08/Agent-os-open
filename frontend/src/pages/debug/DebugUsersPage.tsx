@@ -86,7 +86,7 @@ export function DebugUsersPage({ embedded }: { embedded?: boolean } = {}) {
               ))}
             </div>
             {/* 桌面端表格视图 */}
-            <div className="hidden md:block overflow-hidden rounded-lg border">
+            <div className="hidden md:block overflow-x-auto rounded-lg border">
               <table className="w-full text-sm">
                 <thead className="bg-accent/30">
                   <tr>
@@ -111,7 +111,7 @@ export function DebugUsersPage({ embedded }: { embedded?: boolean } = {}) {
                   {users.map((user) => (
                     <tr
                       key={user.id}
-                      className="hover:bg-accent/20 cursor-pointer border-t"
+                      className="hover:bg-muted/20 cursor-pointer border-t"
                       onClick={() => setExpandedId(expandedId === user.id ? null : user.id)}
                     >
                       <td className="px-4 py-2 font-medium">{user.username}</td>

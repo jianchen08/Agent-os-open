@@ -1,3 +1,4 @@
+/** @feature FP-0.2.四 通知项声明驱动渲染（widget 化批1-C） | @ci: frontend-test */
 /**
  * NotificationItem 声明驱动渲染测试（widget 化批1-C）
  *
@@ -126,15 +127,5 @@ describe('NotificationItem 声明驱动渲染', () => {
       />,
     )
     expect(screen.queryByTestId('notification-source-label')).not.toBeInTheDocument()
-  })
-
-  it('折叠模式也显示来源标签', () => {
-    render(
-      <NotificationItemComponent
-        notification={makeNotification({ sourceLabel: '子任务' })}
-        isCollapsed
-      />,
-    )
-    expect(screen.getByText('子任务')).toBeInTheDocument()
   })
 })

@@ -1,0 +1,612 @@
+# @feature: FP-0.2.〇 管道引擎 | @vision: V3 可嵌入 | @ci: python-coverage
+"""tool_schema 工具 Schema 注入插件 + MCP server.py 适配层测试。
+
+插件行为（capability 通道型）：读 state["tool_ids"]（context_build 供给），
+经 tool-surface capability 拉取过滤后的工具面写入 state。
+
+覆盖行为面：
+- 配置接口：name/priority、enabled 默认值
+- 禁用时返回空工具面，不发起 capability 调用
+- state 无 tool_ids（缺失/非列表）→ 空工具面 + 断链 warning，不发起调用
+- 显式空 tool_ids（声明零工具）→ 照常转发空白名单，无断链告警
+- caller 正常返回 → schemas/contracts 原样写入 state（短方法名 + tool_ids 转发）
+- caller 未注入 → 有界等待接线（cohost 冷启动竞态桥接，默认 10s，生产实证
+  on_load 晚于首次 execute 数百毫秒）；超时仍未接线/调用异常 → 显式抛错
+  （BUG-17：静默空面会把通道断链伪装成"声明零工具"的成功，LLM 无工具声明
+  出站后模型降级为正文输出原生工具标记且永不执行；错误经引擎
+  _plugin_errors → WS 可见反馈）
+- 工具面漂移（wanted 引用返回面不存在的工具）→ warning 留痕，schema 仍按内核
+  过滤结果写入（不静默缩面、不覆盖为全量）；外部提供方 id（用户空间/external
+  MCP 未注册）降级 INFO——非 agent 配置错误，真漂移仍 WARNING
+- execute 入口：state_updates 透传
+- server.py：get_instance 懒构建缓存、on_load 注入 caller + 预热、on_unload 清
+  caller + 缓存、execute 工具契约（PluginResult → dict 序列化、dict 直通）
+
+外部依赖（内核 tool-surface capability）用轻量替身；过滤转发逻辑全部真实实现。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import logging
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+# 复制 server.py 的 sys.path 机制：插件目录（本地 plugin.py）+ plugins/shared/（pipeline 包）
+_THIS_DIR = str(Path(__file__).resolve().parent)
+if _THIS_DIR not in sys.path:
+    sys.path.insert(0, _THIS_DIR)
+_SHARED_DIR = str(Path(__file__).resolve().parents[1])  # plugins/shared/
+if _SHARED_DIR not in sys.path:
+    sys.path.insert(0, _SHARED_DIR)
+
+# 全车道共跑时裸名 `plugin` 会被先收集目录的同名模块劫持，按 _THIS_DIR 显式路径加载
+# （与 prompt_build/test_workflow_and_server.py 的 _load_plugin_module 同范式）。
+def _load_plugin() -> Any:
+    mod_name = "tool_schema_plugin_test"
+    sys.modules.pop(mod_name, None)
+    spec = importlib.util.spec_from_file_location(mod_name, Path(_THIS_DIR) / "plugin.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_PLUGIN_MOD = _load_plugin()
+ToolSchemaPlugin: Any = _PLUGIN_MOD.ToolSchemaPlugin
+
+
+def _run(coro: Any) -> Any:
+    """同步执行协程（新建事件循环，避免 pytest-asyncio 冲突）。"""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def _make_ctx(state: dict[str, Any] | None = None) -> Any:
+    from _libs.pipeline_base.plugin import PluginContext
+
+    return PluginContext(state=dict(state or {}))
+
+
+class _FakeCaller:
+    """tool-surface capability 轻量替身：记录调用并回放脚本化结果（外部依赖替身）。"""
+
+    def __init__(self, result: dict[str, Any] | Exception | None = None) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self._result = result if result is not None else {"schemas": [], "contracts": {}}
+
+    async def __call__(self, method: str, params: dict[str, Any], timeout: Any = None) -> dict[str, Any]:
+        self.calls.append((method, dict(params)))
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+
+@pytest.fixture(autouse=True)
+def _reset_capability_caller() -> Any:
+    """每个用例前后清 caller，防单例状态跨用例污染（caller 现挂单例实例）。"""
+    inst = ToolSchemaPlugin(config={})
+    inst.set_capability_caller(None)
+    yield
+    inst.set_capability_caller(None)
+
+
+# ═══════════════════════════════════════════════════════════
+# 配置接口
+# ═══════════════════════════════════════════════════════════
+
+
+class TestConfigInterface:
+    def test_name_and_priority(self) -> None:
+        """name 固定；priority 从 config 读取，默认 50。"""
+        assert ToolSchemaPlugin(config={}).name == "tool_schema"
+        assert ToolSchemaPlugin(config={}).priority == 50
+        assert ToolSchemaPlugin(config={"priority": 33}).priority == 33
+
+    def test_enabled_default_true(self) -> None:
+        """默认 enabled=True。"""
+        assert ToolSchemaPlugin(config={})._enabled is True
+
+    def test_execute_disabled_returns_empty_without_call(self) -> None:
+        """禁用时返回空工具面，不发起 capability 调用。"""
+        caller = _FakeCaller()
+        p = ToolSchemaPlugin(config={"enabled": False})
+        p.set_capability_caller(caller)
+        result = _run(p.execute(_make_ctx(state={"tool_ids": ["x"]})))
+        assert result.state_updates == {"tool_schemas": [], "tool_output_contracts": {}}
+        assert caller.calls == []
+
+    def test_execute_result_is_plugin_result(self) -> None:
+        """execute 返回值是 PluginResult（行为契约）。"""
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(_FakeCaller())
+        result = _run(p.execute(_make_ctx(state={"tool_ids": []})))
+        assert isinstance(result, _PLUGIN_MOD.PluginResult)
+        assert isinstance(result.state_updates, dict)
+
+
+# ═══════════════════════════════════════════════════════════
+# 白名单解析（配置断链 fail-closed）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestWantedResolution:
+    def test_missing_tool_ids_yields_empty_surface(self, caplog: Any) -> None:
+        """state 无 tool_ids = 配置断链 → 空工具面 + warning，不发起调用（K10 不兜底全量）。"""
+        caller = _FakeCaller()
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
+        with caplog.at_level(logging.WARNING):
+            result = _run(p.execute(_make_ctx(state={})))
+        assert result.state_updates == {"tool_schemas": [], "tool_output_contracts": {}}
+        assert caller.calls == []
+        assert any("tool_ids" in r.getMessage() for r in caplog.records)
+
+    def test_non_list_tool_ids_yields_empty_surface(self, caplog: Any) -> None:
+        """tool_ids 非列表（脏数据）→ 同断链处理：空面 + warning。"""
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(_FakeCaller())
+        with caplog.at_level(logging.WARNING):
+            result = _run(p.execute(_make_ctx(state={"tool_ids": "alpha"})))
+        assert result.state_updates["tool_schemas"] == []
+        assert any("tool_ids" in r.getMessage() for r in caplog.records)
+
+    def test_explicit_empty_tool_ids_forwards_empty_whitelist(self) -> None:
+        """显式空表 = agent 声明零工具：照常转发空白名单（与断链区分），无告警。"""
+        caller = _FakeCaller(result={"schemas": [{"function": {"name": "spill_retrieve"}}],
+                                     "contracts": {}})
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
+        result = _run(p.execute(_make_ctx(state={"tool_ids": []})))
+        assert caller.calls == [("schemas", {"tool_ids": [], "workspace": None})]
+        names = [s["function"]["name"] for s in result.state_updates["tool_schemas"]]
+        assert names == ["spill_retrieve"]
+
+    def test_missing_caller_raises(self) -> None:
+        """caller 未注入且等待超时 → 显式抛错而非静默空面。
+
+        静默空面把基础设施断链伪装成"agent 声明零工具"的成功：LLM 无工具
+        声明出站，模型降级为正文输出原生工具标记且永不执行（BUG-17 实证）。
+        抛错经引擎 warn+continue 落 _plugin_errors → WS plugin_error 可见。
+        wire_wait_seconds=0 跳过等待（正常默认 10s 桥接 cohost 冷启动竞态）。
+        """
+        p = ToolSchemaPlugin(config={"wire_wait_seconds": 0})
+        with pytest.raises(RuntimeError, match="caller 未注入"):
+            _run(p.execute(_make_ctx(state={"tool_ids": ["alpha"]})))
+
+    def test_unwired_caller_waits_then_proceeds(self) -> None:
+        """cohost 冷启动竞态：execute 先于 on_load 到达 → 有界等待接线后照常拉取。
+
+        生产实证（16:52/17:02）：on_load 晚于首次 execute 数百毫秒落地，
+        立即 raise 使该轮无工具出站；等待桥接让同一轮拿到完整工具面。
+        """
+        caller = _FakeCaller(result={
+            "schemas": [{"function": {"name": "alpha"}}],
+            "contracts": {},
+        })
+        p = ToolSchemaPlugin(config={"wire_wait_seconds": 5})
+
+        async def scenario() -> Any:
+            async def wire_later() -> None:
+                await asyncio.sleep(0.3)
+                p.set_capability_caller(caller)
+
+            wiring = asyncio.create_task(wire_later())
+            result = await p.execute(_make_ctx(state={"tool_ids": ["alpha"]}))
+            await wiring
+            return result
+
+        result = _run(scenario())
+        assert caller.calls == [("schemas", {"tool_ids": ["alpha"], "workspace": None})]
+        assert [s["function"]["name"] for s in result.state_updates["tool_schemas"]] == ["alpha"]
+
+    def test_wait_times_out_and_raises(self) -> None:
+        """等待期满仍未接线 → 按断链契约抛错（有界，不悬挂管道）。"""
+        p = ToolSchemaPlugin(config={"wire_wait_seconds": 0.2})
+        with pytest.raises(RuntimeError, match="caller 未注入"):
+            _run(p.execute(_make_ctx(state={"tool_ids": ["alpha"]})))
+
+
+# ═══════════════════════════════════════════════════════════
+# capability 调用与结果落 state
+# ═══════════════════════════════════════════════════════════
+
+
+class TestCapabilityFetch:
+    def test_schemas_and_contracts_passthrough(self) -> None:
+        """caller 正常返回 → schemas/contracts 原样写入 state_updates。"""
+        schemas = [
+            {"type": "function", "function": {"name": "alpha", "description": "d",
+                                              "parameters": {"type": "object"}}},
+            {"type": "function", "function": {"name": "spill_retrieve", "description": "s",
+                                              "parameters": {"type": "object"}}},
+        ]
+        contracts = {"alpha": {"schema": {"type": "object"}, "render": None}}
+        caller = _FakeCaller(result={"schemas": schemas, "contracts": contracts})
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
+        result = _run(p.execute(_make_ctx(state={"tool_ids": ["alpha", "spill_retrieve"]}))
+                      )
+        assert result.state_updates["tool_schemas"] == schemas
+        assert result.state_updates["tool_output_contracts"] == contracts
+
+    def test_caller_receives_short_method_and_tool_ids(self) -> None:
+        """转发契约：短方法名 "schemas" + {"tool_ids": [...]} 参数包。"""
+        caller = _FakeCaller()
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
+        _run(p.execute(_make_ctx(state={"tool_ids": ["alpha", "beta"]})))
+        assert caller.calls == [("schemas", {"tool_ids": ["alpha", "beta"], "workspace": None})]
+
+    def test_capability_failure_propagates(self) -> None:
+        """capability 调用异常（内核未注入 registry 等）→ 异常传播，不静默空面。
+
+        错误要么处理要么传播：把调用失败吞成空面 = 静默降级为无工具 LLM 调用
+        （BUG-17 同款失败链），显式失败交引擎 plugin_errors 面可见反馈。
+        """
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(_FakeCaller(result=RuntimeError("boom")))
+        with pytest.raises(RuntimeError, match="boom"):
+            _run(p.execute(_make_ctx(state={"tool_ids": ["alpha"]})))
+
+    def test_drift_warns_but_keeps_kernel_filtered_surface(self, caplog: Any) -> None:
+        """wanted 引用了返回面不存在的工具 → 漂移 warning；schema 仍按内核过滤结果写入。"""
+        caller = _FakeCaller(result={
+            "schemas": [{"function": {"name": "alpha"}}],
+            "contracts": {},
+        })
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
+        with caplog.at_level(logging.WARNING):
+            result = _run(p.execute(_make_ctx(state={"tool_ids": ["alpha", "ghost"]})))
+        assert result.state_updates["tool_schemas"] == [{"function": {"name": "alpha"}}]
+        assert any("工具面漂移" in r.getMessage() and "ghost" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_no_drift_warning_when_whitelist_satisfied(self, caplog: Any) -> None:
+        """wanted 全部命中返回面 → 无漂移告警（性质断言：告警只由缺口触发）。"""
+        caller = _FakeCaller(result={
+            "schemas": [{"function": {"name": "alpha"}}, {"function": {"name": "beta"}}],
+            "contracts": {},
+        })
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
+        with caplog.at_level(logging.WARNING):
+            _run(p.execute(_make_ctx(state={"tool_ids": ["alpha", "beta"]})))
+        assert not any("工具面漂移" in r.getMessage() for r in caplog.records)
+
+
+# ═══════════════════════════════════════════════════════════
+# 外部提供方缺席分级（真漂移 WARNING / 外部未就绪 INFO）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestExternalProviderMissing:
+    """用户空间/外部 MCP 提供方工具缺席 ≠ agent 配置错误（生产 72 行/日告警归位）。
+
+    两个 id 的提供方在仓内 manifest 不可见（用户空间插件根 / mcp:external 通道），
+    临时用户根（e2e 矩阵）或缺装机器上必然缺席——降级 INFO 留痕，真漂移保持
+    WARNING（可排查：被 G2 净化/插件未启用/名字写错）。
+    """
+
+    @pytest.mark.parametrize("tool_id", ["godot_run", "universal_search"])
+    def test_external_missing_logs_info_not_warning(self, tool_id: str, caplog: Any) -> None:
+        """外部提供方 id 缺席 → 无 WARNING「工具面漂移」，INFO 记录缺席 id。"""
+        caller = _FakeCaller(result={
+            "schemas": [{"function": {"name": "file_read"}}],
+            "contracts": {},
+        })
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
+        with caplog.at_level(logging.INFO):
+            result = _run(p.execute(_make_ctx(state={"tool_ids": ["file_read", tool_id]})))
+        assert not any("工具面漂移" in r.getMessage() for r in caplog.records)
+        external_logs = [r for r in caplog.records if "外部提供方工具缺席" in r.getMessage()]
+        assert external_logs
+        assert external_logs[0].levelno == logging.INFO
+        assert tool_id in external_logs[0].getMessage()
+        # 缺席面 state 键照旧含外部 id（模型可读通告数据源不受分级影响）
+        assert result.state_updates["tool_surface.unavailable"] == [tool_id]
+
+    def test_true_drift_and_external_split(self, caplog: Any) -> None:
+        """混装缺口：WARNING 只列真漂移 id，INFO 只列外部 id（分级互不吞并）。"""
+        caller = _FakeCaller(result={
+            "schemas": [{"function": {"name": "file_read"}}],
+            "contracts": {},
+        })
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
+        with caplog.at_level(logging.INFO):
+            result = _run(p.execute(_make_ctx(
+                state={"tool_ids": ["file_read", "ghost", "godot_run", "universal_search"]}
+            )))
+        warns = [r.getMessage() for r in caplog.records if "工具面漂移" in r.getMessage()]
+        infos = [r.getMessage() for r in caplog.records if "外部提供方工具缺席" in r.getMessage()]
+        assert len(warns) == 1
+        assert "ghost" in warns[0]
+        assert "godot_run" not in warns[0]
+        assert "universal_search" not in warns[0]
+        assert len(infos) == 1
+        assert "godot_run" in infos[0]
+        assert "universal_search" in infos[0]
+        assert "ghost" not in infos[0]
+        assert result.state_updates["tool_surface.unavailable"] == [
+            "ghost", "godot_run", "universal_search",
+        ]
+
+    def test_host_gui_ids_are_external_providers(self, caplog: Any) -> None:
+        """computer_use 宿主 GUI 九件同属外部提供方（非隔离会话下缺席不冒报配置错）。"""
+        caller = _FakeCaller(result={
+            "schemas": [{"function": {"name": "file_read"}}],
+            "contracts": {},
+        })
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
+        with caplog.at_level(logging.INFO):
+            _run(p.execute(_make_ctx(state={
+                "tool_ids": ["file_read", "Type", "App"],
+                "execution_context": {"isolation": {"level": "non_isolated"}},
+            })))
+        assert not any("工具面漂移" in r.getMessage() for r in caplog.records)
+        infos = [r.getMessage() for r in caplog.records if "外部提供方工具缺席" in r.getMessage()]
+        assert len(infos) == 1
+        assert "Type" in infos[0]
+        assert "App" in infos[0]
+
+
+# ═══════════════════════════════════════════════════════════
+# 隔离/worktree 会话默认工具面剥离宿主 GUI 自动化工具（BUG-65）
+# ═══════════════════════════════════════════════════════════
+
+
+# 用户空间 external MCP 宿主 GUI 自动化工具（agent yaml tool_ids 上游原名）
+_GUI_TOOL_IDS = ("App", "Snapshot", "Click", "Type", "Shortcut", "Wait",
+                 "Move", "Screenshot", "Scroll")
+
+
+class TestIsolatedSurfaceStrip:
+    def test_boundary_reliant_context_strips_gui_tool_ids(self) -> None:
+        """隔离/worktree 上下文（依赖隔离边界免审批）→ GUI 工具 id 不进 capability
+        调用，安全工具原样保留；无 execution_context = 缺省隔离，同剥离。
+
+        参数化三组有区分度输入：显式 isolated / worktree 拓扑（isolation 显式
+        non_isolated 也剥离——边界依赖看工作区拓扑）/ 无 execution_context
+        （缺省隔离，fail-closed 与 isolation_guard 归一口径一致）。
+        """
+        ecs = [
+            ("isolated", {"isolation": {"level": "isolated"}}),
+            ("worktree", {"isolation": {"level": "non_isolated"},
+                          "workspace": {"mode": "worktree"}}),
+            ("default_isolated", None),
+        ]
+        for label, ec in ecs:
+            tool_ids = ["file_read", "bash_execute", "Type", "Click", "App"]
+            state: dict[str, Any] = {"tool_ids": tool_ids}
+            if ec is not None:
+                state["execution_context"] = ec
+            caller = _FakeCaller(result={
+                "schemas": [{"function": {"name": "file_read"}}],
+                "contracts": {},
+            })
+            p = ToolSchemaPlugin(config={})
+            p.set_capability_caller(caller)
+            result = _run(p.execute(_make_ctx(state=state)))
+            (method, params), = caller.calls  # 单次 capability 调用
+            assert method == "schemas", label
+            forwarded = params["tool_ids"]
+            # 字面值断言：GUI id 全部剥离、安全 id 全部保留
+            assert "Type" not in forwarded and "Click" not in forwarded \
+                and "App" not in forwarded, label
+            assert forwarded == ["file_read", "bash_execute"], label
+            # 性质断言：转发面与 GUI 集合交集为空，且 = 声明面减 GUI 集
+            assert set(forwarded).isdisjoint(_GUI_TOOL_IDS), label
+            assert set(forwarded) == set(tool_ids) - set(_GUI_TOOL_IDS), label
+            # 剥离不改变 capability 结果落 state（原样透传）
+            assert [s["function"]["name"]
+                    for s in result.state_updates["tool_schemas"]] == ["file_read"], label
+
+    def test_non_isolated_context_keeps_gui_tool_ids(self) -> None:
+        """显式非隔离会话（审批闸生效）工具面不变：GUI id 照常进 capability 调用。"""
+        caller = _FakeCaller(result={"schemas": [], "contracts": {}})
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
+        tool_ids = ["file_read", "Type", "App", "Shortcut"]
+        _run(p.execute(_make_ctx(state={
+            "tool_ids": tool_ids,
+            "execution_context": {"isolation": {"level": "non_isolated"}},
+        })))
+        assert caller.calls == [("schemas", {"tool_ids": tool_ids, "workspace": None})]
+
+    def test_strip_does_not_false_alarm_drift(self, caplog: Any) -> None:
+        """隔离上下文剥离的 GUI id 不再计入 wanted：内核返回面缺它不触发漂移告警。"""
+        caller = _FakeCaller(result={
+            "schemas": [{"function": {"name": "file_read"}}],
+            "contracts": {},
+        })
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
+        with caplog.at_level(logging.WARNING):
+            _run(p.execute(_make_ctx(state={
+                "tool_ids": ["file_read", "Type"],
+                "execution_context": {"isolation": {"level": "isolated"}},
+            })))
+        assert not any("工具面漂移" in r.getMessage() for r in caplog.records)
+
+
+# ═══════════════════════════════════════════════════════════
+# 不可用面 state 键（卡4①：数组缩水显式告知的数据源）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestUnavailableSurfaceKey:
+    """声明工具集 ∩ 当前返回面 = 空集的差集 → ``tool_surface.unavailable`` 键。
+
+    契约：run 内 tool_ids 静态（agent_config_load 每 run 一次），该差集只在
+    可用性变化时变化——等价于「上一轮数组 diff 本轮消失的工具」，且缩水发生
+    在首轮 LLM 调用之前也能捕获（无状态、自愈：工具恢复即空、通告消失）。
+    """
+
+    def test_shrink_writes_unavailable_key(self) -> None:
+        """声明 3 个工具、返回面只有 2 个 → unavailable 键含缺席者（排序确定）。"""
+        caller = _FakeCaller(result={
+            "schemas": [
+                {"function": {"name": "file_read"}},
+                {"function": {"name": "bash"}},
+            ],
+            "contracts": {},
+        })
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
+        result = _run(p.execute(_make_ctx(state={
+            "tool_ids": ["file_read", "bash", "human_interaction"],
+        })))
+        assert result.state_updates["tool_surface.unavailable"] == ["human_interaction"]
+
+    def test_full_surface_writes_empty_key(self) -> None:
+        """声明全部在场 → 键存在且为空表（性质：通告由下游按空表静默）。"""
+        caller = _FakeCaller(result={
+            "schemas": [{"function": {"name": "a"}}, {"function": {"name": "b"}}],
+            "contracts": {},
+        })
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
+        result = _run(p.execute(_make_ctx(state={"tool_ids": ["b", "a"]})))
+        assert result.state_updates["tool_surface.unavailable"] == []
+
+    def test_gui_stripped_ids_not_counted_unavailable(self) -> None:
+        """隔离会话被剥离的 GUI 工具不进 unavailable（剥离是策略非故障，不告 model）。"""
+        caller = _FakeCaller(result={
+            "schemas": [{"function": {"name": "file_read"}}],
+            "contracts": {},
+        })
+        p = ToolSchemaPlugin(config={})
+        p.set_capability_caller(caller)
+        result = _run(p.execute(_make_ctx(state={
+            "tool_ids": ["file_read", "Type"],
+            "execution_context": {"isolation": {"level": "isolated"}},
+        })))
+        assert result.state_updates["tool_surface.unavailable"] == []
+
+    def test_disabled_and_config_break_paths_keep_old_shape(self) -> None:
+        """禁用/配置断链早退路径不加新键（既有契约面不变）。"""
+        p_off = ToolSchemaPlugin(config={"enabled": False})
+        p_off.set_capability_caller(_FakeCaller())
+        r_off = _run(p_off.execute(_make_ctx(state={"tool_ids": ["x"]})))
+        assert "tool_surface.unavailable" not in r_off.state_updates
+
+        p_break = ToolSchemaPlugin(config={})
+        p_break.set_capability_caller(_FakeCaller())
+        r_break = _run(p_break.execute(_make_ctx(state={})))
+        assert "tool_surface.unavailable" not in r_break.state_updates
+
+
+# ═══════════════════════════════════════════════════════════
+# server.py MCP 适配层
+# ═══════════════════════════════════════════════════════════
+
+
+def _load_server() -> Any:
+    """显式路径加载 server.py；逐出裸名 plugin 防劫持。"""
+    sys.modules.pop("plugin", None)
+    mod_name = "tool_schema_server_test"
+    if mod_name in sys.modules:
+        del sys.modules[mod_name]
+    spec = importlib.util.spec_from_file_location(mod_name, Path(_THIS_DIR) / "server.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestServerAdapter:
+    def test_get_instance_returns_plugin(self) -> None:
+        """get_instance 懒构建 ToolSchemaPlugin（config 缺省为空）。"""
+        server = _load_server()
+        inst = server.get_instance()
+        assert isinstance(inst, server.ToolSchemaPlugin)
+        assert inst.name == "tool_schema"
+        assert inst is server.get_instance()  # 缓存单例
+
+    def test_on_load_injects_caller_and_on_unload_clears(self) -> None:
+        """on_load 注入 tool-surface caller + 预热单例；on_unload 清 caller 与缓存。"""
+        server = _load_server()
+        plugin_mod = sys.modules["plugin"]
+        assert server.get_instance()._capability_caller is None
+        _run(server._on_load({}))
+        assert server.get_instance()._capability_caller is not None
+        assert isinstance(server.get_instance(), server.ToolSchemaPlugin)
+        _run(server._on_unload({}))
+        assert server.get_instance()._capability_caller is None
+        rebuilt = server.get_instance()
+        assert isinstance(rebuilt, server.ToolSchemaPlugin)
+
+    def test_wired_caller_routes_via_tool_surface_handle(self) -> None:
+        """on_load 注入的 caller 经 plugin.get_capability("tool-surface").call 转发；
+        测试环境无内核注入（KeyError）→ 异常传播而非静默空面（与插件层契约一致）。"""
+        server = _load_server()
+        _run(server._on_load({}))
+        with pytest.raises(KeyError):
+            _run(server.execute({"pipeline_id": "p-1", "tool_ids": ["alpha"]}))
+
+    def test_execute_tool_returns_state_updates(self) -> None:
+        """execute 工具：state 无 tool_ids → 空工具面（PluginResult 序列化契约）。"""
+        server = _load_server()
+        data = _run(server.execute({"pipeline_id": "p-1"}))
+        assert data["state_updates"] == {"tool_schemas": [], "tool_output_contracts": {}}
+        assert "route_signal" not in data
+        assert "skip_remaining" not in data
+
+    def test_execute_tool_dict_result_passthrough(self, monkeypatch: Any) -> None:
+        """插件返回 dict 时 execute 直接透传。"""
+        server = _load_server()
+
+        class _DictPlugin:
+            async def execute(self, ctx: Any) -> dict[str, Any]:
+                return {"tool_schemas": [{"function": {"name": "x"}}]}
+
+        monkeypatch.setattr(server, "get_instance", lambda: _DictPlugin())
+        data = _run(server.execute({"pipeline_id": "p-1"}))
+        assert data == {"tool_schemas": [{"function": {"name": "x"}}]}
+
+    def test_execute_tool_serializes_skip(self, monkeypatch: Any) -> None:
+        """PluginResult 的 state_updates/skip_remaining 序列化进返回 dict。"""
+        from _libs.pipeline_base.plugin import PluginResult
+
+        server = _load_server()
+
+        class _StubPlugin:
+            async def execute(self, ctx: Any) -> PluginResult:
+                return PluginResult(
+                    state_updates={"tool_schemas": []},
+                    skip_remaining=True,
+                )
+
+        monkeypatch.setattr(server, "get_instance", lambda: _StubPlugin())
+        data = _run(server.execute({"pipeline_id": "p-1"}))
+        assert data["state_updates"] == {"tool_schemas": []}
+        assert "route_signal" not in data
+        assert data["skip_remaining"] is True
+
+    def test_tool_registered_with_schema(self) -> None:
+        """工具名与入参 schema 契约（state 必填、config 可选）。"""
+        server = _load_server()
+        tool_def = server.plugin._tools.get("tool_schema.execute")
+        assert tool_def is not None
+        assert "state" in tool_def.schema["required"]
+        assert "config" in tool_def.schema["properties"]
+
+    def test_plugin_name_registered(self) -> None:
+        """server 注册的插件名固定。"""
+        server = _load_server()
+        assert server.plugin.name == "tool_schema_pipeline"

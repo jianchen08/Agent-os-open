@@ -50,6 +50,12 @@ interface UIState {
   sidebarRatio: number | null
   /** 消息搜索关键词（Sidebar 与 ChatContainer 共享） */
   messageSearchQuery: string
+  /** 工作区全屏（侧栏/聊天让位隐藏、工作区独占；FiveSpaceLayout 渲染）。
+   *  入口两处：面板标题栏全屏钮、webview 桥 workspace.fullscreen（插件页面
+   *  进入游玩态时请求全屏，如酒馆玩法页开新局/进局）。会话 UI 态不持久化。 */
+  workspaceFullscreen: boolean
+  /** 移动端工作区全屏覆盖层开关（FiveSpaceLayout 渲染；opener 移动端开面板时点亮） */
+  mobileWorkspaceOpen: boolean
   /** 待定位消息（Sidebar 消息命中点击 → MessageList 定位消费；一次性，目标管道激活时消费） */
   messageJump: MessageJumpTarget | null
 }
@@ -65,6 +71,8 @@ interface UIActions {
   toggleSidebar: () => void
   /** 设置侧边栏状态 */
   setSidebarCollapsed: (collapsed: boolean) => void
+  /** 设置移动端工作区覆盖层开关 */
+  setMobileWorkspaceOpen: (open: boolean) => void
   /** 显示审批对话框 */
   showApprovalDialog: (approval: ApprovalRequest) => void
   /** 隐藏审批对话框 */
@@ -77,6 +85,8 @@ interface UIActions {
   toggleWorkspace: () => void
   /** 设置工作区面板状态 */
   setWorkspaceCollapsed: (collapsed: boolean) => void
+  /** 设置工作区全屏（webview 桥 workspace.fullscreen 与面板全屏钮共用） */
+  setWorkspaceFullscreen: (fullscreen: boolean) => void
   /** 设置工作区面板宽度比例（null 表示用默认比例） */
   setWorkspacePanelRatio: (ratio: number | null) => void
   /** 设置侧边栏宽度比例（null 表示用默认比例） */
@@ -107,6 +117,8 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
     }
   })(),
   messageSearchQuery: '',
+  workspaceFullscreen: false,
+  mobileWorkspaceOpen: false,
   messageJump: null,
 
   /**
@@ -126,6 +138,10 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
   setSidebarCollapsed: (collapsed: boolean) => {
     uiStorage.setSidebarCollapsed(collapsed)
     set({ sidebarCollapsed: collapsed })
+  },
+
+  setMobileWorkspaceOpen: (open: boolean) => {
+    set({ mobileWorkspaceOpen: open })
   },
 
   /**
@@ -175,6 +191,9 @@ export const useUIStore = create<UIState & UIActions>((set) => ({
   setWorkspaceCollapsed: (collapsed: boolean) => {
     uiStorage.setWorkspaceCollapsed(collapsed)
     set({ workspaceCollapsed: collapsed })
+  },
+  setWorkspaceFullscreen: (fullscreen: boolean) => {
+    set({ workspaceFullscreen: fullscreen })
   },
   /**
    * 设置工作区面板宽度比例（null 表示清除记忆，回退默认比例）

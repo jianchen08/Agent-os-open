@@ -10,9 +10,6 @@
 //! - `pipeline_loop`: PipelineExecutor——统一管道执行器（生产路径）
 //! - `store`: SQLite 存储实现——runs/message_slots/blobs/traces/sessions 等 DDL + CRUD
 //! - `template`: 配置模板插值器——解析 `{{state.xxx}}` / `{{path:xxx}}` 表达式
-//! - `trigger`: 触发器注册表与 committed 视图求值（trigger-svc 内核执行面；
-//!   单例经 `trigger::global_registry()` 访问，不与 transient 的同名
-//!   `global_registry` 在 crate 根重导出混淆）
 //!
 //! [来源: docs/0.2_rust_plugin_solution.md §3.6]
 //! [来源: docs/working/adr_engine_design.md]
@@ -27,15 +24,13 @@ pub mod storage_factory;
 pub mod store;
 pub mod template;
 pub mod transient;
-pub mod trigger;
 
 pub use metrics::{EngineMetrics, EngineMetricsSnapshot};
 pub use pipeline_loop::apply_messages_op_update;
 pub use pipeline_loop::apply_slot_ops_to_array;
 pub use pipeline_loop::trace_mirror_digest;
 pub use pipeline_loop::PipelineExecutor;
-pub use round_events::{RoundEnd, RoundEvents, RoundStart};
+pub use round_events::{ConsumedPendingRecord, PendingConsumed, RoundEnd, RoundEvents, RoundStart};
 pub use store::SqliteStore;
 pub use store::VOLATILE_RUN_KEYS;
 pub use transient::{global_registry, TransientStateRegistry};
-pub use trigger::{TriggerFire, TriggerRegistration};

@@ -16,7 +16,7 @@ system_prompt: '{{path:config/rules/information_integrity_rules.md}}
 
   {{path:config/rules/document_context_rules.md}}
 
-  {{path:.project/}}
+  {{project_agents_md_anchor}}
 
 
   # 你是通用任务执行者
@@ -51,19 +51,19 @@ system_prompt: '{{path:config/rules/information_integrity_rules.md}}
   ## 工作空间
 
 
+  {{storage_overview}}
+
 
   '
 static_vars:
   enabled: true
   items:
-  - '{{rules}}'
   - name: 可扩展工具索引
     type: reference
     content: '## 可扩展工具索引
 
-      以下工具未直接加载，可通过 resource_search 搜索后自动加载使用。
+      以下为扩展能力索引。resource_search 只检索资源不加载工具——能力是否可用以本 agent 的 tool_ids 为准，未持有的能力在任务输出中向调度方反馈（改派或触发资源准备流程），禁止假设搜到即可用。
 
-      - yaml_validate: 验证YAML配置文件
 
       - schema_evaluator: 验证JSON/YAML格式或正则模式校验
 
@@ -80,19 +80,18 @@ dynamic_vars:
   - '{{path:config/rules/execution_review_rules.md}}'
 tool_ids:
 - file_read
-- dsh_read
-- dsh_glob
 - file_write
 - copy_file
 - move_file
 - delete_file
 - create_directory
-- list_directory
 - bash_execute
 - enhanced_search
-- universal_search
-- godot_run
 - web_operate
+# browser_tool 整注（tool_ids 条目=插件 id → 该插件声明面全量入面，capability_router
+# "一行接入配法"）。与下方 computer_use 显式列名的差别：browser_tool 的 plugin.json
+# 声明即安全边界（六件=Bridge 白名单同名集合，无隐藏工具），整注无旁路面。
+- browser_tool
 # computer_use（external MCP：Windows-MCP 动态导入）。显式列名而非插件 id——
 # 上游还带 Shell/PowerShell/FileSystem 等工具，整注等于在 LLM 面开安全旁路
 - Snapshot
@@ -109,12 +108,14 @@ tool_ids:
 - human_interaction
 - eval_sleep
 - eval_echo
-- eval_broken
+# 大输出恢复：工具结果被 spill_guard 替换为摘要时，按 tool_call_id 取回原文
+# （工具面审查 2026-10-19 缺口补配：此前无任何出厂 agent 持有，spill 后取不回）
+- spill_retrieve
 hard_constraints:
 - 任务执行完成后必须调用 task_evaluate 工具进行评估
 - 必须输出规定的产出物
 - 评估通过才能结束任务
-- 遇到无法解决的问题必须报告上级
+- 遇到无法解决的问题：在任务输出中说明阻塞原因与已尝试路径，由调度方裁决改派或触发资源准备流程（本 agent 无上级上报通道）
 soft_constraints:
 - 优先使用简单直接的方法
 - 执行前确认理解任务
@@ -141,13 +142,14 @@ is_active: true
 status: active
 max_iterations: 500
 max_reminders: 3
-timeout_seconds: 1800
+# run 墙钟看门狗不武装（用户裁定 2026-10-17：任务可合法运行数小时，墙钟预算在该
+# 场景纯误伤——1016 三任务 timeout 强制终局实证）。防挂死由单次调用上界
+# （plugin_call_timeout，内核恒有界）承接，防失控由 max_iterations 承接。
 plugins:
   disabled: []
   enabled:
     task_reminder:
       max_reminders: 3
-      cooldown_seconds: 180
 tags:
 - specialized
 - task

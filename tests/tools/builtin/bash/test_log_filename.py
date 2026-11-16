@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import pytest
-from process_manager import ProcessManager
+from agentos_plugin_sdk.process_runtime import ProcessManager
 
 pytestmark = pytest.mark.unit
 

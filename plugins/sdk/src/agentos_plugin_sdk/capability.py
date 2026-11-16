@@ -15,8 +15,79 @@
 
 from __future__ import annotations
 
+import contextvars
 from collections.abc import Awaitable
 from typing import Any, Protocol
+
+# ── 反向调用身份透传（刀1，ADR docs/working/2026-10-15-reverse-call-tenant-
+#    passthrough-adr-draft.md）──────────────────────────────────────────────
+#
+# 内核调用插件时经 invocation `_identity` 下发执行上下文身份（tenant_id/
+# session_id，原头=内核，插件不可指派）；server 在调用边界捕获到本 contextvar
+# （asyncio 每消息独立 task，天然 per-invocation 隔离，等价内核侧 task_local
+# 语义），capability 反调出站时（plugin._make_call_fn）自动回带 `_tenant_id`/
+# `_session_id`。内核桥入口（PluginScopedRouter）消费两键并建立租户 scope。
+_identity_var: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+    "agentos_reverse_call_identity", default=None
+)
+
+
+def bind_reverse_call_identity(
+    identity: Any,
+) -> contextvars.Token[dict[str, str] | None]:
+    """绑定本次调用的执行上下文身份（server 调用边界调用）。
+
+    `identity` 须为 ``{"tenant_id": ..., "session_id": ...}`` dict；非 dict
+    （旧内核/畸形）按无身份处理（返回None 形态 token 亦可安全 reset）。
+    """
+    value = identity if isinstance(identity, dict) and identity else None
+    return _identity_var.set(value)
+
+
+def reset_reverse_call_identity(
+    token: contextvars.Token[dict[str, str] | None],
+) -> None:
+    """调用边界结束时复位身份（防跨调用残留）。"""
+    _identity_var.reset(token)
+
+
+def reverse_call_identity_params() -> dict[str, str]:
+    """反调出站参数附加：有身份 → ``{"_tenant_id", "_session_id", "_user_id"}``；无 → 空。
+
+    `_user_id` 为刀2 增量（ADR docs/decisions/2026-10-17-reverse-call-user-
+    identity-injection.md）：内核 `_identity.user_id` 回显，桥消费后派发面
+    以注入身份为准（插件手写 user 不可指派）。非字符串/空串按缺席处理，
+    与旧内核（不认识该键，当普通 params 剥除/忽略）双向兼容。
+    """
+    identity = _identity_var.get()
+    if not identity:
+        return {}
+    params: dict[str, str] = {}
+    tenant = identity.get("tenant_id")
+    if isinstance(tenant, str) and tenant:
+        params["_tenant_id"] = tenant
+    session = identity.get("session_id")
+    if isinstance(session, str) and session:
+        params["_session_id"] = session
+    user = identity.get("user_id")
+    if isinstance(user, str) and user:
+        params["_user_id"] = user
+    return params
+
+
+def current_reverse_call_tenant_id() -> str | None:
+    """直调面消费：当前调用身份中的租户 ID；无身份/畸形 → None。
+
+    进程内直调（shared 平铺模块 import，非 capability 反调）不走
+    :func:`reverse_call_identity_params` 的出站回带，取租户方在本进程内
+    读同一 contextvar（原头仍是内核 `_identity` 下发，非插件可指派）。
+    调用方按「显式形参 > 本函数 > default」取序。
+    """
+    identity = _identity_var.get()
+    if not identity:
+        return None
+    tenant = identity.get("tenant_id")
+    return tenant if isinstance(tenant, str) and tenant else None
 
 
 class CapabilityHandle:

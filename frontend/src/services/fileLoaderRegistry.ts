@@ -2,9 +2,11 @@
  * 文件加载器路由（docs/working/文件加载器路由设计_20260928.md）。
  *
  * 文件"能否打开"由前端加载器注册表裁决（扩展名/MIME → 查看器词汇），
- * 内核 /uploads 白名单（匿名通道安全边界）不参与决策。全部 loader 统一
- * 经鉴权内容端点取流（artifacts_file_content，键 = /uploads url basename）
- * ——前端对内核匿名通道的媒体扩展名清单零依赖。
+ * 内核 /uploads 扩展名白名单（服务端媒体类型契约）不参与决策。全部 loader
+ * 统一经鉴权内容端点取流（artifacts_file_content，键 = /uploads url
+ * basename）——/uploads 已收紧为需鉴权（ADR 2026-10-10），裸直链消费面
+ * （markdown 图/画廊/直链下载）统一经本文件的 useAuthedAttachmentUrl /
+ * downloadAttachment 解析。
  *
  * 词汇表哲学对齐 renderIntent：loader 是共享词汇不是组件绑定——插件
  * （波3 经 plugin.json file_loaders 声明装载）只声明"我的类型该用哪个
@@ -14,6 +16,7 @@
  * 插件扩展名 → 内置扩展名 → 插件 mime → 内置 mime → null（无对应加载器卡）。
  */
 
+import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import apiClient from '@/services/api/client'
 import { ARTIFACTS_ENDPOINTS } from '@/services/api/endpoints.generated'
@@ -195,7 +198,6 @@ export async function openFileWithLoader(target: FileOpenTarget): Promise<void> 
   let data: { content: string; url?: string; blobUrl?: string }
   try {
     const resp = await apiClient.get<string | Blob>(contentUrlOf(target.url), {
-      baseURL: '',
       responseType: asText ? 'text' : 'blob',
       silent: true,
     })
@@ -238,5 +240,98 @@ export function markdownLinkInterceptor(): (link: { href: string; text: string }
     const name = text.trim() || decodeURIComponent(href.split('/').pop() ?? '') || '附件'
     void openFileWithLoader({ name, url: href })
     return true
+  }
+}
+
+/** 鉴权解析结果：url = 可直接交给 <img>/<iframe> 的地址（透传原值或 blob objectURL） */
+export interface AuthedAttachmentUrl {
+  url?: string
+  /** 取流失败（仅 /uploads 直链会取流；透传类恒 false） */
+  failed: boolean
+}
+
+/**
+ * /uploads 直链 → 鉴权取流解析（/uploads 已收紧为需鉴权，ADR 2026-10-10）：
+ * 非 /uploads 前缀（data:/blob:/https:/ext 静态资源）原样透传，行为零变化；
+ * /uploads url 经 artifacts_file_content（apiClient 带 Authorization）取 blob
+ * → objectURL，src 变化/组件卸载时回收旧 objectURL。裸 <img> 无法携带
+ * Authorization，/uploads 媒体一律经本 hook（或 openFileWithLoader）解析。
+ *
+ * 取流必须走 apiClient 默认基址（constants/api.ts 单点，同源或壳注入绝对地址），
+ * 不可置 baseURL:''——移动壳页面 origin 是壳本地资源服务器（http://localhost），
+ * 同源下无 /ext 路由（404）；绝对地址才会被 CapacitorHttp 拦截转发到云端内核。
+ */
+export function useAuthedAttachmentUrl(src?: string): AuthedAttachmentUrl {
+  const [state, setState] = useState<AuthedAttachmentUrl>(() =>
+    src && !src.startsWith(UPLOADS_URL_PREFIX) ? { url: src, failed: false } : { failed: false },
+  )
+
+  useEffect(() => {
+    if (!src) {
+      setState({ failed: false })
+      return
+    }
+    if (!src.startsWith(UPLOADS_URL_PREFIX)) {
+      setState({ url: src, failed: false })
+      return
+    }
+    let stale = false
+    let objectUrl: string | undefined
+    setState({ failed: false })
+    void (async () => {
+      try {
+        const resp = await apiClient.get<Blob>(contentUrlOf(src), {
+          responseType: 'blob',
+          silent: true,
+        })
+        objectUrl = URL.createObjectURL(resp.data as Blob)
+        if (!stale) setState({ url: objectUrl, failed: false })
+      } catch {
+        if (!stale) setState({ failed: true })
+      }
+    })()
+    return () => {
+      stale = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [src])
+
+  return state
+}
+
+/**
+ * 附件下载：相对路径（内核端点——/uploads 直链或鉴权内容端点）经 apiClient
+ * 取流转 blob 下载（<a href> 导航无法携带 Authorization，/uploads 匿名导航
+ * 已 401）；绝对 http(s) URL 维持浏览器直链下载。失败 toast 报错不抛出
+ * （下载是用户主动作）。
+ */
+export async function downloadAttachment(url: string, fileName: string): Promise<void> {
+  const trigger = (href: string) => {
+    const a = document.createElement('a')
+    a.href = href
+    a.download = fileName
+    document.body.appendChild(a)
+    a.click()
+    // 判空移除：React 19 StrictMode/HMR/外部脚本可能在 click 后已移除 a，
+    // 直接 removeChild 会抛 NotFoundError，先检查 parentNode 避免报错
+    if (a.parentNode) a.parentNode.removeChild(a)
+  }
+  if (!url.startsWith('/')) {
+    trigger(url)
+    return
+  }
+  let objectUrl: string | undefined
+  try {
+    const resp = await apiClient.get<Blob>(url, { responseType: 'blob', silent: true })
+    objectUrl = URL.createObjectURL(resp.data as Blob)
+    trigger(objectUrl)
+    URL.revokeObjectURL(objectUrl)
+  } catch (error) {
+    const status = (error as { response?: { status?: number } } | null)?.response?.status
+    toast.error(
+      status
+        ? `文件 "${fileName}" 下载失败（HTTP ${status}）`
+        : `文件 "${fileName}" 下载失败，请检查网络或文件是否可用`,
+    )
   }
 }

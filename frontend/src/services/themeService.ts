@@ -8,6 +8,7 @@
 
 import { presetThemes } from '@/config/themes'
 import { ThemeStorageService } from '@/services/themeStorage'
+import { normalizeColorMix } from './backdropContrast'
 import {
   colorToHsl,
   colorToHslSolid,
@@ -300,6 +301,12 @@ function pushComponentVars(vars: string[], { config }: CompileCtx): void {
         vars.push(`--badge-info-bg: ${variants.info.bg}`)
         vars.push(`--badge-info-text: ${variants.info.text}`)
         vars.push(`--badge-info-border: ${variants.info.border}`)
+        // rgb 三元组镜像：待交互边框以 rgb(var(--badge-info-text-rgb)/<alpha>) 消费
+        // （原生 alpha 无 color-mix 依赖）；解析失败缺席，消费类内数值 fallback 兜底
+        const infoTextRgb = colorToRgb(variants.info.text)
+        if (infoTextRgb) {
+          vars.push(`--badge-info-text-rgb: ${infoTextRgb.r} ${infoTextRgb.g} ${infoTextRgb.b}`)
+        }
       }
     }
   }
@@ -414,6 +421,21 @@ function pushGlobalSurfaceVars(vars: string[], { config, isDarkTheme, hoverOverl
   vars.push(`--overlay-strong: ${isDarkTheme ? 'rgba(0, 0, 0, 0.8)' : 'rgba(15, 23, 42, 0.78)'}`)
 }
 
+/** HEX 颜色（6/3 位）→ CSS RGB 三元组 "r g b"（消费契约 rgb(var(--x-rgb)/a) 原生
+ *  alpha 语法）；解析失败返回 null，调用方跳过该三元组注入，由消费类内数值
+ *  fallback 兜底。 */
+export function hexToRgbTriplet(hex: string): string | null {
+  const raw = hex.replace(/^#/, '')
+  const expanded = /^[a-f\d]{3}$/i.test(raw)
+    ? raw
+        .split('')
+        .map((ch) => ch + ch)
+        .join('')
+    : raw
+  const rgb = hexToRgb(`#${expanded}`)
+  return rgb ? `${rgb.r} ${rgb.g} ${rgb.b}` : null
+}
+
 /** Deep Space v2 桥接变量（--ds-*）：非深空主题下引用面统一覆写接入主题系统 */
 function pushDeepSpaceBridgeVars(vars: string[], { config, hoverOverlay }: CompileCtx): void {
   // === Deep Space v2 桥接变量（--ds-*） ===
@@ -449,6 +471,17 @@ function pushDeepSpaceBridgeVars(vars: string[], { config, hoverOverlay }: Compi
   }
   Object.entries(map).forEach(([key, value]) => {
     if (value) vars.push(`${key}: ${value}`)
+  })
+
+  // === RGB 三元组镜像（--ds-accent-*-rgb / --ds-status-*-rgb，与上方 --ds-* 同源同条件）===
+  // 消费形态 rgb(var(--x-rgb)/alpha) 是原生 alpha 语法（Chromium 65+，无 color-mix
+  // 依赖），供半透明底/边框类使用——color-mix 半透明配方在 WebView 110（Chromium
+  // <111）下 @supports 门不过，门外裸 var fallback 是实心色，与同色图标叠加即隐形。
+  // 源值非 hex（如 glow 的阴影串）时该三元组缺席，消费类内数值 fallback 兜底。
+  Object.entries(map).forEach(([key, value]) => {
+    if (!value || !(key.startsWith('--ds-accent-') || key.startsWith('--ds-status-'))) return
+    const triplet = hexToRgbTriplet(value)
+    if (triplet) vars.push(`${key}-rgb: ${triplet}`)
   })
 
   // 圆角（ds-r-*，组件目前未引用，输出以保持桥接完整）
@@ -511,6 +544,11 @@ function pushCodeBlockVars(vars: string[], { config, isDarkTheme }: CompileCtx):
   // 深色主题固定深底（兼容语法高亮配色）；浅色主题用主题 input 色（淡主题色调）
   const bg = isDarkTheme ? 'rgba(15, 23, 42, 0.85)' : config.colors.background.input
   vars.push(`--code-bg: ${bg}`)
+  // rgb 三元组镜像：画布 tint 以 rgb(var(--code-bg-rgb)/<alpha>) 消费（原生 alpha
+  // 无 color-mix 依赖，WebView 110 与现代内核同渲染）；rgba/hex 均可解析，
+  // 解析失败该三元组缺席，消费类内数值 fallback 兜底
+  const codeBgRgb = colorToRgb(bg)
+  if (codeBgRgb) vars.push(`--code-bg-rgb: ${codeBgRgb.r} ${codeBgRgb.g} ${codeBgRgb.b}`)
   // 字色组按底色实际亮度分发而非主题 category（special 族也可能是深底），
   // 组件侧高亮样式表只消费 --code-* 令牌，不感知主题。
   const palette = codeBgIsDark(bg) ? CODE_SYNTAX_DARK : CODE_SYNTAX_LIGHT
@@ -610,33 +648,57 @@ function pushRadiusShadowVars(vars: string[], { config }: CompileCtx): void {
   }
 }
 
+/**
+ * 桥变量单点发射：主变量 + alpha 镜像对（R25）
+ *
+ * 主题源值 rgba(r,g,b,a) 经 colorToHsl 保留 alpha（如 `222 47% 11% / 0.1`），
+ * 此类值下 `hsl(var(--x) / N)` 消费形态展开为双 alpha 非法（全引擎 IACVT）：
+ * 110 legacy 规则、语义 alpha 修饰类、手写包装全命中（边框退化 currentColor、
+ * 底色退化 transparent）。带 alpha 的值追加镜像对：
+ * - `--x-t`：剥 alpha 纯三元组——因子化消费形态的基色位
+ * - `--x-a`：alpha 标量——因子化 alpha 位的乘法因子
+ * 因子化形态 `hsl(var(--x-t, var(--x)) / calc(N * var(--x-a, 1)))`：三元组
+ * 主题（无镜像）下展开逐字节等价 `hsl(var(--x) / N)`；带 alpha 主题下精确
+ * 得 alpha 乘积 N*a，与 111+ color-mix 混 transparent 的数学结果等值。
+ */
+function pushBridgeVar(vars: string[], name: string, color: string): void {
+  const hsl = colorToHsl(color)
+  vars.push(`${name}: ${hsl}`)
+  // 仅匹配 rgbToHsl 的带 alpha 输出格式 `H S% L% / A`（奇异值原样返回时不误判）
+  const m = hsl.match(/^(.+) \/ (\d+(?:\.\d+)?)$/)
+  if (m) {
+    vars.push(`${name}-t: ${m[1]}`)
+    vars.push(`${name}-a: ${m[2]}`)
+  }
+}
+
 /** shadcn/ui 桥接映射：HSL 原始格式变量（shadcn 经 hsl(var(--xxx)) 消费） */
 function pushShadcnBridgeVars(vars: string[], { config }: CompileCtx): void {
   // 将自定义主题变量映射到 shadcn/ui 组件期望的 HSL 原始格式变量
   // shadcn/ui 通过 hsl(var(--xxx)) 消费这些变量，所以这里存储的是不带 hsl() 包裹的原始值
   const c = config.colors
-  vars.push(`--foreground: ${colorToHsl(c.text.primary)}`)
-  vars.push(`--background: ${colorToHsl(c.background.main)}`)
-  vars.push(`--card: ${colorToHsl(c.background.card)}`)
-  vars.push(`--card-foreground: ${colorToHsl(c.text.primary)}`)
-  vars.push(`--popover: ${colorToHsl(c.background.elevated)}`)
-  vars.push(`--popover-foreground: ${colorToHsl(c.text.primary)}`)
+  pushBridgeVar(vars, '--foreground', c.text.primary)
+  pushBridgeVar(vars, '--background', c.background.main)
+  pushBridgeVar(vars, '--card', c.background.card)
+  pushBridgeVar(vars, '--card-foreground', c.text.primary)
+  pushBridgeVar(vars, '--popover', c.background.elevated)
+  pushBridgeVar(vars, '--popover-foreground', c.text.primary)
   vars.push(`--panel-solid: ${colorToHslSolid(c.background.elevated)}`)
-  vars.push(`--primary: ${colorToHsl(c.primary)}`)
+  pushBridgeVar(vars, '--primary', c.primary)
   // 主色/次色/强调色的前景（其底上的文字）：黑白择优计算。
   // 不取 bubble.user_text / text.primary 等声明值——那些值对着气泡底/正文底调校，
   // 直接压在 primary/secondary/accent 底上会撞色且无校验兜底；成对精调交给主题
   // 作者并由对比度门禁测试把关，前景在此单点按对比度择优保证任意主题恒可读。
-  vars.push(`--primary-foreground: ${colorToHsl(contrastPick(c.primary))}`)
-  vars.push(`--secondary: ${colorToHsl(c.secondary)}`)
-  vars.push(`--secondary-foreground: ${colorToHsl(contrastPick(c.secondary))}`)
-  vars.push(`--muted: ${colorToHsl(c.background.input)}`)
-  vars.push(`--muted-foreground: ${colorToHsl(c.text.secondary)}`)
-  vars.push(`--accent: ${colorToHsl(c.accent)}`)
-  vars.push(`--accent-foreground: ${colorToHsl(contrastPick(c.accent))}`)
-  vars.push(`--border: ${colorToHsl(c.border.default)}`)
-  vars.push(`--input: ${colorToHsl(c.background.input)}`)
-  vars.push(`--ring: ${colorToHsl(c.primary)}`)
+  pushBridgeVar(vars, '--primary-foreground', contrastPick(c.primary))
+  pushBridgeVar(vars, '--secondary', c.secondary)
+  pushBridgeVar(vars, '--secondary-foreground', contrastPick(c.secondary))
+  pushBridgeVar(vars, '--muted', c.background.input)
+  pushBridgeVar(vars, '--muted-foreground', c.text.secondary)
+  pushBridgeVar(vars, '--accent', c.accent)
+  pushBridgeVar(vars, '--accent-foreground', contrastPick(c.accent))
+  pushBridgeVar(vars, '--border', c.border.default)
+  pushBridgeVar(vars, '--input', c.background.input)
+  pushBridgeVar(vars, '--ring', c.primary)
 }
 
 /** 视觉效果（effects）→ 全局过渡/动画语义变量 */
@@ -712,6 +774,19 @@ export function applyTheme(config: ThemeConfig): void {
  */
 let lastPluginVars: string[] = []
 
+/**
+ * 经区域桥流入 --muted-foreground / --secondary-foreground 的区域变量。
+ * 消费契约是 hsl(var(--muted-foreground))（HSL 三元组），声明面（DSH
+ * 翻译器/皮肤清单）发的是 hex——hex 进 hsl() 非法 → 退化继承色。注入点
+ * 统一归一化；colorToHsl 对已是三元组的值原样返回（幂等），声明方无需
+ * 感知消费契约。--region-*-fg/bg 走裸值消费，不在归一化之列。
+ */
+const HSL_BRIDGE_VARS = new Set([
+  '--region-sidebar-muted-fg',
+  '--region-chat-muted-fg',
+  '--region-workspace-muted-fg',
+])
+
 /** 清理上一插件主题发射的变量（applyTheme 每次应用前调用，统一生命周期） */
 export function clearPluginThemeVars(): void {
   const root = document.documentElement
@@ -728,7 +803,11 @@ export function applyPluginThemeVars(theme: PluginTheme): void {
   const variables = theme.variables ?? {}
   for (const [key, value] of Object.entries(variables)) {
     if (key && value) {
-      root.style.setProperty(key, value)
+      // 非 HSL 桥值经 color-mix 静态等价转换（WebView 110 兼容）：翻译器发射的
+      // color-mix 派生面在 <111 消费位 IACVT；可静态解析形态转等价 hex，
+      // 不可解析形态原值透传（契约见 normalizeColorMix）
+      const out = HSL_BRIDGE_VARS.has(key) ? colorToHsl(value) : normalizeColorMix(value)
+      root.style.setProperty(key, out)
       lastPluginVars.push(key)
     }
   }

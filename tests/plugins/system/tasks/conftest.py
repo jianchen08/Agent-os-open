@@ -1,6 +1,6 @@
 """tasks 插件测试 conftest——把插件目录注入 sys.path。
 
-插件位于 plugins/shared/system/tasks/，测试运行期懒加载平铺模块
+插件位于 plugins/shared/tasks/，测试运行期懒加载平铺模块
 （from storage import ... / import id_utils）。本 conftest 同时暴露
 _PLUGIN_SOURCE_DIRS 给收集期（tests/conftest.py pytest_collect_file）与
 运行期（tests/plugins/conftest.py pytest_runtest_setup）的统一串扰治理：
@@ -13,7 +13,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system" / "tasks"
+_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tasks"
 
 _PLUGIN_SOURCE_DIRS = [str(_PLUGIN_DIR)]
 

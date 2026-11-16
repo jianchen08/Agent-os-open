@@ -1,0 +1,94 @@
+{
+  "case_id": "cap_constraint_follow",
+  "category": "capability",
+  "passed": false,
+  "elapsed_seconds": 148.4,
+  "session_id": "thread-60df4421-cd6c-48bd-a6f4-06e46d826b99",
+  "pipeline_ids": [
+    "16cfa9356cd0"
+  ],
+  "settled": true,
+  "dispatches": [
+    {
+      "terminal": "stream_end",
+      "pipeline_id": "16cfa9356cd0",
+      "interactions": [],
+      "event_types": [
+        "pending_inputs_changed",
+        "pending_inputs_changed",
+        "stream_start",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "stream_end"
+      ]
+    }
+  ],
+  "approval": {
+    "requests_seen": 0,
+    "approved": 0,
+    "denied": 0,
+    "response_errors": []
+  },
+  "metrics": {
+    "pipelines": 1,
+    "iterations_total": 9,
+    "error_steps": 1,
+    "timeout_steps": 0,
+    "tool_calls": 5,
+    "tool_retries": 0,
+    "tool_names": [],
+    "tool_call_counts": {},
+    "task_statuses": [
+      null
+    ],
+    "all_settled": true,
+    "any_failed": false,
+    "by_model": {
+      "glm-5.3-flash": {
+        "input": 64764,
+        "output": 1269,
+        "cached": 0,
+        "total": 66033
+      }
+    },
+    "tokens_total": 66033
+  },
+  "assertions": [
+    {
+      "type": "settled",
+      "passed": true,
+      "detail": "全链管道收敛"
+    },
+    {
+      "type": "no_failed_task",
+      "passed": true,
+      "detail": "无 failed 任务"
+    },
+    {
+      "type": "no_tool_called",
+      "passed": true,
+      "detail": "未调用 bash_execute（约束遵守）"
+    },
+    {
+      "type": "file_contains",
+      "passed": false,
+      "detail": "产物 eval_head.md 未找到"
+    },
+    {
+      "type": "file_contains",
+      "passed": false,
+      "detail": "产物 eval_head.md 未找到"
+    }
+  ],
+  "failed_assertions": [
+    "file_contains",
+    "file_contains"
+  ],
+  "reply_excerpt": "任务完成啦～跟你如实汇报一下经过和结果哦：\n\n**⚠️ 一个路径小插曲（如实说明）**：你给的原始目标路径 `scripts\\eval_bench\\...` 超出了本次会话沙箱允许的范围，第一次写入被系统拒绝了（沙箱根限制在 `.ai_workspaces\\sessions\\thread-60df4421-...` 内）。我把文件写在了沙箱内的等效位置：`D:\\myproject\\container_e17cc5927dfd\\.ai_workspaces\\sessions\\thread-60df4421-cd6c-48bd-a6f4-06e46d826b99\\eval_head.md`，内容为两行原文，每行一条。\n\n**📄 写入的两行内容**：\n\n- **第 3 行**：\n  > `> 本文件是给在本仓库工作的 AI 代理（DSH 等）的项目上下文。读完它再动手；`\n\n- **第 17 行"
+}

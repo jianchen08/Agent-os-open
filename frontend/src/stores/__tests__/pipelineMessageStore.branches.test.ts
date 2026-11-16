@@ -99,24 +99,29 @@ describe('pipelineMessageStore 分支缺口', () => {
   })
 
   describe('内存封顶与空白过滤', () => {
-    it('initFromAPI 超 2000 条：按序裁剪保留最新 2000 条（31）', () => {
+    it('initFromAPI 超 20000 内存窗口：按序裁剪保留最新 20000 条（31）', () => {
       const store = usePipelineMessageStore.getState()
-      const many = Array.from({ length: 2010 }, (_, i) =>
+      const many = Array.from({ length: 20010 }, (_, i) =>
         makeMsg(`m${i}`, i + 1, { role: i % 2 ? 'assistant' : 'user' }),
       )
       store.initFromAPI(PIPE, many)
       const msgs = store.getMessages(PIPE)
-      expect(msgs).toHaveLength(2000)
+      expect(msgs).toHaveLength(20000)
       expect(msgs[0].sequence).toBe(11)
-      expect(msgs[1999].sequence).toBe(2010)
-      expect(store.getBottomCursor(PIPE)).toBe(2010)
+      expect(msgs[19999].sequence).toBe(20010)
+      expect(store.getBottomCursor(PIPE)).toBe(20010)
     })
 
-    it('assistant 仅空白 thinking（无 content/parts）被当空气泡丢弃，有 thinking 内容的保留（277 双面）', () => {
+    it('assistant 空白消息被当空气泡丢弃，仅 thinking part 有内容的保留（277 双面，思考只存 parts）', () => {
       const store = usePipelineMessageStore.getState()
+      // 思考只存 parts（单份化）：判空依据 = thinking part 内容；
+      // 顶层 thinking 已停写，不再作为判空依据
       store.initFromAPI('pipe-blank', [
-        makeMsg('blank-thinking', 1, { content: '', thinking: { content: '   ' } as Message['thinking'] }),
-        makeMsg('real-thinking', 2, { content: '', thinking: { content: '思考' } as Message['thinking'] }),
+        makeMsg('blank-msg', 1, { content: '   ' }),
+        makeMsg('real-thinking', 2, {
+          content: '',
+          parts: [{ type: 'thinking', content: '思考', state: 'done' }],
+        }),
       ])
       const ids = store.getMessages('pipe-blank').map((m) => m.id)
       expect(ids).toEqual(['real-thinking'])
@@ -312,26 +317,37 @@ describe('pipelineMessageStore 分支缺口', () => {
     })
   })
 
+  describe('段清单刷新（分支切换器可见性）', () => {
+    it('已有 spanIndex 条目也刷新清单：陈旧清单不挡刷新（重新生成的新段须可知）', async () => {
+      const { getMessageSegments } = await import('@/services/api/messageSegments')
+      const mocked = vi.mocked(getMessageSegments)
+      mocked.mockClear()
+      // 预置陈旧条目（打开会话时拿到的空清单）
+      usePipelineMessageStore.setState({ spanIndex: { [PIPE]: [] } })
+      setApiRecords([])
+      await usePipelineMessageStore
+        .getState()
+        .loadPipelineMessages(PIPE, { threadId: THREAD, mode: 'init' })
+      expect(mocked).toHaveBeenCalledWith(PIPE)
+    })
+  })
+
   describe('查询方法与游标缺省面', () => {
-    it('未注册管道：游标 0 / hasMoreOlder false / findLastUserMessageId null / 各操作静默', () => {
+    it('未注册管道：游标 0 / hasMoreOlder false / 各操作静默', () => {
       const store = usePipelineMessageStore.getState()
       expect(store.getTopCursor('nope')).toBe(0)
       expect(store.getBottomCursor('nope')).toBe(0)
       expect(store.hasMoreOlder('nope')).toBe(false)
-      expect(store.findLastUserMessageId('nope')).toBeNull()
       expect(() => store.removeMessage('nope', 'm1')).not.toThrow()
-      expect(store.confirmUserMessage('nope', 'cm-x')).toBe(false)
     })
 
-    it('removeMessage/truncateMessagesAfter 目标缺失：幂等跳过（713/739）', () => {
+    it('removeMessage 目标缺失：幂等跳过（713）', () => {
       const store = usePipelineMessageStore.getState()
       store.initFromAPI(PIPE, [
         makeMsg('u1', 1, { role: 'user', content: 'q' }),
         makeMsg('a1', 2),
       ])
       store.removeMessage(PIPE, 'no-such')
-      expect(store.getMessages(PIPE)).toHaveLength(2)
-      store.truncateMessagesAfter(PIPE, 'no-such')
       expect(store.getMessages(PIPE)).toHaveLength(2)
     })
 
@@ -391,7 +407,7 @@ describe('pipelineMessageStore 分支缺口', () => {
     })
   })
 
-  describe('claimUserMessage / ensureInjectedUserMessage / confirmUserMessage', () => {
+  describe('claimUserMessage / ensureInjectedUserMessage', () => {
     const CMID = 'cm-claim-gap'
     const REC = 'mc_claim_gap'
 
@@ -454,15 +470,6 @@ describe('pipelineMessageStore 分支缺口', () => {
       expect(store.getMessages('pipe-seq').map((m) => m.id)).toEqual(['u10', 'r15', 'a20'])
       store.ensureInjectedUserMessage('pipe-seq', { id: 'r30', content: 'late', sequence: 30 })
       expect(store.getMessages('pipe-seq').map((m) => m.id)).toEqual(['u10', 'r15', 'a20', 'r30'])
-    })
-
-    it('confirmUserMessage：已 completed 与未找到均返回 false（657 双面）', () => {
-      const store = usePipelineMessageStore.getState()
-      store.addMessage(PIPE, makeMsg('done-u', 1, {
-        role: 'user', content: 'q', clientMessageId: 'cm-done', status: 'completed',
-      }))
-      expect(store.confirmUserMessage(PIPE, 'cm-done')).toBe(false)
-      expect(store.confirmUserMessage(PIPE, 'cm-none')).toBe(false)
     })
   })
 
@@ -613,37 +620,11 @@ describe('pipelineMessageStore 分支缺口', () => {
   })
 
   describe('动作成功路径与注册/激活缺省面', () => {
-    it('confirmUserMessage：sending 乐观 user 认领成功返回 true（658-661）', () => {
-      const store = usePipelineMessageStore.getState()
-      store.addMessage(PIPE, makeMsg('pending-u', 1, {
-        role: 'user', content: 'q', clientMessageId: 'cm-ok', status: 'sending',
-      }))
-      expect(store.confirmUserMessage(PIPE, 'cm-ok')).toBe(true)
-      expect(store.getMessages(PIPE)[0].status).toBe('completed')
-    })
-
     it('removeMessage：命中即移除（714-715）', () => {
       const store = usePipelineMessageStore.getState()
       store.initFromAPI(PIPE, [makeMsg('u1', 1, { role: 'user', content: 'q' }), makeMsg('a1', 2)])
       store.removeMessage(PIPE, 'a1')
       expect(store.getMessages(PIPE).map((m) => m.id)).toEqual(['u1'])
-    })
-
-    it('truncateMessagesAfter：保留到目标 user 消息（含）为止（742-743）', () => {
-      const store = usePipelineMessageStore.getState()
-      store.initFromAPI(PIPE, [
-        makeMsg('u1', 1, { role: 'user', content: 'q1' }),
-        makeMsg('u2', 2, { role: 'user', content: 'q2' }),
-        makeMsg('a3', 3),
-      ])
-      store.truncateMessagesAfter(PIPE, 'u2')
-      expect(store.getMessages(PIPE).map((m) => m.id)).toEqual(['u1', 'u2'])
-    })
-
-    it('findLastUserMessageId：仅 assistant 时遍历耗尽返回 null（729）', () => {
-      const store = usePipelineMessageStore.getState()
-      store.initFromAPI(PIPE, [makeMsg('a1', 1), makeMsg('a2', 2)])
-      expect(store.findLastUserMessageId(PIPE)).toBeNull()
     })
 
     it('stopStreaming：流式 assistant 收尾为 interrupted，text → done、tool_call calling → error（796/799）', () => {

@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<!--
+  浏览器直播页（browser_tool contributes.pages browser_live，widget: webview 承载）
+
+  职责：经宿主 postMessage 中继换票（/ext/browser_tool/live，GET）→ <img> 直连
+  Bridge MJPEG 流（媒体面不经内核，ADR 2026-10-21-browser-live-workspace-tab）。
+  CSP 由宿主注入：img-src 按页面声明 props.csp 白名单放行 Bridge origin
+  （http://127.0.0.1:* http://localhost:*）；connect-src 'none' 恒锁死——本页
+  不发任何 fetch，一切宿主往返走 agentos.postMessage 中继。
+
+  状态机：loading → live → 断流(img error)重新换票；available=false（运行时
+  未就绪/无页面）→ 等待态轮询 5s；disabled → unavailable 15s 慢轮询。
+-->
+<head>
+  <meta charset="utf-8" />
+  <title>浏览器</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      display: flex; flex-direction: column;
+      font: 12px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+      color: inherit; background: transparent;
+    }
+    #bar {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 12px; border-bottom: 1px solid rgba(128,128,128,.25);
+      opacity: .85; flex: none;
+    }
+    #dot { width: 8px; height: 8px; border-radius: 50%; background: #888; flex: none; }
+    #dot.live { background: #22a06b; }
+    #dot.wait { background: #e2b203; animation: pulse 1.2s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: .35; } }
+    #status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; overflow: auto; }
+    #frame { display: none; max-width: 100%; min-height: 100%; object-fit: contain; }
+    #hint { padding: 16px; opacity: .65; text-align: center; }
+  </style>
+</head>
+<body>
+  <div id="bar">
+    <span id="dot" class="wait"></span>
+    <span id="status">正在连接浏览器…</span>
+  </div>
+  <div id="stage">
+    <img id="frame" alt="浏览器实时画面" />
+    <div id="hint">正在连接浏览器…</div>
+  </div>
+  <script>
+    (function () {
+      var LIVE_METHOD = '/ext/browser_tool/live';
+      var RETRY_MS = { reconnect: 2000, wait: 5000, unavailable: 15000 };
+      var HINT = {
+        loading: '正在连接浏览器…',
+        reconnect: '画面中断，重新换票…',
+        wait: '浏览器未在运行——agent 调用浏览器工具后画面将自动出现',
+        unavailable: '浏览器运行时不可用（Bridge 未启动或未启用 browser 段）',
+        error: '连接失败，正在重试…'
+      };
+      var timer = null;
+      var seq = 0;
+      var frame = document.getElementById('frame');
+      var hint = document.getElementById('hint');
+      var status = document.getElementById('status');
+      var dot = document.getElementById('dot');
+
+      function setPhase(phase) {
+        if (timer) { clearTimeout(timer); timer = null; }
+        var text = HINT[phase] || '';
+        if (phase === 'live') {
+          dot.className = 'live';
+          status.textContent = frame.getAttribute('data-page-url') || '浏览器直播中';
+          frame.style.display = 'block';
+          hint.style.display = 'none';
+        } else {
+          dot.className = 'wait';
+          status.textContent = text;
+          frame.style.display = 'none';
+          hint.style.display = 'block';
+          hint.textContent = text;
+        }
+      }
+
+      function schedule(kind) {
+        setPhase(kind);
+        timer = setTimeout(requestTicket, RETRY_MS[kind]);
+      }
+
+      function requestTicket() {
+        // 无 params → 宿主按 GET 中继（auth:user 由内核 /ext 面把关）
+        window.agentos.postMessage(LIVE_METHOD);
+      }
+
+      window.addEventListener('message', function (e) {
+        var msg = e.data;
+        if (!msg || msg.__agentos_webview !== true) return;
+        if (msg.method === LIVE_METHOD + '.result') {
+          var data = msg.params || {};
+          if (data.mjpeg_url && !data.error) {
+            frame.setAttribute('data-page-url', data.page_url || '');
+            // 票一次性：每次（重）连都先换票再挂 src；断流由 onerror 触发重换
+            frame.onerror = function () { schedule('reconnect'); };
+            frame.src = data.mjpeg_url;
+            setPhase('live');
+          } else if (data.available === false && data.reason === 'disabled') {
+            schedule('unavailable');
+          } else {
+            schedule('wait');
+          }
+        } else if (msg.method === LIVE_METHOD + '.error') {
+          schedule('wait');
+        }
+      });
+
+      setPhase('loading');
+      requestTicket();
+    })();
+  </script>
+</body>
+</html>

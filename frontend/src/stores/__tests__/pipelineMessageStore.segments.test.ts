@@ -92,16 +92,21 @@ describe('pipelineMessageStore 段索引', () => {
     expect(usePipelineMessageStore.getState().spanIndex['pipe-1']).toEqual([])
   })
 
-  it('loadPipelineMessages 打开会话时拉一次段清单；spanIndex 已有清单不重拉', async () => {
+  it('loadPipelineMessages 每次打开都刷新段清单（陈旧清单不挡刷新）', async () => {
+    // 契约修订（2026-10-21 用户实证「重试多次仍找不到分支切换按钮」）：段清单
+    // 原为「无条目时拉一次」——打开会话拿到空清单（[]）后该条目永久存在，陈旧
+    // 清单把刷新永久挡住，重新生成产生的新段前端永不知晓 → ‹i/n› 切换器在会话
+    // 生命周期内不出现。现行口径：每次打开都刷新（非阻塞，失败降级见
+    // fetchSegments），会话内的新段由轮次结束事件补刷。
     getMessagesApiMock.mockResolvedValue({ messages: [], total: 0, session_id: 'sess-1' })
     getMessageSegmentsMock.mockResolvedValue([makeSegment('seg-1', 50)])
 
     await usePipelineMessageStore.getState().loadPipelineMessages('pipe-1', { threadId: 'sess-1', mode: 'init' })
     expect(getMessageSegmentsMock).toHaveBeenCalledTimes(1)
 
-    // 第二次进入（spanIndex 已有该管道条目）不再重拉
+    // 第二次进入（spanIndex 已有该管道条目）照刷：清单可能已因重新生成而变化
     await usePipelineMessageStore.getState().loadPipelineMessages('pipe-1', { threadId: 'sess-1', mode: 'auto' })
-    expect(getMessageSegmentsMock).toHaveBeenCalledTimes(1)
+    expect(getMessageSegmentsMock).toHaveBeenCalledTimes(2)
   })
 
   describe('applySegmentView 乐观换装（后缀语义 §2.5）', () => {

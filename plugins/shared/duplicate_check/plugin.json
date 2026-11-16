@@ -1,0 +1,51 @@
+{
+  "id": "pipeline_duplicate_check",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Duplicate Check",
+  "version": "1.0.2",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "invoke_entry": "duplicate_check.execute",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "stop_reasons": [
+      "model_unavailable",
+      "llm_fail_loop"
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "permissions": {},
+  "priority": 50,
+  "host_group": "light",
+  "state": {
+    "reads": [
+      "_plugin_errors",
+      "agent_level",
+      "core_type",
+      "delegate_depth",
+      "ended",
+      "messages_tail:40",
+      "raw_result",
+      "raw_tool_calls",
+      "router.duplicate_intercepts",
+      "router.last_response",
+      "router.last_response_text",
+      "router.llm_error_cursor",
+      "router.llm_fail_streak",
+      "router.recent_tool_sigs",
+      "router.repetitive_count",
+      "router.tool_fail_banned",
+      "router.tool_fail_streak",
+      "tool_ids",
+      "tool_results"
+    ]
+  }
+}

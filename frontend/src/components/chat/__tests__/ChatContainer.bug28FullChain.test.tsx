@@ -43,9 +43,7 @@ vi.mock('@/stores/pipelineMessageStore', async () => {
 })
 vi.mock('@/hooks/queries/useLlmQueries', () => ({
   useLlmConfigQuery: () => ({ data: undefined, isError: false }),
-  // 思考档位选项面（ChatContainer 声明数据源消费）：无数据 = 选择器隐藏，
-  // 本套件不断言思考面
-  useThinkingLevelsQuery: () => ({ data: undefined }),
+  useThinkingLevelsQuery: () => ({ data: null }),
 }))
 vi.mock('@/hooks/queries/useAgentsQuery', async () => {
   const { queryKeys } = await import('@/services/query/queryKeys')
@@ -197,7 +195,7 @@ describe('BUG-28 续作：真实模块链复现（持久化完整 + 缓存就绪
     expect(receipt).not.toBe(false)
     // router 同款成员校验放行（不落「发送已终止」）
     expect(routerGuardAccepts({ content: '真机复现', pipelineId: MAIN_PID })).toBe(true)
-    expect(notificationCountByTitle('会话管道未就绪')).toBe(0)
+    expect(notificationCountByTitle('会话未就绪')).toBe(0)
   })
 
   it('恢复时序红绿：缓存未就绪时 initSessionTabs 不丢持久化绑定，缓存就绪后一次点击即受理', async () => {

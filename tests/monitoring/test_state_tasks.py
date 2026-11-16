@@ -1,3 +1,4 @@
+# @feature: FP-0.2.可观测性 可观测性基座 | @ci: python-coverage
 """monitoring /ext/monitoring/tasks state 派生 + payload_diag 目录锚定测试。
 
 2026-08-19 调试中心修复：
@@ -22,7 +23,7 @@ pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
 # （pytest 会话启动即导入全部 conftest，目录插入顺序不保证 monitoring 在前）。
 # conftest 仍负责把 monitoring 目录加进 sys.path（server.py 内部的平铺导入需要）。
 _SERVER_PY = (
-    Path(__file__).resolve().parents[2] / "plugins" / "shared" / "system" / "monitoring" / "server.py"
+    Path(__file__).resolve().parents[2] / "plugins" / "shared" / "monitoring" / "server.py"
 )
 _spec = importlib.util.spec_from_file_location("monitoring_server_under_test", _SERVER_PY)
 monitoring_server = importlib.util.module_from_spec(_spec)
@@ -93,7 +94,7 @@ class TestStateTasks:
 
 
 class TestPayloadDiagDirAnchor:
-    """payload_diag 目录锚定（读端与写端同源）。"""
+    """payload_diag 目录锚定（SDK 单源，与写端 adapter 同一函数）。"""
 
     def test_env_var_takes_priority(self, monkeypatch, tmp_path):
         monkeypatch.setenv("AGENTOS_LOG_DIR", str(tmp_path))
@@ -101,10 +102,9 @@ class TestPayloadDiagDirAnchor:
             tmp_path, "logs", "payload_diag"
         )
 
-    def test_walk_up_to_project_root_when_env_missing(self, monkeypatch):
+    def test_user_space_when_env_missing(self, monkeypatch, tmp_path):
+        """env 未设 → 用户空间 logs/payload_diag（SDK 单源缺省，位置推导退役）。"""
         monkeypatch.delenv("AGENTOS_LOG_DIR", raising=False)
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path))
         resolved = monitoring_server._payload_diag_dir()
-        # 必须落在探测到的项目根（含 config/models），而非插件目录 cwd
-        root = monitoring_server._resolve_project_root()
-        assert os.path.isdir(os.path.join(root, "config", "models"))
-        assert resolved == os.path.join(root, "logs", "payload_diag")
+        assert resolved == os.path.join(str(tmp_path), "logs", "payload_diag")

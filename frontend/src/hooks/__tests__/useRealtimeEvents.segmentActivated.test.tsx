@@ -5,8 +5,13 @@
  *
  * 契约（[来源: docs/working/消息历史双能力方案_多代切换与压缩原文_20260923.md §5.1]）：
  * 复用压缩对账 compressionReconcileTimers 防抖模式——防抖合并、坐标缺失跳过、
- * 对账 = 消息全量重拉 + 段清单刷新 + 清乐观段视图标记；失败弹通知且标记保留
+ * 对账 = 消息全量重拉 + 段清单刷新 + 段视图标记处置；失败弹通知且标记保留
  * （乐观视图与权威序列的分叉须可重试收敛）。
+ *
+ * 标记处置（2026-10-21 用户实证修订）：ack 段 = 本地标记 → **保留**（标记=「当前
+ * 在看第几代」，清掉会把 ‹/› 落点重置回最新归档代 → 同一代内容与当前代逐字节
+ * 相同（重试后模型给同样回复）时永远翻到同一代）；ack 段 ≠ 本地标记（他端切换
+ * /本地乐观态失效）→ 照旧清除。
  */
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -154,6 +159,29 @@ describe('useRealtimeEvents — segment_activated 对账', () => {
       .notifications.find((n) => n.title === '对话版本切换对账失败')
     expect(notif).toBeDefined()
     expect(usePipelineMessageStore.getState().segmentViewByPipeline['pipe-seg']).toBeDefined()
+    unmount()
+  })
+
+  it('ack 段与本地段视图标记一致 → 标记保留（‹/› 落点不回退，防「永远翻到同一代」死循环）', async () => {
+    // 用户实证：重试后模型给出与当前代逐字节相同的回复，‹ 落点那一代内容与
+    // 当前代相同 → 看着没变；若 ack 后清掉标记，viewOrdinal 归零，下一次 ‹
+    // 又落回同一代 → 永远在同一代之间打转。ack 段 = 本地标记时保留标记
+    // （=「当前在看第几代」），前翻才能继续走到更早的代。
+    vi.useFakeTimers()
+    const { unmount } = mountWithSpies()
+
+    act(() =>
+      emit(WS_SERVER_EVENTS.SEGMENT_ACTIVATED, {
+        data: { pipeline_id: 'pipe-seg', segment_id: 'seg-gen2', _threadId: 'sess-seg' },
+      }),
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600)
+    })
+    expect(usePipelineMessageStore.getState().segmentViewByPipeline['pipe-seg']).toEqual({
+      baseSeq: 50,
+      segmentId: 'seg-gen2',
+    })
     unmount()
   })
 

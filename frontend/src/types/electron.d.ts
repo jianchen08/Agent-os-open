@@ -3,7 +3,7 @@
  *
  * preload.ts 通过 contextBridge.exposeInMainWorld('electronAPI', ...) 注入。
  * 前端只声明实际消费的子集（窗口管理 + 平台/版本信息），
- * 其余字段（onWindowInfo 等）由 Electron 自身类型在需要时补充。
+ * 其余字段（getAppVersion 等）由 Electron 自身类型在需要时补充。
  *
  * 仅在 Electron 环境下 window.electronAPI 才存在；Web 构建下为 undefined，
  * ElectronWindowManager 据此降级到 WebWindowManager。
@@ -46,8 +46,7 @@ export interface ElectronOpenWindowResult {
 /**
  * preload.ts 暴露的 window 子 API（ipcRenderer.invoke 封装）。
  *
- * 所有方法均返回 Promise（invoke 语义），不经过 preload 的 `on` 白名单
- * （白名单只作用于 ipcRenderer.on 监听通道）。
+ * 所有方法均返回 Promise（invoke 语义），由主进程的参数校验保证安全。
  */
 export interface ElectronWindowAPI {
   /** 创建并返回子窗口；id 重复时聚焦已有窗口 */
@@ -88,8 +87,13 @@ export interface ElectronWindowControlsAPI {
  * macOS 通知中心 / Linux libnotify。提示音仍由渲染进程 Web Audio 合成。
  */
 export interface ElectronNotificationAPI {
-  /** 弹出系统通知；返回是否成功弹出（宿主不支持/参数非法为 false） */
-  show(opts: { title: string; body: string }): Promise<boolean>
+  /** 弹出系统通知；返回是否成功弹出（宿主不支持/参数非法为 false）。
+   *  threadId 可选：非空时点击通知额外派发 notification:navigate（跳转对应对话） */
+  show(opts: { title: string; body: string; threadId?: string }): Promise<boolean>
+  /** 订阅系统通知点击导航（主进程 click → notification:navigate）；返回取消订阅函数 */
+  onNotificationNavigate(
+    callback: (payload: { threadId?: string }) => void,
+  ): () => void
 }
 
 /**
@@ -102,19 +106,34 @@ export interface ElectronDialogAPI {
   pickDirectory(): Promise<string | null>
 }
 
+/** 内核日志判活快照（app:metrics payload 的 kernelLiveness 字段，壳侧消费内核 kernel.liveness 标记） */
+export interface ElectronKernelLiveness {
+  /** 判活标记是否存在且可解析（文件缺失/路径不可知 = false） */
+  markerFound: boolean
+  /** 距内核最后成功写日志的毫秒数（标记不可用 = null） */
+  lastOkWriteAgeMs: number | null
+  /** 年龄未超停摆阈值（600s，对齐内核 log_liveness 静默阈值） */
+  healthy: boolean
+}
+
 /**
- * preload.ts 暴露的应用壳进程树内存指标子 API
+ * preload.ts 暴露的应用壳进程树内存/CPU 指标子 API
  * （ipcRenderer.invoke('app:metrics') 封装；监控页全口径内存的应用壳段）。
  */
 export interface ElectronAppMetricsAPI {
-  /** 汇总 Electron 全部进程（主/渲染/GPU/utility）物理内存，KB 口径 */
-  get(): Promise<{ processCount: number; totalWorkingSetKb: number }>
+  /** 汇总 Electron 全部进程（主/渲染/GPU/utility）物理内存（KB 口径）、CPU（percentCPUUsage 求和）与内核日志判活 */
+  get(): Promise<{
+    processCount: number
+    totalWorkingSetKb: number
+    totalCpuPercent: number
+    kernelLiveness: ElectronKernelLiveness
+  }>
 }
 
 /**
  * 注入到 window 上的 electronAPI（子集）。
  *
- * 实际 preload 还暴露 onWindowInfo/getAppVersion/getPlatform/on 等，
+ * 实际 preload 还暴露 getAppVersion/getPlatform 等，
  * 这里只声明窗口管理器与 TitleBar 消费的字段，避免与 Electron 类型耦合。
  */
 export interface ElectronAPI {
@@ -134,6 +153,21 @@ export interface ElectronAPI {
   dialog?: ElectronDialogAPI
   /** 应用壳进程树内存指标子 API（Electron 环境存在；Web 下缺失，消费方须判空） */
   appMetrics?: ElectronAppMetricsAPI
+  /** 更新提示子 API（P-24，Electron 环境存在；Web/旧版壳下缺失，消费方判空） */
+  update?: ElectronUpdateAPI
+}
+
+/**
+ * preload.ts 暴露的更新提示子 API（ipcRenderer.invoke('update:get-available') /
+ * on('update:available') 封装；P-24 不做自动更新——只提示版本与下载地址）。
+ */
+export interface ElectronUpdateAPI {
+  /** 拉取当前已知的新版本信息（未检查/同版本/检查失败 = null） */
+  getAvailable(): Promise<{ latestVersion: string; downloadUrl: string } | null>
+  /** 订阅新版本可用推送（主进程 update:available）；返回取消订阅函数 */
+  onAvailable(
+    callback: (info: { latestVersion: string; downloadUrl: string }) => void,
+  ): () => void
 }
 
 /** 认证会话镜像子 API：refresh token 由主进程落盘，进程强杀不丢（自动登录跨重启） */

@@ -11,8 +11,21 @@ import { usePipelineRegistryStore } from '@/stores/pipelineRegistryStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { loggers } from '@/utils/logger'
 import { isPipelineRelevant, resolvePipelineId } from '../router'
-import { clearBlockStateForMessage, flushBlockBuffers } from './blockHandler'
-import { ensureStreamingPlaceholder, extractMessageId, extractThreadId, mergeStreamingParts, terminatePipeline } from './utils'
+import {
+  clearBlockStateForMessage,
+  flushBlockBuffers,
+} from './blockHandler'
+import {
+  clearStopRequested,
+  ensureStreamingPlaceholder,
+  extractMessageId,
+  extractThreadId,
+  mergeStreamingParts,
+  noteFreshStreamStart,
+  sweepEmptyStreamingPlaceholders,
+  terminatePipeline,
+} from './utils'
+import type { NotificationAction } from '@/types/notification'
 
 const _debugLogger = loggers.websocket
 
@@ -37,6 +50,14 @@ export function handleStreamStart(eventData: any) {
   const messageId = extractMessageId(eventData)
   if (!messageId) return
 
+  // 停止护栏解除判定：新轮次（不同 message_id）说明内核已在跑下一轮，护栏放行。
+  noteFreshStreamStart(pipelineId, messageId)
+
+  // 新轮次开始：上一轮收尾快照（队列深度/停止中）失效——本轮实际状态由后续
+  // 事件重建（queue_depth 下一次 round_finished 刷新；stream_start 即证明链在跑）。
+  pipelineStore.getState().setRoundQueueDepth(pipelineId, 0)
+  pipelineStore.getState().setStopping(pipelineId, false)
+
   // 管道注册表实时同步：running（在相关性门控之前——面板要展示未打开/未注册的管道）
   usePipelineRegistryStore.getState().applyStreamStatus(pipelineId, 'running')
 
@@ -58,11 +79,21 @@ export function handleStreamStart(eventData: any) {
     `[STREAM_START] pipelineId=${pipelineId.slice(0, 12)} threadId=${threadId?.slice(0, 12) || 'null'} msgId=${messageId.slice(0, 12)} activePipelineId=${currentActivePipelineId?.slice(0, 12) || 'null'}`,
   )
 
-  // stream_start 事件不携带消息 seq（后端在引擎执行时才分配；事件信封顶层
-  // sequence 是全局事件计数器，非消息 seq——严禁当消息序使用）。占位 seq 挂空，
-  // stream_end final_sequence / new_message
-  // 权威值到达后由对账纠正。
-  ensureStreamingPlaceholder(pipelineId, messageId, threadId)
+  // 入口占位行（ADR 2026-11-06-round-entry-slot-placeholder）：内核在引擎迭代
+  // 开始即落占位行并保留权威槽位，stream_start payload 内层的 sequence 就是它
+  // ——占位气泡从第一毫秒起有权威排序坐标。事件信封顶层的 sequence 是全局
+  // 事件计数器（非消息 seq），严禁消费；payload 无 sequence（旧内核/降级世界）
+  // 时维持既有挂空回落，stream_end final_sequence / new_message 权威值到达后
+  // 由对账纠正。
+  const messageSequence = eventData?.data?.sequence
+  ensureStreamingPlaceholder(
+    pipelineId,
+    messageId,
+    threadId,
+    typeof messageSequence === 'number' && Number.isFinite(messageSequence)
+      ? messageSequence
+      : undefined,
+  )
 
   if (currentActivePipelineId === pipelineId) return
 
@@ -141,16 +172,27 @@ export function handleStreamEnd(eventData: any) {
           } else {
             // 空轮次收尾：stream_end 前未收到 new_message 的占位是「本轮无产出」
             // （引擎轮次模型：init/exit 等无消息轮次照常发 stream_end），该消息未
-            // 持久化、也不参与重放——静默移除占位。真实「整轮无回复」由 stream_error
-            // (NO_ASSISTANT_REPLY) 显式通知，此处不再补空回复提示（旧形态会为每个
-            // 前处理轮次弹一次「回复内容为空」通知）。
-            _debugLogger.warn(
-              '[STREAM_END] 空轮次无消息，移除占位: pipeline=%s msgId=%s',
-              pipelineId.slice(0, 12), messageId.slice(0, 12),
-            )
-            const current = pipelineStore.getState().getMessages(pipelineId)
-            if (current.find((m: any) => m.id === messageId)) {
-              pipelineStore.getState().removeMessage(pipelineId, messageId)
+            // 持久化、也不参与重放。run 仍在流式（生成态唯一终止信号是 run 级事件
+            // pipeline_round_finished / stream_error）→ 占位保留：「思考中」指示
+            // 跨轮无缝延续，下一轮 stream_start 的 orphan 清理同事件内删旧建新
+            // （无消失窗口）；撑到 run 终止由 sweepEmptyStreamingPlaceholders
+            // 清扫。生成态已不在（事件乱序/终止先行）→ 就地移除防残留。真实
+            // 「整轮无回复」由 stream_error (NO_ASSISTANT_REPLY) 显式通知，此处
+            // 不补空回复提示（旧形态会为每个前处理轮次弹一次「回复内容为空」通知）。
+            if (pipelineStore.getState().isStreaming(pipelineId)) {
+              _debugLogger.info(
+                '[STREAM_END] 空轮次无消息，run 仍在跑，占位保留（下一轮接手）: pipeline=%s msgId=%s',
+                pipelineId.slice(0, 12), messageId.slice(0, 12),
+              )
+            } else {
+              _debugLogger.warn(
+                '[STREAM_END] 空轮次无消息，移除占位: pipeline=%s msgId=%s',
+                pipelineId.slice(0, 12), messageId.slice(0, 12),
+              )
+              const current = pipelineStore.getState().getMessages(pipelineId)
+              if (current.find((m: any) => m.id === messageId)) {
+                pipelineStore.getState().removeMessage(pipelineId, messageId)
+              }
             }
           }
         }
@@ -210,6 +252,33 @@ function noteFailureCard(pipelineId: string): void {
   }
 }
 
+/** 失败卡重试动作补丁（P-26）：统一错误信封 retryable=true（可重试失败，如
+ * 限流/服务不可用，语义真值 config/kernel/error_codes.json）时卡片附「重新发送」
+ * 动作 + 会话坐标——动作经 NotificationCenter 按 payload.retrySessionId 分发，
+ * 只定位到对应会话（重发是用户语义动作，只定位不代发）。无会话坐标不挂
+ * （挂了也路由不到）。旧形态字符串 error 无信封 → 无动作。 */
+function retryActionPatch(
+  errorMsg: unknown,
+  threadId: string | undefined,
+): { sessionId: string; actions: NotificationAction[] } | undefined {
+  const retryable =
+    typeof errorMsg === 'object' &&
+    errorMsg !== null &&
+    (errorMsg as { retryable?: unknown }).retryable === true
+  if (!retryable || !threadId) return undefined
+  return {
+    sessionId: threadId,
+    actions: [
+      {
+        id: 'retry-resend',
+        label: '重新发送',
+        action: 'custom',
+        payload: { retrySessionId: threadId },
+      },
+    ],
+  }
+}
+
 /** 处理流式错误事件 */
 export function handleStreamError(eventData: any) {  // 先刷写缓冲区，确保错误前的内容不丢失
   flushStreamChunkBuffer()
@@ -220,6 +289,11 @@ export function handleStreamError(eventData: any) {  // 先刷写缓冲区，确
   if (pipelineId) {
     // 标记管道已终止（错误），防止 ensureStreamingPlaceholder 重新启动
     terminatePipeline(pipelineId)
+    // 停止护栏收口：run 级失败终止，护栏使命完成
+    clearStopRequested(pipelineId)
+    // 收尾快照清空：错误终态不再保留队列深度/停止中标记
+    pipelineStore.getState().setStopping(pipelineId, false)
+    pipelineStore.getState().setRoundQueueDepth(pipelineId, 0)
     // 管道注册表实时同步：failed
     usePipelineRegistryStore.getState().applyStreamStatus(pipelineId, 'failed')
   } else {
@@ -241,6 +315,16 @@ export function handleStreamError(eventData: any) {  // 先刷写缓冲区，确
       : typeof errorMsg?.message === 'string'
         ? errorMsg.message
         : '生成过程中发生错误，请重试'
+  // 通知标题按错误码归因，不再一律「流式响应错误」（内核 NO_ASSISTANT_REPLY
+  // 携带 LLM 真实失败原因，标题应与之一致而非笼统归为流式问题）。
+  const errorCode =
+    typeof errorMsg === 'object' && errorMsg !== null && typeof errorMsg.code === 'string'
+      ? errorMsg.code
+      : undefined
+  const errorTitleByCode: Record<string, string> = {
+    NO_ASSISTANT_REPLY: '模型调用失败',
+    ENGINE_RUN_FAILED: '任务执行失败',
+  }
 
   const messageId = extractMessageId(eventData)
   if (messageId) {
@@ -288,7 +372,7 @@ export function handleStreamError(eventData: any) {  // 先刷写缓冲区，确
   }
   noteFailureCard(pipelineId)
   useNotificationStore.getState().addNotification({
-    title: '流式响应错误',
+    title: (errorCode && errorTitleByCode[errorCode]) || '流式响应错误',
     message: errorText,
     priority: 'high',
     category: 'error',
@@ -298,6 +382,8 @@ export function handleStreamError(eventData: any) {  // 先刷写缓冲区，确
       typeof errorMsg === 'object' && errorMsg !== null && typeof errorMsg.source === 'string'
         ? errorMsg.source
         : undefined,
+    // P-26：retryable=true 时附「重新发送」动作 + 会话坐标（定位不代发）
+    ...(retryActionPatch(errorMsg, extractThreadId(eventData)) ?? {}),
   })
 }
 
@@ -318,12 +404,30 @@ export function handlePipelineRoundFinished(eventData: any) {
     return
   }
   const failed = eventData?.data?.failed === true
+  const cancelled = eventData?.data?.cancelled === true
+  const queueDepthRaw = Number(eventData?.data?.queue_depth)
+  const queueDepth = Number.isFinite(queueDepthRaw) && queueDepthRaw > 0 ? queueDepthRaw : 0
+  // 终态清扫在 terminate 之前：空轮次占位在 run 期间被 stream_end 保留
+  // （「思考中」指示跨轮延续），run 终止后即成孤儿；先移除才不会被
+  // stopStreaming 标 interrupted（渲染「生成已中断」假象）。
+  sweepEmptyStreamingPlaceholders(pipelineId)
   terminatePipeline(pipelineId)
-  usePipelineRegistryStore.getState().applyStreamStatus(pipelineId, failed ? 'failed' : 'completed')
+  // 停止护栏收口：run 级终止信号到达，护栏使命完成（下一轮不再压制）。
+  clearStopRequested(pipelineId)
+  // 收尾快照：队列深度 >0 = 链尾 drain 还要继续消费（前端不得显示空闲）；
+  // 停止中标记随终止事件清除。
+  pipelineStore.getState().setRoundQueueDepth(pipelineId, queueDepth)
+  pipelineStore.getState().setStopping(pipelineId, false)
+  // cancelled = 用户停止导致的终态（有产出的中断消息 status=interrupted），
+  // 不再显示成 completed。
+  usePipelineRegistryStore.getState().applyStreamStatus(
+    pipelineId,
+    failed ? 'failed' : cancelled ? 'cancelled' : 'completed',
+  )
 }
 
 /** run_failed 事件最小形态（streaming.json 契约条目 run_failed：载荷字段
- * pipeline_id/thread_id（信封转写 _threadId）/status/stop_reason/run_id，
+ * pipeline_id/thread_id（信封转写 _threadId）/status/stop_reason/error/run_id，
  * 可选键宽容）。 */
 interface RunFailedEvent {
   data?: {
@@ -331,9 +435,52 @@ interface RunFailedEvent {
     _threadId?: string
     status?: string
     stop_reason?: string | null
+    error?: string | null
     run_id?: string
   }
   _threadId?: string
+}
+
+/** 供应商失败契约 code → 人话摘要（语义对齐后端 llm/exceptions.py 分类面：
+ * 后端只透传 [llm_failure code=..] 原文，中文摘要在呈现面落地）。 */
+const LLM_FAILURE_CODE_LABELS: Record<string, string> = {
+  service_down: '上游服务暂不可用',
+  rate_limit: '供应商限流或额度耗尽',
+  quota: '供应商额度耗尽',
+  auth: '认证失败（API Key 无效或未授权）',
+  bad_request: '请求被供应商拒绝',
+}
+
+const MCP_NOISE_MARKER = 'MCP protocol error: '
+const CONN_REFUSED_RE = /dial tcp\s+([^\s":]+):(\d+)/i
+
+/**
+ * 管道失败通知人话化（呈现面，2026-11-06 用户裁定「报错把插件说成工具」）：
+ * 内核出口错误是「MCP 传输包装 + 插件失败契约原文」的多层拼接（如 ``MCP call
+ * failed: tool call failed: … MCP protocol error: [0] llm.complete_stream 工具
+ * 执行失败: [llm_failure code=…] …``），头部全是传输腔，根因沉底。处理：
+ * ① 取最后一跳 ``MCP protocol error`` 之后的根因（与后端 llm_core
+ *   ``_strip_transport_noise`` 同口径——该剥噪只在内层生效，外层内核包装无人剥）；
+ * ② 「工具执行失败」→「插件调用失败」（0.2 一切皆插件：失败的工具即插件能力面）；
+ * ③ ``[llm_failure code=X]`` → 中文分类摘要；拨号拒绝族（dial tcp host:port）
+ *   追加「拒绝连接（网关上游未运行或不可达）」人话；其余尾随截断防卡片刷屏。
+ * 未命中已知形态原样透传（ADR 2026-10-27 归因透传不丢失），仅截 200 字。
+ */
+export function humanizePipelineError(raw: string): string {
+  let text = raw
+  const lastNoise = text.lastIndexOf(MCP_NOISE_MARKER)
+  if (lastNoise >= 0) text = text.slice(lastNoise + MCP_NOISE_MARKER.length)
+  text = text.replace(/^\[\d+\]\s*/, '').replace(/工具执行失败/g, '插件调用失败')
+  const codeMatch = text.match(/\[llm_failure code=([a-z_]+)\]/)
+  if (!codeMatch) return text.length > 200 ? `${text.slice(0, 200)}…` : text
+  const label = LLM_FAILURE_CODE_LABELS[codeMatch[1]] ?? '上游调用失败'
+  const refused = text.match(CONN_REFUSED_RE)
+  if (refused) {
+    return `LLM 插件调用失败：${label}——${refused[1]}:${refused[2]} 拒绝连接（网关上游未运行或不可达）`
+  }
+  const after = text.slice(text.indexOf(codeMatch[0]) + codeMatch[0].length).trim()
+  const cause = after ? `——${after.slice(0, 120)}` : ''
+  return `LLM 插件调用失败：${label}${cause}`
 }
 
 /** 处理 run 级失败终态镜像事件（run_failed）——管道异常退出通知卡的唯一信号源。
@@ -367,18 +514,34 @@ export function handleRunFailed(eventData: RunFailedEvent) {
     pipelineId.slice(0, 12), runId.slice(0, 12), stopReason || '(unsigned)',
   )
 
+  // 终态清扫与 pipeline_round_finished 同理（run 级终止的两个出口），先于
+  // terminate 防空占位被标 interrupted。
+  sweepEmptyStreamingPlaceholders(pipelineId)
   terminatePipeline(pipelineId)
+  pipelineStore.getState().setStopping(pipelineId, false)
+  pipelineStore.getState().setRoundQueueDepth(pipelineId, 0)
   usePipelineRegistryStore.getState().applyStreamStatus(pipelineId, 'failed')
   invalidatePipelineStates()
 
   if (shouldSuppressFailureCard(pipelineId)) return
   noteFailureCard(pipelineId)
+  // 错误透传（ADR 2026-10-27-pipeline-error-notification-channel）：卡片正文
+  // 携带管道坐标 + 内核随事件出口的首条插件错误（humanizePipelineError 剥外层
+  // MCP 包装并人话化；根因原文仍全量落库，会话详情页可查），通知归因到
+  // 「哪条管道、为什么」——不再是无归因的「管道异常退出」。
+  const errorText = typeof data.error === 'string' && data.error.trim() ? data.error.trim() : ''
+  const pipelineTag = `管道 ${pipelineId.slice(0, 8)}`
+  const failureCause = errorText
+    ? humanizePipelineError(errorText)
+    : stopReason
+      ? `停止原因 ${stopReason}`
+      : ''
   useNotificationStore.getState().addNotification({
     id: `run-failed-${pipelineId}-${runId}`,
     title: '管道运行失败',
-    message: stopReason
-      ? `管道异常退出（${stopReason}），点击可定位到对应会话查看详情`
-      : '管道异常退出，点击可定位到对应会话查看详情',
+    message: failureCause
+      ? `${pipelineTag} 运行失败：${failureCause}（点击可定位到对应会话查看详情）`
+      : `${pipelineTag} 异常退出（点击可定位到对应会话查看详情）`,
     priority: 'high',
     category: 'error',
     isBlocking: false,
@@ -432,5 +595,8 @@ export function handlePluginError(eventData: any) {
     category: 'error',
     isBlocking: false,
     errorSource: 'plugin',
+    // P-26：信封 retryable=true 时同款附「重新发送」动作（内核现值恒 false，
+    // 消费信封元数据而非硬编码内核现值）
+    ...(retryActionPatch(errorMsg, extractThreadId(eventData)) ?? {}),
   })
 }

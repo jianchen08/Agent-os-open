@@ -1,0 +1,59 @@
+{
+  "id": "skill_manager",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Skill Manager",
+  "description": "技能注册权威——四源并集 skills/*/SKILL.md 扫描解析单源（仓根/出厂模式包/用户模式包/用户根，source 标注实际胜出源，与快照侧同源优先序；元数据 name/description/languages + 单技能详情含正文），resource_search skill 面的服务提供方",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "services": [
+      {
+        "name": "skill.list",
+        "description": "List registered skills (metadata: id/name/description/languages/source; sorted by id; source = winning origin repo_root / mode:<plugin_id> / user_root; unreadable entries skipped)",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "name": "skill.get",
+        "description": "Get one skill detail (metadata + SKILL.md body content); unknown/malformed id → found=false",
+        "input_schema": {
+          "properties": {
+            "skill_id": {
+              "type": "string",
+              "description": "Skill id (directory name)"
+            }
+          },
+          "required": [
+            "skill_id"
+          ],
+          "type": "object"
+        }
+      }
+    ]
+  },
+  "provides": {
+    "capabilities": [
+      {
+        "namespace": "skill",
+        "methods": [
+          "list",
+          "get"
+        ],
+        "host": "sidecar",
+        "tool_prefix": "skill"
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 30,
+  "host_group": "light"
+}

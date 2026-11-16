@@ -1,0 +1,40 @@
+# =============================================================================
+# F-min 云侧只读挂载（cloud systemd unit 模板，sshfs over 反向隧道）
+#
+# 作用：云机经隧道（agentos-fmin-tunnel 的 2222 反向口）以只读方式挂本机
+# allowed_roots，服务云侧文件预览/加载器/索引。执行与写永不走挂载（ADR
+# 2026-10-12 决策第 4 条）。
+#
+# 使用：每个 allowed_root 一个本 unit 实例（复制后改三处占位：
+#   <local-user>、<sftp 路径形态的本机根目录>、<挂载点名>）。
+#   Windows 本机的 OpenSSH sftp 路径形态随 sshd 实现而异（/d/myproject 或
+#   D:/myproject），部署时先用 `sftp -P 2222 <local-user>@127.0.0.1` 实测确认。
+#
+# ⚠️ 参数占位待 ADR 细化：keepalive/timeout/reconnect 的基线取值、断连时
+# 加载器的降级表现、多宿主挂载点命名与注册表联动——设计文档
+# 《分布式执行设计_事件汇聚E与插件宿主F_20261012.md》§六.9，本模板给出
+# 可用的保守缺省，不锁死口径。
+# =============================================================================
+
+[Unit]
+Description=AgentOS F-min read-only mount of local allowed_roots (sshfs over reverse tunnel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+Restart=on-failure
+RestartSec=10s
+ExecStartPre=/usr/bin/mkdir -p /mnt/fmin/<挂载点名>
+ExecStart=/usr/bin/sshfs -p 2222 \
+  -o ro,reconnect \
+  -o ServerAliveInterval=15 \
+  -o ServerAliveCountMax=3 \
+  -o connecttimeout=30 \
+  -o daemon \
+  <local-user>@127.0.0.1:<sftp 路径形态的本机根目录> \
+  /mnt/fmin/<挂载点名>
+ExecStop=/usr/bin/fusermount -u /mnt/fmin/<挂载点名>
+
+[Install]
+WantedBy=multi-user.target

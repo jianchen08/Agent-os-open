@@ -1,9 +1,10 @@
 /**
  * 任务模式键契约与发送链并入（模式体系落地设计 §4.2 数据链）
  *
- * - 契约：任务上下文字段 `mode` 是**开放标签**（D1 标签裁定：值域 = registry
- *   扫描真值集，非枚举）——本模块零冻结键集；「默认」= 不带键，主 agent 按模式
- *   目录（{{mode_catalog}}）自行归类派发（2026-09-28 设计 D4.1；后端分类器
+ * - 契约：任务上下文字段 `mode` 是**开放标签集**（D1 标签裁定：值域 = registry
+ *   扫描真值集，非枚举）——原生形态 = 字符串数组（有序去重，单标签 = 长度一
+ *   特例，空集 = 默认兜底语义），本模块零冻结键集；「默认」= 不带键，主 agent
+ *   按模式目录（{{mode_catalog}}）自行归类派发（2026-09-28 设计 D4.1；后端分类器
  *   不实现）。选择器选项由 registry 派生（taskModeOptionsFromModes，modes.ts）。
  * - withTaskMode：发送时把所选模式并入消息级 execution_context（会话执行选项
  *   其余键保持原样），内核 1a2 合并点透传至任务上下文。
@@ -28,17 +29,48 @@ export function isModeIdShape(value: unknown): value is string {
 }
 
 /**
+ * mode 标签集归一读取（唯一兼容面）。
+ *
+ * mode 键原生形态 = **字符串数组标签集**（有序去重；单标签 = 长度一特例，
+ * 空集 = 默认兜底语义）。读取面一律经此：string → [string]（旧客户端/存量
+ * state 兼容），数组 → 过滤非字符串项并保序去重，其他 → []。写入面一律数组。
+ */
+export function normalizeModeTags(value: unknown): string[] {
+  if (typeof value === 'string') {
+    const v = value.trim()
+    return v ? [v] : []
+  }
+  if (Array.isArray(value)) {
+    const out: string[] = []
+    for (const item of value) {
+      if (typeof item !== 'string') continue
+      const v = item.trim()
+      if (v && !out.includes(v)) out.push(v)
+    }
+    return out
+  }
+  return []
+}
+
+/** 主标签 = 集内末元素（最新激活优先）；空集 = 空串（默认兜底语义由消费方裁决） */
+export function primaryModeTag(tags: unknown): string {
+  const list = normalizeModeTags(tags)
+  return list.length ? list[list.length - 1] : ''
+}
+
+/**
  * 模式键并入消息级 execution_context
  *
  * 「默认」（mode 缺席）不带键——原 execution_context 原样返回（含 undefined）；
- * 显式选择时浅合并出新的 context（不改动会话执行选项快照对象）。
+ * 显式选择时浅合并出新的 context（不改动会话执行选项快照对象），mode 写
+ * 单元素标签集。
  */
 export function withTaskMode(
   executionContext: Record<string, unknown> | undefined,
   mode: string | undefined,
 ): Record<string, unknown> | undefined {
   if (!mode) return executionContext
-  return { ...executionContext, mode }
+  return { ...executionContext, mode: [mode] }
 }
 
 /**
@@ -75,14 +107,14 @@ export function withPossession(
   return {
     ...executionContext,
     [possessed.personaKey]: possessed.personaText,
-    mode: possessed.mode,
+    mode: [possessed.mode],
   }
 }
 
 /** 模式会话绑定（modeSessionBinder 出生通道写入会话执行选项快照） */
 export interface SessionBinding {
-  /** 会话出生即定的模式键（快照 modeBinding.mode；空串 = 会话无模式绑定） */
-  mode: string
+  /** 会话出生即定的模式标签集（快照 modeBinding.mode；空集/空串 = 无模式绑定） */
+  mode: string | string[]
   /** 绑定执行者 agent 键（缺省 = 主 agent 身份） */
   agentId?: string
   /** 随会话逐消息并入 execution_context 的扩展键（开演档等，键值非空） */
@@ -95,30 +127,39 @@ export interface SessionBinding {
  * 无绑定原样返回（含 undefined）。agent_id 本身走 WS 帧 agent_id 参数（内核
  * 透传管道 state agent.id，卡 yaml 窄工具面生效），不经 execution_context。
  */
+/**
+ * 会话绑定并入消息级 execution_context：绑定在场 → 浅合并出 mode=<绑定标签集>
+ * （会话即激活模式物料，覆写既有 mode 键；空集不带）+ 扩展上下文键的新对象；
+ * 无绑定原样返回（含 undefined）。agent_id 本身走 WS 帧 agent_id 参数（内核
+ * 透传管道 state agent.id，卡 yaml 窄工具面生效），不经 execution_context。
+ */
 export function withSessionBinding(
   executionContext: Record<string, unknown> | undefined,
   binding: SessionBinding | undefined,
 ): Record<string, unknown> | undefined {
   if (!binding) return executionContext
+  const tags = normalizeModeTags(binding.mode)
   return {
     ...executionContext,
-    ...(binding.mode ? { mode: binding.mode } : {}),
+    ...(tags.length ? { mode: tags } : {}),
     ...(binding.extraContext ?? {}),
   }
 }
 
 /**
  * 会话模式绑定并入（2026-09-28 设计 D1/D2，会话出生即定）：快照 modeBinding
- * 的 mode 为唯一模式身份键，覆写消息级既有 mode（会话身份恒定，强于选择器
- * 与其他消息级来源）；pipelineConfigId 不进 execution_context——它走 WS 帧
- * 顶层 pipeline_config_id（发送链直接读快照）。无绑定原样返回。
+ * 的 mode 为唯一模式身份键（标签集数组，string=旧形态兼容读取），覆写消息级
+ * 既有 mode（会话身份恒定，强于选择器与其他消息级来源）；空集不带键（空集 =
+ * 默认兜底语义，不占标签位）；pipelineConfigId 不进 execution_context——它走
+ * WS 帧顶层 pipeline_config_id（发送链直接读快照）。无绑定原样返回。
  */
 export function withModeBinding(
   executionContext: Record<string, unknown> | undefined,
-  binding: { mode: string; pipelineConfigId?: string } | undefined,
+  binding: { mode: string | string[]; pipelineConfigId?: string } | undefined,
 ): Record<string, unknown> | undefined {
-  if (!binding?.mode) return executionContext
-  return { ...executionContext, mode: binding.mode }
+  const tags = normalizeModeTags(binding?.mode)
+  if (!tags.length) return executionContext
+  return { ...executionContext, mode: tags }
 }
 
 /**

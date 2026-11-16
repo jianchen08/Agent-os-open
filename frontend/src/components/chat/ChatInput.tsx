@@ -1,82 +1,52 @@
 /** 统一的聊天输入组件 支持三种模式： */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import {
   AlertCircle,
   Maximize2,
   Minimize2,
   Paperclip,
-  Send,
-  Square,
   X,
 } from '@/assets/icons'
 import { DeclaredWidgetLayer } from '@/components/schema/DeclaredWidgetLayer'
 import { ContextUsageWidget } from '@/components/schema/widgets/ContextUsageWidget'
 import { Button } from '@/components/ui/button'
 import { useControlledSlotBridge } from '@/hooks/useControlledSlotBridge'
+import { useIsMobileViewport } from '@/hooks/useIsMobileViewport'
 import { useModelCapabilities } from '@/hooks/useModelCapabilities'
+import { useSendOutcomeConsumer } from '@/hooks/useSendOutcomeConsumer'
 import { useVoiceInput } from '@/hooks/useVoiceInput'
 import { cn } from '@/lib/utils'
 import { uploadFile, validateFile } from '@/services/api/files'
-import { taskModeOptionsFromModes, useModesRegistry } from '@/services/api/modes'
 import { ErrorSeverity, ErrorType, reportError } from '@/services/errorReporting'
 import {
   clearSessionAgentBinding,
-  openModeSession,
   readSessionAgentBinding,
   type SessionAgentBinding,
 } from '@/services/modeSessionBinder'
-import { getReferenceProviders, buildReferenceBlock, type ReferenceSelection } from '@/services/references'
-import { loadSessionExecutionOptions } from '@/services/sessionExecutionOptions'
+import { getReferenceProviders } from '@/services/references'
 import { useChatInputStore } from '@/stores/chatInputStore'
-import { useNotificationStore } from '@/stores/notificationStore'
 import { usePersonaPossessStore } from '@/stores/personaPossessStore'
 import { useSessionStore } from '@/stores/sessionStore'
+import { useUIStore } from '@/stores/uiStore'
 import { type ThinkingStrength } from '@/types/thinkingMode'
 import { ChatInputActions } from './ChatInputActions'
 import { AttachmentPreview } from './ChatInputAttachmentPreview'
 import { ChatInputPossessChip } from './ChatInputPossessChip'
+import { CitationCardRow } from './CitationCardRow'
+import { ComposerRecordingBanner } from './ComposerRecordingBanner'
+import { composerPlaceholder, composeSendParams } from './composerSend'
+import { ComposerSendButton } from './ComposerSendButton'
+import { SessionAgentIndicator } from './SessionAgentIndicator'
 import { VoiceInputButton } from './VoiceInputButton'
-import type { Attachment, ChatInputProps, PendingFile, SendMessageParams } from './types'
-import type { WidgetDeclaration } from '@/services/schema/ContributionRegistry'
-
-/**
- * 声明 fields 首字段（select）追加宿主派生选项（task_mode）：声明项优先
- * （兜底「默认」档），宿主派生项同 value 去重补位。非 form/select 形态
- * 返回 undefined（零注入）。thinking_strength 的选项不经此通道——其声明
- * fieldsUri 数据源由声明渲染层解析下发。
- */
-function selectFieldsWith(
-  declaration: WidgetDeclaration,
-  options: Array<{ label: string; value: string; description?: string }>,
-): Array<Record<string, unknown>> | undefined {
-  const fields = (declaration.props as { fields?: Array<Record<string, unknown>> } | undefined)?.fields
-  if (!Array.isArray(fields) || fields.length === 0 || fields[0]?.type !== 'select') return undefined
-  const base = (fields[0].options as Array<Record<string, unknown>> | undefined) ?? []
-  const seen = new Set(base.map((o) => String(o.value)))
-  const merged = [...base]
-  for (const option of options) {
-    if (seen.has(option.value)) continue
-    seen.add(option.value)
-    merged.push({ ...option })
-  }
-  return [{ ...fields[0], options: merged }, ...fields.slice(1)]
-}
-
-/** 格式化录音时长为 mm:ss */
-const formatDuration = (seconds: number): string => {
-  const m = Math.floor(seconds / 60)
-    .toString()
-    .padStart(2, '0')
-  const s = (seconds % 60).toString().padStart(2, '0')
-  return `${m}:${s}`
-}
+import type { Attachment, ChatInputProps, PendingFile } from './types'
 
 /** 统一的聊天输入组件 */
 export const ChatInput = ({
   mode = 'full',
   disabled = false,
   isGenerating = false,
+  sendInFlight = false,
   executionState = 'idle',
   onSendMessage,
   onStopGenerate,
@@ -86,6 +56,8 @@ export const ChatInput = ({
   enableThinkingMode = false,
   thinkingStrength: _externalThinkingStrength,
   onThinkingStrengthChange,
+  modelId,
+  onModelIdChange,
   className = '',
   draftKey,
 }: ChatInputProps) => {
@@ -102,50 +74,23 @@ export const ChatInput = ({
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([])
   const [isDragging, setIsDragging] = useState(false)
-  /** 输入区错误提示（上传失败/发送未受理）：落在操作点、可手动关闭，
+  /** 输入区错误提示（上传失败/发送未受理/发送判死）：落在操作点、可手动关闭，
    *  下一次受理发送自动清除 */
   const [inputError, setInputError] = useState<string | null>(null)
   const [isExpanded, setIsExpanded] = useState(false)
-  /** 任务模式（task_mode 声明式选择器，出生语义 §3.2 批 G④）：显示值 = 会话
-   *  执行选项 modeBinding.mode（出生即定，D1/D9）；选择非当前档 = 经
-   *  modeSessionBinder 开新管道会话并跳转，同档重选零动作。选择器不再有
-   *  消息级 mode 键形态（选择即出生，发送链身份归快照绑定）。 */
-  /** 选择器模式项 = modes registry 派生（D1 标签裁定：选项=registry 全量，
-   *  「默认」兜底档在声明面）；registry 不可达降级空数组（仅「默认」不阻断） */
-  const modesRegistry = useModesRegistry()
-  const modeSelectorOptions = useMemo(
-    () => taskModeOptionsFromModes(modesRegistry),
-    [modesRegistry],
-  )
-  const openModeSessionNotify = useCallback((mode: string) => {
-    openModeSession(mode).catch((e) => {
-      // 出生失败落通知中心（拒绝必须反馈；输入区不阻断用户继续当前会话）
-      useNotificationStore.getState().addNotification({
-        title: '模式会话创建失败',
-        message: e instanceof Error ? e.message : String(e),
-        priority: 'high',
-        category: 'error',
-        isBlocking: false,
-        autoDismissMs: 8000,
-        sourceLabel: '前端',
-      })
-    })
-  }, [])
   /** 附身档（mode.possess 桥写入，全局态不按会话分）：null = 未附身 */
   const possessed = usePersonaPossessStore((s) => s.possessed)
-  /** 会话绑定（mode.session 桥写入会话执行选项，按活跃会话分）：
-   *  执行者绑定（指示条）+ 模式绑定（选择器显示值），均随活跃会话切换重读 */
+  /** 会话绑定（mode.session 桥写入会话执行选项，按活跃会话分）：执行者绑定
+   *  （指示条）随活跃会话切换重读。模式绑定不再有输入行选择器（R10③ 收拢：
+   *  会话级选择，模式会话经侧栏模式面板/浏览智能体等选择处出生）。 */
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const [sessionAgent, setSessionAgent] = useState<SessionAgentBinding | null>(null)
-  const [sessionMode, setSessionMode] = useState<string | null>(null)
   useEffect(() => {
     if (!activeSessionId) {
       setSessionAgent(null)
-      setSessionMode(null)
       return
     }
     setSessionAgent(readSessionAgentBinding(activeSessionId))
-    setSessionMode(loadSessionExecutionOptions(activeSessionId)?.modeBinding?.mode ?? null)
   }, [activeSessionId])
   /** 退出绑定会话：清该会话执行选项的 agentId（发送链随之不带身份） */
   const handleExitSessionBinding = useCallback(() => {
@@ -167,8 +112,8 @@ export const ChatInput = ({
   /** 语音实时识别：临时文字在 text 中的起始偏移量，-1 表示无未确认临时文字 */
   const interimVoiceStartRef = useRef(-1)
 
-  /** 思考选择：优先使用外部传入值（随标签路由自动变化），'' = 未选择。
-   *  选项由声明数据源（fieldsUri）下发，本侧只持值通道，零思考业务知识。 */
+  /** 思考选择：优先使用外部传入值（随标签路由自动变化），'' = 未选择（消息
+   *  不带思考参数，模型按 default_params 运行） */
   const currentThinkingStrength: ThinkingStrength = _externalThinkingStrength ?? ''
   const handleStrengthChange = useCallback(
     (strength: ThinkingStrength) => {
@@ -187,24 +132,24 @@ export const ChatInput = ({
     extra: () => ({ disabled: disabled || isExecuting || !modelName || modelName === 'unknown' }),
   })
 
-  // 任务模式桥（出生语义）：'' = 默认档；显示值随会话 modeBinding（出生即定），
-  // 选择不同档 = 经出生通道开新会话（同档重选零动作）。声明在 task_form 插件
-  // （task_mode form select，持「默认」兜底档），模式项由 registry 派生注入。
-  const taskModeBridge = useControlledSlotBridge('task_mode', {
-    field: 'mode',
-    get: () => sessionMode ?? '',
-    set: (_f, v) => {
-      const value = typeof v === 'string' ? v : ''
-      if (value === (sessionMode ?? '')) return
-      openModeSessionNotify(value)
+  /** 显式模型选择：'' = 未选择（选择器占位显示配置模型，帧不带 model_id） */
+  const currentModelId: string = modelId ?? ''
+  const handleModelIdChange = useCallback(
+    (modelIdValue: string) => {
+      onModelIdChange?.(modelIdValue)
     },
-    extra: (declaration) => {
-      const fields = selectFieldsWith(declaration, modeSelectorOptions)
-      return {
-        disabled: disabled || isExecuting,
-        ...(fields ? { fields } : {}),
-      }
-    },
+    [onModelIdChange],
+  )
+  const modelIdBridge = useControlledSlotBridge('model_id', {
+    field: 'model_id',
+    get: () => currentModelId,
+    set: (_f, v) => handleModelIdChange((v as string) ?? ''),
+    // fallbackModelName：新会话默认模型显示面（agent 头/系统默认，ChatContainer
+    // 解析）——选择器声明组件据此在无显式选择、state 行未出时常驻显示默认模型
+    extra: () => ({
+      disabled: disabled || isExecuting,
+      fallbackModelName: modelName ?? '',
+    }),
   })
 
   /** 必须声明在使用它的回调（handleVoiceInterim / handleVoiceTranscriptionComplete 等）之前，
@@ -214,6 +159,10 @@ export const ChatInput = ({
     if (isExpanded) return
     const textarea = textareaRef.current
     if (textarea) {
+      // 工作区全屏期间本输入框 CSS 隐藏（display:none，scrollHeight 恒 0）：
+      // 此时外部插入/浮窗镜像同步仍会写文本，若照常计算会把高度打成 0，
+      // 退出全屏后呈现塌陷输入框——跳过，由退出后的下一次输入重算。
+      if (useUIStore.getState().workspaceFullscreen) return
       const maxHeight = typeof window !== 'undefined' ? window.innerHeight / 3 : 200
       textarea.style.height = 'auto'
       textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`
@@ -489,15 +438,41 @@ export const ChatInput = ({
     })
   }, [])
 
-  /** 发送消息 */
-  const handleSend = useCallback(() => {
-    const trimmedText = text.trim()
+  /** 本次 handleSend 是否由远程发送（全屏浮窗）触发：拒绝分支据此镜像反馈到
+   *  store（浮窗可见）；主输入框自身路径不写该字段 */
+  const remoteSendActiveRef = useRef(false)
 
-    const hasContent = trimmedText.length > 0
+  /** 发送拒绝的操作点报错；远程发送（全屏浮窗）触发时镜像到 store 供浮窗显示
+   *  （浮窗发送失败路径与主输入框一致，不静默） */
+  const reportSendRefusal = useCallback((message: string) => {
+    setInputError(message)
+    if (remoteSendActiveRef.current) {
+      useChatInputStore.getState().reportRemoteSendRefusal(message)
+    }
+  }, [])
+
+  /** 发送消息。正文读 textRef（与 text state 逐点同步，见各 setText 写点）：
+   *  远程发送（全屏浮窗）经 store 订阅调用本函数时渲染闭包可能滞后一拍，
+   *  ref 读取保证取到浮窗刚写入的文本 */
+  const handleSend = useCallback(() => {
+    const trimmedText = textRef.current.trim()
+    // 本输入器已入列引用条目（R5 卡片通道）：发送装配期按序拼块引用进正文尾部
+    const draftCitations = draftKey
+      ? useChatInputStore.getState().citationsByDraftKey[draftKey]
+      : undefined
+
+    const hasContent = trimmedText.length > 0 || (draftCitations?.length ?? 0) > 0
     const hasAttachments = attachments.length > 0
     const hasPendingFiles = pendingFiles.some((pf) => pf.status === 'success')
 
-    if ((!hasContent && !hasAttachments && !hasPendingFiles) || disabled) {
+    if (!hasContent && !hasAttachments && !hasPendingFiles) return
+    // 发送态（本管道在途未落定）不可再次发送：输入锁定后 UI 不可达（textarea
+    // disabled 不产生键盘事件、按钮转圈禁用），此处兜底防御
+    if (sendInFlight) return
+    // 禁用态发送必须明示拒绝（真机缺陷"busy 会话发送静默抑制"唯一静默点：
+    // 文本滞留输入框+零反馈零网络）；空输入静默返回属未尝试发送，不在此列
+    if (disabled) {
+      reportSendRefusal('会话执行中，暂不能发送——请切回会话主标签后再试')
       return
     }
 
@@ -510,76 +485,44 @@ export const ChatInput = ({
       (pf) => pf.status === 'pending' || pf.status === 'uploading',
     )
     if (hasUploadingAttachment) {
-      setInputError('附件正在上传，请等待上传完成后再发送')
+      reportSendRefusal('附件正在上传，请等待上传完成后再发送')
       return
     }
 
-    /** 引用注入（源无关）：枚举全部引用 provider 的待发引用，随消息拼接发送
-        （同消息渲染），发送即消耗（卡片消失，重新点选恢复） */
-    const pendingRefs = getReferenceProviders()
-      .map((p) => p.getSelection())
-      .filter((sel): sel is ReferenceSelection => !!sel && sel.items.length > 0)
-    let content = trimmedText
-    for (const ref of pendingRefs) {
-      const block = buildReferenceBlock(ref)
-      if (block) content = content + '\n\n' + block
-    }
-
-    const allAttachments: Attachment[] = [...attachments]
-
-    pendingFiles
-      .filter((pf) => pf.status === 'success' && pf.uploadResult)
-      .forEach((pf) => {
-        allAttachments.push({
-          id: pf.id,
-          name: pf.uploadResult!.filename,
-          type: pf.uploadResult!.mime_type,
-          size: pf.file.size,
-          url: pf.uploadResult!.url,
-          status: 'completed',
-        })
-      })
-
-    const params: SendMessageParams = {
-      content: content,
-      attachments: allAttachments.length > 0 ? allAttachments : undefined,
-      // thinkingStrength = 选中的参数组 JSON 串（'' = 未选择，后端不覆盖）
+    /** 待发引用（卡片条目+provider 实时选中）并入正文、上传完成附件并入附件面：
+     *  装配见 composerSend */
+    const params = composeSendParams({
+      trimmedText,
+      attachments,
+      pendingFiles,
       thinkingStrength: currentThinkingStrength,
-    }
+      modelId: currentModelId,
+      composerText: textRef.current,
+      draftKey,
+      citations: draftCitations,
+    })
 
     // 受理协议：false = 未受理（无会话/令牌、管道未就绪、子标签不支持等），保留
-    // 输入、附件、草稿与引用供用户重试；true/void（兼容既有只发不回的回调）= 受
-    // 理，清空。
+    // 输入、附件、草稿与引用供用户重试；true/void（兼容既有只发不回的回调）=
+    // 受理，进入发送态。
     const accepted = onSendMessage(params)
     if (accepted === false) {
       // 未受理必须在操作点显式反馈（OBS-25）：拒绝详情由各拒绝层写通知中心
       // （入口在侧栏，输入时不一定可见），输入区不落提示的话用户视角仍是
       // 「点了没反应」。拒发不触碰任何流式状态，「停止生成」只由真实
       // isGenerating 驱动。
-      setInputError('消息未发送，请检查会话状态')
+      reportSendRefusal('消息未发送，请检查会话状态')
       return
     }
 
+    // 受理 = 发送态开始（2026-11-04 落定语义重定义）：文本/附件/草稿保留到落定
+    // （气泡认领上屏/队列条出现）那一刻——清空在本组件的发送终局订阅回调按
+    // 快照比对执行；失败（ack 拒收/20s 看门狗）文本原位保留天然可重试。
     for (const provider of getReferenceProviders()) {
       void provider.consume?.()
     }
-    setText('')
-    textRef.current = ''
-    interimVoiceStartRef.current = -1
-    setAttachments([])
-    setPendingFiles([])
     setInputError(null)
-
-    /** 发送后清除草稿 */
-    if (draftKey) {
-      useChatInputStore.getState().clearDraft(draftKey)
-    }
-
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto'
-    }
-    setIsExpanded(false)
-  }, [text, attachments, pendingFiles, disabled, isExecuting, onSendMessage, currentThinkingStrength])
+  }, [attachments, pendingFiles, disabled, sendInFlight, onSendMessage, currentThinkingStrength, currentModelId, draftKey, reportSendRefusal])
 
   /** 处理文件输入变化 */
   const handleFileInputChange = useCallback(
@@ -728,12 +671,82 @@ export const ChatInput = ({
     }
   }, [draftKey])
 
+  /** 全屏浮窗镜像同步（2026-11-05 阶段一件一）：草稿是双向共享真源，本组件
+   *  每次编辑实时 saveDraft（组件→store），浮窗编辑经 saveDraft 写入的变更由
+   *  本订阅同步回本地文本（store→组件），构成同源同内容。守卫：草稿与
+   *  textRef 相同值跳过（自家 saveDraft 回声 / 挂载初值），无重渲染环。 */
+  useEffect(() => {
+    if (!draftKey) return
+    const syncFromDraft = (state: { drafts: Record<string, string> }) => {
+      const draft = state.drafts[draftKey]
+      if (draft === undefined || draft === textRef.current) return
+      textRef.current = draft
+      setText(draft)
+      setTimeout(adjustTextareaHeight, 0)
+    }
+    syncFromDraft(useChatInputStore.getState())
+    return useChatInputStore.subscribe(syncFromDraft)
+  }, [draftKey, adjustTextareaHeight])
+
+  /** 远程发送（全屏浮窗）消费：浮窗只触发 requestRemoteSend，本组件订阅消费并
+   *  以自身完整状态调用 handleSend——与主输入框完全相同的发送路径与参数装配
+   *  （附件/模型等局部状态仅真实组件可达，浮窗不拼参）。挂载即消费一次。 */
+  const handleSendRef = useRef(handleSend)
+  useEffect(() => {
+    handleSendRef.current = handleSend
+  }, [handleSend])
+  useEffect(() => {
+    const tryRemoteSend = () => {
+      if (!useChatInputStore.getState().pendingRemoteSend) return
+      useChatInputStore.getState().consumeRemoteSend()
+      remoteSendActiveRef.current = true
+      try {
+        handleSendRef.current()
+      } finally {
+        remoteSendActiveRef.current = false
+      }
+    }
+    tryRemoteSend()
+    return useChatInputStore.subscribe(tryRemoteSend)
+  }, [])
+
+  /** 清空输入面（落定成功路径专用）：文本/附件/在途附件/草稿/引用条目一次性清，
+   *  恢复受理前姿态（高度/折叠态/警告条） */
+  const clearComposer = useCallback(() => {
+    setText('')
+    textRef.current = ''
+    interimVoiceStartRef.current = -1
+    setAttachments([])
+    setPendingFiles([])
+    if (draftKey) {
+      useChatInputStore.getState().clearDraft(draftKey)
+      useChatInputStore.getState().clearCitations(draftKey)
+    }
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto'
+    }
+    setIsExpanded(false)
+  }, [draftKey])
+
+  /** 发送终局消费（落定/判死）：store outcome 按 id 增量消费，接缝见 hook */
+  useSendOutcomeConsumer({ draftKey, textRef, onLanded: clearComposer, onError: setInputError })
+
   const isUploading = pendingFiles.some((pf) => pf.status === 'uploading')
   const isCompactMode = mode === 'compact'
+  // 触屏无物理 Enter/Shift 键，桌面键盘操作提示在移动端是无效信息且
+  // 393px 视口下必然折两行撑高输入区——移动端占位只保留输入语义
+  const isMobile = useIsMobileViewport()
+
+  /** 本输入器已入列引用条目数（R5 卡片通道，发送按钮可用性与发送许可计入——
+   *  旧通道引用文本即正文可发，卡片化后仅条目无正文保持同等能力） */
+  const draftCitationsCount = useChatInputStore((s) =>
+    draftKey ? (s.citationsByDraftKey[draftKey]?.length ?? 0) : 0,
+  )
 
   const hasInputContent =
     text.trim().length > 0 ||
     attachments.length > 0 ||
+    draftCitationsCount > 0 ||
     pendingFiles.some((pf) => pf.status === 'success')
 
   const canSend = hasInputContent && !disabled && !isUploading
@@ -754,7 +767,7 @@ export const ChatInput = ({
       onDragLeave={enableDragDrop && inputCapabilities.canDragDrop ? handleDragLeave : undefined}
       onDrop={enableDragDrop && inputCapabilities.canDragDrop ? handleDrop : undefined}
     >
-      {/* 输入区错误提示（上传失败/发送未受理） */}
+      {/* 输入区错误提示（上传失败/发送未受理/发送判死） */}
       {inputError && (
         <div
           id="input-error"
@@ -777,6 +790,7 @@ export const ChatInput = ({
 
       {/* 输入框容器：输入区域与下方图标工具栏一体，不显示分割边框 */}
       <div
+        data-testid="chat-input-box"
         className={cn(
           'relative rounded-xl transition-shadow duration-200',
           'bg-[var(--hover-overlay)]',
@@ -785,6 +799,13 @@ export const ChatInput = ({
           'bg-[var(--chat-input-bg,var(--hover-overlay))]',
         )}
       >
+        {/* 已入列引用卡片行（R5 卡片化/R6 容器内顶部）：挂在输入框容器本体内部
+            （邮件客户端收件人 chips 形态）；pr-10 让出右上角展开/收起悬浮钮位
+            （与 textarea 同款预留，保证卡片 × 可点）。ReferenceSelectionRow
+            （实时选中镜像）仍在容器外上方——已定格条目与实时选中是两条通道，
+            共存不合并 */}
+        <CitationCardRow draftKey={draftKey} className="pr-10" />
+
         {/* 展开/收起编辑器按钮：固定在输入框右上角，悬浮于文本之上 */}
         <Button
           variant="ghost"
@@ -799,7 +820,7 @@ export const ChatInput = ({
           {isExpanded ? <Minimize2 className="h-icon-md w-icon-md" /> : <Maximize2 className="h-icon-md w-icon-md" />}
         </Button>
 
-        {/* 任务模式/权限模式等输入区选择器由声明驱动渲染于底部工具栏
+        {/* 权限模式等输入区选择器由声明驱动渲染于底部工具栏
             （chat-input 空间附加式 DeclaredWidgetLayer），见下方工具栏 */}
 
         {(attachments.length > 0 || pendingFiles.length > 0) && (
@@ -821,23 +842,12 @@ export const ChatInput = ({
           </div>
         )}
 
-        {/* 录音状态条（容器内顶部，与附件预览区结构对称；不改变与上方消息列表的距离） */}
-        {voiceInput.isRecording && (
-          <div className="flex items-center justify-between gap-2 px-3 pt-3 pb-1">
-            <div className="flex items-center gap-2">
-              <span
-                className="bg-status-error inline-block h-2 w-2 rounded-full"
-                style={{ animation: 'voice-pulse-core 1.2s ease-in-out infinite' }}
-              />
-              <span className="text-muted-foreground text-xs font-medium">
-                {voiceInput.mode === 'server-asr' ? '服务器识别中…' : '正在聆听…'}
-              </span>
-            </div>
-            <span className="text-muted-foreground/70 font-mono text-xs tabular-nums">
-              {formatDuration(voiceInput.recordingDuration)}
-            </span>
-          </div>
-        )}
+        {/* 录音状态条（容器内顶部，与附件预览区结构对称） */}
+        <ComposerRecordingBanner
+          isRecording={voiceInput.isRecording}
+          mode={voiceInput.mode}
+          seconds={voiceInput.recordingDuration}
+        />
 
         {/* 文本输入框 */}
         <textarea
@@ -846,18 +856,16 @@ export const ChatInput = ({
           onChange={handleTextChange}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
-          placeholder={
-            isExecuting
-              ? mode === 'smart'
-                ? '执行中...'
-                : '正在生成回复...'
-              : isDragging && enableDragDrop && inputCapabilities.canDragDrop
-                ? '松开鼠标上传文件'
-                : enableFileUpload && !isCompactMode && inputCapabilities.showAttachmentButton
-                  ? 'Enter 发送 · Shift+Enter 换行 · 支持拖拽上传'
-                  : 'Enter 发送 · Shift+Enter 换行'
-          }
-          disabled={disabled}
+          placeholder={composerPlaceholder({
+            sendInFlight,
+            isExecuting,
+            mode,
+            isDragging,
+            canDragDrop: enableDragDrop && inputCapabilities.canDragDrop,
+            isMobile,
+            canAttach: enableFileUpload && !isCompactMode && inputCapabilities.showAttachmentButton,
+          })}
+          disabled={disabled || sendInFlight}
           rows={1}
           data-testid="chat-input-textarea"
           aria-label="消息输入"
@@ -922,7 +930,7 @@ export const ChatInput = ({
                     }
                   },
                 }}
-                className="flex-row items-center"
+                className="flex-row items-center min-w-0"
               />
             )}
 
@@ -934,33 +942,20 @@ export const ChatInput = ({
             存在且未附身时常驻展示 + 一键退出；与附身 chip 互斥（附身是显式
             全局态，优先展示——发送链同序：附身独占时会话绑定全让位） */}
         {!possessed && sessionAgent && (
-          <div
-            data-testid="session-agent-indicator"
-            className="bg-muted text-muted-foreground flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium"
-          >
-            <span aria-hidden="true">👤</span>
-            <span>会话身份：{sessionAgent.name}</span>
-            <button
-              type="button"
-              className="hover:text-foreground ml-0.5 rounded px-0.5 text-sm leading-none"
-              onClick={handleExitSessionBinding}
-              aria-label="退出会话身份绑定"
-              title="退出会话身份绑定"
-            >
-              ×
-            </button>
-          </div>
+          <SessionAgentIndicator name={sessionAgent.name} onExit={handleExitSessionBinding} />
         )}
 
-        {/* 插件声明式工具栏 widget（chat-input 空间附加式）：任务模式/权限模式
-            选择器等（插件 ui_schema 声明驱动，跟随当前选中管道标签）；
-            excludeIds 排除已被上方槽位层消费的声明，防重复渲染；
-            overrideProps 注入 task_mode 受控桥（声明 id 不匹配的声明不受影响） */}
+        {/* 插件声明式工具栏 widget（chat-input 空间附加式）：权限模式选择器
+            （插件 ui_schema 声明驱动，跟随当前选中管道标签）。
+            excludeIds 排除已被上方槽位层消费的声明（voice_input/context_usage/
+            thinking_strength）防重复渲染；task_mode 一并排除（R10③ 收拢裁定
+            2026-10-14：任务/助理模式是会话级选择（出生即定），不经输入行选——
+            模式会话从侧栏模式面板等选择处出生；声明过滤见
+            taskModeOptionsFromModes 的 foreground_selectable 通道） */}
         <DeclaredWidgetLayer
           space="chat-input"
-          className="flex-row items-center"
-          excludeIds={['voice_input', 'context_usage', 'thinking_strength']}
-          overrideProps={taskModeBridge}
+          className="flex-row items-center min-w-0"
+          excludeIds={['voice_input', 'context_usage', 'thinking_strength', 'task_mode', 'model_id']}
         />
             {/* 思考选择槽位（chat-input 空间，数据归属 llm_core）：渲染 llm_core
                 声明的 form（select），值/回调由宿主注入；选项由声明 fieldsUri
@@ -972,62 +967,46 @@ export const ChatInput = ({
                 slotId="thinking_strength"
                 overrideProps={thinkingStrengthBridge}
                 contextVars={{ model: modelName ?? '' }}
-                className="flex-row items-center"
+                className="flex-row items-center min-w-0"
               />
             )}
+
+            {/* 模型选择槽位（chat-input 空间，数据归属 llm_core）：渲染 llm_core
+                声明的 model_select（frame_field=model_id 传输声明）；值/回调由宿主
+                注入，显式选择随消息 model_id 字段透传（最高优先级覆盖管道配置），
+                '' = 未选择（占位显示配置模型名，帧不带字段） */}
+            <DeclaredWidgetLayer
+              space="chat-input"
+              slotId="model_id"
+              overrideProps={modelIdBridge}
+              className="flex-row items-center min-w-0"
+            />
 
             {/* token 用量槽位（chat-input 空间）：默认件 = 插件声明同款
                 ContextUsageWidget（数据从管道 state 读：llm_model /
                 context_window / track.llm_usage，query 缓存共享 + 事件失效化
-                实时刷新），插件声明 id=context_usage 可覆盖声明 props */}
+                实时刷新），插件声明 id=context_usage 可覆盖声明 props；模型名
+                展示归 model_id 选择器（拆分裁定：圈圈=纯上下文信息） */}
             <DeclaredWidgetLayer
               space="chat-input"
               slotId="context_usage"
               fallback={ContextUsageWidget}
-              fallbackProps={{ modelName }}
-              className="flex-row items-center"
+              fallbackProps={{ modelName, ringOnly: true }}
+              className="flex-row items-center min-w-0"
             />
 
             {/* 插件声明的聊天输入动作（chat 空间 input-action 声明驱动） */}
             <ChatInputActions />
           </div>
 
-          {/* 发送/停止按钮（shrink-0：不被压缩，也不被左组挤出）。
-              双态：输入框有内容 → 发送；无内容且执行中 → 停止生成
-              （停止不依赖输入框内容，空输入时也能随时打断） */}
-          <div className="flex shrink-0 items-center">
-            {isExecuting && !hasInputContent && onStopGenerate ? (
-              <Button
-                variant="destructive"
-                size="icon"
-                className="h-11 w-11 rounded-lg sm:h-8 sm:w-8"
-                onClick={onStopGenerate}
-                title="停止生成"
-                aria-label="停止生成"
-                data-testid="chat-stop-button"
-              >
-                <Square className="h-icon-md w-icon-md" />
-              </Button>
-            ) : (
-              <Button
-                variant="default"
-                size="icon"
-                className={cn(
-                  'h-11 w-11 rounded-lg transition-all duration-200 sm:h-8 sm:w-8',
-                  canSend
-                    ? 'bg-primary hover:bg-primary/90 shadow-sm'
-                    : 'bg-muted text-muted-foreground',
-                )}
-                onClick={handleSend}
-                disabled={!canSend}
-                title="发送消息"
-                aria-label="发送消息"
-                data-testid="chat-send-button"
-              >
-                <Send className="h-icon-md w-icon-md" />
-              </Button>
-            )}
-          </div>
+          <ComposerSendButton
+            sendInFlight={sendInFlight}
+            isExecuting={isExecuting}
+            hasInputContent={hasInputContent}
+            canSend={canSend}
+            onStopGenerate={onStopGenerate}
+            onSend={handleSend}
+          />
         </div>
       </div>
 

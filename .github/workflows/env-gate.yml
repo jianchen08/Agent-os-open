@@ -1,0 +1,217 @@
+# ============================================================
+# Env Gate — 打包与部署环境门（用户裁定 2026-10-28）
+# ============================================================
+#
+# 裁定：装机版/开发版反复因环境问题翻车；① 打包通过/部署通过必须是 CI
+#   通过了的；② CI 里必须有关于部署环境的检测和测试。本 workflow 承载 ②，
+#   ① 由 scripts/check_ci_gate.py 在打包链（electron:build）与发布管线
+#   （deploy/release_all.sh preflight）链首机械执法——对 HEAD 取证本
+#   workflow 与 ci.yml 的运行记录，未全绿即拦截。
+#
+# 车道：
+#   pack-windows  Windows 打包链实测（环境检测+测试合一）：
+#     备料供给代码化（_host venv 重建含 SDK editable 三犯缺陷防复发 +
+#     assemble_offline_payload 离线三件套 + check_prereqs 自动补齐
+#     rclone/uv/winfsp）→ 内核 release 构建（freshness 闸前置）→ 前端
+#     pnpm + 根 npm ci → electron:build 全闸链出 NSIS → 静默安装 /S /D=
+#     （装机坑集回归）→ check_packaged_layout + 随包契约断言 + 安装位
+#     内核 /health 启动冒烟 + 插件运行时健康（install_smoke_windows.py
+#     第四段调 check_plugin_runtime_health.py：boot 日志失败签名 + 随包
+#     _host venv SDK 导入 + editable 指向越界——/health 绿 ≠ 插件活，
+#     2026-10-29 装机实证 46 插件 editable 指向开发仓的部署态缺口执法）。
+#     AGENTOS_CI_GATE_IN_RUN=1：electron:build 链首的 check_ci_gate 在
+#     本 run 内自跑，查自己必「在跑」假红——显式声明自跑豁免（脚本输出
+#     SELF-RUN 留痕；本机伪造该变量=自违 2026-10-28 裁定）。
+#   deploy-env    Linux 部署环境检测 + 部署产物构建实测：
+#     run_gates --filter deploy-env（bash -n 全部署脚本 + systemd-analyze
+#     verify 沙箱补桩 + nginx -t harness）+ deploy/build.sh 容器化构建
+#     （rust:1.88 容器编译内核+3 cdylib，部署产物真源路径全链实测）。
+#
+# 触发：push main/dev/*（paths 车道过滤——未命中提交无运行记录，由
+#   check_ci_gate 的「最近绿基线」祖先算法覆盖，语义等价车道跳过）；
+#   workflow_dispatch 手动补跑。不进 PR 必跑面（重车道，打包/部署前置
+#   而非每次 PR 前置；汇总门禁仍由 ci.yml all-checks-passed 独占）。
+#
+# 权限：contents: read（只读；产物经 upload-artifact 供排查）。
+# ============================================================
+
+name: Env Gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, "dev/*"]
+    paths:
+      - "electron/**"
+      - "frontend/**"
+      - "kernel/**"
+      - "plugins/shared/tool_core/**"
+      - "plugins/shared/sensitive_checker/**"
+      - "plugins/shared/spill_guard/**"
+      - "plugins/shared/_host/**"
+      - "plugins/sdk/**"
+      - "plugins/shared/*/plugin.json"
+      - "scripts/**"
+      - "deploy/**"
+      - "config/**"
+      - "skills/**"
+      - "package.json"
+      - "package-lock.json"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/env-gate.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: env-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Windows 打包链实测（备料供给 + 全闸链 + 静默安装 + 装后冒烟）────────
+  pack-windows:
+    name: Pack Windows (打包链实测 + 静默安装冒烟)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      AGENTOS_CI_GATE_IN_RUN: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python (门禁 runner + 组装器)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv (备料供给)
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "plugins/shared/_host/uv.lock"
+
+      # 备料供给代码化 ①：_host 合宿 venv 重建（配方 §8「uv sync --frozen 重建 +
+      # SDK editable」——SDK editable 漏装为三犯缺陷，此处固化防复发）。
+      - name: Build host venv (uv sync --frozen + SDK editable)
+        run: |
+          uv python install 3.12
+          uv sync --frozen --project plugins/shared/_host
+          uv pip install --python plugins/shared/_host/.venv/Scripts/python.exe -e ./plugins/sdk
+
+      # 备料供给代码化 ②：离线三件套 python/ + wheels/（产物 gitignored，
+      # 组装器从 _host venv 基座解析，网络仅打包期需要）。
+      - name: Assemble offline payload (python + wheels)
+        run: python scripts/assemble_offline_payload.py
+
+      - name: Set up Node (electron 工具链)
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          # 22：packageManager 钉 pnpm@11.7.0 要求 Node>=22.13（node 20 下
+          # corepack 拉起即 ERR_UNKNOWN_BUILTIN_MODULE node:sqlite，2026-11-05 实证）
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install root deps (npm ci, 跳过 electron 二进制——electron-builder 自下载)
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+        run: npm ci
+
+      # pnpm 供给必须后于根 npm ci：pnpm workspace 的虚拟仓
+      # （node_modules/.pnpm）落根 node_modules，frontend/node_modules/* 是
+      # 指入其中的 junction——npm ci 整删重建根 node_modules 时把虚拟仓一并
+      # 清空，frontend 链接全悬空（vite.js Cannot find module，2026-11-06
+      # env-gate 首跑实证；旧注释「frontend 不受影响」是误判，已按真实
+      # 依赖方向倒转顺序）。
+      - name: Install frontend deps (pnpm workspace, frozen)
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+
+      - name: Install Rust toolchain
+        working-directory: kernel
+        run: rustup show
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: kernel
+          shared-key: agentos-0.2
+
+      # 打包链不自建内核（extraResources 照搬 exe），CI 侧先行构建使
+      # check_kernel_freshness 的时间序判据成立（checkout mtime 新于提交）。
+      - name: Build kernel (release)
+        working-directory: kernel
+        run: cargo build --release --bin agentos-kernel
+
+      # 全闸链：prereqs 补齐（rclone/uv/winfsp）→ cdylibs → sanitize →
+      # freshness → clean-tree → 前端构建 → tsc → electron-builder NSIS →
+      # 布局闸 → place_release_artifacts。链首 check_ci_gate 因
+      # AGENTOS_CI_GATE_IN_RUN=1 打 SELF-RUN 放行（本 run 即执法载体）。
+      - name: Run packaging chain (electron:build 全闸链)
+        run: npm run electron:build
+
+      - name: Locate installer
+        id: installer
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem release -Filter "*Setup*.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $exe) { Write-Error "release/ 下无 NSIS 安装器产物"; exit 1 }
+          "path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+          Write-Host "installer: $($exe.FullName) ($($exe.Length) B)"
+
+      # 装得上（/S /D= 静默）→ 装得对（布局单一真值 + 随包契约）→
+      # 起得来（安装位内核 /health 200）。
+      - name: Silent install + smoke
+        shell: pwsh
+        run: python scripts/install_smoke_windows.py --installer "${{ steps.installer.outputs.path }}"
+
+      - name: Upload installer artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nsis-installer
+          path: release/*Setup*.exe
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ── Linux 部署环境检测 + 部署产物构建实测 ────────────────────────────────
+  deploy-env:
+    name: Deploy Env (部署环境检测 + 容器构建)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python (gate runner)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      # Linux 执法面：bash -n 全部署脚本 + systemd-analyze verify（沙箱补桩）
+      # + nginx -t（harness 包裹 server 片段）——三件工具 ubuntu runner 缺 nginx，
+      # 显式安装（缺工具=环境缺陷，检测门本身会红）。
+      - name: Install nginx (检测对象)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nginx
+
+      - name: Run deploy env gate (deploy-env)
+        run: python scripts/run_gates.py --filter deploy-env
+
+      # 部署产物真源构建实测：rust:1.88 容器编译内核 + 3 cdylib（命名卷缓存，
+      # 同 start_server.sh 消费布局）。失败=部署机拿不到可用产物。
+      - name: Deploy build smoke (deploy/build.sh 容器构建)
+        run: deploy/build.sh
+
+      - name: Assert deploy artifacts exist
+        run: |
+          test -x kernel/target/release/agentos-kernel || { echo "::error::内核产物缺失"; exit 1; }
+          for so in tool_core sensitive_checker spill_guard; do
+            found=$(find "plugins/shared/$so" -maxdepth 1 -name "lib*.so" | head -1)
+            [ -n "$found" ] || { echo "::error::cdylib 产物缺失: $so"; exit 1; }
+          done
+          echo "部署产物齐全：内核 + 3 cdylib"

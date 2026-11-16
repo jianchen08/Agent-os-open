@@ -67,6 +67,19 @@ vi.mock('../lifecycleHandlers', () => ({
   handleReconnected: () => { invoked.calls.push('reconnected') },
   handleSystemNotification: () => { invoked.calls.push('system_notification') },
 }))
+vi.mock('../pluginHealthNotice', () => ({
+  handlePluginUnavailableNotice: () => { invoked.calls.push('plugin_health_notice') },
+}))
+vi.mock('../memPressureNotice', () => ({
+  // 观测替身按真实契约模拟消费判定：record_id 为 mem 族前缀才算消费
+  // （只记消费命中，咨询未命中不记——与短路断言语义对齐）
+  handleMemPressureNotice: (data: unknown) => {
+    const rid = (data as { data?: { record_id?: string } } | null)?.data?.record_id
+    const consumed = typeof rid === 'string' && rid.startsWith('n_plugin_unavailable_mem_pressure')
+    if (consumed) invoked.calls.push('mem_pressure_notice')
+    return consumed
+  },
+}))
 vi.mock('../router', () => ({
   isPipelineRelevant: (pid: string) => pid === 'pipe-relevant' || !pid,
   resolvePipelineId: (data: any) => {
@@ -166,6 +179,45 @@ describe('initStreamingEvents 全局流式事件接线', () => {
     expect(mockLogger.info).not.toHaveBeenCalledWith(
       expect.stringContaining('drop irrelevant pipeline event'),
     )
+  })
+
+  it('卡3 前端：插件健康面直订 SYSTEM_NOTIFICATION 绕过相关性门控（非关注管道的降级事件也要点亮横幅/toast）', async () => {
+    const mod = await import('../index')
+    mod.initStreamingEvents()
+
+    // 真实 globalWS 同事件双订阅（Set 多 handler）：订阅序上通知面直订在前
+    // （init 内直订先于 _handlers 表循环），末个是气泡路径（门控内）
+    const handlers = mockSubscribe.mock.calls
+      .filter(([e]) => e === WS_SERVER_EVENTS.SYSTEM_NOTIFICATION)
+      .map(([, h]) => h)
+    expect(handlers.length).toBe(2)
+
+    const data = {
+      data: { pipeline_id: 'pipe-never-registered', record_id: 'n_plugin_unavailable_verify_failed_1' },
+    }
+    handlers[0]!(data) // 直订面（mem 分流→非 mem 落插件健康面）：绕过门控照常到达
+    handlers[1]!(data) // 气泡路径：非关注管道被中央门控丢弃
+
+    expect(invoked.calls).not.toContain('system_notification')
+    expect(invoked.calls).toContain('plugin_health_notice')
+  })
+
+  it('R9：SYSTEM_NOTIFICATION 通知面直订分流——mem 族命中短路不落插件健康面，非 mem 照常落', async () => {
+    const mod = await import('../index')
+    mod.initStreamingEvents()
+
+    // 真实 globalWS 同事件双订阅（Set 多 handler）：订阅序上通知面直订在前
+    // （init 内直订先于 _handlers 表循环），末个是气泡路径（门控内）
+    const handlers = mockSubscribe.mock.calls
+      .filter(([e]) => e === WS_SERVER_EVENTS.SYSTEM_NOTIFICATION)
+      .map(([, h]) => h)
+    expect(handlers.length).toBe(2)
+    const route = handlers[0]!
+
+    route({ data: { pipeline_id: 'pipe-x', record_id: 'n_plugin_unavailable_mem_pressure_1', notificationType: 'mem_pressure' } })
+    route({ data: { pipeline_id: 'pipe-x', record_id: 'n_plugin_unavailable_verify_failed_1', notificationType: 'verify_failed' } })
+
+    expect(invoked.calls).toEqual(['mem_pressure_notice', 'plugin_health_notice'])
   })
 
   it('高频增量事件（text/reasoning/tool_call_delta、keepalive）不写事件日志', async () => {

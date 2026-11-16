@@ -12,6 +12,7 @@
 # 环境变量：
 #   AGENTOS_KERNEL_PORT  内核端口（默认 9100）
 #   AGENTOS_FRONTEND_PORT 前端端口（默认 6390，避开 container_22404 的 5289/5290/6290）
+#   AGENTOS_BIND         内核监听地址（默认 127.0.0.1 仅本机；跨机访问显式设 0.0.0.0）
 #   AGENTOS_USER_ROOT    用户空间根；下方钉在 <project>/user_root（dev 与安装版
 #                        应用的 OS 默认空间隔离，ADR 2026-09-18-dev-local-user-root）
 #
@@ -278,42 +279,37 @@ cleanup() {
 }
 trap cleanup INT TERM
 
-# ========== 步骤 2: 准备插件 venv（首次运行；已有 .venv 跳过） ==========
+# ========== 步骤 2: 准备插件 venv（健康门控 + SDK 断言） ==========
 # 插件 sidecar 按目录 venv 运行，内核不回退 PATH 裸 python——
 # 新克隆不装 venv 则所有 Python 插件不可用（插件端点 502）。
-echo -e "${YELLOW}[2/5] 准备 Python 插件 venv...${NC}"
+# 2026-10-18（venv 自愈缺陷三犯）：旧门控=「.venv 目录存在即跳过」且 uv 输出
+# 静默——部分完成的 sync 留下残缺 venv（agentos_plugin_sdk editable 未装）后
+# 永不重刷，坏态经包内携带/junction 传播到装机（合宿组全灭 50 分钟）。供给
+# 逻辑单源收敛到 scripts/ensure_plugin_venvs.py：「venv 可用」= 解释器在 AND
+# （未声明 SDK OR SDK 可 import）；不健康即补装并再断言（有界两轮），失败
+# 可见且反映在退出码（下方 WARN，不中断启动——spawn 期 fail-closed 语义不变）。
+echo -e "${YELLOW}[2/5] 准备 Python 插件 venv（健康门控 + SDK 断言）...${NC}"
 if ! command -v uv >/dev/null 2>&1; then
     echo -e "${RED}[ERROR] 未找到 uv。插件依赖每目录 venv（uv sync）创建。${NC}"
     echo -e "${YELLOW}       安装: https://docs.astral.sh/uv/ 后重跑。${NC}"
     exit 1
 fi
-VENV_CREATED=0
-# 插件目录三种子布局：system|tools/<name>、pipeline/<phase>/<name>、shared/<name> 顶层；
-# 已有 .venv 跳过（幂等）
-for manifest in \
-    "$PROJECT_ROOT"/plugins/shared/*/plugin.json \
-    "$PROJECT_ROOT"/plugins/shared/system/*/plugin.json \
-    "$PROJECT_ROOT"/plugins/shared/tools/*/plugin.json \
-    "$PROJECT_ROOT"/plugins/shared/pipeline/*/*/plugin.json
-do
-    [ -f "$manifest" ] || continue
-    dir=$(dirname "$manifest")
-    if [ -f "$dir/pyproject.toml" ] && [ ! -d "$dir/.venv" ]; then
-        echo -e "       uv sync: $(basename "$dir")"
-        if uv sync --project "$dir" >/dev/null 2>&1; then
-            VENV_CREATED=$((VENV_CREATED + 1))
-        else
-            echo -e "${YELLOW}[WARN] uv sync 失败: $dir（检查 uv.lock/pyproject）${NC}"
-        fi
-    fi
-done
-echo -e "${GREEN}  插件 venv 就绪（本次新建 $VENV_CREATED 个；既有 .venv 跳过）${NC}"
+if python "$PROJECT_ROOT/scripts/ensure_plugin_venvs.py"; then
+    :
+else
+    echo -e "${YELLOW}[WARN] 部分插件 venv 两轮补装后仍不可用——"
+    echo -e "       对应工具/合宿组将 502，检查上方输出后重跑。${NC}"
+fi
 echo ""
 
 # ========== 步骤 3: 启动内核 ==========
 echo -e "${YELLOW}[3/5] 启动 Rust 内核 (端口 :$KERNEL_PORT)...${NC}"
 export AGENTOS_KERNEL_PORT=$KERNEL_PORT
-export AGENTOS_KERNEL_HOST=0.0.0.0
+# 监听地址缺省回环（与内核 resolve_bind_host 默认一致）：dev 全链路经本机
+# Vite proxy 访问内核，无需对外暴露；跨机访问（如 --kernel-only 裸内核交
+# 反代）须显式 AGENTOS_BIND=0.0.0.0，内核此时自行打印绑定面告警。
+# 旧名 AGENTOS_KERNEL_HOST 已弃用（内核过渡别名）。
+export AGENTOS_BIND="${AGENTOS_BIND:-127.0.0.1}"
 export AGENTOS_PLUGINS_DIR="$PROJECT_ROOT/plugins/shared"
 export AGENTOS_CONFIG_ROOT="$PROJECT_ROOT/config"
 # 2026-09-18 (ADR 2026-09-18-dev-local-user-root)：dev 用户空间根钉在项目内
@@ -430,10 +426,13 @@ else
         cd "$PROJECT_ROOT"
     fi
 
-    # 启动前端，通过 VITE_API_BASE_URL 指向内核
+    # 启动前端：VITE_PROXY_TARGET 只喂 Vite proxy（内核基址不进 bundle，dev
+    # CSP connect-src 'self' 同源可达）。弃用旧名 VITE_API_BASE_URL 会以进程
+    # env 优先级盖掉 frontend/.env 的留空，把被 CSP 禁死的跨源直连基址烧进
+    # bundle，禁止回用。
     cd "$FRONTEND_DIR"
     # --yes: 万一本地仍缺 vite，npx 自动下载而不弹交互确认。
-    VITE_API_BASE_URL="http://localhost:$KERNEL_PORT" \
+    VITE_PROXY_TARGET="http://127.0.0.1:$KERNEL_PORT" \
         npx --yes vite --host 0.0.0.0 --port "$FRONTEND_PORT" &
     FRONTEND_PID=$!
     cd "$PROJECT_ROOT"

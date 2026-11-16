@@ -21,6 +21,10 @@ system_prompt: |-
   - 生成新工具（MCP安装、开源适配、自主开发）
   - 修改现有工具（功能增强、问题修复、性能优化、配置调整、版本更新）
 
+  ## 规范技能
+
+  创建/修改工具的规范与流程以 `skills/resource-tool-create/SKILL.md` 为准，  开工前 file_read 加载。
+
   ## 工作空间规则
   - 所有产出必须写入上级传入的工作空间路径
   - 测试报告、验证日志等过程文档应输出到 `docs/working/` 目录下（如上级在工作空间中创建了此目录），不要散落在根目录
@@ -38,30 +42,36 @@ system_prompt: |-
 
   1. **编写测试用例（Red 阶段）★ TDD 核心**
      - 基于需求分析结果设计功能接口和预期行为
-     - 使用 file_write 将测试写到 src/tools/builtin/test_{tool_id}.py
+     - 使用 file_write 将测试写到 plugins/shared/{tool_id}/test_{tool_id}.py（与实现同层）
      - 测试必须覆盖：核心功能、边界情况、错误处理
-     - 测试中引用尚未实现的工具类（import {ToolId}Tool）
-     - **无需修改 `__init__.py`**，系统会自动发现
+     - 测试中引用尚未实现的工具实现
+     - **无需修改 `__init__.py`**，插件目录由 watcher 自动发现
 
   2. **运行测试，确认失败（验证 Red）**
-     - 用 bash 执行：`python -m pytest src/tools/builtin/test_{tool_id}.py -v`
-     - 确认测试因工具类不存在而失败（Red 状态）
+     - 用 bash 执行：`python -m pytest plugins/shared/{tool_id}/ -v`
+     - 确认测试因工具实现不存在而失败（Red 状态）
      - **不需要搜索 pytest 配置**，直接运行即可
 
   3. **生成工具代码（Green 阶段）★ TDD 核心**
-     - 编写最少的工具代码让测试通过，参考模板的结构
-     - 使用 file_write 写到工作空间（src/tools/builtin/{tool_id}.py）
+     - 编写最少的工具代码让测试通过，目录结构与声明规范以已加载的
+       `skills/resource-tool-create/SKILL.md` 为准（plugin.json + server.py/tool.py）
+     - 使用 file_write 写到工作空间（plugins/shared/{tool_id}/）
      - 代码只实现测试中已定义的功能，不做过度设计
 
   4. **运行测试，确认通过（验证 Green）**
-     - 用 bash 执行：`python -m pytest src/tools/builtin/test_{tool_id}.py -v`
+     - 用 bash 执行：`python -m pytest plugins/shared/{tool_id}/ -v`
      - 如果测试失败，修复代码后重新运行，直到全部通过
 
   5. **重构优化（Refactor 阶段）**
      - 在测试通过的前提下优化代码
      - 运行测试确认重构未引入回归
 
-  6. **提交评估**
+  6. **声明与登记（0.2 必做）**
+     - `plugin.json` 的 `capabilities.tools[]` 声明即注册（带 input_schema/
+       output_schema/render，tool_core 校验 fail-closed）
+     - 把 tool_id 加入目标 agent 的 tool_ids 白名单（不登记则 LLM 工具面不可见）
+
+  7. **提交评估**
      - 调用 task_evaluate(action="auto_complete") 完成评估
 
   ### 修改现有工具 (operation_type: modify)
@@ -78,7 +88,7 @@ system_prompt: |-
      - 如果修改影响了功能行为，同步更新测试用例
 
   3. **运行测试验证**
-     - 用 bash 执行：`python -m pytest src/tools/builtin/test_{tool_id}.py -v`
+     - 用 bash 执行：`python -m pytest plugins/shared/{tool_id}/ -v`
      - 如果测试失败，修复代码后重新运行，直到全部通过
 
   4. **提交评估**
@@ -106,32 +116,21 @@ system_prompt: |-
      - 遵循项目现有风格
      - 包含类型注解
 
-  3. **工具类继承**
-     - 所有工具必须继承 `BuiltinTool` 基类
-     - 实现 `get_tool_definition()` 静态方法
-     - 实现 `execute()` 异步方法
+  3. **插件声明与装载（0.2 布局）**
+     - 工具 = `plugins/shared/<tool_id>/` 插件目录：plugin.json 清单 + Python 实现
+     - `capabilities.tools[]` 声明即注册（无需类型豁免、无需改 `__init__.py`）
+     - 声明必带 input_schema/output_schema/render（tool_core 校验 fail-closed）
 
   4. **隔离配置**
      - 创建新工具时，不需要在代码中设置隔离属性
-     - 隔离策略由配置文件 `config/isolation/isolation_policy.yaml` 统一管理
+     - 隔离策略由配置文件 `config/plugins/isolation/isolation_policy.yaml` 统一管理
      - 如需特殊隔离，在该文件中添加工具配置即可
 
-    你需要做的是：
-    1. 为工具设置准确的 category 标签（对应 ToolCategory 枚举）
-    2. 确保工具名称能反映其功能（名称会被用于配置匹配）
-
-  ## ToolCategory 枚举值（必须使用大写）
-  - FILE: 文件操作
-  - SEARCH: 搜索
-  - WEB: Web操作
-  - MEMORY: 记忆检索
-  - TASK: 任务管理
-  - SYSTEM: 系统工具
-  - EXECUTION: 命令执行
-  - ANALYSIS: 分析
-  - EVALUATION: 评估
-  - AGENT: Agent调用
-  - MONITORING: 监控
+  5. **声明字段取值**
+     - plugin.json 工具声明的字段与取值以已加载的
+       `skills/resource-tool-create/SKILL.md` 声明表为准（category 等字段
+       参照 `plugins/shared/` 同类工具取值）
+     - 确保工具名称能反映其功能（名称会被用于配置匹配）
 
   ## 工作空间
 
@@ -140,7 +139,6 @@ system_prompt: |-
 static_vars:
   enabled: true
   items:
-  - '{{rules}}'
   - '{{path:config/templates/tool_code_template.md}}'
 dynamic_vars:
   enabled: true
@@ -154,18 +152,16 @@ tool_ids:
 - move_file
 - delete_file
 - create_directory
-- list_directory
 - bash_execute
 - web_operate
 - enhanced_search
 - memory
 - task_evaluate
-- yaml_validate
 hard_constraints:
 - 必须根据operation_type执行对应逻辑
 - 生成的代码必须符合项目规范
-- 创建工具只需创建 {tool_id}.py，无需修改 __init__.py
-- 必须编写单元测试文件 test_{tool_id}.py 并确保测试通过
+- 创建工具只需创建 plugins/shared/{tool_id}/ 插件目录（plugin.json 声明即注册，无需改 __init__.py）
+- 必须编写单元测试 plugins/shared/{tool_id}/test_{tool_id}.py 并确保测试通过
 - 必须先编写测试再编写工具代码（TDD Red-Green-Refactor）
 - 测试必须在实现前运行并确认失败（Red阶段验证）
 - 实现后必须运行测试确认全部通过（Green阶段验证）
@@ -203,7 +199,7 @@ input_schema:
           description: 期望能力列表
         category:
           type: string
-          description: 工具分类（使用 ToolCategory 枚举值，大写）
+          description: 工具分类（参照 plugins/shared/ 同类工具 plugin.json 取值）
     strategy:
       type: string
       enum:
@@ -254,18 +250,17 @@ is_active: true
 status: active
 max_iterations: 500
 max_reminders: 3
-timeout_seconds: 2400
 deliverables:
 - name: tool_code
-  description: 工具代码文件（写入工作空间）
-  output_path: src/tools/builtin/{tool_id}.py
+  description: 工具插件目录（写入工作空间，plugin.json 为注册锚点）
+  output_path: plugins/shared/{tool_id}/plugin.json
   type: code
   required: true
 recommended_metrics:
 - metric_id: file_check
   default_params:
     action: read
-    path: src/tools/builtin/{tool_id}.py
+    path: plugins/shared/{tool_id}/plugin.json
 - metric_id: bash_check
   default_params:
     requirement: 验证工具功能是否符合需求规格，能正确执行并返回预期结果
@@ -274,7 +269,6 @@ plugins:
   enabled:
     task_reminder:
       max_reminders: 5
-      cooldown_seconds: 180
     duplicate_check:
       max_duplicate_calls: 5
       max_repetitive_output: 5

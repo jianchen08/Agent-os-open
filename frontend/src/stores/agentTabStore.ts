@@ -18,7 +18,7 @@ function getMainPipelineId(sessionId: string): string | null {
   const session = sessions.find((s) => s.id === sessionId)
   const mainPid = session ? mainPipelineIdOf(session) : undefined
   if (!mainPid) {
-    console.warn('[getMainPipelineId] 主管道缺失: sessionId=%s pipelineIds=%o', sessionId, session?.pipelineIds)
+    console.warn('[getMainPipelineId] 主 pipeline 缺失: sessionId=%s pipelineIds=%o', sessionId, session?.pipelineIds)
   }
   return mainPid ?? null
 }
@@ -279,18 +279,22 @@ interface AgentTabState {
   loadTabMessages: (tabId: string, pipelineRunId?: string) => Promise<void>
 }
 
-/** 构建会话主标签（新会话/恢复补建共用，避免字面量复制漂移） */
+/** 构建会话主标签（新会话/恢复补建共用，避免字面量复制漂移）。
+ * 主标签名 = 会话标题（2026-10-16 用户拍板：主标签以会话标题为名，内部词汇
+ * 不进用户可见面；新会话标题默认即 agent 名「灵汐」，起名/改名后随会话标题
+ * 走），会话缓存未就绪时回落「灵汐」。 */
 function buildMainTab(
   sessionId: string,
   mainPipelineId: string | null,
   mainAgentId: ReturnType<typeof getMainAgentId>,
 ): AgentTab {
+  const mainTabName = readSessions().find((s) => s.id === sessionId)?.title || '灵汐'
   return {
     id: `main-${sessionId}`,
-    agentId: mainAgentId, agentName: '主管道', agentLevel: 1,
+    agentId: mainAgentId, agentName: mainTabName, agentLevel: 1,
     taskId: undefined, parentRecordId: undefined,
     pipelineRunId: mainPipelineId || undefined,
-    path: ['主管道'], status: 'running', hasUnread: false,
+    path: [mainTabName], status: 'running', hasUnread: false,
     canClose: false, messages: [],
   }
 }
@@ -309,6 +313,10 @@ function buildInitialTabs(
   mainAgentId: ReturnType<typeof getMainAgentId>,
 ): { tabs: AgentTab[]; activeTabId: string | null } {
   if (saved && saved.tabs.length > 0) {
+    // 主标签名随会话标题刷新：持久化的旧名/存量「主管道」在恢复时矫正到当前
+    // 标题（与 buildMainTab 同一命名契约）；会话缓存未就绪时保持持久化名——
+    // 缺数据不是改名依据（与下方绑定保持同一不变量）。
+    const sessionTitle = readSessions().find((s) => s.id === sessionId)?.title
     // 子 Tab 缺 pipelineRunId 时保持 undefined（不污染）
     let tabs = saved.tabs.map((tab) => {
       if (tab.agentLevel === 1) {
@@ -316,7 +324,12 @@ function buildInitialTabs(
         // 不是改绑依据（与 rebindMainTabToSession 同一不变量）。清空绑定会把
         // 「持久化有 pid」降级成「运行时空 Tab」，发送侧 pid 解析恒空（BUG-28
         // 恢复链断）；缓存就绪后每次激活由 rebindMainTabToSession 以权威矫正。
-        return { ...tab, pipelineRunId: mainPipelineId ?? tab.pipelineRunId, agentId: mainAgentId }
+        return {
+          ...tab,
+          pipelineRunId: mainPipelineId ?? tab.pipelineRunId,
+          agentId: mainAgentId,
+          ...(sessionTitle ? { agentName: sessionTitle, path: [sessionTitle] } : {}),
+        }
       }
       return tab
     })
@@ -704,7 +717,11 @@ export const useAgentTabStore = create<AgentTabState>((set, get) => ({
     const tabId = `sub-${parentRecordId}`
 
     set((state) => {
-      const path = ['主管道', agentName]
+      // 面包屑首段 = 会话标题（主标签现以会话标题为名，见 buildMainTab），
+      // 会话缓存未就绪回落「灵汐」（与 buildMainTab 同一命名契约）
+      const mainTabName =
+        readSessions().find((s) => s.id === state.currentSessionId)?.title || '灵汐'
+      const path = [mainTabName, agentName]
       const existingTab = state.tabs.find((t) => t.id === tabId)
 
       if (existingTab) {

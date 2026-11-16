@@ -12,6 +12,9 @@
  */
 import { beforeEach, describe, expect, it } from 'vitest'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { initializeWidgets } from '@/services/schema/registerWidgets'
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { slotRegistry } from '@/services/slots/slotRegistry'
 import {
   openWorkspacePanelByPath,
   TOP_NAV_PANELS,
@@ -19,8 +22,9 @@ import {
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useUIStore } from '@/stores/uiStore'
 
-/** 以三插件的真实声明形态装载 schema（等价 GrowthLoop → loadFromSchema） */
-function seedSchema(enabled: 'all' | 'none') {
+/** 以三插件的真实声明形态装载 schema（等价 GrowthLoop → loadFromSchema；
+ *  workspace.tab keyed 槽随 GrowthLoop 同批装载——C4 收敛后页签直达按槽解析） */
+async function seedSchema(enabled: 'all' | 'none'): Promise<void> {
   const plugin_contributes =
     enabled === 'all'
       ? [
@@ -37,7 +41,8 @@ function seedSchema(enabled: 'all' | 'none') {
                   slot: 'activity-bar',
                   order: 20,
                   path: '/monitoring',
-                  widget: 'monitoring_panel',
+                  widget: 'widget_stage',
+                  props: { space: 'monitoring' },
                 },
               ],
             },
@@ -81,25 +86,31 @@ function seedSchema(enabled: 'all' | 'none') {
         ]
       : []
 
-  contributionRegistry.loadFromSchema({
+  const schema = {
     plugin_contributes,
     plugin_configs: [],
-  })
+  }
+  contributionRegistry.loadFromSchema(schema as never)
+  await slotRegistry.loadFromSchema(schema as never, { loadWidgets: async () => [] })
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   useLayoutModeStore.setState({ workspaceTabs: [], activeTabId: null })
-  seedSchema('all')
+  widgetRegistry.clear()
+  initializeWidgets()
+  slotRegistry.clear()
+  await seedSchema('all')
 })
 
 describe('T11：面板入口声明驱动', () => {
-  it('/monitoring → 声明命中，打开 monitoring_panel 页签', () => {
+  it('/monitoring → 声明命中，打开 widget_stage 组台页签（生产声明形态）', () => {
     expect(openWorkspacePanelByPath('/monitoring')).toBe(true)
     const tab = useLayoutModeStore.getState().workspaceTabs.find((t) =>
       t.id.startsWith('ws-plugin-monitoring'),
     )
     expect(tab).toBeDefined()
-    expect(tab?.component).toBe('monitoring_panel')
+    expect(tab?.component).toBe('widget_stage')
+    expect(tab?.props).toEqual({ space: 'monitoring' })
   })
 
   it('禁用插件（声明移除）→ 面板入口消失（不再命中硬编码）', () => {
@@ -170,8 +181,8 @@ describe('T11：面板入口声明驱动', () => {
     expect(openWorkspacePanelByPath('/agents')).toBe(false)
   })
 
-  it('onboarding_service 声明：/p/get_started → onboarding_panel 页签（引导入口跳转链）', () => {
-    contributionRegistry.loadFromSchema({
+  it('onboarding_service 声明：/p/get_started → onboarding_panel 页签（引导入口跳转链）', async () => {
+    const schema = {
       plugin_contributes: [
         {
           plugin_id: 'onboarding_service',
@@ -193,7 +204,9 @@ describe('T11：面板入口声明驱动', () => {
         },
       ],
       plugin_configs: [],
-    })
+    }
+    contributionRegistry.loadFromSchema(schema as never)
+    await slotRegistry.loadFromSchema(schema as never, { loadWidgets: async () => [] })
     expect(openWorkspacePanelByPath('/p/get_started')).toBe(true)
     const tab = useLayoutModeStore.getState().workspaceTabs.find((t) =>
       t.id.startsWith('ws-plugin-get_started'),
@@ -208,11 +221,11 @@ describe('T11：面板入口声明驱动', () => {
     expect(openWorkspacePanelByPath('/p/get_started')).toBe(false)
   })
 
-  it('BUG-11 回归：先注册的无 path 同名页不吞掉 /tasks → 点「打开任务管理」面板展开', () => {
+  it('BUG-11 回归：先注册的无 path 同名页不吞掉 /tasks → 点「打开任务管理」面板展开', async () => {
     // 生产 schema 实况：debug_center（id=tasks，无 path）在 plugin_contributes 中
     // 先于 task_service（id=tasks，path=/tasks）。裸 id 去重会把后者静默丢弃，
     // 工作区空态按钮点击后仅弹错误通知、面板永不展开。此处按真实顺序装载。
-    contributionRegistry.loadFromSchema({
+    const schema = {
       plugin_contributes: [
         {
           plugin_id: 'debug_center',
@@ -240,7 +253,9 @@ describe('T11：面板入口声明驱动', () => {
         },
       ],
       plugin_configs: [],
-    })
+    }
+    contributionRegistry.loadFromSchema(schema as never)
+    await slotRegistry.loadFromSchema(schema as never, { loadWidgets: async () => [] })
 
     useUIStore.setState({ workspaceCollapsed: true })
     expect(openWorkspacePanelByPath('/tasks')).toBe(true)

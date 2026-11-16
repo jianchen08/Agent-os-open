@@ -1,0 +1,68 @@
+# 星露谷好感包 · 世界正典世界书（玩法组成原则「包 = 卡+规则+世界书+初始状态」
+# 之世界书位，2026-10-17 标杆补齐）。消费：内定执行身份卡 card_stardew_world
+# lorebook_ids 绑定 → material 逐轮按最近消息关键词命中注入（scan_inject）。
+# 条目字段对齐 ST World Info 子集（同 demo_world.yaml 契约）。
+name: 星露谷小镇正典
+description: 星露谷好感包世界物料：镇民性情作息、地点与四季节日节拍（固定剧情节拍点）。
+scan_depth: 4
+token_budget: 512
+recursive_scanning: false
+entries:
+- keys:
+  - 阿比
+  - Abigail
+  secondary_keys:
+  - 紫发
+  - 口琴
+  content: 阿比：镇上杂货店老板与镇长之女，紫发，我行我素。常在雨天的河边钓鱼，
+    晴天的墓园旁练习口琴。最爱紫水晶与南瓜汤，讨厌枯燥的规矩。好感动向：礼物
+    大增、交谈小增；朋友档会约你探险，密友档向你吐露心事（档位阈值见玩法规则）。
+  enabled: true
+  insertion_order: 100
+  constant: false
+  position: before_char
+  case_sensitive: false
+  comment: 镇民·阿比
+- keys:
+  - 罗宾
+  - Robin
+  secondary_keys:
+  - 木工房
+  - 木匠
+  content: 罗宾：镇上木匠，木工房在牧场北边，爽朗靠谱。每日上午开店，夜里爱喝
+    一杯热汤。最爱山羊奶酪与桃子，讨论起木料就停不下来。好感动向：交谈小增、
+    拜访木工房顺带聊天最自然；密友档会请你帮工打下手（档位阈值见玩法规则）。
+  enabled: true
+  insertion_order: 100
+  constant: false
+  position: before_char
+  case_sensitive: false
+  comment: 镇民·罗宾
+- keys:
+  - 牧场
+  - 农场
+  - 杂物房
+  content: 牧场：爷爷留下的祖产，杂物房的旧农具还留着体温。屋前信箱、屋后一片
+    待开垦的田，西边小路通向镇上，北边上山是罗宾的木工房。
+  enabled: true
+  insertion_order: 90
+  constant: false
+  position: before_char
+  case_sensitive: false
+  comment: 地点·牧场
+- keys:
+  - 节日
+  - 复活节
+  - 月光水母节
+  - 丰收宴
+  - 星夜祭
+  content: 四季节日节拍（固定剧情节拍点）：春·复活节（13 日彩蛋 hunt）、夏·
+    月光水母节（28 日夜海边放灯）、秋·丰收宴（16 日全镇长桌）、冬·星夜祭
+    （25 日广场交换礼物）。节日当天镇上人齐，是好感跃升的天然舞台；未到档的
+    关系照旧婉拒，不落数值（阈值见玩法规则）。
+  enabled: true
+  insertion_order: 80
+  constant: false
+  position: before_char
+  case_sensitive: false
+  comment: 剧情节拍·四季节日

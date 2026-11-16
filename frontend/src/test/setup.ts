@@ -89,3 +89,23 @@ if (typeof globalThis.ResizeObserver !== 'function') {
   ;(globalThis as unknown as { ResizeObserver: typeof ResizeObserverStub }).ResizeObserver =
     ResizeObserverStub
 }
+
+// ---------------------------------------------------------------------------
+// CSS.supports：jsdom 不实现 CSS 接口。@lobehub/ui ConfigProvider 的
+// GlobalFocusRing 挂载即调用 win.CSS?.supports(...)——走真实渲染链路的用例
+// （LobeChatMarkdown 等）缺失即 TypeError。测试默认「无特性支持」（false）。
+// ---------------------------------------------------------------------------
+if (typeof window.CSS?.supports !== 'function') {
+  Object.defineProperty(window, 'CSS', {
+    writable: true,
+    value: { ...(window.CSS ?? {}), supports: () => false },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// scrollIntoView：jsdom 不实现（Element.prototype 无此方法）。激活页签对齐等
+// 布局副作用在测试中默认 no-op；需要断言滚动行为的用例自行覆写为 vi.fn()。
+// ---------------------------------------------------------------------------
+if (typeof Element.prototype.scrollIntoView !== 'function') {
+  Element.prototype.scrollIntoView = function scrollIntoView(): void {}
+}

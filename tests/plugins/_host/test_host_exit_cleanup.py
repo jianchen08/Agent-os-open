@@ -24,14 +24,14 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _HOST_DIR = _REPO_ROOT / "plugins" / "shared" / "_host"
-_BASH_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "bash"
+_BASH_DIR = _REPO_ROOT / "plugins" / "shared" / "bash"
 
 for _d in (str(_HOST_DIR), str(_BASH_DIR)):
     if _d not in sys.path:
         sys.path.insert(0, _d)
 
 import host  # noqa: E402
-from process_manager import ProcessManager  # noqa: E402
+from agentos_plugin_sdk.process_runtime import ProcessManager  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
@@ -183,3 +183,43 @@ class TestKillTrackedChildrenUnits:
             sys.modules.pop(member_name, None)
         assert killed < 10, "预算内未能杀完全部 → 提前放弃"
         assert elapsed < 1.0, "总耗时受预算约束（≤2s 语义的单测等价面）"
+
+
+class TestGracefulHardExit:
+    """stdin EOF 正常退出路径的硬退出兜底（2026-10-16 扫描卡退出僵尸实证）。"""
+
+    def test_cleanup_then_exit_zero_in_order(self) -> None:
+        """契约：先有界清理登记子进程，后 os._exit(0)；顺序可观察。"""
+        calls: list[str] = []
+
+        def cleanup() -> int:
+            calls.append("cleanup")
+            return 3
+
+        def exit_fn(code: int) -> None:
+            calls.append(f"exit:{code}")
+
+        host._graceful_hard_exit(cleanup_fn=cleanup, exit_fn=exit_fn)
+
+        assert calls == ["cleanup", "exit:0"]
+
+    def test_exit_receives_zero_regardless_of_cleanup_count(self) -> None:
+        """清理返回值只作诊断：退出码恒 0（正常终局语义，非失败退出）。"""
+        codes: list[int] = []
+        host._graceful_hard_exit(
+            cleanup_fn=lambda: 0, exit_fn=lambda code: codes.append(code)
+        )
+        assert codes == [0]
+
+    def test_never_returns_normally(self) -> None:
+        """NoReturn 契约：exit_fn 注入为真 os._exit 前的哨兵——函数不正常返回
+        （exit_fn 被调用即视为流程终结；若返回，测试以哨兵未触发失败暴露）。"""
+        reached: list[bool] = []
+
+        def sentinel_exit(code: int) -> None:  # noqa: ARG001 — 签名对齐 os._exit
+            reached.append(True)
+            raise SystemExit(code)
+
+        with pytest.raises(SystemExit):
+            host._graceful_hard_exit(cleanup_fn=lambda: 0, exit_fn=sentinel_exit)
+        assert reached == [True]

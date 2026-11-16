@@ -27,9 +27,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CHANNEL_DIRS = [
-    "plugins/shared/system/channel_wecom",
-    "plugins/shared/system/channel_qq",
-    "plugins/shared/system/channel_dingtalk",
+    "plugins/shared/channel_wecom",
+    "plugins/shared/channel_qq",
+    "plugins/shared/channel_dingtalk",
 ]
 
 # 测试文件本身不计（口径针对源文件）

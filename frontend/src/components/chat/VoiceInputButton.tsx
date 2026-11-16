@@ -102,15 +102,15 @@ export const VoiceInputButton = ({
           error?.type === 'permission_denied' && 'text-destructive hover:text-destructive',
           className,
         )}
-        style={isRecording ? { backgroundColor: 'rgb(239 68 68)' } : undefined}
+        style={isRecording ? { backgroundColor: 'var(--status-error)' } : undefined}
         onMouseEnter={(e) => {
           if (isRecording) {
-            e.currentTarget.style.backgroundColor = 'rgb(220 38 38)'
+            e.currentTarget.style.backgroundColor = 'color-mix(in srgb, var(--status-error) 80%, black)'
           }
         }}
         onMouseLeave={(e) => {
           if (isRecording) {
-            e.currentTarget.style.backgroundColor = 'rgb(239 68 68)'
+            e.currentTarget.style.backgroundColor = 'var(--status-error)'
           }
         }}
         onClick={onClick}

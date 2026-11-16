@@ -1,0 +1,26 @@
+# 项目全景图车道（2026-10-28，方案 AI辅助编程体系落地AgentOS_20261022 §4.4）。
+# graph-check 三合一：增量聚合 → 落盘 docs/graph/graph.js（gitignored 派生物）
+# → 校验红绿；校验与出图同一遍聚合，无"只校验不出图"的独立入口。
+# 纯标准库秒级，独立 workflow 挂车道（元门禁 V1 认可的 --filter 接线形态）。
+# 触发口径（方案 §4.4 如实记录）：本地提交不自动触发，门禁纪律性手动补跑；
+# 远端 CI 只做校验（runner 产物本地不可见），本地可见的新鲜数据由本地执行产生。
+name: graph-check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  graph-check:
+    name: Project Panorama (aggregate + check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Aggregate & Check
+        run: python scripts/run_gates.py --filter graph-check

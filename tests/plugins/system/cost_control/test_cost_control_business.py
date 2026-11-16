@@ -22,7 +22,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +30,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system" / "cost_control"
+_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "cost_control"
 
 
 server_mod: Any = None
@@ -56,6 +56,30 @@ def server() -> Any:
     yield mod
     # 卸载清理：复位模块级单例，防跨测试泄漏
     mod._budget_manager = None
+
+
+
+class _SqliteDbRead:
+    """db-read.query 独立替身：只读 SELECT 落真 sqlite（AGENTOS_DB_PATH）。
+
+    信封按 db_read.unwrap_db_read_envelope 契约（{status:200, body:{rows}}）；
+    内核侧租户收窄不参与——测试自建单租户行（生产 GROUP BY 租户列 + 契约
+    包装收窄，71dca0fff 纪律在内核侧另测）。"""
+
+    def get_capability(self, name: str) -> "_SqliteDbRead":
+        assert name == "db-read", name
+        return self
+
+    async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        import os
+
+        assert method == "query"
+        conn = sqlite3.connect(os.environ["AGENTOS_DB_PATH"])
+        try:
+            rows = [list(r) for r in conn.execute(params["sql"]).fetchall()]
+        finally:
+            conn.close()
+        return {"status": 200, "body": {"columns": [], "rows": rows}}
 
 
 def _run(coro: Any) -> Any:
@@ -231,15 +255,18 @@ class TestHttpBusinessRoutes:
         assert body["scope"] == "global" and body["alert_level"] == "info"
 
     def test_usage_statistics_reshaped(self, server: Any, bm: _FakeBudgetManager, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        # traces 库不存在 → 消耗字段回退 manager 内存账本（G5 契约的降级支）
-        monkeypatch.setattr(server, "kernel_db_path", lambda: tmp_path / "nope.db")
+        # traces 库不存在 → 消耗字段走聚合单点降级全 0（F10：账本不作消耗兜底，
+        # manager 只持限额/费率派生基准——此处 raw 无限额键，占比为 0）；
+        # 请求方租户身份经内核注入的 X-AgentOS-Tenant 头透传（本租户口径）
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(tmp_path / "nope.db"))
         status, body = _decode(
-            _run(server.http_handle(path="/ext/cost_control/usage/statistics", method="GET"))
+            _run(server.http_handle(path="/ext/cost_control/usage/statistics", method="GET",
+                                    headers={"X-AgentOS-Tenant": "tenant-a"}))
         )
         assert status == 200
         # 前端形状契约：global_stats + tasks/sessions 数组 + updated_at
-        assert body["global_stats"]["daily_tokens"] == 100
-        assert body["global_stats"]["monthly_tokens"] == 2000
+        assert body["global_stats"]["daily_tokens"] == 0
+        assert body["global_stats"]["monthly_tokens"] == 0
         assert body["tasks"] == [{"task_id": "t1", "tokens": 40}]
         assert body["sessions"] == [{"session_id": "s1", "tokens": 60}]
         assert body["updated_at"]
@@ -262,17 +289,32 @@ class TestHttpBusinessRoutes:
         }
 
     def test_report_route_periods(self, server: Any, bm: _FakeBudgetManager, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(server, "plugin", _SqliteDbRead())  # db-read 契约替身（真 sqlite 背书）
+        # 真库单行 traces（非本月日期 → 日/月窗 0、全量明细 15）：report 装配
+        # 消费 kernel_db 契约 traces 面真实聚合（F10 单点），读面经 env 同源
+        # 注入；请求方租户身份经头透传（本租户口径）
         db = tmp_path / "agentos_kernel.db"
-        db.write_text("stub", encoding="utf-8")
-        monkeypatch.setattr(server, "kernel_db_path", lambda: db)
-        monkeypatch.setattr(
-            server.traces_usage,
-            "fetch_usage_rows",
-            lambda conn: [(10, 5, 15, "m1", "2026-01-01T00:00:00")],
-        )
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                "CREATE TABLE traces (trace_id TEXT, plugin_id TEXT, patch_data TEXT,"
+                " tenant_id TEXT, created_at TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO traces VALUES ('t-1', 'core', ?, 'tenant-a', '2026-01-01T00:00:00Z')",
+                (json.dumps({"llm_usage": {"input_tokens": 10, "output_tokens": 5,
+                                           "total_tokens": 15},
+                             "llm_model": "m1"}),),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(db))
         for period in ("daily", "weekly", "monthly"):
             status, body = _decode(
-                _run(server.http_handle(path="/ext/cost_control/report", method="GET", query={"period": period}))
+                _run(server.http_handle(path="/ext/cost_control/report", method="GET",
+                                        query={"period": period},
+                                        headers={"X-AgentOS-Tenant": "tenant-a"}))
             )
             assert status == 200
             assert body["period"] == period
@@ -296,35 +338,81 @@ class TestHttpBusinessRoutes:
 
 class TestTraceStats:
     def test_db_missing_returns_zero_stats(self, server: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        monkeypatch.setattr(server, "kernel_db_path", lambda: tmp_path / "nope.db")
-        stats = server._trace_stats_dict()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(tmp_path / "nope.db"))
+        stats = _run(server._trace_stats_dict("tenant-a"))
         assert stats == {"daily": 0, "monthly": 0, "total": 0, "by_model": {}, "records": []}
 
-    def test_aggregation_buckets_today_and_month(self, server: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_missing_tenant_fail_closed_zero(self, server: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        # 请求方身份缺失（X-AgentOS-Tenant 头为空）→ fail-closed 全 0，
+        # 绝不跨租户兜底（成本页不得退化为全租户消耗泄露）
         db = tmp_path / "k.db"
         conn = sqlite3.connect(str(db))
-        conn.execute("CREATE TABLE t (x)")
-        conn.close()
-        monkeypatch.setattr(server, "kernel_db_path", lambda: db)
-        # 本地-naive now：与实现侧 datetime.date.today()（本地）同口径，午夜前后不翻转
-        today = datetime.now().isoformat()
-        old = "2020-01-01T00:00:00"
-        rows = [
-            (10, 5, 15, "m1", today),  # 今日 + 本月
-            (0, 20, 20, "m2", old),  # 仅总计 + 本月? 2020 既非今日也非本月
-            (None, None, None, None, ""),  # 全空 → total 0
-        ]
-        monkeypatch.setattr(server.traces_usage, "fetch_usage_rows", lambda conn: rows)
-        stats = server._trace_stats_dict()
+        try:
+            conn.execute(
+                "CREATE TABLE traces (trace_id TEXT, plugin_id TEXT, patch_data TEXT,"
+                " tenant_id TEXT, created_at TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO traces VALUES ('t-0', 'core', ?, 'tenant-a', ?)",
+                (json.dumps({"llm_usage": {"input_tokens": 10, "output_tokens": 5,
+                                           "total_tokens": 15},
+                             "llm_model": "m1"}), "2020-01-01T00:00:00Z"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(db))
+        assert _run(server._trace_stats_dict("")) == {
+            "daily": 0, "monthly": 0, "total": 0, "by_model": {}, "records": [],
+        }
+
+    def test_aggregation_buckets_today_and_month(self, server: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(server, "plugin", _SqliteDbRead())  # db-read 契约替身（真 sqlite 背书）
+        # 真 traces 表多行：窗口语义 = kernel_db 契约视图（UTC 日/月窗，F10
+        # 单点统一口径）；期望值由播种时间戳按 UTC 现算，不硬编码。
+        now = datetime.now(UTC)
+        fmt = lambda dt: dt.isoformat().replace("+00:00", "Z")  # noqa: E731
+        yesterday = now - timedelta(days=1)
+        db = tmp_path / "k.db"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.execute(
+                "CREATE TABLE traces (trace_id TEXT, plugin_id TEXT, patch_data TEXT,"
+                " tenant_id TEXT, created_at TEXT)"
+            )
+            for i, (inp, out, total, model, created) in enumerate([
+                (10, 5, 15, "m1", fmt(now)),                 # 今日 + 本月
+                (0, 20, 20, "m2", fmt(yesterday)),           # 昨日（本月与否按现算）
+                (None, None, None, None, "2020-01-01T00:00:00Z"),  # 全空行 → total 0
+            ]):
+                conn.execute(
+                    "INSERT INTO traces VALUES (?, ?, ?, ?, ?)",
+                    (
+                        f"t-{i}",
+                        "core",
+                        json.dumps({"llm_usage": {"input_tokens": inp, "output_tokens": out,
+                                                  "total_tokens": total},
+                                    "llm_model": model}),
+                        "tenant-a",
+                        created,
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(db))
+        stats = _run(server._trace_stats_dict("tenant-a"))
         assert stats["total"] == 35
         assert stats["daily"] == 15
-        assert stats["monthly"] == 15  # 2020 行不进本月
+        expected_monthly = 15 + (20 if yesterday.strftime("%Y-%m") == now.strftime("%Y-%m") else 0)
+        assert stats["monthly"] == expected_monthly  # 2020 行不进本月；昨日行跨月边界现算
+        assert stats["monthly"] <= stats["total"]
         assert stats["by_model"] == {"m1": 15, "m2": 20, "unknown": 0}
         assert len(stats["records"]) == 3
 
     def test_sqlite_error_degrades_to_zero(self, server: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         db = tmp_path / "not_a_db.db"
         db.write_text("this is not sqlite", encoding="utf-8")
-        monkeypatch.setattr(server, "kernel_db_path", lambda: db)
-        stats = server._trace_stats_dict()
+        monkeypatch.setenv("AGENTOS_DB_PATH", str(db))
+        stats = _run(server._trace_stats_dict("tenant-a"))
         assert stats["total"] == 0 and stats["records"] == []

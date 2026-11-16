@@ -190,26 +190,32 @@ function createShrinkGuardedLayoutStorage(): PersistStorage<PersistedLayoutState
   }
 }
 
+/** 账户数据初始片段（cacheBoundary 切户清账消费）：页签/浮窗/执行与交互卡均
+ * 归属账户会话，切户必须清（persist 域 = mode+workspaceTabs 同步维护） */
+export const LAYOUT_MODE_ACCOUNT_RESET = {
+  mode: 'five-space' as const,
+  floatingWindows: [] as LayoutModeState['floatingWindows'],
+  workspaceTabs: [] as LayoutModeState['workspaceTabs'],
+  activeExecutions: [] as LayoutModeState['activeExecutions'],
+  pendingInteractions: [] as LayoutModeState['pendingInteractions'],
+}
+
 export const useLayoutModeStore = create<LayoutModeState & LayoutModeActions>()(
   persist(
     (set) => ({
+      ...LAYOUT_MODE_ACCOUNT_RESET,
       // Layout mode — Deep Space App Shell (TitleBar 32 / SideBar / StatusBar 22)
-      mode: 'five-space',
 
       // Five-space layout state
-      floatingWindows: [],
-      workspaceTabs: [],
       dockItems: [],
       fullscreenActive: false,
       fullscreenTitle: null,
       fullscreenContent: null,
 
       // Real-time data
-      activeExecutions: [],
-      pendingInteractions: [],
       // 初始 'connecting'：刷新后尚未发起首次连接，「从未连接」≠「断开」，
-      // 避免 AlertBanner 在首连期间弹"内核连接已断开"误导横幅（叠加 4s
-      // 解除保留期 = 用户感知的"刷新后 5-10s 才连上"）。
+      // 避免首连期间出"内核连接已断开"误导通知条目（叠加 4s 解除保留期 =
+      // 用户感知的"刷新后 5-10s 才连上"）。
       connectionStatus: {
         state: 'connecting',
         latencyMs: null,

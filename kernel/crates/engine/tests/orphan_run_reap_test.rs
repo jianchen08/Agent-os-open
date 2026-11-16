@@ -20,10 +20,22 @@ async fn reap_marks_orphan_running_as_failed_leaves_others() {
     let store = SqliteStore::open_memory().unwrap();
     // 两个运行，record_run_start 落 run_status='running'
     store
-        .record_run_start("pipe_orphan", "default", "r_orphan", "h")
+        .record_run_start(
+            "pipe_orphan",
+            "default",
+            "r_orphan",
+            "h",
+            "2026-10-15T00:00:00+00:00",
+        )
         .unwrap();
     store
-        .record_run_start("pipe_done", "default", "r_done", "h")
+        .record_run_start(
+            "pipe_done",
+            "default",
+            "r_done",
+            "h",
+            "2026-10-15T00:00:00+00:00",
+        )
         .unwrap();
     // pipe_done 正常结束 → completed（终态补 run_ended_at）
     store
@@ -31,7 +43,11 @@ async fn reap_marks_orphan_running_as_failed_leaves_others() {
         .unwrap();
 
     let reaped = store.reap_orphan_runs().expect("reap 应成功");
-    assert_eq!(reaped, 1, "只应清扫 1 个 running 孤儿");
+    assert_eq!(
+        reaped,
+        vec!["pipe_orphan".to_string()],
+        "只应清扫 1 个 running 孤儿，受害者清单点名"
+    );
 
     let orphan = StorageBackend::get_run(&store, "r_orphan")
         .await
@@ -50,11 +66,14 @@ async fn reap_is_idempotent() {
     // 重复清扫：第二次无 running run，返回 0。
     let store = SqliteStore::open_memory().unwrap();
     store
-        .record_run_start("pipe_1", "default", "r1", "h")
+        .record_run_start("pipe_1", "default", "r1", "h", "2026-10-15T00:00:00+00:00")
         .unwrap();
-    assert_eq!(store.reap_orphan_runs().unwrap(), 1);
-    assert_eq!(store.reap_orphan_runs().unwrap(), 0);
-    assert_eq!(store.reap_orphan_runs().unwrap(), 0);
+    assert_eq!(
+        store.reap_orphan_runs().unwrap(),
+        vec!["pipe_1".to_string()]
+    );
+    assert!(store.reap_orphan_runs().unwrap().is_empty());
+    assert!(store.reap_orphan_runs().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -63,7 +82,13 @@ async fn reap_marks_failed_adds_run_ended_at_keeps_task_fields() {
     // 任务域字段（task.status 等）不归清扫管，保持原值。
     let store = SqliteStore::open_memory().unwrap();
     store
-        .record_run_start("pipe_ghost", "default", "r_ghost", "h")
+        .record_run_start(
+            "pipe_ghost",
+            "default",
+            "r_ghost",
+            "h",
+            "2026-10-15T00:00:00+00:00",
+        )
         .unwrap();
     // 出生投影只有任务域字段（内核不仲裁任务语义，清扫不得触碰）
     store
@@ -75,7 +100,10 @@ async fn reap_marks_failed_adds_run_ended_at_keeps_task_fields() {
         )
         .unwrap();
 
-    assert_eq!(store.reap_orphan_runs().unwrap(), 1);
+    assert_eq!(
+        store.reap_orphan_runs().unwrap(),
+        vec!["pipe_ghost".to_string()]
+    );
 
     let fields = state_fields(&store, "pipe_ghost", "default");
     assert_eq!(
@@ -104,7 +132,13 @@ async fn reap_overwrites_stale_running_and_keeps_terminal_projection() {
     // run 状态的纠偏归读面 overlay（按 state 运行键权威状态 fill-if-absent）。
     let store = SqliteStore::open_memory().unwrap();
     store
-        .record_run_start("pipe_stale", "default", "r_a", "h")
+        .record_run_start(
+            "pipe_stale",
+            "default",
+            "r_a",
+            "h",
+            "2026-10-15T00:00:00+00:00",
+        )
         .unwrap();
     store
         .set_run_status_projection("pipe_terminal", "default", RunStatus::Completed)
@@ -155,12 +189,22 @@ async fn reap_covers_all_tenants_not_only_default() {
     ];
     for (pipeline_id, tenant, run_id) in setups {
         store
-            .record_run_start(pipeline_id, tenant, run_id, "h")
+            .record_run_start(
+                pipeline_id,
+                tenant,
+                run_id,
+                "h",
+                "2026-10-15T00:00:00+00:00",
+            )
             .unwrap();
     }
 
     let reaped = store.reap_orphan_runs().expect("reap 应成功");
-    assert_eq!(reaped, 3, "全租户孤儿 run 都应被清扫");
+    assert_eq!(reaped.len(), 3, "全租户孤儿 run 都应被清扫");
+    assert!(
+        reaped.contains(&"pipe_u456".to_string()),
+        "受害者清单含非 default 租户管道"
+    );
 
     for (pipeline_id, tenant, run_id) in setups {
         let run = agentos_tenant::scope(
@@ -176,4 +220,47 @@ async fn reap_covers_all_tenants_not_only_default() {
         );
         assert!(run.ended_at.is_some(), "{pipeline_id} 应补 ended_at");
     }
+}
+
+#[tokio::test]
+async fn reap_clears_pending_cancel_crash_residue() {
+    // ADR 2026-11-02-state-key-governance：崩溃窗口残留的 pending_cancel=true
+    // 若不清扫，会在重启后第一条 run 起手被 test-and-clear 消费——零执行误杀
+    // 新消息（落标与消费之间的崩溃窗口）。清扫是崩溃家政，与孤儿 run 同批。
+    let store = SqliteStore::open_memory().unwrap();
+    for (pipeline_id, tenant) in [("pipe_pc_default", "default"), ("pipe_pc_u1", "u-1")] {
+        store
+            .upsert_state_field(
+                pipeline_id,
+                tenant,
+                "pending_cancel",
+                &serde_json::json!(true),
+            )
+            .unwrap();
+    }
+    // 已消费形态（value='false'）不归清扫管（链收尾清除的正常终态）
+    store
+        .upsert_state_field(
+            "pipe_pc_consumed",
+            "default",
+            "pending_cancel",
+            &serde_json::json!(false),
+        )
+        .unwrap();
+
+    store.reap_orphan_runs().unwrap();
+
+    for (pipeline_id, tenant) in [("pipe_pc_default", "default"), ("pipe_pc_u1", "u-1")] {
+        let fields = state_fields(&store, pipeline_id, tenant);
+        assert!(
+            fields.get("pending_cancel").is_none(),
+            "{pipeline_id} 的崩溃残留待取消标记应被清扫删除"
+        );
+    }
+    let consumed = state_fields(&store, "pipe_pc_consumed", "default");
+    assert_eq!(
+        consumed.get("pending_cancel").and_then(|v| v.as_bool()),
+        Some(false),
+        "已消费形态（false）不是残留，保持原值"
+    );
 }

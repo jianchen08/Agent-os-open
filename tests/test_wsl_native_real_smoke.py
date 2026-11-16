@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-_BASH_DIR = str(Path(__file__).resolve().parents[1] / "plugins" / "shared" / "tools" / "bash")
+_BASH_DIR = str(Path(__file__).resolve().parents[1] / "plugins" / "shared" / "bash")
 if _BASH_DIR not in sys.path:
     sys.path.insert(0, _BASH_DIR)
 
@@ -73,7 +73,7 @@ def _to_wsl_path(path: Path) -> str:
 
 
 def test_background_process_full_lifecycle(tmp_path: Path) -> None:
-    from process_manager import ProcessManager
+    from agentos_plugin_sdk.process_runtime import ProcessManager
 
     marker = tmp_path / "stdin_proof.txt"
     log_dir = tmp_path / "logs"

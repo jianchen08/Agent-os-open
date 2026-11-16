@@ -73,7 +73,7 @@ describe('VoiceInputButton 状态投影', () => {
     const { container } = render(<VoiceInputButton state="recording" />)
     expect(container.querySelectorAll('span[style*="voice-pulse-ring"]')).toHaveLength(2)
     expect(container.querySelectorAll('span[style*="voice-pulse-core"]')).toHaveLength(1)
-    expect(button().style.backgroundColor).toBe('rgb(239, 68, 68)')
+    expect(button().style.backgroundColor).toBe('var(--status-error)')
     const mic = screen.getByTestId('icon-mic')
     expect(mic).toHaveAttribute('fill', 'white')
     expect(mic.style.color).toBe('white')
@@ -105,9 +105,9 @@ describe('VoiceInputButton 录音态悬停', () => {
   it('recording：悬停加深底色，移出恢复红色（与 idle 不变色的第二组输入）', () => {
     const { rerender } = render(<VoiceInputButton state="recording" />)
     fireEvent.mouseEnter(button())
-    expect(button().style.backgroundColor).toBe('rgb(220, 38, 38)')
+    expect(button().style.backgroundColor).toBe('color-mix(in srgb, var(--status-error) 80%, black)')
     fireEvent.mouseLeave(button())
-    expect(button().style.backgroundColor).toBe('rgb(239, 68, 68)')
+    expect(button().style.backgroundColor).toBe('var(--status-error)')
 
     rerender(<VoiceInputButton state="idle" />)
     fireEvent.mouseEnter(button())

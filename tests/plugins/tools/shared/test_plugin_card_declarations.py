@@ -22,7 +22,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_TOOLS_ROOT = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools"
+_TOOLS_ROOT = Path(__file__).resolve().parents[4] / "plugins" / "shared"
 
 # 渲染卡片词汇表（与 frontend/src/utils/dshRenderIntent.ts 保持一致）
 RENDER_CARDS = {
@@ -37,6 +37,9 @@ RENDER_CARDS = {
     "file_card",
     "table",
     "form",
+    # task_card：任务卡型页（8b14852df 取页端点成对；词表真值 =
+    # frontend/src/utils/renderCardVocabulary.generated.ts，本集合同步）
+    "task_card",
 }
 
 # chat_card 块类型词汇表（与 frontend/src/utils/chatCardInterpreter.ts 保持一致）

@@ -147,6 +147,16 @@ impl HistogramBuckets {
 
     /// 记录一个观察值（秒）。
     pub fn observe(&mut self, value: f64) {
+        // counts 的 canonical 布局是「默认桶 N 个 + +Inf 1 个」（new() 建立）；
+        // 本类型 derive(Deserialize)，直构/反序列化可绕过 new() 带来任意长度
+        // （旧桶集/空表），观测前先归一，细桶累计与 +Inf 累计才不会越界——
+        // 原末位（+Inf）计数跨归一保留，缺失桶位补 0。
+        let want = DEFAULT_HISTOGRAM_BUCKETS.len() + 1;
+        if self.counts.len() != want {
+            let inf = self.counts.last().copied().unwrap_or(0);
+            self.counts.resize(want, 0);
+            self.counts[want - 1] = inf;
+        }
         self.sum += value;
         self.count += 1;
         // 找到第一个 >= value 的桶上界，该桶及之后所有桶累计 +1
@@ -156,7 +166,9 @@ impl HistogramBuckets {
             }
         }
         // +Inf 桶永远 +1
-        *self.counts.last_mut().unwrap() += 1;
+        if let Some(last) = self.counts.last_mut() {
+            *last += 1;
+        }
     }
 
     /// 合并另一组 histogram 桶（降采样）。
@@ -703,6 +715,55 @@ mod tests {
         assert_eq!(h.counts[8], 3);
         // +Inf = 3
         assert_eq!(*h.counts.last().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_histogram_buckets_normalizes_noncanonical_counts() {
+        let want = DEFAULT_HISTOGRAM_BUCKETS.len() + 1;
+        // 空表（Deserialize 直构最坏形态）：不 panic，归一后落在 canonical 布局
+        let mut empty = HistogramBuckets {
+            counts: Vec::new(),
+            sum: 0.0,
+            count: 0,
+        };
+        empty.observe(0.02);
+        assert_eq!(empty.counts.len(), want);
+        assert_eq!(*empty.counts.last().unwrap(), 1);
+        assert_eq!(empty.counts[2], 1);
+        assert_eq!(empty.sum, 0.02);
+        assert_eq!(empty.count, 1);
+
+        // 过短（旧桶集形态）：原 +Inf 计数保留并照常 +1，缺失桶位补 0
+        let mut short = HistogramBuckets {
+            counts: vec![1, 0, 0, 0, 7],
+            sum: 1.5,
+            count: 8,
+        };
+        short.observe(0.4);
+        assert_eq!(short.counts.len(), want);
+        assert_eq!(*short.counts.last().unwrap(), 8);
+        assert_eq!(short.counts[7], 1);
+        assert_eq!(short.count, 9);
+
+        // 过长：长度归一到 canonical，原 +Inf 计数不丢并照常 +1
+        let mut long = HistogramBuckets {
+            counts: vec![0; want + 6],
+            sum: 2.0,
+            count: 2,
+        };
+        long.counts[want + 5] = 4;
+        let inf_before = long.counts.last().copied().unwrap();
+        long.observe(3.0);
+        assert_eq!(long.counts.len(), want);
+        assert_eq!(*long.counts.last().unwrap(), inf_before + 1);
+        assert_eq!(long.counts[10], 1);
+        assert_eq!(long.count, 3);
+
+        // canonical 实例观测后长度不变（归一分支不触发，行为与既有契约一致）
+        let mut canonical = HistogramBuckets::new();
+        canonical.observe(0.006);
+        assert_eq!(canonical.counts.len(), want);
+        assert_eq!(*canonical.counts.last().unwrap(), 1);
     }
 
     #[test]

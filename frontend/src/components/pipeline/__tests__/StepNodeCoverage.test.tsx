@@ -38,7 +38,6 @@ const catalog = [
   {
     id: 'pipeline_llm_core',
     name: 'LLM Core',
-    role: 'core',
     hostType: 'in_process',
     version: '1.0.0',
     enabled: true,

@@ -57,8 +57,23 @@ function parseRefreshTokenFromBody(data: unknown): string | null {
   }
 }
 
+/** Retry-After 响应头解析（秒）：内核 429 限速面（auth.rs TooManyRequests）恒带；
+ * 缺失/非数字返回 undefined。axios 头键为小写。 */
+function parseRetryAfterSecs(headers: unknown): number | undefined {
+  const v = (headers as Record<string, unknown> | undefined)?.['retry-after']
+  const n = typeof v === 'string' ? Number(v) : typeof v === 'number' ? v : NaN
+  return Number.isFinite(n) ? n : undefined
+}
+
 /** 清除认证状态：停止 growth loop 轮询、清令牌、通知 store 并整页刷新回 HOME */
 async function clearAuthAndRedirect(): Promise<void> {
+  // 零凭据态（未登录）的 401 不是「会话过期」：启动期后台请求在登录前必然 401，
+  // 整页跳转会 reload → 再 401 无限循环，认证闸永远出不来。有凭据残留才按过期
+  // 处理（清账 + 回首屏重走恢复链）。
+  if (!getAccessToken() && !getRefreshTokenValue()) {
+    return
+  }
+
   try {
     const { destroyGrowthLoop } = await import('../modules/GrowthLoop')
     destroyGrowthLoop()
@@ -66,8 +81,9 @@ async function clearAuthAndRedirect(): Promise<void> {
     // 模块未加载过，忽略
   }
 
-  // 仅清除令牌与用户信息，禁止清理任何工作区状态
-  // （LAST_ACTIVE_SESSION / pipeline-messages / agent-tabs / layout-mode 等保留，供重登后恢复）
+  // 仅清除令牌与用户信息；持久化缓存面的回收在认证过期回调统一执行
+  // （切户清账单点 cacheBoundary.transitionCacheUser(null)——本地缓存按账户
+  // 命名空间隔离且过期即清，跨户重登不可见）
   stopAutoRefresh()
   clearTokens()
   localStorage.removeItem(STORAGE_KEYS.AUTH_USER)
@@ -261,6 +277,8 @@ apiClient.interceptors.response.use(
         typeof responseData?.error?.retryable === 'boolean'
           ? responseData.error.retryable
           : undefined,
+      // 429 限速面的等待秒数（Retry-After 响应头，登录失败三分类消费）
+      retry_after_secs: parseRetryAfterSecs(error.response?.headers),
       details: error.response?.data,
     }
 

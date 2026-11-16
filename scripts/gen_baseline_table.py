@@ -40,6 +40,7 @@ LANES: list[tuple[str, str]] = [
     ("bundle-size-baseline.txt", "前端 vendor 字节 + 无效动态导入计数"),
     ("gate-wiring-baseline.txt", "元门禁：观察型/missing 能力计数上限"),
     ("check_config_direct_reads_baseline.txt", "配置直读存量（文件:处数）"),
+    ("check_kernel_db_direct_reads_baseline.txt", "内核库直连在途欠账（文件:处数）"),
     ("gitleaks-baseline.json", "密钥扫描存量命中（gitleaks 原生 json）"),
 ]
 

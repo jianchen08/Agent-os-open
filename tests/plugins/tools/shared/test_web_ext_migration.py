@@ -27,7 +27,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_WEB_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools" / "web_ext"
+_WEB_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "web_ext"
 
 
 def _load_module() -> Any:

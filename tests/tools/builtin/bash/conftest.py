@@ -1,6 +1,6 @@
 """bash 工具测试公共配置。
 
-0.2 架构下 bash 工具插件位于 ``plugins/shared/tools/bash``，其 ``server.py``
+0.2 架构下 bash 工具插件位于 ``plugins/shared/bash``，其 ``server.py``
 把自身目录加入 sys.path 以支持平铺 import（如 ``from tool import ...``）。
 本 conftest 复刻该行为，使测试可直接 ``from tool import BashTool`` /
 ``from process_manager import ProcessManager`` / ``from bash_types import ...``。
@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_BASH_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "bash"
+_BASH_DIR = _REPO_ROOT / "plugins" / "shared" / "bash"
 
 # 收集期提升声明：tests/conftest.py 的 pytest_collect_file 在每个测试文件
 # 导入前把 bash 目录推到 sys.path[0]（平铺 `from tool import BashTool` 的
@@ -70,7 +70,7 @@ def _bash_path_guard():
     """每个测试前确保 bash 插件目录在 sys.path[0] 并逐出裸名缓存。
 
     模块级 _ensure_bash_on_path 只在 conftest 加载时生效——pytest 收集
-    其他测试文件（test_lsp_gateway_loop 等）的模块级 import 会改写
+    其他测试文件时的模块级 import 会改写
     sys.path[0]，函数内的 `from tool import BashTool` 因此命中错误插件
     （task_submit/tool.py 等）。本 fixture 在每个测试前重置。
     """

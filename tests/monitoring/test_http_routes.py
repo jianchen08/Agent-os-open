@@ -22,10 +22,32 @@ import pytest
 
 pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
 
+from _libs.testing.db_read_fake import FakeDbRead  # noqa: E402 — db-read 契约替身（shared 根）
+
+
+def _install_db_read(db_path, token_tenants: dict[str, str] | None = None) -> FakeDbRead:
+    """db-read provider 注入 server.kernel_reads 装配缝（C2 刀2 读面通道）。"""
+    fake = FakeDbRead(db_path, token_tenants or {"tok-t1": "t1", "tok-a": "tenant-a"})
+    server.kernel_reads.set_provider("db-read", fake.provider)
+    return fake
+
+
+def _drun(coro):
+    import asyncio
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
 _SERVER_PY = (
-    Path(__file__).resolve().parents[2] / "plugins" / "shared" / "system" / "monitoring" / "server.py"
+    Path(__file__).resolve().parents[2] / "plugins" / "shared" / "monitoring" / "server.py"
 )
 _spec = importlib.util.spec_from_file_location("monitoring_server_routes_ut", _SERVER_PY)
+assert _spec is not None, "server.py 模块装载失败"
+assert _spec.loader is not None, "server.py 模块装载失败"
 server = importlib.util.module_from_spec(_spec)
 sys.modules["monitoring_server_routes_ut"] = server
 _spec.loader.exec_module(server)
@@ -41,8 +63,8 @@ def _data(resp: dict[str, Any], status: int = 200) -> Any:
 
 
 def _top_error_status(resp: dict[str, Any]) -> int:
-    """顶层 _error 信封（success False）携带的 HTTP 状态。"""
-    assert resp["success"] is False
+    """协议化错误信封的 HTTP 状态（P-160 后域内错误走 success=True + data.status）。"""
+    assert resp["success"] is True
     return resp["data"]["status"]
 
 
@@ -224,7 +246,7 @@ class TestKernelReadsPluginRuntime:
         list_provider = Recorder(result={"series": [
             {"name": "process.alive", "plugin_id": "bash", "latest": 1},
             {"name": "process.pid", "plugin_id": "bash", "latest": 4242},
-            {"name": "process.memory_rss_bytes", "plugin_id": "bash", "latest": 157286400},
+            {"name": "process.memory_commit_bytes", "plugin_id": "bash", "latest": 157286400},
             {"name": "process.uptime_seconds", "plugin_id": "bash", "latest": 90.0},
             {"name": "process.last_crash_ts", "plugin_id": "bash", "latest": 0},
             # 非进程 gauge / 非字符串 plugin_id 行被剔除
@@ -253,7 +275,7 @@ class TestKernelReadsPluginRuntime:
         assert row["status"] == "running"
         assert row["alive"] == 1
         assert row["pid"] == 4242
-        assert row["memory_rss_mb"] == 150.0  # 157286400 / 1MiB
+        assert row["memory_commit_mb"] == 150.0  # 157286400 / 1MiB
         assert row["uptime_seconds"] == 90.0
         assert row["last_crash_ts"] == 0  # gauge 缺失/零值归 0
         assert result["lifecycle"] == {"plugin_load_total": 7, "plugin_error_total": 2}
@@ -301,7 +323,7 @@ class TestSessionsDomain:
         )
         conn.commit()
         conn.close()
-        monkeypatch.setattr(server, "_kernel_db_path", lambda: str(db))
+        _install_db_read(db)
         return db
 
     async def test_missing_tenant_identity_403(self) -> None:
@@ -333,7 +355,12 @@ class TestSessionsDomain:
         assert body == {"total_tokens": 42}
         assert usage.calls == [(("s1",), {})]
 
-    async def test_cross_tenant_session_404(self, monkeypatch: pytest.MonkeyPatch, empty_runs_db: Path) -> None:
+    async def test_cross_tenant_session_guard_degrades_to_business_layer(
+        self, monkeypatch: pytest.MonkeyPatch, empty_runs_db: Path
+    ) -> None:
+        """C2 刀2 语义重钉：pipeline_state tenant 档收窄内建——他租户锚行对
+        调用方视角不可见，conflict 判据放行，跨租户隔离由业务层租户化读面
+        兜底（200 空形态与未知会话同形，存在性不因守卫旁路而泄露）。"""
         conn = sqlite3.connect(empty_runs_db)
         conn.execute(
             "INSERT INTO pipeline_state VALUES ('s1', 'run_status', 'running', 'str', 'other-tenant', '2026-09-19T00:00:00Z')"
@@ -347,10 +374,13 @@ class TestSessionsDomain:
             _stub_module("execution_records", get_session_total_token_usage=usage),
         )
         resp = await server._handle_sessions_domain(
-            "/ext/monitoring/sessions/s1/total-token-usage", "GET", "", {}, {"x-agentos-tenant": "t1"}
+            "/ext/monitoring/sessions/s1/total-token-usage",
+            "GET",
+            "",
+            {},
+            {"x-agentos-tenant": "t1", "authorization": "tok-t1"},
         )
-        assert _data(resp, 404) == {"error": "not found", "path": "/ext/monitoring/sessions/s1/total-token-usage"}
-        assert usage.calls == []  # 拒绝在业务查询前，不泄露存在性
+        assert _data(resp, 200) == {"total_tokens": 42}  # 业务层（替身桩）承接，无 404 泄露面
 
     async def test_context_token_usage_passes_parent(self, monkeypatch: pytest.MonkeyPatch, empty_runs_db: Path) -> None:
         usage = Recorder(result={"total_tokens": 7})
@@ -410,7 +440,17 @@ class TestSearchDomain:
             )
         )
         assert body == {"items": []}
-        assert stub.calls == [((), {"q": "贪吃蛇", "type": "session", "limit": 7, "tenant_id": "t1"})]
+        assert stub.calls == [
+            ((), {"q": "贪吃蛇", "type": "session", "limit": 7, "tenant_id": "t1", "authorization": ""})
+        ]
+        # 身份穿线：Authorization 原头逐值透传 db-read 契约参数链（C2 刀2）
+        await server._handle_search_domain(
+            "/ext/monitoring/search", "GET", "", {"q": "x"},
+            {"x-agentos-tenant": "t1", "authorization": "Bearer tok-9"},
+        )
+        assert stub.calls[-1] == (
+            (), {"q": "x", "type": "all", "limit": 20, "tenant_id": "t1", "authorization": "Bearer tok-9"}
+        )
 
     async def test_invalid_type_maps_422(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._patch_search(monkeypatch, exc=ValueError("type 非法"))
@@ -487,11 +527,17 @@ class TestPayloadDiagHelpers:
         result = server._read_payload_diag("a.json")
         assert "permission denied" in result["error"]
 
-    def test_project_root_fallback_when_no_marker_dir(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import os
-
-        monkeypatch.setattr(os.path, "isdir", lambda _p: False)
-        assert server._resolve_project_root() == os.path.dirname(server.__file__)
+    def test_user_space_anchor_when_no_marker_dir(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """插件位置推导退役（裁定 2026-11-02）：指纹/env 全不可用也不回落
+        插件目录——缺省恒用户空间 logs/payload_diag（SDK user_root）。"""
+        # AGENTOS_USER_ROOT 显式钉住，证明路径只由用户根决定（与探测/env 无关）
+        monkeypatch.delenv("AGENTOS_LOG_DIR", raising=False)
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path))
+        assert server._payload_diag_dir() == str(
+            tmp_path / "logs" / "payload_diag"
+        )
 
 
 class TestTenantConflictAndToolCalls:
@@ -509,17 +555,18 @@ class TestTenantConflictAndToolCalls:
         conn.close()
         return db
 
-    def test_conflict_db_missing_or_error_is_false(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        monkeypatch.setattr(server, "_kernel_db_path", lambda: str(tmp_path / "nope.db"))
-        assert server._pipeline_tenant_conflict("p1", "t1") is False  # 库缺失：无判据放行
+    def test_conflict_db_missing_or_error_is_false(self, tmp_path: Path) -> None:
+        _install_db_read(tmp_path / "nope.db")
+        assert _drun(server._pipeline_tenant_conflict("p1", "t1")) is False  # 库缺失：无判据放行
 
         db = self._db(tmp_path)
-        monkeypatch.setattr(server, "_kernel_db_path", lambda: str(db))
-        def flaky_connect(*_a: Any, **_kw: Any):
-            raise sqlite3.Error("locked")
 
-        monkeypatch.setattr(sqlite3, "connect", flaky_connect)
-        assert server._pipeline_tenant_conflict("p1", "t1") is False  # 查询失败 fail-open（无判据）
+        class _FlakyDbRead(FakeDbRead):
+            async def call(self, method: str, params: dict, timeout: float | None = None) -> Any:
+                raise sqlite3.Error("locked")
+
+        server.kernel_reads.set_provider("db-read", _FlakyDbRead(db).provider)
+        assert _drun(server._pipeline_tenant_conflict("p1", "t1")) is False  # 查询失败 fail-open（无判据）
 
     def test_query_tool_calls_success_and_error_filters(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         db = tmp_path / "kernel.db"
@@ -535,32 +582,33 @@ class TestTenantConflictAndToolCalls:
         )
         conn.commit()
         conn.close()
-        monkeypatch.setattr(server, "_kernel_db_path", lambda: str(db))
+        _install_db_read(db)
 
-        result = server._query_tool_calls({"status": "success"}, tenant_id="t1")
+        result = _drun(server._query_tool_calls({"status": "success"}, tenant_id="t1", authorization="tok-t1"))
         assert result["total"] == 1
         assert result["items"][0]["tool_name"] == "bash"
         assert result["items"][0]["success"] == 1
 
-        assert server._query_tool_calls({"status": "error"}, tenant_id="t1")["total"] == 0
+        assert _drun(server._query_tool_calls({"status": "error"}, tenant_id="t1", authorization="tok-t1"))["total"] == 0
         # 非法 min_duration 只忽略过滤，不改变结果集（SQL 绑定数不变）
-        assert server._query_tool_calls({"min_duration": "abc"}, tenant_id="t1")["total"] == 1
-        assert server._query_tool_calls({}, tenant_id="t1")["total"] == 1
+        assert _drun(server._query_tool_calls({"min_duration": "abc"}, tenant_id="t1", authorization="tok-t1"))["total"] == 1
+        assert _drun(server._query_tool_calls({}, tenant_id="t1", authorization="tok-t1"))["total"] == 1
 
-    def test_query_tool_calls_sqlite_error_degrades(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_query_tool_calls_sqlite_error_degrades(self, tmp_path: Path) -> None:
         db = self._db(tmp_path)
-        monkeypatch.setattr(server, "_kernel_db_path", lambda: str(db))
-        def bad_connect(*_a: Any, **_kw: Any) -> None:
-            raise sqlite3.Error("bad db")
 
-        monkeypatch.setattr(sqlite3, "connect", bad_connect)
-        result = server._query_tool_calls({}, tenant_id="t1")
+        class _BadDbRead(FakeDbRead):
+            async def call(self, method: str, params: dict, timeout: float | None = None) -> Any:
+                raise sqlite3.Error("bad db")
+
+        server.kernel_reads.set_provider("db-read", _BadDbRead(db).provider)
+        result = _drun(server._query_tool_calls({}, tenant_id="t1", authorization="tok-t1"))
         assert result["total"] == 0
         assert "bad db" in result["error"]
 
-    def test_query_tool_calls_fail_closed_without_tenant(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        monkeypatch.setattr(server, "_kernel_db_path", lambda: str(self._db(tmp_path)))
-        assert server._query_tool_calls({}, tenant_id="") == {
+    def test_query_tool_calls_fail_closed_without_tenant(self, tmp_path: Path) -> None:
+        _install_db_read(self._db(tmp_path))
+        assert _drun(server._query_tool_calls({}, tenant_id="")) == {
             "items": [],
             "total": 0,
             "error": "missing tenant identity",
@@ -574,32 +622,32 @@ class TestTenantConflictAndToolCalls:
 
 class TestTokenUsageDegradation:
     @pytest.fixture
-    def local_monitor(self, monkeypatch: pytest.MonkeyPatch) -> Any:
-        monitor = types.SimpleNamespace(_llm_stats={"request_count": 3})
-        monkeypatch.setattr(server, "_monitor", monitor)
-        return monitor
+    def broken_db(self) -> None:
+        """读库入口故障注入：db-read 替身通道异常（C2 刀2 后读面唯一入口）。"""
+        class _BrokenDbRead(FakeDbRead):
+            async def call(self, method: str, params: dict, timeout: float | None = None) -> Any:
+                raise sqlite3.Error("bad read")
 
-    @pytest.fixture
-    def broken_db(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """读库入口故障注入：collect 内部 `import sqlite3` 是局部绑定，
-        patch 标准库模块本体（monkeypatch 用例级还原）。"""
-        monkeypatch.setattr(
-            sqlite3,
-            "connect",
-            lambda *_a, **_kw: (_ for _ in ()).throw(sqlite3.Error("bad read")),
-        )
+        server.kernel_reads.set_provider("db-read", _BrokenDbRead(Path("unused.db")).provider)
 
-    def test_by_model_query_error_degrades_to_local_counts(
-        self, broken_db: None, local_monitor: Any
-    ) -> None:
-        result = server._collect_token_usage()
+    def test_by_model_query_error_degrades_to_zero(self, broken_db: None) -> None:
+        result = _drun(server._collect_token_usage("tenant-a", "tok-a"))
         assert result["rows"] == []
         assert result["labels"] == []
-        assert result["datasets"] == [{"label": "输入 Tokens", "data": []}, {"label": "输出 Tokens", "data": []}]
-        assert result["request_count"] == 3  # 降级后仍带本地计数
+        assert result["datasets"] == [
+            {"label": "输入 Tokens", "data": []},
+            {"label": "输出 Tokens", "data": []},
+            {"label": "缓存命中 Tokens", "data": []},
+        ]
+        # 调用次数与 token 同策略降级 0（真值源都在 DB，无 DB 即真零）；
+        # 进程内死计数器已退役（P-149），不在降级响应体
+        assert result["request_count"] == 0
+        assert "active_requests" not in result
+        assert "error_count" not in result
+        assert "total_response_time" not in result
 
     def test_by_time_query_error_degrades_to_empty(self, broken_db: None) -> None:
-        result = server._collect_token_usage_by_time()
+        result = _drun(server._collect_token_usage_by_time("tenant-a", "tok-a"))
         assert result["rows"] == []
 
 
@@ -668,6 +716,7 @@ class TestOnLoadProviderBridge:
         assert set(providers) == {
             "pipeline-runs", "messages", "pipeline-state", "traces", "runs-by-pipeline",
             "db-admin-query", "db-admin-clear", "metrics-admin-list", "metrics-admin-query",
+            "db-read",
         }
 
         assert await providers["pipeline-runs"](status=None, limit=42) == [{"run": 1}]
@@ -708,6 +757,12 @@ class TestOnLoadProviderBridge:
         assert handle.calls[-1] == ("query", {"window": "1h", "_authorization": "Bearer tok", "plugin": "kernel"})
         await providers["metrics-admin-query"]()
         assert handle.calls[-1][1] == {"window": "24h"}
+
+        # db-read（C2 刀2）：原始 capability 调用直通（信封解包归 kernel_reads 桥）
+        await providers["db-read"](face="traces", sql="SELECT 1", params={"k": 1}, authorization="Bearer tok")
+        assert handle.calls[-1] == ("query", {"face": "traces", "sql": "SELECT 1", "params": {"k": 1}, "_authorization": "Bearer tok"})
+        await providers["db-read"](face="traces", sql="SELECT 1")
+        assert handle.calls[-1][1] == {"face": "traces", "sql": "SELECT 1"}
 
         # 收尾：reporter 任务（noop）与 monitor 复位，不污染后续用例
         await server._on_unload({})

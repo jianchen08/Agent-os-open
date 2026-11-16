@@ -2,6 +2,7 @@
 
 import { useEffect } from 'react'
 import { WS_LOCAL_EVENTS, WS_SERVER_EVENTS } from '@/constants/websocket'
+import { invalidatePipelineAllTasks } from '@/hooks/queries/useAllTasksQuery'
 import {
   readLongTermTasks,
   updateLongTermTasksCache,
@@ -32,6 +33,26 @@ export function useRealtimeEvents(): void {
     // 防抖用时间戳记录，跟踪上次 fetchMessages 调用时间
     const lastFetchTimeRef = { current: 0 }
 
+    /**
+     * 段清单刷新调度（分支切换器可见性）：管道跑完一轮后刷新该管道的段清单。
+     * 新段由重新生成/回退/编辑重发产生（内核冻结被换后缀），这些动作都伴随
+     * 一轮对话——轮次结束即新段已落库，是最早可安全取清单的时点。
+     * 去抖 300ms：一次执行可能连发多轮（多轮工具调用各发一次），合并为一次请求。
+     */
+    const SEGMENTS_REFRESH_DEBOUNCE_MS = 300
+    const segmentsRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>()
+    const scheduleSegmentsRefresh = (pipelineId: string) => {
+      const pending = segmentsRefreshTimers.get(pipelineId)
+      if (pending) clearTimeout(pending)
+      segmentsRefreshTimers.set(
+        pipelineId,
+        setTimeout(() => {
+          segmentsRefreshTimers.delete(pipelineId)
+          void usePipelineMessageStore.getState().fetchSegments(pipelineId)
+        }, SEGMENTS_REFRESH_DEBOUNCE_MS),
+      )
+    }
+
     /** WS 重连后重新加载当前会话消息，1 秒防抖避免频繁调用。 流式事件（stream_start 等）由 streaming/index.ts 统一处理，此处不重复订阅。 */
     const handleWsReconnect = () => {
       // 重连后补拉管道运行快照（断线期间的 stream_* 增量丢失，以快照对账）。
@@ -46,6 +67,9 @@ export function useRealtimeEvents(): void {
       // 长期任务列表同样可能错过断线期间的状态迁移（无全量出生/变更事件源），
       // 重连即失效重拉，不等 5s 兜底轮询。
       invalidateLongTermTasks()
+      // 任务面板全量任务列表同权补漏（任务中间态变更无 WS 推送源，面板缓存
+      // 只靠 30s 轮询——断线窗口内迁移的状态不在此对账就多滞后一个周期）。
+      invalidatePipelineAllTasks()
       // 防抖：1 秒内不重复调用 fetchMessages
       const now = Date.now()
       if (now - lastFetchTimeRef.current < 1000) {
@@ -83,7 +107,7 @@ export function useRealtimeEvents(): void {
               category: 'error',
               isBlocking: false,
               autoDismissMs: 8000,
-              sourceLabel: '前端',
+              sourceLabel: '系统',
             })
           }
         })
@@ -134,6 +158,9 @@ export function useRealtimeEvents(): void {
       if (taskId) {
         // query 化：store.deleteTask 内部写 query cache（移除任务 + 清 activeTaskId）
         useLongTermTaskStore.getState().deleteTask(taskId)
+        // X18-F1（P-139）：通知中心里带该 taskId 的条目一并摘除（残留只能
+        // 点击空路由，留驻到刷新）
+        useNotificationStore.getState().pruneForTarget({ taskId })
       }
 
       bumpWorkspaceDataVersion()
@@ -142,6 +169,107 @@ export function useRealtimeEvents(): void {
     /** 处理 TaskService 状态机变更事件（running/completed/failed 等切换） */
     const handleTaskStatusChanged = () => {
       bumpWorkspaceDataVersion()
+    }
+
+    /**
+     * 后台任务终态通知（P-19/U-1 前端订阅腿）：task_completed/task_cancelled/
+     * task_failed WS 帧（后端投递腿 = tasks 插件 frontend.emit →
+     * session.emit_event，按用户全部连接扇出——不看该任务也收得到）。
+     * 防打扰门控：任务管道正是当前活跃管道 = 用户正看着会话收尾（完成态在
+     * 消息流里可见），不弹；其余（后台/他 Tab）入通知中心，点击经 taskId
+     * 路由任务面板（OBS-R259-1 既有面）。稳定 id = task-terminal-<task_id>-<status>：
+     * WS 重连重放同帧按「同 id 更新不新增」去重（badge 不增长、不重弹）。
+     * task_failed（P-129 失败通知）：失败帧负载另含失败归因（error /
+     * failure_class / failure_reason，后端空串不携带），归因非空入文案；
+     * 失败是用户必须看见的异常终态，高优 + error 分类（run_failed 通知卡
+     * 同款口径）。
+     */
+    const handleTaskTerminalNotice = (eventData: {
+      data?: Record<string, unknown>
+    }) => {
+      const data = eventData?.data || {}
+      const taskId = typeof data.task_id === 'string' ? data.task_id : ''
+      const pipelineId = typeof data.pipeline_id === 'string' ? data.pipeline_id : ''
+      const status =
+        data.status === 'completed' || data.status === 'cancelled' || data.status === 'failed'
+          ? data.status
+          : ''
+      // 终态真值已变：先对账面板数据源（runs 快照 + 面板全量任务缓存只靠
+      // 30s 轮询兜底，终态事件是后端主动推送的状态变更，不消费即显示滞后
+      // 一个周期），对账与通知门控无关（活跃管道不弹通知也要对账）。
+      invalidatePipelineRuns()
+      invalidatePipelineAllTasks()
+      // 无锚点（路由/去重键缺失）或未知状态：不通知——降级成无路由的裸提示
+      // 只是噪音，终态以任务面板权威投影为准
+      if (!taskId || !status) return
+      if (pipelineId && pipelineId === usePipelineMessageStore.getState().activePipelineId) {
+        return
+      }
+      const title = typeof data.title === 'string' ? data.title.trim() : ''
+      const label = title || `任务 ${taskId.slice(0, 12)}`
+      if (status === 'failed') {
+        const errorText =
+          typeof data.error === 'string' && data.error.trim()
+            ? data.error.trim()
+            : typeof data.failure_reason === 'string' && data.failure_reason.trim()
+              ? data.failure_reason.trim()
+              : ''
+        useNotificationStore.getState().addNotification({
+          id: `task-terminal-${taskId}-failed`,
+          title: '后台任务失败',
+          message: errorText ? `${label}失败：${errorText}。` : `${label}已失败。`,
+          priority: 'high',
+          category: 'error',
+          isBlocking: false,
+          autoDismissMs: 8000,
+          taskId,
+          sourceLabel: '后台任务',
+        })
+        return
+      }
+      useNotificationStore.getState().addNotification({
+        id: `task-terminal-${taskId}-${status}`,
+        title: status === 'completed' ? '后台任务已完成' : '后台任务已取消',
+        message: `${label}已${status === 'completed' ? '完成' : '取消'}。`,
+        priority: 'normal',
+        category: status === 'completed' ? 'success' : 'info',
+        isBlocking: false,
+        autoDismissMs: 8000,
+        taskId,
+        sourceLabel: '后台任务',
+      })
+    }
+
+    /**
+     * 触发器异常交付通知（X24-F1/P-71）：trigger_fired WS 帧（后端投递腿 =
+     * triggers_ext FrontendEmitter → session.emit_event，仅 delivery=failed/
+     * skipped 出帧；sent 不出帧——正常交付已由聊天注入通道可见，重复触达只是
+     * 噪音）。触发器注入失败无重试无补偿（P-61 关联），此前前端零消费，失败
+     * 触发器在用户眼里与从未触发无异——高优 error 通知是唯一可见面。
+     * 载荷 {trigger_id, name, pipeline_id, delivery, failure?}（failure 非空
+     * 才携带）。稳定 id = trigger-fired-<trigger_id>-<delivery>：同帧重放按
+     * 「同 id 更新不新增」去重。不携 taskId 路由坐标（触发器无单实体路由面板，
+     * 防点击空路由）；缺 trigger_id 或未知 delivery → 不通知（降级裸提示只是
+     * 噪音，交付真相以触发器面板/内核日志为准）。
+     */
+    const handleTriggerFired = (eventData: { data?: Record<string, unknown> }) => {
+      const data = eventData?.data || {}
+      const triggerId = typeof data.trigger_id === 'string' ? data.trigger_id : ''
+      const delivery = data.delivery
+      if (!triggerId || (delivery !== 'failed' && delivery !== 'skipped')) return
+      const name = typeof data.name === 'string' ? data.name.trim() : ''
+      const label = name || `触发器 ${triggerId.slice(0, 12)}`
+      const failure = typeof data.failure === 'string' ? data.failure.trim() : ''
+      useNotificationStore.getState().addNotification({
+        id: `trigger-fired-${triggerId}-${delivery}`,
+        title: delivery === 'failed' ? '触发器投递失败' : '触发器投递被跳过',
+        message: failure ? `${label}投递异常：${failure}。` : `${label}投递异常，本轮消息未送达目标会话。`,
+        priority: 'high',
+        category: 'error',
+        isBlocking: false,
+        autoDismissMs: 8000,
+        sourceLabel: '触发器',
+      })
     }
 
     // Subscribe to all events
@@ -155,6 +283,10 @@ export function useRealtimeEvents(): void {
     globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleTaskStatusUpdate)
     globalWS.subscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleTaskStatusChanged)
     globalWS.subscribe(WS_SERVER_EVENTS.TASK_DELETED, handleTaskDeleted)
+    globalWS.subscribe(WS_SERVER_EVENTS.TASK_COMPLETED, handleTaskTerminalNotice)
+    globalWS.subscribe(WS_SERVER_EVENTS.TASK_CANCELLED, handleTaskTerminalNotice)
+    globalWS.subscribe(WS_SERVER_EVENTS.TASK_FAILED, handleTaskTerminalNotice)
+    globalWS.subscribe(WS_SERVER_EVENTS.TRIGGER_FIRED, handleTriggerFired)
 
     /**
      * 发送失败透传（任何错误都必须让用户看见）：
@@ -211,10 +343,32 @@ export function useRealtimeEvents(): void {
         category: 'error',
         isBlocking: false,
         autoDismissMs: 10000,
-        sourceLabel: '前端',
+        sourceLabel: '系统',
       })
     }
     globalWS.subscribe(WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT, handleUserInputSendTimeout)
+
+    /**
+     * 入站路由错误回执（ADR 2026-09-29 回执契约的前端半边）：非 user_input 帧
+     * 被内核拒绝（regenerate 目标缺失、segment_activate 运行中等）时内核回
+     * route_error 帧。fail-closed 拒绝必须让用户看见——只写内核日志 = 用户侧
+     * 静默（装机 2026-10-16 实证：回退/编辑重发被拒全程无反馈）。
+     */
+    const handleRouteError = (eventData: {
+      data?: { message_type?: string; thread_id?: string; error?: string }
+    }) => {
+      const info = eventData?.data || {}
+      useNotificationStore.getState().addNotification({
+        title: '操作未被服务器接受',
+        message: `${info.message_type || '请求'}被拒绝：${info.error || '未知错误'}`,
+        priority: 'high',
+        category: 'error',
+        isBlocking: false,
+        autoDismissMs: 10000,
+        sourceLabel: '系统',
+      })
+    }
+    globalWS.subscribe(WS_SERVER_EVENTS.ROUTE_ERROR, handleRouteError)
 
     /**
      * pending 输入队列同步（ADR-2026-08-26）：内核入队/消费/修改/删除时推送
@@ -223,27 +377,152 @@ export function useRealtimeEvents(): void {
      * 退回条目随事件发还——回填输入框（追加语义，保留已有草稿）+ 清空队列条。
      */
     const handlePendingInputsChanged = (eventData: {
-      data?: { pipeline_id?: string; action?: string; items?: unknown[] }
+      data?: {
+        pipeline_id?: string
+        action?: string
+        items?: unknown[]
+        consumed_messages?: unknown[]
+      }
     }) => {
       const data = eventData?.data
       const pipelineId = data?.pipeline_id
       if (!pipelineId) return
       const items = (data?.items ?? []) as import('@/services/api/pipelines').PendingInputItem[]
+      // 轮边界注入消费（docs/working/待输入队列轮边界注入_台账.md R2）：注入
+      // 消息走与正常发送同一条认领链——consumed 事件逐条携带权威 record
+      // （指纹 record_id/seq/原文），claimUserMessage 裁决 upgrade/insert，
+      // 气泡终态必携排序键（无 seq 消息按排序键永久垫底的根因修复）。
+      // 链级 drain 消费路径恒不带该字段，认领链路不受扰。
+      const consumedMessages = (data?.consumed_messages ?? []) as Array<{
+        client_message_id?: string
+        id?: string
+        sequence?: number
+        content?: unknown
+      }>
+      for (const rec of consumedMessages) {
+        if (!rec.client_message_id || !rec.id) continue
+        usePipelineMessageStore.getState().claimUserMessage(pipelineId, rec.client_message_id, {
+          id: rec.id,
+          content: rec.content,
+          sequence: rec.sequence,
+        })
+      }
       if (data?.action === 'returned') {
         // 只回填用户消息：trigger/task/system 来源的条目（如子任务完成通知）
-        // 不是用户输入，退回输入框只会刷屏——丢弃（内核已一并出队）
+        // 不是用户输入，退回输入框只会刷屏——丢弃。内核同刀（2026-10-27）只
+        // 退回 user 来源，System 条目（regenerate 重跑等）留队交 drain 消费，
+        // 队列条以权威 GET 收敛而非乐观清空。
         const contents = items
           .filter((item) => item.source === 'user')
           .map((item) => item.content)
           .filter((c): c is string => Boolean(c))
           .join('\n')
         if (contents) useChatInputStore.getState().requestInsert(contents)
-        usePendingInputStore.getState().syncFromEvent(pipelineId, [])
+        void usePendingInputStore.getState().load(pipelineId)
         return
       }
       usePendingInputStore.getState().syncFromEvent(pipelineId, items)
     }
     globalWS.subscribe(WS_SERVER_EVENTS.PENDING_INPUTS_CHANGED, handlePendingInputsChanged)
+
+    /**
+     * user 消息早回执（聊天消息流权威化设计真值 docs/working/聊天消息流权威化重设计_20261027.md
+     * 不变量 1）：直跑 run 起手消息落库后内核即时下发权威认领载荷——气泡只认
+     * 引擎确认（与正常发送/队列消费同一条 claimUserMessage 认领链，候选缺失
+     * 即 insert 补插），替代乐观气泡的可见性职责。
+     */
+    const handleUserMessageConfirmed = (eventData: {
+      data?: {
+        pipeline_id?: string
+        client_message_id?: string
+        record?: { id?: string; sequence?: number; content?: unknown }
+      }
+    }) => {
+      const data = eventData?.data
+      const pipelineId = data?.pipeline_id
+      const cmid = data?.client_message_id
+      if (!pipelineId || !cmid) return
+      usePipelineMessageStore.getState().claimUserMessage(pipelineId, cmid, {
+        id: data.record?.id,
+        content: data.record?.content,
+        sequence: data.record?.sequence,
+      })
+    }
+    globalWS.subscribe(WS_SERVER_EVENTS.USER_MESSAGE_CONFIRMED, handleUserMessageConfirmed)
+
+    /**
+     * 消息截断权威事件（不变量 3）：重新生成/回退/编辑重发的内核截断落库完成
+     * 后按 seq 收敛本地视图——前端不做乐观截断/改写，本事件是唯一收敛源。
+     * 段清单同刀刷新（截断产生新冻结段，‹i/n› 切换器即时可见）。
+     */
+    const handleMessagesTruncated = (eventData: {
+      data?: {
+        pipeline_id?: string
+        truncate_before_seq?: number
+        updated_messages?: Array<{ sequence?: number; content?: unknown }>
+      }
+    }) => {
+      const data = eventData?.data
+      const pipelineId = data?.pipeline_id
+      const before = data?.truncate_before_seq
+      if (!pipelineId || typeof before !== 'number') return
+      usePipelineMessageStore
+        .getState()
+        .applyTruncation(pipelineId, before, data?.updated_messages)
+      scheduleSegmentsRefresh(pipelineId)
+    }
+    globalWS.subscribe(WS_SERVER_EVENTS.MESSAGES_TRUNCATED, handleMessagesTruncated)
+
+    /**
+     * 轮次收尾兜底对账（2026-10-19 装机实证：consumed 事件丢失窗口——WS 重连
+     * 重放溢出/effect 重挂载——会让队列条永久陈旧，消息已执行但条目还挂着）。
+     * 队列视图此前纯事件驱动无对账，本 handler 在整次执行终止信号上对"本地
+     * 队列非空"的管道做一次 GET 对账（幂等，消费真相以后端为准）。代价：仅
+     * 队列非空的管道发一次请求；stream_error 路径 round_finished 同样发射
+     * （emit_round_finished_event failed=true 幂等兜底），失败收尾同样收敛。
+     */
+    const handleRoundFinishedQueueReconcile = (eventData: {
+      data?: { pipeline_id?: string }
+    }) => {
+      const pipelineId = eventData?.data?.pipeline_id
+      if (!pipelineId) return
+      // 无条件对账（2026-10-29）：本地队列为空时也必须拉一次——漏接 enqueued
+      // 事件的唯一自愈通道；条件化会永久掩盖「条目已入队但前端不知道」。
+      void usePendingInputStore.getState().load(pipelineId)
+      // 段清单刷新（分支切换器可见性）：重新生成/回退/编辑重发都会把被换后缀
+      // 冻结为新段（内核 freeze_segment op），这些动作都跑一轮对话——轮次结束
+      // 即新段已落库。此刻刷新清单，‹i/n› 切换器随即可见。此前段清单只在
+      // 「打开会话」与「段激活 ack」两处刷新，重新生成产生的新段前端永不知晓
+      // → 切换器在会话生命周期内不出现（用户实证：重试多次仍无切换按钮）。
+      scheduleSegmentsRefresh(pipelineId)
+      // 轮次结束 = 该管道本轮不可能还在压缩中：清除「压缩中」标记（兜底
+      // 清除路径——压缩进程被引擎超时丢弃时不会有 compression_ended）。
+      usePipelineMessageStore.getState().setCompressing(pipelineId, false)
+    }
+    globalWS.subscribe(WS_SERVER_EVENTS.PIPELINE_ROUND_FINISHED, handleRoundFinishedQueueReconcile)
+
+    /**
+     * 压缩开始 / 结束（context_window_guard 经 frontend.emit 透传）：
+     * 上下文压缩是分钟级同步调用（实测 6~18 分钟），期间管道不产出任何流式
+     * 内容——只显示通用「思考中」用户无法区分「模型在思考」与「正在压缩」，
+     * 压缩卡死时也无从判断（用户裁定 2026-10-28）。据此把等待指示器切成
+     * 「压缩中」，压缩结束（成功或失败）再切回。
+     *
+     * 必达性：compression_ended 在压缩进程被引擎超时丢弃时不会到达，故另有
+     * 轮次结束兜底清除（上）。
+     */
+    const handleCompressionStarted = (eventData: { data?: { pipeline_id?: string } }) => {
+      const pipelineId = eventData?.data?.pipeline_id
+      if (!pipelineId) return
+      usePipelineMessageStore.getState().setCompressing(pipelineId, true)
+    }
+    const handleCompressionEnded = (eventData: { data?: { pipeline_id?: string } }) => {
+      const pipelineId = eventData?.data?.pipeline_id
+      if (!pipelineId) return
+      usePipelineMessageStore.getState().setCompressing(pipelineId, false)
+    }
+    globalWS.subscribe(WS_SERVER_EVENTS.COMPRESSION_STARTED, handleCompressionStarted)
+    globalWS.subscribe(WS_SERVER_EVENTS.COMPRESSION_ENDED, handleCompressionEnded)
 
     /**
      * 上下文压缩彻底失败（context_window_guard 经 frontend.emit 透传）：
@@ -334,6 +613,7 @@ export function useRealtimeEvents(): void {
       // 内核 emit_event 统一封装的会话坐标是 data._threadId（与流式族同口径，
       // 复用 extractThreadId 提取）；插件 frontend.emit 形态才携带 thread_id。
       const threadId = extractThreadId(eventData) || eventData?.data?.thread_id || ''
+      const segmentId = eventData?.data?.segment_id || ''
       if (!pipelineId || !threadId) {
         console.warn('[SEGMENT_ACTIVATED] 坐标缺失，跳过对账', eventData?.data)
         return
@@ -350,7 +630,16 @@ export function useRealtimeEvents(): void {
             ps.fetchSegments(pipelineId),
           ])
             .then(() => {
-              ps.clearSegmentView(pipelineId)
+              // 段视图标记保留（=「当前在看第几代」）：ack 的段与本地标记一致时，
+              // 服务端启用序列就是这一代，标记是准确的，清掉反而把 ‹/› 的落点
+              // 重置回最新归档代——同一代内容与当前代逐字节相同时（重试后模型
+              // 给出同样回复），下一次 ‹ 又落回它 →「往前翻永远翻到同一代」
+              // 死循环（用户实证：反复前翻仍是同一气泡）。
+              // 仅当 ack 的段与本地标记不同（他端切换/本地乐观态已失效）才清。
+              const marker = usePipelineMessageStore.getState().segmentViewByPipeline[pipelineId]
+              if (!marker || marker.segmentId !== segmentId) {
+                ps.clearSegmentView(pipelineId)
+              }
             })
             .catch(() => {
               useNotificationStore.getState().addNotification({
@@ -381,7 +670,7 @@ export function useRealtimeEvents(): void {
         category: 'error',
         isBlocking: false,
         autoDismissMs: 0, // 常驻：静默装死比打扰更糟
-        sourceLabel: '前端',
+        sourceLabel: '系统',
       })
     }
     globalWS.subscribe(WS_LOCAL_EVENTS.KICKED_BY_REPLACEMENT, handleKickedByReplacement)
@@ -425,9 +714,22 @@ export function useRealtimeEvents(): void {
       globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_UPDATE, handleTaskStatusUpdate)
       globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_STATUS_CHANGED, handleTaskStatusChanged)
       globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_DELETED, handleTaskDeleted)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_COMPLETED, handleTaskTerminalNotice)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_CANCELLED, handleTaskTerminalNotice)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.TASK_FAILED, handleTaskTerminalNotice)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.TRIGGER_FIRED, handleTriggerFired)
       globalWS.unsubscribe(WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT, handleUserInputSendTimeout)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.ROUTE_ERROR, handleRouteError)
       globalWS.unsubscribe(WS_SERVER_EVENTS.PENDING_INPUTS_CHANGED, handlePendingInputsChanged)
+      globalWS.unsubscribe(
+        WS_SERVER_EVENTS.PIPELINE_ROUND_FINISHED,
+        handleRoundFinishedQueueReconcile,
+      )
+      for (const timer of segmentsRefreshTimers.values()) clearTimeout(timer)
+      segmentsRefreshTimers.clear()
       globalWS.unsubscribe(WS_SERVER_EVENTS.COMPRESSION_FAILED, handleCompressionFailed)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.COMPRESSION_STARTED, handleCompressionStarted)
+      globalWS.unsubscribe(WS_SERVER_EVENTS.COMPRESSION_ENDED, handleCompressionEnded)
     globalWS.unsubscribe(WS_SERVER_EVENTS.COMPRESSION_APPLIED, handleCompressionApplied)
     for (const timer of compressionReconcileTimers.values()) clearTimeout(timer)
     compressionReconcileTimers.clear()

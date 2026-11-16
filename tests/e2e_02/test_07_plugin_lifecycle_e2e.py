@@ -2,7 +2,7 @@
 旅程 7：插件装卸载生命周期 e2e（真内核 + 真 sidecar，非 mock）
 
 验证"插件即声明、装卸即时生效"的核心承诺，对象为专用探针插件
-plugins/shared/tools/e2e_lifecycle_probe（默认 disabled）：
+plugins/shared/e2e_lifecycle_probe（默认 disabled）：
 
   7.1 装载生效：PUT enabled=true → 工具进 LLM 工具面（GET /api/v1/tools）
       + POST /ext/e2e_lifecycle_probe/echo 200 回声（真 sidecar 进程执行）
@@ -40,12 +40,10 @@ TOOL_NAME = "e2e_probe_echo"
 PROBE_DIR = (
     Path(__file__).resolve().parents[2]
     / "plugins"
-    / "shared"
-    / "tools"
-    / "e2e_lifecycle_probe"
+    / "shared" / "e2e_lifecycle_probe"
 )
 PROFILE_PATH = (
-    Path(__file__).resolve().parents[2] / "config" / "plugins" / "default_profile.yaml"
+    Path(__file__).resolve().parents[2] / "config" / "kernel" / "default_profile.yaml"
 )
 STASH_PARENT = Path(__file__).resolve().parents[2] / "logs"
 STASH_DIR = STASH_PARENT / "e2e_lifecycle_probe_stash"
@@ -56,9 +54,7 @@ NUDGE_DIR = (
 SIMPLE_MANIFEST = (
     Path(__file__).resolve().parents[2]
     / "plugins"
-    / "shared"
-    / "tools"
-    / "simple"
+    / "shared" / "simple"
     / "plugin.json"
 )
 

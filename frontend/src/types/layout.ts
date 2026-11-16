@@ -131,6 +131,10 @@ export interface WorkspaceTab {
   /** 声明透传的静态 widget props（插件 views/widgets 贡献条目） */
   props?: Record<string, unknown>
   dataSource?: string
+  /** 会话派生页签的归属会话 id（工作区「只看当前会话」过滤键）；无此字段 =
+   *  全局页签，任何会话下可见。仅视图层过滤显隐，隐藏≠关闭（store 集合不因
+   *  过滤变化）；旧持久化数据无此字段天然兼容，无需迁移 */
+  ownerSessionId?: string
   isActive: boolean
   isPinned: boolean
 }

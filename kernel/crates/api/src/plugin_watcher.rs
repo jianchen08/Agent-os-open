@@ -15,11 +15,6 @@
 //! 排空函数内部复用（只排空不退出）。产物文件变化检测（同 id 换 .dll）属 invoker
 //! 面，不在此处。
 //!
-//! 模式包资源增量重扫（设计稿 2026-09-15 §2.3 P2 遗留接线）：每轮 sync 尾部把
-//! 已注册且启用的模式包的 mode_agents/mode_pipelines 键表刷新为盘上现状——热增删
-//! agents/pipelines 文件、包内重注册/respawn 后键表同源增删，无需重启内核；重扫
-//! 失败保留旧键表只告警（fail-closed，不崩 watcher）。
-//!
 //! 设计：把"发现→diff→注册"的核心逻辑下沉为纯函数 [`apply_discovered_plugins`]，
 //! 时序/IO（notify、轮询、mpsc）只负责触发，便于无 flaky 单测。
 //!
@@ -27,7 +22,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,6 +37,7 @@ use agentos_plugin_loader::{
     output_schema_error, provides_methods_unbacked, CapabilityRegistryImpl, PluginEnablement,
     PluginScopeRegistry, ServiceSurface,
 };
+use futures_util::stream::{self, StreamExt};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -60,6 +56,32 @@ pub const DEFAULT_DEBOUNCE: std::time::Duration = std::time::Duration::from_mill
 /// 1 分钟 = notify 失效时的低频兜底；正常环境变更全由 notify 事件驱动，
 /// 轮询只兜底不抢跑。
 pub const DEFAULT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 进程级 G2 tools/list 观测失败累计（重试退避穷尽后探测通道仍不可用）。
+///
+/// 唯一 inc 点 = [`g2_verify_and_sanitize`] 的 `Err` 分支（spawn_failed=true
+/// 路径）。此前仅 tracing 日志，监控面无处可采（装机插件组事故 2026-10-17
+/// 卡5/卡9）。形态 = crate 自采静态 + 内核 flush 节拍采样（同 mcp
+/// `reverse_call_levels` 先例），聚合器侧以 `kernel` 命名空间的
+/// `mcp.tools_list_observe_fail_total` counter 暴露。
+static G2_TOOLS_LIST_OBSERVE_FAIL_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// 进程级 tools/list 解析 malformed 条目累计（缺 name / tools 非数组等被
+/// `parse_actual_tools` 跳过的条目数）。与观测失败分键：前者是探测通道级
+/// 故障（整次 tools/list 不可用），后者是数据级异常（列表可用但有坏条目，
+/// 事故当天的「tools/list 吐非法」即此形态）。聚合器侧名
+/// `mcp.tools_list_malformed_total`。
+static TOOLS_LIST_MALFORMED_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// 内核指标 flush 节拍的采样口：G2 观测失败累计次数（进程启动以来）。
+pub fn g2_tools_list_observe_fail_total() -> u64 {
+    G2_TOOLS_LIST_OBSERVE_FAIL_TOTAL.load(Ordering::Relaxed)
+}
+
+/// 内核指标 flush 节拍的采样口：tools/list malformed 条目累计数（进程启动以来）。
+pub fn tools_list_malformed_total() -> u64 {
+    TOOLS_LIST_MALFORMED_TOTAL.load(Ordering::Relaxed)
+}
 
 /// cdylib（InProcess）插件集合变更（A3：触发 G8 优雅重启的判据）。
 ///
@@ -417,9 +439,42 @@ const DYNAMIC_IMPORT_MAX_CONSECUTIVE_FAILS: u32 = 5;
 
 /// BUG-51 复验预算上限：观测失败（账本 verify_incomplete）插件的自动复验
 /// 连续失败达 N 轮即落终态 verify_failed（账本可见，插件管理 error 透出原因），
-/// 停止该插件的逐轮自动重验。声明/代码指纹变化（用户动手修）或复验成功即
-/// 重置预算。不设上限的逐轮 spawn 复验只会对真坏插件无限燃烧进程与日志。
-const G2_REVERIFY_MAX_CONSECUTIVE_FAILS: u32 = 5;
+/// 停止该插件的逐轮自动重验，工具面保持遮挡（判定「插件当前不可用」，卡2）。
+/// 声明/代码指纹变化（用户动手修）或复验成功即重置预算。不设上限的逐轮
+/// spawn 复验只会对真坏插件无限燃烧进程与日志。
+///
+/// N 可配：`AGENTOS_G2_VERIFY_FAIL_THRESHOLD`（默认 3——装机 2026-10-17 事故
+/// 口径：连续 3 轮观测失败即判定不可用并通知，不等 5 轮）。
+/// 代码指纹变更确认次数（env `AGENTOS_CODE_FP_CONFIRMATIONS`，默认 2；
+/// 0/1/非法 = 1 即旧行为——单样本翻转立即认变更）。
+fn code_fp_confirmations() -> u32 {
+    static CONFIRMATIONS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *CONFIRMATIONS.get_or_init(|| {
+        std::env::var("AGENTOS_CODE_FP_CONFIRMATIONS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .map(|n| n.max(1))
+            .unwrap_or(2)
+    })
+}
+
+fn g2_reverify_max_consecutive_fails() -> u32 {
+    static THRESHOLD: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        parse_fail_threshold(
+            std::env::var("AGENTOS_G2_VERIFY_FAIL_THRESHOLD")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+/// 阈值解析（纯函数，单测面）：非法/缺省/<1 → 默认 3。
+fn parse_fail_threshold(raw: Option<&str>) -> u32 {
+    raw.and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|&v| v >= 1)
+        .unwrap_or(3)
+}
 
 /// 一行接入（2026-09-03 用户裁定）判定：external MCP 允许零工具声明——
 /// 空声明 = 观测即声明，采信握手 `tools/list` 全量导入（多工具服务免抄
@@ -490,7 +545,13 @@ pub async fn g2_verify_and_sanitize(
     };
     match listed {
         Ok(raw) => {
-            let (actual, _malformed) = parse_actual_tools(&raw);
+            let (actual, malformed) = parse_actual_tools(&raw);
+            // 数据级异常计数上浮监控面（卡9）：列表可用但含坏条目（缺 name /
+            // tools 非数组）——事故当天「tools/list 吐非法 → 整组工具被剔除」
+            // 的直接信号，≥1 即值得告警。
+            if malformed > 0 {
+                TOOLS_LIST_MALFORMED_TOTAL.fetch_add(malformed as u64, Ordering::Relaxed);
+            }
             // 一行接入：零声明 external MCP → 观测即声明，tools/list 全量回填
             // manifest（无可对照声明，不做 drift 对照；每次安装期/复验全量重导入，
             // 幂等）。spawn 失败走下方既有 Err 分支：manifest 保持零声明 +
@@ -507,6 +568,7 @@ pub async fn g2_verify_and_sanitize(
                         category: None,
                         ui: None,
                         render: None,
+                        isolation_capable: None,
                         smoke: None,
                         timeout_ms: None,
                     })
@@ -596,6 +658,9 @@ pub async fn g2_verify_and_sanitize(
                 error = %e.message,
                 "G2 观测失败（spawn/上报不可用，重试后仍失败）——保留声明注册，待复验"
             );
+            // 通道级故障计数上浮监控面（卡9）：重试穷尽仍不可用，计数一次
+            // （退避期内的单次失败不计——计数语义 = 观测失败终态数）。
+            G2_TOOLS_LIST_OBSERVE_FAIL_TOTAL.fetch_add(1, Ordering::Relaxed);
             G2VerifyOutcome {
                 manifest,
                 rejected_tools: Vec::new(),
@@ -605,6 +670,136 @@ pub async fn g2_verify_and_sanitize(
             }
         }
     }
+}
+
+/// boot 主路径 G2 存量校验汇总（Phase 3 #1 并行化提取，语义与原串行循环逐条一致）。
+pub struct G2BootSummary {
+    /// 判定通过（无漂移）数
+    pub verified: usize,
+    /// 判定漂移（已按净化后 manifest 重注册）数
+    pub drifted: usize,
+    /// 观测失败（重试后仍 spawn/tools-list 失败）数
+    pub spawn_failed: usize,
+    /// 观测失败清单（调用方 30s 后台复验）
+    pub observe_incomplete: Vec<PluginManifest>,
+    /// 预烤发现缓存已验证（T4/R-2 层 2）：对账通过免 spawn 复验数——账本登记
+    /// cache_verified 契约态，不进 observe_incomplete（30s 复验链零产生）。
+    pub cache_skipped: usize,
+}
+
+/// boot 主路径 G2 启动期存量校验（自 agentos-kernel.rs 原串行 for 循环提取）。
+///
+/// 语义保持：非覆盖面（禁用/非 sidecar/无 tools+services/合宿成员）登记
+/// not_covered 缺省；G2 覆盖面 spawn→tools/list→对照声明，判定漂移即按净化后
+/// manifest 重注册，观测失败保留声明注册并进 [`G2BootSummary::observe_incomplete`]
+/// 待复验。变化仅在探测扇出：`concurrency` 有界并行（宿主 spawn 每个秒级且相互
+/// 独立，per-host single-flight 锁防双 spawn）——boot 串行段 45.6s 主瓶颈并行化。
+/// 账本写入与注册表重注册收口在扇出后按原 manifest 序串行执行（与原循环同序）。
+/// `cache_skip_ids` = 预烤发现缓存已验证集（T4/R-2 层 2）：免 spawn/observe，
+/// 账本登记 cache_verified。
+#[allow(clippy::too_many_arguments)]
+pub async fn g2_boot_verify_all(
+    invoker: Arc<dyn PluginInvoker>,
+    manifests: &[PluginManifest],
+    enablement: &PluginEnablement,
+    contract_states: &crate::contract::ContractLedger,
+    registry: &Arc<CapabilityRegistryImpl>,
+    plugin_scopes: &PluginScopeRegistry,
+    cache_skip_ids: &std::collections::HashSet<String>,
+    concurrency: usize,
+) -> G2BootSummary {
+    // 预处理（串行、原序）：非覆盖面即时登记缺省，覆盖面收集进探测集。
+    let mut targets: Vec<(usize, PluginManifest)> = Vec::new();
+    let mut cache_skipped = 0usize;
+    for (idx, manifest) in manifests.iter().enumerate() {
+        let enabled = enablement.is_enabled(&manifest.id, manifest.enabled);
+        // 缓存已验证面（T4/R-2 层 2）：种子未变=行为不变，spawn/observe 复验
+        // 免除（复验预算留给漂移回退件）；账本如实登记 cache_verified。
+        if cache_skip_ids.contains(&manifest.id) {
+            contract_states.upsert(crate::contract::PluginContractState::cache_verified(
+                manifest, enabled,
+            ));
+            cache_skipped += 1;
+            continue;
+        }
+        let g2_applicable = enabled
+            && manifest.host_type == HostType::Sidecar
+            && (!manifest.capabilities.tools.is_empty()
+                || !manifest.capabilities.services.is_empty());
+        // light 合宿成员跳过 boot 个体探测：宿主按成员集整组装载有时序窗口，
+        // 探测可能早于成员工具登记 → 空列表误判漂移剔光（08-31 实测 memory
+        // 三试俱败、task_manage 靠时序侥幸过）。成员能力随宿主装载统一登记，
+        // 一致性由 watcher 复验（宿主已定型后探测可信 + 前缀归一）兜底。
+        let is_light_member = agentos_invoker::is_cohost_member(manifest);
+        if !g2_applicable || is_light_member {
+            contract_states.upsert(crate::contract::PluginContractState::not_covered(
+                manifest, enabled,
+            ));
+            continue;
+        }
+        targets.push((idx, manifest.clone()));
+    }
+    // 探测扇出（有界并行）：携带原序号，结果按原序回排后串行收口。
+    let outcomes: Vec<(usize, G2VerifyOutcome)> = stream::iter(targets)
+        .map(|(idx, m)| {
+            let inv = invoker.clone();
+            async move { (idx, g2_verify_and_sanitize(inv.as_ref(), m.clone()).await) }
+        })
+        .buffer_unordered(concurrency.max(1))
+        .collect()
+        .await;
+    let mut ordered: Vec<_> = outcomes;
+    ordered.sort_by_key(|(idx, _)| *idx);
+
+    let mut summary = G2BootSummary {
+        verified: 0,
+        drifted: 0,
+        spawn_failed: 0,
+        observe_incomplete: Vec::new(),
+        cache_skipped,
+    };
+    for (idx, outcome) in ordered {
+        let manifest = &manifests[idx];
+        contract_states.upsert(crate::contract::PluginContractState::derived(
+            manifest,
+            true,
+            Some(&outcome),
+        ));
+        if outcome.spawn_failed {
+            // 观测失败：声明注册不动（启动注册循环已按声明注册），待复验。
+            summary.spawn_failed += 1;
+            summary.observe_incomplete.push(manifest.clone());
+            warn!(
+                target: "plugin-g2-boot",
+                plugin = %manifest.id,
+                "注册闸 G2（boot）：观测失败（重试后仍 spawn/tools-list 失败）——保留声明注册，30s 后复验"
+            );
+            continue;
+        }
+        if !outcome.drift {
+            summary.verified += 1;
+            continue;
+        }
+        summary.drifted += 1;
+        // 判定失败：用净化后 manifest 重注册该插件能力（复用 re-enable：scope revoke + 重注册）。
+        // 拒注是"声明与实现不一致已实际收口"的异常事件，从 info 提升为 warn——
+        // 消除"被拒数日无人知晓"（e2e G5；清单明细另经
+        // GET /api/v1/plugins/contract-status 暴露）。
+        let (tools, http_routes) = crate::plugin_lifecycle::reenable_plugin_capabilities(
+            &outcome.manifest,
+            registry,
+            plugin_scopes,
+        );
+        warn!(
+            target: "plugin-g2-boot",
+            plugin = %manifest.id,
+            rejected = ?outcome.rejected_tools,
+            tools,
+            http_routes,
+            "注册闸 G2（boot）：插件声明与实现不一致，已按净化后 manifest 重注册（需修改插件）"
+        );
+    }
+    summary
 }
 
 /// L0 纯函数：按 enablement 谓词过滤 manifests，返回（保留的引用, 跳过的 disabled 数）。
@@ -694,6 +889,45 @@ fn current_code_fp(
     agentos_invoker::invoker::compute_plugin_fingerprint(&dir, manifest)
 }
 
+/// 代码指纹变更迟滞判定（F17 幻影防护的纯函数核，测试直喂采样序列）。
+///
+/// - 基线缺失（`known=None`）→ 不判变更（基线由注册闸落定），候选撤销；
+/// - 回到基线（`cur==old`，幻影翻转自愈或复验后基线已更新）→ 候选撤销；
+/// - 偏离基线：候选指纹与上轮相同则连击 +1，不同则重计 1；连击达
+///   `confirmations` 才认变更。`confirmations<=1` = 旧行为（立即认变更）。
+fn code_change_confirmed(
+    known: Option<u64>,
+    cur: u64,
+    streaks: &mut HashMap<String, (u64, u32)>,
+    id: &str,
+    confirmations: u32,
+) -> bool {
+    let Some(old) = known else {
+        streaks.remove(id);
+        return false;
+    };
+    if cur == old {
+        streaks.remove(id);
+        return false;
+    }
+    if confirmations <= 1 {
+        streaks.remove(id);
+        return true;
+    }
+    let entry = streaks
+        .entry(id.to_string())
+        .and_modify(|(f, n)| {
+            if *f == cur {
+                *n += 1;
+            } else {
+                *f = cur;
+                *n = 1;
+            }
+        })
+        .or_insert((cur, 1));
+    entry.1 >= confirmations
+}
+
 /// 热发现注册结果并入 L1 启用集合：仅本轮新注册的插件（changed 的已在集合中；
 /// drifted 拒注册的不进）。空报告零成本返回。
 ///
@@ -720,7 +954,7 @@ pub(crate) async fn merge_report_into_enabled_ids(
 // 多依赖注入的编排泵（invoker/registry/scopes/known 集/账本/报告），参数分组
 // 收构成本超出收益，保留为内部函数（调用面收敛于 consumer 循环与测试）。
 #[allow(clippy::too_many_arguments)]
-pub async fn sync_once_with_store(
+async fn sync_once_with_store_hyst(
     invoker: &dyn PluginInvoker,
     registry: &Arc<CapabilityRegistryImpl>,
     scopes: &PluginScopeRegistry,
@@ -730,6 +964,7 @@ pub async fn sync_once_with_store(
     known_manifest_hashes: &mut HashMap<String, u64>,
     known_code_hashes: &mut HashMap<String, u64>,
     known_obs_fail_streaks: &mut HashMap<String, u32>,
+    code_fp_streaks: &mut HashMap<String, (u64, u32)>,
     code_dirs: Option<&std::sync::Arc<CodeDirResolver>>,
     enablement: Option<&PluginEnablement>,
     contract_states: Option<&crate::contract::ContractLedger>,
@@ -816,6 +1051,7 @@ pub async fn sync_once_with_store(
         known_manifest_hashes,
         known_code_hashes,
         known_obs_fail_streaks,
+        code_fp_streaks,
         code_dirs,
         contract_states,
         manifests_store,
@@ -832,8 +1068,59 @@ pub async fn sync_once_with_store(
         manifests_store,
     )
     .await;
+    // 插件署名停机词全量重建（停机词声明化 ADR 2026-10-15）：以当轮注册集
+    // （filtered = 启用且过闸）为准覆盖式替换 core 声明注册表——注册/重注册/
+    // 卸载/启停统一走此刷新，与能力注册同窗（插件可运行 ⇔ 署名已入表）。
+    let declared_stop_words = agentos_core::types::RunStatus::refresh_declared_stop_reasons(
+        filtered
+            .iter()
+            .map(|m| (m.id.clone(), m.capabilities.stop_reasons.clone())),
+    );
+    if declared_stop_words > 0 {
+        info!(
+            count = declared_stop_words,
+            "插件署名停机词表已按注册集重建"
+        );
+    }
     report.changed_plugin_ids = changed_plugin_ids;
     Ok(report)
+}
+
+/// [`sync_once_with_store_hyst`] 的便捷包装（测试/旧行为入口）：候选表每次
+/// 调用全新 = 确认窗永不累计 = 单样本翻转立即认变更（F17 前行为）。生产
+/// consumer 走 `PluginWatcher::run` 内的 hyst 变体（候选表跨轮持久）。
+#[allow(clippy::too_many_arguments)]
+pub async fn sync_once_with_store(
+    invoker: &dyn PluginInvoker,
+    registry: &Arc<CapabilityRegistryImpl>,
+    scopes: &PluginScopeRegistry,
+    known_ids: &mut HashSet<String>,
+    known_cdylib: &mut Option<HashSet<String>>,
+    manifests_store: Option<&ManifestsStore>,
+    known_manifest_hashes: &mut HashMap<String, u64>,
+    known_code_hashes: &mut HashMap<String, u64>,
+    known_obs_fail_streaks: &mut HashMap<String, u32>,
+    code_dirs: Option<&std::sync::Arc<CodeDirResolver>>,
+    enablement: Option<&PluginEnablement>,
+    contract_states: Option<&crate::contract::ContractLedger>,
+) -> Result<SyncReport, PluginError> {
+    let mut code_fp_streaks = HashMap::new();
+    sync_once_with_store_hyst(
+        invoker,
+        registry,
+        scopes,
+        known_ids,
+        known_cdylib,
+        manifests_store,
+        known_manifest_hashes,
+        known_code_hashes,
+        known_obs_fail_streaks,
+        &mut code_fp_streaks,
+        code_dirs,
+        enablement,
+        contract_states,
+    )
+    .await
 }
 
 /// 新发现插件的注册闸 + G2 安装期一致性校验：依赖面不满足拒注册（fail-closed）、
@@ -1006,6 +1293,7 @@ async fn sync_reverify_changed(
     known_manifest_hashes: &mut HashMap<String, u64>,
     known_code_hashes: &mut HashMap<String, u64>,
     known_obs_fail_streaks: &mut HashMap<String, u32>,
+    code_fp_streaks: &mut HashMap<String, (u64, u32)>,
     code_dirs: Option<&std::sync::Arc<CodeDirResolver>>,
     contract_states: Option<&crate::contract::ContractLedger>,
     manifests_store: Option<&ManifestsStore>,
@@ -1014,7 +1302,8 @@ async fn sync_reverify_changed(
     // ── GAP-6：既有插件声明/实现变更 → 复验 + 重注册 + 宿主驱逐 ────────────
     // 声明指纹 = 磁盘 manifest 序列化内容哈希（纯内容比对，与 mtime 无关）；
     // 代码指纹 = 插件源码/配置 mtime 指纹（与 invoker respawn 判据同源，
-    // compute_plugin_fingerprint）。任一变化即触发复验：
+    // compute_plugin_fingerprint）。任一变化即触发复验（代码指纹面有 F17
+    // 迟滞确认窗：连续 N 次同向偏离才认变更，见 code_change_confirmed）：
     // - 代码指纹比对覆盖**全量 sidecar**（B15-R1）：零工具/零服务的 light 管道
     //   插件不再被排除——其 .py 变更在轮询周期内即被看见，无需等调用时拉取；
     // - 检测到代码变化即驱逐宿主（force_unload 语义：kill 进程 + 清缓存/
@@ -1092,9 +1381,19 @@ async fn sync_reverify_changed(
                 Some("verify_incomplete") | Some("verify_failed")
             );
         let cur_code_fp = current_code_fp(code_dirs, m);
-        let code_changed = known_code_hashes
-            .get(&m.id)
-            .is_some_and(|old| cur_code_fp != *old);
+        // F17 幻影防护：mtime 指纹读失败退化 "0:0"（host_key.rs:250），瞬时 I/O
+        // 失败（文件被占用/杀软扫描）呈现为指纹翻转，单样本即触发 G2 复验+成员
+        // 热重载全套——实测 30-90s 永动循环。现要求连续 N 次采样同向偏离基线才
+        // 认变更（N 默认 2，env AGENTOS_CODE_FP_CONFIRMATIONS，1=旧行为）。
+        // 候选表=watcher 持有（跨轮持久），由 sync_once_with_store_hyst 线程化
+        // 传入；回到基线/基线更新后自动撤销。
+        let code_changed = code_change_confirmed(
+            known_code_hashes.get(&m.id).copied(),
+            cur_code_fp,
+            code_fp_streaks,
+            &m.id,
+            code_fp_confirmations(),
+        );
         if code_changed {
             // 用户动手修（实现变更）= 新的复验预算。
             known_obs_fail_streaks.remove(&m.id);
@@ -1104,11 +1403,11 @@ async fn sync_reverify_changed(
         }
         // 复验预算闸：无声明/代码变更的纯待复验轮次，连击达上限即跳过（终态
         // verify_failed 的常态路径——终态不再自动重验，动手修才重开）。
+        let reverify_budget = g2_reverify_max_consecutive_fails();
         if g2_verify_pending
             && !decl_changed
             && !code_changed
-            && known_obs_fail_streaks.get(&m.id).copied().unwrap_or(0)
-                >= G2_REVERIFY_MAX_CONSECUTIVE_FAILS
+            && known_obs_fail_streaks.get(&m.id).copied().unwrap_or(0) >= reverify_budget
         {
             continue;
         }
@@ -1139,15 +1438,15 @@ async fn sync_reverify_changed(
                 Some(state) if matches!(state.as_str(), "verify_incomplete" | "verify_failed") => {
                     let streak = known_obs_fail_streaks.entry(m.id.clone()).or_insert(0);
                     *streak += 1;
-                    if *streak == G2_REVERIFY_MAX_CONSECUTIVE_FAILS {
+                    if *streak == reverify_budget {
                         if let Some(ledger) = contract_states {
                             ledger.upsert(crate::contract::PluginContractState::verify_failed(
                                 m,
                                 true,
                                 format!(
-                                    "G2 复验连续 {G2_REVERIFY_MAX_CONSECUTIVE_FAILS} 轮观测失败（spawn/tools-list 重试后仍失败），\
-                                     已停止自动复验；插件工具保持从 LLM 工具面遮挡。请修复插件后\
-                                     重验：编辑插件文件自动触发，或 POST /api/v1/plugins/validate-all"
+                                    "G2 复验连续 {reverify_budget} 轮观测失败（spawn/tools-list 重试后仍失败），\
+                                     已停止自动复验；插件判定当前不可用，工具保持从 LLM 工具面遮挡。\
+                                     请修复插件后重验：编辑插件文件自动触发，或 POST /api/v1/plugins/validate-all"
                                 ),
                             ));
                         }
@@ -1155,7 +1454,7 @@ async fn sync_reverify_changed(
                             target: "plugin_watcher",
                             plugin = %m.id,
                             fails = *streak,
-                            "G2 复验预算超限：落验证失败终态（verify_failed），停止自动重验（修复后声明/代码变更重开）"
+                            "G2 复验预算超限：判定插件当前不可用（verify_failed 终态），停止自动重验（修复后声明/代码变更重开）"
                         );
                     }
                 }
@@ -1190,6 +1489,58 @@ async fn sync_reverify_changed(
         known_code_hashes.insert(m.id.clone(), cur_code_fp);
     }
     changed_plugin_ids
+}
+
+/// 卡3：verify_failed 跨线检测 + 通知（consumer 每轮 sync 后调用）。
+///
+/// 账本 diff 语义：本轮复验过的插件里，账本现值 verify_failed 且此前不在
+/// 通知集 → 判定「插件当前不可用」成立，触发通知并记账；账本离开终态
+/// （复验转正）→ 清账，之后再跨线可再报。账本/通知器未接线（测试）时
+/// no-op。通知载荷的组名/工具数从共享 store 现查（缺 store 诚实降级为
+/// 无组名/零计数——不编造）。
+async fn notify_verify_failed_crossings(
+    contract_states: Option<&crate::contract::ContractLedger>,
+    notifier: Option<&crate::plugin_notices::UnavailableNotifier>,
+    notified: &mut HashSet<String>,
+    changed_plugin_ids: &[String],
+    manifests_store: Option<&ManifestsStore>,
+) {
+    let (Some(ledger), Some(notify)) = (contract_states, notifier) else {
+        return;
+    };
+    for id in changed_plugin_ids {
+        let Some(state) = ledger.get(id) else {
+            continue;
+        };
+        if state.gates.g2_consistency == "verify_failed" {
+            if notified.insert(id.clone()) {
+                let manifest = manifests_store
+                    .and_then(|store| store.try_read().ok())
+                    .and_then(|guard| guard.iter().find(|m| &m.id == id).cloned());
+                let (group, tools_down) = match &manifest {
+                    Some(m) => (m.host_group.clone(), m.capabilities.tools.len()),
+                    None => (None, 0),
+                };
+                notify(&crate::plugin_notices::PluginUnavailableNotice {
+                    kind: "verify_failed".to_string(),
+                    group,
+                    members: vec![id.clone()],
+                    reason: state
+                        .gates
+                        .last_error
+                        .unwrap_or_else(|| "G2 复验超限".to_string()),
+                    tools_down,
+                });
+                warn!(
+                    target: "plugin_watcher",
+                    plugin = %id,
+                    "插件判定当前不可用（verify_failed 跨线），已外送不可用通知"
+                );
+            }
+        } else {
+            notified.remove(id);
+        }
+    }
 }
 
 /// 复验执行段：代码变更驱逐宿主（force_unload）→ G2 复验/声明重注册 →
@@ -1354,67 +1705,6 @@ async fn sync_merge_store_tail(
     }
 }
 
-/// 模式包资源增量重扫（设计稿 §2.3 P2 遗留接线）：每轮 sync 尾部把当前可注册
-/// （已注册 + 启用）模式包的 mode_agents/mode_pipelines 键表刷新为盘上现状——
-/// 热增删 agents/pipelines 文件、包内重注册/respawn 后键表同源增删，无需重启。
-/// 删除/禁用方向的同源消失由既有 M1 收回承接（scopes.revoke / clear_plugin 触发
-/// guard revoke），此处补齐"增/改"方向（含 reenable 重注册路径 revoke 掉的键）。
-///
-/// - 扫描失败（yaml 非法等，fail-closed 与 boot 同语义）→ warn + 保留全部旧键表，
-///   不崩 watcher，下轮 sync 重试；单包注册失败 → 该包回滚保留旧表 + warn。
-/// - 只动模式资源维度，不触及插件生命周期（工具/路由/宿主面零改动）。
-/// - 模式根与 boot 扫描同源：`<plugins_dir>/modes` + 用户根（user_space 单点解析）。
-///
-/// 返回发生键表变化的包数（观测日志用）。
-fn resync_mode_package_resources(
-    registry: &Arc<CapabilityRegistryImpl>,
-    scopes: &PluginScopeRegistry,
-    plugins_dir: &Path,
-    user_modes_dir: Option<&Path>,
-    registrable_ids: &HashSet<String>,
-) -> usize {
-    let factory_modes = plugins_dir.join("modes");
-    let packages = match agentos_plugin_loader::scan_mode_package_resources(
-        &factory_modes,
-        user_modes_dir,
-        registrable_ids,
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!(
-                target: "plugin_watcher",
-                error = %e,
-                "模式包资源重扫失败：保留旧键表（fail-closed，下轮 sync 重试）"
-            );
-            return 0;
-        }
-    };
-    let mut changed = 0usize;
-    for package in packages {
-        let plugin_id = package.plugin_id.clone();
-        match agentos_plugin_loader::mode_registry::refresh_mode_package_guarded(
-            registry, scopes, package,
-        ) {
-            Ok(true) => {
-                changed += 1;
-                info!(
-                    target: "plugin_watcher",
-                    plugin = %plugin_id,
-                    "模式包资源键表已按盘上现状刷新（热发现重扫）"
-                );
-            }
-            Ok(false) => {}
-            Err(e) => warn!(
-                target: "plugin_watcher",
-                plugin = %plugin_id,
-                error = %e,
-                "模式包资源重扫注册失败：该包回滚保留旧键表（下轮 sync 重试）"
-            ),
-        }
-    }
-    changed
-}
-
 /// 运行时插件自动发现器（notify watch + 轮询兜底，二选一或并存均可）。
 ///
 /// `spawn` 后返回 [`WatcherHandle`]：`trigger` 可手动注入同步信号（测试 / 外部 API 用），
@@ -1439,6 +1729,10 @@ pub struct PluginWatcher {
     /// [`DYNAMIC_IMPORT_MAX_CONSECUTIVE_FAILS`] 暂停逐轮补观测；声明指纹变化
     /// 或导入成功即重置（2026-09-09 熔断，防远端不可达插件无限堆失败记录）。
     known_obs_fail_streaks: HashMap<String, u32>,
+    /// F17 代码指纹迟滞候选表（plugin_id → (候选指纹, 已连击次数)，consumer
+    /// 独占跨轮持久）：瞬时 I/O 失败的幻影翻转须连续 N 次同向偏离基线才认
+    /// 变更，防「指纹抖动 → 成员热重载永动」。
+    code_fp_streaks: HashMap<String, (u64, u32)>,
     /// 插件源码目录解析器（bin 装配注入）。None = 不做代码指纹复验（测试）。
     code_dirs: Option<std::sync::Arc<CodeDirResolver>>,
     /// A3：InProcess 插件 id 已知集合（None = 未建基线，首轮 sync 建立）。
@@ -1462,6 +1756,9 @@ pub struct PluginWatcher {
     /// 闸2·观测：热发现校验结果收口（boot 已收口全量；此处补热发现新插件的
     /// 契约状态）。None = 不记录（测试/旧行为）。
     contract_states: Option<Arc<crate::contract::ContractLedger>>,
+    /// 卡3 通知面：复验超限落 verify_failed（判定「插件当前不可用」）时的
+    /// 通知回调。None = 只落账本与日志（旧行为/测试）。
+    unavailable_notifier: Option<crate::plugin_notices::UnavailableNotifier>,
     /// L1 启用集合共享句柄（`AppState.enabled_plugin_ids`）：热发现注册的新插件
     /// 即时并入——sessions thread_fields contributes 与 domain_event 点对点投递
     /// 随热发现生效。None = 不同步（测试/旧行为，要等 PUT enabled 或重启）。
@@ -1486,6 +1783,7 @@ impl PluginWatcher {
             known_manifest_hashes: HashMap::new(),
             known_code_hashes: HashMap::new(),
             known_obs_fail_streaks: HashMap::new(),
+            code_fp_streaks: HashMap::new(),
             code_dirs: None,
             known_cdylib: None,
             restart_hook: None,
@@ -1493,6 +1791,7 @@ impl PluginWatcher {
             enablement: None,
             profile_reload_root: None,
             contract_states: None,
+            unavailable_notifier: None,
             enabled_ids: None,
             debounce: DEFAULT_DEBOUNCE,
             poll_interval: DEFAULT_POLL_INTERVAL,
@@ -1561,6 +1860,16 @@ impl PluginWatcher {
         self
     }
 
+    /// 注入不可用通知回调（卡3）：复验超限落 verify_failed 终态时外送判定
+    /// 事件（内核 main 据此发系统通知）。不注入 = 行为不变。
+    pub fn with_unavailable_notifier(
+        mut self,
+        notifier: crate::plugin_notices::UnavailableNotifier,
+    ) -> Self {
+        self.unavailable_notifier = Some(notifier);
+        self
+    }
+
     /// 注入 L1 启用集合共享句柄：热发现注册的新插件即时并入（语义对齐
     /// `PUT /plugins/{id}/enabled` 的集合更新），thread_fields / domain_event
     /// 面随热发现生效，无需 re-enable 或重启。
@@ -1599,6 +1908,7 @@ impl PluginWatcher {
             known_manifest_hashes,
             known_code_hashes,
             known_obs_fail_streaks,
+            code_fp_streaks,
             code_dirs,
             known_cdylib,
             restart_hook,
@@ -1606,6 +1916,7 @@ impl PluginWatcher {
             enablement,
             profile_reload_root,
             contract_states,
+            unavailable_notifier,
             enabled_ids,
             debounce,
             poll_interval,
@@ -1659,7 +1970,10 @@ impl PluginWatcher {
                 let mut known_hashes = known_manifest_hashes;
                 let mut known_code = known_code_hashes;
                 let mut known_obs_fail = known_obs_fail_streaks;
+                let mut code_fp_streaks = code_fp_streaks;
                 let mut known_cdylib = known_cdylib;
+                // 卡3：已通知过 verify_failed 的插件集（转正清账，再跨线可再报）。
+                let mut known_verify_failed: HashSet<String> = HashSet::new();
 
                 loop {
                     // 等首个触发事件；所有 sender drop → 退出。
@@ -1679,7 +1993,7 @@ impl PluginWatcher {
                         Some(root) => Some(PluginEnablement::load(root)),
                         None => enablement.clone(),
                     };
-                    let report = match sync_once_with_store(
+                    let report = match sync_once_with_store_hyst(
                         invoker.as_ref(),
                         &registry,
                         &scopes,
@@ -1689,6 +2003,7 @@ impl PluginWatcher {
                         &mut known_hashes,
                         &mut known_code,
                         &mut known_obs_fail,
+                        &mut code_fp_streaks,
                         code_dirs.as_ref(),
                         effective_enablement.as_ref(),
                         contract_states.as_deref(),
@@ -1702,6 +2017,16 @@ impl PluginWatcher {
                         }
                     };
                     sync_count_task.fetch_add(1, Ordering::Relaxed);
+                    // 卡3：verify_failed 跨线检测（账本 diff，恰在进入终态那轮
+                    // 触发一次通知；转正后清账，再跨线可再报）。
+                    notify_verify_failed_crossings(
+                        contract_states.as_deref(),
+                        unavailable_notifier.as_ref(),
+                        &mut known_verify_failed,
+                        &report.changed_plugin_ids,
+                        manifests_store.as_ref(),
+                    )
+                    .await;
                     // 热发现注册的新插件并入 L1 启用集合（thread_fields /
                     // domain_event 面随热发现生效）。
                     if let Some(enabled) = enabled_ids.as_ref() {
@@ -1725,43 +2050,26 @@ impl PluginWatcher {
                         );
                         trigger_cdylib_restart_if_enabled(change, &restart_hook, enabled);
                     }
-                    // 模式包资源增量重扫（每轮 sync 尾部）：registrable = 已注册(known)
-                    // ∩ 启用（enablement 现读 + manifest 声明），与 boot registrable_ids
-                    // 同语义；disabled 包不注册，禁用即同源消失（clear_plugin/租约收回）。
-                    let manifest_enabled: HashMap<String, Option<bool>> =
-                        match manifests_store.as_ref() {
-                            Some(store) => store
-                                .read()
-                                .await
-                                .iter()
-                                .map(|m| (m.id.clone(), m.enabled))
-                                .collect(),
-                            None => HashMap::new(),
-                        };
-                    let registrable: HashSet<String> = known
-                        .iter()
-                        .filter(|id| {
-                            effective_enablement.as_ref().is_none_or(|e| {
-                                e.is_enabled(id, manifest_enabled.get(*id).copied().flatten())
-                            })
-                        })
-                        .cloned()
-                        .collect();
-                    let user_modes =
-                        agentos_core::user_space::user_plugins_dir().map(|p| p.join("modes"));
-                    let mode_resynced = resync_mode_package_resources(
-                        &registry,
-                        &scopes,
-                        &plugins_dir,
-                        user_modes.as_deref(),
-                        &registrable,
-                    );
-                    if mode_resynced > 0 {
-                        info!(
-                            target: "plugin_watcher",
-                            packages = mode_resynced,
-                            "模式包资源增量重扫完成（键表已同步盘上现状）"
-                        );
+                    // 重载波收尾：声明路由巡检（波次收尾主动重注册，消除惰性自愈窗
+                    // ——波次 uninstall 收回/复验 revoke 摘掉的声明路由不再等请求
+                    // 触发 heal）。仅生产接线（store+enabled 共享句柄在场）时运行；
+                    // 全部在册时零动作零日志。
+                    if let (Some(store), Some(enabled)) =
+                        (manifests_store.as_ref(), enabled_ids.as_ref())
+                    {
+                        let (plugins, routes) =
+                            crate::plugin_lifecycle::sweep_declared_http_routes(
+                                &registry, &scopes, store, enabled,
+                            )
+                            .await;
+                        if routes > 0 {
+                            info!(
+                                target: "plugin_watcher",
+                                plugins,
+                                routes,
+                                "重载波收尾：声明路由巡检补注册完成（additive）"
+                            );
+                        }
                     }
                     agentos_core::task_activity::set_current_label("waiting fs events (debounce)");
                 }

@@ -12,8 +12,10 @@
     因此无人消费。
 
 本文件锁两件事：
-  1. 配置接线：prepare 链必须含 pipeline_agent_config_load，且先于
-     tool_schema（tool_ids 供给）与 prompt_build（system_prompt 供给）；
+  1. 配置接线：init 体（会话级静态上下文构建，每 run 一次，ADR
+     2026-10-10-pipeline-shape-split-core-type）必须含 pipeline_agent_config_load，
+     且紧随 mode_material_inject 成对；tool_schema 留守 prepare（动态步，每
+     LLM 轮查活注册表），经 init→main 跨体次序消费 tool_ids 产物；
   2. 插件契约：agent_config_load → prompt_build 串联产出非空 system 消息，
      跳过 agent_config_load 时 prompt_build 产出空 content（断链症状固化，
      防止回退键悄悄复活掩盖接线缺口）。
@@ -32,62 +34,76 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _AUTONOMOUS_YAML = _REPO_ROOT / "config" / "pipelines" / "autonomous.yaml"
 
 
-def _prepare_steps() -> list[str]:
-    """解析 autonomous.yaml main 循环体 prepare 组合节点的 steps 列表。"""
+def _init_steps() -> list[str]:
+    """解析 autonomous.yaml init 循环体内层组合节点的 steps 列表（字符串步）。"""
     cfg = yaml.safe_load(_AUTONOMOUS_YAML.read_text(encoding="utf-8"))
     bodies = cfg["loop_bodies"]
-    main = next(b for b in bodies if b["id"] == "main")
+    init = next(b for b in bodies if b["id"] == "init")
+    inner = next(s for s in init["steps"] if isinstance(s, dict) and s.get("id") == "init")
+    return [s for s in inner["steps"] if isinstance(s, str)]
+
+
+def _prepare_step_names(cfg=None) -> list[str]:
+    """解析 autonomous.yaml main 循环体 prepare 组合节点的 steps 列表（字符串步）。"""
+    cfg = cfg or yaml.safe_load(_AUTONOMOUS_YAML.read_text(encoding="utf-8"))
+    main = next(b for b in cfg["loop_bodies"] if b["id"] == "main")
     prepare = next(s for s in main["steps"] if isinstance(s, dict) and s.get("id") == "prepare")
     return [s for s in prepare["steps"] if isinstance(s, str)]
 
 
-def test_prepare_chain_wires_agent_config_load():
-    """prepare 链含 pipeline_agent_config_load，且在 tool_schema/prompt_build 之前。"""
-    steps = _prepare_steps()
+def test_init_chain_wires_agent_config_load():
+    """init 体含 pipeline_agent_config_load；tool_schema 留守 prepare 且跨体居后。"""
+    steps = _init_steps()
     assert "pipeline_agent_config_load" in steps, (
-        "pipeline_agent_config_load 未接入 autonomous 管道 prepare 链——"
+        "pipeline_agent_config_load 未接入 autonomous 管道 init 体——"
         "context.system_prompt 无人写入，LLM 请求 system 消息为空"
         "（2026-08-19 前端空 system prompt 断链）"
     )
-    idx = {name: i for i, name in enumerate(steps)}
-    assert idx["pipeline_agent_config_load"] < idx["pipeline_tool_schema"], (
-        "agent_config_load 必须先于 tool_schema：agent yaml 的 tool_ids 由其注入"
-    )
-    assert idx["pipeline_agent_config_load"] < idx["pipeline_prompt_build"], (
-        "agent_config_load 必须先于 prompt_build：context.system_prompt 由其供给"
+    cfg = yaml.safe_load(_AUTONOMOUS_YAML.read_text(encoding="utf-8"))
+    body_ids = [b["id"] for b in cfg["loop_bodies"]]
+    assert body_ids.index("init") < body_ids.index("main"), "init 体必须先于 main 体执行"
+    # tool_schema 是动态步（用户复核裁定 2026-10-10：每 LLM 轮查活注册表），
+    # 留守 prepare；agent_config_load 的 tool_ids 产物经 init→main 跨体次序先于它生效。
+    prepare_names = _prepare_step_names(cfg)
+    assert "pipeline_tool_schema" in prepare_names, (
+        "pipeline_tool_schema 必须每 LLM 轮在 prepare 面在位（动态步，不入 init）"
     )
 
 
-def test_prepare_chain_wires_mode_material_after_agent_config_load():
-    """模式物料步骤紧跟 agent_config_load，且在 tool_schema/prompt_build 之前。
+def test_init_chain_wires_mode_material_after_agent_config_load():
+    """模式物料步骤紧跟 agent_config_load，且跨体先于 prepare 的 tool_schema。
 
     2026-09-24 架构重构：模式物料段与 tool_ids 收窄自 agent 配置装载步抽出归
-    pipeline_mode_material_inject——缺位则模式注入整体断链；错位到 tool_schema 之后
-    则收窄不生效，错位到 prompt_build 之后则模式段进不了本轮提示词。
+    pipeline_mode_material_inject——缺位则模式注入整体断链。成对约束（ADR
+    2026-10-10-pipeline-shape-split-core-type）：agent_config_load 每 run 重建
+    system_prompt 基线，mode_material_inject 非幂等追加、靠基线重建防重复——
+    两者必须同在 init 体且相邻；tool_schema 收窄消费其产物（prepare 面，
+    动态步每轮查活注册表，用户复核裁定 2026-10-10 不入 init）。
     """
-    steps = _prepare_steps()
+    steps = _init_steps()
     assert "pipeline_mode_material_inject" in steps, (
-        "pipeline_mode_material_inject 未接入 autonomous 管道 prepare 链——"
+        "pipeline_mode_material_inject 未接入 autonomous 管道 init 体——"
         "模式物料段/mode 回写/tool_ids 收窄整体断链"
     )
     idx = {name: i for i, name in enumerate(steps)}
     assert idx["pipeline_agent_config_load"] < idx["pipeline_mode_material_inject"], (
         "模式物料步骤须在 agent_config_load 之后（消费其写出的基线工具面与提示词）"
     )
-    assert idx["pipeline_mode_material_inject"] < idx["pipeline_tool_schema"], (
-        "模式物料步骤必须先于 tool_schema：tool_ids 收窄由其叠加"
-    )
-    assert idx["pipeline_mode_material_inject"] < idx["pipeline_prompt_build"], (
-        "模式物料步骤必须先于 prompt_build：模式段追加须先于提示词组装"
+
+
+def test_prompt_build_stays_in_main_prepare():
+    """prompt_build 留在 main.prepare（每 LLM 轮执行）：与 init 体分工不混。"""
+    assert "pipeline_prompt_build" in _prepare_step_names(), (
+        "prompt_build 必须每 LLM 轮执行（不可门化）"
     )
 
 
 # ── 插件契约（agent_config_load → prompt_build 平铺导入，逐出同名裸模块）──
 
-add_plugin_dir("input", "agent_config_load")
+add_plugin_dir("agent_config_load")
 import plugin as agent_config_load_mod  # noqa: E402
 
-add_plugin_dir("input", "prompt_build")
+add_plugin_dir("prompt_build")
 import plugin as prompt_build_mod  # noqa: E402
 
 
@@ -106,7 +122,7 @@ def _chain_system_message(agent_cfg_root: Path, agent_id: str, run_config_load: 
 
 
 def _ctx(state: dict):
-    from pipeline.plugin import PluginContext
+    from _libs.pipeline_base.plugin import PluginContext
 
     return PluginContext(state=state, config={})
 

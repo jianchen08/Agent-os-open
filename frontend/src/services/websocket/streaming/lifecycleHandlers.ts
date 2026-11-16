@@ -42,8 +42,23 @@ export async function handleReconnected(): Promise<void> {
   const streamingPipelineIdSet = new Set<string>(
     Object.keys(streamingState).filter((pid) => streamingState[pid]?.isStreaming),
   )
+  // 无 key 终态补漏（排序键不变量：终态转换必携权威序号）：停止/出错与 WS 断窗
+  // 重叠时，本地终态化先于 stream_end 到达且事件丢失——无 seq 终态消息按排序键
+  // （缺 seq 恒排末尾）永久垫底，重连是最后对账点（tail 增量按 id/cmid 收敛补 seq）。
+  // 只认 user/assistant 终态（completed/interrupted/error/failed）；sending
+  // 是 pending 态不进 keyed 排序域；system 通知 seq 缺省是既有形态，不在此触发。
+  const TERMINAL_WITH_SEQ = new Set(['completed', 'interrupted', 'error', 'failed'])
   for (const [pid, msgs] of Object.entries(messagesByPipeline)) {
-    if ((msgs as any[]).some((m: any) => m.role === 'assistant' && m.status === 'streaming')) {
+    if (
+      msgs.some(
+        (m) =>
+          (m.role === 'assistant' && m.status === 'streaming') ||
+          ((m.role === 'user' || m.role === 'assistant') &&
+            m.sequence == null &&
+            m.status != null &&
+            TERMINAL_WITH_SEQ.has(m.status)),
+      )
+    ) {
       streamingPipelineIdSet.add(pid)
     }
   }
@@ -138,7 +153,7 @@ export async function handleReconnected(): Promise<void> {
       category: 'alert',
       isBlocking: false,
       autoDismissMs: 10000,
-      sourceLabel: '前端',
+      sourceLabel: '系统',
     })
   }
 }

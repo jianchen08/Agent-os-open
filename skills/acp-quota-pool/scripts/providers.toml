@@ -1,0 +1,38 @@
+# ACP 额度池 provider 注册表 —— 派发面唯一机器真源（随技能包播种，同目录相对寻址）。
+# 路由选型的口径（优先序/任务分级/禁接规则）真源在 SKILL.md；本文件只承载
+# spawn 面与记账元数据。backend 取值：acp（原生 ACP 握手+会话）/ oneshot
+# （一次性 CLI：args 里 {goal} 占位符由引擎替换为派发目标全文，无会话）。
+# strength 取值：baseline（≥GLM-5.3-Flash）/ weak / unverified
+# （未对标按 weak 对待，S2 禁接）。白嫖政策会漂移——quota_model 带 as-of 日期。
+version = 1
+
+[providers.opencode]
+name = "OpenCode"
+command = "opencode"
+args = ["acp"]
+timeout_seconds = 300
+cost_class = "free"
+strength = "unverified"
+quota_model = "Zen 免费模型档（按模型计费，控制台对账）；本机 1.18.18 原生 ACP（opencode acp）"
+quota_model_as_of = "2026-10-15"
+
+# zcode one-shot 后端：spawn `zcode -p <goal> --json`，stdout = 单个 JSON 结果对象
+# （response 字段承载答复；错误时 exit≠0 且 stderr 可能非 JSON——引擎容错解析）。
+# -p 无交互审批面，--mode yolo 即免审批注册（只读验证任务用 --mode plan）。
+# 无会话续做（无 session_id）；无头实际落 GLM-5.3（standalone 目录只取首个
+# builtinModelIds，Flash 不可选——上游 zai-org/feedback#744 在案）。
+[providers.zcode]
+name = "ZCode"
+command = "node"
+args = [
+    'C:\Program Files\ZCode\resources\glm\zcode.cjs',
+    "-p", "{goal}",
+    "--json",
+    "--mode", "yolo",
+]
+backend = "oneshot"
+timeout_seconds = 300
+cost_class = "paid"
+strength = "unverified"
+quota_model = "GLM coding plan 额度（用户侧 1.5x 促销）；无头实际落 GLM-5.3；额度读取面=官方 glm-plan-usage（M1.5 接账本）"
+quota_model_as_of = "2026-10-16"

@@ -23,6 +23,7 @@ vi.mock('@/services/api/tasks', () => pmMod.tasksApi())
 vi.mock('@/hooks/queries/usePipelineRunsQuery', () => pmMod.pipelineRunsQuery())
 vi.mock('@/hooks/queries/useAllTasksQuery', () => pmMod.allTasksQuery())
 vi.mock('@/hooks/queries/useSessionsQuery', () => pmMod.sessionsQuery())
+vi.mock('@/hooks/queries/useAgentsQuery', () => pmMod.agentsQuery())
 
 /** 播种一条「runs 窗口外 + state 行在场」的崩溃残留任务（BUG-2b 幽灵形态） */
 function seedGhostTask(taskStatus: string, runStatus: string | undefined) {

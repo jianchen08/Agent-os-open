@@ -19,5 +19,6 @@ pub mod verify;
 
 pub use invoker::{
     builtin_group_host_dir, find_group_host_dir, find_venv_interpreter, is_cohost_member,
-    is_plain_python_command, HostProcSnapshot, PluginInvokerImpl,
+    is_plain_python_command, HostProcSnapshot, PluginInvokerImpl, PluginScopedRouter,
+    SpawnBreakerNotice, SpawnRecoveredNotice,
 };

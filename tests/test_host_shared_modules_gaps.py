@@ -23,7 +23,6 @@
   Linux XDG 覆盖）；空白 env 视为未设。
 - state_fields：JSON 字符串还原、required 语义下的解析失败抛错、
   optional 降级留痕。
-- bounded_dict：超限逐出最旧、TTL 清扫、env 非法值回落默认。
 - uploads_path：UPLOADS_DIR 覆盖优先；/uploads/ 前缀与 basename 穿越拒绝。
 
 结构性不可达/环境依赖残留（逐条说明，勿硬凑）：
@@ -34,10 +33,6 @@
 3. ``project_registry.remove_project_folder`` 的 onerror 回退分支只在
    Python < 3.12 生效（``shutil.rmtree`` 无 onexc 参数）；本环境 3.12 恒走
    onexc。以 monkeypatch 替换 rmtree 签名验证分发判据与回退闭包契约。
-4. ``bounded_dict.BoundedDict.__setitem__`` 的 ``if oldest is None: break``
-   （第 90 行）不可达：``__init__`` 强制 ``_max > 0``（非法值回落 1024），
-   而进入该 while 的前置条件是 ``len(_data) >= _max >= 1``——``_data`` 必非空，
-   ``min(..., default=None)`` 恒不返回 None。纯防御性护栏，保留不删。
 """
 
 from __future__ import annotations
@@ -95,14 +90,14 @@ class TestRegistryDataDirResolution:
 
     def test_explicit_dir_wins_over_env(self, tmp_path: Path, shared: Path,
                                         monkeypatch: pytest.MonkeyPatch) -> None:
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         monkeypatch.setenv("TASKS_STORAGE_DIR", str(tmp_path / "env_root"))
 
         assert pr.registry_data_dir(tmp_path / "explicit") == (tmp_path / "explicit" / "projects")
 
     def test_env_dir_used_when_no_explicit(self, tmp_path: Path, shared: Path,
                                            monkeypatch: pytest.MonkeyPatch) -> None:
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         monkeypatch.setenv("TASKS_STORAGE_DIR", str(tmp_path / "env_root"))
 
         assert pr.registry_data_dir() == tmp_path / "env_root" / "projects"
@@ -110,7 +105,7 @@ class TestRegistryDataDirResolution:
     def test_tenant_root_used_when_no_env(self, tmp_path: Path, shared: Path,
                                           monkeypatch: pytest.MonkeyPatch) -> None:
         """无显式与 env → 多租户根 data/{tenant}/tasks（AGENTOS_DATA_DIR 重定向）。"""
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         monkeypatch.setenv("AGENTOS_DATA_DIR", str(tmp_path / "data"))
 
         assert pr.registry_data_dir(tenant_id="acme") == (
@@ -124,7 +119,7 @@ class TestRegistryDataDirResolution:
 class TestRegistryLoadRobustness:
     def test_non_dict_yaml_line_skipped(self, tmp_path: Path, shared: Path) -> None:
         """YAML 解析成列表/标量的登记文件不是登记行 → 跳过且不炸。"""
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         data_dir = tmp_path / "tasks"
         reg = pr.ProjectRegistry(data_dir=data_dir)
         projects_dir = data_dir / "projects"
@@ -139,7 +134,7 @@ class TestRegistryLoadRobustness:
     def test_load_paths_skips_non_dict_and_pathless(self, tmp_path: Path, shared: Path,
                                                     monkeypatch: pytest.MonkeyPatch) -> None:
         """load_project_paths：非 dict 跳过；id 缺失回落文件名；path 空不进映射。"""
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         data_dir = tmp_path / "tasks"
         projects_dir = data_dir / "projects"
         projects_dir.mkdir(parents=True)
@@ -161,7 +156,7 @@ class TestRegistryLoadRobustness:
 class TestRegistryPersistence:
     def test_persist_is_atomic_and_roundtrips(self, tmp_path: Path, shared: Path) -> None:
         """save 写盘后无 .tmp 残留，磁盘内容即登记行（跨实例真往返）。"""
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         reg = pr.ProjectRegistry(data_dir=tmp_path / "tasks")
         saved = reg.save(pr.ProjectModel(id="abc123", title="原题", path="D:/p"))
 
@@ -177,7 +172,7 @@ class TestRegistryPersistence:
 
     def test_delete_missing_file_still_reports_true(self, tmp_path: Path, shared: Path) -> None:
         """内存行存在而磁盘文件缺席（手工删/同步丢失）→ delete 仍成功报 True。"""
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         reg = pr.ProjectRegistry(data_dir=tmp_path / "tasks")
         reg.save(pr.ProjectModel(id="gone00000001", title="t", path="D:/g"))
         (tmp_path / "tasks" / "projects" / "gone00000001.yaml").unlink()
@@ -190,7 +185,7 @@ class TestIsolationConfigPath:
     def test_env_config_root_hit(self, tmp_path: Path, shared: Path,
                                  monkeypatch: pytest.MonkeyPatch) -> None:
         """AGENTOS_CONFIG_ROOT 下存在 isolation_config.yaml → 直接用该文件。"""
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         cfg = tmp_path / "deploy" / "config"
         target = cfg / "plugins" / "isolation" / "isolation_config.yaml"
         target.parent.mkdir(parents=True)
@@ -202,7 +197,7 @@ class TestIsolationConfigPath:
     def test_fallback_when_env_path_absent(self, tmp_path: Path, shared: Path,
                                            monkeypatch: pytest.MonkeyPatch) -> None:
         """env 指向的路径无该文件 → 回落祖先链探针（本仓布局命中仓库真文件）。"""
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(tmp_path / "nowhere" / "config"))
 
         resolved = pr._isolation_config_path()
@@ -214,7 +209,7 @@ class TestIsolationConfigPath:
 class TestWorkspaceBaseDir:
     def test_absolute_root_used_verbatim(self, tmp_path: Path, shared: Path,
                                          monkeypatch: pytest.MonkeyPatch) -> None:
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         cfg = tmp_path / "config"
         target = cfg / "plugins" / "isolation" / "isolation_config.yaml"
         target.parent.mkdir(parents=True)
@@ -227,7 +222,7 @@ class TestWorkspaceBaseDir:
     def test_relative_root_joined_to_project_root(self, tmp_path: Path, shared: Path,
                                                   monkeypatch: pytest.MonkeyPatch) -> None:
         """相对 root 拼项目根（project_root_of_tree 真值），非 CWD。"""
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         cfg = tmp_path / "proj" / "config"
         target = cfg / "plugins" / "isolation" / "isolation_config.yaml"
         target.parent.mkdir(parents=True)
@@ -251,7 +246,7 @@ class TestWorkspaceBaseDir:
         self, tmp_path: Path, shared: Path,
         root_value: str, expect_default: bool, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         cfg = tmp_path / "proj" / "config"
         target = cfg / "plugins" / "isolation" / "isolation_config.yaml"
         target.parent.mkdir(parents=True)
@@ -265,7 +260,7 @@ class TestWorkspaceBaseDir:
     def test_unreadable_config_warns_and_defaults(self, tmp_path: Path, shared: Path,
                                                   monkeypatch: pytest.MonkeyPatch) -> None:
         """配置文件读取异常 → warning 留痕 + 缺省 .ai_workspaces（不抛）。"""
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         cfg = tmp_path / "proj" / "config"
         target = cfg / "plugins" / "isolation" / "isolation_config.yaml"
         target.parent.mkdir(parents=True)
@@ -291,11 +286,11 @@ class TestSlugify:
         ],
     )
     def test_slug_rules(self, title: str, expected: str, shared: Path) -> None:
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         assert pr._slugify(title) == expected
 
     def test_slug_capped_at_50(self, shared: Path) -> None:
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         slug = pr._slugify("x" * 120)
         assert len(slug) == 50
         assert slug == "x" * 50
@@ -306,7 +301,7 @@ class TestEnsureProjectFolderFailures:
         self, tmp_path: Path, shared: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """git init 非零退出 → RuntimeError 带上目标路径与 stderr（fail-closed）。"""
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
 
         class _Result:
             returncode = 128
@@ -323,7 +318,7 @@ class TestEnsureProjectFolderFailures:
         self, tmp_path: Path, shared: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """mkdir 失败（如父路径被文件占位）→ RuntimeError 而非裸 OSError。"""
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         blocker = tmp_path / "blocker"
         blocker.write_text("x", encoding="utf-8")
 
@@ -334,7 +329,7 @@ class TestEnsureProjectFolderFailures:
         self, tmp_path: Path, shared: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """缺省 slug 目录已存在但为空 → 复用（不递增后缀）。"""
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         base = tmp_path / "ws"
         (base / "projects" / "标题").mkdir(parents=True)
         monkeypatch.setattr(pr, "workspace_base_dir", lambda: base)
@@ -352,12 +347,12 @@ class TestRemoveProjectFolderGuards:
     def test_drive_root_refused_on_windows(self, path: str, shared: Path) -> None:
         if os.name != "nt":
             pytest.skip("盘符根受保护判定仅 Windows 生效")
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         assert pr.remove_project_folder(path) is False
 
     def test_workspace_base_itself_refused(self, tmp_path: Path, shared: Path,
                                            monkeypatch: pytest.MonkeyPatch) -> None:
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         base = tmp_path / "ws"
         base.mkdir()
         monkeypatch.setattr(pr, "workspace_base_dir", lambda: base)
@@ -366,14 +361,14 @@ class TestRemoveProjectFolderGuards:
         assert base.is_dir()
 
     def test_missing_path_returns_false(self, tmp_path: Path, shared: Path) -> None:
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         assert pr.remove_project_folder(str(tmp_path / "nope")) is False
 
     def test_readonly_tree_removed_via_unlock_retry(
         self, tmp_path: Path, shared: Path,
     ) -> None:
         """只读文件（git 对象形态）经 onexc 解锁回调后仍能整体删除。"""
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         victim = tmp_path / "victim" / "objects"
         victim.mkdir(parents=True)
         readonly = victim / "pack.idx"
@@ -387,7 +382,7 @@ class TestRemoveProjectFolderGuards:
         self, tmp_path: Path, shared: Path,
     ) -> None:
         """回调契约：PermissionError → 解锁后重试；其它异常原样抛出。"""
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         target = tmp_path / "f.txt"
         target.write_text("x", encoding="utf-8")
         calls: list[str] = []
@@ -403,42 +398,34 @@ class TestRemoveProjectFolderGuards:
         assert calls == [str(target)], "非权限异常不得触发重试"
 
 
-class TestPurgeLegacyContainerDataGaps:
+class TestPurgeLegacyWorkspaceDirsGaps:
+    """container_* 目录清除（T6a 拆分后目录半 = purge_legacy_workspace_dirs）。"""
+
     def test_non_dir_container_entry_skipped(self, tmp_path: Path, shared: Path,
                                              monkeypatch: pytest.MonkeyPatch) -> None:
         """container_* 同名文件（非目录）跳过，不计入 removed_dirs。"""
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         base = tmp_path / "ws"
         base.mkdir()
         (base / "container_notadir").write_text("x", encoding="utf-8")
         monkeypatch.setattr(pr, "workspace_base_dir", lambda: base)
 
-        class _Storage:
-            def list_all(self) -> list[Any]:
-                return []
-
-        stats = pr.purge_legacy_container_data(_Storage())
-
-        assert stats == {"removed_containers": 0, "detached_children": 0, "removed_dirs": 0}
+        assert pr.purge_legacy_workspace_dirs() == 0
         assert (base / "container_notadir").exists()
 
     def test_absent_ws_base_is_noop(self, tmp_path: Path, shared: Path,
                                     monkeypatch: pytest.MonkeyPatch) -> None:
         """工作空间基目录不存在 → 目录段整体跳过（不炸）。"""
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         monkeypatch.setattr(pr, "workspace_base_dir", lambda: tmp_path / "gone")
 
-        class _Storage:
-            def list_all(self) -> list[Any]:
-                return []
-
-        assert pr.purge_legacy_container_data(_Storage())["removed_dirs"] == 0
+        assert pr.purge_legacy_workspace_dirs() == 0
 
     def test_rmtree_failure_is_counted_out_not_raised(
         self, tmp_path: Path, shared: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """目录删除失败 → 留痕并跳过（下次启动重试），不计入统计、不向上抛。"""
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         base = tmp_path / "ws"
         (base / "container_c9").mkdir(parents=True)
         monkeypatch.setattr(pr, "workspace_base_dir", lambda: base)
@@ -448,13 +435,7 @@ class TestPurgeLegacyContainerDataGaps:
 
         monkeypatch.setattr(shutil, "rmtree", _boom)
 
-        class _Storage:
-            def list_all(self) -> list[Any]:
-                return []
-
-        stats = pr.purge_legacy_container_data(_Storage())
-
-        assert stats["removed_dirs"] == 0
+        assert pr.purge_legacy_workspace_dirs() == 0
         assert (base / "container_c9").is_dir()
 
 
@@ -498,11 +479,14 @@ class TestTenantDataBaseResolution:
 
     def test_config_users_repo_default(self, shared: Path,
                                        monkeypatch: pytest.MonkeyPatch) -> None:
+        """用户空间不可解析（user_config_dir None）→ 仓内 config/users 兜底。
+
+        与 _default_data_base 的兜底用例同构，显式钉解析层：仅清 env 不够——
+        Linux XDG 兜底 Path.home()/.local/share 恒可得（Windows 靠 APPDATA 被
+        清才落 None），平台差异不该决定兜底分支是否可达。
+        """
         td = importlib.import_module("tenant_data")
         monkeypatch.delenv("AGENTOS_CONFIG_USERS_DIR", raising=False)
-        # legacy 兜底的前置是"用户空间不可得"；Linux 上 _os_data_dir 恒回落
-        # Path.home()（user_space POSIX 分支），必须显式钉死才能触发仓库回退
-        # （写法同 test_default_data_base_repo_fallback_when_user_space_unresolved）
         monkeypatch.setattr(td.user_space, "user_config_dir", lambda: None)
 
         assert td._default_config_users_base() == _REPO_ROOT / "config" / "users"
@@ -1131,95 +1115,6 @@ class TestStateFields:
         assert sf.as_dict("   ", field="f") is None
 
 
-# ══════════════════════════ bounded_dict ══════════════════════════
-
-
-class TestBoundedDict:
-    def test_max_entries_evicts_oldest(self, shared: Path) -> None:
-        """超 MAX 逐出最旧（按 ts），新写入恒在且长度恒 ≤ MAX。"""
-        bd = importlib.import_module("bounded_dict")
-        now = {"t": 1000.0}
-        d: Any = bd.BoundedDict(ttl_seconds=3600.0, max_entries=3, clock=lambda: now["t"])
-
-        for i in range(6):
-            now["t"] += 1.0
-            d[f"k{i}"] = {"i": i}
-
-        assert len(d) == 3
-        assert "k5" in d and "k0" not in d
-        assert [d[k]["i"] for k in d] == [3, 4, 5]
-
-    def test_ttl_sweep_on_write(self, shared: Path) -> None:
-        """写时清扫过期条目：超 TTL 的旧条目在下一次写入时消失。"""
-        bd = importlib.import_module("bounded_dict")
-        now = {"t": 1000.0}
-        d: Any = bd.BoundedDict(ttl_seconds=10.0, max_entries=100, clock=lambda: now["t"])
-        d["old"] = {"v": 1}
-        now["t"] += 11.0
-        d["new"] = {"v": 2}
-
-        assert "old" not in d
-        assert "new" in d
-
-    def test_entry_gets_ts_stamp_without_mutating_caller(self, shared: Path) -> None:
-        """写入盖 ts（副本），调用方传入的 dict 不被改动。"""
-        bd = importlib.import_module("bounded_dict")
-        now = {"t": 42.0}
-        d: Any = bd.BoundedDict(ttl_seconds=3600.0, max_entries=10, clock=lambda: now["t"])
-        source = {"payload": "x"}
-        d["k"] = source
-
-        assert d["k"]["ts"] == 42.0
-        assert "ts" not in source
-
-    def test_read_surface_matches_dict_semantics(self, shared: Path) -> None:
-        """读面与内置 dict 一致：get/contains/迭代/删除/KeyError。"""
-        bd = importlib.import_module("bounded_dict")
-        d: Any = bd.BoundedDict(ttl_seconds=3600.0, max_entries=10, clock=lambda: 1.0)
-        d["a"] = {"n": 1}
-        d["b"] = {"n": 2}
-
-        assert sorted(iter(d)) == ["a", "b"]
-        assert len(d) == 2
-        del d["a"]
-        assert "a" not in d
-        with pytest.raises(KeyError):
-            _ = d["missing"]
-
-    @pytest.mark.parametrize(
-        ("ttl_env", "max_env", "expect_ttl", "expect_max"),
-        [
-            ("60", "5", 60.0, 5),
-            ("abc", "xyz", 86400.0, 1024),   # 非数值 → 默认
-            ("0", "0", 86400.0, 1024),       # <=0 → 默认（防禁用收敛）
-            ("-3", "-9", 86400.0, 1024),
-            ("", "", 86400.0, 1024),         # 空 → 默认
-        ],
-    )
-    def test_env_overrides_with_invalid_fallback(
-        self, ttl_env: str, max_env: str, expect_ttl: float, expect_max: int,
-        shared: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """env 覆盖 TTL/MAX；非法值回落默认（不可被配置禁用收敛）。"""
-        bd = importlib.import_module("bounded_dict")
-        monkeypatch.setenv(bd._TTL_ENV, ttl_env)
-        monkeypatch.setenv(bd._MAX_ENV, max_env)
-
-        d: Any = bd.BoundedDict()
-        d["k"] = {"v": 1}
-
-        assert d._ttl == expect_ttl
-        assert d._max == expect_max
-
-    def test_explicit_params_beat_env(self, shared: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        bd = importlib.import_module("bounded_dict")
-        monkeypatch.setenv(bd._TTL_ENV, "999")
-        monkeypatch.setenv(bd._MAX_ENV, "999")
-
-        d: Any = bd.BoundedDict(ttl_seconds=7.0, max_entries=2, clock=lambda: 1.0)
-        assert (d._ttl, d._max) == (7.0, 2)
-
-
 # ══════════════════════════ uploads_path ══════════════════════════
 
 
@@ -1297,7 +1192,7 @@ class TestBareNameBootstrap:
     @pytest.mark.parametrize(
         ("module_file", "module_name", "sibling"),
         [
-            ("project_registry.py", "boot_probe_project_registry", "ProjectRegistry"),
+            ("project_manager/project_registry.py", "boot_probe_pm_registry", "ProjectRegistry"),
             ("tenant_data.py", "boot_probe_tenant_data", "tenant_data_root"),
             ("uploads_path.py", "boot_probe_uploads_path", "resolve_uploads_dir"),
         ],
@@ -1331,7 +1226,7 @@ class TestIsolationConfigPathFallback:
     ) -> None:
         """env 无效且 __file__ 祖先链无该配置文件 → 返回包相对路径兜底
         （路径形态仍指向 isolation_config.yaml，调用方读取失败走缺省值）。"""
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         deploy = tmp_path / "deploy"
         deploy.mkdir()
         monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(tmp_path / "elsewhere" / "config"))
@@ -1368,7 +1263,7 @@ class TestRemoveProjectFolderSignatureDispatch:
         本环境（3.12）恒走 onexc 分支，回退分支只在 3.11 及以下真实生效；
         以签名不含 onexc 的替身验证分发判据与回退闭包契约本身。
         """
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         victim = tmp_path / "victim"
         victim.mkdir()
         (victim / "f.txt").write_text("x", encoding="utf-8")
@@ -1384,7 +1279,7 @@ class TestRemoveProjectFolderSignatureDispatch:
         self, tmp_path: Path, shared: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """回退闭包把 (type, value, tb) 的 value 位解包为待解锁路径。"""
-        pr = importlib.import_module("project_registry")
+        pr = importlib.import_module("project_manager.project_registry")  # T6a：吸收进 project_manager
         victim = tmp_path / "victim"
         victim.mkdir()
         ro = victim / "ro.txt"
@@ -1411,27 +1306,29 @@ class TestRemoveProjectFolderSignatureDispatch:
 
 
 class TestNestedModuleBootstrap:
-    """分组子目录模块顶部的 sys.path 自举行（coverage 靶行，file-path 装载语境）。
+    """插件子目录模块顶部的 sys.path 自举行（coverage 靶行，file-path 装载语境）。
 
-    与 TestBareNameBootstrap 同型，但靶模块嵌在子目录、自举靶不同：
-    - system/scene/persistence.py:25、system/review/models.py:20、
-      system/artifacts/models.py:22 —— 上溯两级自举 plugins/shared
-      （模块内 time_iso/tenant_data 等共享裸模块 import 的路径前提）；
-    - pipeline/input/prompt_build/server.py:21 —— 自举靶 = bootstrap 返回的
-      group_root（插件目录父级 pipeline/input/；bootstrap 本身只注入插件
-      目录与共享根、组根只返回不注入，见 ADR 2026-09-08-plugin-bootstrap-sink
+    与 TestBareNameBootstrap 同型，靶模块为平铺插件的内嵌模块、自举靶 =
+    plugins/shared：
+    - scene/persistence.py、review/models.py、artifacts/models.py —— 上溯
+      1 级自举 plugins/shared（模块内 time_iso/tenant_data 等共享裸模块
+      import 的路径前提）；
+    - prompt_build/server.py —— 自举靶 = bootstrap 返回的 group_root
+      （平铺后插件目录父级即 plugins/shared；bootstrap 本身只注入插件目录
+      与共享根、组根只返回不注入，见 ADR 2026-09-08-plugin-bootstrap-sink
       决策 1，兄弟插件裸名导入靠这一行补位）。
 
     真实输入下仅「靶根缺失」初态可达（经文件路径 spec 装载——装载本身不依赖
     sys.path——且靶根此前不在 sys.path）。逐例先按 normcase 摘除全部靶根
     条目，再以唯一模块名 fresh import，断言装载完成后靶根回到 sys.path
-    （normcase 比对）且模块内裸名 import 可用；finally 恢复 sys.path
+    （normcase 比对）且模块内裸名 import 可用；scene 例的
+    `from scene.models import Scene` 在自举行之前执行且其组根与靶同目录
+    （平铺后均为 plugins/shared，sys.path 前置供给会让「靶根缺失」前置
+    失真），改以 sys.modules 预热供给。finally 恢复 sys.path
     （monkeypatch 整表替换自动还原）与 sys.modules（预逐出裸名回填、装载期
     新增的仓内模块逐出）。
     """
 
-    _SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared" / "system"
-    _PIPELINE_INPUT_DIR = _SHARED_DIR / "pipeline" / "input"
     _SHARED_PREFIX = os.path.normcase(os.path.abspath(str(_SHARED_DIR))) + os.sep
 
     @classmethod
@@ -1461,18 +1358,18 @@ class TestNestedModuleBootstrap:
                 sys.modules[name] = module
 
     @pytest.mark.parametrize(
-        ("rel_file", "module_name", "target", "precondition_dir", "sibling_attrs"),
+        ("rel_file", "module_name", "target", "preseed_module", "sibling_attrs"),
         [
             pytest.param(
-                "system/scene/persistence.py",
+                "scene/persistence.py",
                 "boot_probe_scene_persistence",
                 _SHARED_DIR,
-                _SYSTEM_DIR,  # 自举行之前 scene.models 裸名 import 的组根前提
+                "scene.models",  # 自举行之前的包名 import（persistence.py:15）的缓存前提
                 ("ScenePersistence", "tenant_data_root"),
                 id="scene-persistence",
             ),
             pytest.param(
-                "system/review/models.py",
+                "review/models.py",
                 "boot_probe_review_models",
                 _SHARED_DIR,
                 None,
@@ -1480,7 +1377,7 @@ class TestNestedModuleBootstrap:
                 id="review-models",
             ),
             pytest.param(
-                "system/artifacts/models.py",
+                "artifacts/models.py",
                 "boot_probe_artifacts_models",
                 _SHARED_DIR,
                 None,
@@ -1488,9 +1385,9 @@ class TestNestedModuleBootstrap:
                 id="artifacts-models",
             ),
             pytest.param(
-                "pipeline/input/prompt_build/server.py",
+                "prompt_build/server.py",
                 "boot_probe_prompt_build_server",
-                _PIPELINE_INPUT_DIR,
+                _SHARED_DIR,
                 None,
                 ("plugin", "PromptBuildPlugin"),
                 id="prompt-build-server",
@@ -1502,7 +1399,7 @@ class TestNestedModuleBootstrap:
         rel_file: str,
         module_name: str,
         target: Path,
-        precondition_dir: Path | None,
+        preseed_module: str | None,
         sibling_attrs: tuple[str, ...],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1511,14 +1408,18 @@ class TestNestedModuleBootstrap:
         norm = os.path.normcase
         target_key = norm(str(target))
 
-        desired_path = list(sys.path)
-        if precondition_dir is not None:
-            desired_path.insert(0, str(precondition_dir))
-        desired_path = [p for p in desired_path if norm(p) != target_key]
+        modules_before = dict(sys.modules)
+        if preseed_module is not None:
+            # 唯一 sys.path 窗口预热包名成员进 sys.modules（随后照常摘靶）；
+            # 装载期 `from scene.models import ...` 走缓存，零 sys.path 依赖。
+            seed_path = [p for p in sys.path if norm(p) != target_key]
+            seed_path.insert(0, str(_SHARED_DIR))
+            monkeypatch.setattr(sys, "path", seed_path)
+            importlib.import_module(preseed_module)
+        desired_path = [p for p in sys.path if norm(p) != target_key]
         monkeypatch.setattr(sys, "path", desired_path)
         assert target_key not in {norm(p) for p in sys.path}, "前置：靶根已彻底摘除"
 
-        modules_before = dict(sys.modules)
         sys.modules.pop("plugin", None)  # 裸名槽位防串扰（finally 回填）
 
         spec = importlib.util.spec_from_file_location(module_name, str(module_path))

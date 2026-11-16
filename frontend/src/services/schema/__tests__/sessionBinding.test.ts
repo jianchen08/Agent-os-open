@@ -44,7 +44,7 @@ describe('withSessionBinding — 会话绑定并入 execution_context', () => {
     const merged = withSessionBinding(ctx, binding)
     expect(merged).toEqual({
       workspace: { source_path: '/w' },
-      mode: 'roleplay',
+      mode: ['roleplay'],
       roleplay_greeting: '「欢迎光临！」',
       roleplay_user_persona: '北地来的佣兵。',
     })
@@ -60,7 +60,7 @@ describe('withSessionBinding — 会话绑定并入 execution_context', () => {
 
   it('既有 mode 键被覆写为绑定模式键（会话身份出生即定，不留旧值）', () => {
     const ctx: Record<string, unknown> = { mode: 'coding' }
-    expect(withSessionBinding(ctx, { mode: 'writing' })).toEqual({ mode: 'writing' })
+    expect(withSessionBinding(ctx, { mode: 'writing' })).toEqual({ mode: ['writing'] })
   })
 
   it('mode 空串（agent 绑定而模式缺席，如遗留快照）→ 不带 mode 键，仅并入扩展键', () => {
@@ -73,7 +73,7 @@ describe('withSessionBinding — 会话绑定并入 execution_context', () => {
   })
 
   it('空扩展上下文（缺省）→ 仅 mode 键', () => {
-    expect(withSessionBinding(undefined, { mode: 'writing' })).toEqual({ mode: 'writing' })
+    expect(withSessionBinding(undefined, { mode: 'writing' })).toEqual({ mode: ['writing'] })
   })
 })
 
@@ -84,7 +84,7 @@ describe('composeSendIdentity — 发送链三优先级', () => {
     expect(executionContext).toEqual({
       workspace: { source_path: '/w' },
       roleplay_persona: '银发碧眼的月精灵法师。',
-      mode: 'roleplay',
+      mode: ['roleplay'],
     })
     expect(executionContext).not.toHaveProperty('roleplay_greeting')
     expect(agentId).toBeUndefined()
@@ -95,7 +95,7 @@ describe('composeSendIdentity — 发送链三优先级', () => {
     const { executionContext, agentId } = composeSendIdentity(ctx, null, binding)
     expect(executionContext).toEqual({
       workspace: { source_path: '/w' },
-      mode: 'roleplay',
+      mode: ['roleplay'],
       roleplay_greeting: '「欢迎光临！」',
       roleplay_user_persona: '北地来的佣兵。',
     })
@@ -106,7 +106,7 @@ describe('composeSendIdentity — 发送链三优先级', () => {
     const degraded = { ...possessed, personaKey: null }
     const { executionContext, agentId } = composeSendIdentity(undefined, degraded, binding)
     expect(executionContext).toEqual({
-      mode: 'roleplay',
+      mode: ['roleplay'],
       roleplay_greeting: '「欢迎光临！」',
       roleplay_user_persona: '北地来的佣兵。',
     })
@@ -131,7 +131,7 @@ describe('composeSendIdentity — 发送链三优先级', () => {
       { ...possessed, personaText: '' },
       binding,
     )
-    expect(executionContext).toEqual({ roleplay_persona: '', mode: 'roleplay' })
+    expect(executionContext).toEqual({ roleplay_persona: '', mode: ['roleplay'] })
     expect(agentId).toBeUndefined()
   })
 })

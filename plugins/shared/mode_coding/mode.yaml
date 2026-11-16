@@ -1,0 +1,53 @@
+# 编码模式声明面 mode.yaml（2026-09-28 升格自 profile.yaml；设计真值 docs/working/模式包工作模式设计_20260928.md D3。B 部类物料：由用户维护；出厂种子随 mode_coding 插件内打包，
+# 经 mode.get_profile 服务透出；suite 路径相对项目根）
+mode: coding
+name: 编码模式
+# description = 主 agent 唯一域路由知识（批 F3 接管口径：什么任务归我/直派谁/编排链要点；措辞定版 = 渲染缓存前缀稳定）
+description: 代码实现/修复/调试/代码审查类任务。一律派编排链 mode_coding/programming_orchestrator_agent_v2（执行型编排 L2，自带代码审查/功能验证必选外包给 L3 下级；2026-10-23 用户裁定：写代码的任务都给执行v2，不再直派 L3 执行者——L3 无 task_submit，收尾/审查类任务书会撞派发死墙）
+icon: 🔨                # 选择器选项图标（批 G⑤；emoji 随声明面透出 modes API/mode.list）
+# 方案规划段领域规格（批 B2 注册化）：值 = 技能名（包内 skills/ 随包，经工作空间
+# 并集快照按名可读）；方案段骨架第零步按本键查注册表（ADR 2026-10-09 决策 4）
+plan_spec: skill-solution-software
+panel_page_id: coding_delivery
+chain:
+  entry: main
+  # v2 是执行型编排：自身承担编码/测试/调试，审查与功能验证外包在其 team
+  # 声明内表达，链终点即 v2；执行者池声明已全模式退役（P1，六包同批收口）
+  expected_path: [main, mode_coding/programming_orchestrator_agent_v2]
+  entry_override: null
+suite:
+  smoke: config/self_evolve/suites/dev/smoke.yaml
+  external: config/self_evolve/suites/external/swe_verified_seed.yaml
+  # external = 评估主样本集（SWE-bench Verified 15 题种子，ADR
+  # 2026-09-16-external-dataset-sourcing）；执行前置：物料区
+  # external/prep_swe_repos.sh 预置仓库 clone。case_timeout 900 对该档
+  # 不够（issue 修复含环境准备），跑 external 档时按 suite 内
+  # settle_timeout_seconds=3600 收敛等待。
+  full: null          # 二期补全 25-30 题
+material_scope:
+  dispatch_stage:
+    - config/agents/main/task_dispatch_guide.md
+  execution_stage:
+    - plugins/shared/mode_coding/agents/
+levers:
+  tool_misselect: {execution_stage: [tool_ids, dispatch_guide]}
+  orchestration_runaway: {orchestration_stage: [pipeline_steps, breaker_params]}
+  format_violation: {execution_stage: [persona, prompt_skeleton]}
+  eval_no_settle: {evaluation_stage: [evaluation_params]}
+verifier_families: [pytest_exit, file_assert, test_lane]
+# ── 任务级门禁声明（L0 通用层，2026-10-28；方案 §3.2 / ADR 2026-10-27 步骤 2）──
+# 与 verifier_families 分工：verifier_families 服务自进化 suite 回归，ci: 是任务
+# 级门禁声明（二期收敛为单一声明，本期分立防双源语义混淆）。
+# base 引用的指标 id 单源 = config/plugins/evaluation/evaluation_metrics.yaml
+# （防漂移测试 tests/plugins/shared/test_l0_metrics_declaration.py）。
+# 观察模式 gate_mode=false：L0 结果只记录不阻塞，收集误报率；数据支撑后另行
+# 评估切 blocking（ADR 步骤 6，挂触发信号）。
+# domain 段（L1 域门禁 lint/typecheck/test_lane_smoke）待 L1 落位后补，防悬空引用。
+ci:
+  base: [artifact_schema_check, antipattern_scan, scope_consistency]
+  gate_mode: false
+weights: {success: 1.0, cost: 0.2, rounds: 0.1}
+budget:
+  case_timeout: 900
+  round_tokens: 2000000
+  proposals_per_session: 3

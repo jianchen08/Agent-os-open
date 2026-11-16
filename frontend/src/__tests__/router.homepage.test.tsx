@@ -116,6 +116,7 @@ import { createRouter } from '../router'
 import { saveSessionExecutionOptions } from '../services/sessionExecutionOptions'
 import { useAgentTabStore } from '../stores/agentTabStore'
 import { useAuthStore } from '../stores/authStore'
+import { useChatInputStore } from '../stores/chatInputStore'
 import { useInteractionStore, type PendingInteraction } from '../stores/interactionStore'
 import { useNotificationStore } from '../stores/notificationStore'
 import { usePendingInputStore } from '../stores/pendingInputStore'
@@ -304,6 +305,42 @@ describe('handleCreateSession（欢迎页入口）', () => {
     fireEvent.click(screen.getByRole('button', { name: /开始使用/ }))
     expect(mockOpenWorkspacePanel).toHaveBeenCalledWith('/p/get_started')
   })
+
+  it('创建 await 窗口：新会话卡 disabled +「创建中...」（防连点）', async () => {
+    let resolveCreate: (v: { id: string; title: string }) => void = () => {}
+    mockCreateSession.mockReturnValue(
+      new Promise((resolve) => {
+        resolveCreate = resolve
+      }),
+    )
+    await renderHome()
+
+    const card = screen.getByTestId('welcome-create-session')
+    expect(card).toBeEnabled()
+    fireEvent.click(card)
+
+    // await 窗口内：卡片禁用 + 文案切换（再点不触发第二次建会话）
+    expect(screen.getByTestId('welcome-create-session')).toBeDisabled()
+    expect(screen.getByText('创建中...')).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('welcome-create-session'))
+    expect(mockCreateSession).toHaveBeenCalledTimes(1)
+
+    resolveCreate({ id: 's-new', title: '新会话' })
+    await screen.findByTestId('chat-probe')
+    expect(useSessionStore.getState().activeSessionId).toBe('s-new')
+  })
+
+  it('创建失败：卡片复位可重试（不残留 disabled）', async () => {
+    mockCreateSession.mockRejectedValue({ message: '后端炸了' })
+    await renderHome()
+
+    fireEvent.click(screen.getByTestId('welcome-create-session'))
+    await waitFor(() =>
+      expect(screen.getByTestId('welcome-create-session')).toBeEnabled(),
+    )
+    expect(screen.queryByText('创建中...')).not.toBeInTheDocument()
+    expect(screen.getByText('新会话')).toBeInTheDocument()
+  })
 })
 
 /** 捕获 chatProps 上的 onSendMessage（渲染后由 HomePage 回填） */
@@ -373,7 +410,7 @@ describe('handleSendMessage', () => {
     expect(useNotificationStore.getState().notifications.some((n) => n.title === '发送已终止')).toBe(false)
   })
 
-  it('busy 分支：管道流式中 → 照常出站但不建乐观气泡，待处理队列同步', async () => {
+  it('busy 分支：管道流式中 → 出站 + 不建气泡（队列条是排队期唯一视图），待处理队列同步', async () => {
     await renderHomeWithSession()
     usePipelineMessageStore.setState((s) => ({
       streamingState: { ...s.streamingState, p1: { isStreaming: true, messageId: 'm-st' } },
@@ -383,15 +420,21 @@ describe('handleSendMessage', () => {
     const [, content, opts] = mockWs.sendUserInput.mock.calls[0]
     expect(content).toBe('排队')
     expect(opts).toMatchObject({ pipelineId: 'p1', thinkingStrength: 'high' })
-    // enableThinking 已随思考参数组化退役：出站载荷不得再携带该键
-    expect(opts).not.toHaveProperty('enableThinking')
-    expect((opts as { clientMessageId: string }).clientMessageId).toBeTruthy()
-    const pipeline = usePipelineMessageStore.getState()
-    expect(pipeline.messagesByPipeline['p1'] ?? []).toHaveLength(0)
+    const cmid = (opts as { clientMessageId: string }).clientMessageId
+    expect(cmid).toBeTruthy()
+    // 排队期唯一视图（2026-10-26 用户裁定）：忙时入队不建乐观气泡——气泡等
+    // 引擎消费（consumed 事件携权威 record 走 claimUserMessage 补插）才出现。
+    const bucket = usePipelineMessageStore.getState().messagesByPipeline['p1'] ?? []
+    expect(bucket).toHaveLength(0)
     expect(usePendingInputStore.getState().byPipeline['p1']).toBeDefined()
   })
 
-  it('正常分支：乐观 user 消息 + 流式态启动 + 未决 conversation 交互自动解除', async () => {
+  it('发送统一事件驱动：零乐观气泡/零乐观流式态，未决 conversation 交互自动解除', async () => {
+    // 聊天消息流权威化（设计真值 20261027 不变量 1/2）：气泡只认引擎确认
+    // （user_message_confirmed 认领链），生成态只随 stream_start 建立；忙闲
+    // 裁决归内核链，前端不再分叉发送路径。
+    const loadSpy = vi.fn().mockResolvedValue(undefined)
+    usePendingInputStore.setState({ load: loadSpy } as never)
     await renderHomeWithSession()
     useInteractionStore.setState({
       pendingInteractions: [
@@ -407,12 +450,12 @@ describe('handleSendMessage', () => {
         attachments: [{ url: '/uploads/a.png', name: '截图', type: 'image/png' }],
       })
     const pipeline = usePipelineMessageStore.getState()
+    // 零乐观：气泡等引擎确认（user_message_confirmed 认领），生成态等 stream_start
     const bucket = pipeline.messagesByPipeline['p1'] ?? []
-    expect(bucket).toHaveLength(1)
-    expect(bucket[0]).toMatchObject({ role: 'user', status: 'sending', sessionId: 's1' })
-    expect(bucket[0].content).toContain('看图')
-    expect(bucket[0].content).toContain('![截图](/uploads/a.png)')
-    expect(pipeline.streamingState['p1']).toBeDefined()
+    expect(bucket).toHaveLength(0)
+    expect(pipeline.streamingState['p1']).toBeUndefined()
+    // 直跑/入队由内核裁决，队列条权威 GET 对账兜底
+    expect(loadSpy).toHaveBeenCalledWith('p1')
     // 仅未决 conversation 模式且属于目标管道的交互被解除；choice/他管道不动
     expect(mockWs.sendInteractionResponse).toHaveBeenCalledTimes(2)
     expect(mockWs.sendInteractionResponse).toHaveBeenCalledWith('s1', 'req-a', { response_type: 'approved', feedback: '' })
@@ -428,7 +471,7 @@ describe('handleSendMessage', () => {
     expect(mockWs.sendUserInput).toHaveBeenCalledTimes(1)
     const [, , opts] = mockWs.sendUserInput.mock.calls[0]
     expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toEqual({
-      mode: 'coding',
+      mode: ['coding'],
     })
   })
 
@@ -442,7 +485,7 @@ describe('handleSendMessage', () => {
     const [, , opts] = mockWs.sendUserInput.mock.calls[0]
     expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toEqual({
       workspace: { source_path: '/w' },
-      mode: 'coding',
+      mode: ['coding'],
     })
   })
 
@@ -475,7 +518,7 @@ describe('handleSendMessage', () => {
     expect(mockWs.sendUserInput).toHaveBeenCalledTimes(1)
     const [, , opts] = mockWs.sendUserInput.mock.calls[0]
     expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toEqual({
-      mode: 'writing',
+      mode: ['writing'],
     })
   })
 
@@ -497,7 +540,7 @@ describe('handleSendMessage', () => {
     const [, , opts] = mockWs.sendUserInput.mock.calls[0]
     expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toEqual({
       roleplay_persona: '银发碧眼的月精灵法师，月光神殿的最后一位守望者。',
-      mode: 'roleplay',
+      mode: ['roleplay'],
     })
     expect((opts as { agentId?: string }).agentId).toBeUndefined()
   })
@@ -519,7 +562,7 @@ describe('handleSendMessage', () => {
     expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toEqual({
       workspace: { source_path: '/w' },
       roleplay_persona: '北地佣兵，沉默寡言。',
-      mode: 'roleplay',
+      mode: ['roleplay'],
     })
     expect((opts as { agentId?: string }).agentId).toBeUndefined()
   })
@@ -540,7 +583,7 @@ describe('handleSendMessage', () => {
     const [, , opts] = mockWs.sendUserInput.mock.calls[0]
     expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toEqual({
       roleplay_persona: '北地佣兵，沉默寡言。',
-      mode: 'roleplay',
+      mode: ['roleplay'],
     })
     expect((opts as { agentId?: string }).agentId).toBeUndefined()
   })
@@ -564,7 +607,7 @@ describe('handleSendMessage', () => {
       values: {},
       agentId: 'mode_roleplay/card_luna',
       agentName: '月见',
-      modeBinding: { mode: 'roleplay', pipelineConfigId: 'roleplay' },
+      modeBinding: { mode: ['roleplay'], pipelineConfigId: 'roleplay' },
     })
     await renderHomeWithSession()
     await sendAndCapture({ content: '（开始）', pipelineId: 'p1' })
@@ -573,7 +616,7 @@ describe('handleSendMessage', () => {
     expect((opts as { agentId?: string }).agentId).toBe('mode_roleplay/card_luna')
     expect((opts as { pipelineConfigId?: string }).pipelineConfigId).toBe('roleplay')
     expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toEqual({
-      mode: 'roleplay',
+      mode: ['roleplay'],
     })
   })
 
@@ -582,7 +625,7 @@ describe('handleSendMessage', () => {
       values: {},
       agentId: 'mode_roleplay/card_luna',
       agentName: '月见',
-      modeBinding: { mode: 'roleplay', pipelineConfigId: 'roleplay' },
+      modeBinding: { mode: ['roleplay'], pipelineConfigId: 'roleplay' },
       extraContext: { roleplay_greeting: '「欢迎光临！」', roleplay_user_persona: '北地来的佣兵。' },
     })
     await renderHomeWithSession()
@@ -590,11 +633,38 @@ describe('handleSendMessage', () => {
     expect(mockWs.sendUserInput).toHaveBeenCalledTimes(1)
     const [, , opts] = mockWs.sendUserInput.mock.calls[0]
     expect((opts as { executionContext?: Record<string, unknown> }).executionContext).toEqual({
-      mode: 'roleplay',
+      mode: ['roleplay'],
       roleplay_greeting: '「欢迎光临！」',
       roleplay_user_persona: '北地来的佣兵。',
     })
     expect((opts as { agentId?: string }).agentId).toBe('mode_roleplay/card_luna')
+  })
+
+  it('5s 落定超时终局：宿主订阅 timeout outcome 驱动既有停止链（sendCancel 出站）', async () => {
+    // store 层「超时判死产 timeout outcome」由 chatInputStore 契约测试覆盖；
+    // 此处钉宿主接线（2026-11-04 用户裁定「超时=消息坏了，应该停止run」）：
+    // 新 timeout outcome 出现 → 走 handleStopGenerate 同链出站停止帧
+    useChatInputStore.setState({ sendOutcomes: [], sendInFlightByPipeline: {}, drafts: {} })
+    await renderHomeWithSession()
+    await act(async () => {
+      useChatInputStore.setState((s) => {
+        const lastId = s.sendOutcomes[s.sendOutcomes.length - 1]?.id ?? 0
+        return {
+          sendOutcomes: [
+            ...s.sendOutcomes,
+            {
+              id: lastId + 1,
+              clientMessageId: 'cmid-timeout',
+              pipelineId: 'p1',
+              kind: 'timeout' as const,
+              content: '超时消息',
+            },
+          ],
+        }
+      })
+    })
+    await waitFor(() => expect(mockWs.sendCancel).toHaveBeenCalled())
+    expect(mockWs.sendCancel).toHaveBeenCalledWith('s1', undefined, 'p1')
   })
 })
 
@@ -711,17 +781,19 @@ describe('handleRegenerate / onRollbackTo / onEdit', () => {
     expect(mockWs.sendRegenerate).not.toHaveBeenCalled()
   })
 
-  it('regenerate：截断到最后一条 user 之后并出站重跑', async () => {
+  it('regenerate：出站缺省目标（截断/重跑归内核，本地零乐观截断）', async () => {
     await seedMessages()
     await act(async () => {
       (chatProps as CapturedProps | null)?.onRegenerate?.()
     })
     expect(mockWs.sendRegenerate).toHaveBeenCalledWith('s1', { pipelineId: 'p1' })
+    // 权威化（设计真值 20261027 不变量 3）：本地视图由内核 messages_truncated
+    // 按 seq 收敛，发送侧不做乐观截断。
     const rest = usePipelineMessageStore.getState().messagesByPipeline['p1']
-    expect(rest.map((m) => m.id)).toEqual(['u1', 'a1', 'u2'])
+    expect(rest.map((m) => m.id)).toEqual(['u1', 'a1', 'u2', 'a2'])
   })
 
-  it('regenerate：消息桶里没有 user 消息时不截断不出站', async () => {
+  it('regenerate：出站目标解析与拒绝归内核（本地无 user 消息也照常出站）', async () => {
     await renderHomeWithSession()
     usePipelineMessageStore.setState((s) => ({
       activePipelineId: 'p1',
@@ -733,26 +805,26 @@ describe('handleRegenerate / onRollbackTo / onEdit', () => {
     await act(async () => {
       (chatProps as CapturedProps | null)?.onRegenerate?.()
     })
-    expect(mockWs.sendRegenerate).not.toHaveBeenCalled()
+    expect(mockWs.sendRegenerate).toHaveBeenCalledWith('s1', { pipelineId: 'p1' })
   })
 
-  it('rollback：截断到指定 user 消息并携带 userMessageId 重跑', async () => {
+  it('rollback：出站携带 userMessageId（本地零乐观截断）', async () => {
     await seedMessages()
     await act(async () => {
       (chatProps as CapturedProps | null)?.onRollbackTo?.('u1')
     })
     expect(mockWs.sendRegenerate).toHaveBeenCalledWith('s1', { pipelineId: 'p1', userMessageId: 'u1' })
-    expect(usePipelineMessageStore.getState().messagesByPipeline['p1']).toHaveLength(1)
+    expect(usePipelineMessageStore.getState().messagesByPipeline['p1']).toHaveLength(4)
   })
 
-  it('edit：改写目标消息内容并携带 newContent 重跑', async () => {
+  it('edit：出站携带 newContent（内容改写随 updated_messages 权威收敛）', async () => {
     await seedMessages()
     await act(async () => {
       await (chatProps as CapturedProps | null)?.onEdit?.('u1', '改后的第一问')
     })
     expect(mockWs.sendRegenerate).toHaveBeenCalledWith('s1', { pipelineId: 'p1', userMessageId: 'u1', newContent: '改后的第一问' })
     const bucket = usePipelineMessageStore.getState().messagesByPipeline['p1']
-    expect(bucket.find((m) => m.id === 'u1')?.content).toBe('改后的第一问')
+    expect(bucket.find((m) => m.id === 'u1')?.content).toBe('第一问')
   })
 })
 
@@ -760,7 +832,7 @@ describe('回退/编辑重发出站 id 键空间（BUG-57 回归钉）', () => {
   // 双字段范式：user 消息 UI 寻址 id 是前端 uuid，后端权威主键在 recordId
   // （mc_ 指纹，认领时写入；历史回读消息无 recordId，其 id 本身即后端
   // record_id）。内核 regenerate 按 record_id 键空间精确匹配——出站必须带
-  // 权威 id；本地截断/改写仍按 UI id 寻址不变。
+  // 权威 id；本地零乐观（视图收敛走内核 messages_truncated）。
   async function seedClaimed(): Promise<void> {
     await renderHomeWithSession()
     usePipelineMessageStore.setState((s) => ({
@@ -777,13 +849,13 @@ describe('回退/编辑重发出站 id 键空间（BUG-57 回归钉）', () => {
     }))
   }
 
-  it('回退已认领消息：出站带 recordId（非 UI uuid），本地截断仍按 UI id', async () => {
+  it('回退已认领消息：出站带 recordId（非 UI uuid），本地视图不动', async () => {
     await seedClaimed()
     await act(async () => {
       (chatProps as CapturedProps | null)?.onRollbackTo?.('uuid-a')
     })
     expect(mockWs.sendRegenerate).toHaveBeenCalledWith('s1', { pipelineId: 'p1', userMessageId: 'mc-aaa' })
-    expect(usePipelineMessageStore.getState().messagesByPipeline['p1']).toHaveLength(1)
+    expect(usePipelineMessageStore.getState().messagesByPipeline['p1']).toHaveLength(4)
   })
 
   it('回退未认领消息（历史回读形态 id 即 record_id）：出站原样带该 id', async () => {
@@ -800,14 +872,14 @@ describe('回退/编辑重发出站 id 键空间（BUG-57 回归钉）', () => {
     expect(mockWs.sendRegenerate).toHaveBeenCalledWith('s1', { pipelineId: 'p1', userMessageId: 'mc-legacy' })
   })
 
-  it('编辑重发已认领消息：出站带 recordId + newContent，本地改写仍按 UI id', async () => {
+  it('编辑重发已认领消息：出站带 recordId + newContent，本地内容不改写', async () => {
     await seedClaimed()
     await act(async () => {
       await (chatProps as CapturedProps | null)?.onEdit?.('uuid-a', '改写后的第一问')
     })
     expect(mockWs.sendRegenerate).toHaveBeenCalledWith('s1', { pipelineId: 'p1', userMessageId: 'mc-aaa', newContent: '改写后的第一问' })
     const bucket = usePipelineMessageStore.getState().messagesByPipeline['p1']
-    expect(bucket.find((m) => m.id === 'uuid-a')?.content).toBe('改写后的第一问')
+    expect(bucket.find((m) => m.id === 'uuid-a')?.content).toBe('第一问')
   })
 
   it('编辑重发未认领消息（无 recordId）：出站回退 UI id', async () => {

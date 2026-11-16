@@ -6,7 +6,6 @@
  * - 进度条（progress 特性）
  * - 忽略/确认按钮
  * - 阻塞模式覆盖层
- * - 折叠后的摘要行
  *
  * 渲染走声明驱动（widget 化批1-C）：分类→渲染形态由
  * utils/notificationModes 注册表决定（human 插件 ui.notification_modes
@@ -14,7 +13,7 @@
  * 本组件不再按 category 硬编码渲染分支。
  */
 
-import { useCallback } from 'react'
+import { useCallback, useRef } from 'react'
 import {
   AlertCircle,
   AlertTriangle,
@@ -30,6 +29,7 @@ import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { PRIORITY_STYLES } from '@/types/notification'
 import { resolveNotificationLayout } from '@/utils/notificationModes'
+import { hasDraggedBeyond, hasTextSelectionWithin, isInteractiveTarget } from '@/utils/textSelection'
 import type {
   NotificationAction,
   NotificationItem as NotificationItemType,
@@ -55,8 +55,6 @@ const PRIORITY_ICONS: Partial<Record<NotificationPriority, React.ElementType>> =
 export interface NotificationItemProps {
   /** 通知数据 */
   notification: NotificationItemType
-  /** 是否折叠 */
-  isCollapsed?: boolean
   /** 点击通知回调 */
   onClick?: (notification: NotificationItemType) => void
   /** 忽略回调 */
@@ -84,7 +82,6 @@ function formatTime(timestamp: string): string {
 
 export function NotificationItemComponent({
   notification,
-  isCollapsed = false,
   onClick,
   onDismiss,
   onAction,
@@ -92,6 +89,9 @@ export function NotificationItemComponent({
   hasInteraction = false,
 }: NotificationItemProps) {
   const { id, title, priority, progress, isBlocking, isRead, timestamp, actions } = notification
+
+  /** mousedown 起点坐标：用于甄别「点击」与「拖拽选字」 */
+  const pointerOriginRef = useRef<{ x: number; y: number } | null>(null)
 
   const style = PRIORITY_STYLES[priority]
   // 分类→渲染形态由声明注册表决定（默认兜底 + 插件可覆盖）
@@ -101,9 +101,23 @@ export function NotificationItemComponent({
     ? (PRIORITY_ICONS[priority] ?? NOTIFICATION_ICON_MAP[layout.iconKey] ?? Bell)
     : null
 
-  const handleClick = useCallback(() => {
-    onClick?.(notification)
-  }, [onClick, notification])
+  const handleClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      // 内容区自带交互语义的元素（复制按钮 / 链接）自己处理点击，
+      // 不冒泡成条目级动作（否则点复制会误触发导航并关掉通知面板）
+      if (isInteractiveTarget(e.target)) return
+      // 拖选文字：浏览器在 mouseup 后仍派发 click，选区非折叠即视为选字
+      if (hasTextSelectionWithin(e.currentTarget)) return
+      // 指针位移超阈值 = 拖拽选字而非点击
+      if (hasDraggedBeyond(pointerOriginRef.current, e)) return
+      onClick?.(notification)
+    },
+    [onClick, notification],
+  )
+
+  const handleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    pointerOriginRef.current = { x: e.clientX, y: e.clientY }
+  }, [])
 
   const handleDismiss = useCallback(
     (e: React.MouseEvent) => {
@@ -121,35 +135,6 @@ export function NotificationItemComponent({
     [onAction, id],
   )
 
-  /** 折叠模式：只显示一行摘要 */
-  if (isCollapsed) {
-    return (
-      <div
-        className={cn(
-          'flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg',
-          hasInteraction ? 'cursor-pointer hover:bg-accent/60' : 'cursor-default',
-          'hover:bg-muted/50 transition-colors',
-          !isRead && 'font-medium',
-          className,
-        )}
-        onClick={handleClick}
-        data-testid={`notification-item-${id}`}
-      >
-        {IconComponent && <IconComponent className={cn('h-icon-sm w-icon-sm flex-shrink-0', style.text)} />}
-        <span className="truncate flex-1">{title}</span>
-        {notification.sourceLabel && (
-          <span className="text-[10px] text-muted-foreground border border-border/40 rounded px-1 py-px flex-shrink-0">
-            {notification.sourceLabel}
-          </span>
-        )}
-        {hasInteraction && (
-          <span className="text-[10px] text-primary font-medium shrink-0">点击处理</span>
-        )}
-        <span className="text-xs text-muted-foreground flex-shrink-0">{formatTime(timestamp)}</span>
-      </div>
-    )
-  }
-
   return (
     <div
       className={cn(
@@ -164,6 +149,7 @@ export function NotificationItemComponent({
         className,
       )}
       onClick={handleClick}
+      onMouseDown={handleMouseDown}
       data-testid={`notification-item-${id}`}
       role="alert"
     >

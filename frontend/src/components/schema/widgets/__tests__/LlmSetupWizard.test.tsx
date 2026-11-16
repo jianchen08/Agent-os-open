@@ -66,7 +66,12 @@ describe('LlmSetupWizard', () => {
     expect(getRemoteModels).toHaveBeenCalledWith('deepseek')
     fireEvent.click(await screen.findByRole('radio'))
     fireEvent.click(screen.getByRole('button', { name: '设为默认模型' }))
-    await waitFor(() => expect(saveDefaults).toHaveBeenCalledWith({ chat: 'deepseek-chat' }))
+    await waitFor(() =>
+      expect(saveDefaults).toHaveBeenCalledWith({
+        chat: 'deepseek-chat',
+        tiers: { large: 'deepseek-chat', medium: 'deepseek-chat', small: 'deepseek-chat' },
+      }),
+    )
     expect(addModel).toHaveBeenCalledWith('deepseek-chat', {
       provider: 'deepseek',
       model_name: 'deepseek-chat',
@@ -91,5 +96,38 @@ describe('LlmSetupWizard', () => {
     fireEvent.click(screen.getByRole('button', { name: '设为默认模型' }))
     await waitFor(() => expect(saveDefaults).toHaveBeenCalled())
     expect(addModel).not.toHaveBeenCalled()
+  })
+})
+
+describe('LlmSetupWizard 失败路径（补覆盖）', () => {
+  it('预置读取失败：呈现错误信息（63 行 catch）', async () => {
+    const { getLLMPresets } = await import('@/services/api/config')
+    ;(getLLMPresets as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('preset boom'))
+    render(<LlmSetupWizard onConfigured={() => {}} onOpenAdvanced={() => {}} />)
+    await waitFor(() => expect(screen.getByText('preset boom')).toBeInTheDocument())
+  })
+
+  it('保存密钥失败：toast 报错不停在忙态（103 行 catch）', async () => {
+    updateProviderConfig.mockRejectedValue(new Error('key save failed'))
+    render(<LlmSetupWizard onConfigured={() => {}} onOpenAdvanced={() => {}} />)
+    fireEvent.click(await screen.findByText('DeepSeek'))
+    fireEvent.change(screen.getByTestId('wizard-api-key'), { target: { value: 'sk-bad' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存并获取模型' }))
+    const { toast } = await import('@/components/ui/sonner')
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('保存密钥或拉取模型失败', expect.anything()))
+    // finally 收口：busy 解除（按钮可再次点击）
+    await waitFor(() => expect(screen.getByRole('button', { name: '保存并获取模型' })).not.toBeDisabled())
+  })
+
+  it('设默认模型失败：toast 报错（131 行 catch）', async () => {
+    saveDefaults.mockRejectedValue(new Error('default failed'))
+    render(<LlmSetupWizard onConfigured={() => {}} onOpenAdvanced={() => {}} />)
+    fireEvent.click(await screen.findByText('DeepSeek'))
+    fireEvent.change(screen.getByTestId('wizard-api-key'), { target: { value: 'sk-ok' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存并获取模型' }))
+    fireEvent.click(await screen.findByRole('radio'))
+    fireEvent.click(screen.getByRole('button', { name: '设为默认模型' }))
+    const { toast } = await import('@/components/ui/sonner')
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('设置默认模型失败', expect.anything()))
   })
 })

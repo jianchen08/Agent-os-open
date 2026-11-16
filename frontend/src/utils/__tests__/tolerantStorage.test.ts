@@ -19,6 +19,7 @@ vi.mock('@/utils/logger', () => ({
   },
 }))
 
+import { userScopedKey as pk } from '@/utils/userScopedStorage'
 const { createTolerantStorage } = await import('@/utils/tolerantStorage')
 
 describe('createTolerantStorage', () => {
@@ -87,6 +88,6 @@ describe('createTolerantStorage', () => {
 
     expect(useStore.getState().mode).toBe('b')
     // persist 的 trailing 写入在 jsdom 下同步落盘
-    expect(localStorage.getItem('tolerant-test')).toContain('"b"')
+    expect(localStorage.getItem(pk('tolerant-test'))).toContain('"b"')
   })
 })

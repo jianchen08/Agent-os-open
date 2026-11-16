@@ -1,16 +1,16 @@
-"""六模式面板 live 冒烟（可重复车道，纯 stdlib 实现）。
+"""五模式面板 live 冒烟（可重复车道，纯 stdlib 实现）。
 
 背景（2026-09-18 模式面板战役，docs/working/模式面板复验_20260918.md）：
   1. 用户空间播种副本（%APPDATA%/agentos/plugins/modes/mode_*）曾落后仓内版本，
      `_parse_body` 缺内核 base64 契约（kernel/crates/api/src/http_dispatcher.rs 把
      请求原始字节 base64 后作 raw_body 传入插件），写动作全部解析为 {} → 缺参 400；
   2. 双源「用户副本赢」后合宿组 `_host/` 探测不达用户空间，宿主进程未拉起，
-     六插件全部 /ext 路由 502（页面打不开排查_20260918.md）。
+     全部 /ext 路由 502（页面打不开排查_20260918.md）。
 
 本脚本对运行中的栈做三段只读/无副作用探活：
-  A. 六个面板页 GET /ext/mode_*/page/*-panel 全 200 且 body 以 <!DOCTYPE html> 开头；
+  A. 五个面板页 GET /ext/mode_*/page/*-panel 全 200 且 body 以 <!DOCTYPE html> 开头；
   B. 核心数据端点每包抽 1 个 GET → 200 且 JSON 含预期顶层键；
-  C. 写动作解析层探活：对 5 个写动作 POST 空 JSON {} → 断言 400（缺参）。
+  C. 写动作解析层探活：对 4 个写动作 POST 空 JSON {} → 断言 400（缺参）。
      C 段走内核 dispatcher：{} 会被 base64 后传给插件、由插件解回 {} 再走缺参 400
      路径——端到端证明 base64 解析层与路由都活着（旧副本在此同样 400，但 A/B 段
      数据形态不同可区分；配合仓内 test_parse_body_two_form_contract 锁实现）。
@@ -39,7 +39,6 @@ PANEL_PAGES = [
     ("mode_roleplay", "roleplay-panel"),
     ("mode_research", "research-panel"),
     ("mode_godot", "godot-panel"),
-    ("mode_planning", "planning-panel"),
 ]
 
 # B 段：每包抽 1 个免 query 的 GET 数据端点 → 预期顶层键
@@ -49,7 +48,6 @@ DATA_ENDPOINTS = [
     ("mode_coding", "/data/board", "columns"),
     ("mode_research", "/data/sessions", "sessions"),
     ("mode_godot", "/data/scene", "editor_online"),
-    ("mode_planning", "/data/projects", "projects"),
 ]
 
 # C 段：写动作（空 JSON → 缺参 400；不含 godot dispatch，避免任何派发面）
@@ -58,7 +56,6 @@ WRITE_ACTIONS = [
     ("mode_writing", "/data/actions/chapter_act"),
     ("mode_coding", "/data/actions/dispatch_issue"),
     ("mode_research", "/data/actions/start"),
-    ("mode_planning", "/data/actions/plan"),
 ]
 
 

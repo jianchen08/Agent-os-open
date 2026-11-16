@@ -1,5 +1,5 @@
 # @feature: FP-0.2.〇 隔离工作区 工具执行 | @ci: python-coverage
-"""worktree_merge 共享模块（任务域合并门控的 git 机制）单测。
+"""worktree_merge 模块（task_evaluate 插件内部，任务域合并门控的 git 机制）单测。
 
 与 0.1 isolation 侧 tests/test_merge_verify_fix.py 同源互证（机制移植核验）：
 - 真实 git 仓：合并成功落文件+清理、冲突=失败且保留 worktree（冲突不自动解决）、

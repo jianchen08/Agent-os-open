@@ -30,10 +30,15 @@ struct MockDispatcher {
     interactions: Arc<Mutex<Vec<(String, String)>>>, // (thread_id, request_id)
     stops: Arc<Mutex<Vec<(String, String)>>>,        // (thread_id, pipeline_id)
     regenerates: Arc<Mutex<Vec<RegenerateRecord>>>,
+    /// 帧字段 overlay 名单（widget 声明推导的名单在本测试中固定为 model_id）
+    overlay_fields: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait]
 impl PipelineDispatcher for MockDispatcher {
+    async fn frame_overlay_fields(&self) -> Vec<String> {
+        self.overlay_fields.lock().unwrap().clone()
+    }
     async fn dispatch_user_input(
         &self,
         thread_id: &str,
@@ -98,8 +103,9 @@ impl PipelineDispatcher for MockDispatcher {
 
 fn router() -> (InboundRouter, Arc<MockDispatcher>) {
     let dispatcher = Arc::new(MockDispatcher::default());
-    let r = InboundRouter::new(dispatcher.clone());
-    (r, dispatcher)
+    // 缺省名单 = model_id（widget 声明推导的主干用例面）；空名单用例自行清空
+    *dispatcher.overlay_fields.lock().unwrap() = vec!["model_id".to_string()];
+    (InboundRouter::new(dispatcher.clone()), dispatcher)
 }
 
 #[tokio::test]
@@ -288,6 +294,115 @@ async fn user_input_invalid_agent_id_treated_as_absent() {
         let inputs = dispatcher.user_inputs.lock().unwrap();
         assert_eq!(inputs[0].5, "", "{label}: agent_id 按缺失（空串）");
         assert!(inputs[0].6.is_none(), "{label}: 不合成 overlay");
+    }
+}
+
+// ── 插件声明帧字段传输（名单制，2026-10-23 用户裁定：widget 声明 frame_field
+//    推导名单，路由器名单内合成单键 overlay；本测试 mock 声明名单=["model_id"]，
+//    模拟 llm_core 模型选择 widget 的声明形态）──────────────────────────────
+
+#[tokio::test]
+async fn user_input_carries_model_id_as_state_overlay() {
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "user_input",
+        "thread_id": "thread-1",
+        "content": "hi",
+        "model_id": "gw-glm-5.3-flash",
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let inputs = dispatcher.user_inputs.lock().unwrap();
+    assert_eq!(
+        inputs[0].6,
+        Some(serde_json::json!({"model_id": "gw-glm-5.3-flash"})),
+        "名单内字段合成单键 overlay：显式选择消息级落入管道 state（llm_core 解析链首位）"
+    );
+}
+
+#[tokio::test]
+async fn user_input_undeclared_frame_field_not_transported() {
+    // 名单外帧字段一律不透传（防前端自由注 state）：即使值形态合法
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "user_input",
+        "thread_id": "thread-1",
+        "content": "hi",
+        "evil_key": "../state/override",
+        "another_key": "valid-shape-but-undeclared",
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let inputs = dispatcher.user_inputs.lock().unwrap();
+    assert!(
+        inputs[0].6.is_none(),
+        "名单外字段不合成 overlay（frame_field 未声明的键被丢弃）"
+    );
+}
+
+#[tokio::test]
+async fn user_input_empty_allowlist_transports_nothing() {
+    // 空名单（无任何插件声明 frame_field）→ 连合法 model_id 也不传输
+    let (router, dispatcher) = router();
+    dispatcher.overlay_fields.lock().unwrap().clear();
+    let msg = serde_json::json!({
+        "type": "user_input",
+        "thread_id": "thread-1",
+        "content": "hi",
+        "model_id": "gw-glm-5.3-flash",
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let inputs = dispatcher.user_inputs.lock().unwrap();
+    assert!(inputs[0].6.is_none(), "空名单不合成任何 overlay");
+}
+
+#[tokio::test]
+async fn user_input_model_id_merges_with_agent_id_overlay() {
+    // 两键同帧：合一个 overlay 对象（agent.id + model_id 并存，不互相顶掉）
+    let (router, dispatcher) = router();
+    let msg = serde_json::json!({
+        "type": "user_input",
+        "thread_id": "thread-1",
+        "content": "hi",
+        "agent_id": "persona_x",
+        "model_id": "MiniMax-M3.1-Flash",
+    });
+    let outcome = router.route(&msg, "user-A").await;
+    assert_eq!(outcome, RouteOutcome::Handled);
+    let inputs = dispatcher.user_inputs.lock().unwrap();
+    assert_eq!(
+        inputs[0].6,
+        Some(serde_json::json!({
+            "agent.id": "persona_x",
+            "model_id": "MiniMax-M3.1-Flash",
+        }))
+    );
+}
+
+#[tokio::test]
+async fn user_input_invalid_model_id_treated_as_absent() {
+    // 形态守卫与 agent_id 同法：非法按缺失忽略，不投递失败、不合成键
+    for (label, bad) in [
+        ("含路径穿越点", serde_json::json!("../evil")),
+        ("含空白", serde_json::json!("bad id")),
+        ("空串", serde_json::json!("")),
+        ("非字符串", serde_json::json!(7)),
+    ] {
+        let (router, dispatcher) = router();
+        let msg = serde_json::json!({
+            "type": "user_input",
+            "thread_id": "thread-1",
+            "content": "hi",
+            "model_id": bad,
+        });
+        let outcome = router.route(&msg, "user-A").await;
+        assert_eq!(outcome, RouteOutcome::Handled, "{label}: 消息仍应投递");
+        let inputs = dispatcher.user_inputs.lock().unwrap();
+        assert!(
+            inputs[0].6.is_none(),
+            "{label}: 不合成 overlay（管线沿用绑定）"
+        );
     }
 }
 

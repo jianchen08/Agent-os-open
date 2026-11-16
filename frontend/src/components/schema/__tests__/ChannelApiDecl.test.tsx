@@ -59,7 +59,7 @@ vi.mock('@/components/session/SessionEditModal', () => ({
 
 const PLUGIN = JSON.parse(
   fs.readFileSync(
-    path.resolve(__dirname, '../../../../../plugins/shared/tools/triggers_ext/plugin.json'),
+    path.resolve(__dirname, '../../../../../plugins/shared/triggers_ext/plugin.json'),
     'utf-8',
   ),
 ) as {

@@ -1,0 +1,61 @@
+# 修仙战斗包 · 世界正典世界书（玩法组成原则「包 = 卡+规则+世界书+初始状态」
+# 之世界书位，2026-10-17 标杆补齐）。消费：内定执行身份卡 card_qingyan
+# lorebook_ids 绑定 → material 逐轮按最近消息关键词命中注入（scan_inject）。
+name: 青岚宗正典
+description: 修仙战斗包世界物料：演武规约、宗门阶位、地理与宗门大事（固定剧情节拍点）。
+scan_depth: 4
+token_budget: 512
+recursive_scanning: false
+entries:
+- keys:
+  - 演武
+  - 战课
+  - 演武场
+  content: 演武规约：内门弟子每日辰时战课，演武场点卯；对阵先礼后兵，剑鞘触地
+    为认输；伤者由药堂接手，重伤即止斗（禁即死条款的礼法面）。战课连续夺魁
+    三十场者，得入藏经阁三层自选一部功法。
+  enabled: true
+  insertion_order: 100
+  constant: false
+  position: before_char
+  case_sensitive: false
+  comment: 规约·演武
+- keys:
+  - 阶位
+  - 内门
+  - 外门
+  - 真传
+  content: 宗门阶位：外门→内门→真传三阶。外门杂役修行，岁考升内门；内门应战课、
+    领月例灵石；真传入主峰随掌门修行。阶位晋升以季考战绩论，不由血缘与人情。
+  enabled: true
+  insertion_order: 95
+  constant: false
+  position: before_char
+  case_sensitive: false
+  comment: 制度·阶位
+- keys:
+  - 剑冢
+  - 后山
+  - 藏经阁
+  - 药堂
+  content: 宗门地理：演武场在山腰平台；剑冢在后山雾谷，历代弃剑葬于此，雾气终年
+    不散；藏经阁在主峰东侧，三层以上需功勋；药堂在西院，伤患休养地。
+  enabled: true
+  insertion_order: 90
+  constant: false
+  position: before_char
+  case_sensitive: false
+  comment: 地点·青岚宗
+- keys:
+  - 季考
+  - 猎妖
+  - 宗门大比
+  content: 宗门大事节拍（固定剧情节拍点）：季考每三月一回，战绩定阶位与月例；
+    春秋两季各有一次下山猎妖（历练线入口，需结伴）；年末宗门大比，夺魁者掌门
+    亲授一诀。历练与大比是战课之外的晋级路，胜负依数值与伤势裁定。
+  enabled: true
+  insertion_order: 80
+  constant: false
+  position: before_char
+  case_sensitive: false
+  comment: 剧情节拍·宗门大事

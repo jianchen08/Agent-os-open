@@ -267,7 +267,7 @@ export function PipelineSettingsPage({ embedded = false }: { embedded?: boolean 
         </>
       )}
 
-      <div className="text-muted-foreground mt-4 border-t pt-3 text-[10px]">
+      <div className="text-muted-foreground mt-4 border-t pt-3 text-[10px] break-words">
         保存写入 config/pipelines/{PIPELINE_NAME}.yaml（原子写 + If-Match 乐观锁 + G10
         结构校验，下次执行自动热加载生效）；写回后 YAML 键序按字母重排，不影响引擎解析。
       </div>

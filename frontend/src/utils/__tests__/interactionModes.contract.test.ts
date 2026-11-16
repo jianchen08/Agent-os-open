@@ -15,7 +15,7 @@ import { describe, it, expect } from 'vitest'
 import { DEFAULT_MODE_FEATURES } from '../interactionModes'
 
 const REPO_ROOT = resolve(__dirname, '../../../..')
-const HUMAN_MANIFEST = resolve(REPO_ROOT, 'plugins/shared/tools/human/plugin.json')
+const HUMAN_MANIFEST = resolve(REPO_ROOT, 'plugins/shared/human/plugin.json')
 
 interface ModeDecl {
   mode: string

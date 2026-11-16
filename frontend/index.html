@@ -7,7 +7,7 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
     />
-    <meta name="color-scheme" content="dark light" />
+    <meta name="color-scheme" content="light dark" />
     <title>AgentOS</title>
     <!-- 字体已全部本地化（public/fonts/ + src/styles/fonts.css 的 @font-face），
          不再依赖 Google Fonts CDN：内网/离线环境下像素/圆体主题字体同样生效。
@@ -15,9 +15,61 @@
     <!-- 主题预置脚本外置为同源静态文件（head 内无 defer/async，仍同步先于渲染执行）：
          生产 CSP（nginx.conf）script-src 不放行内联脚本，页面不得残留内联 <script>。 -->
     <script src="/theme-init.js"></script>
+    <!-- JS bundle 下载执行完成前的加载占位：MB 级 bundle 在慢网络下 10-20s 纯白，
+         用户无法分辨"在加载还是坏了"。React createRoot 挂载时替换 #root 的 children，
+         占位无需手动清理。云端 CSP style-src 放行 'unsafe-inline'，内联 <style> 合规；
+         本文件不得残留内联 <script>（script-src 约定，见上方注释）。 -->
+    <style>
+      #root-loading {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        background: #fff;
+        color: #333;
+        font-family:
+          -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif;
+        /* 安全区避让：壳把系统栏高度写入 --safe-inset-*（MainActivity），
+           居中内容在矮视口/键盘垫高等退化布局下可能进入状态栏带；env() 供
+           iOS/新 WebView，Android WebView 走注入变量，桌面两者皆 0 零影响 */
+        padding-top: max(env(safe-area-inset-top), var(--safe-inset-top, 0px));
+        padding-bottom: max(env(safe-area-inset-bottom), var(--safe-inset-bottom, 0px));
+      }
+      #root-loading .spinner {
+        width: 36px;
+        height: 36px;
+        border: 3px solid rgba(0, 0, 0, 0.12);
+        border-top-color: #555;
+        border-radius: 50%;
+        animation: root-loading-spin 0.9s linear infinite;
+      }
+      @keyframes root-loading-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      /* theme-init.js 按首帧外观专用键 theme-appearance（迁移窗口回退主题 id
+         白名单）给 <html> 加 dark class，暗色用户首帧即暗底，无白闪 */
+      html.dark #root-loading {
+        background: #141414;
+        color: #d9d9d9;
+      }
+      html.dark #root-loading .spinner {
+        border-color: rgba(255, 255, 255, 0.15);
+        border-top-color: #aaa;
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="root-loading">
+        <div class="spinner"></div>
+        <div>正在加载灵汐…</div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

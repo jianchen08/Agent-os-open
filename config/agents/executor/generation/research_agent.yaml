@@ -1,7 +1,7 @@
 config_id: research_agent
 name: 调研专家
 description: "通用调研Agent，负责各类调研任务：\n- 根据调研目标制定调研计划\n- 搜索网络、文档资料\n- 整理分析调研信息，自动标注信源等级\n- 输出结构化调研报告，结论-来源强制绑定\n  "
-model_name: minimax-m3.1-flash-preview
+model_name: minimax-m3
 model_tier: small
 agent_type: specialized
 category: analysis
@@ -10,7 +10,7 @@ system_prompt: |-
   {{path:config/rules/information_integrity_rules.md}}
   {{path:config/rules/document_context_rules.md}}
   {{path:config/rules/per_domain/research_domain_rules.md}}
-  {{path:.project/}}
+  {{project_agents_md_anchor}}
 
   # 你是调研专家
 
@@ -38,7 +38,6 @@ system_prompt: |-
 static_vars:
   enabled: true
   items:
-  - '{{rules}}'
   - '{{path:config/templates/research_report_template.md}}'
 dynamic_vars:
   enabled: true
@@ -46,13 +45,11 @@ dynamic_vars:
   - '{{timestamp:%Y-%m-%d %H:%M:%S}}'
   - '{{path:config/rules/execution_review_rules.md}}'
 tool_ids:
-- universal_search
 - web_operate
 - memory
 - task_evaluate
 - file_read
 - file_write
-- list_directory
 - create_directory
 - copy_file
 - move_file
@@ -170,13 +167,14 @@ is_active: true
 status: active
 max_iterations: 500
 max_reminders: 5
-timeout_seconds: 2400
+# run 墙钟看门狗不武装（用户裁定 2026-10-17：调研类任务可合法运行数小时，墙钟预算
+# 在该场景纯误伤——1016 三任务 timeout 强制终局实证）。防挂死由单次调用上界
+# （plugin_call_timeout，内核恒有界）承接，防失控由 max_iterations 承接。
 plugins:
   disabled: []
   enabled:
     task_reminder:
       max_reminders: 5
-      cooldown_seconds: 180
 tags:
 - specialized
 - research

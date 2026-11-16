@@ -37,8 +37,12 @@ export function resolveDataSource(ref: DataSourceRef): ResolvedDataSource {
   // workspace:// 协议特殊处理：workspace_service 插件文件树端点
   // （GET /ext/workspace_service/workspaces/{id}/file-tree，200 信封内可携带
   // workspace_status 业务态；404 = 归属闸拒绝，信封 error 有可读原因）
+  // fsbrowse:// 协议：多端目录树索引端点（GET /ext/workspace_service/workspaces/
+  // fs-tree，query path= 懒展开；空 path = 根层 = 本地盘枚举 + 设备分支挂载锚目录）
   if (ref.moduleId === 'workspace') {
     endpoint = WORKSPACE_SERVICE_ENDPOINTS.workspaces_file_tree.replace('{container_task_id}', ref.collection)
+  } else if (ref.moduleId === 'fsbrowse') {
+    endpoint = WORKSPACE_SERVICE_ENDPOINTS.workspaces_fs_tree
   } else {
     endpoint = `/api/v1/modules/${ref.moduleId}/data/${ref.collection}`
   }

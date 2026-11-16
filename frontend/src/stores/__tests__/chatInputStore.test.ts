@@ -8,6 +8,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type * as chatInputStoreMod from '@/stores/chatInputStore'
+import { userScopedKey } from '@/utils/userScopedStorage'
 
 vi.mock('@/utils/logger', () => ({
   loggers: { storage: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } },
@@ -51,9 +52,67 @@ describe('chatInputStore - 输入框桥接与草稿', () => {
   it('drafts 持久化到 localStorage（partialize 仅草稿）；pendingInsert 不落盘', () => {
     store.getState().saveDraft('persist-key', '持久化内容')
     store.getState().requestInsert('瞬态桥接')
-    const raw = localStorage.getItem('chat-input-drafts') || ''
+    const raw = localStorage.getItem(userScopedKey('chat-input-drafts')) || ''
     const parsed = JSON.parse(raw)
     expect(parsed.state.drafts['persist-key']).toBe('持久化内容')
     expect(parsed.state.pendingInsert).toBeUndefined()
+  })
+})
+
+describe('chatInputStore - 发送在途登记（2026-11-04 落定语义：条目含快照，撤下=落定/失败/超时）', () => {
+  let store: chatInputStoreMod.useChatInputStore
+
+  beforeEach(async () => {
+    localStorage.clear()
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-11-04T00:00:00Z'))
+    vi.resetModules()
+    store = (await import('@/stores/chatInputStore')).useChatInputStore
+    store.setState({ sendInFlightByPipeline: {}, sendOutcomes: [] })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('beginSend 按管道挂入条目（cmid+快照）；同 cmid 幂等不重复', () => {
+    store.getState().beginSend('pipe-1', 'cmid-a', '快照A')
+    store.getState().beginSend('pipe-1', 'cmid-a', '快照A')
+    store.getState().beginSend('pipe-1', 'cmid-b', '快照B')
+    store.getState().beginSend('pipe-2', 'cmid-c')
+    const pipe1 = store.getState().sendInFlightByPipeline['pipe-1']
+    expect(pipe1.map((e) => e.clientMessageId)).toEqual(['cmid-a', 'cmid-b'])
+    expect(pipe1[0].content).toBe('快照A')
+    expect(store.getState().sendInFlightByPipeline['pipe-2'].map((e) => e.clientMessageId)).toEqual(['cmid-c'])
+  })
+
+  it('beginSend 空 pipelineId 或空 cmid 拒绝挂入', () => {
+    store.getState().beginSend('', 'cmid-a')
+    store.getState().beginSend('pipe-1', '')
+    expect(store.getState().sendInFlightByPipeline).toEqual({})
+  })
+
+  it('landSendByCmid 跨管道精确撤下该 cmid（落定语义）', () => {
+    store.getState().beginSend('pipe-1', 'cmid-a')
+    store.getState().beginSend('pipe-1', 'cmid-b')
+    store.getState().beginSend('pipe-2', 'cmid-c')
+    store.getState().landSendByCmid('cmid-a')
+    expect(store.getState().sendInFlightByPipeline['pipe-1'].map((e) => e.clientMessageId)).toEqual(['cmid-b'])
+    store.getState().landSendByCmid('cmid-c')
+    expect(store.getState().sendInFlightByPipeline['pipe-2']).toEqual([])
+  })
+
+  it('endSendByCmid（失败判死）跨管道精确撤下该 cmid', () => {
+    store.getState().beginSend('pipe-1', 'cmid-a')
+    store.getState().beginSend('pipe-2', 'cmid-c')
+    store.getState().endSendByCmid('cmid-a', 'TTL 判死')
+    expect(store.getState().sendInFlightByPipeline['pipe-1']).toEqual([])
+    expect(store.getState().sendInFlightByPipeline['pipe-2'].map((e) => e.clientMessageId)).toEqual(['cmid-c'])
+  })
+
+  it('endSendByCmid 空 cmid 幂等零动作', () => {
+    store.getState().beginSend('pipe-1', 'cmid-a')
+    store.getState().endSendByCmid('')
+    expect(store.getState().sendInFlightByPipeline['pipe-1'].map((e) => e.clientMessageId)).toEqual(['cmid-a'])
   })
 })

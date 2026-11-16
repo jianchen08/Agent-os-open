@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">灵汐助手</string>
+    <string name="title_activity_main">灵汐助手</string>
+    <string name="package_name">com.lingxi.agentos</string>
+    <string name="custom_url_scheme">com.lingxi.agentos</string>
+</resources>

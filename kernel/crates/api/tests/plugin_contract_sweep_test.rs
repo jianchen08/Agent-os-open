@@ -1,3 +1,4 @@
+// @feature: FP-0.2.一 插件契约全量扫面(随 lsp 退役更新) | @ci: rust-test
 //! 插件契约全量扫掠闸（2026-08-20）：把 `plugins/shared/**/plugin.json` 声明的
 //! 全部工具/服务契约跑一遍"定义驱动校验器"的可消费性检查。
 //!
@@ -19,20 +20,18 @@ fn plugins_shared_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../plugins/shared")
 }
 
-/// 收集全部 */*/plugin.json（排序保证确定性）。
+/// 收集共享根一层全部 <插件目录>/plugin.json（排序保证确定性；拍平布局
+/// ADR 2026-10-13-plugin-flat-layout）。
 fn manifest_files() -> Vec<PathBuf> {
     let mut out = Vec::new();
     let dir = plugins_shared_dir();
-    for domain in ["system", "tools", "pipeline"] {
-        let d = dir.join(domain);
-        let Ok(entries) = std::fs::read_dir(&d) else {
-            continue;
-        };
-        for e in entries.flatten() {
-            let mf = e.path().join("plugin.json");
-            if mf.is_file() {
-                out.push(mf);
-            }
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let mf = e.path().join("plugin.json");
+        if mf.is_file() {
+            out.push(mf);
         }
     }
     out.sort();
@@ -259,7 +258,8 @@ fn all_plugin_contracts_are_executor_consumable() {
     // task_evaluate/task_manage/trigger_setup/web_operate/review 两件/
     // resource_search/simple 两件 = +21 → 10→31（external_mcp 两件 design_review/
     // universal_search 同批补齐但目录两层深，不在本闸一层扫描面内，不计入）。
-    // 剩余未补 = 死工具（media/download 等，等接线裁决后再补）。
+    // 原挂账死工具 media/download：download 已按工具面审查 2026-10-19 裁决
+    // 整包退役（lsp 四件同批退役）；media 保留待接线裁决。
     // 挂账债收口：schema 按各工具成功分支返回形状 AUTHOR（多态分支只锁共有键，
     // 条件键声明不强锁），fail-closed 校验见 tool_core output_validate。
     // tools_output 棘轮重定（2026-08-27 清理批2）：output_repetition_guard/

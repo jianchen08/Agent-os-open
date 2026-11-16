@@ -30,6 +30,14 @@ use tracing::warn;
 /// per-endpoint 并发许可信号量（max_concurrency 上限保护）。
 type Semaphore = tokio::sync::Semaphore;
 
+/// 插件面请求体上限：2 MiB（显式钉死，2026-10-25 用户裁定维持此值）。
+///
+/// 此前为 axum 框架隐式默认值（代码零配置、框架替拍）——2026-10-25 sync_agent
+/// 上行 413 事故实证该墙存在且生效。不上调：请求体整读 + base64 转发内存
+/// 放大约 2.67 倍，抬墙即内存尖峰（与 /uploads 限量读同源姿势）；发送端
+/// 分批（sync_agent 413 拆批）绕大件，单件真超限走死信隔离留痕。
+pub(crate) const EXT_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+
 /// HTTP dispatcher：路由分发 + timeout + 并发上限。
 ///
 /// 持有能力注册表（查路由）与一个 [`HttpHandleCapability`]（调插件 http.handle）。
@@ -43,6 +51,10 @@ pub struct HttpDispatcher {
     /// 时，端点超时预算暂停消耗（等待就绪而非 504）。`None` = 不感知启动态，
     /// 分发行为与既有单次 timeout 完全一致（测试桩 / 未接线的构造路径）。
     startup_probe: Option<Arc<dyn PluginInvoker>>,
+    /// 校验门禁名单查询（G2 注册门禁全能力面通用化）：返回当前校验未完成/
+    /// 校验失败的插件 id 集（契约账本现值）。`None` = 门禁未接线（裸测试
+    /// 构造），维持既有行为。名单命中即整插件端点拒绝（503）。
+    shadowed_plugin_ids_lookup: Option<Arc<dyn Fn() -> Vec<String> + Send + Sync>>,
 }
 
 /// 目标宿主处于启动窗口时，端点超时预算之上允许的额外等待上限（D1）。
@@ -67,12 +79,25 @@ impl HttpDispatcher {
             handler,
             semaphores: tokio::sync::Mutex::new(HashMap::new()),
             startup_probe: None,
+            shadowed_plugin_ids_lookup: None,
         }
     }
 
     /// 挂载宿主启动态探针（D1），返回 self 供链式调用。
     pub fn with_startup_probe(mut self, probe: Option<Arc<dyn PluginInvoker>>) -> Self {
         self.startup_probe = probe;
+        self
+    }
+
+    /// 挂载校验门禁名单查询（G2 注册门禁全能力面通用化），返回 self 供链式
+    /// 调用。名单 = 契约账本 verify_incomplete/verify_failed 现值（生产装配
+    /// 读 `ContractLedger::verify_pending_plugin_ids()`）：名单内插件的端点
+    /// 一并拒绝，复验通过（账本 ok）自动恢复。
+    pub fn with_shadowed_plugin_ids_lookup(
+        mut self,
+        lookup: Option<Arc<dyn Fn() -> Vec<String> + Send + Sync>>,
+    ) -> Self {
+        self.shadowed_plugin_ids_lookup = lookup;
         self
     }
 
@@ -99,6 +124,9 @@ pub enum DispatchOutcome {
     ConcurrencyLimited,
     /// 插件处理出错（502）。
     HandlerError(String),
+    /// 校验门禁拦截（G2 注册门禁全能力面通用化）：目标插件校验未完成/校验
+    /// 失败，端点整体拒绝（503 服务不可用类），载荷为用户可读原因。
+    VerificationBlocked(String),
 }
 
 /// 分发一个入站 HTTP 请求到插件 http.handle。
@@ -124,6 +152,25 @@ pub async fn dispatch_http(
     let Some(route) = dispatcher.registry.find_http_route(path, method) else {
         return DispatchOutcome::NotFound;
     };
+
+    // G2 注册门禁（全能力面通用化，用户裁定 2026-10-26）：校验未通过 = 整个
+    // 插件不许上岗——其 http_endpoints 一并拒绝（503 服务不可用类），与 LLM
+    // 工具面遮挡同源（契约账本现值查询）：复验通过（账本 ok）自动恢复。
+    // 未接线（None）= 门禁未装配，维持既有行为。
+    if let Some(lookup) = dispatcher.shadowed_plugin_ids_lookup.as_ref() {
+        if lookup().iter().any(|id| id == &route.plugin_id) {
+            let reason = format!(
+                "插件 {} 校验未完成或校验失败（G2 注册门禁），已拦截；复验通过后自动恢复",
+                route.plugin_id
+            );
+            warn!(
+                plugin = %route.plugin_id,
+                path = %route.endpoint.path,
+                "http endpoint blocked by G2 verification gate (503)"
+            );
+            return DispatchOutcome::VerificationBlocked(reason);
+        }
+    }
 
     // 并发上限：try_acquire，拿不到立即 503（不排队，防慢插件拖垮）。
     let sem = dispatcher.semaphore_for(&route).await;
@@ -250,33 +297,41 @@ pub fn build_router_with_http_routes(
 ) -> axum::Router<crate::routes::AppState> {
     let registry = state.capability_registry.clone();
     let handler = state.http_handler.clone();
-    let plugin_dirs = state.plugin_dirs.clone();
 
-    // 至少要有 dispatcher 资源（registry + handler）或 plugin_dirs（静态资源）才挂通配路由。
-    // 否则保留内核静态路由（兼容 AppState::new() 的旧测试）。
+    // 至少要有 dispatcher 资源（registry + handler）或插件目录活真源（静态资源）才挂
+    // 通配路由。否则保留内核静态路由（兼容 AppState::new() 的旧测试）。
+    // G2 注册门禁（全能力面通用化）：遮挡名单查询与 LLM 工具面同源——契约
+    // 账本（AppState.contract_states 同一 Arc 实例）现值，复验通过自动恢复。
     let dispatcher: Option<Arc<HttpDispatcher>> = match (registry, handler) {
-        (Some(r), Some(h)) => Some(Arc::new(
-            // D1：注入宿主启动态探针——respawn 冷启窗内端点等待就绪而非 504。
-            HttpDispatcher::new(r, h).with_startup_probe(state.invoker.clone()),
-        )),
+        (Some(r), Some(h)) => {
+            let gate_ledger = state.contract_states.clone();
+            Some(Arc::new(
+                // D1：注入宿主启动态探针——respawn 冷启窗内端点等待就绪而非 504。
+                HttpDispatcher::new(r, h)
+                    .with_startup_probe(state.invoker.clone())
+                    .with_shadowed_plugin_ids_lookup(Some(Arc::new(move || {
+                        gate_ledger.verify_pending_plugin_ids()
+                    }))),
+            ))
+        }
         _ => None,
     };
-    let has_static = !plugin_dirs.is_empty();
+    let has_static = state.plugin_loader.is_some();
     if dispatcher.is_none() && !has_static {
         return static_router;
     }
 
     let mut router = static_router;
     // 注册一条 /ext/{*rest} 通配路由，所有 /ext/** 请求统一进 handler。
-    // handler 先尝试静态资源（plugin_dirs 命中 + 文件存在）→ 命中则直接返回；
+    // handler 先尝试静态资源（插件目录活真源命中 + 文件存在）→ 命中则直接返回；
     // 否则若有 dispatcher，走 find_http_route 模板匹配插件 http_endpoints；
     // 都不命中：manifest 在册且插件启用（生命周期空窗）→ 503，其余 → 404。
-    let wildcard_handler =
-        build_wildcard_handler(state.clone(), dispatcher.clone(), plugin_dirs.clone());
+    // 目录解析每请求现取 loader 活路径表（B1：不再闭包捕获 boot 快照）。
+    let wildcard_handler = build_wildcard_handler(state.clone(), dispatcher.clone());
     router = router.route("/ext/{*rest}", wildcard_handler);
     // G6-a：/api/v1/datasource/{*rest} 数据源代理——改写 /ext/{rest} 复用同一分发。
     // 前端 fetchDatasourceOptions 对非绝对 URI 走此前缀。
-    let datasource_handler = build_datasource_handler(state, dispatcher, plugin_dirs);
+    let datasource_handler = build_datasource_handler(state, dispatcher);
     router = router.route("/api/v1/datasource/{*rest}", datasource_handler);
     router
 }
@@ -287,6 +342,33 @@ pub fn build_router_with_http_routes(
 /// 静态资源优先：`/ext/{plugin_id}/assets/{*rest}` 命中时由内核直接读文件返回，
 /// 不进入 dispatcher。这让插件带完整 SPA（分离的 JS/CSS/图片）无需为每个子资源
 /// 单独声明 http_endpoints。
+/// 身份 scope 内派发（认证端点 task-local 建立，匿名 None 直派）。
+///
+/// 从 [`exec_ext_request`] 抽出：主函数行数闸（200）与身份链各自内聚。
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_with_identity(
+    auth_identity: Option<agentos_core::types::TenantContext>,
+    dispatcher: &Arc<HttpDispatcher>,
+    path: &str,
+    method_str: &str,
+    raw_body: Vec<u8>,
+    headers_map: HashMap<String, String>,
+    query_multi: HashMap<String, Vec<String>>,
+) -> DispatchOutcome {
+    let fut = dispatch_http(
+        dispatcher,
+        path,
+        method_str,
+        raw_body,
+        headers_map,
+        query_multi,
+    );
+    match auth_identity {
+        Some(ctx) => agentos_tenant::scope(ctx, fut).await,
+        None => fut.await,
+    }
+}
+
 /// 执行一个 /ext 风格请求（插件 http_endpoints 分发 / 静态资源），供
 /// - `/ext/{*rest}` 通配路由
 /// - `/api/v1/datasource/{*rest}` 数据源代理（见 build_datasource_handler）
@@ -295,7 +377,6 @@ pub fn build_router_with_http_routes(
 async fn exec_ext_request(
     state: crate::routes::AppState,
     dispatcher: Option<Arc<HttpDispatcher>>,
-    plugin_dirs: Arc<HashMap<String, std::path::PathBuf>>,
     method: axum::http::Method,
     path: String,
     query_multi: HashMap<String, Vec<String>>,
@@ -307,6 +388,9 @@ async fn exec_ext_request(
     use axum::response::IntoResponse;
 
     // 1) 静态资源直读：命中则直接返回（200 + mime / 404 / 超限 413）。
+    //    目录映射每请求现取 loader 活路径表（B1：boot 快照已退役——热发现
+    //    插件的静态资源不再有"重启才可见"窗口）。
+    let plugin_dirs = state.plugin_dirs();
     if let Some(resp) = try_serve_static_asset(&path, &plugin_dirs).await {
         return resp;
     }
@@ -323,11 +407,22 @@ async fn exec_ext_request(
     //    时，按声明 manifest 自愈补注册缺失路由（heal_plugin_http_routes：
     //    只增不毁——不收回 scope 在册面，防并发自愈/复验互相绞杀），再整体
     //    重试一次；重试时鉴权闸重跑——恢复出的路由携带 auth 声明，鉴权必须以
-    //    恢复后的声明为准。自愈无法恢复（声明无端点/恢复仍缺席）才落 503
-    //    瞬态语义；插件未声明/未启用仍 404（fail-closed 不变）。
+    //    恢复后的声明为准。重试仍 miss 时按注册面现况裁决：声明端点仍缺 →
+    //    503 瞬态语义；声明面完整 → miss 属请求 path/method 与声明面不匹配
+    //    → 404（见下方裁决分支）。插件未声明/未启用仍 404（fail-closed 不变）。
     let raw_body = body.to_vec();
     let mut route_healed = false;
     let mut declared = false;
+    // HTTP 面身份 scope（反调链第三分支收口，2026-11-06 装机 resume 全堵实证）：
+    // 鉴权身份此前只落转发头（x-agentos-*，caller 可读面），task-local 无人
+    // 设置 → invoke_tool 的 `_identity` 注入单点（attempt_sidecar_tool 读
+    // agentos_tenant::current()）空转 → 插件（task_service 等）内部 capability
+    // 反调无身份回带 → 内核派发面身份守卫拒绝（resume_pipeline「调用链未
+    // 携带用户身份」，装机 2026-11-02 TaskTool 三连拒同族第三分支）。
+    // 认证端点在此建立 task-local scope：`_identity` 单一真值注入点自动携带，
+    // 插件手写 user 不可指派的信任模型不变（身份原头=内核鉴权结果）。
+    // 匿名端点（auth:none）保持无 scope = 反调无身份，fail-closed 不变。
+    let mut auth_identity: Option<agentos_core::types::TenantContext> = None;
     let outcome = loop {
         let mut headers_map = header_map_to_hashmap(&headers);
         if let Some(registry) = state.capability_registry.as_ref() {
@@ -340,22 +435,32 @@ async fn exec_ext_request(
                         for spoofed in ["x-agentos-tenant", "x-agentos-user", "x-agentos-role"] {
                             headers_map.remove(spoofed);
                         }
+                        auth_identity = None;
                     }
                     ExtAuthOutcome::Authenticated {
                         user_id,
                         role,
                         tenant_id,
                     } => {
-                        headers_map.insert("x-agentos-tenant".to_string(), tenant_id);
-                        headers_map.insert("x-agentos-user".to_string(), user_id);
-                        headers_map.insert("x-agentos-role".to_string(), role);
+                        headers_map.insert("x-agentos-tenant".to_string(), tenant_id.clone());
+                        headers_map.insert("x-agentos-user".to_string(), user_id.clone());
+                        headers_map.insert("x-agentos-role".to_string(), role.clone());
+                        auth_identity = {
+                            let mut ctx =
+                                agentos_core::types::TenantContext::new(tenant_id, String::new());
+                            ctx.user_id = Some(user_id);
+                            ctx.role = Some(role);
+                            Some(ctx)
+                        };
                     }
                     ExtAuthOutcome::Deny(resp) => return resp,
                 }
             }
         }
 
-        let outcome = dispatch_http(
+        // 身份 scope 内派发（含 heal 重试轮——每轮重跑鉴权会刷新 auth_identity）。
+        let outcome = dispatch_with_identity(
+            auth_identity.clone(),
             &dispatcher,
             &path,
             &method_str,
@@ -434,15 +539,49 @@ async fn exec_ext_request(
             })
         }
         DispatchOutcome::NotFound => {
-            // 声明面在册（manifest 已知且插件启用）但路由缺席 = 插件生命周期空窗
-            // 或注册面静默丢失。上方已自愈重试过一次（BUG-58：heal 成功则不会
-            // 落到这里）；仍未恢复 = 自愈无物可恢复（声明无端点）或恢复失败——
-            // 瞬态不可用而非路由不存在：503+Retry-After 让前端按可重试处理
-            // （裸 404 会被前端当「路由没了」常态化报错，2026-09-04 任务页实测
-            // 反复 404）；warn 补上空窗观测。
             if declared {
+                // 503/404 裁决前复核注册面现况：miss 后自愈重试仍 miss 有两种
+                // 成因，处置相反——
+                // a) 声明面有缺（manifest 声明的端点仍不在册）= 真·生命周期
+                //    空窗/注册面静默丢失（heal 不可达或恢复失败）→ 503+Retry-After
+                //    让前端按可重试处理（裸 404 会被前端当「路由没了」常态化报错，
+                //    2026-09-04 任务页实测）；
+                // b) 声明面完整（全部声明端点都在册）= miss 属请求 path/method
+                //    与声明面不匹配（坏调用方 URL/方法），heal 永远无物可补、
+                //    重试同路径与重启都不可恢复 → 404。旧语义对这种路径级 miss
+                //    也回 503，装机 R297 resume/cancel 永续 503「不自愈」实证
+                //    （heal 27/27 幂等命中 = 注册面从未缺失，Restart-After 语义
+                //    让调用方把永不恢复的 miss 当瞬态无限重试）。
+                // 两分支日志都记 method——路径级 miss 缺 method 无法排障（本次
+                // 调查实证盲点：warn 只有 path，调用方方法无从对证）。
+                let plugin_id = ext_path_plugin_id(&path).unwrap_or_default();
+                let surface_intact = match state
+                    .manifests
+                    .read()
+                    .await
+                    .iter()
+                    .find(|m| m.id == plugin_id)
+                {
+                    Some(m) => match state.capability_registry.as_ref() {
+                        Some(registry) => {
+                            crate::plugin_lifecycle::declared_http_routes_all_present(registry, m)
+                        }
+                        None => false,
+                    },
+                    None => false,
+                };
+                if surface_intact {
+                    tracing::info!(
+                        path = %path,
+                        method = %method_str,
+                        plugin = %plugin_id,
+                        "ext route 404: declared surface intact, path/method unmatched"
+                    );
+                    return (StatusCode::NOT_FOUND, "route not found").into_response();
+                }
                 warn!(
                     path = %path,
+                    method = %method_str,
                     "http route missing for declared plugin even after heal attempt (503, transient lifecycle window)"
                 );
                 return (
@@ -452,6 +591,18 @@ async fn exec_ext_request(
                 )
                     .into_response();
             }
+            // 插件未在册（manifest store 查无 / 未启用）→ 404（fail-closed 不变）。
+            // 此分支零日志曾是排障盲区：波次 manifest 面重建亚秒窗内撞上的请求
+            // 连痕迹都不留（2026-10-15 酒馆面板 404 实证）——warn 带 path/method、
+            // 解析出的插件 id 与 heal 尝试痕迹（heal_attempted=true = 请求时声明
+            // 面曾在、heal 后 manifest 面又被摘的中间态）。
+            warn!(
+                path = %path,
+                method = %method_str,
+                plugin = %ext_path_plugin_id(&path).unwrap_or_default(),
+                heal_attempted = route_healed,
+                "ext route 404: plugin not in manifest store or not enabled"
+            );
             (StatusCode::NOT_FOUND, "route not found").into_response()
         }
         DispatchOutcome::Timeout => {
@@ -459,6 +610,11 @@ async fn exec_ext_request(
         }
         DispatchOutcome::ConcurrencyLimited => {
             (StatusCode::SERVICE_UNAVAILABLE, "concurrency limit").into_response()
+        }
+        // 校验门禁拦截（503 服务不可用类，与并发超限同形态）：原因文案随 body
+        // 出走（点名插件 + 复验恢复路径），禁静默。
+        DispatchOutcome::VerificationBlocked(reason) => {
+            (StatusCode::SERVICE_UNAVAILABLE, reason).into_response()
         }
         DispatchOutcome::HandlerError(msg) => (StatusCode::BAD_GATEWAY, msg).into_response(),
     }
@@ -531,7 +687,6 @@ async fn enforce_ext_auth(
 fn build_wildcard_handler(
     state: crate::routes::AppState,
     dispatcher: Option<Arc<HttpDispatcher>>,
-    plugin_dirs: Arc<HashMap<String, std::path::PathBuf>>,
 ) -> axum::routing::MethodRouter<crate::routes::AppState> {
     use axum::http::{HeaderMap, Method};
 
@@ -541,25 +696,16 @@ fn build_wildcard_handler(
         move |method: Method, uri: axum::http::Uri, headers: HeaderMap, body: axum::body::Bytes| {
             let state = state.clone();
             let dispatcher = dispatcher.clone();
-            let plugin_dirs = plugin_dirs.clone();
             async move {
                 let path = uri.path().to_string();
                 let query_multi = parse_query_multi(&uri);
-                exec_ext_request(
-                    state,
-                    dispatcher,
-                    plugin_dirs,
-                    method,
-                    path,
-                    query_multi,
-                    headers,
-                    body,
-                )
-                .await
+                exec_ext_request(state, dispatcher, method, path, query_multi, headers, body).await
             }
         };
 
     axum::routing::any(handler)
+        // 请求体上限显式钉死（曾在 axum 隐式默认 2 MiB，事故实证后转正）。
+        .layer(axum::extract::DefaultBodyLimit::max(EXT_BODY_LIMIT_BYTES))
 }
 
 /// 从 `/ext/{plugin_id}/...` 提取插件 id 段（非 /ext 前缀或空段返回 None）。
@@ -597,14 +743,12 @@ fn parse_query_multi(uri: &axum::http::Uri) -> HashMap<String, Vec<String>> {
 fn build_datasource_handler(
     state: crate::routes::AppState,
     dispatcher: Option<Arc<HttpDispatcher>>,
-    plugin_dirs: Arc<HashMap<String, std::path::PathBuf>>,
 ) -> axum::routing::MethodRouter<crate::routes::AppState> {
     use axum::http::{HeaderMap, Method, Uri};
 
     let handler = move |method: Method, uri: Uri, headers: HeaderMap, body: axum::body::Bytes| {
         let state = state.clone();
         let dispatcher = dispatcher.clone();
-        let plugin_dirs = plugin_dirs.clone();
         async move {
             let rest = uri.path().trim_start_matches("/api/v1/datasource");
             let rest = rest.trim_start_matches('/');
@@ -617,7 +761,6 @@ fn build_datasource_handler(
             exec_ext_request(
                 state,
                 dispatcher,
-                plugin_dirs,
                 method,
                 ext_path,
                 query_multi,
@@ -628,232 +771,18 @@ fn build_datasource_handler(
         }
     };
     axum::routing::any(handler)
+        // 请求体上限显式钉死（曾在 axum 隐式默认 2 MiB，事故实证后转正）。
+        .layer(axum::extract::DefaultBodyLimit::max(EXT_BODY_LIMIT_BYTES))
 }
 
-/// 静态资源单文件大小上限（字节）：超限直接 413 拒绝，不整读入内存。
-/// 插件前端资源（JS/CSS/图片）正常远小于此；上限只挡异常巨物（误放文件/
-/// 恶意构造），同时约束单请求读盘的内存峰值。
-const STATIC_ASSET_MAX_BYTES: u64 = 8 * 1024 * 1024;
+mod static_assets;
 
-/// 尝试把 `/ext/{plugin_id}/assets/{*rest}` 解析为插件 `web/` 子目录下的文件并直读返回。
-///
-/// 返回：
-/// - `Some(response)` —— 路径形态匹配静态资源（无论命中/未命中/被拒），由调用方直接返回；
-/// - `None` —— 不是静态资源路径形态，或该插件未声明目录，调用方应继续走 dispatcher。
-///
-/// 路径安全：
-/// - 拒绝 `..` 段；
-/// - canonicalize 后必须仍在插件 `web/` 子树内（防 symlink 逃逸）。
-///
-/// 文件读取契约：整读移出 async 执行器（`spawn_blocking`），且先 stat 校验
-/// [`STATIC_ASSET_MAX_BYTES`] 上限——超限 413 拒绝，不整读超限文件。
-async fn try_serve_static_asset(
-    path: &str,
-    plugin_dirs: &HashMap<String, std::path::PathBuf>,
-) -> Option<axum::response::Response> {
-    use axum::body::Body;
-    use axum::http::{HeaderName, HeaderValue, StatusCode};
-    use axum::response::IntoResponse;
-
-    // 解析 /ext/{plugin_id}/assets/{rest}。
-    let stripped = path.strip_prefix("/ext/")?;
-    let mut iter = stripped.splitn(3, '/');
-    let plugin_id = iter.next()?;
-    let mid = iter.next()?;
-    if mid != "assets" {
-        return None; // 非 assets 子路径：交回 dispatcher
-    }
-    let rest = iter.next().unwrap_or("");
-    // 空路径（/ext/{plugin}/assets 或 /ext/{plugin}/assets/）：交回 dispatcher，
-    // 让插件自己决定要不要给一个 http_endpoint 处理目录索引。
-    if rest.is_empty() {
-        return None;
-    }
-
-    let plugin_dir = plugin_dirs.get(plugin_id)?;
-    // 路径安全：先拒 .. 段（canonicalize 之前），防止 ./.. 逃逸。
-    for seg in rest.split('/') {
-        if seg == ".." {
-            return Some((StatusCode::NOT_FOUND, "not found").into_response());
-        }
-    }
-    let web_root = plugin_dir.join("web");
-    // web/ 不存在 → 此插件不托管静态资源，交回 dispatcher。
-    if !web_root.exists() {
-        return None;
-    }
-
-    let file_path = web_root.join(rest);
-
-    // canonicalize 防 symlink 逃逸：file 必须在 web_root 子树内。
-    let canonical_web = match std::fs::canonicalize(&web_root) {
-        Ok(p) => p,
-        Err(_) => return None,
-    };
-    let canonical_file = match std::fs::canonicalize(&file_path) {
-        Ok(p) => p,
-        Err(_) => {
-            // 文件不存在 → 此路径形态确实归静态资源所有，直接 404（不交回 dispatcher，
-            // 否则 dispatcher 也会 404，但语义上 /assets/** 是静态资源命名空间）。
-            return Some((StatusCode::NOT_FOUND, "not found").into_response());
-        }
-    };
-    if !canonical_file.starts_with(&canonical_web) || !canonical_file.is_file() {
-        return Some((StatusCode::NOT_FOUND, "not found").into_response());
-    }
-
-    // 整读在阻塞线程执行（async 执行器上不做同步磁盘 IO），先 stat 校验
-    // 上限——超限 413 拒绝，不整读超限文件。
-    let read_path = canonical_file.clone();
-    let read = tokio::task::spawn_blocking(move || read_static_asset_capped(&read_path)).await;
-    let bytes = match read {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(StaticAssetReadError::TooLarge)) => {
-            return Some(
-                (
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "static asset exceeds size limit",
-                )
-                    .into_response(),
-            );
-        }
-        Ok(Err(StaticAssetReadError::Io)) => {
-            return Some((StatusCode::NOT_FOUND, "not found").into_response());
-        }
-        Err(_) => {
-            return Some(
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "static asset read task failed",
-                )
-                    .into_response(),
-            );
-        }
-    };
-
-    let mime = mime_for_extension(
-        canonical_file
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or(""),
-    );
-
-    let mut builder = axum::response::Response::builder().status(StatusCode::OK);
-    if let (Ok(name), Ok(val)) = (
-        HeaderName::try_from("content-type"),
-        HeaderValue::try_from(mime),
-    ) {
-        builder = builder.header(name, val);
-    }
-    // 静态资源通常可缓存；这里给一个保守的 no-cache（开发期 SPA 热更新友好）。
-    if let (Ok(name), Ok(val)) = (
-        HeaderName::try_from("cache-control"),
-        HeaderValue::try_from("no-cache"),
-    ) {
-        builder = builder.header(name, val);
-    }
-    Some(builder.body(Body::from(bytes)).unwrap_or_else(|_| {
-        (StatusCode::INTERNAL_SERVER_ERROR, "response build failed").into_response()
-    }))
-}
-
-/// 单文件读取结果：超限 / IO 失败分立（分别映射 413 / 404；IO 细节按既有
-/// 契约不外泄——读失败统一 404）。
-enum StaticAssetReadError {
-    TooLarge,
-    Io,
-}
-
-/// 阻塞线程内的静态资源读取：先 stat 校验大小上限，再整读。
-fn read_static_asset_capped(path: &std::path::Path) -> Result<Vec<u8>, StaticAssetReadError> {
-    let len = match std::fs::metadata(path) {
-        Ok(m) => m.len(),
-        Err(_) => return Err(StaticAssetReadError::Io),
-    };
-    if len > STATIC_ASSET_MAX_BYTES {
-        return Err(StaticAssetReadError::TooLarge);
-    }
-    std::fs::read(path).map_err(|_| StaticAssetReadError::Io)
-}
-
-/// 扩展名 → Content-Type 映射表（覆盖常见 web 资源类型）。
-///
-/// 未命中扩展名统一回退到 `application/octet-stream`（浏览器嗅探可识别大部分文本）。
-/// 不引入 mime crate —— 任务范围控制依赖膨胀，常见 web 类型手写映射足够。
-/// 单一来源（2026-08-24 合并）：`/uploads`（routes.rs）与 `/ext/{plugin}/assets`
-/// 两处静态资源出口共用本映射，扩展名集合取两处并集。
-pub(crate) fn mime_for_extension(ext: &str) -> &'static str {
-    match ext.to_ascii_lowercase().as_str() {
-        "html" | "htm" => "text/html; charset=utf-8",
-        "js" | "mjs" => "application/javascript; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "json" => "application/json; charset=utf-8",
-        "map" => "application/json",
-        "txt" | "md" => "text/plain; charset=utf-8",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "avif" => "image/avif",
-        "ico" => "image/x-icon",
-        "woff" => "font/woff",
-        "woff2" => "font/woff2",
-        "ttf" => "font/ttf",
-        "otf" => "font/otf",
-        "eot" => "application/vnd.ms-fontobject",
-        "wasm" => "application/wasm",
-        "pdf" => "application/pdf",
-        "xml" => "application/xml; charset=utf-8",
-        "mp4" => "video/mp4",
-        "webm" => "video/webm",
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "m4a" => "audio/mp4",
-        "ogg" => "audio/ogg",
-        _ => "application/octet-stream",
-    }
-}
-
-/// 把 manifest 路径约定（{param}/{param:path}）转成 axum 0.8 路径参数语法（:param/*param）。
-///
-/// - `{name}` → `:name`（单段捕获）
-/// - `{name:path}` → `*name`（剩余多段通配，axum 0.8 用 `*` 前缀）
-/// - 其他段原样保留。
+pub(crate) use static_assets::mime_for_extension;
+use static_assets::{header_map_to_hashmap, try_serve_static_asset};
 #[cfg(test)]
-fn manifest_path_to_axum(manifest_path: &str) -> String {
-    manifest_path
-        .split('/')
-        .map(|seg| {
-            if seg.starts_with('{') && seg.ends_with('}') {
-                let inner = &seg[1..seg.len() - 1]; // 去掉 { }
-                if let Some(name) = inner.strip_suffix(":path") {
-                    format!("{{*{name}}}") // axum 0.8 多段通配语法 {*name}
-                } else {
-                    format!("{{{inner}}}") // axum 0.8 单段捕获语法 {name}
-                }
-            } else {
-                seg.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-/// HeaderMap → HashMap<String,String>（多值取首个，key 转小写）。
-fn header_map_to_hashmap(headers: &axum::http::HeaderMap) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for (k, v) in headers.iter() {
-        let key = k.as_str().to_lowercase();
-        if let Ok(val) = v.to_str() {
-            map.entry(key).or_insert_with(|| val.to_string());
-        }
-    }
-    map
-}
-
-// ── 生产实现：经 PluginInvoker 调插件 http.handle（sidecar MCP / InProcess 透明分发）──
-
+use static_assets::{
+    manifest_path_to_axum, read_static_asset_capped, StaticAssetReadError, STATIC_ASSET_MAX_BYTES,
+};
 /// 生产环境 HTTP 处理能力实现：经 [`PluginInvoker`] 把入站请求交给插件 `http.handle`。
 ///
 /// dispatcher 据路由查到 `plugin_id` 后填入 [`HttpHandleRequest::plugin_id`]，
@@ -863,6 +792,7 @@ fn header_map_to_hashmap(headers: &axum::http::HeaderMap) -> HashMap<String, Str
 ///
 /// 企微真实回调（真实 corp_id/AES 回包）需插件代码配合 + 部署后验证；本实现只负责
 /// 把 raw body/headers/query 字节级透传到插件，验签/解密/加密由插件（Python）完成。
+// ── 生产实现：经 PluginInvoker 调插件 http.handle（sidecar MCP / InProcess 透明分发）──
 pub struct SidecarHttpHandler {
     invoker: Arc<dyn agentos_core::traits::PluginInvoker>,
 }
@@ -894,1401 +824,4 @@ impl HttpHandleCapability for SidecarHttpHandler {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_manifest_path_to_axum_static() {
-        assert_eq!(manifest_path_to_axum("/ext/p/llm"), "/ext/p/llm");
-        assert_eq!(
-            manifest_path_to_axum("/ext/p/llm/defaults"),
-            "/ext/p/llm/defaults"
-        );
-    }
-
-    #[test]
-    fn test_manifest_path_to_axum_single_param() {
-        // {model_id} → {model_id}（axum 0.8 单段捕获，同名语法）
-        assert_eq!(
-            manifest_path_to_axum("/ext/p/models/{model_id}"),
-            "/ext/p/models/{model_id}"
-        );
-        assert_eq!(
-            manifest_path_to_axum("/ext/p/providers/{provider_id}"),
-            "/ext/p/providers/{provider_id}"
-        );
-    }
-
-    #[test]
-    fn test_manifest_path_to_axum_catchall_param() {
-        // {config_path:path} → {*config_path}（axum 0.8 多段通配语法）
-        assert_eq!(
-            manifest_path_to_axum("/ext/p/generic/{config_path:path}"),
-            "/ext/p/generic/{*config_path}"
-        );
-    }
-
-    /// 建一个带 web/ 子目录的插件目录桩：plugin_id → 插件目录。
-    fn plugin_dirs_with_web(dir: &tempfile::TempDir) -> HashMap<String, std::path::PathBuf> {
-        let web = dir.path().join("web");
-        std::fs::create_dir_all(&web).expect("create web dir");
-        let mut map = HashMap::new();
-        map.insert("p".to_string(), dir.path().to_path_buf());
-        map
-    }
-
-    fn response_status(resp: &axum::response::Response) -> axum::http::StatusCode {
-        resp.status()
-    }
-
-    #[tokio::test]
-    async fn static_asset_serves_small_file_with_mime() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let dirs = plugin_dirs_with_web(&dir);
-        std::fs::write(dir.path().join("web/app.js"), b"console.log(1);").unwrap();
-
-        let resp = try_serve_static_asset("/ext/p/assets/app.js", &dirs)
-            .await
-            .expect("路径形态匹配必须返回响应");
-        assert_eq!(response_status(&resp), axum::http::StatusCode::OK);
-        let headers = resp.headers();
-        assert_eq!(
-            headers.get("content-type").unwrap(),
-            "application/javascript; charset=utf-8"
-        );
-        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
-            .await
-            .unwrap();
-        assert_eq!(&body[..], b"console.log(1);");
-    }
-
-    #[tokio::test]
-    async fn static_asset_oversize_file_rejected_with_413() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let dirs = plugin_dirs_with_web(&dir);
-        // 上限 + 1 字节：超限文件必须被拒绝（不整读入内存）。
-        let oversize = vec![b'x'; STATIC_ASSET_MAX_BYTES as usize + 1];
-        std::fs::write(dir.path().join("web/big.bin"), oversize).unwrap();
-
-        let resp = try_serve_static_asset("/ext/p/assets/big.bin", &dirs)
-            .await
-            .expect("路径形态匹配必须返回响应");
-        assert_eq!(
-            response_status(&resp),
-            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
-            "超限静态资源必须 413 拒绝"
-        );
-    }
-
-    #[tokio::test]
-    async fn static_asset_file_at_limit_is_served() {
-        // 边界区分度：恰好等于上限（≤ 上限）必须正常返回，与超限用例形成
-        // 边界两侧断言。
-        let dir = tempfile::tempdir().expect("tempdir");
-        let dirs = plugin_dirs_with_web(&dir);
-        let at_limit = vec![b'a'; STATIC_ASSET_MAX_BYTES as usize];
-        std::fs::write(dir.path().join("web/edge.bin"), at_limit).unwrap();
-
-        let resp = try_serve_static_asset("/ext/p/assets/edge.bin", &dirs)
-            .await
-            .expect("路径形态匹配必须返回响应");
-        assert_eq!(
-            response_status(&resp),
-            axum::http::StatusCode::OK,
-            "恰好等于上限的文件必须正常返回（上限为闭区间）"
-        );
-    }
-
-    // ── 静态资源路径形态判定（None = 交回 dispatcher 的分支面）──
-
-    /// `try_serve_static_asset` 的非静态形态：非 /ext 前缀 / 缺 plugin 段 /
-    /// 缺 mid 段 / 非 assets / 空 rest / 未声明目录 / 无 web 目录 → 一律 None
-    ///（交回 dispatcher，不吞请求）。
-    #[tokio::test]
-    async fn static_asset_shape_mismatches_return_none() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let dirs = plugin_dirs_with_web(&dir);
-        // 无 web/ 子目录的插件根
-        let bare = tempfile::tempdir().expect("tempdir");
-        let mut with_bare = dirs.clone();
-        with_bare.insert("bare".to_string(), bare.path().to_path_buf());
-
-        let cases = [
-            ("/api/v1/other", "非 /ext 前缀"),
-            ("/ext/", "缺 plugin 段"),
-            ("/ext/p", "缺 mid 段（splitn 只两段）"),
-            ("/ext/p/not-assets/x.js", "非 assets 子路径"),
-            ("/ext/p/assets", "空 rest（目录索引交插件）"),
-            ("/ext/p/assets/", "rest 仅斜杠也视为空"),
-            ("/ext/unknown/assets/x.js", "插件未声明目录"),
-            ("/ext/bare/assets/x.js", "插件无 web/ 子目录"),
-        ];
-        for (path, why) in cases {
-            assert!(
-                try_serve_static_asset(path, &with_bare).await.is_none(),
-                "{why}：应返回 None 交回 dispatcher，path={path}"
-            );
-        }
-    }
-
-    /// `..` 段逃逸与文件不存在：路径形态匹配即由静态分支裁决（Some + 404，
-    /// 不交回 dispatcher——/assets/** 是静态资源命名空间）。
-    #[tokio::test]
-    async fn static_asset_rejects_traversal_and_missing_file() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let dirs = plugin_dirs_with_web(&dir);
-        // plugin.json 在插件根（web/ 之外），逃逸尝试若成功会读到它
-        std::fs::write(dir.path().join("plugin.json"), b"{\"id\":\"p\"}").unwrap();
-
-        let traversal = try_serve_static_asset("/ext/p/assets/../../plugin.json", &dirs)
-            .await
-            .expect("路径形态匹配（含 .. 段）仍归静态分支裁决");
-        assert_eq!(
-            response_status(&traversal),
-            axum::http::StatusCode::NOT_FOUND,
-            ".. 段必须 404，不得逃出 web/ 子树"
-        );
-
-        let missing = try_serve_static_asset("/ext/p/assets/nope.js", &dirs)
-            .await
-            .expect("不存在文件的路径形态仍归静态分支");
-        assert_eq!(response_status(&missing), axum::http::StatusCode::NOT_FOUND);
-    }
-
-    /// `read_static_asset_capped` 的 IO 失败分支（文件被删/不可读）→ Io 错误。
-    #[test]
-    fn read_static_asset_capped_io_failure() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let missing = dir.path().join("gone.bin");
-        assert!(matches!(
-            read_static_asset_capped(&missing),
-            Err(StaticAssetReadError::Io)
-        ));
-        // 超限优先于 IO：先 stat 再读，目录本身 stat 成功但 read 失败 → Io
-        assert!(matches!(
-            read_static_asset_capped(dir.path()),
-            Err(StaticAssetReadError::Io)
-        ));
-    }
-
-    /// `mime_for_extension` 全表 + 大小写不敏感 + 未知回退 octet-stream。
-    #[test]
-    fn mime_for_extension_table_and_fallback() {
-        for (ext, want) in [
-            ("html", "text/html; charset=utf-8"),
-            ("htm", "text/html; charset=utf-8"),
-            ("js", "application/javascript; charset=utf-8"),
-            ("mjs", "application/javascript; charset=utf-8"),
-            ("css", "text/css; charset=utf-8"),
-            ("json", "application/json; charset=utf-8"),
-            ("map", "application/json"),
-            ("txt", "text/plain; charset=utf-8"),
-            ("svg", "image/svg+xml"),
-            ("png", "image/png"),
-            ("woff2", "font/woff2"),
-            ("wasm", "application/wasm"),
-            ("XML", "application/xml; charset=utf-8"),
-        ] {
-            assert_eq!(mime_for_extension(ext), want, "ext={ext}");
-        }
-        for unknown in ["bin", "", "tar.gz", "exe"] {
-            assert_eq!(
-                mime_for_extension(unknown),
-                "application/octet-stream",
-                "未知扩展名 {unknown:?} 回退 octet-stream"
-            );
-        }
-    }
-
-    /// `ext_path_plugin_id`：/ext 前缀提取首段；非 /ext、空段 → None。
-    #[test]
-    fn ext_path_plugin_id_extraction() {
-        assert_eq!(ext_path_plugin_id("/ext/svc/ping"), Some("svc"));
-        assert_eq!(ext_path_plugin_id("/ext/svc"), Some("svc"));
-        assert_eq!(ext_path_plugin_id("/api/v1/ext/svc"), None);
-        assert_eq!(ext_path_plugin_id("/ext/"), None);
-        assert_eq!(ext_path_plugin_id("/ext//ping"), None);
-        assert_eq!(ext_path_plugin_id("/ext"), None);
-    }
-
-    /// `parse_query_multi`：重复 key 保序全量、无 query → 空表。
-    #[test]
-    fn parse_query_multi_preserves_duplicates() {
-        let uri: axum::http::Uri = "/x?a=1&b=2&a=3".parse().unwrap();
-        let m = parse_query_multi(&uri);
-        assert_eq!(m.get("a").unwrap(), &vec!["1".to_string(), "3".to_string()]);
-        assert_eq!(m.get("b").unwrap(), &vec!["2".to_string()]);
-        let bare: axum::http::Uri = "/x".parse().unwrap();
-        assert!(parse_query_multi(&bare).is_empty());
-    }
-
-    /// `header_map_to_hashmap`：key 小写化、多值取首个、非 ASCII 值跳过。
-    #[test]
-    fn header_map_to_hashmap_lowercases_and_first_wins() {
-        use axum::http::{HeaderMap, HeaderValue};
-        let mut headers = HeaderMap::new();
-        headers.insert("X-Custom", HeaderValue::from_static("first"));
-        headers.append("X-Custom", HeaderValue::from_static("second"));
-        let map = header_map_to_hashmap(&headers);
-        assert_eq!(map.get("x-custom").map(String::as_str), Some("first"));
-        assert!(header_map_to_hashmap(&HeaderMap::new()).is_empty());
-    }
-
-    // ── 分发结果 → HTTP 响应的映射（exec_ext_request 的出口面）──
-
-    /// 构造测试用 http_endpoints 声明（auth 显式 none，除用例另行覆写）。
-    fn endpoint(route_id: &str, method: &str, path: &str) -> agentos_core::traits::HttpEndpoint {
-        agentos_core::traits::HttpEndpoint {
-            route_id: route_id.to_string(),
-            method: method.to_string(),
-            path: path.to_string(),
-            auth: Some("none".to_string()),
-            handler_capability: "http.handle".to_string(),
-            timeout_ms: None,
-            max_concurrency: None,
-            description: None,
-        }
-    }
-
-    /// 插件回包状态码越界 / body 非 base64 → 502（上游故障不得静默改 200）。
-    struct BadResponseHandler {
-        bad_status: bool,
-    }
-
-    #[async_trait::async_trait]
-    impl HttpHandleCapability for BadResponseHandler {
-        async fn handle(&self, _req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
-            Ok(HttpHandleResponse {
-                status: if self.bad_status { 0 } else { 200 },
-                headers: HashMap::new(),
-                body: if self.bad_status {
-                    String::new()
-                } else {
-                    "not-base64!!".to_string()
-                },
-                body_encoding: "base64".to_string(),
-            })
-        }
-    }
-
-    /// 坏状态码 + 坏 body 两组区分度输入：都必须 502 且文案点明原因。
-    #[tokio::test]
-    async fn exec_ext_request_maps_bad_plugin_response_to_502() {
-        use crate::routes::AppState;
-        use axum::body::Body;
-        use axum::http::Request;
-        use tower::ServiceExt;
-
-        for (bad_status, why) in [(true, "状态码越界"), (false, "body 非 base64")] {
-            let mut state = AppState::new();
-            let registry = Arc::new(CapabilityRegistryImpl::new());
-            registry
-                .register_http_route("p1", endpoint("r", "GET", "/ext/p1/cb"))
-                .unwrap();
-            state.capability_registry = Some(registry);
-            state.http_handler = Some(Arc::new(BadResponseHandler { bad_status }));
-
-            let app = crate::server::build_router(state);
-            let resp = app
-                .oneshot(
-                    Request::builder()
-                        .uri("/ext/p1/cb")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                resp.status(),
-                axum::http::StatusCode::BAD_GATEWAY,
-                "{why} 必须 502"
-            );
-            let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
-            let text = String::from_utf8_lossy(&body);
-            let expect = if bad_status {
-                "invalid status"
-            } else {
-                "decode failed"
-            };
-            assert!(text.contains(expect), "{why} 文案应含 {expect}: {text}");
-        }
-    }
-
-    /// 无 dispatcher 资源且无 plugin_dirs → build_router_with_http_routes 原样
-    /// 返回静态路由（不挂 /ext 通配），请求 404 由内核路由树裁决。
-    #[tokio::test]
-    async fn build_router_without_dispatcher_resources_keeps_static_tree() {
-        use crate::routes::AppState;
-        use axum::body::Body;
-        use axum::http::Request;
-        use tower::ServiceExt;
-
-        let state = AppState::new();
-        assert!(state.capability_registry.is_none() && state.plugin_dirs.is_empty());
-        // 传入的静态路由树已带 state（生产由 build_router 先 with_state 之前调用，
-        // 此处直接验证返回值语义：资源缺失时原样返回入参路由器）
-        let inner: axum::Router<crate::routes::AppState> = axum::Router::new().route(
-            "/ping",
-            axum::routing::get(|| async { axum::http::StatusCode::OK }),
-        );
-        let app = build_router_with_http_routes(state, inner);
-        let app = app.with_state(crate::routes::AppState::new());
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/ext/anything")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            axum::http::StatusCode::NOT_FOUND,
-            "未挂 /ext 通配时由内核路由树 404"
-        );
-    }
-
-    /// 并发超限 → handler 出口 503（DispatchOutcome::ConcurrencyLimited 映射）。
-    struct HangHandler;
-
-    #[async_trait::async_trait]
-    impl HttpHandleCapability for HangHandler {
-        async fn handle(&self, _req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
-            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-            Ok(HttpHandleResponse {
-                status: 200,
-                headers: HashMap::new(),
-                body: String::new(),
-                body_encoding: "base64".to_string(),
-            })
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn exec_ext_request_concurrency_limited_maps_to_503() {
-        use crate::routes::AppState;
-        use axum::body::Body;
-        use axum::http::Request;
-        use tower::ServiceExt;
-
-        let mut state = AppState::new();
-        let registry = Arc::new(CapabilityRegistryImpl::new());
-        let mut ep = endpoint("r", "GET", "/ext/p1/slow");
-        ep.max_concurrency = Some(1);
-        ep.timeout_ms = Some(5000);
-        registry.register_http_route("p1", ep).unwrap();
-        state.capability_registry = Some(registry);
-        state.http_handler = Some(Arc::new(HangHandler));
-        let app = crate::server::build_router(state);
-
-        let first = app.clone().oneshot(
-            Request::builder()
-                .uri("/ext/p1/slow")
-                .body(Body::empty())
-                .unwrap(),
-        );
-        let second = app.clone().oneshot(
-            Request::builder()
-                .uri("/ext/p1/slow")
-                .body(Body::empty())
-                .unwrap(),
-        );
-        let (a, b) = tokio::join!(first, second);
-        let statuses = [a.unwrap().status(), b.unwrap().status()];
-        assert!(
-            statuses.contains(&axum::http::StatusCode::OK)
-                && statuses.contains(&axum::http::StatusCode::SERVICE_UNAVAILABLE),
-            "并发上限 1 时两请求应一放行一 503，实际 {statuses:?}"
-        );
-    }
-
-    /// 超时 → handler 出口 504（DispatchOutcome::Timeout 映射）。
-    struct SlowThenOkHandler;
-
-    #[async_trait::async_trait]
-    impl HttpHandleCapability for SlowThenOkHandler {
-        async fn handle(&self, _req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            Ok(HttpHandleResponse {
-                status: 200,
-                headers: HashMap::new(),
-                body: String::new(),
-                body_encoding: "base64".to_string(),
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn exec_ext_request_timeout_maps_to_504() {
-        use crate::routes::AppState;
-        use axum::body::Body;
-        use axum::http::Request;
-        use tower::ServiceExt;
-
-        let mut state = AppState::new();
-        let registry = Arc::new(CapabilityRegistryImpl::new());
-        let mut ep = endpoint("r", "GET", "/ext/p1/slow");
-        ep.timeout_ms = Some(50); // 远小于 handler 的 500ms
-        registry.register_http_route("p1", ep).unwrap();
-        state.capability_registry = Some(registry);
-        state.http_handler = Some(Arc::new(SlowThenOkHandler));
-        let app = crate::server::build_router(state);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/ext/p1/slow")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::GATEWAY_TIMEOUT);
-    }
-
-    // ── D1 宽限面：宿主 starting 期间端点超时预算暂停（等待就绪而非 504）──
-
-    /// D1 探针桩：只回答 is_host_starting，其余 trait 面不可达/空实现。
-    struct StartingProbeInvoker {
-        starting: std::sync::atomic::AtomicBool,
-    }
-
-    /// trait 默认实现语义：未覆写 is_host_starting 的实现方（测试桩等）
-    /// 恒不在启动窗口——dispatcher 行为与无探针时完全一致。
-    #[test]
-    fn invoker_default_is_host_starting_is_false() {
-        let invoker = ScriptedInvoker {
-            result: parking_lot::Mutex::new(Err("unused".to_string())),
-        };
-        assert!(
-            !agentos_core::traits::PluginInvoker::is_host_starting(&invoker, "p1"),
-            "默认实现必须返回 false（不在启动窗口）"
-        );
-    }
-
-    #[async_trait::async_trait]
-    impl agentos_core::traits::PluginInvoker for StartingProbeInvoker {
-        async fn invoke_pipeline_plugin<'a>(
-            &self,
-            _plugin_id: &str,
-            _ctx: &agentos_core::types::PluginContext<'a>,
-        ) -> Result<agentos_core::types::PluginResult, agentos_core::types::PluginError> {
-            unreachable!("本测试不触达管道插件调用")
-        }
-        async fn invoke_tool(
-            &self,
-            _plugin_id: &str,
-            _tool_name: &str,
-            _inputs: &serde_json::Value,
-        ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError>
-        {
-            unreachable!("本测试不触达工具调用")
-        }
-        async fn send_lifecycle_hook(
-            &self,
-            _plugin_id: &str,
-            _hook: agentos_core::traits::LifecycleHook,
-            _context: &agentos_core::traits::HookContext,
-        ) -> Result<(), agentos_core::types::PluginError> {
-            Ok(())
-        }
-        fn is_host_starting(&self, _plugin_id: &str) -> bool {
-            self.starting.load(std::sync::atomic::Ordering::SeqCst)
-        }
-    }
-
-    /// D1：宿主 starting 期间预算暂停——handler 在 base timeout 之后才完成
-    /// 仍被等待就绪（respawn 冷启窗内不 504），无探针同型请求则照旧 504。
-    #[tokio::test]
-    async fn dispatch_waits_for_starting_host_beyond_base_timeout() {
-        struct DelayedOkHandler;
-        #[async_trait::async_trait]
-        impl HttpHandleCapability for DelayedOkHandler {
-            async fn handle(&self, _req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
-                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                Ok(HttpHandleResponse {
-                    status: 200,
-                    headers: HashMap::new(),
-                    body: String::new(),
-                    body_encoding: "base64".to_string(),
-                })
-            }
-        }
-
-        let registry = Arc::new(CapabilityRegistryImpl::new());
-        let mut ep = endpoint("r", "GET", "/ext/p1/starting");
-        ep.timeout_ms = Some(100); // 远小于 handler 的 400ms
-        registry.register_http_route("p1", ep).unwrap();
-
-        // 有探针且 starting：预算暂停 → 等 handler 完成而非 100ms 处 504
-        let dispatcher = HttpDispatcher::new(registry.clone(), Arc::new(DelayedOkHandler))
-            .with_startup_probe(Some(Arc::new(StartingProbeInvoker {
-                starting: std::sync::atomic::AtomicBool::new(true),
-            })));
-        let started = std::time::Instant::now();
-        let outcome = dispatch_http(
-            &dispatcher,
-            "/ext/p1/starting",
-            "GET",
-            vec![],
-            HashMap::new(),
-            HashMap::new(),
-        )
-        .await;
-        assert!(
-            matches!(outcome, DispatchOutcome::Handled(_)),
-            "starting 窗口内必须等待就绪而非 504: {outcome:?}"
-        );
-        assert!(
-            started.elapsed() >= std::time::Duration::from_millis(350),
-            "完成必须落在 base timeout 之后的宽限窗内（等待了 {:?}）",
-            started.elapsed()
-        );
-
-        // 无探针：同型请求在 base timeout 处照旧 504（既有语义逐毫秒等价）
-        let dispatcher = HttpDispatcher::new(registry, Arc::new(DelayedOkHandler));
-        let outcome = dispatch_http(
-            &dispatcher,
-            "/ext/p1/starting",
-            "GET",
-            vec![],
-            HashMap::new(),
-            HashMap::new(),
-        )
-        .await;
-        assert!(
-            matches!(outcome, DispatchOutcome::Timeout),
-            "无探针时不得被宽限: {outcome:?}"
-        );
-    }
-
-    /// D1：宿主退出 starting 窗口后预算恢复消耗——不能被宽限无限拖住。
-    #[tokio::test]
-    async fn dispatch_budget_resumes_when_host_leaves_starting_window() {
-        struct SlowHandler;
-        #[async_trait::async_trait]
-        impl HttpHandleCapability for SlowHandler {
-            async fn handle(&self, _req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
-                tokio::time::sleep(std::time::Duration::from_millis(900)).await;
-                Ok(HttpHandleResponse {
-                    status: 200,
-                    headers: HashMap::new(),
-                    body: String::new(),
-                    body_encoding: "base64".to_string(),
-                })
-            }
-        }
-
-        let probe = Arc::new(StartingProbeInvoker {
-            starting: std::sync::atomic::AtomicBool::new(true),
-        });
-        let registry = Arc::new(CapabilityRegistryImpl::new());
-        let mut ep = endpoint("r", "GET", "/ext/p1/flap");
-        ep.timeout_ms = Some(100);
-        registry.register_http_route("p1", ep).unwrap();
-        let dispatcher = HttpDispatcher::new(registry, Arc::new(SlowHandler))
-            .with_startup_probe(Some(probe.clone() as Arc<dyn PluginInvoker>));
-
-        // 300ms 后探针翻 false：预算恢复消耗，100ms 预算在 ~400ms 处耗尽 → 504
-        //（handler 900ms 才完成，必然赶不上）；elapsed < 900ms 证明预算确实恢复。
-        let p = probe.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            p.starting.store(false, std::sync::atomic::Ordering::SeqCst);
-        });
-
-        let started = std::time::Instant::now();
-        let outcome = dispatch_http(
-            &dispatcher,
-            "/ext/p1/flap",
-            "GET",
-            vec![],
-            HashMap::new(),
-            HashMap::new(),
-        )
-        .await;
-        assert!(
-            matches!(outcome, DispatchOutcome::Timeout),
-            "退出 starting 窗口后预算必须恢复消耗: {outcome:?}"
-        );
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed >= std::time::Duration::from_millis(350),
-            "starting 期间预算必须暂停（400ms 完成前不 504）: {elapsed:?}"
-        );
-        assert!(
-            elapsed < std::time::Duration::from_millis(800),
-            "预算恢复后必须按剩余预算 504（不能被宽限无限拖住）: {elapsed:?}"
-        );
-    }
-
-    /// handler 返回 Err → 502（DispatchOutcome::HandlerError 映射）。
-    struct ErrHandler;
-
-    #[async_trait::async_trait]
-    impl HttpHandleCapability for ErrHandler {
-        async fn handle(&self, _req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
-            Err("plugin blew up".to_string())
-        }
-    }
-
-    #[tokio::test]
-    async fn exec_ext_request_handler_error_maps_to_502() {
-        use crate::routes::AppState;
-        use axum::body::Body;
-        use axum::http::Request;
-        use tower::ServiceExt;
-
-        let mut state = AppState::new();
-        let registry = Arc::new(CapabilityRegistryImpl::new());
-        registry
-            .register_http_route("p1", endpoint("r", "GET", "/ext/p1/boom"))
-            .unwrap();
-        state.capability_registry = Some(registry);
-        state.http_handler = Some(Arc::new(ErrHandler));
-        let app = crate::server::build_router(state);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/ext/p1/boom")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::BAD_GATEWAY);
-        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
-        assert!(String::from_utf8_lossy(&body).contains("plugin blew up"));
-    }
-
-    /// 未知路由（无 dispatcher 资源但有 plugin_dirs）：静态分支未命中
-    /// → dispatcher 缺席 → 404 "route not found"。
-    #[tokio::test]
-    async fn exec_ext_request_without_dispatcher_returns_404() {
-        use crate::routes::AppState;
-        use axum::body::Body;
-        use axum::http::Request;
-        use tower::ServiceExt;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut state = AppState::new();
-        // 只有 plugin_dirs（静态资源面），无 capability_registry/http_handler
-        state.plugin_dirs = Arc::new(HashMap::from([("p".to_string(), dir.path().to_path_buf())]));
-        let app = crate::server::build_router(state);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/ext/p/no-route")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
-        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
-        assert!(String::from_utf8_lossy(&body).contains("route not found"));
-    }
-
-    /// `build_datasource_handler`：`/api/v1/datasource/ext/{plugin}/{route}` 改写
-    /// 复用同一分发；短形式 `/api/v1/datasource/{route}` 按 /ext/{route} 处理。
-    #[tokio::test]
-    async fn datasource_handler_rewrites_both_forms() {
-        use crate::routes::AppState;
-        use axum::body::Body;
-        use axum::http::Request;
-        use tower::ServiceExt;
-
-        struct EchoPath;
-        #[async_trait::async_trait]
-        impl HttpHandleCapability for EchoPath {
-            async fn handle(&self, req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
-                Ok(HttpHandleResponse {
-                    status: 200,
-                    headers: HashMap::new(),
-                    body: base64::engine::general_purpose::STANDARD.encode(req.path.as_bytes()),
-                    body_encoding: "base64".to_string(),
-                })
-            }
-        }
-
-        let mut state = AppState::new();
-        let registry = Arc::new(CapabilityRegistryImpl::new());
-        registry
-            .register_http_route("p1", endpoint("r", "GET", "/ext/p1/opts"))
-            .unwrap();
-        state.capability_registry = Some(registry);
-        state.http_handler = Some(Arc::new(EchoPath));
-        let app = crate::server::build_router(state);
-
-        // 带 ext/ 前缀 → 改写为 /ext/p1/opts 命中插件路由
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/datasource/ext/p1/opts")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&body),
-            "/ext/p1/opts",
-            "带 ext/ 前缀应改写为 /ext/ 原样（透传）"
-        );
-
-        // 短形式 → 按 /ext/{route} 处理（未命中注册路由 → 404）
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/datasource/unknown")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
-    }
-
-    /// 鉴权声明为 `user` 且带合法 token → 注入身份头转发给插件（三头齐全）。
-    #[tokio::test]
-    async fn exec_ext_request_injects_identity_headers_for_authed_route() {
-        use crate::routes::AppState;
-        use axum::body::Body;
-        use axum::http::Request;
-        use tower::ServiceExt;
-
-        struct HeaderEcho;
-        #[async_trait::async_trait]
-        impl HttpHandleCapability for HeaderEcho {
-            async fn handle(&self, req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
-                let payload = serde_json::json!({
-                    "tenant": req.headers.get("x-agentos-tenant"),
-                    "user": req.headers.get("x-agentos-user"),
-                    "role": req.headers.get("x-agentos-role"),
-                });
-                Ok(HttpHandleResponse {
-                    status: 200,
-                    headers: HashMap::new(),
-                    body: base64::engine::general_purpose::STANDARD
-                        .encode(payload.to_string().as_bytes()),
-                    body_encoding: "base64".to_string(),
-                })
-            }
-        }
-
-        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
-        let password = agentos_http::auth::hash_password("ext-pw").unwrap();
-        let record = agentos_core::types::UserRecord {
-            user_id: "u-ext-1".to_string(),
-            username: "extuser".to_string(),
-            password: password.clone(),
-            email: None,
-            role: "admin".to_string(),
-            tenant_id: "tenant-ext".to_string(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            last_login_at: None,
-            must_change_password: false,
-        };
-        agentos_core::traits::StorageBackend::create_user(store.as_ref(), &record)
-            .await
-            .unwrap();
-        let built = agentos_http::auth::BuiltInUser {
-            id: record.user_id.clone(),
-            username: record.username.clone(),
-            password,
-            email: String::new(),
-            role: "admin".to_string(),
-            tenant_id: "tenant-ext".to_string(),
-            created_at: String::new(),
-            must_change_password: false,
-        };
-        let token =
-            agentos_http::auth::encode_token(agentos_http::auth::TokenType::Access, &built, 3600);
-
-        let mut state = AppState::new();
-        let registry = Arc::new(CapabilityRegistryImpl::new());
-        let mut ep = endpoint("r", "GET", "/ext/p1/whoami");
-        ep.auth = Some("user".to_string());
-        registry.register_http_route("p1", ep).unwrap();
-        state.capability_registry = Some(registry);
-        state.http_handler = Some(Arc::new(HeaderEcho));
-        state.store = Some(store);
-
-        let app = crate::server::build_router(state);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/ext/p1/whoami")
-                    .header("authorization", format!("Bearer {token}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["tenant"], "tenant-ext", "租户头必须为 token 解析值: {v}");
-        assert_eq!(v["user"], "u-ext-1");
-        assert_eq!(v["role"], "admin");
-    }
-
-    /// 匿名端点（auth:"none"）剥离客户端伪造的身份头（A2：匿名放行 ≠ 信任客户端）。
-    #[tokio::test]
-    async fn anonymous_route_strips_spoofed_identity_headers() {
-        use crate::routes::AppState;
-        use axum::body::Body;
-        use axum::http::Request;
-        use tower::ServiceExt;
-
-        struct HeaderEcho;
-        #[async_trait::async_trait]
-        impl HttpHandleCapability for HeaderEcho {
-            async fn handle(&self, req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
-                let payload = serde_json::json!({
-                    "tenant": req.headers.get("x-agentos-tenant"),
-                    "user": req.headers.get("x-agentos-user"),
-                    "role": req.headers.get("x-agentos-role"),
-                });
-                Ok(HttpHandleResponse {
-                    status: 200,
-                    headers: HashMap::new(),
-                    body: base64::engine::general_purpose::STANDARD
-                        .encode(payload.to_string().as_bytes()),
-                    body_encoding: "base64".to_string(),
-                })
-            }
-        }
-
-        let mut state = AppState::new();
-        let registry = Arc::new(CapabilityRegistryImpl::new());
-        registry
-            .register_http_route("p1", endpoint("r", "POST", "/ext/p1/hook"))
-            .unwrap();
-        state.capability_registry = Some(registry);
-        state.http_handler = Some(Arc::new(HeaderEcho));
-        let app = crate::server::build_router(state);
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/ext/p1/hook")
-                    .header("x-agentos-tenant", "victim-tenant")
-                    .header("x-agentos-user", "victim-user")
-                    .header("x-agentos-role", "admin")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(
-            v["tenant"].is_null() && v["user"].is_null() && v["role"].is_null(),
-            "匿名端点必须剥离客户端伪造的身份头: {v}"
-        );
-    }
-
-    /// 无 auth 声明 → 401 fail-closed（读写同规）；admin 声明 + 非 admin 角色 → 403。
-    #[tokio::test]
-    async fn undeclared_auth_denied_and_admin_role_enforced() {
-        use crate::routes::AppState;
-        use axum::body::Body;
-        use axum::http::Request;
-        use tower::ServiceExt;
-
-        // 无声明
-        let mut state = AppState::new();
-        let registry = Arc::new(CapabilityRegistryImpl::new());
-        let mut ep = endpoint("r", "GET", "/ext/p1/undeclared");
-        ep.auth = None;
-        registry.register_http_route("p1", ep).unwrap();
-        state.capability_registry = Some(registry);
-        state.http_handler = Some(Arc::new(NopHandlerForTests));
-        let app = crate::server::build_router(state);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/ext/p1/undeclared")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            axum::http::StatusCode::UNAUTHORIZED,
-            "无 auth 声明必须 401 fail-closed"
-        );
-
-        // admin 声明 + viewer 角色
-        let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
-        let password = agentos_http::auth::hash_password("role-pw").unwrap();
-        let record = agentos_core::types::UserRecord {
-            user_id: "u-viewer-1".to_string(),
-            username: "viewer_x".to_string(),
-            password: password.clone(),
-            email: None,
-            role: "viewer".to_string(),
-            tenant_id: agentos_http::auth::DEFAULT_TENANT_ID.to_string(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            last_login_at: None,
-            must_change_password: false,
-        };
-        agentos_core::traits::StorageBackend::create_user(store.as_ref(), &record)
-            .await
-            .unwrap();
-        let built = agentos_http::auth::BuiltInUser {
-            id: record.user_id.clone(),
-            username: record.username.clone(),
-            password,
-            email: String::new(),
-            role: "viewer".to_string(),
-            tenant_id: record.tenant_id.clone(),
-            created_at: String::new(),
-            must_change_password: false,
-        };
-        let token =
-            agentos_http::auth::encode_token(agentos_http::auth::TokenType::Access, &built, 3600);
-
-        let mut state = AppState::new();
-        let registry = Arc::new(CapabilityRegistryImpl::new());
-        let mut ep = endpoint("r", "GET", "/ext/p1/adminonly");
-        ep.auth = Some("admin".to_string());
-        registry.register_http_route("p1", ep).unwrap();
-        state.capability_registry = Some(registry);
-        state.http_handler = Some(Arc::new(NopHandlerForTests));
-        state.store = Some(store);
-        let app = crate::server::build_router(state);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/ext/p1/adminonly")
-                    .header("authorization", format!("Bearer {token}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            axum::http::StatusCode::FORBIDDEN,
-            "admin 端点 + viewer 角色必须 403"
-        );
-    }
-
-    struct NopHandlerForTests;
-
-    #[async_trait::async_trait]
-    impl HttpHandleCapability for NopHandlerForTests {
-        async fn handle(&self, _req: HttpHandleRequest) -> Result<HttpHandleResponse, String> {
-            Ok(HttpHandleResponse {
-                status: 200,
-                headers: HashMap::new(),
-                body: String::new(),
-                body_encoding: "base64".to_string(),
-            })
-        }
-    }
-
-    // ── BUG-58：路由缺席自愈（declared+enabled 注册面静默丢失 → 调用路径恢复）──
-
-    /// 构造带 http_endpoints 的 manifest（走 JSON 反序列化，省去手写字段）。
-    fn manifest_with_endpoints(
-        id: &str,
-        endpoints: &[(&str, &str, &str, Option<&str>)],
-    ) -> PluginManifest {
-        let eps: Vec<serde_json::Value> = endpoints
-            .iter()
-            .map(|(route_id, method, path, auth)| {
-                serde_json::json!({
-                    "route_id": route_id, "method": method, "path": path,
-                    "auth": auth, "handler_capability": "http.handle"
-                })
-            })
-            .collect();
-        serde_json::from_value(serde_json::json!({
-            "id": id, "name": id, "version": "1.0.0",
-            "plugin_type": "system", "language": "python",
-            "host_type": "sidecar", "entry": "python server.py",
-            "capabilities": {},
-            "http_endpoints": eps
-        }))
-        .expect("valid manifest")
-    }
-
-    /// BUG-58 核心回归：声明面在册（store manifest + 启用集）但注册表条目静默
-    /// 丢失 → 请求触发调用路径自愈 → 路由恢复并当次分发成功（200 而非 503），
-    /// 且注册表可查、guard 入 scope（幂等基线，不残留悬空注册）。
-    #[tokio::test]
-    async fn exec_ext_request_heals_missing_route_for_declared_plugin() {
-        use crate::routes::AppState;
-        use axum::body::Body;
-        use axum::http::Request;
-        use tower::ServiceExt;
-
-        let mut state = AppState::new();
-        let registry = Arc::new(CapabilityRegistryImpl::new());
-        // 关键前置：注册表无任何路由（模拟装机版静默丢失后的现场）
-        state.capability_registry = Some(registry.clone());
-        state.http_handler = Some(Arc::new(NopHandlerForTests));
-        let manifest = manifest_with_endpoints(
-            "mode_x",
-            &[
-                ("p1", "GET", "/ext/mode_x/page/panel", Some("none")),
-                ("d1", "GET", "/ext/mode_x/data/bootstrap", Some("none")),
-            ],
-        );
-        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest]));
-        state
-            .enabled_plugin_ids
-            .write()
-            .await
-            .insert("mode_x".to_string());
-        let scopes_keepalive = state.plugin_scopes.clone();
-        let app = crate::server::build_router(state);
-        // scope 账本须在断言期保活：oneshot 消费 Router → AppState 释放 →
-        // PluginScopeRegistry drop = M1 结构性收回（guard 全撤）。生产态 AppState
-        // 常驻，此析构只在测试里发生；此处持 Arc 模拟生产态。
-        let scopes_for_assert = scopes_keepalive.clone();
-        let registry_for_assert = registry;
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/ext/mode_x/data/bootstrap")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            axum::http::StatusCode::OK,
-            "自愈恢复路由后当次请求必须分发成功，而非 503"
-        );
-        assert!(
-            registry_for_assert
-                .find_http_route("/ext/mode_x/data/bootstrap", "GET")
-                .is_some(),
-            "自愈后路由必须可查（后续请求直接命中）"
-        );
-        assert!(
-            registry_for_assert
-                .find_http_route("/ext/mode_x/page/panel", "GET")
-                .is_some(),
-            "声明内其余端点一并恢复"
-        );
-        assert_eq!(
-            registry_for_assert.list_http_routes().len(),
-            2,
-            "恢复条数 = 声明端点数（scope 账本 = {} 条 guard）",
-            scopes_for_assert.scope_of("mode_x").len()
-        );
-    }
-
-    /// fail-closed 不变：插件未启用（不在启用集）→ 不自愈、仍 404
-    /// （自愈不得复活被禁用插件的摘除语义）。
-    #[tokio::test]
-    async fn exec_ext_request_does_not_heal_disabled_plugin() {
-        use crate::routes::AppState;
-        use axum::body::Body;
-        use axum::http::Request;
-        use tower::ServiceExt;
-
-        let mut state = AppState::new();
-        state.capability_registry = Some(Arc::new(CapabilityRegistryImpl::new()));
-        state.http_handler = Some(Arc::new(NopHandlerForTests));
-        let manifest =
-            manifest_with_endpoints("mode_y", &[("d1", "GET", "/ext/mode_y/data", Some("none"))]);
-        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest]));
-        // enabled_plugin_ids 留空 = 插件已禁用
-        let app = crate::server::build_router(state);
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/ext/mode_y/data")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
-    }
-
-    /// 声明无 http_endpoints（自愈无物可恢复）→ 维持既有 503 瞬态语义。
-    #[tokio::test]
-    async fn exec_ext_request_503_persists_when_declaration_has_no_endpoints() {
-        use crate::routes::AppState;
-        use axum::body::Body;
-        use axum::http::Request;
-        use tower::ServiceExt;
-
-        let mut state = AppState::new();
-        state.capability_registry = Some(Arc::new(CapabilityRegistryImpl::new()));
-        state.http_handler = Some(Arc::new(NopHandlerForTests));
-        let manifest = manifest_with_endpoints("mode_z", &[]);
-        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest]));
-        state
-            .enabled_plugin_ids
-            .write()
-            .await
-            .insert("mode_z".to_string());
-        let app = crate::server::build_router(state);
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/ext/mode_z/data")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
-        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
-        assert!(String::from_utf8_lossy(&body).contains("temporarily unavailable"));
-    }
-
-    /// 自愈后鉴权闸必须重跑：声明 auth="user" 的路由经自愈恢复后，无 token
-    /// 请求 → 401（而非借自愈绕过鉴权 200，也不是 503）。
-    #[tokio::test]
-    async fn exec_ext_request_reapplies_auth_after_heal() {
-        use crate::routes::AppState;
-        use axum::body::Body;
-        use axum::http::Request;
-        use tower::ServiceExt;
-
-        let mut state = AppState::new();
-        state.capability_registry = Some(Arc::new(CapabilityRegistryImpl::new()));
-        state.http_handler = Some(Arc::new(NopHandlerForTests));
-        let manifest =
-            manifest_with_endpoints("mode_a", &[("d1", "GET", "/ext/mode_a/data", Some("user"))]);
-        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest]));
-        state
-            .enabled_plugin_ids
-            .write()
-            .await
-            .insert("mode_a".to_string());
-        // store 缺席（401 需要验 token 的用户存储）→ resolve_request_user 走
-        // 存储缺失路径；此处只断言"不是 200"，即自愈后鉴权确实执行。
-        let app = crate::server::build_router(state);
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/ext/mode_a/data")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            axum::http::StatusCode::UNAUTHORIZED,
-            "自愈恢复的路由必须重过鉴权闸"
-        );
-    }
-
-    /// 自愈分支覆盖：启用集命中但 store 无 manifest（manifest 缺席）→ 不动作。
-    #[tokio::test]
-    async fn heal_noops_when_manifest_absent_from_store() {
-        use crate::routes::AppState;
-        let mut state = AppState::new();
-        state.capability_registry = Some(Arc::new(CapabilityRegistryImpl::new()));
-        state
-            .enabled_plugin_ids
-            .write()
-            .await
-            .insert("ghost".to_string());
-        let healed = crate::plugin_lifecycle::heal_plugin_http_routes(
-            state.capability_registry.as_ref().unwrap(),
-            &state.plugin_scopes,
-            &state.manifests,
-            &state.enabled_plugin_ids,
-            "ghost",
-        )
-        .await;
-        assert!(!healed, "manifest 缺席时自愈必须不动作");
-    }
-
-    /// `register_manifest_http_routes`：scopes 为 Some 时走 guarded 注册并入
-    /// scope（disable 可撤销）；冲突路由聚合报错而非 panic。
-    #[test]
-    fn register_manifest_http_routes_guarded_and_conflicts_aggregate() {
-        let registry = Arc::new(CapabilityRegistryImpl::new());
-        let scopes = agentos_plugin_loader::PluginScopeRegistry::new();
-        // 用 JSON 反序列化构造 manifest（省去手写全部字段，未给字段走 serde default）
-        let manifest = |id: &str, path: &str| -> PluginManifest {
-            serde_json::from_value(serde_json::json!({
-                "id": id, "name": id, "version": "1.0.0",
-                "plugin_type": "tool", "language": "python",
-                "host_type": "sidecar", "entry": "x",
-                "capabilities": {},
-                "http_endpoints": [{
-                    "route_id": "r", "method": "GET", "path": path,
-                    "auth": "none", "handler_capability": "http.handle"
-                }]
-            }))
-            .expect("valid manifest")
-        };
-
-        let errors =
-            register_manifest_http_routes(&registry, &[manifest("p1", "/ext/p1/a")], Some(&scopes));
-        assert!(errors.is_empty(), "首个注册不得报错: {errors:?}");
-        assert!(
-            !scopes.scope_of("p1").is_empty(),
-            "guarded 注册必须把撤销 guard 登记进 scope"
-        );
-
-        // 冲突：同 path+method 第二个插件 → 聚合错误（不 panic）
-        let errors =
-            register_manifest_http_routes(&registry, &[manifest("p2", "/ext/p1/a")], Some(&scopes));
-        assert_eq!(errors.len(), 1, "冲突必须被聚合上报: {errors:?}");
-        assert!(errors[0].contains("p2"), "错误须点名插件: {errors:?}");
-
-        // None scopes：走非 guarded 注册，同样返回错误列表
-        let registry2 = Arc::new(CapabilityRegistryImpl::new());
-        let errors =
-            register_manifest_http_routes(&registry2, &[manifest("p3", "/ext/p3/ok")], None);
-        assert!(errors.is_empty());
-    }
-
-    /// `SidecarHttpHandler`：经 invoker 转发 http.handle，解析响应；
-    /// 调用失败 / success=false / 响应形状非法三档各自报错。
-    struct ScriptedInvoker {
-        result: parking_lot::Mutex<Result<agentos_core::types::ToolExecutionResult, String>>,
-    }
-
-    #[async_trait::async_trait]
-    impl agentos_core::traits::PluginInvoker for ScriptedInvoker {
-        async fn invoke_pipeline_plugin<'a>(
-            &self,
-            _plugin_id: &str,
-            _ctx: &agentos_core::types::PluginContext<'a>,
-        ) -> Result<agentos_core::types::PluginResult, agentos_core::types::PluginError> {
-            unreachable!("本测试不触达管道插件调用")
-        }
-        async fn invoke_tool(
-            &self,
-            _plugin_id: &str,
-            _tool_name: &str,
-            _inputs: &serde_json::Value,
-        ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError>
-        {
-            match self.result.lock().clone() {
-                Ok(r) => Ok(r),
-                Err(msg) => Err(agentos_core::types::PluginError {
-                    message: msg,
-                    code: None,
-                    source: None,
-                }),
-            }
-        }
-        async fn send_lifecycle_hook(
-            &self,
-            _plugin_id: &str,
-            _hook: agentos_core::traits::LifecycleHook,
-            _context: &agentos_core::traits::HookContext,
-        ) -> Result<(), agentos_core::types::PluginError> {
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn sidecar_http_handler_forwards_and_validates_shape() {
-        use agentos_core::types::ToolExecutionResult;
-
-        let req = HttpHandleRequest {
-            method: "POST".to_string(),
-            path: "/ext/p1/cb".to_string(),
-            plugin_id: "p1".to_string(),
-            raw_body: String::new(),
-            headers: HashMap::new(),
-            query: HashMap::new(),
-            query_multi: HashMap::new(),
-        };
-
-        // 成功路径：{status,headers,body,body_encoding} 原样解析
-        let ok = ToolExecutionResult {
-            success: true,
-            data: serde_json::json!({
-                "status": 201,
-                "headers": {"content-type": "text/plain"},
-                "body": "",
-                "body_encoding": "base64"
-            }),
-            error: None,
-            metadata: None,
-            duration_ms: None,
-        };
-        let handler = SidecarHttpHandler::new(Arc::new(ScriptedInvoker {
-            result: parking_lot::Mutex::new(Ok(ok)),
-        }));
-        let resp = handler.handle(req.clone()).await.expect("成功路径应 Ok");
-        assert_eq!(resp.status, 201);
-        assert_eq!(resp.headers.get("content-type").unwrap(), "text/plain");
-
-        // invoker 调用失败 → Err 透传错误消息
-        let handler = SidecarHttpHandler::new(Arc::new(ScriptedInvoker {
-            result: parking_lot::Mutex::new(Err("transport down".to_string())),
-        }));
-        let err = handler
-            .handle(req.clone())
-            .await
-            .expect_err("调用失败应 Err");
-        assert_eq!(err, "transport down");
-
-        // success=false → Err 取 error 文案
-        let failed = ToolExecutionResult {
-            success: false,
-            data: serde_json::json!({}),
-            error: Some("plugin rejected".to_string()),
-            metadata: None,
-            duration_ms: None,
-        };
-        let handler = SidecarHttpHandler::new(Arc::new(ScriptedInvoker {
-            result: parking_lot::Mutex::new(Ok(failed.clone())),
-        }));
-        let err = handler
-            .handle(req.clone())
-            .await
-            .expect_err("success=false 应 Err");
-        assert_eq!(err, "plugin rejected");
-
-        // success=false 且无 error 文案 → unknown error 兜底
-        let mut no_msg = failed;
-        no_msg.error = None;
-        let handler = SidecarHttpHandler::new(Arc::new(ScriptedInvoker {
-            result: parking_lot::Mutex::new(Ok(no_msg)),
-        }));
-        let err = handler
-            .handle(req.clone())
-            .await
-            .expect_err("无 error 文案应兜底");
-        assert_eq!(err, "unknown error");
-
-        // 响应形状非法（状态码缺失）→ 形状错误文案
-        let bad = ToolExecutionResult {
-            success: true,
-            data: serde_json::json!({"unexpected": true}),
-            error: None,
-            metadata: None,
-            duration_ms: None,
-        };
-        let handler = SidecarHttpHandler::new(Arc::new(ScriptedInvoker {
-            result: parking_lot::Mutex::new(Ok(bad)),
-        }));
-        let err = handler.handle(req).await.expect_err("形状非法应 Err");
-        assert!(
-            err.contains("invalid http.handle response shape"),
-            "实际: {err}"
-        );
-    }
-}
+mod tests;

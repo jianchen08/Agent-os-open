@@ -660,31 +660,6 @@ describe('HumanInteractionFlow — AC-1i: 人工交互流程', () => {
       expect(state.pendingInteractions[0].status).toBe('responded')
     })
 
-    it('getPendingForThread 仅返回 pending 状态', () => {
-      const interaction = createPendingInteraction({
-        requestId: 'req-thread-filter',
-        mode: 'choice',
-        title: '过滤测试',
-        threadId: 'thread-xyz',
-      })
-
-      act(() => {
-        useInteractionStore.getState().addInteraction(interaction)
-      })
-
-      // pending 时应能查到
-      let result = useInteractionStore.getState().getPendingForThread('thread-xyz')
-      expect(result).toHaveLength(1)
-
-      // markResponded 后不应再返回
-      act(() => {
-        useInteractionStore.getState().markResponded('req-thread-filter')
-      })
-
-      result = useInteractionStore.getState().getPendingForThread('thread-xyz')
-      expect(result).toHaveLength(0)
-    })
-
     it('重复添加同一 requestId 应忽略', () => {
       const interaction = createPendingInteraction({
         requestId: 'req-dup',

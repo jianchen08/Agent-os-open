@@ -16,10 +16,12 @@ import {
   Loader2,
 } from '@/assets/icons'
 import { TextDiffView } from '@/components/approval'
+import { ToolviewCardHost } from '@/components/chat/ToolviewCardHost'
 import { FormWidget } from '@/components/schema/widgets/FormWidget'
 import { MarkdownRenderer } from '@/components/shared/markdown/MarkdownRenderer'
 import { TOOL_CONTENT_SCROLL_CLASS } from '@/lib/toolCardStyles'
 import { cn } from '@/lib/utils'
+import { useAuthedAttachmentUrl } from '@/services/fileLoaderRegistry'
 import { getGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
 import type { ActivityDetailBlock } from '@/types/activity'
 import type { FC } from 'react'
@@ -73,24 +75,32 @@ const FileBlockView: FC<{ path: string }> = ({ path }) => {
 }
 
 /**
- * 图片块：缩略图 + 点击灯箱预览；加载失败降级为文件行
+ * 图片块：缩略图 + 点击灯箱预览；加载失败降级为文件行。
+ * /uploads src 经鉴权取流解析（useAuthedAttachmentUrl → blob，/uploads 需鉴权
+ * ADR 2026-10-10），其余 src 透传。
  */
 const ImageBlockView: FC<{ src: string }> = ({ src }) => {
   const [open, setOpen] = useState(false)
-  const [failed, setFailed] = useState(false)
+  const [decodeFailed, setDecodeFailed] = useState(false)
+  // 取流失败与解码失败同走文件行降级（既有失败契约）
+  const { url: authedUrl, failed: fetchFailed } = useAuthedAttachmentUrl(src)
+  const failed = fetchFailed || decodeFailed
 
   if (failed) {
     return <FileBlockView path={src} />
   }
 
+  // 鉴权取流完成前不渲染（透传类 src 无此等待）
+  if (!authedUrl) return null
+
   return (
     <>
       <img
-        src={src}
+        src={authedUrl}
         alt="预览图"
         loading="lazy"
         decoding="async"
-        onError={() => setFailed(true)}
+        onError={() => setDecodeFailed(true)}
         onClick={() => setOpen(true)}
         className="ring-border/40 max-h-40 cursor-zoom-in rounded object-contain transition-shadow hover:ring-1"
       />
@@ -103,7 +113,7 @@ const ImageBlockView: FC<{ src: string }> = ({ src }) => {
           aria-label="图片预览"
         >
           <img
-            src={src}
+            src={authedUrl}
             alt="大图预览"
             decoding="async"
             className="max-h-[85vh] max-w-[90vw] rounded object-contain shadow-2xl"
@@ -171,7 +181,7 @@ const TableBlockView: FC<{ columns: string[]; rows: string[][] }> = ({ columns, 
         {rows.map((row, ri) => (
           <tr key={`r-${ri}`} className="odd:bg-transparent even:bg-[var(--hover-overlay)]">
             {columns.map((_c, ci) => (
-              <td key={`c-${ci}`} className="text-foreground/90 max-w-[320px] truncate border-b border-[var(--border-border)]/30 px-2 py-1 font-mono whitespace-nowrap">
+              <td key={`c-${ci}`} className="text-foreground/90 max-w-[320px] truncate border-b border-border px-2 py-1 font-mono whitespace-nowrap">
                 {row[ci] ?? ''}
               </td>
             ))}
@@ -535,6 +545,20 @@ const DiffDetailView: FC<{ oldContent: string; newContent: string }> = ({
  */
 export const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
   const [expanded, setExpanded] = useState(block.defaultExpanded ?? true)
+  /** 截断回填状态（仅带 onExpand 的块使用）：失败如实显示，成功后本块被全量结果替换 */
+  const [loadState, setLoadState] = useState<'idle' | 'loading' | 'error'>('idle')
+
+  const handleToggle = () => {
+    const next = !expanded
+    setExpanded(next)
+    if (next && block.onExpand && loadState === 'idle') {
+      setLoadState('loading')
+      Promise.resolve(block.onExpand()).then(
+        (ok) => setLoadState(ok ? 'idle' : 'error'),
+        () => setLoadState('error'),
+      )
+    }
+  }
 
   /** 渲染内容 */
   const renderContent = () => {
@@ -581,6 +605,12 @@ export const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
           readOnly={c.readOnly}
         />
       )
+    }
+
+    // chat.toolview keyed 槽插件自定义卡（C4 槽位机制）：`<pluginId>/<name>`
+    // 命名空间卡型路由（内建卡 switch 分发不变——词表+生成闸守门，禁手抄）
+    if (contentType.includes('/')) {
+      return <ToolviewCardHost card={contentType} block={block} />
     }
 
     if (typeof content === 'object') {
@@ -697,7 +727,7 @@ export const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
   return (
     <div className="space-y-1.5">
       <button
-        onClick={() => setExpanded(!expanded)}
+        onClick={handleToggle}
         className="text-muted-foreground hover:text-foreground flex items-center gap-1.5 text-xs font-medium transition-colors"
       >
         {expanded ? (
@@ -708,6 +738,15 @@ export const DetailBlock: FC<{ block: ActivityDetailBlock }> = ({ block }) => {
         {block.label}
       </button>
       {expanded && renderContent()}
+      {expanded && loadState === 'loading' && (
+        <div className="text-muted-foreground flex items-center gap-1.5 text-xs">
+          <Loader2 className="h-icon-xs w-icon-xs animate-spin" />
+          正在加载完整结果…
+        </div>
+      )}
+      {expanded && loadState === 'error' && (
+        <div className="text-status-error text-xs">完整结果加载失败，当前显示预览</div>
+      )}
     </div>
   )
 }

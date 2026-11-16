@@ -1,7 +1,7 @@
 /**
  * 通知系统类型定义
  *
- * 支持非阻塞通知、优先级排序、折叠展开、阻塞式升级
+ * 支持非阻塞通知、时间倒序展示、阻塞式升级
  */
 
 /** 通知优先级 */
@@ -64,21 +64,7 @@ export interface NotificationItem {
   sourceLabel?: string
 }
 
-/** 通知中心折叠状态 */
-export interface NotificationGroupState {
-  /** 每个优先级的折叠状态 */
-  collapsed: Record<NotificationPriority, boolean>
-}
-
-/** 通知优先级权重（用于排序，数值越大优先级越高） */
-export const NOTIFICATION_PRIORITY_WEIGHT: Record<NotificationPriority, number> = {
-  critical: 4,
-  high: 3,
-  normal: 2,
-  low: 1,
-}
-
-/** 优先级对应的颜色和图标映射 */
+/** 优先级对应的颜色和图标映射（条目自身是优先级的唯一视觉出口） */
 export const PRIORITY_STYLES: Record<
   NotificationPriority,
   { bg: string; border: string; text: string; icon: string; pulse: boolean }

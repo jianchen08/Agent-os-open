@@ -114,7 +114,7 @@ export function DebugTasksPage({ embedded }: { embedded?: boolean } = {}) {
               className={`rounded-lg border px-3 py-1.5 text-xs transition-colors ${
                 statusFilter === opt.value
                   ? 'bg-primary text-primary-foreground border-primary'
-                  : 'hover:bg-accent/50'
+                  : 'hover:bg-muted/50'
               }`}
             >
               {opt.label}
@@ -136,7 +136,7 @@ export function DebugTasksPage({ embedded }: { embedded?: boolean } = {}) {
         {/* 任务列表 */}
         {!isLoading && !error && tasks.length > 0 && (
           <>
-            <div className="overflow-hidden rounded-lg border">
+            <div className="overflow-x-auto rounded-lg border">
               <table className="w-full text-sm">
                 <thead className="bg-accent/30">
                   <tr>
@@ -169,7 +169,7 @@ export function DebugTasksPage({ embedded }: { embedded?: boolean } = {}) {
                     return (
                       <tr
                         key={task.id}
-                        className="border-t hover:bg-accent/20"
+                        className="border-t hover:bg-muted/20"
                       >
                         <td className="max-w-[200px] truncate px-4 py-2">
                           {task.title || task.intent || task.name || task.id}
@@ -196,7 +196,7 @@ export function DebugTasksPage({ embedded }: { embedded?: boolean } = {}) {
                           {hasValidTime ? new Date(task.created_at).toLocaleString() : '--'}
                         </td>
                         <td className="px-4 py-2">
-                          {task.status === 'suspended' && task.task_id && (
+                          {normalizeTaskStatus(task.status) === 'stopped' && task.task_id && (
                             <button
                               onClick={() => handleResume(task.task_id as string)}
                               disabled={resumingIds.has(task.task_id as string)}
@@ -229,7 +229,7 @@ export function DebugTasksPage({ embedded }: { embedded?: boolean } = {}) {
                 <button
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
                   disabled={page <= 1}
-                  className="hover:bg-accent/50 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
+                  className="hover:bg-muted/50 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
                 >
                   上一页
                 </button>
@@ -239,7 +239,7 @@ export function DebugTasksPage({ embedded }: { embedded?: boolean } = {}) {
                 <button
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                   disabled={page >= totalPages}
-                  className="hover:bg-accent/50 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
+                  className="hover:bg-muted/50 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
                 >
                   下一页
                 </button>

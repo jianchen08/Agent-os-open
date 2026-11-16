@@ -24,9 +24,9 @@ input_handler / encoding 四个模块的未覆盖行）。
 from __future__ import annotations
 
 import pytest
-from bash_types import ProcessBackend, WorkUnit
-from encoding import EncodingHandler
-from input_handler import InputHandler
+from agentos_plugin_sdk.process_runtime import ProcessBackend, WorkUnit
+from agentos_plugin_sdk.process_runtime import EncodingHandler
+from agentos_plugin_sdk.process_runtime import InputHandler
 from progress_reporter import ProgressReporter
 
 pytestmark = pytest.mark.unit

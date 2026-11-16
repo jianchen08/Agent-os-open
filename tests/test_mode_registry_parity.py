@@ -74,6 +74,32 @@ def test_validate_accepts_good_and_rejects_variants() -> None:
         {"mode": "x", "name": "X",
          "pipelines": [{"name": "p", "context": "task", "source": "package"}]}
     )
+    # plan_spec（批 B2 领域规格注册，与 agent_manager 同源）：技能名形态正例过，
+    # 路径形态/空形态拒（消费通道仅「按名读快照」一条，防第二路径回流）
+    assert parity.validate_declaration(
+        {"mode": "x", "name": "X", "plan_spec": "skill-solution-x"}
+    ) == ""
+    assert "技能名形态" in parity.validate_declaration(
+        {"mode": "x", "name": "X", "plan_spec": "skills/skill-solution-x/SKILL.md"}
+    )
+    assert "技能名形态" in parity.validate_declaration(
+        {"mode": "x", "name": "X", "plan_spec": ""}
+    )
+    # planning_executors（批 B4 plan 态白名单注册化，与 agent_manager 同源）：
+    # 非空字符串列表、元素 mode_X/<stem> 或系统 agent 裸名
+    assert parity.validate_declaration(
+        {"mode": "x", "name": "X",
+         "planning_executors": ["mode_x/planner", "research_agent"]}
+    ) == ""
+    assert "须为非空列表" in parity.validate_declaration(
+        {"mode": "x", "name": "X", "planning_executors": []}
+    )
+    assert "裸名形态" in parity.validate_declaration(
+        {"mode": "x", "name": "X", "planning_executors": ["../evil"]}
+    )
+    assert "裸名形态" in parity.validate_declaration(
+        {"mode": "x", "name": "X", "planning_executors": ["mode_x/a-b"]}
+    )
 
 
 # ── main 端到端（真实出厂包） ─────────────────────────────────────────────
@@ -103,3 +129,49 @@ def test_main_fails_on_orphan_material(tmp_path: Path, capsys: pytest.CaptureFix
     finally:
         sys.argv = original
     assert "孤儿组装器" in capsys.readouterr().out
+
+
+# ── 跨包同名技能对账（原则 7 零副本红线，批 E4） ────────────────────────────
+
+
+def _write_skill(modes_dir: Path, pkg: str, skill: str) -> None:
+    skill_dir = modes_dir / pkg / "skills" / skill
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(f"# {skill}\n", encoding="utf-8")
+
+
+def test_main_passes_with_multiple_skills_in_one_package(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """同包多技能合法（正例）：一包内两个不同名技能不触发零副本对账。"""
+    modes = tmp_path / "modes"
+    _write_pkg(modes, "mode_solo", {"mode": "solo", "name": "单包"})
+    _write_skill(modes, "mode_solo", "skill-alpha")
+    _write_skill(modes, "mode_solo", "skill-beta")
+    original = sys.argv
+    sys.argv = ["check_mode_registry_parity.py", "--modes-dir", str(modes)]
+    try:
+        assert parity.main() == 0
+    finally:
+        sys.argv = original
+    assert "跨包同名技能 0" in capsys.readouterr().out
+
+
+def test_main_fails_on_cross_package_same_name_skill(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """跨包同名技能拒（反例）：两包各带同名技能目录即红（零副本红线执法）。"""
+    modes = tmp_path / "modes"
+    _write_pkg(modes, "mode_one", {"mode": "one", "name": "包一"})
+    _write_pkg(modes, "mode_two", {"mode": "two", "name": "包二"})
+    _write_skill(modes, "mode_one", "skill-dup")
+    _write_skill(modes, "mode_two", "skill-dup")
+    original = sys.argv
+    sys.argv = ["check_mode_registry_parity.py", "--modes-dir", str(modes)]
+    try:
+        assert parity.main() == 1
+    finally:
+        sys.argv = original
+    out = capsys.readouterr().out
+    assert "跨包同名技能" in out and "skill-dup" in out
+    assert "mode_one" in out and "mode_two" in out

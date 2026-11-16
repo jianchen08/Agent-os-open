@@ -29,8 +29,8 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_TS_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools" / "task_submit"
-_SYSTEM_ROOT = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system"
+_TS_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "task_submit"
+_SYSTEM_ROOT = Path(__file__).resolve().parents[4] / "plugins" / "shared"
 
 for _d in [_SYSTEM_ROOT, _SYSTEM_ROOT / "tasks", _SYSTEM_ROOT / "channel_api"]:
     if str(_d) not in sys.path:
@@ -59,6 +59,18 @@ def mod() -> Any:
     return _load_module()
 
 
+@pytest.fixture(autouse=True)
+def _birth_ws(mod: Any) -> Any:
+    """出生协议第三段（提交期同步建工作空间）准备器替身——驱动真实派发的
+    用例必注入（ADR-2026-10-17-task-birth-workspace-inclusion：无跳过路径）。
+    """
+    from tests import _task_birth_workspace as _birth_ws_mod
+
+    _birth_ws_mod.inject_preparer(mod)
+    yield
+    _birth_ws_mod.reset_preparer(mod)
+
+
 class _FakeSender:
     """记录 chat.send_message 参数的派发器 fake（统一出生协议三段式响应）。"""
 
@@ -83,6 +95,7 @@ def _base_inputs(**over: Any) -> dict:
         "parent_agent_level": 1,
         "pipeline_id": "pipe_parent_9",
         "user_id": "user-1",
+        "session_id": "sess-1",
     }
     base.update(over)
     return base
@@ -102,13 +115,16 @@ def _make_tool(mod: Any) -> Any:
 
     tool._validate_target_agent = _ok  # type: ignore[method-assign]
 
-    async def _base_config(target_id: str) -> dict[str, Any] | None:
-        return {
-            "level": "L2",
-            "is_active": True,
-            "tool_ids": ["file_read"],
-            "system_prompt": "stub-persona",
-        }
+    async def _base_config(target_id: str) -> tuple[dict[str, Any] | None, None]:
+        return (
+            {
+                "level": "L2",
+                "is_active": True,
+                "tool_ids": ["file_read"],
+                "system_prompt": "stub-persona",
+            },
+            None,
+        )
 
     tool._get_agent_base_config = _base_config  # type: ignore[method-assign]
     return tool
@@ -202,5 +218,5 @@ class TestGoalContentValidation:
         """正常入参（标题+描述）不受影响——完整链路回归。"""
         r, sender = await _run(mod, _base_inputs())
         assert r.success, r.error
-        assert len(sender.calls) == 4  # 出生三段（登记/身份/派发）+ no_dispatch 登记
+        assert len(sender.calls) == 5  # 出生四段（登记/身份/工作空间/派发）+ no_dispatch 登记
         assert sender.calls[0]["state"]["task.goal"] == "喝水提醒"

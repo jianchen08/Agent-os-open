@@ -17,7 +17,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
-from process_manager import ProcessManager
+from agentos_plugin_sdk.process_runtime import ProcessManager
 
 pytestmark = pytest.mark.unit
 
@@ -31,7 +31,7 @@ class TestConvertWindowsPathsForWsl:
         不 mock 时 Linux 上函数按设计原样返回，转换断言全假红、不转换断言全假绿。
         需要非平台语义的用例（test_non_windows_platform_returns_unchanged）在测试体内
         自行嵌套 patch 覆盖。"""
-        with patch("process_manager.platform.system", return_value="Windows"):
+        with patch("agentos_plugin_sdk.process_runtime.manager.platform.system", return_value="Windows"):
             yield
 
     # ---- 盘符路径 ----
@@ -175,7 +175,7 @@ class TestConvertWindowsPathsForWsl:
 
     def test_non_windows_platform_returns_unchanged(self):
         """非 Windows 平台应原样返回命令。"""
-        with patch("process_manager.platform.system", return_value="Linux"):
+        with patch("agentos_plugin_sdk.process_runtime.manager.platform.system", return_value="Linux"):
             assert (
                 ProcessManager._convert_windows_paths_for_wsl(r"cat D:\file.txt")
                 == r"cat D:\file.txt"

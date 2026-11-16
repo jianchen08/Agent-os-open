@@ -6,9 +6,9 @@
 ## 三层架构
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  统一日志 sink（内核 tracing：.kernel_02.log / 控制台）       │
-└───────────────▲─────────────────────────────▲───────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│  统一日志 sink（内核 tracing：logs/kernel.log.YYYY-MM-DD 单日志面）│
+└────────────────▲──────────────────────────────▲────────────────────┘
                 │ tracing 宏                   │ stderr reader 转发
    ┌────────────┴──────────┐      ┌────────────┴────────────────┐
    │ Rust 内核（tracing）     │      │ Python sidecar（logging）     │
@@ -56,7 +56,7 @@ stderr。内核在 spawn sidecar 时 `stderr(Stdio::piped())` 并启动一个 st
 
 > ⚠️ **隐私警告**：请求体含 `api_key`、用户消息。开启时经基础脱敏
 > （`sk-`/`Bearer`/`api_key` 字段掩码），但**非穷举**。开启即表示信任本地存储。
-> 落盘点在 `plugins/shared/system/llm/adapter.py::completion()`，provider 适配后、
+> 落盘点在 `plugins/shared/llm/adapter.py::completion()`，provider 适配后、
 > litellm 调用前——记录的是真正发往远端 API 边界的请求体。
 
 ## 跨进程链路追踪
@@ -73,14 +73,40 @@ sidecar 进程按 plugin_id 缓存复用（一个 sidecar 服务多次请求）�
 **串联内核与 sidecar 日志**：在统一 sink 里按 `pipeline_id` 过滤，即可看到一次 pipeline
 执行在内核与所有 sidecar 里的完整日志链路。
 
+## 日志留存口径
+
+各日志面的轮转与保留上限（机制均已在实现，本节是成文口径；合规问「日志留多久」
+以本表为准）：
+
+| 日志面 | 轮转机制 | 保留上限 | 落盘位置 |
+|---|---|---|---|
+| 内核日志（含 sidecar 转发行） | tracing-appender **daily** 轮转（UTC 口径） | **30 份**（约 30 天） | `<日志目录>/kernel.log.YYYY-MM-DD` |
+| prompt 审计 | 独立 `RotatingFileHandler`（按体积） | 单文件 20MB × 备份 3 份（卷上限约 80MB） | `data/logs/prompt_audit.log` |
+
+- **内核 30 份 daily**：`kernel/crates/api/src/bin/agentos-kernel.rs` 的
+  `RollingFileAppender`（`.rotation(DAILY)` + `.max_log_files(30)`；daily 轮转无限
+  累积会让 logs/ 目录无界增长，30 份封顶）。stdout 不双写，仅文件层构建失败
+  （只读盘/无目录权限）时降级为 stdout 唯一诊断面。
+- **UTC 口径**（BUG-71 裁决，2026-09-23）：文件名 = 写入时刻的 UTC 日期，轮转
+  边界 = UTC 午夜 = 本地 08:00（UTC+8）；本地日 X 的日志行横跨两个文件，本地
+  午夜 00:00 时最新文件仍叫 X-1。**外部判活不走文件名**，统一看
+  `<日志目录>/kernel.liveness` 标记文件。
+- **日志目录**：dev（CWD 可写）落相对 `logs`；装机态 CWD=只读安装目录时落用户
+  空间 `<USER_ROOT>/logs`（`resolve_log_dir`，ADR 2026-09-28）。
+- **prompt 审计**：`plugins/shared/llm/adapter.py` 的 `_prompt_logger` 挂
+  独立 `RotatingFileHandler`（`maxBytes=20MB, backupCount=3`），不依赖父 logger
+  （保证 sidecar 进程里一定有 handler）；默认关，开关见上节。
+- **观察项（挂监控，另案）**：2026-09-26 实测内核日志单日约 82MB——属日志降噪
+  问题非轮替问题，单日体积告警与降噪另案处理，留存口径不因此调整。
+
 ## 关键文件
 
 | 文件 | 作用 |
 |---|---|
-| `kernel/crates/api/src/bin/agentos-kernel.rs` | 内核 tracing 初始化 |
+| `kernel/crates/api/src/bin/agentos-kernel.rs` | 内核 tracing 初始化 + daily 轮转/30 份上限 + 日志目录解析 |
 | `kernel/crates/mcp/src/client.rs` | `start_stderr_reader`（sidecar 日志汇聚） |
 | `kernel/crates/invoker/src/invoker.rs` | LOG_* env 透传 + `_log_ctx` 注入 |
 |  `plugins/sdk/src/agentos_plugin_sdk/logging/` | 统一日志基础设施（LoggingConfig/LogContext/Formatter） |
 | `plugins/sdk/src/agentos_plugin_sdk/_logging.py` | sidecar `setup_sidecar_logging` |
 | `plugins/sdk/src/agentos_plugin_sdk/server.py` | `_handle_tools_call` 的 `_log_ctx` 绑定 |
-| `plugins/shared/system/llm/adapter.py` | prompt 审计落盘 + 脱敏 |
+| `plugins/shared/llm/adapter.py` | prompt 审计落盘 + 脱敏 |

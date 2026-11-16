@@ -1,0 +1,20 @@
+{
+  "appId": "com.lingxi.agentos",
+  "appName": "灵汐助手",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "http"
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    },
+    "ShellConfig": {
+      "apiBase": "http://162.14.69.153",
+      "_note": "apiBase=壳 apiBase 声明单点（syncweb 生成 www/shell-config.js；原生侧运行时经 ShellConfigWebViewClient 钉死本面，生成物/残留值不进运行时）。安全现状：公网明文 HTTP 过渡态（无 TLS，存在中间人面；server.androidScheme=http 同为明文，是混合内容拦截不成立的前提），TLS 待立项=审查总册 P1-14③【需拍板节奏】。本键为元数据，Capacitor PluginConfig 按键取值不受影响。"
+    },
+    "SystemBars": {
+      "insetsHandling": "disable"
+    }
+  }
+}

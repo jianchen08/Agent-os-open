@@ -59,7 +59,7 @@ class TestNoHardcodedDirSuffix:
         "rel_path",
         [
             "docker-compose.yml",
-            "plugins/shared/system/isolation/scripts/wsl_ensure_containers.sh",
+            "plugins/shared/isolation/scripts/wsl_ensure_containers.sh",
         ],
     )
     def test_no_22404_literal(self, rel_path):
@@ -113,7 +113,7 @@ class TestDynamicContainerLookup:
 
     @pytest.fixture
     def wsl_sh(self):
-        return _read_file("plugins/shared/system/isolation/scripts/wsl_ensure_containers.sh")
+        return _read_file("plugins/shared/isolation/scripts/wsl_ensure_containers.sh")
 
     def test_wsl_uses_compose_ps(self, wsl_sh):
         """wsl 脚本用 docker compose ps -q <service> 获取容器 ID"""
@@ -136,7 +136,7 @@ class TestWslProjectDirDynamic:
 
     @pytest.fixture
     def content(self):
-        return _read_file("plugins/shared/system/isolation/scripts/wsl_ensure_containers.sh")
+        return _read_file("plugins/shared/isolation/scripts/wsl_ensure_containers.sh")
 
     def test_uses_wslpath(self, content):
         """脚本应使用 wslpath 动态推导当前目录的 WSL 路径"""
@@ -165,7 +165,7 @@ class TestPortParameterization:
 
     def test_wsl_no_dangerous_foreign_container_removal(self):
         """wsl_ensure_containers.sh 不应含'自动删除 foreign 容器'的危险预检"""
-        content = _read_file("plugins/shared/system/isolation/scripts/wsl_ensure_containers.sh")
+        content = _read_file("plugins/shared/isolation/scripts/wsl_ensure_containers.sh")
         assert "foreign" not in content, "wsl 脚本仍含自动删除 foreign 容器的危险逻辑"
         assert "预检端口冲突" not in content, "wsl 脚本仍含旧的端口冲突预检（已改为参数化隔离）"
 

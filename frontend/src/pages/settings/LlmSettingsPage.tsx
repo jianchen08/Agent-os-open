@@ -15,7 +15,7 @@
  */
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { ChevronDown, Plus, RefreshCw, Trash2 } from '@/assets/icons'
+import { ChevronDown, Loader2, Plus } from '@/assets/icons'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
@@ -52,6 +52,7 @@ import {
   type LLMDefaults,
 } from '@/services/api/config'
 import { FetchModelsModal } from './FetchModelsModal'
+import { ProviderCard } from './LlmProviderCard'
 import {
   buildModelFields,
   buildRemoteModelFields,
@@ -78,6 +79,10 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   const [activeTab, setActiveTab] = useState('providers')
 
   const [fetchTarget, setFetchTarget] = useState<string | null>(null)
+
+  /** 进行中的保存动作键（per-action savingKey，await 窗口对应按钮 disabled+spinner
+   *  防连点；失败 toast 已在各 handler 落点，状态复位可重试）。运行时态。 */
+  const [savingAction, setSavingAction] = useState<string | null>(null)
 
   // 默认模型草稿（Tab2「默认模型」段，随 config.defaults 同步）
   const [defaultsDraft, setDefaultsDraft] = useState<LLMDefaults>({
@@ -173,6 +178,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
 
   // 保存默认模型选择（chat/embedding/tiers 部分更新，PUT /llm/defaults）
   const handleSaveDefaults = useCallback(async () => {
+    setSavingAction('defaults')
     try {
       const defaults = await saveDefaults(defaultsDraft)
       setConfig((prev) => (prev ? { ...prev, defaults } : prev))
@@ -180,6 +186,8 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
       toast.success('默认模型已保存')
     } catch (e) {
       toast.error('保存默认模型失败', { description: getApiMsg(e, '保存默认模型失败') })
+    } finally {
+      setSavingAction(null)
     }
   }, [defaultsDraft])
 
@@ -187,6 +195,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   const handleAddModel = useCallback(async () => {
     const modelName = newModelConfig.model_name.trim()
     if (!modelName) return
+    setSavingAction('add-model')
     try {
       const { models, added_ids } = await addModel(modelName, {
         provider: newModelConfig.provider,
@@ -205,16 +214,21 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
       }
     } catch (e) {
       toast.error('添加模型失败', { description: getApiMsg(e, '添加模型失败') })
+    } finally {
+      setSavingAction(null)
     }
   }, [newModelConfig, addParams, strengthLevels])
 
   const handleDeleteModel = useCallback(async (modelId: string) => {
+    setSavingAction(`del-model:${modelId}`)
     try {
       const models = await deleteModel(modelId)
       setConfig((prev) => (prev ? { ...prev, models } : prev))
       syncConfigCache({ models })
     } catch (e) {
       toast.error('删除模型失败', { description: getApiMsg(e, '删除模型失败') })
+    } finally {
+      setSavingAction(null)
     }
   }, [])
 
@@ -222,6 +236,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   // 模型初始只有最小字段，上下文与 think 参数都靠这里补全）
   const handleSaveModelSettings = useCallback(
     async (modelId: string, settings: Partial<ModelConfig>) => {
+      setSavingAction(`model-settings:${modelId}`)
       try {
         const models = await updateModel(modelId, settings)
         setConfig((prev) => (prev ? { ...prev, models } : prev))
@@ -229,6 +244,8 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
         toast.success(`已保存 ${modelId} 的模型设置`)
       } catch (e) {
         toast.error('保存模型设置失败', { description: getApiMsg(e, '保存模型设置失败') })
+      } finally {
+        setSavingAction(null)
       }
     },
     [],
@@ -238,6 +255,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   const handleUpdateApiKey = useCallback(
     async (providerId: string, apiKey: string, provider: ProviderConfig) => {
       if (!apiKey.trim()) return
+      setSavingAction(`key:${providerId}`)
       try {
         const firstKey = provider.keys?.[0]
         const entry: Record<string, unknown> = {
@@ -250,6 +268,8 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
         toast.success(`已保存 ${providerId} 的 Key（写入 .env，立即生效）`)
       } catch (e) {
         toast.error('保存密钥失败', { description: getApiMsg(e, '保存密钥失败') })
+      } finally {
+        setSavingAction(null)
       }
     },
     [],
@@ -258,6 +278,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   // 保存提供者并发 / RPM（KeyPool 消费；不带 api_key，后端按条目合并保留占位符）
   const handleSaveConcurrency = useCallback(
     async (providerId: string, maxConcurrent: number, rpm: number) => {
+      setSavingAction(`concurrency:${providerId}`)
       try {
         const firstKey = config?.providers[providerId]?.keys?.[0]
         const entry: Record<string, unknown> = {
@@ -271,6 +292,8 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
         toast.success(`已保存 ${providerId} 的并发设置`)
       } catch (e) {
         toast.error('保存并发设置失败', { description: getApiMsg(e, '保存并发设置失败') })
+      } finally {
+        setSavingAction(null)
       }
     },
     [config],
@@ -278,6 +301,7 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
 
   const handleAddProvider = useCallback(async () => {
     if (!newProviderId.trim()) return
+    setSavingAction('add-provider')
     try {
       const providerConfig: { type: string; api_base?: string; api_key?: string } = {
         type: newProviderType,
@@ -293,16 +317,21 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
       setNewProviderApiKey('')
     } catch (e) {
       toast.error('添加提供商失败', { description: getApiMsg(e, '添加提供商失败') })
+    } finally {
+      setSavingAction(null)
     }
   }, [newProviderId, newProviderType, newProviderApiBase, newProviderApiKey])
 
   const handleDeleteProvider = useCallback(async (providerId: string) => {
+    setSavingAction(`del-provider:${providerId}`)
     try {
       const providers = await deleteProvider(providerId)
       setConfig((prev) => (prev ? { ...prev, providers } : prev))
       syncConfigCache({ providers })
     } catch (e) {
       toast.error('删除提供商失败', { description: getApiMsg(e, '删除提供商失败') })
+    } finally {
+      setSavingAction(null)
     }
   }, [])
 
@@ -456,6 +485,9 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
                           providerId={id}
                           displayName={group.nameOf[id]}
                           provider={provider}
+                          keySaving={savingAction === `key:${id}`}
+                          concurrencySaving={savingAction === `concurrency:${id}`}
+                          deleting={savingAction === `del-provider:${id}`}
                           onUpdateKey={handleUpdateApiKey}
                           onDelete={handleDeleteProvider}
                           onFetchModels={setFetchTarget}
@@ -530,9 +562,17 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
                       placeholder="输入 API Key（自动写入 .env）"
                     />
                   </FieldRow>
-                  <Button size="sm" onClick={handleAddProvider} disabled={!newProviderId.trim()}>
-                    <Plus className="mr-1.5 h-3.5 w-3.5" />
-                    添加提供商
+                  <Button
+                    size="sm"
+                    onClick={handleAddProvider}
+                    disabled={!newProviderId.trim() || savingAction === 'add-provider'}
+                  >
+                    {savingAction === 'add-provider' ? (
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Plus className="mr-1.5 h-3.5 w-3.5" />
+                    )}
+                    {savingAction === 'add-provider' ? '添加中...' : '添加提供商'}
                   </Button>
                 </div>
               </details>
@@ -577,8 +617,12 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
                   onChange={(v) => setDefaultsDraft((p) => ({ ...p, embedding: v }))}
                 />
                 <div className="flex items-center gap-2 pt-1">
-                  <Button size="sm" onClick={handleSaveDefaults}>
-                    保存默认模型
+                  <Button
+                    size="sm"
+                    onClick={handleSaveDefaults}
+                    disabled={savingAction === 'defaults'}
+                  >
+                    {savingAction === 'defaults' ? '保存中...' : '保存默认模型'}
                   </Button>
                 </div>
               </div>
@@ -602,6 +646,8 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
                       modelId={id}
                       model={config!.models[id]}
                       strengthLevels={strengthLevels}
+                      deleting={savingAction === `del-model:${id}`}
+                      settingsSaving={savingAction === `model-settings:${id}`}
                       onDelete={handleDeleteModel}
                       onSaveSettings={handleSaveModelSettings}
                     />
@@ -661,9 +707,13 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
                 <Button
                   size="sm"
                   onClick={handleAddModel}
-                  disabled={!newModelConfig.model_name.trim() || !newModelConfig.provider}
+                  disabled={
+                    !newModelConfig.model_name.trim() ||
+                    !newModelConfig.provider ||
+                    savingAction === 'add-model'
+                  }
                 >
-                  添加模型
+                  {savingAction === 'add-model' ? '添加中...' : '添加模型'}
                 </Button>
               </div>
             </section>
@@ -682,171 +732,6 @@ export function LlmSettingsPage({ embedded = false }: { embedded?: boolean }) {
   )
 }
 
-/** 提供商卡片：填 Key / 更新 Key / 拉取模型 / 并发设置 / 删除 */
-function ProviderCard({
-  providerId,
-  displayName,
-  provider,
-  onUpdateKey,
-  onDelete,
-  onFetchModels,
-  onSaveConcurrency,
-}: {
-  providerId: string
-  displayName?: string
-  provider: ProviderConfig
-  onUpdateKey: (id: string, key: string, provider: ProviderConfig) => void
-  onDelete: (id: string) => void
-  onFetchModels: (id: string) => void
-  onSaveConcurrency: (id: string, maxConcurrent: number, rpm: number) => void
-}) {
-  const [apiKey, setApiKey] = useState('')
-  const [showAdvanced, setShowAdvanced] = useState(false)
-  const [maxConcurrent, setMaxConcurrent] = useState(provider.keys?.[0]?.max_concurrent ?? 6)
-  const [rpm, setRpm] = useState(provider.keys?.[0]?.rpm ?? 10)
-
-  // has_key 由后端按 ${VAR} 能否解析出真实 key 判定；后端未提供该字段时退回非空判断
-  const hasKey = provider.has_key ?? Boolean(provider.keys?.[0]?.api_key)
-  const firstKey = provider.keys?.[0]
-  const maskedKey = firstKey?.api_key ?? '未设置'
-  const needsNoKey = providerId === 'ollama'
-
-  return (
-    <div className="bg-card space-y-2 rounded-lg border px-4 py-3">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-sm font-semibold">{displayName ?? providerId}</span>
-          {displayName && (
-            <span className="text-muted-foreground truncate font-mono text-xs">{providerId}</span>
-          )}
-          {provider.type && (
-            <span className="bg-muted text-muted-foreground rounded px-1.5 py-0.5 font-mono text-[10px]">
-              {provider.type}
-            </span>
-          )}
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <span
-            className={`rounded px-2 py-0.5 text-xs ${hasKey || needsNoKey ? 'bg-status-success/10 text-status-success' : 'bg-status-warning/10 text-status-warning'}`}
-          >
-            {needsNoKey ? '无需 Key' : hasKey ? '已配置' : '未配置'}
-          </span>
-          <Button variant="destructive" size="xs" onClick={() => onDelete(providerId)}>
-            <Trash2 className="mr-1 h-3 w-3" />
-            删除
-          </Button>
-        </div>
-      </div>
-      {provider.api_base && (
-        <div className="text-muted-foreground text-xs">Base URL: {provider.api_base}</div>
-      )}
-
-      {/* Key 配置：未配置时直接内嵌输入；已配置显示掩码 + 更新入口 */}
-      {needsNoKey ? null : hasKey ? (
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-muted-foreground font-mono text-xs">Key: {maskedKey}</span>
-          <Input
-            type="password"
-            autoComplete="new-password"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder="输入新的 API Key"
-            className="h-7 w-56 text-xs"
-          />
-          <Button
-            size="xs"
-            disabled={!apiKey.trim()}
-            onClick={() => {
-              onUpdateKey(providerId, apiKey, provider)
-              setApiKey('')
-            }}
-          >
-            更新 Key
-          </Button>
-        </div>
-      ) : (
-        <div className="space-y-1.5">
-          {provider.env_var && (
-            <p className="text-muted-foreground text-xs">
-              在 .env 设置{' '}
-              <code className="bg-muted rounded px-1 font-mono">{provider.env_var}</code>
-              ，或直接填入：
-            </p>
-          )}
-          <div className="flex items-center gap-2">
-            <Input
-              type="password"
-              autoComplete="new-password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder="填入 API Key（自动写入 .env，立即生效）"
-              className="h-7 flex-1 text-xs"
-              aria-label={`填写 ${providerId} 的 API Key`}
-            />
-            <Button
-              size="xs"
-              disabled={!apiKey.trim()}
-              onClick={() => {
-                onUpdateKey(providerId, apiKey, provider)
-                setApiKey('')
-              }}
-            >
-              保存
-            </Button>
-          </div>
-        </div>
-      )}
-
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          size="xs"
-          variant="outline"
-          onClick={() => onFetchModels(providerId)}
-          disabled={!hasKey && !needsNoKey}
-        >
-          <RefreshCw className="mr-1 h-3 w-3" />
-          拉取模型
-        </Button>
-        <Button size="xs" variant="ghost" onClick={() => setShowAdvanced((v) => !v)}>
-          <ChevronDown
-            className={`mr-1 h-3 w-3 transition-transform ${showAdvanced ? 'rotate-180' : ''}`}
-          />
-          并发设置
-        </Button>
-      </div>
-
-      {showAdvanced && (
-        <div className="border-t pt-2">
-          <div className="flex flex-wrap items-end gap-3">
-            <label className="text-muted-foreground flex flex-col gap-1 text-xs">
-              最大并发
-              <Input
-                type="number"
-                min={1}
-                value={maxConcurrent}
-                onChange={(e) => setMaxConcurrent(Number(e.target.value))}
-                className="h-7 w-24 text-xs"
-              />
-            </label>
-            <label className="text-muted-foreground flex flex-col gap-1 text-xs">
-              RPM（每分钟请求数）
-              <Input
-                type="number"
-                min={0}
-                value={rpm}
-                onChange={(e) => setRpm(Number(e.target.value))}
-                className="h-7 w-24 text-xs"
-              />
-            </label>
-            <Button size="xs" onClick={() => onSaveConcurrency(providerId, maxConcurrent, rpm)}>
-              保存并发设置
-            </Button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
 
 /**
  * 模型行：展示 + 删除 + 模型设置编辑。
@@ -859,6 +744,8 @@ function ModelRow({
   modelId,
   model,
   strengthLevels,
+  deleting,
+  settingsSaving,
   onDelete,
   onSaveSettings,
 }: {
@@ -866,6 +753,10 @@ function ModelRow({
   model: ModelConfig
   /** 思考强度档位（llm_service 预置声明下发） */
   strengthLevels: readonly string[]
+  /** 删除模型进行中 */
+  deleting: boolean
+  /** 保存模型设置进行中 */
+  settingsSaving: boolean
   onDelete: (id: string) => void
   onSaveSettings: (id: string, settings: Partial<ModelConfig>) => Promise<void>
 }) {
@@ -891,16 +782,16 @@ function ModelRow({
           />
           参数
         </Button>
-        <Button variant="destructive" size="xs" onClick={() => onDelete(modelId)}>
-          删除
+        <Button variant="destructive" size="xs" onClick={() => onDelete(modelId)} disabled={deleting}>
+          {deleting ? '删除中...' : '删除'}
         </Button>
       </div>
       {expanded && (
         <div className="mt-2 space-y-3 border-t pt-2">
           <ModelParamsEditor value={draft} onChange={setDraft} levels={strengthLevels} />
           <div className="flex items-center gap-2">
-            <Button size="xs" onClick={handleSave}>
-              保存设置
+            <Button size="xs" onClick={handleSave} disabled={settingsSaving}>
+              {settingsSaving ? '保存中...' : '保存设置'}
             </Button>
             <p className="text-muted-foreground text-[10px]">
               「保持原样」不改动对应字段；未自定义的高级参数维持 yaml 原值

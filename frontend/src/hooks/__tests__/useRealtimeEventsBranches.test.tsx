@@ -75,7 +75,7 @@ beforeEach(() => {
   queryClient.clear()
   useNotificationStore.getState().clearAll()
   useChatInputStore.setState({ pendingInsert: null })
-  usePendingInputStore.setState({ byPipeline: {}, editingId: {} })
+  usePendingInputStore.setState({ byPipeline: {} })
   useSessionStore.setState({ activeSessionId: null })
   useLongTermTaskStore.setState({ activeTaskId: null })
   useLayoutModeStore.setState({ workspaceDataVersion: 0 })
@@ -93,6 +93,7 @@ const ALL_REALTIME_EVENTS = [
   WS_SERVER_EVENTS.TASK_DELETED,
   WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT,
   WS_SERVER_EVENTS.PENDING_INPUTS_CHANGED,
+  WS_SERVER_EVENTS.PIPELINE_ROUND_FINISHED,
   WS_SERVER_EVENTS.COMPRESSION_FAILED,
   WS_SERVER_EVENTS.COMPRESSION_APPLIED,
   WS_LOCAL_EVENTS.KICKED_BY_REPLACEMENT,
@@ -145,7 +146,7 @@ function seedTasksAndMount(tasks: Array<Record<string, unknown>>) {
 }
 
 describe('useRealtimeEvents — 订阅与退订覆盖面', () => {
-  it('挂载时订阅全部 9 条事件（含本地与服务器事件）', () => {
+  it('挂载时订阅全部 10 条事件（含本地与服务器事件）', () => {
     const { unmount } = renderHook(() => useRealtimeEvents())
     for (const evt of ALL_REALTIME_EVENTS) {
       expect(subscribedCount(evt)).toBeGreaterThan(0)
@@ -192,6 +193,21 @@ describe('useRealtimeEvents — 重连补漏 handleWsReconnect', () => {
       (call) => (call[0] as { queryKey?: readonly unknown[] } | undefined)?.queryKey,
     )
     expect(invalidatedKeys).toContainEqual(queryKeys.longTermTasks)
+    unmount()
+    invalidateSpy.mockRestore()
+  })
+
+  it('重连即失效任务面板全量任务缓存（pipelineAllTasks——断线期间任务状态迁移无中间态事件源，补漏清单与长期任务列表同权）', () => {
+    useSessionStore.setState({ activeSessionId: null })
+    const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
+    const { unmount } = renderHook(() => useRealtimeEvents())
+
+    act(() => emit(WS_LOCAL_EVENTS.RECONNECTED, {}))
+
+    const invalidatedKeys = invalidateSpy.mock.calls.map(
+      (call) => (call[0] as { queryKey?: readonly unknown[] } | undefined)?.queryKey,
+    )
+    expect(invalidatedKeys).toContainEqual(queryKeys.pipelineAllTasks)
     unmount()
     invalidateSpy.mockRestore()
   })
@@ -424,6 +440,61 @@ describe('useRealtimeEvents — task_deleted 与 task_status_changed', () => {
   })
 })
 
+describe('useRealtimeEvents — 任务终态事件缓存对账（task_completed/task_cancelled）', () => {
+  /** 收集 invalidateQueries 被调的 queryKey 清单（终态对账断言共用） */
+  function invalidatedKeysWithSpy() {
+    const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
+    const { unmount } = renderHook(() => useRealtimeEvents())
+    const collect = () =>
+      invalidateSpy.mock.calls.map(
+        (call) => (call[0] as { queryKey?: readonly unknown[] } | undefined)?.queryKey,
+      )
+    return { unmount, collect, restore: () => invalidateSpy.mockRestore() }
+  }
+
+  it('终态帧到达即失效 runs 与任务面板全量任务缓存（后端主动推送的状态变更，对账不等 30s 轮询）', () => {
+    useSessionStore.setState({ activeSessionId: null })
+    usePipelineMessageStore.setState({ activePipelineId: null })
+    const { unmount, collect, restore } = invalidatedKeysWithSpy()
+
+    act(() => {
+      emit(WS_SERVER_EVENTS.TASK_COMPLETED, {
+        type: 'task_completed',
+        data: { task_id: 'task-1', pipeline_id: 'task-1', status: 'completed' },
+      })
+      emit(WS_SERVER_EVENTS.TASK_CANCELLED, {
+        type: 'task_cancelled',
+        data: { task_id: 'task-2', pipeline_id: 'task-2', status: 'cancelled' },
+      })
+    })
+
+    const invalidatedKeys = collect()
+    expect(invalidatedKeys).toContainEqual(queryKeys.pipelineRuns)
+    expect(invalidatedKeys).toContainEqual(queryKeys.pipelineAllTasks)
+    unmount()
+    restore()
+  })
+
+  it('防打扰门控命中（任务=当前活跃管道）不弹通知，但缓存对账仍执行（真值已变与是否打扰无关）', () => {
+    usePipelineMessageStore.setState({ activePipelineId: 'task-live' })
+    const { unmount, collect, restore } = invalidatedKeysWithSpy()
+
+    act(() => {
+      emit(WS_SERVER_EVENTS.TASK_COMPLETED, {
+        type: 'task_completed',
+        data: { task_id: 'task-live', pipeline_id: 'task-live', status: 'completed' },
+      })
+    })
+
+    expect(
+      useNotificationStore.getState().notifications.find((n) => n.taskId === 'task-live'),
+    ).toBeUndefined()
+    expect(collect()).toContainEqual(queryKeys.pipelineAllTasks)
+    unmount()
+    restore()
+  })
+})
+
 describe('useRealtimeEvents — pending_inputs_changed', () => {
   it('常规 action 同步全量队列到 pendingInputStore', () => {
     const { unmount } = renderHook(() => useRealtimeEvents())
@@ -456,13 +527,11 @@ describe('useRealtimeEvents — pending_inputs_changed', () => {
     unmount()
   })
 
-  it('action=returned：用户来源条目回填输入框、队列清空', () => {
-    usePendingInputStore.setState({
-      byPipeline: {
-        p1: [{ id: 'old', pipeline_id: 'p1', content: '旧', source: 'user', created_at: '' }],
-      },
-      editingId: {},
-    })
+  it('action=returned：用户来源条目回填输入框、队列走权威 GET 对账', () => {
+    // 内核只退回 user 来源（System 条目留队交 drain），前端不再乐观清空——
+    // 队列条以 GET 全量对账收敛（System 残留条目不被误清）。
+    const loadSpy = vi.fn().mockResolvedValue(undefined)
+    usePendingInputStore.setState({ load: loadSpy } as never)
 
     const { unmount } = renderHook(() => useRealtimeEvents())
     act(() =>
@@ -479,11 +548,13 @@ describe('useRealtimeEvents — pending_inputs_changed', () => {
     )
 
     expect(useChatInputStore.getState().pendingInsert).toBe('第一条\n第二条')
-    expect(usePendingInputStore.getState().byPipeline['p1']).toEqual([])
+    expect(loadSpy).toHaveBeenCalledWith('p1')
     unmount()
   })
 
   it('action=returned：非用户来源（trigger/task）条目被丢弃，不回填输入框', () => {
+    const loadSpy = vi.fn().mockResolvedValue(undefined)
+    usePendingInputStore.setState({ load: loadSpy } as never)
     const { unmount } = renderHook(() => useRealtimeEvents())
     act(() =>
       emit(WS_SERVER_EVENTS.PENDING_INPUTS_CHANGED, {
@@ -498,7 +569,7 @@ describe('useRealtimeEvents — pending_inputs_changed', () => {
     )
 
     expect(useChatInputStore.getState().pendingInsert).toBeNull()
-    expect(usePendingInputStore.getState().byPipeline['p1']).toEqual([])
+    expect(loadSpy).toHaveBeenCalledWith('p1')
     unmount()
   })
 
@@ -518,21 +589,155 @@ describe('useRealtimeEvents — pending_inputs_changed', () => {
     unmount()
   })
 
-  it('action=returned：items 缺省时按空列表处理（清空队列、不回填）', () => {
-    usePendingInputStore.setState({
-      byPipeline: {
-        p1: [{ id: 'old', pipeline_id: 'p1', content: '旧', source: 'user', created_at: '' }],
-      },
-      editingId: {},
-    })
-
+  it('action=returned：items 缺省时按空列表处理（不回填、仍走权威对账）', () => {
+    const loadSpy = vi.fn().mockResolvedValue(undefined)
+    usePendingInputStore.setState({ load: loadSpy } as never)
     const { unmount } = renderHook(() => useRealtimeEvents())
     act(() =>
       emit(WS_SERVER_EVENTS.PENDING_INPUTS_CHANGED, { data: { pipeline_id: 'p1', action: 'returned' } }),
     )
 
     expect(useChatInputStore.getState().pendingInsert).toBeNull()
-    expect(usePendingInputStore.getState().byPipeline['p1']).toEqual([])
+    expect(loadSpy).toHaveBeenCalledWith('p1')
+    unmount()
+  })
+
+  it('consumed 带 consumed_messages：凭权威 record 补插 user 气泡（忙时入队无本地候选，走 claimUserMessage insert，与正常发送同链）', () => {
+    // 注入消息无独立消费轮的 stream_start/认领链路——内核随 consumed 事件逐条
+    // 携带权威 record（指纹 record_id/seq/原文），前端 claimUserMessage 裁决。
+    // 排队期唯一视图=队列条（2026-10-26 用户裁定）：本地无乐观候选 → insert
+    // 路径补插；终态必携排序键：插入即有 sequence，不按排序键永久垫底。
+    usePipelineMessageStore.setState({
+      messagesByPipeline: { p1: [] },
+    })
+
+    const { unmount } = renderHook(() => useRealtimeEvents())
+    act(() =>
+      emit(WS_SERVER_EVENTS.PENDING_INPUTS_CHANGED, {
+        data: {
+          pipeline_id: 'p1',
+          action: 'consumed',
+          items: [],
+          consumed_messages: [
+            { client_message_id: 'cmid-x', id: 'mc-x', sequence: 42, content: '排队中消息' },
+          ],
+        },
+      }),
+    )
+
+    const msgs = usePipelineMessageStore.getState().messagesByPipeline['p1'] || []
+    expect(msgs).toHaveLength(1)
+    expect(msgs[0].status).toBe('completed')
+    expect(msgs[0].clientMessageId).toBe('cmid-x')
+    expect(msgs[0].recordId).toBe('mc-x')
+    expect(msgs[0].sequence).toBe(42)
+    expect(msgs[0].content).toBe('排队中消息')
+  })
+
+  it('consumed 不带 consumed_messages（链级 drain 路径）：不补插气泡（认领链路不受扰）', () => {
+    usePipelineMessageStore.setState({
+      messagesByPipeline: { p2: [] },
+    })
+
+    const { unmount } = renderHook(() => useRealtimeEvents())
+    act(() =>
+      emit(WS_SERVER_EVENTS.PENDING_INPUTS_CHANGED, {
+        data: { pipeline_id: 'p2', action: 'consumed', items: [] },
+      }),
+    )
+
+    expect(usePipelineMessageStore.getState().messagesByPipeline['p2'] ?? []).toHaveLength(0)
+    unmount()
+  })
+})
+
+describe('useRealtimeEvents — 早回执与权威截断（聊天消息流权威化 20261027）', () => {
+  it('user_message_confirmed：候选缺失时 insert 权威 user 气泡（recordId+seq）', () => {
+    usePipelineMessageStore.setState({
+      messagesByPipeline: { p1: [] },
+      pipelineSessionMap: { p1: 's1' },
+    } as never)
+    const { unmount } = renderHook(() => useRealtimeEvents())
+    act(() =>
+      emit(WS_SERVER_EVENTS.USER_MESSAGE_CONFIRMED, {
+        data: {
+          pipeline_id: 'p1',
+          thread_id: 'T1',
+          client_message_id: 'cm-ea-1',
+          record: { id: 'mc_abc123', sequence: 7, content: '早回执消息' },
+        },
+      }),
+    )
+
+    const msgs = usePipelineMessageStore.getState().getMessages('p1')
+    expect(msgs).toHaveLength(1)
+    expect(msgs[0].role).toBe('user')
+    expect(msgs[0].clientMessageId).toBe('cm-ea-1')
+    expect(msgs[0].recordId).toBe('mc_abc123')
+    expect(msgs[0].sequence).toBe(7)
+    expect(msgs[0].content).toBe('早回执消息')
+    expect(msgs[0].status).toBe('completed')
+    unmount()
+  })
+
+  it('user_message_confirmed：载荷缺 cmid/管道时静默（防御面）', () => {
+    usePipelineMessageStore.setState({ messagesByPipeline: {} } as never)
+    const { unmount } = renderHook(() => useRealtimeEvents())
+    act(() =>
+      emit(WS_SERVER_EVENTS.USER_MESSAGE_CONFIRMED, {
+        data: { pipeline_id: 'p1', record: { id: 'mc_x', sequence: 1, content: 'x' } },
+      }),
+    )
+    expect(usePipelineMessageStore.getState().messagesByPipeline['p1']).toBeUndefined()
+    unmount()
+  })
+
+  it('messages_truncated：按 seq 权威截断 + updated_messages 原地改写 + 段清单刷新', async () => {
+    vi.useFakeTimers()
+    const mk = (id: string, seq: number, content: string) => ({
+      id,
+      sessionId: 's1',
+      role: 'user' as const,
+      content,
+      timestamp: '',
+      status: 'completed' as const,
+      sequence: seq,
+    })
+    usePipelineMessageStore.setState({
+      messagesByPipeline: {
+        p1: [
+          mk('u5', 5, '原问题'),
+          { ...mk('a6', 6, '旧回复'), role: 'assistant' as const },
+          mk('u7', 7, '排队消息'),
+          { ...mk('a8', 8, '旧回复2'), role: 'assistant' as const },
+          // 无 seq 暂态（截断点之后的流式占位）随权威截断一并移除
+          { ...mk('u9-nokey', 0, '未认领'), sequence: undefined, status: 'sending' as const },
+        ],
+      },
+      pipelineSessionMap: { p1: 's1' },
+    } as never)
+    const fetchSegmentsSpy = vi.fn().mockResolvedValue(undefined)
+    usePipelineMessageStore.setState({ fetchSegments: fetchSegmentsSpy } as never)
+    const { unmount } = renderHook(() => useRealtimeEvents())
+    act(() =>
+      emit(WS_SERVER_EVENTS.MESSAGES_TRUNCATED, {
+        data: {
+          pipeline_id: 'p1',
+          thread_id: 'T1',
+          truncate_before_seq: 7,
+          regenerate: true,
+          updated_messages: [{ sequence: 5, role: 'user', content: '改写后的问题' }],
+        },
+      }),
+    )
+
+    const msgs = usePipelineMessageStore.getState().getMessages('p1')
+    expect(msgs.map((m) => m.id)).toEqual(['u5', 'a6'])
+    expect(msgs[0].content).toBe('改写后的问题')
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400)
+    })
+    expect(fetchSegmentsSpy).toHaveBeenCalledWith('p1')
     unmount()
   })
 })
@@ -563,6 +768,45 @@ describe('useRealtimeEvents — 通知类事件', () => {
       .getState()
       .notifications.find((n) => n.title === '上下文压缩失败')
     expect(notif?.message).toContain('上下文将持续膨胀')
+    unmount()
+  })
+
+  it('compression_started 置「压缩中」标记，compression_ended 清除', () => {
+    const { unmount } = renderHook(() => useRealtimeEvents())
+    act(() =>
+      emit(WS_SERVER_EVENTS.COMPRESSION_STARTED, {
+        data: { pipeline_id: 'p1', thread_id: 'T1' },
+      }),
+    )
+    expect(usePipelineMessageStore.getState().isCompressing('p1')).toBe(true)
+
+    act(() =>
+      emit(WS_SERVER_EVENTS.COMPRESSION_ENDED, {
+        data: { pipeline_id: 'p1', status: 'applied' },
+      }),
+    )
+    expect(usePipelineMessageStore.getState().isCompressing('p1')).toBe(false)
+    unmount()
+  })
+
+  it('compression_started 缺 pipeline_id 时不误标（不清别人状态）', () => {
+    const { unmount } = renderHook(() => useRealtimeEvents())
+    act(() => emit(WS_SERVER_EVENTS.COMPRESSION_STARTED, { data: { thread_id: 'T1' } }))
+    expect(Object.keys(usePipelineMessageStore.getState().compressingByPipeline)).toEqual([])
+    unmount()
+  })
+
+  it('轮次结束兜底清除「压缩中」（压缩被超时丢弃时无 ended 事件）', () => {
+    const { unmount } = renderHook(() => useRealtimeEvents())
+    act(() =>
+      emit(WS_SERVER_EVENTS.COMPRESSION_STARTED, {
+        data: { pipeline_id: 'p9', thread_id: 'T1' },
+      }),
+    )
+    expect(usePipelineMessageStore.getState().isCompressing('p9')).toBe(true)
+
+    act(() => emit(WS_SERVER_EVENTS.PIPELINE_ROUND_FINISHED, { data: { pipeline_id: 'p9' } }))
+    expect(usePipelineMessageStore.getState().isCompressing('p9')).toBe(false)
     unmount()
   })
 
@@ -893,5 +1137,73 @@ describe('useRealtimeEvents — compression_applied 指纹对账（BUG-72 A1）'
       .notifications.find((n) => n.title === '压缩后消息对账失败')
     expect(notif).toBeDefined()
     unmount()
+  })
+})
+
+describe('useRealtimeEvents — 轮次收尾队列兜底对账', () => {
+  /** 桩定 pendingInputStore.load：断言对账触发，不真发请求 */
+  function mountWithQueueLoadSpy() {
+    const loadSpy = vi.fn().mockResolvedValue(undefined)
+    usePendingInputStore.setState({ load: loadSpy } as never)
+    const { unmount } = renderHook(() => useRealtimeEvents())
+    return { loadSpy, unmount }
+  }
+
+  it('round_finished + 本地队列非空 → GET 对账（consumed 丢失窗口自愈）', () => {
+    usePendingInputStore.setState({
+      byPipeline: {
+        p1: [{ id: 'a', pipeline_id: 'p1', content: 'x', source: 'user', created_at: '' }],
+      },
+    })
+    const { loadSpy, unmount } = mountWithQueueLoadSpy()
+    act(() =>
+      emit(WS_SERVER_EVENTS.PIPELINE_ROUND_FINISHED, { data: { pipeline_id: 'p1' } }),
+    )
+    expect(loadSpy).toHaveBeenCalledWith('p1')
+    unmount()
+  })
+
+  it('本地队列为空也拉取（漏接 enqueued 时的唯一自愈通道）', () => {
+    usePendingInputStore.setState({ byPipeline: { p1: [] } })
+    const { loadSpy, unmount } = mountWithQueueLoadSpy()
+    act(() =>
+      emit(WS_SERVER_EVENTS.PIPELINE_ROUND_FINISHED, { data: { pipeline_id: 'p1' } }),
+    )
+    // 2026-10-29 契约变更：条件化对账会让「已入队但前端不知道」永久隐藏，
+    // 轮末必须无条件拉一次权威列表。
+    expect(loadSpy).toHaveBeenCalledWith('p1')
+    unmount()
+  })
+
+  it('pipeline_id 缺失跳过', () => {
+    const { loadSpy, unmount } = mountWithQueueLoadSpy()
+    act(() => emit(WS_SERVER_EVENTS.PIPELINE_ROUND_FINISHED, { data: {} }))
+    expect(loadSpy).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('round_finished → 刷新该管道段清单（新段落库时刻，‹i/n› 切换器随即可见）', async () => {
+    const fetchSegmentsSpy = vi.fn().mockResolvedValue(undefined)
+    usePipelineMessageStore.setState({ fetchSegments: fetchSegmentsSpy } as never)
+    const { unmount } = renderHook(() => useRealtimeEvents())
+    act(() =>
+      emit(WS_SERVER_EVENTS.PIPELINE_ROUND_FINISHED, { data: { pipeline_id: 'p1' } }),
+    )
+    // 去抖 300ms 后触发
+    await vi.waitFor(() => {
+      expect(fetchSegmentsSpy).toHaveBeenCalledWith('p1')
+    })
+    unmount()
+  })
+
+  it('卸载时清理段清单刷新定时器（不残留请求）', () => {
+    const fetchSegmentsSpy = vi.fn().mockResolvedValue(undefined)
+    usePipelineMessageStore.setState({ fetchSegments: fetchSegmentsSpy } as never)
+    const { unmount } = renderHook(() => useRealtimeEvents())
+    act(() =>
+      emit(WS_SERVER_EVENTS.PIPELINE_ROUND_FINISHED, { data: { pipeline_id: 'p1' } }),
+    )
+    unmount()
+    expect(fetchSegmentsSpy).not.toHaveBeenCalled()
   })
 })

@@ -21,18 +21,25 @@ import {
   ExternalLink,
   ArrowUpDown,
   Plus,
+  Link,
 } from '@/assets/icons'
 import { Button } from '@/components/ui/button'
 import apiClient from '@/services/api/client'
 import { parseDataSourceRef, resolveDataSource } from '@/services/schema/parser'
+import { isLazyTreeSource } from '@/services/schema/treeDataSources'
 import { CreateTaskFormModal } from './CreateTaskFormModal'
-import { getFileTreeDomainBinding, type FileTreeStatusConfigItem as StatusConfigItem } from './fileTreeActions'
-import { extractRequestError, loadErrorDomain } from './fileTreeErrors'
+import {
+  getFileTreeDomainBinding,
+  type FileTreeStatusConfigItem as StatusConfigItem,
+  type TreeNodeData,
+  type TreeWidgetConfig,
+} from './fileTreeActions'
 import {
   FileTreeContextMenu,
   type ContextMenuContext,
   type ContextMenuTreeNode,
 } from './FileTreeContextMenu'
+import { extractRequestError, loadErrorDomain } from './fileTreeErrors'
 import { formatTime, PRIORITY_LABELS } from './fileTreeFormatting'
 import { openWorkspaceTreeTab } from './workspaceTreeTab'
 
@@ -60,64 +67,6 @@ function loadExpandedIds(treeKey: string): Set<string> | null {
     if (Array.isArray(arr)) return new Set(arr)
   } catch { /* ignore */ }
   return null
-}
-
-/** 树节点数据结构 */
-interface TreeNodeData {
-  /** 节点唯一标识 */
-  id?: string
-  /** 节点标题 */
-  title?: string
-  /** 节点图标 */
-  icon?: string
-  /** 节点状态 */
-  status?: string
-  /** 进度值（0-100） */
-  progress?: number
-  /** 子节点 */
-  children?: TreeNodeData[]
-  /** 节点描述 */
-  description?: string
-  /** 其他扩展字段 */
-  [key: string]: unknown
-}
-
-/** 树形组件配置属性 */
-interface TreeWidgetConfig {
-  /** 树标题 */
-  title?: string
-  /** 是否显示状态图标 */
-  showStatus?: boolean
-  /** 是否显示进度条 */
-  showProgress?: boolean
-  /** 默认展开层级（0=全折叠, -1=全展开） */
-  expandLevel?: number
-  /** 节点图标字段名 */
-  nodeIconField?: string
-  /** 节点标题字段名 */
-  nodeTitleField?: string
-  /** 节点状态字段名 */
-  nodeStatusField?: string
-  /** 子节点字段名 */
-  nodeChildrenField?: string
-  /** 状态显示配置 */
-  statusConfig?: Record<string, StatusConfigItem>
-  /** 直接传入的树数据 */
-  data?: TreeNodeData[]
-  /** 是否显示搜索框 */
-  showSearch?: boolean
-  /** 是否显示状态筛选器（默认跟随 showStatus） */
-  showStatusFilter?: boolean
-  /** 默认筛选状态值（默认 'running'，空字符串表示显示全部） */
-  defaultStatusFilter?: string
-  /** 是否显示启用/禁用开关（默认 true，workspace:// 数据源自动 false） */
-  showEnabledToggle?: boolean
-  /** 节点点击回调（用于外部处理节点点击事件） */
-  onNodeClick?: (node: TreeNodeData) => void
-  /** 文件节点点击回调（用于打开文件编辑器） */
-  onFileClick?: (filePath: string, fileName: string) => void
-  /** 会话 ID（用于按会话过滤/加载任务数据） */
-  sessionId?: string
 }
 
 /** 状态筛选比较口径（归一化 + 活跃集合）——由注册的域绑定提供；未注册时
@@ -334,6 +283,36 @@ function filterNodes(
   return result
 }
 
+/** 节点是否为可展开形态：目录或链接（junction/symlink，展开列目标第一层） */
+function isExpandableType(node: TreeNodeData): boolean {
+  const type = node.type as string | undefined
+  return type === 'directory' || type === 'link'
+}
+
+/** workspace 懒加载合并：把已拉取子层与层错误并入节点树。
+ *  未拉取的目录/链接节点保持无 children——展开形态由 type 判定，
+ *  拉取过（含空层）的节点打 lazyLoaded 防止重复请求。 */
+function mergeLazyChildren(
+  nodes: TreeNodeData[],
+  childrenField: string,
+  childrenByDir: Record<string, TreeNodeData[]>,
+  layerErrors: Record<string, string>,
+): TreeNodeData[] {
+  return nodes.map((node) => {
+    if (!isExpandableType(node)) return node
+    const path = (node.path as string) ?? ''
+    const merged: TreeNodeData = { ...node }
+    const loaded = childrenByDir[path]
+    if (loaded !== undefined) {
+      merged[childrenField] = mergeLazyChildren(loaded, childrenField, childrenByDir, layerErrors)
+      merged.lazyLoaded = true
+    }
+    const err = layerErrors[path]
+    if (err) merged.error = err
+    return merged
+  })
+}
+
 /** 排序模式 */
 type SortMode = 'none' | 'name-asc' | 'name-desc' | 'type'
 
@@ -349,8 +328,9 @@ function sortNodes(
     const titleB = String(getNodeField(b, titleField) ?? '').toLowerCase()
     const childrenA = getNodeField(a, childrenField) as TreeNodeData[] | undefined
     const childrenB = getNodeField(b, childrenField) as TreeNodeData[] | undefined
-    const isDirA = Array.isArray(childrenA)
-    const isDirB = Array.isArray(childrenB)
+    // 目录判定带 type：懒加载下未展开的目录没有 children 数组，不能据此当文件
+    const isDirA = Array.isArray(childrenA) || isExpandableType(a)
+    const isDirB = Array.isArray(childrenB) || isExpandableType(b)
 
     if (isDirA !== isDirB) return isDirA ? -1 : 1
 
@@ -398,9 +378,12 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   /** 默认筛选状态值（缺省取域词表默认值，如任务树默认 running；无域绑定为空 = 全部） */
   const defaultStatusFilterValue = config.defaultStatusFilter ?? domainBinding?.statuses.defaultFilter ?? ''
 
-  /** 是否显示启用/禁用开关（需域绑定提供切换动作；workspace:// 数据源默认隐藏） */
+  /** 是否显示启用/禁用开关（需域绑定提供切换动作；懒加载数据源默认隐藏） */
   const ds = rawProps.dataSource as string | undefined
-  const showEnabledToggle = config.showEnabledToggle ?? (!!domainBinding && !(ds?.startsWith('workspace://')))
+  /** 懒加载树模式（workspace:// 工作区文件树 / fsbrowse:// 多端目录树索引，
+   *  协议集合见 treeDataSources）：数据驱动为单层列举，展开按 path 拉一层 */
+  const isLazySource = isLazyTreeSource(ds)
+  const showEnabledToggle = config.showEnabledToggle ?? (!!domainBinding && !isLazySource)
   /** 合并状态配置（域词表配置为基座，props 显式配置覆盖） */
   const statusConfig = { ...domainBinding?.statuses.config, ...(config.statusConfig ?? {}) }
   /** 状态筛选选项（「全部」+ 域词表；无域绑定只余「全部」） */
@@ -412,6 +395,8 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const onNodeClick = config.onNodeClick ?? (rawProps.onNodeClick as ((node: TreeNodeData) => void) | undefined)
   /** 文件节点点击回调 */
   const onFileClick = config.onFileClick ?? (rawProps.onFileClick as ((filePath: string, fileName: string) => void) | undefined)
+  /** 目录/链接行点击回调（目录选择场景） */
+  const onDirectoryClick = config.onDirectoryClick ?? (rawProps.onDirectoryClick as ((node: TreeNodeData) => void) | undefined)
   /** 会话 ID */
   const sessionId = config.sessionId ?? (rawProps.sessionId as string | undefined)
   /** 树的唯一标识（用于 localStorage 持久化展开状态） */
@@ -431,6 +416,20 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const [internalRefresh, setInternalRefresh] = useState(0)
   /** 标记是否已完成首次加载，用于区分首次加载与刷新，避免刷新时闪烁 loading */
   const hasLoadedRef = useRef(false)
+  /** workspace 懒加载：已拉取子层（目录相对路径 → 一层直接子项；空数组=已拉取且为空） */
+  const [childrenByDir, setChildrenByDir] = useState<Record<string, TreeNodeData[]>>({})
+  /** workspace 懒加载：层级加载失败/截断信息（目录相对路径 → 可读原因，渲染在该目录节点 error 位） */
+  const [layerErrors, setLayerErrors] = useState<Record<string, string>>({})
+  /** workspace 根层截断标记（后端单层条目数封顶时为 true，底部渲染截断提示） */
+  const [rootTruncated, setRootTruncated] = useState(false)
+
+  /** childrenByDir / expandedIds 的 ref 镜像：刷新流程（loadTreeData）需要读取
+   *  展开集合与已加载目录来重拉可见层，避免把高频变化的 state 依赖进加载 effect */
+  const childrenByDirRef = useRef<Record<string, TreeNodeData[]>>({})
+  const expandedIdsRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    childrenByDirRef.current = childrenByDir
+  }, [childrenByDir])
 
   /** 触发树数据刷新（暂停/恢复操作后调用） */
   const triggerRefresh = useCallback(() => {
@@ -459,21 +458,71 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
         name: String(getNodeField(n, nodeTitleField) ?? ''),
         path: (n.path as string) ?? getStableNodeId(n),
         isDirectory: !!(getNodeField(n, nodeChildrenField) as TreeNodeData[] | undefined)?.length
-          || (n.type as string) === 'directory',
+          || isExpandableType(n),
         children: (getNodeField(n, nodeChildrenField) as TreeNodeData[] | undefined)
           ?.map((c) => ({
             name: String(getNodeField(c, nodeTitleField) ?? ''),
             path: (c.path as string) ?? getStableNodeId(c),
             isDirectory: !!(getNodeField(c, nodeChildrenField) as TreeNodeData[] | undefined)?.length
-              || (c.type as string) === 'directory',
+              || isExpandableType(c),
             children: undefined,
           })),
       })),
     [nodeTitleField, nodeChildrenField],
   )
 
-  /** 实际使用的树数据：优先使用远程数据，否则使用直接传入的数据 */
-  const effectiveData = remoteTreeData.length > 0 ? remoteTreeData : allData
+  /** 实际使用的树数据：优先使用远程数据，否则使用直接传入的数据。
+   *  workspace 懒加载模式再把已拉取子层并入（无拉取记录时保持原引用，
+   *  不破坏下游 effect 的引用相等守卫）。 */
+  let effectiveData = remoteTreeData.length > 0 ? remoteTreeData : allData
+  if (isLazySource && effectiveData.length > 0) {
+    effectiveData = mergeLazyChildren(effectiveData, nodeChildrenField, childrenByDir, layerErrors)
+  }
+
+  /** 拉取单个目录层（workspace 懒加载专用）：成功/失败/截断都落确定的 state */
+  const fetchLayerInto = useCallback(
+    async (dirPath: string) => {
+      try {
+        const ref = parseDataSourceRef(rawProps.dataSource as string)
+        const resolved = resolveDataSource(ref)
+        const params: Record<string, unknown> = {
+          ...(resolved.params as Record<string, string>),
+          path: dirPath,
+        }
+        const response = await apiClient.get(resolved.endpoint, { params })
+        const raw = response.data
+        // 与根层同口径：业务级错误（无坐标/目录缺失）进层错误位，不伪装空目录
+        const wsStatus = (raw as { workspace_status?: string })?.workspace_status
+        if (wsStatus) {
+          throw new Error((raw as { error?: string })?.error || '工作区不可用')
+        }
+        const entries = ((raw as { entries?: TreeNodeData[] })?.entries ?? []) as TreeNodeData[]
+        setChildrenByDir((prev) => ({ ...prev, [dirPath]: entries }))
+        const truncated = (raw as { truncated?: boolean })?.truncated
+        setLayerErrors((prev) => {
+          const next = { ...prev }
+          delete next[dirPath]
+          if (truncated) next[dirPath] = '该层条目过多，已截断显示'
+          return next
+        })
+      } catch (e) {
+        setChildrenByDir((prev) => ({ ...prev, [dirPath]: [] }))
+        setLayerErrors((prev) => ({ ...prev, [dirPath]: extractRequestError(e) }))
+      }
+    },
+    [rawProps.dataSource],
+  )
+
+  /** 展开/收起时的懒加载触发：仅对未拉取过的可展开节点发一次单层请求 */
+  const handleExpandLazy = useCallback(
+    (node: TreeNodeData) => {
+      if (!isLazySource) return
+      const path = (node.path as string) ?? ''
+      if (!path || childrenByDirRef.current[path] !== undefined) return
+      void fetchLayerInto(path)
+    },
+    [isLazySource, fetchLayerInto],
+  )
 
   /** 处理节点右键菜单 */
   const handleNodeContextMenu = useCallback(
@@ -483,7 +532,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
       const nodePath = (node.path as string) ?? getStableNodeId(node)
       const nodeTitle = String(getNodeField(node, nodeTitleField) ?? '')
       const children = getNodeField(node, nodeChildrenField) as TreeNodeData[] | undefined
-      const isDir = !!children?.length || (node.type as string) === 'directory'
+      const isDir = !!children?.length || isExpandableType(node)
       const parentPath = nodePath.includes('/') ? nodePath.substring(0, nodePath.lastIndexOf('/')) : ''
       setContextMenu({
         x: e.clientX,
@@ -528,6 +577,9 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   useEffect(() => {
     if (!rawProps.dataSource) {
       setRemoteTreeData([])
+      setChildrenByDir({})
+      setLayerErrors({})
+      setRootTruncated(false)
       return
     }
 
@@ -559,9 +611,9 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
           hasLoadedRef.current = true
           return
         }
-        const tree = raw?.children ?? raw?.tree ?? []
+        const tree = raw?.entries ?? raw?.children ?? raw?.items ?? []
         const flat = raw?.items ?? []
-        const filteredData = tree.length > 0 ? tree : flat
+        const filteredData = (tree.length > 0 ? tree : flat) as TreeNodeData[]
 
         if (filteredData.length > 0) {
           setRemoteTreeData(filteredData)
@@ -574,11 +626,28 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
           const fallbackResp = await apiClient.get(resolved.endpoint, { params: fallbackParams })
           if (cancelled) return
           const fallbackRaw = fallbackResp.data
-          const fallbackTree = fallbackRaw?.children ?? fallbackRaw?.tree ?? []
+          const fallbackTree = fallbackRaw?.entries ?? fallbackRaw?.children ?? fallbackRaw?.items ?? []
           const fallbackFlat = fallbackRaw?.items ?? []
           setRemoteTreeData(fallbackTree.length > 0 ? fallbackTree : fallbackFlat)
         } else {
           setRemoteTreeData([])
+        }
+        if (isLazySource) {
+          setRootTruncated(!!raw?.truncated)
+          // 子层缓存整体失效：根层已是新扫描，展开中的目录重拉（操作连贯性——
+          // 右键建/删/改后刷新应看到新内容而非旧层缓存）。重拉范围 = 展开集合
+          // 与根层目录类型的交集 ∪ 之前拉取过的目录（嵌套展开层根层不可见）。
+          const prevDirs = childrenByDirRef.current
+          setChildrenByDir({})
+          setLayerErrors({})
+          const rootDirPaths = new Set(
+            filteredData
+              .filter((n) => isExpandableType(n))
+              .map((n) => (n.path as string) ?? ''),
+          )
+          for (const p of expandedIdsRef.current) {
+            if (rootDirPaths.has(p) || prevDirs[p] !== undefined) void fetchLayerInto(p)
+          }
         }
         hasLoadedRef.current = true
       } catch (e) {
@@ -603,7 +672,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
       cancelled = true
       clearTimeout(timer)
     }
-  }, [sessionId, rawProps.dataSource, refreshKey, internalRefresh])
+  }, [sessionId, rawProps.dataSource, refreshKey, internalRefresh, isLazySource, fetchLayerInto])
 
   /** sessionId 变更时重置首次加载标记 */
   useEffect(() => {
@@ -616,6 +685,10 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
   const [searchKeyword, setSearchKeyword] = useState('')
   /** 展开的节点 ID 集合（优先从 localStorage 恢复） */
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => restoredExpandedIds ?? new Set<string>())
+  /** expandedIds 的 ref 镜像（刷新流程读取，见 childrenByDirRef 注释） */
+  useEffect(() => {
+    expandedIdsRef.current = expandedIds
+  }, [expandedIds])
   /** 状态筛选值（默认取域词表默认值，空字符串表示显示全部） */
   const [statusFilter, setStatusFilter] = useState(defaultStatusFilterValue)
   /** 正在切换启用/禁用状态的节点 ID 集合 */
@@ -636,6 +709,10 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
     hasInitializedRef.current = false
     prevDataRef.current = []
     seenNodeIdsRef.current = new Set()
+    // 树上下文已切换：懒加载子层缓存与截断标记随之失效
+    setChildrenByDir({})
+    setLayerErrors({})
+    setRootTruncated(false)
   }, [treeKey])
 
   /** 已出现过的节点 ID 集合（用于区分新老节点） */
@@ -883,7 +960,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
                   className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
                     statusFilter === opt.value
                       ? 'bg-primary/15 text-primary font-medium'
-                      : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
+                      : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
                   }`}
                 >
                   {opt.label}
@@ -920,7 +997,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
               onClick={handleSortToggle}
               title={SORT_LABELS[sortMode]}
               className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors ${
-                sortMode !== 'none' ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50 text-muted-foreground'
+                sortMode !== 'none' ? 'bg-accent text-accent-foreground' : 'hover:bg-muted/50 text-muted-foreground'
               }`}
             >
               <ArrowUpDown className="h-3.5 w-3.5" />
@@ -960,6 +1037,7 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
               onSelect={handleSelect}
               onNodeClick={onNodeClick}
               onFileClick={onFileClick}
+              onDirectoryClick={onDirectoryClick}
               onRefresh={triggerRefresh}
               togglingIds={togglingIds}
               isNodeEnabled={domainBinding?.isEnabled}
@@ -967,10 +1045,18 @@ export function FileTreeWidget(rawProps: Record<string, unknown>) {
               normalizeStatus={domainBinding?.statuses.normalize}
               onToggleEnabled={handleToggleEnabled}
               onContextMenu={handleNodeContextMenu}
+              onExpandLazy={handleExpandLazy}
             />
           ))
         )}
       </div>
+
+      {/* workspace 懒加载根层截断提示（后端单层条目数封顶标记） */}
+      {isLazySource && rootTruncated && (
+        <div className="text-muted-foreground/60 border-t px-4 py-2 text-center text-[10px]">
+          目录过大，仅显示部分条目
+        </div>
+      )}
 
       {/* 上下文菜单 */}
       {contextMenu && (
@@ -1027,6 +1113,8 @@ interface TreeNodeProps {
   onNodeClick?: (node: TreeNodeData) => void
   /** 文件节点点击回调（用于打开文件编辑器） */
   onFileClick?: (filePath: string, fileName: string) => void
+  /** 目录/链接行点击回调（目录选择场景追踪当前目录） */
+  onDirectoryClick?: (node: TreeNodeData) => void
   /** 数据刷新回调（暂停/恢复操作后触发） */
   onRefresh?: () => void
   /** 正在切换中的节点 ID 集合 */
@@ -1041,6 +1129,8 @@ interface TreeNodeProps {
   onToggleEnabled: (nodeId: string, enabled: boolean) => void
   /** 右键菜单回调（用于文件操作上下文菜单） */
   onContextMenu?: (e: React.MouseEvent, node: TreeNodeData) => void
+  /** 懒加载触发回调（workspace 文件树：展开未加载的目录/链接节点时拉取该层） */
+  onExpandLazy?: (node: TreeNodeData) => void
 }
 
 /** 树节点组件 递归渲染单个树节点及其子节点，处理展开/折叠动画、 */
@@ -1061,6 +1151,7 @@ function TreeNode({
   onSelect,
   onNodeClick,
   onFileClick,
+  onDirectoryClick,
   onRefresh,
   togglingIds,
   isNodeEnabled,
@@ -1068,6 +1159,7 @@ function TreeNode({
   normalizeStatus,
   onToggleEnabled,
   onContextMenu,
+  onExpandLazy,
 }: TreeNodeProps): React.ReactNode {
   const nodeId = getStableNodeId(node)
   const title = String(getNodeField(node, nodeTitleField) ?? '未命名')
@@ -1088,6 +1180,11 @@ function TreeNode({
   const isContainer = isContainerNode?.(node) ?? false
   const hasPipeline = !!pipelineRunId && !isContainer
   const hasWorkspace = !!wsMode && wsMode !== 'shared' && !!wsPath
+  /** 可展开形态：有已加载子项，或类型本身可展开（懒加载目录/链接未拉取前无 children） */
+  const isExpandable = hasChildren || isExpandableType(node)
+  /** 子层是否已拉取过（含空目录），拉取过就不再重复触发懒加载 */
+  const lazyLoaded = node.lazyLoaded === true
+  const isLinkNode = (node.type as string) === 'link'
 
   /** 当前节点是否启用（由域绑定的状态词表判定，后端状态驱动） */
   const isEnabled = isNodeEnabled?.(status) ?? false
@@ -1097,14 +1194,19 @@ function TreeNode({
 
   const handleClick = useCallback(() => {
     onSelect(nodeId)
-    if (hasChildren) {
+    if (isExpandable) {
+      // 目录/链接行点击：目录选择场景追踪当前目录（回调在先，展开照旧）
+      onDirectoryClick?.(node)
+      // 未拉取过子层先触发懒加载（收起态重复点击由上层按已加载去重），
+      // 展开/收起状态照常切换——子项就位后随合并数据自动呈现
+      if (!lazyLoaded) onExpandLazy?.(node)
       onToggle(nodeId)
     } else if (onFileClick) {
       // 文件节点点击：使用 path 字段作为文件路径，fallback 到 nodeId
       const filePath = (node.path as string) ?? nodeId
       onFileClick(filePath, title)
     }
-  }, [nodeId, hasChildren, onToggle, onSelect, onFileClick, node, title])
+  }, [nodeId, isExpandable, lazyLoaded, onExpandLazy, node, onToggle, onSelect, onFileClick, onDirectoryClick, title])
 
   const handleChevronClick = useCallback(
     (e: React.MouseEvent) => {
@@ -1174,7 +1276,7 @@ function TreeNode({
       onContextMenu={(e) => onContextMenu?.(e, node)}
     >
       <div
-        className={`group flex cursor-pointer items-start py-1.5 transition-colors hover:bg-accent ${
+        className={`group flex cursor-pointer items-start py-1.5 transition-colors hover:bg-muted ${
           isSelected
             ? 'bg-accent/50 border-l-2 border-l-status-info'
             : 'border-l-2 border-l-transparent'
@@ -1201,7 +1303,7 @@ function TreeNode({
           )}
           <button
             className={`mr-1 flex h-5 w-5 items-center justify-center rounded transition-transform ${
-              hasChildren
+              isExpandable
                 ? 'text-muted-foreground hover:text-foreground'
                 : 'invisible'
             }`}
@@ -1217,7 +1319,10 @@ function TreeNode({
 
           {icon ? (
             <span className="mr-1.5 shrink-0 text-sm">{icon}</span>
-          ) : hasChildren ? (
+          ) : isLinkNode ? (
+            // 链接节点（junction/symlink）——图标随行文本 currentColor 继承（显式 status-info 选中行对比不足）
+            <Link className="mr-1.5 h-4 w-4 shrink-0" />
+          ) : isExpandable ? (
             isExpanded ? (
               <FolderOpen className="text-status-warning mr-1.5 h-4 w-4 shrink-0" />
             ) : (
@@ -1295,7 +1400,7 @@ function TreeNode({
             {/* 对话按钮：仅当节点拥有 pipeline_run_id 时显示 */}
             {hasPipeline && (
               <button
-                className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                 onClick={handleConversationClick}
                 title="打开对话"
                 tabIndex={-1}
@@ -1307,7 +1412,7 @@ function TreeNode({
             {/* 打开工作空间按钮：当节点具有独立工作空间时显示 */}
             {hasWorkspace && (
               <button
-                className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                 onClick={handleOpenWorkspace}
                 title={`打开工作空间: ${wsPath}`}
                 tabIndex={-1}
@@ -1340,6 +1445,7 @@ function TreeNode({
               onSelect={onSelect}
               onNodeClick={onNodeClick}
               onFileClick={onFileClick}
+              onDirectoryClick={onDirectoryClick}
               onRefresh={onRefresh}
               togglingIds={togglingIds}
               isNodeEnabled={isNodeEnabled}
@@ -1347,6 +1453,7 @@ function TreeNode({
               normalizeStatus={normalizeStatus}
               onToggleEnabled={onToggleEnabled}
               onContextMenu={onContextMenu}
+              onExpandLazy={onExpandLazy}
             />
 
           ))}

@@ -11,7 +11,7 @@ mode_skill_sources 注入或按仓内布局推导（出厂 plugins/shared/modes/
 用户根 <USER_ROOT>/plugins/modes/），同名优先序用户根包 > 出厂包 > 仓根
 （与 mode_keys 双根解析一致）。
 
-涉及模块：plugins/shared/system/isolation/workspace_lifecycle.py::
+涉及模块：plugins/shared/isolation/workspace_lifecycle.py::
 _copy_skills_to_workspace / _skill_sources
 """
 from __future__ import annotations

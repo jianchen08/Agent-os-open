@@ -1,0 +1,89 @@
+"""任务服务模块 — 门面模式组合类。"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+from _task_cleanup import _TaskCleanupMixin
+from _task_crud import _TaskCrudMixin
+from _task_state import _TaskStateMixin
+
+logger = logging.getLogger(__name__)
+
+StateChangeCallback = Callable[[str, str, str], Awaitable[None]]
+
+
+class TaskService(_TaskCrudMixin, _TaskStateMixin, _TaskCleanupMixin):
+    """任务服务类。"""
+
+    def __init__(
+        self,
+        task_id: str | None = None,
+        initial_state: str = "pending",
+        event_bus: Any | None = None,
+        data_dir: str | None = None,
+        tenant_id: str | None = None,
+    ) -> None:
+        """初始化任务服务。
+
+        data_dir 仅作显式覆盖（存储优先级第 1 级）；传 None 时不得在本层
+        自设默认值，由 TaskStorage 解析剩余两级：
+        TASKS_STORAGE_DIR env → 多租户根 data/{tenant}/tasks（租户取序：
+        显式 tenant_id 形参 > SDK 身份 contextvar > default，刀1b）。
+        """
+        self.task_id = task_id
+        self._event_bus = event_bus
+        self._state_callbacks: list[StateChangeCallback] = []
+
+        # 门面模式的存储层（仅 task_id=None 时初始化）
+        self._storage: Any = None
+        if task_id is None:
+            from storage import TaskStorage  # noqa: PLC0415
+
+            self._storage = TaskStorage(data_dir=data_dir, tenant_id=tenant_id)
+
+    @property
+    def storage(self) -> Any:
+        """存储层只读访问（容器遗留清除等维护入口）。"""
+        return self._storage
+
+    def snapshot_tasks(self) -> list[Any]:
+        """任务全量只读快照（跨插件扫描入口：isolation 活跃 workspace 清点等）。
+
+        列表为浅拷贝，任务对象与存储共享——调用方只读，不得变更状态。
+        消费方无需下钻 storage/_tasks 私有层（B8 私有互访收敛面）。
+        """
+        if self._storage is None:
+            return []
+        return self._storage.list_all()
+
+    def register_state_callback(self, callback: StateChangeCallback) -> None:
+        """注册任务状态变更回调函数。"""
+        self._state_callbacks.append(callback)
+
+    def unregister_state_callback(self, callback: StateChangeCallback) -> None:
+        """注销任务状态变更回调函数。"""
+        if callback in self._state_callbacks:
+            self._state_callbacks.remove(callback)
+
+    async def _emit_state_change(
+        self,
+        task_id: str,
+        old_status: str,
+        new_status: str,
+    ) -> None:
+        """通知所有注册的回调函数任务状态已变更。
+
+        前端感知任务状态的现状契约：终态经 events.py 派生的
+        task_completed/task_failed 域事件（event-bus）；中间状态变更
+        （running/stopped 等）无前端通知，消费方以 state 聚合读面为准。
+        """
+        logger.debug("state change: %s -> %s | task=%s", old_status, new_status, task_id[:12] if task_id else "")
+
+        for cb in self._state_callbacks:
+            try:
+                await cb(task_id, old_status, new_status)
+            except Exception as exc:
+                logger.warning("state callback 执行失败（不影响状态转换主流程）: %s", exc)

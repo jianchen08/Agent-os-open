@@ -46,16 +46,27 @@ def _make_env(env_id: str = "cua-ws") -> IsolationEnvironment:
 def _manager_with_provider(create_fn) -> IsolationManager:
     """构造注入 mock provider 的 IsolationManager。
 
-    provider.is_available 返回容器可用；_find_existing_container 返回 None
-    （模拟 Docker 中无该容器），迫使走 create 分支。
+    provider.is_available 返回容器可用；_find_existing_container 模拟真 daemon
+    语义：容器创建前查无（None）、创建后按名可寻——复用快路径的每轮验活
+    （B5 收尾）依赖此真值：登记 READY 而 daemon 查无 = 死登记，须清登记重建。
     """
     manager = IsolationManager(providers={})
     provider = MagicMock()
     provider.is_available = AsyncMock(return_value=(True, None))
-    provider.create_environment = create_fn
+    daemon_names: set[str] = set()
+
+    async def create_and_register(context, container_name=None):
+        env = await create_fn(context, container_name=container_name)
+        daemon_names.add(env.env_id)
+        return env
+
+    provider.create_environment = create_and_register
     manager._providers[IsolationLevel.CONTAINER] = provider
-    # 绕过 Docker 查找：直接返回 None
-    manager._find_existing_container = AsyncMock(return_value=None)
+
+    async def find_by_name(name):
+        return _make_env(env_id=name) if name in daemon_names else None
+
+    manager._find_existing_container = AsyncMock(side_effect=find_by_name)
     manager._check_providers_availability = AsyncMock(
         return_value={IsolationLevel.CONTAINER: (True, None)}
     )
@@ -160,13 +171,18 @@ def test_get_ws_lock_returns_same_lock_for_same_key():
 
 
 # ---------------------------------------------------------------------------
-# 4. 内存缓存命中：第二个任务不再触碰 Docker（_find_existing_container 不被调用）
+# 4. 内存缓存命中：第二个任务仅做一次 daemon 验活探针（B5 收尾每轮验活契约）
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_second_concurrent_task_hits_cache_not_docker():
-    """同 workspace 第二个并发任务应命中内存缓存，不调用 _find_existing_container。"""
+async def test_second_concurrent_task_reuses_via_liveness_probe():
+    """同 workspace 第二个并发任务命中内存登记后仅做一次 daemon 验活探针。
+
+    B5 收尾后复用快路径每轮验活（存在+running+探针通过才复用）：任务 1 建
+    环境 1 次 docker 查找（未命中→创建），任务 2 复用时 1 次验活探活，共
+    2 次、create 仅 1 次——若复用快路径失效（回归），任务 2 会重走查找+创建。
+    """
     find_count = 0
 
     async def create_fn(context, container_name=None):
@@ -185,7 +201,7 @@ async def test_second_concurrent_task_hits_cache_not_docker():
     manager._find_existing_container = counting_find
 
     ws = "/proj/workspace_abc__wt_2705dda2"
-    await asyncio.gather(
+    results = await asyncio.gather(
         manager.get_or_create_environment(
             task_id="t1", task_type=TaskType.ATOMIC, workspace=ws,
             operation_type=OperationType.CODE_EXECUTION, tool_name="bash_execute",
@@ -196,5 +212,7 @@ async def test_second_concurrent_task_hits_cache_not_docker():
         ),
     )
 
-    # 串行化后：第一个任务查 Docker（1 次），第二个命中内存缓存（0 次额外查找）
-    assert find_count == 1, f"应只查 Docker 一次，实际 {find_count} 次"
+    # 串行化后：任务 1 建 env 查 1 次，任务 2 复用验活探 1 次（2 次查找、
+    # 1 次创建）；两次调用拿到同一 env_id（复用而非重建）。
+    assert find_count == 2, f"应共 2 次 daemon 查找（建 env 1 + 验活 1），实际 {find_count} 次"
+    assert results[0].env_id == results[1].env_id

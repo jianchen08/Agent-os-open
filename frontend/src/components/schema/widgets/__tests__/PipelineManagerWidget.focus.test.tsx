@@ -3,14 +3,14 @@
  * PipelineManagerWidget 任务定位测试（通知点击 → focusTaskId）
  *
  * 契约（OBS-R259-1）：focusTaskId 非空时定位该任务行——解除状态筛选收窄
- * （面板默认只看运行中，终态任务行必须可见）、展开树祖先链、行内滚动定位
+ * （无会话缺省只看运行中，终态任务行必须可见）、展开树祖先链、行内滚动定位
  * 并短暂高亮（data-located）；任务行不在列表（未含/已清理）→ 只保留开签
  * 不定位（筛选不动、无定位标记）。
  *
  * mock 约定沿用 PipelineManagerWidget.test.tsx：runs/states/全量任务三个
  * query hook 播种数据。
  */
-import { fireEvent, screen } from '@testing-library/react'
+import { screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { PipelineManagerWidget } from '@/components/schema/widgets/PipelineManagerWidget'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
@@ -23,6 +23,8 @@ const seed = vi.hoisted(() => {
       pipeline_id: 'pipe-x',
       run_id: 'run-x',
       thread_id: 'th-x',
+      // 统一管道标题（ADR 2026-10-27）：任务管道行名 = run.title（任务标题）
+      title: '被定位任务',
       status: 'completed',
       started_at: '2026-09-01T00:00:00Z',
     },
@@ -30,6 +32,7 @@ const seed = vi.hoisted(() => {
       pipeline_id: 'pipe-parent',
       run_id: 'run-parent',
       thread_id: 'th-p',
+      title: '父任务',
       status: 'completed',
       started_at: '2026-09-01T00:00:00Z',
     },
@@ -37,6 +40,7 @@ const seed = vi.hoisted(() => {
       pipeline_id: 'pipe-child',
       run_id: 'run-child',
       thread_id: 'th-p',
+      title: '嵌套子任务',
       status: 'completed',
       started_at: '2026-09-01T00:01:00Z',
     },
@@ -92,6 +96,9 @@ vi.mock('@/hooks/queries/useAllTasksQuery', () => ({
 vi.mock('@/hooks/queries/useSessionsQuery', () => ({
   useSessionsQuery: () => ({ data: [] }),
 }))
+vi.mock('@/hooks/queries/useAgentsQuery', () => ({
+  useAgentsQuery: () => ({ data: [] }),
+}))
 
 /** 行定位标记查询（属性值精确匹配，不经选择器转义） */
 function locatedRow(key: string): Element | null {
@@ -113,7 +120,7 @@ describe('PipelineManagerWidget focusTaskId 任务定位', () => {
   it('定位终态任务行：解除「运行中」筛选收窄，行可见且带定位标记', async () => {
     renderWidget('task-x')
 
-    // 默认筛选只看运行中——定位必须让终态行可见（筛选被解除）
+    // 无会话缺省只看运行中——定位必须让终态行可见（筛选被解除）
     const row = await screen.findByText('被定位任务')
     expect(row).toBeInTheDocument()
     const marked = locatedRow('pipe-x')
@@ -143,15 +150,5 @@ describe('PipelineManagerWidget focusTaskId 任务定位', () => {
     const marked = locatedRow('pipe-child')
     expect(marked).not.toBeNull()
     expect(marked!.getAttribute('data-located')).toBe('true')
-  })
-
-  it('列表视图同样支持定位（行 data-entry-key + 定位标记）', async () => {
-    const { container } = renderWidget('task-x')
-    fireEvent.click(screen.getByText('列表'))
-
-    await screen.findByText('被定位任务')
-    expect(container.querySelector('[data-entry-key="pipe-x"]')?.getAttribute('data-located')).toBe(
-      'true',
-    )
   })
 })

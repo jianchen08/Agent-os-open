@@ -385,8 +385,8 @@ describe('renderIntentToBlocks / applyRenderIntent（级联集成）', () => {
   })
 
   it('applyRenderIntent：声明 + 数据可映射 → details 被替换', () => {
-    addRenderIntent('dsh_read', { card: 'read' })
-    const activity = { type: 'tool_call', toolName: 'dsh_read', details: [{ label: 'old', content: 'x' }] } as ActivityData
+    addRenderIntent('sample_read', { card: 'read' })
+    const activity = { type: 'tool_call', toolName: 'sample_read', details: [{ label: 'old', content: 'x' }] } as ActivityData
     const toolCall = {
       tool_args: { file_path: 'a.ts' },
       resultData: { content: 'l1', offset: 1 },
@@ -400,8 +400,8 @@ describe('renderIntentToBlocks / applyRenderIntent（级联集成）', () => {
   })
 
   it('applyRenderIntent：字段对不上（映射失败）→ null 回退', () => {
-    addRenderIntent('dsh_read', { card: 'read' })
-    const activity = { type: 'tool_call', toolName: 'dsh_read' } as ActivityData
+    addRenderIntent('sample_read', { card: 'read' })
+    const activity = { type: 'tool_call', toolName: 'sample_read' } as ActivityData
     const toolCall = { tool_args: {}, resultData: { unrelated: true } } as MessageToolCall
     expect(applyRenderIntent(activity, toolCall)).toBeNull()
   })

@@ -2,8 +2,9 @@
 /**
  * 会话列表窗口化（虚拟滚动）契约测试（renderer 内存优化项 1）
  *
- * - 超过阈值（>40 条）："全部会话"组仅渲染可视窗口±缓冲，总高度以占位撑出
- *   （滚动条长度不缩水）；置顶组、阈值以下全量渲染（既有契约不回退）
+ * - 超过阈值（>40 条）："默认空间"组仅渲染可视窗口±缓冲，总高度以占位撑出
+ *   （滚动条长度不缩水）；阈值以下全量渲染（既有契约不回退）。2026-11-06 起
+ *   置顶独立全量分组浮顶，不入窗口化列表
  * - 滚动换窗：滚到底部后窗口滑向末尾（首屏外条目卸载、尾部条目挂载）
  * - fail-open：无布局尺寸（clientHeight=0）时全量渲染，不因误判而丢内容
  * - 窗口化下点击/星标交互不回退
@@ -140,9 +141,9 @@ describe('会话列表窗口化', () => {
     expect(screen.getAllByRole('button', { name: /^会话:/ })).toHaveLength(40)
   })
 
-  it('置顶会话不受窗口化影响（分组照常全量渲染）', () => {
+  it('置顶会话独立全量分组浮顶，不入窗口化列表（2026-11-06 裁定）', () => {
     const sessions = [
-      createSession(-1, { id: 'pinned-1', title: '置顶会话', pinned: true }),
+      createSession(-1, { id: 'pinned-1', title: '置顶会话', pinned: true, updatedAt: '2026-06-01T00:00:00Z' }),
       ...Array.from({ length: 100 }, (_, i) => createSession(i)),
     ]
     const { container } = render(
@@ -153,11 +154,18 @@ describe('会话列表窗口化', () => {
         {...callbacks}
       />,
     )
+    // 置顶组独立全量渲染且位于普通组之前（更旧的置顶也不被新活跃挤下去）
+    expect(screen.getByText('已置顶')).toBeInTheDocument()
     expect(screen.getByText('置顶会话')).toBeInTheDocument()
-    const pinnedGroup = screen.getByText('已置顶').closest('[data-group="pinned"]')
-    expect(within(pinnedGroup as HTMLElement).getByText('置顶会话')).toBeInTheDocument()
-    // 普通组仍窗口化
-    expect(container.querySelector('[data-testid="session-list-window"]')).not.toBeNull()
+    const pinnedGroup = document.querySelector('[data-group="pinned"]') as HTMLElement
+    const normalGroup = document.querySelector('[data-group="normal"]') as HTMLElement
+    expect(
+      pinnedGroup.compareDocumentPosition(normalGroup) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    // 普通组仍窗口化，窗口内只有普通会话（置顶不入窗口）
+    const windowEl = container.querySelector('[data-testid="session-list-window"]')
+    expect(windowEl).not.toBeNull()
+    expect(within(windowEl as HTMLElement).queryByText('置顶会话')).toBeNull()
   })
 
   it('无布局尺寸（clientHeight=0）fail-open 全量渲染', () => {

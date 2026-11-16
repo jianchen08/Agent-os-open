@@ -1,0 +1,637 @@
+{
+  "id": "agentos-builtin-tools",
+  "requires_services": [
+    "packaging",
+    "project.load_zones"
+  ],
+  "name": "Builtin Tools",
+  "description": "7 个高频内置工具（文件读写/搜索/文件管理）MCP 封装",
+  "version": "1.0.8",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "metrics_class": "tool",
+    "tools": [
+      {
+        "name": "file_read",
+        "description": "读取文件内容；路径为目录时返回该目录条目列表（名称/类型/大小）。查看工作空间或目录结构直接用本工具，读文件/列目录不要用 Shell 命令代替",
+        "render": {
+          "card": "read"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "文件或目录路径（相对路径或绝对路径）。目录=返回该目录条目列表，查看工作空间/目录结构直接用本工具"
+            },
+            "start_line": {
+              "type": "integer",
+              "description": "起始行号（从1开始），仅读取指定行范围（仅文件模式生效）",
+              "default": 1
+            },
+            "end_line": {
+              "type": "integer",
+              "description": "结束行号（从1开始，包含该行），仅读取指定行范围（仅文件模式生效）"
+            },
+            "offset": {
+              "type": "integer",
+              "description": "起始行号（1-based）。start_line 的业界别名，两者同给时 start_line 优先"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "返回行数上限（与 end_line 二选一，end_line 优先）；换算：end_line = 起始行 + limit - 1"
+            },
+            "tail": {
+              "type": "integer",
+              "description": "仅读取文件最后 N 行（仅文件模式生效）"
+            },
+            "include_hidden": {
+              "type": "boolean",
+              "description": "目录模式：是否包含隐藏项（以.开头），默认 false",
+              "default": false
+            },
+            "pattern": {
+              "type": "string",
+              "description": "目录模式：文件名匹配模式（glob 语法，如 *.py）"
+            }
+          },
+          "required": [
+            "path"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string"
+            },
+            "lines": {
+              "type": "integer"
+            },
+            "size": {
+              "type": "integer"
+            },
+            "content": {
+              "type": "string"
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "file",
+                      "directory"
+                    ]
+                  },
+                  "size": {
+                    "type": "integer"
+                  }
+                }
+              },
+              "description": "目录模式：条目列表（名称/类型/字节大小）"
+            },
+            "count": {
+              "type": "integer",
+              "description": "目录模式：条目数"
+            },
+            "converted": {
+              "type": "boolean",
+              "description": "文档回退：内容经 markdown 转换产出（docx/pdf）"
+            },
+            "source_format": {
+              "type": "string",
+              "description": "文档回退：原文档格式（docx/pdf）"
+            },
+            "path": {
+              "type": "string",
+              "description": "图片模态读取时的文件绝对路径"
+            },
+            "mime_type": {
+              "type": "string",
+              "description": "图片模态读取时的 MIME 类型"
+            },
+            "base64_data": {
+              "type": "string",
+              "description": "图片模态读取时的 base64 内容"
+            }
+          }
+        }
+      },
+      {
+        "name": "file_write",
+        "description": "写入/编辑文件",
+        "ui": {
+          "chat_card": {
+            "icon": "edit",
+            "title": "写入 {{args.path | basename | default:file_write}}",
+            "filePathSource": "output.file || result.file",
+            "diffStat": {
+              "addedSource": "output.added || result.added",
+              "removedSource": "output.removed || result.removed"
+            },
+            "blocks": [
+              {
+                "type": "code",
+                "label": "文件路径",
+                "source": "args.path",
+                "collapsible": false
+              },
+              {
+                "type": "diff",
+                "label": "差异对比",
+                "diffOldSource": "output.old_content || result.old_content",
+                "diffNewSource": "output.new_content || result.new_content",
+                "collapsible": true,
+                "defaultExpanded": true
+              },
+              {
+                "type": "code",
+                "id": "content",
+                "label": "写入内容",
+                "source": "args.content",
+                "unless": "output.old_content || result.old_content",
+                "collapsible": true,
+                "defaultExpanded": false
+              }
+            ],
+            "actions": [
+              {
+                "id": "open_file",
+                "label": "打开文件",
+                "on_click": {
+                  "action": "open_file",
+                  "value": "{{result.file}}"
+                }
+              },
+              {
+                "id": "copy_content",
+                "label": "复制内容",
+                "on_click": {
+                  "action": "copy",
+                  "value": "{{args.content}}"
+                }
+              }
+            ]
+          }
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "文件路径"
+            },
+            "content": {
+              "type": "string",
+              "description": "文件内容"
+            },
+            "action": {
+              "type": "string",
+              "enum": [
+                "write",
+                "search_replace",
+                "insert",
+                "delete_lines",
+                "append"
+              ],
+              "description": "编辑操作类型",
+              "default": "write"
+            },
+            "start_line": {
+              "type": "integer",
+              "description": "起始行号（write/insert/delete_lines 使用）"
+            },
+            "end_line": {
+              "type": "integer",
+              "description": "结束行号（write/delete_lines 使用）"
+            },
+            "line": {
+              "type": "integer",
+              "description": "插入位置行号（insert 使用）"
+            },
+            "old_str": {
+              "type": "string",
+              "description": "要搜索的原始文本（search_replace 使用）"
+            },
+            "new_str": {
+              "type": "string",
+              "description": "替换后的新文本（search_replace 使用）"
+            },
+            "create_backup": {
+              "type": "boolean",
+              "description": "是否创建 .bak 备份",
+              "default": true
+            }
+          },
+          "required": [
+            "path",
+            "action"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "写盘后的宿主绝对路径（前端卡片「打开文件」用；args.path 是写入前的原始参数，可能为相对路径打不开）"
+            },
+            "added": {
+              "type": "integer"
+            },
+            "removed": {
+              "type": "integer"
+            },
+            "size": {
+              "type": "integer",
+              "description": "写后磁盘字节数（前端 file_card 大小徽标数据源）"
+            },
+            "backup": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "old_content": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "写前全文（diff 卡数据源；文件新建时为空串）"
+            },
+            "new_content": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "写后全文（diff 卡数据源 + 完整文件视图）"
+            }
+          }
+        },
+        "render": {
+          "card": "file_card"
+        }
+      },
+      {
+        "name": "enhanced_search",
+        "description": "代码/文件搜索（search_type=filename 按文件名搜、text 按内容搜）。遍历为深度优先，自动跳过 node_modules/.git/target 等依赖与构建产物目录（.gitignore 同款口径，这些目录内文件不可搜；直接以该类目录为 path 起搜可进入）；其余目录受 timeout_seconds 墙钟预算约束（默认 60s），超时只返回已遍历到的部分——空结果≠文件不存在，可能只是尚未遍历到。未命中时优先把 path 缩小到更具体的目录重搜，或调大 timeout_seconds，勿仅凭一次空结果断定文件不存在。",
+        "render": {
+          "card": "search"
+        },
+        "input_schema": {
+          "properties": {
+            "case_sensitive": {
+              "default": false,
+              "description": "是否区分大小写",
+              "type": "boolean"
+            },
+            "context_lines": {
+              "default": 2,
+              "description": "上下文行数",
+              "type": "integer"
+            },
+            "file_pattern": {
+              "description": "文件过滤模式（如 *.py）",
+              "type": "string"
+            },
+            "max_depth": {
+              "default": 20,
+              "description": "最大递归深度",
+              "type": "integer"
+            },
+            "max_results": {
+              "default": 100,
+              "description": "最大结果数",
+              "type": "integer"
+            },
+            "path": {
+              "default": ".",
+              "description": "搜索起始路径",
+              "type": "string"
+            },
+            "query": {
+              "type": "string",
+              "description": "搜索关键词或正则表达式（字面子串匹配，use_regex=true 才是正则；不支持 * 通配符，filename 搜索直接用文件名子串，勿带 * 或 ?）"
+            },
+            "search_type": {
+              "default": "text",
+              "description": "搜索类型：text=内容搜索，filename=文件名搜索",
+              "enum": [
+                "text",
+                "filename"
+              ],
+              "type": "string"
+            },
+            "timeout_seconds": {
+              "default": 60.0,
+              "description": "遍历墙钟预算（秒），超时返回部分结果",
+              "type": "number"
+            },
+            "use_regex": {
+              "default": false,
+              "description": "是否使用正则表达式",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "results": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "file_path": {
+                    "type": "string"
+                  },
+                  "line_number": {
+                    "type": "integer"
+                  },
+                  "content": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "count": {
+              "type": "integer"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "results"
+          ]
+        }
+      },
+      {
+        "name": "create_directory",
+        "description": "创建目录",
+        "render": {
+          "card": "file"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "目录路径"
+            },
+            "parents": {
+              "type": "boolean",
+              "description": "是否创建父目录（默认 true）",
+              "default": true
+            }
+          },
+          "required": [
+            "path"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "path"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "创建后的目录绝对路径"
+            }
+          }
+        }
+      },
+      {
+        "name": "copy_file",
+        "description": "复制文件",
+        "render": {
+          "card": "form"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "type": "string",
+              "description": "源文件或目录路径（与 copies 二选一）"
+            },
+            "destination": {
+              "type": "string",
+              "description": "目标路径（与 copies 二选一）"
+            },
+            "copies": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "type": "string"
+                  },
+                  "destination": {
+                    "type": "string"
+                  }
+                }
+              },
+              "description": "批量复制列表（与 source/destination 二选一）"
+            },
+            "overwrite": {
+              "type": "boolean",
+              "description": "是否覆盖已存在的目标（默认 false）",
+              "default": false
+            }
+          },
+          "required": []
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "type": "string",
+              "description": "单条复制：源路径"
+            },
+            "destination": {
+              "type": "string",
+              "description": "单条复制：目标路径"
+            },
+            "results": {
+              "type": "array",
+              "description": "批量复制：逐条结果",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "type": "string"
+                  },
+                  "destination": {
+                    "type": "string"
+                  },
+                  "success": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "move_file",
+        "description": "移动文件",
+        "render": {
+          "card": "form"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "type": "string",
+              "description": "源路径"
+            },
+            "destination": {
+              "type": "string",
+              "description": "目标路径"
+            },
+            "moves": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "type": "string"
+                  },
+                  "destination": {
+                    "type": "string"
+                  }
+                }
+              },
+              "description": "批量移动列表"
+            },
+            "overwrite": {
+              "type": "boolean",
+              "description": "是否覆盖已存在的目标（默认 false）",
+              "default": false
+            }
+          },
+          "required": []
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "type": "string",
+              "description": "单条移动：源路径"
+            },
+            "destination": {
+              "type": "string",
+              "description": "单条移动：目标路径"
+            },
+            "results": {
+              "type": "array",
+              "description": "批量移动：逐条结果",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "type": "string"
+                  },
+                  "destination": {
+                    "type": "string"
+                  },
+                  "success": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "delete_file",
+        "description": "删除文件",
+        "render": {
+          "card": "form"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "要删除的文件或目录路径（与 paths 二选一）"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "批量删除路径列表"
+            },
+            "recursive": {
+              "type": "boolean",
+              "description": "是否递归删除目录（默认 false）",
+              "default": false
+            },
+            "force": {
+              "type": "boolean",
+              "description": "是否强制删除（包括只读文件，默认 false）",
+              "default": false
+            }
+          },
+          "required": []
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "results"
+          ],
+          "properties": {
+            "results": {
+              "type": "array",
+              "description": "逐条删除结果（全部成功才走成功通道）",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "deleted": {
+                    "type": "boolean"
+                  },
+                  "error": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "steps": [
+      {
+        "name": "agentos-builtin-tools",
+        "description": "管道步骤默认入口（自名声明；步骤服务索引兼容映射 method=None，与直引等价）"
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 40,
+  "host_group": "light"
+}

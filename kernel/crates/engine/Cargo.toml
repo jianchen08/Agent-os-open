@@ -29,3 +29,16 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"
+criterion.workspace = true
+# test-util：tokio paused time（fake clock）供 run 超时看门狗时序测试注入可调延迟
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+# 性能基准（整改方案 §6 拍板⑨）：热点一（管道事件分发）+ 热点二（SQLite 写）。
+# harness = false：criterion 自带统计（采样/置信区间/对比），不用 libtest 计时。
+[[bench]]
+name = "pipeline_dispatch"
+harness = false
+
+[[bench]]
+name = "sqlite_write"
+harness = false

@@ -20,16 +20,19 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _SHARED_DIR = Path(__file__).resolve().parents[3] / "plugins" / "shared"
-_TASKS_PLUGIN_DIR = _SHARED_DIR / "system" / "tasks"
+_TASKS_PLUGIN_DIR = _SHARED_DIR / "tasks"
+_PROJECT_MANAGER_DIR = _SHARED_DIR / "project_manager"
 
 
 @pytest.fixture(autouse=True)
 def _isolate_registry_module():
-    """共享层 + tasks 插件裸名逐出 + 代际还原（串扰防线，与 tasks 测试同款）。
+    """共享层 + tasks/project_manager 插件裸名逐出 + 代际还原（串扰防线）。
 
-    tasks/shared 目录强制置顶（先移除再插入）：其他测试文件收集期/运行期
-    会把同名裸名插件的目录残留在 sys.path 前部（如 multimodal 的 storage.py），
-    仅判断"已在"不纠位会让 from storage import 命中敌意同名模块。
+    tasks/project_manager 目录强制置顶（先移除再插入）：其他测试文件收集期/
+    运行期会把同名裸名插件的目录残留在 sys.path 前部（如 multimodal 的
+    storage.py），仅判断"已在"不纠位会让 from storage import 命中敌意同名
+    模块。平铺迁移（ADR 2026-10-13-plugin-flat-layout）后 project_registry
+    属主目录 = plugins/shared/project_manager。
     """
     evict = ("project_registry", "task_types", "storage", "service", "service_access")
     was: dict[str, Any] = {}
@@ -45,7 +48,14 @@ def _isolate_registry_module():
     if t in sys.path:
         sys.path.remove(t)
     sys.path.insert(0, t)
+    pm = str(_PROJECT_MANAGER_DIR)
+    pm_dir_was_present = pm in sys.path
+    if pm in sys.path:
+        sys.path.remove(pm)
+    sys.path.insert(0, pm)
     yield
+    if not pm_dir_was_present and pm in sys.path:
+        sys.path.remove(pm)
     if not task_dir_was_present and t in sys.path:
         sys.path.remove(t)
     for m in evict:
@@ -194,66 +204,45 @@ class TestRemoveProjectFolder:
 
 
 class TestPurgeLegacyContainerData:
-    def _storage(self, tmp_path: Path) -> Any:
-        from storage import TaskStorage
+    """容器任务遗留数据清除·目录半（purge_legacy_workspace_dirs，幂等）。
 
-        return TaskStorage(data_dir=tmp_path / "tasks")
+    T6a 拆分：任务行半（container 行删除+子任务挂靠脱钩）为纯 TaskStorage
+    操作已内联 tasks/server.py 启动序列（隔离测试面待 tasks 域补，治理候选）；
+    本类钉目录半——工作空间基目录下 container_* 副本目录清除。"""
 
-    def _mk_task(self, storage: Any, tid: str, **meta: Any) -> None:
-        from task_types import TaskModel
+    def test_removes_container_dirs_keeps_others(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import project_registry as pr
 
-        storage.save(TaskModel(id=tid, title=tid, metadata=dict(meta)))
+        monkeypatch.setattr(pr, "workspace_base_dir", lambda: tmp_path)
+        container_dir = tmp_path / "container_c-1"
+        keep_dir = tmp_path / "normal_ws"
+        container_dir.mkdir()
+        keep_dir.mkdir()
 
-    def test_purges_containers_detaches_children_and_dirs(
-            self, tmp_path: Path, ws_base: Path) -> None:
-        from project_registry import purge_legacy_container_data
+        removed = pr.purge_legacy_workspace_dirs()
 
-        storage = self._storage(tmp_path)
-        self._mk_task(storage, "c-1", task_scope="container")
-        self._mk_task(storage, "c-2", task_scope="container")
-        self._mk_task(storage, "t-1")  # 普通任务保留
-        self._mk_task(storage, "t-2")  # 容器子任务 → 退化
-        storage.update("t-2", parent_task_id="c-1")
-
-        container_dir = ws_base / "container_c-1"
-        container_dir.mkdir(parents=True)
-        (container_dir / "artifacts.txt").write_text("x", encoding="utf-8")
-        keep_dir = ws_base / "task_t-1"
-        keep_dir.mkdir(parents=True)
-
-        stats = purge_legacy_container_data(storage)
-
-        assert stats == {"removed_containers": 2, "detached_children": 1, "removed_dirs": 1}
-        assert storage.get("c-1") is None and storage.get("c-2") is None
-        assert storage.get("t-1") is not None
-        assert storage.get("t-2").parent_task_id is None
+        assert removed == 1
         assert not container_dir.exists()
         assert keep_dir.exists()  # container_ 前缀外目录不动
 
-    def test_idempotent_and_noop_on_clean_state(
-            self, tmp_path: Path, ws_base: Path) -> None:
-        from project_registry import purge_legacy_container_data
+    def test_idempotent_and_noop_on_clean_state(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import project_registry as pr
 
-        storage = self._storage(tmp_path)
-        self._mk_task(storage, "t-1")
+        monkeypatch.setattr(pr, "workspace_base_dir", lambda: tmp_path)
 
-        first = purge_legacy_container_data(storage)
-        second = purge_legacy_container_data(storage)
+        first = pr.purge_legacy_workspace_dirs()
+        second = pr.purge_legacy_workspace_dirs()
 
-        assert first == {"removed_containers": 0, "detached_children": 0, "removed_dirs": 0}
+        assert first == 0
         assert second == first
-        assert storage.get("t-1") is not None
 
-    def test_soft_deleted_scope_key_ignored(self, tmp_path: Path, ws_base: Path) -> None:
-        """scope 键只认 task_scope=container；其他 metadata 不误删。"""
-        from project_registry import purge_legacy_container_data
+    def test_missing_base_dir_is_noop(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """工作空间基目录不存在 = 空转（首启/全新安装形态）。"""
+        import project_registry as pr
 
-        storage = self._storage(tmp_path)
-        self._mk_task(storage, "t-9", source="project", task_scope="non_container")
-        stats = purge_legacy_container_data(storage)
-        assert stats["removed_containers"] == 0
-        assert storage.get("t-9") is not None
+        monkeypatch.setattr(pr, "workspace_base_dir", lambda: tmp_path / "nope")
 
+        assert pr.purge_legacy_workspace_dirs() == 0
 
 class TestWorkflowState:
     """workflow_state 方案工作流状态（ADR 2026-09-17-plan-mode-project-state-gate）。
@@ -310,10 +299,10 @@ class TestRegistrationWhitelist:
     """登记白名单（locked 用户配置）+ 前缀授权 + 重叠检测。"""
 
     def test_load_whitelist_missing_entries_and_corrupt(self, tmp_path: Path) -> None:
-        from project_registry import load_registration_whitelist
+        from project_registry import load_zone_sections
 
         base = tmp_path / "cfgusers"
-        assert load_registration_whitelist(base=base) == []
+        assert load_zone_sections(base=base)["entries"] == []
 
         d = base / "default"
         d.mkdir(parents=True)
@@ -323,17 +312,17 @@ class TestRegistrationWhitelist:
             f"  - {tmp_path / 'space two'}\n",
             encoding="utf-8",
         )
-        assert load_registration_whitelist(base=base) == [
+        assert load_zone_sections(base=base)["entries"] == [
             str(tmp_path / "work"),
             str(tmp_path / "space two"),
         ]
 
         (d / "project_whitelist.yaml").write_text("entries: [unclosed", encoding="utf-8")
-        assert load_registration_whitelist(base=base) == []
+        assert load_zone_sections(base=base)["entries"] == []
 
     def test_load_read_deny_and_zone_policy_sections(self, tmp_path: Path) -> None:
         """read_deny 节与 entries 同文件解析（ADR 2026-09-24 决策1/4）；缺节 = 无排除。"""
-        from project_registry import load_read_deny, load_registration_whitelist
+        from project_registry import load_zone_sections
 
         base = tmp_path / "cfgusers"
         d = base / "default"
@@ -346,8 +335,8 @@ class TestRegistrationWhitelist:
             f"  - {tmp_path / 'space two'}\n",
             encoding="utf-8",
         )
-        assert load_registration_whitelist(base=base) == [str(tmp_path / "work")]
-        assert load_read_deny(base=base) == [
+        assert load_zone_sections(base=base)["entries"] == [str(tmp_path / "work")]
+        assert load_zone_sections(base=base)["read_deny"] == [
             str(tmp_path / "private"),
             str(tmp_path / "space two"),
         ]
@@ -355,12 +344,12 @@ class TestRegistrationWhitelist:
         (d / "project_whitelist.yaml").write_text(
             f"entries:\n  - {tmp_path / 'work'}\n", encoding="utf-8"
         )
-        assert load_read_deny(base=base) == []
+        assert load_zone_sections(base=base)["read_deny"] == []
 
         # 非字典 YAML（标量/列表形态）= 空名单，不炸
         (d / "project_whitelist.yaml").write_text("- scalar\n", encoding="utf-8")
-        assert load_registration_whitelist(base=base) == []
-        assert load_read_deny(base=base) == []
+        assert load_zone_sections(base=base)["entries"] == []
+        assert load_zone_sections(base=base)["read_deny"] == []
 
     def test_missing_user_space_file_falls_back_to_legacy_base(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -383,11 +372,11 @@ class TestRegistrationWhitelist:
         # 默认解析（用户空间 base）钉到 tmp：不读宿主真实用户空间（机器状态敏感）。
         monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path / "usroot"))
 
-        assert pr.load_registration_whitelist() == [str(tmp_path / "legacy_zone")]
-        assert pr.load_read_deny() == [str(tmp_path / "legacy_deny")]
+        assert pr.load_zone_sections()["entries"] == [str(tmp_path / "legacy_zone")]
+        assert pr.load_zone_sections()["read_deny"] == [str(tmp_path / "legacy_deny")]
 
         empty = tmp_path / "explicit_base"
-        assert pr.load_registration_whitelist(base=empty) == []
+        assert pr.load_zone_sections(base=empty)["entries"] == []
 
         user_space_dir = tmp_path / "user_space_users"
         (user_space_dir / "default").mkdir(parents=True)
@@ -399,8 +388,8 @@ class TestRegistrationWhitelist:
             "tenant_config_dir",
             lambda tenant_id, base=None: user_space_dir / tenant_id,
         )
-        assert pr.load_registration_whitelist() == [str(tmp_path / "us_zone")]
-        assert pr.load_read_deny() == []
+        assert pr.load_zone_sections()["entries"] == [str(tmp_path / "us_zone")]
+        assert pr.load_zone_sections()["read_deny"] == []
 
     def test_match_registration_scope_prefix_any_depth(self, tmp_path: Path) -> None:
         import project_registry as pr
@@ -428,7 +417,10 @@ class TestRegistrationWhitelist:
         import project_registry as pr
 
         reg = pr.ProjectRegistry(data_dir=tmp_path / "tasks")
-        monkeypatch.setattr(pr, "load_registration_whitelist", lambda **k: [str(tmp_path / "work")])
+        monkeypatch.setattr(
+            pr, "load_zone_sections",
+            lambda *a, **k: {"entries": [str(tmp_path / "work")], "read_deny": [], "read_allow": []},
+        )
         outside = tmp_path / "elsewhere" / "proj"
         with pytest.raises(ValueError, match="白名单"):
             pr.ensure_project_registered(
@@ -441,7 +433,10 @@ class TestRegistrationWhitelist:
         import project_registry as pr
 
         reg = pr.ProjectRegistry(data_dir=tmp_path / "tasks")
-        monkeypatch.setattr(pr, "load_registration_whitelist", lambda **k: [str(tmp_path / "work")])
+        monkeypatch.setattr(
+            pr, "load_zone_sections",
+            lambda *a, **k: {"entries": [str(tmp_path / "work")], "read_deny": [], "read_allow": []},
+        )
         deep = tmp_path / "work" / "a" / "b" / "尚未存在"
         project, created = pr.ensure_project_registered(
             title="深层", explicit_path=str(deep), registry=reg
@@ -456,7 +451,9 @@ class TestRegistrationWhitelist:
         reg = pr.ProjectRegistry(data_dir=tmp_path / "tasks")
         legacy = pr.ProjectModel(title="存量", path=str(tmp_path / "legacy"))
         reg.save(legacy)
-        monkeypatch.setattr(pr, "load_registration_whitelist", lambda **k: [])
+        monkeypatch.setattr(
+            pr, "load_zone_sections", lambda *a, **k: {"entries": [], "read_deny": [], "read_allow": []},
+        )
         project, created = pr.ensure_project_registered(
             title="存量", explicit_path=str(tmp_path / "legacy"), registry=reg
         )
@@ -466,7 +463,11 @@ class TestRegistrationWhitelist:
         import project_registry as pr
 
         reg = pr.ProjectRegistry(data_dir=tmp_path / "tasks")
-        monkeypatch.setattr(pr, "load_registration_whitelist", lambda **k: [str(tmp_path)])
+        monkeypatch.setattr(
+            pr,
+            "load_zone_sections",
+            lambda *a, **k: {"entries": [str(tmp_path)], "read_deny": [], "read_allow": []},
+        )
         outer = tmp_path / "scope" / "outer"
         pr.ensure_project_registered(title="外层", explicit_path=str(outer), registry=reg)
 
@@ -507,3 +508,253 @@ class TestProjectRootOfTree:
         monkeypatch.setattr(pr, "__file__", str(fake_tree / "project_registry.py"))
         with pytest.raises(RuntimeError, match="AGENTOS_CONFIG_ROOT"):
             pr.project_root_of_tree()
+
+
+class TestModeRegistration:
+    """mode_tags/default_mode 项目登记（ADR 2026-10-09 批 B8）。
+
+    校验三条（登记/修改写入面 fail-closed）：形态 MODE_ID_RE / 注册表可解析
+    （出厂+用户双根）/ default_mode ∈ mode_tags；save 写面变更检测执法。
+    """
+
+    def test_default_empty_tags(self, tmp_path: Path) -> None:
+        from project_registry import ProjectModel
+
+        p = ProjectModel(title="P", path="D:/x/p")
+        assert p.mode_tags == []
+        assert p.default_mode == ""
+
+    def test_valid_tags_persisted_roundtrip(self, tmp_path: Path) -> None:
+        from project_registry import ProjectModel, ProjectRegistry
+
+        reg = ProjectRegistry(data_dir=tmp_path / "tasks")
+        p = reg.save(
+            ProjectModel(title="P", path="D:/x/p", mode_tags=["coding", "research"], default_mode="coding")
+        )
+        loaded = ProjectRegistry(data_dir=tmp_path / "tasks").get(p.id)
+        assert loaded is not None
+        assert loaded.mode_tags == ["coding", "research"]
+        assert loaded.default_mode == "coding"
+
+    @pytest.mark.parametrize(
+        "bad_tag",
+        ["Bad-Tag", "../evil", "1x", "with space", "x" * 65, "大写"],
+    )
+    def test_invalid_shape_rejected_names_tag(self, tmp_path: Path, bad_tag: str) -> None:
+        from project_registry import ProjectModel, ProjectRegistry
+
+        reg = ProjectRegistry(data_dir=tmp_path / "tasks")
+        with pytest.raises(ValueError, match="非法模式标签"):
+            reg.save(ProjectModel(title="P", path="D:/x/p", mode_tags=["coding", bad_tag]))
+
+    def test_unresolvable_tag_rejected(self, tmp_path: Path) -> None:
+        """出厂+用户双根均无该包 → 拒，错误信息含标签名。"""
+        from project_registry import ProjectModel, ProjectRegistry
+
+        reg = ProjectRegistry(data_dir=tmp_path / "tasks")
+        with pytest.raises(ValueError, match="不可解析.*no_such_pack"):
+            reg.save(ProjectModel(title="P", path="D:/x/p", mode_tags=["no_such_pack"]))
+
+    def test_default_mode_not_in_tags_rejected(self, tmp_path: Path) -> None:
+        from project_registry import ProjectModel, ProjectRegistry
+
+        reg = ProjectRegistry(data_dir=tmp_path / "tasks")
+        with pytest.raises(ValueError, match="default_mode 'game' 不在 mode_tags"):
+            reg.save(
+                ProjectModel(title="P", path="D:/x/p", mode_tags=["coding"], default_mode="game")
+            )
+        # 空集合 + 非空 default 同拒（主域必须是已登记标签之一）
+        with pytest.raises(ValueError, match="不在 mode_tags"):
+            reg.save(ProjectModel(title="P2", path="D:/x/p2", default_mode="coding"))
+
+    def test_default_mode_empty_allowed_with_tags(self, tmp_path: Path) -> None:
+        """default_mode 缺省（空串）= 未标注，合法（主域标注是可选项）。"""
+        from project_registry import ProjectModel, ProjectRegistry
+
+        reg = ProjectRegistry(data_dir=tmp_path / "tasks")
+        p = reg.save(ProjectModel(title="P", path="D:/x/p", mode_tags=["coding"]))
+        assert p.default_mode == ""
+
+    def test_save_change_detection_unchanged_tags_skip_disk(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """写面变更检测：mode 字段未变的保存（动作端点翻转 auto_execute 等）
+        不重复对盘校验——模式包卸载后陈旧标签不卡死无关写面；改写标签本身
+        照常被校验拦截（fail-closed）。"""
+        import project_registry as pr
+
+        reg = pr.ProjectRegistry(data_dir=tmp_path / "tasks")
+        p = reg.save(pr.ProjectModel(title="P", path="D:/x/p", mode_tags=["coding"]))
+
+        # validate_mode_registration 经模块级导入名消费 find_mode_package_dir
+        # （from mode_keys import 绑定），钉桩须落 project_registry 命名空间。
+        monkeypatch.setattr(pr, "find_mode_package_dir", lambda mode: None)
+        p.auto_execute = True
+        saved = reg.save(p)  # mode 字段未变 → 不触盘校验，翻转放行
+        assert saved.auto_execute is True
+        p.mode_tags = ["coding", "writing"]
+        with pytest.raises(ValueError, match="不可解析"):
+            reg.save(p)  # mode 字段变了 → 按当前盘面校验，拒
+
+    def test_ensure_reuse_applies_tags_to_existing_project(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """存量项目补挂：同路径复用通道显式携带 tags → 更新既有登记行
+        （created=False）；不带 tags 的复用不动既有登记。"""
+        import project_registry as pr
+
+        # 白名单自足：登记闸读用户空间真值（开发机装机副本恰含 Temp 目录时
+        # 会偶然放行），显式钉本测 tmp 根为授权条目，不依赖宿主名单状态
+        monkeypatch.setattr(
+            pr, "load_zone_sections",
+            lambda: {"entries": [str(tmp_path)], "read_deny": []},
+        )
+
+        folder = tmp_path / "proj"
+        folder.mkdir()
+        reg = pr.ProjectRegistry(data_dir=tmp_path / "tasks")
+        p1, created1 = pr.ensure_project_registered(
+            "P", explicit_path=str(folder), registry=reg
+        )
+        assert created1 is True and p1.mode_tags == []
+        p2, created2 = pr.ensure_project_registered(
+            "P", explicit_path=str(folder), registry=reg,
+            mode_tags=["coding", "research"], default_mode="coding",
+        )
+        assert created2 is False
+        assert p2.id == p1.id
+        assert p2.mode_tags == ["coding", "research"]
+        assert p2.default_mode == "coding"
+        p3, _created3 = pr.ensure_project_registered("P", explicit_path=str(folder), registry=reg)
+        assert p3.mode_tags == ["coding", "research"]  # 未传 = 不动
+
+    def test_ensure_rejects_invalid_tag_before_folder_creation(self, tmp_path: Path) -> None:
+        """声明非法 tags → 建文件夹之前即拒（失败原子，不留孤儿目录）。"""
+        import project_registry as pr
+
+        reg = pr.ProjectRegistry(data_dir=tmp_path / "tasks")
+        folder = tmp_path / "never_created"
+        with pytest.raises(ValueError, match="非法模式标签"):
+            pr.ensure_project_registered(
+                "P", explicit_path=str(folder), registry=reg, mode_tags=["Nope"]
+            )
+        assert not folder.exists()
+
+
+class TestSeedModeSkills:
+    """技能播种到项目根 skills/（批 B8，用户裁定）：增量补缺不覆盖。
+
+    四态（用户裁定验收车道）：复制 / 增量补缺 / 用户改动不覆盖 / tag 变更后
+    新包补播；外加失败可见（陈旧标签/复制失败 warning，不阻断登记）。
+    模式包经 AGENTOS_USER_ROOT 用户根播种（真实磁盘，find_mode_package_dir
+    双根优先序消费），不 mock mode_keys。
+    """
+
+    @pytest.fixture
+    def seeded(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
+        """用户根 mode_demo 包（plugin.json 包标记 + skills/foo）+ 项目文件夹。"""
+        user_root = tmp_path / "user_root"
+        pkg = user_root / "plugins" / "modes" / "mode_demo"
+        pkg.mkdir(parents=True)
+        (pkg / "plugin.json").write_text("{}", encoding="utf-8")
+        (pkg / "skills" / "foo").mkdir(parents=True)
+        (pkg / "skills" / "foo" / "SKILL.md").write_text("foo v1", encoding="utf-8")
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(user_root))
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        return {"user_root": user_root, "pkg": pkg, "proj": project_dir}
+
+    def _project(self, tmp_path: Path, proj: Path, tags: list[str]) -> Any:
+        from project_registry import ProjectModel
+
+        return ProjectModel(title="P", path=str(proj), mode_tags=tags)
+
+    def test_copies_tag_pack_skills(self, tmp_path: Path, seeded: dict[str, Path]) -> None:
+        from project_registry import seed_mode_skills
+
+        p = self._project(tmp_path, seeded["proj"], ["demo"])
+        assert seed_mode_skills(p) == []
+        skill = seeded["proj"] / "skills" / "foo" / "SKILL.md"
+        assert skill.is_file()
+        assert skill.read_text(encoding="utf-8") == "foo v1"
+
+    def test_no_tags_or_no_path_is_noop(self, tmp_path: Path, seeded: dict[str, Path]) -> None:
+        from types import SimpleNamespace
+
+        from project_registry import seed_mode_skills
+
+        assert seed_mode_skills(self._project(tmp_path, seeded["proj"], [])) == []
+        empty = seed_mode_skills(SimpleNamespace(mode_tags=["demo"], path=""))
+        assert empty == []
+        assert not (seeded["proj"] / "skills").exists()
+
+    def test_incremental_backfill_keeps_existing(
+        self, tmp_path: Path, seeded: dict[str, Path]
+    ) -> None:
+        """包侧新增技能 + 幂等重跑：缺的补齐，已有保持原样（对账补缺）。"""
+        from project_registry import seed_mode_skills
+
+        p = self._project(tmp_path, seeded["proj"], ["demo"])
+        seed_mode_skills(p)
+        # 包侧升级：新增 bar + 修改 foo
+        (seeded["pkg"] / "skills" / "bar").mkdir()
+        (seeded["pkg"] / "skills" / "bar" / "SKILL.md").write_text("bar v1", encoding="utf-8")
+        (seeded["pkg"] / "skills" / "foo" / "SKILL.md").write_text("foo v2", encoding="utf-8")
+        assert seed_mode_skills(p) == []  # 幂等重跑 = 对账补缺
+        assert (seeded["proj"] / "skills" / "bar" / "SKILL.md").read_text(encoding="utf-8") == "bar v1"
+        # 用户侧 foo 不被新版本覆盖
+        assert (seeded["proj"] / "skills" / "foo" / "SKILL.md").read_text(encoding="utf-8") == "foo v1"
+
+    def test_user_edit_not_overwritten(self, tmp_path: Path, seeded: dict[str, Path]) -> None:
+        from project_registry import seed_mode_skills
+
+        p = self._project(tmp_path, seeded["proj"], ["demo"])
+        seed_mode_skills(p)
+        user_file = seeded["proj"] / "skills" / "foo" / "SKILL.md"
+        user_file.write_text("用户定制", encoding="utf-8")
+        seed_mode_skills(p)
+        assert user_file.read_text(encoding="utf-8") == "用户定制"
+
+    def test_tag_change_seeds_new_pack(self, tmp_path: Path, seeded: dict[str, Path]) -> None:
+        """tag 集合变更（加第二个包）：新包技能补播，旧包技能原样保留。"""
+        pkg2 = seeded["user_root"] / "plugins" / "modes" / "mode_extra"
+        pkg2.mkdir(parents=True)
+        (pkg2 / "plugin.json").write_text("{}", encoding="utf-8")
+        (pkg2 / "skills" / "extra-skill").mkdir(parents=True)
+        (pkg2 / "skills" / "extra-skill" / "SKILL.md").write_text("extra", encoding="utf-8")
+        from project_registry import seed_mode_skills
+
+        p = self._project(tmp_path, seeded["proj"], ["demo"])
+        seed_mode_skills(p)
+        p2 = self._project(tmp_path, seeded["proj"], ["demo", "extra"])
+        assert seed_mode_skills(p2) == []
+        assert (seeded["proj"] / "skills" / "extra-skill" / "SKILL.md").is_file()
+        assert (seeded["proj"] / "skills" / "foo" / "SKILL.md").is_file()
+
+    def test_stale_tag_yields_warning_not_raise(
+        self, tmp_path: Path, seeded: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """登记后包被卸载（陈旧标签）→ warning 返回不抛（播种不阻断登记）。"""
+        import mode_keys
+
+        monkeypatch.setattr(mode_keys, "find_mode_package_dir", lambda mode: None)
+        from project_registry import seed_mode_skills
+
+        warnings = seed_mode_skills(self._project(tmp_path, seeded["proj"], ["demo"]))
+        assert len(warnings) == 1
+        assert "demo" in warnings[0]
+        assert not (seeded["proj"] / "skills").exists()
+
+    def test_copy_failure_yields_warning(
+        self, tmp_path: Path, seeded: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """单技能复制失败 → warning 返回（错误可见不静默），登记照常。"""
+        import project_registry as pr
+
+        def _boom(src: Any, dst: Any, **kw: Any) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(pr.shutil, "copytree", _boom)
+        warnings = pr.seed_mode_skills(self._project(tmp_path, seeded["proj"], ["demo"]))
+        assert len(warnings) == 1
+        assert "disk full" in warnings[0]

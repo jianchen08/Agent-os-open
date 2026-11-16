@@ -335,9 +335,10 @@ describe('DecisionFormAdapter', () => {
     expect(arg).toContain('b')
   })
 
-  it('无选项 → 渲染空表单占位（不崩）', () => {
+  it('无选项 → 选项框空态（禁用 + 无选项，不崩）', () => {
     const { container } = render(<DecisionFormAdapter options={[]} />)
-    expect(container.querySelector('form') ?? container.firstChild).toBeTruthy()
+    expect(container.querySelector('.ant-select')).not.toBeNull()
+    expect(screen.getByText('无选项')).toBeInTheDocument()
   })
 
   it('非法 options（非数组/缺 id）→ 视为无选项', () => {
@@ -404,6 +405,32 @@ describe('CompactSelectToggle 受控模式', () => {
       />,
     )
     expect(screen.getByTestId('compact-select-trigger')).toHaveTextContent('乙')
+  })
+
+  it('下拉面板限高可滚动（选项带长描述不把面板顶穿视口）', async () => {
+    render(
+      <FormWidget
+        value={{ mode: 'a' }}
+        onChange={vi.fn()}
+        fields={[
+          {
+            name: 'mode',
+            type: 'select' as const,
+            label: '模式',
+            options: [
+              { label: '甲', value: 'a', description: '很长很长的选项说明'.repeat(10) },
+            ],
+          },
+        ]}
+      />,
+    )
+    const trigger = screen.getByTestId('compact-select-trigger')
+    fireEvent.pointerDown(trigger)
+    fireEvent.pointerUp(trigger)
+    fireEvent.click(trigger)
+    const menu = await screen.findByRole('menu')
+    expect(menu.className).toContain('max-h-')
+    expect(menu.className).toContain('overflow-y-auto')
   })
 
   it('disabled 声明 → 触发器禁用不可点', () => {

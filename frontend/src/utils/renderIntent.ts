@@ -3,8 +3,9 @@
  *
  * 工具卡片渲染采用「双路由」：
  * 1. **声明路由**：插件在 plugin.json 的 capabilities.tools[].render 直接声明渲染形式
- *    （card = terminal|diff|read|web|search|generic|image|file|file_card|table|form +
- *    bindings + title），工具结果按声明路由到对应渲染形式。
+ *    （card 取值 = 插件侧声明面生成物 RENDER_CARD_VOCABULARY，卡型词汇表单源见
+ *    renderCardVocabulary.generated.ts + bindings + title），工具结果按声明路由到
+ *    对应渲染形式。
  * 2. **数据路由**：无声明时按结果/参数的数据形状自动匹配渲染形式（结果含
  *    old/new 文本对 → diff；含 stdout+exit_code → terminal；含 lines+content → read；
  *    含 url → web；图片扩展名路径 → image；文件路径 → file；表头+二维数组 → table）。
@@ -19,22 +20,22 @@
  * 覆盖，默认按灵汐工具约定的字段名族（args.command/result.output|stdout/…）解析。
  */
 
+import { RENDER_CARD_VOCABULARY, type RenderCardValue } from './renderCardVocabulary.generated'
 import type { ActivityData, ActivityDetailBlock } from '@/types/activity'
+import type { ErrorEnvelope } from '@/types/api'
 import type { MessageToolCall } from '@/types/models'
 
-/** 渲染形式词汇表：声明路由（插件配置）与数据路由（形状推断）共用。 */
-export type RenderIntentCard =
-  | 'terminal'
-  | 'diff'
-  | 'read'
-  | 'web'
-  | 'search'
-  | 'generic'
-  | 'image'
-  | 'file'
-  | 'file_card'
-  | 'table'
-  | 'form'
+/**
+ * 渲染形式词汇表：声明路由（插件配置）与数据路由（形状推断）共用。
+ * 单源 = 插件侧声明面（plugin.json render.card + dsh_adapter translator 卡型
+ * 映射）构建期生成物——本文件不再手抄卡型清单（AR-M5）。
+ *
+ * C4 扩展出口（设计真值 = docs/working/DSH生态嫁接通用机制设计_20261104.md §4.4
+ * 消息流渲染统一）：内建卡 = 词表白名单（生成闸不变，禁手抄）；插件自定义卡 =
+ * `<pluginId>/<name>` 命名空间卡型（chat.toolview keyed 槽承载，W 通用递送
+ * 动态注册 / webview 懒加载），词表生成物不动。
+ */
+export type RenderIntentCard = RenderCardValue | (string & {})
 
 /**
  * 工具 render 声明（ToolDescriptor.render 的前端形态）。
@@ -45,6 +46,9 @@ export interface ToolRenderIntent {
   bindings?: Record<string, string> | undefined
   /** 卡片标题覆盖（缺省用工具名/结果 path） */
   title?: string | undefined
+  /** 打开插件页面意图（plugin.json render.open_page：{page, label?}；
+   * 声明驱动——页面未装载/插件禁用时呈现层零注入零按钮） */
+  openPage?: { page: string; label?: string | undefined } | undefined
 }
 
 /** render 意图注册表：toolName → 声明（schema 装载时填充）。 */
@@ -76,19 +80,45 @@ export function getRenderIntent(toolName: string): ToolRenderIntent | undefined 
   return renderIntents.get(toolName)
 }
 
-/** 宽松 JSON → ToolRenderIntent（card 非法即弃，防止坏声明崩渲染）。 */
+/**
+ * 插件自定义卡型出口判定：`<pluginId>/<name>` 命名空间形态（词表外的唯一
+ * 合法 render.card 值域——chat.toolview keyed 槽按卡型键寻址承载）。
+ * 渲染存在性 fail-closed 在槽装载期校验（SlotRegistry），此处只认形态。
+ */
+export function isNamespacedRenderCard(card: string): boolean {
+  return card.includes('/') && /^[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+$/.test(card)
+}
+
+/** 宽松 JSON → ToolRenderIntent（card 非法即弃，防止坏声明崩渲染）。
+ * 词表 = 生成物 RENDER_CARD_VOCABULARY（内建卡白名单）；词表外接受
+ * `<pluginId>/<name>` 命名空间卡型（chat.toolview 槽出口）；其余即弃，
+ * 回落数据路由。 */
 function normalizeRenderIntent(raw: Record<string, unknown> | undefined): ToolRenderIntent | undefined {
   if (!raw || typeof raw !== 'object') return undefined
   const card = raw.card
-  const CARDS: readonly string[] = [
-    'terminal', 'diff', 'read', 'web', 'search', 'generic', 'image', 'file', 'file_card', 'table', 'form',
-  ]
-  if (typeof card !== 'string' || !CARDS.includes(card)) return undefined
+  if (typeof card !== 'string' || !(RENDER_CARD_VOCABULARY as readonly string[]).includes(card)) {
+    if (typeof card !== 'string' || !isNamespacedRenderCard(card)) {
+      return undefined
+    }
+  }
   const intent: ToolRenderIntent = { card: card as RenderIntentCard }
   if (raw.bindings && typeof raw.bindings === 'object') {
     intent.bindings = raw.bindings as Record<string, string>
   }
   if (typeof raw.title === 'string') intent.title = raw.title
+  // open_page 声明（{page, label?}）：page 非空字符串才生效；非法形态整字段
+  // 丢弃（旧前端忽略未知字段 = 天然向后兼容，坏声明不崩渲染）
+  const openPage = raw.open_page
+  if (openPage && typeof openPage === 'object') {
+    const page = (openPage as Record<string, unknown>).page
+    const label = (openPage as Record<string, unknown>).label
+    if (typeof page === 'string' && page.trim()) {
+      intent.openPage = {
+        page: page.trim(),
+        ...(typeof label === 'string' && label.trim() ? { label: label.trim() } : {}),
+      }
+    }
+  }
   return intent
 }
 
@@ -138,7 +168,7 @@ function pickField(
 export interface RenderContext {
   args: SourceData
   result: SourceData
-  error?: string | import('@/types/api').ErrorEnvelope | null
+  error?: string | ErrorEnvelope | null
   duration_ms?: number | null
 }
 
@@ -460,8 +490,10 @@ export function formPayload(
  * 按数据形状保守匹配渲染形式（强特征优先，避免误判）：
  * diff（old/new 文本对）→ terminal（args.command）→ read（lines/content+path）→
  * search（files/paths/results）→ web（url/sources）→ image（图片扩展名路径）→
- * file（结果文件路径）→ table（*_h/*_d 或 d 二维数组或 items 对象数组）。
- * 未命中返回 undefined（调用方落通用数据渲染）。
+ * table（*_h/*_d 或 d 二维数组或 items 对象数组）→ file（结果文件路径）。
+ * table 先于 file：file_read 目录模式结果带 result.file（目录路径）+ items
+ * 对象数组，须落表格卡（每文件一行）而非文件路径条。未命中返回 undefined
+ * （调用方落通用数据渲染）。
  */
 export function inferRenderIntent(ctx: RenderContext): ToolRenderIntent | undefined {
   const noop: ToolRenderIntent = { card: 'generic' }
@@ -477,21 +509,28 @@ export function inferRenderIntent(ctx: RenderContext): ToolRenderIntent | undefi
   if (web) return { card: 'web' }
   const image = imagePayload(ctx, noop)
   if (image) return { card: 'image' }
-  const file = filePayload(ctx, noop)
-  if (file) return { card: 'file' }
   const table = tablePayload(ctx, noop)
   if (table) return { card: 'table' }
+  const file = filePayload(ctx, noop)
+  if (file) return { card: 'file' }
   return undefined
 }
 
 // ── 条目元信息（summary/filePath）提取 ────────────────────────────────
 
-/** render 意图派生的条目元信息：summary = 头部摘要行，filePath = 可打开文件。 */
+/**
+ * render 意图派生的条目元信息：summary = 头部摘要行，filePath = 可打开文件，
+ * pipelineId = 可跳转执行管道。
+ */
 export interface CardMeta {
   /** 头部摘要（命令/路径/URL 等一句话，折叠态可见） */
   summary?: string
   /** 可在工作区打开的文件路径（存在时条目提供打开入口） */
   filePath?: string
+  /** 可打开的任务执行管道 ID（存在时条目提供打开入口） */
+  pipelineId?: string
+  /** 管道对应的任务 ID（打开管道时透传给标签，缺省同 pipelineId） */
+  taskId?: string
   /** 头部主位标题覆盖（file_card = 文件名；缺省沿用工具名人性化） */
   title?: string
   /** 头部大小徽标（字节；file_card = 写后文件大小） */
@@ -540,7 +579,7 @@ export function deriveGenericSummary(ctx: RenderContext): string | undefined {
 /**
  * 按 render 意图提取条目元信息（纯函数，与 payload 构造器同字段族）。
  * read/file/image/diff → filePath + summary；terminal/web/search → summary；
- * table/form/generic → 无（返回空对象）。
+ * task_card → pipelineId/taskId + title + summary；table/form/generic → 无（返回空对象）。
  */
 export function deriveCardMeta(ctx: RenderContext, intent: ToolRenderIntent): CardMeta {
   const path = str(pickField('path', [...PATH_FIELDS], ctx, intent))
@@ -598,6 +637,21 @@ export function deriveCardMeta(ctx: RenderContext, intent: ToolRenderIntent): Ca
       const query = str(pickField('query', [...QUERY_FIELDS], ctx, intent))
       return query !== undefined ? { summary: query } : {}
     }
+    case 'task_card': {
+      // 任务卡元信息：pipeline_id 是开入口闸门（缺失 = 管道未创建，无处可跳）；
+      // 标题=任务标题，摘要=任务短 id（任务即管道，两 id 同源同值）
+      const pipelineId = str(pickField('pipelineId', ['result.pipeline_id'], ctx, intent))
+      if (!pipelineId) return {}
+      const title = str(pickField('title', ['result.title'], ctx, intent))
+      const taskId = str(pickField('taskId', ['result.task_id'], ctx, intent)) ?? pipelineId
+      return {
+        ...(title ? { title } : {}),
+        summary: taskId,
+        pipelineId,
+        taskId,
+        icon: 'task',
+      }
+    }
     default:
       return {}
   }
@@ -605,7 +659,8 @@ export function deriveCardMeta(ctx: RenderContext, intent: ToolRenderIntent): Ca
 
 // ── 主入口：渲染意图 → ActivityDetailBlock[] ────────────────────────
 
-const PAYLOAD_BUILDERS: Record<Exclude<RenderIntentCard, 'generic'>, (ctx: RenderContext, intent: ToolRenderIntent) => Record<string, unknown> | null> = {
+/** 卡型 → payload 构造器（导出仅供词汇表 lockstep 契约测试对账；运行时行为不变）。 */
+export const PAYLOAD_BUILDERS: Record<Exclude<RenderIntentCard, 'generic'>, (ctx: RenderContext, intent: ToolRenderIntent) => Record<string, unknown> | null> = {
   terminal: terminalPayload,
   diff: diffPayload,
   read: readPayload,
@@ -616,6 +671,7 @@ const PAYLOAD_BUILDERS: Record<Exclude<RenderIntentCard, 'generic'>, (ctx: Rende
   file_card: fileCardPayload,
   table: tablePayload,
   form: formPayload,
+  task_card: formPayload,
 }
 
 /** generic：无专门卡（保持现有级联渲染，声明只影响标题）。 */
@@ -624,6 +680,19 @@ export function renderIntentToBlocks(
   ctx: RenderContext,
 ): ActivityDetailBlock[] {
   if (intent.card === 'generic') return []
+  // 插件自定义卡出口（chat.toolview keyed 槽）：先于内建 payload 表分发——
+  // 命名空间卡型不走内建字段族映射，工具数据 JSON 透传（跨域只传 JSON+回调），
+  // 渲染由 DetailBlock → ToolviewCardHost 按卡型键路由（未装载=可见占位）。
+  if (isNamespacedRenderCard(intent.card)) {
+    return [
+      {
+        id: `toolview:${intent.card}`,
+        label: intent.title ?? intent.card,
+        content: { args: ctx.args ?? null, result: ctx.result ?? null },
+        contentType: intent.card,
+      },
+    ]
+  }
   const payload = PAYLOAD_BUILDERS[intent.card](ctx, intent)
   if (payload === null) return []
 
@@ -674,7 +743,10 @@ export function renderIntentToBlocks(
         defaultExpanded: true,
       }]
     }
-    case 'form': {
+    // task_card 详情 = form 同构（kv 标量 + json 折叠），差异全在 meta 面
+    // （标题=任务名、摘要=任务 id、pipelineId 开入口）——块形态不另立组件。
+    case 'form':
+    case 'task_card': {
       const kvItems = Array.isArray(payload.kvItems) ? payload.kvItems as { key: string; value: string }[] : []
       const jsonItems = Array.isArray(payload.jsonItems) ? payload.jsonItems as { label: string; content: unknown }[] : []
       return [{
@@ -791,6 +863,10 @@ export function renderIntentToBlocks(
       }]
     }
   }
+  // 词表内建卡型已被上方 case 全覆盖（switch 穷尽 RenderCardValue）；
+  // 兜底 return 仅为类型收口（RenderIntentCard 含命名空间出口的宽型），
+  // 命名空间卡已在函数头部分流，此行不可达。
+  return []
 }
 
 /**

@@ -18,7 +18,7 @@
  * trigger: "on_event:approval.created"）即首个消费者。
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { ChevronLeft, ChevronRight } from '@/assets/icons'
 import { FullscreenOverlay } from '@/components/layout/FullscreenOverlay'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
@@ -151,11 +151,16 @@ export function SchemaFullscreenHost({
   const [draft, setDraft] = useState('')
 
   // 声明收集（trigger 求值 + space 过滤）。getAllWidgets() 每次返回新数组引用，
-  // 只在依赖变化时重算，避免订阅 effect 反复重挂。
+  // 只在依赖变化时重算，避免订阅 effect 反复重挂。注册表版本号订阅：装载晚于
+  // 挂载时 effect 重跑收声明（非响应式单例直读不订阅则永空，同 DeclaredWidgetLayer）
+  const widgetStoreVersion = useSyncExternalStore(
+    (listener) => contributionRegistry.subscribe(listener),
+    () => contributionRegistry.getVersion(),
+  )
   useEffect(() => {
     const decls = declarations ?? contributionRegistry.getAllWidgets()
     setEventDecls(collectFullscreenEventDeclarations(decls, space))
-  }, [declarations, space])
+  }, [declarations, space, widgetStoreVersion])
 
   // 为每个触发事件名注册订阅；事件到达 → 入队（declarationId + requestId 去重）
   useEffect(() => {
@@ -348,7 +353,7 @@ export function SchemaFullscreenHost({
                 // 卡面未声明对应语义 → 按钮禁用（fail-closed，契约违约可见）
                 const denyOption = current.options.find((o) => o.semantics === 'deny')
                 const approveOption = current.options.find((o) => o.semantics === 'approve_once')
-                const missingHint = '该审批未声明对应语义选项（后端契约违约），已禁用'
+                const missingHint = '该审批未提供此操作选项，已禁用'
                 return (
                   <>
                     <button

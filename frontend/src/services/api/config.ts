@@ -110,8 +110,13 @@ export interface LLMConfigResponse {
 
 // ── 内核单一配置面读写原语 ────────────────────────────────
 
-/** 用户空间 .env 掩码视图：变量名 → 是否已设置。has_key 派生与 key 写入共用。 */
-async function getUserEnvVarSet(): Promise<Set<string>> {
+/**
+ * 用户空间 .env 掩码视图：变量名 → 是否已设置。has_key 派生与 key 写入共用。
+ *
+ * 导出面：onboarding 首启自动引导（services/onboarding/autoOpen）以
+ * 「.env 是否已含 provider key」判定净装态，与设置页 has_key 同源同判定。
+ */
+export async function getUserEnvVarSet(): Promise<Set<string>> {
   const response = await apiClient.get<{ vars: Record<string, string> }>(
     API_ENDPOINTS.PLUGIN_CONFIG.USER_ENV,
   )

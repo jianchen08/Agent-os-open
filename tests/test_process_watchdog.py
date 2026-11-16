@@ -1,3 +1,4 @@
+# @feature: FP-0.2.内核内存治理 进程看门狗内存水位触发与 idle 排序清理 | @ci: python-coverage
 """进程看门狗策略层测试：内存水位驱动 + 按 idle 排序杀。
 
 背景：
@@ -23,13 +24,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# 0.2 架构：bash 工具位于 plugins/shared/tools/bash（平铺 import）。
-_BASH_DIR = str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "tools" / "bash")
+# 0.2 架构：bash 工具位于 plugins/shared/bash（平铺 import）。
+_BASH_DIR = str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "bash")
 if _BASH_DIR not in sys.path:
     sys.path.insert(0, _BASH_DIR)
 
-from bash_types import ProcessInfo  # noqa: E402
-from process_manager import ProcessManager  # noqa: E402
+from agentos_plugin_sdk.process_runtime import ProcessInfo  # noqa: E402
+from agentos_plugin_sdk.process_runtime import ProcessManager  # noqa: E402
 
 pytestmark = pytest.mark.unit
 

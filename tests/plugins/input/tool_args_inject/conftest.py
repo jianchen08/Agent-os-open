@@ -11,7 +11,7 @@ from pathlib import Path
 
 _PLUGIN_DIR = (
     Path(__file__).resolve().parents[4]
-    / "plugins" / "shared" / "pipeline" / "input" / "tool_args_inject"
+    / "plugins" / "shared" / "tool_args_inject"
 )
 _SHARED_DIR = (
     Path(__file__).resolve().parents[4]

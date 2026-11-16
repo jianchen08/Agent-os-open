@@ -1,0 +1,81 @@
+{
+  "id": "pipeline_agent_config_load",
+  "name": "Agent Config Load",
+  "version": "1.7.2",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "host_group": "light",
+  "entry": "python server.py",
+  "invoke_entry": "agent_config_load.execute",
+  "requires_services": [
+    "packaging",
+    "card.lint_decl",
+    "card.lint_actions",
+    "card.lint_pack_ui",
+    "project.list_paths"
+  ],
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "steps": [
+      {
+        "name": "pipeline_agent_config_load",
+        "required_state_inputs": [
+          "agent.id"
+        ]
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 50,
+  "export_fields": [
+    "task.id",
+    "tool_ids",
+    "tool_ids.mode_source",
+    "project_roots",
+    "context.*",
+    "model_tier",
+    "max_iterations",
+    "max_reminders",
+    "timeout_seconds",
+    "agent_level"
+  ],
+  "persistent_fields": [
+    "task.id",
+    "project_roots",
+    "model_tier",
+    "max_iterations",
+    "max_reminders",
+    "timeout_seconds",
+    "agent_level"
+  ],
+  "description": "加载 agent 配置并写入执行上下文 state：按 agent_id 加载对应 agent 配置（提示词、工具白名单、变量、约束等），产出键 task.id / tool_ids（\"inherit\" = 继承基线全量工具面）/ tool_ids.mode_source（模式声明工具并入审计）/ project_roots / context.*（extra_context 与 agent 配置运行时键）；RP 模式包作者声明（regex_scripts/variables/behaviors/hard_rules/engine/开演向导卡包/rp_init 快照）展开为 context.rp_* 键供下游消费；模式物料段与 mode 键回写由 pipeline_mode_material_inject 步骤承载。",
+  "state": {
+    "reads": [
+      "agent.id",
+      "core_type",
+      "iteration",
+      "lineage.parent_pipeline_id",
+      "lineage.origin",
+      "lineage.origin_session_id",
+      "lineage.parent_ws_meta",
+      "lineage.root",
+      "max_iterations",
+      "max_reminders",
+      "model_id",
+      "model_tier",
+      "pipeline_id",
+      "raw_tool_calls",
+      "session_id",
+      "system_prompt",
+      "task.id",
+      "task.parent_project_id",
+      "timeout_seconds"
+    ]
+  }
+}

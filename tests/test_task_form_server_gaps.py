@@ -32,7 +32,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[1] / "plugins" / "shared" / "system" / "task_form"
+_PLUGIN_DIR = Path(__file__).resolve().parents[1] / "plugins" / "shared" / "task_form"
 _MODULE_NAME = "task_form_server_gaps_under_test"
 
 
@@ -327,15 +327,25 @@ class TestHttpRouting:
     async def test_projects_endpoint_reads_shared_registry(
         self, server: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """项目选项 = 共享登记行 {value:id,label:title}；无登记 → 空列表无 warning。"""
+        """项目选项 = project.list 登记行 {value:id,label:title}（T6a 服务消费）。"""
         root = _make_project(tmp_path, "form: {fields: []}\n")
         monkeypatch.setenv("AGENTOS_PROJECT_ROOT", str(root))
-        monkeypatch.setenv("TASKS_STORAGE_DIR", str(tmp_path / "tasks_data"))
-        from project_registry import ProjectModel, ProjectRegistry
+        # 真实登记簿实现直连桩（只桩跨插件 RPC 层，读面语义走真实依赖）
+        _SHARED = str(Path(server.__file__).resolve().parents[1])
+        if _SHARED not in sys.path:
+            sys.path.insert(0, _SHARED)
+        from dataclasses import asdict as _asdict
 
-        ProjectRegistry(tmp_path / "tasks_data").save(
-            ProjectModel(id="p0000000001", title="项目甲", path="D:/a")
-        )
+        from project_manager import project_registry as pr
+
+        row = pr.ProjectModel(id="p0000000001", title="项目甲", path="D:/a")
+
+        class _Handle:
+            async def call(self, method: str, args: dict[str, Any]) -> dict[str, Any]:
+                assert method == "list"
+                return {"items": [_asdict(row)], "total": 1}
+
+        monkeypatch.setattr(server.plugin, "get_capability", lambda name: _Handle())
 
         resp = await server.http_handle(
             path="/ext/task_form/options/projects", method="GET", query={},

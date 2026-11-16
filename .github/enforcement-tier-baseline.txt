@@ -1,0 +1,15 @@
+# 规范执法档位基线（棘轮只减不增；执法器 scripts/check_rule_enforcement_tier.py）
+# 语义：存量规则文件尚未登记执法档位的放行清单（相对 config/rules/）。
+# 纪律：触碰即清——改到哪个规则文件，就在 config/rules/enforcement_tiers.yaml
+# 登记其执法档位并把本行移除；基线只减不增。
+dispatcher_rules_exec.md
+execution_review_rules.md
+isolation_network_rules.md
+python_type_hints.md
+per_agent/code_writer_rules.md
+per_agent/design_system_constraints.md
+per_agent/environment_setup_rules.md
+per_agent/function_verify_rules.md
+per_agent/state_machine_test_design.md
+per_domain/research_domain_rules.md
+per_domain/writing_domain_rules.md

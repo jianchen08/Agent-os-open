@@ -6,6 +6,7 @@
  * 被淘汰管道刷新后由 API 冷启动重新加载。
  */
 import { compareMessages } from '@/utils/messageOrder'
+import type { PipelineMessageState } from './pipelineMessageState'
 import type { Message } from '@/types/models'
 
 /**
@@ -112,4 +113,43 @@ export function trimMessagesForPersistence(
     }
   }
   return kept
+}
+
+/** 持久化快照形态：partialize 落盘的数据域全集（运行时态一律不落盘）。 */
+export type PipelineMessagePersistedSnapshot = Pick<
+  PipelineMessageState,
+  | 'messagesByPipeline'
+  | 'pipelines'
+  | 'pipelineSessionMap'
+  | 'activePipelineId'
+  | 'topCursorsByPipeline'
+  | 'bottomCursorsByPipeline'
+  | 'hasMoreOlderByPipeline'
+>
+
+/**
+ * partialize 的完整快照构建（纯函数，自 pipelineMessageStore persist 配置抽出）：
+ * 先按条数 + 总体积 LRU 裁剪出保留的管道集合（trimMessagesForPersistence），
+ * 再统一应用于消息/元数据/游标，保证保留集一致性；运行时状态不进快照。
+ */
+export function buildPersistedSnapshot(state: PipelineMessageState): PipelineMessagePersistedSnapshot {
+  const keptMessages = trimMessagesForPersistence(state.messagesByPipeline, state.activePipelineId)
+  const keptPids = new Set(Object.keys(keptMessages))
+  const pickByKey = <V>(rec: Record<string, V> | undefined): Record<string, V> => {
+    if (!rec) return {}
+    const out: Record<string, V> = {}
+    for (const [k, v] of Object.entries(rec)) {
+      if (keptPids.has(k)) out[k] = v
+    }
+    return out
+  }
+  return {
+    messagesByPipeline: keptMessages,
+    pipelines: pickByKey(state.pipelines),
+    pipelineSessionMap: pickByKey(state.pipelineSessionMap),
+    activePipelineId: state.activePipelineId,
+    topCursorsByPipeline: pickByKey(state.topCursorsByPipeline),
+    bottomCursorsByPipeline: pickByKey(state.bottomCursorsByPipeline),
+    hasMoreOlderByPipeline: pickByKey(state.hasMoreOlderByPipeline),
+  }
 }

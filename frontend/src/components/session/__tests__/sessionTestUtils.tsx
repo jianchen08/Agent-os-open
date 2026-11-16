@@ -57,7 +57,7 @@ export function makeAgent(overrides: Record<string, unknown> = {}) {
   }
 }
 
-/** 真实声明照抄 plugins/shared/pipeline/input/workspace_lifecycle/plugin.json */
+/** 真实声明照抄 plugins/shared/workspace_lifecycle/plugin.json */
 export const REAL_WORKSPACE_LIFECYCLE_FIELDS = [
   {
     name: 'workspace',
@@ -82,7 +82,7 @@ export const REAL_WORKSPACE_LIFECYCLE_FIELDS = [
   },
 ]
 
-/** 真实声明照抄 plugins/shared/system/isolation/plugin.json */
+/** 真实声明照抄 plugins/shared/isolation/plugin.json */
 export const REAL_ISOLATION_FIELDS = [
   {
     name: 'isolationMode',

@@ -1,0 +1,236 @@
+{
+  "id": "sync_relay",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Sync Relay",
+  "description": "多端同步中继插件（可驻云端或桌面）：/ext/sync_relay/** 承载 sync_event 接收/下发（租户内多端扇出）+ 设备注册表（device_id/档位/版本/能力面/在线心跳，2c 路由唯一输入）+ 入网初始化基线发放（层级权威：云>桌面>手机）+ cursor 发放 + 入网码配对（一次性码换 per-device token，防重放）+ 执行凭据双钥面（发起端签发→属主端验证，独立分库，per-device 短时效）。per-device token 鉴权（env AGENTOS_SYNC_RELAY_TOKENS 预置 + 入网码兑换签发两源，device:token 绑定防顶名，P6）；ULID 幂等零重复；无 HLC 事件拒收（裸墙钟 LWW 已否）；会话等属主面只追加（他端写拒绝死信留痕）。存储为插件自有 SQLite（data/ 自持先例，真值库挂 relay，内核零改动）。",
+  "version": "1.6.1",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "activation": "eager",
+  "lifecycle": {
+    "idle_timeout_secs": 0
+  },
+  "capabilities": {
+    "tools": [
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for /ext/sync_relay/**（多端同步中继面）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "raw_body": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "query": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "query_multi": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "integer"
+            },
+            "body": {
+              "type": "object"
+            }
+          }
+        },
+        "render": {
+          "card": "generic"
+        }
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": []
+  },
+  "permissions": {},
+  "priority": 50,
+  "http_endpoints": [
+    {
+      "route_id": "receive_events",
+      "method": "POST",
+      "path": "/ext/sync_relay/events",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "description": "sync_event 批量上行接收（per-device token 验签自管：device:token 绑定防顶名；ULID 幂等；schema/HLC/属主执法，违约死信不阻塞批次）"
+    },
+    {
+      "route_id": "pull_events",
+      "method": "GET",
+      "path": "/ext/sync_relay/events",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "description": "按 cursor 增量拉取（拉为主，ADR D3；token 绑定设备身份，since_cursor 之后严格递增返回）"
+    },
+    {
+      "route_id": "register_device",
+      "method": "POST",
+      "path": "/ext/sync_relay/devices",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "description": "设备注册（device_id/档位/版本/能力面；入网初始化第一步）"
+    },
+    {
+      "route_id": "device_heartbeat",
+      "method": "POST",
+      "path": "/ext/sync_relay/devices/heartbeat",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "description": "设备心跳上报（在链存在性判定数据源，ADR D1；携带 capabilities 时同步刷新能力面——2c exec_channel 子键随心跳更新；未注册设备 fail-closed）"
+    },
+    {
+      "route_id": "bootstrap_baseline",
+      "method": "GET",
+      "path": "/ext/sync_relay/bootstrap",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "description": "新设备入网初始化基线发放（层级权威①：每资产按 云>桌面>手机 取基线，ADR D2）"
+    },
+    {
+      "route_id": "enroll_device",
+      "method": "POST",
+      "path": "/ext/sync_relay/enroll",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "登录即入网（ADR 2026-11-02-login-as-enrollment）：relay 内核 admin JWT 直签 per-device token 并注册入设备注册表（重复调用幂等换发；入网码机制已退役）"
+    },
+    {
+      "route_id": "list_devices",
+      "method": "GET",
+      "path": "/ext/sync_relay/devices",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "设备注册表查看（档位/版本/在线状态；前端设备面板与 2c 路由的数据面）"
+    },
+    {
+      "route_id": "routing_view",
+      "method": "GET",
+      "path": "/ext/sync_relay/routing_view",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "description": "2c 路由表只读视图（per-device token 鉴权）：位阶展开+在线判定+能力面透传（exec_channel 子树领地/resource/degraded/plugins），relay 只供数据不裁决（裁决归发起端统一路径树解析层）"
+    },
+    {
+      "route_id": "issue_exec_token",
+      "method": "POST",
+      "path": "/ext/sync_relay/exec_tokens",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "description": "执行凭据签发（2c 双钥配对流：发起端 sync token 鉴权，凭据体由发起端自带，绑定目标设备并登记短时效；目标不在注册表 404，relay 不代生成）"
+    },
+    {
+      "route_id": "exec_verification_set",
+      "method": "GET",
+      "path": "/ext/sync_relay/exec_tokens",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "description": "属主端验证集拉取（2c 双钥：只回落绑定自己的有效执行凭据，过期行顺带物理清理；属主端执行通道 server 据此校验来调 Bearer）"
+    },
+    {
+      "route_id": "list_dead_letters",
+      "method": "GET",
+      "path": "/ext/sync_relay/dead_letters",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "拒绝/违约事件死信查看（顶名/缺 HLC/属主违规留痕面）"
+    },
+    {
+      "route_id": "verify_device",
+      "method": "GET",
+      "path": "/ext/sync_relay/verify",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "description": "借权验证面（per-device token 验签自管）：token→绑定设备轻量核验，member 目标借权据此确认请求方同注册表"
+    },
+    {
+      "route_id": "borrow_auth",
+      "method": "POST",
+      "path": "/ext/sync_relay/borrow_auth",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "description": "配对设备借权换发本内核 admin 会话（bearer=per-device token；信任边界=同注册表，ADR 2026-10-22-borrowed-device-auth）"
+    },
+    {
+      "route_id": "registry",
+      "method": "GET",
+      "path": "/ext/sync_relay/registry",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "description": "全网注册表复制快照（per-device token 鉴权）：设备表全量含各设备 token_hash 对等信任面（A 档，目标端借权核验本地比对的数据源；哈希仅对同注册表成员出域，明文 token 恒不出库）"
+    }
+  ],
+  "config_files": [
+    {
+      "id": "settings",
+      "label": "同步中继配置",
+      "fields": [
+        {
+          "name": "online_window_secs",
+          "label": "在线判定窗口（秒）",
+          "type": "number",
+          "required": false,
+          "description": "设备最后一次心跳距今不超过该窗口即判定在线（在链存在性，ADR D1）"
+        },
+        {
+          "name": "pull_page_limit",
+          "label": "单页拉取上限（条）",
+          "type": "integer",
+          "required": false,
+          "description": "GET events 单页返回事件数上限（cursor 断点续传）"
+        },
+        {
+          "name": "exec_token_ttl_secs",
+          "label": "执行凭据缺省时效（秒）",
+          "type": "number",
+          "required": false,
+          "description": "签发体未显式带 ttl_secs 时的执行凭据时效（缺省 3600 秒；上限 24 小时夹取，续用重签）"
+        },
+        {
+          "name": "hub_device_id",
+          "label": "中枢设备身份",
+          "type": "string",
+          "required": false,
+          "description": "配对中枢自身的 device_id（ADR 2026-10-21-device-card-direct-connect）：routing_view 被成功拉取时 touch 该条目（拉取即中枢网络面活性证据）并标 is_hub；空 = 行为与旧版一致（零 touch 零标记）"
+        }
+      ],
+      "path": "config/plugins/sync_relay/settings.yaml"
+    }
+  ]
+}

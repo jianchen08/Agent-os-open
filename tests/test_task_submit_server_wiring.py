@@ -29,9 +29,9 @@ pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SDK_DIR = _REPO_ROOT / "plugins" / "sdk" / "src"
-_TASKS_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "tasks"
-_TOOL_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "task_submit"
-_SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared" / "system"
+_TASKS_DIR = _REPO_ROOT / "plugins" / "shared" / "tasks"
+_TOOL_DIR = _REPO_ROOT / "plugins" / "shared" / "task_submit"
+_SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared"
 _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
 
 _SERVER_MOD = "task_submit_server_wiring_test_mod"
@@ -223,19 +223,14 @@ def test_agent_lookup_calls_agent_manager_agent_get(wiring, monkeypatch):
 @pytest.mark.parametrize(
     "payload,why",
     [
-        ({"success": False, "data": {"found": True, "config": {}}}, "success=false"),
-        ({"data": {"found": True, "config": {}}}, "缺 success 键"),
         ({"success": True, "data": {"found": False}}, "found=false"),
         ({"success": True, "data": {}}, "缺 found 键"),
-        ({"success": True}, "缺 data"),
-        ({"success": True, "data": {"found": True}}, "缺 config"),
-        ({"success": True, "data": {"found": True, "config": "not-dict"}},
-         "config 非 dict"),
-        ("not-a-dict", "响应非 dict"),
+        ({"success": True}, "缺 data 键"),
+        ({"success": True, "data": {"found": False, "config": {}}}, "found=false 带冗余 config"),
     ],
 )
-def test_agent_lookup_degrades_to_none(wiring, monkeypatch, payload, why):
-    """信封逐级判真：任一不成立 → None（调用方据此走磁盘回退）。"""
+def test_agent_lookup_miss_returns_none(wiring, monkeypatch, payload, why):
+    """未命中（found 不成立）→ None：调用方据此报"Agent 不存在"。"""
     server_mod, tool_mod = wiring
     _install_capabilities(server_mod, monkeypatch, {
         "chat": lambda m, p: {},
@@ -245,6 +240,32 @@ def test_agent_lookup_degrades_to_none(wiring, monkeypatch, payload, why):
     asyncio.run(server_mod._on_load({}))
 
     assert asyncio.run(tool_mod._agent_registry_lookup("a1")) is None, why
+
+
+@pytest.mark.parametrize(
+    "payload,why",
+    [
+        ({"success": False, "data": {"found": True, "config": {}}}, "success=false"),
+        ({"data": {"found": True, "config": {}}}, "缺 success 键"),
+        ({"success": True, "data": {"found": True}}, "缺 config"),
+        ({"success": True, "data": {"found": True, "config": "not-dict"}},
+         "config 非 dict"),
+        ("not-a-dict", "响应非 dict"),
+    ],
+)
+def test_agent_lookup_unavailable_raises(wiring, monkeypatch, payload, why):
+    """服务不可用/信封违约 → 抛异常：调用方翻译成"配置服务不可用"，
+    不与"Agent 不存在"（None）混淆——fail-closed 且归因如实的单一来源契约。"""
+    server_mod, tool_mod = wiring
+    _install_capabilities(server_mod, monkeypatch, {
+        "chat": lambda m, p: {},
+        "pipeline-state": lambda m, p: [],
+        "tool-executor": _responder_agent_get(payload),
+    })
+    asyncio.run(server_mod._on_load({}))
+
+    with pytest.raises(RuntimeError, match="agent"):
+        asyncio.run(tool_mod._agent_registry_lookup("a1")), why
 
 
 # ── task_submit 工具包装（server 暴露面） ────────────────────────────────

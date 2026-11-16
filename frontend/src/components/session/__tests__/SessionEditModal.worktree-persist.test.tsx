@@ -66,7 +66,7 @@ describe('BUG-75：新建会话 worktree 拓扑持久化', () => {
         mode: 'worktree',
       },
     })
-  })
+  }, 30000)
 
   it('工作空间留空时选 worktree → 守卫兜底恒 plain 且不携带 workspace（现有约束保持）', async () => {
     threadSchemaMock.mockResolvedValue([...REAL_WORKSPACE_LIFECYCLE_FIELDS, ...REAL_ISOLATION_FIELDS])

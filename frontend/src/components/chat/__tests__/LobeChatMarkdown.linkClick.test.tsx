@@ -14,10 +14,18 @@ import { describe, expect, it, vi } from 'vitest'
 import ReactMarkdown from 'react-markdown'
 import { LobeChatMarkdown } from '../LobeChatMarkdown'
 
-// @lobehub/ui Markdown 桩：react-markdown 渲染真实锚点（委托逻辑的被测对象）
+// @lobehub/ui Markdown 桩：react-markdown 渲染真实锚点（委托逻辑的被测对象）。
+// 组件按子路径消费（@lobehub/ui/es/*/index，见 LobeChatMarkdown 头注），桩需
+// 同路径——顶层 '@lobehub/ui' mock 不拦截子路径导入。
 vi.mock('@lobehub/ui', () => ({
   ConfigProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   Markdown: ({ children }: { children: string }) => <>{<ReactMarkdown>{children}</ReactMarkdown>}</>,
+}))
+vi.mock('@lobehub/ui/es/ConfigProvider/index', () => ({
+  default: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}))
+vi.mock('@lobehub/ui/es/Markdown/index', () => ({
+  default: ({ children }: { children: string }) => <>{<ReactMarkdown>{children}</ReactMarkdown>}</>,
 }))
 
 function renderMd(content: string, onLinkClick?: (l: { href: string; text: string }) => boolean) {

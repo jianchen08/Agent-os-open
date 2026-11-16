@@ -4,8 +4,8 @@
     "packaging"
   ],
   "name": "DB Admin HTTP Face",
-  "description": "DB Admin 管理后台的 HTTP 面层（boot-plugin 第一刀）：/ext/db_admin/** 端点经内核 dispatcher 进本插件 http.handle，反向调用内核 db-admin capability（SQL 能力层：表枚举/行 CRUD/SQL 执行器，逻辑与鉴权在内核 handler 内）。鉴权凭证（Authorization 头）由本插件原样转发、内核侧解析，插件不做鉴权决策。",
-  "version": "1.0.0",
+  "description": "DB Admin 管理后台的 HTTP 面层：/ext/db_admin/** 端点经内核 dispatcher 进本插件 http.handle，反向调用内核 db-admin capability（SQL 能力层：表枚举/行 CRUD/SQL 执行器，逻辑与鉴权在内核 handler 内）。鉴权凭证（Authorization 头）由本插件原样转发、内核侧解析，插件不做鉴权决策。",
+  "version": "1.0.2",
   "plugin_type": "tool",
   "language": "python",
   "host_type": "sidecar",
@@ -16,6 +16,44 @@
       {
         "name": "http.handle",
         "description": "HTTP endpoint handler for /ext/db_admin/**（db-admin capability 的 HTTP 面转发层）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "raw_body": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "query": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "query_multi": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
         "output_schema": {
           "type": "object",
           "properties": {
@@ -30,10 +68,18 @@
         "render": {
           "card": "generic"
         }
-      },
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [],
+    "services": [
       {
         "name": "db_admin.status",
         "description": "插件状态（capability 句柄是否已注入）",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
         "output_schema": {
           "type": "object",
           "properties": {
@@ -44,20 +90,12 @@
               "type": "boolean"
             }
           }
-        },
-        "render": {
-          "card": "generic"
         }
       }
-    ],
-    "route_signals": [],
-    "lifecycle_hooks": []
+    ]
   },
   "permissions": {},
   "priority": 50,
-  "granted_capabilities": [
-    "db-admin"
-  ],
   "http_endpoints": [
     {
       "route_id": "tables",
@@ -115,5 +153,6 @@
       "handler_capability": "http.handle",
       "description": "SQL 执行器（body: {sql, confirm}；危险语句黑名单在内核 handler）"
     }
-  ]
+  ],
+  "host_group": "light_stable"
 }

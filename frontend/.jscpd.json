@@ -1,5 +1,6 @@
 {
   "pattern": "src/**/*.{ts,tsx}",
+  "ignore": ["**/__tests__/**"],
   "reporters": ["json"],
   "output": "./reports/jscpd",
   "min-tokens": 50,

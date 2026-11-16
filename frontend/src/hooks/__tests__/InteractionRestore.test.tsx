@@ -86,6 +86,116 @@ function makeRecord(overrides: {
   }
 }
 
+/** 直接播种一条本地 pending 交互（模拟早前 WS 事件入列/上一轮恢复的残留卡） */
+function seedPending(requestId: string, timestamp: string): void {
+  useInteractionStore.setState((state) => ({
+    pendingInteractions: [
+      ...state.pendingInteractions,
+      {
+        requestId,
+        mode: 'choice',
+        title: '待结算的审批卡',
+        description: '',
+        threadId: 'thread-1',
+        tabId: '',
+        agentId: 'agent-1',
+        pipelineId: 'pipe-1',
+        timestamp,
+        status: 'pending',
+        sessionId: 'sess-1',
+      },
+    ],
+  }))
+}
+
+describe('pending 轮询对账收卡（真机"审批交互卡残影浮层不自动收"回归）', () => {
+  beforeEach(() => {
+    pendingResponse.items = []
+    apiGetMock.mockClear()
+    useInteractionStore.setState({ pendingInteractions: [] })
+    useNotificationStore.setState({ notifications: [] })
+    usePipelineMessageStore.setState({ pipelines: {} })
+  })
+
+  it('他端已应答（服务端列表归零）→ 本地残留 pending 卡自动收起', async () => {
+    // 卡片早在轮询前已入列（时间戳取过去），服务端 pending 已归零
+    seedPending('req-settled-elsewhere', '2026-10-12T00:00:00.000Z')
+
+    renderHook(() => useInteractionHandler('sess-1'), { wrapper: MemoryRouterWrapper })
+
+    await waitFor(() => {
+      expect(
+        useInteractionStore.getState().pendingInteractions.some(
+          (i) => i.requestId === 'req-settled-elsewhere',
+        ),
+      ).toBe(false)
+    })
+  })
+
+  it('对账只收 pending 态：已应答/已进入的卡片不受影响（保留 2s 展示链路）', async () => {
+    useInteractionStore.setState({
+      pendingInteractions: [
+        {
+          requestId: 'req-responded',
+          mode: 'choice',
+          title: '本端已应答',
+          description: '',
+          threadId: 'thread-1',
+          tabId: '',
+          agentId: 'agent-1',
+          timestamp: '2026-10-12T00:00:00.000Z',
+          status: 'responded',
+          sessionId: 'sess-1',
+        },
+      ],
+    })
+
+    renderHook(() => useInteractionHandler('sess-1'), { wrapper: MemoryRouterWrapper })
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50))
+    })
+    // responded 态由既有 2s 自动消失链路负责，对账不越权提前清（状态未被改动）
+    expect(
+      useInteractionStore.getState().pendingInteractions.some(
+        (i) => i.requestId === 'req-responded' && i.status === 'responded',
+      ),
+    ).toBe(true)
+  })
+
+  it('在途豁免：入列时间不早于本轮轮询发起时刻的卡片不误收（WS 事件在途保护）', async () => {
+    // 时间戳取未来 = 晚于轮询发起时刻入列的卡（守卫边界）
+    seedPending('req-inflight', '2099-01-01T00:00:00.000Z')
+
+    renderHook(() => useInteractionHandler('sess-1'), { wrapper: MemoryRouterWrapper })
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50))
+    })
+    expect(
+      useInteractionStore.getState().pendingInteractions.some(
+        (i) => i.requestId === 'req-inflight',
+      ),
+    ).toBe(true)
+  })
+
+  it('服务端仍在列的 pending 卡不收（对账只收消失项）', async () => {
+    seedPending('req-still-pending', '2026-10-12T00:00:00.000Z')
+    pendingResponse.items = [makeRecord({ id: 'req-still-pending', mode: 'choice' })]
+
+    renderHook(() => useInteractionHandler('sess-1'), { wrapper: MemoryRouterWrapper })
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50))
+    })
+    expect(
+      useInteractionStore.getState().pendingInteractions.some(
+        (i) => i.requestId === 'req-still-pending',
+      ),
+    ).toBe(true)
+  })
+})
+
 describe('交互刷新恢复', () => {
   beforeEach(() => {
     pendingResponse.items = []

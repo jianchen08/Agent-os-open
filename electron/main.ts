@@ -30,18 +30,43 @@ import {
   shouldBlockTopFrameNavigation,
 } from "./app-protocol";
 import {
+  applyOfflineVenvEnv,
   ensurePackagedKernelRunning,
+  ensureUvForPackagedBoot,
   getPackagedAdminCredential,
+  kernelResourcePaths,
+  managedKernelLogDir,
+  patrolPluginVenvs,
   shutdownManagedKernel,
+  TOKEN_SECRET_FILE,
 } from "./kernel-manager";
+import { initDiagLog, logDiag } from "./diag-log";
+import {
+  KERNEL_LIVENESS_STALE_THRESHOLD_MS,
+  KERNEL_LIVENESS_UNKNOWN,
+  LIVENESS_MARKER_FILENAME,
+  startKernelLivenessPoller,
+  type KernelLivenessPoller,
+  type KernelLivenessSnapshot,
+} from "./kernel-liveness";
+import {
+  reportRenderProcessGone,
+  reportWebContentsResponsive,
+  reportWebContentsUnresponsive,
+} from "./renderer-health";
+import { startWsRelay, type WsRelayHandle } from "./ws-relay";
 import { attachEditMenu } from "./edit-menu";
 import { createTray, destroyTray } from "./tray";
-import { loadAuthSession, saveAuthSession } from "./auth-session";
 import {
-  startWindowInfoPolling,
-  stopWindowInfoPolling,
-  WindowInfoPoller,
-} from "./window-info";
+  UPDATE_GET_AVAILABLE_CHANNEL,
+  currentUpdateInfo,
+  startUpdateCheck,
+} from "./update-check";
+import {
+  AUTH_SESSION_FILE,
+  loadAuthSession,
+  saveAuthSession,
+} from "./auth-session";
 import {
   captureWindowState,
   loadWindowState,
@@ -60,9 +85,11 @@ registerAppSchemePrivileges();
 // 禁止无日志死路（BUG-50 的反馈缺口：启动序列中断后无任何痕迹）
 process.on("uncaughtException", (err) => {
   console.error("[Electron] 未捕获异常:", err);
+  logDiag(`[main] uncaughtException: ${err?.stack ?? err}`);
 });
 process.on("unhandledRejection", (reason) => {
   console.error("[Electron] 未处理的 Promise 拒绝:", reason);
+  logDiag(`[main] unhandledRejection: ${String(reason)}`);
 });
 
 /** 开发环境下 Vite dev server 的 URL（端口 5188，与 vite.config.ts 一致） */
@@ -90,9 +117,6 @@ const MAXIMIZED_CHANGED_CHANNEL = "window:maximized-changed";
 
 /** 主窗口引用 */
 let mainWindow: BrowserWindow | null = null;
-
-/** 窗口信息轮询器引用 */
-let windowInfoPoller: WindowInfoPoller | null = null;
 
 /** 渲染层可见性自愈控制器（主窗口一个实例，见 visibility-recovery.ts） */
 let visibilityRecovery: VisibilityRecovery | null = null;
@@ -269,9 +293,18 @@ function createMainWindow(
   });
 
   hardenWindowNavigation(win);
-  // 编辑面：右键剪切/复制/粘贴/全选菜单 + 生产环境 Ctrl/Cmd 快捷键兜底
-  //（应用菜单已移除，无加速器；见 edit-menu.ts 头注释）
-  attachEditMenu(win, { withShortcuts: !isDevelopment() });
+  // 编辑面：右键剪切/复制/粘贴/全选菜单。键盘 Ctrl+C/X/V/A 走 Chromium 原生
+  // 路径（独立于应用菜单生效），不经菜单也不经主进程代理——见 edit-menu.ts 头注释
+  attachEditMenu(win);
+
+  // 渲染进程挂死/恢复观测（证据面先行，不自动重启不弹窗；处理函数见
+  // renderer-health.ts）。随窗口创建重挂（macOS activate 重建窗口路径）。
+  win.webContents.on("unresponsive", () => {
+    reportWebContentsUnresponsive(webContentsProcessId(win.webContents), logDiag);
+  });
+  win.webContents.on("responsive", () => {
+    reportWebContentsResponsive(webContentsProcessId(win.webContents), logDiag);
+  });
 
   // 存档为最大化时先最大化再显示（窗口此刻隐藏，无闪动）；TitleBar 挂载时
   // 经 window:self:is-maximized 同步图标，maximize 事件推送照常覆盖
@@ -297,6 +330,13 @@ function createMainWindow(
   };
   win.on("show", notifyVisibilityRecovery);
   win.on("restore", notifyVisibilityRecovery);
+  // "focus" 钩子补"用户切回本应用"的复查时机：失联判定以窗口持有 OS 焦点
+  // 为前提（窗口被别的窗口盖住时 Chromium 报 hidden 属正常遮挡，见
+  // visibility-recovery.ts 头注释），用户切回来即需复查一次。focus 入口
+  // 不重置微抖预算——否则用户每点一次应用就再武装一轮 3 次 hide→show。
+  win.on("focus", () => {
+    visibilityRecovery?.onWindowFocused();
+  });
   // 控制器与窗口同生命周期（macOS activate 重建窗口时旧实例随替换）
   visibilityRecovery?.stop();
   visibilityRecovery = null;
@@ -419,11 +459,43 @@ export async function bootPackagedKernelThenLoad(
   win: BrowserWindow,
 ): Promise<void> {
   try {
+    // uv 引导（2026-10-26 用户裁定「安装上就能用」）：本机 PATH 有 uv 用本机的
+    // （不另装）；没有就把随包 prereqs/uv.exe 落 <用户根>/bin 并前置进程 PATH
+    // ——内核 autoprovision 与全部子 spawn 继承。缺失不可补 → 日志降级不反噬
+    // 启动（与 venv-patrol 同语义，见 kernel-manager ensureUvForPackagedBoot）。
+    try {
+      const uvDecision = ensureUvForPackagedBoot({
+        resourcesPath: process.resourcesPath,
+        appDataDir: app.getPath("appData"),
+        userRootEnv: process.env.AGENTOS_USER_ROOT,
+        env: process.env,
+      });
+      if (uvDecision.action === "materialize") {
+        logDiag(`[uv-bootstrap] 随包 uv 已落位并前置 PATH: ${uvDecision.targetUvPath}`);
+      } else if (uvDecision.action === "unavailable") {
+        logDiag(`[uv-bootstrap] uv 不可用（${uvDecision.reason}）`);
+      } else {
+        logDiag("[uv-bootstrap] 本机 uv 在 PATH，未做改动");
+      }
+      // 离线 venv 供给：随包 python/wheels 在场才注入（旧包/dev 零改动）。
+      const offline = applyOfflineVenvEnv({
+        resourcesPath: process.resourcesPath,
+        env: process.env,
+      });
+      if (offline.pythonShipped || offline.wheelhouseShipped) {
+        logDiag(
+          `[uv-bootstrap] 离线供给注入 python=${offline.pythonShipped} wheelhouse=${offline.wheelhouseShipped}`,
+        );
+      }
+    } catch (uvErr) {
+      logDiag(`[uv-bootstrap] 启动跳过: ${String(uvErr)}`);
+    }
     const result = await ensurePackagedKernelRunning({
       resourcesPath: process.resourcesPath,
-      // token 签名密钥持久化（userData 每安装身份一份）：刷新令牌跨重启有效，
-      // 否则内核每进程随机签名，用户每次打开应用都要重新登录
-      userDataDir: app.getPath("userData"),
+      // token 签名密钥持久化（认证身份目录，机器级跨安装稳定）：刷新令牌跨
+      // 重启有效，否则内核每进程随机签名，用户每次打开应用都要重新登录；
+      // 不随安装目录哈希走——换目录重装不再作废全端令牌（2026-10-22 用户实测）
+      authIdentityDir,
       // 库位置钉用户根（BUG-85）：装机默认库=<appData>/agentos/agentos_kernel.db，
       // 安装目录不再落库，静默卸载不再删用户数据
       appDataDir: app.getPath("appData"),
@@ -431,10 +503,39 @@ export async function bootPackagedKernelThenLoad(
     console.info(
       `[Electron] 内核就绪（已拉起打包内核 pid=${result.pid ?? "?"}），加载前端`,
     );
+    // 内核日志面判活轮询（60s 周期读 resources/kernel/logs/kernel.liveness，
+    // 停摆/恢复跃迁落 diag-log；判活快照并入 app:metrics 见 kernel-liveness.ts）。
+    // 观测面失败不反噬启动主流程。
+    try {
+      startKernelLivenessWatch();
+    } catch (livenessErr) {
+      logDiag(`[kernel-liveness] 启动跳过: ${String(livenessErr)}`);
+    }
+    // 插件 venv 健康巡检（boot 后台，不阻塞前端加载）：断言「解释器在 + SDK 可
+    // import」，不健康即补装并再断言。venv 重建成功≠可用（装机 2026-10-18 三犯：
+    // 残缺 venv 无断言静默传播→合宿组全灭 50 分钟），此处是 launcher 侧断言面；
+    // uv 缺席/失败仅日志降级（与内核 autoprovision 同语义）。观测面失败不反噬
+    // 启动主流程——独立兜底，失败只留日志。
+    try {
+      const pluginsDir = kernelResourcePaths(process.resourcesPath).pluginsDir;
+      void patrolPluginVenvs({ pluginsDir }).then((report) => {
+        const broken = report.broken.map((b) => b.key);
+        logDiag(
+          `[venv-patrol] ok=${report.ok.length} repaired=${report.repaired.length} ` +
+            `broken=${JSON.stringify(broken)}`,
+        );
+        if (broken.length > 0) {
+          logDiag(`[venv-patrol] 仍故障: ${broken.join(",")}（详见上方 [VenvPatrol] 行）`);
+        }
+      });
+    } catch (patrolErr) {
+      logDiag(`[venv-patrol] 启动跳过（插件根解析失败）: ${String(patrolErr)}`);
+    }
   } catch (err) {
     // 错误消息自带用户指引（缺失→重装 / 超时→看日志重试），此处原样呈现
     const message = err instanceof Error ? err.message : String(err);
     console.error("[Electron] 内核启动失败:", message);
+    logDiag(`[main] 内核启动失败 -> app.exit(1): ${message}`);
     dialog.showErrorBox("灵汐助手 启动失败", message);
     app.exit(1);
     return;
@@ -505,6 +606,10 @@ function toggleMainWindow(): void {
  *
  * 窗口不存在/已销毁时静默返回。second-instance（双开唤起首实例）与
  * 系统通知点击共用同一恢复序列。
+ *
+ * show 无条件调用：Windows 前台锁下，窗口可见但在后台时单独 focus() 被
+ * OS 静默拒绝（toast 点击激活语境进程无前台权，窗口纹丝不动=「点击通知
+ * 无反应」），show 自带激活语义才真正置前。
  */
 export function focusMainWindow(win: BrowserWindow | null): void {
   if (!win || win.isDestroyed()) {
@@ -513,10 +618,24 @@ export function focusMainWindow(win: BrowserWindow | null): void {
   if (win.isMinimized()) {
     win.restore();
   }
-  if (!win.isVisible()) {
-    win.show();
-  }
+  win.show();
   win.focus();
+}
+
+/**
+ * 系统通知点击统一处理：聚焦主窗口；携带 threadId 时向渲染进程派发
+ * notification:navigate（渲染层据此跳转到通知对应的会话）。
+ *
+ * 窗口未就绪/已销毁时只安全无操作（聚焦路径同 focusMainWindow 的静默语义）。
+ */
+export function handleNotificationClick(
+  win: BrowserWindow | null,
+  threadId?: string,
+): void {
+  focusMainWindow(win);
+  if (threadId !== undefined && win && !win.isDestroyed()) {
+    win.webContents.send("notification:navigate", { threadId });
+  }
 }
 
 /**
@@ -524,7 +643,9 @@ export function focusMainWindow(win: BrowserWindow | null): void {
  * 由 Electron Notification 按宿主 OS 路由）。
  *
  * - 静音（silent: true）：提示音由渲染进程 Web Audio 统一合成，避免双重响
- * - 点击通知聚焦主窗口（交互请求的落点在应用内）
+ * - 点击通知聚焦主窗口；opts.threadId 为非空字符串时额外派发
+ *   notification:navigate 载荷（渲染层跳转到该会话）——threadId 缺失/非法
+ *   （非字符串/空串）一律退化为仅聚焦，与既有行为兼容
  * - 参数非法或宿主不支持时返回 false，不抛错（调用方按布尔处理）
  *
  * 不接触 ipcMain，便于单测。
@@ -532,6 +653,7 @@ export function focusMainWindow(win: BrowserWindow | null): void {
 export function showSystemNotification(opts: {
   title?: unknown;
   body?: unknown;
+  threadId?: unknown;
 }): boolean {
   if (!opts || typeof opts.title !== "string" || opts.title.length === 0) {
     console.warn("[Electron] notification:show 参数非法，需要非空 title", opts);
@@ -542,35 +664,44 @@ export function showSystemNotification(opts: {
     return false;
   }
   const body = typeof opts.body === "string" ? opts.body : "";
+  const threadId =
+    typeof opts.threadId === "string" && opts.threadId.length > 0
+      ? opts.threadId
+      : undefined;
   const notification = new Notification({
     title: opts.title,
     body,
     silent: true,
   });
   notification.on("click", () => {
-    focusMainWindow(mainWindow);
+    handleNotificationClick(mainWindow, threadId);
   });
   notification.show();
   return true;
 }
 
 /**
- * 应用壳进程树内存指标（监控页「插件」tab 全口径内存的应用壳段）。
+ * 应用壳进程树内存与 CPU 指标（监控页「插件」tab 全口径内存的应用壳段）。
  *
  * 汇总 app.getAppMetrics() 的全部 Electron 进程（主/渲染/GPU/utility）物理
  * 内存：workingSetSize 为 KB 口径（Electron MemoryInfo），Windows 上与任务
  * 管理器 working set 同义，与插件段 RSS / 内核段 RSS 同口径可加和。
+ *
+ * CPU 汇总：各进程 cpu.percentCPUUsage（Electron CPUUsage，距上次查询的
+ * CPU 百分比，首次查询为 0）逐进程求和为 totalCpuPercent。
  *
  * 不接触 ipcMain，便于单测。
  */
 export function collectAppMetrics(): {
   processCount: number;
   totalWorkingSetKb: number;
+  totalCpuPercent: number;
 } {
   const metrics = app.getAppMetrics();
   return {
     processCount: metrics.length,
     totalWorkingSetKb: metrics.reduce((sum, m) => sum + m.memory.workingSetSize, 0),
+    totalCpuPercent: metrics.reduce((sum, m) => sum + m.cpu.percentCPUUsage, 0),
   };
 }
 
@@ -650,7 +781,7 @@ function createChildWindow(opts: ChildWindowOptions): {
 
   hardenWindowNavigation(win);
   // 主窗口同款编辑面（子窗口输入区同样要能复制粘贴）
-  attachEditMenu(win, { withShortcuts: !isDevelopment() });
+  attachEditMenu(win);
 
   win.once("ready-to-show", () => {
     win.show();
@@ -714,21 +845,37 @@ function registerIpcHandlers(): void {
     return BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false;
   });
 
+  // WS 中继控制面（远端内核实时通道）：
+  //  - allow：渲染层声明当前内核基址（中继只转发到它，非开放代理）
+  //  - url：取中继 URL（票据/协议版本/补漏游标随行）
+  ipcMain.handle("ws:relay:allow", (_event, target: unknown) => {
+    ensureWsRelay()?.setAllowedTarget(typeof target === "string" ? target : null);
+    return true;
+  });
+  ipcMain.handle("ws:relay:url", async (_event, params: unknown) => {
+    const relay = ensureWsRelay();
+    if (!relay) return null;
+    await relay.ready.catch(() => 0);
+    return relay.buildUrl((params ?? {}) as Record<string, unknown>);
+  });
+
   // 认证会话镜像（渲染进程 localStorage 的强杀耐久备份）：refresh token 单次
   // 轮换后若 Chromium 批量提交尚未落盘即被强杀，stored 值已被服务端作废——
-  // 主进程文件同步写立即落入 OS 页缓存，进程强杀不丢。
+  // 主进程文件同步写立即落入 OS 页缓存，进程强杀不丢。落认证身份目录（机器
+  // 级跨安装稳定）：换目录重装后新 Chromium profile 的 localStorage 为空，
+  // 初始化链从镜像回读种子即免重登。
   ipcMain.handle("auth:session:save", (_event, refreshToken: unknown) => {
     if (refreshToken !== null && typeof refreshToken !== "string") {
       return false;
     }
     saveAuthSession(
-      app.getPath("userData"),
+      authIdentityDir,
       typeof refreshToken === "string" ? refreshToken : null,
     );
     return true;
   });
   ipcMain.handle("auth:session:load", () => {
-    return loadAuthSession(app.getPath("userData"));
+    return loadAuthSession(authIdentityDir);
   });
 
   // 装机版自动登录凭据（ADR 2026-10-02-packaged-auto-login-env-only）：load
@@ -824,7 +971,7 @@ function registerIpcHandlers(): void {
   // ===== 系统通知 IPC（渲染进程交互提醒经宿主 OS 原生通知呈现）=====
   ipcMain.handle(
     "notification:show",
-    (_event, opts: { title?: unknown; body?: unknown }) => {
+    (_event, opts: { title?: unknown; body?: unknown; threadId?: unknown }) => {
       return showSystemNotification(opts);
     },
   );
@@ -834,9 +981,14 @@ function registerIpcHandlers(): void {
     return pickDirectoryViaDialog(event);
   });
 
-  // ===== 应用壳进程树内存 IPC（监控页全口径内存的应用壳段）=====
+  // ===== 应用壳进程树内存/CPU + 内核日志判活 IPC（监控页应用壳段）=====
   ipcMain.handle("app:metrics", () => {
-    return collectAppMetrics();
+    return { ...collectAppMetrics(), kernelLiveness: currentKernelLiveness() };
+  });
+
+  // ===== 更新提示 IPC（P-24：启动检查结果的拉取兜底；推送通道 update:available）=====
+  ipcMain.handle(UPDATE_GET_AVAILABLE_CHANNEL, () => {
+    return currentUpdateInfo();
   });
 }
 
@@ -867,16 +1019,16 @@ function cleanup(): void {
     console.warn("[Electron] 注销快捷键失败:", err);
   }
 
-  // 停止窗口信息轮询
-  if (windowInfoPoller !== null) {
-    stopWindowInfoPolling(windowInfoPoller);
-    windowInfoPoller = null;
-  }
-
   // 停止可见性自愈巡检
   if (visibilityRecovery !== null) {
     visibilityRecovery.stop();
     visibilityRecovery = null;
+  }
+
+  // 停止内核日志判活轮询（壳退出清理）
+  if (kernelLivenessPoller !== null) {
+    kernelLivenessPoller.stop();
+    kernelLivenessPoller = null;
   }
 
   // 销毁托盘
@@ -911,6 +1063,80 @@ export function resolvePackagedUserData(
   return path.join(appDataPath, appName, "userdata", installId);
 }
 
+/**
+ * 认证身份目录（跨安装稳定，机器级）：token 签名密钥与认证会话镜像的落盘位。
+ *
+ * 有意不随安装身份（resolvePackagedUserData 的安装目录哈希）走：BUG-50 按
+ * 安装目录隔离的是 Chromium 磁盘缓存（损坏跨副本传染），认证身份则是机器
+ * 级事实源——内核用户库本就机器级共享（%APPDATA%\<appName>\agentos_kernel.db，
+ * BUG-85），同一账号体系配每安装一份签名密钥=换目录重装即全端令牌作废
+ * （2026-10-22 用户实测：七个安装身份=七套密钥，每次重装全量重登+已发给他
+ * 机的令牌一并作废）。
+ *
+ * @returns 形如 %APPDATA%\<appName>\identity 的稳定目录
+ */
+export function resolveAuthIdentityDir(
+  appDataPath: string,
+  appName: string,
+): string {
+  return path.join(appDataPath, appName, "identity");
+}
+
+/**
+ * 认证身份文件迁移种子：稳定位缺失而现役安装旧 userData 有同名文件时拷贝
+ * 过去（保留现役密钥=已发令牌不作废；保留会话镜像=重装后免重登）。失败只
+ * 记日志不阻断启动——迁移缺失的代价是首次启动后重新生成/重登，非致命。
+ */
+export function migrateIdentityFile(
+  fileName: string,
+  legacyDir: string,
+  identityDir: string,
+): void {
+  const target = path.join(identityDir, fileName);
+  if (fs.existsSync(target)) return;
+  const source = path.join(legacyDir, fileName);
+  try {
+    if (!fs.existsSync(source)) return;
+    fs.mkdirSync(identityDir, { recursive: true });
+    fs.copyFileSync(source, target);
+  } catch (err) {
+    console.warn(`[Electron] 认证身份文件迁移失败: ${fileName}`, err);
+  }
+}
+
+/**
+ * 旧身份目录候选（认证文件迁移源，新→旧）：现役 userData 优先，其余同构
+ * 哈希身份目录按目标文件 mtime 续后。换**新**目录重装时自身 userData 为空，
+ * 无接管则密钥再换代一次（全端令牌再作废一次）——本机 7 身份实证换目录
+ * 重装是常态而非例外（2026-10-22），迁移源必须跨身份扫描。
+ */
+export function legacyIdentityCandidates(
+  userDataDir: string,
+  fileName: string,
+): string[] {
+  const candidates = [userDataDir];
+  try {
+    const root = path.dirname(userDataDir); // ...\userdata
+    const own = path.basename(userDataDir);
+    candidates.push(
+      ...fs
+        .readdirSync(root, { withFileTypes: true })
+        .filter(
+          (e) =>
+            e.isDirectory() && e.name !== own && /^[0-9a-f]{12}$/.test(e.name),
+        )
+        .map((e) => path.join(root, e.name, fileName))
+        .filter((f) => fs.existsSync(f))
+        .map((f) => ({ f, m: fs.statSync(f).mtimeMs }))
+        .sort((a, b) => b.m - a.m)
+        .map((x) => x.f),
+    );
+  } catch {
+    // 身份根不可读：仅回退现役 userData 单源
+  }
+  return candidates;
+}
+
 // userData 定位必须先于抢锁：Windows 单实例锁键派生自 userData 目录
 // （Chromium ProcessSingleton 的消息窗口类名与 lockfile 均以它为源），
 // setPath 即改锁身份——「锁 key 含安装身份」由此成立。
@@ -923,6 +1149,112 @@ if (app.isPackaged) {
   );
   app.setPath("userData", userDataDir);
   console.info(`[Electron] userData: ${userDataDir}`);
+}
+// 认证身份目录（打包件=机器级稳定位；dev 沿用默认 userData，与打包件天然
+// 隔离——dev 内核是另一账号体系且无稳定密钥，镜像互窜会把打包件令牌喂给
+// dev 内核）。迁移先于任何消费：现役安装旧 userData 内的密钥/会话镜像先
+// 落稳定位，本次启动即无缝接续。
+const authIdentityDir = app.isPackaged
+  ? resolveAuthIdentityDir(app.getPath("appData"), app.getName())
+  : app.getPath("userData");
+if (app.isPackaged) {
+  for (const fileName of [TOKEN_SECRET_FILE, AUTH_SESSION_FILE]) {
+    for (const src of legacyIdentityCandidates(app.getPath("userData"), fileName)) {
+      // migrateIdentityFile 对已存在目标幂等早退：候选序=优先级序，首中即定
+      migrateIdentityFile(fileName, src, authIdentityDir);
+    }
+  }
+}
+// 允许渲染进程请求明文 http 远端（混合内容豁免）。
+//
+// 背景（2026-10-22 用户实测「连远端内核直接跳登录界面」的真因）：渲染页 origin
+// 是 app://（registerSchemesAsPrivileged secure=true=安全源），安全源发
+// http:// 属混合内容 → Chromium 直接拦掉，请求连对端都到不了；本地档因
+// 127.0.0.1 属可信源而豁免，掩盖了该缺陷。远端明文连接是产品已承认的过渡态
+// （连接卡有「明文过渡期」提示 + 对端内核 CORS 白名单显式放行该 origin），
+// 故此处放行明文子资源；HTTPS 域名就绪后本开关可撤（连同 CORS 白名单收紧）。
+//
+// 必须在 app ready 前设置（Chromium 命令行开关仅 ready 前生效）。
+app.commandLine?.appendSwitch?.("allow-running-insecure-content");
+
+// 远端内核实时通道中继（2026-10-22）：app:// 源=安全源，安全源发 ws:// 远端
+// 属混合内容 → 渲染层 WS 握手被浏览器拦（fetch/XHR 有 allow-running-insecure-content
+// 放行，WS 不在其列）。主进程起回环 WS 端点代转接；只转发到渲染层显式声明的
+// 当前内核基址（非开放代理）。内核零改动。
+//
+// 惰性启动（仅打包态）：dev 渲染页是 http://localhost（Vite），直连内核 WS 本就
+// 可用（无混合内容约束），无需中继；测试 import main 也不应带起监听副作用。
+let wsRelay: WsRelayHandle | null = null;
+function ensureWsRelay(): WsRelayHandle | null {
+  if (!app.isPackaged) return null;
+  if (wsRelay) return wsRelay;
+  wsRelay = startWsRelay();
+  wsRelay.ready
+    .then((p) => console.info(`[Electron] WS 中继就绪: ws://127.0.0.1:${p}/relay`))
+    .catch((err) => console.warn("[Electron] WS 中继启动失败（远端实时通道不可用）:", err));
+  return wsRelay;
+}
+
+// 应用壳诊断日志（观测埋点）：退出决策链（window-all-closed/before-quit/
+// 内核 exit）与未捕获异常落 userData/logs/electron-main.log——打包件 console.*
+// 无消费者，2026-10-10 整树退出（外部树杀 or 干净退出）无法辨别的直接缺口。
+initDiagLog(path.join(app.getPath("userData"), "logs"));
+logDiag(`[main] process start pid=${process.pid} isPackaged=${app.isPackaged}`);
+
+/** webContents 所属渲染进程号（已销毁等取不到 = null；观测面不因它阻断） */
+function webContentsProcessId(webContents: Electron.WebContents): number | null {
+  try {
+    return webContents.getProcessId();
+  } catch {
+    return null;
+  }
+}
+
+// 渲染进程崩溃观测（证据面先行，不自动重启不弹窗；处理函数见 renderer-health.ts）。
+// app 级事件覆盖全部窗口的渲染进程；进程号从事件携带的 webContents 取。
+app.on(
+  "render-process-gone",
+  (_event, webContents, details) => {
+    reportRenderProcessGone(details, webContentsProcessId(webContents), logDiag);
+  },
+);
+
+// 内核日志面判活观测（消费内核 log_liveness.rs 写出的 kernel.liveness 标记；
+// 模块职责见 kernel-liveness.ts）。轮询器在内核 boot 成功后起（startKernelLivenessWatch），
+// 停摆/恢复跃迁经 diag-log 留痕——同一停摆态只告警一次，恢复后重新武装。
+let kernelLivenessPoller: KernelLivenessPoller | null = null;
+
+function startKernelLivenessWatch(): void {
+  const logDir = managedKernelLogDir();
+  const markerPath =
+    logDir === null ? null : path.join(logDir, LIVENESS_MARKER_FILENAME);
+  kernelLivenessPoller?.stop();
+  kernelLivenessPoller = startKernelLivenessPoller({
+    markerPath,
+    onTransition: (snap) => {
+      if (snap.markerFound && !snap.healthy) {
+        const ageSecs =
+          snap.lastOkWriteAgeMs === null
+            ? "?"
+            : String(Math.round(snap.lastOkWriteAgeMs / 1000));
+        const line =
+          `[kernel-liveness] 内核日志写面停摆：标记 ${ageSecs}s 未刷新` +
+          `（阈值 ${KERNEL_LIVENESS_STALE_THRESHOLD_MS / 1000}s），疑似日志写者死亡`;
+        console.warn("[Electron]", line);
+        logDiag(line);
+      } else if (snap.healthy) {
+        const line = "[kernel-liveness] 内核日志写面活性恢复";
+        console.info("[Electron]", line);
+        logDiag(line);
+      }
+    },
+  });
+  logDiag(`[kernel-liveness] 判活轮询已启动 marker=${markerPath ?? "(路径不可知)"}`);
+}
+
+/** 当前内核日志判活快照（app:metrics 消费；轮询器未起 = 无可用标记） */
+function currentKernelLiveness(): KernelLivenessSnapshot {
+  return kernelLivenessPoller?.snapshot() ?? { ...KERNEL_LIVENESS_UNKNOWN };
 }
 
 // Windows toast 通知的进程身份：打包件与安装快捷方式同 AUMID；
@@ -950,6 +1282,8 @@ app.on("second-instance", () => {
 
 // 应用就绪后初始化
 app.whenReady().then(() => {
+  // 远端实时通道中继在 ready 后才起（测试环境 whenReady 不 resolve → 无监听副作用）
+  ensureWsRelay();
   console.info("[Electron] 应用启动中...");
 
   // 生产环境移除默认应用菜单（File/Edit/View/... 由自定义标题栏取代）；
@@ -967,14 +1301,16 @@ app.whenReady().then(() => {
   // 创建主窗口
   const win = createMainWindow();
 
+  // 更新提示面检查（P-24，不做自动更新）：启动时读一次版本清单（环境变量
+  // AGENTOS_UPDATE_MANIFEST_URL 注入；缺省禁用零网络）与新版本则推渲染层进
+  // 通知中心——fire-and-forget，不阻断启动序列
+  startUpdateCheck(win, { localVersion: app.getVersion() });
+
   // 注册全局快捷键
   registerGlobalShortcut();
 
   // 创建系统托盘
   createTray(win);
-
-  // 启动窗口信息轮询
-  windowInfoPoller = startWindowInfoPolling(win);
 
   console.info("[Electron] 应用启动完成");
 });
@@ -990,6 +1326,7 @@ app.on("activate", () => {
 
 // 所有窗口关闭时退出应用（非 macOS）
 app.on("window-all-closed", () => {
+  logDiag("[main] window-all-closed -> app.quit()");
   if (process.platform !== "darwin") {
     app.quit();
   }
@@ -997,6 +1334,7 @@ app.on("window-all-closed", () => {
 
 // 应用退出前清理资源
 app.on("before-quit", () => {
+  logDiag("[main] before-quit（干净退出路径开始：收内核树 + 存档）");
   // 窗口状态最后存档点：close 监听随本钩子移除，托盘退出等真退出路径
   // （不经 hide-to-tray 的 close 事件）只有这里能补存
   if (mainWindow && !mainWindow.isDestroyed()) {

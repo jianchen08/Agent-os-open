@@ -29,7 +29,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system" / "monitoring"
+_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "monitoring"
 
 
 def _load_server() -> Any:
@@ -254,7 +254,10 @@ def test_records_unknown_session_empty(server: Any, kr: Any) -> None:
         method="GET", query={"session_id": "nope"},
     ))
     assert status == 200
-    assert body == {"records": [], "total": 0, "session_id": "nope"}
+    assert body["records"] == [] and body["total"] == 0
+    assert body["session_id"] == "nope"
+    # X29-F1 分页契约：空页显式带 has_more=False（客户端停止翻页信号）
+    assert body["has_more"] is False
 
 
 def test_records_degrade_without_providers(server: Any, kr: Any) -> None:

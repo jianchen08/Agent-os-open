@@ -18,6 +18,66 @@ export interface FileTreeStatusConfigItem {
   label: string
 }
 
+/** 树节点数据结构（FileTreeWidget 通用树形数据契约） */
+export interface TreeNodeData {
+  /** 节点唯一标识 */
+  id?: string
+  /** 节点标题 */
+  title?: string
+  /** 节点图标 */
+  icon?: string
+  /** 节点状态 */
+  status?: string
+  /** 进度值（0-100） */
+  progress?: number
+  /** 子节点 */
+  children?: TreeNodeData[]
+  /** 节点描述 */
+  description?: string
+  /** 其他扩展字段 */
+  [key: string]: unknown
+}
+
+/** 树形组件配置属性（file_tree widget 外部配置面） */
+export interface TreeWidgetConfig {
+  /** 树标题 */
+  title?: string
+  /** 是否显示状态图标 */
+  showStatus?: boolean
+  /** 是否显示进度条 */
+  showProgress?: boolean
+  /** 默认展开层级（0=全折叠, -1=全展开） */
+  expandLevel?: number
+  /** 节点图标字段名 */
+  nodeIconField?: string
+  /** 节点标题字段名 */
+  nodeTitleField?: string
+  /** 节点状态字段名 */
+  nodeStatusField?: string
+  /** 子节点字段名 */
+  nodeChildrenField?: string
+  /** 状态显示配置 */
+  statusConfig?: Record<string, FileTreeStatusConfigItem>
+  /** 直接传入的树数据 */
+  data?: TreeNodeData[]
+  /** 是否显示搜索框 */
+  showSearch?: boolean
+  /** 是否显示状态筛选器（默认跟随 showStatus） */
+  showStatusFilter?: boolean
+  /** 默认筛选状态值（默认 'running'，空字符串表示显示全部） */
+  defaultStatusFilter?: string
+  /** 是否显示启用/禁用开关（默认 true，workspace:// 数据源自动 false） */
+  showEnabledToggle?: boolean
+  /** 节点点击回调（用于外部处理节点点击事件） */
+  onNodeClick?: (node: TreeNodeData) => void
+  /** 文件节点点击回调（用于打开文件编辑器） */
+  onFileClick?: (filePath: string, fileName: string) => void
+  /** 目录/链接行点击回调（目录选择场景追踪当前目录；文件行不触发） */
+  onDirectoryClick?: (node: TreeNodeData) => void
+  /** 会话 ID（用于按会话过滤/加载任务数据） */
+  sessionId?: string
+}
+
 /** 组件可接触的树节点最小结构（FileTreeWidget 的 TreeNodeData 结构兼容） */
 export interface FileTreeNodeRef {
   id?: string

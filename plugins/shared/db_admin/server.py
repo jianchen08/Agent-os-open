@@ -35,7 +35,7 @@ from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
 bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根（http_json）入 sys.path
 
-from http_json import (  # noqa: E402
+from _root_api import (  # noqa: E402
     decode_body as _decode_body,
     json_response as _json_response,
     ok as _ok,
@@ -158,9 +158,12 @@ async def db_admin_status() -> dict[str, Any]:
             "method": {"type": "string"},
             "plugin_id": {"type": "string"},
             "raw_body": {"type": "string"},
-            "headers": {"type": "object"},
-            "query": {"type": "object"},
-            "query_multi": {"type": "object"},
+            "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+            "query": {"type": "object", "additionalProperties": {"type": "string"}},
+            "query_multi": {
+                "type": "object",
+                "additionalProperties": {"type": "array", "items": {"type": "string"}},
+            },
         },
     },
 )

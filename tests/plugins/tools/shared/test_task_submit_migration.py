@@ -25,8 +25,8 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_TS_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools" / "task_submit"
-_SYSTEM_ROOT = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system"
+_TS_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "task_submit"
+_SYSTEM_ROOT = Path(__file__).resolve().parents[4] / "plugins" / "shared"
 
 # 0.2 平铺模块目录（与 task_submit/server.py 的 sys.path 装配一致）
 for _d in [_SYSTEM_ROOT, _SYSTEM_ROOT / "tasks", _SYSTEM_ROOT / "channel_api"]:
@@ -201,35 +201,21 @@ class TestTaskSubmitInheritParams:
     @pytest.mark.parametrize("mode", ["pipe", "workspace", ["pipe", "workspace"], ["pipe"], ["workspace"]])
     @pytest.mark.asyncio
     async def test_inherit_mode_valid_forms_pass_parsing(self, mod, mode):
-        """合法 mode（字符串/列表）应通过解析层（最终在 create_task 处失败是 mock 所致）。"""
+        """inherit_mode 已撤下（2026-10-20 裁定）：任何形态不校验、不报参数错
+        （解析只看 inherit_from；最终在 create_task 处失败是 mock 所致）。"""
         tool = self._make_tool(mod)
         result = await tool.execute(self._build_inputs(mode))
         assert result.error_code != "INVALID_INHERIT_MODE"
         assert result.error_code != "INVALID_INHERIT_PARAMS"
     @pytest.mark.parametrize("mode", ["invalid", ["invalid"], ["pipe", "invalid"]])
     @pytest.mark.asyncio
-    async def test_inherit_mode_invalid_forms_rejected(self, mod, mode):
-        """非法 mode 应返回 INVALID_INHERIT_MODE。"""
+    async def test_inherit_mode_retired_forms_ignored(self, mod, mode):
+        """inherit_mode 已撤下（2026-10-20 裁定）：非法形态也只忽略不校验，
+        解析只看 inherit_from——本桩无 state 聚合，失败码为
+        INHERIT_STATE_UNAVAILABLE（绝不再是任何 mode 校验错）。"""
         tool = self._make_tool(mod)
         result = await tool.execute(self._build_inputs(mode))
-        assert result.error_code == "INVALID_INHERIT_MODE"
-
-    @pytest.mark.asyncio
-    async def test_build_metadata_handles_list_mode_for_pipe(self, mod):
-        """mode=['pipe','workspace'] 时 metadata['inherit_pipe_from'] 应被设置。"""
-        tool = mod.TaskSubmitTool()
-        inputs = self._build_inputs(["pipe", "workspace"])
-        metadata = tool._build_metadata(inputs, inputs["goal"], inputs["acceptance_criteria"])
-        assert metadata.get("inherit") == inputs["inherit"]
-        assert metadata.get("inherit_pipe_from") == "src-task-001"
-
-    @pytest.mark.asyncio
-    async def test_build_metadata_no_pipe_mark_for_workspace_only(self, mod):
-        """mode=['workspace'] 不应设置 inherit_pipe_from。"""
-        tool = mod.TaskSubmitTool()
-        inputs = self._build_inputs(["workspace"])
-        metadata = tool._build_metadata(inputs, inputs["goal"], inputs["acceptance_criteria"])
-        assert "inherit_pipe_from" not in metadata
+        assert result.error_code == "INHERIT_STATE_UNAVAILABLE"
 
 
 # ── 核心行为：非容器任务提交成功路径 ──────────────────────
@@ -238,38 +224,52 @@ class TestTaskSubmitInheritParams:
 class TestTaskSubmitCoreSubmit:
     """任务提交：成功、执行器不可用降级、工作空间初始化失败。"""
 
-    def _patch_submit_deps(self, mod, monkeypatch, task: MagicMock | None = None) -> tuple[MagicMock, MagicMock]:
-        """把提交路径的依赖全部 mock 掉，返回 (task_service, provider)。
+    def _patch_submit_deps(self, mod, monkeypatch) -> MagicMock:
+        """把提交路径的依赖 mock 掉，返回 provider。
 
-        0.2 语义：任务提交即落库，不再调用 task_worker.submit_task
-        （管道执行由会话对话驱动），provider 仅服务 workspace_lifecycle 等。
+        GAP-1 语义：任务 = 管道，经统一出生协议派发（chat sender 由用例自注），
+        无 YAML 落库路径；provider 仅服务 workspace_lifecycle 等 sidecar 消费方。
         """
-        from unittest.mock import AsyncMock
-
-        task_service = MagicMock()
-        if task is not None:
-            task_service.create_task = AsyncMock(return_value=task)
-        task_service.hard_delete = AsyncMock()
-        task_service.save_task = AsyncMock()
-        task_service.get_root_task_id.return_value = None
-
         provider = MagicMock()
         provider.get.return_value = None  # 无 task_worker 实例（0.2 现状）
 
-        monkeypatch.setattr(mod.TaskSubmitTool, "_get_task_service", lambda self: task_service)
         async def _ok(self, t, l):
             return (True, "", "")
 
+        async def _base_config(self, target_id):
+            return (
+                {
+                    "level": "L2",
+                    "is_active": True,
+                    "tool_ids": ["file_read"],
+                    "system_prompt": "stub-persona",
+                },
+                None,
+            )
+
         monkeypatch.setattr(mod.TaskSubmitTool, "_validate_target_agent", _ok)
+        monkeypatch.setattr(mod.TaskSubmitTool, "_get_agent_base_config", _base_config)
         monkeypatch.setattr(mod.TaskSubmitTool, "_check_dependencies_exist", lambda self, d: [])
         monkeypatch.setattr(mod, "_get_service_provider", lambda: provider)
-        return task_service, provider
+        # 出生协议第三段（提交期同步建工作空间）准备器替身——见 tests/_task_birth_workspace.py
+        from tests import _task_birth_workspace as _birth_ws
+
+        monkeypatch.setattr(
+            mod,
+            "_workspace_preparer",
+            _birth_ws.make_preparer(
+                result={
+                    "workspace": "D:/proj",
+                    "task.ws_meta": {"mode": "plain", "path": "D:/proj"},
+                }
+            ),
+        )
+        return provider
 
     @pytest.mark.asyncio
     async def test_submit_non_container_success(self, mod, monkeypatch):
-        """非容器任务提交成功：返回 task_id + L1 可见 workspace（提交即落库，无 worker 转发）。"""
-        task = _make_task()
-        task_service, provider = self._patch_submit_deps(mod, monkeypatch, task)
+        """非容器任务提交成功：返回 task_id + L1 可见 workspace（任务 = 管道，无 YAML 落库）。"""
+        provider = self._patch_submit_deps(mod, monkeypatch)
 
         calls: list[dict] = []
 
@@ -287,6 +287,10 @@ class TestTaskSubmitCoreSubmit:
                 "target_type": "agent",
                 "target_id": "general_agent",
                 "workspace": "D:/proj",
+                "user_id": "user-1",
+                # 完备性并集（autonomous 成员 required_state_inputs）：会话坐标经
+                # 提交参数补齐（身份字段由 _patch_submit_deps 的基座钩子替身供给）
+                "session_id": "sess-1",
             }
         )
         mod._chat_sender = None
@@ -295,9 +299,11 @@ class TestTaskSubmitCoreSubmit:
         # 2026-08-22 短化定案（8db4c6b16）：LLM 工具面回传 12 位短 id
         assert output["task_id"] == "pipe_gen_abc123"[:12]
         assert output["pipeline_id"] == "pipe_gen_abc123"[:12]
-        assert output["status"] == "running"
+        # ADR 2026-10-17 修硬编码假信号：提交回执如实返回出生态 pending
+        # （任务已受理/工作空间已就绪；终态归评估闸门写）
+        assert output["status"] == "pending"
         assert output["workspace"] == "D:/proj"
-        task_service.create_task.assert_not_called()
+        provider.get.assert_not_called()
 
     # GAP-1 统一后移除：test_workspace_init_failure_cleans_up（提交期不再初始化工作空间/is_root 查询/继承参数传 create_task——见 e2e 缺口文档延伸节）
 

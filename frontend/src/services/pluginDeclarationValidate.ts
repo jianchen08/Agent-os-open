@@ -35,14 +35,15 @@ export interface PluginDeclarationInput {
   externalMcp?: boolean
 }
 
-/** 流式协议事件清单（LLM 流式 8 事件 + 生命周期事件，方案 2026-08-26 定稿；
- * 旧 stream_chunk/thinking_* 已退役）。单一真值源在 config/kernel/kernel_capabilities/
- * streaming.json，此处仅人读速览——机械一致性由内核加载器结构校验兜底（事件
- * 不在契约内网关 fail-closed 拒收；前端按本清单确认有 handler 消费）。 */
+/** 流式协议事件清单（单一真值源 = config/kernel/kernel_capabilities/
+ * streaming.json capabilities[].method 全集，插件声明面校验用）。
+ * 机械一致性由内核加载器结构校验兜底（事件不在契约内网关 fail-closed
+ * 拒收；前端按同一协议消费——本清单漂移即 pluginDeclarationValidate
+ * 真实语料测试红）。 */
 const STREAMING_EVENTS = new Set([
-  'block_start', 'text_delta', 'reasoning_delta', 'tool_call_delta',
-  'block_end', 'usage', 'finish', 'keepalive',
-  'stream_start', 'tool_start', 'tool_result', 'new_message', 'stream_end', 'stream_error',
+  'stream_start', 'stream_chunk', 'thinking_start', 'thinking_chunk', 'thinking_end',
+  'tool_start', 'tool_result', 'new_message', 'stream_end',
+  'pipeline_round_finished', 'run_failed', 'stream_error', 'plugin_error',
 ])
 
 export interface PluginValidationResult {
@@ -71,8 +72,17 @@ function nonEmptyString(v: unknown): boolean {
   return typeof v === 'string' && v.trim().length > 0
 }
 
-/** 校验一个 UIInputFormField 形状（page.schema[].fields[] / chat_card form.fields[]） */
-function validateFields(fields: unknown, ctx: string, errs: string[], warns: string[]): void {
+/** 校验一个 UIInputFormField 形状（page.schema[].fields[] / chat_card form.fields[]）。
+ * widgetLevelFieldsUri：widget 声明 props.fieldsUri 在场（fields 整组由端点下发，
+ * 渲染层拉取后合并并摘除 fieldsUri）——字段级 options/datasource 非必需，
+ * select 无 options 属合法形态，不误标「下拉为空」。 */
+function validateFields(
+  fields: unknown,
+  ctx: string,
+  errs: string[],
+  warns: string[],
+  widgetLevelFieldsUri = false,
+): void {
   if (fields === undefined || fields === null) return
   if (!Array.isArray(fields)) {
     errs.push(`${ctx}.fields 应为数组`)
@@ -93,10 +103,11 @@ function validateFields(fields: unknown, ctx: string, errs: string[], warns: str
       warns.push(`${ctx}.fields[${i}] name=${String(name)} 未知 type=${type}（将落回 string 渲染）`)
     }
     // select/multiselect/radio/checkbox 下拉型字段缺 options 且无动态源 → 空下拉
+    // （widget 级 fieldsUri 在场时选项面由端点下发，不误标）
     if (typeof type === 'string' && ['select', 'multiselect', 'radio', 'checkbox'].includes(type)) {
       const hasOptions = Array.isArray(rec.options) && rec.options.length > 0
       const hasDatasource = nonEmptyString(rec.datasourceUri)
-      if (!hasOptions && !hasDatasource) {
+      if (!hasOptions && !hasDatasource && !widgetLevelFieldsUri) {
         warns.push(`${ctx}.fields[${i}] name=${String(name)} type=${type} 缺 options/datasourceUri（下拉为空）`)
       }
     }
@@ -249,8 +260,10 @@ export function validatePluginDeclaration(
     if (w.space !== undefined && !nonEmptyString(w.space)) {
       warnings.push(`${ctx} id=${String(w.id)} space 非字符串`)
     }
-    const wProps = (w as { props?: { fields?: unknown } }).props
-    validateFields(wProps?.fields, `${ctx}.props`, errors, warnings)
+    const wProps = (w as { props?: { fields?: unknown; fieldsUri?: unknown } }).props
+    // widget 级 fieldsUri = select 字段的合法动态源形态（选项面由端点下发，
+    // 如 llm_core thinking_strength）——传给字段校验消除「缺 options」误标
+    validateFields(wProps?.fields, `${ctx}.props`, errors, warnings, nonEmptyString(wProps?.fieldsUri))
   }
 
   validateStreaming(input.streaming, errors, warnings)

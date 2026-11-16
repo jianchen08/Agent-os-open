@@ -6,13 +6,13 @@
 存在性预检就把挂载源交给 docker——WSL docker 下 daemon 对不存在的 bind mount
 源静默自动创建空目录，命令落空目录却以成功假象通过。
 
-契约：挂载源不存在 → 拒绝创建容器（返回 None，调用方标 blocked），manager
-不被触达；挂载源存在 → 正常走 manager。
+契约：挂载源不存在 → 拒绝创建容器（返回 (None, None)，调用方标 blocked），
+环境服务不被触达；挂载源存在 → 经服务正门（isolation.create_env）落地。
 """
 import sys
-import types
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -20,7 +20,7 @@ import tests._isolation_path  # noqa: F401  # 注入 isolation 插件目录到 s
 
 _ISOLATION_GUARD_DIR = str(
     Path(__file__).resolve().parent.parent
-    / "plugins" / "shared" / "pipeline" / "input" / "isolation_guard",
+    / "plugins" / "shared" / "isolation_guard",
 )
 if _ISOLATION_GUARD_DIR in sys.path:
     sys.path.remove(_ISOLATION_GUARD_DIR)
@@ -34,19 +34,26 @@ from plugin import IsolationGuard  # noqa: E402
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _reset_env_caller() -> Any:
+    """每用例后摘除注入的 caller 假身（模块级全局，防跨用例泄漏）。"""
+    yield
+    plugin_module.set_env_caller(None)
+
+
 def _make_guard() -> IsolationGuard:
     with patch("decider.IsolationDecider"), \
          patch.object(IsolationGuard, "_detect_docker", return_value=(True, "")):
-        return IsolationGuard(config={"providers": {"wsl_native": {"enabled": False}}})
+        return IsolationGuard(config={"providers": {"wsl_native": {"enabled": False}, "linux_native": {"enabled": False}}})
 
 
 def _make_ctx() -> object:
-    from pipeline.plugin import PluginContext
+    from _libs.pipeline_base.plugin import PluginContext
 
     return PluginContext(state={})
 
 
-def _run(coro):
+def _run(coro: Any) -> Any:
     import asyncio
 
     loop = asyncio.new_event_loop()
@@ -56,41 +63,50 @@ def _run(coro):
         loop.close()
 
 
-def test_dangling_workspace_refuses_without_touching_manager(tmp_path, monkeypatch):
-    """workspace 指向不存在的目录 → 返回 None，manager 零触达（fail-closed）。"""
+def _spy_caller(calls: list[dict[str, Any]]) -> Any:
+    """记录调用且原样返回成功信封的 caller 假身（触达断言用）。"""
+
+    async def _call(tool_name: str, args: dict[str, Any]) -> Any:
+        calls.append({"tool_name": tool_name, "args": args})
+        return {"success": True, "data": {"env_id": "cua-real_ws", "status": "ready"}}
+
+    return _call
+
+
+def test_dangling_workspace_refuses_without_touching_service(tmp_path: Path) -> None:
+    """workspace 指向不存在的目录 → 返回 (None, None)，环境服务零触达（fail-closed）。"""
     guard = _make_guard()
     dangling = tmp_path / "no_such_ws__wt_deadbeef"
-    manager = MagicMock()
-    manager.get_or_create_environment = AsyncMock()
-    monkeypatch.setattr(guard, "_get_manager", lambda: manager)
+    calls: list[dict[str, Any]] = []
+    plugin_module.set_env_caller(_spy_caller(calls))
 
     out = _run(guard._get_or_create_container(str(dangling), _make_ctx()))
 
-    assert out is None
-    manager.get_or_create_environment.assert_not_awaited()
+    assert out == (None, None)
+    assert calls == []
 
 
-def test_existing_workspace_goes_through_manager(tmp_path, monkeypatch):
-    """workspace 真实存在 → 正常请求 manager 创建容器，返回 env_id。"""
+def test_existing_workspace_goes_through_service(tmp_path: Path) -> None:
+    """workspace 真实存在 → 经服务正门落地，返回 (env_id, exec_backend)。"""
     guard = _make_guard()
     ws = tmp_path / "real_ws"
     ws.mkdir()
-    env = types.SimpleNamespace(status="READY", env_id="cua-real_ws")
-    manager = MagicMock()
-    manager.get_or_create_environment = AsyncMock(return_value=env)
-    monkeypatch.setattr(guard, "_get_manager", lambda: manager)
+    calls: list[dict[str, Any]] = []
+    plugin_module.set_env_caller(_spy_caller(calls))
 
-    out = _run(guard._get_or_create_container(str(ws), _make_ctx()))
+    env_id, backend = _run(guard._get_or_create_container(str(ws), _make_ctx()))
 
-    assert out == "cua-real_ws"
-    manager.get_or_create_environment.assert_awaited_once()
+    assert env_id == "cua-real_ws"
+    assert backend is None
+    assert len(calls) == 1
+    assert calls[0]["tool_name"] == "isolation.create_env"
+    assert calls[0]["args"]["workspace"] == str(ws)
 
 
-def test_none_workspace_short_circuits(tmp_path, monkeypatch):
-    """workspace 为空 → 原样 None（非隔离路径，不触发存在性检查）。"""
+def test_none_workspace_short_circuits(tmp_path: Path) -> None:
+    """workspace 为空 → 原样 (None, None)（非隔离路径，不触发存在性检查）。"""
     guard = _make_guard()
-    manager = MagicMock()
-    manager.get_or_create_environment = AsyncMock()
-    monkeypatch.setattr(guard, "_get_manager", lambda: manager)
-    assert _run(guard._get_or_create_container(None, _make_ctx())) is None
-    manager.get_or_create_environment.assert_not_awaited()
+    calls: list[dict[str, Any]] = []
+    plugin_module.set_env_caller(_spy_caller(calls))
+    assert _run(guard._get_or_create_container(None, _make_ctx())) == (None, None)
+    assert calls == []

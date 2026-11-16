@@ -11,6 +11,11 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+# 持久浏览器运行时（bridge.yaml browser 段启用时需要；仅投屏面依赖
+# websocket-client，MCP 代理面零额外依赖）。
+browser = [
+    "websocket-client>=1.6",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["."]

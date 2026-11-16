@@ -9,7 +9,7 @@
  * 匹配规则：
  * - status ∈ {pending, entered}（未点进入对话与已进入对话均算未决）
  * - mode === 'conversation'（choice 需显式选选项、notification 不阻塞，均不解除）
- * - 归属同 getEnteredForPipeline：pipelineId 精确命中 / 缺失时 threadId 兼容
+ * - 归属规则：pipelineId 精确命中 / 缺失时 threadId 兼容
  * - 同管道多条全部返回（用户发消息 == 明确解除意图，不做歧义豁免）
  */
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -82,7 +82,7 @@ describe('getPendingConversationsForPipeline 精确归属', () => {
     expect(hits).toEqual([])
   })
 
-  it('pipelineId 缺失时允许 threadId 命中（旧命名空间兼容，同 getEnteredForPipeline）', () => {
+  it('pipelineId 缺失时允许 threadId 命中（旧命名空间兼容）', () => {
     seed(conv({ requestId: 'a', pipelineId: undefined, threadId: 'P1' }))
     const hits = useInteractionStore.getState().getPendingConversationsForPipeline('P1')
     expect(hits.map((h) => h.requestId)).toEqual(['a'])

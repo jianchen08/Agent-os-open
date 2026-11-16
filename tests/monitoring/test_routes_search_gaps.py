@@ -2,25 +2,28 @@
 """monitoring routes_search 本体缺口补测（行号锚定 2026-09-13 插桩车道）。
 
 既有 test_http_routes.py 只在 server 分发层 stub routes_search；本文件直测
-search 域本体：
+search 域本体（C2 刀2 后数据源 = db-read 契约，替身 = _libs/testing 共享
+FakeDbRead：真 SQL 落测试自有 sqlite + tenant 档收窄包装仿真）：
 
-1. ``_tenant_pipeline_ids``：租户缺失 / 库缺失 / 真库 run_status 簿记键直查 /
-   库损坏 fail-closed → None（绝不全量兜底）；
-2. ``_search_sessions``：租户缺失 / 库缺失 / 大小写不敏感子串 / 租户隔离 /
-   LIKE 通配符显式转义（% _ \\ 不充当模式）/ last_active_at 排序 / limit /
-   库损坏 → []；
+1. ``_tenant_pipeline_ids``：租户缺失 / 契约失败 fail-closed → None（绝不
+   全量兜底）/ 真库 run_status 簿记键直查（身份经 authorization 穿线）/
+   limit / 他租户谓词值过度限制；
+2. ``_search_sessions``：租户缺失 / 大小写不敏感子串 / 租户隔离 / LIKE
+   通配符显式转义（% _ \\ 不充当模式）/ last_active_at 排序 / limit /
+   契约失败 → []；
 3. ``_search_messages``：不可见集 fail-closed / 管道白名单过滤 / 前览子串
    匹配 / 无前览跳过 / 200 字符截断 / limit 命中即返；
 4. ``search()``：type 非法 ValueError / 空词空结果 / 租户缺失 fail-closed /
    type 三值分流。
 
-内核库走真实 SQLite tmp 库（sessions/runs 表与内核落库同形）；
-kernel_reads/execution_records 桥为外部依赖 stub。
+收窄执法本体由 Rust 契约测试承担（read_faces/tests.rs）；本文件钉插件侧
+SQL 形状与装配契约。
 """
 
 from __future__ import annotations
 
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -29,24 +32,25 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-# kernel_db 位于 plugins/shared 根（共享平铺层），monitoring conftest 只注入
-# 插件目录——本文件自补 shared 根（去重插入，防车道残留目录抢占解析）。
+# kernel_reads/db_read/_libs 位于 plugins/shared 根（共享平铺层），monitoring
+# conftest 只注入插件目录——本文件自补 shared 根（去重插入，防车道残留目录
+# 抢占解析）。
 _SHARED_ROOT = str(Path(__file__).resolve().parents[2] / "plugins" / "shared")
-if _SHARED_ROOT in __import__("sys").path:
-    __import__("sys").path.remove(_SHARED_ROOT)
-__import__("sys").path.insert(0, _SHARED_ROOT)
+if _SHARED_ROOT in sys.path:
+    sys.path.remove(_SHARED_ROOT)
+sys.path.insert(0, _SHARED_ROOT)
 
-import routes_search  # noqa: E402 — tests/monitoring/conftest 注入插件目录
+import kernel_reads  # noqa: E402 — tests/monitoring/conftest 注入插件目录
+import routes_search  # noqa: E402
+from _libs.testing.db_read_fake import FakeDbRead  # noqa: E402
 
 
 @pytest.fixture
-def kernel_db_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """真实 tmp 内核库（sessions / pipeline_state 同形表）+ kernel_db_path 指向它。
+def kernel_db_file(tmp_path: Path) -> Path:
+    """真实 tmp 库（sessions / pipeline_state 同形表），供替身执行真 SQL。
 
     runs 表已退役（ADR 2026-09-18）：执行过 = pipeline_state 有 run_status 簿记键。
     """
-    import kernel_db
-
     db = tmp_path / "agentos_kernel.db"
     conn = sqlite3.connect(db)
     conn.execute(
@@ -77,16 +81,24 @@ def kernel_db_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     conn.commit()
     conn.close()
-    monkeypatch.setattr(kernel_db, "kernel_db_path", lambda: db)
     return db
 
 
-def _corrupt_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import kernel_db
+@pytest.fixture(autouse=True)
+def _reset_kernel_reads_providers():
+    """用例后清空 kernel_reads provider 注册表（db-read 注入不跨用例渗漏）。"""
+    yield
+    kernel_reads.reset_providers()
 
-    db = tmp_path / "corrupt.db"
-    db.write_bytes(b"not a sqlite file" * 10)
-    monkeypatch.setattr(kernel_db, "kernel_db_path", lambda: db)
+
+def _install_db_read(
+    db_path: Path,
+    token_tenants: dict[str, str] | None = None,
+    fail: Exception | None = None,
+) -> FakeDbRead:
+    fake = FakeDbRead(db_path, token_tenants, fail)
+    kernel_reads.set_provider("db-read", fake.provider)
+    return fake
 
 
 # ═══════════════════════════════════════════════════════════
@@ -95,26 +107,39 @@ def _corrupt_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestTenantPipelineIds:
-    def test_missing_tenant_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        assert routes_search._tenant_pipeline_ids("") is None
+    async def test_missing_tenant_returns_none(self) -> None:
+        fake = _install_db_read(Path("unused.db"))
+        assert await routes_search._tenant_pipeline_ids("") is None
+        assert fake.calls == []  # 身份缺失不发起契约查询（fail-closed 前置）
 
-    def test_missing_db_returns_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        import kernel_db
+    async def test_contract_failure_returns_none(self, tmp_path: Path) -> None:
+        # 通道异常 / 内核 403 信封（无凭证）一律 None——绝不退化全量兜底
+        _install_db_read(
+            tmp_path / "nope.db", {"tok-1": "tenant-1"}, fail=RuntimeError("bridge down")
+        )
+        assert await routes_search._tenant_pipeline_ids("tenant-1", "tok-1") is None
 
-        monkeypatch.setattr(kernel_db, "kernel_db_path", lambda: tmp_path / "nope.db")
-        assert routes_search._tenant_pipeline_ids("tenant-1") is None
+        _install_db_read(tmp_path / "nope.db", token_tenants={})
+        assert await routes_search._tenant_pipeline_ids("tenant-1", "anon") is None
 
-    def test_real_db_returns_tenant_pipelines(self, kernel_db_file: Path) -> None:
-        ids = routes_search._tenant_pipeline_ids("tenant-1")
+    async def test_real_db_returns_tenant_pipelines(self, kernel_db_file: Path) -> None:
+        fake = _install_db_read(kernel_db_file, {"tok-1": "tenant-1"})
+        ids = await routes_search._tenant_pipeline_ids("tenant-1", "tok-1")
         assert ids == {"pipe-1", "pipe-2"}
+        # 身份与数据面逐值穿线（face=pipeline_state，tenant 档）
+        assert fake.calls[0]["face"] == "pipeline_state"
+        assert fake.calls[0]["_authorization"] == "tok-1"
+        assert fake.calls[0]["params"]["tenant"] == "tenant-1"
 
-    def test_limit_respected(self, kernel_db_file: Path) -> None:
-        ids = routes_search._tenant_pipeline_ids("tenant-1", limit=1)
+    async def test_limit_respected(self, kernel_db_file: Path) -> None:
+        _install_db_read(kernel_db_file, {"tok-1": "tenant-1"})
+        ids = await routes_search._tenant_pipeline_ids("tenant-1", "tok-1", limit=1)
         assert ids == {"pipe-1"}
 
-    def test_corrupt_db_fail_closed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        _corrupt_db(tmp_path, monkeypatch)
-        assert routes_search._tenant_pipeline_ids("tenant-1") is None
+    async def test_wrong_tenant_predicate_over_restricts(self, kernel_db_file: Path) -> None:
+        # 内层租户谓词值与身份租户不一致 = 过度限制（空集），绝不越界到他租户
+        _install_db_read(kernel_db_file, {"tok-1": "tenant-1"})
+        assert await routes_search._tenant_pipeline_ids("tenant-2", "tok-1") == set()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -123,38 +148,42 @@ class TestTenantPipelineIds:
 
 
 class TestSearchSessions:
-    def test_missing_tenant_returns_empty(self) -> None:
-        assert routes_search._search_sessions("x", 20, "") == []
+    async def test_missing_tenant_returns_empty(self) -> None:
+        fake = _install_db_read(Path("unused.db"))
+        assert await routes_search._search_sessions("x", 20, "") == []
+        assert fake.calls == []
 
-    def test_missing_db_returns_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        import kernel_db
+    async def test_contract_failure_returns_empty(self, tmp_path: Path) -> None:
+        _install_db_read(
+            tmp_path / "nope.db", {"tok-1": "tenant-1"}, fail=RuntimeError("bridge down")
+        )
+        assert await routes_search._search_sessions("x", 20, "tenant-1", "tok-1") == []
 
-        monkeypatch.setattr(kernel_db, "kernel_db_path", lambda: tmp_path / "nope.db")
-        assert routes_search._search_sessions("x", 20, "tenant-1") == []
-
-    def test_case_insensitive_substring_tenant_isolated(
+    async def test_case_insensitive_substring_tenant_isolated(
         self, kernel_db_file: Path
     ) -> None:
-        hits = routes_search._search_sessions("lingxi", 20, "tenant-1")
+        _install_db_read(kernel_db_file, {"tok-1": "tenant-1"})
+        hits = await routes_search._search_sessions("lingxi", 20, "tenant-1", "tok-1")
         assert [h["id"] for h in hits] == ["th-b"]
 
-        hits = routes_search._search_sessions("小说", 20, "tenant-1")
+        hits = await routes_search._search_sessions("小说", 20, "tenant-1", "tok-1")
         assert [h["id"] for h in hits] == ["th-a"]
         # 租户隔离：tenant-2 的命中绝不出现在 tenant-1 视角
         assert all(h["id"] != "th-c" for h in hits)
 
-    def test_like_wildcards_are_literal(self, kernel_db_file: Path) -> None:
+    async def test_like_wildcards_are_literal(self, kernel_db_file: Path) -> None:
         """% _ \\ 显式转义：用户输入不充当 LIKE 模式（字面子串匹配）。
 
         "%" 命中且仅命中标题含字面 % 的 th-d——若 % 是通配符应命中全部 4 行；
         "_" 无任何字面命中——若 _ 是通配符应命中全部。
         """
-        assert routes_search._search_sessions("_", 20, "tenant-1") == []
-        assert routes_search._search_sessions("\\", 20, "tenant-1") == []
-        hits = routes_search._search_sessions("%", 20, "tenant-1")
+        _install_db_read(kernel_db_file, {"tok-1": "tenant-1"})
+        assert await routes_search._search_sessions("_", 20, "tenant-1", "tok-1") == []
+        assert await routes_search._search_sessions("\\", 20, "tenant-1", "tok-1") == []
+        hits = await routes_search._search_sessions("%", 20, "tenant-1", "tok-1")
         assert [h["id"] for h in hits] == ["th-d"]
 
-    def test_ordering_and_limit(self, kernel_db_file: Path) -> None:
+    async def test_ordering_and_limit(self, kernel_db_file: Path) -> None:
         """last_active_at 优先、updated_at 兜底降序；limit 截断。"""
         conn = sqlite3.connect(kernel_db_file)
         conn.executemany(
@@ -168,14 +197,11 @@ class TestSearchSessions:
         conn.commit()
         conn.close()
 
-        hits = routes_search._search_sessions("order probe", 20, "tenant-1")
+        _install_db_read(kernel_db_file, {"tok-1": "tenant-1"})
+        hits = await routes_search._search_sessions("order probe", 20, "tenant-1", "tok-1")
         assert [h["id"] for h in hits] == ["th-f", "th-e"]
-        limited = routes_search._search_sessions("order probe", 1, "tenant-1")
+        limited = await routes_search._search_sessions("order probe", 1, "tenant-1", "tok-1")
         assert [h["id"] for h in limited] == ["th-f"]
-
-    def test_corrupt_db_returns_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        _corrupt_db(tmp_path, monkeypatch)
-        assert routes_search._search_sessions("x", 20, "tenant-1") == []
 
 
 # ═══════════════════════════════════════════════════════════
@@ -280,12 +306,17 @@ class TestSearchEntry:
         assert out == {"query": q, "type": "all", "sessions": [], "messages": []}
 
     async def test_missing_tenant_fail_closed(self, kernel_db_file: Path) -> None:
-        """租户缺失：q 非空也返回空集（跨租户泄露防线，不报错）。"""
+        """租户缺失：q 非空也返回空集（跨租户泄露防线，不报错、不发查询）。"""
+        fake = _install_db_read(kernel_db_file, {"tok-1": "tenant-1"})
         out = await routes_search.search("灵汐", type="all", tenant_id="")
         assert out["sessions"] == [] and out["messages"] == []
+        assert fake.calls == []
 
     async def test_type_session_scopes_to_sessions(self, kernel_db_file: Path) -> None:
-        out = await routes_search.search("lingxi", type="session", tenant_id="tenant-1")
+        _install_db_read(kernel_db_file, {"tok-1": "tenant-1"})
+        out = await routes_search.search(
+            "lingxi", type="session", tenant_id="tenant-1", authorization="tok-1"
+        )
         assert [s["id"] for s in out["sessions"]] == ["th-b"]
         assert out["messages"] == []
 
@@ -300,9 +331,14 @@ class TestSearchEntry:
                 ],
             },
         )
-        out = await routes_search.search("lingxi", type="message", tenant_id="tenant-1")
+        _install_db_read(kernel_db_file, {"tok-1": "tenant-1"})
+        out = await routes_search.search(
+            "lingxi", type="message", tenant_id="tenant-1", authorization="tok-1"
+        )
         assert out["sessions"] == []
         assert [m["id"] for m in out["messages"]] == ["m1"]
 
-        out = await routes_search.search("lingxi", type="all", tenant_id="tenant-1")
+        out = await routes_search.search(
+            "lingxi", type="all", tenant_id="tenant-1", authorization="tok-1"
+        )
         assert len(out["sessions"]) == 1 and len(out["messages"]) == 1

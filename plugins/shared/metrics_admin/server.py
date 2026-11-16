@@ -32,7 +32,7 @@ from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
 bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根（http_json）入 sys.path
 
-from http_json import (  # noqa: E402
+from _root_api import (  # noqa: E402
     json_response as _json_response,
     ok as _ok,
     protocol_error as _error,
@@ -123,8 +123,8 @@ async def metrics_admin_status() -> dict[str, Any]:
             "method": {"type": "string"},
             "plugin_id": {"type": "string"},
             "raw_body": {"type": "string"},
-            "headers": {"type": "object"},
-            "query": {"type": "object"},
+            "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+            "query": {"type": "object", "additionalProperties": {"type": "string"}},
         },
     },
 )

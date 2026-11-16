@@ -19,7 +19,7 @@ import pytest
 
 # ── 路径注入：memory 工具自包含（Tool/ToolExecutionResult 就地定义）──
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_MEM_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "memory"
+_MEM_DIR = _REPO_ROOT / "plugins" / "shared" / "memory"
 _s = str(_MEM_DIR)
 # 强制置顶（不只在缺席时插入）：车道共跑时其它插件的 tool.py 目录可能已占住
 # path 前位，逐出缓存后仍会按前位解析到错误实现（共跑 AttributeError：

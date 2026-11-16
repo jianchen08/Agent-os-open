@@ -18,7 +18,7 @@ import pytest
 pytestmark = pytest.mark.integration
 
 HERE = Path(__file__).parent
-BROWSER_PLUGIN = HERE.parent.parent.parent.parent / "plugins" / "shared" / "tools" / "browser"
+BROWSER_PLUGIN = HERE.parent.parent.parent.parent / "plugins" / "shared" / "browser"
 BRIDGE_DIR = HERE.parent.parent.parent.parent / "mcp-servers" / "mcp-bridge"
 
 sys.path.insert(0, str(BRIDGE_DIR))
@@ -86,7 +86,9 @@ class TestServerSurface:
     def test_six_tools_registered(self):
         plugin = _load_browser_server().plugin
         registered = set(plugin._tools.keys())
-        assert registered == set(BROWSER_TOOLS)
+        # 六件 LLM 工具 + http.handle（/ext/browser_tool/live 直播换票 REST 面，
+        # 经 plugin.json http_endpoints 声明承接，不入 LLM 工具面）。
+        assert registered == set(BROWSER_TOOLS) | {"http.handle"}
 
     def test_registered_schemas_match_manifest(self):
         plugin = _load_browser_server().plugin
@@ -94,8 +96,13 @@ class TestServerSurface:
             manifest = json.load(f)
         declared = {t["name"]: t for t in manifest["capabilities"]["tools"]}
         for name, tooldef in plugin._tools.items():
+            if name not in declared:
+                continue  # http.handle 走 http_endpoints 声明面，不在 capability tools
             assert tooldef.schema == declared[name]["input_schema"], name
             assert tooldef.render == declared[name]["render"], name
+        # 六件工具 render 均声明 open_page → 工具卡「查看浏览器」按钮（直播页签）。
+        for name in BROWSER_TOOLS:
+            assert declared[name]["render"].get("open_page", {}).get("page") == "browser_live", name
 
 
 # ── 参数构造（LLM 入参 → 上游契约）───────────────────────────
@@ -202,8 +209,12 @@ class TestExecuteContainerPath:
         monkeypatch.setattr(BridgeClient, "_resolve_token", staticmethod(lambda cfg: "tok-abc"))
 
         # 替身 docker exec：消费 stdin（内嵌脚本），模拟容器内客户端输出。
+        # 命令比对按 bc._DOCKER 模块真值（全路径解析满足进程启动审计，
+        # 裸名 "docker" 仅在 PATH 无 docker 的环境成立）。
+        from agentos_plugin_sdk import bridge_client as bc
+
         def fake_exec(cmd, **kwargs):
-            if cmd[:2] == ["docker", "network"]:
+            if cmd[:2] == [bc._DOCKER, "network"]:
                 # _docker_gateway_ip 的网关探测调用——返回空（无网关候选）。
                 class Net:
                     returncode = 1
@@ -211,7 +222,7 @@ class TestExecuteContainerPath:
 
                 return Net()
 
-            assert cmd[:3] == ["docker", "exec", "-i"]
+            assert cmd[:3] == [bc._DOCKER, "exec", "-i"]
             assert "python" in cmd
 
             class P:
@@ -233,7 +244,7 @@ class TestExecuteContainerPath:
         monkeypatch.setenv("AGENTOS_BRIDGE_URL", "http://10.9.8.7:8765")
         t = BrowserTool({"upstream": "browser", "timeout_secs": 10})
         # _container_id 由 isolation_guard 注入 args（tool.py 据此判 sandbox 并
-        # 转环境变量给容器内客户端）。
+        # 显式传参给容器内客户端）。
         r = await t.execute(
             {"_tool_name": "browser_navigate", "url": "https://example.com", "_container_id": "c-test-1"}
         )
@@ -243,7 +254,6 @@ class TestExecuteContainerPath:
     @pytest.mark.asyncio
     async def test_container_path_without_container_id_fails_clean(self, monkeypatch):
         monkeypatch.setattr(BridgeClient, "_resolve_token", staticmethod(lambda cfg: "tok-abc"))
-        monkeypatch.delenv("_CONTAINER_ID", raising=False)
         # 无 _container_id → caller 判为 host → 走直发路径；断言不误入容器路径。
         from agentos_plugin_sdk import bridge_client as bc
 

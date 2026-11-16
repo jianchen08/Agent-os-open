@@ -21,7 +21,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "pipeline" / "input" / "host_context"
+_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "host_context"
 
 
 def _load_server() -> Any:
@@ -340,7 +340,7 @@ class TestPluginIdentityAndBroadcast:
     ) -> None:
         """引用文本：position 非空才渲染 [position=...]（缺省不产生噪声字段）。"""
         import plugin as gc
-        from pipeline.plugin import PluginContext
+        from _libs.pipeline_base.plugin import PluginContext
 
         gc.set_emitter(None)
         p = gc.HostContextPlugin()

@@ -31,7 +31,7 @@ pub fn field_or_data<'a>(msg: &'a Value, key: &str) -> Option<&'a str> {
 
 /// 配置类 id 形态校验（agent_id / pipeline_config_id 共用）：非空、不含空白
 /// 字符、长度 ≤128 字符、不含 ".."（防路径形 id / 任意键注入）。内核零注册表
-/// 知识，不做存在性校验——消费侧（context_build / 管道编译缓存）找不到目标
+/// 知识，不做存在性校验——消费侧（agent_config_load / 管道编译缓存）找不到目标
 /// 自然报错或回落默认并告警。
 pub fn valid_config_id(s: &str) -> bool {
     !s.is_empty()
@@ -58,12 +58,15 @@ pub trait PipelineDispatcher: Send + Sync {
     /// 参数 + 引擎写入的 lineage 扁平键），在 execution_context 合并点之后、
     /// 引擎恢复合并之后并入 initial_state 顶层扁平键；WS 前端路径不透传前端
     /// 自由 overlay，router 仅在帧携带 agent_id 时合成单键 overlay
-    /// `{"agent.id": v}`（消息级执行身份，见下）。
+    /// `{"agent.id": v}`（消息级执行身份，见下），外加插件 widget 声明
+    /// （`frame_overlay_fields`，2026-10-23 用户裁定：名单制传输、名单源自
+    /// ui_schema widget 的 `frame_field` 键）推导的帧字段单键 overlay。
     ///
     /// agent_id 指定执行管道加载的 agent 配置（config/agents/**/<id>.yaml，
     /// 决定人格/tool_ids/技能）。任务派发按 target 选 agent；WS 主会话路径
     /// 传空串 = 未指定，由 dispatcher 实现侧按线程绑定解析
-    /// （registry → DB sessions.agent_id → 默认 "agentos"，2026-08-24 阶段1）。
+    /// （registry 热 → 主管道 state `agent.id` 冷真值 → 默认 "agentos"，F2
+    /// 收敛：sessions.agent_id 降为投影不作读源）。
     /// 帧显式携带时（2026-09-25）：该槽位仍只作派发簿记，run 执行身份由
     /// router 合成的 state overlay 落管道 state 持久键 `agent.id` 承载——
     /// 消息级覆盖，管道后续轮次沿用最后写入值；空串 = 不写键，沿用既有身份。
@@ -94,6 +97,19 @@ pub trait PipelineDispatcher: Send + Sync {
         client_message_id: &str,
         source: PendingInputSource,
     ) -> Result<(), String>;
+
+    /// 帧字段 overlay 名单（名单制传输，2026-10-23 用户裁定）。
+    ///
+    /// 允许经 user_input 帧合成单键 state overlay 的字段名集合——名单源自
+    /// 插件 ui_schema widget 声明的 `frame_field` 键（widget 即字段声明面：
+    /// 用途/来源/传输去向一体），实现侧从 manifests 活集合现读（热发现即时
+    /// 可见，disabled 插件除外）。路由器只做名单内字段的形态守卫 + 单键合成
+    /// （overlay 随 pending 表落库可审计）；名单外帧字段一律不透传，防前端
+    /// 自由注 state。业务语义（优先级/消费方式）全在声明插件侧。
+    /// 默认空 = 不合成任何帧字段键（旧实现/mock 无需关心）。
+    async fn frame_overlay_fields(&self) -> Vec<String> {
+        Vec::new()
+    }
 
     /// 转发人工交互响应（审批/选择）。
     ///
@@ -128,6 +144,23 @@ pub trait PipelineDispatcher: Send + Sync {
         _pipeline_id: &str,
         _user_message_id: &str,
         _new_content: Option<&str>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// 队列条目强制发送（2026-10-27 权威化：目标条目立即执行，其余条目留队）。
+    ///
+    /// 语义 = 停当前回复（不退回队列）+ 目标条目重排至队首由链尾 drain 首个
+    /// 消费（原参数原样保留：cmid/thinking_strength/execution_context）；链空闲
+    /// 则直接直跑目标。与 dispatch_stop 的差异：停止按钮 = 停 run + 队列退回
+    /// 输入框（2026-09-11 裁定）；强制发送只针对单条，其余排队条目语义不变。
+    /// 默认 no-op（测试 mock 无需关心）。
+    async fn dispatch_force_pending(
+        &self,
+        _user_id: &str,
+        _thread_id: &str,
+        _pipeline_id: &str,
+        _input_id: &str,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -207,6 +240,7 @@ impl InboundRouter {
             "interaction_response" => self.route_interaction(msg).await,
             "stop_generation" => self.route_stop(msg).await,
             "regenerate" => self.route_regenerate(msg, user_id).await,
+            "force_pending_input" => self.route_force_pending(msg, user_id).await,
             "segment_activate" => self.route_segment_activate(msg, user_id).await,
             "active_thread_changed" => self.route_active_thread(msg, user_id).await,
             _ => RouteOutcome::Ignored,
@@ -265,6 +299,14 @@ impl InboundRouter {
             .filter(|s| valid_config_id(s))
             .unwrap_or("")
             .to_string();
+        // model_id 等插件声明帧字段：名单制传输（2026-10-23 用户裁定）——插件
+        // manifest `frame_overlay_fields` 声明自己消费的帧字段，路由器对名单内
+        // 字段合成单键 overlay（字段名与值同过 config-id 形态守卫，非法按缺失
+        // 忽略不报错——可选提示性字段不得让消息投递失败）；名单外帧字段一律
+        // 不透传（防前端自由注 state）。overlay 随 pending 表落库可审计。
+        let mut declared_fields = self.dispatcher.frame_overlay_fields().await;
+        declared_fields.sort();
+        declared_fields.dedup();
         // pipeline_config_id：显式指定执行管道的配置（config/pipelines/{id}.yaml，
         // 按需加载编译缓存）。顶层优先、data 信封兜底；形态校验对齐 agent_id
         // 同款（[..]/空白/超长防路径穿越拼文件名），非法按缺失忽略 = autonomous
@@ -274,12 +316,28 @@ impl InboundRouter {
             .map(str::to_string);
         // 合法非空时合成单键 state overlay：在引擎恢复合并（热/冷）之后应用
         // （apply_state_overlay）＝消息级覆盖既有持久键，随 final_state 落
-        // pipeline_state 表，后续轮次恢复沿用最后写入值；消费方 context_build
-        // 按 agent.id 加载 yaml（加载不到回落默认并告警，内核零 agent 知识）。
-        let state_overlay = if agent_id.is_empty() {
+        // pipeline_state 表，后续轮次恢复沿用最后写入值；消费方 agent_config_load
+        // 按 agent.id 加载 yaml（加载不到回落默认并告警，内核零 agent 知识）；
+        // 插件声明字段（如 llm_core 的 model_id）由各消费插件按自己的解析链消费。
+        let mut overlay = serde_json::Map::new();
+        if !agent_id.is_empty() {
+            overlay.insert("agent.id".to_string(), serde_json::json!(agent_id));
+        }
+        for field in declared_fields {
+            // 字段名本身也过形态守卫（防保留键碰撞如 "agent.id" 与畸形声明）
+            if !valid_config_id(&field) {
+                continue;
+            }
+            if let Some(v) = field_or_data(msg, &field) {
+                if valid_config_id(v) {
+                    overlay.insert(field, serde_json::json!(v));
+                }
+            }
+        }
+        let state_overlay = if overlay.is_empty() {
             None
         } else {
-            Some(serde_json::json!({ "agent.id": agent_id }))
+            Some(serde_json::Value::Object(overlay))
         };
         match self
             .dispatcher
@@ -292,7 +350,7 @@ impl InboundRouter {
                 execution_context,
                 state_overlay.as_ref(),
                 // 空串 = 未指定，agent 解析归 dispatcher 实现侧（线程绑定
-                // registry → DB sessions.agent_id → agentos）；显式值仅作
+                // registry → 主管道 state agent.id 冷真值 → agentos）；显式值仅作
                 // 派发簿记，执行身份由上面合成的 agent.id overlay 承载。
                 &agent_id,
                 pipeline_config_id.as_deref(),
@@ -381,6 +439,34 @@ impl InboundRouter {
                 &user_message_id,
                 new_content,
             )
+            .await
+        {
+            Ok(()) => RouteOutcome::Handled,
+            Err(e) => RouteOutcome::Error(e),
+        }
+    }
+
+    /// force_pending_input——队列条目强制发送（2026-10-27 权威化）。
+    ///
+    /// payload {pipeline_id, input_id}（顶层优先、data 信封兜底，同 stop）。
+    /// 语义见 PipelineDispatcher::dispatch_force_pending。
+    async fn route_force_pending(&self, msg: &Value, user_id: &str) -> RouteOutcome {
+        let thread_id = match msg.get("thread_id").and_then(|v| v.as_str()) {
+            Some(t) if !t.is_empty() => t.to_string(),
+            _ => return RouteOutcome::Error("force_pending_input 缺少 thread_id".into()),
+        };
+        let pipeline_id = field_or_data(msg, "pipeline_id")
+            .unwrap_or_default()
+            .to_string();
+        let input_id = field_or_data(msg, "input_id")
+            .unwrap_or_default()
+            .to_string();
+        if input_id.is_empty() {
+            return RouteOutcome::Error("force_pending_input 缺少 input_id".into());
+        }
+        match self
+            .dispatcher
+            .dispatch_force_pending(user_id, &thread_id, &pipeline_id, &input_id)
             .await
         {
             Ok(()) => RouteOutcome::Handled,

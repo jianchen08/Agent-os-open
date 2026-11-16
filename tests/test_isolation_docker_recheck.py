@@ -18,7 +18,7 @@
 3. 配置显式指定的 False 永不刷新（信任配置，保护既有行为）。
 4. True 状态不触发复检。
 """
-# isolation_guard 插件位于 plugins/shared/pipeline/input/isolation_guard/（0.2 平铺 import）
+# isolation_guard 插件位于 plugins/shared/isolation_guard/（0.2 平铺 import）
 import sys
 import time
 import types
@@ -35,7 +35,7 @@ import tests._isolation_path  # noqa: F401  # 注入 isolation 插件目录到 s
 # _pipeline_plugin_path.add_plugin_dir 同款：本目录置顶 + 裸名逐出后再 import。
 _ISOLATION_GUARD_DIR = str(
     Path(__file__).resolve().parent.parent
-    / "plugins" / "shared" / "pipeline" / "input" / "isolation_guard",
+    / "plugins" / "shared" / "isolation_guard",
 )
 if _ISOLATION_GUARD_DIR in sys.path:
     sys.path.remove(_ISOLATION_GUARD_DIR)
@@ -44,8 +44,8 @@ for _bare in ("plugin", "tool", "models", "service"):
     sys.modules.pop(_bare, None)
 
 from agentos_plugin_sdk.isolation_types import IsolationLevel
-from pipeline.plugin import PluginContext
-from pipeline.types import StateKeys
+from _libs.pipeline_base.plugin import PluginContext
+from _libs.pipeline_base.types import StateKeys
 import plugin as plugin_module  # noqa: E402  # 模块对象引用：裸名串扰治理会 evict 后重 import，字符串 patch 会打到新对象
 from plugin import IsolationGuard  # noqa: E402
 
@@ -55,7 +55,7 @@ def _fake_wsl_health(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
     """引擎自愈在插件内延迟 import wsl_health（路径注入后），测试环境用 fake 占位。
 
     复检路径触发 _ensure_engine 时命中 fake，不真实拉起 WSL/docker
-    （wsl_health 自身行为由 plugins/shared/system/isolation/test_wsl_health.py 覆盖）。
+    （wsl_health 自身行为由 plugins/shared/isolation/test_wsl_health.py 覆盖）。
     """
     fake = types.SimpleNamespace()
     fake.ensure_docker_engine = MagicMock()
@@ -87,7 +87,7 @@ def _container_policy(plugin):
     plugin._decider.resolve = MagicMock(return_value=mock_policy)
     # 0.2 容器落地：provider=docker 后还需幂等获取/创建容器，失败会改标 denied。
     # 本文件测复检契约，容器创建一律 stub 成功（容器语义由 test_container_landing 覆盖）。
-    plugin._get_or_create_container = AsyncMock(return_value="mock-container-1")
+    plugin._get_or_create_container = AsyncMock(return_value=("mock-container-1", None))
 
 
 def _make_auto_plugin(detected: tuple[str, str] = ("absent", "")):
@@ -103,7 +103,7 @@ def _make_auto_plugin(detected: tuple[str, str] = ("absent", "")):
          patch.object(IsolationGuard, "_detect_docker", return_value=detected):
         # 钉 docker 后端：真身 isolation_config.yaml 已启用 wsl_native（探测目标
         # 会从 docker 切到 WSL，本机 WSL 在位即 True，复检契约无从测起）。
-        return IsolationGuard(config={"providers": {"wsl_native": {"enabled": False}}})
+        return IsolationGuard(config={"providers": {"wsl_native": {"enabled": False}, "linux_native": {"enabled": False}}})
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +159,7 @@ async def test_no_recheck_within_cooldown():
 async def test_config_specified_false_never_rechecks():
     """config 显式指定 docker_available=False 时永不复检，始终拦截。"""
     with patch("decider.IsolationDecider"):
-        plugin = IsolationGuard(config={"docker_available": False, "providers": {"wsl_native": {"enabled": False}}})
+        plugin = IsolationGuard(config={"docker_available": False, "providers": {"wsl_native": {"enabled": False}, "linux_native": {"enabled": False}}})
     assert plugin._docker_auto is False
     _container_policy(plugin)
 

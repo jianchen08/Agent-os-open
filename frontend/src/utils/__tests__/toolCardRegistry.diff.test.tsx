@@ -9,7 +9,7 @@
  * 修复方案：后端补 result_data 结构化字段，前端 toolHandler 存为 resultData，
  * registry 的 extractWriteDiff 优先读 resultData。
  *
- * 声明来源：file_write 的卡片表单声明由插件侧提供（plugins/shared/tools/
+ * 声明来源：file_write 的卡片表单声明由插件侧提供（plugins/shared/
  * builtin_tools/plugin.json 的 capabilities.tools[].ui.chat_card，前端经
  * /api/v1/schema 装载）——本测试模拟 schema 装载后走真实 enhance 级联。
  */

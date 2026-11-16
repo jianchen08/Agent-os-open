@@ -60,16 +60,30 @@ def _venv_python(plugin_dir: Path) -> str | None:
     return None
 
 
-# 渠道插件凭据护栏（channel_* server.py on_load fail-fast）：空凭据拒载，
-# 探针（无凭据环境）下这四插件的 on_load 预期为点名缺失配置的 RuntimeError。
-_CREDENTIAL_GUARDED_PLUGINS = {"channel_dingtalk", "channel_feishu", "channel_qq", "channel_wecom"}
+# 凭据/配置护栏（on_load fail-fast）：空凭据/缺配置拒载，探针（无凭据
+# 环境）下这些插件的 on_load 预期为点名缺失配置的 RuntimeError——
+# channel_* 渠道凭据 + trace_exporter 上报三元组（ingestion_url/origin_host/token）
+# + sync_agent 端侧同步三元组（relay_url/token/watch 根，2b 多端同步）。
+_CREDENTIAL_GUARDED_PLUGINS = {
+    "channel_dingtalk", "channel_feishu", "channel_qq", "channel_wecom", "trace_exporter",
+    "sync_agent",
+}
+
+# 零工具契约插件：manifest 不声明 tools 也无前端 contributes，且运行时
+# 契约即零 LLM 工具（内部面插件）——不适用「至少注册 1 个工具」断言，
+# 加载 + 生命周期仍全验。distributed_router：R24 撤工具面（四工具退役，
+# ADR 2026-10-18-unified-namespace-fs-mount-and-mcp-transfer，编址/挂载
+# 内部面），地盘观测归前端呈现层。
+_ZERO_TOOL_CONTRACT_PLUGINS = {
+    "distributed_router",
+}
 
 
 # ────────────────────────────────────────────────────────────
 # 插件目录发现
 # ────────────────────────────────────────────────────────────
 
-_SKIP_DIRS = {"sdk", "data", "shared/data", "shared/pipeline/_base", "shared/native_test"}
+_SKIP_DIRS = {"sdk", "data", "shared/data", "shared/_libs", "shared/native_test"}  # 拍平布局（ADR 2026-10-13）
 _SKIP_NAMES = {"native_test", "wasm_hello"}
 
 
@@ -144,9 +158,12 @@ PLUGIN_DIRS = [d for d in _discover_plugin_dirs() if _is_python_sidecar(d)]
 EXTERNAL_MCP_DIRS = [d for d in _discover_plugin_dirs() if _is_external_mcp(d)]
 NATIVE_PLUGIN_DIRS = [d for d in _discover_plugin_dirs() if _is_native_plugin(d)]
 
-# 纯转发型 server.py（无 plugin 对象、无 create_plugin，仅 run()）：
-# 注册逻辑在包内实现，由插件自有测试覆盖（plugins/shared/tools/builtin_tools/tests）
-WRAPPER_ONLY_PLUGINS = {"builtin_tools"}
+# 探针预算（秒）：须 ≥ 最重插件的 on_load 自报冷启动预算——hindsight
+# _COLD_START_WAIT_S=150（慢档 pg0 首启建库 + LiteLLM cost map 退避实测
+# 150s+，装机 2026-10-20 夜间轮）+ python 冷启动/spawn/杀树开销与满批并行
+# 负载余量。90s 旧值 < 插件自报契约，慢档结构性必撞（独立 CI 轮 1 实锤：
+# probe timeout (90s)，同轮 hindsight 真 spawn 健康检查 PASS 旁证非回归）。
+PROBE_TIMEOUT_S = 240
 
 
 def _run_probe(plugin_dir: Path, invoke: dict | None = None) -> dict:
@@ -172,11 +189,15 @@ def _run_probe(plugin_dir: Path, invoke: dict | None = None) -> dict:
             env=env,
             capture_output=True,
             text=True,
-            timeout=90,
+            timeout=PROBE_TIMEOUT_S,
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return {"dir": str(plugin_dir), "load_ok": False, "load_error": "probe timeout (90s)"}
+        return {
+            "dir": str(plugin_dir),
+            "load_ok": False,
+            "load_error": f"probe timeout ({PROBE_TIMEOUT_S}s)",
+        }
     try:
         report = json.loads(proc.stdout.strip().splitlines()[-1])
     except (json.JSONDecodeError, IndexError):
@@ -197,16 +218,18 @@ def _safe_invocations(plugin_dir: Path, tmp_path: Path) -> dict:
     """按插件目录返回可安全执行的 {tool: kwargs}。"""
     rel = str(plugin_dir.relative_to(ROOT / "plugins")).replace("\\", "/")
     table: dict[str, dict] = {
-        "shared/system/cost_control": {"cost_control.get_status": {}},
-        "shared/system/human_interaction": {"interaction.get_pending": {}},
-        "shared/system/monitoring": {"monitoring.get_health": {}},
-        "shared/system/review": {"review_get_report": {"review_id": "smoke_nonexistent"}},
-        "shared/tools/triggers": {"trigger.list": {}},
-        "shared/tools/simple": {
-            "yaml_validate": {"content": "a: 1\nb: 2\n"},
+        "shared/cost_control": {"cost_control.get_status": {}},
+        "shared/human": {"interaction.get_pending": {}},
+        # shared/monitoring：LLM 工具面五件退役（commit 236f7c428），读面归
+        # HTTP /ext/monitoring/**——零工具即契约，declarative 分支（contributes
+        # + tools 空）只验加载与生命周期，无安全调用行可列。
+        "shared/review": {"review_ops": {"action": "get_report", "review_id": "smoke_nonexistent"}},
+        "shared/triggers": {"trigger.list": {}},
+        "shared/simple": {
+            "read_execution_detail": {"pipeline_run_id": "smoke", "level": "skeleton"},
         },
     }
-    if rel == "shared/system/evaluation":
+    if rel == "shared/evaluation":
         target = tmp_path / "smoke_artifact.txt"
         target.write_text("smoke")
         table[rel] = {
@@ -216,7 +239,7 @@ def _safe_invocations(plugin_dir: Path, tmp_path: Path) -> dict:
                 "gate_mode": False,
             }
         }
-    if rel == "shared/tools/builtin_tools":
+    if rel == "shared/builtin_tools":
         target = tmp_path / "smoke_read.txt"
         target.write_text("smoke content")
         table[rel] = {"file_read": {"path": str(target)}}
@@ -232,14 +255,6 @@ def test_plugin_loads_and_executes(plugin_dir: Path, tmp_path: Path) -> None:
     """插件可加载、注册工具、触发生命周期；精选工具可真实执行。"""
     report = _run_probe(plugin_dir, _safe_invocations(plugin_dir, tmp_path))
 
-    # 纯转发型插件（builtin_tools）没有 plugin 对象，注册逻辑在包内，由插件自有测试覆盖；
-    # 探针能走到 "no plugin object" 说明 server.py 及其依赖导入成功
-    if plugin_dir.name in WRAPPER_ONLY_PLUGINS:
-        assert report.get("load_error") == "no plugin object (wrapper-only server.py)", (
-            f"插件 {plugin_dir.name} 加载失败: {report.get('load_error')}"
-        )
-        return
-
     assert report.get("load_ok") is True, (
         f"插件加载失败: {report.get('load_error')}\n"
         f"探针报告: {json.dumps(report, ensure_ascii=False)[:500]}"
@@ -254,7 +269,7 @@ def test_plugin_loads_and_executes(plugin_dir: Path, tmp_path: Path) -> None:
     declarative = not declared_tools and bool(meta.get("contributes"))
 
     tools = report.get("tools", [])
-    if not declarative:
+    if not declarative and plugin_dir.name not in _ZERO_TOOL_CONTRACT_PLUGINS:
         assert len(tools) >= 1, f"插件 {plugin_dir.name} 未注册任何工具"
 
     # 凭据护栏渠道（fail-fast 契约）：探针环境不注入渠道凭据，on_load 拒载并
@@ -369,12 +384,25 @@ def test_python_sidecar_plugins_have_uv_contract() -> None:
     pyproject.toml + .venv 双标志齐备——生产 invoker 已删 plain PATH python 回退
     （kernel/crates/invoker resolve_sidecar_command，2026-08-19），缺任一标志
     该插件在生产侧启动即失败。矩阵层提前暴露，防"新增插件忘建 venv"回归。
+
+    合宿成员豁免（与生产两侧同源对齐：ensure_plugin_venvs/bootstrap classify
+    同规则——plugin.json 声明任意 host_group 即成员）：成员运行期从 _host
+    共享 venv 拉起，自身 .venv 零消费（bootstrap 删冗余后 absent 是合法态）。
     """
     assert PLUGIN_DIRS, "插件发现异常：0 个 python sidecar"
+
+    def _is_cohost_member(d: Path) -> bool:
+        try:
+            meta = json.loads((d / "plugin.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        return bool(meta.get("host_group"))
+
     missing = [
         str(d.relative_to(ROOT))
         for d in PLUGIN_DIRS
-        if not (d / "pyproject.toml").is_file() or _venv_python(d) is None
+        if not _is_cohost_member(d)
+        and (not (d / "pyproject.toml").is_file() or _venv_python(d) is None)
     ]
     assert not missing, (
         "以下 Python sidecar 插件缺 uv 单轨契约（pyproject.toml + .venv），"

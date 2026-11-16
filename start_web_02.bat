@@ -189,12 +189,21 @@ if errorlevel 1 (
 echo.
 
 REM ============================================================
-REM  Step 2: prepare plugin venvs (first run only; skip dirs with .venv)
+REM  Step 2: prepare plugin venvs (health-gated + SDK-asserted)
 REM  Plugins run in per-directory uv venvs - the kernel refuses to fall
 REM  back to a bare PATH python, so a fresh clone without this step gets
 REM  every Python sidecar down (502 on plugin endpoints).
+REM  2026-10-18 (venv self-heal defect, 3x incident): the old gate here
+REM  skipped any dir with an existing .venv and silenced uv output, so a
+REM  partially-completed sync left a broken venv (missing agentos_plugin_sdk
+REM  editable) that was never re-synced and propagated to installed machines
+REM  via package/junction. Supply now lives in scripts\ensure_plugin_venvs.py:
+REM  "venv usable" = interpreter present AND SDK importable when declared;
+REM  unhealthy dirs get uv sync + re-assert (bounded 2 rounds), failures
+REM  reported visibly and reflected in the exit code (WARN below, launch
+REM  continues - spawn-time fail-closed semantics unchanged).
 REM ============================================================
-echo [2/4] Preparing Python plugin venvs...
+echo [2/4] Preparing Python plugin venvs (health-gated, SDK asserted)...
 where uv >nul 2>nul
 if errorlevel 1 (
     echo [ERROR] uv not found in PATH.
@@ -203,22 +212,11 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-REM Step 2 pre-work: shared cohost env first. host_group=light members spawn
-REM ONLY from plugins\shared\_host\.venv (fail-closed HOST_VENV_MISSING
-REM otherwise), so the shared env is a hard prerequisite, not an optimization.
-if not exist "%PROJECT_ROOT%\plugins\shared\_host\.venv" (
-    echo        uv sync: _host ^(shared cohost env^)
-    uv sync --project "%PROJECT_ROOT%\plugins\shared\_host" >nul 2>&1
-    if errorlevel 1 echo [WARN] uv sync failed: _host ^(light cohost members will be down^)
+python "%PROJECT_ROOT%\scripts\ensure_plugin_venvs.py"
+if errorlevel 1 (
+    echo [WARN] Some plugin venvs remain unhealthy after 2 repair rounds -
+    echo        affected tools/cohost groups will 502 until fixed. See above.
 )
-REM Per-plugin envs, dedup-aware (ADR 2026-09-07-plugin-venv-dedup): cohost
-REM members (ANY host_group declaration - light/light_stable/... run inside
-REM _host, same rule as kernel is_cohost_member) get NO own venv; everything
-REM else with plugin.json+pyproject.toml gets uv sync when .venv is missing
-REM (idempotent skip). Fixed-depth enumeration mirrors
-REM bootstrap_plugin_envs.py PLUGIN_GLOBS; a recursive scan would descend
-REM dsh_adapter's node_modules junction and hang.
-powershell -NoProfile -Command "$created=0; $root='%PROJECT_ROOT%\plugins\shared'; $globs=@('system\*','tools\*','pipeline\core\*','pipeline\input\*','pipeline\output\*','modes\*','db_admin','metrics_admin','user_admin'); foreach($g in $globs){ $p=Join-Path $root $g; if(-not (Test-Path -Path $p)){ continue }; foreach($d in (Get-ChildItem -Path $p -Directory)){ $pj=Join-Path $d.FullName 'plugin.json'; if(-not (Test-Path -LiteralPath $pj)){ continue }; try{ $j=Get-Content -LiteralPath $pj -Raw | ConvertFrom-Json }catch{ continue }; if($j.host_group){ continue }; if(Test-Path -LiteralPath (Join-Path $d.FullName '.venv')){ continue }; if(-not (Test-Path -LiteralPath (Join-Path $d.FullName 'pyproject.toml'))){ continue }; Write-Host ('       uv sync: ' + $d.Name); & uv sync --project $d.FullName *> $null; if($LASTEXITCODE -ne 0){ Write-Host ('       [WARN] uv sync failed: ' + $d.FullName) } else { $created++ } } }; Write-Host ('[OK] Plugin venvs ready (created ' + $created + ' this run; cohost members intentionally skipped)')"
 echo.
 
 REM ============================================================

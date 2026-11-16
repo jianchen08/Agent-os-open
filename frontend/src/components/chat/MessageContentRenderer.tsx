@@ -61,6 +61,9 @@ export interface MessageContentRendererProps {
   renderToolCall?: (fragment: Extract<RenderFragment, { type: 'tool_call' }>) => ReactNode
   /** 搜索查询（用于高亮） */
   searchQuery?: string
+  /** 流式总耗时锚点（触发消息发出时刻 ms）：思考中卡片头部实时总耗时用；
+   *  缺省不显示耗时 */
+  streamAnchorMs?: number | null
 }
 
 /** 默认文本渲染器 */
@@ -98,12 +101,13 @@ function renderFragment(
   renderText?: (content: string, isStreaming: boolean) => ReactNode,
   renderToolCall?: (fragment: Extract<RenderFragment, { type: 'tool_call' }>) => ReactNode,
   searchQuery?: string,
+  streamAnchorMs?: number | null,
 ): ReactNode {
   switch (fragment.type) {
     case 'thinking':
       return (
         <div key={fragment.key}>
-          <ThinkingDisplay thinking={fragment.thinking} />
+          <ThinkingDisplay thinking={fragment.thinking} streamAnchorMs={streamAnchorMs} />
         </div>
       )
 
@@ -176,6 +180,7 @@ function MessageContentRendererBase({
   renderText,
   renderToolCall,
   searchQuery,
+  streamAnchorMs,
 }: MessageContentRendererProps): ReactNode {
   if (fragments.length === 0) {
     return null
@@ -184,7 +189,7 @@ function MessageContentRendererBase({
   return (
     <div className={cn('message-content-renderer space-y-3', className)}>
       {fragments.map((fragment) =>
-        renderFragment(fragment, isStreaming, renderText, renderToolCall, searchQuery),
+        renderFragment(fragment, isStreaming, renderText, renderToolCall, searchQuery, streamAnchorMs),
       )}
     </div>
   )
@@ -193,6 +198,10 @@ function MessageContentRendererBase({
 /** 消息内容渲染器（带 memo 优化） */
 export const MessageContentRenderer = memo(MessageContentRendererBase, (prev, next) => {
   if (prev.isStreaming !== next.isStreaming) {
+    return false
+  }
+
+  if (prev.streamAnchorMs !== next.streamAnchorMs) {
     return false
   }
 

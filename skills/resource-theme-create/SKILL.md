@@ -23,7 +23,7 @@ description: 创建或修改前端 UI 主题时加载。主题配置规范：The
 |------|------|------|
 | **前端主题系统（本规范对象）** | `frontend/src/config/themes/` + `frontend/src/types/theme.ts` | ✅ 实际在用，7 个预设主题，接入 DOM/shadcn |
 
-> 历史上后端曾有一套 `design_tokens` / `style_config`，零消费方，已删除。**主题只在前端做。**
+> 后端无主题系统，主题只在前端实现。
 
 ## 二、主题文件放哪、叫什么
 
@@ -168,7 +168,6 @@ export const presetThemes = { /* ... */ 'my-theme': myTheme }  // ③ 加入映�
 ## 六、不要做的事
 
 - ❌ 不要改 `frontend/src/types/theme.ts` 的结构来迁就你的主题——结构是契约，主题适配结构而非反过来
-- ❌ 不要在后端 `src/ui_schema/design_tokens.py` / `style_config.py` 建主题——那是未接入的孤儿系统
 - ❌ 不要漏 `index.ts` 的三处注册之一（漏了主题不会被 `presetThemes` / 主题选择器发现）
 - ❌ 不要给纯色字段填 `linear-gradient()`（仅 `background.main` 等明确支持渐变的字段可以）
 

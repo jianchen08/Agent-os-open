@@ -16,6 +16,11 @@ from agentos_plugin_sdk.capability import (
     MetricsReporter,
 )
 from agentos_plugin_sdk.cohost import CohostServer
+from agentos_plugin_sdk.db_read import (
+    DbReadQueryError,
+    db_read_query,
+    unwrap_db_read_envelope,
+)
 from agentos_plugin_sdk.enum_utils import safe_enum_value
 from agentos_plugin_sdk.exceptions.step import StepException, StepNotFoundError
 from agentos_plugin_sdk.logging import (
@@ -71,6 +76,7 @@ __all__ = [
     "CapabilityInjection",
     "CohostServer",
     "ContextFilter",
+    "DbReadQueryError",
     "EXECUTION_TRANSITIONS",
     "ExecutionResult",
     "ExecutionStatus",
@@ -103,6 +109,7 @@ __all__ = [
     "collect_tools",
     "create_failure_result",
     "create_success_result",
+    "db_read_query",
     "dispatch_pipe_hook_registry",
     "get_logger",
     "get_settings",
@@ -110,4 +117,5 @@ __all__ = [
     "safe_enum_value",
     "setup_logging",
     "tool",
+    "unwrap_db_read_envelope",
 ]

@@ -16,6 +16,7 @@ agentos-tenant.workspace = true
 agentos-config.workspace = true
 agentos-plugin-loader.workspace = true
 agentos-engine.workspace = true
+agentos-api.workspace = true
 agentos-invoker.workspace = true
 agentos-mcp.workspace = true
 parking_lot = "0.12"
@@ -25,3 +26,9 @@ sha2 = "0.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde_yaml = "0.9"
 tempfile = "3"
+agentos-session.workspace = true
+agentos-http.workspace = true
+axum = { version = "0.8", features = ["ws"] }
+tower = { version = "0.5", features = ["util"] }
+futures-util = "0.3"
+tokio-tungstenite = "0.29"

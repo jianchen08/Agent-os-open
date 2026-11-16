@@ -10,12 +10,17 @@
 
 import { createAsyncStoragePersister } from '@tanstack/query-async-storage-persister'
 import { get, set, del, createStore } from 'idb-keyval'
+import { userScopedKey } from '@/utils/userScopedStorage'
 
 const idbStore = createStore('app-db', 'kv')
 
+/** 持久缓存键统一走账户命名空间（隔离执法点①）：queryPersister 的 key 选项
+ * 是业务名，落盘/读取经 userScopedKey 注入账户前缀——切户后旧账户 query 缓存
+ * 对新账户不可达（App.tsx 启动即 hydrate 全量 query 缓存先于认证，不隔离则
+ * 旧账户会话/任务列表闪现）。 */
 async function getItem(key: string): Promise<string | null> {
   try {
-    return (await get<string>(key, idbStore)) ?? null
+    return (await get<string>(userScopedKey(key), idbStore)) ?? null
   } catch {
     return null
   }
@@ -23,7 +28,7 @@ async function getItem(key: string): Promise<string | null> {
 
 async function setItem(key: string, value: string): Promise<void> {
   try {
-    await set(key, value, idbStore)
+    await set(userScopedKey(key), value, idbStore)
   } catch {
     // 静默降级：持久化失败仅丢失刷新后的缓存秒开，不影响运行时数据
   }
@@ -31,7 +36,7 @@ async function setItem(key: string, value: string): Promise<void> {
 
 async function removeItem(key: string): Promise<void> {
   try {
-    await del(key, idbStore)
+    await del(userScopedKey(key), idbStore)
   } catch {
     // 同上，删除失败无业务影响
   }

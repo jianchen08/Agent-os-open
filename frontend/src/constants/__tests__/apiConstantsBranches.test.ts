@@ -50,6 +50,37 @@ describe('constants/api — API_BASE_URL 环境派生', () => {
   })
 })
 
+describe('constants/api — API_BASE_URL 壳基址回落（移动壳本地直用）', () => {
+  const SHELL_BASE = 'http://162.14.69.153'
+
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).LINGXI_SHELL_CONFIG
+  })
+
+  it('无壳注入且 env 为空 → 空串（浏览器/桌面行为不变）', async () => {
+    vi.resetModules()
+    vi.stubEnv('VITE_API_BASE_URL', '')
+    const mod = await import('../api')
+    expect(mod.API_BASE_URL).toBe('')
+  })
+
+  it('壳注入 apiBase 且 env 为空 → 取壳基址（本地直用命中云端内核）', async () => {
+    vi.resetModules()
+    vi.stubEnv('VITE_API_BASE_URL', '')
+    ;(window as unknown as Record<string, unknown>).LINGXI_SHELL_CONFIG = { apiBase: SHELL_BASE }
+    const mod = await import('../api')
+    expect(mod.API_BASE_URL).toBe(SHELL_BASE)
+  })
+
+  it('env 显式设置时优先于壳基址（运维显式配置压过壳默认）', async () => {
+    vi.resetModules()
+    vi.stubEnv('VITE_API_BASE_URL', 'http://env-wins:9100')
+    ;(window as unknown as Record<string, unknown>).LINGXI_SHELL_CONFIG = { apiBase: SHELL_BASE }
+    const mod = await import('../api')
+    expect(mod.API_BASE_URL).toBe('http://env-wins:9100')
+  })
+})
+
 describe('constants/api — 参数化端点构造', () => {
   it('SESSIONS 派生端点携带 id 且互不相同', () => {
     const id = 'sess-42'
@@ -149,13 +180,10 @@ describe('constants/api — 参数化端点构造', () => {
     expect(new Set(urls).size).toBe(5)
   })
 
-  it('KNOWLEDGE_BASE 的 GET/DELETE/DELETE_CATEGORY 替换各自占位符', () => {
+  it('KNOWLEDGE_BASE 的 GET/DELETE 替换各自占位符', () => {
     expect(API_ENDPOINTS.KNOWLEDGE_BASE.GET('kb1')).not.toContain('{item_id}')
     expect(API_ENDPOINTS.KNOWLEDGE_BASE.GET('kb1')).toContain('kb1')
     expect(API_ENDPOINTS.KNOWLEDGE_BASE.DELETE('kb1')).toContain('kb1')
-    const delCat = API_ENDPOINTS.KNOWLEDGE_BASE.DELETE_CATEGORY('cat1')
-    expect(delCat).toContain('cat1')
-    expect(delCat).not.toContain('{name}')
   })
 })
 

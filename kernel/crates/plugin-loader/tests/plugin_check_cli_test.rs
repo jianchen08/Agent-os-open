@@ -155,9 +155,10 @@ fn json_output_is_parseable_with_summary_and_plugins() {
 #[test]
 fn root_scan_discovers_nested_manifests() {
     let dir = tempfile::tempdir().unwrap();
-    // 模拟 plugins/shared/{system,tools}/<name>/plugin.json 嵌套布局
-    write_valid_manifest(dir.path().join("shared/tools").as_path(), "nested_a");
-    write_valid_manifest(dir.path().join("shared/system").as_path(), "nested_b");
+    // 递归发现：任意嵌套子目录下的 manifest 均入校验面（生产拍平布局为一层，
+    // 嵌套夹具证发现器深度无关）
+    write_valid_manifest(dir.path().join("shared/group_a").as_path(), "nested_a");
+    write_valid_manifest(dir.path().join("shared/group_b").as_path(), "nested_b");
     let r = run(&["--json", "--root", dir.path().to_str().unwrap()]);
 
     assert_eq!(r.code, Some(0));

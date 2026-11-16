@@ -27,7 +27,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_ROLLBACK_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "rollback"
+_ROLLBACK_DIR = _REPO_ROOT / "plugins" / "shared" / "rollback"
 
 
 def _load(name: str) -> Any:

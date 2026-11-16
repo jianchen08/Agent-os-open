@@ -1,17 +1,17 @@
 /**
- * ExtensionComponents（P5-a/b/d 渲染层，ADR §3.4 档位二）
+ * ExtensionComponents（P5-a/b 渲染层，ADR §3.4 档位二）
  *
  * - CommandPalette：命令面板（Cmd/Ctrl+Shift+P 打开），搜索 + 执行 + when 过滤
  * - ContextMenuItems：右键/上下文菜单项（按 location + when 过滤）
- * - ExtensionModalHost + useExtensionModal：模态弹窗（command 触发，用声明的预置 widget 渲染）
  *
- * 所有命令触发统一经 CommandDispatcher.executeCommand（→ 内核 transport 或打开 modal）。
- * modal 的 widget 只能引用预置 widget（ADR §2.3），由外部通过 children 注入渲染。
+ * 模态弹窗呈现已收敛至 shell.overlay 槽锚点（SlotOverlayHost，C4 槽位机制；
+ * contributes.modal → shell.overlay 域条目，触发面 commands 不动）。
+ * 所有命令触发统一经 CommandDispatcher.executeCommand（→ 内核 transport 或
+ * 打开声明的 overlay）。
  */
 
 import React, { useEffect, useState } from 'react'
 import type { CommandDispatcher } from '@/services/schema/commandDispatcher'
-import type { ContributionEntry } from '@/services/schema/ContributionRegistry'
 
 // ──────────────────────────────────────────────────────────────
 // CommandPalette（P5-b 命令面板）
@@ -77,7 +77,7 @@ export function CommandPalette({ open, dispatcher, onClose }: CommandPaletteProp
             filtered.map((cmd) => (
               <li key={cmd.id}>
                 <button
-                  className="hover:bg-accent flex w-full items-center gap-2 px-4 py-2 text-left text-sm"
+                  className="hover:bg-muted flex w-full items-center gap-2 px-4 py-2 text-left text-sm"
                   onClick={() => handleSelect(cmd.id)}
                 >
                   {cmd.category && (
@@ -116,7 +116,7 @@ export function ContextMenuItems({ location, dispatcher }: ContextMenuItemsProps
       {items.map((item) => (
         <li key={item.id}>
           <button
-            className="hover:bg-accent flex w-full items-center px-3 py-1.5 text-left text-sm"
+            className="hover:bg-muted flex w-full items-center px-3 py-1.5 text-left text-sm"
             onClick={() => void dispatcher.executeCommand(item.command as string)}
           >
             {item.title || item.id}
@@ -127,73 +127,5 @@ export function ContextMenuItems({ location, dispatcher }: ContextMenuItemsProps
   )
 }
 
-// ──────────────────────────────────────────────────────────────
-// ExtensionModalHost + useExtensionModal（P5-d 模态弹窗）
-// ──────────────────────────────────────────────────────────────
-
-interface ModalState {
-  /** 当前待显示的 modal（null 表示无） */
-  modal: ContributionEntry | null
-  /** 关闭当前 modal */
-  closeModal: () => void
-}
-
-/**
- * 订阅 CommandDispatcher 的 modal 打开事件，返回当前待显示的 modal。
- *
- * 命令触发后若存在 trigger=on_command:<commandId> 的 modal 声明，
- * CommandDispatcher 会广播打开事件，本 hook 捕获并设为当前 modal。
- */
-export function useExtensionModal(dispatcher: CommandDispatcher): ModalState {
-  const [modal, setModal] = useState<ContributionEntry | null>(null)
-
-  useEffect(() => {
-    return dispatcher.onModalOpen((m) => setModal(m))
-  }, [dispatcher])
-
-  return { modal, closeModal: () => setModal(null) }
-}
-
-interface ExtensionModalHostProps {
-  /** 待显示的 modal 声明 */
-  modal: ContributionEntry
-  /** 关闭回调 */
-  onClose: () => void
-  /** modal 内容（由父级用声明的预置 widget 渲染后注入） */
-  children: React.ReactNode
-}
-
-/**
- * 模态弹窗容器：渲染遮罩 + 标题栏 + 内容区。
- *
- * modal 的 widget 由父级查 widget registry 后作为 children 注入（ADR §2.3：
- * 插件不能贡献任意 React 组件，只能引用预置 widget）。
- */
-export function ExtensionModalHost({ modal, onClose, children }: ExtensionModalHostProps): React.ReactElement {
-  return (
-    <div
-      className="fixed inset-0 z-[200] flex items-center justify-center bg-[var(--overlay-bg)]"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      data-testid="extension-modal"
-    >
-      <div
-        className="bg-popover text-popover-foreground w-full max-w-2xl rounded-lg border shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="border-border flex items-center justify-between border-b px-4 py-3">
-          <h2 className="text-base font-medium">{modal.title || modal.id}</h2>
-          <button
-            className="text-muted-foreground hover:text-foreground px-2 text-lg"
-            onClick={onClose}
-            aria-label="关闭"
-          >
-            ×
-          </button>
-        </div>
-        <div className="max-h-[70vh] overflow-y-auto p-4">{children}</div>
-      </div>
-    </div>
-  )
-}
+// ExtensionModalHost + useExtensionModal 已删除（存量收敛：modal 呈现面迁至
+// components/slots/SlotOverlayHost，C4 槽位机制统一承载 widget/webview 通道）

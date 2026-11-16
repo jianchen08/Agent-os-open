@@ -395,7 +395,10 @@ describe('authStore initializeAuth 恢复分支', () => {
     expect(tl.clearTokens).not.toHaveBeenCalled()
   })
 
-  it('refresh 失败且判定认证失效：登出清理并保持未认证', async () => {
+  it('refresh 失败且判定认证失效：内联清凭据（不经 logout）保持未认证', async () => {
+    // 2026-10-22 契约修订：认证失效走内联清理后落入免填自动登录链，不再
+    // 经 logout()——logout 落壳自动登录禁用旗标，属用户登出意图专属；此处
+    // 是初始化清理。宿主无凭据（本用例）则未认证收口。
     tl.getRefreshTokenValue.mockReturnValue('rt-stored')
     tl.refresh.mockRejectedValue(new Error('invalid_grant'))
     tl.isAuthFailureFromError.mockReturnValue(true)
@@ -403,7 +406,7 @@ describe('authStore initializeAuth 恢复分支', () => {
     await useAuthStore.getState().initializeAuth()
 
     expect(tl.clearTokens).toHaveBeenCalled()
-    expect(authApi.logout).toHaveBeenCalled()
+    expect(authApi.logout).not.toHaveBeenCalled()
     const s = useAuthStore.getState()
     expect(s.isAuthenticated).toBe(false)
     expect(s.isInitializing).toBe(false)

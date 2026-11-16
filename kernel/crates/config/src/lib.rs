@@ -11,7 +11,7 @@
 //!   读写锁并发安全、加载失败回滚 + 审计日志
 //! - `error`: 配置系统错误类型
 //!
-//! agent 配置（`config/agents/**`）不归本 crate：加载在 context_build 插件
+//! agent 配置（`config/agents/**`）不归本 crate：加载在 agent_config_load 插件
 //! （sidecar 自持），工具面过滤经内核 tool-surface capability（ADR
 //! 2026-09-02-agent-config-decouple-tool-surface）。
 //!

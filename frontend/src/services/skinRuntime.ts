@@ -102,6 +102,10 @@ function scopeValueOf(theme: PluginTheme & { skin: string }): string {
 
 /** 摘除当前皮肤注入（属性 + <style> + hooks 清理 + 装饰层清空 + 槽位收回） */
 function disposeCurrentSkin(): void {
+  // 无在挂皮肤即无事可清——关键守卫：themeStore.applyTheme 对非皮肤主题
+  // 每次都会走 clearPluginSkin，无条件摘除会把同轮 image 分支刚挂上的
+  // body.has-bg-image 拆掉（背景图主题的图片层从此不渲染）。
+  if (!document.documentElement.hasAttribute('data-skin')) return
   document.documentElement.removeAttribute('data-skin')
   document.body.removeAttribute('data-skin-dark')
   // 皮肤激活期挂的背景图信号摘除（与主题管线互斥 owner，见 applyPluginSkin）

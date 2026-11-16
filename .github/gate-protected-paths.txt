@@ -1,0 +1,35 @@
+# 机械闸受保护清单（方案 AI辅助编程体系落地AgentOS_20261022 §3.6 件 2）
+# 执法器：scripts/check_gate_protected.py —— diff 命中即红。
+# 唯一放行 = gate-change 独立任务：ADR + commit message [gate-change: <ADR路径>]
+# 标记 + 全量档佐证。语义：行尾 / = 目录前缀整护；否则精确文件。
+# 本清单自身在列（自举保护：改清单也须走 gate-change）。
+
+# ── 门禁配置（单一真源 + 元门禁账本）──────────────────────────
+scripts/run_gates.py
+scripts/install_hooks.py
+scripts/githooks/
+scripts/check_pre_commit.py
+scripts/check_ci_gate.py
+scripts/check_no_build_artifacts.py
+scripts/check_gate_protected.py
+scripts/check_rule_enforcement_tier.py
+scripts/check_doc_frontmatter.py
+
+# ── 各 baseline 棘轮与 CI 定义（.github 整目录）────────────────
+.github/
+
+# ── 文档图化机械提取核（LLM 零参与执法面）─────────────────────
+scripts/graph_extract.py
+scripts/graph_aggregate.py
+scripts/graph_check.py
+scripts/graph_model.py
+
+# ── 评估指标定义（L0 三指标单源）──────────────────────────────
+config/plugins/evaluation/evaluation_metrics.yaml
+
+# ── 规范执法档位注册表（件 4 制度面）──────────────────────────
+config/rules/enforcement_tiers.yaml
+
+# ── 文档类型规范与渲染规定源码 ────────────────────────────────
+docs/schemas/
+docs/graph/viewer.html

@@ -25,7 +25,7 @@ import yaml
 
 from tests._pipeline_plugin_path import add_plugin_dir
 
-add_plugin_dir("input", "security_check")
+add_plugin_dir("security_check")
 from plugin import SecurityCheckPlugin  # noqa: E402
 
 # 直接从仓库根读取安全规则，绕开已删除的 config.config_center。

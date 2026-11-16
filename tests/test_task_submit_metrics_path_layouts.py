@@ -2,12 +2,13 @@
 # @ci: python-coverage
 """task_submit 指标配置坐标解析的三布局单测（tool._metrics_config_path）。
 
-与 plugins/shared/tools/task_evaluate/test_metrics_path_layouts.py 互为对偶
+与 plugins/shared/task_evaluate/test_metrics_path_layouts.py 互为对偶
 （同一解析契约、同一装机根因）：用户空间平铺布局（<agentos>/plugins/
 task_submit/tool.py）下原「向上 4 级」落到 <APPDATA>/config/...（不存在）→
 指标表加载为空 → 提交期校验 fail-open 放行、评估期指标诚实失败。现契约 =
-祖先逐级探测（首个含该 yaml 的祖先即根）+ 全 miss 回落向上 4 级，三布局
-（仓库 / 装机树 / 用户平铺）单算法通吃。
+祖先逐级探测（首个含该 yaml 的祖先即根，单源 _libs.evaluation_metrics_path）+
+全 miss 回落探测起点向上 3 级拼相对尾，三布局（仓库 / 装机树 / 用户平铺）
+单算法通吃。
 
 布局经模块 __file__ 替身模拟（安装位置是外部环境条件），被测函数为真实实现。
 """
@@ -25,16 +26,16 @@ pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SDK_DIR = _REPO_ROOT / "plugins" / "sdk" / "src"
-_TASKS_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "tasks"
-_TOOL_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "task_submit"
-_SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared" / "system"
+_TASKS_DIR = _REPO_ROOT / "plugins" / "shared" / "tasks"
+_TOOL_DIR = _REPO_ROOT / "plugins" / "shared" / "task_submit"
+_SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared"
 
 _PROBE_PARTS = ("config", "plugins", "evaluation", "evaluation_metrics.yaml")
 
 # 布局名 → (布局根目录名, 插件文件相对布局根路径)
 _LAYOUTS = {
-    "repo": ("repo", "plugins/shared/tools/task_submit/tool.py"),
-    "installed_tree": ("resources", "plugins/shared/tools/task_submit/tool.py"),
+    "repo": ("repo", "plugins/shared/task_submit/tool.py"),
+    "installed_tree": ("resources", "plugins/shared/task_submit/tool.py"),
     "user_flat": ("agentos", "plugins/task_submit/tool.py"),
 }
 
@@ -85,14 +86,16 @@ def test_metrics_config_path_hits_each_layout(
     assert Path(resolved).is_file()  # 性质：命中即真实存在
 
 
-def test_metrics_config_path_falls_back_to_four_up_when_all_miss(
+def test_metrics_config_path_falls_back_to_three_up_when_all_miss(
     tool_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """沿途任何祖先都无该 yaml → 回落历史行为：向上 4 级拼相对尾。"""
+    """沿途任何祖先都无该 yaml → 回落历史行为：探测起点向上 3 级拼相对尾
+    （与 task_evaluate 侧同契约，_libs 单源；探测起点 = 插件目录）。"""
     plugin_file = tmp_path / "deep" / "nest" / "alone" / "tool.py"
     plugin_file.parent.mkdir(parents=True)
     monkeypatch.setattr(tool_module, "__file__", str(plugin_file))
 
     resolved = Path(tool_module._metrics_config_path())
 
-    assert resolved == plugin_file.parent.parents[3].joinpath(*_PROBE_PARTS)
+    assert resolved == plugin_file.parent.parents[2].joinpath(*_PROBE_PARTS)
+    assert not resolved.exists()  # 全 miss 回落允许幽灵路径（调用方自有降级）

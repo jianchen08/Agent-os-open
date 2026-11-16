@@ -17,6 +17,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
+import { loadSchemaIntoRegistries } from '@/test/schemaLoader'
 import { openWorkspacePanel, openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useUIStore } from '@/stores/uiStore'
@@ -95,7 +96,18 @@ describe('FiveSpaceLayout — 模式面板页签走 webview iframe（godot 样�
   })
 
   it('path 直达 godot 面板 → 页签内容为 webview iframe，桥注入完整，无任何回退标记', async () => {
-    contributionRegistry.register(GODOT_PAGE)
+    // 声明经两表装载（C4：path 直达按 workspace.tab keyed 槽解析；槽装载期
+    // 终验要求承载 widget 'webview' 已注册——beforeEach 的 initializeWidgets 提供）
+    await loadSchemaIntoRegistries({
+      plugin_contributes: [
+        {
+          plugin_id: 'mode_godot',
+          plugin_name: 'Mode Godot',
+          contributes: { pages: [GODOT_PAGE as unknown as Record<string, unknown>] },
+        },
+      ],
+      plugin_configs: [],
+    })
     expect(openWorkspacePanelByPath('/p/godot_dev')).toBe(true)
 
     render(

@@ -136,22 +136,58 @@ struct PipelineFile {
     /// 归一进 [`PipelineConfig::max_rounds`]；缺省 None = 引擎缺省 200。
     #[serde(default)]
     max_rounds: Option<usize>,
+    /// 出厂播种版本（顶层 `version:`，ADR 2026-10-24-config-seed-version-arbitration）：
+    /// 装机播种裁决用——electron `seedConfigTree` 比较用户空间副本与包内此值，
+    /// 用户侧不严格更大即覆盖。内核不消费（不进 [`PipelineConfig`]），加载器
+    /// 只承载键使 `deny_unknown_fields` 不拒绝；格式（点分整数）由
+    /// `scripts/check_config_seed_versions.py` 门禁持有。缺省 None =
+    /// 非受管文件（copy-if-missing 旧语义不变）。
+    #[serde(default)]
+    version: Option<String>,
+    /// 安全关键步骤 id 集（顶层 `safety_locked_steps:`，设计 §4.3 护栏）：
+    /// 审批/评估等步骤——checks 不可触发或跳过。编译期执法
+    /// （`compile_pipeline_with_checks`），加载器只透传。
+    #[serde(default)]
+    safety_locked_steps: Vec<String>,
 }
 
 impl PipelineFile {
     /// 归一为内部 [`PipelineConfig`]（`next`/`while` → `exit_routes`/`while_cond`）。
     ///
-    /// 隐性技术债务显性标注（ADR 2026-09-09-kernel-dead-layer-adjudication，
-    /// 裁决=③级未接线保留）——**hooks 丢弃点**：本函数经
-    /// [`Self::to_internal_with_hooks`] 解析出 hooks 声明后按 `(cfg, _)` 丢弃，
-    /// 生产加载（server.rs `load_and_compile`）不消费 hooks：
-    /// - 妥协内容：hooks ③级命中未接线，yaml 声明解析后即弃（不报错不告警）；
-    /// - 升级触发条件：管道配置出现 `hooks:` 声明或步骤服务跨插件编排需求——
-    ///   生产入口切到 [`load_pipeline_with_hooks`] 消费本函数第二返回值；
-    /// - 时间上限：0.3 主线排期评审——无接线需求则连 hooks 解析一起删。
+    /// **hooks 已退役（钩子收敛终局，设计 §4.3）**：yaml 出现 `hooks:` 声明 =
+    /// 加载错误（fail-visible，文案含 checks 迁移指引）——由
+    /// [`LoopBodyFile::to_internal_with_hooks`] / [`StepFile::to_internal_with_hooks`]
+    /// 拒绝；本函数保留签名（api 生产调用面）但不再静默丢弃。
     #[allow(clippy::wrong_self_convention)] // 消费型转换（File 结构一次性归一到内部类型）
     fn to_internal(self) -> Result<PipelineConfig, PipelineLoadError> {
         self.to_internal_with_hooks().map(|(cfg, _)| cfg)
+    }
+
+    /// 归一为内部 [`PipelineConfig`] + checks 声明（钩子收敛终局，单次解析）。
+    ///
+    /// checks 不进入 [`PipelineConfig`]（引擎类型零改动）：body 级声明按循环体
+    /// id 收集，供编译期
+    /// [`agentos_engine::compiler::compile_pipeline_with_checks`] 消费；
+    /// `safety_locked_steps` 顶层声明透传为编译护栏输入。
+    #[allow(clippy::wrong_self_convention)] // 消费型转换（File 结构一次性归一到内部类型）
+    fn to_internal_with_checks(
+        self,
+    ) -> Result<(PipelineConfig, PipelineChecks), PipelineLoadError> {
+        let safety_locked_steps = self.safety_locked_steps.clone();
+        let body_checks: Vec<(String, Vec<agentos_core::types::StepCheck>)> = self
+            .loop_bodies
+            .iter()
+            .filter(|b| !b.checks.is_empty())
+            .map(|b| (b.id.clone(), b.checks.clone()))
+            .collect();
+        let config = self.to_internal()?;
+        Ok((
+            config,
+            PipelineChecks {
+                body_checks,
+                safety_locked_steps,
+            },
+        ))
     }
 
     /// 归一为内部 [`PipelineConfig`] + hooks 声明（服务化提案 §3.6，单次解析）。
@@ -204,7 +240,26 @@ pub fn validate_pipeline_config_data(data: &serde_json::Value) -> Result<(), Pip
     let file: PipelineFile = serde_json::from_value(data.clone()).map_err(|e| {
         PipelineLoadError::InvalidConfig(format!("结构校验失败（G10 文件 DSL）: {e}"))
     })?;
+    // 出厂播种版本格式（ADR 2026-10-24-config-seed-version-arbitration）：
+    // 保存面报错前置（与 CI 门禁同口径）；启动加载保持容忍（旧内核读新
+    // yaml 的前向兼容不因 version 格式硬拒）。
+    if let Some(v) = file.version.as_deref() {
+        if !is_dotted_int_version(v) {
+            return Err(PipelineLoadError::InvalidConfig(format!(
+                "顶层 version 格式无效（期望点分整数，如 1 / 1.2，实际 {v:?}）"
+            )));
+        }
+    }
     file.to_internal().map(|_| ())
+}
+
+/// 点分整数版本号判定（`1` / `1.2` / `1.2.3`；空段/非数字/空串 = 假）。
+/// 装机播种裁决与保存面校验共用此格式；序比较（逐段数值）在 electron
+/// 播种侧持有，内核只判格式。
+fn is_dotted_int_version(s: &str) -> bool {
+    !s.is_empty()
+        && s.split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// hooks 声明聚合（服务化提案 §3.6）：body 级 + step 级（复合键 `"<body id>:<step id>"`）。
@@ -217,6 +272,19 @@ pub struct PipelineHooks {
     pub body_hooks: Vec<(String, Vec<agentos_engine::compiler::HookFile>)>,
     /// step 级 hooks：`("<body id>:<step id>" 复合键, 声明列表)`。
     pub step_hooks: Vec<(String, Vec<agentos_engine::compiler::HookFile>)>,
+}
+
+/// checks 声明聚合（钩子收敛终局，设计 §4.3）：body 级 checks + 安全步骤集。
+///
+/// 由 [`load_pipeline_with_checks`] 单次解析产出，供编译期
+/// [`agentos_engine::compiler::compile_pipeline_with_checks`] 消费；
+/// 未声明时两表皆空（分发点零开销短路）。
+#[derive(Debug, Default)]
+pub struct PipelineChecks {
+    /// body 级 checks：`(循环体 id, 声明列表)`。
+    pub body_checks: Vec<(String, Vec<agentos_core::types::StepCheck>)>,
+    /// 安全关键步骤 id 集（不可被 checks 触发或跳过）。
+    pub safety_locked_steps: Vec<String>,
 }
 
 /// 循环体 YAML 形态。
@@ -234,9 +302,15 @@ struct LoopBodyFile {
     next: Vec<TransitionFile>,
     #[serde(default)]
     run_on_error: bool,
-    /// 管道级 hooks（服务化提案 §3.6）：整个循环体生命周期的观察者。
+    /// hooks 声明（已退役，钩子收敛终局）：非空 = 加载错误（fail-visible，
+    /// 文案含 checks 迁移指引）——见设计 §4.3。
     #[serde(default)]
     hooks: Vec<agentos_engine::compiler::HookFile>,
+    /// checks 统一检测声明（钩子收敛终局，设计 §4.3）：本循环体内生效的
+    /// 触发时机 × when 谓词 × 动作（route/terminate/run 一次性步）。
+    /// 编译期经 `compile_pipeline_with_checks` 消费。
+    #[serde(default)]
+    checks: Vec<agentos_core::types::StepCheck>,
 }
 
 /// 循环体文件归一产物：内部循环体 + body 级 hooks + step 级 hooks
@@ -259,6 +333,12 @@ impl LoopBodyFile {
         // step 级转移的 Step 目标判定需要本 body 的 step id 全集
         let local_step_ids: HashSet<String> = self.steps.iter().map(|s| s.id.clone()).collect();
         let location = format!("循环体 '{}'", self.id);
+        if !self.hooks.is_empty() {
+            return Err(PipelineLoadError::InvalidConfig(format!(
+                "{location}: hooks 机制已退役（checks 统一机制取代，设计 §4.3）——请迁移为循环体 \
+                 checks 声明（如 step 级 step_end → {{at: \"post:<step>\", then: \"run:<步骤id>\"}}）"
+            )));
+        }
 
         // 循环体级转移：目标只接受 end / 循环体 id（step 级转移才接受 step id）
         let mut next_routes = Vec::with_capacity(self.next.len());
@@ -333,6 +413,12 @@ impl StepFile {
         body_location: &str,
     ) -> Result<(PipelineStep, Vec<agentos_engine::compiler::HookFile>), PipelineLoadError> {
         let location = format!("{body_location} / step '{}'", self.id);
+        if !self.hooks.is_empty() {
+            return Err(PipelineLoadError::InvalidConfig(format!(
+                "{location}: hooks 机制已退役（checks 统一机制取代，设计 §4.3）——请迁移为循环体 \
+                 checks 声明（如 step 级 step_end → {{at: \"post:<step>\", then: \"run:<步骤id>\"}}）"
+            )));
+        }
         let mut next_routes: Vec<Route> = Vec::with_capacity(self.next.len());
         for t in self.next {
             next_routes.push(t.into_route(body_ids, Some(local_step_ids), &location)?);
@@ -407,6 +493,42 @@ pub fn load_pipeline_config_by_name(
         .map_err(|e| PipelineLoadError::ParseYaml(path.clone(), e.to_string()))?;
     let config = file.to_internal().map_err(|e| e.with_path(path.clone()))?;
     Ok(config)
+}
+
+/// 按名加载管道配置 + checks 声明（钩子收敛终局，设计 §4.3，单次解析）。
+///
+/// 与 [`load_pipeline_config_by_name`] 同源（同一 YAML 文件、同一解析层），
+/// 额外返回 checks 聚合（body 级）与安全步骤集，供编译期
+/// [`agentos_engine::compiler::compile_pipeline_with_checks`] 消费。
+/// 文件缺失时返回默认配置 + 空 checks（与加载降级一致）；`hooks:` 声明 =
+/// 加载错误（退役 fail-visible）。
+pub fn load_pipeline_with_checks(
+    config_root: &Path,
+    name: &str,
+) -> Result<(PipelineConfig, PipelineChecks), PipelineLoadError> {
+    let path = resolve_pipeline_config_path(config_root, &format!("{name}.yaml"));
+    if !path.exists() {
+        tracing::warn!(
+            "Pipeline config not found at {}, using default (empty loop bodies)",
+            path.display()
+        );
+        return Ok((
+            PipelineConfig {
+                name: "default".to_string(),
+                loop_bodies: Vec::new(),
+                checkpoint: Default::default(),
+                initial_state: HashMap::new(),
+                max_rounds: None,
+            },
+            PipelineChecks::default(),
+        ));
+    }
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| PipelineLoadError::ReadFile(path.clone(), e.to_string()))?;
+    let file: PipelineFile = serde_yaml::from_str(&raw)
+        .map_err(|e| PipelineLoadError::ParseYaml(path.clone(), e.to_string()))?;
+    file.to_internal_with_checks()
+        .map_err(|e| e.with_path(path.clone()))
 }
 
 /// 加载管道配置 + hooks 声明（服务化提案 §3.6，单次解析）。
@@ -794,7 +916,8 @@ loop_bodies:
         assert!(missing.loop_bodies.is_empty());
     }
 
-    /// hooks 声明解析（服务化提案 §3.6）：body 级 + step 级复合键 + 空配置零条目。
+    /// hooks 声明已退役（钩子收敛终局，设计 §4.3）：旧双作用域 yaml 现在
+    /// fail-visible 拒载（文案含 checks 迁移指引），不再解析出 hooks 表。
     #[test]
     fn test_load_pipeline_with_hooks_parses_two_level_scopes() {
         let tmp = TempDir::new().unwrap();
@@ -817,19 +940,11 @@ loop_bodies:
         fs::create_dir_all(root.join("pipelines")).unwrap();
         fs::write(root.join("pipelines/autonomous.yaml"), yaml).unwrap();
 
-        let (cfg, hooks) = load_pipeline_with_hooks(root).expect("should load");
-        assert_eq!(cfg.name, "hook_pipeline");
-        assert_eq!(cfg.loop_bodies.len(), 1);
-        // body 级 hooks：按循环体 id 收集
-        assert_eq!(hooks.body_hooks.len(), 1);
-        assert_eq!(hooks.body_hooks[0].0, "main");
-        assert_eq!(hooks.body_hooks[0].1.len(), 1);
-        assert_eq!(hooks.body_hooks[0].1[0].on, "stream_chunk");
-        assert_eq!(hooks.body_hooks[0].1[0].run, "watcher.on_chunk");
-        // step 级 hooks：复合键 "<body id>:<step id>"，未声明 hooks 的 step 不产生条目
-        assert_eq!(hooks.step_hooks.len(), 1);
-        assert_eq!(hooks.step_hooks[0].0, "main:core");
-        assert_eq!(hooks.step_hooks[0].1[0].run, "w2.on_chunk");
+        let err = load_pipeline_with_hooks(root).expect_err("hooks 已退役应拒载");
+        let msg = format!("{err}");
+        assert!(msg.contains("hooks 机制已退役"), "err: {msg}");
+        assert!(msg.contains("checks"), "err: {msg}");
+        assert!(msg.contains("main"), "err: {msg}");
     }
 
     /// hooks 空配置 → 两表皆空（发射点零开销短路）。
@@ -1197,6 +1312,11 @@ loop_bodies:
     /// （加载 + 归一成功即证明迁移后的 YAML 可被引擎消费；编译校验在启动期 fail-fast。）
     #[test]
     fn test_real_autonomous_yaml_loads_after_dsl_migration() {
+        // 用户空间钉空临时根：解析用户层优先（ADR 2026-09-13），不钉会读到
+        // 宿主机装机版旧种子副本致车道随机器漂移；钉空根回落 factory=仓内
+        // 真实 config（本测试语义）。
+        let us_tmp = TempDir::new().unwrap();
+        let _us = pin_tmp_user_space(us_tmp.path());
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
             .join("config");
@@ -1213,9 +1333,13 @@ loop_bodies:
             "bodies: {:?}",
             cfg.loop_bodies.iter().map(|b| &b.id).collect::<Vec<_>>()
         );
-        // main / post：DSL next 归一为 routes（7 条：任务终态收束 + 对话挂起 +
-        // 对话结束 + 新输入回 LLM + duplicate 回 LLM + 纯文本轮不终局 + 缺省
-        // end；工具循环已并入 tool_exec 并行 for-each，post 无 raw_tool_calls 路由）
+        // main / post：DSL next 归一为 routes（9 条：任务终态收束 + 工具迭代
+        // 收尾回写 + 对话挂起 + 对话清除 + 工具调用回环 + 新输入回 LLM +
+        // duplicate 回 LLM + 纯文本轮不终局 + 缺省 end；形态拆分
+        // 2026-10-10-pipeline-shape-split-core-type 后 post 显式路由 core_type
+        // 决定下一迭代形态，tool_exec 并行 for-each 在迭代内居于 llm 之前，
+        // post 须有 raw_tool_calls 回环路由把控制送回下一迭代——否则聊天会话
+        // （task.id=none、conversation_mode 未激活）兜底 end 吞调用）
         let main = cfg
             .loop_bodies
             .iter()
@@ -1228,49 +1352,69 @@ loop_bodies:
             .iter()
             .find(|s| s.id == "post")
             .expect("post step");
-        assert_eq!(post.routes.len(), 7, "post next 七条");
-        // 任务终态当轮收束置顶（用户裁定 2026-08-29：成功/失败/取消立即 end）
+        assert_eq!(post.routes.len(), 9, "post next 九条");
+        // 任务终态当轮收束置顶（用户裁定 2026-08-29：成功/失败/取消立即 end；
+        // task.id != none 限定任务管道——会话聊天管道无 task.id 不终态收束；
+        // 2026-10-21 960ec2a36 并入 task_evaluation_completed 投影键——评估
+        // 通过的工具轮当轮 end，不回 LLM 空转一轮）
         assert_eq!(post.routes[0].then.next, RouteNext::End);
         assert_eq!(
             post.routes[0].when,
-            "task.status == 'completed' or task.status == 'failed' or task.status == 'cancelled'"
+            "task.id != none and (task.status == 'completed' or task.status == 'failed' or task.status == 'cancelled' or task_evaluation_completed == True)"
+        );
+        // 工具迭代收尾：无条件回 LLM（执行完或缓存命中都回）并显式写回
+        // core_type=llm_call。必须居对话路由之前——工具迭代 post 时刻
+        // raw_tool_calls 可能已被缓存命中清空，对话挂起路由若先判会在 LLM
+        // 消费结果之前抢跑挂起（形态拆分 2026-10-10 新增路由）
+        assert_eq!(post.routes[1].then.next, RouteNext::Loop);
+        assert_eq!(post.routes[1].when, "core_type == 'tool_execute'");
+        assert_eq!(
+            post.routes[1].then.set.get("core_type"),
+            Some(&serde_json::json!("llm_call"))
         );
         // 对话模式分支（2026-08-27 接线 conversation_mode）
-        assert_eq!(post.routes[1].then.next, RouteNext::Loop);
+        assert_eq!(post.routes[2].then.next, RouteNext::Loop);
         assert_eq!(
-            post.routes[1].when,
+            post.routes[2].when,
             "conversation_mode == True and raw_tool_calls == []"
         );
         assert_eq!(
-            post.routes[1].then.set.get("suspended"),
+            post.routes[2].then.set.get("suspended"),
             Some(&serde_json::json!(true)),
             "对话挂起经 set suspended=true 表达"
         );
         assert_eq!(
-            post.routes[2].when,
+            post.routes[3].when,
             "conversation_mode == True and raw_tool_calls != []"
         );
-        // 新输入回 LLM（result_format 置位 _has_new_llm_input）
-        assert_eq!(post.routes[3].when, "_has_new_llm_input == true");
-        // duplicate_check 二级拦截回 LLM（控制状态键契约 ADR 2026-08-30）
+        // 工具调用回环（下一迭代 tool_exec 消费；居对话清除路由之后，
+        // roleplay.yaml 同款）
         assert_eq!(post.routes[4].then.next, RouteNext::Loop);
-        assert_eq!(post.routes[4].when, "router.duplicate_back_llm == True");
         assert_eq!(
-            post.routes[4].then.set.get("router.duplicate_back_llm"),
+            post.routes[4].when,
+            "raw_tool_calls != [] and raw_tool_calls != None"
+        );
+        // 新输入回 LLM（result_format 置位 _has_new_llm_input）
+        assert_eq!(post.routes[5].when, "_has_new_llm_input == true");
+        // duplicate_check 二级拦截回 LLM（控制状态键契约 ADR 2026-08-30）
+        assert_eq!(post.routes[6].then.next, RouteNext::Loop);
+        assert_eq!(post.routes[6].when, "router.duplicate_back_llm == True");
+        assert_eq!(
+            post.routes[6].then.set.get("router.duplicate_back_llm"),
             Some(&serde_json::json!(false)),
             "回 LLM 分支自清路由键防残留"
         );
         // 任务管道纯文本轮不终局（D2 一次性终局修复 221a776d6，兜底 end 前置轮回规则）
-        assert_eq!(post.routes[5].then.next, RouteNext::Loop);
+        assert_eq!(post.routes[7].then.next, RouteNext::Loop);
         assert_eq!(
-            post.routes[5].when,
+            post.routes[7].when,
             "task.id != none and conversation_mode != True and task.status != 'completed' and task.status != 'failed' and task.status != 'cancelled'"
         );
-        assert_eq!(post.routes[6].then.next, RouteNext::End);
-        assert_eq!(post.routes[6].when, "True", "缺省 when 归一为 True");
+        assert_eq!(post.routes[8].then.next, RouteNext::End);
+        assert_eq!(post.routes[8].when, "True", "缺省 when 归一为 True");
         // core 步骤静态化：动态 core_plugin 项退役，只余工具缓存命中的门控直出；
-        // 工具执行核移至 tool_exec 并行 for-each（单调用契约，ADR
-        // 2026-10-02-loopconfig-parallel-foreach）
+        // 工具执行核移至 tool_exec 并行 for-each（单调用契约，内容移植自
+        // sync/open-main-20261008 9101f86a9）
         let core = main
             .steps
             .iter()
@@ -1283,8 +1427,11 @@ loop_bodies:
                 StepItem::Gated { name, when, .. } if name == "pipeline_tool_cache" => when.clone(),
                 _ => None,
             })
-            .expect("core 应为 pipeline_tool_cache 门控项");
-        assert!(cache_when.contains("raw_tool_calls"));
+            .expect("tool_cache 应为带 when 的门控项");
+        assert_eq!(
+            cache_when, "raw_tool_calls != [] and raw_tool_calls != None",
+            "缓存命中直出、未命中放行执行核"
+        );
         let tool_exec = main
             .steps
             .iter()
@@ -1293,15 +1440,37 @@ loop_bodies:
         let lc = tool_exec
             .loop_config
             .as_ref()
-            .expect("tool_exec 应带 for-each loop_config");
+            .expect("tool_exec 应声明 loop_config for-each");
         assert_eq!(lc.over.as_deref(), Some("state.raw_tool_calls"));
         assert_eq!(lc.as_iter.as_deref(), Some("current_call"));
-        assert_eq!(lc.max_concurrency, 4, "有界并行上限配置域可调");
-        assert!(lc.consume, "收尾清源 raw_tool_calls");
-        assert!(lc.collect.contains(&"tool_results".to_string()));
-        assert!(lc
-            .collect_append
-            .contains(&"submitted_task_ids".to_string()));
+        assert_eq!(lc.max_concurrency, 4, "有界并行");
+        for collected in ["tool_results", "_full_tool_results", "_executed_tool_calls"] {
+            assert!(
+                lc.collect.iter().any(|k| k == collected),
+                "collect 应含 {collected}"
+            );
+        }
+        assert_eq!(
+            lc.collect_append,
+            vec!["submitted_task_ids".to_string()],
+            "会话累计键走 collect_append"
+        );
+        assert!(lc.consume, "over 源键收尾清空（消费即清）");
+        assert_eq!(
+            lc.consume_keys,
+            vec!["pre_decided_results".to_string()],
+            "预填结果批内共享、消费后清除"
+        );
+        // llm 组：llm_core + spill_guard（旧 core 组序的等价平铺）
+        let llm = main.steps.iter().find(|s| s.id == "llm").expect("llm step");
+        assert!(
+            llm.steps.iter().any(|s| s.name() == "pipeline_llm_core"),
+            "llm 组应含 pipeline_llm_core"
+        );
+        assert!(
+            llm.steps.iter().any(|s| s.name() == "pipeline_spill_guard"),
+            "llm 组应保留 spill_guard"
+        );
         // W2a 压缩粗门：prepare 的 context_window_guard 为带 when 的门控项，
         // 公式（百分比阈值）经 condition DSL 编译期可解析（加载面断言；语义
         // 真假两侧由 engine 测试锁定）
@@ -1459,6 +1628,46 @@ next:
             ]
         });
         assert!(validate_pipeline_config_data(&ok).is_ok());
+    }
+
+    /// 出厂播种版本字段（ADR 2026-10-24-config-seed-version-arbitration）：
+    /// 顶层 `version:` 加载容忍（启动面不因字段在场硬拒——deny_unknown_fields
+    /// 白名单补位）+ 保存面格式闸（点分整数；非点分整数/空串报错，缺省 None 放行）。
+    #[test]
+    fn test_version_field_load_tolerance_and_validate_format() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let _guard = pin_tmp_user_space(root);
+        fs::create_dir_all(root.join("pipelines")).unwrap();
+        // 启动加载容忍：带 version 的 yaml 正常加载（含非点分格式——格式闸
+        // 在保存面与 CI，旧内核读新 yaml 不硬拒）。
+        for v in ["1", "1.2.3", "weird"] {
+            fs::write(
+                root.join("pipelines/autonomous.yaml"),
+                format!("name: v{v:?}\nversion: {v}\nloop_bodies:\n  - id: main\n    steps: []\n"),
+            )
+            .unwrap();
+            let cfg = load_pipeline_config(root).expect("带 version 的 yaml 应能加载");
+            assert_eq!(cfg.name, format!("v{v:?}"));
+        }
+
+        // 保存面：点分整数放行。
+        for ok_v in ["1", "1.2", "10.0.1"] {
+            let payload = json!({ "name": "p", "version": ok_v });
+            assert!(
+                validate_pipeline_config_data(&payload).is_ok(),
+                "version={ok_v} 应放行"
+            );
+        }
+        // 保存面：非点分整数 / 空串报错；缺省 None 放行。
+        for bad_v in ["1.x", "v2", "1..2", ""] {
+            let payload = json!({ "name": "p", "version": bad_v });
+            let err = validate_pipeline_config_data(&payload)
+                .err()
+                .unwrap_or_else(|| panic!("version={bad_v:?} 应报错"));
+            assert!(matches!(err, PipelineLoadError::InvalidConfig(_)));
+        }
+        assert!(validate_pipeline_config_data(&json!({ "name": "p" })).is_ok());
     }
 
     /// validate_pipeline_config_data：旧形态键 / 死形态 / 未知目标 / 缺 name 全部报错
@@ -1774,5 +1983,59 @@ steps:
         };
         validate_no_name_conflicts(&pipeline, &StepLibrary::default(), &HashSet::new())
             .expect("Phase 目标存在应通过");
+    }
+}
+
+/// checks 声明装载（钩子收敛终局，设计 §4.3）：body 级 checks 归一为
+/// `(循环体 id, 声明列表)` + 顶层安全步骤集透传；hooks 键保留但非空即拒。
+#[cfg(test)]
+mod checks_wiring_tests {
+    use super::*;
+
+    #[test]
+    fn body_checks_parsed_with_safety_locks() {
+        let yaml = r#"
+name: p
+safety_locked_steps: [approve, evaluate]
+loop_bodies:
+  - id: main
+    steps:
+      - id: think
+        steps: [{name: llm_step}]
+      - id: act
+        steps: [{name: tool_step}]
+    checks:
+      - at: "pre:act"
+        then: "run:think"
+      - at: "post:act"
+        when: "act_done == true"
+        then: terminate
+"#;
+        let file: PipelineFile = serde_yaml::from_str(yaml).expect("yaml 解析");
+        let (config, checks) = file.to_internal_with_checks().expect("checks 归一");
+        assert_eq!(config.loop_bodies.len(), 1);
+        assert_eq!(checks.body_checks.len(), 1);
+        assert_eq!(checks.body_checks[0].0, "main");
+        assert_eq!(checks.body_checks[0].1.len(), 2);
+        assert_eq!(checks.body_checks[0].1[0].at, "pre:act");
+        assert_eq!(checks.body_checks[0].1[0].then, "run:think");
+        assert_eq!(checks.body_checks[0].1[1].then, "terminate");
+        assert_eq!(checks.safety_locked_steps, vec!["approve", "evaluate"]);
+    }
+
+    #[test]
+    fn hooks_declaration_is_rejected_fail_visible() {
+        let yaml = r#"
+name: p
+loop_bodies:
+  - id: main
+    hooks: [{on: turn/end, run: "node x.mjs"}]
+    steps: []
+"#;
+        let file: PipelineFile = serde_yaml::from_str(yaml).expect("yaml 解析");
+        let err = file.to_internal_with_checks().expect_err("hooks 应拒载");
+        let msg = format!("{err}");
+        assert!(msg.contains("hooks"), "err: {msg}");
+        assert!(msg.contains("checks"), "err: {msg}");
     }
 }

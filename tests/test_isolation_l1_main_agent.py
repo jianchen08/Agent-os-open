@@ -19,23 +19,22 @@ from unittest.mock import MagicMock, patch
 # 先注入插件目录与 plugins/shared/（pipeline 命名空间包 + 裸名模块解析需要），
 # 再 import——消除对 pytest 收集顺序的依赖（自包含，可单独运行）。
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "shared"))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "pipeline" / "input" / "isolation_guard"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugins" / "shared" / "isolation_guard"))
 
 # 收集期防线：平铺套件可能把 pipeline/types.py 装进裸名 "types" 缓存
-# （其顶层相对导入必炸），导入 SimpleNamespace 前恢复 stdlib 绑定。
+# （其顶层相对导入必炸），导入 stdlib types 前恢复绑定。
 from tests._stdlib_guard import ensure_stdlib_module
 
 ensure_stdlib_module("types")
-from types import SimpleNamespace  # noqa: E402
 
 import pytest  # noqa: E402
 from agentos_plugin_sdk.isolation_types import IsolationLevel  # noqa: E402
 
 import tests._isolation_path  # noqa: F401
 
-from pipeline.plugin import PluginContext  # noqa: E402
-from pipeline.types import StateKeys  # noqa: E402
-from plugin import IsolationGuard  # noqa: E402
+from _libs.pipeline_base.plugin import PluginContext  # noqa: E402
+from _libs.pipeline_base.types import StateKeys  # noqa: E402
+from plugin import IsolationGuard, set_env_caller  # noqa: E402
 
 
 def _make_guard(docker_available: bool = True) -> IsolationGuard:
@@ -46,12 +45,13 @@ def _make_guard(docker_available: bool = True) -> IsolationGuard:
     mock_policy.isolation = IsolationLevel.CONTAINER
     guard._decider.resolve = MagicMock(return_value=mock_policy)
     guard._get_task_metadata = MagicMock(return_value={"isolation_level": "isolated"})
-    # 容器落地注入 fake manager：docker 决策后直接返回容器 id，不触真实 IsolationManager
+    # 容器落地注入环境服务 caller 假身：docker 决策后正门返回容器 id，
+    # 不触真实 isolation 服务
 
-    async def _goc(**kwargs):
-        return SimpleNamespace(env_id="container-test")
+    async def _create_env(tool_name: str, args: dict) -> dict:
+        return {"success": True, "data": {"env_id": "container-test", "status": "ready"}}
 
-    guard._manager = SimpleNamespace(get_or_create_environment=_goc)
+    set_env_caller(_create_env)
     return guard
 
 

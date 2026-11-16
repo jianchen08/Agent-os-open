@@ -38,6 +38,12 @@ logger = logging.getLogger(__name__)
 # 回退 force_unload 整组驱逐语义）。加载新实例由 reload_handler（宿主侧
 # 遮蔽纪律）承担，本类只做成员换入与聚合表重建。
 RELOAD_MEMBER_METHOD = "agentos/reload_member"
+# 内核 → 宿主的「成员在场保证」请求（带应答，幂等）。与 reload_member 的分界：
+# reload 要求成员**在当前成员表里**（换码语义）；load 负责**把成员载入进程**
+# （缺席补齐 + 摘除后加回，同一动作）——成员集的权威在内核分配表（ADR
+# 2026-10-29），宿主只执行指令、不设准入白名单。域事件投递前的唤醒原语与
+# 新成员惰性装箱的补齐都走这条（ADR 2026-10-28 D5）。
+LOAD_MEMBER_METHOD = "agentos/load_member"
 
 # 内核 → 宿主的单成员卸载请求（带应答；ADR 2026-09-24
 # member-granularity-unload）：定向 on_unload → 从成员表摘除 → 三张聚合表
@@ -76,14 +82,21 @@ class CohostServer:
     ) -> None:
         if not members:
             raise ValueError("cohost server requires at least one member plugin")
+        # 成员集的唯一权威在内核分配表；本表只记「当前在场成员」，随
+        # load_member/unload_member 指令增减（ADR 2026-10-29）。宿主不持有
+        # 期望态副本——出生名册只是首载入参，不作后续准入白名单。
         self._members: dict[str, AgentOSPlugin] = dict(members)
         self._channel = KernelChannel()
         self._tools = self._aggregate_tools()
         self._resources = self._aggregate_resources()
         self._lifecycle_handlers = self._aggregate_lifecycle_handlers()
+        # 步骤聚合（与单插件 run() 路径等价：漏传会让合宿步骤分发恒
+        # STEP_NOT_FOUND——todo.fold/extract 出生起 422 次/日的根因）。
+        self._steps = self._aggregate_steps()
         self._initialize_params: dict[str, Any] = {}
         handlers: dict[str, tuple[type, Any]] = {
-            UNLOAD_MEMBER_METHOD: (types.RequestParams, self._handle_unload_request)
+            UNLOAD_MEMBER_METHOD: (types.RequestParams, self._handle_unload_request),
+            LOAD_MEMBER_METHOD: (types.RequestParams, self._handle_load_request),
         }
         if reload_handler is not None:
             handlers[RELOAD_MEMBER_METHOD] = (
@@ -98,6 +111,7 @@ class CohostServer:
             kernel_channel=self._channel,
             request_handlers=handlers,
             on_call_config=self._route_call_config,
+            steps=self._steps,
         )
         self._reload_handler = reload_handler
         self._unload_handler = unload_handler
@@ -123,24 +137,29 @@ class CohostServer:
         注入语义与首次握手一致）。
 
         Raises:
-            ValueError: plugin_id 非当前成员，或换入后聚合表重名。
+            ValueError: 换入后聚合表重名（成员资格归内核分配表，此处不预检）。
         """
-        if plugin_id not in self._members:
-            raise ValueError(f"swap_member: unknown member: {plugin_id}")
+        # 成员资格不预检：成员集权威在内核分配表（ADR 2026-10-29），宿主只
+        # 执行装载指令。真正的安全网是下面的聚合重名校验——失败不落表。
         self._members[plugin_id] = plugin
         # 先按新成员集全量重聚合（重名校验在聚合期抛出，失败不落表）。
         new_tools = self._aggregate_tools()
         new_resources = self._aggregate_resources()
         new_handlers = self._aggregate_lifecycle_handlers()
+        new_steps = self._aggregate_steps()
         self._tools.clear()
         self._tools.update(new_tools)
         self._resources.clear()
         self._resources.update(new_resources)
         self._lifecycle_handlers.clear()
         self._lifecycle_handlers.update(new_handlers)
-        # 新成员接线：共享反向调用通道 + initialize 注入重放。
+        # steps 同一 dict 与 McpServer 共享，原位替换（换入成员步骤下一拍生效）。
+        self._steps.clear()
+        self._steps.update(new_steps)
+        # 新成员接线：共享反向调用通道 + initialize 注入重放（按成员路由，
+        # 与首载同一语义——重放原始参数会把触发成员的命名空间发给换入成员）。
         plugin._kernel_channel = self._channel
-        plugin._on_initialize(dict(self._initialize_params))
+        plugin._on_initialize(self._member_initialize_params(plugin_id, dict(self._initialize_params)))
         logger.info("[cohost] member swapped in: %s (tools=%d)", plugin_id, len(self._tools))
 
     async def _dispatch_member_unload(self, plugin_id: str) -> None:
@@ -184,6 +203,41 @@ class CohostServer:
         except Exception:
             logger.exception("[cohost] 成员 on_load 定向派发异常（已隔离）: plugin=%s", plugin_id)
 
+    async def _handle_load_request(self, ctx: Any, _params: Any) -> dict[str, Any]:
+        """``agentos/load_member`` 请求处理：把缺席成员载入宿主进程。
+
+        幂等：成员已在场 → ``{loaded: True, added: False}``（内核既在每次域事件
+        前调用、也在新成员惰性装箱时调用，不能把已在场当失败）。载入路径与热
+        换入同源（加载回调 → 三张聚合表重建 → 定向 on_load），差别只在**不派发
+        旧实例 on_unload**（旧实例已随摘除离场）。
+
+        不校验成员资格：成员集权威在内核分配表（ADR 2026-10-29），宿主只执行
+        指令；加载失败不会写进成员表，宿主状态不被破坏。
+
+        任何失败以异常应答（协议错误），内核据此回退整组重建——事件可能缺投 /
+        新成员不可用，两种情况都必须让内核看见。
+        """
+        raw = dict(ctx.params) if ctx.params else {}
+        plugin_id = raw.get("plugin_id")
+        if not isinstance(plugin_id, str) or not plugin_id:
+            raise ValueError("load_member: missing plugin_id")
+        if plugin_id in self._members:
+            return {"loaded": True, "added": False, "plugin_id": plugin_id}
+        loader = self._reload_handler
+        if loader is None:
+            raise ValueError("load_member: no reload handler registered")
+        fresh_caps = raw.get("capabilities")
+        if isinstance(fresh_caps, dict):
+            self._initialize_params = {**self._initialize_params, "capabilities": fresh_caps}
+        plugin = loader(plugin_id)
+        if asyncio.iscoroutine(plugin):
+            plugin = await plugin
+        self.swap_member(plugin_id, plugin)
+        # 加回同首载：on_load 必须重跑（初始化副作用不在实例构造里）
+        await self._dispatch_member_load(plugin_id)
+        logger.info("[cohost] member added back: %s (tools=%d)", plugin_id, len(self._tools))
+        return {"loaded": True, "added": True, "plugin_id": plugin_id}
+
     async def _handle_reload_request(self, ctx: Any, _params: Any) -> dict[str, Any]:
         """``agentos/reload_member`` 请求处理：旧成员定向 on_unload → 加载 → 换入。
 
@@ -200,6 +254,14 @@ class CohostServer:
         loader = self._reload_handler
         if loader is None:
             raise ValueError("reload_member: no reload handler registered")
+        # 缺陷E（台账 R2）：内核在请求携带实时 capabilities（与 initialize 同源
+        # 派生）时刷新留存快照——换入成员按新声明面注入。宿主 spawn 时握手快照
+        # 可能缺后续注册的 namespace（boot 竞态窗口），成员重载是唯一不换进程的
+        # 注入重放点：不刷新则陈旧快照终身有效（"刷新不粘滞"）。旧内核不带该
+        # 字段：维持快照重放（旧行为）。
+        fresh_caps = raw.get("capabilities")
+        if isinstance(fresh_caps, dict):
+            self._initialize_params = {**self._initialize_params, "capabilities": fresh_caps}
         await self._dispatch_member_unload(plugin_id)
         plugin = loader(plugin_id)
         if asyncio.iscoroutine(plugin):
@@ -268,6 +330,21 @@ class CohostServer:
                 tools[full_name] = replace(tool_def, name=full_name)
         return tools
 
+    def _aggregate_steps(self) -> dict[str, Any]:
+        """成员步骤 handler 聚合为扁平 ``{step_name}`` 表。
+
+        步骤名与 manifest ``capabilities.steps`` 一致（内核约定分发按名查，
+        不带插件前缀——与单插件 ``plugin.run()`` 的 ``steps=self.steps`` 等
+        价）。跨成员同名步骤拒绝（合宿内步骤名即全局名）。
+        """
+        steps: dict[str, Any] = {}
+        for plugin in self._members.values():
+            for name, handler in plugin.steps.items():
+                if name in steps:
+                    raise ValueError(f"cohost step name conflict: {name}")
+                steps[name] = handler
+        return steps
+
     def _aggregate_resources(self) -> dict[str, ResourceDef]:
         """成员资源 → ``{plugin_id}.{uri}`` 前缀聚合。"""
         resources: dict[str, ResourceDef] = {}
@@ -309,15 +386,33 @@ class CohostServer:
 
         return _fan_out
 
+    def _member_initialize_params(self, plugin_id: str, params: dict[str, Any]) -> dict[str, Any]:
+        """按成员路由握手注入配置（``member_configs`` 增量字段，内核合宿 spawn 注入）。
+
+        initialize 的 ``config`` 只承载触发成员的 config_files 命名空间（单握手
+        参数无成员维度）——不路由则非触发成员的构造期配置落空（2026-10-09
+        isolation_guard 部署实测：以空配置构造 → 注入链断裂 fail-closed，容器
+        要求型工具全拒）。内核在 params 附 ``member_configs``（{plugin_id: 该
+        成员注入命名空间}）且含本成员时改写 ``config`` 为该成员自己的命名空间；
+        字段缺席（旧内核）或无本成员条目（manifest 并发卸载窗口）原样返回，
+        回落顶层 ``config``（旧行为，兼容双向）。
+        """
+        member_configs = params.get("member_configs")
+        if not isinstance(member_configs, dict) or plugin_id not in member_configs:
+            return params
+        routed = dict(params)
+        routed["config"] = member_configs[plugin_id]
+        return routed
+
     def _fan_out_initialize(self, params: dict[str, Any]) -> None:
         """initialize 握手扇出：全部成员共享本服务端的 KernelChannel 并各自注入。"""
         # 留存最近一次握手参数：成员热换入（swap_member）时按同参重放注入。
         self._initialize_params = dict(params)
-        for plugin in self._members.values():
+        for plugin_id, plugin in self._members.items():
             # 预置共享通道：成员 _on_initialize 懒建 KernelChannel 的分支因此
             # 复用共享实例，成员的反向调用走本服务端唯一 stdio 连接。
             plugin._kernel_channel = self._channel
-            plugin._on_initialize(params)
+            plugin._on_initialize(self._member_initialize_params(plugin_id, params))
 
     def _member_for_tool(self, tool_name: str | None) -> AgentOSPlugin | None:
         """按工具名解析属主成员（``{plugin_id}.`` 前缀即路由，最长前缀胜出）。

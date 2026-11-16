@@ -3,7 +3,7 @@
  *
  * 真实缺陷：@rjsf/antd 表单（设置页/Agent 配置/会话编辑/聊天 widget）与
  * antd Select/Switch 走 antd 自带 token；应用根部此前无 ConfigProvider，
- * antd 恒为浅色默认（Form.Item label rgba(0,0,0,0.88)、输入框白底），
+ * antd 恒为浅色默认（Form.Item label 不透明深色、输入框白底），
  * 深色主题下压在应用深色面板上不可读（模态框说明文字撞色）。
  *
  * 机制：antd v6 组件按 --ant-* CSS 变量消费 token，ConfigProvider 在

@@ -1,0 +1,39 @@
+{
+  "id": "sample_widget",
+  "name": "样例 Widget 插件（C4 代表性测试通道）",
+  "description": "最小样例：带前端产物（frontend/main.js，按宿主 SDK 约定构建，external react/antd），经 W 通用加载器运行时注册 widget，contributes.slots 声明落 sidebar.block 与 shell.overlay 槽位。",
+  "version": "0.1.0",
+  "frontend": {
+    "entry": "frontend/main.js"
+  },
+  "contributes": {
+    "slots": [
+      {
+        "id": "status_light_block",
+        "slot": "sidebar.block",
+        "title": "样例状态灯",
+        "order": 5,
+        "channel": "component",
+        "widget": "sample_widget/status_light",
+        "props": { "state": "on", "label": "W 递送" }
+      },
+      {
+        "id": "boom_block",
+        "slot": "sidebar.block",
+        "title": "样例坏块（ErrorBoundary 隔离验证）",
+        "order": 6,
+        "channel": "component",
+        "widget": "sample_widget/boom"
+      },
+      {
+        "id": "announce_overlay",
+        "slot": "shell.overlay",
+        "title": "样例公告",
+        "openOn": "on_command:sample_widget.announce",
+        "channel": "component",
+        "widget": "sample_widget/announce",
+        "props": { "text": "来自 W 递送" }
+      }
+    ]
+  }
+}

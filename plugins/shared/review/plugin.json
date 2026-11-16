@@ -1,0 +1,367 @@
+{
+  "id": "review_service",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Review Service",
+  "version": "1.0.4",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "state": {
+    "writes": [
+      "task.review.*"
+    ]
+  },
+  "capabilities": {
+    "tools": [
+      {
+        "name": "review_ops",
+        "description": "复盘操作面（二合一）。action='trigger'：为已完成任务触发复盘并生成经验报告——深度复盘经 chat.send_message 派发 review_agent 子管道（返回 status='running'）；chat 缺席/派发失败降级本地基础报告（status='degraded'，不产空 lessons 假成功）；被复盘集合超预算（max_pipelines_per_review，缺省 5）拒绝（status='rejected'，应拆分）。最小示例：review_ops(action='trigger', summary='<一句话说明本次任务做了什么>')（task_id 缺省=当前任务，复盘别的任务显式填）。action='get_report'：按 review_id 取报告（轮询复盘管道 state 聚合行，真实完成才落 completed；本体在被复盘任务 ws 文件面）。最小示例：review_ops(action='get_report', review_id='review_xxxxxxxx')。",
+        "render": {
+          "card": "form",
+          "title": "复盘"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "trigger",
+                "get_report"
+              ],
+              "description": "复盘动作（必填枚举）：trigger=为已完成任务触发复盘并生成经验报告；get_report=按 review_id 取报告（真实完成才落 completed，可轮询）"
+            },
+            "task_id": {
+              "type": "string",
+              "description": "仅 action='trigger'：被复盘任务 ID。缺省=当前任务（系统注入）；复盘其它任务时显式填"
+            },
+            "summary": {
+              "type": "string",
+              "description": "仅 action='trigger'（必填）：一句话说明本次任务做了什么"
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [],
+              "description": "仅 action='trigger'：产物路径清单（可选）"
+            },
+            "metrics": {
+              "type": "object",
+              "additionalProperties": true,
+              "default": {},
+              "description": "仅 action='trigger'：任务指标（可选，自由对象）"
+            },
+            "pipeline_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [],
+              "description": "仅 action='trigger'：多管道复盘的被复盘管道清单（与 task_id 去重合并登记；超预算拒绝）"
+            },
+            "review_id": {
+              "type": "string",
+              "description": "仅 action='get_report'（必填）：复盘报告 id（trigger 返回）"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "oneOf": [
+            {
+              "properties": {
+                "action": {
+                  "const": "trigger"
+                },
+                "task_id": {},
+                "summary": {},
+                "artifacts": {},
+                "metrics": {},
+                "pipeline_ids": {}
+              },
+              "required": [
+                "action",
+                "summary"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "get_report"
+                },
+                "review_id": {}
+              },
+              "required": [
+                "action",
+                "review_id"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "description": "按 action 返回对应结构：trigger={review_id,status(running|degraded|rejected),mode,pipeline_id?,lessons_count?}；get_report=报告本体 {review_id,task_id,summary,status,mode,created_at,pipeline_id?,artifacts?,metrics?,lessons?,recommendations?,updated_at?}；参数/动作错误返回 {success:false,error}（error 教改法）",
+          "properties": {
+            "review_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "description": "running（派发）/degraded（本地降级）/rejected（超复盘预算）/completed/failed（get_report 终态）"
+            },
+            "mode": {
+              "type": "string",
+              "description": "pipeline/local_degrade"
+            },
+            "pipeline_id": {
+              "type": "string",
+              "description": "派发分支"
+            },
+            "lessons_count": {
+              "type": "integer",
+              "description": "降级分支"
+            },
+            "task_id": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "number",
+              "description": "unix 秒"
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "metrics": {
+              "type": "object"
+            },
+            "lessons": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "recommendations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "updated_at": {
+              "type": "number"
+            }
+          }
+        }
+      },
+      {
+        "name": "review_improvement",
+        "description": "复盘改进建议：按分诊规则对失败面做机制前置检查/三向分诊/杠杆映射，产出结构化建议（评估原则数据化承载）",
+        "render": {
+          "card": "form",
+          "title": "复盘·改进建议"
+        },
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "cases"
+          ],
+          "properties": {
+            "cases": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "case_id": {
+                    "type": "string"
+                  },
+                  "task_status": {
+                    "type": "string"
+                  },
+                  "criteria": {
+                    "type": "object",
+                    "description": "验收指标名 → 是否通过(bool)"
+                  },
+                  "symptom_note": {
+                    "type": "string"
+                  },
+                  "trajectory_note": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "case_id",
+                  "task_status",
+                  "criteria"
+                ]
+              }
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "improvable"
+          ],
+          "properties": {
+            "improvable": {
+              "type": "number"
+            },
+            "suggestions": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load"
+    ],
+    "services": [
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for /ext/review_service/** (reviews domain 9 endpoints)",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "raw_body": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object"
+            },
+            "query": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 50,
+  "http_endpoints": [
+    {
+      "route_id": "review_create",
+      "method": "POST",
+      "path": "/ext/review_service/reviews",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "reviews 域：创建审批请求（原 POST /ext/channel_api/reviews 语义——body: task_id/thread_id/session_id/tab_id/title/description/artifact_ids/priority/timeout_seconds/metadata）"
+    },
+    {
+      "route_id": "review_list",
+      "method": "GET",
+      "path": "/ext/review_service/reviews",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "reviews 域：审批列表（query: task_id/limit——原 GET /ext/channel_api/reviews 语义）"
+    },
+    {
+      "route_id": "review_media_review",
+      "method": "POST",
+      "path": "/ext/review_service/reviews/media-review",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 120000,
+      "max_concurrency": 2,
+      "description": "reviews 域：上传文件并执行媒体审阅（multipart: file + media_type；timeout 由源值 60s 放大至 120s——PyAV 解码/关键帧提取大文件可超 60s——原 POST /ext/channel_api/reviews/media-review 语义）"
+    },
+    {
+      "route_id": "review_get",
+      "method": "GET",
+      "path": "/ext/review_service/reviews/{review_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "reviews 域：审批详情（原 GET /ext/channel_api/reviews/{review_id} 语义；不存在返回 {error:{code:NOT_FOUND}}）"
+    },
+    {
+      "route_id": "review_feedback",
+      "method": "POST",
+      "path": "/ext/review_service/reviews/{review_id}/feedback",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "reviews 域：提交审批反馈（body: response_type/overall_comment/annotations/user_id——原 POST /ext/channel_api/reviews/{review_id}/feedback 语义）"
+    },
+    {
+      "route_id": "review_viewed",
+      "method": "POST",
+      "path": "/ext/review_service/reviews/{review_id}/viewed",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "reviews 域：标记已查看（状态 pending → in_review——原 POST /ext/channel_api/reviews/{review_id}/viewed 语义）"
+    },
+    {
+      "route_id": "review_cancel",
+      "method": "POST",
+      "path": "/ext/review_service/reviews/{review_id}/cancel",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "reviews 域：取消审批（body: reason——原 POST /ext/channel_api/reviews/{review_id}/cancel 语义）"
+    },
+    {
+      "route_id": "review_media_metadata",
+      "method": "GET",
+      "path": "/ext/review_service/reviews/{review_id}/media-metadata",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "reviews 域：审批关联的媒体元数据（优先返回已存审阅结果，否则按 media_files 实时解析——原 GET /ext/channel_api/reviews/{review_id}/media-metadata 语义）"
+    },
+    {
+      "route_id": "review_attachments",
+      "method": "POST",
+      "path": "/ext/review_service/reviews/{review_id}/attachments",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 30000,
+      "max_concurrency": 2,
+      "description": "reviews 域：为审批添加媒体附件（JSON body: files/auto_review，文件路径非上传；auto_review 触发媒体审阅——原 POST /ext/channel_api/reviews/{review_id}/attachments 语义）"
+    }
+  ],
+  "host_group": "light",
+  "config_files": [
+    {
+      "id": "triage_rules",
+      "path": "config/plugins/review/triage_rules.yaml",
+      "label": "分诊与杠杆规则"
+    }
+  ]
+}

@@ -29,7 +29,10 @@ pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
-for _p in (str(_SHARED_DIR),):
+# card_io 在 mode_roleplay 属主包内（R1 拍平迁移回归），包内模块自 shared 根
+# 裸名取 atomic_io——两目录都须在 path 上（test_card_lint.py 同款装载形态）。
+_CARD_IO_DIR = _SHARED_DIR / "mode_roleplay"
+for _p in (str(_SHARED_DIR), str(_CARD_IO_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 

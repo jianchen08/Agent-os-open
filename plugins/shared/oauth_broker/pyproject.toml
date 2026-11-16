@@ -1,0 +1,13 @@
+[project]
+name = "agentos-plugin-oauth-broker"
+version = "1.0.0"
+description = "Lingxi AgentOS 0.2 plugin — oauth_broker（MCP 服务器 OAuth 授权代理：发现/注册/PKCE/本机回调/token 落用户空间 .env）"
+requires-python = ">=3.11"
+dependencies = [
+    "agentos-plugin-sdk>=0.2.0",
+]
+
+# 本地 SDK 源映射（uv lock 解析必需——agentos-plugin-sdk 不在任何 registry）：
+# editable 链接 plugins/sdk/src 源码目录（判据 2 案 A）。
+[tool.uv.sources]
+agentos-plugin-sdk = { path = "../../sdk", editable = true }

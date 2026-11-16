@@ -16,6 +16,9 @@ import { PluginConfigEditor } from '@/components/config/PluginConfigEditor'
 import { renderPageContent } from '@/components/schema/PageRenderer'
 import { useSchemaQuery } from '@/hooks/queries/useSchemaQuery'
 import { cn } from '@/lib/utils'
+import { AboutSettingsPage } from '@/pages/settings/AboutSettingsPage'
+import { BackendConnectionPage } from '@/pages/settings/devices/BackendConnectionPage'
+import { NotificationSettingsPage } from '@/pages/settings/NotificationSettingsPage'
 import { PipelineSettingsPage } from '@/pages/settings/PipelineSettingsPage'
 import { PluginsSettingsPage } from '@/pages/settings/PluginsSettingsPage'
 import { ThemeSettingsPage } from '@/pages/settings/ThemeSettingsPage'
@@ -27,6 +30,9 @@ type NavKey =
   | 'kernel-theme'
   | 'kernel-plugins'
   | 'kernel-pipeline'
+  | 'kernel-backend-connection'
+  | 'kernel-notifications'
+  | 'kernel-about'
   | `plugin:${string}`
   | `declared:${string}`
 
@@ -59,6 +65,8 @@ export interface SettingsHubWidgetProps {
 export function SettingsHubWidget({ initialActive = 'kernel-plugins' }: SettingsHubWidgetProps) {
   const [active, setActive] = useState<NavKey>(initialActive)
   const [pluginPanels, setPluginPanels] = useState<SettingsPanelEntry[]>([])
+  /** 移动端导航抽屉开关：md 以下 aside 变滑出层（双栏在 375px 会把内容列挤碎） */
+  const [navOpen, setNavOpen] = useState(false)
 
   // schema（query 化）：设置中枢唯一 schema 消费端，共享缓存条目
   const schemaQuery = useSchemaQuery()
@@ -103,20 +111,27 @@ export function SettingsHubWidget({ initialActive = 'kernel-plugins' }: Settings
 
   return (
     <div
-      className="flex h-full min-h-0"
-      style={{ background: 'var(--ds-bg-panel, hsl(var(--card)))' }}
+      className="relative flex h-full min-h-0"
+      style={{ background: 'var(--ds-bg-panel)' }}
       data-testid="settings-hub"
     >
-      {/* 左导航树 */}
+      {/* 左导航树：桌面常驻侧栏；移动端为滑出抽屉（遮罩点击/选中条目后收起） */}
       <aside
-        className="flex w-56 shrink-0 flex-col border-r"
-        style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}
+        className={cn(
+          'absolute inset-y-0 left-0 z-20 flex w-72 shrink-0 flex-col border-r shadow-xl transition-transform duration-200',
+          'md:static md:w-56 md:translate-x-0 md:shadow-none',
+          navOpen ? 'translate-x-0' : '-translate-x-full',
+        )}
+        style={{
+          borderColor: 'var(--ds-border-subtle)',
+          background: 'var(--ds-bg-panel)',
+        }}
       >
         <div className="border-b px-3 py-2.5" style={{ borderColor: 'var(--ds-border-subtle)' }}>
           <div className="text-foreground text-[13px] font-semibold">设置</div>
           <div className="text-muted-foreground font-mono text-[10px]">内核 · 插件</div>
         </div>
-        <nav className="min-h-0 flex-1 overflow-y-auto p-2">
+        <nav className="min-h-0 flex-1 overflow-y-auto p-2" onClick={() => setNavOpen(false)}>
           <NavGroup
             icon={Settings}
             label="内核设置"
@@ -177,17 +192,44 @@ export function SettingsHubWidget({ initialActive = 'kernel-plugins' }: Settings
         </nav>
       </aside>
 
+      {/* 移动端遮罩：导航抽屉打开时盖住内容区，点击收起 */}
+      {navOpen && (
+        <div
+          className="absolute inset-0 z-10 bg-black/40 md:hidden"
+          onClick={() => setNavOpen(false)}
+          data-testid="settings-nav-backdrop"
+        />
+      )}
+
       {/* 右内容区：canvas 底色与左导航 panel 区分；内嵌现有设置页（无「设置总览」） */}
-      <main className="min-h-0 min-w-0 flex-1 overflow-auto bg-[var(--ds-bg-canvas,hsl(var(--background)))]">
+      <main className="min-h-0 min-w-0 flex-1 overflow-auto bg-[var(--ds-bg-canvas)]">
+        {/* 移动端导航切换条（md 以下显示；桌面由常驻侧栏承担） */}
+        <div
+          className="sticky top-0 z-10 flex shrink-0 items-center border-b px-2 py-1.5 md:hidden"
+          style={{ borderColor: 'var(--ds-border-subtle)', background: 'var(--ds-bg-panel)' }}
+        >
+          <button
+            type="button"
+            onClick={() => setNavOpen(true)}
+            className="text-muted-foreground flex h-8 items-center gap-1.5 rounded-md px-2 text-[12px] hover:bg-[var(--hover-overlay)]"
+            data-testid="settings-nav-toggle"
+          >
+            ☰ 设置导航
+          </button>
+        </div>
         {active === 'kernel-theme' && <ThemeSettingsPage />}
         {active === 'kernel-pipeline' && <PipelineSettingsPage embedded />}
         {active === 'kernel-plugins' && <PluginsSettingsPage />}
+        {active === 'kernel-backend-connection' && <BackendConnectionPage embedded />}
+        {active === 'kernel-notifications' && <NotificationSettingsPage embedded />}
+        {active === 'kernel-about' && <AboutSettingsPage embedded />}
         {String(active).startsWith('plugin:') && (
           <PluginConfigEmbed pathKey={String(active).slice('plugin:'.length)} />
         )}
         {activeDeclared && (
-          // 声明的 settings 页：经 PageRenderer 分发（widget/schema），声明驱动渲染
-          <div className="h-full min-h-0">{renderPageContent(activeDeclared)}</div>
+          // 声明的 settings 页：经 PageRenderer 分发（widget/schema），声明驱动渲染。
+          // overflow-x-auto：schema 表单页（antd 主题）个别行宽超视口时降级为页内微滚而非剪裁
+          <div className="h-full min-h-0 overflow-x-auto">{renderPageContent(activeDeclared)}</div>
         )}
       </main>
     </div>
@@ -213,15 +255,15 @@ function NavGroup({
   return (
     <div
       className={cn(
-        'border-[var(--ds-border-subtle,rgba(148,163,184,0.12))] py-2.5',
+        'border-[var(--ds-border-subtle)] py-2.5',
         !first && 'border-t',
       )}
       title={hint}
     >
       <div className="text-muted-foreground mb-1.5 flex items-center gap-1.5 px-1.5">
-        <GroupIcon className="h-4 w-4 shrink-0 text-[var(--ds-accent-primary,#22D3EE)]" />
+        <GroupIcon className="h-4 w-4 shrink-0 text-[var(--ds-accent-primary)]" />
         <span className="text-foreground text-[13px] font-semibold leading-none">{label}</span>
-        <div className="h-px flex-1 bg-[var(--ds-border-subtle,rgba(148,163,184,0.12))]" />
+        <div className="h-px flex-1 bg-[var(--ds-border-subtle)]" />
         <span className="font-mono text-[10px] leading-none">{count}</span>
       </div>
       <div className="flex flex-col gap-0.5">{children}</div>
@@ -247,14 +289,14 @@ function NavButton({
       className={cn(
         'flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[12px] transition-colors',
         active
-          ? 'text-[var(--ds-accent-primary,#22D3EE)]'
+          ? 'text-[var(--ds-accent-primary)]'
           : 'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]',
       )}
       style={
         active
           ? {
-              background: 'var(--ds-bg-elevated, #111C38)',
-              boxShadow: 'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.45))',
+              background: 'var(--ds-bg-elevated)',
+              boxShadow: 'inset 0 0 0 1px var(--ds-border-active)',
             }
           : undefined
       }

@@ -249,3 +249,46 @@ describe('ContributionRegistry — 重新加载与单例', () => {
     expect(contributionRegistry).toBeInstanceOf(ContributionRegistry)
   })
 })
+
+describe('ContributionRegistry — 变更订阅（渲染层响应化）', () => {
+  let registry: ContributionRegistry
+
+  beforeEach(() => {
+    registry = new ContributionRegistry()
+  })
+
+  function widgetSchema(): SchemaResponse {
+    return makeSchema({
+      agents: [
+        {
+          id: 'p1',
+          name: 'P1',
+          version: '1.0',
+          ui_schema: { widgets: [{ id: 'w1', type: 'status_card', space: 'workspace' }] },
+        },
+      ],
+    })
+  }
+
+  it('装载/清空递增版本号并通知订阅方；退订后不再通知', () => {
+    const seen: number[] = []
+    const unsubscribe = registry.subscribe(() => seen.push(registry.getVersion()))
+    expect(registry.getVersion()).toBe(0)
+
+    registry.loadFromSchema(widgetSchema())
+    const afterLoad = registry.getVersion()
+    expect(afterLoad).toBeGreaterThan(0)
+
+    registry.clear()
+    const afterClear = registry.getVersion()
+    // 性质断言：版本号单调递增（变更必通知、通知必换版本——
+    // useSyncExternalStore 依赖值变化触发重渲染的正确性前提）
+    expect(afterClear).toBeGreaterThan(afterLoad)
+    expect(seen).toContain(afterLoad)
+    expect(seen).toContain(afterClear)
+
+    unsubscribe()
+    registry.loadFromSchema(widgetSchema())
+    expect(seen).not.toContain(registry.getVersion())
+  })
+})

@@ -1,0 +1,16 @@
+[project]
+name = "agentos-plugin-acp-quota-pool"
+version = "0.1.0"
+description = "Lingxi AgentOS 0.2 plugin — acp_quota_pool（ACP 额度池技能载荷壳：播种面 + sidecar 依赖闭包）"
+requires-python = ">=3.11"
+dependencies = [
+    "agentos-plugin-sdk>=0.2.0",
+    # ACP 客户端 SDK（官方 agentclientprotocol/python-sdk；PyPI 发行名带连字符，
+    # 导入名 acp）。minor 封顶与根 pyproject 同口径：0.x 无稳定契约承诺。
+    "agent-client-protocol>=0.12.1,<0.13",
+]
+
+# 本地 SDK 源映射（uv lock 解析必需——agentos-plugin-sdk 不在任何 registry）：
+# editable 链接 plugins/sdk/src 源码目录（判例：evaluation/pyproject 同轨）。
+[tool.uv.sources]
+agentos-plugin-sdk = { path = "../../sdk", editable = true }

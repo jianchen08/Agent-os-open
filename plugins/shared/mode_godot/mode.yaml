@@ -1,0 +1,41 @@
+# Godot 游戏开发模式声明面 mode.yaml（2026-09-28 升格自 profile.yaml；设计真值 docs/working/模式包工作模式设计_20260928.md D3。B 部类物料：由用户维护；出厂种子随 mode_godot 插件内打包，
+# 经 mode.get_profile 服务透出；suite 路径相对项目根）
+# 既有事实模式结构化收编（P3-⑤立项）：godot 链 = main → godot_orchestrator_agent
+# （L2 执行型编排，自身承担修改+godot_run 运行验证，不外派）；godot_expert 是
+# main 的轻量单点直派快道（L3），不在编排链内（同 mode_coding code_writer 形态）
+mode: godot
+name: Godot 游戏开发模式
+# description = 主 agent 唯一域路由知识（批 F3 接管口径：什么任务归我/直派谁/编排链要点；措辞定版 = 渲染缓存前缀稳定）
+description: Godot 游戏开发任务（场景/脚本/配置修改与运行验证）。轻量单点修改直派 mode_godot/godot_expert；成规模修改派编排链 mode_godot/godot_orchestrator_agent（执行型编排，自身承担修改与 godot_run 运行验证）
+icon: 🎮                # 选择器选项图标（批 G⑤；emoji 随声明面透出 modes API/mode.list）
+# 方案规划段领域规格（批 B2 注册化）：值 = 技能名（包内 skills/ 随包，经工作空间
+# 并集快照按名可读）；方案段骨架第零步按本键查注册表（ADR 2026-10-09 决策 4）
+plan_spec: skill-solution-game
+panel_page_id: godot_dev
+chain:
+  entry: main
+  # 实际编排（照实声明）：godot_orchestrator_agent 是执行型编排（team=[]，自身
+  # 承担修改+运行验证），链终点即编排者；godot_expert 走 main 直派快道不入链；
+  # 执行者池声明已全模式退役（P1，ADR 2026-10-09 决策 2）
+  expected_path: [main, mode_godot/godot_orchestrator_agent]
+  entry_override: null
+suite:
+  smoke: null         # godot 题集二期补全（收编时评测面暂缺，不指共享 coding 冒烟）
+  full: null
+material_scope:
+  dispatch_stage:
+    - config/agents/main/task_dispatch_guide.md
+  execution_stage:
+    - plugins/shared/mode_godot/agents/
+levers:
+  reference_miss: {execution_stage: [persona, prompt_skeleton]}
+  verification_skipped: {execution_stage: [tool_ids, persona]}
+  scene_format_violation: {execution_stage: [persona, prompt_skeleton]}
+  orchestration_runaway: {orchestration_stage: [pipeline_steps, breaker_params]}
+  eval_no_settle: {evaluation_stage: [evaluation_params]}
+verifier_families: [godot_run_exit, file_assert]
+weights: {success: 1.0, cost: 0.2, rounds: 0.1}
+budget:
+  case_timeout: 1800
+  round_tokens: 2000000
+  proposals_per_session: 3

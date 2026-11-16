@@ -1,0 +1,9 @@
+# 能力门禁表（原则 P1：插件集合三端一致，运行时降级不裁集合）。
+# schema：顶层 mapping plugin_id -> {min_profile, degrade_reason}
+#   min_profile ∈ {phone, desktop, cloud}（词表见 device_profile.TIERS）；
+#   degrade_reason 非空字符串（前端「此端降级」提示文案）。
+# 行为契约：本文件缺失 = 全量默认不降级（fail-open）；字段非法 = fail-closed 报错。
+# 产物：scripts/audit_plugin_deps.py 全量依赖审计初版（aarch64 wheel 可得性判据），
+# 手工可增补/修订——机器重跑会整体覆盖，修订请连同审计判据一起改。
+
+{}

@@ -4,7 +4,7 @@
 
 ## 1. 何时选 native
 
-进程内零 IPC（延迟 < 1μs 量级），适合每轮必执行的高频管道步骤。代价：无热加载（cdylib 集合变更 = 内核排空 + 自重启，G8）、编译期耦合（内核与插件必须同 rustc 版本，`rust-toolchain.toml` 锁定 1.85）、panic=abort（panic 会终止进程）。常规路径：先写 sidecar，基准证明开销显著再晋升（`plugins/shared/pipeline/output/sensitive_checker/` 即从 Python 迁移的样板）。
+进程内零 IPC（延迟 < 1μs 量级），适合每轮必执行的高频管道步骤。代价：无热加载（cdylib 集合变更 = 内核排空 + 自重启，G8）、编译期耦合（内核与插件必须同 rustc 版本，`rust-toolchain.toml` 锁定 1.85）、panic=abort（panic 会终止进程）。常规路径：先写 sidecar，基准证明开销显著再晋升（`plugins/shared/sensitive_checker/` 即从 Python 迁移的样板）。
 
 ## 2. 工程骨架与构建
 
@@ -26,7 +26,7 @@ serde_json = "1"
 panic = "abort"                # cdylib 跨 FFI 标准做法，避免 unwind 跨边界 UB
 ```
 
-manifest（参考 `plugins/shared/pipeline/output/sensitive_checker/plugin.json`）：
+manifest（参考 `plugins/shared/sensitive_checker/plugin.json`）：
 
 ```jsonc
 {
@@ -52,7 +52,7 @@ manifest（参考 `plugins/shared/pipeline/output/sensitive_checker/plugin.json`
 - `ExecContext`：`ctx`（`state_json` / `config_json` / `tenant_id` / `session_id` / `task_id` / `pipeline_id` / `tool_call_json`——`tool_call_json` 含 `{"name": ...}` 即工具调用语义，返回 `{success, data}` 信封）+ `host`（`HostServices`，`call_capability(capability, method, params_json) -> Result<&str, &str>` 反调内核，与 sidecar 走同一 router，对称借用协议）。
 - 不用 abi_stable：靠 rustc 版本锁定保证 vtable 一致——**不要用与内核不同的工具链版本编译**。
 
-## 4. 完整示例（`plugins/shared/pipeline/output/sensitive_checker/src/lib.rs` 节选）
+## 4. 完整示例（`plugins/shared/sensitive_checker/src/lib.rs` 节选）
 
 ```rust
 use std::collections::HashMap;

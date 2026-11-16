@@ -1,0 +1,109 @@
+{
+  "id": "pipeline_state_marker_parse",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "name": "State Marker Parse",
+  "description": "状态统一标记解析步（通用管道步骤）：提取本轮 assistant 回复尾部的 <state> 标记（单标记容器 JSON，键=目标账本）→ 账本白名单分发落账（state=character_state.update / memory=memory 工具 store）→ character_state.render 回写 state 供下轮动态变量注入（消息尾部形态，零前缀缓存损失）→ 写 context.state_updates 结构化载荷+原文区间（前端 pull-from-state 渲染状态小卡并隐藏标记原文）。零标记=零动作；落账/服务失败 warning 降级不阻断管道。状态类变更统一走本标记通道，不进工具面。State Contract Validator：op/类型/clamp/max_delta_per_turn → accepted/rejected 双账，schema=None 兼容态逐字透传。动作驱动基线：状态变化只走两条作者声明通道——①动作（choices/actions 声明清单，玩家经尾条 user 消息与声明 id/name 全等选取，fail-closed）→ 声明效果：engine 落点与 behaviors 同键同轮合并经 Validator（动作先、标记[回退开启时]次之、behaviors 后，缺省取最后），game 落点转发宿主 delta 通道不进 story 账本（actions_for_game 桥面随 game_bridge 扩展）；②behaviors 叙述 trigger regex → 声明效果。<state> 尾标记收窄为 memory 通道：state 字段由卡 engine.allow_state_proposals 门控（默认关=解析忽略+审计 source=state_field_ignored 原样载荷摘要一行，不进 Validator 不落账对用户不可见；显式 true=恢复 LLM 提议合法来源 source=llm 走 Validator 全套；作弊轮缺省来源仍 cheat）。/cheat 接线：meta.cheating 在场 = 非保留键域逐字旁路（reason=cheat_bypass）、cheat_overrides.keep_state_machine 键域仍全校验（规格归一单源 card_lint.keep_state_machine_spec，垃圾声明 fail-closed 全保留）。game 域分域（双域分治）：标记载荷与 behaviors 效果中的 game.* 前缀键不入 story 账本，改产出宿主 delta——薄 sanity（值可 JSON 序列化/长度与单轮条数上限，拒绝+审计不 clamp 不解释 op，宿主权威后端不否决）后三面落点：审计（idem={pipeline}:{seq}:game 与 story 批分幂等空间，缺省 source=game_delta、behavior/action 行行级覆盖）+ state 键 game_host_delta（持久面只留最新轮，export/persistent_fields 声明）+ mode.game.push_delta 推送宿主模式包待发队列（目标插件 ID 按 agent 键命名空间派生 mode_X/<stem>→mode_X，零模式特判；GET /game/state 取后清；推送失败/非模式命名空间 warning 降级留痕）。无 game.* 键=零变化（Tier 0 兼容态）。会话首轮 init effects（动作驱动基线同构）：context.rp_init_effects 对 Validator 全套结算，结算序 init 最先（先于动作/标记/behaviors），行级审计 source=init，幂等闸=审计文件会话级 idem {pipeline_id}:init（同轮重放/重启重入只生效一次；探针 rp_state_audit.has_idem 与写面同幂等空间），ws 不可得=fail-closed 跳过（一次性增量防每轮重放复利放大），键域不在卡+包 variables 声明内=rejected+审计 fail-closed；无 rp_init_effects=现状零变化",
+  "version": "1.9.1",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load"
+    ],
+    "services": [
+      {
+        "name": "state.adjudicate",
+        "description": "State Contract Validator 结算委托（单源 validate_and_apply 纯函数透出，零副作用）——自由操作 Adjudicate 面消费（mode_roleplay 经 tool-executor 显式 plugin_id 调用，世界内嵌批次二）；返回 {accepted, rejected, audit} 三账，落账/审计归调用方编排",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "changes",
+            "current"
+          ],
+          "properties": {
+            "changes": {
+              "type": "object",
+              "description": "变更集 {状态键: op 串或值}（dict 形态，键唯一）"
+            },
+            "schema": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "description": "variables 声明（None=兼容态逐字透传）"
+            },
+            "hard_rules": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "description": "hard_rules（max_delta_per_turn 等；可空）"
+            },
+            "current": {
+              "type": "object",
+              "description": "账本现值（相对 op 基线/审计 from 源）"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "accepted",
+            "rejected",
+            "audit"
+          ],
+          "properties": {
+            "accepted": {
+              "type": "object",
+              "description": "账本键 → 落账值（clamp 后）"
+            },
+            "rejected": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "拒绝行（key/op/from/to/reason/layer）"
+            },
+            "audit": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "accepted+rejected 全流水行"
+            }
+          }
+        }
+      }
+    ],
+    "steps": [
+      {
+        "name": "pipeline_state_marker_parse",
+        "description": "管道步骤默认入口（自名声明；步骤服务索引兼容映射 method=None，与直引等价）"
+      }
+    ]
+  },
+  "priority": 50,
+  "host_group": "light",
+  "export_fields": [
+    "game_host_delta"
+  ],
+  "persistent_fields": [
+    "game_host_delta"
+  ],
+  "http_endpoints": [
+    {
+      "route_id": "state_marker_latest",
+      "method": "GET",
+      "path": "/ext/pipeline_state_marker_parse/latest",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "该管道最近一轮 state_updates 载荷（?pipeline_id=；无 = 空载荷——前端状态小卡拉取源，零内核边界下的唯一通道）"
+    }
+  ],
+  "invoke_entry": "state_marker_parse.execute"
+}

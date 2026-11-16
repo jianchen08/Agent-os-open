@@ -11,7 +11,7 @@
  *  - SPA 深链（/p/<pageId>、/login 等无文件对应路径）：回落 index.html，
  *    createBrowserRouter 按 pathname 匹配（与 nginx try_files 同语义）；
  *  - 内核 API（/api、/ext、/media、/uploads）：主进程 net.fetch 回源
- *    http://127.0.0.1:<内核端口>（缺省 9101，与 dev 栈 9100 错峰）——同源化后
+ *    http://127.0.0.1:<内核端口>（缺省=打包件默认端口，与 dev 栈 9100 错峰）——同源化后
  *    前端 axios 沿用相对路径，无 CORS、无 CSP connect-src 问题（与 dev 侧
  *    vite server.proxy 拓扑同构）。
  *    WebSocket（/ws）无法经协议层代理，由前端按打包件形态直连内核
@@ -108,7 +108,7 @@ const LOADING_PAGE_HTML = `<!doctype html>
 
 /**
  * 内核回源地址（端口与内核 spawn/健康探测同源解析，resolveKernelPort 见
- * kernel-manager；AGENTOS_KERNEL_PORT 可整体错峰，缺省 9101）。
+ * kernel-manager；AGENTOS_KERNEL_PORT 可整体错峰，缺省=打包件默认端口）。
  */
 const KERNEL_ORIGIN = `http://127.0.0.1:${KERNEL_PORT}`;
 /** 打包件渲染进程直连内核 WS 源（WebSocket 无法经协议层代理） */
@@ -117,17 +117,20 @@ const KERNEL_WS_ORIGIN = `ws://127.0.0.1:${KERNEL_PORT}`;
 /**
  * app:// 源的内容安全策略（与 web 部署链 nginx.conf / vite dev 同口径）。
  *
- * 差异点仅 connect-src：内核 API 走 app://bundle 同源代理，但 WebSocket
- * 无法经协议层代理，打包件由渲染进程直连内核（websocket.ts app: 分支）
- * ——须显式放行内核 http/ws 源（与回源同端口，见 KERNEL_ORIGIN）。'unsafe-eval'
- * 为 ajv8 (RJSF v6) new Function 编译校验器所需，web 链同款。
+ * connect-src 放行任意 http/https/ws 源：产品允许用户把应用指向**任意**远端
+ * 内核（设备卡/手输地址），connect-src 只列本机回源=远端内核的 API/WS 全被
+ * CSP 挡在渲染层（2026-10-22 用户实测「连远端内核直接跳登录」终因：云端
+ * nginx 访问日志 0 条 /api/v1 实证——请求根本没出渲染进程）。真实访问控制仍
+ * 由目标内核的 CORS 白名单 + 认证门承担；明文远端的用户提示见连接卡 P6 提示。
+ *
+ * 'unsafe-eval' 为 ajv8 (RJSF v6) new Function 编译校验器所需，web 链同款。
  */
 const APP_CSP = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
-  `connect-src 'self' ${KERNEL_ORIGIN} ${KERNEL_WS_ORIGIN}`,
+  `connect-src 'self' http: https: ws: wss: ${KERNEL_ORIGIN} ${KERNEL_WS_ORIGIN}`,
   "font-src 'self' data:",
   "frame-src 'self' blob: data:",
   "object-src 'none'",

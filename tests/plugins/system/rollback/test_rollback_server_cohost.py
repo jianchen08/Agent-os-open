@@ -22,7 +22,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _PLUGIN_DIR = (
-    Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system" / "rollback"
+    Path(__file__).resolve().parents[4] / "plugins" / "shared" / "rollback"
 )
 _BARE_NAMES = ("models", "manager", "reversers")
 

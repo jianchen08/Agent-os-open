@@ -9,6 +9,7 @@
 
 import React, { useState, useCallback, useEffect, useRef } from 'react'
 import {
+  Loader2,
   Plus,
   Trash2,
   Edit3,
@@ -61,6 +62,8 @@ interface MenuItem {
   visible: boolean
   /** 是否危险操作 */
   danger?: boolean
+  /** 操作进行中（store.mutatingPath 命中）：图标换转圈 + 项禁用 */
+  pending?: boolean
 }
 
 /**
@@ -119,10 +122,14 @@ export function FileTreeContextMenu(props: {
   const createInputRef = useRef<HTMLInputElement>(null)
 
   const store = useWorkspaceStore()
+  /** 条目写操作进行中的目标路径（store 级 pending 真值源，#4）：
+   *  确认/菜单按钮据此 disabled+转圈，失败 toast 由 store 落 */
+  const mutatingPath = store.mutatingPath ?? null
 
-  /** 点击外部关闭菜单 */
+  /** 点击外部关闭菜单（写操作进行中不拆可见 pending：等操作落定自关） */
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
+      if (mutatingPath) return
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         onClose()
       }
@@ -135,12 +142,13 @@ export function FileTreeContextMenu(props: {
       clearTimeout(timer)
       document.removeEventListener('mousedown', handleClickOutside)
     }
-  }, [onClose])
+  }, [onClose, mutatingPath])
 
-  /** Esc 关闭 */
+  /** Esc 关闭（写操作进行中不响应，防拆可见 pending） */
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (mutatingPath) return
         if (renaming || creating) {
           setRenaming(false)
           setCreating(null)
@@ -153,7 +161,7 @@ export function FileTreeContextMenu(props: {
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [onClose, renaming, creating, showMoveDialog])
+  }, [onClose, renaming, creating, showMoveDialog, mutatingPath])
 
   /** 自动聚焦重命名输入框 */
   useEffect(() => {
@@ -213,16 +221,15 @@ export function FileTreeContextMenu(props: {
     }
   }, [createValue, creating, isDirectory, targetPath, parentDir, containerTaskId, store, onRefresh])
 
-  /** 删除确认 */
-  const handleDelete = useCallback(() => {
+  /** 删除确认（菜单留驻到操作落定：await 期间删除项转圈可见，失败 toast 由 store 落） */
+  const handleDelete = useCallback(async () => {
     if (!targetPath || !targetName) return
     const confirmed = window.confirm(`确定要删除 "${targetName}" 吗？此操作不可撤销。`)
     if (!confirmed) return
-    store.deleteEntry(containerTaskId, targetPath).then((success) => {
-      if (success) {
-        onRefresh()
-      }
-    })
+    const success = await store.deleteEntry(containerTaskId, targetPath)
+    if (success) {
+      onRefresh()
+    }
     onClose()
   }, [targetPath, targetName, containerTaskId, store, onRefresh, onClose])
 
@@ -236,6 +243,14 @@ export function FileTreeContextMenu(props: {
     }
     onClose()
   }, [targetPath, containerTaskId, store, onRefresh, onClose])
+
+  /** 新建目标全路径（与 handleConfirmCreate 同式；pending 判定用） */
+  const createBaseDir = isDirectory && targetPath ? targetPath : parentDir
+  const trimmedCreateValue = createValue.trim()
+  const createFullPath = createBaseDir ? `${createBaseDir}/${trimmedCreateValue}` : trimmedCreateValue
+  const createPending = creating !== null && mutatingPath !== null && mutatingPath === createFullPath
+  /** 目标路径变更中（重命名/删除/移动三操作 await 窗口共用：变更源 = targetPath） */
+  const targetPending = mutatingPath !== null && mutatingPath === targetPath
 
   /** 构建菜单项列表 */
   const menuItems: MenuItem[] = [
@@ -263,6 +278,7 @@ export function FileTreeContextMenu(props: {
       icon: <Trash2 className="h-3.5 w-3.5" />,
       visible: targetPath !== null,
       danger: true,
+      pending: targetPending,
     },
     {
       id: 'move',
@@ -297,15 +313,17 @@ export function FileTreeContextMenu(props: {
           <div className="mt-2 flex justify-end gap-2">
             <button
               onClick={() => setRenaming(false)}
-              className="text-muted-foreground hover:text-foreground rounded px-2 py-1 text-xs transition-colors"
+              disabled={targetPending}
+              className="text-muted-foreground hover:text-foreground rounded px-2 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50"
             >
               取消
             </button>
             <button
               onClick={handleConfirmRename}
-              className="bg-primary text-primary-foreground rounded px-2 py-1 text-xs transition-colors hover:opacity-90"
+              disabled={targetPending}
+              className="bg-primary text-primary-foreground rounded px-2 py-1 text-xs transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              确认
+              {targetPending ? '保存中...' : '确认'}
             </button>
           </div>
         </div>
@@ -338,15 +356,17 @@ export function FileTreeContextMenu(props: {
           <div className="mt-2 flex justify-end gap-2">
             <button
               onClick={() => setCreating(null)}
-              className="text-muted-foreground hover:text-foreground rounded px-2 py-1 text-xs transition-colors"
+              disabled={createPending}
+              className="text-muted-foreground hover:text-foreground rounded px-2 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50"
             >
               取消
             </button>
             <button
               onClick={handleConfirmCreate}
-              className="bg-primary text-primary-foreground rounded px-2 py-1 text-xs transition-colors hover:opacity-90"
+              disabled={createPending}
+              className="bg-primary text-primary-foreground rounded px-2 py-1 text-xs transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              确认
+              {createPending ? '创建中...' : '确认'}
             </button>
           </div>
         </div>
@@ -372,13 +392,18 @@ export function FileTreeContextMenu(props: {
               <X className="h-3.5 w-3.5" />
             </button>
           </div>
-          {/* 根目录选项 */}
+          {/* 根目录选项（移动进行中禁用目标选择：await 窗口可见 pending） */}
           <button
             onClick={() => handleMove('/')}
-            className="hover:bg-accent flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors"
+            disabled={targetPending}
+            className="hover:bg-muted flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <Folder className="text-status-warning h-3.5 w-3.5 shrink-0" />
-            <span className="text-foreground">/ (根目录)</span>
+            {targetPending ? (
+              <Loader2 className="text-status-warning h-3.5 w-3.5 shrink-0 animate-spin" />
+            ) : (
+              <Folder className="text-status-warning h-3.5 w-3.5 shrink-0" />
+            )}
+            <span className="text-foreground">{targetPending ? '移动中...' : '/ (根目录)'}</span>
           </button>
           {directories.length === 0 ? (
             <div className="text-muted-foreground px-3 py-4 text-center text-xs">
@@ -390,7 +415,8 @@ export function FileTreeContextMenu(props: {
                 <button
                   key={dir.path}
                   onClick={() => handleMove(dir.path)}
-                  className="hover:bg-accent flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors"
+                  disabled={targetPending}
+                  className="hover:bg-muted flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                   style={{ paddingLeft: `${dir.depth * 12 + 12}px` }}
                 >
                   <Folder className="text-status-warning h-3.5 w-3.5 shrink-0" />
@@ -421,8 +447,9 @@ export function FileTreeContextMenu(props: {
           className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
             item.danger
               ? 'text-status-error hover:bg-status-error/10'
-              : 'text-foreground hover:bg-accent'
-          }`}
+              : 'text-foreground hover:bg-muted'
+          } ${item.pending ? 'cursor-not-allowed opacity-60' : ''}`}
+          disabled={item.pending}
           onClick={() => {
             switch (item.id) {
               case 'new-file':
@@ -435,7 +462,7 @@ export function FileTreeContextMenu(props: {
                 handleStartRename()
                 break
               case 'delete':
-                handleDelete()
+                void handleDelete()
                 break
               case 'move':
                 setShowMoveDialog(true)
@@ -443,7 +470,7 @@ export function FileTreeContextMenu(props: {
             }
           }}
         >
-          {item.icon}
+          {item.pending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : item.icon}
           <span>{item.label}</span>
         </button>
       ))}

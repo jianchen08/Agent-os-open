@@ -24,13 +24,13 @@
 - **命令示例**：
   - Node：`npx playwright test e2e/feature.spec.ts --reporter=list`
   - Python：`pytest tests/test_feature.py -v`
-- **第三步：回退策略**：仅当项目既无 Node 也无 Python playwright 栈，或 CLI 执行失败时，才回退到内置 `playwright_test` 工具做命令式浏览器验证（browser_launch → navigate → interact → capture_console → screenshot_compare → close）
-- **验证策略分层**（CLI spec 与内置工具都应覆盖）：
+- **第三步：回退策略**：CLI 不可用时无浏览器工具可回退（工具面无 playwright 类内置工具），直接按下方「playwright 全部不可用时的处理」如实报告工具缺口，禁止弱验证替代
+- **验证策略分层**（CLI spec 应覆盖）：
   1. **行为层**：点击/输入后是否有正确响应、页面跳转、状态变化
   2. **视觉层**（截图）：关键页面截图对比
   3. **console 层**：捕获 console 错误和警告
   4. **结构层**：页面是否包含预期 DOM 元素、表单字段
-- **playwright 全部不可用时的处理**（CLI 与内置工具都不可用）：
+- **playwright 全部不可用时的处理**（CLI 栈不可用，无内置浏览器工具可回退）：
   1. **禁止降级到 fetch**：fetch 只能做 HTTP 请求，无法替代浏览器自动化验证前端交互行为，用 fetch 替代 playwright 做前端验证是不充分的验证
   2. **必须如实报告**：在验证报告的 tool_capability_assessment 中明确说明：
      - 哪些前端/UI内容**无法验证**（如按钮点击响应、页面渲染、交互行为）
@@ -64,5 +64,5 @@
 ## 工具选择原则
 
 - **后端/API**：优先使用专用工具（fetch > curl）
-- **前端/UI**：优先用 playwright 命令行跑测试脚本（npx playwright test / pytest），先探测栈、优先复用已有 spec、无则现场生成；CLI 栈不可用时回退内置 playwright_test 工具；两者都不可用时禁止降级到 fetch，必须如实报告工具缺口
+- **前端/UI**：优先用 playwright 命令行跑测试脚本（npx playwright test / pytest），先探测栈、优先复用已有 spec、无则现场生成；CLI 栈不可用且无内置浏览器工具可回退时禁止降级到 fetch，必须如实报告工具缺口
 - **前端验证通过条件**：可验证部分全部实际验证通过 + 不可验证部分有清晰说明和资源请求

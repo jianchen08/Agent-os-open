@@ -15,8 +15,10 @@ agent 读写面）。2026-09-12 用户裁定反转该限制的**读侧**：纯�
 
 解析规则（与 param_inject 原实现同源，统一到本模块单点）：
 AGENTOS_CONFIG_ROOT（内核启动发布，指向 <repo>/config）优先；回退自本
-文件向上找含 config/kernel 的祖先目录。两者皆不可得 → 无仓库锚
-（行为退回单根，不报错）。
+文件向上找含 config/kernel 的祖先目录。候选含用户空间根一律不采纳
+（user_space 契约：用户可写资产整体位于仓库外；装机形态其 config/kernel
+由出厂树播种，目录指纹不可辨，按范畴排除——用户根成锚会把用户运行时面
+拖进仓库恒拒集）。两者皆不可得 → 无仓库锚（行为退回单根，不报错）。
 
 [来源: docs/decisions/2026-09-12-read-anchor-repo-source.md]
 """
@@ -25,6 +27,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+
+from user_space import user_root
 
 # 仓库根内禁止读取面覆盖的一等目录（运行时面 + 产物/噪声面）。
 REPO_READ_DENIED_DIRS: frozenset[str] = frozenset(
@@ -46,6 +50,26 @@ _resolved: Path | None = None
 _resolved_done = False
 
 
+def _is_repo_root_candidate(candidate: Path) -> bool:
+    """候选目录是否可作仓库根：config/kernel 指纹命中且非用户空间根。
+
+    用户空间根是运行时面（user_space 契约：用户可写资产整体位于仓库**之外**），
+    其 ``config/kernel`` 由装机链播种（kernel-manager 钉
+    ``AGENTOS_CONFIG_ROOT=<user_root>/config``，出厂树经 seedConfigTree 补齐），
+    目录指纹无法区分仓库根与用户根，按范畴排除。不排除的后果：用户根被采纳
+    为仓库根后，用户运行时面（``.ai_workspaces`` 等）整体落进仓库恒拒集，
+    写区白名单链在其下全部失效（锚外白名单写被误判系统自保硬拒）。
+    """
+    if not (candidate / "config" / "kernel").is_dir():
+        return False
+    user_dir = user_root()
+    if user_dir is None:
+        return True
+    return os.path.normcase(os.path.normpath(str(candidate))) != os.path.normcase(
+        os.path.normpath(str(user_dir))
+    )
+
+
 def resolve_repo_root() -> Path | None:
     """解析 Agent OS 仓库根（结果缓存；测试用 :func:`reset_cache` 重置）。"""
     global _resolved, _resolved_done
@@ -55,16 +79,16 @@ def resolve_repo_root() -> Path | None:
     env_root = os.environ.get("AGENTOS_CONFIG_ROOT")
     if env_root:
         p = Path(env_root)
-        if (p / "kernel").is_dir():
+        if (p / "kernel").is_dir() and _is_repo_root_candidate(p.parent):
             _resolved = p.parent
             _resolved_done = True
             return _resolved
-        if (p / "config" / "kernel").is_dir():
+        if (p / "config" / "kernel").is_dir() and _is_repo_root_candidate(p):
             _resolved = p
             _resolved_done = True
             return _resolved
     for parent in Path(__file__).resolve().parents:
-        if (parent / "config" / "kernel").is_dir():
+        if _is_repo_root_candidate(parent):
             _resolved = parent
             _resolved_done = True
             return _resolved
@@ -139,6 +163,38 @@ def repo_write_denied(resolved: Path) -> str | None:
         return (
             f"路径位于仓库 {first}/ 目录（运行时/产物区，不可写），"
             "写操作被拒绝；写区覆盖仓库源码与文档目录"
+        )
+    return None
+
+
+def factory_skills_write_denied(resolved: Path) -> str | None:
+    """出厂 ``skills/`` 写区收敛判定（ADR 2026-10-09 批 C-a 红线①，原则 7）。
+
+    出厂 skills/（仓库根一级 ``skills/`` 目录）运行期唯一写路径 = 自进化提案
+    管道（proposal_submit/proposal_apply，管道自持 IO 不经工具闸）——任何
+    agent 经工具的直写恒拒且不可授权（授权卡会开出第二条写路径，破坏唯一
+    写路径红线）。仅锚定仓库根一级 skills 目录：项目根 skills/ 播种（用户域
+    资产）与会话工作空间 skills/ 快照（workspace_lifecycle 写面）不经本判定，
+    照常按根锚放行。
+
+    消费方须在**根锚放行之前**调用（dev 场景 project_root 即仓库根，锚内
+    快捷放行会遮蔽本判定）；读面不收敛（skills/ 是可读源码区）。
+
+    Returns:
+        拒绝原因（指向提案管道）；None = 不拒绝。
+    """
+    root = resolve_repo_root()
+    if root is None:
+        return None
+    try:
+        rel = resolved.relative_to(root)
+    except ValueError:
+        return None
+    if rel.parts[:1] == ("skills",):
+        return (
+            "路径位于出厂 skills/ 目录（运行期唯一写路径 = 自进化提案管道："
+            "mode_evolution 的 proposal_submit/proposal_apply），工具直写被拒绝；"
+            "技能增改请走进化提案"
         )
     return None
 

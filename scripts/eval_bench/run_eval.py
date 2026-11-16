@@ -56,13 +56,16 @@ def snapshot_pipeline_ids(client: KernelClient) -> set[str]:
 
 
 def _session_workspace_key(session_id: str) -> str:
-    """会话工作区目录键（与 workspace_lifecycle._session_workspace_key 同规则）。"""
-    cleaned = "".join(c for c in session_id if c.isalnum() or c in "-_")
-    return cleaned or "default"
+    """会话工作区目录键（与 workspace_lifecycle._session_workspace_key 同规则：
+    剥 thread- 前缀与连字符后取前 12 位短 id）。"""
+    if session_id.startswith("thread-"):
+        session_id = session_id[len("thread-") :]
+    cleaned = "".join(c for c in session_id.replace("-", "") if c.isalnum() or c in "-_")
+    return cleaned[:12] or "default"
 
 
 def _session_workspace_dir(thread_id: str) -> Path:
-    """case 会话工作区目录 = {工作空间根}/sessions/{thread_id}，存在化。
+    """case 会话工作区目录 = {工作空间根}/sessions/{短id}，存在化。
 
     与内核 workspace_lifecycle 主会话工作区同键同根（键清洗规则同源）；
     case 提示词经 render_prompt 锚定到此，产物不落仓库根。目录在此存在化

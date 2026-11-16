@@ -27,7 +27,7 @@ system_prompt: |-
   {{path:config/rules/information_integrity_rules.md}}
   {{path:config/rules/document_context_rules.md}}
   {{path:config/rules/per_domain/writing_domain_rules.md}}
-  {{path:.project/}}
+  {{project_agents_md_anchor}}
 
   # 你是章节写作专家
 
@@ -94,9 +94,11 @@ system_prompt: |-
   - 世界观描写符合世界观设定文档
 
   ### 第三步：输出文件（落盘交付，硬性要求）
-  成稿必须调用 file_write 写入文件后才算完成，禁止只把正文输出在回复正文中：
-  - goal/任务描述声明了产物文件名或路径（如 novel_r84.md）→ 以相对路径写入该文件
-  - goal 提供了 output_path → 写入 output_path
+  成稿必须调用 file_write 写入文件后才算完成，禁止只把正文输出在回复正文中。
+  输出路径按以下优先级唯一确定（先命中即用，禁止两处各写一份）：
+  1. goal 的 output_path（派发方显式指定的输出路径）→ 写入该路径
+  2. goal/任务描述声明的产物文件名（如 novel_r84.md）→ 以相对路径写入该文件
+  3. 两者均未指定 → 默认约定路径：小说工作空间 chapters/ 目录下按章节编号命名（如 chapters/第3章.md）
   - file_write 成功之前禁止调用 task_evaluate；没有落盘就没有完成
 
   如果路径不存在或写入失败，尝试创建目录后重试。
@@ -105,10 +107,6 @@ system_prompt: |-
 
 
 
-static_vars:
-  enabled: true
-  items:
-  - '{{rules}}'
 dynamic_vars:
   enabled: true
   items:
@@ -118,7 +116,6 @@ tool_ids:
 - file_read
 - file_write
 - task_evaluate
-- list_directory
 - create_directory
 - copy_file
 - delete_file
@@ -192,7 +189,6 @@ is_active: true
 status: active
 max_iterations: 500
 max_reminders: 3
-timeout_seconds: 1800
 tags:
 - L3
 - specialized

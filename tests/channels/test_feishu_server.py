@@ -18,7 +18,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_FEISHU_DIR = Path(__file__).resolve().parents[2] / "plugins" / "shared" / "system" / "channel_feishu"
+_FEISHU_DIR = Path(__file__).resolve().parents[2] / "plugins" / "shared" / "channel_feishu"
 _CC_DIR = _FEISHU_DIR.parent / "channel_common"
 
 # 与 server.py 顶层 import 冲突的同名平铺模块

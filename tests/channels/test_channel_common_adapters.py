@@ -20,7 +20,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_CC_DIR = Path(__file__).resolve().parents[2] / "plugins" / "shared" / "system" / "channel_common"
+_CC_DIR = Path(__file__).resolve().parents[2] / "plugins" / "shared" / "channel_common"
 _FILES = {
     "base_combo": "base_combo_adapter.py",
     "input": "input_adapter.py",

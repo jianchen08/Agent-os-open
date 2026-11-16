@@ -16,7 +16,8 @@ import * as path from "path";
 
 import * as electronModules from "electron";
 
-const AUTH_SESSION_FILE = "auth-session.json";
+/** 认证会话镜像文件名（认证身份目录下；main 侧迁移种子需要） */
+export const AUTH_SESSION_FILE = "auth-session.json";
 
 /** 加密信封版本；格式演进只增版本号，读取按版本分发。 */
 const ENVELOPE_VERSION = 1;

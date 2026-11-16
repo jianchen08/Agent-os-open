@@ -1,0 +1,401 @@
+{
+  "id": "sync_agent",
+  "requires_services": [
+    "packaging",
+    "db-read"
+  ],
+  "name": "Sync Agent",
+  "description": "多端同步端侧常驻插件：可同步层变更捕获（两通道架构，ADR 2026-10-17-sync-two-channel-routing——file 通道=config yaml 快照对比 + T2 git 仓库化（plugins/skills/artifact_index，变更=commit/墓碑=删除即提交/增量=bundle，恒 ff 零合并）；db 通道=管道步骤捕获消息/任务+域事件捕获会话）→ 打 HLC → sync_event 批上行（outbox+指数退避，断网不丢）；按 cursor 拉取下行 → 按通道路由合并（file=HLC-LWW 落盘；db=单一通用镜像表只读落地，属主面他端不接管不删除）；设备心跳上报；入网自举。配对流（/ext/sync_agent/join）：未配对不拒载，输入网码换正式 per-device token。手动备份（T6 拍板③a，/ext/sync_agent/backup/**）：DB 会话/任务逻辑记录导出（T1 形态 JSONL）+指定工作空间 → 本地 git 仓库，commit 即备份点（增量/可回溯/可恢复），离线可用。relay 不可达不阻塞本机执行（离线第一）。设备页数据面 GET /ext/sync_agent/relay/devices 云端权威注册表透传（R30 销项：中枢 routing_view 单点换源，降级诚实标记）。",
+  "version": "1.9.3",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "host_group": "light_stable",
+  "entry": "python server.py",
+  "activation": "eager",
+  "lifecycle": {
+    "idle_timeout_secs": 0
+  },
+  "capabilities": {
+    "tools": [
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for /ext/sync_agent/**（配对流与状态面）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "raw_body": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "query": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "query_multi": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "integer"
+            },
+            "body": {
+              "type": "object"
+            }
+          }
+        },
+        "render": {
+          "card": "generic"
+        }
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload",
+      "domain_event"
+    ],
+    "services": [
+      {
+        "name": "sync_capture.execute",
+        "description": "DB 逻辑记录捕获步（autonomous.yaml post 组；消息 diff+任务漂移+会话骨架 → sync_event 上行）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "object",
+              "description": "Pipeline working state（引擎投喂）"
+            },
+            "config": {
+              "type": "object",
+              "description": "步骤 config（未用，契约占位）"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      {
+        "name": "sync_agent.get_status",
+        "description": "端侧同步引擎状态（配对/游标/待上行/计数面/末次错误）",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "loaded": {
+              "type": "boolean"
+            },
+            "paired": {
+              "type": "boolean"
+            },
+            "device_id": {
+              "type": "string"
+            },
+            "tier": {
+              "type": "string"
+            },
+            "bootstrap_done": {
+              "type": "boolean"
+            },
+            "pending": {
+              "type": "integer"
+            },
+            "cursor": {
+              "type": "integer"
+            },
+            "captured_total": {
+              "type": "integer"
+            },
+            "applied_total": {
+              "type": "integer"
+            },
+            "stale_total": {
+              "type": "integer"
+            },
+            "flushed_total": {
+              "type": "integer"
+            },
+            "failed_flushes": {
+              "type": "integer"
+            },
+            "pulled_total": {
+              "type": "integer"
+            },
+            "heartbeats_total": {
+              "type": "integer"
+            },
+            "last_error": {
+              "type": "string"
+            },
+            "mirror_total": {
+              "type": "integer"
+            },
+            "exec_channel": {
+              "type": "object",
+              "description": "exec 通道面（2c）：capability=上报的能力子键，verification=属主端验证集状态（tokens_persisted/synced_at）"
+            },
+            "file_channel": {
+              "type": "object",
+              "description": "git 文件通道状态面：scope → role/head/commits"
+            }
+          }
+        }
+      }
+    ],
+    "steps": [
+      {
+        "name": "sync_agent",
+        "description": "DB 逻辑记录捕获步（T1 两通道 db 通道：消息 diff+任务漂移+会话骨架 → sync_event 上行；session_id 缺席=无会话任务跳过骨架捕获，不阻提交）",
+        "required_state_inputs": [
+          "messages",
+          "pipeline_id"
+        ]
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 50,
+  "http_endpoints": [
+    {
+      "route_id": "enroll_device",
+      "method": "POST",
+      "path": "/ext/sync_agent/enroll",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "登录即入网（ADR 2026-11-02-login-as-enrollment）：携 relay 基址 + relay 内核 admin JWT 向 relay 直签 per-device token，凭据落 data/（永不同步层）并即时重建引擎（重入网清游标账，HLC 时钟保留）"
+    },
+    {
+      "route_id": "sync_status",
+      "method": "GET",
+      "path": "/ext/sync_agent/status",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "端侧同步状态（paired/游标/待上行/末次错误；设置页同步区的数据面）"
+    },
+    {
+      "route_id": "relay_devices",
+      "method": "GET",
+      "path": "/ext/sync_agent/relay/devices",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "云端权威设备注册表透传（R30 数据面：复用引擎 relay 通道拉中枢 routing_view；未配对/云端不可达=空 devices+degraded+error 诚实降级；短 TTL 只缓存成功面，降级不缓存）"
+    },
+    {
+      "route_id": "mirror_records",
+      "method": "GET",
+      "path": "/ext/sync_agent/mirror/records",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "他端 DB 逻辑记录只读镜像呈现（?table=messages|sessions|tasks 过滤；无写路由，结构性不可篡改）"
+    },
+    {
+      "route_id": "backup_run",
+      "method": "POST",
+      "path": "/ext/sync_agent/backup/run",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "手动备份执行（T6 拍板③a）：DB 会话/任务逻辑记录导出（T1 形态 JSONL）+指定工作空间（body workspaces=[{name,path}]，可空=仅 DB）各产一个 commit 到备份仓库；空部分诚实跳过，失败显式报错"
+    },
+    {
+      "route_id": "backup_status",
+      "method": "GET",
+      "path": "/ext/sync_agent/backup/status",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "手动备份能力状态（configured/git 可用/仓库根/备份点头/commit 深度）"
+    },
+    {
+      "route_id": "backup_points",
+      "method": "GET",
+      "path": "/ext/sync_agent/backup/points",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "备份点清单（git log，新→旧：sha/时刻/主题；任意时点回溯入口）"
+    },
+    {
+      "route_id": "backup_restore",
+      "method": "POST",
+      "path": "/ext/sync_agent/backup/restore",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "从备份点检出（body {part: db|workspace, dest, commit?, name?}；workspace=文件恢复路径，db=JSONL 物化回灌内核为后续刀；目标目录须不存在或为空，拒覆盖）"
+    },
+    {
+      "route_id": "sync_probe",
+      "method": "POST",
+      "path": "/ext/sync_agent/probe",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "注册表地址实测探活（入参 device_ids，地址唯一来源=云端注册表；设备卡实测可达数据源，ADR 2026-10-21-device-card-direct-connect）"
+    },
+    {
+      "route_id": "borrow_auth",
+      "method": "POST",
+      "path": "/ext/sync_agent/borrow_auth",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "description": "配对设备借权（member 目标；bearer=请求方 per-device token，经 relay /verify 核验后换发本内核 admin 会话）"
+    },
+    {
+      "route_id": "borrow",
+      "method": "POST",
+      "path": "/ext/sync_agent/borrow",
+      "auth": "admin",
+      "handler_capability": "http.handle",
+      "description": "借权出站代理（仅已登录本机前端）：代持本机 per-device token 与目标内核完成 borrow_auth 握手，令牌对回传前端按 @base 分键落盘"
+    }
+  ],
+  "config_files": [
+    {
+      "id": "settings",
+      "label": "端侧同步配置",
+      "fields": [
+        {
+          "name": "relay_url",
+          "label": "Relay 端点基址",
+          "type": "string",
+          "required": false,
+          "description": "云端/桌面 sync_relay 基址（…/ext/sync_relay）；解析序 env AGENTOS_SYNC_RELAY_URL > 入网码配对凭据 > 本字段；三者皆缺 = 未配对（引擎停转，输码配对后即用）"
+        },
+        {
+          "name": "device_tier",
+          "label": "设备档位",
+          "type": "string",
+          "required": false,
+          "description": "cloud / desktop / phone（层级权威与 2c 路由登记面；缺省 desktop，env AGENTOS_DEVICE_TIER 优先）"
+        },
+        {
+          "name": "app_version",
+          "label": "应用版本",
+          "type": "string",
+          "required": false,
+          "description": "设备注册表版本字段（插件版本收敛窗口对账面，ADR D4）"
+        },
+        {
+          "name": "watch_pattern",
+          "label": "捕获通配",
+          "type": "string",
+          "required": false,
+          "description": "watch 目录下相对通配（缺省 **/*.yaml；捕获根 = 用户配置层，env AGENTOS_SYNC_WATCH_DIR 可覆盖）"
+        },
+        {
+          "name": "poll_interval_secs",
+          "label": "轮询间隔（秒）",
+          "type": "number",
+          "required": false,
+          "description": "捕获/上行/下行单拍循环间隔"
+        },
+        {
+          "name": "heartbeat_interval_secs",
+          "label": "心跳间隔（秒）",
+          "type": "number",
+          "required": false,
+          "description": "设备心跳上报周期（须小于 relay 在线判定窗口）"
+        },
+        {
+          "name": "file_owner_scopes",
+          "label": "文件通道属主域",
+          "type": "string",
+          "required": false,
+          "description": "本端为属主（写者）的 git 通道域，逗号分隔（plugins,skills,artifact_index）；空 = 纯读者（T2 拍板③b：变更=commit、删除=墓碑、增量=bundle、恒 ff 零合并）；env AGENTOS_SYNC_FILE_OWNER_SCOPES 优先"
+        },
+        {
+          "name": "file_reader_scopes",
+          "label": "文件通道拉取域",
+          "type": "string",
+          "required": false,
+          "description": "本端拉取镜像的域（逗号分隔）；空 = 词表全集减属主域；无传输面前读者臂空转零副作用"
+        },
+        {
+          "name": "file_root_plugins",
+          "label": "插件域源目录",
+          "type": "string",
+          "required": false,
+          "description": "plugins 域内容源（属主写面；相对路径按进程 cwd 解析，缺省 plugins/shared）"
+        },
+        {
+          "name": "file_root_skills",
+          "label": "技能域源目录",
+          "type": "string",
+          "required": false,
+          "description": "skills 域内容源（属主写面；缺省 skills）"
+        },
+        {
+          "name": "file_root_artifact_index",
+          "label": "产物索引域源目录",
+          "type": "string",
+          "required": false,
+          "description": "artifact_index 域内容源（缺省 data/sync_agent/artifact_index，生产者=T4 产物归属面接线）"
+        },
+        {
+          "name": "exec_channel.mcp_url",
+          "label": "执行通道 MCP 端点",
+          "type": "string",
+          "required": false,
+          "description": "本端 exec 通道 MCP server 地址（2c 能力面：随注册/心跳上报 exec_channel 子键，allowed_roots 即本端子树领地声明；env AGENTOS_EXEC_MCP_URL 优先；空 = 通道面全关，注册表零噪音）"
+        },
+        {
+          "name": "exec_channel.allowed_roots",
+          "label": "执行通道领地根",
+          "type": "string",
+          "required": false,
+          "description": "本端在统一路径树上的子树领地声明，逗号/空白分隔（前缀路由的路由表主体；工作空间基目录应覆盖在内以供跨端寻址；env AGENTOS_EXEC_ALLOWED_ROOTS 优先）"
+        },
+        {
+          "name": "backup_repo_root",
+          "label": "备份仓库根路径",
+          "type": "string",
+          "required": false,
+          "description": "手动备份（T6）本地 git 仓库根（备份点=commit，增量/可回溯/可恢复；永不同步 data/ 层语义）；空 = 备份能力停用；env AGENTOS_SYNC_BACKUP_ROOT 优先；git 可执行缺失同停用（诚实报错禁静默）"
+        }
+      ],
+      "path": "config/plugins/sync_agent/settings.yaml"
+    }
+  ],
+  "invoke_entry": "sync_capture.execute",
+  "state": {
+    "reads": [
+      "messages",
+      "task.id",
+      "task.status",
+      "task.goal",
+      "task.description",
+      "task.acceptance_criteria",
+      "task.created_at",
+      "task.dependencies",
+      "task.submitted_by",
+      "task.submitted_by_level"
+    ]
+  }
+}

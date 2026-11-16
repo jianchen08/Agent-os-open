@@ -22,7 +22,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_MON_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system" / "monitoring"
+_MON_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "monitoring"
 
 
 def _load_pm():

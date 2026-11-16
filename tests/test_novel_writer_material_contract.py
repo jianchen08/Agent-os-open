@@ -74,9 +74,9 @@ def test_system_prompt_carries_write_before_evaluate_gate(agent_cfg: dict, ancho
     assert anchor in prompt, f"system_prompt 缺少落盘闸门锚点 {anchor!r}"
 
 
-def test_timeout_budget_declared(agent_cfg: dict) -> None:
-    """长创作任务必须显式声明超时预算（断链时 stop_check 落 600s 默认值先杀任务）。"""
-    timeout = agent_cfg.get("timeout_seconds")
-    assert isinstance(timeout, int) and timeout >= 600, (
-        "timeout_seconds 必须为 ≥600 的整数（创作任务耗时超过默认 600s）"
+def test_no_run_wall_clock_budget(agent_cfg: dict) -> None:
+    """长创作任务不得声明 run 墙钟预算（键缺席=引擎看门狗不武装）。"""
+    assert "timeout_seconds" not in agent_cfg, (
+        "创作 Agent 不得声明 run 墙钟预算：预算耗尽时引擎会强制终态化，"
+        "长任务在成稿落盘前即被收走"
     )

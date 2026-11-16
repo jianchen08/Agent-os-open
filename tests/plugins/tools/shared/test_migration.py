@@ -4,8 +4,8 @@
 测试覆盖：
 1. plugin.json 格式正确
 2. server.py 可导入（create_plugin 返回 AgentOSPlugin 实例）
-3. TOOL_REGISTRY 声明现役 2 工具（yaml_validate / read_execution_detail）
-4. 各工具函数可被调用并返回正确结构
+3. TOOL_REGISTRY 声明现役 1 工具（read_execution_detail）
+4. 复杂工具目录结构存在性
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ pytestmark = pytest.mark.unit
 
 
 # 将 simple 工具目录加入 sys.path
-SIMPLE_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools" / "simple"
+SIMPLE_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "simple"
 sys.path.insert(0, str(SIMPLE_DIR))
 
 # 将 SDK 目录加入 sys.path
@@ -48,10 +48,10 @@ class TestSimplePluginJson:
     def test_plugin_json_declares_live_tools(self):
         data = json.loads((SIMPLE_DIR / "plugin.json").read_text(encoding="utf-8"))
         tools = data["capabilities"]["tools"]
-        # 现役工具面 2 个
-        assert len(tools) == 2
+        # 现役工具面 1 个（yaml_validate 已退役：纯函数 bash 一行可替代）
+        assert len(tools) == 1
         tool_names = {t["name"] for t in tools}
-        expected = {"yaml_validate", "read_execution_detail"}
+        expected = {"read_execution_detail"}
         assert tool_names == expected
 
 
@@ -89,47 +89,13 @@ class TestSimpleServerImport:
         assert plugin.name == "simple_tools"
 
     def test_tool_registry_has_live_tools(self):
-        assert len(_load_simple_server().TOOL_REGISTRY) == 2
+        assert len(_load_simple_server().TOOL_REGISTRY) == 1
 
     def test_all_tools_registered(self):
         plugin = _load_simple_server().create_plugin()
         registered = set(plugin._tools.keys())
-        expected = {"yaml_validate", "read_execution_detail"}
+        expected = {"read_execution_detail"}
         assert registered == expected
-
-
-# ── 工具函数功能校验 ──────────────────────────────────
-
-
-# 现役工具面（simple 插件）由本类与 simple/test_system_tools.py 共同覆盖。
-class TestYamlValidate:
-    """YAML 校验工具测试。"""
-
-    @pytest.mark.asyncio
-    async def test_valid_yaml_content(self):
-        from system_tools import yaml_validate
-
-        result = await yaml_validate(content="name: test\nvalue: 123")
-        assert result["valid"] is True
-        assert result["parsed"]["name"] == "test"
-
-    @pytest.mark.asyncio
-    async def test_invalid_yaml_syntax(self):
-        from system_tools import yaml_validate
-
-        result = await yaml_validate(content="name: [unclosed bracket\n")
-        assert result["valid"] is False
-
-    @pytest.mark.asyncio
-    async def test_missing_required_fields(self):
-        from system_tools import yaml_validate
-
-        result = await yaml_validate(
-            content="name: test",
-            required_fields=["name", "version"],
-        )
-        assert result["valid"] is False
-        assert any("version" in e for e in result["errors"])
 
 
 # ── 复杂工具 plugin.json + server.py 存在性校验 ──────────
@@ -138,13 +104,13 @@ class TestYamlValidate:
 class TestComplexToolsStructure:
     """验证 18 个复杂工具的目录结构。"""
 
-    TOOLS_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools"
+    TOOLS_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared"
 
     @pytest.mark.parametrize("tool_dir", [
-        "bash", "download", "resource_merge",
+        "bash", "resource_merge",
         "task", "task_submit", "task_evaluate",
         "search", "triggers_ext",
-        "media", "lsp", "memory",
+        "media", "memory",
         "human", "web_ext",
     ])
     def test_complex_tool_has_plugin_json(self, tool_dir):
@@ -152,10 +118,10 @@ class TestComplexToolsStructure:
             f"Missing plugin.json for {tool_dir}"
 
     @pytest.mark.parametrize("tool_dir", [
-        "bash", "download", "resource_merge",
+        "bash", "resource_merge",
         "task", "task_submit", "task_evaluate",
         "search", "triggers_ext",
-        "media", "lsp", "memory",
+        "media", "memory",
         "human", "web_ext",
     ])
     def test_complex_tool_has_server_py(self, tool_dir):
@@ -163,10 +129,10 @@ class TestComplexToolsStructure:
             f"Missing server.py for {tool_dir}"
 
     @pytest.mark.parametrize("tool_dir", [
-        "bash", "download", "resource_merge",
+        "bash", "resource_merge",
         "task", "task_submit", "task_evaluate",
         "search", "triggers_ext",
-        "media", "lsp", "memory",
+        "media", "memory",
         "human", "web_ext",
     ])
     def test_complex_tool_has_source_code(self, tool_dir):

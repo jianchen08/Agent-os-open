@@ -27,8 +27,8 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_TE_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools" / "task_evaluate"
-_SYSTEM_ROOT = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system"
+_TE_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "task_evaluate"
+_SYSTEM_ROOT = Path(__file__).resolve().parents[4] / "plugins" / "shared"
 
 _PLUGIN_PATHS = tuple(str(_d) for _d in [_TE_DIR, _SYSTEM_ROOT, _SYSTEM_ROOT / "tasks"])
 
@@ -221,10 +221,75 @@ class TestAgentMetricPipeline:
         return [
             {
                 "pipeline_id": "taskP1",
-                "ws_meta": {"path": ws_path, "mode": "worktree", "project_root": "D:/proj"},
+                "task.ws_meta": {"path": ws_path, "mode": "worktree", "project_root": "D:/proj"},
                 "lineage.origin_session_id": "sessRoot1",
             }
         ]
+
+    def test_dispatch_user_id_is_task_submitter(
+        self, mod_exec: Any, metrics_path: str, tmp_path: Path
+    ) -> None:
+        """G 缺陷（R2 移动端 2026-10-15，2/2 复现）：派发身份 = 被评估任务的真实
+        提交者（task.submitted_by）。内核 chat.send_message 创建分支按 user_id
+        反查用户→租户（K8 fail-closed，ADR 2026-10-10），合成账号 task_system
+        在用户表查无此人必被拒——「用户不存在（token 持有者已删除）」=
+        TenantResolveError::NotFound。file_check 本地检查不派发故不受影响、
+        semantic_check 派发必败的分野即此一线。"""
+        ws = tmp_path / "ws-task"
+        ws.mkdir()
+        sent: list[dict[str, Any]] = []
+
+        async def fake_chat(params: dict[str, Any]) -> dict[str, Any]:
+            sent.append(params)
+            return {"pipeline_id": "evalPipe1"}
+
+        rows = [
+            {
+                "pipeline_id": "taskP1",
+                "task.ws_meta": {"path": str(ws), "mode": "plain"},
+                "task.submitted_by": "admin-user-0001",
+                "lineage.origin_session_id": "sessRoot1",
+            }
+        ]
+        ex = _make_executor(
+            mod_exec,
+            chat_send=fake_chat,
+            state_rows=(lambda: rows),
+            metrics_path=metrics_path,
+        )
+        r = _run(ex.run_evaluation("taskP1", ["semantic_check"], {}))
+        assert sent[0]["user_id"] == "admin-user-0001", (
+            "评估子管道派发身份必须是任务真实提交者（租户解析按用户表反查）"
+        )
+        assert r.results[0].pipeline_run_id == "evalPipe1"
+
+    def test_dispatch_user_id_fallback_without_submitter(
+        self, mod_exec: Any, metrics_path: str, tmp_path: Path
+    ) -> None:
+        """存量行缺 task.submitted_by → 不造合成账号，user_id 键缺席
+        （合成账号在用户表查无此人必被租户反查拒，身份回退调用方原身份）。"""
+        ws = tmp_path / "ws-task"
+        ws.mkdir()
+        sent: list[dict[str, Any]] = []
+
+        async def fake_chat(params: dict[str, Any]) -> dict[str, Any]:
+            sent.append(params)
+            return {"pipeline_id": "evalPipe1"}
+
+        rows = [
+            {
+                "pipeline_id": "taskP1",
+                "task.ws_meta": {"path": str(ws), "mode": "plain"},
+            }
+        ]
+        ex = _make_executor(
+            mod_exec,
+            chat_send=fake_chat,
+            state_rows=(lambda: rows),
+            metrics_path=metrics_path,
+        )
+        _run(ex.run_evaluation("taskP1", ["semantic_check"], {}))
+        assert "user_id" not in sent[0]
 
     def test_dispatch_contract_r2_workspace_inheritance(
         self, mod_exec: Any, metrics_path: str, tmp_path: Path

@@ -26,7 +26,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_ROLLBACK_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "rollback"
+_ROLLBACK_DIR = _REPO_ROOT / "plugins" / "shared" / "rollback"
 
 # 平铺 import 命名空间抢位：目标目录置于 sys.path 最前并逐出同名裸模块缓存
 sys.path.insert(0, str(_ROLLBACK_DIR))
@@ -122,7 +122,7 @@ class TestFileReverserGaps:
         target_a = tmp_path / "a.txt"
         target_a.write_text("orig", encoding="utf-8")
         op_a = OperationLog(
-            tool_name="file_update",
+            tool_name="file_write",
             operation_type=OperationType.UPDATE,
             target=str(target_a),
             before_state={"content": 123},
@@ -133,7 +133,7 @@ class TestFileReverserGaps:
         target_b = tmp_path / "b_dir"
         target_b.mkdir()
         op_b = OperationLog(
-            tool_name="file_delete",
+            tool_name="delete_file",
             operation_type=OperationType.DELETE,
             target=str(target_b),
             before_state={"content": "x"},
@@ -156,7 +156,7 @@ class TestFileReverserGaps:
         """无原始内容快照 → 拒绝恢复（不静默造空文件）。"""
         target = tmp_path / "gone.txt"
         op = OperationLog(
-            tool_name="file_delete",
+            tool_name="delete_file",
             operation_type=OperationType.DELETE,
             target=str(target),
             before_state=before_state,
@@ -175,11 +175,15 @@ class TestFileReverserGaps:
 
 
 class TestGitReverserDispatch:
-    """reverse 按 tool_name 分发到对应逆操作与失败分支。"""
+    """reverse 按逆操作载荷分发到对应逆操作与失败分支。"""
 
     @pytest.mark.asyncio
-    async def test_branch_without_name_fails(self, git_repo: Any) -> None:
-        op = OperationLog(tool_name="git_branch", operation_type=OperationType.EXECUTE, params={})
+    async def test_branch载荷缺名称失败(self, git_repo: Any) -> None:
+        op = OperationLog(
+            tool_name="git_branch",
+            operation_type=OperationType.EXECUTE,
+            params={"branch_name": ""},
+        )
 
         result = await GitReverser(repo_path=str(git_repo)).reverse(op)
 
@@ -187,14 +191,15 @@ class TestGitReverserDispatch:
         assert "分支名称" in result["message"]
 
     @pytest.mark.asyncio
-    async def test_unsupported_git_tool_rejected(self, git_repo: Any) -> None:
-        op = OperationLog(tool_name="git_checkout", operation_type=OperationType.EXECUTE)
+    async def test_无git载荷的操作拒绝(self, git_repo: Any) -> None:
+        """无任何逆操作载荷 → 无分发目标，明确失败而非静默。"""
+        op = OperationLog(tool_name="not_a_reversable_op", operation_type=OperationType.EXECUTE)
 
         result = await GitReverser(repo_path=str(git_repo)).reverse(op)
 
         assert result["success"] is False
         assert "不支持的 Git 操作" in result["message"]
-        assert "git_checkout" in result["message"]
+        assert "not_a_reversable_op" in result["message"]
 
     @pytest.mark.asyncio
     async def test_git_command_exception_caught(self, git_repo: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -373,7 +378,7 @@ def _install_fake_aiohttp(
 
 class TestAPIReverserGaps:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("tool_name", ["api_create", "api_delete"])
+    @pytest.mark.parametrize("tool_name", ["external_service", "records_api"])
     async def test_missing_reverse_action_fails(self, tool_name: str) -> None:
         op = OperationLog(tool_name=tool_name, operation_type=OperationType.EXECUTE)
 
@@ -388,7 +393,7 @@ class TestAPIReverserGaps:
         self, reverse_action: dict[str, Any],
     ) -> None:
         op = OperationLog(
-            tool_name="api_delete",
+            tool_name="records_api",
             operation_type=OperationType.EXECUTE,
             reverse_action=reverse_action,
         )
@@ -406,7 +411,7 @@ class TestAPIReverserGaps:
         for status in (200, 204):
             requests = _install_fake_aiohttp(monkeypatch, status=status)
             op = OperationLog(
-                tool_name="api_delete",
+                tool_name="records_api",
                 operation_type=OperationType.EXECUTE,
                 reverse_action={
                     "type": "http",
@@ -436,7 +441,7 @@ class TestAPIReverserGaps:
         """4xx/5xx 响应 → 逆操作失败，状态码可观测。"""
         requests = _install_fake_aiohttp(monkeypatch, status=404)
         op = OperationLog(
-            tool_name="api_delete",
+            tool_name="records_api",
             operation_type=OperationType.EXECUTE,
             reverse_action={"type": "http", "method": "DELETE", "url": "https://x/y"},
         )
@@ -452,7 +457,7 @@ class TestAPIReverserGaps:
     @pytest.mark.parametrize("url", [None, ""])
     async def test_http_reverse_without_url_fails(self, url: str | None) -> None:
         op = OperationLog(
-            tool_name="api_delete",
+            tool_name="records_api",
             operation_type=OperationType.EXECUTE,
             reverse_action={"type": "http", "method": "DELETE", "url": url},
         )
@@ -469,7 +474,7 @@ class TestAPIReverserGaps:
         """传输层异常（连接拒绝等）→ 失败信封携带错误明细。"""
         _install_fake_aiohttp(monkeypatch, exc=OSError("connection refused"))
         op = OperationLog(
-            tool_name="api_delete",
+            tool_name="records_api",
             operation_type=OperationType.EXECUTE,
             reverse_action={"type": "http", "method": "DELETE", "url": "https://x/y"},
         )

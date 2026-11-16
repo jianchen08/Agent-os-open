@@ -117,7 +117,14 @@ export function LlmSetupWizard({
           display_name: selectedModel,
         })
       }
-      await saveDefaults({ chat: selectedModel })
+      // 主对话 agent 以 model_tier（large/medium/small）解析模型， tiers 不随
+      // defaults.chat 走——只写 chat 时 agent 仍解析到旧 tier 模型（净装态即
+      // 无 key 的占位模型，对话必死）。「设为默认模型」语义 = 三档齐切；
+      // embedding 独立不受影响。
+      await saveDefaults({
+        chat: selectedModel,
+        tiers: { large: selectedModel, medium: selectedModel, small: selectedModel },
+      })
       setStep(3)
       onConfigured()
     } catch (e) {
@@ -189,7 +196,7 @@ export function LlmSetupWizard({
           {models && models.length > 0 ? (
             <div className="max-h-40 overflow-y-auto rounded-md border" data-testid="wizard-models">
               {models.map((m) => (
-                <label key={m.id} className="hover:bg-accent flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm">
+                <label key={m.id} className="hover:bg-muted flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm">
                   <input
                     type="radio"
                     name="wizard-model"

@@ -40,6 +40,7 @@ from mcp.server.stdio import stdio_server
 from mcp.shared.exceptions import MCPError
 from mcp_types.jsonrpc import INVALID_PARAMS
 
+from agentos_plugin_sdk.capability import bind_reverse_call_identity, reset_reverse_call_identity
 from agentos_plugin_sdk.step_dispatch import dispatch_pipe_hook_registry
 from agentos_plugin_sdk.types import LifecycleEvent, ResourceDef, ToolDef
 
@@ -74,6 +75,23 @@ def _augment_description(description: str, output_schema: dict[str, Any] | None)
         return description
     line = f"Output contract: {compact}"
     return f"{description}\n{line}" if description else line
+
+
+def _object_output_schema(output_schema: dict[str, Any] | None) -> dict[str, Any] | None:
+    """MCP ``outputSchema`` 仅在根 ``type: "object"`` 时下发。
+
+    MCP 握手版本（2024-11-05..2025-11-25）把 outputSchema 限定为根
+    ``type: "object"`` 的 schema（协议模型 ``OutputSchema.type`` 是
+    ``Literal["object"]`` 且必填）；官方 runner 按协商版本序列化
+    ``ListToolsResult`` 时，array/string/缺 type 的声明触发 pydantic
+    校验失败，整条 tools/list 以 -32603 应答——同宿主全部工具不可见。
+
+    非 object 声明仍完整保留在 ToolDef（输出契约声明、service 调用方语义
+    都以它为准），模型侧输出形状由 ``_augment_description`` 的契约摘要承载。
+    """
+    if isinstance(output_schema, dict) and output_schema.get("type") == "object":
+        return output_schema
+    return None
 
 
 # 反向 capability 调用等待内核响应的超时：86400s=24h（BUG-60 审批族统一值，
@@ -345,10 +363,12 @@ class McpServer:
     async def _on_list_tools(self, ctx: Any, params: Any) -> types.ListToolsResult:
         """tools/list——返回已注册工具（schema 以 ToolDef 声明为准，不从签名推导）。
 
-        output_schema 经 MCP 标准 ``outputSchema`` 字段下发（2025-06-18 结构化输出）；
-        render 意图经 ``_meta`` 透传（协议安全通道）。声明了 output_schema 的工具，
-        description 追加单行输出契约摘要——消费端（模型/客户端）不读结构化字段也能
-        知道输出形状（task_dsh_plugin_adapter 任务 1）。
+        output_schema 经 MCP 标准 ``outputSchema`` 字段下发（2025-06-18 结构化输出），
+        但仅限根 ``type: "object"`` 的声明（MCP 线格式约束，见
+        ``_object_output_schema``）；render 意图经 ``_meta`` 透传（协议安全通道）。
+        声明了 output_schema 的工具，description 追加单行输出契约摘要——消费端
+        （模型/客户端）不读结构化字段也能知道输出形状（task_dsh_plugin_adapter
+        任务 1）。
         """
         tools: list[types.Tool] = []
         for td in self._tools.values():
@@ -357,8 +377,18 @@ class McpServer:
                 description=_augment_description(td.description, td.output_schema),
                 input_schema=td.schema,
             )
-            if td.output_schema is not None:
-                tool.output_schema = td.output_schema
+            output_schema = _object_output_schema(td.output_schema)
+            if output_schema is not None:
+                tool.output_schema = output_schema
+            elif td.output_schema is not None:
+                # 非 object 声明不下发（否则整组 tools/list 非法）；留痕定位声明
+                # 缺陷——真实输出形状仍在 description 的契约摘要里。
+                logger.warning(
+                    "[mcp] 工具 %s 的 output_schema 根 type=%r 非 object，"
+                    "MCP outputSchema 不下发（契约摘要见 description）",
+                    td.name,
+                    td.output_schema.get("type"),
+                )
             if td.render is not None:
                 tool.meta = {"render": td.render}
             tools.append(tool)
@@ -377,6 +407,22 @@ class McpServer:
         """
         name = params.get("name", "")
         arguments = dict(params.get("arguments") or {})
+
+        # 反向调用身份透传（刀1）：内核在 invocation arguments 顶部注入
+        # `_identity`（执行上下文身份原头，tenant_id/session_id）。此处捕获到
+        # contextvar（官方 dispatcher 每消息独立 task，天然 per-invocation
+        # 隔离），该次调用内发起的 capability 反调自动回带 `_tenant_id`/
+        # `_session_id`（plugin._make_call_fn 出站附加）；调用边界 finally 复位
+        # 防跨调用残留。保留键即刻从 arguments 移除，不泄漏给任何分发路径
+        # （工具/具名步骤/管道钩子）的 handler 参数。
+        identity_token = bind_reverse_call_identity(arguments.pop("_identity", None))
+        try:
+            return await self._dispatch_tools_call(name, arguments)
+        finally:
+            reset_reverse_call_identity(identity_token)
+
+    async def _dispatch_tools_call(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
+        """tools/call 主体（身份绑定后）：约定分发 → 工具表分发。"""
 
         # 配置变更感知（调用边界，先于任何分发）：内核每调用现算注入 config，
         # 此处刷新插件配置视图并按需触发 on_config_changed 钩子。回调签名

@@ -23,40 +23,62 @@ struct RouteKey {
     method: String,
 }
 
+/// 属地前缀匹配（F-min）：workspace 是否等于 root 或落于其下。
+///
+/// 双侧归一（小写化 + 分隔符统一为 `\`）后做边界比对——云内核（POSIX）上
+/// 比对的是两端原样的 Windows 形态路径字符串，归一必须无条件执行（对齐
+/// 本机 server 守卫 `os.path.normcase` 的 NTFS 语义）；`\` 后缀防
+/// `/a/b` 误配 `/a/bc` 的同构问题。
+fn workspace_within(workspace: &str, root: &str) -> bool {
+    let norm = |s: &str| s.to_lowercase().replace('/', "\\");
+    let ws = norm(workspace);
+    let rt = norm(root);
+    if ws == rt {
+        return true;
+    }
+    let prefix = if rt.ends_with('\\') {
+        rt
+    } else {
+        format!("{rt}\\")
+    };
+    ws.starts_with(&prefix)
+}
+
 /// 能力注册表实现。
 ///
-/// 管理四类能力：
+/// 管理三类能力：
 /// 1. Tools: 工具插件/系统插件提供的工具
 /// 2. RouteSignals: 管道插件声明的路由信号
 /// 3. HttpRoutes: 插件贡献的 HTTP 端点（ADR §3.3）
-/// 4. ModeResources: 模式包约定子目录注册的 agent 键/编排键（设计稿
-///    2026-09-15 §2.3 约定即注册；登记/撤销见 [`crate::mode_registry`]）
 ///
-/// （原 Resources 维度已删除：注册链无消费方。）
+/// （原 Resources/ModeResources 维度已删除：Resources 注册链无消费方；
+/// 模式包资源改按需聚合——ADR 2026-10-15-mode-registry-retirement，
+/// 消费方 api/src/mode_view.rs 现算，零注册状态。）
 pub struct CapabilityRegistryImpl {
     tools: RwLock<HashMap<String, ToolDescriptor>>,
+    /// 同名多实例表（F-min 属地路由，设计文档 §53）：工具名 → 全部实例。
+    /// 主实例表（tools）承载既有读面；本表承载同名裁决的完整实例集。
+    tool_instances: RwLock<HashMap<String, Vec<ToolDescriptor>>>,
+    /// 宿主领地表（manifest mcp.allowed_roots 登记）：plugin_id → roots。
+    hosts: RwLock<HashMap<String, Vec<String>>>,
     tools_by_plugin: RwLock<HashMap<String, Vec<String>>>,
     route_signals_by_plugin: RwLock<HashMap<String, Vec<RouteType>>>,
     /// HTTP 端点维度（ADR §3.3）：RouteKey → 已注册描述符。
     http_routes: RwLock<HashMap<RouteKey, HttpRouteDescriptor>>,
     /// 插件 → 其注册的 RouteKey 列表（注销时清除用）。
     http_routes_by_plugin: RwLock<HashMap<String, Vec<RouteKey>>>,
-    /// 模式包 agent 键维度：`mode_X/<stem>` → 条目（禁用即同源消失）。
-    mode_agents: RwLock<HashMap<String, crate::mode_registry::ModeAgentEntry>>,
-    /// 模式包编排键维度：`mode_X/<stem>` → 条目（task_kinds 随行）。
-    mode_pipelines: RwLock<HashMap<String, crate::mode_registry::ModePipelineEntry>>,
 }
 
 impl CapabilityRegistryImpl {
     pub fn new() -> Self {
         Self {
             tools: RwLock::new(HashMap::new()),
+            tool_instances: RwLock::new(HashMap::new()),
+            hosts: RwLock::new(HashMap::new()),
             tools_by_plugin: RwLock::new(HashMap::new()),
             route_signals_by_plugin: RwLock::new(HashMap::new()),
             http_routes: RwLock::new(HashMap::new()),
             http_routes_by_plugin: RwLock::new(HashMap::new()),
-            mode_agents: RwLock::new(HashMap::new()),
-            mode_pipelines: RwLock::new(HashMap::new()),
         }
     }
 
@@ -69,8 +91,6 @@ impl CapabilityRegistryImpl {
             tools: self.tools.read().len(),
             route_signal_plugins: self.route_signals_by_plugin.read().len(),
             http_routes: self.http_routes.read().len(),
-            mode_agents: self.mode_agents.read().len(),
-            mode_pipelines: self.mode_pipelines.read().len(),
         }
     }
 }
@@ -84,10 +104,6 @@ pub struct RegistryMemoryStats {
     pub route_signal_plugins: usize,
     /// 已注册插件 HTTP 端点数。
     pub http_routes: usize,
-    /// 模式包 agent 键数。
-    pub mode_agents: usize,
-    /// 模式包编排键数。
-    pub mode_pipelines: usize,
 }
 
 impl Default for CapabilityRegistryImpl {
@@ -205,10 +221,44 @@ impl CapabilityRegistryImpl {
 
     /// 移除单个工具注册（guard revoke 用；与 unregister_tools 同族逻辑，按名单条移除）。
     fn remove_tool_entry(&self, plugin_id: &str, tool_name: &str) {
-        self.tools.write().remove(tool_name);
+        let replacement = {
+            {
+                let mut instances = self.tool_instances.write();
+                if let Some(entry) = instances.get_mut(tool_name) {
+                    entry.retain(|t| t.plugin_id != plugin_id);
+                    if entry.is_empty() {
+                        instances.remove(tool_name);
+                    }
+                }
+                // 写锁在此 drop（elect_primary 同锁读，parking_lot 不可重入）。
+            }
+            self.elect_primary(tool_name)
+        };
+        let mut tools = self.tools.write();
+        match replacement {
+            Some(td) => {
+                tools.insert(tool_name.to_string(), td);
+            }
+            None => {
+                tools.remove(tool_name);
+            }
+        }
         if let Some(names) = self.tools_by_plugin.write().get_mut(plugin_id) {
             names.retain(|n| n != tool_name);
         }
+    }
+
+    /// 从多实例表递补某工具的主实例：非宿主实例优先，全部宿主实例取首个
+    /// （与 resolve_tool_instance 缺省裁决同规）。只在持有 tools 写锁的上下文
+    /// 调用——本函数不触碰 tools 锁，避免同线程读写锁死锁。
+    fn elect_primary(&self, name: &str) -> Option<ToolDescriptor> {
+        let instances = self.tool_instances.read().get(name)?.clone();
+        let hosts = self.hosts.read();
+        instances
+            .iter()
+            .find(|t| !hosts.contains_key(&t.plugin_id))
+            .or_else(|| instances.first())
+            .cloned()
     }
 
     /// 移除该插件的路由信号声明。
@@ -282,71 +332,45 @@ impl CapabilityRegistryImpl {
         });
         Ok((descriptor, guard))
     }
-
-    // ── 模式包约定资源维度（设计稿 2026-09-15 §2.3 约定即注册）──
-    //
-    // 登记入口 = crate::mode_registry::register_mode_package_guarded（占用检查
-    // + guard 化撤销组合，弱引用语义与本文件其他 guarded 方法一致）；这里提供
-    // 插入/查询/按插件移除原语，供该入口与 clear_plugin 使用。
-
-    /// 原语：整体插入一个模式包的条目（调用方须先完成占用检查）。
-    pub(crate) fn insert_mode_entries(&self, package: &crate::mode_registry::ModePackageResources) {
-        let mut agents = self.mode_agents.write();
-        let mut pipelines = self.mode_pipelines.write();
-        for entry in &package.agents {
-            agents.insert(entry.key.clone(), entry.clone());
-        }
-        for entry in &package.pipelines {
-            pipelines.insert(entry.key.clone(), entry.clone());
-        }
-    }
-
-    /// 原语：按 (键, 是否编排键) 名单移除条目（guard revoke 用；只移除确属
-    /// 该插件的键，防名单过期误删他人注册）。
-    pub(crate) fn remove_mode_keys_of(&self, plugin_id: &str, keys: &[(String, bool)]) {
-        let mut agents = self.mode_agents.write();
-        let mut pipelines = self.mode_pipelines.write();
-        for (key, is_pipeline) in keys {
-            if *is_pipeline {
-                if pipelines.get(key).is_some_and(|e| e.plugin_id == plugin_id) {
-                    pipelines.remove(key);
-                }
-            } else if agents.get(key).is_some_and(|e| e.plugin_id == plugin_id) {
-                agents.remove(key);
-            }
-        }
-    }
-
-    /// 按键查模式包 agent 条目（消费方取数：`mode_X/<stem>` → 身份基座文件）。
-    pub fn get_mode_agent(&self, key: &str) -> Option<crate::mode_registry::ModeAgentEntry> {
-        self.mode_agents.read().get(key).cloned()
-    }
-
-    /// 按键查模式包编排条目（消费方取数：编排键 → 定义文件 + task_kinds；
-    /// 编排键是管道定义，与运行实例 pipeline_id 概念分离）。
-    pub fn get_mode_pipeline(&self, key: &str) -> Option<crate::mode_registry::ModePipelineEntry> {
-        self.mode_pipelines.read().get(key).cloned()
-    }
-
-    /// 全量模式包 agent 条目（按键字典序，输出确定）。
-    pub fn list_mode_agents(&self) -> Vec<crate::mode_registry::ModeAgentEntry> {
-        let mut out: Vec<_> = self.mode_agents.read().values().cloned().collect();
-        out.sort_by(|a, b| a.key.cmp(&b.key));
-        out
-    }
-
-    /// 全量模式包编排条目（按键字典序，输出确定）。
-    pub fn list_mode_pipelines(&self) -> Vec<crate::mode_registry::ModePipelineEntry> {
-        let mut out: Vec<_> = self.mode_pipelines.read().values().cloned().collect();
-        out.sort_by(|a, b| a.key.cmp(&b.key));
-        out
-    }
 }
 
 #[async_trait]
 impl CapabilityRegistry for CapabilityRegistryImpl {
     fn register_tool(&self, plugin_id: &str, tool: ToolDescriptor) {
         let name = tool.name.clone();
+        // 多实例表：同插件同工具重注册 = 原位替换（热重载/G2 复验不重复追加）；
+        // 异插件同名 = 追加（同名同工具的多宿主形态，设计文档 §53）。
+        {
+            let mut instances = self.tool_instances.write();
+            let entry = instances.entry(name.clone()).or_default();
+            match entry.iter_mut().find(|t| t.plugin_id == plugin_id) {
+                Some(slot) => *slot = tool.clone(),
+                None => entry.push(tool.clone()),
+            }
+        }
+        // 主实例裁决：宿主实例不夺非宿主实例的主（云原生插件保持缺省主位，
+        // 宿主实例只在无主或缺省解析时经属地路由出场）。同级覆盖 = 既有
+        // 重注册语义（后写者胜）。
+        let is_host = self.hosts.read().contains_key(plugin_id);
+        {
+            let tools = self.tools.read();
+            if let Some(existing) = tools.get(&name) {
+                let existing_is_host = self.hosts.read().contains_key(&existing.plugin_id);
+                if is_host && !existing_is_host {
+                    drop(tools);
+                    self.tools_by_plugin
+                        .write()
+                        .entry(plugin_id.to_string())
+                        .or_default()
+                        .push(name.clone());
+                    info!(
+                        "Tool registered (instance, primary yielded to native): plugin={} tool={}",
+                        plugin_id, name
+                    );
+                    return;
+                }
+            }
+        }
         self.tools.write().insert(name.clone(), tool);
         self.tools_by_plugin
             .write()
@@ -359,16 +383,71 @@ impl CapabilityRegistry for CapabilityRegistryImpl {
     fn unregister_tools(&self, plugin_id: &str) {
         let mut by_plugin = self.tools_by_plugin.write();
         if let Some(names) = by_plugin.remove(plugin_id) {
+            drop(by_plugin);
             let mut tools = self.tools.write();
             for name in &names {
-                tools.remove(name);
+                // 该工具主位若是本插件的，摘除后从多实例表递补（宿主实例
+                // 兜底，避免主位悬空导致反查 miss）；无递补 = 顺其自然移除。
+                let replacement = {
+                    {
+                        let mut instances = self.tool_instances.write();
+                        if let Some(entry) = instances.get_mut(name) {
+                            entry.retain(|t| t.plugin_id != plugin_id);
+                            if entry.is_empty() {
+                                instances.remove(name);
+                            }
+                        }
+                        // 写锁在此 drop（elect_primary 同锁读，不可重入）。
+                    }
+                    self.elect_primary(name)
+                };
+                match replacement {
+                    Some(td) => {
+                        tools.insert(name.clone(), td);
+                    }
+                    None => {
+                        tools.remove(name);
+                    }
+                }
             }
+            drop(tools);
+            self.hosts.write().remove(plugin_id);
             info!(
                 "Tools unregistered: plugin={} count={}",
                 plugin_id,
                 names.len()
             );
         }
+    }
+
+    fn register_host(&self, plugin_id: &str, allowed_roots: Vec<String>) {
+        self.hosts
+            .write()
+            .insert(plugin_id.to_string(), allowed_roots);
+    }
+
+    fn resolve_tool_instance(&self, name: &str, workspace: Option<&str>) -> Option<ToolDescriptor> {
+        let instances = self.tool_instances.read().get(name).cloned()?;
+        if instances.len() == 1 {
+            return instances.into_iter().next();
+        }
+        if let Some(ws) = workspace {
+            let hosts = self.hosts.read();
+            for inst in &instances {
+                if let Some(roots) = hosts.get(&inst.plugin_id) {
+                    if roots.iter().any(|root| workspace_within(ws, root)) {
+                        return Some(inst.clone());
+                    }
+                }
+            }
+        }
+        // 缺省：非宿主实例优先（与主实例裁决同规）；全部为宿主实例时取首个。
+        let hosts = self.hosts.read();
+        instances
+            .iter()
+            .find(|t| !hosts.contains_key(&t.plugin_id))
+            .or_else(|| instances.first())
+            .cloned()
     }
 
     fn get_tool(&self, name: &str) -> Option<ToolDescriptor> {
@@ -474,13 +553,6 @@ impl CapabilityRegistry for CapabilityRegistryImpl {
                 routes.remove(k);
             }
         }
-        // 清除模式包约定资源（禁用即同源消失，与工具/路由维度同一语义）
-        self.mode_agents
-            .write()
-            .retain(|_, e| e.plugin_id != plugin_id);
-        self.mode_pipelines
-            .write()
-            .retain(|_, e| e.plugin_id != plugin_id);
     }
 }
 
@@ -623,6 +695,12 @@ pub struct ServiceSurface {
 /// provides）会被误判「无人提供」→ 拒注册。端点级按 router 实际分支列方法；
 /// `config-reader`/`logger` 走兜底分发，按规范方法名登记（角色可满足，端点精确性
 /// 以 router 实测为准；若两端漂移由依赖不改契约者负责收敛）。
+///
+/// `db-read`/`chat`/`db-admin` 分发形态：db-read 走内置 match 臂
+/// （`("db-read", m)` → DbReadCapabilityHandler）；chat/db-admin 由内核 boot 期
+/// 把常驻 handler 注册进 CapabilityHandlerRegistry（router 先查它再落内置
+/// match）。实现均在内核 crate、注册点在内核 main——提供方是内核而非插件，
+/// 消费方可声明也可免声明（内建 ns 免声明税则）。
 const KERNEL_PROVIDED_SERVICES: &[(&str, &[&str])] = &[
     (
         "pipeline-executor",
@@ -632,6 +710,8 @@ const KERNEL_PROVIDED_SERVICES: &[(&str, &[&str])] = &[
             "suspend_pipeline",
             "resume_pipeline",
             "get_run_status",
+            "wait_run_stop",
+            "is_pipeline_viewed",
             "delete_pipeline",
         ],
     ),
@@ -654,6 +734,61 @@ const KERNEL_PROVIDED_SERVICES: &[(&str, &[&str])] = &[
     ("registry", &["register_tool"]),
     ("tenant-context", &["get"]),
     ("traces", &["list"]),
+    // 内核库读契约服务（C2 刀1）：方法集 = read_faces::DbReadCapabilityHandler
+    // 的 call 分支（query/faces），与 NAMESPACE 常量对齐。
+    ("db-read", &["query", "faces"]),
+    // 消息注入桥（触发器/任务派发/channel 系消费）：唯一方法 arm 在
+    // chat_send_handler::ChatSendHandler::handle（send_message）。
+    ("chat", &["send_message"]),
+    // SQL 能力层（boot-plugin 第一刀，HTTP 面在 db_admin 插件）：方法集 =
+    // db-admin/src/capability.rs 的 handle 分支八臂。
+    (
+        "db-admin",
+        &[
+            "list_tables",
+            "table_query",
+            "table_insert",
+            "table_get_row",
+            "table_update_row",
+            "table_delete_row",
+            "execute",
+            "clear_execution_data",
+        ],
+    ),
+    // 用户管理策略面（boot-plugin 第二刀，HTTP 面在 user_admin 插件）：方法集 =
+    // user-admin/src/capability.rs 的 handle 分支四臂（auth 执行门永留内核
+    // auth.rs，不经 capability）。
+    (
+        "user-admin",
+        &["list_users", "update_role", "update_tenant", "delete_user"],
+    ),
+    // 指标读面（boot-plugin 第三刀，HTTP 面在 metrics_admin 插件）：方法集 =
+    // api/src/metrics/capability.rs 的 handle 分支三臂；写面 metrics.record
+    // 是上方独立内置臂，不经此 handler。
+    ("metrics-admin", &["query", "list", "prometheus"]),
+    // LLM 工具面过滤服务（K10 执行时契约）：内置 match 单方法臂
+    // capability_router.rs `("tool-surface", "schemas")`。
+    ("tool-surface", &["schemas"]),
+    // 基础设施共享存储读面（M2）：内置 match `("service-registry", m)`，method
+    // 形如 `<域>.<op>`，方法集 = capability_router/service_registry.rs 的
+    // (domain, op) 五臂；端点精确性以该分发实测为准（域扩充随实现同步）。
+    (
+        "service-registry",
+        &[
+            "messages.list",
+            "traces.list",
+            "traces.list_by_pipeline",
+            "pipeline-runs.list",
+            "pipeline-runs.list_by_pipeline",
+        ],
+    ),
+    // 插件中间态内存寄存器（ADR 2026-08-27）：内置 match `("transient", m)` →
+    // dispatch_transient 四方法臂。
+    ("transient", &["set", "get", "list", "clear"]),
+    // sidecar 兜底新建承载管道（ADR 2026-11-03-pim-trigger-anchor）：内置 match
+    // `("session", "create")` → handle_session_create；消费方 mode_personal
+    // requires_services 声明，真语料依赖闸据此守住本表项。
+    ("session", &["create"]),
 ];
 
 impl ServiceSurface {
@@ -1008,6 +1143,7 @@ mod tests {
             source: ToolSource::Builtin,
             ui: None,
             render: None,
+            isolation_capable: None,
         }
     }
 
@@ -1236,6 +1372,78 @@ mod tests {
         assert!(surface.has_method("pipeline-executor", "suspend"));
         assert!(surface.has_method("event-bus", "emit"));
         assert!(!surface.has_role("ghost-core"));
+    }
+
+    #[test]
+    fn test_service_surface_kernel_provided_db_read_chat_db_admin() {
+        // 漂移修补守卫（资源注册收敛 T5.1）：db-read（router 内置臂）、
+        // chat/db-admin（内核 boot 期注册进 CapabilityHandlerRegistry 的常驻
+        // handler）必须在内核内置面——缺位时消费方声明 requires_services 即被
+        // G2 依赖闸误拒，被迫不声明裸奔。方法集与路由分支逐一对齐：
+        // read_faces::DbReadCapabilityHandler::call（query/faces）、
+        // chat_send_handler::ChatSendHandler::handle（send_message）、
+        // db-admin/src/capability.rs::handle（八臂）。
+        let surface = ServiceSurface::from_manifests(&[]);
+        assert!(surface.has_role("db-read"));
+        assert!(surface.has_method("db-read", "query"));
+        assert!(surface.has_method("db-read", "faces"));
+        assert!(
+            !surface.has_method("db-read", "write"),
+            "db-read 是只读契约：未登记的方法不算注册"
+        );
+        assert!(surface.has_role("chat"));
+        assert!(surface.has_method("chat", "send_message"));
+        assert!(!surface.has_method("chat", "bogus_method"));
+        assert!(surface.has_role("db-admin"));
+        for method in [
+            "list_tables",
+            "table_query",
+            "table_insert",
+            "table_get_row",
+            "table_update_row",
+            "table_delete_row",
+            "execute",
+            "clear_execution_data",
+        ] {
+            assert!(surface.has_method("db-admin", method));
+        }
+    }
+
+    #[test]
+    fn test_service_surface_kernel_provided_leftover_arms() {
+        // 漂移修补守卫（资源注册收敛 T5.3 收口上刀遗留）：user-admin/metrics-admin
+        // （内核 boot 期注册进 CapabilityHandlerRegistry 的常驻 handler）与
+        // tool-surface/service-registry/transient（CapabilityRouter 内置 match 臂）
+        // 必须在内核内置面——缺位时消费方要么被 G2 误拒、要么被迫裸奔不声明。
+        // 方法集与路由实现逐一对齐：user-admin/capability.rs 四臂、
+        // metrics/capability.rs 三臂、router `("tool-surface", "schemas")` 单臂、
+        // capability_router/service_registry.rs (domain, op) 五臂、
+        // dispatch_transient 四臂。
+        let surface = ServiceSurface::from_manifests(&[]);
+        assert!(surface.has_role("user-admin"));
+        for method in ["list_users", "update_role", "update_tenant", "delete_user"] {
+            assert!(surface.has_method("user-admin", method));
+        }
+        assert!(surface.has_role("metrics-admin"));
+        for method in ["query", "list", "prometheus"] {
+            assert!(surface.has_method("metrics-admin", method));
+        }
+        assert!(surface.has_method("tool-surface", "schemas"));
+        assert!(!surface.has_method("tool-surface", "write"));
+        assert!(surface.has_role("service-registry"));
+        for method in [
+            "messages.list",
+            "traces.list",
+            "traces.list_by_pipeline",
+            "pipeline-runs.list",
+            "pipeline-runs.list_by_pipeline",
+        ] {
+            assert!(surface.has_method("service-registry", method));
+        }
+        assert!(surface.has_role("transient"));
+        for method in ["set", "get", "list", "clear"] {
+            assert!(surface.has_method("transient", method));
+        }
     }
 
     #[test]
@@ -1586,7 +1794,6 @@ mod tests {
             description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::System,
-            pipeline_role: None,
             language: "python".to_string(),
             host_type: HostType::Sidecar,
             host_group: None,
@@ -1595,7 +1802,6 @@ mod tests {
             requires_services: vec![],
             permissions: Default::default(),
             priority: 100,
-            granted_capabilities: vec![],
             mcp: None,
             lifecycle: None,
             native: None,
@@ -2015,5 +2221,126 @@ mod tests {
         let surface = ServiceSurface::from_manifests(&[m]);
         let ids = surface.provider_ids("svc");
         assert_eq!(ids, vec!["dual".to_string()], "同一提供者只出现一次");
+    }
+
+    // ── F-min 属地路由（设计文档 §53）：同名多实例 + 工作空间属地解析 ──
+
+    fn register_host_tool(reg: &CapabilityRegistryImpl, plugin_id: &str, roots: Vec<&str>) {
+        reg.register_host(plugin_id, roots.into_iter().map(String::from).collect());
+    }
+
+    /// 宿主实例不夺非宿主实例的主：同名注册后缺省解析（无 workspace）恒回
+    /// 云原生实例；workspace 命中宿主领地 → 宿主实例；领地外 → 云原生实例。
+    #[test]
+    fn host_instance_yields_primary_and_resolves_by_workspace() {
+        let reg = CapabilityRegistryImpl::new();
+        register_host_tool(&reg, "mcp_local_host", vec!["D:\\myproject"]);
+        reg.register_tool(
+            "mcp_local_host",
+            make_tool_descriptor("file_read", "mcp_local_host", ToolCategory::File),
+        );
+        reg.register_tool(
+            "builtin_tools",
+            make_tool_descriptor("file_read", "builtin_tools", ToolCategory::File),
+        );
+
+        // 缺省（无 workspace）= 非宿主主实例
+        let plain = reg.resolve_tool_instance("file_read", None).unwrap();
+        assert_eq!(plain.plugin_id, "builtin_tools");
+        // get_tool（主实例表）也不被宿主夺位
+        assert_eq!(
+            reg.get_tool("file_read").unwrap().plugin_id,
+            "builtin_tools"
+        );
+
+        // workspace 在领地内 → 宿主实例（绝对路径原样、大小写/分隔符归一）
+        for ws in ["D:\\myproject\\container_x", "d:/myproject/container_x"] {
+            let bound = reg.resolve_tool_instance("file_read", Some(ws)).unwrap();
+            assert_eq!(bound.plugin_id, "mcp_local_host", "ws={ws}");
+        }
+        // 领地外 → 云原生实例
+        let outside = reg
+            .resolve_tool_instance("file_read", Some("D:\\other"))
+            .unwrap();
+        assert_eq!(outside.plugin_id, "builtin_tools");
+    }
+
+    /// 宿主先注册、原生后注册：原生到位即接管主位（非宿主优先不受注册顺序
+    /// 影响）；前缀同串但非边界（D:\myproject2 vs D:\myproject）不误判属地。
+    #[test]
+    fn native_late_registration_takes_over_and_prefix_is_boundary_safe() {
+        let reg = CapabilityRegistryImpl::new();
+        register_host_tool(&reg, "mcp_local_host", vec!["D:\\myproject"]);
+        reg.register_tool(
+            "mcp_local_host",
+            make_tool_descriptor("bash_execute", "mcp_local_host", ToolCategory::File),
+        );
+        // 宿主先到、暂无主位竞争：缺省解析 = 宿主实例（唯一实例直返）
+        assert_eq!(
+            reg.resolve_tool_instance("bash_execute", None)
+                .unwrap()
+                .plugin_id,
+            "mcp_local_host"
+        );
+        reg.register_tool(
+            "bash_tool",
+            make_tool_descriptor("bash_execute", "bash_tool", ToolCategory::File),
+        );
+        // 原生到位接管主位
+        assert_eq!(
+            reg.resolve_tool_instance("bash_execute", None)
+                .unwrap()
+                .plugin_id,
+            "bash_tool"
+        );
+        // 前缀同串非边界：不命中领地
+        let sibling = reg
+            .resolve_tool_instance("bash_execute", Some("D:\\myproject2\\x"))
+            .unwrap();
+        assert_eq!(sibling.plugin_id, "bash_tool");
+    }
+
+    /// 非宿主主实例注销后从多实例表递补宿主实例（主位不悬空，反查不 miss）。
+    #[test]
+    fn unregister_native_reelects_host_instance() {
+        let reg = CapabilityRegistryImpl::new();
+        register_host_tool(&reg, "mcp_local_host", vec!["D:\\myproject"]);
+        reg.register_tool(
+            "mcp_local_host",
+            make_tool_descriptor("file_read", "mcp_local_host", ToolCategory::File),
+        );
+        reg.register_tool(
+            "builtin_tools",
+            make_tool_descriptor("file_read", "builtin_tools", ToolCategory::File),
+        );
+        reg.unregister_tools("builtin_tools");
+        let fallback = reg.get_tool("file_read").expect("主位应递补宿主实例");
+        assert_eq!(fallback.plugin_id, "mcp_local_host");
+    }
+
+    /// 单实例工具（无属地竞争）解析恒返回其自身——零部署差异既有行为。
+    #[test]
+    fn single_instance_tool_resolves_to_itself_regardless_of_workspace() {
+        let reg = CapabilityRegistryImpl::new();
+        register_host_tool(&reg, "mcp_local_host", vec!["D:\\myproject"]);
+        reg.register_tool(
+            "mcp_local_host",
+            make_tool_descriptor("memory", "mcp_local_host", ToolCategory::System),
+        );
+        for ws in [None, Some("C:\\Windows\\system32")] {
+            let td = reg.resolve_tool_instance("memory", ws).unwrap();
+            assert_eq!(td.plugin_id, "mcp_local_host");
+        }
+    }
+
+    /// workspace_within 归一与边界：根相等、子路径、大小写/斜杠归一、
+    /// 同串非边界、盘根形态。
+    #[test]
+    fn workspace_within_normalization_and_boundary() {
+        assert!(workspace_within("D:\\myproject", "D:\\myproject"));
+        assert!(workspace_within("D:\\myproject\\a\\b.txt", "D:\\myproject"));
+        assert!(workspace_within("d:/myproject/x", "D:\\MYPROJECT"));
+        assert!(!workspace_within("D:\\myproject2", "D:\\myproject"));
+        assert!(!workspace_within("D:\\other", "D:\\myproject"));
     }
 }

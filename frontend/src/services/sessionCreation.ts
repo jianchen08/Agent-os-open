@@ -8,6 +8,7 @@
  */
 import { createProject } from '@/services/api/tasks'
 import { reportError, ErrorSeverity, ErrorType } from '@/services/errorReporting'
+import { applyDefaultModeBinding } from '@/services/modeSessionBinder'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import type { SessionFormOptions } from '@/components/session/SessionEditModal'
 import type { Session } from '@/types'
@@ -58,6 +59,9 @@ export async function createSessionWithProject(
     agentId: agentId || undefined,
     fieldMetadata: options?.fieldMetadata,
   })
+  // 出生无显式模式选择 → default 声明模式补挂（M1 并入刀；fire-and-forget，
+  // registry 无 default/不可达零动作；错误面自含不阻断会话创建主体）
+  void applyDefaultModeBinding(created.id)
   await registerSessionProject(created.id, created.title || title || '', options, componentName)
   return created
 }

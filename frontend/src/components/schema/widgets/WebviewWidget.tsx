@@ -36,6 +36,8 @@ import {
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { buildWebviewThemeTokens } from '@/services/webviewThemeTokens'
 import { useNotificationStore } from '@/stores/notificationStore'
+import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
+import { useUIStore } from '@/stores/uiStore'
 import { usePersonaPossessStore } from '@/stores/personaPossessStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { getActiveSessionTheme, useSessionThemeStore } from '@/stores/sessionThemeStore'
@@ -70,12 +72,37 @@ export interface WebviewWidgetProps {
    * 卡未收到前呈折叠占位态（不伪造计数）。可选；通用 widget 不带此 prop。
    */
   injectMessage?: { content: string; metadata?: Record<string, unknown> | null }
+  /**
+   * 自适应高度（ADR 2026-10-14-message-card-body-form，通用容器能力）：
+   * 开启后容器高度由卡内页经上行 method "webview.resize" {height} 驱动
+   * （宿主 clamp 至 [WEBVIEW_MIN_HEIGHT, WEBVIEW_MAX_HEIGHT]px）；可选
+   * width 同桥回报容器宽（悬浮槽等 shrink-to-fit 容器需实宽，缺省不动宽）；
+   * 缺省关闭 = 既有 100% 填充形态零变化。
+   */
+  autoHeight?: boolean
+  /**
+   * 页面声明 CSP 扩展（白名单制）：原始形态任意，经 normalizeCspExtension
+   * fail-closed 归一（非法整包丢弃）；仅低危展示向 img-src 可扩展，高危向
+   * （script/connect/default）恒锁死——声明来源 = 插件自己的 manifest props，
+   * 可审计。缺省 = CSP_META 基线零变化。
+   */
+  csp?: unknown
+  /**
+   * 透明底声明（悬浮角标等叠加在宿主界面上的形态）：iframe 元素底色改透明，
+   * 插件页自带圆角/底色直接透出宿主——否则圆角四角外露 iframe 的 canvas
+   * 方形底（用户所见"圆角钮带方框背景"）。缺省 false = 既有 canvas 底零变化。
+   */
+  transparent?: boolean
 }
 
-/** 注入 iframe 的 bootstrap JS：暴露 window.agentos.postMessage 给插件 HTML。
- *  携带宿主下发的实例级令牌（__wv_token）——上行消息的身份凭据。
- *  同时预置 window.agentos.ctx（挂载时活跃会话）——后续变化靠宿主 ctx.sync 下行推。 */
-function bootstrapJs(instanceToken: string, sessionId: string | null): string {
+/**
+ * 注入 iframe 的 bootstrap JS：暴露 window.agentos.postMessage 给插件 HTML。
+ * 携带宿主下发的实例级令牌（__wv_token）——上行消息的身份凭据。
+ * 同时预置 window.agentos.ctx（挂载时活跃会话）——后续变化靠宿主 ctx.sync 下行推。
+ * 导出复用：ContentCardRenderer webview 卡体同款桥形态（content_cards 内联
+ * 内容沙箱）。
+ */
+export function bootstrapJs(instanceToken: string, sessionId: string | null): string {
   const token = JSON.stringify(instanceToken)
   const sid = JSON.stringify(sessionId ?? '')
   return `<script>
@@ -96,9 +123,76 @@ function bootstrapJs(instanceToken: string, sessionId: string | null): string {
 </script>`
 }
 
-/** 注入 iframe 的 CSP：限制脚本/样式来源，防御 XSS。 */
-const CSP_META =
+/** 注入 iframe 的 CSP：限制脚本/样式来源，防御 XSS。（content_cards webview 形态
+ *  卡消费同款 CSP——不可信内容沙箱预览的安全形态全仓单源） */
+export const CSP_META =
   '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\'; style-src \'unsafe-inline\'; img-src data:; connect-src \'none\';">'
+
+/**
+ * 页面声明可扩展的 CSP 面（白名单制，fail-closed）。
+ *
+ * 沙箱基座三类高危向（default-src / script-src / connect-src）**不开放扩展**——
+ * 脚本执行与外联通道是 webview 沙箱的存在意义；开放的是低危展示向 img-src：
+ * 图片加载不执行代码，声明落在插件自己的 manifest（contributes.pages[].props.csp），
+ * 可审计、随声明走。典型场景：插件页直连本机服务投屏（browser_tool 直播页签
+ * img → Bridge MJPEG，ADR 2026-10-21-browser-live-workspace-tab）。
+ */
+export interface WebviewCspExtension {
+  /** 追加放行的图片来源（origin 形态，如 "http://127.0.0.1:*"；normalizeCspExtension 校验后的产物形态） */
+  imgSrc?: string[]
+}
+
+/** 合法 img-src 源：http/https + 必有 host + 可选端口（数字或 `*` 通配）。 */
+const CSP_SOURCE_RE = /^https?:\/\/[A-Za-z0-9.-]+(?::(\d+|\*))?$/
+
+/**
+ * 归一化页面声明的 CSP 扩展：非法条目逐条丢弃（坏声明不崩渲染，renderIntent
+ * 同款 fail-closed 口径）；非数组 imgSrc 整字段丢弃。归一后按 CSP 语义去重。
+ */
+export function normalizeCspExtension(raw: unknown): WebviewCspExtension | null {
+  if (!raw || typeof raw !== 'object') return null
+  const imgSrc = (raw as Record<string, unknown>).imgSrc
+  if (!Array.isArray(imgSrc)) return null
+  const sources = new Set<string>()
+  for (const entry of imgSrc) {
+    if (typeof entry === 'string') {
+      const trimmed = entry.trim()
+      if (trimmed && CSP_SOURCE_RE.test(trimmed)) sources.add(trimmed)
+    }
+  }
+  return sources.size > 0 ? { imgSrc: [...sources] } : null
+}
+
+/**
+ * 由默认基线 + 可选扩展合成 CSP meta。扩展只落 img-src（normalizeCspExtension
+ * 已过滤形态），基线三类高危向恒锁死；无扩展时与 CSP_META 逐字节一致。
+ */
+export function buildCspMeta(ext?: WebviewCspExtension | null): string {
+  const imgSources = ext?.imgSrc?.length ? ` ${ext.imgSrc.join(' ')}` : ''
+  return (
+    `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; ` +
+    `script-src 'unsafe-inline'; style-src 'unsafe-inline'; ` +
+    `img-src data:${imgSources}; connect-src 'none';">`
+  )
+}
+
+/** 自适应高度夹取界（webview.resize 上行，autoHeight 实例专用） */
+export const WEBVIEW_MIN_HEIGHT = 24
+export const WEBVIEW_MAX_HEIGHT = 4000
+
+function clampWebviewHeight(raw: unknown): number | null {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return null
+  return Math.min(WEBVIEW_MAX_HEIGHT, Math.max(WEBVIEW_MIN_HEIGHT, Math.round(raw)))
+}
+
+/** 自适应宽度夹取界（webview.resize 上行可选 width，autoHeight 实例专用；
+ *  0 为合法值 = 卡内容自隐藏态） */
+export const WEBVIEW_MAX_WIDTH = 4000
+
+function clampWebviewWidth(raw: unknown): number | null {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return null
+  return Math.min(WEBVIEW_MAX_WIDTH, Math.max(0, Math.round(raw)))
+}
 
 /** 取数挂起判定窗：超窗即转显式超时错误态（可重试）。请求可能在浏览器连接
  *  队列或内核饱和中静默悬挂——axios timeout 只从网络层发起才计时，组件层是
@@ -111,9 +205,15 @@ const PENDING_TIMEOUT_MS = 30_000
  * 有 head → 两者注入 head 开标签后（bootstrap 先于 body 脚本解析，桥不缺位）；
  * 只有 html → 注入合成 head；无结构 HTML → 包一层（bootstrap 在 body 末）。
  * sessionId 为挂载时活跃会话（bootstrap ctx 预置）。
+ * cspExt：页面声明 CSP 扩展（img-src 白名单；fail-closed 归一后合成）。
  */
-function wrapHtml(html: string, instanceToken: string, sessionId: string | null): string {
-  const injected = `${CSP_META}${bootstrapJs(instanceToken, sessionId)}`
+function wrapHtml(
+  html: string,
+  instanceToken: string,
+  sessionId: string | null,
+  cspExt?: WebviewCspExtension | null,
+): string {
+  const injected = `${buildCspMeta(cspExt)}${bootstrapJs(instanceToken, sessionId)}`
   if (/<head[^>]*>/i.test(html)) {
     return html.replace(/<head[^>]*>/i, (m) => `${m}${injected}`)
   }
@@ -121,7 +221,7 @@ function wrapHtml(html: string, instanceToken: string, sessionId: string | null)
     return html.replace(/<html[^>]*>/i, (m) => `${m}<head>${injected}</head>`)
   }
   // 无结构 HTML：包一层
-  return `<!DOCTYPE html><html><head>${CSP_META}</head><body>${html}${bootstrapJs(instanceToken, sessionId)}</body></html>`
+  return `<!DOCTYPE html><html><head>${buildCspMeta(cspExt)}</head><body>${html}${bootstrapJs(instanceToken, sessionId)}</body></html>`
 }
 
 export function WebviewWidget({
@@ -130,13 +230,31 @@ export function WebviewWidget({
   widgetId,
   title,
   injectMessage,
+  autoHeight = false,
+  csp,
+  transparent = false,
 }: WebviewWidgetProps): React.ReactNode {
   const [html, setHtml] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   /** 取数代次：重试按钮自增，驱动 effect 重新发起请求 */
   const [attempt, setAttempt] = useState(0)
+  /** 自动重试：插件路由注册窗口期（内核（重）启动后插件 http 路由注册晚于面板
+   *  加载）的 404/route not found 属瞬态——退避自动重试至多 4 次后再停留终态；
+   *  其余错误不自动重试（终态 + 手动重试）。调度就地于取数 catch（依赖 error
+   *  状态链的 effect 会被重试加载态的 cleanup 取消断链），计数走 ref */
+  const autoRetriesRef = useRef(0)
+  /** 瞬态取数中（插件路由注册窗口期）：停留加载语义不落错误态 */
+  const [transientPending, setTransientPending] = useState(false)
+  /** 组件存活 ref：调度回调不得被上一轮取数 effect 的 cancelled 旗标挡杀 */
+  const mountedRef = useRef(true)
+  useEffect(() => () => { mountedRef.current = false }, [])
   /** webview 就绪信号（iframe load 或上行 __ready 先到者）：下行桥推送的门闩 */
   const [webviewReady, setWebviewReady] = useState(false)
+  /** 自适应高度（autoHeight 实例；webview.resize 上行驱动，缺省下界起步） */
+  const [autoHeightPx, setAutoHeightPx] = useState(WEBVIEW_MIN_HEIGHT)
+  /** 自适应宽度（autoHeight 实例可选位；webview.resize 上行 width 驱动，
+   *  null = 未回报保持 w-full——悬浮槽等 shrink-to-fit 容器需内容自报实宽） */
+  const [autoWidthPx, setAutoWidthPx] = useState<number | null>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
 
   // 实例级令牌（安全审查 B-4）：每次挂载生成，注入 iframe bootstrap，
@@ -155,6 +273,7 @@ export function WebviewWidget({
 
   // 下行桥订阅面（面板-宿主融合协议）：会话上下文 + 生效主题
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const activePipelineId = usePipelineMessageStore((s) => s.activePipelineId)
   const globalThemeConfig = useThemeStore((s) => s.themeConfig)
   const activePluginTheme = useThemeStore((s) => s.activePluginTheme)
   const sessionStacks = useSessionThemeStore((s) => s.stacks)
@@ -205,12 +324,15 @@ export function WebviewWidget({
         window.clearTimeout(timer)
         if (cancelled || timedOut) return
         setWebviewReady(false) // 新文档即将注入：等重新就绪后再恢复下行桥推送
+        setTransientPending(false)
         setHtml(
           wrapHtml(
             typeof res.data === 'string' ? res.data : String(res.data),
             instanceToken,
             // 挂载时活跃会话（bootstrap ctx 预置；后续变化靠 ctx.sync 推）
             useSessionStore.getState().activeSessionId,
+            // 页面声明 CSP 扩展（声明面 props，fail-closed 归一）
+            normalizeCspExtension(csp),
           ),
         )
       })
@@ -218,14 +340,34 @@ export function WebviewWidget({
         window.clearTimeout(timer)
         if (cancelled || timedOut) return
         // message 可能为空串（空串越过 ?? 兜底会 falsy 回加载态），按真值兜底
-        setError((e as Error).message || '加载插件 HTML 失败')
+        const msg = (e as Error).message || '加载插件 HTML 失败'
+        // 瞬态（404/route not found = 插件路由注册窗口期）→ 加载语义：停留
+        // 加载占位退避重取，不落错误态——路由不是缺失，是还没就绪（注册窗口
+        // 期应显示加载中，2026-10-15 用户架构裁定）。上限后才落终态。调度就地
+        // 于 catch（error 状态链 effect 会被加载态 cleanup 取消断链），计数走 ref
+        if (/404|route not found/i.test(msg)) {
+          if (autoRetriesRef.current < 4) {
+            const n = autoRetriesRef.current + 1
+            autoRetriesRef.current = n
+            setTransientPending(true)
+            setTimeout(() => {
+              if (mountedRef.current) setAttempt((x) => x + 1)
+            }, 1500 * n)
+          } else {
+            setTransientPending(false)
+            setError(msg)
+          }
+          return
+        }
+        setTransientPending(false)
+        setError(msg)
       })
     return () => {
       cancelled = true
       window.clearTimeout(timer)
       controller.abort()
     }
-  }, [endpoint, attempt])
+  }, [endpoint, attempt, csp])
 
   // 收 iframe 上行消息（校验 origin + 协议 + 实例令牌）→ 按 method 路由到后端
   // handler 在 window 上注册，不依赖 iframeRef 是否就绪（实际 sendDown 用 optional chaining）
@@ -250,6 +392,39 @@ export function WebviewWidget({
 
       try {
         let res: unknown
+        if (msg.method === 'webview.resize') {
+          // 自适应尺寸上行桥（ADR 2026-10-14-message-card-body-form，通用容器
+          // 能力非卡片专用）：autoHeight 实例按卡内页回报高度撑开容器（clamp
+          // 界内），可选 width 同桥回报容器宽——悬浮槽等 shrink-to-fit 容器里
+          // 100% 宽塌缩为 0，卡自报实宽才可见；未开启实例 fail-closed 回
+          // error（不静默忽略）。
+          if (!autoHeight) {
+            sendDown('error', { message: 'webview.resize 已丢弃：本实例未开启自适应高度' })
+            return
+          }
+          const height = clampWebviewHeight(
+            (msg.params as { height?: unknown } | null)?.height,
+          )
+          if (height === null) {
+            sendDown('error', { message: 'webview.resize 已丢弃：height 须为有限数值' })
+            return
+          }
+          // 可选 width：缺省不动容器宽（既有纯高度卡零变化）；在场须有限数值
+          const rawWidth = (msg.params as { width?: unknown } | null)?.width
+          let width: number | undefined
+          if (rawWidth !== undefined) {
+            const clampedWidth = clampWebviewWidth(rawWidth)
+            if (clampedWidth === null) {
+              sendDown('error', { message: 'webview.resize 已丢弃：width 须为有限数值' })
+              return
+            }
+            width = clampedWidth
+            setAutoWidthPx(clampedWidth)
+          }
+          setAutoHeightPx(height)
+          sendDown('result', { applied: true, height, ...(width !== undefined ? { width } : {}) })
+          return
+        }
         if (msg.method === 'theme.apply') {
           // 主题桥协议（模式体系 §5.0）：白名单宿主侧方法——载荷为结构化
           // ThemeConfig 档，按收到时的当前会话入 override 栈；schema 校验
@@ -265,6 +440,20 @@ export function WebviewWidget({
             return
           }
           sendDown('result', { applied: true })
+          return
+        }
+        if (msg.method === 'workspace.fullscreen') {
+          // 工作区全屏桥（白名单宿主侧方法）：插件页面进入游玩态时请求工作区
+          // 全屏（如酒馆玩法页「新开一局」/进局——玩法页独占工作区而非嵌在小
+          // 面板里）。载荷 {on?: boolean}：缺省/true=进入全屏，false=退出；
+          // 非 boolean 非法载荷整包丢弃（fail-closed）。纯宿主行为，不经内核。
+          const on = (msg.params as { on?: unknown } | null | undefined)?.on
+          if (on !== undefined && typeof on !== 'boolean') {
+            sendDown('error', { message: 'workspace.fullscreen 已丢弃：on 须为 boolean' })
+            return
+          }
+          useUIStore.getState().setWorkspaceFullscreen(on !== false)
+          sendDown('result', { applied: true, fullscreen: on !== false })
           return
         }
         if (msg.method === 'mode.possess') {
@@ -305,6 +494,9 @@ export function WebviewWidget({
           // 须在建立时告知。
           const possessedCard = usePersonaPossessStore.getState().possessed
           useNotificationStore.getState().addNotification({
+            // 附身档稳定 id（模式+卡）：同档重复上行（面板重载）同 id 去重，换卡/
+            // 换模式是另一条提示——不走正文指纹闸（按实体语义去重，见 store 契约）
+            id: `persona-possess:${possessedCard?.mode ?? ''}:${possessedCard?.card_id ?? ''}`,
             title: `已附身「${possessedCard?.name ?? ''}」`,
             message: '附身将接管人设，改变提示词前缀、破坏缓存命中（成本上升）。',
             priority: 'normal',
@@ -322,7 +514,8 @@ export function WebviewWidget({
           // 随建即跳转 + modeBinding 快照 + 扩展位 agent_id/extra_context/
           // first_message + D8 人设接管提示 + 面板页随开）。载荷 fail-closed：
           // mode 形态键必填，扩展位在场须非空（agent_id 在场须携 name），非法
-          // 整包丢弃（零状态变更）并回 error。
+          // 整包丢弃（零状态变更）并回 error；card_theme 档非法只丢该位（出生
+          // 零阻断）。回执带 theme_pinned 事实位（出生是否钉入卡主题）。
           const payload = parseModeSessionPayload(msg.params)
           if (!payload) {
             sendDown('error', {
@@ -342,9 +535,15 @@ export function WebviewWidget({
             title: payload.title,
             extraContext: payload.extraContext,
             firstMessage: payload.firstMessage,
+            pipelineConfigId: payload.pipelineConfigId,
+            cardTheme: payload.cardTheme,
             intoSessionId,
           })
-          sendDown('result', { applied: true, session_id: created.sessionId })
+          sendDown('result', {
+            applied: true,
+            session_id: created.sessionId,
+            theme_pinned: created.themePinned,
+          })
           return
         }
         if (msg.method.startsWith('/')) {
@@ -389,15 +588,17 @@ export function WebviewWidget({
     }
     window.addEventListener('message', handler)
     return () => window.removeEventListener('message', handler)
-  }, [widgetId, pluginId, instanceToken])
+  }, [widgetId, pluginId, instanceToken, autoHeight])
 
-  // 下行：latest 变化时推给 iframe
+  // 下行：latest 变化时推给 iframe；html 就绪时以当时值补推一次（宿主先
+  // 派发、iframe 后挂监听的窗口防丢——与 theme.sync「就绪后以当时值补推，
+  // 不丢终态」同口径）
   useEffect(() => {
-    if (!latest || !iframeRef.current?.contentWindow) return
+    if (!latest || !html || !iframeRef.current?.contentWindow) return
     const msg = buildWebviewMessage('widget.event', latest)
     // origin 用 '*' 是因为 sandbox iframe origin 是 'null'，需显式指定
     iframeRef.current.contentWindow.postMessage(msg, '*')
-  }, [latest])
+  }, [latest, html])
 
   // 下行桥 theme.sync（面板-宿主融合协议）：就绪时推当前生效主题的 token map，
   // 主题变化（全局切换/会话出入栈/插件皮肤）时重推；未就绪不推（__ready/load
@@ -412,14 +613,19 @@ export function WebviewWidget({
     )
   }, [webviewReady, effectiveTheme])
 
-  // 下行桥 ctx.sync：就绪时推当前活跃会话，会话切换时重推（无会话推空串）
+  // 下行桥 ctx.sync：就绪时推当前活跃会话与激活管道，会话/管道切换时重推
+  // （无会话推空串）。pipelineId 供插件页按管道精确取数（如待办角标拉
+  // /latest?pipeline_id=——后台多管道并行时"最近更新"不等于当前会话管道）
   useEffect(() => {
     if (!webviewReady) return
     iframeRef.current?.contentWindow?.postMessage(
-      buildWebviewMessage('ctx.sync', { sessionId: activeSessionId ?? '' }),
+      buildWebviewMessage('ctx.sync', {
+        sessionId: activeSessionId ?? '',
+        pipelineId: activePipelineId ?? '',
+      }),
       '*',
     )
-  }, [webviewReady, activeSessionId])
+  }, [webviewReady, activeSessionId, activePipelineId])
 
   // 下行桥 message.data（消息卡宿主桥）：就绪时按卡输入契约推送宿主消息数据
   // （content + metadata 含 compression_ref）。挂载即推一次；消息内容是不可变
@@ -439,7 +645,15 @@ export function WebviewWidget({
           <FileWarning className="mr-2 h-5 w-5" />
           Webview 加载失败: {error}
         </div>
-        <Button variant="outline" size="sm" onClick={() => setAttempt((n) => n + 1)}>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            autoRetriesRef.current = 0
+            setTransientPending(false)
+            setAttempt((n) => n + 1)
+          }}
+        >
           重试
         </Button>
       </div>
@@ -448,14 +662,25 @@ export function WebviewWidget({
 
   if (!html) {
     return (
-      <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
-        加载 Webview...
+      <div className="text-muted-foreground flex h-full flex-col items-center justify-center gap-1 text-sm">
+        <div>加载 Webview...</div>
+        {transientPending && <div className="text-xs">插件路由注册中…</div>}
       </div>
     )
   }
 
   return (
-    <div className="relative h-full w-full">
+    <div
+      className={autoHeight ? 'relative w-full' : 'relative h-full w-full'}
+      style={
+        autoHeight
+          ? {
+              height: `${autoHeightPx}px`,
+              ...(autoWidthPx !== null ? { width: `${autoWidthPx}px` } : {}),
+            }
+          : undefined
+      }
+    >
       <iframe
         ref={iframeRef}
         srcDoc={html}
@@ -463,7 +688,9 @@ export function WebviewWidget({
         // 关键安全：不开 allow-same-origin → iframe 独立 opaque origin，无法访问宿主 token
         sandbox="allow-scripts allow-forms allow-popups allow-modals"
         onLoad={() => setWebviewReady(true)}
-        className="absolute inset-0 border-0 bg-[var(--web-canvas)]"
+        // transparent 声明（悬浮叠加形态）改透明底：插件页自带圆角透出宿主，
+        // 缺省 canvas 底（全页面形态需要不透明画布）
+        className={`absolute inset-0 border-0 ${transparent ? 'bg-transparent' : 'bg-[var(--web-canvas)]'}`}
         style={{ width: '100%', height: '100%' }}
       />
     </div>

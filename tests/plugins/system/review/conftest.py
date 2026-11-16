@@ -12,7 +12,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system" / "review"
+_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "review"
 
 _PLUGIN_SOURCE_DIRS = [str(_PLUGIN_DIR)]
 

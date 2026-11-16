@@ -69,7 +69,7 @@ const TabsList = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivEl
       )}
       style={{
         borderRadius: 'var(--tabs-radius, 0.5rem)',
-        backgroundColor: 'var(--tabs-list-bg, rgba(255, 255, 255, 0.05))',
+        backgroundColor: 'var(--tabs-list-bg)',
       }}
       {...props}
     />
@@ -99,11 +99,11 @@ const TabsTrigger = React.forwardRef<HTMLButtonElement, TabsTriggerProps>(
         )}
         style={{
           borderRadius: 'var(--tabs-radius, 0.5rem)',
-          backgroundColor: isSelected ? 'var(--tabs-active-bg, #1e293b)' : 'transparent',
+          backgroundColor: isSelected ? 'var(--tabs-active-bg)' : 'transparent',
           color: isSelected
-            ? 'var(--tabs-active-text, #f8fafc)'
-            : 'var(--tabs-inactive-text, #94a3b8)',
-          boxShadow: isSelected ? 'var(--btn-shadow, 0 2px 4px rgba(0,0,0,0.1))' : 'none',
+            ? 'var(--tabs-active-text)'
+            : 'var(--tabs-inactive-text)',
+          boxShadow: isSelected ? 'var(--shadow-sm)' : 'none',
         }}
         onClick={() => onValueChange(value)}
         {...props}

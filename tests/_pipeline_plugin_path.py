@@ -1,8 +1,9 @@
-"""把 pipeline 插件目录加入 sys.path（供引用 plugins.input/output/core 的测试复用）。
+"""把插件源目录加入 sys.path（供引用平铺插件的测试复用）。
 
-0.2 架构下 pipeline 插件位于 plugins/shared/pipeline/{input,output,core}/<name>/，
-插件内部用平铺 import（from plugin import X）。本模块把指定插件的源目录
-加入 sys.path，使 `from plugin import X` 可解析。
+0.2 拍平布局（ADR 2026-10-13-plugin-flat-layout）下插件位于
+plugins/shared/<name>/，插件内部用平铺 import（from plugin import X）。
+本模块把指定插件的源目录加入 sys.path，使 ``from plugin import X`` 可解析；
+plugins/shared/ 本体同时入 path（_libs、state_fields 等平铺共享模块）。
 """
 
 from __future__ import annotations
@@ -12,29 +13,27 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
-_PIPELINE_DIR = _SHARED_DIR / "pipeline"
 
 # 已加入的目录（防重复）
 _added: set[str] = set()
 
-# pipeline 兼容 shim（from pipeline.plugin/types import）需要 plugins/shared/ 作为 namespace 包
+# 共享根入 path：_libs.pipeline_base / state_fields 等平铺模块的解析锚
 if str(_SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(_SHARED_DIR))
 _added.add(str(_SHARED_DIR))
 
 
-def add_plugin_dir(category: str, name: str) -> None:
-    """把 plugins/shared/pipeline/<category>/<name>/ 加入 sys.path。
+def add_plugin_dir(name: str) -> None:
+    """把 plugins/shared/<name>/ 加入 sys.path。
 
     多个插件目录都有 plugin.py 等同名模块，先入的会被 sys.modules 缓存，
     导致后导入的 ``from plugin import X`` 命中错误模块。故每次调用都把目标
     目录置于 sys.path 最前，并逐出已缓存的同名裸模块。
 
     Args:
-        category: "input" | "output" | "core"
         name: 插件目录名（如 "agent_config_load"、"track"、"security_check"）
     """
-    d = str(_PIPELINE_DIR / category / name)
+    d = str(_SHARED_DIR / name)
     # 总是把目标目录置于 sys.path 最前（即使已存在，也要确保它在 position 0，
     # 否则先收集测试插入的其它插件目录会抢走裸名解析）。
     if d in sys.path:
@@ -48,9 +47,9 @@ def add_plugin_dir(category: str, name: str) -> None:
     # sys.modules，本插件 plugin.py 的 `from service import` 需重解析到
     # 本目录（含 service.py 的插件：security_check 等）。
     # 例外 "types"：与 stdlib 同名——无差别逐出后，目标目录无 types.py 时
-    # 重解析沿 sys.path 命中 plugins/shared/pipeline/types.py（顶层相对导入
-    # 必炸的劫持源）。目标目录自带平铺 types.py 才逐出重解析，否则钉死
-    # stdlib 本体（tests/_stdlib_guard 防线）。
+    # 重解析沿 sys.path 命中共享根平铺 types.py（顶层相对导入必炸的劫持源）。
+    # 目标目录自带平铺 types.py 才逐出重解析，否则钉死 stdlib 本体
+    # （tests/_stdlib_guard 防线）。
     for m in ("plugin", "tool", "models", "service", "storage", "policy",
               "sensitive_paths", "interfaces", "isolation_level", "workspace"):
         sys.modules.pop(m, None)

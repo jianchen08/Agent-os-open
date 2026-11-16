@@ -1,8 +1,11 @@
 """MCP Bridge 网关——HTTP 入口与路由。
 
-POST /mcp/{upstream}   转发 JSON-RPC（initialize / tools/list / tools/call）
-GET  /health           存活探针（无鉴权）
-认证/白名单/审计见 policy.py；上游子进程管理见 upstream.py。
+POST /mcp/{upstream}          转发 JSON-RPC（initialize / tools/list / tools/call）
+GET  /browser/live-ticket     直播换票（Bearer 鉴权；一次性短时票）
+GET  /browser/live.mjpeg      直播投屏（票鉴权；CDP screencast → MJPEG 长流）
+GET  /health                  存活探针（无鉴权）
+认证/白名单/审计见 policy.py；上游子进程管理见 upstream.py；
+持久浏览器运行时（直播画面来源）见 browser_runtime.py。
 
 配置来源：AGENTOS_BRIDGE_CONFIG 或 config/bridge/bridge.yaml（仓库布局推导）。
 会话 key 来自请求头 X-Bridge-Session（沙箱内客户端用 session_id，跨会话
@@ -20,7 +23,9 @@ import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
+from browser_runtime import BrowserLiveError, BrowserRuntime
 from policy import BridgePolicy, PolicyError
 from upstream import UpstreamError, UpstreamManager
 
@@ -57,6 +62,10 @@ class BridgeApp:
         self.policy = policy or BridgePolicy.from_config(config)
         idle = float(config.get("session_idle_timeout_secs", 300))
         self.manager = manager or UpstreamManager(idle_timeout_secs=idle)
+        # 持久浏览器运行时（config browser 段缺省 = 关闭，MCP 代理面不受影响）。
+        self.live = BrowserRuntime(
+            config.get("browser") or {}, bridge_port=int(config.get("port", 8765))
+        )
         # (upstream, session) → 已与上游完成 initialize 握手。
         self._handshaken: set[tuple[str, str]] = set()
         self._handshake_lock = threading.Lock()
@@ -114,6 +123,9 @@ class BridgeApp:
                 tool = str(params.get("name", ""))
                 self.policy.check_tool(upstream, params)
             result = session.request(method, params if params else None)
+            if method == "tools/call":
+                args = (params.get("arguments") or {}) if isinstance(params.get("arguments"), dict) else {}
+                self.live.note_activity(upstream, session_key, tool, args)
             body_out = {"result": result}
         except PolicyError as e:
             code, body_out, decision, reason = e.http_status, {"error": str(e)}, "deny", str(e)
@@ -137,6 +149,39 @@ class BridgeApp:
             "clientInfo": {"name": "mcp-bridge", "version": "0.1.0"},
         })
         session.notify("notifications/initialized")
+
+    def handle_live_ticket(self, auth_header: str | None, session_key: str) -> tuple[int, dict]:
+        """处理 GET /browser/live-ticket（Bearer 鉴权，签发一次性投屏票）。"""
+        try:
+            self.policy.check_auth(auth_header)
+        except PolicyError as e:
+            return e.http_status, {"error": str(e)}
+        if not self.live.enabled:
+            return 404, {"error": "浏览器运行时未启用（配置 browser 段）"}
+        try:
+            return 200, self.live.open_ticket(session_key)
+        except BrowserLiveError as e:
+            return e.http_status, {"error": str(e)}
+
+    def consume_live_ticket(self, path: str) -> tuple[bool, str]:
+        """校验 /browser/live.mjpeg?ticket= 的票。返回 (ok, 错误信息)。"""
+        if not self.live.enabled:
+            return False, "浏览器运行时未启用（配置 browser 段）"
+        ticket = (parse_qs(urlparse(path).query).get("ticket") or [""])[0]
+        if not ticket or not self.live.consume_ticket(ticket):
+            return False, "直播票无效或已过期（请重新换票）"
+        return True, ""
+
+    def start_browser_background(self) -> None:
+        """后台拉起持久浏览器（fail-soft：失败仅打日志，MCP 面自会 502 可见）。"""
+
+        def _start() -> None:
+            try:
+                self.live.ensure_started()
+            except BrowserLiveError as e:
+                print(f"[mcp-bridge] 浏览器运行时启动失败（直播与工具面将不可用）: {e}", flush=True)
+
+        threading.Thread(target=_start, daemon=True).start()
 
     def sweep(self) -> list[tuple[str, str]]:
         """回收空闲会话并清握手簿记（sweep 线程周期调用）。"""
@@ -171,8 +216,37 @@ def make_handler(app: BridgeApp):
         def do_GET(self) -> None:
             if self.path == "/health":
                 self._send(200, {"status": "ok", "sessions": app.manager.session_count()})
-            else:
-                self._send(404, {"error": "not found"})
+                return
+            if self.path.split("?")[0] == "/browser/live-ticket":
+                session_key = (self.headers.get("X-Bridge-Session") or "").strip() or "default"
+                code, payload = app.handle_live_ticket(self.headers.get("Authorization"), session_key)
+                self._send(code, payload)
+                return
+            if self.path.split("?")[0] == "/browser/live.mjpeg":
+                self._handle_live_mjpeg()
+                return
+            self._send(404, {"error": "not found"})
+
+        def _handle_live_mjpeg(self) -> None:
+            """MJPEG 长流：票校验后阻塞转发 CDP screencast（票一次性，流断重换）。"""
+            ok, reason = app.consume_live_ticket(self.path)
+            if not ok:
+                self._send(403, {"error": reason})
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Cache-Control", "no-cache, no-store")
+            self.end_headers()
+            try:
+                app.live.stream_mjpeg(self.wfile)
+            except BrowserLiveError as e:
+                # 流中途失败：补一段错误 JSON 收尾（客户端 img onerror 触发重连换票）。
+                try:
+                    self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+                except OSError:
+                    pass
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass  # 客户端断开（关页签/刷新），正常结束
 
         def do_POST(self) -> None:
             parts = self.path.strip("/").split("/")
@@ -206,7 +280,7 @@ def make_server(config: dict | None = None, config_path: str | None = None) -> T
 
 
 def serve() -> None:
-    """启动网关（阻塞）。sweep 线程周期回收空闲会话。"""
+    """启动网关（阻塞）。sweep 线程周期回收空闲会话；浏览器后台拉起。"""
     config = load_config()
     app = BridgeApp(config)
     sweep_secs = max(15.0, float(config.get("session_idle_timeout_secs", 300)) / 4)
@@ -217,6 +291,8 @@ def serve() -> None:
             app.sweep()
 
     threading.Thread(target=_sweep, daemon=True).start()
+    if app.live.enabled:
+        app.start_browser_background()
     bind = str(config.get("bind", "127.0.0.1"))
     port = int(config.get("port", 8765))
     server = ThreadingHTTPServer((bind, port), make_handler(app))
@@ -225,6 +301,7 @@ def serve() -> None:
         server.serve_forever()
     finally:
         app.manager.shutdown_all()
+        app.live.shutdown()
 
 
 if __name__ == "__main__":

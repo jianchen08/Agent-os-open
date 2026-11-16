@@ -1,0 +1,26 @@
+# 文风标准档·冷硬极简（C1 整合刀 2026-10-13）——档位结构契约同 concrete_plain.yaml
+#   （id/name/traits/authors/sample_note 五字段，缺一不可；schema 校验见
+#   modes/tests/test_roleplay_style_profiles.py）
+# 考据来源（整合对照，措辞原创）：wbu-craft-control-sliders（MIT，可改编）、
+# spiderweb-zh-bagu-style-crafts（对照，作家锚）、bartender-zh-style-library
+# （对照）、nemo-atelier-style-library（对照）。雷蒙德·卡佛为整合补充锚点
+# （极简主义代表作家名，事实性引用）。
+# 播种自包含：本目录数据不 import 共享根模块，C2 按 yaml 逐文件读取。
+id: hard_minimal
+name: 冷硬极简档
+traits:
+  - 短句直陈，动词驱动，能删的字全删
+  - 零心理描写：情绪全靠动作、停顿、物件承接
+  - 对话短促，各说各的，不解释不补充
+  - 比喻配额极低，出现必须是重击
+  - 关键转折用一句长句收束，其余全短
+  - 场景只拍可见物，像镜头一样不含评价
+  - 结尾收在事实上，不留抒情余韵
+authors:
+  - 海明威
+  - 雷蒙德·卡佛
+sample_note: >-
+  句子砍到骨头：主语、动词、宾语，能删的字全删。对话短兵相接，谁也不解释自己，
+  情绪一个字不提，全在停顿和动作里。节奏靠短句堆积，关键处突然一记长句收束。
+  禁止形容堆叠与心理独白，画面像镜头一样只拍可见的东西——冷，但每一刀都落在
+  实处。

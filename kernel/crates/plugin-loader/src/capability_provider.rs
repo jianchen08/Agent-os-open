@@ -51,15 +51,23 @@ pub trait CapabilityBridge: Send + Sync {
     ) -> Result<Value, McpError>;
 }
 
+/// 校验门禁名单查询（G2 注册门禁全能力面通用化）：返回当前处于校验未完成
+/// （verify_incomplete）/ 校验失败终态（verify_failed）的插件 id 集（契约账本
+/// 现值）。生产装配读 `ContractLedger::verify_pending_plugin_ids()`——复验通过
+/// （账本 ok）即自动移出，调用方实时读现值，无独立状态机。
+pub type VerificationGateLookup = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+
 /// 一个由 plugin manifest provides 声明注册的 capability handler。
 ///
-/// 持有 manifest 元数据 + 可选的桥接对象。无 bridge 时返回 NotBridged 错误
-/// （明确的"未桥接"提示）；有 bridge 时转发调用并返回结果。
+/// 持有 manifest 元数据 + 可选的桥接对象 + 可选的校验门禁名单查询。无 bridge 时
+/// 返回 NotBridged 错误（明确的"未桥接"提示）；有 bridge 时转发调用并返回结果；
+/// 门禁名单命中本插件时整插件拒绝（校验没通过 = 整个插件不许上岗）。
 pub struct ProvidedCapabilityHandler {
     namespace: String,
     methods: Vec<String>,
     plugin_id: String,
     bridge: Option<Arc<dyn CapabilityBridge>>,
+    verify_gate: Option<VerificationGateLookup>,
 }
 
 impl ProvidedCapabilityHandler {
@@ -69,12 +77,20 @@ impl ProvidedCapabilityHandler {
             methods: capability.methods.clone(),
             plugin_id,
             bridge: None,
+            verify_gate: None,
         }
     }
 
     /// 注入桥接对象，让 handler 能转发调用到真实实现方。
     pub fn with_bridge(mut self, bridge: Arc<dyn CapabilityBridge>) -> Self {
         self.bridge = Some(bridge);
+        self
+    }
+
+    /// 注入校验门禁名单查询（G2 注册门禁全能力面通用化）：名单命中本插件时
+    /// capability 调用一律拒绝，与 LLM 工具面遮挡同源同语义（同一账本现值）。
+    pub fn with_verification_gate(mut self, gate: VerificationGateLookup) -> Self {
+        self.verify_gate = Some(gate);
         self
     }
 }
@@ -86,6 +102,21 @@ impl CapabilityHandler for ProvidedCapabilityHandler {
     }
 
     async fn handle(&self, method: &str, params: Value) -> Result<Value, McpError> {
+        // G2 注册门禁（全能力面通用化，用户裁定 2026-10-26）：校验未通过 =
+        // 整个插件不许上岗——本插件提供的全部 capability 一并拒绝（先于
+        // method 白名单），与 LLM 工具面遮挡同源（同一账本现值查询）：
+        // 复验通过（账本 ok）自动放行，无需重启。
+        if let Some(gate) = &self.verify_gate {
+            if gate().iter().any(|id| id == &self.plugin_id) {
+                return Err(McpError::Protocol {
+                    message: format!(
+                        "capability {}.{} 调用被拦截：插件 {} 校验未完成或校验失败（G2 注册门禁），\
+                         已拦截；复验通过后自动恢复",
+                        self.namespace, method, self.plugin_id
+                    ),
+                });
+            }
+        }
         // method 白名单校验（manifest 声明了哪些 method 就只接受哪些）
         if !self.methods.iter().any(|m| m == method) {
             return Err(McpError::Protocol {
@@ -118,12 +149,16 @@ impl CapabilityHandler for ProvidedCapabilityHandler {
 /// `bridge` 为 Some 时，所有注册的 handler 共享这个桥接对象（转发到真实实现方）；
 /// 为 None 时 handler 返回 NotBridged（测试/过渡期）。
 ///
+/// `verify_gate` 为 Some 时，所有注册的 handler 共享校验门禁名单查询（G2 注册
+/// 门禁全能力面通用化）：名单内插件的 capability 调用一律拒绝，复验通过自动放行。
+///
 /// 同一 namespace 被多个插件声明时，后注册者覆盖前者（`CapabilityHandlerRegistry`
 /// 的热替换语义）。调用方如需确定性优先级，应按 plugin priority 排序后再传入。
 pub fn register_provided_capabilities(
     registry: &CapabilityHandlerRegistry,
     manifests: &[PluginManifest],
     bridge: Option<Arc<dyn CapabilityBridge>>,
+    verify_gate: Option<VerificationGateLookup>,
 ) -> usize {
     let mut count = 0;
     for manifest in manifests {
@@ -134,6 +169,9 @@ pub fn register_provided_capabilities(
             let mut handler = ProvidedCapabilityHandler::new(manifest.id.clone(), cap);
             if let Some(b) = &bridge {
                 handler = handler.with_bridge(Arc::clone(b));
+            }
+            if let Some(gate) = &verify_gate {
+                handler = handler.with_verification_gate(Arc::clone(gate));
             }
             registry.register(Arc::new(handler));
             tracing::info!(
@@ -278,7 +316,6 @@ mod tests {
             description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::System,
-            pipeline_role: None,
             language: "python".to_string(),
             host_type: HostType::Sidecar,
             host_group: None,
@@ -290,7 +327,6 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            granted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -323,7 +359,7 @@ mod tests {
             }),
         )];
 
-        let count = register_provided_capabilities(&registry, &manifests, None);
+        let count = register_provided_capabilities(&registry, &manifests, None, None);
         assert_eq!(count, 1);
         assert!(registry.has_namespace("human-interaction"));
         assert!(registry
@@ -350,7 +386,7 @@ mod tests {
             ),
         ];
 
-        let count = register_provided_capabilities(&registry, &manifests, None);
+        let count = register_provided_capabilities(&registry, &manifests, None, None);
         assert_eq!(count, 1, "只注册有 provides 的插件");
         assert!(!registry.has_namespace("no_provides_plugin"));
     }
@@ -372,7 +408,7 @@ mod tests {
                 }],
             }),
         )];
-        register_provided_capabilities(&registry, &manifests, None);
+        register_provided_capabilities(&registry, &manifests, None, None);
 
         let err = registry.route("ns1", "do_something", json!({})).await;
         assert!(err.is_err());
@@ -399,7 +435,7 @@ mod tests {
                 }],
             }),
         )];
-        register_provided_capabilities(&registry, &manifests, None);
+        register_provided_capabilities(&registry, &manifests, None, None);
 
         let err = registry.route("ns1", "create_choice", json!({})).await;
         assert!(err.is_err(), "无 bridge 时应返回 NotBridged 错误");
@@ -455,7 +491,7 @@ mod tests {
                 }],
             }),
         )];
-        register_provided_capabilities(&registry, &manifests, Some(bridge.clone()));
+        register_provided_capabilities(&registry, &manifests, Some(bridge.clone()), None);
 
         let result = registry
             .route(
@@ -496,7 +532,7 @@ mod tests {
                 }],
             }),
         )];
-        register_provided_capabilities(&registry, &manifests, Some(bridge.clone()));
+        register_provided_capabilities(&registry, &manifests, Some(bridge.clone()), None);
 
         let err = registry.route("ns1", "forbidden", json!({})).await;
         assert!(err.is_err(), "未声明 method 应被拦截");
@@ -523,7 +559,7 @@ mod tests {
                 }],
             }),
         )];
-        register_provided_capabilities(&registry, &manifests, None);
+        register_provided_capabilities(&registry, &manifests, None, None);
 
         let router: Arc<dyn CapabilityRouter> = registry;
         let ns = router.known_namespaces();
@@ -955,9 +991,112 @@ mod tests {
 
         // bridge 在场：bridged 分支求值 + 两个 capability 都登记
         let count =
-            register_provided_capabilities(&registry, &manifests, Some(Arc::new(NoopBridge)));
+            register_provided_capabilities(&registry, &manifests, Some(Arc::new(NoopBridge)), None);
         assert_eq!(count, 2, "同一 manifest 的两个 capability 均计入");
         assert!(registry.has_namespace("ns-a"));
         assert!(registry.has_namespace("ns-b"));
+    }
+
+    // ── G2 注册门禁全能力面通用化：provides.capabilities 动态 handler 同源拦截 ──
+    // 契约：账本 verify_incomplete/verify_failed（名单现值）内插件提供的
+    // capability 一并拒绝（用户裁定 2026-10-26：校验没通过 = 整个插件不许上岗）；
+    // 拒绝带明确原因、不得到达 bridge；复验通过（账本 ok）自动放行。
+
+    /// ns1/do 单 capability manifest（门禁用例共用）。
+    fn gate_test_manifest(id: &str) -> PluginManifest {
+        make_manifest(
+            id,
+            Some(ProvidesCapabilities {
+                capabilities: vec![ProvidedCapability {
+                    protocol_roles: Vec::new(),
+                    namespace: "ns1".to_string(),
+                    methods: vec!["do".to_string()],
+                    host: ProvidedCapabilityHost::Sidecar,
+                    tool_prefix: None,
+                }],
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn provided_capability_blocked_for_verify_pending_plugin() {
+        let bridge = Arc::new(CapturingBridge {
+            received: parking_lot::Mutex::new(vec![]),
+            return_value: json!({}),
+        });
+        let registry = CapabilityHandlerRegistry::new();
+        let manifests = vec![gate_test_manifest("p1")];
+        register_provided_capabilities(
+            &registry,
+            &manifests,
+            Some(bridge.clone()),
+            Some(Arc::new(|| vec!["p1".to_string()])),
+        );
+
+        let err = registry
+            .route("ns1", "do", json!({}))
+            .await
+            .expect_err("校验未通过插件的 capability 必须被拒");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("校验未完成或校验失败") && msg.contains("已拦截"),
+            "拒绝必须带明确原因（校验未完成/校验失败，已拦截）: {msg}"
+        );
+        assert!(msg.contains("p1"), "原因要点名插件: {msg}");
+        assert!(
+            bridge.received.lock().is_empty(),
+            "被拦调用不得到达 bridge/sidecar"
+        );
+    }
+
+    #[tokio::test]
+    async fn provided_capability_reopens_after_ledger_ok() {
+        // 转正：复验通过（账本 ok，名单清除）后同一调用自动放行，无需重启。
+        let pending = Arc::new(parking_lot::Mutex::new(vec!["p1".to_string()]));
+        let bridge = Arc::new(CapturingBridge {
+            received: parking_lot::Mutex::new(vec![]),
+            return_value: json!({"done": true}),
+        });
+        let registry = CapabilityHandlerRegistry::new();
+        let manifests = vec![gate_test_manifest("p1")];
+        let pending_for_gate = pending.clone();
+        register_provided_capabilities(
+            &registry,
+            &manifests,
+            Some(bridge.clone()),
+            Some(Arc::new(move || pending_for_gate.lock().clone())),
+        );
+
+        let err = registry
+            .route("ns1", "do", json!({}))
+            .await
+            .expect_err("待复验期间必须被拒");
+        assert!(format!("{err}").contains("已拦截"));
+
+        pending.lock().clear();
+        let ok = registry.route("ns1", "do", json!({})).await.unwrap();
+        assert_eq!(ok["done"], true, "账本 ok 后 capability 自动放行");
+        assert_eq!(bridge.received.lock().len(), 1, "放行后真实到达 bridge");
+    }
+
+    #[tokio::test]
+    async fn provided_capability_unaffected_for_healthy_plugin() {
+        // 区分度：名单只含他插件时，健康插件的 capability 照常转发。
+        let bridge = Arc::new(CapturingBridge {
+            received: parking_lot::Mutex::new(vec![]),
+            return_value: json!({"done": true}),
+        });
+        let registry = CapabilityHandlerRegistry::new();
+        let manifests = vec![gate_test_manifest("healthy")];
+        register_provided_capabilities(
+            &registry,
+            &manifests,
+            Some(bridge.clone()),
+            Some(Arc::new(|| vec!["some_other_plugin".to_string()])),
+        );
+
+        let ok = registry.route("ns1", "do", json!({})).await.unwrap();
+        assert_eq!(ok["done"], true, "健康插件不受名单影响");
+        assert_eq!(bridge.received.lock().len(), 1);
     }
 }

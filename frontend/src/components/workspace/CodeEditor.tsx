@@ -1,14 +1,24 @@
 /** 代码编辑器组件 在工作区面板中提供带语法高亮的代码编辑功能。 */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
-import { Save, AlertTriangle, FileText, Eye, Pencil, RefreshCw, Quote } from '@/assets/icons'
+import { Save, AlertTriangle, FileText, Eye, Pencil, RefreshCw, Loader2 } from '@/assets/icons'
+import { CitationFloatBar } from '@/components/chat/CitationFloatBar'
 import { codeHighlightStyle } from '@/components/shared/markdown/codeHighlightStyle'
+import {
+  extractExtension,
+  getLanguageForFileName,
+  PrismSyntaxHighlighter,
+} from '@/components/shared/markdown/prismLanguages'
 import { cn } from '@/lib/utils'
+import { markdownLinkInterceptor } from '@/services/fileLoaderRegistry'
+import { EDITABLE_FILE_MAX_BYTES as LARGE_FILE_THRESHOLD } from '@/services/fileOpener'
+import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useChatInputStore } from '@/stores/chatInputStore'
 import { subscribeFileChange, unsubscribeFileChange } from '@/stores/fileEditorRegistry'
+import { useSessionStore } from '@/stores/sessionStore'
+import { classifyCitationKind } from '@/utils/citationKind'
+import { formatFileSize } from '@/utils/format'
 import { LobeChatMarkdown } from '../chat/LobeChatMarkdown'
-import { markdownLinkInterceptor } from '@/services/fileLoaderRegistry'
 
 /** md 预览内 /uploads 附件链接拦截（改走加载器，防整窗导航死页） */
 const attachmentLinkInterceptor = markdownLinkInterceptor()
@@ -29,9 +39,6 @@ const MARKDOWN_EXTENSIONS = new Set(['.md', '.markdown'])
  */
 const HIGHLIGHTER_LINE_PROPS = { style: { whiteSpace: 'pre-wrap', display: 'block' } } as const
 
-/** 大文件阈值（1MB） */
-const LARGE_FILE_THRESHOLD = 1_000_000
-
 /** 可编辑的文件扩展名集合 */
 const EDITABLE_EXTENSIONS = new Set([
   '.py', '.js', '.jsx', '.ts', '.tsx', '.json', '.yaml', '.yml', '.toml',
@@ -43,74 +50,7 @@ const EDITABLE_EXTENSIONS = new Set([
   '.proto', '.cmake', '.gradle', '.txt', '.md', '.markdown',
 ])
 
-/** 文件扩展名 → Prism 语言映射 */
-const EXTENSION_TO_LANGUAGE: Record<string, string> = {
-  '.py': 'python',
-  '.js': 'javascript',
-  '.jsx': 'jsx',
-  '.ts': 'typescript',
-  '.tsx': 'tsx',
-  '.json': 'json',
-  '.yaml': 'yaml',
-  '.yml': 'yaml',
-  '.toml': 'toml',
-  '.xml': 'xml',
-  '.html': 'html',
-  '.htm': 'html',
-  '.css': 'css',
-  '.scss': 'scss',
-  '.less': 'less',
-  '.vue': 'html',
-  '.svelte': 'html',
-  '.rs': 'rust',
-  '.go': 'go',
-  '.java': 'java',
-  '.kt': 'kotlin',
-  '.c': 'c',
-  '.cpp': 'cpp',
-  '.h': 'c',
-  '.hpp': 'cpp',
-  '.cs': 'csharp',
-  '.rb': 'ruby',
-  '.php': 'php',
-  '.swift': 'swift',
-  '.sh': 'bash',
-  '.bash': 'bash',
-  '.bat': 'batch',
-  '.ps1': 'powershell',
-  '.sql': 'sql',
-  '.r': 'r',
-  '.lua': 'lua',
-  '.pl': 'perl',
-  '.dart': 'dart',
-  '.zig': 'zig',
-  '.ini': 'ini',
-  '.cfg': 'ini',
-  '.conf': 'ini',
-  '.env': 'bash',
-  '.properties': 'properties',
-  '.log': 'text',
-  '.csv': 'text',
-  '.tsv': 'text',
-  '.graphql': 'graphql',
-  '.gql': 'graphql',
-  '.proto': 'protobuf',
-  '.cmake': 'cmake',
-  '.gradle': 'groovy',
-  '.txt': 'text',
-  '.md': 'markdown',
-  '.markdown': 'markdown',
-  '.svg': 'xml',
-  '.gitignore': 'text',
-  '.dockerignore': 'text',
-  '.editorconfig': 'ini',
-  '.eslintrc': 'json',
-  '.prettierrc': 'json',
-  '.dockerfile': 'docker',
-  '.makefile': 'makefile',
-  '.map': 'json',
-  '.lock': 'text',
-}
+/** 文件扩展名 → Prism 语言映射与扩展名提取：与 FilePreview 共用真值源（prismLanguages） */
 
 /** 自动刷新配置 */
 export interface AutoRefreshConfig {
@@ -128,6 +68,10 @@ export interface CodeEditorProps {
   content: string
   /** 文件大小（字节） */
   size?: number
+  /** 已加载字节位（undefined=全量；按需加载分页推进） */
+  loadedBytes?: number
+  /** 加载更多回调（返回追加后是否仍有未加载内容）；无分页数据时不出现加载条 */
+  onLoadMore?: (loadAll: boolean) => Promise<boolean>
   /** 保存回调 */
   onSave: (content: string) => Promise<boolean>
   /** 是否只读模式 */
@@ -141,18 +85,9 @@ export interface CodeEditorProps {
 }
 
 // ────────────────────────────────────────────
-// 选中引用浮动按钮：辅助工具
+// 选中引用浮动条：辅助工具（浮条 UI=共通组件 components/chat/CitationFloatBar，
+// R4 件③上移；本文件只保留选区检测/行号回算/内容组装等容器侧逻辑）
 // ────────────────────────────────────────────
-
-/** 浮动「引用」按钮样式（一次性注入到 document.head） */
-let _floatingQuoteStyleInjected = false
-function injectFloatingQuoteStyles(): void {
-  if (_floatingQuoteStyleInjected || typeof document === 'undefined') return
-  _floatingQuoteStyleInjected = true
-  const style = document.createElement('style')
-  style.textContent = `@keyframes floatingQuoteIn{from{opacity:0;transform:translate(-50%,-100%) scale(0.95)}to{opacity:1;transform:translate(-50%,-100%) scale(1)}}`
-  document.head.appendChild(style)
-}
 
 /** 从代码内容中检测选中文字所在的函数名 从选中起始行向上逐行扫描，匹配常见函数/类定义模式（JS/TS/Python/Go/Rust 等）。 */
 function detectFunctionName(code: string, targetLine: number): string | null {
@@ -192,72 +127,7 @@ const FLOATING_QUOTE_INITIAL: FloatingQuoteState = {
   position: { x: 0, y: 0 },
 }
 
-/** 浮动「引用」按钮（Notion / Google Docs 风格） 选中文字时弹出，点击「引用」把内容塞到 Chat 输入框；按 Esc 关闭。 */
-function FloatingQuoteButton({
-  position,
-  onQuote,
-  onClose,
-}: {
-  position: { x: number; y: number }
-  onQuote: () => void
-  onClose: () => void
-}) {
-  return (
-    <div
-      className="pointer-events-auto absolute z-50"
-      style={{
-        left: position.x,
-        top: position.y,
-        transform: 'translate(-50%, -100%)',
-        animation: 'floatingQuoteIn 150ms ease-out',
-      }}
-    >
-      <div
-        className="flex items-center gap-1 rounded-lg border border-[var(--floating-quote-border,rgba(255,255,255,0.1))] bg-[var(--floating-quote-bg,#2a2a2a)] px-1.5 py-1 shadow-[var(--floating-quote-shadow,0_4px_12px_rgba(0,0,0,0.3))]"
-      >
-        <button
-          onClick={onQuote}
-          className="flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1 text-xs font-medium text-[var(--floating-quote-text,#fff)] transition-colors hover:bg-[var(--floating-quote-hover-bg,rgba(255,255,255,0.1))]"
-          title="引用到对话 (Enter)"
-        >
-          <Quote className="h-3.5 w-3.5" />
-          <span>引用</span>
-        </button>
-        <button
-          onClick={onClose}
-          className="flex h-5 w-5 items-center justify-center rounded text-xs text-[var(--floating-quote-text,#fff)] opacity-60 transition-opacity hover:opacity-100"
-          title="关闭 (Esc)"
-          aria-label="关闭"
-        >
-          ×
-        </button>
-      </div>
-    </div>
-  )
-}
-
-/** 从文件名提取扩展名 */
-function extractExtension(fileName: string): string {
-  const lastSlash = Math.max(fileName.lastIndexOf('/'), fileName.lastIndexOf('\\'))
-  const baseName = fileName.substring(lastSlash + 1)
-
-  if (baseName.startsWith('.') && baseName.lastIndexOf('.') === 0) {
-    return baseName.toLowerCase()
-  }
-
-  const dotIndex = baseName.lastIndexOf('.')
-  if (dotIndex === -1) {
-    return baseName.toLowerCase()
-  }
-
-  return baseName.substring(dotIndex).toLowerCase()
-}
-
-/** 根据文件名获取 Prism 语言标识 */
-function getLanguage(fileName: string): string {
-  const ext = extractExtension(fileName)
-  return EXTENSION_TO_LANGUAGE[ext] ?? 'text'
-}
+/** 从文件名提取扩展名 / 语言解析：与 FilePreview 共用真值源（prismLanguages） */
 
 /** 判断文件是否可编辑 */
 function isEditable(fileName: string): boolean {
@@ -270,6 +140,8 @@ export function CodeEditor({
   filePath,
   content: initialContent,
   size,
+  loadedBytes,
+  onLoadMore,
   onSave,
   readOnly = false,
   className,
@@ -297,8 +169,20 @@ export function CodeEditor({
     return filePath.substring(lastSlash + 1)
   }, [filePath])
 
-  const language = useMemo(() => getLanguage(filePath), [filePath])
-  const editable = useMemo(() => !readOnly && isEditable(filePath), [readOnly, filePath])
+  const language = useMemo(() => getLanguageForFileName(filePath), [filePath])
+  /** 部分加载（按需加载未读完）：禁编辑——部分内容写回会截断丢失其后内容 */
+  const isPartial = useMemo(
+    () =>
+      !!onLoadMore &&
+      loadedBytes !== undefined &&
+      size !== undefined &&
+      loadedBytes < size,
+    [onLoadMore, loadedBytes, size],
+  )
+  const editable = useMemo(
+    () => !readOnly && !isPartial && isEditable(filePath),
+    [readOnly, isPartial, filePath],
+  )
   const isMarkdownFile = useMemo(() => {
     const ext = extractExtension(filePath)
     return MARKDOWN_EXTENSIONS.has(ext)
@@ -309,22 +193,38 @@ export function CodeEditor({
     [size, initialContent.length],
   )
 
+  /** 按需加载：加载更多/加载全部（失败通知由装配层 reportError 负责，这里只管态） */
+  const [loadingMore, setLoadingMore] = useState(false)
+  const handleLoadMoreClick = useCallback(
+    async (loadAll: boolean) => {
+      if (!onLoadMore || loadingMore) return
+      setLoadingMore(true)
+      try {
+        await onLoadMore(loadAll)
+      } finally {
+        setLoadingMore(false)
+      }
+    },
+    [onLoadMore, loadingMore],
+  )
+
   /** 内容容器的 ref，用于保存和恢复滚动位置 */
   const contentContainerRef = useRef<HTMLDivElement>(null)
 
   // ────────────────────────────────────────────
   // 选中引用浮动按钮
   // ────────────────────────────────────────────
-  // 用户在预览模式 / 只读模式下选中文字时，弹出「引用」按钮；
-  // 点击后把带行号和函数名的格式化文本塞进 Chat 输入框（chatInputStore.requestInsert）。
+  // 用户在预览模式 / 只读模式下选中文字时，弹出「引用」浮条；
+  // R5 落点卡片化：动作产 CitationItem 入列（draftKey 与 ChatContainer 接线同构
+  // = activeTabId || activeSessionId），markdown 块引用合成移到发送装配期
+  // （composeSendParams），发送产物不变。
   // 注意：编辑模式（textarea）使用浏览器原生选择/复制，不挂浮动按钮，避免遮挡编辑光标。
-  const requestInsert = useChatInputStore((s) => s.requestInsert)
+  const addCitation = useChatInputStore((s) => s.addCitation)
+  const activeTabId = useAgentTabStore((s) => s.activeTabId)
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const citationDraftKey = activeTabId || activeSessionId || ''
   const [floatingQuote, setFloatingQuote] = useState<FloatingQuoteState>(FLOATING_QUOTE_INITIAL)
   const justSelectedRef = useRef(false)
-
-  useEffect(() => {
-    injectFloatingQuoteStyles()
-  }, [])
 
   /** 处理预览区文字选中，计算行号范围并弹出浮动按钮 */
   const handlePreviewMouseUp = useCallback(() => {
@@ -388,9 +288,9 @@ export function CodeEditor({
     }
   }, [floatingQuote.visible])
 
-  /** 引用选中文字到 Chat 输入框 */
-  const handleQuote = useCallback(() => {
-    if (!floatingQuote.selectedText) return
+  /** 由当前浮动选区构建引用片段（「引用」与「评审」共用，禁复制）：
+   *  quotedFileInfo=来源注记（文件:函数(行号)），formattedQuotedText=行号定格快照 */
+  const buildQuotedFragment = useCallback(() => {
     const lineRange = floatingQuote.lineRange
     const funcName = lineRange ? detectFunctionName(localContent, lineRange.start) : null
     const lineInfo = lineRange
@@ -417,24 +317,40 @@ export function CodeEditor({
         .map((line, i) => `L${lineRange.start + i}: ${line}`)
         .join('\n')
     }
+    return { quotedFileInfo, formattedQuotedText }
+  }, [floatingQuote.selectedText, floatingQuote.lineRange, filePath, localContent])
 
-    // 引用文本格式：「${quotedFileInfo}:\n${quotedText}」
-    requestInsert(`「${quotedFileInfo}:\n${formattedQuotedText}」`)
+  /** 引用选中文字到 Chat 输入框（结构化条目入列，kind 按文件扩展名判定） */
+  const handleQuote = useCallback(() => {
+    if (!floatingQuote.selectedText) return
+    const { quotedFileInfo, formattedQuotedText } = buildQuotedFragment()
+
+    addCitation(citationDraftKey, {
+      kind: classifyCitationKind(filePath),
+      title: quotedFileInfo,
+      excerpt: formattedQuotedText,
+    })
     setFloatingQuote((prev) => ({ ...prev, visible: false }))
     window.getSelection()?.removeAllRanges()
-  }, [floatingQuote.selectedText, floatingQuote.lineRange, filePath, localContent, requestInsert])
+  }, [floatingQuote.selectedText, buildQuotedFragment, addCitation, citationDraftKey, filePath])
 
-  /** Esc 关闭浮动按钮 */
-  useEffect(() => {
-    if (!floatingQuote.visible) return
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setFloatingQuote((prev) => ({ ...prev, visible: false }))
-      }
-    }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [floatingQuote.visible])
+  /** 评审：同引用入列 + 评语（发送装配期经 composeCitationEntry 合成块引用+意见，
+   *  组装真源与消息流同源） */
+  const handleReview = useCallback(
+    (comment: string) => {
+      if (!floatingQuote.selectedText) return
+      const { quotedFileInfo, formattedQuotedText } = buildQuotedFragment()
+      addCitation(citationDraftKey, {
+        kind: classifyCitationKind(filePath),
+        title: quotedFileInfo,
+        excerpt: formattedQuotedText,
+        comment,
+      })
+      setFloatingQuote((prev) => ({ ...prev, visible: false }))
+      window.getSelection()?.removeAllRanges()
+    },
+    [floatingQuote.selectedText, buildQuotedFragment, addCitation, citationDraftKey, filePath],
+  )
 
   /** 当切换文件时重置浮动按钮 */
   useEffect(() => {
@@ -566,7 +482,7 @@ export function CodeEditor({
 
   // 只读高亮块：大文件/只读预览/编辑三分支共用同一渲染契约（提取防克隆漂移）
   const codeHighlighter = (
-    <SyntaxHighlighter
+    <PrismSyntaxHighlighter
       language={language}
       style={codeHighlightStyle}
       showLineNumbers={true}
@@ -576,7 +492,7 @@ export function CodeEditor({
         margin: 0,
         borderRadius: 0,
         fontSize: '0.8125rem',
-        background: 'var(--code-bg, #1e1e1e)',
+        background: 'var(--code-bg)',
         color: 'var(--code-text)',
         minHeight: '100%',
       }}
@@ -588,7 +504,7 @@ export function CodeEditor({
       }}
     >
       {localContent}
-    </SyntaxHighlighter>
+    </PrismSyntaxHighlighter>
   )
 
   // 大文件提示
@@ -623,7 +539,9 @@ export function CodeEditor({
         <div className="border-border bg-muted/30 flex items-center gap-2 border-b px-4 py-2">
           <FileText className="text-muted-foreground h-4 w-4" />
           <span className="text-foreground text-sm font-medium">{fileName}</span>
-          <span className="text-muted-foreground ml-2 text-xs">（只读预览）</span>
+          <span className="text-muted-foreground ml-2 text-xs">
+            {isPartial ? `（只读预览 · 按需加载）` : '（只读预览）'}
+          </span>
         </div>
         <div
           ref={contentContainerRef}
@@ -633,13 +551,49 @@ export function CodeEditor({
         >
           {codeHighlighter}
           {floatingQuote.visible && (
-            <FloatingQuoteButton
+            <CitationFloatBar
+              positioning="absolute"
               position={floatingQuote.position}
               onQuote={handleQuote}
+              onReview={handleReview}
               onClose={() => setFloatingQuote((prev) => ({ ...prev, visible: false }))}
             />
           )}
         </div>
+        {isPartial && onLoadMore && (
+          <div className="border-border bg-muted/30 flex flex-wrap items-center justify-center gap-3 border-t px-4 py-2.5">
+            <span className="text-muted-foreground text-xs">
+              已加载 {formatFileSize(loadedBytes!)}
+              {size !== undefined ? ` / 共 ${formatFileSize(size)}` : ''}
+              （大文件按需加载，编辑需先加载全部）
+            </span>
+            <button
+              onClick={() => void handleLoadMoreClick(false)}
+              disabled={loadingMore}
+              className={cn(
+                'flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
+                loadingMore
+                  ? 'bg-muted text-muted-foreground cursor-not-allowed'
+                  : 'bg-primary text-primary-foreground hover:bg-primary/90',
+              )}
+            >
+              {loadingMore ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              加载更多
+            </button>
+            <button
+              onClick={() => void handleLoadMoreClick(true)}
+              disabled={loadingMore}
+              className={cn(
+                'flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
+                loadingMore
+                  ? 'bg-muted text-muted-foreground cursor-not-allowed'
+                  : 'bg-muted text-muted-foreground hover:bg-muted hover:text-foreground',
+              )}
+            >
+              加载全部
+            </button>
+          </div>
+        )}
       </div>
     )
   }
@@ -667,7 +621,7 @@ export function CodeEditor({
             </button>
             <button
               onClick={handleIgnoreExternalChange}
-              className="flex items-center gap-1 rounded-md bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              className="flex items-center gap-1 rounded-md bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               title="保留当前修改"
             >
               忽略
@@ -714,7 +668,7 @@ export function CodeEditor({
               'flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
               !isPreview
                 ? 'bg-status-info text-status-info-foreground'
-                : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground',
+                : 'bg-muted text-muted-foreground hover:bg-muted hover:text-foreground',
             )}
             title={isPreview ? '切换到编辑模式' : '切换到预览模式'}
           >
@@ -745,9 +699,11 @@ export function CodeEditor({
           >
             <LobeChatMarkdown content={localContent} onLinkClick={attachmentLinkInterceptor} />
             {floatingQuote.visible && (
-              <FloatingQuoteButton
+              <CitationFloatBar
+                positioning="absolute"
                 position={floatingQuote.position}
                 onQuote={handleQuote}
+                onReview={handleReview}
                 onClose={() => setFloatingQuote((prev) => ({ ...prev, visible: false }))}
               />
             )}
@@ -761,9 +717,11 @@ export function CodeEditor({
           >
             {codeHighlighter}
             {floatingQuote.visible && (
-              <FloatingQuoteButton
+              <CitationFloatBar
+                positioning="absolute"
                 position={floatingQuote.position}
                 onQuote={handleQuote}
+                onReview={handleReview}
                 onClose={() => setFloatingQuote((prev) => ({ ...prev, visible: false }))}
               />
             )}
@@ -777,8 +735,8 @@ export function CodeEditor({
             ref={preRef}
             className="pointer-events-none absolute inset-0 scrollbar-transparent p-4 text-sm"
             style={{
-              background: 'var(--code-bg, #1e1e1e)',
-              color: 'var(--code-text, #d4d4d4)',
+              background: 'var(--code-bg)',
+              color: 'var(--code-text)',
               fontFamily:
                 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
               fontSize: '0.8125rem',
@@ -804,7 +762,7 @@ export function CodeEditor({
             style={{
               background: 'transparent',
               color: 'transparent',
-              caretColor: 'var(--code-text, #d4d4d4)',
+              caretColor: 'var(--code-text)',
               fontFamily:
                 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
               fontSize: '0.8125rem',

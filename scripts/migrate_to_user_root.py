@@ -38,7 +38,7 @@ _SHARED_ROOT = _REPO_ROOT / "plugins" / "shared"
 if str(_SHARED_ROOT) not in sys.path:
     sys.path.insert(0, str(_SHARED_ROOT))
 
-import user_space  # noqa: E402
+from _root_api import user_space  # noqa: E402
 
 #: 数据库文件及其 SQLite 伴生文件（WAL 模式下的 -wal/-shm 必须与主库同迁，
 #: 否则新库会丢掉尚未 checkpoint 的事务）。

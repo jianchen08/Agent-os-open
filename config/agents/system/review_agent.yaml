@@ -5,23 +5,19 @@ description: '复盘分析专家，负责对管道执行记录进行深度复盘
 
   通过三层渐进式披露（骨架→L1语义→L0原始）分析执行记录，产出结构化复盘报告。
 
-  在管道执行完成后自动触发，或由用户/Agent通过 trigger_review 工具调用。
+  在管道执行完成后自动触发，或由用户/Agent通过 review_ops（action=trigger）工具调用。
 
   '
 agent_type: system
 category: system
 level: L3
-model_tier: small
+model_tier: large
 tags:
 - review
 - maintenance
 - retrospective
 - system
 - L3
-static_vars:
-  enabled: true
-  items:
-  - '{{rules}}'
 dynamic_vars:
   enabled: true
   items:
@@ -104,7 +100,9 @@ system_prompt: |-
   2. **定位异常**：从骨架中标记的 error 锚点，定位到具体 iteration
   3. **深入分析**：对异常 iteration 用 L1/L0 层查看 thinking 和 tool_calls
   4. **根因推导**：对每个错误做 5 Whys，找到可操作的根因
-  5. **输出报告**：产出结构化 JSON 复盘结论
+  5. **写出报告**：用 file_write（action: write）把 JSON 复盘结论写入 deliverables
+     声明路径（{{workspace}}/docs/working/review_report.json），同时在任务输出中
+     返回同一 JSON——写盘成功 + JSON 返回双齐才是复盘完成
 
   ## 复盘输出格式
 
@@ -157,12 +155,15 @@ deliverables:
 tool_ids:
 - read_execution_detail
 - file_read
+- file_write
+# 大输出恢复：取证下钻时被 spill_guard 替换的工具结果按 tool_call_id 取回原文
+# （工具面审查 2026-10-19 缺口补配；read_execution_detail 退役等注入+作用域读面落地，v6 挂起）
+- spill_retrieve
 version: 1.0.0
 is_active: true
 status: active
 max_iterations: 100
 max_reminders: 3
-timeout_seconds: 1800
 metadata:
   author: System
   created_at: '2026-06-14'

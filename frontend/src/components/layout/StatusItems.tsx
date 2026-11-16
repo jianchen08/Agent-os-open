@@ -87,7 +87,7 @@ function PluginStatusItem({ item }: { item: PageDeclaration }) {
     if (!page) {
       useNotificationStore.getState().addNotification({
         title: '状态项无法打开页面',
-        message: `状态项「${item.title ?? item.id}」声明的导航目标页 ${behavior.page} 不存在（提供它的插件可能已禁用）`,
+        message: `状态项「${item.title ?? item.id}」指向的页面 ${behavior.page} 不存在（提供它的插件可能已禁用）`,
         priority: 'normal',
         category: 'error',
         isBlocking: false,
@@ -108,7 +108,7 @@ function PluginStatusItem({ item }: { item: PageDeclaration }) {
       ) : (
         <span
           className="inline-block h-1.5 w-1.5 shrink-0 rounded-full"
-          style={{ backgroundColor: color ?? 'var(--ds-status-pending, #94A3B8)' }}
+          style={{ backgroundColor: color ?? 'var(--ds-status-pending)' }}
         />
       )}
       <span className="text-muted-foreground truncate text-[11px] leading-none">{label}</span>
@@ -122,7 +122,7 @@ function PluginStatusItem({ item }: { item: PageDeclaration }) {
         onClick={handleClick}
         title={`${label}（点击打开 ${behavior.page}）`}
         data-testid={`status-item-nav-${item.id}`}
-        className="hover:bg-accent flex min-w-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded px-0.5 py-0.5 transition-colors"
+        className="hover:bg-muted flex min-w-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded px-0.5 py-0.5 transition-colors"
       >
         {content}
       </button>

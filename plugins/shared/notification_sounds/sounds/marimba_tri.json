@@ -1,0 +1,63 @@
+{
+  "id": "marimba_tri",
+  "label": "木琴三连",
+  "engine": "web_audio_synth",
+  "params": {
+    "partials": [
+      {
+        "ratio": 1.0,
+        "gain": 1.0,
+        "decayRatio": 1.0
+      },
+      {
+        "ratio": 2.0,
+        "gain": 0.22,
+        "decayRatio": 0.55
+      },
+      {
+        "ratio": 3.02,
+        "gain": 0.1,
+        "decayRatio": 0.4
+      },
+      {
+        "ratio": 5.01,
+        "gain": 0.05,
+        "decayRatio": 0.28
+      }
+    ],
+    "attack": 0.006,
+    "wet": 0.55,
+    "taps": [
+      {
+        "delay": 0.083,
+        "feedback": 0.42,
+        "lowpass": 5200.0
+      },
+      {
+        "delay": 0.127,
+        "feedback": 0.36,
+        "lowpass": 3800.0
+      }
+    ],
+    "notes": [
+      {
+        "freq": 783.99,
+        "start": 0,
+        "peak": 0.3974,
+        "decay": 0.55
+      },
+      {
+        "freq": 1046.5,
+        "start": 0.1,
+        "peak": 0.3974,
+        "decay": 0.6
+      },
+      {
+        "freq": 1318.51,
+        "start": 0.2,
+        "peak": 0.3974,
+        "decay": 0.7
+      }
+    ]
+  }
+}

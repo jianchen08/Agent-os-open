@@ -4,30 +4,23 @@
  * 在应用根挂载一次，统一装配 contributes.* 的运行时：
  * - useExtensionShortcuts：注册全局快捷键（contributes.shortcuts）
  * - CommandPalette：Cmd/Ctrl+Shift+P 打开（聚合 contributes.commands）
- * - ExtensionModalHost：命令触发的模态弹窗（contributes.modal）
+ * - SlotOverlayHost：shell.overlay 槽锚点（C4 槽位机制——contributes.modal
+ *   收敛为 shell.overlay 域条目，呈现=模态；触发面 commands 不动。
+ *   设计真值 = docs/working/DSH生态嫁接通用机制设计_20261104.md §4.4）
  *
  * 命令面板的打开快捷键固定为 Cmd/Ctrl+Shift+P（VS Code 习惯）。
- * modal 的 widget 渲染由 widgetRegistry 提供（预置 widget，ADR §2.3）。
+ * overlay 内容渲染（widget/webview 通道、fail-closed、ErrorBoundary）由
+ * SlotEntryContent/SlotRegistry 统一承载。
  */
 
 import React, { useEffect, useState } from 'react'
+import { SlotOverlayHost } from '@/components/slots/SlotOverlayHost'
 import { useExtensionShortcuts } from '@/hooks/useExtensionShortcuts'
 import { commandDispatcher } from '@/services/schema/commandDispatcher'
-import { CommandPalette, ExtensionModalHost, useExtensionModal } from './ExtensionComponents'
+import { CommandPalette } from './ExtensionComponents'
 import type { CommandDispatcher } from '@/services/schema/commandDispatcher'
 
-/** 预置 widget 渲染器签名 */
-export type WidgetRenderer = (
-  props: Record<string, unknown>,
-  onClose: () => void,
-) => React.ReactNode
-
-/** 预置 widget 注册表（widget 名 → 渲染器） */
-export type WidgetRegistry = Record<string, WidgetRenderer>
-
 interface ExtensionHostProps {
-  /** 预置 widget 注册表（决定 modal 能渲染哪些 widget，ADR §2.3） */
-  widgetRegistry?: WidgetRegistry
   /** 命令分发器（默认全局单例，可注入便于测试） */
   dispatcher?: CommandDispatcher
 }
@@ -38,7 +31,7 @@ function isMac(): boolean {
   return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
 }
 
-export function ExtensionHost({ widgetRegistry = {}, dispatcher = commandDispatcher }: ExtensionHostProps): React.ReactElement {
+export function ExtensionHost({ dispatcher = commandDispatcher }: ExtensionHostProps): React.ReactElement {
   // 1. 注册全局快捷键（contributes.shortcuts）
   useExtensionShortcuts()
 
@@ -57,24 +50,6 @@ export function ExtensionHost({ widgetRegistry = {}, dispatcher = commandDispatc
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [])
 
-  // 3. modal 宿主（contributes.modal，命令触发）
-  const { modal, closeModal } = useExtensionModal(dispatcher)
-
-  const renderModalContent = (): React.ReactNode => {
-    if (!modal) return null
-    const widgetName = modal.widget as string | undefined
-    if (!widgetName) return null
-    const renderer = widgetRegistry[widgetName]
-    if (!renderer) {
-      return (
-        <div className="text-muted-foreground text-sm">
-          未知 widget: {widgetName}（需在前端预置 widget 注册表中声明）
-        </div>
-      )
-    }
-    return renderer((modal.props as Record<string, unknown>) ?? {}, closeModal)
-  }
-
   return (
     <>
       <CommandPalette
@@ -82,11 +57,8 @@ export function ExtensionHost({ widgetRegistry = {}, dispatcher = commandDispatc
         dispatcher={dispatcher}
         onClose={() => setPaletteOpen(false)}
       />
-      {modal && (
-        <ExtensionModalHost modal={modal} onClose={closeModal}>
-          {renderModalContent()}
-        </ExtensionModalHost>
-      )}
+      {/* shell.overlay 槽锚点（modal 收敛呈现；无触发零渲染） */}
+      <SlotOverlayHost dispatcher={dispatcher} />
     </>
   )
 }

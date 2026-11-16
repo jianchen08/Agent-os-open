@@ -1,0 +1,36 @@
+{
+ "plugin_id": "snippet_box",
+ "all_pass": true,
+ "checks": [
+  {
+   "name": "manifest_precheck",
+   "pass": true,
+   "detail": "id=snippet_box, 声明工具=['snippet_box']"
+  },
+  {
+   "name": "plugin_check",
+   "pass": true,
+   "detail": "跳过（--plugin-check-bin 未提供；G2 同款校验由内核装载期执行）"
+  },
+  {
+   "name": "instance_spawn",
+   "pass": true,
+   "detail": "scratch 实例就绪 port=55921 run_id=run_55921_20261103_194549"
+  },
+  {
+   "name": "tools_visible",
+   "pass": true,
+   "detail": "声明 1 个工具全部可见"
+  },
+  {
+   "name": "schema_declared",
+   "pass": true,
+   "detail": "schema 响应含插件 id 'snippet_box'（弱断言；摘录 {\"agents\": [{\"id\": \"acp_quota_pool\", \"name\": \"ACP Quota Pool\", \"ui_schema\": null, \"version\": \"0.2.0\"}, {\"id\": \"notification_sounds\", \"name\": \"Notification Sounds\", \"ui_schema\": null, \"version\": \"1.0.0…）"
+  },
+  {
+   "name": "instance_cleanup",
+   "pass": true,
+   "detail": "已 stop（端口释放已验证）"
+  }
+ ]
+}

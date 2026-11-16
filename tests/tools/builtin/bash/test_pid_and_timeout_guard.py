@@ -25,7 +25,7 @@ pytestmark = pytest.mark.unit
 @pytest.fixture
 def tool(tmp_path):
     t = BashTool()
-    from process_manager import ProcessManager
+    from agentos_plugin_sdk.process_runtime import ProcessManager
 
     t.process_manager = ProcessManager(log_dir=tmp_path / "logs")
     return t
@@ -100,7 +100,7 @@ class TestContinueTimeoutCap:
     async def test_huge_timeout_clamped_to_max(self, tmp_path) -> None:
         """timeout=99999 被钳到 MAX_TIMEOUT（覆盖为 1s）→ 有限时间内返回 running。"""
         t = _ShortCapTool()
-        from process_manager import ProcessManager
+        from agentos_plugin_sdk.process_runtime import ProcessManager
 
         t.process_manager = ProcessManager(log_dir=tmp_path / "logs")
         pid, _ = await t.process_manager.start_process(_sleep_cmd(), working_dir=str(tmp_path))
@@ -122,7 +122,7 @@ class TestContinueTimeoutCap:
     async def test_small_timeout_passes_through(self, tmp_path) -> None:
         """小于上限的 timeout 透传生效：约 0.5s 即返回，不被上限钳制拉长。"""
         t = _ShortCapTool()
-        from process_manager import ProcessManager
+        from agentos_plugin_sdk.process_runtime import ProcessManager
 
         t.process_manager = ProcessManager(log_dir=tmp_path / "logs")
         pid, _ = await t.process_manager.start_process(_sleep_cmd(), working_dir=str(tmp_path))

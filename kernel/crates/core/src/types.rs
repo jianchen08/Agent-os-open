@@ -11,9 +11,10 @@
 //! - 内容懒加载（ADR ⑦）：ContentLoader
 //! - 引擎结果类型（ADR ①）：StepResult / WakeEvent / EngineError
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, LazyLock};
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -255,6 +256,29 @@ impl TenantContext {
             credential_handle: None,
         }
     }
+
+    /// 身份继承门面：从父 scope 全量克隆身份三元组
+    /// （tenant_id / session_id / user_id）。
+    ///
+    /// 契约（A1 统一收口，ADR 2026-10-17-reverse-call-user-identity-injection
+    /// 后继）：**执行/反调路径禁用两参 `new`**——两参构造丢 user_id，下游
+    /// 守卫（resume_pipeline / session.create「调用链未携带用户身份」）
+    /// fail-fast；凡从既有执行上下文派生 scope，一律用
+    /// [`TenantContext::inherit`]。两参 `new` 仅保留给簿记读面（无身份
+    /// 消费点的 store 读写 scope）与系统合成身份（无父可继承的入口）。
+    /// role/permissions 等非身份字段以空起步——与桥重建口径一致
+    /// （`PluginScopedRouter` 亦只回带三元组）。
+    pub fn inherit(parent: &TenantContext) -> Self {
+        Self {
+            tenant_id: parent.tenant_id.clone(),
+            user_id: parent.user_id.clone(),
+            session_id: parent.session_id.clone(),
+            role: None,
+            permissions: Vec::new(),
+            enabled_plugins: Vec::new(),
+            credential_handle: None,
+        }
+    }
 }
 
 // ── 工具元信息 ──────────────────────────────────────────────────
@@ -418,13 +442,25 @@ pub enum RunStatus {
     Cancelled,
 }
 
+/// 插件署名停机词声明注册表（停机词声明化 ADR 2026-10-15）：plugin_id →
+/// 其 manifest `capabilities.stop_reasons` 声明词集。watcher sync 收束点
+/// 全量重建（注册/重注册/卸载/启停统一走此刷新），与能力注册同窗——
+/// 插件可运行 ⇔ 其署名已入表。进程级单点：engine 落库与 api 域事件/外发
+/// 派生共用 from_control_state，词汇必须进程唯一（实例穿参不可达 api 消费点）。
+static DECLARED_FAILED_STOP_REASONS: LazyLock<RwLock<BTreeMap<String, BTreeSet<String>>>> =
+    LazyLock::new(|| RwLock::new(BTreeMap::new()));
+
 impl RunStatus {
     /// Failed 终态署名词表（`router.stop_reason` 取值）：命中即映射 Failed。
-    /// 单点权威——from_control_state 查此表，词表测试遍历此表防漏词；
-    /// 新增署名只改此表，落库、域事件派生与词表测试同步生效。
+    /// 内核/契约词单点权威——from_control_state 查静态表∪声明注册表并集
+    /// （停机词声明化 ADR 2026-10-15），词表测试遍历此表防漏词。插件署名
+    /// 词不在新增词入此表——经 manifest `capabilities.stop_reasons` 声明进
+    /// [`DECLARED_FAILED_STOP_REASONS`]；表内 task_failed/max_iterations/
+    /// duplicate_loop/tool_fail_loop 为 ADR 2026-08-30 契约冻结的既迁存量
+    /// （二期随 A1 收口迁声明面，见 ADR 决策 4），timeout=看门狗署名、
+    /// dropped_tool_calls/empty_reply_exhausted=引擎异常终局闸署名。
     pub const FAILED_STOP_REASONS: &[&str] = &[
         "task_failed",
-        "task_evaluate_failed",
         "max_iterations",
         "timeout",
         "budget_exhausted",
@@ -433,7 +469,38 @@ impl RunStatus {
         "stalled",
         "duplicate_loop",
         "tool_fail_loop",
+        "dropped_tool_calls",
+        "empty_reply_exhausted",
     ];
+
+    /// 全量重建插件署名停机词声明注册表（watcher sync 收束单点调用）：
+    /// 以当轮注册集覆盖式替换，卸载/停用插件的历史声明随重建消失，无残留。
+    /// 空词与全空声明的插件不入表（空声明 = 无署名可认）。返回声明词总数
+    /// （调用方日志/诊断用）。
+    pub fn refresh_declared_stop_reasons(
+        declarations: impl IntoIterator<Item = (String, Vec<String>)>,
+    ) -> usize {
+        let mut next: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (plugin_id, words) in declarations {
+            let words: BTreeSet<String> = words.into_iter().filter(|w| !w.is_empty()).collect();
+            if !words.is_empty() {
+                next.insert(plugin_id, words);
+            }
+        }
+        let total = next.values().map(|w| w.len()).sum();
+        *DECLARED_FAILED_STOP_REASONS.write() = next;
+        total
+    }
+
+    /// 署名是否折算 Failed：内核/契约静态词表 ∪ 插件声明注册表（私有判定，
+    /// 唯一消费方 from_control_state；测试经 from_control_state 观察并集）。
+    fn maps_to_failed(stop_reason: &str) -> bool {
+        Self::FAILED_STOP_REASONS.contains(&stop_reason)
+            || DECLARED_FAILED_STOP_REASONS
+                .read()
+                .values()
+                .any(|words| words.contains(stop_reason))
+    }
 
     /// run 终态映射（控制状态键契约 ADR 2026-08-30）：挂起优先；其余按
     /// `router.stop_reason` 署名查表——谁写终止谁署名，引擎只查表不猜；
@@ -456,7 +523,7 @@ impl RunStatus {
             Some("user_requested") | Some("task_cancelled") | Some("task_deleted") => {
                 Self::Cancelled
             }
-            Some(reason) if Self::FAILED_STOP_REASONS.contains(&reason) => Self::Failed,
+            Some(reason) if Self::maps_to_failed(reason) => Self::Failed,
             _ => Self::Completed,
         }
     }
@@ -511,6 +578,12 @@ pub struct PipelineRunInfo {
     /// 归属会话（thread）ID，可空（pipeline_sessions 未建映射的历史数据）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
+    /// 管道标题（统一命名字段，state.title；启用方在出生时给出——任务管道
+    /// 由出生协议写任务标题、会话主管道由会话域随标题落定/变更刷新。无键
+    /// 不出，消费方自行走 ID 兜底（ADR 2026-10-27-pipeline-title-field，
+    /// 用户裁定无回退腿））
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// 运行状态（state.run_status）
     pub status: RunStatus,
     /// 开始时间（ISO8601；state.run_started_at）
@@ -562,9 +635,10 @@ pub struct MessageRecord {
     /// 前端据此渲染"思考过程"折叠区。仅 role=assistant 且模型输出思考时非空。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
-    /// 工具结果消息（role=tool）的执行状态：completed / failed。
-    /// 非 tool 消息为 None。前端刷新后据此（与 error）还原失败态，
-    /// 与流式 tool_result 事件的 success 信号统一。
+    /// 消息执行状态。role=tool：completed / failed（envelope 权威 + content
+    /// 前缀兜底），前端刷新后据此（与 error）还原失败态。非 tool（assistant）：
+    /// blob status 透传（interrupted / error 半截消息，与 WS 热路径
+    /// message_status_from_blob 同源；正常消息 None，读面回退 completed）。user 恒 None。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     /// 工具结果消息（role=tool）的错误文本。status=failed 时非空。
@@ -846,7 +920,7 @@ pub struct Route {
 
 /// 循环配置（step 级：组合节点自带循环，如批量处理；循环体级循环用 `while`）。
 ///
-/// 两种形态（ADR 2026-10-02-loopconfig-parallel-foreach）：
+/// 两种形态（并行 for-each 原语，内容移植自 sync/open-main-20261008 c2db32c26）：
 /// - 重复循环（`over` 缺省）：对 steps 重复执行至多 max_iterations 轮（既有语义）；
 /// - 并行 for-each（`over` 存在）：对 over 数组逐元素执行 steps——单调用 ≡ 循环
 ///   的单元素展开，逐调用控制就是循环体内的普通 step。缺省字段下行为与引入
@@ -1049,6 +1123,32 @@ pub struct PipelineStep {
     pub loop_config: Option<LoopConfig>,
 }
 
+/// checks 统一检测声明（钩子收敛终局，设计真值
+/// `docs/working/DSH生态嫁接通用机制设计_20261104.md` §4.3）。
+///
+/// 统一模型：管道 = 流（顺序 steps + then 跳转）+ checks（触发时机 × when × 动作）。
+/// 条件 = when 谓词（纯求值）；外部事实判定 → 前置算条件的 step（算完写 state，
+/// when 读 state）。动作三词表：
+/// - `route:<step id>`：声明式转移（含状态机边）；
+/// - `terminate`：终止当前循环体（原钩子 `decision:terminate` 语义平移）；
+/// - `run:<step id>`：一次性触发步——触发一次执行一次，与顺序步完全同语义
+///   （经同一 invoke/轨迹/checkpoint 面；注入类动作也是 run 写 state 的步）。
+///
+/// 护栏（编译期执法，见 engine compiler）：安全关键步骤不可被 checks 触发或
+/// 跳过；步产出路由（then/RouteNext）优先，checks 仅在触发边界消费；跳数上限
+/// 沿用 steps×4；state_delta 事件仅通知不携带控制权。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepCheck {
+    /// 触发时机：`pre:<step id>`（该步执行前）/ `post:<step id>`（该步执行后）/
+    /// `state:<顶层键>`（该键被写后由首个步边界消费，可配 equals 值 when）。
+    pub at: String,
+    /// 触发谓词（可选）：与路由/when 门同语法同求值器；None = 恒真。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
+    /// 触发动作（三词表，见结构体文档）。
+    pub then: String,
+}
+
 /// 管道循环体：管道由多个循环体顺序组成（如 init → main → exit）。
 ///
 /// 每个循环体拥有独立的 steps 与循环条件（G10 统一 DSL 单轨）：
@@ -1173,6 +1273,27 @@ impl StepLibrary {
     pub fn ids(&self) -> Vec<&str> {
         self.steps.keys().map(|s| s.as_str()).collect()
     }
+}
+
+/// 宿主 spawn 类批量操作的默认并行度上界：`min(8, 逻辑核数)`。
+///
+/// spawn→连接→initialize 每宿主秒级且独立（跨宿主并行安全，per-host
+/// single-flight 锁防同宿主双 spawn），并行度再高收益递减、徒增进程风暴
+/// ——8 已覆盖单机插件宿主数的合理并发窗。无核数信息时回退 1（串行）。
+/// 消费方：boot G2 存量校验、请求路径整组 respawn。
+///
+/// 原则 P2（合宿数=f(设备档案)）：宿主数计划由 Python SDK
+/// `agentos_plugin_sdk.device_profile.plan_hosts` 出（手机 1-2 / 桌面 4 /
+/// 云独立档），手机档并行 spawn 天然被宿主数上界约束；本函数保持 spawn
+/// 并行度唯一执法源，Python 侧 `spawn_concurrency` 仅为同公式计划投影。
+/// 装箱面（槽容量/装箱域）按档取值的执法在 invoker
+/// `host_key::light_host_max_members` / `cohost_packing_domain`，档位探测
+/// 单源 `crate::device_profile`。
+pub fn bounded_spawn_concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 8)
 }
 
 // ── 单元测试（serde 往返 / 构造器 / 终态映射 / Display 契约）──────
@@ -1647,6 +1768,7 @@ mod tests {
             run_id: "r-1".into(),
             pipeline_id: Some("p-1".into()),
             thread_id: Some("th-1".into()),
+            title: Some("周报整理".into()),
             status: RunStatus::Failed,
             started_at: "2026-09-13T00:00:00Z".into(),
             ended_at: Some("2026-09-13T01:00:00Z".into()),
@@ -1655,12 +1777,13 @@ mod tests {
         let bare = PipelineRunInfo {
             pipeline_id: None,
             thread_id: None,
+            title: None,
             ended_at: None,
             ..full
         };
         let s = serde_json::to_string(&bare).unwrap();
         assert!(
-            !s.contains("pipeline_id") && !s.contains("thread_id"),
+            !s.contains("pipeline_id") && !s.contains("thread_id") && !s.contains("title"),
             "{s}"
         );
         assert_serde_roundtrip(&bare);
@@ -2137,5 +2260,17 @@ mod tests {
         let mut ids = lib.ids();
         ids.sort_unstable();
         assert_eq!(ids, vec!["commit", "review"]);
+    }
+
+    /// 并行度上界三性质：非零、≤8、≤逻辑核数（真机快照逐条核对）。
+    #[test]
+    fn bounded_spawn_concurrency_is_bounded_and_positive() {
+        let n = bounded_spawn_concurrency();
+        assert!(n >= 1, "必须非零（回退 1 串行）: {n}");
+        assert!(n <= 8, "上界 8: {n}");
+        let cores = std::thread::available_parallelism()
+            .map(|v| v.get())
+            .unwrap_or(1);
+        assert!(n <= cores, "不得超过逻辑核数: n={n} cores={cores}");
     }
 }

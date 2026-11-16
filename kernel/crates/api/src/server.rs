@@ -1,9 +1,6 @@
-//! Axum HTTP/WebSocket API 服务器
-//!
-//! 提供 RESTful API 端点和 WebSocket 流式通信。
-//! AC-06-3: /health 返回 200
-//! AC-06-4: WebSocket 可连接收发消息
-//! AC-06-5: Schema 聚合端点
+//! Axum HTTP/WebSocket API 服务器——RESTful API 端点与 WebSocket 流式通信。
+//! AC-06-3: /health 返回 200；AC-06-4: WebSocket 可连接收发消息；AC-06-5:
+//! Schema 聚合端点。
 //!
 //! [来源: docs/tasks/task_07_llm_api.md]
 
@@ -17,7 +14,7 @@ use std::time::{Duration, SystemTime};
 use parking_lot::RwLock as ParkingRwLock;
 
 use agentos_core::traits::StorageBackend;
-use agentos_core::types::{PipelineConfig, StepLibrary, TenantContext};
+use agentos_core::types::TenantContext;
 use axum::{
     body::Body,
     extract::{
@@ -32,7 +29,7 @@ use axum::{
 };
 
 use crate::pipeline_loader::{
-    load_pipeline_config_by_name, load_step_library, validate_no_name_conflicts,
+    load_pipeline_with_checks, load_step_library, validate_no_name_conflicts,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
@@ -48,10 +45,10 @@ use crate::routes::{
     pending_inputs_delete_handler, pending_inputs_list_handler, pending_inputs_update_handler,
     pipelines_handler, pipelines_runs_handler, pipelines_state_handler,
     plugins_contract_status_handler, plugins_dependents_handler, plugins_hosts_handler,
-    plugins_set_enabled_handler, plugins_status_handler, put_pipeline_config_handler,
-    put_plugin_config_handler, put_user_env_handler, schema_handler, serve_upload_handler,
-    system_memstats_handler, system_restart_handler, tools_handler, validate_all_plugins_handler,
-    AppState,
+    plugins_set_enabled_handler, plugins_source_arbitration_handler, plugins_status_handler,
+    put_pipeline_config_handler, put_plugin_config_handler, put_user_env_handler, schema_handler,
+    serve_upload_handler, system_memstats_handler, system_restart_handler, tools_handler,
+    validate_all_plugins_handler, AppState,
 };
 use crate::session_routes::{
     create_session_handler, delete_session_handler, list_session_messages_handler,
@@ -61,6 +58,9 @@ use crate::session_routes::{
 use agentos_http::auth::resolve_request_tenant_id;
 use agentos_http::error::ApiError;
 use agentos_session::router::PipelineDispatcher;
+
+mod anchor_liveness;
+mod step_error_fold;
 
 /// WebSocket 消息请求体。
 #[derive(Debug, Deserialize, Serialize)]
@@ -84,6 +84,9 @@ pub struct WsResponse {
     /// 降级应答标记（echo_fallback；统一错误模型：假成功显式化）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub degraded: Option<bool>,
+    /// 失败终态标记（自 run 控制状态键真实折算，2026-10-15 刀2）：失败 run 对
+    /// HTTP 调用方显式呈现，不再以 200+文本虚报成功
+    pub failed: Option<bool>,
 }
 
 /// 构建 API 路由树。
@@ -95,8 +98,8 @@ pub fn build_router(state: AppState) -> Router {
     let static_router = Router::new()
         // AC-06-3: 健康检查
         .route("/health", get(health_handler))
-        // 上传文件静态服务（channel_api artifacts 上传的媒体；前端附件预览/
-        // 背景图引用 /uploads/... URL）
+        // 上传文件静态服务（artifacts 上传的媒体；需鉴权——前端统一走鉴权
+        // 取流加载器，无裸直链消费面，ADR 2026-10-10）
         .route("/uploads/{filename}", get(serve_upload_handler))
         // AC-06-5: Schema 聚合端点
         .route("/api/v1/schema", get(schema_handler))
@@ -175,18 +178,23 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/plugins/contract-status",
             get(plugins_contract_status_handler),
         )
-        // 批次C 观测面：宿主盒子快照（只读；鉴权走 /api/v1/plugins* 白名单读面）
+        // 批次C 观测面：宿主盒子快照（只读；鉴权走 /api/v1 前缀读面）
         .route("/api/v1/plugins/hosts", get(plugins_hosts_handler))
+        // D4（审查总册 P1-15）：多源仲裁「用户副本未生效」清单（只读告警面）
+        .route(
+            "/api/v1/plugins/source-arbitration",
+            get(plugins_source_arbitration_handler),
+        )
         // G8 优雅重启（admin）：排空 running runs → exit 75，监督者拉起新进程
         .route(
             "/api/v1/system/restart",
             axum::routing::post(system_restart_handler),
         )
         // M1 测量面：mimalloc 分配器统计快照（内核自有只读诊断端点，
-        // 鉴权走 write_surface_auth 白名单读面）
+        // 鉴权走 /api/v1 前缀读面）
         .route("/api/v1/system/memstats", get(system_memstats_handler))
         // 堆栈级诊断面：内核活内存按结构分解 + 任务级活动转储（只读，
-        // 鉴权同 memstats 白名单读面）
+        // 鉴权同 memstats 前缀读面）
         .route(
             "/api/v1/system/memory-breakdown",
             get(crate::system_diagnostics::system_memory_breakdown_handler),
@@ -241,15 +249,18 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/auth/change-password",
             post(change_password_handler),
         );
-    // 统一通用数据接口（task_01）已迁移为 boot-plugin（第一刀）：
-    // /api/v1/db/* 的 axum nest 已摘除——SQL 能力层在 agentos-db-admin crate 的
-    // capability handler（agentos-kernel.rs 注册 db-admin namespace），HTTP 面在
-    // plugins/shared/db_admin 插件（/ext/db_admin/** 经 dispatcher 通配分发）。
-
+    // 统一通用数据接口（task_01）已迁移为 boot-plugin（第一刀）：/api/v1/db/* 的 axum nest
+    // 已摘除（能力层在 agentos-db-admin handler，HTTP 面在 db_admin 插件）。例外
+    // /api/v1/db/read = db-read 读契约管理端点（C2 刀1，handler 在 db-admin read_faces）。
+    let static_router = static_router.route(
+        "/api/v1/db/read",
+        post(agentos_db_admin::db_read_http_handler),
+    );
     // P3：动态挂载插件 HTTP 端点（http_routes → dispatcher）
     let router =
         crate::http_dispatcher::build_router_with_http_routes(state.clone(), static_router);
-    // F-API-1：配置写入面 + 会话/插件生命周期鉴权（白名单路径 + method 分写/读）。
+    // 鉴权层（default-deny 枚举制）：受保护前缀 + 匿名豁免清单，声明见
+    // [AUTH_PROTECTED_PREFIXES] 一组 pub 常量（对账枚举单一真值源）。
     let auth_layer = from_fn_with_state(state.clone(), write_surface_auth);
     // CORS：开发期前端通过 VITE_API_BASE_URL 直连内核（http://localhost:9100），
     // 浏览器跨域请求需要预检（OPTIONS）+ 响应头带 Access-Control-Allow-Origin。
@@ -260,30 +271,97 @@ pub fn build_router(state: AppState) -> Router {
         .layer(from_fn(cors_middleware))
 }
 
-/// F-API-1：配置写入面 + 会话/插件生命周期/管道域读面鉴权中间件。
+/// 鉴权面声明（P-2 default-deny 枚举制，ADR 2026-10-10；2026-09-11 未竟第二刀）。
 ///
-/// 按路径白名单 + method 区分：写面（POST/PUT/PATCH/DELETE）→ require_surface_role
-/// （admin）；读面（GET）→ require_surface_role（admin/viewer）。白名单覆盖：
-/// - `/api/v1/sessions*`（会话 CRUD）
-/// - `/api/v1/plugins*`（status/enabled/config；注意 /api/v1/plugins 裸路径也需鉴权）
-/// - `/api/v1/system/restart`、`/api/v1/system/memstats*`（读面：分配器统计
-///   快照 + 快照差分）、`/api/v1/system/memory-breakdown`、
-///   `/api/v1/system/task-dump`（堆栈级诊断读面）
-/// - `/api/v1/actions/execute`、`/api/v1/interaction/response`
-/// - `/api/v1/chat`（写面：消息触发管道执行/落库，未鉴权等于任意人
-///   可驱动执行与消耗算力）
-/// - `/api/v1/pipelines*`（管道域读端点：列表/runs/state/pending-inputs——
-///   管道运行数据含会话内容与执行轨迹，缺省匿名=任意人可读）
-/// - `/api/v1/message-segments*`（消息段读端点：段行含消息引用列表，单段解析
-///   成员全文——同属会话内容读面）
-/// - `/api/v1/tools`、`/api/v1/schema`（工具面与配置聚合读端点）
-/// - `/api/v1/config/pipelines/{name}`（GET 读 + PUT 写，写面原有）
-/// - `/metrics`（Prometheus 导出：指标含用量数据，抓取方需带 token）
-/// - `/api/v1/ws-ticket`（特例：任意已认证用户可签发，不做角色门——见下方分支）
+/// 单一真值源：鉴权层与对账测试共用这组常量；scripts/gen_openapi.py 后续复用
+/// 同一对账枚举（枚举键 = server.rs / http_dispatcher.rs 注册调用里的路径字面量
+/// × 下列各清单，Python 侧同型扫描即可，先例 scripts/check_kernel_port_sync.py
+/// 正则抽源码）。
+pub const AUTH_PROTECTED_PREFIXES: &[&str] = &[
+    // 内核静态 API 全域（含 /api/v1/datasource 数据源代理——前端 apiClient
+    // 统一带 token，代理面默认鉴权）
+    "/api/v1/",
+    // 附件取流面：前端消费面统一走鉴权取流加载器（2026-09-28 文件加载器
+    // 路由），裸直链已清零；svg 同源 XSS 匿名面随之闭合
+    "/uploads/",
+    // WebSocket 握手面（豁免清单内的握手端点票据/token 自鉴权）
+    "/ws/",
+];
+
+/// 受保护路径中不落任何前缀的精确成员（"/metrics" 无子面）。
+pub const AUTH_PROTECTED_EXACT: &[&str] = &["/metrics"];
+
+/// 匿名豁免清单：受保护域内允许匿名到达的精确路径，每项注明为何匿名安全。
+/// 条目必须存在于注册面（对账测试双向对账，过期条目即红）。
+pub const AUTH_ANONYMOUS_ALLOW: &[&str] = &[
+    // 不匿名无法登录（同面自带登录限流）
+    "/api/v1/auth/login",
+    // 注册是登录前唯一写入口（同面自带全局限频）
+    "/api/v1/auth/register",
+    // handler 自校验 token：无 token 即 401，匿名路由无害
+    "/api/v1/auth/me",
+    // handler 自校验 refresh token（单次轮换 + 口令绑定）
+    "/api/v1/auth/refresh",
+    // 仅消费请求体携带的 refresh token，无 token 即无副作用
+    "/api/v1/auth/logout",
+    // handler 自校验 access token + 口令绑定段（自服务面，与角色无关——
+    // 落角色门会把普通用户改自己口令误拒为 403）
+    "/api/v1/auth/change-password",
+    // 握手自鉴权：?ticket= 一次性票据 / ?token= Bearer，无效 4001 拒绝
+    "/ws/chat",
+];
+
+/// 任意已认证用户（无角色门）的受保护路径：ws-ticket 签发——票据只是本人
+/// WS 握手凭证（单次消费 + 60s TTL），非管理面写操作。
+pub const AUTH_ANY_USER_ALLOW: &[&str] = &["/api/v1/ws-ticket"];
+
+/// 鉴权层域外（鉴权另有所属，对账清单）：
+/// - /health：存活探测（release.yml 冒烟与装机探测），无数据面；
+/// - /ext/{*rest}：插件声明制鉴权（manifest auth 字段缺省 401 fail-closed，
+///   ADR 2026-09-11），由 http_dispatcher 自持。
+pub const AUTH_OUTSIDE_MIDDLEWARE: &[&str] = &["/health", "/ext/{*rest}"];
+
+/// 鉴权面分类（对账枚举的判定结果；`None` = 路径未落入任何一侧）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthSurfaceClass {
+    /// 匿名豁免（handler 自鉴权或登录前入口）
+    AnonymousAllow,
+    /// 任意已认证用户，无角色门
+    AnyUser,
+    /// 受保护：GET → admin/viewer，其余 method → admin
+    Protected,
+    /// 鉴权层域外（/health 探测、/ext 声明制）
+    OutsideMiddleware,
+}
+
+/// 路径 → 鉴权面分类。豁免/任意用户清单精确匹配优先于受保护前缀；未落入
+/// 任何一侧返回 None——注册面出现此类路径时对账测试判红（新路由必须在
+/// 受保护前缀内，或显式登记进某一清单并注明缘由）。
+pub fn classify_auth_surface(path: &str) -> Option<AuthSurfaceClass> {
+    if AUTH_ANONYMOUS_ALLOW.contains(&path) {
+        return Some(AuthSurfaceClass::AnonymousAllow);
+    }
+    if AUTH_ANY_USER_ALLOW.contains(&path) {
+        return Some(AuthSurfaceClass::AnyUser);
+    }
+    if AUTH_PROTECTED_PREFIXES.iter().any(|p| path.starts_with(p))
+        || AUTH_PROTECTED_EXACT.contains(&path)
+    {
+        return Some(AuthSurfaceClass::Protected);
+    }
+    if AUTH_OUTSIDE_MIDDLEWARE.contains(&path) {
+        return Some(AuthSurfaceClass::OutsideMiddleware);
+    }
+    None
+}
+
+/// 内核静态面鉴权中间件（default-deny 枚举制，ADR 2026-10-10）。
 ///
-/// 其余路径放行（/health、/api/v1/auth/*、/uploads/*、/ws、/api/v1/db/* 等；
-/// agent 配置写面已插件化——/ext/agent_manager 的 PUT admin 闸由插件自持，
-/// 见 2026-08-20 ADR）。
+/// `needs_auth = 受保护路径 && !匿名豁免`：命中受保护前缀且不在豁免清单的
+/// 路径按 method 分权（GET → admin/viewer，POST/PUT/PATCH/DELETE → admin，
+/// require_surface_role）；受保护前缀内新注册的路由缺省即受保护（枚举制
+/// 翻转的本意），前缀外新路由须登记进域外清单，否则对账测试红。豁免清单
+/// 与域外清单逐项缘由见 [AUTH_ANONYMOUS_ALLOW] / [AUTH_OUTSIDE_MIDDLEWARE]。
 async fn write_surface_auth(
     State(state): State<AppState>,
     req: Request,
@@ -294,26 +372,15 @@ async fn write_surface_auth(
 
     // WS 票据签发：任意已认证用户（user/admin 均可），不做角色区分——
     // 票据只是本人 WS 握手凭证（单次消费 + 60s TTL），非管理面写操作。
-    if path == "/api/v1/ws-ticket" {
+    if AUTH_ANY_USER_ALLOW.contains(&path) {
         agentos_http::auth::resolve_request_user(state.store.as_ref(), req.headers()).await?;
         return Ok(next.run(req).await);
     }
 
-    let needs_auth = path.starts_with("/api/v1/sessions")
-        || path.starts_with("/api/v1/plugins")
-        || path.starts_with("/api/v1/pipelines")
-        || path.starts_with("/api/v1/message-segments")
-        || path.starts_with("/api/v1/config/pipelines/")
-        || path == "/api/v1/system/restart"
-        || path.starts_with("/api/v1/system/memstats")
-        || path == "/api/v1/system/memory-breakdown"
-        || path == "/api/v1/system/task-dump"
-        || path == "/api/v1/actions/execute"
-        || path == "/api/v1/interaction/response"
-        || path == "/api/v1/chat"
-        || path == "/api/v1/schema"
-        || path == "/api/v1/tools"
-        || path == "/metrics";
+    let needs_auth = matches!(
+        classify_auth_surface(path),
+        Some(AuthSurfaceClass::Protected)
+    );
 
     if !needs_auth {
         return Ok(next.run(req).await);
@@ -329,7 +396,7 @@ async fn write_surface_auth(
     }
 }
 
-/// 会话/插件生命周期白名单面的角色校验（原 db_routes::require_read_role /
+/// 受保护面角色校验（原 db_routes::require_read_role /
 /// require_admin_role 的 api 侧等价实现——db_routes 已拆至 db-admin crate，
 /// 此处用 api 自身的 resolve_request_user（agentos-http 单一实现），
 /// 语义与错误消息保持与拆分前一致）。
@@ -546,43 +613,34 @@ async fn run_p2_ws_session_authed(
 
 /// 根据请求头解析当前租户上下文。
 ///
-/// 多租户 P0-4：从 Authorization token 解析（或回退到默认租户），
-/// 注入到 [`agentos_tenant::scope`] 后，engine/store 通过 task_local 读取。
+/// 多租户 P0-4：从 Authorization token 解析（无 token / 无效 / 过期回退默认
+/// 租户），注入到 [`agentos_tenant::scope`] 后，engine/store 通过 task_local 读取。
 /// async：tenant 解析需查 store（持久化用户的一用户一租户映射）。
+/// token 合法但用户解析失败（已删除/存储故障）→ 错误传播（401/503，
+/// K8 修订 ADR 2026-10-10），不再降级 default——写面降级即写串租户。
 pub(crate) async fn request_tenant_ctx(
     store: Option<&std::sync::Arc<dyn agentos_core::traits::StorageBackend>>,
     headers: &HeaderMap,
     session_id: &str,
-) -> TenantContext {
-    TenantContext::new(resolve_request_tenant_id(store, headers).await, session_id)
+) -> Result<TenantContext, agentos_http::error::ApiError> {
+    let tenant_id = resolve_request_tenant_id(store, headers).await?;
+    Ok(TenantContext::new(tenant_id, session_id))
 }
 
-// 通过 0.2 配置驱动管道引擎处理消息。
-//
-// 构造 [`agentos_engine::PipelineExecutor`]，读取 AppState 中的 `pipeline_config`
-// + `step_library`，按 YAML 定义的 step 顺序执行（三级命中规则）。
-//
-// 流程：
-// 1. 构造初始 state（含 `message` / `core_type` 等；执行身份走 state 持久键
-//    `agent.id`，非 per-run 注入）
-// 2. agent 配置与工具面均归插件域：context_build 按 state agent.id 加载
-//    agent yaml 并写 state.tool_ids，tool_schema 插件经内核 tool-surface
-//    capability 取过滤后 schema（prepare 链每轮刷新）
-// 3. 构造 PipelineExecutor 并执行 `run`
-// 4. 从最终 state 提取响应（优先 `raw_result`，回退 `message`，再回退原消息）
-//
-// 降级条件：AppState 缺少 invoker / store / project_root（典型为测试或老式构造）
-// 时走 echo-fallback，标注降级原因。
-
-// 冷路径回放从该 pipeline 的 step 级轨迹按序 merge 重建完整 state（含 messages），
-// 不再特化只读 messages 表——轨迹颗粒度即恢复边界。
+// 通过 0.2 配置驱动管道引擎处理消息：构造 [`agentos_engine::PipelineExecutor`]，
+// 热路径经 `load_and_compile_by_name` 现读盘上 config（管道配置 + 公共 step 库）
+// 按 YAML 定义的 step 顺序执行（三级命中规则）；初始 state 构造、agent 配置与
+// 工具面均归插件域（agent_config_load / tool_schema 经 tool-surface capability），
+// 从最终 state 只认 `raw_result` 提取响应；AppState 缺 invoker / store /
+// project_root（测试或老式构造）时走 echo-fallback。冷路径回放从 step 级轨迹
+// 按序 merge 重建完整 state（轨迹颗粒度即恢复边界）。
 
 /// 管道配置热重载的 mtime 检测 TTL：1 秒内不重复 stat，避免高频 chat 时反复解析 YAML。
 const PIPELINE_CONFIG_TTL: Duration = Duration::from_secs(1);
 
-/// 热重载检测的全局缓存：记录上次检测时刻 + 上次配置文件的 mtime 指纹 +
-/// 上次编译产物（G10：指纹不变时直接复用，零重编译）。
-/// 进程级单例（OnceLock），所有 chat 请求共享，避免每次都重新 stat/解析/编译。
+/// 热重载检测的全局缓存：上次检测时刻 + 上次编译指纹（配置 mtime ⊕ manifests
+/// 摘要，B6 双维键域）+ 上次编译产物（G10：指纹不变直接复用）。进程级单例，
+/// 所有 chat 请求共享，避免反复 stat/解析/编译。
 #[derive(Clone)]
 struct ConfigReloadState {
     last_check: std::time::Instant,
@@ -599,11 +657,15 @@ fn config_reload_cache() -> &'static ParkingRwLock<HashMap<PathBuf, ConfigReload
     CONFIG_RELOAD_CACHE.get_or_init(|| ParkingRwLock::new(HashMap::new()))
 }
 
-/// 计算管道配置的 mtime 指纹：autonomous.yaml + config/steps/ 目录下所有 .yaml。
-///
-/// 用 mtime 而非内容 hash：stat 是微秒级，热路径可接受；mtime 精度足够捕获配置修改。
-/// 任一配置文件 mtime 变化 → 指纹变化 → 触发重载。
-fn compute_config_fingerprint(config_root: &std::path::Path) -> u64 {
+/// 计算管道编译缓存指纹：配置面 mtime（autonomous.yaml + config/steps/*.yaml）
+/// ⊕ manifests 摘要（B6，编译输入第二维——步骤服务索引与已知插件集合均出自
+/// manifests）。配置面用 mtime（stat 微秒级，热路径可接受）；声明面是内存
+/// 集合，mtime 无法表达，用按 id 排序的内容序列化 hash——内容不变（纯代码
+/// 变更）命中缓存，任何声明变更必失效。任一维变化 → 指纹变化 → 重编译。
+fn compute_config_fingerprint(
+    config_root: &std::path::Path,
+    manifests: &[agentos_core::traits::PluginManifest],
+) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::Hasher;
     let mut hasher = DefaultHasher::new();
@@ -649,6 +711,16 @@ fn compute_config_fingerprint(config_root: &std::path::Path) -> u64 {
         }
     }
 
+    // manifests 摘要（声明维，B6）：按 id 排序消除集合序噪声，逐个序列化哈希。
+    let mut sorted: Vec<&agentos_core::traits::PluginManifest> = manifests.iter().collect();
+    sorted.sort_by(|a, b| a.id.cmp(&b.id));
+    hasher.write(b"manifests:");
+    for m in sorted {
+        let json = serde_json::to_string(m).expect("manifest 序列化不可失败");
+        hasher.write(json.as_bytes());
+        hasher.write(b"\n");
+    }
+
     hasher.finish()
 }
 
@@ -665,24 +737,20 @@ async fn live_plugin_ids(state: &AppState) -> std::collections::HashSet<String> 
         .collect()
 }
 
-/// Pull 热加载：按需重载并**编译**管道配置（G10 生产路径）。
-///
-/// 每次 `process_via_engine` 执行前调用。返回本次执行应使用的
-/// [`CompiledPipeline`]（启动期编译的语义，运行时零解析）。
-/// 策略（双层短路 + fail-safe）：
-/// 1. **TTL 门**：距上次检测不足 `PIPELINE_CONFIG_TTL`（1s）→ 直接返回缓存编译产物。
-/// 2. **指纹比对**：TTL 过期后 stat autonomous.yaml + steps 目录 mtime，与缓存比对。
-///    相同 → 返回缓存产物（没更新）；不同 → 重新加载 + 校验 + 编译，
-///    成功返回新产物并更新缓存，失败（坏 YAML / 命名冲突 / 编译错误）则保留旧
-///    产物 + 记 warn（不 panic，对照启动期 fail-fast 的降级版）。
-///
-/// 快照语义：在途 run 持调用时拿到的 `Arc` 跑完，新 run 取新产物——热重载对
-/// 正在执行的管道零影响。失败安全：任何 IO/解析/编译错误都回退到旧产物，
-/// 绝不因热重载让 chat 不可用。
+/// Pull 热加载：按需重载并**编译**管道配置（G10 生产路径）。每次
+/// `process_via_engine` 执行前调用，返回本次执行应使用的
+/// [`CompiledPipeline`]（启动期编译的语义，运行时零解析）；`None` = 尚无一次
+/// 成功编译——调用方显式报错拒绝空跑（空管道轮次零步"完成" = 零回复零错误帧
+/// 的假成功）。策略（双层短路）：①TTL 门——距上次检测不足 1s 直接返回缓存
+/// 产物；②指纹比对——过期后计算指纹（配置 mtime ⊕ manifests 摘要）与缓存
+/// 比对，相同 → 缓存产物，不同 → 重载 + 编译（失败保留旧产物 + warn）。快照
+/// 语义：在途 run 持调用时的 `Arc` 跑完，新 run 取新产物。自愈：编译对
+/// (配置, manifests) 确定性——同指纹必同结果，失败态不占位缓存；修复到达
+/// （提供方热注册/能力变更/配置修复）必改指纹，下个 TTL 窗口自动重编译。
 async fn maybe_reload_compiled_pipeline(
     state: &AppState,
     config_root: &std::path::Path,
-) -> Arc<agentos_engine::compiler::CompiledPipeline> {
+) -> Option<Arc<agentos_engine::compiler::CompiledPipeline>> {
     let now = std::time::Instant::now();
     // TTL 门 + 指纹比对在同一把读锁下快照（按 config_root 取，测试多根并发隔离）
     let (needs_check, cached) = {
@@ -696,17 +764,19 @@ async fn maybe_reload_compiled_pipeline(
         }
     };
     if !needs_check {
-        return cached.unwrap_or_else(empty_compiled);
+        return cached;
     }
 
-    let new_fp = compute_config_fingerprint(config_root);
+    // 指纹双维（配置 stat ⊕ manifests 快照），仅 TTL 过期路径执行。
+    let manifests_snapshot = state.manifests.read().await.clone();
+    let new_fp = compute_config_fingerprint(config_root, &manifests_snapshot);
     let (reload, cached_compiled) = {
         let mut cache = config_reload_cache().write();
         let (stale, compiled) = match cache.get(config_root) {
             None => (true, None),
             Some(c) => (c.last_fingerprint != new_fp, c.compiled.clone()),
         };
-        // 无论是否重载都刷新检测时刻；指纹更新到 new_fp
+        // 无论是否重载都刷新检测时刻与指纹基线（修复到达必改指纹，见函数头"自愈"）。
         cache.insert(
             config_root.to_path_buf(),
             ConfigReloadState {
@@ -719,13 +789,14 @@ async fn maybe_reload_compiled_pipeline(
     };
 
     if !reload {
-        return cached_compiled.unwrap_or_else(empty_compiled);
+        return cached_compiled;
     }
 
-    // 指纹变化 → 重新加载 + 校验 + 编译（G10：when AST / 引用 / 环在加载期暴露）
+    // 指纹变化 → 重新加载 + 校验 + 编译
+    //（G10：when AST / 引用 / 环在加载期暴露）
     info!("Pipeline config changed on disk, reloading + recompiling...");
-    let known_ids = live_plugin_ids(state).await;
-    let recompiled = load_and_compile(config_root, &known_ids);
+    let manifests_snapshot = state.manifests.read().await.clone();
+    let recompiled = load_and_compile(config_root, &manifests_snapshot);
     let new_compiled = match recompiled {
         Ok(c) => {
             info!(
@@ -737,7 +808,9 @@ async fn maybe_reload_compiled_pipeline(
         }
         Err(e) => {
             warn!(error = %e, "Hot reload: pipeline recompile failed, keeping old compiled config");
-            return cached_compiled.unwrap_or_else(empty_compiled);
+            // 失败态不入缓存：编译对 (配置, manifests) 确定性——同指纹必同结果；
+            // 修复到达必改指纹，下个 TTL 窗口自动重编译（双维同权驱动自愈）。
+            return cached_compiled;
         }
     };
     // 编译成功 → 原子更新缓存（后续请求零重编译）。
@@ -751,29 +824,22 @@ async fn maybe_reload_compiled_pipeline(
             .write()
             .insert(config_root.to_path_buf(), c);
     }
-    new_compiled
+    Some(new_compiled)
 }
 
-/// 加载 + 校验 + 编译管道（供热重载与启动期 fail-fast 复用）。
-///
-/// 任一步失败返回 Err（含上下文）——启动期调用方据此 panic 拒绝启动，
-/// 热重载调用方据此保留旧产物。
-///
-/// 隐性技术债务显性标注（ADR 2026-09-09-kernel-dead-layer-adjudication，
-/// 裁决=③级未接线保留）：
-/// - 妥协内容：本入口走 `compile_pipeline`（无 hooks 无步骤服务索引）——
-///   hooks/步骤服务接线编译链（`load_pipeline_with_hooks` →
-///   `compile_pipeline_with_hooks`）已建成但未接线，yaml 声明的 hooks 在
-///   `to_internal` 丢弃、运行时 `hooks_for` 恒空表短路、③级命中不可达；
-/// - 升级触发条件：管道配置出现 `hooks:` 声明，或步骤服务跨插件编排
-///   需求立项——届时本入口切换到 with_hooks 装配（单点改动）；
-/// - 时间上限：0.3 主线排期评审——届时确认无接线需求则执行删除分支
-///   （拆除整链，回退纯 `compile_pipeline` 形态）。
+/// 加载 + 校验 + 编译管道（供热重载与启动期 fail-fast 复用）：任一步失败返回
+/// Err（含上下文）——启动期调用方据此 panic 拒绝启动，热重载调用方据此保留旧产物。
+/// 步骤服务③级已接线（ADR 2026-10-08-step-service-level3-wiring）：本入口恒构
+/// [`build_step_service_index`] 传入 with_hooks 装配——③级命中生产可达（执行死层
+/// ①接线分支，ADR 2026-09-09-kernel-dead-layer-adjudication）。兼容映射保证存量
+/// 零破坏：纯步骤插件隐式默认注册、显式条目 name==插件 id 映射 method None（与④
+/// 直引等价）；hooks 沿传空（无声明需求，hooks 链仍按原裁定保留，yaml hooks 字段
+/// 在 `to_internal` 丢弃不变）。
 pub fn load_and_compile(
     config_root: &std::path::Path,
-    plugin_ids: &std::collections::HashSet<String>,
+    manifests: &[agentos_core::traits::PluginManifest],
 ) -> Result<agentos_engine::compiler::CompiledPipeline, String> {
-    load_and_compile_by_name(config_root, "autonomous", plugin_ids)
+    load_and_compile_by_name(config_root, "autonomous", manifests)
 }
 
 /// 按名加载 + 校验 + 编译管道（[`load_and_compile`] 的通用形态）。
@@ -782,32 +848,45 @@ pub fn load_and_compile(
 pub fn load_and_compile_by_name(
     config_root: &std::path::Path,
     name: &str,
-    plugin_ids: &std::collections::HashSet<String>,
+    manifests: &[agentos_core::traits::PluginManifest],
 ) -> Result<agentos_engine::compiler::CompiledPipeline, String> {
-    use agentos_engine::compiler::compile_pipeline;
-    let pipeline = load_pipeline_config_by_name(config_root, name)
+    use agentos_engine::compiler::{build_step_service_index, compile_pipeline_with_checks};
+    let plugin_ids: std::collections::HashSet<String> =
+        manifests.iter().map(|m| m.id.clone()).collect();
+    let index = build_step_service_index(manifests)
+        .map_err(|e| format!("步骤服务索引构建失败: {}", e.message))?;
+    let (pipeline, checks) = load_pipeline_with_checks(config_root, name)
         .map_err(|e| format!("加载管道配置 '{name}' 失败: {e}"))?;
     let steps = load_step_library(config_root).map_err(|e| format!("加载公共 step 库失败: {e}"))?;
-    validate_no_name_conflicts(&pipeline, &steps, plugin_ids)
+    validate_no_name_conflicts(&pipeline, &steps, &plugin_ids)
         .map_err(|conflict| format!("管道配置 '{name}' 命名冲突: {conflict}"))?;
-    compile_pipeline(&pipeline, &steps, plugin_ids)
-        .map_err(|e| format!("管道配置 '{name}' 编译失败: {e}"))
+    // L2 嵌套不变量装载期校验（ADR 2026-11-05-timeout-taxonomy-and-merge §5.2）：
+    // 外层声明 ≥ 内层声明，违反拦截（指名哪层包不住哪层）——矛盾在装载时炸
+    // 而非运行 600s 后炸；动态面（LLM 工具面）由 L1 让位机制承载，不在此拦。
+    crate::timeout_nesting::validate_timeout_nesting(&pipeline, &steps, manifests, &index)
+        .map_err(|e| format!("管道配置 '{name}' 超时嵌套校验失败: {e}"))?;
+    compile_pipeline_with_checks(
+        &pipeline,
+        &steps,
+        &plugin_ids,
+        Some(&index),
+        &checks.body_checks,
+        &checks.safety_locked_steps,
+    )
+    .map_err(|e| format!("管道配置 '{name}' 编译失败: {}", e.message))
 }
 
 // ═════════════════════════════════════════════════════════════════
 // 管道编译缓存（PipelineCache）：显式指定的管道配置按需加载编译
 // ═════════════════════════════════════════════════════════════════
 
-/// 单个管道配置名的编译产物版本集（D9 版本钉住，批 H）。
-///
-/// - `versions`：按 config_hash 双键保留全部历史版本产物——PUT 热更不删旧
-///   条目（已钉实例按 (name, config_hash) 恒取出生版本）；
-/// - `latest`：当前盘面最新版的 config_hash，PUT 热更后置 None（下次未钉
-///   取用按盘面重编译产新版本入集）。
-///
-/// 版本集合进程内只增不删：每次 PUT 至多新增一个版本，产物为配置规模的
-/// 小结构（无 messages 等大字段），进程生命周期内不做淘汰——淘汰会让已钉
-/// 实例被迫走盘面重编译路径，配置已改时误触 fail-closed（旧产物必须保留）。
+/// 单个管道配置名的编译产物版本集（D9 版本钉住，批 H）。`versions` 按
+/// config_hash 双键保留全部历史版本产物——PUT 热更不删旧条目（已钉实例按
+/// (name, config_hash) 恒取出生版本）；`latest` = 当前盘面最新版的 config_hash，
+/// PUT 热更后置 None（下次未钉取用按盘面重编译产新版本入集）。版本集合进程内
+/// 只增不删：每次 PUT 至多新增一个版本，产物为配置规模的小结构（无 messages 等
+/// 大字段），进程生命周期内不做淘汰——淘汰会让已钉实例被迫走盘面重编译路径，
+/// 配置已改时误触 fail-closed（旧产物必须保留）。
 struct PipelineVersionSet {
     latest: Option<String>,
     versions: HashMap<String, Arc<agentos_engine::compiler::CompiledPipeline>>,
@@ -881,8 +960,7 @@ pub fn pipeline_cache_invalidate(name: &str) {
 /// 管道编译产物选择收敛点（CompiledPipeline 唯一运行时取用面）。
 ///
 /// - `config_id = None` → autonomous 单例（[`maybe_reload_compiled_pipeline`]
-///   热重载路径，缺省行为与历史逐字节一致）——默认会话不参与版本钉住
-///   （D9 范围 = 显式绑定与任务派生管道，dev 迭代面保持热更）；
+///   热重载路径）——默认会话不参与版本钉住（D9 = 显式绑定与任务派生管道）；
 /// - `Some(id)` 且未钉（`pinned_hash = None`）→ 当前最新版：缓存 latest 命中
 ///   直接返回，未命中按盘面加载+编译+入集返回（调用方据返回产物的
 ///   `config_hash` 落钉 = 出生即钉）；
@@ -891,10 +969,8 @@ pub fn pipeline_cache_invalidate(name: &str) {
 ///   恢复），不一致 → `Err` fail-closed（含期望/当前盘面 hash，提示新开会话
 ///   或重派任务，不静默换版本）；
 /// - 任一步失败 → `Err`（带管道名）——**不回落 autonomous**：用哪个管道就是
-///   哪个，静默回落 = 用错管道。
-///
-/// `pinned_hash` 仅对显式配置生效（`None` 缺省路径无视它，由调用方
-/// [`resolve_config_pin`] 保证不出现在缺省轮）。
+///   哪个，静默回落 = 用错管道。`pinned_hash` 仅对显式配置生效（`None` 缺省
+///   路径无视它，由调用方 [`resolve_config_pin`] 保证不出现在缺省轮）。
 pub(crate) async fn compiled_for(
     state: &AppState,
     config_root: &std::path::Path,
@@ -902,7 +978,13 @@ pub(crate) async fn compiled_for(
     pinned_hash: Option<&str>,
 ) -> Result<Arc<agentos_engine::compiler::CompiledPipeline>, String> {
     let Some(name) = config_id.filter(|s| !s.is_empty()) else {
-        return Ok(maybe_reload_compiled_pipeline(state, config_root).await);
+        // autonomous 缺省路径：无可用编译产物显式报错拒绝空跑（零步"完成" =
+        // 零回复零错误帧的假成功）；Err 经既有失败面可见，自愈靠指纹双维——
+        // 修复到达必改指纹，下个 TTL 窗口自动重编译。
+        return maybe_reload_compiled_pipeline(state, config_root).await.ok_or_else(|| {
+            "管道配置 'autonomous' 暂不可用：编译失败且无历史产物，拒绝空管道执行（修复配置或补齐步骤提供方插件后自动恢复）"
+                .to_string()
+        });
     };
     if let Some(expected) = pinned_hash {
         return compiled_for_pinned(state, config_root, name, expected).await;
@@ -987,8 +1069,12 @@ async fn compile_explicit_config(
     if !path.exists() {
         return Err(format!("管道配置 '{name}' 不存在（{}）", path.display()));
     }
-    let known_ids = live_plugin_ids(state).await;
-    let compiled = Arc::new(load_and_compile_by_name(config_root, name, &known_ids)?);
+    let manifests_snapshot = state.manifests.read().await.clone();
+    let compiled = Arc::new(load_and_compile_by_name(
+        config_root,
+        name,
+        &manifests_snapshot,
+    )?);
     info!(pipeline_config = %name, "Pipeline config lazily loaded and compiled");
     Ok(compiled)
 }
@@ -1045,21 +1131,6 @@ fn resolve_config_pin(
     }
 }
 
-/// 空编译产物（配置缺失/首次编译失败时的安全降级：空管道执行，语义与
-/// "缺省配置下内核可启动"一致）。
-fn empty_compiled() -> Arc<agentos_engine::compiler::CompiledPipeline> {
-    use agentos_engine::compiler::compile_pipeline;
-    let empty = PipelineConfig::default();
-    Arc::new(
-        compile_pipeline(
-            &empty,
-            &StepLibrary::default(),
-            &std::collections::HashSet::new(),
-        )
-        .expect("空管道编译必然成功"),
-    )
-}
-
 /// 引擎执行结果。
 ///
 /// - `content`：纯文本回复（raw_result/message 提取），HTTP/回退路径直接消费；
@@ -1070,7 +1141,7 @@ fn empty_compiled() -> Arc<agentos_engine::compiler::CompiledPipeline> {
 /// - `plugin_errors`：本轮管道执行中插件失败（result.error / invoker Err）的
 ///   收集（引擎 warn+继续的假成功显式化）——WS 路径发射 plugin_error 事件
 ///   弹前端通知；HTTP 路径无消费面（REST chat 同步返回，错误进日志）。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct EngineOutcome {
     pub content: String,
     pub final_assistant: Option<serde_json::Value>,
@@ -1080,6 +1151,26 @@ pub(crate) struct EngineOutcome {
     pub degraded: bool,
     /// 插件执行错误收集（`[{plugin_id, code, message}]`，引擎 `_plugin_errors` 键提取）。
     pub plugin_errors: Vec<serde_json::Value>,
+    /// 轮边界注入消费的队列条目 cmid（引擎 `_consumed_pending_cmids` 键提取，
+    /// 设计真值 docs/working/待输入队列轮边界注入_方案_20261025.md）：这些条目
+    /// 不经链级 drain 独立成轮，run 收尾时调用方对每个 cmid 通知 REST /chat
+    /// 同步桥等待者（同一 outcome），防等待者挂到超时层。
+    pub consumed_pending_cmids: Vec<String>,
+}
+
+impl EngineOutcome {
+    /// 终止型出口信封：无 assistant 产出、非降级、零插件错误的失败/拒绝构造
+    /// （前置校验拒绝、引擎 Err 防御、落库重试耗尽等出口共用，消除同形字面量）。
+    fn terminated(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            final_assistant: None,
+            failed: true,
+            degraded: false,
+            plugin_errors: Vec::new(),
+            consumed_pending_cmids: Vec::new(),
+        }
+    }
 }
 
 // 技术债（同 ROADMAP 已知技术债表 PLR091x 治理方式）：多参转发函数，
@@ -1150,13 +1241,9 @@ async fn process_via_engine_inner(
     //    thread_id 是组织集合 id，不得充当执行坐标（2026-08-30 用户裁定：
     //    thread 回退曾让消息/state 落进以 thread id 为键的幽灵管道）。
     let effective_pipeline_id = if pipeline_id.is_empty() {
-        return EngineOutcome {
-            content: "[error] 缺少 pipeline_id，拒绝派发（会话 id 不得充当管道执行坐标）".into(),
-            final_assistant: None,
-            failed: true,
-            degraded: false,
-            plugin_errors: Vec::new(),
-        };
+        return EngineOutcome::terminated(
+            "[error] 缺少 pipeline_id，拒绝派发（会话 id 不得充当管道执行坐标）",
+        );
     } else {
         pipeline_id
     };
@@ -1228,6 +1315,35 @@ async fn process_via_engine_inner(
         Err(outcome) => return outcome,
     };
 
+    // 直跑早回执（聊天消息流权威化设计真值 docs/working/聊天消息流权威化重设计_20261027.md
+    // 不变量 1）：触发 user 消息此刻已带权威 seq/message_id 落库，即时回传认领
+    // 载荷——前端气泡只认引擎确认（claimUserMessage 同一条认领链），亚秒级上屏
+    // 替代乐观气泡。regenerate 重跑（skip_user_append）目标消息已在场，不发。
+    if !skip_user_append && !client_message_id.is_empty() {
+        if let Some(session) = state.session.as_ref() {
+            if let Some(first) = initial_state
+                .get("_pending_message_ops")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+            {
+                let payload = serde_json::json!({
+                    "pipeline_id": effective_pipeline_id,
+                    "thread_id": thread_id,
+                    "client_message_id": client_message_id,
+                    "record": {
+                        "id": first.get("message_id").cloned().unwrap_or_default(),
+                        "sequence": first.get("seq").cloned().unwrap_or(serde_json::json!(0)),
+                        "content": message,
+                    },
+                    "_threadId": thread_id,
+                });
+                let _ = session
+                    .emit_event(thread_id, "user_message_confirmed", payload)
+                    .await;
+            }
+        }
+    }
+
     // 2a. 实际状态轮中可见（2026-09-03 双状态裁定）：上一轮 final_state 若滞留
     //     registry，轮中可观测性（/pipelines/state）会读到陈旧终态——「显示已
     //     结束但还在输出」。dispatch 在引擎执行前用带 run_status=running 的
@@ -1235,7 +1351,7 @@ async fn process_via_engine_inner(
     //     控制键已刷新）。条目不存在（管道首轮）跳过——stage_finalize 收尾补建。
     stage_refresh_registry_snapshot(&tenant_id, effective_pipeline_id, &initial_state);
 
-    // 2/2b. agent 配置加载与工具面注入均归插件域：context_build 按 state 持久键
+    // 2/2b. agent 配置加载与工具面注入均归插件域：agent_config_load 按 state 持久键
     //    agent.id 加载 agent yaml 并写 state.tool_ids，tool_schema 插件经内核
     //    tool-surface capability 取过滤后 schema（prepare 链每轮刷新）。
 
@@ -1246,7 +1362,7 @@ async fn process_via_engine_inner(
         invoker,
         project_root,
         tenant,
-        store,
+        store.clone(),
         initial_state,
         agent_id,
         message,
@@ -1263,11 +1379,14 @@ async fn process_via_engine_inner(
     // 3b/4. registry 回写 + 响应提取。
     let outcome = stage_finalize(
         &final_state,
+        Some(store.as_ref()),
         &tenant_id,
         effective_pipeline_id,
         thread_id,
         agent_id,
-    );
+        &run_id,
+    )
+    .await;
     // GAP-2：run 终态域事件——内核只派生 run.* 终态事件（failed/suspended/
     // cancelled/completed，见 derive_run_terminal_events）；task_completed/
     // task_failed 由 task_service 插件订阅 run.* 后按任务域语义派生（ADR
@@ -1412,20 +1531,16 @@ async fn emit_run_terminal_domain_events(
             // checkpoint 兜底行将永远读不到终态（评测判稳/前端观测断链，2026-09-10
             // 压测实证）。表行单字段 upsert，随兜底行合并出口；下轮起点注入
             // running 覆盖，无复活风险。
+            let terminal_fields = terminal_run_fields(status, terminal_state);
             if let Some(store) = state.store.as_ref() {
                 if let Err(e) = store
-                    .upsert_state_field(
-                        pipeline_id,
-                        &tenant_id,
-                        "run_status",
-                        &serde_json::json!(status),
-                    )
+                    .upsert_state_fields(pipeline_id, &tenant_id, &terminal_fields)
                     .await
                 {
                     warn!(
                         pipeline_id = %pipeline_id,
                         error = %e,
-                        "终态 run_status 落表失败（观测兜底缺失，不影响执行）"
+                        "终态 run_status/run_stop_reason 落表失败（观测兜底缺失，不影响执行）"
                     );
                 }
             }
@@ -1435,6 +1550,36 @@ async fn emit_run_terminal_domain_events(
     }
 }
 
+/// run 收尾落表字段：`run_status` + `run_stop_reason`（同点、同生命周期、同事务）。
+///
+/// `run_status` 是内核持有的实际状态，checkpoint 落档按 VOLATILE 剥离，注销
+/// 热缓存前必须旁路落表，否则 list 视图的 checkpoint 兜底行永远读不到终态。
+///
+/// `run_stop_reason` 与之同点：它是**失败归因的唯一真值载体**。`router.stop_reason`
+/// 按设计在 `VOLATILE_RUN_KEYS` 内（防跨 run 残留，刻意不随 checkpoint 落档），
+/// 代价是终态真因只活在 WS 事件与日志——插件侧对账面读不到，只能写死猜测文案
+/// （事故 2026-10-17：墙钟超时被报成"启动清扫标记的进程异常终止"，与当日事实
+/// 无关，把排查方向带偏）。
+///
+/// 未署名（键缺席 / 非字符串 / 空串）一律落**空串**而非跳过：每轮终态都写，
+/// 杜绝上一轮署名残留被下一轮误读为本次归因。
+fn terminal_run_fields(
+    status: agentos_core::types::RunStatus,
+    terminal_state: &serde_json::Value,
+) -> serde_json::Map<String, serde_json::Value> {
+    let stop_reason = terminal_state
+        .get("router.stop_reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let mut fields = serde_json::Map::new();
+    fields.insert("run_status".to_string(), serde_json::json!(status));
+    fields.insert(
+        "run_stop_reason".to_string(),
+        serde_json::json!(stop_reason),
+    );
+    fields
+}
+
 /// run.failed 前端镜像帧：`run_failed` WS 事件（streaming.json 契约条目）。
 ///
 /// 载荷坐标从终态 state 提取（session_id/pipeline_id 出生契约键；引擎 Err
@@ -1442,6 +1587,11 @@ async fn emit_run_terminal_domain_events(
 /// （FAILED_STOP_REASONS 命中词；引擎 Err 无署名为 null）——内核只转发不
 /// 解释。run_id 是前端通知幂等键（emit_event 进 thread 级重放缓冲，重放
 /// 不重复弹卡）。会话坐标缺失 → 丢弃（无 WS 投递目标；域事件照发）。
+///
+/// `error`：首条插件错误原文（全量不截断，ADR 2026-10-27-pipeline-error-
+/// notification-channel 错误透传裁定）。折叠失败轮（步失败零产出）stop_reason
+/// 恒空串，通知卡此前只剩「管道异常退出」无归因——真实原因（限流/连接/
+/// 认证等）随本字段出口，前端失败卡直接渲染。无插件错误的失败轮为 null。
 async fn emit_run_failed_frontend_event(
     session: &agentos_session::SessionCoordinator,
     terminal_state: &serde_json::Value,
@@ -1458,6 +1608,15 @@ async fn emit_run_failed_frontend_event(
     if thread_id.is_empty() || pipeline_id.is_empty() {
         return;
     }
+    let first_plugin_error = terminal_state
+        .get("_plugin_errors")
+        .and_then(|v| v.as_array())
+        .and_then(|errs| {
+            errs.iter().find_map(|e| {
+                let msg = e.get("message")?.as_str()?.trim();
+                (!msg.is_empty()).then(|| msg.to_string())
+            })
+        });
     let _ = session
         .emit_event(
             thread_id,
@@ -1469,6 +1628,7 @@ async fn emit_run_failed_frontend_event(
                 "stop_reason": terminal_state.get("router.stop_reason")
                     .cloned()
                     .unwrap_or(serde_json::Value::Null),
+                "error": first_plugin_error,
                 "run_id": run_id,
             }),
         )
@@ -1485,6 +1645,7 @@ fn echo_fallback(missing: &str, message: &str) -> EngineOutcome {
         failed: false,
         degraded: true,
         plugin_errors: Vec::new(),
+        consumed_pending_cmids: Vec::new(),
     }
 }
 
@@ -1542,7 +1703,7 @@ fn merge_message_execution_context(base: &mut serde_json::Value, message: &serde
 /// core 器官执行态缺省（core_type 语义标志 + core_plugin 插件选择）不在本函数
 /// 种入——P1-1 声明化后由管道配置 `initial_state:` 声明、stage_execute
 /// 消费编译产物补种（内核零插件 id 知识）；agent 配置加载已移出内核
-/// （内核不读 config/agents/**，语义由管道输入插件 context_build 按执行上下文
+/// （内核不读 config/agents/**，语义由管道输入插件 agent_config_load 按执行上下文
 /// 键自持），管道配置步骤经 state 写面按步覆盖 core_type/core_plugin
 /// （config/pipelines/autonomous.yaml）。自由 state overlay 在恢复合并之后
 /// 应用（stage_recover_history）。
@@ -1565,7 +1726,7 @@ async fn stage_build_initial_state(
         "input": message,
         // 执行身份不是 per-run 注入键：agent 身份是管道 state 持久键 `agent.id`
         // （出生方经 chat.send_message state 透传落库），随本函数之后的热恢复
-        // （registry）/冷恢复（pipeline_state 表）进入 state，供 context_build
+        // （registry）/冷恢复（pipeline_state 表）进入 state，供 agent_config_load
         // 等插件消费面读取——缺省主 agent 由消费面自持，派发不再携带/注入身份。
         "ended": false,
         "suspended": false,
@@ -1962,8 +2123,8 @@ mod stage_finalize_residency_tests {
     /// tool_cache_writer 消费，跨轮零消费——恢复链 merge_recovered_scalars 跳过
     /// `_` 键），不得随 final_state 滞留内存注册表。messages 驻留是设计正确
     /// （队列跨轮延续），不动；tool_schemas 剥离是既有契约。
-    #[test]
-    fn residency_snapshot_strips_underscore_staging_keys_and_keeps_messages() {
+    #[tokio::test]
+    async fn residency_snapshot_strips_underscore_staging_keys_and_keeps_messages() {
         let reg = agentos_session::pipeline_state_registry::global_registry();
         let tenant = "tenant_finalize_us";
         let pid = "pipe_finalize_us";
@@ -1980,7 +2141,16 @@ mod stage_finalize_residency_tests {
             "_plugin_errors": [],
             "tool_schemas": {"bash_execute": {"type": "object"}},
         });
-        let _ = stage_finalize(&final_state, tenant, pid, "thread_fu", "agentos");
+        let _ = stage_finalize(
+            &final_state,
+            None,
+            tenant,
+            pid,
+            "thread_fu",
+            "agentos",
+            "run_fu",
+        )
+        .await;
 
         let entry = reg.get(tenant, pid).expect("收尾应补建条目");
         let e = entry.read();
@@ -2161,15 +2331,9 @@ async fn stage_recover_history(
                 error = %e,
                 "user 消息落库重试耗尽，终止本轮发送（不进入引擎执行）"
             );
-            EngineOutcome {
-                content: format!(
-                    "消息未受理：user 消息落库失败（已重试仍失败），本轮发送已终止，请稍候重试。原因: {e}"
-                ),
-                final_assistant: None,
-                failed: true,
-                degraded: false,
-                plugin_errors: Vec::new(),
-            }
+            EngineOutcome::terminated(format!(
+                "消息未受理：user 消息落库失败（已重试仍失败），本轮发送已终止，请稍候重试。原因: {e}"
+            ))
         })?;
     }
     Ok(initial_state)
@@ -2464,6 +2628,7 @@ async fn append_user_message(
 /// 执行失败（executor.run 返回 Err）：把 run 标记 failed + ended_at（避免永远卡
 /// running、历史悬空）并以 failed outcome 出口（Err 携带）。
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)] // 存量吸收(2026-10-12 文件规模棘轮): chat 执行编排聚合,拆分随执行链批次
 async fn stage_execute(
     state: &AppState,
     invoker: Arc<dyn agentos_core::traits::PluginInvoker>,
@@ -2509,6 +2674,8 @@ async fn stage_execute(
             thread_id,
             route_id,
             user_id.to_string(),
+            store.clone(),
+            tenant.tenant_id.clone(),
         )) as Arc<dyn agentos_engine::RoundEvents>
     });
 
@@ -2527,13 +2694,9 @@ async fn stage_execute(
         Ok(h) => h,
         Err(e) => {
             warn!(pipeline_config = ?pipeline_config_id, error = %e, "Pipeline config pin rejected");
-            return Err(EngineOutcome {
-                content: format!("[error] 管道配置加载失败: {e}"),
-                final_assistant: None,
-                failed: true,
-                degraded: false,
-                plugin_errors: Vec::new(),
-            });
+            return Err(EngineOutcome::terminated(format!(
+                "[error] 管道配置加载失败: {e}"
+            )));
         }
     };
     let compiled = match compiled_for(
@@ -2547,13 +2710,9 @@ async fn stage_execute(
         Ok(c) => c,
         Err(e) => {
             warn!(pipeline_config = ?pipeline_config_id, error = %e, "Pipeline config select failed");
-            return Err(EngineOutcome {
-                content: format!("[error] 管道配置加载失败: {e}"),
-                final_assistant: None,
-                failed: true,
-                degraded: false,
-                plugin_errors: Vec::new(),
-            });
+            return Err(EngineOutcome::terminated(format!(
+                "[error] 管道配置加载失败: {e}"
+            )));
         }
     };
     // P1-1 core 器官缺省声明化：管道配置 `initial_state:` 声明的键值在开轮前
@@ -2604,13 +2763,9 @@ async fn stage_execute(
                 error = %e,
                 "版本钉住落库失败，终止本轮（重发可恢复）"
             );
-            return Err(EngineOutcome {
-                content: format!("[error] 管道版本钉住写入失败: {e}（本轮未执行，请重发消息重试）"),
-                final_assistant: None,
-                failed: true,
-                degraded: false,
-                plugin_errors: Vec::new(),
-            });
+            return Err(EngineOutcome::terminated(format!(
+                "[error] 管道版本钉住写入失败: {e}（本轮未执行，请重发消息重试）"
+            )));
         }
         if let Some(obj) = initial_state.as_object_mut() {
             for (k, v) in &pin_fields {
@@ -2651,6 +2806,15 @@ async fn stage_execute(
             .iter()
             .flat_map(|m| m.persistent_fields.iter().cloned()),
     )
+    // 监控 M2 分类（整改 K2 声明化）：从全部插件 manifest 的
+    // `capabilities.metrics_class` 声明收集注入（未声明 = Other 兜底；
+    // 非法值引擎装配点 warn 后按 Other 计）。
+    .with_metrics_classes(state.manifests.read().await.iter().filter_map(|m| {
+        m.capabilities
+            .metrics_class
+            .clone()
+            .map(|declared| (m.id.clone(), declared))
+    }))
     // on_pipeline_end 钩子插件收集（spill_guard 清理通道）：manifest 声明了该
     // 钩子的插件在 run 结束时收到 OnPipelineEnd（best-effort，见 executor）。
     .with_pipeline_end_hook_plugins(
@@ -2684,7 +2848,7 @@ async fn stage_execute(
         executor
     };
 
-    // agent 配置唯一事实源 = context_build 插件；工具面过滤 = tool_schema 插件
+    // agent 配置唯一事实源 = agent_config_load 插件；工具面过滤 = tool_schema 插件
     // 经内核 tool-surface capability（K10 执行时契约）。引擎/内核零 agent 配置知识。
     info!(run_id = %run_id, agent_id = %agent_id, "Pipeline run started");
 
@@ -2722,7 +2886,9 @@ async fn stage_execute(
     match executor.run_compiled(&compiled, initial_state).await {
         Ok(s) => Ok(s),
         Err(e) => {
-            warn!(run_id = %run_id, error = %e, "PipelineExecutor run failed");
+            // error 级（run 失败是终态裁决事件；装机 2026-10-10 B74/B75/B76
+            // 排障按 ERROR 检索不到本次级 WARN，失败原因等于没落日志）
+            error!(run_id = %run_id, error = %e, "PipelineExecutor run failed");
             // GAP-2：run.failed 终态事件（引擎 Err 防御网；task.* 派生经预捕获标签）
             emit_run_terminal_domain_events(state, &failed_emit_state, run_id, true).await;
             // B2：引擎失败兜底——把 run 标记 failed + ended_at，避免永远卡 running、
@@ -2742,43 +2908,132 @@ async fn stage_execute(
                     warn!(run_id = %run_id, error = %pe, "run_status(Failed) 簿记失败（继续）");
                 }
             }
-            Err(EngineOutcome {
-                content: format!("[engine-run-failed] {message}"),
-                final_assistant: None,
-                failed: true,
-                degraded: false,
-                plugin_errors: Vec::new(),
-            })
+            Err(EngineOutcome::terminated(format!(
+                "[engine-run-failed] {message}"
+            )))
         }
     }
 }
 
-/// 阶段 3b/4：final_state 回写全局 registry + 提取响应。
-///
-/// 回写：final_state 含完整 messages 历史（LLM 插件 append 了 assistant 回复），
-/// 按 (tenant_id, effective_pipeline_id) 常驻：下一轮热路径直接复用，
-/// 免 DB 查询；重启/内存丢失时冷路径从 messages 表恢复（见 stage_recover_history）。
-/// 常驻副本剥离大对象：`tool_schemas`（每轮 prepare 链 tool_schema 插件经
-/// tool-surface capability 重新拉取，跨轮无意义）与 `_` 前缀引擎私有 staging
-/// 键（`_full_tool_results`/`_executed_tool_calls` 等——per-run 中间态，全文
-/// 权威副本在工具缓存，跨轮零消费；见 ADR 2026-09-29-trace-mirror-dedup）。
+/// 阶段 3b/4：final_state 回写全局 registry + 提取响应。回写：final_state 含
+/// 完整 messages 历史（LLM 插件 append 了 assistant 回复），按
+/// (tenant_id, effective_pipeline_id) 常驻：下一轮热路径直接复用免 DB 查询，
+/// 重启/内存丢失时冷路径从 messages 表恢复（见 stage_recover_history）。常驻
+/// 副本剥离大对象：`tool_schemas`（每轮 prepare 链经 tool-surface capability
+/// 重新拉取，跨轮无意义）与 `_` 前缀引擎私有 staging 键（`_full_tool_results`
+/// 等 per-run 中间态，权威副本在工具缓存，见 ADR 2026-09-29-trace-mirror-dedup）；
 /// messages 驻留是设计正确（管道持有队列省每轮拼装），不动。
-fn stage_finalize(
+async fn stage_finalize(
     final_state: &serde_json::Value,
+    store: Option<&dyn StorageBackend>,
     tenant_id: &str,
     effective_pipeline_id: &str,
     thread_id: &str,
     agent_id: &str,
+    run_id: &str,
 ) -> EngineOutcome {
+    // 终态失败折算（控制状态键契约 ADR 2026-08-30，与引擎落库/域事件共用单点
+    // RunStatus::from_control_state）：署名失败（dropped_tool_calls/timeout 等
+    // FAILED_STOP_REASONS 命中，DSL 正常收束）曾硬编码 failed:false——失败 run
+    // 以成功姿态外发，chat 面把虚报文本当真（BUG-45 机制根源）；挂起/取消非失败。
+    let status = agentos_core::types::RunStatus::from_control_state(final_state);
+    // 步骤失败聚合（ADR 2026-10-15-step-error-run-signature-aggregation）：插件
+    // 步失败由引擎 warn+继续（ADR 2026-08-18），错误收集在 `_plugin_errors`——
+    // 未署名完成轮零产出（raw_result 空，与响应提取同锚）折叠 failed；有产出
+    // = 有痕完成（degraded）。控制状态署名优先，挂起/取消/署名失败轮不折叠。
+    let plugin_errors = final_state
+        .get("_plugin_errors")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    // 轮边界注入消费的队列 cmid（引擎 `_consumed_pending_cmids` 键，跨多次注入
+    // 累积；下划线前缀键随 strip_non_resident_keys 剥离不进持久化）。
+    let consumed_pending_cmids = final_state
+        .get("_consumed_pending_cmids")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| c.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let has_output = final_state
+        .get("raw_result")
+        .is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty()));
+    let control_failed = matches!(status, agentos_core::types::RunStatus::Failed);
+    let fold_failed = !control_failed
+        && !has_output
+        && !plugin_errors.is_empty()
+        && status == agentos_core::types::RunStatus::Completed;
+    let content = if control_failed {
+        let reason = final_state
+            .get("router.stop_reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        format!("本轮 run 失败（stop_reason: {reason}）")
+    } else if fold_failed {
+        step_error_fold::zero_output_content(&plugin_errors)
+    } else {
+        extract_response_content(final_state)
+    };
+    // A2：本轮最终 assistant 消息（完整持久形态，含 tool_calls/reasoning_content/seq），
+    // WS 路径 new_message 携带它——前端与 DB 加载共用 mapper，冷热路径同构。
+    let final_assistant = final_state
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .and_then(|msgs| {
+            msgs.iter()
+                .rev()
+                .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("assistant"))
+                .cloned()
+        });
+    let failed = control_failed || fold_failed;
     if !effective_pipeline_id.is_empty() {
         let reg = agentos_session::global_registry();
         let mut persisted = final_state.clone();
-        if let Some(obj) = persisted.as_object_mut() {
-            obj.remove("tool_schemas");
-            let underscore_keys: Vec<String> =
-                obj.keys().filter(|k| k.starts_with('_')).cloned().collect();
-            for k in underscore_keys {
-                obj.remove(&k);
+        strip_non_resident_keys(&mut persisted);
+        // 失败不进消息流（ADR 2026-10-27-pipeline-error-notification-channel，
+        // 用户裁定，替代缺陷 ④-A 的失败回复直写契约）：失败是管道域事实，不
+        // 是对话内容——合成 assistant 错误消息（synthetic=true）曾直写
+        // message_slots 并入常驻快照，聊天流被错误气泡污染且刷新后历史悬置
+        // 错误回复。失败事实的常驻面 = run_status / run_stop_reason /
+        // run.plugin_errors（下方镜像键，管道域读面）+ run_failed WS 事件
+        // （error 字段携带首条插件错误原文，通知卡弹层）；REST content 与
+        // WS stream_error 照常携带失败终态文本。消息队列零写入 = 零回灌
+        // （llm_core 出站装配天然见不到失败原因，旧 synthetic 剔除逻辑随之
+        // 退役）。
+        // 插件级失败常驻镜像（ADR 2026-10-17-task-birth-workspace-inclusion）：
+        // `_plugin_errors` 是引擎私有 staging 键（`_` 前缀），strip 时随快照
+        // 剥离——重启后插件级失败彻底失忆，启动对账（tasks/reconcile）与面板
+        // 读面均无从知悉。镜像到常驻键 run.plugin_errors 并直写 pipeline_state
+        // 表，冷启动后仍可读。非空才写：绝大多数 run 零插件失败，不增常驻体积。
+        // 不改 ADR 2026-10-15 的折叠语义（有产出 + 步失败 = degraded 仍成立），
+        // 本键只负责让失败事实不丢。
+        if !plugin_errors.is_empty() {
+            if let Some(obj) = persisted.as_object_mut() {
+                obj.insert(
+                    "run.plugin_errors".to_string(),
+                    serde_json::Value::Array(plugin_errors.clone()),
+                );
+            }
+            if let Some(store) = store {
+                let mut fields = serde_json::Map::new();
+                fields.insert(
+                    "run.plugin_errors".to_string(),
+                    serde_json::Value::Array(plugin_errors.clone()),
+                );
+                if let Err(pe) = store
+                    .upsert_state_fields(effective_pipeline_id, tenant_id, &fields)
+                    .await
+                {
+                    warn!(
+                        pipeline_id = %effective_pipeline_id,
+                        tenant_id = %tenant_id,
+                        run_id = %run_id,
+                        error = %pe,
+                        "插件级失败常驻落库失败（继续；重启后该失败将不可见）"
+                    );
+                }
             }
         }
         if !reg.contains(tenant_id, effective_pipeline_id) {
@@ -2793,31 +3048,33 @@ fn stage_finalize(
             reg.update_state(tenant_id, effective_pipeline_id, persisted);
         }
     }
-
-    let content = extract_response_content(final_state);
-    // A2：本轮最终 assistant 消息（完整持久形态，含 tool_calls/reasoning_content/seq），
-    // WS 路径 new_message 携带它——前端与 DB 加载共用 mapper，冷热路径同构。
-    let final_assistant = final_state
-        .get("messages")
-        .and_then(|v| v.as_array())
-        .and_then(|msgs| {
-            msgs.iter()
-                .rev()
-                .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("assistant"))
-                .cloned()
-        });
     EngineOutcome {
         content,
         final_assistant,
-        failed: false,
-        degraded: false,
+        failed,
+        // 有痕完成（步失败后自救产出）：调用方据此与干净完成区分；失败/干净轮恒 false。
+        degraded: !fold_failed
+            && !plugin_errors.is_empty()
+            && status == agentos_core::types::RunStatus::Completed,
         // 插件错误收集（引擎 `_plugin_errors` 键；下划线前缀键不参与插件
         // state_updates 合并，仅引擎内部写入）。WS 路径据此发射 plugin_error。
-        plugin_errors: final_state
-            .get("_plugin_errors")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default(),
+        plugin_errors,
+        consumed_pending_cmids,
+    }
+}
+
+/// 常驻快照剥离：`tool_schemas`（每轮 prepare 链经 tool-surface capability
+/// 重新拉取，跨轮无意义）与 `_` 前缀引擎私有 staging 键（`_full_tool_results`
+/// 等 per-run 中间态，权威副本在工具缓存，见 ADR 2026-09-29-trace-mirror-dedup）。
+/// messages 驻留是设计正确（管道持有队列省每轮拼装），不动。
+fn strip_non_resident_keys(state: &mut serde_json::Value) {
+    if let Some(obj) = state.as_object_mut() {
+        obj.remove("tool_schemas");
+        let underscore_keys: Vec<String> =
+            obj.keys().filter(|k| k.starts_with('_')).cloned().collect();
+        for k in underscore_keys {
+            obj.remove(&k);
+        }
     }
 }
 
@@ -2885,28 +3142,30 @@ async fn chat_handler(
     headers: HeaderMap,
     axum::Json(req): axum::Json<WsRequest>,
 ) -> Result<axum::Json<WsResponse>, ApiError> {
-    // 在租户上下文内通过管道引擎处理消息（多租户 P0-4）
-    let tenant_ctx = request_tenant_ctx(state.store.as_ref(), &headers, &req.session_id).await;
-    // 分层持久化：REST chat 路径需用会话的真实 active_pipeline_id，否则消息会落到
-    // thread_id 维度（effective 回退），与前端按 active_pipeline_id 查询不匹配 → 前端拿不到消息。
-    // WS 路径（ws_session.rs）前端已带真实 pipeline_id，此处为 REST fallback 补齐。
+    // 在租户上下文内通过管道引擎处理消息（多租户 P0-4）；租户解析失败即拒绝
+    // （K8 修订 ADR 2026-10-10），不降级 default 写串租户。
+    let tenant_ctx = request_tenant_ctx(state.store.as_ref(), &headers, &req.session_id).await?;
+    // 分层持久化：REST chat 路径用会话真实 active_pipeline_id（锚点）经活性守卫
+    // 解析（刀4 终态惰性切回，见 anchor_liveness）；WS 路径前端已带真实
+    // pipeline_id，此处为 REST fallback 补齐。
     let pipeline_id = if let Some(store) = state.store.as_ref() {
         let sid = req.session_id.clone();
         let store_clone = store.clone();
-        match agentos_tenant::scope(tenant_ctx.clone(), async move {
+        let session = match agentos_tenant::scope(tenant_ctx.clone(), async move {
             store_clone.get_session(&sid).await
         })
         .await
         {
-            Ok(Some(session)) => session.active_pipeline_id.unwrap_or_default(),
+            Ok(Some(session)) => Some(session),
             // 会话不存在（Ok(None)）→ 空 pipeline_id，chain_key 回退 session_id；
             // 存储故障（Err）单独报错可见，不与"无会话"混同。
-            Ok(None) => String::new(),
+            Ok(None) => None,
             Err(e) => {
                 warn!(session = %req.session_id, error = %e, "chat_handler: get_session 失败，chain_key 回退 session_id");
-                String::new()
+                None
             }
-        }
+        };
+        anchor_liveness::resolve_chat_pipeline_id(store, &tenant_ctx, session).await
     } else {
         String::new()
     };
@@ -2965,13 +3224,8 @@ async fn chat_handler(
     )
     .await
     {
-        Ok(outcome) => outcome.unwrap_or_else(|_| EngineOutcome {
-            content: "[engine task terminated unexpectedly]".to_string(),
-            final_assistant: None,
-            failed: true,
-            degraded: false,
-            plugin_errors: Vec::new(),
-        }),
+        Ok(outcome) => outcome
+            .unwrap_or_else(|_| EngineOutcome::terminated("[engine task terminated unexpectedly]")),
         Err(_) => {
             // 超时自清理 waiter（防条目泄漏；事后到达的 notify 因条目已删
             // 变为 no-op），对客户端显式 500 而非无限挂死。
@@ -2992,6 +3246,8 @@ async fn chat_handler(
         // 降级应答显式化（2026-08-26 统一错误模型）：echo_fallback 时标记，
         // 调用方（插件 send_message 等）据此与正常回复区分，不把降级当成功。
         degraded: Some(outcome.degraded),
+        // 失败终态显式化（刀2）：外发失败语义随响应出走，非静默非虚报。
+        failed: Some(outcome.failed),
     };
     Ok(axum::Json(response))
 }
@@ -3125,6 +3381,10 @@ async fn shutdown_signal(invoker: Option<Arc<dyn agentos_core::traits::PluginInv
 }
 
 #[cfg(test)]
+mod finalize_visibility_tests;
+#[cfg(test)]
 mod pipeline_version_tests;
+#[cfg(test)]
+mod step_error_aggregation_tests;
 #[cfg(test)]
 mod tests;

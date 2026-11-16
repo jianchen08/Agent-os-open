@@ -1,0 +1,27 @@
+# 文风标准档·文学修辞（C1 整合刀 2026-10-13）——档位结构契约同 concrete_plain.yaml
+#   （id/name/traits/authors/sample_note 五字段，缺一不可；schema 校验见
+#   modes/tests/test_roleplay_style_profiles.py）
+# 考据来源（整合对照，措辞原创）：wbu-craft-control-sliders（MIT，可改编）、
+# sudachi-zh-style-core（MIT，可改编）、bartender-zh-style-library（对照，作家锚）、
+# nemo-atelier-style-library（对照）、spiderweb-zh-bagu-style-crafts（对照，作家锚）、
+# lucid-loom-narrative-styles（AGPL，仅对照不引文）。
+# 播种自包含：本目录数据不 import 共享根模块，C2 按 yaml 逐文件读取。
+id: literary_figurative
+name: 文学修辞档
+traits:
+  - 比喻贵精不贵多：一个段落至多一处，必须照亮本体
+  - 通感与象征服务主题，意象前后呼应成系统
+  - 长短句交错成呼吸，复句层层推进
+  - 用词求密度：一词多义、意义叠加，经得起重读
+  - 写情先写景，让环境替人物承担情绪
+  - 叙述者可以有立场与判断，但不替角色下结论
+  - 禁止形容词堆砌与空洞抒情，浓密度来自结构而非辞藻
+authors:
+  - 加缪
+  - 福克纳
+  - 邱妙津
+sample_note: >-
+  修辞是精确的武器而非装饰：一个比喻只在它照亮事物时出场，通感与象征服务主题，
+  意象前后呼应成系统。句子长短交错成呼吸，复句层层推进，词要经得起重读——一词
+  多义，意义叠加。写孤独就写太阳照常升起，让景物替人物沉默。密度来自结构与意象，
+  不来自辞藻罗列。

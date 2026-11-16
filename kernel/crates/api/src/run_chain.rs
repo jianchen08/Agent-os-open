@@ -91,10 +91,30 @@ impl RunChainRegistry {
         self.chains.lock().len()
     }
 
+    /// 管道是否有在途执行链（派发已受理、尚未到引擎 run 建行的空窗判定用）。
+    /// 空 key 恒 false（空 key 不构成串行维度，见 enqueue 防御）。
+    pub fn has_chain(&self, pipeline_key: &str) -> bool {
+        !pipeline_key.is_empty() && self.chains.lock().contains_key(pipeline_key)
+    }
+
     /// 活跃管道偏好映射条目数（堆栈级诊断面 memory-breakdown 消费；
     /// 容量以用户数为上界，不做淘汰）。
     pub fn active_pipeline_count(&self) -> usize {
         self.active_pipeline.lock().len()
+    }
+
+    /// 管道是否为任一用户当前选中的活跃管道（查看态）。
+    ///
+    /// 消费方 = notify_judge 的「用户正在看 → 跳过通知判定」门（用户裁定
+    /// 2026-10-21：人在场时通知无意义，判定 LLM 与打标全跳）。真值来源与
+    /// 排队优先级同源（active_thread_changed + 最近派发兜底）。
+    pub fn is_pipeline_viewed(&self, pipeline_id: &str) -> bool {
+        !pipeline_id.is_empty()
+            && self
+                .active_pipeline
+                .lock()
+                .values()
+                .any(|p| p == pipeline_id)
     }
 
     /// 并发闸门快照 (running, waiting)（堆栈级诊断面：排队即卡顿的直读信号）。

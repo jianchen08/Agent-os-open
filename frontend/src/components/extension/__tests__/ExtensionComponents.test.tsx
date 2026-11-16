@@ -1,22 +1,19 @@
 /**
- * ExtensionComponents 测试（P5-a/b/d 渲染层）
+ * ExtensionComponents 测试（P5-a/b 渲染层）
  *
  * - CommandPalette：搜索 + 执行 + when 过滤
  * - ContextMenu：按 location + when 渲染菜单项
- * - ModalHost：command 触发后弹出声明的 widget
+ *
+ * 模态弹窗呈现已收敛至 shell.overlay 槽锚点（SlotOverlayHost，C4 槽位机制），
+ * 通道/触发覆盖见 components/slots/__tests__/SlotOverlayHost.test.tsx。
  *
  * 真实渲染被测组件，仅 Mock transport（CommandDispatcher 注入）。
  */
 
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
+import { render, screen, fireEvent } from '@testing-library/react'
 import React from 'react'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import {
-  CommandPalette,
-  ContextMenuItems,
-  ExtensionModalHost,
-  useExtensionModal,
-} from '@/components/extension/ExtensionComponents'
+import { CommandPalette, ContextMenuItems } from '@/components/extension/ExtensionComponents'
 import { CommandDispatcher } from '@/services/schema/commandDispatcher'
 import { ContributionRegistry } from '@/services/schema/ContributionRegistry'
 import { useContextKeys } from '@/stores/contextKeysStore'
@@ -119,64 +116,5 @@ describe('ContextMenuItems — 右键菜单（P5-a）', () => {
     render(<ContextMenuItems location="nonexistent/context" dispatcher={dispatcher} />)
     // 无菜单项时不渲染任何菜单按钮
     expect(screen.queryByText('跳转')).not.toBeInTheDocument()
-  })
-})
-
-describe('ExtensionModalHost — 模态弹窗（P5-d）', () => {
-  let registry: ContributionRegistry
-  let dispatcher: CommandDispatcher
-
-  beforeEach(() => {
-    useContextKeys.getState().reset()
-    registry = setupRegistry({
-      commands: [{ id: 'ext.openDialog', title: '打开对话框' }],
-      modal: [
-        {
-          id: 'ext.dialog',
-          title: '示例对话框',
-          trigger: 'on_command:ext.openDialog',
-          widget: 'example_widget',
-          props: { foo: 'bar' },
-        },
-      ],
-    })
-    dispatcher = new CommandDispatcher(registry)
-    dispatcher.setTransport(vi.fn().mockResolvedValue(undefined))
-  })
-
-  it('command 触发后 modal 出现，用声明的 widget 渲染', async () => {
-    const widgetRegistry = {
-      example_widget: (props: Record<string, unknown>, onClose: () => void) => (
-        <div>
-          <span>widget-content-{String(props.foo)}</span>
-          <button onClick={onClose}>关闭</button>
-        </div>
-      ),
-    }
-
-    function Host() {
-      const { modal } = useExtensionModal(dispatcher)
-      if (!modal) return null
-      const Widget = widgetRegistry[modal.widget as keyof typeof widgetRegistry]
-      return (
-        <ExtensionModalHost modal={modal} onClose={() => {}}>
-          {Widget ? Widget(modal.props as Record<string, unknown>, () => {}) : null}
-        </ExtensionModalHost>
-      )
-    }
-
-    render(<Host />)
-    // 初始无 modal
-    expect(screen.queryByText('示例对话框')).not.toBeInTheDocument()
-
-    // 触发命令（包在 act 中确保 React 处理订阅回调引起的状态更新）
-    await act(async () => {
-      await dispatcher.executeCommand('ext.openDialog')
-    })
-
-    await waitFor(() => {
-      expect(screen.getByText('示例对话框')).toBeInTheDocument()
-    })
-    expect(screen.getByText('widget-content-bar')).toBeInTheDocument()
   })
 })

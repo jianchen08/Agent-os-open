@@ -1437,4 +1437,91 @@ describe('GlobalWebSocketService', () => {
       disconnect()
     })
   })
+
+  // ──────────────────────────────────────────────
+  // 发送态生命周期重定义（落定语义，2026-11-04）：ack 只是受理回执，不再撤
+  // 发送在途标记——发送态终点 = 气泡认领/队列条出现（chatInputStore.landSendByCmid，
+  // 落定通道测试见 stores/__tests__/sendLandingChannels.test.ts）。判死出口：
+  // 5s 落定超时（先到，用户裁定「超时=消息坏了」）、ack(ok:false) 与 20s 看门狗
+  // （对已判死 cmid 幂等零动作）。
+  // ──────────────────────────────────────────────
+  describe('发送态落定语义：ack 不撤发送态', () => {
+    it('ack(ok:true) 不撤发送在途标记（发送态由认领/队列条落定撤下）', async () => {
+      const { service, ws, disconnect } = await setupConnected()
+      const { useChatInputStore } = await import('@/stores/chatInputStore')
+      useChatInputStore.setState({ sendInFlightByPipeline: {}, sendOutcomes: [] })
+      useChatInputStore.getState().beginSend('pipe-land-1', 'cmid-land-1', 'hello', 'dk-1')
+
+      service.sendUserInput('thread-1', 'hello', {
+        pipelineId: 'pipe-land-1',
+        clientMessageId: 'cmid-land-1',
+      })
+      ws.onmessage?.({
+        data: JSON.stringify({
+          type: 'user_input_ack',
+          client_message_id: 'cmid-land-1',
+          thread_id: 'thread-1',
+          ok: true,
+        }),
+      })
+
+      // ack = 受理回执：发送在途保持（气泡未上屏），不产生任何 outcome
+      expect(useChatInputStore.getState().sendInFlightByPipeline['pipe-land-1']).toHaveLength(1)
+      expect(useChatInputStore.getState().sendOutcomes).toEqual([])
+      disconnect()
+    })
+
+    it('ack(ok:false) 撤发送在途并落 failed outcome（失败出口，reason 随 outcome 供操作点报错）', async () => {
+      const { service, ws, disconnect } = await setupConnected()
+      const { useChatInputStore } = await import('@/stores/chatInputStore')
+      useChatInputStore.setState({ sendInFlightByPipeline: {}, sendOutcomes: [] })
+      useChatInputStore.getState().beginSend('pipe-land-2', 'cmid-rej-land', 'hello', 'dk-2')
+
+      service.sendUserInput('thread-1', 'hello', {
+        pipelineId: 'pipe-land-2',
+        clientMessageId: 'cmid-rej-land',
+      })
+      ws.onmessage?.({
+        data: JSON.stringify({
+          type: 'user_input_ack',
+          client_message_id: 'cmid-rej-land',
+          thread_id: 'thread-1',
+          ok: false,
+          error: '会话无可派发管道',
+        }),
+      })
+
+      expect(useChatInputStore.getState().sendInFlightByPipeline['pipe-land-2']).toEqual([])
+      const outcomes = useChatInputStore.getState().sendOutcomes
+      expect(outcomes[outcomes.length - 1]).toMatchObject({
+        clientMessageId: 'cmid-rej-land',
+        kind: 'failed',
+      })
+      expect(outcomes[outcomes.length - 1].reason).toContain('会话无可派发管道')
+      disconnect()
+    })
+
+    it('20s 看门狗：5s 落定超时已判死时幂等零动作（终局唯一，不二次宣告）', async () => {
+      const { service, disconnect } = await createService()
+      const { useChatInputStore } = await import('@/stores/chatInputStore')
+      useChatInputStore.setState({ sendInFlightByPipeline: {}, sendOutcomes: [] })
+      useChatInputStore.getState().beginSend('pipe-land-3', 'cmid-ttl-land', 'hello', 'dk-3')
+      service.sendUserInput('thread-1', 'hello', {
+        pipelineId: 'pipe-land-3',
+        clientMessageId: 'cmid-ttl-land',
+      })
+
+      // 未连接 → 入队；先到 5s 落定超时判死（用户裁定「超时=消息坏了」），
+      // 20s 看门狗到点时该 cmid 已终局，不产生第二个宣告
+      await vi.advanceTimersByTimeAsync(20000)
+
+      expect(useChatInputStore.getState().sendInFlightByPipeline['pipe-land-3']).toEqual([])
+      const outcomes = useChatInputStore
+        .getState()
+        .sendOutcomes.filter((o) => o.clientMessageId === 'cmid-ttl-land')
+      expect(outcomes).toHaveLength(1)
+      expect(outcomes[0].kind).toBe('timeout')
+      disconnect()
+    })
+  })
 })

@@ -1,0 +1,467 @@
+"""路由侧效应工厂 — 从 llm.yaml 灌 pools/映射表/兜底表/直连白名单。"""
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import Any
+from urllib.parse import urlparse
+
+from key_pool import KeyPool, KeySlot
+
+logger = logging.getLogger(__name__)
+
+# 进程内代理环境变量名（httpx / aiohttp / requests 三家都读这些）。
+_PROXY_ENV_VARS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+)
+
+
+def _direct_hosts_from_llm_data(llm_data: dict[str, Any]) -> tuple[str, ...]:
+    """llm.yaml providers 段 → 直连 host 并集（NO_PROXY 兜底白名单，单一真值=配置）。
+
+    provider 级 api_base 与 key 级覆盖同权并入；解析不出 hostname 的条目跳过
+    （NO_PROXY 是兜底不是闸门，脏 base 不该炸构建）。按 yaml 首现序去重，
+    生成的 NO_PROXY 串确定性可测。
+    """
+    hosts: list[str] = []
+    for provider_conf in llm_data.get("providers", {}).values():
+        if not isinstance(provider_conf, dict):
+            continue
+        bases = [provider_conf.get("api_base", "")]
+        for key_conf in provider_conf.get("keys", []) or []:
+            if isinstance(key_conf, dict):
+                bases.append(key_conf.get("api_base", ""))
+        for base in bases:
+            host = urlparse(base).hostname if base else None
+            if host and host not in hosts:
+                hosts.append(host)
+    return tuple(hosts)
+
+
+def disable_llm_proxy(direct_hosts: tuple[str, ...]) -> None:
+    """强制 LLM 调用直连，与本机系统代理解耦。
+
+    direct_hosts 为 LLM 出口直连域名并集（llm.yaml providers api_base 派生，
+    见 _direct_hosts_from_llm_data；由 build_router 持配置传入）。
+    """
+    # 1. 清空进程内代理环境变量（httpx/aiohttp/requests 三家共用）
+    for var in _PROXY_ENV_VARS:
+        os.environ.pop(var, None)
+
+    # 2. httpx 侧直连由 wire_client._get_client 的 trust_env=False 落地
+    #    （httpx 默认 trust_env=True 会经 getproxies() 读 Windows 注册表
+    #    系统代理，只清 env 不足以解耦）
+
+    # 3. NO_PROXY 兜底：列出所有 LLM 直连域名（NO_PROXY 支持逗号分隔列表）
+    existing_no_proxy = os.environ.get("NO_PROXY", "")
+    hosts_to_add = [h for h in direct_hosts if h not in existing_no_proxy]
+    if hosts_to_add:
+        merged = ",".join(filter(None, [existing_no_proxy, *hosts_to_add]))
+        os.environ["NO_PROXY"] = merged
+        os.environ["no_proxy"] = merged
+
+    logger.info(
+        "[Router] LLM 出口已强制直连 (proxy env cleared, aiohttp_trust_env=False, NO_PROXY=%s)",
+        os.environ.get("NO_PROXY"),
+    )
+
+
+# 模块级单例缓存
+_router_instance: Any | None = None
+_adapter_instance: Any = None
+_key_pools: dict[str, KeyPool] = {}
+# model_id → provider 映射（由 build_router 填充）
+_model_to_provider: dict[str, str] = {}
+# model_id → model_name 映射（由 build_router 填充）
+# KeyPoolAdapter 直连时用 model_id 路由到正确 provider，再反查 model_name 拼成
+# 上游模型名发给上游（model_id 不是真实模型名，不能直接发给 API）
+_model_to_name: dict[str, str] = {}
+# provider 名称 → 上游类型前缀映射（由 build_router 从 llm.yaml providers.type 填充）
+_provider_type_map: dict[str, str] = {}
+# model_id → provider 插件路由（由 build_router 从 providers.<name>.via=plugin 填充，
+# 2026-11-04 网关化第二步）：{"provider_type": <provides namespace 后缀>}
+_plugin_provider_routes: dict[str, dict[str, str]] = {}
+# 主模型 id → 兜底模型 id 列表（build_fallbacks 产物展平，provider 插件分支
+# 网关侧兜底用——插件模型传输在插件，自路由兜底在此消费）
+_fallback_chain_map: dict[str, list[str]] = {}
+# provider 名称 → 原始 conf（wire 层 api_base/via 消费）
+_provider_conf_map: dict[str, dict[str, Any]] = {}
+
+
+def get_provider_prefix(provider_name: str) -> str:
+    """获取 provider 对应的上游类型前缀（从配置动态读取）。
+
+    fail-closed（兜底反模式审查 P8）：未在 llm.yaml providers.<name>.type
+    配置的 provider 显式抛配置错误——provider 名本身不是合法上游前缀，
+    静默回退会把配置错误推迟成上游 API 的隐蔽 404/路由失败。
+    """
+    if provider_name in _provider_type_map:
+        return _provider_type_map[provider_name]
+    if not provider_name:
+        # 调用方（adapter/keypool 直连）以空 provider 表示"无前缀直连模型"
+        return ""
+    # 映射缺失：懒加载重建一次，仍未命中即配置错误
+    _ensure_provider_type_map_loaded()
+    if provider_name not in _provider_type_map:
+        raise ValueError(
+            f"前缀映射缺失: provider '{provider_name}' 未在 llm.yaml "
+            "providers.<name>.type 配置（不回退 provider 名充当上游前缀）"
+        )
+    return _provider_type_map[provider_name]
+
+
+def _ensure_provider_type_map_loaded() -> None:
+    """懒加载 _provider_type_map（若为空则从 yaml 重建）。"""
+    if _provider_type_map:
+        return
+    try:
+        from _config_models import get_model_config_loader  # noqa: PLC0415
+
+        loader = get_model_config_loader()
+        llm_data = loader.load_llm_data()
+        for pn, pc in llm_data.get("providers", {}).items():
+            if isinstance(pc, dict) and "type" in pc:
+                _provider_type_map[pn] = pc["type"]
+    except Exception:  # noqa: BLE001
+        # 懒加载失败留空 map、不在此处抛；下游 get_provider_prefix 查无 type 即
+        # 抛 ValueError——配置错误 fail-closed，不回退 provider 名充当上游前缀
+        logger.warning("[Router] 懒加载 provider_type_map 失败", exc_info=True)
+
+
+def _provider_model_string(provider: str, model_name: str) -> str:
+    """计算 provider 前缀形态的模型标识字符串。"""
+    prefix = get_provider_prefix(provider)
+    return f"{prefix}/{model_name}"
+
+
+def _format_key_fingerprint(api_key: Any) -> str:
+    """格式化 api_key 为安全的诊断指纹（不泄露完整 key）。
+
+    用于 Router 构建日志，便于快速定位「Invalid API key」类问题：
+    - 空 key → EMPTY
+    - 未展开占位符 ${...} → UNRESOLVED:<占位符>
+    - 正常 key → <前6位>...(len=N)
+    """
+    if not api_key or not isinstance(api_key, str):
+        return "EMPTY"
+    if "${" in api_key:
+        return f"UNRESOLVED:{api_key}"
+    return f"{api_key[:6]}...(len={len(api_key)})"
+
+
+def _parse_provider_keys(
+    llm_data: dict[str, Any],
+) -> dict[str, list[KeySlot]]:
+    """从 llm.yaml 的 providers 段解析所有 key。"""
+    providers_section = llm_data.get("providers", {})
+
+    result: dict[str, list[KeySlot]] = {}
+
+    for provider_name, provider_conf in providers_section.items():
+        if not isinstance(provider_conf, dict):
+            continue
+
+        api_base = provider_conf.get("api_base", "")
+        keys_conf = provider_conf.get("keys", [])
+        slots: list[KeySlot] = []
+
+        if keys_conf and isinstance(keys_conf, list):
+            for i, key_conf in enumerate(keys_conf):
+                if not isinstance(key_conf, dict):
+                    continue
+                slots.append(
+                    KeySlot(
+                        key_id=key_conf.get("id", f"{provider_name}_{i}"),
+                        api_key=key_conf.get("api_key", ""),
+                        api_base=key_conf.get("api_base", "") or api_base,
+                        max_concurrent=key_conf.get("max_concurrent", 2),
+                        rpm_limit=key_conf.get("rpm", 0),
+                        token_quota=key_conf.get("token_quota", 0),
+                    )
+                )
+        else:
+            api_key = provider_conf.get("api_key", "")
+            if api_key:
+                slots.append(
+                    KeySlot(
+                        key_id=f"{provider_name}_default",
+                        api_key=api_key,
+                        api_base=api_base,
+                    )
+                )
+
+        if slots:
+            result[provider_name] = slots
+            logger.info(
+                "[Router] provider %s: %d key(s)",
+                provider_name,
+                len(slots),
+            )
+
+    return result
+
+
+def build_model_list(
+    model_loader: Any,
+    provider_keys: dict[str, list[KeySlot]],
+) -> list[dict[str, Any]]:
+    """从 llm.yaml 构建 Router model_list。"""
+    llm_data = model_loader.load_llm_data()
+    models_section = llm_data.get("models", {})
+
+    model_list: list[dict[str, Any]] = []
+
+    for model_id, model_conf in models_section.items():
+        # 跳过 embedding 模型：自路由兜底面只承载对话模型
+        if model_conf.get("dimension") or "embedding" in model_id:
+            continue
+
+        provider = model_conf.get("provider", "")
+        model_name = model_conf.get("model_name", model_id)
+
+        # via=plugin 的 provider 模型不进部署清单（传输在插件，
+        # KeyPoolAdapter 分支直调契约方）；混入 model_list 会在
+        # _provider_model_string 的 fail-closed type 校验上炸整表。
+        prov_conf = llm_data.get("providers", {}).get(provider)
+        if isinstance(prov_conf, dict) and prov_conf.get("via") == "plugin":
+            continue
+
+        provider_model = _provider_model_string(provider, model_name)
+        slots = provider_keys.get(provider)
+
+        # 模型级凭证覆盖（如 deepseek-chat 有自己的 api_key）
+        model_api_key = model_conf.get("api_key", "")
+        model_api_base = model_conf.get("api_base", "")
+
+        if slots and not model_api_key:
+            # 多 key：每个 slot 注册一个 deployment
+            for slot in slots:
+                lp: dict[str, Any] = {"model": provider_model}
+                lp["api_key"] = slot.api_key
+                lp["api_base"] = model_api_base or slot.api_base or ""
+                if not lp["api_base"]:
+                    del lp["api_base"]
+
+                model_list.append(
+                    {
+                        "model_name": model_id,
+                        "params": lp,
+                    }
+                )
+                logger.info(
+                    "[Router] deployment: %s → %s (key=%s, fp=%s)",
+                    model_id,
+                    provider_model,
+                    slot.key_id,
+                    _format_key_fingerprint(slot.api_key),
+                )
+        else:
+            # 单 key：直接用模型级或 provider 级的凭证
+            lp = {"model": provider_model}
+            if model_api_key:
+                lp["api_key"] = model_api_key
+            if model_api_base:
+                lp["api_base"] = model_api_base
+            elif slots and slots[0].api_base:
+                lp["api_base"] = slots[0].api_base
+
+            model_list.append(
+                {
+                    "model_name": model_id,
+                    "params": lp,
+                }
+            )
+            # 单 key 分支的 api_key 来源：模型级 model_api_key 优先，否则无（provider 级）
+            single_key = model_api_key or (slots[0].api_key if slots else "")
+            logger.info(
+                "[Router] deployment: %s → %s (fp=%s)",
+                model_id,
+                provider_model,
+                _format_key_fingerprint(single_key),
+            )
+
+    return model_list
+
+
+def build_fallbacks(model_loader: Any) -> list[dict[str, Any]]:
+    """从 llm.yaml 的 defaults.tiers.fallback_chain 构建 Router fallbacks。"""
+    llm_data = model_loader.load_llm_data()
+    defaults = llm_data.get("defaults", {})
+    tiers = defaults.get("tiers", {})
+    fallback_chain = tiers.get("fallback_chain", {})
+
+    merged: dict[str, list[str]] = {}
+    for model_type, fallback_ids in fallback_chain.items():
+        primary_id = defaults.get(model_type, "")
+        if primary_id and fallback_ids:
+            existing = merged.setdefault(primary_id, [])
+            for fid in fallback_ids:
+                if fid not in existing:
+                    existing.append(fid)
+
+    fallbacks: list[dict[str, Any]] = []
+    for primary_id, fb_ids in merged.items():
+        fallbacks.append({primary_id: fb_ids})
+        logger.info("[Router] fallback: %s → %s", primary_id, fb_ids)
+
+    return fallbacks
+
+
+def build_router(model_loader: Any) -> None:
+    """构建 None 实例。"""
+    global _key_pools, _model_to_provider, _provider_type_map  # noqa: PLW0602
+
+    llm_data = model_loader.load_llm_data()
+
+    # 钉死 LLM 出口直连：清掉进程内代理 env + 关 aiohttp trust_env + NO_PROXY 兜底
+    # （域名并集从本份 llm.yaml providers api_base 现场派生，直连白名单不另设表）。
+    disable_llm_proxy(_direct_hosts_from_llm_data(llm_data))
+
+
+    # 从 providers.type 字段构建 provider → 上游前缀映射
+    _provider_type_map.clear()
+    _provider_conf_map.clear()
+    for provider_name, provider_conf in llm_data.get("providers", {}).items():
+        if not isinstance(provider_conf, dict):
+            continue
+        _provider_conf_map[provider_name] = dict(provider_conf)
+        if "type" in provider_conf:
+            _provider_type_map[provider_name] = provider_conf["type"]
+            logger.info(
+                "[Router] provider %s → upstream prefix: %s",
+                provider_name,
+                provider_conf["type"],
+            )
+
+    provider_keys = _parse_provider_keys(llm_data)
+    model_list = build_model_list(model_loader, provider_keys)
+    fallbacks = build_fallbacks(model_loader)
+    # 兜底链展平（主模型 id → 兜底 id 列表）：provider 插件分支网关侧兜底消费
+    _fallback_chain_map.clear()
+    for entry in fallbacks:
+        for primary, fb_ids in entry.items():
+            _fallback_chain_map[primary] = list(fb_ids)
+
+    # 构建 model_id → provider 映射
+    _model_to_provider.clear()
+    # 构建 model_id → model_name 映射（KeyPoolAdapter 直连时反查真实模型名用）
+    _model_to_name.clear()
+    for model_id, model_conf in llm_data.get("models", {}).items():
+        provider = model_conf.get("provider", "")
+        model_name = model_conf.get("model_name", model_id)
+        if provider:
+            _model_to_provider[model_id] = provider
+        _model_to_name[model_id] = model_name
+
+    # 构建 model_id → provider 插件路由（2026-11-04 网关化第二步）：
+    # providers.<name>.via=plugin 的模型改调 llm_provider.<type>.* 契约方，
+    # 传输在插件、路由/池化/兜底/用量留网关（ADR 2026-11-04）。
+    _plugin_provider_routes.clear()
+    providers_section = llm_data.get("providers", {})
+    for model_id, provider in _model_to_provider.items():
+        conf = providers_section.get(provider)
+        if isinstance(conf, dict) and conf.get("via") == "plugin":
+            _plugin_provider_routes[model_id] = {
+                "provider_type": str(conf.get("provider_type") or provider),
+            }
+
+    # 构建 KeyPools（仅用于统计展示）
+    for prov_name, slots in provider_keys.items():
+        _key_pools[prov_name] = KeyPool(slots, pool_id=prov_name)
+
+    # 2026-11-04 网关化：薄客户端直连 + 网关级兜底链（_fallback_chain_map）；
+    # model_list 保留仅作部署清点日志。本函数只做侧效应
+    # （pools/映射表/兜底表/直连白名单）。
+    logger.info(
+        "[Router] 构建完成: %d deployments, fallbacks=%d（薄客户端直连 + 自路由兜底链）",
+        len(model_list),
+        len(fallbacks),
+    )
+
+
+def get_key_pool(provider_name: str) -> KeyPool | None:
+    """获取指定 provider 的 KeyPool（仅统计用）。"""
+    return _key_pools.get(provider_name)
+
+
+def get_provider_for_model(model_id: str) -> str:
+    """根据 model_id 查找 provider 名称（如 glm-5.1 → zhipu_coding）。"""
+    return _model_to_provider.get(model_id, "")
+
+
+def get_model_name_for_id(model_id: str) -> str:
+    """根据 model_id 反查 model_name（如 deepseek-v4-pro-apigo → deepseek-v4-pro）。"""
+    return _model_to_name.get(model_id, model_id)
+
+
+def get_plugin_provider_route(model_id: str) -> dict[str, str] | None:
+    """model_id 的 provider 插件路由（via=plugin 声明）。
+
+    返回 {"provider_type": <provides namespace 后缀>}；未声明 via=plugin 的
+    模型返回 None（走内置直连路径）。
+    """
+    return _plugin_provider_routes.get(model_id)
+
+
+def get_fallback_models(model_id: str) -> list[str]:
+    """主模型的兜底模型 id 列表（fallback_chain 展平；未配置返回空）。"""
+    return _fallback_chain_map.get(model_id, [])
+
+
+def get_provider_conf(provider_name: str) -> dict[str, Any] | None:
+    """provider 原始 conf（wire 层 api_base/via 消费；未命中 None）。"""
+    return _provider_conf_map.get(provider_name)
+
+
+def build_adapter(model_loader: Any) -> Any:
+    """构建 KeyPoolAdapter — 按 key 粒度并发控制 + RPM 限流 + 配额追踪。"""
+    from adapter import KeyPoolAdapter  # noqa: PLC0415
+
+    llm_data = model_loader.load_llm_data()
+    concurrency_section = llm_data.get("concurrency", {})
+    default_max_concurrent = concurrency_section.get("default_max_concurrent", 2)
+
+    get_or_create_router(model_loader)
+
+    adapter = KeyPoolAdapter(
+        None,
+        default_max_concurrent=default_max_concurrent,
+    )
+
+    logger.info(
+        "[Router] KeyPoolAdapter: default_max_concurrent=%d, key_pools=%s",
+        default_max_concurrent,
+        list(_key_pools.keys()),
+    )
+    return adapter
+
+
+def get_or_create_router(model_loader: Any) -> None:
+    """初始化共享路由侧效应（pools/映射表/兜底表）。
+
+    Router 对象已随 2026-11-04 网关化退役（ADR 2026-11-04-llm-default-
+    gateway-and-provider-plugins）：本函数只灌侧效应表，恒无返回值；
+    ``_router_instance`` 保留为恒 None 的兼容槽位（reset_router 清空语义不变）。
+    """
+    build_router(model_loader)
+
+
+def reset_router() -> None:
+    """重置 Router/Adapter 模块级单例，使配置变更后重新构建。"""
+    global _router_instance, _adapter_instance  # noqa: PLW0603
+    _router_instance = None
+    _adapter_instance = None
+    _key_pools.clear()
+    _model_to_provider.clear()
+    _model_to_name.clear()
+    _provider_type_map.clear()
+    _plugin_provider_routes.clear()
+    _fallback_chain_map.clear()
+    _provider_conf_map.clear()
+    logger.info("[Router] 模块级单例已重置")

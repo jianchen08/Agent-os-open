@@ -33,8 +33,8 @@ export interface PluginHost {
   pid?: number | null
   /** 宿主进程是否存活 */
   alive?: boolean | null
-  /** 宿主进程常驻内存（MB） */
-  rss_mb?: number | null
+  /** 宿主进程私有提交内存（MB；任务管理器「提交大小」口径，含已换出私有页） */
+  commit_mb?: number | null
   /** 宿主进程运行时长（秒） */
   uptime_secs?: number | null
   /** 宿主进程实际成员快照 */
@@ -79,8 +79,8 @@ export interface PluginRuntimeRow {
   status?: string | null
   /** 进程 PID */
   pid?: number | null
-  /** 常驻内存（MB） */
-  memory_rss_mb?: number | null
+  /** 私有提交内存（MB；任务管理器「提交大小」口径） */
+  memory_commit_mb?: number | null
   /** 运行时长（秒） */
   uptime_seconds?: number | null
   /** 上次崩溃时间戳（unix 秒；0 = 未崩过或留存窗外） */

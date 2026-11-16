@@ -1,0 +1,71 @@
+{
+  "id": "channel_cli",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "CLI Channel",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": [
+      {
+        "name": "cli.get_status",
+        "description": "Get CLI channel adapter status",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string"
+            },
+            "connected": {
+              "type": "boolean"
+            },
+            "healthy": {
+              "type": "boolean"
+            }
+          }
+        }
+      },
+      {
+        "name": "cli.sanitize_text",
+        "description": "Sanitize text for terminal output",
+        "input_schema": {
+          "properties": {
+            "text": {
+              "type": "string",
+              "description": "Text to sanitize for terminal"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 50,
+  "requires_content": 5
+}

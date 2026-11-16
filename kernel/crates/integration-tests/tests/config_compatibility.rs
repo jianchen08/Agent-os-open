@@ -285,7 +285,7 @@ name: Coding Agent
 version: "2.0"
 pipeline:
   input:
-    - plugin: context_build
+    - plugin: agent_config_load
       inputs:
         max_history: 20
     - plugin: prompt_build

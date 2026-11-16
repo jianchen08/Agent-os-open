@@ -2,8 +2,10 @@
 /**
  * 功能测试：ContextUsageIndicator 上下文用量指示器（圈型进度 + 用量明细浮窗）
  *
+ * 主条头部：圆环本身作模型名前的图标槽位（无 Database 图标）。
  * 语义沿用：>=90% error 红 / >=70% warning 黄 / 其余 success 绿；
- * maxTokens<=0 不展示假进度；compact（小尺寸）同样渲染圆环。
+ * maxTokens<=0 时圆环仍在但不带进度语义（无 progressbar role/aria、弧为空）
+ * 且不显示数字（不展示假进度）；compact（小尺寸）同样渲染圆环。
  *
  * 浮窗：悬停或点击主条弹出（上下文使用量 + 本轮明细 + 管道累计明细），
  * 移入浮窗保持打开，移出关闭；无数据的明细行/段不渲染。
@@ -31,8 +33,12 @@ describe('ContextUsageIndicator — 圈型进度', () => {
     expect(ring).toHaveAttribute('aria-valuemax', '100')
     // 旧横向进度条结构已移除
     expect(screen.queryByTestId('context-usage-bar')).not.toBeInTheDocument()
+    // 圆环是主条头部第一个元素（原 Database 图标槽位），Database 图标已移除
+    const indicator = screen.getByTestId('context-usage-indicator')
+    expect(indicator.firstElementChild).toBe(ring)
+    expect(document.querySelector('.database-icon')).not.toBeInTheDocument()
     // 主条显示紧凑数字（千分位完整数字只出现在浮窗）
-    expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('4.0k / 10.0k')
+    expect(indicator).toHaveTextContent('4.0k / 10.0k')
   })
 
   it('紧凑数字格式：十万级无小数、百万级 M、千以下原样', () => {
@@ -48,12 +54,18 @@ describe('ContextUsageIndicator — 圈型进度', () => {
     expect(screen.getByTestId('context-usage-indicator')).toHaveTextContent('900 / 2.0k')
   })
 
-  it('maxTokens<=0 不渲染假进度（无 progressbar、主条无数字）', () => {
+  it('maxTokens<=0：圆环仍在作图标槽位，但不带进度语义（无 progressbar role/aria 值）、主条无数字', () => {
     render(<ContextUsageIndicator modelName="deepseek-v3" currentTokenUsage={0} maxTokens={0} />)
+    // 窗口未知圆环仍渲染（模型名前的图标槽位），只是不假装有进度
+    const ring = screen.getByTestId('context-usage-ring')
+    expect(ring).toBeInTheDocument()
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+    expect(ring).not.toHaveAttribute('role')
+    expect(ring).not.toHaveAttribute('aria-valuenow')
     const indicator = screen.getByTestId('context-usage-indicator')
-    expect(indicator).toBeInTheDocument()
     expect(indicator).not.toHaveTextContent('/ ')
+    // Database 图标不再出现（圆环即图标槽位）
+    expect(document.querySelector('.database-icon')).not.toBeInTheDocument()
   })
 })
 
@@ -192,6 +204,7 @@ describe('ContextUsageIndicator — 基础语义', () => {
     render(<ContextUsageIndicator modelName="unknown" />)
     expect(screen.getByTestId('context-usage-invalid')).toBeInTheDocument()
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('context-usage-ring')).not.toBeInTheDocument()
     expect(screen.queryByTestId('context-usage-indicator')).not.toBeInTheDocument()
   })
 
@@ -201,5 +214,72 @@ describe('ContextUsageIndicator — 基础语义', () => {
     )
     expect(screen.getByRole('progressbar')).toBeInTheDocument()
     expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '50')
+  })
+})
+
+describe('ContextUsageIndicator — 上下文压缩终态（用户裁定 2026-10-28）', () => {
+  it('压缩失败：主条常驻「压缩失败」标记（不依赖一次性 toast）', () => {
+    render(
+      <ContextUsageIndicator
+        modelName="glm-5.3-flash"
+        currentTokenUsage={654479}
+        maxTokens={1000000}
+        compressionStatus={{ status: 'failed', reason: '压缩未产生有效收缩' }}
+      />,
+    )
+    expect(screen.getByTestId('context-compression-failed')).toHaveTextContent('压缩失败')
+  })
+
+  it('压缩失败：纯圈模式用红点作常驻信号（无文案位）', () => {
+    render(
+      <ContextUsageIndicator
+        modelName="glm-5.3-flash"
+        currentTokenUsage={654479}
+        maxTokens={1000000}
+        ringOnly
+        compressionStatus={{ status: 'failed' }}
+      />,
+    )
+    expect(screen.getByTestId('context-compression-failed-dot')).toBeInTheDocument()
+    expect(screen.queryByTestId('context-compression-failed')).not.toBeInTheDocument()
+  })
+
+  it('压缩失败：浮窗展示失败原因', () => {
+    render(
+      <ContextUsageIndicator
+        modelName="glm-5.3-flash"
+        currentTokenUsage={654479}
+        maxTokens={1000000}
+        compressionStatus={{ status: 'failed', reason: 'no healthy deployments' }}
+      />,
+    )
+    openPopover()
+    const row = screen.getByTestId('context-compression-status')
+    expect(row).toHaveTextContent('失败')
+    expect(row).toHaveTextContent('no healthy deployments')
+  })
+
+  it('压缩成功（applied）：不显示失败标记，浮窗显示正常', () => {
+    render(
+      <ContextUsageIndicator
+        modelName="glm-5.3-flash"
+        currentTokenUsage={200000}
+        maxTokens={1000000}
+        compressionStatus={{ status: 'applied' }}
+      />,
+    )
+    expect(screen.queryByTestId('context-compression-failed')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('context-compression-failed-dot')).not.toBeInTheDocument()
+    openPopover()
+    expect(screen.getByTestId('context-compression-status')).toHaveTextContent('正常')
+  })
+
+  it('无压缩状态：不渲染压缩段（不发明状态）', () => {
+    render(
+      <ContextUsageIndicator modelName="m" currentTokenUsage={1000} maxTokens={10000} />,
+    )
+    expect(screen.queryByTestId('context-compression-failed')).not.toBeInTheDocument()
+    openPopover()
+    expect(screen.queryByTestId('context-compression-status')).not.toBeInTheDocument()
   })
 })

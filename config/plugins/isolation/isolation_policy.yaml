@@ -79,6 +79,22 @@ tools:
     isolation: isolated
     execution: browser_mcp
 
+  # --- 自进化评测面（mode_evolution 模式包内部数据服务，宿主机执行）---
+  # 与该包 plugin.json capabilities.tools 声明同源；键漂移由
+  # plugins/shared/isolation/test_policy.py 的声明对账闸执法。
+  eval_query:
+    isolation: non_isolated
+    execution: host_direct
+  eval_summarize:
+    isolation: non_isolated
+    execution: host_direct
+  eval_run_heldout:
+    isolation: non_isolated
+    execution: host_direct
+  proposal:
+    isolation: non_isolated
+    execution: host_direct
+
 # ============================================
 # 模式/进化治理路径 profile（2026-09-15 模式服务化同刀）
 # ============================================
@@ -106,7 +122,7 @@ profiles:
       self_evolve_config_mirror:
         path: config/self_evolve
         access: read_only
-        reason: B 部类进化流程物料；写面仅仓库外 staging（proposal_submit），冻结面由提案校验执行
+        reason: B 部类进化流程物料；写面仅仓库外 staging（proposal 的 action=submit），冻结面由提案校验执行
 
 # ============================================
 # 分类级规则（匹配不到具体工具名时，按分类兜底）
@@ -137,28 +153,5 @@ categories:
     isolation: non_isolated
     execution: host_direct
   memory:
-    isolation: non_isolated
-    execution: host_direct
-
-  # --- 自进化评测面（内部数据服务，宿主直执行）---
-  eval_run_suite:
-    isolation: non_isolated
-    execution: host_direct
-  eval_judge_heldout:
-    isolation: non_isolated
-    execution: host_direct
-  proposal_submit:
-    isolation: non_isolated
-    execution: host_direct
-  proposal_promote:
-    isolation: non_isolated
-    execution: host_direct
-  proposal_reject:
-    isolation: non_isolated
-    execution: host_direct
-  eval_view_signatures:
-    isolation: non_isolated
-    execution: host_direct
-  eval_health_report:
     isolation: non_isolated
     execution: host_direct

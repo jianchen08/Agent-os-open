@@ -304,8 +304,10 @@ describe('ContributionRegistry — 旧贡献点直接归一化为 pages', () => 
     expect(sc?.command).toBe('editor.save')
     expect(sc?.pluginId).toBe('p')
 
-    const modal = registry.getPage('modal1')
-    expect(modal).toMatchObject({ legacyFrom: 'modal', trigger: 'on_command:cmd1', widget: 'approval_card', props: { mode: 'strict' } })
+    // modal 不再归一化进 pages（C4 存量收敛：SlotRegistry 翻译为 shell.overlay
+    // 槽条目，触发查询 = slotRegistry.findOverlayByTrigger）
+    expect(registry.getPage('modal1')).toBeUndefined()
+    expect(registry.getPages().some((p) => p.legacyFrom === 'modal')).toBe(false)
   })
 
   it('plugin_configs 的 config_files 归一化为 settings/nav 页(datasourceUri=路径)', () => {
@@ -365,8 +367,8 @@ describe('ContributionRegistry — 旧贡献点直接归一化为 pages', () => 
     expect(registry.getMenus('workspace/context')).toHaveLength(1)
     expect(registry.getCommands()[0].id).toBe('cmd1')
     expect(registry.getShortcuts()[0].key).toBe('Ctrl+K')
-    expect(registry.getModals()).toHaveLength(1)
-    expect(registry.findModalByTrigger('on_command:cmd1')?.id).toBe('modal1')
+    // modal 薄视图已删除（C4 收敛：SlotRegistry.findOverlayByTrigger 承接）
+    expect(registry.getPages().some((p) => p.legacyFrom === 'modal')).toBe(false)
     // getByType 薄视图:pages = 声明页;旧 key = 归一化页
     expect(registry.getByType('pages').map((p) => p.id)).toEqual(['pg'])
     expect(registry.getByType('menus')).toHaveLength(1)
@@ -455,7 +457,7 @@ describe('ContributionRegistry — 未知贡献点 key 忽略（导航页垃圾�
         {
           plugin_id: 'dsh_adapter',
           contributes: {
-            renderers: [{ card: 'read', tool: 'dsh_read' }],
+            renderers: [{ card: 'read', tool: 'sample_read' }],
             pages: [{ id: 'real_page', title: '真实页面', space: 'workspace' }],
           },
         },

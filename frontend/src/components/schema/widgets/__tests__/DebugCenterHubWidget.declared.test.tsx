@@ -69,7 +69,7 @@ describe('DebugCenterHubWidget — 子页声明组台', () => {
   it('声明为空 → 显式占位（不静默空白）', () => {
     seedSubPages([])
     render(<DebugCenterHubWidget />)
-    expect(screen.getByText(/暂无声明子页/)).toBeInTheDocument()
+    expect(screen.getByText(/暂无子页/)).toBeInTheDocument()
   })
 
   it('order 声明驱动排序（后声明序小者先渲染为首屏）', () => {

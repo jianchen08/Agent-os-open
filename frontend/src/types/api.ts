@@ -183,6 +183,8 @@ export interface ApiError extends ErrorEnvelope {
   code: string
   /** 错误消息 */
   message: string
+  /** 429 限速面的等待秒数（Retry-After 响应头解析；非限速错误为 undefined） */
+  retry_after_secs?: number
   /** 错误详情（可选；任意结构，按需在消费端窄化） */
   details?: unknown
 }

@@ -7,7 +7,7 @@
   reap 强杀兜底、shutdown_all 停看门狗+终止计数；
 - send_input / terminate_process 的参数与管道失败分支；
 - WSL 命令解析与 Windows 路径转 WSL 路径（纯函数，parametrize 展开）；
-- _spawn_local_process 的 shell 选择分支（create_subprocess_exec 桩）；
+- spawn_local_process（单源 shell_route.py）的 shell 选择分支（create_subprocess_exec 桩）；
 - Local/Container 两个后端的 kill/采样契约。
 """
 
@@ -22,13 +22,15 @@ from typing import Any
 
 import pytest
 
-from bash_types import ProcessInfo, WorkUnit
-from process_manager import (
+from agentos_plugin_sdk.process_runtime import ProcessInfo, WorkUnit
+from agentos_plugin_sdk.process_runtime import (
     ContainerProcessBackend,
     LocalProcessBackend,
     ProcessManager,
-    _get_container_backend,
 )
+from agentos_plugin_sdk.process_runtime.backends import _get_container_backend
+# 本地 shell 五级路由单源（自 process_manager 抽出，普查 ⚠️-6）
+import agentos_plugin_sdk.process_runtime.shell_route as shell_route
 
 pytestmark = pytest.mark.unit
 
@@ -299,6 +301,24 @@ async def test_watchdog_kill_backend_failure_is_contained(tmp_path) -> None:
     assert info.status == "running"
 
 
+async def test_watchdog_kill_reap_failure_keeps_status(tmp_path, caplog) -> None:
+    """backend kill 成功但收尸失败（强杀也失败）→ 按终止失败记账，
+    状态保持未定，不得谎报 terminated（审查 P1-23 状态保真）。"""
+    import logging
+
+    mgr = _make_manager(tmp_path)
+    backend = FakeBackend()
+    proc = FakeProcess(pid=53, wait_forever=True, kill_error=ProcessLookupError("gone"))
+    info = _register(mgr, 53, process=proc, backend=backend)
+
+    with caplog.at_level(logging.ERROR):
+        await mgr._watchdog_kill(53, info, "orphan")
+
+    assert (53, True) in backend.killed
+    assert info.status == "running"
+    assert any("终止" in r.getMessage() and "失败" in r.getMessage() for r in caplog.records)
+
+
 async def test_reap_after_kill_force_kills_when_wait_times_out(tmp_path) -> None:
     """backend 整树杀后 wait 卡死 → 3s 超时 → process.kill() 兜底。"""
     mgr = _make_manager(tmp_path)
@@ -309,6 +329,7 @@ async def test_reap_after_kill_force_kills_when_wait_times_out(tmp_path) -> None
 
     assert proc.kill_called == 1
     assert info.status == "terminated"
+    assert info.exit_code == 0  # 收尸拿到的退出码落账，不得静默丢成 None
 
 
 async def test_reap_after_kill_waits_clean_exit(tmp_path) -> None:
@@ -320,6 +341,7 @@ async def test_reap_after_kill_waits_clean_exit(tmp_path) -> None:
 
     assert proc.kill_called == 0
     assert info.status == "terminated"
+    assert info.exit_code == 0  # 收尸拿到的退出码落账，不得静默丢成 None
 
 
 async def test_shutdown_all_terminates_only_running_and_counts(tmp_path) -> None:
@@ -664,17 +686,17 @@ async def test_read_container_pid_falls_back_to_host_pid() -> None:
     ],
 )
 def test_is_compound_command(command: str, expected: bool) -> None:
-    assert ProcessManager._is_compound_command(command) is expected
+    assert shell_route.is_compound_command(command) is expected
 
 
 # ─────────────────────────── WSL 参数解析与路径转换 ───────────────────────────
 
 
 def test_is_wsl_command_shape() -> None:
-    assert ProcessManager._WSL_COMMAND_RE.match("wsl ls")
-    assert ProcessManager._WSL_COMMAND_RE.match("WSL.EXE -d U")
-    assert not ProcessManager._WSL_COMMAND_RE.match("wslx ls")
-    assert not ProcessManager._WSL_COMMAND_RE.match("echo wsl")
+    assert shell_route._WSL_COMMAND_RE.match("wsl ls")
+    assert shell_route._WSL_COMMAND_RE.match("WSL.EXE -d U")
+    assert not shell_route._WSL_COMMAND_RE.match("wslx ls")
+    assert not shell_route._WSL_COMMAND_RE.match("echo wsl")
 
 
 @pytest.mark.parametrize(
@@ -696,12 +718,12 @@ def test_is_wsl_command_shape() -> None:
     ],
 )
 def test_parse_wsl_args(command: str, expected: list[str]) -> None:
-    assert ProcessManager._parse_wsl_args(command) == expected
+    assert shell_route.parse_wsl_args(command) == expected
 
 
 def test_join_for_bash_c() -> None:
-    assert ProcessManager._join_for_bash_c(["echo", "a b"]) == "echo 'a b'"
-    assert ProcessManager._join_for_bash_c(["echo", "$HOME|wc"]) == "echo $HOME|wc"
+    assert shell_route.join_for_bash_c(["echo", "a b"]) == "echo 'a b'"
+    assert shell_route.join_for_bash_c(["echo", "$HOME|wc"]) == "echo $HOME|wc"
 
 
 def test_convert_windows_paths_non_windows_is_noop(monkeypatch) -> None:
@@ -736,7 +758,7 @@ def test_convert_single_windows_path_wsl_unc_short_form() -> None:
     assert ProcessManager._convert_single_windows_path("justword") == "justword"
 
 
-# ─────────────────────────── _spawn_local_process 分支选择 ───────────────────────────
+# ─────────────────────────── spawn_local_process 分支选择 ───────────────────────────
 
 
 class _SpawnRecorder:
@@ -758,7 +780,7 @@ class _SpawnRecorder:
 @pytest.fixture
 def spawn_recorder(monkeypatch) -> _SpawnRecorder:
     rec = _SpawnRecorder()
-    import process_manager as pm
+    import agentos_plugin_sdk.process_runtime.manager as pm
 
     monkeypatch.setattr(pm.asyncio, "create_subprocess_exec", rec.exec)
     monkeypatch.setattr(pm.asyncio, "create_subprocess_shell", rec.shell)
@@ -769,12 +791,11 @@ def spawn_recorder(monkeypatch) -> _SpawnRecorder:
 async def test_spawn_local_wsl_direct_priority(tmp_path, monkeypatch, spawn_recorder) -> None:
     """WSL 可用 + wsl 命令 → 直连分支（不走 bash -c 包装）。"""
     monkeypatch.setattr("shutil.which", lambda name: "C:\\wsl.exe" if name == "wsl" else None)
-    import process_manager as pm
+    import agentos_plugin_sdk.process_runtime.manager as pm
 
     monkeypatch.setattr(pm.platform, "system", lambda: "Windows")
-    mgr = _make_manager(tmp_path)
 
-    await mgr._spawn_local_process("wsl ls -la", None, {}, is_windows=True)
+    await shell_route.spawn_local_process("wsl ls -la", None, {}, is_windows=True)
 
     assert spawn_recorder.exec_calls == [
         ("wsl", "-e", "bash", "-c", "ls -la")
@@ -786,9 +807,8 @@ async def test_spawn_local_msys_bash_wraps_compound_with_pipefail(
     tmp_path, monkeypatch, spawn_recorder
 ) -> None:
     monkeypatch.setattr("shutil.which", lambda name: "C:\\bash.exe" if name == "bash" else None)
-    mgr = _make_manager(tmp_path)
 
-    await mgr._spawn_local_process("echo a && echo b", None, {}, is_windows=True)
+    await shell_route.spawn_local_process("echo a && echo b", None, {}, is_windows=True)
 
     args = spawn_recorder.exec_calls[0]
     assert args[:3] == ("bash", "-c", "set -o pipefail; echo a && echo b")
@@ -798,9 +818,8 @@ async def test_spawn_local_msys_bash_wraps_compound_with_pipefail(
 async def test_spawn_local_windows_cmd_fallback(tmp_path, monkeypatch, spawn_recorder) -> None:
     """无 bash/wsl → cmd /c 兜底。"""
     monkeypatch.setattr("shutil.which", lambda name: None)
-    mgr = _make_manager(tmp_path)
 
-    await mgr._spawn_local_process("dir", None, {}, is_windows=True)
+    await shell_route.spawn_local_process("dir", None, {}, is_windows=True)
 
     assert spawn_recorder.shell_calls and "cmd /c" in spawn_recorder.shell_calls[0]
 
@@ -808,9 +827,8 @@ async def test_spawn_local_windows_cmd_fallback(tmp_path, monkeypatch, spawn_rec
 @pytest.mark.asyncio
 async def test_spawn_local_posix_compound_uses_bash(tmp_path, monkeypatch, spawn_recorder) -> None:
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/bash" if name == "bash" else None)
-    mgr = _make_manager(tmp_path)
 
-    await mgr._spawn_local_process("echo a | wc -l", None, {}, is_windows=False)
+    await shell_route.spawn_local_process("echo a | wc -l", None, {}, is_windows=False)
 
     args = spawn_recorder.exec_calls[0]
     assert args[:3] == ("bash", "-c", "set -o pipefail; echo a | wc -l")
@@ -819,9 +837,8 @@ async def test_spawn_local_posix_compound_uses_bash(tmp_path, monkeypatch, spawn
 @pytest.mark.asyncio
 async def test_spawn_local_posix_simple_uses_shell(tmp_path, monkeypatch, spawn_recorder) -> None:
     monkeypatch.setattr("shutil.which", lambda name: None)
-    mgr = _make_manager(tmp_path)
 
-    await mgr._spawn_local_process("ls", None, {}, is_windows=False)
+    await shell_route.spawn_local_process("ls", None, {}, is_windows=False)
 
     assert spawn_recorder.shell_calls == ["ls"]
 
@@ -829,10 +846,9 @@ async def test_spawn_local_posix_simple_uses_shell(tmp_path, monkeypatch, spawn_
 @pytest.mark.asyncio
 async def test_start_wsl_process_injects_lang(tmp_path, monkeypatch, spawn_recorder) -> None:
     monkeypatch.setattr("shutil.which", lambda name: "wsl.exe")
-    mgr = _make_manager(tmp_path)
     env = {"PATH": "x"}
 
-    await mgr._start_wsl_process("wsl echo hi", None, env)
+    await shell_route.start_wsl_process("wsl echo hi", None, env)
 
     assert env["LANG"] == "en_US.UTF-8"
     args = spawn_recorder.exec_calls[0]

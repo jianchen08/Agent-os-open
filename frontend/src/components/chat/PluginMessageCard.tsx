@@ -57,17 +57,28 @@ export interface PluginMessageCardProps {
    * 缺省不下发——通用 widget 卡自行经 widget.event 通道取数。
    */
   message?: { content: string; metadata?: Record<string, unknown> | null }
+  /**
+   * 高度形态（ADR 2026-10-14-message-card-body-form）：fixed = 既有 h-64 有界
+   * （缺省，状态卡/压缩卡现状零变化）；auto = 本体形态卡自适应高（卡内页经
+   * webview.resize 通用上行桥回报内容高，宿主 clamp 后撑开容器）。
+   */
+  fit?: 'fixed' | 'auto'
 }
 
 /** 消息卡容器：有界高度内嵌插件 webview（沙箱安全模型同 WebviewWidget） */
-export function PluginMessageCard({ instanceKey, styleId, message }: PluginMessageCardProps) {
+export function PluginMessageCard({ instanceKey, styleId, message, fit = 'fixed' }: PluginMessageCardProps) {
   const resolved = resolveMessageStyle(styleId)
   if (!resolved) return null
   return (
     <div
-      className="border-border/40 h-64 w-full overflow-hidden rounded-xl border"
+      className={
+        fit === 'auto'
+          ? 'w-full'
+          : 'border-border/40 h-64 w-full overflow-hidden rounded-xl border'
+      }
       data-testid="plugin-message-card"
       data-message-style={styleId}
+      data-fit={fit}
     >
       <WebviewWidget
         pluginId={resolved.pluginId}
@@ -75,6 +86,7 @@ export function PluginMessageCard({ instanceKey, styleId, message }: PluginMessa
         widgetId={resolved.widgetId ?? `${instanceKey}:${styleId}`}
         title={resolved.page.title ?? styleId}
         injectMessage={message}
+        autoHeight={fit === 'auto'}
       />
     </div>
   )

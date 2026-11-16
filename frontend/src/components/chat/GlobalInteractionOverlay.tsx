@@ -75,17 +75,6 @@ export function GlobalInteractionOverlay() {
     }
   }, [pendingItems.length, currentIndex])
 
-  // 响应完成或跳转后自动移除
-  useEffect(() => {
-    if (!currentInteraction) return
-    if (currentInteraction.status === 'responded' || currentInteraction.status === 'navigated') {
-      const timer = setTimeout(() => {
-        dismissInteraction(currentInteraction.requestId)
-      }, 2000)
-      return () => clearTimeout(timer)
-    }
-  }, [currentInteraction, dismissInteraction])
-
   const handleRespondChoice = useCallback(
     async (optionId: string) => {
       if (!currentInteraction) return

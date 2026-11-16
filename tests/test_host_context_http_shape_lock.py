@@ -24,9 +24,9 @@ import pytest
 
 from tests._pipeline_plugin_path import add_plugin_dir
 
-add_plugin_dir("input", "host_context")
+add_plugin_dir("host_context")
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[1] / "plugins" / "shared" / "pipeline" / "input" / "host_context"
+_PLUGIN_DIR = Path(__file__).resolve().parents[1] / "plugins" / "shared" / "host_context"
 
 
 @pytest.fixture

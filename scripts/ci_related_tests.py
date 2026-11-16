@@ -109,7 +109,7 @@ def select_tests(changed: list[str]) -> tuple[list[Path], list[str]]:
         notes.append(f"根目录运维脚本 {len(root_ops)} 个 → test_startup_scripts_fix.py（静态契约）")
 
     for f in changed:
-        if f.startswith(("plugins/shared/system/", "plugins/shared/tools/")):
+        if f.startswith("plugins/shared/"):
             root = _plugin_root(f)
             if root is not None:
                 plugin_roots.setdefault(root, set()).update(_plugin_ids(root))
@@ -120,7 +120,13 @@ def select_tests(changed: list[str]) -> tuple[list[Path], list[str]]:
             if len(parts) >= 2:
                 needles.add(parts[1])
         elif f.startswith("tests/") and f.endswith(".py"):
-            selected.add(ROOT / f)
+            # 删除的测试文件不得进 pytest 参数：路径不存在会让整条车道
+            # 以 usage error（exit 4）失败，掩盖真实结果（2026-11-04 实测）
+            path = ROOT / f
+            if path.is_file():
+                selected.add(path)
+            else:
+                notes.append(f"{f}: 已删除/不存在，跳过")
 
     for root, ids in plugin_roots.items():
         local = _local_plugin_tests(root)
@@ -200,7 +206,7 @@ def main() -> int:
             return 0
         changed = resolved[0]
 
-    heavy_hits = [f for f in changed if f.startswith(("kernel/", "plugins/sdk/", "plugins/shared/pipeline/"))]
+    heavy_hits = [f for f in changed if f.startswith(("kernel/", "plugins/sdk/", "plugins/shared/"))]
     if heavy_hits:
         print(
             f"[related-tests] 变更含全量车道面（{len(heavy_hits)} 文件，如 {heavy_hits[0]}），"

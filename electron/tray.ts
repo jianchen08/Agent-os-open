@@ -5,8 +5,10 @@
  * 以及点击托盘图标切换窗口显示/隐藏。
  */
 
-import { Tray, Menu, nativeImage, BrowserWindow, app } from "electron";
+import { Tray, Menu, nativeImage, BrowserWindow, app, shell, dialog } from "electron";
 import * as path from "path";
+
+import { managedKernelLogDir, resolveKernelLogDirForTray } from "./kernel-manager";
 
 /** 托盘图标资源路径（相对于编译后的 dist-electron 目录） */
 const TRAY_ICON_RELATIVE_PATH = "../frontend/public/favicon.ico";
@@ -103,6 +105,19 @@ function hideMainWindow(): void {
 }
 
 /**
+ * 打开内核日志目录（P-22 日志可达性：日志的终点也应可达——用户自救与报障
+ * 入口）。落点解析复用 kernel-manager 单点（受管内核真身优先，dev 回退同一
+ * 资源解析）；打不开（目录不存在/无权限）显式报错框，不静默。
+ */
+async function openKernelLogDir(): Promise<void> {
+  const dir = resolveKernelLogDirForTray(managedKernelLogDir(), app.getAppPath());
+  const failure = await shell.openPath(dir);
+  if (failure) {
+    dialog.showErrorBox("无法打开日志目录", `${dir}\n${failure}`);
+  }
+}
+
+/**
  * 创建系统托盘。
  *
  * @param mainWindow - 关联的 BrowserWindow 实例
@@ -137,6 +152,13 @@ export function createTray(mainWindow: BrowserWindow): Tray {
       type: "normal",
       click: () => {
         hideMainWindow();
+      },
+    },
+    {
+      label: "打开日志目录",
+      type: "normal",
+      click: () => {
+        void openKernelLogDir();
       },
     },
     {

@@ -14,8 +14,9 @@
 
 import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
-import { Bot, EditIcon, RefreshCw } from '@/assets/icons'
+import { Bot, EditIcon, Eye, RefreshCw } from '@/assets/icons'
 import { AgentConfigModal } from '@/components/agent/AgentConfigModal'
+import { PromptPreviewModal } from '@/components/agent/PromptPreviewModal'
 import { EmptyState } from '@/components/shared/EmptyState'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
@@ -39,6 +40,7 @@ export function AgentManagerPage({ typeLabels }: AgentManagerPageProps = {}) {
   const [search, setSearch] = useState('')
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [editingAgent, setEditingAgent] = useState<AgentResponse | null>(null)
+  const [previewingAgent, setPreviewingAgent] = useState<AgentResponse | null>(null)
 
   // 四态统一（OBS-R258-1）：搜索词进 queryKey，换词自动重查；
   // refetch 供失败重试/手动刷新/编辑保存后回读共用
@@ -63,7 +65,7 @@ export function AgentManagerPage({ typeLabels }: AgentManagerPageProps = {}) {
         <button
           onClick={resource.refetch}
           disabled={resource.isLoading}
-          className="hover:bg-accent/50 h-8 w-8 rounded-lg border p-1.5 text-xs disabled:opacity-50 md:min-h-[44px] md:min-w-[44px]"
+          className="hover:bg-muted/50 h-8 w-8 rounded-lg border p-1.5 text-xs disabled:opacity-50 md:min-h-[44px] md:min-w-[44px]"
           aria-label="刷新智能体列表"
         >
           <RefreshCw className={`h-3.5 w-3.5 ${resource.isLoading ? 'animate-spin' : ''}`} />
@@ -110,7 +112,7 @@ export function AgentManagerPage({ typeLabels }: AgentManagerPageProps = {}) {
           {agents.map((agent) => (
             <div
               key={agent.id}
-              className="hover:bg-accent/30 cursor-pointer rounded-lg border p-4 transition-colors"
+              className="hover:bg-muted/30 cursor-pointer rounded-lg border p-4 transition-colors"
               onClick={() => setExpandedId(expandedId === agent.id ? null : agent.id)}
               role="listitem"
             >
@@ -121,9 +123,21 @@ export function AgentManagerPage({ typeLabels }: AgentManagerPageProps = {}) {
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation()
+                      setPreviewingAgent(agent)
+                    }}
+                    className="text-muted-foreground hover:bg-muted/50 hover:text-foreground rounded-md p-1.5 transition-colors"
+                    aria-label={`查看提示词 ${agent.name}`}
+                    title="查看组装提示词"
+                  >
+                    <Eye className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation()
                       setEditingAgent(agent)
                     }}
-                    className="text-muted-foreground hover:bg-accent/50 hover:text-foreground rounded-md p-1.5 transition-colors"
+                    className="text-muted-foreground hover:bg-muted/50 hover:text-foreground rounded-md p-1.5 transition-colors"
                     aria-label={`编辑 ${agent.name}`}
                     title="编辑配置"
                   >
@@ -208,6 +222,13 @@ export function AgentManagerPage({ typeLabels }: AgentManagerPageProps = {}) {
         isOpen={!!editingAgent}
         onClose={() => setEditingAgent(null)}
         onSaved={resource.refetch}
+      />
+
+      {/* 组装提示词预览模态框（prompt_build prompt.preview 服务透传） */}
+      <PromptPreviewModal
+        agent={previewingAgent}
+        isOpen={!!previewingAgent}
+        onClose={() => setPreviewingAgent(null)}
       />
     </PageShell>
   )

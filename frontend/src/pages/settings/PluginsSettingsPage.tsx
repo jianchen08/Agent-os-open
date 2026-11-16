@@ -37,14 +37,16 @@ import { API_ENDPOINTS } from '@/constants/api'
 import { usePluginsQuery } from '@/hooks/queries/usePluginsQuery'
 import { useAsyncResource } from '@/hooks/useAsyncResource'
 import apiClient from '@/services/api/client'
-import { refreshPluginContributions } from '@/services/modules/GrowthLoop'
 import { queryClient } from '@/services/query/queryClient'
 import { queryKeys } from '@/services/query/queryKeys'
 import type { PluginStatus } from '@/hooks/queries/usePluginsQuery'
 
 /** 类型主题：卡片徽标 + 图标方块共用一套配色。
- *  半透明底/边框用 color-mix 绑定 ds 语义令牌（同 ActivityCard 模式），
- *  跟随主题切换；fallback 与旧硬编码 hex 一致，令牌缺席时渲染不变。 */
+ *  半透明底/边框用 rgb(var(--ds-*-rgb)/alpha) 原生 alpha 语法绑定 ds 语义令牌
+ *  （RGB 三元组由 themeService 随 --ds-* 同源注入），跟随主题切换；不用
+ *  color-mix——WebView 110（Chromium <111）不支持，两段式产物门外裸 var
+ *  fallback 是实心色，会与同色图标叠加成隐形；fallback 三元组与旧硬编码 hex
+ *  一致，令牌缺席时渲染不变。 */
 function typeTheme(configType: string): {
   label: string
   badgeClass: string
@@ -56,9 +58,9 @@ function typeTheme(configType: string): {
     return {
       label: 'Pipeline',
       badgeClass:
-        'bg-[color-mix(in_srgb,var(--ds-accent-ai,#A78BFA)_15%,transparent)] text-[var(--ds-accent-ai,#A78BFA)] border-[color-mix(in_srgb,var(--ds-accent-ai,#A78BFA)_35%,transparent)]',
+        'bg-[rgb(var(--ds-accent-ai-rgb)/0.15)] text-[var(--ds-accent-ai)] border-[rgb(var(--ds-accent-ai-rgb)/0.35)]',
       boxClass:
-        'bg-[color-mix(in_srgb,var(--ds-accent-ai,#A78BFA)_12%,transparent)] border-[color-mix(in_srgb,var(--ds-accent-ai,#A78BFA)_35%,transparent)] text-[var(--ds-accent-ai,#A78BFA)]',
+        'bg-[rgb(var(--ds-accent-ai-rgb)/0.12)] border-[rgb(var(--ds-accent-ai-rgb)/0.35)] text-[var(--ds-accent-ai)]',
       Icon: Zap,
     }
   }
@@ -66,9 +68,9 @@ function typeTheme(configType: string): {
     return {
       label: 'Tool',
       badgeClass:
-        'bg-[color-mix(in_srgb,var(--ds-accent-primary,#22D3EE)_12%,transparent)] text-[var(--ds-accent-primary,#22D3EE)] border-[color-mix(in_srgb,var(--ds-accent-primary,#22D3EE)_35%,transparent)]',
+        'bg-[rgb(var(--ds-accent-primary-rgb)/0.12)] text-[var(--ds-accent-primary)] border-[rgb(var(--ds-accent-primary-rgb)/0.35)]',
       boxClass:
-        'bg-[color-mix(in_srgb,var(--ds-accent-primary,#22D3EE)_10%,transparent)] border-[color-mix(in_srgb,var(--ds-accent-primary,#22D3EE)_35%,transparent)] text-[var(--ds-accent-primary,#22D3EE)]',
+        'bg-[rgb(var(--ds-accent-primary-rgb)/0.10)] border-[rgb(var(--ds-accent-primary-rgb)/0.35)] text-[var(--ds-accent-primary)]',
       Icon: Wrench,
     }
   }
@@ -76,9 +78,9 @@ function typeTheme(configType: string): {
     return {
       label: 'System',
       badgeClass:
-        'bg-[color-mix(in_srgb,var(--ds-status-info,#60A5FA)_12%,transparent)] text-[var(--ds-status-info,#60A5FA)] border-[color-mix(in_srgb,var(--ds-status-info,#60A5FA)_35%,transparent)]',
+        'bg-[rgb(var(--ds-status-info-rgb)/0.12)] text-[var(--ds-status-info)] border-[rgb(var(--ds-status-info-rgb)/0.35)]',
       boxClass:
-        'bg-[color-mix(in_srgb,var(--ds-status-info,#60A5FA)_10%,transparent)] border-[color-mix(in_srgb,var(--ds-status-info,#60A5FA)_35%,transparent)] text-[var(--ds-status-info,#60A5FA)]',
+        'bg-[rgb(var(--ds-status-info-rgb)/0.10)] border-[rgb(var(--ds-status-info-rgb)/0.35)] text-[var(--ds-status-info)]',
       Icon: Settings,
     }
   }
@@ -187,6 +189,9 @@ export function PluginsSettingsPage() {
         // 刷新插件贡献（contributes 仅 Enabled 插件导出）：
         // 禁用 → 其主题从列表移除（在用则回退 base）、注入 CSS 清理；
         // 启用 → 其主题/样式重新注入。失败不影响开关结果（仅 warn）。
+        // 动态导入：GrowthLoop 是 schema 装载全链入口（main/authStore/client/
+        // resync 均按需动态加载以避静态环），本页静态引它会击穿其拆分意图。
+        const { refreshPluginContributions } = await import('@/services/modules/GrowthLoop')
         void refreshPluginContributions()
       } else {
         toast.error(res.data.error || '操作失败')
@@ -244,8 +249,8 @@ export function PluginsSettingsPage() {
         <div
           className="sticky top-0 z-10 -mx-6 -mt-6 border-b px-6 pb-2.5 pt-4"
           style={{
-            background: 'var(--ds-bg-panel, #0A1226)',
-            borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))',
+            background: 'var(--ds-bg-panel)',
+            borderColor: 'var(--ds-border-subtle)',
           }}
         >
           <div className="flex items-center gap-2">
@@ -274,7 +279,7 @@ export function PluginsSettingsPage() {
               onClick={resource.refetch}
               disabled={isLoading}
               className="hover:bg-[var(--hover-overlay)] flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
-              style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}
+              style={{ borderColor: 'var(--ds-border-subtle)' }}
             >
               <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
               刷新
@@ -289,14 +294,14 @@ export function PluginsSettingsPage() {
                   onClick={() => setFilter(tab.id)}
                   className={`rounded-md px-2.5 py-1 text-[11px] transition-colors ${
                     filter === tab.id
-                      ? 'text-[var(--ds-accent-primary,#22D3EE)]'
+                      ? 'text-[var(--ds-accent-primary)]'
                       : 'text-muted-foreground hover:text-foreground'
                   }`}
                   style={
                     filter === tab.id
                       ? {
-                          background: 'var(--ds-bg-elevated, #111C38)',
-                          boxShadow: 'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.45))',
+                          background: 'var(--ds-bg-elevated)',
+                          boxShadow: 'inset 0 0 0 1px var(--ds-border-active)',
                         }
                       : undefined
                   }
@@ -348,11 +353,11 @@ export function PluginsSettingsPage() {
                   className="rounded-lg border p-3"
                   style={{
                     background: plugin.enabled
-                      ? 'var(--ds-bg-panel, #0A1226)'
-                      : 'color-mix(in srgb, var(--muted-foreground, #94a3b8) 4%, transparent)',
+                      ? 'var(--ds-bg-panel)'
+                      : 'hsl(var(--muted-foreground) / 0.04)',
                     borderColor: plugin.error
-                      ? 'color-mix(in srgb, var(--ds-status-error, #F87171) 55%, transparent)'
-                      : 'var(--ds-border-subtle, rgba(148,163,184,0.12))',
+                      ? 'rgb(var(--ds-status-error-rgb)/0.55)'
+                      : 'var(--ds-border-subtle)',
                     opacity: plugin.enabled ? 1 : 0.6,
                   }}
                 >
@@ -387,7 +392,7 @@ export function PluginsSettingsPage() {
                         {plugin.description || plugin.plugin_id}
                       </p>
                       <div className="text-muted-foreground mt-1 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[10px]">
-                        <span className="text-[var(--ds-accent-primary,#22D3EE)]">
+                        <span className="text-[var(--ds-accent-primary)]">
                           {activationLabel(plugin.activation)}
                         </span>
                         <span>{plugin.host_type}</span>
@@ -414,7 +419,7 @@ export function PluginsSettingsPage() {
                             已净化/工具被剔除：
                             {gate.sanitized
                               ? `剔除 ${(gate.sanitized.rejected_tools ?? []).join('、') || '（见契约页）'}（工具 ${gate.sanitized.tools_before ?? '?'}→${gate.sanitized.tools_after ?? '?'}）`
-                              : (gate.last_error ?? 'G2 复核判定声明与实现不一致')}
+                              : (gate.last_error ?? '插件声明与实现不一致')}
                           </span>
                         </div>
                       )}
@@ -439,7 +444,7 @@ export function PluginsSettingsPage() {
                       disabled={togglingId === plugin.plugin_id}
                       className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 transition-colors duration-200 disabled:opacity-50 ${
                         plugin.enabled
-                          ? 'bg-[var(--ds-accent-primary,#22D3EE)] border-[var(--ds-accent-primary,#22D3EE)]'
+                          ? 'bg-[var(--ds-accent-primary)] border-[var(--ds-accent-primary)]'
                           : 'bg-[var(--status-pending)] border-[var(--status-pending)]'
                       }`}
                       title={plugin.enabled ? '点击禁用（重启生效）' : '点击启用（重启生效）'}
@@ -479,7 +484,7 @@ export function PluginsSettingsPage() {
                 <div
                   key={tool.name}
                   className="hover:bg-[var(--hover-overlay)] cursor-pointer rounded-lg border p-2.5"
-                  style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}
+                  style={{ borderColor: 'var(--ds-border-subtle)' }}
                   onClick={() => setExpandedTool(expandedTool === tool.name ? null : tool.name)}
                 >
                   <div className="flex flex-wrap items-center gap-2">
@@ -490,7 +495,7 @@ export function PluginsSettingsPage() {
                       <span className="text-muted-foreground font-mono text-[10px]">@{tool.plugin_id}</span>
                     )}
                     {tool.category && (
-                      <span className="rounded border-[color-mix(in_srgb,var(--ds-accent-primary,#22D3EE)_35%,transparent)] bg-[color-mix(in_srgb,var(--ds-accent-primary,#22D3EE)_12%,transparent)] border px-1.5 py-0.5 font-mono text-[10px]">
+                      <span className="rounded border-[rgb(var(--ds-accent-primary-rgb)/0.35)] bg-[rgb(var(--ds-accent-primary-rgb)/0.12)] border px-1.5 py-0.5 font-mono text-[10px]">
                         {tool.category}
                       </span>
                     )}

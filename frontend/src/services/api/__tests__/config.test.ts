@@ -399,3 +399,65 @@ describe('配置管理 API（LLM 配置域）', () => {
     })
   })
 })
+
+describe('模型/提供商 CRUD 边角（补覆盖：冲突序号/不存在报错/keys 空槽透传）', () => {
+  // clearAllMocks 只清调用记录不清 Once 队列——本组用例对 get/put 先 mockReset
+  // 自隔离，避免既有用例遗留的一次性应答串台（全量红单跑绿的顺序依赖）
+  beforeEach(() => {
+    vi.mocked(apiClient.get).mockReset()
+    vi.mocked(apiClient.put).mockReset()
+  })
+
+  it('addModel 派生 id 也被占用：`<id>-<provider>-2` 顺延不覆盖', async () => {
+    vi.mocked(apiClient.get).mockResolvedValueOnce(
+      okResponse(
+        {
+          models: {
+            gpt4o: { provider: 'openai', model_name: 'name-a' },
+            'gpt4o-openai': { provider: 'openai', model_name: 'name-b' },
+          },
+        },
+        'v1',
+      ),
+    )
+    vi.mocked(apiClient.put).mockResolvedValueOnce({ data: { etag: 'v2' }, headers: {} })
+
+    const config = { provider: 'openai', model_name: 'name-c' }
+    const result = await configApi.addModel('gpt4o', config)
+
+    expect(result.added_ids).toEqual(['gpt4o-openai-2'])
+    expect(result.models['gpt4o-openai-2']).toEqual(config)
+    expect(result.models['gpt4o-openai']).toEqual({ provider: 'openai', model_name: 'name-b' })
+  })
+
+  it('removeModel 不存在：报错不 PUT', async () => {
+    vi.mocked(apiClient.get).mockResolvedValueOnce(
+      okResponse({ models: { m1: { provider: 'openai', model_name: 'n' } } }, 'v1'),
+    )
+    await expect(configApi.deleteModel('ghost')).rejects.toThrow("模型 'ghost' 不存在")
+    expect(apiClient.put).not.toHaveBeenCalled()
+  })
+
+  it('removeProvider 不存在：报错不 PUT', async () => {
+    vi.mocked(apiClient.get).mockResolvedValueOnce(
+      okResponse({ providers: { openai: { type: 'openai' } } }, 'v1'),
+    )
+    await expect(configApi.deleteProvider('ghost')).rejects.toThrow("提供商 'ghost' 不存在")
+    expect(apiClient.put).not.toHaveBeenCalled()
+  })
+
+  it('updateProviderConfig keys 槽位为 null：原样透传（不与磁盘值合并）', async () => {
+    vi.mocked(apiClient.get).mockResolvedValueOnce(
+      okResponse(
+        { providers: { deepseek: { type: 'openai', keys: [{ api_key: '${DS_KEY}', label: 'k1' }] } } },
+        'v1',
+      ),
+    )
+    vi.mocked(apiClient.put).mockResolvedValueOnce({ data: { etag: 'v2' }, headers: {} })
+
+    await configApi.updateProviderConfig('deepseek', { keys: [null] })
+
+    const payload = vi.mocked(apiClient.put).mock.calls[0][1] as { data: { providers: { deepseek: { keys: unknown[] } } } }
+    expect(payload.data.providers.deepseek.keys).toEqual([null])
+  })
+})

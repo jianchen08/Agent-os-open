@@ -20,3 +20,9 @@ parking_lot = "0.12"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
+criterion.workspace = true
+
+# 性能基准（整改方案 §6 拍板⑨）：热点三（WS 扇出）——mock sink 计数，不开真 socket。
+[[bench]]
+name = "ws_fanout"
+harness = false

@@ -112,7 +112,7 @@ describe('handleNewMessage 认领', () => {
     expect(user?.sequence).toBe(2)
   })
 
-  it('旧内核无 user_message → 乐观 user 标记 completed（不驱逐不删除，兼容不崩）', () => {
+  it('旧内核无 user_message → 不做无 key 本地终态化（气泡留待对账，终态必携排序键）', () => {
     const store = usePipelineMessageStore.getState()
     store.addMessage(PIPELINE, {
       id: CMID, sessionId: THREAD, role: 'user', content: 'hi',
@@ -129,11 +129,12 @@ describe('handleNewMessage 认领', () => {
         message: { id: 'a_22222222222222222222222222222222', role: 'assistant', content: 'ok', sequence: 1, status: 'completed' },
       },
     } as never)
-    // 无 user_message → 不插权威版（旧内核无回传），乐观 user 原地 completed
+    // 无 user_record（无权威 id/seq）→ 无 key 不终态化：本地标 completed 会造出
+    // 无 seq 终态消息（排序键缺省恒排末尾 = 垫底根因）；权威版由对账按 cmid 收敛。
     const msgs = usePipelineMessageStore.getState().getMessages(PIPELINE)
     const user = msgs.find((m) => m.clientMessageId === CMID)
     expect(user).toBeDefined()
-    expect(user?.status).toBe('completed')
+    expect(user?.status).toBe('sending')
   })
 
   it('服务端 status=interrupted（停止/中断半截消息）→ 前端保持 interrupted 不覆盖 completed', () => {

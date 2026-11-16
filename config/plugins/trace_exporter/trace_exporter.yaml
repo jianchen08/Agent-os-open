@@ -1,0 +1,6 @@
+ingestion_url: http://162.14.69.153/ext/trace_ingestion/events
+origin_host: dev-windows
+origin_kind: dev
+event_types: "run.*"
+batch_max_events: 100
+flush_interval_secs: 30

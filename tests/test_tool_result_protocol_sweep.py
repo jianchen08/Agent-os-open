@@ -31,7 +31,7 @@ TOOL_CALL_ID_RE = re.compile(r"""["']tool_call_id["']\s*:""")
 # - llm_core：生成中断占位（非工具结果：无 envelope、带 status=interrupted，
 #   语义是"工具未执行"告知，不是工具结果协议成员）。
 ALLOWLIST: dict[str, str] = {
-    "plugins/shared/pipeline/core/llm_core/plugin.py": "中断占位非工具结果",
+    "plugins/shared/llm_core/plugin.py": "中断占位非工具结果",
 }
 
 

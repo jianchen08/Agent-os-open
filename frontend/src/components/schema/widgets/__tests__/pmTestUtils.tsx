@@ -22,7 +22,15 @@ const states: Record<string, Record<string, unknown>> = {}
 const tasks: Record<string, unknown>[] = []
 const sessions: Record<string, unknown>[] = []
 const projects: Record<string, unknown>[] = []
+const agents: Record<string, unknown>[] = []
 const usage = { usageByPipeline: {} as Record<string, Record<string, unknown>> }
+
+/** modes registry 合成体（模式徽标名/图标数据源；按用例可变） */
+export const modesRegistry: {
+  modes: Array<Record<string, unknown>>
+  total: number
+  errors: string[]
+} = { modes: [], total: 0, errors: [] }
 
 /**
  * 播种数据 + 可断言 mock 句柄。默认实现对齐各 query hook 的宽松形态
@@ -34,7 +42,9 @@ export const pmSeed = {
   tasks,
   sessions,
   projects,
+  agents,
   usage,
+  modesRegistry,
   pauseTask: vi.fn(() => Promise.resolve()),
   resumeTask: vi.fn(() => Promise.resolve()),
   cancelTask: vi.fn(() => Promise.resolve()),
@@ -54,10 +64,12 @@ export const pmSeed = {
   readSessions: vi.fn(() => [] as Record<string, unknown>[]),
   ensureSessionsLoaded: vi.fn(() => Promise.resolve([] as unknown[])),
   setActiveSession: vi.fn(() => Promise.resolve()),
+  rebuildSessionFromThread: vi.fn(),
   usePipelineRunsQuery: vi.fn(() => ({ data: runs })),
   usePipelineStatesQuery: vi.fn(() => ({ data: states })),
   useAllTasksQuery: vi.fn(() => ({ data: tasks })),
   useSessionsQuery: vi.fn(() => ({ data: sessions })),
+  useAgentsQuery: vi.fn(() => ({ data: agents })),
 }
 
 /** 清空全部播种容器（mock 句柄的默认实现保留，需要重配的用例自行 mockReset） */
@@ -67,6 +79,7 @@ export function resetPmContainers() {
   pmSeed.tasks.length = 0
   pmSeed.sessions.length = 0
   pmSeed.projects.length = 0
+  pmSeed.agents.length = 0
   for (const k of Object.keys(pmSeed.usage.usageByPipeline)) {
     delete pmSeed.usage.usageByPipeline[k]
   }
@@ -96,24 +109,35 @@ export const pmMod = {
     readSessions: pmSeed.readSessions,
     ensureSessionsLoaded: pmSeed.ensureSessionsLoaded,
   }),
+  agentsQuery: () => ({ useAgentsQuery: pmSeed.useAgentsQuery }),
   contextUsageStore: () => ({
     useContextUsageStore: (sel: (s: unknown) => unknown) =>
       sel({ usageByPipeline: pmSeed.usage.usageByPipeline }),
   }),
   sessionListStore: () => ({
     useSessionListStore: {
-      getState: () => ({ setActiveSession: pmSeed.setActiveSession }),
+      getState: () => ({
+        setActiveSession: pmSeed.setActiveSession,
+        rebuildSessionFromThread: pmSeed.rebuildSessionFromThread,
+      }),
     },
   }),
 }
 
 /**
- * 渲染并切到状态筛选「全部」（面板默认只看运行中——用户裁定 2026-09-21；
- * 无运行证据/终态防御用例的断言前提是条目可见。DOM 序：类型筛选「全部」在前，
- * 状态筛选「全部」第二）。
+ * 渲染并切到全量视野：状态组无「全部」项，标签全不选中即全量——无活跃会话时
+ * 面板缺省选中「运行中」，点该标签取消即全量；有活跃会话时缺省已空集，
+ * 无需点击（缺省契约见 PipelineManagerWidget 状态筛选注）。
+ *
+ * 会话激活与否以会话 chip 是否已渲染为准（render 同步 flush effects，chip
+ * 在 ⇔ 挂载时有活跃会话）；不顶层 import sessionStore——它经 GlobalWebSocket
+ * 拉到被 mock 的 api/client，vi.mock 工厂会在本模块求值期触发 pmMod TDZ
+ * （见各测试文件 mock 时序约束）。
  */
 export function renderPmAllStatuses(ui: ReactElement) {
   const ret = renderWithProviders(ui)
-  fireEvent.click(screen.getAllByText('全部')[1])
+  if (!screen.queryByLabelText('移除会话筛选')) {
+    fireEvent.click(screen.getByRole('button', { name: '状态：运行中' }))
+  }
   return ret
 }

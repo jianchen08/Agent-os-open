@@ -1,0 +1,2 @@
+# sync_relay 运行配置（字段声明见 plugin.json config_files；留空 = 行为与旧版一致）
+hub_device_id: ""

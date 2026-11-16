@@ -2,10 +2,10 @@
 /**
  * NotificationCenter 面板交互测试
  *
- * 覆盖：触发按钮未读 badge、按优先级分组渲染、折叠/展开（含"还有 N 条"）、
+ * 覆盖：触发按钮未读 badge、单列时间线渲染（最新在最上、不分组不折叠）、
  * 点击通知标记已读、sourceId 关联待处理交互时跳转并关面板、动作按钮执行、
- * wheel 冒泡拦截与 body overflow 临时解除/恢复、点击外部与 ESC 关闭、
- * 阻塞式模态框（标题/正文/进度条/动作按钮/确认继续）。
+ * wheel 冒泡拦截与 body overflow 临时解除/恢复、点击外部与 ESC 关闭、阻塞式
+ * 模态框（标题/正文/进度条/动作按钮/确认继续）。
  *
  * mock 约定（沿用 chat 目录既有测试惯例）：MarkdownRenderer 与 ui/dialog
  * 简化渲染；通知/交互两个 Zustand store 用真实实现驱动，测试间重置。
@@ -75,7 +75,7 @@ describe('NotificationCenter 触发按钮与未读 badge', () => {
   })
 })
 
-describe('NotificationCenter 面板分组渲染', () => {
+describe('NotificationCenter 面板列表渲染', () => {
   it('空通知打开面板：显示暂无通知', async () => {
     const user = userEvent.setup()
     render(<NotificationCenter />)
@@ -84,44 +84,49 @@ describe('NotificationCenter 面板分组渲染', () => {
     expect(screen.getByText('暂无通知')).toBeInTheDocument()
   })
 
-  it('四级优先级各成组：组头计数 + 通知标题可见', async () => {
+  it('单列时间线：四级优先级条目同时可见，不渲染分组头与折叠行', async () => {
     const user = userEvent.setup()
     seedNotifications([
-      makeNotification({ id: 'c1', priority: 'critical', title: '紧急件' }),
-      makeNotification({ id: 'c2', priority: 'critical', title: '紧急件二' }),
-      makeNotification({ id: 'h1', priority: 'high', title: '重要件' }),
-      makeNotification({ id: 'h2', priority: 'high', title: '重要件二' }),
-      makeNotification({ id: 'h3', priority: 'high', title: '重要件三' }),
-      makeNotification({ id: 'n1', priority: 'normal', title: '普通件' }),
-      makeNotification({ id: 'l1', priority: 'low', title: '低优先件' }),
+      makeNotification({ id: 'c1', priority: 'critical', title: '紧急件', timestamp: '2026-01-01T00:00:04Z' }),
+      makeNotification({ id: 'h1', priority: 'high', title: '重要件', timestamp: '2026-01-01T00:00:03Z' }),
+      makeNotification({ id: 'n1', priority: 'normal', title: '普通件', timestamp: '2026-01-01T00:00:02Z' }),
+      makeNotification({ id: 'l1', priority: 'low', title: '低优先件', timestamp: '2026-01-01T00:00:01Z' }),
     ])
     render(<NotificationCenter />)
     await user.click(screen.getByTestId('notification-center-trigger'))
 
-    expect(screen.getByText('🔴 紧急')).toBeInTheDocument()
-    expect(screen.getByText('(2)')).toBeInTheDocument()
-    expect(screen.getByText('🟠 重要')).toBeInTheDocument()
-    expect(screen.getByText('(3)')).toBeInTheDocument()
-    expect(screen.getByText('🔵 普通')).toBeInTheDocument()
-    expect(screen.getByText('⚪ 低优先')).toBeInTheDocument()
+    // 全部条目直接可见（无默认折叠、无组头）
     expect(screen.getByText('紧急件')).toBeInTheDocument()
-    expect(screen.getByText('重要件三')).toBeInTheDocument()
+    expect(screen.getByText('重要件')).toBeInTheDocument()
     expect(screen.getByText('普通件')).toBeInTheDocument()
     expect(screen.getByText('低优先件')).toBeInTheDocument()
+    expect(screen.queryByTestId(/^notification-group-/)).not.toBeInTheDocument()
+    expect(screen.queryByText('🔴 紧急')).not.toBeInTheDocument()
+    expect(screen.queryByText('🔵 普通')).not.toBeInTheDocument()
   })
 
-  it('组内未读计数徽标按组统计', async () => {
+  it('最新在最上：时间倒序渲染，与优先级无关', async () => {
     const user = userEvent.setup()
     seedNotifications([
-      makeNotification({ id: 'h1', priority: 'high', title: '未读重要件' }),
-      makeNotification({ id: 'h2', priority: 'high', title: '已读重要件', isRead: true }),
+      makeNotification({ id: 'old', priority: 'critical', title: '较早的紧急件', timestamp: '2026-01-01T00:00:01Z' }),
+      makeNotification({ id: 'new', priority: 'low', title: '最新的低优先件', timestamp: '2026-01-01T00:00:03Z' }),
+      makeNotification({ id: 'mid', priority: 'high', title: '中间的重要件', timestamp: '2026-01-01T00:00:02Z' }),
     ])
     render(<NotificationCenter />)
     await user.click(screen.getByTestId('notification-center-trigger'))
-    expect(screen.getByText('1 条未读')).toBeInTheDocument()
+
+    const list = screen.getByTestId('notification-list')
+    const ids = Array.from(
+      list.querySelectorAll('[data-testid^="notification-item-"]'),
+    ).map((el) => el.getAttribute('data-testid'))
+    expect(ids).toEqual([
+      'notification-item-new',
+      'notification-item-mid',
+      'notification-item-old',
+    ])
   })
 
-  it('全部已读：未读 badge 清零；清空：面板转空态', async () => {
+  it('全部已读：未读 badge 清零；清空经确认：面板转空态（X18-F1 二次确认）', async () => {
     const user = userEvent.setup()
     seedNotifications([
       makeNotification({ id: 'a' }),
@@ -136,36 +141,12 @@ describe('NotificationCenter 面板分组渲染', () => {
       '通知中心',
     )
 
+    // X18-F1（P-137）：清空须过确认层（共享 ConfirmDialog）才生效
     await user.click(screen.getByRole('button', { name: '清空' }))
+    expect(screen.getByRole('dialog', { name: '确认操作' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '确认' }))
     expect(screen.getByText('暂无通知')).toBeInTheDocument()
     expect(screen.queryByText('通知标题')).not.toBeInTheDocument()
-  })
-})
-
-describe('NotificationCenter 折叠与展开', () => {
-  it('默认折叠组只显前 2 条摘要，"还有 N 条"展开全组，组头再折叠', async () => {
-    const user = userEvent.setup()
-    seedNotifications([
-      makeNotification({ id: 'm1', priority: 'normal', title: '普通甲' }),
-      makeNotification({ id: 'm2', priority: 'normal', title: '普通乙' }),
-      makeNotification({ id: 'm3', priority: 'normal', title: '普通丙' }),
-    ])
-    render(<NotificationCenter />)
-    await user.click(screen.getByTestId('notification-center-trigger'))
-
-    // normal 组默认折叠：前 2 条摘要可见，第 3 条不可见
-    expect(screen.getByText('普通甲')).toBeInTheDocument()
-    expect(screen.getByText('普通乙')).toBeInTheDocument()
-    expect(screen.queryByText('普通丙')).not.toBeInTheDocument()
-    expect(screen.getByText(/还有 1 条普通通知/)).toBeInTheDocument()
-
-    // 点"还有 N 条"展开全组
-    await user.click(screen.getByText(/还有 1 条普通通知/))
-    expect(screen.getByText('普通丙')).toBeInTheDocument()
-
-    // 点组头重新折叠
-    await user.click(screen.getByTestId('notification-group-normal'))
-    expect(screen.queryByText('普通丙')).not.toBeInTheDocument()
   })
 })
 

@@ -153,6 +153,71 @@ describe('client 401 拦截器：认证失效分类（统一 isAuthFailureFromEr
   })
 })
 
+describe('client 401 拦截器：零凭据态不整页跳转（启动期 reload 循环防护）', () => {
+  /** location.href 赋值记录（jsdom 不导航，用 setter 捕获跳转意图） */
+  const navigations: string[] = []
+  let currentHref = 'http://localhost/'
+
+  beforeEach(() => {
+    navigations.length = 0
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: {
+        get pathname() {
+          return '/'
+        },
+        get href() {
+          return currentHref
+        },
+        set href(value: string) {
+          navigations.push(value)
+          currentHref = value
+        },
+      },
+    })
+  })
+
+  afterEach(() => {
+    Reflect.deleteProperty(window, 'location')
+  })
+
+  it('未登录态（零凭据）后台请求 401 → 不跳转也不报「认证已过期」', async () => {
+    clearTokens()
+    localStorage.clear()
+    routes.set('GET /api/v1/sessions', () => ({ status: 401 }))
+
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect(apiClient.get('/api/v1/sessions')).rejects.toThrow()
+    } finally {
+      consoleSpy.mockRestore()
+    }
+
+    // 未登录不是「会话过期」，整页跳转会让启动期轮询 401 → reload → 再 401 无限循环
+    expect(navigations).toEqual([])
+    expect(mockReportError).not.toHaveBeenCalledWith('认证已过期，请重新登录', expect.anything())
+  })
+
+  it('曾有会话但 refresh 凭据已失效 → 仍走登出跳转（既有行为不回退）', async () => {
+    setTokens('access-1', 'rt-vanished-9999', 100)
+    localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
+    routes.set('GET /api/v1/sessions', () => ({ status: 401 }))
+
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect(apiClient.get('/api/v1/sessions')).rejects.toThrow()
+    } finally {
+      consoleSpy.mockRestore()
+    }
+
+    expect(mockReportError).toHaveBeenCalledWith(
+      '认证已过期，请重新登录',
+      expect.objectContaining({ type: 'authentication' }),
+    )
+    expect(navigations).toEqual(['/'])
+  })
+})
+
 describe('client 401 拦截器：多标签并发轮换竞争（refresh token 存 localStorage 共享链）', () => {
   it('请求所用旧值已被他 tab 轮换 → 用本地新值重放续链，不登出', async () => {
     setTokens('access-1', 'rt-old-tabA-value', 100)

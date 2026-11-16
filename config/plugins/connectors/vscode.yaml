@@ -5,7 +5,7 @@ description: VSCode 编辑器扩展连接器，支持文件操作、选区获取
 type: vscode
 
 # 通信协议
-# 协议与端口对齐 plugins/shared/system/connectors/vscode/channel.py 的 HTTP 实现（urllib，端口 9741）
+# 协议与端口对齐 connectors/（原 plugins/shared/system/connectors/，实现已随 5037bd01a 退役）/vscode/channel.py 的 HTTP 实现（urllib，端口 9741）
 protocol: http
 endpoint: "http://localhost:9741"
 

@@ -4,6 +4,12 @@
 
 def test_import_version():
     """验证 agentos_plugin_sdk 可导入且 __version__ 存在。"""
+    import tomllib
+    from pathlib import Path
+
     from agentos_plugin_sdk import __version__
 
-    assert __version__ == "0.2.0"
+    expected = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"
+    ]["version"]
+    assert __version__ == expected

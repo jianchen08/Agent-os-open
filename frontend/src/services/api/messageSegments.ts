@@ -35,12 +35,19 @@ export interface SegmentDetail extends SegmentMeta {
  * 成员消息词汇归一：内核槽位 blob 存储词汇（message_id/seq）与 HTTP 投影
  * 词汇（id/sequence）并存，段成员自 blob 直读时可能是前者。统一补齐前端
  * 消费键（BackendMessageResponse），不改写其余字段。
+ *
+ * 工具词汇同款投影：冻结成员是原始 LLM 形态（assistant.tool_calls /
+ * tool.tool_call_id），不投影则 assistant 的 tool_call part 组不出来、
+ * tool 结果吸收断链——段内工具消息只剩一个孤零零的「工具」标签、工具结果
+ * 内容丢失（1017 实测）。
  */
 function normalizeSegmentMember(raw: Record<string, unknown>): BackendMessageResponse {
   const withIdentity = {
     ...raw,
     id: (raw.id ?? raw.message_id) as string,
     sequence: (raw.sequence ?? raw.seq) as number | undefined,
+    toolCallId: (raw.toolCallId ?? raw.tool_call_id) as string | undefined,
+    toolCalls: raw.toolCalls ?? raw.tool_calls,
   }
   return withIdentity as BackendMessageResponse
 }

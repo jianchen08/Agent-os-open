@@ -65,7 +65,6 @@ fn llm_manifest() -> agentos_core::traits::PluginManifest {
         description: None,
         version: "1.0.0".to_string(),
         plugin_type: PluginType::System,
-        pipeline_role: None,
         language: "python".to_string(),
         host_type: HostType::Sidecar,
         host_group: None,
@@ -77,7 +76,6 @@ fn llm_manifest() -> agentos_core::traits::PluginManifest {
         mcp: None,
         lifecycle: None,
         native: None,
-        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],
@@ -231,7 +229,9 @@ async fn test_cold_checkpoint_row_carries_latest_run_status() {
     let run_id = format!("run_{}", std::process::id());
 
     use agentos_core::types::RunStatus;
-    store.record_run_start(&pid, tenant, &run_id, "h").unwrap();
+    store
+        .record_run_start(&pid, tenant, &run_id, "h", "2026-10-15T00:00:00+00:00")
+        .unwrap();
     store
         .set_run_status_projection(&pid, tenant, RunStatus::Failed)
         .unwrap();

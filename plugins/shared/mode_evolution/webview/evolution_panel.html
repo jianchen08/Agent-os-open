@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>自进化</title>
+  <style>
+  :root {
+    --bg: #f8fafc; --fg: #1a1a1a; --muted: #64748b; --border: #cbd5e1;
+    --card: #ffffff; --ph: #94a3b8; --ok: #16a34a; --bad: #dc2626;
+    --warn: #b45309; --accent: #2563eb; --accent-soft: #dbeafe;
+    --track: #eef2f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f172a; --fg: #e2e8f0; --muted: #94a3b8; --border: #334155;
+      --card: #1e293b; --ph: #475569; --ok: #4ade80; --bad: #f87171;
+      --warn: #fbbf24; --accent: #60a5fa; --accent-soft: #1e3a5f;
+      --track: #263244;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 12px; font-size: 13px; color: var(--fg); background: var(--bg);
+    font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  }
+  h1 { margin: 0; font-size: 15px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .sub { margin: 4px 0 10px; font-size: 11px; color: var(--muted); }
+  .badge { display: inline-block; padding: 1px 10px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+  .badge.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+  .badge.bad { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); }
+  .badge.flat { color: var(--muted); border: 1px solid var(--border); font-weight: 400; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .chip { display: inline-block; font-size: 11px; color: var(--muted); background: var(--card);
+    border: 1px solid var(--border); border-radius: 5px; padding: 2px 8px; }
+  .chip b { color: var(--fg); font-weight: 600; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); align-items: center; flex-wrap: wrap; }
+  .tab { padding: 7px 14px; font-size: 13px; color: var(--muted); background: none;
+    border: none; border-bottom: 2px solid transparent; cursor: pointer; font-family: inherit; }
+  .tab:hover { color: var(--fg); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .btn { font-family: inherit; font-size: 12px; color: var(--fg); background: var(--card);
+    border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; cursor: pointer; margin-left: auto; }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .status { margin: 6px 0 10px; font-size: 12px; color: var(--muted); min-height: 16px; }
+  section {
+    border: 1px solid var(--border); border-radius: 6px; background: var(--card);
+    min-width: 0; margin-bottom: 12px;
+  }
+  h2 {
+    margin: 0; padding: 8px 10px; font-size: 12px; color: var(--muted);
+    border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px;
+  }
+  .body { padding: 8px 10px; }
+  .cols { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
+  .modes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .mode-card { padding: 10px; text-align: center; cursor: pointer;
+    border: 1px dashed var(--ph); border-radius: 6px; }
+  .mode-card:hover { border-color: var(--accent); }
+  .mode-card.active { border: 1px solid var(--accent); background: var(--accent-soft); }
+  .mode-card .name { font-size: 13px; font-weight: 600; }
+  .mode-card .stat { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .mbar { height: 4px; border-radius: 2px; background: var(--track); margin-top: 6px; overflow: hidden; }
+  .mbar i { display: block; height: 100%; background: var(--accent); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; }
+  tr:last-child td { border-bottom: none; }
+  .mono { font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+  .metrics { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+  .metric { padding: 8px; border: 1px solid var(--border); border-radius: 6px; text-align: center; }
+  .metric .val { font-size: 16px; font-weight: 600; }
+  .metric .label { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .metric .dd { font-size: 11px; color: var(--ok); margin-top: 2px; }
+  .metric.na { border-style: dashed; opacity: 0.85; }
+  .metric.na .drv { font-size: 10.5px; color: var(--warn); margin-top: 2px; }
+  .placeholder {
+    padding: 12px; text-align: center; color: var(--muted);
+    border: 1px dashed var(--ph); border-radius: 6px; font-size: 12px;
+  }
+  .ph-note { font-size: 11px; opacity: 0.75; margin-top: 2px; }
+  .note { font-size: 11px; color: var(--muted); margin: 8px 0 0; }
+  .tag { display: inline-block; padding: 1px 7px; border-radius: 9px; font-size: 11px;
+    border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+  .tag.ok { color: var(--ok); border-color: transparent; background: color-mix(in srgb, var(--ok) 12%, transparent); }
+  .tag.bad { color: var(--bad); border-color: transparent; background: color-mix(in srgb, var(--bad) 10%, transparent); }
+  .tag.warn { color: var(--warn); border-color: transparent; background: color-mix(in srgb, var(--warn) 14%, transparent); }
+  .tag.acc { color: var(--accent); border-color: transparent; background: var(--accent-soft); }
+  .round { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .round:last-child { border-bottom: none; }
+  .rid { color: var(--muted); font-size: 11px; }
+  .delta-up { color: var(--ok); } .delta-down { color: var(--bad); } .delta-flat { color: var(--muted); }
+  .bar-track { background: var(--track); border-radius: 3px; height: 12px; margin-top: 3px; overflow: hidden; }
+  .bar-fill { background: var(--accent); height: 100%; }
+  .bar-fill.control { background: var(--ph); }
+  .steps { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
+  .step { padding: 3px 8px; font-size: 11px; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 10px; }
+  .arrow { color: var(--ph); font-size: 11px; }
+  .sig { display: flex; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--border);
+    font-size: 12px; align-items: baseline; flex-wrap: wrap; }
+  .sig:last-child { border-bottom: none; }
+  .sig .when { margin-left: auto; color: var(--muted); font-size: 11px; }
+  .sig .desc { flex-basis: 100%; color: var(--muted); font-size: 11px; }
+  .pipe { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .pcol { min-width: 0; }
+  .pch { font-size: 11px; color: var(--muted); padding-bottom: 4px;
+    border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; }
+  .pch b { color: var(--fg); }
+  .pitem { font-size: 11px; border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 7px; margin-top: 6px; background: var(--bg); }
+  .pitem .pd { color: var(--muted); margin-top: 2px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .clog { display: flex; flex-direction: column; }
+  .clitem { display: flex; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--border);
+    font-size: 12px; align-items: baseline; flex-wrap: wrap; }
+  .clitem:last-child { border-bottom: none; }
+  .clitem .cd { color: var(--muted); font-size: 11px; width: 40px; flex: none; }
+  .clitem .cv { margin-left: auto; color: var(--muted); font-size: 11px; }
+  .weekbars { display: flex; align-items: flex-end; gap: 6px; height: 56px; margin-top: 8px; }
+  .weekbars .wb { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px; height: 100%; justify-content: flex-end; }
+  .weekbars .wb i { display: block; width: 70%; background: var(--accent); border-radius: 2px 2px 0 0; }
+  .weekbars .wb i.bad { background: var(--bad); opacity: 0.7; }
+  .weekbars .wb span { font-size: 10px; color: var(--muted); }
+  .bindnote { margin-left: auto; font-family: ui-monospace, Consolas, monospace; font-size: 10.5px;
+    color: var(--muted); background: var(--bg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 52%; }
+  </style>
+</head>
+<body>
+  <h1>自进化 <span id="verdictBadge"></span></h1>
+  <p class="sub" id="sub"></p>
+  <div class="chips" id="headChips"></div>
+
+  <div class="tabs" role="tablist" aria-label="自进化双线">
+    <button class="tab active" id="tab-daily" role="tab" aria-controls="dailyPanel"
+      aria-selected="true" type="button">① 日常体验循环 · 主线（全体用户）</button>
+    <button class="tab" id="tab-eval" role="tab" aria-controls="evalPanel"
+      aria-selected="false" type="button">② 基线评测验证</button>
+    <button class="btn" id="refreshBtn" type="button"
+      title="重新供页并注入最新账本与任务流量快照">重取快照</button>
+  </div>
+  <p class="status" id="statusLine" aria-live="polite"></p>
+
+  <!-- ① 日常体验循环（主线）：真实任务流量 + 信号 + 改进循环 + 进化日志 -->
+  <div id="dailyPanel" role="tabpanel" aria-labelledby="tab-daily">
+    <section aria-label="今日任务流量">
+      <h2>今日任务流量（真实运行）<span class="bindnote">service-registry.pipeline-runs.list</span></h2>
+      <div class="body">
+        <div class="metrics" id="dailyKpi"></div>
+        <div class="weekbars" id="weekBars"></div>
+        <p class="note" id="dailyNote"></p>
+      </div>
+    </section>
+
+    <div class="cols">
+      <section aria-label="体验信号流">
+        <h2>体验信号流（任务失败 = 现有真实信号）<span class="bindnote">pipeline-runs 失败行</span></h2>
+        <div class="body">
+          <div id="signalList"></div>
+          <p class="note">用户否决 / 预算超支 / 中途放弃信号待 approval、cost_control 服务面接入（缺口态，接入后同行补齐）。</p>
+        </div>
+      </section>
+      <section aria-label="改进循环管道">
+        <h2>改进循环管道（提案账投影）<span class="bindnote">proposals 账</span></h2>
+        <div class="body">
+          <div class="pipe" id="pipeLine"></div>
+          <p class="note">流向：信号归因（review_service）→ 提案 → 基线评测验证（页签②）→ 应用 → 日常复检。
+            「归因中 / 灰度」两态未落账（缺口）；已生效提案由保留率哨兵复检，回退走 proposal(action='reject')。</p>
+        </div>
+      </section>
+    </div>
+
+    <section aria-label="进化日志">
+      <h2>进化日志（用户视角）<span class="bindnote">proposals(applied) 投影</span></h2>
+      <div class="body"><div class="clog" id="changelog"></div></div>
+    </section>
+
+    <section aria-label="日常线绑定表">
+      <h2>日常线 ⇄ 后端功能绑定表<span class="bindnote">功能驱动声明面</span></h2>
+      <div class="body"><div id="dailyBinds"></div></div>
+    </section>
+  </div>
+
+  <!-- ② 基线评测验证：题集机器（T1-T8 / 对照臂 / held-out） -->
+  <div id="evalPanel" role="tabpanel" aria-labelledby="tab-eval" hidden>
+    <section aria-label="模式分组">
+      <h2>模式分组<span class="bindnote">eval_summarize → modes{}</span></h2>
+      <div class="body">
+        <div class="modes" id="modes"></div>
+        <p class="note">点击模式卡下钻该模式轮次；分组随账本数据渲染（已知模式带中文名，其余按 key 显示）。</p>
+      </div>
+    </section>
+
+    <div class="cols">
+      <section aria-label="轮次时间线">
+        <h2>轮次时间线（T1-T8 状态机）<span class="bindnote">rounds[]</span></h2>
+        <div class="body">
+          <div class="steps" role="list">
+            <span class="step" role="listitem">T1 测量</span><span class="arrow">→</span>
+            <span class="step" role="listitem">T2 归因</span><span class="arrow">→</span>
+            <span class="step" role="listitem">T3 提案</span><span class="arrow">→</span>
+            <span class="step" role="listitem">T4 试跑</span><span class="arrow">→</span>
+            <span class="step" role="listitem">T5 裁决</span><span class="arrow">→</span>
+            <span class="step" role="listitem">T6 晋升/回滚</span><span class="arrow">→</span>
+            <span class="step" role="listitem">T7 记忆回填</span><span class="arrow">→</span>
+            <span class="step" role="listitem">T8 循环决策</span>
+          </div>
+          <div id="timeline"></div>
+          <p class="note">回边：T5 拒→回 T3；T8 假设耗尽→回 T1；连败 K 触发熔断→收尾。步骤级留痕待轮次状态落账接入（数据源缺口）。</p>
+        </div>
+      </section>
+      <section aria-label="scorecard 走势">
+        <h2>scorecard 走势（基线 vs 各轮）<span class="bindnote">modes[].series[]</span></h2>
+        <div class="body" id="trend"></div>
+      </section>
+    </div>
+
+    <section aria-label="进化循环状态机">
+      <h2>T1-T8 进化循环 · 状态机<span class="bindnote">轮状态写面（缺口）</span></h2>
+      <div class="body">
+        <div id="ring"></div>
+        <p class="note">实线 = 正向循环；虚线 = 回边（T5 裁决拒→重提案；连败 K→熔断收尾）。中央游标随所选模式最新轮次示意点亮，步骤级留痕落账后改为实时位置。</p>
+      </div>
+    </section>
+
+    <div class="cols">
+      <section aria-label="假设清单">
+        <h2>假设清单（提案账投影）<span class="bindnote">proposal（action=submit/apply/reject）</span></h2>
+        <div class="body" id="hypotheses"></div>
+      </section>
+      <section aria-label="杠杆命中率">
+        <h2>杠杆命中率<span class="bindnote">health_summary → levers{}</span></h2>
+        <div class="body" id="levers"></div>
+      </section>
+    </div>
+
+    <div class="cols">
+      <section aria-label="对照臂">
+        <h2>对照臂（treatment − control 真增益参照）<span class="bindnote">control_comparison</span></h2>
+        <div class="body" id="controls"></div>
+      </section>
+      <section aria-label="轨迹库证据">
+        <h2>轨迹库样本（立项前置证据面）<span class="bindnote">harvest_trajectories.py</span></h2>
+        <div class="body" id="library"></div>
+      </section>
+    </div>
+
+    <div class="cols">
+      <section aria-label="健康度五指标">
+        <h2>健康度五指标<span class="bindnote">eval_query(health) + held-out</span></h2>
+        <div class="body" id="metrics"></div>
+      </section>
+      <section aria-label="熔断状态">
+        <h2>熔断状态<span class="bindnote">连败 K 计数未落账</span></h2>
+        <div class="body" id="breaker"></div>
+      </section>
+    </div>
+
+    <section aria-label="自进化指标 P0-P3">
+      <h2>自进化指标（P0-P3 优先级裁决）<span class="bindnote">evolution_metrics.verdict</span></h2>
+      <div class="body">
+        <div id="evolution-verdict"></div>
+        <div class="metrics" id="evolution-metrics"></div>
+        <p class="note">P0 进化是否发生（学习率/迁移/判断力）· P1 稳定（保留率/方差/回滚）· P2 高效（样本/时间效率）· P3 安全（用户否决=一票否决）。领域指标不是自进化指标，单轮通过率只是原始观测（ADR 2026-09-16）。</p>
+      </div>
+    </section>
+
+    <section aria-label="进化引擎工具面">
+      <h2>进化引擎工具面（经进化引擎 agent 派发，面板一期只读）</h2>
+      <div class="body">
+        <div class="steps" id="toolFace"></div>
+        <p class="note">评测操作不经面板直发（CSP 快照渲染 + 派发属 agent 工具面）：对进化引擎 agent 说
+          「跑冒烟 / 聚合 / 跑 held-out / 健康体检 / 采集轨迹」即触发对应工具。</p>
+      </div>
+    </section>
+
+    <section aria-label="评测线绑定表">
+      <h2>评测线 ⇄ 后端功能绑定表<span class="bindnote">功能驱动声明面</span></h2>
+      <div class="body"><div id="evalBinds"></div></div>
+    </section>
+  </div>
+
+  <script>
+  // 数据快照：供页时由插件 http.handle 把账本聚合 + 日常线任务流量注入下方赋值
+  // （锚点替换）；直开本文件（快照为 null）时全区块按占位渲染。CSP
+  // connect-src 'none'：无网络拉取，重取快照 = location.reload() 重新供页。
+  window.__EVOLUTION_SNAPSHOT__ = null/*__SNAPSHOT_INJECT__*/;
+  var MODE_META = [
+    ["coding", "编码"], ["writing", "写作"], ["roleplay", "角色扮演"], ["research", "调研"]
+  ];
+  var snap = window.__EVOLUTION_SNAPSHOT__ || {};
+  var daily = snap.daily || null;
+  var active = null;
+  var MODE_LABELS = {};
+  MODE_META.forEach(function(m) { MODE_LABELS[m[0]] = m[1]; });
+  function modeLabel(key) { return MODE_LABELS[key] || key; }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function(c) {
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  }
+  function pct(passed, total) { return total > 0 ? Math.round(passed / total * 100) : 0; }
+  function deltaHtml(d) {
+    var cls = d > 0 ? 'delta-up' : (d < 0 ? 'delta-down' : 'delta-flat');
+    var sign = d > 0 ? '+' : '';
+    return '<span class="' + cls + '">' + sign + d + '</span>';
+  }
+  function rateStr(v) {
+    return (v === null || v === undefined) ? '—' : (v * 100).toFixed(1) + '%';
+  }
+  function placeholder(label, note) {
+    return '<div class="placeholder"><div>' + esc(label) + '</div>' +
+      (note ? '<div class="ph-note">' + esc(note) + '</div>' : '') + '</div>';
+  }
+  function gapBox(label, driver) {
+    return '<div class="metric na"><div class="val">—</div><div class="label">' + esc(label) +
+      '</div><div class="drv">缺口: ' + esc(driver) + '</div></div>';
+  }
+  function repeatRate(v) {
+    return (v === null || v === undefined) ? '—' : (v * 100).toFixed(1) + '%';
+  }
+  // 提案时间（proposal_id = pYYYYMMDD_HHMMSS）→ MM-DD；旧 id 解析不出返回 —
+  function proposalDate(pid) {
+    var s = String(pid || '');
+    return /^p\d{8}_/.test(s) ? s.slice(5, 7) + '-' + s.slice(7, 9) : '—';
+  }
+  function dayShort(iso) { return String(iso || '').slice(5, 16).replace('T', ' '); }
+  function shortId(s) {
+    s = String(s || '');
+    return s.length > 14 ? s.slice(0, 14) + '…' : s;
+  }
+
+  // ── 页签（① 日常主线 / ② 基线评测） ──
+  function bindTabs() {
+    var pairs = [['tab-daily', 'dailyPanel'], ['tab-eval', 'evalPanel']];
+    pairs.forEach(function(p) {
+      document.getElementById(p[0]).addEventListener('click', function() {
+        pairs.forEach(function(q) {
+          var on = q[0] === p[0];
+          document.getElementById(q[0]).classList.toggle('active', on);
+          document.getElementById(q[0]).setAttribute('aria-selected', on ? 'true' : 'false');
+          document.getElementById(q[1]).hidden = !on;
+        });
+      });
+    });
+    document.getElementById('refreshBtn').addEventListener('click', function() {
+      location.reload();
+    });
+  }
+
+  // ── 头部 ──
+  function renderHead() {
+    var evo = snap.evolution || {};
+    var badge = document.getElementById('verdictBadge');
+    var labels = { evolving: '进化中', no_evolution: '进化未发生（P0 不达标）',
+                   unstable: '不可靠（P1 不达标）', inefficient: '低效（P2 不达标）',
+                   vetoed: '一票否决（P3 触发）', insufficient_data: '数据不足' };
+    var verdict = evo.verdict || 'insufficient_data';
+    var cls = verdict === 'evolving' ? 'ok' : (verdict === 'insufficient_data' ? 'flat' : 'bad');
+    badge.className = 'badge ' + cls;
+    badge.textContent = 'verdict: ' + (labels[verdict] || verdict);
+    var d = daily && daily.today ? daily.today : null;
+    var html = '<span class="chip">评测轮次 <b>' + (snap.rounds_total || 0) + '</b></span>' +
+      '<span class="chip">提案 <b>' + (snap.proposals_total || 0) + '</b> · 命中率 <b>' +
+      rateStr(snap.hit_rate) + '</b></span>' +
+      '<span class="chip">驳回率 <b>' + rateStr(snap.reject_rate) + '</b></span>';
+    if (d) {
+      html += '<span class="chip">今日任务 <b>' + d.total + '</b> · 完成率 <b>' +
+        rateStr(d.completion_rate) + '</b></span>' +
+        (daily.running ? '<span class="chip">在途 <b>' + daily.running + '</b></span>' : '');
+    }
+    document.getElementById('headChips').innerHTML = html;
+    document.getElementById('sub').textContent =
+      '双线观测：① 日常体验循环（真实任务流量）· ② 基线评测验证（reports/eval 账本，共 ' +
+      (snap.rounds_total || 0) + ' 轮）。供页时整体快照注入；CSP 快照渲染，重取快照即重新供页。';
+  }
+
+  // ── ① 日常线 ──
+  function slot(label, val, dd) {
+    return '<div class="metric"><div class="val">' + val + '</div><div class="label">' +
+      esc(label) + '</div>' + (dd ? '<div class="dd">' + esc(dd) + '</div>' : '') + '</div>';
+  }
+  function renderDailyKpi() {
+    var el = document.getElementById('dailyKpi');
+    if (!daily) {
+      el.innerHTML = gapBox('今日任务流量', 'service-registry 未注入') +
+        gapBox('一次通过率（纠正口径）', 'human-interaction 服务面') +
+        gapBox('干预率', 'human-interaction 服务面') +
+        gapBox('token 成本 / 任务', 'cost_control 服务面') +
+        '<p class="note">日常线数据源缺口：供页时未能取到真实任务运行行。能力注入后本区自动点亮。</p>';
+      document.getElementById('weekBars').innerHTML = '';
+      document.getElementById('dailyNote').textContent = '';
+      return;
+    }
+    var d = daily.today;
+    el.innerHTML =
+      slot('今日任务', d.total, '') +
+      slot('已完成', d.completed, '') +
+      slot('失败（含取消）', d.failed, '') +
+      slot('完成率', rateStr(d.completion_rate), '') +
+      (daily.running ? slot('在途（全窗）', daily.running, '')
+                     : gapBox('一次通过率（纠正口径）', 'human-interaction 服务面'));
+    var week = daily.week || [];
+    var max = 1;
+    week.forEach(function(w) { if (w.total > max) max = w.total; });
+    document.getElementById('weekBars').innerHTML = week.map(function(w) {
+      var h = Math.round(w.total / max * 100);
+      var bad = w.failed > 0 ? ' bad' : '';
+      return '<div class="wb" title="' + esc(w.date + '：' + w.total + ' 任务 · 完成 ' +
+        w.completed + ' · 失败 ' + w.failed) + '"><i class="' + bad +
+        '" style="height:' + Math.max(h, 4) + '%"></i><span>' + esc(w.date.slice(5)) + '</span></div>';
+    }).join('');
+    document.getElementById('dailyNote').textContent =
+      '完成率 = 已完成 /（已完成 + 失败 + 取消），分母 0 不猜测；失败含用户中止（体验信号）。' +
+      '窗口 ' + (daily.window_total || 0) + ' 行 · 快照 ' + esc(daily.generated_at || '') +
+      ' · 一次通过率（无纠正口径）与成本面待 human-interaction / cost_control 服务面接入（缺口）。';
+  }
+
+  function renderSignals() {
+    var el = document.getElementById('signalList');
+    var list = (daily && daily.recent_failures) || [];
+    if (!list.length) {
+      el.innerHTML = placeholder(daily ? '窗口内无失败任务' : '任务流量数据源缺口',
+        daily ? null : 'service-registry.pipeline-runs.list 未注入');
+      return;
+    }
+    el.innerHTML = list.map(function(f) {
+      var cls = f.status === 'cancelled' ? 'warn' : 'bad';
+      var label = f.status === 'cancelled' ? '已取消' : '失败';
+      return '<div class="sig"><span class="tag ' + cls + '">' + label + '</span>' +
+        '<span class="mono">' + esc(shortId(f.pipeline_id)) + '</span>' +
+        (f.thread_id ? '<span class="rid">' + esc(shortId(f.thread_id)) + '</span>' : '') +
+        '<span class="when">' + esc(dayShort(f.started_at)) + '</span>' +
+        '<div class="desc">立项归因经进化引擎 agent（eval_query(screen) 轨迹库核查 → review_service 归因 → 提案送页签②验证），面板一期只读。</div></div>';
+    }).join('');
+  }
+
+  function renderPipeline() {
+    var el = document.getElementById('pipeLine');
+    var list = snap.hypotheses || [];
+    var cols = [
+      ['submitted', '待处理', ''], ['applied', '已生效', 'ok'],
+      ['reverted', '已回滚', 'warn'], ['rejected', '已驳回', 'bad']
+    ];
+    var by = {};
+    cols.forEach(function(c) { by[c[0]] = []; });
+    list.forEach(function(h) {
+      var o = String(h.outcome || '');
+      if (by[o]) by[o].push(h);
+    });
+    el.innerHTML = cols.map(function(c) {
+      var items = by[c[0]].map(function(h) {
+        return '<div class="pitem"><b class="mono">' + esc(h.proposal_id) + '</b>' +
+          '<div class="pd" title="' + esc(h.motivation || '') + '">' +
+          esc(h.motivation || h.target || '') + '</div></div>';
+      }).join('');
+      if (!items) items = '<div class="pitem" style="border-style:dashed;color:var(--muted)">—</div>';
+      return '<div class="pcol"><div class="pch"><span>' + c[1] + '</span><b>' +
+        by[c[0]].length + '</b></div>' + items + '</div>';
+    }).join('');
+  }
+
+  function renderChangelog() {
+    var el = document.getElementById('changelog');
+    var applied = (snap.hypotheses || []).filter(function(h) {
+      return h.outcome === 'applied';
+    });
+    if (!applied.length) {
+      el.innerHTML = placeholder('暂无已生效改进',
+        '提案经基线评测验证应用后在此展示（用户视角的进化记录）');
+      return;
+    }
+    el.innerHTML = applied.map(function(h) {
+      var extra = [];
+      if (h.target) extra.push(esc(shortId(h.target)));
+      if (h.commit) extra.push('<span class="mono">' + esc(h.commit) + '</span>');
+      return '<div class="clitem"><span class="cd">' + esc(proposalDate(h.proposal_id)) + '</span>' +
+        '<span>' + esc(h.motivation || '') + '</span>' +
+        '<span class="cv" title="' + esc(h.target || '') + '">' + extra.join(' · ') + '</span></div>';
+    }).join('') +
+    '<p class="note">只展示已生效提案（proposal(action='apply') 落账）；日常指标回退经保留率哨兵回滚后从本列表移除（outcome→reverted）。</p>';
+  }
+
+  var DAILY_BINDS = [
+    ['今日任务流量 / 信号流', 'service-registry.pipeline-runs.list', 'run_id/status/started_at/pipeline_id', '已接（供页时拉取；失败按缺口渲染）'],
+    ['一次通过率（纠正口径）/ 干预率', 'human-interaction 审批账', '否决 / 干预事件', '缺口 · 服务面未接'],
+    ['token 成本 / 任务', 'cost_control.get_statistics', 'usage_statistics', '缺口 · 服务面未接'],
+    ['改进循环管道 / 进化日志', 'proposals 账（proposal apply / reject）', 'outcome / motivation / commit', '已接（账本投影）'],
+    ['归因中 / 灰度 两态', 'review_service + 灰度发布', '信号→假设→灰度状态机', '缺口 · 未落账'],
+    ['评测线桥接', '页签② 全套（T1-T8）', '假设送评 → 保留率哨兵回读', '已接（双线合流点）']
+  ];
+  function renderDailyBinds() {
+    document.getElementById('dailyBinds').innerHTML = '<table><tr><th>面板区块</th><th>后端驱动</th><th>数据契约</th><th>状态</th></tr>' +
+      DAILY_BINDS.map(function(r) {
+        var live = r[3].indexOf('已接') === 0;
+        return '<tr><td>' + esc(r[0]) + '</td><td class="mono">' + esc(r[1]) + '</td>' +
+          '<td class="mono">' + esc(r[2]) + '</td><td><span class="tag ' + (live ? 'ok' : 'warn') + '">' +
+          esc(r[3]) + '</span></td></tr>';
+      }).join('') + '</table>';
+  }
+
+  // ── ② 评测线 ──
+  function renderModes() {
+    var el = document.getElementById('modes');
+    var keys = MODE_META.map(function(m) { return m[0]; });
+    Object.keys(snap.modes || {}).forEach(function(k) {
+      if (keys.indexOf(k) === -1) keys.push(k);
+    });
+    var html = '';
+    keys.forEach(function(key) {
+      var e = snap.modes[key];
+      var stat = e ? e.rounds + ' 轮 · ' + e.passed + '/' + e.total + ' 通过' : '暂无轮次数据';
+      html += '<div class="mode-card' + (active === key ? ' active' : '') +
+        '" data-mode="' + esc(key) + '"><div class="name">' + esc(modeLabel(key)) + '</div>' +
+        '<div class="stat">' + (e ? esc(stat) : stat) + '</div>';
+      if (e && e.total > 0) {
+        html += '<div class="mbar"><i style="width:' + pct(e.passed, e.total) + '%"></i></div>';
+      }
+      html += '</div>';
+    });
+    el.innerHTML = html;
+    Array.prototype.forEach.call(el.querySelectorAll('.mode-card'), function(card) {
+      card.addEventListener('click', function() {
+        active = (active === card.getAttribute('data-mode')) ? null : card.getAttribute('data-mode');
+        renderEval();
+      });
+    });
+  }
+
+  function renderTimeline() {
+    var el = document.getElementById('timeline');
+    if (!active || !snap.modes[active]) {
+      el.innerHTML = placeholder('选择上方模式卡下钻轮次', null);
+      return;
+    }
+    var rows = snap.modes[active].series.map(function(p) {
+      var failed = (p.failed_cases || []);
+      var ctl = p.round_type === 'control';
+      var rep = repeatsNote(p.repeats);
+      return '<div class="round"><b>' + esc(p.run_id) + '</b>' +
+        (ctl ? ' <span class="tag">对照</span>' : '') +
+        ' · ' + p.passed + '/' + p.total + ' 通过 · Δ基线 ' + deltaHtml(p.delta_vs_baseline) +
+        (failed.length ? ' · 失败: ' + esc(failed.join(', ')) : '') +
+        (rep ? ' · 复跑未全过: ' + esc(rep) : '') + '</div>';
+    }).join('');
+    el.innerHTML = rows;
+  }
+  function repeatsNote(repeats) {
+    if (!repeats) return '';
+    var parts = [];
+    Object.keys(repeats).forEach(function(cid) {
+      var arr = repeats[cid] || [];
+      var ok = arr.filter(Boolean).length;
+      if (ok < arr.length) parts.push(cid + ' ' + ok + '/' + arr.length);
+    });
+    return parts.join(', ');
+  }
+
+  function renderTrend() {
+    var el = document.getElementById('trend');
+    if (!active || !snap.modes[active]) {
+      el.innerHTML = placeholder('选择上方模式卡查看走势', null);
+      return;
+    }
+    var series = snap.modes[active].series;
+    if (!series.length) { el.innerHTML = placeholder('暂无轮次', null); return; }
+    var W = 520, H = 190, L = 34, R = 10, T = 12, B = 24;
+    var iw = W - L - R, ih = H - T - B;
+    var n = series.length;
+    function X(i) { return L + (n > 1 ? i * iw / (n - 1) : iw / 2); }
+    function Y(v) { return T + ih - v / 100 * ih; }
+    var s = '';
+    [0, 50, 100].forEach(function(v) {
+      s += '<line x1="' + L + '" y1="' + Y(v) + '" x2="' + (W - R) + '" y2="' + Y(v) +
+        '" stroke="var(--border)" stroke-width="1"/>' +
+        '<text x="' + (L - 5) + '" y="' + (Y(v) + 4) + '" font-size="11" text-anchor="end" fill="var(--muted)">' + v + '</text>';
+    });
+    var base = series[0].total > 0 ? series[0].passed / series[0].total * 100 : 0;
+    s += '<line x1="' + L + '" y1="' + Y(base) + '" x2="' + (W - R) + '" y2="' + Y(base) +
+      '" stroke="var(--ph)" stroke-width="1" stroke-dasharray="4 3"/>' +
+      '<text x="' + (W - R) + '" y="' + (Y(base) - 4) + '" font-size="11" text-anchor="end" fill="var(--muted)">基线 ' + Math.round(base) + '%</text>';
+    var path = '';
+    var pts = '';
+    series.forEach(function(p, i) {
+      var v = p.total > 0 ? p.passed / p.total * 100 : 0;
+      if (path) path += ' ';
+      path += (i ? 'L' : 'M') + X(i).toFixed(1) + ',' + Y(v).toFixed(1);
+      var tip = esc(p.run_id + ' · ' + p.passed + '/' + p.total);
+      var ctl = p.round_type === 'control';
+      pts += ctl
+        ? '<rect x="' + (X(i) - 4) + '" y="' + (Y(v) - 4) + '" width="8" height="8" transform="rotate(45 ' +
+          X(i) + ' ' + Y(v) + ')" fill="var(--card)" stroke="var(--ph)" stroke-width="1.4"><title>' + tip + '</title></rect>'
+        : '<circle cx="' + X(i) + '" cy="' + Y(v) + '" r="4" fill="var(--accent)"><title>' + tip + '</title></circle>';
+      s += '<text x="' + X(i) + '" y="' + (H - 8) + '" font-size="11" text-anchor="middle" fill="var(--muted)">R' + (i + 1) + '</text>';
+    });
+    el.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:auto" role="img" aria-label="scorecard 走势">' +
+      s + '<path d="' + path + '" fill="none" stroke="var(--accent)" stroke-width="1.8"/>' + pts + '</svg>' +
+      '<p class="note">基线 = 该模式首轮通过率；灰菱形 = 对照轮（零变更参照）。</p>';
+  }
+
+  // T1-T8 状态机（纯 SVG，箭头为手绘三角形——CSP 自包含契约禁 fill 的 fill 域外引用）
+  function arrow(x1, y1, x2, y2, color, dash) {
+    var dx = x2 - x1, dy = y2 - y1, len = Math.sqrt(dx * dx + dy * dy) || 1;
+    var ux = dx / len, uy = dy / len, px = -uy, py = ux;
+    var bx = x2 - ux * 9, by = y2 - uy * 9;
+    return '<line x1="' + x1 + '" y1="' + y1 + '" x2="' + bx.toFixed(1) + '" y2="' + by.toFixed(1) +
+      '" stroke="' + color + '" stroke-width="1.4"' + (dash ? ' stroke-dasharray="4 3"' : '') + '/>' +
+      '<path d="M' + x2 + ',' + y2 + ' L' + (bx + px * 4.5).toFixed(1) + ',' + (by + py * 4.5).toFixed(1) +
+      ' L' + (bx - px * 4.5).toFixed(1) + ',' + (by - py * 4.5).toFixed(1) + ' Z" fill="' + color + '"/>';
+  }
+  function renderRing() {
+    var el = document.getElementById('ring');
+    var steps = [
+      ['T1', '测量', 70, 36], ['T2', '归因', 200, 36], ['T3', '提案', 330, 36], ['T4', '试跑', 460, 36],
+      ['T5', '裁决', 460, 170], ['T6', '晋升/回滚', 330, 170], ['T7', '记忆回填', 200, 170], ['T8', '循环决策', 70, 170]
+    ];
+    var ph = 'var(--ph)', warn = 'var(--warn)', bad = 'var(--bad)';
+    var s = '<svg viewBox="0 0 560 262" style="width:100%;height:auto" role="img" aria-label="T1-T8 进化循环状态机">';
+    s += arrow(118, 36, 152, 36, ph) + arrow(248, 36, 282, 36, ph) + arrow(378, 36, 412, 36, ph);
+    s += arrow(460, 54, 460, 150, ph);
+    s += arrow(412, 170, 284, 170, ph) + arrow(282, 170, 154, 170, ph) + arrow(124, 170, 72, 170, ph);
+    s += arrow(70, 152, 70, 58, ph);
+    s += '<text x="82" y="112" font-size="11" fill="var(--muted)">循环（假设未耗尽）</text>';
+    s += arrow(412, 150, 384, 62, warn, true);
+    s += '<text x="396" y="112" font-size="11" fill="var(--warn)">裁决拒 → 重提案</text>';
+    s += arrow(70, 188, 70, 216, bad, true);
+    s += '<rect x="24" y="218" width="92" height="30" rx="7" fill="color-mix(in srgb, var(--bad) 12%, transparent)" stroke="' + bad + '"/>' +
+      '<text x="42" y="237" font-size="12" fill="' + bad + '">熔断收尾</text>';
+    // 游标：所选模式最新轮次落位（T4 试跑=对照轮；其余按最近终端状态示意 T6）
+    var cur = active && snap.modes[active] && snap.modes[active].series.length
+      ? snap.modes[active].series[snap.modes[active].series.length - 1] : null;
+    var cx = 234, cy = 86, cw = 172;
+    var label = cur
+      ? '游标: ' + esc(modeLabel(active)) + ' · ' + esc(String(cur.run_id).slice(-4)) +
+        (cur.round_type === 'control' ? ' · T4' : ' · T6')
+      : '游标: 选择模式卡后点亮';
+    s += '<rect x="' + cx + '" y="' + cy + '" width="' + cw + '" height="34" rx="8" ' +
+      'fill="var(--accent-soft)" stroke="var(--accent)" stroke-dasharray="5 3"/>' +
+      '<text x="' + (cx + 14) + '" y="' + (cy + 21) + '" font-size="11.5" fill="var(--accent)">' + label + '</text>';
+    steps.forEach(function(st) {
+      var isCursor = cur && ((cur.round_type === 'control' && st[0] === 'T4') ||
+                             (cur.round_type !== 'control' && st[0] === 'T6'));
+      s += '<rect x="' + (st[2] - 46) + '" y="' + (st[3] - 16) + '" width="92" height="34" rx="7" ' +
+        'fill="' + (isCursor ? 'var(--accent-soft)' : 'var(--card)') + '" stroke="' +
+        (isCursor ? 'var(--accent)' : 'var(--border)') + '"/>' +
+        '<text x="' + (st[2] - 34) + '" y="' + (st[3] + 4) + '" font-size="11" fill="var(--muted)">' + st[0] + '</text>' +
+        '<text x="' + (st[2] - 14) + '" y="' + (st[3] + 4) + '" font-size="12" fill="var(--fg)">' + esc(st[1]) + '</text>';
+    });
+    s += '</svg>';
+    el.innerHTML = s;
+  }
+
+  function renderHypotheses() {
+    var el = document.getElementById('hypotheses');
+    var list = snap.hypotheses || [];
+    if (!list.length) {
+      el.innerHTML = placeholder('暂无假设/提案账', '独立假设账待 T2 归因落账后接入（现投影提案动机）');
+      return;
+    }
+    var tagCls = { applied: 'ok', rejected: 'bad', reverted: 'warn', submitted: 'acc' };
+    var rows = list.map(function(h) {
+      var o = String(h.outcome || '');
+      return '<tr><td class="mono">' + esc(h.proposal_id) + '</td><td>' + esc(h.target) + '</td>' +
+        '<td>' + esc(h.motivation) + '</td><td><span class="tag ' + (tagCls[o] || '') + '">' +
+        esc(o) + '</span></td></tr>';
+    }).join('');
+    el.innerHTML = '<table><tr><th>提案</th><th>目标物料</th><th>动机（假设）</th><th>状态</th></tr>' + rows + '</table>' +
+      '<p class="note">「待处理(submitted)」提案由进化引擎 agent 走基线评测验证；面板一期只读（操作在 agent 工具面）。</p>';
+  }
+
+  function renderLevers() {
+    var el = document.getElementById('levers');
+    var levers = snap.levers || {};
+    var keys = Object.keys(levers);
+    if (!keys.length) {
+      el.innerHTML = placeholder('暂无杠杆账', '提案落账后按动机聚合（口径同 eval_query health 域）');
+      return;
+    }
+    var rows = keys.map(function(k) {
+      var lv = levers[k];
+      return '<tr><td>' + esc(k) + '</td><td>' + lv.applied + '/' + lv.total + '</td></tr>';
+    }).join('');
+    var overall = snap.hit_rate === null || snap.hit_rate === undefined
+      ? '—' : (snap.hit_rate * 100).toFixed(1) + '%';
+    el.innerHTML = '<p>总命中率: <b>' + overall + '</b></p>' +
+      '<table><tr><th>杠杆（动机）</th><th>命中/总数</th></tr>' + rows + '</table>';
+  }
+
+  function renderControls() {
+    var el = document.getElementById('controls');
+    var controls = snap.controls;
+    var keys = controls ? Object.keys(controls) : [];
+    if (!keys.length) {
+      el.innerHTML = placeholder('暂无对照轮',
+        'T4 对照臂：聚合时 round_type=control；对照轮不入基线链与 P0-P3 序列');
+      return;
+    }
+    var rows = keys.map(function(k) {
+      var c = controls[k];
+      return '<tr><td>' + esc(modeLabel(k)) + '</td><td>' + repeatRate(c.treatment_rate) +
+        '</td><td>' + repeatRate(c.control_rate) + '</td><td>' + deltaHtml(c.delta) + '</td></tr>';
+    }).join('');
+    el.innerHTML = '<table><tr><th>模式</th><th>treatment</th><th>control</th><th>Δ 真增益</th></tr>' +
+      rows + '</table>' +
+      '<p class="note">Δ≈0 而 treatment 名义提升 → 增益疑为预算/新鲜度效应（按预测失准处置）。</p>';
+  }
+
+  function renderLibrary() {
+    var el = document.getElementById('library');
+    var lib = snap.library;
+    if (!lib || !lib.total) {
+      el.innerHTML = placeholder('轨迹库缺失',
+        '跑 harvest_trajectories.py 采集后此处显示失败样本/可重放分布');
+      return;
+    }
+    var keys = Object.keys(lib.modes || {});
+    var rows = keys.map(function(k) {
+      var m = lib.modes[k];
+      return '<tr><td>' + esc(modeLabel(k)) + '</td><td>' + m.total + '</td><td>' +
+        m.failures + '</td><td>' + m.replayable + '</td></tr>';
+    }).join('');
+    el.innerHTML = '<p>共 ' + lib.total + ' 条 · 失败 ' + lib.failures + ' · 可重放 ' +
+      lib.replayable + (lib.generated_tag ? ' · 库 ' + esc(lib.generated_tag) : '') + '</p>' +
+      '<table><tr><th>模式</th><th>总量</th><th>失败</th><th>可重放</th></tr>' + rows + '</table>';
+  }
+
+  function renderMetrics() {
+    var el = document.getElementById('metrics');
+    el.innerHTML =
+      slot('提案命中率', rateStr(snap.hit_rate), '') +
+      slot('驳回率', rateStr(snap.reject_rate), '') +
+      gapBox('判决一致率', 'eval_run_heldout 判决落账') +
+      gapBox('归因有效度', 'held-out 判决落账') +
+      gapBox('循环经济性', 'token 账落账') +
+      '<p class="note" style="flex-basis:100%">口径对齐 Harness 层自进化方案 §6.2；后三项为数据源缺口（缺口态标注可补齐的后端函数）。</p>';
+  }
+
+  function renderBreaker() {
+    var el = document.getElementById('breaker');
+    if (!snap.breaker) {
+      el.innerHTML = placeholder('未记录到熔断', '连败 K 触发计数待 T7 落账接入（数据源缺口）');
+      return;
+    }
+    el.innerHTML = '<p class="delta-up">状态: ' + esc(snap.breaker.state || '—') + '</p>';
+  }
+
+  function renderEvolution() {
+    var vEl = document.getElementById('evolution-verdict');
+    var mEl = document.getElementById('evolution-metrics');
+    var evo = snap.evolution;
+    if (!evo || !evo.verdict) {
+      vEl.innerHTML = placeholder('暂无 P0-P3 裁决', '快照未携带 evolution 字段（旧账本或插件未升级）');
+      mEl.innerHTML = '';
+      return;
+    }
+    var labels = { evolving: '进化中', no_evolution: '进化未发生（P0 不达标）',
+                   unstable: '不可靠（P1 不达标）', inefficient: '低效（P2 不达标）',
+                   vetoed: '一票否决（P3 触发）', insufficient_data: '数据不足' };
+    var label = labels[evo.verdict] || evo.verdict;
+    var cls = evo.verdict === 'evolving' ? 'delta-up'
+      : (evo.verdict === 'insufficient_data' ? 'delta-flat' : 'delta-down');
+    vEl.innerHTML = '<p><b>' + esc(label) + '</b> <span class="' + cls + '">verdict=' +
+      esc(evo.verdict) + '</span> · ' + esc(evo.reason || '') + '</p>';
+    function short(x) {
+      if (x === null || x === undefined) return '—';
+      if (typeof x === 'object') return JSON.stringify(x);
+      return String(x);
+    }
+    var p0 = evo.p0 || {}, p1 = evo.p1 || {}, p2 = evo.p2 || {}, p3 = evo.p3 || {};
+    var lr = p0.learning_rates || {};
+    var lrKeys = Object.keys(lr);
+    var judgment = p0.judgment || {};
+    mEl.innerHTML =
+      slot('P0 学习率（斜率）', lrKeys.length
+        ? lrKeys.map(function(k) { return modeLabel(k) + ':' + lr[k].slope; }).join(' / ') : '—', '') +
+      slot('P0 预测失准率', short(judgment.prediction_miss_rate), '') +
+      slot('P1 保留率', short(p1.retention), '') +
+      slot('P1 方差收敛', short(p1.variance), '') +
+      slot('P2 样本效率', short(p2.sample_efficiency), '') +
+      slot('P3 用户否决回滚', short(p3.user_veto_reverts), '');
+  }
+
+  var TOOL_FACE = [
+    'eval_query（suite 题集展开 / screen 轨迹核查 / health 健康裁决）', 'eval_summarize（聚合落账）',
+    'eval_run_heldout（held-out 裁决）',
+    'proposal（action=submit/apply/reject 提案）',
+    'harvest_trajectories.py（轨迹采集）'
+  ];
+  function renderToolFace() {
+    document.getElementById('toolFace').innerHTML =
+      TOOL_FACE.map(function(t) { return '<span class="step mono">' + esc(t) + '</span>'; }).join('');
+  }
+
+  var EVAL_BINDS = [
+    ['模式分组 / 走势 / 时间线', 'eval_summarize 落账 rounds[]', 'passed/total/round_type/repeat_detail', '已接（供页快照）'],
+    ['T1-T8 游标', '轮状态写面（未建）', '轮次状态机事件', '缺口 · 步骤级留痕未落账'],
+    ['假设 / 杠杆 / 对照臂', 'proposals 账 + evolution_metrics', 'outcome/levers/controls', '已接（供页快照）'],
+    ['轨迹库证据', 'harvest_trajectories.py', 'library_summary', '已接（缺失按缺口渲染）'],
+    ['健康度后三项', 'eval_run_heldout / token 账', '判决一致率/归因有效度/循环经济性', '缺口 · 未落账'],
+    ['熔断状态', 'T7 记忆回填写面', 'breaker.state', '缺口 · 连败 K 计数未落账'],
+    ['页面本体', 'GET /ext/mode_evolution/page/evolution-panel', 'window.__EVOLUTION_SNAPSHOT__ 锚点注入', '已接（重取=重新供页）']
+  ];
+  function renderEvalBinds() {
+    document.getElementById('evalBinds').innerHTML = '<table><tr><th>面板区块</th><th>后端驱动</th><th>数据契约</th><th>状态</th></tr>' +
+      EVAL_BINDS.map(function(r) {
+        var live = r[3].indexOf('已接') === 0;
+        return '<tr><td>' + esc(r[0]) + '</td><td class="mono">' + esc(r[1]) + '</td>' +
+          '<td class="mono">' + esc(r[2]) + '</td><td><span class="tag ' + (live ? 'ok' : 'warn') + '">' +
+          esc(r[3]) + '</span></td></tr>';
+      }).join('') + '</table>';
+  }
+
+  function renderEval() {
+    renderModes();
+    renderTimeline();
+    renderTrend();
+    renderRing();
+    renderHypotheses();
+    renderLevers();
+    renderControls();
+    renderLibrary();
+    renderMetrics();
+    renderBreaker();
+    renderEvolution();
+  }
+
+  function renderDaily() {
+    renderDailyKpi();
+    renderSignals();
+    renderPipeline();
+    renderChangelog();
+    renderDailyBinds();
+  }
+
+  bindTabs();
+  renderHead();
+  renderDaily();
+  renderEval();
+  renderToolFace();
+  renderEvalBinds();
+  </script>
+</body>
+</html>

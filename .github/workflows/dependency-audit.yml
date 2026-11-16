@@ -2,12 +2,16 @@
 # 依赖安全审计（weekly）— 灵汐 AgentOS
 # ============================================================
 #
-# 定期（每周一 03:00 UTC）+ 手动触发，审计两条依赖面：
+# 定期（每周一 03:00 UTC）+ 手动触发，审计三条依赖面：
 #   1. python-audit：uv.lock 导出 requirements 后用 pip-audit 查已知漏洞
 #      （PyPI 漏洞库）。审计面 = 全量锁内容（含 dev/extra，--all-extras），
 #      与 CI 安装的事实 pin 同源。
 #   2. frontend-audit：pnpm audit 查 npm 生态已知漏洞，--audit-level=high
 #      起才失败（low/moderate 噪音不阻塞，high/critical 红灯）。
+#   3. cargo-audit：RustSec advisory 直查 kernel/Cargo.lock（审查总册
+#      AR-L L-12 补车道），已知漏洞即失败，报告恒归档 artifact。与 ci.yml
+#      的 cargo-deny 门禁互为冗余防线（deny 另管 license/bans/sources，
+#      audit 是纯 advisory 数据库快查，DB 每次运行 fresh clone）。
 #
 # 本 workflow 不挂在 all-checks-passed（ci.yml 分支保护门禁）内：周期审计
 # 失败产出修复任务，不阻塞 PR。Python 上界防漂移（pyproject next-major
@@ -70,3 +74,30 @@ jobs:
       # devDependencies 同属供应链），high 及以上致非零退出
       - name: Run pnpm audit (high/critical 阻塞)
         run: pnpm audit --audit-level=high
+
+  cargo-audit:
+    name: cargo-audit (kernel/Cargo.lock)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # 预编译二进制（taiki-e/install-action，与 ci.yml 的 cargo-llvm-cov
+      # 同款），无需本地 rustc——cargo-audit 直读 Cargo.lock，不 shell 出 cargo
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2
+        with:
+          tool: cargo-audit
+
+      # 已知漏洞即非零退出（与本文件其余 job 同语义）；pipefail 防 tee 吞退出码
+      - name: Run cargo-audit (已知漏洞即非零退出)
+        run: |
+          set -o pipefail
+          cargo audit --file kernel/Cargo.lock 2>&1 | tee /tmp/cargo-audit-report.txt
+
+      # 审计证据归档：失败也要留痕（always()），复盘以报告为据
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cargo-audit-report
+          path: /tmp/cargo-audit-report.txt

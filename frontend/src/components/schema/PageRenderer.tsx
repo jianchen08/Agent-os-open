@@ -171,7 +171,7 @@ function PagePopoutButton({ page }: { page: PageDeclaration }) {
       title="弹出为浮窗"
       aria-label="弹出为浮窗"
       onClick={() => windowManager.openPopout(page)}
-      className="bg-background/80 hover:bg-accent text-muted-foreground hover:text-foreground pointer-events-auto absolute right-1 top-1 z-10 flex h-6 w-6 items-center justify-center rounded text-xs opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100"
+      className="bg-background/80 hover:bg-muted text-muted-foreground hover:text-foreground pointer-events-auto absolute right-1 top-1 z-10 flex h-6 w-6 items-center justify-center rounded text-xs opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100 focus:opacity-100"
     >
       {/* 弹出/外链图标 */}
       <svg
@@ -250,7 +250,7 @@ export function renderPageContent(page: PageDeclaration): ReactNode {
         data-testid={`dock-page-${page.id}`}
         className="flex items-center gap-1.5 whitespace-nowrap"
       >
-        <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--ds-status-pending,#94A3B8)]" />
+        <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--ds-status-pending)]" />
         <span className="text-muted-foreground text-[11px] leading-none">{page.title ?? page.id}</span>
       </div>
     )

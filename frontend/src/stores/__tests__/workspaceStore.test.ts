@@ -12,9 +12,19 @@ const apiMocks = vi.hoisted(() => ({
   moveEntry: vi.fn(),
 }))
 
+const toastMocks = vi.hoisted(() => ({
+  error: vi.fn(),
+  success: vi.fn(),
+  warning: vi.fn(),
+  info: vi.fn(),
+}))
+
 vi.mock('@/services/api/workspaces', () => apiMocks)
+// 失败反馈走 toast（操作点可见，替代旧 window.alert 阻塞弹窗）
+vi.mock('@/components/ui/sonner', () => ({ toast: toastMocks }))
 
 import { useWorkspaceStore } from '../workspaceStore'
+import { userScopedKey as pk } from '@/utils/userScopedStorage'
 
 const WS_PAYLOAD = {
   id: 'ws-1',
@@ -22,14 +32,8 @@ const WS_PAYLOAD = {
   sessionId: 'sess-1',
   title: '任务一',
   description: '描述',
-  fileTree: [
-    {
-      name: 'src',
-      type: 'directory',
-      path: 'src',
-      children: [{ name: 'main.py', type: 'file', path: 'src/main.py' }],
-    },
-  ],
+  // 单层列举契约：工作空间载荷不再携带嵌套 children
+  fileTree: [{ name: 'src', type: 'directory', path: 'src' }],
   createdAt: '2026-09-13T00:00:00Z',
   updatedAt: '2026-09-13T01:00:00Z',
 }
@@ -56,7 +60,8 @@ describe('workspaceStore', () => {
       const ws = await useWorkspaceStore.getState().fetchWorkspace('ct-1')
       expect(ws?.id).toBe('ws-1')
       expect(ws?.fileTree[0].type).toBe('directory')
-      expect(ws?.fileTree[0].children?.[0].path).toBe('src/main.py')
+      // 单层契约：载荷不携带嵌套 children（子层懒加载另列）
+      expect(ws?.fileTree[0].children).toBeUndefined()
       expect(useWorkspaceStore.getState().workspaces['ct-1'].title).toBe('任务一')
       expect(useWorkspaceStore.getState().loading).toBe(false)
     })
@@ -86,7 +91,7 @@ describe('workspaceStore', () => {
       await useWorkspaceStore.getState().fetchWorkspace('ct-1')
 
       apiMocks.getWorkspaceFileTree.mockResolvedValue({
-        tree: [{ name: 'a.txt', type: 'weird-type', path: 'a.txt' }],
+        entries: [{ name: 'a.txt', type: 'weird-type', path: 'a.txt' }],
       })
       const tree = await useWorkspaceStore.getState().fetchFileTree('ct-1')
       expect(tree[0].type).toBe('file') // 契约外值回退 file
@@ -95,7 +100,7 @@ describe('workspaceStore', () => {
 
     it('未缓存的工作空间不改 state 但仍返回树', async () => {
       apiMocks.getWorkspaceFileTree.mockResolvedValue({
-        tree: [{ name: 'b.txt', type: 'file', path: 'b.txt' }],
+        entries: [{ name: 'b.txt', type: 'file', path: 'b.txt' }],
       })
       const tree = await useWorkspaceStore.getState().fetchFileTree('ghost')
       expect(tree).toHaveLength(1)
@@ -136,7 +141,7 @@ describe('workspaceStore', () => {
       ['renameEntry', 'renameEntry', ['ct-1', 'a.py', 'b.py'] as const],
       ['moveEntry', 'moveEntry', ['ct-1', 'a.py', 'dir'] as const],
     ])('%s 成功路径', async (_label, fn, args) => {
-      apiMocks.getWorkspaceFileTree.mockResolvedValue({ tree: [] })
+      apiMocks.getWorkspaceFileTree.mockResolvedValue({ entries: [], truncated: false })
       apiMocks[fn].mockResolvedValue({})
       const ok = await (useWorkspaceStore.getState() as any)[fn](...args)
       expect(ok).toBe(true)
@@ -144,19 +149,36 @@ describe('workspaceStore', () => {
       expect(apiMocks.getWorkspaceFileTree).toHaveBeenCalledWith('ct-1') // 树已刷新
     })
 
-    it('失败路径弹告警并返回 false，文案前缀按动作区分', async () => {
-      apiMocks.getWorkspaceFileTree.mockResolvedValue({ tree: [] })
+    it('失败路径 toast 报错并返回 false，文案按动作区分；mutatingPath 复位', async () => {
+      apiMocks.getWorkspaceFileTree.mockResolvedValue({ entries: [], truncated: false })
       const cases: Array<[string, string]> = [
         ['createEntry', '创建失败'],
         ['deleteEntry', '删除失败'],
         ['renameEntry', '重命名失败'],
         ['moveEntry', '移动失败'],
       ]
-      for (const [fn, prefix] of cases) {
+      for (const [fn, title] of cases) {
         apiMocks[fn].mockRejectedValueOnce(new Error('x'))
         await (useWorkspaceStore.getState() as any)[fn]('ct-1', 'x', 'y')
-        expect(window.alert).toHaveBeenLastCalledWith(`${prefix}: x`)
+        expect(toastMocks.error).toHaveBeenLastCalledWith(title, { description: 'x' })
+        // await 窗口结束 pending 复位（失败不假装成功，也不残留 disabled）
+        expect(useWorkspaceStore.getState().mutatingPath).toBeNull()
       }
+    })
+
+    it('写动作 await 窗口置 mutatingPath（pending 真值源）', async () => {
+      apiMocks.getWorkspaceFileTree.mockResolvedValue({ entries: [], truncated: false })
+      let resolveDelete: (v: unknown) => void = () => {}
+      apiMocks.deleteEntry.mockReturnValue(
+        new Promise((resolve) => {
+          resolveDelete = resolve
+        }),
+      )
+      const promise = useWorkspaceStore.getState().deleteEntry('ct-1', 'old.py')
+      expect(useWorkspaceStore.getState().mutatingPath).toBe('old.py')
+      resolveDelete({})
+      await promise
+      expect(useWorkspaceStore.getState().mutatingPath).toBeNull()
     })
   })
 
@@ -205,7 +227,7 @@ describe('workspaceStore', () => {
       await useWorkspaceStore.getState().fetchWorkspace('ct-1')
       useWorkspaceStore.getState().togglePathExpanded('src')
 
-      const raw = localStorage.getItem('workspace-store')
+      const raw = localStorage.getItem(pk('workspace-store'))
       expect(raw).toBeTruthy()
       const parsed = JSON.parse(raw!)
       expect(Array.isArray(parsed.state.expandedPaths)).toBe(true)
@@ -217,7 +239,7 @@ describe('workspaceStore', () => {
 
     it('rehydrate 时数组还原为 Set，运行时字段强制重置', async () => {
       localStorage.setItem(
-        'workspace-store',
+        pk('workspace-store'),
         JSON.stringify({
           state: {
             workspaces: { 'ct-9': { id: 'ws-9', title: '旧' } },
@@ -239,7 +261,7 @@ describe('workspaceStore', () => {
 
     it('rehydrate 遇到损坏的 expandedPaths 类型回退空 Set', async () => {
       localStorage.setItem(
-        'workspace-store',
+        pk('workspace-store'),
         JSON.stringify({ state: { expandedPaths: 'not-an-array' }, version: 1 }),
       )
       await useWorkspaceStore.persist.rehydrate()

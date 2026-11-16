@@ -18,7 +18,20 @@
  *   或 hooks/queries/* 标准入口，loading/error/empty/ready 穷举渲染）。
  *   未迁移页面调用点逐行 `// eslint-disable-next-line local-rules/no-bare-usequery-in-pages`
  *   + HACK 原因登记（棘轮：新增调用点仍会被拦）。
+ *
+ * 规则三 no-widget-store-imports —— 查「widget 与具体 store 绑死」（widgets
+ *   目录生效，[来源: docs/decisions/2026-10-10-widget-action-bus.md]）：
+ *   src/components/schema/widgets/** 禁 import '@/stores'（含 @/stores/* 子路
+ *   径）——动作面走 useWidgetAction（内置域 host adapter / ui_schema actionUri），
+ *   数据面走 datasourceUri。存量直连文件登记在 eslint-rules/
+ *   widget-store-import-baseline.json（error 级 + 棘轮：迁移一个删一个，基线
+ *   清零后闸全量生效；baseline 缺失/损坏 = 空基线，fail-closed 全量执法）。
+ *   测试文件不执法（mock store 属测试正当依赖）。
  */
+
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
 
 const PURE_GLOBALS = new Set([
   'Error', 'String', 'Number', 'Boolean', 'JSON', 'Math', 'Date',
@@ -215,9 +228,72 @@ const noBareUseQueryInPages = {
   },
 }
 
+// ── 规则三：widget 目录禁 @/stores（Action Bus 棘轮基线）─────────────
+
+/** frontend 根（本文件在 frontend/eslint-rules/ 下） */
+const FRONTEND_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
+
+/** 棘轮基线缓存（进程内一次加载；基线是文件清单，不是 inline disable） */
+let widgetStoreBaselineCache = null
+
+/**
+ * 读 widget store 直连基线（账本统一归 .github/——gate-wiring V6 账本纪律）
+ *
+ * fail-closed：文件缺失/损坏按空基线处理（闸全量生效，红得可见），不静默放行。
+ */
+function loadWidgetStoreBaseline() {
+  if (widgetStoreBaselineCache) return widgetStoreBaselineCache
+  try {
+    const raw = readFileSync(
+      fileURLToPath(new URL('../../.github/widget-store-import-baseline.json', import.meta.url)),
+      'utf8',
+    )
+    const parsed = JSON.parse(raw)
+    widgetStoreBaselineCache = Array.isArray(parsed)
+      ? parsed.filter((x) => typeof x === 'string')
+      : []
+  } catch {
+    widgetStoreBaselineCache = []
+  }
+  return widgetStoreBaselineCache
+}
+
+const noWidgetStoreImports = {
+  meta: {
+    type: 'problem',
+    docs: {
+      description:
+        "widgets 目录禁 import '@/stores'（含子路径）：动作面走 useWidgetAction、数据面走 datasourceUri（ADR 2026-10-10）",
+    },
+    schema: [],
+    messages: {
+      widgetStoreImport:
+        "widgets 目录禁 import '@/stores'（ADR 2026-10-10 widget Action Bus）：动作面走 useWidgetAction（host adapter/actionUri）、数据面走 datasourceUri；存量迁移文件登记在 .github/widget-store-import-baseline.json（棘轮：迁移一个删一个，基线清零后全量禁止）。",
+    },
+  },
+  create(context) {
+    const filename = context.filename ?? ''
+    // 归一为 frontend 相对路径（Windows 分隔符 → /）才可比基线
+    const rel = path
+      .relative(FRONTEND_ROOT, filename)
+      .split(path.sep)
+      .join('/')
+    if (!rel.startsWith('src/') || loadWidgetStoreBaseline().includes(rel)) return {}
+    return {
+      ImportDeclaration(node) {
+        const value = node.source?.value
+        if (value === '@/stores' || (typeof value === 'string' && value.startsWith('@/stores/'))) {
+          context.report({ node, messageId: 'widgetStoreImport' })
+        }
+      },
+    }
+  },
+}
+
 export default {
   rules: {
     'no-swallowed-errors': noSwallowedErrors,
     'no-bare-usequery-in-pages': noBareUseQueryInPages,
+    'no-widget-store-imports': noWidgetStoreImports,
   },
 }

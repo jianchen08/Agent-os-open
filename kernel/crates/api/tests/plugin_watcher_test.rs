@@ -19,7 +19,7 @@ use serial_test::serial;
 use tokio::time::timeout;
 
 /// 钉用户根到一次性空临时目录（进程级 Once）：
-/// sync 会重扫模式包资源 = `<plugins_dir>/modes` + 用户根 modes 目录——
+/// sync 会全量重扫插件根（含用户根 modes 二级嵌套的模式包）——
 /// 宿主真实用户空间被播种/并行会话同步副本时，该扫描拖长 sync 耗时，
 /// 测试的秒级等待窗即超时（0 syncs/无注册/无 hook）。串行整测共享同一空根。
 fn pin_temp_user_root() {
@@ -334,6 +334,92 @@ async fn watcher_does_not_fire_restart_hook_for_sidecar_only() {
     drop(handle);
 }
 
+/// 重载波收尾巡检端到端：波次摘掉的声明 http 路由在下一轮 sync 收尾被主动
+/// 补注册——无需任何请求触发（惰性 heal 窗消除的整环锁，2026-10-15 酒馆面板
+/// 404 消缺）。
+#[tokio::test]
+#[serial]
+async fn watcher_sweep_restores_revoked_http_routes_at_sync_tail() {
+    pin_temp_user_root();
+    let tmp = tempfile::tempdir().unwrap();
+    std::env::set_var("AGENTOS_PLUGINS_DIR", tmp.path());
+
+    // 带 http_endpoints 的 in_process 插件（boot 形态：启动时已发现；无进程模型，
+    // 不触 spawn）。in_process 在复验循环头部被排除，sync 其余段零扰动。
+    let dir = tmp.path().join("mode_swp");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("plugin.json"),
+        r#"{
+    "id": "mode_swp", "name": "mode_swp", "version": "1.0.0",
+    "plugin_type": "system", "language": "rust",
+    "host_type": "in_process", "entry": "mode_swp",
+    "capabilities": {},
+    "http_endpoints": [{
+        "route_id": "d1", "method": "GET", "path": "/ext/mode_swp/data",
+        "auth": "none", "handler_capability": "http.handle"
+    }]
+}"#,
+    )
+    .unwrap();
+
+    let loader: Arc<dyn PluginLoader> = Arc::new(PluginLoaderImpl::new(tmp.path(), None));
+    let invoker = Arc::new(PluginInvokerImpl::new(loader));
+    let initial: Vec<_> = invoker.discover_new_plugins().await.unwrap();
+    let initial_ids: HashSet<String> = initial.iter().map(|m| m.id.clone()).collect();
+    assert!(initial_ids.contains("mode_swp"));
+
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    let scopes = Arc::new(agentos_plugin_loader::PluginScopeRegistry::new());
+    // boot 注册声明路由 → 波次收回（uninstall/复验 revoke 语义）。
+    let manifest = initial.iter().find(|m| m.id == "mode_swp").unwrap().clone();
+    agentos_api::plugin_lifecycle::reenable_plugin_capabilities(&manifest, &registry, &scopes);
+    assert!(registry
+        .find_http_route("/ext/mode_swp/data", "GET")
+        .is_some());
+    scopes.revoke("mode_swp");
+    assert!(
+        registry
+            .find_http_route("/ext/mode_swp/data", "GET")
+            .is_none(),
+        "前置：波次收回后路由缺失"
+    );
+
+    let manifests_store: agentos_api::plugin_watcher::ManifestsStore =
+        Arc::new(tokio::sync::RwLock::new(initial));
+    let enabled = Arc::new(tokio::sync::RwLock::new(initial_ids));
+    let handle = PluginWatcher::new(
+        tmp.path().to_path_buf(),
+        invoker as Arc<dyn agentos_core::traits::PluginInvoker>,
+        registry.clone(),
+        HashSet::new(),
+    )
+    .with_scopes(Arc::clone(&scopes))
+    .with_manifests_store(manifests_store)
+    .with_enabled_ids(enabled)
+    .with_debounce(Duration::from_millis(50))
+    .spawn();
+    handle.trigger.send(()).unwrap();
+
+    // 路由应在 3s 内被波尾巡检补回（零请求触发）。
+    let restored = timeout(Duration::from_secs(3), async {
+        loop {
+            if registry
+                .find_http_route("/ext/mode_swp/data", "GET")
+                .is_some()
+            {
+                return Ok::<(), ()>(());
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await;
+    assert!(
+        restored.is_ok(),
+        "波尾巡检应在 sync 收尾补回波次摘掉的声明路由"
+    );
+}
+
 /// 手动触发一次同步并轮询 flag（最多 3s）。
 async fn handle_trigger_and_wait(
     handle: &agentos_api::plugin_watcher::WatcherHandle,
@@ -351,11 +437,14 @@ async fn handle_trigger_and_wait(
     .await;
 }
 
-/// 模式包资源热发现端到端（P2 遗留接线）：模式包内热增 agents 文件，经 watcher
-/// 每轮 sync 尾部的增量重扫，mode 键表即时反映——无需重启内核。
+/// 模式包资源按需聚合端到端（ADR 2026-10-15-mode-registry-retirement）：
+/// 嵌套装机布局（`modes/<pkg>/`）的模式包经 invoker 递归根收集发现（boot 同源），
+/// 约定资源视图 = 活 manifests + loader 路径表 + 盘上现状的按需聚合——热增
+/// agents 文件下次聚合即时入键表，全程零注册状态、零刷新机器（原 watcher
+/// 增量重扫特例已随 mode_registry 注册状态机退役）。
 #[tokio::test]
 #[serial]
-async fn watcher_resyncs_mode_package_resources_on_sync() {
+async fn mode_resources_aggregate_on_demand_from_discovered_packages() {
     pin_temp_user_root();
     let tmp = tempfile::tempdir().unwrap();
     std::env::set_var("AGENTOS_PLUGINS_DIR", tmp.path());
@@ -376,40 +465,54 @@ async fn watcher_resyncs_mode_package_resources_on_sync() {
 }"#,
     )
     .unwrap();
-    let loader: Arc<dyn PluginLoader> = Arc::new(PluginLoaderImpl::new(tmp.path(), None));
-    // initial_ids 与 boot 同源：走 invoker 的递归根收集（mode 包嵌套在
+    let loader = Arc::new(PluginLoaderImpl::new(tmp.path(), None));
+    // 发现与 boot 同源：走 invoker 的递归根收集（mode 包嵌套在
     // modes/<pkg>/，loader.discover 的单层扫描看不到）。
-    let invoker = Arc::new(PluginInvokerImpl::new(loader));
-    let initial: Vec<_> = invoker.discover_new_plugins().await.unwrap();
-    let initial_ids: HashSet<String> = initial.iter().map(|m| m.id.clone()).collect();
-    assert!(initial_ids.contains("mode_e2e"), "模式包应作为插件被发现");
+    let invoker = Arc::new(PluginInvokerImpl::new(loader.clone()));
+    let manifests: Vec<_> = invoker.discover_new_plugins().await.unwrap();
+    let enabled: HashSet<String> = manifests.iter().map(|m| m.id.clone()).collect();
+    assert!(enabled.contains("mode_e2e"), "模式包应作为插件被发现");
 
-    let registry = Arc::new(CapabilityRegistryImpl::new());
-    let handle = PluginWatcher::new(
-        tmp.path().to_path_buf(),
-        invoker as Arc<dyn agentos_core::traits::PluginInvoker>,
-        registry.clone(),
-        initial_ids,
-    )
-    .with_debounce(Duration::from_millis(50))
-    .spawn();
+    // 聚合取数 = 生产 schema 装配同款三参：活 manifests + 启用集 + loader 路径表。
+    let dirs = loader.get_plugin_dirs();
+    let keys = || {
+        let (agents, pipelines) =
+            agentos_api::mode_view::aggregate_mode_resources(&manifests, &enabled, &dirs);
+        (
+            agents
+                .iter()
+                .map(|a| a["key"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>(),
+            pipelines
+                .iter()
+                .map(|p| p["key"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>(),
+        )
+    };
+    let (agents, pipelines) = keys();
+    assert!(
+        agents.is_empty() && pipelines.is_empty(),
+        "无约定文件 = 零条目"
+    );
 
-    // 热增 agents 约定文件 + 手动触发同步 → sync 尾部增量重扫登记 mode 键。
+    // 热增 agents/pipelines 约定文件 → 下次聚合键即时出现（无需注册/重启/刷新）。
     std::fs::create_dir_all(pkg.join("agents")).unwrap();
     std::fs::write(pkg.join("agents/novelist.yaml"), "model_tier: large\n").unwrap();
-    handle.trigger.send(()).unwrap();
-
-    let appeared = timeout(Duration::from_secs(3), async {
-        loop {
-            if registry.get_mode_agent("mode_e2e/novelist").is_some() {
-                return Ok::<(), ()>(());
-            }
-            tokio::time::sleep(Duration::from_millis(30)).await;
-        }
-    })
-    .await;
-    assert!(
-        appeared.is_ok(),
-        "热增 agents 文件后 mode 键应在 3s 内出现（watcher 重扫）"
+    std::fs::create_dir_all(pkg.join("pipelines")).unwrap();
+    std::fs::write(
+        pkg.join("pipelines/main.yaml"),
+        "task_kinds: [roleplay.chat]\nsteps: []\n",
+    )
+    .unwrap();
+    let (agents, pipelines) = keys();
+    assert_eq!(
+        agents,
+        vec!["mode_e2e/novelist"],
+        "热增文件无需重启即入键表"
+    );
+    assert_eq!(
+        pipelines,
+        vec!["mode_e2e/main"],
+        "编排键 + task_kinds 随盘上现状派生"
     );
 }

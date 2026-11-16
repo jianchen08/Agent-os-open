@@ -5,7 +5,7 @@
  * hook 内部各分支）：
  * - 来源标签解析：管道元数据 → agents 缓存 → agentId 原文三级回退
  * - options 归一化：字符串数组 / 对象包裹（MiniMax 畸形）/ 对象数组 / 无 label 过滤
- * - file_paths 附件：拉取成功进 fileContents 并注册文件 Tab；success=false /
+ * - file_paths 附件：文件全文注册进文件 Tab（不入交互 store）；success=false /
  *   API 抛错降级为占位文本；已存在 Tab 跳过
  * - mode 分流：notification 只进通知中心；choice/conversation 只进交互 Store
  * - 交互去重；cancelled/timeout 摘除并联动撤下通知
@@ -63,6 +63,7 @@ const mockAgents = vi.hoisted(() => ({ list: [] as Array<{ id: string; configId?
 vi.mock('@/hooks/queries/useAgentsQuery', () => ({ readAgents: () => mockAgents.list }))
 
 import { useInteractionHandler } from '@/hooks/useInteractionHandler'
+import { getFileEditorData } from '@/stores/fileEditorRegistry'
 import { useInteractionStore, type PendingInteraction } from '@/stores/interactionStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
@@ -376,7 +377,7 @@ describe('音频通知失败兜底', () => {
 })
 
 describe('系统通知派发（OS 原生通知路由）', () => {
-  it('新交互到达 → showSystemNotification 以解析出的 title/description 调用一次', async () => {
+  it('新交互到达 → showSystemNotification 以解析出的 title/description/threadId 调用一次', async () => {
     const view = await mountHandler()
     ws.emit('interaction_request', {
       request_id: 'req-sys1', interaction_mode: 'choice', title: '审批', description: '请确认',
@@ -385,7 +386,7 @@ describe('系统通知派发（OS 原生通知路由）', () => {
     await waitFor(() => expect(useInteractionStore.getState().pendingInteractions).toHaveLength(1))
     await act(async () => {})
     expect(vi.mocked(showSystemNotification)).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(showSystemNotification)).toHaveBeenCalledWith({ title: '审批', body: '请确认' })
+    expect(vi.mocked(showSystemNotification)).toHaveBeenCalledWith({ title: '审批', body: '请确认', threadId: 't' })
     view.unmount()
   })
 
@@ -400,6 +401,23 @@ describe('系统通知派发（OS 原生通知路由）', () => {
     expect(vi.mocked(showSystemNotification)).toHaveBeenCalledWith({
       title: '人类交互请求',
       body: 'agent-a 请求您的输入',
+      threadId: 't',
+    })
+    view.unmount()
+  })
+
+  it('thread_id 缺失 → threadId 透传 undefined（通知点击退化仅聚焦）', async () => {
+    const view = await mountHandler()
+    ws.emit('interaction_request', {
+      request_id: 'req-sys4', interaction_mode: 'choice', title: '审批', description: '请确认',
+      agent_id: 'a', session_id: 's', pipeline_id: 'p',
+    })
+    await waitFor(() => expect(useInteractionStore.getState().pendingInteractions).toHaveLength(1))
+    await act(async () => {})
+    expect(vi.mocked(showSystemNotification)).toHaveBeenCalledWith({
+      title: '审批',
+      body: '请确认',
+      threadId: undefined,
     })
     view.unmount()
   })
@@ -431,10 +449,11 @@ describe('file_paths 附件拉取与文件 Tab 注册', () => {
     return view
   }
 
-  it('拉取成功 → fileContents 落库 + 文件 Tab 注册并激活 + 进入五空间', async () => {
+  it('拉取成功 → 文件全文注册进文件 Tab（不入交互 store）+ Tab 激活 + 进入五空间', async () => {
     const view = await pushWithFiles(['/ws/报告.md'])
+    expect(getFileEditorData('file-_local-_ws_报告.md')?.content).toBe('文件内容甲')
     const parsed = useInteractionStore.getState().pendingInteractions[0]
-    expect(parsed.fileContents).toEqual({ '/ws/报告.md': '文件内容甲' })
+    expect('fileContents' in parsed).toBe(false)
     const layout = useLayoutModeStore.getState()
     expect(layout.workspaceTabs.some((t) => t.moduleId === '__file_editor__' && t.title === '报告.md')).toBe(true)
     expect(layout.mode).toBe('five-space')
@@ -448,9 +467,9 @@ describe('file_paths 附件拉取与文件 Tab 注册', () => {
       return { data: { success: false, message: '文件不存在' } }
     })
     const view = await pushWithFiles(['/ws/丢.txt'])
-    const parsed = useInteractionStore.getState().pendingInteractions[0]
-    expect(parsed.fileContents?.['/ws/丢.txt']).toContain('文件加载失败')
-    expect(parsed.fileContents?.['/ws/丢.txt']).toContain('文件不存在')
+    const content = getFileEditorData('file-_local-_ws_丢.txt')?.content ?? ''
+    expect(content).toContain('文件加载失败')
+    expect(content).toContain('文件不存在')
     view.unmount()
   })
 
@@ -460,8 +479,8 @@ describe('file_paths 附件拉取与文件 Tab 注册', () => {
       throw new Error('超时')
     })
     const view = await pushWithFiles(['/ws/断.txt'])
-    const parsed = useInteractionStore.getState().pendingInteractions[0]
-    expect(parsed.fileContents?.['/ws/断.txt']).toContain('文件加载失败')
+    const content = getFileEditorData('file-_local-_ws_断.txt')?.content ?? ''
+    expect(content).toContain('文件加载失败')
     view.unmount()
   })
 })
@@ -588,6 +607,20 @@ describe('respond 出站与 fail-closed', () => {
     })
     expect(useInteractionStore.getState().pendingInteractions[0].status).toBe('entered')
     expect(mockNavigateToPipeline).toHaveBeenCalledWith('p-9', { agentName: '专家乙', agentLevel: 3 })
+    view.unmount()
+  })
+
+  it('navigateToTab：无标题 → 标签名回落交互的智能体名（标签命名链）', async () => {
+    const view = await mountHandler()
+    useInteractionStore.setState({
+      pendingInteractions: [
+        makeParsed({ requestId: 'req-an', sessionId: 'sess-a', status: 'pending', agentName: '评审员' }) as PendingInteraction,
+      ],
+    })
+    await act(async () => {
+      await view.result.current.navigateToTab('req-an', 'p-8')
+    })
+    expect(mockNavigateToPipeline).toHaveBeenCalledWith('p-8', { agentName: '评审员', agentLevel: 2 })
     view.unmount()
   })
 

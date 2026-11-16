@@ -1,0 +1,26 @@
+{
+  "id": "notification_sounds",
+  "name": "Notification Sounds",
+  "description": "交互提示音目录：Web Audio 合成预设（sounds/ 下一个 JSON 即一个音效，内置与自定义同权），前端提示音选择器消费",
+  "version": "1.0.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "host_group": "light_stable",
+  "entry": "python server.py",
+  "http_endpoints": [
+    {
+      "route_id": "sounds_catalog",
+      "method": "GET",
+      "path": "/ext/notification_sounds/sounds",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "提示音目录全量（合成预设含渲染参数与默认项标记；读盘即热，落 JSON 文件即上目录）"
+    }
+  ],
+  "capabilities": {
+    "tools": []
+  }
+}

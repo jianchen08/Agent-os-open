@@ -20,6 +20,8 @@ if str(_SHARED_ROOT) not in sys.path:
 
 import user_space  # noqa: E402
 
+from agentos_plugin_sdk import diagnostics_settings as ds  # noqa: E402
+
 pytestmark = pytest.mark.unit
 
 _ALL_ENV = (
@@ -35,6 +37,51 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """清空全部用户空间环境变量，杜绝宿主机真实取值渗入断言。"""
     for key in _ALL_ENV:
         monkeypatch.delenv(key, raising=False)
+
+
+# ── SDK 包边界副本对齐（多端平台差异普查 ⚠️-3 收敛锚）──────────
+
+
+class TestSdkDiagnosticsCopyAlignment:
+    """SDK ``diagnostics_settings.user_root`` 副本与本体同输入同输出。
+
+    SDK 包边界不可 import user_space（user_space 是共享根裸模块，SDK 以
+    site-packages 平拷贝布局装入各 venv 时无共享根可达）——副本合法存在，
+    防漂移靠本组对齐断言；改动须与本体同刀（锚注释互链）。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_user_root_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(user_space.USER_ROOT_ENV, raising=False)
+
+    def test_env_override_same_root(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv(user_space.USER_ROOT_ENV, str(tmp_path))
+        assert ds.user_root() == user_space.user_root() == tmp_path
+
+    def test_os_default_same_root(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """常规环境（win: APPDATA 在 / posix: XDG 或 home 兜底）两面同根。"""
+        assert ds.user_root() == user_space.user_root()
+
+    def test_os_data_dir_unavailable_documented_difference(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OS 数据目录不可得时的**已知微差**（副本注释裁定，非漂移）：
+
+        SDK 侧 APPDATA 缺省回退 ``~/AppData/Roaming``（settings.yaml 必须
+        可落位，永不 None）；本体诚实返回 None（调用方自择回退）。
+        POSIX 两侧同走 home 兜底，无微差。
+        """
+        if sys.platform == "win32":
+            monkeypatch.delenv("APPDATA", raising=False)
+            assert user_space._os_data_dir() is None
+            assert user_space.user_root() is None
+            assert ds.user_root() == Path.home() / "AppData" / "Roaming" / "agentos"
+        else:
+            monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+            expected = Path.home() / ".local" / "share" / "agentos"
+            assert ds.user_root() == user_space.user_root() == expected
 
 
 # ── 分区默认位置（随用户根推导） ───────────────────────────────
@@ -167,3 +214,50 @@ def test_tenant_data_base_follows_user_space(
     assert tenant_data.tenant_data_root("default", "probe", base=None).is_relative_to(
         legacy
     )
+
+
+# ── payload_diag 快照目录单源（SDK，写端 adapter 与读端 monitoring 共用）──
+
+
+class TestPayloadDiagDirAnchor:
+    """``ds.payload_diag_dir``：LLM 请求快照目录读写单源。
+
+    裁定 2026-11-02：快照锚用户空间 ``logs/payload_diag``，禁插件文件位置
+    /cwd 推导——装机布局下写端探测命中包内 resources、读端 env 命中用户
+    空间，读写分叉致「LLM 请求」调试页看不到新调用
+    （ADR 2026-11-02-payload-diag-user-space-anchor）。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_anchor_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("AGENTOS_LOG_DIR", raising=False)
+        monkeypatch.delenv(user_space.USER_ROOT_ENV, raising=False)
+
+    def test_log_dir_env_override_wins(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("AGENTOS_LOG_DIR", str(tmp_path))
+        assert ds.payload_diag_dir() == tmp_path / "logs" / "payload_diag"
+
+    def test_default_under_user_root(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv(user_space.USER_ROOT_ENV, str(tmp_path))
+        assert ds.payload_diag_dir() == tmp_path / "logs" / "payload_diag"
+
+    @pytest.mark.parametrize("blank", ["", "   ", "\t"])
+    def test_blank_env_falls_back_to_user_root(
+        self, blank: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # 空白 env ≠ 覆盖（与 user_root 的空白语义一致）
+        monkeypatch.setenv("AGENTOS_LOG_DIR", blank)
+        monkeypatch.setenv(user_space.USER_ROOT_ENV, str(tmp_path))
+        assert ds.payload_diag_dir() == tmp_path / "logs" / "payload_diag"
+
+    def test_log_dir_override_beats_user_root(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # 两组区分度输入：env 覆盖与用户根同时存在时，部署覆盖优先
+        monkeypatch.setenv("AGENTOS_LOG_DIR", str(tmp_path / "deploy"))
+        monkeypatch.setenv(user_space.USER_ROOT_ENV, str(tmp_path / "user"))
+        assert ds.payload_diag_dir() == tmp_path / "deploy" / "logs" / "payload_diag"

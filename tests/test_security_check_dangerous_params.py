@@ -19,10 +19,10 @@ import pytest
 
 from tests._pipeline_plugin_path import add_plugin_dir
 
-add_plugin_dir("input", "security_check")
+add_plugin_dir("security_check")
 
 import plugin as sc_mod  # noqa: E402
-from pipeline.plugin import PluginContext  # noqa: E402
+from _libs.pipeline_base.plugin import PluginContext  # noqa: E402
 from plugin import SecurityCheckPlugin  # noqa: E402
 
 pytestmark = pytest.mark.unit

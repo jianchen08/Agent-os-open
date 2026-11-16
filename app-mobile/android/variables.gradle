@@ -1,0 +1,22 @@
+ext {
+    minSdkVersion = 24
+    compileSdkVersion = 36
+    // targetSdk 钉 28（Termux 同款无 root 分发口径，ADR 2026-10-26-mobile-targetsdk-28）：
+    // targetSdk >= 29 的应用落 SELinux untrusted_app 新域，app_data_file 的 execute
+    // 被 W^X neverallow 拒绝——proot 本机栈对 rootfs 内二进制（env/bash/内核 ELF）
+    // 的 exec 全被 execute_no_trans 拦（S5-B：真机 enforcing 无 root 本机栈不可起，
+    // 登录恒失败）；28 归入 untrusted_app_27 legacy 域，exec 允许。compileSdk 保持
+    // 36（高 API 编译 + 低 target 运行）。分发面为侧载 APK，无商店 targetSdk 门槛。
+    targetSdkVersion = 28
+    androidxActivityVersion = '1.11.0'
+    androidxAppCompatVersion = '1.7.1'
+    androidxCoordinatorLayoutVersion = '1.3.0'
+    androidxCoreVersion = '1.17.0'
+    androidxFragmentVersion = '1.8.9'
+    coreSplashScreenVersion = '1.2.0'
+    androidxWebkitVersion = '1.14.0'
+    junitVersion = '4.13.2'
+    androidxJunitVersion = '1.3.0'
+    androidxEspressoCoreVersion = '3.7.0'
+    cordovaAndroidVersion = '14.0.1'
+}

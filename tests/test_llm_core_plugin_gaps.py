@@ -4,7 +4,7 @@
 覆盖面（按行为分组）：
 - 模块级共享根自举（sys.path bootstrap 真实执行）与 priority 元数据；
 - 模型解析：state.model_tier → defaults.tiers（_resolve_tier）、model_id 大小写
-  不敏感命中 / 缺失保持当前配置；
+  不敏感命中 / 缺失显式失败（不静默回落）；
 - 空回复重试策略：plugin_configs 覆盖 max_empty_retries、跨轮计数、耗尽裁决；
 - assistant 消息组装：tool_calls + reasoning_content 保留、空回复不追加消息；
 - 多模态：list 形态 content 直接追加、本地引用解析失败（文件不存在/读取失败）；
@@ -29,19 +29,18 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_CORE_DIR = _REPO_ROOT / "plugins" / "shared" / "pipeline" / "core"
-_LLM_CORE_DIR = _CORE_DIR / "llm_core"
 _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
-_SYSTEM_LLM_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "llm"
+_LLM_CORE_DIR = _SHARED_DIR / "llm_core"
+_SYSTEM_LLM_DIR = _SHARED_DIR / "llm"
 
 # sys.path 自举：先把共享根摘出，让 plugin.py 顶部的共享根自举行
 # （_SHARED_ROOT not in sys.path → insert(0)）真实执行；再保证 llm_core 包目录
-# 与 system/llm（adapter / _config_models 平铺模块落点）在最前（车道共跑时
+# 与 llm（adapter / _config_models 平铺模块落点）在最前（车道共跑时
 # 其他插件目录可能残留 sys.path 前部，幂等跳过会让 `from adapter import`
 # 命中他插件）。
 while str(_SHARED_DIR) in sys.path:
     sys.path.remove(str(_SHARED_DIR))
-for _d in (_SYSTEM_LLM_DIR, _CORE_DIR, _LLM_CORE_DIR):
+for _d in (_SYSTEM_LLM_DIR, _LLM_CORE_DIR):
     if str(_d) in sys.path:
         sys.path.remove(str(_d))
     sys.path.insert(0, str(_d))
@@ -207,13 +206,13 @@ async def test_execute_resolves_model_via_state_tier(tier, want_model, want_api_
 @pytest.mark.parametrize(
     ("requested", "want_model", "want_api_base"),
     [
-        ("ghost-model", "FallbackKeep", "https://keep.example.com"),  # 缺配置 → 保持当前模型
         ("BIG-MODEL", "BigModel", "https://a.example.com"),  # 大小写不敏感命中
+        ("Small-Model", "SmallModel", "https://b.example.com"),  # 大小写不敏感命中（第二组）
     ],
-    ids=["missing-config-keeps-current", "case-insensitive-hit"],
+    ids=["case-insensitive-hit-a", "case-insensitive-hit-b"],
 )
 async def test_execute_model_id_lookup(requested, want_model, want_api_base):
-    """state.model_id 查表：未找到告警并保持原配置（不阻断）；命中含大小写不敏感。"""
+    """state.model_id 查表命中：大小写不敏感。"""
     from _config_models import set_config
 
     set_config(_MODEL_CONFIG)
@@ -233,6 +232,32 @@ async def test_execute_model_id_lookup(requested, want_model, want_api_base):
 
     assert result["llm_model"] == want_model
     assert result["llm_api_base"] == want_api_base
+
+
+async def test_execute_model_id_missing_config_fails_visibly():
+    """state.model_id 未命中配置表 → 本轮显式失败点名模型（不以构造默认静默回落）。
+
+    缺陷⑥-A 修复语义：解析出的显式模型名不在可用列表时本轮失败直写
+    （R16⑧），LLM 调用不发生——不再 warning 后按原模型继续对话。
+    """
+    from _config_models import set_config
+
+    set_config(_MODEL_CONFIG)
+    caller = _RecordingCaller(_llm_data())
+    plugin = _make_plugin(
+        caller,
+        {
+            "provider": "openai",
+            "model_name": "FallbackKeep",
+            "api_base": "https://keep.example.com",
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="ghost-model"):
+        await plugin.execute(
+            _Ctx({"messages": [{"role": "user", "content": "hi"}], "model_id": "ghost-model"})
+        )
+    assert caller.calls == [], "未命中模型不得以构造默认发起 LLM 调用"
 
 
 # ── 空回复重试策略（plugin_configs 覆盖 + 跨轮计数）──────────────────

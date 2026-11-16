@@ -21,7 +21,11 @@
 import { createEvent, fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { initializeWidgets } from '@/services/schema/registerWidgets'
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { slotRegistry } from '@/services/slots/slotRegistry'
+import { loadSchemaIntoRegistries } from '@/test/schemaLoader'
 import { makeDataTransfer } from '@/test/dndTestUtils'
 import { StoreDrivenPanel } from './helpers/workspacePanelHarness'
 import { makeTab } from './helpers/workspaceTabFactory'
@@ -49,13 +53,28 @@ describe('WorkspacePanel — 空态与全屏', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     contributionRegistry.clear()
+    slotRegistry.clear()
     useLayoutModeStore.setState({ workspaceTabs: [], visitedTabIds: [] })
   })
 
-  it('空态渲染导航页，点击声明条目打开对应工作区页签（真实 opener 链路）', () => {
-    contributionRegistry.register({
-      type: 'pages', id: 'tasks', title: '任务管理',
-      space: 'workspace', slot: 'tab', path: '/tasks', pluginId: 'task_service',
+  it('空态渲染导航页，点击声明条目打开对应工作区页签（真实 opener 链路）', async () => {
+    // 内建 widget 注册面（生产 main.tsx 启动同款）：workspace.tab 槽装载期终验需要
+    widgetRegistry.clear()
+    initializeWidgets()
+    // 声明经两表装载（C4：页签内容按 workspace.tab keyed 槽解析）
+    await loadSchemaIntoRegistries({
+      plugin_contributes: [
+        {
+          plugin_id: 'task_service',
+          plugin_name: 'Task Service',
+          contributes: {
+            pages: [
+              { id: 'tasks', title: '任务管理', space: 'workspace', slot: 'tab', path: '/tasks', widget: 'status_card' },
+            ],
+          },
+        },
+      ],
+      plugin_configs: [],
     })
     render(<StoreDrivenPanel />)
     expect(screen.getByTestId('workspace-nav-page')).toBeInTheDocument()

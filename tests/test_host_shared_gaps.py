@@ -3,7 +3,12 @@
 
 行为契约（断输入→输出/副作用，不钉实现）：
 - _default_shared_root：宿主文件上级目录即 plugins/shared（成员发现根）
-- _scan_plugin_dirs：插件根不可用 → 跳过该根不报错（可用根照常索引）
+- _scan_plugin_dirs：插件根不可用 → 跳过该根不报错（可用根照常索引）；
+  同 id 双源裁决（BuiltinFirst 版本口径）：用户副本 semver 严格大于内置才
+  接管，==/</版本缺失/不可解析均内置赢（fail-closed），版本缺失/不可解析
+  落败告警；manifest id 与目录名两索引同规；多用户源归约取最高
+- _load_members：事故形态回归锁——用户 stale 低版本副本 import 即炸时，
+  裁决选中内置副本，加载成功不崩
 - _LoopWatchdog.start：重复启动幂等（单 watchdog 线程，停滞时恰一次自杀）
 - _heartbeat_loop：取消前持续打点（心跳时间戳单调推进）
 - _serve：serve 正常返回后心跳任务被取消、watchdog 停止（否则 asyncio.run
@@ -77,19 +82,38 @@ async def last_lifecycle() -> dict:
 '''
 
 
-def _write_member(shared_root: Path, group_rel: str, dir_name: str, manifest_id: str) -> Path:
-    """在假 shared 树下写入合成成员目录（plugin.json + plugin.py + server.py）。"""
+def _write_member(
+    shared_root: Path,
+    group_rel: str,
+    dir_name: str,
+    manifest_id: str,
+    version: str | None = None,
+) -> Path:
+    """在假 shared 树下写入合成成员目录（plugin.json + plugin.py + server.py）。
+
+    ``version``：写入 manifest version 字段（双源裁决测试需显式版本）；
+    ``None`` 缺省不写（锁定「缺失 version 字段」降级语义的测试依赖该形态）。
+    """
     member_dir = shared_root / group_rel / dir_name
     member_dir.mkdir(parents=True, exist_ok=True)
-    (member_dir / "plugin.json").write_text(
-        json.dumps({"id": manifest_id, "host_type": "sidecar"}),
-        encoding="utf-8",
-    )
+    manifest: dict[str, Any] = {"id": manifest_id, "host_type": "sidecar"}
+    if version is not None:
+        manifest["version"] = version
+    (member_dir / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
     (member_dir / "plugin.py").write_text(f'MEMBER_NAME = "{dir_name}"\n', encoding="utf-8")
     (member_dir / "server.py").write_text(
         _MEMBER_SERVER_TEMPLATE.format(plugin_name=dir_name), encoding="utf-8"
     )
     return member_dir
+
+
+def _dual_roots(tmp_path: Path) -> tuple[Path, Path]:
+    """构造双源裁决的根对：返回（内置根， 用户根），次序同 _member_roots。"""
+    builtin_root = tmp_path / "builtin_shared"
+    user_root = tmp_path / "user_plugins"
+    builtin_root.mkdir()
+    user_root.mkdir()
+    return builtin_root, user_root
 
 
 @pytest.fixture(autouse=True)
@@ -132,7 +156,144 @@ class TestSharedRootAndScan:
         assert by_dir == {"alpha": member}
 
 
-# ── watchdog 启动幂等 ────────────────────────────────────
+# ── 双源裁决（BuiltinFirst 版本口径，对齐内核 ADR 2026-09-20）──
+
+
+class TestScanBuiltinFirstAdjudication:
+    """_scan_plugin_dirs 同 id 双源裁决：用户副本 semver 严格大于内置才接管。
+
+    事故锚（2026-10-15 装机审批 502）：用户空间 stale 副本 approval 1.2.2
+    （< 内置 1.2.3）曾被「同 id 用户赢」规则选中 → import 已删模块 → 宿主
+    fail-fast 崩循。裁决语义与内核 loader.rs ``should_replace``（BuiltinFirst）
+    同规：持平或任一侧版本缺失/不可解析 → 内置赢（fail-closed，内置为权威
+    分发物）。两张索引（manifest id / 目录名）必须同规。
+    """
+
+    @pytest.mark.parametrize(
+        ("user_version", "builtin_version", "expected", "case"),
+        [
+            ("1.2.2", "1.2.3", "builtin", "user-lower-incident-shape"),
+            ("1.2.3", "1.2.3", "builtin", "equal"),
+            ("1.2.4", "1.2.3", "user", "user-strictly-newer"),
+            ("1.10.0", "1.9.9", "user", "numeric-not-lexicographic"),
+            ("1.2.4-rc.1", "1.2.4", "builtin", "prerelease-below-release"),
+            ("1.2.4", "1.2.4-rc.1", "user", "release-above-prerelease"),
+            (None, "1.2.3", "builtin", "user-version-missing"),
+            ("not-semver", "1.2.3", "builtin", "user-version-unparseable"),
+            ("1.2.4", None, "builtin", "builtin-version-missing"),
+        ],
+    )
+    def test_adjudication_matrix_both_indexes(
+        self,
+        tmp_path: Path,
+        user_version: str | None,
+        builtin_version: str | None,
+        expected: str,
+        case: str,
+    ) -> None:
+        """版本裁决矩阵：user<builtin→内置；==→内置；>→用户；版本缺失/不可
+        解析 fail-closed 内置。manifest id 与目录名两张索引同规（数字段按数值
+        比较而非字典序；预发布 < 正式版——semver 2.0.0 全序）。"""
+        del case  # 仅作用例标识
+        builtin_root, user_root = _dual_roots(tmp_path)
+        builtin_dir = _write_member(builtin_root, "shared", "approval", "approval_service", builtin_version)
+        user_dir = _write_member(user_root, "approval", "approval", "approval_service", user_version)
+
+        by_manifest, by_dir = host._scan_plugin_dirs([builtin_root, user_root])
+
+        winner = user_dir if expected == "user" else builtin_dir
+        assert by_manifest.get("approval_service") == winner
+        assert by_dir.get("approval") == winner, "目录名索引必须与 manifest id 索引同规"
+
+    def test_multiple_user_sources_take_strictly_newest(self, tmp_path: Path) -> None:
+        """多用户源同 id：逐对归约取版本最高者（严格大于内置的候选里最新），
+        同版本持平保留先发现者（目录名字典序），与内核多源归约语义一致。"""
+        builtin_root, user_root = _dual_roots(tmp_path)
+        _write_member(builtin_root, "shared", "plug", "dup_id", "1.0.0")
+        _write_member(user_root, "a_dir", "plug", "dup_id", "2.0.0")
+        _write_member(user_root, "b_dir", "plug", "dup_id", "1.5.0")
+
+        by_manifest, by_dir = host._scan_plugin_dirs([builtin_root, user_root])
+
+        assert by_manifest["dup_id"] == user_root / "a_dir" / "plug"
+        assert by_dir["plug"] == user_root / "a_dir" / "plug"
+
+    def test_tie_between_user_sources_keeps_first_found(self, tmp_path: Path) -> None:
+        builtin_root, user_root = _dual_roots(tmp_path)
+        _write_member(builtin_root, "shared", "plug", "dup_id", "1.0.0")
+        _write_member(user_root, "a_dir", "plug", "dup_id", "2.0.0")
+        _write_member(user_root, "b_dir", "plug", "dup_id", "2.0.0")
+
+        by_manifest, _ = host._scan_plugin_dirs([builtin_root, user_root])
+
+        assert by_manifest["dup_id"] == user_root / "a_dir" / "plug"
+
+    @pytest.mark.parametrize(
+        ("user_version", "case"),
+        [(None, "missing"), ("garbage version", "unparseable")],
+    )
+    def test_user_version_degradation_warns(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        user_version: str | None,
+        case: str,
+    ) -> None:
+        """用户副本因版本缺失/不可解析落败：fail-closed 内置 + 告警（该分裂
+        形态此前完全静默，2026-10-15 事故链的配套可观测面）。"""
+        del case  # 仅作用例标识
+        builtin_root, user_root = _dual_roots(tmp_path)
+        _write_member(builtin_root, "shared", "approval", "approval_service", "1.2.3")
+        _write_member(user_root, "approval", "approval", "approval_service", user_version)
+
+        with caplog.at_level("WARNING", logger="host"):
+            by_manifest, _ = host._scan_plugin_dirs([builtin_root, user_root])
+
+        assert by_manifest["approval_service"] == builtin_root / "shared" / "approval"
+        assert any("approval_service" in rec.message for rec in caplog.records), (
+            "用户副本版本降级落败必须告警且携带插件 id"
+        )
+
+    def test_no_warning_on_designed_arbitration(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """按设计完成的版本裁决（用户版本可解析但更低/持平）不告警——告警
+        只留给「版本缺失/不可解析」降级形态，避免正常对账刷屏。"""
+        builtin_root, user_root = _dual_roots(tmp_path)
+        _write_member(builtin_root, "shared", "approval", "approval_service", "1.2.3")
+        _write_member(user_root, "approval", "approval", "approval_service", "1.2.2")
+
+        with caplog.at_level("WARNING", logger="host"):
+            host._scan_plugin_dirs([builtin_root, user_root])
+
+        assert not [rec for rec in caplog.records if "approval_service" in rec.message]
+
+
+class TestLoadMembersPicksBuiltinOverStaleUser:
+    """事故形态端到端回归锁：_load_members 全链路（双根发现 → 裁决 → 加载）。
+
+    用户根经环境变量解析（生产路径），内置副本健康、用户副本 import 即炸
+    （复刻 stale 1.2.2 `from kernel_db import ...` 形态）——修复前用户副本被
+    选中加载即 CohostError，修复后加载内置副本成功。"""
+
+    def test_loads_builtin_copy_when_user_copy_is_stale(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        builtin_root, user_root = _dual_roots(tmp_path)
+        healthy = _write_member(builtin_root, "shared", "approval", "approval_service", "1.2.3")
+        stale = _write_member(user_root, "approval", "approval", "approval_service", "1.2.2")
+        (stale / "server.py").write_text(
+            "raise ModuleNotFoundError(\"No module named 'kernel_db'\")\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("AGENTOS_USER_PLUGINS_DIR", str(user_root))
+
+        members, failures = host._load_members(builtin_root, ["approval_service"])
+        assert failures == []
+
+        assert set(members) == {"approval_service"}
+        assert members["approval_service"].name == "approval"
+        assert healthy.is_dir()
+        assert stale.is_dir()
 
 
 class TestWatchdogStartIdempotent:
@@ -253,26 +414,33 @@ class TestExecMemberModuleSpecGuard:
 
 
 class TestMainSuccessPath:
-    def test_main_serves_aggregated_members_and_returns_zero(
+    def test_main_serves_aggregated_members_then_hard_exits_zero(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """服务终局走 _graceful_hard_exit（os._exit(0) 不经解释器收尾），
+        exit code 语义与清理顺序在 test_host_exit_cleanup 另测。"""
         root = tmp_path / "shared"
         _write_member(root, "system", "alpha", "alpha_id")
         served: list[tuple[Any, float]] = []
+        hard_exits: list[int] = []
 
         async def _fake_serve(
             server: CohostServer, stall_secs: float = host._WATCHDOG_STALL_SECS_DEFAULT
         ) -> None:
             served.append((server, stall_secs))
 
+        def _fake_hard_exit() -> None:
+            hard_exits.append(0)
+
         monkeypatch.setattr(host, "_serve", _fake_serve)
+        monkeypatch.setattr(host, "_graceful_hard_exit", _fake_hard_exit)
         monkeypatch.delenv("AGENTOS_HOST_WATCHDOG_SECS", raising=False)
 
-        rc = host.main(
+        host.main(
             ["--group", "light", "--slot", "2", "--members", "alpha_id"], shared_root=root
         )
 
-        assert rc == 0
+        assert hard_exits == [0]
         assert len(served) == 1
         server, stall_secs = served[0]
         assert isinstance(server, CohostServer)

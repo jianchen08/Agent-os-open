@@ -15,6 +15,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePersonaPossessStore } from '@/stores/personaPossessStore'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import { ChatInput } from '../ChatInput'
+import { userScopedKey as pk } from '@/utils/userScopedStorage'
 
 const mocks = vi.hoisted(() => ({
   fetchPipelineStates: vi.fn(),
@@ -80,6 +81,6 @@ describe('ChatInput — 附身指示条', () => {
     })
     expect(screen.queryByTestId('possess-indicator')).not.toBeInTheDocument()
     // 解除即清持久化档（重启后不复活）
-    expect(localStorage.getItem('persona.possessed')).toContain('null')
+    expect(localStorage.getItem(pk('persona.possessed'))).toContain('null')
   })
 })

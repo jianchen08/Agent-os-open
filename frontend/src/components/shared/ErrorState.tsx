@@ -49,7 +49,7 @@ function CenterError({ message, onRetry }: { message: string; onRetry?: () => vo
       {onRetry && (
         <button
           onClick={onRetry}
-          className="hover:bg-accent/50 mt-4 flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm transition-colors"
+          className="hover:bg-muted/50 mt-4 flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm transition-colors"
           aria-label="重试"
         >
           <RefreshCw className="h-3.5 w-3.5" />

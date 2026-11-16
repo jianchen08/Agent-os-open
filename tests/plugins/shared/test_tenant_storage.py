@@ -31,7 +31,7 @@ import pytest
 pytestmark = pytest.mark.unit  # TDD 分层：纯单测，零外部依赖（tests/plugins 强制）
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared" / "system"
+_SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared"
 _TASKS_DIR = _SYSTEM_DIR / "tasks"
 _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
 

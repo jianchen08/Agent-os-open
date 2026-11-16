@@ -19,7 +19,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_LLM_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system" / "llm"
+_LLM_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "llm"
 if str(_LLM_DIR) not in sys.path:
     sys.path.insert(0, str(_LLM_DIR))
 

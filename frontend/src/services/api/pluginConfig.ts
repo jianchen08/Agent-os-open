@@ -157,7 +157,7 @@ export async function getPluginConfigFile(
  *
  * @param pluginId - 插件 id
  * @param fileId - 配置文件 id
- * @param data - 完整文件内容（已掩码 *** 哨兵由后端 B2 合并）
+ * @param data - 完整文件内容（已掩码 **** 哨兵由后端 B2 合并）
  * @param ifMatch - GET 时拿到的 ETag；不匹配时后端返回 409
  * @returns 保存成功后的新 ETag
  * @throws {PluginConfigConflictError} ETag 冲突（409）

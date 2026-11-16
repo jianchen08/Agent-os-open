@@ -16,7 +16,7 @@ import pytest
 pytestmark = pytest.mark.integration
 
 HERE = Path(__file__).parent
-BROWSER_PLUGIN = HERE.parent.parent.parent.parent / "plugins" / "shared" / "tools" / "browser"
+BROWSER_PLUGIN = HERE.parent.parent.parent.parent / "plugins" / "shared" / "browser"
 BRIDGE_DIR = HERE.parent.parent.parent.parent / "mcp-servers" / "mcp-bridge"
 
 sys.path.insert(0, str(BRIDGE_DIR))
@@ -126,8 +126,9 @@ class TestContainerFailureBranches:
             return P()
 
         monkeypatch.setattr(bc.subprocess, "run", fake_exec)
-        monkeypatch.setenv("_CONTAINER_ID", "c-test-1")
-        c = BridgeClient({"upstream": "browser", "timeout_secs": 5}, session_id="s", caller="sandbox")
+        c = BridgeClient(
+            {"upstream": "browser", "timeout_secs": 5}, session_id="s", caller="sandbox", container_id="c-test-1"
+        )
         r = c._send({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         assert not r["ok"]
         assert "容器内 MCP Client 执行失败" in r["body"]["error"]
@@ -146,8 +147,9 @@ class TestContainerFailureBranches:
             return P()
 
         monkeypatch.setattr(bc.subprocess, "run", fake_exec)
-        monkeypatch.setenv("_CONTAINER_ID", "c-test-1")
-        c = BridgeClient({"upstream": "browser", "timeout_secs": 5}, session_id="s", caller="sandbox")
+        c = BridgeClient(
+            {"upstream": "browser", "timeout_secs": 5}, session_id="s", caller="sandbox", container_id="c-test-1"
+        )
         r = c._send({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         assert not r["ok"]
         assert "无输出" in r["body"]["error"]
@@ -166,8 +168,9 @@ class TestContainerFailureBranches:
             return P()
 
         monkeypatch.setattr(bc.subprocess, "run", fake_exec)
-        monkeypatch.setenv("_CONTAINER_ID", "c-test-1")
-        c = BridgeClient({"upstream": "browser", "timeout_secs": 5}, session_id="s", caller="sandbox")
+        c = BridgeClient(
+            {"upstream": "browser", "timeout_secs": 5}, session_id="s", caller="sandbox", container_id="c-test-1"
+        )
         r = c._send({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         assert not r["ok"]
         assert "不可解析" in r["body"]["error"]

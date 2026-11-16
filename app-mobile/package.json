@@ -1,0 +1,29 @@
+{
+  "name": "lingxi-agentos-mobile-shell",
+  "version": "0.2.2",
+  "private": true,
+  "description": "AgentOS Capacitor Android shell (local-first: frontend dist bundled in APK, API base via ShellConfig)",
+  "scripts": {
+    "cap": "cap",
+    "syncweb": "node scripts/syncweb.mjs",
+    "build:sync": "node scripts/build-sync.mjs",
+    "test": "vitest --run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/cli": "^8.5.3",
+    "@capacitor/core": "^8.5.3",
+    "@capacitor/local-notifications": "^8.3.1",
+    "@capacitor/preferences": "^8.0.1",
+    "@capacitor/status-bar": "^8.0.4",
+    "@capawesome-team/capacitor-android-foreground-service": "^8.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "esbuild": "^0.28.0",
+    "jsdom": "^29.1.1",
+    "typescript": "~5.9.3",
+    "vitest": "^4.1.8"
+  }
+}

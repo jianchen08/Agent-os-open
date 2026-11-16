@@ -2,6 +2,13 @@
 Agent OS Frontend Static Server
 用 Python 托管前端静态文件，支持 SPA 路由回退和 API/WebSocket 反向代理
 替代 nginx（因为 Docker Hub 无法拉取 nginx 镜像）
+
+【弃用（0.1 遗留，2026-10-09）】生产反代参考已定稿为 deploy/nginx.conf（静态
+dist + SPA 回退 + /api /ext /ws /media /uploads 同源反代内核）。本文件是 0.1
+编排遗留：BACKEND_URL/BACKEND_WS_URL 默认指 `agent:8000`——0.2 的
+docker-compose.yml 只承载 Redis，`agent` 主机名不可解析；0.2 内核实际监听
+AGENTOS_KERNEL_PORT（缺省 9100）。现仓库唯一消费方是 frontend/Dockerfile
+（0.1 遗留镜像构建路径；0.2 编排已无前端服务）。新部署勿以本文件为反代参考。
 """
 
 import os

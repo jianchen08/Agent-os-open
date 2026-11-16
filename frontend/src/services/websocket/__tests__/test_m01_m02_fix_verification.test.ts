@@ -20,8 +20,14 @@ const mocks = vi.hoisted(() => {
     updatePart: vi.fn(),
     finalizeMessage: vi.fn(),
     stopStreaming: vi.fn(),
+    // run 级收尾快照（eae6e717f：queue_depth>0 = 链尾 drain 未完，不得显示空闲）
+    setRoundQueueDepth: vi.fn(),
+    setStopping: vi.fn(),
     removeMessage: vi.fn(),
     registerPipeline: vi.fn(),
+    // 空轮次 stream_end 分流依据（run 仍在流式 → 占位保留跨轮；已终止 → 移除）：
+    // 缺省 false = 生成态已终止（移除路径用例的默认前提）
+    isStreaming: vi.fn(() => false),
     findStreamingPartIndex: vi.fn(() => -1),
     appendToPart: vi.fn(),
     activePipelineId: null as string | null,
@@ -79,8 +85,11 @@ function resetAllMocks(): void {
   mocks.pipelineMethods.updatePart.mockClear()
   mocks.pipelineMethods.finalizeMessage.mockClear()
   mocks.pipelineMethods.stopStreaming.mockClear()
+  mocks.pipelineMethods.setRoundQueueDepth.mockClear()
+  mocks.pipelineMethods.setStopping.mockClear()
   mocks.pipelineMethods.removeMessage.mockClear()
   mocks.pipelineMethods.registerPipeline.mockClear()
+  mocks.pipelineMethods.isStreaming.mockReturnValue(false)
   mocks.addNotification.mockClear()
   mocks.updateUsage.mockClear()
   mocks.autoRenameSessionIfNeeded.mockClear()
@@ -103,7 +112,7 @@ describe('M-02: handleStreamEnd - 空轮次收尾（逐轮模型）', () => {
     ])
   })
 
-  it('空轮次 stream_end（无 new_message 无内容）→ 静默移除占位，不追加警示卡/不弹通知', () => {
+  it('空轮次 stream_end（生成态已终止）→ 静默移除占位，不追加警示卡/不弹通知', () => {
     handleStreamEnd({
       data: { pipeline_id: 'pipe-001', parts: [], full_content: '' },
       message_id: 'msg-1',
@@ -111,6 +120,20 @@ describe('M-02: handleStreamEnd - 空轮次收尾（逐轮模型）', () => {
     })
 
     expect(mocks.pipelineMethods.removeMessage).toHaveBeenCalledWith('pipe-001', 'msg-1')
+    expect(mocks.pipelineMethods.appendPart).not.toHaveBeenCalled()
+    expect(mocks.addNotification).not.toHaveBeenCalled()
+  })
+
+  it('空轮次 stream_end（run 仍在流式）→ 占位保留跨轮（「思考中」指示不闪没）', () => {
+    mocks.pipelineMethods.isStreaming.mockReturnValue(true)
+
+    handleStreamEnd({
+      data: { pipeline_id: 'pipe-001', parts: [], full_content: '' },
+      message_id: 'msg-1',
+      _threadId: 'thread-1',
+    })
+
+    expect(mocks.pipelineMethods.removeMessage).not.toHaveBeenCalled()
     expect(mocks.pipelineMethods.appendPart).not.toHaveBeenCalled()
     expect(mocks.addNotification).not.toHaveBeenCalled()
   })
@@ -129,17 +152,20 @@ describe('M-02: handleStreamEnd - 空轮次收尾（逐轮模型）', () => {
     expect(mocks.applyStreamStatus).not.toHaveBeenCalled()
   })
 
-  it('run 级收尾（pipeline_round_finished）→ terminatePipeline + 状态落 completed', () => {
+  it('run 级收尾（pipeline_round_finished）→ terminatePipeline + 收尾快照 + 状态落 completed', () => {
     handlePipelineRoundFinished({
       data: { pipeline_id: 'pipe-001', failed: false },
       _threadId: 'thread-1',
     })
 
     expect(mocks.pipelineMethods.stopStreaming).toHaveBeenCalledWith('pipe-001')
+    // 收尾快照（eae6e717f 契约）：空队列深度归零、停止中标记随终止事件清除
+    expect(mocks.pipelineMethods.setRoundQueueDepth).toHaveBeenCalledWith('pipe-001', 0)
+    expect(mocks.pipelineMethods.setStopping).toHaveBeenCalledWith('pipe-001', false)
     expect(mocks.applyStreamStatus).toHaveBeenCalledWith('pipe-001', 'completed')
   })
 
-  it('full_content 为 null（缺失）且消息无内容时同样移除占位', () => {
+  it('full_content 为 null（缺失）且消息无内容时同样移除占位（生成态已终止）', () => {
     handleStreamEnd({
       data: { pipeline_id: 'pipe-001', parts: [] },
       message_id: 'msg-1',

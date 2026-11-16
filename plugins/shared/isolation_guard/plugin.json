@@ -1,0 +1,48 @@
+{
+  "id": "pipeline_isolation_guard",
+  "requires_services": [
+    "packaging",
+    "isolation.create_env"
+  ],
+  "name": "Isolation Guard",
+  "version": "1.0.6",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "host_group": "light",
+  "entry": "python server.py",
+  "invoke_entry": "isolation_guard.execute",
+  "persistent_fields": [
+    "isolation.container_name"
+  ],
+  "config_files": [
+    {
+      "id": "isolation_config",
+      "path": "config/plugins/isolation/isolation_config.yaml",
+      "label": "隔离配置"
+    }
+  ],
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "permissions": {},
+  "priority": 50,
+  "state": {
+    "reads": [
+      "agent_level",
+      "core_type",
+      "execution_context",
+      "plugin_configs",
+      "raw_tool_calls",
+      "task.id",
+      "tool_output_contracts",
+      "workspace",
+      "pre_decided_results"
+    ]
+  }
+}

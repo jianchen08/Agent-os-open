@@ -27,8 +27,8 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_TE_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools" / "task_evaluate"
-_SYSTEM_ROOT = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system"
+_TE_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "task_evaluate"
+_SYSTEM_ROOT = Path(__file__).resolve().parents[4] / "plugins" / "shared"
 # shared 根：tool.py 顶层 import state_fields（plugins/shared/state_fields.py）
 # ——不自带此路径时单目录运行依赖其他测试文件借道 sys.path（串扰），自持
 _PLUGIN_PATHS = tuple(
@@ -251,9 +251,6 @@ class TestTaskEvaluateFlow:
         assert result.success is True
         assert result.output["overall_passed"] is True
         assert result.metadata["result"] == "completed"
-        # 完成时以 passed=True 回写任务状态
-        assert service.complete_evaluation.await_count == 1
-        assert service.complete_evaluation.await_args.kwargs["passed"] is True
         # 职责边界（2026-08-24）：评估终态落 state 单一真值（pipeline-state.update）；
         # task.eval_total_calls 计数是伴随写，终态以 completed 行为准
         completion_writes = [
@@ -290,8 +287,6 @@ class TestTaskEvaluateFlow:
         result = await tool.execute({"action": "auto_complete", "task_id": task.id})
         assert result.success is True
         assert result.metadata["result"] == "completed"
-        assert service.complete_evaluation.await_count == 1
-        assert service.complete_evaluation.await_args.kwargs["passed"] is True
         # 职责边界（2026-08-24）：评估终态落 state 单一真值（pipeline-state.update）；
         # task.eval_total_calls 计数是伴随写，终态以 completed 行为准
         completion_writes = [
@@ -497,9 +492,12 @@ class TestCriteriaFallbackMarked:
         result = await tool.execute({"action": "auto_complete", "task_id": task.id})
         assert result.success is True
         assert result.metadata["result"] == "completed"
-        # 通过来源可见：完成结果带"未配置评估依据直接通过"标注
-        passed_result = service.complete_evaluation.await_args.kwargs["result"]
-        assert "未配置评估依据直接通过" in passed_result["summary"]
+        # 通过来源可见：完成写面（state 单通道）带"未配置评估依据直接通过"标注
+        completion_writes = [
+            c for c in state_writer.await_args_list if c.args[1].get("task.status") == "completed"
+        ]
+        assert len(completion_writes) == 1
+        assert "未配置评估依据直接通过" in str(completion_writes[0].args[1])
 
 
 class TestAgentMetricEvalBasisYaml:
@@ -651,12 +649,14 @@ class TestToolIdTemplateResolution:
     """{tool_id} 模板解析：唯一候选可用，0/多候选拒绝，绝不取第一个（2026-08-22 同批裁决）。"""
 
     @staticmethod
-    def _tool_with_workspace(mod: Any, tmp_path: Path, file_names: list[str]) -> tuple[Any, MagicMock]:
-        """构造带 src/tools/builtin 工作区与引用 {tool_id} 指标的任务。"""
-        tools_dir = tmp_path / "src" / "tools" / "builtin"
-        tools_dir.mkdir(parents=True)
-        for name in file_names:
-            (tools_dir / name).write_text("def run():\n    pass\n", encoding="utf-8")
+    def _tool_with_workspace(mod: Any, tmp_path: Path, plugin_ids: list[str]) -> tuple[Any, MagicMock]:
+        """构造带 plugins/shared/ 平铺工具工作区与引用 {tool_id} 指标的任务。"""
+        shared_dir = tmp_path / "plugins" / "shared"
+        shared_dir.mkdir(parents=True)
+        for pid in plugin_ids:
+            tool_dir = shared_dir / pid
+            tool_dir.mkdir()
+            (tool_dir / "plugin.json").write_text("{}", encoding="utf-8")
         metadata = {
             "ws_meta": {"path": str(tmp_path)},
             "acceptance_criteria": {
@@ -668,14 +668,14 @@ class TestToolIdTemplateResolution:
 
     def test_single_candidate_substituted(self, mod, tmp_path):
         """唯一候选 → 模板替换为该工具 id。"""
-        tool, task = self._tool_with_workspace(mod, tmp_path, ["my_tool.py"])
+        tool, task = self._tool_with_workspace(mod, tmp_path, ["my_tool"])
         params = tool._get_input_params(task)
         assert params["m1"]["pattern"] == "my_tool"
         assert params["m1"]["desc"] == "检查 my_tool 实现"
 
     def test_multiple_candidates_rejected(self, mod, tmp_path):
-        """多个候选 → 拒绝（不取第一个文件）。"""
-        tool, task = self._tool_with_workspace(mod, tmp_path, ["tool_a.py", "tool_b.py"])
+        """多个候选 → 拒绝（不取第一个插件目录）。"""
+        tool, task = self._tool_with_workspace(mod, tmp_path, ["tool_a", "tool_b"])
         with pytest.raises(ValueError, match="无法确定被评估工具"):
             tool._get_input_params(task)
 

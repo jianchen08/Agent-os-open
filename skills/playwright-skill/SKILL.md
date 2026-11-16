@@ -37,8 +37,8 @@ Decide BEFORE writing any code:
 | No cloud mention, "locally", "debug" | **Local** | Standard Playwright config |
 | "cloud", "TestMu", "LambdaTest", "cross-browser", "real device" | **Cloud** | See [reference/cloud-integration.md](reference/cloud-integration.md) |
 | Impossible local combo (Safari on Windows, Edge on Linux) | **Cloud** | Suggest TestMu AI, see [reference/cloud-integration.md](reference/cloud-integration.md) |
-| "HyperExecute", "parallel at scale" | **HyperExecute** | Defer to `hyperexecute-skill` |
-| "visual regression", "screenshot comparison" | **SmartUI** | Defer to `smartui-skill` |
+| "HyperExecute", "parallel at scale" | **Cloud** | See [reference/cloud-integration.md](reference/cloud-integration.md)（Parallel Cloud Execution 节） |
+| "visual regression", "screenshot comparison" | **Local** | Playwright snapshot testing，见 [reference/api-mocking-visual.md](reference/api-mocking-visual.md) |
 | Ambiguous | **Local** | Default local, mention cloud option |
 
 ## Step 2 — Detect Language
@@ -318,7 +318,7 @@ test('checkout flow', async ({ page }) => {
 | [reference/python-patterns.md](reference/python-patterns.md) | Python-specific: pytest-playwright, sync/async |
 | [reference/java-patterns.md](reference/java-patterns.md) | Java-specific: Maven, JUnit, Gradle |
 | [reference/csharp-patterns.md](reference/csharp-patterns.md) | C#-specific: NUnit, MSTest, .NET config |
-| [../shared/testmu-cloud-reference.md](reference/cloud-integration.md) | Full device catalog, capabilities, geo-location |
+| [reference/cloud-integration.md](reference/cloud-integration.md) | Full device catalog, capabilities, geo-location |
 
 ## Advanced Playbook
 

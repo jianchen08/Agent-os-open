@@ -4,8 +4,8 @@
  * PipelineManagerWidget 四态契约测试（OBS-R258-1 components 试点）
  *
  * 面板为多源聚合查询面（runs/states/全量任务/项目登记），四态口径按面拆分：
- * - 主列表面：首载中（主源 pending 且尚无条目）显示加载态，不渲染
- *   「暂无管道运行记录」空态伪装；加载完成无数据才落空态
+ * - 主列表面：首载中（主源 pending 且尚无条目）显示加载态，不渲染空态伪装；
+ *   加载完成条目为空（含筛选后为空）落「无匹配结果」空态
  * - 项目登记副面：拉取失败降级为留痕横幅 + 手动重试（登记行只是分组/归局
  *   面，不阻断任务列表），不伪装成「无项目」
  */
@@ -36,6 +36,9 @@ vi.mock('@/hooks/queries/useAllTasksQuery', () => ({
 }))
 vi.mock('@/hooks/queries/useSessionsQuery', () => ({
   useSessionsQuery: seed.mockUseSessions,
+}))
+vi.mock('@/hooks/queries/useAgentsQuery', () => ({
+  useAgentsQuery: () => ({ data: [] }),
 }))
 vi.mock('@/hooks/queries/useProjectsQuery', () => ({
   useProjectsQuery: seed.mockUseProjects,
@@ -77,15 +80,15 @@ describe('PipelineManagerWidget 四态契约（OBS-R258-1）', () => {
     renderWithProviders(<PipelineManagerWidget />)
 
     expect(screen.getByText('加载中...')).toBeInTheDocument()
-    expect(screen.queryByText('暂无管道运行记录')).not.toBeInTheDocument()
+    expect(screen.queryByText('无匹配结果（试试清除筛选或关键词）')).not.toBeInTheDocument()
   })
 
-  it('加载完成无数据：落「暂无管道运行记录」空态（加载门不遮蔽真空态）', () => {
+  it('加载完成无数据：落「无匹配结果」空态（加载门不遮蔽真空态）', () => {
     seedMainQueriesReady()
     seed.mockUseProjects.mockReturnValue(qReady({ items: [] }))
     renderWithProviders(<PipelineManagerWidget />)
 
-    expect(screen.getByText('暂无管道运行记录')).toBeInTheDocument()
+    expect(screen.getByText('无匹配结果（试试清除筛选或关键词）')).toBeInTheDocument()
     expect(screen.queryByText('加载中...')).not.toBeInTheDocument()
   })
 

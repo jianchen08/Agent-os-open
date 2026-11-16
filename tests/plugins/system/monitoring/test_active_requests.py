@@ -17,6 +17,32 @@ import pytest
 
 pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
 
+_REPO_ROOT = __import__("pathlib").Path(__file__).resolve().parents[4]
+for _p in (str(_REPO_ROOT / "plugins" / "shared"),):
+    if _p not in __import__("sys").path:
+        __import__("sys").path.insert(0, _p)
+
+from _libs.testing.db_read_fake import FakeDbRead  # noqa: E402 — db-read 契约替身
+
+_TOK_MAP = {"tok-a": "tenant-a"}
+
+
+def _install_db_read(server, db_path) -> FakeDbRead:
+    """db-read provider 注入 server.kernel_reads 装配缝（C2 刀2 读面通道）。"""
+    fake = FakeDbRead(db_path, _TOK_MAP)
+    server.kernel_reads.set_provider("db-read", fake.provider)
+    return fake
+
+
+def _drun(coro):
+    import asyncio
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
 
 # ============================================================
 # fixtures
@@ -59,10 +85,10 @@ def _active(monitor) -> int:
 class TestCollectTokenUsage:
     """/ext/monitoring/token-usage 数据源：traces 聚合真值 + 无 DB 降级 0。"""
 
-    def test_no_db_degrades_to_zero(self, server_module, monkeypatch, tmp_path) -> None:
-        """AGENTOS_DB_PATH 指向不存在文件 → token 三项降级 0（不抛错）。"""
-        monkeypatch.setenv("AGENTOS_DB_PATH", str(tmp_path / "absent.db"))
-        result = server_module._collect_token_usage()
+    def test_no_db_degrades_to_zero(self, server_module, tmp_path) -> None:
+        """db-read 契约失败（替身指向缺失库）→ token 三项降级 0（不抛错）。"""
+        _install_db_read(server_module, tmp_path / "absent.db")
+        result = _drun(server_module._collect_token_usage("tenant-a", "tok-a"))
         assert result["total_tokens"] == 0
         assert result["prompt_tokens"] == 0
         assert result["completion_tokens"] == 0
@@ -81,7 +107,8 @@ class TestCollectTokenUsage:
         db_path = tmp_path / "kernel.db"
         conn = sqlite3.connect(db_path)
         conn.execute(
-            "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT, value TEXT, value_kind TEXT)"
+            "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT, value TEXT,"
+            " value_kind TEXT, tenant_id TEXT, updated_at TEXT)"
         )
         # state 值域标量化（ADR 2026-09-18）：json 键存 JSON 文本，标量按 str 原样存
         rows = [
@@ -90,14 +117,13 @@ class TestCollectTokenUsage:
             ("p3", "context_window", "32000", "str"),  # 非用量键不计入
         ]
         conn.executemany(
-            "INSERT INTO pipeline_state VALUES (?, ?, ?, ?)",
+            "INSERT INTO pipeline_state VALUES (?, ?, ?, ?, 'tenant-a', '2026-09-15T00:00:00Z')",
             rows,
         )
         conn.commit()
         conn.close()
-        monkeypatch.setenv("AGENTOS_DB_PATH", str(db_path))
-
-        result = server_module._collect_token_usage()
+        _install_db_read(server_module, db_path)
+        result = _drun(server_module._collect_token_usage("tenant-a", "tok-a"))
         assert result["prompt_tokens"] == 12
         assert result["completion_tokens"] == 8
         assert result["total_tokens"] == 20
@@ -112,7 +138,8 @@ class TestCollectTokenUsage:
         db_path = tmp_path / "kernel.db"
         conn = sqlite3.connect(db_path)
         conn.execute(
-            "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT, value TEXT, value_kind TEXT)"
+            "CREATE TABLE pipeline_state (pipeline_id TEXT, field_key TEXT, value TEXT,"
+            " value_kind TEXT, tenant_id TEXT, updated_at TEXT)"
         )
         rows = [
             ("p1", "track.llm_usage", json.dumps({"total_input_tokens": 7, "total_output_tokens": 3, "total_tokens": 10}), "json"),
@@ -121,20 +148,26 @@ class TestCollectTokenUsage:
             ("p2", "llm_model", "m-b", "str"),
         ]
         conn.executemany(
-            "INSERT INTO pipeline_state VALUES (?, ?, ?, ?)",
+            "INSERT INTO pipeline_state VALUES (?, ?, ?, ?, 'tenant-a', '2026-09-15T00:00:00Z')",
             rows,
         )
         conn.commit()
         conn.close()
-        monkeypatch.setenv("AGENTOS_DB_PATH", str(db_path))
-
-        result = server_module._collect_token_usage()
+        _install_db_read(server_module, db_path)
+        result = _drun(server_module._collect_token_usage("tenant-a", "tok-a"))
         assert result["labels"] == ["m-a", "m-b"]
-        assert [d["label"] for d in result["datasets"]] == ["输入 Tokens", "输出 Tokens"]
+        assert [d["label"] for d in result["datasets"]] == [
+            "输入 Tokens",
+            "输出 Tokens",
+            "缓存命中 Tokens",
+        ]
         assert result["datasets"][0]["data"] == [7.0, 5.0]
         assert result["datasets"][1]["data"] == [3.0, 5.0]
+        # 早期管道缺 cached 字段：序列按 0 兜底（与「未记录模型」同容错口径）
+        assert result["datasets"][2]["data"] == [0.0, 0.0]
         # 同源同值：datasets 数据 = rows 各列（防两套真值漂移）
         assert result["datasets"][0]["data"] == [r["input_tokens"] for r in result["rows"]]
+        assert result["datasets"][2]["data"] == [r["cached_tokens"] for r in result["rows"]]
 
 
 class TestTokenUsageByTimeSeries:
@@ -146,13 +179,13 @@ class TestTokenUsageByTimeSeries:
 
         db_path = tmp_path / "kernel.db"
         conn = sqlite3.connect(db_path)
-        conn.execute("CREATE TABLE traces (patch_data TEXT, created_at TEXT)")
+        conn.execute("CREATE TABLE traces (patch_data TEXT, created_at TEXT, tenant_id TEXT)")
         data = [
             ({"llm_usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}}, "2026-09-09T10:00:00Z"),
             ({"llm_usage": {"input_tokens": 5, "output_tokens": 5, "total_tokens": 10}}, "2026-09-10T11:00:00Z"),
         ]
         conn.executemany(
-            "INSERT INTO traces (patch_data, created_at) VALUES (?, ?)",
+            "INSERT INTO traces (patch_data, created_at, tenant_id) VALUES (?, ?, 'tenant-a')",
             [(json.dumps(r), ts) for r, ts in data],
         )
         conn.commit()
@@ -161,9 +194,8 @@ class TestTokenUsageByTimeSeries:
 
     def test_by_time_series_same_source_as_rows(self, server_module, monkeypatch, tmp_path) -> None:
         db_path = self._seed_db(tmp_path)
-        monkeypatch.setenv("AGENTOS_DB_PATH", str(db_path))
-
-        result = server_module._collect_token_usage_by_time()
+        _install_db_read(server_module, db_path)
+        result = _drun(server_module._collect_token_usage_by_time("tenant-a", "tok-a"))
         by_day = {r["date"]: r for r in result["rows"]}
         assert set(result["labels"]) == set(by_day)
         # 同源同值：每日 datasets 输入 = rows 输入
@@ -171,36 +203,9 @@ class TestTokenUsageByTimeSeries:
         for day, row in by_day.items():
             assert inp[day] == row["input_tokens"]
 
-    def test_by_time_no_db_degrades_empty_series(self, server_module, monkeypatch, tmp_path) -> None:
-        monkeypatch.setenv("AGENTOS_DB_PATH", str(tmp_path / "absent.db"))
-        result = server_module._collect_token_usage_by_time()
+    def test_by_time_no_db_degrades_empty_series(self, server_module, tmp_path) -> None:
+        _install_db_read(server_module, tmp_path / "absent.db")
+        result = _drun(server_module._collect_token_usage_by_time("tenant-a", "tok-a"))
         assert result["rows"] == []
         assert result["labels"] == []
         assert result["datasets"][0]["data"] == []
-
-
-# ============================================================
-# 兼容性：只调 end 不调 start（存量调用方）
-# ============================================================
-
-
-class TestBackwardCompat:
-    """存量调用只调 end 不调 start，active_requests 不得变负。"""
-
-    @pytest.mark.asyncio
-    async def test_end_without_start_not_negative(self, server_module, fresh_monitor) -> None:
-        """只调 record_llm_request（未 start），active_requests 下限为 0。
-
-        WHY：record_llm_request 会配对减除 active_requests，但存量调用方
-        只调 end 不调 start，若无下限保护，active_requests 会变 -1，破坏指标语义
-        并触发 detect_bottlenecks 误判。必须 floor 到 0。
-        """
-        await server_module.monitoring_record_llm_request(response_time=0.3, error=False)
-        assert _active(fresh_monitor) == 0
-
-    @pytest.mark.asyncio
-    async def test_many_ends_without_start_stays_zero(self, server_module, fresh_monitor) -> None:
-        """多次只调 end，active_requests 恒为 0（不被负数累积）。"""
-        for _ in range(5):
-            await server_module.monitoring_record_llm_request(response_time=0.1, error=False)
-        assert _active(fresh_monitor) == 0

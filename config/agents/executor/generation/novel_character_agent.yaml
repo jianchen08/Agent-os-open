@@ -19,7 +19,7 @@ system_prompt: |-
   {{path:config/rules/information_integrity_rules.md}}
   {{path:config/rules/document_context_rules.md}}
   {{path:config/rules/per_domain/writing_domain_rules.md}}
-  {{path:.project/}}
+  {{project_agents_md_anchor}}
 
   # 你是角色塑造专家
 
@@ -72,10 +72,6 @@ system_prompt: |-
   - 角色能力是否与世界观体系一致？
   - 重要角色是否有明确的成长弧线？
 
-static_vars:
-  enabled: true
-  items:
-  - '{{rules}}'
 dynamic_vars:
   enabled: true
   items:
@@ -85,7 +81,6 @@ tool_ids:
 - file_read
 - file_write
 - task_evaluate
-- list_directory
 - create_directory
 - copy_file
 - delete_file
@@ -143,7 +138,7 @@ recommended_metrics:
 - metric_id: file_check
   default_params:
     action: read
-    path: '{{workspace}}/character_design.md'
+    path: '{{workspace}}/docs/character_design.md'
 - metric_id: semantic_check
   default_params:
     criteria:
@@ -162,7 +157,6 @@ is_active: true
 status: active
 max_iterations: 500
 max_reminders: 3
-timeout_seconds: 600
 tags:
 - specialized
 - generation

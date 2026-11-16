@@ -28,6 +28,19 @@ export function getModePanelTarget(mode: string): PageDeclaration | undefined {
     .find((p) => p.slot === 'tab' && p.mode === mode)
 }
 
+/**
+ * 自动弹出通道的候选解析（autoOpenModePanel 专用）：同 mode 多页声明时在
+ * 「愿意自动弹」的候选（未声明 autoOpen:false）里按 order 取最小者；全员选退
+ * = 该模式的自动弹出整体关闭。显式通道（openModeSession 点名出生 / 导航直达）
+ * 不过滤，仍走 getModePanelTarget——选退只约束自动通道，不剥夺显式入口。
+ */
+export function getModeAutoOpenTarget(mode: string): PageDeclaration | undefined {
+  if (!mode) return undefined
+  return contributionRegistry
+    .getPagesBySpace('workspace')
+    .find((p) => p.slot === 'tab' && p.mode === mode && p.autoOpen !== false)
+}
+
 /** registry 内按 mode 键取声明（缺席 = undefined） */
 export function modeDeclarationOf(
   mode: string,

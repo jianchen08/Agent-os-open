@@ -1,9 +1,9 @@
 /**
  * 文档库分区（记忆页两分区之一）
  *
- * 分类列表 + 标签云 + 统计卡 + 上传区 + 条目列表。query 化数据
- * （useKnowledgeBaseQuery 缓存 SWR，重挂零请求）；upload/delete/分类变更后
- * invalidateKnowledgeBaseCache 整体失效。
+ * 标签云 + 统计卡 + 上传区 + 条目列表（平铺，条目以标签 chip 展示）。
+ * query 化数据（useKnowledgeBaseQuery 缓存 SWR，重挂零请求）；
+ * upload/delete 后 invalidateKnowledgeBaseCache 整体失效。
  */
 
 import { useState, useRef } from 'react'
@@ -11,10 +11,7 @@ import {
   BookOpen,
   Upload,
   Trash2,
-  FolderPlus,
-  X,
   Tag,
-  Folder,
   FileText,
 } from '@/assets/icons'
 import { EmptyState } from '@/components/shared/EmptyState'
@@ -37,26 +34,17 @@ export function KnowledgeBaseContent() {
     ok: boolean
   } | null>(null)
 
-  const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
-
   const [isUploading, setIsUploading] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const [showCategoryModal, setShowCategoryModal] = useState(false)
-  const [newCategoryName, setNewCategoryName] = useState('')
-  const [isCreatingCategory, setIsCreatingCategory] = useState(false)
-
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
-
-  const [confirmDeleteCategory, setConfirmDeleteCategory] = useState<string | null>(null)
 
   // 全部数据（query 化）：staleTime 窗口内重挂零请求；写操作后 invalidate
   const kbQuery = useKnowledgeBaseQuery()
   const items = kbQuery.data?.items ?? []
   const stats = kbQuery.data?.stats ?? null
-  const categories = kbQuery.data?.categories ?? []
   const tags = kbQuery.data?.tags ?? []
   // 无缓存数据时显示 loading（有缓存先渲染缓存不闪 loading）
   const isLoading = kbQuery.isPending && !kbQuery.data
@@ -144,130 +132,13 @@ export function KnowledgeBaseContent() {
     }
   }
 
-  /**
-   * 创建分类
-   */
-  const handleCreateCategory = async () => {
-    if (!newCategoryName.trim()) return
-    setIsCreatingCategory(true)
-    setActionMessage(null)
-    try {
-      await apiClient.post(API_ENDPOINTS.KNOWLEDGE_BASE.CREATE_CATEGORY, {
-        name: newCategoryName.trim(),
-      })
-      setActionMessage({ text: `分类 "${newCategoryName.trim()}" 创建成功`, ok: true })
-      setNewCategoryName('')
-      setShowCategoryModal(false)
-      invalidateKnowledgeBaseCache()
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : '创建分类失败'
-      setActionMessage({ text: message, ok: false })
-    } finally {
-      setIsCreatingCategory(false)
-    }
-  }
-
-  /**
-   * 删除分类
-   *
-   * Args:
-   *   name: 分类名称
-   */
-  const handleDeleteCategory = async (name: string) => {
-    setActionMessage(null)
-    try {
-      await apiClient.delete(API_ENDPOINTS.KNOWLEDGE_BASE.DELETE_CATEGORY(name))
-      setActionMessage({ text: `分类 "${name}" 已删除`, ok: true })
-      setConfirmDeleteCategory(null)
-      if (selectedCategory === name) {
-        setSelectedCategory(null)
-      }
-      invalidateKnowledgeBaseCache()
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : '删除分类失败'
-      setActionMessage({ text: message, ok: false })
-    }
-  }
-
-  /** 根据分类筛选后的条目 */
-  const filteredItems = selectedCategory
-    ? items.filter((item) => item.categories?.includes(selectedCategory))
-    : items
-
   return (
     <>
       <div className="flex h-full min-h-0 overflow-hidden">
-        {/* 左侧：分类列表 */}
+        {/* 左侧：标签云 */}
         <aside className="w-56 shrink-0 space-y-2 overflow-y-auto border-r p-4">
-          <div className="flex items-center justify-between">
-            <span className="text-muted-foreground text-xs font-medium">分类</span>
-            <button
-              onClick={() => setShowCategoryModal(true)}
-              className="text-muted-foreground hover:text-foreground"
-              title="新建分类"
-            >
-              <FolderPlus className="h-3.5 w-3.5" />
-            </button>
-          </div>
-
-          <button
-            onClick={() => setSelectedCategory(null)}
-            className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors ${
-              selectedCategory === null
-                ? 'bg-primary/10 text-primary'
-                : 'hover:bg-accent/30'
-            }`}
-          >
-            <Folder className="h-3.5 w-3.5" />
-            全部
-          </button>
-
-          {categories.map((cat) => (
-            <div key={cat.name} className="group flex items-center">
-              <button
-                onClick={() => setSelectedCategory(cat.name)}
-                className={`flex flex-1 items-center gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors ${
-                  selectedCategory === cat.name
-                    ? 'bg-primary/10 text-primary'
-                    : 'hover:bg-accent/30'
-                }`}
-              >
-                <Folder className="h-3.5 w-3.5 shrink-0" />
-                <span className="flex-1 truncate">{cat.name}</span>
-                {cat.count !== undefined && (
-                  <span className="text-muted-foreground text-xs">{cat.count}</span>
-                )}
-              </button>
-              {confirmDeleteCategory === cat.name ? (
-                <div className="flex items-center gap-0.5">
-                  <button
-                    onClick={() => handleDeleteCategory(cat.name)}
-                    className="text-destructive text-xs"
-                  >
-                    ✓
-                  </button>
-                  <button
-                    onClick={() => setConfirmDeleteCategory(null)}
-                    className="text-muted-foreground text-xs"
-                  >
-                    ✕
-                  </button>
-                </div>
-              ) : (
-                <button
-                  onClick={() => setConfirmDeleteCategory(cat.name)}
-                  className="text-muted-foreground hover:text-destructive block md:hidden md:group-hover:block p-0.5"
-                  title="删除分类"
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              )}
-            </div>
-          ))}
-
-          {/* 标签云 */}
           {tags.length > 0 && (
-            <div className="mt-4">
+            <div>
               <span className="text-muted-foreground flex items-center gap-1 text-xs font-medium">
                 <Tag className="h-3 w-3" />
                 标签
@@ -293,20 +164,13 @@ export function KnowledgeBaseContent() {
 
           {/* 统计卡片 */}
           {stats && (
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-2 gap-4">
               <div className="rounded-lg border p-4">
                 <div className="text-muted-foreground mb-1 flex items-center gap-1.5 text-xs">
                   <FileText className="h-3.5 w-3.5" />
                   总条目
                 </div>
                 <div className="text-xl font-semibold">{stats.total}</div>
-              </div>
-              <div className="rounded-lg border p-4">
-                <div className="text-muted-foreground mb-1 flex items-center gap-1.5 text-xs">
-                  <Folder className="h-3.5 w-3.5" />
-                  分类数
-                </div>
-                <div className="text-xl font-semibold">{stats.categories_count}</div>
               </div>
               <div className="rounded-lg border p-4">
                 <div className="text-muted-foreground mb-1 flex items-center gap-1.5 text-xs">
@@ -379,18 +243,18 @@ export function KnowledgeBaseContent() {
           {isLoading && <LoadingState />}
 
           {/* 空状态 */}
-          {!isLoading && !error && filteredItems.length === 0 && (
+          {!isLoading && !error && items.length === 0 && (
             <EmptyState
               icon={BookOpen}
-              title={selectedCategory ? `"${selectedCategory}" 分类下暂无条目` : '知识库暂无条目'}
+              title="知识库暂无条目"
               description="上方拖拽文件或点击上传按钮添加知识库内容"
             />
           )}
 
           {/* 知识库条目列表 */}
-          {!isLoading && !error && filteredItems.length > 0 && (
+          {!isLoading && !error && items.length > 0 && (
             <div className="space-y-3" aria-live="polite" aria-label="知识库列表">
-              {filteredItems.map((item) => (
+              {items.map((item) => (
                 <div key={item.id} className="rounded-lg border p-4">
                   <div className="mb-2 flex items-start justify-between">
                     <div className="flex items-center gap-2">
@@ -412,7 +276,7 @@ export function KnowledgeBaseContent() {
                           </button>
                           <button
                             onClick={() => setConfirmDeleteId(null)}
-                            className="hover:bg-accent/50 rounded px-2 py-0.5 text-xs"
+                            className="hover:bg-muted/50 rounded px-2 py-0.5 text-xs"
                           >
                             取消
                           </button>
@@ -430,18 +294,6 @@ export function KnowledgeBaseContent() {
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2 text-xs">
-                    {item.categories && item.categories.length > 0 && (
-                      <div className="flex gap-1">
-                        {item.categories.map((cat) => (
-                          <span
-                            key={cat}
-                            className="bg-accent/30 text-muted-foreground rounded px-1.5 py-0.5"
-                          >
-                            {cat}
-                          </span>
-                        ))}
-                      </div>
-                    )}
                     {item.tags && item.tags.length > 0 && (
                       <div className="flex gap-1">
                         {item.tags.map((tag) => (
@@ -466,51 +318,6 @@ export function KnowledgeBaseContent() {
           )}
         </div>
       </div>
-
-      {/* 创建分类模态框 */}
-      {showCategoryModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--overlay-bg)]">
-          <div className="bg-background w-full max-w-sm rounded-lg border p-6 shadow-lg">
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-base font-semibold">新建分类</h2>
-              <button
-                onClick={() => setShowCategoryModal(false)}
-                className="text-muted-foreground hover:text-foreground"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            <div className="space-y-4">
-              <div>
-                <label className="text-muted-foreground mb-1 block text-xs">分类名称</label>
-                <input
-                  type="text"
-                  value={newCategoryName}
-                  onChange={(e) => setNewCategoryName(e.target.value)}
-                  placeholder="输入分类名称"
-                  onKeyDown={(e) => e.key === 'Enter' && handleCreateCategory()}
-                  className="bg-background focus:ring-primary w-full rounded-lg border px-3 py-2 text-sm focus:ring-1 focus:outline-none"
-                />
-              </div>
-              <div className="flex justify-end gap-2">
-                <button
-                  onClick={() => setShowCategoryModal(false)}
-                  className="hover:bg-accent/50 rounded-lg border px-4 py-2 text-sm"
-                >
-                  取消
-                </button>
-                <button
-                  onClick={handleCreateCategory}
-                  disabled={isCreatingCategory || !newCategoryName.trim()}
-                  className="bg-primary text-primary-foreground rounded-lg px-4 py-2 text-sm hover:opacity-90 disabled:opacity-50"
-                >
-                  {isCreatingCategory ? '创建中...' : '创建'}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </>
   )
 }

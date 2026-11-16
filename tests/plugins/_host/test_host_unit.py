@@ -232,7 +232,7 @@ class TestMemberRoots:
     def test_member_in_arbitrary_domain_resolves(self, make_member) -> None:
         """出厂根任意域（modes/）下的成员可定位并加载（域不设白名单）。"""
         member_dir = make_member("modes", "mode_research", "mode_research")
-        members = host._load_members(member_dir.parents[1], ["mode_research"])
+        members, _ = host._load_members(member_dir.parents[1], ["mode_research"])
         assert set(members) == {"mode_research"}
         assert members["mode_research"].name == "mode_research"
 
@@ -241,17 +241,38 @@ class TestMemberRoots:
     ) -> None:
         """用户插件根独有成员可定位（用户空间是内核发现面的一半）。"""
         user_member = make_user_member("modes", "mode_solo", "mode_solo")
-        assert host._load_members(shared_tree, ["mode_solo"])["mode_solo"].name == "mode_solo"
+        members, _ = host._load_members(shared_tree, ["mode_solo"])
+        assert members["mode_solo"].name == "mode_solo"
         assert user_member.is_dir()
 
     def test_user_copy_wins_over_factory_copy(
         self, shared_tree: Path, make_member, make_user_member
     ) -> None:
-        """同 id 双根 → 用户副本优先（镜像内核「同 id 用户赢」，不静默跑出厂旧码）。"""
-        make_member("modes", "mode_research", "mode_research", member_name="factory_copy")
-        make_user_member("modes", "mode_research", "mode_research", member_name="user_copy")
-        members = host._load_members(shared_tree, ["mode_research"])
+        """同 id 双根 → 用户副本严格更大版本接管（BuiltinFirst，ADR 2026-09-20；
+        持平/缺失/不可解析内置赢——不静默跑出厂旧码的前提是用户侧已发新版）。"""
+        make_member(
+            "modes", "mode_research", "mode_research",
+            member_name="factory_copy", version="1.0.0",
+        )
+        make_user_member(
+            "modes", "mode_research", "mode_research",
+            member_name="user_copy", version="1.1.0",
+        )
+        members, _ = host._load_members(shared_tree, ["mode_research"])
         assert members["mode_research"].name == "user_copy"
+
+    def test_equal_version_factory_copy_wins(self, shared_tree: Path, make_member, make_user_member) -> None:
+        """防拟合对照：用户版本持平内置 → 内置副本接管（BuiltinFirst 严格大于才换）。"""
+        make_member(
+            "modes", "mode_research", "mode_research",
+            member_name="factory_copy", version="1.0.0",
+        )
+        make_user_member(
+            "modes", "mode_research", "mode_research",
+            member_name="user_copy", version="1.0.0",
+        )
+        members, _ = host._load_members(shared_tree, ["mode_research"])
+        assert members["mode_research"].name == "factory_copy"
 
     def test_factory_copy_fallback_when_user_root_lacks_member(
         self, shared_tree: Path, make_member, user_plugins_tree: Path, monkeypatch: pytest.MonkeyPatch
@@ -259,7 +280,7 @@ class TestMemberRoots:
         """用户根无该成员（或不存在）→ 回落出厂副本（双根兜底，不 fail-fast）。"""
         make_member("modes", "mode_research", "mode_research", member_name="factory_copy")
         monkeypatch.setenv("AGENTOS_USER_PLUGINS_DIR", str(user_plugins_tree / "absent"))
-        members = host._load_members(shared_tree, ["mode_research"])
+        members, _ = host._load_members(shared_tree, ["mode_research"])
         assert members["mode_research"].name == "factory_copy"
 
     def test_user_layer_unresolvable_degrades_to_factory_only(
@@ -268,7 +289,7 @@ class TestMemberRoots:
         """用户层解析失败（user_space 不可用）→ 仅出厂根，不抛出、不阻断宿主。"""
         make_member("modes", "mode_research", "mode_research")
         monkeypatch.setitem(sys.modules, "user_space", types.ModuleType("user_space"))
-        members = host._load_members(shared_tree, ["mode_research"])
+        members, _ = host._load_members(shared_tree, ["mode_research"])
         assert set(members) == {"mode_research"}
 
     def test_shared_root_promoted_into_sys_path(self, shared_tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -283,38 +304,88 @@ class TestMemberRoots:
 # ── 成员加载与 fail-fast ─────────────────────────────────
 
 
-class TestMemberLoadFailFast:
-    """成员加载 fail-fast：任一成员失败 → main 退出码 1 + 明确错误。"""
+class TestMemberLoadIsolation:
+    """成员加载隔离：单成员失败跳过并 [cohost][member-offline] 上报，不拖垮整组。
 
-    def test_unknown_member_fail_fast(self, shared_tree: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = host.main(
-            ["--group", "light", "--slot", "1", "--members", "alpha_id,ghost"],
-            shared_root=shared_tree,
-        )
-        assert rc == 1
-        assert "ghost" in capsys.readouterr().err
+    仅整组级错误（成员表空/重复、全部成员失败）保持 fail-fast 退出 1——
+    无任何可服务成员的宿主进程没有存在意义（ADR 2026-10-17-cohost-member-fail-soft）。
+    """
 
-    def test_broken_member_fail_fast(self, make_member, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_unknown_member_skipped_others_load(self, shared_tree: Path) -> None:
+        members, failures = host._load_members(shared_tree, ["alpha_id", "ghost"])
+        assert set(members) == {"alpha_id"}
+        assert [(f.plugin_id, f.stage) for f in failures] == [("ghost", "not_found")]
+
+    def test_broken_member_skipped_others_serve(
+        self,
+        make_member,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
         broken_dir = make_member("system", "broken", "broken_id")
-        (broken_dir / "server.py").write_text("raise ImportError('broken on purpose')\n", encoding="utf-8")
+        (broken_dir / "server.py").write_text(
+            "raise ImportError('broken on purpose')", encoding="utf-8"
+        )
+        make_member("system", "healthy", "healthy_id")
+        served: list[CohostServer] = []
+
+        async def _fake_serve(server: CohostServer, stall_secs: float) -> None:
+            served.append(server)
+
+        monkeypatch.setattr(host, "_serve", _fake_serve)
+        monkeypatch.setattr(host, "_graceful_hard_exit", lambda: None)
+
+        host.main(
+            ["--group", "light", "--slot", "1", "--members", "broken_id,healthy_id"],
+            shared_root=broken_dir.parents[1],
+        )
+
+        assert len(served) == 1
+        # 坏成员的工具不进聚合面，好成员工具照常
+        assert served[0].tool_names == [
+            "healthy_id.echo",
+            "healthy_id.last_lifecycle",
+        ]
+        err = capsys.readouterr().err
+        assert "[cohost][member-offline]" in err
+        assert "plugin=broken_id" in err
+        assert "stage=load" in err
+        assert "ImportError" in err
+        assert "offline=1" in err
+
+    def test_all_members_failed_fail_fast(
+        self, make_member, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        broken_dir = make_member("system", "broken", "broken_id")
+        (broken_dir / "server.py").write_text(
+            "raise ImportError('broken on purpose')", encoding="utf-8"
+        )
         rc = host.main(
             ["--group", "light", "--slot", "1", "--members", "broken_id"],
             shared_root=broken_dir.parents[1],
         )
         assert rc == 1
-        assert "broken_id" in capsys.readouterr().err
+        assert "全部成员加载失败" in capsys.readouterr().err
+
+    def test_unknown_only_fail_fast(self, shared_tree: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = host.main(
+            ["--group", "light", "--slot", "1", "--members", "ghost"],
+            shared_root=shared_tree,
+        )
+        assert rc == 1
+        assert "全部成员加载失败" in capsys.readouterr().err
 
     def test_member_without_plugin_object_fail_fast(
         self, make_member, capsys: pytest.CaptureFixture[str]
     ) -> None:
         no_plugin_dir = make_member("system", "emptyish", "emptyish_id")
-        (no_plugin_dir / "server.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (no_plugin_dir / "server.py").write_text("VALUE = 1", encoding="utf-8")
         rc = host.main(
             ["--group", "light", "--slot", "1", "--members", "emptyish_id"],
             shared_root=no_plugin_dir.parents[1],
         )
         assert rc == 1
-        assert "emptyish_id" in capsys.readouterr().err
+        assert "全部成员加载失败" in capsys.readouterr().err
 
     def test_empty_members_fail_fast(self, shared_tree: Path, capsys: pytest.CaptureFixture[str]) -> None:
         rc = host.main(["--group", "light", "--slot", "1", "--members", ","], shared_root=shared_tree)
@@ -334,7 +405,7 @@ class TestMemberLoading:
     """多成员同进程加载：平铺裸名隔离 + 聚合命名空间。"""
 
     def test_members_load_independently_with_namespaced_tools(self, shared_tree: Path) -> None:
-        members = host._load_members(shared_tree, ["alpha_id", "beta_id", "gamma_id"])
+        members, _ = host._load_members(shared_tree, ["alpha_id", "beta_id", "gamma_id"])
         # 各成员持有独立 AgentOSPlugin 实例（进程内多实例）
         assert set(members) == {"alpha_id", "beta_id", "gamma_id"}
         assert len({id(m) for m in members.values()}) == 3

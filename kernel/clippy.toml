@@ -1,0 +1,7 @@
+# clippy 阈值配置（clippy 约定位置：workspace 根）
+# too-many-lines-threshold：函数体行数硬闸 200（coding_domain_rules.md §九.3
+# 唯一真相源；lint 开关在 run_gates.py kernel-clippy 命令 -D clippy::too-many-lines）。
+# 存量 6 处以 #[allow(clippy::too_many_lines)] + 归因注释吸收（2026-10-12
+# 文件规模棘轮落地，ADR docs/decisions/2026-10-12-file-length-mechanical-gate.md），
+# 新函数超 200 行即 CI 红，拆分须同刀收紧 allow。
+too-many-lines-threshold = 200

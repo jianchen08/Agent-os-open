@@ -40,13 +40,18 @@ pub fn compute_message_id(msg: &Value) -> String {
     format!("mc_{:x}", hasher.finalize())
 }
 
-/// 消息规范化：克隆并剥离"位置与内部标记"字段（仅顶层）。
+/// 消息规范化：克隆并剥离"位置、身份与审计锚"字段（仅顶层）。
+/// `message_id`/`run_id` 是槽位行携带的身份与 run 审计锚（load_message_history
+/// 随消息对象返回、段冻结随成员携带），不是内容——指纹只认内容：旧段成员无此
+/// 二字段、新段成员有，幂等/查重/内容寻址均不因它们漂移。
 fn canonical_message(msg: &Value) -> Value {
     let Some(obj) = msg.as_object() else {
         return msg.clone();
     };
     let mut filtered = obj.clone();
     filtered.remove("seq");
+    filtered.remove("message_id");
+    filtered.remove("run_id");
     filtered.retain(|k, _| !k.starts_with('_'));
     Value::Object(filtered)
 }
@@ -85,6 +90,25 @@ mod tests {
         let a = json!({"role": "user", "content": "v1"});
         let b = json!({"role": "user", "content": "v2"});
         assert_ne!(compute_message_id(&a), compute_message_id(&b));
+    }
+
+    #[test]
+    fn fingerprint_ignores_slot_identity_and_audit_fields() {
+        // message_id/run_id 是槽位行携带的身份与审计锚（load_message_history
+        // 随消息对象返回、段冻结随成员携带），不是内容：带不带指纹不变——
+        // 旧段成员（无此二字段）与新段成员（有）幂等/查重比对不漂移。
+        let body = json!({"role": "assistant", "content": "同文"});
+        let mut with_identity = body.clone();
+        with_identity["message_id"] = json!("a_42591d08");
+        with_identity["run_id"] = json!("cd9f74fe-244b-424d-bce5-7816926eebdc");
+        assert_eq!(
+            compute_message_id(&body),
+            compute_message_id(&with_identity)
+        );
+        // seq 剥离既有语义不回归
+        let mut with_seq = body.clone();
+        with_seq["seq"] = json!(7);
+        assert_eq!(compute_message_id(&body), compute_message_id(&with_seq));
     }
 
     #[test]

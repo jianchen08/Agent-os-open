@@ -22,12 +22,12 @@ from tests._security_check_harness import wire_approval_cap
 
 pytestmark = pytest.mark.unit
 
-add_plugin_dir("input", "security_check")
+add_plugin_dir("security_check")
 
 import plugin as sc_mod  # noqa: E402
 import repo_anchor  # noqa: E402
 import zone_policy  # noqa: E402
-from pipeline.plugin import PluginContext  # noqa: E402
+from _libs.pipeline_base.plugin import PluginContext  # noqa: E402
 from plugin import SecurityCheckPlugin  # noqa: E402
 
 
@@ -104,17 +104,18 @@ class TestReadChainBuiltinZone:
         assert counter.calls == 0, "白名单命中不得发起读授权卡"
 
     @pytest.mark.asyncio
-    async def test_worktree_sibling_list_directory_read_passes(
+    async def test_worktree_sibling_directory_read_passes(
         self, incident_layout: dict[str, Path]
     ) -> None:
-        """事故同形操作：list_directory 列兄弟目录（2026-09-28 熔断同款工具）。"""
+        """事故同形操作：列目录读兄弟工作树（2026-09-28 熔断同款；能力现归
+        file_read 目录模式）。"""
         ws, sibling = incident_layout["workspace"], incident_layout["sibling"]
         _, counter = wire_approval_cap(sc_mod, [])
         plugin = SecurityCheckPlugin(config={"enabled": True, "rules": []})
 
         blocked = await plugin._enforce_zone_policy(
-            _zone_ctx(ws, _tool_calls("list_directory", {"path": str(sibling)})),
-            _tool_calls("list_directory", {"path": str(sibling)}),
+            _zone_ctx(ws, _tool_calls("file_read", {"path": str(sibling)})),
+            _tool_calls("file_read", {"path": str(sibling)}),
             {},
         )
 

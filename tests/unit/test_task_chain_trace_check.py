@@ -2,8 +2,9 @@
 """task-chain-viewer 追溯完整性检查测试（ADR 2026-09-17 决策 3）。
 
 任务级 traces_to 对账方案级 AC 总表：断链 = 红旗（HTML 区块 + --check-traces
-退出码 1）。方案总纲缺失/无 AC 定义 = 无从对账不产红旗（缺失由 plan_workflow
-定稿自检把关，本检查只管已声明 AC 的追溯断链）。
+退出码 1）。方案总纲缺失/无 AC 定义 = 无从对账不产红旗（缺失由
+skill-container-task-flow「方案规划段」定稿自检清单把关，本检查只管已声明
+AC 的追溯断链）。
 """
 from __future__ import annotations
 

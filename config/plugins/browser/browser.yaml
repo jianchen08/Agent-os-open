@@ -7,3 +7,6 @@ bridge:
   bridge_base: http://127.0.0.1:8765
   upstream: browser
   timeout_secs: 120
+  # 网关凭据（可选，config 优先于 env）：dev 走 .env/环境变量不在此落值；
+  # 装机侧 sidecar 无 env 供给通道，由用户空间配置副本携带（部署时写入）。
+  # token:

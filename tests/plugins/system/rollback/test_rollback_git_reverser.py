@@ -93,7 +93,6 @@ def _make_git_manager(repo: Any) -> Any:
 
     reg = ReverserRegistry()
     reg._reversers = {}
-    reg._tool_mapping = {}
     reg.register(GitReverser(repo_path=str(repo)))
     return RollbackManager(reverser_registry=reg)
 
@@ -126,15 +125,32 @@ class TestGitReverseCommitPrecision:
         assert (git_repo / "a.txt").read_text(encoding="utf-8") == "A1"
 
     @pytest.mark.asyncio
-    async def test_commit_hash缺失时失败不静默(self, git_repo: Any) -> None:
+    async def test_无git载荷不被认领且仓库不被触碰(self, git_repo: Any) -> None:
         from reversers import GitReverser
 
         _commit(git_repo, "a.txt", "A1")
         _commit(git_repo, "b.txt", "B")
         head_before = _head(git_repo)
 
-        # 记录点 hash 缺失（老日志/未捕获）——绝不能回退 HEAD~1（会回退错误对象）
+        # before_state 为空 = 无任何 git 逆操作载荷：reverse 无分发目标，
+        # 绝不能回退 HEAD~1（会回退错误对象）
         result = await GitReverser(repo_path=str(git_repo)).reverse(_make_git_op({}))
+
+        assert result["success"] is False
+        assert _head(git_repo) == head_before  # 仓库未被触碰
+
+    @pytest.mark.asyncio
+    async def test_commit_hash键在值缺时拒绝回退(self, git_repo: Any) -> None:
+        from reversers import GitReverser
+
+        _commit(git_repo, "a.txt", "A1")
+        _commit(git_repo, "b.txt", "B")
+        head_before = _head(git_repo)
+
+        # 载荷位在（键存在）但值缺失（老日志/未捕获）——绝不能回退 HEAD~1
+        result = await GitReverser(repo_path=str(git_repo)).reverse(
+            _make_git_op({"commit_hash": None})
+        )
 
         assert result["success"] is False
         assert "commit_hash" in result["message"]
@@ -294,7 +310,7 @@ class TestReverseCreateDirectoryProtection:
         d.mkdir()
         (d / "unrelated.txt").write_text("later", encoding="utf-8")  # 后续无关写入
         op = OperationLog(
-            tool_name="file_create",
+            tool_name="create_directory",
             operation_type=OperationType.CREATE,
             target=str(d),
             before_state=None,
@@ -316,7 +332,7 @@ class TestReverseCreateDirectoryProtection:
         (d / "f.txt").write_text("x", encoding="utf-8")
         # {"exists": False} = 操作前目录不存在 → 目录由本操作创建，删除属操作自身范围
         op = OperationLog(
-            tool_name="file_create",
+            tool_name="create_directory",
             operation_type=OperationType.CREATE,
             target=str(d),
             before_state={"exists": False},
@@ -335,7 +351,7 @@ class TestReverseCreateDirectoryProtection:
         d = tmp_path / "empty_dir"
         d.mkdir()
         op = OperationLog(
-            tool_name="file_create",
+            tool_name="create_directory",
             operation_type=OperationType.CREATE,
             target=str(d),
             before_state=None,
@@ -356,7 +372,7 @@ class TestReverseCreateDirectoryProtection:
         (d / "keep.txt").write_text("keep", encoding="utf-8")
         # 操作前目录已存在 → 目录不是本操作创建的对象，不得 rmtree
         op = OperationLog(
-            tool_name="file_create",
+            tool_name="create_directory",
             operation_type=OperationType.CREATE,
             target=str(d),
             before_state={"exists": True, "is_dir": True},

@@ -24,12 +24,14 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _SHARED_DIR = Path(__file__).resolve().parent.parent / "plugins" / "shared"
-_PIPELINE_DIR = _SHARED_DIR / "pipeline"
-_WORKSPACE_DIR = _PIPELINE_DIR / "input" / "workspace_lifecycle"
-_ENV_DIR = _PIPELINE_DIR / "input" / "environment_lifecycle"
+_WORKSPACE_DIR = _SHARED_DIR / "workspace_lifecycle"
+_ENV_DIR = _SHARED_DIR / "environment_lifecycle"
 
-if str(_SHARED_DIR) not in sys.path:
-    sys.path.insert(0, str(_SHARED_DIR))
+# 插件目录随同入 path：plugin.py 惰性消费插件内模块（workspace_lifecycle/
+# tree_anchor 等，按路径装载面契约不挑装载方 sys.path）
+for _d in (_SHARED_DIR, _WORKSPACE_DIR, _ENV_DIR):
+    if str(_d) not in sys.path:
+        sys.path.insert(0, str(_d))
 
 
 def _load_plugin(dirpath: Path, modname: str):
@@ -41,7 +43,7 @@ def _load_plugin(dirpath: Path, modname: str):
 
 @pytest.fixture(scope="module")
 def plugins():
-    from pipeline.plugin import PluginContext  # noqa: PLC0415
+    from _libs.pipeline_base.plugin import PluginContext  # noqa: PLC0415
 
     ws_mod = _load_plugin(_WORKSPACE_DIR, "ws_lc_test_mod")
     env_mod = _load_plugin(_ENV_DIR, "env_lc_test_mod")
@@ -77,8 +79,10 @@ async def test_workspace_init_resolves_from_execution_context(plugins):
 
 @pytest.mark.asyncio
 async def test_workspace_init_idempotent(plugins, tmp_path):
-    """init：state 已有 workspace 且目录真实存在时跳过（恢复/复用幂等）。
+    """init：state 已有 workspace 且目录真实存在时跳过创建（恢复/复用幂等）。
 
+    跳过创建仍会自愈补全主会话域坐标键 ws_meta（ebc6075d8：历史会话
+    坐标未入投影时跨 run 冷恢复读不到；坐标已在 = 零产出）。
     目录缺失不跳过（落空即重建，598b4ad4 空壳防护）——见 rebuild 用例。
     """
     ws_dir = tmp_path / "ws"
@@ -94,7 +98,10 @@ async def test_workspace_init_idempotent(plugins, tmp_path):
             }
         )
     )
-    assert result.state_updates == {}, "已有 workspace 不应重复解析"
+    updates = result.state_updates
+    assert set(updates) == {"ws_meta"}, "跳过创建只允许自愈坐标键，不重复解析 workspace"
+    assert updates["ws_meta"]["mode"] == "worktree"
+    assert updates["ws_meta"]["path"] == str(ws_dir)
 
 
 @pytest.mark.asyncio
@@ -146,15 +153,16 @@ async def test_workspace_init_main_session_gets_workspace_root(plugins, monkeypa
     import isolation.workspace as ws_mod
 
     monkeypatch.setattr(ws_mod, "get_workspace_base_dir", lambda: tmp_path)
+    monkeypatch.setattr(ws_mod, "find_project_root", lambda: tmp_path)
 
     result = await plugins["ws"].execute(
         plugins["ctx_factory"]({"current_phase": "init", "session_id": "thread-abc123"})
     )
     updates = result.state_updates
-    expected = str(tmp_path / "sessions" / "thread-abc123")
+    expected = str(tmp_path / "sessions" / "abc123")
     assert updates["workspace"] == expected
     assert updates["ws_meta"]["mode"] == "plain"
-    assert updates["ws_meta"]["session_id"] == "thread-abc123"
+    assert updates["ws_meta"]["session_id"] == "abc123"
     # 主会话不写 project_root（语义 = 实际项目目录，防会话目录伪装成项目目录）
     assert "project_root" not in updates
 
@@ -166,11 +174,12 @@ async def test_workspace_init_main_session_key_fallback_and_sanitized(plugins, m
     import isolation.workspace as ws_mod
 
     monkeypatch.setattr(ws_mod, "get_workspace_base_dir", lambda: tmp_path)
+    monkeypatch.setattr(ws_mod, "find_project_root", lambda: tmp_path)
 
     r1 = await plugins["ws"].execute(
         plugins["ctx_factory"]({"current_phase": "init", "pipeline_id": "pipe-xyz"})
     )
-    assert r1.state_updates["workspace"] == str(tmp_path / "sessions" / "pipe-xyz")
+    assert r1.state_updates["workspace"] == str(tmp_path / "sessions" / "pipexyz")
 
     r2 = await plugins["ws"].execute(
         plugins["ctx_factory"]({"current_phase": "init", "session_id": "../escape"})
@@ -190,6 +199,7 @@ async def test_workspace_init_main_session_syncs_skills_via_manager(
     from isolation.workspace_lifecycle import WorkspaceLifecycleManager
 
     monkeypatch.setattr(ws_mod, "get_workspace_base_dir", lambda: tmp_path)
+    monkeypatch.setattr(ws_mod, "find_project_root", lambda: tmp_path)
     repo_skills = tmp_path / "_repo" / "skills"
     (repo_skills / "skill-demo").mkdir(parents=True)
     (repo_skills / "skill-demo" / "SKILL.md").write_text("demo", encoding="utf-8")
@@ -208,7 +218,7 @@ async def test_workspace_init_main_session_syncs_skills_via_manager(
     result = await plugins["ws"].execute(
         plugins["ctx_factory"]({"current_phase": "init", "session_id": "thread-abc"})
     )
-    ws_dir = tmp_path / "sessions" / "thread-abc"
+    ws_dir = tmp_path / "sessions" / "abc"
     assert result.state_updates["workspace"] == str(ws_dir)
     # 删值实验对照：manager 同步把源技能带进会话工作区
     synced = ws_dir / "skills" / "skill-demo" / "SKILL.md"
@@ -229,6 +239,7 @@ async def test_workspace_init_main_session_degrades_without_manager(plugins, mon
     import isolation.workspace as ws_mod
 
     monkeypatch.setattr(ws_mod, "get_workspace_base_dir", lambda: tmp_path)
+    monkeypatch.setattr(ws_mod, "find_project_root", lambda: tmp_path)
     monkeypatch.setattr(
         type(plugins["ws"]), "_get_manager", lambda self, base_path_hint=None: None
     )
@@ -237,19 +248,25 @@ async def test_workspace_init_main_session_degrades_without_manager(plugins, mon
         plugins["ctx_factory"]({"current_phase": "init", "session_id": "thread-abc"})
     )
     updates = result.state_updates
-    ws_dir = tmp_path / "sessions" / "thread-abc"
+    ws_dir = tmp_path / "sessions" / "abc"
     assert updates["workspace"] == str(ws_dir)
     assert not (ws_dir / "skills").exists()
 
 
 async def test_workspace_init_main_session_project_root_idempotent(plugins, tmp_path):
-    """init：主会话 state 已有 workspace（目录真实存在）时不重复解析（顶部幂等短路）。"""
+    """init：主会话 state 已有 workspace（目录真实存在）时不重复解析（顶部幂等短路）。
+
+    短路仍自愈补全会话域坐标键（无 execution_context → mode 缺省 plain，ebc6075d8）。
+    """
     ws_dir = tmp_path / "already" / "set"
     ws_dir.mkdir(parents=True)
     result = await plugins["ws"].execute(
         plugins["ctx_factory"]({"current_phase": "init", "workspace": str(ws_dir)})
     )
-    assert result.state_updates == {}
+    updates = result.state_updates
+    assert set(updates) == {"ws_meta"}, "短路只允许自愈坐标键"
+    assert updates["ws_meta"]["mode"] == "plain"
+    assert updates["ws_meta"]["path"] == str(ws_dir)
 
 
 async def test_workspace_init_task_without_ws_declaration_unchanged(plugins):
@@ -285,7 +302,11 @@ async def test_workspace_init_task_mirrors_task_ws_meta(plugins, monkeypatch):
 
     monkeypatch.setattr(ws, "_get_manager", lambda base_path_hint=None: _OkManager())
     writes: list[tuple[str, dict[str, Any]]] = []
-    monkeypatch.setattr(ws_mod, "_task_state_writer", lambda pid, fields: writes.append((pid, fields)))
+
+    async def _writer(pid: str, fields: dict) -> None:
+        writes.append((pid, fields))
+
+    monkeypatch.setattr(ws_mod, "_task_state_writer", _writer)
     try:
         result = await ws.execute(
             plugins["ctx_factory"](
@@ -302,7 +323,7 @@ async def test_workspace_init_task_mirrors_task_ws_meta(plugins, monkeypatch):
         ws_mod._task_state_writer = None
     assert result.error is None
     assert writes == [("task_mirror_1", {"task.ws_meta": {"mode": "plain", "path": "D:/proj/x", "task_id": "task_mirror_1"}})]
-    assert result.state_updates["ws_meta"]["path"] == "D:/proj/x"
+    assert result.state_updates["task.ws_meta"]["path"] == "D:/proj/x"
 
 
 @pytest.mark.asyncio
@@ -317,7 +338,7 @@ async def test_workspace_init_task_mirror_failure_not_blocking(plugins, monkeypa
 
     monkeypatch.setattr(ws, "_get_manager", lambda base_path_hint=None: _OkManager())
 
-    def _boom(pid: str, fields: dict) -> None:
+    async def _boom(pid: str, fields: dict) -> None:
         raise RuntimeError("写面故障")
 
     monkeypatch.setattr(ws_mod, "_task_state_writer", _boom)
@@ -337,8 +358,8 @@ async def test_workspace_init_task_mirror_failure_not_blocking(plugins, monkeypa
     finally:
         ws_mod._task_state_writer = None
     assert result.error is None, "镜像失败不阻断已成功的主创建"
-    assert result.state_updates["ws_meta"]["path"] == "D:/proj/x"
-    assert "task.ws_meta 镜像写失败" in caplog.text
+    assert result.state_updates["task.ws_meta"]["path"] == "D:/proj/x"
+    assert "task.ws_meta 创建写失败" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -403,7 +424,11 @@ async def test_workspace_skip_branch_mirrors_inherited_ws_meta(plugins, monkeypa
     ],
 )
 async def test_workspace_skip_branch_without_coordinates_no_mirror(plugins, monkeypatch, tmp_path, state_extra):
-    """无 task 身份或无出生契约坐标 → 不补写镜像（虚构 plain 会误放行真 worktree）。"""
+    """无 task 身份或无出生契约坐标 → 不补写任务域镜像（虚构 plain 会误放行真 worktree）。
+
+    主会话分支（无 task 身份）跳过创建时仍自愈会话域坐标键（ebc6075d8）；
+    任务管道分支两域都不写。
+    """
     ws_mod = plugins["ws_mod"]
     ws = plugins["ws"]
     ws_dir = tmp_path / "wsx"
@@ -424,15 +449,30 @@ async def test_workspace_skip_branch_without_coordinates_no_mirror(plugins, monk
     finally:
         ws_mod._task_state_writer = None
     assert result.error is None
-    assert result.state_updates == {}
-    assert writes == []
+    if state_extra:
+        # 任务管道：无父链坐标不虚构，也不写会话域键（两域互斥）
+        assert result.state_updates == {}
+    else:
+        # 主会话：跳过创建仍自愈会话域坐标键
+        assert set(result.state_updates) == {"ws_meta"}
+        assert result.state_updates["ws_meta"]["path"] == str(ws_dir)
+    assert writes == [], "无出生契约坐标不得补写任务域镜像"
 
 
 @pytest.mark.asyncio
-async def test_workspace_skip_branch_mirror_idempotent_when_present(plugins, monkeypatch):
-    """state 已有 task.ws_meta/ws_meta（恢复场景）→ 不重复补写。"""
+async def test_workspace_skip_branch_mirror_idempotent_when_present(
+    plugins, monkeypatch, tmp_path
+):
+    """state 已有 task.ws_meta/ws_meta 且 workspace 目录真实在位（恢复场景）
+    → 不重复补写。workspace 路径必须真实存在——指向不存在目录会被判为
+    被外部清理的落空坐标而重建（598b4ad4 防静默跳过），非本用例面。"""
     ws_mod = plugins["ws_mod"]
     ws = plugins["ws"]
+
+    real_ws = tmp_path / "ws" / "y"
+    real_wt = tmp_path / "wt"
+    real_ws.mkdir(parents=True)
+    real_wt.mkdir()
 
     writes: list[tuple[str, dict[str, Any]]] = []
 
@@ -446,8 +486,8 @@ async def test_workspace_skip_branch_mirror_idempotent_when_present(plugins, mon
                 {
                     "current_phase": "init",
                     "task.id": "task_skip_3",
-                    "workspace": "D:/ws/y",
-                    "task.ws_meta": {"mode": "worktree", "path": "D:/wt"},
+                    "workspace": str(real_ws),
+                    "task.ws_meta": {"mode": "worktree", "path": str(real_wt)},
                 }
             )
         )
@@ -485,7 +525,7 @@ async def test_workspace_skip_branch_mirror_failure_not_blocking(plugins, monkey
         ws_mod._task_state_writer = None
     assert result.error is None
     assert result.state_updates == {}
-    assert "task.ws_meta 镜像补写失败" in caplog.text
+    assert "task.ws_meta 补全写失败" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -510,7 +550,7 @@ async def test_workspace_skip_branch_mirror_writer_unbound(plugins, monkeypatch,
         )
     assert result.error is None
     assert result.state_updates == {}
-    assert "镜像补写跳过" in caplog.text
+    assert "task_state_writer 未绑定，task.ws_meta 补全跳过" in caplog.text
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,11 @@
    声明（防孤儿组装器——声明驱动下无声明即不加载，静默失效需闸兜底）；
    声明 material 的包若有 skills/，包内技能须被 agents 提示词按名引用
    （批 E §3.1 技能孤儿对账，防无人加载的孤儿技能）；
-3. 消费者对账豁免台账：已声明未消费的字段在此登记（豁免=显式承认 + 升级
+3. 跨包同名技能对账（原则 7 零副本红线执法，批 E4）：出厂包 skills/ 目录间
+   出现同名技能（同名目录）即红——任何包禁携带他包同名物料，跨包复用走
+   全限定引用 + 按归属取料（D6）；用户根副本不算（用户覆盖是合法通道，同名
+   优先序用户根赢），且用户根不在 modes_dir 扫描面内，天然不参与本对账；
+4. 消费者对账豁免台账：已声明未消费的字段在此登记（豁免=显式承认 + 升级
    触发条件），台账外出现"无消费点白名单字段"视为空转回流。
 
 口径变化（2026-09-28 批 G⑦，D1 标签裁定）：原第 2 检「前端 TASK_MODES 冻结
@@ -51,6 +55,8 @@ _MODE_DECL_KNOWN = {
     "persona",
     "theme",
     "icon",
+    "plan_spec",
+    "planning_executors",
     "chain",
     "suite",
     "material_scope",
@@ -58,8 +64,19 @@ _MODE_DECL_KNOWN = {
     "verifier_families",
     "weights",
     "budget",
+    # 与 agent_manager._MODE_DECL_KNOWN 同源补齐（default = 默认模式声明；
+    # inject_tools = 包级工具并入声明，守卫 C）
+    "default",
+    "inject_tools",
 }
 _PIPELINE_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+# 技能名形态（与 plugins/shared/mode_keys.py is_skill_name 同源；本脚本仅
+# 标准库 + PyYAML，正则双侧同步）。
+_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+# 执行者键形态（与 mode_keys.is_planning_executor_key 同源，双侧同步）：
+# mode_X/<stem>（模式名小写标识/stem 字母数字下划线）或系统 agent 裸名。
+_MODE_AGENT_KEY_RE = re.compile(r"^mode_([a-z][a-z0-9_]{0,63})/([A-Za-z0-9_]+)$")
+_BARE_AGENT_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 # 消费者对账豁免台账：字段 → (豁免原因, 升级触发条件)。台账外的声明字段必须
 # 在仓内有消费点（grep 佐证由本脚本对 tool_card 之外的字段抽查主消费面）。
@@ -122,19 +139,43 @@ def validate_declaration(data: object) -> str:
             value = data[key]
             if not isinstance(value, str) or not value.strip():
                 return f"{key} 须为非空字符串（不声明 = 不切换主题/无图标）"
+    # plan_spec（批 B2 领域规格注册，与 agent_manager 同源）：可选，值形态 =
+    # 技能名（包内 skills/ 随包，工作空间并集快照按名可读）；路径形态拒收。
+    if "plan_spec" in data:
+        plan_spec = data["plan_spec"]
+        if not (isinstance(plan_spec, str) and _SKILL_NAME_RE.match(plan_spec)):
+            return "plan_spec 须为技能名形态（如 skill-solution-software；不声明 = 不写该键）"
+    # planning_executors（批 B4，与 agent_manager 同源）：可选字符串列表，
+    # 元素 = plan 态执行者键（mode_X/<stem> 或系统 agent 裸名）；空列表拒。
+    if "planning_executors" in data:
+        declared = data["planning_executors"]
+        if not isinstance(declared, list) or not declared:
+            return "planning_executors 须为非空列表（不声明 = 不写该键，缺省 = 零贡献）"
+        for key in declared:
+            if not (
+                isinstance(key, str)
+                and (_MODE_AGENT_KEY_RE.match(key) is not None or _BARE_AGENT_KEY_RE.match(key) is not None)
+            ):
+                return f"planning_executors[] 执行者键须为 mode_X/<stem> 或系统 agent 裸名形态: {key!r}"
     return ""
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--modes-dir", default="plugins/shared/modes")
+    parser.add_argument("--modes-dir", default="plugins/shared")  # 拍平：模式包平铺共享根（mode_* 前缀识别）
     args = parser.parse_args()
 
     modes_dir = Path(args.modes_dir)
     errors: list[str] = []
     mode_keys: dict[str, dict] = {}
+    # 跨包同名对账索引：技能目录名 → 出现该技能的包名列表（原则 7 零副本红线）
+    skills_by_name: dict[str, list[str]] = {}
 
     for pkg in sorted(modes_dir.glob("mode_*")):
+        # 拍平布局下共享根的 mode_ 前缀目录含非模式包插件（如
+        # mode_material_inject 管道步骤）；对账面 = 声明了 mode.yaml 的包。
+        if not (pkg / "mode.yaml").is_file():
+            continue
         if not pkg.is_dir():
             continue
         decl_path = pkg / "mode.yaml"
@@ -172,6 +213,23 @@ def main() -> int:
                 if skill.is_dir() and (skill / "SKILL.md").is_file() and skill.name not in agents_text:
                     errors.append(f"{pkg.name}: 技能 {skill.name} 存在但未被包内 agents 提示词引用（孤儿技能）")
 
+        # 技能索引（跨包同名对账用；同包多技能合法，只登记不判）
+        if (pkg / "skills").is_dir():
+            for skill in sorted((pkg / "skills").iterdir()):
+                if skill.is_dir() and (skill / "SKILL.md").is_file():
+                    skills_by_name.setdefault(skill.name, []).append(pkg.name)
+
+    # 跨包同名技能对账（原则 7 零副本红线执法，批 E4）：出厂包 skills/ 之间同名
+    # 技能即红——任何包禁携带他包同名物料，跨包复用走全限定引用 + 按归属取料
+    # （D6）。用户根副本不算（用户覆盖合法通道，同名优先序用户根赢）；用户根
+    # 不在本扫描面内，天然不参与本对账。
+    for skill_name, owners in sorted(skills_by_name.items()):
+        if len(owners) > 1:
+            errors.append(
+                f"跨包同名技能（零副本红线）: {skill_name} 同时出现于 {', '.join(sorted(owners))}"
+                "——技能归属唯一，跨包复用走全限定引用（按归属取料），禁携带副本"
+            )
+
     # 豁免台账外的运行时声明字段须有消费佐证（评估域字段豁免于 eval_harness 消费）
     runtime_fields = {"pipelines", "panel_page_id", "presenter", "material", "icon", "theme"}
     consumed = {
@@ -198,7 +256,8 @@ def main() -> int:
         return 1
     print(
         f"对账通过：{len(mode_keys)} 包声明面合法；"
-        f"组装器声明/实物对齐；豁免台账 {len(_CONSUMPTION_EXEMPT)} 项；"
+        f"组装器声明/实物对齐；跨包同名技能 0（{len(skills_by_name)} 技能全仓唯一）；"
+        f"豁免台账 {len(_CONSUMPTION_EXEMPT)} 项；"
         f"选择器选项=registry 运行时派生（TASK_MODES 冻结集已退役，vitest 两态断言保障）。"
     )
     return 0

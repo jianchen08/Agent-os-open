@@ -112,7 +112,7 @@ metrics:
       properties:
         mode:
           type: string
-          enum: [choice, conversation]
+          enum: [choice]
           description: 交互模式
           default: choice
         title:
@@ -132,3 +132,125 @@ metrics:
           default: 300
       required: [mode, title]
     tags: [human, approval, review]
+
+  # ========== 格式检查 ==========
+  - name: format_valid
+    description: 产物格式检查（tool 型：给 command 时在任务工作区真执行格式化器检查命令，退出码 0=通过；无 command 时按 path 存在性检查）
+    category: file
+    evaluator_type: tool
+    evaluator_id: bash_execute
+    level: 2
+    includes: [file_check]
+    requires: []
+    input_schema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: 目标文件或目录路径（command 缺席时的检查对象）
+        type:
+          type: string
+          enum: [python, markdown, json, yaml]
+          description: 产物语言类型（command 缺省时随任务语境记录，不参与判定）
+        command:
+          type: string
+          description: 格式检查命令（真执行：在任务工作区运行，退出码 0=通过，如 ruff format --check <path>）
+        timeout_seconds:
+          type: integer
+          description: command 超时时间（秒）
+          default: 600
+      required: [path]
+    tags: [format, style, check]
+
+  # ========== L0 通用层检查规则（ADR 2026-10-27 步骤 2，观察模式）==========
+
+  - name: artifact_schema_check
+    description: L0 产物结构检查（执行报告存在且结构合法、AC 清单非空——YAML/JSON 产物按 schema 校验必填字段/类型/数组长度）
+    category: artifact
+    evaluator_type: tool
+    evaluator_id: file_evaluator
+    level: 1  # L0 通用层
+    includes: []
+    requires: []
+    input_schema:
+      type: object
+      properties:
+        path:
+          type: string
+          description: 产物文件路径（YAML/JSON，相对任务工作区）
+        workspace:
+          type: string
+          description: 任务工作区根（path 相对解析基准）
+        check:
+          type: string
+          enum: [matches_schema, exists, not_empty, contains]
+          description: 检查类型（matches_schema=结构契约校验；兼容 file_check 族枚举）
+        schema:
+          type: object
+          description: 结构契约（required=必填字段存在且非空；properties.{f}.type=array/object/string/number/integer/boolean；properties.{f}.min_items=数组最小长度）
+          properties:
+            required:
+              type: array
+              items:
+                type: string
+            properties:
+              type: object
+        pattern:
+          type: string
+          description: 内容匹配模式（check=contains 时使用）
+      required: [path, check]
+    tags: [l0, artifact, schema]
+
+  - name: antipattern_scan
+    description: L0 反模式扫描（空 except、调试残留 print/console.log、疑似硬编码密钥——bash 命令组合，命中即失败）
+    category: antipattern
+    evaluator_type: tool
+    evaluator_id: bash_execute
+    level: 1
+    includes: []
+    requires: []
+    input_schema:
+      type: object
+      properties:
+        command:
+          type: string
+          description: 扫描命令（在任务工作区执行；退出码 0=无反模式命中=通过；default_config 载观察期参考命令，试点任务可按语境定制）
+        workspace:
+          type: string
+          description: 任务工作区根
+        timeout_seconds:
+          type: integer
+          description: 超时时间（秒）
+          default: 600
+      required: [command]
+    default_config:
+      # 观察期参考命令：对 git 改动的 py/ts/tsx 文件扫描空 except、调试残留、
+      # 疑似密钥赋值；命中 → exit 1（fail + message 留痕），无命中 → exit 0（pass）
+      command: >-
+        git status --porcelain -uall | awk '{print $2}'
+        | grep -E '[.](py|ts|tsx)$'
+        | xargs -r grep -n -E 'except[^:]*:[[:space:]]*(pass|\.\.\.)|console[.]log\(|(api_key|secret|password)[[:space:]]*=[[:space:]]*[^[:space:]]+'
+        && exit 1 || exit 0
+    tags: [l0, antipattern, scan]
+
+  - name: scope_consistency
+    description: L0 改动面一致性（git status 改动文件清单 ⊆ 任务书改动面绑定表 allowed_paths；越界清单进 message）
+    category: scope
+    evaluator_type: tool
+    evaluator_id: file_evaluator
+    level: 1
+    includes: []
+    requires: []
+    input_schema:
+      type: object
+      properties:
+        workspace:
+          type: string
+          description: 任务工作区根（git 仓库/worktree 根）
+        allowed_paths:
+          type: array
+          items:
+            type: string
+          description: 改动面绑定表（文件或目录，相对工作区，/ 分隔；目录前缀匹配）
+      required: [workspace, allowed_paths]
+    tags: [l0, scope, consistency]

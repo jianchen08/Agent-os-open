@@ -1,0 +1,156 @@
+{
+  "case_id": "cap_key_carry_multiround",
+  "category": "capability",
+  "passed": false,
+  "elapsed_seconds": 380.6,
+  "session_id": "thread-3953b0e7-ad5c-47cb-8dff-b58d2a82214c",
+  "pipeline_ids": [
+    "2c9ff64fbc67"
+  ],
+  "settled": false,
+  "dispatches": [
+    {
+      "terminal": "stream_end",
+      "pipeline_id": "2c9ff64fbc67",
+      "interactions": [],
+      "event_types": [
+        "pending_inputs_changed",
+        "pending_inputs_changed",
+        "stream_start",
+        "stream_end"
+      ]
+    },
+    {
+      "terminal": "stream_end",
+      "pipeline_id": "2c9ff64fbc67",
+      "interactions": [],
+      "event_types": [
+        "reasoning_delta",
+        "widget_event",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "widget_event",
+        "block_end",
+        "block_start",
+        "tool_call_delta",
+        "block_end",
+        "usage",
+        "finish",
+        "cost_update",
+        "widget_event",
+        "new_message",
+        "stream_end"
+      ]
+    },
+    {
+      "terminal": "stream_end",
+      "pipeline_id": "2c9ff64fbc67",
+      "interactions": [],
+      "event_types": [
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "tool_result",
+        "tool_start",
+        "widget_event",
+        "tool_result",
+        "widget_event",
+        "stream_start",
+        "widget_event",
+        "finish",
+        "new_message",
+        "stream_end"
+      ]
+    }
+  ],
+  "approval": {
+    "requests_seen": 0,
+    "approved": 0,
+    "denied": 0,
+    "response_errors": []
+  },
+  "metrics": {
+    "pipelines": 1,
+    "iterations_total": 1,
+    "error_steps": 0,
+    "timeout_steps": 0,
+    "tool_calls": 0,
+    "tool_retries": 0,
+    "tool_names": [],
+    "tool_call_counts": {},
+    "task_statuses": [
+      null
+    ],
+    "all_settled": false,
+    "any_failed": false,
+    "by_model": {
+      "glm-5.3-flash": {
+        "input": 9038,
+        "output": 120,
+        "cached": 0,
+        "total": 9158
+      }
+    },
+    "tokens_total": 9158
+  },
+  "assertions": [
+    {
+      "type": "settled",
+      "passed": false,
+      "detail": "管道未收敛（挂起/超时）"
+    },
+    {
+      "type": "no_failed_task",
+      "passed": true,
+      "detail": "无 failed 任务"
+    },
+    {
+      "type": "file_contains",
+      "passed": false,
+      "detail": "产物 eval_notes.md 未找到"
+    },
+    {
+      "type": "reply_contains",
+      "passed": false,
+      "detail": "回复不含目标内容（候选 ['ZEBRA-7391']）"
+    }
+  ],
+  "failed_assertions": [
+    "settled",
+    "file_contains",
+    "reply_contains"
+  ],
+  "reply_excerpt": ""
+}

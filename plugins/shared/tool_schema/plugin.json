@@ -1,0 +1,42 @@
+{
+  "id": "pipeline_tool_schema",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Tool Schema",
+  "version": "1.0.1",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "host_group": "light",
+  "entry": "python server.py",
+  "invoke_entry": "tool_schema.execute",
+  "capabilities": {
+    "metrics_class": "tool",
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "steps": [
+      {
+        "name": "pipeline_tool_schema",
+        "required_state_inputs": [
+          "tool_ids"
+        ]
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 50,
+  "state": {
+    "volatile_keys": [
+      "tool_schemas"
+    ],
+    "reads": [
+      "tool_ids",
+      "execution_context"
+    ]
+  }
+}

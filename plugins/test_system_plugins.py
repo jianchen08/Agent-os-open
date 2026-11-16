@@ -29,12 +29,12 @@ if _SDK_SRC not in sys.path:
     sys.path.insert(0, _SDK_SRC)
 
 
-# 插件名 → 功能分类目录的映射（插件已按功能分类组织）
+# 插件名 → 功能分类目录的映射（0.2 平铺布局：全部直挂 plugins/shared/）
 _PLUGIN_CATEGORY_MAP: dict[str, str] = {
-    "approval": "shared/system",
-    "evaluation": "shared/system",
-    "review": "shared/system",
-    "builtin_tools": "shared/tools",
+    "approval": "shared",
+    "evaluation": "shared",
+    "review": "shared",
+    "builtin_tools": "shared",
 }
 
 
@@ -258,17 +258,20 @@ class TestEvaluationPlugin:
 # ═══════════════════════════════════════════════════════════
 
 class TestReviewPlugin:
-    """验证复盘系统插件（0.2：触发工具名为 trigger_review，无 review. 前缀）。"""
+    """验证复盘系统插件（0.2：工具面二合一 review_ops，action=trigger|get_report）。"""
 
     def test_review_tools_registered(self) -> None:
         mod = _load_plugin_module("review")
-        assert "trigger_review" in mod.plugin._tools
-        assert "review_get_report" in mod.plugin._tools
+        assert "review_ops" in mod.plugin._tools
+        # 二合一（任务C刀2）退役旧名：单工具 action 枚举承载读写两面
+        assert "trigger_review" not in mod.plugin._tools
+        assert "review_get_report" not in mod.plugin._tools
 
     def test_trigger_review(self) -> None:
         mod = _load_plugin_module("review")
         result = _call_tool(
-            mod, "trigger_review",
+            mod, "review_ops",
+            action="trigger",
             task_id="task_1",
             summary="Completed data analysis",
             metrics={"accuracy": 0.95},
@@ -281,7 +284,8 @@ class TestReviewPlugin:
     def test_trigger_review_with_low_metrics(self) -> None:
         mod = _load_plugin_module("review")
         result = _call_tool(
-            mod, "trigger_review",
+            mod, "review_ops",
+            action="trigger",
             task_id="task_2",
             summary="Failed task",
             metrics={"accuracy": 0.3},
@@ -292,13 +296,17 @@ class TestReviewPlugin:
     def test_get_report(self) -> None:
         mod = _load_plugin_module("review")
         triggered = _call_tool(
-            mod, "trigger_review",
+            mod, "review_ops",
+            action="trigger",
             task_id="task_3",
             summary="Test",
         )
-        report = _call_tool(mod, "review_get_report", review_id=triggered["review_id"])
-        assert report["task_id"] == "task_3"
-        assert "lessons" in report
+        # F9 单通道：报告读面 = state 索引 → 文件面直读。本烟测 harness 无
+        # pipeline-state 能力（索引无处落/无处读）→ 显式读面不可用错误，
+        # 不与「review 不存在」混同（完整往返见 review/test_review_persistence.py）。
+        report = _call_tool(mod, "review_ops", action="get_report", review_id=triggered["review_id"])
+        assert report["success"] is False
+        assert report["error"] == "pipeline state unavailable"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -358,8 +366,8 @@ class TestMonitoringRecordMetric:
     """验证 monitoring 插件经 record_metric 上报 D 类系统资源（M7）。"""
 
     def _load_monitoring(self) -> Any:
-        # monitoring 在 shared/system/monitoring/
-        plugin_path = Path(_PLUGINS_DIR) / "shared" / "system" / "monitoring" / "server.py"
+        # monitoring 在 shared/monitoring/（平铺直挂）
+        plugin_path = Path(_PLUGINS_DIR) / "shared" / "monitoring" / "server.py"
         spec = importlib.util.spec_from_file_location("monitoring_server_test", plugin_path)
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)

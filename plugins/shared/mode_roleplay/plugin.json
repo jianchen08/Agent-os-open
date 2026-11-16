@@ -1,0 +1,922 @@
+{
+  "id": "mode_roleplay",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Mode Roleplay",
+  "version": "1.40.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "description": "角色扮演模式出厂种子：模式元数据服务面（mode.describe / mode.get_profile / mode.game.push_delta 游戏域 delta 入队）+ 工作区面板数据面（角色卡/世界书/开演记录；宿主融合——对话回归对话框、卡 theme/avatar 经 theme.apply 随卡切主题、面板主题跟宿主 token）+ 写动作（开演端点 possess-only——附身校验回执不派任务，fresh 开演已会话化：面板经 roleplay.continue 宿主桥建扮演会话持续对话，所选开场白/用户设定经会话执行选项快照随消息透传；开演记录详情回显扮演轮次——宿主活跃会话不参与归属）+ 卡库/世界书双根（出厂∪用户层同 id 接管；save/delete/import/export 卡管理与 ST V2/V3 导入导出；世界书 save/delete/import 与 ST World Info 导入）+ persona 档案面（roleplay_personas.json）+ 开演向导（面板刀-Ⅰ：五步卡片流选择页——选卡/角色配置（含演出四轴单选组，数据驱动刀 2026-10-13 自终步前移）/世界观/玩法/开场白，所选配置经 mode.session extra_context 透传，bootstrap 聚合玩法包清点；C2 整合刀四轴候选集 GET data/wizard/axes——文风轴动态列包内 styles/ 档位+尺度/节奏/代理权三静态考据轴，四轴选择组装为 rp_axes 快照键走既有 B8 通道，注入消费后置）+ 面板数据驱动呈现（GET data/packs 玩法包双根清点独立端点——向导玩法勾选组与概览计数数据源；概览能力计数三源动态：玩法包/文风档/创作草稿，加载失败显示 --；面板零硬编码包名/档位名/数量）+ 游戏域会话通道（批 4-Ⅰ Tier 1 第一刀：单宿主租约 attach/detach（第二宿主=接管+对账）+ 宿主快照 push 薄 sanity 只留最新不否决 + game.* delta 回推队列 GET state 取后清——通道注册表为进程内寄存器索引级，宿主权威后端零否决）+ 出厂游戏页骨架（游戏界面呈现页：面板玩法子页内嵌挂载，会话绑定/快照表/delta/叙事流）+ 游戏宿主引擎件（批 4-Ⅱ-核：声明聚合通道 GET game/config——会话绑定卡+pack 的 Tier 1 声明 rules/narrative_graph/actions 聚合透出，无声明=键缺席；游戏页内 4a 表达式求值/4b narrative_graph 求值/4c 通用 handler 库，白名单沙箱禁 eval，宿主权威 state 变更随快照回推；批 4-Ⅲ：template/ui 声明同通道聚合透出（_DEFERRED_PACK_KEYS 契约键启用消费），游戏页内 4d 模板渲染（{{...}} 插值子集走 4a 求值器，产物过 rpSanitizeHtml 消毒——单源 serve-time 装配自面板 rp-sanitize 块，无 LLM 降级轮/节点进入/trigger 真值三消费时机）+ 4e 声明式 choices（叙事流内按钮卡，点击=文本填入输入区+action 交 4c，不接 turn）+ ui（status_bar_template 状态条/bg_image/bgm 白名单媒体，bgm 仅用户交互后起播），profile 与示例卡/世界书/文风档（styles/ 四档标准文风档 yaml，C1 整合刀数据位，档位结构契约见 yaml 头注释与包内数据位）与出厂玩法包（packs/ 修仙战斗+星露谷好感两件，C3 整合刀内容位：variables/behaviors Tier 0 装载执行、rules/choices 宿主/提示词承载面，卡以 pack_ids 引用）随包内打包 + 创作草稿五态状态机（扩展波 B-Ⅰ：创作工作台页签+创作 agent 卡 card_author「AI 帮我生成」经 mode.session 附身起草；GET data/wizards/drafts 列表/详情三件套 + POST data/wizards/draft/{register,lint,smoke,submit,approve,reject}——草稿落 <user_config>/rp_drafts/，register 形态校验+creator AI 署名强制，lint=card_lint 单源（B-Ⅱ 起内容安全扫描模式表亦单源收编于共享 card_lint）+suspicious+HTML 高危三面，smoke 一期人工试玩登记，自动探针经 B-Ⅱ 考据维持降级（诚实收敛：eval 域 suite.smoke 是 agent 编排任务链管道+自进化账本耦合+agent 键目标，与草稿卡探针三处错配，升级触发=卡级探针库化服务面就绪；probe 携带即 400 显式降级说明），approve 三闸强制（状态机+lint/smoke 证据缺一不可=409）受控搬移入用户层卡库+审核留痕 who/when，reject 意见回写草稿保留；非法迁移 fail-closed 409）。RP 面板 v3.1 刀1（后端能力缝）：玩法包呈现面声明 ui（icon/style_tags/lineage 谱系档/theme_css 包内主题/page 自包含玩法页）+ init_ui（开演设置页 routes/trait_pools，整键缺席=面板回落通用组合配置）——结构判定单源共享 card_lint（lint_ui/lint_init_ui），本侧归一剔除（lineage 非法剔除回落缺省档 full、theme_css/page 文件缺失剔除+warning）；GET data/packs 条目增 ui/has_page/init_ui 载荷 + 一并返回自定义玩法 combos（大厅自定义卡）；POST data/combos/{save,delete}（<user_config>/rp_combos/*.json 用户件同 id 覆盖，card_id 须在卡库）；sessions 行增 pack_ids（agent_id 卡归属 ∪ 行内 wizard_pack_ids）+ state_summary（行内持久 state 摘要，键不在=键缺席）+ ?pack= 过滤（继续上局按玩法归属）；GET game/page（?session_id=，{session_id, page_html} 装配载荷——声明序第一个 ui.page 有效包，serve-time 单源装配 rpSanitizeHtml+rp-bridge + 同包 theme_css <style> 内联页头；无声明 page_html=null 回落通用 game_host 渲染非 404）；GET game/config 增 ui_page 布尔与 init_ui 声明本体透出（只透出不消费）；game_host 包页整区接管引擎渲染区（document 注入——agentosFetch 绑顶层窗 window.agentos，srcdoc iframe 无该对象会分叉桥单源）",
+  "permissions": {},
+  "priority": 45,
+  "host_group": "light",
+  "capabilities": {
+    "tools": [],
+    "services": [
+      {
+        "name": "mode.describe",
+        "description": "返回角色扮演模式元数据（chain/权重/预算/profile 路径/panel_page_id）",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "mode",
+            "name",
+            "chain",
+            "weights",
+            "budget",
+            "profile_path",
+            "panel_page_id"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "chain": {
+              "type": "object"
+            },
+            "weights": {
+              "type": "object"
+            },
+            "budget": {
+              "type": "object"
+            },
+            "profile_path": {
+              "type": "string"
+            },
+            "panel_page_id": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "mode.get_profile",
+        "description": "返回角色扮演模式包内 mode.yaml 解析后的内容",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "mode.game.push_delta",
+        "description": "游戏域 delta 入队（state_marker_parse 落账步推送通道；无租约丢弃=Tier 0，队列上限丢最旧）",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "session_id",
+            "deltas"
+          ],
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "description": "RP 扮演会话 pipeline_id"
+            },
+            "turn_seq": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "description": "产生 delta 的尾条 assistant 消息 seq（对账序）"
+            },
+            "deltas": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "game.* 变更行（raw 值，宿主按自身规则解释）"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "queued",
+            "dropped"
+          ],
+          "properties": {
+            "queued": {
+              "type": "integer"
+            },
+            "dropped": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      {
+        "name": "card.lint_decl",
+        "description": "卡声明结构 lint（variables 类型面/enum 面 + behaviors trigger/effect 面 + engine 类型面；单源 card_lint）——装载侧 agent_config_load 消费",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "variables": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "description": "合并后 variables 声明（None=无声明）"
+            },
+            "behaviors": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "description": "合并后 behaviors 声明（None=无声明）"
+            },
+            "engine": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "description": "卡 extensions.engine 声明（None/空=未声明）"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "warnings"
+          ],
+          "properties": {
+            "warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "card.lint_actions",
+        "description": "actions target 面校验+归一（合法 {engine,game}、缺省补 engine、非法剔除 fail-soft）——装载侧 agent_config_load 消费",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "actions"
+          ],
+          "properties": {
+            "actions": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "description": "卡 extensions.actions 声明"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "actions",
+            "warnings"
+          ],
+          "properties": {
+            "actions": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "规范化后的有效条目"
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "card.lint_pack_ui",
+        "description": "pack 呈现面 ui/init_ui 结构 lint（结构单源 card_lint）——装载侧 agent_config_load 消费",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "ui": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "description": "pack 顶层 ui 声明（None=未声明）"
+            },
+            "init_ui": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "description": "pack 顶层 init_ui 声明（None=整键缺席）"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "warnings"
+          ],
+          "properties": {
+            "warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "card.lint_extensions",
+        "description": "卡 extensions 四面结构 lint 汇总（variables/behaviors/actions/engine）——出厂内容提案安检 mode_evolution 消费",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "extensions": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "description": "卡 extensions 或包顶层数据（非映射=空表）"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "warnings"
+          ],
+          "properties": {
+            "warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "card.scan_suspicious",
+        "description": "可疑指令模式扫描（大小写不敏感子串，模式表单源 card_lint）——mode_evolution content_audit 消费",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "text"
+          ],
+          "properties": {
+            "text": {
+              "type": "string",
+              "description": "扫描对象拼文"
+            },
+            "subject": {
+              "type": "string",
+              "description": "检查对象名（卡=角色设定/世界书=世界书内容/玩法包=玩法包内容）"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "warnings"
+          ],
+          "properties": {
+            "warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "card.scan_html_card",
+        "description": "卡形态高危 HTML 扫描（description/personality/scenario/first_mes/alternate_greetings/extensions 全文本值）——mode_evolution content_audit 消费",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "card"
+          ],
+          "properties": {
+            "card": {
+              "type": "object",
+              "description": "卡数据 dict"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "warnings"
+          ],
+          "properties": {
+            "warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "card.scan_html_texts",
+        "description": "高危 HTML 形态扫描（文本集入参，逐形态独立标注）——mode_evolution content_audit 消费",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "texts"
+          ],
+          "properties": {
+            "texts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "扫描文本集"
+            },
+            "subject": {
+              "type": "string",
+              "description": "检查对象名（缺省 角色卡内容）"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "warnings"
+          ],
+          "properties": {
+            "warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "card.texts_of_tree",
+        "description": "任意嵌套结构收集全部字符串叶子（玩法包内容扫描取料）——mode_evolution content_audit 消费",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "data"
+          ],
+          "properties": {
+            "data": {
+              "type": "object",
+              "description": "嵌套声明数据（dict/list/str 树）"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "texts"
+          ],
+          "properties": {
+            "texts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load"
+    ]
+  },
+  "http_endpoints": [
+    {
+      "route_id": "mode_roleplay_panel_page",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/page/roleplay-panel",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "Webview HTML page: 角色扮演面板（插件自带 webview 页）"
+    },
+    {
+      "route_id": "mode_roleplay_game_page",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/page/game-host",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "Webview HTML page: 出厂游戏页（Tier 1 第一宿主呈现页——无独立 tab，面板玩法子页内嵌挂载；批 4-Ⅰ 骨架）"
+    },
+    {
+      "route_id": "mode_roleplay_game_attach",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/game/session/attach",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "游戏域通道：单宿主租约登记 {session_id, host_id, game_save_id?}——新租/接管（返回前宿主+对账要求）/同 host 幂等续租"
+    },
+    {
+      "route_id": "mode_roleplay_game_snapshot",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/game/snapshot",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "游戏域通道：宿主快照 push {session_id, host_id, turn_id, seq, state}——薄 sanity（state 为 dict/键为字符串）后只留最新+审计，不否决宿主权威"
+    },
+    {
+      "route_id": "mode_roleplay_game_state",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/game/state",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "游戏域通道：最新快照+租约+待发 deltas（query 必带 session_id；无快照=显式空对象非 404；deltas 取后清）"
+    },
+    {
+      "route_id": "mode_roleplay_game_detach",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/game/detach",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "游戏域通道：租约释放 {session_id, host_id}（快照保留=离线降级读面；无租约幂等）"
+    },
+    {
+      "route_id": "mode_roleplay_game_config",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/game/config",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "游戏域通道：会话绑定卡+pack 的 Tier 1 声明聚合（rules/narrative_graph/actions，pack 声明序后者覆盖→卡覆盖；actions 逐条带 target 缺省 engine）——无声明=键缺席（宿主引擎件空转=Tier 0 兼容态；query 必带 session_id）"
+    },
+    {
+      "route_id": "mode_roleplay_game_turn",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/game/turn",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 30000,
+      "max_concurrency": 8,
+      "description": "游戏域通道（批 5 turn 服务类型框架）：玩家输入派发进绑定 RP 会话 {session_id, text, service=main|npc_chat|barks|event}——一期实开 main（chat.send_message 注入分支薄代理+background 即时回执，叙事经 data/messages 轮询回流）；npc_chat=mode.session 专属会话指引、barks/event 后置占位 400；会话绑定校验+单宿主租约（未 attach 409）"
+    },
+    {
+      "route_id": "mode_roleplay_game_operation",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/game/operation",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 10000,
+      "max_concurrency": 8,
+      "description": "游戏域通道（世界内嵌批次二）：自由操作→结构化命令 {session_id, operation: {id, params}}——Propose（id 须在会话绑定包 operations 清单/params 按 params_schema 校验，fail-closed 400 带原因）→ Adjudicate（声明 effects 走 State Contract Validator 同源结算 state.adjudicate 服务，与 behaviors 同通道；玩家也是 Agent 同一校验，原子结算无部分应用）；回执 {applied: true, state_delta} 或 {applied: false, reason: 具体原因}（拒绝必须带原因）；会话校验+单宿主租约与 game/turn 同闸；审计 source=operation 沉淀回路自动可见"
+    },
+    {
+      "route_id": "mode_roleplay_game_tick",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/game/tick",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 10000,
+      "max_concurrency": 8,
+      "description": "游戏域通道（世界内嵌批次三）：世界演化周期推进 {session_id, ticks?=1（上限 10 钳制）}——玩法包 tick 声明 steps 声明序逐 tick×逐 step 顺序结算（state.adjudicate Validator 单源；cycle 算子编排侧解析为绝对值，确定性零 LLM）；直达管道接口不经任务壳（触发器定时直达=离台推进，登记面）；无声明包空转回执 {applied: true, ticks, advanced: false} 不 404；回执 {applied, ticks, advanced, state_delta?, steps_fired?}；会话校验+单宿主租约与 game/operation 同闸；审计 source=tick 批标记行 summary 载 ticks 与 fired steps"
+    },
+    {
+      "route_id": "mode_roleplay_data_bootstrap",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/data/bootstrap",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "面板头元数据（模式名/链/panel_page_id）+ 玩法包双根清点（开演向导玩法勾选页数据源，聚合进既有端点零新增）"
+    },
+    {
+      "route_id": "mode_roleplay_data_wizard_axes",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/data/wizard/axes",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "开演向导四轴候选集（C2 整合刀）：文风轴动态列包内 styles/ 档位（档位名+特征清单首行；目录缺失=空列表降级）+ 尺度/节奏/代理权三静态考据轴；面板选择组装为 extra_context.rp_axes 快照（B8 通道），注入消费后置"
+    },
+    {
+      "route_id": "mode_roleplay_data_packs",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/data/packs",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "玩法包清点独立端点（面板数据驱动刀）：双根载荷（出厂∪用户层 packs 同 id 接管，id/name/description/origin/计数）——向导玩法勾选组与面板概览计数数据源；fail-soft 目录缺失=空列表"
+    },
+    {
+      "route_id": "mode_roleplay_data_sessions",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/data/sessions",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "本模式会话列表（pipeline-state mode 键过滤归一）"
+    },
+    {
+      "route_id": "mode_roleplay_data_messages",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/data/messages",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "会话对话流（messages.list 按 pipeline_id，query 必带 pipeline_id）"
+    },
+    {
+      "route_id": "mode_roleplay_data_cards",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/data/cards",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "角色卡画廊（包内 agents/card_*.yaml，ST V2 字段子集 + theme/avatar 宿主融合字段）"
+    },
+    {
+      "route_id": "mode_roleplay_data_lorebooks",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/data/lorebooks",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "世界书条目表（双根合并：包内出厂 ∪ 用户层 lorebooks 同 id 接管，ST World Info 子集）"
+    },
+    {
+      "route_id": "mode_roleplay_data_personas",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/data/personas",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "persona 档案列表（用户空间 roleplay_personas.json，name 唯一键）"
+    },
+    {
+      "route_id": "mode_roleplay_card_save",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/cards/save",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：卡保存落用户层（出厂同 id 覆盖即接管语义）"
+    },
+    {
+      "route_id": "mode_roleplay_card_delete",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/cards/delete",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：删除用户层卡（出厂卡拒绝并指引复制后修改）"
+    },
+    {
+      "route_id": "mode_roleplay_card_import",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/cards/import",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：导入 ST V2/V3 角色卡（PNG/JSON）落用户层，附结构 issues 与可疑指令 warnings"
+    },
+    {
+      "route_id": "mode_roleplay_card_export",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/cards/export",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：导出卡为 ST V2 信封（format=json 缺省/PNG 可选，base64 载荷 data URI 下载）"
+    },
+    {
+      "route_id": "mode_roleplay_lorebook_save",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/lorebooks/save",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：世界书保存落用户层（出厂同 id 覆盖即接管语义）"
+    },
+    {
+      "route_id": "mode_roleplay_lorebook_delete",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/lorebooks/delete",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：删除用户层世界书（出厂书拒绝并指引复制后修改）"
+    },
+    {
+      "route_id": "mode_roleplay_lorebook_import",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/lorebooks/import",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：导入 SillyTavern World Info JSON（entries 数字键对象/数组双形态）落用户层，附可疑指令 warnings"
+    },
+    {
+      "route_id": "mode_roleplay_persona_save",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/personas/save",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：persona 档案 upsert（name 唯一键，已存在即更新）"
+    },
+    {
+      "route_id": "mode_roleplay_persona_delete",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/personas/delete",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：删除 persona 档案（persona_id/name 同值二选一）"
+    },
+    {
+      "route_id": "mode_roleplay_game_page_data",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/game/page",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "自包含玩法页装配载荷（?session_id=；{session_id, page_html}，无声明=page_html null 回落通用渲染；serve-time 单源装配+包内 theme_css 内联）"
+    },
+    {
+      "route_id": "mode_roleplay_combo_save",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/combos/save",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：自定义玩法 combo 落盘（name/card_id 必填，card_id 须在卡库；同 id 覆盖）"
+    },
+    {
+      "route_id": "mode_roleplay_combo_delete",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/combos/delete",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：删除自定义玩法 combo（{id}；不存在如实报错）"
+    },
+    {
+      "route_id": "mode_roleplay_action_play",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/actions/play",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：以此角色开演（task_submit 派发，target=卡 agent 键）"
+    },
+    {
+      "route_id": "mode_roleplay_action_regenerate",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/actions/regenerate",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 20000,
+      "max_concurrency": 4,
+      "description": "写动作：重新生成末条回复变体（swipe 一期裁定，task_submit 派发）"
+    },
+    {
+      "route_id": "pipeline_open",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/pipeline/open",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 30000,
+      "max_concurrency": 4,
+      "description": "B8 管道标签：向既有会话开通扮演子管道（chat.send_message 创建分支薄代理）——{session_id, agent_id?, first_message?} 返回 {pipeline_id}"
+    },
+    {
+      "route_id": "mode_roleplay_drafts_list",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/data/wizards/drafts",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "创作草稿列表（query state 过滤）/单草稿详情（query draft_id：卡内容+lint 报告+smoke 记录+审核留痕三件套）"
+    },
+    {
+      "route_id": "mode_roleplay_draft_register",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/wizards/draft/register",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "草稿登记 {session_id, path|content, draft_id?}——形态校验+creator AI 署名强制落 draft 态（<user_config>/rp_drafts/）；path=会话工作空间内相对路径（realtime 越界拒绝），重登记=内容替换证据失效重置 draft"
+    },
+    {
+      "route_id": "mode_roleplay_draft_lint",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/wizards/draft/lint",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "草稿 lint {draft_id}——card_lint 单源结构校验+suspicious 注入形状+HTML 高危三面，lint_pass/rejected（报告落元数据；HTML 只标注不阻断）"
+    },
+    {
+      "route_id": "mode_roleplay_draft_smoke",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/wizards/draft/smoke",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "试玩登记 {draft_id, smoke_session_id, conclusion?, probe?}——一期人工试玩记录（试玩会话引用+结论）→ smoke_pass；probe 参数契约预留（携带即 400，自动探针接 eval 域=B-Ⅱ）"
+    },
+    {
+      "route_id": "mode_roleplay_draft_submit",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/wizards/draft/submit",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "提交人审 {draft_id}——smoke_pass→awaiting_review 进审核队列"
+    },
+    {
+      "route_id": "mode_roleplay_draft_approve",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/wizards/draft/approve",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "批准入库 {draft_id}——三闸强制（awaiting_review+lint/smoke 证据元数据缺一不可=409）受控搬移入用户层卡库（save 通道语义同 id 接管）+审核留痕 who/when/approve；creator AI 署名入库复写"
+    },
+    {
+      "route_id": "mode_roleplay_draft_reject",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/wizards/draft/reject",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "打回 {draft_id, reason}——意见回写元数据+留痕 who/when/reject/reason→rejected（草稿数据保留，回创作会话迭代）"
+    },
+    {
+      "route_id": "mode_roleplay_scene_turn",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/group/scene_turn",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 120000,
+      "max_concurrency": 4,
+      "description": "场景批编排（缺口批次四 §6 M2）：一次 LLM 调用产出在场全员反应 {session_id, scene.background, participants, visibility?} → {reactions: [{card_id, reaction, state_ops?}]}——多角色 prompt 按 agent 键展开（material 同路径），每角色情境投影=认知迷雾（visibility 覆盖收窄可见名单），fail-closed 解析单角色降级记因不炸整轮；LLM 传输面失败 502"
+    },
+    {
+      "route_id": "mode_roleplay_precipitation_candidates",
+      "method": "GET",
+      "path": "/ext/mode_roleplay/data/precipitation/candidates",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "沉淀回路候选统计（缺口批次三）：会话审计事件流水复盘——命名动作→同状态键同向同幅转移重复出现聚为候选规则（可枚举性判据，无流水=空列表）"
+    },
+    {
+      "route_id": "mode_roleplay_precipitation_promote",
+      "method": "POST",
+      "path": "/ext/mode_roleplay/data/precipitation/promote",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "沉淀回路人工审核闸（显式调用才固化）：候选规则体写入用户层玩法包 behaviors（双根同 id 接管生效），带来源标记可单独回退；作者声明 behavior 同 id=409"
+    }
+  ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "roleplay_studio",
+        "title": "酒馆",
+        "icon": "🍺",
+        "space": "workspace",
+        "slot": "tab",
+        "path": "/p/roleplay_studio",
+        "widget": "webview",
+        "props": {
+          "pluginId": "mode_roleplay",
+          "htmlPath": "/page/roleplay-panel",
+          "widgetId": "roleplay_studio"
+        },
+        "order": 30,
+        "description": "酒馆面板：角色卡/世界书/开演记录（对话在聊天区）",
+        "mode": "roleplay",
+        "detachable": {
+          "popout": true,
+          "childWindow": true,
+          "defaultSize": {
+            "w": 1080,
+            "h": 680
+          },
+          "minSize": {
+            "w": 720,
+            "h": 480
+          }
+        }
+      }
+    ],
+    "message_cards": [
+      {
+        "match": {
+          "marker": "state"
+        },
+        "style_id": "roleplay_state_card"
+      }
+    ],
+    "client_styles": [
+      {
+        "id": "rp_stream_cursor",
+        "path": "styles/stream_cursor.css",
+        "scope": "global",
+        "modes": [
+          "roleplay"
+        ],
+        "description": "RP 模式会话流式光标换装（modes 门控，非目标会话零注入）"
+      }
+    ]
+  },
+  "lifecycle": {
+    "idle_timeout_secs": 0
+  },
+  "provides": {
+    "capabilities": [
+      {
+        "namespace": "card",
+        "methods": [
+          "lint_decl",
+          "lint_actions",
+          "lint_pack_ui",
+          "lint_extensions",
+          "scan_suspicious",
+          "scan_html_card",
+          "scan_html_texts",
+          "texts_of_tree"
+        ],
+        "host": "sidecar",
+        "tool_prefix": "card"
+      }
+    ]
+  }
+}

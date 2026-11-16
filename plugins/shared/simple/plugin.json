@@ -1,0 +1,123 @@
+{
+  "id": "simple_tools",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Simple Tools Plugin",
+  "description": "简单工具集插件（read_execution_detail 执行详情读取）",
+  "version": "1.0.1",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "metrics_class": "tool",
+    "tools": [
+      {
+        "name": "read_execution_detail",
+        "description": "查看管道执行详细记录（渐进式披露）",
+        "render": {
+          "card": "form",
+          "title": "执行详情"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "pipeline_run_id": {
+              "type": "string",
+              "description": "管道运行 ID"
+            },
+            "level": {
+              "type": "string",
+              "enum": [
+                "skeleton",
+                "L1",
+                "L0"
+              ],
+              "description": "skeleton=骨架, L1=压缩块, L0=原始记录"
+            },
+            "iteration": {
+              "type": "integer",
+              "description": "目标轮次"
+            },
+            "fields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "L0层专用字段过滤"
+            }
+          },
+          "required": [
+            "pipeline_run_id",
+            "level"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "pipeline_run_id",
+            "level"
+          ],
+          "properties": {
+            "pipeline_run_id": {
+              "type": "string"
+            },
+            "level": {
+              "type": "string",
+              "description": "skeleton/L1/L0"
+            },
+            "trace_steps": {
+              "type": "array"
+            },
+            "trace_count": {
+              "type": "integer"
+            },
+            "message_lines": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "message_count": {
+              "type": "integer"
+            },
+            "hint": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string",
+              "description": "L1 压缩块分支"
+            },
+            "chunk_count": {
+              "type": "integer"
+            },
+            "chunks": {
+              "type": "array"
+            },
+            "turn_count": {
+              "type": "integer"
+            },
+            "turns": {
+              "type": "array"
+            },
+            "record_count": {
+              "type": "integer"
+            },
+            "records": {
+              "type": "array"
+            }
+          }
+        }
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "permissions": {},
+  "priority": 50,
+  "host_group": "light"
+}

@@ -7,10 +7,14 @@
  */
 import { vi } from 'vitest'
 
-/** sessionStore：固定活跃会话 session-1 */
+/** sessionStore：固定活跃会话 session-1（selector 感知：传选择器回所选字段，
+ *  无选择器回全量 state——与 zustand 用法对齐；R5 前为恒回全量对象的平替，
+ *  R5 卡片化后 MessageItem 以 selector 取 activeSessionId 作 draftKey 键域） */
 export function sessionStoreActiveMock() {
+  const state = { activeSessionId: 'session-1' }
   return {
-    useSessionStore: () => ({ activeSessionId: 'session-1' }),
+    useSessionStore: (selector?: (s: typeof state) => unknown) =>
+      selector ? selector(state) : state,
   }
 }
 
@@ -44,11 +48,18 @@ export function errorReportingMock() {
   }
 }
 
-/** fileLoaderRegistry：一次性 openFileWithLoader（附件打开走加载器路由） */
+/** fileLoaderRegistry：一次性 openFileWithLoader（附件打开走加载器路由）。
+ * 直链鉴权解析（useAuthedAttachmentUrl）/鉴权下载（downloadAttachment）以
+ * 透传桩承担渲染（行为契约在 fileLoaderRegistry.test / AttachmentImage.test）。 */
 export function attachmentOpenerMock() {
   return {
     openFileWithLoader: vi.fn(),
     markdownLinkInterceptor: () => () => false,
+    useAuthedAttachmentUrl: (src?: string) =>
+      src && !src.startsWith('/uploads/')
+        ? { url: src, failed: false }
+        : { url: 'blob:stub', failed: false },
+    downloadAttachment: vi.fn(async () => undefined),
   }
 }
 
@@ -79,4 +90,30 @@ export function messageContentRendererStubMock() {
 export function useMessageRenderStubMock() {
   const useMessageRender = () => ({ fragments: [], isStreaming: false })
   return { useMessageRender, default: useMessageRender }
+}
+
+/** useMessageRender 桩（带文本 fragments，assistant 默认气泡路径用）。
+ *  displayContent 置空：用户消息路径取 displayContent || message.content，
+ *  置空强制回退真实 message.content（同一文件内 user/assistant 共桩） */
+export function useMessageRenderTextMock(text: string) {
+  const useMessageRender = () => ({
+    fragments: [{ text }],
+    isStreaming: false,
+    messageId: 'assistant-1',
+    displayContent: '',
+  })
+  return { useMessageRender, default: useMessageRender }
+}
+
+/** MessageContentRenderer 桩：fragments 文本直出（assistant 默认气泡路径用） */
+export function messageContentRendererTextMock() {
+  return {
+    default: ({ fragments }: { fragments: Array<{ text: string }> }) => (
+      <div data-testid="assistant-fragments">
+        {fragments.map((f, i) => (
+          <span key={i}>{f.text}</span>
+        ))}
+      </div>
+    ),
+  }
 }

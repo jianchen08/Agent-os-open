@@ -1,137 +1,131 @@
 /** 消息项组件 显示单条消息，支持用户消息和 AI 消息的不同样式 */
 
-import { memo, useContext, useEffect, useRef, useState } from 'react'
+import { createContext, memo, useContext, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import {
   AlertCircleIcon as AlertCircle,
   Bell,
   Bot,
-  Check,
   FileCode,
   FileText,
   FileIcon as FileGeneric,
-  Loader2,
   MessageSquare,
   Sparkles,
   User,
 } from '@/assets/icons'
+import { CitationFloatBar } from '@/components/chat/CitationFloatBar'
+import { useBubbleCitationBar } from '@/components/chat/hooks/useBubbleCitationBar'
 import { LobeChatMarkdown } from '@/components/chat/LobeChatMarkdown'
 import { ImageGallery } from '@/components/media/ImageGallery'
 import { ErrorSourceBadge } from '@/components/shared/ErrorSourceBadge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
-import { Button } from '@/components/ui/button'
 import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
+import { useMessageStateCard } from '@/hooks/queries/useMessageStateCard'
 import { cn } from '@/lib/utils'
+import { usePresenterProfile } from '@/services/api/presenterProfiles'
 import { ErrorType, reportError } from '@/services/errorReporting'
 import { markdownLinkInterceptor, openFileWithLoader } from '@/services/fileLoaderRegistry'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { buildBubbleCardPayload, matchBubbleCardStyleId } from '@/services/schema/messageCardBody'
+import { stripBySpan } from '@/services/schema/messageStateCard'
+import { primaryModeTag, type PersonaPossession } from '@/services/schema/modeOptions'
+import { loadSessionExecutionOptions } from '@/services/sessionExecutionOptions'
+import { useAgentTabStore } from '@/stores/agentTabStore'
+import { useChatInputStore } from '@/stores/chatInputStore'
 import { useInteractionStore } from '@/stores/interactionStore'
 import { usePersonaPossessStore } from '@/stores/personaPossessStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useThemeStore } from '@/stores/themeStore'
+import { toolCallToActivity } from '@/utils/activityConverter'
 import { formatTimestamp } from '@/utils/format'
+import { getGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
+import { expandTruncatedToolResult } from '@/utils/toolResultBackfill'
+import { buildTruncatedResultDetailBlock, resolveTruncatedToolResultForDisplay } from '@/utils/toolResultTruncate'
+import ActivityCard from './ActivityCard'
+import { CompressionOriginalsButton } from './CompressionOriginalsButton'
 import useMessageRender from './hooks/useMessageRender'
 import { MessageActions } from './MessageActions'
 import MessageContentRenderer from './MessageContentRenderer'
-import { PluginMessageCard } from './PluginMessageCard'
-import { resolveMessageCardRoute } from './messageCardRouter'
-import { StyleMessageCard } from './StyleMessageCard'
-import { ToolMessageCard } from './ToolMessageCard'
-import {
-  PresenterContext,
-  PresenterScope,
-} from './presenterScope'
+import { MessageEditor } from './MessageEditor'
+import { MESSAGE_STYLE_METADATA_KEY, PluginMessageCard, resolveMessageStyle } from './PluginMessageCard'
 import { parseReferenceMessage, ReferenceChip } from './ReferenceChip'
-import { useMessageStateCard } from '@/hooks/queries/useMessageStateCard'
-import { stripBySpan } from '@/services/schema/messageStateCard'
+import { StreamActivityIndicator } from './StreamActivityIndicator'
+import { ToolTailActivity } from './ToolTailActivity'
 import type { MessageItemProps } from './types'
-import type { PresenterAvatar } from '@/services/api/presenterProfiles'
+import type { PresenterAvatar, PresenterProfile } from '@/services/api/presenterProfiles'
+import type { ActivityData } from '@/types/activity'
+import type { MessageToolCall } from '@/types/models'
+import type { ReactNode } from 'react'
+
+/** tool 消息状态 → ActivityStatus 映射（streaming 与 running 同义） */
+const TOOL_STATUS_MAP: Record<string, MessageToolCall['status']> = {
+  completed: 'completed',
+  failed: 'failed',
+  running: 'running',
+  streaming: 'running',
+  pending: 'pending',
+  cancelled: 'cancelled',
+}
+
+/** 来源注记的角色标签（引用块首行，用户可读口径；自 MessageActions 件二迁入） */
+const ROLE_SOURCE_LABELS: Record<MessageItemProps['message']['role'], string> = {
+  user: '用户',
+  assistant: '助手',
+  system: '系统',
+  tool: '工具',
+}
+
+/** 已警告过的未知状态值（同一未知值只警告一次，长消息流不刷屏） */
+const warnedUnknownToolStatuses = new Set<string>()
 
 /** 消息 markdown 附件链接拦截（/uploads 链接改走加载器，防整窗导航死页） */
 const attachmentLinkInterceptor = markdownLinkInterceptor()
 
-/** 消息编辑组件 */
-interface MessageEditorProps {
-  content: string
-  onSave: (newContent: string) => void
-  onCancel: () => void
-  disabled?: boolean
+/**
+ * 解析 tool 消息状态：未知值不猜 completed（未知 ≠ 成功），
+ * 归入 pending 并 console.warn 提示词表外的新状态。
+ */
+function resolveToolStatus(raw: string): MessageToolCall['status'] {
+  const mapped = TOOL_STATUS_MAP[raw]
+  if (mapped) return mapped
+  if (!warnedUnknownToolStatuses.has(raw)) {
+    warnedUnknownToolStatuses.add(raw)
+    console.warn(`[MessageItem] 未知工具消息状态 "${raw}"，按 pending 渲染`)
+  }
+  return 'pending'
 }
 
-const MessageEditor = ({ content, onSave, onCancel, disabled = false }: MessageEditorProps) => {
-  const [value, setValue] = useState(content)
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
+/** 消息编辑组件 */
+/** 呈现档案上下文（PresenterScope → 头像槽/徽标的单向投递） */
+const PresenterContext = createContext<PresenterProfile | null>(null)
 
-  useEffect(() => {
-    if (textareaRef.current) {
-      textareaRef.current.focus()
-      textareaRef.current.setSelectionRange(
-        textareaRef.current.value.length,
-        textareaRef.current.value.length,
-      )
-      textareaRef.current.style.height = 'auto'
-      textareaRef.current.style.height = `${Math.max(100, textareaRef.current.scrollHeight)}px`
-    }
-  }, [])
+/**
+ * 附身档 → 呈现档案：附身是临时态（消息本体身份仍是主 agent），仅投递
+ * {name, avatar} 供头像槽/徽标消费；origin 标 possess 以区分卡目录解析来源。
+ */
+function possessionToPresenter(possessed: PersonaPossession): PresenterProfile {
+  return { name: possessed.name, avatar: possessed.avatar, origin: 'possess' }
+}
 
-  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setValue(e.target.value)
-    e.target.style.height = 'auto'
-    e.target.style.height = `${Math.max(100, e.target.scrollHeight)}px`
-  }
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault()
-    if (value.trim() && value !== content) {
-      onSave(value)
-    } else if (value === content) {
-      onCancel()
-    }
-  }
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault()
-      handleSubmit(e)
-    } else if (e.key === 'Escape') {
-      onCancel()
-    }
-  }
-
-  return (
-    <form onSubmit={handleSubmit} className="flex w-full flex-col gap-2">
-      <textarea
-        ref={textareaRef}
-        value={value}
-        onChange={handleChange}
-        onKeyDown={handleKeyDown}
-        disabled={disabled}
-        className="border-input bg-background text-foreground focus:ring-ring min-h-[100px] w-full resize-none rounded-md border p-3 text-sm focus:ring-2 focus:outline-none"
-        placeholder="编辑消息内容..."
-      />
-      <div className="flex items-center justify-between">
-        <span className="text-muted-foreground text-xs">Ctrl+Enter 保存，Esc 取消</span>
-        <div className="flex gap-2">
-          <Button type="button" variant="ghost" size="sm" onClick={onCancel} disabled={disabled}>
-            取消
-          </Button>
-          <Button type="submit" size="sm" disabled={disabled || !value.trim()}>
-            {disabled ? (
-              <>
-                <Loader2 className="mr-1 h-icon-md w-icon-md animate-spin" />
-                保存中...
-              </>
-            ) : (
-              <>
-                <Check className="mr-1 h-icon-md w-icon-md" />
-                保存
-              </>
-            )}
-          </Button>
-        </div>
-      </div>
-    </form>
-  )
+/**
+ * 呈现档案作用域：assistant 消息带 agentId 或附身激活时挂载（挂载条件由
+ * 调用方裁定）。呈现优先级：消息自带模式卡键 → presenter 解析优先（卡身份是
+ * 消息的永久属性）；presenter 未命中且附身激活 → 附身档覆盖（解除即回退）。
+ * agentId 缺席时 usePresenterProfile 恒 null（零请求）。
+ */
+function PresenterScope({
+  agentId,
+  possessed,
+  children,
+}: {
+  agentId: string | undefined
+  possessed: PersonaPossession | null
+  children: ReactNode
+}) {
+  const presenter = usePresenterProfile(agentId)
+  const profile = presenter ?? (possessed ? possessionToPresenter(possessed) : null)
+  return <PresenterContext.Provider value={profile}>{children}</PresenterContext.Provider>
 }
 
 /**
@@ -219,6 +213,82 @@ function PresenterAwareBadge({ agent }: { agent: { name: string } | null }) {
   )
 }
 
+/**
+ * 呈现态工具消息体：工具卡片沉浸化——默认折叠为一行低调叙事行
+ * （`✦ <角色名>的静默行动`；名字缺席回退 `✦ 静默行动`；失败态显示
+ * `✦ 行动受挫` 弱警示色），点击行展开原生 ActivityCard 详情（可查证），
+ * 再点收回；折叠态为组件内 useState，每消息独立且不持久化。
+ * 非呈现态（presenter/附身双未命中）原样直出 ActivityCard，布局与既有零差异。
+ */
+function ToolMessageBody({ activity, failed }: { activity: ActivityData; failed: boolean }) {
+  const presenter = useContext(PresenterContext)
+  const [expanded, setExpanded] = useState(false)
+  if (!presenter) {
+    return <ActivityCard activity={activity} />
+  }
+  return (
+    <>
+      <button
+        type="button"
+        data-testid="presenter-tool-narrative"
+        onClick={() => setExpanded((v) => !v)}
+        className={cn(
+          'cursor-pointer rounded px-0.5 text-left text-xs transition-colors',
+          failed ? 'text-status-warning/70' : 'text-muted-foreground',
+        )}
+      >
+        {failed ? '✦ 行动受挫' : presenter.name ? `✦ ${presenter.name}的静默行动` : '✦ 静默行动'}
+      </button>
+      {expanded && <ActivityCard activity={activity} />}
+    </>
+  )
+}
+
+/**
+ * 本体卡体（ADR 2026-10-14-message-card-body-form）：头像载荷在卡组件内解析
+ * （呈现档案源既有——agentId → data_cards；附身激活时附身档覆盖，与
+ * PresenterScope 同优先序）。仅本体形态行挂载本组件——非 RP 会话/非命中行
+ * 零挂载零请求（兼容态数据面零变化），故 presenter hook 不上提至 MessageItem
+ * 顶层（无条件 useQuery 会牵连全部无 Provider 的既有渲染测试）。
+ */
+function BubbleCardBody({
+  message,
+  styleId,
+  content,
+  isUser,
+  possessActive,
+  possessed,
+}: {
+  message: MessageItemProps['message']
+  styleId: string
+  content: string
+  isUser: boolean
+  possessActive: boolean
+  possessed: PersonaPossession | null
+}) {
+  const presenterProfile = usePresenterProfile(isUser ? undefined : (message.agentId ?? undefined))
+  const presenter =
+    presenterProfile ?? (possessActive && possessed ? possessionToPresenter(possessed) : null)
+  return (
+    <PluginMessageCard
+      instanceKey={message.id}
+      styleId={styleId}
+      fit="auto"
+      message={{
+        content,
+        metadata: {
+          card: buildBubbleCardPayload(
+            isUser ? 'user' : 'assistant',
+            message.status,
+            message.agentId ?? undefined,
+            presenter,
+          ),
+        },
+      }}
+    />
+  )
+}
+
 /** 消息项组件 */
 export const MessageItem = memo(function MessageItem({
   message,
@@ -231,6 +301,8 @@ export const MessageItem = memo(function MessageItem({
   className = '',
   searchQuery,
   taskId,
+  readOnly = false,
+  streamAnchorMs,
 }: MessageItemProps) {
   const [isEditing, setIsEditing] = useState(false)
   const [versionContent, setVersionContent] = useState<string | null>(null)
@@ -243,11 +315,66 @@ export const MessageItem = memo(function MessageItem({
   // 背景图激活信号（背景图主题/皮肤）：平铺 AI 消息在背景图上必须框起
   // 气泡面（用户裁决：文字不许裸贴背景图；只框气泡区域不糊整块）
   const bgImageActive = useThemeStore((s) => s.bgImageActive)
+  // 消息气泡毛玻璃开关（主题级 effects.messageGlass）：皮肤激活期皮肤即
+  // "主题"（皮肤清单未声明该字段 → 缺省开，玻璃面是皮肤 flat 气泡的既有
+  // 观感基线，base 预设的声明不牵连皮肤）；内置主题按预设声明，缺省开
+  const messageGlassOn = useThemeStore((s) =>
+    s.activePluginTheme ? true : (s.themeConfig?.effects?.messageGlass ?? true),
+  )
+  const isTool = message.role === 'tool'
 
   const isSystemMessage = message.role === 'system'
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const isMessageStreaming = message.status === 'streaming'
+
+  // ────────────────────────────────────────────
+  // 选中文字引用/评审浮层（R4 件③，用户裁定：消息流入口=工作区制品同形态）
+  // 气泡内选中文字 → 选区上方弹 CitationFloatBar（fixed 视口坐标 portal）；
+  // R5 落点卡片化：动作产 CitationItem 入列（chatInputStore.citationsByDraftKey，
+  // draftKey 与 ChatContainer 接线同构 = activeTabId || activeSessionId），
+  // markdown 块引用合成移到发送装配期（composeSendParams），发送产物不变。
+  // ────────────────────────────────────────────
+  const bubbleRef = useRef<HTMLDivElement | null>(null)
+  const citationBarEnabled = !readOnly && !!activeSessionId
+  const { bar: citationBar, closeBar: closeCitationBar, handleBubbleMouseUp } =
+    useBubbleCitationBar(bubbleRef, citationBarEnabled)
+  const addCitation = useChatInputStore((s) => s.addCitation)
+  const activeTabId = useAgentTabStore((s) => s.activeTabId)
+  const citationDraftKey = activeTabId || activeSessionId || ''
+
+  /** 引用：选中文字定格快照入列（kind=message，title=角色标签；发送装配期
+   *  以 createdAt 还原来源时间注记） */
+  const handleCitationQuote = () => {
+    if (!citationBar) return
+    addCitation(citationDraftKey, {
+      kind: 'message',
+      title: ROLE_SOURCE_LABELS[message.role] ?? message.role,
+      excerpt: citationBar.selectedText,
+    })
+    closeCitationBar()
+    window.getSelection()?.removeAllRanges()
+  }
+
+  /** 评审：同引用入列 + 评语标记（意见为空时 store 侧不落 comment 字段） */
+  const handleCitationReview = (comment: string) => {
+    if (!citationBar) return
+    addCitation(citationDraftKey, {
+      kind: 'message',
+      title: ROLE_SOURCE_LABELS[message.role] ?? message.role,
+      excerpt: citationBar.selectedText,
+      comment,
+    })
+    closeCitationBar()
+    window.getSelection()?.removeAllRanges()
+  }
+  // 「压缩中」：上下文压缩是分钟级同步调用，期间无流式产出——占位气泡须显示
+  // 「压缩中」而非通用「思考中」，用户才能区分在等模型还是在等压缩
+  // （用户裁定 2026-10-28）。按活跃管道判定（压缩发生在当前对话管道内）。
+  const isCompressing = usePipelineMessageStore((s) => {
+    const pipelineId = s.activePipelineId
+    return pipelineId ? !!s.compressingByPipeline[pipelineId] : false
+  })
 
   const { data: agents = [] } = useAgentsQuery()
   const agent = message.agentId ? agents.find((a) => a.id === message.agentId) : null
@@ -317,10 +444,11 @@ export const MessageItem = memo(function MessageItem({
     setIsEditing(false)
   }
 
-  // 状态统一标记卡分发（2026-09-28 设计 §5b）：三道门（最新 assistant 非流式 /
-  // 解析步端点载荷在场 / 插件 message_cards 声明命中——宿主零样式 id 硬编码）。
-  // 正文按 span 精确切除标记段（标记可能在中间，后半正文不可丢）；无载荷/无
-  // 声明 = null，渲染输出与既有逐字节一致。
+  // 状态标记切除（2026-09-28 设计 §5b，渲染形态 2026-10-17 退役 webview 卡）：
+  // 三道门（最新 assistant 非流式/解析步端点载荷在场/插件 message_cards 声明
+  // 命中——宿主零样式 id 硬编码）。正文按 span 精确切除标记段（标记可能在中间，
+  // 后半正文不可丢）；状态呈现归工作区玩法页（状态快照/状态条），消息流不再
+  // 尾随状态卡。无载荷/无声明 = null，渲染输出与既有逐字节一致。
   const stateCard = useMessageStateCard(isLast && isAssistant && !isMessageStreaming)
   const stateCardMessage = stateCard
     ? { ...message, content: stripBySpan(message.content, stateCard.span) }
@@ -334,43 +462,206 @@ export const MessageItem = memo(function MessageItem({
     taskId,
   })
 
-  // 消息卡路由（分发器单点）：tool 活动卡 / 插件消息卡的判定与优先级在
-  // messageCardRouter（与既有渲染顺序逐字对齐）；命中即提前渲染对应卡组件，
-  // 未命中走下方 fallback 骨架。新消息卡形态 = router 加 kind + 卡组件文件。
-  const cardRoute = resolveMessageCardRoute(message)
+  // 本体形态分发门（ADR 2026-10-14-message-card-body-form）：会话 mode 绑定 →
+  // message_cards bubble 声明命中 → 该会话全部已定稿 user/assistant 消息行本体
+  // （头像+气泡+正文）交插件卡渲染；流式期间不接（宿主原生渲染零改动，刀3 降格
+  // 裁定）。显式 metadata.message_style 卡（上方分支）优先于本体形态。降级态/
+  // 等待占位/附件/引用片/非纯文本片段行保持宿主原生（卡不吞既有功能面）。
+  const sessionMode = useMemo(() => {
+    const sid = message.sessionId || activeSessionId
+    return sid ? primaryModeTag(loadSessionExecutionOptions(sid)?.modeBinding?.mode) || null : null
+  }, [message.sessionId, activeSessionId])
+  const bubbleStyleId = matchBubbleCardStyleId(
+    contributionRegistry.getAllMessageCards(),
+    sessionMode,
+  )
+  const bubbleDegraded =
+    message.status === 'error' || message.status === 'failed' || message.status === 'interrupted'
+  const bubbleWaitingEmpty = isAssistant && hasPendingInteraction && !message.content.trim()
+  const bubbleRefParsed =
+    isUser ? parseReferenceMessage(renderContext.displayContent || message.content) : null
+  const bubbleHasExtras =
+    (isUser && (message.attachments?.length ?? 0) > 0) ||
+    (bubbleRefParsed !== null && bubbleRefParsed.items.length > 0) ||
+    renderContext.fragments.some((f) => f.type !== 'text')
+  const bubbleContent = renderContext.displayContent || stateCardMessage.content
+  const bubbleRowActive =
+    bubbleStyleId !== null &&
+    resolveMessageStyle(bubbleStyleId) !== null &&
+    (isUser || isAssistant) &&
+    !isMessageStreaming &&
+    !isEditing &&
+    !bubbleDegraded &&
+    !bubbleWaitingEmpty &&
+    !bubbleHasExtras &&
+    bubbleContent.trim() !== ''
 
   /**
-   * 工具消息活动卡：非扮演态统一走 ActivityCard 满宽卡（与消息流 parts 吸收
-   * 路径同款）；扮演呈现态（presenter 命中或附身生效）由卡内 ToolMessageBody
-   * 特化为折叠叙事行。作用域按消息 agentId（卡键）与附身态挂载。
+   * 工具消息独立渲染：非扮演态统一走 ActivityCard 满宽卡（与消息流 parts 吸收
+   * 路径同款）；扮演呈现态（presenter 命中或附身生效）由 ToolMessageBody 特化
+   * 为折叠叙事行，工具卡片沉浸化。作用域按消息 agentId（卡键）与附身态挂载，
+   * presenter/附身双未命中时其内直出原生卡，渲染输出与既有逐字节一致。
    */
-  if (cardRoute?.kind === 'tool-card') {
+  if (isTool) {
+    const toolName: string = message.toolName || (message.metadata?.name as string | undefined) || '工具'
+    const toolStatus: string = message.status || 'completed'
+    const resolvedStatus = resolveToolStatus(toolStatus)
+    // 截断标记解析（数据面瘦身批次 1.2）：结果体超阈值时是「预览+标记」，
+    // 标记对象不进渲染分支；展开经 expandTruncatedToolResult 单条回取，
+    // 取回的全量消息按 id 替换桶内截断版，本卡随 store 更新显示全量。
+    const rawToolResult: unknown = message.toolResult || message.metadata?.result || message.metadata?.output
+    const resolvedTool = resolveTruncatedToolResultForDisplay(rawToolResult, message.toolResultData)
+    const toolError: unknown = message.toolError || message.metadata?.error
+    const durationMs: unknown = message.durationMs || message.metadata?.duration_ms
+
+    let activity = toolCallToActivity(
+      {
+        call_id: message.toolCallId || message.id,
+        tool_name: toolName,
+        tool_args: (message.metadata?.args as Record<string, unknown> | undefined) ?? {},
+        status: resolvedStatus,
+        result: resolvedTool.result,
+        resultData: resolvedTool.resultData,
+        error: typeof toolError === 'string' ? toolError : undefined,
+        duration_ms: typeof durationMs === 'number' ? durationMs : undefined,
+        containerTaskId: message.metadata?.containerTaskId as string | undefined,
+      },
+      {
+        onOpenFile: (filePath, recordCtid) =>
+          getGlobalOpenFileCallback()(filePath, recordCtid ?? taskId),
+      },
+    )
+    if (resolvedTool.mark) {
+      const mark = resolvedTool.mark
+      activity = {
+        ...activity,
+        details: [
+          ...(activity.details ?? []),
+          buildTruncatedResultDetailBlock(mark, () =>
+            expandTruncatedToolResult({
+              messageId: message.id,
+              callId: message.toolCallId || message.id,
+              sequence: mark.sequence,
+            }),
+          ),
+        ],
+      }
+    }
+
     return (
-      <ToolMessageCard
-        message={message}
-        possessActive={possessActive}
-        possessed={possessed}
-        taskId={taskId}
-        className={className}
-      />
+      <PresenterScope
+        agentId={message.agentId ?? undefined}
+        possessed={possessActive ? possessed : null}
+      >
+        <div
+          className={cn(
+            'group hover:bg-muted/30 flex gap-3 px-4 py-2 transition-colors',
+            'max-w-[calc(100%-44px)]',
+            className,
+          )}
+          data-testid="message-item"
+          data-role="tool"
+        >
+          <div className="min-w-0 flex-1">
+            <ToolMessageBody activity={activity} failed={resolvedStatus === 'failed'} />
+          </div>
+        </div>
+      </PresenterScope>
     )
   }
 
-  // 插件消息卡（模式体系 §5.0 通用能力）：判定已归路由层——非流式
-  // assistant/system 携带 metadata.message_style 且声明命中；system 覆盖
-  // 压缩块消息（消息段模型 §5.1）——卡只展示压缩结果，原始段落保留在
-  // 消息流中正常显示。
-  if (cardRoute?.kind === 'style-card') {
-    return (
-      <StyleMessageCard message={message} styleId={cardRoute.styleId} className={className} />
-    )
+  // 消息卡路由（模式体系 §5.0 通用能力）：非流式 assistant / system 消息携带
+  // metadata.message_style 且 registry 有声明 → 通用 webview 消息卡容器；
+  // 无声明（禁用/未声明）同源消失，回退下方默认渲染。流式期间不路由
+  // （正文仍在到达，卡片属终态渲染，完成后接管）。system 覆盖压缩块消息
+  // （消息段模型 §5.1：role=system 块 + metadata.message_style=compression_card，
+  // 卡渲染 + 宿主桥数据注入；带段引用的块消息另有宿主侧「查看原始」入口）。
+  if ((isAssistant || isSystemMessage) && !isMessageStreaming) {
+    const styleId = message.metadata?.[MESSAGE_STYLE_METADATA_KEY]
+    if (typeof styleId === 'string' && resolveMessageStyle(styleId)) {
+      return (
+        <div
+          className={cn(
+            'group hover:bg-muted/30 flex flex-col items-start gap-1 px-4 py-1.5 transition-colors',
+            'w-full',
+            className,
+          )}
+          data-testid="message-item"
+          data-role={message.role}
+          data-message-style={styleId}
+        >
+          <Avatar
+            className={cn(
+              'h-8 w-8 flex-shrink-0 rounded-xl shadow-sm',
+              isSystemMessage
+                ? 'bg-status-warning/15 text-status-warning'
+                : 'bg-secondary text-secondary-foreground',
+            )}
+          >
+            <AvatarFallback className="rounded-xl text-sm font-medium">
+              {isSystemMessage ? (
+                <Bell className="h-icon-md w-icon-md" />
+              ) : (
+                <Bot className="h-icon-md w-icon-md" />
+              )}
+            </AvatarFallback>
+          </Avatar>
+          <div className="min-w-0 w-full">
+            <PluginMessageCard
+              instanceKey={message.id}
+              styleId={styleId}
+              message={{ content: message.content, metadata: message.metadata }}
+            />
+            {/* 宿主侧「查看原始 N 条」：卡上行桥未放行内核段端点（web/cards/
+                compression.html 取数缺口），段取数由宿主承担（只读，不激活） */}
+            {isSystemMessage && <CompressionOriginalsButton message={message} />}
+          </div>
+        </div>
+      )
+    }
   }
+
+  // 元信息行（呈现徽标/时间戳/操作钮）：本体形态行与宿主原生行同源共用
+  // （观感衔接锚——流式原生行与定稿卡行并存时元信息行逐像素一致）
+  const metaRow = (
+    <div
+      className={cn(
+        'text-muted-foreground mt-1.5 flex items-center gap-3 text-xs',
+        isUser ? 'flex-row-reverse' : '',
+      )}
+    >
+      {isAssistant && <PresenterAwareBadge agent={agent ?? null} />}
+
+      <span className="text-muted-foreground/70">{formatTimestamp(message.timestamp)}</span>
+
+      {!readOnly && activeSessionId && (
+        <div className="flex items-center gap-2">
+          {/* 操作组（复制/编辑/回退/重新生成）hover 才显形；‹i/n› 分支切换器
+              常驻可见（它是到达历史代版本的唯一入口，藏进 hover 组内等于
+              「没有入口」——用户实证：重试多次仍找不到左右切换按钮） */}
+          <MessageActions
+            message={message}
+            sessionId={message.sessionId || activeSessionId}
+            isUserMessage={isUser}
+            isLastMessage={isLast}
+            disabled={isGenerating}
+            onCopy={handleCopy}
+            onEdit={handleEdit}
+            onContentUpdate={handleContentUpdate}
+            onRegenerate={onRegenerate}
+            onRollbackTo={onRollbackTo}
+            segmentSwitcherBaseSeq={segmentSwitcherBaseSeq}
+          />
+        </div>
+      )}
+    </div>
+  )
 
   const row = (
     <div
       className={cn(
-        'group flex gap-3 px-4 py-3 transition-colors',
-        isUser ? 'flex-row-reverse' : '',
+        'group flex flex-col gap-1 px-4 py-1.5 transition-colors',
+        isUser ? 'items-end' : 'items-start',
         'hover:bg-muted/30',
         className,
       )}
@@ -383,7 +674,7 @@ export const MessageItem = memo(function MessageItem({
         className={cn(
           'flex min-w-0 flex-col',
           isUser ? 'items-end' : 'items-start',
-          isUser ? 'max-w-[80%] sm:max-w-[75%]' : 'max-w-[calc(100%-44px)] flex-1',
+          isUser ? 'max-w-[80%] sm:max-w-[75%]' : 'w-full',
         )}
       >
         {isEditing ? (
@@ -396,8 +687,8 @@ export const MessageItem = memo(function MessageItem({
                 ? 'var(--bubble-user-radius, 1.5rem)'
                 : 'var(--bubble-ai-radius, 1rem)',
               boxShadow: isUser
-                ? 'var(--bubble-user-shadow, 0 1px 2px 0 rgb(0 0 0 / 0.05))'
-                : 'var(--bubble-ai-shadow, 0 1px 2px 0 rgb(0 0 0 / 0.05))',
+                ? 'var(--bubble-user-shadow)'
+                : 'var(--bubble-ai-shadow)',
               border: isUser ? 'var(--bubble-user-border, none)' : 'var(--bubble-ai-border, none)',
               padding: isUser
                 ? 'var(--bubble-user-padding, 0.75rem 1rem)'
@@ -427,10 +718,10 @@ export const MessageItem = memo(function MessageItem({
                     ? 'var(--bubble-user-radius, 1.5rem)'
                     : 'var(--bubble-ai-radius, 1rem)',
                 boxShadow: isSystemMessage
-                  ? 'var(--bubble-ai-shadow, 0 1px 2px 0 rgb(0 0 0 / 0.05))'
+                  ? 'var(--bubble-ai-shadow)'
                   : isUser
-                    ? 'var(--bubble-user-shadow, 0 1px 2px 0 rgb(0 0 0 / 0.05))'
-                    : 'var(--bubble-ai-shadow, 0 1px 2px 0 rgb(0 0 0 / 0.05))',
+                    ? 'var(--bubble-user-shadow)'
+                    : 'var(--bubble-ai-shadow)',
                 border: isSystemMessage
                   ? 'none'
                   : isUser
@@ -457,18 +748,25 @@ export const MessageItem = memo(function MessageItem({
               // 无圆角/阴影/边框，文字随对话区区域前景（--region-chat-fg）
               if (!isUser && !isSystemMessage && bubbleAiMode === 'flat') {
                 if (bgImageActive) {
-                  // 背景图上平铺文本不许裸贴：换成
-                  // 半透明气泡面——面用皮肤原生气泡令牌（翻译器按皮肤
-                  // patches.css 提取 --bubble-ai-bg，跟皮肤颜色一样），
-                  // 无皮肤气泡声明的主题回退 --card；局部仅内容区（收拢由
-                  // index.css fit-content 规则完成），模糊限定在气泡盒内
-                  bubbleStyle.background = 'var(--bubble-ai-bg, color-mix(in srgb, var(--card) 80%, transparent))'
+                  // 背景图上平铺文本不许裸贴：恒有气泡面（用户裁决）——面用
+                  // 皮肤原生气泡令牌（翻译器按皮肤 patches.css 提取
+                  // --bubble-ai-bg，跟皮肤颜色一样），无令牌回退 --card；
+                  // 局部仅内容区（收拢由 index.css fit-content 规则完成）。
+                  // 面是否带毛玻璃（blur+玻璃描边）由主题 effects.messageGlass
+                  // 决定；关=去 blur/描边留面（不裸贴仍在）。
+                  // 回退面/描边一律 hsl(var(--x)) 原样消费、禁追加 alpha：
+                  // backdropContrast 管线在背景图上下文会把 --card/--border
+                  // 改写为自带 slash alpha 的形态（面/线 alpha 按真实背景
+                  // 包络计算保 AA），再拼 `/ 0.8` 会双斜杠非法（color-mix 基
+                  // 三元组同理非法=R22 死声明根因）；无管线时值即纯三元组，
+                  // 两种形态 hsl() 皆合法。
+                  bubbleStyle.background = 'var(--bubble-ai-bg, hsl(var(--card)))'
                   bubbleStyle.color = 'var(--bubble-ai-text, var(--foreground))'
                   bubbleStyle.borderRadius = '18px 18px 18px 6px'
-                  bubbleStyle.boxShadow = '0 3px 10px rgb(0 0 0 / 0.08)'
-                  bubbleStyle.border = '1px solid color-mix(in srgb, var(--border) 50%, transparent)'
+                  bubbleStyle.boxShadow = 'var(--shadow-sm)'
+                  bubbleStyle.border = messageGlassOn ? '1px solid hsl(var(--border))' : ''
                   bubbleStyle.padding = '0.5rem 0.75rem'
-                  bubbleStyle.backdropFilter = 'blur(6px)'
+                  bubbleStyle.backdropFilter = messageGlassOn ? 'blur(6px)' : ''
                 } else {
                   // 空串赋值 = React 省略该内联属性：透明底、无圆角/阴影/边框，
                   // 文字继承对话区区域前景（--region-chat-fg）
@@ -524,7 +822,13 @@ export const MessageItem = memo(function MessageItem({
                   return null
                 }
                 return (
-                  <div className={bubbleCls} style={bubbleStyle}>
+                  <div
+                    ref={bubbleRef}
+                    onMouseUp={handleBubbleMouseUp}
+                    className={bubbleCls}
+                    style={bubbleStyle}
+                    data-bubble={isUser ? 'user' : 'ai'}
+                  >
                     {userContent && (
                       // 用户消息统一 markdown 渲染（与 assistant 同款）：
                       // 附件索引以 markdown 引用并入 content（![f](/uploads/x.png)），
@@ -607,7 +911,13 @@ export const MessageItem = memo(function MessageItem({
               }
 
               return (
-                <div className={bubbleCls} style={bubbleStyle}>
+                <div
+                  ref={bubbleRef}
+                  onMouseUp={handleBubbleMouseUp}
+                  className={bubbleCls}
+                  style={bubbleStyle}
+                  data-bubble={isUser ? 'user' : 'ai'}
+                >
                   {renderContext.fragments.length === 0 ? (
                     isMessageStreaming || _waitingInteraction ? (
                       <div className="flex items-center gap-2">
@@ -617,10 +927,10 @@ export const MessageItem = memo(function MessageItem({
                             <span className="text-sm text-status-info">等待用户响应...</span>
                           </>
                         ) : (
-                          <>
-                            <Loader2 className="h-icon-md w-icon-md animate-spin" />
-                            <span className="text-sm">思考中...</span>
-                          </>
+                          <StreamActivityIndicator
+                            label={isCompressing ? '压缩中...' : '思考中...'}
+                            anchorMs={streamAnchorMs}
+                          />
                         )}
                       </div>
                     ) : _isFailedMessage ? (
@@ -639,64 +949,62 @@ export const MessageItem = memo(function MessageItem({
                       fragments={renderContext.fragments}
                       isStreaming={isMessageStreaming}
                       searchQuery={searchQuery}
+                      streamAnchorMs={streamAnchorMs}
                     />
                   )}
+                  <ToolTailActivity streaming={renderContext.isStreaming} parts={message.parts} pendingInteraction={hasPendingInteraction} compressing={isCompressing} streamAnchorMs={streamAnchorMs} />
                 </div>
               )
             })()}
           </>
         )}
 
-        <div
-          className={cn(
-            'text-muted-foreground mt-1.5 flex items-center gap-3 text-xs',
-            isUser ? 'flex-row-reverse' : '',
-          )}
-        >
-          {isAssistant && <PresenterAwareBadge agent={agent ?? null} />}
-
-          <span className="text-muted-foreground/70">{formatTimestamp(message.timestamp)}</span>
-
-          {activeSessionId && (
-            <div className="opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity duration-200">
-              <MessageActions
-                message={message}
-                sessionId={message.sessionId || activeSessionId}
-                isUserMessage={isUser}
-                isLastMessage={isLast}
-                disabled={isGenerating}
-                onCopy={handleCopy}
-                onEdit={handleEdit}
-                onContentUpdate={handleContentUpdate}
-                onRegenerate={onRegenerate}
-                onRollbackTo={onRollbackTo}
-                segmentSwitcherBaseSeq={segmentSwitcherBaseSeq}
-              />
-            </div>
-          )}
-        </div>
+        {metaRow}
+        {/* 选中文字引用/评审浮层（fixed portal，视口坐标）：气泡选区快照见上 */}
+        {citationBarEnabled && citationBar && (
+          <CitationFloatBar
+            positioning="fixed"
+            position={{ x: citationBar.x, y: citationBar.y }}
+            onQuote={handleCitationQuote}
+            onReview={handleCitationReview}
+            onClose={closeCitationBar}
+          />
+        )}
       </div>
     </div>
   )
 
-  // 状态卡（追加形态）：正文（已切标记）之后尾随插件 webview 状态小卡——
-  // 渲染本体在插件（message-style 声明 htmlPath），宿主只做数据路由与挂载。
-  const rowWithCard =
-    stateCard ? (
-      <>
-        {row}
-        <PluginMessageCard
-          instanceKey={`${message.id}:state`}
-          styleId={stateCard.styleId}
-          message={{
-            content: stateCardMessage.content,
-            metadata: { state_updates: { entries: stateCard.entries, span: stateCard.span } },
-          }}
-        />
-      </>
-    ) : (
-      row
-    )
+  // 本体形态行（ADR 2026-10-14-message-card-body-form）：头像槽/气泡盒/正文整体
+  // 交插件卡（fit=auto 自适应高，载荷信封 metadata.card）；元信息行与宿主同源。
+  const bodyRow = bubbleRowActive ? (
+    <div
+      className={cn(
+        'group flex flex-col gap-1 px-4 py-1.5 transition-colors',
+        isUser ? 'items-end' : 'items-start',
+        'hover:bg-muted/30',
+        className,
+      )}
+      data-testid="message-item"
+      data-role={message.role}
+      data-message-card-body={bubbleStyleId ?? undefined}
+    >
+      <BubbleCardBody
+        message={message}
+        styleId={bubbleStyleId ?? ''}
+        content={bubbleContent}
+        isUser={isUser}
+        possessActive={possessActive}
+        possessed={possessActive ? possessed : null}
+      />
+      {metaRow}
+    </div>
+  ) : (
+    row
+  )
+
+  // 状态标记已切除（webview 状态卡退役，2026-10-17）：stateCard 只承载标记段
+  // span 切除（stateCardMessage），消息流不再尾随任何状态卡件——状态呈现归
+  // 工作区玩法页（状态快照/状态条）。
 
   // 扮演呈现作用域：assistant+agentId（卡身份解析）或附身激活（限活跃管道
   // 会话）挂载，其余消息行不引入作用域，渲染输出与既有完全一致；
@@ -707,9 +1015,9 @@ export const MessageItem = memo(function MessageItem({
         agentId={message.agentId ?? undefined}
         possessed={possessActive ? possessed : null}
       >
-        {rowWithCard}
+        {bodyRow}
       </PresenterScope>
     )
   }
-  return rowWithCard
+  return bodyRow
 })

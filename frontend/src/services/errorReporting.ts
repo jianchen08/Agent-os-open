@@ -165,7 +165,7 @@ export function captureException(error: Error, context?: ErrorContext): void {
  */
 export function installGlobalErrorListeners(): void {
   window.addEventListener('error', (event) => {
-    reportError(event.message || '前端运行时错误', {
+    reportError(event.message || '界面运行时错误', {
       type: ErrorType.CLIENT,
       severity: ErrorSeverity.ERROR,
       component: 'window.onerror',

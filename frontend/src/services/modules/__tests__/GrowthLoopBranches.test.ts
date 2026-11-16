@@ -25,7 +25,7 @@ const mocks = vi.hoisted(() => ({
   initializeWidgets: vi.fn(),
   initResyncOnSchema: vi.fn(),
   disposeResyncOnSchema: vi.fn(),
-  syncPluginStyles: vi.fn(),
+  syncPluginStylesForSession: vi.fn(),
   removeAllPluginStyles: vi.fn(),
   refreshShortcuts: vi.fn(),
   setTransport: vi.fn(),
@@ -68,7 +68,7 @@ vi.mock('@/services/dshAdapter', () => ({
   loadDshAdapterContributions: mocks.loadDshAdapterContributions,
 }))
 vi.mock('@/services/pluginStyles', () => ({
-  syncPluginStyles: mocks.syncPluginStyles,
+  syncPluginStylesForSession: mocks.syncPluginStylesForSession,
   removeAllPluginStyles: mocks.removeAllPluginStyles,
 }))
 vi.mock('@/services/api/client', () => ({
@@ -241,11 +241,11 @@ describe('GrowthLoop — schema 装载面', () => {
 
     expect(mocks.retryPendingTheme).toBeTruthy()
     expect(mocks.syncPluginThemes).toBeTruthy()
-    expect(mocks.syncPluginStyles).toHaveBeenCalledWith([{ id: 's1' }])
+    expect(mocks.syncPluginStylesForSession.mock.calls[0][0]).toEqual([{ id: 's1' }])
     expect(mocks.refreshShortcuts).toHaveBeenCalledTimes(1)
     expect(mocks.loadDshAdapterContributions).toHaveBeenCalledTimes(1)
     expect(
-      useNotificationStore.getState().notifications.filter((n) => n.title === '插件贡献加载失败'),
+      useNotificationStore.getState().notifications.filter((n) => n.title === '插件功能加载失败'),
     ).toEqual([])
   })
 })

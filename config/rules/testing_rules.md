@@ -20,23 +20,11 @@
 |------|------|
 | 测试粒度 | 函数、方法、类级别 |
 | 测试范围 | 单个单元，与外部依赖隔离 |
-| 运行速度 | 毫秒级 |
 | 依赖 | 使用 Mock 隔离外部依赖 |
 
 ```python
-import pytest
-
 def test_calculate_discount():
-    result = calculate_discount(100, 0.2)
-    assert result == 20
-
-def test_user_service_get_user(mocker):
-    mock_repo = mocker.Mock()
-    mock_repo.get_by_id.return_value = User(id=1, name="Test")
-    service = UserService(user_repo=mock_repo)
-    user = service.get_user(1)
-    assert user.id == 1
-    mock_repo.get_by_id.assert_called_once_with(1)
+    assert calculate_discount(100, 0.2) == 20
 ```
 
 #### 集成测试
@@ -45,23 +33,16 @@ def test_user_service_get_user(mocker):
 |------|------|
 | 测试粒度 | 模块、服务级别 |
 | 测试范围 | 多个单元协作，真实依赖 |
-| 运行速度 | 秒级 |
 | 依赖 | 使用 Testcontainers 或内存数据库 |
 
 ```python
-@pytest.fixture
-def db_session(db_engine):
-    Session = sessionmaker(bind=db_engine)
-    session = Session()
-    yield session
-    session.rollback()
-    session.close()
-
 def test_user_repository_create(db_session):
     repo = UserRepository(db_session)
     user = repo.create(User(name="Test", email="test@example.com"))
     assert user.id is not None
 ```
+
+（db_session 等 fixture 的搭建方式见 §5.2。）
 
 #### E2E 测试
 
@@ -69,7 +50,6 @@ def test_user_repository_create(db_session):
 |------|------|
 | 测试粒度 | 整个应用 |
 | 测试范围 | 从 UI 到数据库的真实用户流程 |
-| 运行速度 | 分钟级 |
 | 依赖 | 真实服务、真实浏览器 |
 
 ---
@@ -158,23 +138,11 @@ def test_email_service_send(mocker):
     mock_sender = mocker.Mock()
     mock_sender.send.return_value = True
     service = EmailService(sender=mock_sender)
-    result = service.send("test@example.com", "Hello")
-    assert result is True
-    mock_sender.send.assert_called_once()
-
-# Mock 模块级函数
-def test_payment_process(mocker):
-    mocker.patch("app.services.payment.stripe.Charge.create", return_value={"status": "succeeded"})
-    result = payment_process(1000, "card_123")
-    assert result.status == "succeeded"
-
-# Fixture 复用 Mock
-@pytest.fixture
-def mock_user_repo(mocker):
-    mock = mocker.Mock()
-    mock.get_by_id.return_value = User(id=1, name="Test")
-    return mock
+    assert service.send("test@example.com", "Hello") is True
 ```
+
+其余两式一句话：Mock 模块级函数用 `mocker.patch("<模块>.<函数>", return_value=…)`；
+复用 Mock 走 `pytest.fixture` 返回构造好的 `mocker.Mock()`。
 
 ### 4.4 Mock 最佳实践
 
@@ -196,15 +164,10 @@ def mock_user_repo(mocker):
 
 ### 5.2 Fixture 策略
 
-```python
-# Factory 模式
-class UserFactory(Factory):
-    class Meta:
-        model = User
-    name = "Test User"
-    email = Factory(lambda: f"user_{uuid.uuid4()}@example.com")
+Factory 模式（factory_boy 等）用声明字段 + 惰性唯一值生成测试数据（如
+`email = Factory(lambda: f"user_{uuid.uuid4()}@example.com")`）。事务回滚（推荐）：
 
-# 事务回滚（推荐）
+```python
 @pytest.fixture
 def db_session():
     session = db_session_maker()
@@ -228,40 +191,19 @@ def db_session():
 
 ### 6.1 Playwright 配置
 
-```typescript
-// playwright.config.ts
-export default defineConfig({
-  testDir: './tests/e2e',
-  fullyParallel: true,
-  forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 2 : 0,
-  use: {
-    baseURL: 'http://localhost:3000',
-    trace: 'on-first-retry',
-    screenshot: 'only-on-failure',
-  },
-  projects: [
-    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
-    { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
-  ],
-});
-```
+`playwright.config.ts` 要点（文字描述，勿整抄模板）：`testDir` 指向 e2e 目录；
+CI 下 `forbidOnly: true` 且 `retries` ≥2（本地 0）；`use` 固定 `baseURL`、
+`trace: 'on-first-retry'`、`screenshot: 'only-on-failure'`；`projects` 按需枚举
+浏览器（chromium/firefox 等）。
 
 ### 6.2 页面对象模式
 
 ```typescript
 export class LoginPage {
-  readonly usernameInput: Locator;
-  readonly submitButton: Locator;
-
-  constructor(page: Page) {
-    this.usernameInput = page.getByTestId('username-input');
-    this.submitButton = page.getByTestId('login-submit');
-  }
-
-  async login(username: string, password: string) {
-    await this.usernameInput.fill(username);
-    await this.submitButton.click();
+  constructor(private page: Page) {}
+  async login(username: string) {
+    await this.page.getByTestId('username-input').fill(username);
+    await this.page.getByTestId('login-submit').click();
   }
 }
 ```
@@ -394,7 +336,7 @@ export class LoginPage {
 3. `@audit` 若填，`T5#<n>` 的 `<n>` 必须是 `reports/audit_round3/T5_tests.md` §⑨ 表中存在的编号。
 4. 标记缺失或引用无效 → `scripts/check_test_traceability.py` 退出非 0 → CI 拦截。
 
-> 校验脚本与 CI 接入在「测试治理 · 阶段 5」落地；落地前，新增/修改测试应主动补齐标记（软约束）。
+> 校验已接线：`scripts/run_gates.py` 的 traceability-gate 调 `scripts/check_test_traceability.py` 执法；存量未标记文件受 `.github/traceability-baseline.txt` 棘轮约束（未标记 `@feature` 文件数上限只减不增，治理一批后 `--init` 收紧）。新增/修改测试文件必须带 `@feature` 标记（相对基线新增未标记文件即红）。
 
 ### 9.4 与意图测试（§8）的关系
 

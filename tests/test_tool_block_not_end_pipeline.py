@@ -1,7 +1,7 @@
 # @feature: FP-0.2.〇 管道引擎与插件执行模型 | @vision: V3 可嵌入 | @ci: python-test
 from tests._pipeline_plugin_path import add_plugin_dir
 
-add_plugin_dir("core", "tool_core")
+add_plugin_dir("tool_core")
 """工具级拦截应转为「工具失败结果」而非终结整个管道。
 
 历史 Bug:
@@ -22,6 +22,34 @@ add_plugin_dir("core", "tool_core")
 由 tool_core Rust 侧幂等单测 + 各拦截方插件测试承接。
 """
 from pathlib import Path
+
+
+def _find_post_next():
+    """定位 autonomous.yaml 中 id=post 的 next 路由块（post 嵌套在 phase 组内）。"""
+    import yaml
+
+    active = Path(__file__).resolve().parent.parent / "config" / "pipelines" / "autonomous.yaml"
+    cfg = yaml.safe_load(active.read_text(encoding="utf-8"))
+
+    def _find(node):
+        if isinstance(node, dict):
+            if node.get("id") == "post" and "next" in node:
+                return node["next"]
+            for value in node.values():
+                found = _find(value)
+                if found is not None:
+                    return found
+        elif isinstance(node, list):
+            for item in node:
+                found = _find(item)
+                if found is not None:
+                    return found
+        return None
+
+    rules = _find(cfg)
+    if rules is None:
+        raise AssertionError("autonomous.yaml 未找到 post.next 路由块")
+    return rules
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -65,33 +93,7 @@ class TestNoEndRouteForToolBlock:
 
 class TestPostRouteTaskTextOnlyLoop:
     def _post_next(self):
-        import yaml
-
-        active = (
-            Path(__file__).resolve().parent.parent / "config" / "pipelines" / "autonomous.yaml"
-        )
-        cfg = yaml.safe_load(active.read_text(encoding="utf-8"))
-
-        def _find_post(node):
-            """递归定位 id=post 且带 next 的路由节点（post 嵌套在 phase 组内）。"""
-            if isinstance(node, dict):
-                if node.get("id") == "post" and "next" in node:
-                    return node["next"]
-                for value in node.values():
-                    found = _find_post(value)
-                    if found is not None:
-                        return found
-            elif isinstance(node, list):
-                for item in node:
-                    found = _find_post(item)
-                    if found is not None:
-                        return found
-            return None
-
-        rules = _find_post(cfg)
-        if rules is None:
-            raise AssertionError("autonomous.yaml 未找到 post.next 路由块")
-        return rules
+        return _find_post_next()
 
     def test_fallback_end_is_last_and_unconditional(self):
         """兜底 end 必须是最后一条且无条件（所有可续跑规则都在它之前）。"""
@@ -121,3 +123,34 @@ class TestPostRouteTaskTextOnlyLoop:
             )
         # 排序：回环规则必须先于兜底 end（rules[-1]）
         assert rules.index(rule) < len(rules) - 1
+
+
+# ═══════════════════════════════════════════════════════════════
+# P0: post 出口路由契约——待执行工具调用必须回轮执行（不得静默终局）
+# 2026-10-08：静态化迁移删掉「raw_tool_calls 非空 → loop」通用回环路由后，
+# 会话管道（无 task.id，无任务管道兜底 loop）带调用的轮次直接落兜底 end——
+# 工具调用被吞、run 假绿 completed 且零报错（装机版 10-02 起全部会话运行
+# 0 工具执行）。契约：raw_tool_calls 非空回环规则必须存在且位于兜底 end
+# 之前；配置再被删时，引擎收尾异常终局闸以 dropped_tool_calls 失败署名
+# 显式报错兜底（不再静默）。
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestPostRouteToolCallsLoop:
+    def test_tool_calls_loop_before_fallback_end(self):
+        """raw_tool_calls 非空回环规则必须存在且位于兜底 end 之前。"""
+        rules = _find_post_next()
+        loop_rules = [
+            r
+            for r in rules[:-1]
+            if r.get("then") == "loop"
+            and r.get("when")
+            and "raw_tool_calls != []" in r["when"]
+        ]
+        assert loop_rules, (
+            "缺少工具调用回环规则（raw_tool_calls 非空 → loop）：会话管道"
+            "带调用的轮次会落兜底 end，工具调用被吞、run 假绿 completed"
+        )
+        assert rules.index(loop_rules[0]) < len(rules) - 1, (
+            "工具调用回环规则必须先于兜底 end，否则永远不可达"
+        )

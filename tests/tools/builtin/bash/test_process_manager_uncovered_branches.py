@@ -16,9 +16,10 @@
 - 终止/收尾：温和终止超时后升级强杀、wait 吞掉异常、磁盘日志退出码解析
   容错、进程数超限懒惰清理（含 100 边界）；
 - 看门狗：主循环取消退出/异常存续、全员退出早退、无 backend 回退
-  terminate、reap 强杀失败吞掉、shutdown_all 记录终止失败与看门狗异常；
-- 后端：psutil 缺失/枚举失败/杀失败逐级降级、内存采样失败返回 None、
-  ContainerProcessBackend._run_cmd 走真实短命子进程。
+  terminate、reap 强杀失败保持状态不误报、shutdown_all 记录终止失败与
+  看门狗异常；
+- 后端：psutil 缺失/枚举失败/杀失败逐级降级、内存采样失败显式 None+
+  告警日志、ContainerProcessBackend._run_cmd 走真实短命子进程。
 """
 
 from __future__ import annotations
@@ -37,13 +38,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from bash_types import ProcessInfo
-from input_handler import InputHandler
-from process_manager import (
+from agentos_plugin_sdk.process_runtime import ProcessInfo
+from agentos_plugin_sdk.process_runtime import InputHandler
+from agentos_plugin_sdk.process_runtime import (
     ContainerProcessBackend,
     LocalProcessBackend,
     ProcessManager,
 )
+# 本地 shell 五级路由单源（自 process_manager 抽出，普查 ⚠️-6）
+import agentos_plugin_sdk.process_runtime.shell_route as shell_route
 
 pytestmark = pytest.mark.unit
 
@@ -145,7 +148,7 @@ def fast_timeout(monkeypatch):
     """把 wait_for 的超时按 1/10 缩短（保留真实计时器与 TimeoutError 机制，
     注入可调延迟而非零延迟 mock），避免 terminate/reap 的 5s/3s 兜底拖慢测试。
     内层超时恒小于外层包装超时（同比例缩短），不会误伤被测协程。"""
-    import process_manager as pm_mod
+    import agentos_plugin_sdk.process_runtime.manager as pm_mod
 
     real_wait_for = asyncio.wait_for
 
@@ -173,10 +176,13 @@ async def _wait_cleaned(mgr: ProcessManager, pid: int, timeout: float = 15.0) ->
 
 
 def _psutil_stub() -> ModuleType:
-    """构造假 psutil 模块（函数内 `import psutil` 命中 sys.modules 存根）。"""
+    """构造假 psutil 模块（函数内 `import psutil` 命中 sys.modules 存根）。
+
+    异常层级与真库对齐：NoSuchProcess/AccessDenied 均为 Error 子类。"""
     mod = ModuleType("psutil")
-    mod.NoSuchProcess = type("NoSuchProcess", (Exception,), {})  # type: ignore[attr-defined]
-    mod.AccessDenied = type("AccessDenied", (Exception,), {})  # type: ignore[attr-defined]
+    mod.Error = type("Error", (Exception,), {})  # type: ignore[attr-defined]
+    mod.NoSuchProcess = type("NoSuchProcess", (mod.Error,), {})  # type: ignore[attr-defined]
+    mod.AccessDenied = type("AccessDenied", (mod.Error,), {})  # type: ignore[attr-defined]
     return mod
 
 
@@ -247,7 +253,7 @@ def test_init_tolerates_uncreatable_log_dir(tmp_path, caplog):
     """日志目录不可创建（父级是文件）→ 告警且不阻断管理器构建。"""
     blocked = tmp_path / "blocked"
     blocked.write_text("x", encoding="utf-8")
-    with caplog.at_level(logging.WARNING, logger="process_manager"):
+    with caplog.at_level(logging.WARNING, logger="agentos_plugin_sdk.process_runtime.manager"):
         mgr = ProcessManager(log_dir=blocked / "logs")
     assert mgr.active_processes == {}
     assert any("日志目录创建失败" in r.getMessage() for r in caplog.records)
@@ -258,7 +264,7 @@ def test_ensure_log_dir_tolerates_failure_and_returns_resolved(tmp_path, caplog)
     blocked = tmp_path / "blocked"
     blocked.write_text("x", encoding="utf-8")
     mgr = _make_manager(tmp_path)
-    with caplog.at_level(logging.WARNING, logger="process_manager"):
+    with caplog.at_level(logging.WARNING, logger="agentos_plugin_sdk.process_runtime.manager"):
         resolved = mgr._ensure_log_dir(blocked / "sub")
     assert Path(resolved).name == "sub"
     assert any("日志目录创建失败" in r.getMessage() for r in caplog.records)
@@ -274,7 +280,7 @@ def test_startup_sweep_tolerates_unreadable_dir(caplog):
         def glob(self, pattern: str):
             raise OSError("directory unreadable")
 
-    with caplog.at_level(logging.WARNING, logger="process_manager"):
+    with caplog.at_level(logging.WARNING, logger="agentos_plugin_sdk.process_runtime.manager"):
         ProcessManager(log_dir=_UnreadableDir())
     assert any("启动日志清扫失败" in r.getMessage() for r in caplog.records)
 
@@ -296,7 +302,7 @@ def test_startup_sweep_tolerates_unstatable_file(caplog):
         def glob(self, pattern: str):
             return [_BrokenStatFile()]
 
-    with caplog.at_level(logging.WARNING, logger="process_manager"):
+    with caplog.at_level(logging.WARNING, logger="agentos_plugin_sdk.process_runtime.manager"):
         ProcessManager(log_dir=_DirWithBrokenFile())
     assert any("过期日志删除失败" in r.getMessage() for r in caplog.records)
 
@@ -370,7 +376,7 @@ async def test_container_compound_command_wraps_with_inner_sh(tmp_path):
         captured.extend(args)
         return _fake_container_process(host_pid=42, container_pid=100)
 
-    with patch("process_manager.asyncio.create_subprocess_exec", side_effect=fake_exec):
+    with patch("agentos_plugin_sdk.process_runtime.manager.asyncio.create_subprocess_exec", side_effect=fake_exec):
         pid, _ = await mgr.start_process(command='echo "标签" && ls', container_id="cid")
 
     assert pid == 42
@@ -390,7 +396,7 @@ async def test_container_simple_command_wraps_with_direct_exec(tmp_path):
         captured.extend(args)
         return _fake_container_process(host_pid=42, container_pid=100)
 
-    with patch("process_manager.asyncio.create_subprocess_exec", side_effect=fake_exec):
+    with patch("agentos_plugin_sdk.process_runtime.manager.asyncio.create_subprocess_exec", side_effect=fake_exec):
         await mgr.start_process(command="echo hello", container_id="cid")
 
     wrapped = captured[captured.index("-c") + 1]
@@ -405,7 +411,7 @@ async def test_container_process_records_owner_in_metadata_and_header(tmp_path, 
     均不出现。"""
     mgr = _make_manager(tmp_path)
     with patch(
-        "process_manager.asyncio.create_subprocess_exec",
+        "agentos_plugin_sdk.process_runtime.manager.asyncio.create_subprocess_exec",
         return_value=_fake_container_process(42, 100),
     ):
         pid, log_file = await mgr.start_process(
@@ -453,7 +459,7 @@ def test_normalize_local_command_guard_matrix(
 @pytest.fixture
 def spawn_recorder(monkeypatch) -> _SpawnRecorder:
     rec = _SpawnRecorder()
-    import process_manager as pm_mod
+    import agentos_plugin_sdk.process_runtime.manager as pm_mod
 
     monkeypatch.setattr(pm_mod.asyncio, "create_subprocess_exec", rec.exec)
     monkeypatch.setattr(pm_mod.asyncio, "create_subprocess_shell", rec.shell)
@@ -465,12 +471,11 @@ def spawn_recorder(monkeypatch) -> _SpawnRecorder:
 async def test_spawn_local_wsl_bash_sets_lang_once(tmp_path, monkeypatch, spawn_recorder, preset_lang):
     """WSL bash 分支：仅在调用方未设 LANG 时注入 en_US.UTF-8，不覆盖已有值。"""
     monkeypatch.setattr(shutil, "which", lambda name: "wsl.exe" if name == "wsl" else None)
-    mgr = _make_manager(tmp_path)
     env = {"PATH": "x"}
     if preset_lang:
         env["LANG"] = "zh_CN.UTF-8"
 
-    await mgr._spawn_local_process("echo hi", None, env, is_windows=True)
+    await shell_route.spawn_local_process("echo hi", None, env, is_windows=True)
 
     assert spawn_recorder.exec_calls, "应走 wsl -e bash -c exec 分支"
     assert spawn_recorder.exec_calls[0][:3] == ("wsl", "-e", "bash")
@@ -493,7 +498,7 @@ async def test_spawn_local_wsl_bash_sets_lang_once(tmp_path, monkeypatch, spawn_
     ],
 )
 def test_is_compound_command_escape_and_substitution(command: str, expected: bool) -> None:
-    assert ProcessManager._is_compound_command(command) is expected
+    assert shell_route.is_compound_command(command) is expected
 
 
 # ─────────────────────────── 输出读取：回调与流故障（真实子进程） ───────────────────────────
@@ -538,7 +543,7 @@ async def test_real_process_on_output_exception_isolated(tmp_path, monkeypatch, 
     def broken(_line: str) -> None:
         raise RuntimeError("progress sink exploded")
 
-    with caplog.at_level(logging.DEBUG, logger="process_manager"):
+    with caplog.at_level(logging.DEBUG, logger="agentos_plugin_sdk.process_runtime.manager"):
         try:
             pid, log_file = await mgr.start_process(
                 "echo boom-line; echo second", working_dir=str(tmp_path), on_output=broken
@@ -670,7 +675,7 @@ def test_log_input_masks_sensitive_and_tolerates_io_failure(tmp_path, caplog):
 
     as_dir = tmp_path / "as_dir"
     as_dir.mkdir()
-    with caplog.at_level(logging.DEBUG, logger="process_manager"):
+    with caplog.at_level(logging.DEBUG, logger="agentos_plugin_sdk.process_runtime.manager"):
         ProcessManager._log_input(as_dir, "hello", handler)  # 不抛
     assert any("输入记录写入失败" in r.getMessage() for r in caplog.records)
 
@@ -747,7 +752,7 @@ def test_cleanup_if_needed_boundary(tmp_path, caplog, count, expect_remaining):
     for i in range(count):
         _register_completed(mgr, 7000 + i)
 
-    with caplog.at_level(logging.INFO, logger="process_manager"):
+    with caplog.at_level(logging.INFO, logger="agentos_plugin_sdk.process_runtime.manager"):
         mgr.get_process_info(7000)
 
     assert len(mgr.active_processes) == expect_remaining
@@ -772,7 +777,7 @@ async def test_watchdog_loop_exits_cleanly_when_cancelled(tmp_path, caplog):
 
     mgr._watchdog_check_once = parked_check  # type: ignore[method-assign]
     task = asyncio.get_running_loop().create_task(mgr._watchdog_loop())
-    with caplog.at_level(logging.INFO, logger="process_manager"):
+    with caplog.at_level(logging.INFO, logger="agentos_plugin_sdk.process_runtime.manager"):
         await entered.wait()
         task.cancel()
         await task  # 若 CancelledError 未被主循环吞掉，这里会抛
@@ -922,18 +927,24 @@ async def test_watchdog_kill_without_backend_falls_back_to_terminate(tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_reap_after_kill_swallows_force_kill_failure(tmp_path, fast_timeout):
-    """reap：等待超时 → 强杀兜底也失败（如 AccessDenied）→ 吞掉仍标记 terminated。"""
+async def test_reap_after_kill_force_kill_failure_keeps_status(tmp_path, fast_timeout, caplog):
+    """reap：等待超时 → 强杀兜底也失败（如 AccessDenied）→ 抛错并保持状态。
+
+    状态保真（审查 P1-23）：reap 失败不得吞掉后仍标记 terminated——
+    未死进程被谎报已死会脱离 running 快照、失去看门狗兜底巡检。
+    """
     mgr = _make_manager(tmp_path)
     proc = FakeProcess(pid=62, wait_forever=True, kill_error=PermissionError("denied"))
     info = _register(mgr, 62, process=proc)
     info.log_file.write_text("# Bash Command Log\n", encoding="utf-8")
 
-    await asyncio.wait_for(mgr._reap_after_kill(62, info), timeout=5.0)
+    with pytest.raises(PermissionError), caplog.at_level(logging.WARNING):
+        await asyncio.wait_for(mgr._reap_after_kill(62, info), timeout=5.0)
 
     assert proc.kill_called == 1
-    assert info.status == "terminated"
-    assert "terminated by watchdog" in info.log_file.read_text(encoding="utf-8")
+    assert info.status == "running", "reap 失败不得谎报 terminated"
+    assert "terminated by watchdog" not in info.log_file.read_text(encoding="utf-8")
+    assert any("不误报 terminated" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -978,7 +989,7 @@ async def test_shutdown_all_logs_watchdog_task_error(tmp_path, caplog):
 )
 def test_parse_wsl_args_other_flags_kept_in_order(command: str, expected: list[str]) -> None:
     """带值标志之外的 WSL 标志原样保留在 wsl_opts（位置不乱序）。"""
-    assert ProcessManager._parse_wsl_args(command) == expected
+    assert shell_route.parse_wsl_args(command) == expected
 
 
 # ─────────────────────────── 后端降级契约 ───────────────────────────
@@ -1130,7 +1141,7 @@ async def test_local_backend_sample_unit_memory_sums_tree(monkeypatch):
     )
     monkeypatch.setitem(sys.modules, "psutil", stub)
 
-    from bash_types import WorkUnit
+    from agentos_plugin_sdk.process_runtime import WorkUnit
 
     total = await LocalProcessBackend().sample_unit_memory(WorkUnit(pid=9, command="x"))
 
@@ -1144,7 +1155,7 @@ async def test_local_backend_sample_unit_memory_root_missing_returns_none(monkey
     stub.Process = lambda pid: (_ for _ in ()).throw(stub.NoSuchProcess(pid))  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "psutil", stub)
 
-    from bash_types import WorkUnit
+    from agentos_plugin_sdk.process_runtime import WorkUnit
 
     assert await LocalProcessBackend().sample_unit_memory(WorkUnit(pid=10, command="x")) is None
 
@@ -1158,9 +1169,72 @@ async def test_local_backend_sample_unit_memory_generic_error_returns_none(monke
     )
     monkeypatch.setitem(sys.modules, "psutil", stub)
 
-    from bash_types import WorkUnit
+    from agentos_plugin_sdk.process_runtime import WorkUnit
 
     assert await LocalProcessBackend().sample_unit_memory(WorkUnit(pid=11, command="x")) is None
+
+
+@pytest.mark.asyncio
+async def test_local_backend_sample_memory_failure_paths_log_and_return_none(
+    monkeypatch, caplog
+):
+    """宿主内存采样失败 → 显式 None + 告警日志，不得静默（审查 P1-23）。
+
+    两组区分度输入：psutil 缺失（import 失败）/ psutil 接口故障（OSError）。"""
+    backend = LocalProcessBackend()
+
+    # 组①：psutil 缺失（sys.modules 置 None → import 即 ImportError）
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    with caplog.at_level(logging.WARNING):
+        ratio = await backend.sample_memory()
+    assert ratio is None
+    assert any("采样不可用" in r.getMessage() for r in caplog.records)
+
+    # 组②：psutil 接口故障（virtual_memory 抛 OSError）
+    caplog.clear()
+    stub = _psutil_stub()
+
+    def boom() -> SimpleNamespace:
+        raise OSError("mem unavailable")
+
+    stub.virtual_memory = boom  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "psutil", stub)
+    with caplog.at_level(logging.WARNING):
+        ratio = await backend.sample_memory()
+    assert ratio is None
+    assert any("宿主内存采样失败" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_local_backend_sample_unit_memory_failure_paths_log_and_return_none(
+    monkeypatch, caplog
+):
+    """单元内存采样失败 → 显式 None + 日志，不得静默（审查 P1-23）。
+
+    两组区分度输入：psutil 缺失（import 失败）/ 接口故障（根进程
+    memory_info 抛非 NoSuchProcess/AccessDenied 类 OSError）。"""
+    from agentos_plugin_sdk.process_runtime import WorkUnit
+
+    backend = LocalProcessBackend()
+
+    # 组①：psutil 缺失（sys.modules 置 None → import 即 ImportError）
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    with caplog.at_level(logging.WARNING):
+        rss = await backend.sample_unit_memory(WorkUnit(pid=12, command="x"))
+    assert rss is None
+    assert any("采样不可用" in r.getMessage() for r in caplog.records)
+
+    # 组②：接口故障（根进程 memory_info 抛 OSError）
+    caplog.clear()
+    stub = _psutil_stub()
+    stub.Process = lambda _pid: _StubPsutilProc(  # type: ignore[attr-defined]
+        rss=10, info_error=OSError("proc fs broken")
+    )
+    monkeypatch.setitem(sys.modules, "psutil", stub)
+    with caplog.at_level(logging.WARNING):
+        rss = await backend.sample_unit_memory(WorkUnit(pid=13, command="x"))
+    assert rss is None
+    assert any("单元内存采样失败" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -1174,8 +1248,8 @@ async def test_container_backend_run_cmd_runs_real_child_process():
     assert b"run_cmd_ok" in out
 
 def test_map_wsl_working_dir_passthrough_non_workspace_paths():
-    """非 /workspace 约定路径原样透传（含反斜杠形态），不嫁接 workspace 前缀。"""
-    from process_manager import _map_wsl_working_dir
+    """非 /workspace 约定位绝对路径原样透传（含反斜杠形态），不嫁接 workspace 前缀。"""
+    from agentos_plugin_sdk.process_runtime.transports import _map_wsl_working_dir
 
     backend = {"workspace_wsl": "/mnt/d/ws"}
     assert _map_wsl_working_dir(backend, "/opt/data") == "/opt/data"
@@ -1183,9 +1257,24 @@ def test_map_wsl_working_dir_passthrough_non_workspace_paths():
     assert _map_wsl_working_dir({}, "/opt/data") == "/opt/data"
 
 
+def test_map_wsl_working_dir_relative_joins_workspace_root():
+    """相对路径按 workspace 根拼接（wsl --cd 只收绝对路径；相对形态实测 E_INVALIDARG）。
+
+    workspace_wsl 未知（异常形态）不猜路径：保持原样交 wsl 显式失败。
+    """
+    from agentos_plugin_sdk.process_runtime.transports import _map_wsl_working_dir
+
+    backend = {"workspace_wsl": "/mnt/d/ws"}
+    assert _map_wsl_working_dir(backend, ".") == "/mnt/d/ws"
+    assert _map_wsl_working_dir(backend, "./") == "/mnt/d/ws"
+    assert _map_wsl_working_dir(backend, "frontend") == "/mnt/d/ws/frontend"
+    assert _map_wsl_working_dir(backend, "frontend/src") == "/mnt/d/ws/frontend/src"
+    assert _map_wsl_working_dir({}, "frontend") == "frontend"
+
+
 def test_map_wsl_working_dir_maps_workspace_prefix_to_wsl_root():
     """/workspace/<sub> 约定路径映射到环境 workspace 的 WSL 路径（ntpath 反斜杠形态同映射）。"""
-    from process_manager import _map_wsl_working_dir
+    from agentos_plugin_sdk.process_runtime.transports import _map_wsl_working_dir
 
     backend = {"workspace_wsl": "/mnt/d/ws"}
     assert _map_wsl_working_dir(backend, "/workspace/out.txt") == "/mnt/d/ws/out.txt"

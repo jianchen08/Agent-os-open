@@ -2,6 +2,7 @@
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { toast } from '@/components/ui/sonner'
 import {
   createEntry as apiCreateEntry,
   deleteEntry as apiDeleteEntry,
@@ -31,6 +32,10 @@ interface WorkspaceState {
   loading: boolean
   /** 错误信息 */
   error: string | null
+  /** 条目写操作进行中的目标路径（新建/重命名/删除/移动 await 窗口；null=空闲）。
+   *  右键菜单/输入框据此刻 disabled+pending，树 refetch 期间旧树保持可见。
+   *  运行时态，不持久化。 */
+  mutatingPath: string | null
 }
 
 interface WorkspaceActions {
@@ -60,15 +65,22 @@ interface WorkspaceActions {
   clearCache: () => void
 }
 
+/** 账户数据初始片段（cacheBoundary 切户清账消费；与 persist partialize 字段同域，
+ * loading/error/mutatingPath 为运行时态随附重置） */
+export const WORKSPACE_ACCOUNT_RESET = {
+  workspaces: {},
+  activeWorkspaceId: null,
+  expandedPaths: new Set<string>(),
+  selectedFilePath: null,
+  loading: false,
+  error: null,
+  mutatingPath: null,
+}
+
 export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
   persist(
     (set, get) => ({
-      workspaces: {},
-      activeWorkspaceId: null,
-      expandedPaths: new Set<string>(),
-      selectedFilePath: null,
-      loading: false,
-      error: null,
+      ...WORKSPACE_ACCOUNT_RESET,
 
   fetchWorkspace: async (containerTaskId) => {
     set({ loading: true, error: null })
@@ -87,16 +99,16 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
         loading: false,
       }))
       return ws
-    } catch (e: any) {
-      set({ loading: false, error: e.message })
+    } catch (e) {
+      set({ loading: false, error: e instanceof Error ? e.message : String(e) })
       return null
     }
   },
 
   fetchFileTree: async (containerTaskId) => {
     try {
-      const { tree } = await apiGetFileTree(containerTaskId)
-      const normalized = tree.map(_normalizeFileTreeNode)
+      const { entries } = await apiGetFileTree(containerTaskId)
+      const normalized = entries.map(_normalizeFileTreeNode)
         set((state) => {
         const ws = state.workspaces[containerTaskId]
         if (ws) {
@@ -154,51 +166,70 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
     return taskId
   },
 
+  // 条目写动作族：await 窗口置 mutatingPath（UI pending 真值源），失败 toast
+  // 落在操作点（不静默不装成功），成功后 refetch 期间旧树保持可见
+  //（fetchFileTree 仅在成功响应后替换树数据）。
   createEntry: async (containerTaskId, path, type) => {
+    set({ mutatingPath: path })
     try {
       await apiCreateEntry(containerTaskId, path, type)
       await get().fetchFileTree(containerTaskId)
       return true
-    } catch (e: any) {
-      console.error('[workspaceStore] createEntry failed:', e)
-      window.alert(`创建失败: ${e?.message ?? '未知错误'}`)
+    } catch (e) {
+      toast.error('创建失败', {
+        description: e instanceof Error ? e.message : '未知错误',
+      })
       return false
+    } finally {
+      set({ mutatingPath: null })
     }
   },
 
   deleteEntry: async (containerTaskId, path) => {
+    set({ mutatingPath: path })
     try {
       await apiDeleteEntry(containerTaskId, path)
       await get().fetchFileTree(containerTaskId)
       return true
-    } catch (e: any) {
-      console.error('[workspaceStore] deleteEntry failed:', e)
-      window.alert(`删除失败: ${e?.message ?? '未知错误'}`)
+    } catch (e) {
+      toast.error('删除失败', {
+        description: e instanceof Error ? e.message : '未知错误',
+      })
       return false
+    } finally {
+      set({ mutatingPath: null })
     }
   },
 
   renameEntry: async (containerTaskId, oldPath, newName) => {
+    set({ mutatingPath: oldPath })
     try {
       await apiRenameEntry(containerTaskId, oldPath, newName)
       await get().fetchFileTree(containerTaskId)
       return true
-    } catch (e: any) {
-      console.error('[workspaceStore] renameEntry failed:', e)
-      window.alert(`重命名失败: ${e?.message ?? '未知错误'}`)
+    } catch (e) {
+      toast.error('重命名失败', {
+        description: e instanceof Error ? e.message : '未知错误',
+      })
       return false
+    } finally {
+      set({ mutatingPath: null })
     }
   },
 
   moveEntry: async (containerTaskId, sourcePath, destinationDir) => {
+    set({ mutatingPath: sourcePath })
     try {
       await apiMoveEntry(containerTaskId, sourcePath, destinationDir)
       await get().fetchFileTree(containerTaskId)
       return true
-    } catch (e: any) {
-      console.error('[workspaceStore] moveEntry failed:', e)
-      window.alert(`移动失败: ${e?.message ?? '未知错误'}`)
+    } catch (e) {
+      toast.error('移动失败', {
+        description: e instanceof Error ? e.message : '未知错误',
+      })
       return false
+    } finally {
+      set({ mutatingPath: null })
     }
   },
 
@@ -238,6 +269,7 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
           // 运行时状态强制重置
           loading: false,
           error: null,
+          mutatingPath: null,
         }
       },
     },
@@ -266,11 +298,17 @@ function _normalizeWorkspace(data: WorkspacePayload): Workspace {
 function _normalizeFileTreeNode(data: FileTreeNodePayload): FileTreeNode {
   return {
     name: data.name ?? '',
-    // 契约外值回退 'file'（树节点仅渲染目录/文件两态）
-    type: data.type === 'directory' ? 'directory' : 'file',
+    // link（junction/symlink）归 directory 形态；契约外值仍回退 'file'
+    type:
+      data.type === 'file'
+        ? 'file'
+        : data.type === 'directory' || data.type === 'link'
+          ? 'directory'
+          : 'file',
     path: data.path ?? '',
     artifactId: data.artifactId,
-    children: data.children ? data.children.map(_normalizeFileTreeNode) : undefined,
+    // 单层列举无 children（子层懒加载另列），保持字段形状兼容消费方
+    children: undefined,
     metadata: data.metadata,
   }
 }

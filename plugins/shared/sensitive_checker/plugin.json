@@ -1,0 +1,26 @@
+{
+  "id": "pipeline_sensitive_checker",
+  "name": "Sensitive Checker",
+  "version": "1.0.0",
+  "plugin_type": "pipeline",
+  "language": "rust",
+  "host_type": "in_process",
+  "host_group": "light",
+  "entry": "pipeline_sensitive_checker_native.dll",
+  "invoke_entry": "plugin_execute",
+  "native": {
+    "artifact": "pipeline_sensitive_checker_native"
+  },
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": []
+  },
+  "permissions": {},
+  "priority": 50,
+  "state": {
+    "reads": [
+      "tool_results"
+    ]
+  }
+}

@@ -54,7 +54,7 @@ from agentos_plugin_sdk.bootstrap import bootstrap_plugin
 
 bootstrap_plugin(__file__)  # 插件目录 + plugins/shared 根（http_json）入 sys.path
 
-from http_json import (  # noqa: E402
+from _root_api import (  # noqa: E402
     decode_body as _decode_body,
     json_response as _json_response,
     ok as _ok,
@@ -165,7 +165,7 @@ async def _handle_users_domain(
         return True, _ok(_json_response({
             "error": {
                 "code": "501",
-                "message": "用户激活状态更新未支持：users 表无 is_active 列（内核迁移待产品拍板）",
+                "message": "用户激活状态更新未支持：users 表无 is_active 列",
             }
         }, 501))
 
@@ -324,8 +324,8 @@ async def user_admin_status() -> dict[str, Any]:
             "method": {"type": "string"},
             "plugin_id": {"type": "string"},
             "raw_body": {"type": "string"},
-            "headers": {"type": "object"},
-            "query": {"type": "object"},
+            "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+            "query": {"type": "object", "additionalProperties": {"type": "string"}},
         },
     },
 )

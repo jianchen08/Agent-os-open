@@ -1,0 +1,40 @@
+# 写作模式声明面 mode.yaml（2026-09-28 升格自 profile.yaml；设计真值 docs/working/模式包工作模式设计_20260928.md D3。B 部类物料：由用户维护；出厂种子随 mode_writing 插件内打包，
+# 经 mode.get_profile 服务透出；suite 路径相对项目根）
+# 链路对标 NovelAI/Sudowrite 范式：续写/扩写/改写动作 + 章节验收（semantic_check）
+mode: writing
+name: 写作模式
+# description = 主 agent 唯一域路由知识（批 F3 接管口径：什么任务归我/直派谁/编排链要点；措辞定版 = 渲染缓存前缀稳定）
+description: 小说等长文写作任务（续写/扩写/改写/大纲/设定）。派编排链 orchestrator/novel_orchestrator_agent（执行型：内容生产自执行，一致性/文风/终审三审外包，素材调研条件外包 research_agent）
+icon: ✍️                # 选择器选项图标（批 G⑤；emoji 随声明面透出 modes API/mode.list）
+# 方案规划段领域规格（批 B2 注册化）：值 = 技能名（包内 skills/ 随包，经工作空间
+# 并集快照按名可读）；方案段骨架第零步按本键查注册表（ADR 2026-10-09 决策 4）
+plan_spec: skill-solution-novel
+panel_page_id: writing_workshop
+material: material.py::build_injection   # 提示词物料组装器（声明驱动发现，设计 D3；注入 rules/dispatch.md 派发口径）
+chain:
+  entry: main
+  # 实际编排（照实声明）：main 派单表小说域派 novel_orchestrator_agent（执行型：
+  # 内容生产自执行，一致性/文风/终审与素材调研外包不入主链）；执行者池已全退役（P1，
+  # ADR 2026-10-09 决策 2），chain 只声明 entry/expected_path/entry_override
+  expected_path: [main, orchestrator/novel_orchestrator_agent]
+  entry_override: null
+suite:
+  smoke: config/self_evolve/suites/dev/writing.yaml
+  full: null          # 二期补全
+material_scope:
+  dispatch_stage:
+    - config/agents/main/task_dispatch_guide.md
+  execution_stage:
+    - config/agents/orchestrator/novel_orchestrator_agent.yaml
+    - config/agents/executor/generation/novel_writer_agent.yaml
+levers:
+  agent_misdispatch: {dispatch_stage: [task_dispatch_guide, orchestrator_config]}
+  structure_violation: {execution_stage: [persona, prompt_skeleton]}
+  style_drift: {execution_stage: [persona]}
+  eval_no_settle: {evaluation_stage: [evaluation_params]}
+verifier_families: [file_assert, structure_assert, semantic_check]
+weights: {success: 1.0, cost: 0.2, rounds: 0.1}
+budget:
+  case_timeout: 1200
+  round_tokens: 2000000
+  proposals_per_session: 3

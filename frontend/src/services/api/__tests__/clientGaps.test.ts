@@ -290,6 +290,8 @@ describe('client.ts 覆盖缺口（批九）', () => {
     })
 
     it('刷新失败且分类为认证失败 → 登出（整页刷新落点恒为 HOME）', async () => {
+      // 真实链路：走到刷新失败必是持有凭据的会话（零凭据在 clearAuthAndRedirect 早退）
+      h.getAccessToken.mockReturnValue('tok-live')
       h.refresh.mockImplementation(() => Promise.reject(new Error('refresh boom')))
       window.history.pushState({}, '', '/login')
       localStorage.setItem('auth_user', '{"id":1}')
@@ -313,6 +315,7 @@ describe('client.ts 覆盖缺口（批九）', () => {
     })
 
     it('refresh 请求自身 401 + body 非法 JSON → 无法判定竞争 → 登出且不触发 refresh()', async () => {
+      h.getAccessToken.mockReturnValue('tok-live')
       // 断言点在登出副作用而非重定向（重定向弧由 client401 真实链路覆盖）
       window.history.pushState({}, '', '/login')
       const handler = responseErrorHandler
@@ -333,6 +336,7 @@ describe('client.ts 覆盖缺口（批九）', () => {
     })
 
     it('refresh 请求自身 401 + body 对象但 refresh_token 非字符串 → 同样视为无可用值 → 登出', async () => {
+      h.getAccessToken.mockReturnValue('tok-live')
       window.history.pushState({}, '', '/login')
       const handler = responseErrorHandler
       await expect(

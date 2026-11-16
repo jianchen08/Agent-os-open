@@ -393,7 +393,7 @@ curl -X PUT "http://localhost:9100/api/v1/plugins/llm_service/config/llm"   -H "
 curl "http://localhost:9100/api/v1/tools" -H "Authorization: Bearer <token>"
 ```
 
-Agent 无独立 REST 面：Agent 是 `config/agents/` 下的 YAML，由 context_build 插件
+Agent 无独立 REST 面：Agent 是 `config/agents/` 下的 YAML，由 agent_config_load 插件
 按 agent_id 展开为执行上下文（见 [execution-semantics.md](execution-semantics.md) §一）。
 
 ### 4.6 记忆
@@ -1069,7 +1069,7 @@ def test_with_context(log_context):
 |----|----------|------|
 | Rust | `rust-lint` / `rust-build` / `rust-test` / `rust-coverage` / `rust-deny` | fmt+clippy / 编译 / 测试 / lcov 基线 / 依赖许可门禁 |
 | Python | `python-lint` / `python-test` / `python-coverage` / `python-heavy-suites` | run_gates 车道（sdk-lint/sdk-mypy/sdk-test/plugins-coverage 族），基线锁见 §3.3 |
-| 前端 | `frontend-endpoints-sync` / `frontend-test` / `frontend-e2e` | 端点生成物一致性 / vitest / Playwright |
+| 前端 | `frontend-endpoints-sync` / `frontend-test` / `frontend-e2e` | 端点生成物一致性 + 主题色卫生闸（endpoints 车道触发面含 `plugins/**`，是仅改插件声明面时主题色门禁的唯一 CI 触达点；`run_gates --mode plugins` 本地同含此闸）/ vitest / Playwright |
 | 桌面 | `electron-compile` | 桌面壳编译门禁 |
 | 专项 | `timing` / `pre-commit` / `tdd-gate` / `traceability-gate` | 时序不变量 / 钩子 / TDD 合规 / 追溯标记 |
 | 汇总 | `all-checks-passed` | 以上全部通过才绿 |

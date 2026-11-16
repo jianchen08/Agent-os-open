@@ -15,6 +15,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 let store: typeof import('@/stores/notificationStore').useNotificationStore
 
 beforeEach(async () => {
+  // persist 落盘跨测试泄漏：先清存储再重建 store（chatInputStore.test.ts 同款隔离）
+  localStorage.clear()
   vi.resetModules()
   const mod = await import('@/stores/notificationStore')
   store = mod.useNotificationStore

@@ -8,7 +8,7 @@ cases:
   category: coding
   target: mode_coding/programming_orchestrator_agent_v2
   messages:
-  - 已知缺陷：`plugins/shared/tools/task_submit/tool.py` 的 _validate_required_metric_params
+  - 已知缺陷：`plugins/shared/task_submit/tool.py` 的 _validate_required_metric_params
     函数在 acceptance_criteria 的 input_params 值为非 dict 类型（例如字符串）时，会把它当 None 处理从而漏报缺失参数。任务：读取该文件相关函数，产出一个修复方案文件
     fix_proposal.md 写入当前工作空间，内容包含：1) 缺陷根因一句话；2) 建议修改的函数名与修改思路（伪代码即可，不要真的改仓库文件）。
   acceptance_criteria:
@@ -65,8 +65,8 @@ cases:
   category: coding
   target: mode_coding/programming_orchestrator_agent_v2
   messages:
-  - '请统计当前仓库 plugins/shared 目录下一级子目录的个数（不含 __pycache__），并统计 plugins/shared/system
-    下以字母 c 开头的子目录名列表。把结果写入当前工作空间 dirs_report.json，格式：{"shared_top_dirs": <数字>, "system_c_dirs":
+  - '请统计当前仓库 plugins/shared 目录下一级子目录的个数（不含 __pycache__），并统计其中以字母
+    c 开头的子目录名列表。把结果写入当前工作空间 dirs_report.json，格式：{"shared_top_dirs": <数字>, "system_c_dirs":
     ["目录名", ...]}。'
   acceptance_criteria:
     file_check:

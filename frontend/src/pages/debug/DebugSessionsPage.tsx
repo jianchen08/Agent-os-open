@@ -8,6 +8,7 @@ import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
 import { useDebugSessionsQuery } from '@/hooks/queries/useDebugQueries'
+import { sanitizeSessionTitle } from '@/utils/sessionTitle'
 
 /**
  * 调试会话页面组件
@@ -48,7 +49,7 @@ export function DebugSessionsPage({ embedded }: { embedded?: boolean } = {}) {
           <div className="space-y-2 md:hidden">
               {sessions.map((session) => (
                 <div key={session.id} className="rounded-lg border p-3">
-                  <div className="text-sm font-medium truncate">{session.title || session.id}</div>
+                  <div className="text-sm font-medium truncate">{sanitizeSessionTitle(session.title) || session.id}</div>
                   <div className="text-muted-foreground mt-1 font-mono text-xs truncate">{session.id}</div>
                   <div className="text-muted-foreground mt-2 space-y-1 text-xs">
                     <div className="flex items-center gap-2">
@@ -66,7 +67,7 @@ export function DebugSessionsPage({ embedded }: { embedded?: boolean } = {}) {
               ))}
             </div>
             {/* 桌面端表格视图 */}
-            <div className="hidden md:block overflow-hidden rounded-lg border">
+            <div className="hidden md:block overflow-x-auto rounded-lg border">
               <table className="w-full text-sm">
                 <thead className="bg-accent/30">
                   <tr>
@@ -89,11 +90,11 @@ export function DebugSessionsPage({ embedded }: { embedded?: boolean } = {}) {
                 </thead>
                 <tbody>
                   {sessions.map((session) => (
-                    <tr key={session.id} className="hover:bg-accent/20 border-t">
+                    <tr key={session.id} className="hover:bg-muted/20 border-t">
                       <td className="max-w-[180px] truncate px-4 py-2 font-mono text-xs">
                         {session.id}
                       </td>
-                      <td className="max-w-[200px] truncate px-4 py-2">{session.title || '--'}</td>
+                      <td className="max-w-[200px] truncate px-4 py-2">{sanitizeSessionTitle(session.title) || '--'}</td>
                       <td className="px-4 py-2">
                         <span className="bg-primary/10 text-primary rounded-full px-2 py-0.5 text-xs">
                           {session.record_count}

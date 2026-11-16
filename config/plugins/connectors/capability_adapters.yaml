@@ -31,9 +31,9 @@ adapters:
   # ==============================================================
   # VSCode IDE 连接器
   # 通过 HTTP 短轮询与 VSCode 扩展通信，支持双向交互。
-  # 实现：plugins/shared/system/connectors/vscode/connector.py
+  # 实现：connectors 插件族已退役（5037bd01a），本配置存量待清
   #       （connector_class: connectors.vscode.connector.VSCodeConnector，
-  #        平铺 import 相对 plugins/shared/system/connectors/ 目录）
+  #        平铺 import 相对 connectors/ 目录）
   # ==============================================================
   vscode:
     type: "ide"
@@ -53,7 +53,7 @@ adapters:
   # ==============================================================
   # ComfyUI 创意生产连接器
   # 通过 HTTP API + WebSocket 连接 ComfyUI，支持 AI 图像生成工作流。
-  # 实现：plugins/shared/system/connectors/creative/comfyui.py
+  # 实现：connectors/（原 plugins/shared/system/connectors/，实现已随 5037bd01a 退役）/creative/comfyui.py
   #       （connector_class: connectors.creative.comfyui.ComfyUIConnector）
   # ==============================================================
   comfyui:

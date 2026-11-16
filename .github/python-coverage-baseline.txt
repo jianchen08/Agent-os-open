@@ -1,6 +1,6 @@
-# ⚠️ 门禁挂起中（run_gates.py plugins-coverage 内 --skip，2026-09-01 就地裁定）
-# ——下方数值不代表当前执法线；插桩度量与 coverage.xml 产出照常，
-# 恢复 = run_gates.py 去掉 --skip（详见 scripts/run_gates.py 内注释）。
+# 门禁执法中（2026-09-24 D1 拍板摘除 --skip 恢复执法，实况坐标
+# scripts/run_gates.py :488-491；2026-11-04 勘误本头注，依据=20261103
+# 自主审查轮 F4 账本失真裁定）——下方数值行即现役执法线。
 #
 # Python 插件整体行覆盖率基线（line%，只升不降，
 # 见 scripts/check_python_coverage_baseline.py；数据源 plugins-coverage gate
@@ -140,7 +140,7 @@
 # 本批 16 件补测（约 380 用例，320→60 缺行）：eval_harness/server.py
 # 88→1（账本读写/聚合基线取数/held-out 三失败分支/提案三工具全链含真实
 # git 提交与篡改存档复核）、eval_harness 纯函数面三件 100%（classify 未归类/
-# proposal 七条 schema 短路与逃逸/suite_reader workspace 锚定三形态）、
+# proposal 校验 schema 短路与逃逸/suite_reader workspace 锚定三形态）、
 # task_submit/server.py 21→0（on_load 三能力桥 + 工具包装载荷）、rollback
 # server+manager 100%、media 五件（_media_core/image/tts/music/video）
 # 全 100%、artifacts/models、monitoring/server 靶行清零、isolation_guard、

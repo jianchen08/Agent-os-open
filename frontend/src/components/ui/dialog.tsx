@@ -22,7 +22,7 @@ const DialogOverlay = React.forwardRef<
       className,
     )}
     style={{
-      backgroundColor: `var(--dialog-overlay-bg, #000000)`,
+      backgroundColor: `var(--dialog-overlay-bg)`,
       opacity: `var(--dialog-overlay-opacity, 0.8)`,
     }}
     {...props}
@@ -50,11 +50,11 @@ const DialogContent = React.forwardRef<
         zIndex: 50,
         backgroundColor: 'hsl(var(--popover))',
         borderRadius: 'var(--dialog-radius, 1rem)',
-        boxShadow: 'var(--dialog-shadow, 0 25px 50px -12px rgba(0, 0, 0, 0.5))',
-        border: 'var(--dialog-border, 1px solid rgba(255, 255, 255, 0.1))',
+        boxShadow: 'var(--dialog-shadow)',
+        border: 'var(--dialog-border)',
       }}
       className={cn(
-        'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 flex max-h-[90vh] flex-col overflow-y-auto duration-200',
+        'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 flex max-h-[var(--dialog-max-h,90vh)] flex-col overflow-y-auto duration-200',
         className,
       )}
       {...props}
@@ -72,7 +72,12 @@ const DialogHeader = ({
   ...props
 }: React.HTMLAttributes<HTMLDivElement> & { showClose?: boolean }) => (
   <div
-    className={cn('flex flex-shrink-0 items-center justify-between gap-2 p-6 pb-0', className)}
+    className={cn(
+      // sticky 顶沿：内容超高滚动时标题/关闭钮常驻（弹窗根是滚动容器，
+      // 背景取弹窗同色遮挡滚过的内容；内容不超高时 sticky 不生效、观感不变）
+      'bg-popover sticky top-0 z-10 flex flex-shrink-0 items-center justify-between gap-2 rounded-t-[inherit] p-6 pb-0',
+      className,
+    )}
     {...props}
   >
     <div className="flex min-w-0 flex-1 flex-col space-y-1.5 text-center sm:text-left">
@@ -91,7 +96,10 @@ DialogHeader.displayName = 'DialogHeader'
 const DialogFooter = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
   <div
     className={cn(
-      'flex flex-shrink-0 flex-col-reverse border-t p-6 pt-4 sm:flex-row sm:justify-end sm:space-x-2',
+      // sticky 底沿：主操作（创建/保存等确认键）常驻视口内可达——移动端
+      // 窄视口超高弹窗不再把确认键裁到滚动区末尾（R9 巡检 #5）；不超高时
+      // sticky 不生效、观感不变。border-t 兼作钉住态与滚动内容分隔线。
+      'bg-popover sticky bottom-0 z-10 flex flex-shrink-0 flex-col-reverse rounded-b-[inherit] border-t p-6 pt-4 sm:flex-row sm:justify-end sm:space-x-2',
       className,
     )}
     {...props}

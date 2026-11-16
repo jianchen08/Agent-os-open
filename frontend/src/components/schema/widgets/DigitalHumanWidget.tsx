@@ -5,7 +5,7 @@
  * - 形象(3D/2D/Live2D/VRM)是 **workspace 的 widget**,不是独立空间。
  * - 现阶段只做占位:**不引入** three.js/pixi/live2d 等渲染库。
  *   真实渲染由 0.7.0 路线以插件接入现成引擎(Live2D/TTS/VRM),后端走
- *   Connector 框架(`plugins/shared/system/connectors/`)。
+ *   Connector 框架（connectors 插件族已随 5037bd01a 退役）。
  *
  * 「插件接入就生效」形态:
  * - 现在:显示 source/connector 信息 + 「形象渲染待插件接入」提示。
@@ -20,7 +20,7 @@
  */
 
 import React from 'react'
-import { useWidgetEventStore } from '@/stores/widgetEventStore'
+import { useWidgetEventValue } from '@/hooks/useWidgetEventValue'
 
 /** DigitalHumanWidget 属性 */
 export interface DigitalHumanWidgetProps {
@@ -53,11 +53,9 @@ export function DigitalHumanWidget(props: DigitalHumanWidgetProps): React.ReactN
   // source 优先，modelUri 作为别名兜底（ADR §7.6 命名兼容）
   const resolvedSource = source ?? modelUri
 
-  // 订阅 widgetEventStore：仅在有 widgetId 时读取 latest，为将来事件推送预留。
-  // 未传 widgetId 时传 undefined，store selector 返回 undefined，不订阅具体实例。
-  const latestEvent = useWidgetEventStore((s) =>
-    widgetId ? s.latest[widgetId] : undefined,
-  )
+  // 订阅 widget_event 推送：仅在有 widgetId 时读取 latest，为将来事件推送预留。
+  // 未传 widgetId 时不订阅任何实例，返回 undefined。
+  const latestEvent = useWidgetEventValue(widgetId)
 
   return (
     <div

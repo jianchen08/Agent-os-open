@@ -6,10 +6,12 @@
  * 对齐原「插件运行」表周期）补每插件上次崩溃时间——该列 hosts 契约没有，
  * 两现成端点前端 join（用户裁定：运行表与卡片是同一数据，不并存，列全迁卡片）。
  *
- * 汇总条内存为全口径分段：插件段（hosts 求和）+ 内核段（GET
+ * 汇总条内存为全口径分段：插件段（hosts 求和，私有提交口径）+ 内核段（GET
  * /api/v1/system/memstats 的内核进程 RSS）+ 应用壳段（Electron IPC
  * app:metrics 的进程树 workingSet，Web 形态缺失显 —）；全应用合计仅三段
- * 全有值时给出（任一缺失不虚构合计）。
+ * 全有值时给出（任一缺失不虚构合计；三段口径各异为已知现状，统一待后续）。
+ * 同条附应用壳 CPU（app:metrics 的 percentCPUUsage 求和）与内核日志活性
+ * （app:metrics 的 kernelLiveness：标记缺失显 —，停摆红显）。
  *
  * 渲染：按进程分组卡片，插件名是主角——独占进程直接以插件名为题，共享进程
  * 以「N 个插件共享进程」为题、成员插件按行呈现状态词（运行中/启动中/等待
@@ -30,6 +32,7 @@ import { useKernelMemStatsQuery } from '@/hooks/queries/useKernelMemStatsQuery'
 import { usePluginHostsQuery } from '@/hooks/queries/usePluginHostsQuery'
 import { usePluginRuntimeQuery } from '@/hooks/queries/usePluginRuntimeQuery'
 import { formatDate } from '@/utils/format'
+import type { ElectronKernelLiveness } from '@/types/electron'
 import type { HostMember, PendingSpawnEntry, PluginHost } from '@/types/pluginHosts'
 
 /** 「调用长时间未返回」判定窗（ms）：进行中的调用>0 且最后调用距今超过该窗视为卡住嫌疑 */
@@ -54,9 +57,34 @@ function formatUptime(secs: number | null | undefined): string {
 }
 
 /** 内存（MB）→ 人读值（缺失 → '—'） */
-function formatRss(rssMb: number | null | undefined): string {
-  if (typeof rssMb !== 'number' || !Number.isFinite(rssMb)) return '—'
-  return `${rssMb.toFixed(1)} MB`
+function formatMb(mb: number | null | undefined): string {
+  if (typeof mb !== 'number' || !Number.isFinite(mb)) return '—'
+  return `${mb.toFixed(1)} MB`
+}
+
+/** CPU 百分比 → 人读值（缺失 → '—'） */
+function formatCpuPercent(pct: number | null | undefined): string {
+  if (typeof pct !== 'number' || !Number.isFinite(pct)) return '—'
+  return `${pct.toFixed(1)}%`
+}
+
+/** 内核日志活性行文本：标记缺失/路径不可知显 —（不误报）；停摆红显（真实
+ * 告警事实，带标记未刷新时长）；健康显「正常」+ 刷新新鲜度 */
+function kernelLivenessDisplay(snap: ElectronKernelLiveness | null | undefined): {
+  text: string
+  error: boolean
+} {
+  if (!snap || !snap.markerFound) return { text: '—', error: false }
+  const freshness = livenessAgeText(snap.lastOkWriteAgeMs)
+  if (snap.healthy) return { text: `正常${freshness}`, error: false }
+  return { text: `停摆${freshness}`, error: true }
+}
+
+/** 标记年龄（ms）→ 「 · N前」后缀（缺失 → 空串，不虚构时长） */
+function livenessAgeText(ageMs: number | null | undefined): string {
+  if (typeof ageMs !== 'number' || !Number.isFinite(ageMs)) return ''
+  const secs = Math.max(0, Math.round(ageMs / 1000))
+  return ` · ${formatUptime(secs)}前`
 }
 
 /** 运行态行清单 → 插件 id → 上次崩溃 epoch 秒（仅收 0/非法值之外的崩溃记录） */
@@ -162,7 +190,7 @@ function HostCard({
 
       <div className="text-muted-foreground flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
         <span>PID {host.pid ?? '—'}</span>
-        <span>内存 {formatRss(host.rss_mb)}</span>
+        <span>提交内存 {formatMb(host.commit_mb)}</span>
         <span>运行 {formatUptime(host.uptime_secs)}</span>
         <span>进行中的调用 {host.in_flight ?? 0}</span>
         <span>最后调用 {formatEpochRelative(host.last_call_at)}</span>
@@ -225,34 +253,38 @@ function kbToMb(kb: number | null | undefined): number | null {
   return typeof kb === 'number' && Number.isFinite(kb) ? kb / 1024 : null
 }
 
-/** 汇总条：进程/状态计数 + 全口径内存（插件段=进程观测卡片求和；内核段=
- * memstats 内核进程 RSS；应用壳段=Electron 进程树 workingSet；全应用=三段
- * 合计，任一段缺失不虚构合计显 —）。rss 缺失（null）不进求和；全部缺失
- * 显 —。 */
+/** 汇总条：进程/状态计数 + 全口径内存（插件段=进程观测卡片求和，私有提交
+ * 口径；内核段=memstats 内核进程 RSS；应用壳段=Electron 进程树 workingSet；
+ * 全应用=三段合计，任一段缺失不虚构合计显 —）。commit 缺失（null）不进
+ * 求和；全部缺失显 —。附应用壳 CPU 与内核日志活性行（Electron IPC）。 */
 function HostsSummary({
   hosts,
   pendingCount,
   kernelRssMb,
   shellRssMb,
+  shellCpuPercent,
+  kernelLiveness,
 }: {
   hosts: PluginHost[]
   pendingCount: number
   kernelRssMb: number | null
   shellRssMb: number | null
+  shellCpuPercent: number | null
+  kernelLiveness: ElectronKernelLiveness | null
 }) {
   const aliveCount = hosts.filter((h) => h.alive === true).length
   const deadCount = hosts.filter((h) => h.alive === false).length
-  const totalRss = hosts.reduce(
-    (sum, h) => (typeof h.rss_mb === 'number' ? sum + h.rss_mb : sum),
+  const totalCommitMb = hosts.reduce(
+    (sum, h) => (typeof h.commit_mb === 'number' ? sum + h.commit_mb : sum),
     0,
   )
-  const anyRss = hosts.some((h) => typeof h.rss_mb === 'number')
+  const anyCommitMb = hosts.some((h) => typeof h.commit_mb === 'number')
   const fullTotal =
-    anyRss && kernelRssMb !== null && shellRssMb !== null
-      ? totalRss + kernelRssMb + shellRssMb
+    anyCommitMb && kernelRssMb !== null && shellRssMb !== null
+      ? totalCommitMb + kernelRssMb + shellRssMb
       : null
   const memberCount = hosts.reduce((sum, h) => sum + (h.members?.length ?? 0), 0)
-  const formatMb = (mb: number | null) => (mb !== null ? `${mb.toFixed(1)} MB` : '—')
+  const liveness = kernelLivenessDisplay(kernelLiveness)
   return (
     <div
       data-testid="hosts-summary"
@@ -261,9 +293,15 @@ function HostsSummary({
       <span>进程 {hosts.length}</span>
       <span>运行中 {aliveCount}</span>
       <span>已停止 {deadCount}</span>
-      <span className="text-foreground font-medium">插件内存 {formatMb(anyRss ? totalRss : null)}</span>
+      <span className="text-foreground font-medium">
+        插件内存(提交) {formatMb(anyCommitMb ? totalCommitMb : null)}
+      </span>
       <span>内核 {formatMb(kernelRssMb)}</span>
       <span>应用壳 {formatMb(shellRssMb)}</span>
+      <span>应用壳 CPU {formatCpuPercent(shellCpuPercent)}</span>
+      <span className={liveness.error ? 'text-status-error font-medium' : undefined}>
+        内核日志活性 {liveness.text}
+      </span>
       <span className="text-foreground font-medium">全应用 {formatMb(fullTotal)}</span>
       <span>承载插件 {memberCount}</span>
       {pendingCount > 0 && <span>未装载 {pendingCount}</span>}
@@ -378,6 +416,8 @@ export function PluginHostsWidget() {
         pendingCount={pendingSpawn.length}
         kernelRssMb={bytesToMb(memStatsQuery.data?.process_rss_bytes)}
         shellRssMb={kbToMb(appMetricsQuery.data?.totalWorkingSetKb)}
+        shellCpuPercent={appMetricsQuery.data?.totalCpuPercent ?? null}
+        kernelLiveness={appMetricsQuery.data?.kernelLiveness ?? null}
       />
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         {runningHosts.map((host) => (

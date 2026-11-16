@@ -11,18 +11,13 @@ use agentos_core::types::PluginError;
 use serde_json::{json, Value};
 use tracing::warn;
 
-/// 加载 manifest 声明的 `config_files` 并按命名空间合并（与 sidecar spawn 同逻辑）。
-///
-/// `load_config()` → `build_injected_config(full, manifest)`。
-/// 解析错误（YAML 语法）上抛；IO/缺文件降级为空对象（同 sidecar）。
-///
-/// 原生/WASM 插件由此拿到与 sidecar 一致的配置，不再硬编码空 `{}`。
-pub async fn injected_config(
-    loader: &dyn PluginLoader,
-    manifest: &PluginManifest,
-) -> Result<Value, PluginError> {
-    let full_config = match loader.load_config().await {
-        Ok(c) => c,
+/// 全量配置装载（[`injected_config`] 的第一步独立化）：config root 递归扫描 +
+/// 用户层叠加。错误分级语义（PARSE 上抛 / 其余降级空对象）在此单点承载——
+/// 除 [`injected_config`] 外，合宿成员级注入映射（invoker 侧每成员
+/// `build_injected_config`）也走本入口，保证多消费方错误语义一致。
+pub async fn load_full_config(loader: &dyn PluginLoader) -> Result<Value, PluginError> {
+    match loader.load_config().await {
+        Ok(c) => Ok(c),
         Err(e) => {
             if e.code
                 .as_deref()
@@ -36,12 +31,25 @@ pub async fn injected_config(
                 });
             }
             warn!(
-                "Failed to load plugin config for '{}', using empty: {}",
-                manifest.id, e
+                "Failed to load plugin config for injection, using empty: {}",
+                e
             );
-            serde_json::json!({})
+            Ok(serde_json::json!({}))
         }
-    };
+    }
+}
+
+/// 加载 manifest 声明的 `config_files` 并按命名空间合并（与 sidecar spawn 同逻辑）。
+///
+/// `load_config()` → `build_injected_config(full, manifest)`。
+/// 解析错误（YAML 语法）上抛；IO/缺文件降级为空对象（同 sidecar）。
+///
+/// 原生/WASM 插件由此拿到与 sidecar 一致的配置，不再硬编码空 `{}`。
+pub async fn injected_config(
+    loader: &dyn PluginLoader,
+    manifest: &PluginManifest,
+) -> Result<Value, PluginError> {
+    let full_config = load_full_config(loader).await?;
     Ok(build_injected_config(&full_config, manifest))
 }
 
@@ -318,7 +326,6 @@ mod tests {
             description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Pipeline,
-            pipeline_role: None,
             language: "rust".to_string(),
             host_type: HostType::InProcess,
             host_group: None,
@@ -330,7 +337,6 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            granted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files,

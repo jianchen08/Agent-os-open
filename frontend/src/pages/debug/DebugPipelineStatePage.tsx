@@ -35,7 +35,7 @@ function StateFieldRow({ field }: { field: PipelineStateField }) {
   const pretty = formatFieldValue(field.field_value)
   const isLong = pretty.length > 120 || pretty.includes('\n')
   return (
-    <tr className="border-t hover:bg-accent/20 align-top">
+    <tr className="border-t hover:bg-muted/20 align-top">
       <td className="px-3 py-2 font-mono text-xs break-all">{field.field_key}</td>
       <td className="max-w-[480px] px-3 py-2">
         {isLong ? (
@@ -131,7 +131,7 @@ export function DebugPipelineStatePage({ embedded }: { embedded?: boolean } = {}
         <div className="space-y-4">
           {/* runs 历史表 */}
           {data.runs.length > 0 && (
-            <div className="overflow-hidden rounded-lg border">
+            <div className="overflow-x-auto rounded-lg border">
               <table className="w-full text-sm">
                 <thead className="bg-accent/30">
                   <tr>
@@ -170,7 +170,7 @@ export function DebugPipelineStatePage({ embedded }: { embedded?: boolean } = {}
           )}
 
           {/* state 全字段表 */}
-          <div className="overflow-hidden rounded-lg border">
+          <div className="overflow-x-auto rounded-lg border">
             <table className="w-full text-sm">
               <thead className="bg-accent/30">
                 <tr>

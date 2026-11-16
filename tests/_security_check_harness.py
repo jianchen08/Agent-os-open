@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pipeline.plugin import PluginContext
+from _libs.pipeline_base.plugin import PluginContext
 
 
 class ApprovalCounter:

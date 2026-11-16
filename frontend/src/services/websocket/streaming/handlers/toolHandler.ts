@@ -1,6 +1,7 @@
 /** 工具调用事件处理器（start / result） 仅使用 parts[] 统一路径，已移除旧 toolCalls / contentBlocks 兼容代码。 */
 import type { ToolCallPart } from '@/types/messageParts'
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
+import { truncateToolResultData } from '@/utils/toolResultTruncate'
 import { loggers } from '@/utils/logger'
 import { resolvePipelineId } from '../router'
 import { flushStreamChunkBuffer } from './streamHandler'
@@ -36,6 +37,26 @@ function resolveToolResultState(
     )
   }
   return 'done'
+}
+
+/**
+ * 同管道内跨消息按 callId 搜既有声明卡，返回其宿主消息 id；找不到返回 null。
+ *
+ * 融合迭代管道（tool_exec 步先于 llm 步、post 路由不写 core_type）下，第 N 轮
+ * LLM 声明的工具调用在 N+1 轮迭代开头执行，契约事件 message_id 全部 = a_{N+1}
+ * （晚一轮）——按事件 message_id 直接寻址必然 miss。callId 是唯一稳定身份
+ * （provider id 或 call_<hex24>，跨消息唯一），消息只是容器：直接寻址 miss 时
+ * 以 callId 跨消息归并到声明卡（贯彻 ADR 2026-09-28-tool-call-live-card 单键归并）。
+ * 数据面单管道持久化上限 250 条，全量遍历成本可忽略，且只走直接 miss 的罕见路径。
+ */
+function findToolCallMessageId(pipelineId: string, callId: string): string | null {
+  const msgs = pipelineStore.getState().getMessages(pipelineId)
+  for (const msg of msgs) {
+    if (msg.parts?.some((p) => p.type === 'tool_call' && p.callId === callId)) {
+      return msg.id
+    }
+  }
+  return null
 }
 
 /** 处理工具调用开始事件 向 parts[] 追加一个 tool_call part；若 call_id 缺失则跳过（等数据完整再渲染）。 */
@@ -91,14 +112,25 @@ export function handleToolStart(eventData: any) {
   // 同 call_id 的卡已存在（block 协议输出阶段建卡 / new_message 映射 / FIXUP）：
   // upsert 归并进这张卡，不建第二张。执行开始置 'calling'（state='streaming'
   // 的映射卡也收拢进 calling）；已有终态证据（result/error）的迟到事件不回退。
-  const existingIdx = pipelineStore.getState().findToolCallPartIndex(pipelineId, messageId, callId)
+  // 直接寻址（事件 message_id 钉死消息）miss 时先跨消息按 callId 搜声明卡——
+  // 融合迭代管道下契约事件 message_id 晚一轮，归并目标在上一轮消息里；
+  // 跨消息也未命中才走占位+建卡路径。
+  let targetMsgId = messageId
+  let existingIdx = pipelineStore.getState().findToolCallPartIndex(pipelineId, messageId, callId)
+  if (existingIdx < 0) {
+    const foundMsgId = findToolCallMessageId(pipelineId, callId)
+    if (foundMsgId) {
+      targetMsgId = foundMsgId
+      existingIdx = pipelineStore.getState().findToolCallPartIndex(pipelineId, targetMsgId, callId)
+    }
+  }
   if (existingIdx >= 0) {
     const cur = pipelineStore.getState().getMessages(pipelineId)
-      .find((m) => m.id === messageId)?.parts?.[existingIdx] as ToolCallPart | undefined
+      .find((m) => m.id === targetMsgId)?.parts?.[existingIdx] as ToolCallPart | undefined
     if (cur) {
       const hasTerminal = cur.result !== undefined || cur.resultData !== undefined || cur.error !== undefined
       const eventArgs = eventData.args || eventData.data?.args || eventData.data?.tool_args || {}
-      pipelineStore.getState().updatePart(pipelineId, messageId, existingIdx, {
+      pipelineStore.getState().updatePart(pipelineId, targetMsgId, existingIdx, {
         state: hasTerminal ? cur.state : 'calling',
         name: !cur.name || cur.name === 'unknown' ? toolName : cur.name,
         args: cur.args && Object.keys(cur.args).length > 0 ? cur.args : eventArgs,
@@ -106,8 +138,8 @@ export function handleToolStart(eventData: any) {
           ?? (eventData.container_task_id || eventData.data?.container_task_id || undefined),
       })
       _debugLogger.debug(
-        '[TOOL_START] upsert 既有卡: tool=%s callId=%s state=%s',
-        toolName, callId?.slice(0, 12), hasTerminal ? cur.state : 'calling',
+        '[TOOL_START] upsert 既有卡: tool=%s callId=%s state=%s msgId=%s',
+        toolName, callId?.slice(0, 12), hasTerminal ? cur.state : 'calling', targetMsgId?.slice(0, 12),
       )
     }
     return
@@ -163,7 +195,17 @@ export function handleToolProgress(eventData: any) {
   const delta: string = typeof data?.delta === 'string' ? data.delta : ''
   if (!delta) return
 
-  const partIndex = pipelineStore.getState().findToolCallPartIndex(pipelineId, messageId, callId)
+  // 直接寻址 miss 时跨消息按 callId 归并（契约事件 message_id 晚一轮，见
+  // findToolCallMessageId 注释），定位到声明卡所在消息再追加。
+  let targetMsgId = messageId
+  let partIndex = pipelineStore.getState().findToolCallPartIndex(pipelineId, messageId, callId)
+  if (partIndex < 0) {
+    const foundMsgId = findToolCallMessageId(pipelineId, callId)
+    if (foundMsgId) {
+      targetMsgId = foundMsgId
+      partIndex = pipelineStore.getState().findToolCallPartIndex(pipelineId, targetMsgId, callId)
+    }
+  }
   if (partIndex < 0) {
     // tool_start 未达/丢失：进度无法定位，静默丢弃（结果仍会由 tool_result 补齐）
     _debugLogger.debug(
@@ -174,7 +216,7 @@ export function handleToolProgress(eventData: any) {
   }
 
   const msgs = pipelineStore.getState().getMessages(pipelineId)
-  const msg = msgs.find((m: any) => m.id === messageId)
+  const msg = msgs.find((m: any) => m.id === targetMsgId)
   const part = msg?.parts?.[partIndex] as any
   if (!part) return
   // 迟到进度（part 已 done/error）：结果已定，忽略避免覆盖
@@ -191,7 +233,7 @@ export function handleToolProgress(eventData: any) {
   const secs = (Number(data?.elapsed_ms) || 0) / 1000
   const currentStep = `已输出 ${kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb.toFixed(1)} KB`} / ${secs.toFixed(1)}s`
 
-  pipelineStore.getState().updatePart(pipelineId, messageId, partIndex, {
+  pipelineStore.getState().updatePart(pipelineId, targetMsgId, partIndex, {
     partialOutput: nextOutput,
     currentStep,
   } as any)
@@ -215,8 +257,18 @@ export function handleToolResult(eventData: any) {
   const callId = eventData.call_id || eventData.data?.call_id
   if (!callId) return
 
-  // 通过 call_id 精确匹配 parts[] 中的 tool_call part 并更新
+  // 通过 call_id 精确匹配 parts[] 中的 tool_call part 并更新。
+  // 直接寻址 miss 时先跨消息按 callId 搜声明卡（契约事件 message_id 晚一轮，
+  // 见 findToolCallMessageId 注释）；跨消息也未命中才走 FIXUP 建卡兜底。
+  let targetMsgId = messageId
   let partIndex = pipelineStore.getState().findToolCallPartIndex(pipelineId, messageId, callId)
+  if (partIndex < 0) {
+    const foundMsgId = findToolCallMessageId(pipelineId, callId)
+    if (foundMsgId) {
+      targetMsgId = foundMsgId
+      partIndex = pipelineStore.getState().findToolCallPartIndex(pipelineId, targetMsgId, callId)
+    }
+  }
   if (partIndex < 0) {
     // tool_result 到达时对应的 tool_call part 可能不存在（tool_start 事件丢失/乱序），
     // 补建 tool_call part 再写入结果，对齐 Python bridge_events.py 的 FIXUP 自动补发
@@ -239,23 +291,34 @@ export function handleToolResult(eventData: any) {
 
   if (partIndex >= 0) {
     const resultToolName = eventData.tool_name || eventData.data?.tool_name
+    // 结果体超阈值统一截断（数据面瘦身批次 1.2，与 session.ts 映射收敛到同一
+    // 纯函数）：part 只存「预览+标记」，展开时经 toolResultBackfill 按 sequence
+    // 回取全量回填。sequence 取结果卡宿主消息当前权威值（流式占位未挂 seq 时
+    // 标记不带 sequence，展开如实报不可回取，落库对账后新标记会带上）。
+    const msgSequence = pipelineStore
+      .getState()
+      .getMessages(pipelineId)
+      .find((m) => m.id === targetMsgId)?.sequence
     const updates: Record<string, unknown> = {
       state: resolveToolResultState(
         eventData.success ?? eventData.data?.success,
         eventData.error ?? eventData.data?.error,
         resultToolName ?? 'unknown',
       ),
-      result: eventData.result ?? eventData.data?.result,
+      result: truncateToolResultData(eventData.result ?? eventData.data?.result, msgSequence),
       // 后端在 tool_result 事件携带的结构化完整数据（含 diff 的 added/removed/old_content/new_content），
       // 流式 result 字段为截断字符串仅供预览；result_data 供工具卡片渲染 +/- 徽标与展开 diff。
-      resultData: eventData.result_data ?? eventData.data?.result_data,
+      resultData: truncateToolResultData(
+        eventData.result_data ?? eventData.data?.result_data,
+        msgSequence,
+      ),
       error: eventData.error ?? eventData.data?.error,
       durationMs: eventData.duration_ms ?? eventData.data?.duration_ms,
     }
     // 当 part 的 name 仍为 fallback "unknown" 且 result 事件携带有效 tool_name 时，回填更新
     if (resultToolName && resultToolName !== 'unknown') {
       const msgs = pipelineStore.getState().getMessages(pipelineId)
-      const msg = msgs.find((m: any) => m.id === messageId)
+      const msg = msgs.find((m: any) => m.id === targetMsgId)
       if (msg?.parts?.[partIndex]) {
         const currentPart = msg.parts[partIndex] as any
         if (currentPart.name === 'unknown' || !currentPart.name) {
@@ -263,6 +326,6 @@ export function handleToolResult(eventData: any) {
         }
       }
     }
-    pipelineStore.getState().updatePart(pipelineId, messageId, partIndex, updates)
+    pipelineStore.getState().updatePart(pipelineId, targetMsgId, partIndex, updates)
   }
 }

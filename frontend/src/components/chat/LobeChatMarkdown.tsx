@@ -1,10 +1,15 @@
 /** LobeChat Markdown 渲染组件 使用 @lobehub/ui 的 Markdown 组件，专为 AI 聊天设计 */
 
-import { ConfigProvider, Markdown } from '@lobehub/ui'
+// @lobehub/ui 子路径 import（必须带 /index 后缀，es/Markdown 形式会
+// ERR_PACKAGE_PATH_NOT_EXPORTED）：把 lobehub 从整体 vendor 入口拆为按组件消费，
+// 避免主入口把未用组件链拉进首屏 chunk。
+import ConfigProvider from '@lobehub/ui/es/ConfigProvider/index'
+import Markdown from '@lobehub/ui/es/Markdown/index'
 import { motion } from 'motion/react'
 import { useMemo, type FC, type MouseEvent, type ReactNode } from 'react'
 import { AttachmentImage } from '@/components/shared/markdown/AttachmentImage'
 import { preprocessSvgCodeBlocks } from '@/components/shared/markdown/shared'
+import { ContentCardGate, TaskListGate } from './contentCard/ContentCardGate'
 import './LobeChatMarkdown.css'
 
 interface LobeChatMarkdownProps {
@@ -64,7 +69,20 @@ export const LobeChatMarkdown: FC<LobeChatMarkdownProps> = ({
             enableMermaid={true}
             // 附件图片引用（![f](/uploads/x.png)）加载失败 → 显式失败卡
             // （2026-09-08 附件解析失败显式化：前端要说明，禁无文字占位图）
-            components={{ img: AttachmentImage }}
+            // pre 覆写 = content_cards 分发门（ADR 2026-10-14-content-card-registry）：
+            // 按 fence language 查表换渲染，未命中/流式中回投默认代码块（现状原样）；
+            // isStreaming 经闭包携带（消息级流式门，§7）
+            components={{
+              img: AttachmentImage,
+              pre: (preProps) => <ContentCardGate {...preProps} isStreaming={isStreaming} />,
+              // task-list 块声明路由（2026-10-24 用户裁定：渲染归插件声明，
+              // 本组件只接通用 gate，零业务知识）；流式原样。
+              // 流式必须整键缺席而非值 undefined：react-markdown v10 组件解析
+              // 按键存在性取值（hast-util-to-jsx-runtime own.call 命中即用值），
+              // undefined 值会渲染成 undefined 组件 → React 错误码 130 整页崩
+              // （2026-10-25 装机实证：流式输出含列表消息必崩）。
+              ...(isStreaming ? {} : { ul: TaskListGate }),
+            }}
           >
             {processedContent}
           </Markdown>

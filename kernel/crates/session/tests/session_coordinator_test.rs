@@ -648,3 +648,42 @@ async fn emit_event_routes_interaction_family_out_of_replay_buffer() {
         "普通事件应可重放"
     );
 }
+
+/// broadcast_event：任意事件类型保留顶层 type 的全局广播（卡3 全局通知路由的
+/// 传输原语）。broadcast_widget 走 widget_event 信封发不出 system_notification
+/// ——本方法与 emit_event 同形（{type, data, sequence}），路由改全连接广播，
+/// 不进 thread 重放缓冲。无活跃管道/无 thread 注册也必须可达（装机 2026-10-18
+/// 事故缺口：组全灭时用户无相关活跃会话 → 通知零投递）。
+#[tokio::test]
+async fn broadcast_event_preserves_type_and_reaches_all_connections() {
+    let coord = SessionCoordinator::default();
+    assert_eq!(
+        coord
+            .broadcast_event("system_notification", serde_json::json!({"x": 1}))
+            .await,
+        0,
+        "无连接 → 零投递（不 panic）"
+    );
+
+    let (a, recv_a) = MockSink::online();
+    let (b, recv_b) = MockSink::online();
+    coord.register("user-A", a);
+    coord.register("user-B", b);
+    let n = coord
+        .broadcast_event(
+            "system_notification",
+            serde_json::json!({"record_id": "n_x_1", "content": "组不可用"}),
+        )
+        .await;
+    assert_eq!(n, 2, "两个连接各收一份（无需 thread 注册）");
+    for recv in [&recv_a, &recv_b] {
+        let frames = recv.lock().unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0]["type"], "system_notification",
+            "顶层 type 必须保留（前端按事件名订阅）"
+        );
+        assert_eq!(frames[0]["data"]["record_id"], "n_x_1");
+        assert!(frames[0]["sequence"].is_u64(), "sequence 同形");
+    }
+}

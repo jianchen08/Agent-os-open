@@ -1,0 +1,427 @@
+{
+  "id": "human_interaction_tool",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Human Interaction Tool",
+  "description": "用户交互插件（双角色：LLM 工具 + 交互服务。choice/conversation/notification 三模式）",
+  "version": "2.2.5",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "mcp": {
+    "transport": "stdio",
+    "request_timeout_secs": 86400
+  },
+  "lifecycle": {
+    "idle_timeout_secs": 0
+  },
+  "capabilities": {
+    "metrics_class": "tool",
+    "tools": [
+      {
+        "name": "human_interaction",
+        "description": "与用户交互（LLM 工具，双态：带 options=阻塞交互卡（点选/自由回复/进入对话），不带=非阻塞通知）",
+        "render": {
+          "card": "form",
+          "title": "人工交互"
+        },
+        "ui": {
+          "interaction_modes": [
+            {
+              "mode": "choice",
+              "features": [
+                "options",
+                "options_detail",
+                "text_input"
+              ]
+            },
+            {
+              "mode": "conversation",
+              "features": [
+                "options",
+                "options_detail",
+                "suggestions",
+                "navigate",
+                "text_input"
+              ]
+            },
+            {
+              "mode": "notification",
+              "features": [
+                "message",
+                "progress"
+              ]
+            }
+          ],
+          "notification_modes": [
+            {
+              "category": "progress",
+              "features": [
+                "status",
+                "message",
+                "progress"
+              ],
+              "icon": "loader"
+            },
+            {
+              "category": "alert",
+              "features": [
+                "status",
+                "message",
+                "actions"
+              ],
+              "icon": "alert-triangle"
+            },
+            {
+              "category": "info",
+              "features": [
+                "status",
+                "message"
+              ],
+              "icon": "info"
+            },
+            {
+              "category": "success",
+              "features": [
+                "status",
+                "message"
+              ],
+              "icon": "check-circle"
+            },
+            {
+              "category": "error",
+              "features": [
+                "status",
+                "message",
+                "actions"
+              ],
+              "icon": "alert-circle"
+            }
+          ]
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string",
+              "description": "交互标题"
+            },
+            "description": {
+              "type": "string",
+              "description": "详细说明"
+            },
+            "options": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  }
+                }
+              },
+              "description": "选项列表。必须是 JSON 数组，例如 [\"批准\",\"拒绝\"] 或 [{\"id\":\"1\",\"label\":\"批准\"},{\"id\":\"2\",\"label\":\"拒绝\"}]。禁止包一层对象（如 {\"item\":[...]})。有 options=阻塞交互卡（点选/自由回复/进入对话）；无 options=非阻塞通知"
+            },
+            "timeout_seconds": {
+              "type": "number",
+              "default": 86400,
+              "description": "超时时间（秒）"
+            },
+            "priority": {
+              "type": "string",
+              "enum": [
+                "low",
+                "normal",
+                "high",
+                "critical"
+              ],
+              "default": "normal",
+              "description": "优先级"
+            },
+            "progress": {
+              "type": "number",
+              "description": "进度百分比 0-100（通知）"
+            },
+            "file_paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "需要展示给用户的文件路径列表。系统会自动读取文件内容并在交互面板中展示。以下两种情况都必须使用此参数：（1）主动展示——当你需要将文件内容、设计方案、代码变更等信息呈现给用户查看或审批时（如通知推送文件、选择卡展示文件变更）；（2）用户请求——当用户明确要求查看某个文件、某个结果，或要求省略/跳过某些内容并需要确认时。带 options 时展示于选择卡，不带 options 时必须改用带 options 的调用（通知不支持文件展示）。支持相对路径（基于工作空间）和绝对路径，单文件不超过10MB，最多10个文件。工作空间范围限制仅对子任务（L2+）生效；主 agent（L1）可展示项目内任意路径。"
+            }
+          },
+          "required": [
+            "title"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "type": "string",
+              "description": "sent/completed/user_arrived/denied"
+            },
+            "request_id": {
+              "type": "string",
+              "description": "notification"
+            },
+            "response_type": {
+              "type": "string",
+              "description": "answered/approved 等原始应答类型"
+            },
+            "selected_option": {
+              "type": "string"
+            },
+            "answers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "feedback": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string",
+              "description": "denied 分支"
+            }
+          }
+        }
+      }
+    ],
+    "services": [
+      {
+        "name": "interaction.send_notification",
+        "description": "发送非阻塞通知（服务能力）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "thread_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string",
+              "default": ""
+            },
+            "priority": {
+              "type": "string",
+              "enum": [
+                "low",
+                "normal",
+                "high",
+                "critical"
+              ],
+              "default": "normal"
+            }
+          },
+          "required": [
+            "session_id",
+            "thread_id",
+            "title"
+          ]
+        }
+      },
+      {
+        "name": "interaction.create_choice",
+        "description": "创建选择模式交互请求（服务能力）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "thread_id": {
+              "type": "string"
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string",
+              "default": ""
+            },
+            "options": {
+              "type": "array"
+            },
+            "timeout_seconds": {
+              "type": "integer",
+              "default": 86400
+            },
+            "priority": {
+              "type": "string",
+              "enum": [
+                "low",
+                "normal",
+                "high",
+                "critical"
+              ],
+              "default": "normal"
+            },
+            "user_id": {
+              "type": "string",
+              "description": "创建者用户（param_inject/调用方服务端注入，用于审批归属归因）"
+            },
+            "agent_id": {
+              "type": "string",
+              "description": "发起 Agent 坐标（state agent.id / config_id，卡片来源展示）"
+            },
+            "agent_level": {
+              "type": "string",
+              "description": "发起 Agent 层级（L1/L2/L3，卡片来源展示）"
+            },
+            "pipeline_id": {
+              "type": "string",
+              "description": "所属管道 ID（卡片来源展示与路由）"
+            },
+            "agent_name": {
+              "type": "string",
+              "description": "发起 Agent 显示名（卡片来源展示，缺省由前端缓存解析）"
+            }
+          },
+          "required": [
+            "session_id",
+            "thread_id",
+            "tab_id",
+            "title"
+          ]
+        }
+      },
+      {
+        "name": "interaction.wait_for_choice",
+        "description": "等待用户选择响应（服务能力）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "request_id": {
+              "type": "string"
+            },
+            "timeout": {
+              "type": "number",
+              "default": 86400
+            }
+          },
+          "required": [
+            "request_id"
+          ]
+        }
+      },
+      {
+        "name": "interaction.respond",
+        "description": "提交交互响应（前端响应回路）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "request_id": {
+              "type": "string"
+            },
+            "response_type": {
+              "type": "string",
+              "description": "approved/denied/answered/timeout/cancelled"
+            },
+            "selected_option": {
+              "type": "string"
+            },
+            "answers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "feedback": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "request_id",
+            "response_type"
+          ]
+        }
+      },
+      {
+        "name": "interaction.cancel",
+        "description": "取消交互请求（服务能力）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "request_id": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "request_id"
+          ]
+        }
+      },
+      {
+        "name": "interaction.get_pending",
+        "description": "获取待处理请求列表（服务能力）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "integer",
+              "default": 50
+            }
+          }
+        }
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "provides": {
+    "capabilities": [
+      {
+        "namespace": "human-interaction",
+        "methods": [
+          "send_notification",
+          "create_choice",
+          "wait_for_choice",
+          "respond",
+          "cancel",
+          "get_pending"
+        ],
+        "host": "sidecar",
+        "tool_prefix": "interaction",
+        "protocol_roles": [
+          {
+            "role": "interaction-respond",
+            "method": "respond"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 15,
+  "activation": "eager",
+  "host_group": "longwait"
+}

@@ -30,7 +30,7 @@ function registerPage(overrides: Partial<PageDeclaration>): void {
 describe('PluginStatusItems — dock/status 插件项迁移到侧栏底部', () => {
   beforeEach(() => {
     contributionRegistry.clear()
-    useWidgetEventStore.setState({ events: {}, latest: {} })
+    useWidgetEventStore.setState({ latest: {} })
     useContextKeys.setState({ keys: {} })
   })
 
@@ -74,7 +74,7 @@ describe('PluginStatusItems — dock/status 插件项迁移到侧栏底部', () 
 describe('PluginStatusItems — onClick 导航行为（模式体系 §5.0 通用能力）', () => {
   beforeEach(() => {
     contributionRegistry.clear()
-    useWidgetEventStore.setState({ events: {}, latest: {} })
+    useWidgetEventStore.setState({ latest: {} })
     useContextKeys.setState({ keys: {} })
     useLayoutModeStore.setState({ workspaceTabs: [] })
     useNotificationStore.setState({ notifications: [] })

@@ -6,9 +6,20 @@
  * 带参 key 用工厂函数（参数进 key，参数变 = 缓存条目变）。
  */
 
+import type { MirrorTable } from '@/services/api/syncMirror'
+
 export const queryKeys = {
   /** 会话列表（GET /sessions?session_type=main_pipeline） */
   sessions: ['sessions'] as const,
+  /** 本机同步状态（GET /ext/sync_agent/status，本机地盘身份） */
+  syncAgentStatus: ['sync-agent-status'] as const,
+  /** 地盘可达性：云端权威设备注册表透传（GET /ext/sync_agent/relay/devices，R30） */
+  relayDevices: ['relay-devices'] as const,
+  /** 注册表设备实测探活（POST /ext/sync_agent/probe，按设备 id 集分条缓存） */
+  deviceProbes: (deviceIds: string[]) => ['device-probes', [...deviceIds].sort()] as const,
+  /** 只读镜像记录（GET /ext/sync_agent/mirror/records，按表分条缓存） */
+  syncMirrorRecords: (table: MirrorTable) =>
+    ['sync-mirror-records', table] as const,
   /** agent 列表（GET /ext/agent_manager/agents） */
   agents: ['agents'] as const,
   /** agent 管理页列表（AgentManagerPage，按搜索词分条；与全量 agents 缓存隔离） */
@@ -48,6 +59,8 @@ export const queryKeys = {
   llmPayloadDiag: (page: number) => ['debug', 'llm-payload', page] as const,
   /** 调试中心：LLM 请求诊断全部分条的前缀（清空全部后批量失效用） */
   llmPayloadDiagPrefix: ['debug', 'llm-payload'] as const,
+  /** 调试中心：诊断开关（settings.yaml diagnostics 段） */
+  diagnosticsSettings: ['debug', 'diagnostics-settings'] as const,
   /** 调试中心：评估指标 */
   evaluationMetrics: ['debug', 'evaluation-metrics'] as const,
   /** 调试中心：用户列表 */

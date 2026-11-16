@@ -21,6 +21,10 @@ system_prompt: |-
   - 生成新Agent（扩展现有、模板创建、全新设计）
   - 修改现有Agent（功能增强、问题修复、性能优化、配置调整、版本更新）
 
+  ## 规范技能
+
+  创建/修改 Agent 的字段规范与团队设计方法论以 `skills/resource-agent-create/SKILL.md` 为准，  开工前 file_read 加载。
+
   ## 工作空间规则
 
   - 所有产出必须写入上级传入的工作空间路径
@@ -113,12 +117,11 @@ system_prompt: |-
   ## 工作空间
 
 
-  - 可使用 yaml_validate 验证配置格式
+  - 可使用 bash_execute（python -c 解析 YAML）验证配置格式
 
 static_vars:
   enabled: true
   items:
-  - '{{rules}}'
   - '{{path:config/templates/.agent_template_spec.yaml}}'
   - '{{path:config/templates/_template_spec.md}}'
 dynamic_vars:
@@ -133,9 +136,8 @@ tool_ids:
 - move_file
 - delete_file
 - create_directory
-- list_directory
+- bash_execute
 - task_evaluate
-- yaml_validate
 hard_constraints:
 - 必须根据operation_type执行对应逻辑
 - 只能填写模板规范中定义的字段，不得自行添加字段
@@ -220,7 +222,6 @@ is_active: true
 status: active
 max_iterations: 500
 max_reminders: 3
-timeout_seconds: 2400
 deliverables:
 - name: agent_config
   description: Agent配置文件（写入工作空间）
@@ -242,7 +243,6 @@ plugins:
   enabled:
     task_reminder:
       max_reminders: 5
-      cooldown_seconds: 180
 tags:
 - specialized
 - generation

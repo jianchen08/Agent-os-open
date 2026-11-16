@@ -78,8 +78,9 @@ describe('FloatingWindowManager — 移动端底部 sheet', () => {
     expect(screen.getByTestId('floating-window')).toBeInTheDocument()
 
     // 标题栏拖拽：mousedown 记录起点 → mousemove 更新 position
+    // buttons:1 = 按键按住（拖拽现场；jsdom 默认 buttons=0，会被判为已抬起）
     fireEvent.mouseDown(screen.getByTestId('floating-window-titlebar'), { clientX: 200, clientY: 100 })
-    fireEvent.mouseMove(document, { clientX: 240, clientY: 130 })
+    fireEvent.mouseMove(document, { clientX: 240, clientY: 130, buttons: 1 })
     fireEvent.mouseUp(document)
     expect(onUpdate).toHaveBeenCalledWith('w1', { position: { x: 160, y: 110 } })
   })

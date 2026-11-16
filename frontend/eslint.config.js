@@ -148,6 +148,22 @@ export default tseslint.config(
     },
   },
 
+  // widget Action Bus 闸（ADR 2026-10-10-widget-action-bus）：widgets 目录禁
+  // import '@/stores'（含子路径）——动作面走 useWidgetAction（内置域 host
+  // adapter / ui_schema actionUri）、数据面走 datasourceUri，widget 不与具体
+  // store 绑死。存量直连文件登记在 eslint-rules/widget-store-import-baseline.json
+  // （error 级 + 棘轮：迁移一个删一个，基线清零后闸全量生效；防死锁——迁移
+  // 前不红）。测试文件豁免见下方 test files 块。
+  {
+    files: ['src/components/schema/widgets/**/*.{ts,tsx}'],
+    plugins: {
+      'local-rules': localRules,
+    },
+    rules: {
+      'local-rules/no-widget-store-imports': 'error',
+    },
+  },
+
   // Test files - relaxed rules
   {
     files: [
@@ -160,9 +176,11 @@ export default tseslint.config(
       '@typescript-eslint/no-non-null-assertion': 'off',
       'no-console': 'off',
       'react-refresh/only-export-components': 'off',
-      // 测试断言错误路径属正常（mock 拒绝/catch 断言），两条 OBS-R258-1 规则只在生产面执法
+      // 测试断言错误路径属正常（mock 拒绝/catch 断言），两条 OBS-R258-1 规则只在生产面执法；
+      // widget store 闸同豁免（mock store 属测试正当依赖）
       'local-rules/no-swallowed-errors': 'off',
       'local-rules/no-bare-usequery-in-pages': 'off',
+      'local-rules/no-widget-store-imports': 'off',
     },
   },
 

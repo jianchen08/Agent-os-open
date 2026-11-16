@@ -74,13 +74,12 @@ describe('场景3: widgetEventStore 接收并分发 widget_event', () => {
     useWidgetEventStore.getState().clear()
   })
 
-  it('dispatchWidgetEvent 按 widget_id 更新 latest + 追加队列', () => {
+  it('dispatchWidgetEvent 按 widget_id 更新 latest', () => {
     const { dispatchWidgetEvent } = useWidgetEventStore.getState()
     dispatchWidgetEvent({ widget_id: 'w1', event: 'snapshot', data: { value: 42 }, sequence: 1 })
 
     const state = useWidgetEventStore.getState()
     expect(state.latest['w1'].data.value).toBe(42)
-    expect(state.events['w1']).toHaveLength(1)
   })
 
   it('多次 dispatch 更新 latest 到最新值', () => {
@@ -89,7 +88,6 @@ describe('场景3: widgetEventStore 接收并分发 widget_event', () => {
     dispatchWidgetEvent({ widget_id: 'w1', event: 'snapshot', data: { value: 2 }, sequence: 2 })
 
     expect(useWidgetEventStore.getState().latest['w1'].data.value).toBe(2)
-    expect(useWidgetEventStore.getState().events['w1']).toHaveLength(2)
   })
 
   it('无 widget_id 的事件被忽略', () => {
@@ -98,7 +96,7 @@ describe('场景3: widgetEventStore 接收并分发 widget_event', () => {
     expect(Object.keys(useWidgetEventStore.getState().latest)).toHaveLength(0)
   })
 
-  it('不同 widget_id 队列互不干扰', () => {
+  it('不同 widget_id 互不干扰', () => {
     const { dispatchWidgetEvent } = useWidgetEventStore.getState()
     dispatchWidgetEvent({ widget_id: 'w1', event: 'snap', data: { v: 1 }, sequence: 1 })
     dispatchWidgetEvent({ widget_id: 'w2', event: 'snap', data: { v: 2 }, sequence: 2 })

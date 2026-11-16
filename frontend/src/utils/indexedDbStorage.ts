@@ -13,6 +13,7 @@
 import { get, set, del, createStore } from 'idb-keyval'
 import { createJSONStorage } from 'zustand/middleware'
 import { createPersistThrottle } from './persistThrottle'
+import { userScopedKey } from './userScopedStorage'
 
 /** 复用的 IndexedDB keyval store 句柄（库名 / store 名固定） */
 const idbStore = createStore('app-db', 'kv')
@@ -30,43 +31,49 @@ function markMemoryFallback(): void {
   )
 }
 
-/** 容错 get：IndexedDB 失败则读内存降级 */
+/** 容错 get：IndexedDB 失败则读内存降级。
+ *
+ * 键经 userScopedKey 注入账户命名空间（隔离执法点①）：消息缓存按登录账户隔离，
+ * 切户后读不到旧账户缓存。 */
 async function safeGet(name: string): Promise<string | null> {
-  if (useMemoryFallback) return memoryFallback.get(name) ?? null
+  const key = userScopedKey(name)
+  if (useMemoryFallback) return memoryFallback.get(key) ?? null
   try {
-    const val = await get<string>(name, idbStore)
+    const val = await get<string>(key, idbStore)
     return val ?? null
   } catch {
     markMemoryFallback()
-    return memoryFallback.get(name) ?? null
+    return memoryFallback.get(key) ?? null
   }
 }
 
 /** 容错 set：IndexedDB 失败则写内存降级 */
 async function safeSet(name: string, value: string): Promise<void> {
+  const key = userScopedKey(name)
   if (useMemoryFallback) {
-    memoryFallback.set(name, value)
+    memoryFallback.set(key, value)
     return
   }
   try {
-    await set(name, value, idbStore)
+    await set(key, value, idbStore)
   } catch {
     markMemoryFallback()
-    memoryFallback.set(name, value)
+    memoryFallback.set(key, value)
   }
 }
 
 /** 容错 del：IndexedDB 失败则删内存降级 */
 async function safeDel(name: string): Promise<void> {
+  const key = userScopedKey(name)
   if (useMemoryFallback) {
-    memoryFallback.delete(name)
+    memoryFallback.delete(key)
     return
   }
   try {
-    await del(name, idbStore)
+    await del(key, idbStore)
   } catch {
     markMemoryFallback()
-    memoryFallback.delete(name)
+    memoryFallback.delete(key)
   }
 }
 

@@ -22,7 +22,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system" / "multimodal"
+_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "multimodal"
 
 
 def _load_server() -> Any:

@@ -14,12 +14,14 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { DebugLlmPayloadPage } from '@/pages/debug/DebugLlmPayloadPage'
-import { getPayloadDiagFile, getPayloadDiagList } from '@/services/api/llmPayload'
+import { getDiagnosticsSettings, getPayloadDiagFile, getPayloadDiagList } from '@/services/api/llmPayload'
 import { createTestQueryClient, renderWithProviders } from '@/test/renderWithProviders'
 
 vi.mock('@/services/api/llmPayload', () => ({
   getPayloadDiagList: vi.fn(),
   getPayloadDiagFile: vi.fn(),
+  getDiagnosticsSettings: vi.fn(),
+  updateDiagnosticsSettings: vi.fn(),
 }))
 
 function renderPage() {
@@ -57,6 +59,10 @@ describe('DebugLlmPayloadPage', () => {
     vi.mocked(getPayloadDiagFile).mockResolvedValue({
       name: FAKE_ITEMS[0].name,
       content: JSON.stringify(FAKE_BODY),
+    })
+    // 诊断开关默认开（settings.yaml 面默认值）
+    vi.mocked(getDiagnosticsSettings).mockResolvedValue({
+      diagnostics: { payload_diag: true, prompt_audit: false },
     })
   })
 

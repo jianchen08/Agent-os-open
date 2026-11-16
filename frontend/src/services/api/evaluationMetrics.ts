@@ -53,7 +53,7 @@ export async function getEvaluationMetrics(params?: {
     { params, optional: true },
   )
   // 后端评估服务保证 metric 字段全量返回（category/usage_count/success_count/
-  // created_at 恒存在，见 plugins/shared/system/evaluation/server.py 的列表组装），
+  // created_at 恒存在，见 plugins/shared/evaluation/server.py 的列表组装），
   // 直接透传；不再以 ''/0 伪造补齐缺失字段（伪造会让「无统计」与「未上报」不可区分）。
   return {
     metrics: response.data.metrics,

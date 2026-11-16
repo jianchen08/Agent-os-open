@@ -6,9 +6,8 @@
  */
 
 import { useCallback } from 'react'
-import { toast } from 'sonner'
 import { Download, FileQuestion } from '@/assets/icons'
-import apiClient from '@/services/api/client'
+import { downloadAttachment } from '@/services/fileLoaderRegistry'
 
 export interface NoLoaderPreviewProps {
   /** 文件路径/名（用于提取扩展名与下载命名） */
@@ -31,28 +30,8 @@ export function NoLoaderPreview({ filePath, size, url }: NoLoaderPreviewProps) {
   const lastSlash = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'))
   const fileName = filePath.substring(lastSlash + 1)
 
-  const handleDownload = useCallback(async () => {
-    if (!url) return
-    try {
-      const resp = await apiClient.get<Blob>(url, {
-        baseURL: '',
-        responseType: 'blob',
-        silent: true,
-      })
-      const blobUrl = URL.createObjectURL(resp.data)
-      const a = document.createElement('a')
-      a.href = blobUrl
-      a.download = fileName
-      a.click()
-      URL.revokeObjectURL(blobUrl)
-    } catch (error) {
-      const status = (error as { response?: { status?: number } } | null)?.response?.status
-      toast.error(
-        status
-          ? `文件 "${fileName}" 下载失败（HTTP ${status}）`
-          : `文件 "${fileName}" 下载失败，请检查网络或文件是否可用`,
-      )
-    }
+  const handleDownload = useCallback(() => {
+    if (url) void downloadAttachment(url, fileName)
   }, [url, fileName])
 
   return (
@@ -69,7 +48,7 @@ export function NoLoaderPreview({ filePath, size, url }: NoLoaderPreviewProps) {
           <p className="text-foreground mb-1 text-sm font-medium">暂无支持 {ext || '未知'} 类型的加载器</p>
           <p className="text-muted-foreground text-xs">该文件类型暂无可用的在线查看器。</p>
           <button
-            onClick={() => void handleDownload()}
+            onClick={handleDownload}
             className="bg-primary hover:bg-primary/90 mt-3 flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs text-primary-foreground transition-colors"
           >
             <Download className="h-3.5 w-3.5" />

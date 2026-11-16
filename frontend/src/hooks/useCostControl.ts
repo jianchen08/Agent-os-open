@@ -108,7 +108,7 @@ export function useCostControl() {
   // 监听 WS cost_update 事件，事件驱动刷新使用统计。
   // WS 回调内吞掉 rejection：fetchUsageStatistics 内部会 rethrow 给调用方组
   // 装错误态，fire-and-forget 调用下 unhandled rejection 会被全局监听兜成
-  // 「前端运行时错误」高优通知（假告警）。
+  // 「界面运行时错误」高优通知（假告警）。
   useEffect(() => {
     const handleCostUpdate = () => {
       fetchUsageStatistics().catch(() => {

@@ -4,7 +4,8 @@
  * 语义（本刀边界，ADR 2026-09-16-electron-kernel-spawn-wiring；
  * 端口默认分离 ADR 2026-09-20-packaged-kernel-port-default-9101）：
  *  - 生产模式（app.isPackaged）启动时：**只 spawn 包内内核**（cwd=resources/kernel，
- *    env 指向包内插件/配置）。默认端口 9101 与开发栈默认 9100 天然错峰，两套
+ *    env 指向包内插件/配置）。默认端口（KERNEL_DEFAULT_PORT，生成物单源）与
+ *    开发栈默认 9100 天然错峰，两套
  *    环境可并存；解析端口仍被占用 → KernelPortBusyError 显式报错——绝不
  *    复用/连接外部内核（连接外部内核 = 两套环境混用，开发版损坏会拖死装机版，
  *    用户裁定禁止）；
@@ -26,15 +27,24 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 
+import {
+  diagLogPaths,
+  logDiag,
+  pruneExpiredKernelLogs,
+  shouldRotateDiagLog,
+} from "./diag-log";
+import { PACKAGED_KERNEL_PORT } from "./packaged-kernel-port.generated";
+
 /**
- * 打包件内核默认端口。
+ * 打包件内核默认端口（生成物单源 re-export）。
  *
- * 刻意与开发栈默认端口 9100 错峰（start_web_02.bat 起的 dev 内核占 9100）：
- * 装机版与开发版可同时运行，互不抢占（用户裁决 2026-09-20：同端口 = 无隔离）。
- * 前端打包件 WS 直连源（frontend/src/constants/websocket.ts
- * PACKAGED_KERNEL_WS_ORIGIN）与本值保持一致，改动须同刀同步。
+ * 真值单源在 scripts/generate_port_constants.py 真值区 → 本文件旁的
+ * packaged-kernel-port.generated.ts（DO-NOT-EDIT）；与开发栈默认端口 9100
+ * 错峰，装机版与开发版可并存（用户裁决 2026-09-20，ADR 同名）。改端口 =
+ * 改生成器真值 → 跑生成脚本两侧随动；一致性由
+ * scripts/check_kernel_port_sync.py 执法（生成幂等 = 绿）。
  */
-export const KERNEL_DEFAULT_PORT = 9101;
+export const KERNEL_DEFAULT_PORT = PACKAGED_KERNEL_PORT;
 
 /**
  * 内核端口解析：AGENTOS_KERNEL_PORT 可整体错峰（端口冲突规避/隔离端口验证），
@@ -107,27 +117,30 @@ export function planKernelRestart(input: {
 /** 打包件默认空闲回收阈值（对齐 start_web_02.bat：300s 回收真空闲 sidecar） */
 const PLUGIN_IDLE_TIMEOUT_SECS = "300";
 
-/** 内核 token 签名密钥落盘文件名（userData 下，每安装身份一份） */
-const TOKEN_SECRET_FILE = "kernel-token-secret";
+/** 内核 token 签名密钥落盘文件名（认证身份目录下，机器级一份跨安装稳定） */
+export const TOKEN_SECRET_FILE = "kernel-token-secret";
 
 /** 密钥最小长度（与内核侧 AGENTOS_TOKEN_SECRET 的强度告警阈值一致） */
 const TOKEN_SECRET_MIN_LEN = 32;
 
 /**
- * 解析内核 token 签名密钥：userData 下持久化文件优先；缺失或过弱则生成
- * ≥32 字符随机密钥并落盘。
+ * 解析内核 token 签名密钥：认证身份目录下持久化文件优先；缺失或过弱则
+ * 生成 ≥32 字符随机密钥并落盘。
  *
  * 不注入该密钥时内核每进程随机签名（agentos_http::auth）——重启后全部
  * token 失效，用户每次打开应用都要重新登录。持久化一份=刷新令牌跨重启
  * 有效（自动登录）；删除该文件=全端登出（口令改密吊销面不受影响）。
+ * 目录取认证身份目录（main.resolveAuthIdentityDir，机器级跨安装稳定），
+ * 不随安装目录哈希走——内核用户库机器级共享（BUG-85），同一账号体系
+ * 每安装一份密钥=换目录重装即全端令牌作废（2026-10-22 用户实测）。
  *
  * @returns 非空密钥；生成/读取失败返回 null（内核回落进程随机密钥，
  *          行为退化为现状的每次重登，不阻断启动）
  */
-export function resolveTokenSecret(userDataDir: string): string | null {
+export function resolveTokenSecret(identityDir: string): string | null {
   try {
-    fs.mkdirSync(userDataDir, { recursive: true });
-    const file = path.join(userDataDir, TOKEN_SECRET_FILE);
+    fs.mkdirSync(identityDir, { recursive: true });
+    const file = path.join(identityDir, TOKEN_SECRET_FILE);
     try {
       const existing = fs.readFileSync(file, "utf-8").trim();
       if (existing.length >= TOKEN_SECRET_MIN_LEN) {
@@ -218,36 +231,88 @@ export function resolvePackagedConfigUsersDir(
 }
 
 /**
- * 装机形态配置根（用户数据为准，ADR 2026-10-03-packaged-user-data-first）：
- * `<userRoot>/config`——全配置树（agents/pipelines/llm.yaml/models…）的真值
- * 在用户空间（可写、升级不丢），包内 `resources\config` 降级为首次播种源
- * （seedTreeMissingOnly 补缺，绝不覆盖既有）。ambient AGENTOS_CONFIG_ROOT
- * 显式设置时原样继承（覆盖能力保留）。
+ * 装机形态配置根真值（ADR 2026-10-17-installed-config-root-user-space）：
+ * `<userRoot>/config`——与内核 `user_space::user_config_dir()`、
+ * `scripts/sync_installed_user_space.py --config` 的落点同源同值。
+ *
+ * 为什么必须是用户空间而非包内 `resources/config`：
+ * - **安装目录是升级/卸载抹除面**：写进去的配置每次升级回退、卸载即删；
+ * - **读侧按路径直读的插件看不见用户空间**：插件（如 isolation 的
+ *   `_isolation_config_path()`）先查 `AGENTOS_CONFIG_ROOT`、未命中才从插件
+ *   文件向上找祖先目录那份——该变量指包内时，用户空间配置永不被读，
+ *   用户写的 `workspace.root` 静默失效（2026-10-17 事故根因）。
+ *
+ * 优先级：ambient `AGENTOS_CONFIG_ROOT`（显式钉配置根的能力归用户）→
+ * `AGENTOS_USER_CONFIG_DIR`（用户层根覆盖）→ `<userRoot>/config`。前两者
+ * 与内核 `user_space::user_config_dir()` 的解析链逐项对齐——**注入值恒等于
+ * 内核自己解析出的用户配置层**，否则会出现"内核写 A 层、插件读 B 层"的
+ * 分叉（单真值模型的实证根因）。**显式设置时解析值即该值**，播种与注入
+ * 共用同一解析结果，二者不得分叉。
  */
-export function resolvePackagedUserConfigDir(
+export function resolvePackagedConfigRootDir(
   env: NodeJS.ProcessEnv,
   appDataDir: string,
 ): string {
+  const pinned = envValue(env, "AGENTOS_CONFIG_ROOT");
+  if (pinned) {
+    return pinned;
+  }
+  const pinnedUserConfig = envValue(env, "AGENTOS_USER_CONFIG_DIR");
+  if (pinnedUserConfig) {
+    return pinnedUserConfig;
+  }
   const userRoot =
     envValue(env, "AGENTOS_USER_ROOT") ?? path.join(appDataDir, "agentos");
   return path.join(userRoot, "config");
 }
 
 /**
- * 播种目录树（幂等，非破坏性）：把 srcRoot 子树复制到 dstRoot——仅补缺失
- * 文件，绝不覆盖/删除既有内容（用户空间是活跃真值）。srcRoot 不存在时
- * 不动作。fsMod 注入便于测试（与 seedZonePolicyFiles 同款）。
+ * 出厂配置树播种（幂等）：把包内 `resources/config` 整树播种到用户空间配置根。
+ *
+ * 两段裁决（ADR 2026-10-24-config-seed-version-arbitration）：
+ * - **非受管文件**（无有效顶层 `version:` 声明）：copy-if-missing——仅补缺失，
+ *   绝不覆盖既有内容（用户空间是活跃真值，用户在 storage/授权名单/插件配置
+ *   上的改动都在这里，出厂树只补洞）；
+ * - **受管出厂默认**（yaml 顶层 `version:` 为点分整数）：版本裁决——用户副本
+ *   版本**严格大于**包内版本才保留，否则（持平/更低/无版本/不可解析）包内
+ *   覆盖。受管是包侧逐文件自声明的：包内文件不带有效 version 即不入受管面，
+ *   语义与旧版逐字节一致。
+ *
+ * 为什么覆盖裁决放播种步而非内核读侧：读侧只认一个根（ADR
+ * 2026-10-17-installed-config-root-user-space，半配置不失效）保持不变；
+ * 「用户空间陈旧副本遮蔽包内修复」（2026-10-24 评估通过空转事故根因，
+ * 10-21 旧 autonomous.yaml 遮蔽 10-23 包内路由修复）在播种步一次治好，
+ * 内核零改动。
+ *
+ * 版本格式（点分整数，如 1 / 1.2）由保存面（PUT 校验）与 CI 门禁
+ * `scripts/check_config_seed_versions.py`（内容变更必须抬版本）把守；
+ * 播种侧对不可解析版本 fail 向包内（用户副本视为 0，被覆盖自愈）。
+ *
+ * 返回计数（copied=补缺，overwritten=版本覆盖）——overwritten>0 由调用方
+ * 留痕（覆盖不可见=本次事故复盘盲区）。
+ *
+ * fsMod 注入便于测试（与 seedZonePolicyFiles 同款）。
  */
-export function seedTreeMissingOnly(
+export interface SeedConfigTreeResult {
+  copied: number;
+  overwritten: number;
+}
+
+export function seedConfigTree(
   fsMod: Pick<
     typeof fs,
-    "existsSync" | "mkdirSync" | "readdirSync" | "statSync" | "copyFileSync"
+    | "existsSync"
+    | "mkdirSync"
+    | "readdirSync"
+    | "readFileSync"
+    | "copyFileSync"
   >,
-  srcRoot: string,
-  dstRoot: string,
-): void {
-  if (!fsMod.existsSync(srcRoot)) {
-    return;
+  packageConfigRoot: string,
+  userConfigDir: string,
+): SeedConfigTreeResult {
+  const result: SeedConfigTreeResult = { copied: 0, overwritten: 0 };
+  if (!fsMod.existsSync(packageConfigRoot)) {
+    return result;
   }
   const walk = (src: string, dst: string): void => {
     fsMod.mkdirSync(dst, { recursive: true });
@@ -258,27 +323,69 @@ export function seedTreeMissingOnly(
         walk(s, d);
       } else if (!fsMod.existsSync(d)) {
         fsMod.copyFileSync(s, d);
+        result.copied += 1;
+      } else if (shouldOverwriteManaged(fsMod, s, d)) {
+        fsMod.copyFileSync(s, d);
+        result.overwritten += 1;
       }
     }
   };
-  walk(srcRoot, dstRoot);
+  walk(packageConfigRoot, userConfigDir);
+  return result;
+}
+
+/** 受管出厂默认判定后是否覆盖用户副本（包内未声明有效 version = 永不覆盖）。 */
+function shouldOverwriteManaged(
+  fsMod: Pick<typeof fs, "existsSync" | "readFileSync">,
+  packageFile: string,
+  userFile: string,
+): boolean {
+  if (!/\.(yaml|yml)$/i.test(packageFile)) {
+    return false;
+  }
+  let pkgVersion: number[] | null;
+  let userVersion: number[] | null;
+  try {
+    pkgVersion = topLevelVersion(fsMod.readFileSync(packageFile, "utf-8"));
+    userVersion = fsMod.existsSync(userFile)
+      ? topLevelVersion(fsMod.readFileSync(userFile, "utf-8"))
+      : null;
+  } catch {
+    // 读失败（编码/占用等）不覆盖——播种失败面留给既有 try/catch 语义
+    return false;
+  }
+  if (!pkgVersion) {
+    return false;
+  }
+  return !versionStrictlyGreater(userVersion ?? [], pkgVersion);
 }
 
 /**
- * 播种授权名单（幂等，非破坏性）：把包内 `configRoot/users` 子树复制到用户
- * 空间真值目录——仅补缺失文件，绝不覆盖/删除既有内容（用户空间是活跃真值，
- * 用户批准的永久授权都在这里）。包内无 users 子树（异常包）时不动作。
- * fsMod 注入便于测试（与 probeKernelHealth 的 fetch 注入同款）。
+ * yaml 顶层 `version:` 提取（列首无缩进行，值必须点分整数；其余形态含缺席
+ * 一律 null）。列首限定排除嵌套键与列表项；只扫 yaml 文本，无需完整解析器
+ * （格式由保存面与 CI 把守，此处只做保守识别）。
  */
-export function seedZonePolicyFiles(
-  fsMod: Pick<
-    typeof fs,
-    "existsSync" | "mkdirSync" | "readdirSync" | "statSync" | "copyFileSync"
-  >,
-  configRoot: string,
-  targetUsersDir: string,
-): void {
-  seedTreeMissingOnly(fsMod, path.join(configRoot, "users"), targetUsersDir);
+function topLevelVersion(text: string): number[] | null {
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^version:\s*(\d+(?:\.\d+)*)\s*(?:#.*)?$/.exec(line);
+    if (m) {
+      return m[1].split(".").map(Number);
+    }
+  }
+  return null;
+}
+
+/** 逐段数值比较（短侧补零）：user 严格大于 pkg 才真。 */
+function versionStrictlyGreater(user: number[], pkg: number[]): boolean {
+  const len = Math.max(user.length, pkg.length);
+  for (let i = 0; i < len; i += 1) {
+    const u = user[i] ?? 0;
+    const p = pkg[i] ?? 0;
+    if (u !== p) {
+      return u > p;
+    }
+  }
+  return false;
 }
 
 /**
@@ -289,17 +396,23 @@ export function seedZonePolicyFiles(
  *   弃用别名，ambient 残留值因 AGENTOS_BIND 恒被设置而必然失效）；
  * - AGENTOS_KERNEL_PORT：钉为 resolveKernelPort 解析值——内核监听端口与健康
  *   探测（KERNEL_HEALTH_URL）恒一致，ambient 值不致造成两者分叉；
- * - AGENTOS_PLUGINS_DIR / AGENTOS_CONFIG_ROOT：指向包内资源；
+ * - AGENTOS_PLUGINS_DIR：指向包内内置插件根；
+ * - AGENTOS_CONFIG_ROOT：钉用户空间 `<userRoot>/config`
+ *   （resolvePackagedConfigRootDir 解析值，ADR 2026-10-17）——配置真值可写
+ *   且升级不丢，且**按路径直读配置的插件能真正读到用户改的值**（指包内时
+ *   用户空间配置永不被读）；包内 `resources/config` 经 seedConfigTree 首次
+ *   播种，用户空间缺项由出厂树补齐。configRoot 未解析到时回落包内资源；
+ *   ambient 显式设置优先（显式钉配置根的能力归用户）；
  * - AGENTOS_DB_PATH：BUG-85 库位置改用户根——仅当 ambient 未设时注入
  *   resolvePackagedDbPath 解析值（显式覆盖能力归用户，空白串视为未设）；
  *   不注入时包内 storage.yaml 的相对路径会把库锚进安装目录，静默卸载即删库；
  * - AGENTOS_CONFIG_USERS_DIR：授权名单真值钉用户空间（ADR 2026-09-24 决策5，
- *   恒为 `<userRoot>/config/users`）——包内 resources 名单经 seedZonePolicyFiles
- *   首次播种，授权卡永久项写用户空间，升级不丢；ambient 显式设置优先；
- * - AGENTOS_PLUGIN_SOURCE_PRIORITY=user：双源同 id 裁决置用户优先——用户数据
- *   为准（ADR 2026-10-03-packaged-user-data-first）：用户空间插件副本是安装
- *   身份的活跃真值（sync_installed_user_space 维护），升级由同步流程治理，
- *   不再以「防陈旧」（BUG-55）为由压过用户数据；用户根仍承载内置没有的
+ *   恒为 `<userRoot>/config/users`）——经 seedConfigTree 随配置树首次播种，
+ *   授权卡永久项写用户空间，升级不丢；ambient 显式设置优先；
+ * - AGENTOS_PLUGIN_SOURCE_PRIORITY=builtin：双源同 id 裁决置内置优先——装机版
+ *   用户空间的共享插件副本是旧安装/旧迁移遗留（陈旧/扁平布局/.venv 缺失），
+ *   不得压过包内版本匹配的新版（BUG-55，ADR
+ *   2026-09-20-packaged-dual-source-adjudication）；用户根仍承载内置没有的
  *   额外插件；
  * - AGENTOS_PLUGIN_VENV_AUTOPROVISION=1：boot 后台对缺 .venv 的 Python sidecar
  *   跑 `uv sync` 自愈（打包资源排除 .venv 且装机链没有 dev launcher；同 ADR
@@ -317,14 +430,15 @@ export function buildKernelEnv(
   tokenSecret?: string,
   dbPath?: string,
   configUsersDir?: string,
+  configRoot?: string,
 ): NodeJS.ProcessEnv {
   return {
     ...base,
     AGENTOS_BIND: "127.0.0.1",
     AGENTOS_KERNEL_PORT: String(KERNEL_PORT),
     AGENTOS_PLUGINS_DIR: paths.pluginsDir,
-    AGENTOS_CONFIG_ROOT: paths.configRoot,
-    AGENTOS_PLUGIN_SOURCE_PRIORITY: "user",
+    AGENTOS_CONFIG_ROOT: envValue(base, "AGENTOS_CONFIG_ROOT") ?? configRoot ?? paths.configRoot,
+    AGENTOS_PLUGIN_SOURCE_PRIORITY: "builtin",
     AGENTOS_PLUGIN_VENV_AUTOPROVISION: "1",
     AGENTOS_PLUGIN_IDLE_TIMEOUT_SECS: PLUGIN_IDLE_TIMEOUT_SECS,
     // token 签名密钥持久化（每安装身份一份）：不注入时内核每进程随机签名，
@@ -416,6 +530,12 @@ let tokenSecret: string | null = null;
 let packagedDbPath: string | null = null;
 /** 当前安装身份的授权名单真值目录（ensure 时解析并播种一次；ADR 2026-09-24 决策5） */
 let packagedConfigUsersDir: string | null = null;
+/**
+ * 当前安装身份的配置根真值（ensure 时解析 + 播种一次；
+ * ADR 2026-10-17-installed-config-root-user-space）。播种失败时置 null——
+ * buildKernelEnv 随之回落包内出厂配置根（宁可读旧配置，不可读半份配置）。
+ */
+let packagedConfigRootDir: string | null = null;
 /** 装机版自动登录凭据：username 固定内置 admin，password 即 env 事实源值 */
 export interface AdminCredential {
   username: string;
@@ -446,9 +566,90 @@ export function getPackagedAdminCredential(): AdminCredential | null {
   return adminCredential;
 }
 
+/** 内核 stderr 落盘文件名（kernel logs 目录内，与 kernel.log.* 同处） */
+const KERNEL_STDERR_FILE = "kernel-stderr.log";
+
+/** 内核日志目录（判活/托盘等观测面复用）：内核按 cwd 相对 `logs/` 写日轮转日志 */
+export function kernelLogDir(paths: KernelResourcePaths): string {
+  return path.join(paths.kernelDir, "logs");
+}
+
+/**
+ * 托盘「打开日志目录」落点（P-22 日志可达性）：受管内核日志真身优先（壳拉起
+ * 的内核 spawn 时钉住，装机=resources\kernel\logs）；壳未拉起内核（dev 外部
+ * 内核）回退同一资源解析（appPath 侧 kernelDir，dev=kernel/logs）——单点
+ * 解析，不硬编码双份路径。
+ */
+export function resolveKernelLogDirForTray(
+  managedDir: string | null,
+  appPath: string,
+): string {
+  return managedDir ?? kernelLogDir(kernelResourcePaths(appPath));
+}
+
+/**
+ * 受管内核的日志目录（spawnKernelProcess 拉起时更新；未由壳拉起过 = null）。
+ * 内核日志活性判活（kernel-liveness.ts）据它定位 `kernel.liveness` 标记文件。
+ */
+let managedLogDir: string | null = null;
+
+/** 受管内核日志目录（未拉起过 = null；dev 外部内核不属于应用管理，恒 null） */
+export function managedKernelLogDir(): string | null {
+  return managedLogDir;
+}
+
+/** 内核 stderr 落盘轮转上限（panic 痕迹低频，8MB 足够追溯） */
+export const KERNEL_STDERR_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * spawn 前清理过期内核日志（P-29c 保留策略副作用薄层）：名单判过期纯函数
+ * 在 diag-log（可单测），这里只执行删除。清理失败仅留痕——保留策略绝不
+ * 反噬内核拉起主流程。
+ */
+function pruneKernelLogsBeforeSpawn(logDir: string): void {
+  let expired: string[];
+  try {
+    expired = pruneExpiredKernelLogs(fs.readdirSync(logDir), new Date());
+  } catch {
+    return; // 目录不存在（首次启动）= 无可清理
+  }
+  for (const name of expired) {
+    try {
+      fs.rmSync(path.join(logDir, name), { force: true });
+    } catch (err) {
+      console.warn(`[Kernel] 过期日志清理失败（跳过）: ${name}:`, err);
+    }
+  }
+}
+
+/**
+ * 追加内核 stderr 到文件（panic/abort 唯一痕迹——装机 2026-10-10 B75 实锤：
+ * 内核 0xc0000409 崩溃在 Windows 事件日志外零痕迹，stdio "ignore" 把
+ * panic 输出直接丢弃）。轮转单代（.old）；失败静默（观测面不反噬）。
+ */
+export function appendKernelStderr(logDir: string, chunk: string, maxBytes = KERNEL_STDERR_MAX_BYTES): void {
+  try {
+    fs.mkdirSync(logDir, { recursive: true });
+    const current = path.join(logDir, KERNEL_STDERR_FILE);
+    const old = path.join(logDir, `${KERNEL_STDERR_FILE}.old`);
+    try {
+      if (shouldRotateDiagLog(fs.statSync(current).size, maxBytes)) {
+        fs.rmSync(old, { force: true });
+        fs.renameSync(current, old);
+      }
+    } catch {
+      // 首次写入前文件不存在 = 正常路径
+    }
+    fs.appendFileSync(current, chunk, "utf-8");
+  } catch {
+    // 磁盘故障时观测面退场
+  }
+}
+
 /** spawn 包内内核（ensure 与自动重启共用的副作用层） */
 function spawnKernelProcess(paths: KernelResourcePaths): ChildProcess {
-  return spawn(paths.kernelExe, [], {
+  pruneKernelLogsBeforeSpawn(kernelLogDir(paths));
+  const child = spawn(paths.kernelExe, [], {
     cwd: paths.kernelDir,
     env: buildKernelEnv(
       process.env,
@@ -456,10 +657,21 @@ function spawnKernelProcess(paths: KernelResourcePaths): ChildProcess {
       tokenSecret ?? undefined,
       packagedDbPath ?? undefined,
       packagedConfigUsersDir ?? undefined,
+      packagedConfigRootDir ?? undefined,
     ),
-    stdio: "ignore",
+    // stderr 落盘：panic/abort 痕迹必须可见（stdout 无内容消费，维持 ignore）
+    stdio: ["ignore", "ignore", "pipe"],
     windowsHide: true,
   });
+  const stderrLogDir = kernelLogDir(paths);
+  managedLogDir = stderrLogDir;
+  child.stderr?.on("data", (chunk: Buffer) => {
+    appendKernelStderr(stderrLogDir, chunk.toString("utf-8"));
+  });
+  child.stderr?.on("error", () => {
+    // 流级错误（进程已死等）不处理：观测面不反噬
+  });
+  return child;
 }
 
 /** 等待内核健康就绪；进程退出或 spawn 错误提前失败（绝不在引导期错杀内核） */
@@ -518,6 +730,13 @@ function armKernelExitWatcher(paths: KernelResourcePaths): void {
       runDurationMs: Date.now() - currentRunStartedAt,
       consecutiveRestarts,
     });
+    // 退出事实源（观测契约）：code/signal/重启决策必须落盘——外部树杀（无
+    // signal、负 code）、G8 exit(75)、主动关闭在此可辨别（装机 2026-10-10
+    // 整树退出无任何痕迹的直接缺口）。
+    logDiag(
+      `[kernel] exit pid=${child.pid} code=${code} signal=${signal} ` +
+        `intentionalShutdown=${intentionalShutdown} decision=${JSON.stringify(decision)}`,
+    );
     if (decision.action === "none") {
       return;
     }
@@ -616,8 +835,10 @@ export async function ensurePackagedKernelRunning(opts: {
   resourcesPath: string;
   /** 健康探测注入（测试用）；缺省探测解析端口 /health */
   probe?: () => Promise<boolean>;
-  /** userData 目录：解析持久化 token 签名密钥与 admin 凭据存档（自动登录跨重启） */
-  userDataDir?: string;
+  /** 认证身份目录（main.resolveAuthIdentityDir，机器级跨安装稳定）：解析
+   *  持久化 token 签名密钥；其存在性兼作「装机形态」指示（admin 凭据仅在
+   *  此形态消费 ambient env） */
+  authIdentityDir?: string;
   /** OS 应用数据目录（app.getPath("appData")）：解析装机默认库位置（BUG-85 用户根） */
   appDataDir?: string;
 }): Promise<{ mode: "spawned"; pid?: number }> {
@@ -625,11 +846,13 @@ export async function ensurePackagedKernelRunning(opts: {
   if (!fs.existsSync(paths.kernelExe)) {
     throw new KernelMissingError(paths.kernelExe);
   }
-  tokenSecret = opts.userDataDir ? resolveTokenSecret(opts.userDataDir) : null;
-  adminCredential = opts.userDataDir
+  tokenSecret = opts.authIdentityDir
+    ? resolveTokenSecret(opts.authIdentityDir)
+    : null;
+  adminCredential = opts.authIdentityDir
     ? resolveAutoLoginCredential(process.env.AGENTOS_ADMIN_PASSWORD)
     : null;
-  if (opts.userDataDir && !adminCredential) {
+  if (opts.authIdentityDir && !adminCredential) {
     console.warn(
       "[Kernel] 装机版未设置 AGENTOS_ADMIN_PASSWORD，自动登录不可用" +
         "（部署契约：launcher/安装器须播种该变量；现回落手动登录）",
@@ -641,29 +864,28 @@ export async function ensurePackagedKernelRunning(opts: {
   packagedConfigUsersDir = opts.appDataDir
     ? resolvePackagedConfigUsersDir(process.env, opts.appDataDir)
     : null;
-  if (packagedConfigUsersDir) {
-    try {
-      seedZonePolicyFiles(fs, paths.configRoot, packagedConfigUsersDir);
-    } catch (err) {
-      // 播种失败不阻断启动：名单读取侧对缺失文件按空名单处理（安全侧）
-      console.warn("[kernel-manager] 授权名单播种失败（按空白名单降级）:", err);
-    }
-  }
-  // 配置根用户数据为准（ADR 2026-10-03-packaged-user-data-first）：全配置树
-  // 真值在用户空间；包内 resources/config 首启补缺播种（绝不覆盖既有），
-  // 之后内核读用户空间配置——包内那份只当出厂种子，永不直接消费。
+  // 配置根钉用户空间（ADR 2026-10-17）：包内 resources/config 降级为**首次
+  // 播种源**，用户空间是真值。播种失败不阻断启动——回落包内配置根（旧行为）
+  // 好过让内核对着半份配置启动。
+  packagedConfigRootDir = null;
   if (opts.appDataDir) {
-    const userConfigDir = resolvePackagedUserConfigDir(
+    const userConfigDir = resolvePackagedConfigRootDir(
       process.env,
       opts.appDataDir,
     );
     try {
-      seedTreeMissingOnly(fs, paths.configRoot, userConfigDir);
-      paths.configRoot = userConfigDir;
+      const seeded = seedConfigTree(fs, paths.configRoot, userConfigDir);
+      if (seeded.overwritten > 0) {
+        // 版本覆盖留痕（ADR 2026-10-24）：覆盖不可见 = 2026-10-24 遮蔽事故
+        // 复盘盲区——被治好的陈旧副本必须可从日志追认。
+        console.log(
+          `[kernel-manager] 出厂配置播种：补缺 ${seeded.copied} 件，版本覆盖 ${seeded.overwritten} 件（用户副本版本不高于包内，按 ADR 2026-10-24 裁决覆盖）。`,
+        );
+      }
+      packagedConfigRootDir = userConfigDir;
     } catch (err) {
-      // 播种失败不阻断启动：回退读包内配置（出厂种子），与旧行为一致
       console.warn(
-        "[kernel-manager] 用户配置树播种失败（回退包内配置）:",
+        "[kernel-manager] 配置树播种失败（配置根回落包内出厂配置）:",
         err,
       );
     }
@@ -745,5 +967,358 @@ export function shutdownManagedKernel(): void {
     clearTimeout(restartTimer);
     restartTimer = null;
   }
+  logDiag(`[kernel] shutdownManagedKernel pid=${pid}（主动收树 taskkill /F /T）`);
   killKernelTree(pid);
+}
+
+// ── 插件 venv 健康巡检（boot 后台；launcher venv 自愈三犯缺陷的装机侧断言面）──
+//
+// 背景（装机 2026-10-18 三犯实证）：venv「重建成功」不等于「可用」——部分完成
+// 的 uv sync 会留下缺 agentos_plugin_sdk editable 的残缺 venv，门控只看目录/
+// 解释器存在就跳过，坏态不可见地传播到装机（合宿组全灭 50 分钟零断言）。内核
+// autoprovision（boot 后台 uv sync 重建）的选形同样只认解释器存在。本巡检是
+// launcher 侧的补充断言面：内核就绪后逐目标断言「解释器在 + SDK 可 import」，
+// 不健康即补装并再断言（有界两轮），坏态必然留日志。uv 缺席/失败仅 warn 降级
+// （与内核 autoprovision 同语义，不阻断、不重试风暴）。
+
+/** venv 内 SDK 模块名（import 断言对象）。 */
+export const VENV_SDK_MODULE = "agentos_plugin_sdk";
+/** pyproject 依赖声明名（声明扫描对象）。 */
+export const VENV_SDK_DIST = "agentos-plugin-sdk";
+
+/** 单插件巡检目标（`_host` 共享宿主 + 独立 sidecar）。 */
+export interface VenvHealthTarget {
+  /** 插件 id 或 "_host"（日志/上报键）。 */
+  key: string;
+  /** `uv sync --project` 的工程目录。 */
+  projectDir: string;
+  /** pyproject 声明了 SDK → 做 import 断言；未声明 → 仅解释器存在性。 */
+  requiresSdk: boolean;
+}
+
+/** venv 目录下的解释器路径（Windows `Scripts\python.exe`，其余 `bin/python`）。 */
+export function venvInterpreterPath(
+  venvDir: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const exe = platform === "win32" ? "python.exe" : "python";
+  return path.join(venvDir, platform === "win32" ? "Scripts" : "bin", exe);
+}
+
+/**
+ * 枚举巡检目标（与 dev 侧 scripts/ensure_plugin_venvs.py 同规则）：
+ * `_host` 恒首个（合宿全体 spawn 的前置）；host_group 成员跳过（运行期零消费）；
+ * 有 plugin.json + pyproject.toml 的独立 sidecar 入选。定深一级——dsh_adapter
+ * 存在自嵌套 node_modules junction，递归会挂死。
+ */
+export function enumerateVenvHealthTargets(
+  pluginsDir: string,
+  fsMod: Pick<
+    typeof fs,
+    "existsSync" | "readdirSync" | "readFileSync" | "statSync"
+  > = fs,
+): VenvHealthTarget[] {
+  let entries: string[];
+  try {
+    entries = fsMod.readdirSync(pluginsDir);
+  } catch {
+    return [];
+  }
+  const isCohostMember = (dir: string): boolean => {
+    try {
+      const meta = JSON.parse(
+        fsMod.readFileSync(path.join(dir, "plugin.json"), "utf-8"),
+      ) as { host_group?: string };
+      return Boolean(meta.host_group);
+    } catch {
+      return false;
+    }
+  };
+  const targets: VenvHealthTarget[] = [];
+  for (const name of entries) {
+    const dir = path.join(pluginsDir, name);
+    try {
+      if (!fsMod.statSync(dir).isDirectory()) {
+        continue;
+      }
+    } catch {
+      continue;
+    }
+    if (name !== "_host") {
+      if (!fsMod.existsSync(path.join(dir, "plugin.json"))) {
+        continue;
+      }
+      if (isCohostMember(dir)) {
+        continue;
+      }
+    }
+    let declaresSdk = false;
+    try {
+      declaresSdk = fsMod
+        .readFileSync(path.join(dir, "pyproject.toml"), "utf-8")
+        .includes(VENV_SDK_DIST);
+    } catch {
+      continue; // 无 pyproject：重建无从谈起（与选形三件套同判）
+    }
+    targets.push({ key: name, projectDir: dir, requiresSdk: declaresSdk });
+  }
+  targets.sort((a, b) =>
+    a.key === "_host" ? -1 : b.key === "_host" ? 1 : a.key < b.key ? -1 : 1,
+  );
+  return targets;
+}
+
+/** 补装执行体（生产=uv sync 子进程；测试注入假 runner）。 */
+export type VenvSyncRunner = (
+  projectDir: string,
+) => Promise<{ ok: boolean; error?: string }>;
+/** SDK import 探测体（生产=venv 解释器子进程；测试注入假 runner）。 */
+export type VenvImportRunner = (interpreter: string) => Promise<boolean>;
+
+function awaitProcessClose(child: ChildProcess): Promise<{ code: number | null }> {
+  return new Promise((resolve) => {
+    child.once("close", (code) => resolve({ code }));
+    child.once("error", () => resolve({ code: null }));
+  });
+}
+
+/** 生产补装：`uv sync --project <dir>`（launcher 完整同步语义，不加 frozen/inexact）。 */
+export const uvSyncRunner: VenvSyncRunner = async (projectDir) => {
+  try {
+    const args = ["sync", "--project", projectDir];
+    // 离线依赖库（与内核 venv_provision UV_WHEELHOUSE_ENV 同源）：随包 wheels
+    // 在场时只吃本地 wheel，绝不触网（2026-10-26 离线发行裁定）。
+    const wheelhouse = process.env.AGENTOS_UV_WHEELHOUSE;
+    if (wheelhouse !== undefined && wheelhouse.trim() !== "") {
+      // 离线模式锁文件即真相（frozen 禁锁重解析/回写，与内核 sync_args 同语义）
+      args.push("--frozen", "--no-index", "--find-links", wheelhouse);
+    }
+    const child = spawn("uv", args, {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    const timer = setTimeout(() => child.kill(), 300_000);
+    timer.unref();
+    const { code } = await awaitProcessClose(child);
+    return code === 0 ? { ok: true } : { ok: false, error: `uv sync 退出码 ${code}` };
+  } catch (err) {
+    return { ok: false, error: `uv 拉起失败（是否在 PATH）: ${String(err)}` };
+  }
+};
+
+/** 生产探测：venv 解释器 `-c "import agentos_plugin_sdk"`，exit 0 = 可用。 */
+export const venvImportRunner: VenvImportRunner = async (interpreter) => {
+  try {
+    const child = spawn(interpreter, ["-c", `import ${VENV_SDK_MODULE}`], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    const timer = setTimeout(() => child.kill(), 60_000);
+    timer.unref();
+    const { code } = await awaitProcessClose(child);
+    return code === 0;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * 一轮 venv 健康巡检：逐目标断言（解释器在 + 声明了 SDK 则 import 必须过），
+ * 不健康即补装并再断言（有界两轮），坏态必进日志。单目标失败不牵连其余；
+ * 全程无异常抛出（观测面不反噬主流程）。
+ *
+ * `onSynced` 钩子供测试在假 runner 下建模「补装生效」（真实 uv sync 自带该
+ * 副作用，无需钩子）。
+ */
+export async function patrolPluginVenvs(opts: {
+  pluginsDir: string;
+  syncRunner?: VenvSyncRunner;
+  importRunner?: VenvImportRunner;
+  log?: (message: string) => void;
+  onSynced?: (projectDir: string) => void;
+  fsMod?: Pick<
+    typeof fs,
+    "existsSync" | "readdirSync" | "readFileSync" | "statSync"
+  >;
+}): Promise<{
+  ok: string[];
+  repaired: string[];
+  broken: Array<{ key: string; error: string }>;
+}> {
+  const log = opts.log ?? ((message: string) => console.warn(message));
+  const sync = opts.syncRunner ?? uvSyncRunner;
+  const probe = opts.importRunner ?? venvImportRunner;
+  const fsMod = opts.fsMod ?? fs;
+  const report = {
+    ok: [] as string[],
+    repaired: [] as string[],
+    broken: [] as Array<{ key: string; error: string }>,
+  };
+
+  const healthy = async (target: VenvHealthTarget): Promise<boolean> => {
+    const interpreter = venvInterpreterPath(path.join(target.projectDir, ".venv"));
+    if (!fsMod.existsSync(interpreter)) {
+      return false;
+    }
+    if (!target.requiresSdk) {
+      return true;
+    }
+    return probe(interpreter);
+  };
+
+  for (const target of enumerateVenvHealthTargets(opts.pluginsDir, fsMod)) {
+    if (await healthy(target)) {
+      report.ok.push(target.key);
+      continue;
+    }
+    let error = "";
+    let fixed = false;
+    for (let round = 1; round <= 2 && !fixed; round += 1) {
+      const result = await sync(target.projectDir);
+      opts.onSynced?.(target.projectDir);
+      if (await healthy(target)) {
+        fixed = true;
+        log(
+          `[VenvPatrol] ${target.key} venv 不健康，补装后断言通过（第 ${round} 轮）` +
+            (result.ok ? "" : `；sync 自身报错: ${result.error ?? "未知"}`),
+        );
+        report.repaired.push(target.key);
+      } else {
+        error = result.error ?? "补装后断言仍未通过";
+      }
+    }
+    if (!fixed) {
+      log(
+        `[VenvPatrol] ${target.key} venv 两轮补装后仍不可用（${error}）——` +
+          "对应工具/合宿组将 502，请检查 uv 输出或网络后重启应用重试",
+      );
+      report.broken.push({ key: target.key, error });
+    }
+  }
+  return report;
+}
+
+// ── uv 引导（2026-10-26 用户裁定「安装上就能用」）────────────────────────────
+// 打包资源排除插件 venv（布局门禁现役设计），首启 venv 自愈靠内核 autoprovision
+// 拉 PATH 上的 uv——外部净装机没有 uv 即全线瘫痪（venv_provision.rs 原话
+// 「uv 是否在 PATH？」）。本段裁定+落位随包副本：本机有 uv 用本机的（不另装）；
+// 没有就把随包 prereqs/uv.exe 落到用户根 bin/ 并前置进程 PATH（内核与全部子
+// spawn 继承）。纯函数裁定 + fs 副作用分层，与本文件既有纪律同形。
+
+export type UvBootstrapDecision =
+  | { action: "none" }
+  | { action: "materialize"; bundledUvPath: string; binDir: string; targetUvPath: string }
+  | { action: "unavailable"; reason: string };
+
+/** uv 引导裁定（纯函数，fs/平台注入）：PATH 命中 → none；缺而随包在 →
+ * materialize；双缺 → unavailable。PATH 空条目跳过，空串视为未设。 */
+export function resolveUvBootstrapDecision(input: {
+  pathEnv: string | undefined;
+  sep: string;
+  uvExecutableName: string;
+  exists: (p: string) => boolean;
+  bundledUvPath: string | null;
+  bundledUvExists: boolean;
+  binDir: string;
+}): UvBootstrapDecision {
+  const dirs = (input.pathEnv ?? "").split(input.sep).filter((d) => d.trim() !== "");
+  const onPath = dirs.some((dir) => input.exists(path.join(dir, input.uvExecutableName)));
+  if (onPath) {
+    return { action: "none" };
+  }
+  if (input.bundledUvPath && input.bundledUvExists) {
+    return {
+      action: "materialize",
+      bundledUvPath: input.bundledUvPath,
+      binDir: input.binDir,
+      targetUvPath: path.join(input.binDir, input.uvExecutableName),
+    };
+  }
+  return {
+    action: "unavailable",
+    reason: "PATH 无 uv 且包内无随包副本（prereqs/uv.exe 缺失）——插件 venv 自愈将失败",
+  };
+}
+
+/**
+ * uv 引导副作用（打包 boot 接线）：裁定 → materialize 时落副本 + 前置
+ * env.PATH（幂等：目标已存在不重拷；PATH 首位已是 binDir 不重复前置）。
+ * none/unavailable 不动 env。返回裁定供调用方记日志。
+ */
+export function ensureUvForPackagedBoot(input: {
+  resourcesPath: string;
+  appDataDir: string;
+  userRootEnv: string | undefined;
+  env: NodeJS.ProcessEnv;
+  sep?: string;
+  platform?: NodeJS.Platform;
+  exists?: (p: string) => boolean;
+  copyFileSync?: typeof fs.copyFileSync;
+  mkdirSync?: typeof fs.mkdirSync;
+}): UvBootstrapDecision {
+  const sep = input.sep ?? path.delimiter;
+  const platform = input.platform ?? process.platform;
+  const uvExecutableName = platform === "win32" ? "uv.exe" : "uv";
+  const exists = input.exists ?? fs.existsSync;
+  const bundledUvPath = path.join(input.resourcesPath, "prereqs", "uv.exe");
+  const userRoot =
+    input.userRootEnv && input.userRootEnv.trim() !== ""
+      ? input.userRootEnv
+      : path.join(input.appDataDir, "agentos");
+  const binDir = path.join(userRoot, "bin");
+  const decision = resolveUvBootstrapDecision({
+    pathEnv: input.env.PATH,
+    sep,
+    uvExecutableName,
+    exists,
+    bundledUvPath,
+    bundledUvExists: exists(bundledUvPath),
+    binDir,
+  });
+  if (decision.action !== "materialize") {
+    return decision;
+  }
+  const copyFileSync = input.copyFileSync ?? fs.copyFileSync;
+  const mkdirSync = input.mkdirSync ?? fs.mkdirSync;
+  mkdirSync(decision.binDir, { recursive: true });
+  if (!exists(decision.targetUvPath)) {
+    copyFileSync(decision.bundledUvPath, decision.targetUvPath);
+  }
+  const currentPath = input.env.PATH ?? "";
+  const firstEntry = currentPath.split(sep)[0] ?? "";
+  if (firstEntry !== decision.binDir) {
+    input.env.PATH = currentPath === "" ? decision.binDir : decision.binDir + sep + currentPath;
+  }
+  return decision;
+}
+
+// ── 离线 venv 供给 env（2026-10-26 用户裁定「都放进去/离线也能用」）──────────
+// 随包 prereqs/python（完整解释器）+ prereqs/wheels（依赖 wheel 库）：boot 注入
+// UV_PYTHON 与 AGENTOS_UV_WHEELHOUSE，uv 建 venv 不找系统 python、不触网拉包
+// （内核 autoprovision 与本文件 uvSyncRunner 同源消费 wheelhouse env）。
+
+export interface OfflineVenvEnvResult {
+  pythonShipped: boolean;
+  wheelhouseShipped: boolean;
+}
+
+/** 离线供给 env 注入（副作用：写 env；两件皆缺=旧包/dev 形态，零改动）。 */
+export function applyOfflineVenvEnv(input: {
+  resourcesPath: string;
+  env: NodeJS.ProcessEnv;
+  exists?: (p: string) => boolean;
+}): OfflineVenvEnvResult {
+  const exists = input.exists ?? fs.existsSync;
+  const result: OfflineVenvEnvResult = { pythonShipped: false, wheelhouseShipped: false };
+  const pythonExe = path.join(input.resourcesPath, "prereqs", "python", "python.exe");
+  if (exists(pythonExe)) {
+    input.env.UV_PYTHON = pythonExe;
+    result.pythonShipped = true;
+  }
+  const wheelsDir = path.join(input.resourcesPath, "prereqs", "wheels");
+  if (exists(wheelsDir)) {
+    input.env.AGENTOS_UV_WHEELHOUSE = wheelsDir;
+    result.wheelhouseShipped = true;
+  }
+  return result;
 }

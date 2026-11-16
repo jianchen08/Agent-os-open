@@ -16,7 +16,7 @@ import pytest
 
 from tests._pipeline_plugin_path import add_plugin_dir
 
-add_plugin_dir("input", "agent_config_load")
+add_plugin_dir("agent_config_load")
 import plugin as agent_config_load_mod  # noqa: E402
 
 pytestmark = pytest.mark.unit
@@ -25,7 +25,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _ctx(state: dict):
-    from pipeline.plugin import PluginContext
+    from _libs.pipeline_base.plugin import PluginContext
 
     return PluginContext(state=state, config={})
 
@@ -106,7 +106,7 @@ class TestModeAgentKeyAssembly:
         assert isinstance(updates.get("tool_ids"), list)
         # 真实文件兜底确认（防显示名漂移掩盖解析失败）
         seed = (
-            _REPO_ROOT / "plugins" / "shared" / "modes" / "mode_coding"
+            _REPO_ROOT / "plugins" / "shared" / "mode_coding"
             / "agents" / "code_writer.yaml"
         )
         assert os.path.isfile(seed)
@@ -122,7 +122,7 @@ class TestModeAgentKeyAssembly:
         assert "godot_run" in updates.get("tool_ids", [])
         # 真实文件兜底确认（防显示名漂移掩盖解析失败）
         seed = (
-            _REPO_ROOT / "plugins" / "shared" / "modes" / "mode_godot"
+            _REPO_ROOT / "plugins" / "shared" / "mode_godot"
             / "agents" / "godot_expert.yaml"
         )
         assert os.path.isfile(seed)

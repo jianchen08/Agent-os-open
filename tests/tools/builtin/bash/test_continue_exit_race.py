@@ -1,7 +1,7 @@
 # @feature: FP-0.2.spill_guard bash 工具面 | @ci: python-coverage
 """continue 等待循环跨过退出时点后的三条终局分支补测。
 
-靶行（plugins/shared/tools/bash/tool.py:746-778）：等待循环结束后
+靶行（plugins/shared/bash/tool.py:746-778）：等待循环结束后
 ``proc_info is None``（记录已被 _on_output_task_done 在「置终态→清内存」
 同瞬间移除）时的磁盘回读（746-748）与无日志显式失败（749-752），以及记录
 仍在但已转终态时的正常完成路径（766-767/774-775）与非零退出失败路径。
@@ -18,8 +18,8 @@ import time
 from pathlib import Path
 
 import pytest
-from bash_types import ProcessInfo
-from process_manager import ProcessManager
+from agentos_plugin_sdk.process_runtime import ProcessInfo
+from agentos_plugin_sdk.process_runtime import ProcessManager
 from tool import BashTool
 
 pytestmark = pytest.mark.unit

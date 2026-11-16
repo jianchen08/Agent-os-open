@@ -3,7 +3,7 @@
 //!
 //! 覆盖 ADR §4.3 的安全控制：
 //! - B1 path 校验（归一化 + 落 config/ 子树 + denylist + 禁 ../）
-//! - B2 secret 掩码（GET 只掩码真实明文、保留 ${ENV_VAR}；PUT *** 保留原值）
+//! - B2 secret 掩码（GET 只掩码真实明文、保留 ${ENV_VAR}；PUT 哨兵保留原值）
 //! - B4 ETag + 原子写（tmp + os.replace）
 //! - B6 PUT round-trip 校验（yaml.safe_load 可解析，失败拒绝写）
 
@@ -102,11 +102,11 @@ fn test_b2_real_plaintext_secret_masked() {
 
 #[test]
 fn test_b2_put_sentinel_preserves_original() {
-    // PUT body 中值为 "***" 的字段，服务端保留磁盘原值
+    // PUT body 中值为掩码哨兵（GET 掩码视图形态）的字段，服务端保留磁盘原值
     let stored = serde_json::json!({"api_key": "${DEEPSEEK_API_KEY}", "name": "old"});
-    let submitted = serde_json::json!({"api_key": "***", "name": "new"});
+    let submitted = serde_json::json!({"api_key": "****", "name": "new"});
     let merged = apply_put_masked_sentinels(&stored, &submitted);
-    // api_key 保留原占位符，不被 *** 覆盖
+    // api_key 保留原占位符，不被哨兵覆盖
     assert_eq!(merged["api_key"], "${DEEPSEEK_API_KEY}");
     // 其他字段用提交值
     assert_eq!(merged["name"], "new");

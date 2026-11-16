@@ -1,5 +1,6 @@
 /** 全局流式事件服务（管道 ID 路由版本） 核心设计原则： */
 import { WS_LOCAL_EVENTS, WS_SERVER_EVENTS } from '@/constants/websocket'
+import { autoOpenBrowserLiveOnToolStart } from '@/services/browserLiveAutoOpen'
 import { globalWS } from '@/services/websocket/GlobalWebSocket'
 import { loggers } from '@/utils/logger'
 import {
@@ -27,10 +28,18 @@ import {
   handleReconnected,
   handleSystemNotification,
 } from './lifecycleHandlers'
+import { handleMemPressureNotice } from './memPressureNotice'
+import { handlePluginUnavailableNotice } from './pluginHealthNotice'
 import { isPipelineRelevant, resolvePipelineId } from './router'
 
 let _initialized = false
 const _handlers: Record<string, (data: any) => void> = {}
+/**
+ * 通知面直订 handler（独立于 _handlers 表，destroy 需单独反注册）：mem 族
+ * （ADR 2026-10-19 D5 告警，record_id 与插件不可用同前缀但语义不同）先路由
+ * 专项呈现，消费命中即短路；其余落插件健康面（卡3）。
+ */
+let _noticeRouteHandler: ((data: unknown) => void) | null = null
 const _debugLogger = loggers.websocket
 
 /** 全局 WS 事件日志包装器 记录每一个到达前端的 WS 事件类型、pipelineId、messageId， */
@@ -89,7 +98,12 @@ export function initStreamingEvents(): void {
     handleRunFailed(data)
   }
   _handlers[WS_SERVER_EVENTS.NEW_MESSAGE] = _logWrap(WS_SERVER_EVENTS.NEW_MESSAGE, handleNewMessage)
-  _handlers[WS_SERVER_EVENTS.TOOL_START] = _logWrap(WS_SERVER_EVENTS.TOOL_START, handleToolStart)
+  _handlers[WS_SERVER_EVENTS.TOOL_START] = _logWrap(WS_SERVER_EVENTS.TOOL_START, (data) => {
+    // 浏览器工具调用 → 自动打开/激活「浏览器」直播页签（幂等；用户裁定"使用即所见"）。
+    // 门控后执行：非关注管道的浏览器调用不打扰当前视图。
+    autoOpenBrowserLiveOnToolStart(data?.tool_name || data?.data?.tool_name)
+    handleToolStart(data)
+  })
   _handlers[WS_SERVER_EVENTS.TOOL_RESULT] = _logWrap(WS_SERVER_EVENTS.TOOL_RESULT, handleToolResult)
   _handlers[WS_SERVER_EVENTS.TOOL_PROGRESS] = _logWrap(WS_SERVER_EVENTS.TOOL_PROGRESS, handleToolProgress)
   _handlers[WS_SERVER_EVENTS.ITERATION] = _logWrap(WS_SERVER_EVENTS.ITERATION, handleIteration)
@@ -104,6 +118,15 @@ export function initStreamingEvents(): void {
     WS_SERVER_EVENTS.SYSTEM_NOTIFICATION,
     handleSystemNotification,
   )
+  // 通知面直订：绕过相关性门控（RUN_FAILED 同款先例）——内存高压告警/插件
+  // 降级横幅都是全局健康/治理面，非关注管道的事件也要点亮；门控内的气泡路径
+  // （上方注册）维持原行为不变。
+  _noticeRouteHandler = (data: unknown) => {
+    _logEvent(WS_SERVER_EVENTS.SYSTEM_NOTIFICATION, data)
+    if (handleMemPressureNotice(data)) return
+    handlePluginUnavailableNotice(data)
+  }
+  globalWS.subscribe(WS_SERVER_EVENTS.SYSTEM_NOTIFICATION, _noticeRouteHandler)
 
   // 2026-08-26 清理：以下事件在后端（kernel ws_session.rs / capability_router.rs
   // 事件族 + 插件 event-bus.emit 全集）无任何发射源，订阅已删除：
@@ -126,6 +149,10 @@ export function destroyStreamingEvents(): void {
   if (!_initialized) return
   for (const [event, handler] of Object.entries(_handlers)) {
     globalWS.unsubscribe(event, handler)
+  }
+  if (_noticeRouteHandler) {
+    globalWS.unsubscribe(WS_SERVER_EVENTS.SYSTEM_NOTIFICATION, _noticeRouteHandler)
+    _noticeRouteHandler = null
   }
   Object.keys(_handlers).forEach((k) => delete _handlers[k])
   _initialized = false

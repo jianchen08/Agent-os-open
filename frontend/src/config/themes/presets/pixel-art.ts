@@ -238,6 +238,7 @@ export const pixelArtTheme: ThemeConfig = {
 
   effects: {
     glassmorphism: false,
+    messageGlass: false,
     animations: true,
     transitionDuration: 120,
     transitionEasing: 'steps(4, end)',

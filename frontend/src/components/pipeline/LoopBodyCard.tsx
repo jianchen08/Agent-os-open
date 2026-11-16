@@ -65,7 +65,7 @@ export function LoopBodyCard({
 
   return (
     <section
-      className="border-border bg-[var(--ds-bg-elevated,#111C38)] rounded-2xl border p-4"
+      className="border-border bg-[var(--ds-bg-elevated)] rounded-2xl border p-4"
       data-testid={`loop-body-${body?.id ?? bodyIndex}`}
     >
       {/* 体头部 */}
@@ -112,7 +112,7 @@ export function LoopBodyCard({
 
       {/* 体设置：while / run_on_error / next */}
       {settingsOpen && (
-        <div className="border-border bg-[var(--ds-bg-panel,rgba(148,163,184,0.04))] mb-3 space-y-3 rounded-xl border p-3">
+        <div className="border-border bg-[var(--ds-bg-panel)] mb-3 space-y-3 rounded-xl border p-3">
           <div className="text-muted-foreground flex flex-wrap items-center gap-4 text-xs">
             <label className="flex items-center gap-1.5">
               while（循环继续条件）
@@ -185,7 +185,7 @@ export function LoopBodyCard({
           type="button"
           onClick={addStep}
           className="text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)] flex w-full items-center justify-center gap-1 rounded-xl border border-dashed py-2 text-xs"
-          style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}
+          style={{ borderColor: 'var(--ds-border-subtle)' }}
         >
           <Plus className="h-3.5 w-3.5" />
           添加 step

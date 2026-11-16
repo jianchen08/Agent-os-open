@@ -193,8 +193,8 @@ system_prompt: |
 #   | {{task_id}} | 当前任务 ID | 任务评估时 | output_path、评估指标 path |
 #   | {{agent_id}} | 当前 Agent ID | 产出物路径构建时 | output_path |
 #   | {{path:文件路径}} | 将指定文件内容注入到提示词中 | 提示词构建时 | system_prompt 中引用外部规则/模板文件 |
-#   | {{rules}} | 注入硬约束和软约束 | 提示词构建时 | system_prompt 中引用约束 |
 #   - 使用原则：占位符在 YAML 中以字面量写入，运行时由系统自动替换，Agent 无需关心实际值
+#   - 约束不经占位符注入：state.constraints_text 由提示词构建尾部自动追加「## 约束」段
 #
 # ===== L2 示例 =====
 #   system_prompt: |
@@ -355,23 +355,18 @@ system_prompt: |
 #   | 工具名 | 说明 |
 #   |---|---|
 #   | file_read | 读取文件内容 |
-#   | list_directory | 列出目录内容（文件列表、大小、类型） |
+#   | （列目录已并入 file_read：路径指向目录即返回条目列表） |
 #   | file_write | 创建、写入、编辑文件内容 |
 #   | bash_execute | 执行Shell命令 |
 #   | enhanced_search | 在文件中搜索文本、代码或文件名 |
 #   | web_search | 搜索互联网信息 |
 #   | fetch | 执行HTTP请求和网页抓取 |
-#   | lsp_definition | 跳转到代码定义 |
-#   | lsp_references | 查找代码引用 |
-#   | lsp_diagnostics | 获取代码诊断信息 |
-#   | file_jump | 跳转到指定文件 |
 #   | task_submit | 提交任务给Agent或工作流执行 |
 #   | task_manage | 查询和控制任务状态 |
 #   | task_evaluate | 评估任务是否满足验收标准 |
 #   | memory | 检索和存储记忆 |
 #   | resource_search | 搜索Agent/工具/工作流/脚本资源 |
 #   | evaluate | Schema验证、格式检查、JSON验证 |
-#   | yaml_validate | 验证YAML配置文件的格式和内容 |
 #   | human_interaction | 向用户提问并获取回答 |
 #   | trigger_setup | 设置触发器（延迟/定时/事件/条件） |
 #   | schema_evaluator | 验证JSON/YAML格式或正则模式校验 |
@@ -388,8 +383,7 @@ system_prompt: |
 #           - web_search: 搜索互联网信息
 #           - fetch: 执行HTTP请求和网页抓取
 #           - evaluate: Schema验证、格式检查
-#           - yaml_validate: 验证YAML配置文件
-#           - human_interaction: 向用户提问并获取回答
+# #           - human_interaction: 向用户提问并获取回答
 #           - rollback_task: 创建检查点、回滚任务操作
 #           - state_update: 更新工作流共享状态变量
 #           - trigger_setup: 设置触发器（延迟/定时/事件/条件）
@@ -566,9 +560,6 @@ tool_ids:
 #   | "task_manage" | 管理任务状态 | 需要管理任务状态的 Agent（L1/L2 必选）|
 #   | "enhanced_search" | 增强搜索 | 需要在代码中搜索的 Agent |
 #   | "human_interaction" | 人工交互 | 需要向用户提问的 Agent |
-#   | "lsp_definition" | LSP 定义跳转 | 需要查找代码定义的 Agent |
-#   | "lsp_references" | LSP 引用查找 | 需要查找代码引用的 Agent |
-#   | "lsp_diagnostics" | LSP 诊断 | 需要获取代码诊断的 Agent |
 #   | "rollback_task" | 回滚任务 | 需要回滚操作的 Agent |
 #   | "trigger_setup" | 触发器设置 | 需要设置自动化触发器的 Agent |
 # - 按层级必选工具:
@@ -740,7 +731,7 @@ context_variables:
 #       |----------|---------|---------|----------|----------|----------|
 #       | research_agent | 调研报告 | - | docs/working/{title}_research_report.md | container | file_check |
 #       | solution_planning_agent | 方案文档、任务链、检查点 | - | docs/working/{title}_solution.md, docs/tasks/, docs/working/{title}_checkpoints.md | container | file_check |
-#       | resource_manager_agent | 资源配置文件 | 资源操作报告 | config/agents/{category}/{agent_id}.yaml, docs/working/resource_generation_report.md | host | file_check |
+#       | mode_evolution/resource_manager_agent | 资源配置文件 | 资源操作报告 | config/agents/{category}/{agent_id}.yaml, docs/working/resource_generation_report.md | host | file_check |
 #       | mode_coding/code_writer | 代码文件、测试文件 | - | 由任务决定 | container | file_check, format_valid |
 #       | mode_coding/code_reviewer_agent | - | 审查报告 | docs/working/{title}_review_report.md | container | file_check |
 #       | mode_coding/test_debug_agent | 测试文件、bug修复代码 | 调试报告 | tests/test_{module}.py, docs/working/{title}_bugfix_report.md | container | file_check |
@@ -889,19 +880,10 @@ max_reminders: {max_reminders}
 #   | atomic | 2 | 原子任务基本不需要提醒 |
 #   | 定时/后台任务 | -1 | 后台任务不需要提醒机制 |
 
-timeout_seconds: {timeout_seconds}
-# 【必填】超时时间（秒）
-# - 类型: integer
-# - 作用: 限制 Agent 执行的最大时间，超时后检查是否有进展，无进展则停止
-# - 特殊值: -1 表示无限制，不进行超时检查（适用于需要持续运行的后台任务或主 Agent）
-# - 建议值:
-#   | 场景 | 建议值 | 说明 |
-#   |---|---|---|
-#   | L1 主控 Agent | -1 或 3600 | 主 Agent 需要持续运行，建议无限制 |
-#   | 定时/后台任务 | -1 | 需要持续运行的后台任务，设为无限制 |
-#   | 快速任务 | 300 (5分钟) | 简单查询、单步操作 |
-#   | 常规任务 | 600 (10分钟) | 常规执行任务 |
-#   | 复杂任务 | 1800 (30分钟) | 复杂分析、多步骤任务 |
+# run 墙钟预算：键刻意缺席（用户裁定 2026-10-17：任务可合法运行数小时，
+# 墙钟看门狗在该场景纯误伤）。防挂死由单次调用上界（plugin_call_timeout，
+# 内核恒有界）承接，防失控由 max_iterations 承接——不要在本文件加回
+# timeout_seconds：它会让整条 agent 链在预算耗尽时被引擎强制终态化。
 
 # ==================== 插件配置 ====================
 #
@@ -948,7 +930,6 @@ timeout_seconds: {timeout_seconds}
 #     enabled:
 #       task_reminder:
 #         max_reminders: 5         # 覆盖默认的 3 次提醒
-#         cooldown_seconds: 120    # 覆盖默认的 300 秒冷却
 #       context_compress:
 #         context_window: 64000    # 覆盖默认的 128K 上下文窗口
 #         compress_trigger_ratio: 0.6

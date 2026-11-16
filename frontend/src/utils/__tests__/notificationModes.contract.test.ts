@@ -16,7 +16,7 @@ import { describe, it, expect } from 'vitest'
 import { DEFAULT_CATEGORY_DECLS } from '../notificationModes'
 
 const REPO_ROOT = resolve(__dirname, '../../../..')
-const HUMAN_MANIFEST = resolve(REPO_ROOT, 'plugins/shared/tools/human/plugin.json')
+const HUMAN_MANIFEST = resolve(REPO_ROOT, 'plugins/shared/human/plugin.json')
 
 interface CategoryDecl {
   category: string

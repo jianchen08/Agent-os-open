@@ -59,6 +59,22 @@ describe('wizard 多步表单', () => {
     expect(body).toMatchObject({ title: 'T1', workspace: 'ws-prod', pipeline_id: expect.any(String) })
   })
 
+  it('steps 为空 → 空态占位不进表单', () => {
+    render(<WizardWidget steps={[]} endpoint="/ext/tasks/root" />)
+    expect(screen.getByText(/暂无向导步骤/)).toBeInTheDocument()
+  })
+
+  it('多步间「上一步」回退：步序回退且已填值保留', async () => {
+    mockPost.mockResolvedValue({ data: { task_id: 't-2' } })
+    render(<WizardWidget steps={steps} endpoint="/ext/tasks/root" />)
+    fireEvent.change(screen.getByLabelText('标题'), { target: { value: 'T1' } })
+    submit()
+    await waitFor(() => expect(screen.getByText('2. 执行环境')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: '上一步' }))
+    await waitFor(() => expect(screen.getByText('1. 基本信息')).toBeInTheDocument())
+    expect((screen.getByLabelText('标题') as HTMLInputElement).value).toBe('T1')
+  })
+
   it('endpoint 响应 error 字段 → toast 失败（成功 toast 不出现）', async () => {
     const { toast } = await import('@/components/ui/sonner')
     mockPost.mockResolvedValue({ data: { error: '名称冲突' } })

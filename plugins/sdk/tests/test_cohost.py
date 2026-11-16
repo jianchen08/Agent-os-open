@@ -15,6 +15,7 @@ import pytest
 
 from agentos_plugin_sdk import AgentOSPlugin
 from agentos_plugin_sdk.cohost import CohostServer
+from agentos_plugin_sdk.exceptions.step import StepNotFoundError
 
 pytestmark = pytest.mark.unit
 
@@ -72,3 +73,62 @@ async def test_fan_out_isolates_member_failure(
 
     assert received == ["healthy_first", "healthy_last"], "故障成员之后的成员 on_load 不得被饥饿"
     assert any("broken" in rec.message for rec in caplog.records), "成员 handler 异常必须留痕（含成员标识）"
+
+
+# ── steps 聚合（commit 爆涨排查副产品：合宿路径漏传 steps 导致 todo.fold/
+# todo.extract 出生起即 STEP_NOT_FOUND 422 次/日——单插件 run() 传 steps，
+# 合宿构造漏传，两路径必须等价）───────────────────────────────────
+
+
+def _plugin_with_step(plugin_id: str, step_name: str) -> AgentOSPlugin:
+    plugin = AgentOSPlugin(plugin_id)
+
+    @plugin.step(step_name)
+    async def _handler(state: dict[str, Any], config: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {"state_updates": {"done": step_name}}
+
+    return plugin
+
+
+def _make_server(members: dict[str, AgentOSPlugin]) -> CohostServer:
+    return CohostServer(members)
+
+
+@pytest.mark.asyncio
+async def test_member_steps_aggregated_into_dispatch() -> None:
+    """成员 @plugin.step 注册的步骤聚合进合宿分发表（回归：漏传 steps=
+    合宿步骤分发恒 STEP_NOT_FOUND）。"""
+    server = _make_server(
+        {
+            "pipeline_todo_track": _plugin_with_step("pipeline_todo_track", "todo.fold"),
+            "other": _plugin_with_step("other", "other.step"),
+        }
+    )
+    result = await server._server._dispatch_step("todo.fold", {})
+    text = result.content[0].text
+    assert '"done"' in text and "todo.fold" in text
+    result2 = await server._server._dispatch_step("other.step", {})
+    assert "other.step" in result2.content[0].text
+
+
+def test_step_name_conflict_rejected() -> None:
+    """跨成员同名步骤 → 拒绝构造（与 tools/resource 重名同语义）。"""
+    with pytest.raises(ValueError, match="step name conflict: todo.fold"):
+        _make_server(
+            {
+                "a": _plugin_with_step("a", "todo.fold"),
+                "b": _plugin_with_step("b", "todo.fold"),
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_swap_member_replaces_steps_in_place() -> None:
+    """成员热换入：新成员 steps 原位生效（McpServer 持同一 dict 引用）。"""
+    server = _make_server({"a": _plugin_with_step("a", "todo.fold")})
+    server.swap_member("a", _plugin_with_step("a", "other.step"))
+    result = await server._server._dispatch_step("other.step", {})
+    assert "other.step" in result.content[0].text
+    # 换出后旧步骤未注册：分发即 StepNotFoundError（B017 禁盲 Exception）
+    with pytest.raises(StepNotFoundError):
+        await server._server._dispatch_step("todo.fold", {})

@@ -21,7 +21,7 @@ import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 /** 直读真实 plugin.json（生产 schema 源头） */
 const PLUGIN_JSON_PATH = resolve(
   dirname(fileURLToPath(import.meta.url)),
-  '../../../../../plugins/shared/system/hindsight_memory/plugin.json',
+  '../../../../../plugins/shared/hindsight_memory/plugin.json',
 )
 const pluginJson = JSON.parse(readFileSync(PLUGIN_JSON_PATH, 'utf-8')) as {
   contributes: { pages: Array<{ id: string; space: string; slot: string; widget: string }> }

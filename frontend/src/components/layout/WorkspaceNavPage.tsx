@@ -216,7 +216,7 @@ export function WorkspaceNavPage() {
           className="text-muted-foreground flex h-full flex-1 flex-col items-center justify-center gap-3 text-sm"
         >
           <FolderTree className="text-muted-foreground/40 h-10 w-10" />
-          <span>暂无页面声明（插件 contributes.pages 为空或未装载）</span>
+          <span>暂无页面</span>
         </div>
       ) : searchMissed ? (
         <div

@@ -18,7 +18,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from process_manager import ProcessManager
+from agentos_plugin_sdk.process_runtime import ProcessManager
 
 pytestmark = pytest.mark.unit
 

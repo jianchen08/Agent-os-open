@@ -28,7 +28,7 @@ from pathlib import Path
 # 0.2 自包含路径注入：multimodal 插件目录 + system 父目录（mm_types/storage 平铺导入）。
 # 不依赖目录 conftest（批量收集时 conftest 加载时机不稳定），文件级注入保证
 # 任何收集顺序下 `from storage import` 都命中本插件。
-_MM_DIR = Path(__file__).resolve().parents[2] / "plugins" / "shared" / "system" / "multimodal"
+_MM_DIR = Path(__file__).resolve().parents[2] / "plugins" / "shared" / "multimodal"
 _SYS_DIR = _MM_DIR.parent
 _OLD_PATH = sys.path[:]  # 收集期锁定后恢复：不污染后续文件的 sys.path[0]
 for _d in (_MM_DIR, _SYS_DIR):

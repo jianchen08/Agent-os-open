@@ -31,12 +31,12 @@ import pytest
 
 from tests._pipeline_plugin_path import add_plugin_dir
 
-add_plugin_dir("input", "agent_config_load")
+add_plugin_dir("agent_config_load")
 import plugin as agent_config_load_mod  # noqa: E402
 
 
 def _ctx(state: dict):
-    from pipeline.plugin import PluginContext
+    from _libs.pipeline_base.plugin import PluginContext
 
     return PluginContext(state=state, config={})
 
@@ -53,7 +53,13 @@ def _run(config, state: dict) -> dict:
 
 @pytest.fixture()
 def config_root(tmp_path, monkeypatch):
-    """隔离的 AGENTOS_CONFIG_ROOT（agents 目录按用例内容写入）。"""
+    """隔离的 AGENTOS_CONFIG_ROOT（agents 目录按用例内容写入）。
+
+    用户配置层同刀钉 tmp：双根用户优先契约下，开发机真实装机用户根
+    （%APPDATA%/agentos）的 config_id 回退命中会接管 factory 夹具。
+    """
+    monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path / "user-root"))
+    monkeypatch.delenv("AGENTOS_USER_CONFIG_DIR", raising=False)
     monkeypatch.setenv("AGENTOS_CONFIG_ROOT", str(tmp_path))
     return tmp_path
 
@@ -448,15 +454,30 @@ def test_hierarchical_key_empty_segment_skips_direct(config_root, tmp_path):
 
 
 class TestProjectRootsInjection:
+    @staticmethod
+    def _stub_paths(monkeypatch: pytest.MonkeyPatch, paths: dict[str, str]) -> None:
+        """project.list_paths 服务桩（T6a：登记读面收口项目域主）。"""
+        async def _caller(method: str, args: dict, timeout: object = None) -> dict:
+            assert method == "list_paths"
+            return {"paths": dict(paths)}
+
+        cb = agent_config_load_mod.AgentConfigLoadPlugin
+        # _run 每用例新建实例，注入挂在类 setter 可达的实例缝上：
+        # 拦截 __init__ 后的实例不可行，直接以 threading 缝替换——setter 是
+        # 实例方法，故对 _run 的实例注入（run 内 cb.set_project_service_caller）。
+        original_init = cb.__init__
+
+        def _patched_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            self.set_project_service_caller(
+                lambda method, args_, timeout=None: _caller(method, args_)
+            )
+
+        monkeypatch.setattr(cb, "__init__", _patched_init)
+
     def test_anchored_run_injects_project_roots(self, monkeypatch) -> None:
         """挂靠项目（task.parent_project_id）→ state.project_roots = [项目根]。"""
-        import project_registry
-
-        monkeypatch.setattr(
-            project_registry,
-            "load_project_paths",
-            lambda: {"proj00000001": "D:/x/proj_a"},
-        )
+        self._stub_paths(monkeypatch, {"proj00000001": "D:/x/proj_a"})
         updates = _run(
             {"agent_level": "L3"},
             {
@@ -469,9 +490,7 @@ class TestProjectRootsInjection:
 
     def test_unregistered_project_degrades_without_injection(self, monkeypatch) -> None:
         """project_id 不在登记 → 降级不注入（warning，不阻断管道）。"""
-        import project_registry
-
-        monkeypatch.setattr(project_registry, "load_project_paths", lambda: {})
+        self._stub_paths(monkeypatch, {})
         updates = _run(
             {"agent_level": "L3"},
             {

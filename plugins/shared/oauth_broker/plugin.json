@@ -1,0 +1,314 @@
+{
+  "id": "oauth_broker",
+  "requires_services": [],
+  "name": "OAuth Broker",
+  "description": "MCP 服务器 OAuth 授权代理（RFC 9728/8414/7591 + OAuth 2.1 PKCE + RFC 8707/9207，按 MCP 2026-07-28 修订）：本机回调 + 打开浏览器走授权码流程，token 落用户空间 .env（内核按 ${VAR} 占位读到，mtime 指纹触发 MCP 客户端重建，无需重启）。自助注册不可行的服务（无动态注册端点/无元数据，如 GitHub）自动打开注册页或 PAT 页并逐条列出要手填的值。",
+  "version": "1.2.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "metrics_class": "tool",
+    "tools": [
+      {
+        "name": "oauth",
+        "description": "oauth 操作面（二合一）。action='authorize'：确保目标远程 MCP 服务器已授权——已有有效 token 直接返回；过期且有 refresh token 先刷新（轮换后落库）；否则按 MCP 授权规范走全量授权码 + PKCE(S256) 流程——发现受保护资源与授权服务器元数据（显式 resource_metadata 指针 → 401 的 WWW-Authenticate 指针 → well-known 子路径/根两种形态）、动态客户端注册（结果按服务器缓存在 .env；也可传预注册 client_id [+client_secret]，或把 client_id 传成你自托管的 HTTPS 客户端元数据文档 URL）、打开本机浏览器并返回可点击授权 URL，回调到达后换 token 落用户空间 .env（键名 MCP_OAUTH_<服务器>_ACCESS_TOKEN 等）。回调未在 wait_seconds 内到达时返回 status='pending' + authorization_url，人工点击后重新调用本工具查询结果。服务不支持自助注册（无动态注册端点或连元数据都没有，如 GitHub）且未传 client_id 时，返回 status='registration_required' 并自动打开该服务的 OAuth App 注册页（guidance_action=create_pat 则打开 PAT 页）、逐条列出要手填的值。token 与 client_secret 值永不进返回值。最小示例：oauth(action='authorize', server_url='https://mcp.example.com/mcp')。action='status'：列出已授权 MCP 服务器的 token 状态：每服务器报 env 键前缀、资源指示符、是否有 access/refresh token、到期时间、是否过期、是否需要刷新。只回键名与状态，绝不回 token 值。最小示例：oauth(action='status')（server_url 可选过滤单服务器）。",
+        "render": {
+          "card": "generic",
+          "title": "MCP OAuth"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "authorize",
+                "status"
+              ],
+              "description": "oauth 动作（必填枚举）：authorize=确保目标服务器已授权（有效/刷新/全量授权码+PKCE/人工引导注册）；status=列出已授权服务器 token 状态（无 token 值）"
+            },
+            "server_url": {
+              "type": "string",
+              "description": "目标 MCP 服务器 URL（http/https 绝对 URL，如 https://mcp.example.com/mcp）。action='authorize' 必填；action='status' 可选（只查该服务器，缺省列出 .env 里全部已授权服务器）"
+            },
+            "client_id": {
+              "type": "string",
+              "description": "仅 action='authorize'：预注册客户端 id（可选；缺省复用 .env 已缓存 id，仍无则动态客户端注册）"
+            },
+            "scope": {
+              "type": "string",
+              "description": "仅 action='authorize'：申请的授权范围（可选，空格分隔；缺省不显式指定，由授权服务器取默认）"
+            },
+            "wait_seconds": {
+              "type": "number",
+              "description": "仅 action='authorize'：等待回调的上限秒数（0-900，缺省 180；0 = 立即返回授权 URL；超上限拒）"
+            },
+            "callback_base_url": {
+              "type": "string",
+              "description": "仅 action='authorize'：本机回调基址（可选，只允许回环 http/https，如 http://127.0.0.1:9100；缺省取内核端口）"
+            },
+            "client_secret": {
+              "type": "string",
+              "description": "仅 action='authorize'：预注册机密客户端的 secret（可选；与 client_id 配套时按 client_secret_post 提交，落用户根 .env，绝不进日志/返回值）"
+            },
+            "resource_metadata_url": {
+              "type": "string",
+              "description": "仅 action='authorize'：受保护资源元数据地址（可选；显式覆盖——缺省先试无凭据 401 的 WWW-Authenticate 指针，再试 well-known 两种形态）"
+            },
+            "guidance_action": {
+              "type": "string",
+              "enum": [
+                "register_app",
+                "create_pat"
+              ],
+              "default": "register_app",
+              "description": "仅 action='authorize'：进入人工引导分支时打开哪个页面：register_app=OAuth App 注册页（缺省）；create_pat=该服务的 PAT 创建页"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "oneOf": [
+            {
+              "properties": {
+                "action": {
+                  "const": "authorize"
+                },
+                "server_url": {},
+                "client_id": {},
+                "scope": {},
+                "wait_seconds": {},
+                "callback_base_url": {},
+                "client_secret": {},
+                "resource_metadata_url": {},
+                "guidance_action": {}
+              },
+              "required": [
+                "action",
+                "server_url"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "status"
+                },
+                "server_url": {}
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "description": "按 action 返回对应结构：authorize={status(authorized|pending|registration_required),method,server_url,resource,env_prefix,env_keys,expires_at,authorization_url,browser_opened,refresh_error,notes,guidance?}；status={servers:[{env_prefix,resource,has_access_token,has_refresh_token,expires_at,expired,needs_refresh}]}；参数错误返回 {success:false,error,error_code}（error 教改法）",
+          "properties": {
+            "status": {
+              "type": "string",
+              "description": "authorize：authorized = 已授权（凭据在 .env）；pending = 待人工在浏览器完成授权；registration_required = 该服务不支持自助注册，已给引导（看 guidance）"
+            },
+            "method": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "authorize：existing=既有有效 token；refresh=刷新；authorization_code=全量授权；pending 时为 null"
+            },
+            "server_url": {
+              "type": "string",
+              "description": "规范化后的目标服务器 URL"
+            },
+            "resource": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "RFC 8707 资源指示符（token 受众）"
+            },
+            "env_prefix": {
+              "type": "string",
+              "description": "该服务器的 .env 键前缀（如 MCP_OAUTH_MCP_EXAMPLE_COM_MCP）"
+            },
+            "env_keys": {
+              "type": "array",
+              "description": "该服务器的 .env 键名清单（键名而已，不含值）",
+              "items": {
+                "type": "string"
+              }
+            },
+            "expires_at": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "access token 到期时间（ISO8601 UTC；授权服务器未给 expires_in 时为 null）"
+            },
+            "authorization_url": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "待人工点击的授权 URL（仅 pending 时非空）"
+            },
+            "browser_opened": {
+              "type": "boolean",
+              "description": "是否已尝试打开本机浏览器"
+            },
+            "refresh_error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "刷新尝试失败的机器可读错误码（未尝试/成功时为 null）"
+            },
+            "notes": {
+              "type": "array",
+              "description": "人工可操作提示（如回调未到、浏览器未打开时怎么办）",
+              "items": {
+                "type": "string"
+              }
+            },
+            "guidance": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "description": "人工引导面（仅 status=registration_required 非空；只含 URL 与要手填的非敏感值）",
+              "properties": {
+                "provider": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "命中的引导行（服务方 host）"
+                },
+                "app_name": {
+                  "type": "string"
+                },
+                "homepage_url": {
+                  "type": "string",
+                  "description": "注册页要填的主页 URL"
+                },
+                "callback_url": {
+                  "type": "string",
+                  "description": "注册页要填的回调地址（须与后续授权逐字一致）"
+                },
+                "scopes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "该服务公布的所需 scope 清单"
+                },
+                "registration_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "OAuth App 注册页（可能带 best-effort 预填参数，不保证生效）"
+                },
+                "registration_prefilled": {
+                  "type": "boolean",
+                  "description": "注册页是否带上了预填参数（不保证生效，[未验证]）"
+                },
+                "pat_page_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "PAT 创建页（可能带 best-effort 预填参数）"
+                },
+                "pat_page_prefilled": {
+                  "type": "boolean"
+                },
+                "pat_env_key": {
+                  "type": "string",
+                  "description": "PAT 的落库键名（用户根 .env）；写入后重新调用 oauth（action=authorize）即视为已授权"
+                },
+                "auth_config_snippet": {
+                  "type": "string",
+                  "description": "MCP 服务器鉴权声明片段（bearer + ${键名} 占位）"
+                },
+                "opened_action": {
+                  "type": "string",
+                  "description": "本次打开的是哪一个页面"
+                }
+              }
+            },
+            "servers": {
+              "type": "array",
+              "description": "status：授权状态条目（无 token 值的状态面）",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "env_prefix": {
+                    "type": "string"
+                  },
+                  "resource": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "has_access_token": {
+                    "type": "boolean"
+                  },
+                  "has_refresh_token": {
+                    "type": "boolean"
+                  },
+                  "expires_at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "expired": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ],
+                    "description": "是否已过期（无到期时间或不可解析时为 null）"
+                  },
+                  "needs_refresh": {
+                    "type": "boolean",
+                    "description": "已过期且有 refresh token（可先走刷新）"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    ],
+    "lifecycle_hooks": []
+  },
+  "permissions": {},
+  "http_endpoints": [
+    {
+      "route_id": "oauth_callback",
+      "method": "GET",
+      "path": "/ext/oauth_broker/callback",
+      "auth": "none",
+      "handler_capability": "http.handle",
+      "timeout_ms": 15000,
+      "max_concurrency": 4,
+      "description": "OAuth 授权回调（授权服务器把浏览器重定向到这里；匿名可达是声明面事实，凭 state 命中 + iss 校验 + PKCE 换 token 把关）"
+    }
+  ],
+  "priority": 30,
+  "host_group": "light",
+  "config_files": [
+    {
+      "id": "guidance",
+      "path": "config/plugins/oauth_broker/guidance.yaml",
+      "label": "OAuth 服务方引导页（注册页/PAT 页与预填参数）",
+      "settings": false
+    }
+  ]
+}

@@ -1,0 +1,154 @@
+{
+  "id": "pipeline_llm_core",
+  "host_group": "llm",
+  "name": "LLM Core",
+  "version": "1.4.0",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "invoke_entry": "llm_core.execute",
+  "mcp": {
+    "transport": "stdio"
+  },
+  "capabilities": {
+    "metrics_class": "llm",
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "streaming": {
+      "conduit": true
+    },
+    "steps": [
+      {
+        "name": "pipeline_llm_core",
+        "required_state_inputs": [
+          "messages"
+        ]
+      }
+    ],
+    "call_timeout_seconds": 3780
+  },
+  "permissions": {},
+  "priority": 50,
+  "persistent_fields": [
+    "llm_model",
+    "track.llm_usage",
+    "track.total_tokens",
+    "context_window",
+    "track.messages_chars_at_llm",
+    "track.model_context_window"
+  ],
+  "state": {
+    "volatile_keys": [
+      "thinking_strength",
+      "core_type",
+      "core_plugin"
+    ],
+    "reads": [
+      "messages",
+      "system_message",
+      "compression_messages",
+      "multimodal_content",
+      "prompt.dynamic_vars",
+      "tool_schemas",
+      "plugin_configs",
+      "model_id",
+      "llm_model_binding",
+      "streaming",
+      "thinking_strength",
+      "llm_empty_streak",
+      "iteration",
+      "track.llm_usage",
+      "track.messages_chars"
+    ]
+  },
+  "requires_services": [
+    "llm.complete_stream",
+    "packaging"
+  ],
+  "config_files": [
+    {
+      "id": "llm",
+      "path": "config/plugins/llm/llm.yaml",
+      "label": "LLM 模型配置",
+      "settings": false
+    },
+    {
+      "id": "embedding",
+      "path": "config/plugins/llm/embedding.yaml",
+      "label": "向量模型配置",
+      "fields": [
+        {
+          "name": "embedding.enabled",
+          "type": "toggle",
+          "label": "启用向量模型"
+        },
+        {
+          "name": "embedding.default_provider",
+          "type": "string",
+          "label": "默认提供商"
+        },
+        {
+          "name": "embedding.default_model",
+          "type": "string",
+          "label": "默认模型"
+        }
+      ]
+    }
+  ],
+  "lifecycle": {
+    "idle_timeout_secs": 0
+  },
+  "ui_schema": {
+    "widgets": [
+      {
+        "id": "model_id",
+        "type": "model_select",
+        "space": "chat-input",
+        "frame_field": "model_id",
+        "props": {
+          "title": "模型",
+          "icon": "cpu"
+        }
+      },
+      {
+        "id": "thinking_strength",
+        "type": "form",
+        "space": "chat-input",
+        "props": {
+          "title": "思考强度",
+          "icon": "brain",
+          "fieldsUri": "/ext/llm_service/config/llm/thinking-levels?model={model}",
+          "fields": [
+            {
+              "name": "strength",
+              "type": "select"
+            }
+          ]
+        }
+      },
+      {
+        "id": "context_usage",
+        "type": "context_usage",
+        "space": "chat-input",
+        "props": {
+          "ringOnly": true
+        }
+      }
+    ]
+  },
+  "export_fields": [
+    "llm_model",
+    "llm_model_id",
+    "router.stop_reason",
+    "context_window",
+    "track.llm_usage",
+    "track.total_tokens",
+    "track.messages_chars_at_llm",
+    "track.model_context_window"
+  ]
+}

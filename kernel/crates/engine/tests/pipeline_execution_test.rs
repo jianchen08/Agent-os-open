@@ -714,3 +714,260 @@ async fn test_while_cond_false_after_state_change_exits() {
     assert_eq!(final_state["done"], json!(true));
     assert_eq!(final_state["ended"], json!(false), "while 退出 ≠ ended");
 }
+
+// ── 首 token 前取消收口（缺陷A，台账 R1 ④immediate，2026-10-15）──────────
+// stop_generation 在 run 建立前到达 → dispatch_stop 落管道级 pending_cancel
+// 标记（ws_session 侧）→ 引擎 run 创建起手消费：零 step 执行、终态折算
+// Cancelled、标记清除。取消在任何时点都必须生效，禁静默吞。
+
+/// 待取消标记消费：run 起手检出 pending_cancel → 零插件调用直接收尾。
+#[tokio::test]
+async fn pending_cancel_marker_consumed_at_run_start() {
+    let store = Arc::new(SqliteStore::open_memory().unwrap());
+    store
+        .upsert_state_fields(
+            "p-cancel",
+            "default",
+            &json!({ "pending_cancel": true })
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+    let invoker = Arc::new(MockInvoker::new());
+    invoker.set_result(
+        "counter",
+        PluginResult {
+            state_updates: HashMap::from([("ticked".to_string(), json!(true))]),
+            ..Default::default()
+        },
+    );
+    let config = PipelineConfig {
+        name: "cancel_at_start".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![PipelineStep {
+                id: "tick".into(),
+                steps: vec!["counter".into()],
+                when: None,
+                context: HashMap::new(),
+                routes: vec![],
+                loop_config: None,
+            }],
+            // 单轮收敛：counter 置 ticked=true，第二轮 while 假退出（防拟合对照
+            // 基建与消费测试同款，无恒真循环）。
+            while_cond: Some("ticked != True".into()),
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
+    };
+    let store_dyn: Arc<dyn StorageBackend> = store.clone();
+    let executor = PipelineExecutor::new(
+        Arc::clone(&invoker) as Arc<dyn PluginInvoker>,
+        Path::new(".").to_path_buf(),
+        agentos_core::types::TenantContext::new("default", "thread-cancel"),
+        ["counter".to_string()],
+        store_dyn,
+        "run-cancel",
+    );
+    let final_state = executor
+        .run_compiled(
+            &compile_pipeline(&config, &StepLibrary::default(), executor.plugin_ids())
+                .expect("compile ok"),
+            json!({ "pipeline_id": "p-cancel" }),
+        )
+        .await
+        .expect("run should succeed");
+
+    // 取消生效三面：零 step 执行（LLM 调用不发生）+ 终态 Cancelled + 标记消费。
+    assert_eq!(
+        invoker.call_count("counter"),
+        0,
+        "起手取消生效：零 step 执行（生成不发生）"
+    );
+    assert_eq!(
+        final_state.get("run_status").and_then(|v| v.as_str()),
+        Some("cancelled"),
+        "用户请求取消 → 终态折算 Cancelled（from_control_state 单点）"
+    );
+    assert_eq!(final_state["ended"], json!(true));
+    let fields = store.load_pipeline_state("p-cancel", "default").unwrap();
+    assert_eq!(
+        fields.get("run_status").and_then(|v| v.as_str()),
+        Some("cancelled"),
+        "终态落库可观测"
+    );
+    assert_ne!(
+        fields.get("pending_cancel").and_then(|v| v.as_bool()),
+        Some(true),
+        "标记已消费（不残留给后续轮次设陷阱）"
+    );
+}
+
+/// 对照组：无标记 → 正常执行（防拟合：消费逻辑不得误伤正常轮）。
+#[tokio::test]
+async fn without_pending_cancel_marker_run_executes_normally() {
+    let store = Arc::new(SqliteStore::open_memory().unwrap());
+    let invoker = Arc::new(MockInvoker::new());
+    invoker.set_result(
+        "counter",
+        PluginResult {
+            state_updates: HashMap::from([("ticked".to_string(), json!(true))]),
+            ..Default::default()
+        },
+    );
+    let config = PipelineConfig {
+        name: "normal_round".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![PipelineStep {
+                id: "tick".into(),
+                steps: vec!["counter".into()],
+                when: None,
+                context: HashMap::new(),
+                routes: vec![],
+                loop_config: None,
+            }],
+            // 单轮收敛：counter 置 ticked=true，第二轮 while 假退出（防拟合对照
+            // 基建与消费测试同款，无恒真循环）。
+            while_cond: Some("ticked != True".into()),
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
+    };
+    let store_dyn: Arc<dyn StorageBackend> = store.clone();
+    let executor = PipelineExecutor::new(
+        Arc::clone(&invoker) as Arc<dyn PluginInvoker>,
+        Path::new(".").to_path_buf(),
+        agentos_core::types::TenantContext::new("default", "thread-normal"),
+        ["counter".to_string()],
+        store_dyn,
+        "run-normal",
+    );
+    let final_state = executor
+        .run_compiled(
+            &compile_pipeline(&config, &StepLibrary::default(), executor.plugin_ids())
+                .expect("compile ok"),
+            json!({ "pipeline_id": "p-normal" }),
+        )
+        .await
+        .expect("run should succeed");
+
+    assert_eq!(
+        invoker.call_count("counter"),
+        1,
+        "无标记正常轮：step 照常执行"
+    );
+    assert_ne!(
+        final_state.get("run_status").and_then(|v| v.as_str()),
+        Some("cancelled"),
+        "无标记不得误判取消"
+    );
+}
+
+/// 消费一次性（2026-10-19 装机残留误杀事故的引擎面对照锁）：
+/// 一个标记只取消当次 run——起手消费后，同一 store 的下一次 run 必须正常执行。
+/// api 层链收尾清除（run_pipeline_round_scoped）是残留的主防线；本测试锁定
+/// 引擎消费语义这一层：即便标记残留，也最多杀死一个 run，不连环。
+#[tokio::test]
+async fn consumed_marker_does_not_affect_subsequent_run() {
+    let store = Arc::new(SqliteStore::open_memory().unwrap());
+    store
+        .upsert_state_fields(
+            "p-once",
+            "default",
+            &json!({ "pending_cancel": true })
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+    let invoker = Arc::new(MockInvoker::new());
+    invoker.set_result(
+        "counter",
+        PluginResult {
+            state_updates: HashMap::from([("ticked".to_string(), json!(true))]),
+            ..Default::default()
+        },
+    );
+    let config = PipelineConfig {
+        name: "consume_once".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![PipelineStep {
+                id: "tick".into(),
+                steps: vec!["counter".into()],
+                when: None,
+                context: HashMap::new(),
+                routes: vec![],
+                loop_config: None,
+            }],
+            // 单轮收敛（同款防拟合基建）：counter 置 ticked=true，第二轮假退出。
+            while_cond: Some("ticked != True".into()),
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
+    };
+
+    // run1：标记在场 → 起手消费，零执行取消。
+    let store_dyn: Arc<dyn StorageBackend> = store.clone();
+    let executor1 = PipelineExecutor::new(
+        Arc::clone(&invoker) as Arc<dyn PluginInvoker>,
+        Path::new(".").to_path_buf(),
+        agentos_core::types::TenantContext::new("default", "thread-once"),
+        ["counter".to_string()],
+        store_dyn,
+        "run-once-1",
+    );
+    let final1 = executor1
+        .run_compiled(
+            &compile_pipeline(&config, &StepLibrary::default(), executor1.plugin_ids())
+                .expect("compile ok"),
+            json!({ "pipeline_id": "p-once" }),
+        )
+        .await
+        .expect("run1 should succeed");
+    assert_eq!(
+        final1.get("run_status").and_then(|v| v.as_str()),
+        Some("cancelled"),
+        "run1 起手消费标记 → 取消生效"
+    );
+
+    // run2：同一 store，标记已被 run1 消费 → 正常执行，不得连环误杀。
+    let store_dyn2: Arc<dyn StorageBackend> = store.clone();
+    let executor2 = PipelineExecutor::new(
+        Arc::clone(&invoker) as Arc<dyn PluginInvoker>,
+        Path::new(".").to_path_buf(),
+        agentos_core::types::TenantContext::new("default", "thread-once"),
+        ["counter".to_string()],
+        store_dyn2,
+        "run-once-2",
+    );
+    let final2 = executor2
+        .run_compiled(
+            &compile_pipeline(&config, &StepLibrary::default(), executor2.plugin_ids())
+                .expect("compile ok"),
+            json!({ "pipeline_id": "p-once" }),
+        )
+        .await
+        .expect("run2 should succeed");
+    assert_eq!(
+        invoker.call_count("counter"),
+        1,
+        "消费一次性：标记只杀一个 run，run2 的 step 照常执行"
+    );
+    assert_ne!(
+        final2.get("run_status").and_then(|v| v.as_str()),
+        Some("cancelled"),
+        "run2 不得被已消费的标记取消"
+    );
+}

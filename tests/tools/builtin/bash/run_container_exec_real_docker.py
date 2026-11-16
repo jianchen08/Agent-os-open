@@ -20,11 +20,11 @@ import sys
 import time
 from pathlib import Path
 
-# 0.2 架构：bash 工具位于 plugins/shared/tools/bash（平铺 import）。
-sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools" / "bash"))
+# 0.2 架构：bash 工具位于 plugins/shared/bash（平铺 import）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "plugins" / "shared" / "bash"))
 
-from bash_types import WorkUnit  # noqa: E402
-from process_manager import (  # noqa: E402
+from agentos_plugin_sdk.process_runtime import WorkUnit  # noqa: E402
+from agentos_plugin_sdk.process_runtime import (  # noqa: E402
     ContainerProcessBackend,
     ProcessManager,
 )

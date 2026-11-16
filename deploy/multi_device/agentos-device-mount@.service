@@ -1,0 +1,56 @@
+# =============================================================================
+# 统一命名空间云侧挂载（systemd 模板 unit，sshfs over 反向隧道）
+#
+# 作用：云端把对端（桌面 DESKTOP-41ST1LM 等）的领地子树挂到本端根下
+#   /<设备名>（D16：根下一层直挂，物理即规范）——云侧进程以普通本地路径
+#   透明读写（D14：路径统一承载 = OS 文件系统挂载，零运行时路径翻译）。
+#
+# 每设备一个实例：systemctl enable --now agentos-device-mount@<设备名>
+#   例：agentos-device-mount@DESKTOP-41ST1LM（挂载点 /DESKTOP-41ST1LM）
+#
+# 前置（2026-10-18 探明均为未供给态，激活步骤见 README §激活）：
+#   1. apt install sshfs（云端未装）；
+#   2. 桌面侧 autossh 反向隧道在飞（deploy/remote/agentos-fmin-tunnel.service，
+#      2222 → 桌面 sshd :22）；
+#   3. 云端密钥已入桌面 authorized_keys（密钥供给流见 README §凭据三面）；
+#   4. 导出声明 export_declarations.yaml 中该设备 exports 已定（allowed_roots
+#      语义平移，D19）。
+#
+# ⚠️ sftp 路径形态占位：Windows OpenSSH sftp-server 暴露根的路径形态随
+#   sshd 实现而异（/d/myproject 或 D:/myproject）——部署时先
+#   `sftp -P 2222 <desktop-user>@127.0.0.1` 实测确认（deploy/remote 既有标注）。
+#
+# 读写语义（D20）：默认 rw（转读写按需）；只读快照轴 = ExecStart 加
+#   `-o ro`（先例：deploy/remote/agentos-fmin-local-ro.service 云侧 ro 模板）。
+# 断链语义（D20）：属主离线 = 挂载不可达，进程拿 OS 层错误（ENOENT/EIO/
+#   IO timeout）——诚实不可用由文件系统语义承载，零应用层判定。
+# =============================================================================
+
+[Unit]
+Description=AgentOS unified namespace mount of %i territory (sshfs over reverse tunnel, root anchor /%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# 挂载执行归 ubuntu 用户（内核同用户可直接读挂载树；root 挂的 FUSE 缺省
+# allow_other=no 会把 ubuntu 挡在外面——挂载点属主必须与消费进程同用户）
+User=ubuntu
+Group=ubuntu
+Type=forking
+Restart=on-failure
+RestartSec=10s
+# 根下锚点目录创建需 root：systemd "+" 前缀 = 该行无视 User 以 root 执行
+ExecStartPre=+/usr/bin/mkdir -p /%i
+ExecStartPre=+/usr/bin/chown ubuntu:ubuntu /%i
+ExecStart=/usr/bin/sshfs -p 2222 \
+  -o reconnect \
+  -o ServerAliveInterval=15 \
+  -o ServerAliveCountMax=3 \
+  -o connecttimeout=30 \
+  -o daemon \
+  <desktop-user>@127.0.0.1:<sftp 路径形态的桌面领地根> \
+  /%i
+ExecStop=/usr/bin/fusermount -u /%i
+
+[Install]
+WantedBy=multi-user.target

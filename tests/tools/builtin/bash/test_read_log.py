@@ -13,8 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from bash_types import ProcessInfo
-from process_manager import ProcessManager
+from agentos_plugin_sdk.process_runtime import ProcessInfo
+from agentos_plugin_sdk.process_runtime import ProcessManager
 from tool import BashTool
 
 pytestmark = pytest.mark.unit
@@ -58,7 +58,7 @@ def test_read_log_by_pid_io_error_raises_process_log_read_error(pm, tmp_path, mo
     """日志文件存在但读取失败（IO）→ 上抛 ProcessLogReadError，与「不存在返回 None」区分。"""
     import builtins
 
-    import process_manager as pm_mod
+    import agentos_plugin_sdk.process_runtime.manager as pm_mod
 
     _write_log_file(tmp_path / "logs", pid=55501, command="echo hi", content="out\n")
     monkeypatch.setattr(

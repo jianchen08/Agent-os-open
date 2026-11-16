@@ -29,22 +29,6 @@ import { RouteRulesEditor } from './RouteRulesEditor'
 import type { PipelinePluginCatalogEntry } from '@/services/api/pipelines'
 import type { Path, PipelineEditorOps, PipelineStepV2 } from '@/services/pipeline/model'
 
-/** role 徽标颜色（input/core/output/未知） */
-const ROLE_BADGE: Record<string, { label: string; className: string }> = {
-  input: {
-    label: 'input',
-    className: 'text-[var(--ds-accent-primary,#22D3EE)] border-[rgba(34,211,238,0.35)]',
-  },
-  core: {
-    label: 'core',
-    className: 'text-[var(--ds-accent-ai,#A78BFA)] border-[rgba(167,139,250,0.35)]',
-  },
-  output: {
-    label: 'output',
-    className: 'text-status-success border-[rgba(74,222,128,0.35)]',
-  },
-}
-
 /** 去掉 pipeline_ 前缀的短名（完整 id 放 title） */
 function shortName(id: string): string {
   return id.startsWith('pipeline_') ? id.slice('pipeline_'.length) : id
@@ -117,8 +101,8 @@ function RefChip({
   if (kind === 'unknown') {
     return (
       <span
-        className={`${base} border-[rgba(251,191,36,0.4)] text-status-warning`}
-        title={`未在插件目录与 step 清单中命中：可能是公共 step 库 id（config/steps/*）或未注册插件（${itemRef}）`}
+        className={`${base} border-[rgb(var(--status-warning-rgb)/0.4)] text-status-warning`}
+        title={`未找到引用「${itemRef}」：可能属于公共步骤库或未启用的插件`}
       >
         <span className="shrink-0 text-[10px]">?</span>
         <span className="truncate font-mono">{itemRef}</span>
@@ -128,10 +112,6 @@ function RefChip({
     )
   }
 
-  const role = ROLE_BADGE[entry?.role ?? ''] ?? {
-    label: entry?.role ?? '插件',
-    className: 'text-muted-foreground border-border',
-  }
   // 启用状态三态（FE7）：true=已启用 / false=已禁用 / null=状态侧缺失（未知）
   const enabledState: 'enabled' | 'disabled' | 'unknown' =
     entry?.enabled === false ? 'disabled' : entry?.enabled == null ? 'unknown' : 'enabled'
@@ -142,7 +122,7 @@ function RefChip({
   }
   return (
     <span
-      className={`${base} ${role.className} bg-[var(--hover-overlay)]`}
+      className={`${base} text-muted-foreground border-border bg-[var(--hover-overlay)]`}
       title={enabledTitle[enabledState]}
     >
       <span
@@ -156,7 +136,6 @@ function RefChip({
         aria-label={enabledState === 'disabled' ? '已禁用' : enabledState === 'unknown' ? '状态未知' : '已启用'}
       />
       <span className="text-foreground truncate font-medium">{shortName(itemRef)}</span>
-      <span className={`shrink-0 text-[10px] ${role.className}`}>{role.label}</span>
       {gateBadge}
       {onOpenConfig && (
         <button
@@ -273,7 +252,7 @@ export function StepNode({
 
   return (
     <div
-      className="border-border bg-[var(--ds-bg-panel,#0A1226)] rounded-xl border p-3"
+      className="border-border bg-[var(--ds-bg-panel)] rounded-xl border p-3"
       data-testid={`step-node-${step?.id ?? stepIndex}`}
     >
       {/* 头部：id + 徽标 + 排序/删除 */}
@@ -352,7 +331,7 @@ export function StepNode({
             return (
               <span
                 key={`malformed-${i}`}
-                className="group inline-flex max-w-full items-center gap-1.5 rounded-full border border-[rgba(251,191,36,0.4)] px-2 py-0.5 text-xs text-status-warning"
+                className="group inline-flex max-w-full items-center gap-1.5 rounded-full border border-[rgb(var(--status-warning-rgb)/0.4)] px-2 py-0.5 text-xs text-status-warning"
                 title={`无法识别的 steps 条目（缺 name 字段）：${JSON.stringify(rawEntry)}`}
               >
                 <span className="shrink-0 text-[10px]">!</span>

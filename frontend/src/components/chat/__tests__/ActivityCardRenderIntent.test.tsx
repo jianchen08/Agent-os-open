@@ -27,7 +27,7 @@ vi.mock('@/utils/toolCardRegistry', () => ({
   getGlobalOpenFileCallback: () => () => {},
 }))
 
-/** dsh_read 工具的真实结果（DSH read canonical 输出，e2e 实测形态）。 */
+/** read 卡 canonical 输出（read 形态，e2e 实测）。 */
 const readResultData = {
   path: 'src/app.ts',
   offset: 1,
@@ -38,7 +38,7 @@ const readResultData = {
   totalLines: 120,
 }
 
-/** dsh_glob 工具的真实结果（DSH glob canonical 输出）。 */
+/** search 卡 canonical 输出（glob 形态）。 */
 const globResultData = {
   root: '.',
   paths: ['a.ts', 'b/c.ts'],
@@ -47,7 +47,7 @@ const globResultData = {
 function makeToolCall(resultData: Record<string, unknown>): MessageToolCall {
   return {
     id: 'tc-1',
-    tool_name: 'dsh_read',
+    tool_name: 'sample_read',
     tool_args: { file_path: 'src/app.ts' },
     status: 'done',
     resultData,
@@ -75,10 +75,10 @@ describe('render 意图生效链路：声明 → 意图注册 → 原生卡片�
   it('read 卡：注册后工具结果渲染行号视图（含窗口计数）', () => {
     // 第 1 步：翻译产物注册（等价 dshAdapter.loadDshAdapterContributions 的
     // contributes.renderers 兜底通道；plugin.json render 声明通道则不经此步）
-    addRenderer('dsh_read', 'read')
+    addRenderer('sample_read', 'read')
 
     // 第 2 步：意图映射（toolCardRegistry.enhance 的声明路由层同函数）
-    const enhanced = applyRenderIntent(makeActivity('dsh_read'), makeToolCall(readResultData))
+    const enhanced = applyRenderIntent(makeActivity('sample_read'), makeToolCall(readResultData))
     expect(enhanced).not.toBeNull()
     expect(enhanced?.details?.[0].contentType).toBe('read')
 
@@ -90,9 +90,9 @@ describe('render 意图生效链路：声明 → 意图注册 → 原生卡片�
   })
 
   it('search 卡：glob 结果渲染路径平铺 + 计数', () => {
-    addRenderer('dsh_read', 'search') // 复用同名工具换卡验证注册表可覆盖
+    addRenderer('sample_read', 'search') // 复用同名工具换卡验证注册表可覆盖
     const enhanced = applyRenderIntent(
-      makeActivity('dsh_read'),
+      makeActivity('sample_read'),
       makeToolCall(globResultData),
     )
     expect(enhanced?.details?.[0].contentType).toBe('search')
@@ -107,13 +107,13 @@ describe('render 意图生效链路：声明 → 意图注册 → 原生卡片�
   })
 
   it('失败卡片同样走意图路由渲染（status=failed 不影响渲染形态）', () => {
-    addRenderer('dsh_read', 'read')
-    const enhanced = applyRenderIntent(makeActivity('dsh_read'), makeToolCall(readResultData))
+    addRenderer('sample_read', 'read')
+    const enhanced = applyRenderIntent(makeActivity('sample_read'), makeToolCall(readResultData))
     const failed = { ...(enhanced as ActivityData), status: 'failed' as const, error: 'boom' }
     render(<ActivityCard activity={failed} />)
     // 默认折叠，展开后内容块可见
     expect(screen.queryByText('显示 2 / 120 行')).not.toBeInTheDocument()
-    fireEvent.click(screen.getByText('dsh_read 工具调用'))
+    fireEvent.click(screen.getByText('sample_read 工具调用'))
     expect(screen.getByText('显示 2 / 120 行')).toBeInTheDocument()
   })
 })

@@ -14,12 +14,29 @@ async-trait.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 agentos-core.workspace = true
+agentos-memory.workspace = true
 agentos-hooks.workspace = true
+# 反向调用租户透传（刀1）：PluginScopedRouter/native 桥以 task_local 建立租户 scope。
+agentos-tenant.workspace = true
 agentos-mcp = { path = "../mcp" }
 agentos-plugin-loader = { path = "../plugin-loader" }
 # 原生插件 interface crate（HostServices / PipelinePlugin trait 契约）。
 agentos-native-sdk.workspace = true
 parking_lot = "0.12"
+# buffer_unordered 有界并发扇出（请求路径整组 respawn，与 api/sidecar_warmup 同款）
+futures-util = "0.3"
+
+# ADR 2026-10-19-memory-governor-and-process-pooling D4 第二刀：宿主 spawn 挂
+# per-host Job Object（PROCESS_MEMORY + KILL_ON_JOB_CLOSE）。windows-sys 为本仓
+# 依赖图既有依赖（api/core 两 crate 在用，Cargo.lock 0.52.0），此处仅按 feature
+# 面接线，不引新依赖。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3"

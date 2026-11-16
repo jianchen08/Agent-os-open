@@ -33,6 +33,7 @@
 //! [方案总纲 §3.4]: docs/0.2_rust_plugin_solution.md
 
 pub mod config_scan;
+pub mod device_profile;
 pub mod ids;
 pub mod task_activity;
 pub mod traits;

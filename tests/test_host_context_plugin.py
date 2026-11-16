@@ -7,7 +7,7 @@
 
 from tests._pipeline_plugin_path import add_plugin_dir
 
-add_plugin_dir("input", "host_context")
+add_plugin_dir("host_context")
 
 import asyncio  # noqa: E402
 
@@ -307,7 +307,7 @@ def _load_server_module():
     # 裸名 server 会与其他插件测试的 sys.modules 串扰（如 security_check），
     # 以独立模块名从文件加载；add_plugin_dir 保证 server.py 内 `from plugin import`
     # 解析到本插件目录。
-    add_plugin_dir("input", "host_context")
+    add_plugin_dir("host_context")
     server_py = Path(gc_plugin.__file__).parent / "server.py"
     spec = importlib.util.spec_from_file_location("host_context_server", server_py)
     mod = importlib.util.module_from_spec(spec)

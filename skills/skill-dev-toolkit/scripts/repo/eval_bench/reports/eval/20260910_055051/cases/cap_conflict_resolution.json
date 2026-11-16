@@ -1,0 +1,121 @@
+{
+  "case_id": "cap_conflict_resolution",
+  "category": "capability",
+  "passed": false,
+  "elapsed_seconds": 410.1,
+  "session_id": "thread-fb1335d5-a0d6-4bb3-aa79-061bb2cbcac8",
+  "pipeline_ids": [
+    "6277c1d9b576",
+    "9854c3551e67"
+  ],
+  "settled": false,
+  "dispatches": [
+    {
+      "terminal": "stream_end",
+      "pipeline_id": "6277c1d9b576",
+      "interactions": [],
+      "event_types": [
+        "pending_inputs_changed",
+        "pending_inputs_changed",
+        "widget_event",
+        "stream_start",
+        "stream_end"
+      ]
+    },
+    {
+      "terminal": "stream_end",
+      "pipeline_id": "6277c1d9b576",
+      "interactions": [],
+      "event_types": [
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "block_end",
+        "block_start",
+        "tool_call_delta",
+        "block_end",
+        "usage",
+        "finish",
+        "cost_update",
+        "new_message",
+        "stream_end"
+      ]
+    }
+  ],
+  "approval": {
+    "requests_seen": 0,
+    "approved": 0,
+    "denied": 0,
+    "response_errors": []
+  },
+  "metrics": {
+    "pipelines": 2,
+    "iterations_total": 11,
+    "error_steps": 0,
+    "timeout_steps": 0,
+    "tool_calls": 8,
+    "tool_retries": 0,
+    "tool_names": [],
+    "tool_call_counts": {},
+    "task_statuses": [
+      null,
+      "pending"
+    ],
+    "all_settled": false,
+    "any_failed": false,
+    "by_model": {
+      "glm-5.3-flash": {
+        "input": 34869,
+        "output": 1251,
+        "cached": 128,
+        "total": 36120
+      },
+      "MiniMax-M3": {
+        "input": 53405,
+        "output": 1356,
+        "cached": 10368,
+        "total": 54761
+      }
+    },
+    "tokens_total": 90881
+  },
+  "assertions": [
+    {
+      "type": "settled",
+      "passed": false,
+      "detail": "管道未收敛（挂起/超时）"
+    },
+    {
+      "type": "no_failed_task",
+      "passed": true,
+      "detail": "无 failed 任务"
+    },
+    {
+      "type": "reply_contains",
+      "passed": true,
+      "detail": "回复含目标内容（候选 ['6543']）"
+    }
+  ],
+  "failed_assertions": [
+    "settled"
+  ],
+  "reply_excerpt": "三个文件都读取完啦～结论如下：\n\n**当前生效的数据库端口是：6543** ✅\n\n**依据**（来源：会话目录下的文件内容）：\n\n| 文件 | 内容 | 状态 |\n|------|------|------|\n| `db_spec_v1.txt` | 数据库端口： 5432 | ❌ 已废弃 |\n| `db_spec_v2.txt` | 数据库端口： 6543 | ✅ 生效 |\n| `db_readme.txt` | 「db_spec_v1.txt 已废弃，数据库配置以 db_spec_v2.txt 为准」 | 📌 配置说明 |\n\n虽然 v1 里写的是 5432，但 readme 明确说明了 v1 已废弃、以 v2 为准，所以 **6543** 才是当前真正生效的端口哦～\n\n如果后续需要基于这个端口做配置变更或验证连接什么的，随时告诉我呀 🌸"
+}

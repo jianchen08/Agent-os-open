@@ -57,7 +57,7 @@ function MemoryItemActions(props: {
           <button
             onClick={props.onCancelDelete}
             disabled={deleting}
-            className="hover:bg-accent/50 rounded px-2 py-0.5 text-xs"
+            className="hover:bg-muted/50 rounded px-2 py-0.5 text-xs"
           >
             取消
           </button>
@@ -298,7 +298,7 @@ export function ConversationMemorySection() {
                 <button
                   onClick={() => setEpisodesPage((p) => Math.max(1, p - 1))}
                   disabled={episodesPage <= 1}
-                  className="hover:bg-accent/50 h-8 md:min-h-[44px] rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
+                  className="hover:bg-muted/50 h-8 md:min-h-[44px] rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
                 >
                   上一页
                 </button>
@@ -308,7 +308,7 @@ export function ConversationMemorySection() {
                 <button
                   onClick={() => setEpisodesPage((p) => p + 1)}
                   disabled={episodesPage >= Math.ceil(episodesTotal / MEMORY_EPISODES_PAGE_SIZE)}
-                  className="hover:bg-accent/50 h-8 md:min-h-[44px] rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
+                  className="hover:bg-muted/50 h-8 md:min-h-[44px] rounded-lg border px-3 py-1.5 text-sm disabled:opacity-50"
                 >
                   下一页
                 </button>

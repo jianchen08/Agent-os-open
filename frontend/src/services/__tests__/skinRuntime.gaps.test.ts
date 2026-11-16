@@ -241,6 +241,23 @@ describe('hooks 失败回滚与清理韧性', () => {
   })
 })
 
+describe('clearPluginSkin 与背景图信号的互斥边界', () => {
+  it('无在挂皮肤（data-skin 缺失）：不摘 body.has-bg-image（主题管线 image 分支的同轮标记不被误拆）', () => {
+    document.documentElement.removeAttribute('data-skin')
+    document.body.classList.add('has-bg-image')
+    clearPluginSkin()
+    expect(document.body.classList.contains('has-bg-image')).toBe(true)
+  })
+
+  it('有在挂皮肤：照旧摘除 has-bg-image（皮肤侧 owner 语义不变）', () => {
+    document.documentElement.setAttribute('data-skin', 'p:ok')
+    document.body.classList.add('has-bg-image')
+    clearPluginSkin()
+    expect(document.body.classList.contains('has-bg-image')).toBe(false)
+    expect(document.documentElement.hasAttribute('data-skin')).toBe(false)
+  })
+})
+
 describe('竞态与层宿主重建', () => {
   it('import 期间被新切换取代：迟到的 hooks 不执行 apply，URL 回收，新皮肤落地', async () => {
     hooksSource = `

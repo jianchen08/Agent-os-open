@@ -15,7 +15,13 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _reset_module_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    """每个用例重置模块级配置与 .env 缓存，隔离相互影响。"""
+    """每个用例重置模块级配置与 .env 缓存，隔离相互影响。
+
+    用户空间 .env 优先（B3 归一后 env_file_path 用户根先行）：本套测项目根
+    回退分支，钉掉 user_root 隔离开发机用户空间 .env 的干扰。"""
+    import _root_api
+
+    monkeypatch.setattr(_root_api, "user_root", lambda: None)
     monkeypatch.setattr(cm, "_config", {})
     monkeypatch.setattr(cm, "_env_cache", None)
     for var in ("CM_TEST_ENV_VAR", "CM_TEST_FILE_VAR", "CM_TEST_EXAMPLE_VAR"):

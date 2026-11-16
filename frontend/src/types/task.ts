@@ -220,7 +220,7 @@ export interface AgentTab {
   /** 是否可关闭（主 Agent 不可关闭） */
   canClose: boolean
   /** 消息列表 */
-  messages?: any[]
+  messages?: unknown[]
 }
 
 // ============================================

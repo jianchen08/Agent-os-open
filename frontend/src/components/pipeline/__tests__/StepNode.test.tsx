@@ -23,7 +23,6 @@ const catalog = [
   {
     id: 'pipeline_llm_core',
     name: 'LLM Core',
-    role: 'core',
     hostType: 'in_process',
     version: '1.0.0',
     enabled: true,
@@ -32,7 +31,6 @@ const catalog = [
   {
     id: 'pipeline_tool_core',
     name: 'Tool Core',
-    role: 'core',
     hostType: 'in_process',
     version: '1.0.0',
     enabled: false,
@@ -81,9 +79,9 @@ describe('StepNode', () => {
     )
 
     expect(screen.getByLabelText('step id')).toHaveValue('core')
-    // 插件短名（去 pipeline_ 前缀）+ role 徽标 + step/模板原样
+    // 插件短名（去 pipeline_ 前缀）+ step/模板原样（role 徽标已随死字段退役）
     expect(screen.getByText('llm_core')).toBeInTheDocument()
-    expect(screen.getByText('core', { exact: true })).toBeInTheDocument()
+    expect(screen.queryByText('core', { exact: true })).not.toBeInTheDocument()
     expect(screen.getByText('{{state.core_plugin}}')).toBeInTheDocument()
     expect(screen.getByText('other_step')).toBeInTheDocument()
     expect(screen.getByText('mystery_ref')).toBeInTheDocument()

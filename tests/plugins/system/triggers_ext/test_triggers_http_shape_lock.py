@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 _REPO = Path(__file__).resolve().parents[4]
-_PLUGIN_DIR = _REPO / "plugins" / "shared" / "tools" / "triggers_ext"
+_PLUGIN_DIR = _REPO / "plugins" / "shared" / "triggers_ext"
 for _d in (str(_PLUGIN_DIR),):
     if _d not in sys.path:
         sys.path.insert(0, _d)

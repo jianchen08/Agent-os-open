@@ -131,10 +131,12 @@ describe('formatDate - 其余粒度（date/time/未知 mode）', () => {
 
   it('未知 mode 回退完整本地串（default 分支）', () => {
     const out = formatDate('2026-01-01T12:34:56Z', 'nope' as never)
-    // zh-CN toLocaleString：日期无补零、本地时区；期望值按本机时区动态推导
-    // （CI runner 为 UTC，开发机为 UTC+8——断言不得绑定具体时区）
-    const d = new Date('2026-01-01T12:34:56Z')
-    expect(out).toMatch(new RegExp(`${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`))
-    expect(out).toMatch(new RegExp(`${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`))
+    // zh-CN toLocaleString：无补零、本地时区——期望值按运行时时区推导
+    // （CI=UTC 渲染 12 点、本地 UTC+8 渲染 20 点，均应通过）
+    const local = new Date('2026-01-01T12:34:56Z')
+    expect(out).toMatch(
+      new RegExp(`${local.getFullYear()}/${local.getMonth() + 1}/${local.getDate()}`),
+    )
+    expect(out).toMatch(new RegExp(`${local.getHours()}:34:56`))
   })
 })

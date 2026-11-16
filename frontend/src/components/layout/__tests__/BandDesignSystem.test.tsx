@@ -9,6 +9,10 @@
  * - 按钮不顶到窗口边缘（顶带两端留白）。
  * - 按钮以外区域可拖动窗口。
  *
+ * 形态分流（R9 巡检 #7，2026-10-14）：压缩省略仅顶带形态（带宽与对话标签
+ * 共享，压缩换同屏签数）；面板形态（移动端整行独占）标签 shrink-0 保持内容
+ * 自然宽，横向不足由签条滚动承接——压缩下限会把 CJK 标题从字中间切开（压字）。
+ *
  * 断行为不断实现：只断言可观察契约——标签允许收缩且有下限与上限、文字节点带
  * 省略前提、顶带按钮间隔来自同一单源（改一处即可全带变化）、边缘留白存在。
  * 不复制类名字符串到断言里（那是实现细节），而是断言单源导出的常量确实生效。
@@ -110,7 +114,7 @@ describe('对话标签压缩省略', () => {
   })
 })
 
-/** 工作区标签：同一宽度契约 + 行内纵向滚动锁 */
+/** 工作区标签：形态分流宽度契约 + 行内纵向滚动锁 */
 describe('工作区标签压缩省略与滚动锁', () => {
   const tabs: WorkspaceTab[] = [
     {
@@ -131,11 +135,31 @@ describe('工作区标签压缩省略与滚动锁', () => {
       />,
     )
 
-  it('长标题标签可压缩且有上下限，文字节点具备遮蔽收边前提', () => {
+  it('面板形态（移动端/无顶带槽位）标签不压缩（shrink-0），长标题仍受上限收口', () => {
     renderPanel(tabs)
-    expectTabShrinkable(screen.getByRole('tab'))
+    const tab = screen.getByRole('tab')
+    const tokens = tab.className.split(/\s+/)
+    expect(tokens).toContain('shrink-0')
+    expect(tokens).not.toContain('shrink')
+    expect(tab.className).not.toMatch(/\bmin-w-\[/)
+    expect(tab.className).toMatch(/max-w-\[/)
     const text = screen.getByTestId('tab-label')
     expect(text.className).toContain('min-w-0')
+  })
+
+  it('顶带形态（有槽位）标签可压缩且有上下限——挤压时省略而非溢出', () => {
+    const slot = document.createElement('div')
+    slot.id = 'chat-top-band-workspace-tabs'
+    document.body.appendChild(slot)
+    const { unmount } = renderPanel(tabs)
+    try {
+      expectTabShrinkable(screen.getByRole('tab'))
+      const text = screen.getByTestId('tab-label')
+      expect(text.className).toContain('min-w-0')
+    } finally {
+      unmount()
+      slot.remove()
+    }
   })
 
   it('标签行横向可滚但纵向锁定（不出现上下滚轮）', () => {

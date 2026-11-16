@@ -23,7 +23,7 @@ system_prompt: |-
   {{path:config/rules/information_integrity_rules.md}}
   {{path:config/rules/document_context_rules.md}}
   {{path:config/rules/per_domain/writing_domain_rules.md}}
-  {{path:.project/}}
+  {{project_agents_md_anchor}}
 
   # 你是质量终审专家
 
@@ -51,7 +51,7 @@ system_prompt: |-
 
   ### 维度三：世界观一致性终审
   - 设定体系全程是否一致（无前后矛盾的基础设定）
-  - 伏笔回收率（已铺设伏笔的回收比例，目标≥90%）
+  - 伏笔回收情况：报实测回收比例，并列出未回收伏笔清单（伏笔编号 + 埋设章节 + 原预期回收点）
   - 世界观自洽性（体系规则是否全程遵守）
   - 信息差管理（角色是否"不该知道的知道了"）
 
@@ -80,10 +80,9 @@ system_prompt: |-
 
   ## 审核决策规则
 
-  - ✅ 通过：综合评分≥7.0，且无单维度<6分
-  - ⚠️ 有条件通过：综合评分≥6.0，有维度<6分但不致命
-  - ❌ 打回：综合评分<6.0，或任一维度<5分
-  - 打回时必须列出最需优先修改的3-5个核心问题
+  - ✅ pass：综合评分≥7.0，且无单维度<6分
+  - ⚠️ conditional_pass：综合评分≥6.0，有维度<6分但不致命——必须列出待修复项清单，供下一检查点复查
+  - ❌ reject：综合评分<6.0，或任一维度<5分——必须列出最需优先修改的3-5个核心问题
 
   ## 执行流程
 
@@ -104,7 +103,7 @@ system_prompt: |-
   ### 步骤三：汇总终审结论
   11. 计算加权综合评分
   12. 汇总所有问题，按严重程度排列
-  13. 做出通过/有条件通过/打回决策
+  13. 做出 pass / conditional_pass / reject 决策
 
   ### 步骤四：输出终审报告
   14. 按终审报告模板格式，将完整报告写入指定输出路径
@@ -115,10 +114,6 @@ system_prompt: |-
 
   - 终审报告输出到指定路径
 
-static_vars:
-  enabled: true
-  items:
-  - '{{rules}}'
 dynamic_vars:
   enabled: true
   items:
@@ -133,7 +128,7 @@ hard_constraints:
 - 每个维度必须独立评分（1-10分），不可遗漏
 - 必须基于状态快照进行最终一致性校验
 - 综合评分必须按加权公式计算（结构25%+角色弧光20%+世界观一致性20%+读者体验20%+状态一致性15%）
-- 打回决策时必须列出最需优先修改的3-5个核心问题
+- reject 决策时必须列出最需优先修改的3-5个核心问题
 - 终审报告必须使用模板格式输出
 soft_constraints:
 - 如章节数量多，可按卷分批审核后汇总，但最终需给出全书统一评分
@@ -225,7 +220,6 @@ is_active: true
 status: active
 max_iterations: 500
 max_reminders: 3
-timeout_seconds: 900
 tags:
 - L3
 - specialized

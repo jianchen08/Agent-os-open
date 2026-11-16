@@ -1,0 +1,28 @@
+# 内核库只读数据面注册表——db-read 服务单一真值源（C2/C3 刀1，2026-10-15）。
+# 三方消费：内核装载（kernel/crates/db-admin/src/read_faces.rs，fail-closed——
+# scope 词表/面 id 重复/标识符白名单任一违反即拒绝启动）、闸脚本、本文档。
+# 加面 = 改本文件（机制代码不动）；面定义了就能用，查询形状（聚合/join/列裁剪）
+# 不按形状登记。
+#
+# 字段：id = 调用方引用名（安全标识符）；table = 暴露的物理表名（authorizer
+# READ 放行白名单）；scope = tenant（结果强制按调用方租户收窄）| global（仅
+# admin 可调，可带 tenant 参数收窄单租户）；tenant_column = 租户列（收窄谓词
+# 列，调用方 SELECT 必须投影真实列，常量改名冒充拒绝）。
+# 不存在"无租户视图"：看全局的必须是管理员权限，看单个租户的按租户收窄。
+faces:
+  - id: pipeline_state            # tenant 档：monitoring 搜索 / approval 归属反查
+    table: pipeline_state
+    scope: tenant
+    tenant_column: tenant_id
+  - id: pipeline_state_admin      # global 档：mode_evolution 运维收割（ADR 2026-09-16）
+    table: pipeline_state
+    scope: global
+    tenant_column: tenant_id
+  - id: sessions                  # tenant 档：monitoring 会话标题搜索
+    table: sessions
+    scope: tenant
+    tenant_column: tenant_id
+  - id: traces                    # tenant 档：cost_control 用量（本租户口径）
+    table: traces
+    scope: tenant
+    tenant_column: tenant_id

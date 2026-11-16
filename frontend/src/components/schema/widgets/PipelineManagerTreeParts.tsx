@@ -1,26 +1,40 @@
-/** 任务管理面板树视图/列表视图渲染部件
+/** 任务管理面板树视图渲染部件
  *
  * 从 PipelineManagerWidget 拆出（冻结文件只许缩小）：PipelineTree 树族
- * （PipelineTree/TreeGroup/TreeChildren/EntryRow/EntryDetail）与
- * PipelineTable 列表视图。全部 props 传参、无主组件闭包依赖；
- * 主组件经 PipelineTree/PipelineTable/PipelineTreeNode 三导出消费。
+ * （PipelineTree/TreeGroup/TreeChildren/EntryRow/EntryDetail）。全部 props
+ * 传参、无主组件闭包依赖；主组件经 PipelineTree/PipelineTreeNode 导出消费。
+ *
+ * 条目行布局契约（勿回退）：
+ * - 标题主位：名称独占信息区弹性位（min-w-0 + truncate，超长省略号），
+ *   悬停 tooltip 给全文；agent 只显 stem 短名（mode 前缀进 tooltip）——
+ *   全名过长会把标题挤没；
+ * - 标签固定：状态/时长/token 等标签 shrink-0 不互相挤压；
+ * - 信息区（标题 + 标签）整区可压缩自裁剪（overflow-hidden），操作按钮区
+ *   独立在外且 shrink-0 —— 标签再多也不把按钮挤出屏幕外；
+ * - 展开/收起：整行任意位置点按即切换（不只详情按钮），详情按钮以
+ *   chevron 箭头（rotate-90）+ aria-expanded 提示展开态；
+ * - 信息架构分层：共有特征区（标题/状态/时长/token，位置恒定可扫读对比）
+ *   与模式/执行者次要区（模式标记/agent 短名/循环体阶段）并列且次要区在后，
+ *   模式信息不插入共有区内部——不同模式的任务行结构一致。
  */
-import React, { useState } from 'react'
+import { useState } from 'react'
 import {
   ChevronRight,
+  Loader2,
   XCircle,
   PauseCircle,
   PlayCircle,
   CopyIcon,
   FolderOpen,
-  InfoIcon,
   MessageSquare,
   Trash2,
 } from '@/assets/icons'
+import { failureClassLabel } from '@/constants/failureAttribution'
+import { useTaskActing } from '@/hooks/useTaskActing'
 import { entryDurationMs, formatDuration } from '@/types/activity'
-import { taskStatusLabel } from '@/types/taskStatus'
-import { ModePanelBadge } from './ModePanelBadge'
-import { statusIcon } from './pipelineStatusVisuals'
+import { stopReasonLabel, suspendedReasonLabel, taskStatusLabel } from '@/types/taskStatus'
+import { ModeTagBadges } from './ModePanelBadge'
+import { statusVisual, taskRowStatusVisual } from './pipelineStatusVisuals'
 import type { Session } from '@/types/models'
 import type { PipelineViewEntry } from '@/types/pipeline'
 
@@ -91,16 +105,16 @@ export function resolveThreadTop(
 }
 
 /** 锚点合成上下文：建树过程的登记面（视图内条目/全量条目/已建节点/根列表）
- *  与类型筛选——按引用传入，与原闭包同对象读写，行为等价 */
+ *  与类型筛选集合——按引用传入，与原闭包同对象读写，行为等价 */
 export interface PipelineTreeAnchorContext {
   entryByKey: Map<string, PipelineViewEntry>
   allEntryByKey: Map<string, PipelineViewEntry>
   nodeByKey: Map<string, PipelineTreeNode>
   roots: PipelineTreeNode[]
-  kindFilter: 'all' | 'task' | 'session'
+  kindFilters: ReadonlySet<'task' | 'session'>
 }
 
-/** 锚点行合成：窄筛视图（缺省只看运行中）会滤掉自身不在跑的主管道条目，
+/** 锚点行合成：窄筛视图（如只看运行中）会滤掉自身不在跑的主管道条目，
  *  其锚点行从全量条目补渲染挂根——运行中的子任务平级挂其下，主管道归属
  *  可见（用户裁定 2026-09-24）。视图内已含（含稍后建行的前向引用，走
  *  childrenMap 合并）或已建的锚点直接复用；类型筛选命不中的锚点不合成 */
@@ -109,7 +123,10 @@ export function ensureAnchorNode(key: string, ctx: PipelineTreeAnchorContext): s
   if (ctx.entryByKey.has(key) || ctx.nodeByKey.has(key)) return key
   const anchorEntry = ctx.allEntryByKey.get(key)
   if (!anchorEntry) return undefined
-  if (ctx.kindFilter !== 'all' && anchorEntry.kind !== ctx.kindFilter) return undefined
+  if (ctx.kindFilters.size > 0) {
+    if (anchorEntry.kind !== 'task' && anchorEntry.kind !== 'session') return undefined
+    if (!ctx.kindFilters.has(anchorEntry.kind)) return undefined
+  }
   const node: PipelineTreeNode = { key, entry: anchorEntry, depth: 0, children: [] }
   ctx.nodeByKey.set(key, node)
   ctx.roots.push(node)
@@ -169,11 +186,6 @@ export function PipelineTree({
     ) : null
   return (
     <div className="py-1">
-      {tree.length === 0 && (
-        <div className="text-muted-foreground px-4 py-6 text-center text-xs">
-          暂无管道运行记录
-        </div>
-      )}
       {group('项目', projects)}
       {group('执行中的管道', active)}
       {group('最近完成', done)}
@@ -212,7 +224,7 @@ function TreeGroup({
   return (
     <div>
       <button
-        className="hover:bg-accent/50 text-muted-foreground flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs font-medium"
+        className="hover:bg-muted/50 text-muted-foreground flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs font-medium"
         onClick={() => setCollapsed((c) => !c)}
       >
         <ChevronRight className={`h-3.5 w-3.5 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
@@ -298,9 +310,10 @@ function TreeChildren({
   )
 }
 
-/** 管道条目行（常态：类型/状态/名称/agent/耗时/token；行首 chevron=树子级展开，
+/** 管道条目行（常态：agent 名/状态/名称/耗时/token；行首 chevron=树子级展开，
  *  操作区「详细信息」按钮=详情展开——两者解耦，树收起不会关详情；
- *  任务一对一绑定时此行即任务行，子任务/子管道直挂其下） */
+ *  任务一对一绑定时此行即任务行，子任务/子管道直挂其下。
+ *  行首身份位=执行 agent 名徽标（用户裁定 2026-11-06，会话/任务类型徽标退役） */
 function EntryRow({
   entry,
   depth,
@@ -331,11 +344,22 @@ function EntryRow({
     action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder' | 'delete',
   ) => void
 }) {
-  // 项目登记行无运行态：不取状态图标（渲染面按 kind 跳过状态/耗时/token 列）
-  const status = entry.kind === 'project' ? null : statusIcon(entry.status ?? '')
+  // 项目登记行无运行态：不取状态视觉（渲染面按 kind 跳过状态/耗时/token 列）。
+  // 任务行状态显示聚合（设计 §4.5 一词一义）：按 (task.status, 子任务挂号)
+  // 折算，不直出 run 域词汇；会话行沿用运行态视觉（run 域词汇不变）
+  const status =
+    entry.kind === 'project'
+      ? null
+      : entry.kind === 'task'
+        ? taskRowStatusVisual(entry.taskStatus, entry.hasPendingSubtasks === true, entry.status)
+        : statusVisual(entry.status ?? '')
   const durationMs = entry.kind === 'project' ? null : entryDurationMs(entry, nowMs)
   const tokenTotal = entryTokenTotal(entry)
   const isLocated = locatedKey === entry.key
+  // 行级写操作进行中（pause/resume/cancel await 窗口）：真值源 = store 级
+  // actingTaskIds（#11 统一暴露，经 useTaskActing 转介——widgets 禁 import
+  // @/stores）——进行中行按钮转圈禁用，不各自造 useState
+  const taskActing = useTaskActing(entry.taskId)
 
   return (
     <div>
@@ -343,11 +367,11 @@ function EntryRow({
         data-entry-key={entry.key}
         data-located={isLocated || undefined}
         className={`group flex items-center gap-1.5 py-1.5 pr-2 transition-colors ${
-          entry.kind === 'project' ? '' : 'hover:bg-accent cursor-pointer'
+          entry.kind === 'project' ? '' : 'hover:bg-muted cursor-pointer'
         } ${isLocated ? 'bg-primary/10' : ''}`}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
-        onClick={entry.kind === 'project' ? undefined : () => onEntryClick(entry)}
-        title={entry.kind === 'project' ? undefined : '打开对话标签'}
+        onClick={entry.kind === 'project' ? undefined : () => onToggleDetail(entry.key)}
+        title={entry.kind === 'project' ? undefined : '展开/收起详情'}
       >
         {/* 树子级展开 chevron（仅有子级时渲染；叶子行占位对齐） */}
         {hasChildren ? (
@@ -366,86 +390,95 @@ function EntryRow({
         ) : (
           <span className="h-5 w-5 shrink-0" />
         )}
-        {/* 类型徽标 */}
-        <span
-          className={`shrink-0 rounded px-1 py-0 text-[10px] font-medium ${
-            entry.kind === 'task'
-              ? 'bg-status-warning/15 text-status-warning'
-              : entry.kind === 'project'
-                ? 'bg-status-success/15 text-status-success'
-                : 'bg-primary/10 text-primary/80'
-          }`}
-        >
-          {entry.kind === 'task' ? '任务' : entry.kind === 'project' ? '项目' : '会话'}
-        </span>
+        {/* 行首身份位：项目登记行=「项目」徽标（无执行 agent 可言，用户裁定
+            2026-11-06 只退役任务/会话类型徽标）；管道行=执行 agent 名（如主管道
+            显「灵汐」；解析不到身份不渲染，代号 ID 不进行内、不进悬停提示） */}
+        {entry.kind === 'project' ? (
+          <span className="bg-status-success/15 text-status-success shrink-0 rounded px-1 py-0 text-[10px] font-medium">
+            项目
+          </span>
+        ) : (
+          entry.agentLabel && (
+            <span
+              data-testid="pipeline-entry-agent"
+              className="bg-primary/10 text-primary/80 max-w-[40%] min-w-0 truncate rounded px-1.5 py-0 text-[10px] font-medium"
+            >
+              {entry.agentLabel}
+            </span>
+          )
+        )}
         {orphan && (
           <span className="shrink-0 rounded bg-muted px-1 py-0 text-[10px] text-muted-foreground">
             无归属
           </span>
         )}
-        {/* 状态图标（title 带原始状态——4 态映射的细态不丢；项目登记行无运行态） */}
-        {status && (
-          <span
-            className="shrink-0"
-            title={`运行状态：${status.label}${entry.taskStatus ? ` · 任务原始状态：${entry.taskStatus}` : ''}${entry.stateStatus ? ` · state 真值：${entry.stateStatus}` : ''}`}
-          >
-            {status.icon}
+        {/* 信息区（两层）：共有特征区（位置恒定，跨任务可扫读对比）+ 模式/执行者
+            次要区（仅该模式/执行者存在时出现；差异只在区内容，不改行布局） */}
+        <span data-testid="pipeline-entry-meta" className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+          {/* 共有特征区：标题 → 状态 → 运行时长 → token（顺序恒定，任何任务同位） */}
+          <span data-testid="pipeline-entry-common" className="flex min-w-0 flex-1 items-center gap-1.5">
+            {/* 名称（标题主位：独占弹性位，超长省略号；悬停 tooltip 给全文） */}
+            <span
+              data-testid="pipeline-entry-title"
+              title={entry.name}
+              className="text-foreground/90 min-w-0 flex-1 truncate text-sm"
+            >
+              {entry.name}
+            </span>
+            {/* 状态标签（项目登记行无运行态不渲染） */}
+            {status && (
+              <span
+                data-testid="pipeline-entry-status"
+                title={`运行状态：${status.label}${entry.taskStatus ? ` · 任务原始状态：${entry.taskStatus}` : ''}${entry.stateStatus ? ` · state 真值：${entry.stateStatus}` : ''}`}
+                className={`shrink-0 rounded px-1 text-[10px] font-medium ${status.color}`}
+              >
+                {status.label}
+              </span>
+            )}
+            {/* 运行时长（项目登记行非运行，无耗时语义） */}
+            {entry.kind !== 'project' && (
+              <span
+                data-testid="pipeline-entry-duration"
+                className="text-muted-foreground/60 hidden shrink-0 text-[10px] tabular-nums md:inline"
+              >
+                {formatDuration(durationMs)}
+              </span>
+            )}
+            {/* token */}
+            <span
+              data-testid="pipeline-entry-token"
+              className="text-muted-foreground/60 shrink-0 text-[10px] tabular-nums"
+            >
+              {tokenTotal != null ? tokenTotal.toLocaleString() : '--'}
+            </span>
           </span>
-        )}
-        {/* 名称 */}
-        <span className="text-foreground/90 min-w-0 flex-1 truncate text-sm">{entry.name}</span>
-        {/* 任务态（两态模型：任务条目独立展示任务域状态，与运行态图标分离；
-            非任务条目无 taskStatus 不渲染。原始值进 title 不占版面） */}
-        {entry.taskStatus && (
-          <span
-            className="bg-muted text-muted-foreground hidden shrink-0 rounded px-1 py-0 text-[10px] md:inline"
-            title={`任务状态：${taskStatusLabel(entry.taskStatus)}（原始值 ${entry.taskStatus}）`}
-          >
-            任务:{taskStatusLabel(entry.taskStatus)}
-          </span>
-        )}
-        {/* 循环体阶段（内核 state.current_phase：init/main/exit…） */}
-        {entry.currentPhase && (
-          <span
-            className="bg-muted text-muted-foreground hidden shrink-0 rounded px-1 text-[10px] sm:inline"
-            title={`当前循环体阶段：${entry.currentPhase}${entry.messageCount != null ? ` · ${entry.messageCount} 条消息` : ''}`}
-          >
-            {entry.currentPhase}
-          </span>
-        )}
-        {/* 模式徽标插槽（§5.0 观测链）：state.mode 有键且 registry 查得到
-            面板映射才渲染（§5.3 查不到映射=不渲染）；点击打开模式面板 */}
-        {entry.mode && <ModePanelBadge mode={entry.mode} />}
-        {/* agent */}
-        {entry.agentName && (
-          <span className="bg-primary/10 text-primary/70 hidden shrink-0 rounded px-1.5 py-0 text-[10px] sm:inline">
-            {entry.agentName}
-          </span>
-        )}
-        {/* 状态标签（项目登记行无运行态不渲染） */}
-        {status && (
-          <span className={`shrink-0 rounded px-1 text-[10px] font-medium ${status.color}`}>
-            {status.label}
-          </span>
-        )}
-        {/* 耗时（项目登记行非运行，无耗时语义） */}
-        {entry.kind !== 'project' && (
-          <span className="text-muted-foreground/60 hidden shrink-0 text-[10px] tabular-nums md:inline">
-            {formatDuration(durationMs)}
-          </span>
-        )}
-        {/* token */}
-        <span className="text-muted-foreground/60 shrink-0 text-[10px] tabular-nums">
-          {tokenTotal != null ? tokenTotal.toLocaleString() : '--'}
+          {/* 模式次要区：循环体阶段 + 模式标记（执行 agent 名已升行首身份位，
+              不在次要区重复表达） */}
+          {(entry.modeTags?.length || entry.currentPhase) && (
+            <span data-testid="pipeline-entry-mode" className="flex min-w-0 items-center gap-1">
+              {/* 循环体阶段（内核 state.current_phase：init/main/exit…）——执行者细态 */}
+              {entry.currentPhase && (
+                <span
+                  className="bg-muted text-muted-foreground hidden shrink-0 rounded px-1 text-[10px] sm:inline"
+                  title={`当前循环体阶段：${entry.currentPhase}${entry.messageCount != null ? ` · ${entry.messageCount} 条消息` : ''}`}
+                >
+                  {entry.currentPhase}
+                </span>
+              )}
+              {/* 模式徽标插槽（§5.0 观测链）：state.mode 标签集逐标签渲染，registry
+                  查得到面板映射才渲染（§5.3 查不到映射=不渲染）；点击打开模式面板 */}
+              <ModeTagBadges modeTags={entry.modeTags} />
+            </span>
+          )}
         </span>
-        {/* 操作按钮 */}
-        <div className="flex shrink-0 items-center gap-0.5">
+        {/* 操作按钮区（独立于信息区且 shrink-0：标签再多也不把按钮挤出屏幕外） */}
+        <div data-testid="pipeline-entry-actions" className="flex shrink-0 items-center gap-0.5">
           {/* 详细信息（独立于树展开：树收起不关详情，信息停留显示） */}
           <button
             className={`${
               detailOpen
                 ? 'bg-primary/20 text-primary'
-                : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+                : 'text-muted-foreground hover:bg-muted hover:text-foreground'
             } flex h-6 w-6 items-center justify-center rounded transition-colors`}
             onClick={(e) => {
               e.stopPropagation()
@@ -453,9 +486,10 @@ function EntryRow({
             }}
             title="详细信息（展开/收起详情，不受树展开影响）"
             aria-label="切换详细信息"
+            aria-expanded={detailOpen}
             tabIndex={-1}
           >
-            <InfoIcon className="h-3.5 w-3.5" />
+            <ChevronRight className={`h-3.5 w-3.5 transition-transform ${detailOpen ? 'rotate-90' : ''}`} />
           </button>
           {entry.kind !== 'project' && (
             <button
@@ -500,7 +534,7 @@ function EntryRow({
             </button>
           )}
           <button
-            className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 w-6 items-center justify-center rounded transition-colors"
+            className="text-muted-foreground hover:bg-muted hover:text-foreground flex h-6 w-6 items-center justify-center rounded transition-colors"
             onClick={(e) => {
               e.stopPropagation()
               onAction(entry, 'copy')
@@ -514,23 +548,34 @@ function EntryRow({
           {entry.kind === 'task' && entry.taskId && entry.status === 'running' && (
             <>
               <button
-                className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 w-6 items-center justify-center rounded transition-colors"
+                className="text-muted-foreground hover:bg-muted hover:text-foreground flex h-6 w-6 items-center justify-center rounded transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                 onClick={(e) => {
                   e.stopPropagation()
                   onAction(entry, 'pause')
                 }}
+                disabled={taskActing}
                 title="暂停任务"
+                aria-label={taskActing ? '暂停任务进行中' : '暂停任务'}
                 tabIndex={-1}
               >
-                <PauseCircle className="h-3.5 w-3.5" />
+                {taskActing ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <PauseCircle className="h-3.5 w-3.5" />
+                )}
               </button>
               <button
-                className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 w-6 items-center justify-center rounded transition-colors"
+                className="text-muted-foreground hover:bg-muted hover:text-foreground flex h-6 w-6 items-center justify-center rounded transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                 onClick={(e) => {
                   e.stopPropagation()
+                  // 原「取消任务」改标「暂停」（词汇退役，ADR 2026-10-30）：
+                  // 接口不变（POST cancel，后端写任务 stopped 终态），点击走
+                  // 确认弹窗（Widget 内）说明「任务将暂停，可恢复」
                   onAction(entry, 'cancel')
                 }}
-                title="取消任务"
+                disabled={taskActing}
+                title="暂停"
+                aria-label="暂停"
                 tabIndex={-1}
               >
                 <XCircle className="h-3.5 w-3.5" />
@@ -539,20 +584,26 @@ function EntryRow({
           )}
           {entry.kind === 'task' && entry.taskId && entry.status === 'suspended' && (
             <button
-              className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 w-6 items-center justify-center rounded transition-colors"
+              className="text-muted-foreground hover:bg-muted hover:text-foreground flex h-6 w-6 items-center justify-center rounded transition-colors disabled:cursor-not-allowed disabled:opacity-50"
               onClick={(e) => {
                 e.stopPropagation()
                 onAction(entry, 'resume')
               }}
+              disabled={taskActing}
               title="恢复任务"
+              aria-label={taskActing ? '恢复任务进行中' : '恢复任务'}
               tabIndex={-1}
             >
-              <PlayCircle className="h-3.5 w-3.5" />
+              {taskActing ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <PlayCircle className="h-3.5 w-3.5" />
+              )}
             </button>
           )}
           {entry.workspacePath && (
             <button
-              className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 w-6 items-center justify-center rounded transition-colors"
+              className="text-muted-foreground hover:bg-muted hover:text-foreground flex h-6 w-6 items-center justify-center rounded transition-colors"
               onClick={(e) => {
                 e.stopPropagation()
                 onAction(entry, 'workspace')
@@ -588,7 +639,8 @@ function EntryDetail({ entry, depth }: { entry: PipelineViewEntry; depth: number
           ['开始', entry.startedAt],
         ]
   if (entry.endedAt) rows.push(['结束', entry.endedAt])
-  if (entry.agentName) rows.push(['Agent', entry.agentName])
+  // Agent 行：只显显示名（用户裁定 2026-11-06：agent 名在场则代号 ID 不再显示）
+  if (entry.agentLabel) rows.push(['Agent', entry.agentLabel])
   // state 真值关键数据（任务条目上的关键信息不缺位）
   if (entry.taskStatus) rows.push(['任务状态', `${taskStatusLabel(entry.taskStatus)}（${entry.taskStatus}）`])
   if (entry.stateStatus) rows.push(['State 状态', entry.stateStatus])
@@ -596,6 +648,17 @@ function EntryDetail({ entry, depth }: { entry: PipelineViewEntry; depth: number
   if (entry.currentPhase) rows.push(['当前阶段', entry.currentPhase])
   if (entry.messageCount != null) rows.push(['消息条数', String(entry.messageCount)])
   if (entry.rawError) rows.push(['错误', entry.rawError])
+  // 终局署名（run_stop_reason 非空才渲染；人话对照 + 原词，词表外原词透传）
+  if (entry.stopReason) rows.push(['停止原因', stopReasonLabel(entry.stopReason)])
+  // 挂起归因（run 域 suspended_reason 非空才渲染；人话对照 + 原词，词表外
+  // 原词透传。键缺席/空串=未署名，回退现状不伪造归因——P-23 片2）
+  if (entry.suspendedReason) rows.push(['挂起原因', suspendedReasonLabel(entry.suspendedReason)])
+  // 任务域失败归因（task.failure_* 非空才渲染；字段缺失回退现状——只渲染
+  // 停止原因行，不伪造归因。分类=人话（原词），全文=后端已译文本原样透传）
+  if (entry.failureClass || entry.failureReason) {
+    const parts = [failureClassLabel(entry.failureClass ?? ''), entry.failureReason]
+    rows.push(['失败归因', parts.filter(Boolean).join('：')])
+  }
   if (entry.totalTokens && typeof entry.totalTokens === 'object') {
     const t = entry.totalTokens
     const parts = ['input', 'output', 'total']
@@ -629,264 +692,6 @@ function EntryDetail({ entry, depth }: { entry: PipelineViewEntry; depth: number
           </span>
         </div>
       )}
-    </div>
-  )
-}
-
-// ═════════════════════════════════════════════════════════════════
-// 列表视图：平铺表格（类型/名称/归属/状态/耗时/token/操作）
-// ═════════════════════════════════════════════════════════════════
-
-export function PipelineTable({
-  entries,
-  nowMs,
-  expandedKeys,
-  locatedKey,
-  onToggle,
-  onEntryClick,
-  onAction,
-}: {
-  entries: PipelineViewEntry[]
-  nowMs: number
-  expandedKeys: Set<string>
-  /** 通知定位高亮的条目 key（focusTaskId 定位语义，超时自动清除） */
-  locatedKey?: string | null
-  onToggle: (key: string) => void
-  onEntryClick: (entry: PipelineViewEntry) => void
-  onAction: (
-    entry: PipelineViewEntry,
-    action: 'pause' | 'resume' | 'cancel' | 'copy' | 'workspace' | 'open-folder' | 'delete',
-  ) => void
-}) {
-  if (entries.length === 0) {
-    return (
-      <div className="px-4 py-6 text-center">
-        <p className="text-muted-foreground text-xs">暂无管道运行记录</p>
-      </div>
-    )
-  }
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="border-b text-left">
-            <th className="text-muted-foreground px-3 py-1.5 text-[11px] font-medium">类型</th>
-            <th className="text-muted-foreground px-3 py-1.5 text-[11px] font-medium">名称</th>
-            <th className="text-muted-foreground hidden px-3 py-1.5 text-[11px] font-medium sm:table-cell">归属</th>
-            <th className="text-muted-foreground hidden px-3 py-1.5 text-[11px] font-medium lg:table-cell">Agent</th>
-            <th className="text-muted-foreground px-3 py-1.5 text-[11px] font-medium">状态</th>
-            <th className="text-muted-foreground hidden px-3 py-1.5 text-[11px] font-medium md:table-cell">耗时</th>
-            <th className="text-muted-foreground px-3 py-1.5 text-right text-[11px] font-medium">Token</th>
-            <th className="text-muted-foreground px-3 py-1.5 text-[11px] font-medium">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          {entries.map((entry) => {
-            // 项目登记行无运行态：状态/耗时列显 —（列位保留对齐）
-            const status = entry.kind === 'project' ? null : statusIcon(entry.status ?? '')
-            const durationMs = entry.kind === 'project' ? null : entryDurationMs(entry, nowMs)
-            const tokenTotal = entryTokenTotal(entry)
-            const isLocated = locatedKey === entry.key
-            return (
-              <React.Fragment key={entry.key}>
-                <tr
-                  data-entry-key={entry.key}
-                  data-located={isLocated || undefined}
-                  className={`border-b last:border-b-0 ${isLocated ? 'bg-primary/10' : ''} ${
-                    entry.kind === 'project' ? '' : 'hover:bg-accent/20 cursor-pointer'
-                  }`}
-                  onClick={entry.kind === 'project' ? undefined : () => onEntryClick(entry)}
-                  title={entry.kind === 'project' ? undefined : '打开对话标签'}
-                >
-                  <td className="px-3 py-1.5">
-                    <button
-                      className="text-muted-foreground hover:text-foreground mr-1 inline-flex h-4 w-4 items-center justify-center"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        onToggle(entry.key)
-                      }}
-                      tabIndex={-1}
-                    >
-                      <ChevronRight
-                        className={`h-3 w-3 transition-transform ${expandedKeys.has(entry.key) ? 'rotate-90' : ''}`}
-                      />
-                    </button>
-                    <span
-                      className={`rounded px-1 py-0 text-[10px] font-medium ${
-                        entry.kind === 'task'
-                          ? 'bg-status-warning/15 text-status-warning'
-                          : entry.kind === 'project'
-                            ? 'bg-status-success/15 text-status-success'
-                            : 'bg-primary/10 text-primary/80'
-                      }`}
-                    >
-                      {entry.kind === 'task' ? '任务' : entry.kind === 'project' ? '项目' : '会话'}
-                    </span>
-                  </td>
-                  <td className="max-w-[160px] truncate px-3 py-1.5 text-xs">
-                    {entry.name}
-                    {!entry.sessionTitle && entry.kind !== 'project' && (
-                      <span className="ml-1 rounded bg-muted px-1 py-0 text-[9px] text-muted-foreground">
-                        无归属
-                      </span>
-                    )}
-                  </td>
-                  <td className="hidden px-3 py-1.5 text-xs text-muted-foreground sm:table-cell">
-                    {entry.sessionTitle || '--'}
-                  </td>
-                  <td className="hidden px-3 py-1.5 text-xs text-muted-foreground lg:table-cell">
-                    {entry.agentName || '--'}
-                  </td>
-                  <td className="px-3 py-1.5">
-                    {status ? (
-                      <span
-                        className={`flex items-center gap-1 text-xs ${status.color}`}
-                        title={`运行状态：${status.label}${entry.taskStatus ? ` · 任务原始状态：${entry.taskStatus}` : ''}${entry.stateStatus ? ` · state 真值：${entry.stateStatus}` : ''}`}
-                      >
-                        {status.icon}
-                        {status.label}
-                        {entry.taskStatus && (
-                          <span
-                            className="bg-muted text-muted-foreground rounded px-1 py-0 text-[10px]"
-                            title={`任务状态：${taskStatusLabel(entry.taskStatus)}（原始值 ${entry.taskStatus}）`}
-                          >
-                            任务:{taskStatusLabel(entry.taskStatus)}
-                          </span>
-                        )}
-                      </span>
-                    ) : (
-                      <span className="text-xs text-muted-foreground">—</span>
-                    )}
-                  </td>
-                  <td className="hidden px-3 py-1.5 text-xs tabular-nums text-muted-foreground md:table-cell">
-                    {entry.kind === 'project' ? '—' : formatDuration(durationMs)}
-                  </td>
-                  <td className="px-3 py-1.5 text-right text-xs tabular-nums text-muted-foreground">
-                    {tokenTotal != null ? tokenTotal.toLocaleString() : '--'}
-                  </td>
-                  <td className="px-3 py-1.5">
-                    <div className="flex items-center gap-0.5">
-                      {entry.kind !== 'project' && (
-                        <button
-                          className="bg-primary/15 text-primary hover:bg-primary/25 flex h-6 w-6 items-center justify-center rounded"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onEntryClick(entry)
-                          }}
-                          title="打开对话"
-                          aria-label="打开对话"
-                          tabIndex={-1}
-                        >
-                          <MessageSquare className="h-3.5 w-3.5" />
-                        </button>
-                      )}
-                      {entry.kind === 'project' && entry.projectId && (
-                        <button
-                          className="bg-primary/15 text-primary hover:bg-primary/25 flex h-6 w-6 items-center justify-center rounded"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onAction(entry, 'open-folder')
-                          }}
-                          title="在系统文件管理器中打开项目文件夹"
-                          aria-label="打开文件夹"
-                          tabIndex={-1}
-                        >
-                          <FolderOpen className="h-3.5 w-3.5" />
-                        </button>
-                      )}
-                      {entry.kind === 'project' && entry.projectId && (
-                        <button
-                          className="text-muted-foreground hover:bg-status-error/15 hover:text-status-error flex h-6 w-6 items-center justify-center rounded"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onAction(entry, 'delete')
-                          }}
-                          title="删除项目"
-                          aria-label="删除项目"
-                          tabIndex={-1}
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      )}
-                      <button
-                        className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 w-6 items-center justify-center rounded"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          onAction(entry, 'copy')
-                        }}
-                        title="复制管道 ID"
-                        aria-label="复制管道 ID"
-                        tabIndex={-1}
-                      >
-                        <CopyIcon className="h-3.5 w-3.5" />
-                      </button>
-                      {entry.kind === 'task' && entry.taskId && entry.status === 'running' && (
-                        <>
-                          <button
-                            className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 w-6 items-center justify-center rounded"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              onAction(entry, 'pause')
-                            }}
-                            title="暂停任务"
-                            tabIndex={-1}
-                          >
-                            <PauseCircle className="h-3.5 w-3.5" />
-                          </button>
-                          <button
-                            className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 w-6 items-center justify-center rounded"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              onAction(entry, 'cancel')
-                            }}
-                            title="取消任务"
-                            tabIndex={-1}
-                          >
-                            <XCircle className="h-3.5 w-3.5" />
-                          </button>
-                        </>
-                      )}
-                      {entry.kind === 'task' && entry.taskId && entry.status === 'suspended' && (
-                        <button
-                          className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 w-6 items-center justify-center rounded"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onAction(entry, 'resume')
-                          }}
-                          title="恢复任务"
-                          tabIndex={-1}
-                        >
-                          <PlayCircle className="h-3.5 w-3.5" />
-                        </button>
-                      )}
-                      {entry.workspacePath && (
-                        <button
-                          className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-6 w-6 items-center justify-center rounded"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onAction(entry, 'workspace')
-                          }}
-                          title={`打开工作空间: ${entry.workspacePath}`}
-                          tabIndex={-1}
-                        >
-                          <FolderOpen className="h-3.5 w-3.5" />
-                        </button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-                {expandedKeys.has(entry.key) && (
-                  <tr className="border-b">
-                    <td colSpan={8} className="bg-muted/20 px-3 py-1.5">
-                      <EntryDetail entry={entry} depth={0} />
-                    </td>
-                  </tr>
-                )}
-              </React.Fragment>
-            )
-          })}
-        </tbody>
-      </table>
     </div>
   )
 }

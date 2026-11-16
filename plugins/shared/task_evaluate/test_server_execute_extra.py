@@ -1,0 +1,1151 @@
+# @feature: FP-0.2.〇 管道引擎与插件执行模型(内核地基) | @vision: V3 可嵌入 | @ci: python-coverage
+"""task_evaluate 服务端装配（server.py）与工具执行路径（execute 编排）补充单测。
+
+server.py：
+- on_load 装配默认执行器（PipelineEvaluationExecutor 经 set_default_executor 注入）；
+- task_evaluate 工具入口：成功/失败两条返回分支（错误路径返回 {"success": False, "error": ...}）。
+
+execute 编排（沿用真实 TaskService + tmp 存储，外部依赖仅 state 读面/写面与
+执行器注入替身）：
+- 单指标模式：summary 透传、超时 EVAL_TIMEOUT、litellm 限速 RATE_LIMITED、
+  一般异常 EVAL_FAILED、部分通过 partial_pass、全过自动完成；
+- 自动评估：summary 回填未配置指标、无指标自动完成、历史全过跳过执行器；
+- 结果处理：unrecoverable 模式耗尽 FAILED、失败计数耗尽 FAILED、通过重置计数、
+  完整 retry 反馈（剩余次数/失败明细）、空结果 METRIC_NOT_FOUND；
+- 调用次数上限 EVAL_CALL_LIMIT_EXCEEDED、AMBIGUOUS 短 id 拒绝；
+- 合并门控：ws_meta 缺失即失败（不静默跳过）/ state ws_meta 透传机制层
+  （worktree_merge 替身；真实 git 行为由 tests/plugins/shared/test_worktree_merge.py 覆盖）；
+- 评估子管道注册：root 存在时注册/跳过/异常降级。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import sys
+import types
+from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+_TE_DIR = Path(__file__).resolve().parent
+_TASKS_DIR = _TE_DIR.parents[0] / "tasks"
+# 共享根（plugins/shared 平铺模块 state_fields/task_birth；worktree_merge 在
+# 本目录）——对齐生产 sidecar sys.path 形态（自身目录 + shared 根），单文件可跑。
+_SHARED_ROOT = _TE_DIR.parents[0]
+
+for _d in (_TE_DIR, _TASKS_DIR, _SHARED_ROOT):
+    if str(_d) not in sys.path:
+        sys.path.insert(0, str(_d))
+
+from task_types import TaskStatus  # noqa: E402 — 依赖上方 sys.path 注入
+
+
+def _load_tool() -> Any:
+    mod_name = "task_eval_tool_exec_under_test"
+    if mod_name in sys.modules:
+        return sys.modules[mod_name]
+    spec = importlib.util.spec_from_file_location(mod_name, _TE_DIR / "tool.py")
+    assert spec is not None and spec.loader is not None, "cannot load tool.py"
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def mod() -> Any:
+    return _load_tool()
+
+
+@pytest.fixture
+def service(tmp_path: Path) -> Any:
+    # 导入前把 tasks 插件目录强制置顶（共跑时别插件同名 service.py 可能占位）。
+    _s = str(_TASKS_DIR)
+    while _s in sys.path:
+        sys.path.remove(_s)
+    sys.path.insert(0, _s)
+    # 逐出已缓存的裸名槽位：共跑时 security_check 等插件的 service.py 可能已
+    # 占位，仅置顶 path 不够（sys.modules 命中优先）。task_evaluate 的 tool.py
+    # 不导入裸名 service（只按文件载入），故逐出不影响其类身份。
+    sys.modules.pop("service", None)
+    from service import TaskService
+
+    return TaskService(data_dir=str(tmp_path / "tasks"))
+
+
+async def _new_task(service: Any, *, metadata: dict[str, Any] | None = None) -> Any:
+    return await service.create_task(title="评估任务", description="任务描述", metadata=metadata or {})
+
+
+def _inject_tool(
+    mod: Any,
+    monkeypatch: Any,
+    service: Any,
+    merge_result: str | None = None,
+) -> tuple[Any, MagicMock]:
+    """monkeypatch 服务获取/读面/写面与合并机制替身，返回 (tool, state_writer)。
+
+    merge_result：worktree_merge 机制替身返回值（None=合并成功/无需合并；
+    str=失败原因）。门控的 ws_meta 解析仍走真实实现；机制层（git CLI）为
+    外部依赖故以替身注入，真实 git 行为由 tests/plugins/shared/test_worktree_merge.py
+    用真实仓库覆盖。
+    """
+    state_writer = AsyncMock()
+    monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
+    monkeypatch.setattr(mod, "_state_reader", None)
+    monkeypatch.setattr(mod, "_state_writer", state_writer)
+
+    def _merge_stub(task_id: str, ws_meta: dict[str, Any]) -> str | None:
+        return merge_result
+
+    monkeypatch.setattr(mod.worktree_merge, "merge_worktree_before_complete", _merge_stub)
+    return mod.TaskEvaluateTool(), state_writer
+
+
+def _metric(metric_id: str, passed: bool, **kw: Any) -> Any:
+    from _eval_core import MetricResult
+
+    return MetricResult(metric_id=metric_id, passed=passed, **kw)
+
+
+def _eval_result(task_id: str, metrics: list[Any], *, summary: str = "") -> Any:
+    from _eval_core import EvaluationResult
+
+    r = EvaluationResult(task_id=task_id, results=metrics, summary=summary)
+    r.compute_overall()
+    return r
+
+
+class _RecordingExecutor:
+    """记录每次 run_evaluation 的参数并返回可编程结果。"""
+
+    def __init__(self, result_factory: Any) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._result_factory = result_factory
+
+    async def run_evaluation(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        return self._result_factory(kwargs)
+
+
+# ── server.py：on_load 装配与工具处理器 ──────────────────────
+
+
+class TestServerAssembly:
+    @staticmethod
+    def _load_server() -> Any:
+        name = "task_eval_server_extra_under_test"
+        if name in sys.modules:
+            return sys.modules[name]
+        spec = importlib.util.spec_from_file_location(name, _TE_DIR / "server.py")
+        assert spec is not None and spec.loader is not None, "cannot load server.py"
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    def test_on_load_injects_default_executor(self, monkeypatch: Any) -> None:
+        # 生产中 server.py exec 期由合宿 loader 裸名遮蔽窗口担保 `tool` 解析到
+        # 本插件目录；测试进程内以槽位预置等价模拟，使 server 绑定该别名实例
+        tool_mod = _load_tool()
+        monkeypatch.setitem(sys.modules, "tool", tool_mod)
+        server_mod = self._load_server()
+        before = tool_mod._default_executor
+        try:
+            asyncio.run(server_mod._on_load({}))
+            assert tool_mod._default_executor is not None, "on_load 应装配默认评估执行器"
+            # 注入的默认执行器应带 chat_send/state_rows（真实验证它可被构造）
+            ex = tool_mod._default_executor
+            assert callable(ex._chat_send)
+            assert callable(ex._state_rows)
+        finally:
+            tool_mod.set_default_executor(before)
+
+    @pytest.mark.asyncio
+    async def test_handler_success_and_error_paths(self, monkeypatch: Any) -> None:
+        from agentos_plugin_sdk import create_failure_result, create_success_result
+
+        class _FakeTool:
+            async def execute(self, inputs: dict[str, Any]) -> Any:
+                if inputs.get("action") == "fail":
+                    return create_failure_result(error="模拟失败", error_code="X")
+                return create_success_result(data={"task_id": inputs.get("task_id")})
+
+        fake_mod = types.ModuleType("tool")
+        fake_mod.TaskEvaluateTool = _FakeTool
+        server_mod = self._load_server()
+        # handler 消费 server 模块 exec 期绑定的 tool_mod（生产由合宿 loader
+        # 遮蔽窗口担保指向本插件）；测试以模块属性替换注入替身
+        monkeypatch.setattr(server_mod, "tool_mod", fake_mod)
+        out = await server_mod.task_evaluate(action="auto_complete", task_id="t1")
+        # 9de6b56f6 起 server 返回完整 ToolExecutionResult 信封（metadata 携带
+        # result=completed/task_failed 等副作用信号，剥成裸 output 会丢评估证据）
+        assert out["success"] is True
+        assert out["output"] == {"task_id": "t1"}
+        out_err = await server_mod.task_evaluate(action="fail", task_id="t1")
+        assert out_err["success"] is False
+        assert out_err["error"] == "模拟失败"
+
+
+# ── 单指标模式（evaluate_single） ────────────────────────────
+
+
+class TestEvaluateSingle:
+    @pytest.mark.asyncio
+    async def test_summary_passthrough_and_partial_pass(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1", "m2"]})
+
+        def _factory(kwargs: dict[str, Any]) -> Any:
+            return _eval_result(task.id, [_metric("m1", True)], summary="ok")
+
+        executor = _RecordingExecutor(_factory)
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        tool._executor = executor
+        result = await tool.execute({"action": "evaluate_single", "metric_id": "m1", "task_id": task.id, "summary": "我做完了"})
+        assert result.success is True
+        assert result.metadata["result"] == "partial_pass"
+        assert "进度：1/2" in result.metadata["message"]
+        assert "m2" in result.metadata["message"]
+        # summary 透传给执行器
+        assert executor.calls[0]["input_params"] == {"m1": {"summary": "我做完了"}}
+        assert executor.calls[0]["metric_ids"] == ["m1"]
+        # 未走到完成/失败终态：不写状态
+        assert task.metadata["eval_total_calls"] == 1
+
+    @pytest.mark.asyncio
+    async def test_single_metric_converts_to_auto_complete(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        """单指标任务在 evaluate_single 下自动转完全评估并完成。"""
+        task = await _new_task(
+            service,
+            metadata={
+                "evaluation_metric_ids": ["m1"],
+                "acceptance_criteria": {"m1": {"input_params": {"criteria": "存在", "path": "x"}}},
+            },
+        )
+
+        def _factory(kwargs: dict) -> Any:
+            return _eval_result(task.id, [_metric("m1", True)], summary="全过")
+
+        ex = _RecordingExecutor(_factory)
+        tool, state_writer = _inject_tool(mod, monkeypatch, service)
+        tool._executor = ex
+        result = await tool.execute({"action": "evaluate_single", "metric_id": "m1", "task_id": task.id})
+        assert result.success is True
+        assert result.metadata["result"] == "completed"
+        assert state_writer.await_args.args[1]["task.status"] == "completed"
+        # 自动转完全评估：执行器收到全部指标
+        assert ex.calls[0]["metric_ids"] == ["m1"]
+
+    @pytest.mark.asyncio
+    async def test_timeout_returns_eval_timeout(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1", "m2"]})
+        monkeypatch.setattr(mod.TaskEvaluateTool, "_get_eval_timeout", staticmethod(lambda self: 0.001))
+
+        async def _slow(**kwargs: Any) -> Any:
+            await asyncio.sleep(1)
+
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        tool._executor = _SlowExecutor(_slow)
+        result = await tool.execute({"action": "evaluate_single", "metric_id": "m1", "task_id": task.id})
+        assert result.success is False
+        assert result.error_code == "EVAL_TIMEOUT"
+        assert "评估超时" in result.error
+
+    @pytest.mark.asyncio
+    async def test_rate_limited_returns_rate_limited(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        """限速异常 → RATE_LIMITED。litellm 已退役（0.2 精简环境未必在，
+        tool.py 懒导入按 ImportError 降级），按导入边界注入形状替身（与下方
+        degrade 测试的 import hook 同一接缝），真实/缺失环境同跑同断言。"""
+
+        class _RateLimitError(Exception):
+            pass
+
+        fake_litellm = types.ModuleType("litellm")
+        fake_litellm.RateLimitError = _RateLimitError
+        monkeypatch.setitem(sys.modules, "litellm", fake_litellm)
+
+        task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1", "m2"]})
+
+        def _boom(_kwargs: dict[str, Any]) -> Any:
+            raise _RateLimitError("quota")
+
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        tool._executor = _RecordingExecutor(_boom)
+        result = await tool.execute({"action": "evaluate_single", "metric_id": "m1", "task_id": task.id})
+        assert result.success is False
+        assert result.error_code == "RATE_LIMITED"
+        assert "限速" in result.error
+
+    @pytest.mark.asyncio
+    async def test_generic_exception_returns_eval_failed(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1", "m2"]})
+
+        async def _boom(**kwargs: Any) -> Any:
+            raise RuntimeError("executor blew up")
+
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        tool._executor = _RecordingExecutor(_boom)
+        result = await tool.execute({"action": "evaluate_single", "metric_id": "m1", "task_id": task.id})
+        assert result.success is False
+        assert result.error_code == "EVAL_FAILED"
+
+
+class _SlowExecutor:
+    def __init__(self, coro: Any) -> None:
+        self._coro = coro
+
+    async def run_evaluation(self, **kwargs: Any) -> Any:
+        return await self._coro(**kwargs)
+
+
+# ── 自动评估（auto_complete） ────────────────────────────────
+
+
+class TestAutoComplete:
+    @pytest.mark.asyncio
+    async def test_summary_filled_into_input_params(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(
+            service,
+            metadata={
+                "evaluation_metric_ids": ["m1", "m2"],
+                "acceptance_criteria": {"m1": {"input_params": {"criteria": "要求"}}},
+            },
+        )
+
+        def _factory(kwargs: dict) -> Any:
+            return _eval_result(task.id, [_metric("m1", True), _metric("m2", True)], summary="ok")
+
+        ex = _RecordingExecutor(_factory)
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        tool._executor = ex
+        result = await tool.execute({"action": "auto_complete", "task_id": task.id, "summary": "完成总结"})
+        assert result.success is True
+        assert result.metadata["result"] == "completed"
+        params = ex.calls[0]["input_params"]
+        assert params["m1"]["criteria"] == "要求"
+        assert params["m1"]["summary"] == "完成总结"
+        assert params["m2"]["summary"] == "完成总结"
+
+    @pytest.mark.asyncio
+    async def test_no_metrics_auto_completes_without_executor(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(service)
+        tool, state_writer = _inject_tool(mod, monkeypatch, service)
+        tool._executor = _RecordingExecutor(lambda _kw: _eval_result(task.id, []))
+        result = await tool.execute({"action": "auto_complete", "task_id": task.id})
+        assert result.success is True
+        assert result.output["overall_passed"] is True
+        # BUG-33：无指标完成 = 零验证放行，完成结论必须如实标注，不得谎称"评估通过"
+        assert result.output["summary"] == "未声明评估指标，未经评估直接完成"
+        assert result.metadata["message"] == "任务未声明验收指标，未经评估直接完成"
+        # 两次状态写：①评估调用计数（eval_total_calls，耗尽判定的跨调用真值）
+        # ②完成裁决（task.status + 诚实标注的 eval_summary）
+        assert state_writer.await_count == 2
+        assert state_writer.await_args.args[1]["task.status"] == "completed"
+        assert (
+            state_writer.await_args.args[1]["task.eval_summary"]
+            == "未声明评估指标，未经评估直接完成"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_metrics_executor_self_report_is_flagged_not_bare(
+        self, mod: Any, service: Any, monkeypatch: Any
+    ) -> None:
+        """BUG-33 回归锚：执行者自我报告（可能含虚假落盘声明）不得以裸文本充当
+        评估结论——必须带「无验收指标，未经评估」标注后才能落 task.eval_summary。"""
+        task = await _new_task(service)
+        tool, state_writer = _inject_tool(mod, monkeypatch, service)
+        tool._executor = _RecordingExecutor(lambda _kw: _eval_result(task.id, []))
+        result = await tool.execute(
+            {
+                "action": "auto_complete",
+                "task_id": task.id,
+                "summary": "已落盘 novel_r84.md",
+            }
+        )
+        assert result.success is True
+        eval_summary = state_writer.await_args.args[1]["task.eval_summary"]
+        assert eval_summary.startswith("【无验收指标，未经评估直接完成】")
+        # 执行者报告保留可追溯，但永不裸过
+        assert "已落盘 novel_r84.md" in eval_summary
+        assert result.metadata["message"] == "任务未声明验收指标，未经评估直接完成"
+
+    @pytest.mark.asyncio
+    async def test_all_passed_history_skips_executor(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(
+            service,
+            metadata={
+                "evaluation_metric_ids": ["m1", "m2"],
+                "evaluation_history": [
+                    {"metrics": [{"metric_id": "m1", "passed": True}, {"metric_id": "m2", "passed": True}]}
+                ],
+            },
+        )
+        ex = _RecordingExecutor(lambda _kw: _eval_result("x", []))
+        tool, state_writer = _inject_tool(mod, monkeypatch, service)
+        tool._executor = ex
+        result = await tool.execute({"action": "auto_complete", "task_id": task.id})
+        assert result.success is True
+        assert result.metadata["result"] == "completed"
+        assert ex.calls == [], "历史全过不应再调用执行器"
+        assert "历史评估记录" in result.output["summary"]
+
+    @pytest.mark.asyncio
+    async def test_auto_complete_timeout(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(
+            service,
+            metadata={
+                "evaluation_metric_ids": ["m1"],
+                "acceptance_criteria": {"m1": {"input_params": {"criteria": "存在", "path": "x"}}},
+            },
+        )
+        monkeypatch.setattr(mod.TaskEvaluateTool, "_get_eval_timeout", staticmethod(lambda self: 0.001))
+
+        async def _slow(**kwargs: Any) -> Any:
+            await asyncio.sleep(1)
+
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        tool._executor = _SlowExecutor(_slow)
+        result = await tool.execute({"action": "auto_complete", "task_id": task.id})
+        assert result.success is False
+        assert result.error_code == "EVAL_TIMEOUT"
+
+    @pytest.mark.asyncio
+    async def test_call_limit_exceeded_fails_task(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1"], "max_eval_calls": 0})
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        result = await tool.execute({"action": "auto_complete", "task_id": task.id})
+        assert result.success is False
+        assert result.error_code == "EVAL_CALL_LIMIT_EXCEEDED"
+        assert result.metadata.get("task_failed") is True
+        assert service.get_task(task.id).status.value == "pending"
+
+
+# ── 评估结果处理（_handle_evaluation_result） ────────────────
+
+
+class TestHandleEvaluationResult:
+    @pytest.mark.asyncio
+    async def test_unrecoverable_pattern_exhausts_immediately(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1"], "max_eval_retries": 5})
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        result = _eval_result(task.id, [_metric("m1", False, message="command not found")])
+        out = await tool._handle_evaluation_result({"action": "auto_complete"}, service, task, result)
+        assert out.success is True
+        assert out.metadata["result"] == "failed"
+        # unrecoverable → 直接按耗尽处理（不消耗渐进重试）；终态在 state
+        assert task.metadata["eval_retry_count"] == {"m1": 5}
+
+    @pytest.mark.asyncio
+    async def test_retry_count_exhausted_fails_task(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(
+            service,
+            metadata={"evaluation_metric_ids": ["m1"], "max_eval_retries": 3, "eval_retry_count": {"m1": 2}},
+        )
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        result = _eval_result(task.id, [_metric("m1", False, message="继续改进")])
+        out = await tool._handle_evaluation_result({"action": "auto_complete"}, service, task, result)
+        assert out.success is True
+        assert out.metadata["result"] == "failed"
+        assert "重试次数耗尽" in out.metadata["message"]
+
+    @pytest.mark.asyncio
+    async def test_retry_feedback_with_remaining_counts(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(
+            service,
+            metadata={
+                "evaluation_metric_ids": ["m1"],
+                "max_eval_retries": 3,
+                "eval_retry_count": {"m1": 1},
+                "max_eval_calls": 15,
+                "eval_total_calls": 7,
+            },
+        )
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        result = _eval_result(task.id, [_metric("m1", False, message="文件不对", score=20.0)])
+        out = await tool._handle_evaluation_result({"action": "auto_complete"}, service, task, result)
+        assert out.success is True
+        assert out.metadata["result"] == "retry"
+        assert out.metadata["retry_remaining"] == 1
+        msg = out.metadata["message"]
+        assert "[m1] 未通过" in msg
+        assert "文件不对" in msg
+        assert "得分: 20.0" in msg
+        assert "剩余重试：1 次" in msg
+        assert "已调用 7/15" in msg
+
+    @pytest.mark.asyncio
+    async def test_passed_metric_resets_retry_count(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(
+            service,
+            metadata={"evaluation_metric_ids": ["m1"], "eval_retry_count": {"m1": 2}},
+        )
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        result = _eval_result(task.id, [_metric("m1", True)])
+        out = await tool._handle_evaluation_result({"action": "auto_complete"}, service, task, result)
+        assert out.success is True
+        assert out.metadata["result"] == "completed"
+        assert task.metadata["eval_retry_count"] == {"m1": 0}
+
+    @pytest.mark.asyncio
+    async def test_no_results_metric_not_found(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(service, metadata={"evaluation_metric_ids": ["ghost"]})
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        out = await tool._handle_evaluation_result({"action": "auto_complete"}, service, task, _eval_result(task.id, []))
+        assert out.success is False
+        assert out.error_code == "METRIC_NOT_FOUND"
+        assert "未找到任何有效的评估指标" in out.error
+
+    @pytest.mark.asyncio
+    async def test_fail_fast_semantics_kept_compatible(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        """fail_fast/skip_state_update 兼容保留：逐指标独立回收，写面仍在工具层。"""
+        task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1"]})
+        result = _eval_result(task.id, [_metric("m1", False)])
+        tool, state_writer = _inject_tool(mod, monkeypatch, service)
+        out = await tool._handle_evaluation_result({"action": "auto_complete"}, service, task, result)
+        assert out.success is True
+
+
+class TestMergeAndRegister:
+    @pytest.mark.asyncio
+    async def test_try_merge_missing_ws_meta_fails_not_skips(self, mod: Any, monkeypatch: Any) -> None:
+        """ws_meta 拿不到 = 合并失败（worktree 产物不能静默丢失），不再有跳过分支。"""
+        monkeypatch.setattr(mod, "_state_reader", None)
+        err = await mod.TaskEvaluateTool()._try_merge_before_complete(MagicMock(id="t1"))
+        assert err is not None
+        assert "t1" in err
+        assert "ws_meta" in err
+
+    @pytest.mark.asyncio
+    async def test_try_merge_delegates_to_local_mechanism(self, mod: Any, monkeypatch: Any) -> None:
+        """门控决策 + 机制执行分层：门控把 state 解析的 ws_meta 透传共享模块并回传结果。"""
+        calls: list[tuple[str, dict[str, Any]]] = []
+
+        def fake_merge(task_id: str, ws_meta: dict[str, Any]) -> str | None:
+            calls.append((task_id, ws_meta))
+            return "merge boom"
+
+        monkeypatch.setattr(mod.worktree_merge, "merge_worktree_before_complete", fake_merge)
+        ws_meta = {"mode": "worktree", "path": "D:/wt", "project_root": "D:/src", "branch": "task/t1"}
+        monkeypatch.setattr(
+            mod, "_state_reader", lambda: [{"pipeline_id": "t1", "task.ws_meta": ws_meta}]
+        )
+        err = await mod.TaskEvaluateTool()._try_merge_before_complete(MagicMock(id="t1"))
+        assert err == "merge boom"
+        assert calls == [("t1", ws_meta)]
+
+    def test_register_eval_pipelines_with_root(self, mod: Any, monkeypatch: Any) -> None:
+        registered: list[tuple[str, str]] = []
+
+        class _ExecStorage:
+            def register_pipeline(self, pid: str, root_id: str) -> None:
+                registered.append((pid, root_id))
+
+        class _Provider:
+            def get(self, key: str) -> Any:
+                return _ExecStorage() if key == "execution_record_storage" else None
+
+        service = MagicMock()
+        service.get_root_task_id.return_value = "root-1"
+        monkeypatch.setattr(mod, "_get_service_provider", lambda: _Provider())
+        r = _eval_result("x", [_metric("a", True, pipeline_run_id="evalP"), _metric("b", True)])
+        mod.TaskEvaluateTool._register_eval_pipelines(service, MagicMock(), r)
+        assert registered == [("evalP", "root-1")]
+
+    def test_register_eval_pipelines_exception_degrades(self, mod: Any, monkeypatch: Any, caplog: Any) -> None:
+        class _BoomStorage:
+            def register_pipeline(self, pid: str, root_id: str) -> None:
+                raise RuntimeError("storage down")
+
+        class _Provider:
+            def get(self, key: str) -> Any:
+                return _BoomStorage()
+
+        service = MagicMock()
+        service.get_root_task_id.return_value = "root-1"
+        monkeypatch.setattr(mod, "_get_service_provider", lambda: _Provider())
+        mod.TaskEvaluateTool._register_eval_pipelines(service, MagicMock(), _eval_result("x", [_metric("a", True, pipeline_run_id="p")]))
+        assert "注册评估管道分组失败" in caplog.text
+
+def _eval(task_id: str, metrics: list[Any], *, summary: str = "") -> Any:
+    from _eval_core import EvaluationResult
+
+    r = EvaluationResult(task_id=task_id, results=metrics, summary=summary)
+    r.compute_overall()
+    return r
+
+
+# ── execute 路径补充：错误分支与边界 ─────────────────────────
+
+
+class TestExecuteExtraPaths:
+    @pytest.mark.asyncio
+    async def test_missing_task_id_injection_error(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        """task_id 未注入 → INJECTION_ERROR（零推断，2026-08-22 用户裁决）。"""
+        monkeypatch.setattr(mod, "_state_reader", None)
+        monkeypatch.setattr(mod, "_state_writer", AsyncMock())
+        monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
+        tool = mod.TaskEvaluateTool()
+        result = await tool.execute({"action": "auto_complete"})
+        assert result.success is False
+        assert result.error_code == "INJECTION_ERROR"
+        assert result.metadata.get("task_failed") is True
+
+    @pytest.mark.asyncio
+    async def test_resolve_task_id_reader_exception_degrades(self, mod: Any, monkeypatch: Any) -> None:
+        """_resolve_task_id 内读 state 抛异常 → 解析降级原样放行（不炸执行）。"""
+
+        async def _boom(self: Any) -> list[dict[str, Any]]:
+            raise RuntimeError("bridge down")
+
+        monkeypatch.setattr(mod.TaskEvaluateTool, "_read_state_rows", _boom)
+        tool = mod.TaskEvaluateTool()
+        # 降级语义：异常被吞，原样返回候选 id（后续"任务不存在"路径处理）
+        assert await tool._resolve_task_id("abc123") == "abc123"
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_task_id_rejected(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        """短 id 歧义 → AMBIGUOUS_TASK_ID（零猜测）。"""
+        monkeypatch.setattr(
+            mod,
+            "_state_reader",
+            lambda: [{"pipeline_id": "abc1111111111"}, {"pipeline_id": "abc2222222222"}],
+        )
+        monkeypatch.setattr(mod, "_state_writer", AsyncMock())
+        monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
+        tool = mod.TaskEvaluateTool()
+        result = await tool.execute({"action": "auto_complete", "task_id": "abc"})
+        assert result.success is False
+        assert result.error_code == "AMBIGUOUS_TASK_ID"
+
+    @pytest.mark.asyncio
+    async def test_evaluate_single_missing_metric_id(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1", "m2"]})
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        result = await tool.execute({"action": "evaluate_single", "task_id": task.id})
+        assert result.success is False
+        assert result.error_code == "METRIC_ID_REQUIRED"
+
+    @pytest.mark.asyncio
+    async def test_evaluate_single_metric_not_found(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1", "m2"]})
+
+        def _factory(kwargs: dict[str, Any]) -> Any:
+            return _eval_result(task.id, [], summary="")
+
+        ex = _RecordingExecutor(_factory)
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        tool._executor = ex
+        result = await tool.execute({"action": "evaluate_single", "metric_id": "ghost", "task_id": task.id})
+        assert result.success is False
+        assert result.error_code == "METRIC_NOT_FOUND"
+        assert "未找到" in result.error
+
+    @pytest.mark.asyncio
+    async def test_evaluate_single_failed_returns_retry(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1", "m2"]})
+
+        def _factory(kwargs: dict[str, Any]) -> Any:
+            return _eval_result(task.id, [_metric("m1", False, message="不对")], summary="")
+
+        ex = _RecordingExecutor(_factory)
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        tool._executor = ex
+        result = await tool.execute({"action": "evaluate_single", "metric_id": "m1", "task_id": task.id})
+        assert result.success is True
+        assert result.metadata["result"] == "retry"
+        assert "继续改进" in result.metadata["message"]
+
+    @pytest.mark.asyncio
+    async def test_auto_complete_no_criteria_passed(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        """真无验收标准的指标（无 criteria 且无 command/path 可执行参数）直接通过；
+        带 command/path 的工具型指标不适用直通，必须落执行器（见
+        test_tool_extra.test_auto_complete_runs_tool_metric_with_command）。"""
+        task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1"], "acceptance_criteria": {"m1": {"input_params": {}}}})
+
+        def _factory(kwargs: dict[str, Any]) -> Any:
+            return _eval_result(task.id, [_metric("m1", True)], summary="全部通过")
+
+        ex = _RecordingExecutor(_factory)
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        tool._executor = ex
+        result = await tool.execute({"action": "auto_complete", "task_id": task.id})
+        assert result.success is True
+        assert result.metadata["result"] == "completed"
+        assert ex.calls == [], "无 criteria 直接通过，不应调用执行器"
+        # 通过来源如实标注：未配置评估依据直接通过，而非任务描述兜底
+        assert "未配置评估依据直接通过" in result.output["summary"]
+        assert "所有 1 个指标均已通过" in result.output["summary"]
+
+    @pytest.mark.asyncio
+    async def test_auto_complete_eval_failed(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(
+            service,
+            metadata={
+                "evaluation_metric_ids": ["m1"],
+                "acceptance_criteria": {"m1": {"input_params": {"criteria": "存在", "path": "x"}}},
+            },
+        )
+
+        def _boom(kwargs: dict[str, Any]) -> Any:
+            raise RuntimeError("engine died")
+
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        tool._executor = _RecordingExecutor(_boom)
+        result = await tool.execute({"action": "auto_complete", "task_id": task.id})
+        assert result.success is False
+        assert result.error_code == "EVAL_FAILED"
+
+    @pytest.mark.asyncio
+    async def test_auto_complete_no_criteria_task_fails_param_parse(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        """{tool_id} 模板歧义 → 显式失败而非带病评估。"""
+        task = await _new_task(
+            service,
+            metadata={"evaluation_metric_ids": ["m1"], "acceptance_criteria": {"m1": {"input_params": {"pattern": "{tool_id}"}}}},
+        )
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        result = await tool.execute({"action": "auto_complete", "task_id": task.id})
+        assert result.success is False
+        assert result.error_code == "INVALID_INPUT_PARAMS"
+
+    @pytest.mark.asyncio
+    async def test_task_not_found(self, mod: Any, monkeypatch: Any) -> None:
+        monkeypatch.setattr(mod, "_state_reader", None)
+        monkeypatch.setattr(mod, "_state_writer", AsyncMock())
+        service = MagicMock()
+        service.get_task.return_value = None
+        monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
+        tool = mod.TaskEvaluateTool()
+        result = await tool.execute({"action": "auto_complete", "task_id": "ghost"})
+        assert result.success is False
+        assert result.error_code == "TASK_NOT_FOUND"
+
+    @pytest.mark.asyncio
+    async def test_unknown_action_rejected(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(service)
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        result = await tool.execute({"action": "bogus", "task_id": task.id})
+        assert result.success is False
+        assert result.error_code == "INVALID_ACTION"
+
+    @pytest.mark.asyncio
+    async def test_single_metric_executor_not_injected(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1", "m2"]})
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        result = await tool.execute({"action": "evaluate_single", "metric_id": "m1", "task_id": task.id})
+        assert result.success is False
+        assert result.error_code == "EVAL_ENGINE_UNAVAILABLE"
+
+    @pytest.mark.asyncio
+    async def test_litellm_import_degrade_keeps_eval_failed(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        """litellm 不可导入（精简环境）→ 限速识别降级，仍返回 EVAL_FAILED。"""
+        task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1", "m2"]})
+        # 让 litellm 导入失败：用 import hook 模拟 ModuleNotFoundError
+        import builtins
+
+        real_import = builtins.__import__
+
+        def _fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "litellm":
+                raise ModuleNotFoundError("no litellm")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _fake_import)
+
+        def _boom(kwargs: dict[str, Any]) -> Any:
+            raise RuntimeError("boom")
+
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        tool._executor = _RecordingExecutor(_boom)
+        result = await tool.execute({"action": "evaluate_single", "metric_id": "m1", "task_id": task.id})
+        assert result.success is False
+        assert result.error_code == "EVAL_FAILED"
+
+
+# ── 剩余边界：恢复/汇总标记/模板唯一替换/异常降级 ─────────────
+
+
+class TestEdgeBranches:
+    @pytest.mark.asyncio
+    async def test_recover_completion_state_write_failure_surfaces(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        """FAILED 任务恢复完成时终态写 state 未落账 → 显式失败结果（不谎报成功）。"""
+        task = await _new_task(service)
+        task.status = TaskStatus.FAILED
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        monkeypatch.setattr(mod, "_state_writer", None)
+        out = await tool._complete_task(service, task, _eval_result(task.id, [_metric("m1", True)]))
+        # 终态回写失败不得返回与成功同值（task 实际仍 failed）
+        assert out.success is False
+        assert out.error_code == "RECOVER_TO_COMPLETED_FAILED"
+        assert out.metadata.get("task_failed") is True
+
+    @pytest.mark.asyncio
+    async def test_merge_gate_failure_marks_failed_with_disclosure(
+        self, mod: Any, service: Any, monkeypatch: Any
+    ) -> None:
+        """合并门控失败 → failed 判死直出；落账情况在 metadata 如实回告
+        （重试计数随"元数据镜像时序窗口"退役——单键出生/创建写全，无窗口）。"""
+        task = await _new_task(service)
+        tool, state_writer = _inject_tool(
+            mod, monkeypatch, service, merge_result="ws_meta 读取失败: meta not ready"
+        )
+        out = await tool._complete_task(service, task, _eval_result(task.id, [_metric("m1", True)]))
+        assert out.success is False
+        assert "ws_meta 读取失败" in out.error
+        assert out.metadata.get("task_failed") is True
+        assert out.metadata.get("state_persisted") is True
+        assert state_writer.await_args.args[1]["task.status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_merge_gate_failure_state_write_failure_discloses(
+        self, mod: Any, service: Any, monkeypatch: Any
+    ) -> None:
+        """合并门控失败且终态写 state 失败 → metadata 如实明示未落账。"""
+        task = await _new_task(service)
+        tool, _ = _inject_tool(mod, monkeypatch, service, merge_result="ws_meta 读取失败: meta not ready")
+        monkeypatch.setattr(mod, "_state_writer", AsyncMock(side_effect=RuntimeError("state down")))
+        out = await tool._complete_task(service, task, _eval_result(task.id, [_metric("m1", True)]))
+        assert out.success is False
+        assert "ws_meta 读取失败" in out.error
+        assert out.metadata.get("state_persisted") is False
+
+    @pytest.mark.asyncio
+    async def test_merge_fail_complete_evaluation_exception(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        """complete_evaluation(passed=False) 异常 → 兜底落 state 并在 metadata 回告落账情况。"""
+        task = await _new_task(service)
+        tool, state_writer = _inject_tool(mod, monkeypatch, service, merge_result="worktree 合并失败: merge boom")
+        out = await tool._complete_task(service, task, _eval_result(task.id, [_metric("m1", True)]))
+        assert out.success is False
+        assert "worktree 合并失败" in out.error
+        # 终态 _write_task_state 成功 → metadata 明示 failed 终态已落账
+        assert out.metadata.get("state_persisted") is True
+        assert state_writer.await_args.args[1]["task.status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_merge_collision_selfheal_notes_into_completed_state(
+        self, mod: Any, service: Any, monkeypatch: Any
+    ) -> None:
+        """合并成功且有未跟踪碰撞自愈 → task.merge_notes 随终态落账（上级通知
+        经 tasks/events tags → triggers_ext 渲染告知上级；2026-10-23 用户裁定：
+        备份落主空间后必须告知上级对账，不允许静默换血）。"""
+        task = await _new_task(service)
+        tool, state_writer = _inject_tool(mod, monkeypatch, service, merge_result=None)
+        report = [
+            {
+                "path": "docs/working/台账.md",
+                "action": "backed_up_to=台账.md.merge-backup-20261023T010541Z"
+                "（主空间未跟踪副本与分支内容不一致，已备份待上级对账）",
+            }
+        ]
+        monkeypatch.setattr(mod.worktree_merge, "last_collision_report", lambda: report)
+        out = await tool._complete_task(service, task, _eval_result(task.id, [_metric("m1", True)]))
+        assert out.success is True
+        payload = state_writer.await_args.args[1]
+        assert payload["task.status"] == "completed"
+        assert "台账.md" in payload["task.merge_notes"]
+        assert "backed_up_to=" in payload["task.merge_notes"]
+
+    @pytest.mark.asyncio
+    async def test_merge_fail_state_fallback_also_fails_discloses(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        """complete_evaluation 与兜底 state 写入双失败 → metadata 明示状态未落账。"""
+        task = await _new_task(service)
+        tool, _ = _inject_tool(mod, monkeypatch, service, merge_result="worktree 合并失败: merge boom")
+        monkeypatch.setattr(mod, "_state_writer", AsyncMock(side_effect=RuntimeError("state down")))
+        out = await tool._complete_task(service, task, _eval_result(task.id, [_metric("m1", True)]))
+        assert out.success is False
+        assert "worktree 合并失败" in out.error
+        assert out.metadata.get("state_persisted") is False
+
+    @pytest.mark.asyncio
+    async def test_retry_counts_non_dict_normalized(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(service, metadata={"evaluation_metric_ids": ["m1"], "eval_retry_count": "junk"})
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        out = await tool._handle_evaluation_result(
+            {"action": "auto_complete"}, service, task, _eval_result(task.id, [_metric("m1", False)])
+        )
+        assert out.success is True
+        # 非 dict 重试计数被归一化为空 dict → 当前为第 1 次，未耗尽
+        assert task.metadata["eval_retry_count"] == {"m1": 1}
+
+    @pytest.mark.asyncio
+    async def test_metadata_none_normalized(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        task = await _new_task(service)
+        task.metadata = None
+        tool, _ = _inject_tool(mod, monkeypatch, service)
+        out = await tool._handle_evaluation_result(
+            {"action": "auto_complete"}, service, task, _eval_result(task.id, [_metric("m1", False)])
+        )
+        assert out.success is True
+        assert task.metadata is not None
+        assert task.metadata["eval_retry_count"] == {"m1": 1}
+
+    @pytest.mark.asyncio
+    async def test_resolve_id_raise_degrades(self, mod: Any, monkeypatch: Any) -> None:
+        """resolve_id 抛异常 → 解析降级原样放行（既有"任务不存在"路径处理）。"""
+        import id_utils
+
+        def _boom(rows: Any, candidate: str) -> Any:
+            raise RuntimeError("resolve broken")
+
+        monkeypatch.setattr(mod, "_state_reader", lambda: [{"pipeline_id": "abc"}])
+        monkeypatch.setattr(id_utils, "resolve_id", _boom)
+        tool = mod.TaskEvaluateTool()
+        assert await tool._resolve_task_id("abc") == "abc"
+
+    @pytest.mark.asyncio
+    async def test_single_all_passed_completes(self, mod: Any, service: Any, monkeypatch: Any) -> None:
+        """evaluate_single 当前指标通过 + 历史全过 → 自动完成任务。"""
+        task = await _new_task(
+            service,
+            metadata={
+                "evaluation_metric_ids": ["m1", "m2"],
+                "evaluation_history": [
+                    {"metrics": [{"metric_id": "m1", "passed": True}, {"metric_id": "m2", "passed": True}]}
+                ],
+            },
+        )
+
+        def _factory(kwargs: dict[str, Any]) -> Any:
+            return _eval_result(task.id, [_metric("m1", True)], summary="ok")
+
+        ex = _RecordingExecutor(_factory)
+        tool, state_writer = _inject_tool(mod, monkeypatch, service)
+        tool._executor = ex
+        result = await tool.execute({"action": "evaluate_single", "metric_id": "m1", "task_id": task.id})
+        assert result.success is True
+        assert result.metadata["result"] == "completed"
+        assert state_writer.await_args.args[1]["task.status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_tool_id_template_single_candidate_substituted(self, mod: Any, tmp_path: Path) -> None:
+        """{tool_id} 唯一候选 → 替换进参数（不猜测，唯一命中）。"""
+        tool_dir = tmp_path / "plugins" / "shared" / "my_tool"
+        tool_dir.mkdir(parents=True)
+        (tool_dir / "plugin.json").write_text("{}", encoding="utf-8")
+        task = MagicMock()
+        task.id = "t-1"
+        task.description = ""
+        task.title = ""
+        task.metadata = {
+            "evaluation_metric_ids": ["m1"],
+            "ws_meta": {"path": str(tmp_path)},
+            "acceptance_criteria": {"m1": {"input_params": {"pattern": "{tool_id}"}}},
+        }
+        tool = mod.TaskEvaluateTool()
+        params = tool._get_input_params(task)
+        assert params["m1"]["pattern"] == "my_tool"
+        # 未配置 criteria 不兜底：原样保留，不拿描述/标题顶替
+        assert params["m1"].get("criteria") is None
+
+
+class TestStateRowExecuteMerge:
+    @pytest.mark.asyncio
+    async def test_yaml_fallback_task_without_state_row_fails_gate(
+        self, mod: Any, service: Any, monkeypatch: Any
+    ) -> None:
+        """state 行缺位 → YAML 回退组装的任务无 state 坐标，合并门控按
+        ws_meta 读取失败 fail-closed（YAML metadata 坐标通道退役，不兜底）。"""
+        task = await _new_task(
+            service,
+            metadata={
+                "evaluation_metric_ids": ["m1"],
+                "ws_meta": {"mode": "plain", "path": "D:/ws"},
+            },
+        )
+        monkeypatch.setattr(mod, "_state_reader", lambda: [])
+        state_writer = AsyncMock()
+        monkeypatch.setattr(mod, "_state_writer", state_writer)
+        monkeypatch.setattr(mod.TaskEvaluateTool, "_get_task_service", lambda self: service)
+        ex = _RecordingExecutor(lambda kw: _eval_result(task.id, [_metric("m1", True)], summary="ok"))
+        tool = mod.TaskEvaluateTool(executor=ex)
+        result = await tool.execute({"action": "auto_complete", "task_id": task.id})
+        assert result.success is False
+        assert "ws_meta" in result.error
+        assert state_writer.await_args is not None
+        assert state_writer.await_args.args[1]["task.status"] == "failed"
+
+
+# ── server.py 装配：读写面闭包契约 ────────────────────────────
+
+
+class TestServerClosures:
+    """on_load 注入的 state 读/写/chat 闭包（按真实 capability 句柄往返）。"""
+
+    @staticmethod
+    def _fresh_server() -> Any:
+        name = "task_eval_server_caps_under_test"
+        sys.modules.pop(name, None)
+        spec = importlib.util.spec_from_file_location(name, _TE_DIR / "server.py")
+        assert spec is not None and spec.loader is not None, "cannot load server.py"
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    @pytest.fixture(autouse=True)
+    def _clean_tool_slot(self) -> Any:
+        """on_load 内部 `import tool` 走本插件目录（防其它测试残留 tool 槽位）。"""
+        sys.modules.pop("tool", None)
+        te = str(_TE_DIR)
+        if te in sys.path:
+            sys.path.remove(te)
+        sys.path.insert(0, te)
+        yield
+        sys.modules.pop("tool", None)
+
+    @pytest.mark.asyncio
+    async def test_on_load_closures_roundtrip(self) -> None:
+        """state 读/写/chat 闭包经 pipeline-state/chat capability 正确转发。"""
+        from agentos_plugin_sdk import CapabilityHandle
+
+        server_mod = self._fresh_server()
+        plugin = server_mod.plugin
+
+        list_calls: list[Any] = []
+        update_calls: list[Any] = []
+        send_calls: list[Any] = []
+
+        async def _call_fn(method: str, params: dict[str, Any], timeout: float | None = None) -> Any:
+            # CapabilityHandle.call 原样转发 method（不带 capability 前缀）
+            if method == "list":
+                list_calls.append(params)
+                return [{"pipeline_id": "p1", "task.status": "running"}] if len(list_calls) == 1 else "not-a-list"
+            if method == "update":
+                update_calls.append(params)
+                return {"ok": True}
+            if method == "send_message":
+                send_calls.append(params)
+                return {"pipeline_id": "evalP"}
+            return {}
+
+        plugin._capabilities = {
+            "pipeline-state": CapabilityHandle("pipeline-state", call_fn=_call_fn),
+            "chat": CapabilityHandle("chat", call_fn=_call_fn),
+        }
+        await server_mod._on_load({})
+
+        import tool as tool_mod  # noqa: PLC0415 — on_load 已装配本插件 tool 槽位
+
+        try:
+            # 读面：state 聚合行可读；非 list 响应降级为空列表
+            rows = await tool_mod._get_state_reader()()
+            assert rows == [{"pipeline_id": "p1", "task.status": "running"}]
+            rows2 = await tool_mod._get_state_reader()()
+            assert rows2 == []
+            # 写面：task 状态落 state（pipeline_id + fields 原样转发）
+            await tool_mod._get_state_writer()("p1", {"task.status": "completed"})
+            assert update_calls[0]["pipeline_id"] == "p1"
+            assert update_calls[0]["fields"] == {"task.status": "completed"}
+            # 默认执行器已装配：chat 闭包可派发评估子管道
+            executor = tool_mod._default_executor
+            assert executor is not None
+            resp = await executor._chat_send({"create": True, "agent_id": "evaluator_agent"})
+            assert resp == {"pipeline_id": "evalP"}
+            assert send_calls == [{"create": True, "agent_id": "evaluator_agent"}]
+        finally:
+            tool_mod.set_default_executor(None)
+
+    @pytest.mark.asyncio
+    async def test_assembled_executor_runs_tool_metric(self, tmp_path: Path) -> None:
+        """on_load 装配的默认执行器可直接本地执行 tool 型指标（无需内核）。"""
+        from _executor import PipelineEvaluationExecutor
+
+        from agentos_plugin_sdk import CapabilityHandle
+
+        server_mod = self._fresh_server()
+        plugin = server_mod.plugin
+
+        async def _call_fn(method: str, params: dict[str, Any], timeout: float | None = None) -> Any:
+            if method == "pipeline-state.list":
+                return []
+            return {}
+
+        plugin._capabilities = {
+            "pipeline-state": CapabilityHandle("pipeline-state", call_fn=_call_fn),
+            "chat": CapabilityHandle("chat", call_fn=_call_fn),
+        }
+        await server_mod._on_load({})
+
+        import tool as tool_mod  # noqa: PLC0415
+
+        try:
+            cfg = tmp_path / "metrics.yaml"
+            cfg.write_text(
+                "metrics:\n  - name: file_check\n    evaluator_type: tool\n",
+                encoding="utf-8",
+            )
+            ex = PipelineEvaluationExecutor(
+                chat_send=AsyncMock(return_value={"pipeline_id": "evalP"}),
+                state_rows=(lambda: []),
+                metrics_config_path=str(cfg),
+            )
+            result = await ex.run_evaluation("t1", ["file_check"], {"file_check": {"path": "no-such-file"}})
+            assert result.results[0].passed is False
+            assert "不存在" in result.results[0].message
+        finally:
+            tool_mod.set_default_executor(None)
+
+    @pytest.mark.asyncio
+    async def test_on_load_wires_own_tool_module_not_foreign_slot(
+        self, monkeypatch: Any
+    ) -> None:
+        """合宿裸名槽位串扰回归：on_load 只装配本插件 tool 模块。
+
+        合宿宿主静息态下 sys.modules["tool"] 可能是其他成员的 tool 模块；
+        on_load 若运行期 `import tool` 会命中异成员模块（AttributeError 或
+        错误装配）。契约：on_load 装配的本插件 tool 模块与 exec 期裸名槽位
+        解析结果同源，异成员槽位模块不被触碰。
+        """
+        # 裸名槽位预置为本插件 tool.py（loader 在成员 exec 期交付的同源实例）
+        own_tool = importlib.import_module("tool")
+        assert own_tool.__file__ is not None
+        assert str(_TE_DIR) in str(own_tool.__file__)
+
+        server_mod = self._fresh_server()
+
+        # exec 之后、on_load 之前槽位被异成员模块占据（合宿静息态形态）
+        foreign = types.ModuleType("tool")
+        foreign.set_state_reader = lambda reader: None  # 有读面无写面（同生产故障形态）
+        monkeypatch.setitem(sys.modules, "tool", foreign)
+
+        await server_mod._on_load({})
+
+        assert own_tool._default_executor is not None, "on_load 应装配本插件 tool 模块"
+        assert getattr(foreign, "_state_reader", None) is None, "异成员槽位模块不得被读面装配触碰"
+        assert getattr(foreign, "_default_executor", None) is None, "异成员槽位模块不得被执行器装配触碰"
+
+    @pytest.mark.asyncio
+    async def test_tool_handler_uses_bound_tool_module_not_foreign_slot(
+        self, monkeypatch: Any
+    ) -> None:
+        """工具调用路径同源回归：handler 从 exec 期绑定模块取 TaskEvaluateTool。
+
+        合宿静息态裸名槽位是异成员 tool 模块（无 TaskEvaluateTool）——运行期
+        `from tool import TaskEvaluateTool` 曾在此 ImportError（生产日志
+        "cannot import name 'TaskEvaluateTool' from 'tool'"）。
+        """
+        server_mod = self._fresh_server()
+
+        captured: list[dict[str, Any]] = []
+
+        class _FakeTool:
+            async def execute(self, inputs: dict[str, Any]) -> Any:
+                captured.append(inputs)
+                return types.SimpleNamespace(success=True, output={"routed": "own"})
+
+        # 本插件 tool 模块挂替身（验证 handler 路由到它）
+        own_tool = importlib.import_module("tool")
+        monkeypatch.setattr(own_tool, "TaskEvaluateTool", _FakeTool)
+
+        # 异成员槽位在场（无 TaskEvaluateTool，同生产故障形态）
+        foreign = types.ModuleType("tool")
+        monkeypatch.setitem(sys.modules, "tool", foreign)
+
+        out = await server_mod.task_evaluate(action="auto_complete", task_id="t9")
+
+        assert out == {"routed": "own"}, "handler 应路由到本插件 tool 模块"
+        assert captured == [{"action": "auto_complete", "task_id": "t9"}]

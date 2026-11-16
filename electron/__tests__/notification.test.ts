@@ -6,7 +6,10 @@
  *  - showSystemNotification：title 非空字符串才弹；body 非字符串折算为空串；
  *    宿主不支持（Notification.isSupported()=false）返回 false 不弹；弹出时
  *    一律 silent:true（提示音由渲染进程 Web Audio 统一合成，避免双重响），
- *    并注册 click → 聚焦主窗口（窗口未就绪时安全无操作）；
+ *    并注册 click → 聚焦主窗口（窗口未就绪时安全无操作）；threadId 非空
+ *    字符串时点击额外派发 notification:navigate 载荷，缺失/非法退化为仅聚焦；
+ *  - handleNotificationClick：聚焦 + navigate 载荷派发的点击统一处理
+ *    （窗口缺失/已销毁时安全无操作）；
  *  - focusMainWindow：还原最小化 → 显示 → 聚焦，窗口缺失/已销毁静默返回
  *    （second-instance 与通知点击共用同一恢复序列）；
  *  - Windows toast 的进程身份：打包件 AUMID = electron-builder appId
@@ -88,9 +91,10 @@ afterAll(() => {
 });
 
 // vi.mock 提升到文件最前，顶层动态导入拿到的 main 模块已处于 mock 环境
-const { showSystemNotification, focusMainWindow } = await import("../main");
+const { showSystemNotification, focusMainWindow, handleNotificationClick } =
+  await import("../main");
 
-/** 用假窗口对象驱动 focusMainWindow 的各分支 */
+/** 用假窗口对象驱动 focusMainWindow / handleNotificationClick 的各分支 */
 function makeFakeWin(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     isDestroyed: vi.fn(() => false),
@@ -99,6 +103,7 @@ function makeFakeWin(overrides: Partial<Record<string, unknown>> = {}) {
     restore: vi.fn(),
     show: vi.fn(),
     focus: vi.fn(),
+    webContents: { send: vi.fn() },
     ...overrides,
   };
 }
@@ -156,6 +161,61 @@ describe("showSystemNotification", () => {
     )?.[1] as () => void;
     expect(() => clickHandler()).not.toThrow();
   });
+
+  it("threadId 非空字符串 → 照常弹出且不入 Notification 构造参数", () => {
+    expect(
+      showSystemNotification({ title: "审批", body: "x", threadId: "th-1" }),
+    ).toBe(true);
+    expect(electronMock.notificationInstances[0]!.opts).toEqual({
+      title: "审批",
+      body: "x",
+      silent: true,
+    });
+  });
+
+  it.each([
+    ["threadId 缺失", undefined],
+    ["threadId 空串", ""],
+    ["threadId 非字符串", 42],
+  ])("%s → 容忍照常弹出（其余行为不变）", (_name, threadId) => {
+    expect(
+      showSystemNotification({
+        title: "审批",
+        body: "x",
+        threadId,
+      } as { title?: unknown; body?: unknown; threadId?: unknown }),
+    ).toBe(true);
+    expect(electronMock.notificationInstances).toHaveLength(1);
+  });
+});
+
+describe("handleNotificationClick（聚焦 + navigate 载荷）", () => {
+  it("带 threadId → 聚焦主窗口且发送 notification:navigate 载荷", () => {
+    const win = makeFakeWin();
+    handleNotificationClick(win as never, "th-1");
+    expect(win.focus).toHaveBeenCalledTimes(1);
+    expect(win.webContents.send).toHaveBeenCalledTimes(1);
+    expect(win.webContents.send).toHaveBeenCalledWith("notification:navigate", {
+      threadId: "th-1",
+    });
+  });
+
+  it("无 threadId → 仅聚焦不发送（与既有行为兼容）", () => {
+    const win = makeFakeWin();
+    handleNotificationClick(win as never);
+    expect(win.focus).toHaveBeenCalledTimes(1);
+    expect(win.webContents.send).not.toHaveBeenCalled();
+  });
+
+  it("窗口已销毁 → 即使带 threadId 也不发送不抛错", () => {
+    const win = makeFakeWin({ isDestroyed: vi.fn(() => true) });
+    expect(() => handleNotificationClick(win as never, "th-1")).not.toThrow();
+    expect(win.webContents.send).not.toHaveBeenCalled();
+  });
+
+  it("窗口缺失（null）→ 安全无操作不抛错", () => {
+    expect(() => handleNotificationClick(null, "th-1")).not.toThrow();
+  });
 });
 
 describe("focusMainWindow（恢复序列：还原 → 显示 → 聚焦）", () => {
@@ -182,11 +242,11 @@ describe("focusMainWindow（恢复序列：还原 → 显示 → 聚焦）", () 
     expect(win.focus).toHaveBeenCalledTimes(1);
   });
 
-  it("正常可见 → 只聚焦（不 restore 不 show）", () => {
+  it("正常可见 → 也 show（Windows 前台锁：仅 focus() 置前被静默拒绝）+ focus", () => {
     const win = makeFakeWin();
     focusMainWindow(win as never);
     expect(win.restore).not.toHaveBeenCalled();
-    expect(win.show).not.toHaveBeenCalled();
+    expect(win.show).toHaveBeenCalledTimes(1);
     expect(win.focus).toHaveBeenCalledTimes(1);
   });
 });

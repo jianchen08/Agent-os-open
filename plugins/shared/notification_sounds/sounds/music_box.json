@@ -1,0 +1,57 @@
+{
+  "id": "music_box",
+  "label": "八音盒",
+  "engine": "web_audio_synth",
+  "params": {
+    "partials": [
+      {
+        "ratio": 1.0,
+        "gain": 1.0,
+        "decayRatio": 1.0
+      },
+      {
+        "ratio": 4.0,
+        "gain": 0.18,
+        "decayRatio": 0.35
+      },
+      {
+        "ratio": 5.4,
+        "gain": 0.08,
+        "decayRatio": 0.25
+      },
+      {
+        "ratio": 6.8,
+        "gain": 0.05,
+        "decayRatio": 0.2
+      }
+    ],
+    "attack": 0.004,
+    "wet": 0.65,
+    "taps": [
+      {
+        "delay": 0.083,
+        "feedback": 0.42,
+        "lowpass": 5200.0
+      },
+      {
+        "delay": 0.127,
+        "feedback": 0.36,
+        "lowpass": 3800.0
+      }
+    ],
+    "notes": [
+      {
+        "freq": 1318.51,
+        "start": 0,
+        "peak": 0.3879,
+        "decay": 1.05
+      },
+      {
+        "freq": 1046.5,
+        "start": 0.22,
+        "peak": 0.3879,
+        "decay": 1.3
+      }
+    ]
+  }
+}

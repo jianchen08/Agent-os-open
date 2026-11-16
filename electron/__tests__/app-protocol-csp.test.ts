@@ -76,7 +76,7 @@ describe("app:// 静态响应 CSP（审查 F5）", () => {
     expect(csp).toContain("default-src 'self'");
     expect(csp).toContain("object-src 'none'");
     // 内核 WS 直连源（打包件 WebSocket 绕过协议层代理；装机版默认端口 9101）
-    expect(csp).toContain("connect-src 'self' http://127.0.0.1:9101 ws://127.0.0.1:9101");
+    expect(csp).toContain("connect-src 'self' http: https: ws: wss: http://127.0.0.1:9101 ws://127.0.0.1:9101");
     // ajv8 (RJSF) new Function 所需（web 链同款）
     expect(csp).toContain("'unsafe-eval'");
     expect(resp.headers.get("X-Content-Type-Options")).toBe("nosniff");
@@ -103,7 +103,7 @@ describe("app:// 静态响应 CSP（审查 F5）", () => {
       const handler = await install();
       const page = await handler(new Request("app://bundle/"));
       const csp = page.headers.get("Content-Security-Policy") ?? "";
-      expect(csp).toContain("connect-src 'self' http://127.0.0.1:19200 ws://127.0.0.1:19200");
+      expect(csp).toContain("connect-src 'self' http: https: ws: wss: http://127.0.0.1:19200 ws://127.0.0.1:19200");
       expect(csp).not.toContain("127.0.0.1:9101");
       await handler(new Request("app://bundle/api/v1/sessions"));
       const calls = electronMock.net.fetch.mock.calls;

@@ -27,7 +27,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system" / "artifacts"
+_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "artifacts"
 
 _BOUNDARY = "X-TEST-BOUNDARY-42"
 
@@ -711,16 +711,20 @@ class TestDispatch:
 
 class TestExtraBranches:
     def test_load_adds_system_dir(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """system / shared 目录不在 sys.path 时，server.py 自举补入（含 tenant_data）。"""
-        sys_dir = str(_PLUGIN_DIR.parent)
-        shared_dir = str(_PLUGIN_DIR.parents[1])
-        prev = [p for p in list(sys.path) if p in (sys_dir, shared_dir)]
+        """插件目录 / 共享根不在 sys.path 时，server.py 自举补入（含 tenant_data）。
+
+        拍平布局（ADR 2026-10-13-plugin-flat-layout）下组根与共享根合一：
+        bootstrap 注入的两项 = 插件目录 + plugins/shared。
+        """
+        plugin_dir = str(_PLUGIN_DIR)
+        shared_dir = str(_PLUGIN_DIR.parent)
+        prev = [p for p in list(sys.path) if p in (plugin_dir, shared_dir)]
         for p in prev:
             sys.path.remove(p)
         try:
             loaded = _load_server()
             assert "http.handle" in loaded.plugin._tools
-            assert sys_dir in sys.path
+            assert plugin_dir in sys.path
             assert shared_dir in sys.path
         finally:
             for p in prev:

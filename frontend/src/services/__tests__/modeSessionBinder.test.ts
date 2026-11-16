@@ -35,17 +35,20 @@ const apiGetMock = vi.hoisted(() => vi.fn())
 vi.mock('@/services/api/client', () => ({
   apiClient: { get: (...args: unknown[]) => apiGetMock(...args) },
 }))
+import { presetThemes } from '@/config/themes'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import {
+  applyDefaultModeBinding,
   clearSessionAgentBinding,
   ensureModeTheme,
   openModeSession,
+  parseModeSessionPayload,
   readSessionAgentBinding,
   syncModeThemeForSession,
 } from '../modeSessionBinder'
 import { loadSessionExecutionOptions } from '../sessionExecutionOptions'
 import { useNotificationStore } from '@/stores/notificationStore'
-import { useSessionThemeStore } from '@/stores/sessionThemeStore'
+import { getActiveSessionTheme, useSessionThemeStore } from '@/stores/sessionThemeStore'
 import { queryClient } from '@/services/query/queryClient'
 import type { ModesRegistryResponse } from '@/services/api/modes'
 
@@ -131,11 +134,13 @@ describe('openModeSession — 建会话 + modeBinding 出生 + D8 提示 + 面�
     expect(createSessionMock).toHaveBeenCalledWith('角色扮演模式')
     expect(receipt).toEqual({
       sessionId: 'th-角色扮演模式',
-      modeBinding: { mode: 'roleplay', pipelineConfigId: 'roleplay' },
+      modeBinding: { mode: ['roleplay'], pipelineConfigId: 'roleplay' },
+      // 出生钉事实位：无卡主题键 + 模式无 theme 声明 → 如实 false
+      themePinned: false,
     })
     expect(loadSessionExecutionOptions('th-角色扮演模式')).toMatchObject({
       values: {},
-      modeBinding: { mode: 'roleplay', pipelineConfigId: 'roleplay' },
+      modeBinding: { mode: ['roleplay'], pipelineConfigId: 'roleplay' },
     })
     // 面板页声明随开（声明驱动）
     expect(openPanelMock).toHaveBeenCalledTimes(1)
@@ -183,7 +188,7 @@ describe('openModeSession — 建会话 + modeBinding 出生 + D8 提示 + 面�
       },
     ])
     const receipt = await openModeSession('roleplay')
-    expect(receipt.modeBinding).toEqual({ mode: 'roleplay', pipelineConfigId: 'roleplay' })
+    expect(receipt.modeBinding).toEqual({ mode: ['roleplay'], pipelineConfigId: 'roleplay' })
   })
 
   it('registry 不可达 → 降级：会话照常创建、modeBinding 仅 mode 键、无提示无管道', async () => {
@@ -192,7 +197,7 @@ describe('openModeSession — 建会话 + modeBinding 出生 + D8 提示 + 面�
     const receipt = await openModeSession('roleplay')
 
     expect(receipt.sessionId).toBe('th-roleplay') // 标题回退 mode 键
-    expect(receipt.modeBinding).toEqual({ mode: 'roleplay' })
+    expect(receipt.modeBinding).toEqual({ mode: ['roleplay'] })
     expect(useNotificationStore.getState().notifications).toHaveLength(0)
     expect(sendUserInputMock).not.toHaveBeenCalled()
   })
@@ -206,12 +211,15 @@ describe('openModeSession — 建会话 + modeBinding 出生 + D8 提示 + 面�
       firstMessage: '（开始）',
     })
 
-    expect(createSessionMock).toHaveBeenCalledWith('扮演·月见')
+    // X13-F1：agentId 随出生请求落服务端（完整模式键），快照面同刀保留
+    expect(createSessionMock).toHaveBeenCalledWith('扮演·月见', {
+      agentId: 'mode_roleplay/card_luna',
+    })
     expect(loadSessionExecutionOptions('th-扮演·月见')).toMatchObject({
       agentId: 'mode_roleplay/card_luna',
       agentName: '月见',
       extraContext: { roleplay_greeting: '「欢迎光临！」' },
-      modeBinding: { mode: 'roleplay', pipelineConfigId: 'roleplay' },
+      modeBinding: { mode: ['roleplay'], pipelineConfigId: 'roleplay' },
     })
     expect(sendUserInputMock).toHaveBeenCalledTimes(1)
     const [threadId, content, opts] = sendUserInputMock.mock.calls[0]
@@ -221,16 +229,144 @@ describe('openModeSession — 建会话 + modeBinding 出生 + D8 提示 + 面�
     expect(opts.agentId).toBe('mode_roleplay/card_luna')
     expect(opts.pipelineConfigId).toBe('roleplay')
     expect(opts.clientMessageId).toBeTruthy()
-    expect(opts.executionContext).toEqual({ mode: 'roleplay', roleplay_greeting: '「欢迎光临！」' })
+    expect(opts.executionContext).toEqual({ mode: ['roleplay'], roleplay_greeting: '「欢迎光临！」' })
   })
 
-  it('默认出生（mode 空串）→ 无 modeBinding、无提示、宿主默认标题', async () => {
+  it('默认出生（mode 空串）→ registry 无 default 声明 = 无 modeBinding、无提示、宿主默认标题', async () => {
     const receipt = await openModeSession('')
 
     expect(receipt.modeBinding).toBeUndefined()
     expect(createSessionMock).toHaveBeenCalledWith(undefined)
     expect(useNotificationStore.getState().notifications).toHaveLength(0)
     expect(openPanelMock).not.toHaveBeenCalled()
+  })
+
+  it('M1 默认出生：mode 空串 → 绑 default 声明模式（含对话链管道，标题=模式名）', async () => {
+    registryOf([
+      { ...ROLEPLAY_DECL, default: false },
+      {
+        ...WRITING_DECL,
+        mode: 'personal',
+        name: '个人助理模式',
+        default: true,
+        pipelines: [],
+        plugin_id: 'mode_personal',
+      },
+    ])
+
+    const receipt = await openModeSession('')
+
+    // 出生即定：绑 personal（无 conversation 管道声明 → 不带 pipelineConfigId）
+    expect(receipt.modeBinding).toEqual({ mode: ['personal'] })
+    expect(createSessionMock).toHaveBeenCalledWith('个人助理模式')
+    expect(loadSessionExecutionOptions(receipt.sessionId)).toMatchObject({
+      modeBinding: { mode: ['personal'] },
+    })
+  })
+
+  it('M1 默认出生：default 模式带对话链 → pipelineConfigId 随绑；显式选择不受影响', async () => {
+    registryOf([
+      ROLEPLAY_DECL,
+      {
+        ...WRITING_DECL,
+        mode: 'personal',
+        name: '个人助理模式',
+        default: true,
+        icon: '🌱',
+        pipelines: [{ name: 'personal_main', context: 'conversation' as const }],
+        plugin_id: 'mode_personal',
+      },
+    ])
+    const defaulted = await openModeSession('')
+    expect(defaulted.modeBinding).toEqual({ mode: ['personal'], pipelineConfigId: 'personal_main' })
+
+    // 显式选择（非空串）路径行为不变：仍按所选模式出生
+    const explicit = await openModeSession('roleplay')
+    expect(explicit.modeBinding).toEqual({ mode: ['roleplay'], pipelineConfigId: 'roleplay' })
+  })
+
+  it('M1 默认出生降级两态：registry 不可达 / 无 default 声明 = 不带绑定', async () => {
+    apiGetMock.mockRejectedValue(new Error('registry down'))
+    const unreachable = await openModeSession('')
+    expect(unreachable.modeBinding).toBeUndefined()
+
+    registryOf([ROLEPLAY_DECL, WRITING_DECL]) // 七包无一声明 default
+    const noDefault = await openModeSession('')
+    expect(noDefault.modeBinding).toBeUndefined()
+  })
+
+  it('默认出生不随开面板：空串解析到 default 声明模式且有面板页 → 不弹（环境模式不抢焦点）', async () => {
+    registryOf([
+      ROLEPLAY_DECL,
+      {
+        ...WRITING_DECL,
+        mode: 'personal',
+        name: '个人助理模式',
+        default: true,
+        pipelines: [],
+        plugin_id: 'mode_personal',
+      },
+    ])
+    contributionRegistry.register({
+      type: 'pages', id: 'pim_today', title: '今日',
+      space: 'workspace', slot: 'tab', path: '/p/agentos_pim_today', mode: 'personal',
+      pluginId: 'mode_personal',
+    })
+
+    await openModeSession('')
+
+    // modeBinding 照常出生（default 解析面不动），只有面板不随开
+    expect(openPanelMock).not.toHaveBeenCalled()
+  })
+
+  it('显式出生不受页面 autoOpen:false 选退约束：点名模式 = 进入其工作面', async () => {
+    contributionRegistry.register({
+      type: 'pages', id: 'roleplay_studio2', title: '角色扮演工作台',
+      space: 'workspace', slot: 'tab', path: '/p/roleplay_studio', mode: 'roleplay',
+      autoOpen: false, pluginId: 'mode_roleplay',
+    })
+
+    await openModeSession('roleplay')
+
+    expect(openPanelMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('applyDefaultModeBinding：无绑定会话补挂 default；已有绑定不覆盖；无声明零动作', async () => {
+    // 无声明 → 零动作
+    await applyDefaultModeBinding('th-plain')
+    expect(loadSessionExecutionOptions('th-plain')).toBeNull()
+
+    registryOf([
+      {
+        ...WRITING_DECL,
+        mode: 'personal',
+        name: '个人助理模式',
+        default: true,
+        pipelines: [],
+        plugin_id: 'mode_personal',
+      },
+    ])
+    queryClient.clear() // registry 合成已换：清 5min 共享缓存再走 fetchQuery
+    // 无绑定 → 补挂（其余快照键保留）
+    localStorage.setItem(
+      'session-exec-options:th-new',
+      JSON.stringify({ values: { conversation_mode: 'plan' } }),
+    )
+    await applyDefaultModeBinding('th-new')
+    expect(loadSessionExecutionOptions('th-new')).toMatchObject({
+      values: { conversation_mode: 'plan' },
+      modeBinding: { mode: ['personal'] },
+    })
+
+    // 已有绑定（显式选择）→ 不覆盖
+    localStorage.setItem(
+      'session-exec-options:th-bound',
+      JSON.stringify({ values: {}, modeBinding: { mode: 'roleplay' } }),
+    )
+    await applyDefaultModeBinding('th-bound')
+    expect(loadSessionExecutionOptions('th-bound')).toMatchObject({
+      modeBinding: { mode: 'roleplay' },
+    })
   })
 
   it('快照写入不覆盖既有会话键（重绑极端路径保留 values/executionContext）', async () => {
@@ -245,7 +381,7 @@ describe('openModeSession — 建会话 + modeBinding 出生 + D8 提示 + 面�
     expect(loadSessionExecutionOptions('th-角色扮演模式')).toMatchObject({
       values: { conversation_mode: 'plan' },
       executionContext: { isolation: { level: 'high' } },
-      modeBinding: { mode: 'roleplay', pipelineConfigId: 'roleplay' },
+      modeBinding: { mode: ['roleplay'], pipelineConfigId: 'roleplay' },
     })
   })
 
@@ -253,6 +389,43 @@ describe('openModeSession — 建会话 + modeBinding 出生 + D8 提示 + 面�
     createSessionMock.mockRejectedValue(new Error('创建失败'))
     await expect(openModeSession('roleplay')).rejects.toThrow('创建失败')
     expect(sendUserInputMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('X13-F1 服务端出生绑定（面板桥会话换设备/清缓存不丢模式身份）', () => {
+  // 缺陷基线（X5 静态走查）：openModeSession 的 createSession 只传 title，
+  // agentId 只落浏览器快照 → 服务端 sessions.agent_id 空、state agent.id 回落
+  // 默认 agentos（kernel 出生绑定 unwrap_or("agentos")）→ 换设备模式串味成普通
+  // 会话。修法 = 出生请求补传完整模式键（kernel fail-closed 出生绑定的输入，
+  // 弹窗轨 SessionEditModal 同口径）；本地快照面保留（主题/执行选项继续用）。
+  it('绑定出生：createSession 收完整模式键 agent_id（服务端 fail-closed 出生绑定输入）', async () => {
+    await openModeSession('roleplay', {
+      agentId: 'mode_roleplay/card_luna',
+      agentName: '月见',
+    })
+    // 值必须是完整模式键 mode_X/<stem>（非 config_id 裸 stem——SessionEditModal
+    // 同款先例：裸 stem 丢前缀致人设配置装配落空）
+    expect(createSessionMock).toHaveBeenCalledWith('角色扮演模式', {
+      agentId: 'mode_roleplay/card_luna',
+    })
+  })
+
+  it('清 localStorage 后身份仍可恢复：本地面可丢，服务端真值（出生请求键）恒在', async () => {
+    const receipt = await openModeSession('roleplay', {
+      agentId: 'mode_roleplay/card_rin',
+      agentName: '凛',
+    })
+    localStorage.clear() // 换设备/清缓存：本地快照绑定面全丢
+    expect(loadSessionExecutionOptions(receipt.sessionId)).toBeNull()
+    // 服务端真值路径：mock 服务端捕获的出生请求仍持完整模式键——kernel 据此
+    // fail-closed 落 state agent.id + sessions 投影，恢复链（setActiveSession
+    // 读 session.agentId）从服务端回读身份
+    expect(createSessionMock.mock.calls[0][1]).toEqual({ agentId: 'mode_roleplay/card_rin' })
+  })
+
+  it('无绑定出生不伪造服务端键：createSession 单参调用（不带 options）', async () => {
+    await openModeSession('roleplay')
+    expect(createSessionMock.mock.calls[0]).toHaveLength(1)
   })
 })
 
@@ -313,6 +486,149 @@ describe('模式主题通道（批 G⑤：decl.theme → 会话主题 override�
     )
     await syncModeThemeForSession('th-p')
     expect(useSessionThemeStore.getState().stacks['th-p']).toBeUndefined()
+  })
+})
+
+describe('mode.session 桥载荷 parse — pipeline_config_id 扩展位（批次一）', () => {
+  it('合法登记名 → parsed.pipelineConfigId；空串/非字符串整包拒绝（与其余扩展位同 fail-closed 契约）', () => {
+    expect(parseModeSessionPayload({ mode: 'roleplay', pipeline_config_id: 'triple_chain' })).toEqual({
+      mode: 'roleplay',
+      pipelineConfigId: 'triple_chain',
+    })
+    expect(parseModeSessionPayload({ mode: 'roleplay', pipeline_config_id: '' })).toBeNull()
+    expect(parseModeSessionPayload({ mode: 'roleplay', pipeline_config_id: 7 })).toBeNull()
+    // 键缺席 = 不伪造（现役载荷形态零新增）
+    expect(parseModeSessionPayload({ mode: 'roleplay' })).toEqual({ mode: 'roleplay' })
+  })
+})
+
+describe('openModeSession 玩法级管道绑定覆盖（批次一：缺省=mode 绑定管道，现役零变化）', () => {
+  it('显式 pipelineConfigId 覆盖 mode 对话链管道：快照与回执同值、首条帧随覆盖管道', async () => {
+    const receipt = await openModeSession('roleplay', {
+      pipelineConfigId: 'triple_chain',
+      firstMessage: '（开始）',
+    })
+
+    expect(receipt.modeBinding).toEqual({ mode: ['roleplay'], pipelineConfigId: 'triple_chain' })
+    expect(loadSessionExecutionOptions('th-角色扮演模式')).toMatchObject({
+      modeBinding: { mode: ['roleplay'], pipelineConfigId: 'triple_chain' },
+    })
+    expect(sendUserInputMock).toHaveBeenCalledWith(
+      'th-角色扮演模式',
+      '（开始）',
+      expect.objectContaining({ pipelineConfigId: 'triple_chain' }),
+    )
+  })
+
+  it('覆盖不依赖 registry 可达：声明不可达时显式绑定仍生效（玩法声明自带交互形态）', async () => {
+    apiGetMock.mockRejectedValue(new Error('registry down'))
+    const receipt = await openModeSession('roleplay', { pipelineConfigId: 'triple_chain' })
+    expect(receipt.modeBinding).toEqual({ mode: ['roleplay'], pipelineConfigId: 'triple_chain' })
+  })
+
+  it('缺省回落：不携覆盖 = mode 绑定管道（现役行为零变化锚，与既有出生测试互证）', async () => {
+    const receipt = await openModeSession('roleplay')
+    expect(receipt.modeBinding).toEqual({ mode: ['roleplay'], pipelineConfigId: 'roleplay' })
+  })
+})
+
+describe('mode.session 桥载荷 parse — card_theme 扩展位（卡主题随扮演会话出生钉）', () => {
+  /** 卡库 /data/cards 条目 theme 字段形态（完整 ThemeConfig 档，出厂像素档） */
+  const CARD_THEME = presetThemes['pixel-art']
+
+  it('合法档 → parsed.cardTheme 原样透传；键缺席不伪造（现役载荷形态零新增）', () => {
+    expect(parseModeSessionPayload({ mode: 'roleplay', card_theme: CARD_THEME })?.cardTheme).toEqual(
+      CARD_THEME,
+    )
+    expect(parseModeSessionPayload({ mode: 'roleplay' })).toEqual({ mode: 'roleplay' })
+  })
+
+  // 非法档只丢该位不阻断出生（fail-closed 的粒度=扩展位，其余载荷照常解析）
+  const INVALID_THEMES: unknown[] = [
+    null,
+    'not-a-theme',
+    { id: 'broken', name: '坏档' }, // 缺 colors/components/effects/backgrounds
+    { ...CARD_THEME, colors: 'not-a-map' },
+  ]
+
+  it.each(INVALID_THEMES.map((t, i) => [i, t] as const))(
+    '非法档 #%i → 丢弃该位、其余扩展位与 mode 照常解析（出生零阻断）',
+    (_i, bad) => {
+      const parsed = parseModeSessionPayload({
+        mode: 'roleplay',
+        title: '扮演·月见',
+        card_theme: bad,
+      })
+      expect(parsed).toEqual({ mode: 'roleplay', title: '扮演·月见' })
+      expect(parsed?.cardTheme).toBeUndefined()
+    },
+  )
+})
+
+describe('openModeSession 卡主题出生钉入（出生即钉，与附身出生钉同构）', () => {
+  /** 卡库 /data/cards 条目 theme 字段形态（出厂像素档：用户气泡描边可见） */
+  const CARD_THEME = presetThemes['pixel-art']
+  /** 带 theme 声明的合成模式（模式级主题通道的既有消费面） */
+  const THEMED_DECL_FOR_CARD = {
+    ...WRITING_DECL,
+    mode: 'immersive',
+    name: '沉浸模式',
+    theme: null as string | null,
+  }
+
+  it('合法卡档 → 新会话栈顶=卡主题、回执 themePinned=true（气泡变量随会话 override 走）', async () => {
+    const receipt = await openModeSession('roleplay', { cardTheme: CARD_THEME })
+
+    const stack = useSessionThemeStore.getState().stacks[receipt.sessionId]
+    expect(stack).toHaveLength(1)
+    expect(stack?.[0].id).toBe(CARD_THEME.id)
+    expect(receipt.themePinned).toBe(true)
+    // 生效面断言：会话 override 顶档就是卡档（ChatContainer 经作用域消费）
+    expect(getActiveSessionTheme(receipt.sessionId)?.colors.bubble.user_border).toBe(
+      CARD_THEME.colors.bubble.user_border,
+    )
+  })
+
+  it('无主题卡（键缺席）→ 出生行为与现役一致：栈零条目、themePinned=false', async () => {
+    const receipt = await openModeSession('roleplay', { title: '扮演·月见' })
+
+    expect(receipt.themePinned).toBe(false)
+    expect(useSessionThemeStore.getState().stacks[receipt.sessionId]).toBeUndefined()
+    // 现役出生面不变：会话建出 + modeBinding 快照照落
+    expect(createSessionMock).toHaveBeenCalledWith('扮演·月见')
+    expect(loadSessionExecutionOptions(receipt.sessionId)?.modeBinding).toEqual({
+      mode: ['roleplay'],
+      pipelineConfigId: 'roleplay',
+    })
+  })
+
+  it('非法卡档（pushTheme 二次 fail-closed 拦下）→ 不钉、入栈零变更、出生零失败', async () => {
+    // 通道契约：直调出生扩展位（桥 parse 已拦一道；此例钉住入栈位二次校验面）
+    const receipt = await openModeSession('roleplay', {
+      cardTheme: { id: 'broken', name: '坏档' } as unknown as typeof CARD_THEME,
+    })
+
+    expect(receipt.themePinned).toBe(false)
+    expect(useSessionThemeStore.getState().stacks[receipt.sessionId]).toBeUndefined()
+    expect(receipt.sessionId).toBe('th-角色扮演模式')
+  })
+
+  it('卡主题优先于 mode 声明主题（更具体者胜，缺省回落现役通道）', async () => {
+    registryOf([
+      { ...THEMED_DECL_FOR_CARD, theme: 'deep-space' },
+      { ...THEMED_DECL_FOR_CARD, mode: 'immersive2', name: '沉浸模式二', theme: 'deep-space' },
+      WRITING_DECL,
+    ])
+    const withCard = await openModeSession('immersive', { cardTheme: CARD_THEME })
+    expect(useSessionThemeStore.getState().stacks[withCard.sessionId]?.map((c) => c.id)).toEqual([
+      CARD_THEME.id,
+    ])
+
+    const withoutCard = await openModeSession('immersive2')
+    expect(useSessionThemeStore.getState().stacks[withoutCard.sessionId]?.map((c) => c.id)).toEqual([
+      'deep-space',
+    ])
+    expect(withoutCard.themePinned).toBe(true)
   })
 })
 

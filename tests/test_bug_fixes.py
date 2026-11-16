@@ -8,7 +8,7 @@
 以 raising 的假 task_tree 驱动真实留痕/降级逻辑，断言日志记录与异常行为，
 不检查源码文本。
 
-[来源: plugins/shared/system/isolation/workspace_lifecycle.py]
+[来源: plugins/shared/isolation/workspace_lifecycle.py]
 """
 from __future__ import annotations
 

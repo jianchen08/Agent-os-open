@@ -1,8 +1,11 @@
 # @feature: FP-0.2.五 审批闭环 | @vision: V2 全能闭环 | @ci: python-coverage
 """approval.create_choice 超时/异常语义单测（F-APPROVAL-1）。
 
-产品决策：审批等待超时 = **拒绝**（不恢复管道、记录拒绝状态），
-不再"超时即恢复放行"；默认超时调大（24h=86400s）且可经环境变量覆盖。
+产品决策（F-APPROVAL-1 + X3-F1 管道回收环，3bfa79b15）：审批等待超时/异常 =
+**拒绝**——记录拒绝状态，并经 resume 通道回收挂起簿记（resume 携带
+approved=False 拒绝裁决，绝非"超时即恢复放行"）；回收成功返回面
+resumed=True（任务侧得到终态/可继续信号）；默认超时调大（24h=86400s）
+且可经环境变量覆盖。
 
 契约依据：
 - human-interaction 的 ``wait_for_choice`` 在 service 层 *raise*
@@ -34,7 +37,7 @@ pytestmark = pytest.mark.unit
 
 _SERVER_PATH = (
     Path(__file__).resolve().parents[4]
-    / "plugins" / "shared" / "system" / "approval" / "server.py"
+    / "plugins" / "shared" / "approval" / "server.py"
 )
 
 
@@ -133,8 +136,13 @@ def _reset_state() -> None:
 
 
 class TestApprovalTimeoutReject:
-    async def test_timeout_returns_rejected_and_does_not_resume(self) -> None:
-        """超时（cap 返回 error）→ status=rejected、不恢复、句柄清理、拒绝可查。"""
+    async def test_timeout_returns_rejected_and_recycles_via_rejection_resume(self) -> None:
+        """超时（cap 返回 error）→ 拒绝结算 + 挂起簿记回收（resume 携带拒绝裁决）。
+
+        新契约（3bfa79b15 X3-F1）：resume 会发生但携带 approved=False 拒绝裁决，
+        管道按拒绝结算——绝非"超时即恢复放行"；返回面 resumed=True 表示簿记
+        已回收、任务侧得到终态/可继续信号。
+        """
         _, pipeline_calls = _install_caps(
             wait_res={
                 "error": "交互超时",
@@ -146,43 +154,54 @@ class TestApprovalTimeoutReject:
             title="继续执行？", options=["同意", "拒绝"], run_id="run-1"
         )
 
-        # 拒绝语义：不恢复管道
+        # 拒绝语义：超时裁决 = 拒绝；回收环成功 → resumed=True（终态/可继续信号）
         assert result["status"] == "rejected"
-        assert result["resumed"] is False
-        assert result.get("reason")
+        assert result["resumed"] is True
+        assert result["reason"] == "timeout"
 
         # 杜绝句柄泄漏：_suspended 必须已清理（内部不变量，无公开读面；
         # 其公开后果——管道挂死——正是本契约要防的）
         assert "req-test" not in server._suspended
         assert len(server._suspended) == 0
 
-        # 关键护栏：超时绝不恢复管道（"超时即恢复"= 绕过审批）
-        assert _resume_calls(pipeline_calls) == []
+        # 关键护栏：回收环 resume 恰一次发生，且载荷携带拒绝裁决
+        # （approved=False + timeout 原因）——管道恢复但裁决仍是拒绝，
+        # 绝不"超时即恢复放行"
+        resume_calls = _resume_calls(pipeline_calls)
+        assert len(resume_calls) == 1
+        resume_params = resume_calls[0][1]
+        assert resume_params["approval_id"] == "req-test"
+        assert resume_params["result"] == {"approved": False, "reason": "timeout"}
+        assert resume_params["run_id"] == "run-1"
 
-        # 拒绝状态可查（公开面）：submit 返回已记录的终态，且绝不二次恢复
+        # 拒绝状态可查（公开面）：submit 回放已记录的拒绝终态，不再二次恢复
         queried = await server.submit(request_id="req-test", result="whatever")
         assert queried["status"] == "rejected"
         assert queried["approved"] is False
         assert queried["reason"] == "timeout"
-        assert queried["resumed"] is False
-        assert _resume_calls(pipeline_calls) == []
+        assert queried["resumed"] is True
+        assert len(_resume_calls(pipeline_calls)) == 1
 
-    async def test_wait_exception_cleans_suspended_and_does_not_resume(self) -> None:
-        """wait_for_choice raise（连接中断等）→ 同样拒绝 + 句柄不泄漏。"""
+    async def test_wait_exception_cleans_suspended_and_recycles_via_rejection_resume(self) -> None:
+        """wait_for_choice raise（连接中断等）→ 拒绝结算 + 回收环 + 句柄不泄漏。"""
         _, pipeline_calls = _install_caps(wait_exc=RuntimeError("connection reset"))
 
         result = await server.create_choice(
             title="继续执行？", options=["同意"], run_id="run-1"
         )
 
+        # 异常收敛为拒绝（reason=rejected），回收环携带拒绝裁决
         assert result["status"] == "rejected"
-        assert result["resumed"] is False
+        assert result["resumed"] is True
         assert len(server._suspended) == 0
-        assert _resume_calls(pipeline_calls) == []
-        # 拒绝终态可查（公开面）
+        resume_calls = _resume_calls(pipeline_calls)
+        assert len(resume_calls) == 1
+        assert resume_calls[0][1]["result"] == {"approved": False, "reason": "rejected"}
+        # 拒绝终态可查（公开面）：submit 回放拒绝终态，不再二次恢复
         queried = await server.submit(request_id="req-test", result="whatever")
         assert queried["status"] == "rejected"
         assert queried["approved"] is False
+        assert len(_resume_calls(pipeline_calls)) == 1
 
     async def test_submit_after_timeout_returns_rejected(self) -> None:
         """超时决断后，submit 命中已拒绝结果，不再尝试恢复。"""

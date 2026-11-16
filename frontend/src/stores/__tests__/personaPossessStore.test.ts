@@ -11,6 +11,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { parsePossessPayload, usePersonaPossessStore } from '@/stores/personaPossessStore'
+import { userScopedKey as pk } from '@/utils/userScopedStorage'
 
 describe('parsePossessPayload — mode 守卫 + personaText 载荷两形态', () => {
   it('携带 mode/personaText → 原样入档（不含注入键——键由 setPossessed 钉住）', () => {
@@ -45,6 +46,13 @@ describe('parsePossessPayload — mode 守卫 + personaText 载荷两形态', ()
     expect(parsePossessPayload({ mode: 'roleplay', card_id: '', name: '月见', avatar: '🌙' })).toBeNull()
     expect(parsePossessPayload({ mode: 'roleplay', card_id: 'card_x', name: '缺 avatar' })).toBeNull()
     expect(parsePossessPayload(null)).toBeNull()
+  })
+  it('avatar 色对形态（{fg,bg}）原样入档；残缺色对/非对象整包拒绝', () => {
+    expect(
+      parsePossessPayload({ mode: 'roleplay', card_id: 'card_x', name: '月见', avatar: { fg: '#ffffff', bg: '#0d1424' } }),
+    ).toMatchObject({ avatar: { fg: '#ffffff', bg: '#0d1424' } })
+    expect(parsePossessPayload({ mode: 'roleplay', card_id: 'card_x', name: '月见', avatar: { fg: '#ffffff' } })).toBeNull()
+    expect(parsePossessPayload({ mode: 'roleplay', card_id: 'card_x', name: '月见', avatar: ['🎭'] })).toBeNull()
   })
 })
 
@@ -106,12 +114,19 @@ describe('旧 roleplay.possessed 档一次性迁移（数据面兼容）', () =>
       personaText: '旧人设。', personaKey: 'roleplay_persona',
     })
     expect(localStorage.getItem('roleplay.possessed')).toBeNull()
-    expect(localStorage.getItem('persona.possessed')).toContain('roleplay')
+    expect(localStorage.getItem(pk('persona.possessed'))).toContain('roleplay')
+  })
+
+  it('旧档在但 state.possessed 缺席 → 脏档兜底：旧键清除不迁移', async () => {
+    localStorage.setItem('roleplay.possessed', JSON.stringify({ state: {}, version: 1 }))
+    const { usePersonaPossessStore: fresh } = await import('@/stores/personaPossessStore')
+    expect(fresh.getState().possessed).toBeNull()
+    expect(localStorage.getItem('roleplay.possessed')).toBeNull()
   })
 
   it('新档已在场 → 幂等不覆盖（旧键清除）', async () => {
     localStorage.setItem(
-      'persona.possessed',
+      pk('persona.possessed'),
       JSON.stringify({
         state: { possessed: { mode: 'groupchat', card_id: 'card_g', name: '群', avatar: '💬', personaText: '', personaKey: 'groupchat_persona' } },
         version: 1,
@@ -128,7 +143,7 @@ describe('旧 roleplay.possessed 档一次性迁移（数据面兼容）', () =>
 
   it('新档（通用形态）重水化原样恢复', async () => {
     localStorage.setItem(
-      'persona.possessed',
+      pk('persona.possessed'),
       JSON.stringify({
         state: {
           possessed: {

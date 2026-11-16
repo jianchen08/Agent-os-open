@@ -1,0 +1,11 @@
+# 内核库直连在途欠账基线（棘轮只减不增）；格式 文件相对路径: 处数
+# 口径（2026-10-15 刀3 终态）：内核库直连零 + 自有库显式豁免名单（名单在
+# 检查器 EXEMPT_FILES 带归因）；基线只容在途欠账，新增直连即红。
+# 键必须是仓库相对 posix 路径（绝对路径键属历史缺陷形态，检查器拒判）
+#
+# 在途归因（并行同步轮改动面，非 2026-10-15 内核库读契约刀触碰面）：
+# - sync_agent/agent_state.py / sync_event.py / sync_relay/relay_store.py
+#   = 多端同步轮在途直连，随该轮收尾迁移 db-read 契约后清偿归零。
+plugins/shared/sync_agent/agent_state.py: 1
+plugins/shared/sync_event.py: 2
+plugins/shared/sync_relay/relay_store.py: 1

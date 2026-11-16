@@ -46,6 +46,12 @@ ignore = [
     # tracing-appender 做日志日期格式化，不消费用户 RFC 2822 解析输入，实际
     # 暴露面不存在。随 rustc 升级一并升 time 后移除本条。
     { id = "RUSTSEC-2026-0009", reason = "time 0.3.36 via tracing-appender 传递依赖；补丁版 0.3.47 需 rustc 1.88（本仓钉 1.85 无法编译），且仅用日期格式化不用 RFC 2822 解析，实际暴露不存在，随 rustc 升级处理，升级后移除" },
+    # unsafe-libyaml 0.2.11（serde_yaml 0.9 唯一 C 绑定后端，五 crate 消费）：
+    # unmaintained（无已知漏洞，仅维护状态公告；advisory-db 2026-10-13 起新
+    # 触发，上轮 CI 时尚未命中）。serde_yaml 上游 dtolnay 已归档 EOL，治本 =
+    # serde_yaml 迁移（报告 §二 #2 三步走：serde_yaml2/yaml-peg 评估），迁移
+    # 完成移除本条。
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml 0.2.11 via serde_yaml 0.9（api/config/engine/plugin-loader/integration-tests 消费）；unmaintained 无已知漏洞，serde_yaml 上游已归档，随 serde_yaml 迁移（报告 §二 #2 三步走）处理，迁移完成移除" },
 ]
 
 [licenses]

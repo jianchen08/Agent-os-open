@@ -7,11 +7,12 @@
  *  （user 权威 record：id/sequence/content，引擎落库后提取）——前端据此按
  *  client_message_id 认领乐观 user 消息（recordId 双字段范式，UI 寻址 id 永不变），
  *  **不再驱逐**（旧驱逐路径 = 发送后用户消息消失的症状根因）。 */
+import { extractNotifyText, notifyPipelineMessage } from '@/lib/systemNotifier'
 import { mapBackendMessageToMessage } from '@/services/api/session'
 import { usePipelineMessageStore as pipelineStore } from '@/stores/pipelineMessageStore'
 import { loggers } from '@/utils/logger'
 import { resolvePipelineId } from '../router'
-import { extractMessageId, extractThreadId, mergeStreamingParts, stopPipelineStreaming } from './utils'
+import { extractMessageId, extractThreadId, mergeStreamingParts } from './utils'
 
 /** 处理新消息事件 */
 export function handleNewMessage(eventData: any) {
@@ -29,8 +30,12 @@ export function handleNewMessage(eventData: any) {
     return
   }
 
-  // 只清事件明确归属的管道
-  stopPipelineStreaming(pipelineId)
+  // 不在此处 stopPipelineStreaming：new_message 是轮级事件（一轮 = 一条消息，
+  // 多轮 run 逐轮发射），生成态的唯一终止信号是 run 级
+  // pipeline_round_finished / stream_error（streamHandler.handleStreamEnd 同款
+  // 约定）。轮级清流式会让 new_message 与 round_finished 的收尾窗口
+  // （post 阶段：通知判定/持久化）内 isStreaming 提前翻 false——忙时发送
+  // 误走非忙分支（乐观气泡与待发队列同屏互斥破坏）、轮间生成态闪烁。
 
   const data = eventData?.data || eventData
 
@@ -46,6 +51,8 @@ export function handleNewMessage(eventData: any) {
     applyLegacyPartsMessage(pipelineId, messageId, data, eventData)
   }
 
+  notifyLandedAssistantMessage(pipelineId, threadId, messageId, data)
+
   // fallback: 仅更新 sequence
   const backendSeq = data?.sequence ?? eventData?.sequence
   if (backendSeq != null) {
@@ -53,6 +60,43 @@ export function handleNewMessage(eventData: any) {
       sequence: backendSeq,
     } as any)
   }
+}
+
+/**
+ * 消息落定后的系统级通知（壳能力接线：Electron toast / macOS 通知中心 / libnotify）。
+ *
+ * 弹出唯一依据 = 后端判定器写入消息 metadata 的 notify_worthy 标记（键名契约）：
+ * 标记 → 无视可见性/焦点必弹；无标记 → 一律静默（前台后台都不弹——防 away 时
+ * 任务管道消息轰炸；触发器/注入轮是否弹出也由判定器打标接管，前端不再按
+ * proactive/可见性兜底）。
+ *
+ * 标记从 new_message 权威完整形态（data.message，DB 同构）读取——与
+ * claimOrInjectUserMessage 读 userRecord.metadata 同一现役模式；流式占位经
+ * updateMessage 只补内容面（metadata 不落 store），事件对象才是标记的到达面。
+ * threadId（事件 _threadId）随通知透传：点击通知跳转对应对话。
+ * 通知失败静默降级，不阻塞消息流（notifyPipelineMessage 永不 reject）。
+ */
+function notifyLandedAssistantMessage(
+  pipelineId: string,
+  threadId: string | undefined,
+  messageId: string,
+  data: Record<string, any> | undefined,
+): void {
+  const landed = pipelineStore
+    .getState()
+    .getMessages(pipelineId)
+    .find((m) => m.id === messageId)
+  if (!landed || landed.role !== 'assistant') return
+
+  const notifyWorthy = data?.message?.metadata?.notify_worthy === true
+
+  void notifyPipelineMessage({
+    notifyWorthy,
+    title: '灵汐',
+    body: extractNotifyText(landed),
+    threadId,
+    dedupeKey: messageId,
+  })
 }
 
 /**
@@ -85,9 +129,12 @@ function claimOrInjectUserMessage(
         pipelineId.slice(0, 12), confirmedCmid.slice(0, 12), result,
       )
     } else {
-      // 旧内核兜底：主数组乐观 user 标记 completed（后端已持久化；
-      // 权威 id/seq 由对账补正——不驱逐不删除）
-      pipelineStore.getState().confirmUserMessage(pipelineId, confirmedCmid)
+      // 事件缺权威回传（版本错配窗口）：不做无 key 本地终态化——无 seq 终态
+      // 消息按排序键永久垫底；气泡留待对账按 cmid 收敛（幂等键随 blob 持久化）。
+      loggers.websocket.warn(
+        '[NEW_MESSAGE] cmid 认领缺权威 user_record（内核/前端版本错配？），留待对账: pipeline=%s cmid=%s',
+        pipelineId.slice(0, 12), confirmedCmid.slice(0, 12),
+      )
     }
   } else if (userRecord?.id) {
     // 无 cmid 的注入消息（触发器/任务/HTTP，ADR-2026-08-26）：user 权威回传

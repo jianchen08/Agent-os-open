@@ -1,0 +1,14 @@
+{
+  "host": "127.0.0.1",
+  "port": 9201,
+  "allowed_roots": [
+    "D:\\myproject",
+    "C:\\agentos-mnt\\local"
+  ],
+  "audit_log": "logs/fmin_local_mcp_audit.jsonl",
+  "adb_serial": "127.0.0.1:5555",
+  "members": [
+    "builtin_tools",
+    "bash"
+  ]
+}

@@ -92,6 +92,7 @@ fn split_pipeline_state(state_json: &serde_json::Value) -> bool {
 }
 
 /// 组装分解面（handler 纯逻辑层，测试直接消费）。
+#[allow(clippy::too_many_lines)] // 存量吸收(2026-10-12 文件规模棘轮): 记忆分解组装为单一纯函数契约
 pub(crate) async fn build_memory_breakdown(state: &AppState) -> MemoryBreakdown {
     let mut items: Vec<MemoryBreakdownItem> = Vec::new();
 
@@ -229,17 +230,11 @@ pub(crate) async fn build_memory_breakdown(state: &AppState) -> MemoryBreakdown 
             name: "capability_registry",
             entries: reg_stats
                 .as_ref()
-                .map(|s| {
-                    s.tools
-                        + s.route_signal_plugins
-                        + s.http_routes
-                        + s.mode_agents
-                        + s.mode_pipelines
-                })
+                .map(|s| s.tools + s.route_signal_plugins + s.http_routes)
                 .unwrap_or(0),
             approx_bytes: tools * 2048,
             measured: false,
-            note: Some("工具/路由信号/HTTP 端点/模式包键 [实测条目];字节按工具 ×2KB 估算"),
+            note: Some("工具/路由信号/HTTP 端点 [实测条目];字节按工具 ×2KB 估算"),
             detail: reg_stats.map(|s| serde_json::json!(s)),
         });
 
@@ -337,7 +332,11 @@ pub(crate) async fn build_memory_breakdown(state: &AppState) -> MemoryBreakdown 
                 "ws_tickets": tickets,
                 "widget_bindings": widgets,
                 "enabled_plugin_ids": state.enabled_plugin_ids.read().await.len(),
-                "plugin_dirs": state.plugin_dirs.len(),
+                "plugin_dirs": state
+                    .plugin_loader
+                    .as_ref()
+                    .map(|l| l.plugin_dir_count())
+                    .unwrap_or(0),
             })),
         });
     }

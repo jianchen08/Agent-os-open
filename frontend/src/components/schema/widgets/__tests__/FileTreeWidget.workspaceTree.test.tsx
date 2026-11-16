@@ -5,7 +5,7 @@
  *
  * 与既有 FileTreeWidget 测试的差异：不 mock schema parser（workspace:// 走
  * 真实解析 → /ext/workspace_service 端点），mock 响应使用后端 file-tree 端点
- * 的真实形状（顶层 tree 键 + name/type/path 字段），props 与 FiveSpaceLayout
+ * 的真实形状（顶层 entries 键 + name/type/path 字段，单层列举），props 与 FiveSpaceLayout
  * component-based tab 渲染路径逐一对齐——回归 BUG-4：该场景树恒空。
  *
  * mock 仅限外部依赖（api client / tasks api / 宿主 store / jsdom 不可行宿主）。
@@ -48,10 +48,11 @@ const WORKSPACE_TAB_PROPS = {
   nodeChildrenField: 'children',
 } as const
 
-/** 后端 GET /ext/workspace_service/workspaces/{id}/file-tree 的真实返回形状 */
+/** 后端 GET /ext/workspace_service/workspaces/{id}/file-tree 的真实返回形状（单层列举） */
 const FILE_TREE_RESPONSE = {
   data: {
-    tree: [{ name: 'eval_answer.txt', type: 'file', path: 'eval_answer.txt' }],
+    entries: [{ name: 'eval_answer.txt', type: 'file', path: 'eval_answer.txt' }],
+    truncated: false,
   },
 }
 
@@ -62,7 +63,7 @@ beforeEach(() => {
 })
 
 describe('工作区文件树（workspace:// tab 真实链路）', () => {
-  it('file-tree 端点 tree 键形状 → 文件节点必须渲染', async () => {
+  it('file-tree 端点 entries 键形状 → 文件节点必须渲染', async () => {
     mockGet.mockResolvedValue(FILE_TREE_RESPONSE)
 
     render(<FileTreeWidget {...WORKSPACE_TAB_PROPS} />)
@@ -87,19 +88,14 @@ describe('工作区文件树（workspace:// tab 真实链路）', () => {
   it('多层目录树 → 根目录可见，子节点按 expandLevel 折叠', async () => {
     mockGet.mockResolvedValue({
       data: {
-        tree: [
-          {
-            name: 'reports',
-            type: 'directory',
-            path: 'reports',
-            children: [{ name: 'a.log', type: 'file', path: 'reports/a.log' }],
-          },
-        ],
+        entries: [{ name: 'reports', type: 'directory', path: 'reports' }],
+        truncated: false,
       },
     })
 
     render(<FileTreeWidget {...WORKSPACE_TAB_PROPS} />)
 
+    // 懒加载契约：根层只渲染一层，子层随展开另列（不随根响应下发）
     expect(await screen.findByText('reports')).toBeInTheDocument()
     expect(screen.queryByText('a.log')).not.toBeInTheDocument()
   })
@@ -124,7 +120,7 @@ describe('工作区文件树（workspace:// tab 真实链路）', () => {
   })
 
   it('空结果会话回退（两串行请求均空）→ 空态而非「未找到匹配的节点」', async () => {
-    mockGet.mockResolvedValue({ data: { tree: [] } })
+    mockGet.mockResolvedValue({ data: { entries: [], truncated: false } })
 
     render(<FileTreeWidget {...WORKSPACE_TAB_PROPS} />)
 

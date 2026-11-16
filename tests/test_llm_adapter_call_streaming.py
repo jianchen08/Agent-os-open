@@ -1,3 +1,4 @@
+# @feature: FP-0.2.〇 LLM 适配层流式调用 | @ci: python-test
 """``_call_streaming`` 行为等价回归测试（AsyncMock 桩）。
 
 背景：``adapter._call_streaming`` 是流式 LLM 调用核心（首 chunk 超时检测建连 +
@@ -24,7 +25,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_LLM_SERVICE_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "llm"
+_LLM_SERVICE_DIR = _REPO_ROOT / "plugins" / "shared" / "llm"
 # 去重插入到 [0]：车道共跑时其他插件目录（如 channel_feishu）可能残留于
 # sys.path 前部，平铺 `import adapter` 会命中他插件同名模块。本测试守护
 # llm_service 的 `_call_streaming`（唯一现役实现）。
@@ -33,7 +34,7 @@ if str(_LLM_SERVICE_DIR) in sys.path:
 sys.path.insert(0, str(_LLM_SERVICE_DIR))
 
 import adapter as _adapter  # noqa: E402  平铺 import，与生产代码一致
-import litellm  # noqa: E402
+import wire_client  # noqa: E402
 
 
 class _HandlerlessLogger(logging.Logger):
@@ -66,7 +67,7 @@ def _isolate_diag_loggers(monkeypatch) -> Any:  # noqa: ANN001
 
 
 class _FakeStream:
-    """模拟 litellm 流：按预设 chunk 序列异步迭代，可观测 aclose。"""
+    """模拟 LLM 流：按预设 chunk 序列异步迭代，可观测 aclose。"""
 
     def __init__(self, chunks: list[Any]) -> None:
         self._chunks = list(chunks)
@@ -154,7 +155,7 @@ def _usage(
     )
 
 
-class _StubAdapter(_adapter._BaseLiteLLMAdapter):
+class _StubAdapter(_adapter._BaseLLMAdapter):
     """桩 adapter：``_do_completion`` 返回预设流并记录调用 kwargs。"""
 
     def __init__(self, stream: Any) -> None:
@@ -166,7 +167,7 @@ class _StubAdapter(_adapter._BaseLiteLLMAdapter):
         return self._stream
 
 
-class _RaisingAdapter(_adapter._BaseLiteLLMAdapter):
+class _RaisingAdapter(_adapter._BaseLLMAdapter):
     """``_do_completion`` 直接抛指定异常（模拟建连失败/超时）。"""
 
     def __init__(self, exc: BaseException) -> None:
@@ -352,10 +353,10 @@ async def test_on_chunk_stop_signal_sets_stream_repetition() -> None:
 
 
 async def test_empty_stream_raises_timeout_and_closes() -> None:
-    """首字节即空流（建连成功零 chunk）→ litellm.Timeout，且 stream 被 aclose。"""
+    """首字节即空流（建连成功零 chunk）→ WireTimeoutError，且 stream 被 aclose。"""
     stream = _FirstEmptyStream()
     ad = _StubAdapter(stream)
-    with pytest.raises(litellm.Timeout):
+    with pytest.raises(wire_client.WireTimeoutError):
         await ad._call_streaming(
             "m", [{"role": "user", "content": "x"}],
             inter_chunk_timeout=600, first_chunk_timeout=10,
@@ -364,18 +365,18 @@ async def test_empty_stream_raises_timeout_and_closes() -> None:
     assert stream.aclose_called is True
 
 
-async def test_first_chunk_timeout_raises_litellm_timeout() -> None:
-    """建连阶段超时（_do_completion 抛 asyncio.TimeoutError）→ litellm.Timeout。"""
+async def test_first_chunk_timeout_raises_wire_timeout() -> None:
+    """建连阶段超时（_do_completion 抛 asyncio.TimeoutError）→ WireTimeoutError。"""
     ad = _RaisingAdapter(asyncio.TimeoutError())
-    with pytest.raises(litellm.Timeout):
+    with pytest.raises(wire_client.WireTimeoutError):
         await ad._call_streaming(
             "m", [{"role": "user", "content": "x"}],
             inter_chunk_timeout=600, first_chunk_timeout=10,
         )
 
 
-async def test_inter_chunk_timeout_raises_litellm_timeout() -> None:
-    """inter-chunk 静默超时（后续 __anext__ 抛 asyncio.TimeoutError）→ litellm.Timeout。"""
+async def test_inter_chunk_timeout_raises_wire_timeout() -> None:
+    """inter-chunk 静默超时（后续 __anext__ 抛 asyncio.TimeoutError）→ WireTimeoutError。"""
 
     class _OneThenTimeout(_FakeStream):
         def __init__(self) -> None:
@@ -389,7 +390,7 @@ async def test_inter_chunk_timeout_raises_litellm_timeout() -> None:
             raise asyncio.TimeoutError()
 
     ad = _StubAdapter(_OneThenTimeout())
-    with pytest.raises(litellm.Timeout):
+    with pytest.raises(wire_client.WireTimeoutError):
         await ad._call_streaming(
             "m", [{"role": "user", "content": "x"}],
             inter_chunk_timeout=600, first_chunk_timeout=10,

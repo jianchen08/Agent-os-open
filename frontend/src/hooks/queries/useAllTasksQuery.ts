@@ -14,6 +14,7 @@
 import { useQuery } from '@tanstack/react-query'
 import apiClient from '@/services/api/client'
 import { TASK_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
+import { queryClient } from '@/services/query/queryClient'
 import { queryKeys } from '@/services/query/queryKeys'
 
 /** 任务列表响应结构（task_service 插件 list_tasks 返回格式） */
@@ -43,4 +44,9 @@ export function useAllTasksQuery(
     queryFn: fetchAllTasks,
     refetchInterval,
   })
+}
+
+/** 标记全量任务缓存失效（WS 重连/任务终态事件对账用；活跃订阅自动重拉） */
+export function invalidatePipelineAllTasks(): void {
+  void queryClient.invalidateQueries({ queryKey: queryKeys.pipelineAllTasks })
 }

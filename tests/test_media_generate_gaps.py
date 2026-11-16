@@ -39,7 +39,7 @@ from agentos_plugin_sdk.multimodal import multimodal_content_from_file
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_PLUGIN_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "media"
+_PLUGIN_DIR = _REPO_ROOT / "plugins" / "shared" / "media"
 if str(_PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_DIR))
 

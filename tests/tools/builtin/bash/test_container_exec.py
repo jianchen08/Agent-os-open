@@ -22,13 +22,13 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from bash_types import WorkUnit
-from process_manager import (
+from agentos_plugin_sdk.process_runtime import WorkUnit
+from agentos_plugin_sdk.process_runtime import (
     ContainerProcessBackend,
     LocalProcessBackend,
     ProcessManager,
-    _get_container_backend,
 )
+from agentos_plugin_sdk.process_runtime.backends import _get_container_backend
 from tool import BashTool
 
 pytestmark = pytest.mark.unit
@@ -151,7 +151,7 @@ async def test_start_process_with_container_id_uses_docker_exec(tmp_path):
         return fake_proc
 
     with patch(
-        "process_manager.asyncio.create_subprocess_exec",
+        "agentos_plugin_sdk.process_runtime.manager.asyncio.create_subprocess_exec",
         side_effect=fake_create_subprocess_exec,
     ):
         pid, _ = await pm.start_process(
@@ -195,10 +195,10 @@ async def test_start_process_without_container_id_unchanged(tmp_path):
         return fake_proc
 
     with patch(
-        "process_manager.asyncio.create_subprocess_exec",
+        "agentos_plugin_sdk.process_runtime.manager.asyncio.create_subprocess_exec",
         side_effect=fake_exec,
     ), patch(
-        "process_manager.asyncio.create_subprocess_shell",
+        "agentos_plugin_sdk.process_runtime.manager.asyncio.create_subprocess_shell",
         side_effect=fake_shell,
     ):
         await pm.start_process(command="echo hi", working_dir=str(tmp_path))
@@ -216,7 +216,7 @@ async def test_start_process_container_stores_container_pid_in_metadata(tmp_path
     fake_proc = _make_fake_process(host_pid=42, container_pid=100)
 
     with patch(
-        "process_manager.asyncio.create_subprocess_exec",
+        "agentos_plugin_sdk.process_runtime.manager.asyncio.create_subprocess_exec",
         return_value=fake_proc,
     ):
         pid, _ = await pm.start_process(
@@ -241,7 +241,7 @@ async def test_start_process_container_returns_host_pid_as_key(tmp_path):
     fake_proc = _make_fake_process(host_pid=999, container_pid=1)
 
     with patch(
-        "process_manager.asyncio.create_subprocess_exec",
+        "agentos_plugin_sdk.process_runtime.manager.asyncio.create_subprocess_exec",
         return_value=fake_proc,
     ):
         pid, _ = await pm.start_process(command="x", container_id="cid")
@@ -269,7 +269,7 @@ async def test_start_process_container_ignores_host_working_dir(tmp_path):
         return fake_proc
 
     with patch(
-        "process_manager.asyncio.create_subprocess_exec",
+        "agentos_plugin_sdk.process_runtime.manager.asyncio.create_subprocess_exec",
         side_effect=fake_create_subprocess_exec,
     ):
         # 传入宿主 Windows 路径（模拟 BashTool.get_working_dir 的返回值）
@@ -416,7 +416,7 @@ async def test_start_process_container_assigns_container_backend(tmp_path):
     fake_proc = _make_fake_process(host_pid=42, container_pid=100)
 
     with patch(
-        "process_manager.asyncio.create_subprocess_exec",
+        "agentos_plugin_sdk.process_runtime.manager.asyncio.create_subprocess_exec",
         return_value=fake_proc,
     ):
         await pm.start_process(command="x", container_id="cid")
@@ -433,10 +433,10 @@ async def test_start_process_local_assigns_local_backend(tmp_path):
     fake_proc = _make_fake_process(host_pid=8)
 
     with patch(
-        "process_manager.asyncio.create_subprocess_exec",
+        "agentos_plugin_sdk.process_runtime.manager.asyncio.create_subprocess_exec",
         return_value=fake_proc,
     ), patch(
-        "process_manager.asyncio.create_subprocess_shell",
+        "agentos_plugin_sdk.process_runtime.manager.asyncio.create_subprocess_shell",
         return_value=fake_proc,
     ):
         await pm.start_process(command="x")
@@ -461,7 +461,7 @@ async def test_terminate_container_process_calls_docker_kill(tmp_path):
         return 0, b"", b""
 
     with patch(
-        "process_manager.asyncio.create_subprocess_exec",
+        "agentos_plugin_sdk.process_runtime.manager.asyncio.create_subprocess_exec",
         return_value=fake_proc,
     ):
         await pm.start_process(command="x", container_id="cid")
@@ -514,7 +514,7 @@ async def test_bashtool_execute_passes_container_id_to_start_process(tmp_path):
 
     tool.process_manager.start_process = fake_start_process  # type: ignore[assignment]
     # 让 get_process_info 返回 completed，避免轮询
-    from bash_types import ProcessInfo
+    from agentos_plugin_sdk.process_runtime import ProcessInfo
     fake_info = ProcessInfo(
         pid=1, command="x", start_time=0, log_file=tmp_path / "fake.log",
         status="completed", exit_code=0,
@@ -544,7 +544,7 @@ async def test_bashtool_execute_without_container_id_passes_none(tmp_path):
         return 1, tmp_path / "fake.log"
 
     tool.process_manager.start_process = fake_start_process  # type: ignore[assignment]
-    from bash_types import ProcessInfo
+    from agentos_plugin_sdk.process_runtime import ProcessInfo
     fake_info = ProcessInfo(
         pid=1, command="x", start_time=0, log_file=tmp_path / "fake.log",
         status="completed", exit_code=0,
@@ -585,7 +585,7 @@ async def test_bashtool_execute_with_container_id_skips_security_check(tmp_path)
         return 1, tmp_path / "fake.log"
 
     tool2.process_manager.start_process = fake_start_process  # type: ignore[assignment]
-    from bash_types import ProcessInfo
+    from agentos_plugin_sdk.process_runtime import ProcessInfo
     fake_info = ProcessInfo(
         pid=1, command="x", start_time=0, log_file=tmp_path / "fake.log",
         status="completed", exit_code=0,
@@ -619,7 +619,7 @@ async def test_container_execute_running_continue_completed_cycle(tmp_path):
     fake_proc = _make_fake_process(host_pid=42, container_pid=100, keep_open=True)
 
     with patch(
-        "process_manager.asyncio.create_subprocess_exec",
+        "agentos_plugin_sdk.process_runtime.manager.asyncio.create_subprocess_exec",
         return_value=fake_proc,
     ):
         # 1) execute：timeout 极小，进程还活着 → 返回 running
@@ -676,7 +676,7 @@ async def test_container_execute_timeout_does_not_kill_process(tmp_path):
         return 0, b"", b""
 
     with patch(
-        "process_manager.asyncio.create_subprocess_exec",
+        "agentos_plugin_sdk.process_runtime.manager.asyncio.create_subprocess_exec",
         return_value=fake_proc,
     ):
         # execute 超时返回 running

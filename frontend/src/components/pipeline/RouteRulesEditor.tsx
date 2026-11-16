@@ -109,7 +109,7 @@ export function RouteRulesEditor({
         return (
           <div
             key={i}
-            className="border-border bg-[var(--ds-bg-panel,rgba(148,163,184,0.04))] space-y-2 rounded-lg border p-2.5"
+            className="border-border bg-[var(--ds-bg-panel)] space-y-2 rounded-lg border p-2.5"
             data-testid={`route-rule-${i}`}
           >
             <div className="flex items-center gap-2">

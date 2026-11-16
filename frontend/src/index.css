@@ -1,8 +1,11 @@
-@import './styles/responsive.css';
 @import './styles/fonts.css';
 @import './styles/design-tokens.css';
 @import './styles/deep-space-v2.css';
+/* layout-spec（:root 基准值）须先于 responsive（移动端覆盖值）：
+   两者同为 :root 选择器，级联按源序取后者——此前 responsive 在前，
+   移动端 --layout-titlebar-height 覆盖从未生效（抽屉/覆盖层顶沿落到桌面 32px） */
 @import './styles/layout-spec.css';
+@import './styles/responsive.css';
 @import './styles/animations.css';
 @import './styles/enhancements.css';
 @import './styles/component-optimizations.css';
@@ -214,6 +217,46 @@ html[data-skin] [data-testid='workspace-toggle-float']:not([class*='bg-accent'])
   backdrop-filter: blur(4px);
 }
 
+/* <111 WebView legacy 等价（@supports not 门控：支持 color-mix 的浏览器整块
+   不生效，渲染零变化）。上面两条底衬用 var(--background)（三元组变量）做基、
+   preflight 的 ::placeholder 用 currentcolor 做基——均无法构建期机械等价变换
+   （compat-color-mix.mjs 跳过），老 WebView 上分别为无效声明（底衬丢失）与
+   100% 实色（placeholder 偏实）。混 transparent 只改 alpha，故手写同视觉
+   legacy 声明：底衬 = hsl(var(--background) / 0.72)（三元组加 slash alpha，
+   Chromium 65+；变量自带 alpha 时值非法回退透明=不劣于既有降级）。
+   placeholder 精确等价（currentcolor 折半）在 110 不可达——实测 Blink 110
+   对 ::placeholder 忽略 opacity/filter，只认窄属性集——取同观感近似：
+   hsl(var(--foreground) / 0.5)。基色选 foreground 而非 muted-foreground：
+   区域桥（.theme-*-area 的 --muted-foreground 自引用 fallback）使 muted 系
+   变量在区域子树内 guaranteed-invalid（跨端既有缺陷），foreground 未被
+   桥接全程有效，且输入框文本通常即 foreground，与 currentcolor 折半最贴。
+   变量失效场景回退继承 currentcolor=与桌面同款，不劣化。本块 unlayered 且
+   源序在上述规则之后：压过构建器生成的门外 fallback（三元组直填=非法）与
+   preflight 的 currentcolor 实色；无 alpha 平类 placeholder:text-muted-
+   foreground 的全饱和声明在 utilities 层会输给本块 unlayered 规则，末尾按
+   类再断言恢复同桌面值（/40、/60 有构建期 cm-compat 同 specificity 类规则
+   压过本块，无需重复）。 */
+@supports not (color: color-mix(in lab, red, red)) {
+  ::-webkit-input-placeholder {
+    color: hsl(var(--foreground) / 0.5);
+  }
+  ::placeholder {
+    color: hsl(var(--foreground) / 0.5);
+  }
+  html[data-skin] [role='tablist'] {
+    background: hsl(var(--background) / 0.72);
+  }
+  html[data-skin] [data-testid='sidebar-toggle-float']:not([class*='bg-accent']),
+  html[data-skin] [data-testid='workspace-toggle-float']:not([class*='bg-accent']) {
+    background: hsl(var(--background) / 0.72);
+  }
+  .placeholder\:text-muted-foreground::-webkit-input-placeholder,
+  .placeholder\:text-muted-foreground::-moz-placeholder,
+  .placeholder\:text-muted-foreground::placeholder {
+    color: hsl(var(--muted-foreground));
+  }
+}
+
 /* 皮肤背景图上的消息气泡收拢（有背景图的皮肤聊天文本
    必须框起来，但只框**气泡区域本身**——整行/整块模糊会把背景图盖死。
    气泡底色由 MessageItem 内联样式按主题令牌渲染（内联高于 CSS，flat 平铺
@@ -236,6 +279,20 @@ body.has-bg-image .theme-chat-area {
   background-color: var(--region-chat-bg, transparent);
 }
 
+/* === 区域 muted 桥的根值中间层 ===
+   区域桥（.theme-sidebar-area 等下方三组）把 --muted-foreground /
+   --secondary-foreground 重绑定为 var(--region-x-muted-fg, <根值>)。
+   fallback 不能直接引用变量自身：region 变量未声明时走 fallback 分支，
+   自引用成环 → guaranteed-invalid（所有浏览器），region 子树内 muted 系
+   变量恒空、muted 类退化继承色。中间层声明在 :root（region 子树之外，
+   无环）：computed 值在根上对 --muted-foreground 求值（themeService /
+   插件主题均对 :root setProperty --muted-foreground，内联胜出），随主题/
+   皮肤切换同步；子树内重绑 --muted-foreground 不影响已求值的继承值。 */
+:root {
+  --muted-foreground-root: var(--muted-foreground);
+  --secondary-foreground-root: var(--secondary-foreground);
+}
+
 /* 主题区域背景关系（插件主题可配）：
    --region-sidebar-bg / --region-chat-bg / --region-workspace-bg ——
    区域背景取 transparent 时透出统一背景层（body 背景/立绘），
@@ -248,8 +305,8 @@ body.has-bg-image .theme-chat-area {
      重绑定，侧栏内所有消费 text-muted-foreground 等的后代自动重算，
      零组件改动） */
   color: var(--region-sidebar-fg, var(--foreground));
-  --muted-foreground: var(--region-sidebar-muted-fg, var(--muted-foreground));
-  --secondary-foreground: var(--region-sidebar-muted-fg, var(--secondary-foreground));
+  --muted-foreground: var(--region-sidebar-muted-fg, var(--muted-foreground-root));
+  --secondary-foreground: var(--region-sidebar-muted-fg, var(--secondary-foreground-root));
   background-image: var(--sidebar-texture, none);
   background-size: var(--sidebar-texture-size, 24px) var(--sidebar-texture-size, 24px);
 }
@@ -265,15 +322,15 @@ body.has-bg-image .theme-chat-area {
   /* 区域前景（所有文字/图标按所在区域背景翻转）——
      聊天区文字/图标颜色与 muted 等随聊天面（对话主区）单独强制 */
   color: var(--region-chat-fg, var(--foreground));
-  --muted-foreground: var(--region-chat-muted-fg, var(--muted-foreground));
-  --secondary-foreground: var(--region-chat-muted-fg, var(--secondary-foreground));
+  --muted-foreground: var(--region-chat-muted-fg, var(--muted-foreground-root));
+  --secondary-foreground: var(--region-chat-muted-fg, var(--secondary-foreground-root));
 }
 
 /* 工作区区域前景（与聊天区同面同值——原生对话主区一体，用户二裁） */
 [data-region='workspace'] {
   color: var(--region-workspace-fg, var(--foreground));
-  --muted-foreground: var(--region-workspace-muted-fg, var(--muted-foreground));
-  --secondary-foreground: var(--region-workspace-muted-fg, var(--secondary-foreground));
+  --muted-foreground: var(--region-workspace-muted-fg, var(--muted-foreground-root));
+  --secondary-foreground: var(--region-workspace-muted-fg, var(--secondary-foreground-root));
 }
 
 /* 工作区区域背景（类级而非内联——皮肤 CSS 位置路由把

@@ -6,6 +6,7 @@
 
 import { useEffect } from 'react'
 import { Check } from '@/assets/icons'
+import { THEME_PREVIEW_FALLBACK } from '@/config/themes'
 import { cn } from '@/lib/utils'
 import { useThemeStore } from '@/stores/themeStore'
 import type { ThemeInfo } from '@/types/theme'
@@ -19,12 +20,9 @@ function getPreviewColors(theme: ThemeInfo) {
     }
   }
   if (theme.category === 'light' || theme.id === 'light') {
-    return { bg: '#f8fafc', primary: '#2563eb', text: '#0f172a' }
+    return THEME_PREVIEW_FALLBACK.light
   }
-  return { bg: '#0f172a', primary: '#3b82f6', text: '#f8fafc' }
-  // 色板预览语义豁免（S9）：以上静态 hex 是「主题本体预览样本」——缩略色块
-  // 必须恒定可辨、不随当前主题令牌联动（否则深浅主题互看时样本失真）；
-  // 后端未下发 preview 元数据时按 light/dark 家族给静态近似值。
+  return THEME_PREVIEW_FALLBACK.dark
 }
 
 function ThemeSwatch({
@@ -52,7 +50,7 @@ function ThemeSwatch({
         className="relative flex h-5 w-5 shrink-0 items-center justify-center rounded-full border"
         style={{
           backgroundColor: colors.bg,
-          borderColor: isSelected ? colors.primary : 'rgba(148,163,184,0.35)',
+          borderColor: isSelected ? colors.primary : 'var(--border)',
         }}
       >
         <span
@@ -60,7 +58,7 @@ function ThemeSwatch({
           style={{ backgroundColor: colors.primary }}
         />
         {isSelected && (
-          <Check className="absolute -right-0.5 -bottom-0.5 h-2.5 w-2.5 text-[var(--ds-accent-primary,#22D3EE)]" />
+          <Check className="absolute -right-0.5 -bottom-0.5 h-2.5 w-2.5 text-[var(--ds-accent-primary)]" />
         )}
       </span>
       <span className="text-foreground min-w-0 flex-1 truncate text-[12px]">
@@ -115,8 +113,8 @@ export function ThemePopover({
     <div
       className="border-border absolute bottom-full left-1/2 z-[100] mb-1.5 w-40 -translate-x-1/2 overflow-hidden rounded-lg border shadow-xl"
       style={{
-        background: 'var(--ds-bg-panel, hsl(var(--card)))',
-        boxShadow: '0 10px 28px -8px rgba(0,0,0,0.45)',
+        background: 'var(--ds-bg-panel)',
+        boxShadow: 'var(--shadow-xl)',
       }}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}

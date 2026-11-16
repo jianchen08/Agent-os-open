@@ -74,10 +74,12 @@ class TestComputeLanesRootOpsScripts:
 
     def test_subdir_scripts_keep_existing_lanes(self, changed_areas):
         # scripts/ 子目录脚本归 FULL（不被根脚本规则劫持）；
-        # 插件目录 .sh 随其所属插件面走 related（既有前缀规则不变）。
+        # 插件面 .sh 随其所属面走：plugins/shared/ 平铺后整体归核心面（python_full）。
         assert changed_areas.compute_lanes(["scripts/foo.sh"])["full"] is True
         assert changed_areas.compute_lanes(["scripts/foo.sh"])["related"] is False
-        assert changed_areas.compute_lanes(["plugins/shared/tools/simple/a.sh"])["related"] is True
+        lanes = changed_areas.compute_lanes(["plugins/shared/simple/a.sh"])
+        assert lanes["python_full"] is True
+        assert lanes["related"] is False
 
     def test_full_dominates_root_script(self, changed_areas):
         # 重车道互斥瀑布不变：kernel 变更 + 根脚本变更 → 只 full 不 related
@@ -86,12 +88,16 @@ class TestComputeLanesRootOpsScripts:
         assert lanes["related"] is False
 
     def test_plain_python_change_unchanged(self, changed_areas):
-        # 普通 py 变更行为不变：非核心插件 → related；pipeline → python_full
-        lanes = changed_areas.compute_lanes(["plugins/shared/tools/memory/server.py"])
-        assert lanes["related"] is True
+        # 普通 py 变更行为不变：插件面（plugins/shared/ 平铺后整体）→ python_full；
+        # 非插件 py（mcp-servers）→ related
+        lanes = changed_areas.compute_lanes(["plugins/shared/memory/server.py"])
+        assert lanes["python_full"] is True
         assert lanes["full"] is False
-        assert lanes["python_full"] is False
-        lanes_core = changed_areas.compute_lanes(["plugins/shared/pipeline/input/agent_config_load/x.py"])
+        assert lanes["related"] is False
+        lanes_mcp = changed_areas.compute_lanes(["mcp-servers/probe/server.py"])
+        assert lanes_mcp["related"] is True
+        assert lanes_mcp["python_full"] is False
+        lanes_core = changed_areas.compute_lanes(["plugins/shared/agent_config_load/x.py"])
         assert lanes_core["python_full"] is True
         assert lanes_core["related"] is False
 
@@ -112,6 +118,12 @@ class TestRelatedTestsRootOpsMapping:
         selected, _ = related_tests.select_tests(["tests/test_port_config.py"])
         assert related_tests.ROOT / "tests/test_port_config.py" in selected
         assert related_tests.TESTS_DIR / "test_startup_scripts_fix.py" not in selected
+
+    def test_deleted_test_file_is_skipped(self, related_tests):
+        """删除的测试文件不进 pytest 参数（否则 pytest exit 4 误红整条车道）。"""
+        selected, notes = related_tests.select_tests(["tests/test_this_file_was_deleted.py"])
+        assert selected == []
+        assert any("已删除" in n for n in notes)
 
     def test_bash_syntax_check_passes_good_script(self, related_tests, tmp_path, monkeypatch):
         if shutil.which("bash") is None:

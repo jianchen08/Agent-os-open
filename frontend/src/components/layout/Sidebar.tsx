@@ -15,7 +15,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Bell, ChatIcon, ChatActiveIcon, Loader2, Plus, User, X } from '@/assets/icons'
+import { ChatIcon, ChatActiveIcon, Loader2, Plus, X } from '@/assets/icons'
 import { ChangePasswordForm } from '@/components/auth/ChangePasswordForm'
 import { LoginModal } from '@/components/auth/LoginModal'
 import { NotificationCenter } from '@/components/chat/NotificationCenter'
@@ -24,15 +24,8 @@ import { ThemeButton } from '@/components/layout/ThemeButton'
 import { SessionEditModal, type SessionFormOptions } from '@/components/session/SessionEditModal'
 import { SessionList } from '@/components/session/SessionList'
 import { SessionSearch } from '@/components/session/SessionSearch'
+import { SlotHost } from '@/components/slots/SlotHost'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
 import { useSessionsQuery } from '@/hooks/queries/useSessionsQuery'
 import { cn } from '@/lib/utils'
 import { searchGlobal, type SessionSearchHit, type MessageSearchHit } from '@/services/api/search'
@@ -42,7 +35,7 @@ import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { evaluateWhen } from '@/services/schema/whenExpression'
 import { registerSessionProject, createSessionWithProject } from '@/services/sessionCreation'
 import { saveSessionExecutionOptions } from '@/services/sessionExecutionOptions'
-import { openWorkspacePanel, openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
+import { openPluginPage, openWorkspacePanel, openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useAuthStore } from '@/stores/authStore'
 import { useNotificationStore } from '@/stores/notificationStore'
@@ -54,6 +47,7 @@ import {
   SettingsEntryButton,
   SIDEBAR_STYLES,
 } from './SidebarParts'
+import { SidebarBellButton, SidebarUserMenu } from './SidebarUserMenu'
 import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
 import type { Session } from '@/types'
 
@@ -116,9 +110,26 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   }, [contribTick, user])
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
   const navigate = useNavigate()
+  /** 登出进行中（菜单项禁用 +「退出中…」，防重复点击；成功后页面跳转卸载，
+   *  失败通知落在操作点并复位可重试） */
+  const [loggingOut, setLoggingOut] = useState(false)
   /** 登出走统一编排（WS/流式清理+logout+跳转），与 router.tsx 的 onLogout 同源 */
   const handleLogout = useCallback(() => {
-    void performLogout(navigate)
+    setLoggingOut(true)
+    performLogout(navigate)
+      .catch((error: unknown) => {
+        // 失败可见（不静默装成功）：通知 + 菜单项复位（finally）可就地重试
+        useNotificationStore.getState().addNotification({
+          title: '退出登录失败',
+          message: (error as { message?: string })?.message ?? '请稍后重试',
+          priority: 'normal',
+          category: 'error',
+          isBlocking: false,
+          autoDismissMs: 5000,
+          sourceLabel: '前端',
+        })
+      })
+      .finally(() => setLoggingOut(false))
   }, [navigate])
 
   // 弹窗式登录框状态（点菜单里的"登录"才打开）
@@ -137,6 +148,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   const toggleSessionPin = useSessionListStore((state) => state.toggleSessionPin)
   const renameSession = useSessionListStore((state) => state.renameSession)
   const updateSessionAgent = useSessionListStore((state) => state.updateSessionAgent)
+  const updateSessionWorkspace = useSessionListStore((state) => state.updateSessionWorkspace)
   const sidebarCollapsed = useUIStore((state) => state.sidebarCollapsed)
   const setSidebarCollapsed = useUIStore((state) => state.setSidebarCollapsed)
   const setMessageJump = useUIStore((state) => state.setMessageJump)
@@ -148,7 +160,9 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
 
 
   /**
-   * 统一搜索：防抖调用后端搜索 API（monitoring 插件 search）。
+   * 统一搜索：防抖调用后端搜索 API（端点=monitoring 插件 plugin.json
+   * http_endpoints 声明投影 mon_search_global——真值源在声明面，改名经
+   * endpoints.generated.ts 重生成后 tsc 闸红跟随，壳层无路径词面）。
    * 输入停止 350ms 后发起请求；q 为空时清空结果。
    */
   useEffect(() => {
@@ -192,6 +206,17 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   }, [searchKeyword, searchResults, sessions, searchError])
 
   /**
+   * 移动端会话面收口：点会话/消息命中/新建完成 = 用户要回对话主管道视图，
+   * 抽屉与工作区覆盖层一并收起（真机缺陷"视图切换失灵"收口缺员：窄窗形态下
+   * 工作区覆盖层盖住整个主区，会话切换在其背后发生，用户视角"钉死在文件/面板
+   * 内容视图"；与 M4/M5/M8 抽屉收口同族，收口单点在此）。
+   */
+  const closeMobileWorkspaceSurfaces = useCallback(() => {
+    setSidebarCollapsed(true)
+    useUIStore.getState().setMobileWorkspaceOpen(false)
+  }, [setSidebarCollapsed])
+
+  /**
    * 处理会话点击 - 设置活动会话并导航到会话页面
    * Requirements: Requirement 2 - 点击会话可以从其他页面跳转到对话页面
    *
@@ -233,9 +258,9 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
       if (tabId && tabId !== tabStore.activeTabId) {
         tabStore.switchToTab(tabId)
       }
-      if (isMobile) setSidebarCollapsed(true)
+      if (isMobile) closeMobileWorkspaceSurfaces()
     },
-    [sessions, handleSessionClick, setMessageJump, isMobile, setSidebarCollapsed],
+    [sessions, handleSessionClick, setMessageJump, isMobile],
   )
 
   /**
@@ -275,6 +300,17 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
           // 声明，服务端 PATCH 会话不承载）。
           await renameSession(sessionId, title)
           await updateSessionAgent(sessionId, agentId)
+          // 工作空间字段改动写回服务端 metadata（会话树聚合/列表徽标真值源）：
+          // 只存本地执行快照的话 session.workspace 不变，聚合不随编辑走。
+          const nextWorkspace = options?.fieldMetadata?.workspace
+          if (typeof nextWorkspace === 'string' && nextWorkspace.trim()) {
+            const nextMode = options?.fieldMetadata?.workspace_mode
+            await updateSessionWorkspace(
+              sessionId,
+              nextWorkspace.trim(),
+              nextMode === 'plain' || nextMode === 'worktree' ? nextMode : undefined,
+            )
+          }
           saveSessionExecutionOptions(sessionId, {
             values: options?.fieldMetadata ?? {},
             ...(options?.executionContext
@@ -289,6 +325,9 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
           await createSessionWithProject(title || undefined, agentId, options)
           setModal(null)
         }
+        // 新建/编辑成功即收抽屉：新会话聊天在抽屉背后，不收则用户看到的
+        // 仍是列表（与 M4/M5 opener 收口同族，此为弹窗直调链路的最后成员）
+        if (isMobile) closeMobileWorkspaceSurfaces()
       } catch (error) {
         reportError(error instanceof Error ? error.message : String(error), {
           type: ErrorType.SERVER,
@@ -301,7 +340,31 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
         setIsSaving(false)
       }
     },
-    [renameSession, updateSessionAgent],
+    [isMobile, closeMobileWorkspaceSurfaces, renameSession, updateSessionAgent, updateSessionWorkspace],
+  )
+
+  /**
+   * 会话树顶栏一键新建：以该工作空间为工作空间直接创建会话（不开弹窗）。
+   * 与弹窗创建同链路（createSessionWithProject：metadata 出生落库 + 项目登记）；
+   * 拓扑取 plain 默认——worktree 属显式选择项，仅弹窗内可表。
+   */
+  const handleCreateInWorkspace = useCallback(
+    async (workspace: string) => {
+      try {
+        await createSessionWithProject(undefined, null, {
+          fieldMetadata: { workspace, workspace_mode: 'plain' },
+          executionContext: { workspace: { source_path: workspace, mode: 'plain' } },
+        })
+      } catch (error) {
+        reportError(error instanceof Error ? error.message : String(error), {
+          type: ErrorType.SERVER,
+          severity: ErrorSeverity.ERROR,
+          componentName: 'Sidebar',
+          operation: 'createSessionInWorkspace',
+        })
+      }
+    },
+    [],
   )
 
   /**
@@ -311,11 +374,14 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
     setModal({ mode: 'edit', sessionId: session.id })
   }, [])
 
+  /** 复制会话进行中的会话 ID 集合（行级 Loader2 pending 真值源） */
+  const [copyingSessionIds, setCopyingSessionIds] = useState<ReadonlySet<string>>(new Set())
   /**
-   * 处理复制会话
+   * 处理复制会话（await 期间行内转圈；失败通知落在操作点）
    */
   const handleCopySession = useCallback(
     async (session: Session) => {
+      setCopyingSessionIds((prev) => new Set(prev).add(session.id))
       try {
         await copySession(session.id)
       } catch (error) {
@@ -325,6 +391,22 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
           componentName: 'Sidebar',
           operation: 'copySession',
           sessionId: session.id,
+        })
+        useNotificationStore.getState().addNotification({
+          title: '复制会话失败',
+          message:
+            (error as { message?: string })?.message ?? '请检查网络连接后重试',
+          priority: 'normal',
+          category: 'error',
+          isBlocking: false,
+          autoDismissMs: 5000,
+          sourceLabel: '前端',
+        })
+      } finally {
+        setCopyingSessionIds((prev) => {
+          const next = new Set(prev)
+          next.delete(session.id)
+          return next
         })
       }
     },
@@ -378,16 +460,16 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
   }, [isMobile, setSidebarCollapsed])
 
   /**
-   * 处理会话点击（移动端自动关闭侧边栏）
+   * 处理会话点击（移动端自动收抽屉+工作区覆盖层，回对话主管道视图）
    */
   const handleSessionClickMobile = useCallback(
     async (sessionId: string) => {
       await handleSessionClick(sessionId)
       if (isMobile) {
-        setSidebarCollapsed(true)
+        closeMobileWorkspaceSurfaces()
       }
     },
-    [handleSessionClick, isMobile, setSidebarCollapsed],
+    [handleSessionClick, isMobile, closeMobileWorkspaceSurfaces],
   )
 
   const handlePluginClick = useCallback(
@@ -398,13 +480,9 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
         // 兜底（未声明路径落 '*' 通配只会静默回首页，P0-1）
         openWorkspacePanelByPath(entry.path)
       } else if (entry.widget) {
-        openWorkspacePanel({
-          id: `ws-plugin-${entry.id}`,
-          title: entry.title || entry.id,
-          component: String(entry.widget),
-          icon: entry.icon,
-          moduleId: entry.pluginId ? `__plugin_${entry.pluginId}__` : `__contrib_${entry.id}__`,
-        })
+        // workspace.tab 域走 SlotRegistry keyed 槽（C4 收敛）；非收敛域
+        // widget 直开（opener pluginPageSpec 统一映射）
+        openPluginPage(entry)
       } else {
         // 容器条目（viewsContainers）：优先取容器下声明了 widget 的视图条目，
         // 带其静态 props 渲染（声明数据直通 widget）；无视图条目时用容器 id 兜底
@@ -459,7 +537,10 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
           // 区域背景关系 --region-sidebar-bg 由 .theme-sidebar-area CSS 规则统一消费）
           // theme-sidebar-area 叠加主题区域纹理（--sidebar-texture）
           'theme-sidebar-area',
-          isMobile && !sidebarCollapsed && 'fixed top-0 left-0 z-50 shadow-2xl',
+          // 移动端 fixed 抽屉：顶沿避让状态栏（全屏沉浸下系统栏浮于内容上，
+          // --safe-area-top 由壳注入/env 提供，桌面=0）；fixed 相对视口定位，
+          // 不受外层抽屉容器 top 约束
+          isMobile && !sidebarCollapsed && 'fixed left-0 z-50 shadow-2xl top-[var(--safe-area-top,0px)]',
         )}
         style={
           sidebarCollapsed && !isMobile
@@ -478,6 +559,9 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                   minWidth: `${SIDEBAR_STYLES.width.mobile}px`,
                   maxWidth: `${SIDEBAR_STYLES.width.mobile}px`,
                   flexShrink: 0,
+                  // fixed 抽屉的 h-full 相对视口取高，不扣顶部安全区偏移会把
+                  // 底栏（用户/设置/主题/通知）整体推出视口外（top+height>dvh）
+                  height: 'calc(100dvh - var(--safe-area-top, 0px) - var(--safe-area-bottom, 0px))',
                 }
               : {
                   width: '100%',
@@ -500,14 +584,14 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               className={cn(
                 'mb-2 flex h-10 w-10 items-center justify-center rounded-lg transition-colors',
                 activeView === 'sessions'
-                  ? 'text-[var(--ds-accent-primary,#22D3EE)]'
+                  ? 'text-[var(--ds-accent-primary)]'
                   : 'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]',
               )}
               style={
                 activeView === 'sessions'
                   ? {
-                      background: 'var(--bg-elevated, var(--ds-bg-elevated, #111C38))',
-                      boxShadow: 'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.45))',
+                      background: 'var(--ds-bg-elevated)',
+                      boxShadow: 'inset 0 0 0 1px var(--ds-border-active)',
                     }
                   : undefined
               }
@@ -527,14 +611,14 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               className={cn(
                 'mb-2 flex h-10 w-10 items-center justify-center rounded-lg transition-colors',
                 activeView === 'tasks'
-                  ? 'text-[var(--ds-accent-primary,#22D3EE)]'
+                  ? 'text-[var(--ds-accent-primary)]'
                   : 'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]',
               )}
               style={
                 activeView === 'tasks'
                   ? {
-                      background: 'var(--bg-elevated, var(--ds-bg-elevated, #111C38))',
-                      boxShadow: 'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.45))',
+                      background: 'var(--ds-bg-elevated)',
+                      boxShadow: 'inset 0 0 0 1px var(--ds-border-active)',
                     }
                   : undefined
               }
@@ -554,15 +638,15 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                   className={cn(
                     'mb-2 flex h-10 w-10 items-center justify-center rounded-lg transition-colors',
                     selected
-                      ? 'text-[var(--ds-accent-primary,#22D3EE)]'
+                      ? 'text-[var(--ds-accent-primary)]'
                       : 'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]',
                   )}
                   style={
                     selected
                       ? {
-                          background: 'var(--bg-elevated, var(--ds-bg-elevated, #111C38))',
+                          background: 'var(--ds-bg-elevated)',
                           boxShadow:
-                            'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.45))',
+                            'inset 0 0 0 1px var(--ds-border-active)',
                         }
                       : undefined
                   }
@@ -578,90 +662,22 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
               className="mt-auto flex flex-col items-center gap-2 pb-1"
               data-testid="sidebar-rail-footer"
             >
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button
-                    type="button"
-                    className={cn(
-                      'flex h-9 w-9 items-center justify-center rounded-lg transition-colors outline-none data-[state=open]:bg-[var(--hover-overlay)]',
-                      isAuthenticated
-                        ? 'text-muted-foreground hover:text-foreground hover:bg-[var(--hover-overlay)]'
-                        : 'text-primary hover:bg-[var(--hover-overlay)]',
-                    )}
-                    title={
-                      isAuthenticated
-                        ? `${(user as { username?: string; email?: string } | null)?.username || '用户'} · 点击展开`
-                        : '点击登录'
-                    }
-                    aria-label="账号菜单"
-                    data-testid="sidebar-rail-user"
-                  >
-                    <User className="h-4 w-4" />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent
-                  side="right"
-                  align="center"
-                  sideOffset={6}
-                  className="w-48"
-                  data-testid="sidebar-rail-user-menu"
-                >
-                  <DropdownMenuLabel className="text-[11px]">
-                    {isAuthenticated
-                      ? (user as { username?: string } | null)?.username || '已登录'
-                      : '未登录'}
-                  </DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                  {!isAuthenticated && (
-                    <DropdownMenuItem onClick={() => setLoginModalOpen(true)}>
-                      登录
-                    </DropdownMenuItem>
-                  )}
-                  {isAuthenticated && (
-                    <>
-                      <DropdownMenuItem onClick={() => setLoginModalOpen(true)}>
-                        切换账号
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
-                        onClick={handleLogout}
-                        className="text-destructive focus:text-destructive"
-                      >
-                        退出登录
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                    </>
-                  )}
-                  <DropdownMenuItem onClick={() => openWorkspacePanelByPath('/settings')}>
-                    设置
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => openWorkspacePanelByPath('/monitoring')}>
-                    监控
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    onClick={() => openWorkspacePanelByPath('/tasks')}
-                    data-testid="sidebar-user-menu-tasks"
-                  >
-                    任务管理
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <SidebarUserMenu
+                variant="rail"
+                isAuthenticated={isAuthenticated}
+                user={user as { username?: string; email?: string } | null}
+                loggingOut={loggingOut}
+                onOpenLogin={() => setLoginModalOpen(true)}
+                onOpenChangePassword={() => setChangePasswordOpen(true)}
+                onLogout={handleLogout}
+              />
               <SettingsEntryButton rail />
               <ThemeButton compact />
-              <button
-                type="button"
+              <SidebarBellButton
+                variant="rail"
+                unreadCount={notificationUnreadCount}
                 onClick={toggleNotificationPanel}
-                className="text-muted-foreground hover:text-foreground relative flex h-9 w-9 items-center justify-center rounded-lg hover:bg-[var(--hover-overlay)]"
-                title="通知"
-                aria-label={`通知${notificationUnreadCount > 0 ? ` (${notificationUnreadCount} 条未读)` : ''}`}
-                data-testid="sidebar-rail-notification"
-              >
-                <Bell className="h-4 w-4" />
-                {notificationUnreadCount > 0 && (
-                  <span className="bg-status-error text-status-error-foreground absolute -top-0.5 -right-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full px-0.5 text-[9px] font-bold">
-                    {notificationUnreadCount > 99 ? '99+' : notificationUnreadCount}
-                  </span>
-                )}
-              </button>
+              />
             </div>
           </div>
         ) : (
@@ -677,9 +693,9 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                 >
                   <span
                     className="flex h-6 w-6 items-center justify-center rounded-md"
-                    style={{ background: 'var(--bg-elevated, var(--ds-bg-elevated, #111C38))' }}
+                    style={{ background: 'var(--ds-bg-elevated)' }}
                   >
-                    <Plus className="h-3.5 w-3.5 text-[var(--ds-accent-primary,#22D3EE)]" />
+                    <Plus className="h-3.5 w-3.5 text-[var(--ds-accent-primary)]" />
                   </span>
                   新建会话
                 </button>
@@ -697,9 +713,9 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                   style={
                     activeView === 'tasks'
                       ? {
-                          background: 'var(--bg-elevated, var(--ds-bg-elevated, #111C38))',
+                          background: 'var(--ds-bg-elevated)',
                           boxShadow:
-                            'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.35))',
+                            'inset 0 0 0 1px var(--ds-border-active)',
                         }
                       : undefined
                   }
@@ -729,9 +745,9 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                       style={
                         selected
                           ? {
-                              background: 'var(--bg-elevated, var(--ds-bg-elevated, #111C38))',
+                              background: 'var(--ds-bg-elevated)',
                               boxShadow:
-                                'inset 0 0 0 1px var(--ds-border-active, rgba(34,211,238,0.35))',
+                                'inset 0 0 0 1px var(--ds-border-active)',
                             }
                           : undefined
                       }
@@ -833,6 +849,7 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                     sessions={filteredSessions}
                     activeSessionId={activeSessionId}
                     deletingSessionIds={deletingSessionIds}
+                    copyingSessionIds={copyingSessionIds}
                     onSessionClick={handleSessionClickMobile}
                     onDeleteSession={deleteSession}
                     onEditSession={handleEditSession}
@@ -840,11 +857,21 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                     onStarSession={handleStarSession}
                     onPinSession={handlePinSession}
                     onResetMessages={handleResetMessages}
+                    onCreateInWorkspace={handleCreateInWorkspace}
                     className="px-2"
                     itemHeight={SIDEBAR_STYLES.itemHeight}
                   />
                 )}
               </div>
+
+              {/* sidebar.block 槽锚点（C4 槽位机制，会话列表下方区块；
+                  布局契约=全宽纵向卡流带上限，条目渲染进宿主容器——
+                  设计真值 = docs/working/DSH生态嫁接通用机制设计_20261104.md §4.4） */}
+              <SlotHost
+                slotKey="sidebar.block"
+                whenContext={{ 'user.role': user?.role ?? 'guest' }}
+                className="max-h-64 shrink-0 overflow-y-auto px-2 pb-1"
+              />
 
               {/* 底栏：紧凑单行，不占大空白 */}
               {/* 插件状态项条带（dock/status 贡献，原 StatusBar 迁移；无项不渲染） */}
@@ -853,114 +880,22 @@ export const Sidebar = memo<SidebarProps>(({ isMobile = false }) => {
                 className="border-border mt-auto flex h-9 shrink-0 items-center gap-0.5 border-t px-1.5"
                 data-testid="sidebar-footer"
               >
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <button
-                      type="button"
-                      className="text-muted-foreground hover:text-foreground flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-md px-1 py-1 text-left transition-colors outline-none hover:bg-[var(--hover-overlay)] data-[state=open]:bg-[var(--hover-overlay)]"
-                      title={
-                        isAuthenticated
-                          ? `${(user as { username?: string } | null)?.username || '用户'} · 点击展开`
-                          : '点击登录'
-                      }
-                      aria-label="账号菜单"
-                      data-testid="sidebar-user-area"
-                    >
-                      <User className="h-3.5 w-3.5 shrink-0 opacity-80" />
-                      <span className="truncate text-[11px] leading-none">
-                        {(user as { username?: string; email?: string } | null)?.username ||
-                          (user as { username?: string; email?: string } | null)?.email ||
-                          '未登录'}
-                      </span>
-                      {!isAuthenticated && (
-                        <span className="text-primary ml-auto shrink-0 text-[10px] font-medium">
-                          登录
-                        </span>
-                      )}
-                    </button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent
-                    side="top"
-                    align="start"
-                    sideOffset={6}
-                    className="w-48"
-                    data-testid="sidebar-user-menu"
-                  >
-                    <DropdownMenuLabel className="text-[11px]">
-                      {isAuthenticated
-                        ? (user as { username?: string } | null)?.username || '已登录'
-                        : '未登录'}
-                    </DropdownMenuLabel>
-                    <DropdownMenuSeparator />
-                    {!isAuthenticated && (
-                      <DropdownMenuItem
-                        onClick={() => setLoginModalOpen(true)}
-                        data-testid="sidebar-user-menu-login"
-                      >
-                        登录
-                      </DropdownMenuItem>
-                    )}
-                    {isAuthenticated && (
-                      <>
-                        <DropdownMenuItem
-                          onClick={() => setChangePasswordOpen(true)}
-                          data-testid="sidebar-user-menu-change-password"
-                        >
-                          修改密码
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onClick={() => setLoginModalOpen(true)}
-                          data-testid="sidebar-user-menu-switch"
-                        >
-                          切换账号
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onClick={handleLogout}
-                          className="text-destructive focus:text-destructive"
-                          data-testid="sidebar-user-menu-logout"
-                        >
-                          退出登录
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                      </>
-                    )}
-                    <DropdownMenuItem
-                      onClick={() => openWorkspacePanelByPath('/settings')}
-                      data-testid="sidebar-user-menu-settings"
-                    >
-                      设置
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      onClick={() => openWorkspacePanelByPath('/monitoring')}
-                      data-testid="sidebar-user-menu-monitoring"
-                    >
-                      监控
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      onClick={() => openWorkspacePanelByPath('/tasks')}
-                      data-testid="sidebar-user-menu-tasks-2"
-                    >
-                      任务管理
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                <SidebarUserMenu
+                  variant="footer"
+                  isAuthenticated={isAuthenticated}
+                  user={user as { username?: string; email?: string } | null}
+                  loggingOut={loggingOut}
+                  onOpenLogin={() => setLoginModalOpen(true)}
+                  onOpenChangePassword={() => setChangePasswordOpen(true)}
+                  onLogout={handleLogout}
+                />
                 <SettingsEntryButton />
                 <ThemeButton compact />
-                <button
-                  type="button"
+                <SidebarBellButton
+                  variant="footer"
+                  unreadCount={notificationUnreadCount}
                   onClick={toggleNotificationPanel}
-                  className="text-muted-foreground hover:text-foreground relative flex h-7 w-7 shrink-0 items-center justify-center rounded-md hover:bg-[var(--hover-overlay)]"
-                  title="通知"
-                  aria-label={`通知${notificationUnreadCount > 0 ? ` (${notificationUnreadCount} 条未读)` : ''}`}
-                  data-testid="sidebar-notification"
-                >
-                  <Bell className="h-3.5 w-3.5" />
-                  {notificationUnreadCount > 0 && (
-                    <span className="bg-status-error text-status-error-foreground absolute -top-1 -right-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full px-0.5 text-[9px] font-bold">
-                      {notificationUnreadCount > 99 ? '99+' : notificationUnreadCount}
-                    </span>
-                  )}
-                </button>
+                />
               </div>
             </div>
           </>

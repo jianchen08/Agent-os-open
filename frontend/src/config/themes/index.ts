@@ -38,6 +38,33 @@ export const presetThemes: Record<string, ThemeConfig> = {
 }
 
 /**
+ * 颜色值定义常量（定义层）
+ *
+ * 供非定义层文件消费的默认色值：主题色卫生门禁要求颜色字面量只出现在定义层，
+ * 组件/服务侧一律从这里导入。
+ */
+export const DEFAULT_COLOR_PICKER_HEX = '#000000'
+
+export const USER_THEME_FALLBACK_PREVIEW = {
+  primary: '#8b5cf6',
+  background: '#0f172a',
+  surface: '#1e293b',
+  text: '#f8fafc',
+  accent: '#06b6d4',
+} as const
+
+export const DEFAULT_TEXTURE_TINT = 'rgba(255,255,255,0.03)'
+
+/**
+ * light/dark 家族预览样本（S9 裁定：主题本体预览样本须恒定可辨，
+ * 不随当前主题令牌联动；后端未下发 preview 元数据时取此静态近似值）
+ */
+export const THEME_PREVIEW_FALLBACK = {
+  light: { bg: '#f8fafc', primary: '#2563eb', text: '#0f172a' },
+  dark: { bg: '#0f172a', primary: '#3b82f6', text: '#f8fafc' },
+} as const
+
+/**
  * 预设主题列表
  *
  * 用于 UI 展示主题选择器

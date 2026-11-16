@@ -1,0 +1,186 @@
+{
+  "id": "resource_merge_tool",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Resource Merge Tool",
+  "description": "基于 git worktree 的资源合并与回滚 MCP 工具",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "metrics_class": "tool",
+    "tools": [
+      {
+        "name": "resource_merge",
+        "description": "基于 git worktree 的资源合并与回滚工具",
+        "render": {
+          "card": "form",
+          "title": "资源合并"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "prepare",
+                "merge",
+                "rollback",
+                "git_status",
+                "git_commit",
+                "git_diff",
+                "git_log",
+                "git_merge_abort",
+                "cleanup"
+              ]
+            },
+            "workspace": {
+              "type": "string"
+            },
+            "target_files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "target_dir": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "checkpoint_id": {
+              "type": "string"
+            },
+            "merge_strategy": {
+              "type": "string",
+              "enum": [
+                "copy",
+                "git_merge",
+                "git_merge_no_ff"
+              ],
+              "default": "copy"
+            }
+          },
+          "required": [
+            "action",
+            "workspace"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "action",
+            "workspace"
+          ],
+          "properties": {
+            "action": {
+              "type": "string",
+              "description": "回显操作（prepare/merge/rollback/git_*/cleanup）"
+            },
+            "workspace": {
+              "type": "string"
+            },
+            "branch_name": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "base_commit": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "target_dir": {
+              "type": "string"
+            },
+            "merged_files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "change_report": {
+              "type": "object",
+              "description": "added/modified/deleted 文件清单"
+            },
+            "mode": {
+              "type": "string"
+            },
+            "merge_strategy": {
+              "type": "string"
+            },
+            "merge_commit": {
+              "type": "string"
+            },
+            "staged": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "untracked": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "unstaged": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "total_changes": {
+              "type": "integer"
+            },
+            "commit_hash": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "diff": {
+              "type": "string"
+            },
+            "commits": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "hash": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "time": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "cleanup_failed": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "permissions": {},
+  "priority": 20,
+  "host_group": "light"
+}

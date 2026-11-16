@@ -2,9 +2,11 @@
 
 import { API_ENDPOINTS } from '@/constants/api'
 import apiClient from '@/services/api/client'
+import { mergeSessionsWithWatchlist } from '@/services/sessionWatchlist'
 import { mapThreadToSession, type ThreadStateResponse } from '@/utils/mappers'
 import { checkIsSystemMessage } from '@/utils/messageType'
 import { requestWithRetry } from '@/utils/retry'
+import { truncateToolResultData } from '@/utils/toolResultTruncate'
 import type { MessagePart, ToolCallPart } from '@/types/messageParts'
 import type { Message, MessageToolCall, Session, ToolCallStatus } from '@/types/models'
 import type { RetryOptions } from '@/utils/retry'
@@ -71,6 +73,8 @@ interface ThreadCreateResponse {
   agent_id?: string | null
   pipeline_ids?: string[]
   active_pipeline_id?: string | null
+  /** 内核合并默认值后的完整 metadata（workspace 等出生值在此回显） */
+  metadata?: Record<string, unknown>
 }
 
 /**
@@ -151,15 +155,21 @@ function validateSessionId(sessionId: string): void {
  * （messageHandler）都经它生成 parts[]——流式收到的消息与刷新后从数据库加载
  * 的数据形态一致，不再有两套 parts 构造逻辑。
  */
-/** 工具结果消息（role=tool）映射：结果/结构化 envelope/错误/耗时字段投影 */
+/** 工具结果消息（role=tool）映射：结果/结构化 envelope/错误/耗时字段投影。
+ *  结果体超阈值统一截断为「预览+标记」（数据面瘦身批次 1.2，写入面与流式
+ *  toolHandler 收敛到 truncateToolResultData 单一纯函数）；展开回填按
+ *  sequence 单条重取时传 includeFullToolResults 旁路截断拿全量。 */
 function buildToolResultMessage(
   backendMessage: BackendMessageResponse,
   sessionId: string,
+  opts?: { includeFullToolResults?: boolean },
 ): Message {
+  const keepFull = opts?.includeFullToolResults === true
+  const msgSequence = backendMessage.sequence
   return {
     id: backendMessage.id,
     sessionId: sessionId,
-    sequence: backendMessage.sequence ?? 0,
+    sequence: msgSequence ?? 0,
     role: 'tool',
     content: backendMessage.content,
     timestamp: backendMessage.timestamp,
@@ -171,11 +181,16 @@ function buildToolResultMessage(
     // tool 消息的结果：后端把执行结果放在 content 里（分层持久化投影），
     // 旧路径放在 toolResult 字段。这里取 toolResult，为空则用 content 兜底，
     // 保证 merge 函数能把结果注入 assistant 的 tool_call part（ActivityCard 显示）。
-    toolResult: backendMessage.toolResult ?? backendMessage.content,
+    // 超阈值截断（content 兜底的全文同样截断，不再整份常驻）。
+    toolResult: keepFull
+      ? (backendMessage.toolResult ?? backendMessage.content)
+      : truncateToolResultData(backendMessage.toolResult ?? backendMessage.content, msgSequence),
     // 结构化结果 envelope（result_data 投影）：与流式 tool_result 事件同源，
     // merge 时注入 tool_call part 的 resultData。null 归一为 undefined
     // （对齐流式 handler 的 ?? 语义，失败工具双侧均为 undefined）。
-    toolResultData: backendMessage.toolResultData ?? undefined,
+    toolResultData: keepFull
+      ? (backendMessage.toolResultData ?? undefined)
+      : truncateToolResultData(backendMessage.toolResultData ?? undefined, msgSequence),
     // 后端新字段为 error（tool-role 消息携带 status + error），旧字段为 toolError。
     // 优先取 error、兼容兜底，mergeConsecutiveAssistantMessages 据 toolError 判定失败。
     toolError: backendMessage.error ?? backendMessage.toolError,
@@ -329,9 +344,10 @@ function assembleNonToolParts(params: {
 export function mapBackendMessageToMessage(
   backendMessage: BackendMessageResponse,
   sessionId: string,
+  opts?: { includeFullToolResults?: boolean },
 ): Message {
   if (backendMessage.role === 'tool') {
-    return buildToolResultMessage(backendMessage, sessionId)
+    return buildToolResultMessage(backendMessage, sessionId, opts)
   }
 
   const toolCalls =
@@ -362,7 +378,8 @@ export function mapBackendMessageToMessage(
     },
     clientMessageId: (backendMessage.metadata?.client_message_id as string | undefined) ?? undefined,
     attachments: backendMessage.attachments,
-    thinking,
+    // 思考只落 thinking part（上方 assembleNonToolParts），不写顶层 thinking——
+    // 显示主路径全走 parts，顶层双份是纯内存冗余（批次 1 数据面瘦身）。
     parts: parts.length > 0 ? parts : undefined,
   }
 }
@@ -526,7 +543,10 @@ export async function getSessions(options: RetryOptions = {}): Promise<Session[]
     const threads = Array.isArray(response.data)
       ? response.data
       : (response.data?.threads || [])
-    return threads.map(mapThreadToSession)
+    // 服务端列表按 updated_at DESC 截断（端点硬编码 limit，无分页），新建后
+    // 零活动的会话会被挤出窗口——登记表合并补回，侧栏/搜索映射/会话树分组
+    // 不再丢新会话
+    return mergeSessionsWithWatchlist(threads.map(mapThreadToSession))
   }, options)
 }
 
@@ -581,6 +601,10 @@ export async function createSession(
       agent_id: response.data.agent_id || null,
       pipeline_ids: response.data.pipeline_ids || [],
       active_pipeline_id: response.data.active_pipeline_id || null,
+      // metadata 必须回接：workspace 等出生值只在响应 metadata 里（内核合并
+      // 默认后回显），不接则新建会话在缓存里丢 workspace、列表不聚合，直到
+      // 下次列表刷新才自愈。响应缺 metadata（异常后端）时回退请求侧值。
+      metadata: response.data.metadata ?? requestData.metadata,
     }
 
     return mapThreadToSession(threadState)
@@ -607,6 +631,8 @@ export async function getMessages(
     limit?: number
     before_sequence?: number
     after_sequence?: number
+    /** 前端内部标志（不映射为查询参数）：旁路工具结果截断，展开回填取全量用 */
+    includeFullToolResults?: boolean
   },
   options: RetryOptions = {},
 ): Promise<{
@@ -647,8 +673,9 @@ export async function getMessages(
     }
 
     const rawMessages = payload.messages || []
+    const includeFullToolResults = filters?.includeFullToolResults === true
     const mapped = rawMessages.map((msg: BackendMessageResponse) =>
-      mapBackendMessageToMessage(msg, sessionId),
+      mapBackendMessageToMessage(msg, sessionId, { includeFullToolResults }),
     )
     // has_more 为信封必带字段（kernel session_routes.rs 恒回 {messages,total,has_more}，
     // 空列表同样回 false）；缺失/类型不符属协议违反，fail-closed 抛错而非默认 false

@@ -41,6 +41,7 @@ vi.mock('@/stores/sessionStore', async () => {
 })
 
 import { WebviewWidget } from '../WebviewWidget'
+import { userScopedKey as pk } from '@/utils/userScopedStorage'
 
 const apiGet = apiClient.get as unknown as Mock
 const apiPost = apiClient.post as unknown as Mock
@@ -116,7 +117,7 @@ describe('WebviewWidget — mode.possess 附身桥（注入键 registry 派生�
     expect(notified[0].message).toContain('接管人设')
     expect(notified[0].message).toContain('缓存命中')
     // persist 契约：重启可恢复（键 persona.possessed）
-    expect(localStorage.getItem('persona.possessed')).toContain('card_luna')
+    expect(localStorage.getItem(pk('persona.possessed'))).toContain('card_luna')
     expect(apiPost).not.toHaveBeenCalled()
   })
 

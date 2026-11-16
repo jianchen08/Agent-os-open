@@ -5,6 +5,7 @@
  * @module activity
  */
 
+import type { ErrorEnvelope } from './api'
 import type { ReactNode } from 'react'
 
 /**
@@ -28,6 +29,7 @@ export type ActivityStatus =
   | 'completed'
   | 'failed'
   | 'cancelled'
+  | 'interrupted'
 
 /**
  * 详情区块内容类型
@@ -55,6 +57,10 @@ export type DetailContentType =
   // （chat_card form 块声明，ActivityCard 透传 FormWidget）；否则 kvItems 标量
   // + jsonItems 长文本折叠的只读表单视图（render 意图数据路由产物）。
   | 'form'
+  // chat.toolview keyed 槽插件自定义卡出口（C4 槽位机制）：`<pluginId>/<name>`
+  // 命名空间卡型——W 通用递送注册组件 / webview 懒加载，由 ToolviewCardHost
+  // 按卡型键路由（装载 fail-closed，未装载可见占位）。
+  | (string & {})
 
 /**
  * 活动操作类型
@@ -110,6 +116,12 @@ export interface ActivityDetailBlock {
   web?:
     | { kind: 'fetch'; url: string; statusCode: number; truncated: boolean }
     | { kind: 'search'; answer?: string; sources: { url: string; title?: string; snippet?: string; publishedAt?: string }[]; truncated: boolean }
+  /**
+   * 首次展开回调（工具结果截断回填接线）：true=回取成功、false=失败
+   * （DetailBlock 据此显示加载中/失败态；成功后 store 更新，本块被全量
+   * 结果渲染替换）。缺省 = 普通块，展开无副作用。
+   */
+  onExpand?: () => Promise<boolean>
 }
 
 /**
@@ -158,6 +170,18 @@ export interface ActivityData {
   filePath?: string
   /** 打开文件回调（点击文件名时调用） */
   onOpenFile?: (filePath: string, containerTaskId?: string) => void | Promise<void>
+  /** 关联的任务执行管道 ID（如 task_submit 提交的任务） */
+  pipelineId?: string
+  /** 打开任务执行管道回调（点击任务名/打开按钮时调用） */
+  onOpenPipeline?: (pipelineId: string) => void | Promise<void>
+  /** 关联的插件页面 id（工具 render.open_page 声明，如 pim_today「今日」页） */
+  panelPageId?: string
+  /** 打开插件页面时定位高亮的条目 id（工具结果实体 id，如 capture 回执 todo.id） */
+  panelPageItemId?: string
+  /** 打开按钮文案（声明 open_page.label，缺省「打开」） */
+  panelPageLabel?: string
+  /** 打开插件页面回调（点击标题/按钮时调用；第二参为定位条目 id） */
+  onOpenPanel?: (pageId: string, itemId?: string) => void | Promise<void>
   /** 活动状态 */
   status: ActivityStatus
   /** 状态文本描述（可选，有默认值） */
@@ -179,7 +203,7 @@ export interface ActivityData {
   /** 头部大小徽标（字节，file_card 卡由 result.size 注入） */
   size?: number
   /** 错误信息（统一错误信封对象或旧形态字符串，渲染端提取 message） */
-  error?: string | import('./api').ErrorEnvelope
+  error?: string | ErrorEnvelope
   /** 时间戳 */
   timestamp?: string
   /** 可操作项（重试、删除等） */
@@ -250,4 +274,27 @@ export function entryDurationMs(
   return entry.endedAt
     ? new Date(entry.endedAt).getTime() - start
     : nowMs - start
+}
+
+/**
+ * 工具调用活动状态推导（显式终态范式：进行中只能由持久化状态在活跃流式
+ * 上下文中声明，不得由数据缺席推导）。
+ *
+ * 优先级：
+ * 1. 终态证据在场（错误 → failed；结果/结构化结果 → completed），任何上下文不回退；
+ * 2. 显式 cancelled → cancelled；
+ * 3. 活跃流式上下文中的在途 state（calling/streaming）→ running（真在途）；
+ * 4. 非流式上下文 + 无终态证据的在途 state → interrupted（中断终态）——历史
+ *    孤儿工具调用（run 被中断时工具结果从未落库）在此收口，渲染静止终态卡，
+ *    不再永动「进行中」转圈/计时。
+ */
+export function deriveToolCallActivityStatus(
+  evidence: { state?: string; hasResult?: boolean; hasError?: boolean },
+  inStreamingContext: boolean,
+): ActivityStatus {
+  if (evidence.hasError) return 'failed'
+  if (evidence.hasResult) return 'completed'
+  if (evidence.state === 'cancelled') return 'cancelled'
+  if (inStreamingContext) return 'running'
+  return 'interrupted'
 }

@@ -5,7 +5,7 @@
 //! 通过 stdin/stdout 与 Python 边车进程通信，完成 initialize 握手和 tools/call 调用。
 //!
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
-use crate::capability::{parse_capability_method_with, CapabilityRouter, STANDARD_CAPABILITIES};
+use crate::capability::{CapabilityRouter, STANDARD_CAPABILITIES};
 use crate::error::McpError;
 
 use agentos_core::traits::AuthType;
@@ -57,6 +57,20 @@ const LINE_BUF_SHRINK_BYTES: usize = 128 * 1024;
 /// notification 派发队列容量（有界）：慢消费 + 高频流式 chunk 下防无界
 /// 积压——待处理条目内存上限恒为容量 × 单条目大小。
 const NOTIFICATION_QUEUE_CAPACITY: usize = 1024;
+
+/// 进程级 sidecar stdout EOF 累计（跨全部 stdio sidecar 聚合，cumulative）。
+///
+/// reader loop 的 EOF 分支（`Ok(0)`，进程退出/崩溃致 stdout 关闭）递增。此前该
+/// 分支仅 tracing 日志，监控面无处可采（装机插件组事故 2026-10-17 卡5/卡9：
+/// respawn crash-loop 的 EOF 速率告警因此不可采）。采样源形态同
+/// `reverse_call_levels`（crate 自采静态 + 内核 flush 节拍每秒采样），聚合器侧
+/// 以 `kernel` 命名空间的 `mcp.sidecar_stdout_eof_total` counter 暴露。
+static SIDECAR_STDOUT_EOF_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// 内核指标 flush 节拍的采样口：sidecar stdout EOF 累计次数（进程启动以来）。
+pub fn sidecar_stdout_eof_total() -> u64 {
+    SIDECAR_STDOUT_EOF_TOTAL.load(Ordering::Relaxed)
+}
 
 // tracing 的 warn 宏用于 reader_loop 的降级日志
 use tracing::warn;
@@ -164,6 +178,9 @@ pub struct McpClient {
     /// Capability 路由器——处理 sidecar 反向调用内核能力。
     /// None 时 sidecar 反向调用将被拒绝（返回 method not found）。
     router: Option<Arc<dyn CapabilityRouter>>,
+    /// 反向调用并发闸门（R-1 排队制）：acquire-with-wait，满载排队零拒绝，
+    /// 仅排队等待超限时回 JSON-RPC error。
+    reverse_gate: Arc<ReverseGate>,
     /// JSON-RPC 请求等待响应的超时（默认 [`DEFAULT_REQUEST_TIMEOUT_SECS`]）。
     ///
     /// 默认值（86400s）为审批/人机交互族统一值，同时覆盖 sidecar 端 LLM 调用的
@@ -177,6 +194,12 @@ pub struct McpClient {
     /// 每步新分配大缓冲在长跑下放大分配器压力——容量保留、内容每帧清零重写
     /// （M3 热路径缓冲复用；stdout/stderr 行缓冲另有容量棘轮治理）。
     raw_frame_scratch: parking_lot::Mutex<Vec<u8>>,
+    /// 合宿成员下线观察者（卡3 通知面）：stderr 出现
+    /// `[cohost][member-offline]` 结构性行时回调（解析见 member_offline 模块）。
+    /// None = 只转发 tracing（旧行为）。
+    #[allow(clippy::type_complexity)]
+    stderr_notice_observer:
+        Option<Arc<dyn Fn(&crate::member_offline::MemberOfflineNotice) + Send + Sync>>,
 }
 
 /// 出网 URL 边界守卫（安全审查摘出）。
@@ -232,8 +255,15 @@ fn is_outbound_url_allowed(url: &str) -> Result<(), McpError> {
         });
     }
     let block_loopback = std::env::var("AGENTOS_MCP_BLOCK_LOOPBACK").as_deref() == Ok("1");
-    // 字面 IP 直判
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+    // 字面 IP 直判：必须经 url::Host 枚举直取——host_str 对 IPv6 返回带
+    // 方括号形态，IpAddr::parse 恒失败；若按主机名分支处理，Linux glibc
+    // 对方括号名解析恒败会走"解析失败放行" fail-open，私网/环回 IPv6
+    // 字面量即绕过守卫（Windows getaddrinfo 宽容方括号，本地测不出）。
+    if let Some(ip) = parsed.host().and_then(|h| match h {
+        url::Host::Ipv4(v4) => Some(std::net::IpAddr::V4(v4)),
+        url::Host::Ipv6(v6) => Some(std::net::IpAddr::V6(v6)),
+        url::Host::Domain(_) => None,
+    }) {
         return if ip_address_blocked(ip, block_loopback) {
             Err(McpError::ConnectionFailed {
                 message: format!(
@@ -244,25 +274,6 @@ fn is_outbound_url_allowed(url: &str) -> Result<(), McpError> {
         } else {
             Ok(())
         };
-    }
-    // 方括号 IPv6（url::host_str 保留括号，直接 parse 必失败）：去括号后按
-    // 字面 IP 同判。否则落到主机名解析分支——Linux glibc 对带括号串解析失败
-    // 走 fail-open 放行（[::1]/[fc00::] 特殊段绕过拦截；Windows 解析器反而
-    // 认得括号数值地址，故仅 Linux CI 暴露）。
-    let bare = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
-    if let Some(bare) = bare {
-        if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-            return if ip_address_blocked(ip, block_loopback) {
-                Err(McpError::ConnectionFailed {
-                    message: format!(
-                        "MCP http 出网被拒：{url} 命中禁止网段（私网/元数据/特殊段，环回{}放行）",
-                        if block_loopback { "不" } else { "" },
-                    ),
-                })
-            } else {
-                Ok(())
-            };
-        }
     }
     // 主机名：解析后逐个 IP 校验
     use std::net::ToSocketAddrs;
@@ -415,18 +426,9 @@ mod outbound_guard_tests {
 
     /// 加固模式（AGENTOS_MCP_BLOCK_LOOPBACK=1）连环回一并拒绝——
     /// 环境变量经进程 globals，故本用例串行化在自身内完成（设置-断言-恢复）。
-    /// 恢复走 Drop 守卫：窗口内断言 panic 不得遗留 env=1 毒化后续并发用例
-    /// （一次实证：IPv6 方括号判缺失致本用例 panic，16 个环回 mock 用例连坐）。
     #[test]
     fn test_outbound_url_guard_block_loopback_env_hardens() {
-        struct EnvRestore;
-        impl Drop for EnvRestore {
-            fn drop(&mut self) {
-                std::env::remove_var("AGENTOS_MCP_BLOCK_LOOPBACK");
-            }
-        }
         let _guard = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
-        let _restore = EnvRestore;
         // 先确保未加固时环回放行（对照基线）
         std::env::remove_var("AGENTOS_MCP_BLOCK_LOOPBACK");
         assert!(is_outbound_url_allowed("http://127.0.0.1:11434").is_ok());
@@ -442,7 +444,8 @@ mod outbound_guard_tests {
         );
         // 公网不受加固影响
         assert!(is_outbound_url_allowed("https://api.openai.com/v1").is_ok());
-        // env 恢复由 _restore Drop 守卫兜底（panic 安全）
+
+        std::env::remove_var("AGENTOS_MCP_BLOCK_LOOPBACK");
     }
 }
 
@@ -466,9 +469,11 @@ impl McpClient {
             stdio_dead: Arc::new(AtomicBool::new(false)),
             last_heartbeat_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             router: None,
+            reverse_gate: Arc::new(ReverseGate::from_env()),
             request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
             http_service: None,
             raw_frame_scratch: parking_lot::Mutex::new(Vec::new()),
+            stderr_notice_observer: None,
         }
     }
 
@@ -502,10 +507,22 @@ impl McpClient {
             stdio_dead: Arc::new(AtomicBool::new(false)),
             last_heartbeat_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             router: None,
+            reverse_gate: Arc::new(ReverseGate::from_env()),
             request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
             http_service: None,
             raw_frame_scratch: parking_lot::Mutex::new(Vec::new()),
+            stderr_notice_observer: None,
         }
+    }
+
+    /// 设置合宿成员下线观察者（卡3 通知面）：stderr 出现
+    /// `[cohost][member-offline]` 结构性行时回调（日志转发照旧，观察者旁路）。
+    pub fn with_stderr_notice_observer(
+        mut self,
+        observer: Arc<dyn Fn(&crate::member_offline::MemberOfflineNotice) + Send + Sync>,
+    ) -> Self {
+        self.stderr_notice_observer = Some(observer);
+        self
     }
 
     /// 设置 JSON-RPC 请求等待响应的超时。
@@ -535,6 +552,13 @@ impl McpClient {
     /// 未设置时，sidecar 反向调用将被拒绝（返回 method not found）。
     pub fn with_router(mut self, router: Arc<dyn CapabilityRouter>) -> Self {
         self.router = Some(router);
+        self
+    }
+
+    /// 显式注入反向调用并发闸门（测试注入精确并发/等待/超时配置用；
+    /// 生产缺省由 `ReverseGate::from_env` 按环境变量建闸）。
+    pub fn with_reverse_gate(mut self, gate: Arc<ReverseGate>) -> Self {
+        self.reverse_gate = gate;
         self
     }
 
@@ -670,6 +694,7 @@ impl McpClient {
             let stdout = Arc::clone(stdout);
             let pending = Arc::clone(&self.pending);
             let router = self.router.clone();
+            let reverse_gate = Arc::clone(&self.reverse_gate);
             // stdin 在 stdio 模式下必然存在（与 stdout 同时建立）；
             // reader loop 仅在 stdout 存在时启动，故 stdin 安全解包。
             let Some(stdin) = self.stdin.clone() else {
@@ -707,6 +732,9 @@ impl McpClient {
                             // sidecar stdout 关闭（进程退出/崩溃）：记 warn 让
                             // 崩溃在日志里可见，进行中的 send_request 不静默等满超时。
                             tracing::warn!("[mcp] sidecar stdout EOF（进程退出）");
+                            // 计数上浮监控面（卡9）：EOF 速率 = crash-loop 的
+                            // 直接信号，经内核 flush 节拍采样进聚合器。
+                            SIDECAR_STDOUT_EOF_TOTAL.fetch_add(1, Ordering::Relaxed);
                             // EOF 即清空 pending（drop 所有 oneshot sender）→ rx 端
                             // 立即收到 channel closed → send_request 快速失败返回
                             // 错误，不阻塞调用方至超时。
@@ -748,6 +776,7 @@ impl McpClient {
                                     id.clone(),
                                     router.clone(),
                                     Arc::clone(&stdin),
+                                    Arc::clone(&reverse_gate),
                                 );
                                 continue;
                             }
@@ -813,6 +842,7 @@ impl McpClient {
             let stderr = Arc::clone(stderr);
             let plugin_id = self.plugin_id.clone().unwrap_or_else(|| "?".to_string());
             let heartbeat = Arc::clone(&self.last_heartbeat_ms);
+            let notice_observer = self.stderr_notice_observer.clone();
 
             tokio::spawn(async move {
                 let mut reader = stderr.lock().await;
@@ -854,6 +884,15 @@ impl McpClient {
                                 continue;
                             }
                             tracing::info!(target: "sidecar", "[{}] {}", plugin_id, trimmed);
+                            // 合宿成员下线结构性行（卡3）：旁路回调通知面，日志
+                            // 转发照旧——观察者缺失时行为与之前逐字节一致。
+                            if let Some(observer) = &notice_observer {
+                                if let Some(notice) =
+                                    crate::member_offline::parse_member_offline_line(trimmed)
+                                {
+                                    observer(&notice);
+                                }
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -1152,6 +1191,21 @@ impl McpClient {
     /// 发送 initialize 请求完成 MCP 协议握手。
     /// config 参数为插件配置 JSON，将包含在 initialize params 的 `config` 字段中。
     pub async fn initialize(&self, config: &Value) -> Result<Value, McpError> {
+        self.initialize_with_member_configs(config, None).await
+    }
+
+    /// initialize 握手（合宿成员级配置注入形态）。
+    ///
+    /// `member_configs` 为 Some 时以 `member_configs` 字段随 params 下发：
+    /// {plugin_id: 该成员 config_files 注入命名空间}，SDK 合宿扇出按成员路由
+    /// （initialize 的单 `config` 只承载触发成员的命名空间，非触发成员的构造期
+    /// 配置会落空——2026-10-09 isolation_guard 部署实测根因）。独占宿主传 None，
+    /// params 不携带该字段，与旧形态字节一致。
+    pub async fn initialize_with_member_configs(
+        &self,
+        config: &Value,
+        member_configs: Option<&Value>,
+    ) -> Result<Value, McpError> {
         // HTTP transport：initialize 握手已在 connect（serve_client）内完成，
         // 能力协商与 notifications/initialized 均由 rmcp 承载——此处幂等直返回，
         // 不向第三方 server 发协议外方法。
@@ -1164,14 +1218,11 @@ impl McpClient {
         // 从 router 的 known_namespaces() 动态派生——router 是注册表时，
         // 运行时注册的 namespace（如交互插件声明）自动出现在声明里，
         // sidecar SDK 据此创建 CapabilityHandle。无 router 时声明空。
-        let capabilities: Value = match &self.router {
-            Some(r) => build_declared_capabilities_from_namespaces(&r.known_namespaces()),
-            None => build_declared_capabilities(false),
-        };
+        let capabilities: Value = self.declared_capabilities();
 
         let protocol_version = std::env::var("AGENTOS_MCP_PROTOCOL_VERSION")
             .unwrap_or_else(|_| MCP_PROTOCOL_VERSION.to_string());
-        let params = serde_json::json!({
+        let mut params = serde_json::json!({
             "protocolVersion": protocol_version,
             "capabilities": capabilities,
             "clientInfo": {
@@ -1180,6 +1231,9 @@ impl McpClient {
             },
             "config": config
         });
+        if let Some(member_configs) = member_configs {
+            params["member_configs"] = member_configs.clone();
+        }
         let result = self.send_request("initialize", Some(params)).await?;
 
         // 发送 initialized 通知（fire-and-forget，不等响应）
@@ -1198,6 +1252,18 @@ impl McpClient {
     /// `agentos/reload_member` 成员粒度热重载）。
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, McpError> {
         self.send_request(method, Some(params)).await
+    }
+
+    /// 当前对 sidecar 的 capability 声明面（缺陷E，台账 R2）：实时派生自
+    /// router 的 known_namespaces——initialize 握手与 `agentos/reload_member`
+    /// （成员重载刷新声明面）共用同一派生单点。注册发生在某次握手之后时，
+    /// 后续重载/重握手仍能把新 namespace 带给宿主；构造期定格会让 boot 竞态
+    /// 窗口宿主终身缺句柄。
+    pub fn declared_capabilities(&self) -> Value {
+        match &self.router {
+            Some(r) => build_declared_capabilities_from_namespaces(&r.known_namespaces()),
+            None => build_declared_capabilities(false),
+        }
     }
 
     /// 发送 JSON-RPC notification（不等响应）。
@@ -1537,330 +1603,19 @@ async fn run_tree_kill_windows(pid: u32, mut cmd: std::process::Command) {
     }
 }
 
-/// 向 stdin 写入一行原始 JSON（不加协议包装）。
-///
-/// 用于回写 sidecar 反向调用的 response——response 必须用与 request 相同的 id。
-async fn write_raw_line(
-    stdin: &Arc<Mutex<tokio::process::ChildStdin>>,
-    json_str: &str,
-) -> Result<(), McpError> {
-    let mut writer = stdin.lock().await;
-    writer
-        .write_all(json_str.as_bytes())
-        .await
-        .map_err(|e| McpError::Transport {
-            message: format!("write error: {e}"),
-        })?;
-    writer
-        .write_all(b"\n")
-        .await
-        .map_err(|e| McpError::Transport {
-            message: format!("write newline error: {e}"),
-        })?;
-    writer.flush().await.map_err(|e| McpError::Transport {
-        message: format!("flush error: {e}"),
-    })?;
-    Ok(())
-}
+mod reverse;
 
-/// 读循环分支1：响应帧处理——按字符串 id 查 pending 表，命中则 resolve
-/// oneshot（未命中：无任务在等该 id，帧丢弃）。
-async fn resolve_pending_response(
-    line_str: &str,
-    id: &str,
-    pending: &Arc<Mutex<HashMap<String, oneshot::Sender<JsonRpcResponse>>>>,
-) {
-    let mut pending_map = pending.lock().await;
-    let Some(sender) = pending_map.remove(id) else {
-        return;
-    };
-    // 匹配 pending → 这是 response
-    if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(line_str) {
-        if sender.send(response).is_err() {
-            tracing::warn!(
-                "[mcp] pending receiver dropped; JSON-RPC response id={id} not delivered"
-            );
-        }
-    }
-}
-
-/// 读循环分支2：sidecar 主动发起的 request（有 method + id）→ 派发独立处理任务。
-///
-/// 处理必须离开读循环：同宿主自反调用（插件经 router 调同宿主工具）写 stdin
-/// 后等待响应，而响应只能被读循环读出——内联 await = 读循环等自己，死锁至
-/// request_timeout；非自反的长反向调用同样队头阻塞读循环，令同宿主其他
-/// pending 响应延迟解析造成假超时。派发即返回，读循环继续消费下一帧。
-/// 处理任务内所有失败路径（router 错误 / stdin 回写失败）已在
-/// handle_incoming_request 内 warn 留痕；任务自身 panic 的 JoinError 由
-/// 看护任务 warn，不静默。
-fn spawn_request_dispatch(
-    msg: Value,
-    method: String,
-    id: Value,
-    router: Option<Arc<dyn CapabilityRouter>>,
-    stdin: Arc<Mutex<tokio::process::ChildStdin>>,
-) {
-    let task = tokio::spawn(async move {
-        dispatch_incoming_request(&msg, &method, &id, &router, &stdin).await;
-    });
-    tokio::spawn(async move {
-        if let Err(e) = task.await {
-            warn!("[mcp] 反向调用处理任务异常终止: {e}");
-        }
-    });
-}
-
-/// 读循环分支2：sidecar 主动发起的 request（有 method + id）→ 路由反向调用。
-async fn dispatch_incoming_request(
-    msg: &Value,
-    method: &str,
-    id: &Value,
-    router: &Option<Arc<dyn CapabilityRouter>>,
-    stdin: &Arc<Mutex<tokio::process::ChildStdin>>,
-) {
-    let raw_id = id.clone();
-    // 日志/错误消息用规范化字符串形式（数值 id 转十进制）
-    let id_repr = match id {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    };
-    handle_incoming_request(method, msg, &raw_id, &id_repr, router, stdin).await;
-}
-
-/// notification 有界派发队列（FIFO + 满载丢最旧）。
-///
-/// notification（流式 chunk 推送为主）是 best-effort 单向通知：读循环不允许
-/// 被慢消费阻塞（否则响应 resolve 时效受损），也不能无界积压——容量打满后
-/// 淘汰最旧条目并累计计数告警。丢最旧保完成帧：流式正文丢头仍会终结，丢尾
-/// 则前端等不到完成标记而悬挂。条目随连接生命周期：reader loop 结束置关闭
-/// 位，工作任务排空残留后退出。
-struct NotificationQueue {
-    /// FIFO 队列体。锁只护出入队（无 await 持锁），工作任务在锁外串行处理。
-    inner: std::sync::Mutex<VecDeque<(String, Value)>>,
-    /// 空队列/关闭唤醒：push 与 close 各补一个许可，pop 侧不丢唤醒。
-    notify: tokio::sync::Notify,
-    /// reader loop 结束置位：队列排空后工作任务退出。
-    closed: AtomicBool,
-    /// 满载淘汰最旧的累计条数（过载观测面）。
-    dropped: AtomicU64,
-}
-
-impl NotificationQueue {
-    fn new() -> Self {
-        Self {
-            inner: std::sync::Mutex::new(VecDeque::new()),
-            notify: tokio::sync::Notify::new(),
-            closed: AtomicBool::new(false),
-            dropped: AtomicU64::new(0),
-        }
-    }
-
-    /// 入队（同步返回，不阻塞读循环）。容量满则淘汰最旧并计数告警。
-    fn push(&self, item: (String, Value)) {
-        let evicted = {
-            let mut q = self
-                .inner
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            q.push_back(item);
-            if q.len() > NOTIFICATION_QUEUE_CAPACITY {
-                q.pop_front().is_some()
-            } else {
-                false
-            }
-        };
-        if evicted {
-            let total = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-            warn!(
-                target: "mcp:notification",
-                total_dropped = total,
-                capacity = NOTIFICATION_QUEUE_CAPACITY,
-                "notification queue full; dropped oldest (best-effort)"
-            );
-        }
-        self.notify.notify_one();
-    }
-
-    /// 取出最旧条目；空且未关闭时挂起等待；空且已关闭时返回 None
-    /// （工作任务退出点）。
-    async fn pop(&self) -> Option<(String, Value)> {
-        loop {
-            let item = self
-                .inner
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .pop_front();
-            if item.is_some() {
-                return item;
-            }
-            if self.closed.load(Ordering::Relaxed) {
-                return None;
-            }
-            self.notify.notified().await;
-        }
-    }
-
-    /// reader loop 结束调用：置关闭位并唤醒工作任务（排空残留后退出）。
-    fn close(&self) {
-        self.closed.store(true, Ordering::Relaxed);
-        self.notify.notify_one();
-    }
-
-    /// 当前队列长度（测试观测面）。
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
-    }
-
-    /// 满载淘汰累计条数（测试观测面）。
-    #[cfg(test)]
-    fn dropped_count(&self) -> u64 {
-        self.dropped.load(Ordering::Relaxed)
-    }
-}
-
-/// 读循环分支3：sidecar 主动发起的 notification（有 method 无 id）→
-/// 入有序派发队列（满载丢最旧、同步返回，不阻塞读循环）。
-fn dispatch_notification(method: String, msg: &Value, queue: &NotificationQueue) {
-    let params = msg.get("params").cloned().unwrap_or(Value::Null);
-    queue.push((method, params));
-}
-
-/// 处理 sidecar 主动发起的 JSON-RPC request。
-///
-/// method 形如 `pipeline-executor.resume`，拆分后路由到 CapabilityRouter；
-/// 结果通过 stdin 回写为 JSON-RPC response。`raw_id` 为请求的原始 id 值
-/// （string 或 number，按 JSON-RPC 2.0 要求原样回显），`id_repr` 为其字符串
-/// 形式（仅用于日志）。
-async fn handle_incoming_request(
-    method: &str,
-    msg: &Value,
-    raw_id: &Value,
-    id_repr: &str,
-    router: &Option<Arc<dyn CapabilityRouter>>,
-    stdin: &Arc<Mutex<tokio::process::ChildStdin>>,
-) {
-    let params = msg.get("params").cloned().unwrap_or(Value::Null);
-
-    // namespace 白名单从 router 动态获取（M2 注册表改造）。
-    // router 为 None 时用编译期 STANDARD_CAPABILITIES 兜底（实际下面会因 router
-    // 为 None 直接返回 no router configured，这里的解析仅决定是否 -32601）。
-    let known_ns = router
-        .as_ref()
-        .map(|r| r.known_namespaces())
-        .unwrap_or_default();
-    // 非 capability method（如 MCP 标准方法）不处理
-    let Some((capability, cap_method)) = parse_capability_method_with(method, &known_ns) else {
-        let resp = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": raw_id,
-            "error": {"code": -32601, "message": format!("method not found: {method}")}
-        });
-        if let Err(e) = write_raw_line(stdin, &resp.to_string()).await {
-            tracing::warn!(
-                "[mcp] failed to write -32601 (method not found) response for id={id_repr}: {e}"
-            );
-        }
-        return;
-    };
-
-    let Some(router) = router else {
-        let resp = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": raw_id,
-            "error": {"code": -32601, "message": "no capability router configured"}
-        });
-        if let Err(e) = write_raw_line(stdin, &resp.to_string()).await {
-            tracing::warn!(
-                "[mcp] failed to write -32601 (no router) response for id={id_repr}: {e}"
-            );
-        }
-        return;
-    };
-
-    let result = router.handle(capability, cap_method, params).await;
-    let resp = match result {
-        Ok(value) => {
-            // MCP 官方 SDK 的 JSONRPCResponse.result 契约是 object（dict[str, Any]）：
-            // 数组/标量/Null 会让对端 pydantic 校验失败、响应被静默丢弃 → 发起方
-            // pending 永不 resolve → 超时（如 service-registry.
-            // memory.search 返回 Vec 即中招）。非 object 一律包 {"__raw__": value}，
-            // SDK KernelChannel.send_request 对称解包；object 原样（零迁移成本）。
-            let result_value = if value.is_object() {
-                value
-            } else {
-                serde_json::json!({ "__raw__": value })
-            };
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": raw_id,
-                "result": result_value
-            })
-        }
-        Err(e) => serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": raw_id,
-            "error": {"code": -32603, "message": e.to_string()}
-        }),
-    };
-    if let Err(e) = write_raw_line(stdin, &resp.to_string()).await {
-        tracing::warn!("[mcp] failed to write JSON-RPC response for id={id_repr}: {e}");
-    }
-}
-
-/// notification 有序派发工作任务：从有界 FIFO 队列逐条取出并串行处理。
-///
-/// 同一 sidecar 连接的 notification（流式 chunk 为主）是有序增量，处理
-/// 完成序必须等于发送序；串行 await 同时保证 router.handle 内部副作用
-/// （如 event-bus.emit 的 WS 推送）按序完成。队列在 reader loop 结束
-/// （stdout EOF）置关闭位，排空残留后本任务退出。
-fn spawn_notification_worker(
-    queue: Arc<NotificationQueue>,
-    router: Option<Arc<dyn CapabilityRouter>>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        while let Some((method, params)) = queue.pop().await {
-            handle_incoming_notification(&method, params, &router).await;
-        }
-    })
-}
-
-/// 处理 sidecar 主动发起的 JSON-RPC notification（无 id，fire-and-forget）。
-///
-/// method 形如 `event-bus.emit`，拆分后路由到 CapabilityRouter。
-/// 与 handle_incoming_request 的区别：不回 response（notification 协议无响应）。
-/// 用于流式 chunk 高频推送（sidecar 边生成边推，内核推前端）。
-async fn handle_incoming_notification(
-    method: &str,
-    params: Value,
-    router: &Option<Arc<dyn CapabilityRouter>>,
-) {
-    tracing::debug!(target: "mcp:notification", method = %method, "收到 sidecar notification");
-    let known_ns = router
-        .as_ref()
-        .map(|r| r.known_namespaces())
-        .unwrap_or_default();
-    let Some((capability, cap_method)) = parse_capability_method_with(method, &known_ns) else {
-        tracing::debug!(target: "mcp:notification", method = %method, "notification 非 capability method，丢弃");
-        return;
-    };
-    let Some(router) = router else {
-        return;
-    };
-    // 调用 router.handle，忽略返回值（notification 不需要 response）。
-    // event-bus.emit handler 内部负责把 chunk 推到前端。
-    if let Err(e) = router.handle(capability, cap_method, params).await {
-        tracing::warn!(
-            target: "mcp:notification",
-            capability, method = cap_method, error = %e,
-            "capability notification 处理失败",
-        );
-    }
-}
-
+#[cfg(test)]
+use reverse::{
+    dispatch_incoming_request, handle_incoming_notification, handle_incoming_request,
+    resolve_reverse_handle_timeout, resolve_reverse_max_concurrent,
+    resolve_reverse_queue_wait_secs, DEFAULT_REVERSE_MAX_CONCURRENT,
+};
+use reverse::{
+    dispatch_notification, resolve_pending_response, spawn_notification_worker,
+    spawn_request_dispatch, NotificationQueue,
+};
+pub use reverse::{reverse_call_levels, ReverseGate};
 impl Drop for McpClient {
     fn drop(&mut self) {
         // kill_on_drop(true) 会在 Drop 时自动 kill 子进程
@@ -1933,13 +1688,11 @@ fn resolve_windows_command(command: &str) -> String {
 
 /// 把字符串里的 `${ENV_VAR}` 占位替换为环境变量值（含 `.env` overlay 回退）。
 ///
-/// 查找顺序（GAP-4a，与 stdio sidecar 的 spawn 叠加同语义）：**项目 `.env`
-/// overlay（用户数据为准）→ 进程环境**。`.env` 中出现的变量一律以 .env 值
-/// 解析（ADR 2026-10-03-packaged-user-data-first：设置页写入的用户 .env 是
-/// key 唯一真值，ambient/系统环境不得压过——否则 UI「已配置」与运行时实际
-/// 解析分叉）；保留名（AGENTOS_*/PATH 等）不参与 overlay。用户经设置页把
-/// key 写入 `.env` 后，HTTP MCP connect 时即可解析，无需重启内核（配合
-/// invoker 的 `.env` mtime 指纹触发客户端重建，改动下次调用即生效）。
+/// 查找顺序（GAP-4a，与 stdio sidecar 的 spawn 叠加同语义）：**进程环境 →
+/// 项目 `.env` overlay**（[`crate::env_file::env_delta_overlay`] 的增量——只补
+/// 进程环境缺失的变量，绝不用 `.env` 覆盖系统显式设置的环境变量）。用户经
+/// 设置页把 key 写入 `.env` 后，HTTP MCP connect 时即可解析，无需重启内核
+/// （配合 invoker 的 `.env` mtime 指纹触发客户端重建，改动下次调用即生效）。
 ///
 /// 引用的变量两处均未设置时报错（早暴露，不静默放行）——外部 MCP 端点的鉴权值
 /// 缺失通常意味着配置未就绪，连出去也会被 401 拒绝，不如在 connect 时直接失败。
@@ -2020,17 +1773,15 @@ fn resolve_env_placeholders_with(
     Ok(out)
 }
 
-/// 单变量查找：`.env` overlay（用户数据为准）优先，缺失时回退进程环境。
+/// 单变量查找：进程环境优先，缺失时回退 `.env` overlay（增量）。
 ///
-/// overlay 来自 [`crate::env_file::env_delta_overlay`]——其自身已按
-/// 「.env 一律覆盖 ambient（保留名除外）」产出，此处再显式按 overlay →
-/// 进程环境 的顺序查找，与 stdio sidecar 继承的子进程环境同语义
-/// （ADR 2026-10-03-packaged-user-data-first）。
+/// overlay 来自 [`crate::env_file::env_delta_overlay`]——其本身已按「系统环境
+/// 变量 > .env」过滤（只含进程环境缺失的变量），此处再显式按 进程环境 →
+/// overlay 的顺序查找，与 stdio sidecar 继承的子进程环境同语义。
 fn lookup_env_var(var: &str, overlay: &HashMap<String, String>) -> Option<String> {
-    overlay
-        .get(var)
-        .cloned()
-        .or_else(|| std::env::var(var).ok())
+    std::env::var(var)
+        .ok()
+        .or_else(|| overlay.get(var).cloned())
 }
 
 #[cfg(test)]
@@ -2381,6 +2132,53 @@ sys.stdin.readline()
         // 无 router 时声明空，sidecar 反调会被拒。
         let caps = build_declared_capabilities(false);
         assert!(caps.as_object().map(|o| o.is_empty()).unwrap_or(true));
+    }
+
+    /// 可变 namespace 集合的 mock router：模拟「注册发生在宿主握手之后」
+    /// （缺陷E boot 竞态：chat.send_message 晚于部分宿主 initialize）。
+    struct MutableNsRouter {
+        namespaces: std::sync::Mutex<Vec<String>>,
+    }
+    #[async_trait::async_trait]
+    impl crate::capability::CapabilityRouter for MutableNsRouter {
+        async fn handle(
+            &self,
+            _capability: &str,
+            _method: &str,
+            _params: Value,
+        ) -> Result<Value, McpError> {
+            Ok(json!({}))
+        }
+        fn known_namespaces(&self) -> Vec<String> {
+            self.namespaces.lock().unwrap().clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn declared_capabilities_reflects_live_router_namespaces() {
+        // 缺陷E（台账 R2）：声明面必须**实时**派生自 router——boot 竞态窗口
+        // 里 chat 注册晚于握手，若声明面在客户端构造期定格，宿主重握手也拿
+        // 不到 chat（重载刷新无从谈起）。实时派生下，注册后的 declared_
+        // capabilities()（initialize 与 reload_member 共用）必含新 namespace。
+        let router = Arc::new(MutableNsRouter {
+            namespaces: std::sync::Mutex::new(vec!["pipeline-executor".to_string()]),
+        });
+        let client =
+            McpClient::new_stdio("definitely_missing_cmd_e", vec![]).with_router(router.clone());
+        let before = client.declared_capabilities();
+        assert!(before.get("chat").is_none(), "前置：注册前声明面无 chat");
+
+        router.namespaces.lock().unwrap().push("chat".to_string());
+
+        let after = client.declared_capabilities();
+        assert!(
+            after.get("chat").is_some(),
+            "注册后声明面必须实时含 chat（重载刷新声明面的前提）"
+        );
+        assert!(
+            after.get("pipeline-executor").is_some(),
+            "既有 namespace 保留"
+        );
     }
 
     #[test]
@@ -2832,23 +2630,20 @@ sys.stdin.readline()
     }
 
     #[test]
-    fn test_resolve_placeholders_overlay_user_data_wins_over_process_env() {
-        // 两者都有 → .env（用户数据）优先（ADR 2026-10-03-packaged-user-data-first：
-        // 设置页写入的用户 .env 是 key 唯一真值，ambient 环境不得压过——否则
-        // UI「已配置」与运行时实际解析分叉）。
+    fn test_resolve_placeholders_process_env_priority_over_overlay() {
+        // 两者都有 → 进程环境优先（mock overlay）
         std::env::set_var("MCP_PH_BOTH", "from_process");
         let overlay = HashMap::from([("MCP_PH_BOTH".to_string(), "from_dotenv".to_string())]);
         assert_eq!(
             resolve_env_placeholders_with("${MCP_PH_BOTH}", &overlay).unwrap(),
-            "from_dotenv"
-        );
-        // 性质断言（优先级可逆）：.env 移除该项后，同输入回落进程环境值
-        let empty: HashMap<String, String> = HashMap::new();
-        assert_eq!(
-            resolve_env_placeholders_with("${MCP_PH_BOTH}", &empty).unwrap(),
             "from_process"
         );
+        // 性质断言（优先级可逆）：进程环境删除后，同输入改取 overlay 值
         std::env::remove_var("MCP_PH_BOTH");
+        assert_eq!(
+            resolve_env_placeholders_with("${MCP_PH_BOTH}", &overlay).unwrap(),
+            "from_dotenv"
+        );
     }
 
     #[test]
@@ -2917,12 +2712,12 @@ sys.stdin.readline()
             resolve_env_placeholders(&format!("Bearer ${{{var}}}")).unwrap(),
             "Bearer from_dotenv"
         );
-        // 2) 两者都有 → .env（用户数据）优先（ADR 2026-10-03-packaged-user-data-first：
-        //    真实 env_delta_overlay 语义：.env 值覆盖 ambient，非 vacuous 断言）
+        // 2) 两者都有 → 进程环境优先（真实 env_delta_overlay 语义：系统环境
+        //    显式设置的变量不进 overlay，此处非 vacuous 断言）
         std::env::set_var(&var, "from_process");
         assert_eq!(
             resolve_env_placeholders(&format!("Bearer ${{{var}}}")).unwrap(),
-            "Bearer from_dotenv"
+            "Bearer from_process"
         );
 
         std::env::remove_var(&var);
@@ -3000,6 +2795,16 @@ sys.stdin.readline()
     }
 
     // ── 反向调用路由（handle_incoming_request / handle_incoming_notification）──
+
+    /// 直调用例的缺省闸门（128 并发 / 30s 等待 / per-handle 超时不开），
+    /// 环境变量不可依赖（并行用例互扰），一律显式注入。
+    fn test_gate() -> Arc<ReverseGate> {
+        Arc::new(ReverseGate::new(
+            DEFAULT_REVERSE_MAX_CONCURRENT,
+            Duration::from_secs(30),
+            None,
+        ))
+    }
 
     /// 测试用 router：记录调用并返回可配置结果。
     struct RecordingRouter {
@@ -3170,6 +2975,7 @@ sys.stdin.readline()
             "req-1",
             &Some(router.clone()),
             &stdin,
+            &test_gate(),
         )
         .await;
         let line = read_echo_line(&capture).await;
@@ -3188,6 +2994,7 @@ sys.stdin.readline()
             "7",
             &Some(router.clone()),
             &stdin,
+            &test_gate(),
         )
         .await;
         let line2 = read_echo_line(&capture).await;
@@ -3211,6 +3018,7 @@ sys.stdin.readline()
             "r2",
             &Some(router.clone()),
             &stdin,
+            &test_gate(),
         )
         .await;
         let line = read_echo_line(&capture).await;
@@ -3231,6 +3039,7 @@ sys.stdin.readline()
             "r3",
             &Some(router.clone()),
             &stdin,
+            &test_gate(),
         )
         .await;
         let line = read_echo_line(&capture).await;
@@ -3247,6 +3056,7 @@ sys.stdin.readline()
             "r4",
             &None,
             &stdin2,
+            &test_gate(),
         )
         .await;
         let line2 = read_echo_line(&capture2).await;
@@ -3271,6 +3081,7 @@ sys.stdin.readline()
             "r5",
             &Some(router.clone()),
             &stdin,
+            &test_gate(),
         )
         .await;
         let line = read_echo_line(&capture).await;
@@ -3469,8 +3280,11 @@ sys.stdin.readline()
     async fn incoming_request_dispatch_does_not_head_of_line_block_responses() {
         // 读循环队头阻塞回归：反向 request 的处理（慢 router）不得内联阻塞
         // 读循环——其后到达的正常响应必须立即 resolve。修复前读循环 await
-        // router.handle，响应行滞留管道 → 请求假超时（router 延迟 1s > 请求
-        // 超时 300ms，红测确定性失败）；修复后派发即返回，读循环继续消费。
+        // router.handle，响应行滞留管道 → 请求假超时；修复后派发即返回，
+        // 读循环继续消费。请求超时 2s 只兜底传输面（python 冷启动在满套件
+        // 负载下可达数百 ms，300ms 会误伤真路——装机打包链实测）；回归钉由
+        // elapsed<1s 承载：若真发生队头阻塞，响应要等慢 router 1s 后才
+        // resolve，elapsed 落 ~1.05s 仍被抓红。
         assert!(
             python_available(),
             "python 不可用——本用例依赖真实 python sidecar 替身"
@@ -3496,7 +3310,7 @@ sys.stdin.readline()
             python_exe(),
             vec!["-u".to_string(), "-c".to_string(), script.to_string()],
         )
-        .with_request_timeout(Duration::from_millis(300))
+        .with_request_timeout(Duration::from_secs(2))
         .with_router(router);
         client.connect().await.expect("替身可连接");
 
@@ -3677,6 +3491,37 @@ sys.stdin.readline()
             "EOF 清空 pending 应快速失败: {err}"
         );
         client.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sidecar_stdout_eof_increments_counter() {
+        if !python_available() {
+            return;
+        }
+        // 卡9 计数器：sidecar 退出致 stdout EOF → 进程级累计计数递增。计数器
+        // 是进程级静态（跨测试共享），断言前后差（delta）而非绝对值。
+        let before = sidecar_stdout_eof_total();
+        let script = "import sys; sys.stdin.readline()";
+        let mut client = McpClient::new_stdio(
+            python_exe().to_string(),
+            vec!["-c".to_string(), script.to_string()],
+        );
+        client = client.with_request_timeout(Duration::from_millis(2000));
+        client.connect().await.unwrap();
+        // stdin 保持打开时请求阻塞至超时；直接 kill 触发 EOF 分支
+        client.kill().await.unwrap();
+        // kill 关闭 stdin/stdout → reader loop 读到 EOF → 计数 +1（给读循环
+        // 一拍时间落地）
+        for _ in 0..50 {
+            if sidecar_stdout_eof_total() > before {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            sidecar_stdout_eof_total() > before,
+            "sidecar 退出（EOF）应递增 stdout EOF 计数"
+        );
     }
 
     #[tokio::test]
@@ -4455,6 +4300,56 @@ sys.stdin.readline()
     }
 
     #[tokio::test]
+    async fn initialize_member_configs_wire_contract() {
+        // member_configs 线上契约（合宿成员级注入，2026-10-09 isolation_guard
+        // 部署实测修复面）：Some → params 携带该字段原样下发；None（initialize
+        // 直调形态）→ params 不携带该字段，与旧形态字节一致。
+        assert!(python_available(), "python 不可用");
+        let script = concat!(
+            "import sys, json\n",
+            "req = json.loads(sys.stdin.readline())\n",
+            "sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': {'echo': req.get('params')}}) + '\\n'); sys.stdout.flush()\n",
+            "sys.stdin.readline()\n",
+        );
+
+        let members = json!({"iso_guard": {"isolation_config": {"providers": {"docker": {}}}}});
+        let mut with_members = McpClient::new_stdio(
+            python_exe().to_string(),
+            vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+        )
+        .with_request_timeout(Duration::from_secs(10));
+        with_members.connect().await.unwrap();
+        let echo = with_members
+            .initialize_with_member_configs(&json!({"trigger_ns": 1}), Some(&members))
+            .await
+            .unwrap();
+        assert_eq!(
+            echo["echo"]["member_configs"], members,
+            "Some 形态必须把 member_configs 原样随 params 下发"
+        );
+        assert_eq!(
+            echo["echo"]["config"],
+            json!({"trigger_ns": 1}),
+            "顶层 config 保留"
+        );
+        with_members.kill().await.unwrap();
+
+        let mut without_members = McpClient::new_stdio(
+            python_exe().to_string(),
+            vec!["-u".to_string(), "-c".to_string(), script.to_string()],
+        )
+        .with_request_timeout(Duration::from_secs(10));
+        without_members.connect().await.unwrap();
+        let echo2 = without_members.initialize(&json!({})).await.unwrap();
+        assert!(
+            echo2["echo"].get("member_configs").is_none(),
+            "独占形态不得携带 member_configs 字段（行为零变化）: {}",
+            echo2["echo"]
+        );
+        without_members.kill().await.unwrap();
+    }
+
+    #[tokio::test]
     // 刻意持 std Mutex 跨 await：TEST_ENV_MUTEX 串行化的正是进程全局
     // AGENTOS_CONFIG_ROOT，必须覆盖 connect 的整个生命周期（测试独占语义）。
     #[allow(clippy::await_holding_lock)]
@@ -4469,14 +4364,18 @@ sys.stdin.readline()
             "python 不可用——本用例依赖真实 python sidecar"
         );
         std::env::remove_var("AGENTOS_MCP_IT_EXTRA");
-        std::env::remove_var("MCP_IT_DOTENV");
+        std::env::remove_var("AGENTOS_MCP_IT_DOTENV");
 
         let workdir = tempfile::tempdir().expect("工作目录临时创建");
         let envroot = tempfile::tempdir().expect("项目根临时创建");
         std::fs::create_dir_all(envroot.path().join("config")).unwrap();
         // .env 落点＝<USER_ROOT>/.env（ADR 2026-09-13-unified-user-root）：
         // 临时目录同时充当项目根与用户空间根
-        std::fs::write(envroot.path().join(".env"), "MCP_IT_DOTENV=from_dotenv\n").unwrap();
+        std::fs::write(
+            envroot.path().join(".env"),
+            "AGENTOS_MCP_IT_DOTENV=from_dotenv\n",
+        )
+        .unwrap();
 
         // panic 安全地恢复两个进程级环境变量
         struct RestoreConfigRoot {
@@ -4506,7 +4405,7 @@ sys.stdin.readline()
         let script = concat!(
             "import sys, json, os\n",
             "req = json.loads(sys.stdin.readline())\n",
-            "sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': {'cwd': os.getcwd(), 'extra': os.environ.get('AGENTOS_MCP_IT_EXTRA', ''), 'dotenv': os.environ.get('MCP_IT_DOTENV', '')}}) + '\\n'); sys.stdout.flush()\n",
+            "sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': {'cwd': os.getcwd(), 'extra': os.environ.get('AGENTOS_MCP_IT_EXTRA', ''), 'dotenv': os.environ.get('AGENTOS_MCP_IT_DOTENV', '')}}) + '\\n'); sys.stdout.flush()\n",
         );
         let mut client = McpClient::new_stdio(
             python_exe().to_string(),
@@ -4596,6 +4495,7 @@ sys.stdin.readline()
             "nr-1",
             &None,
             &stdin,
+            &test_gate(),
         )
         .await;
         let line = read_echo_line(&capture).await;
@@ -4622,6 +4522,7 @@ sys.stdin.readline()
             "wf-1",
             &Some(router.clone()),
             &stdin,
+            &test_gate(),
         )
         .await;
         // 路由本身仍被调度（写失败发生在回写阶段）
@@ -4666,12 +4567,321 @@ sys.stdin.readline()
             &msg["id"],
             &Some(router.clone()),
             &stdin,
+            &test_gate(),
         )
         .await;
         let line = read_echo_line(&capture).await;
         let resp: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(resp["id"], 42, "数值 id 按原类型回显");
         assert_eq!(resp["result"]["ok"], true);
+    }
+
+    // ── R-1 反向调用排队制（闸门：acquire-with-wait，零拒绝 + 有界等待）──
+
+    /// 到位即挂起、等统一放行的 router：延迟由测试显式控制（可控延迟注入，
+    /// 非零延迟 mock）——挂起期间许可不释放，并发上限/排队行为可确定性观察。
+    struct HoldReleaseRouter {
+        entered: Arc<AtomicU64>,
+        release: tokio::sync::watch::Sender<bool>,
+    }
+
+    #[async_trait::async_trait]
+    impl CapabilityRouter for HoldReleaseRouter {
+        async fn handle(&self, _c: &str, _m: &str, _p: Value) -> Result<Value, McpError> {
+            self.entered.fetch_add(1, Ordering::Relaxed);
+            let mut rx = self.release.subscribe();
+            loop {
+                if *rx.borrow() {
+                    return Ok(json!({"held": true}));
+                }
+                if rx.changed().await.is_err() {
+                    // Sender 全部 drop（测试异常路径）不得悬挂 handle
+                    return Ok(json!({"held": true}));
+                }
+            }
+        }
+        fn known_namespaces(&self) -> Vec<String> {
+            vec!["event-bus".to_string()]
+        }
+    }
+
+    /// 等待谓词成立（10ms 轮询 + 截止，避免 busy-loop 与无限等待）。
+    async fn wait_until(deadline: Duration, mut pred: impl FnMut() -> bool, what: &str) {
+        let end = tokio::time::Instant::now() + deadline;
+        while !pred() {
+            assert!(tokio::time::Instant::now() < end, "超截止仍未满足：{what}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// 200 并发灌入（并发上限 128）：前 128 在执、后 72 排队，放行后**全部
+    /// 完成零拒绝**（性质断言）；在执峰值受 128 硬约束；完成后水位守恒归零。
+    #[tokio::test]
+    async fn reverse_calls_queue_through_gate_without_rejection() {
+        assert!(
+            python_available(),
+            "python 不可用——本用例依赖 echo 替身读回响应"
+        );
+        let (stdin, capture, _child) = spawn_echo_stdio().await;
+        let entered = Arc::new(AtomicU64::new(0));
+        let (tx, _rx) = tokio::sync::watch::channel(false);
+        let router = Arc::new(HoldReleaseRouter {
+            entered: entered.clone(),
+            release: tx.clone(),
+        });
+        let gate = Arc::new(ReverseGate::new(128, Duration::from_secs(10), None));
+
+        let total: u64 = 200;
+        let mut tasks = Vec::new();
+        for i in 0..total {
+            let msg = json!({"jsonrpc": "2.0", "id": i, "method": "event-bus.emit"});
+            let stdin = Arc::clone(&stdin);
+            let router = router.clone();
+            let gate = gate.clone();
+            tasks.push(tokio::spawn(async move {
+                dispatch_incoming_request(
+                    &msg,
+                    "event-bus.emit",
+                    &msg["id"],
+                    &Some(router),
+                    &stdin,
+                    &gate,
+                )
+                .await;
+            }));
+        }
+
+        // 稳态确定性可达：handle 挂起不放行 → 恰 128 在执、其余 72 在队。
+        wait_until(
+            Duration::from_secs(10),
+            || {
+                gate.active.load(Ordering::Relaxed) == 128
+                    && gate.queued.load(Ordering::Relaxed) == total - 128
+            },
+            "200 任务应达 128 在执 + 72 在队稳态",
+        )
+        .await;
+        assert_eq!(
+            entered.load(Ordering::Relaxed),
+            128,
+            "仅持许可者可进入 handle"
+        );
+
+        // 放行 → 排队者依次获得许可，全部完成
+        tx.send(true).unwrap();
+        for t in tasks {
+            t.await.unwrap();
+        }
+
+        // 性质断言：所有请求最终完成、零拒绝（每条响应都是 result，无 error）。
+        for i in 0..total {
+            let line = read_echo_line(&capture).await;
+            let resp: Value = serde_json::from_str(&line).unwrap();
+            assert!(
+                resp.get("error").is_none(),
+                "排队制不得拒绝任何请求（第 {i} 条收到 error）: {line}"
+            );
+            assert_eq!(resp["result"]["held"], true);
+        }
+        assert_eq!(
+            entered.load(Ordering::Relaxed),
+            total,
+            "放行后 200 个反向调用全部被执行"
+        );
+        // 守恒：完成后 per-gate 水位归零（许可与计数无泄漏）
+        assert_eq!(gate.queued.load(Ordering::Relaxed), 0);
+        assert_eq!(gate.active.load(Ordering::Relaxed), 0);
+    }
+
+    /// 排队等待上限（0.1s）：占住唯一许可的调用挂起不放行时，排队者 0.1s 后
+    /// 收到 -32000 JSON-RPC error（错误先于放行确定到达——时序由测试放行点
+    /// 控制），且超限者不进 handle；占位者放行后正常完成（零拒绝语义不受影响）。
+    #[tokio::test]
+    async fn reverse_call_queue_wait_limit_answers_jsonrpc_error() {
+        assert!(
+            python_available(),
+            "python 不可用——本用例依赖 echo 替身读回响应"
+        );
+        let (stdin, capture, _child) = spawn_echo_stdio().await;
+        let entered = Arc::new(AtomicU64::new(0));
+        let (tx, _rx) = tokio::sync::watch::channel(false);
+        let router = Arc::new(HoldReleaseRouter {
+            entered: entered.clone(),
+            release: tx.clone(),
+        });
+        // 并发 1 + 等待上限 0.1s：第二个调用必然排队超限（可控延迟注入）
+        let gate = Arc::new(ReverseGate::new(1, Duration::from_millis(100), None));
+
+        let first_msg = json!({"jsonrpc": "2.0", "id": "holder", "method": "event-bus.emit"});
+        let first = {
+            let stdin = Arc::clone(&stdin);
+            let router = router.clone();
+            let gate = gate.clone();
+            tokio::spawn(async move {
+                dispatch_incoming_request(
+                    &first_msg,
+                    "event-bus.emit",
+                    &first_msg["id"],
+                    &Some(router),
+                    &stdin,
+                    &gate,
+                )
+                .await;
+            })
+        };
+        wait_until(
+            Duration::from_secs(5),
+            || entered.load(Ordering::Relaxed) == 1,
+            "占位调用应先进入 handle",
+        )
+        .await;
+
+        let second_msg = json!({"jsonrpc": "2.0", "id": "queued", "method": "event-bus.emit"});
+        let started = tokio::time::Instant::now();
+        dispatch_incoming_request(
+            &second_msg,
+            "event-bus.emit",
+            &second_msg["id"],
+            &Some(router.clone()),
+            &stdin,
+            &gate,
+        )
+        .await;
+        let err_elapsed = started.elapsed();
+
+        // 超限错误先于放行到达（0.1s 上限 << 测试放行时刻）：读到的首条响应
+        // 必是排队超限 error，且 id 对应排队者。
+        let line = read_echo_line(&capture).await;
+        let resp: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(resp["id"], "queued", "首条响应必须是排队超限者");
+        assert_eq!(resp["error"]["code"], -32000);
+        let msg = resp["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("queue wait timeout"),
+            "错误消息应指明排队等待超限: {msg}"
+        );
+        assert!(
+            err_elapsed < Duration::from_secs(3),
+            "超限错误应在等待上限附近返回（实测 {err_elapsed:?}），而非拖到放行后"
+        );
+        assert_eq!(
+            entered.load(Ordering::Relaxed),
+            1,
+            "排队超限者不得进入 handle（拒绝发生在闸门，不在路由）"
+        );
+
+        // 放行占位者 → 正常完成；水位守恒归零
+        tx.send(true).unwrap();
+        first.await.unwrap();
+        let line2 = read_echo_line(&capture).await;
+        let resp2: Value = serde_json::from_str(&line2).unwrap();
+        assert_eq!(resp2["id"], "holder");
+        assert_eq!(resp2["result"]["held"], true);
+        assert_eq!(gate.queued.load(Ordering::Relaxed), 0);
+        assert_eq!(gate.active.load(Ordering::Relaxed), 0);
+    }
+
+    /// per-handle 超时为显式开启项：开启后超限回 -32603（消息含 handle
+    /// timeout）；缺省不开——同延迟的慢调用照常等到结果（86400 长等待族
+    /// 不被掐断的回归）。
+    #[tokio::test]
+    async fn reverse_call_handle_timeout_opt_in_and_default_off() {
+        assert!(
+            python_available(),
+            "python 不可用——本用例依赖 echo 替身读回响应"
+        );
+        // 开启：0.2s 超时 vs 0.5s 慢调用（固定注入延迟）→ 超限错误
+        let (stdin, capture, _child) = spawn_echo_stdio().await;
+        let router = Arc::new(SlowRouter {
+            delay: Duration::from_millis(500),
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let gate = ReverseGate::new(
+            128,
+            Duration::from_secs(10),
+            Some(Duration::from_millis(200)),
+        );
+        let msg = json!({"jsonrpc": "2.0", "id": "slow-1", "method": "event-bus.emit"});
+        dispatch_incoming_request(
+            &msg,
+            "event-bus.emit",
+            &msg["id"],
+            &Some(router),
+            &stdin,
+            &gate,
+        )
+        .await;
+        let line = read_echo_line(&capture).await;
+        let resp: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(resp["error"]["code"], -32603);
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("handle timeout"),
+            "错误消息应指明 per-handle 超时: {line}"
+        );
+
+        // 缺省不开：同 0.5s 慢调用等满延迟返回 result
+        let (stdin2, capture2, _child2) = spawn_echo_stdio().await;
+        let router2 = Arc::new(SlowRouter {
+            delay: Duration::from_millis(500),
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let gate2 = test_gate();
+        let msg2 = json!({"jsonrpc": "2.0", "id": "slow-2", "method": "event-bus.emit"});
+        let started = tokio::time::Instant::now();
+        dispatch_incoming_request(
+            &msg2,
+            "event-bus.emit",
+            &msg2["id"],
+            &Some(router2),
+            &stdin2,
+            &gate2,
+        )
+        .await;
+        let line2 = read_echo_line(&capture2).await;
+        let resp2: Value = serde_json::from_str(&line2).unwrap();
+        assert_eq!(resp2["result"], json!({}), "缺省不掐断慢调用");
+        assert!(
+            started.elapsed() >= Duration::from_millis(500),
+            "缺省路径必须真等到慢调用完成（时序不变量），实测 {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// 闸门环境变量解析矩阵：合法直取（含小数/空白容错），非法/非正/非有限
+    /// 回缺省；per-handle 超时未设/非法/非正一律不开。
+    #[test]
+    fn reverse_gate_env_resolvers_validate_inputs() {
+        assert_eq!(resolve_reverse_max_concurrent(None), 128);
+        assert_eq!(resolve_reverse_max_concurrent(Some("")), 128);
+        assert_eq!(resolve_reverse_max_concurrent(Some("abc")), 128);
+        assert_eq!(resolve_reverse_max_concurrent(Some("0")), 128);
+        assert_eq!(resolve_reverse_max_concurrent(Some("-4")), 128);
+        assert_eq!(resolve_reverse_max_concurrent(Some("64")), 64);
+        assert_eq!(resolve_reverse_max_concurrent(Some(" 32 ")), 32);
+
+        assert_eq!(resolve_reverse_queue_wait_secs(None), 30.0);
+        assert_eq!(resolve_reverse_queue_wait_secs(Some("0.1")), 0.1);
+        assert_eq!(resolve_reverse_queue_wait_secs(Some("5")), 5.0);
+        assert_eq!(resolve_reverse_queue_wait_secs(Some(" 2.5 ")), 2.5);
+        assert_eq!(resolve_reverse_queue_wait_secs(Some("")), 30.0);
+        assert_eq!(resolve_reverse_queue_wait_secs(Some("0")), 30.0);
+        assert_eq!(resolve_reverse_queue_wait_secs(Some("-1")), 30.0);
+        assert_eq!(resolve_reverse_queue_wait_secs(Some("nan")), 30.0);
+        assert_eq!(resolve_reverse_queue_wait_secs(Some("inf")), 30.0);
+        assert_eq!(resolve_reverse_queue_wait_secs(Some("junk")), 30.0);
+
+        assert_eq!(resolve_reverse_handle_timeout(None), None);
+        assert_eq!(resolve_reverse_handle_timeout(Some("")), None);
+        assert_eq!(resolve_reverse_handle_timeout(Some("0")), None);
+        assert_eq!(resolve_reverse_handle_timeout(Some("-3")), None);
+        assert_eq!(resolve_reverse_handle_timeout(Some("zzz")), None);
+        assert_eq!(
+            resolve_reverse_handle_timeout(Some("2.5")),
+            Some(Duration::from_millis(2500))
+        );
     }
 
     /// 出网守卫的 fail-closed 面：无 host 的 URL（如 file 形态）与解析失败

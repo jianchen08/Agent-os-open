@@ -1,9 +1,11 @@
 /**
- * 应用壳进程树内存指标 query（监控页全口径内存的应用壳段数据源）
+ * 应用壳进程树内存/CPU 指标 query（监控页全口径内存的应用壳段数据源）
  *
- * 数据走 Electron IPC（window.electronAPI.appMetrics.get），仅 Electron
- * 形态启用（Web 下 electronAPI 缺失 → enabled false，汇总条该段显 —）；
- * refetchInterval 10s 对齐插件段刷新节奏，页面不可见自动暂停。
+ * 数据走 Electron IPC（window.electronAPI.appMetrics.get），payload 原样
+ * 透传（内存 KB 求和 + CPU percentCPUUsage 求和 + 内核日志判活
+ * kernelLiveness）；仅 Electron 形态启用（Web 下 electronAPI 缺失 →
+ * enabled false，汇总条该段显 —）；refetchInterval 10s 对齐插件段刷新节奏，
+ * 页面不可见自动暂停。
  */
 
 import { useQuery } from '@tanstack/react-query'

@@ -484,20 +484,19 @@ describe('validatePluginDeclaration — capabilities.streaming 校验', () => {
   })
 
   it.each([
-    'block_start',
-    'text_delta',
-    'reasoning_delta',
-    'tool_call_delta',
-    'block_end',
-    'usage',
-    'finish',
-    'keepalive',
     'stream_start',
+    'stream_chunk',
+    'thinking_start',
+    'thinking_chunk',
+    'thinking_end',
     'tool_start',
     'tool_result',
     'new_message',
     'stream_end',
+    'pipeline_round_finished',
+    'run_failed',
     'stream_error',
+    'plugin_error',
   ])('契约事件 %s 合法', (event) => {
     expect(run({ streaming: { events: [event] } }).errors).toEqual([])
   })

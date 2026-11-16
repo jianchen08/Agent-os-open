@@ -173,6 +173,34 @@ describe('session API 覆盖缺口（批九）', () => {
       await createSession({ fieldMetadata: {} })
       expect(JSON.parse(mockAxios.history.post[1].data)).toEqual({})
     })
+
+    it('响应 metadata 回接：workspace 等出生值即时落在 Session 上（不等列表刷新）', async () => {
+      mockAxios.onPost(API_ENDPOINTS.SESSIONS.CREATE).reply(200, {
+        thread_id: 'th-ws',
+        created_at: TS,
+        updated_at: TS,
+        // 内核 create 合并默认值后的完整 metadata 回显
+        metadata: { workspace: 'D:/proj/demo', workspace_mode: 'plain' },
+      })
+
+      const session = await createSession({
+        fieldMetadata: { workspace: 'D:/proj/demo', workspace_mode: 'plain' },
+      })
+
+      expect(session.workspace).toBe('D:/proj/demo')
+      expect(session.workspaceMode).toBe('plain')
+    })
+
+    it('响应缺 metadata（异常后端）→ 回退请求侧 fieldMetadata 映射', async () => {
+      mockAxios.onPost(API_ENDPOINTS.SESSIONS.CREATE).reply(200, {
+        thread_id: 'th-ws2',
+        created_at: TS,
+      })
+
+      const session = await createSession({ fieldMetadata: { workspace: 'D:/proj/fallback' } })
+
+      expect(session.workspace).toBe('D:/proj/fallback')
+    })
   })
 
   describe('updateSessionAgent', () => {
@@ -427,6 +455,51 @@ describe('session API 覆盖缺口（批九）', () => {
       expect(msg.durationMs).toBe(77)
       expect(msg.containerTaskId).toBe('ct-1')
     })
+
+    it('结果体超阈值截断为「预览+标记」（含 content 兜底全文），阈值内原样；includeFullToolResults 旁路', () => {
+      const big = 'x'.repeat(9 * 1024)
+      const bigData = { blob: 'y'.repeat(9 * 1024) }
+
+      // 超阈值：toolResult 与 content 兜底、toolResultData 双侧截断，标记带 sequence
+      const truncated = mapBackendMessageToMessage(
+        backendMessage({
+          id: 't3',
+          role: 'tool',
+          sequence: 9,
+          content: big,
+          toolResultData: bigData,
+        }),
+        's1',
+      )
+      expect(truncated.toolResult).toMatchObject({
+        __truncated: true,
+        totalBytes: big.length,
+        sequence: 9,
+      })
+      expect((truncated.toolResult as any).preview.length).toBe(2 * 1024)
+      expect(truncated.toolResultData).toMatchObject({
+        __truncated: true,
+        totalBytes: JSON.stringify(bigData).length,
+        sequence: 9,
+      })
+
+      // 阈值内：原样透传（同一值）
+      const small = mapBackendMessageToMessage(
+        backendMessage({ id: 't4', role: 'tool', content: '小结果', toolResultData: { a: 1 } }),
+        's1',
+      )
+      expect(small.toolResult).toBe('小结果')
+      expect(small.toolResultData).toEqual({ a: 1 })
+
+      // 展开回填路径：includeFullToolResults 旁路截断拿全量
+      const full = mapBackendMessageToMessage(
+        backendMessage({ id: 't5', role: 'tool', sequence: 9, content: big, toolResultData: bigData }),
+        's1',
+        { includeFullToolResults: true },
+      )
+      expect(full.toolResult).toBe(big)
+      expect(full.toolResultData).toEqual(bigData)
+    })
   })
 
   describe('mapBackendMessageToMessage：非 tool 消息组装', () => {
@@ -559,8 +632,9 @@ describe('session API 覆盖缺口（批九）', () => {
         backendMessage({ role: 'assistant', content: '答', reasoningContent: '思考中' }),
         's1',
       )
-      expect(viaReasoning.thinking).toEqual({ content: '思考中', isThinking: false })
-      expect(viaReasoning.parts?.[0]).toMatchObject({ type: 'thinking', sequence: 0 })
+      // 思考只落 thinking part，不写顶层 thinking（单份化，数据面瘦身）
+      expect(viaReasoning.thinking).toBeUndefined()
+      expect(viaReasoning.parts?.[0]).toMatchObject({ type: 'thinking', content: '思考中', sequence: 0 })
       expect(viaReasoning.parts?.[1]).toMatchObject({ type: 'text', content: '答', sequence: 1 })
 
       const viaMetadata = mapBackendMessageToMessage(
@@ -571,13 +645,15 @@ describe('session API 覆盖缺口（批九）', () => {
         }),
         's1',
       )
-      expect(viaMetadata.thinking).toEqual({ content: '元数据思考', isThinking: false })
+      expect(viaMetadata.thinking).toBeUndefined()
+      expect(viaMetadata.parts?.[0]).toMatchObject({ type: 'thinking', content: '元数据思考' })
 
       const blank = mapBackendMessageToMessage(
         backendMessage({ role: 'assistant', content: '答', reasoningContent: '   ' }),
         's1',
       )
       expect(blank.parts?.some((p) => p.type === 'thinking')).toBe(false)
+      expect(blank.thinking).toBeUndefined()
     })
 
     it('空内容且无思考无工具调用的消息：parts 缺省（不产空数组）', () => {

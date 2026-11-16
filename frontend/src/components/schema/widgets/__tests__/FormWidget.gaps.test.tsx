@@ -173,12 +173,13 @@ describe('G3：readbackUri 回读当前值（权限模式选择器）', () => {
     fireEvent.pointerDown(trigger)
     fireEvent.pointerUp(trigger)
     fireEvent.click(trigger)
+    // 菜单项恒为原文（全称不丢）
     fireEvent.click(await screen.findByText('默认（命中规则才确认）'))
     await waitFor(() =>
-      expect(screen.getByTestId('compact-select-trigger').textContent).toContain(
-        '默认（命中规则才确认）',
-      ),
+      expect(screen.getByTestId('compact-select-trigger').textContent).toContain('默认'),
     )
+    // R10③：触发器可见文案去括注（"显示的描述太长了"），括注只在菜单/可访问名
+    expect(screen.getByTestId('compact-select-trigger').textContent).not.toContain('命中规则')
   })
 })
 
@@ -234,6 +235,69 @@ describe('G4：紧凑选择器触发器自标识（BUG-6 回归）', () => {
   })
 })
 
+describe('紧凑选择器 icon-only 形态（icon 声明在场 → 触发器只留图标）', () => {
+  // 用户原话"不要写思考强度4个字"：icon 在场的声明（思考强度 brain）触发器
+  // icon-only，设置名退到 title 悬停、可达性由可访问名承载；icon 缺失的声明
+  // （权限模式/触发器）维持原文字形态。机制按 icon 在场判别，不感知具体 id。
+  const iconProps = { title: '思考强度', icon: 'brain' }
+  const iconField = {
+    name: 'strength',
+    type: 'select' as const,
+    label: '思考强度',
+    options: [
+      { label: '关闭', value: 'off' },
+      { label: '低', value: 'low' },
+      { label: '高', value: 'high' },
+    ],
+  }
+
+  it('icon 在场已选择：触发器无可见文字，title 悬停=设置名，可访问名仍自标识', () => {
+    render(
+      <FormWidget
+        fields={[iconField]}
+        value={{ strength: 'high' }}
+        onChange={vi.fn()}
+        {...iconProps}
+      />,
+    )
+    const trigger = screen.getByTestId('compact-select-trigger')
+    expect(trigger.textContent?.trim()).toBe('')
+    expect(trigger).toHaveAttribute('title', '思考强度')
+    expect(screen.getByRole('button', { name: '思考强度：高' })).toBeInTheDocument()
+  })
+
+  it('icon 在场未选择：可访问名=设置名（无值可示不复读），title 悬停仍在', () => {
+    render(
+      <FormWidget
+        fields={[iconField]}
+        value={{ strength: '' }}
+        onChange={vi.fn()}
+        {...iconProps}
+      />,
+    )
+    expect(screen.getByRole('button', { name: '思考强度' })).toHaveAttribute(
+      'title',
+      '思考强度',
+    )
+  })
+
+  it('icon 缺失已选择：维持原文字形态（可见文案=当前值裸值）', () => {
+    render(<FormWidget fields={[iconField]} value={{ strength: 'high' }} onChange={vi.fn()} />)
+    const trigger = screen.getByRole('button', { name: '思考强度：高' })
+    expect(trigger).toHaveTextContent('高')
+  })
+
+  it('icon 缺失未选择：可见文案维持设置名兜底（原行为），可访问名不再复读设置名', () => {
+    render(<FormWidget fields={[iconField]} value={{ strength: '' }} onChange={vi.fn()} />)
+    const trigger = screen.getByTestId('compact-select-trigger')
+    expect(trigger).toHaveTextContent('思考强度')
+    expect(screen.getByRole('button', { name: '思考强度' })).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: '思考强度：思考强度' }),
+    ).not.toBeInTheDocument()
+  })
+})
+
 describe('隔离会话权限档如实显示（免审批默认 + 显式覆盖）', () => {
   // 语义（用户裁定 2026-09-15）：隔离/worktree 会话未显式选择权限档时后端
   // 默认完全免审批（explicit=false 回读），选择器必须显示该生效默认；
@@ -263,7 +327,7 @@ describe('隔离会话权限档如实显示（免审批默认 + 显式覆盖）'
     fireEvent.click(trigger)
   }
 
-  it('隔离会话未显式选择（explicit=false 回读）→ 显示「免审批（隔离默认）」', async () => {
+  it('隔离会话未显式选择（explicit=false 回读）→ 可见「免审批」，全称在可访问名', async () => {
     useSessionsQueryMock.mockReturnValue({
       data: [{ id: 's-iso', isolationMode: 'isolated', workspaceMode: 'plain' }],
     })
@@ -272,7 +336,10 @@ describe('隔离会话权限档如实显示（免审批默认 + 显式覆盖）'
 
     renderSelector()
     const trigger = await screen.findByTestId('compact-select-trigger')
-    await waitFor(() => expect(trigger.textContent).toContain('免审批（隔离默认）'))
+    // R10③：可见文案去括注（「免审批（隔离默认）」→「免审批」），"隔离默认"
+    // 语境由可访问名承载（读屏/GUI 按全称定位不受影响）
+    await waitFor(() => expect(trigger.textContent).toContain('免审批'))
+    expect(trigger.textContent).not.toContain('隔离默认')
     expect(
       screen.getByRole('button', { name: '权限模式：免审批（隔离默认）' }),
     ).toBeInTheDocument()
@@ -283,7 +350,7 @@ describe('隔离会话权限档如实显示（免审批默认 + 显式覆盖）'
     expect(checked).toEqual([])
   })
 
-  it('worktree 会话未显式选择 → 同样显示「免审批（隔离默认）」', async () => {
+  it('worktree 会话未显式选择 → 同样可见「免审批」（R10③ 去括注）', async () => {
     useSessionsQueryMock.mockReturnValue({
       data: [{ id: 's-wt', isolationMode: null, workspaceMode: 'worktree' }],
     })
@@ -292,10 +359,10 @@ describe('隔离会话权限档如实显示（免审批默认 + 显式覆盖）'
 
     renderSelector()
     const trigger = await screen.findByTestId('compact-select-trigger')
-    await waitFor(() => expect(trigger.textContent).toContain('免审批（隔离默认）'))
+    await waitFor(() => expect(trigger.textContent).toContain('免审批'))
   })
 
-  it('非隔离会话未显式选择 → 显示默认档（生效语义与显示一致）', async () => {
+  it('非隔离会话未显式选择 → 显示默认档（可见去括注，生效语义与显示一致）', async () => {
     useSessionsQueryMock.mockReturnValue({
       data: [{ id: 's-ni', isolationMode: 'non_isolated', workspaceMode: 'plain' }],
     })
@@ -304,9 +371,8 @@ describe('隔离会话权限档如实显示（免审批默认 + 显式覆盖）'
 
     renderSelector()
     const trigger = await screen.findByTestId('compact-select-trigger')
-    await waitFor(() =>
-      expect(trigger.textContent).toContain('默认（命中规则才确认）'),
-    )
+    await waitFor(() => expect(trigger.textContent).toContain('默认'))
+    expect(trigger.textContent).not.toContain('命中规则')
   })
 
   it('隔离会话显式选择（explicit=true 回读）→ 显示所选档而非免审批', async () => {
@@ -318,9 +384,7 @@ describe('隔离会话权限档如实显示（免审批默认 + 显式覆盖）'
 
     renderSelector()
     const trigger = await screen.findByTestId('compact-select-trigger')
-    await waitFor(() =>
-      expect(trigger.textContent).toContain('接受编辑（文件自动）'),
-    )
+    await waitFor(() => expect(trigger.textContent).toContain('接受编辑'))
     expect(trigger.textContent).not.toContain('免审批')
   })
 })

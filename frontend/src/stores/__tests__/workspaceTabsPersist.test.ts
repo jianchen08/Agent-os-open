@@ -1,5 +1,6 @@
 /** fileEditorRegistry 与 layoutModeStore 工作区标签持久化的最小冒烟测试 */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { userScopedKey as pk } from '@/utils/userScopedStorage'
 
 describe('workspaceTabsPersist', () => {
   beforeEach(() => {
@@ -21,7 +22,7 @@ describe('workspaceTabsPersist', () => {
         containerTaskId: '_local',
       })
 
-      const raw = localStorage.getItem('file-editor-registry')
+      const raw = localStorage.getItem(pk('file-editor-registry'))
       expect(raw).toBeTruthy()
       const parsed = JSON.parse(raw!)
       expect(parsed['tab-1']).toBeDefined()
@@ -41,7 +42,7 @@ describe('workspaceTabsPersist', () => {
       })
       mod.updateFileEditorData('tab-2', { content: 'new' })
 
-      const parsed = JSON.parse(localStorage.getItem('file-editor-registry')!)
+      const parsed = JSON.parse(localStorage.getItem(pk('file-editor-registry'))!)
       expect(parsed['tab-2'].content).toBe('new')
     })
 
@@ -55,7 +56,7 @@ describe('workspaceTabsPersist', () => {
       })
       mod.removeFileEditorData('tab-3')
 
-      const parsed = JSON.parse(localStorage.getItem('file-editor-registry')!)
+      const parsed = JSON.parse(localStorage.getItem(pk('file-editor-registry'))!)
       expect(parsed['tab-3']).toBeUndefined()
     })
   })
@@ -72,7 +73,7 @@ describe('workspaceTabsPersist', () => {
       })
 
       // 触发持久化
-      const raw = localStorage.getItem('layout-mode')
+      const raw = localStorage.getItem(pk('layout-mode'))
       expect(raw).toBeTruthy()
       const parsed = JSON.parse(raw!)
       const tabs = parsed.state?.workspaceTabs ?? []

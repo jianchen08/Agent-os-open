@@ -41,7 +41,6 @@ export function makePendingInteraction(
 export function resetNotificationStores(): void {
   useNotificationStore.setState({
     notifications: [],
-    groupState: { collapsed: { critical: false, high: false, normal: true, low: true } },
     isPanelOpen: false,
     activeBlockingNotification: null,
   })

@@ -61,8 +61,8 @@ const DropdownMenuSubContent = React.forwardRef<
     )}
     style={{
       borderRadius: 'var(--dropdown-radius, 0.75rem)',
-      boxShadow: 'var(--dropdown-shadow, 0 10px 15px -3px rgba(0, 0, 0, 0.4))',
-      border: 'var(--dropdown-border, 1px solid rgba(255, 255, 255, 0.1))',
+      boxShadow: 'var(--dropdown-shadow)',
+      border: 'var(--dropdown-border)',
       backgroundColor: 'hsl(var(--popover))',
     }}
     {...props}
@@ -85,8 +85,8 @@ const DropdownMenuContent = React.forwardRef<
       )}
       style={{
         borderRadius: 'var(--dropdown-radius, 0.75rem)',
-        boxShadow: 'var(--dropdown-shadow, 0 10px 15px -3px rgba(0, 0, 0, 0.4))',
-        border: 'var(--dropdown-border, 1px solid rgba(255, 255, 255, 0.1))',
+        boxShadow: 'var(--dropdown-shadow)',
+        border: 'var(--dropdown-border)',
         backgroundColor: 'hsl(var(--popover))',
       }}
       {...props}

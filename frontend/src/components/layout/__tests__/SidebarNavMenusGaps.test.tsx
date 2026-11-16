@@ -22,6 +22,9 @@ import { searchGlobal } from '@/services/api/search'
 import { getSessions, getThreadSchema } from '@/services/api/session'
 import { reportError } from '@/services/errorReporting'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { initializeWidgets } from '@/services/schema/registerWidgets'
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { slotRegistry } from '@/services/slots/slotRegistry'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useAuthStore } from '@/stores/authStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
@@ -30,6 +33,7 @@ import { useSessionListStore } from '@/stores/sessionListStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
 import { createTestQueryClient, renderWithProviders } from '@/test/renderWithProviders'
+import { loadSchemaIntoRegistries, registerWidgetStub } from '@/test/schemaLoader'
 import type * as sessionMod from '@/services/api/session'
 import type * as errorReportingMod from '@/services/errorReporting'
 import type { Session } from '@/types/models'
@@ -76,11 +80,53 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 }
 
 /** 注册三类 activity-bar 插件入口 + 监控/任务管理隐藏直达页 */
-function registerPluginPages(): void {
-  contributionRegistry.register({
-    type: 'pages', id: 'plug-path', space: 'workspace', slot: 'activity-bar',
-    title: '路径页', path: '/ext/panel', pluginId: 'plugA', order: 1,
+async function registerPluginPages(): Promise<void> {
+  // 内建 widget 注册面（生产 main.tsx 启动同款）+ 合成 widget 名注册桩：
+  // C4 槽装载期「声明↔注册一致性」终验要求承载 widget 已注册
+  widgetRegistry.clear()
+  initializeWidgets()
+  registerWidgetStub('custom_widget')
+  registerWidgetStub('container_view_widget')
+  registerWidgetStub('monitoring_hub')
+  registerWidgetStub('tasks_hub')
+  // 路径直达页与菜单直达页：经两表装载（workspace.tab keyed 槽承载 path 直达）
+  await loadSchemaIntoRegistries({
+    plugin_contributes: [
+      {
+        plugin_id: 'plugA',
+        plugin_name: 'Plug A',
+        contributes: {
+          pages: [
+            { id: 'plug-path', space: 'workspace', slot: 'activity-bar', title: '路径页', path: '/ext/panel', widget: 'status_card', order: 1 },
+          ],
+        },
+      },
+      // 菜单直达页（slot=tab，不进侧栏导航，仅供壳层导航解析）。监控页按 E6
+      // 声明面化走声明键（pluginId+pageId=monitoring/monitoring，与真实
+      // plugin.json contributes.pages 声明同构），标题/组件为夹具自定值以证明
+      // 页签内容来自注册表活值
+      {
+        plugin_id: 'monitoring',
+        plugin_name: 'Monitoring',
+        contributes: {
+          pages: [
+            { id: 'monitoring', space: 'workspace', slot: 'tab', title: '监控台', path: '/monitoring', widget: 'monitoring_hub' },
+          ],
+        },
+      },
+      {
+        plugin_id: 'task_service',
+        plugin_name: 'Task Service',
+        contributes: {
+          pages: [
+            { id: 'tasks-page', space: 'workspace', slot: 'tab', title: '任务管理', path: '/tasks', widget: 'tasks_hub' },
+          ],
+        },
+      },
+    ],
+    plugin_configs: [],
   })
+  // widget 直开夹具（无 path，不经槽解析；保持无 pluginId 的 contrib 形态断言）
   contributionRegistry.register({
     type: 'pages', id: 'plug-widget', space: 'workspace', slot: 'activity-bar',
     title: '组件页', widget: 'custom_widget', order: 2,
@@ -92,20 +138,13 @@ function registerPluginPages(): void {
     type: 'views', id: 'plug-container-view', title: '容器视图',
     widget: 'container_view_widget', containerId: 'plug-container',
   })
-  // 菜单直达页（slot=tab，不进侧栏导航，仅供 openWorkspacePanelByPath 解析）
-  contributionRegistry.register({
-    type: 'pages', id: 'monitoring-page', space: 'workspace', slot: 'tab',
-    title: '监控台', path: '/monitoring', widget: 'monitoring_hub',
-  })
-  contributionRegistry.register({
-    type: 'pages', id: 'tasks-page', space: 'workspace', slot: 'tab',
-    title: '任务管理', path: '/tasks', widget: 'tasks_hub',
-  })
 }
 
 beforeEach(() => {
   vi.clearAllMocks()
   contributionRegistry.clear()
+  // 槽表同批清空：跨用例残留的 workspace.tab 条目会让内置 /tasks 等路径被旧声明劫持
+  slotRegistry.clear()
   useUIStore.setState({ sidebarCollapsed: false, messageJump: null, messageSearchQuery: '' })
   useSessionStore.setState({ activeSessionId: null })
   useNotificationStore.setState({ notifications: [] })
@@ -193,22 +232,22 @@ describe('贡献页 1.5s 轮询热注册', () => {
 })
 
 describe('折叠 rail：插件入口与高亮切换', () => {
-  function renderRail() {
+  async function renderRail() {
     useUIStore.setState({ sidebarCollapsed: true })
-    registerPluginPages()
+    await registerPluginPages()
     renderWithProviders(<Sidebar />, { queryClient: createTestQueryClient() })
   }
 
-  it('path 声明页：点击 rail 图标 → 经声明路径打开工作区页签', () => {
-    renderRail()
+  it('path 声明页：点击 rail 图标 → 经声明路径打开工作区页签', async () => {
+    await renderRail()
     fireEvent.click(screen.getByTestId('sidebar-rail-plugin-plug-path'))
     const tabs = useLayoutModeStore.getState().workspaceTabs
     expect(tabs).toHaveLength(1)
     expect(tabs[0]).toMatchObject({ id: 'ws-plugin-plug-path', moduleId: '__plugin_plugA__' })
   })
 
-  it('widget 声明页：点击 rail 图标 → 打开预置 widget 页签', () => {
-    renderRail()
+  it('widget 声明页：点击 rail 图标 → 打开预置 widget 页签', async () => {
+    await renderRail()
     fireEvent.click(screen.getByTestId('sidebar-rail-plugin-plug-widget'))
     const tabs = useLayoutModeStore.getState().workspaceTabs
     expect(tabs[0]).toMatchObject({
@@ -216,8 +255,8 @@ describe('折叠 rail：插件入口与高亮切换', () => {
     })
   })
 
-  it('容器条目：取容器下声明 widget 的视图条目打开页签', () => {
-    renderRail()
+  it('容器条目：取容器下声明 widget 的视图条目打开页签', async () => {
+    await renderRail()
     fireEvent.click(screen.getByTestId('sidebar-rail-plugin-plug-container'))
     const tabs = useLayoutModeStore.getState().workspaceTabs
     expect(tabs[0]).toMatchObject({
@@ -225,8 +264,8 @@ describe('折叠 rail：插件入口与高亮切换', () => {
     })
   })
 
-  it('会话入口高亮跟随点击切换（插件选中后会话入口可点回）', () => {
-    renderRail()
+  it('会话入口高亮跟随点击切换（插件选中后会话入口可点回）', async () => {
+    await renderRail()
     const sessionsBtn = screen.getByTestId('sidebar-rail-sessions')
     expect(sessionsBtn.getAttribute('style')).toContain('inset')
 
@@ -273,21 +312,21 @@ describe('任务管理常驻入口（前端自有页，非插件声明）', () =
 })
 
 describe('折叠 rail 用户菜单', () => {
-  function openRailUserMenu() {
+  async function openRailUserMenu() {
     useUIStore.setState({ sidebarCollapsed: true })
-    registerPluginPages()
+    await registerPluginPages()
     renderWithProviders(<Sidebar />, { queryClient: createTestQueryClient() })
     openDropdownMenu(screen.getByTestId('sidebar-rail-user'))
   }
 
   it('已登录：切换账号 → 打开登录弹窗', async () => {
-    openRailUserMenu()
+    await openRailUserMenu()
     fireEvent.click(screen.getByText('切换账号'))
     expect(await screen.findByTestId('login-modal-form')).toBeInTheDocument()
   })
 
   it('已登录：设置/监控/任务管理 → 分别打开对应工作区页签', async () => {
-    openRailUserMenu()
+    await openRailUserMenu()
     fireEvent.click(screen.getByText('设置'))
     await waitFor(() => {
       expect(useLayoutModeStore.getState().workspaceTabs.map((t) => t.id)).toContain('ws-panel-settings')
@@ -296,7 +335,7 @@ describe('折叠 rail 用户菜单', () => {
     openDropdownMenu(screen.getByTestId('sidebar-rail-user'))
     fireEvent.click(screen.getByText('监控'))
     await waitFor(() => {
-      expect(useLayoutModeStore.getState().workspaceTabs.map((t) => t.id)).toContain('ws-plugin-monitoring-page')
+      expect(useLayoutModeStore.getState().workspaceTabs.map((t) => t.id)).toContain('ws-plugin-monitoring')
     })
 
     openDropdownMenu(screen.getByTestId('sidebar-rail-user'))
@@ -308,15 +347,15 @@ describe('折叠 rail 用户菜单', () => {
 
   it('未登录：登录入口 → 打开登录弹窗', async () => {
     useAuthStore.setState({ isAuthenticated: false, user: null, token: null })
-    openRailUserMenu()
+    await openRailUserMenu()
     fireEvent.click(screen.getByText('登录'))
     expect(await screen.findByTestId('login-modal-form')).toBeInTheDocument()
   })
 })
 
 describe('展开态用户菜单', () => {
-  function openUserMenu() {
-    registerPluginPages()
+  async function openUserMenu() {
+    await registerPluginPages()
     renderWithProviders(<Sidebar />, { queryClient: createTestQueryClient() })
     openDropdownMenu(screen.getByTestId('sidebar-user-area'))
   }
@@ -328,7 +367,7 @@ describe('展开态用户菜单', () => {
       .mockImplementation(async () => {
         useAuthStore.setState({ isAuthenticated: true, token: 'new-token' })
       })
-    openUserMenu()
+    await openUserMenu()
     fireEvent.click(await screen.findByTestId('sidebar-user-menu-login'))
     const form = await screen.findByTestId('login-modal-form')
     fireEvent.change(screen.getByTestId('login-modal-username'), { target: { value: 'bob' } })
@@ -348,7 +387,7 @@ describe('展开态用户菜单', () => {
     const changeSpy = vi
       .spyOn(useAuthStore.getState(), 'changePassword')
       .mockResolvedValue(undefined)
-    openUserMenu()
+    await openUserMenu()
     fireEvent.click(await screen.findByTestId('sidebar-user-menu-change-password'))
     fireEvent.change(await screen.findByTestId('change-password-old-input'), {
       target: { value: 'old-pass-1' },
@@ -371,13 +410,13 @@ describe('展开态用户菜单', () => {
   })
 
   it('已登录：切换账号 → 打开登录弹窗', async () => {
-    openUserMenu()
+    await openUserMenu()
     fireEvent.click(await screen.findByTestId('sidebar-user-menu-switch'))
     expect(await screen.findByTestId('login-modal-form')).toBeInTheDocument()
   })
 
   it('已登录：设置/监控/任务管理 → 分别打开对应工作区页签', async () => {
-    openUserMenu()
+    await openUserMenu()
     fireEvent.click(await screen.findByTestId('sidebar-user-menu-settings'))
     await waitFor(() => {
       expect(useLayoutModeStore.getState().workspaceTabs.map((t) => t.id)).toContain('ws-panel-settings')
@@ -386,7 +425,7 @@ describe('展开态用户菜单', () => {
     openDropdownMenu(screen.getByTestId('sidebar-user-area'))
     fireEvent.click(await screen.findByTestId('sidebar-user-menu-monitoring'))
     await waitFor(() => {
-      expect(useLayoutModeStore.getState().workspaceTabs.map((t) => t.id)).toContain('ws-plugin-monitoring-page')
+      expect(useLayoutModeStore.getState().workspaceTabs.map((t) => t.id)).toContain('ws-plugin-monitoring')
     })
 
     openDropdownMenu(screen.getByTestId('sidebar-user-area'))
@@ -586,8 +625,8 @@ describe('移动端自动收起', () => {
     expect(useUIStore.getState().sidebarCollapsed).toBe(true)
   })
 
-  it('点击插件页 → 打开工作区页签并自动收起侧栏', () => {
-    registerPluginPages()
+  it('点击插件页 → 打开工作区页签并自动收起侧栏', async () => {
+    await registerPluginPages()
     renderWithProviders(<Sidebar isMobile />, { queryClient: createTestQueryClient() })
     fireEvent.click(screen.getByTestId('sidebar-menu-plugin-plug-path'))
     expect(useLayoutModeStore.getState().workspaceTabs.map((t) => t.id)).toContain('ws-plugin-plug-path')

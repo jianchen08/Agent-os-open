@@ -22,7 +22,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools" / "human"
+_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "human"
 
 
 def _load_server():
@@ -109,12 +109,12 @@ class TestHandlerWiring:
     async def test_choice_mode_passes_resolved_file_paths(
         self, server_with_spy, tmp_path: Path
     ) -> None:
-        """choice 模式：file_paths 翻译为宿主绝对路径后传入 service。"""
+        """带 options（原 choice 语义，2026-10-19 裁定选择=对话）：file_paths
+        翻译为宿主绝对路径后经 conversation 统一交互卡传入 service。"""
         server, spy = server_with_spy
         (tmp_path / "plan.md").write_text("# plan\n", encoding="utf-8")
 
         await server.human_interaction(
-            mode="choice",
             title="请审批",
             options=["批准", "拒绝"],
             file_paths=["plan.md", "/workspace/plan.md"],
@@ -122,19 +122,19 @@ class TestHandlerWiring:
             pipeline_id="pipe-1",
         )
 
-        assert len(spy.choice_calls) == 1
-        assert spy.choice_calls[0]["file_paths"] == [str(tmp_path / "plan.md")] * 2
+        assert len(spy.conversation_calls) == 1
+        assert spy.conversation_calls[0]["file_paths"] == [str(tmp_path / "plan.md")] * 2
 
     async def test_conversation_mode_passes_resolved_file_paths(
         self, server_with_spy, tmp_path: Path
     ) -> None:
-        """conversation 模式：同 choice 的翻译与接线。"""
+        """conversation（有 options 才进入阻塞交互态）：file_paths 翻译接线。"""
         server, spy = server_with_spy
         (tmp_path / "spec.md").write_text("# spec\n", encoding="utf-8")
 
         await server.human_interaction(
-            mode="conversation",
             title="讨论方案",
+            options=[{"id": "1", "label": "继续"}],
             file_paths=["spec.md"],
             workspace=str(tmp_path),
             pipeline_id="pipe-2",
@@ -148,7 +148,6 @@ class TestHandlerWiring:
         server, spy = server_with_spy
 
         await server.human_interaction(
-            mode="notification",
             title="进度",
             file_paths=["x.md"],
             workspace=r"D:\ws",
@@ -164,10 +163,10 @@ class TestHandlerWiring:
         server, spy = server_with_spy
 
         await server.human_interaction(
-            mode="choice", title="确认", options=["ok"], pipeline_id="pipe-3",
+            title="确认", options=["ok"], pipeline_id="pipe-3",
         )
 
-        assert spy.choice_calls[0]["file_paths"] is None
+        assert spy.conversation_calls[0]["file_paths"] is None
 
     async def test_invalid_file_paths_normalized_to_none(
         self, server_with_spy
@@ -176,11 +175,11 @@ class TestHandlerWiring:
         server, spy = server_with_spy
 
         await server.human_interaction(
-            mode="choice", title="t", options=["ok"], file_paths=42, pipeline_id="p-1",
+            title="t", options=["ok"], file_paths=42, pipeline_id="p-1",
         )
         await server.human_interaction(
-            mode="choice", title="t", options=["ok"], file_paths=[42, None], pipeline_id="p-2",
+            title="t", options=["ok"], file_paths=[42, None], pipeline_id="p-2",
         )
 
-        assert spy.choice_calls[0]["file_paths"] is None, "非列表入参应归一为 None"
-        assert spy.choice_calls[1]["file_paths"] is None, "全非法项的列表应归一为 None"
+        assert spy.conversation_calls[0]["file_paths"] is None, "非列表入参应归一为 None"
+        assert spy.conversation_calls[1]["file_paths"] is None, "全非法项的列表应归一为 None"

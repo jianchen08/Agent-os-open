@@ -23,6 +23,8 @@ const TOKEN_KEYS = [
   '--ag-card',
   '--ag-accent',
   '--ag-accent-soft',
+  '--ag-primary', // 1017 分界条恒紫修复：品牌主色入载荷
+  '--ag-primary-soft', // 品牌主色浅底派生
   '--ag-chip',
   '--ag-ok',
   '--ag-warn',
@@ -35,7 +37,7 @@ beforeEach(() => {
 })
 
 describe('buildWebviewThemeTokens — 声明值优先', () => {
-  it('完整 ThemeConfig → 固定 12 键全非空，颜色取声明值', () => {
+  it('完整 ThemeConfig → 固定 14 键全非空，颜色取声明值', () => {
     const tokens = buildWebviewThemeTokens(DARK)
     expect(Object.keys(tokens).sort()).toEqual([...TOKEN_KEYS].sort())
     for (const key of TOKEN_KEYS) expect(tokens[key].length).toBeGreaterThan(0)

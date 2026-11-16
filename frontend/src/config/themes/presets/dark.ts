@@ -269,6 +269,7 @@ export const darkTheme: ThemeConfig = {
 
   effects: {
     glassmorphism: true,
+    messageGlass: true,
     animations: true,
     transitionDuration: 200,
     transitionEasing: 'cubic-bezier(0.32, 0, 0.67, 0)',

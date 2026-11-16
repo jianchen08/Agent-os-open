@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/core",
+    "crates/memory",
     "crates/config",
     "crates/plugin-loader",
     "crates/native-sdk",
@@ -16,6 +17,7 @@ members = [
     "crates/engine",
     "crates/session",
     "crates/integration-tests",
+    "crates/seedx",
 ]
 resolver = "2"
 
@@ -49,7 +51,7 @@ debug = "line-tables-only"
 [profile.release]
 strip = "debuginfo"
 [workspace.package]
-version = "0.2.0"
+version = "0.2.2"
 edition = "2021"
 license = "MIT"
 rust-version = "1.85"
@@ -94,8 +96,19 @@ mimalloc = { version = "0.1.52", features = ["extended"] }
 libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
 # 任务活动标签槽（task_activity：O(1) 原子标签交换，堆栈级诊断面）
 arc-swap = "1"
+# 进程级 CPU/内存采集（内核自身进程自采样，性能监测补强 T5：proc_state poller
+# 采 cpu_usage/memory）。只启 system 组件锁最小依赖（disk/network/user/component
+# 不用；Windows 句柄数 sysinfo 不暴露，沿 collect_memory_commit 既有平台分支自采）。
+# 0.38 而非最新 0.39：0.39 全系 MSRV=1.95 高于本仓工具链 rust 1.88（原生与
+# WSL rust:1.88 容器同版），0.38 系 MSRV=1.88 恰对齐。
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
+# 性能基准框架（整改方案 §6 拍板⑨：三热点受控对照——管道事件分发/SQLite 写/
+# WS 扇出，benches 见 engine/session 两 crate；持续性能观测走既有 metrics
+# histogram（metrics/aggregator.rs Prometheus 桶），criterion 只做受控对照，不引 OTel）
+criterion = "0.5"
 # 内核 crate（workspace 内部引用）
 agentos-core = { path = "crates/core" }
+agentos-memory = { path = "crates/memory" }
 agentos-config = { path = "crates/config" }
 agentos-plugin-loader = { path = "crates/plugin-loader" }
 # 原生插件 SDK（cdylib 插件作者依赖，task_11 N3）

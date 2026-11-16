@@ -44,6 +44,19 @@ const growthLoop = vi.hoisted(() => ({
 
 const removeQueries = vi.hoisted(() => vi.fn())
 
+// 借权面（启动即借权路径用）：本机内核代持令牌向目标换发 + 壳层配对设备直借
+const borrow = vi.hoisted(() => ({
+  mintLocalKernelToken: vi.fn(async () => 'local-at'),
+  borrowSession: vi.fn(async () => ({ ok: true, refreshToken: 'rt-borrow' })),
+  borrowViaShellDevice: vi.fn(async () => ({ ok: false, error: 'unset' })),
+}))
+
+vi.mock('@/services/deviceBorrow', () => ({
+  mintLocalKernelToken: (...args: unknown[]) => borrow.mintLocalKernelToken(...args),
+  borrowSession: (...args: unknown[]) => borrow.borrowSession(...args),
+  borrowViaShellDevice: (...args: unknown[]) => borrow.borrowViaShellDevice(...args),
+  borrowAndConnect: vi.fn(),
+}))
 vi.mock('@/services/api/auth', () => authApi)
 vi.mock('@/services/auth/tokenLifecycle', () => tl)
 vi.mock('@/services/authCallbacks', () => ({
@@ -115,6 +128,9 @@ beforeEach(() => {
   authApi.login.mockResolvedValue({ ...LOGIN_RESPONSE })
   authApi.getCurrentUser.mockResolvedValue({ ...USER_INFO })
   authApi.changePassword.mockResolvedValue({ ...LOGIN_RESPONSE })
+  borrow.mintLocalKernelToken.mockResolvedValue(null)
+  borrow.borrowSession.mockResolvedValue({ ok: false, error: 'unset' })
+  borrow.borrowViaShellDevice.mockResolvedValue({ ok: false, error: 'unset' })
 })
 
 describe('initializeAuth 装机版自动登录分支', () => {
@@ -167,5 +183,154 @@ describe('initializeAuth 装机版自动登录分支', () => {
 
     expect(host.load).not.toHaveBeenCalled()
     expect(authApi.login).not.toHaveBeenCalled()
+  })
+
+  it('存量 refresh 认证失效 → 清凭据后继续装机免填自动登录（不短路）', async () => {
+    // 2026-10-22 用户实测根因：坏 token 走 logout 后 return，短路下方自动
+    // 登录链——「无密码切回本机」劣化为每次手输。契约：认证失效清凭据后
+    // 落入宿主凭据链，静默恢复认证。
+    const host = hostStubs()
+    host.load.mockResolvedValue({ username: 'admin', password: 'seed-pw' })
+    stubHost(host)
+    tl.getRefreshTokenValue.mockReturnValue('rt-stale')
+    tl.refresh.mockRejectedValue(new Error('401 令牌失效'))
+
+    await useAuthStore.getState().initializeAuth()
+
+    expect(tl.clearTokens).toHaveBeenCalled()
+    expect(authApi.login).toHaveBeenCalledWith('admin', 'seed-pw')
+    const s = useAuthStore.getState()
+    expect(s.isAuthenticated).toBe(true)
+    expect(s.isInitializing).toBe(false)
+  })
+
+  it('自定义后端档（server_base_url 已设）→ 本机凭据只用于本机借权，不打远端', async () => {
+    // 方向铁律：远端档下本机凭据只与**本机内核**交互（借权），绝不作为远端
+    // 账号口令提交（凭据外泄面 + 触发对方限速锁）。借权不可用才落未认证。
+    const host = hostStubs()
+    host.load.mockResolvedValue({ username: 'admin', password: 'seed-pw' })
+    stubHost(host)
+    localStorage.setItem('server_base_url', 'http://192.168.1.50:9101')
+    borrow.mintLocalKernelToken.mockResolvedValue('local-at')
+    borrow.borrowSession.mockResolvedValue({ ok: false, error: '借权不可用' })
+
+    await useAuthStore.getState().initializeAuth()
+
+    expect(authApi.login).not.toHaveBeenCalled()
+    // 本机凭据只走本机借权面（deviceBorrow 内部取凭据→打本机），不打远端
+    expect(borrow.mintLocalKernelToken).toHaveBeenCalled()
+    expect(borrow.borrowSession).toHaveBeenCalledWith('http://192.168.1.50:9101', 'local-at')
+    const s = useAuthStore.getState()
+    expect(s.isAuthenticated).toBe(false)
+    expect(s.isInitializing).toBe(false)
+  })
+})
+
+// 壳本机内核档凭据路径（shellLocalAuth）——文件顶部无既有 mock，补挂默认
+// null 保既有用例语义不变；成功路径为本组新增覆盖面。
+const shellAuth = vi.hoisted(() => ({
+  loadShellLocalCredential: vi.fn(),
+  shellAutoLoginDisabled: vi.fn((): boolean => false),
+}))
+
+vi.mock('@/services/shellLocalAuth', () => {
+  return {
+    loadShellLocalCredential: (...args: unknown[]) => shellAuth.loadShellLocalCredential(...args),
+    shellAutoLoginDisabled: (...args: unknown[]) => shellAuth.shellAutoLoginDisabled(...args),
+    markShellAutoLoginDisabled: vi.fn(),
+    notifyShellLoginOutcome: vi.fn().mockResolvedValue(undefined),
+    __shellAuth: shellAuth,
+  }
+})
+
+describe('initializeAuth 壳本机内核档凭据（移动壳自动登录）', () => {
+  it('壳凭据就绪且未禁用 → 直接登录成功，初始化收口', async () => {
+    const { __shellAuth } = await import('@/services/shellLocalAuth') as unknown as {
+      __shellAuth: { loadShellLocalCredential: ReturnType<typeof vi.fn>; shellAutoLoginDisabled: ReturnType<typeof vi.fn> }
+    }
+    __shellAuth.shellAutoLoginDisabled.mockReturnValue(false)
+    __shellAuth.loadShellLocalCredential.mockResolvedValue({ username: 'admin', password: 'device-pw' })
+    try {
+      await useAuthStore.getState().initializeAuth()
+      expect(authApi.login).toHaveBeenCalledWith('admin', 'device-pw')
+      expect(useAuthStore.getState().isInitializing).toBe(false)
+      expect(useAuthStore.getState().isAuthenticated).toBe(true)
+    } finally {
+      __shellAuth.loadShellLocalCredential.mockReset()
+      __shellAuth.loadShellLocalCredential.mockResolvedValue(null)
+      __shellAuth.shellAutoLoginDisabled.mockReturnValue(false)
+    }
+  })
+})
+
+describe('initializeAuth 启动即借权（远端档免登）', () => {
+  it('自定义后端 + 无存量令牌 → 借权换发并自动恢复认证（零登录面）', async () => {
+    // 用户 2026-10-22 实测：应用启动即指向远端且无存量令牌时落登录闸——
+    // 契约：先借权（本机代持令牌）再常规 refresh，全程不要求手输。
+    localStorage.setItem('server_base_url', 'http://162.14.69.153')
+    borrow.mintLocalKernelToken.mockResolvedValue('local-at')
+    borrow.borrowSession.mockResolvedValue({ ok: true, refreshToken: 'rt-borrow' })
+
+    await useAuthStore.getState().initializeAuth()
+
+    expect(borrow.borrowSession).toHaveBeenCalledWith('http://162.14.69.153', 'local-at')
+    expect(localStorage.getItem('refresh_token@http://162.14.69.153')).toBe('rt-borrow')
+    const st = useAuthStore.getState()
+    expect(st.isAuthenticated).toBe(true)
+    expect(st.isInitializing).toBe(false)
+  })
+
+  it('移动壳远端档冷启动：本机栈不拉起（mint null）→ 壳配对设备直借恢复认证', async () => {
+    // 用户 2026-10-26 实测：移动端连云端仍落登录页——远端档本机 proot 栈按
+    // 设计不拉起，本机代持腿必然 mint 失败；契约：壳层 per-device token 直借
+    // 云端 relay /borrow_auth 补位，全程零登录面。
+    localStorage.setItem('server_base_url', 'http://162.14.69.153')
+    borrow.mintLocalKernelToken.mockResolvedValue(null)
+    borrow.borrowViaShellDevice.mockResolvedValue({ ok: true, refreshToken: 'rt-shell' })
+
+    await useAuthStore.getState().initializeAuth()
+
+    expect(borrow.borrowViaShellDevice).toHaveBeenCalledWith('http://162.14.69.153')
+    expect(localStorage.getItem('refresh_token@http://162.14.69.153')).toBe('rt-shell')
+    expect(borrow.borrowSession).not.toHaveBeenCalled()
+    const st = useAuthStore.getState()
+    expect(st.isAuthenticated).toBe(true)
+    expect(st.isInitializing).toBe(false)
+  })
+
+  it('本机腿握手失败 → 壳层直借腿补位（先成先得）', async () => {
+    localStorage.setItem('server_base_url', 'http://162.14.69.153')
+    borrow.mintLocalKernelToken.mockResolvedValue('local-at')
+    borrow.borrowSession.mockResolvedValue({ ok: false, error: '借权不可用' })
+    borrow.borrowViaShellDevice.mockResolvedValue({ ok: true, refreshToken: 'rt-shell' })
+
+    await useAuthStore.getState().initializeAuth()
+
+    expect(borrow.borrowSession).toHaveBeenCalledTimes(1)
+    expect(borrow.borrowViaShellDevice).toHaveBeenCalledWith('http://162.14.69.153')
+    expect(localStorage.getItem('refresh_token@http://162.14.69.153')).toBe('rt-shell')
+    expect(useAuthStore.getState().isAuthenticated).toBe(true)
+  })
+})
+
+describe('initializeAuth 存量令牌失效后的重借（远端档）', () => {
+  it('存量 refresh 认证失败 → 重新借权并恢复认证（零登录面）', async () => {
+    // 用户 2026-10-22 二次撞墙：目标内核重启致令牌作废，启动链只清凭据不重借
+    // → 又落登录页。契约：失效即重借并重试 refresh。
+    localStorage.setItem('server_base_url', 'http://162.14.69.153')
+    tl.getRefreshTokenValue.mockReturnValue('rt-stale')
+    tl.refresh
+      .mockRejectedValueOnce(new Error('401 令牌失效'))
+      .mockResolvedValueOnce(undefined)
+    borrow.mintLocalKernelToken.mockResolvedValue('local-at')
+    borrow.borrowSession.mockResolvedValue({ ok: true, refreshToken: 'rt-fresh' })
+
+    await useAuthStore.getState().initializeAuth()
+
+    expect(borrow.borrowSession).toHaveBeenCalledWith('http://162.14.69.153', 'local-at')
+    expect(localStorage.getItem('refresh_token@http://162.14.69.153')).toBe('rt-fresh')
+    const st = useAuthStore.getState()
+    expect(st.isAuthenticated).toBe(true)
+    expect(st.isInitializing).toBe(false)
   })
 })

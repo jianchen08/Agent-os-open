@@ -33,12 +33,11 @@ import {
   planKernelRestart,
   probeKernelHealth,
   resolveKernelPort,
+  resolvePackagedConfigRootDir,
   resolvePackagedConfigUsersDir,
   resolvePackagedDbPath,
   resolveTokenSecret,
-  seedTreeMissingOnly,
-  seedZonePolicyFiles,
-  resolvePackagedUserConfigDir,
+  seedConfigTree,
   shutdownManagedKernel,
   waitForKernelHealth,
 } from "../kernel-manager";
@@ -94,9 +93,9 @@ describe("buildKernelEnv", () => {
     expect(env.AGENTOS_PLUGIN_IDLE_TIMEOUT_SECS).toBe("300");
   });
 
-  it("双源裁决置用户优先（ADR 2026-10-03-packaged-user-data-first：用户空间副本是安装身份活跃真值）", () => {
+  it("双源裁决置内置优先（BUG-55：用户空间陈旧副本不得压过打包新版）", () => {
     const env = buildKernelEnv({}, paths);
-    expect(env.AGENTOS_PLUGIN_SOURCE_PRIORITY).toBe("user");
+    expect(env.AGENTOS_PLUGIN_SOURCE_PRIORITY).toBe("builtin");
   });
 
   it("venv 自愈门开（装机链无 dev launcher，boot 后台 uv sync 重建缺 .venv 的 sidecar）", () => {
@@ -281,6 +280,35 @@ describe("ensurePackagedKernelRunning", () => {
           probe: async () => false,
         }),
       ).rejects.toThrow(/spawn|启动失败/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("spawn 前清理过期内核日志（P-29c）：过期 kernel.log 被删，边界内文件与 stderr 面保留", async () => {
+    const dir = makeFakeResources();
+    try {
+      const logDir = path.join(dir, "kernel", "logs");
+      fs.mkdirSync(logDir, { recursive: true });
+      // 日期取 40 天前（必过期）与今天（必保留）：不依赖用例运行时刻
+      const dayMs = 24 * 60 * 60 * 1000;
+      const iso = (d: Date) => d.toISOString().slice(0, 10);
+      const expired = `kernel.log.${iso(new Date(Date.now() - 40 * dayMs))}`;
+      const fresh = `kernel.log.${iso(new Date())}`;
+      fs.writeFileSync(path.join(logDir, expired), "old");
+      fs.writeFileSync(path.join(logDir, fresh), "new");
+      fs.writeFileSync(path.join(logDir, "kernel-stderr.log"), "stderr");
+
+      await expect(
+        ensurePackagedKernelRunning({
+          resourcesPath: dir,
+          probe: async () => false,
+        }),
+      ).rejects.toThrow(/spawn|启动失败/); // 零字节 exe：清理已跑、spawn 随后失败
+
+      expect(fs.existsSync(path.join(logDir, expired))).toBe(false);
+      expect(fs.existsSync(path.join(logDir, fresh))).toBe(true);
+      expect(fs.existsSync(path.join(logDir, "kernel-stderr.log"))).toBe(true);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -615,9 +643,9 @@ describe("resolvePackagedConfigUsersDir + AGENTOS_CONFIG_USERS_DIR 注入（ADR 
   });
 });
 
-describe("seedZonePolicyFiles（包内名单首次播种，幂等非破坏）", () => {
-  it("复制缺失文件；既有内容绝不覆盖；包内无 users 子树不动作", () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "seedzone-"));
+describe("seedZonePolicyFiles 已被 seedConfigTree 吸收（授权名单段是配置树子树）", () => {
+  it("授权名单段随整树播种落盘，语义与原单段播种一致", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "seedusers-"));
     try {
       const configRoot = path.join(tmp, "resources", "config");
       fs.mkdirSync(path.join(configRoot, "users", "default"), {
@@ -628,130 +656,358 @@ describe("seedZonePolicyFiles（包内名单首次播种，幂等非破坏）", 
         "entries: []\n",
         "utf-8",
       );
-      const target = path.join(tmp, "target", "users");
+      // 用户空间配置根（不再单指 users/）
+      const target = path.join(tmp, "target", "config");
 
-      seedZonePolicyFiles(fs, configRoot, target);
-      expect(
-        fs.readFileSync(
-          path.join(target, "default", "project_whitelist.yaml"),
-          "utf-8",
-        ),
-      ).toBe("entries: []\n");
+      seedConfigTree(fs, configRoot, target);
+      const targetFile = path.join(
+        target,
+        "users",
+        "default",
+        "project_whitelist.yaml",
+      );
+      expect(fs.readFileSync(targetFile, "utf-8")).toBe("entries: []\n");
 
-      // 幂等非破坏：用户空间既有内容（已批准的永久授权）不被包内版本冲掉
-      const targetFile = path.join(target, "default", "project_whitelist.yaml");
+      // 幂等非破坏：已批准的永久授权不被包内版本冲掉
       fs.writeFileSync(targetFile, "entries:\n  - D:\\mine\n", "utf-8");
-      seedZonePolicyFiles(fs, configRoot, target);
+      seedConfigTree(fs, configRoot, target);
       expect(fs.readFileSync(targetFile, "utf-8")).toContain("D:\\mine");
-
-      // 包内无 users 子树（异常包）→ 目标目录不创建
-      const emptyConfig = path.join(tmp, "empty_config");
-      fs.mkdirSync(emptyConfig, { recursive: true });
-      const t2 = path.join(tmp, "t2");
-      seedZonePolicyFiles(fs, emptyConfig, t2);
-      expect(fs.existsSync(t2)).toBe(false);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
 });
 
-describe("resolvePackagedUserConfigDir / seedTreeMissingOnly（用户数据为准，ADR 2026-10-03）", () => {
-  it("用户配置根 = <userRoot>/config；AGENTOS_USER_ROOT 显式生效", () => {
-    expect(resolvePackagedUserConfigDir({}, "C:/appdata")).toBe(
-      ["C:", "appdata", "agentos", "config"].join(path.sep),
+/**
+ * 装机版配置根指向用户空间（ADR 2026-10-17-installed-config-root-user-space）。
+ *
+ * 回归根因：`AGENTOS_CONFIG_ROOT` 曾恒指包内 `resources/config`，用户空间
+ * `%APPDATA%\agentos\config/**` 对按路径直读配置的插件（isolation 的
+ * `_isolation_config_path()`）完全不被读取——用户写的 `workspace.root`
+ * 静默失效，且安装目录是升级/卸载抹除面。
+ */
+describe("resolvePackagedConfigRootDir（配置根真值 = 用户空间，非安装目录）", () => {
+  const appData = "C:\\Users\\u\\AppData\\Roaming";
+
+  it("缺省落 <userRoot>/config（与内核 user_space::user_config_dir 同源同值）", () => {
+    expect(resolvePackagedConfigRootDir({}, appData)).toBe(
+      path.join(appData, "agentos", "config"),
     );
-    expect(
-      resolvePackagedUserConfigDir({ AGENTOS_USER_ROOT: "D:/uroot" }, "C:/appdata"),
-    ).toBe(["D:", "uroot", "config"].join(path.sep));
   });
 
-  it("播种补缺不覆盖：目标已有文件原样保留、缺失文件补齐、源缺失不动作", () => {
-    const exists = new Set<string>();
-    const copied: Array<[string, string]> = [];
-    const tree: Record<string, Array<{ name: string; isDirectory: () => boolean }>> = {};
-    const fsMod = {
-      existsSync: (p: fs.PathLike) => exists.has(String(p)),
-      mkdirSync: (p: fs.PathLike) => void exists.add(String(p)),
-      readdirSync: (p: fs.PathLike) => tree[String(p)] ?? [],
-      statSync: ((p: fs.PathLike) => ({
-        isDirectory: () => {
-          const e = tree[String(p)];
-          return Array.isArray(e);
-        },
-      })) as unknown as typeof fs.statSync,
-      copyFileSync: (a: fs.PathLike, b: fs.PathLike) =>
-        void copied.push([String(a), String(b)]),
-    } as unknown as typeof fs;
-
-    // 键一律 path.join 产出（与实现的逐层 join 同源，跨平台分隔符一致）
-    const cfg = ["C:", "res", "config"].join(path.sep);
-    const dst = ["C:", "uroot", "config"].join(path.sep);
-    const agentsDir = path.join(cfg, "agents");
-    exists.add(cfg);
-    tree[cfg] = [
-      { name: "agents", isDirectory: () => true },
-      { name: "llm.yaml", isDirectory: () => false },
-    ];
-    exists.add(path.join(dst, "llm.yaml")); // 用户已有 → 不覆盖
-    tree[agentsDir] = [
-      { name: "main.yaml", isDirectory: () => false },
-    ];
-
-    // 源根不存在 → 不动作、不抛错
-    expect(() =>
-      seedTreeMissingOnly(fsMod, ["C:", "nope"].join(path.sep), dst),
-    ).not.toThrow();
-
-    seedTreeMissingOnly(fsMod, cfg, dst);
+  it("AGENTOS_USER_ROOT 显式设置时随之改锚", () => {
     expect(
-      copied.some(
-        ([, b]) => b === path.join(dst, "llm.yaml"),
+      resolvePackagedConfigRootDir(
+        { AGENTOS_USER_ROOT: "D:\\customroot" },
+        appData,
       ),
-    ).toBe(false);
-    expect(
-      copied.some(
-        ([, b]) => b === path.join(dst, "agents", "main.yaml"),
-      ),
-    ).toBe(true);
+    ).toBe(path.join("D:\\customroot", "config"));
   });
 
-  it("升级场景：包内配置变更/新增，用户已有文件内容一字节不动（打包后不覆盖用户已有配置）", () => {
-    const userWritten = new Map<string, string>(); // 目标已有内容（用户数据）
-    const copied: Array<[string, string]> = [];
-    const tree: Record<string, Array<{ name: string; isDirectory: () => boolean }>> = {};
-    const files = new Map<string, string>(); // 源侧文件内容
-    const fsMod = {
-      existsSync: (p: fs.PathLike) =>
-        files.has(String(p)) || userWritten.has(String(p)) || tree[String(p)] !== undefined,
-      mkdirSync: () => void 0,
-      readdirSync: (p: fs.PathLike) => tree[String(p)] ?? [],
-      statSync: ((p: fs.PathLike) => ({
-        isDirectory: () => tree[String(p)] !== undefined,
-      })) as unknown as typeof fs.statSync,
-      copyFileSync: (a: fs.PathLike, b: fs.PathLike) => {
-        copied.push([String(a), String(b)]);
-        userWritten.set(String(b), files.get(String(a)) ?? "");
-      },
-    } as unknown as typeof fs;
+  it("ambient AGENTOS_CONFIG_ROOT 显式设置优先（显式覆盖能力归用户，空白串视为未设）", () => {
+    expect(
+      resolvePackagedConfigRootDir(
+        { AGENTOS_CONFIG_ROOT: "D:\\pinned" },
+        appData,
+      ),
+    ).toBe("D:\\pinned");
+    expect(
+      resolvePackagedConfigRootDir({ AGENTOS_CONFIG_ROOT: "  " }, appData),
+    ).toBe(path.join(appData, "agentos", "config"));
+  });
 
-    const cfg = ["C:", "res", "config"].join(path.sep);
-    const dst = ["C:", "uroot", "config"].join(path.sep);
-    const userKey = path.join(dst, "llm.yaml");
-    // 用户既有：自定义 key（用户数据，非出厂内容）
-    userWritten.set(userKey, "providers: my-own: sk-user-own");
-    tree[cfg] = [
-      { name: "llm.yaml", isDirectory: () => false },
-      { name: "new-feature.yaml", isDirectory: () => false },
-    ];
-    files.set(path.join(cfg, "llm.yaml"), "providers: factory: placeholder");
-    files.set(path.join(cfg, "new-feature.yaml"), "flag: true");
+  it("AGENTOS_USER_CONFIG_DIR 覆盖生效——与内核 user_config_dir() 同链（不分叉）", () => {
+    expect(
+      resolvePackagedConfigRootDir(
+        { AGENTOS_USER_CONFIG_DIR: "E:\\ucfg" },
+        appData,
+      ),
+    ).toBe("E:\\ucfg");
+    // 配置根显式钉 > 用户层覆盖
+    expect(
+      resolvePackagedConfigRootDir(
+        { AGENTOS_CONFIG_ROOT: "D:\\pinned", AGENTOS_USER_CONFIG_DIR: "E:\\ucfg" },
+        appData,
+      ),
+    ).toBe("D:\\pinned");
+  });
 
-    seedTreeMissingOnly(fsMod, cfg, dst);
+  it("性质：解析值恒在用户根之下，绝不回指安装目录（安装目录是卸载抹除面）", () => {
+    const resolved = resolvePackagedConfigRootDir({}, appData);
+    expect(path.basename(resolved)).toBe("config");
+    expect(resolved.startsWith(path.join(appData, "agentos"))).toBe(true);
+  });
+});
 
-    // 新出厂文件补进来；用户已有文件既不在 copy 名单、内容一字节不变
-    expect(userWritten.get(path.join(dst, "new-feature.yaml"))).toBe("flag: true");
-    expect(copied.some(([, b]) => b === userKey)).toBe(false);
-    expect(userWritten.get(userKey)).toBe("providers: my-own: sk-user-own");
+describe("buildKernelEnv 配置根面（核心回归）", () => {
+  const paths = kernelResourcePaths("C:\\app\\resources", "win32");
+  const userConfigDir = "C:\\Users\\u\\AppData\\Roaming\\agentos\\config";
+
+  it("注入用户空间配置根，不再指向包内 resources/config", () => {
+    const env = buildKernelEnv({}, paths, undefined, undefined, undefined, userConfigDir);
+    expect(env.AGENTOS_CONFIG_ROOT).toBe(userConfigDir);
+    // 回归断言：不得等于包内资源
+    expect(env.AGENTOS_CONFIG_ROOT).not.toBe(paths.configRoot);
+  });
+
+  it("ambient 显式设置时不被覆盖（用户显式钉配置根的能力保留）", () => {
+    const env = buildKernelEnv(
+      { AGENTOS_CONFIG_ROOT: "D:\\pinned" },
+      paths,
+      undefined,
+      undefined,
+      undefined,
+      userConfigDir,
+    );
+    expect(env.AGENTOS_CONFIG_ROOT).toBe("D:\\pinned");
+  });
+
+  it("未解析到用户空间配置根时保持旧行为（退路注入路径不变，不静默留空）", () => {
+    expect(buildKernelEnv({}, paths).AGENTOS_CONFIG_ROOT).toBe(
+      paths.configRoot,
+    );
+  });
+});
+
+describe("seedConfigTree（包内出厂配置树首次播种到用户空间，幂等非破坏）", () => {
+  // 每个用例一套干净的临时布局：resources/config = 出厂种子，user/config = 用户空间
+  const makeTree = (): {
+    root: string;
+    pkg: string;
+    user: string;
+  } => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "seedcfg-"));
+    const pkg = path.join(root, "resources", "config");
+    const user = path.join(root, "user", "config");
+    fs.mkdirSync(path.join(pkg, "pipelines"), { recursive: true });
+    fs.writeFileSync(
+      path.join(pkg, "pipelines", "default.yaml"),
+      "steps: []\n",
+      "utf-8",
+    );
+    fs.mkdirSync(path.join(pkg, "plugins", "isolation"), { recursive: true });
+    fs.writeFileSync(
+      path.join(pkg, "plugins", "isolation", "isolation_config.yaml"),
+      "workspace:\n  root: .ai_workspaces\n",
+      "utf-8",
+    );
+    return { root, pkg, user };
+  };
+
+  const withTree = (body: (t: ReturnType<typeof makeTree>) => void): void => {
+    const t = makeTree();
+    try {
+      body(t);
+    } finally {
+      fs.rmSync(t.root, { recursive: true, force: true });
+    }
+  };
+
+  it("整树复制到用户空间：内核保留段（pipelines）与插件配置段一并落盘", () => {
+    withTree(({ pkg, user }) => {
+      seedConfigTree(fs, pkg, user);
+      expect(
+        fs.readFileSync(path.join(user, "pipelines", "default.yaml"), "utf-8"),
+      ).toBe("steps: []\n");
+      expect(
+        fs.readFileSync(
+          path.join(user, "plugins", "isolation", "isolation_config.yaml"),
+          "utf-8",
+        ),
+      ).toContain(".ai_workspaces");
+    });
+  });
+
+  it("用户空间既有文件绝不覆盖（用户改过的 workspace.root 不被出厂版本冲掉）", () => {
+    withTree(({ pkg, user }) => {
+      const mine = path.join(
+        user,
+        "plugins",
+        "isolation",
+        "isolation_config.yaml",
+      );
+      fs.mkdirSync(path.dirname(mine), { recursive: true });
+      fs.writeFileSync(mine, "workspace:\n  root: D:\\mine\n", "utf-8");
+
+      seedConfigTree(fs, pkg, user);
+
+      expect(fs.readFileSync(mine, "utf-8")).toContain("D:\\mine");
+      // 缺项仍补齐（用户空间半配置不让整体失效）
+      expect(
+        fs.existsSync(path.join(user, "pipelines", "default.yaml")),
+      ).toBe(true);
+    });
+  });
+
+  it("幂等：重复播种结果一致（每次启动都跑，不得漂移）", () => {
+    withTree(({ pkg, user }) => {
+      const target = path.join(
+        user,
+        "plugins",
+        "isolation",
+        "isolation_config.yaml",
+      );
+      seedConfigTree(fs, pkg, user);
+      const snap = fs.readFileSync(target, "utf-8");
+      seedConfigTree(fs, pkg, user);
+      expect(fs.readFileSync(target, "utf-8")).toBe(snap);
+    });
+  });
+
+  it("应用升级新增的出厂文件能被补播种（用户已有文件不动，新增文件落盘）", () => {
+    withTree(({ pkg, user }) => {
+      seedConfigTree(fs, pkg, user);
+      // 升级：新包多了一个出厂文件
+      fs.mkdirSync(path.join(pkg, "kernel"), { recursive: true });
+      fs.writeFileSync(
+        path.join(pkg, "kernel", "plugin_allowlist.yaml"),
+        "allow: []\n",
+        "utf-8",
+      );
+      seedConfigTree(fs, pkg, user);
+      expect(
+        fs.readFileSync(
+          path.join(user, "kernel", "plugin_allowlist.yaml"),
+          "utf-8",
+        ),
+      ).toBe("allow: []\n");
+    });
+  });
+
+  it("包内无配置树（异常包/extraResources 未随包）时目标目录不创建，播种零动作", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "seedcfg-"));
+    try {
+      const missingPkg = path.join(tmp, "resources", "config");
+      const user = path.join(tmp, "user", "config");
+      seedConfigTree(fs, missingPkg, user);
+      expect(fs.existsSync(user)).toBe(false);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  // ── 版本裁决（ADR 2026-10-24-config-seed-version-arbitration）──
+  // 受管出厂默认（包内 yaml 顶层 version: 点分整数）：用户副本不严格大于
+  // 包内即覆盖——治「用户空间陈旧副本遮蔽包内修复」（2026-10-24 事故根因）。
+  // 非受管文件保持 copy-if-missing 旧语义（用户数据真值永不被冲）。
+
+  it("受管文件：用户副本无版本（=0）被包内覆盖，返回计数可观测", () => {
+    withTree(({ pkg, user }) => {
+      const pkgYaml = path.join(pkg, "pipelines", "autonomous.yaml");
+      const userYaml = path.join(user, "pipelines", "autonomous.yaml");
+      fs.writeFileSync(
+        pkgYaml,
+        "version: 2\nname: new\n",
+        "utf-8",
+      );
+      fs.mkdirSync(path.dirname(userYaml), { recursive: true });
+      // 2026-10-24 事故形态：用户空间是修复前的陈旧副本（无 version 字段）
+      fs.writeFileSync(userYaml, "name: stale-no-version\n", "utf-8");
+
+      const result = seedConfigTree(fs, pkg, user);
+
+      expect(fs.readFileSync(userYaml, "utf-8")).toBe("version: 2\nname: new\n");
+      expect(result.overwritten).toBe(1);
+    });
+  });
+
+  it("受管文件：用户副本版本严格更大则保留（声明所有权=改完抬版本）", () => {
+    withTree(({ pkg, user }) => {
+      const pkgYaml = path.join(pkg, "pipelines", "autonomous.yaml");
+      const userYaml = path.join(user, "pipelines", "autonomous.yaml");
+      fs.writeFileSync(pkgYaml, "version: 2\nname: pkg\n", "utf-8");
+      fs.mkdirSync(path.dirname(userYaml), { recursive: true });
+      fs.writeFileSync(
+        userYaml,
+        "version: 3\nname: mine-edited\n",
+        "utf-8",
+      );
+
+      const result = seedConfigTree(fs, pkg, user);
+
+      expect(fs.readFileSync(userYaml, "utf-8")).toContain("mine-edited");
+      expect(result.overwritten).toBe(0);
+    });
+  });
+
+  it("受管文件：版本持平也覆盖（CI 强制改内容必抬版本，持平=内容应同）", () => {
+    withTree(({ pkg, user }) => {
+      const pkgYaml = path.join(pkg, "pipelines", "autonomous.yaml");
+      const userYaml = path.join(user, "pipelines", "autonomous.yaml");
+      fs.writeFileSync(pkgYaml, "version: 2\nname: pkg\n", "utf-8");
+      fs.mkdirSync(path.dirname(userYaml), { recursive: true });
+      fs.writeFileSync(userYaml, "version: 2\nname: user-touched\n", "utf-8");
+
+      seedConfigTree(fs, pkg, user);
+
+      expect(fs.readFileSync(userYaml, "utf-8")).toBe("version: 2\nname: pkg\n");
+    });
+  });
+
+  it("受管文件：用户副本版本不可解析（非点分整数）fail 向包内（视为 0 覆盖）", () => {
+    withTree(({ pkg, user }) => {
+      const pkgYaml = path.join(pkg, "pipelines", "autonomous.yaml");
+      const userYaml = path.join(user, "pipelines", "autonomous.yaml");
+      fs.writeFileSync(pkgYaml, "version: 1\nname: pkg\n", "utf-8");
+      fs.mkdirSync(path.dirname(userYaml), { recursive: true });
+      fs.writeFileSync(userYaml, "version: v9\nname: mine\n", "utf-8");
+
+      seedConfigTree(fs, pkg, user);
+
+      expect(fs.readFileSync(userYaml, "utf-8")).toBe("version: 1\nname: pkg\n");
+    });
+  });
+
+  it("嵌套缩进的 version: 不算顶层声明（只有列首键是所有权声明位）", () => {
+    withTree(({ pkg, user }) => {
+      const pkgYaml = path.join(pkg, "pipelines", "autonomous.yaml");
+      const userYaml = path.join(user, "pipelines", "autonomous.yaml");
+      fs.writeFileSync(pkgYaml, "version: 1\nname: pkg\n", "utf-8");
+      fs.mkdirSync(path.dirname(userYaml), { recursive: true });
+      // 用户副本只有嵌套在 map 里的 version（缩进两格）——顶层无声明 = 0
+      fs.writeFileSync(
+        userYaml,
+        "name: mine\nmetadata:\n  version: 99\n",
+        "utf-8",
+      );
+
+      seedConfigTree(fs, pkg, user);
+
+      expect(fs.readFileSync(userYaml, "utf-8")).toBe("version: 1\nname: pkg\n");
+    });
+  });
+
+  it("非受管文件不受版本裁决影响：包内无 version 的 yaml 与非 yaml 既有文件永不覆盖", () => {
+    withTree(({ pkg, user }) => {
+      // 包内 yaml 无顶层 version → 非受管（copy-if-missing 旧语义）
+      const plainYaml = path.join(pkg, "plugins", "isolation", "isolation_config.yaml");
+      fs.writeFileSync(plainYaml, "workspace:\n  root: .ai_workspaces\n", "utf-8");
+      const userYaml = path.join(user, "plugins", "isolation", "isolation_config.yaml");
+      fs.mkdirSync(path.dirname(userYaml), { recursive: true });
+      fs.writeFileSync(userYaml, "workspace:\n  root: D:\\mine\n", "utf-8");
+      // 非 yaml 文本带 version: 行 → 不入受管面
+      const pkgReadme = path.join(pkg, "README.txt");
+      fs.writeFileSync(pkgReadme, "version: 9\nfactory readme\n", "utf-8");
+      const userReadme = path.join(user, "README.txt");
+      fs.writeFileSync(userReadme, "user readme\n", "utf-8");
+
+      const result = seedConfigTree(fs, pkg, user);
+
+      expect(fs.readFileSync(userYaml, "utf-8")).toContain("D:\\mine");
+      expect(fs.readFileSync(userReadme, "utf-8")).toBe("user readme\n");
+      expect(result.overwritten).toBe(0);
+    });
+  });
+
+  it("用户独有文件（包内没有）永不被播种触碰", () => {
+    withTree(({ pkg, user }) => {
+      const mineOnly = path.join(user, "pipelines", "my_custom.yaml");
+      fs.mkdirSync(path.dirname(mineOnly), { recursive: true });
+      fs.writeFileSync(mineOnly, "name: mine\n", "utf-8");
+
+      seedConfigTree(fs, pkg, user);
+
+      expect(fs.readFileSync(mineOnly, "utf-8")).toBe("name: mine\n");
+    });
   });
 });

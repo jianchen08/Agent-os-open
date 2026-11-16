@@ -13,6 +13,7 @@ import { queryClient } from '@/services/query/queryClient'
 import { queryKeys } from '@/services/query/queryKeys'
 import { useLongTermTaskStore } from '../longTermTaskStore'
 import type { Task } from '@/types/task'
+import { userScopedKey as pk } from '@/utils/userScopedStorage'
 
 vi.mock('@/services/api/longTermTasks', () => ({
   fetchLongTermTasks: vi.fn(),
@@ -205,7 +206,7 @@ describe('longTermTaskStore — 选择态与缓存增量', () => {
 describe('longTermTaskStore — 持久化范围', () => {
   it('仅持久化 activeTaskId（tasks 数据不进 localStorage）', () => {
     useLongTermTaskStore.getState().setActiveTask('t9')
-    const raw = localStorage.getItem('long-term-task-storage')
+    const raw = localStorage.getItem(pk('long-term-task-storage'))
     expect(raw).toBeTruthy()
     const parsed = JSON.parse(raw!)
     expect(parsed.state).toEqual({ activeTaskId: 't9' })

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentos-plugin-sdk"
-version = "0.2.0"
+version = "0.2.2"
 description = "Lingxi AgentOS 0.2 Plugin SDK — Python plugin development toolkit"
 requires-python = ">=3.11"
 license = {text = "MIT"}
@@ -12,6 +12,7 @@ authors = [
     {name = "Lingxi AgentOS Contributors"}
 ]
 dependencies = [
+    "psutil>=5.9",  # process_runtime 本地后端：整树杀 + 内存采样
     "pyyaml>=6.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
@@ -32,6 +33,8 @@ dev = [
     "mypy>=1.10",
     # 测试专用：multimodal 用例以 PIL 合成 PNG 字节（生产 src 零 PIL 引用）
     "pillow>=10",
+    # process_runtime 本地后端的 psutil 类型 stub（strict mypy）
+    "types-psutil>=6",
 ]
 
 [tool.setuptools.packages.find]
@@ -47,7 +50,8 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "S", "C4"]
 
 [tool.ruff.lint.per-file-ignores]
 # 测试代码：assert 是标准用法；临时文件/except-pass 是测试桩的合理写法
-"tests/**/*.py" = ["S101", "S108", "S110"]
+# 中文用例名是仓内测试约定（与插件车道一致），SDK 测试同循
+"tests/**/*.py" = ["S101", "S108", "S110", "N802"]
 # 公开 API 异常基类名保持 BaseAppException（改名破坏下游兼容）
 "src/agentos_plugin_sdk/exceptions/**" = ["N818"]
 

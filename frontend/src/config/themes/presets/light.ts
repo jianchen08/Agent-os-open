@@ -45,7 +45,7 @@ export const lightTheme: ThemeConfig = {
 
     status: {
       success: '#047857',
-      warning: '#B45309',
+      warning: '#92400E',
       error: '#B91C1C',
       info: '#2563EB',
       running: '#0E7490',
@@ -272,6 +272,7 @@ export const lightTheme: ThemeConfig = {
 
   effects: {
     glassmorphism: false,
+    messageGlass: false,
     animations: true,
     transitionDuration: 200,
     transitionEasing: 'cubic-bezier(0.32, 0, 0.67, 0)',

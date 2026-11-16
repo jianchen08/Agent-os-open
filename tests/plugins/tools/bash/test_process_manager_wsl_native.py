@@ -22,11 +22,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-_BASH_DIR = str(Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tools" / "bash")
+_BASH_DIR = str(Path(__file__).resolve().parents[4] / "plugins" / "shared" / "bash")
 if _BASH_DIR not in sys.path:
     sys.path.insert(0, _BASH_DIR)
 
-from process_manager import ProcessManager  # noqa: E402
+from agentos_plugin_sdk.process_runtime import ProcessManager  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
@@ -210,6 +210,36 @@ class TestWslNativeStart:
         )
         argv = argvs[0]
         assert argv[argv.index("--cd") + 1] == "D:\\host\\dir"
+
+    def test_working_dir_relative_joins_workspace_root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 相对形态直透 wsl --cd 实测 E_INVALIDARG（2026-10-17 装机实锤：带相对
+        # working_dir 的 bash 调用整批 exit -1）；按容器 cwd=workspace 根语义拼接。
+        argvs = _patch_exec(monkeypatch)
+        pm = ProcessManager()
+        _run(
+            pm.start_process(
+                "echo OK",
+                working_dir="frontend",
+                log_dir=tmp_path,
+                container_id="cua-ws1",
+                exec_backend=dict(_BACKEND_BASE),
+            )
+        )
+        assert argvs[0][argvs[0].index("--cd") + 1] == "/mnt/d/ws/frontend"
+
+    def test_working_dir_relative_dot_maps_workspace_root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        argvs = _patch_exec(monkeypatch)
+        pm = ProcessManager()
+        _run(
+            pm.start_process(
+                "ls",
+                working_dir=".",
+                log_dir=tmp_path,
+                container_id="cua-ws1",
+                exec_backend=dict(_BACKEND_BASE),
+            )
+        )
+        assert argvs[0][argvs[0].index("--cd") + 1] == "/mnt/d/ws"
 
     def test_compound_command_wrapped_as_inner_sh(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         argvs = _patch_exec(monkeypatch)

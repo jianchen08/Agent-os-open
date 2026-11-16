@@ -1,0 +1,52 @@
+{
+  "id": "low_boop",
+  "label": "低音柔跳",
+  "engine": "web_audio_synth",
+  "params": {
+    "partials": [
+      {
+        "ratio": 1.0,
+        "gain": 1.0,
+        "decayRatio": 1.0
+      },
+      {
+        "ratio": 2.0,
+        "gain": 0.05,
+        "decayRatio": 0.5
+      },
+      {
+        "ratio": 3.0,
+        "gain": 0.02,
+        "decayRatio": 0.3
+      }
+    ],
+    "attack": 0.012,
+    "wet": 0.4,
+    "taps": [
+      {
+        "delay": 0.083,
+        "feedback": 0.42,
+        "lowpass": 5200.0
+      },
+      {
+        "delay": 0.127,
+        "feedback": 0.36,
+        "lowpass": 3800.0
+      }
+    ],
+    "notes": [
+      {
+        "freq": 523.25,
+        "start": 0,
+        "peak": 0.5799,
+        "decay": 0.38
+      },
+      {
+        "freq": 392.0,
+        "start": 0.16,
+        "peak": 0.5799,
+        "decay": 0.5
+      }
+    ]
+  }
+}

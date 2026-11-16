@@ -23,10 +23,10 @@ import { DigitalHumanWidget } from '../DigitalHumanWidget'
 
 describe('DigitalHumanWidget — 占位基础设施', () => {
   beforeEach(() => {
-    useWidgetEventStore.setState({ events: {}, latest: {} })
+    useWidgetEventStore.setState({ latest: {} })
   })
   afterEach(() => {
-    useWidgetEventStore.setState({ events: {}, latest: {} })
+    useWidgetEventStore.setState({ latest: {} })
   })
 
   it('AC-1: 渲染占位并显示 source 信息', () => {
@@ -67,7 +67,6 @@ describe('DigitalHumanWidget — 占位基础设施', () => {
   it('AC-5: 有 widgetId 时订阅 widgetEventStore,渲染最新事件载荷', () => {
     // 预置一条 widget 事件(模拟内核 widget_event 推送)
     useWidgetEventStore.setState({
-      events: {},
       latest: {
         dh_1: {
           widget_id: 'dh_1',
@@ -86,7 +85,6 @@ describe('DigitalHumanWidget — 占位基础设施', () => {
   it('AC-6: 无 widgetId 时不读取 store latest(不显示事件区)', () => {
     // 预置一条别的事件,确认无 widgetId 时不会被读取展示
     useWidgetEventStore.setState({
-      events: {},
       latest: {
         other: {
           widget_id: 'other',

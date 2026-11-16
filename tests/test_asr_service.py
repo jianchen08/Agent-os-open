@@ -21,14 +21,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# 0.2：multimodal 插件位于 plugins/shared/system/multimodal/，
-# from multimodal.asr import 需要 system/ 父目录（包命名空间）；
-# asr.py 内部平铺导入 mm_types（multimodal 目录自身）与 user_space
-# （plugins/shared 裸模块，配置用户层解析）。
+# 0.2 平铺布局：multimodal 插件位于 plugins/shared/multimodal/；
+# asr.py 内部平铺导入 mm_types（multimodal 目录自身在 sys.path）与
+# user_space（plugins/shared 裸模块，配置用户层解析）。
 _SHARED = Path(__file__).resolve().parent.parent / "plugins" / "shared"
-_SYSTEM = _SHARED / "system"
-_MULTIMODAL = _SYSTEM / "multimodal"
-for _p in (_SHARED, _SYSTEM, _MULTIMODAL):
+_MULTIMODAL = _SHARED / "multimodal"
+for _p in (_SHARED, _MULTIMODAL):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 

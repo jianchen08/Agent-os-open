@@ -27,7 +27,6 @@ fn manifest(plugin_id: &str, plugin_type: PluginType, host_type: HostType) -> Pl
         description: None,
         version: "1.0.0".to_string(),
         plugin_type,
-        pipeline_role: None,
         language: "python".to_string(),
         host_type,
         host_group: None,
@@ -39,7 +38,6 @@ fn manifest(plugin_id: &str, plugin_type: PluginType, host_type: HostType) -> Pl
         mcp: None,
         lifecycle: None,
         native: None,
-        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],
@@ -65,6 +63,7 @@ fn tool_cap(name: &str) -> ToolCapability {
         category: Some(ToolCategory::File),
         ui: None,
         render: None,
+        isolation_capable: None,
         smoke: None,
         timeout_ms: None,
     }
@@ -91,10 +90,10 @@ fn declaration_based_registration_tools_any_type_services_not_registered() {
 
     // system 适配器声明 tools（多职能插件）→ 注册（原附录D① 会挡掉）
     let mut adapter = manifest("dsh_adapter", PluginType::System, HostType::Sidecar);
-    adapter.capabilities.tools = vec![tool_cap("dsh_read"), tool_cap("dsh_glob")];
+    adapter.capabilities.tools = vec![tool_cap("sample_read"), tool_cap("sample_glob")];
     assert_eq!(register_plugin_capabilities(&adapter, &reg, &scopes), 2);
-    assert!(reg.get_tool("dsh_read").is_some());
-    assert!(reg.get_tool("dsh_glob").is_some());
+    assert!(reg.get_tool("sample_read").is_some());
+    assert!(reg.get_tool("sample_glob").is_some());
 
     // system 服务方法声明在 services 槽 → 不进 LLM 面（语义唯一化的另一半）
     let mut service_host = manifest("monitoring", PluginType::System, HostType::Sidecar);

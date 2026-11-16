@@ -24,6 +24,8 @@ checkpoint 标量快照改造）漏掉还原，消费点 `isinstance(x, dict)` �
 3. :func:`optional_dict` —— 宽松形态：合法值还原，缺失/非法返回默认值并
    留 warning 痕迹（适合"可选增强字段"）。
 
+4. :func:`as_list` —— 列表字段两形态容忍（同 as_dict 语义，容器为 list）。
+
 [来源: 用户要求 2026-08-28——同类参数转换排查 + state 字段校验显式报错]
 """
 
@@ -89,6 +91,30 @@ def require_dict(value: Any, *, field: str) -> dict[str, Any]:
     result = as_dict(value, field=field, required=True)
     assert result is not None  # required=True 下 as_dict 必返回 dict 或抛错
     return result
+
+
+def as_list(value: Any, *, field: str) -> list[Any] | None:
+    """list 字段值 → list（JSON 字符串自动还原；形态错返回 None 并留 warning）。
+
+    与 :func:`as_dict` 同一契约，容器为 list（如 task.evaluation_history）。
+    """
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and value.strip().startswith("["):
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError) as exc:
+            logger.warning("[state_fields] 字段 '%s' JSON 解析失败（按缺失处理）: %s", field, exc)
+            return None
+        if isinstance(parsed, list):
+            return parsed
+    if value not in (None, ""):
+        logger.warning(
+            "[state_fields] 字段 '%s' 形态非法（期望 list/JSON 字符串，实际 %s），按缺失处理",
+            field,
+            type(value).__name__,
+        )
+    return None
 
 
 def optional_dict(value: Any, *, field: str) -> dict[str, Any]:

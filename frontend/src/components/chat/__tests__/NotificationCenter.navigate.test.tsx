@@ -43,10 +43,9 @@ vi.mock('@/stores/sessionListStore', () => ({
 async function openPanelAndClick(item: NotificationItem) {
   useNotificationStore.setState({ notifications: [item] })
   render(<NotificationCenter />)
-  await userEvent
-    .setup()
-    .click(screen.getByTestId('notification-center-trigger'))
-  await userEvent.setup().click(screen.getByTestId(`notification-item-${item.id}`))
+  const user = userEvent.setup()
+  await user.click(screen.getByTestId('notification-center-trigger'))
+  await user.click(screen.getByTestId(`notification-item-${item.id}`))
 }
 
 function resetStores(): void {

@@ -35,7 +35,7 @@ export interface InteractionModeDecl {
 /** 内置默认件表（导出仅供契约测试与 manifest 声明对账；运行时行为不变） */
 export const DEFAULT_MODE_FEATURES: Record<string, InteractionModeDecl> = {
   choice: { mode: 'choice', features: ['options', 'options_detail', 'text_input'], textInputPlaceholder: '输入回复后发送...' },
-  conversation: { mode: 'conversation', features: ['options', 'suggestions', 'navigate', 'text_input'] },
+  conversation: { mode: 'conversation', features: ['options', 'options_detail', 'suggestions', 'navigate', 'text_input'] },
   notification: { mode: 'notification', features: ['message', 'progress'] },
 }
 

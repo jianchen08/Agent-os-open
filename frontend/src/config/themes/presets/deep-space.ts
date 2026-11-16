@@ -270,6 +270,7 @@ export const deepSpaceTheme: ThemeConfig = {
 
   effects: {
     glassmorphism: true,
+    messageGlass: true,
     animations: true,
     transitionDuration: 250,
     transitionEasing: 'cubic-bezier(0.16, 1, 0.3, 1)',

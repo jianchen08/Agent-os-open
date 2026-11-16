@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -33,22 +34,30 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system" / "tasks"
+_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "tasks"
 
 
 @pytest.fixture(autouse=True)
 def _isolate_tasks_plugin_modules():
-    """逐出同名裸模块并注入本插件目录（与 test_tasks_http_api.py 同款隔离）。"""
+    """逐出同名裸模块并注入本插件目录（与 test_tasks_http_api.py 同款隔离）。
+
+    projects 域登记簿平铺迁移后属主 = plugins/shared/project_manager
+    （project_registry 裸名导入需其属主目录在 path）。"""
     d = str(_PLUGIN_DIR)
-    shared_root = str(_PLUGIN_DIR.parents[1])
+    shared_root = str(_PLUGIN_DIR.parents[0])  # plugins/shared（平铺共享根）
+    pm_dir = str(_PLUGIN_DIR.parents[0] / "project_manager")
     _was_present = d in sys.path
     _added_shared_root = False
+    _added_pm_dir = False
     if d in sys.path:
         sys.path.remove(d)
     sys.path.insert(0, d)
     if shared_root not in sys.path:
         sys.path.insert(1, shared_root)
         _added_shared_root = True
+    if pm_dir not in sys.path:
+        sys.path.insert(2, pm_dir)
+        _added_pm_dir = True
     _evict_names = (
         "task_types",
         "state_machine",
@@ -78,6 +87,8 @@ def _isolate_tasks_plugin_modules():
         sys.path.insert(0, d)
     if _added_shared_root:
         sys.path.remove(shared_root)
+    if _added_pm_dir and pm_dir in sys.path:
+        sys.path.remove(pm_dir)
     for m in _evict_names:
         if m in _evicted:
             sys.modules[m] = _evicted[m]
@@ -379,8 +390,8 @@ class TestInvokeTaskSubmitFailures:
         """chat 能力缺席时提交任务 → TaskBirthError → 500（fail-closed 不静默）。"""
         import http_api
 
-        _seed_state(hub, [{"pipeline_id": "pipe-1", "task.goal": "g",
-                           "task.status": "pending"}])
+        _seed_state(hub, [{"pipeline_id": "pipe-1", "task.id": "pipe-1",
+                           "task.goal": "g", "task.status": "pending"}])
 
         def _selective(name: str) -> Any:
             if name == "chat":
@@ -405,8 +416,18 @@ class TestInvokeTaskSubmitFailures:
 
 @pytest.fixture
 def registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
+    """临时 ProjectRegistry + _project_call 桥注入（T6a 后 http_api 经
+    project.* 服务取登记簿；桥与 project_manager/server.py 载荷形态一致，
+    与 test_tasks_http_api.py registry fixture 同款）。"""
+    from dataclasses import asdict
+
     import project_registry as projects_mod
 
+    # 数据根重定向到 tmp（project_manager reg_env 夹具同款）：桥内
+    # ensure_project_registered 走生产同路径（不传 registry 实例），内部裸
+    # ProjectRegistry() 经此 env 落 tmp——缺省解析 = 用户空间 default 租户
+    # 登记簿（装机版 admin 账户名下），测试写面会漏进真实应用
+    monkeypatch.setenv("TASKS_STORAGE_DIR", str(tmp_path / "tasks"))
     # 登记白名单缺省成员（工作空间根）隔离到 tmp（ADR 2026-09-17 登记白名单闸）
     monkeypatch.setattr(projects_mod, "workspace_base_dir", lambda: tmp_path)
 
@@ -418,8 +439,53 @@ def registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     )
     import http_api
 
-    monkeypatch.setattr(http_api, "get_project_registry", lambda: reg)
-    return reg
+    async def _registry_project_call(method: str, args: dict[str, Any]) -> dict[str, Any]:
+        if method == "create":
+            try:
+                proj, created = projects_mod.ensure_project_registered(
+                    title=str(args.get("title") or ""),
+                    explicit_path=str(args.get("path") or ""),
+                    session_id=str(args.get("session_id") or ""),
+                    submitted_by=str(args.get("submitted_by") or ""),
+                    auto_execute=bool(args.get("auto_execute", False)),
+                )
+            except (ValueError, RuntimeError) as exc:
+                raise http_api.APIError(
+                    status_code=400, error_code="API_REQ_4002", message=str(exc)
+                ) from exc
+            reg.save(proj)
+            return {"project": asdict(proj), "created": created}
+        if method == "get":
+            proj = reg.get(str(args.get("project_id") or "").strip())
+            return {"found": proj is not None, **({"project": asdict(proj)} if proj else {})}
+        if method == "list":
+            rows = [asdict(x) for x in reg.list()]
+            return {"items": rows, "total": len(rows)}
+        if method == "save":
+            row = args.get("project")
+            if not isinstance(row, dict):
+                return {"error": "project row required"}
+            try:
+                saved = reg.save(projects_mod.ProjectModel(**row))
+            except (TypeError, ValueError) as exc:
+                return {"error": str(exc)}
+            return {"project": asdict(saved)}
+        if method == "delete":
+            return {"deleted": reg.delete(str(args.get("project_id") or "").strip())}
+        if method == "remove_folder":
+            import shutil
+
+            path = str(args.get("path") or "")
+            removed = bool(path) and Path(path).is_dir()
+            if removed:
+                shutil.rmtree(path)
+            return {"removed": removed}
+        raise KeyError(f"project.{method}")
+
+    monkeypatch.setattr(http_api, "_project_call", _registry_project_call)
+    yield reg
+    # 测完即删：tmp 登记簿整体清除，不留任何账户名下残留
+    shutil.rmtree(tmp_path / "tasks", ignore_errors=True)
 
 
 class TestProjectsGaps:

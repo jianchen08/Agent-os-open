@@ -12,16 +12,20 @@ role=tool 诊断消息把缺失/类型错误明细反馈给 LLM，使其能补�
 
 from __future__ import annotations
 
+import ast
+import json
+from pathlib import Path
+
 from tests._pipeline_plugin_path import add_plugin_dir
 
-add_plugin_dir("input", "tool_schema_validator")
+add_plugin_dir("tool_schema_validator")
 
 from typing import Any
 
 import plugin as _tsv_plugin_mod  # noqa: E402  模块级捕获：测试内 re-import 会被裸名逐出干扰
 import pytest
-from pipeline.plugin import PluginContext
-from pipeline.types import StateKeys
+from _libs.pipeline_base.plugin import PluginContext
+from _libs.pipeline_base.types import StateKeys
 
 pytestmark = pytest.mark.unit
 
@@ -60,7 +64,7 @@ _REGISTRY = _FakeRegistry([_FakeTool("file_write", _FILE_WRITE_SCHEMA)])
 
 
 def _make_plugin() -> Any:
-    add_plugin_dir("input", "tool_schema_validator")
+    add_plugin_dir("tool_schema_validator")
     from plugin import ToolSchemaValidator
     return ToolSchemaValidator()
 
@@ -499,7 +503,7 @@ class _FreshModule:
     """
 
     def __init__(self) -> None:
-        add_plugin_dir("input", "tool_schema_validator")
+        add_plugin_dir("tool_schema_validator")
         import plugin as mod
 
         self._mod = mod
@@ -997,3 +1001,741 @@ class TestTruncationDetectionBoundaries:
         remaining = result.state_updates.get(StateKeys.RAW_TOOL_CALLS, [])
         assert [t["id"] for t in remaining] == ["c1"]
         assert remaining[0]["args"] == '{"goal": "x"'  # 原样透传，不猜测内容
+
+
+# ─────────────── 嵌套属性校验 + array 包装 dict 解包（2026-10-16）───────────────
+
+
+class TestNestedPropertyTraversal:
+    """object 型 property 带 properties 声明 → 下钻校验/修复；array 期望收到
+    单键包装 dict（{"item": v}/{"items": [...]}）→ 解包收编。
+
+    背景（task_submit 二连败复盘）：模型把单文件列表发射成
+    {"files": {"item": "docs/plugin_layering_plan.md"}}——顶层
+    acceptance_criteria 是自由 object，顶层校验看不见内层类型错，
+    坏形态漏到工具层被 fail-closed 拒绝，flash 档模型盲改二连败。
+    """
+
+    _NESTED_SCHEMA: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "acceptance_criteria": {
+                "type": "object",
+                "properties": {
+                    "files": {"type": "array"},
+                    "expect": {"type": "string"},
+                },
+                "required": ["files"],
+            },
+        },
+    }
+
+    def _ctx_with(self, tc: dict[str, Any]) -> PluginContext:
+        registry = _FakeRegistry([_FakeTool("submit_like", self._NESTED_SCHEMA)])
+        return PluginContext(
+            state={
+                StateKeys.CORE_TYPE: "tool_execute",
+                StateKeys.RAW_TOOL_CALLS: [tc],
+                "messages": [],
+            },
+            _services={"tool_registry": registry},
+        )
+
+    @pytest.mark.asyncio
+    async def test_nested_scalar_wrapper_dict_unwrapped_and_passed(self) -> None:
+        """嵌套 array 字段收到 {"item": 路径} → 解包为 [路径] 放行 + 修复留痕。"""
+        plugin = _make_plugin()
+        tc = {
+            "name": "submit_like",
+            "args": {
+                "acceptance_criteria": {
+                    "files": {"item": "docs/plugin_layering_plan.md"},
+                    "expect": "含现状清单",
+                }
+            },
+            "id": "call_n1",
+        }
+        result = await plugin.execute(self._ctx_with(tc))
+        updates = result.state_updates
+
+        remaining = updates.get(StateKeys.RAW_TOOL_CALLS, [])
+        assert [t["id"] for t in remaining] == ["call_n1"], "解包后放行"
+        assert remaining[0]["args"]["acceptance_criteria"]["files"] == [
+            "docs/plugin_layering_plan.md"
+        ]
+        assert "pre_decided_results" not in updates, "不拦截"
+        fixes = updates.get("schema_fixes")
+        assert fixes, "修复必须留痕（schema_fixes）"
+        assert "acceptance_criteria.files" in str(fixes)
+
+    @pytest.mark.asyncio
+    async def test_nested_list_valued_wrapper_unwrapped(self) -> None:
+        """{"items": [a, b]} → [a, b]：元素保序不丢。"""
+        plugin = _make_plugin()
+        tc = {
+            "name": "submit_like",
+            "args": {"acceptance_criteria": {"files": {"items": ["a.md", "b.md"]}}},
+            "id": "call_n2",
+        }
+        result = await plugin.execute(self._ctx_with(tc))
+        remaining = result.state_updates.get(StateKeys.RAW_TOOL_CALLS, [])
+        assert remaining[0]["args"]["acceptance_criteria"]["files"] == ["a.md", "b.md"]
+
+    @pytest.mark.asyncio
+    async def test_nested_missing_required_reports_qualified_path(self) -> None:
+        """嵌套 required 缺失 → 诊断带限定路径（内层字段可定位）。"""
+        plugin = _make_plugin()
+        tc = {
+            "name": "submit_like",
+            "args": {"acceptance_criteria": {"expect": "x"}},
+            "id": "call_n3",
+        }
+        result = await plugin.execute(self._ctx_with(tc))
+        entry = _pre_by_call_id(result.state_updates)["call_n3"]
+        assert entry["success"] is False
+        assert "Missing required field: acceptance_criteria.files" in entry["error"]
+
+    @pytest.mark.asyncio
+    async def test_nested_ambiguous_wrapper_still_blocked(self) -> None:
+        """多键包装 dict（意图不明）→ 不猜测，仍拦截且错误带限定路径。"""
+        plugin = _make_plugin()
+        tc = {
+            "name": "submit_like",
+            "args": {"acceptance_criteria": {"files": {"a": "x.md", "b": "y.md"}}},
+            "id": "call_n4",
+        }
+        result = await plugin.execute(self._ctx_with(tc))
+        entry = _pre_by_call_id(result.state_updates)["call_n4"]
+        assert entry["success"] is False
+        assert "SCHEMA_VALIDATION_FAILED" in entry["error"]
+        assert "acceptance_criteria.files" in entry["error"]
+
+    @pytest.mark.asyncio
+    async def test_free_form_object_without_properties_untouched(self) -> None:
+        """无 properties 的自由 object（如指标名 dict）不下钻、零误伤。"""
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {"acceptance_criteria": {"type": "object"}},
+        }
+        registry = _FakeRegistry([_FakeTool("free_form", schema)])
+        plugin = _make_plugin()
+        tc = {
+            "name": "free_form",
+            "args": {
+                "acceptance_criteria": {
+                    "file_check": {"input_params": {"path": "x.md"}},
+                    "anything": {"nested": [1, 2]},
+                }
+            },
+            "id": "call_n5",
+        }
+        ctx = PluginContext(
+            state={
+                StateKeys.CORE_TYPE: "tool_execute",
+                StateKeys.RAW_TOOL_CALLS: [tc],
+                "messages": [],
+            },
+            _services={"tool_registry": registry},
+        )
+        result = await plugin.execute(ctx)
+        updates = result.state_updates
+        assert "pre_decided_results" not in updates, "自由 object 不受下钻影响"
+        assert "schema_fixes" not in updates
+
+    @pytest.mark.asyncio
+    async def test_top_level_array_wrapper_dict_unwrapped(self) -> None:
+        """顶层 array 字段同样享受包装解包（通用能力，不限于嵌套层）。"""
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {"tags": {"type": "array"}},
+        }
+        registry = _FakeRegistry([_FakeTool("tags_tool", schema)])
+        plugin = _make_plugin()
+        tc = {"name": "tags_tool", "args": {"tags": {"item": "x"}}, "id": "call_n6"}
+        ctx = PluginContext(
+            state={
+                StateKeys.CORE_TYPE: "tool_execute",
+                StateKeys.RAW_TOOL_CALLS: [tc],
+                "messages": [],
+            },
+            _services={"tool_registry": registry},
+        )
+        result = await plugin.execute(ctx)
+        remaining = result.state_updates.get(StateKeys.RAW_TOOL_CALLS, [])
+        assert remaining[0]["args"]["tags"] == ["x"]
+
+
+# ─────────────── 常见形态目录兼容（2026-10-16 第二轮，业界实证）───────────────
+
+
+class TestCommonShapeRepair:
+    """LLM 工具调用常见形态走样目录（搜索实证：数字键对象化数组/围栏包裹/
+    prose 夹带/单元素数组包对象/布尔与浮点的类型漂移）。无歧义形态收编，
+    歧义形态不猜测（P9 反伪造立场不变：非 JSON 裸字符串仍拦截）。
+    """
+
+    _SHAPE_SCHEMA: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "tags": {"type": "array"},
+            "options": {"type": "object"},
+            "count": {"type": "integer"},
+            "content": {"type": "string"},
+        },
+    }
+
+    def _ctx_with(self, tc: dict[str, Any]) -> PluginContext:
+        registry = _FakeRegistry([_FakeTool("shape_tool", self._SHAPE_SCHEMA)])
+        return PluginContext(
+            state={
+                StateKeys.CORE_TYPE: "tool_execute",
+                StateKeys.RAW_TOOL_CALLS: [tc],
+                "messages": [],
+            },
+            _services={"tool_registry": registry},
+        )
+
+    async def _repaired_arg(self, args: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+        plugin = _make_plugin()
+        tc = {"name": "shape_tool", "args": args, "id": "call_s"}
+        result = await plugin.execute(self._ctx_with(tc))
+        updates = result.state_updates
+        remaining = updates.get(StateKeys.RAW_TOOL_CALLS, [])
+        got = remaining[0]["args"] if remaining else None
+        return got, updates
+
+    @pytest.mark.asyncio
+    async def test_numeric_indexed_dict_to_array(self) -> None:
+        """{"0": a, "1": b} 数字键顺序对象 → [a, b]（业界实证高频形态）。"""
+        got, _ = await self._repaired_arg({"tags": {"0": "x", "1": "y"}})
+        assert got["tags"] == ["x", "y"]
+
+    @pytest.mark.asyncio
+    async def test_numeric_indexed_gap_dict_blocked(self) -> None:
+        """数字键有空洞（0,2 缺 1）→ 序列化残缺不猜测，拦截。"""
+        _, updates = await self._repaired_arg({"tags": {"0": "x", "2": "y"}})
+        assert "SCHEMA_VALIDATION_FAILED" in _pre_by_call_id(updates)["call_s"]["error"]
+
+    @pytest.mark.asyncio
+    async def test_empty_dict_for_array_still_blocked(self) -> None:
+        """空 dict 不解包为空数组（P9：不伪造合法空集合）。"""
+        _, updates = await self._repaired_arg({"tags": {}})
+        assert "SCHEMA_VALIDATION_FAILED" in _pre_by_call_id(updates)["call_s"]["error"]
+
+    @pytest.mark.parametrize("scalar", [42, 3.5, True])
+    @pytest.mark.asyncio
+    async def test_bare_scalar_for_array_wrapped(self, scalar: Any) -> None:
+        """裸标量（数字/布尔，无隐藏结构可言）→ 单元素数组。"""
+        got, _ = await self._repaired_arg({"tags": scalar})
+        assert got["tags"] == [scalar]
+
+    @pytest.mark.asyncio
+    async def test_fenced_json_strings_converted(self) -> None:
+        """markdown 围栏包裹的 JSON（array/object 两型）→ 剥围栏解析。"""
+        got, _ = await self._repaired_arg(
+            {"tags": "```json\n[1, 2]\n```", "options": "```json\n{\"a\": 1}\n```"}
+        )
+        assert got["tags"] == [1, 2]
+        assert got["options"] == {"a": 1}
+
+    @pytest.mark.asyncio
+    async def test_prose_wrapped_json_extracted(self) -> None:
+        """prose 夹带 JSON（"Here is the JSON: {...}"）→ 截取最外层括号解析。"""
+        got, _ = await self._repaired_arg(
+            {"options": "Here is the JSON: {\"a\": 1} hope this helps"}
+        )
+        assert got["options"] == {"a": 1}
+
+    @pytest.mark.asyncio
+    async def test_unextractable_prose_still_blocked(self) -> None:
+        """prose 里根本没 JSON → 不伪造，拦截（P9 立场）。"""
+        _, updates = await self._repaired_arg({"options": "absolutely no json here"})
+        assert "SCHEMA_VALIDATION_FAILED" in _pre_by_call_id(updates)["call_s"]["error"]
+
+    @pytest.mark.asyncio
+    async def test_object_single_element_array_unwrapped(self) -> None:
+        """object 字段收到单元素数组 [{...}] → 取该元素。"""
+        got, _ = await self._repaired_arg({"options": [{"a": 1}]})
+        assert got["options"] == {"a": 1}
+
+    @pytest.mark.asyncio
+    async def test_object_multi_element_array_not_guessed(self) -> None:
+        """多元素数组包 object → 取哪个不明，不猜测，拦截。"""
+        _, updates = await self._repaired_arg({"options": [{"a": 1}, {"b": 2}]})
+        assert "SCHEMA_VALIDATION_FAILED" in _pre_by_call_id(updates)["call_s"]["error"]
+
+    @pytest.mark.asyncio
+    async def test_bool_for_string_coerced_lowercase(self) -> None:
+        """string 字段收布尔 → "true"/"false"（小写，bool 分支先于 int）。"""
+        got, _ = await self._repaired_arg({"content": True})
+        assert got["content"] == "true"
+
+    @pytest.mark.asyncio
+    async def test_decimal_forms_for_integer_coerced(self) -> None:
+        """integer 字段收 "3.0"/3.0 → 3（字符串经 float 桥接，浮点整数值直转）。"""
+        got, _ = await self._repaired_arg({"count": "3.0"})
+        assert got["count"] == 3
+        got, _ = await self._repaired_arg({"count": 3.0})
+        assert got["count"] == 3
+
+    @pytest.mark.asyncio
+    async def test_non_integral_float_for_integer_blocked(self) -> None:
+        """integer 字段收 3.5 → 不可无损，不猜测，拦截。"""
+        _, updates = await self._repaired_arg({"count": 3.5})
+        assert "SCHEMA_VALIDATION_FAILED" in _pre_by_call_id(updates)["call_s"]["error"]
+
+    @pytest.mark.asyncio
+    async def test_numeric_indexed_form_composes_with_nested_traversal(self) -> None:
+        """数字键形态与嵌套下钻组合：内层 array 字段同样收编。"""
+        registry = _FakeRegistry([
+            _FakeTool(
+                "submit_like",
+                {
+                    "type": "object",
+                    "properties": {
+                        "acceptance_criteria": {
+                            "type": "object",
+                            "properties": {"files": {"type": "array"}},
+                        }
+                    },
+                },
+            )
+        ])
+        plugin = _make_plugin()
+        tc = {
+            "name": "submit_like",
+            "args": {"acceptance_criteria": {"files": {"0": "a.md", "1": "b.md"}}},
+            "id": "call_sn",
+        }
+        ctx = PluginContext(
+            state={
+                StateKeys.CORE_TYPE: "tool_execute",
+                StateKeys.RAW_TOOL_CALLS: [tc],
+                "messages": [],
+            },
+            _services={"tool_registry": registry},
+        )
+        result = await plugin.execute(ctx)
+        remaining = result.state_updates.get(StateKeys.RAW_TOOL_CALLS, [])
+        assert remaining[0]["args"]["acceptance_criteria"]["files"] == ["a.md", "b.md"]
+
+
+# ─────────────── 修复层与工具契约对齐（2026-10-16 第三轮）───────────────
+
+
+class TestMapFieldAlignment:
+    """map 形 object（声明 additionalProperties）与工具契约对齐。
+
+    实证背景：headers/query/params 类字段工具侧契约是 dict[str, str]
+    （HTTP 语义），模型高频替身形态是 name/value 键值对列表。此前泛化的
+    「单元素数组→取元素」对单对场景会修坏成 {"name": X, "value": Y} 当
+    映射用（静默语义污染）——map 字段只收编合形 pairs，其余列表不猜。
+    """
+
+    _ALIGNED_SCHEMA: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+            "metrics": {"type": "object", "additionalProperties": True},
+            "data": {"type": ["object", "array"]},
+            "options": {"type": "object"},
+        },
+    }
+
+    def _ctx_with(self, tc: dict[str, Any]) -> PluginContext:
+        registry = _FakeRegistry([_FakeTool("aligned_tool", self._ALIGNED_SCHEMA)])
+        return PluginContext(
+            state={
+                StateKeys.CORE_TYPE: "tool_execute",
+                StateKeys.RAW_TOOL_CALLS: [tc],
+                "messages": [],
+            },
+            _services={"tool_registry": registry},
+        )
+
+    async def _repaired_arg(self, args: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+        plugin = _make_plugin()
+        tc = {"name": "aligned_tool", "args": args, "id": "call_m"}
+        result = await plugin.execute(self._ctx_with(tc))
+        updates = result.state_updates
+        remaining = updates.get(StateKeys.RAW_TOOL_CALLS, [])
+        return (remaining[0]["args"] if remaining else None), updates
+
+    @pytest.mark.asyncio
+    async def test_pairs_list_multi_converted_to_map(self) -> None:
+        """name/value 对列表（多对）→ dict，HTTP 语义对齐。"""
+        got, _ = await self._repaired_arg(
+            {"headers": [{"name": "A", "value": "1"}, {"name": "B", "value": "2"}]}
+        )
+        assert got["headers"] == {"A": "1", "B": "2"}
+
+    @pytest.mark.asyncio
+    async def test_pairs_list_single_converted_not_misread(self) -> None:
+        """单对列表 [{"name": X, "value": Y}] → {"X": Y}，而非误读为
+        {"name": X, "value": Y} 两个 header（对齐回归核心用例）。"""
+        got, _ = await self._repaired_arg({"headers": [{"name": "X", "value": "Y"}]})
+        assert got["headers"] == {"X": "Y"}
+
+    @pytest.mark.parametrize(
+        "pair", [{"key": "score", "value": 0.4}, {"k": "score", "v": 0.4}]
+    )
+    @pytest.mark.asyncio
+    async def test_pairs_convention_variants(self, pair: dict) -> None:
+        """key/value、k/v 同约定收编（值型不受 string 限制，随声明面）。"""
+        got, _ = await self._repaired_arg({"metrics": [pair]})
+        assert got["metrics"] == {"score": 0.4}
+
+    @pytest.mark.asyncio
+    async def test_malformed_pairs_list_blocked_not_unwrapped(self) -> None:
+        """单键元素（缺取值侧）不合对形 → 不落泛化解包，明确拦截。"""
+        _, updates = await self._repaired_arg({"headers": [{"name": "A"}]})
+        assert "SCHEMA_VALIDATION_FAILED" in _pre_by_call_id(updates)["call_m"]["error"]
+
+    @pytest.mark.asyncio
+    async def test_non_pairs_multi_blocked(self) -> None:
+        """非对形多元素列表 → 拦截。"""
+        _, updates = await self._repaired_arg(
+            {"headers": [{"foo": 1}, {"bar": 2}]}
+        )
+        assert "SCHEMA_VALIDATION_FAILED" in _pre_by_call_id(updates)["call_m"]["error"]
+
+    @pytest.mark.asyncio
+    async def test_map_fenced_string_still_parsed(self) -> None:
+        """map 字段的字符串形态（围栏 JSON）仍走泛化字符串解析。"""
+        got, _ = await self._repaired_arg({"headers": "```json\n{\"A\": \"1\"}\n```"})
+        assert got["headers"] == {"A": "1"}
+
+    @pytest.mark.asyncio
+    async def test_union_typed_body_passes_untouched(self) -> None:
+        """union（["object","array"]）字段 = 任意 JSON 体：列表直通不修不拦。
+
+        对齐 web_operate.data（json=data 直传，列表体合法）——既不被
+        泛化解包修坏（[{"a":1}] 保持列表），也不被类型闸拦截。
+        """
+        got, updates = await self._repaired_arg({"data": [1, 2, 3]})
+        assert got["data"] == [1, 2, 3]
+        assert "pre_decided_results" not in updates
+        got, _ = await self._repaired_arg({"data": [{"a": 1}]})
+        assert got["data"] == [{"a": 1}], "单元素列表体不得被解包修坏"
+
+    @pytest.mark.asyncio
+    async def test_plain_object_unwrap_unharmed(self) -> None:
+        """非 map 的裸 object 字段：单元素数组解包照常（既有行为不回归）。"""
+        got, _ = await self._repaired_arg({"options": [{"a": 1}]})
+        assert got["options"] == {"a": 1}
+
+
+# ─────────── 未声明参数策略（2026-10-18：additionalProperties:false 生效）───────────
+
+
+_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _injector_native_keys() -> set[str]:
+    """AST 提取 ``tool_args_inject._NATIVE_INJECT_KEYS`` 字面量（注入面真值）。
+
+    非字面量（动态构造）时抛 AssertionError——注入键域漂移必须显式同步，
+    不得静默放行（该集合决定校验层是否会把系统注入键误判为未知键）。
+    """
+    source = (_ROOT / "plugins" / "shared" / "tool_args_inject" / "plugin.py").read_text(
+        encoding="utf-8"
+    )
+    for node in ast.parse(source).body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(getattr(t, "id", "") == "_NATIVE_INJECT_KEYS" for t in node.targets):
+            continue
+        literal = ast.literal_eval(node.value.args[0])
+        assert isinstance(literal, set), "_NATIVE_INJECT_KEYS 非集合字面量，注入域不可判定"
+        assert literal, "_NATIVE_INJECT_KEYS 字面量为空，注入域不可判定"
+        return {str(k) for k in literal}
+    raise AssertionError(
+        "tools_args_inject 未以字面量声明 _NATIVE_INJECT_KEYS："
+        "tool_schema_validator._SYSTEM_INJECT_KEYS 需同步（未声明键策略的注入面豁免）"
+    )
+
+
+class TestUnknownKeyPolicy:
+    """声明 ``additionalProperties: false`` 的对象收到未声明键 → fail-closed
+    拒绝，错误文案同时回显未知键与该 schema 声明的合法键（模型可自纠）。
+
+    背景（全量解析 439 次工具调用）：额外键 28 次被**静默忽略**、不报错——
+    模型以为发对了，参数直接丢掉（"静默失效"）。此前校验只查 required/type，
+    ``enum/const/pattern/min/max/additionalProperties`` 一律不查。
+
+    边界（JSON Schema 语义，存量工具零行为变化）：未声明
+    ``additionalProperties``（或声明 true / 子 schema）照旧放行。
+    """
+
+    _STRICT: dict[str, Any] = {
+        "type": "object",
+        "properties": {"url": {"type": "string"}, "waitUntil": {"type": "string"}},
+        "required": ["url"],
+        "additionalProperties": False,
+    }
+
+    # 未表态（缺省）——存量绝大多数工具的形态，行为必须一字不变。
+    _LOOSE: dict[str, Any] = {
+        "type": "object",
+        "properties": {"url": {"type": "string"}},
+        "required": ["url"],
+    }
+
+    async def _run(self, schema: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+        """给定 schema/args 跑一轮真实 validator，返回 state_updates。"""
+        registry = _FakeRegistry([_FakeTool("probe_tool", schema)])
+        plugin = _make_plugin()
+        ctx = PluginContext(
+            state={
+                StateKeys.CORE_TYPE: "tool_execute",
+                StateKeys.RAW_TOOL_CALLS: [{"name": "probe_tool", "args": args, "id": "call_u1"}],
+                "messages": [],
+            },
+            _services={"tool_registry": registry},
+        )
+        return (await plugin.execute(ctx)).state_updates
+
+    @pytest.mark.asyncio
+    async def test_strict_unknown_key_blocked_with_unknown_and_allowed_echo(self) -> None:
+        """未声明键 → 拒绝（不进执行），错误同时回显未知键与合法键列表。"""
+        args = {"url": "https://example.com", "file_check": {"path": "x.md"}}
+        updates = await self._run(self._STRICT, args)
+        entry = _pre_by_call_id(updates)["call_u1"]
+
+        assert entry["success"] is False, "静默放行 = 参数被丢，必须拒绝"
+        assert "SCHEMA_VALIDATION_FAILED" in entry["error"]
+        assert "file_check" in entry["error"], "未回显未知键名，模型无法自纠"
+        assert "url" in entry["error"], "未回显合法键列表"
+        assert "waitUntil" in entry["error"], "未回显合法键列表"
+        assert entry["metadata"]["unknown_keys"] == ["file_check"]
+
+        # 拒绝经结果预填直出：调用保留在 raw_tool_calls（tool_core 配对执行面）
+        remaining = updates.get(StateKeys.RAW_TOOL_CALLS, [])
+        assert [t["id"] for t in remaining] == ["call_u1"]
+        # 不得静默剥键凑绿——原始 args 一字不动
+        assert remaining[0]["args"] == args
+
+    @pytest.mark.asyncio
+    async def test_multiple_unknown_keys_all_echoed(self) -> None:
+        """多个未声明键（含 None 值）全部回显，顺序稳定（sorted）。"""
+        updates = await self._run(
+            self._STRICT,
+            {
+                "url": "https://example.com",
+                "evaluation_metrics": [1, 2],
+                "AC_template": None,
+            },
+        )
+        entry = _pre_by_call_id(updates)["call_u1"]
+
+        assert entry["success"] is False
+        assert "AC_template" in entry["error"]
+        assert "evaluation_metrics" in entry["error"]
+        assert entry["metadata"]["unknown_keys"] == ["AC_template", "evaluation_metrics"]
+
+    @pytest.mark.asyncio
+    async def test_loose_schema_unknown_key_still_passes(self) -> None:
+        """未声明 additionalProperties → 照旧放行（存量工具契约不变）。"""
+        extra = {"url": "https://example.com", "file_check": {"path": "x.md"}}
+        updates = await self._run(self._LOOSE, extra)
+
+        assert "pre_decided_results" not in updates, "未表态的工具不得被新策略拦下"
+        assert "schema_errors" not in updates
+        assert updates[StateKeys.RAW_TOOL_CALLS][0]["args"] == extra
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "additional",
+        [True, {"type": "string"}],
+        ids=["additionalProperties-true", "additionalProperties-subschema"],
+    )
+    async def test_open_additional_properties_passes(self, additional: Any) -> None:
+        """additionalProperties 为 true / 子 schema → 放行（只有 false 才是拒绝面）。"""
+        schema = dict(self._STRICT, additionalProperties=additional)
+        updates = await self._run(
+            schema, {"url": "https://example.com", "anything": "goes"}
+        )
+        assert "pre_decided_results" not in updates
+
+    @pytest.mark.asyncio
+    async def test_strict_declared_keys_pass(self) -> None:
+        """全声明键齐备 → 放行，零误伤（无修复留痕）。"""
+        updates = await self._run(
+            self._STRICT, {"url": "https://example.com", "waitUntil": "load"}
+        )
+        assert "pre_decided_results" not in updates
+        assert "schema_fixes" not in updates
+
+    @pytest.mark.asyncio
+    async def test_strict_empty_properties_allows_only_system_keys(self) -> None:
+        """properties 为空 + 严格（browser_snapshot 同款）：无参放行，任何键拒绝。"""
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+        assert "pre_decided_results" not in await self._run(schema, {})
+
+        updates = await self._run(schema, {"level": "error"})
+        entry = _pre_by_call_id(updates)["call_u1"]
+        assert entry["success"] is False
+        assert "level" in entry["error"]
+        assert "allowed fields: none" in entry["error"], "空声明面须回显「无合法键」"
+
+    @pytest.mark.asyncio
+    async def test_system_injected_keys_are_not_unknown(self) -> None:
+        """注入键豁免：管道序 tool_args_inject → validator，校验面看到的是
+        注入后 args（timestamp/pipeline_id 无条件注入，session_id/workspace
+        等按 state 有值才注入）——LLM 未发出的键不得据此拒绝，否则严格工具
+        在生产全轮必死。"""
+        injected = sorted(_injector_native_keys())
+        args: dict[str, Any] = {"url": "https://example.com"}
+        args.update(dict.fromkeys(injected, "v"))
+        updates = await self._run(self._STRICT, args)
+
+        assert "pre_decided_results" not in updates, (
+            f"系统注入键被判为未知键：{injected}"
+        )
+
+    def test_system_key_set_covers_injector_declaration(self) -> None:
+        """两边相碰（漂移守卫）：validator 的豁免集合 ⊇ 注入方声明的注入键集。
+
+        注入方增键而未同步 → 本测试红（生产表现为严格工具整轮被误拒），
+        不靠人工记忆同步。
+        """
+        exempt = set(_tsv_plugin_mod._SYSTEM_INJECT_KEYS)
+        declared = _injector_native_keys()
+        assert declared <= exempt, (
+            f"注入方新增键未同步进 _SYSTEM_INJECT_KEYS: {sorted(declared - exempt)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_nested_strict_object_unknown_key_blocked(self) -> None:
+        """嵌套 object 声明严格 → 下钻拒绝，错误带限定路径（内层可定位）。"""
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "options": {
+                    "type": "object",
+                    "properties": {"waitUntil": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+            },
+        }
+        updates = await self._run(
+            schema, {"url": "u", "options": {"waitUntil": "load", "typo": 1}}
+        )
+        entry = _pre_by_call_id(updates)["call_u1"]
+
+        assert entry["success"] is False
+        assert "options.typo" in entry["error"], "内层未知键须带限定路径"
+        assert "allowed fields: options.waitUntil" in entry["error"]
+        assert entry["metadata"]["unknown_keys"] == ["options.typo"]
+
+    @pytest.mark.asyncio
+    async def test_nested_strict_empty_object_declaration_blocked(self) -> None:
+        """嵌套 object 只声明 additionalProperties:false（无 properties）→ 下钻拒绝。"""
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {
+                "options": {"type": "object", "additionalProperties": False},
+            },
+        }
+        assert "pre_decided_results" not in await self._run(schema, {"options": {}})
+
+        updates = await self._run(schema, {"options": {"a": 1}})
+        entry = _pre_by_call_id(updates)["call_u1"]
+        assert entry["success"] is False
+        assert "options.a" in entry["error"]
+
+    @pytest.mark.asyncio
+    async def test_nested_loose_object_untouched(self) -> None:
+        """嵌套 object 未表态 → 不下钻拒绝（自由形态零误伤，既有行为不变）。"""
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {
+                "metrics": {"type": "object", "properties": {"score": {"type": "number"}}},
+            },
+        }
+        updates = await self._run(
+            schema, {"metrics": {"score": 1.0, "自由指标名": {"nested": True}}}
+        )
+        assert "pre_decided_results" not in updates
+
+    @pytest.mark.asyncio
+    async def test_case_mismatched_key_is_unknown_and_reports_both_errors(self) -> None:
+        """键名大小写敏感（JSON Schema 语义）：URL ≠ url → 未知键 + 缺必填并存。"""
+        updates = await self._run(self._STRICT, {"URL": "https://example.com"})
+        entry = _pre_by_call_id(updates)["call_u1"]
+
+        assert entry["success"] is False
+        assert "Missing required field: url" in entry["error"]
+        assert "URL" in entry["error"]
+        assert entry["metadata"]["unknown_keys"] == ["URL"]
+
+    @pytest.mark.asyncio
+    async def test_real_browser_manifest_schema_enforcement(self) -> None:
+        """采纳面实证：真实 browser 六件的 manifest schema（非手抄副本）在本层生效。
+
+        browser 六件是全仓唯一声明 ``additionalProperties: false`` 的工具面
+        （实现侧 ``_build_arguments`` 按声明白名单透传、上游 @playwright/mcp
+        契约即严格）——本刀的采纳面就是它们：声明键 + 系统注入键放行，未声明
+        键拒绝并回显合法键（空 properties 的 browser_snapshot 回显 none）。
+        """
+        manifest = json.loads(
+            (_ROOT / "plugins" / "shared" / "browser" / "plugin.json").read_text(encoding="utf-8")
+        )
+        schemas = {t["name"]: t["input_schema"] for t in manifest["capabilities"]["tools"]}
+        assert schemas, "browser manifest 未声明工具面"
+        assert all(s.get("additionalProperties") is False for s in schemas.values()), (
+            "browser 声明面不再是严格面：本测试的采纳面前提已变，须重审"
+        )
+
+        click_args = {"target": "e12", "doubleClick": True, "session_id": "s-1", "timestamp": "T"}
+        assert "pre_decided_results" not in await self._run(
+            schemas["browser_click"], click_args
+        ), "声明键 + 系统注入键应放行"
+
+        updates = await self._run(schemas["browser_click"], dict(click_args, file_check="x.md"))
+        entry = _pre_by_call_id(updates)["call_u1"]
+        assert entry["success"] is False
+        assert "file_check" in entry["error"]
+        assert "target" in entry["error"], "回显合法键：browser_click 的 target"
+        assert "doubleClick" in entry["error"]
+
+        # 空 properties（browser_snapshot）：注入键放行，任何模型发出的键拒绝
+        snapshot_schema = schemas["browser_snapshot"]
+        assert "pre_decided_results" not in await self._run(
+            snapshot_schema, {"pipeline_id": "p-1", "workspace": "/ws"}
+        )
+        snapshot_updates = await self._run(snapshot_schema, {"fullPage": True})
+        snapshot_entry = _pre_by_call_id(snapshot_updates)["call_u1"]
+        assert snapshot_entry["success"] is False
+        assert "fullPage" in snapshot_entry["error"]
+
+
+class TestActionStatsObservability:
+    """参数削减效果观测（2026-10-19）：per-(tool, action, outcome) 计数器。"""
+
+    def test_counters_track_pass_fixed_rejected(self) -> None:
+        import asyncio
+
+        plugin = _make_plugin()
+
+        async def _repair_ok(*_a, **_k):
+            return None
+
+        # 声明面只有 string 型 path：c3 传 int（可修复形态）→ schema_fixed；
+        # c2 缺 path 不可修复 → prefill_rejected；c1 全合规 → pass
+        calls = [
+            {"name": "file_write", "id": "c1", "args": {"action": "write", "content": "x", "path": "a.txt"}},
+            {"name": "file_write", "id": "c2", "args": {"action": "write", "content": "x"}},
+            {"name": "file_write", "id": "c3", "args": {"action": "write", "content": "x", "path": 3}},
+        ]
+        result = asyncio.run(plugin.execute(_make_ctx(calls)))
+        stats = result.state_updates["tool_action_stats"]
+        # 键为竖线串（e03c29a58 键字符串化：tuple 键过 MCP 边界即炸）
+        assert stats["file_write|write|pass"] == 1
+        assert stats["file_write|write|prefill_rejected"] == 1
+        assert stats["file_write|write|schema_fixed"] == 1

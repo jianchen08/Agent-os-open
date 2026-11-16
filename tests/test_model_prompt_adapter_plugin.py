@@ -7,13 +7,13 @@ head insert op 构造、白名单过滤、rules.yaml 真实配置的结构校验
 
 from tests._pipeline_plugin_path import add_plugin_dir
 
-add_plugin_dir("input", "model_prompt_adapter")
+add_plugin_dir("model_prompt_adapter")
 
 import asyncio  # noqa: E402
 import re  # noqa: E402
 
 import plugin as mpa_plugin  # noqa: E402
-from pipeline.plugin import PluginContext  # noqa: E402
+from _libs.pipeline_base.plugin import PluginContext  # noqa: E402
 
 
 def _rule(**overrides):

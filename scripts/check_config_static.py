@@ -11,7 +11,7 @@ config/ 16 个子目录的 yaml 此前无 PR 级校验——配置写错最晚�
 3. 技能引用存在（2026-09-29，R300 装机悬空引用防回潮）：config/** 文本
    （yaml + md）里 ``skills/<名>/SKILL.md`` 形态的技能索引引用必须命中
    权威源并集（git 跟踪的仓根 skills/*/SKILL.md ∪ 出厂模式包
-   plugins/shared/modes/mode_*/skills/*/SKILL.md）。提示词把技能路径报给
+   plugins/shared/mode_*/skills/*/SKILL.md）。提示词把技能路径报给
    模型而不保证实体存在 = R300 事故链源头（模型按 {{user_root}} 拼绝对
    路径 File not found），悬空引用一律 PR 阶段消灭。整行注释与通配形态
    （skills/x-*/SKILL.md）不入扫。
@@ -69,11 +69,11 @@ def _known_plugin_ids() -> set[str]:
 
 def _known_skill_names() -> set[str]:
     """技能权威源并集 = git 跟踪的仓根 skills/*/SKILL.md ∪ 出厂模式包
-    plugins/shared/modes/mode_*/skills/*/SKILL.md（与 workspace_lifecycle
+    plugins/shared/mode_*/skills/*/SKILL.md（与 workspace_lifecycle
     _skill_sources 的 dev 侧源同口径；用户根 skills/ 是装机补种通道，不是
     PR 阶段可引用的新增源——包内没有的引用装到真用户机上必然悬空）。"""
     proc = subprocess.run(
-        ["git", "ls-files", "skills/*/SKILL.md", "plugins/shared/modes/*/skills/*/SKILL.md"],
+        ["git", "ls-files", "skills/*/SKILL.md", "plugins/shared/mode_*/skills/*/SKILL.md"],
         cwd=str(ROOT),
         capture_output=True,
         text=True,

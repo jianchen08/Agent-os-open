@@ -12,13 +12,16 @@
  */
 
 /* eslint-disable import-x/order */
+import { renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   clearPluginFileLoaderBindings,
+  downloadAttachment,
   markdownLinkInterceptor,
   openFileWithLoader,
   registerFileLoaderBindings,
   resolveLoader,
+  useAuthedAttachmentUrl,
 } from '@/services/fileLoaderRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { getFileEditorData } from '@/stores/fileEditorRegistry'
@@ -37,10 +40,11 @@ vi.mock('@/services/api/client', () => ({
 
 // blob URL（jsdom 无 createObjectURL，桩住断言传给页签数据的值）
 const createObjectURLMock = vi.fn(() => 'blob:mock-1')
+const revokeObjectURLMock = vi.fn()
 vi.stubGlobal('URL', {
   ...URL,
   createObjectURL: createObjectURLMock,
-  revokeObjectURL: vi.fn(),
+  revokeObjectURL: revokeObjectURLMock,
 })
 
 describe('resolveLoader', () => {
@@ -217,5 +221,90 @@ describe('markdownLinkInterceptor', () => {
     expect(shouldHandle({ href: 'https://example.com/a', text: '外链' })).toBe(false)
     expect(shouldHandle({ href: '/p/some-page', text: '站内' })).toBe(false)
     expect(getMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('useAuthedAttachmentUrl（/uploads 直链鉴权解析，ADR 2026-10-10）', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    revokeObjectURLMock.mockClear()
+  })
+  afterEach(() => vi.restoreAllMocks())
+
+  it('非 /uploads 前缀透传（https 外链不走取流）', () => {
+    const { result } = renderHook(() => useAuthedAttachmentUrl('https://cdn.example.com/a.png'))
+    expect(result.current).toEqual({ url: 'https://cdn.example.com/a.png', failed: false })
+    expect(getMock).not.toHaveBeenCalled()
+  })
+
+  it('/uploads 直链经鉴权内容端点取流为 blob objectURL（键 = basename）', async () => {
+    getMock.mockResolvedValueOnce({ data: new Blob(['x']) })
+    const { result } = renderHook(() => useAuthedAttachmentUrl('/uploads/pic9.png'))
+    await waitFor(() => expect(result.current.url).toBe('blob:mock-1'))
+    expect(getMock).toHaveBeenCalledWith(
+      '/ext/artifacts/files/pic9.png',
+      expect.objectContaining({ responseType: 'blob' }),
+    )
+    // 移动壳回归钉：同源 origin 是本地资源服务器（无 /ext 路由），取流必须走
+    // apiClient 默认基址（壳注入绝对地址），禁止 baseURL:'' 覆盖
+    expect(getMock.mock.calls[0][1]?.baseURL).toBeUndefined()
+    expect(result.current.failed).toBe(false)
+  })
+
+  it('取流失败 → failed=true（url 不落值，消费方呈现失败态）', async () => {
+    getMock.mockRejectedValueOnce({ response: { status: 404 } })
+    const { result } = renderHook(() => useAuthedAttachmentUrl('/uploads/gone.png'))
+    await waitFor(() => expect(result.current.failed).toBe(true))
+    expect(result.current.url).toBeUndefined()
+  })
+
+  it('src 变化：旧 objectURL 回收并按新地址重新取流（防泄漏不变量）', async () => {
+    getMock.mockResolvedValue({ data: new Blob(['x']) })
+    const { result, rerender } = renderHook(({ src }) => useAuthedAttachmentUrl(src), {
+      initialProps: { src: '/uploads/a.png' },
+    })
+    await waitFor(() => expect(result.current.url).toBe('blob:mock-1'))
+    rerender({ src: '/uploads/b.png' })
+    await waitFor(() =>
+      expect(getMock).toHaveBeenCalledWith(
+        '/ext/artifacts/files/b.png',
+        expect.objectContaining({ responseType: 'blob' }),
+      ),
+    )
+    expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:mock-1')
+  })
+})
+
+describe('downloadAttachment（附件下载鉴权取流）', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+    toastErrorMock.mockClear()
+  })
+  afterEach(() => vi.restoreAllMocks())
+
+  it('相对路径（内核端点）：apiClient 取流转 blob 触发下载（导航无法携带 Authorization）', async () => {
+    getMock.mockResolvedValueOnce({ data: new Blob(['x']) })
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    await downloadAttachment('/uploads/report.pdf', 'report.pdf')
+    expect(getMock).toHaveBeenCalledWith(
+      '/uploads/report.pdf',
+      expect.objectContaining({ responseType: 'blob' }),
+    )
+    expect(getMock.mock.calls[0][1]?.baseURL).toBeUndefined()
+    expect(clickSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('绝对 http(s) URL：浏览器直链下载（不走取流）', async () => {
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    await downloadAttachment('https://cdn.example.com/x.png', 'x.png')
+    expect(getMock).not.toHaveBeenCalled()
+    expect(clickSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('取流失败：toast 报错不抛出（下载是用户主动作）', async () => {
+    getMock.mockRejectedValueOnce({ response: { status: 401 } })
+    await expect(downloadAttachment('/uploads/gone.pdf', 'gone.pdf')).resolves.toBeUndefined()
+    expect(toastErrorMock).toHaveBeenCalledTimes(1)
+    expect(String(toastErrorMock.mock.calls[0][0])).toContain('gone.pdf')
   })
 })

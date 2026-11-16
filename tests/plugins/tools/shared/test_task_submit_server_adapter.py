@@ -25,9 +25,9 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_TS_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "task_submit"
-_TASKS_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "tasks"
-_SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared" / "system"
+_TS_DIR = _REPO_ROOT / "plugins" / "shared" / "task_submit"
+_TASKS_DIR = _REPO_ROOT / "plugins" / "shared" / "tasks"
+_SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared"
 _SHARED_ROOT = _REPO_ROOT / "plugins" / "shared"
 
 for _d in (str(_TS_DIR), str(_TASKS_DIR), str(_SYSTEM_DIR), str(_SHARED_ROOT)):

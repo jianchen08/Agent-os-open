@@ -73,6 +73,33 @@ describe('ThinkingDisplay — 头部', () => {
     expect(queryByText('1.5s')).not.toBeInTheDocument()
   })
 
+  // 2026-11-06 用户裁定：思考中态头部统一图标后跟实时总耗时；结束后回到 durationMs 徽标
+  it('isThinking 且带耗时锚点：头部显示实时总耗时；结束后切回 durationMs 徽标', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-11-06T10:00:10Z'))
+      const anchor = Date.parse('2026-11-06T10:00:08Z')
+      const view = render(
+        <ThinkingDisplay
+          thinking={makeThinking({ content: '', isThinking: true })}
+          streamAnchorMs={anchor}
+        />,
+      )
+      expect(view.getByTestId('stream-elapsed')).toHaveTextContent('2.0s')
+
+      view.rerender(
+        <ThinkingDisplay
+          thinking={makeThinking({ content: '结论', isThinking: false, durationMs: 1523 })}
+          streamAnchorMs={anchor}
+        />,
+      )
+      expect(view.queryByTestId('stream-elapsed')).not.toBeInTheDocument()
+      expect(view.getByText('1.5s')).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('点击头部展开/再点击收起', () => {
     const { container, getByText } = renderDisplay(makeThinking({ content: '思考正文' }))
     fireEvent.click(getByText('思考过程'))

@@ -219,7 +219,7 @@ describe('ChatInput 文件选择与上传管线', () => {
     expect(screen.getByText('5 B')).toBeInTheDocument()
   })
 
-  it('上传成功后发送：待传文件转换为附件随消息发出，发送受理后附件清空', async () => {
+  it('上传成功后发送：待传文件转换为附件随消息发出；受理后附件保留（清空只在落定）', async () => {
     mocks.uploadFile.mockResolvedValue(uploadOk)
     const onSendMessage = vi.fn()
     const { container } = renderInput({ onSendMessage })
@@ -251,7 +251,9 @@ describe('ChatInput 文件选择与上传管线', () => {
         ],
       }),
     )
-    await waitFor(() => expect(screen.queryByText('notes.txt')).toBeNull())
+    // 2026-11-04 落定语义重定义：受理 = 发送态开始，附件与文本同批保留，
+    // 由落定订阅回调一并清空（见 ChatInput.sendLifecycle.test.tsx）
+    expect(screen.getByText('notes.txt')).toBeInTheDocument()
   })
 
   it('图片文件：生成预览 URL 渲染缩略图；移除时释放预览 URL', async () => {
@@ -716,6 +718,33 @@ describe('ChatInput 发送守卫', () => {
     expect(onSendMessage).not.toHaveBeenCalled()
     expect(textareaEl().value).toBe('被禁用的输入')
   })
+
+  it('禁用态发送明示拒绝（真机"busy 会话发送静默抑制"回归锁）：Enter 与点发送按钮均有 inline 提示，输入保留', () => {
+    const onSendMessage = vi.fn()
+    const { rerenderWith } = renderInput({ onSendMessage })
+    fireEvent.change(textareaEl(), { target: { value: '执行中的发言' } })
+    rerenderWith({ disabled: true })
+
+    // Enter 路径：显式 inline 提示，不发送、不清空
+    fireEvent.keyDown(textareaEl(), { key: 'Enter' })
+    expect(onSendMessage).not.toHaveBeenCalled()
+    expect(screen.getByRole('alert')).toHaveTextContent('会话执行中，暂不能发送')
+    expect(textareaEl().value).toBe('执行中的发言')
+
+    // 点发送按钮路径：按钮 disabled 点击无效果是原生行为——提示不重复、不误清
+    fireEvent.click(screen.getByTestId('chat-send-button'))
+    expect(onSendMessage).not.toHaveBeenCalled()
+    expect(textareaEl().value).toBe('执行中的发言')
+  })
+
+  it('禁用态空输入按 Enter：未尝试发送，不弹提示（静默仅限无内容）', () => {
+    const onSendMessage = vi.fn()
+    const { rerenderWith } = renderInput({ onSendMessage })
+    rerenderWith({ disabled: true })
+    fireEvent.keyDown(textareaEl(), { key: 'Enter' })
+    expect(onSendMessage).not.toHaveBeenCalled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
 })
 
 describe('ChatInput 上传中发送拦截（附件在途不随消息发出）', () => {
@@ -766,7 +795,8 @@ describe('ChatInput 上传中发送拦截（附件在途不随消息发出）', 
         ],
       }),
     )
-    expect(textareaEl().value).toBe('')
+    // 受理不清输入（落定语义）：文本保留到落定，失败路径天然可重试
+    expect(textareaEl().value).toBe('看这张图')
   })
 
   it('上传已失败（error 终态）的附件不拦截发送', async () => {
@@ -812,7 +842,8 @@ describe('ChatInput 引用注入与消耗（referenceProviders 注册缝）', ()
     expect(params.content).toContain('- Enemy (node) @ /root/Enemy [position=(1,2,3)]')
     expect(params.content.endsWith('</reference>')).toBe(true)
     expect(consume).toHaveBeenCalledTimes(1)
-    expect(textareaEl().value).toBe('')
+    // 受理不清输入（落定语义）：正文保留到落定，由落定订阅回调清空
+    expect(textareaEl().value).toBe('看看这个')
   })
 
   it('无待发引用（null selection）→ 正文不注入，consume 仍被枚举调用', () => {

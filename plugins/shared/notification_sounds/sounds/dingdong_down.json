@@ -1,0 +1,34 @@
+{
+  "id": "dingdong_down",
+  "label": "下行叮咚",
+  "engine": "web_audio_synth",
+  "params": {
+    "partials": [
+      {
+        "ratio": 1.0,
+        "gain": 1.0,
+        "decayRatio": 1.0
+      },
+      {
+        "ratio": 2.0,
+        "gain": 0.35,
+        "decayRatio": 0.45
+      }
+    ],
+    "attack": 0.012,
+    "notes": [
+      {
+        "freq": 1318.51,
+        "start": 0,
+        "peak": 0.22,
+        "decay": 0.5
+      },
+      {
+        "freq": 1046.5,
+        "start": 0.18,
+        "peak": 0.22,
+        "decay": 0.55
+      }
+    ]
+  }
+}

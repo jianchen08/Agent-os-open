@@ -29,7 +29,7 @@ from tests._security_check_harness import (
     wire_approval_cap,
 )
 
-add_plugin_dir("input", "security_check")
+add_plugin_dir("security_check")
 import plugin as sc_mod  # noqa: E402
 from plugin import SecurityCheckPlugin  # noqa: E402
 

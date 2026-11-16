@@ -1,0 +1,86 @@
+# 统一命名空间保留名清单（初值）——设备名注册校验用
+#
+# 契约：ADR 2026-10-18-unified-namespace-fs-mount-and-mcp-transfer D16
+# 「保留名避碰（登记侧校验，一句话机制）」——根下直挂 /<设备名>/ 与系统目录
+# 共享命名空间，设备名注册时逐名比对本清单（Windows/macOS 大小写不敏感比对，
+# Linux 精确比对），命中即拒/要求改名。消费方=设备注册入口（sync_agent 注册面）
+# 与部署脚本；一行一名，# 开头为注释。
+#
+# 三类来源：
+# A. Linux 根下系统目录（云端 Linux 挂载锚 /<设备名> 与其共享 / 命名空间）
+# B. MSYS/Git 安装根同名件（桌面 Git Bash / 映射处的并列项）
+# C. Windows 盘根保留名（盘根 junction C:\<设备名> 与其共享盘根命名空间）
+
+# ---- A. Linux 根系统目录（同时覆盖 B 的 MSYS 同名件）----
+bin
+boot
+cdrom
+dev
+etc
+home
+lib
+lib32
+lib64
+libx32
+lost+found
+media
+mnt
+opt
+proc
+root
+run
+sbin
+snap
+srv
+sys
+tmp
+usr
+var
+
+# ---- B. MSYS/Git 安装根特有并列项（与 A 不重者）----
+mingw64
+cmd
+
+# ---- C. Windows 盘根保留名 ----
+Windows
+System32
+Program Files
+Program Files (x86)
+ProgramData
+Users
+PerfLogs
+Temp
+Recycle.Bin
+System Volume Information
+Documents and Settings
+Intel
+Drivers
+Dell
+Recovery
+swapfile.sys
+pagefile.sys
+hiberfil.sys
+
+# ---- 通用文件名级保留（Windows DOS 设备名，任何位置命中即拒）----
+CON
+PRN
+AUX
+NUL
+COM1
+COM2
+COM3
+COM4
+COM5
+COM6
+COM7
+COM8
+COM9
+LPT1
+LPT2
+LPT3
+LPT4
+LPT5
+LPT6
+LPT7
+LPT8
+LPT9

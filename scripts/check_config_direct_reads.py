@@ -6,7 +6,7 @@
 Python/Rust 源码中的硬编码配置路径字面量，新违规即红（存量进基线文件棘轮清偿）。
 
 - 扫描目标：plugins/shared/**/*.py、plugins/sdk/src/**/*.py、
-  plugins/shared/pipeline/**/src/**/*.rs（native cdylib）
+  plugins/shared/**/*.rs（native cdylib；拍平布局随共享根一并入扫描面）
 - 判定：出现 `config/` 路径字面量（斜杠/分段拼接两种形态）
 - 基线：.github/check_config_direct_reads_baseline.txt（每行 = 文件:出现次数），
   只减不增；基线外新增 → exit 1
@@ -42,8 +42,19 @@ EXCLUDE_DIRS = {
 
 # `config/...` 斜杠形态（字符串内）；分段拼接形态 `"config", "xx"` / "config" / "xx"
 SLASH_FORM = re.compile(r"config/[A-Za-z0-9_\-./]+\.(?:yaml|yml|json)")
-SEGMENT_FORM = re.compile(r"""["']config["']\s*,\s*["'][^"']+["']""")
+SEGMENT_FORM = re.compile(r"""["']config["']\s*,\s*["']([^"']+)["']""")
 PATH_JOIN_FORM = re.compile(r"""["']config["']\s*/\s*["'][^"']+["']""")
+_CONFIG_SUFFIXES = (".yaml", ".yml", ".json")
+
+
+def _is_config_segment(segment: str) -> bool:
+    """分段形态的第二段是否真像 config/ 下的路径。
+
+    带点但不是 config 文件后缀的段是**非路径 token**——典型如测试里给
+    ``git config`` 设身份用的 ``"config", "user.email"``（真违规形状是
+    ``"config", "agents/main.yaml"``）。裸段（``"agents"``）无点，按目录名收。
+    """
+    return "/" in segment or "." not in segment or segment.endswith(_CONFIG_SUFFIXES)
 
 
 def iter_sources() -> list[Path]:
@@ -55,7 +66,13 @@ def iter_sources() -> list[Path]:
         stack = [root]
         while stack:
             cur = stack.pop()
-            for p in cur.iterdir():
+            # 扫描与活进程建/删目录竞态（mcp_windows_mcp 实锤族）：entry 消失
+            # 或无权限 → 跳过，不整闸崩
+            try:
+                children = list(cur.iterdir())
+            except (FileNotFoundError, PermissionError):
+                continue
+            for p in children:
                 if p.is_dir():
                     if p.name in EXCLUDE_DIRS:
                         continue
@@ -67,7 +84,7 @@ def iter_sources() -> list[Path]:
 
 def count_violations(text: str) -> int:
     n = len(SLASH_FORM.findall(text))
-    n += len(SEGMENT_FORM.findall(text))
+    n += sum(1 for m in SEGMENT_FORM.finditer(text) if _is_config_segment(m.group(1)))
     n += len(PATH_JOIN_FORM.findall(text))
     return n
 

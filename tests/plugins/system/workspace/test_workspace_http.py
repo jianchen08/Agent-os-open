@@ -3,18 +3,24 @@
 
 覆盖（对齐原 tests/channels/test_routes_workspaces.py 语义 + 新 http.handle 分发层）：
 1. GET /{id} /{id}/artifacts /{id}/file-tree —— 工作空间详情/制品聚合/文件树
-2. GET/PUT /{id}/file-content —— 文件读写 + 路径穿越防护 + 10MB 限制
+2. GET/PUT /{id}/file-content —— 文件读写；读面按路径形态分治（用户裁定
+   2026-09-28 绝对路径直读 + 2026-10-24 延伸：锚定仅用于定位、不做越界拒绝、
+   不设大小上限，ADR 2026-09-28-file-content-absolute-direct-read）；写面
+   仍守越界 + 10MB 限制
 3. POST /{id}/create-entry / DELETE /{id}/entries / POST rename-entry / move-entry
-4. POST /open-file 与 /{id}/open —— IDE 连接器链路（无连接器/成功/失败/异常）
+4. POST /open-file 与 /{id}/open —— 宿主原生直开链路（成功/路径缺失/OS 调用
+   失败，用户裁定 2026-10-08：打开本地路径不经插件层）
 5. 404 未知路由 / 解码异常 500 / auth 由声明承接（handler 不读 _user）
 6. _on_load 的 pipeline-state 读面注入（能力就绪 → set_state_reader；未授予 →
-   降级回退，workspace_service 读面 None）
-7. 归属闸（U6）：_resolve_workspace_path 四通道统一按"请求方与目标任务归属"
-   放行/404（_local 特例要求认证；项目登记 submitted_by / state 行
-   task.submitted_by / 任务镜像 metadata.user_id 为各通道归属权威字段）
+   读面缺失 = 无坐标，如实 no_workspace，无兜底通道）
+7. 工作区解析路由（用户裁定 2026-10-08，state 单一真相源）：_resolve_container_path
+   按 id 类别显式路由——_local 特例要求认证；任务/会话管道 id 走 state 聚合行
+   （任务行按 task.submitted_by 归属闸，会话域行认证可达）；项目登记按
+   ProjectModel.submitted_by；task_service 镜像通道已删（state 无行即
+   no_workspace，不再有镜像兜底）
 
-外部依赖（tasks.service_access / connectors）经 sys.modules 注入与进程内
-ConnectorRegistry 直连控制，不接真实内核。
+外部依赖（tasks.service_access / 宿主打开调用 os.startfile 与 webbrowser）
+经 sys.modules 注入与 monkeypatch 替身隔离，不接真实内核。
 """
 
 from __future__ import annotations
@@ -31,7 +37,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system" / "workspace"
+_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "workspace"
 
 
 def _load_server() -> Any:
@@ -62,9 +68,9 @@ def ws_dir(tmp_path: Path) -> str:
 
 
 def _inject_workspace_path(server: Any, ws_path: str | None) -> None:
-    """控制 _resolve_workspace_path：None = 未找到工作空间路径。
+    """控制 _resolve_container_path：None = 未找到工作空间路径。
 
-    fake 签名与生产解析器同形（container_task_id, caller）——归属闸注入
+    fake 签名与生产路由器同形（container_task_id, caller）——归属闸注入
     场景由注入面整体替代，本 fake 只表达坐标解析结果。
     """
 
@@ -73,7 +79,7 @@ def _inject_workspace_path(server: Any, ws_path: str | None) -> None:
             return None
         return ws_path
 
-    server._resolve_workspace_path = fake  # type: ignore[method-assign]
+    server._resolve_container_path = fake  # type: ignore[method-assign]
 
 
 def _run(coro: Any) -> Any:
@@ -108,6 +114,25 @@ def _decode_http(result: dict[str, Any]) -> tuple[int, Any]:
     resp = result["data"]
     body = base64.b64decode(resp["body"]).decode("utf-8")
     return resp["status"], json.loads(body)
+
+
+def _startfile_recorder(seen: list[str]) -> Any:
+    """os.startfile 替身工厂：记录调用参数（显式 def，mypy func-returns-value 干净）。"""
+
+    def _record(p: str) -> None:
+        seen.append(p)
+
+    return _record
+
+
+def _webbrowser_recorder(seen: list[str]) -> Any:
+    """webbrowser.open 替身工厂：记录 URI 并返回 True（显式 def，mypy 干净）。"""
+
+    def _record(uri: str) -> bool:
+        seen.append(uri)
+        return True
+
+    return _record
 
 
 class _FakeTask:
@@ -149,52 +174,36 @@ class _FakeProjectRegistry:
         return types.SimpleNamespace(submitted_by=sub)
 
 
-def _inject_project_registry(submitted_by: dict[str, str]) -> None:
-    """注入伪 tasks.service_access 的项目登记簿通道（与 _inject_task_service
-    共用模块槽：两者同经 tasks.service_access 懒加载）。"""
-    mod = sys.modules.get("tasks.service_access")
-    if mod is None:
-        mod = types.ModuleType("tasks.service_access")
-        mod.get_task_service = lambda: None  # type: ignore[attr-defined]
-    mod.get_project_registry = lambda: _FakeProjectRegistry(submitted_by)  # type: ignore[attr-defined]
-    sys.modules["tasks.service_access"] = mod
+def _inject_project_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    server: Any,
+    paths: dict[str, str],
+    submitted_by: dict[str, str],
+) -> None:
+    """project.* 能力替身（T6a 后归属闸/路径解析经 plugin.get_capability
+    ("project") 的 list_paths/get；非 project 能力透传真 plugin）。"""
+    owners = dict(submitted_by)
 
+    class _FakeProjectCap:
+        async def call(self, method: str, args: dict) -> dict:
+            if method == "list_paths":
+                return {"paths": dict(paths)}
+            if method == "get":
+                pid = str(args.get("project_id") or "")
+                if pid not in owners:
+                    return {"found": False}
+                return {"found": True, "project": {"submitted_by": owners[pid]}}
+            raise KeyError(method)
 
-def _caller_success(
-    connector_type: str = "fake_vscode", data: Any = None
-) -> tuple[Any, list[tuple[str, dict[str, Any]]]]:
-    """connector.execute 成功响应的调用方替身；记录收到的 (action_type, parameters)。"""
-    calls: list[tuple[str, dict[str, Any]]] = []
+    real = server.plugin
 
-    async def _c(action_type: str, parameters: dict[str, Any]) -> dict[str, Any]:
-        calls.append((action_type, parameters))
-        resp: dict[str, Any] = {"success": True, "connector_type": connector_type}
-        if data is not None:
-            resp["data"] = data
-        return resp
+    class _FakePlugin:
+        def get_capability(self, name: str) -> Any:
+            if name == "project":
+                return _FakeProjectCap()
+            return real.get_capability(name)
 
-    return _c, calls
-
-
-def _caller_no_connector() -> Any:
-    async def _c(action_type: str, parameters: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG001
-        return {"success": False, "no_connector": True, "error": "没有已连接的连接器支持动作"}
-
-    return _c
-
-
-def _caller_fail(error: str) -> Any:
-    async def _c(action_type: str, parameters: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG001
-        return {"success": False, "error": error}
-
-    return _c
-
-
-def _caller_raise(exc: Exception) -> Any:
-    async def _c(action_type: str, parameters: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG001
-        raise exc
-
-    return _c
+    monkeypatch.setattr(server, "plugin", _FakePlugin())
 
 
 # ═══════════════════════════════════════════════════════════
@@ -291,7 +300,7 @@ class TestWorkspaceDetail:
             )
         )
         assert status == 200
-        names = {n["name"] for n in body["tree"]}
+        names = {n["name"] for n in body["entries"]}
         assert names == {"a.txt", "sub"}
 
     def test_get_file_tree_no_workspace_path(self, server: Any) -> None:
@@ -304,7 +313,7 @@ class TestWorkspaceDetail:
             )
         )
         assert status == 200
-        assert body["tree"] == []
+        assert body["entries"] == []
 
 
 # ═══════════════════════════════════════════════════════════
@@ -345,6 +354,8 @@ class TestFileContent:
         assert body["success"] is True
 
     def test_read_file_escape_workspace(self, server: Any, ws_dir: str, tmp_path: Path) -> None:
+        """读面相对路径 `../` = 锚定定位、不做越界拒绝（用户裁定 2026-10-24：
+        打开面不通过路径限制用户访问，守卫归写面与 fs_tools 链）。"""
         _inject_workspace_path(server, ws_dir)
         outside = tmp_path / "outside.txt"
         outside.write_text("x", encoding="utf-8")
@@ -357,8 +368,8 @@ class TestFileContent:
             )
         )
         assert status == 200
-        assert body["success"] is False
-        assert "超出工作空间范围" in body["message"]
+        assert body["success"] is True, "读面越界不拒绝（锚定仅用于定位）"
+        assert body["content"] == "x"
 
     def test_read_file_missing(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
@@ -983,7 +994,7 @@ class TestEntryOps:
 
 
 # ═══════════════════════════════════════════════════════════
-# 4. IDE 连接器链路（open-file / open）
+# 4. 宿主原生直开链路（open-file / open，用户裁定 2026-10-08）
 # ═══════════════════════════════════════════════════════════
 
 
@@ -1001,79 +1012,100 @@ class TestIdeOpenFile:
         assert body["success"] is False
         assert "file_path 参数不能为空" in body["message"]
 
-    def test_open_file_no_connector(self, server: Any) -> None:
-        """服务面无已连接连接器（no_connector 标记）→ 沿用既有用户提示语。"""
-        server._connector_caller = _caller_no_connector()
-        status, body = _decode_http(
-            _call(
-                server,
-                path="/ext/workspace_service/workspaces/open-file",
-                method="POST",
-                raw_body='{"file_path": "a.py"}',
-            )
+    def test_open_file_host_success(
+        self, server: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """既有文件 → os.startfile 收到该路径（额外字段 line/column 不碍事）。"""
+        f = tmp_path / "a.py"
+        f.write_text("x", encoding="utf-8")
+        opened: list[str] = []
+        # 钉 win32 分支（与下方 posix 回退测试同构）：POSIX 宿主无 os.startfile，
+        # 不钉则落 webbrowser 回退分支，断言对象落空
+        monkeypatch.setattr(server.sys, "platform", "win32")
+        monkeypatch.setattr(
+            server.os, "startfile", _startfile_recorder(opened), raising=False
         )
-        assert status == 200
-        assert body["success"] is False
-        assert "没有可用的 IDE 连接器" in body["message"]
-
-    def test_open_file_capability_missing_degrades(self, server: Any) -> None:
-        """tool-executor 未授予（caller 未绑定）→ 如实降级不谎报连接器状态。"""
-        server._connector_caller = None
         status, body = _decode_http(
             _call(
                 server,
                 path="/ext/workspace_service/workspaces/open-file",
                 method="POST",
-                raw_body='{"file_path": "a.py"}',
-            )
-        )
-        assert status == 200
-        assert body["success"] is False
-        assert "连接器服务不可用" in body["message"]
-
-    def test_open_file_connector_success(self, server: Any) -> None:
-        caller, calls = _caller_success()
-        server._connector_caller = caller
-        status, body = _decode_http(
-            _call(
-                server,
-                path="/ext/workspace_service/workspaces/open-file",
-                method="POST",
-                raw_body='{"file_path": "a.py", "line": 3, "column": 5}',
+                raw_body=json.dumps({"file_path": str(f), "line": 3, "column": 5}),
             )
         )
         assert status == 200
         assert body["success"] is True
-        assert calls == [("open_file", {"file_path": "a.py", "line": 3, "column": 5})]
-        assert "已在" in body["message"]
+        assert opened == [str(f.resolve())]
+        assert body["file_path"] == str(f)
 
-    def test_open_file_connector_failure(self, server: Any) -> None:
-        server._connector_caller = _caller_fail("connector boom")
-        status, body = _decode_http(
-            _call(
-                server,
-                path="/ext/workspace_service/workspaces/open-file",
-                method="POST",
-                raw_body='{"file_path": "a.py"}',
-            )
+    def test_open_file_missing_target_reports_failure(
+        self, server: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """路径不存在 → 公开面如实失败，且不发起 OS 调用。"""
+        opened: list[str] = []
+        monkeypatch.setattr(
+            server.os, "startfile", _startfile_recorder(opened), raising=False
         )
-        assert status == 200
-        assert body["success"] is False
-        assert "连接器执行失败" in body["message"]
-
-    def test_open_file_connector_exception(self, server: Any) -> None:
-        server._connector_caller = _caller_raise(RuntimeError("kaput"))
         status, body = _decode_http(
             _call(
                 server,
                 path="/ext/workspace_service/workspaces/open-file",
                 method="POST",
-                raw_body='{"file_path": "a.py"}',
+                raw_body=json.dumps({"file_path": str(tmp_path / "ghost.py")}),
             )
         )
         assert status == 200
         assert body["success"] is False
         assert "打开文件失败" in body["message"]
+        assert opened == []
+
+    def test_open_file_os_failure_reports_failure(
+        self, server: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OS 调用异常 → 公开面如实失败（不吞异常、不谎报成功）。"""
+        f = tmp_path / "b.py"
+        f.write_text("x", encoding="utf-8")
+
+        def _boom(p: str) -> None:
+            raise OSError("no association")
+
+        # 钉 win32 分支：OS 调用失败面按 startfile 路径断言（POSIX 落 webbrowser）
+        monkeypatch.setattr(server.sys, "platform", "win32")
+        monkeypatch.setattr(server.os, "startfile", _boom, raising=False)
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/open-file",
+                method="POST",
+                raw_body=json.dumps({"file_path": str(f)}),
+            )
+        )
+        assert status == 200
+        assert body["success"] is False
+        assert "打开文件失败" in body["message"]
+
+    def test_open_file_posix_falls_back_to_webbrowser(
+        self, server: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """非 Windows 平台 → webbrowser.open 收到 file URI。"""
+        f = tmp_path / "c.py"
+        f.write_text("x", encoding="utf-8")
+        monkeypatch.setattr(server.sys, "platform", "linux")
+        opened: list[str] = []
+        monkeypatch.setattr(
+            server.webbrowser, "open", _webbrowser_recorder(opened)
+        )
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/open-file",
+                method="POST",
+                raw_body=json.dumps({"file_path": str(f)}),
+            )
+        )
+        assert status == 200
+        assert body["success"] is True
+        assert opened == [f.resolve().as_uri()]
 
 
 class TestIdeOpenWorkspace:
@@ -1090,14 +1122,16 @@ class TestIdeOpenWorkspace:
         assert body["success"] is False
         assert "未找到任务" in body["message"]
 
-    def test_open_workspace_no_connector_file_manager_ok(
+    def test_open_workspace_host_success_windows(
         self, server: Any, ws_dir: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Windows 分支：os.startfile 收到工作空间路径 → success=True。"""
         _inject_workspace_path(server, ws_dir)
-        server._connector_caller = _caller_no_connector()
-        # 在子进程边界（外部依赖）记录系统文件管理器拉起，不经私有函数
-        spawned: list[Any] = []
-        monkeypatch.setattr(server.subprocess, "Popen", spawned.append)
+        opened: list[str] = []
+        monkeypatch.setattr(server.sys, "platform", "win32")
+        monkeypatch.setattr(
+            server.os, "startfile", _startfile_recorder(opened), raising=False
+        )
         status, body = _decode_http(
             _call(
                 server,
@@ -1107,61 +1141,42 @@ class TestIdeOpenWorkspace:
         )
         assert status == 200
         assert body["success"] is True
-        assert "系统文件管理器" in body["message"]
-        assert spawned
+        assert opened == [str(Path(ws_dir).resolve())]
+        assert body["path"] == ws_dir
 
-    def test_open_workspace_no_connector_no_file_manager(
+    def test_open_workspace_host_success_posix(
         self, server: Any, ws_dir: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """非 Windows 分支：webbrowser.open 收到 file URI → success=True。"""
         _inject_workspace_path(server, ws_dir)
-        server._connector_caller = _caller_no_connector()
-        def boom(*_a: Any, **_k: Any) -> Any:
+        monkeypatch.setattr(server.sys, "platform", "linux")
+        opened: list[str] = []
+        monkeypatch.setattr(
+            server.webbrowser, "open", _webbrowser_recorder(opened)
+        )
+        status, body = _decode_http(
+            _call(
+                server,
+                path="/ext/workspace_service/workspaces/t1/open",
+                method="POST",
+            )
+        )
+        assert status == 200
+        assert body["success"] is True
+        assert opened == [Path(ws_dir).as_uri()]
+
+    def test_open_workspace_os_failure_reports_failure(
+        self, server: Any, ws_dir: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OS 调用异常 → 公开面如实失败（不假成功）。"""
+        _inject_workspace_path(server, ws_dir)
+
+        def boom(p: str) -> None:
             raise OSError("no file manager")
 
-        monkeypatch.setattr(server.subprocess, "Popen", boom)
-        status, body = _decode_http(
-            _call(
-                server,
-                path="/ext/workspace_service/workspaces/t1/open",
-                method="POST",
-            )
-        )
-        assert status == 200
-        assert body["success"] is False
-        assert "无法启动系统文件管理器" in body["message"]
-
-    def test_open_workspace_connector_success(self, server: Any, ws_dir: str) -> None:
-        _inject_workspace_path(server, ws_dir)
-        caller, calls = _caller_success()
-        server._connector_caller = caller
-        status, body = _decode_http(
-            _call(
-                server,
-                path="/ext/workspace_service/workspaces/t1/open",
-                method="POST",
-            )
-        )
-        assert status == 200
-        assert body["success"] is True
-        assert calls == [("open_folder", {"path": body["path"]})]
-
-    def test_open_workspace_connector_failure(self, server: Any, ws_dir: str) -> None:
-        _inject_workspace_path(server, ws_dir)
-        server._connector_caller = _caller_fail("boom")
-        status, body = _decode_http(
-            _call(
-                server,
-                path="/ext/workspace_service/workspaces/t1/open",
-                method="POST",
-            )
-        )
-        assert status == 200
-        assert body["success"] is False
-        assert "连接器执行失败" in body["message"]
-
-    def test_open_workspace_connector_exception(self, server: Any, ws_dir: str) -> None:
-        _inject_workspace_path(server, ws_dir)
-        server._connector_caller = _caller_raise(RuntimeError("kaput"))
+        # 钉 win32 分支（与上方 host_success_windows 同构）：失败面按 startfile 路径断言
+        monkeypatch.setattr(server.sys, "platform", "win32")
+        monkeypatch.setattr(server.os, "startfile", boom, raising=False)
         status, body = _decode_http(
             _call(
                 server,
@@ -1173,10 +1188,9 @@ class TestIdeOpenWorkspace:
         assert body["success"] is False
         assert "打开工作空间失败" in body["message"]
 
-    def test_open_in_system_file_manager_missing_dir(self, server: Any) -> None:
-        """目录不存在 → /open 公开面如实失败，不假成功。"""
+    def test_open_workspace_missing_dir_reports_failure(self, server: Any) -> None:
+        """坐标在目录不在 → /open 公开面如实失败，不假成功。"""
         _inject_workspace_path(server, "/no/such/dir/anywhere")
-        server._connector_caller = _caller_no_connector()
         status, body = _decode_http(
             _call(
                 server,
@@ -1186,7 +1200,7 @@ class TestIdeOpenWorkspace:
         )
         assert status == 200
         assert body["success"] is False
-        assert "无法启动系统文件管理器" in body["message"]
+        assert "打开工作空间失败" in body["message"]
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1239,13 +1253,23 @@ class TestDispatch:
         assert status == 200
         assert body["success"] is True
 
-    def test_resolve_workspace_path_from_task_metadata(self, server: Any, ws_dir: str) -> None:
-        """镜像通道经公开 HTTP 面解析：ws_meta.path（归属一致）→ 文件树落在该目录。"""
-        task_svc = _FakeTaskService()
-        task_svc.tasks["c1"] = _FakeTask(
-            "c1", metadata={"user_id": "u-1", "ws_meta": {"path": ws_dir}}
+    def test_resolve_workspace_path_from_state_ws_meta(self, server: Any, ws_dir: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        """state 通道经公开 HTTP 面解析：行内 task.ws_meta（归属一致）→ 文件树
+        落在该目录（任务行"任务 init 即写"契约的唯一读面）。"""
+        ws_mod = sys.modules["workspace_service"]
+        monkeypatch.setattr(
+            ws_mod,
+            "_state_reader",
+            lambda: [
+                {
+                    "pipeline_id": "c1",
+                    "task.id": "c1",
+                    "task.submitted_by": "u-1",
+                    "task.ws_meta": {"mode": "plain", "path": ws_dir},
+                }
+            ],
+            raising=False,
         )
-        _inject_task_service(task_svc)
         (Path(ws_dir) / "meta.txt").write_text("x", encoding="utf-8")
         status, body = _decode_http(_call(
             server,
@@ -1254,12 +1278,15 @@ class TestDispatch:
             headers=_auth("u-1"),
         ))
         assert status == 200
-        assert {n["name"] for n in body["tree"]} == {"meta.txt"}
+        assert {n["name"] for n in body["entries"]} == {"meta.txt"}
 
-    def test_resolve_workspace_path_task_missing(self, server: Any) -> None:
-        """任务不存在 → 解析为无工作空间（公开面 no_workspace，不误报坐标）。"""
-        task_svc = _FakeTaskService()
-        _inject_task_service(task_svc)
+    def test_resolve_workspace_path_task_missing(self, server: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        """state 无该任务行（行在场但不匹配）→ 解析为无工作空间
+        （公开面 no_workspace，不误报坐标）。"""
+        ws_mod = sys.modules["workspace_service"]
+        monkeypatch.setattr(
+            ws_mod, "_state_reader", lambda: [{"pipeline_id": "other"}], raising=False
+        )
         status, body = _decode_http(_call(
             server,
             path="/ext/workspace_service/workspaces/ghost/file-tree",
@@ -1269,9 +1296,8 @@ class TestDispatch:
         assert status == 200
         assert body["workspace_status"] == "no_workspace"
 
-    def test_resolve_workspace_path_service_none(self, server: Any) -> None:
-        """task service 不可用 → 解析为无工作空间（公开面 no_workspace）。"""
-        _inject_task_service(None)  # type: ignore[arg-type]
+    def test_resolve_workspace_path_reader_not_injected(self, server: Any) -> None:
+        """state 读面未注入（能力未授予）→ 解析为无工作空间（无坐标，无兜底）。"""
         status, body = _decode_http(_call(
             server,
             path="/ext/workspace_service/workspaces/c1/file-tree",
@@ -1280,6 +1306,29 @@ class TestDispatch:
         ))
         assert status == 200
         assert body["workspace_status"] == "no_workspace"
+
+    def test_mirror_channel_retired_state_absent_no_workspace(
+        self, server: Any, ws_dir: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """镜像通道删除回归：task_service 镜像有任务（含 ws_meta/user_id）而
+        state 无行 → no_workspace，不再有镜像兜底（双写歧路退役）。"""
+        task_svc = _FakeTaskService()
+        task_svc.tasks["c1"] = _FakeTask(
+            "c1", metadata={"user_id": "u-1", "ws_meta": {"path": ws_dir}}
+        )
+        _inject_task_service(task_svc)
+        ws_mod = sys.modules["workspace_service"]
+        monkeypatch.setattr(ws_mod, "_state_reader", lambda: [], raising=False)
+        (Path(ws_dir) / "mirror.txt").write_text("x", encoding="utf-8")
+        status, body = _decode_http(_call(
+            server,
+            path="/ext/workspace_service/workspaces/c1/file-tree",
+            method="GET",
+            headers=_auth("u-1"),
+        ))
+        assert status == 200
+        assert body["workspace_status"] == "no_workspace"
+        assert body["entries"] == []
 
     def test_resolve_workspace_path_local(self, server: Any) -> None:
         """_local → 仓库根：公开面可读取仓库根标志文件 AGENTS.md（内容非空）。"""
@@ -1294,15 +1343,16 @@ class TestDispatch:
         assert body["success"] is True
         assert body["content"]
 
-    def test_resolve_workspace_path_exception_degrades(self, server: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        """task service 抛异常 → 公开面降级为 no_workspace（不 500）。"""
-        mod = types.ModuleType("tasks.service_access")
+    def test_resolve_workspace_path_state_reader_error_no_workspace(
+        self, server: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """state 读面抛异常 → 公开面降级为 no_workspace（不 500，无兜底）。"""
+        ws_mod = sys.modules["workspace_service"]
 
-        def gts() -> Any:
-            raise RuntimeError("task service broke")
+        def boom() -> list[dict[str, Any]]:
+            raise RuntimeError("state read broke")
 
-        mod.get_task_service = gts  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "tasks.service_access", mod)
+        monkeypatch.setattr(ws_mod, "_state_reader", boom, raising=False)
         status, body = _decode_http(_call(
             server,
             path="/ext/workspace_service/workspaces/c1/file-tree",
@@ -1319,15 +1369,15 @@ class TestDispatch:
 
 
 class TestWorkspaceOwnershipGate:
-    """_resolve_workspace_path 归属闸（U6）：请求方与目标任务归属不一致 → 404
+    """工作区解析归属闸（U6）：请求方与目标任务归属不一致 → 404
     （防存在性探测）；任务域目标缺归属元数据 fail-closed 拒绝并说明原因（存量
-    回填属运行时操作）；caller 未认证一律拒绝。各通道归属权威字段：
-    - _local 特例：项目根本地工作区（部署级共享，无单任务归属）→ 要求认证；
-    - 项目登记：ProjectModel.submitted_by；
-    - state 聚合行：任务行（task.id / task.submitted_by / task.ws_meta 任一
-      在场）按 task.submitted_by（task_submit 出生协议写全）闸；会话域行
-      （无任何任务身份标记）坐标即服务端 state 真值，认证 caller 可达；
-    - 任务镜像：metadata.user_id（task_submit _build_metadata 落账）。
+    回填属运行时操作）；caller 未认证一律拒绝。各入口归属权威字段：
+    - _local 显式入口：项目根本地工作区（部署级共享，无单任务归属）→ 要求认证；
+    - 项目登记显式入口：ProjectModel.submitted_by；
+    - state 聚合行（任务/会话管道 id 唯一通道）：任务行（task.id /
+      task.submitted_by / task.ws_meta 任一在场）按 task.submitted_by
+      （task_submit 出生协议写全）闸；会话域行（无任何任务身份标记）坐标即
+      服务端 state 真值，认证 caller 可达；task_service 镜像通道已删。
     """
 
     def _seed_state_rows(self, monkeypatch: pytest.MonkeyPatch, rows: list[dict[str, Any]]) -> None:
@@ -1474,12 +1524,9 @@ class TestWorkspaceOwnershipGate:
         self, server: Any, ws_dir: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """项目登记行归属 = submitted_by：创建者放行，其他用户 404。"""
-        import project_registry as projects_mod
-
-        monkeypatch.setattr(
-            projects_mod, "load_project_paths", lambda: {"proj-1": ws_dir}
+        _inject_project_registry(
+            monkeypatch, server, paths={"proj-1": ws_dir}, submitted_by={"proj-1": "u-1"}
         )
-        _inject_project_registry({"proj-1": "u-1"})
         (Path(ws_dir) / "note.md").write_text("proj", encoding="utf-8")
         status, body = _decode_http(_call(
             server,
@@ -1503,12 +1550,9 @@ class TestWorkspaceOwnershipGate:
         self, server: Any, ws_dir: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """登记行 submitted_by 为空（存量登记）→ fail-closed 404 并说明原因。"""
-        import project_registry as projects_mod
-
-        monkeypatch.setattr(
-            projects_mod, "load_project_paths", lambda: {"proj-legacy": ws_dir}
+        _inject_project_registry(
+            monkeypatch, server, paths={"proj-legacy": ws_dir}, submitted_by={"proj-legacy": ""}
         )
-        _inject_project_registry({"proj-legacy": ""})
         status, body = _decode_http(_call(
             server,
             path="/ext/workspace_service/workspaces/proj-legacy/file-tree",
@@ -1518,62 +1562,35 @@ class TestWorkspaceOwnershipGate:
         assert status == 404
         assert "归属" in json.dumps(body, ensure_ascii=False)
 
-    # ── 任务镜像通道（TaskService） ──
+    # ── 镜像通道退役（task_service 镜像删除回归） ──
 
-    def test_mirror_channel_owner_allowed_other_denied(
+    def test_mirror_owner_no_longer_grants_access(
         self, server: Any, ws_dir: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """镜像任务归属 = metadata.user_id（task_submit 落账）：创建者放行，
-        其他用户 404。"""
+        """镜像通道删除回归：state 无行时，镜像归属一致（metadata.user_id 命中）
+        也不再放行——坐标以 state 为唯一真相源，file-tree 如实 no_workspace。"""
         task_svc = _FakeTaskService()
         task_svc.tasks["c1"] = _FakeTask(
             "c1", metadata={"user_id": "u-1", "ws_meta": {"path": ws_dir}}
         )
         _inject_task_service(task_svc)
-        (Path(ws_dir) / "note.md").write_text("mirror", encoding="utf-8")
-        status, body = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/c1/file-content",
-            method="GET",
-            query={"path": "note.md"},
-            headers=_auth("u-1"),
-        ))
-        assert status == 200
-        assert body["content"] == "mirror"
-        status, _ = _decode_http(_call(
-            server,
-            path="/ext/workspace_service/workspaces/c1/file-content",
-            method="GET",
-            query={"path": "note.md"},
-            headers=_auth("u-2"),
-        ))
-        assert status == 404
-
-    def test_mirror_channel_missing_owner_fail_closed(
-        self, server: Any, ws_dir: str
-    ) -> None:
-        """镜像任务 metadata 缺 user_id（存量镜像）→ fail-closed 404 并说明原因。"""
-        task_svc = _FakeTaskService()
-        task_svc.tasks["c1"] = _FakeTask(
-            "c1", metadata={"ws_meta": {"path": ws_dir}}
-        )
-        _inject_task_service(task_svc)
+        self._seed_state_rows(monkeypatch, [])
+        (Path(ws_dir) / "mirror.md").write_text("mirror", encoding="utf-8")
         status, body = _decode_http(_call(
             server,
             path="/ext/workspace_service/workspaces/c1/file-tree",
             method="GET",
             headers=_auth("u-1"),
         ))
-        assert status == 404
-        assert "归属" in json.dumps(body, ensure_ascii=False)
+        assert status == 200
+        assert body["workspace_status"] == "no_workspace"
+        assert body["entries"] == []
 
     def test_unknown_id_no_channel_hit_still_no_workspace(
         self, server: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """全通道未命中维持既有 None 语义（无工作区坐标），不做 404 误报。"""
+        """state 行未命中维持既有 None 语义（无工作区坐标），不做 404 误报。"""
         self._seed_state_rows(monkeypatch, [])
-        task_svc = _FakeTaskService()
-        _inject_task_service(task_svc)
         status, body = _decode_http(_call(
             server,
             path="/ext/workspace_service/workspaces/ghost/file-tree",
@@ -1619,36 +1636,6 @@ class TestStateReaderInjection:
         # 卸载后工作空间工具回到未初始化行为（服务不再可用）
         _run(server._on_unload({}))
         assert _run(server.workspace_get_or_create("t1"))["success"] is False
-
-
-class TestConnectorCallerInjection:
-    """_on_load 的 connector.execute 正门绑定（tool-executor 句柄）。"""
-
-    def test_on_load_binds_connector_caller(self, server: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        """tool-executor 句柄就绪 → caller 绑定，经 tool-executor.invoke 直达
-        connectors_service 的 connector.execute（显式 plugin_id，同 isolation 惯例）。"""
-
-        class _FakeHandle:
-            async def call(self, method: str, params: dict, timeout: float | None = None) -> dict:  # noqa: ARG002
-                assert method == "invoke"
-                assert params["tool_name"] == "connector.execute"
-                assert params["plugin_id"] == "connectors_service"
-                return {"success": True, "connector_type": "fake_vscode"}
-
-        monkeypatch.setitem(server.plugin._capabilities, "tool-executor", _FakeHandle())
-        _run(server._on_load({}))
-        try:
-            assert server._connector_caller is not None
-            resp = _run(server._connector_caller("open_file", {"file_path": "a.py"}))
-            assert resp["success"] is True
-        finally:
-            _run(server._on_unload({}))
-        assert server._connector_caller is None
-
-    def test_on_load_without_tool_executor_degrades(self, server: Any) -> None:
-        """能力未授予 → caller 保持 None（IDE 打开面如实降级），不抛。"""
-        _run(server._on_load({}))
-        assert server._connector_caller is None
 
 
 class TestToolsStillRegistered:
@@ -1727,9 +1714,11 @@ class TestEmptyAndOversizedPayloads:
         assert (Path(ws_dir) / "x.md").exists()
 
     def test_read_file_too_large(self, server: Any, ws_dir: str) -> None:
+        """读面不设大小上限（用户裁定 2026-10-24：打开面不限，写面仍有 10MB）。"""
         _inject_workspace_path(server, ws_dir)
         huge = Path(ws_dir) / "huge.txt"
-        huge.write_text("x" * (10 * 1024 * 1024 + 1), encoding="utf-8")
+        payload = "x" * (10 * 1024 * 1024 + 1)
+        huge.write_text(payload, encoding="utf-8")
         status, body = _decode_http(_call(
             server,
             path="/ext/workspace_service/workspaces/t1/file-content",
@@ -1737,8 +1726,9 @@ class TestEmptyAndOversizedPayloads:
             query={"path": "huge.txt"},
         ))
         assert status == 200
-        assert body["success"] is False
-        assert "文件过大" in body["message"]
+        assert body["success"] is True, "读面无大小上限（打开面不限）"
+        assert body["size"] == len(payload)
+        assert body["has_more"] is False
 
     def test_save_file_too_large(self, server: Any, ws_dir: str) -> None:
         _inject_workspace_path(server, ws_dir)
@@ -1780,7 +1770,8 @@ class TestEmptyAndOversizedPayloads:
         assert body["success"] is True
 
     def test_read_relative_path_no_workspace_escape(self, server: Any) -> None:
-        """无工作空间 + 相对路径越出项目根 → 拒绝。"""
+        """无工作空间 + 相对路径越出项目根 → 锚定定位不拒绝（读面无越界守卫）；
+        目标不存在 → 按文件缺失如实上报，不再是「超出工作空间范围」。"""
         _inject_workspace_path(server, None)
         status, body = _decode_http(_call(
             server,
@@ -1790,7 +1781,8 @@ class TestEmptyAndOversizedPayloads:
         ))
         assert status == 200
         assert body["success"] is False
-        assert "超出工作空间范围" in body["message"]
+        assert "文件不存在" in body["message"], "读面不做越界拒绝，缺失才报错"
+        assert "超出工作空间范围" not in body["message"]
 
 
 class TestSiblingDirectoryBypass:
@@ -1898,33 +1890,34 @@ class TestSiblingDirectoryBypass:
 
 
 class TestAbsolutePathBoundary:
-    """绝对路径分支撤豁免（U3）：绝对路径与相对路径同受工作空间边界守卫。
-
-    豁免不对称时绝对路径零守卫 = 任意文件读（agentos_kernel.db/.env/
-    跨任务工作区均在射程）；撤豁免后绝对路径仅在边界内放行，无工作空间时
-    以项目根为界，越界显式报错。
+    """绝对路径直读（用户裁定 2026-09-28 + 2026-10-24 延伸）：路径自足即直读，
+    不受工作空间/项目根边界拦截——本端点消费方是经内核 token 鉴权的前端用户
+    打开面（与本机编辑器打开文件同权）；agent 读链走 fs_tools 自有守卫不经此
+    端点。写面端点维持相对路径 + 锚定守卫不变。
     """
 
-    def test_read_oversized_file_denied(self, server: Any, ws_dir: str, tmp_path: Path) -> None:
-        """超限文件经任务工作空间绝对路径必须拒读（体积闸确定性探针）。
+    def test_read_absolute_kernel_db_direct_read(
+        self, server: Any, ws_dir: str, tmp_path: Path
+    ) -> None:
+        """agentos_kernel.db 形态的宿主文件绝对路径直读（打开面同权，无读黑名单）。
 
-        绝对路径直读无黑名单，唯一确定性闸位 = 10MB 体积闸（ADR
-        2026-09-28 file-content 绝对路径裁定）。原探针用项目根真实
-        agentos_kernel.db，依赖运行环境的文件锁定/体积偶然性，CI 纯净
-        checkout 无该文件——改用构造的超限文件钉同一「必拒」语义。
+        库文件自建（tmp_path）：agentos_kernel.db 是 gitignored 运行时产物，
+        依赖项目根恰有真库会让测试绑定开发机状态；被测契约是「任意宿主绝对
+        路径可直读」，与文件是否真为内核库无关，文件名保留库形态以钉场景。
         """
         _inject_workspace_path(server, ws_dir)
-        big = tmp_path / "oversized.bin"
-        big.write_bytes(b"\0" * (10 * 1024 * 1024 + 1))
+        db_path = tmp_path / "agentos_kernel.db"
+        payload = b"SQLite format 3\x00" + b"\x00" * 24
+        db_path.write_bytes(payload)
         status, body = _decode_http(_call(
             server,
             path="/ext/workspace_service/workspaces/t1/file-content",
             method="GET",
-            query={"path": str(big)},
+            query={"path": str(db_path)},
         ))
         assert status == 200
-        assert body["success"] is False, "超 10MB 体积闸必拒"
-        assert "过大" in body.get("message", ""), "拒绝原因应来自体积闸"
+        assert body["success"] is True, "绝对路径直读：内核库与用户本机文件同权"
+        assert body["size"] == len(payload)
 
     def test_read_absolute_sibling_file_allowed(self, server: Any, ws_dir: str, tmp_path: Path) -> None:
         """工作空间外普通文件绝对路径读 = 放行（读黑名单制默认全放，
@@ -2070,82 +2063,6 @@ class TestEntryDefensiveBranches:
         assert "目标路径超出工作空间范围" in body["message"]
 
 
-class TestSystemFileManager:
-    """平台分派经公开 /open 面验证：子进程边界记录拉起命令（外部依赖）。"""
-
-    def _open_via_http(self, server: Any) -> tuple[int, dict[str, Any]]:
-        return _decode_http(
-            _call(
-                server,
-                path="/ext/workspace_service/workspaces/t1/open",
-                method="POST",
-            )
-        )
-
-    def test_open_in_system_file_manager_win32(
-        self, tmp_path: Path, server: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        d = tmp_path / "openme"
-        d.mkdir()
-        _inject_workspace_path(server, str(d))
-        server._connector_caller = _caller_no_connector()
-        calls: list[list[str]] = []
-        monkeypatch.setattr(server.subprocess, "Popen", calls.append)
-        monkeypatch.setattr(server.sys, "platform", "win32")
-        status, body = self._open_via_http(server)
-        assert status == 200
-        assert body["success"] is True
-        assert calls
-        assert calls[0][0] == "explorer"
-
-    def test_open_in_system_file_manager_darwin(
-        self, tmp_path: Path, server: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        d = tmp_path / "openme"
-        d.mkdir()
-        _inject_workspace_path(server, str(d))
-        server._connector_caller = _caller_no_connector()
-        calls: list[list[str]] = []
-        monkeypatch.setattr(server.subprocess, "Popen", calls.append)
-        monkeypatch.setattr(server.sys, "platform", "darwin")
-        status, body = self._open_via_http(server)
-        assert status == 200
-        assert body["success"] is True
-        assert calls[0][0] == "open"
-
-    def test_open_in_system_file_manager_linux(
-        self, tmp_path: Path, server: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        d = tmp_path / "openme"
-        d.mkdir()
-        _inject_workspace_path(server, str(d))
-        server._connector_caller = _caller_no_connector()
-        calls: list[list[str]] = []
-        monkeypatch.setattr(server.subprocess, "Popen", calls.append)
-        monkeypatch.setattr(server.sys, "platform", "linux")
-        status, body = self._open_via_http(server)
-        assert status == 200
-        assert body["success"] is True
-        assert calls[0][0] == "xdg-open"
-
-    def test_open_in_system_file_manager_popen_error(
-        self, tmp_path: Path, server: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        d = tmp_path / "openme"
-        d.mkdir()
-        _inject_workspace_path(server, str(d))
-        server._connector_caller = _caller_no_connector()
-
-        def boom(*_a: Any, **_k: Any) -> Any:
-            raise OSError("no explorer")
-
-        monkeypatch.setattr(server.subprocess, "Popen", boom)
-        status, body = self._open_via_http(server)
-        assert status == 200
-        assert body["success"] is False
-        assert "无法启动系统文件管理器" in body["message"]
-
-
 class TestWorkspaceToolsSuccess:
     def test_get_or_create_tool_success(self, server: Any) -> None:
         _run(server._on_load({}))
@@ -2173,7 +2090,7 @@ class TestWorkspaceToolsSuccess:
         (tmp_path / "f.txt").write_text("x", encoding="utf-8")
         result = _run(server.workspace_get_file_tree("t1", base_path=str(tmp_path)))
         assert result["success"] is True
-        assert {n["name"] for n in result["tree"]} == {"f.txt"}
+        assert {n["name"] for n in result["entries"]} == {"f.txt"}
 
     def test_get_file_tree_tool_uninitialized(self, server: Any) -> None:
         # 全新加载的 server 尚未 on_load，服务天然未初始化

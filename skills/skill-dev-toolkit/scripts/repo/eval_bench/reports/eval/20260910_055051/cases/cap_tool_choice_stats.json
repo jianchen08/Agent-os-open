@@ -1,0 +1,88 @@
+{
+  "case_id": "cap_tool_choice_stats",
+  "category": "capability",
+  "passed": false,
+  "elapsed_seconds": 326.1,
+  "session_id": "thread-1ae0dca2-8841-419a-8288-221488ddcbcf",
+  "pipeline_ids": [
+    "1025fd7f78a9",
+    "784680fca148"
+  ],
+  "settled": false,
+  "dispatches": [
+    {
+      "terminal": "stream_end",
+      "pipeline_id": "784680fca148",
+      "interactions": [],
+      "event_types": [
+        "pending_inputs_changed",
+        "pending_inputs_changed",
+        "stream_start",
+        "stream_end"
+      ]
+    }
+  ],
+  "approval": {
+    "requests_seen": 0,
+    "approved": 0,
+    "denied": 0,
+    "response_errors": []
+  },
+  "metrics": {
+    "pipelines": 2,
+    "iterations_total": 14,
+    "error_steps": 0,
+    "timeout_steps": 0,
+    "tool_calls": 6,
+    "tool_retries": 0,
+    "tool_names": [],
+    "tool_call_counts": {},
+    "task_statuses": [
+      "pending",
+      null
+    ],
+    "all_settled": false,
+    "any_failed": false,
+    "by_model": {
+      "MiniMax-M3": {
+        "input": 110191,
+        "output": 1386,
+        "cached": 66552,
+        "total": 111577
+      },
+      "glm-5.3-flash": {
+        "input": 9125,
+        "output": 432,
+        "cached": 0,
+        "total": 9557
+      }
+    },
+    "tokens_total": 121134
+  },
+  "assertions": [
+    {
+      "type": "settled",
+      "passed": false,
+      "detail": "管道未收敛（挂起/超时）"
+    },
+    {
+      "type": "no_failed_task",
+      "passed": true,
+      "detail": "无 failed 任务"
+    },
+    {
+      "type": "file_json_field",
+      "passed": true,
+      "detail": "files 期望 30 实得 30"
+    },
+    {
+      "type": "file_json_field",
+      "passed": true,
+      "detail": "total_lines 期望 7457 实得 7457"
+    }
+  ],
+  "failed_assertions": [
+    "settled"
+  ],
+  "reply_excerpt": "好哒～任务已经顺利派发出去啦～ 🎉\n\n**任务信息小结**：\n- **任务 ID**：`1025fd7f78a9`\n- **执行者**：`general_agent`\n- **目标**：统计 `config/agents` 目录（含子目录）下所有 `.yaml` 文件的文件数和文本行数合计\n- **产出**：`eval_stats.json`，格式为 `{\"files\": 文件数, \"total_lines\": 总行数}`，写入你指定的会话目录\n- **验收**：文件检查已配置好，会自动确认 JSON 文件生成且内容符合格式\n\n现在任务正在后台执行中，等它跑完我会第一时间收到通知，到时候把统计结果报给你哦～ 你先歇一会儿，有我在盯着呢 😊"
+}

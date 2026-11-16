@@ -260,6 +260,7 @@ export const highContrastTheme: ThemeConfig = {
 
   effects: {
     glassmorphism: false,
+    messageGlass: false,
     animations: false,
     transitionDuration: 0,
     transitionEasing: 'linear',

@@ -11,7 +11,10 @@ import { forceReloadSessions, readSessions } from '@/hooks/queries/useSessionsQu
 import { useSessionThemeScope } from '@/hooks/useSessionThemeScope'
 import { type LLMDefaults } from '@/services/api/config'
 import { syncModeThemeForSession } from '@/services/modeSessionBinder'
+import { syncPluginStylesForSession } from '@/services/pluginStyles'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { useAgentTabStore } from '@/stores/agentTabStore'
+import { useChatInputStore } from '@/stores/chatInputStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useSessionStore } from '@/stores/sessionStore'
@@ -19,6 +22,7 @@ import {
   useThinkingModeStore,
   useExplicitThinkingStrength,
 } from '@/stores/thinkingModeStore'
+import { useModelSelectStore, useExplicitModelSelect } from '@/stores/modelSelectStore'
 import { useUIStore } from '@/stores/uiStore'
 import { useVotingStore } from '@/stores/votingStore'
 import { type ThinkingStrength } from '@/types/thinkingMode'
@@ -30,6 +34,7 @@ import { MessageList } from './MessageList'
 import { PendingInputQueueBar } from './PendingInputQueueBar'
 import { ReferenceSelectionRow } from './ReferenceSelectionRow'
 import { VotingPanel } from './VotingPanel'
+import { ChatFloatingLayer } from './ChatFloatingLayer'
 import type { ChatContainerProps } from './types'
 import type { Message } from '@/types/models'
 
@@ -75,9 +80,10 @@ function ActiveVotingPanels({ sessionId }: { sessionId: string }) {
   )
 }
 
-/** 主 Tab 显示名固定"主管道"（agent 身份在对话栏 header 展示），
- *  不随 agentName 变化；子 Tab 显示任务标题。 */
-const MAIN_TAB_NAME = '主管道'
+/** 主标签名回落：主标签现以会话标题为名（agentTabStore.buildMainTab 建立，
+ *  改名经 sessionListStore.renameSession 同步），仅当标签名缺失时兜底显示
+ *  agent 名「灵汐」（与新建会话默认标题同源；内部词汇不进用户可见面）。 */
+const MAIN_TAB_NAME = '灵汐'
 
 /** 将 agentTabStore 中的 Tab 数据映射为 AgentTabBar 组件所需格式 */
 function mapStoreTabsToBarFormat(
@@ -86,7 +92,7 @@ function mapStoreTabsToBarFormat(
   unreadCounts: Record<string, number>,
 ) {
   return storeTabs.map((tab) => {
-    const name = tab.agentLevel === 1 ? MAIN_TAB_NAME : tab.agentName
+    const name = tab.agentLevel === 1 ? tab.agentName || MAIN_TAB_NAME : tab.agentName
     return {
       id: tab.id,
       name,
@@ -108,6 +114,7 @@ export const ChatContainer = ({
   isLoading = false,
   onSendMessage,
   onStopGenerate,
+  onForceSendPending,
   className = '',
   hasMoreMessages = false,
   isLoadingMoreMessages = false,
@@ -142,18 +149,19 @@ export const ChatContainer = ({
   })
 
   /**
-   * LLM 配置（共享 query 缓存，queryKeys.llmConfig）：仅消费模型显示 tiers
-   * （P8 分级键 → 具体模型名）。挂载期一次性快照（useEffect+useState）会在
-   * 设置页改配置后过期——输入框兜底模型名随缓存更新热更新（2026-09-28 批次 C）。
-   * 失败降级：tiers 缺失时 resolveModelDisplayName 原样返回键名，一次性提示。
+   * LLM 配置（共享 query 缓存，queryKeys.llmConfig）：模型显示 tiers 与思考
+   * 强度反向映射同源消费。挂载期一次性快照（useEffect+useState）会在设置页
+   * 改配置后过期——输入框兜底模型名随缓存更新热更新（2026-09-28 批次 C）。
+   * 失败降级：tiers 缺失时 resolveModelDisplayName 原样返回键名，models 缺失
+   * 时思考强度回退默认档位，一次性提示。
    */
   const { data: llmConfig, isError: llmConfigError } = useLlmConfigQuery()
   const llmDefaults: LLMDefaults | null = llmConfig?.defaults ?? null
   useEffect(() => {
     if (!llmConfigError) return
     notifyDegradedOnce('chat-llm-config', {
-      title: 'LLM 配置获取失败',
-      message: '模型分级信息不可用，已回退显示原始模型键',
+      title: '模型配置获取失败',
+      message: '模型列表与思考档位暂不可用，已按默认配置显示',
     })
   }, [llmConfigError])
 
@@ -170,9 +178,12 @@ export const ChatContainer = ({
     return ''
   }, [activeTab?.agentId, pipelineAgentName, agents])
 
-  /** P8: 分级键（large/medium/small）→ 具体模型名；具体模型名原样返回 */
+  /** P8: 分级键（large/medium/small）→ 具体模型名；具体模型名原样返回。
+   *  agent 头未配置 model（rawModelName 空）→ 兜底系统默认对话模型
+   *  （llm.yaml defaults.chat，注册表键形态）；llm 配置整体缺失 → 空串
+   *  （选择器空态占位，不发明模型名）。 */
   const effectiveModelName = useMemo(
-    () => resolveModelDisplayName(rawModelName, llmDefaults?.tiers),
+    () => resolveModelDisplayName(rawModelName || llmDefaults?.chat || '', llmDefaults?.tiers),
     [rawModelName, llmDefaults],
   )
 
@@ -208,6 +219,13 @@ export const ChatContainer = ({
     void syncModeThemeForSession(sessionId)
   }, [sessionId])
 
+  /** 插件 CSS 会话域门重同步（ADR 2026-10-14-message-card-body-form）：带 modes
+   *  声明的 client_styles 随活跃会话 modeBinding 进出生效域（如模式会话换装流式
+   *  光标，切走即移除）；无 modes 声明不受影响（既有全局装饰语义零变化）。 */
+  useEffect(() => {
+    syncPluginStylesForSession(contributionRegistry.getClientStyles(), sessionId)
+  }, [sessionId])
+
   /** 判断是否为子 Tab（L2/L3）激活状态 */
   const isSubTabActive = activeTab != null && activeTab.agentLevel !== 1
   const isSubTabFinished = isSubTabActive && (activeTab?.status === 'completed' || activeTab?.status === 'failed')
@@ -221,12 +239,37 @@ export const ChatContainer = ({
    *  生成态再并上 runs 快照的 running 真值（30s 轮询 + WS 增量同源），
    *  停止按钮/输入框禁用据此恢复。 */
   const currentTabPipelineId = activeTab?.pipelineRunId || ''
-  const streamingActive = usePipelineMessageStore(
-    (s) => (currentTabPipelineId ? (s.streamingState[currentTabPipelineId]?.isStreaming ?? false) : false),
-  )
   const { data: runsSnapshot = {} } = usePipelineRunsQuery()
+  // 轮次收尾快照：run 结束但链尾 drain 还要继续消费（queue_depth>0）→ 仍算
+  // 运行中（pipeline_round_finished 携带队列深度，前端不再提前回到空闲）。
+  const roundQueueDepth = usePipelineMessageStore((s) =>
+    currentTabPipelineId ? (s.roundQueueDepthByPipeline?.[currentTabPipelineId] ?? 0) : 0,
+  )
+  // 停止受理中：run_status 已变 suspended 但引擎长步骤未退出 → 保持「停止中」，
+  // 直到 run 级终止事件/下一轮 stream_start 清除。
+  const stoppingActive = usePipelineMessageStore((s) =>
+    currentTabPipelineId ? (s.stoppingByPipeline?.[currentTabPipelineId] ?? false) : false,
+  )
+  // 生成态单一真值：runs 快照（stream_start 实时写 running）+ 两个收尾快照。
+  // 原 streamingActive 双源已删——stream_start 已同步 runs cache，重复订阅只会
+  // 制造两套状态不一致。
+  // stopping 兜底：终止事件丢失时 runs 轮询到达终态也要解除「停止中」，
+  // 不能靠 pipeline_round_finished 单通道（断线重放溢出即永久停止中）。
+  const runStatus = runsSnapshot[currentTabPipelineId]?.status
+  const stoppingLive =
+    stoppingActive &&
+    runStatus !== 'completed' &&
+    runStatus !== 'failed' &&
+    runStatus !== 'cancelled'
   const effectiveIsGenerating =
-    streamingActive || runsSnapshot[currentTabPipelineId]?.status === 'running'
+    runStatus === 'running' || roundQueueDepth > 0 || stoppingLive
+
+  /** 发送在途：当前标签管道有已受理未落定的发送（chatInputStore 登记，气泡认领/
+   *  队列条出现/5s 落定超时/失败判死四口撤下，2026-11-04 落定语义重定义）→
+   *  发送按钮转圈、输入锁定 */
+  const sendInFlight = useChatInputStore((s) =>
+    currentTabPipelineId ? (s.sendInFlightByPipeline[currentTabPipelineId]?.length ?? 0) > 0 : false,
+  )
 
   /**
    * 待定位消息 → MessageList 消费目标：仅当跳转目标管道正是当前激活管道时透传。
@@ -239,9 +282,8 @@ export const ChatContainer = ({
   )
 
 
-  /** 思考选择值（宿主只持值通道，选项归声明数据源 fieldsUri 下发）：
-   *  显示值 = 标签显式记忆（∈ 下发选项时生效，换模型旧记忆自动失效）
-   *  ?? 端点当前参数组 ?? 未选择（''）。 */
+  /** 思考选择：显式记忆（∈ 下发选项时生效）?? 端点当前参数组（反向推断
+   *  真值源在后端 current，前端零推断零映射）。 */
   const explicitThinkingStrength = useExplicitThinkingStrength()
   const { data: thinkingLevelsData } = useThinkingLevelsQuery(effectiveModelName)
   const activeThinkingStrength: ThinkingStrength = useMemo(() => {
@@ -255,10 +297,22 @@ export const ChatContainer = ({
   }, [explicitThinkingStrength, thinkingLevelsData])
   const setThinkingStrength = useThinkingModeStore((s) => s.setStrength)
 
+  /** 显式模型选择（标签级记忆）：'' = 未选择（帧不带 model_id，跟随配置）。
+   *  随消息透传 → 内核按 widget 声明 frame_field 名单合成 state overlay →
+   *  llm_core 解析链首位（最高优先级覆盖管道配置）。 */
+  const explicitModelId = useExplicitModelSelect()
+  const setModelId = useModelSelectStore((s) => s.setModel)
+  const handleModelIdChange = useCallback(
+    (modelIdValue: string) => {
+      const tabId = useAgentTabStore.getState().activeTabId
+      if (tabId) setModelId(tabId, modelIdValue)
+    },
+    [setModelId],
+  )
+
   /**
-   * 切换思考档位：本地标签级记忆（localStorage，随路由联动）。实际参数由
-   * 消息级 thinking_strength 路由（llm_core 按 thinking_strength_params 解析），
-   * 无需后端伴随调用。
+   * 消息级 thinking_strength 路由（llm_core 按 thinking_strength_params 解析）：
+   * 选择记入标签级记忆（localStorage，随路由联动），随消息透传——零后端参谋调用。
    */
   const handleThinkingStrengthChange = useCallback(
     (strength: ThinkingStrength) => {
@@ -349,7 +403,7 @@ export const ChatContainer = ({
       // 聊天区背景由 .theme-chat-area 类消费（--chat-bg-image/-color 双通道）：
       // bg-[var(--chat-bg)] 生成 background-color 位，渐变主题（deep-space 等）
       // 塞进去会整条失效→聊天区透明→全屏纹理层穿透内容区
-      className={`theme-chat-area flex h-full min-h-0 flex-col overflow-hidden ${className}`}
+      className={`theme-chat-area relative flex h-full min-h-0 flex-col overflow-hidden ${className}`}
       data-testid="chat-container"
       data-session-id={sessionId}
       // 聊天容器状态（我方词汇）：empty=空态欢迎页 / active=对话态。
@@ -357,6 +411,9 @@ export const ChatContainer = ({
       // （位置映射，不给组件贴 DSH 名字）
       data-chat-state={filteredMessages.length > 0 ? 'active' : 'empty'}
     >
+      {/* 通用悬浮挂载槽（2026-10-24 用户裁定：位置按插件声明 anchor 定位，
+          本槽零业务知识；无 anchor 声明时零渲染） */}
+      <ChatFloatingLayer />
       {/* 对话标签行：桌面 portal 进布局顶带槽位（chat-top-band-tabs）——
           顶带是唯一拖拽容器，标签行作为其 DOM 子元素自动获得 no-drag 洞；
           槽位不存在（移动端/无顶带形态）回退内联渲染。 */}
@@ -373,7 +430,16 @@ export const ChatContainer = ({
           tabsSlot,
         )}
       {showTabBar && !tabsSlot && (
-        <div className="flex h-10 shrink-0 items-center justify-center" data-testid="chat-session-header">
+        <div
+          className="flex shrink-0 items-center justify-center"
+          style={{
+            // 高度=内容行 40px + 安全区：固定 h-10 配 border-box 时状态栏
+            // 内边距会吃掉内容盒（负高度），flex 居中把标签 chip 顶进状态栏带
+            height: 'calc(2.5rem + var(--safe-area-top, 0px))',
+            paddingTop: 'var(--safe-area-top, 0px)',
+          }}
+          data-testid="chat-session-header"
+        >
           <div className="min-w-0">
             <AgentTabBar
               tabs={barTabs}
@@ -412,84 +478,102 @@ export const ChatContainer = ({
       {/* 输入区域 · Deep Space v2: 上边框 + 12px 内边距（P5: 通知中心已移至侧边栏唯一入口） */}
       <div
         className="relative shrink-0 border-t px-3 py-3"
-        style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}
+        style={{
+          borderColor: 'var(--ds-border-subtle)',
+          // 全屏沉浸下内容铺到手势条底下，输入区自行避让（桌面变量=0 不变）
+          paddingBottom: 'max(0.75rem, var(--safe-area-bottom, 0px))',
+        }}
         data-testid="chat-composer"
       >
-        {/* 引用选中镜像行（实时镜像：选中出现 / 取消消失；选中非空发送时
-            provider 域随消息注入引用；经注册缝渲染，壳不感知具体插件域）。
-            threadId 必须用 sessionId：内核 WS 绑定按 activeSessionId 注册
-            （sendActiveThread），用 activeTabId（main-<sessionId>）订阅会导致
-            事件单播查无绑定被丢弃——引用只随刷新显示。 */}
-        <ReferenceSelectionRow threadId={sessionId} />
-        {/* 待处理输入队列条（ADR-2026-08-26）：执行中发送的消息在此排队，
-            点击条目内联编辑/删除/清空；消费激活后进主消息流 */}
-        {currentTabPipelineId && (
-          <PendingInputQueueBar pipelineId={currentTabPipelineId} />
-        )}
-        {/* key 强制切换标签时重建 ChatInput，使每个标签的输入状态（text/attachments/pendingFiles）独立 */}
-        <ChatInput
-          key={`input-${activeTabId || sessionId}`}
-          draftKey={activeTabId || sessionId}
-          disabled={isSubTabFinished}
-          isGenerating={effectiveIsGenerating}
-          onSendMessage={(params) => {
-            if (isSubTabFinished) return false
-            // 管道 ID 单一来源：当前标签的 pipelineRunId（主标签=后端回填的主管道
-            // ID，子标签=sub_agent_created 事件下发的子管道 ID）。
-            // 主标签兜底：对话框预建会话在缓存重拉/事件回填竞态下 pipelineRunId
-            // 可能短暂为空——回退到会话主管道映射解析（pipelineIds[0]），
-            // 发送不再静默丢失；子标签不兜底（串管道风险）。
-            let pid = activeTab?.pipelineRunId
-            if (!pid && !isSubTabActive) {
-              const session = readSessions().find((s) => s.id === sessionId)
-              pid = (session && mainPipelineIdOf(session)) || ''
-            }
-            if (!pid) {
-              // 未受理显式提示 + 返回 false：ChatInput 保留输入与草稿（不再静默丢消息）
-              if (isSubTabActive) {
-                notifyDegradedOnce('chat-subtab-send-unsupported', {
-                  title: '子任务标签不支持发送',
-                  message: '请在主管道标签发送消息',
-                })
-              } else {
-                // 自愈（BUG-28）：主管道解析失败多为会话缓存陈旧/未就绪（列表拉取
-                // 失败、创建响应与列表重拉的竞态窗口）——强制重拉会话列表拿到权威
-                // 主管道后重建标签面，用户重试即可受理；不绕过受理协议硬发（无主管
-                // 道时硬发会把消息丢进空管道）。重拉失败一次性显式提示，不静默吞错。
-                void forceReloadSessions()
-                  .then(() => {
-                    // 用户已切走会话时不回写旧会话标签面（陈旧异步不得扰动当前视图）
-                    if (useAgentTabStore.getState().currentSessionId === sessionId) {
-                      initSessionTabs(sessionId)
-                    }
-                  })
-                  .catch((error) => {
-                    console.error('[ChatContainer] 会话列表强制重拉失败:', error)
-                    notifyDegradedOnce('chat-sessions-reload-failed', {
-                      title: '会话列表刷新失败',
-                      message: '会话主管道解析失败且自动重拉未成功，请检查连接后重试',
-                    })
-                  })
-                useNotificationStore.getState().addNotification({
-                  title: '会话管道未就绪',
-                  message: '会话管道未就绪，请稍候重试',
-                  priority: 'normal',
-                  category: 'error',
-                  isBlocking: false,
-                  autoDismissMs: 6000,
-                  sourceLabel: '前端',
-                })
+        {/* 输入区与消息列消费同一对话列宽（--chat-content-max-w）：宽视口下
+            输入框与上方消息同轴居中；窄于上限（移动端/分屏）零变化。 */}
+        <div className="mx-auto w-full max-w-[var(--chat-content-max-w)]">
+          {/* 引用选中镜像行（实时镜像：选中出现 / 取消消失；选中非空发送时
+              provider 域随消息注入引用；经注册缝渲染，壳不感知具体插件域）。
+              threadId 必须用 sessionId：内核 WS 绑定按 activeSessionId 注册
+              （sendActiveThread），用 activeTabId（main-<sessionId>）订阅会导致
+              事件单播查无绑定被丢弃——引用只随刷新显示。 */}
+          <ReferenceSelectionRow threadId={sessionId} />
+          {/* 待处理输入队列条（ADR-2026-08-26）：执行中发送的消息在此排队，
+              点击条目退回输入框/删除/清空/立即发送；消费激活后进主消息流 */}
+          {currentTabPipelineId && (
+            <PendingInputQueueBar
+              pipelineId={currentTabPipelineId}
+              onForceSend={
+                onForceSendPending
+                  ? (inputId) => onForceSendPending(currentTabPipelineId, inputId)
+                  : undefined
               }
-              return false
-            }
-            return onSendMessage({ ...params, pipelineId: pid })
-          }}
-          onStopGenerate={onStopGenerate}
-          enableThinkingMode={true}
-          modelName={effectiveModelName}
-          thinkingStrength={activeThinkingStrength}
-          onThinkingStrengthChange={handleThinkingStrengthChange}
-        />
+            />
+          )}
+          {/* key 强制切换标签时重建 ChatInput，使每个标签的输入状态（text/attachments/pendingFiles）独立 */}
+          <ChatInput
+            key={`input-${activeTabId || sessionId}`}
+            draftKey={activeTabId || sessionId}
+            disabled={isSubTabFinished}
+            isGenerating={effectiveIsGenerating}
+            sendInFlight={sendInFlight}
+            onSendMessage={(params) => {
+              if (isSubTabFinished) return false
+              // 管道 ID 单一来源：当前标签的 pipelineRunId（主标签=后端回填的主管道
+              // ID，子标签=sub_agent_created 事件下发的子管道 ID）。
+              // 主标签兜底：对话框预建会话在缓存重拉/事件回填竞态下 pipelineRunId
+              // 可能短暂为空——回退到会话主管道映射解析（pipelineIds[0]），
+              // 发送不再静默丢失；子标签不兜底（串管道风险）。
+              let pid = activeTab?.pipelineRunId
+              if (!pid && !isSubTabActive) {
+                const session = readSessions().find((s) => s.id === sessionId)
+                pid = (session && mainPipelineIdOf(session)) || ''
+              }
+              if (!pid) {
+                // 未受理显式提示 + 返回 false：ChatInput 保留输入与草稿（不再静默丢消息）
+                if (isSubTabActive) {
+                  notifyDegradedOnce('chat-subtab-send-unsupported', {
+                    title: '子任务标签不支持发送',
+                    message: '请回到会话第一个标签发送消息',
+                  })
+                } else {
+                  // 自愈（BUG-28）：主管道解析失败多为会话缓存陈旧/未就绪（列表拉取
+                  // 失败、创建响应与列表重拉的竞态窗口）——强制重拉会话列表拿到权威
+                  // 主管道后重建标签面，用户重试即可受理；不绕过受理协议硬发（无主管
+                  // 道时硬发会把消息丢进空管道）。重拉失败一次性显式提示，不静默吞错。
+                  void forceReloadSessions()
+                    .then(() => {
+                      // 用户已切走会话时不回写旧会话标签面（陈旧异步不得扰动当前视图）
+                      if (useAgentTabStore.getState().currentSessionId === sessionId) {
+                        initSessionTabs(sessionId)
+                      }
+                    })
+                    .catch((error) => {
+                      console.error('[ChatContainer] 会话列表强制重拉失败:', error)
+                      notifyDegradedOnce('chat-sessions-reload-failed', {
+                        title: '会话列表刷新失败',
+                        message: '会话数据暂不可用，请检查连接后重试',
+                      })
+                    })
+                  useNotificationStore.getState().addNotification({
+                    title: '会话未就绪',
+                    message: '会话尚未就绪，请稍候重试',
+                    priority: 'normal',
+                    category: 'error',
+                    isBlocking: false,
+                    autoDismissMs: 6000,
+                    sourceLabel: '系统',
+                  })
+                }
+                return false
+              }
+              return onSendMessage({ ...params, pipelineId: pid })
+            }}
+            onStopGenerate={onStopGenerate}
+            enableThinkingMode={true}
+            modelName={effectiveModelName}
+            thinkingStrength={activeThinkingStrength}
+            onThinkingStrengthChange={handleThinkingStrengthChange}
+            modelId={explicitModelId}
+            onModelIdChange={handleModelIdChange}
+          />
+        </div>
       </div>
     </div>
   )

@@ -1,16 +1,29 @@
 ---
 name: 任务链可视化
-description: 将 docs/tasks/ 下的任务文件和 .project/ 下的项目文档汇总为单个自包含 HTML，供人类审阅任务链全貌、依赖关系和 AC 追溯覆盖。在方案规划完成后、交付用户审阅前使用。
+description: 将 docs/tasks/ 下的任务文件和 docs/project/ 下的项目文档汇总为单个自包含 HTML，供人类审阅任务链全貌、依赖关系和 AC 追溯覆盖。在方案规划完成后、交付用户审阅前使用。（需任务链数据文件已存在：本仓当前无 docs/tasks/、docs/project/ 产出。）
 ---
 
 # 任务链可视化
 
 > **本技能是流程指引，不是逐条打勾清单**：按场景判断使用，遇不适用情况保持裁量，不机械执行。
 
+## 数据源现状（2026-11-04 实测）
+
+- **本仓当前没有 `docs/tasks/`、`docs/project/` 两个目录**（`ls -d docs/tasks docs/project` → 两者均
+  `No such file or directory`）。本技能声明的两个默认输入面在本仓都无产出。
+- **任务链数据从未写入文档面**：任务真身在内核库（`agentos_kernel.db`）；graph 的提取源只取仓内
+  文件（`docs/**/*.md`、`plugin.json`、`Cargo.toml`、`SKILL.md` 等，见 `scripts/graph_pipeline.md`），
+  内核库不在其源列表内，仓内也没有把任务从内核库导出成 `docs/tasks/task_XX_*.md` 的工序。
+- **本技能需先有任务链数据文件（`docs/tasks/task_XX_*.md` 等）才能产出有效视图**：目录缺失时脚本
+  只在 stderr 告警「任务目录不存在」并继续，产出的是空任务视图（无任务、无依赖拓扑）。
+- **数据面建设不属本技能范围**：把任务落成文档文件（导出约定、frontmatter 形态、与内核库的对账）
+  是独立议题，本技能不承接、也不预设其形态。
+
 ## 描述
 
 读取方案规划阶段产出的任务文件（`docs/tasks/task_XX_*.md`，含 YAML frontmatter）
-和项目文档（`.project/*.md`），生成一个**自包含**的交互式 HTML 页面（所有
+和项目文档（`docs/project/*.md`；存量项目 legacy 档案区 `.project/` 须经
+`--project-dir` 显式传入），生成一个**自包含**的交互式 HTML 页面（所有
 CSS/JS 内联，无外部依赖，可离线打开），供用户在方案确认前审阅：
 
 - 任务全貌与状态分布
@@ -37,7 +50,7 @@ python skills/skill-task-chain-viewer/scripts/generate_task_chain_html.py --titl
 |------|------|------|
 | `--title` | 否 | 页面标题，默认「项目任务链」 |
 | `--tasks-dir` | 否 | 任务文件目录，默认 `docs/tasks/` |
-| `--project-dir` | 否 | 项目文档目录，默认 `.project/` |
+| `--project-dir` | 否 | 项目文档目录，默认 `docs/project/`（legacy 项目传 `.project/`） |
 | `--output` | 否 | 输出路径，默认 `docs/working/{title}_task_chain.html` |
 
 ## 使用场景

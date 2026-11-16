@@ -20,9 +20,9 @@ from pathlib import Path
 
 import pytest
 
-PLUGINS_BASE = Path(__file__).resolve().parent.parent.parent / "plugins" / "shared" / "system"
+PLUGINS_BASE = Path(__file__).resolve().parent.parent.parent / "plugins" / "shared"
 
-# 现役通道插件全量枚举（与 plugins/shared/system/channel_* 一一对应）
+# 现役通道插件全量枚举（与 plugins/shared/channel_* 一一对应）
 CHANNELS = [
     "channel_dingtalk",
     "channel_feishu",

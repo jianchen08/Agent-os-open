@@ -127,6 +127,16 @@
 
 ---
 
+## 调研需求 [必填]
+
+> 审查结论依赖外部事实（库行为、版本兼容、规范口径等）而无法就地核实时标记；编排器消费本字段：needs_research=true 时先派发 research_agent 调研，再复审。
+
+- **needs_research**: true / false
+- **调研问题清单**（needs_research=true 时逐条列出具体、可调研的问题；false 时写「无」）:
+  1. {research_question}
+
+---
+
 ## 发现问题 [必填]
 
 > 只列有问题的项，通过的不写。审查者只指出问题，怎么修由执行者决定。

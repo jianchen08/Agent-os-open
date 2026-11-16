@@ -1,12 +1,12 @@
 /** @feature FP-T12 前端组件补测 | @ci frontend-test */
 /**
  * notificationStore 分支补测：
- * - 入队：优先级降序 + 同优先级时间升序排序、显式 id 去重、批量添加
+ * - 入队：时间倒序（最新在前）排序、显式 id 去重、批量添加
  * - 阻塞通知：activeBlockingNotification 的设置/不顶替/移除联动、升级
  * - 已读/移除/清空/进度钳制
  * - confirmBlockingNotification 动作分流（命中 navigate / 未命中回落默认）
  * - executeAction dismiss/navigate/custom 分支
- * - 折叠/面板开关、未读计数与按优先级过滤
+ * - 面板开关与未读计数
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { NotificationItem, NotificationPriority } from '@/types/notification'
@@ -14,6 +14,8 @@ import type { NotificationItem, NotificationPriority } from '@/types/notificatio
 let store: typeof import('@/stores/notificationStore').useNotificationStore
 
 beforeEach(async () => {
+  // persist 落盘跨测试泄漏：先清存储再重建 store（chatInputStore.test.ts 同款隔离）
+  localStorage.clear()
   vi.resetModules()
   const mod = await import('@/stores/notificationStore')
   store = mod.useNotificationStore
@@ -43,18 +45,18 @@ function addAt(epochMs: number, data: AddInput): string {
 }
 
 describe('notificationStore 入队与排序', () => {
-  it('跨优先级降序排序：后入队的 critical 排在前', () => {
-    addAt(1_000, makeInput({ title: '低优', priority: 'low' }))
-    addAt(2_000, makeInput({ title: '危急', priority: 'critical' }))
-    const priorities = store.getState().notifications.map((n) => n.priority)
-    expect(priorities).toEqual(['critical', 'low'])
+  it('时间倒序：后入队的排在前', () => {
+    addAt(1_000, makeInput({ title: '先入队', priority: 'low' }))
+    addAt(2_000, makeInput({ title: '后入队', priority: 'critical' }))
+    const titles = store.getState().notifications.map((n) => n.title)
+    expect(titles).toEqual(['后入队', '先入队'])
   })
 
-  it('同优先级按时间升序（先到先排，非按插入位置）', () => {
-    addAt(2_000, makeInput({ title: '先入队' }))
-    addAt(1_000, makeInput({ title: '后入队但时间更早' }))
+  it('跨优先级同样按时间倒序：不再按优先级重排', () => {
+    addAt(2_000, makeInput({ title: '较新的普通件', priority: 'normal' }))
+    addAt(1_000, makeInput({ title: '较早的紧急件', priority: 'critical' }))
     const titles = store.getState().notifications.map((n) => n.title)
-    expect(titles).toEqual(['后入队但时间更早', '先入队'])
+    expect(titles).toEqual(['较新的普通件', '较早的紧急件'])
   })
 
   it('显式 id 重复入队更新而非新增：最新内容生效、只保留一条', () => {
@@ -76,7 +78,8 @@ describe('notificationStore 入队与排序', () => {
     expect(ids).toHaveLength(2)
     expect(new Set(ids).size).toBe(2)
     const list = store.getState().notifications
-    expect(list.map((n) => n.priority)).toEqual(['high', 'normal'])
+    // 同一时间戳：稳定排序保持入队顺序
+    expect(list.map((n) => n.priority)).toEqual(['normal', 'high'])
     expect(list.every((n) => n.isRead === false)).toBe(true)
   })
 
@@ -160,8 +163,6 @@ describe('notificationStore 已读与清空', () => {
     expect(store.getState().getUnreadCount()).toBe(2)
     store.getState().markAsRead(a)
     expect(store.getState().getUnreadCount()).toBe(1)
-    expect(store.getState().getUnreadCountByPriority('high')).toBe(0)
-    expect(store.getState().getUnreadCountByPriority('normal')).toBe(1)
   })
 
   it('markAllAsRead 清零全部未读', () => {
@@ -262,18 +263,7 @@ describe('notificationStore 确认与动作分流', () => {
   })
 })
 
-describe('notificationStore 面板与折叠', () => {
-  it.each(['critical', 'high', 'normal', 'low'] as const)(
-    'toggleGroupCollapsed 翻转 %s 折叠态',
-    (priority: NotificationPriority) => {
-      const before = store.getState().groupState.collapsed[priority]
-      store.getState().toggleGroupCollapsed(priority)
-      expect(store.getState().groupState.collapsed[priority]).toBe(!before)
-      store.getState().toggleGroupCollapsed(priority)
-      expect(store.getState().groupState.collapsed[priority]).toBe(before)
-    },
-  )
-
+describe('notificationStore 面板开关', () => {
   it('togglePanel 来回切换；openPanel/closePanel 显式置位', () => {
     expect(store.getState().isPanelOpen).toBe(false)
     store.getState().togglePanel()
@@ -284,27 +274,6 @@ describe('notificationStore 面板与折叠', () => {
     expect(store.getState().isPanelOpen).toBe(true)
     store.getState().closePanel()
     expect(store.getState().isPanelOpen).toBe(false)
-  })
-})
-
-describe('notificationStore 计数与过滤', () => {
-  it('getByPriority 只返回该优先级通知', () => {
-    addAt(1_000, makeInput({ id: 'h-1', priority: 'high' }))
-    addAt(2_000, makeInput({ id: 'h-2', priority: 'high' }))
-    addAt(3_000, makeInput({ id: 'l-1', priority: 'low' }))
-    const highs = store.getState().getByPriority('high')
-    expect(highs.map((n) => n.id)).toEqual(['h-1', 'h-2'])
-    expect(store.getState().getByPriority('critical')).toEqual([])
-  })
-
-  it('getUnreadCountByPriority 区分已读与未读', () => {
-    const h1 = addAt(1_000, makeInput({ id: 'h-1', priority: 'high' }))
-    addAt(2_000, makeInput({ id: 'h-2', priority: 'high' }))
-    addAt(3_000, makeInput({ id: 'n-1', priority: 'normal' }))
-    store.getState().markAsRead(h1)
-    expect(store.getState().getUnreadCountByPriority('high')).toBe(1)
-    expect(store.getState().getUnreadCountByPriority('normal')).toBe(1)
-    expect(store.getState().getUnreadCount()).toBe(2)
   })
 })
 
@@ -328,5 +297,23 @@ describe('executeAction - confirm 动作', () => {
     const state = store.getState()
     expect(state.activeBlockingNotification).toBeNull()
     expect(state.notifications.find((n) => n.id === 'n-confirm')?.isRead).toBe(true)
+  })
+})
+
+describe('dismissNotification 记忆有界淘汰（长会话防无界增长）', () => {
+  it('超上限（1000）后最旧 id 被淘汰——被淘汰 id 重新入列可见', () => {
+    const add = (id: string) => store.getState().addNotification(makeInput({ id, title: `t-${id}` }))
+    const dismiss = (id: string) => store.getState().dismissNotification(id)
+    // 1002 次 add+dismiss：cap=1000 → 最早两条淘汰出记忆
+    for (let i = 0; i < 1002; i++) {
+      add(`ev-${i}`)
+      dismiss(`ev-${i}`)
+    }
+    // ev-0 已淘汰：重新入列不被记忆过滤（出现在列表）；ev-1001 仍在记忆：入列即被移除
+    add('ev-0')
+    add('ev-1001')
+    const ids = store.getState().notifications.map((n: { id: string }) => n.id)
+    expect(ids).toContain('ev-0')
+    expect(ids).not.toContain('ev-1001')
   })
 })

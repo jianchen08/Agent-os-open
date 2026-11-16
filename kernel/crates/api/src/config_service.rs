@@ -337,6 +337,11 @@ pub fn seed_declared_configs(
     (seeded, failures)
 }
 
+/// B2 掩码哨兵单源：真实明文 secret 在 GET 掩码视图中的形态。PUT 合并
+/// （[`apply_put_masked_sentinels`]）见此值即保留磁盘原值——哨兵绝不落盘，
+/// 否则字面 key 的 provider 全链 401。
+pub const MASKED_SECRET: &str = "****";
+
 /// B2（GET 掩码）：递归掩码真实明文 secret 值，**保留 `${ENV_VAR}` 占位符**。
 ///
 /// 规则（ADR §4.3 B2）：
@@ -377,19 +382,22 @@ fn mask_secret_value(v: &Value) -> Value {
     if s.starts_with("${") && s.ends_with('}') {
         return Value::String(s.to_string());
     }
-    Value::String("****".to_string())
+    Value::String(MASKED_SECRET.to_string())
 }
 
-/// B2（PUT 保留原值）：合并提交配置，`"***"` 哨兵字段保留磁盘原值。
+/// B2（PUT 保留原值）：合并提交配置，掩码哨兵（[`MASKED_SECRET`]）字段保留
+/// 磁盘原值。
 ///
-/// 前端整文件 PUT 时，被掩码的 secret 字段值为 `"***"`；服务端必须保留磁盘原值，
-/// 否则会把 `${ENV_VAR}` 占位符冲掉。
+/// 前端整文件 PUT 时，被掩码的 secret 字段值即 GET 掩码视图的哨兵；服务端必须
+/// 保留磁盘原值，否则哨兵被当真值落盘（字面 key 全链 401）。对象按键、数组按
+/// 索引配对递归（`keys[]` 条目即索引身份，与前端 keys 合并同口径）；磁盘无
+/// 原值可还原的哨兵（新键/新元素）一律剔除——哨兵绝不落盘。
 pub fn apply_put_masked_sentinels(stored: &Value, submitted: &Value) -> Value {
     match (stored, submitted) {
         (Value::Object(stored_map), Value::Object(submitted_map)) => {
             let mut out = serde_json::Map::new();
             for (k, sv) in submitted_map {
-                if sv.as_str() == Some("***") {
+                if sv.as_str() == Some(MASKED_SECRET) {
                     // 哨兵：保留磁盘原值（若磁盘无该 key 则删除该字段）
                     if let Some(orig) = stored_map.get(k) {
                         out.insert(k.clone(), orig.clone());
@@ -401,6 +409,27 @@ pub fn apply_put_masked_sentinels(stored: &Value, submitted: &Value) -> Value {
                 }
             }
             Value::Object(out)
+        }
+        (Value::Array(stored_arr), Value::Array(submitted_arr)) => {
+            let mut out = Vec::with_capacity(submitted_arr.len());
+            for (i, sv) in submitted_arr.iter().enumerate() {
+                match stored_arr.get(i) {
+                    Some(orig) => {
+                        if sv.as_str() == Some(MASKED_SECRET) {
+                            out.push(orig.clone()); // 哨兵：保留磁盘原元素
+                        } else {
+                            out.push(apply_put_masked_sentinels(orig, sv));
+                        }
+                    }
+                    None => {
+                        // 磁盘无对应原值的哨兵元素剔除（绝不落盘），新增元素原样收
+                        if sv.as_str() != Some(MASKED_SECRET) {
+                            out.push(sv.clone());
+                        }
+                    }
+                }
+            }
+            Value::Array(out)
         }
         (_, submitted_other) => submitted_other.clone(),
     }
@@ -480,7 +509,6 @@ mod tests {
             description: Some("测试插件".to_string()),
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Tool,
-            pipeline_role: None,
             language: "python".to_string(),
             host_type: HostType::Sidecar,
             host_group: None,
@@ -492,7 +520,6 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            granted_capabilities: vec![],
             restricted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
@@ -1039,7 +1066,7 @@ mod tests {
         assert!(masked["plain"].is_null());
     }
 
-    /// `apply_put_masked_sentinels`：磁盘无该 key 的 `***` 哨兵 = 删除字段；
+    /// `apply_put_masked_sentinels`：磁盘无该 key 的掩码哨兵 = 删除字段；
     /// 嵌套对象的哨兵递归保留原值。
     #[test]
     fn apply_put_masked_sentinels_nested_and_missing_key() {
@@ -1049,7 +1076,7 @@ mod tests {
         });
         let submitted = serde_json::json!({
             // api_key 磁盘无此 key（新字段带哨兵）→ 该字段被删除
-            "llm": {"api_key": "***", "model": "new", "brand_new": "***"},
+            "llm": {"api_key": MASKED_SECRET, "model": "new", "brand_new": MASKED_SECRET},
             "name": "renamed"
         });
         let merged = apply_put_masked_sentinels(&stored, &submitted);
@@ -1066,6 +1093,82 @@ mod tests {
             apply_put_masked_sentinels(&serde_json::json!({"a": 1}), &serde_json::json!([1, 2])),
             serde_json::json!([1, 2])
         );
+    }
+
+    /// B2 往返恒等：GET 掩码视图整树 PUT 回来必须还原磁盘原值——
+    /// `apply_put_masked_sentinels(stored, mask_secrets(stored)) == stored`。
+    /// 字面明文 key（providers/models 任意层）回存原值，掩码哨兵绝不落盘
+    /// （落盘即该 provider 全链 401）；`${VAR}` 占位符与非 secret 字段不受影响。
+    #[test]
+    fn put_merge_restores_mask_view_roundtrip() {
+        let stored = serde_json::json!({
+            "providers": {
+                "cpa_gateway": {
+                    "keys": [{"id": "main", "api_key": "sk-literal-gw"}],
+                    "type": "openai"
+                },
+                "minimax": {
+                    "keys": [{"id": "main", "api_key": "${MINIMAX_API_KEY}"}],
+                    "type": "minimax"
+                }
+            },
+            "models": {
+                "mock-llm": {"api_key": "sk-model-literal", "provider": "mock_llm"}
+            },
+            "defaults": {"chat": "gw-x"}
+        });
+        let masked = mask_secrets(&stored);
+        assert_eq!(
+            masked["providers"]["cpa_gateway"]["keys"][0]["api_key"],
+            "****"
+        );
+        let merged = apply_put_masked_sentinels(&stored, &masked);
+        assert_eq!(merged, stored, "掩码视图经 PUT 合并必须还原磁盘原值");
+    }
+
+    /// `apply_put_masked_sentinels` 数组臂：按索引与磁盘配对——哨兵元素还原
+    /// 磁盘原元素；新增普通元素原样收；磁盘无原值的新增哨兵元素剔除（绝不
+    /// 落盘）；元素减少 = 删除语义照常生效。
+    #[test]
+    fn apply_put_masked_sentinels_array_pairs_by_index() {
+        let stored = serde_json::json!({
+            "keys": [
+                {"id": "a", "api_key": "sk-a"},
+                {"id": "b", "api_key": "${B_API_KEY}"}
+            ]
+        });
+        let submitted = serde_json::json!({
+            "keys": [
+                {"id": "a", "api_key": "****", "rpm": 5},
+                {"id": "b", "api_key": "${B_API_KEY}"},
+                {"id": "c", "api_key": "sk-c"}
+            ]
+        });
+        let merged = apply_put_masked_sentinels(&stored, &submitted);
+        assert_eq!(merged["keys"][0]["api_key"], "sk-a", "哨兵还原磁盘原元素");
+        assert_eq!(merged["keys"][0]["rpm"], 5, "同元素非哨兵字段用提交值");
+        assert_eq!(merged["keys"][1]["api_key"], "${B_API_KEY}");
+        assert_eq!(merged["keys"][2], submitted["keys"][2], "新增元素原样收");
+
+        // 新增元素带哨兵（磁盘无原值）→ 剔除该元素
+        let submitted_new_sentinel = serde_json::json!({"keys": [
+            {"id": "a", "api_key": "****"},
+            {"id": "b", "api_key": "${B_API_KEY}"},
+            "****"
+        ]});
+        let merged_new = apply_put_masked_sentinels(&stored, &submitted_new_sentinel);
+        assert_eq!(merged_new["keys"].as_array().unwrap().len(), 2);
+        assert_eq!(merged_new["keys"][0]["api_key"], "sk-a");
+
+        // 裸哨兵元素落在已有索引 → 还原磁盘原元素（与对象臂同语义）
+        let merged_bare =
+            apply_put_masked_sentinels(&stored, &serde_json::json!({"keys": ["****", "****"]}));
+        assert_eq!(merged_bare["keys"], stored["keys"]);
+
+        // 提交数组更短 → 删除语义（尾部元素消失）
+        let merged_short =
+            apply_put_masked_sentinels(&stored, &serde_json::json!({"keys": [{"id": "a"}]}));
+        assert_eq!(merged_short["keys"].as_array().unwrap().len(), 1);
     }
 
     /// `compute_etag` 内容敏感（不同内容不同 etag）且同内容稳定。

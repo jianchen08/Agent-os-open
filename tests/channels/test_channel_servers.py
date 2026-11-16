@@ -20,8 +20,8 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_SYSTEM_DIR = Path(__file__).resolve().parents[2] / "plugins" / "shared" / "system"
-_CC_DIR = _SYSTEM_DIR / "channel_common"
+_SHARED_DIR = Path(__file__).resolve().parents[2] / "plugins" / "shared"
+_CC_DIR = _SHARED_DIR / "channel_common"
 
 # 各通道目录下与 server.py 顶层 import 冲突的同名平铺模块
 _EVICT = {
@@ -35,7 +35,7 @@ _EVICT = {
 def load_server(request: pytest.FixtureRequest):
     """按渠道加载 server 模块,teardown 清理 sys.path 与 sys.modules。"""
     channel: str = request.param
-    d = str(_SYSTEM_DIR / f"channel_{channel}")
+    d = str(_SHARED_DIR / f"channel_{channel}")
     cc = str(_CC_DIR)
     saved_path = list(sys.path)
     saved_modules = {m: sys.modules[m] for m in _EVICT if m in sys.modules}

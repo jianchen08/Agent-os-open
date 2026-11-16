@@ -1,7 +1,7 @@
 {
   "name": "frontend",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.2.2",
   "license": "Apache-2.0",
   "description": "灵汐 AgentOS 前端 — 聊天界面与可视化配置",
   "repository": {
@@ -12,6 +12,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "postbuild": "node scripts/compat-color-mix.mjs",
     "typecheck": "tsc -b",
     "test": "vitest --run",
     "test:coverage": "vitest --run --coverage",
@@ -47,7 +48,6 @@
     "idb-keyval": "^6.2.6",
     "js-yaml": "^4.3.1",
     "lucide-react": "^0.556.0",
-    "mermaid": "^11.14.0",
     "motion": "^12.38.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

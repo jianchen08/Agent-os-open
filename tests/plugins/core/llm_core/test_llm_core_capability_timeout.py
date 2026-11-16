@@ -28,10 +28,10 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_LLM_CORE_DIR = _REPO_ROOT / "plugins" / "shared" / "pipeline" / "core" / "llm_core"
+_LLM_CORE_DIR = _REPO_ROOT / "plugins" / "shared" / "llm_core"
 _CORE_DIR = _LLM_CORE_DIR.parent
 _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
-_SYSTEM_LLM_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "llm"
+_SYSTEM_LLM_DIR = _REPO_ROOT / "plugins" / "shared" / "llm"
 for _d in (_SYSTEM_LLM_DIR, _SHARED_DIR, _CORE_DIR, _LLM_CORE_DIR):
     if str(_d) not in sys.path:
         sys.path.insert(0, str(_d))

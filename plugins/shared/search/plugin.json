@@ -1,0 +1,161 @@
+{
+  "id": "resource_search_tool",
+  "requires_services": [
+    "packaging",
+    "agent.list",
+    "agent.get",
+    "skill.list",
+    "skill.get"
+  ],
+  "name": "Resource Search Tool",
+  "description": "搜索系统内 Agent、工具、Skill 资源的 MCP 工具",
+  "version": "1.0.3",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "metrics_class": "tool",
+    "tools": [
+      {
+        "name": "resource_search",
+        "description": "搜索系统内 Agent、工具、Skill 资源",
+        "render": {
+          "card": "table"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "resource_type": {
+              "type": "string",
+              "enum": [
+                "agent",
+                "tool",
+                "skill",
+                "all"
+              ],
+              "description": "资源类型：agent/tool/skill/all"
+            },
+            "query": {
+              "type": "string",
+              "description": "搜索关键词（支持子串匹配；为空或通配符 *,all,所有 时返回全部）"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "simple",
+                "detailed"
+              ],
+              "default": "simple",
+              "description": "simple=列出匹配资源；detailed=返回完整描述（skill 返回 SKILL.md 内容，agent 返回 recommended_metrics）。注意：精简实现不支持动态工具注入，detailed 模式下 tool 类型不会真正加载到会话。"
+            },
+            "filters": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "description": "按分类过滤（仅 tool 类型生效，匹配 plugin.json 的 plugin_type）"
+                },
+                "level": {
+                  "type": "string",
+                  "enum": [
+                    "system",
+                    "user",
+                    "all"
+                  ],
+                  "description": "按级别过滤（仅 agent 类型生效；system≈L1，user≈L2/L3）"
+                },
+                "language": {
+                  "type": "string",
+                  "description": "按语言过滤 Skill 脚本：python/nodejs/bash/powershell"
+                }
+              },
+              "description": "可选过滤条件"
+            },
+            "limit": {
+              "type": "integer",
+              "default": 20,
+              "maximum": 20,
+              "description": "返回数量，默认20"
+            }
+          },
+          "required": [
+            "resource_type"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "description": "三类资源（agent/tool/skill）表格式结果；全部键条件出现（无命中即缺席）",
+          "properties": {
+            "agent_h": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "agent 表头"
+            },
+            "agent_d": {
+              "type": "array",
+              "items": {
+                "type": "array"
+              },
+              "description": "agent 行"
+            },
+            "agent_c": {
+              "type": "integer"
+            },
+            "tool_h": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "tool_d": {
+              "type": "array",
+              "items": {
+                "type": "array"
+              }
+            },
+            "tool_c": {
+              "type": "integer"
+            },
+            "skill_h": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "skill_d": {
+              "type": "array",
+              "items": {
+                "type": "array"
+              }
+            },
+            "skill_c": {
+              "type": "integer"
+            }
+          }
+        }
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "permissions": {},
+  "priority": 30,
+  "config_files": [
+    {
+      "id": "builtin_tools_config",
+      "path": "config/tools/builtin_tools_config.yaml",
+      "label": "内置工具配置"
+    },
+    {
+      "id": "resource_search",
+      "path": "config/plugins/search/resource_search.yaml",
+      "label": "资源搜索配置"
+    }
+  ],
+  "host_group": "light"
+}

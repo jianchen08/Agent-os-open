@@ -14,11 +14,11 @@
 
 import { fetchModesRegistry, type ModeDeclaration } from '@/services/api/modes'
 import { MODE_ROLEPLAY_ENDPOINTS } from '@/services/api/endpoints.generated'
-import { getPresetTheme } from '@/services/themeService'
+import { getPresetTheme, validateThemeConfig } from '@/services/themeService'
 import { queryClient } from '@/services/query/queryClient'
 import { queryKeys } from '@/services/query/queryKeys'
 import { getModePanelTarget } from '@/services/schema/modePanel'
-import { isModeIdShape } from '@/services/schema/modeOptions'
+import { isModeIdShape, primaryModeTag } from '@/services/schema/modeOptions'
 import {
   loadSessionExecutionOptions,
   saveSessionExecutionOptions,
@@ -33,6 +33,7 @@ import { useNotificationStore } from '@/stores/notificationStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
 import { useSessionThemeStore } from '@/stores/sessionThemeStore'
 import { generateUUID } from '@/utils/uuid'
+import type { ThemeConfig } from '@/types/theme'
 
 /** 出生扩展位：模式包/入口特有语义经此承载（宿主零模式知识） */
 export interface ModeSessionBirthExtensions {
@@ -51,6 +52,16 @@ export interface ModeSessionBirthExtensions {
    *  向该会话开通子管道（mode_pipeline_open 代理 → 子 Tab + 管道级绑定），
    *  会话出生语义不动（既有会话 modeBinding 不被改写） */
   intoSessionId?: string
+  /** 玩法级管道绑定显式覆盖（世界内嵌谱系右移批次一，调研 §6.4）：开演载荷
+   *  携包上下文时透传包声明管道（清点条目 pipeline 键，服务端已过登记校验）；
+   *  缺省 = mode 绑定管道（现役零变化）。值合法性执法在 bind 侧（插件端点
+   *  登记闸 fail-closed 回落缺省 + 警示面），本通道只透传不复判 */
+  pipelineConfigId?: string
+  /** 卡主题档（完整 ThemeConfig，来自所选卡的 theme 字段）：出生即钉入该会话
+   *  主题 override 栈——卡主题不随会话出生则新会话无 override，聊天回落全局
+   *  主题（面板浏览期 applyCardTheme 钉的是**当时活跃**会话，跨会话不继承）。
+   *  载荷非法在桥 parse 侧 fail-closed 丢该位；入栈位复用 pushTheme 二次校验 */
+  cardTheme?: ThemeConfig
 }
 
 /** registry 按 mode 键取声明（fetchQuery 共享缓存）；reachable=false =
@@ -91,6 +102,24 @@ export async function resolvePersonaInjectionKey(mode: string): Promise<PersonaK
   return { status: 'undeclared' }
 }
 
+/**
+ * registry 取出生默认模式声明（M1 并入刀：mode.yaml default:true 至多一个，
+ * 后端 agent_manager 声明校验执法多标整批复决）。无 default 声明 / registry
+ * 不可达 = null（诚实降级：出生不带绑定，与无声明同语义）。
+ */
+async function lookupDefaultModeDeclaration(): Promise<ModeDeclaration | null> {
+  try {
+    const registry = await queryClient.fetchQuery({
+      queryKey: queryKeys.modesRegistry,
+      queryFn: fetchModesRegistry,
+      staleTime: 5 * 60_000,
+    })
+    return registry.modes.find((m) => m.default === true) ?? null
+  } catch {
+    return null
+  }
+}
+
 /** mode.session 桥载荷（模式会话出生，面板侧携模式键 + 模式包特有扩展位） */
 export interface ModeSessionPayload {
   /** 模式键（必填，形态守卫） */
@@ -107,6 +136,12 @@ export interface ModeSessionPayload {
   firstMessage?: string
   /** 开进既有会话（B8）：'current' = 活跃会话；显式会话 id 原样透传 */
   intoSessionId?: string
+  /** 玩法级管道绑定（wire 键 pipeline_config_id = 内核 chat.send_message 参数
+   *  同名；插件端点 bind 侧登记闸执法，桥载荷只透传形态） */
+  pipelineConfigId?: string
+  /** 卡主题档（wire 键 card_theme = 卡库 /data/cards 条目的 theme 字段形态：
+   *  完整 ThemeConfig）。非法档在 parse 侧 fail-closed 丢该位（出生零阻断） */
+  cardTheme?: ThemeConfig
 }
 
 function nonEmptyString(value: unknown): string | undefined {
@@ -118,6 +153,8 @@ function nonEmptyString(value: unknown): string | undefined {
  * name/title/first_message 在场须非空字符串（agent_id 在场须携 name——指示条
  * 显示名）；extra_context 在场须为键值均非空字符串的 plain object。非法返回
  * null（桥侧整包丢弃零状态变更并回 error）。
+ * card_theme 为唯一「丢该位不丢整包」的扩展位：档形态非法时出生照常进行（会话
+ * 创建是主流程，主题只是增补），缺位/丢弃都表现为键缺席=现役零变化。
  */
 export function parseModeSessionPayload(payload: unknown): ModeSessionPayload | null {
   if (typeof payload !== 'object' || payload === null) return null
@@ -130,6 +167,7 @@ export function parseModeSessionPayload(payload: unknown): ModeSessionPayload | 
     ['title', 'title'],
     ['first_message', 'firstMessage'],
     ['into_session_id', 'intoSessionId'],
+    ['pipeline_config_id', 'pipelineConfigId'],
   ] as const) {
     const raw = p[key]
     if (raw === undefined) continue
@@ -138,6 +176,10 @@ export function parseModeSessionPayload(payload: unknown): ModeSessionPayload | 
     parsed[field] = value
   }
   if (parsed.agentId && !parsed.agentName) return null
+  if (p.card_theme !== undefined) {
+    // 档形态校验单源（validateThemeConfig，与 pushTheme 入栈面同判）
+    if (validateThemeConfig(p.card_theme).valid) parsed.cardTheme = p.card_theme as ThemeConfig
+  }
   if (p.extra_context !== undefined) {
     if (typeof p.extra_context !== 'object' || p.extra_context === null) return null
     const extra: Record<string, string> = {}
@@ -174,7 +216,7 @@ export function ensureModeTheme(sessionId: string, themeId: string): boolean {
  * 零动作）。异步面（registry fetchQuery 共享缓存），调用方 fire-and-forget。
  */
 export async function syncModeThemeForSession(sessionId: string): Promise<void> {
-  const mode = loadSessionExecutionOptions(sessionId)?.modeBinding?.mode
+  const mode = primaryModeTag(loadSessionExecutionOptions(sessionId)?.modeBinding?.mode)
   if (!mode) return
   const { decl } = await lookupModeDeclaration(mode)
   if (decl?.theme) ensureModeTheme(sessionId, decl.theme)
@@ -183,9 +225,12 @@ export async function syncModeThemeForSession(sessionId: string): Promise<void> 
 /**
  * 以某模式开新会话：建会话（store 编排激活/标签/主管道注册，随建即跳转）→
  * 该会话执行选项写入 modeBinding（出生解析一次）+ 扩展位（agentId 绑定/开演
- * 档快照，既有快照原样保留其余键，无快照落最小包）→ 人设接管声明提示（D8）
+ * 档快照，既有快照原样保留其余键，无快照落最小包）→ 主题出生钉（卡主题优先，
+ * 缺省模式声明主题）→ 人设接管声明提示（D8）
  * → 面板页声明随开（getModePanelTarget 声明驱动）→ 可选首条触发消息。
- * mode 空串 = 默认会话出生（不带 modeBinding，选择器「默认」档的出生形态）。
+ * mode 空串 = 选择器「默认」档出生：绑 registry default 声明模式（M1 并入刀；
+ * 无 default/不可达 = 不带 modeBinding 的诚实降级）。回执 themePinned 如实报
+ * 出生是否钉入主题（禁静默降级：不钉也说 false）。
  * 返回出生回执（sessionId + 落定的 modeBinding）。
  */
 /**
@@ -198,7 +243,7 @@ export async function syncModeThemeForSession(sessionId: string): Promise<void> 
 async function openModePipelineIntoSession(
   mode: string,
   ext: ModeSessionBirthExtensions,
-): Promise<{ sessionId: string; modeBinding?: { mode: string; pipelineConfigId?: string } }> {
+): Promise<{ sessionId: string; modeBinding?: { mode: string | string[]; pipelineConfigId?: string }; themePinned: boolean }> {
   const intoSessionId = ext.intoSessionId as string
   const { decl } = await lookupModeDeclaration(mode)
   // 端点职责就地（用户裁定）：模式插件自己的接口（roleplay 直调本插件端点；
@@ -208,12 +253,28 @@ async function openModePipelineIntoSession(
     pipeline_id: string
     thread_id: string
     pipeline_config_id: string
+    pipeline_warning?: string
   }>(MODE_ROLEPLAY_ENDPOINTS.pipeline_open, {
     session_id: intoSessionId,
     mode,
     agent_id: ext.agentId,
     first_message: ext.firstMessage,
+    // 玩法级管道绑定透传（批次一）：端点 bind 侧登记闸执法（未登记 fail-closed
+    // 回落缺省），本通道只透传；缺省不带键 = 现役 roleplay 路径零变化
+    ...(ext.pipelineConfigId ? { pipeline_config_id: ext.pipelineConfigId } : {}),
   })
+  // bind 侧警示面（错误面可见）：端点回落缺省时通知可辨；派发本身不受阻
+  if (res.data.pipeline_warning) {
+    useNotificationStore.getState().addNotification({
+      title: '玩法管道回落',
+      message: res.data.pipeline_warning,
+      priority: 'normal',
+      category: 'alert',
+      isBlocking: false,
+      autoDismissMs: 8000,
+      sourceLabel: '模式会话',
+    })
+  }
   const pipelineId = res.data.pipeline_id
   const binding = {
     mode,
@@ -244,8 +305,11 @@ async function openModePipelineIntoSession(
   }
   if (decl?.persona?.replace) {
     useNotificationStore.getState().addNotification({
-      title: `已开进${decl.name}管道`,
-      message: '该模式会接管人设，将改变提示词前缀、破坏缓存命中（成本上升）。',
+      title: `已进入「${decl.name}」模式`,
+      message: '该模式会接管人设，当前会话上下文将重新载入。',
+      // 会话坐标：模式提示按会话语义去重（同正文指纹闸不吞另一会话的提示），
+      // 删会话时随 pruneForTarget 摘除
+      sessionId: intoSessionId,
       priority: 'normal',
       category: 'info',
       isBlocking: false,
@@ -256,24 +320,46 @@ async function openModePipelineIntoSession(
   return {
     sessionId: intoSessionId,
     modeBinding: { mode, ...(binding.pipelineConfigId ? { pipelineConfigId: binding.pipelineConfigId } : {}) },
+    // B8 开进既有会话 = 会话出生语义不动（override 栈属既有会话，补钉登记为
+    // 后续批）：出生钉事实位如实回 false。
+    themePinned: false,
   }
 }
 
 export async function openModeSession(
   mode: string,
   ext: ModeSessionBirthExtensions = {},
-): Promise<{ sessionId: string; modeBinding?: { mode: string; pipelineConfigId?: string } }> {
+): Promise<{ sessionId: string; modeBinding?: { mode: string | string[]; pipelineConfigId?: string }; themePinned: boolean }> {
   if (ext.intoSessionId) {
     return openModePipelineIntoSession(mode, ext)
   }
-  const { decl } = await lookupModeDeclaration(mode)
+  // 出生无显式选择（mode 空串 = 选择器「默认」档）→ 绑 default 声明模式（M1
+  // 并入刀，替代"空串 = 不带键"）；无 default 声明 / registry 不可达 = 维持
+  // 无绑定出生（诚实降级，与无声明同语义）。
+  let effectiveMode = mode
+  if (!mode) {
+    effectiveMode = (await lookupDefaultModeDeclaration())?.mode ?? ''
+  }
+  const { decl } = await lookupModeDeclaration(effectiveMode)
   const conversationPipeline = decl?.pipelines.find((p) => p.context === 'conversation')?.name
-  const modeBinding = mode
-    ? { mode, ...(conversationPipeline ? { pipelineConfigId: conversationPipeline } : {}) }
+  // 玩法级管道绑定显式覆盖优先（批次一）；缺省 = mode 绑定管道（现役零变化）
+  const pipelineConfigId = ext.pipelineConfigId || conversationPipeline
+  const modeBinding = effectiveMode
+    ? { mode: [effectiveMode], ...(pipelineConfigId ? { pipelineConfigId } : {}) }
     : undefined
   const created = await useSessionListStore
     .getState()
-    .createSession(ext.title ?? decl?.name ?? (mode || undefined))
+    .createSession(
+      ext.title ?? decl?.name ?? (effectiveMode || undefined),
+      // X13-F1 服务端出生绑定面：执行者键（完整模式键 mode_X/<stem>，桥载荷
+      // agent_id，与 WS 帧/B8 管道绑定同源同值）随创建请求落服务端——kernel
+      // 出生绑定 fail-closed 自动接管（state agent.id + sessions 投影 +
+      // thread→agent 注册表），换设备/清缓存后身份由服务端真值恢复（身份轴
+      // 唯一真值=会话绑定 agent_id，模式体系设计 §4.2；弹窗轨 SessionEditModal
+      // 同口径）。本地快照面保留（主题/执行选项/指示条继续用）；无绑定出生
+      // 不伪造键（单参调用，与「无声明同语义」降级一致）。
+      ...(ext.agentId ? [{ agentId: ext.agentId }] : []),
+    )
   const snapshot = loadSessionExecutionOptions(created.id)
   saveSessionExecutionOptions(created.id, {
     values: snapshot?.values ?? {},
@@ -291,6 +377,9 @@ export async function openModeSession(
     useNotificationStore.getState().addNotification({
       title: `已进入${decl.name}会话`,
       message: '该模式会接管人设，将改变提示词前缀、破坏缓存命中（成本上升）。',
+      // 会话坐标：模式提示按会话语义去重（同正文指纹闸不吞另一会话的提示），
+      // 删会话时随 pruneForTarget 摘除
+      sessionId: created.id,
       priority: 'normal',
       category: 'info',
       isBlocking: false,
@@ -301,14 +390,25 @@ export async function openModeSession(
 
   // 面板页随开（声明驱动：contributes.pages 带 mode 键的面板页；无声明零动作。
   // 幂等：已开 = 激活）。新建会话管道 state.mode 尚未落定，等「进 tab」事件按
-  // mode 触发会错过弹出窗口——语义明确（选择该模式 = 进入其工作面），直接开。
-  const panelTarget = getModePanelTarget(mode)
-  if (panelTarget) openPluginPage(panelTarget)
+  // mode 触发会错过弹出窗口——语义明确（点名选择该模式 = 进入其工作面），直接
+  // 开；页面 autoOpen:false 选退只约束自动通道（modePanelAutoOpen），显式点名
+  // 不受限。默认档出生（mode 空串解析到 default 声明）= 用户未选择任何模式，
+  // 与 Sidebar 新建会话路径同义——环境模式不抢焦点，不随开。
+  if (mode) {
+    const panelTarget = getModePanelTarget(effectiveMode)
+    if (panelTarget) openPluginPage(panelTarget)
+  }
 
-  // 模式主题随出生（批 G⑤）：decl.theme 非空 → 会话主题 override 入栈（无
-  // 声明/不可解析零动作——诚实降级不发明）；后续激活由
-  // syncModeThemeForSession 幂等补同步（重载后会话栈丢失场景）。
-  if (decl?.theme) ensureModeTheme(created.id, decl.theme)
+  // 主题随出生：卡主题（卡库条目 theme 载荷，更具体）优先，缺省回落模式声明
+  // 主题通道（批 G⑤ decl.theme）；两者皆缺席 = 零动作（现役回落全局主题）。
+  // 入栈复用 pushTheme 既有 fail-closed 校验（档非法 → 零状态变更）。
+  // 现状边界：override 栈不入持久化 → 重载后卡主题不自动补（syncModeThemeForSession
+  // 只按 modeBinding 补模式声明主题，卡主题的补同步面属后续批登记项）。
+  const themePinned = ext.cardTheme
+    ? useSessionThemeStore.getState().pushTheme(created.id, ext.cardTheme)
+    : decl?.theme
+      ? ensureModeTheme(created.id, decl.theme)
+      : false
 
   // 首条触发消息（开演档）：execution_context 与发送链同一并入形态（mode 键 +
   // 扩展上下文），agentId/pipelineConfigId 走帧参数——首条与后续消息注入口径一致。
@@ -317,14 +417,14 @@ export async function openModeSession(
       pipelineId: created.pipelineIds?.[0],
       clientMessageId: generateUUID(),
       executionContext: {
-        ...(mode ? { mode } : {}),
+        ...(effectiveMode ? { mode: [effectiveMode] } : {}),
         ...(ext.extraContext ?? {}),
       },
       ...(ext.agentId ? { agentId: ext.agentId } : {}),
       ...(modeBinding?.pipelineConfigId ? { pipelineConfigId: modeBinding.pipelineConfigId } : {}),
     })
   }
-  return { sessionId: created.id, ...(modeBinding ? { modeBinding } : {}) }
+  return { sessionId: created.id, ...(modeBinding ? { modeBinding } : {}), themePinned }
 }
 
 /** 会话执行选项里的执行者绑定读出形态（name 缺席回退 agentId 尾段） */
@@ -347,4 +447,32 @@ export function clearSessionAgentBinding(threadId: string): void {
   const snapshot = loadSessionExecutionOptions(threadId)
   if (!snapshot) return
   saveSessionExecutionOptions(threadId, { ...snapshot, agentId: undefined, agentName: undefined })
+}
+
+/**
+ * 出生无显式选择的默认绑定补挂（M1 并入刀）：Sidebar「新建会话」等不经
+ * openModeSession 的出生通道在落会话后调用（fire-and-forget）——registry 有
+ * default 声明 → 补写 modeBinding（出生即定语义与选择器出生一致）；已有绑定
+ * （显式选择/重复调用）不覆盖，无 default 声明 / registry 不可达零动作。
+ * 自含错误面：本地快照写失败 = 会话无绑定（与无声明同语义）降级不上抛
+ * （fire-and-forget 调用方无接收面，绑定是增补不是会话创建主体）。
+ */
+export async function applyDefaultModeBinding(sessionId: string): Promise<void> {
+  try {
+    const snapshot = loadSessionExecutionOptions(sessionId)
+    if (snapshot?.modeBinding) return
+    const decl = await lookupDefaultModeDeclaration()
+    if (!decl) return
+    const pipeline = decl.pipelines.find((p) => p.context === 'conversation')?.name
+    saveSessionExecutionOptions(sessionId, {
+      values: snapshot?.values ?? {},
+      executionContext: snapshot?.executionContext,
+      modeBinding: {
+        mode: [decl.mode],
+        ...(pipeline ? { pipelineConfigId: pipeline } : {}),
+      },
+    })
+  } catch {
+    // 降级即处理：无绑定出生（诚实语义），不向 fire-and-forget 调用方传播
+  }
 }

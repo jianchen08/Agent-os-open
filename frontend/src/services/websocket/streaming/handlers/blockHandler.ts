@@ -60,10 +60,26 @@ interface MessageBlockState {
   toolBlocks: Map<number, ToolBlockAccum>
   /** 已 block_end 闭合的块索引集合（防重复闭合/重复建 part） */
   closedBlocks: Set<number>
+  /** 最近一次 touch 时刻（ms）：空闲回收依据（每次 getBlockState 更新） */
+  lastActivity: number
 }
 
 /** (pipelineId, messageId) → 块累积状态。块索引只在本消息内有效。 */
 const _blockStates = new Map<string, MessageBlockState>()
+
+/** 块状态空闲回收阈值：断线丢终止事件（finish/stream_end/stream_error）的残留
+ * 状态无界常驻——新流注册时清理空闲超阈的条目（数据面瘦身批次 1.4） */
+const BLOCK_STATE_IDLE_SWEEP_MS = 10 * 60 * 1000
+
+/** 清理空闲超阈的残留块状态（仅在新流注册时触发，摊销 O(1) 常规开销） */
+function sweepIdleBlockStates(): void {
+  const now = Date.now()
+  for (const [key, st] of _blockStates) {
+    if (now - st.lastActivity > BLOCK_STATE_IDLE_SWEEP_MS) {
+      _blockStates.delete(key)
+    }
+  }
+}
 
 function stateKey(pipelineId: string, messageId: string): string {
   return `${pipelineId}::${messageId}`
@@ -73,9 +89,19 @@ function getBlockState(pipelineId: string, messageId: string): MessageBlockState
   const key = stateKey(pipelineId, messageId)
   let st = _blockStates.get(key)
   if (!st) {
-    st = { buffers: new Map(), partIndexByBlock: new Map(), toolBlocks: new Map(), closedBlocks: new Set() }
+    // 新流注册 = 触发空闲回收的时机：先清理残留，再挂新状态
+    sweepIdleBlockStates()
+    st = {
+      buffers: new Map(),
+      partIndexByBlock: new Map(),
+      toolBlocks: new Map(),
+      closedBlocks: new Set(),
+      lastActivity: Date.now(),
+    }
     _blockStates.set(key, st)
+    return st
   }
+  st.lastActivity = Date.now()
   return st
 }
 

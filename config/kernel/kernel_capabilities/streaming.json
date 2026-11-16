@@ -483,6 +483,10 @@
             "type": ["string", "null"],
             "description": "router.stop_reason 署名（FAILED_STOP_REASONS 命中词）原值透传；引擎 Err 防御路径无署名为 null"
           },
+          "error": {
+            "type": ["string", "null"],
+            "description": "首条插件错误原文（全量不截断，ADR 2026-10-27-pipeline-error-notification-channel）。折叠失败轮 stop_reason 恒空串，失败归因随本字段透传（限流/连接/认证等）；无插件错误的失败轮为 null"
+          },
           "run_id": {
             "type": "string",
             "minLength": 1,

@@ -76,8 +76,8 @@ def _find_pipeline_state(body, pipeline_id: str) -> dict | None:
 def _run_task_to_terminal(token, kernel_url, endpoint: str, payload: dict, cleanup_sessions, thread_id: str | None = None) -> dict:
     """单输入单输出：一次创建调用 → 轮询观察至合法终态 → 返回观察结果。
 
-    合法终态：completed（评估闭合）/ pending_evaluation（执行完毕但 agent
-    未评估，task_reminder 裁决）/ failed——均代表管道自主执行收尾。
+    合法终态：completed（评估闭合）/ failed（task_reminder 耗尽裁决）——
+    均代表管道自主执行收尾。
     thread_id：root 任务（TaskRootCreate）必填会话归属，由调用方预建传入；
     缺省时内部自建辅助会话（plain 任务无会话归属要求）。
     """
@@ -108,7 +108,7 @@ def _run_task_to_terminal(token, kernel_url, endpoint: str, payload: dict, clean
                 s = (row.get("state") or {}).get("task.status", "")
                 if s and s not in seen_statuses:
                     seen_statuses.append(s)
-                if s in ("completed", "pending_evaluation", "failed"):
+                if s in ("completed", "failed"):
                     break
         time.sleep(_POLL_INTERVAL_SECONDS)
 
@@ -122,8 +122,8 @@ def _assert_task_output(state: dict, expect_mode: str | None) -> None:
     """输出验证（全部来自查询接口的观察数据）。"""
     # 1. 管道自主收尾：合法终态 + LLM 真实执行（防假完成）
     final_status = state.get("task.status", "")
-    assert final_status in ("completed", "pending_evaluation", "failed"), (
-        f"任务应自主收尾（completed/pending_evaluation/failed），实际 '{final_status}'"
+    assert final_status in ("completed", "failed"), (
+        f"任务应自主收尾（completed/failed），实际 '{final_status}'"
     )
     usage = state.get("track.llm_usage") or {}
     if isinstance(usage, str):

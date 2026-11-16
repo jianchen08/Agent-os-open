@@ -1,7 +1,7 @@
 # @feature: FP-0.2.可观测性 可观测性 | @ci: python-coverage
 """monitoring 插件测试 conftest——把插件目录注入 sys.path。
 
-插件位于 plugins/shared/system/monitoring/，内部用平铺 import
+插件位于 plugins/shared/monitoring/，内部用平铺 import
 （from performance_monitor import ... / from health import ... / from metrics import ...）。
 本 conftest 同时暴露 _PLUGIN_SOURCE_DIRS 给 tests/plugins/conftest.py 的
 pytest_runtest_setup，治理同进程多插件裸名串扰（server/health/metrics 等跨插件同名）。
@@ -14,7 +14,7 @@ from pathlib import Path
 
 _PLUGIN_DIR = (
     Path(__file__).resolve().parents[4]
-    / "plugins" / "shared" / "system" / "monitoring"
+    / "plugins" / "shared" / "monitoring"
 )
 
 _PLUGIN_SOURCE_DIRS = [str(_PLUGIN_DIR)]

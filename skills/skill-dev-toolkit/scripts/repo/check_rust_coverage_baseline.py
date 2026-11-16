@@ -1,0 +1,147 @@
+#!/usr/bin/env python
+"""Rust 覆盖率基线锁（阶段 2.3）：把 Rust line% 纳入"只升不降"门禁。
+
+机制：
+- cargo-llvm-cov 产出 lcov（CI），本脚本解析 line% 并对照 .github/rust-coverage-baseline.txt。
+- line% < 基线 → 退出码 1（CI 红）。
+- **自动棘轮已停用（D1 拍板 2026-09-24：目标线固定 90，用户口径；与 2026-08-21
+  恒推高裁决冲突，新拍板覆盖；陈旧产物误棘轮两次实证）**：原机制备忘——line% ≥ 基线（绿跑）→ 自动把基线写到
+  floor(实测)+1——向上取整到下一个整数百分比（85.49→86、恰为整数→再 +1），
+  恒高于实测留压力，下轮未提升即红是预期设计。写入只替换数值行、保留归因
+  注释；改动随本批 commit 留归因（CI job 内的写入随 job 丢弃，以仓库为准）。
+- --init 保留为人工精确锚定（写实测原值、拒降），仅校准场景用。
+
+用法：
+    python scripts/check_rust_coverage_baseline.py --lcov coverage.lcov   # 对照 + 绿跑自动棘轮
+    python scripts/check_rust_coverage_baseline.py --lcov coverage.lcov --init
+"""
+
+from __future__ import annotations
+
+import argparse
+import math
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+KERNEL_DIR = ROOT / "kernel"
+BASELINE_FILE = ROOT / ".github" / "rust-coverage-baseline.txt"
+KEY = "rust_line_coverage"
+# 行首锚定：归因注释里的历史数值（"# KEY=90.0 → 92.0"）不是真值，
+# 不得参与读取或改写（2026-09-13 批四实锤的注释毒化缺陷）。
+BASELINE_LINE_RE = re.compile(rf"^{KEY}=([0-9.]+)", re.MULTILINE)
+
+# lcov 行覆盖：每条 "DA:<line>,<count>[,...]" 记一行；count>0 视为已覆盖。
+DA_RE = re.compile(r"^DA:\d+,\d+")
+
+
+def parse_lcov_line_pct(lcov_path: Path) -> float | None:
+    """从 lcov 文件计算整体行覆盖率（%）。无 DA 行返回 None。"""
+    covered = 0
+    total = 0
+    for line in lcov_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.startswith("DA:"):
+            continue
+        # DA:<line>,<count>[,<checksum>]
+        parts = line[3:].split(",")
+        if len(parts) < 2:
+            continue
+        total += 1
+        try:
+            if int(parts[1]) > 0:
+                covered += 1
+        except ValueError:
+            continue
+    if total == 0:
+        return None
+    return covered / total * 100.0
+
+
+def read_baseline() -> float:
+    if not BASELINE_FILE.exists():
+        return 0.0
+    m = BASELINE_LINE_RE.search(BASELINE_FILE.read_text(encoding="utf-8"))
+    return float(m.group(1)) if m else 0.0
+
+
+def next_pressure_line(measured_pct: float) -> int:
+    """棘轮压力线：实测向上取整到下一个整数百分比（85.49→86、恰为整数→再 +1）。
+    100 为覆盖率上界，封顶不越（实测 100 时基线停在 100）：
+    「恒高于实测」在 100 处数学上不可满足，再 +1 会写出 101 的死局基线。"""
+    return min(math.floor(measured_pct) + 1, 100)
+
+
+def update_baseline_value(pct: float) -> None:
+    """只替换 KEY= 数值行，保留归因注释（旧 write_baseline 整文件重写会抹注释）。"""
+    text = BASELINE_FILE.read_text(encoding="utf-8") if BASELINE_FILE.exists() else ""
+    new_line = f"{KEY}={pct:.1f}"
+    if BASELINE_LINE_RE.search(text):
+        text = BASELINE_LINE_RE.sub(new_line, text, count=1)
+    else:
+        text = (text.rstrip("\n") + "\n" if text else "") + new_line + "\n"
+    BASELINE_FILE.write_text(text, encoding="utf-8")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Rust 覆盖率基线锁")
+    parser.add_argument("--lcov", required=True, help="cargo-llvm-cov 产出的 lcov 文件路径")
+    parser.add_argument("--init", action="store_true", help="用当前 line%% 写入/收紧基线")
+    parser.add_argument(
+        "--skip",
+        action="store_true",
+        help="暂时挂起基线门禁（打印提示后放行，基线文件保留不动）；恢复 = 去掉 --skip",
+    )
+    args = parser.parse_args()
+
+    if args.skip:
+        baseline = read_baseline()
+        print(
+            f"[rust-cov] ⏸️ 覆盖率基线门禁暂时挂起（当前基线 {baseline:.1f} 保留在"
+            " .github/rust-coverage-baseline.txt）。恢复 = 去掉 --skip。"
+        )
+        return 0
+
+    lcov = Path(args.lcov)
+
+    pct = parse_lcov_line_pct(lcov)
+    if pct is None:
+        print("[rust-cov] ⚠️ lcov 无 DA 行（覆盖率数据为空），跳过门禁", file=sys.stderr)
+        return 0
+
+    baseline = read_baseline()
+    print(f"[rust-cov] line% = {pct:.2f}（基线 {baseline:.1f}）")
+
+    if args.init:
+        if pct + 1e-6 < baseline:
+            print(
+                f"[rust-cov] ❌ --init 拒绝降基线：实测 {pct:.2f} < 现基线 {baseline:.1f}。\n"
+                "  棘轮不可逆；如确有正当理由（度量口径变更等），手改基线文件并在 commit\n"
+                "  message 留归因。",
+                file=sys.stderr,
+            )
+            return 1
+        update_baseline_value(pct)
+        print(f"[rust-cov] ✅ 基线已锚定实测：{KEY}={pct:.1f}")
+        return 0
+
+    if pct + 1e-6 < baseline:
+        print(
+            f"[rust-cov] ❌ line% {pct:.2f} < 基线 {baseline:.1f}（只升不降）",
+            file=sys.stderr,
+        )
+        return 1
+
+    status = "持平" if abs(pct - baseline) < 1e-6 else f"上升 {pct - baseline:.2f}"
+    print(f"[rust-cov] ✅ line% {pct:.2f} ≥ 基线 {baseline:.1f}（{status}）")
+    # D1 拍板（2026-09-24）：目标线固定 90（用户口径），自动棘轮停用——
+    # "目标"语义与"恒推高"不可共存，且陈旧产物误棘轮两次实证（评估 §0.3
+    # lcov 95→96 事件 + 本次 90→96 即时复发）。收紧 = --init 手动 + commit 归因。
+    suggested = next_pressure_line(pct)
+    if suggested != baseline:
+        print(f"[rust-cov] 💡 可收紧：--init 锚定实测（建议下一压力线 {suggested:.1f}），基线改动走 commit 留归因。")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

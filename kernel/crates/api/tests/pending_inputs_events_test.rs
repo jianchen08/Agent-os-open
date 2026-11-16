@@ -12,10 +12,7 @@ use std::sync::{Arc, Mutex};
 use agentos_api::routes::AppState;
 use agentos_api::server::build_router;
 use agentos_core::traits::{HostType, PluginManifest, PluginType};
-use agentos_core::types::{
-    LoopBody, PendingInputRecord, PendingInputSource, PipelineConfig, PipelineStep, PluginContext,
-    PluginResult,
-};
+use agentos_core::types::{PendingInputRecord, PendingInputSource, PluginContext, PluginResult};
 use agentos_session::SessionCoordinator;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -49,7 +46,6 @@ fn manifest_base(plugin_id: &str) -> PluginManifest {
         description: None,
         version: "1.0.0".to_string(),
         plugin_type: PluginType::System,
-        pipeline_role: None,
         language: "python".to_string(),
         host_type: HostType::Sidecar,
         host_group: None,
@@ -61,7 +57,6 @@ fn manifest_base(plugin_id: &str) -> PluginManifest {
         mcp: None,
         lifecycle: None,
         native: None,
-        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],
@@ -171,13 +166,29 @@ impl agentos_core::traits::PluginInvoker for SilentInvoker {
 /// `broken_route=true` 时给 step 装一条恒真自跳路由（`Step("llm")` 跳自身）——
 /// 编译期目标存在可通过，运行期跳转次数超限 → `run_compiled` 返回 Err
 /// （invoker 错误只 warn+continue，不会置 failed，无法触发 stream_error 分支）。
-fn make_engine_state(
+async fn make_engine_state(
     store: Arc<agentos_engine::SqliteStore>,
     invoker: Arc<dyn agentos_core::traits::PluginInvoker>,
     session: Arc<SessionCoordinator>,
     broken_route: bool,
 ) -> AppState {
     let store_dyn: Arc<dyn agentos_core::traits::StorageBackend> = store.clone();
+    // 播种派发用户 u1（tenant=default）：K8 修订（ADR 2026-10-10）后租户
+    // 解析按真值走、无降级，测试用户必须先在库。
+    store_dyn
+        .create_user(&agentos_core::types::UserRecord {
+            user_id: "u1".to_string(),
+            username: "u-1".to_string(),
+            password: String::new(),
+            email: None,
+            role: "user".to_string(),
+            tenant_id: "default".to_string(),
+            created_at: "2026-10-10T00:00:00Z".to_string(),
+            last_login_at: None,
+            must_change_password: false,
+        })
+        .await
+        .unwrap();
     let mut state = AppState::new();
     state.store = Some(store_dyn);
     state.invoker = Some(invoker);
@@ -195,27 +206,6 @@ fn make_engine_state(
     };
     std::fs::write(cfg_dir.join("autonomous.yaml"), yaml).unwrap();
     state.project_root = Some(tmp_root);
-    state.pipeline_config = Arc::new(PipelineConfig {
-        name: "test_pending".to_string(),
-        loop_bodies: vec![LoopBody {
-            id: "llm".to_string(),
-            steps: vec![PipelineStep {
-                id: "llm".to_string(),
-                steps: vec!["mock_llm_core".into()],
-                when: None,
-                context: std::collections::HashMap::new(),
-                routes: vec![],
-                loop_config: None,
-            }],
-            while_cond: None,
-            exit_routes: vec![],
-            run_on_error: false,
-        }],
-        checkpoint: Default::default(),
-        initial_state: std::collections::HashMap::new(),
-        max_rounds: None,
-    });
-    state.step_library = Arc::new(agentos_core::types::StepLibrary::default());
     state.manifests = Arc::new(tokio::sync::RwLock::new(vec![manifest_base(
         "mock_llm_core",
     )]));
@@ -297,7 +287,7 @@ async fn dispatch_success_pushes_new_message_and_stream_end() {
     );
     coord.register_thread("thread-ok-1", "u1");
     seed_session_with_pipeline(&store, "thread-ok-1", "pipe-ok-1").await;
-    let state = make_engine_state(store, Arc::new(OkInvoker), coord, false);
+    let state = make_engine_state(store, Arc::new(OkInvoker), coord, false).await;
 
     let dispatcher = agentos_api::ws_session::EngineDispatcher::new(state);
     use agentos_session::router::PipelineDispatcher;
@@ -343,7 +333,7 @@ async fn dispatch_silent_core_pushes_no_assistant_reply_error_not_echo() {
     );
     coord.register_thread("thread-silent-1", "u1");
     seed_session_with_pipeline(&store, "thread-silent-1", "pipe-silent-1").await;
-    let state = make_engine_state(store, Arc::new(SilentInvoker), coord, false);
+    let state = make_engine_state(store, Arc::new(SilentInvoker), coord, false).await;
 
     let dispatcher = agentos_api::ws_session::EngineDispatcher::new(state);
     use agentos_session::router::PipelineDispatcher;
@@ -400,7 +390,7 @@ async fn dispatch_engine_failure_pushes_stream_error() {
     );
     coord.register_thread("thread-fail-1", "u1");
     seed_session_with_pipeline(&store, "thread-fail-1", "pipe-fail-1").await;
-    let state = make_engine_state(store, Arc::new(OkInvoker), coord, true);
+    let state = make_engine_state(store, Arc::new(OkInvoker), coord, true).await;
 
     let dispatcher = agentos_api::ws_session::EngineDispatcher::new(state);
     use agentos_session::router::PipelineDispatcher;
@@ -431,13 +421,9 @@ async fn dispatch_engine_failure_pushes_stream_error() {
     assert_eq!(parsed["data"]["error"]["code"], "ENGINE_RUN_FAILED");
 }
 
-#[tokio::test]
-async fn endpoint_update_emits_pending_inputs_changed() {
-    pin_temp_user_root();
-    // 造 store + 一条 pending + pipeline↔thread 映射 + session
-    let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
-    let store_dyn: Arc<dyn agentos_core::traits::StorageBackend> = store.clone();
-    // pending-inputs 已纳入管道域鉴权（PUT=写面 admin）：播种 admin 并铸同源 token
+/// 播种 admin 并铸 Bearer token（pending-inputs 写面 = admin 鉴权，PUT/DELETE
+/// 端点测试共用夹具）。
+async fn seed_admin_bearer(store_dyn: &Arc<dyn agentos_core::traits::StorageBackend>) -> String {
     const SEED_ADMIN_PW: &str = "test-admin-pw-2026";
     let hash = agentos_http::auth::hash_password(SEED_ADMIN_PW).unwrap();
     let _ = store_dyn
@@ -463,33 +449,44 @@ async fn endpoint_update_emits_pending_inputs_changed() {
         created_at: String::new(),
         must_change_password: false,
     };
-    let bearer = format!(
+    format!(
         "Bearer {}",
         agentos_http::auth::encode_token(agentos_http::auth::TokenType::Access, &admin, 3600)
-    );
+    )
+}
+
+/// 造一条 pending 记录（id/content 指定，其余最小夹具值；thread 随 pid 派生）。
+fn pending_record(pid: &str, id: &str, content: &str) -> PendingInputRecord {
+    PendingInputRecord {
+        id: id.to_string(),
+        pipeline_id: pid.to_string(),
+        tenant_id: "default".to_string(),
+        user_id: "u1".to_string(),
+        content: content.to_string(),
+        thread: format!("thread-{pid}"),
+        source: PendingInputSource::Trigger,
+        agent_id: "agentos".to_string(),
+        route_id: pid.to_string(),
+        thinking_strength: String::new(),
+        client_message_id: String::new(),
+        execution_context: None,
+        state_overlay: None,
+        pipeline_config_id: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
+#[tokio::test]
+async fn endpoint_update_emits_pending_inputs_changed() {
+    pin_temp_user_root();
+    // 造 store + 一条 pending + pipeline↔thread 映射 + session
+    let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store_dyn: Arc<dyn agentos_core::traits::StorageBackend> = store.clone();
+    // pending-inputs 已纳入管道域鉴权（PUT=写面 admin）：播种 admin 并铸同源 token
+    let bearer = seed_admin_bearer(&store_dyn).await;
     let pid = "pipe-evt-1";
     store_dyn
-        .enqueue_pending_input(
-            "default",
-            pid,
-            &PendingInputRecord {
-                id: "p_evt_1".to_string(),
-                pipeline_id: pid.to_string(),
-                tenant_id: "default".to_string(),
-                user_id: "u1".to_string(),
-                content: "旧内容".to_string(),
-                thread: "thread-evt-1".to_string(),
-                source: PendingInputSource::Trigger,
-                agent_id: "agentos".to_string(),
-                route_id: pid.to_string(),
-                thinking_strength: String::new(),
-                client_message_id: String::new(),
-                execution_context: None,
-                state_overlay: None,
-                pipeline_config_id: None,
-                created_at: chrono::Utc::now().to_rfc3339(),
-            },
-        )
+        .enqueue_pending_input("default", pid, &pending_record(pid, "p_evt_1", "旧内容"))
         .await
         .unwrap();
     store_dyn
@@ -537,6 +534,137 @@ async fn endpoint_update_emits_pending_inputs_changed() {
     assert_eq!(parsed["data"]["items"][0]["content"], "新内容");
 }
 
+/// REST 删除成功路径行为断言（队列生命周期留痕，2026-10-21 装机排障）：
+/// 此前删除成功零日志（仅失败路径 warn）+ 事件推送消失 = "已发送"假象。
+/// 锁定：DELETE 单条 → 200 + deleted 事件 + 剩余条目留在表（新增 info! 留痕
+/// 随本 handler 成功路径执行）。
+#[tokio::test]
+async fn endpoint_delete_emits_deleted_action_and_keeps_remaining() {
+    pin_temp_user_root();
+    let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store_dyn: Arc<dyn agentos_core::traits::StorageBackend> = store.clone();
+    let bearer = seed_admin_bearer(&store_dyn).await;
+    let pid = "pipe-del-1";
+    store_dyn
+        .enqueue_pending_input("default", pid, &pending_record(pid, "p_del_1", "甲"))
+        .await
+        .unwrap();
+    store_dyn
+        .enqueue_pending_input("default", pid, &pending_record(pid, "p_del_2", "乙"))
+        .await
+        .unwrap();
+    store_dyn
+        .link_pipeline_session(pid, "thread-pipe-del-1", "default")
+        .await
+        .unwrap();
+
+    let coord = Arc::new(SessionCoordinator::new());
+    let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+    coord.register(
+        "u1",
+        Arc::new(FrameSink {
+            frames: frames.clone(),
+        }),
+    );
+    coord.register_thread("thread-pipe-del-1", "u1");
+
+    let mut state = AppState::new();
+    state.store = Some(store_dyn);
+    state.session = Some(coord);
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/pipelines/{pid}/pending-inputs/p_del_1"))
+                .header("authorization", &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    wait_for_frame(&frames, "pending_inputs_changed").await;
+    let all = frames.lock().unwrap();
+    let evt = all
+        .iter()
+        .find(|f| f.contains("pending_inputs_changed"))
+        .expect("应收到 pending_inputs_changed 帧");
+    let parsed: serde_json::Value = serde_json::from_str(evt).unwrap();
+    assert_eq!(parsed["data"]["action"], "deleted");
+    // 事件携带剩余条目（乙），被删条目（甲）不再出现
+    let items = parsed["data"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], "p_del_2");
+    // 行为对账：剩余条目确实留在表
+    let rows = store.list_pending_inputs("default", pid).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "p_del_2");
+}
+
+/// REST 清空成功路径行为断言（队列生命周期留痕同上）：清空 → 200 + cleared
+/// 事件（items 空）+ 队列表清零（新增含 ids 的 info! 留痕随本路径执行）。
+#[tokio::test]
+async fn endpoint_clear_emits_cleared_action_and_empties_queue() {
+    pin_temp_user_root();
+    let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store_dyn: Arc<dyn agentos_core::traits::StorageBackend> = store.clone();
+    let bearer = seed_admin_bearer(&store_dyn).await;
+    let pid = "pipe-clr-1";
+    store_dyn
+        .enqueue_pending_input("default", pid, &pending_record(pid, "p_clr_1", "甲"))
+        .await
+        .unwrap();
+    store_dyn
+        .enqueue_pending_input("default", pid, &pending_record(pid, "p_clr_2", "乙"))
+        .await
+        .unwrap();
+    store_dyn
+        .link_pipeline_session(pid, "thread-pipe-clr-1", "default")
+        .await
+        .unwrap();
+
+    let coord = Arc::new(SessionCoordinator::new());
+    let frames = Arc::new(Mutex::new(Vec::<String>::new()));
+    coord.register(
+        "u1",
+        Arc::new(FrameSink {
+            frames: frames.clone(),
+        }),
+    );
+    coord.register_thread("thread-pipe-clr-1", "u1");
+
+    let mut state = AppState::new();
+    state.store = Some(store_dyn);
+    state.session = Some(coord);
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/pipelines/{pid}/pending-inputs"))
+                .header("authorization", &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    wait_for_frame(&frames, "pending_inputs_changed").await;
+    let all = frames.lock().unwrap();
+    let evt = all
+        .iter()
+        .find(|f| f.contains("pending_inputs_changed"))
+        .expect("应收到 pending_inputs_changed 帧");
+    let parsed: serde_json::Value = serde_json::from_str(evt).unwrap();
+    assert_eq!(parsed["data"]["action"], "cleared");
+    assert!(parsed["data"]["items"].as_array().unwrap().is_empty());
+    let rows = store.list_pending_inputs("default", pid).unwrap();
+    assert!(rows.is_empty(), "清空后队列表必须为零行");
+}
+
 /// 条件入队（ADR-2026-09-11）：链空闲 → 直跑本轮，全程无 enqueued/consumed 帧、
 /// 队列表保持空——前端乐观气泡与待处理队列条由此互斥（杜绝"聊天+待处理"同屏）。
 #[tokio::test]
@@ -553,7 +681,7 @@ async fn dispatch_idle_chain_runs_direct_without_pending_frames() {
     );
     coord.register_thread("thread-idle-1", "u1");
     seed_session_with_pipeline(&store, "thread-idle-1", "pipe-idle-1").await;
-    let state = make_engine_state(store.clone(), Arc::new(OkInvoker), coord, false);
+    let state = make_engine_state(store.clone(), Arc::new(OkInvoker), coord, false).await;
 
     let dispatcher = agentos_api::ws_session::EngineDispatcher::new(state);
     use agentos_session::router::PipelineDispatcher;
@@ -601,7 +729,7 @@ async fn dispatch_busy_chain_enqueues_then_consumes_after_release() {
     );
     coord.register_thread("thread-busy-1", "u1");
     seed_session_with_pipeline(&store, "thread-busy-1", "pipe-busy-1").await;
-    let state = make_engine_state(store.clone(), Arc::new(OkInvoker), coord, false);
+    let state = make_engine_state(store.clone(), Arc::new(OkInvoker), coord, false).await;
 
     // 占链：同管道挂起任务（模拟上一条消息仍在执行）。
     let release = Arc::new(tokio::sync::Notify::new());
@@ -688,7 +816,7 @@ async fn wait_for_rounds(frames: &Arc<Mutex<Vec<String>>>, expected_count: usize
 
 /// WS agent_id 透传 → 管道 state 持久键 agent.id（2026-09-25，双审查断裂点
 /// 修复的落库断言）：帧显式携带 → 落 pipeline_state 表（persistent_fields
-/// 声明投影，镜像生产 context_build 对 agent.id 的声明）；下一条消息切换
+/// 声明投影，镜像生产 agent_config_load 对 agent.id 的声明）；下一条消息切换
 /// 身份 → 消息级覆盖；再一条不带 → 沿用最后写入值（内核不写键不回退）。
 #[tokio::test]
 async fn dispatch_agent_id_lands_as_persistent_state_key_and_overrides() {
@@ -704,12 +832,15 @@ async fn dispatch_agent_id_lands_as_persistent_state_key_and_overrides() {
     );
     coord.register_thread("thread-agent-1", "u1");
     seed_session_with_pipeline(&store, "thread-agent-1", "pipe-agent-1").await;
-    let state = make_engine_state(store.clone(), Arc::new(OkInvoker), coord, false);
-    // 生产中 agent.id 的持久化声明来自 context_build manifest（persistent_fields）；
+    let state = make_engine_state(store.clone(), Arc::new(OkInvoker), coord, false).await;
+    // 生产中 agent.id 的持久化声明来自 agent_config_load manifest（persistent_fields）；
     // 夹具 manifests 默认为空集，这里补一条同款声明使投影生效。
     let mut m = manifest_base("mock_llm_core");
     m.persistent_fields = vec!["agent.id".to_string()];
-    state.manifests.write().await.push(m);
+    // 整表替换 make_engine_state 预置的同 id 夹具：步骤服务索引按名字全局查重
+    // （接线 ADR 2026-10-08-step-service-level3-wiring），重复 id = fail-closed
+    // 编译错——生产注册表保证 id 唯一，夹具同规。
+    *state.manifests.write().await = vec![m];
 
     let dispatcher = agentos_api::ws_session::EngineDispatcher::new(state);
     use agentos_core::traits::StorageBackend;

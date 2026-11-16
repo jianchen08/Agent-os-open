@@ -1,7 +1,7 @@
 /**
  * Agent Tab Item 组件
  *
- * 显示单个管道标签页：主 Tab（不可关闭）显示"主管道"，子 Tab 显示任务标题。
+ * 显示单个管道标签页：主 Tab（不可关闭）显示会话标题（缺失时兜底 agent 名），子 Tab 显示任务标题。
  * 层级关系由管道管理面板的树形结构承载，标签栏不展示层级徽章。
  *
  * 注意：Agent 切换功能位于会话列表三点菜单（SessionList），
@@ -122,7 +122,7 @@ export const AgentTabItem: React.FC<AgentTabItemProps> = ({ tab, onClick, onClos
         isMainTab && 'bg-primary/5 border-primary/20 border',
         tab.isActive
           ? 'bg-primary/15 text-primary border-primary/30 border shadow-sm'
-          : 'hover:bg-accent text-muted-foreground hover:text-foreground border border-transparent',
+          : 'hover:bg-muted text-muted-foreground hover:text-foreground border border-transparent',
         className,
       )}
       title={tab.path?.join(' \u2192 ') || tab.name}

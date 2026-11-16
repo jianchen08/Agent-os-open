@@ -2,6 +2,7 @@
 // 由 capability_router.rs 的主 #[cfg(test)] 测试块体平移而来（保留私有项访问）。
 
 use super::*;
+use agentos_core::traits::MessageQueryOpts;
 use agentos_core::types::TraceEntry;
 use serde_json::json;
 
@@ -29,7 +30,6 @@ fn test_task_export_manifest() -> agentos_core::traits::PluginManifest {
         description: None,
         version: "1.0.0".to_string(),
         plugin_type: agentos_core::traits::PluginType::System,
-        pipeline_role: None,
         language: "python".to_string(),
         host_type: agentos_core::traits::HostType::Sidecar,
         host_group: None,
@@ -41,7 +41,6 @@ fn test_task_export_manifest() -> agentos_core::traits::PluginManifest {
         mcp: None,
         lifecycle: None,
         native: None,
-        granted_capabilities: vec![],
         restricted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
@@ -213,994 +212,11 @@ async fn test_metrics_record_missing_name() {
     assert!(res.is_err());
 }
 
-/// 捕获 event-bus 推送到 sink 的文本（验证 tool 事件转发）。
-struct CaptureSink {
-    received: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
-}
-#[async_trait::async_trait]
-impl agentos_session::EventSink for CaptureSink {
-    async fn send_text(&self, text: &str) -> bool {
-        if let Ok(v) = serde_json::from_str::<Value>(text) {
-            self.received.lock().unwrap().push(v);
-        }
-        true
-    }
-    fn id(&self) -> u64 {
-        1
-    }
-}
-
-/// 构建带 session 的 router + 捕获 sink（验证 event-bus.emit 转发到前端）。
-fn router_with_session(
-    received: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
-) -> KernelCapabilityRouter {
-    use agentos_session::SessionCoordinator;
-    let coord = Arc::new(SessionCoordinator::default());
-    let sink = Arc::new(CaptureSink { received }) as Arc<dyn agentos_session::EventSink>;
-    coord.register("user-test", sink);
-    coord.register_thread("thread-1", "user-test");
-    let agg = MetricsAggregator::new();
-    KernelCapabilityRouter::with_metrics(agg).with_session(coord)
-}
-
-/// 带契约 + 声明查询器 + session 的 router（streaming 声明闸测试）。
-fn router_with_streaming_gate(
-    received: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
-    decl: Option<agentos_core::traits::StreamingCapability>,
-) -> KernelCapabilityRouter {
-    use agentos_session::SessionCoordinator;
-    let coord = Arc::new(SessionCoordinator::default());
-    let sink = Arc::new(CaptureSink { received }) as Arc<dyn agentos_session::EventSink>;
-    coord.register("user-test", sink);
-    coord.register_thread("thread-1", "user-test");
-    let contracts = Arc::new(
-        crate::kernel_capabilities::load_contracts(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../config/kernel/kernel_capabilities"),
-        )
-        .expect("仓库契约必须可加载"),
-    );
-    let lookup: StreamingDeclarationLookupFn = Arc::new(move |_pid| decl.clone());
-    KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
-        .with_session(coord)
-        .with_capability_contracts(contracts)
-        .with_streaming_declaration_lookup(lookup)
-}
-
-#[tokio::test]
-async fn streaming_gate_rejects_undeclared_plugin() {
-    // 插件未声明 capabilities.streaming → 事件被拒（fail-closed），sink 无事件。
-    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = router_with_streaming_gate(received.clone(), None);
-    let res = router
-        .handle(
-            "event-bus",
-            "emit",
-            json!({
-                "_plugin_id": "my_streamer",
-                "event": "stream_chunk",
-                "payload": {
-                    "thread_id": "thread-1",
-                    "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
-                    "message_id": "p_chunk_001",
-                    "content": "hi",
-                },
-            }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res["status"], "dropped");
-    assert!(res["reason"].as_str().unwrap().contains("streaming"));
-    assert!(received.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn streaming_gate_declared_plugin_emits() {
-    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let decl = agentos_core::traits::StreamingCapability {
-        conduit: false,
-        events: Some(vec![
-            "stream_start".to_string(),
-            "stream_chunk".to_string(),
-            "stream_end".to_string(),
-        ]),
-        part_types: None,
-        persist: Some(false),
-    };
-    let router = router_with_streaming_gate(received.clone(), Some(decl.clone()));
-    // 声明内的事件 → 放行（p_ 命名空间 + thread_id 齐备）
-    let res = router
-        .handle(
-            "event-bus",
-            "emit",
-            json!({
-                "_plugin_id": "my_streamer",
-                "event": "stream_chunk",
-                "payload": {
-                    "thread_id": "thread-1",
-                    "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
-                    "message_id": "p_chunk_001",
-                    "content": "hi",
-                },
-            }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res["status"], "emitted");
-    assert_eq!(received.lock().unwrap().len(), 1);
-    // 声明外的 streaming 契约事件（tool_start 也在 10 事件内）→ 声明闸拒绝
-    let res2 = router
-        .handle(
-            "event-bus",
-            "emit",
-            json!({
-                "_plugin_id": "my_streamer",
-                "event": "tool_start",
-                "payload": {
-                    "thread_id": "thread-1",
-                    "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
-                    "message_id": "p_tool_001",
-                    "call_id": "c1",
-                    "tool_name": "f",
-                },
-            }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        res2["status"], "dropped",
-        "tool_start 未在 events 声明内应被声明闸拒绝（fail-closed）"
-    );
-}
-
-#[tokio::test]
-async fn streaming_gate_rejects_event_outside_declaration() {
-    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let decl = agentos_core::traits::StreamingCapability {
-        conduit: false,
-        events: Some(vec!["stream_start".to_string()]),
-        part_types: None,
-        persist: None,
-    };
-    let router = router_with_streaming_gate(received.clone(), Some(decl));
-    // events 声明只含 stream_start → stream_chunk 被拒
-    let res = router
-        .handle(
-            "event-bus",
-            "emit",
-            json!({
-                "_plugin_id": "my_streamer",
-                "event": "stream_chunk",
-                "payload": {
-                    "thread_id": "thread-1",
-                    "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
-                    "message_id": "p_chunk_001",
-                    "content": "hi",
-                },
-            }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res["status"], "dropped");
-    assert!(res["reason"].as_str().unwrap().contains("declared events"));
-}
-
-#[tokio::test]
-async fn streaming_gate_engine_conduit_bypasses_declaration() {
-    // 引擎管道器官（manifest 声明 capabilities.streaming.conduit=true，P1-2
-    // 声明化）豁免 events 清单发射闸，但命名空间必须 a_（内核签发）。
-    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let decl = agentos_core::traits::StreamingCapability {
-        conduit: true,
-        events: None,
-        part_types: None,
-        persist: None,
-    };
-    let router = router_with_streaming_gate(received.clone(), Some(decl));
-    let res = router
-        .handle(
-            "event-bus",
-            "emit",
-            json!({
-                "_plugin_id": "pipeline_llm_core",
-                "event": "stream_chunk",
-                "payload": {
-                    "thread_id": "thread-1",
-                    "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
-                    "message_id": "a_0123456789abcdef0123456789abcdef",
-                    "content": "hi",
-                },
-            }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res["status"], "emitted");
-    // 但 llm_core 自造 p_ id → 命名空间执法拒绝
-    let res2 = router
-        .handle(
-            "event-bus",
-            "emit",
-            json!({
-                "_plugin_id": "pipeline_llm_core",
-                "event": "stream_chunk",
-                "payload": {
-                    "thread_id": "thread-1",
-                    "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
-                    "message_id": "p_selfmade_001",
-                    "content": "hi",
-                },
-            }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res2["status"], "dropped");
-}
-
-#[tokio::test]
-async fn streaming_gate_engine_id_without_conduit_declaration_rejected() {
-    // P1-2 fail-closed：引擎管道 id 不再凭 id 豁免——manifest 未声明
-    // capabilities.streaming.conduit（lookup None）时按普通插件执法。
-    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = router_with_streaming_gate(received.clone(), None);
-    let res = router
-        .handle(
-            "event-bus",
-            "emit",
-            json!({
-                "_plugin_id": "pipeline_llm_core",
-                "event": "stream_chunk",
-                "payload": {
-                    "thread_id": "thread-1",
-                    "pipeline_id": "c1b2c3d4e5f64789abcdef0123456789",
-                    "message_id": "a_0123456789abcdef0123456789abcdef",
-                    "content": "hi",
-                },
-            }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        res["status"], "dropped",
-        "未声明 conduit 的插件（含引擎 id）不得豁免发射闸"
-    );
-    assert!(res["reason"].as_str().unwrap().contains("not declared"));
-}
-
-#[tokio::test]
-async fn test_event_bus_tool_start_forwarded_with_fields() {
-    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = router_with_session(received.clone());
-
-    // 模拟 tool_core 经 host_call → event-bus.emit 上报的 tool_start 事件。
-    let params = json!({
-        "event": "tool_start",
-        "payload": {
-            "thread_id": "thread-1",
-            "pipeline_id": "pipe-1",
-            "message_id": "msg-1",
-            "call_id": "call_abc",
-            "tool_name": "bash_execute",
-            "args": {"command": "echo hi"},
-        }
-    });
-    let res = router.handle("event-bus", "emit", params).await.unwrap();
-    assert_eq!(res["status"], "emitted");
-    assert_eq!(res["event"], "tool_start");
-
-    // sink 应收到透传后的事件（含路由键 + 业务字段）。
-    let msgs = received.lock().unwrap().clone();
-    assert_eq!(msgs.len(), 1);
-    let ev = &msgs[0];
-    assert_eq!(ev["type"], "tool_start");
-    assert_eq!(ev["data"]["call_id"], "call_abc");
-    assert_eq!(ev["data"]["tool_name"], "bash_execute");
-    assert_eq!(ev["data"]["args"]["command"], "echo hi");
-    assert_eq!(ev["data"]["pipeline_id"], "pipe-1");
-    assert_eq!(ev["data"]["message_id"], "msg-1");
-    assert_eq!(ev["data"]["_threadId"], "thread-1");
-}
-
-#[tokio::test]
-async fn test_event_bus_tool_result_forwarded() {
-    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = router_with_session(received.clone());
-
-    let params = json!({
-        "event": "tool_result",
-        "payload": {
-            "thread_id": "thread-1",
-            "pipeline_id": "pipe-1",
-            "message_id": "msg-1",
-            "call_id": "call_abc",
-            "tool_name": "bash_execute",
-            "result": "hi\n",
-            "success": true,
-            "duration_ms": 5.2,
-        }
-    });
-    let res = router.handle("event-bus", "emit", params).await.unwrap();
-    assert_eq!(res["event"], "tool_result");
-
-    let msgs = received.lock().unwrap().clone();
-    assert_eq!(msgs.len(), 1);
-    assert_eq!(msgs[0]["type"], "tool_result");
-    assert_eq!(msgs[0]["data"]["call_id"], "call_abc");
-    assert_eq!(msgs[0]["data"]["success"], true);
-    assert_eq!(msgs[0]["data"]["duration_ms"], 5.2);
-}
-
-#[tokio::test]
-async fn test_event_bus_tool_event_no_thread_id_dropped() {
-    // thread_id 缺失 → 前端无法路由，应丢弃（不推 sink）。
-    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = router_with_session(received.clone());
-
-    let params = json!({
-        "event": "tool_start",
-        "payload": {"call_id": "c1", "tool_name": "f"}
-    });
-    let _ = router.handle("event-bus", "emit", params).await.unwrap();
-    assert!(received.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn test_event_bus_interaction_request_forwarded() {
-    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = router_with_session(received.clone());
-    let params = json!({
-        "event": "interaction_request",
-        "payload": {
-            "thread_id": "thread-1",
-            "request_id": "req-abc",
-            "interaction_mode": "choice",
-            "title": "请选择",
-            "options": [{"id": "a", "label": "方案A"}],
-        }
-    });
-    let res = router.handle("event-bus", "emit", params).await.unwrap();
-    assert_eq!(res["status"], "emitted");
-    assert_eq!(res["event"], "interaction_request");
-    let msgs = received.lock().unwrap().clone();
-    assert_eq!(msgs.len(), 1);
-    assert_eq!(msgs[0]["type"], "interaction_request");
-    assert_eq!(msgs[0]["data"]["request_id"], "req-abc");
-    assert_eq!(msgs[0]["data"]["_threadId"], "thread-1");
-}
-
-#[tokio::test]
-async fn test_event_bus_interaction_event_no_thread_id_dropped() {
-    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = router_with_session(received.clone());
-    let params = json!({
-        "event": "interaction_request",
-        "payload": {"request_id": "req-abc", "title": "x"}
-    });
-    let _ = router.handle("event-bus", "emit", params).await.unwrap();
-    assert!(received.lock().unwrap().is_empty());
-}
-
-// ── frontend.emit：插件 → 内核 → 前端一次性事件出口（ADR §3.5，
-//    task_observability 任务 1/2 共享前置）──
-
-#[tokio::test]
-async fn test_frontend_emit_cost_update_forwarded() {
-    // track 插件经 frontend.emit 推 cost_update：payload 携带路由键 +
-    // 单轮/累计 token 指标，整体透传并补齐路由键后推前端。
-    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = router_with_session(received.clone());
-
-    let params = json!({
-        "event": "cost_update",
-        "payload": {
-            "thread_id": "thread-1",
-            "pipeline_id": "pipe-1",
-            "message_id": "msg-1",
-            "input_tokens": 60632,
-            "output_tokens": 512,
-            "cached_tokens": 60000,
-            "total_tokens": 61144,
-            "cache_hit_ratio": 0.9895,
-            "cumulative": {
-                "total_input": 2458025,
-                "total_output": 30000,
-                "total_cached": 2331456,
-                "missed": 126569
-            }
-        }
-    });
-    let res = router.handle("frontend", "emit", params).await.unwrap();
-    assert_eq!(res["status"], "emitted");
-    assert_eq!(res["event"], "cost_update");
-
-    let msgs = received.lock().unwrap().clone();
-    assert_eq!(msgs.len(), 1);
-    let ev = &msgs[0];
-    assert_eq!(ev["type"], "cost_update");
-    assert_eq!(ev["data"]["pipeline_id"], "pipe-1");
-    assert_eq!(ev["data"]["message_id"], "msg-1");
-    assert_eq!(ev["data"]["_threadId"], "thread-1");
-    assert_eq!(ev["data"]["input_tokens"], 60632);
-    assert_eq!(ev["data"]["cached_tokens"], 60000);
-    assert_eq!(ev["data"]["cumulative"]["missed"], 126569);
-    // sequence 信封由 SessionCoordinator 分配（与 tool 事件同空间）
-    assert!(ev.get("sequence").is_some());
-}
-
-#[tokio::test]
-async fn test_frontend_emit_tool_progress_forwarded() {
-    // bash 工具执行中经 frontend.emit 推 tool_progress（stdout 增量）。
-    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = router_with_session(received.clone());
-
-    let params = json!({
-        "event": "tool_progress",
-        "payload": {
-            "thread_id": "thread-1",
-            "pipeline_id": "pipe-1",
-            "message_id": "msg-1",
-            "call_id": "call_abc",
-            "tool_name": "bash_execute",
-            "delta": "build ok\n",
-            "bytes_read": 4096,
-            "elapsed_ms": 2100
-        }
-    });
-    let res = router.handle("frontend", "emit", params).await.unwrap();
-    assert_eq!(res["event"], "tool_progress");
-
-    let msgs = received.lock().unwrap().clone();
-    assert_eq!(msgs.len(), 1);
-    assert_eq!(msgs[0]["type"], "tool_progress");
-    assert_eq!(msgs[0]["data"]["call_id"], "call_abc");
-    assert_eq!(msgs[0]["data"]["delta"], "build ok\n");
-    assert_eq!(msgs[0]["data"]["pipeline_id"], "pipe-1");
-    assert_eq!(msgs[0]["data"]["_threadId"], "thread-1");
-}
-
-#[tokio::test]
-async fn test_frontend_emit_thread_id_top_level_fallback() {
-    // thread_id 允许在 params 顶层（ADR scope 语义）——payload 内缺失时兜底。
-    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = router_with_session(received.clone());
-
-    let params = json!({
-        "event": "termination_status",
-        "thread_id": "thread-1",
-        "payload": {
-            "pipeline_id": "pipe-1",
-            "convergence": "converging",
-            "remaining_budget_percent": 73.5
-        }
-    });
-    let res = router.handle("frontend", "emit", params).await.unwrap();
-    assert_eq!(res["event"], "termination_status");
-
-    let msgs = received.lock().unwrap().clone();
-    assert_eq!(msgs.len(), 1);
-    assert_eq!(msgs[0]["type"], "termination_status");
-    assert_eq!(msgs[0]["data"]["_threadId"], "thread-1");
-    assert_eq!(msgs[0]["data"]["convergence"], "converging");
-}
-
-#[tokio::test]
-async fn test_frontend_emit_no_thread_id_dropped() {
-    // thread_id 缺失（payload 与顶层都无）→ 前端无法路由，丢弃。
-    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = router_with_session(received.clone());
-
-    let params = json!({
-        "event": "cost_update",
-        "payload": {"pipeline_id": "pipe-1", "total_tokens": 100}
-    });
-    let _ = router.handle("frontend", "emit", params).await.unwrap();
-    assert!(received.lock().unwrap().is_empty());
-}
-
-// ── tool-executor._call_context 透传（task_observability 任务 2）──
-
-/// 捕获 invoke_tool 收到的 (plugin_id, tool_name, inputs)。
-struct CaptureInvoker {
-    captured: std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>,
-}
-#[async_trait::async_trait]
-impl agentos_core::traits::PluginInvoker for CaptureInvoker {
-    async fn invoke_pipeline_plugin<'a>(
-        &self,
-        _plugin_id: &str,
-        _ctx: &agentos_core::types::PluginContext<'a>,
-    ) -> Result<agentos_core::types::PluginResult, agentos_core::types::PluginError> {
-        Err(agentos_core::types::PluginError {
-            message: "not used in test".into(),
-            code: None,
-            source: None,
-        })
-    }
-    async fn invoke_tool(
-        &self,
-        plugin_id: &str,
-        tool_name: &str,
-        inputs: &Value,
-    ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError> {
-        self.captured.lock().unwrap().push((
-            plugin_id.to_string(),
-            tool_name.to_string(),
-            inputs.clone(),
-        ));
-        Ok(agentos_core::types::ToolExecutionResult {
-            success: true,
-            data: json!({"output": "ok"}),
-            error: None,
-            duration_ms: Some(1),
-            metadata: None,
-        })
-    }
-    async fn send_lifecycle_hook(
-        &self,
-        _plugin_id: &str,
-        _hook: agentos_core::traits::LifecycleHook,
-        _context: &agentos_core::traits::HookContext,
-    ) -> Result<(), agentos_core::types::PluginError> {
-        Ok(())
-    }
-}
-
-/// 构造带单工具注册表（bash_execute → plugin_bash）+ 捕获 invoker 的 router。
-fn router_with_tool_invoke(
-    captured: std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>,
-) -> KernelCapabilityRouter {
-    use agentos_core::traits::ToolDescriptor;
-    use agentos_core::types::{ToolCategory, ToolSource};
-    use agentos_plugin_loader::CapabilityRegistryImpl;
-    let registry = CapabilityRegistryImpl::new();
-    registry.register_tool(
-        "plugin_bash",
-        ToolDescriptor {
-            name: "bash_execute".into(),
-            description: String::new(),
-            plugin_id: "plugin_bash".into(),
-            input_schema: json!({}),
-            output_schema: None,
-            category: ToolCategory::System,
-            source: ToolSource::Mcp,
-            ui: None,
-            render: None,
-        },
-    );
-    KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
-        .with_invoker(Arc::new(CaptureInvoker { captured }))
-        .with_registry(Arc::new(registry))
-}
-
-#[tokio::test]
-async fn test_tool_executor_invoke_merges_call_context_into_args() {
-    // tool_core 在 params 级携带 _call_context（前端路由键）→
-    // 内核合入 tool args 透传给工具 sidecar（bash 据此推 tool_progress）。
-    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = router_with_tool_invoke(captured.clone());
-
-    let params = json!({
-        "tool_name": "bash_execute",
-        "args": {"command": "echo hi", "session_id": "sess-1"},
-        "_call_context": {
-            "call_id": "call_abc",
-            "pipeline_id": "pipe-1",
-            "message_id": "msg-1",
-            "thread_id": "sess-1"
-        }
-    });
-    let res = router
-        .handle("tool-executor", "invoke", params)
-        .await
-        .unwrap();
-    assert_eq!(res["success"], true);
-
-    let calls = captured.lock().unwrap().clone();
-    assert_eq!(calls.len(), 1);
-    let (plugin_id, tool_name, inputs) = &calls[0];
-    assert_eq!(plugin_id, "plugin_bash");
-    assert_eq!(tool_name, "bash_execute");
-    assert_eq!(inputs["command"], "echo hi");
-    assert_eq!(inputs["session_id"], "sess-1");
-    assert_eq!(inputs["_call_context"]["call_id"], "call_abc");
-    assert_eq!(inputs["_call_context"]["pipeline_id"], "pipe-1");
-    assert_eq!(inputs["_call_context"]["message_id"], "msg-1");
-    assert_eq!(inputs["_call_context"]["thread_id"], "sess-1");
-}
-
-#[tokio::test]
-async fn test_tool_executor_invoke_without_call_context_untouched() {
-    // 无 _call_context（旧 tool_core / 无进度需求的工具）→ args 原样透传。
-    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = router_with_tool_invoke(captured.clone());
-
-    let params = json!({
-        "tool_name": "bash_execute",
-        "args": {"command": "echo hi", "session_id": "sess-1"},
-    });
-    let _ = router
-        .handle("tool-executor", "invoke", params)
-        .await
-        .unwrap();
-
-    let calls = captured.lock().unwrap().clone();
-    assert_eq!(calls.len(), 1);
-    let inputs = &calls[0].2;
-    assert!(inputs.get("_call_context").is_none());
-    assert_eq!(inputs["command"], "echo hi");
-}
-
-// ── tool-executor.invoke 目标插件解析（显式 plugin_id 优先于注册表反查）──
-
-#[tokio::test]
-async fn test_tool_executor_explicit_plugin_id_wins_over_registry() {
-    // 调用方显式传 plugin_id（系统插件工具如 hindsight.recall 不在 CapabilityRegistry，
-    // 反查必然失败）→ 必须优先用显式 plugin_id，而不是注册表反查结果。
-    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    // 注册表把 bash_execute → plugin_bash；但显式 plugin_id 指向 system 插件 hindsight。
-    let router = router_with_tool_invoke(captured.clone());
-
-    let params = json!({
-        "tool_name": "bash_execute",
-        "plugin_id": "hindsight",
-        "args": {"query": "where did I leave the keys", "session_id": "sess-1"},
-    });
-    let res = router
-        .handle("tool-executor", "invoke", params)
-        .await
-        .unwrap();
-    assert_eq!(res["success"], true);
-
-    let calls = captured.lock().unwrap().clone();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].0, "hindsight", "显式 plugin_id 应优先于注册表反查");
-    assert_eq!(calls[0].1, "bash_execute");
-}
-
-#[tokio::test]
-async fn test_tool_executor_empty_plugin_id_falls_back_to_registry() {
-    // 显式 plugin_id 为空字符串 → 视为未提供，回退注册表反查。
-    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = router_with_tool_invoke(captured.clone());
-
-    let params = json!({
-        "tool_name": "bash_execute",
-        "plugin_id": "",
-        "args": {"command": "echo hi"},
-    });
-    let _ = router
-        .handle("tool-executor", "invoke", params)
-        .await
-        .unwrap();
-
-    let calls = captured.lock().unwrap().clone();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].0, "plugin_bash", "空 plugin_id 应回退注册表反查");
-}
-
-#[tokio::test]
-async fn test_tool_executor_internal_keys_stripped_from_args() {
-    // _owner/_log_ctx/tenant_id/plugin_id 是内核/SDK 内部元数据，不得透传给工具 handler。
-    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = router_with_tool_invoke(captured.clone());
-
-    let params = json!({
-        "tool_name": "bash_execute",
-        "plugin_id": "plugin_bash",
-        "args": {
-            "command": "echo hi",
-            "session_id": "sess-1",
-            "_owner": "user-1",
-            "_log_ctx": {"request_id": "req-1"},
-            "tenant_id": "tenant-a",
-            "plugin_id": "spoofed",
-            "pipeline_id": "pipe-1"
-        },
-        "_log_ctx": {"request_id": "req-1"},
-    });
-    let _ = router
-        .handle("tool-executor", "invoke", params)
-        .await
-        .unwrap();
-
-    let calls = captured.lock().unwrap().clone();
-    let inputs = &calls[0].2;
-    // 内部元数据全部剥离
-    assert!(inputs.get("_owner").is_none(), "_owner 应被剥离");
-    assert!(inputs.get("_log_ctx").is_none(), "_log_ctx 应被剥离");
-    assert!(inputs.get("tenant_id").is_none(), "tenant_id 应被剥离");
-    assert!(
-        inputs.get("plugin_id").is_none(),
-        "args 级 plugin_id 应被剥离（防伪造）"
-    );
-    // 业务字段保留（session_id/pipeline_id 是 tool_args_inject 注入的显式参数）
-    assert_eq!(inputs["command"], "echo hi");
-    assert_eq!(inputs["session_id"], "sess-1");
-    assert_eq!(inputs["pipeline_id"], "pipe-1");
-}
-
-#[tokio::test]
-async fn test_tool_executor_registry_fallback_without_explicit_id() {
-    // 无显式 plugin_id → 注册表 tool_name → plugin_id 反查。
-    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = router_with_tool_invoke(captured.clone());
-
-    let params = json!({
-        "tool_name": "bash_execute",
-        "args": {"command": "echo hi", "session_id": "sess-1"},
-    });
-    let _ = router
-        .handle("tool-executor", "invoke", params)
-        .await
-        .unwrap();
-
-    let calls = captured.lock().unwrap().clone();
-    assert_eq!(calls[0].0, "plugin_bash");
-}
-
-#[tokio::test]
-async fn test_tool_executor_unregistered_tool_fails_closed() {
-    // 反查失败（无注册表/工具未注册）+ 无显式 plugin_id → fail-closed 报
-    // "工具未注册"，不落 invoker（无"工具名当插件 ID"兜底）。
-    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_invoker(
-        Arc::new(CaptureInvoker {
-            captured: captured.clone(),
-        }),
-    );
-
-    let params = json!({
-        "tool_name": "some_tool",
-        "args": {"x": 1},
-    });
-    let res = router
-        .handle("tool-executor", "invoke", params)
-        .await
-        .unwrap();
-
-    assert_eq!(res["success"], false);
-    assert!(
-        res["error"].as_str().unwrap().contains("未注册"),
-        "应报工具未注册，got: {}",
-        res["error"].as_str().unwrap()
-    );
-    let calls = captured.lock().unwrap().clone();
-    assert!(calls.is_empty(), "未注册工具不应触达 invoker");
-}
-
-// ── tool-executor.invoke 调用路径自愈（BUG-37）────────────────────────────
-// 注册表条目因 G2 启动期误剔等原因丢失且 watcher 不重扫 → 工具永久不可用。
-// 自愈闭包 = "未注册但 manifest 在册 → 重注册再反查"（有界：每次调用至多一次）。
-
-/// 自愈测试夹具：共享注册表 + 记录 heal 触发次数。
-/// heal 闭包模拟生产装配（manifest 在册 → 重注册 → 返回描述符）。
-fn router_with_heal(
-    captured: std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>,
-    registry: Arc<agentos_plugin_loader::CapabilityRegistryImpl>,
-    heal_calls: std::sync::Arc<std::sync::Mutex<usize>>,
-) -> KernelCapabilityRouter {
-    use agentos_core::traits::ToolDescriptor;
-    use agentos_core::types::{ToolCategory, ToolSource};
-    let reg_for_heal = registry.clone();
-    let heal: ToolRegistryHealFn = Arc::new(move |tool_name: &str| {
-        let reg = reg_for_heal.clone();
-        let calls = heal_calls.clone();
-        Box::pin(async move {
-            *calls.lock().unwrap() += 1;
-            // 模拟生产自愈：manifest 在册 → reenable 重注册（幂等），返回描述符。
-            if tool_name != "project_state" {
-                return None;
-            }
-            let descriptor = ToolDescriptor {
-                name: tool_name.to_string(),
-                description: "healed".into(),
-                plugin_id: "project_state_tool".into(),
-                input_schema: json!({"type": "object"}),
-                output_schema: None,
-                category: ToolCategory::System,
-                source: ToolSource::Mcp,
-                ui: None,
-                render: None,
-            };
-            reg.register_tool("project_state_tool", descriptor.clone());
-            Some(descriptor)
-        })
-    });
-    KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
-        .with_invoker(Arc::new(CaptureInvoker { captured }))
-        .with_registry(registry)
-        .with_tool_registry_heal(heal)
-}
-
-#[tokio::test]
-async fn test_tool_executor_unregistered_tool_self_heals_and_invokes() {
-    // 注册表条目丢失（G2 误剔形态：registry 无 project_state）→ 反查 miss
-    // 触发自愈重注册 → 本次调用按重注册结果路由到正确插件，且注册表恢复。
-    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let heal_calls = std::sync::Arc::new(std::sync::Mutex::new(0usize));
-    let registry = Arc::new(agentos_plugin_loader::CapabilityRegistryImpl::new());
-    let router = router_with_heal(captured.clone(), registry.clone(), heal_calls.clone());
-
-    let params = json!({
-        "tool_name": "project_state",
-        "args": {"action": "query"},
-    });
-    let res = router
-        .handle("tool-executor", "invoke", params)
-        .await
-        .unwrap();
-
-    assert_eq!(res["success"], true, "自愈后调用应成功: {}", res["error"]);
-    let calls = captured.lock().unwrap().clone();
-    assert_eq!(calls.len(), 1, "自愈后应落 invoker 执行");
-    assert_eq!(calls[0].0, "project_state_tool", "应路由到重注册的插件");
-    assert_eq!(calls[0].1, "project_state");
-    // 注册表条目恢复（后续反查不再依赖自愈）
-    assert!(
-        registry.get_tool("project_state").is_some(),
-        "自愈应把工具重注册进共享注册表"
-    );
-    // 下次调用直接命中注册表，不再触发自愈（有界性）
-    let _ = router
-        .handle(
-            "tool-executor",
-            "invoke",
-            json!({"tool_name": "project_state", "args": {"action": "query"}}),
-        )
-        .await
-        .unwrap();
-    assert_eq!(*heal_calls.lock().unwrap(), 1, "注册表恢复后不应再触发自愈");
-}
-
-#[tokio::test]
-async fn test_tool_executor_heal_miss_still_fails_closed() {
-    // 自愈闭包返回 None（manifest 不在册 / 插件已禁用）→ 保持 fail-closed
-    // 报"未注册"，不落 invoker。
-    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let heal_calls = std::sync::Arc::new(std::sync::Mutex::new(0usize));
-    let registry = Arc::new(agentos_plugin_loader::CapabilityRegistryImpl::new());
-    let router = router_with_heal(captured.clone(), registry.clone(), heal_calls.clone());
-
-    let res = router
-        .handle(
-            "tool-executor",
-            "invoke",
-            json!({"tool_name": "ghost_tool", "args": {}}),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(res["success"], false);
-    assert!(
-        res["error"].as_str().unwrap().contains("未注册"),
-        "自愈未命中应保持 fail-closed，got: {}",
-        res["error"].as_str().unwrap()
-    );
-    assert_eq!(*heal_calls.lock().unwrap(), 1, "应触发过一次自愈尝试");
-    assert!(
-        captured.lock().unwrap().is_empty(),
-        "自愈未命中不得触达 invoker"
-    );
-}
-
-/// 固定返回错误的 invoker（验证 tool-executor.invoke 的错误归一化）。
-struct ErroringInvoker;
-#[async_trait::async_trait]
-impl agentos_core::traits::PluginInvoker for ErroringInvoker {
-    async fn invoke_pipeline_plugin<'a>(
-        &self,
-        _plugin_id: &str,
-        _ctx: &agentos_core::types::PluginContext<'a>,
-    ) -> Result<agentos_core::types::PluginResult, agentos_core::types::PluginError> {
-        Err(agentos_core::types::PluginError {
-            message: "not used".into(),
-            code: None,
-            source: None,
-        })
-    }
-    async fn invoke_tool(
-        &self,
-        _plugin_id: &str,
-        _tool_name: &str,
-        _inputs: &Value,
-    ) -> Result<agentos_core::types::ToolExecutionResult, agentos_core::types::PluginError> {
-        Err(agentos_core::types::PluginError {
-            message: "sidecar crashed".into(),
-            code: Some("MCP_TOOL_CALL_FAILED".into()),
-            source: None,
-        })
-    }
-    async fn send_lifecycle_hook(
-        &self,
-        _plugin_id: &str,
-        _hook: agentos_core::traits::LifecycleHook,
-        _context: &agentos_core::traits::HookContext,
-    ) -> Result<(), agentos_core::types::PluginError> {
-        Ok(())
-    }
-}
-
-#[tokio::test]
-async fn test_tool_executor_invoke_error_normalized_to_failure_json() {
-    // invoke_tool 返回 Err → capability 层归一化为 {"success": false, "error": ...}，
-    // 不把内核 PluginError 泄漏给 sidecar。
-    use agentos_core::traits::ToolDescriptor;
-    use agentos_core::types::{ToolCategory, ToolSource};
-    use agentos_plugin_loader::CapabilityRegistryImpl;
-    let registry = CapabilityRegistryImpl::new();
-    registry.register_tool(
-        "plugin_bash",
-        ToolDescriptor {
-            name: "bash_execute".into(),
-            description: String::new(),
-            plugin_id: "plugin_bash".into(),
-            input_schema: json!({}),
-            output_schema: None,
-            category: ToolCategory::System,
-            source: ToolSource::Mcp,
-            ui: None,
-            render: None,
-        },
-    );
-    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
-        .with_invoker(Arc::new(ErroringInvoker))
-        .with_registry(Arc::new(registry));
-
-    let res = router
-        .handle(
-            "tool-executor",
-            "invoke",
-            json!({"tool_name": "bash_execute", "args": {"command": "echo hi"}}),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res["success"], false);
-    assert!(res["error"].as_str().unwrap().contains("sidecar crashed"));
-}
-
-#[tokio::test]
-async fn test_tool_executor_missing_invoker_returns_protocol_error() {
-    // 未注入 invoker → Protocol 错误（配置缺失早暴露）。
-    // 工具先经注册表反查可达（否则 fail-closed 走"未注册"分支）。
-    use agentos_core::traits::ToolDescriptor;
-    use agentos_core::types::{ToolCategory, ToolSource};
-    use agentos_plugin_loader::CapabilityRegistryImpl;
-    let registry = CapabilityRegistryImpl::new();
-    registry.register_tool(
-        "plugin_bash",
-        ToolDescriptor {
-            name: "bash_execute".into(),
-            description: String::new(),
-            plugin_id: "plugin_bash".into(),
-            input_schema: json!({}),
-            output_schema: None,
-            category: ToolCategory::System,
-            source: ToolSource::Mcp,
-            ui: None,
-            render: None,
-        },
-    );
-    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
-        .with_registry(Arc::new(registry));
-    let res = router
-        .handle(
-            "tool-executor",
-            "invoke",
-            json!({"tool_name": "bash_execute", "args": {}}),
-        )
-        .await;
-    assert!(res.is_err());
-    let err = res.unwrap_err();
-    match err {
-        agentos_mcp::McpError::Protocol { message } => {
-            assert!(message.contains("未配置 invoker"), "got: {message}")
-        }
-        other => panic!("expected Protocol error, got {other:?}"),
-    }
-}
-
-// ── event-bus.emit_domain（ADR 2026-08-28 事件下沉底座，用真实内存 SqliteStore 验证端到端）──
-
-type DomainSink = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<(String, serde_json::Value)>)>>>;
+mod streaming_events;
+mod tool_invoke;
+
+use self::streaming_events::{router_with_session, router_with_streaming_gate, CaptureSink};
+use self::tool_invoke::{CaptureInvoker, DomainSink};
 
 #[tokio::test]
 async fn emit_domain_broadcasts_to_domain_broadcaster() {
@@ -1252,6 +268,25 @@ async fn emit_domain_without_broadcaster_fails_closed_and_missing_event_rejected
     assert!(err.to_string().contains("event"), "{err}");
 }
 
+/// pipeline-state.update 声明制测试调用方（manifest state.writes 等价声明）。
+const TEST_STATE_WRITER: &str = "test_state_writer";
+
+/// 测试写面声明：task.* 与触发器注册表（含 legacy 前缀）——模拟任务域
+/// 写者插件的 manifest `state.writes`。其他 plugin_id = 未声明（应拒绝）。
+fn test_state_writes_lookup() -> crate::capability_router::StateWritesLookupFn {
+    Arc::new(|plugin_id: &str| {
+        if plugin_id == TEST_STATE_WRITER {
+            vec![
+                "task.*".to_string(),
+                "trigger.registry.*".to_string(),
+                "task.trigger.registry.*".to_string(),
+            ]
+        } else {
+            Vec::new()
+        }
+    })
+}
+
 fn router_with_store() -> KernelCapabilityRouter {
     let store: Arc<dyn StorageBackend> =
         Arc::new(agentos_engine::SqliteStore::open_memory().expect("open_memory"));
@@ -1260,6 +295,7 @@ fn router_with_store() -> KernelCapabilityRouter {
         .with_export_fields_lookup(Arc::new(|| {
             crate::capability_router::ExportFields::from_manifests(&[test_task_export_manifest()])
         }))
+        .with_state_writes_lookup(test_state_writes_lookup())
 } // ── GAP-2：pipeline-state 域（CONDITION 触发器的求值上下文源） ──────
 
 #[tokio::test]
@@ -1327,10 +363,68 @@ async fn test_pipeline_state_lists_registry_rows_with_task_fields() {
 }
 
 #[tokio::test]
+async fn test_reverse_call_tenant_passthrough_scopes_kernel_read_faces() {
+    // 刀1 acceptance（maintenance 通道实测口径）：sidecar 反调经
+    // PluginScopedRouter（生产装配形态，host_acquire 同构）→ 内核
+    // pipeline-state.list 读面——params 携带 `_tenant_id: maintenance` 时读面
+    // 按 maintenance 解析（任务详情 404 的同根机制）；无 `_tenant_id` 时按
+    // default 回退（maintenance 行不得泄漏）。
+    let tenant = format!("maintenance_{}", uuid::Uuid::new_v4().simple());
+    let pid = format!("pipe_mtn_{}", uuid::Uuid::new_v4().simple());
+    let reg = agentos_session::pipeline_state_registry::global_registry();
+    reg.get_or_init(
+        &tenant,
+        &pid,
+        "th_mtn",
+        "agentos",
+        json!({
+            "pipeline_id": pid,
+            "task.id": "task-mtn-1",
+            "task.status": "running",
+        }),
+    );
+
+    // 生产组合：PluginScopedRouter 包共享内核路由器（身份=插件 id）。
+    let kernel = Arc::new(router_with_store());
+    let scoped = agentos_invoker::PluginScopedRouter::new(
+        "task_evaluate",
+        kernel as Arc<dyn CapabilityRouter>,
+    );
+
+    // ① 反调带 `_tenant_id: maintenance` → maintenance 行可见（404 根因消除）
+    let rows = scoped
+        .handle(
+            "pipeline-state",
+            "list",
+            json!({"_tenant_id": tenant, "_session_id": "th_mtn"}),
+        )
+        .await
+        .unwrap();
+    let arr = rows.as_array().expect("返回应为行数组");
+    let row = arr
+        .iter()
+        .find(|r| r.get("pipeline_id").and_then(|v| v.as_str()) == Some(pid.as_str()))
+        .expect("maintenance 反调必须看到本租户任务行（详情 404 同根）");
+    assert_eq!(row["task.id"], "task-mtn-1");
+
+    // ② 同一反调无 `_tenant_id` → default 回退语义：maintenance 行不可见
+    let rows = scoped
+        .handle("pipeline-state", "list", json!({}))
+        .await
+        .unwrap();
+    let arr = rows.as_array().expect("返回应为行数组");
+    assert!(
+        !arr.iter()
+            .any(|r| r.get("pipeline_id").and_then(|v| v.as_str()) == Some(pid.as_str())),
+        "无租户反调按 default 回退，maintenance 行不得泄漏"
+    );
+}
+
+#[tokio::test]
 async fn test_pipeline_state_cold_rows_carry_latest_run_status() {
-    // BUG-2 幽灵 running：冷兜底行（checkpoint + 表行合并）缺 run_status 时，
-    // 消费方（插件 reconcile / 前端三源推断）把死管道猜成 running。
-    // 契约：冷行以 runs 表最新 run 的权威状态补齐 run_status（fill-if-absent）。
+    // 冷兜底行（checkpoint + 表行合并）原样携带表行 run_status 簿记键——投影
+    // 即真值（runs 退役收尾 ADR 2026-10-08：读面不补写不伪造，旧 runs 表权威
+    // overlay 已废）。
     let tenant = format!("tenant_cold_rs_{}", uuid::Uuid::new_v4().simple());
     let pid = format!("pipe_cold_rs_{}", uuid::Uuid::new_v4().simple());
     let run_id = format!("run_cold_rs_{}", uuid::Uuid::new_v4().simple());
@@ -1342,7 +436,7 @@ async fn test_pipeline_state_cold_rows_carry_latest_run_status() {
         agentos_core::types::TenantContext::new(&tenant, "th_cold_rs"),
         async {
             store
-                .record_run_start(&pid, &tenant, &run_id, "h")
+                .record_run_start(&pid, &tenant, &run_id, "h", "2026-10-15T00:00:00+00:00")
                 .await
                 .unwrap();
             store
@@ -1356,7 +450,7 @@ async fn test_pipeline_state_cold_rows_carry_latest_run_status() {
                 )
                 .await
                 .unwrap();
-            // 出生投影只有任务域字段：run_status 缺失（崩溃形态）
+            // 出生投影只有任务域字段：run_status 由簿记键单独带出
             store
                 .upsert_state_field(&pid, &tenant, "task.status", &serde_json::json!("running"))
                 .await
@@ -1385,7 +479,54 @@ async fn test_pipeline_state_cold_rows_carry_latest_run_status() {
     assert_eq!(row["source"], "checkpoint");
     assert_eq!(
         row["run_status"], "cancelled",
-        "冷行应携带 runs 表最新 run 的权威状态"
+        "冷行应原样携带表行 run_status 簿记键"
+    );
+    assert_eq!(row["task.status"], "running", "任务域字段保持原值");
+}
+
+#[tokio::test]
+async fn test_pipeline_state_cold_rows_missing_run_status_stays_missing() {
+    // 运行簿记投影缺失（崩溃/reap 形态：有出生投影无 run_status 键）→ 冷行
+    // 如实缺 run_status——读面不补写不伪造（谁终态谁随写，runs 退役收尾
+    // ADR 2026-10-08，旧 overlay 会把缺键 fabrication 成 running）。
+    let tenant = format!("tenant_cold_rsx_{}", uuid::Uuid::new_v4().simple());
+    let pid = format!("pipe_cold_rsx_{}", uuid::Uuid::new_v4().simple());
+
+    let store: std::sync::Arc<dyn agentos_core::traits::StorageBackend> =
+        std::sync::Arc::new(agentos_engine::SqliteStore::open_memory().expect("open_memory"));
+    agentos_tenant::scope(
+        agentos_core::types::TenantContext::new(&tenant, "th_cold_rsx"),
+        async {
+            // 出生投影只有任务域字段（无 record_run_start：run_status 缺失形态）
+            store
+                .upsert_state_field(&pid, &tenant, "task.status", &serde_json::json!("running"))
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_store(store.clone())
+        .with_export_fields_lookup(Arc::new(|| {
+            crate::capability_router::ExportFields::from_manifests(&[test_task_export_manifest()])
+        }));
+    let rows = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new(&tenant, "th_cold_rsx"),
+        router.handle("pipeline-state", "list", json!({})),
+    )
+    .await
+    .unwrap();
+
+    let arr = rows.as_array().expect("返回应为行数组");
+    let row = arr
+        .iter()
+        .find(|r| r.get("pipeline_id").and_then(|v| v.as_str()) == Some(pid.as_str()))
+        .expect("表行单独在场即出口");
+    assert_eq!(row["source"], "checkpoint");
+    assert!(
+        row.get("run_status").is_none(),
+        "簿记投影缺失不得伪造运行状态"
     );
     assert_eq!(row["task.status"], "running", "任务域字段保持原值");
 }
@@ -1613,6 +754,7 @@ async fn test_pipeline_state_update_writes_task_fields_both_paths() {
             "pipeline-state",
             "update",
             json!({
+                "_plugin_id": TEST_STATE_WRITER,
                 "pipeline_id": pid,
                 "fields": {"task.status": "completed", "task.ended_at": "2026-08-24T00:00:00Z"},
             }),
@@ -1653,9 +795,9 @@ async fn test_pipeline_state_update_writes_task_fields_both_paths() {
 }
 
 #[tokio::test]
-async fn test_pipeline_state_update_rejects_non_task_keys() {
-    // 写面仅允许 task.* 前缀键——管道运行域字段（iteration/status/suspended）
-    // 归引擎，插件不得触碰。
+async fn test_pipeline_state_update_rejects_undeclared_and_unknown_plugin() {
+    // 声明制（ADR 2026-10-02）：调用方 manifest state.writes 未声明的键拒绝
+    // （如管道运行域 iteration）；无声明的 plugin_id 一律拒绝（fail-closed）。
     let tenant = format!("tenant_upd2_{}", uuid::Uuid::new_v4().simple());
     let router = router_with_store();
     let r = agentos_tenant::scope(
@@ -1664,16 +806,67 @@ async fn test_pipeline_state_update_rejects_non_task_keys() {
             "pipeline-state",
             "update",
             json!({
+                "_plugin_id": TEST_STATE_WRITER,
                 "pipeline_id": "pipe_x",
                 "fields": {"iteration": 5},
             }),
         ),
     )
     .await;
-    assert!(
-        r.is_err(),
-        "非 task.* 键必须拒绝（管道运行域归引擎）: {r:?}"
-    );
+    let err = r.expect_err("未在 state.writes 声明的键必须拒绝（管道运行域归引擎）");
+    assert!(err.to_string().contains("state.writes"), "{err}");
+
+    // 无声明插件：任务域键也不放行（声明制而非前缀制）
+    let r2 = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new(&tenant, "th_upd2"),
+        router.handle(
+            "pipeline-state",
+            "update",
+            json!({
+                "_plugin_id": "undeclared_plugin",
+                "pipeline_id": "pipe_x",
+                "fields": {"task.status": "running"},
+            }),
+        ),
+    )
+    .await;
+    assert!(r2.is_err(), "未声明插件的 task.* 键必须拒绝: {r2:?}");
+
+    // 缺 _plugin_id：拒绝（写面只接受插件上下文调用）
+    let r3 = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new(&tenant, "th_upd2"),
+        router.handle(
+            "pipeline-state",
+            "update",
+            json!({"pipeline_id": "pipe_x", "fields": {"task.status": "running"}}),
+        ),
+    )
+    .await;
+    let err3 = r3.expect_err("缺 _plugin_id 必须拒绝");
+    assert!(err3.to_string().contains("_plugin_id"), "{err3}");
+}
+
+#[tokio::test]
+async fn test_pipeline_state_update_prefix_wildcard_and_non_task_namespace() {
+    // 前缀通配声明生效，且非 task.* 命名空间同规（不再有域特判）：
+    // 声明 trigger.registry.* → trigger.registry.t1 可写。
+    let tenant = format!("tenant_upd3_{}", uuid::Uuid::new_v4().simple());
+    let pid = format!("pipe_upd3_{}", uuid::Uuid::new_v4().simple());
+    let router = router_with_store();
+    let r = agentos_tenant::scope(
+        agentos_core::types::TenantContext::new(&tenant, "th_upd3"),
+        router.handle(
+            "pipeline-state",
+            "update",
+            json!({
+                "_plugin_id": TEST_STATE_WRITER,
+                "pipeline_id": pid,
+                "fields": {"trigger.registry.t1": {"trigger_id": "t1"}},
+            }),
+        ),
+    )
+    .await;
+    assert!(r.is_ok(), "前缀通配声明的非 task 键应可写: {r:?}");
 }
 
 #[tokio::test]
@@ -1717,7 +910,13 @@ async fn test_traces_list_by_pipeline_bypasses_session_mapping() {
     let router =
         KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_store(store.clone());
     store
-        .record_run_start("task_tp", "default", "run_tp_1", "hash")
+        .record_run_start(
+            "task_tp",
+            "default",
+            "run_tp_1",
+            "hash",
+            "2026-10-15T00:00:00+00:00",
+        )
         .await
         .unwrap();
     let user_msg = json!({"role": "user", "content": "kickoff"});
@@ -1813,7 +1012,13 @@ async fn test_pipeline_runs_list_by_pipeline_returns_current_run_projection() {
     let router =
         KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_store(store.clone());
     store
-        .record_run_start("task_lp", "default", "run_lp_1", "hash")
+        .record_run_start(
+            "task_lp",
+            "default",
+            "run_lp_1",
+            "hash",
+            "2026-10-15T00:00:00+00:00",
+        )
         .await
         .unwrap();
 
@@ -1860,7 +1065,13 @@ async fn test_pipeline_runs_list_by_pipeline_returns_current_run_projection() {
 
     // 同管道新一轮 run 开跑：覆盖为当前运行投影（仍至多一条）
     store
-        .record_run_start("task_lp", "default", "run_lp_2", "hash")
+        .record_run_start(
+            "task_lp",
+            "default",
+            "run_lp_2",
+            "hash",
+            "2026-10-15T00:00:00+00:00",
+        )
         .await
         .unwrap();
     let res = router
@@ -1901,7 +1112,13 @@ async fn test_pipeline_executor_get_run_status_ok() {
     let router =
         KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_store(store.clone());
     sqlite
-        .record_run_start("task_status_1", "default", "run_status_1", "hash")
+        .record_run_start(
+            "task_status_1",
+            "default",
+            "run_status_1",
+            "hash",
+            "2026-10-15T00:00:00+00:00",
+        )
         .unwrap();
     let res = router
         .handle(
@@ -1968,147 +1185,6 @@ async fn test_pipeline_executor_get_run_status_errors() {
         )
         .await;
     assert!(res3.is_err(), "不存在的 run 必须报错");
-}
-
-// ── G6：granted_capabilities 白名单单点校验 ──
-
-#[tokio::test]
-async fn g6_granted_capability_allowed() {
-    let lookup: GrantsLookupFn = Arc::new(|pid| {
-        assert_eq!(pid, "p1");
-        Some(vec!["event-bus".to_string()])
-    });
-    let router =
-        KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_grants_lookup(lookup);
-    let out = router
-        .handle(
-            "event-bus",
-            "emit",
-            json!({"_plugin_id": "p1", "type": "x"}),
-        )
-        .await
-        .unwrap();
-    // event-bus.emit 返回 200-ish json（不因授权被拒即通过）。
-    assert!(out.get("status").is_some() || !out.is_null());
-}
-
-#[tokio::test]
-async fn g6_ungranted_capability_denied() {
-    let lookup: GrantsLookupFn = Arc::new(|_| Some(vec!["config-reader".to_string()]));
-    let router =
-        KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_grants_lookup(lookup);
-    let err = router
-        .handle(
-            "event-bus",
-            "emit",
-            json!({"_plugin_id": "p1", "type": "x"}),
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        format!("{err}").contains("not granted"),
-        "应被白名单拒绝: {err}"
-    );
-}
-
-#[tokio::test]
-async fn g6_undeclared_grants_default_allow() {
-    // 未声明 granted_capabilities（None）→ 默认全授予（存量兼容）。
-    let lookup: GrantsLookupFn = Arc::new(|_| None);
-    let router =
-        KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_grants_lookup(lookup);
-    let out = router
-        .handle(
-            "event-bus",
-            "emit",
-            json!({"_plugin_id": "p1", "type": "x"}),
-        )
-        .await
-        .unwrap();
-    assert!(out.get("status").is_some() || !out.is_null());
-}
-
-// ── G6 strict 开关（AGENTOS_GRANTS_STRICT=1，审计变更#3）──
-
-#[tokio::test]
-async fn g6_strict_denies_undeclared_grants() {
-    // 契约（strict fail-closed）：开启 strict 后，未声明 granted_capabilities
-    // 的插件反向调用一律拒绝，错误信息标明未声明。
-    let lookup: GrantsLookupFn = Arc::new(|_| None);
-    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
-        .with_grants_lookup(lookup)
-        .with_grants_strict();
-    let err = router
-        .handle(
-            "event-bus",
-            "emit",
-            json!({"_plugin_id": "p1", "type": "x"}),
-        )
-        .await
-        .unwrap_err();
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("not granted") && msg.contains("no granted_capabilities declared"),
-        "strict 拒绝未声明者，且信息指向未声明: {msg}"
-    );
-}
-
-#[tokio::test]
-async fn g6_strict_allows_declared_grants() {
-    // 契约（strict 只收紧未声明者）：已声明白名单且命中的调用照常放行。
-    let lookup: GrantsLookupFn = Arc::new(|pid| {
-        assert_eq!(pid, "p1");
-        Some(vec!["event-bus".to_string()])
-    });
-    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
-        .with_grants_lookup(lookup)
-        .with_grants_strict();
-    let out = router
-        .handle(
-            "event-bus",
-            "emit",
-            json!({"_plugin_id": "p1", "type": "x"}),
-        )
-        .await
-        .unwrap();
-    assert!(out.get("status").is_some() || !out.is_null());
-}
-
-#[tokio::test]
-async fn g6_strict_still_denies_ungranted_capability() {
-    // 契约（strict 叠加白名单语义）：声明了白名单但 namespace 不在名单内，
-    // strict 下照旧拒绝——白名单制语义不因开关改变。
-    let lookup: GrantsLookupFn = Arc::new(|_| Some(vec!["config-reader".to_string()]));
-    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
-        .with_grants_lookup(lookup)
-        .with_grants_strict();
-    let err = router
-        .handle(
-            "event-bus",
-            "emit",
-            json!({"_plugin_id": "p1", "type": "x"}),
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        format!("{err}").contains("not granted"),
-        "白名单不命中时 strict 照常拒绝: {err}"
-    );
-}
-
-#[tokio::test]
-async fn g6_no_lookup_no_check() {
-    // 未装配授权查询器 → 不校验（旧装配兼容）。
-    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new());
-    let out = router
-        .handle(
-            "event-bus",
-            "emit",
-            json!({"_plugin_id": "p1", "type": "x"}),
-        )
-        .await
-        .unwrap();
-    assert!(out.get("status").is_some() || !out.is_null());
 }
 
 // ── G3：registry.register_tool 运行时动态注册 ──
@@ -2183,47 +1259,6 @@ async fn g3_register_tool_without_registrar_errors() {
 }
 
 #[tokio::test]
-async fn g3_envelope_gate_applies_to_registry_namespace() {
-    // 信封闸（G6 单点）：声明了白名单但不含 "registry" → 拒绝（信封二道闸验证）。
-    let registrar: DynamicToolRegistrar = Arc::new(|_, _| Ok(()));
-    let lookup: GrantsLookupFn = Arc::new(|_| Some(vec!["config-reader".to_string()]));
-    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
-        .with_dynamic_tool_registrar(registrar)
-        .with_grants_lookup(lookup);
-    let err = router
-        .handle(
-            "registry",
-            "register_tool",
-            json!({"_plugin_id": "p", "name": "x"}),
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        format!("{err}").contains("not granted"),
-        "信封闸应先于注册拒绝: {err}"
-    );
-}
-
-#[tokio::test]
-async fn g3_envelope_grant_allows_registration() {
-    // granted 含 "registry" → 信封闸放行,注册成功。
-    let registrar: DynamicToolRegistrar = Arc::new(|_, _| Ok(()));
-    let lookup: GrantsLookupFn = Arc::new(|_| Some(vec!["registry".to_string()]));
-    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
-        .with_dynamic_tool_registrar(registrar)
-        .with_grants_lookup(lookup);
-    let out = router
-        .handle(
-            "registry",
-            "register_tool",
-            json!({"_plugin_id": "p", "name": "x"}),
-        )
-        .await
-        .unwrap();
-    assert_eq!(out["status"], "registered");
-}
-
-#[tokio::test]
 async fn test_suspend_resume_pipeline_by_id() {
     // GAP-1 统一：task = pipeline——按管道挂起/恢复（stop/resume 映射）。
     // resume_pipeline 三分语义：停泊挂起拉起续跑轮（PipelineResumerFn 派发）、
@@ -2252,88 +1287,254 @@ async fn test_suspend_resume_pipeline_by_id() {
             },
         ));
 
-    agentos_tenant::scope(
-        agentos_core::types::TenantContext::new("tenant_sr", "thread_sr"),
-        async {
-            let tenant = agentos_tenant::current_or_default("default").tenant_id;
-            store
-                .record_run_start("pipe_task_9", &tenant, "run_sr_1", "h")
-                .await
-                .unwrap();
-            store
-                .record_run_start("pipe_task_9", &tenant, "run_sr_2", "h")
-                .await
-                .unwrap();
-            store
-                .link_pipeline_session("pipe_task_9", "thread_sr", &tenant)
-                .await
-                .unwrap();
+    let mut scope_ctx = agentos_core::types::TenantContext::new("tenant_sr", "thread_sr");
+    scope_ctx.user_id = Some("u_injected".to_string());
+    agentos_tenant::scope(scope_ctx, async {
+        let tenant = agentos_tenant::current_or_default("default").tenant_id;
+        store
+            .record_run_start(
+                "pipe_task_9",
+                &tenant,
+                "run_sr_1",
+                "h",
+                "2026-10-15T00:00:00+00:00",
+            )
+            .await
+            .unwrap();
+        store
+            .record_run_start(
+                "pipe_task_9",
+                &tenant,
+                "run_sr_2",
+                "h",
+                "2026-10-15T00:00:00+00:00",
+            )
+            .await
+            .unwrap();
+        store
+            .link_pipeline_session("pipe_task_9", "thread_sr", &tenant)
+            .await
+            .unwrap();
 
-            // suspend：最新 run（run_sr_2）被挂起
-            let r = router
-                .handle(
-                    "pipeline-executor",
-                    "suspend_pipeline",
-                    json!({"pipeline_id": "pipe_task_9"}),
-                )
-                .await
-                .unwrap();
-            assert_eq!(r["status"], "suspended");
-            assert_eq!(r["run_id"], "run_sr_2", "应挂起最新 run");
-            let got = store.get_run("run_sr_2").await.unwrap();
-            assert_eq!(got.status, agentos_core::types::RunStatus::Suspended);
+        // suspend：最新 run（run_sr_2）被挂起
+        let r = router
+            .handle(
+                "pipeline-executor",
+                "suspend_pipeline",
+                json!({"pipeline_id": "pipe_task_9"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r["status"], "suspended");
+        assert_eq!(r["run_id"], "run_sr_2", "应挂起最新 run");
+        let got = store.get_run("run_sr_2").await.unwrap();
+        assert_eq!(got.status, agentos_core::types::RunStatus::Suspended);
 
-            // 幂等：再次 suspend 返回同 run
-            let r2 = router
-                .handle(
-                    "pipeline-executor",
-                    "suspend_pipeline",
-                    json!({"pipeline_id": "pipe_task_9"}),
-                )
-                .await
-                .unwrap();
-            assert_eq!(r2["run_id"], "run_sr_2");
+        // 幂等：再次 suspend 返回同 run
+        let r2 = router
+            .handle(
+                "pipeline-executor",
+                "suspend_pipeline",
+                json!({"pipeline_id": "pipe_task_9"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r2["run_id"], "run_sr_2");
 
-            // resume：停泊挂起 → 拉起续跑轮；旧 run 保持 Suspended（挂起即其
-            // 真实收束史，新 run 另起一行承载执行，不造幽灵 running）
-            let r3 = router
-                .handle(
-                    "pipeline-executor",
-                    "resume_pipeline",
-                    json!({"pipeline_id": "pipe_task_9", "user_id": "u_1"}),
-                )
-                .await
-                .unwrap();
-            assert_eq!(r3["run_id"], "run_sr_2");
-            assert_eq!(r3["dispatched"], true, "停泊挂起应派发续跑轮");
-            let got2 = store.get_run("run_sr_2").await.unwrap();
-            assert_eq!(
-                got2.status,
-                agentos_core::types::RunStatus::Suspended,
-                "旧 run 不翻 Running——翻了无人收尾即幽灵 running"
-            );
-            assert_eq!(
-                dispatched.lock().unwrap().as_slice(),
-                [(
-                    "pipe_task_9".to_string(),
-                    "thread_sr".to_string(),
-                    "u_1".to_string(),
-                    None
-                )],
-                "续跑派发应带 pipeline/thread/user 三坐标走统一派发链（无 overlay 时为 None）"
-            );
+        // resume：停泊挂起 → 拉起续跑轮；旧 run 保持 Suspended（挂起即其
+        // 真实收束史，新 run 另起一行承载执行，不造幽灵 running）。
+        // 身份契约（刀3）：反调面身份取执行上下文注入（scope user_id），
+        // params.user_id 形参退役不可指派——此处 params 不带 user。
+        let r3 = router
+            .handle(
+                "pipeline-executor",
+                "resume_pipeline",
+                json!({"pipeline_id": "pipe_task_9"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r3["run_id"], "run_sr_2");
+        assert_eq!(r3["dispatched"], true, "停泊挂起应派发续跑轮");
+        let got2 = store.get_run("run_sr_2").await.unwrap();
+        assert_eq!(
+            got2.status,
+            agentos_core::types::RunStatus::Suspended,
+            "旧 run 不翻 Running——翻了无人收尾即幽灵 running"
+        );
+        assert_eq!(
+            dispatched.lock().unwrap().as_slice(),
+            [(
+                "pipe_task_9".to_string(),
+                "thread_sr".to_string(),
+                "u_injected".to_string(),
+                None
+            )],
+            "续跑派发身份应取执行上下文注入 user（scope 回显），非 params 手传"
+        );
 
-            // 孤儿管道（无会话挂载）→ 拒绝派发（回复无人订阅，静默即假成功）
-            let r4 = router
-                .handle(
-                    "pipeline-executor",
-                    "resume_pipeline",
-                    json!({"pipeline_id": "pipe_ghost"}),
-                )
-                .await;
-            assert!(r4.is_err(), "孤儿/伪造 id 应拒绝派发");
-        },
-    )
+        // 孤儿管道（无会话挂载）→ 拒绝派发（回复无人订阅，静默即假成功）
+        let r4 = router
+            .handle(
+                "pipeline-executor",
+                "resume_pipeline",
+                json!({"pipeline_id": "pipe_ghost"}),
+            )
+            .await;
+        assert!(r4.is_err(), "孤儿/伪造 id 应拒绝派发");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn resume_pipeline_ignores_params_user_prefers_injected() {
+    // 刀3 身份契约：反调面 params.user_id 不可指派身份——注入 user 在场时
+    // 覆盖手传值（伪造/旧插件传值一律忽略，原头 = 内核执行上下文回显）。
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let dispatched: Arc<DispatchedResumes> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = dispatched.clone();
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_store(store.clone())
+        .with_pipeline_resumer(Arc::new(
+            move |pipeline_id: String,
+                  thread_id: String,
+                  user_id: String,
+                  state_overlay: Option<serde_json::Value>| {
+                let sink = sink.clone();
+                Box::pin(async move {
+                    sink.lock()
+                        .unwrap()
+                        .push((pipeline_id, thread_id, user_id, state_overlay));
+                    Ok(())
+                })
+                    as std::pin::Pin<
+                        Box<dyn std::future::Future<Output = Result<(), String>> + Send>,
+                    >
+            },
+        ));
+
+    let mut scope_ctx = agentos_core::types::TenantContext::new("t_forge", "th_forge");
+    scope_ctx.user_id = Some("u_real".to_string());
+    agentos_tenant::scope(scope_ctx, async {
+        let tenant = agentos_tenant::current_or_default("default").tenant_id;
+        store
+            .record_run_start(
+                "pipe_forge",
+                &tenant,
+                "run_f1",
+                "h",
+                "2026-10-15T00:00:00+00:00",
+            )
+            .await
+            .unwrap();
+        store
+            .link_pipeline_session("pipe_forge", "th_forge", &tenant)
+            .await
+            .unwrap();
+        router
+            .handle(
+                "pipeline-executor",
+                "suspend_pipeline",
+                json!({"pipeline_id": "pipe_forge"}),
+            )
+            .await
+            .unwrap();
+
+        let r = router
+            .handle(
+                "pipeline-executor",
+                "resume_pipeline",
+                json!({"pipeline_id": "pipe_forge", "user_id": "u_fake"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r["dispatched"], true);
+        assert_eq!(
+            dispatched.lock().unwrap().as_slice(),
+            [(
+                "pipe_forge".to_string(),
+                "th_forge".to_string(),
+                "u_real".to_string(),
+                None
+            )],
+            "手传 u_fake 应被忽略，派发身份取注入 user（u_real）"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn resume_pipeline_without_injected_identity_fails_fast() {
+    // 刀3 fail-fast：scope 无注入 user（桥仅建 tenant scope，`_user_id` 缺席
+    // 形态）→ 显式拒绝，不得以空串透传派发（空身份曾飘到 WS 分发层才炸，
+    // 文案误导为「token 持有者已删除」，装机 2026-11-02 实证）。
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let dispatched: Arc<DispatchedResumes> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = dispatched.clone();
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_store(store.clone())
+        .with_pipeline_resumer(Arc::new(
+            move |pipeline_id: String,
+                  thread_id: String,
+                  user_id: String,
+                  state_overlay: Option<serde_json::Value>| {
+                let sink = sink.clone();
+                Box::pin(async move {
+                    sink.lock()
+                        .unwrap()
+                        .push((pipeline_id, thread_id, user_id, state_overlay));
+                    Ok(())
+                })
+                    as std::pin::Pin<
+                        Box<dyn std::future::Future<Output = Result<(), String>> + Send>,
+                    >
+            },
+        ));
+
+    let scope_ctx = agentos_core::types::TenantContext::new("t_nouser", "th_nouser");
+    agentos_tenant::scope(scope_ctx, async {
+        let tenant = agentos_tenant::current_or_default("default").tenant_id;
+        store
+            .record_run_start(
+                "pipe_nouser",
+                &tenant,
+                "run_n1",
+                "h",
+                "2026-10-15T00:00:00+00:00",
+            )
+            .await
+            .unwrap();
+        store
+            .link_pipeline_session("pipe_nouser", "th_nouser", &tenant)
+            .await
+            .unwrap();
+        router
+            .handle(
+                "pipeline-executor",
+                "suspend_pipeline",
+                json!({"pipeline_id": "pipe_nouser"}),
+            )
+            .await
+            .unwrap();
+
+        let err = router
+            .handle(
+                "pipeline-executor",
+                "resume_pipeline",
+                json!({"pipeline_id": "pipe_nouser"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("未携带用户身份"),
+            "fail-fast 文案应区分「未携带身份」而非「token 持有者已删除」: {err}"
+        );
+        assert!(
+            dispatched.lock().unwrap().is_empty(),
+            "无注入身份不得派发续跑轮"
+        );
+    })
     .await;
 }
 
@@ -2371,7 +1572,13 @@ async fn resume_pipeline_approval_pending_flips_only() {
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
             store
-                .record_run_start("pipe_ap", &tenant, "run_ap_1", "h")
+                .record_run_start(
+                    "pipe_ap",
+                    &tenant,
+                    "run_ap_1",
+                    "h",
+                    "2026-10-15T00:00:00+00:00",
+                )
                 .await
                 .unwrap();
             store
@@ -2426,7 +1633,13 @@ async fn suspend_persists_pending_interaction_credential_and_resume_clears_it() 
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
             store
-                .record_run_start("pipe_s7", &tenant, "run_s7", "h")
+                .record_run_start(
+                    "pipe_s7",
+                    &tenant,
+                    "run_s7",
+                    "h",
+                    "2026-10-15T00:00:00+00:00",
+                )
                 .await
                 .unwrap();
 
@@ -2484,7 +1697,13 @@ async fn suspend_without_request_id_leaves_metadata_absent() {
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
             store
-                .record_run_start("pipe_s7b", &tenant, "run_s7b", "h")
+                .record_run_start(
+                    "pipe_s7b",
+                    &tenant,
+                    "run_s7b",
+                    "h",
+                    "2026-10-15T00:00:00+00:00",
+                )
                 .await
                 .unwrap();
             router
@@ -2531,7 +1750,13 @@ async fn resume_pipeline_running_in_flight_idempotent() {
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
             store
-                .record_run_start("pipe_rf", &tenant, "run_rf_1", "h")
+                .record_run_start(
+                    "pipe_rf",
+                    &tenant,
+                    "run_rf_1",
+                    "h",
+                    "2026-10-15T00:00:00+00:00",
+                )
                 .await
                 .unwrap();
             store
@@ -2585,42 +1810,47 @@ async fn resume_pipeline_terminal_history_dispatches_new_round() {
             },
         ));
 
-    agentos_tenant::scope(
-        agentos_core::types::TenantContext::new("tenant_th", "thread_th"),
-        async {
-            let tenant = agentos_tenant::current_or_default("default").tenant_id;
-            store
-                .record_run_start("pipe_th", &tenant, "run_th_1", "h")
-                .await
-                .unwrap();
-            sqlite
-                .set_run_status_projection(
-                    "pipe_th",
-                    &tenant,
-                    agentos_core::types::RunStatus::Cancelled,
-                )
-                .unwrap();
-            store
-                .link_pipeline_session("pipe_th", "thread_th", &tenant)
-                .await
-                .unwrap();
+    let mut th_ctx = agentos_core::types::TenantContext::new("tenant_th", "thread_th");
+    th_ctx.user_id = Some("u_th".to_string());
+    agentos_tenant::scope(th_ctx, async {
+        let tenant = agentos_tenant::current_or_default("default").tenant_id;
+        store
+            .record_run_start(
+                "pipe_th",
+                &tenant,
+                "run_th_1",
+                "h",
+                "2026-10-15T00:00:00+00:00",
+            )
+            .await
+            .unwrap();
+        sqlite
+            .set_run_status_projection(
+                "pipe_th",
+                &tenant,
+                agentos_core::types::RunStatus::Cancelled,
+            )
+            .unwrap();
+        store
+            .link_pipeline_session("pipe_th", "thread_th", &tenant)
+            .await
+            .unwrap();
 
-            let r = router
-                .handle(
-                    "pipeline-executor",
-                    "resume_pipeline",
-                    json!({"pipeline_id": "pipe_th"}),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                r["run_id"], "",
-                "无在飞 run：run_id 保持空串约定，续跑由新 run 承载"
-            );
-            assert_eq!(r["dispatched"], true, "终态历史应拉起新续跑轮");
-            assert_eq!(dispatched.lock().unwrap().len(), 1);
-        },
-    )
+        let r = router
+            .handle(
+                "pipeline-executor",
+                "resume_pipeline",
+                json!({"pipeline_id": "pipe_th"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            r["run_id"], "",
+            "无在飞 run：run_id 保持空串约定，续跑由新 run 承载"
+        );
+        assert_eq!(r["dispatched"], true, "终态历史应拉起新续跑轮");
+        assert_eq!(dispatched.lock().unwrap().len(), 1);
+    })
     .await;
 }
 
@@ -2653,50 +1883,54 @@ async fn resume_pipeline_forwards_state_overlay_to_dispatch() {
             },
         ));
 
-    agentos_tenant::scope(
-        agentos_core::types::TenantContext::new("tenant_ov", "thread_ov"),
-        async {
-            let tenant = agentos_tenant::current_or_default("default").tenant_id;
-            store
-                .record_run_start("pipe_ov", &tenant, "run_ov_1", "h")
-                .await
-                .unwrap();
-            // 停泊挂起态（无审批署名 → 走续跑拉起分支）
-            sqlite
-                .set_run_status_projection(
-                    "pipe_ov",
-                    &tenant,
-                    agentos_core::types::RunStatus::Suspended,
-                )
-                .unwrap();
-            store
-                .link_pipeline_session("pipe_ov", "thread_ov", &tenant)
-                .await
-                .unwrap();
+    let mut ov_ctx = agentos_core::types::TenantContext::new("tenant_ov", "thread_ov");
+    ov_ctx.user_id = Some("u_ov".to_string());
+    agentos_tenant::scope(ov_ctx, async {
+        let tenant = agentos_tenant::current_or_default("default").tenant_id;
+        store
+            .record_run_start(
+                "pipe_ov",
+                &tenant,
+                "run_ov_1",
+                "h",
+                "2026-10-15T00:00:00+00:00",
+            )
+            .await
+            .unwrap();
+        // 停泊挂起态（无审批署名 → 走续跑拉起分支）
+        sqlite
+            .set_run_status_projection(
+                "pipe_ov",
+                &tenant,
+                agentos_core::types::RunStatus::Suspended,
+            )
+            .unwrap();
+        store
+            .link_pipeline_session("pipe_ov", "thread_ov", &tenant)
+            .await
+            .unwrap();
 
-            let r = router
-                .handle(
-                    "pipeline-executor",
-                    "resume_pipeline",
-                    json!({
-                        "pipeline_id": "pipe_ov",
-                        "user_id": "u_ov",
-                        "state_overlay": {"task.status": "running", "task_status": "running"},
-                    }),
-                )
-                .await
-                .unwrap();
-            assert_eq!(r["dispatched"], true);
-            let got = dispatched.lock().unwrap();
-            let (_, _, _, overlay) = &got[0];
-            assert_eq!(
-                overlay.as_ref().expect("overlay 必须透传")["task.status"],
-                json!("running"),
-                "任务域复位 overlay 必须原样到达派发闭包"
-            );
-            assert_eq!(overlay.as_ref().unwrap()["task_status"], json!("running"));
-        },
-    )
+        let r = router
+            .handle(
+                "pipeline-executor",
+                "resume_pipeline",
+                json!({
+                    "pipeline_id": "pipe_ov",
+                    "state_overlay": {"task.status": "running", "task_status": "running"},
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r["dispatched"], true);
+        let got = dispatched.lock().unwrap();
+        let (_, _, _, overlay) = &got[0];
+        assert_eq!(
+            overlay.as_ref().expect("overlay 必须透传")["task.status"],
+            json!("running"),
+            "任务域复位 overlay 必须原样到达派发闭包"
+        );
+        assert_eq!(overlay.as_ref().unwrap()["task_status"], json!("running"));
+    })
     .await;
 }
 
@@ -2714,7 +1948,13 @@ async fn resume_pipeline_without_resumer_degrades_bookkeeping() {
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
             store
-                .record_run_start("pipe_nr", &tenant, "run_nr_1", "h")
+                .record_run_start(
+                    "pipe_nr",
+                    &tenant,
+                    "run_nr_1",
+                    "h",
+                    "2026-10-15T00:00:00+00:00",
+                )
                 .await
                 .unwrap();
             store
@@ -3062,6 +2302,7 @@ fn plain_tool(name: &str) -> agentos_core::traits::ToolDescriptor {
         source: agentos_core::types::ToolSource::Builtin,
         ui: None,
         render: None,
+        isolation_capable: None,
     }
 }
 
@@ -3169,6 +2410,7 @@ fn tool_for(name: &str, plugin_id: &str) -> agentos_core::traits::ToolDescriptor
         source: agentos_core::types::ToolSource::Mcp,
         ui: None,
         render: None,
+        isolation_capable: None,
     }
 }
 
@@ -3385,7 +2627,7 @@ async fn tool_surface_excludes_non_object_input_schema() {
 async fn tool_surface_contracts_unfiltered_by_whitelist() {
     // 契约：输出契约表不过滤——凡声明 output_schema/render 的工具都有条目，
     // 与被白名单收窄的 schema 面解耦（tool_core 按 tool_name 查表）。
-    let mut contracted = plain_tool("dsh_read");
+    let mut contracted = plain_tool("sample_read");
     contracted.output_schema = Some(json!({"type": "object", "required": ["path"]}));
     contracted.render = Some(json!({"card": "read"}));
     contracted.category = agentos_core::types::ToolCategory::File;
@@ -3401,9 +2643,40 @@ async fn tool_surface_contracts_unfiltered_by_whitelist() {
     assert!(result["schemas"].as_array().unwrap().is_empty());
     let contracts = result["contracts"].as_object().unwrap();
     assert_eq!(contracts.len(), 1, "只有声明契约的工具进入: {contracts:?}");
-    assert_eq!(contracts["dsh_read"]["schema"]["required"][0], "path");
-    assert_eq!(contracts["dsh_read"]["render"]["card"], "read");
+    assert_eq!(contracts["sample_read"]["schema"]["required"][0], "path");
+    assert_eq!(contracts["sample_read"]["render"]["card"], "read");
     assert!(contracts.get("legacy_tool").is_none());
+}
+
+#[tokio::test]
+async fn tool_surface_contracts_carry_isolation_capable() {
+    // 隔离能力声明经契约表下发（guard 查 state.tool_output_contracts 注入
+    // _exec_backend）：显式 true 透传；未声明 → false（恒出现，不做键缺席）。
+    let mut capable = plain_tool("bash_execute");
+    capable.output_schema = Some(json!({"type": "object"}));
+    capable.isolation_capable = Some(true);
+    let mut plain = plain_tool("host_only");
+    plain.output_schema = Some(json!({"type": "object"}));
+    let router = router_with_tool_descriptors(&[capable, plain]);
+    let result = router
+        .handle(
+            "tool-surface",
+            "schemas",
+            json!({"tool_ids": ["bash_execute", "host_only"]}),
+        )
+        .await
+        .unwrap();
+    let contracts = result["contracts"].as_object().unwrap();
+    assert_eq!(
+        contracts["bash_execute"]["isolation_capable"],
+        json!(true),
+        "显式声明应透传"
+    );
+    assert_eq!(
+        contracts["host_only"]["isolation_capable"],
+        json!(false),
+        "未声明恒 false（guard 侧免键缺席分支）"
+    );
 }
 
 #[tokio::test]
@@ -3593,6 +2866,7 @@ async fn test_pipeline_state_update_db_failure_leaves_memory_untouched() {
             "pipeline-state",
             "update",
             json!({
+                "_plugin_id": TEST_STATE_WRITER,
                 "pipeline_id": pid,
                 "fields": {"task.status": "completed", "task.ended_at": "2026-09-11T00:00:00Z"},
             }),
@@ -3640,7 +2914,7 @@ async fn delete_pipeline_removes_runs_and_registry_entries() {
         agentos_core::types::TenantContext::new(&tenant, "th_del"),
         async {
             store
-                .record_run_start(&pid, &tenant, "run_del_1", "h")
+                .record_run_start(&pid, &tenant, "run_del_1", "h", "2026-10-15T00:00:00+00:00")
                 .await
                 .unwrap();
             store
@@ -4108,9 +3382,8 @@ async fn approval_created_broadcasts_domain_tags_with_null_placeholders() {
     let sink = broadcasted.clone();
     let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let coord = Arc::new(agentos_session::SessionCoordinator::default());
-    let capture = Arc::new(CaptureSink {
-        received: received.clone(),
-    }) as Arc<dyn agentos_session::EventSink>;
+    let capture = Arc::new(CaptureSink::with_received(received.clone()))
+        as Arc<dyn agentos_session::EventSink>;
     coord.register("user-test", capture);
     coord.register_thread("thread-1", "user-test");
     let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
@@ -4157,6 +3430,35 @@ async fn approval_created_broadcasts_domain_tags_with_null_placeholders() {
 
     // 前端透传腿照常
     assert_eq!(received.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn domain_mirror_routing_follows_single_source_list() {
+    // 单源跟随证明（K3，ADR 2026-10-10）：镜像分流名单取自
+    // config/kernel/ws_events.yaml domain_mirrors 节——名单里是什么名，域总线
+    // 就收到什么名（行为跟随单源，而非硬编码巧合通过）。
+    for name in crate::ws_events::domain_mirrors() {
+        let broadcasted: DomainSink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = broadcasted.clone();
+        let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+            .with_domain_broadcaster(Arc::new(
+                move |n: &str, tags: Vec<(String, serde_json::Value)>| {
+                    sink.lock().unwrap().push((n.to_string(), tags));
+                },
+            ));
+        let res = router
+            .handle(
+                "event-bus",
+                "emit",
+                json!({"event": name, "payload": {"thread_id": "t"}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "dropped", "无 session 装配时透传腿 dropped");
+        let got = broadcasted.lock().unwrap();
+        assert_eq!(got.len(), 1, "镜像事件必须广播进域总线: {name}");
+        assert_eq!(&got[0].0, name, "域总线事件名必须与名单一致: {name}");
+    }
 }
 
 // ── registry.register_tool：descriptor 构造 + 信封分支补齐 ──────────────
@@ -4249,9 +3551,8 @@ async fn register_tool_registrar_error_propagates_as_protocol_error() {
 async fn register_tool_success_broadcasts_widget_schema_changed() {
     let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let coord = Arc::new(agentos_session::SessionCoordinator::default());
-    let capture = Arc::new(CaptureSink {
-        received: received.clone(),
-    }) as Arc<dyn agentos_session::EventSink>;
+    let capture = Arc::new(CaptureSink::with_received(received.clone()))
+        as Arc<dyn agentos_session::EventSink>;
     coord.register("user-any", capture); // 广播给全部活跃连接，无需 thread 注册
     let registrar: DynamicToolRegistrar = Arc::new(|_, _| Ok(()));
     let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
@@ -4389,7 +3690,7 @@ async fn service_registry_pipeline_runs_list_with_status_filter_and_limit_cap() 
         ("pipe_f3", "run_f3", "failed"),
     ] {
         store
-            .record_run_start(pipe, "default", run_id, "h")
+            .record_run_start(pipe, "default", run_id, "h", "2026-10-15T00:00:00+00:00")
             .await
             .unwrap();
         if status_str != "running" {
@@ -4498,21 +3799,6 @@ async fn capability_contract_valid_params_fall_through_to_route() {
     assert_eq!(res["tenant_id"], "default");
 }
 
-// ── G6：params 无 _plugin_id → 不做白名单校验（内核自身调用路径）─────────
-
-#[tokio::test]
-async fn g6_lookup_present_without_plugin_id_skips_check() {
-    let lookup: GrantsLookupFn = Arc::new(|_| Some(vec![])); // 名单为空 = 严格
-    let router =
-        KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_grants_lookup(lookup);
-    // 无 _plugin_id（非插件上下文）→ 校验跳过，照常路由
-    let res = router
-        .handle("tenant-context", "get", json!({}))
-        .await
-        .unwrap();
-    assert_eq!(res["tenant_id"], "default");
-}
-
 // ── tool-surface.schemas：tool_ids 畸形条目容错 ─────────────────────────
 
 #[tokio::test]
@@ -4604,7 +3890,13 @@ async fn suspend_resume_param_and_store_guards() {
 
     // suspend 幂等：第二次挂起已挂起 run 直接返回句柄，不再改写
     store
-        .record_run_start("pipe_idem", "default", "run_idem", "h")
+        .record_run_start(
+            "pipe_idem",
+            "default",
+            "run_idem",
+            "h",
+            "2026-10-15T00:00:00+00:00",
+        )
         .await
         .unwrap();
     let first = router
@@ -4655,43 +3947,48 @@ async fn resume_pipeline_param_and_resumer_error_guards() {
             Box::pin(async { Err("引擎排空拒绝".to_string()) })
                 as std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
         }));
-    agentos_tenant::scope(
-        agentos_core::types::TenantContext::new("tenant_rerr", "thread_rerr"),
-        async {
-            let tenant = agentos_tenant::current_or_default("default").tenant_id;
-            store
-                .record_run_start("pipe_rerr", &tenant, "run_rerr", "h")
-                .await
-                .unwrap();
-            store
-                .upsert_state_fields(
-                    "pipe_rerr",
-                    &tenant,
-                    &json!({ "run_status": "suspended" })
-                        .as_object()
-                        .unwrap()
-                        .clone(),
-                )
-                .await
-                .unwrap();
-            store
-                .link_pipeline_session("pipe_rerr", "thread_rerr", &tenant)
-                .await
-                .unwrap();
-            let err = failing
-                .handle(
-                    "pipeline-executor",
-                    "resume_pipeline",
-                    json!({"pipeline_id": "pipe_rerr"}),
-                )
-                .await
-                .unwrap_err();
-            assert!(
-                format!("{err}").contains("续跑派发失败"),
-                "派发闭包错误须透传: {err}"
-            );
-        },
-    )
+    let mut rerr_ctx = agentos_core::types::TenantContext::new("tenant_rerr", "thread_rerr");
+    rerr_ctx.user_id = Some("u_rerr".to_string());
+    agentos_tenant::scope(rerr_ctx, async {
+        let tenant = agentos_tenant::current_or_default("default").tenant_id;
+        store
+            .record_run_start(
+                "pipe_rerr",
+                &tenant,
+                "run_rerr",
+                "h",
+                "2026-10-15T00:00:00+00:00",
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_state_fields(
+                "pipe_rerr",
+                &tenant,
+                &json!({ "run_status": "suspended" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .await
+            .unwrap();
+        store
+            .link_pipeline_session("pipe_rerr", "thread_rerr", &tenant)
+            .await
+            .unwrap();
+        let err = failing
+            .handle(
+                "pipeline-executor",
+                "resume_pipeline",
+                json!({"pipeline_id": "pipe_rerr"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("续跑派发失败"),
+            "派发闭包错误须透传: {err}"
+        );
+    })
     .await;
 }
 
@@ -4953,11 +4250,8 @@ async fn tool_executor_missing_session_identity_warns_but_executes() {
     let _ = &guard;
     let seen: std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_invoker(
-        Arc::new(CaptureInvoker {
-            captured: seen.clone(),
-        }),
-    );
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_invoker(Arc::new(CaptureInvoker::with_captured(seen.clone())));
     let res = router
         .handle(
             "tool-executor",
@@ -5119,7 +4413,13 @@ async fn suspend_pipeline_without_active_run_is_idempotent_ok() {
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
             store
-                .record_run_start("pipe_sp_done", &tenant, "run_done", "h")
+                .record_run_start(
+                    "pipe_sp_done",
+                    &tenant,
+                    "run_done",
+                    "h",
+                    "2026-10-15T00:00:00+00:00",
+                )
                 .await
                 .unwrap();
             sqlite
@@ -5206,7 +4506,13 @@ async fn resume_pipeline_without_resumer_degrades_with_diagnostics() {
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
             store
-                .record_run_start("pipe_nobo", &tenant, "run_nobo", "h")
+                .record_run_start(
+                    "pipe_nobo",
+                    &tenant,
+                    "run_nobo",
+                    "h",
+                    "2026-10-15T00:00:00+00:00",
+                )
                 .await
                 .unwrap();
             sqlite
@@ -5265,7 +4571,7 @@ async fn suspend_records_pending_interaction_credential() {
                 ("pipe_pc_no", "run_pc_no", false),
             ] {
                 store
-                    .record_run_start(pipe, &tenant, run_id, "h")
+                    .record_run_start(pipe, &tenant, run_id, "h", "2026-10-15T00:00:00+00:00")
                     .await
                     .unwrap();
                 let mut params = json!({"run_id": run_id});
@@ -5305,7 +4611,13 @@ async fn resume_clears_pending_interaction_credential() {
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
             store
-                .record_run_start("pipe_rc", &tenant, "run_rc", "h")
+                .record_run_start(
+                    "pipe_rc",
+                    &tenant,
+                    "run_rc",
+                    "h",
+                    "2026-10-15T00:00:00+00:00",
+                )
                 .await
                 .unwrap();
             router
@@ -5353,7 +4665,13 @@ async fn get_run_status_returns_record_or_errors() {
         async {
             let tenant = agentos_tenant::current_or_default("default").tenant_id;
             store
-                .record_run_start("pipe_grs", &tenant, "run_grs", "hash_grs")
+                .record_run_start(
+                    "pipe_grs",
+                    &tenant,
+                    "run_grs",
+                    "hash_grs",
+                    "2026-10-15T00:00:00+00:00",
+                )
                 .await
                 .unwrap();
             let res = router
@@ -5365,7 +4683,10 @@ async fn get_run_status_returns_record_or_errors() {
                 .await
                 .unwrap();
             assert_eq!(res["run_id"], "run_grs");
-            assert_eq!(res["config_hash"], "hash_grs");
+            assert_eq!(
+                res["config_hash"], "",
+                "run_config_hash 已退役，get_run_status 投影恒空串"
+            );
 
             let err = router
                 .handle(
@@ -5404,7 +4725,7 @@ async fn delete_pipeline_removes_data_and_is_idempotent() {
                 json!({"pipeline_id": pid, "status": "completed"}),
             );
             store
-                .record_run_start(&pid, &tenant, "run_del", "h")
+                .record_run_start(&pid, &tenant, "run_del", "h", "2026-10-15T00:00:00+00:00")
                 .await
                 .unwrap();
             store
@@ -5452,8 +4773,8 @@ async fn delete_pipeline_removes_data_and_is_idempotent() {
     .await;
 }
 
-/// unhandled capability：未注册的 capability.method → 协议错误 + 留痕
-/// （logger/config-reader 等死能力的残留调用落点）。
+/// unhandled capability：未注册的 capability.method → 协议错误 + 结构化留痕
+/// （ns/method/调用方；运行时对账兜底，资源注册收敛 T5.5）。
 #[tokio::test]
 async fn unhandled_capability_emits_diagnostics() {
     let (guard, logs) = crate::test_env::capture_logs();
@@ -5469,254 +4790,204 @@ async fn unhandled_capability_emits_diagnostics() {
         "兜底文案须指明未实现: {err}"
     );
     assert!(
-        text.contains("unhandled capability call"),
-        "残留调用须留痕: {text}"
+        text.contains("service_unresolved: capability=retired-namespace method=do_thing"),
+        "未解析调用须结构化留痕: {text}"
     );
 }
 
-// ── trigger-svc：触发器注册面（M1 内核侧）────────────────────────
-//
-// 全局注册表进程级共享：trigger_id/pipeline/键全测试域唯一 + 结束清场
-// （unregister + ack）防跨测试串扰。通知闭包测试进程不接线——fire 只落
-// fire log，经 reconcile 断言（通知分发契约在 engine trigger.rs 单测覆盖）。
-
+/// unhandled capability 观测：service_unresolved 计数按调用方归属进聚合器
+/// （T5.5 观测定名；调用方取 invoker 注入的 `_plugin_id` 信任锚点）。
 #[tokio::test]
-async fn trigger_svc_register_seed_reconcile_ack_roundtrip() {
-    let router = router_with_store();
-    let pid = format!("pipe_tsvc_{}", uuid::Uuid::new_v4().simple());
-    let trigger_id = format!("t_tsvc_{}", uuid::Uuid::new_v4().simple());
-
-    // 预置 committed 行（种子求值上下文）：task.status=running
-    let seeded_row = router
-        .handle(
-            "pipeline-state",
-            "update",
-            json!({"pipeline_id": pid, "fields": {"task.status": "running"}}),
-        )
-        .await
-        .unwrap();
-    assert_eq!(seeded_row["status"], "updated");
-
-    // 注册：条件尚未满足 → seed_fired=false
-    let out = router
-        .handle(
-            "trigger-svc",
-            "register",
-            json!({
-                "trigger_id": trigger_id,
-                "condition": "task.status == 'done'",
-                "pipeline_id": pid,
-                "watched_keys": ["task.status"],
-                "owner_plugin_id": "triggers_ext",
-            }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(out["ok"], true);
-    assert_eq!(
-        out["seed_fired"], false,
-        "种子行 task.status=running 不应命中"
-    );
-
-    // 无关写（watched 未命中）不点火
-    router
-        .handle(
-            "pipeline-state",
-            "update",
-            json!({"pipeline_id": pid, "fields": {"task.goal": "x"}}),
-        )
-        .await
-        .unwrap();
-    let fires = router
-        .handle("trigger-svc", "reconcile", json!({}))
-        .await
-        .unwrap();
-    assert!(
-        fires["fires"].as_array().unwrap().is_empty(),
-        "watched 未命中不得点火: {fires}"
-    );
-
-    // 命中写：task.status=done → 边沿 false→true 点火
-    router
-        .handle(
-            "pipeline-state",
-            "update",
-            json!({"pipeline_id": pid, "fields": {"task.status": "done"}}),
-        )
-        .await
-        .unwrap();
-    let fires = router
-        .handle("trigger-svc", "reconcile", json!({}))
-        .await
-        .unwrap();
-    let arr = fires["fires"].as_array().unwrap();
-    let mine: Vec<_> = arr
-        .iter()
-        .filter(|f| f["trigger_id"] == trigger_id.as_str())
-        .collect();
-    assert_eq!(mine.len(), 1, "边沿命中应恰好一火: {fires}");
-    assert_eq!(mine[0]["keys"], json!(["task.status"]));
-    assert_eq!(mine[0]["pipeline_id"], pid.as_str());
-    assert!(mine[0]["fire_seq"].as_i64().is_some());
-    assert!(mine[0]["fired_at"].as_str().is_some());
-
-    // ack 前 reconcile 幂等可见；ack 后消失
-    let again = router
-        .handle("trigger-svc", "reconcile", json!({}))
-        .await
-        .unwrap();
-    assert_eq!(again["fires"].as_array().unwrap().len(), arr.len());
-    let seq = mine[0]["fire_seq"].as_i64().unwrap();
-    let acked = router
-        .handle("trigger-svc", "ack", json!({"fire_ids": [seq]}))
-        .await
-        .unwrap();
-    assert_eq!(acked["ok"], true);
-    let after = router
-        .handle("trigger-svc", "reconcile", json!({}))
-        .await
-        .unwrap();
-    assert!(
-        after["fires"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|f| f["trigger_id"] != trigger_id.as_str()),
-        "ack 后不得再返回: {after}"
-    );
-
-    // 清场
-    router
-        .handle(
-            "trigger-svc",
-            "unregister",
-            json!({"trigger_id": trigger_id}),
-        )
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn trigger_svc_register_seed_fired_true_when_condition_holds() {
-    let router = router_plain();
-    let trigger_id = format!("t_tsvc_seed_{}", uuid::Uuid::new_v4().simple());
-    // 全局触发器（无 pipeline_id）：种子上下文 = 空 state，恒真条件命中
-    let out = router
-        .handle(
-            "trigger-svc",
-            "register",
-            json!({
-                "trigger_id": trigger_id,
-                "condition": "True",
-                "watched_keys": ["tsv.never_written"],
-                "owner_plugin_id": "triggers_ext",
-            }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(out["ok"], true);
-    assert_eq!(out["seed_fired"], true, "恒真条件种子应命中");
-    // 种子命中只初始化边沿簿记：不点火（fire log 无该触发器条目）
-    let fires = router
-        .handle("trigger-svc", "reconcile", json!({}))
-        .await
-        .unwrap();
-    assert!(
-        fires["fires"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|f| f["trigger_id"] != trigger_id.as_str()),
-        "种子命中不落 fire log: {fires}"
-    );
-    router
-        .handle(
-            "trigger-svc",
-            "unregister",
-            json!({"trigger_id": trigger_id}),
-        )
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn trigger_svc_register_rejects_syntax_error() {
-    let router = router_plain();
+async fn unhandled_capability_records_service_unresolved_metric() {
+    let (router, agg) = router_with_metrics();
     let err = router
         .handle(
-            "trigger-svc",
-            "register",
-            json!({
-                "trigger_id": "t_bad_syntax",
-                "condition": "a = 1",
-                "owner_plugin_id": "triggers_ext",
-            }),
+            "ghost-ns",
+            "ghost_method",
+            json!({"_plugin_id": "task_service", "k": "v"}),
         )
         .await
-        .expect_err("语法错误须注册期显式报错");
-    assert!(format!("{err}").contains("条件语法错误"), "{err}");
+        .expect_err("未注册 capability 必须报错");
+    assert!(format!("{err}").contains("ghost-ns.ghost_method"));
+    let views = agg.query(
+        Some("task_service"),
+        Some("service_unresolved"),
+        None,
+        &Labels::new(),
+    );
+    assert_eq!(views.len(), 1, "service_unresolved series 应按调用方归属");
+    let total: f64 = views[0].samples.iter().map(|s| s.value).sum();
+    assert!(
+        (total - 1.0).abs() < f64::EPSILON,
+        "单次未解析调用计 1.0: {total}"
+    );
 }
 
+// ── session.create 能力臂（日程承载兜底，ADR 2026-11-03-pim-trigger-anchor）──
+
 #[tokio::test]
-async fn trigger_svc_register_missing_params_rejected() {
-    let router = router_plain();
-    for missing in ["trigger_id", "owner_plugin_id"] {
-        let mut body = json!({
-            "trigger_id": "t_x",
-            "condition": "a == 1",
-            "owner_plugin_id": "p",
-        });
-        body.as_object_mut().unwrap().remove(missing);
-        let err = router
-            .handle("trigger-svc", "register", body)
+async fn session_create_with_injected_identity_creates_thread_and_pipeline() {
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let coord = Arc::new(agentos_session::SessionCoordinator::default());
+    let broadcasted: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = broadcasted.clone();
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_store(store.clone())
+        .with_session(coord)
+        .with_domain_broadcaster(Arc::new(
+            move |event: &str, _tags: Vec<(String, serde_json::Value)>| {
+                sink.lock().unwrap().push(event.to_string());
+            },
+        ));
+
+    let mut ctx = agentos_core::types::TenantContext::new("t_sc", "th_sc");
+    ctx.user_id = Some("u_sc".to_string());
+    agentos_tenant::scope(ctx, async {
+        let r = router
+            .handle(
+                "session",
+                "create",
+                json!({"title": "日程承载管道", "agent_id": "agentos"}),
+            )
             .await
-            .expect_err("缺参数须拒绝");
-        assert!(format!("{err}").contains(missing), "{missing}: {err}");
-    }
-    let err = router
-        .handle(
-            "trigger-svc",
-            "register",
-            json!({"trigger_id": "t_x", "owner_plugin_id": "p"}),
-        )
-        .await
-        .expect_err("缺 condition 须拒绝");
-    assert!(format!("{err}").contains("condition"), "{err}");
+            .unwrap();
+        let thread_id = r["thread_id"].as_str().unwrap_or_default().to_string();
+        let pipeline_id = r["pipeline_ids"][0]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(thread_id.starts_with("thread-"), "应返回 thread 坐标");
+        assert_eq!(pipeline_id.len(), 12, "主管道 id = 12 位 hex（统一格式）");
+
+        // pipeline_sessions 映射在账（触发器注入的派发坐标前提）
+        let mapped = store.get_thread_id_by_pipeline(&pipeline_id).await.unwrap();
+        assert_eq!(
+            mapped.as_deref(),
+            Some(thread_id.as_str()),
+            "主管道必须挂真实会话（孤儿管道拒绝派发的既有守卫）"
+        );
+        // 会话行落库（跨重启恢复面）
+        let sess = store.get_session(&thread_id).await.unwrap();
+        assert!(sess.is_some(), "sessions 表必须落行");
+        assert!(
+            broadcasted
+                .lock()
+                .unwrap()
+                .contains(&"session.created".to_string()),
+            "session.created 域事件必须广播（观察者契约）"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
-async fn trigger_svc_ack_shape_validated() {
-    let router = router_plain();
+async fn session_create_without_identity_fails_fast() {
+    // 反调面身份契约（同 resume_pipeline 刀3）：无注入 user 显式拒绝，
+    // 不得以空串/anonymous 落库。
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let coord = Arc::new(agentos_session::SessionCoordinator::default());
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_store(store.clone())
+        .with_session(coord);
+
     let err = router
-        .handle("trigger-svc", "ack", json!({"fire_ids": ["x"]}))
+        .handle("session", "create", json!({"title": "x"}))
         .await
-        .expect_err("非整数 fire_ids 须拒绝");
-    assert!(format!("{err}").contains("整数"), "{err}");
-    let err = router
-        .handle("trigger-svc", "ack", json!({}))
-        .await
-        .expect_err("缺 fire_ids 须拒绝");
-    assert!(format!("{err}").contains("fire_ids"), "{err}");
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("未携带用户身份"),
+        "fail-fast 文案应区分「未携带身份」: {err}"
+    );
 }
 
+// ── P-23 片1：pipeline-executor.resume 恢复即清挂起归因键 ──
+
 #[tokio::test]
-async fn g6_trigger_svc_denied_without_grant() {
-    // trigger-svc 与其他反向能力同过 G6 单点：白名单不含即拒。
-    let lookup: GrantsLookupFn = Arc::new(|_| Some(vec!["other-capability".to_string()]));
-    let router =
-        KernelCapabilityRouter::with_metrics(MetricsAggregator::new()).with_grants_lookup(lookup);
-    let err = router
-        .handle(
-            "trigger-svc",
-            "register",
-            json!({
-                "_plugin_id": "p1",
-                "trigger_id": "t_g6",
-                "condition": "True",
-                "owner_plugin_id": "triggers_ext",
-            }),
+async fn test_pipeline_executor_resume_clears_suspended_reason() {
+    // 恢复成功即清 suspended_reason（与 suspend_request_id 同批同款）：
+    // 陈旧归因残留会让恢复后的行被误读为仍处该次挂起。
+    let sqlite = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let router = KernelCapabilityRouter::with_metrics(MetricsAggregator::new())
+        .with_store(store)
+        .with_sqlite(sqlite.clone());
+    sqlite
+        .record_run_start(
+            "pipe_rz",
+            "default",
+            "rz",
+            "hash",
+            "2026-11-04T00:00:00+00:00",
         )
+        .unwrap();
+    // 模拟 drain 排空落库后的形态：suspended + 归因键在位
+    sqlite
+        .set_run_status_projection(
+            "pipe_rz",
+            "default",
+            agentos_core::types::RunStatus::Suspended,
+        )
+        .unwrap();
+    sqlite
+        .upsert_state_field(
+            "pipe_rz",
+            "default",
+            "suspended_reason",
+            &json!("test: drain reason"),
+        )
+        .unwrap();
+
+    let out = router
+        .handle("pipeline-executor", "resume", json!({"run_id": "rz"}))
         .await
-        .expect_err("未授权调用须拒绝");
-    assert!(format!("{err}").contains("not granted"), "{err}");
+        .unwrap();
+    assert_eq!(out["status"], "resumed");
+
+    let fields = sqlite.load_pipeline_state("pipe_rz", "default").unwrap();
+    assert_eq!(
+        fields.get("run_status"),
+        Some(&json!("running")),
+        "run 翻回 running"
+    );
+    assert_eq!(
+        fields.get("suspended_reason"),
+        Some(&serde_json::Value::Null),
+        "恢复即清挂起归因（防跨恢复残留）"
+    );
+}
+
+// ── state.writes 调用方身份归约（合宿宿主键 → 成员并集）───────────────
+
+#[test]
+fn state_writes_for_caller_resolves_group_host_union() {
+    // 反调身份=进程身份：独占=插件 id，合宿=宿主键。合宿宿主的写必须归约到
+    // 成员声明并集，否则成员插件全员被判无持久写权限（task.ws_meta 实证）。
+    let entries = vec![
+        ("alpha".to_string(), vec!["task.alpha".to_string()]),
+        ("beta".to_string(), vec!["task.ws_meta".to_string()]),
+        ("gamma".to_string(), vec!["other.key".to_string()]),
+    ];
+    let host_key_of = |id: &str| match id {
+        "alpha" | "beta" => "group:light:2".to_string(),
+        other => format!("plugin:{other}"),
+    };
+
+    // 独占：直命中 manifest.id
+    assert_eq!(
+        state_writes_for_caller(&entries, host_key_of, "gamma"),
+        vec!["other.key".to_string()]
+    );
+    // 合宿宿主键：成员声明并集
+    let mut group = state_writes_for_caller(&entries, host_key_of, "group:light:2");
+    group.sort();
+    assert_eq!(
+        group,
+        vec!["task.alpha".to_string(), "task.ws_meta".to_string()]
+    );
+    // 未知调用方：空声明（fail-closed）
+    assert!(state_writes_for_caller(&entries, host_key_of, "group:none:1").is_empty());
+    assert!(state_writes_for_caller(&entries, host_key_of, "ghost").is_empty());
 }

@@ -16,12 +16,10 @@ dependencies = [
     "rich>=13.0",
     "aiohttp>=3.9",
     "watchdog>=3.0",
-    # 下三条 next-major 上界（2026-09-11 第七波，最小刀只封高漂移风险项，
-    # 不做全量封顶）：litellm 0.x→1.x 曾全量破坏性重写且 minor 也常破；
-    # pydantic 1→2 为生态最著名破坏性迁移、3 在路上；Pillow 历代大版本
-    # 惯例移除弃用 API（如 10 删 Image.ANTIALIAS）。与 weekly pip-audit
-    # 互补：审计抓已知 CVE，上界抓大版本破坏性升级。
-    "litellm>=1.96.2,<2",
+    # 下两条 next-major 上界（2026-09-11 第七波，最小刀只封高漂移风险项，
+    # 不做全量封顶）：pydantic 1→2 为生态最著名破坏性迁移、3 在路上；
+    # Pillow 历代大版本惯例移除弃用 API（如 10 删 Image.ANTIALIAS）。
+    # 与 weekly pip-audit 互补：审计抓已知 CVE，上界抓大版本破坏性升级。
     "pydantic>=2.0,<3",
     "pydantic-settings>=2.0",
     "python-lsp-server>=1.14.0",
@@ -31,13 +29,20 @@ dependencies = [
     "sqlalchemy>=2.0",
     "python-dotenv>=1.2.2",
     "Pillow>=10.0,<13",
+    # cost_control/tokenizer.py 的真实依赖：litellm 退役（0b8e3f775）前靠其
+    # 传递依赖存活，lock 重算后消失致测试收集 ModuleNotFoundError——显式声明。
+    "tiktoken>=0.13",
+    # ACP 客户端 SDK（acp_bridge 插件：外部编码 agent 派发统一走 ACP，
+    # ADR 2026-10-15-acp-agent-connector-quota-pool）。minor 封顶：0.x 系列
+    # 无稳定契约承诺，协议演进随 SDK 升级显式动锁。
+    "agent-client-protocol>=0.12.1,<0.13",
     # Windows 无系统 IANA 时区库，zoneinfo（prompt_build 动态变量时间注入等）
     # 缺 tzdata 会静默回退 UTC；Linux 走系统库不受影响。
     "tzdata>=2024.1; sys_platform == 'win32'",
 ]
 
 # [project.scripts]
-# 0.2 架构下 CLI 由插件提供（plugins/shared/system/channel_cli/），
+# 0.2 架构下 CLI 由插件提供（plugins/shared/channel_cli/），
 # 不再在根包注册 entry point。如需 CLI，运行 channel_cli 插件或内核 dispatcher。
 
 [project.optional-dependencies]
@@ -48,11 +53,24 @@ dev = [
     "pytest-cov>=4.0",
     "mypy>=1.10",
     "ruff>=0.5",
+    # yaml 类型桩：sdk-mypy（diagnostics_settings import yaml）严格模式
+    # 必需——根 venv 供 CI python-lint 车道与本 uv run 同口径
+    "types-PyYAML>=6.0",
+    # psutil 类型桩：sdk-mypy（process_runtime.backends 懒加载 psutil）严格模式必需
+    "types-psutil>=6.0",
     # fastapi：tests/test_new_project_e2e.py import（TestClient/声明式
     # schema），运行测试才需要
     "fastapi>=0.110",
     # e2e（tests/e2e_02）：WS 流式链路测试需要
     "websockets>=13.0",
+    # zstandard：tests/deploy/test_materialize_seed.py（种子包压缩校验）import；
+    # 2026-11-02 干净检出 timing-gate 收集期 ModuleNotFoundError 实证漏声明
+    "zstandard>=0.22",
+    # file_read 文档→markdown 回退测试（builtin_tools tests 真实生成 docx/pdf；
+    # 生产面依赖在 builtin_tools 插件 venv，此处仅为根 venv 测试车道同口径）
+    "markdown-it-py>=3.0",
+    "python-docx>=1.1",
+    "pypdf>=4.0",
 ]
 document = [
     "markitdown[docx,xlsx]>=0.1.0",
@@ -90,6 +108,8 @@ markers = [
     "task: Task E2E测试",
     "agent: Agent测试",
     "llm: LLM相关测试",
+    "real_api: 实机探针（需真实密钥+显式环境变量opt-in，缺任一即 skip，不对 CI/常规门禁生效）",
+    "whitebox: 白盒测试（直探内部实现的补充测试面，code-debug/test-fixer 技能强制使用）",
 ]
 filterwarnings = [
     "ignore::sqlalchemy.exc.SADeprecationWarning",
@@ -190,10 +210,10 @@ unfixable = ["F401"]  # 不自动删除未使用 import（可能是 re-export）
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401", "F403"]  # __init__.py 允许未使用 import
 "tests/**" = ["B011", "PT009", "PT027"]  # 测试文件：允许 assert 调试残留与 unittest 风格断言
-"plugins/shared/system/channel_cli/**" = ["T201"]  # CLI 允许 print
+"plugins/shared/channel_cli/**" = ["T201"]  # CLI 允许 print
 # isolation/manager.py 的函数内 docker 延迟导入（已标 noqa: PLC0415），
 # 其 import 排序对延迟加载场景意义有限，避免与延迟加载意图冲突
-"plugins/shared/system/isolation/manager.py" = ["I001"]
+"plugins/shared/isolation/manager.py" = ["I001"]
 
 [tool.ruff.lint.isort]
 # 0.2 架构：插件目录平铺，各插件内部以裸模块名 import（server.py 把自身目录加入 sys.path）。
@@ -215,7 +235,7 @@ line-ending = "lf"
 
 [tool.mypy]
 python_version = "3.11"
-# 宽松模式：项目大量依赖无类型注解的第三方库（litellm/docker 等），
+# 宽松模式：项目大量依赖无类型注解的第三方库（docker 等），
 # 关闭噪音类警告，只保留真正的类型错误检查。
 # 类型注解完善是长期技术债，见 ROADMAP。
 warn_return_any = false
@@ -265,7 +285,6 @@ check_untyped_defs = false
 [[tool.mypy.overrides]]
 # 第三方库跳过
 module = [
-    "litellm.*",
     "watchdog.*",
     "aiohttp.*",
 ]

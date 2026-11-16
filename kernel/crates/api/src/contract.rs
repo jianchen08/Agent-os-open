@@ -185,6 +185,31 @@ impl PluginContractState {
         Self::derived(plugin, enabled, None)
     }
 
+    /// 预烤发现缓存已验证（T4/R-2 层 2，2026-11-01）：boot G2 免 spawn 复验
+    /// 的登记——插件面字节经打包期摘要对账逐一匹配（不变不重来），本 boot 未
+    /// spawn 观测。与 not_covered 可区分：契约页如实显示缓存对账已过、观测未跑。
+    pub fn cache_verified(plugin: &PluginManifest, enabled: bool) -> Self {
+        Self {
+            plugin_id: plugin.id.clone(),
+            enabled,
+            gates: ContractGates {
+                manifest_schema_valid: true,
+                dep_ok: true,
+                g2_consistency: "cache_verified".to_string(),
+                smoke_result: "not_covered".to_string(),
+                render_decl_valid: "n/a".to_string(),
+                runtime_input_violations: 0,
+                runtime_output_violations: 0,
+                last_error: None,
+                rejected_tools: Vec::new(),
+                sanitized: None,
+                reverified_ts: None,
+                registry_disk_diffs: None,
+            },
+            last_scan_ts: now_ms(),
+        }
+    }
+
     /// 验证失败终态（BUG-51 注册门禁）：G2 复验预算超限（连续多轮观测失败）
     /// 后的终止标记——插件停留在 LLM 工具面遮挡态，`last_error` 携带用户可见
     /// 原因（plugins API error / 契约页透出）。清除仅经真实复验通过（`ok`）

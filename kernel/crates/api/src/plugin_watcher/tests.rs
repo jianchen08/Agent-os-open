@@ -54,6 +54,10 @@ struct MockInvoker {
     list_tools: std::collections::HashMap<String, serde_json::Value>,
     /// 置 true 时 list_plugin_tools 返回错误（模拟 spawn/上报失败）。
     list_tools_fail: bool,
+    /// 按 id 观测失败（boot 扇出失败隔离测试：只对这些 id 返回 Err）。
+    fail_ids: std::collections::HashSet<String>,
+    /// list_plugin_tools 应答前注入延迟 ms（boot 扇出并行时序测试；0 = 不延迟）。
+    delay_ms: u64,
     /// 前 N 次调用失败后恢复成功（模拟瞬态观测失败，测重试路径）。
     list_tools_fail_times: usize,
     /// list_plugin_tools 调用计数（断言重试次数）。
@@ -116,7 +120,13 @@ impl PluginInvoker for MockInvoker {
         let calls = self
             .list_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if self.list_tools_fail || calls < self.list_tools_fail_times {
+        if self.delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+        }
+        if self.list_tools_fail
+            || self.fail_ids.contains(plugin_id)
+            || calls < self.list_tools_fail_times
+        {
             return Err(PluginError {
                 message: "list_tools boom".into(),
                 code: None,
@@ -156,6 +166,8 @@ impl MockInvoker {
             fail: false,
             list_tools,
             list_tools_fail: false,
+            fail_ids: std::collections::HashSet::new(),
+            delay_ms: 0,
             list_tools_fail_times: 0,
             list_calls: std::sync::atomic::AtomicUsize::new(0),
             invoke_tool_fail: false,
@@ -245,6 +257,8 @@ async fn sync_once_propagates_discover_error() {
         fail: true,
         list_tools: std::collections::HashMap::new(),
         list_tools_fail: false,
+        fail_ids: std::collections::HashSet::new(),
+        delay_ms: 0,
         list_tools_fail_times: 0,
         list_calls: std::sync::atomic::AtomicUsize::new(0),
         invoke_tool_fail: false,
@@ -911,6 +925,69 @@ async fn g2_verify_consistent_returns_unchanged() {
 }
 
 #[tokio::test]
+async fn g2_observe_fail_increments_counter_once() {
+    // 卡9 计数器：观测失败终态（重试穷尽）→ mcp.tools_list_observe_fail_total
+    // 递增。计数器是进程级静态（同二进制并行测试共享），断言只能取「至少 +1」
+    // 的竞态容忍口径；「恰 1 次/终态」语义由实现单点保证——inc 只在
+    // g2_verify_and_sanitize 的 Err 分支（重试穷尽后）发生且每次恰 fetch_add(1)。
+    let mut invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1"], false)]);
+    invoker.list_tools_fail = true;
+    let before = crate::plugin_watcher::g2_tools_list_observe_fail_total();
+    let m = mk_manifest("p1", "tool", &["t1"], false);
+    let out = g2_verify_and_sanitize(&invoker, m).await;
+    assert!(out.spawn_failed, "探测通道故障应标记 spawn_failed");
+    assert!(
+        crate::plugin_watcher::g2_tools_list_observe_fail_total() > before,
+        "观测失败终态应使计数递增"
+    );
+}
+
+#[tokio::test]
+async fn g2_malformed_entries_increment_counter_by_entry_count() {
+    // 卡9 计数器：tools/list 可用但含坏条目 → mcp.tools_list_malformed_total
+    // 按条目数递增（与观测失败分键——通道级 vs 数据级两种语义）。进程级静态
+    // 并行共享 → 竞态容忍口径取「至少 +2」（本测试喂 2 个坏条目）。
+    let mut invoker = MockInvoker::new(vec![mk_manifest("p1", "tool", &["t1"], false)]);
+    invoker.list_tools.insert(
+        "p1".into(),
+        json!({ "tools": [
+            { "name": "t1", "description": "ok" },
+            { "description": "缺 name" },
+            { "name": 42, "description": "name 非字符串" },
+        ]}),
+    );
+    let before = crate::plugin_watcher::tools_list_malformed_total();
+    let m = mk_manifest("p1", "tool", &["t1"], false);
+    let out = g2_verify_and_sanitize(&invoker, m).await;
+    assert!(!out.spawn_failed);
+    assert!(
+        crate::plugin_watcher::tools_list_malformed_total() >= before + 2,
+        "两个坏条目应各计 1（好条目不计）"
+    );
+}
+
+#[test]
+fn tools_list_counter_keys_are_distinct() {
+    // 多实例分键：观测失败与 malformed 是两个独立计数键——纯解析不触任何键
+    //（计数只在 g2_verify_and_sanitize 消费点发生），两键互不串扰。
+    let before_fail = crate::plugin_watcher::g2_tools_list_observe_fail_total();
+    let before_malformed = crate::plugin_watcher::tools_list_malformed_total();
+    let (actual, malformed) = agentos_invoker::verify::parse_actual_tools(&json!({}));
+    assert!(actual.is_empty());
+    assert_eq!(malformed, 1, "缺 tools 键 = 1 个 malformed（parse 层语义）");
+    assert_eq!(
+        crate::plugin_watcher::g2_tools_list_observe_fail_total(),
+        before_fail,
+        "纯解析不触观测失败键"
+    );
+    assert_eq!(
+        crate::plugin_watcher::tools_list_malformed_total(),
+        before_malformed,
+        "parse_actual_tools 本身不计数（计数在 g2 消费点）"
+    );
+}
+
+#[tokio::test]
 async fn g2_verify_light_member_namespaced_names_not_drift() {
     // 合宿成员上报的工具名带 "{plugin_id}." 前缀（宿主按 §4.2 命名空间注册）：
     // G2 对照声明（裸名）前必须归一化前缀，否则 100% 误判 missing 漂移剔光工具
@@ -1030,6 +1107,259 @@ async fn g2_verify_observation_fail_retries_then_passes() {
     let out = g2_verify_and_sanitize(&invoker, m).await;
     assert!(!out.spawn_failed && !out.drift, "重试即过，不误杀");
     assert_eq!(out.manifest.capabilities.tools.len(), 1);
+}
+
+// ── Phase 3 #1：boot 主路径 G2 存量校验并行化（g2_boot_verify_all）──────
+
+/// boot 校验混装面：G2 覆盖（ok/漂移/观测失败）与非覆盖（禁用/合宿/native）各一。
+fn boot_fixture() -> Vec<PluginManifest> {
+    let mut disabled = mk_manifest("disabled1", "tool", &["td"], false);
+    disabled.enabled = Some(false);
+    let mut native = mk_manifest("native1", "tool", &["tn"], false);
+    native.host_type = agentos_core::traits::HostType::InProcess;
+    vec![
+        mk_manifest("ok1", "tool", &["t1"], false),
+        mk_manifest("drift1", "tool", &["t1", "ghost"], false),
+        disabled,
+        mk_manifest_light("light1", &["tl"]),
+        native,
+        mk_manifest("dead1", "tool", &["td_"], false),
+    ]
+}
+
+/// 构造与 fixture 配套的 mock：drift1 只上报 t1（ghost 漂移），dead1 恒观测失败。
+fn make_boot_invoker() -> MockInvoker {
+    let mut inv = MockInvoker::new(boot_fixture());
+    inv.list_tools.insert(
+        "drift1".into(),
+        json!({ "tools": [{"name": "t1", "description": "t1"}] }),
+    );
+    inv.fail_ids.insert("dead1".into());
+    inv
+}
+
+/// 跑一轮 boot 校验，返回（汇总, 各插件账本 g2 一致性态, 注册表工具名集）。
+async fn run_boot_verify(
+    concurrency: usize,
+) -> (
+    super::G2BootSummary,
+    std::collections::HashMap<String, String>,
+    std::collections::HashSet<String>,
+) {
+    let invoker = Arc::new(make_boot_invoker());
+    let ledger = crate::contract::ContractLedger::new();
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    let scopes = PluginScopeRegistry::new();
+    let enablement = PluginEnablement::default();
+    let manifests = boot_fixture();
+    let inv_dyn: Arc<dyn PluginInvoker> = invoker;
+    let summary = super::g2_boot_verify_all(
+        inv_dyn,
+        &manifests,
+        &enablement,
+        &ledger,
+        &registry,
+        &scopes,
+        &std::collections::HashSet::new(),
+        concurrency,
+    )
+    .await;
+    let states = ledger
+        .snapshot()
+        .into_iter()
+        .map(|s| (s.plugin_id, s.gates.g2_consistency))
+        .collect();
+    let tool_names = registry.list_tools().into_iter().map(|t| t.name).collect();
+    (summary, states, tool_names)
+}
+
+/// 串行语义不变锚：concurrency=1 与 concurrency=8 的汇总/账本/注册表逐项一致，
+/// 且各插件账本状态与原串行循环语义一一对应（ok/sanitized/not_covered/
+/// verify_incomplete），漂移净化重注册只带未漂移工具（ghost 不进注册表）。
+#[tokio::test]
+async fn g2_boot_verify_semantics_invariant_across_concurrency() {
+    let (s1, states1, tools1) = run_boot_verify(1).await;
+    let (s8, states8, tools8) = run_boot_verify(8).await;
+    assert_eq!(s1.verified, s8.verified, "verified 并行度不变量");
+    assert_eq!(s1.drifted, s8.drifted, "drifted 并行度不变量");
+    assert_eq!(
+        s1.spawn_failed, s8.spawn_failed,
+        "spawn_failed 并行度不变量"
+    );
+    let inc1: Vec<_> = s1.observe_incomplete.iter().map(|m| m.id.clone()).collect();
+    let inc8: Vec<_> = s8.observe_incomplete.iter().map(|m| m.id.clone()).collect();
+    assert_eq!(inc1, inc8, "观测失败清单并行度不变量");
+
+    assert_eq!(
+        (s1.verified, s1.drifted, s1.spawn_failed),
+        (1, 1, 1),
+        "混装面计数：ok1 过闸 / drift1 净化 / dead1 观测失败"
+    );
+    assert_eq!(inc1, vec!["dead1".to_string()]);
+    for id in ["ok1", "drift1", "disabled1", "light1", "native1", "dead1"] {
+        assert_eq!(
+            states1.get(id),
+            states8.get(id),
+            "账本状态并行度不变量: {id}"
+        );
+    }
+    assert_eq!(states1.get("ok1").map(String::as_str), Some("ok"));
+    assert_eq!(
+        states1.get("drift1").map(String::as_str),
+        Some("sanitized"),
+        "漂移净化在账本留痕"
+    );
+    assert_eq!(
+        states1.get("dead1").map(String::as_str),
+        Some("verify_incomplete"),
+        "观测失败 ≠ 判定失败：账本标校验未完成"
+    );
+    assert_eq!(
+        states1.get("disabled1").map(String::as_str),
+        Some("not_covered")
+    );
+    assert_eq!(
+        states1.get("light1").map(String::as_str),
+        Some("not_covered"),
+        "合宿成员跳过 boot 个体探测（时序窗口误剔防线）"
+    );
+    assert_eq!(
+        states1.get("native1").map(String::as_str),
+        Some("not_covered")
+    );
+    assert_eq!(tools1, tools8, "注册表工具集并行度不变量");
+    assert_eq!(
+        tools1,
+        ["t1".to_string()]
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+        "ok1 与净化后 drift1 各注册 t1，ghost 不得进注册表"
+    );
+}
+
+/// 失败隔离 + 并行时序（延迟注入 150ms/插件，禁零延迟）：单宿主恒败不拖死整组
+/// （其余 5 个照常收口）；6 路并发总时长≈最慢单探（≪串行 900ms），2 路并发
+/// ≥3 波次（并行度上界真实生效）。
+#[tokio::test]
+async fn g2_boot_verify_probe_overlaps_and_isolates_failures() {
+    let ids = ["b1", "b2", "b3", "b4", "b5", "b6"];
+    let make_manifests = || {
+        ids.iter()
+            .map(|id| mk_manifest(id, "tool", &["tx"], false))
+            .collect::<Vec<_>>()
+    };
+    let run = |concurrency: usize| async move {
+        let mut inv = MockInvoker::new(make_manifests());
+        inv.delay_ms = 150;
+        let inv_dyn: Arc<dyn PluginInvoker> = Arc::new(inv);
+        let ledger = crate::contract::ContractLedger::new();
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let scopes = PluginScopeRegistry::new();
+        let enablement = PluginEnablement::default();
+        let manifests = make_manifests();
+        let started = std::time::Instant::now();
+        let summary = super::g2_boot_verify_all(
+            inv_dyn,
+            &manifests,
+            &enablement,
+            &ledger,
+            &registry,
+            &scopes,
+            &std::collections::HashSet::new(),
+            concurrency,
+        )
+        .await;
+        (started.elapsed(), summary)
+    };
+    let (wide_elapsed, wide) = run(6).await;
+    let (narrow_elapsed, narrow) = run(2).await;
+
+    // 失败隔离：全部成功收口（verified=6），零观测失败。
+    assert_eq!(
+        (wide.verified, wide.drifted, wide.spawn_failed),
+        (6, 0, 0),
+        "全成功面计数"
+    );
+    // 并行重叠：6 路并发 ≈ 单波 150ms（≪串行 6×150=900ms）；性质下界 ≥ 波长
+    // 证明延迟真实注入未被吞。
+    assert!(
+        wide_elapsed >= std::time::Duration::from_millis(140),
+        "延迟必须真实生效（实际 {wide_elapsed:?}）"
+    );
+    assert!(
+        wide_elapsed < std::time::Duration::from_millis(600),
+        "6 路并发必须重叠推进（实际 {wide_elapsed:?}；串行 ≥900ms）"
+    );
+    // 并行度上界真实生效：2 路并发至少走 3 波（≥3×150=450ms，留余量下界 300ms）。
+    assert!(
+        narrow_elapsed >= std::time::Duration::from_millis(300),
+        "2 路并发必须呈波次推进（实际 {narrow_elapsed:?}）"
+    );
+    assert_eq!(
+        (narrow.verified, narrow.spawn_failed),
+        (6, 0),
+        "窄并发同样全量收口"
+    );
+}
+
+/// ── T4/R-2 层 2：缓存已验证集免 spawn 复验 ──────────────────────────
+/// 缓存一致态（种子未变）boot：skip 集内插件零观测（mock list_tools 调用计数
+/// 为 0）、账本登记 cache_verified、不进 observe_incomplete（30s 复验链零产生）；
+/// 集外插件照常探测（复验预算留给漂移回退件）。
+#[tokio::test]
+async fn g2_boot_verify_cache_verified_ids_skip_spawn_observation() {
+    let invoker = Arc::new(make_boot_invoker());
+    let ledger = crate::contract::ContractLedger::new();
+    let registry = Arc::new(CapabilityRegistryImpl::new());
+    let scopes = PluginScopeRegistry::new();
+    let enablement = PluginEnablement::default();
+    let manifests = boot_fixture();
+    let skip: std::collections::HashSet<String> = ["ok1", "drift1", "dead1"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let inv_dyn: Arc<dyn PluginInvoker> = invoker.clone();
+    let summary = super::g2_boot_verify_all(
+        inv_dyn,
+        &manifests,
+        &enablement,
+        &ledger,
+        &registry,
+        &scopes,
+        &skip,
+        4,
+    )
+    .await;
+    // 全覆盖面（ok1/drift1/dead1）都在 skip 集 → 零探测、零复验清单
+    assert_eq!(
+        (summary.verified, summary.drifted, summary.spawn_failed),
+        (0, 0, 0),
+        "缓存一致态：零 spawn 观测"
+    );
+    assert_eq!(summary.cache_skipped, 3, "免验数=skip 集与覆盖面交集");
+    assert!(
+        summary.observe_incomplete.is_empty(),
+        "免验件不进复验清单（30s 复验链零产生）"
+    );
+    assert_eq!(
+        invoker
+            .list_calls
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "skip 集内插件零 tools/list 观测调用"
+    );
+    let states: std::collections::HashMap<String, String> = ledger
+        .snapshot()
+        .into_iter()
+        .map(|s| (s.plugin_id, s.gates.g2_consistency))
+        .collect();
+    for id in ["ok1", "drift1", "dead1"] {
+        assert_eq!(
+            states.get(id).map(String::as_str),
+            Some("cache_verified"),
+            "{id} 账本如实登记缓存已验证（区别于 not_covered）"
+        );
+    }
 }
 
 /// 零声明 external MCP（一行接入形态）：entry=mcp:external + 空 capabilities。
@@ -1755,6 +2085,7 @@ async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
     let mut known = HashSet::new();
     let mut hashes = HashMap::new();
     let mut code_hashes = HashMap::new();
+    let mut code_fp_streaks = HashMap::new();
     let ledger = crate::contract::ContractLedger::new();
 
     // 两个内容不同的目录（文件名不同 → 指纹必异），模拟"修复前/后"的代码；
@@ -1775,7 +2106,7 @@ async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
         "fix1".into(),
         json!({ "tools": [{"name": "t1", "description": "t1"}] }),
     );
-    let r1 = sync_once_with_store(
+    let r1 = sync_once_with_store_hyst(
         &inv1,
         &registry_arc,
         &scopes,
@@ -1785,6 +2116,7 @@ async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
         &mut hashes,
         &mut code_hashes,
         &mut HashMap::new(),
+        &mut code_fp_streaks,
         Some(&resolver),
         None,
         Some(&ledger),
@@ -1798,10 +2130,11 @@ async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
         "基线轮零驱逐"
     );
 
-    // 次轮：实现修复（上报恢复 t1+t2），manifest 未动，仅代码指纹变化
+    // 次轮：实现修复（上报恢复 t1+t2），manifest 未动，仅代码指纹变化。
+    // F17 迟滞契约：单次翻转只记候选（幻影防护），本轮零动作。
     *stage.write() = dir_new.path().to_path_buf();
     let inv2 = MockInvoker::new(vec![mk_manifest("fix1", "tool", &["t1", "t2"], false)]);
-    let r2 = sync_once_with_store(
+    let r2 = sync_once_with_store_hyst(
         &inv2,
         &registry_arc,
         &scopes,
@@ -1811,6 +2144,31 @@ async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
         &mut hashes,
         &mut code_hashes,
         &mut HashMap::new(),
+        &mut code_fp_streaks,
+        Some(&resolver),
+        None,
+        Some(&ledger),
+    )
+    .await
+    .unwrap();
+    assert!(
+        r2.changed_plugin_ids.is_empty() && inv2.force_unloads.lock().unwrap().is_empty(),
+        "单次翻转=候选确认期，不得触发复验/驱逐（F17 幻影防护）"
+    );
+
+    // 确认轮：编辑保持（第二次同向确认）——此时触发复验重注册 + 驱逐。
+    let inv2b = MockInvoker::new(vec![mk_manifest("fix1", "tool", &["t1", "t2"], false)]);
+    let r2b = sync_once_with_store_hyst(
+        &inv2b,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        &mut HashMap::new(),
+        &mut code_fp_streaks,
         Some(&resolver),
         None,
         Some(&ledger),
@@ -1818,12 +2176,12 @@ async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
     .await
     .unwrap();
     assert_eq!(
-        r2.changed_plugin_ids,
+        r2b.changed_plugin_ids,
         vec!["fix1".to_string()],
-        "代码指纹变化须触发复验重注册"
+        "连续确认后代码指纹变化须触发复验重注册"
     );
     assert_eq!(
-        *inv2.force_unloads.lock().unwrap(),
+        *inv2b.force_unloads.lock().unwrap(),
         vec!["fix1".to_string()],
         "B15-R1：g2 插件代码变更同样驱逐宿主（进程侧新代码不依赖调用时 pull）"
     );
@@ -1840,7 +2198,7 @@ async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
     assert!(st.gates.reverified_ts.is_some(), "显式复验通过必留痕");
 
     // 第三轮：代码/声明都不再变 → 不重验（幂等，不重复 spawn 复核）
-    let r3 = sync_once_with_store(
+    let r3 = sync_once_with_store_hyst(
         &inv2,
         &registry_arc,
         &scopes,
@@ -1850,6 +2208,7 @@ async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
         &mut hashes,
         &mut code_hashes,
         &mut HashMap::new(),
+        &mut code_fp_streaks,
         Some(&resolver),
         None,
         Some(&ledger),
@@ -1858,7 +2217,7 @@ async fn sync_revalidates_on_code_change_and_restores_fixed_tool() {
     .unwrap();
     assert!(r3.changed_plugin_ids.is_empty(), "未变更不得重注册");
     assert_eq!(
-        inv2.force_unloads.lock().unwrap().len(),
+        inv2b.force_unloads.lock().unwrap().len(),
         1,
         "未编辑周期零重复驱逐"
     );
@@ -1945,6 +2304,8 @@ async fn verify_incomplete_reverify_budget_expires_to_verify_failed_terminal() {
     let mut known = HashSet::new();
     let mut hashes = HashMap::new();
     let mut code_hashes = HashMap::new();
+    // F17 迟滞候选表（跨轮持久）：用户修复信号需连续两次同向确认。
+    let mut code_fp_streaks = HashMap::new();
     let ledger = crate::contract::ContractLedger::new();
     // 连击账目必须跨轮持久（同一 HashMap 贯穿全部轮次，预算才可累积）
     let mut obs_fail_streaks = HashMap::new();
@@ -1963,7 +2324,7 @@ async fn verify_incomplete_reverify_budget_expires_to_verify_failed_terminal() {
     // 首轮：新插件观测失败 → 声明注册 + verify_incomplete
     let mut inv_fail = MockInvoker::new(vec![mk_manifest("h2", "tool", &["t1"], false)]);
     inv_fail.list_tools_fail = true;
-    sync_once_with_store(
+    sync_once_with_store_hyst(
         &inv_fail,
         &registry_arc,
         &scopes,
@@ -1973,6 +2334,7 @@ async fn verify_incomplete_reverify_budget_expires_to_verify_failed_terminal() {
         &mut hashes,
         &mut code_hashes,
         &mut obs_fail_streaks,
+        &mut code_fp_streaks,
         Some(&resolver),
         None,
         Some(&ledger),
@@ -1985,8 +2347,8 @@ async fn verify_incomplete_reverify_budget_expires_to_verify_failed_terminal() {
     );
 
     // 连续复验失败至预算上限（首轮注册失败不计入复验预算）
-    for _ in 0..G2_REVERIFY_MAX_CONSECUTIVE_FAILS {
-        sync_once_with_store(
+    for _ in 0..g2_reverify_max_consecutive_fails() {
+        sync_once_with_store_hyst(
             &inv_fail,
             &registry_arc,
             &scopes,
@@ -1996,6 +2358,7 @@ async fn verify_incomplete_reverify_budget_expires_to_verify_failed_terminal() {
             &mut hashes,
             &mut code_hashes,
             &mut obs_fail_streaks,
+            &mut code_fp_streaks,
             Some(&resolver),
             None,
             Some(&ledger),
@@ -2014,7 +2377,7 @@ async fn verify_incomplete_reverify_budget_expires_to_verify_failed_terminal() {
     let calls_before = inv_fail
         .list_calls
         .load(std::sync::atomic::Ordering::Relaxed);
-    sync_once_with_store(
+    sync_once_with_store_hyst(
         &inv_fail,
         &registry_arc,
         &scopes,
@@ -2024,6 +2387,7 @@ async fn verify_incomplete_reverify_budget_expires_to_verify_failed_terminal() {
         &mut hashes,
         &mut code_hashes,
         &mut obs_fail_streaks,
+        &mut code_fp_streaks,
         Some(&resolver),
         None,
         Some(&ledger),
@@ -2038,10 +2402,12 @@ async fn verify_incomplete_reverify_budget_expires_to_verify_failed_terminal() {
         "终态后停止单插件自动重验"
     );
 
-    // 用户修复（代码指纹变化）→ 预算重置 → 本轮复验成功 → 转正
+    // 用户修复（代码指纹变化）→ 预算重置 → 本轮复验成功 → 转正。
+    // F17 迟滞契约：单次翻转=候选确认期（预算未重置，终态继续跳过复验）；
+    // 第二次同向确认才认变更。
     *stage.write() = dir_new.path().to_path_buf();
     let inv_ok = MockInvoker::new(vec![mk_manifest("h2", "tool", &["t1"], false)]);
-    sync_once_with_store(
+    sync_once_with_store_hyst(
         &inv_ok,
         &registry_arc,
         &scopes,
@@ -2051,6 +2417,24 @@ async fn verify_incomplete_reverify_budget_expires_to_verify_failed_terminal() {
         &mut hashes,
         &mut code_hashes,
         &mut obs_fail_streaks,
+        &mut code_fp_streaks,
+        Some(&resolver),
+        None,
+        Some(&ledger),
+    )
+    .await
+    .unwrap();
+    sync_once_with_store_hyst(
+        &inv_ok,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        &mut obs_fail_streaks,
+        &mut code_fp_streaks,
         Some(&resolver),
         None,
         Some(&ledger),
@@ -2251,6 +2635,8 @@ async fn sync_evicts_zero_tool_light_sidecar_on_code_change() {
     let mut known: HashSet<String> = ["conv_mode".to_string()].into_iter().collect();
     let mut hashes = HashMap::new();
     let mut code_hashes = HashMap::new();
+    // F17 迟滞候选表（跨轮持久——本测试经 hyst 变体驱动多轮确认）。
+    let mut code_fp_streaks = HashMap::new();
 
     // 两份指纹必然相异的"代码"（不同文件名，免 mtime 粒度抖动），stage 切换
     // 模拟 .py 编辑；真实目录 + 真实指纹函数（关键路径不走 mock）。
@@ -2268,7 +2654,7 @@ async fn sync_evicts_zero_tool_light_sidecar_on_code_change() {
 
     // 轮询周期 1：基线轮——建基线，零驱逐
     let inv1 = MockInvoker::new(vec![m.clone()]);
-    let r1 = sync_once_with_store(
+    let r1 = sync_once_with_store_hyst(
         &inv1,
         &registry_arc,
         &scopes,
@@ -2278,6 +2664,7 @@ async fn sync_evicts_zero_tool_light_sidecar_on_code_change() {
         &mut hashes,
         &mut code_hashes,
         &mut HashMap::new(),
+        &mut code_fp_streaks,
         Some(&resolver),
         None,
         None,
@@ -2290,10 +2677,12 @@ async fn sync_evicts_zero_tool_light_sidecar_on_code_change() {
         "基线轮零驱逐"
     );
 
-    // 轮询周期 2：.py 编辑落地（stage → v2），期间**零调用**
+    // 轮询周期 2：.py 编辑落地（stage → v2），期间**零调用**。
+    // F17 迟滞契约：单次翻转只记候选（幻影防护——瞬时 I/O 失败同形态），
+    // 连续第二次确认才驱逐。
     *stage.write() = dir_v2.path().to_path_buf();
     let inv2 = MockInvoker::new(vec![m.clone()]);
-    sync_once_with_store(
+    sync_once_with_store_hyst(
         &inv2,
         &registry_arc,
         &scopes,
@@ -2303,6 +2692,31 @@ async fn sync_evicts_zero_tool_light_sidecar_on_code_change() {
         &mut hashes,
         &mut code_hashes,
         &mut HashMap::new(),
+        &mut code_fp_streaks,
+        Some(&resolver),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        inv2.force_unloads.lock().unwrap().is_empty(),
+        "单次翻转=候选确认期，不得驱逐（F17 幻影防护）"
+    );
+
+    // 轮询周期 3：编辑保持（第二次确认）——此时驱逐（下个调用者拿新代码）。
+    let inv2b = MockInvoker::new(vec![m.clone()]);
+    sync_once_with_store_hyst(
+        &inv2b,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        &mut HashMap::new(),
+        &mut code_fp_streaks,
         Some(&resolver),
         None,
         None,
@@ -2310,24 +2724,26 @@ async fn sync_evicts_zero_tool_light_sidecar_on_code_change() {
     .await
     .unwrap();
     assert_eq!(
-        *inv2.force_unloads.lock().unwrap(),
+        *inv2b.force_unloads.lock().unwrap(),
         vec!["conv_mode".to_string()],
-        "零调用下代码变更必须驱逐宿主（下个调用者拿新代码）"
+        "连续确认后零调用下代码变更必须驱逐宿主（下个调用者拿新代码）"
     );
     assert_eq!(
-        inv2.list_calls.load(std::sync::atomic::Ordering::Relaxed),
+        inv2b.list_calls.load(std::sync::atomic::Ordering::Relaxed),
         0,
         "零工具插件不得触发 G2 探测（检测全程零调用）"
     );
     assert_eq!(
-        inv2.invoke_calls.load(std::sync::atomic::Ordering::Relaxed),
+        inv2b
+            .invoke_calls
+            .load(std::sync::atomic::Ordering::Relaxed),
         0,
         "检测全程零工具调用"
     );
 
-    // 轮询周期 3：代码不再变——零驱逐（幂等，不重复 respawn）
+    // 轮询周期 4：代码不再变——零驱逐（幂等，不重复 respawn）
     let inv3 = MockInvoker::new(vec![m]);
-    let r3 = sync_once_with_store(
+    let r3 = sync_once_with_store_hyst(
         &inv3,
         &registry_arc,
         &scopes,
@@ -2337,6 +2753,7 @@ async fn sync_evicts_zero_tool_light_sidecar_on_code_change() {
         &mut hashes,
         &mut code_hashes,
         &mut HashMap::new(),
+        &mut code_fp_streaks,
         Some(&resolver),
         None,
         None,
@@ -2789,10 +3206,11 @@ async fn reverify_host_evict_failure_is_warned_and_continues() {
     let registry_arc = Arc::new(CapabilityRegistryImpl::new());
     let mut known = HashSet::from(["evict_fail".to_string()]);
     let mut code_hashes = HashMap::new();
+    let mut code_fp_streaks = HashMap::new();
     let mut hashes = HashMap::new();
 
     // 基线轮
-    sync_once_with_store(
+    sync_once_with_store_hyst(
         &invoker,
         &registry_arc,
         &scopes,
@@ -2802,6 +3220,7 @@ async fn reverify_host_evict_failure_is_warned_and_continues() {
         &mut hashes,
         &mut code_hashes,
         &mut HashMap::new(),
+        &mut code_fp_streaks,
         Some(&resolver),
         None,
         None,
@@ -2809,9 +3228,10 @@ async fn reverify_host_evict_failure_is_warned_and_continues() {
     .await
     .unwrap();
 
-    // 代码变更 → 驱逐失败（warn）+ 复验继续
+    // 代码变更 → 驱逐失败（warn）+ 复验继续。
+    // F17 迟滞契约：单次翻转=候选确认期（零动作），第二次同向确认才驱逐+复验。
     *stage.write() = v2.path().to_path_buf();
-    let r = sync_once_with_store(
+    sync_once_with_store_hyst(
         &invoker,
         &registry_arc,
         &scopes,
@@ -2821,6 +3241,24 @@ async fn reverify_host_evict_failure_is_warned_and_continues() {
         &mut hashes,
         &mut code_hashes,
         &mut HashMap::new(),
+        &mut code_fp_streaks,
+        Some(&resolver),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let r = sync_once_with_store_hyst(
+        &invoker,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        None,
+        &mut hashes,
+        &mut code_hashes,
+        &mut HashMap::new(),
+        &mut code_fp_streaks,
         Some(&resolver),
         None,
         None,
@@ -3280,177 +3718,6 @@ async fn dynamic_import_fuse_crossing_is_warned_once() {
     );
 }
 
-// ── 模式包资源增量重扫（resync_mode_package_resources，真实临时目录）──
-
-/// 写最小模式包 manifest（扫描层只读 id，与 mode_registry 测试 fixture 同形态）。
-fn write_mode_package_manifest(root: &Path, mode_id: &str) {
-    let dir = root.join("modes").join(mode_id);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("plugin.json"),
-        format!(r#"{{"id":"{mode_id}","version":"1.0.0"}}"#),
-    )
-    .unwrap();
-}
-
-/// 写一个 agents 约定文件（目录按需创建）。
-fn write_mode_agent(root: &Path, mode_id: &str, name: &str, content: &str) {
-    let dir = root.join("modes").join(mode_id).join("agents");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join(name), content).unwrap();
-}
-
-#[tokio::test]
-async fn resync_mode_resources_hot_added_agent_key_appears() {
-    let tmp = tempfile::tempdir().unwrap();
-    write_mode_package_manifest(tmp.path(), "mode_hot_add");
-    write_mode_agent(
-        tmp.path(),
-        "mode_hot_add",
-        "base.yaml",
-        "model_tier: large\n",
-    );
-
-    let registry = Arc::new(CapabilityRegistryImpl::new());
-    let scopes = PluginScopeRegistry::new();
-    let registrable: HashSet<String> = ["mode_hot_add".to_string()].into_iter().collect();
-
-    // 基线：base 键注册入表（guard 入 scope，与 boot 同一 M1 语义）
-    assert_eq!(
-        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
-        1
-    );
-    assert!(registry.get_mode_agent("mode_hot_add/base").is_some());
-    assert!(!scopes.scope_of("mode_hot_add").is_empty());
-    // 盘上无变化 → 快路径 no-op（零 churn）
-    assert_eq!(
-        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
-        0,
-        "键表与盘上一致时必须 no-op"
-    );
-
-    // 热增 agents 文件 → 下轮重扫键出现（无需重启）
-    write_mode_agent(
-        tmp.path(),
-        "mode_hot_add",
-        "hot.yaml",
-        "model_tier: small\n",
-    );
-    assert_eq!(
-        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
-        1
-    );
-    let hot = registry.get_mode_agent("mode_hot_add/hot").unwrap();
-    assert!(hot.path.ends_with("hot.yaml"), "条目路径指向盘上文件");
-    assert!(
-        registry.get_mode_agent("mode_hot_add/base").is_some(),
-        "既有键不受牵连"
-    );
-}
-
-#[tokio::test]
-async fn resync_mode_resources_hot_deleted_agent_key_disappears() {
-    let tmp = tempfile::tempdir().unwrap();
-    write_mode_package_manifest(tmp.path(), "mode_hot_del");
-    write_mode_agent(tmp.path(), "mode_hot_del", "base.yaml", "x: 1\n");
-    write_mode_agent(tmp.path(), "mode_hot_del", "doomed.yaml", "x: 2\n");
-
-    let registry = Arc::new(CapabilityRegistryImpl::new());
-    let scopes = PluginScopeRegistry::new();
-    let registrable: HashSet<String> = ["mode_hot_del".to_string()].into_iter().collect();
-    assert_eq!(
-        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
-        1
-    );
-    assert!(registry.get_mode_agent("mode_hot_del/doomed").is_some());
-
-    // 热删 agents 文件 → 键同源消失（其余键不受牵连）
-    std::fs::remove_file(tmp.path().join("modes/mode_hot_del/agents/doomed.yaml")).unwrap();
-    assert_eq!(
-        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
-        1
-    );
-    assert!(registry.get_mode_agent("mode_hot_del/doomed").is_none());
-    assert!(
-        registry.get_mode_agent("mode_hot_del/base").is_some(),
-        "未删除的键保留"
-    );
-}
-
-#[tokio::test]
-async fn resync_mode_resources_scan_failure_keeps_old_table() {
-    let tmp = tempfile::tempdir().unwrap();
-    write_mode_package_manifest(tmp.path(), "mode_bad_yaml");
-    write_mode_agent(tmp.path(), "mode_bad_yaml", "base.yaml", "x: 1\n");
-
-    let registry = Arc::new(CapabilityRegistryImpl::new());
-    let scopes = PluginScopeRegistry::new();
-    let registrable: HashSet<String> = ["mode_bad_yaml".to_string()].into_iter().collect();
-    assert_eq!(
-        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
-        1
-    );
-
-    // 重扫失败形态①：yaml 语法坏 → 整轮扫描 fail-closed，旧键表保留、不崩
-    write_mode_agent(
-        tmp.path(),
-        "mode_bad_yaml",
-        "bad.yaml",
-        "a: [broken\n  ::::",
-    );
-    assert_eq!(
-        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
-        0,
-        "扫描失败不产生任何键表变化"
-    );
-    assert!(
-        registry.get_mode_agent("mode_bad_yaml/base").is_some(),
-        "重扫失败保留旧键表"
-    );
-
-    // 形态②：可解析但顶层非映射（pipelines 约定目录）→ 同样保留旧表
-    std::fs::remove_file(tmp.path().join("modes/mode_bad_yaml/agents/bad.yaml")).unwrap();
-    let pipelines_dir = tmp.path().join("modes/mode_bad_yaml/pipelines");
-    std::fs::create_dir_all(&pipelines_dir).unwrap();
-    std::fs::write(pipelines_dir.join("empty.yaml"), "").unwrap();
-    assert_eq!(
-        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
-        0
-    );
-    assert!(registry.get_mode_agent("mode_bad_yaml/base").is_some());
-}
-
-#[tokio::test]
-async fn resync_mode_resources_restores_keys_after_scope_revoke() {
-    let tmp = tempfile::tempdir().unwrap();
-    write_mode_package_manifest(tmp.path(), "mode_respawn");
-    write_mode_agent(tmp.path(), "mode_respawn", "base.yaml", "x: 1\n");
-
-    let registry = Arc::new(CapabilityRegistryImpl::new());
-    let scopes = PluginScopeRegistry::new();
-    let registrable: HashSet<String> = ["mode_respawn".to_string()].into_iter().collect();
-    assert_eq!(
-        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
-        1
-    );
-
-    // 包内重注册/respawn 路径（reenable_plugin_capabilities）先整 scope 收回：
-    // 模式键随 M1 guard 同源消失
-    scopes.revoke("mode_respawn");
-    assert!(registry.get_mode_agent("mode_respawn/base").is_none());
-
-    // 下轮 sync 尾部重扫 → 键表恢复（guard 重新入 scope）
-    assert_eq!(
-        resync_mode_package_resources(&registry, &scopes, tmp.path(), None, &registrable),
-        1
-    );
-    assert!(registry.get_mode_agent("mode_respawn/base").is_some());
-    assert!(
-        !scopes.scope_of("mode_respawn").is_empty(),
-        "恢复的注册重新入 scope"
-    );
-}
-
 // ── 双源同 id（模式包 repo 份 + 用户份）：用户赢贯通 60s 重验证路径 ────────
 
 /// 写一个带 tools + http 端点的模式包（生产 mode_* 形态：sidecar + 合宿成员外
@@ -3658,4 +3925,267 @@ async fn dual_source_same_id_user_wins_no_swap_routes_alive_across_syncs() {
         std::path::Path::new(&dir).starts_with(user.path()),
         "源码目录必须稳定在用户根，got: {dir}"
     );
+}
+
+#[tokio::test]
+async fn sync_rebuilds_declared_stop_reason_vocabulary() {
+    // 停机词声明化（ADR 2026-10-15）集成链：manifest capabilities.stop_reasons
+    // 声明 → sync 收束全量重建 core 声明注册表 → from_control_state 折算
+    // Failed；插件从发现集消失（卸载）后下一轮重建摘词，回退 Completed 兜底。
+    // 测试尾部空重建自清算，不向同二进制并行测试泄漏词汇。
+    let word = "decl_chain_sync_word";
+    let signed = json!({ "router.stop_reason": word });
+    let manifest: PluginManifest = serde_json::from_value(json!({
+        "id": "stop_signer", "name": "stop_signer", "version": "1.0.0",
+        "plugin_type": "tool", "language": "rust",
+        "host_type": "sidecar", "entry": "x",
+        "capabilities": { "stop_reasons": [word] },
+    }))
+    .expect("valid manifest");
+    let invoker = MockInvoker::new(vec![manifest]);
+    let registry_arc = std::sync::Arc::new(CapabilityRegistryImpl::new());
+    let scopes = PluginScopeRegistry::new();
+    let store: ManifestsStore = Arc::new(RwLock::new(Vec::new()));
+    let mut known = HashSet::new();
+    sync_once_with_store(
+        &invoker,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        Some(&store),
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    // 词表是进程级全局（LazyLock<RwLock>），同二进制并行兄弟测试的 sync
+    // 全量重建可在本测断言窗口内清掉本词（llvm-cov 满批实测一次）——被清
+    // 则重跑自身 sync 重进词表，有界重试而非裸断言。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match agentos_core::types::RunStatus::from_control_state(&signed) {
+            agentos_core::types::RunStatus::Failed => break,
+            _ if std::time::Instant::now() < deadline => {
+                sync_once_with_store(
+                    &invoker,
+                    &registry_arc,
+                    &scopes,
+                    &mut known,
+                    &mut None,
+                    Some(&store),
+                    &mut HashMap::new(),
+                    &mut HashMap::new(),
+                    &mut HashMap::new(),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            other => panic!("sync 收束后声明词须进 core 词表并折算 Failed，got {other:?}"),
+        }
+    }
+    // 卸载路径：发现集清空 → 重建摘词 → 兜底 Completed（无残留）
+    let empty_invoker = MockInvoker::new(vec![]);
+    sync_once_with_store(
+        &empty_invoker,
+        &registry_arc,
+        &scopes,
+        &mut known,
+        &mut None,
+        Some(&store),
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        agentos_core::types::RunStatus::from_control_state(&signed),
+        agentos_core::types::RunStatus::Completed,
+        "卸载后重建摘词，署名回退缺省兜底"
+    );
+    // 双跑自清算：兄弟测试的全量重建可能在我们断言后又写入其词集——此处
+    // 空重建兜底归零（返回值仅计数，无观察面）
+    agentos_core::types::RunStatus::refresh_declared_stop_reasons([]);
+    agentos_core::types::RunStatus::refresh_declared_stop_reasons([]);
+}
+
+// ── 卡2a：复验预算阈值可配（默认 3）──
+
+#[test]
+fn fail_threshold_parses_default_override_invalid_and_zero() {
+    // 缺省 = 3（2026-10-17 事故口径：连续 3 轮观测失败即判定不可用）
+    assert_eq!(parse_fail_threshold(None), 3);
+    assert_eq!(parse_fail_threshold(Some("")), 3);
+    // 显式覆盖生效
+    assert_eq!(parse_fail_threshold(Some("7")), 7);
+    assert_eq!(parse_fail_threshold(Some(" 2 ")), 2);
+    // 非法与零/负值不妥协，回默认
+    assert_eq!(parse_fail_threshold(Some("abc")), 3);
+    assert_eq!(parse_fail_threshold(Some("0")), 3);
+    assert_eq!(parse_fail_threshold(Some("-1")), 3);
+}
+
+// ── 卡3：verify_failed 跨线通知 ──
+
+#[tokio::test]
+async fn verify_failed_crossing_notifies_once_until_recovered() {
+    let ledger = crate::contract::ContractLedger::new();
+    let m = mk_manifest("vf_plugin", "tool", &["t1"], false);
+    let notices = Arc::new(parking_lot::Mutex::new(Vec::<(String, Vec<String>)>::new()));
+    let notifier: crate::plugin_notices::UnavailableNotifier = {
+        let sink = notices.clone();
+        Arc::new(move |n: &crate::plugin_notices::PluginUnavailableNotice| {
+            sink.lock().push((n.kind.clone(), n.members.clone()));
+        })
+    };
+    let mut notified = HashSet::new();
+
+    // 未到终态（not_covered）：不通知
+    ledger.upsert(crate::contract::PluginContractState::derived(
+        &m, true, None,
+    ));
+    notify_verify_failed_crossings(
+        Some(&ledger),
+        Some(&notifier),
+        &mut notified,
+        &["vf_plugin".to_string()],
+        None,
+    )
+    .await;
+    assert!(notices.lock().is_empty(), "未跨线不得通知");
+
+    // 落终态 → 恰好一次（重复轮不刷屏）
+    ledger.upsert(crate::contract::PluginContractState::verify_failed(
+        &m,
+        true,
+        "预算超限".to_string(),
+    ));
+    for _ in 0..3 {
+        notify_verify_failed_crossings(
+            Some(&ledger),
+            Some(&notifier),
+            &mut notified,
+            &["vf_plugin".to_string()],
+            None,
+        )
+        .await;
+    }
+    assert_eq!(notices.lock().len(), 1, "跨线只报一次");
+
+    // 转正（复验 ok——账本唯一清除口；弱信号 not_covered 因粘滞清不掉终态）
+    // → 清账 → 再跨线可再报
+    let ok_outcome = crate::plugin_watcher::G2VerifyOutcome {
+        manifest: m.clone(),
+        rejected_tools: Vec::new(),
+        drift: false,
+        spawn_failed: false,
+        smoke_failed: false,
+    };
+    ledger.upsert(crate::contract::PluginContractState::derived(
+        &m,
+        true,
+        Some(&ok_outcome),
+    ));
+    notify_verify_failed_crossings(
+        Some(&ledger),
+        Some(&notifier),
+        &mut notified,
+        &["vf_plugin".to_string()],
+        None,
+    )
+    .await;
+    ledger.upsert(crate::contract::PluginContractState::verify_failed(
+        &m,
+        true,
+        "再次超限".to_string(),
+    ));
+    notify_verify_failed_crossings(
+        Some(&ledger),
+        Some(&notifier),
+        &mut notified,
+        &["vf_plugin".to_string()],
+        None,
+    )
+    .await;
+    assert_eq!(notices.lock().len(), 2, "转正后再跨线可再报");
+
+    // 未接线（无账本/无通知器）：no-op 不 panic
+    notify_verify_failed_crossings(
+        None,
+        Some(&notifier),
+        &mut notified,
+        &["x".to_string()],
+        None,
+    )
+    .await;
+    notify_verify_failed_crossings(Some(&ledger), None, &mut notified, &["x".to_string()], None)
+        .await;
+}
+
+// ── F17：代码指纹迟滞（幻影防护）纯函数核 ──────────────────────────────────
+
+use super::code_change_confirmed;
+
+/// 单次翻转只记候选不触发；回到基线撤销候选；再次偏离重新计数。
+#[test]
+fn code_change_hysteresis_single_flip_does_not_fire() {
+    let mut streaks = HashMap::new();
+    // 基线 100：翻转 200 → 候选（连击 1）不触发
+    assert!(!code_change_confirmed(Some(100), 200, &mut streaks, "p", 2));
+    assert_eq!(streaks.get("p"), Some(&(200, 1)));
+    // 回到基线（幻影自愈）→ 候选撤销
+    assert!(!code_change_confirmed(Some(100), 100, &mut streaks, "p", 2));
+    assert!(!streaks.contains_key("p"), "回到基线必须撤销候选");
+    // 再次偏离 → 连击从 1 重新起算，仍不触发
+    assert!(!code_change_confirmed(Some(100), 300, &mut streaks, "p", 2));
+    assert_eq!(streaks.get("p"), Some(&(300, 1)));
+}
+
+/// 连续两次同向翻转 → 第二次触发；触发后回到基线再翻转，重新走确认窗。
+#[test]
+fn code_change_hysteresis_double_flip_fires_once() {
+    let mut streaks = HashMap::new();
+    assert!(!code_change_confirmed(Some(100), 200, &mut streaks, "p", 2));
+    assert!(code_change_confirmed(Some(100), 200, &mut streaks, "p", 2));
+    // 触发后基线由复验面更新为 200 → 回到基线清候选
+    assert!(!code_change_confirmed(Some(200), 200, &mut streaks, "p", 2));
+    assert!(!streaks.contains_key("p"));
+}
+
+/// 振荡序列（A→B→A→B）永不累计连击 → 永不触发（respawn 风暴免疫）。
+#[test]
+fn code_change_hysteresis_oscillation_never_fires() {
+    let mut streaks = HashMap::new();
+    for cur in [200u64, 100, 200, 100, 200, 100] {
+        assert!(
+            !code_change_confirmed(Some(100), cur, &mut streaks, "p", 2),
+            "振荡序列第 {cur} 拍不得触发"
+        );
+    }
+}
+
+/// confirmations=1/0 = 旧行为（单样本翻转立即触发）；基线缺失不判变更。
+#[test]
+fn code_change_hysteresis_respects_legacy_confirmations() {
+    let mut streaks = HashMap::new();
+    assert!(code_change_confirmed(Some(100), 200, &mut streaks, "p", 1));
+    assert!(!streaks.contains_key("p"), "旧语义不留候选");
+    assert!(code_change_confirmed(Some(100), 200, &mut streaks, "q", 0));
+    // 基线缺失（新插件首轮）：不判变更且不残留候选
+    let mut streaks2 = HashMap::new();
+    streaks2.insert("p".to_string(), (999, 5));
+    assert!(!code_change_confirmed(None, 200, &mut streaks2, "p", 2));
+    assert!(!streaks2.contains_key("p"), "基线缺失撤销候选");
 }

@@ -1,8 +1,11 @@
 /**
  * 上下文使用进度指示器（圈型进度 + 用量明细浮窗）
  *
- * 主条：模型名 | 圆环 | 已用/上限（紧凑数字）；maxTokens <= 0 时只显示模型名
- * （不展示假进度）。语义：>=90% error 红 / >=70% warning 黄 / 其余 success 绿。
+ * 主条：圆环（模型名前的头部图标槽位）| 模型名 | 已用/上限（紧凑数字）。
+ * 窗口已知（maxTokens > 0）：圆环带 role=progressbar 与 aria 值，按真实比例
+ * 渲染进度弧，色调语义 >=90% error 红 / >=70% warning 黄 / 其余 success 绿。
+ * 窗口未知（maxTokens <= 0）：圆环仍在（无进度语义的图标槽位，进度弧为空、
+ * muted 色），数字不显示——不展示假进度。
  *
  * 浮窗：鼠标悬停或点击弹出（输入框在页面底部，向上弹），展示上下文使用量、
  * 本轮 token 明细（输出/总计/缓存命中）与该管道的累计 token 明细；
@@ -10,7 +13,7 @@
  */
 
 import { useState } from 'react'
-import { AlertCircle, Database } from '@/assets/icons'
+import { AlertCircle } from '@/assets/icons'
 import { cn } from '@/lib/utils'
 import { formatNumber } from '@/utils/format'
 import type { CumulativeUsage } from '@/stores/contextUsageStore'
@@ -34,6 +37,14 @@ export interface ContextUsageIndicatorProps {
   cumulative?: CumulativeUsage
   /** 紧凑模式（小尺寸，侧栏/旧 StatusBar 场景） */
   compact?: boolean
+  /** 纯圈模式（chat-input 拆分裁定 20261023）：只渲染圆环本身，模型名与行内
+   *  已用/上限数字一律不渲染，上下文信息只在悬停/点击浮窗呈现；缺省 false =
+   *  沿用旧形态（圈+名+数字，侧栏等场景） */
+  ringOnly?: boolean
+  /** 压缩终态（管道 state `context.compression`）：failed 时常驻可见地标注
+   *  「压缩失败」——压缩失败 = 上下文持续膨胀的静默劣化，只发一次性 toast
+   *  等于没有提示（用户裁定 2026-10-28） */
+  compressionStatus?: { status: string; reason?: string }
   className?: string
 }
 
@@ -42,7 +53,7 @@ const RING_SIZE = 16
 const RING_SIZE_COMPACT = 12
 
 /** token 紧凑格式（主条用）：1000→1.0k，128000→128k，2500000→2.5M */
-function formatCompactTokens(n: number): string {
+export function formatCompactTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 100_000) return `${Math.round(n / 1_000)}k`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
@@ -64,25 +75,42 @@ function DetailRow({ label, value, ratio }: { label: string; value?: number; rat
 }
 
 /**
- * 圈型进度（SVG 圆环）：
- * role=progressbar 供无障碍；颜色语义随使用率（error/warning/success）。
+ * 圆环（SVG 圆环）：模型名前的头部图标槽位。窗口已知时带 role=progressbar
+ * 供无障碍，颜色语义随使用率（error/warning/success）；窗口未知时仅为图标
+ * （无进度语义，进度弧为空、muted 色）。
  */
-function UsageRing({ ratio, size, tone }: { ratio: number; size: number; tone: string }) {
+function UsageRing({
+  ratio,
+  size,
+  tone,
+  withProgress,
+}: {
+  ratio: number
+  size: number
+  tone: string
+  /** 上下文窗口已知才带进度条语义（role/aria 值）；未知时仅为图标槽位 */
+  withProgress: boolean
+}) {
   const stroke = 2
   const r = (size - stroke) / 2
   const c = 2 * Math.PI * r
   const clamped = Math.max(0, Math.min(1, ratio))
+  const progressAria = withProgress
+    ? {
+        role: 'progressbar' as const,
+        'aria-valuenow': Math.round(clamped * 100),
+        'aria-valuemin': 0,
+        'aria-valuemax': 100,
+        'aria-label': '上下文用量',
+      }
+    : {}
 
   return (
     <svg
       width={size}
       height={size}
       viewBox={`0 0 ${size} ${size}`}
-      role="progressbar"
-      aria-valuenow={Math.round(clamped * 100)}
-      aria-valuemin={0}
-      aria-valuemax={100}
-      aria-label="上下文用量"
+      {...progressAria}
       className="shrink-0"
       data-testid="context-usage-ring"
     >
@@ -128,6 +156,7 @@ function UsagePopover({
   cachedTokens,
   hitRatio,
   cumulative,
+  compressionStatus,
   onMouseEnter,
   onMouseLeave,
 }: {
@@ -139,6 +168,7 @@ function UsagePopover({
   cachedTokens: number
   hitRatio: number
   cumulative?: CumulativeUsage
+  compressionStatus?: { status: string; reason?: string }
   onMouseEnter: () => void
   onMouseLeave: () => void
 }) {
@@ -191,6 +221,26 @@ function UsagePopover({
         </div>
       )}
 
+      {/* 上下文压缩终态（失败 = 上下文持续膨胀，必须可见） */}
+      {compressionStatus && (
+        <div className="border-border mt-2 border-t pt-2 text-xs">
+          <div className="text-muted-foreground mb-1 text-[10px] font-medium tracking-wide">
+            上下文压缩
+          </div>
+          <div
+            className={cn(
+              'leading-snug',
+              compressionStatus.status === 'failed' ? 'text-status-error' : 'text-status-success',
+            )}
+            data-testid="context-compression-status"
+          >
+            {compressionStatus.status === 'failed'
+              ? `失败：${compressionStatus.reason || '未产生有效收缩，上下文将持续膨胀'}`
+              : '正常（最近一次已生效）'}
+          </div>
+        </div>
+      )}
+
       {/* 该管道累计 token 明细 */}
       {cumulative && cumulative.total_tokens > 0 && (
         <div className="border-border mt-2 border-t pt-2 text-xs">
@@ -215,7 +265,7 @@ function UsagePopover({
 }
 
 /**
- * 模型名 + 圈型上下文进度 + 用量明细浮窗（输入框工具栏槽位默认件）
+ * 圆环 + 模型名 + 用量明细浮窗（输入框工具栏槽位默认件）
  */
 export function ContextUsageIndicator({
   modelName,
@@ -227,6 +277,8 @@ export function ContextUsageIndicator({
   hitRatio = 0,
   cumulative,
   compact = false,
+  ringOnly = false,
+  compressionStatus,
   className,
 }: ContextUsageIndicatorProps) {
   const [popoverOpen, setPopoverOpen] = useState(false)
@@ -238,7 +290,7 @@ export function ContextUsageIndicator({
           'items-center gap-1.5 rounded-lg border border-muted/20 text-muted-foreground',
           compact
             ? 'flex h-[18px] px-1.5 text-[10px]'
-            : 'hidden h-8 px-3 text-xs sm:flex',
+            : 'flex h-8 px-2 text-xs sm:px-3',
           className,
         )}
         data-testid="context-usage-invalid"
@@ -249,9 +301,12 @@ export function ContextUsageIndicator({
     )
   }
 
-  const ratio = maxTokens > 0 ? currentTokenUsage / maxTokens : 0
-  const tone =
-    ratio >= 0.9
+  const hasWindow = maxTokens > 0
+  const compressionFailed = compressionStatus?.status === 'failed'
+  const ratio = hasWindow ? currentTokenUsage / maxTokens : 0
+  const tone = !hasWindow
+    ? 'text-muted-foreground'
+    : ratio >= 0.9
       ? 'text-status-error'
       : ratio >= 0.7
         ? 'text-status-warning'
@@ -264,7 +319,7 @@ export function ContextUsageIndicator({
           'bg-primary/10 border-primary/20 min-w-0 cursor-pointer items-center gap-2 rounded-lg border',
           compact
             ? 'flex h-[18px] gap-1.5 px-1.5 text-[10px]'
-            : 'hidden h-8 px-3 text-xs sm:flex',
+            : 'flex h-8 gap-1.5 px-2 text-xs sm:gap-2 sm:px-3',
         )}
         data-testid="context-usage-indicator"
         aria-expanded={popoverOpen}
@@ -272,16 +327,36 @@ export function ContextUsageIndicator({
         onMouseEnter={() => setPopoverOpen(true)}
         onMouseLeave={() => setPopoverOpen(false)}
       >
-        <Database
-          className={cn('text-primary shrink-0', compact ? 'h-icon-xs w-icon-xs' : 'h-icon-sm w-icon-sm')}
+        <UsageRing
+          ratio={ratio}
+          size={compact ? RING_SIZE_COMPACT : RING_SIZE}
+          tone={tone}
+          withProgress={hasWindow}
         />
-        <span className="text-primary max-w-[120px] truncate font-semibold">{modelName}</span>
-        {maxTokens > 0 && <UsageRing ratio={ratio} size={compact ? RING_SIZE_COMPACT : RING_SIZE} tone={tone} />}
-        {maxTokens > 0 && (
+        {!ringOnly && (
+          <span className="text-primary max-w-[72px] truncate font-semibold sm:max-w-[120px]">{modelName}</span>
+        )}
+        {!ringOnly && hasWindow && (
           <span className="text-primary/80 tabular-nums whitespace-nowrap">
             {formatCompactTokens(currentTokenUsage)} / {formatCompactTokens(maxTokens)}
           </span>
         )}
+        {compressionFailed &&
+          (ringOnly ? (
+            // 纯圈模式无文案位：一个红点作常驻信号（详情在悬停浮窗）
+            <span
+              className="bg-status-error h-1.5 w-1.5 shrink-0 rounded-full"
+              data-testid="context-compression-failed-dot"
+              aria-label="上下文压缩失败"
+            />
+          ) : (
+            <span
+              className="text-status-error border-status-error/40 shrink-0 rounded border px-1 text-[10px] whitespace-nowrap"
+              data-testid="context-compression-failed"
+            >
+              压缩失败
+            </span>
+          ))}
       </div>
       {popoverOpen && (
         <UsagePopover
@@ -293,6 +368,7 @@ export function ContextUsageIndicator({
           cachedTokens={cachedTokens}
           hitRatio={hitRatio}
           cumulative={cumulative}
+          compressionStatus={compressionStatus}
           onMouseEnter={() => setPopoverOpen(true)}
           onMouseLeave={() => setPopoverOpen(false)}
         />

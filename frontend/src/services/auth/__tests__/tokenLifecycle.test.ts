@@ -38,6 +38,7 @@ import {
   stopAutoRefresh,
   loadMirroredAuthSession,
 } from '@/services/auth/tokenLifecycle'
+import { SERVER_BASE_URL_KEY } from '@/services/shellApiBase'
 
 const BASE_TIME = new Date('2026-01-01T00:00:00Z').getTime()
 
@@ -385,5 +386,69 @@ describe('tokenLifecycle: 主进程镜像回读 (loadMirroredAuthSession)', () =
       authSession: { load: vi.fn().mockRejectedValue(new Error('bridge down')) },
     }
     await expect(loadMirroredAuthSession()).resolves.toBeNull()
+  })
+})
+
+describe('tokenLifecycle: 按后端分键（每后端登录态隔离，切换往返不互串）', () => {
+  const REMOTE_BASE = 'https://cloud.example.com'
+  const REMOTE_KEY = `refresh_token@${REMOTE_BASE}`
+
+  beforeEach(() => {
+    // 隔离他 describe 残留：本组断言「裸键不被写入」须从净态起
+    localStorage.removeItem(STORAGE_KEYS.REFRESH_TOKEN)
+  })
+
+  afterEach(() => {
+    localStorage.removeItem(SERVER_BASE_URL_KEY)
+    localStorage.removeItem(REMOTE_KEY)
+    delete (window as unknown as { electronAPI?: unknown }).electronAPI
+    vi.resetModules()
+  })
+
+  /** 自定义后端模式下取全新模块实例（分键在模块加载期定型，与 API_BASE_URL 同律） */
+  async function importWithRemoteBase() {
+    localStorage.setItem(SERVER_BASE_URL_KEY, REMOTE_BASE)
+    vi.resetModules()
+    return import('@/services/auth/tokenLifecycle')
+  }
+
+  it('自定义后端模式：setTokens 落分键，裸键不动（本机档登录态不被覆盖）', async () => {
+    const mod = await importWithRemoteBase()
+    mod.setTokens('at-remote', 'rt-remote', 100)
+    expect(localStorage.getItem(REMOTE_KEY)).toBe('rt-remote')
+    expect(localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)).toBeNull()
+    expect(mod.getRefreshTokenValue()).toBe('rt-remote')
+  })
+
+  it('自定义后端模式：clearTokens 只清分键，他后端凭据不受影响', async () => {
+    localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, 'rt-local')
+    const mod = await importWithRemoteBase()
+    mod.setTokens('at-remote', 'rt-remote', 100)
+    mod.clearTokens()
+    expect(localStorage.getItem(REMOTE_KEY)).toBeNull()
+    // 本机档（裸键）凭据原样保留——切回本机免重登
+    expect(localStorage.getItem(STORAGE_KEYS.REFRESH_TOKEN)).toBe('rt-local')
+  })
+
+  it('自定义后端模式：刷新链路读分键、轮换新值落分键', async () => {
+    const mod = await importWithRemoteBase()
+    localStorage.setItem(REMOTE_KEY, 'rt-remote-old')
+    mockApiRefreshToken.mockReset()
+    mockApiRefreshToken.mockResolvedValue({
+      access_token: 'at-remote-2',
+      refresh_token: 'rt-remote-new',
+      expires_in: 60,
+    })
+    await mod.refresh()
+    expect(mockApiRefreshToken).toHaveBeenCalledWith('rt-remote-old')
+    expect(localStorage.getItem(REMOTE_KEY)).toBe('rt-remote-new')
+  })
+
+  it('自定义后端模式：镜像面禁用（镜像文件是桌面本机内核专属优化，不跨后端承载令牌）', async () => {
+    const mod = await importWithRemoteBase()
+    ;(window as unknown as { electronAPI: unknown }).electronAPI = {
+      authSession: { load: vi.fn().mockResolvedValue('rt-desktop') },
+    }
+    await expect(mod.loadMirroredAuthSession()).resolves.toBeNull()
   })
 })

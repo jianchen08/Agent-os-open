@@ -222,3 +222,22 @@ describe('SettingsHubWidget — 模型设置迁为插件 widget（内核导航�
     })
   })
 })
+
+describe('SettingsHubWidget — 移动端导航抽屉（md 以下开合）', () => {
+  afterEach(() => {
+    contributionRegistry.clear()
+    widgetRegistry.clear()
+    mockGetSchema.mockReset()
+    mockGetSchema.mockResolvedValue({})
+  })
+
+  it('切换条开抽屉，遮罩点击收起', async () => {
+    renderWithProviders(<SettingsHubWidget />)
+    // 初始：遮罩不在场（抽屉收起）
+    expect(screen.queryByTestId('settings-nav-backdrop')).toBeNull()
+    fireEvent.click(screen.getByTestId('settings-nav-toggle'))
+    expect(screen.getByTestId('settings-nav-backdrop')).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('settings-nav-backdrop'))
+    expect(screen.queryByTestId('settings-nav-backdrop')).toBeNull()
+  })
+})

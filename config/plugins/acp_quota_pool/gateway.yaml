@@ -1,0 +1,10 @@
+# ACP 额度池 CPA 网关配置（acp_quota_pool 插件 config_files[id=gateway] 的真值）。
+# 网关 = CLIProxyAPI（仓外部署于 C:\Users\jc\cpa-gateway，见方案台账 R5；
+# start-gateway.bat 自带端口守卫，重复拉起幂等）。
+# 密钥纪律：管理密钥真值禁入仓——管理页登录由用户在嵌入页内完成；
+# management_key_env 仅留引用名（数据面如启用，经环境变量注入真值）。
+base_url: http://127.0.0.1:8317
+start_command: C:\Users\jc\cpa-gateway\start-gateway.bat
+health_timeout_secs: 2.0
+startup_grace_secs: 3.0
+management_key_env: ACP_CPA_MANAGEMENT_KEY

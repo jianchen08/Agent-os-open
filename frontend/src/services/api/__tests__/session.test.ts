@@ -11,6 +11,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { API_ENDPOINTS } from '@/services/api/../../constants/api'
 import apiClient from '@/services/api/client'
 import { getSessions, deleteSession, getMessages } from '@/services/api/session'
+import { forgetSession, rememberSession } from '@/services/sessionWatchlist'
 import type { Message } from '@/services/api/../../types/models'
 
 // 创建axios mock适配器
@@ -20,8 +21,13 @@ describe('会话和消息API服务', () => {
   beforeEach(() => {
     // 每个测试前重置mock
     mockAxios.reset()
-    // 清除localStorage
+    // 清除localStorage（含会话登记表）
     localStorage.clear()
+  })
+
+  afterEach(() => {
+    // 登记表不跨用例泄入（localStorage.clear 已覆盖本端写入，此处兜底注销测试固定 id）
+    forgetSession('thread-new-out-of-window')
   })
 
   afterEach(() => {
@@ -72,6 +78,44 @@ describe('会话和消息API服务', () => {
 
       // 验证抛出错误
       await expect(getSessions()).rejects.toThrow()
+    })
+
+    it('登记表补偿：服务端窗口外的新建会话合并进列表（真机"新建会话不可见"回归锁）', async () => {
+      // 服务端只回窗口内旧会话（按 updated_at DESC 截断，新建零活动会话被挤出）
+      mockAxios.onGet(API_ENDPOINTS.SESSIONS.LIST).reply(200, {
+        threads: [
+          {
+            thread_id: 'session-windowed',
+            current_state: 'active',
+            intent: '窗口内会话',
+            created_at: '2026-10-12T09:00:00Z',
+            updated_at: '2026-10-12T09:00:00Z',
+            agent_id: null,
+          },
+        ],
+      })
+
+      // 本客户端新建会话已登记（createSession 链路写入）
+      rememberSession({
+        id: 'thread-new-out-of-window',
+        title: 'RP对话链深测',
+        createdAt: '2026-10-12T08:00:00Z',
+        updatedAt: '2026-10-12T08:00:00Z',
+        metadata: { session_type: 'main_pipeline', workspace: 'D:/proj-a' },
+        agentId: null,
+        workspace: 'D:/proj-a',
+        workspaceMode: null,
+        isolationMode: 'isolated',
+        pipelineIds: ['pipe-new'],
+        pinned: false,
+        starred: false,
+      })
+
+      const result = await getSessions()
+
+      // 窗口外会话补入列表，workspace 随行（会话树分组归属）
+      expect(result.map((s) => s.id)).toContain('thread-new-out-of-window')
+      expect(result.find((s) => s.id === 'thread-new-out-of-window')?.workspace).toBe('D:/proj-a')
     })
 
     it('应该在服务器错误时支持重试', async () => {

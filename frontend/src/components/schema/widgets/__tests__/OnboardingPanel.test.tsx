@@ -1,6 +1,7 @@
 // @feature FP-0.2.四 前端Schema 引导面板 widget | @ci frontend-test
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { consumeLlmWizardFocus, requestLlmWizardFocus } from '@/services/onboarding/llmWizardFocus'
 import { OnboardingPanel } from '../OnboardingPanel'
 import type { Walkthrough } from '@/services/onboarding/types'
 
@@ -21,6 +22,26 @@ vi.mock('@/services/api/client', () => ({
   default: {
     get: vi.fn(async (endpoint: string) => ({ data: apiResultsFixture[endpoint] ?? {} })),
   },
+}))
+
+// 向导数据面（LlmSetupWizard 经 services/api/config 取配置/预置；直达用例需要
+// 向导真实渲染出第 1 步=选供应商）
+const llmConfigFixture = {
+  models: {},
+  providers: { deepseek: { keys: [{ id: 'deepseek_main', api_key: '' }] } },
+  defaults: { chat: '', tiers: {}, embedding: '' },
+}
+const llmPresetsFixture = {
+  provider_groups: [{ label: '常用', providers: [['deepseek', 'DeepSeek']] }],
+}
+vi.mock('@/services/api/config', () => ({
+  getUserEnvVarSet: vi.fn(async () => new Set<string>()),
+  getLLMConfig: vi.fn(async () => llmConfigFixture),
+  getLLMPresets: vi.fn(async () => llmPresetsFixture),
+  addModel: vi.fn(async () => ({})),
+  getRemoteModels: vi.fn(async () => ({ models: [] })),
+  saveDefaults: vi.fn(async () => ({})),
+  updateProviderConfig: vi.fn(async () => ({})),
 }))
 
 vi.mock('@/services/workspacePanelOpener', () => ({
@@ -87,6 +108,7 @@ let apiResultsFixture: Record<string, unknown> = {}
 
 beforeEach(() => {
   vi.clearAllMocks()
+  consumeLlmWizardFocus() // 清自动打开直达闩（模块级状态防跨用例污染）
   progressFixture = {}
   apiResultsFixture = {}
 })
@@ -157,5 +179,23 @@ describe('OnboardingPanel', () => {
   it('向导步骤卡提供「打开配置向导」入口', async () => {
     render(<OnboardingPanel />)
     expect(await screen.findByRole('button', { name: '打开配置向导' })).toBeInTheDocument()
+  })
+})
+
+describe('自动打开直达（autoOpen 焦点通道）', () => {
+  it('挂载前已请求直达：免点「打开配置向导」直接展开向导第 1 步（选供应商）', async () => {
+    requestLlmWizardFocus()
+    render(<OnboardingPanel />)
+    expect(await screen.findByTestId('llm-setup-wizard')).toBeInTheDocument()
+    expect(await screen.findByText('DeepSeek')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '打开配置向导' })).not.toBeInTheDocument()
+  })
+
+  it('已挂载面板收到直达事件：直接展开向导（无需重新挂载）', async () => {
+    render(<OnboardingPanel />)
+    await screen.findByText('配置模型与 API')
+    expect(screen.queryByTestId('llm-setup-wizard')).not.toBeInTheDocument()
+    requestLlmWizardFocus()
+    expect(await screen.findByTestId('llm-setup-wizard')).toBeInTheDocument()
   })
 })

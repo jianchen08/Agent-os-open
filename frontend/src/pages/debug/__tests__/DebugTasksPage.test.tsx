@@ -39,7 +39,11 @@ vi.mock('@/services/websocket/GlobalWebSocket', () => ({
 const mockGetTaskList = vi.mocked(getTaskList)
 const mockResumeTask = vi.mocked(resumeTask)
 
-function makeTask(overrides: Partial<TaskInfo> & { id: string }): TaskInfo {
+/** status 收原始 string：夹具需喂旧持久化值（suspended）与未知值（planning），
+ *  TaskInfo.status 词表只含现行七态，旧值/未知值模拟按原始串传入。 */
+function makeTask(
+  overrides: Omit<Partial<TaskInfo>, 'status'> & { id: string; status?: string },
+): TaskInfo {
   return {
     title: `任务 ${overrides.id}`,
     status: 'completed',
@@ -112,7 +116,7 @@ describe('DebugTasksPage 列表渲染', () => {
     expect(screen.getByText('已结束')).toBeInTheDocument()
     expect(screen.getByText('进行中')).toBeInTheDocument()
 
-    // 恢复按钮只在携带 task_id 的旧挂起值上出现
+    // 恢复按钮只在归一为 stopped（含旧挂起值折叠）且携带 task_id 的行上出现
     expect(screen.getAllByRole('button', { name: '恢复' })).toHaveLength(1)
 
     // 时间无效 → 时间列显示 --（该行其余列均有值，-- 唯一来自时间格）

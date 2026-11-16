@@ -16,7 +16,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 HERE = Path(__file__).parent
-BROWSER_PLUGIN = HERE.parent.parent.parent.parent / "plugins" / "shared" / "tools" / "browser"
+BROWSER_PLUGIN = HERE.parent.parent.parent.parent / "plugins" / "shared" / "browser"
 BRIDGE_DIR = HERE.parent.parent.parent.parent / "mcp-servers" / "mcp-bridge"
 
 sys.path.insert(0, str(BRIDGE_DIR))
@@ -215,6 +215,27 @@ class TestBridgeClientProtocolMethods:
         )
         assert c.initialize()["protocolVersion"] == "2024-11-05"
 
+    def test_live_ticket_gets_ticket_endpoint(self, monkeypatch):
+        """live_ticket 打 GET /browser/live-ticket（宿主直发路径，错误映射共用）。"""
+        monkeypatch.setattr(BridgeClient, "_resolve_token", staticmethod(lambda cfg: "tok-abc"))
+        c = BridgeClient({"bridge_base": "http://127.0.0.1:8765", "upstream": "browser"}, session_id="sess-7")
+        captured: dict = {}
+
+        def fake_open(req, timeout):
+            captured["url"] = req.full_url
+            captured["method"] = req.get_method()
+            captured["auth"] = req.get_header("Authorization")
+            captured["session"] = req.get_header("X-bridge-session")
+            return {"ok": True, "status": 200, "body": {"ticket": "tk", "mjpeg_url": "u"}}
+
+        monkeypatch.setattr(c, "_open_with_errors", fake_open)
+        r = c.live_ticket()
+        assert r["ok"] and r["body"]["ticket"] == "tk"
+        assert captured["url"] == "http://127.0.0.1:8765/browser/live-ticket"
+        assert captured["method"] == "GET"
+        assert captured["auth"] == "Bearer tok-abc"
+        assert captured["session"] == "sess-7"
+
 
 class TestSendDirectUnreachable:
     @pytest.mark.asyncio
@@ -230,11 +251,10 @@ class TestContainerNoContainerId:
     @pytest.mark.asyncio
     async def test_sandbox_without_container_id(self, monkeypatch):
         monkeypatch.setattr(BridgeClient, "_resolve_token", staticmethod(lambda cfg: "tok-abc"))
-        monkeypatch.delenv("_CONTAINER_ID", raising=False)
         c = BridgeClient({"upstream": "browser", "timeout_secs": 2}, session_id="s", caller="sandbox")
         r = c._send({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         assert not r["ok"]
-        assert "_container_id" in r["body"]["error"]
+        assert "container_id" in r["body"]["error"]
 
 
 class TestFindProjectRootBoundary:
@@ -419,3 +439,17 @@ class TestGatewayDetectionOSError:
 
         monkeypatch.setattr(os_mod, "popen", boom)
         assert DockerProvider._detect_host_gateway_ip() == ""
+
+
+class TestBridgeTokenFromConfig:
+    """bridge.token 配置优先（装机 sidecar 无 env/.env 供给通道的唯一合规凭据面）。"""
+
+    def test_config_token_wins_over_env(self, monkeypatch):
+        monkeypatch.setenv("AGENTOS_BRIDGE_TOKEN", "env-token")
+        c = BridgeClient({"bridge_base": "http://127.0.0.1:8765", "token": "cfg-token"})
+        assert c._token == "cfg-token"
+
+    def test_env_fallback_when_no_config_token(self, monkeypatch):
+        monkeypatch.setenv("AGENTOS_BRIDGE_TOKEN", "env-token")
+        c = BridgeClient({"bridge_base": "http://127.0.0.1:8765"})
+        assert c._token == "env-token"

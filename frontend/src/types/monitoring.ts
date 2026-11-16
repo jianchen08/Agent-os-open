@@ -15,7 +15,7 @@ export interface TaskInfo {
   /** 任务名称（后端返回） */
   name?: string
   /** 执行状态 */
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'suspended'
+  status: 'pending' | 'running' | 'evaluating' | 'stopped' | 'completed' | 'failed' | 'timeout'
   /** 任务描述 */
   description?: string
   /** 创建时间 */

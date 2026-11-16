@@ -1,15 +1,23 @@
 /**
- * 音频通知工具模块
+ * 音频通知工具模块——提示音渲染器（数据全部由插件递送，前端零音效硬编码）
  *
- * 使用 Web Audio API 合成短促的系统提示音，
- * 无需外部音频文件。
- *
- * Features:
- * - 使用 Web Audio API 合成 notification ping 音效
- * - 尊重用户偏好（检查 notification 权限和静音设置）
- * - 不阻塞主线程（异步播放）
- * - 自动处理浏览器的音频上下文限制
+ * 音效目录来自 notification_sounds 插件（GET /ext/notification_sounds/sounds，
+ * sounds/*.json 即内容，用户/agent 落预设文件即上目录）；本模块只承载：
+ * - Web Audio 通用合成引擎：泛音簇振荡器 + 指数滑音 + 颤音 LFO + 反馈延迟软混响
+ * - 音效选择偏好（localStorage `notification_sound_id`，设备级，与
+ *   `notification_sound_muted` 静音开关同一存放模式）
+ * - 播放决策：静音/目录不可用/AudioContext 不可用均静默跳过（返回 false，
+ *   调用方已有应用内通知降级路径）
  */
+
+import {
+  fetchNotificationSoundCatalog,
+  type NotificationSoundPreset,
+  type SoundSynthParams,
+} from '@/services/api/notificationSounds'
+
+/** 音效选择偏好存储键 */
+export const NOTIFICATION_SOUND_STORAGE_KEY = 'notification_sound_id'
 
 /** 音频上下文单例（延迟初始化） */
 let audioContext: AudioContext | null = null
@@ -19,6 +27,9 @@ let userHasInteracted = false
 
 /** 是否已初始化监听器 */
 let interactionListenerInitialized = false
+
+/** 目录缓存（含在飞去重）；失败不缓存，下次播放重试 */
+let catalogPromise: Promise<{ sounds: NotificationSoundPreset[]; defaultId: string }> | null = null
 
 /**
  * 初始化用户交互监听
@@ -57,7 +68,9 @@ function getAudioContext(): AudioContext | null {
 
   try {
     if (!audioContext) {
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext
+      // 旧 Safari 前缀形态（webkitAudioContext）：类型化为可选构造器而非 any
+      const legacyWindow = window as Window & { webkitAudioContext?: typeof AudioContext }
+      const AudioContextClass = window.AudioContext || legacyWindow.webkitAudioContext
       if (!AudioContextClass) return null
       audioContext = new AudioContextClass()
     }
@@ -88,64 +101,161 @@ function shouldPlaySound(): boolean {
   return true
 }
 
+async function getCatalog(): Promise<{ sounds: NotificationSoundPreset[]; defaultId: string }> {
+  if (!catalogPromise) {
+    catalogPromise = fetchNotificationSoundCatalog().catch((error: unknown) => {
+      catalogPromise = null // 失败不缓存：下次播放重试拉取
+      throw error
+    })
+  }
+  return catalogPromise
+}
+
+/** 读取音效选择偏好；未选择返回空串（由 resolvePreset 回落默认项） */
+export function getNotificationSoundId(): string {
+  if (typeof window === 'undefined') return ''
+  try {
+    return localStorage.getItem(NOTIFICATION_SOUND_STORAGE_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+/** 持久化音效选择；空串清除（回落插件默认项）。存储不可用静默。 */
+export function setNotificationSoundId(id: string): void {
+  if (typeof window === 'undefined') return
+  try {
+    if (id) localStorage.setItem(NOTIFICATION_SOUND_STORAGE_KEY, id)
+    else localStorage.removeItem(NOTIFICATION_SOUND_STORAGE_KEY)
+  } catch {
+    // 存储不可用时静默：选择仅当次生效
+  }
+}
+
 /**
- * 使用 Web Audio API 合成短促的 notification ping 音效
- *
- * 音效参数：
- * - 频率: 880Hz (A5 音高，清脆悦耳)
- * - 波形: sine (正弦波，柔和)
- * - 时长: 150ms (短促不刺耳)
- * - 音量: 0.3 (适中音量)
- * - 衰减: 平滑淡出
+ * 拉取目录供设置页等消费方枚举音效；失败折算空目录（展示"不可用"）。
  */
-function synthesizeNotificationPing(ctx: AudioContext): void {
+export async function getNotificationSoundOptions(): Promise<{
+  sounds: NotificationSoundPreset[]
+  defaultId: string
+}> {
+  try {
+    return await getCatalog()
+  } catch {
+    return { sounds: [], defaultId: '' }
+  }
+}
+
+/** 依偏好解析待渲染预设：所选 id 命中 → 默认项 → 目录首个；目录不可用 → null */
+async function resolvePreset(): Promise<SoundSynthParams | null> {
+  try {
+    const catalog = await getCatalog()
+    if (catalog.sounds.length === 0) return null
+    const stored = getNotificationSoundId()
+    const picked =
+      catalog.sounds.find((s) => s.id === stored) ??
+      catalog.sounds.find((s) => s.id === catalog.defaultId) ??
+      catalog.sounds[0]
+    return picked?.params ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 通用合成引擎：按预设参数渲染
+ *
+ * 结构（与预设 JSON 契约一一对应）：
+ * - 每音 × 每泛音成分一个正弦振荡器，attack 起音后指数衰减（duration = decay × decayRatio）
+ * - 音符可选指数滑音（glideTo/glideTime）与颤音 LFO（vibratoHz/vibratoDepth）
+ * - wet>0 时经反馈延迟软混响（每抽头：延迟 → 低通 → 汇总，汇总反馈回延迟）
+ */
+function synthesizePreset(ctx: AudioContext, params: SoundSynthParams): void {
   const now = ctx.currentTime
+  const attack = params.attack ?? 0.006
+  const wet = params.wet ?? 0
+  const taps = params.taps ?? []
 
-  // 主音调振荡器
-  const oscillator = ctx.createOscillator()
-  const gainNode = ctx.createGain()
+  const master = ctx.createGain()
+  master.gain.value = 0.85
+  master.connect(ctx.destination)
 
-  oscillator.type = 'sine'
-  oscillator.frequency.setValueAtTime(880, now)
-  // 轻微的频率下滑，增加"叮"的感觉
-  oscillator.frequency.exponentialRampToValueAtTime(660, now + 0.12)
+  const tapInputs: GainNode[] = []
+  if (wet > 0 && taps.length > 0) {
+    for (const tap of taps) {
+      const input = ctx.createGain()
+      input.gain.value = wet / taps.length
+      const delay = ctx.createDelay(1)
+      delay.delayTime.value = tap.delay
+      const lowpass = ctx.createBiquadFilter()
+      lowpass.type = 'lowpass'
+      lowpass.frequency.value = tap.lowpass
+      const feedback = ctx.createGain()
+      feedback.gain.value = tap.feedback
+      const recirc = ctx.createDelay(1)
+      recirc.delayTime.value = tap.delay
+      const sum = ctx.createGain()
 
-  // 音量包络：快速起音 + 平滑淡出
-  gainNode.gain.setValueAtTime(0, now)
-  gainNode.gain.linearRampToValueAtTime(0.3, now + 0.01) // 快速起音
-  gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.15) // 平滑淡出
+      input.connect(delay)
+      delay.connect(lowpass)
+      lowpass.connect(sum)
+      sum.connect(feedback)
+      feedback.connect(recirc)
+      recirc.connect(sum)
+      sum.connect(master)
 
-  oscillator.connect(gainNode)
-  gainNode.connect(ctx.destination)
+      tapInputs.push(input)
+    }
+  }
 
-  oscillator.start(now)
-  oscillator.stop(now + 0.15)
+  for (const noteDef of params.notes) {
+    const t0 = now + noteDef.start
+    for (const partial of params.partials) {
+      const peak = noteDef.peak * partial.gain
+      if (peak <= 0) continue // 指数包络起点必须为正
+      const duration = noteDef.decay * partial.decayRatio
 
-  // 添加一个高频泛音，增加清脆感
-  const harmonic = ctx.createOscillator()
-  const harmonicGain = ctx.createGain()
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
 
-  harmonic.type = 'sine'
-  harmonic.frequency.setValueAtTime(1320, now)
-  harmonic.frequency.exponentialRampToValueAtTime(990, now + 0.08)
+      osc.type = 'sine'
+      osc.frequency.setValueAtTime(noteDef.freq * partial.ratio, t0)
+      if (noteDef.glideTo != null && noteDef.glideTime != null) {
+        osc.frequency.exponentialRampToValueAtTime(
+          noteDef.glideTo * partial.ratio,
+          t0 + noteDef.glideTime,
+        )
+      }
+      if (noteDef.vibratoHz != null && noteDef.vibratoDepth != null) {
+        const lfo = ctx.createOscillator()
+        const lfoGain = ctx.createGain()
+        lfo.frequency.value = noteDef.vibratoHz
+        lfoGain.gain.value = noteDef.freq * noteDef.vibratoDepth * partial.ratio
+        lfo.connect(lfoGain)
+        lfoGain.connect(osc.frequency)
+        lfo.start(t0)
+        lfo.stop(t0 + duration)
+      }
 
-  harmonicGain.gain.setValueAtTime(0, now)
-  harmonicGain.gain.linearRampToValueAtTime(0.1, now + 0.005)
-  harmonicGain.gain.exponentialRampToValueAtTime(0.001, now + 0.08)
+      gain.gain.setValueAtTime(0, t0)
+      gain.gain.linearRampToValueAtTime(peak, t0 + attack)
+      gain.gain.exponentialRampToValueAtTime(Math.max(peak * 0.001, 0.0001), t0 + duration)
 
-  harmonic.connect(harmonicGain)
-  harmonicGain.connect(ctx.destination)
+      osc.connect(gain)
+      gain.connect(master)
+      for (const tapInput of tapInputs) gain.connect(tapInput)
 
-  harmonic.start(now)
-  harmonic.stop(now + 0.08)
+      osc.start(t0)
+      osc.stop(t0 + duration)
+    }
+  }
 }
 
 /**
  * 播放交互请求通知音
  *
- * 使用 Web Audio API 合成短促的系统提示音。
- * 异步执行，不阻塞主线程。
- * 自动处理浏览器音频策略限制。
+ * 按用户所选预设（未选则插件默认项）经通用引擎渲染。
+ * 异步执行，不阻塞主线程；自动处理浏览器音频策略限制。
  *
  * @returns 是否成功播放
  */
@@ -155,6 +265,9 @@ export async function playNotificationSound(): Promise<boolean> {
   if (!shouldPlaySound()) return false
 
   try {
+    const params = await resolvePreset()
+    if (!params) return false
+
     const ctx = getAudioContext()
     if (!ctx) return false
 
@@ -168,7 +281,7 @@ export async function playNotificationSound(): Promise<boolean> {
       }
     }
 
-    synthesizeNotificationPing(ctx)
+    synthesizePreset(ctx, params)
     return true
   } catch {
     // 静默处理播放失败，不影响主流程

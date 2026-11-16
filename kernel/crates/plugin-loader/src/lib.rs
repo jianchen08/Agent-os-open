@@ -7,9 +7,11 @@
 //!
 //! - `loader`: 插件加载器实现——双根扫描、manifest 解析校验、按需加载
 //! - `registry`: 能力注册表 + 依赖解析器
-//! - `mode_registry`: 模式包约定子目录扫描注册（agents/pipelines，设计稿 §2.3 约定即注册）
 //! - `capability_provider`: 把 manifest 的 provides.capabilities 注册成 CapabilityHandler（M4）
 //! - `error`: 错误类型
+//!
+//! （模式包约定资源曾由 `mode_registry` 注册状态机承载，已退役：视图改按需
+//! 聚合，见 ADR 2026-10-15-mode-registry-retirement 与 api/src/mode_view.rs。）
 //!
 //! [来源: docs/0.2_rust_plugin_solution.md §3.7]
 //! [来源: docs/tasks/task_05_plugin_system.md]
@@ -18,7 +20,6 @@ pub mod capability_provider;
 pub mod enablement;
 pub mod error;
 pub mod loader;
-pub mod mode_registry;
 pub mod native_loader;
 pub mod registry;
 
@@ -28,18 +29,14 @@ pub(crate) mod test_env;
 
 pub use capability_provider::{
     register_provided_capabilities, CapabilityBridge, CapabilityRoute, McpBridge,
-    ProvidedCapabilityHandler,
+    ProvidedCapabilityHandler, VerificationGateLookup,
 };
 pub use enablement::{PluginEnablement, PluginProfile, ProfileEntry};
 pub use error::LoaderError;
 pub use loader::{
-    load_allowlist_file, AllowlistConfig, AllowlistEntry, AllowlistMode, DualSourcePolicy,
-    PluginLoaderImpl, CAP_HOST_CSS, CAP_HOST_JS, DANGEROUS_FRONTEND_CAPS,
-    PLUGIN_SOURCE_PRIORITY_ENV,
-};
-pub use mode_registry::{
-    register_mode_package_guarded, scan_mode_package_resources, ModeAgentEntry,
-    ModePackageResources, ModePipelineEntry, ModeResourceError,
+    collect_plugin_dirs, load_allowlist_file, AllowlistConfig, AllowlistEntry, AllowlistMode,
+    DualSourcePolicy, IneffectiveUserCopy, PluginLoaderImpl, CAP_HOST_CSS, CAP_HOST_JS,
+    DANGEROUS_FRONTEND_CAPS, PLUGIN_SOURCE_PRIORITY_ENV,
 };
 pub use native_loader::NativePluginLoader;
 pub use registry::{

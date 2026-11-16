@@ -58,7 +58,7 @@ use crate::db_routes::{
     update_row_inner, ListParams,
 };
 
-/// db-admin capability 的 namespace（manifest granted_capabilities 与此对齐）。
+/// db-admin capability 的 namespace。
 pub const NAMESPACE: &str = "db-admin";
 
 /// handler 所需状态（原 [`crate::db_routes::DbAdminState`] 语义不变）。

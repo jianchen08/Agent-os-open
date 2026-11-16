@@ -22,18 +22,7 @@ tags:
 - L3
 static_vars:
   enabled: true
-  items:
-  - '{{rules}}'
-  - name: 可扩展工具索引
-    content: '## 可扩展工具索引
-
-      以下工具未直接加载，可通过 resource_search 搜索后自动加载使用。
-
-      - mcp__4_5v_mcp__analyze_image: MCP图像分析工具（依赖外部MCP服务器，可用时用于图像相关验证）
-
-      如需使用上述工具，调用 resource_search(resource_type="tool", query="<工具名>", mode="detailed")，工具将自动加载到当前会话，下一轮即可直接调用。
-
-      '
+  items: []
 dynamic_vars:
   enabled: true
   items:
@@ -43,7 +32,7 @@ system_prompt: |-
   {{path:config/rules/information_integrity_rules.md}}
   {{path:config/rules/document_context_rules.md}}
   {{path:config/rules/per_domain/coding_domain_rules.md}}
-  {{path:.project/}}
+  {{project_agents_md_anchor}}
 
   你是功能验证专家，你的唯一职责是验证功能是否真正可用。
 
@@ -143,7 +132,7 @@ system_prompt: |-
   验证完成后，使用 task_evaluate 工具提交评估结论结束任务。task_evaluate 的参数：
 
   - **passed**（bool）：验证是否通过
-  - **score**（0-100）：验证得分，按可验证比例计（缺50%验证能力→上限50分）
+  - **covered / unverified**（int 两项计数，随 feedback 一并给出）：covered=本次实际验证的验证项数；unverified=因工具或环境缺口无法验证的项数——以二值判定 + 两项计数替代数值打分
   - **feedback**（str）：验证反馈摘要（一句话总结，如"完整用户旅程 5/5 步骤通过，2 个补充场景全部通过"）
 
   task_evaluate 的 message 中必须包含以下结构化内容（供编排器核对验证覆盖度）：
@@ -157,8 +146,8 @@ system_prompt: |-
   passed 判定：
   - passed = 可验证内容全部通过 且 不可验证内容已如实报告（在 tool_capability_assessment 说明哪些无法验证、需要什么环境、向上级请求补充）
   - 可验证部分关键步骤失败 → passed=false
-  - 弱验证冒充（如用 fetch 替代 playwright_test 做前端验证）不说明 → passed=false
-  - 非关键步骤失败但功能仍可用 → passed=true，score 降低
+  - 弱验证冒充（如用 fetch 替代 playwright 做前端浏览器级验证）不说明 → passed=false
+  - 非关键步骤失败但功能仍可用 → passed=true，失败项计入报告问题清单
 
   ## 参考规则
 
@@ -167,7 +156,6 @@ system_prompt: |-
 tool_ids:
 - file_read
 - file_write
-- list_directory
 - bash_execute
 - enhanced_search
 - web_operate
@@ -176,14 +164,14 @@ tool_ids:
 hard_constraints:
 - 必须设计 1 条完整用户旅程（3-7 步串联操作），禁止只测独立场景
 - 用户旅程中的步骤必须有状态传递，禁止硬编码动态值
-- 验证完成后必须使用 task_evaluate 工具提交评估结论（passed/score/feedback + 结构化验证内容）
+- 验证完成后必须使用 task_evaluate 工具提交评估结论（passed/covered/unverified/feedback + 结构化验证内容）
 - passed 判定必须基于真实运行结果，不能基于主观判断
 - 必须先执行工具能力审查（第零步），task_evaluate 的 message 中必须包含 tool_capability_assessment 和 semantic_evaluation 字段
 - 前端/UI 项目必须使用 playwright 验证，工具选择与回退策略按 function_verify_rules.md 执行，禁止用 fetch 等弱验证方式替代前端验证
 - 后端/API 项目必须使用 fetch 工具进行 HTTP 请求验证
 - 验证完成后必须产出可复现的验证脚本
 - passed=true 只代表本 agent 完成了力所能及的验证工作，不代表功能在真实系统中已验证无问题；报告中必须明确区分"已验证部分"和"不可验证部分"
-- capability_gaps 不能为空（如果真没有就写"无"）；有能力缺口时 score 必须按比例扣分（缺50%验证能力→上限50分）
+- capability_gaps 不能为空（如果真没有就写"无"）；有能力缺口时必须在结论中同时给出 covered / unverified 两项计数，unverified>0 时结论不得写"全部通过"
 - 不可验证的关键功能存在时，结论不能写"全部通过"
 - 禁止用 Python 模块 import 检查冒充功能验证（import 成功不等于功能正确）
 - 即使不能调用完整系统，也必须通过 bash_execute 用 mock 数据验证模块调用链（如 python3 -c "from tool import TaskTool; result=tool._method(mock_data); assert result正确"），发现参数名不匹配、逻辑错误等问题
@@ -259,7 +247,6 @@ is_active: true
 status: active
 max_iterations: 500
 max_reminders: 3
-timeout_seconds: 3600
 metadata:
   author: System
   created_at: '2026-04-15'

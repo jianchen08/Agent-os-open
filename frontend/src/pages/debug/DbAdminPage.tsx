@@ -333,7 +333,7 @@ export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
                 className={`block w-full rounded-md px-3 py-2 text-left text-sm transition-colors ${
                   activeTable === t.name
                     ? 'bg-accent text-accent-foreground'
-                    : 'text-muted-foreground hover:bg-accent/50'
+                    : 'text-muted-foreground hover:bg-muted/50'
                 }`}
               >
                 <div className="font-medium">{t.name}</div>
@@ -400,17 +400,17 @@ export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
                 </button>
               </div>
             ))}
-            <button onClick={handleAddFilter} className="border-border text-muted-foreground hover:bg-accent h-7 rounded border px-2 text-xs">
+            <button onClick={handleAddFilter} className="border-border text-muted-foreground hover:bg-muted h-7 rounded border px-2 text-xs">
               + 筛选
             </button>
             <button onClick={fetchRows} className="bg-primary text-primary-foreground h-7 rounded px-2 text-xs">
               查询
             </button>
-            <div className="ml-auto flex items-center gap-1 text-xs">
+            <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center gap-1 text-xs">
               <select
                 value={sortCol}
                 onChange={(e) => setSortCol(e.target.value)}
-                className="bg-card border-border h-7 rounded border px-1 text-xs"
+                className="bg-card border-border h-7 max-w-[45vw] rounded border px-1 text-xs md:max-w-none"
               >
                 <option value="">排序列</option>
                 {activeColumns.map((c) => (
@@ -422,7 +422,7 @@ export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
               <select
                 value={sortDir}
                 onChange={(e) => setSortDir(e.target.value as 'asc' | 'desc')}
-                className="bg-card border-border h-7 rounded border px-1 text-xs"
+                className="bg-card border-border h-7 max-w-[45vw] rounded border px-1 text-xs md:max-w-none"
               >
                 <option value="asc">升序</option>
                 <option value="desc">降序</option>
@@ -452,7 +452,7 @@ export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
                 </thead>
                 <tbody>
                   {rows.map((row, idx) => (
-                    <tr key={idx} className="hover:bg-accent/20 border-t align-top">
+                    <tr key={idx} className="hover:bg-muted/20 border-t align-top">
                       <td className="whitespace-nowrap px-2 py-1">
                         <button
                           onClick={() => handleUpdate(row, pkCols)}
@@ -482,11 +482,11 @@ export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
           </div>
 
           {/* 分页 */}
-          <div className="flex items-center gap-2 border-t px-3 py-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2 border-t px-3 py-2 text-xs">
             <button
               onClick={() => setOffset(Math.max(0, offset - limit))}
               disabled={offset <= 0}
-              className="border-border text-muted-foreground hover:bg-accent disabled:opacity-40 rounded border px-2 py-1"
+              className="border-border text-muted-foreground hover:bg-muted disabled:opacity-40 rounded border px-2 py-1"
             >
               上一页
             </button>
@@ -496,7 +496,7 @@ export function DbAdminPage({ embedded }: { embedded?: boolean } = {}) {
             <button
               onClick={() => setOffset(offset + limit)}
               disabled={offset + rows.length >= total}
-              className="border-border text-muted-foreground hover:bg-accent disabled:opacity-40 rounded border px-2 py-1"
+              className="border-border text-muted-foreground hover:bg-muted disabled:opacity-40 rounded border px-2 py-1"
             >
               下一页
             </button>

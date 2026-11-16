@@ -149,3 +149,75 @@ describe('handleStreamError 统一错误信封（2026-08-26）', () => {
     expect(n.errorSource).toBeUndefined()
   })
 })
+
+// 通知标题按错误码归因（2026-10-08）：内核 NO_ASSISTANT_REPLY 携带 LLM 真实
+// 失败原因（网络失败曾被标题「流式响应错误」+ 旧文案误归因为配置/密钥问题）。
+describe('handleStreamError 通知标题按错误码归因', () => {
+  let store: any
+  let handleStreamError: any
+
+  beforeEach(async () => {
+    vi.resetModules()
+    const storeMod = await import('@/stores/pipelineMessageStore')
+    store = storeMod.usePipelineMessageStore
+    ;(window as any).__pipelineStore = store
+    store.setState({
+      messagesByPipeline: {
+        [PIPELINE_ID]: [
+          {
+            id: MESSAGE_ID,
+            role: 'assistant',
+            status: 'streaming',
+            content: 'partial',
+            parts: [{ type: 'text', content: 'partial', state: 'streaming' }],
+            sequence: 1,
+            timestamp: new Date().toISOString(),
+          },
+        ],
+      },
+      pipelineSessionMap: { [PIPELINE_ID]: THREAD_ID },
+      streamingState: { [PIPELINE_ID]: true },
+      pipelines: {},
+      activePipelineId: PIPELINE_ID,
+      topCursorsByPipeline: {},
+      bottomCursorsByPipeline: {},
+      hasMoreOlderByPipeline: {},
+      isLoadingOlderByPipeline: {},
+    })
+    const mod = await import('@/services/websocket/streaming/handlers')
+    handleStreamError = mod.handleStreamError
+    addNotificationMock.mockClear()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('NO_ASSISTANT_REPLY：标题归因为模型调用失败，正文保留真实错误原文', () => {
+    handleStreamError(
+      makeStreamErrorEvent({
+        code: 'NO_ASSISTANT_REPLY',
+        message: '本轮对话未产生回复（模型调用失败：llm.complete_stream 工具执行失败: Connection error.）',
+        source: 'kernel',
+        retryable: true,
+      }),
+    )
+    const n = addNotificationMock.mock.calls[0][0]
+    expect(n.title).toBe('模型调用失败')
+    expect(n.message).toContain('Connection error.')
+    expect(n.message).not.toContain('配置与密钥')
+  })
+
+  it('未知错误码：标题回退流式响应错误（映射不误伤其他码）', () => {
+    handleStreamError(
+      makeStreamErrorEvent({
+        code: 'SOME_OTHER_CODE',
+        message: '其他错误',
+        source: 'kernel',
+        retryable: false,
+      }),
+    )
+    const n = addNotificationMock.mock.calls[0][0]
+    expect(n.title).toBe('流式响应错误')
+  })
+})

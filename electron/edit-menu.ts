@@ -1,19 +1,20 @@
 // @feature: FP-0.2.三 宿主接入 | @ci: frontend-test
 /**
- * 编辑类右键菜单 + 快捷键兜底（装机版「无法右键复制」修复，2026-09-28）。
+ * 编辑类右键菜单（装机版「无法右键复制」修复，2026-09-28）。
  *
- * 背景：Electron 的 webContents 没有内建右键菜单，且 Windows/Linux 上
- * Ctrl+C/X/V/A 剪贴板快捷键依赖应用菜单的角色加速器——生产环境
- * Menu.setApplicationMenu(null)（自定义标题栏取代原生菜单）后两者一并失效。
- * 开发态前端多跑在浏览器（浏览器自带右键菜单），问题只在 Electron 壳显形。
+ * 职责边界：本模块只承载右键菜单。Electron 的 webContents 没有内建
+ * 右键菜单（dev 态前端跑在浏览器、菜单由浏览器自带），生产环境
+ * Menu.setApplicationMenu(null)（自定义标题栏取代原生菜单）后由这里
+ * 按 context-menu 事件的 editFlags 弹出剪切/复制/粘贴/全选；右键处
+ * 无任何可编辑语义时不弹空菜单。
  *
- *  - attachEditContextMenu：webContents 'context-menu' 事件弹出
- *    剪切/复制/粘贴/全选 菜单，可用性按 editFlags 判定（右键处无任何
- *    可编辑语义时不弹空菜单）；
- *  - attachEditShortcutsFallback：'before-input-event' 拦截 Ctrl/Cmd+
- *    C/X/V/A 并显式调 webContents 编辑方法。preventDefault 压掉原生
- *    路径后单次执行，无论宿主 Chromium 是否已内建处理都不会双触发。
- *    仅生产环境挂载（dev 保留默认菜单，加速器已存在，叠加有双触发风险）。
+ * 键盘 Ctrl/Cmd+C/X/V/A 一律走 Chromium 原生路径，不在
+ * before-input-event 代理：原生路径在 Windows/Linux 独立于应用菜单生效
+ * （Electron 39 无应用菜单实测粘贴/全选/复制/剪切、含选中非编辑区文本
+ * 复制全部通过）；主进程代理会把粘贴逼进「renderer→主进程→renderer」
+ * 异步绕路，与剪贴板写入型注入工具（语音鼠标等）竞态——工具写完剪贴板
+ * 随即恢复原内容时，迟到的 paste 读到旧内容或空，正文不上屏。实测与
+ * 裁决见 docs/decisions/2026-10-23-remove-edit-shortcut-keyboard-fallback.md。
  */
 import { Menu, type BrowserWindow } from "electron";
 
@@ -24,17 +25,6 @@ export interface EditMenuFlags {
   canPaste: boolean;
   canSelectAll: boolean;
 }
-
-/** webContents 编辑命令（与 role 一一对应） */
-export type EditAction = "copy" | "cut" | "paste" | "selectAll";
-
-/** Ctrl/Cmd+字母 → 编辑命令映射（键 = input.key 小写归一） */
-const EDIT_SHORTCUT_ACTIONS: Readonly<Record<string, EditAction>> = {
-  c: "copy",
-  x: "cut",
-  v: "paste",
-  a: "selectAll",
-};
 
 /**
  * 构造编辑右键菜单模板（纯函数，便于单测）。
@@ -57,33 +47,6 @@ export function buildEditContextMenuTemplate(
   return template;
 }
 
-/**
- * 解析键盘输入是否命中编辑快捷键（纯函数，便于单测）。
- *
- * 主修饰键 = 非 darwin 的 Ctrl / darwin 的 Cmd；Alt/Shift 组合一律不命中
- * （保留给浏览器级快捷键与输入大写）。keyup/非编辑键返回 null。
- */
-export function resolveEditShortcutAction(input: {
-  type: string;
-  key: string;
-  control: boolean;
-  meta: boolean;
-  alt: boolean;
-  shift: boolean;
-}): EditAction | null {
-  if (input.type !== "keyDown") {
-    return null;
-  }
-  if (input.alt || input.shift) {
-    return null;
-  }
-  const modifier = process.platform === "darwin" ? input.meta : input.control;
-  if (!modifier) {
-    return null;
-  }
-  return EDIT_SHORTCUT_ACTIONS[input.key.toLowerCase()] ?? null;
-}
-
 function attachEditContextMenu(win: BrowserWindow): void {
   win.webContents.on("context-menu", (_event, params) => {
     const template = buildEditContextMenuTemplate(params.editFlags);
@@ -94,29 +57,10 @@ function attachEditContextMenu(win: BrowserWindow): void {
   });
 }
 
-function attachEditShortcutsFallback(win: BrowserWindow): void {
-  win.webContents.on("before-input-event", (event, input) => {
-    const action = resolveEditShortcutAction(input);
-    if (!action) {
-      return;
-    }
-    event.preventDefault();
-    win.webContents[action]();
-  });
-}
-
 /**
  * 给窗口挂编辑面（主窗口与子窗口同款，复制粘贴体验不因窗口形态漂移）。
- *
- * @param opts.withShortcuts - 同时挂键盘兜底；仅生产环境传 true
- * （dev 默认菜单的角色加速器已覆盖，叠加有双触发风险）
+ * 只挂右键菜单；键盘快捷键的承载方是 Chromium 原生路径（见头注释）。
  */
-export function attachEditMenu(
-  win: BrowserWindow,
-  opts: { withShortcuts: boolean },
-): void {
+export function attachEditMenu(win: BrowserWindow): void {
   attachEditContextMenu(win);
-  if (opts.withShortcuts) {
-    attachEditShortcutsFallback(win);
-  }
 }

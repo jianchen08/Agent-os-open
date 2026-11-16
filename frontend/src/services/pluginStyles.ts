@@ -20,6 +20,8 @@
 
 import { apiClient } from '@/services/api/client'
 import { extUrl } from '@/services/api/extRoute'
+import { loadSessionExecutionOptions } from '@/services/sessionExecutionOptions'
+import { primaryModeTag } from '@/services/schema/modeOptions'
 import { loggers } from '@/utils/logger'
 import type { ClientStyleDeclaration } from '@/services/schema/ContributionRegistry'
 
@@ -218,15 +220,31 @@ export function removeAllPluginStyles(): void {
 }
 
 /**
+ * 会话域门（ADR 2026-10-14-message-card-body-form）：带 modes 的声明仅当活跃
+ * 会话 mode ∈ modes 时生效；缺省/空 modes = 不限域（既有全局装饰语义）。
+ */
+export function clientStyleModeGateOpen(style: ClientStyleDeclaration, activeMode: string | null): boolean {
+  if (!style.modes || style.modes.length === 0) return true
+  return activeMode !== null && style.modes.includes(activeMode)
+}
+
+/**
  * 以注册表为权威同步注入样式（schema 重载后调用）
  *
  * 1. 移除注册表中已不存在的 <style>（插件禁用/卸载 → 无残留）；
  * 2. 注入注册表中尚未注入的（含重新启用的插件）。
  *
  * @param styles - 当前注册表内全部 client_styles 声明
+ * @param activeMode - 活跃会话 modeBinding.mode（null = 无绑定/非会话上下文）；
+ *        仅影响带 modes 门声明——门外的带门声明按「已失效」移除（与插件禁用
+ *        同路径），无 modes 声明不受影响。
  */
-export function syncPluginStyles(styles: ClientStyleDeclaration[]): void {
-  const desired = new Set(styles.map((s) => `${s.pluginId}:${s.id}`))
+export function syncPluginStyles(
+  styles: ClientStyleDeclaration[],
+  activeMode: string | null = null,
+): void {
+  const active = styles.filter((s) => clientStyleModeGateOpen(s, activeMode))
+  const desired = new Set(active.map((s) => `${s.pluginId}:${s.id}`))
   document.querySelectorAll(`style[${STYLE_ID_ATTR}]`).forEach((el) => {
     const key = el.getAttribute(STYLE_ID_ATTR)
     if (key && !desired.has(key)) {
@@ -234,7 +252,20 @@ export function syncPluginStyles(styles: ClientStyleDeclaration[]): void {
       loggers.websocket.debug(`[pluginStyles] 移除失效样式 ${key}`)
     }
   })
-  for (const style of styles) {
+  for (const style of active) {
     void injectPluginStyle(style)
   }
+}
+
+/**
+ * 按活跃会话同步注入样式（会话切换触发点消费，ADR 2026-10-14-message-card-body-form）：
+ * 读会话执行选项快照 modeBinding.mode 后按注册表权威重同步——带 modes 门声明随
+ * 会话域进出（RP 会话注入换装、切走即移除），无门声明零变化。
+ */
+export function syncPluginStylesForSession(
+  styles: ClientStyleDeclaration[],
+  sessionId: string | null | undefined,
+): void {
+  const mode = sessionId ? (primaryModeTag(loadSessionExecutionOptions(sessionId)?.modeBinding?.mode) || null) : null
+  syncPluginStyles(styles, mode)
 }

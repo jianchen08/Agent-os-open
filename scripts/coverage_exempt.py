@@ -40,36 +40,51 @@ ROOT = Path(__file__).resolve().parent.parent
 # 迁移至此使插桩/免插桩两侧共用一个基集）。
 BASE_TEST_PATHS: list[str] = [
     "plugins/test_system_plugins.py",
-    "plugins/shared/system/llm/",
-    "plugins/shared/system/tasks/",
+    "plugins/shared/llm/",
+    "plugins/shared/tasks/",
     # 模式插件出厂种子契约测试（2026-09-15 四模式种子接线：缺此条目则
-    # plugins/shared/modes/ 下 server.py 不进插桩车道、覆盖率失真）。
-    "plugins/shared/modes/",
+    # 模式包出厂种子契约测试（拍平后集中于 _libs/mode_tests，SEEDS 驱动；
+    # 缺此条目则模式包 server.py 不进插桩车道、覆盖率失真）。
+    "plugins/shared/_libs/mode_tests/",
     # agent_config_load 双根自举/sidecar 复用测试（2026-09-18 登记：目录内 7 用例
     # 此前不在基集，plugin.py sys.path 守卫缺行失真——覆盖率批十修正）。
-    "plugins/shared/pipeline/input/agent_config_load/",
-    # tool_core 单调用契约测试（2026-10-02 静态化迁移：Rust cdylib 收窄为
-    # Python sidecar 单调用插件——plugin/server/分支矩阵三文件进插桩基集，
-    # 否则 diff-cov 对 server.py/plugin.py fail-loud）。
-    "plugins/shared/pipeline/core/tool_core/",
-    # result_format 门判据测试（2026-10-02 迁移：core_type 门改 tool_results
-    # 判据，目录内测试进基集补度量面）。
-    "plugins/shared/pipeline/output/result_format/",
+    "plugins/shared/agent_config_load/",
     # 模式物料通用步骤测试（2026-09-24 架构重构：自 context_build 抽出为独立
     # 管道插件，原 tests/test_context_build_mode_material.py 断言随迁目录内）。
-    "plugins/shared/pipeline/input/mode_material_inject/",
-    "plugins/shared/pipeline/input/environment_lifecycle/",
-    "plugins/shared/pipeline/input/level_guard/",
-    "plugins/shared/pipeline/input/multimodal_preprocessor/",
-    "plugins/shared/pipeline/input/tool_schema/",
-    "plugins/shared/pipeline/output/duplicate_check/",
-    "plugins/shared/tools/task/",
-    "plugins/shared/tools/human/",
-    "plugins/shared/tools/lsp/",
-    "plugins/shared/tools/task_evaluate/",
-    "plugins/shared/tools/web_ext/",
-    "plugins/shared/tools/builtin_tools/tests/",
-    "plugins/shared/system/dsh_adapter/tests/",
+    "plugins/shared/mode_material_inject/",
+    "plugins/shared/environment_lifecycle/",
+    "plugins/shared/level_guard/",
+    "plugins/shared/multimodal_preprocessor/",
+    "plugins/shared/tool_schema/",
+    "plugins/shared/duplicate_check/",
+    # stop_check 执行超时闸门计时锚修复（2026-10-20 问题 10）：插件目录内
+    # 测试接入插桩车道——改动行覆盖率门禁对 scope 内改动文件 fail-loud
+    # （度量面漂移），不接线则 stop_check/plugin.py 的改动行不在 coverage.xml
+    # 内，diff-coverage 车道直接红。
+    "plugins/shared/stop_check/",
+    # 模式插件出厂 agent 契约闸（2026-10-20 问题 8 工具面漂移余波收口）：
+    # mode_coding/mode_godot 包内 test_agent_tool_ids*.py 断言出厂 agent 的
+    # tool_ids ⊆ 插件注册表面（退役 id 残留即红），此前不在基集 ⇒ 本地跑绿、
+    # CI 车道不收集（退役 id 长期无人拦）。目录内测试接线进插桩车道，缺此
+    # 条目则契约闸在 CI 失效。
+    "plugins/shared/mode_coding/",
+    "plugins/shared/mode_godot/",
+    # state_marker_parse 装载/审计步测试（2026-10-11 评审修复刀登记：目录内
+    # RP 测试此前不在基集，plugin.py/rp_state_audit idem 派生行覆盖率失真——
+    # agent_config_load 2026-09-18 登记同款缺口补齐）。
+    "plugins/shared/state_marker_parse/",
+    # rp_state_audit 共享审计单源契约测试（2026-10-11 同批登记：idem 派生
+    # helper 的降级分支行仅此文件覆盖）。
+    "tests/test_rp_state_audit.py",
+    "plugins/shared/task/",
+    "plugins/shared/human/",
+    "plugins/shared/task_evaluate/",
+    "plugins/shared/web_ext/",
+    "plugins/shared/builtin_tools/tests/",
+    "plugins/shared/dsh_adapter/tests/",
+    # ACP 额度池技能载荷测试（2026-10-15 M0 登记：engine/registry/ledger +
+    # 手搓 fake agent 线缆车道 + on_load 播种行为；opencode 真冒烟无装机自 skip）。
+    "plugins/shared/acp_quota_pool/tests/",
     "tests/plugins/",
     "tests/suites/plugins/",
     "tests/channels/",
@@ -105,25 +120,17 @@ BASE_TEST_PATHS: list[str] = [
     "tests/test_isolation_guard_dangling_workspace.py",
     # 2026-08-21 覆盖率批次：既有绿灯测试接线进插桩车道（@ci: none-local
     # 未接车道时目标模块整体不进覆盖面：python_packager/server.py（sidecar-only
-    # 缺进程内导入）、download/tool.py、triggers_ext、monitoring 等）。
+    # 缺进程内导入）、triggers_ext、monitoring 等）。
     # 全部目录 2026-08-21 本地单跑绿后接入。
-    "plugins/shared/system/python_packager/",
-    "plugins/shared/system/monitoring/",
-    "plugins/shared/tools/download/",
-    "plugins/shared/tools/triggers_ext/",
+    "plugins/shared/python_packager/",
+    "plugins/shared/monitoring/",
+    "plugins/shared/triggers_ext/",
     # 2026-08-25 批次E：散落测试全绿接入插桩车道（本地全车道共跑 2371 全绿后纳入）。
     # tests/suites（含 core/task 等平铺 import 套件，task_types 独占模块双实例
     # 根因已修：根 conftest 逐出名单去独占名 + 运行期路径守卫）、unit（含
     # channel_migration 六通道插件契约）、monitoring（0.2 监控模块）、multimodal
     # （storage 槽位收敛）、顶层任务契约与权限测试。
-    # tests/suites 展开为子目录（2026-10-04）：整目录入参在分片调度下不可
-    # 拆分（_pytest_argv_shards 按路径中点切分），单目录过重时会撑爆单个
-    # 分片 job；子目录粒度让分片均衡成为可能。测试集不变。
-    "tests/suites/core/",
-    "tests/suites/e2e/",
-    "tests/suites/llm/",
-    "tests/suites/plugins/",
-    "tests/suites/task/",
+    "tests/suites/",
     "tests/unit/",
     "tests/monitoring/",
     "tests/multimodal/",
@@ -151,26 +158,31 @@ BASE_TEST_PATHS: list[str] = [
     # security_check 系八文件共跑绿后纳入）。此前 pipeline/** 与 system/tools
     # 散目录不在车道 → context_window_guard/security_check/isolation/
     # hindsight_memory 等模块虽有进程内测试但车道不收集，覆盖率长期失真。
-    "plugins/shared/pipeline/input/context_window_guard/",
-    "plugins/shared/pipeline/input/prompt_build/",
-    "plugins/shared/pipeline/input/security_check/",
-    "plugins/shared/pipeline/output/child_task_guard/tests/",
-    "plugins/shared/pipeline/output/task_reminder/",
-    "plugins/shared/pipeline/output/tool_cache_writer/",
-    "plugins/shared/system/agent_manager/",
-    "plugins/shared/system/approval/",
+    "plugins/shared/context_window_guard/",
+    "plugins/shared/prompt_build/",
+    "plugins/shared/security_check/",
+    "plugins/shared/task_reminder/",
+    "plugins/shared/tool_cache_writer/",
+    # 模式体系收口批D度量面登记（2026-10-09）：todo_track 进程内测试（importlib
+    # 唯一模块名加载 tool/server）登记进基集，防批内改动的 server.py/tool.py
+    # 不进插桩度量面（coverage.xml 无此文件）→ plugins-diff-coverage fail-loud
+    # （度量面漂移）。project_create/project_state 已随插件退役移出登记
+    # （不存在的基集路径会让 pytest 用法错误整车道退出）。
+    "plugins/shared/todo_track/",
+    "plugins/shared/agent_manager/",
+    "plugins/shared/approval/",
     # evaluation 读面/执行面行为测试（2026-08-26 A5.3 P0 批：server.py 50%→93%）
-    "plugins/shared/system/evaluation/",
-    "plugins/shared/system/isolation/",
-    "plugins/shared/system/scene/",
-    "plugins/shared/system/task_form/",
-    "plugins/shared/system/workspace/",
-    "plugins/shared/system/hindsight_memory/",
-    "plugins/shared/system/review/test_review_persistence.py",
-    "plugins/shared/tools/memory/",
-    "plugins/shared/tools/resource_merge/",
-    "plugins/shared/tools/simple/",
-    "plugins/shared/tools/spill_retrieve/",
+    "plugins/shared/evaluation/",
+    "plugins/shared/isolation/",
+    "plugins/shared/scene/",
+    "plugins/shared/task_form/",
+    "plugins/shared/workspace/",
+    "plugins/shared/hindsight_memory/",
+    "plugins/shared/review/test_review_persistence.py",
+    "plugins/shared/memory/",
+    "plugins/shared/resource_merge/",
+    "plugins/shared/simple/",
+    "plugins/shared/spill_retrieve/",
     # 2026-08-26 批次G：LLM/隔离/任务链孤儿测试接线（12 文件单跑 107 绿
     # 10.2s 后接入；此前在车道名单外 → llm_core adapter 16.6%/system.llm
     # adapter 17.8%/isolation workspace 三件 7.6-17.9% 的覆盖率失真）。
@@ -212,7 +224,6 @@ BASE_TEST_PATHS: list[str] = [
     "tests/test_security_check_permission_modes.py",
     "tests/test_security_check_signature.py",
     "tests/test_security_check_soft_block_loop.py",
-    "tests/test_sensitive_paths.py",
     "tests/test_startup_env_adaptation.py",
     "tests/test_startup_scripts_fix.py",
     "tests/test_tool_block_not_end_pipeline.py",
@@ -224,11 +235,11 @@ BASE_TEST_PATHS: list[str] = [
     "tests/tools/builtin/",
     # 2026-09-13 覆盖率补测批九：cost_control 目录接线（既有并发测试在
     # tests/plugins/ 下、目录内缺口测试 38 用例车道口径绿后纳入）。
-    "plugins/shared/system/cost_control/",
+    "plugins/shared/cost_control/",
     # 2026-09-13 覆盖率补测批九：tool_args_inject 目录接线（2026-10-02 改名自
     # param_inject）——既有 9 用例此前从未进车道（目录不在名单）、车道口径全绿
     # 后随缺口测试一并纳入。
-    "plugins/shared/pipeline/input/tool_args_inject/",
+    "plugins/shared/tool_args_inject/",
     # 2026-09-14 覆盖率补测批九：agent_config_load 缺口分支补测（config_id 回退/
     # 缓存失效/非 dict yaml/priority/血缘投影/static_vars 装载/层级覆盖），
     # 缺此条目则新文件不进插桩车道、plugin.py 覆盖率失真。
@@ -239,8 +250,8 @@ BASE_TEST_PATHS: list[str] = [
     "tests/test_agent_config_load_mode_agent_key.py",
     # 2026-09-14 覆盖率补测批九：review 缺口测试接线（逐文件登记——目录内
     # test_review_hindsight_e2e.py 是环境门槛 e2e，不进插桩车道）。
-    "plugins/shared/system/review/test_review_gaps.py",
-    "plugins/shared/system/review/test_improvement.py",
+    "plugins/shared/review/test_review_gaps.py",
+    "plugins/shared/review/test_improvement.py",
     # 2026-09-14 覆盖率补测批九：_host/host.py 缺口测试（_host 非插件目录，
     # 文件自带路径注入不依赖 tests/plugins/_host/conftest）。
     "tests/test_host_shared_gaps.py",
@@ -248,8 +259,8 @@ BASE_TEST_PATHS: list[str] = [
     # 随缺口补测一并接线——model_prompt_adapter 顶层非映射文档降级缺陷已同刀修复。
     "tests/test_model_prompt_adapter_gaps.py",
     # 批十：review 缺口补测随插件目录接线（原 tests/test_review_gaps_2.py 归位到
-    # plugins/shared/system/review/，与该目录既有 test_review_gaps.py 同址）。
-    "plugins/shared/system/review/test_review_service_gaps.py",
+    # plugins/shared/review/，与该目录既有 test_review_gaps.py 同址）。
+    "plugins/shared/review/test_review_service_gaps.py",
     # 2026-09-14 覆盖率补测簇 J：pipeline/_base 基础三件套（IPlugin 接口族/
     # PluginContext/PluginResult/create_initial_state/find_plugin_config）此前
     # 不在任何车道（_base 非插件目录、SDK 侧是复制品），模块覆盖率长期失真。
@@ -265,10 +276,16 @@ BASE_TEST_PATHS: list[str] = [
     # （102-117 行）此前不在任何车道——该目录整体收集会与 system/llm 的平铺
     # `import adapter` 裸名冲突（3 文件收集期 AttributeError），故只登记执行面
     # 单文件（自带唯一模块名装载，与车道共跑实测 2794 绿/服务器面 100%）。
-    "plugins/shared/pipeline/core/llm_core/test_llm_core_server_execute.py",
+    "plugins/shared/llm_core/test_llm_core_server_execute.py",
+    # 2026-10-20 模型热切换在飞保护（问题 1）：llm_core 的模型绑定快照
+    # （run 启动时快照 + 显式 alias/superseded_by 迁移 + fail-closed）补测单文件
+    # 接线——llm_core 目录整体收集仍会与 shared/llm 的平铺 `import adapter` 裸名
+    # 冲突（故只登记单文件，同上）；本文件自带唯一模块名装载 + 追加式 sys.path
+    # 追加（不夺平铺名首位），与车道共跑实测绿。
+    "plugins/shared/llm_core/test_llm_core_model_binding.py",
     # 2026-09-14 覆盖率补测批十（簇 B/C）：shared 根散模块 + 三个未登记插件目录
     # 的缺口补测——这些文件不在任何已登记目录下，缺此条目则模块覆盖率失真。
-    "tests/test_host_shared_modules_gaps.py",  # project_registry/tenant_data/repo_anchor/proc_tree/user_space/state_fields/bounded_dict/uploads_path
+    "tests/test_host_shared_modules_gaps.py",  # project_registry/tenant_data/repo_anchor/proc_tree/user_space/state_fields/uploads_path
     "tests/test_metrics_admin_server_gaps.py",  # metrics_admin/server.py
     "tests/test_task_form_server_gaps.py",  # task_form/server.py
     "tests/test_tool_cache_gaps.py",  # pipeline/input/tool_cache
@@ -279,6 +296,17 @@ BASE_TEST_PATHS: list[str] = [
     # 此前文件不在车道 → artifact_service.py 覆盖率失真）。
     "tests/test_artifacts_gaps.py",
     "tests/test_workspace_lifecycle_gaps.py",  # pipeline/input/workspace_lifecycle
+    # 2026-10-11 RP批1b：card_io 手写 PNG 写面测试接线（shared 根散模块测试
+    # 不在车道则 card_io.py 改动行覆盖率失真——diff coverage 执法前提）。
+    "tests/test_card_io_write_png.py",
+    # 2026-10-17 外部生态导入 A 批：新插件目录内测试接线（缺此条目则
+    # ecosystem_import 的翻译器/落地器/工具面不进插桩度量面，diff coverage
+    # 度量面漂移必红）。夹具全在 tmp_path 内构造真实 Codex 插件目录。
+    "plugins/shared/ecosystem_import/tests/",
+    # 2026-10-17 MCP OAuth 授权 C 批：新插件目录内测试接线（缺此条目则
+    # oauth_broker 的协议面/流程面/工具面不进插桩度量面，diff coverage
+    # 度量面漂移必红）。夹具起真实 HTTP 假授权服务器（127.0.0.1 随机端口）。
+    "plugins/shared/oauth_broker/tests/",
 ]
 
 # 车道 marker 过滤：@pytest.mark.timing 用例唯一归 timing-gate（独立 stage，
@@ -316,6 +344,27 @@ EXEMPT_SUITES: list[ExemptSuite] = [
         covered_by=(
             "各插件的进程内单测（tests/plugins/{system,input,output,shared}/ 与"
             " plugins/shared/**/test_*.py，均留在插桩 gate 内）+ 免插桩并行 gate 本身的红绿"
+        ),
+    ),
+    ExemptSuite(
+        path="plugins/shared/hindsight_memory/test_hindsight_api_smoke.py",
+        profile=(
+            "hindsight-api 真启动冒烟：真实 aux venv 解释器 spawn 子进程"
+            "（stdout=DEVNULL + Job 钉死 + stderr 排空，与生产 _start_api_server"
+            " 全同款）+ pg0 嵌入式 PG 初始化 + /health 轮询，单例分钟级（真实"
+            "子进程×真实环境；GBK 横幅秒死与 venv 包缺失两类装机事故的回归门，"
+            "2026-10-21）；无 aux venv 环境模块级 skip"
+        ),
+        measured_in_process=(
+            "server.py 的 _start_api_server/_wait_api_ready/_build_api_env/"
+            "_pre_clean_port 在父 pytest 进程内真实执行；hindsight_api 栈代码"
+            "全部在孙进程（api 子进程）内，父进程 coverage 测不到"
+        ),
+        covered_by=(
+            "test_hindsight_spawn_guard/test_hindsight_server_lifecycle/"
+            "test_hindsight_aux_provision 等 hindsight 进程内单测套件（留在"
+            "插桩 gate 内）接住 server.py 线级覆盖；本套件红绿本身守护真实"
+            "启动契约"
         ),
     ),
 ]

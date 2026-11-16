@@ -13,6 +13,9 @@
 #   - Python sdist + wheel（python -m build 产出，dist/）
 #   - kernel 二进制（release 构建，Linux x86_64 tar.gz + Windows x86_64 zip）
 #   - Linux 产物入 Release 前先冒烟（临时库启动内核，curl /health 断言 200）
+#   - SBOM ×2（CycloneDX：sbom-kernel.json=发布二进制 crate 闭包、
+#     sbom-frontend.json=pnpm workspace 依赖全图）——依赖爆 CVE 时 30 秒
+#     查出「用了没、哪个版本」（整改方案 §6 企业级补课第 2 项）
 #   - 全部归档到 GitHub Release（softprops/action-gh-release）
 #
 # 权限：contents: write（创建 Release）；id-token 预留 pypi Trusted
@@ -120,6 +123,38 @@ jobs:
             -C release-assets agentos-kernel
           ls -la release-assets/
 
+      # SBOM（kernel 侧，CycloneDX）：cargo-cyclonedx 读 Cargo.lock 生成全量
+      # per-crate BOM（agentos-<crate>.cdx.json），取 agentos-api 这份——
+      # agentos-kernel bin 归属该包，其依赖闭包 = 发布二进制的 crate 面
+      # （native-sdk/test-plugin/integration-tests 不在闭包，本就不随产物发）。
+      # 工具走 cargo install（同上 sccache 形态；release 低频车道，装一次约
+      # 1 分钟可接受，不为此引第三方 action + SHA pin）。
+      - name: Generate kernel SBOM (CycloneDX)
+        working-directory: kernel
+        run: |
+          cargo install cargo-cyclonedx --locked
+          cargo cyclonedx --format json
+          cp crates/api/agentos-api.cdx.json ../release-assets/sbom-kernel.json
+
+      # SBOM（frontend 侧，CycloneDX）：用 pnpm 原生 pnpm sbom 而非整改方案
+      # 原文写的 cyclonedx-npm——后者只读 npm package-lock.json，而本仓前端
+      # 已迁 pnpm workspace 单锁（根 pnpm-lock.yaml），frontend/package-lock.json
+      # 停更失真（2026-08-14 后未动，含已删的 mermaid 直接依赖、缺 overrides）。
+      # pnpm sbom --lockfile-only 直接读锁、免 install（本地 pristine 无
+      # node_modules 实测成立），与 CI 前端车道同源同真值；范围为 pnpm
+      # workspace 全图（frontend + electron 装机壳 devDep，CVE 面覆盖装机版）。
+      - name: Set up Node (pnpm sbom)
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Generate frontend SBOM (CycloneDX, pnpm sbom)
+        working-directory: frontend
+        run: |
+          corepack enable
+          pnpm --version
+          pnpm sbom --sbom-format cyclonedx --lockfile-only \
+            > ../release-assets/sbom-frontend.json
+
       # 冒烟验证：发布二进制必须能真实启动并服务 /health（200）。
       # AGENTOS_DB_PATH 指向临时目录（不动仓库数据）；默认绑定 127.0.0.1；
       # 插件 sidecar 缺 venv 只会 G2 观测降级（非致命），不阻塞 /health。
@@ -171,3 +206,4 @@ jobs:
             dist/*.tar.gz
             release-assets/*.tar.gz
             release-assets/*.zip
+            release-assets/sbom-*.json

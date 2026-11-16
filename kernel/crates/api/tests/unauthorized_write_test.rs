@@ -107,7 +107,6 @@ async fn app_with_deps() -> (tempfile::TempDir, axum::Router, UserRootGuard) {
         description: None,
         version: "1.0.0".to_string(),
         plugin_type: PluginType::System,
-        pipeline_role: None,
         language: "python".to_string(),
         host_type: HostType::Sidecar,
         host_group: None,
@@ -119,7 +118,6 @@ async fn app_with_deps() -> (tempfile::TempDir, axum::Router, UserRootGuard) {
         mcp: None,
         lifecycle: None,
         native: None,
-        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![ConfigFileMapping {

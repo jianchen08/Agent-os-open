@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import yaml  # type: ignore[import-untyped]  # 第三方 stubs 缺失
+import yaml
 
 
 def tool_result_entry(

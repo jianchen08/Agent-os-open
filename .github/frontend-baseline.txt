@@ -104,11 +104,22 @@
 # 下一批目标 = RjsfForm、useInteractionHandler、ActivityBlockViews 残余，以及
 # ExtensionHost/PanelHostWidget/HtmlPreviewWidget 等 0% 容器页（需真实宿主
 # 上下文，先评估可达性）。
+# 收紧（2026-10-28 本地 CI 转绿轮）：98.82→99.36 的历史口径已失真七周，
+# 本轮实测 99.36 基线已被新代码摊薄到 98.89（缺 225 行）；两批补测（69 个新
+# 测试文件、约 150 例，覆盖 ModelSelectWidget/modelSelectStore/deviceBorrow/
+# wsRelay/FiveSpaceLayout/ChatInput/ChatContainer 等最大缺口面）补回 153 行后
+# 实测 99.67%（20314/20382，缺 68 行）；复跑实测 99.64——覆盖率对时序敏感
+# （异步链路偶少跑几行，±0.03pp / 约 6 行），故基线取 99.60 留抖动余量
+# （仍比旧基线 +0.24pp）。缺行主体 = 契约下不可达的防御兜底与
+# 死代码（ChatInput attachments 死状态 3 行、MessageContentRenderer 恒真守卫
+# 3 行、LoginModal 死 default 分支 1 行等，判据见 docs/working/本地CI转绿_台账_20261028.md）。
+# 归因 ADR：docs/decisions/2026-10-28-frontend-giant-file-freeze.md
 vitest_failures=0
 eslint_errors=0
-vitest_coverage_pct=99.36
+vitest_coverage_pct=99.60
 # 批次8-1 warnings 棘轮（只减不增）：844 = 2026-09-24 实测起步（no-explicit-any/import-x/order 优先清偿）
-eslint_warnings=844
+# 收紧 844→843（2026-10-30 独立CI轮间：P-21 failureAttribution 三测试文件失效 disable 清偿 + import-x/order 归位，实测 843）
+eslint_warnings=843
 #
 # 收紧（2026-09-18 覆盖率补测批，dev/0.2@16b413b83 工作树实测 99.36）：
 # vitest 全量 502 文件 5606 用例 0 失败，Lines 15315/15413 = 99.36%（99.12 →

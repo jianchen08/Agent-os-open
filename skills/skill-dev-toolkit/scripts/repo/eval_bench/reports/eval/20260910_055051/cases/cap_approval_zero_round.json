@@ -1,0 +1,78 @@
+{
+  "case_id": "cap_approval_zero_round",
+  "category": "approval",
+  "passed": false,
+  "elapsed_seconds": 323.5,
+  "session_id": "thread-277168c2-8582-4345-ba18-d490254ea13d",
+  "pipeline_ids": [
+    "4d2d2aa6f8fb"
+  ],
+  "settled": false,
+  "dispatches": [
+    {
+      "terminal": "stream_end",
+      "pipeline_id": "4d2d2aa6f8fb",
+      "interactions": [],
+      "event_types": [
+        "pending_inputs_changed",
+        "pending_inputs_changed",
+        "stream_start",
+        "widget_event",
+        "stream_end"
+      ]
+    }
+  ],
+  "approval": {
+    "requests_seen": 0,
+    "approved": 0,
+    "denied": 0,
+    "response_errors": []
+  },
+  "metrics": {
+    "pipelines": 1,
+    "iterations_total": 1,
+    "error_steps": 0,
+    "timeout_steps": 0,
+    "tool_calls": 0,
+    "tool_retries": 0,
+    "tool_names": [],
+    "tool_call_counts": {},
+    "task_statuses": [
+      null
+    ],
+    "all_settled": false,
+    "any_failed": false,
+    "by_model": {
+      "glm-5.3-flash": {
+        "input": 9165,
+        "output": 392,
+        "cached": 0,
+        "total": 9557
+      }
+    },
+    "tokens_total": 9557
+  },
+  "assertions": [
+    {
+      "type": "settled",
+      "passed": false,
+      "detail": "管道未收敛（挂起/超时）"
+    },
+    {
+      "type": "approval_seen",
+      "passed": false,
+      "detail": "审批账本 denied=0"
+    },
+    {
+      "type": "tool_calls_below",
+      "passed": false,
+      "detail": "human_interaction 调用 0 次（上限 1，>0 防止没调的假通过）"
+    }
+  ],
+  "failed_assertions": [
+    "settled",
+    "approval_seen",
+    "tool_calls_below"
+  ],
+  "reply_excerpt": "好哒～这个任务我来直接处理：先创建目录和说明文件，再用 bash 工具执行删除。创建文件和加载 bash 工具这两步互不依赖，我同时进行～"
+}

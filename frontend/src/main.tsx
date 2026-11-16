@@ -16,9 +16,18 @@ import {
   ErrorType,
 } from '@/services/errorReporting'
 import { openFile } from '@/services/fileOpener'
-import { registerGlobalOpenFileCallback } from '@/utils/toolCardRegistry'
+import { navigateToPipeline } from '@/services/pipelineNavigator'
+import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { openPluginPage } from '@/services/workspacePanelOpener'
+import { useWidgetEventStore } from '@/stores/widgetEventStore'
+import {
+  registerGlobalOpenFileCallback,
+  registerGlobalOpenPanelCallback,
+  registerGlobalOpenTaskPipelineCallback,
+} from '@/utils/toolCardRegistry'
 import { App } from './App'
 import { useAuthStore } from './stores/authStore'
+import { useSessionStore } from './stores/sessionStore'
 import { initializeTheme } from './stores/themeStore'
 import './index.css'
 
@@ -110,6 +119,49 @@ async function bootstrap() {
         filePath,
       })
     }
+  })
+
+  // 任务卡片 → 执行管道：与任务管理页「打开对话」同一导航通道。派发的任务
+  // 管道是自环管道（thread_id=自身 id），三级查找必落空——当前活跃会话即
+  // 血缘 origin 会话（卡片所在聊天），作 fallbackSessionId 定位提示传入。
+  // 导航失败由 pipelineNavigator 内部显式通知，此处不再重复上报。
+  registerGlobalOpenTaskPipelineCallback(async (pipelineId, info) => {
+    await navigateToPipeline(pipelineId, {
+      agentName: info?.title || '子任务',
+      taskId: info?.taskId,
+      fallbackSessionId: useSessionStore.getState().activeSessionId ?? undefined,
+    })
+  })
+
+  // 工具卡「打开今日总览」→ 打开/激活插件页面 + 定位条目（render.open_page
+  // 声明驱动；页面未装载=零注入零按钮，此处只对已装载声明负责）。
+  // 定位经 widgetEventStore 下行：WebviewWidget 订阅 latest[widgetId] 转发
+  // widget.event 给页面（页面侧滚动高亮）。下行无 ready 门闩——首次打开时
+  // 页面尚在加载，立即推可能丢；延迟重推覆盖加载完成窗口（重复定位幂等无害）。
+  registerGlobalOpenPanelCallback(async (pageId: string, itemId?: string) => {
+    const page = contributionRegistry.getPages().find((p) => p.id === pageId)
+    if (!page) {
+      reportError(`页面 ${pageId} 未声明（插件可能已禁用），无法打开`, {
+        type: ErrorType.CLIENT,
+        severity: ErrorSeverity.ERROR,
+        component: 'main',
+        action: 'openPluginPage',
+        source: 'frontend',
+      })
+      return
+    }
+    const opened = openPluginPage(page)
+    if (!opened || !itemId) return
+    const widgetId = (page.props as Record<string, unknown> | undefined)?.widgetId
+    if (typeof widgetId !== 'string' || !widgetId) return
+    const pushLocate = (): void =>
+      useWidgetEventStore.getState().dispatchWidgetEvent({
+        widget_id: widgetId,
+        event: 'locate',
+        data: { itemId },
+      })
+    pushLocate()
+    window.setTimeout(pushLocate, 1500)
   })
 
   // 异步初始化认证状态（不阻塞渲染）

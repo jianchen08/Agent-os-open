@@ -1,0 +1,139 @@
+# ── 玩法包：修仙战斗（出厂首批，C3 整合刀——RP 物料整合）─────────────────────
+#
+# 考据来源（docs/working/rp_prompt_material/，仅借结构与思路，本件文案全部原创）：
+#   gameplay/magpie-variables-turns.md   最简变量 + 回合计数形态（combat.回合）
+#   gameplay/nimbkoll-rpg-engine.md（CC0）结果依数值裁决 / 硬下限 / 反上帝模（胜负不由叙事倒推）
+#   mixed/gm-os-v45-immersive.md（MIT）  事实优先级（引擎事实>规则>正典）与回合纪律（一轮一发展）
+#   gameplay/dem-status-choices.md       选项列表契约形态（分类标签思想）
+#   mixed/magpie-consequence-set.md      Never The Kill 条款对照（许可未明，仅考据不录原文）
+#
+# 声明面四件（卡顶层 pack_ids: [xianxia_combat] 引用；同键合并 = 后到覆盖，卡覆盖包）：
+#   variables/behaviors —— Tier 0 内置逻辑执行：state_marker_parse 行为匹配 →
+#     State Contract Validator 结算（路径/类型/clamp 执法）；
+#   rules/choices —— 提示词承载声明面（rules 经 /game/config 向宿主透出，choices
+#     为选项契约清单：text/category/hint，点击语义 = 清单全等选取）。
+# 播种型纪律：本包自包含不跨包引用；与卡合流自洽（effect 键全部在本包 variables 声明内，
+#  behaviors trigger 按叙述正文匹配、措辞收窄防误命中）。
+
+name: 修仙战斗
+description: 修仙斗法裁决包——气血/灵力/伤势三轴数值随叙述经行为触发自动结算，附战斗轮选项契约、裁决优先级与禁即死条款。
+
+variables:
+  player:
+    气血: {type: int, min: 0, max: 100, default: 100}
+    灵力: {type: int, min: 0, max: 100, default: 100}
+    伤势: {type: enum, values: [无伤, 轻伤, 重伤, 濒死], default: 无伤}
+  combat:
+    回合: {type: int, min: 1, max: 9999, default: 1}
+
+behaviors:
+  剑气斩:
+    trigger: "剑气(斩|纵横|破空)"
+    effect: {player.气血: "-18"}
+  护体罡气:
+    trigger: "护体罡气|罡气护体|罡气护身"
+    effect: {player.气血: "+8"}
+  走火入魔:
+    trigger: "走火入魔|真气逆行"
+    effect: {player.灵力: "-15", player.伤势: "=重伤"}
+  调息回气:
+    trigger: "调息回气|盘坐调息|打坐调息"
+    effect: {player.灵力: "+10", combat.回合: "+1"}
+
+rules:
+  裁决优先级:
+    - 引擎事实：variables 声明与结算结果（含上下限钳制）为最高事实，叙述不得改写数值
+    - 本包规则：伤害/恢复基准与回合纪律按本节执行
+    - 卡片设定与世界观正典：数值裁决之外的剧情事实来源
+    - 推测与气氛渲染：不产生任何数值后果
+  伤害裁决: >-
+    斗法叙述命中行为触发词时按 behaviors 声明结算：气血是生命度量（触底为失去战斗
+    能力而非死亡，见禁即死条款）；灵力是施为资源，招式与恢复增减灵力；重伤及以上
+    伤势改变行动叙述基调（依伤势档位描写行动受限，不得无伤硬撑）。
+  回合纪律: >-
+    每次回复只推进一个显著发展（一次交锋、一处变化或一个决定），不连锁多段结果；
+    招式对轰的结果依数值与伤势描写裁定，不由叙事需要倒推胜负；调息类推进回合计数。
+  禁即死: >-
+    角色不死：气血触底与濒死只落为可存活后果（被俘、重伤拖走、道基受损、昏迷获救），
+    严重度以事前铺垫的风险为上限；不展示存续机制，剧情内无人知晓死局不可达。
+
+choices:
+  - text: 出剑迎敌
+    category: 攻击
+    hint: 招式对轰——叙述命中「剑气斩」类词面时由行为触发结算伤害
+  - text: 护体罡气
+    category: 防御
+    hint: 防御架势——叙述命中「护体罡气」类词面时回复气血
+  - text: 调息回气
+    category: 恢复
+    hint: 回复灵力并推进回合（行为触发结算）；战斗胶着时的续航选项
+  - text: 遁走离场
+    category: 撤退
+    hint: 脱战不落数值，剧情转入撤离线；裁决优先级见 rules
+
+# ── 固定剧情流程（包侧键名 graph——rp_packs _DEFERRED_PACK_KEYS 契约名，聚合
+# 后向宿主透出键名 narrative_graph；game_host 引擎区 4b 求值）──
+# 剧情阶段线：演武战课（开场，随卡 scenario）→ 下山历练 / 生死一线（濒死触发，
+# 禁即死：气血回稳即归队）→ 宗门大比（季考线顶点，常驻不封口）。节点跳转依据
+# 叙述关键词 decisions 与状态阈值 triggers，宿主权威位 __graph_node 随快照回推。
+graph:
+  nodes:
+  - id: war_class
+    label: 演武战课
+    decisions:
+    - when: "narration matches /下山|历练|游历|猎妖/"
+      next: jianghu
+  - id: jianghu
+    label: 下山历练
+    decisions:
+    - when: "state.combat.回合 >= 30"
+      next: grand_tournament
+  - id: crisis
+    label: 生死一线
+    decisions:
+    - when: "state.player.气血 >= 30"
+      next: war_class
+  - id: grand_tournament
+    label: 宗门大比
+  triggers:
+  - type: threshold
+    when: "state.player.伤势 == '濒死'"
+    jump_to: crisis
+  - type: threshold
+    when: "state.combat.回合 >= 60"
+    jump_to: grand_tournament
+
+# ── 呈现面声明（RP 面板 v3.1 刀1；结构契约见 card_lint lint_ui/lint_init_ui）──
+# 本包无 ui.page（has_page=false，演示大厅「通用开演配置流」路由）；init_ui
+#  effects 键域全在本包 variables 声明内（fail-closed 同源自洽）。
+ui:
+  icon: "⚔️"
+  style_tags: ["水墨", "禁即死"]
+  lineage: full
+  theme_css: xianxia_theme.css
+
+init_ui:
+  title: 开新的一局
+  intro: 选择你的出身与根骨，踏入斗法江湖——气血灵力皆有声，胜负不由叙事倒推。
+  show_variables: true
+  routes:
+    - id: lone_cultivator
+      label: 散修逆袭
+      profile: 你是无门无派的散修，功法残缺全凭自悟，一手烂牌打得咬牙切齿却从不认命。
+    - id: sect_disciple
+      label: 宗门弟子
+      profile: 你是名门宗门的内门弟子，门规森严、资源优渥，暗流与期许都压在你一人肩上。
+  trait_pools:
+    - id: xianxia_traits
+      label: 根骨词条
+      options:
+        - id: sword_bone
+          label: 剑骨天成
+          profile: 你天生剑骨，出剑快过念头，同辈中无人能接你三招。
+        - id: iron_body
+          label: 铜皮铁骨
+          profile: 你筋骨如铁，皮糙肉厚，寻常打法落在身上不过是闷响。
+          effects: {player.气血: "+10"}
+        - id: spirit_talent
+          label: 灵慧早显
+          profile: 你灵力天赋异禀，引气入体如呼吸般自然，只是心性还需磨砺。

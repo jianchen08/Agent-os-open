@@ -9,9 +9,11 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { loadRenderIntents } from '@/utils/renderIntent'
+import { loadOutputSchemas } from '@/utils/outputSchemaView'
 import {
   enhanceActivityWithToolConfig,
   registerGlobalOpenFileCallback,
+  registerGlobalOpenTaskPipelineCallback,
 } from '@/utils/toolCardRegistry'
 import type { ActivityData } from '@/types/activity'
 import type { MessageToolCall } from '@/types/models'
@@ -20,6 +22,7 @@ let openFileSpy: ReturnType<typeof vi.fn> | null = null
 
 afterEach(() => {
   loadRenderIntents([])
+  loadOutputSchemas([])
   if (openFileSpy) {
     registerGlobalOpenFileCallback(() => {})
     openFileSpy = null
@@ -163,5 +166,77 @@ describe('功能点：数据路由分支注入条目增强（无声明工具）'
     )
     expect(out.subtitle).toBeTruthy()
     expect(out.filePath).toBeUndefined()
+  })
+})
+
+describe('功能点：render 声明工具不落契约视图（目录结果按形状重推表格卡）', () => {
+  it('file_read 声明 read 卡 + 有 output_schema：目录结果（无 content）→ table 卡而非 schema 表单', () => {
+    loadRenderIntents([{ name: 'file_read', render: { card: 'read' } }])
+    loadOutputSchemas([
+      { name: 'file_read', output_schema: { type: 'object', properties: { file: { type: 'string' }, items: { type: 'array' }, count: { type: 'integer' }, content: { type: 'string' } } } },
+    ])
+
+    const out = enhanceActivityWithToolConfig(
+      makeActivity('file_read'),
+      makeToolCall('file_read', { path: 'D:/ws' }, {
+        file: 'D:/ws',
+        count: 2,
+        items: [
+          { name: 'a.txt', type: 'file', size: 1 },
+          { name: 'pkg', type: 'directory', size: 0 },
+        ],
+      }),
+    )
+
+    expect(out.details?.[0]?.contentType).toBe('table')
+    const table = out.details?.[0]?.table as { columns: string[]; rows: string[][] }
+    expect(table.rows).toHaveLength(2)
+    expect(table.columns).toEqual(['name', 'type', 'size'])
+  })
+})
+
+describe('功能点：task_card 声明注入任务管道打开入口', () => {
+  const taskSpy = vi.fn()
+
+  afterEach(() => {
+    registerGlobalOpenTaskPipelineCallback(() => {})
+    taskSpy.mockClear()
+  })
+
+  it('成功结果 → pipelineId/onOpenPipeline 注入 + 标题=任务名 + 摘要=任务短 id + task 图标', () => {
+    registerGlobalOpenTaskPipelineCallback(taskSpy)
+    loadRenderIntents([{ name: 'task_submit', render: { card: 'task_card' } }])
+
+    const out = enhanceActivityWithToolConfig(
+      makeActivity('task_submit'),
+      makeToolCall(
+        'task_submit',
+        { goal_title: '修复登录超时', target_id: 'coder' },
+        { task_id: 'abc123def456', title: '修复登录超时', status: 'running', pipeline_id: 'abc123def456', message: '已提交' },
+      ),
+    )
+
+    expect(out.title).toBe('修复登录超时')
+    expect(out.subtitle).toBe('abc123def456')
+    expect(out.pipelineId).toBe('abc123def456')
+    expect(out.onOpenPipeline).toBeTypeOf('function')
+    out.onOpenPipeline?.('abc123def456')
+    expect(taskSpy).toHaveBeenCalledWith('abc123def456', { taskId: 'abc123def456', title: '修复登录超时' })
+    // task 语义图标经 chatCardIconRegistry 解析（Target 组件）
+    expect(out.customIcon).toBeTruthy()
+  })
+
+  it('在途调用（无结果）→ 不开入口，标题沿用工具名人性化、摘要兜底 goal_title', () => {
+    loadRenderIntents([{ name: 'task_submit', render: { card: 'task_card' } }])
+
+    const out = enhanceActivityWithToolConfig(
+      makeActivity('task_submit'),
+      makeToolCall('task_submit', { goal_title: '修复登录超时' }),
+    )
+
+    expect(out.title).toBe('提交任务')
+    expect(out.subtitle).toBe('修复登录超时')
+    expect(out.pipelineId).toBeUndefined()
+    expect(out.onOpenPipeline).toBeUndefined()
   })
 })

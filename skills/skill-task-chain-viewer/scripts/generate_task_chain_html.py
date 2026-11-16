@@ -2,7 +2,8 @@
 """任务链可视化生成器。
 
 读取 docs/tasks/ 下的任务文件（YAML frontmatter + Markdown 正文）和
-.project/ 下的项目文档，生成单个自包含 HTML 页面。
+docs/project/ 下的项目文档（存量项目 legacy 档案区 .project/ 须经
+--project-dir 显式传入），生成单个自包含 HTML 页面。
 
 设计要点：
 - 纯标准库，无第三方依赖（frontmatter 用正则解析，避免引入 python-frontmatter）
@@ -170,7 +171,8 @@ def check_trace_integrity(
     """任务级 traces_to 对账方案级 AC 总表，返回断链清单（task_id / trace）。
 
     方案总纲缺失或无 AC 定义 = 无从对账，不产红旗（返回空）——缺失本身由
-    plan_workflow 定稿自检清单把关，本检查只管「已声明 AC 的追溯断链」。
+    skill-container-task-flow「方案规划段」定稿自检清单把关，本检查只管
+    「已声明 AC 的追溯断链」。
     """
     if not solution_ac_ids:
         return []
@@ -864,7 +866,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="生成任务链可视化 HTML")
     parser.add_argument("--title", default="项目任务链")
     parser.add_argument("--tasks-dir", default="docs/tasks/")
-    parser.add_argument("--project-dir", default=".project/")
+    parser.add_argument("--project-dir", default="docs/project/")
     parser.add_argument("--output", default="")
     parser.add_argument(
         "--solution-doc",

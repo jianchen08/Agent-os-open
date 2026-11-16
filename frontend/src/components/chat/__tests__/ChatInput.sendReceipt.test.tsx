@@ -76,7 +76,7 @@ function typeAndSend(text: string) {
   fireEvent.click(screen.getByTestId('chat-send-button'))
 }
 
-describe('ChatInput 发送受理协议（false 保留输入，true/void 清空）', () => {
+describe('ChatInput 发送受理协议（false 保留输入；true/void 受理进入发送态，清空只在落定）', () => {
   it('回调返回 false（未受理）→ 输入与草稿保留，可直接重试', () => {
     const onSendMessage = vi.fn(() => false)
     renderInput(onSendMessage, 'draft-keep-1')
@@ -89,26 +89,29 @@ describe('ChatInput 发送受理协议（false 保留输入，true/void 清空�
     expect(useChatInputStore.getState().drafts['draft-keep-1']).toBe('这条消息不能丢')
   })
 
-  it('回调返回 true（受理）→ 清空输入与草稿', () => {
+  // 2026-11-04 落定语义重定义：受理 ≠ 清空——发送态终点 = 消息落进消息流
+  //（气泡认领/队列条出现），清空由落定订阅回调按快照比对执行
+  //（见 ChatInput.sendLifecycle.test.tsx）。
+  it('回调返回 true（受理）→ 输入与草稿保留（清空只在落定）', () => {
     const onSendMessage = vi.fn(() => true)
     renderInput(onSendMessage, 'draft-accept-1')
 
     typeAndSend('正常发送')
 
     expect(onSendMessage).toHaveBeenCalledTimes(1)
-    expect(textareaValue()).toBe('')
-    expect(useChatInputStore.getState().drafts['draft-accept-1']).toBeUndefined()
+    expect(textareaValue()).toBe('正常发送')
+    expect(useChatInputStore.getState().drafts['draft-accept-1']).toBe('正常发送')
   })
 
-  it('回调无返回值（void，兼容既有只发不回的回调）→ 照常清空（回归）', () => {
+  it('回调无返回值（void，兼容既有只发不回的回调）→ 照常受理进入发送态，输入保留（回归）', () => {
     const onSendMessage = vi.fn()
     renderInput(onSendMessage, 'draft-void-1')
 
     typeAndSend('void 兼容发送')
 
     expect(onSendMessage).toHaveBeenCalledTimes(1)
-    expect(textareaValue()).toBe('')
-    expect(useChatInputStore.getState().drafts['draft-void-1']).toBeUndefined()
+    expect(textareaValue()).toBe('void 兼容发送')
+    expect(useChatInputStore.getState().drafts['draft-void-1']).toBe('void 兼容发送')
   })
 })
 
@@ -152,5 +155,41 @@ describe('ChatInput 未受理显式反馈（OBS-25：拒绝必须落在操作点
     expect(screen.queryByTestId('chat-stop-button')).toBeNull()
     expect(screen.getByTestId('chat-send-button')).toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent('消息未发送')
+  })
+})
+
+describe('ChatInput 发送在途（落定语义：转圈+输入锁定，落定前不回到可发送态）', () => {
+  function renderInFlight(sendInFlight: boolean) {
+    return render(
+      <ChatInput
+        mode="full"
+        onSendMessage={vi.fn() as never}
+        enableFileUpload
+        enableDragDrop
+        modelName="deepseek-v3"
+        sendInFlight={sendInFlight}
+      />,
+    )
+  }
+
+  it('sendInFlight → 按钮变转圈等待态（禁用，不可再点发送）', () => {
+    renderInFlight(true)
+    const inflight = screen.getByTestId('chat-send-inflight')
+    expect(inflight).toBeDisabled()
+    expect(screen.queryByTestId('chat-send-button')).toBeNull()
+  })
+
+  // 2026-11-04 落定语义重定义：发送态期间输入锁定不可编辑（textarea disabled）
+  // ——连发节奏受落定耗时限制属可接受代价（用户裁定），不再「键入回落发送态」。
+  it('sendInFlight 期间 textarea 锁定不可编辑（锁定=连发节奏受落定耗时限制）', () => {
+    renderInFlight(true)
+    expect(screen.getByTestId('chat-input-textarea')).toBeDisabled()
+    expect(screen.getByTestId('chat-input-textarea').placeholder).toContain('发送中')
+  })
+
+  it('无在途 → 正常发送按钮（回归）', () => {
+    renderInFlight(false)
+    expect(screen.getByTestId('chat-send-button')).toBeInTheDocument()
+    expect(screen.queryByTestId('chat-send-inflight')).toBeNull()
   })
 })

@@ -18,6 +18,8 @@ plugins:
     enabled: true
   pipeline_security_check:
     enabled: true
+  pipeline_todo_track:
+    enabled: true
   pipeline_isolation_guard:
     enabled: true
   hindsight_memory_service:

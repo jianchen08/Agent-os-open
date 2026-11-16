@@ -14,9 +14,13 @@ import { CodeEditor } from '../CodeEditor'
 import type * as fileEditorRegistry from '@/stores/fileEditorRegistry'
 
 const onSaveMock = vi.fn()
-vi.mock('react-syntax-highlighter', () => ({
-  Prism: ({ children }: { children?: React.ReactNode }) => <pre>{children}</pre>,
-}))
+vi.mock('react-syntax-highlighter/dist/esm/prism-light', () => {
+  // prismLanguages 模块导入时会调用 registerLanguage/alias 注册语言，mock 上补齐静态方法
+  const MockHighlighter = ({ children }: { children?: React.ReactNode }) => <pre>{children}</pre>
+  ;(MockHighlighter as unknown as Record<string, unknown>).registerLanguage = () => {}
+  ;(MockHighlighter as unknown as Record<string, unknown>).alias = () => {}
+  return { default: MockHighlighter }
+})
 vi.mock('@/components/chat/LobeChatMarkdown', () => ({
   LobeChatMarkdown: ({ content }: { content: string }) => <div data-testid="md">{content}</div>,
 }))
@@ -198,5 +202,58 @@ describe('CodeEditor 外部变更与内容同步', () => {
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
     expect(textarea.value).toBe('keep me')
     expect(screen.queryByText('文件已被外部修改')).not.toBeInTheDocument()
+  })
+})
+
+describe('CodeEditor 按需加载分支（用户裁定 2026-10-24）', () => {
+  const bigFile = {
+    filePath: 'logs/big.py',
+    content: 'x'.repeat(100),
+    size: 100000,
+    loadedBytes: 100,
+  }
+  const onLoadMoreMock = vi.fn().mockResolvedValue(true)
+
+  beforeEach(() => {
+    onLoadMoreMock.mockClear()
+    onLoadMoreMock.mockResolvedValue(true)
+  })
+
+  it('部分加载（loadedBytes < size）→ 只读预览 + 加载条（进度/加载更多/加载全部），无编辑入口', () => {
+    render(<CodeEditor {...bigFile} onLoadMore={onLoadMoreMock} onSave={onSaveMock} />)
+    // partial 禁编辑：无编辑切换按钮（防截断内容写回丢数据）
+    expect(screen.queryByRole('button', { name: /^编辑$/ })).not.toBeInTheDocument()
+    expect(screen.getByText(/（只读预览 · 按需加载）/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /加载更多/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /加载全部/ })).toBeInTheDocument()
+    // 进度文案：已加载窗口 / 总大小（100 B / 97.66 KB）
+    expect(screen.getByText(/已加载 100 B/)).toBeInTheDocument()
+    expect(screen.getByText(/共 97.66 KB/)).toBeInTheDocument()
+  })
+
+  it('点击「加载更多」→ onLoadMore(false)（下一窗口）', () => {
+    render(<CodeEditor {...bigFile} onLoadMore={onLoadMoreMock} onSave={onSaveMock} />)
+    fireEvent.click(screen.getByRole('button', { name: /加载更多/ }))
+    expect(onLoadMoreMock).toHaveBeenCalledWith(false)
+  })
+
+  it('点击「加载全部」→ onLoadMore(true)（读到文件尾）', () => {
+    render(<CodeEditor {...bigFile} onLoadMore={onLoadMoreMock} onSave={onSaveMock} />)
+    fireEvent.click(screen.getByRole('button', { name: /加载全部/ }))
+    expect(onLoadMoreMock).toHaveBeenCalledWith(true)
+  })
+
+  it('全量已加载（loadedBytes 缺省）→ 无加载条，编辑入口恢复', () => {
+    render(
+      <CodeEditor
+        filePath="logs/small.py"
+        content="print(1)"
+        size={8}
+        onLoadMore={onLoadMoreMock}
+        onSave={onSaveMock}
+      />,
+    )
+    expect(screen.queryByRole('button', { name: /加载更多/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^编辑$/ })).toBeInTheDocument()
   })
 })

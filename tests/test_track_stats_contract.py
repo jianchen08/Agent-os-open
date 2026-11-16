@@ -31,7 +31,7 @@ from typing import Any
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_LLM_CORE_DIR = _REPO_ROOT / "plugins" / "shared" / "pipeline" / "core" / "llm_core"
+_LLM_CORE_DIR = _REPO_ROOT / "plugins" / "shared" / "llm_core"
 _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
 _SYSTEM_LLM_DIR = _SHARED_DIR / "system" / "llm"
 
@@ -45,7 +45,7 @@ if str(_LLM_CORE_DIR) in sys.path:
     sys.path.remove(str(_LLM_CORE_DIR))
 sys.path.insert(0, str(_LLM_CORE_DIR))
 
-from pipeline.plugin import PluginContext  # noqa: E402
+from _libs.pipeline_base.plugin import PluginContext  # noqa: E402
 from track_stats import TrackStats  # noqa: E402
 
 
@@ -133,6 +133,19 @@ class TestTokenAccumulation:
         assert usage["total_input_tokens"] == 100
         assert usage["total_output_tokens"] == 20
         assert usage["total_cached_tokens"] == 40
+
+    def test_total_calls_counts_llm_rounds(self) -> None:
+        """total_calls = 大模型调用次数：带用量轮 +1（stop_check 轮次预算锚，
+        用户裁定 2026-10-17）；无用量轮继承不增。"""
+        # 首个带用量轮：0 → 1
+        updates = _sync(TrackStats(), _ctx(_llm_state()))
+        assert updates["track.llm_usage"]["total_calls"] == 1
+        # 带既有累计的轮：prev +1
+        state = _llm_state(**{"track.llm_usage": {"total_calls": 41, "total_input_tokens": 1}})
+        assert _sync(TrackStats(), _ctx(state))["track.llm_usage"]["total_calls"] == 42
+        # 无用量轮（llm_usage 缺席）：继承不增
+        state = _llm_state(**{"track.llm_usage": {"total_calls": 7}, "llm_usage": None})
+        assert _sync(TrackStats(), _ctx(state))["track.llm_usage"]["total_calls"] == 7
 
     def test_accumulates_across_rounds(self) -> None:
         """跨轮累计：前轮已有累计值时相加，不是覆盖。"""

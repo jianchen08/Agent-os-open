@@ -21,7 +21,7 @@ import pytest
 pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_ISOLATION_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "isolation"
+_ISOLATION_DIR = _REPO_ROOT / "plugins" / "shared" / "isolation"
 _SERVER_PATH = _ISOLATION_DIR / "server.py"
 
 # 平铺裸名逐出（server/manager/checkpoint/wsl_health 跨插件同名），保证本文件
@@ -51,6 +51,7 @@ def _make_env(env_id: str = "env-1", level: str = "isolated", task_id: str = "t1
         provider_type="host",
         status="ready",
         context=SimpleNamespace(task_id=task_id),
+        provider_info={},
     )
 
 
@@ -68,6 +69,10 @@ class _StubManager:
         self.envs: list[SimpleNamespace] = [self.env]
         self.stats: dict = {"total_environments": 0}
         _StubManager.instances.append(self)
+
+    def set_state_rows_provider(self, provider: object) -> None:
+        """记录 state 行读面注入（销毁面 task.ws_meta 坐标通道接线）。"""
+        self.state_rows_provider = provider
 
     async def start(self) -> None:
         self.started = True
@@ -122,7 +127,7 @@ class TestUninitializedGuards:
             server.isolation_stats(),
         ):
             result = await coro
-            assert result == {"error": "隔离服务未初始化"}
+            assert result == {"success": False, "error": "隔离服务未初始化"}
 
     async def test_destroy_env_uninitialized_is_explicit_failure(self) -> None:
         """destroy_env 失败显式 success=False——跨插件消费方（environment_lifecycle
@@ -169,6 +174,8 @@ class TestCreateEnv:
             "provider_type": "host",
             "status": "ready",
             "context_task_id": "t1",
+            "exec_backend": None,
+            "provider_error": "",
         }
         (_op, kw) = stub.calls[0]
         assert kw["task_id"] == "t9"
@@ -393,6 +400,8 @@ class TestLifecycle:
         assert mgr.started
         # providers 配置经 extract_providers_config 从注入快照提取
         assert mgr.providers_config_override == {"providers": {"host": {"limits": {"max_environments": 2}}}}
+        # 销毁面 state 坐标通道接线（F3：task.ws_meta 真值，无注入则按任务销毁恒跳过）
+        assert hasattr(mgr, "state_rows_provider"), "on_load 必须注入 state_rows_provider"
         assert isinstance(server._checkpoint_mgr, CheckpointManager)
         assert isinstance(server._permission_checker, PermissionChecker)
         watcher = server._config_watcher_task

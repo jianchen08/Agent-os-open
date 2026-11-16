@@ -6,7 +6,8 @@
 2. workspace 安全校验分支（盘符根/系统目录/配置工作空间根/无效路径/降级跳过）
 3. goal 与 acceptance_criteria 形态归一（JSON 串/纯文本/非 dict/部分无效指标剔除）
 4. 继承参数校验与源解析（pipe 源查找、workspace 跨容器/已消失拒绝）
-5. agent registry 注入往返、服务故障/未命中磁盘回退（含 config_id 扫描与损坏 yaml 跳过）
+5. agent registry 注入往返、服务故障 fail-closed / 未命中 NOT_FOUND（agent 配置
+   单源 = 注入钩子，无磁盘回退——解析权归 agent_manager）
 6. state 桥降级语义（读取失败 None、依赖 fail-closed、父存在性兜底、项目归属单跳继承）
 7. 派发编排隔离语义（出生后登记失败不影响提交、描述超长/L2 越权闸门）
 
@@ -24,24 +25,16 @@ import sys
 import tempfile
 from pathlib import Path
 
-from tests._stdlib_guard import ensure_stdlib_module
-
-# 车道共跑防线：某条导入链会让插件同名模块（pipeline/types.py，包内相对
-# 导入顶层即炸）劫持裸名 "types"。导入 SimpleNamespace/ModuleType 前恢复 stdlib 绑定。
-ensure_stdlib_module("types")
-from types import ModuleType, SimpleNamespace  # noqa: E402
-
 import pytest  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SDK_DIR = _REPO_ROOT / "plugins" / "sdk" / "src"
-_TASKS_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "tasks"
-_TOOL_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "task_submit"
-# isolation 是包（import isolation.workspace）、project_registry 是共享平铺模块，
-# 均需其父目录入 sys.path
-_SYSTEM_DIR = _REPO_ROOT / "plugins" / "shared" / "system"
+_TASKS_DIR = _REPO_ROOT / "plugins" / "shared" / "tasks"
+_TOOL_DIR = _REPO_ROOT / "plugins" / "shared" / "task_submit"
+# 拍平布局（ADR 2026-10-13-plugin-flat-layout）：isolation 包与 project_registry
+# 等平铺模块同住共享根，父目录（共享根）入 sys.path 即覆盖两者
 _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
 
 _MOD_NAME = "task_submit_tool_branches_test_mod"
@@ -55,7 +48,7 @@ def _module_sys_path():
     `import workspace` 解析冲突——用 fixture 管理并恢复，不污染同进程其它测试。
     """
     added: list[str] = []
-    for _p in (_SDK_DIR, _TASKS_DIR, _TOOL_DIR, _SYSTEM_DIR, _SHARED_DIR):
+    for _p in (_SDK_DIR, _TASKS_DIR, _TOOL_DIR, _SHARED_DIR):
         s = str(_p)
         if s not in sys.path:
             sys.path.insert(0, s)
@@ -99,62 +92,27 @@ def _reset_module_injections(tool_module, tmp_path_factory, monkeypatch):
     tool_module._state_reader = None
 
 
-class FakeTask:
-    """最小任务对象（metadata 承载 submitted_by_level 等归属字段）。"""
-
-    def __init__(self, task_id: str, metadata: dict | None = None):
-        self.id = task_id
-        self.title = "t"
-        self.description = ""
-        self.metadata = metadata or {}
-        self.status = SimpleNamespace(value="pending")
-
-
-class FakeTaskService:
-    def __init__(self, tasks: dict[str, FakeTask] | None = None):
-        self._tasks = tasks or {}
-        self.created: list[dict] = []
-
-    def get_task(self, task_id: str):
-        return self._tasks.get(task_id)
-
-    async def create_task(self, **kwargs):
-        task = FakeTask(f"new_{len(self.created)}", kwargs.get("metadata") or {})
-        self.created.append(kwargs)
-        return task
-
-    async def hard_delete(self, task_id: str):
-        pass
-
-    async def save_task(self, task):
-        return task
-
-    async def bind_pipeline_run(self, task_id: str, pipeline_id: str):
-        pass
-
-    def get_root_task_id(self, task_id: str):
-        return "root_x"
-
-
-def make_tool(tool_module, service: FakeTaskService | None = None):
-    """构造 TaskSubmitTool，monkeypatch 服务提供者与校验钩子（沿用 params 文件惯例）。
+def make_tool(tool_module):
+    """构造 TaskSubmitTool，monkeypatch 校验钩子（沿用 params 文件惯例）。
 
     chat sender 假实现按统一出生协议分段响应：create → 身份登记（no_dispatch）
     → 执行派发（background）→ 提交者管道登记（no_dispatch + task.owned.*）。
     captured["params"] 保留出生登记调用，captured["dispatch"] 保留执行派发调用，
     captured["calls"] 为全部调用。
     """
-    service = service or FakeTaskService()
     captured: dict = {"calls": []}
 
     tool = tool_module.TaskSubmitTool()
-    tool._get_task_service = lambda: service
 
     async def _fake_validate_target(target_id, level):
         return (True, "", "")
 
     tool._validate_target_agent = _fake_validate_target
-    tool._check_parent_ownership = lambda level, pid: (True, None)
+
+    async def _allow_ownership(level, pid):
+        return (True, None)
+
+    tool._check_parent_ownership = _allow_ownership
 
     async def fake_sender(params: dict) -> dict:
         captured["calls"].append(params)
@@ -167,6 +125,23 @@ def make_tool(tool_module, service: FakeTaskService | None = None):
         return {"status": "dispatched", "pipeline_id": params.get("pipeline_id", "")}
 
     tool_module.set_chat_sender(fake_sender)
+
+    # 出生协议第三段（工作空间同步创建，ADR-2026-10-17）：准备器缺席即出生失败
+    from tests import _task_birth_workspace as _birth_ws  # noqa: PLC0415
+
+    _birth_ws.inject_preparer(tool_module)
+
+    # agent 配置查询钩子缺省注入（配置单源 = 注入钩子，无磁盘回退）：完备性
+    # 左值的身份字段源——需要特定配置/故障形态的用例自行覆盖注入
+    async def _default_lookup(agent_id: str):
+        return {
+            "level": "L3",
+            "is_active": True,
+            "tool_ids": ["file_write"],
+            "system_prompt": "persona-stub",
+        }
+
+    tool_module.set_agent_registry_lookup(_default_lookup)
     return tool, captured
 
 
@@ -175,10 +150,14 @@ def base_inputs(**overrides):
         "goal_title": "测试任务",
         "goal_description": "分支补测",
         "target_type": "agent",
-        # P3 迁移后编码执行者驻 mode_coding 包（真实磁盘可解析，完备性身份
-        # 字段经模式包键回退链取得）
+        # P3 迁移后编码执行者驻 mode_coding 包（键形态经注入钩子解析）
         "target_id": "mode_coding/code_writer",
         "parent_agent_level": 2,
+        # 提交者会话坐标（生产由 param_inject 注入；完备性闸门按 state 键
+        # 计必需）——无会话锚场景的用例显式覆盖
+        "session_id": "sess-1",
+        # 提交者身份（生产由调用上下文注入；内核 chat.send_message 出生硬校验非空）
+        "user_id": "u_test",
     }
     inputs.update(overrides)
     return inputs
@@ -221,14 +200,15 @@ def test_service_provider_shim_has_no_sidecar_services(tool_module):
 
 @pytest.mark.asyncio
 async def test_agent_registry_lookup_injection_roundtrip(tool_module):
-    """set_agent_registry_lookup 注入后按 id 查询；未命中返回 None（磁盘回退信号）。"""
+    """set_agent_registry_lookup 注入后按 id 查询：命中得 dict，未命中得 (None, "")。"""
     tool_module.set_agent_registry_lookup(registry_hook({"orch": {"level": "L2"}}))
     tool = tool_module.TaskSubmitTool()
-    cfg = await tool._get_agent_config_from_registry("orch")
-    assert cfg is not None
-    assert cfg.level == "L2"
-    assert cfg.is_active is True
-    assert await tool._get_agent_config_from_registry("nobody") is None
+    cfg, unavailable = await tool._lookup_agent_config("orch")
+    assert unavailable == ""
+    assert cfg == {"level": "L2"}
+    cfg, unavailable = await tool._lookup_agent_config("nobody")
+    assert cfg is None
+    assert unavailable == ""
 
 
 def test_state_reader_injection_roundtrip(tool_module):
@@ -319,40 +299,6 @@ async def test_dependency_check_fail_closed_when_state_bridge_down(tool_module, 
     assert "dep000000001" in result.error
 
 
-# ── _get_task_service 懒解析（service_access 懒加载 + 缓存）──
-
-
-def test_get_task_service_resolves_via_service_access_and_caches(tool_module, monkeypatch):
-    """首次经 service_access 解析并缓存；再次调用不再触达解析源。"""
-    svc = FakeTaskService()
-    calls: list[int] = []
-    fake_mod = ModuleType("service_access")
-
-    def get_task_service():
-        calls.append(1)
-        return svc
-
-    fake_mod.get_task_service = get_task_service
-    monkeypatch.setitem(sys.modules, "service_access", fake_mod)
-
-    tool = tool_module.TaskSubmitTool()
-    assert tool._get_task_service() is svc
-    assert tool._get_task_service() is svc
-    assert calls == [1]
-
-
-def test_get_task_service_none_is_not_cached(tool_module, monkeypatch):
-    """service_access 返回 None（sidecar 未接线）→ 不缓存，每次重查。"""
-    fake_mod = ModuleType("service_access")
-    fake_mod.get_task_service = lambda: None
-    monkeypatch.setitem(sys.modules, "service_access", fake_mod)
-
-    tool = tool_module.TaskSubmitTool()
-    assert tool._get_task_service() is None
-    assert tool._task_service is None
-    assert tool._get_task_service() is None
-
-
 # ── goal / acceptance_criteria 形态归一 ──────────────────────
 
 
@@ -361,8 +307,8 @@ def test_get_task_service_none_is_not_cached(tool_module, monkeypatch):
     [
         # JSON 串形态解析为对象
         ('{"title": "t1", "description": "d1"}', {"title": "t1", "description": "d1"}),
-        # 纯文本（非 JSON）→ 包装为 title
-        ("整理仓库目录", {"title": "整理仓库目录"}),
+        # 纯文本（非 JSON）→ 单字符串主形态：title=首行、description=全文
+        ("整理仓库目录", {"title": "整理仓库目录", "description": "整理仓库目录"}),
     ],
 )
 def test_parse_goal_input_string_forms(tool_module, raw, expected):
@@ -559,26 +505,18 @@ async def test_validate_parent_task_id_requires_injected_parent_for_l2l3(tool_mo
     assert await tool._validate_parent_task_id(level, None) is False
 
 
-# ── L1 parent_task_id 存在性（服务 + state 兜底）─────────────
+# ── L1 parent_task_id 存在性（state 单通道）──────────────────
 
 
 @pytest.mark.asyncio
 async def test_l1_unknown_parent_task_id_rejected(tool_module):
-    """L1 指定的父任务在服务与 state 聚合中都不存在（无读取桥）→ 拒绝挂载。"""
-    tool, _ = make_tool(tool_module, FakeTaskService())
+    """L1 指定的父任务在 state 聚合中不存在（无读取桥）→ 拒绝挂载。"""
+    tool, _ = make_tool(tool_module)
     result = await tool.execute(
         base_inputs(parent_agent_level=1, parent_task_id="ghost00000000")
     )
     assert not result.success
     assert result.error_code == "L2_CANNOT_SPECIFY_PARENT_TASK_ID"
-
-
-@pytest.mark.asyncio
-async def test_l1_parent_exists_in_service_passes(tool_module):
-    """父任务在服务中存在 → 存在性通过（不走 state 兜底）。"""
-    tool = tool_module.TaskSubmitTool()
-    tool._task_service = FakeTaskService({"p1": FakeTask("p1")})
-    assert await tool._validate_parent_task_id(1, "p1") is True
 
 
 @pytest.mark.asyncio
@@ -591,11 +529,10 @@ async def test_l1_parent_exists_in_service_passes(tool_module):
         ([{"task.owned.ownedabc12345.title": "x"}], "ownedabc12345"),
     ],
 )
-async def test_l1_parent_exists_in_state_fallback(tool_module, monkeypatch, rows, parent_id):
-    """服务缺失的父任务经 state 聚合兜底确认存在（登记型任务 = task.owned.*）。"""
+async def test_l1_parent_exists_in_state_channel(tool_module, monkeypatch, rows, parent_id):
+    """父任务存在性以 state 为唯一通道：行命中即放行（task = pipeline）。"""
     monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
     tool = tool_module.TaskSubmitTool()
-    tool._task_service = FakeTaskService()  # 服务无记录 → 走 state 兜底
     assert await tool._validate_parent_task_id(1, parent_id) is True
 
 
@@ -607,52 +544,44 @@ async def test_parent_exists_in_state_bridge_down_returns_false(tool_module, mon
     assert await tool._parent_exists_in_state("ghost00000000") is False
 
 
-def test_parent_ownership_without_service_passes_through(tool_module):
-    """无任务服务时归属校验不阻断（交由后续存在性校验）。"""
-    tool = tool_module.TaskSubmitTool()
-    tool._task_service = None
-
-    def _no_service():
-        return None
-
-    tool._get_task_service = _no_service
-    ok, err = tool._check_parent_ownership(2, "someparent1234")
-    assert ok is True
-    assert err is None
+# ── 父任务归属闸（state 层级键，fail-closed）──────────────────
+# 行为矩阵主车道：tests/tools/test_task_submit_permission_p0.py（P0-3 权限面专文件）。
 
 
 # ── 项目挂靠解析分支 ─────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_project_binding_bootstraps_shared_root(tool_module, monkeypatch, tmp_path):
-    """共享层未入 sys.path 时挂靠解析自举注入（防线上 sys.path 组装缺失）。"""
-    import project_registry as pr
+async def test_project_binding_resolves_workspace_via_service(tool_module, monkeypatch, tmp_path):
+    """挂靠解析经 project.list_paths 服务（T6a）：workspace 锚到登记项目文件夹。
 
-    folder = tmp_path / "proj_folder_bootstrap"
+    原共享层 sys.path 自举分支随服务化退场（跨插件读面收口项目域主，
+    消费方不再直读共享根登记文件）。
+    """
+    folder = tmp_path / "proj_folder_service"
     folder.mkdir()
-    monkeypatch.setattr(pr, "load_project_paths", lambda: {"proj00000002": str(folder)})
+    paths = {"proj00000002": str(folder)}
+
+    async def fake_project_service(method: str, args: dict):
+        if method == "list_paths":
+            return {"paths": dict(paths)}
+        if method == "get":
+            pid = str(args.get("project_id") or "")
+            return (
+                {"found": True, "project": {"id": pid, "workflow_state": "running", "mode_tags": []}}
+                if pid in paths
+                else {"found": False}
+            )
+        raise AssertionError(f"unexpected method: {method}")
+
+    monkeypatch.setattr(tool_module, "_project_service", fake_project_service)
     monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
     tool, captured = make_tool(tool_module)
 
-    shared_root = str(_SHARED_DIR)
-    removed_count = 0
-    bootstrapped = False
-    # 工具模块导入时已无条件自举过一次共享层（重复驻留），须清空全部条目
-    while shared_root in sys.path:
-        sys.path.remove(shared_root)
-        removed_count += 1
-    try:
-        result = await tool.execute(
-            base_inputs(parent_agent_level=1, project_id="proj00000002")
-        )
-        # 挂靠解析路径自举注入共享层（非残留条目的效果）
-        bootstrapped = shared_root in sys.path
-    finally:
-        if removed_count and shared_root not in sys.path:
-            sys.path.insert(0, shared_root)
+    result = await tool.execute(
+        base_inputs(parent_agent_level=1, project_id="proj00000002")
+    )
     assert result.success, result.error
-    assert bootstrapped, "挂靠解析未把共享层自举进 sys.path"
     ec = captured["dispatch"]["execution_context"]
     assert ec["workspace"]["source_path"] == str(folder)
 
@@ -660,11 +589,19 @@ async def test_project_binding_bootstraps_shared_root(tool_module, monkeypatch, 
 @pytest.mark.asyncio
 async def test_project_folder_missing_rejected(tool_module, monkeypatch, tmp_path):
     """登记在场但文件夹已删除 → PROJECT_FOLDER_MISSING fail-honest。"""
-    import project_registry as pr
+    async def fake_project_service(method: str, args: dict):
+        if method == "list_paths":
+            return {"paths": {"proj00000003": str(tmp_path / "deleted_folder")}}
+        if method == "get":
+            pid = str(args.get("project_id") or "")
+            return (
+                {"found": True, "project": {"id": pid, "workflow_state": "running", "mode_tags": []}}
+                if pid == "proj00000003"
+                else {"found": False}
+            )
+        raise AssertionError(f"unexpected method: {method}")
 
-    monkeypatch.setattr(
-        pr, "load_project_paths", lambda: {"proj00000003": str(tmp_path / "deleted_folder")}
-    )
+    monkeypatch.setattr(tool_module, "_project_service", fake_project_service)
     monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
     tool, _ = make_tool(tool_module)
     result = await tool.execute(base_inputs(parent_agent_level=1, project_id="proj00000003"))
@@ -685,6 +622,9 @@ async def test_l2_child_project_inheritance_without_parent_row(tool_module, monk
 
 
 # ── inherit 参数校验与源解析 ─────────────────────────────────
+#
+# 2026-10-20 用户裁定《继承机制简化方案》：inherit_from 单参数 = 源任务 ID；
+# inherit_mode 撤下；工具按 id 正向查源任务 state 行 → 整份复制其坐标。
 
 
 @pytest.mark.parametrize(
@@ -697,96 +637,136 @@ async def test_l2_child_project_inheritance_without_parent_row(tool_module, monk
         ({}, ""),
     ],
 )
-def test_inherit_from_id_of_flat_and_nested(tool_module, inp, expected):
+def test_inherit_source_id_flat_and_nested(tool_module, inp, expected):
     """扁平 inherit_from 与旧式 inherit.from 同口径提取。"""
-    assert tool_module._inherit_from_id_of(inp) == expected
+    assert tool_module._inherit_source_id(inp) == expected
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "inherit_from,inherit_mode",
     [
-        ("", "pipe"),  # 缺 from
-        ("src0000000001", 123),  # mode 非法类型
-        ("src0000000001", None),  # mode 缺失
+        ("", "pipe"),  # 空 id = 未填继承 = 普通新任务
+        ("src0000000001", 123),  # 撤下的 inherit_mode 被忽略（不报错）
+        ("src0000000001", None),  # 同上
     ],
 )
-async def test_inherit_invalid_params_rejected(tool_module, inherit_from, inherit_mode):
-    """inherit 缺 from / mode 类型非法 → INVALID_INHERIT_PARAMS。"""
-    tool, _ = make_tool(tool_module)
+async def test_inherit_retired_mode_ignored_or_empty_is_plain_task(
+    tool_module, monkeypatch, inherit_from, inherit_mode
+):
+    """inherit_from 为空 = 普通新任务；inherit_mode 已撤下 → 忽略不报错。
+
+    2026-10-20 用户裁定：inherit_mode 撤下（pipe 是空壳，上下文重新开始即
+    重新开始）。旧调用方仍在传该键时按忽略处理并留 WARN，不打断在跑路径。
+    """
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    tool, captured = make_tool(tool_module)
     result = await tool.execute(
         base_inputs(parent_agent_level=1, inherit_from=inherit_from, inherit_mode=inherit_mode)
     )
-    assert not result.success
-    assert result.error_code == "INVALID_INHERIT_PARAMS"
+    if inherit_from:
+        # 源任务查无 → 显式报错（不静默当普通任务）；撤下的 mode 不参与判定
+        assert not result.success
+        assert result.error_code == "INHERIT_SOURCE_NOT_FOUND", result.error
+        return
+    assert result.success, result.error
+    ec = captured["dispatch"]["execution_context"]
+    assert "inherit" not in ec["workspace"]
+    assert ec["workspace"]["source_path"] == ""
 
 
 @pytest.mark.asyncio
-async def test_inherit_pipe_source_found_in_state(tool_module, monkeypatch):
-    """pipe 继承源在 state 聚合命中 → 观测到源管道 id，提交继续。"""
-    monkeypatch.setattr(
-        tool_module,
-        "_state_reader",
-        lambda: [{"pipeline_id": "srcpipe000001", "task.id": "srcpipe000001"}],
-    )
+async def test_inherit_source_found_in_state_copies_coordinate(tool_module, monkeypatch, tmp_proj):
+    """inherit_from 命中源任务 → 整份复制其坐标（不新建 worktree）。"""
+    rows = [
+        {
+            "pipeline_id": "srcpipe000001",
+            "task.id": "srcpipe000001",
+            "run_status": "failed",
+            "task.status": "failed",
+            "task.ws_meta": json.dumps(
+                {"path": str(tmp_proj), "mode": "plain", "project_root": str(tmp_proj)}
+            ),
+        }
+    ]
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
     tool, captured = make_tool(tool_module)
     result = await tool.execute(
-        base_inputs(task_id="parent_p", inherit_from="srcpipe000001", inherit_mode="pipe")
+        base_inputs(task_id="parent_p", inherit_from="srcpipe000001")
     )
     assert result.success, result.error
-    assert captured["dispatch"]["pipeline_id"] == "a1b2c3d4e5f6"
+    ec = captured["dispatch"]["execution_context"]
+    assert ec["workspace"]["source_path"] == str(tmp_proj)
+    assert ec["workspace"]["inherit"]["source_task_id"] == "srcpipe000001"
 
 
 @pytest.mark.asyncio
-async def test_inherit_pipe_source_missing_degrades_to_empty_history(tool_module, monkeypatch):
-    """pipe 继承源不在 state 聚合 → 对话历史为空但不阻断提交（观测性降级）。"""
+async def test_inherit_source_missing_rejected_not_degraded(tool_module, monkeypatch):
+    """inherit_from 查无源任务 → 显式报错（不静默当普通任务提交）。
+
+    旧实现对 pipe 继承源缺失只降级为「对话历史为空」——静默降级会让人以为
+    继承了其实没继承。
+    """
     monkeypatch.setattr(
         tool_module, "_state_reader", lambda: [{"pipeline_id": "unrelated000001"}]
     )
     tool, _ = make_tool(tool_module)
     result = await tool.execute(
-        base_inputs(task_id="parent_p", inherit_from="srcpipe000001", inherit_mode="pipe")
+        base_inputs(task_id="parent_p", inherit_from="srcpipe000001")
     )
-    assert result.success, result.error
+    assert not result.success
+    assert result.error_code == "INHERIT_SOURCE_NOT_FOUND", result.error
 
 
 @pytest.mark.asyncio
-async def test_inherit_workspace_cross_container_rejected(tool_module, monkeypatch, tmp_path_factory):
-    """源任务工作空间在其它容器（仓库根外）→ 拒绝继承，防产物落错容器。"""
+async def test_inherit_foreign_project_rejected(tool_module, monkeypatch, tmp_path_factory):
+    """源任务坐标属于另一个项目基座 → 拒绝继承，防产物落错项目。
+
+    归属判据取坐标里的 project_root（坐标对坐标），不取插件代码位置——后者
+    在装机用户空间按文件层级数推导，会把仓外项目一律误判跨容器。
+    """
+    base = tmp_path_factory.mktemp("own_project")
     outside = tmp_path_factory.mktemp("outside_container")
     rows = [
         {
             "pipeline_id": "xcontainer123",
             "task.id": "xcontainer123",
-            "ws_meta": json.dumps({"path": str(outside), "mode": "plain"}),
+            "run_status": "failed",
+            "task.status": "failed",
+            "task.ws_meta": json.dumps(
+                {"path": str(outside), "mode": "plain", "project_root": str(outside)}
+            ),
         }
     ]
     monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
     tool = tool_module.TaskSubmitTool()
-    path, fail = await tool._extract_inherited_workspace("xcontainer123")
-    assert path is None
+    meta, fail = await tool._resolve_inherit_coordinate(
+        "xcontainer123", {"parent_ws_meta": {"path": str(base), "project_root": str(base)}}
+    )
+    assert meta is None
     assert fail is not None
-    assert "其它容器" in fail.error
+    assert "另一个项目基座" in fail.error
 
 
 @pytest.mark.asyncio
 async def test_inherit_workspace_vanished_rejected(tool_module, monkeypatch, tmp_proj):
-    """源任务工作空间目录已消失 → 拒绝继承并引导重提。"""
+    """源任务工作空间目录已消失 → 拒绝继承并引导改派（不静默回落）。"""
     vanished = Path(tmp_proj) / "gone_dir"
     rows = [
         {
             "pipeline_id": "vanished12345",
             "task.id": "vanished12345",
-            "ws_meta": json.dumps({"path": str(vanished), "mode": "plain"}),
+            "run_status": "completed",
+            "task.status": "completed",
+            "task.ws_meta": json.dumps({"path": str(vanished), "mode": "plain"}),
         }
     ]
     monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
     tool = tool_module.TaskSubmitTool()
-    path, fail = await tool._extract_inherited_workspace("vanished12345")
-    assert path is None
+    meta, fail = await tool._resolve_inherit_coordinate("vanished12345")
+    assert meta is None
     assert fail is not None
     assert "已不存在" in fail.error
-
 
 # ── 依赖短 id 解析（歧义/非字符串保真）───────────────────────
 
@@ -823,13 +803,16 @@ async def test_non_string_dependency_kept_verbatim(tool_module, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_missing_target_type_rejected(tool_module):
-    tool, _ = make_tool(tool_module)
+async def test_empty_target_type_internalized_dispatches(tool_module):
+    """空 target_type → 常量内化缺省归一 agent（ec9ac5fe7，ADR 2026-10-19
+    task-submit-agent-determines-orchestration）：显式空串走 falsy 归一路径，
+    agent.id 计入完备性左值，派发放行——与编排侧回归锚（缺省不入参）互补。"""
+    tool, captured = make_tool(tool_module)
     inputs = base_inputs(parent_agent_level=1)
     inputs["target_type"] = ""
     result = await tool.execute(inputs)
-    assert not result.success
-    assert result.error_code == "MISSING_TARGET_TYPE"
+    assert result.success, result.error
+    assert captured["dispatch"]["pipeline_id"] == "a1b2c3d4e5f6"
 
 
 @pytest.mark.asyncio
@@ -873,12 +856,13 @@ async def test_target_agent_gates_reject(tool_module, level_str, is_active, expe
     assert result.error_code == expected_code
 
 
-# ── agent registry 故障降级与磁盘回退 ────────────────────────
+# ── agent registry 故障 fail-closed 与未命中（agent 配置单源 = 注入钩子）──
 
 
 @pytest.mark.asyncio
-async def test_registry_service_crash_falls_back_to_disk_not_found(tool_module):
-    """registry 服务抛异常 → 降级磁盘回退；磁盘也无 → TARGET_AGENT_NOT_FOUND。"""
+async def test_registry_service_crash_fails_closed_unavailable(tool_module):
+    """registry 服务抛异常（agent_manager 不可用）→ fail-closed 显式不可用，
+    不冒充"Agent 不存在"（层级闸门无配置可判，拒绝派发并如实归因）。"""
     tool, _ = make_tool(tool_module)
     restore_real_target_validation(tool)
 
@@ -890,20 +874,22 @@ async def test_registry_service_crash_falls_back_to_disk_not_found(tool_module):
         base_inputs(parent_agent_level=1, target_id="no_such_agent_zzz")
     )
     assert not result.success
-    assert result.error_code == "TARGET_AGENT_NOT_FOUND"
-    assert "no_such_agent_zzz" in result.error
+    assert result.error_code == "AGENT_CONFIG_UNAVAILABLE"
+    assert "agent_manager" in result.error
 
 
 @pytest.mark.asyncio
-async def test_registry_service_miss_falls_back_to_disk(tool_module):
-    """registry 未命中（返回 None，服务正常）→ 同样磁盘回退判定不存在。"""
+async def test_registry_service_miss_reports_not_found(tool_module):
+    """registry 正常应答未命中（None）→ TARGET_AGENT_NOT_FOUND。"""
+
+    tool, _ = make_tool(tool_module)
+    restore_real_target_validation(tool)
 
     async def miss(target_id):
         return None
 
+    # 覆盖缺省钩子须在 make_tool 之后（缺省钩子对所有 id 应答命中）
     tool_module.set_agent_registry_lookup(miss)
-    tool, _ = make_tool(tool_module)
-    restore_real_target_validation(tool)
     result = await tool.execute(
         base_inputs(parent_agent_level=1, target_id="no_such_agent_zzz")
     )
@@ -912,12 +898,58 @@ async def test_registry_service_miss_falls_back_to_disk(tool_module):
 
 
 @pytest.mark.asyncio
-async def test_disk_lookup_resolves_mode_agent_key_real_dispatch(tool_module):
-    """模式命名空间键全链派发：mode_coding/code_writer（出厂包内 L3 执行者）
-    → 磁盘回退解析包内 yaml，L3 目标对 L2 提交者放行并按新键派发。"""
+async def test_registry_hook_missing_fails_closed_unavailable(tool_module):
+    """钩子未注入（接线缺失）→ AGENT_CONFIG_UNAVAILABLE，绝不静默放行。"""
+    tool, _ = make_tool(tool_module)
+    restore_real_target_validation(tool)
+    tool_module._agent_registry_lookup = None
+    result = await tool.execute(
+        base_inputs(parent_agent_level=1, target_id="any_agent_here")
+    )
+    assert not result.success
+    assert result.error_code == "AGENT_CONFIG_UNAVAILABLE"
+    assert "未注入" in result.error
+
+
+def _mode_agent_registry_hook():
+    """模式键目标的最小注册表替身（身份性字段齐备，供层级闸与完备性左值）。"""
+    return registry_hook(
+        {
+            "mode_coding/code_writer": {
+                "level": "L3",
+                "is_active": True,
+                "tool_ids": ["file_write"],
+                "system_prompt": "persona-stub",
+            },
+            "mode_coding/programming_orchestrator_agent_v2": {
+                "level": "L2",
+                "is_active": True,
+                "tool_ids": ["file_write"],
+                "system_prompt": "persona-stub",
+            },
+            "mode_godot/godot_expert": {
+                "level": "L3",
+                "is_active": True,
+                "tool_ids": ["file_write"],
+                "system_prompt": "persona-stub",
+            },
+            "mode_godot/godot_orchestrator_agent": {
+                "level": "L2",
+                "is_active": True,
+                "tool_ids": ["file_write"],
+                "system_prompt": "persona-stub",
+            },
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_mode_agent_key_dispatch_via_registry_hook(tool_module):
+    """模式命名空间键全链派发：mode_coding/code_writer（L3 执行者）
+    经注入钩子解析配置，L3 目标对 L2 提交者放行并按新键派发。"""
     tool, captured = make_tool(tool_module)
     restore_real_target_validation(tool)
-    # 不注入 registry 钩子 → 磁盘回退；task_id 注入父链（L2 不能建根任务）
+    tool_module.set_agent_registry_lookup(_mode_agent_registry_hook())
     result = await tool.execute(
         base_inputs(parent_agent_level=2, target_id="mode_coding/code_writer", task_id="ctx-task-1")
     )
@@ -926,11 +958,12 @@ async def test_disk_lookup_resolves_mode_agent_key_real_dispatch(tool_module):
 
 
 @pytest.mark.asyncio
-async def test_disk_lookup_dispatches_mode_orchestrator_from_main(tool_module):
+async def test_mode_orchestrator_dispatch_from_main_via_registry_hook(tool_module):
     """模式命名空间键全链派发：mode_coding/programming_orchestrator_agent_v2
-    （出厂包内 L2 编排者）作为 main（L1）直接下级派发成功。"""
+    （L2 编排者）作为 main（L1）直接下级派发成功。"""
     tool, captured = make_tool(tool_module)
     restore_real_target_validation(tool)
+    tool_module.set_agent_registry_lookup(_mode_agent_registry_hook())
     # main（L1）建根任务：不传 task_id（父链参数为 L2+ 专属）
     result = await tool.execute(
         base_inputs(
@@ -943,11 +976,12 @@ async def test_disk_lookup_dispatches_mode_orchestrator_from_main(tool_module):
 
 
 @pytest.mark.asyncio
-async def test_disk_lookup_dispatches_mode_godot_expert_real_dispatch(tool_module):
+async def test_mode_godot_expert_dispatch_via_registry_hook(tool_module):
     """模式命名空间键全链派发（mode_godot 包，P3-⑤ 立项）：mode_godot/godot_expert
-    （出厂包内 L3 执行者）→ 磁盘回退解析包内 yaml，L2 提交者派单成功。"""
+    （L3 执行者）→ L2 提交者派单成功。"""
     tool, captured = make_tool(tool_module)
     restore_real_target_validation(tool)
+    tool_module.set_agent_registry_lookup(_mode_agent_registry_hook())
     result = await tool.execute(
         base_inputs(parent_agent_level=2, target_id="mode_godot/godot_expert", task_id="ctx-task-1")
     )
@@ -956,11 +990,12 @@ async def test_disk_lookup_dispatches_mode_godot_expert_real_dispatch(tool_modul
 
 
 @pytest.mark.asyncio
-async def test_disk_lookup_dispatches_mode_godot_orchestrator_from_main(tool_module):
+async def test_mode_godot_orchestrator_dispatch_from_main_via_registry_hook(tool_module):
     """模式命名空间键全链派发（mode_godot 包）：mode_godot/godot_orchestrator_agent
-    （出厂包内 L2 执行型编排者）作为 main（L1）直接下级派发成功。"""
+    （L2 执行型编排者）作为 main（L1）直接下级派发成功。"""
     tool, captured = make_tool(tool_module)
     restore_real_target_validation(tool)
+    tool_module.set_agent_registry_lookup(_mode_agent_registry_hook())
     result = await tool.execute(
         base_inputs(
             parent_agent_level=1,
@@ -969,85 +1004,6 @@ async def test_disk_lookup_dispatches_mode_godot_orchestrator_from_main(tool_mod
     )
     assert result.success, result.error
     assert captured["dispatch"]["agent_id"] == "mode_godot/godot_orchestrator_agent"
-
-
-def test_disk_lookup_skips_corrupt_yaml_during_config_id_scan(tool_module, monkeypatch):
-    """config_id 扫描期单个 yaml 损坏 → 跳过继续（except-continue 不阻断查找）。"""
-    import yaml as real_yaml
-
-    real_safe_load = real_yaml.safe_load
-
-    def selective_safe_load(stream):
-        name = str(getattr(stream, "name", "")).replace("\\", "/")
-        if name.endswith("system/evolution_agent.yaml"):
-            raise real_yaml.YAMLError("模拟配置损坏")
-        return real_safe_load(stream)
-
-    monkeypatch.setattr(real_yaml, "safe_load", selective_safe_load)
-    found, level_str, level, is_active, corrupt_path = (
-        tool_module.TaskSubmitTool._lookup_agent_from_disk("evolution")
-    )
-    # 唯一 config_id 命中的文件在扫描期损坏被跳过 → 与"不存在"同型返回（无损坏归因路径）
-    assert found is False
-    assert corrupt_path == ""
-
-
-@pytest.mark.parametrize(
-    ("target_id", "yaml_rel", "expected_level"),
-    [
-        # 扁平布局：文件名与 id 无关、内容 config_id 命中
-        ("cfgscan_target_a", "writer_settings.yaml", "L3"),
-        # 深层嵌套 + 不同 level 值（防对单一文件名/层级硬编码）
-        ("cfgscan_target_b", "nested/deep/inner_probe.yaml", "L2"),
-    ],
-)
-def test_disk_lookup_hits_by_config_id_content_when_filename_misses(
-    tool_module, monkeypatch, tmp_path, target_id, yaml_rel, expected_level
-):
-    """config_id 兜底扫描（靶行 tool.py 2315-2316：命中赋值 + break）。
-
-    文件名 rglob 未命中（无 `{target_id}.yaml`）→ 遍历全部 yaml 逐个
-    safe_load，按内容 `config_id == target_id` 命中并停扫。config_dir 由模块
-    `__file__` 上溯五级推导，把 `__file__` 注入 tmp 假树后对真实落盘 yaml 走
-    真扫描（文件 IO 为真实依赖，仅定位锚点是注入的）。
-    """
-    config_dir = tmp_path / "config" / "agents"
-    yaml_file = config_dir / yaml_rel
-    yaml_file.parent.mkdir(parents=True)
-    yaml_file.write_text(
-        f"config_id: {target_id}\nlevel: {expected_level}\nis_active: true\n",
-        encoding="utf-8",
-    )
-    # 对照：文件名与内容都不命中的普通 yaml，不得被误收
-    (config_dir / "plain_no_config_id.yaml").write_text("level: L1\n", encoding="utf-8")
-
-    fake_tool_py = tmp_path / "plugins" / "shared" / "tools" / "task_submit" / "tool.py"
-    monkeypatch.setattr(tool_module, "__file__", str(fake_tool_py))
-
-    config, corrupt_path = tool_module.TaskSubmitTool._load_agent_yaml_dict(target_id)
-
-    assert corrupt_path == "", "按内容命中是健康路径，不得带损坏归因"
-    assert isinstance(config, dict)
-    assert config.get("config_id") == target_id, "必须按内容命中目标 yaml，而非旁落普通文件"
-    assert config.get("level") == expected_level
-
-
-def test_disk_lookup_resolves_mode_agent_key(tool_module, monkeypatch, tmp_path):
-    """两级解析第二级：config/agents 未命中 → 模式包 agents/<stem>.yaml。
-
-    mode_X/<stem> 键经 mode_keys 双根解析（用户副本优先），读出 level/is_active
-    供派发层级闸门判定（模式体系设计稿 §3.3）。
-    """
-    pkg = tmp_path / "plugins" / "modes" / "mode_ghostmode"
-    (pkg / "agents").mkdir(parents=True)
-    (pkg / "plugin.json").write_text("{}", encoding="utf-8")
-    (pkg / "agents" / "exec1.yaml").write_text("level: L3\n", encoding="utf-8")
-    monkeypatch.setenv("AGENTOS_USER_ROOT", str(tmp_path))
-    found, level_str, level, is_active, corrupt_path = (
-        tool_module.TaskSubmitTool._lookup_agent_from_disk("mode_ghostmode/exec1")
-    )
-    assert found is True
-    assert (level_str, level, is_active, corrupt_path) == ("L3", 3, True, "")
 
 
 # ── 派发编排隔离语义 ─────────────────────────────────────────
@@ -1166,77 +1122,31 @@ async def test_execute_rejects_system_dir_workspace(tool_module):
     assert result.error_code == "UNSAFE_WORKSPACE"
 
 
-# ── _build_metadata / 任务级 execution_context（遗留装配面）──
-
-
-def test_build_metadata_skips_non_dict_criteria(tool_module):
-    """非 dict 验收标准跳过存储（告警不落账），其余字段照常装配。"""
-    tool = tool_module.TaskSubmitTool()
-    md = tool._build_metadata(
-        {"session_id": "s-1", "parent_agent_level": 2, "workspace": ""},
-        {"title": "t"},
-        "not-a-dict",
-    )
-    assert "acceptance_criteria" not in md
-    assert "evaluation_metric_ids" not in md
-    assert md["session_id"] == "s-1"
-    assert md["submitted_by_level"] == 2
-
-
-def test_build_metadata_carries_task_level_execution_context(tool_module):
-    """显式 workspace 落任务级 execution_context（供执行器透传）。"""
-    tool = tool_module.TaskSubmitTool()
-    md = tool._build_metadata(
-        {"workspace": "/w", "workspace_mode": "plain", "isolation_level": "isolated"},
-        {"title": "t"},
-        {"file_check": {}},
-    )
-    assert md["acceptance_criteria"] == {"file_check": {}}
-    assert md["evaluation_metric_ids"] == ["file_check"]
-    assert md["execution_context"]["workspace"]["source_path"] == "/w"
-
-
-@pytest.mark.parametrize(
-    "inputs,expected_ws",
-    [
-        # 显式 workspace：带 source_path，拓扑缺省 worktree
-        (
-            {"workspace": "/w", "workspace_mode": "", "parent_task_id": "p1"},
-            {"source_path": "/w", "mode": "worktree", "explicit": True},
-        ),
-        # 无显式 workspace 但有拓扑声明：source_path 留空
-        (
-            {"workspace_mode": "worktree"},
-            {"source_path": "", "mode": "worktree"},
-        ),
-    ],
-)
-def test_task_level_execution_context_workspace_forms(tool_module, inputs, expected_ws):
-    ec = tool_module.TaskSubmitTool._task_level_execution_context(inputs)
-    assert ec["workspace"] == expected_ws
-    if "parent_task_id" in inputs:
-        assert ec["parent_task_id"] == inputs["parent_task_id"]
-    # isolation 只在显式选择时落
-    assert ("isolation" in ec) == bool(inputs.get("isolation_level"))
-
-
 # ── 派发 execution_context 模式键透传（BUG-61：模式面板按 state.mode 过滤行源）──
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode_value", ["coding", "research"])
-async def test_dispatch_execution_context_carries_mode(tool_module, monkeypatch, mode_value):
+@pytest.mark.parametrize(
+    ("mode_value", "target_id"),
+    [("coding", "mode_coding/code_writer"), ("godot", "mode_godot/godot_expert")],
+)
+async def test_dispatch_execution_context_carries_mode(
+    tool_module, monkeypatch, mode_value, target_id
+):
     """mode 输入随派发透传进 execution_context（与聊天主链消息级 EC 同形）。
 
     内核 1a2 把消息级 execution_context 并入出生管道 initial state 后，
     mode_material_inject 据 execution_context.mode 回写 state.mode；模式面板
     （mode_coding 等）的会话/看板行源按 state.mode 过滤——派发链丢键即
-    全面板零呈现（BUG-61 根因）。
+    全面板零呈现（BUG-61 根因）。用例取同包配对（批 B8 闸②：mode ≠ 目标
+    归属包在门口即拒，透传语义只对合法组合成立）。
     """
     monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
     tool, captured = make_tool(tool_module)
-    # 面板派发形态 = L1 根任务（mode_coding _issue_args 同口径）
-    result = await tool.execute(base_inputs(parent_agent_level=1, mode=mode_value))
+    # 面板派发形态 = L1 根任务（mode_* _issue_args 同口径）
+    result = await tool.execute(
+        base_inputs(parent_agent_level=1, mode=mode_value, target_id=target_id)
+    )
     assert result.success, result.error
     assert captured["dispatch"]["execution_context"]["mode"] == mode_value
 
@@ -1382,24 +1292,33 @@ def test_parse_goal_input_non_dict_non_string_rejected(tool_module, bad_goal):
 
 @pytest.mark.asyncio
 async def test_root_task_inherits_workspace_from_source(tool_module, monkeypatch, tmp_proj):
-    """根任务 inherit workspace：源任务坐标复用（不复制不初始化），继承不算显式。"""
+    """根任务 inherit_from：源任务坐标整份复制（不复制不初始化），继承不算显式。"""
     rows = [
         {
             "pipeline_id": "wsrc000000001",
             "task.id": "wsrc000000001",
-            "ws_meta": json.dumps({"path": str(tmp_proj), "mode": "plain"}),
+            "run_status": "failed",
+            "task.status": "failed",
+            "task.ws_meta": json.dumps(
+                {"path": str(tmp_proj), "mode": "plain", "project_root": str(tmp_proj)}
+            ),
         }
     ]
     monkeypatch.setattr(tool_module, "_state_reader", lambda: rows)
     tool, captured = make_tool(tool_module)
     result = await tool.execute(
-        base_inputs(parent_agent_level=1, inherit_from="wsrc000000001", inherit_mode="workspace")
+        base_inputs(parent_agent_level=1, inherit_from="wsrc000000001")
     )
     assert result.success, result.error
     # 继承坐标写入 execution_context；无显式声明 → explicit=False
     ec = captured["dispatch"]["execution_context"]
     assert ec["workspace"]["source_path"] == str(tmp_proj)
     assert ec["workspace"]["explicit"] is False
+    # 出生 state 携整份复制的坐标 + 执行锚点（工作空间已就位 → 无创建动作）
+    birth_state = captured["params"]["state"]
+    assert birth_state["task.ws_meta"]["path"] == str(tmp_proj)
+    assert birth_state["workspace"] == str(tmp_proj)
+    assert birth_state["task.inherit_from"] == "wsrc000000001"
     # 继承回写 inputs 后随出生 state 可见（metadata 面不再双写）
     assert captured["dispatch"]["pipeline_id"] == "a1b2c3d4e5f6"
 
@@ -1426,6 +1345,34 @@ async def test_parent_ws_meta_written_to_birth_state(tool_module):
     assert state["lineage.parent_pipeline_id"] == "owner-pipe-1"
 
 
+# ── 提交者层级出生写全（归属闸真值）──────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "submitter_level,extra",
+    [
+        # L1 根任务（面板/LLM 根提交，无父）
+        (1, {}),
+        # L2 子任务（父任务 id 经注入回退 = task_id）
+        (2, {"pipeline_id": "owner-pipe-1", "task_id": "parent-task-1"}),
+    ],
+)
+async def test_submitted_by_level_written_to_birth_state(tool_module, submitter_level, extra):
+    """task.submitted_by_level 随出生 state 一次写全（= 提交者 Agent 层级）。
+
+    归属闸 _check_parent_ownership 据该键判定父任务层级链（子任务挂载
+    权限面唯一真值，无 YAML 通道）。
+    """
+    tool, captured = make_tool(tool_module)
+    result = await tool.execute(
+        base_inputs(parent_agent_level=submitter_level, **extra)
+    )
+    assert result.success, result.error
+    state = captured["params"]["state"]
+    assert state["task.submitted_by_level"] == submitter_level
+
+
 # ── 依赖短 id 解析成功路径 ───────────────────────────────────
 
 
@@ -1443,43 +1390,24 @@ async def test_dependency_short_id_resolves_and_passes_check(tool_module, monkey
 
 @pytest.mark.asyncio
 async def test_parent_exists_in_state_no_match_returns_false(tool_module, monkeypatch):
-    """state 行在场但无命中（pipeline_id / task.owned.* 均不匹配）→ 兜底判不存在。"""
+    """state 行在场但无命中（pipeline_id / task.owned.* 均不匹配）→ 判不存在。"""
     monkeypatch.setattr(
         tool_module, "_state_reader", lambda: [{"pipeline_id": "other000000001"}]
     )
     tool = tool_module.TaskSubmitTool()
-    tool._task_service = FakeTaskService()  # 服务无记录 → 走 state 兜底
     assert await tool._validate_parent_task_id(1, "ghost00000000") is False
-
-
-# ── _attach_inherit_metadata pipe 带宽标记 ───────────────────
-
-
-@pytest.mark.parametrize(
-    "mode",
-    ["pipe", ["pipe", "workspace"]],
-    ids=["string-mode", "list-mode"],
-)
-def test_build_metadata_marks_pipe_inherit_bandwidth(tool_module, mode):
-    """inherit 含 pipe（字符串或列表形态）→ 附带宽照键 inherit_pipe_from。"""
-    tool = tool_module.TaskSubmitTool()
-    md = tool._build_metadata(
-        {"inherit_from": "src1", "inherit_mode": mode},
-        {"title": "t"},
-        {},
-    )
-    assert md["inherit"] == {"from": "src1", "mode": mode}
-    assert md["inherit_pipe_from"] == "src1"
 
 
 # ── 4.4 plan 态派发白名单闸（ADR 2026-09-17 决策 2）──────────────
 
 
 class _FakeProject:
-    def __init__(self, workflow_state: str = "plan"):
+    def __init__(self, workflow_state: str = "plan", mode_tags: list[str] | None = None):
         self.id = "proj00000009"
         self.workflow_state = workflow_state
         self.path = "D:/x/p"
+        self.mode_tags = list(mode_tags or [])
+        self.default_mode = ""
 
 
 @pytest.mark.asyncio
@@ -1487,17 +1415,22 @@ async def test_plan_state_gate_rejects_non_whitelisted_executor(
     tool_module, monkeypatch, tmp_path
 ):
     """plan 态 + 白名单外执行者 → PROJECT_PLAN_LOCKED（状态闸机械化拦截）。"""
-    import project_registry as pr
-
     folder = tmp_path / "plan_gate_proj"
     folder.mkdir()
-    monkeypatch.setattr(pr, "load_project_paths", lambda: {"proj00000009": str(folder)})
 
-    class _FakeRegistry:
-        def get(self, pid):
-            return _FakeProject("plan") if pid == "proj00000009" else None
+    async def fake_project_service(method: str, args: dict):
+        if method == "list_paths":
+            return {"paths": {"proj00000009": str(folder)}}
+        if method == "get":
+            pid = str(args.get("project_id") or "")
+            return (
+                {"found": True, "project": {"id": pid, "workflow_state": "plan", "mode_tags": []}}
+                if pid == "proj00000009"
+                else {"found": False}
+            )
+        raise AssertionError(f"unexpected method: {method}")
 
-    monkeypatch.setattr(pr, "ProjectRegistry", _FakeRegistry)
+    monkeypatch.setattr(tool_module, "_project_service", fake_project_service)
     monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
     tool, _ = make_tool(tool_module)
     result = await tool.execute(
@@ -1508,20 +1441,38 @@ async def test_plan_state_gate_rejects_non_whitelisted_executor(
     assert "plan→running" in result.error
 
 
+def _stub_project_service(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_module: Any,
+    paths: dict[str, str],
+    states: dict[str, str],
+) -> None:
+    """project.* 服务桩（T6a）：list_paths 按登记映射、get 按 states 回工作流态。"""
+
+    async def fake_project_service(method: str, args: dict):
+        if method == "list_paths":
+            return {"paths": dict(paths)}
+        if method == "get":
+            pid = str(args.get("project_id") or "")
+            known = pid in states
+            return (
+                {"found": True, "project": {"id": pid, "workflow_state": states[pid], "mode_tags": []}}
+                if known
+                else {"found": False}
+            )
+        raise AssertionError(f"unexpected method: {method}")
+
+    monkeypatch.setattr(tool_module, "_project_service", fake_project_service)
+
+
 @pytest.mark.asyncio
 async def test_plan_state_gate_allows_research_dispatch(tool_module, monkeypatch, tmp_path):
     """plan 态 + 白名单执行者（research_agent）→ 闸放行，链路继续走完。"""
-    import project_registry as pr
-
     folder = tmp_path / "plan_gate_research"
     folder.mkdir()
-    monkeypatch.setattr(pr, "load_project_paths", lambda: {"proj00000009": str(folder)})
-
-    class _FakeRegistry:
-        def get(self, pid):
-            return _FakeProject("plan") if pid == "proj00000009" else None
-
-    monkeypatch.setattr(pr, "ProjectRegistry", _FakeRegistry)
+    _stub_project_service(
+        monkeypatch, tool_module, {"proj00000009": str(folder)}, {"proj00000009": "plan"}
+    )
     monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
     tool, captured = make_tool(tool_module)
     result = await tool.execute(
@@ -1538,17 +1489,11 @@ async def test_plan_state_gate_allows_research_dispatch(tool_module, monkeypatch
 @pytest.mark.asyncio
 async def test_plan_state_gate_inactive_on_running_project(tool_module, monkeypatch, tmp_path):
     """running 态项目 → 闸不生效（执行类派发照常）。"""
-    import project_registry as pr
-
     folder = tmp_path / "plan_gate_running"
     folder.mkdir()
-    monkeypatch.setattr(pr, "load_project_paths", lambda: {"proj00000009": str(folder)})
-
-    class _FakeRegistry:
-        def get(self, pid):
-            return _FakeProject("running") if pid == "proj00000009" else None
-
-    monkeypatch.setattr(pr, "ProjectRegistry", _FakeRegistry)
+    _stub_project_service(
+        monkeypatch, tool_module, {"proj00000009": str(folder)}, {"proj00000009": "running"}
+    )
     monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
     tool, captured = make_tool(tool_module)
     result = await tool.execute(
@@ -1558,34 +1503,200 @@ async def test_plan_state_gate_inactive_on_running_project(tool_module, monkeypa
     assert "dispatch" in captured
 
 
-def test_plan_state_gate_skips_without_project(tool_module):
+@pytest.mark.asyncio
+async def test_plan_state_gate_skips_without_project(tool_module):
     """不挂项目 → 闸直接放行（返回 None）。"""
     gate = tool_module.TaskSubmitTool._gate_project_plan_state
-    assert gate("", "agent", "mode_coding/code_writer") is None
+    assert await gate("", "agent", "mode_coding/code_writer") is None
 
 
-def test_plan_state_gate_rebootstrap_shared_root_when_absent(
+@pytest.mark.asyncio
+async def test_plan_state_gate_service_unavailable_fail_closed(
     tool_module, monkeypatch, tmp_path
 ):
-    """shared_root 不在 sys.path（裸宿主装载）→ 守卫补插后闸仍工作（1054）。"""
-    import project_registry as pr
-
-    shared_root = str(Path(tool_module.__file__).resolve().parents[2])
-    cleaned = [p for p in sys.path if str(p) != shared_root]
-    assert shared_root not in cleaned
-    monkeypatch.setattr(sys, "path", cleaned)
-
-    folder = tmp_path / "plan_gate_reboot"
-    folder.mkdir()
-    monkeypatch.setattr(pr, "load_project_paths", lambda: {"proj00000010": str(folder)})
-
-    class _FakeRegistry:
-        def get(self, pid):
-            return _FakeProject("plan") if pid == "proj00000010" else None
-
-    monkeypatch.setattr(pr, "ProjectRegistry", _FakeRegistry)
+    """project 服务缺席（裸宿主装载未注入）→ 闸 fail-closed 拒绝（T6a，
+    原 shared_root 守卫自举分支随服务化退场——读面收口后不可直读兜底）。"""
+    monkeypatch.setattr(tool_module, "_project_service", None)
     gate = tool_module.TaskSubmitTool._gate_project_plan_state
-    # 白名单外执行者 → 拦截（守卫补插的路径上 import project_registry 成功）
-    result = gate("proj00000010", "agent", "mode_coding/code_writer")
+    # 白名单外执行者 → 拦截（服务不可用信封，不静默放行）
+    result = await gate("proj00000010", "agent", "mode_coding/code_writer")
     assert result is not None and not result.success
-    assert shared_root in sys.path  # 守卫已把 shared_root 插回
+    assert result.error_code == "PROJECT_SERVICE_UNAVAILABLE"
+
+
+def _seed_user_mode_package(
+    monkeypatch: pytest.MonkeyPatch, user_root: Path, dirname: str, mode_yaml: str
+) -> None:
+    """播种用户根模式包（plugin.json 包标记 + mode.yaml 声明）。
+
+    collect_planning_executors 经 AGENTOS_USER_ROOT 双根枚举真实读取——
+    用真实包声明驱动闸聚合，不 mock mode_keys（文件面即依赖真相）。
+    """
+    pkg = user_root / "plugins" / "modes" / dirname
+    pkg.mkdir(parents=True)
+    (pkg / "plugin.json").write_text("{}", encoding="utf-8")
+    (pkg / "mode.yaml").write_text(mode_yaml, encoding="utf-8")
+    monkeypatch.setenv("AGENTOS_USER_ROOT", str(user_root))
+
+
+def _plan_state_project(monkeypatch: pytest.MonkeyPatch, folder: Path, tool_module: Any) -> None:
+    """登记 plan 态项目（T6a 服务桩形态：沿用本文件 plan 闸既有假登记模式）。"""
+    folder.mkdir()
+    _stub_project_service(
+        monkeypatch, tool_module, {"proj00000011": str(folder)}, {"proj00000011": "plan"}
+    )
+
+
+# ── 4.4.1 plan 态白名单注册化聚合三态（批 B4：基线 ∪ Σ 注册贡献）──────────
+# 三态同键对比：执行者键都用默认 target（mode_coding/code_writer，真实磁盘
+# 可解析），差异只在注册声明面——拒绝/放行的唯一变量 = 聚合贡献。
+
+
+@pytest.mark.asyncio
+async def test_plan_state_gate_baseline_only_mode_key_rejected(
+    tool_module, monkeypatch, tmp_path
+):
+    """仅基线（出厂六包零声明 = 注册零贡献）→ 模式执行者仍拒（fail-closed）。"""
+    _plan_state_project(monkeypatch, tmp_path / "plan_gate_b4_baseline", tool_module)
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    tool, _captured = make_tool(tool_module)
+    result = await tool.execute(
+        base_inputs(parent_agent_level=1, project_id="proj00000011")
+    )
+    assert not result.success
+    assert result.error_code == "PROJECT_PLAN_LOCKED"
+    assert "environment_setup_agent" in result.error  # 错误信息列放行集
+
+
+@pytest.mark.asyncio
+async def test_plan_state_gate_registered_contribution_allowed(
+    tool_module, monkeypatch, tmp_path
+):
+    """基线+贡献：注册包声明 mode_coding/code_writer → 同键 plan 态放行
+    （真实用户根包声明，mode_keys 磁盘聚合）。"""
+    _seed_user_mode_package(
+        monkeypatch,
+        tmp_path / "user_root_contrib",
+        "mode_mixed",
+        "mode: mixed\nname: M\nplanning_executors: [mode_coding/code_writer]\n",
+    )
+    _plan_state_project(monkeypatch, tmp_path / "plan_gate_b4_contrib", tool_module)
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    tool, captured = make_tool(tool_module)
+    result = await tool.execute(
+        base_inputs(parent_agent_level=1, project_id="proj00000011")
+    )
+    assert result.success, result.error
+    assert "dispatch" in captured
+
+
+@pytest.mark.asyncio
+async def test_plan_state_gate_invalid_declaration_entries_contribute_nothing(
+    tool_module, monkeypatch, tmp_path
+):
+    """非法形态条目 = 零贡献：同声明内合法条目过闸、非法条目不豁免
+    （fail-closed；声明面全量拒收由 agent_manager/parity 同源闸执法）。"""
+    _seed_user_mode_package(
+        monkeypatch,
+        tmp_path / "user_root_invalid",
+        "mode_mixed",
+        "mode: mixed\nname: M\n"
+        "planning_executors: ['mode_mixed/planner', '../evil', 'Mode_X/agent']\n",
+    )
+    _plan_state_project(monkeypatch, tmp_path / "plan_gate_b4_invalid", tool_module)
+    gate = tool_module.TaskSubmitTool._gate_project_plan_state
+    # 合法形态条目过闸（返回 None = 放行）
+    assert await gate("proj00000011", "agent", "mode_mixed/planner") is None
+    # 非法形态条目不在放行集（穿越键 / 大写模式名键）；基线外未声明键同样不豁免
+    for target_id in ("../evil", "Mode_X/agent", "mode_coding/code_writer"):
+        result = await gate("proj00000011", "agent", target_id)
+        assert result is not None and not result.success, target_id
+        assert result.error_code == "PROJECT_PLAN_LOCKED", target_id
+
+
+# ── 4.4.1 mode 登记两闸（批 B8：显式 mode 集合/归属轻校验，四态）──────────
+
+
+def _mode_gate_project(
+    monkeypatch: pytest.MonkeyPatch, tool_module: Any, folder: Path, mode_tags: list[str]
+) -> None:
+    """登记带 mode_tags 的项目（T6a 服务桩形态：沿用本文件 mode 闸既有假登记模式）。"""
+    folder.mkdir()
+    _stub_project_service(
+        monkeypatch,
+        tool_module,
+        {"proj00000012": str(folder)},
+        {"proj00000012": "running"},
+    )
+
+    base = tool_module._project_service
+
+    async def _mode_tags_override(method: str, args: dict):
+        pid = str(args.get("project_id") or "")
+        if method == "get" and pid == "proj00000012":
+            return {"found": True, "project": {"id": pid, "workflow_state": "running", "mode_tags": mode_tags}}
+        return await base(method, args)
+
+    monkeypatch.setattr(tool_module, "_project_service", _mode_tags_override)
+
+
+@pytest.mark.asyncio
+async def test_mode_gate_outside_project_tags_rejected(tool_module, monkeypatch, tmp_path):
+    """闸① 集合外拒：挂靠项目登记 tags 且显式 mode ∉ 集合 → 拒，错误信息
+    指明登记集合与调整通道（可指导改正）。"""
+    _mode_gate_project(monkeypatch, tool_module, tmp_path / "mode_gate_tags", ["coding", "research"])
+    gate = tool_module.TaskSubmitTool._gate_mode_registration
+    result = await gate("proj00000012", "game", "mode_coding/code_writer")
+    assert result is not None and not result.success
+    assert result.error_code == "MODE_NOT_IN_PROJECT_TAGS"
+    assert "coding" in result.error and "research" in result.error
+    assert "project_create" in result.error  # 调整通道在错误信息中可达
+
+
+@pytest.mark.asyncio
+async def test_mode_gate_unregistered_project_tags_skipped(tool_module, monkeypatch, tmp_path):
+    """闸① legacy 宽容：挂靠项目未登记 tags → 集合闸跳过（mode 任意值放行）。"""
+    _mode_gate_project(monkeypatch, tool_module, tmp_path / "mode_gate_notags", [])
+    gate = tool_module.TaskSubmitTool._gate_mode_registration
+    assert await gate("proj00000012", "game", "research_agent") is None
+
+
+@pytest.mark.asyncio
+async def test_mode_gate_target_pack_mismatch_rejected(tool_module):
+    """闸② 归属不一致拒：target 为 mode_X/<stem> 而显式 mode ≠ X → 拒
+    （不依赖项目挂靠；裸名执行者无归属包，闸②不适用）。"""
+    gate = tool_module.TaskSubmitTool._gate_mode_registration
+    result = await gate("", "game", "mode_coding/code_writer")
+    assert result is not None and not result.success
+    assert result.error_code == "MODE_TARGET_PACK_MISMATCH"
+    assert "mode_coding" in result.error
+    # 裸名系统执行者（无归属包）+ 任意 mode → 闸②不适用
+    assert await gate("", "game", "research_agent") is None
+
+
+@pytest.mark.asyncio
+async def test_mode_gate_no_mode_is_noop(tool_module):
+    """不填 mode = 现状不变（零隐式填充零新逻辑）：闸直接放行。"""
+    gate = tool_module.TaskSubmitTool._gate_mode_registration
+    assert await gate("proj00000012", "", "mode_coding/code_writer") is None
+    assert await gate("", "", "mode_coding/code_writer") is None
+
+
+@pytest.mark.asyncio
+async def test_mode_gate_registered_mode_passes_and_dispatches(
+    tool_module, monkeypatch, tmp_path
+):
+    """登记内 mode + 归属一致 → 两闸全过，链路继续走完（显式 mode ∈ 集合）。"""
+    _mode_gate_project(monkeypatch, tool_module, tmp_path / "mode_gate_pass", ["coding"])
+    monkeypatch.setattr(tool_module, "_state_reader", lambda: [])
+    tool, captured = make_tool(tool_module)
+    result = await tool.execute(
+        base_inputs(
+            parent_agent_level=1,
+            project_id="proj00000012",
+            mode="coding",
+        )
+    )
+    assert result.success, result.error
+    assert "dispatch" in captured
+    assert captured["dispatch"]["execution_context"]["mode"] == "coding"

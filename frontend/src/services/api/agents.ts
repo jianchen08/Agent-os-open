@@ -70,3 +70,28 @@ export async function getAgents(
     return response.data
   }, options)
 }
+
+/** 提示词组装预览响应（agent_manager prompt-preview 端点，prompt.preview 服务透传） */
+export interface AgentPromptPreview {
+  /** 组装后的 SystemMessage 文本 */
+  system_message: string
+  /** 动态变量消息（运行时追加在历史消息之后；无动态变量时为 null） */
+  dynamic_vars_message?: { role?: string; content?: string } | null
+  /** 预览的 agent id（系统键或模式键 mode_X/<stem>） */
+  agent_id: string
+  /** 配置文件磁盘路径 */
+  source_path?: string
+}
+
+/** 获取 Agent 组装预览（离线组装面：无任务工作空间，session_workspace 注入为空） */
+export async function getAgentPromptPreview(
+  id: string,
+  options: RetryOptions = {},
+): Promise<AgentPromptPreview> {
+  return requestWithRetry(async () => {
+    const response = await apiClient.get<AgentPromptPreview>(
+      API_ENDPOINTS.AGENTS.PROMPT_PREVIEW(id),
+    )
+    return response.data
+  }, options)
+}

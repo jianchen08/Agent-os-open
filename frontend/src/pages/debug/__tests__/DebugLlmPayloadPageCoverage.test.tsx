@@ -19,13 +19,20 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DebugLlmPayloadPage } from '@/pages/debug/DebugLlmPayloadPage'
-import { getPayloadDiagFile, getPayloadDiagList } from '@/services/api/llmPayload'
+import {
+  getDiagnosticsSettings,
+  getPayloadDiagFile,
+  getPayloadDiagList,
+  updateDiagnosticsSettings,
+} from '@/services/api/llmPayload'
 import { renderWithProviders } from '@/test/renderWithProviders'
 import type { PayloadDiagItem } from '@/services/api/llmPayload'
 
 vi.mock('@/services/api/llmPayload', () => ({
   getPayloadDiagList: vi.fn(),
   getPayloadDiagFile: vi.fn(),
+  getDiagnosticsSettings: vi.fn(),
+  updateDiagnosticsSettings: vi.fn(),
 }))
 
 const ITEM: PayloadDiagItem = {
@@ -66,6 +73,10 @@ function byTagExact(tag: string, exact: string): HTMLElement {
 beforeEach(() => {
   vi.resetAllMocks()
   vi.mocked(getPayloadDiagList).mockResolvedValue({ items: [ITEM], total: 1 })
+  // 诊断开关默认开（settings.yaml 面默认值），toggle 用例另行覆盖关闭态
+  vi.mocked(getDiagnosticsSettings).mockResolvedValue({
+    diagnostics: { payload_diag: true, prompt_audit: false },
+  })
 })
 
 describe('DebugLlmPayloadPage — 消息内容多形态', () => {
@@ -340,5 +351,38 @@ describe('DebugLlmPayloadPage — 快照读取失败面', () => {
 
     fireEvent.click(item)
     expect(screen.queryByText('唯一内容')).not.toBeInTheDocument()
+  })
+})
+
+describe('DebugLlmPayloadPage — 诊断开关热切换', () => {
+  it('开关读取默认开态；点击调 PUT 翻转并刷新回显', async () => {
+    renderWithProviders(<DebugLlmPayloadPage />)
+    // 初始：默认开（settings.yaml 面默认值）
+    expect(await screen.findByRole('button', { name: '已开启' })).toBeEnabled()
+
+    vi.mocked(updateDiagnosticsSettings).mockResolvedValue({
+      diagnostics: { payload_diag: false, prompt_audit: false },
+    })
+    // 点击后 GET 刷新读到关闭态（invalidate → refetch）
+    vi.mocked(getDiagnosticsSettings).mockResolvedValue({
+      diagnostics: { payload_diag: false, prompt_audit: false },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '已开启' }))
+
+    expect(await screen.findByRole('button', { name: '已关闭' })).toBeInTheDocument()
+    expect(updateDiagnosticsSettings).toHaveBeenCalledWith({ payload_diag: false })
+  })
+
+  it('PUT 失败（网络面）不翻转回显，错误就地呈现（乐观态不残留）', async () => {
+    renderWithProviders(<DebugLlmPayloadPage />)
+    expect(await screen.findByRole('button', { name: '已开启' })).toBeEnabled()
+
+    vi.mocked(updateDiagnosticsSettings).mockRejectedValue(new Error('network down'))
+    fireEvent.click(screen.getByRole('button', { name: '已开启' }))
+
+    await waitFor(() => expect(updateDiagnosticsSettings).toHaveBeenCalled())
+    // 失败后仍是开态（缓存值未失效）+ 错误就地呈现不冒泡
+    expect(await screen.findByRole('button', { name: '已开启' })).toBeInTheDocument()
+    expect(await screen.findByText('切换失败：network down')).toBeInTheDocument()
   })
 })

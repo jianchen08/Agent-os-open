@@ -2,19 +2,21 @@
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { getMessageSegments, type SegmentDetail, type SegmentMeta } from '@/services/api/messageSegments'
+import { getMessageSegments } from '@/services/api/messageSegments'
 import { getMessages as apiGetMessages, mapBackendMessageToMessage } from '@/services/api/session'
+import { useChatInputStore } from '@/stores/chatInputStore'
 import { useContextKeys } from '@/stores/contextKeysStore'
 import {
   _fetchAbortControllers,
   abortKeyOf,
   fetchKindOf,
 } from '@/stores/pipelineMessageFetchWindows'
-import { trimMessagesForPersistence } from '@/stores/pipelineMessagePersistence'
+import { buildPersistedSnapshot } from '@/stores/pipelineMessagePersistence'
 // retry removed per audit: 内部 API 不应内置重试，429/5xx 重试统一由 axios interceptor 管理
 import { decideClaim } from '@/streaming/claim'
 import { indexedDbStorage } from '@/utils/indexedDbStorage'
 import { loggers } from '@/utils/logger'
+import { markMessageHydrated, waitForMessageHydration } from './pipelineMessageHydration'
 import {
   buildTransientPlaceholder,
   calculateBottomCursor,
@@ -26,6 +28,9 @@ import {
   mergeSorted,
   mutateMessageParts,
 } from './pipelineMessageMerge'
+import { reconcileFromAPI } from './pipelineMessageReconcile'
+import { PIPELINE_MESSAGE_ACCOUNT_RESET, setInitialLoadingFlag } from './pipelineMessageState'
+import type { PipelineMessageState, PipelineMeta } from './pipelineMessageState'
 import type { MessagePart, ToolCallPart } from '@/types/messageParts'
 import type { Message } from '@/types/models'
 
@@ -40,260 +45,13 @@ const logger = loggers.sessionStore
  *  数十秒），迟到快照才不会抹掉窗口内的本页活动。 */
 const INFLIGHT_FRESH_MS = 90_000
 
-/** 刷新后后台全量对账去重（同一管道只对账一次；流式结束前的对账推迟） */
-const _reconcilingPipelines = new Set<string>()
-
-/**
- * 刷新后后台静默全量对账（auto 首次进入且本地有 IndexedDB 缓存时，
- * 页面立即用缓存渲染（秒开），全量 API 对账放后台执行——initFromAPI 权威替换
- * 能修正刷新前流式断线留下的空洞/残影（增量补漏 after_sequence 拉不到已加载
- * 区间内的缺失消息）。对账无变化时对 UI 零影响。失败不再静默：缓存与 DB
- * 的分叉（空洞/残影）无人修正会永久留存——warn 后借既有 fetchMessages 全量
- * 重拉一次，重拉仍失败保留缓存现状待下次进入/WS 重连重试（fetchMessages
- * 自带失败日志）。流式进行中跳过——init 全量替换会清流式占位。
- */
-async function reconcileFromAPI(pipelineId: string, threadId: string): Promise<void> {
-  if (_reconcilingPipelines.has(pipelineId)) return
-  const store = usePipelineMessageStore.getState()
-  if (store.isStreaming(pipelineId)) return
-  _reconcilingPipelines.add(pipelineId)
-  const reconcileOnce = async (): Promise<void> => {
-    await store.fetchMessages(pipelineId, { threadId })
-    usePipelineMessageStore.setState((s) => ({
-      reconciledByPipeline: { ...s.reconciledByPipeline, [pipelineId]: true },
-    }))
-  }
-  try {
-    await reconcileOnce()
-  } catch (error) {
-    const err = error as { status?: number; code?: string; message?: string }
-    const errInfo = err?.status ?? err?.code ?? err?.message ?? String(error)
-    logger.warn(
-      '[pipelineMessageStore.reconcileFromAPI] 全量对账失败，强制重拉一次: pipelineId=%s err=%s',
-      pipelineId,
-      errInfo,
-    )
-    try {
-      await reconcileOnce()
-    } catch {
-      // 重拉仍失败：保留缓存现状，待下次进入/WS 重连重试（fetchMessages 已有失败日志）
-    }
-  } finally {
-    _reconcilingPipelines.delete(pipelineId)
-  }
-}
-
-/** IndexedDB rehydrate 完成信号（persist onFinishHydration 设置；刷新后首屏
- *  loadPipelineMessages 在 rehydrate 前到达时等待，否则本地缓存不可见 →
- *  auto 判定"未对账"全量 init，IndexedDB 缓存形同虚设） */
-let _hydrated = false
-const _hydrationWaiters: Array<() => void> = []
-const _markHydrated = () => {
-  _hydrated = true
-  for (const resolve of _hydrationWaiters.splice(0)) resolve()
-}
-/** 等待 persist rehydrate 完成（已完成立即返回；500ms 兜底防极端情况挂起） */
-function waitForMessageHydration(): Promise<void> {
-  if (_hydrated) return Promise.resolve()
-  return new Promise((resolve) => {
-    _hydrationWaiters.push(resolve)
-    // 兜底：rehydrate 未触发（存储异常等）也不阻塞加载，缓存恢复退化为全量 API
-    window.setTimeout(() => {
-      const idx = _hydrationWaiters.indexOf(resolve)
-      if (idx !== -1) _hydrationWaiters.splice(idx, 1)
-      resolve()
-    }, 500)
-  })
-}
-
-/** 管道元数据 */
-export interface PipelineMeta {
-  /** 管道唯一标识 */
-  pipelineId: string
-  /** 所属会话 ID */
-  sessionId: string
-  /** 管道层级：1=主管道，2=子管道，3=孙管道 */
-  level: 1 | 2 | 3
-  /** 关联的 Tab ID（主管道为 null） */
-  tabId: string | null
-  /** Agent 名称 */
-  agentName: string
-  /** 管道状态 */
-  status: 'idle' | 'running' | 'completed' | 'error'
-  /** 父管道 ID（主管道为 null） */
-  parentId: string | null
-  /** 未读消息计数 */
-  unreadCount: number
-}
-
-/** 单个管道的流式状态 */
-export interface StreamingStatus {
-  /** 是否正在流式传输 */
-  isStreaming: boolean
-  /** 正在流式传输的消息 ID */
-  messageId: string | null
-}
-
-/** Store 状态接口 */
-interface PipelineMessageState {
-  /** 一级索引：pipelineId → 消息列表 */
-  messagesByPipeline: Record<string, Message[]>
-  /** 管道元数据 */
-  pipelines: Record<string, PipelineMeta>
-  /** 管道归属映射：pipelineId → sessionId */
-  pipelineSessionMap: Record<string, string>
-  /** 流式状态 */
-  streamingState: Record<string, StreamingStatus>
-  /** 当前激活的管道 ID */
-  activePipelineId: string | null
-  /** 顶部游标：pipelineId → 已加载的最小 sequence（用于向上翻页） */
-  topCursorsByPipeline: Record<string, number>
-  /** 底部游标：pipelineId → 已确认的最大 sequence（用于断线补漏） */
-  bottomCursorsByPipeline: Record<string, number>
-  /** 是否还有更早的消息：pipelineId → boolean */
-  hasMoreOlderByPipeline: Record<string, boolean>
-  /** 是否正在加载更早的消息 */
-  isLoadingOlderByPipeline: Record<string, boolean>
-  /** 运行时标记：本次会话已与后端全量对账过的 pipeline（不持久化，rehydrate 后重置）。
-   *  防止流式断线残留的不可信 bottomCursor 导致刷新后只走增量补漏、已加载区间内空洞永远补不上。 */
-  reconciledByPipeline: Record<string, boolean>
-
-  /** 段索引：pipelineId → 段元数据清单（消息段模型：段 = 替换事件冻结的非启用
-   *  内容，[来源: docs/working/消息历史双能力方案_多代切换与压缩原文_20260923.md §2.1]）。
-   *  打开会话时拉一次清单（loadPipelineMessages），segment_activated 对账后刷新；
-   *  运行时态，不持久化。 */
-  spanIndex: Record<string, SegmentMeta[]>
-  /** 本地乐观段视图：pipelineId → ‹i/n› 切换当前查看的段（乐观换装标记；
-   *  segment_activated 对账成功后清除 = 回归服务端权威启用序列） */
-  segmentViewByPipeline: Record<string, { baseSeq: number; segmentId: string } | null>
-
-  /** 拉取段清单写入 spanIndex（打开会话时一次）。非核心面：失败降级为空清单
-   *  + warn 留痕（切换器隐藏），不影响消息主链路，不上抛。 */
-  fetchSegments: (pipelineId: string) => Promise<void>
-  /** 某锚点 base_seq 的段列表（多段同 base_seq 按 created_at 升序，代号 = 序数） */
-  getSegmentsAt: (pipelineId: string, baseSeq: number) => SegmentMeta[]
-  /** 乐观换装：用段成员自 base_seq 起点覆写本地消息视图（激活后缀语义 §2.5：
-   *  [base_seq..末尾] 整体呈现为段成员），并记录段视图标记 */
-  applySegmentView: (pipelineId: string, detail: SegmentDetail, sessionId: string) => void
-  /** 清除乐观段视图标记（segment_activated 对账成功后调用，消息已由 API 权威重建） */
-  clearSegmentView: (pipelineId: string) => void
-
-  /** 注册管道 */
-  registerPipeline: (meta: PipelineMeta) => void
-  /** 激活管道 */
-  activatePipeline: (pipelineId: string) => void
-
-  /** 添加消息到指定管道 */
-  addMessage: (pipelineId: string, message: Message) => void
-  /** 更新指定管道中的消息（部分更新） */
-  updateMessage: (pipelineId: string, messageId: string, partial: Partial<Message>) => void
-  /** 移除指定管道中的消息 */
-  removeMessage: (pipelineId: string, messageId: string) => void
-  /** 获取指定管道的消息列表 */
-  getMessages: (pipelineId: string) => Message[]
-
-  /** 认领 user 消息（[来源: docs/decisions/2026-08-22-streaming-protocol-rewrite.md]）：
-   *  按 cmid 找到乐观 user
-   *  消息 → 权威 record_id/seq 记入独立 recordId 字段（UI 寻址 id 永不变），
-   *  status='completed'。候选缺失（断线期间确认到达/刷新窗口）→ 以
-   *  cmid 为 id 插入权威 user 版——「发送后用户消息消失」结构性不可能。 */
-  claimUserMessage: (pipelineId: string, cmid: string, userRecord: {
-    id?: string
-    content?: unknown
-    sequence?: number
-    metadata?: Record<string, unknown> | null
-  }) => 'upgraded' | 'inserted' | 'skipped'
-
-  /** 无 cmid 注入消息（触发器/任务/HTTP，ADR-2026-08-26）补插 user 气泡：
-   *  按 id 幂等（重复事件不双插）；按 sequence 落位——保证触发器消息出现在
-   *  assistant 回复之前（与后端消息序一致）。 */
-  ensureInjectedUserMessage: (pipelineId: string, userRecord: {
-    id?: string
-    content?: unknown
-    sequence?: number
-    metadata?: Record<string, unknown> | null
-  }) => void
-
-  /** 确认主数组乐观 user（旧内核无 user_message 回传的兼容路径）：按 cmid 把
-   *  status='sending' 标记为 'completed'（后端已持久化；权威 id/seq 由对账补正）。
-   *  无候选 → skipped（不插不建——后端记录由对账拉取）。 */
-  confirmUserMessage: (pipelineId: string, cmid: string) => boolean
-
-  /** 获取指定管道中最后一条 user 消息（重新生成缺省目标） */
-  findLastUserMessageId: (pipelineId: string) => string | null
-  /** 乐观截断：保留到目标 user 消息（含）为止，其后消息全部移除（重新生成/回退/编辑重发本地即时反馈） */
-  truncateMessagesAfter: (pipelineId: string, userMessageId: string) => void
-
-  /** 开始流式传输 */
-  startStreaming: (pipelineId: string, messageId: string) => void
-  /** 停止流式传输 */
-  stopStreaming: (pipelineId: string) => void
-  /** 查询指定管道是否正在流式传输 */
-  isStreaming: (pipelineId: string) => boolean
-
-  /** 冷启动：从 API 写入最新消息并设置双游标 */
-  initFromAPI: (pipelineId: string, messages: Message[], hasMoreOlder?: boolean) => void
-  /** 向上翻页：将更早消息插入头部并更新 topCursor */
-  prependMessages: (pipelineId: string, messages: Message[], hasMoreOlder?: boolean) => void
-  /** 断线补漏：追加缺失消息到底部并更新 bottomCursor */
-  appendMessages: (pipelineId: string, messages: Message[]) => void
-  /** 获取指定管道的顶部游标 */
-  getTopCursor: (pipelineId: string) => number
-  /** 获取指定管道的底部游标 */
-  getBottomCursor: (pipelineId: string) => number
-  /** 判断指定管道是否已初始化 */
-  isInitialized: (pipelineId: string) => boolean
-  /** 判断指定管道是否还有更早的消息 */
-  hasMoreOlder: (pipelineId: string) => boolean
-
-  /** 直接从 API 加载指定管道的历史消息（底层，调用方应优先用 loadPipelineMessages） */
-  fetchMessages: (
-    pipelineId: string,
-    options?: { limit?: number; before_sequence?: number; after_sequence?: number; threadId?: string },
-  ) => Promise<void>
-  /** 加载管道消息的统一入口（收敛所有加载场景的流式保护、双游标决策）。 4 个加载场景（会话切换 / 子 Tab 切换 / 关 Tab 回主 / WS 重连补漏）都应调用本方法， */
-  loadPipelineMessages: (
-    pipelineId: string,
-    options: {
-      threadId: string
-      mode?: 'auto' | 'init' | 'backfill'
-      skipStreamingCheck?: boolean
-    },
-  ) => Promise<{ ok: boolean; error?: unknown }>
-
-  // Parts 统一修改方法
-
-  /** 追加一个新 Part 到指定消息 */
-  appendPart: (pipelineId: string, messageId: string, part: MessagePart) => void
-  /** 更新指定消息的某个 Part（按 partIndex 精确定位） */
-  updatePart: (pipelineId: string, messageId: string, partIndex: number, updates: Partial<MessagePart>) => void
-  /** 向指定 Part 追加文本内容（用于流式增量） */
-  appendToPart: (pipelineId: string, messageId: string, partIndex: number, content: string) => void
-  /** 结束消息流式状态：所有 Part.state = 'done', 消息 status = 'completed' */
-  finalizeMessage: (pipelineId: string, messageId: string) => void
-  /** 获取指定消息中最后一个指定类型的 Part 的 index */
-  findLastPartIndex: (pipelineId: string, messageId: string, type: MessagePart['type']) => number
-  /** 获取指定消息中 state='streaming' 的最后一个 Part 的 index */
-  findStreamingPartIndex: (pipelineId: string, messageId: string) => number
-  /** 获取指定消息中指定 callId 的 tool_call Part 的 index */
-  findToolCallPartIndex: (pipelineId: string, messageId: string, callId: string) => number
-}
+export type { PipelineMeta, StreamingStatus } from './pipelineMessageState'
+export { PIPELINE_MESSAGE_ACCOUNT_RESET }
 
 /** 统一管道消息 Store */
 export const usePipelineMessageStore = create<PipelineMessageState>()(
   persist((set, get) => ({
-  messagesByPipeline: {},
-  pipelines: {},
-  pipelineSessionMap: {},
-  streamingState: {},
-  activePipelineId: null,
-  topCursorsByPipeline: {},
-  bottomCursorsByPipeline: {},
-  hasMoreOlderByPipeline: {},
-  isLoadingOlderByPipeline: {},
-  reconciledByPipeline: {},
-  spanIndex: {},
-  segmentViewByPipeline: {},
+  ...PIPELINE_MESSAGE_ACCOUNT_RESET,
 
   /** 注册管道，建立 pipelineId 与元数据的映射 */
   registerPipeline: (meta: PipelineMeta) => {
@@ -416,6 +174,12 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
 
     if (act.kind === 'skip') return 'skipped'
 
+    // 认领成功 = 发送态落定点（2026-11-04 落定语义重定义）：三条调用路径
+    // （new_message 权威回传 / user_message_confirmed 早回执 / 队列消费
+    // consumed_messages）在此单点收敛，按 client_message_id 撤发送态——发送态
+    // 终点 = 气泡上屏。未知 cmid（注入消息等非本端发送）在 store 内幂等零动作。
+    useChatInputStore.getState().landSendByCmid(cmid)
+
     set((stateInner) => {
       const msgs = stateInner.messagesByPipeline[pipelineId] || []
       if (act.kind === 'upgrade') {
@@ -515,23 +279,6 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     })
   },
 
-  /** 确认主数组乐观 user（旧内核无 user_message 回传的兼容路径）。 */
-  confirmUserMessage: (pipelineId, cmid) => {
-    let hit = false
-    set((stateInner) => {
-      const msgs = stateInner.messagesByPipeline[pipelineId] || []
-      const idx = msgs.findIndex((m) => m.clientMessageId === cmid)
-      if (idx < 0 || msgs[idx].status === 'completed') return stateInner
-      hit = true
-      const next = [...msgs]
-      next[idx] = { ...next[idx], status: 'completed' }
-      return {
-        messagesByPipeline: { ...stateInner.messagesByPipeline, [pipelineId]: next },
-      }
-    })
-    return hit
-  },
-
   /** 更新指定管道中的消息（部分更新）。精确 ID 匹配：失配即
    * 记 error 并跳过——不做 role+sequence/指纹等模糊匹配（非唯一键，迟到事件
    * 会写错旧消息）。找不到目标说明事件与本地状态脱节，正确处置是等对账补正，
@@ -588,30 +335,47 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     })
   },
 
-  /** 获取指定管道中最后一条 user 消息 ID（重新生成缺省目标）。
-   *  tool 结果消息不参与：截断点只能是 user 消息边界（tool_calls/tool 配对完整性）。 */
-  findLastUserMessageId: (pipelineId: string) => {
-    const msgs = get().messagesByPipeline[pipelineId] || []
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      if (msgs[i].role === 'user') return msgs[i].id
-    }
-    return null
-  },
-
-  /** 乐观截断：保留到目标 user 消息（含）为止，其后消息整体移除。
-   *  重新生成/回退/编辑重发的本地即时反馈（服务端 regenerate 落库后由对账收敛）。
-   *  找不到目标 user 消息 → 幂等跳过。 */
-  truncateMessagesAfter: (pipelineId: string, userMessageId: string) => {
+  /** 权威截断（messages_truncated 事件，聊天消息流权威化设计真值不变量 3）：
+   *  按 sequence < truncateBeforeSeq 保留，其后（含无 seq 但位于截断点之后的
+   *  本地暂态）一并移除；updated_messages 按 seq 原地改写（编辑重发目标消息
+   *  权威全文）。幂等：重复事件零变化。挂起的流式态随截断清理（被截后缀的
+   *  流式占位不得残留生成态）。 */
+  applyTruncation: (pipelineId: string, truncateBeforeSeq: number, updated?: Array<{
+    sequence?: number
+    content?: unknown
+  }>) => {
     set((state) => {
-      const msgs = state.messagesByPipeline[pipelineId] || []
-      const idx = msgs.findIndex((m) => m.id === userMessageId)
-      if (idx < 0) return state
-      const kept = msgs.slice(0, idx + 1)
+      const msgs = state.messagesByPipeline[pipelineId]
+      if (!msgs) return state
+      // 无 seq 本地暂态：保留当且仅当它出现在首个被截消息（首个
+      // seq >= truncateBeforeSeq）之前——本地顺序是引擎序的投影，边界之后的
+      // 暂态（流式占位/未认领乐观消息）属于被截后缀。
+      const firstTruncatedIdx = msgs.findIndex(
+        (m) => m.sequence != null && m.sequence >= truncateBeforeSeq,
+      )
+      const kept = msgs.filter((m, i) => {
+        if (m.sequence != null) return m.sequence < truncateBeforeSeq
+        return firstTruncatedIdx < 0 ? true : i < firstTruncatedIdx
+      })
+      if (updated) {
+        for (const u of updated) {
+          if (typeof u.sequence !== 'number') continue
+          const idx = kept.findIndex((m) => m.sequence === u.sequence)
+          if (idx >= 0 && typeof u.content === 'string') {
+            kept[idx] = { ...kept[idx], content: u.content }
+          }
+        }
+      }
+      const streaming = state.streamingState[pipelineId]?.isStreaming
+        ? { ...state.streamingState }
+        : state.streamingState
+      if (streaming !== state.streamingState) delete streaming[pipelineId]
       return {
         messagesByPipeline: {
           ...state.messagesByPipeline,
           [pipelineId]: kept,
         },
+        streamingState: streaming,
       }
     })
   },
@@ -774,6 +538,69 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     return get().streamingState[pipelineId]?.isStreaming ?? false
   },
 
+  /** 标记/取消「压缩中」（compression_started/ended 事件驱动） */
+  setCompressing: (pipelineId: string, compressing: boolean) => {
+    if (!pipelineId) return
+    set((state) => {
+      if (!!state.compressingByPipeline[pipelineId] === compressing) return state
+      const next = { ...state.compressingByPipeline }
+      if (compressing) {
+        next[pipelineId] = true
+      } else {
+        delete next[pipelineId]
+      }
+      return { compressingByPipeline: next }
+    })
+  },
+
+  /** 查询「压缩中」标记 */
+  isCompressing: (pipelineId: string) => {
+    return get().compressingByPipeline[pipelineId] ?? false
+  },
+
+  /** 轮次收尾队列深度快照（pipeline_round_finished.queue_depth） */
+  setRoundQueueDepth: (pipelineId: string, depth: number) => {
+    if (!pipelineId) return
+    set((state) => ({
+      roundQueueDepthByPipeline: {
+        ...state.roundQueueDepthByPipeline,
+        [pipelineId]: depth > 0 ? depth : 0,
+      },
+    }))
+  },
+
+  /** 停止受理中标记：点停止即置位，run 级终止事件/新 stream_start 清除 */
+  setStopping: (pipelineId: string, stopping: boolean) => {
+    if (!pipelineId) return
+    set((state) => {
+      if (!!state.stoppingByPipeline[pipelineId] === stopping) return state
+      const next = { ...state.stoppingByPipeline }
+      if (stopping) {
+        next[pipelineId] = true
+      } else {
+        delete next[pipelineId]
+      }
+      return { stoppingByPipeline: next }
+    })
+  },
+
+  /** 标记/清除指定管道的消息加载失败态（X1-F1）。设置点=调用方通知策略
+   *  （sessionListStore 会话切换失败分支）；清除点统一收敛在 loadPipelineMessages
+   *  成功路径——重试成功 / 下次进入 / WS 重连对账成功共用，不另起定时器。 */
+  setLoadError: (pipelineId: string, failed: boolean) => {
+    if (!pipelineId) return
+    set((state) => {
+      if (!!state.loadErrorByPipeline[pipelineId] === failed) return state
+      const next = { ...state.loadErrorByPipeline }
+      if (failed) {
+        next[pipelineId] = true
+      } else {
+        delete next[pipelineId]
+      }
+      return { loadErrorByPipeline: next }
+    })
+  },
+
   /** 冷启动：从 API 写入最新消息并设置双游标 合并策略 — API 权威替换本地缓存；未被 API 覆盖的「飞行中」本页消息（乐观 user / 流式占位 / 刚完成回复）在新鲜度窗口内保留。 */
   initFromAPI: (pipelineId: string, messages: Message[], hasMoreOlder?: boolean) => {
     set((state) => {
@@ -874,7 +701,13 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       // 数据层保持原始消息、sequence 连续。
       const merged = mergeIncrementalApiWithLocal(sorted, existing)
       // 过滤空白 assistant 消息（无 content 无 parts 无 toolCalls），避免空气泡
-      const finalMerged = filterBlankMessages(merged)
+      const blankFiltered = filterBlankMessages(merged)
+      // 内存封顶（与 append 同窗口，仅极端增长兜底）：cap 与翻页闸解耦——
+      // 触发裁顶不再置 hasMoreOlder=false（2026-10-13 用户裁定：数据层截断
+      // + 关闸让长会话滚到顶看不到更早历史，内核侧全量完好）。翻页与否唯
+      // 一依据后端 has_more；cap 极端边界下继续翻页拉回的更早消息会被立即
+      // 裁掉、桶不增长，链式续载的"条数不增长不续载"守卫兜住空转。
+      const finalMerged = capMessagesForMemory(blankFiltered)
       const topCursor = finalMerged[0]?.sequence ?? 0
       return {
         messagesByPipeline: {
@@ -887,7 +720,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         },
         hasMoreOlderByPipeline: {
           ...state.hasMoreOlderByPipeline,
-          // 后端始终返回 has_more，前端直接使用
+          // 后端 has_more 唯一真值（cap 裁顶不再干预）
           [pipelineId]: hasMoreOlder ?? false,
         },
         isLoadingOlderByPipeline: {
@@ -953,7 +786,13 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
   /** 按 pipelineId 从 API 拉取消息（init/翻页/补漏三种游标模式） */
   fetchMessages: async (
     pipelineId: string,
-    options?: { limit?: number; before_sequence?: number; after_sequence?: number; threadId?: string },
+    options?: {
+      limit?: number
+      before_sequence?: number
+      after_sequence?: number
+      threadId?: string
+      includeFullToolResults?: boolean
+    },
   ) => {
     // 同类别新请求发起 = 旧请求作废：abort 在途旧请求并让出占位（同管道同
     // 类别任意时刻至多一个在途 fetch，取代即取消；跨类别不互取消）。
@@ -964,19 +803,18 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       previousController.abort()
       _fetchAbortControllers.delete(abortKey)
       // 被取消的「加载更早」立即让出 loading 标记（新请求若同为翻页，下方会重新置位）
-      set((state) => {
-        if (!state.isLoadingOlderByPipeline[pipelineId]) return state
-        return {
-          isLoadingOlderByPipeline: {
-            ...state.isLoadingOlderByPipeline,
-            [pipelineId]: false,
-          },
-        }
-      })
+      if (get().isLoadingOlderByPipeline[pipelineId]) {
+        set((s) => ({
+          isLoadingOlderByPipeline: { ...s.isLoadingOlderByPipeline, [pipelineId]: false },
+        }))
+      }
     }
 
     const controller = new AbortController()
     _fetchAbortControllers.set(abortKey, controller)
+
+    // 首屏全量（无游标）→ 置首载标记（消息区渲染骨架而非空态：空 ≠ 加载，OBS-R258-1）
+    const noCursor = options?.before_sequence === undefined && options?.after_sequence === undefined
 
     const fetchPromise = (async () => {
       // 加载更早消息时设置 loading 状态（显示加载指示器）
@@ -988,6 +826,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
           },
         }))
       }
+      if (noCursor) setInitialLoadingFlag(set, get, pipelineId, true)
       try {
         const limit = options?.limit ?? 50
         // 自动从 pipelineSessionMap 查找 sessionId 作为 threadId fallback
@@ -1007,6 +846,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
           before_sequence: options?.before_sequence,
           after_sequence: options?.after_sequence,
           pipelineRunId: pipelineId,
+          includeFullToolResults: options?.includeFullToolResults,
         })
 
         // 等待响应期间被同管道新请求 abort：本请求已作废，静默返回不写状态。
@@ -1068,24 +908,17 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         // 不在此处吞异常，否则所有调用方的 catch/then 分支永远拿不到错误。
         throw err
       } finally {
-        // 身份守卫：被取代的请求不清理取代者的令牌、不动其 loading 标记
-        // （被取消者的标记已在取代点复位）
+        // 身份守卫：被取代的请求不清理取代者的令牌、不动其 loading 标记（被取消者
+        // 已在取代点复位）。落定双清（成功/失败皆清——「加载更早」残留卡翻页；
+        // 首载残留卡骨架，失败态走 loadErrorByPipeline）
         if (_fetchAbortControllers.get(abortKey) === controller) {
           _fetchAbortControllers.delete(pipelineId)
-          // 重置「加载更早」的 loading 标记，避免残留 true 时用户滚动到顶部后「加载更多」完全失效。
-          if (options?.before_sequence !== undefined) {
-            set((state) => {
-              if (state.isLoadingOlderByPipeline[pipelineId]) {
-                return {
-                  isLoadingOlderByPipeline: {
-                    ...state.isLoadingOlderByPipeline,
-                    [pipelineId]: false,
-                  },
-                }
-              }
-              return state
+          if (options?.before_sequence !== undefined && get().isLoadingOlderByPipeline[pipelineId]) {
+            set({
+              isLoadingOlderByPipeline: { ...get().isLoadingOlderByPipeline, [pipelineId]: false },
             })
           }
+          if (noCursor) setInitialLoadingFlag(set, get, pipelineId, false)
         }
       }
     })()
@@ -1108,9 +941,14 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       return { ok: true }
     }
 
-    // 段清单随会话/管道打开拉一次（spanIndex 无该管道条目时；非阻塞、不参与
-    // 游标与模式决策，失败降级见 fetchSegments）
-    if (!state.spanIndex[pipelineId]) void state.fetchSegments(pipelineId)
+    // 段清单随会话/管道打开刷新（非仅首次）：新段由重新生成/回退/编辑重发产生
+    // （内核把这些动作的被换后缀冻结为段），而这些动作都在跑一轮对话——轮次结束
+    // 事件会触发清单刷新（useRealtimeEvents）。此处若只在「无条目时」拉一次，
+    // 打开会话时拿到空清单（[]）后该条目永久存在，「有条目即跳过」的判定会把
+    // 刷新永久挡住，‹i/n› 切换器在会话生命周期内永远不出现（用户实证：重试
+    // 多次仍找不到分支切换按钮）。非阻塞、不参与游标与模式决策，失败降级见
+    // fetchSegments。
+    void state.fetchSegments(pipelineId)
 
     // 模式决策：
     // - mode='init'：页面刷新 / 显式强制 → 全量 initFromAPI，丢弃本地，以 API 权威重建
@@ -1139,6 +977,11 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         await state.fetchMessages(pipelineId, { threadId, after_sequence: bottomCursor })
       }
       // mode='auto' 且已对账 或 缓存为空 → 不做 API 调用，直接用缓存
+      // 加载成功即清该管道失败态（X1-F1）：重试/下次进入/WS 重连对账成功的
+      // 共用清除点，失败态随现有加载流自然消失，不另起定时器。
+      if (get().loadErrorByPipeline[pipelineId]) {
+        get().setLoadError(pipelineId, false)
+      }
       return { ok: true }
     } catch (error) {
       return { ok: false, error }
@@ -1272,30 +1115,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
     storage: indexedDbStorage,
     // 仅持久化核心数据，排除运行时状态。
     // 先按条数 + 总体积 LRU 裁剪出保留的管道集合，再统一应用于消息/元数据/游标，保证一致性。
-    partialize: (state) => {
-      const keptMessages = trimMessagesForPersistence(
-        state.messagesByPipeline,
-        state.activePipelineId,
-      )
-      const keptPids = new Set(Object.keys(keptMessages))
-      const pickByKey = <V>(rec: Record<string, V>): Record<string, V> => {
-        if (!rec) return {}
-        const out: Record<string, V> = {}
-        for (const [k, v] of Object.entries(rec)) {
-          if (keptPids.has(k)) out[k] = v
-        }
-        return out
-      }
-      return {
-        messagesByPipeline: keptMessages,
-        pipelines: pickByKey(state.pipelines),
-        pipelineSessionMap: pickByKey(state.pipelineSessionMap),
-        activePipelineId: state.activePipelineId,
-        topCursorsByPipeline: pickByKey(state.topCursorsByPipeline),
-        bottomCursorsByPipeline: pickByKey(state.bottomCursorsByPipeline),
-        hasMoreOlderByPipeline: pickByKey(state.hasMoreOlderByPipeline),
-      }
-    },
+    partialize: buildPersistedSnapshot,
     // 恢复时合并默认状态（运行时状态用默认值）
     merge: (persisted, current) => {
       const p = (persisted as Partial<PipelineMessageState>) || {}
@@ -1316,6 +1136,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
         messagesByPipeline: cleanedMessages,
         // 运行时状态强制重置（不信任持久化值）
         streamingState: {},
+        compressingByPipeline: {},
         isLoadingOlderByPipeline: {},
         // 重置对账标记：应用重启后持久化的 bottomCursor 不可信（可能来自流式断线时的乐观值），
         // 所有 pipeline 必须重新全量对账，避免已加载区间内的空洞无法通过增量补漏修复。
@@ -1334,7 +1155,7 @@ export const usePipelineMessageStore = create<PipelineMessageState>()(
       }
       // 唤醒 waitForMessageHydration 的等待者（rehydrate 完成 = 缓存可见，
       // loadPipelineMessages 的 auto 决策不再误判）
-      _markHydrated()
+      markMessageHydrated()
     },
   },
 ))

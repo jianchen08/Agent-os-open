@@ -1,0 +1,51 @@
+# =============================================================================
+# 多端统一命名空间 —— 导出声明（D19 语义平移）
+#
+# 契约：ADR 2026-10-18-unified-namespace-fs-mount-and-mcp-transfer D19
+# 「allowed_roots 语义平移」：注册表 exec_channel.allowed_roots（领地声明）
+# 平移为**导出声明**（每端 serve 哪些目录）——注册表物理零改动，仍是拓扑
+# 单源；消费方从"运行时解析裁决"改为"挂载配置生成"（本文件即生成挂载
+# unit/脚本时的读面）。路径统一承载 = OS 文件系统挂载（D14），本文件不参与
+# 任何运行时解析。
+#
+# 设备名注册校验：对 deploy/multi_device/reserved_names.txt 逐名比对
+# （D16 保留名避碰，一句话机制）。
+# =============================================================================
+
+schema: agentos.multi_device.export_declarations/v1
+# rclone 版本钉选（见 README §版本钉选）：三端统一 v1.75.2
+rclone_pinned_version: "v1.75.2"
+
+devices:
+  # ---- 云端 Linux（162.14.69.153，7x24 内核端）----
+  # 设备名 = platform.node() 回退口径（.env 未配 AGENTOS_DEVICE_ID，2026-10-18 探明）
+  VM-0-16-ubuntu:
+    role: cloud-kernel
+    serve: openssh-sftp            # sshd 内建 SFTP，零安装（2026-10-18 探明：sshd active + sftp 子系统在）
+    sftp_root: /home/ubuntu        # SFTP 会话根（子系统默认按系统根暴露时此值仅作领地对照）
+    exports:                       # = 注册表 exec_channel.allowed_roots 同源语义
+      - /home/ubuntu/agentos       # 内核与插件领地
+      - /data                      # 数据面
+    mount_options: rw              # 桌面挂云端默认读写；只读快照轴见 README §挂载选项（D20）
+
+  # ---- 桌面 Windows（DESKTOP-41ST1LM，主力端）----
+  DESKTOP-41ST1LM:
+    role: desktop-primary
+    serve: openssh-sftp-over-reverse-tunnel
+    # 云→桌方向：桌面 sshd(:22) ← autossh 反向隧道 → 云 127.0.0.1:2222
+    # （unit 模板 deploy/remote/agentos-fmin-tunnel.service；2026-10-18 探明桌面
+    #  sshd 未装、隧道未立——激活前置见 README §激活状态）
+    sftp_root: "<待桌面 sshd 装后实测>"   # Windows OpenSSH sftp 路径形态随 sshd 实现而异
+    exports:                              # 与 deploy/remote/local_mcp_server 先例 allowed_roots 同源
+      - D:/myproject
+      - C:/agentos-mnt/local
+    mount_options: rw                     # 云侧挂桌面领地（转读写按需；先例模板为 ro，转换即改选项）
+
+  # ---- Android/MuMu（mumu-emulator-01，proot 端）----
+  # 导出/绑定实施待后续刀（README §proot 骨架先立）：proot 内 rclone serve sftp
+  # 暴露 files/user_root 工作空间；proot 外进程域不可达（D17 诚实标注）。
+  # mumu-emulator-01:
+  #   role: android-proot
+  #   serve: rclone-sftp-in-proot
+  #   exports:
+  #     - <proot 内工作空间路径>

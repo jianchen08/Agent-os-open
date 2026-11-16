@@ -77,14 +77,20 @@ def write_member(
     manifest_id: str,
     *,
     member_name: str | None = None,
+    version: str | None = None,
 ) -> Path:
-    """在假 shared 树下写入一个合成成员目录（plugin.json + plugin.py + server.py）。"""
+    """在假 shared 树下写入一个合成成员目录（plugin.json + plugin.py + server.py）。
+
+    version：manifest 版本（BuiltinFirst 双根仲裁——ADR 2026-09-20——用户副本
+    须严格大于内置副本才接管；缺省不写版本字段）。"""
     member_dir = shared_root / group_rel / dir_name
     member_dir.mkdir(parents=True, exist_ok=True)
-    (member_dir / "plugin.json").write_text(
-        json.dumps({"id": manifest_id, "host_type": "sidecar", "entry": "python server.py"}),
-        encoding="utf-8",
-    )
+    manifest: dict[str, object] = {
+        "id": manifest_id, "host_type": "sidecar", "entry": "python server.py"
+    }
+    if version is not None:
+        manifest["version"] = version
+    (member_dir / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
     name = member_name if member_name is not None else dir_name
     (member_dir / "plugin.py").write_text(f'MEMBER_NAME = "{name}"\n', encoding="utf-8")
     (member_dir / "server.py").write_text(_MEMBER_SERVER_TEMPLATE.format(plugin_name=name), encoding="utf-8")
@@ -118,8 +124,14 @@ def isolated_user_plugins_root(tmp_path_factory: pytest.TempPathFactory, monkeyp
 def make_member(shared_tree: Path) -> Callable[..., Path]:
     """向假 shared 树追加合成成员的工厂（返回成员目录）。"""
 
-    def _make(group_rel: str, dir_name: str, manifest_id: str, *, member_name: str | None = None) -> Path:
-        return write_member(shared_tree, group_rel, dir_name, manifest_id, member_name=member_name)
+    def _make(
+        group_rel: str, dir_name: str, manifest_id: str, *,
+        member_name: str | None = None, version: str | None = None,
+    ) -> Path:
+        return write_member(
+            shared_tree, group_rel, dir_name, manifest_id,
+            member_name=member_name, version=version,
+        )
 
     return _make
 
@@ -137,7 +149,13 @@ def user_plugins_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def make_user_member(user_plugins_tree: Path) -> Callable[..., Path]:
     """向合成用户插件根投放成员的工厂（形同 ``make_member``）。"""
 
-    def _make(group_rel: str, dir_name: str, manifest_id: str, *, member_name: str | None = None) -> Path:
-        return write_member(user_plugins_tree, group_rel, dir_name, manifest_id, member_name=member_name)
+    def _make(
+        group_rel: str, dir_name: str, manifest_id: str, *,
+        member_name: str | None = None, version: str | None = None,
+    ) -> Path:
+        return write_member(
+            user_plugins_tree, group_rel, dir_name, manifest_id,
+            member_name=member_name, version=version,
+        )
 
     return _make

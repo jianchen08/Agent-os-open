@@ -1,6 +1,6 @@
 ---
 name: 创建工具
-description: 创建或修改工具时加载。0.2 插件化工具创建规范：TDD 流程、plugins/shared/tools 布局、plugin.json 工具声明（input_schema/output_schema/render）、tool_ids 登记、热发现行为。
+description: 创建或修改工具时加载。0.2 插件化工具创建规范：TDD 流程、plugins/shared 平铺布局、plugin.json 工具声明（input_schema/output_schema/render）、tool_ids 登记、热发现行为。
 ---
 
 # 创建工具
@@ -11,16 +11,16 @@ description: 创建或修改工具时加载。0.2 插件化工具创建规范：
 
 ### 1. 需求分析
 - 明确工具的名称（tool_id，snake_case）、描述、输入输出接口、使用场景
-- 先查 `plugins/shared/tools/` 现有工具：能复用/扩展现有工具时禁止新建
+- 先查 `plugins/shared/` 现有工具：能复用/扩展现有工具时禁止新建
 
 ### 2. 编写测试（Red 阶段）
-- 测试写到 `plugins/shared/tools/{tool_id}/test_{tool_id}.py`（与实现同层）
+- 测试写到 `plugins/shared/{tool_id}/test_{tool_id}.py`（与实现同层）
 - 覆盖：核心功能、边界情况、错误处理
 - 测试中引用尚未实现的工具实现，运行确认失败（Red）
 
 ### 3. 生成工具代码（Green 阶段）
-- 实现写到 `plugins/shared/tools/{tool_id}/`，写最少的代码让测试通过
-- 运行测试确认通过（Green）：`pytest plugins/shared/tools/{tool_id}/`
+- 实现写到 `plugins/shared/{tool_id}/`，写最少的代码让测试通过
+- 运行测试确认通过（Green）：`pytest plugins/shared/{tool_id}/`
 
 ### 4. 重构优化（Refactor 阶段）
 - 测试通过前提下优化代码，运行测试确认无回归
@@ -31,10 +31,10 @@ description: 创建或修改工具时加载。0.2 插件化工具创建规范：
 
 ## plugin.json 工具声明（0.2 契约）
 
-目录布局（参照现有插件 `plugins/shared/tools/bash/`、`download/`）：
+目录布局（参照现有插件 `plugins/shared/bash/`、`web_ext/`（拍平布局，ADR 2026-10-13））：
 
 ```
-plugins/shared/tools/{tool_id}/
+plugins/shared/{tool_id}/
 ├── plugin.json      # 清单：声明即注册
 ├── server.py        # 入口（entry: "python server.py"）
 ├── tool.py          # 工具实现
@@ -66,8 +66,8 @@ plugins/shared/tools/{tool_id}/
 ## 验证清单
 
 创建工具后逐项核对：
-- [ ] `plugins/shared/tools/{tool_id}/plugin.json` 存在，capabilities.tools 声明含 output_schema + render
-- [ ] `pytest plugins/shared/tools/{tool_id}/` 通过（含 Red 阶段写下的用例）
+- [ ] `plugins/shared/{tool_id}/plugin.json` 存在，capabilities.tools 声明含 output_schema + render
+- [ ] `pytest plugins/shared/{tool_id}/` 通过（含 Red 阶段写下的用例）
 - [ ] tool_id 已加入目标 agent 的 tool_ids 白名单
 - [ ] 权限 permissions 最小授权（不写 `"*"` 除非确有必要）
-- [ ] 触碰即清：新代码带测试，不动 mypy/覆盖率基线（见 AGENTS.md 治理债条款）
+- [ ] 触碰即清（改动触碰某模块时同刀清该模块治理债）：新代码带测试，不动 mypy/覆盖率基线（细见本仓 AGENTS.md「约定」节）

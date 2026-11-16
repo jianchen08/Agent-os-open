@@ -7,7 +7,7 @@
  * @module ChartWidget
  */
 
-import React, { useMemo } from 'react'
+import React, { Fragment, useMemo } from 'react'
 import { useElementVisible } from '@/hooks/useElementVisible'
 import { useDataWidget, DataWidgetStatus  } from '@/services/schema/dataWidget'
 import { WidgetEmptyState } from './WidgetEmptyState'
@@ -50,6 +50,8 @@ interface ChartConfig {
   showLegend?: boolean
   /** 是否显示 tooltip */
   showTooltip?: boolean
+  /** 是否显示数值标注（柱顶/数据点的压缩数值，默认关） */
+  showDataLabels?: boolean
   /** 宽度 */
   width?: number | string
   /** 高度 */
@@ -108,9 +110,44 @@ function extractConfig(props: Record<string, unknown>): ChartConfig {
     title: props.title as string | undefined,
     showLegend: (props.showLegend as boolean) ?? true,
     showTooltip: (props.showTooltip as boolean) ?? true,
+    showDataLabels: (props.showDataLabels as boolean) ?? false,
     width: (props.width as number | string) ?? '100%',
     height: (props.height as number | string) ?? 280,
   }
+}
+
+/** 数据标注字号 */
+const DATA_LABEL_FONT_SIZE = 9
+
+/**
+ * 数值压缩格式（数值标注用）：≥1 亿 → 亿（1 位小数）；≥1 万 → 万（1 位小数）；
+ * 其余四舍五入取整。裸数字过宽必互撞（token 量级实测千万级）。
+ */
+export function formatDataLabel(value: number): string {
+  const abs = Math.abs(value)
+  if (abs >= 1e8) return `${(value / 1e8).toFixed(1)}亿`
+  if (abs >= 1e4) return `${(value / 1e4).toFixed(1)}万`
+  return String(Math.round(value))
+}
+
+/** 估算标签渲染宽度（px）：CJK 等全宽字符按字号计，ASCII 窄字符按 0.6 倍计 */
+function estimateLabelWidth(text: string): number {
+  let width = 0
+  for (const ch of text) {
+    width += ch.charCodeAt(0) > 0xff ? DATA_LABEL_FONT_SIZE : DATA_LABEL_FONT_SIZE * 0.6
+  }
+  return width
+}
+
+/**
+ * 依槽位宽度（相邻标签锚点横向间距）选标签排布角：水平放得下用水平，
+ * 否则 -45° 斜排，再窄竖排（-90°）——数值标注以互不压为验收。
+ */
+function dataLabelAngle(text: string, slot: number): number {
+  const width = estimateLabelWidth(text)
+  if (slot >= width + 2) return 0
+  if (slot >= (width + DATA_LABEL_FONT_SIZE) / Math.SQRT2 + 2) return -45
+  return -90
 }
 
 /**
@@ -285,6 +322,7 @@ function LineAreaChart({
   const points = useMemo(() => {
     return data.datasets.map((ds) => {
       const pts = ds.data.map((v, i) => ({
+        v,
         x:
           padding.left +
           (data.labels.length > 1
@@ -362,6 +400,19 @@ function LineAreaChart({
                 fill={dataset.color ?? PALETTE[di]}
               />
             ))}
+            {config.showDataLabels &&
+              pts.map((p, pi) => (
+                <text
+                  key={`label-${pi}`}
+                  x={p.x}
+                  y={p.y - 6}
+                  className="fill-muted-foreground"
+                  fontSize={DATA_LABEL_FONT_SIZE}
+                  textAnchor="middle"
+                >
+                  {formatDataLabel(p.v)}
+                </text>
+              ))}
           </g>
         )
       })}
@@ -387,6 +438,8 @@ function BarChart({
     data.datasets.length > 1
       ? barGroupWidth / data.datasets.length - 2
       : barGroupWidth * 0.6
+  /** 相邻柱锚点的横向间距——数值标签排布角判定的槽位宽度 */
+  const barSlot = barGroupWidth / data.datasets.length
 
   return (
     <svg viewBox={`0 0 ${chartW} ${height}`} className="h-full w-full">
@@ -412,16 +465,34 @@ function BarChart({
                   ? (barGroupWidth / data.datasets.length) * di + 1
                   : barGroupWidth * 0.2)
               const y = padding.top + chartH - barH
+              const barW = Math.max(barWidth, 4)
+              const labelX = x + barW / 2
+              const labelY = y - 3
+              const labelText = formatDataLabel(value)
+              const angle = dataLabelAngle(labelText, barSlot)
               return (
-                <rect
-                  key={di}
-                  x={x}
-                  y={y}
-                  width={Math.max(barWidth, 4)}
-                  height={Math.max(barH, 0)}
-                  fill={ds.color ?? PALETTE[di]}
-                  rx={2}
-                />
+                <Fragment key={di}>
+                  <rect
+                    x={x}
+                    y={y}
+                    width={barW}
+                    height={Math.max(barH, 0)}
+                    fill={ds.color ?? PALETTE[di]}
+                    rx={2}
+                  />
+                  {config.showDataLabels && (
+                    <text
+                      x={labelX}
+                      y={labelY}
+                      className="fill-muted-foreground"
+                      fontSize={DATA_LABEL_FONT_SIZE}
+                      textAnchor="middle"
+                      transform={angle !== 0 ? `rotate(${angle}, ${labelX}, ${labelY})` : undefined}
+                    >
+                      {labelText}
+                    </text>
+                  )}
+                </Fragment>
               )
             })}
             <text
@@ -498,7 +569,7 @@ function PieChart({
             key={i}
             d={slice.path}
             fill={slice.color}
-            stroke="var(--background, #fff)"
+            stroke="var(--background)"
             strokeWidth={1}
           />
         ))}

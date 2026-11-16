@@ -6,8 +6,8 @@
 - decode_output_line / decode_output_text：UTF-8 严格直通、null 字节
   剔除、GBK（CMD 输出）解码、UTF-8+surrogateescape（WSL 经 cmd 污染的
   混合字节）、Windows 代码页轮试、UTF-8+replace 兜底；
-- safe_cmd_encode：系统编码可表示时直通、不可表示字符安全替换、未知
-  编码名（LookupError）回退原文。
+- safe_cmd_encode（单源在 shell_route.py，普查 ⚠️-6 随刀迁移）：系统编码
+  可表示时直通、不可表示字符安全替换、未知编码名（LookupError）回退原文。
 
 解码路径依赖系统代码页/平台，用 monkeypatch 固定 get_system_encoding
 与 platform.system，保证跨平台确定性（不 mock 外部服务）。
@@ -19,8 +19,10 @@ import locale
 
 import pytest
 
-import encoding as encoding_mod
-from encoding import EncodingHandler
+import agentos_plugin_sdk.process_runtime.encoding as encoding_mod
+from agentos_plugin_sdk.process_runtime import EncodingHandler
+
+import agentos_plugin_sdk.process_runtime.shell_route as shell_route
 
 pytestmark = pytest.mark.unit
 
@@ -110,12 +112,12 @@ class TestSafeCmdEncode:
     def test_representable_text_unchanged(self, monkeypatch) -> None:
         monkeypatch.setattr(locale, "getpreferredencoding", lambda: "utf-8")
         text = "echo 你好 world"
-        assert EncodingHandler.safe_cmd_encode(text) == text
+        assert shell_route.safe_cmd_encode(text) == text
 
     def test_unrepresentable_chars_replaced_for_gbk(self, monkeypatch) -> None:
         # CMD 代码页 cp936 无法表示 emoji → 替换为 ?，命令骨架保留
         monkeypatch.setattr(locale, "getpreferredencoding", lambda: "cp936")
-        result = EncodingHandler.safe_cmd_encode("echo \U0001F600 done")
+        result = shell_route.safe_cmd_encode("echo \U0001F600 done")
         assert "\U0001F600" not in result
         assert result.startswith("echo")
         assert result.endswith("done")
@@ -124,4 +126,4 @@ class TestSafeCmdEncode:
         # LookupError（编码名不存在）→ 无法替换，返回原文
         monkeypatch.setattr(locale, "getpreferredencoding", lambda: "cp99999")
         text = "echo 测试"
-        assert EncodingHandler.safe_cmd_encode(text) == text
+        assert shell_route.safe_cmd_encode(text) == text

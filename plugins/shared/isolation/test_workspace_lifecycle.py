@@ -1,0 +1,598 @@
+# @feature: FP-0.2.〇 管道引擎 | @ci: none-local
+"""isolation workspace_lifecycle.py 工作空间生命周期测试（A5.3 补）。
+
+覆盖：
+1. init_container_workspace：复制源 + git init / 已存在复用 / 失败抛错；
+2. on_task_start：复用已有 meta / 子任务共享父空间 / 根任务分发 + skills 复制；
+3. _start_root_task：inherit 复用 / plain 直接目录 / 无显式 workspace 降级 plain /
+   非 git 项目根降级 plain / worktree 建立全流程；
+4. _persist_ws_meta / restore_ws_meta。
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+_PLUGIN_DIR = Path(__file__).resolve().parent  # plugins/shared/isolation/
+_SHARED_DIR = _PLUGIN_DIR.parent  # plugins/shared/
+_TASK_EVALUATE_DIR = _SHARED_DIR / "task_evaluate"  # worktree_merge（合并门控机制）
+for _d in (_PLUGIN_DIR, _SHARED_DIR, _TASK_EVALUATE_DIR):
+    if str(_d) not in sys.path:
+        sys.path.insert(0, str(_d))
+
+
+def _load_mod() -> Any:
+    mod_name = "isolation_workspace_lifecycle_test"
+    if mod_name in sys.modules:
+        del sys.modules[mod_name]
+    spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_DIR / "workspace_lifecycle.py")
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_MOD = _load_mod()
+WorkspaceLifecycleManager = _MOD.WorkspaceLifecycleManager
+
+
+class _FakeTask:
+    def __init__(self, task_id: str, parent_task_id: str | None = None, metadata: dict | None = None):
+        self.id = task_id
+        self.parent_task_id = parent_task_id
+        self.metadata = metadata or {}
+
+
+class _FakeTree:
+    """task_tree 假实现:内存任务表 + save_task 记入 metadata。"""
+
+    def __init__(self, tasks: dict[str, _FakeTask] | None = None):
+        self._tasks = tasks or {}
+        self.saved: list[tuple[str, dict]] = []
+
+    def get_task(self, task_id: str) -> _FakeTask | None:
+        return self._tasks.get(task_id)
+
+    async def save_task(self, task: _FakeTask) -> None:
+        self.saved.append((task.id, dict(task.metadata)))
+
+
+def _make_manager(
+    tmp_path: Path,
+    ws_root: str | Path,
+    tasks: dict[str, _FakeTask] | None = None,
+    meta_store: dict | None = None,
+    config: dict | None = None,
+    mode_skill_sources: list[Path] | None = None,
+) -> WorkspaceLifecycleManager:  # type: ignore[valid-type]  # importlib 动态加载的类别名不可作注解
+    cfg = {"workspace": {"default_mode": "worktree", "root": str(ws_root)}}
+    if config:
+        cfg["workspace"].update(config)
+    return WorkspaceLifecycleManager(
+        resource_merge=None,
+        config=cfg,
+        task_tree=_FakeTree(tasks),
+        ws_meta_store=meta_store or {},
+        base_path=str(tmp_path),
+        # 默认钉空模式包源 = 仅仓根单源（既有行为基线，不依赖真实仓内模式
+        # 包布局）；包源并集/优先序由 TestSkillsCopy 显式注入覆盖。
+        mode_skill_sources=[] if mode_skill_sources is None else mode_skill_sources,
+    )
+
+
+def _git_init(repo: Path, branch: str = "main") -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    import subprocess
+
+    subprocess.run(["git", "init", "-b", branch, str(repo)], check=True, capture_output=True, text=True)
+    # CI runner 无全局 git 身份，commit 会以 128 失败——repo 级补身份（与
+    # 生产 _ensure_git_user 同口径）
+    subprocess.run(["git", "config", "user.name", "Agent OS"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "agent@agent-os.local"], cwd=repo, check=True, capture_output=True, text=True
+    )
+    (repo / "README.md").write_text("proj", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+
+
+class TestOnTaskStart:
+    def test_reuses_existing_meta(self, tmp_path: Path) -> None:
+        ws = tmp_path / "existing_ws"
+        ws.mkdir()
+        meta_store = {"t1": {"mode": "shared", "path": str(ws)}}
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot", meta_store=meta_store)
+        meta = m.on_task_start("t1", "unused", {"is_root": False})
+        assert meta["path"] == str(ws)
+
+    def test_meta_path_missing_recreates(self, tmp_path: Path) -> None:
+        meta_store = {"t1": {"mode": "shared", "path": str(tmp_path / "gone")}}
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot", meta_store=meta_store, tasks={})
+        meta = m.on_task_start("t1", "ws", {"is_root": True})
+        assert meta["path"]  # 重新创建（plain 空目录分支）
+        assert m._ws_meta_store["t1"]["path"] == meta["path"]
+
+
+class TestSubtask:
+    def test_plain_mode_shares_host_dir(self, tmp_path: Path) -> None:
+        host_ws = tmp_path / "host_ws"
+        host_ws.mkdir()
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
+        meta = m._start_subtask("sub1", str(host_ws), {"workspace_mode": "plain", "_has_explicit_workspace": True})
+        assert meta["mode"] == "shared"
+        assert meta["path"] == str(host_ws)
+
+    def test_worktree_mode_shares_parent_path(self, tmp_path: Path) -> None:
+        parent_ws = tmp_path / "parent_ws"
+        parent_ws.mkdir()
+        tree = _FakeTree({"sub1": _FakeTask("sub1", parent_task_id="p1")})
+        meta_store = {"p1": {"path": str(parent_ws), "project_root": str(parent_ws)}}
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot", tasks=tree._tasks, meta_store=meta_store)
+        meta = m._start_subtask("sub1", "fallback", {"workspace_mode": "worktree"})
+        assert meta["mode"] == "shared"
+        assert meta["path"] == str(parent_ws)
+        assert meta["project_root"] == str(parent_ws)
+
+    def test_explicit_worktree_builds_isolation_copy(self, tmp_path: Path) -> None:
+        """显式 workspace（挂项目）的 worktree 子任务：在源目录（项目文件夹）
+        上建隔离 worktree，不继承父工作空间（2026-08-30 修复：项目挂靠曾被
+        子任务继承父逻辑吞掉，任务跑进会话目录）。"""
+        source = tmp_path / "proj"
+        _git_init(source)
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
+        meta = m._start_subtask(
+            "sub1",
+            str(source),
+            {"workspace_mode": "worktree", "_has_explicit_workspace": True},
+        )
+        assert meta["mode"] == "worktree"
+        assert meta["project_root"] == str(source)
+        assert meta["branch"] == "task/sub1"
+        assert Path(meta["path"]).is_dir()
+        assert meta["path"] != str(source)
+
+    def test_inherited_parent_ws_meta_preferred(self, tmp_path: Path) -> None:
+        """出生契约继承（lineage.parent_ws_meta）优先：聚合查找缺席也能共享父空间。
+
+        父管道运行中 registry 行尚未建立、聚合读不可见（时序窗口）曾致同会话
+        子任务工作空间漂移——出生契约坐标是发起时写全的权威快照。
+        """
+        inherited_ws = tmp_path / "session_ws"
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot", tasks={}, meta_store={})
+        meta = m._start_subtask(
+            "sub1",
+            "default_root_dir",
+            {
+                "workspace_mode": "",
+                "_inherited_parent_ws_meta": {
+                    "mode": "plain",
+                    "path": str(inherited_ws),
+                    "session_id": "thread-abc",
+                },
+            },
+        )
+        assert meta["mode"] == "shared"
+        assert meta["path"] == str(inherited_ws)
+        assert meta["project_root"] == ""
+        assert meta["parent_workspace"] == "default_root_dir"
+        assert m._ws_meta_store["sub1"]["path"] == str(inherited_ws)
+
+    def test_inherited_parent_ws_meta_carries_project_root(self, tmp_path: Path) -> None:
+        """继承坐标带 project_root（worktree 父任务）→ 透传给子任务 ws_meta。"""
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot", tasks={}, meta_store={})
+        meta = m._start_subtask(
+            "sub1",
+            "default_root_dir",
+            {
+                "workspace_mode": "worktree",
+                "_inherited_parent_ws_meta": {
+                    "mode": "worktree",
+                    "path": str(tmp_path / "parent_wt"),
+                    "project_root": str(tmp_path / "proj"),
+                },
+            },
+        )
+        assert meta["path"] == str(tmp_path / "parent_wt")
+        assert meta["project_root"] == str(tmp_path / "proj")
+
+    def test_no_coordinates_raises_without_fallback(self, tmp_path: Path) -> None:
+        """出生契约与父链聚合双缺 → 显式报错，拒绝静默回退独立目录。"""
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot", tasks={}, meta_store={})
+        with pytest.raises(RuntimeError, match="父链工作空间解析失败"):
+            m._start_subtask("sub1", "default_root_dir", {"workspace_mode": ""})
+
+
+class TestRootTask:
+    def test_inherit_workspace(self, tmp_path: Path) -> None:
+        ws = tmp_path / "inherit_ws"
+        ws.mkdir()
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
+        task_data = {
+            "_inherit_workspace_resolved": True,
+            "_source_ws_meta": {"mode": "worktree", "branch": "task/old", "project_root": str(ws)},
+        }
+        meta = m._start_root_task("r1", str(ws), task_data)
+        assert meta["mode"] == "worktree"
+        assert meta["branch"] == "task/old"
+        assert meta["path"] == str(ws)
+
+    def test_plain_mode_direct_directory(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws_plain"
+        ws.mkdir()
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
+        meta = m._start_root_task("r1", str(ws), {"workspace_mode": "plain"})
+        assert meta["mode"] == "plain"
+        assert meta["path"] == str(ws)
+
+    def test_plain_with_uncreated_path_creates_dir(self, tmp_path: Path) -> None:
+        """plain 收到未建路径（上游解析的「工作区根/{task_id}」）→ 服务负责创建目录。"""
+        ws = tmp_path / "wsroot" / "task_plain_new"
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
+        meta = m._start_root_task("task_plain_new", str(ws), {"workspace_mode": "plain"})
+        assert meta["mode"] == "plain"
+        assert meta["path"] == str(ws)
+        assert ws.exists()
+
+    def test_plain_no_explicit_workspace_creates_dir(self, tmp_path: Path) -> None:
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
+        meta = m._start_root_task("r1", "", {"workspace_mode": "plain", "task_id": "r1"})
+        # 空 workspace 时 _detect_scenario 返回 ws_root/task_id,该分支的 mode 语义为 shared
+        assert meta["mode"] == "shared"
+        assert Path(meta["path"]).exists()
+        assert meta["task_id"] == "r1"
+
+    def test_no_git_repo_falls_back_plain(self, tmp_path: Path) -> None:
+        ws = tmp_path / "non_git"
+        ws.mkdir()
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
+        meta = m._start_root_task("r1", str(ws), {"task_id": "r1"})
+        assert meta["mode"] == "plain"
+        assert Path(meta["path"]).exists()
+
+    def test_worktree_full_flow(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        _git_init(repo)
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
+        meta = m._start_root_task("r1", str(repo), {"task_id": "r1", "_has_explicit_workspace": True})
+        assert meta["mode"] == "worktree"
+        assert meta["branch"] == "task/r1"
+        ws_dir = Path(meta["path"])
+        assert ws_dir.exists()
+        assert ws_dir != repo
+        assert (ws_dir / "README.md").exists()
+
+    def test_worktree_full_checkout_with_large_file(self, tmp_path: Path) -> None:
+        """大文件项目同样走全量 worktree：git 自管 checkout，无大小预扫描/sparse 决策。"""
+        repo = tmp_path / "repo"
+        _git_init(repo)
+        # tracked 大文件直接随 worktree checkout（不因体积改走别的路径）
+        big = repo / "big.bin"
+        big.write_bytes(b"\x00" * 4 * 1024 * 1024)
+        import subprocess
+
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "big"], cwd=repo, check=True, capture_output=True, text=True)
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
+        meta = m._start_root_task("r1", str(repo), {"task_id": "r1", "_has_explicit_workspace": True})
+        assert meta["mode"] == "worktree"
+        ws_dir = Path(meta["path"])
+        assert ws_dir.exists()
+        assert (ws_dir / "big.bin").exists()  # 全量 checkout，tracked 大文件在工作区内
+
+
+class TestSkillsCopy:
+    def test_skills_copied_to_workspace(self, tmp_path: Path) -> None:
+        (tmp_path / "skills" / "skill_a" / "scripts").mkdir(parents=True)
+        (tmp_path / "skills" / "skill_a" / "SKILL.md").write_text("# a", encoding="utf-8")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
+        m._copy_skills_to_workspace(str(ws))
+        assert (ws / "skills" / "skill_a" / "SKILL.md").exists()
+
+    def test_skills_missing_dir_skipped(self, tmp_path: Path) -> None:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
+        m._copy_skills_to_workspace(str(ws))  # base_path 下无 skills/ → 静默跳过
+        assert not (ws / "skills").exists()
+
+    def test_skills_same_dir_skipped(self, tmp_path: Path) -> None:
+        (tmp_path / "skills").mkdir()
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
+        m._copy_skills_to_workspace(str(tmp_path))  # ws == base_path → 跳过
+        assert (tmp_path / "skills").exists()
+
+    def test_usermount_volume_query_failure_not_blocking(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """WinFsp 用户态挂载卷回归（2026-10-19 真机实锤 WinError 1005）：任务
+        workspace 指向挂载卷时 final-path 卷查询（Path.resolve →
+        GetFinalPathNameByHandleW）对挂载路径抛 1005，而卷本身可用（stat/mkdir
+        正常）——工作空间创建与 skills 复制不得被卷查询阻断。"""
+        fake_mount = tmp_path / "vm_mount"
+        ws = fake_mount / "ws"
+        ws.mkdir(parents=True)
+        (tmp_path / "skills" / "skill_a").mkdir(parents=True)
+        (tmp_path / "skills" / "skill_a" / "SKILL.md").write_text("# a", encoding="utf-8")
+
+        real_resolve = Path.resolve
+
+        def _winfsp_broken_resolve(self: Path, strict: bool = False) -> Path:
+            # 只对挂载根下路径模拟卷查询失败（本机盘路径保持真实 resolve）
+            if fake_mount in self.parents or self == fake_mount:
+                raise OSError(1005, "此卷不包含可识别的文件系统")
+            return real_resolve(self, strict=strict)
+
+        monkeypatch.setattr(Path, "resolve", _winfsp_broken_resolve)
+
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
+        meta = m.on_task_start(
+            "t1005",
+            str(ws),
+            {"task_id": "t1005", "_has_explicit_workspace": True, "workspace_mode": "plain"},
+        )
+        assert meta["mode"] == "plain"
+        assert Path(meta["path"]) == ws
+        # mkdir/复制仍真实执行，skills 落盘挂载卷工作空间
+        assert (ws / "skills" / "skill_a" / "SKILL.md").exists()
+
+    def test_real_creation_error_still_propagates(self, tmp_path: Path) -> None:
+        """卷查询降级不吞真实创建错误：skills 目标位被文件占位 → mkdir 的
+        FileExistsError 原样上抛（降级面只覆盖身份比较，不覆盖创建语义）。"""
+        (tmp_path / "skills" / "skill_a").mkdir(parents=True)
+        (tmp_path / "skills" / "skill_a" / "SKILL.md").write_text("# a", encoding="utf-8")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "skills").write_text("occupied", encoding="utf-8")  # 文件占位目录位
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
+        with pytest.raises(FileExistsError):
+            m._copy_skills_to_workspace(str(ws))
+
+    def test_existing_skill_kept(self, tmp_path: Path) -> None:
+        (tmp_path / "skills" / "skill_a").mkdir(parents=True)
+        (tmp_path / "skills" / "skill_a" / "SKILL.md").write_text("new", encoding="utf-8")
+        ws = tmp_path / "ws"
+        (ws / "skills" / "skill_a").mkdir(parents=True)
+        (ws / "skills" / "skill_a" / "SKILL.md").write_text("old", encoding="utf-8")
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
+        m._copy_skills_to_workspace(str(ws))
+        assert (ws / "skills" / "skill_a" / "SKILL.md").read_text(encoding="utf-8") == "old"
+
+    def test_declared_skills_all_delivered(self, tmp_path: Path) -> None:
+        """同步完整性：权威源并集声明的技能全部落盘工作空间（R300 缺交付反例：
+        装机包无根技能源时 agentos.yaml 引用悬空）。"""
+        (tmp_path / "skills" / "s_root").mkdir(parents=True)
+        (tmp_path / "skills" / "s_root" / "SKILL.md").write_text("r", encoding="utf-8")
+        pack = tmp_path / "pack" / "skills"
+        (pack / "s_mode").mkdir(parents=True)
+        (pack / "s_mode" / "SKILL.md").write_text("m", encoding="utf-8")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot", mode_skill_sources=[pack])
+        m._copy_skills_to_workspace(str(ws))
+        assert (ws / "skills" / "s_root" / "SKILL.md").is_file()
+        assert (ws / "skills" / "s_mode" / "SKILL.md").is_file()
+
+
+class TestUserRootSkillsSource:
+    """用户根 skills/ 源（R300 装机悬空引用根治）：推导加入并集、同名用户赢、
+    注入模式（mode_skill_sources 显式传入）不叠加——注入语义 = 替换推导。"""
+
+    def _make_deriv_manager(self, tmp_path: Path) -> Any:
+        """推导模式 manager（mode_skill_sources=None，与生产同构）。"""
+        return WorkspaceLifecycleManager(
+            resource_merge=None,
+            config={"workspace": {"default_mode": "worktree", "root": str(tmp_path / "wsroot")}},
+            task_tree=_FakeTree(),
+            ws_meta_store={},
+            base_path=str(tmp_path),
+        )
+
+    def test_user_root_skills_synced_to_workspace(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        user_root = tmp_path / "userroot"
+        (user_root / "skills" / "skill_container_flow").mkdir(parents=True)
+        (user_root / "skills" / "skill_container_flow" / "SKILL.md").write_text(
+            "# 容器任务链", encoding="utf-8"
+        )
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(user_root))
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        # base_path 无 skills/（装机形态：包内无根技能）→ 仅用户根源可达
+        m = self._make_deriv_manager(tmp_path)
+        m._copy_skills_to_workspace(str(ws))
+        assert (ws / "skills" / "skill_container_flow" / "SKILL.md").read_text(
+            encoding="utf-8"
+        ) == "# 容器任务链"
+
+    def test_user_root_same_name_wins(self, tmp_path: Path, monkeypatch: Any) -> None:
+        (tmp_path / "skills" / "skill_a").mkdir(parents=True)
+        (tmp_path / "skills" / "skill_a" / "SKILL.md").write_text("base", encoding="utf-8")
+        user_root = tmp_path / "userroot"
+        (user_root / "skills" / "skill_a").mkdir(parents=True)
+        (user_root / "skills" / "skill_a" / "SKILL.md").write_text("user", encoding="utf-8")
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(user_root))
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        m = self._make_deriv_manager(tmp_path)
+        m._copy_skills_to_workspace(str(ws))
+        # 升优先序末位 = 用户副本赢（与双根插件/模式包同序）
+        assert (ws / "skills" / "skill_a" / "SKILL.md").read_text(encoding="utf-8") == "user"
+
+    def test_injection_mode_skips_user_root_derivation(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        user_root = tmp_path / "userroot"
+        (user_root / "skills" / "skill_a").mkdir(parents=True)
+        (user_root / "skills" / "skill_a" / "SKILL.md").write_text("user", encoding="utf-8")
+        monkeypatch.setenv("AGENTOS_USER_ROOT", str(user_root))
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        # 注入模式（测试封闭面）：用户根推导不叠加（_make_manager 缺省钉 []）
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot")
+        m._copy_skills_to_workspace(str(ws))
+        assert not (ws / "skills").exists()
+
+    def test_user_root_env_unset_no_source(self, tmp_path: Path, monkeypatch: Any) -> None:
+        # 用户根不可得（AGENTOS_USER_ROOT 与 OS 数据目录皆无）→ 用户根
+        # skills/ 源不入并集。POSIX 上 _os_data_dir 恒可推导（~/.local/share），
+        # 仅 delenv 模拟不出「不可得」，须钉 user_space.user_root → None
+        monkeypatch.delenv("AGENTOS_USER_ROOT", raising=False)
+        monkeypatch.delenv("APPDATA", raising=False)
+        import user_space
+
+        monkeypatch.setattr(user_space, "user_root", lambda: None)
+        m = self._make_deriv_manager(tmp_path)
+        sources = m._skill_sources()
+        assert not any(p.parent.name in ("agentos", "userroot") for p in sources)
+
+    def test_user_space_import_failure_degrades_without_source(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """user_space 不可得（import 失败）→ 用户根 skills/ 源静默降级（与
+        用户根模式包推导同口径），仓根与模式包源不受影响。"""
+        import types
+
+        monkeypatch.setitem(sys.modules, "user_space", None)  # None → import 抛 ImportError
+        m = self._make_deriv_manager(tmp_path)
+        sources = m._skill_sources()
+        assert not any(p.parent.name in ("agentos", "userroot") for p in sources)
+        # 仓根源仍在（降级不清场）
+        assert tmp_path / "skills" in sources
+
+
+class TestMetaPersist:
+    # _persist_ws_meta 写分支已随 state 单一真相源收敛退役（F13，2026-10-08）：
+    # 任务坐标持久化权威在 state 单键 task.ws_meta，本管理器无任何写通道；
+    # restore 只读契约（恢复进内存 store 供复用）保留测试。
+
+    def test_restore_ws_meta(self, tmp_path: Path) -> None:
+        task = _FakeTask("t1", metadata={"ws_meta": {"mode": "worktree", "path": "/y"}})
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot", tasks={"t1": task})
+        m.restore_ws_meta("t1")
+        assert m._ws_meta_store["t1"] == {"mode": "worktree", "path": "/y"}
+
+    def test_restore_skips_when_already_present(self, tmp_path: Path) -> None:
+        m = _make_manager(tmp_path, ws_root=tmp_path / "wsroot", meta_store={"t1": {"path": "/keep"}})
+        m.restore_ws_meta("t1")  # store 已有 → 不覆盖
+        assert m._ws_meta_store["t1"]["path"] == "/keep"
+
+
+# ═══════════════════════════════════════════════════════════
+# _safe_ws_name：worktree 目录名生成
+# ═══════════════════════════════════════════════════════════
+
+
+class TestSafeWsName:
+    @pytest.mark.parametrize(
+        "project_name",
+        [
+            "Worktree_与_Plain_模式合并测试项目",  # 中文项目名（原 15 上限会截成 Worktree_与_Plai）
+            "thread-a4d3c62b-d500-4790-8b69-b53d",  # 会话目录形态长名
+            "myproj",  # 短名
+        ],
+    )
+    def test_project_name_preserved_verbatim(self, project_name: str) -> None:
+        """常规长度项目名原样保留——worktree 目录名与项目保持可读对应。"""
+        assert _MOD._safe_ws_name(project_name, "a67b31846401") == (
+            f"{project_name}__wt_a67b3184"
+        )
+
+    def test_illegal_chars_and_spaces_sanitized(self) -> None:
+        """Windows 非法字符/空格清洗为下划线，折叠后不含连续下划线。"""
+        import re
+
+        name = _MOD._safe_ws_name('a<b>:"c d|e?*x', "t1234567890")
+        stem = name.rsplit("__wt_", 1)[0]
+        assert name.endswith("__wt_t1234567")
+        assert not re.search(r'[<>:"/\|?*\x00-\x1f ]', stem)
+        assert "__" not in stem
+
+    def test_pathological_length_capped(self) -> None:
+        """病态超长名截到上限且不残留结尾分隔符（Windows 单组件上限保护）。"""
+        name = _MOD._safe_ws_name("长" * 250, "t1234567890")
+        stem, _sep, task_part = name.rpartition("__wt_")
+        assert task_part == "t1234567"
+        assert len(stem) <= 100
+        assert not stem.endswith(("_", "."))
+
+    def test_blank_name_falls_back_to_ws(self) -> None:
+        """清洗后为空 → 固定 ws 前缀，目录名仍可生成。"""
+        assert _MOD._safe_ws_name("///", "t1234567890") == "ws__wt_t1234567"
+
+
+# ═══════════════════════════════════════════════════════════
+# worktree 会话锚定自主权（2026-09-19 用户裁决，BUG-53 修正）
+# ═══════════════════════════════════════════════════════════
+
+
+class TestSessionAnchorAutonomy:
+    """agent 自主锚定会话工作区合法（路径白名单前缀内即合法，系统不上浮）。
+
+    2026-09-19 用户裁决：worktree 源锚点用 agent 指定的 workspace 原样落地，
+    服务不做出生期改锚——锚定会话世界时在其上建会话仓是 agent 自主行为的
+    合法结果；路径合法性由项目登记白名单（config/users/default/
+    project_whitelist.yaml 前缀授权）把守，不归本层治理。
+    """
+
+    def _make_manager_at(self, tmp_path: Path) -> WorkspaceLifecycleManager:  # type: ignore[valid-type]
+        return _make_manager(tmp_path, ws_root=tmp_path / "ai_ws")
+
+    def _assert_anchored_in_place(self, meta: dict, session_ws: Path, ws_base: Path, task_id: str) -> None:
+        assert meta["mode"] == "worktree"
+        assert meta["project_root"] == str(session_ws), "锚点原样采用，不上浮到项目根"
+        assert meta["branch"] == f"task/{task_id}"
+        ws_dir = Path(meta["path"])
+        assert ws_dir.is_dir()
+        assert ws_dir.is_relative_to(ws_base)
+
+    def test_subtask_session_anchor_worktrees_in_place(self, tmp_path: Path) -> None:
+        """形状1（子任务分支）：显式 worktree 源=会话目录 → 原地锚定建副本。"""
+        session_ws = tmp_path / "ai_ws" / "sessions" / "thread-abc"
+        session_ws.mkdir(parents=True)
+        m = self._make_manager_at(tmp_path)
+        meta = m._start_subtask(
+            "sub1",
+            str(session_ws),
+            {"workspace_mode": "worktree", "_has_explicit_workspace": True},
+        )
+        self._assert_anchored_in_place(meta, session_ws, tmp_path / "ai_ws", "sub1")
+
+    def test_root_task_session_anchor_worktrees_in_place(self, tmp_path: Path) -> None:
+        """形状2（根任务分支）：根任务锚定会话空间同样原样落地。"""
+        session_ws = tmp_path / "ai_ws" / "sessions" / "thread-abc" / "sub"
+        session_ws.mkdir(parents=True)
+        m = self._make_manager_at(tmp_path)
+        meta = m._start_root_task("r1", str(session_ws), {"task_id": "r1", "_has_explicit_workspace": True})
+        self._assert_anchored_in_place(meta, session_ws, tmp_path / "ai_ws", "r1")
+
+    def test_merged_products_visible_in_session_workspace(self, tmp_path: Path) -> None:
+        """合并落地全链：会话锚定任务出生 → worktree 产物 → 合并门控 →
+        产物落在 agent 锚定的会话仓工作区（会话世界内真实可见）。"""
+        import worktree_merge
+
+        session_ws = tmp_path / "ai_ws" / "sessions" / "thread-abc"
+        session_ws.mkdir(parents=True)
+        m = self._make_manager_at(tmp_path)
+        meta = m._start_subtask(
+            "sub-merge",
+            str(session_ws),
+            {"workspace_mode": "worktree", "_has_explicit_workspace": True},
+        )
+        product = Path(meta["path"]) / "sales_2025_dashboard.html"
+        product.write_text("<html>886 / 118</html>", encoding="utf-8")
+        assert worktree_merge.merge_worktree_before_complete("sub-merge", meta) is None
+        landed = session_ws / "sales_2025_dashboard.html"
+        assert landed.exists(), "产物必须到达锚定的会话仓工作区（agent 自主锚定的合法落点）"
+        assert landed.read_text(encoding="utf-8") == "<html>886 / 118</html>"

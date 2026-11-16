@@ -11,16 +11,22 @@
 //!    [`CompiledItem::Composite`]（管道/库 step，运行时查统一步骤池递归）/
 //!    [`CompiledItem::Dynamic`]（`{{state.xxx}}` 模板名，运行时渲染后查池/插件——
 //!    显式保留的动态点）；未知引用在加载期报错。传入 [`StepServiceIndex`] 时
-//!    （[`compile_pipeline_with_hooks`] 的 `index` 参数），③ 级命中携带解析结果
-//!    `method`（SDK 侧按 `_step_method` 约定字段分发，提案 §3.4）；复合体
-//!    隐式诉求（插件 id 存在但索引未注册）→ 编译期报错（fail-closed 强制自白，
-//!    提案 §3.3）；未传索引（legacy 入口 [`compile_pipeline`]）→ 现状插件名
-//!    直引（method None = 默认 execute 入口）。
+//!    （[`compile_pipeline_with_hooks`] / [`compile_pipeline_with_checks`] 的
+//!    `index` 参数），③ 级命中携带解析结果 `method`（SDK 侧按 `_step_method`
+//!    约定字段分发，提案 §3.4）；复合体隐式诉求（插件 id 存在但索引未注册）→
+//!    编译期报错（fail-closed 强制自白，提案 §3.3）；未传索引（legacy 入口
+//!    [`compile_pipeline`]）→ 现状插件名直引（method None = 默认 execute 入口）。
 //! 3. **步骤服务索引**：聚合全部启用插件 manifests 的 `capabilities.steps`（显式）
 //!    与单入口插件隐式默认注册（服务化提案 §3.3），名字全局查重；复合体
 //!    （tools/services/steps）隐式关闭——管道按插件 id 直引 → 编译错误（强制自白）。
-//! 4. **hooks 装载表**：管道 YAML 的 hooks 声明编译为 [`HookEntry`] 分发表
-//!    （声明位置即作用域，服务化提案 §3.6），运行时查表直派；空集零开销。
+//! 4. **checks 统一检测声明**（钩子收敛终局，设计真值
+//!    `docs/working/DSH生态嫁接通用机制设计_20261104.md` §4.3）：统一模型 =
+//!    管道 = 流（顺序 steps + then 跳转）+ checks（触发时机 × when × 动作）。
+//!    声明经 [`compile_pipeline_with_checks`] 编译为 [`CompiledCheck`] 分发表
+//!    （触发时机 `pre/post/state` × when AST × 动作 `route/terminate/run`），
+//!    route/run 目标编译期存在性校验，安全关键步骤护栏（不可被 checks 触发/
+//!    跳过）在此执法；空集零开销。hooks 机制退役：非空 hooks 声明编译报错
+//!    （[`HookFile`] 类型仅为 api 加载面契约保留）。
 //! 5. **引用环检测**：composite 递归引用图 DFS，环 → 编译错误（运行时递归不死循环）。
 //! 6. **转移目标校验**：`RouteNext::Phase/Step` 目标存在性在此复核（api 层
 //!    `validate_no_name_conflicts` 已查 Phase，此处双保险 + Step 目标）。
@@ -34,7 +40,7 @@ use std::collections::{HashMap, HashSet};
 use agentos_core::traits::PluginManifest;
 use agentos_core::types::{
     CheckpointConfig, LoopBody, LoopConfig, PipelineConfig, PipelineStep, Route, RouteNext,
-    StepLibrary,
+    StepCheck, StepLibrary,
 };
 use sha2::{Digest, Sha256};
 
@@ -68,9 +74,10 @@ pub struct CompiledPipeline {
     /// 源 [`PipelineConfig`] 的确定性指纹（[`pipeline_config_hash`]，SHA-256 前 16 hex）。
     /// 编译期一次算好随计划走，run 落 runs.config_hash 用。
     pub config_hash: String,
-    /// hooks 装载表（服务化提案 §3.6）：管道 YAML 的 hooks 声明编译产物，
-    /// 运行时按 (作用域, 事件) 查表直派。空 = 未声明任何钩子（发射点零开销）。
-    pub step_hooks: Vec<HookEntry>,
+    /// checks 分发表（钩子收敛终局，设计 §4.3）：checks 统一检测声明的编译
+    /// 产物，运行时按（循环体, 触发时机）查表消费。空 = 未声明任何 check
+    /// （边界分发点零开销短路）。
+    pub checks: Vec<CompiledCheck>,
     /// 管道配置声明的初始 state 缺省（P1-1 声明驱动缺省）：执行首轮前种入的
     /// 标量键值（api 层消费；键已存在时不覆盖——本轮值优先）。
     pub initial_state: Vec<(String, serde_json::Value)>,
@@ -98,25 +105,25 @@ impl CompiledPipeline {
         self.bodies.iter().map(|b| b.id.as_str()).collect()
     }
 
-    /// 查 hooks 装载表：`(作用域, 事件名)` → 命中条目（引用）。
+    /// 查 checks 分发表：`(循环体, 触发时机)` → 命中条目（引用，声明序）。
     ///
-    /// 空表（未声明任何钩子）提前返回空 Vec——发射点先查表再决定是否进入
-    /// 分发分支，无钩子配置的主干零开销（服务化提案 §3.6 空集短路）。
-    pub fn hooks_for(&self, scope: &HookScope, event: &str) -> Vec<&HookEntry> {
-        if self.step_hooks.is_empty() {
+    /// 空表（未声明任何 check）提前返回空 Vec——分发点先查表再决定是否进入
+    /// 分发分支，无 checks 配置的主干零开销（空集短路）。
+    pub fn checks_for_trigger(&self, body_id: &str, trigger: &CheckTrigger) -> Vec<&CompiledCheck> {
+        if self.checks.is_empty() {
             return Vec::new();
         }
-        self.step_hooks
+        self.checks
             .iter()
-            .filter(|h| &h.scope == scope && h.event == event)
+            .filter(|c| c.body_id == body_id && &c.trigger == trigger)
             .collect()
     }
 
     /// 编译产物引用的全部插件 id——boot sidecar 预热集的单一来源。
     ///
     /// 覆盖：各循环体步骤项（`Plugin` 项；`Composite` 项查统一步骤池递归展开，
-    /// 步骤 id 级 visited 防御池内环）+ step_hooks 装载表的 run 目标。
-    /// `Dynamic` 项运行时才解析出插件名，不在此列（懒 spawn 兜底）。
+    /// 步骤 id 级 visited 防御池内环）。checks 动作目标是循环体 step，其引用
+    /// 已经由步骤项覆盖。`Dynamic` 项运行时才解析出插件名，不在此列（懒 spawn 兜底）。
     pub fn referenced_plugin_ids(&self) -> HashSet<String> {
         fn visit(
             step: &CompiledStep,
@@ -148,9 +155,8 @@ impl CompiledPipeline {
                 visit(step, self, &mut ids, &mut seen);
             }
         }
-        for hook in &self.step_hooks {
-            ids.insert(hook.plugin_id.clone());
-        }
+        // checks 动作目标 = 本循环体 step（route/run 目标编译期已校验存在），
+        // 其插件引用已经由循环体步骤项收集，不在此重复展开。
         ids
     }
 }
@@ -192,18 +198,22 @@ impl StepServiceIndex {
 
 /// 聚合全部启用插件 manifests 构建步骤服务索引（服务化提案 §3.2/§3.3）。
 ///
-/// 现状：③级未接线——生产加载入口（server.rs `load_and_compile`）未消费本
-/// 索引，调用方仅测试（ADR 2026-09-09-kernel-dead-layer-adjudication：
-/// 妥协=hooks/步骤服务命中不可达；触发=步骤服务跨插件编排需求；上限=0.3
-/// 排期评审，无需求即随整链删除）。
+/// 生产接线（ADR 2026-10-08-step-service-level3-wiring）：api 层
+/// `load_and_compile_by_name` 恒构索引传入 with_hooks 装配——③级命中生产
+/// 可达，触发条件（步骤服务跨插件编排需求立项）已现，死层①裁定
+/// （ADR 2026-09-09-kernel-dead-layer-adjudication）的接线分支就此执行；
+/// hooks 沿传空（无声明需求），hooks 链仍按原裁定保留。
 ///
 /// 规则：
-/// - **显式条目**：`capabilities.steps[].name` → `{plugin_id, method: Some(name)}`
-///   （method 存步骤 name 本身——SDK 侧按 name 分发，不发明 type 字段）；
+/// - **显式条目**：`capabilities.steps[].name` → `{plugin_id, method}`——
+///   异名步骤 `method: Some(name)`（SDK 侧按 name 分发，不发明 type 字段）；
+///   **name == 插件 id 的条目映射 `method: None`**（默认 execute 语义）——
+///   现网 manifests 通用声明形态即 `[{name: "pipeline_<id>"}]`，该映射使
+///   ③级命中与④插件名直引完全等价，存量声明零破坏；
 /// - **隐式默认**：未声明 steps 且无 tools/services 的插件自动生成
 ///   `{name: <插件id>, plugin_id: <插件id>, method: None}`（None = 默认 execute
-///   入口）；声明了 tools/services 或 ≥2 个 steps 的复合体隐式关闭——管道按
-///   插件 id 直引 → 编译错误（fail-closed，强制自白条款）；
+///   入口）；声明了 tools/services 的复合体隐式关闭——管道按插件 id 直引 →
+///   编译错误（fail-closed，强制自白条款）；
 /// - **名字全局查重**：显式之间、显式与隐式之间冲突 → 编译错误（含双方来源 id）。
 ///
 /// 纯函数（无 IO 无时序），可同步单测。
@@ -234,9 +244,16 @@ pub fn build_step_service_index(
             continue;
         }
         for step in explicit {
+            // name == 插件 id = 该插件默认入口的自白式声明（现网通用形态），
+            // 映射 method None 保持与④直引等价；异名步骤才走具名分发。
+            let method = if step.name == manifest.id {
+                None
+            } else {
+                Some(step.name.clone())
+            };
             let entry = ResolvedStep {
                 plugin_id: manifest.id.clone(),
-                method: Some(step.name.clone()),
+                method,
             };
             if let Some(prev) = entries.insert(step.name.clone(), entry) {
                 return Err(CompileError {
@@ -252,113 +269,318 @@ pub fn build_step_service_index(
     Ok(StepServiceIndex { entries })
 }
 
-/// hooks 作用域（服务化提案 §3.6：声明位置即作用域，分发粒度 = 声明粒度）。
+/// 编译后的 check 触发时机。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HookScope {
-    /// 管道级：整个循环体生命周期的观察者（`loop_bodies[].hooks`）。
-    Body(String),
-    /// step 级：仅该 step 执行期间触发（`loop_bodies[].steps[].hooks`，
-    /// 复合键 `"<body id>:<step id>"`）。
-    Step(String),
+pub enum CheckTrigger {
+    /// 步执行前触发（`pre:<step id>`）。
+    Pre(String),
+    /// 步执行后触发（`post:<step id>`；步产出路由优先，check route 在步已
+    /// 产出路由时抑制）。
+    Post(String),
+    /// state 顶层键写事件触发（`state:<键>`）：键被写（[`crate::pipeline_loop`]
+    /// 写路径 journal 落点发射 state_delta 事件）后由首个步边界消费——
+    /// 触发一次执行一次。when 可表达 equals 值条件（求值时读当前 state）。
+    State(String),
 }
 
-/// hooks 装载表条目（编译产物）：作用域 + 事件 → 插件方法。
+/// 编译后的 check 动作。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HookEntry {
-    pub scope: HookScope,
-    /// 事件名（P1 挂桩阶段任意字符串合法，P2 收敛为枚举白名单）。
-    pub event: String,
-    /// 提供该钩子的插件 id。
-    pub plugin_id: String,
-    /// 目标方法：`Some(method)` = `run: <插件id>.<method>` 点号后缀；
-    /// `None` = 裸插件名（默认 execute 入口）。
-    pub method: Option<String>,
+pub enum CheckAction {
+    /// 声明式转移（`route:<step id>`，目标 = 同循环体 step；执行时与 step 级
+    /// Step 跳转同语义，共享跳数护栏 steps×4）。
+    Route(String),
+    /// 终止当前循环体（`terminate`；原钩子 `decision:terminate` 语义平移——
+    /// 置 `ended=true`，循环体立即终止，后续循环体/收尾体照常推进）。
+    Terminate,
+    /// 一次性触发步（`run:<step id>`，目标 = 同循环体 step）：触发一次执行
+    /// 一次，与顺序步完全同语义（经同一 invoke/轨迹/checkpoint 面）；轨迹
+    /// 身份 = 模板步 id + 触发纪元（多次触发多条目不混叠）。
+    Run(String),
+}
+
+/// 编译后的 check 条目（[`compile_pipeline_with_checks`] 产物，分发表行）。
+#[derive(Debug, Clone)]
+pub struct CompiledCheck {
+    /// 宿主循环体 id（触发与动作目标都在该循环体内）。
+    pub body_id: String,
+    pub trigger: CheckTrigger,
+    /// 触发谓词 AST（None = 恒真；假则本 check 不触发）。
+    pub when: Option<Expr>,
+    pub action: CheckAction,
+}
+
+impl CompiledCheck {
+    /// 触发时机人读标签（`pre:s1` / `post:s1` / `state:x`）——诊断与轨迹
+    /// 归属来源标注（`check@<at>` 窗口 id）共用。
+    pub fn at_label(&self) -> String {
+        match &self.trigger {
+            CheckTrigger::Pre(id) => format!("pre:{id}"),
+            CheckTrigger::Post(id) => format!("post:{id}"),
+            CheckTrigger::State(key) => format!("state:{key}"),
+        }
+    }
 }
 
 /// 管道 YAML 的 hooks 声明形态（`{on: <事件>, run: <插件id>[.<method>]}`）。
 ///
-/// 反序列化输入（api 层 `PipelineFile` 解析后经 [`compile_step_hooks`] 编译）；
-/// 事件名暂不设白名单（P1 挂桩阶段任意字符串合法，P2 收敛枚举）。
+/// **已退役**（钩子收敛终局，设计 §4.3：hook 不再独立存在，统一模型 =
+/// checks 分发 + run 步）。本类型仅为 api 加载面契约保留（api `pipeline_loader`
+/// 解析 YAML `hooks:` 字段的载体）；声明进入编译即报错（见
+/// [`compile_pipeline_with_hooks`]），迁移映射：step 级
+/// `{on: step_end, run}` → `{at: "post:<step>", then: "run:<步骤id>"}`。
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct HookFile {
     pub on: String,
     pub run: String,
 }
 
-/// 编译 hooks 声明为装载表（服务化提案 §3.6 编译期装载表）。
+/// 编译管道 + checks 分发表 + 步骤服务接线（钩子收敛终局的统一编译入口）。
 ///
-/// 现状：③级未接线——生产编译入口恒传空 hooks（ADR
-/// 2026-09-09-kernel-dead-layer-adjudication，随整链接线或删除）。
+/// 在 `compile_pipeline_with_index` 基础上编译 checks 声明：
 ///
-/// - `run` 解析：`<插件id>.<method>` 点号前缀为插件 id、后缀为 method；
-///   裸插件名 = method None（默认 execute 入口）；
-/// - 未启用/未知插件 id → 编译错误（fail-closed，不静默丢弃）；
-/// - 空 hooks 零开销：返回空 Vec（发射点提前短路）。
+/// - `body_checks`：各循环体已反序列化的 checks 声明（调用方归一传入，键为
+///   循环体 id）；未声明传空切片，产物 `checks` 为空 Vec（分发点零开销短路）；
+/// - `safety_locked_steps`：安全关键步骤 id 集（审批/评估等——不可被 checks
+///   触发或跳过的护栏标记集；装载面后续接线，引擎先执法）。
 ///
-/// `body_hooks` / `step_hooks` 为各作用域已解析的声明（api 层 yaml 结构
-/// 归一后传入；`step_hooks` 键为 `"<body id>:<step id>"` 复合键）。
-pub fn compile_step_hooks(
-    body_hooks: &[(String, Vec<HookFile>)],
-    step_hooks: &[(String, Vec<HookFile>)],
+/// 校验（全部编译期 fail-closed）：
+/// - `at` 词表：`pre:<步>` / `post:<步>` / `state:<键>`，触发步须在本循环体；
+/// - `then` 词表：`route:<步>` / `terminate` / `run:<步>`，目标步须在本循环体；
+/// - when 语法错误即报错（AST 复用 `compile_when`）；
+/// - 安全护栏：route/run 目标命中安全步 → 报错（不可触发）；pre 边界终止/
+///   转移跳过安全步、post 转移跳越区间含安全步 → 报错（不可跳过；反向转移
+///   与 run 动作不跳步）。
+pub fn compile_pipeline_with_checks(
+    config: &PipelineConfig,
+    step_library: &StepLibrary,
     plugin_ids: &HashSet<String>,
-) -> Result<Vec<HookEntry>, CompileError> {
+    index: Option<&StepServiceIndex>,
+    body_checks: &[(String, Vec<StepCheck>)],
+    safety_locked_steps: &[String],
+) -> Result<CompiledPipeline, CompileError> {
+    let mut compiled = compile_pipeline_with_index(config, step_library, plugin_ids, index)?;
+    compiled.checks = compile_checks(body_checks, safety_locked_steps, &compiled)?;
+    Ok(compiled)
+}
+
+/// 编译 checks 声明为分发表（词表解析 + 存在性校验 + 安全护栏执法）。
+fn compile_checks(
+    body_checks: &[(String, Vec<StepCheck>)],
+    safety_locked_steps: &[String],
+    compiled: &CompiledPipeline,
+) -> Result<Vec<CompiledCheck>, CompileError> {
     let mut out = Vec::new();
-    for (body_id, hooks) in body_hooks {
-        for hook in hooks {
-            out.push(compile_hook_entry(
-                HookScope::Body(body_id.clone()),
-                hook,
-                plugin_ids,
-            )?);
-        }
-    }
-    for (step_key, hooks) in step_hooks {
-        for hook in hooks {
-            out.push(compile_hook_entry(
-                HookScope::Step(step_key.clone()),
-                hook,
-                plugin_ids,
-            )?);
+    for (body_id, checks) in body_checks {
+        let Some(body) = compiled.bodies.iter().find(|b| &b.id == body_id) else {
+            return Err(CompileError {
+                location: "checks 声明".to_string(),
+                message: format!("checks 宿主循环体 '{body_id}' 不是已声明的循环体"),
+            });
+        };
+        let step_pos = |id: &str| body.steps.iter().position(|s| s.id == *id);
+        let safety: HashSet<&str> = safety_locked_steps.iter().map(|s| s.as_str()).collect();
+        for (i, decl) in checks.iter().enumerate() {
+            let location = format!("循环体 '{body_id}' / check #{}", i + 1);
+            let trigger = compile_check_trigger(&decl.at, &step_pos, &location)?;
+            let when = compile_when(decl.when.as_deref(), &location)?;
+            let action = compile_check_action(&decl.then, &step_pos, &location)?;
+            enforce_check_safety(
+                &trigger,
+                &action,
+                &step_pos,
+                body.steps.len(),
+                &safety,
+                &location,
+            )?;
+            out.push(CompiledCheck {
+                body_id: body_id.clone(),
+                trigger,
+                when,
+                action,
+            });
         }
     }
     Ok(out)
 }
 
-/// 编译单条 hooks 声明（`run` 三形态解析 + 插件存在性校验）。
-fn compile_hook_entry(
-    scope: HookScope,
-    hook: &HookFile,
-    plugin_ids: &HashSet<String>,
-) -> Result<HookEntry, CompileError> {
-    let (plugin_id, method) = match hook.run.split_once('.') {
-        Some((plugin, method)) if !plugin.is_empty() && !method.is_empty() => {
-            (plugin.to_string(), Some(method.to_string()))
-        }
-        _ => (hook.run.clone(), None),
+/// 解析触发时机（`pre:<步>` / `post:<步>` / `state:<键>`；触发步存在性校验）。
+fn compile_check_trigger(
+    at: &str,
+    step_pos: &impl Fn(&str) -> Option<usize>,
+    location: &str,
+) -> Result<CheckTrigger, CompileError> {
+    let err = |message: String| CompileError {
+        location: location.to_string(),
+        message,
     };
-    if !plugin_ids.contains(&plugin_id) {
-        return Err(CompileError {
-            location: format!("hooks 作用域 '{}'", scope_label(&scope)),
-            message: format!(
-                "hooks run 目标插件 '{}' 未启用/未知（事件 '{}'）",
-                plugin_id, hook.on
-            ),
-        });
+    let Some((kind, rest)) = at.split_once(':') else {
+        return Err(err(format!(
+            "触发时机 '{at}' 非法（合法形态：pre:<step id> / post:<step id> / state:<键>）"
+        )));
+    };
+    match kind {
+        "pre" | "post" => {
+            if rest.is_empty() {
+                return Err(err(format!("触发时机 '{at}' 缺 step id")));
+            }
+            if step_pos(rest).is_none() {
+                return Err(err(format!(
+                    "触发时机 '{at}' 的步 '{rest}' 不在本循环体 steps 中"
+                )));
+            }
+            Ok(if kind == "pre" {
+                CheckTrigger::Pre(rest.to_string())
+            } else {
+                CheckTrigger::Post(rest.to_string())
+            })
+        }
+        "state" => {
+            if rest.is_empty() || rest.contains(':') {
+                return Err(err(format!(
+                    "触发时机 '{at}' 非法：state 订阅键必须是单个非空顶层键（不含冒号）"
+                )));
+            }
+            Ok(CheckTrigger::State(rest.to_string()))
+        }
+        other => Err(err(format!(
+            "触发时机 '{at}' 未知（'{other}' 不是 pre/post/state）"
+        ))),
     }
-    Ok(HookEntry {
-        scope,
-        event: hook.on.clone(),
-        plugin_id,
-        method,
-    })
 }
 
-/// 作用域的人读标签（诊断定位用）：`循环体 'main'` / `step 'main:core'`。
-fn scope_label(scope: &HookScope) -> String {
-    match scope {
-        HookScope::Body(id) => format!("循环体 '{id}'"),
-        HookScope::Step(key) => format!("step '{key}'"),
+/// 解析动作（`route:<步>` / `terminate` / `run:<步>`；目标存在性校验）。
+fn compile_check_action(
+    then: &str,
+    step_pos: &impl Fn(&str) -> Option<usize>,
+    location: &str,
+) -> Result<CheckAction, CompileError> {
+    let err = |message: String| CompileError {
+        location: location.to_string(),
+        message,
+    };
+    if then == "terminate" {
+        return Ok(CheckAction::Terminate);
     }
+    let Some((kind, target)) = then.split_once(':') else {
+        return Err(err(format!(
+            "动作 '{then}' 非法（合法词表：route:<step id> / terminate / run:<step id>）"
+        )));
+    };
+    if target.is_empty() {
+        return Err(err(format!("动作 '{then}' 缺目标 step id")));
+    }
+    if step_pos(target).is_none() {
+        return Err(err(format!(
+            "动作 '{then}' 的目标步 '{target}' 不在本循环体 steps 中"
+        )));
+    }
+    match kind {
+        "route" => Ok(CheckAction::Route(target.to_string())),
+        "run" => Ok(CheckAction::Run(target.to_string())),
+        other => Err(err(format!(
+            "动作 '{then}' 未知（'{other}' 不是 route/run）"
+        ))),
+    }
+}
+
+/// 安全护栏执法（编译期，设计 §4.3：安全关键步骤不可被 checks 跳过或触发）。
+///
+/// - **不可触发**：route/run 目标命中安全步 → 报错；
+/// - **不可跳过**：按（触发边界, 动作）静态计算被跳过的步位区间，与安全步
+///   位置相交即报错——pre:X 转移/终止使 X 不执行（区间 [X..目标) / [X..末]）；
+///   post:X 转移跳越 (X,目标) 开区间、终止跳过 (X,末]；反向转移不跳过区间
+///   （目标之前的步后续仍会执行）；run 动作只追加执行不跳步；
+///   state 触发无源位置（运行时任意写点触发），只受"不可触发"约束。
+fn enforce_check_safety(
+    trigger: &CheckTrigger,
+    action: &CheckAction,
+    step_pos: &impl Fn(&str) -> Option<usize>,
+    body_len: usize,
+    safety: &HashSet<&str>,
+    location: &str,
+) -> Result<(), CompileError> {
+    let err = |message: String| CompileError {
+        location: location.to_string(),
+        message,
+    };
+    // 不可触发：动作目标不得是安全步
+    if let CheckAction::Route(target) | CheckAction::Run(target) = action {
+        if safety.contains(target.as_str()) {
+            return Err(err(format!(
+                "安全关键步骤 '{target}' 不可被 checks 触发（动作 '{}'）；\
+                 安全步骤只能由管道流顺序执行或步产出路由到达",
+                match action {
+                    CheckAction::Route(_) => "route",
+                    _ => "run",
+                }
+            )));
+        }
+    }
+    // 不可跳过：静态计算被跳过的步位区间 [start, end)（半开；空区间 = 无跳过）
+    let skipped: Option<(usize, usize)> = match (trigger, action) {
+        (CheckTrigger::Pre(id), CheckAction::Route(target)) => {
+            let (x, y) = (step_pos(id), step_pos(target));
+            match (x, y) {
+                (Some(x), Some(y)) if y > x => Some((x, y)), // X 被 divert 未执行
+                (Some(x), _) => Some((x, x + 1)),            // 反向转移：仅 X 自身被跳过
+                _ => None,
+            }
+        }
+        (CheckTrigger::Pre(id), CheckAction::Terminate) => {
+            step_pos(id).map(|x| (x, body_len)) // [X..末]
+        }
+        (CheckTrigger::Post(id), CheckAction::Route(target)) => {
+            let (x, y) = (step_pos(id), step_pos(target));
+            match (x, y) {
+                (Some(x), Some(y)) if y > x => Some((x + 1, y)), // (X, 目标) 开区间
+                _ => None,                                       // 反向/同位：无跳过
+            }
+        }
+        (CheckTrigger::Post(id), CheckAction::Terminate) => {
+            step_pos(id).map(|x| (x + 1, body_len)) // (X, 末]
+        }
+        _ => None, // Run 不跳步；State 触发无源位置
+    };
+    if let Some((start, end)) = skipped {
+        let hit = safety
+            .iter()
+            .find(|s| step_pos(s).is_some_and(|p| p >= start && p < end));
+        if let Some(hit_id) = hit {
+            return Err(err(format!(
+                "checks 动作会跳过安全关键步骤（被跳区间含安全步 '{hit_id}'）——\
+                 安全步骤不可被 checks 跳过，请调整触发边界或动作目标"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// 编译管道 + hooks 装载表 + 步骤服务接线（hooks 机制退役后的兼容入口）。
+///
+/// **hooks 机制已退役**（钩子收敛终局，设计 §4.3：hook 不再独立存在，统一
+/// 模型 = checks 分发 + run 步）。生产编译入口（api `load_and_compile_by_name`）
+/// 恒传空 hooks（`to_internal` 已丢弃 YAML hooks 字段）——空入参行为零改动
+/// （编译通过、checks 空表）；**非空 hooks 声明 = 编译错误**（fail-visible，
+/// 文案含 checks 迁移指引，禁静默丢弃）。新声明一律走
+/// [`compile_pipeline_with_checks`]。
+pub fn compile_pipeline_with_hooks(
+    config: &PipelineConfig,
+    step_library: &StepLibrary,
+    plugin_ids: &HashSet<String>,
+    index: Option<&StepServiceIndex>,
+    body_hooks: &[(String, Vec<HookFile>)],
+    step_hooks: &[(String, Vec<HookFile>)],
+) -> Result<CompiledPipeline, CompileError> {
+    if !body_hooks.is_empty() || !step_hooks.is_empty() {
+        return Err(CompileError {
+            location: "hooks 声明".to_string(),
+            message: "hooks 机制已退役（checks 统一机制取代）：请把 {on, run} 声明迁移为 \
+                      checks 声明（如 step 级 {on: step_end, run} → {at: \"post:<step>\", \
+                      then: \"run:<步骤id>\"}，经 compile_pipeline_with_checks 编译）"
+                .to_string(),
+        });
+    }
+    compile_pipeline_with_index(config, step_library, plugin_ids, index)
 }
 
 /// 编译后的循环体。
@@ -466,38 +688,7 @@ pub fn compile_pipeline(
     compiler.compile(config, step_library)
 }
 
-/// 编译管道 + hooks 装载表 + 步骤服务接线（服务化提案 §3.6/§3.2 接线入口）。
-///
-/// 现状：③级未接线——生产加载走 [`compile_pipeline`]（index=None、空
-/// hooks），本入口仅测试消费（ADR 2026-09-09-kernel-dead-layer-adjudication：
-/// 触发=管道配置出现 hooks 声明或步骤服务编排需求；上限=0.3 排期评审）。
-///
-/// 在 [`compile_pipeline`] 基础上附加 hooks 编译与四级命中：`body_hooks` /
-/// `step_hooks` 为各作用域已反序列化的 hooks 声明（api 层 yaml 结构归一后传入，
-/// 键为循环体 id / `"<body id>:<step id>"` 复合键）。未声明 hooks 时传空切片，
-/// 产物 `step_hooks` 为空 Vec（发射点零开销短路）。
-///
-/// `index` = 步骤服务索引（[`build_step_service_index`] 聚合全部启用插件
-/// manifests 构建）。`Some`：③ 级命中（[`StepServiceIndex::resolve`]）→
-/// `CompiledItem::Plugin { method: Some(步骤名) }`（SDK 侧按 `_step_method`
-/// 分发）；插件 id 存在但 resolve 落空且非组合/库 → **编译期报错**（复合体
-/// 隐式诉求 fail-closed，文案含步骤名/插件 id/修复指引）；都不命中 → 现状
-/// error! 宽容语义保留（对齐既有第③级 miss 行为，见 [`Compiler::compile_step`]）。
-/// `None`：legacy 入口语义——插件名直引零改动（method None = 默认 execute）。
-pub fn compile_pipeline_with_hooks(
-    config: &PipelineConfig,
-    step_library: &StepLibrary,
-    plugin_ids: &HashSet<String>,
-    index: Option<&StepServiceIndex>,
-    body_hooks: &[(String, Vec<HookFile>)],
-    step_hooks: &[(String, Vec<HookFile>)],
-) -> Result<CompiledPipeline, CompileError> {
-    let mut compiled = compile_pipeline_with_index(config, step_library, plugin_ids, index)?;
-    compiled.step_hooks = compile_step_hooks(body_hooks, step_hooks, plugin_ids)?;
-    Ok(compiled)
-}
-
-/// 编译管道 + 步骤服务接线（无 hooks 的接线形态，供既有 `with_hooks` 内部复用）。
+/// 编译管道 + 步骤服务接线（checks/hooks 兼容入口内部复用的接线形态）。
 fn compile_pipeline_with_index(
     config: &PipelineConfig,
     step_library: &StepLibrary,
@@ -648,7 +839,7 @@ impl Compiler<'_> {
             bodies,
             checkpoint: config.checkpoint.clone(),
             config_hash: pipeline_config_hash(config),
-            step_hooks: Vec::new(),
+            checks: Vec::new(),
             initial_state: config
                 .initial_state
                 .iter()
@@ -736,9 +927,10 @@ impl Compiler<'_> {
         })
     }
 
-    /// loop_config 校验（编译期 fail-closed，ADR 2026-10-02-loopconfig-parallel-foreach）：
-    /// over/as 成对且为合法形态、max_concurrency 取值域、for-each 专属字段不出现在
-    /// 重复循环上、归并键为单个顶层键名、迭代变量名不与引擎保留键冲突。
+    /// loop_config 校验（编译期 fail-closed；并行 for-each 原语，内容移植自
+    /// sync/open-main-20261008 c2db32c26）：over/as 成对且为合法形态、
+    /// max_concurrency 取值域、for-each 专属字段不出现在重复循环上、归并键为
+    /// 单个顶层键名、迭代变量名不与引擎保留键冲突。
     fn validate_loop_config(lc: &LoopConfig, location: &str) -> Result<(), CompileError> {
         let err = |message: String| CompileError {
             location: location.to_string(),
@@ -761,7 +953,7 @@ impl Compiler<'_> {
         }
         if lc.max_concurrency == 0 || lc.max_concurrency < -1 {
             return Err(err(format!(
-                "max_concurrency={} 非法（0 与 <-1 禁用；1=串行链式，>1=有界并行，-1=不限）",
+                "max_concurrency={} 非法（0 与 <-1 已禁用；1=串行链式，>1=有界并行，-1=不限）",
                 lc.max_concurrency
             )));
         }
@@ -993,7 +1185,6 @@ mod tests {
             description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Pipeline,
-            pipeline_role: None,
             language: "python".to_string(),
             host_type: HostType::Sidecar,
             host_group: None,
@@ -1005,7 +1196,6 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            granted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
             config_files: vec![],
@@ -1540,6 +1730,23 @@ mod tests {
     }
 
     #[test]
+    fn step_index_explicit_entry_named_as_plugin_id_maps_to_default_execute() {
+        // 兼容映射（接线 ADR 2026-10-08-step-service-level3-wiring）：显式条目
+        // name == 插件 id（现网 manifests 通用声明形态 `[{name: "pipeline_<id>"}]`）
+        // → method None = 默认 execute 语义，与④插件名直引完全等价。
+        let caps = steps_caps(vec![StepCapability {
+            name: "pipeline_task_service".into(),
+            description: None,
+            input_schema: None,
+        }]);
+        let index = build_step_service_index(&[with_caps(manifest("pipeline_task_service"), caps)])
+            .expect("ok");
+        let r = index.resolve("pipeline_task_service").expect("命中");
+        assert_eq!(r.plugin_id, "pipeline_task_service");
+        assert_eq!(r.method, None);
+    }
+
+    #[test]
     fn step_index_implicit_default_for_single_entry_plugins() {
         // 单入口纯步骤插件（无 tools/services/steps）→ 隐式默认注册 name=插件 id
         let index = build_step_service_index(&[manifest("alpha"), manifest("beta")]).expect("ok");
@@ -1566,6 +1773,7 @@ mod tests {
                 category: None,
                 ui: None,
                 render: None,
+                isolation_capable: None,
                 smoke: None,
                 timeout_ms: None,
             }]),
@@ -1597,6 +1805,7 @@ mod tests {
                     category: None,
                     ui: None,
                     render: None,
+                    isolation_capable: None,
                     smoke: None,
                     timeout_ms: None,
                 }],
@@ -1660,102 +1869,349 @@ mod tests {
         assert!(index.names().is_empty());
     }
 
-    // ── hooks 装载表（服务化提案 §3.6）──
+    // ── checks 统一检测声明（钩子收敛终局，设计 §4.3）──
 
-    #[test]
-    fn hooks_compile_two_level_scopes() {
-        let plugin_ids = plugins(&["watcher", "w2"]);
-        let body_hooks = vec![(
-            "main".to_string(),
-            vec![HookFile {
-                on: "stream_chunk".into(),
-                run: "watcher.on_chunk".into(),
-            }],
-        )];
-        let step_hooks = vec![(
-            "main:core".to_string(),
-            vec![HookFile {
-                on: "stream_chunk".into(),
-                run: "w2.on_chunk".into(),
-            }],
-        )];
-        let entries = compile_step_hooks(&body_hooks, &step_hooks, &plugin_ids).expect("ok");
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].scope, HookScope::Body("main".to_string()));
-        assert_eq!(entries[0].event, "stream_chunk");
-        assert_eq!(entries[0].plugin_id, "watcher");
-        assert_eq!(entries[0].method.as_deref(), Some("on_chunk"));
-        assert_eq!(entries[1].scope, HookScope::Step("main:core".to_string()));
-        assert_eq!(entries[1].plugin_id, "w2");
-        assert_eq!(entries[1].method.as_deref(), Some("on_chunk"));
+    use agentos_core::types::StepCheck;
+
+    /// 构造单循环体 + checks 声明的编译入参（with_checks 入口）。
+    fn compile_with_checks(
+        config: &PipelineConfig,
+        body_checks: &[(String, Vec<StepCheck>)],
+        safety: &[&str],
+    ) -> Result<CompiledPipeline, CompileError> {
+        compile_pipeline_with_checks(
+            config,
+            &StepLibrary::default(),
+            &plugins(&["alpha", "beta"]),
+            None,
+            body_checks,
+            &safety.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        )
     }
 
+    fn check(at: &str, when: Option<&str>, then: &str) -> StepCheck {
+        StepCheck {
+            at: at.to_string(),
+            when: when.map(|s| s.to_string()),
+            then: then.to_string(),
+        }
+    }
+
+    /// 合法声明编译：触发时机/when AST/动作三词表逐项落位。
     #[test]
-    fn hooks_run_three_forms() {
-        let plugin_ids = plugins(&["watcher", "bare"]);
-        // ① 点号双段：插件.method；② 裸插件名：method None（默认 execute 入口）
-        let body_hooks = vec![
-            (
-                "main".to_string(),
+    fn checks_compile_triggers_when_and_actions() {
+        let config = single_body(
+            "p",
+            vec![
+                make_step("s1", vec![StepItem::Bare("alpha".into())]),
+                make_step("s2", vec![StepItem::Bare("beta".into())]),
+                make_step("watch", vec![]),
+            ],
+        );
+        let compiled = compile_with_checks(
+            &config,
+            &[(
+                "main".into(),
                 vec![
-                    HookFile {
-                        on: "evt".into(),
-                        run: "watcher.on_chunk".into(),
-                    },
-                    HookFile {
-                        on: "evt2".into(),
-                        run: "bare".into(),
-                    },
+                    check("pre:s1", None, "run:watch"),
+                    check("post:s2", Some("flag == 'x'"), "terminate"),
+                    check("state:flag", None, "route:s2"),
                 ],
-            ),
-            (
-                "other".to_string(),
+            )],
+            &[],
+        )
+        .expect("合法 checks 编译通过");
+        assert_eq!(compiled.checks.len(), 3);
+        assert_eq!(compiled.checks[0].body_id, "main");
+        assert_eq!(
+            compiled.checks[0].trigger,
+            CheckTrigger::Pre("s1".into()),
+            "pre 触发解析"
+        );
+        assert!(compiled.checks[0].when.is_none(), "缺省 when 恒真");
+        assert_eq!(compiled.checks[0].action, CheckAction::Run("watch".into()));
+        assert_eq!(
+            compiled.checks[1].trigger,
+            CheckTrigger::Post("s2".into()),
+            "post 触发解析"
+        );
+        assert!(compiled.checks[1].when.is_some(), "when 表达式编译为 AST");
+        assert_eq!(compiled.checks[1].action, CheckAction::Terminate);
+        assert_eq!(
+            compiled.checks[2].trigger,
+            CheckTrigger::State("flag".into()),
+            "state 键级触发解析"
+        );
+        assert_eq!(compiled.checks[2].action, CheckAction::Route("s2".into()));
+    }
+
+    /// when 语法错误 → 编译错（AST 复用 compile_when，加载期暴露）。
+    #[test]
+    fn check_invalid_when_is_compile_error() {
+        let config = single_body(
+            "p",
+            vec![make_step("s1", vec![StepItem::Bare("alpha".into())])],
+        );
+        for when in ["this is ((( invalid", "state.x >"] {
+            let err = compile_with_checks(
+                &config,
+                &[(
+                    "main".into(),
+                    vec![check("post:s1", Some(when), "terminate")],
+                )],
+                &[],
+            )
+            .unwrap_err();
+            assert!(err.message.contains("when"), "when={when} err: {err}");
+            assert!(err.message.contains("语法"), "err: {err}");
+            assert!(err.location.contains("main"), "定位含循环体: {err}");
+        }
+    }
+
+    /// route/run 目标不存在 → 编译错（fail-closed，不静默丢弃）。
+    #[test]
+    fn check_target_missing_is_compile_error() {
+        let config = single_body(
+            "p",
+            vec![make_step("s1", vec![StepItem::Bare("alpha".into())])],
+        );
+        for then in ["route:ghost", "run:ghost"] {
+            let err = compile_with_checks(
+                &config,
+                &[("main".into(), vec![check("post:s1", None, then)])],
+                &[],
+            )
+            .unwrap_err();
+            assert!(
+                err.message.contains("ghost"),
+                "then={then} 错误须含目标名: {err}"
+            );
+            assert!(err.location.contains("main"), "err: {err}");
+        }
+    }
+
+    /// 触发时机引用不存在的步 → 编译错。
+    #[test]
+    fn check_trigger_step_missing_is_compile_error() {
+        let config = single_body(
+            "p",
+            vec![make_step("s1", vec![StepItem::Bare("alpha".into())])],
+        );
+        for at in ["pre:ghost", "post:ghost"] {
+            let err = compile_with_checks(
+                &config,
+                &[("main".into(), vec![check(at, None, "terminate")])],
+                &[],
+            )
+            .unwrap_err();
+            assert!(err.message.contains("ghost"), "at={at} err: {err}");
+        }
+    }
+
+    /// at/then 词表外形态 → 编译错（触发时机未知前缀 / 动作未知词）。
+    #[test]
+    fn check_malformed_at_and_then_are_compile_errors() {
+        let config = single_body(
+            "p",
+            vec![make_step("s1", vec![StepItem::Bare("alpha".into())])],
+        );
+        let err = compile_with_checks(
+            &config,
+            &[(
+                "main".into(),
+                vec![check("midstream:s1", None, "terminate")],
+            )],
+            &[],
+        )
+        .unwrap_err();
+        assert!(err.message.contains("midstream:s1"), "err: {err}");
+        let err = compile_with_checks(
+            &config,
+            &[("main".into(), vec![check("post:s1", None, "explode:s1")])],
+            &[],
+        )
+        .unwrap_err();
+        assert!(err.message.contains("explode:s1"), "err: {err}");
+        let err = compile_with_checks(
+            &config,
+            &[("main".into(), vec![check("state:", None, "terminate")])],
+            &[],
+        )
+        .unwrap_err();
+        assert!(err.message.contains("state:"), "空键名报错: {err}");
+        // 未知循环体 id → 编译错
+        let err = compile_with_checks(
+            &config,
+            &[("nobody".into(), vec![check("post:s1", None, "terminate")])],
+            &[],
+        )
+        .unwrap_err();
+        assert!(err.message.contains("nobody"), "err: {err}");
+    }
+
+    /// 护栏①：安全关键步骤不可被 checks 触发（route/run 目标命中即编译错）。
+    #[test]
+    fn check_cannot_trigger_safety_locked_step() {
+        let config = single_body(
+            "p",
+            vec![
+                make_step("s1", vec![StepItem::Bare("alpha".into())]),
+                make_step("approval", vec![StepItem::Bare("beta".into())]),
+            ],
+        );
+        for then in ["route:approval", "run:approval"] {
+            let err = compile_with_checks(
+                &config,
+                &[("main".into(), vec![check("post:s1", None, then)])],
+                &["approval"],
+            )
+            .unwrap_err();
+            assert!(
+                err.message.contains("approval"),
+                "then={then} 错误须含安全步 id: {err}"
+            );
+            assert!(err.message.contains("安全"), "err: {err}");
+        }
+    }
+
+    /// 护栏①：安全关键步骤不可被 checks 跳过——pre:X 终止/转移使 X 不再执行
+    /// （X 安全步）→ 编译错；run 动作不跳步（X 照常执行）→ 合法。
+    #[test]
+    fn check_cannot_skip_safety_locked_step_from_pre() {
+        let config = single_body(
+            "p",
+            vec![
+                make_step("gate", vec![StepItem::Bare("alpha".into())]),
+                make_step("fallback", vec![StepItem::Bare("beta".into())]),
+            ],
+        );
+        let err = compile_with_checks(
+            &config,
+            &[("main".into(), vec![check("pre:gate", None, "terminate")])],
+            &["gate"],
+        )
+        .unwrap_err();
+        assert!(err.message.contains("gate"), "err: {err}");
+        let err = compile_with_checks(
+            &config,
+            &[(
+                "main".into(),
+                vec![check("pre:gate", None, "route:fallback")],
+            )],
+            &["gate"],
+        )
+        .unwrap_err();
+        assert!(err.message.contains("gate"), "pre 转移跳过安全步: {err}");
+        // run 动作不改变 X 的执行（先跑 run 步再执行 gate）→ 合法
+        assert!(
+            compile_with_checks(
+                &config,
+                &[("main".into(), vec![check("pre:gate", None, "run:fallback")])],
+                &["gate"],
+            )
+            .is_ok(),
+            "pre:run 不跳过安全步"
+        );
+    }
+
+    /// 护栏①：post:X route:Y 跳过 (X,Y) 区间中的安全步 → 编译错；目标本身
+    /// 是安全步已由护栏①拦；区间无安全步 → 合法。
+    #[test]
+    fn check_route_skipping_safety_step_is_compile_error() {
+        let config = single_body(
+            "p",
+            vec![
+                make_step("s1", vec![StepItem::Bare("alpha".into())]),
+                make_step("audit", vec![StepItem::Bare("beta".into())]),
+                make_step("s3", vec![StepItem::Bare("alpha".into())]),
+            ],
+        );
+        let err = compile_with_checks(
+            &config,
+            &[("main".into(), vec![check("post:s1", None, "route:s3")])],
+            &["audit"],
+        )
+        .unwrap_err();
+        assert!(err.message.contains("audit"), "跳过安全步须报错: {err}");
+        // 反向跳转（s3 → s1）不越过 audit → 合法
+        assert!(
+            compile_with_checks(
+                &config,
+                &[("main".into(), vec![check("post:s3", None, "route:s1")])],
+                &["audit"],
+            )
+            .is_ok(),
+            "反向转移不跳过安全步"
+        );
+    }
+
+    /// hooks 机制退役（收敛终局）：非空 hooks 声明 → 编译错（fail-visible，
+    /// 文案含 checks 迁移指引）；空 hooks（生产恒传形态）零改动。
+    #[test]
+    fn legacy_hooks_declaration_is_retired_compile_error() {
+        let config = single_body(
+            "p",
+            vec![make_step("s1", vec![StepItem::Bare("alpha".into())])],
+        );
+        let err = compile_pipeline_with_hooks(
+            &config,
+            &StepLibrary::default(),
+            &plugins(&["alpha"]),
+            None,
+            &[(
+                "main".into(),
                 vec![HookFile {
-                    on: "evt3".into(),
+                    on: "step_end".into(),
+                    run: "watcher.on_step".into(),
+                }],
+            )],
+            &[],
+        )
+        .unwrap_err();
+        assert!(err.message.contains("退役"), "err: {err}");
+        assert!(err.message.contains("checks"), "迁移指引: {err}");
+        // step 级 hooks 同样退役
+        let err = compile_pipeline_with_hooks(
+            &config,
+            &StepLibrary::default(),
+            &plugins(&["alpha"]),
+            None,
+            &[],
+            &[(
+                "main:s1".into(),
+                vec![HookFile {
+                    on: "step_start".into(),
                     run: "watcher".into(),
                 }],
-            ),
-        ];
-        let entries = compile_step_hooks(&body_hooks, &[], &plugin_ids).expect("ok");
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].method.as_deref(), Some("on_chunk"));
-        assert_eq!(entries[1].method, None, "裸插件名 = 默认 execute 入口");
-        assert_eq!(entries[2].method, None);
+            )],
+        )
+        .unwrap_err();
+        assert!(err.message.contains("退役"), "err: {err}");
+        // 空 hooks（api 生产恒传形态）→ 编译通过、checks 空表
+        let compiled = compile_pipeline_with_hooks(
+            &config,
+            &StepLibrary::default(),
+            &plugins(&["alpha"]),
+            None,
+            &[],
+            &[],
+        )
+        .expect("空 hooks 编译通过");
+        assert!(compiled.checks.is_empty(), "无声明 → checks 空表短路");
     }
 
+    /// 空 checks 声明（未声明）→ 编译产物 checks 空表（分发点零开销短路）。
     #[test]
-    fn hooks_unknown_plugin_is_compile_error() {
-        let plugin_ids = plugins(&["watcher"]);
-        let body_hooks = vec![(
-            "main".to_string(),
-            vec![HookFile {
-                on: "stream_chunk".into(),
-                run: "ghost.on_chunk".into(),
-            }],
-        )];
-        let err = compile_step_hooks(&body_hooks, &[], &plugin_ids).unwrap_err();
-        assert!(err.message.contains("ghost"), "err: {err}");
-        assert!(err.message.contains("stream_chunk"), "err: {err}");
-    }
-
-    #[test]
-    fn hooks_empty_config_yields_zero_entries() {
-        let entries = compile_step_hooks(&[], &[], &plugins(&["watcher"])).expect("ok");
-        assert!(entries.is_empty(), "空 hooks 零条目");
-    }
-
-    #[test]
-    fn compiled_pipeline_hooks_for_queries_and_empty_short_circuit() {
+    fn no_checks_yields_empty_table() {
         let config = single_body(
             "p",
             vec![make_step("s", vec![StepItem::Bare("alpha".into())])],
         );
         let compiled =
             compile_pipeline(&config, &StepLibrary::default(), &plugins(&["alpha"])).expect("ok");
-        // 未声明 hooks → 空表，查询恒空（发射点零开销短路）
-        assert!(compiled.step_hooks.is_empty());
+        assert!(compiled.checks.is_empty());
         assert!(compiled
-            .hooks_for(&HookScope::Body("main".into()), "stream_chunk")
+            .checks_for_trigger("main", &CheckTrigger::Pre("s".into()))
             .is_empty());
     }
 
@@ -1781,6 +2237,7 @@ mod tests {
                     category: None,
                     ui: None,
                     render: None,
+                    isolation_capable: None,
                     smoke: None,
                     timeout_ms: None,
                 }],
@@ -1862,6 +2319,7 @@ mod tests {
                 category: None,
                 ui: None,
                 render: None,
+                isolation_capable: None,
                 smoke: None,
                 timeout_ms: None,
             }]),
@@ -1907,10 +2365,11 @@ mod tests {
         }
     }
 
-    /// referenced_plugin_ids：Plugin 项 + Composite 池递归 + hooks 目标全收集；
+    /// referenced_plugin_ids：Plugin 项 + Composite 池递归全收集；
     /// Dynamic 模板与未被引用的插件不进集合（预热集只含确定性引用）。
+    /// checks 动作目标是循环体 step（其插件经步骤项已被收集），不新增引用。
     #[test]
-    fn referenced_plugin_ids_covers_steps_composite_and_hooks() {
+    fn referenced_plugin_ids_covers_steps_and_composite() {
         let config = single_body(
             "p",
             vec![
@@ -1926,21 +2385,7 @@ mod tests {
             make_step("inner", vec![StepItem::Bare("beta".into())]),
         );
         let plugin_ids = plugins(&["alpha", "beta", "gamma", "delta"]);
-        let compiled = compile_pipeline_with_hooks(
-            &config,
-            &lib,
-            &plugin_ids,
-            None,
-            &[(
-                "main".into(),
-                vec![HookFile {
-                    on: "after_step".into(),
-                    run: "gamma.before".into(),
-                }],
-            )],
-            &[],
-        )
-        .expect("ok");
+        let compiled = compile_pipeline(&config, &lib, &plugin_ids).expect("ok");
 
         let ids = compiled.referenced_plugin_ids();
         assert!(ids.contains("alpha"), "Plugin 项直引: {ids:?}");
@@ -1948,7 +2393,6 @@ mod tests {
             ids.contains("beta"),
             "Composite 池递归展开 inner→beta: {ids:?}"
         );
-        assert!(ids.contains("gamma"), "hooks run 目标: {ids:?}");
         // 性质断言：确定性引用集 ⊆ 编译传入插件集，且不含未引用插件/步骤 id
         assert!(ids.is_subset(&plugin_ids), "引用集须为插件 id: {ids:?}");
         assert!(!ids.contains("delta"), "未引用插件不进预热集: {ids:?}");

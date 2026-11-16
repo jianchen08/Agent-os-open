@@ -205,14 +205,12 @@ class TestDenyPriority:
     """契约5：deny 优先级——白名单先行为现状语义，内建前缀同位同权。"""
 
     @pytest.fixture
-    def deny_entry(self, monkeypatch: pytest.MonkeyPatch):
-        """read_deny 名单注入（名单文件加载为外部依赖，钉桩于模块缝）。"""
+    def deny_entry(self):
+        """read_deny 名单前缀提供者（T6a 后名单由调用方传 read_deny=，
+        模块级 _load_read_deny 加载缝已退役）。"""
 
-        def _install(prefix: Path) -> Path:
-            monkeypatch.setattr(
-                zone_policy, "_load_read_deny", lambda: [str(prefix)]
-            )
-            return prefix
+        def _install(prefix: Path) -> list[str]:
+            return [str(prefix)]
 
         return _install
 
@@ -223,9 +221,11 @@ class TestDenyPriority:
         （现状白名单先行，见 zone_policy.read_verdict 放行链序）。"""
         ws = str(worktree_layout["workspace"])
         denied_doc = worktree_layout["sibling"] / "note.md"
-        deny_entry(worktree_layout["sibling"])
+        deny_list = deny_entry(worktree_layout["sibling"])
 
-        allow, reason = read_verdict(denied_doc, workspace=ws, project_root=ws)
+        allow, reason = read_verdict(
+            denied_doc, workspace=ws, project_root=ws, read_deny=deny_list
+        )
 
         assert allow, "内建白名单命中应先于 deny 扫描（同显式 read_allow 位序）"
         assert reason is None
@@ -237,9 +237,11 @@ class TestDenyPriority:
         ws = str(worktree_layout["workspace"])
         outside = tmp_path / "vendor" / "secret"
         outside.mkdir(parents=True)
-        deny_entry(outside)
+        deny_list = deny_entry(outside)
 
-        allow, reason = read_verdict(outside / "k.txt", workspace=ws, project_root=ws)
+        allow, reason = read_verdict(
+            outside / "k.txt", workspace=ws, project_root=ws, read_deny=deny_list
+        )
 
         assert not allow
         assert reason is not None
@@ -318,13 +320,15 @@ class TestUserRootFormBoundary:
         ws.mkdir(parents=True)
         note = sibling / "note.md"
         note.write_text("sibling doc", encoding="utf-8")
-        monkeypatch.setattr(zone_policy, "_load_read_deny", lambda: [str(sibling)])
+        deny_list = [str(sibling)]
 
-        allow, reason = read_verdict(note, workspace=str(ws), project_root=str(ws))
+        allow, reason = read_verdict(
+            note, workspace=str(ws), project_root=str(ws), read_deny=deny_list
+        )
         assert allow, f"地界内兄弟树读应被内建白名单放行，实际拒绝: {reason}"
         assert reason is None
 
-        allow_no_anchor, reason_no_anchor = read_verdict(note)
+        allow_no_anchor, reason_no_anchor = read_verdict(note, read_deny=deny_list)
         assert not allow_no_anchor
         assert reason_no_anchor is not None
 

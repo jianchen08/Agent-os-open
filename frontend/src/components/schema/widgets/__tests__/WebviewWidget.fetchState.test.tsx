@@ -95,3 +95,53 @@ describe('WebviewWidget 取数状态机（BUG-42 第二层）', () => {
     expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument()
   })
 })
+
+describe('WebviewWidget 插件路由注册窗口期（加载语义，2026-10-15 架构裁定）', () => {
+  it('404 窗口期 → 加载中语义（不落错误态）退避重取；就绪后渲染 iframe', async () => {
+    for (let i = 0; i < 4; i++) apiGet.mockRejectedValueOnce(new Error('request failed with status 404'))
+    apiGet.mockResolvedValue({ data: '<p>ok</p>' })
+    vi.useFakeTimers()
+    render(<WebviewWidget pluginId="demo" />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+    // 窗口期 = 加载语义：加载占位 + 注册中副行，绝不落错误态
+    expect(screen.getByText('加载 Webview...')).toBeInTheDocument()
+    expect(screen.getByText(/插件路由注册中/)).toBeInTheDocument()
+    expect(screen.queryByText(/Webview 加载失败/)).not.toBeInTheDocument()
+    // 退避链：1.5s/3s/4.5s/6s 四次自动重取，第五次（就绪）成功进 iframe
+    await act(async () => { await vi.advanceTimersByTimeAsync(1600) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(3100) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(4600) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(6100) })
+    expect(screen.getByTitle('Webview')).toBeInTheDocument()
+    expect(apiGet.mock.calls.length).toBe(5)
+    vi.useRealTimers()
+  })
+
+  it('重试上限后仍 404 → 落终态错误 + 手动重试（诚实不无限转圈）', async () => {
+    apiGet.mockRejectedValue(new Error('request failed with status 404'))
+    vi.useFakeTimers()
+    render(<WebviewWidget pluginId="demo" />)
+    // 推过 1.5+3+4.5+6=15s 退避链（四次重取全 404）+ 上限后第六取落终态
+    await act(async () => { await vi.advanceTimersByTimeAsync(1600) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(3100) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(4600) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(6100) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(3100) })
+    expect(screen.getByText(/Webview 加载失败/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument()
+    expect(screen.queryByText(/插件路由注册中/)).not.toBeInTheDocument()
+    vi.useRealTimers()
+  })
+
+  it('非瞬态错误（504）立即落错误态（无加载窗口语义）', async () => {
+    apiGet.mockRejectedValue(new Error('kernel 504'))
+    vi.useFakeTimers()
+    render(<WebviewWidget pluginId="demo" />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+    expect(screen.getByText(/Webview 加载失败/)).toBeInTheDocument()
+    expect(screen.queryByText(/插件路由注册中/)).not.toBeInTheDocument()
+    await act(async () => { await vi.advanceTimersByTimeAsync(20000) })
+    expect(apiGet.mock.calls.length).toBe(1)
+    vi.useRealTimers()
+  })
+})

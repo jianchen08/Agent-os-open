@@ -22,7 +22,7 @@ import yaml
 
 from tests._pipeline_plugin_path import add_plugin_dir
 
-add_plugin_dir("input", "security_check")
+add_plugin_dir("security_check")
 
 import plugin as sc_mod  # noqa: E402
 import server as server_mod  # noqa: E402
@@ -233,7 +233,7 @@ class TestSwitchThenExecuteE2E:
     ).get("rules", [])
 
     def _ctx_for(self, command: str, task_isolated: bool = False) -> Any:
-        from pipeline.plugin import PluginContext  # noqa: PLC0415
+        from _libs.pipeline_base.plugin import PluginContext  # noqa: PLC0415
 
         return PluginContext(
             state={
@@ -598,7 +598,7 @@ class TestSessionKeyContract:
         )
 
         # 执行侧读取：同会话、不同 pipeline_id（主/子管道、任务轮换）必须命中
-        from pipeline.plugin import PluginContext  # noqa: PLC0415
+        from _libs.pipeline_base.plugin import PluginContext  # noqa: PLC0415
 
         ctx = PluginContext(
             state={
@@ -618,7 +618,7 @@ class TestSessionKeyContract:
         """GUI 实测场景（BUG-15）：选择器写入（session 键）→ 同会话异管道的
         隔离任务命中黑名单必须弹审批，不被「隔离未显式选择 → 免审批」吞掉。
         """
-        from pipeline.plugin import PluginContext  # noqa: PLC0415
+        from _libs.pipeline_base.plugin import PluginContext  # noqa: PLC0415
 
         from tests._security_check_harness import wire_approval_cap
 

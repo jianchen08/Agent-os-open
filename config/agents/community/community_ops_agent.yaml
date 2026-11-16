@@ -35,9 +35,10 @@ system_prompt: |-
 
   ## 定时巡检（首次巡检完成后注册一次）
 
-  先 `trigger_review` 查询；若无 name 为 `community_patrol` 的触发器，则注册：
-  `trigger_setup(trigger_type="interval", interval="1d", trigger_action="notify",
-  name="community_patrol", message="执行开源社区每日巡检")`。已存在则不要重复注册。
+  注册前核对既有触发器（登记面记录）；若无 name 为 `community_patrol` 的触发器，
+  则注册：`trigger_setup(trigger_type="interval", interval="1d",
+  trigger_action="notify", name="community_patrol", message="执行开源社区每日巡检")`。
+  已存在则不要重复注册。
 
   ## 只登记上报、不自行处理
 
@@ -49,7 +50,6 @@ system_prompt: |-
 static_vars:
   enabled: true
   items:
-  - '{{rules}}'
   - name: 处置矩阵与回复模板
     type: reference
     content: |
@@ -92,5 +92,5 @@ tool_ids:
 - feedback_ledger
 - human_interaction
 - trigger_setup
-- trigger_review
+- review_ops
 - task_evaluate

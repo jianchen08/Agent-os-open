@@ -2,25 +2,28 @@
  * CommandDispatcher（P5 a/b/c/d 核心，ADR §3.4 档位二）
  *
  * 命令是 P5 四类插槽的统一出口：
- *   菜单点击 / 命令面板执行 / 快捷键命中 / modal trigger
+ *   菜单点击 / 命令面板执行 / 快捷键命中 / overlay trigger
  *   → 全部经 CommandDispatcher.executeCommand(commandId, args)
- *   → 路由到内核（插件 capability，经 transport）或打开声明的 modal
+ *   → 路由到内核（插件 capability，经 transport）或打开声明的 overlay
  *
  * 设计要点：
  * - transport 注入（仅这一段是外部依赖，可 Mock）；被测逻辑不 Mock
- * - modal 触发：若存在 trigger=on_command:<commandId> 的 modal 声明，执行命令后打开 modal
+ * - overlay 触发：若存在 openOn=on_command:<commandId> 的 shell.overlay 槽条目
+ *   （contributes.modal 收敛产物，SlotRegistry 装载），执行命令后打开；
+ *   动作触发面（commands）与渲染呈现面（slots）分离——动作面不进槽
  * - when 过滤：命令/菜单的 when 字段经 evaluateWhen(contextKeys) 过滤可见性
  */
 
 import { contributionRegistry, type ContributionEntry } from '@/services/schema/ContributionRegistry'
 import { evaluateWhen, type ContextKeys } from '@/services/schema/whenExpression'
+import { slotRegistry, type SlotEntry } from '@/services/slots/slotRegistry'
 import { useContextKeys } from '@/stores/contextKeysStore'
 
 /** 内核 transport：把命令交给内核执行（最终调插件 capability/tool） */
 export type CommandTransport = (commandId: string, args?: unknown) => Promise<unknown>
 
-/** modal 打开回调 */
-export type ModalOpenHandler = (modal: ContributionEntry) => void
+/** overlay 打开回调（载荷 = shell.overlay 槽条目） */
+export type ModalOpenHandler = (modal: SlotEntry) => void
 
 /** commandId → trigger 字符串约定 */
 const COMMAND_TRIGGER_PREFIX = 'on_command:'
@@ -28,19 +31,23 @@ const COMMAND_TRIGGER_PREFIX = 'on_command:'
 export class CommandDispatcher {
   /** 注入的内核 transport（命令真正执行的出口） */
   private transport: CommandTransport | null = null
-  /** modal 打开订阅者 */
+  /** overlay 打开订阅者 */
   private modalOpenHandlers: ModalOpenHandler[] = []
-  /** 数据源（默认全局单例，可注入便于测试） */
-  private readonly registry: { getCommands: () => ContributionEntry[]; getMenus: (location?: string) => ContributionEntry[]; getModals: () => ContributionEntry[]; findModalByTrigger: (trigger: string) => ContributionEntry | undefined }
+  /** 命令/菜单数据源（默认全局单例，可注入便于测试） */
+  private readonly registry: { getCommands: () => ContributionEntry[]; getMenus: (location?: string) => ContributionEntry[] }
+  /** overlay 条目查询源（默认 slotRegistry 单例，可注入便于测试） */
+  private readonly overlays: { findOverlayByTrigger: (trigger: string) => SlotEntry | undefined }
   /** context keys 读取器（默认读全局 store，可注入便于测试） */
   private readonly getKeys: () => ContextKeys
 
   constructor(
-    registry?: { getCommands: () => ContributionEntry[]; getMenus: (location?: string) => ContributionEntry[]; getModals: () => ContributionEntry[]; findModalByTrigger: (trigger: string) => ContributionEntry | undefined },
+    registry?: { getCommands: () => ContributionEntry[]; getMenus: (location?: string) => ContributionEntry[] },
     getKeys?: () => ContextKeys,
+    overlays?: { findOverlayByTrigger: (trigger: string) => SlotEntry | undefined },
   ) {
     this.registry = registry ?? contributionRegistry
     this.getKeys = getKeys ?? (() => useContextKeys.getState().keys)
+    this.overlays = overlays ?? slotRegistry
   }
 
   /** 注入内核 transport（启动期由 GrowthLoop 注入） */
@@ -73,8 +80,8 @@ export class CommandDispatcher {
       }
     }
 
-    // 2. 触发绑定的 modal（trigger=on_command:<commandId>）
-    const modal = this.registry.findModalByTrigger(`${COMMAND_TRIGGER_PREFIX}${commandId}`)
+    // 2. 触发绑定的 overlay（shell.overlay 条目 openOn=on_command:<commandId>）
+    const modal = this.overlays.findOverlayByTrigger(`${COMMAND_TRIGGER_PREFIX}${commandId}`)
     if (modal) {
       for (const handler of this.modalOpenHandlers) {
         handler(modal)

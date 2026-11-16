@@ -81,11 +81,15 @@ async def test_swap_member_reinjects_channel_and_initialize() -> None:
     assert received.get("config") == {"k": "v"}, "initialize 注入参数必须重放"
 
 
-async def test_swap_member_unknown_id_raises() -> None:
-    """未知成员 id：ValueError，不得静默吞掉（内核将走 force_unload 回退）。"""
+async def test_swap_member_accepts_unknown_id() -> None:
+    """未知成员 id 照常换入：成员集权威在内核分配表（ADR 2026-10-29）。
+
+    宿主不再持出生名册做准入；装载失败（目录不存在/聚合异常）由 load_member
+    以协议错误应答，内核据此回退整组重建。
+    """
     server = CohostServer({"a": _plugin_with_tool("a", "probe", "v1")})
-    with pytest.raises(ValueError):
-        server.swap_member("ghost", _plugin_with_tool("ghost", "g", "v"))
+    server.swap_member("ghost", _plugin_with_tool("ghost", "g", "v"))
+    assert "ghost.g" in server._tools
 
 
 async def test_swap_member_updates_lifecycle_handlers() -> None:
@@ -223,3 +227,56 @@ async def test_no_reload_handler_no_request_registered() -> None:
     """未注入 reload_handler（独占 server.py 复用 McpServer 形态）：不注册 reload 请求。"""
     server = CohostServer({"a": _plugin_with_tool("a", "probe", "v1")})
     assert server._server._sdk.get_request_handler("agentos/reload_member") is None
+
+
+# ── 重载刷新声明面（缺陷E，台账 R2）：成员重载必须携带实时 capabilities ────
+
+
+async def test_reload_request_capabilities_refresh_stale_snapshot() -> None:
+    """内核 reload 请求携带实时 capabilities → 换入成员按新声明面注入。
+
+    缺陷E 复现路径（台账 R2）：宿主 spawn 时握手快照缺 chat（boot 竞态窗口
+    spawn 的宿主），成员 idle-unload/重载循环后失效面复现（重放陈旧快照，
+    刷新不粘滞）。内核侧修复：reload_member 请求携带实时 capabilities——
+    宿主换入成员时必须消费请求携带的声明面（快照陈旧不再是终身判决），
+    且快照本身刷新（后续换入同享）。
+    """
+    stale_caps = {"pipeline-executor": {}}  # 宿主 spawn 时声明面（无 chat）
+    fresh_caps = {"pipeline-executor": {}, "chat": {}}  # 内核实时声明面（含 chat）
+
+    async def fake_loader(plugin_id: str) -> AgentOSPlugin:
+        return _plugin_with_tool(plugin_id, "probe", "reloaded")
+
+    server = CohostServer({"a": _plugin_with_tool("a", "probe", "v1")}, reload_handler=fake_loader)
+    # 模拟陈旧宿主：spawn 时握手快照缺 chat
+    server._fan_out_initialize({"capabilities": dict(stale_caps), "config": {}})
+
+    handler = _sdk_handler(server)
+    result = await handler(
+        _FakeCtx({"plugin_id": "a", "capabilities": fresh_caps}),
+        None,
+    )
+
+    assert result["reloaded"] is True
+    swapped = server._members["a"]
+    # 换入成员拿到 chat 能力句柄（陈旧快照下这里 KeyError=缺陷E 的 sidecar 面）
+    handle = swapped.get_capability("chat")
+    assert handle is not None, "换入成员必须按请求携带的实时声明面拿到 chat 句柄"
+    # 快照已刷新：后续换入（不再带 capabilities 的旧内核/其它路径）同享新声明面
+    assert server._initialize_params["capabilities"] == fresh_caps
+
+
+async def test_reload_request_without_capabilities_keeps_snapshot() -> None:
+    """旧内核 reload 请求不带 capabilities：维持快照重放（旧行为兼容）。"""
+    server = CohostServer(
+        {"a": _plugin_with_tool("a", "probe", "v1")},
+        reload_handler=lambda pid: _plugin_with_tool(pid, "probe", "r"),
+    )
+    server._fan_out_initialize({"capabilities": {"x": {}}, "config": {}})
+
+    handler = _sdk_handler(server)
+    result = await handler(_FakeCtx({"plugin_id": "a"}), None)
+
+    assert result["reloaded"] is True
+    assert server._initialize_params["capabilities"] == {"x": {}}, "无实时声明面不得改写快照"
+    assert server._members["a"].get_capability("x") is not None

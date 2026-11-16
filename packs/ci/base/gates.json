@@ -1,0 +1,46 @@
+{
+  "gates": [
+    {
+      "id": "no_build_artifacts",
+      "lane": "commit",
+      "tier": "block",
+      "run": ["python", "checks/no_build_artifacts.py"],
+      "est_seconds": 2
+    },
+    {
+      "id": "oversized_files",
+      "lane": "commit",
+      "tier": "block",
+      "run": ["python", "checks/oversized_files.py"],
+      "est_seconds": 2
+    },
+    {
+      "id": "secrets_scan",
+      "lane": "commit",
+      "tier": "block",
+      "run": ["python", "checks/secrets_scan.py"],
+      "est_seconds": 3
+    },
+    {
+      "id": "repo_size_budget",
+      "lane": "commit",
+      "tier": "block",
+      "run": ["python", "checks/repo_size_budget.py"],
+      "est_seconds": 2
+    },
+    {
+      "id": "doc_links",
+      "lane": "commit",
+      "tier": "block",
+      "run": ["python", "checks/doc_links.py"],
+      "est_seconds": 3
+    },
+    {
+      "id": "asset_conventions",
+      "lane": "commit",
+      "tier": "block",
+      "run": ["python", "checks/asset_conventions.py"],
+      "est_seconds": 2
+    }
+  ]
+}

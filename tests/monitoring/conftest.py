@@ -1,6 +1,6 @@
 """monitoring 测试 conftest — 0.2 平铺 import 路径。
 
-0.2 架构下监控模块位于 plugins/shared/system/monitoring/，内部用平铺 import
+0.2 架构下监控模块位于 plugins/shared/monitoring/，内部用平铺 import
 （from health import ...）。本 conftest 把该目录加入 sys.path。
 
 ``_PLUGIN_SOURCE_DIRS`` 是根 conftest 裸名逐出钩子（tests/conftest.py）的置前
@@ -16,10 +16,12 @@ import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_MONITORING_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "monitoring"
+_MONITORING_DIR = _REPO_ROOT / "plugins" / "shared" / "monitoring"
+# 共享根（kernel_reads/server.py 顶层 import _root_api——db-read 桥 T6d 已上收 SDK）
+_SHARED_ROOT = _REPO_ROOT / "plugins" / "shared"
 
 _PLUGIN_SOURCE_DIRS = [str(_MONITORING_DIR)]
 
-for _d in _PLUGIN_SOURCE_DIRS:
+for _d in (str(_SHARED_ROOT), *_PLUGIN_SOURCE_DIRS):
     if _d not in sys.path:
         sys.path.insert(0, _d)

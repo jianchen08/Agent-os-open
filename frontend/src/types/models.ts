@@ -2,6 +2,8 @@
  * 核心数据模型类型定义
  */
 
+import type { TaskStatus } from './taskStatus'
+
 /**
  * Agent 类型
  */
@@ -127,8 +129,8 @@ export interface ThinkingStep {
   type: 'reasoning' | 'analysis' | 'planning' | 'evaluation'
   /** 步骤内容 */
   content: string
-  /** 步骤状态 */
-  status: 'pending' | 'running' | 'completed' | 'failed'
+  /** 步骤状态（任务七态子集：思考步骤不取 evaluating/stopped/timeout） */
+  status: Exclude<TaskStatus, 'evaluating' | 'stopped' | 'timeout'>
   /** 时间戳 */
   timestamp: string
   /** 子步骤 */
@@ -136,9 +138,16 @@ export interface ThinkingStep {
 }
 
 /**
- * 工具调用状态
+ * 工具调用状态：生命周期四态取自任务七态真源（工具调用不取
+ * evaluating/stopped/timeout）；'cancelled' 为工具调用自有终态
+ * （任务域旧别名值，任务级折叠为 stopped，工具卡保留原义）；
+ * 'interrupted' 为前端显式中断终态（历史孤儿工具调用：run 被中断
+ * 时结果从未返回，非流式上下文渲染静止终态卡，不得推导 pending/running）。
  */
-export type ToolCallStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+export type ToolCallStatus =
+  | Exclude<TaskStatus, 'evaluating' | 'stopped' | 'timeout'>
+  | 'cancelled'
+  | 'interrupted'
 
 /**
  * 工具调用记录（消息级别）
@@ -174,22 +183,6 @@ export interface MessageToolCall {
   currentStep?: string
   /** 所属任务容器 ID（用于解析工具卡片的文件路径） */
   containerTaskId?: string
-  /**
-   * 工具调用开始时消息 content 的长度
-   *
-   * 用于流式阶段将 content 按 toolCalls 的执行位置分割成多个 text block，
-   * 实现文本和工具调用的穿插显示。
-   * 仅在流式阶段由前端设置，数据库加载时不会携带此字段。
-   */
-  _contentLength?: number
-  /**
-   * 工具调用开始时 thinking.content 的长度
-   *
-   * 用于流式阶段将 thinking 按 toolCalls 的执行位置分割成多个 thinking block，
-   * 实现思考内容和文本/工具调用的穿插显示。
-   * 仅在流式阶段由前端设置，数据库加载时不会携带此字段。
-   */
-  _thinkingLength?: number
 }
 
 /**
@@ -224,15 +217,6 @@ export interface Message {
   }>
   /** 思考内容（AI 消息可选） */
   thinking?: ThinkingContent
-  /**
-   * 思考内容分割点（流式阶段使用）
-   *
-   * 流式期间同一个 messageId 的 thinking 包含两轮思考（tool_call 前后各一次），
-   * 此字段记录 tool_call 开始时 thinking.content.length，用于拆分 thinking。
-   * 第一轮 thinking[0:splitLength] 关联到 tool_call 前的文本，
-   * 第二轮 thinking[splitLength:] 关联到 tool_call 后的文本。
-   */
-  _thinkingSplitLength?: number
   /** 合并前的原始消息 ID 列表（合并连续 assistant 消息时填充） */
   _originalIds?: string[]
   /**
@@ -275,10 +259,18 @@ export interface Message {
     /** 错误信息 */
     error?: string
   }
-  /** 消息状态（流式状态或工具消息状态）。
+  /** 消息状态（流式状态或工具消息状态）：终态对 completed/failed 取自
+   *  任务七态真源（Exclude 收窄，消息不携带五个前置任务态），其余为
+   *  前端流式生命周期自有值。
    *  'failed' 用于 role=tool 的工具结果消息（后端持久化工具执行失败态），
    *  与 MessageToolCall.status 的 'failed' 对齐，刷新后可还原失败渲染。 */
-  status?: 'idle' | 'sending' | 'streaming' | 'completed' | 'error' | 'failed' | 'interrupted'
+  status?:
+    | Exclude<TaskStatus, 'pending' | 'running' | 'evaluating' | 'stopped' | 'timeout'>
+    | 'idle'
+    | 'sending'
+    | 'streaming'
+    | 'error'
+    | 'interrupted'
   /** 前端乐观消息 ID，用于与服务端持久化消息对账（消除重复/丢失） */
   clientMessageId?: string
   /** 后端权威 record_id（双字段范式：UI 寻址 id 永不变，

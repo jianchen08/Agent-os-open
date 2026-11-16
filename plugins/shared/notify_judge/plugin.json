@@ -1,0 +1,32 @@
+{
+  "id": "pipeline_notify_judge",
+  "name": "Notify Judge",
+  "version": "1.1.2",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "invoke_entry": "notify_judge.execute",
+  "description": "管道收尾通知判定（输出步骤，v4 终局门+LLM 主判+快切）：尾条 assistant 带 tool_calls→零判定零打标（中间轮非本轮交付，防「每个 AI 回复都弹」）；尾部窗口出现 human_interaction 调用→不弹（交互卡路径已通知，防双响）；最终文本命中强承诺/意图词→弹（快切省钱）；其余→LLM 主判（尾部窗口序列化截 4k，便宜模型档，判据「这条输出是否值得打断用户」）；LLM 失败→静默不弹（fail-closed 减噪，失败即全放行等于减噪器失效）。worthy=true 经 messages set-op 写尾条 assistant 消息 metadata.notify_worthy（true-only 契约键，前端 systemNotifier 消费，GET messages 回显）；false/无正文零写入直通，任何异常 warning 不阻断。",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load"
+    ]
+  },
+  "config_files": [
+    {
+      "id": "settings",
+      "path": "config/plugins/notify_judge/notify_judge.yaml",
+      "label": "通知判定配置"
+    }
+  ],
+  "priority": 55,
+  "host_group": "light",
+  "state": {
+    "reads": [
+      "messages"
+    ]
+  }
+}

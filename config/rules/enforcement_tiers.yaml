@@ -1,0 +1,48 @@
+# 规范执法档位注册表（方案 AI辅助编程体系落地AgentOS_20261022 §3.6 件 4）
+# 执法器：scripts/check_rule_enforcement_tier.py —— 无档位的规范不得入库。
+#
+# 每条规范立项必须标三档执法位之一：
+#   mechanical 机械闸（可完全机械判定 → run_gates/lint/schema；须给出 gates）
+#   metric     评估指标（半机械 → evaluation_metrics；须给出 metrics）
+#   review     审查清单（需语义判断 → 审查 AI 法定检查项；不得声明 gates/metrics）
+#   mixed      跨档（gates/metrics 至少一项）
+# 防悬空：gates 须在 run_gates GATES 中存在；metrics 须在 evaluation_metrics.yaml
+# 存在；review_docs 路径须存在（检查器机械校验）。
+# path 相对 config/rules/。存量未登记文件由 .github/enforcement-tier-baseline.txt
+# 棘轮放行（只减不增；触碰即清：改到哪个规则文件就登记哪个并从基线移除）。
+rules:
+  - path: document_context_rules.md
+    tier: review
+    note: 上下文读取与文档规范——读级序/文档落位/结构清单约定，执法面为编排器
+      与审查 AI 的流程核查（无独立机械 gate）。
+  - path: information_integrity_rules.md
+    tier: review
+    note: 信息诚实原则——来源标注/达成度如实/失败记录，执法面为审查 AI 对
+      报告类产出的验收检查表（无独立机械 gate）。
+  - path: per_domain/coding_domain_rules.md
+    tier: mixed
+    gates: [file-length-baseline, plugins-lint, kernel-clippy, kernel-fmt, frontend-lint]
+    metrics: [antipattern_scan, human_review]
+    review_docs: [docs/working/规则语义档审查检查表.md]
+    note: 编程域规则 mixed 档（提案 P-05/E3-4）。机械子集=Must Fix 文件行数闸与
+      lint 家族（调试残留/CJK 行宽/风格红线）；指标子集=antipattern_scan L0 反模式
+      扫描（空 except/调试残留/硬编码密钥）+ human_review 语义条款审查；语义子集
+      可勾选清单=review_docs 检查表（需求第一/最小输出/复用边界/行为测试/防拟合）。
+  - path: testing_rules.md
+    tier: mixed
+    gates: [plugins-heavy, plugins-coverage, sdk-test]
+    metrics: [human_review]
+    review_docs: [docs/working/规则语义档审查检查表.md]
+    note: 测试规范 mixed 档（提案 P-05/E3-4）。机械子集=pytest 车道族（heavy 执行 /
+      coverage 棘轮 / sdk-test），承载「无测试提交/新代码带测试」；语义子集=断行为
+      不断实现/防拟合/金字塔层级/意图测试，执法面=审查 AI 法定检查（human_review +
+      检查表）。
+  - path: PRIORITY.md
+    tier: mixed
+    gates: [gate-wiring]
+    metrics: [human_review]
+    review_docs: [docs/working/规则语义档审查检查表.md]
+    note: 跨文件优先级 mixed 档（提案 P-05/E3-4）。机械子集=「机械门禁优先于一切
+      软约束；门禁冲突以基线与 run_gates 接线为准」由 gate-wiring 元门禁承载；语义
+      子集=P0-P3 级序与同级源序裁决，执法面=审查 AI 冲突裁决时按此执行
+      （human_review + 检查表）。

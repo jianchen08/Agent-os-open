@@ -384,4 +384,59 @@ describe('apply* 入口边界（741/754/755）', () => {
   it('inferRenderIntent：result 为 null 且 args 无特征时安全返回 undefined', () => {
     expect(inferRenderIntent({ args: {}, result: null })).toBeUndefined()
   })
+
+  it('inferRenderIntent：file+items 对象数组（file_read 目录模式）→ table 卡先于 file 卡', () => {
+    const shape = {
+      file: 'D:/ws/tmp',
+      items: [
+        { name: 'a.txt', type: 'file', size: 1 },
+        { name: 'pkg', type: 'directory', size: 0 },
+      ],
+      count: 2,
+    }
+    expect(inferRenderIntent(ctx({}, shape))?.card).toBe('table')
+    const out = renderIntentToBlocks(inferRenderIntent(ctx({}, shape))!, ctx({}, shape))
+    expect(out[0].contentType).toBe('table')
+    const table = out[0].table as { columns: string[]; rows: string[][] }
+    expect(table.columns).toEqual(['name', 'type', 'size'])
+    expect(table.rows).toHaveLength(2)
+    expect(table.rows[0]).toEqual(['a.txt', 'file', '1'])
+  })
+
+  it('inferRenderIntent：仅 file 路径无 items → 仍落 file 卡（顺序翻转不误伤）', () => {
+    expect(inferRenderIntent(ctx({}, { file: 'D:/ws/out.pdf' }))?.card).toBe('file')
+  })
+})
+
+describe('task_card — 任务卡 meta 与 form 同构详情', () => {
+  beforeEach(() => loadRenderIntents([]))
+
+  it('deriveCardMeta：pipeline_id 闸门开入口，标题=任务名、摘要=任务短 id、图标 task', () => {
+    const meta = deriveCardMeta(
+      ctx({ goal_title: '写报告' }, { task_id: 'abc123def456', title: '写报告', status: 'running', pipeline_id: 'abc123def456' }),
+      intent('task_card'),
+    )
+    expect(meta.pipelineId).toBe('abc123def456')
+    expect(meta.taskId).toBe('abc123def456')
+    expect(meta.title).toBe('写报告')
+    expect(meta.summary).toBe('abc123def456')
+    expect(meta.icon).toBe('task')
+  })
+
+  it('deriveCardMeta：无 pipeline_id（在途/派发失败）→ 空对象，不开入口', () => {
+    expect(deriveCardMeta(ctx({ goal_title: 'x' }, {}), intent('task_card'))).toEqual({})
+    expect(deriveCardMeta(ctx({}, { task_id: 't' }), intent('task_card'))).toEqual({})
+  })
+
+  it('详情块与 form 卡同构（kv + json 折叠），不另立组件', () => {
+    const blocks = renderIntentToBlocks(intent('task_card'), ctx({}, { task_id: 't1', title: '写报告', pipeline_id: 't1' }))
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0].contentType).toBe('form')
+    // 纯结果侧 kv：任务即管道两 id 同值，三标量按 result 键序
+    expect(blocks[0].kvItems).toEqual([
+      { key: '任务ID', value: 't1' },
+      { key: '标题', value: '写报告' },
+      { key: '管道ID', value: 't1' },
+    ])
+  })
 })

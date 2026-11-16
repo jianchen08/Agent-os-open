@@ -1,0 +1,39 @@
+{
+  "gates": [
+    {
+      "id": "project_godot_hygiene",
+      "lane": "commit",
+      "tier": "block",
+      "run": ["python", "checks/project_godot_hygiene.py"],
+      "est_seconds": 2
+    },
+    {
+      "id": "addons_present",
+      "lane": "commit",
+      "tier": "block",
+      "run": ["python", "checks/addons_present.py"],
+      "est_seconds": 2
+    },
+    {
+      "id": "gdparse_syntax",
+      "lane": "commit",
+      "tier": "block",
+      "run": ["python", "checks/gdparse_syntax.py"],
+      "est_seconds": 10
+    },
+    {
+      "id": "godot_headless_import",
+      "lane": "commit",
+      "tier": "block",
+      "run": ["python", "checks/godot_headless_import.py"],
+      "est_seconds": 60
+    },
+    {
+      "id": "godot_boot_smoke",
+      "lane": "commit",
+      "tier": "warn",
+      "run": ["python", "checks/godot_boot_smoke.py"],
+      "est_seconds": 30
+    }
+  ]
+}

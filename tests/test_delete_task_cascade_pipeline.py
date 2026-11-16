@@ -14,11 +14,12 @@ from pathlib import Path
 
 import pytest
 
-# 0.2：tasks 插件位于 plugins/shared/system/tasks/，from tasks.service 需 system/ 父目录；
-# service.py 内部平铺导入 _task_* 兄弟模块，需 tasks 目录自身。
-_SYSTEM_DIR = Path(__file__).resolve().parent.parent / "plugins" / "shared" / "system"
-_TASKS_DIR = _SYSTEM_DIR / "tasks"
-for _d in (_SYSTEM_DIR, _TASKS_DIR):
+# 0.2 平铺：tasks 插件位于 plugins/shared/tasks/，from tasks.service 需
+# plugins/shared 父目录；service.py 内部平铺导入 _task_* 兄弟模块，需 tasks
+# 目录自身。
+_SHARED_DIR = Path(__file__).resolve().parent.parent / "plugins" / "shared"
+_TASKS_DIR = _SHARED_DIR / "tasks"
+for _d in (_SHARED_DIR, _TASKS_DIR):
     _s = str(_d)
     if _s not in sys.path:
         sys.path.insert(0, _s)
@@ -35,8 +36,8 @@ def _tasks_path_guard():
     同 suites/core 的守卫：其他插件测试的 autouse fixture（如 multimodal）
     会把各自目录推到 sys.path[0] 且不恢复，tasks 测试运行期懒加载
     `from storage import TaskStorage` 依赖 sys.path 首位是本插件目录。
-    用例结束后恢复原路径序——tasks 目录驻留会压制 system/workspace/ 的
-    namespace 包（tasks/workspace.py 裸模块优先于包）。task_types 必须
+    用例结束后恢复原路径序——tasks 目录驻留会压制 plugins/shared/workspace/
+    的 namespace 包（tasks/workspace.py 裸模块优先于包）。task_types 必须
     保留——测试模块收集期绑定的 TaskStatus 实例依赖其驻留。
     """
     _saved = sys.path[:]

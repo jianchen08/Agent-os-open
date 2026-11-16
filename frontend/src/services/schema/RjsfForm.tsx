@@ -19,8 +19,10 @@
 import Form from '@rjsf/antd'
 import validator from '@rjsf/validator-ajv8'
 import { Select, Switch } from 'antd'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { toast } from 'sonner'
+import { DirectoryTreePickerModal } from '@/components/workspace/DirectoryTreePickerModal'
+import { DEFAULT_COLOR_PICKER_HEX } from '@/config/themes'
 import apiClient from '@/services/api/client'
 import type { UIInputFormField } from '@/types/schema'
 import type { IChangeEvent } from '@rjsf/core'
@@ -539,7 +541,7 @@ function AsyncSelectWidget(props: WidgetProps) {
 
 /** color → 原生取色器 + 十六进制回显 */
 function ColorPickerWidget({ id, value, onChange, disabled, readonly }: WidgetProps) {
-  const hex = String(value ?? '#000000')
+  const hex = String(value ?? DEFAULT_COLOR_PICKER_HEX)
   return (
     <div className="flex items-center gap-2">
       <input
@@ -574,14 +576,17 @@ const DIRECTORY_INPUT_CLS =
   'bg-background border-input w-full min-w-0 flex-1 rounded-md border px-3 py-2 text-sm'
 
 /**
- * directory → 文本输入 + 「浏览…」（Electron 原生目录对话框）
+ * directory → 文本输入 + 「目录树」+「浏览…」（多端目录树 / Electron 原生对话框）
  *
- * 表单值恒为文本（绝对路径），手输与浏览两路并存：Electron 壳注入
- * electronAPI.dialog 时渲染浏览按钮（系统资源管理器选择，选中回填/取消不改写/
- * 失败 toast 不静默）；Web 构建无桥接，退化为纯文本输入。
+ * 表单值恒为文本（绝对路径），三路并存：「目录树」打开 DirectoryTreePickerModal
+ * （复用 FileTreeWidget 的 fsbrowse:// 多端目录树——本地盘+设备分支挂载锚，
+ * 选中回填，Web/Electron 通用，不依赖系统资源管理器）；Electron 壳注入
+ * electronAPI.dialog 时另渲染「浏览…」（系统资源管理器选择，选中回填/取消
+ * 不改写/失败 toast 不静默）；Web 构建无桥接则无该按钮。
  */
 function DirectoryPickerWidget({ id, value, onChange, disabled, readonly, placeholder }: WidgetProps) {
   const pick = window.electronAPI?.dialog?.pickDirectory
+  const [treeOpen, setTreeOpen] = useState(false)
   const handleChange = (next: string) => onChange(next)
   const input = (
     <input
@@ -594,7 +599,30 @@ function DirectoryPickerWidget({ id, value, onChange, disabled, readonly, placeh
       onChange={(e) => handleChange(e.target.value)}
     />
   )
-  if (!pick) return input
+  /** 统一渲染：文本输入 + 「目录树」（fsbrowse 多端目录树模态框）+ 可选「浏览…」 */
+  const renderWithTreeButton = (browseButton: ReactNode) => (
+    <div className="flex items-center gap-2">
+      {input}
+      <button
+        type="button"
+        data-testid="directory-tree-browse"
+        className="border-input bg-background hover:bg-muted text-foreground disabled:cursor-not-allowed disabled:opacity-50 whitespace-nowrap rounded-md border px-3 py-2 text-sm"
+        disabled={disabled || readonly}
+        onClick={() => setTreeOpen(true)}
+      >
+        目录树
+      </button>
+      {browseButton}
+      <DirectoryTreePickerModal
+        open={treeOpen}
+        onClose={() => setTreeOpen(false)}
+        onPick={(dir) => handleChange(dir)}
+      />
+    </div>
+  )
+  if (!pick) {
+    return renderWithTreeButton(null)
+  }
 
   const handleBrowse = () => {
     pick()
@@ -605,19 +633,16 @@ function DirectoryPickerWidget({ id, value, onChange, disabled, readonly, placeh
         toast.error(`目录选择失败：${err instanceof Error ? err.message : String(err)}`)
       })
   }
-  return (
-    <div className="flex items-center gap-2">
-      {input}
-      <button
-        type="button"
-        data-testid="directory-browse"
-        className="border-input bg-background hover:bg-muted text-foreground disabled:cursor-not-allowed disabled:opacity-50 whitespace-nowrap rounded-md border px-3 py-2 text-sm"
-        disabled={disabled || readonly}
-        onClick={handleBrowse}
-      >
-        浏览…
-      </button>
-    </div>
+  return renderWithTreeButton(
+    <button
+      type="button"
+      data-testid="directory-browse"
+      className="border-input bg-background hover:bg-muted text-foreground disabled:cursor-not-allowed disabled:opacity-50 whitespace-nowrap rounded-md border px-3 py-2 text-sm"
+      disabled={disabled || readonly}
+      onClick={handleBrowse}
+    >
+      浏览…
+    </button>,
   )
 }
 
@@ -660,6 +685,11 @@ export interface RjsfFormProps {
   layout?: 'single' | 'double'
   /** 整表禁用（只读展示场景，如工具 output_schema 结构化视图） */
   disabled?: boolean
+  /** 表单元素 id：外部提交按钮经 form 属性关联原生提交（高表单弹层把主操作
+   *  钉在弹窗 footer 用，表单内提交钮由 hideSubmit 收起） */
+  formId?: string
+  /** 不渲染表单内提交按钮（配合外部 form 关联提交钮，避免出现两颗提交钮） */
+  hideSubmit?: boolean
 }
 
 /**
@@ -677,6 +707,8 @@ export function RjsfForm({
   title,
   layout = 'single',
   disabled,
+  formId,
+  hideSubmit,
 }: RjsfFormProps) {
   const [submitting, setSubmitting] = useState(false)
   // 提交被表单校验拦截的可见反馈（验收：任何保存失败必有可见反馈，禁止静默）。
@@ -698,20 +730,18 @@ export function RjsfForm({
     () => ({
       ...uiSchema,
       'ui:submitButtonOptions': {
-        norender: !onSubmit,
+        norender: !onSubmit || hideSubmit,
         submitText: submitting ? '提交中...' : submitLabel,
         props: { type: 'primary' as const, loading: submitting, disabled: submitting },
       },
     }),
-    [uiSchema, submitLabel, onSubmit, submitting],
+    [uiSchema, submitLabel, onSubmit, submitting, hideSubmit],
   )
 
   if (fields.length === 0) {
-    return (
-      <div className="rounded-lg border border-dashed p-6 text-center">
-        <p className="text-muted-foreground text-sm">暂无表单字段</p>
-      </div>
-    )
+    // 空态不另起占位组件，由选项框控件自身承载（禁用 + 「无选项」，用户裁定
+    // 2026-10-18）——与表单字段用同一颗 Select，视觉与常规空 options 字段一致
+    return <Select className="w-full" disabled placeholder="无选项" options={[]} />
   }
 
   const handleSubmit = async ({ formData: values }: IChangeEvent) => {
@@ -754,6 +784,7 @@ export function RjsfForm({
         transformErrors={transformErrors}
         omitExtraData
         disabled={disabled}
+        id={formId}
         onSubmit={handleSubmit}
         onError={(errors) => {
           // 只收集不落在任何字段上的 schema 级错误（如 ajv 编译失败的 {stack}）——

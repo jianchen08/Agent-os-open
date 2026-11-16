@@ -997,6 +997,37 @@ mod tests {
     }
 
     #[test]
+    fn test_task_terminal_route_guard_grammar() {
+        // autonomous.yaml post 终态收束路由的实际表达式（2026-10-21 会话死锁
+        // 修复刀）：and 链 + 括号 or 组 + 缺键路径 != none——文法回归即管道
+        // 加载期编译失败（fail-closed 全管道不可用），故原样锁死。
+        let session = json!({ "task": { "status": "cancelled" } });
+        assert!(
+            !eval_condition(
+                "task.id != none and (task.status == 'completed' or task.status == 'failed' or task.status == 'cancelled')",
+                &session,
+            ),
+            "会话（无 task.id）残留终态不得命中终态收束路由"
+        );
+        let task = json!({ "task": { "id": "t1", "status": "cancelled" } });
+        assert!(
+            eval_condition(
+                "task.id != none and (task.status == 'completed' or task.status == 'failed' or task.status == 'cancelled')",
+                &task,
+            ),
+            "任务管道自身终态照常命中"
+        );
+        let running = json!({ "task": { "id": "t2", "status": "running" } });
+        assert!(
+            !eval_condition(
+                "task.id != none and (task.status == 'completed' or task.status == 'failed' or task.status == 'cancelled')",
+                &running,
+            ),
+            "未决投影不命中"
+        );
+    }
+
+    #[test]
     fn test_flat_dotted_key() {
         // 平键点链：本仓 state 惯例是平铺点键（插件 state_updates 经 set_key
         // 平插 "task.status"/"router.duplicate_back_llm"，不拆点）——路由条件

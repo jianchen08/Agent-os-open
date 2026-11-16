@@ -41,8 +41,6 @@ export interface PendingInteraction {
   pipelineId?: string
   /** 选择模式的选项 */
   options?: InteractionOption[]
-  /** 澄清问题 */
-  questions?: string[]
   /** 对话模式的开场消息 */
   initialMessage?: string
   /** 快捷回复建议 */
@@ -55,14 +53,14 @@ export interface PendingInteraction {
   timeoutSeconds?: number
   /** 后端创建时刻（ISO）；倒计时起点 */
   createdAt?: string
+  /** 后端超时前提醒已送达（interaction_timeout_reminder，P-20）：审批卡切提醒态 */
+  timeoutReminded?: boolean
   timestamp: string
   status: 'pending' | 'responded' | 'navigated' | 'dismissed' | 'entered'
   /** 审批请求 ID（仅 conversation 模式下审批场景有值） */
   reviewRequestId?: string
   /** 关联制品 ID 列表（仅审批场景有值） */
   artifactIds?: string[]
-  /** 文件内容映射（由前端通过 file-content API 拉取） */
-  fileContents?: Record<string, string>
   /** 所属会话 ID */
   sessionId?: string
 }
@@ -85,10 +83,8 @@ interface InteractionState {
   dismissInteraction: (requestId: string) => void
   /** 标记用户已进入对话（管道挂起等待用户输入） */
   markEntered: (requestId: string) => void
-  /** 按 threadId 获取待处理交互 */
-  getPendingForThread: (threadId: string) => PendingInteraction[]
-  /** 按 pipelineId 获取已进入但未响应的交互 */
-  getEnteredForPipeline: (pipelineId: string) => PendingInteraction | undefined
+  /** 标记后端超时前提醒已送达（interaction_timeout_reminder，P-20）：卡片切提醒态 */
+  markTimeoutReminded: (requestId: string) => void
   /** 按 pipelineId 获取未决 conversation 交互（用户发消息即解除，2026-09-02 裁定） */
   getPendingConversationsForPipeline: (pipelineId: string) => PendingInteraction[]
   /** 打开全局交互浮层 */
@@ -180,37 +176,16 @@ export const useInteractionStore = create<InteractionState>()((set, get) => ({
     })
   },
 
-  getPendingForThread: (threadId) => {
-    return get().pendingInteractions.filter(
-      (i) => i.threadId === threadId && i.status === 'pending',
-    )
-  },
-
-  /** 按 pipelineId 获取已进入但未响应的交互（精确归属，不跨命名空间撞键）
-   *
-   * 归属规则：
-   * - i.pipelineId === probe 精确命中（0.2 规范坐标）；
-   * - pipelineId 缺失时允许 threadId === probe（thread==pipeline 旧身份命名空间的
-   *   确定性兼容，非猜测）；
-   * - agentId 是 Agent 实体坐标，绝不参与管道归属匹配；
-   * - 多命中（同管道多条 entered）→ 不返回（不自动批准），记 warn 暴露歧义。
-   */
-  getEnteredForPipeline: (pipelineId) => {
-    const matches = get().pendingInteractions.filter(
-      (i) =>
-        i.status === 'entered' &&
-        (i.pipelineId === pipelineId || (!i.pipelineId && i.threadId === pipelineId)),
-    )
-    if (matches.length === 0) return undefined
-    if (matches.length > 1) {
-      console.warn(
-        '[interactionStore] getEnteredForPipeline 歧义：管道 %s 存在 %d 条 entered 交互，不自动批准',
-        pipelineId?.slice(0, 12),
-        matches.length,
-      )
-      return undefined
-    }
-    return matches[0]
+  /** 超时提醒单点置位（幂等）：仅 pending 卡生效——后端每请求只提醒一次，
+   *  WS 重连重放同帧由 !timeoutReminded 守卫吞掉（已提醒不重渲染提醒态） */
+  markTimeoutReminded: (requestId) => {
+    set((state) => ({
+      pendingInteractions: state.pendingInteractions.map((i) =>
+        i.requestId === requestId && i.status === 'pending' && !i.timeoutReminded
+          ? { ...i, timeoutReminded: true }
+          : i,
+      ),
+    }))
   },
 
   /** 按 pipelineId 获取未决 conversation 交互（用户发消息即解除）
@@ -218,7 +193,7 @@ export const useInteractionStore = create<InteractionState>()((set, get) => ({
    * 2026-09-02 裁定：对交互工具，用户发送消息本身即一次响应——解除挂起、
    * 工具返回空回复、消息继续推进。覆盖 pending（未点进入对话）与 entered
    * 两态；choice 模式需用户显式选选项，不自动解除；notification 不阻塞。
-   * 归属规则同 getEnteredForPipeline（pipelineId 精确 / 缺失时 threadId 兼容）。
+   * 归属规则：pipelineId 精确命中，缺失时 threadId 兼容（旧命名空间）。
    * 用户发消息 == 明确交互意图，同管道多条全部返回（逐一解除，不做歧义豁免）。
    */
   getPendingConversationsForPipeline: (pipelineId) => {

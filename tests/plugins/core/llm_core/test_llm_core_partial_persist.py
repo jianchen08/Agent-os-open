@@ -26,10 +26,10 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_LLM_CORE_DIR = _REPO_ROOT / "plugins" / "shared" / "pipeline" / "core" / "llm_core"
+_LLM_CORE_DIR = _REPO_ROOT / "plugins" / "shared" / "llm_core"
 _CORE_DIR = _LLM_CORE_DIR.parent
 _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
-_SYSTEM_LLM_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "llm"
+_SYSTEM_LLM_DIR = _REPO_ROOT / "plugins" / "shared" / "llm"
 # 平铺 import 路径：llm_core 平铺模块 + pipeline namespace 包根 + system/llm
 # （_config_models 平铺 import）。插入顺序经设计：后插入者在 sys.path 更前，
 # _LLM_CORE_DIR 必须压过 _SYSTEM_LLM_DIR——两处均有 adapter.py，

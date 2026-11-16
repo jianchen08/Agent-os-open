@@ -17,8 +17,8 @@ import time
 from pathlib import Path
 
 import pytest
-from bash_types import ProcessInfo
-from process_manager import ProcessManager
+from agentos_plugin_sdk.process_runtime import ProcessInfo
+from agentos_plugin_sdk.process_runtime import ProcessManager
 
 pytestmark = pytest.mark.unit
 
@@ -229,7 +229,7 @@ def test_startup_sweep_summary_logged(tmp_path, caplog):
     stale.write_text("x", encoding="utf-8")
     _set_mtime(stale, 10 * 24 * 3600.0)
 
-    with caplog.at_level(logging.INFO, logger="process_manager"):
+    with caplog.at_level(logging.INFO, logger="agentos_plugin_sdk.process_runtime.manager"):
         ProcessManager(log_dir=log_dir)
 
     summary = [r for r in caplog.records if "启动日志清扫完成" in r.message]
@@ -240,6 +240,6 @@ def test_startup_sweep_summary_logged(tmp_path, caplog):
     caplog.clear()
     empty_dir = tmp_path / "empty"
     empty_dir.mkdir()
-    with caplog.at_level(logging.INFO, logger="process_manager"):
+    with caplog.at_level(logging.INFO, logger="agentos_plugin_sdk.process_runtime.manager"):
         ProcessManager(log_dir=empty_dir)
     assert not [r for r in caplog.records if "启动日志清扫完成" in r.message]

@@ -40,7 +40,7 @@ export function FullscreenOverlay({ isActive, title, onExit, children }: Fullscr
       >
         <span className="text-foreground truncate text-[13px] font-medium">{title ?? '全屏模式'}</span>
         <button
-          className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-7 items-center justify-center rounded-md px-2.5 text-xs transition-colors"
+          className="text-muted-foreground hover:bg-muted hover:text-foreground flex h-7 items-center justify-center rounded-md px-2.5 text-xs transition-colors"
           onClick={onExit}
         >
           退出全屏 (Esc)

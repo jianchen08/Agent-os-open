@@ -8,9 +8,13 @@ import {
 } from '@/constants/websocket'
 import { isAuthFailureFromError, isExpired, refresh, getAccessToken } from '@/services/auth/tokenLifecycle'
 import { fetchWsTicket } from '@/services/auth/wsTicket'
+import { resolveRelayWsUrl } from '@/services/wsRelay'
+import { API_BASE_URL } from '@/constants/api'
 import { triggerAuthExpired } from '@/services/authCallbacks'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { useChatInputStore } from '@/stores/chatInputStore'
 import { loggers } from '@/utils/logger'
+import { generateUUID } from '@/utils/uuid'
 
 const _wsLogger = loggers.websocket
 
@@ -202,7 +206,17 @@ class GlobalWebSocketService {
     if (this._disposed || this._status !== 'connecting' || seq !== this._connectSeq) return
 
     // 断线重连时带上 last_sequence，让后端重放断线期间的消息
-    const url = buildGlobalWebSocketUrl({ ticket }, this._lastSequence > 0 ? this._lastSequence : undefined)
+    // 远端内核：优先走主进程 WS 中继（app:// 安全源发 ws:// 远端属混合内容，
+    // 渲染层直连被浏览器拦）；本地内核/无宿主能力→直连。
+    let url = buildGlobalWebSocketUrl({ ticket }, this._lastSequence > 0 ? this._lastSequence : undefined)
+    const relayUrl = await resolveRelayWsUrl(
+      API_BASE_URL,
+      ticket,
+      this._lastSequence > 0 ? this._lastSequence : undefined,
+    )
+    if (relayUrl) {
+      url = relayUrl
+    }
     _wsLogger.debug('[GlobalWS] connecting to %s (last_sequence=%d)', url.substring(0, 60), this._lastSequence)
     this.ws = new WebSocket(url)
 
@@ -282,15 +296,21 @@ class GlobalWebSocketService {
           this._handleKickedByReplacement()
           return
         }
-        // user_input 回执（ADR 2026-09-29）：ok:true 撤在途计时；ok:false 撤计时
+        // user_input 回执（ADR 2026-09-29）：ok 双值都撤在途计时；ok:false 撤计时
         // 并立即透传既有 send_timeout 通道（serverAware=true，UI 文案按"服务器
         // 拒收"呈现，不再等 TTL 也不谎报"后端无记录"）。
+        // 发送态生命周期（2026-11-04 落定语义重定义）：ack 只是受理回执，不撤
+        // 发送在途标记——发送态终点 = 气泡认领/队列条出现（landSendByCmid）；
+        // ok:true 与落定之间的死寂窗口由发送态（转圈+输入锁定）覆盖，5s 落定
+        // 超时（chatInputStore.SEND_LANDING_TIMEOUT_MS）兜底解锁不判死。
         if (data.type === 'user_input_ack') {
           const cmid = typeof data.client_message_id === 'string' ? data.client_message_id : ''
           const armed = cmid ? this._disarmUserInputTimer(cmid) : undefined
           if (data.ok === false) {
             const reason = `服务器拒绝派发：${typeof data.error === 'string' ? data.error : '未知错误'}`
             _wsLogger.warn('[GlobalWS] user_input 被内核拒收: cmid=%s error=%s', cmid.slice(0, 8), data.error)
+            // 失败出口：撤发送在途并落 failed outcome（操作点报错，文本保留可重试）
+            if (cmid) useChatInputStore.getState().endSendByCmid(cmid, reason)
             this._emit(WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT, {
               type: WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT,
               data: {
@@ -304,7 +324,8 @@ class GlobalWebSocketService {
           }
         }
         // stream_start：该管道已有轮次在跑（内核→前端方向实测可达），按 pipeline_id
-        // 撤在途计时（回执契约的兜底撤销，ack 缺失时第二撤点）。
+        // 撤在途计时（回执契约的兜底撤销，ack 缺失时第二撤点）。发送在途标记不在
+        // 此撤：stream_start ≠ 落定（气泡未上屏），发送态由落定/5s 超时收口。
         if (data.type === 'stream_start') {
           const pid = data?.data?.pipeline_id ?? data?.pipeline_id
           if (typeof pid === 'string') {
@@ -407,7 +428,7 @@ class GlobalWebSocketService {
   sendUserInput(threadId: string, content: string, opts?: {
     pipelineId?: string
     attachments?: unknown[]
-    /** 思考选择 = 参数组 JSON 串（'' = 不覆盖；内核透传 → llm_core 解析覆盖模型参数） */
+    /** 思考强度（参数组 JSON 串；内核透传 → llm_core 白名单过滤直覆盖） */
     thinkingStrength?: string
     clientMessageId?: string
     /**
@@ -430,6 +451,12 @@ class GlobalWebSocketService {
      * 专属管道的通道；不带则按会话默认管道。
      */
     pipelineConfigId?: string
+    /**
+     * 显式模型选择（llm.yaml models 键）：帧 model_id 字段——内核按插件
+     * widget 声明的 frame_field 名单合成单键 state overlay，llm_core 解析链
+     * 首位消费（显式选择最高优先级覆盖管道配置）。不带 = 跟随管线既有绑定。
+     */
+    modelId?: string
   }): void {
     const msg: PendingMessage = {
       type: 'user_input',
@@ -438,6 +465,7 @@ class GlobalWebSocketService {
       pipeline_id: opts?.pipelineId || '',
       attachments: opts?.attachments || [],
       thinking_strength: opts?.thinkingStrength || '',
+      ...(opts?.modelId ? { model_id: opts.modelId } : {}),
       client_message_id: opts?.clientMessageId || '',
       ...(opts?.executionContext ? { execution_context: opts.executionContext } : {}),
       ...(opts?.agentId ? { agent_id: opts.agentId } : {}),
@@ -488,6 +516,10 @@ class GlobalWebSocketService {
           cmid.slice(0, 8),
         )
       }
+      // 20s 看门狗 = 排队未发出/无回执的兜底判死：剔除滞留队列帧并落 failed
+      // outcome（对 5s 落定超时已判死的 cmid 幂等零动作；reason 随 outcome 供
+      // 输入区操作点报错）
+      useChatInputStore.getState().endSendByCmid(cmid, reason)
       this._emit(WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT, {
         type: WS_LOCAL_EVENTS.USER_INPUT_SEND_TIMEOUT,
         data: {
@@ -546,6 +578,18 @@ class GlobalWebSocketService {
     this._send({ type: 'stop_generation', thread_id: threadId, reason, pipeline_id: pipelineId })
   }
 
+  /** 队列条目强制发送（2026-10-27 权威化单帧原语）：内核侧「目标条目重排至
+   *  队首 + 停当前回复（不退回队列）+ 链尾 drain 首个消费目标」。其余排队
+   *  条目全程留队继续排队。通知性消息：离线时入队，重连后随 _flushQueue 发出。 */
+  sendForcePendingInput(threadId: string, opts: { pipelineId: string; inputId: string }): void {
+    this._send({
+      type: 'force_pending_input',
+      thread_id: threadId,
+      pipeline_id: opts.pipelineId,
+      input_id: opts.inputId,
+    })
+  }
+
   /** 重新生成：截断到目标 user 消息后重跑（缺省最后一条 user；带 new_content
    *  为编辑重发——后端改写目标消息内容后重跑）。通知性消息：离线时入队，
    *  重连后随 _flushQueue 发出。 */
@@ -589,7 +633,17 @@ class GlobalWebSocketService {
 
   /** 响应人类交互请求 */
   sendInteractionResponse(threadId: string, requestId: string, response: unknown): void {
-    this._send({ type: 'interaction_response', thread_id: threadId, data: { request_id: requestId, response } })
+    // 帧级唯一 cmid：离线队列判重键=(type, thread_id, client_message_id)，本帧
+    // 原生无 cmid 时同 thread 两张不同卡的应答会因 undefined===undefined 被误判
+    // 重复而静默丢弃（第二张卡永远发不出去，审批只能等超时按拒绝裁决）。每次
+    // 发送生成唯一 cmid 使判重键唯一化；误发的重复应答由服务端按交互 sessionId
+    // 幂等拒绝兜底，多发帧无害。
+    this._send({
+      type: 'interaction_response',
+      thread_id: threadId,
+      client_message_id: generateUUID(),
+      data: { request_id: requestId, response },
+    })
   }
 
   /** 订阅事件（handler 入参类型由调用方按事件契约声明） */

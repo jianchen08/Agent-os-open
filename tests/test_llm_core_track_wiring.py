@@ -27,14 +27,13 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_CORE_DIR = _REPO_ROOT / "plugins" / "shared" / "pipeline" / "core"
-_LLM_CORE_DIR = _CORE_DIR / "llm_core"
 _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
-_SYSTEM_LLM_DIR = _SHARED_DIR / "system" / "llm"
+_LLM_CORE_DIR = _SHARED_DIR / "llm_core"
+_SYSTEM_LLM_DIR = _SHARED_DIR / "llm"
 
 while str(_SHARED_DIR) in sys.path:
     sys.path.remove(str(_SHARED_DIR))
-for _d in (_SYSTEM_LLM_DIR, _CORE_DIR, _LLM_CORE_DIR):
+for _d in (_SYSTEM_LLM_DIR, _LLM_CORE_DIR):
     if str(_d) in sys.path:
         sys.path.remove(str(_d))
     sys.path.insert(0, str(_d))

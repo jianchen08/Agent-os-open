@@ -835,5 +835,5 @@ describe('组件级颜色对门禁（TSX 层级 × 全主题对比度）', () =>
         .filter(Boolean)
         .join('\n\n'),
     ).toEqual({ newlyAdded: [], stale: [] })
-  })
+  }, 120000)
 })

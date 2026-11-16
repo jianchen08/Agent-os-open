@@ -31,7 +31,7 @@ import tests._isolation_path  # noqa: F401  # 注入 isolation_guard 插件目�
 # security_check/plugin.py 抢走 `plugin` 名）。本目录置顶 + 裸名逐出后再 import。
 _ISOLATION_GUARD_DIR = str(
     Path(__file__).resolve().parent.parent
-    / "plugins" / "shared" / "pipeline" / "input" / "isolation_guard",
+    / "plugins" / "shared" / "isolation_guard",
 )
 if _ISOLATION_GUARD_DIR in sys.path:
     sys.path.remove(_ISOLATION_GUARD_DIR)
@@ -40,8 +40,8 @@ for _bare in ("plugin", "tool", "models", "service"):
     sys.modules.pop(_bare, None)
 
 from agentos_plugin_sdk.isolation_types import IsolationLevel  # noqa: E402
-from pipeline.plugin import PluginContext  # noqa: E402
-from pipeline.types import StateKeys  # noqa: E402
+from _libs.pipeline_base.plugin import PluginContext  # noqa: E402
+from _libs.pipeline_base.types import StateKeys  # noqa: E402
 import plugin as plugin_module  # noqa: E402,F401  # 模块对象钉住：裸名串扰治理 evict 后引用不断
 from plugin import IsolationGuard  # noqa: E402
 
@@ -146,7 +146,7 @@ def _guard_with_probe(
     with patch("decider.IsolationDecider"):
         # 显式钉 docker 后端：本机仓库 yaml 可能启用 wsl_native，探测分派
         # 会随之改道，使本文件锁定的 docker 探测语义失真
-        return IsolationGuard(config={"providers": {"wsl_native": {"enabled": False}}})
+        return IsolationGuard(config={"providers": {"wsl_native": {"enabled": False}, "linux_native": {"enabled": False}}})
 
 
 class TestProbeErrorFailClosed:
@@ -202,7 +202,7 @@ class TestProbeErrorFailClosed:
             run=lambda *a, **k: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd="docker", timeout=3)),
         )
         _container_policy(guard)
-        guard._get_or_create_container = AsyncMock(return_value="mock-container-1")
+        guard._get_or_create_container = AsyncMock(return_value=("mock-container-1", None))
 
         # 越过冷却窗口；复检时探测边界转为健康
         monkeypatch.setattr("subprocess.run", lambda *a, **k: _docker_run_ok())

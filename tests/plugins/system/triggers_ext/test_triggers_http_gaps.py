@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 _REPO = Path(__file__).resolve().parents[4]
-_PLUGIN_DIR = _REPO / "plugins" / "shared" / "tools" / "triggers_ext"
+_PLUGIN_DIR = _REPO / "plugins" / "shared" / "triggers_ext"
 for _d in (str(_PLUGIN_DIR), str(_REPO / "plugins" / "sdk" / "src")):
     if _d not in sys.path:
         sys.path.insert(0, _d)
@@ -51,6 +51,10 @@ def _token(user_id: str = "u1", username: str = "alice", *, expired: bool = Fals
     return base64.b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
 
 
+# 内核已认证分发的身份头形态（http_dispatcher 权威注入，键已小写）
+_OWNER_H = {"x-agentos-tenant": "t1", "x-agentos-user": "u1", "x-agentos-role": "user"}
+
+
 def _make_trigger(
     trigger_id: str = "trigger_event_abc123def456",
     *,
@@ -64,6 +68,8 @@ def _make_trigger(
         event_name="task_completed",
         message="触发注入消息",
         pipeline_id=pipeline_id,
+        # X6-F1 归属过滤：播种触发器带属主（与 _OWNER_H 调用者身份一致）
+        metadata={"user_id": "u1", "tenant_id": "t1"},
     )
 
 
@@ -111,6 +117,7 @@ def test_update_via_dispatch_ok_and_validation_400() -> None:
     resp = asyncio.run(http_api.handle_http_dispatch(
         f"{PREFIX}/{cfg.trigger_id}", "PUT",
         _encode_body({"pipeline_id": "other", "max_count": 5}),
+        {}, _OWNER_H,
     ))
     assert resp["success"] is False, resp
     assert resp["data"]["status"] == 400
@@ -119,6 +126,7 @@ def test_update_via_dispatch_ok_and_validation_400() -> None:
     body = _unwrap(asyncio.run(http_api.handle_http_dispatch(
         f"{PREFIX}/{cfg.trigger_id}", "PUT",
         _encode_body({"pipeline_id": "p1", "max_count": 5, "max_time": "2h"}),
+        {}, _OWNER_H,
     )))
     assert body["trigger"]["trigger_id"] == cfg.trigger_id
     assert body["trigger"]["max_fires"] == 5
@@ -134,7 +142,7 @@ def test_delete_via_dispatch() -> None:
     cfg = _make_trigger()
     mgr.register(cfg)
     body = _unwrap(asyncio.run(http_api.handle_http_dispatch(
-        f"{PREFIX}/{cfg.trigger_id}", "DELETE")))
+        f"{PREFIX}/{cfg.trigger_id}", "DELETE", headers=_OWNER_H)))
     assert body == {"deleted": True, "trigger_id": cfg.trigger_id}
     # BUG-23：删除 = 注销，注册表移除（列表重拉条目消失）
     assert mgr.get(cfg.trigger_id) is None
@@ -144,7 +152,9 @@ def test_fire_via_dispatch() -> None:
     """POST /triggers/{id}/trigger 经 dispatch 分发 → 手动触发注入。"""
     delivered: list[tuple[str, str]] = []
 
-    async def _fake_injector(pipeline_id: str, message: str, user_id: str) -> Any:
+    async def _fake_injector(
+        pipeline_id: str, message: str, user_id: str, state: dict[str, Any] | None = None
+    ) -> Any:
         delivered.append((pipeline_id, message))
         return {"ok": True}
 
@@ -156,7 +166,7 @@ def test_fire_via_dispatch() -> None:
         cfg = _make_trigger(pipeline_id="p_fire")
         mgr.register(cfg)
         body = _unwrap(loop.run_until_complete(http_api.handle_http_dispatch(
-            f"{PREFIX}/{cfg.trigger_id}/trigger", "POST")))
+            f"{PREFIX}/{cfg.trigger_id}/trigger", "POST", headers=_OWNER_H)))
         assert body == {"fired": True, "trigger_id": cfg.trigger_id}
         loop.run_until_complete(asyncio.sleep(0))  # 注入经 loop 调度
         assert delivered and delivered[0][0] == "p_fire"

@@ -287,14 +287,14 @@ async fn message_id_injected_once_into_first_assistant_append() {
 async fn message_id_injection_skips_modify_ops_on_old_slots() {
     // A1：对旧槽位的 modify op（显式旧 seq）不注入 message_id——
     // 防止 context_window_guard 等改写历史 assistant 时误挂本轮 message_id。
+    // 旧槽位 = 本轮流式 id 分配前已落库的历史（真机 user_input/上一轮消息同构，
+    // 2026-10-19 构造修正：原构造把历史写在认领批次里，槽位被误认领，断言的
+    // 实为「粘滞改写」路径——见 op_update_round_claimed_slot_modify_keeps_streaming_id）。
     let store = SqliteStore::open_memory().unwrap();
     let backend: &dyn StorageBackend = &store;
-    let mut state = json!({
-        "pipeline_id": "p6",
-        "message_id": "a_run_002",
-        "_assistant_id_assigned": false,
-        "messages": []
-    });
+    let mut state = json!({ "pipeline_id": "p6", "messages": [] });
+
+    // 历史 assistant 在轮次开始前落库（无 message_id → 内容指纹）
     apply_messages_op_update(
         &mut state,
         backend,
@@ -307,18 +307,29 @@ async fn message_id_injection_skips_modify_ops_on_old_slots() {
     .await
     .unwrap();
 
-    // 同批 op 含：历史槽位 modify（seq 0，assistant）+ 新 append（无 seq，user）
+    // round_start 等价形态：分配本轮流式 id、复位闩锁
+    state["message_id"] = json!("a_run_002");
+    state["_assistant_id_assigned"] = json!(false);
+
+    // 本轮首个 assistant 追加（无 seq → 引擎分配 seq 1）：认领 a_run_002
     apply_messages_op_update(
         &mut state,
         backend,
         "default",
-        &[
-            set(
-                0,
-                json!({ "role": "assistant", "content": "历史回复(改写)" }),
-            ),
-            json!({ "op": "set", "msg": { "role": "user", "content": "新消息" } }),
-        ],
+        &[json!({ "op": "set", "msg": { "role": "assistant", "content": "本轮回复" } })],
+    )
+    .await
+    .unwrap();
+
+    // 旧槽位（seq 0，本轮认领之前已存在）显式 seq 改写：不得注入本轮 message_id
+    apply_messages_op_update(
+        &mut state,
+        backend,
+        "default",
+        &[set(
+            0,
+            json!({ "role": "assistant", "content": "历史回复(改写)" }),
+        )],
     )
     .await
     .unwrap();
@@ -337,5 +348,78 @@ async fn message_id_injection_skips_modify_ops_on_old_slots() {
     assert!(
         mod_row.message_id.starts_with("mc_"),
         "modify 回退内容指纹（内容变了指纹也变）"
+    );
+}
+
+#[tokio::test]
+async fn op_update_round_claimed_slot_modify_keeps_streaming_id() {
+    // 真机 2026-10-19 偶发双气泡根因复现（装机库 pipeline 9b4da24d92e1 实证）：
+    // 最终轮 llm 步骤追加 assistant（认领本轮 a_ 流式 id）→ post 步骤对同一槽位
+    // 显式 seq 改写（[来源:] 标注、无 _message_id）→ 表侧 record_id 被内容指纹
+    // 回退覆盖 → 流式占位（a_）与 DB 重载记录（mc_）键断裂，前端三键精确对账
+    // 全部落空，90s 新鲜度窗口内两版并存 = 重复气泡。
+    // 契约：本轮已认领槽位的后续改写保持认领 id（粘滞），改写内容照常更新。
+    let store = SqliteStore::open_memory().unwrap();
+    let backend: &dyn StorageBackend = &store;
+    let pid = "p_round_sticky";
+
+    // 用户消息在轮次开始前落库（无 message_id → 内容指纹，与真机 user_input 同构）
+    let mut state = json!({ "pipeline_id": pid });
+    apply_messages_op_update(
+        &mut state,
+        backend,
+        "default",
+        &[json!({ "op": "set", "msg": { "role": "user", "content": "你有项目的说明没有" } })],
+    )
+    .await
+    .unwrap();
+
+    // round_start 等价形态：分配本轮流式 id、复位闩锁
+    state["message_id"] = json!("a_roundfinal");
+    state["_assistant_id_assigned"] = json!(false);
+
+    // llm 步骤：本轮 assistant 追加（认领流式 id）
+    apply_messages_op_update(
+        &mut state,
+        backend,
+        "default",
+        &[json!({ "op": "set", "msg": { "role": "assistant", "content": "最终回复v1" } })],
+    )
+    .await
+    .unwrap();
+
+    let before = store
+        .get_slot_messages_by_pipeline(pid, "default", MessageQueryOpts::default())
+        .unwrap();
+    let claimed = before
+        .iter()
+        .find(|r| r.seq_in_branch == 1)
+        .expect("seq1 存在");
+    assert_eq!(claimed.message_id, "a_roundfinal", "追加应认领本轮流式 id");
+
+    // post 步骤：同槽显式 seq 改写（[来源:] 标注，无 _message_id）——粘滞保持
+    apply_messages_op_update(
+        &mut state,
+        backend,
+        "default",
+        &[set(
+            1,
+            json!({ "role": "assistant", "content": "最终回复v2 [来源: README.md]" }),
+        )],
+    )
+    .await
+    .unwrap();
+
+    let after = store
+        .get_slot_messages_by_pipeline(pid, "default", MessageQueryOpts::default())
+        .unwrap();
+    assert_eq!(after.len(), 2, "同槽改写不新增行");
+    let rewritten = after
+        .iter()
+        .find(|r| r.seq_in_branch == 1)
+        .expect("seq1 存在");
+    assert_eq!(
+        rewritten.message_id, "a_roundfinal",
+        "本轮已认领槽位的改写不得被指纹回退覆盖（流式占位与 DB record_id 对齐）"
     );
 }

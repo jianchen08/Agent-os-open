@@ -25,6 +25,7 @@
   - [主题与前端定制](#主题与前端定制)
 - [数据流示例](#数据流示例)
 - [扩展点](#扩展点)
+- [部署形态](#部署形态)
 - [架构设计四问](#架构设计四问)
 
 ---
@@ -40,7 +41,7 @@
 | 能力 | 承载插件（示例） |
 |---|---|
 | LLM 调用 | `llm_service`（`llm.complete_stream` 服务）+ `pipeline_llm_core`（core 步骤） |
-| 工具执行 | `pipeline_tool_core`（Rust 原生）+ 各工具插件（tools/ 27 份 manifest：19 个自研 + 8 个预置外部 MCP 接入，55 个工具声明） |
+| 工具执行 | `pipeline_tool_core`（Rust 原生）+ 各工具插件（tools/ 自研 manifest + 预置外部 MCP 接入清单，份数与工具声明数以实际盘面为准） |
 | 记忆 | `hindsight_memory` + `memory` 工具 |
 | 评估闸门 | `evaluation`（task_evaluate）+ `pipeline_task_reminder`（放行检测） |
 | 审批 / 人机交互 | `approval` + `human`（human-interaction） |
@@ -122,7 +123,7 @@ Agent 配置 mtime 缓存热生效；插件目录与 manifest 变更热发现自
 
 ### 管道引擎（Pipeline Engine）
 
-内核引擎是配置解释执行器：读 `config/pipelines/autonomous.yaml`（唯一现役管道，所有 Agent 共用，差异由 Agent 配置体现），按 `loop_bodies` 顺序执行，据统一路由 DSL 决定循环、分支与循环体间转移。
+内核引擎是配置解释执行器：读 `config/pipelines/` 管道配置（默认 `autonomous.yaml` 与 `roleplay.yaml` 并存，所有 Agent 共用，差异由 Agent 配置体现），按 `loop_bodies` 顺序执行，据统一路由 DSL 决定循环、分支与循环体间转移。
 
 ```
 init 循环体（单次）  workspace/environment 解析
@@ -145,7 +146,7 @@ exit 循环体（单次）  workspace 收尾 + 环境释放（run_on_error，提
 
 所有可扩展模块收敛到**同一个插件协议**：一个插件 = 一个目录 + 一份 `plugin.json` manifest（+ 实现代码）。内核统一发现、校验（`deny_unknown_fields`）、注册、按需加载，不区分内部还是第三方。
 
-- **三类目录**：`plugins/shared/pipeline/{input,core,output}/`（管道步骤）、`plugins/shared/tools/`（LLM 工具）、`plugins/shared/system/`（系统服务）。
+- **单分类平铺**：`plugins/shared/<插件id>/` 单层平铺（96 插件；管道步骤、LLM 工具、系统服务不再分桶——目录分类已证失真，id 与 capabilities 承载语义，ADR 2026-10-13-plugin-flat-layout）。
 - **双根发现**：内置根 `plugins/shared/` + 用户根（`AGENTOS_USER_PLUGINS_DIR`），同 id 用户根覆盖内置根。
 - **宿主三轨**：Python sidecar（默认；独立进程、MCP over stdio、uv venv 单轨、懒启动/空闲回收/崩溃自愈/热重载）、Rust cdylib 原生（`in_process`；高频管道步骤晋升轨、永不 dlclose）、外部 MCP（`entry: "mcp:external"`；零代码直连第三方 MCP 服务）。
 - **能力声明**：`capabilities.tools`（进 LLM 面）/ `services`（内部服务，不进 LLM 面）/ `lifecycle_hooks` / `streaming`（流式事件声明，fail-closed）；`route_signals` 仅是声明位，执行面零消费，新插件无需声明。
@@ -186,7 +187,7 @@ plugins:
 
 - **统一契约**：每个工具声明 `input_schema` + `output_schema` + `render`（前端渲染意图）。工具执行后按 `output_schema` fail-closed 校验；前端按 `render` 路由渲染结果卡片；MCP 对外下发同一契约。
 - **执行**：工具调用由管道 core 步的 `pipeline_tool_core`（Rust 原生插件）执行，大输出经 `pipeline_spill_guard` 落盘兜底（`spill_retrieve` 为框架强制工具）。
-- **分类来源**：内置工具插件（tools/ 19 个自研 + 8 个预置外部 MCP 接入清单）／任意外部 MCP 工具（零代码接入）／用户根自研插件。
+- **分类来源**：内置工具插件（tools/ 自研 + 预置外部 MCP 接入清单，现仅 1 台）／任意外部 MCP 工具（零代码接入）／用户根自研插件。
 - **工具面控制**：Agent 的 `tool_ids` 白名单 + 层级守卫（level_guard 拦截越级任务类工具）+ 安全守卫（security_check 判定路径/危险工具审批/隔离放行）。
 
 ### 记忆系统
@@ -206,7 +207,7 @@ plugins:
 任务质量的硬约束，确保质量不被跳过：
 
 - **提交即带指标**：`task_submit` 提交任务须带评估指标（acceptance criteria）；可从 Agent 的 `recommended_metrics` 自动补全。
-- **评估裁决在插件**：`task_evaluate` 工具（`plugins/shared/system/evaluation/`）执行评估；管道 output 步 `pipeline_task_reminder` 是放行闸门——提醒耗尽仍无评估证据 → 任务标 `pending_evaluation`，不落 completed；有证据内核才补落默认 completed。
+- **评估裁决在插件**：`task_evaluate` 工具（`plugins/shared/evaluation/`）执行评估；管道 output 步 `pipeline_task_reminder` 是放行闸门——提醒耗尽仍无评估证据 → 任务裁决 `failed`（`task_evaluate_failed` 停机词经插件声明面注册）。
 - **项目（Project）**：对"开发一个 App""写一部小说"这类多阶段大任务，提供方案规划 → 阶段执行 → 人类审查 → 完成验收闭环。项目 = 用户创建的真实文件夹 + 登记，是任务树分组锚点——只组织任务链（`project_id` / `parent_task_id` 传递），不直接执行。
 - **任务状态**：task = pipeline state 单一真值，状态由任务域插件经 pipeline-state 写面裁决。
 
@@ -291,6 +292,21 @@ plugins:
 | 随插件分发主题/皮肤 | manifest `contributes.themes` | [guides/theme.md](guides/theme.md) |
 | 新增前端页面/表单 | manifest `ui_schema` / `http_endpoints` | [plugin-protocol.md](guides/plugin-protocol.md) |
 | 插件间服务依赖 | manifest `requires_services`（能力角色名） | [plugin-protocol.md](guides/plugin-protocol.md) |
+
+---
+
+## 部署形态
+
+生产/常驻部署定型（ADR
+[2026-10-09-linux-server-deployment-shape](decisions/2026-10-09-linux-server-deployment-shape.md)）：
+**单进程 Rust 内核 + 静态前端同源反代 + systemd 托管**。P0 主形态 = 源码
+checkout 部署（服务器自构建 uv + cargo，保留仓库布局）；启动设施实物在
+`deploy/`（systemd unit、env 模板、裸起脚本、nginx 反代参考配置）；隔离后端
+按平台自适应（Windows = wsl_native，非 Windows = Docker，ADR
+[2026-10-09-isolation-backend-platform-adaptive-selection](decisions/2026-10-09-isolation-backend-platform-adaptive-selection.md)）。
+
+完整构建步骤、环境变量清单、连接两形态与安全 checklist 见
+[guides/deployment.md](guides/deployment.md)，此处不重复展开。
 
 ---
 

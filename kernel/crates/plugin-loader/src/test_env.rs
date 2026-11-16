@@ -79,3 +79,32 @@ impl Drop for UserRootGuard {
         }
     }
 }
+
+/// 把 `AGENTOS_DISCOVERY_CACHE`（发现缓存工件路径覆盖，loader/cache.rs）钉到
+/// 指定值（Drop 还原）。**必须经 [`user_space_env_lock`] 取锁**（同款全局态
+/// 互斥纪律）。
+pub(crate) struct CachePathEnvGuard {
+    _lock: UserSpaceEnvGuard,
+    original: Option<String>,
+}
+
+impl CachePathEnvGuard {
+    pub(crate) fn set(path: &str) -> Self {
+        let lock = user_space_env_lock();
+        let original = std::env::var(super::loader::DISCOVERY_CACHE_ENV).ok();
+        std::env::set_var(super::loader::DISCOVERY_CACHE_ENV, path);
+        Self {
+            _lock: lock,
+            original,
+        }
+    }
+}
+
+impl Drop for CachePathEnvGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(v) => std::env::set_var(super::loader::DISCOVERY_CACHE_ENV, v),
+            None => std::env::remove_var(super::loader::DISCOVERY_CACHE_ENV),
+        }
+    }
+}

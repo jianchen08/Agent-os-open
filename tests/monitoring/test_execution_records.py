@@ -167,7 +167,7 @@ class TestGetExecutionRecord:
 
         record = await er.get_execution_record("m-target")
 
-        assert calls == [("p1", er._PER_SESSION_MSG_LIMIT)]  # 去重：同管道只查一次
+        assert calls == [("p1", er.PER_SESSION_MSG_LIMIT)]  # 去重：同管道只查一次
         assert record == {"id": "m-target", "session_id": "", "message_data": {}, "created_at": ""}
 
 
@@ -239,6 +239,107 @@ class TestListOrphanRuns:
         assert body["items"][0]["pipeline_id"] == "p-old2"  # 最久的先呈现
         assert body["total"] == 2
         assert body["min_minutes"] == 10
+
+
+# ═══════════════════════════════════════════════════════════
+# list_execution_records：分页语义诚实化（X29-F1 / P-159）
+# ═══════════════════════════════════════════════════════════
+
+
+def _history(session_id: str, count: int, base: datetime | None = None) -> list[dict]:
+    """升序全量消息历史（seq/created_at 递增）——内核 messages.list 的全量形态。"""
+    start = base or datetime(2026, 11, 1, tzinfo=UTC)
+    return [
+        {
+            "message_id": f"{session_id}-m{i}",
+            "role": "user",
+            "content_preview": f"msg-{i}",
+            "seq_in_branch": i,
+            "created_at": _iso(start + timedelta(seconds=i)),
+            "run_id": f"{session_id}-r",
+        }
+        for i in range(count)
+    ]
+
+
+def _recent_window_provider(history: list[dict]):
+    """忠实内核契约的 messages provider：只回最近 limit 条（seq 升序）。
+
+    内核 messages.list 仅支持 pipeline_id+limit（无 offset），超过 limit 的
+    会话只呈现最近一段——用 rows[-limit:] 模拟该截断语义。
+    """
+
+    async def _fn(*args, pipeline_id=None, limit=None):
+        rows = [m for m in history if m["message_id"].startswith(f"{pipeline_id}-")]
+        return list(rows if limit is None else rows[-int(limit):])
+
+    return _fn
+
+
+class TestListExecutionRecordsPagination:
+    """分页诚实契约：窗口内返数据 + has_more 标记；窗口外空页显式 has_more=False。"""
+
+    async def test_single_session_window_boundary_pages_are_honest(self):
+        """>500 条会话（窗口截断）：offset=0/500/501 三页符合诚实契约。"""
+        history = _history("p1", 503)  # 超窗口：内核只回最近 500 条
+        kernel_reads.set_provider("messages", _recent_window_provider(history))
+
+        first = await er.list_execution_records(session_id="p1", limit=50, offset=0)
+        boundary = await er.list_execution_records(session_id="p1", limit=50, offset=500)
+        beyond = await er.list_execution_records(session_id="p1", limit=50, offset=501)
+
+        assert first["total"] == 500  # total 如实反映可达窗口
+        assert len(first["records"]) == 50
+        assert first["records"][0]["id"] == "p1-m502"  # 最新在前
+        assert first["has_more"] is True
+        assert boundary["records"] == []  # offset 触窗口边界
+        assert boundary["has_more"] is False  # 显式无更多，非恒空静默
+        assert beyond["records"] == []
+        assert beyond["has_more"] is False
+
+    async def test_single_session_paging_tiles_window_exactly(self):
+        """性质断言：按 has_more 逐页翻取，恰好无重无漏铺满整个窗口。"""
+        history = _history("p1", 605)
+        kernel_reads.set_provider("messages", _recent_window_provider(history))
+
+        collected: list[str] = []
+        offset = 0
+        while True:
+            page = await er.list_execution_records(session_id="p1", limit=100, offset=offset)
+            collected.extend(r["id"] for r in page["records"])
+            if not page["has_more"]:
+                break
+            offset += 100
+
+        assert len(collected) == 500  # 窗口全量，一条不少
+        assert len(set(collected)) == len(collected)  # 无重复
+        assert collected[0] == "p1-m604"  # 最新在前
+        assert collected[-1] == "p1-m105"  # 窗口最旧段（605 条截到最近 500）
+
+    async def test_all_sessions_mode_window_pages_and_has_more(self):
+        """全会话模式同构：窗口内部分末页 + 越界页 has_more=False。"""
+        runs = [
+            {"run_id": "r1", "pipeline_id": "p1", "started_at": "2026-11-01T00:00:00Z"},
+            {"run_id": "r0", "pipeline_id": "p0", "started_at": "2026-10-01T00:00:00Z"},
+        ]
+        history = _history("p0", 100, base=datetime(2026, 10, 1, tzinfo=UTC))
+        history += _history("p1", 100, base=datetime(2026, 11, 1, tzinfo=UTC))
+        _set_provider("pipeline-runs", runs)
+        kernel_reads.set_provider("messages", _recent_window_provider(history))
+
+        head = await er.list_execution_records(limit=150, offset=0)
+        tail = await er.list_execution_records(limit=150, offset=150)
+        beyond = await er.list_execution_records(limit=150, offset=200)
+
+        assert head["total"] == 200  # 2 会话 × 100 条
+        assert len(head["records"]) == 150
+        assert head["records"][0]["id"] == "p1-m99"  # 全局最新在前
+        assert head["has_more"] is True
+        assert len(tail["records"]) == 50  # 部分末页
+        assert tail["records"][0]["id"] == "p0-m49"  # 末页接续无重无漏
+        assert tail["has_more"] is False
+        assert beyond["records"] == []  # offset 越过窗口
+        assert beyond["has_more"] is False
 
 
 # ═══════════════════════════════════════════════════════════

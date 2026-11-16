@@ -5,6 +5,7 @@
  * 主题系统完全前端化，无后端依赖。
  */
 
+import { Loader2 } from '@/assets/icons'
 import { PageShell } from '@/components/shared/PageShell'
 import { themeList } from '@/config/themes'
 import { useThemeStore } from '@/stores/themeStore'
@@ -18,6 +19,9 @@ import type { ThemeInfo } from '@/types/theme'
 export function ThemeSettingsPage({ embedded = false }: { embedded?: boolean }) {
   const { currentThemeId, mode, setTheme, setMode, resolvedTheme, availableThemes, refreshThemes } =
     useThemeStore()
+  // 主题应用进行中的主题 ID（store 级 applyingThemeId）：应用卡转圈、全卡
+  // 禁用防连点/并发应用
+  const applyingThemeId = useThemeStore((s) => s.applyingThemeId)
   // 与 ThemePopover 同源：优先 store 聚合列表（预设 + 插件贡献 + 用户自定义），
   // store 未初始化时回退静态 themeList（避免首帧空白）。
   const themes = availableThemes.length > 0 ? availableThemes : themeList
@@ -35,7 +39,7 @@ export function ThemeSettingsPage({ embedded = false }: { embedded?: boolean }) 
               className={`rounded-lg border px-4 py-2 text-sm transition-colors ${
                 mode === m
                   ? 'bg-primary/10 text-primary border-primary/30'
-                  : 'hover:bg-accent/30 border-border'
+                  : 'hover:bg-muted/30 border-border'
               }`}
             >
               {m === 'light' ? '浅色' : m === 'dark' ? '深色' : '跟随系统'}
@@ -55,6 +59,8 @@ export function ThemeSettingsPage({ embedded = false }: { embedded?: boolean }) 
               key={theme.id}
               theme={theme}
               isActive={currentThemeId === theme.id}
+              isApplying={applyingThemeId === theme.id}
+              disabled={applyingThemeId !== null}
               onSelect={() => {
                 void setTheme(theme.id)
                 void refreshThemes()
@@ -81,14 +87,18 @@ export function ThemeSettingsPage({ embedded = false }: { embedded?: boolean }) 
   )
 }
 
-/** 主题预览卡片 */
+/** 主题预览卡片（应用进行中：转圈 +「应用中…」，禁用防连点） */
 function ThemeCard({
   theme,
   isActive,
+  isApplying,
+  disabled,
   onSelect,
 }: {
   theme: ThemeInfo
   isActive: boolean
+  isApplying?: boolean
+  disabled?: boolean
   onSelect: () => void
 }) {
   const preview = theme.preview
@@ -97,7 +107,9 @@ function ThemeCard({
     <button
       type="button"
       onClick={onSelect}
-      className={`group rounded-lg border p-4 text-left transition-all ${
+      disabled={disabled}
+      data-testid={`theme-card-${theme.id}`}
+      className={`group rounded-lg border p-4 text-left transition-all disabled:cursor-not-allowed disabled:opacity-70 ${
         isActive
           ? 'border-primary ring-primary/30 ring-2'
           : 'hover:border-primary/50 border-border'
@@ -128,7 +140,11 @@ function ThemeCard({
         </div>
       )}
 
-      <h3 className="text-sm font-semibold">{theme.name}</h3>
+      <h3 className="text-sm font-semibold">
+        {isApplying && <Loader2 className="mr-1.5 inline h-3.5 w-3.5 animate-spin" />}
+        {theme.name}
+        {isApplying && <span className="text-muted-foreground ml-1.5 text-xs">应用中…</span>}
+      </h3>
       {theme.description && (
         <p className="text-muted-foreground mt-1 line-clamp-2 text-xs">{theme.description}</p>
       )}

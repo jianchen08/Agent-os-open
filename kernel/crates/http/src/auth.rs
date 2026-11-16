@@ -16,9 +16,14 @@
 //!   me / refresh）。WS 握手（`verify_access_token`）为同步上下文查不到
 //!   store，只做签名/过期/类型校验，改密吊销由重连后的 token 刷新链路承接。
 //!
-//! 服务端密钥经环境变量 `AGENTOS_TOKEN_SECRET` 注入；未设置时每进程生成随机
-//! 密钥（重启即全部 token 失效）并打 warn。旧格式（无签名 base64）token
-//! 一律拒绝——签发入口全部在内核，刷新即得新 token，无兼容期（内部一刀切）。
+//! 服务端密钥解析序（ADR 2026-10-22-token-secret-persistent-default，用户裁定
+//! 2026-10-22「默认不得随机，更强安全由部署者自定」）：`AGENTOS_TOKEN_SECRET`
+//! 显式配置 > `AGENTOS_TOKEN_SECRET_EPHEMERAL=1` 显式一次性（重启即全量 token
+//! 失效）> 默认持久化——首启在用户空间 `<data>/token_secret.key` 生成落盘，
+//! 此后跨重启复用（重启不再掉登录）。持久化仅生产入口 [`init_token_secret`]
+//! 启用；未初始化入口（测试/工具二进制）惰性回落一次性密钥、零 IO。旧格式
+//! （无签名 base64）token 一律拒绝——签发入口全部在内核，刷新即得新 token，
+//! 无兼容期（内部一刀切）。
 //!
 //! ## 口令存储（D1）
 //!
@@ -26,6 +31,8 @@
 //! [`verify_password`]；非哈希形态的存量值校验恒失败（fail-closed，明文
 //! 登录拒绝），由内核启动迁移统一哈希化回写。
 
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use argon2::password_hash::{PasswordHash, SaltString};
@@ -128,34 +135,191 @@ impl From<&agentos_core::types::UserRecord> for BuiltInUser {
 
 // ─── Token 服务端密钥 ────────────────────────────────────────────────
 
-/// token 签名密钥（进程内单次初始化）：`AGENTOS_TOKEN_SECRET` 优先；
-/// 未设置/为空时生成进程随机密钥并 warn（重启即全量 token 失效，生产部署
-/// 应显式设置以跨重启保持会话）。
-fn token_secret() -> &'static str {
-    static SECRET: OnceLock<String> = OnceLock::new();
-    SECRET.get_or_init(|| {
-        match std::env::var(TOKEN_SECRET_ENV) {
-            Ok(s) if !s.trim().is_empty() => {
-                if s.trim().len() < 32 {
-                    tracing::warn!(
-                        "{TOKEN_SECRET_ENV} 长度不足 32 字符，签名强度受限；建议使用 ≥32 字符随机值"
-                    );
-                }
-                s
-            }
-            _ => {
-                let generated = format!(
-                    "{}{}",
-                    uuid::Uuid::new_v4().simple(),
-                    uuid::Uuid::new_v4().simple()
-                );
-                tracing::warn!(
-                    "{TOKEN_SECRET_ENV} 未设置：使用进程随机密钥签名 token（重启后全部 token 失效）；生产部署请设置该环境变量"
-                );
-                generated
-            }
+/// 显式选择一次性密钥的环境变量名：置 `1`/`true` 时跳过持久化层，每次启动
+/// 生成进程随机密钥（重启即全量 token 失效）。随机是**显式选择**而非默认——
+/// 默认必须跨重启稳定（用户裁定 2026-10-22）。
+pub const TOKEN_SECRET_EPHEMERAL_ENV: &str = "AGENTOS_TOKEN_SECRET_EPHEMERAL";
+
+/// 持久化密钥文件名（落 `agentos_core::user_space::user_data_dir()` 下；
+/// 用户仓 git 化为 ignore-all 白名单制且不含 data/，密钥绝不入任何 git）。
+pub const TOKEN_SECRET_FILE: &str = "token_secret.key";
+
+/// 密钥最小长度（字符）：env 显式短值仅告警不拒；持久层短值视为损坏重生成。
+const TOKEN_SECRET_MIN_LEN: usize = 32;
+
+/// 密钥解析来源（启动日志分级与测试断言用）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenSecretSource {
+    /// 部署者显式配置；`too_short` = 长度不足（仅告警不拒绝，尊重显式值）。
+    EnvExplicit { too_short: bool },
+    /// 部署者显式选择一次性密钥（opt-in，不读不写持久层）。
+    EphemeralOptIn,
+    /// 复用持久化副本。
+    PersistedExisting,
+    /// 首次生成并持久化落盘。
+    GeneratedAndPersisted,
+    /// 持久层不可用/写失败，降级一次性密钥（`reason` 供启动日志定位）。
+    EphemeralFallback { reason: String },
+}
+
+/// 解析 token 签名密钥（纯函数，IO 仅限 `store` 落点，生成器注入可测）。
+///
+/// 解析序：env 显式（空白 = 未设置）> ephemeral opt-in（不读不写持久层）>
+/// 持久层复用/首启生成（`Ok(落点)`）> 降级一次性（`Err(原因)`）。持久层短值
+/// 视为损坏：重新生成并原子覆盖，绝不让坏文件砖掉启动。
+pub fn resolve_token_secret(
+    env_secret: Option<String>,
+    ephemeral_opt_in: bool,
+    store: Result<&Path, &str>,
+    generate: &mut dyn FnMut() -> String,
+) -> (String, TokenSecretSource) {
+    if let Some(raw) = env_secret {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return (
+                trimmed.to_string(),
+                TokenSecretSource::EnvExplicit {
+                    too_short: trimmed.len() < TOKEN_SECRET_MIN_LEN,
+                },
+            );
         }
-    })
+    }
+    if ephemeral_opt_in {
+        return (generate(), TokenSecretSource::EphemeralOptIn);
+    }
+    let path = match store {
+        Ok(p) => p,
+        Err(reason) => {
+            return (
+                generate(),
+                TokenSecretSource::EphemeralFallback {
+                    reason: reason.to_string(),
+                },
+            );
+        }
+    };
+    if let Ok(raw) = std::fs::read_to_string(path) {
+        let stored = raw.trim();
+        if stored.len() >= TOKEN_SECRET_MIN_LEN {
+            return (stored.to_string(), TokenSecretSource::PersistedExisting);
+        }
+    }
+    let generated = generate();
+    match write_token_secret_file(path, &generated) {
+        Ok(()) => (generated, TokenSecretSource::GeneratedAndPersisted),
+        Err(reason) => (generated, TokenSecretSource::EphemeralFallback { reason }),
+    }
+}
+
+/// 持久化密钥原子落盘：临时文件（uuid 后缀防双进程撞名）+ rename 换入；
+/// Unix 上收紧到 0600（Windows 继承用户 profile ACL）。失败清理临时文件。
+fn write_token_secret_file(path: &Path, secret: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} 无父目录", path.display()))?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("创建目录 {}: {e}", parent.display()))?;
+    let stem = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("token_secret");
+    let tmp = path.with_file_name(format!("{stem}.tmp-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::write(&tmp, secret).map_err(|e| format!("写 {}: {e}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("换入 {}: {e}", path.display()));
+    }
+    Ok(())
+}
+
+/// 生产生成器：两个 uuid v4 simple 拼接 = 64 个 hex 字符。
+fn generate_token_secret() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+static TOKEN_SECRET: OnceLock<String> = OnceLock::new();
+/// 持久化层开关：仅 [`init_token_secret`]（生产 main）置位。惰性路径（测试/
+/// 工具二进制）恒关闭——保证任何测试车道零真实用户空间 IO。
+static TOKEN_SECRET_PERSIST_READY: AtomicBool = AtomicBool::new(false);
+
+/// 生产入口启动初始化（内核 main 专用）：启用持久化层并立即解析一次。
+/// 必须在日志初始化后调用（解析结论落启动日志）、任何 token 签发前调用。
+pub fn init_token_secret() {
+    TOKEN_SECRET_PERSIST_READY.store(true, Ordering::Release);
+    let _ = token_secret();
+}
+
+/// token 签名密钥（进程内单次初始化，解析序见模块头注）。
+fn token_secret() -> &'static str {
+    TOKEN_SECRET.get_or_init(resolve_and_log).as_str()
+}
+
+fn resolve_and_log() -> String {
+    let env_secret = std::env::var(TOKEN_SECRET_ENV).ok();
+    let ephemeral = std::env::var(TOKEN_SECRET_EPHEMERAL_ENV)
+        .map(|v| matches!(v.trim(), "1" | "true" | "True" | "TRUE"))
+        .unwrap_or(false);
+    let store = if TOKEN_SECRET_PERSIST_READY.load(Ordering::Acquire) {
+        agentos_core::user_space::user_data_dir()
+            .map(|d| d.join(TOKEN_SECRET_FILE))
+            .ok_or_else(|| "用户空间不可用（无 OS 数据目录）".to_string())
+    } else {
+        Err("持久化未初始化（测试/工具入口未调 init_token_secret）".to_string())
+    };
+    let store_path = store.as_ref().ok().map(|p| p.to_path_buf());
+    let (secret, source) = resolve_token_secret(
+        env_secret,
+        ephemeral,
+        store.as_ref().map(|p| p.as_path()).map_err(|e| e.as_str()),
+        &mut generate_token_secret,
+    );
+    match source {
+        TokenSecretSource::EnvExplicit { too_short: false } => {
+            tracing::info!("token 签名密钥：{TOKEN_SECRET_ENV} 显式配置（部署者提供）");
+        }
+        TokenSecretSource::EnvExplicit { too_short: true } => {
+            tracing::warn!(
+                "{TOKEN_SECRET_ENV} 长度不足 32 字符，签名强度受限；建议使用 ≥32 字符随机值"
+            );
+        }
+        TokenSecretSource::EphemeralOptIn => {
+            tracing::warn!(
+                "{TOKEN_SECRET_EPHEMERAL_ENV} 显式启用一次性密钥：重启后全部 token 失效"
+            );
+        }
+        TokenSecretSource::PersistedExisting => {
+            tracing::info!(
+                "token 签名密钥：复用持久化副本 {}（重启后登录态保持）",
+                store_path
+                    .as_deref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
+            );
+        }
+        TokenSecretSource::GeneratedAndPersisted => {
+            tracing::info!(
+                "token 签名密钥：首次生成并持久化 {}（此后重启登录态保持）",
+                store_path
+                    .as_deref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
+            );
+        }
+        TokenSecretSource::EphemeralFallback { reason } => {
+            tracing::warn!(
+                "token 密钥持久化不可用（{reason}）：本次使用一次性随机密钥，重启后全部 token 失效；可设 {TOKEN_SECRET_ENV} 显式固定"
+            );
+        }
+    }
+    secret
 }
 
 fn hmac_sha256(payload: &str) -> Vec<u8> {
@@ -303,7 +467,10 @@ pub fn is_token_expired(exp: u64) -> bool {
 /// 解析请求归属的租户 ID（HTTP 路径用，async）。
 ///
 /// 当前 token 载荷尚未包含 tenant 段，因此本函数在 token 合法时查 store /
-/// 内置用户表得到 `tenant_id`，否则回退到 [`DEFAULT_TENANT_ID`]。
+/// 内置用户表得到 `tenant_id`。无 token / 无效 / 过期 = 匿名请求，属合法
+/// 状态，回退 [`DEFAULT_TENANT_ID`]；token 合法但解析用户失败（已删除 /
+/// 存储故障）走 [`resolve_tenant_id_by_user`] 的拒绝语义（K8 修订，
+/// ADR 2026-10-10），不再降级 default——写面降级即写串租户。
 ///
 /// TODO(多租户): 签发面（agentos-api auth）token 载荷扩展出 tenant claim 后，
 /// 本函数改为优先从 token 解析；该变更未发生前，store/内置用户表查询是
@@ -311,15 +478,32 @@ pub fn is_token_expired(exp: u64) -> bool {
 pub async fn resolve_request_tenant_id(
     store: Option<&std::sync::Arc<dyn agentos_core::traits::StorageBackend>>,
     headers: &HeaderMap,
-) -> String {
+) -> Result<String, ApiError> {
     if let Some(token) = extract_bearer_token(headers) {
         if let Some(t) = decode_token(&token) {
             if !is_token_expired(t.exp) {
-                return resolve_tenant_id_by_user(store, &t.user_id).await;
+                return map_tenant_resolve_rejection(
+                    resolve_tenant_id_by_user(store, &t.user_id).await,
+                );
             }
         }
     }
-    DEFAULT_TENANT_ID.to_string()
+    Ok(DEFAULT_TENANT_ID.to_string())
+}
+
+/// [`resolve_request_tenant_id`] 的失败翻译（错误要么处理要么传播）：
+/// NotFound = 持有效签名的已删用户，与 [`authenticate_bearer_user`] 同文案 401；
+/// StoreError = 基础设施故障，503（对齐会话列表「存储挂了」面，不伪装 4xx）。
+fn map_tenant_resolve_rejection(r: Result<String, TenantResolveError>) -> Result<String, ApiError> {
+    match r {
+        Ok(t) => Ok(t),
+        Err(TenantResolveError::NotFound) => Err(ApiError::Unauthorized {
+            message: "用户不存在".to_string(),
+        }),
+        Err(TenantResolveError::StoreError(e)) => Err(ApiError::ServiceUnavailable {
+            message: format!("用户→租户解析存储故障: {e}"),
+        }),
+    }
 }
 
 /// 解析请求认证用户（HTTP 管理面端点用，如 `/api/v1/db/*`）。
@@ -380,12 +564,41 @@ pub async fn authenticate_bearer_user(
     Ok((t, user))
 }
 
+/// user→tenant 解析失败（tri-state 的两个失败态，K8 修订 ADR 2026-10-10）。
+///
+/// 失败类二分（总原则①）：NotFound 是"用户合法缺失"（已删除/从未存在），
+/// StoreError 是基础设施故障——两类都拒绝分发，但审计语义与客户端处置不同
+/// （前者 token 已死，后者重试可恢复）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TenantResolveError {
+    /// 用户不存在：token 持有者已无分发资格（已删用户 token 不得继续分发）。
+    NotFound,
+    /// 存储查询故障：fail-closed 拒绝，不降级 default 继续分发。
+    StoreError(String),
+}
+
+impl std::fmt::Display for TenantResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TenantResolveError::NotFound => write!(f, "用户不存在（token 持有者已删除）"),
+            TenantResolveError::StoreError(e) => write!(f, "用户→租户解析存储故障: {e}"),
+        }
+    }
+}
+
 /// 按 user_id 解析其归属的租户 ID（WS 路径用，与 HTTP 路径同源）。
 ///
-/// store 优先查持久化用户的 tenant_id；store 存在但解析不出（用户已删除 /
-/// 存储故障）时**不再静默**——warn 审计标记后回退 [`DEFAULT_TENANT_ID`]
-/// （K8：归因可见的降级，防读写串租户无痕发生）。仅无 store（测试场景）
-/// 走内置 admin 表，再不命中回退默认租户。
+/// 查询是 tenant-unscoped 主键查询（user_id 全局唯一，求真租户时 task_local
+/// 不参与——由 [`find_user_by_id`] 契约保证）。三态消费（K8 修订，
+/// ADR 2026-10-10，替代旧「降级 default + warn」过渡态）：
+///
+/// - **Found** → 返回真实租户；
+/// - **NotFound（store 在）** → 直接拒绝（拍板①：已删用户 token 不应继续
+///   分发），warn 留痕；**store 不在** → default 是文档化降级（无持久化即
+///   无租户注册表，default 是唯一可能租户，非吞错——与"有 store 查不出"
+///   二分，总原则①的"合法缺失"侧）；
+/// - **StoreError** → fail-closed 拒绝，error 留痕（错误通道本在 Result 里，
+///   旧实现被 `if let Ok(Some)` 丢弃后与 NotFound 合流降级 default）。
 ///
 /// WebSocket 握手链路只透传 `user_id`（受 `PipelineDispatcher` trait 签名约束），
 /// 无法携带 `HeaderMap`。本函数让 WS 入站分发器能用同一套用户表查出真正的
@@ -393,22 +606,28 @@ pub async fn authenticate_bearer_user(
 pub async fn resolve_tenant_id_by_user(
     store: Option<&std::sync::Arc<dyn agentos_core::traits::StorageBackend>>,
     user_id: &str,
-) -> String {
+) -> Result<String, TenantResolveError> {
     match find_user_by_id(store, user_id).await {
-        Some(u) => u.tenant_id,
-        None => {
-            if store.is_some() {
-                // K8 审计标记：store 在而用户解析不出（get_user_by_id 按 task_local
-                // tenant 隔离，跨租户/已删除用户在此不可见）。降级为 default，
-                // 但必须留 warn 可审计。
-                tracing::warn!(
-                    target: "auth-tenant-degrade",
-                    user_id = %user_id,
-                    fallback_tenant = DEFAULT_TENANT_ID,
-                    "用户→租户解析失败，降级 default 租户（用户已删除/跨租户不可见/存储故障；K8 审计标记）"
-                );
+        Ok(Some(u)) => Ok(u.tenant_id),
+        Ok(None) => {
+            if store.is_none() {
+                return Ok(DEFAULT_TENANT_ID.to_string());
             }
-            DEFAULT_TENANT_ID.to_string()
+            tracing::warn!(
+                target: "auth-tenant-resolve",
+                user_id = %user_id,
+                "用户→租户解析：用户不存在，拒绝分发（已删用户 token）"
+            );
+            Err(TenantResolveError::NotFound)
+        }
+        Err(e) => {
+            tracing::error!(
+                target: "auth-tenant-resolve",
+                user_id = %user_id,
+                error = %e,
+                "用户→租户解析：存储故障，fail-closed 拒绝分发（不降级 default）"
+            );
+            Err(TenantResolveError::StoreError(e.to_string()))
         }
     }
 }
@@ -425,8 +644,9 @@ pub fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
 // 持久化优先：先查 store（真实注册用户）。store 存在而未命中不回退内置
 // （防换库/清库后硬编码 admin 后门复活）；仅无 store（AppState::new() 测试
 // 场景）走内置脚手架表（不可登录，仅供非凭据路径）。
-// get_user_by_id 走 task_local tenant 隔离，故需在调用方建立 tenant scope；
-// 但 login/register 时还不知道 tenant，get_user_by_username 跨租户全局查。
+// get_user_by_id / get_user_by_username 均为跨租户全局查询：前者 user_id 是
+// 全局唯一主键（租户解析求真租户，task_local 不得参与），后者登录时还不知道
+// 租户上下文。
 
 /// 按凭据查用户（登录用）。store 优先，口令 argon2 校验。
 ///
@@ -451,21 +671,28 @@ pub async fn find_user_by_credentials(
 
 /// 按 user_id 查用户（token 解析 / WS 握手用）。
 ///
-/// store 存在但未命中（含 get_user_by_id 按租户隔离导致的跨租户不可见）**不回退**
-/// 内置 admin：换库/清库后按旧 token 的 user_id 命中硬编码表 = 已删除用户复活
-/// （K4，对齐 find_user_by_credentials）。仅无 store（测试场景）走内置表。
+/// tri-state（K8 修订 ADR 2026-10-10）：`Ok(Some)` = Found / `Ok(None)` =
+/// NotFound（用户不存在）/ `Err` = StoreError（存储故障）。存储查询本身是
+/// tenant-unscoped 主键查询（user_id 全局唯一，与 task_local 租户无关）——
+/// 租户解析（[`resolve_tenant_id_by_user`]）正是求真租户，不能受 task_local
+/// 影响。store 存在但未命中**不回退**内置 admin：换库/清库后按旧 token 的
+/// user_id 命中硬编码表 = 已删除用户复活（K4，对齐 find_user_by_credentials）。
+/// 仅无 store（测试场景）走内置表；无 store 且未命中同样是 `Ok(None)`
+/// （动态用户 token 只可能由有 store 的实例签发，无 store 场景查无此用户
+/// 属实然）。
 pub async fn find_user_by_id(
     store: Option<&std::sync::Arc<dyn agentos_core::traits::StorageBackend>>,
     id: &str,
-) -> Option<BuiltInUser> {
+) -> Result<Option<BuiltInUser>, agentos_core::types::StorageError> {
     if let Some(store) = store {
-        if let Ok(Some(u)) = store.get_user_by_id(id).await {
-            return Some(BuiltInUser::from(&u));
-        }
-        return None; // store 在而未命中：不回退内置（防硬编码后门复活）
+        // 错误通道原样透传：Err ≠ None，调用方按 tri-state 分治处置。
+        return store
+            .get_user_by_id(id)
+            .await
+            .map(|u| u.map(|r| BuiltInUser::from(&r)));
     }
-    // 无 store（测试/无持久化场景）：内置脚手架表
-    default_users().into_iter().find(|u| u.id == id)
+    // 无 store（测试/无持久化场景）：内置脚手架表（命中与否都是"查询成功"）
+    Ok(default_users().into_iter().find(|u| u.id == id))
 }
 
 /// 按用户名查用户（token 校验场景用，跨租户全局查询，不校验密码）。
@@ -497,16 +724,16 @@ pub async fn find_user_by_username(
 pub struct VerifiedUser {
     pub user_id: String,
     pub username: String,
-    pub tenant_id: String,
 }
 
 /// 校验 access token（供 WS 握手从 `?token=` 查询参数鉴权）。
 ///
 /// 返回 `Some(VerifiedUser)` 当且仅当：token 签名有效 + 未过期 + access 类型。
-/// 同步上下文查不到 store，用户存在性与口令绑定（改密吊销）不在握手判定——
-/// 前者由 dispatch 时 `resolve_tenant_id_by_user` 权威解析，后者由握手后
-/// 的 token 刷新链路（refresh/me 均做口令绑定校验）承接。任一校验失败返回
-/// `None`（调用方按 ADR §7.2 以 4001 拒绝握手）。
+/// 本函数是同步纯 token 校验（无 store 可查）：用户存在性由 WS 会话入口
+/// （api `run_ws_session_with_auth`）握手后按 store 复用 [`find_user_by_id`]
+/// 权威校验（已删用户 4001 拒连）；口令绑定（改密吊销）由握手后的 token
+/// 刷新链路（refresh/me 均做口令绑定校验）承接。任一校验失败返回 `None`
+/// （调用方按 ADR §7.2 以 4001 拒绝握手）。
 pub fn verify_access_token(token: &str) -> Option<VerifiedUser> {
     let t = decode_token(token)?;
     if is_token_expired(t.exp) {
@@ -516,17 +743,9 @@ pub fn verify_access_token(token: &str) -> Option<VerifiedUser> {
     if !t.is_access() {
         return None;
     }
-    // tenant_id：内置 admin 直接回填；动态用户先留空（dispatch 时权威解析）。
-    // user_id/username 已从 token 解出，握手注册连接用它们即可。
-    let tenant_id = default_users()
-        .into_iter()
-        .find(|u| u.id == t.user_id)
-        .map(|u| u.tenant_id)
-        .unwrap_or_default();
     Some(VerifiedUser {
         user_id: t.user_id,
         username: t.username,
-        tenant_id,
     })
 }
 
@@ -847,14 +1066,16 @@ mod tests {
 
         // ① 无 Authorization 头
         assert_eq!(
-            resolve_request_tenant_id(store, &HeaderMap::new()).await,
+            resolve_request_tenant_id(store, &HeaderMap::new())
+                .await
+                .unwrap(),
             DEFAULT_TENANT_ID
         );
 
         // ② 垃圾 token
         let junk = mk_headers("garbage-token");
         assert_eq!(
-            resolve_request_tenant_id(store, &junk).await,
+            resolve_request_tenant_id(store, &junk).await.unwrap(),
             DEFAULT_TENANT_ID
         );
 
@@ -863,33 +1084,332 @@ mod tests {
         let expect_tenant = user.tenant_id.clone();
         let good = mk_headers(&encode_token(TokenType::Access, &user, 3600));
         assert_eq!(
-            resolve_request_tenant_id(store, &good).await,
+            resolve_request_tenant_id(store, &good).await.unwrap(),
             expect_tenant,
             "合法 token 应按用户解析租户"
         );
 
-        // ④ 合法但过期 → default
+        // ④ 合法但过期 → default（匿名语义，非解析失败）
         let expired = mk_headers(&encode_token(TokenType::Access, &user, 0));
         assert_eq!(
-            resolve_request_tenant_id(store, &expired).await,
+            resolve_request_tenant_id(store, &expired).await.unwrap(),
             DEFAULT_TENANT_ID,
             "过期 token 不得用于租户解析"
         );
     }
 
-    /// resolve_tenant_id_by_user：无 store 且用户不在内置表 → default
-    /// （不 panic，不返回空串）。
+    // ── 租户解析 tri-state（K8 修订 ADR 2026-10-10）──
+    //
+    // fake storage 注入三态（Some/None/Err）——存储是外部依赖，mock 合规；
+    // 断言解析行为本身：Found 真租户 / NotFound 拒绝 / StoreError fail-closed，
+    // 任何失败态都不得出口 default（降级即写串租户）。
+
+    /// 最小注入式用户查询桩：仅 get_user_by_id 有行为，其余方法不可达。
+    struct UserLookupStore(
+        Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>,
+    );
+
+    fn user_of(user_id: &str, tenant_id: &str) -> agentos_core::types::UserRecord {
+        agentos_core::types::UserRecord {
+            user_id: user_id.to_string(),
+            username: format!("u-{user_id}"),
+            password: String::new(),
+            email: None,
+            role: "user".to_string(),
+            tenant_id: tenant_id.to_string(),
+            created_at: "2026-10-10T00:00:00Z".to_string(),
+            last_login_at: None,
+            must_change_password: false,
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl agentos_core::traits::StorageBackend for UserLookupStore {
+        async fn get_run(
+            &self,
+            _run_id: &str,
+        ) -> Result<agentos_core::types::RunRecord, agentos_core::types::StorageError> {
+            unreachable!("租户解析路径不读 run")
+        }
+        async fn get_messages_by_pipeline(
+            &self,
+            _pipeline_id: &str,
+            _opts: agentos_core::traits::MessageQueryOpts,
+        ) -> Result<Vec<agentos_core::types::MessageRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("租户解析路径不读消息")
+        }
+        async fn get_blob(
+            &self,
+            _blob_id: &str,
+        ) -> Result<Vec<u8>, agentos_core::types::StorageError> {
+            unreachable!("租户解析路径不读 blob")
+        }
+        async fn append_trace(
+            &self,
+            _entry: agentos_core::types::TraceEntry,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("租户解析路径不写轨迹")
+        }
+        async fn store_blob(
+            &self,
+            _data: &[u8],
+            _mime_type: &str,
+        ) -> Result<String, agentos_core::types::StorageError> {
+            unreachable!("租户解析路径不写 blob")
+        }
+        async fn create_session(
+            &self,
+            _session: &agentos_core::types::SessionRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("租户解析路径不建会话")
+        }
+        async fn get_session(
+            &self,
+            _thread_id: &str,
+        ) -> Result<Option<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("租户解析路径不读会话")
+        }
+        async fn list_sessions(
+            &self,
+            _filter: agentos_core::traits::SessionListFilter,
+        ) -> Result<Vec<agentos_core::types::SessionRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("租户解析路径不列会话")
+        }
+        async fn update_session(
+            &self,
+            _session: &agentos_core::types::SessionRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("租户解析路径不更会话")
+        }
+        async fn delete_session(
+            &self,
+            _thread_id: &str,
+        ) -> Result<Vec<String>, agentos_core::types::StorageError> {
+            unreachable!("租户解析路径不删会话")
+        }
+        async fn link_pipeline_session(
+            &self,
+            _pipeline_id: &str,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("租户解析路径不写映射")
+        }
+        async fn list_pipeline_ids_by_thread(
+            &self,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<String>, agentos_core::types::StorageError> {
+            unreachable!("租户解析路径不读映射")
+        }
+        async fn get_step_traces_by_thread(
+            &self,
+            _thread_id: &str,
+            _tenant_id: &str,
+        ) -> Result<Vec<agentos_core::types::TraceEntry>, agentos_core::types::StorageError>
+        {
+            unreachable!("租户解析路径不读轨迹")
+        }
+        async fn create_user(
+            &self,
+            _user: &agentos_core::types::UserRecord,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("租户解析路径不建用户")
+        }
+        async fn get_user_by_id(
+            &self,
+            _user_id: &str,
+        ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            self.0.clone()
+        }
+        async fn get_user_by_username(
+            &self,
+            _username: &str,
+        ) -> Result<Option<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("租户解析路径按 id 查")
+        }
+        async fn list_users(
+            &self,
+        ) -> Result<Vec<agentos_core::types::UserRecord>, agentos_core::types::StorageError>
+        {
+            unreachable!("租户解析路径不列用户")
+        }
+        async fn update_last_login(
+            &self,
+            _user_id: &str,
+        ) -> Result<(), agentos_core::types::StorageError> {
+            unreachable!("租户解析路径不更登录时间")
+        }
+        async fn update_user_password(
+            &self,
+            _user_id: &str,
+            _password_hash: &str,
+            _must_change_password: bool,
+        ) -> Result<bool, agentos_core::types::StorageError> {
+            unreachable!("租户解析路径不改密")
+        }
+        async fn delete_user(
+            &self,
+            _user_id: &str,
+        ) -> Result<bool, agentos_core::types::StorageError> {
+            unreachable!("租户解析路径不删用户")
+        }
+    }
+
+    fn lookup_store(
+        injected: Result<
+            Option<agentos_core::types::UserRecord>,
+            agentos_core::types::StorageError,
+        >,
+    ) -> std::sync::Arc<dyn agentos_core::traits::StorageBackend> {
+        std::sync::Arc::new(UserLookupStore(injected))
+    }
+
+    /// find_user_by_id tri-state 三分支：Err 原样透传（不再被 if let 丢弃），
+    /// None/Some 语义保真。
     #[tokio::test]
-    async fn resolve_tenant_id_by_unknown_user_falls_back_to_default() {
-        let store: Option<&std::sync::Arc<dyn agentos_core::traits::StorageBackend>> = None;
-        assert_eq!(
-            resolve_tenant_id_by_user(store, "no-such-user").await,
-            DEFAULT_TENANT_ID
+    async fn find_user_by_id_passes_tri_state_through() {
+        // ① Found：返回用户且租户保真
+        let store = lookup_store(Ok(Some(user_of("u-b", "tenant-b"))));
+        let u = find_user_by_id(Some(&store), "u-b").await.unwrap().unwrap();
+        assert_eq!(u.tenant_id, "tenant-b");
+        assert_eq!(u.id, "u-b");
+
+        // ② NotFound：Ok(None)（查询成功，用户不存在）
+        let store = lookup_store(Ok(None));
+        assert!(
+            find_user_by_id(Some(&store), "u-gone")
+                .await
+                .unwrap()
+                .is_none(),
+            "用户不存在是查询成功的空结果，不是错误"
         );
-        assert_eq!(
-            resolve_tenant_id_by_user(store, "").await,
+
+        // ③ StoreError：Err 原样透传（性质断言：不得伪装成 None/Some）
+        let store = lookup_store(Err(agentos_core::types::StorageError::Database(
+            "injected outage".to_string(),
+        )));
+        assert!(
+            find_user_by_id(Some(&store), "u-any").await.is_err(),
+            "存储故障必须走 Err 通道，不得与 NotFound 合流"
+        );
+
+        // 无 store：内置表命中/未命中同样是 Ok 两态
+        let admin_id = default_users()[0].id.clone();
+        assert!(find_user_by_id(None, &admin_id).await.unwrap().is_some());
+        assert!(find_user_by_id(None, "no-such").await.unwrap().is_none());
+    }
+
+    /// resolve_tenant_id_by_user：Found → 真实租户（非 default 租户用户不落
+    /// 降级）；NotFound → 拒绝（拍板①）；StoreError → fail-closed 拒绝。
+    /// 失败态一律不出租户值（降级 default = 写串租户，性质断言）。
+    #[tokio::test]
+    async fn resolve_tenant_id_by_user_consumes_tri_state() {
+        // ① Found：两个不同非 default 租户（区分度第二组输入）各自解析为真
+        for (uid, tenant) in [("u-b", "tenant-b"), ("u-c", "tenant-c")] {
+            let store = lookup_store(Ok(Some(user_of(uid, tenant))));
+            assert_eq!(
+                resolve_tenant_id_by_user(Some(&store), uid).await.unwrap(),
+                tenant,
+                "动态用户必须解析出真实租户 {tenant}"
+            );
+        }
+
+        // ② NotFound（已删用户）：拒绝，且不是 default
+        let store = lookup_store(Ok(None));
+        let err = resolve_tenant_id_by_user(Some(&store), "u-gone")
+            .await
+            .unwrap_err();
+        assert_eq!(err, TenantResolveError::NotFound, "已删用户 token 必须拒绝");
+        assert_ne!(
+            err.to_string(),
             DEFAULT_TENANT_ID,
-            "空 user_id 同样回退默认租户"
+            "拒绝路径不得出口任何租户值"
+        );
+
+        // ③ StoreError：fail-closed 拒绝（错误串透传可归因）
+        let store = lookup_store(Err(agentos_core::types::StorageError::Database(
+            "injected outage".to_string(),
+        )));
+        let err = resolve_tenant_id_by_user(Some(&store), "u-any")
+            .await
+            .unwrap_err();
+        match &err {
+            TenantResolveError::StoreError(msg) => {
+                assert!(msg.contains("injected outage"), "错误串可归因: {msg}")
+            }
+            other => panic!("存储故障必须是 StoreError 态: {other:?}"),
+        }
+    }
+
+    /// 无 store 场景（测试/嵌入式降级模式）：default 是唯一可能租户——
+    /// 内置 admin 解析其真实租户（恰为 default），未知用户走文档化降级
+    /// （无持久化即无租户注册表，非吞错）。有 store 的拒绝路径见
+    /// tri-state 用例（合法缺失与解析失败二分）。
+    #[tokio::test]
+    async fn resolve_tenant_id_by_user_no_store_is_documented_default() {
+        let admin = default_users().into_iter().next().unwrap();
+        let expect = admin.tenant_id.clone();
+        assert_eq!(
+            resolve_tenant_id_by_user(None, &admin.id).await.unwrap(),
+            expect,
+            "内置 admin 解析其真实租户"
+        );
+        for unknown in ["no-such-user", ""] {
+            assert_eq!(
+                resolve_tenant_id_by_user(None, unknown).await.unwrap(),
+                DEFAULT_TENANT_ID,
+                "无 store 时 {unknown:?} 走文档化降级（唯一可能租户）"
+            );
+        }
+    }
+
+    /// resolve_request_tenant_id：合法 token + 解析失败 → HTTP 面拒绝
+    /// （NotFound → 401 文案与 authenticate_bearer_user 一致；StoreError →
+    /// 503 不伪装 4xx）；无 token 保持匿名 default 契约。
+    #[tokio::test]
+    async fn resolve_request_tenant_id_propagates_resolution_failure() {
+        let mk = |store: std::sync::Arc<dyn agentos_core::traits::StorageBackend>,
+                  user: BuiltInUser| {
+            let token = encode_token(TokenType::Access, &user, 3600);
+            (Some(store), mk_headers(&token))
+        };
+
+        // NotFound → 401（对齐管理面"用户不存在"文案）
+        let (store, headers) = mk(lookup_store(Ok(None)), test_user(""));
+        match resolve_request_tenant_id(store.as_ref(), &headers).await {
+            Err(ApiError::Unauthorized { message }) => {
+                assert_eq!(message, "用户不存在");
+            }
+            other => panic!("已删用户必须 401: {other:?}"),
+        }
+
+        // StoreError → 503（基础设施故障不伪装客户端错误）
+        let (store, headers) = mk(
+            lookup_store(Err(agentos_core::types::StorageError::Database(
+                "db down".into(),
+            ))),
+            test_user(""),
+        );
+        match resolve_request_tenant_id(store.as_ref(), &headers).await {
+            Err(ApiError::ServiceUnavailable { message }) => {
+                assert!(message.contains("db down"), "错误可归因: {message}");
+            }
+            other => panic!("存储故障必须 503: {other:?}"),
+        }
+
+        // 无 token：匿名 default 契约不变（合法缺失 ≠ 解析失败）
+        let store = lookup_store(Ok(None));
+        assert_eq!(
+            resolve_request_tenant_id(Some(&store), &HeaderMap::new())
+                .await
+                .unwrap(),
+            DEFAULT_TENANT_ID
         );
     }
 
@@ -917,5 +1437,212 @@ mod tests {
                 "{value:?} 不应被识别为 bearer token"
             );
         }
+    }
+}
+
+// ─── token 密钥解析（持久化默认，ADR 2026-10-22-token-secret-persistent-default） ───
+
+#[cfg(test)]
+mod token_secret_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    /// 定长字符串夹具：`c` 重复 `n` 次。
+    fn s(c: char, n: usize) -> String {
+        std::iter::repeat_n(c, n).collect()
+    }
+
+    /// 确定性生成器：`tag` + 63 位计数补零，恒 64 字符（≥ MIN 32）。
+    fn counting_gen(tag: char) -> impl FnMut() -> String {
+        let mut n: u64 = 0;
+        move || {
+            n += 1;
+            format!("{tag}{n:0>63}")
+        }
+    }
+
+    fn key_path(tmp: &TempDir) -> PathBuf {
+        tmp.path().join(TOKEN_SECRET_FILE)
+    }
+
+    #[test]
+    fn env_explicit_wins_and_store_untouched() {
+        let tmp = TempDir::new().unwrap();
+        let key = key_path(&tmp);
+        std::fs::write(&key, s('P', 64)).unwrap();
+
+        let (secret, source) = resolve_token_secret(
+            Some(s('E', 40)),
+            false,
+            Ok(key.as_path()),
+            &mut counting_gen('G'),
+        );
+        assert_eq!(secret, s('E', 40));
+        assert_eq!(source, TokenSecretSource::EnvExplicit { too_short: false });
+        assert_eq!(
+            std::fs::read_to_string(&key).unwrap(),
+            s('P', 64),
+            "env 显式时持久层绝不被触碰"
+        );
+    }
+
+    #[test]
+    fn env_explicit_short_used_with_flag() {
+        let (secret, source) = resolve_token_secret(
+            Some("short".into()),
+            false,
+            Err("不可用"),
+            &mut counting_gen('G'),
+        );
+        assert_eq!(secret, "short", "显式短值仅告警不拒绝（尊重部署者）");
+        assert_eq!(source, TokenSecretSource::EnvExplicit { too_short: true });
+    }
+
+    #[test]
+    fn env_blank_treated_as_unset_falls_through() {
+        let tmp = TempDir::new().unwrap();
+        let key = key_path(&tmp);
+        std::fs::write(&key, s('P', 64)).unwrap();
+
+        // 空白 env = 未设置（与既有口径一致）→ 落持久层
+        let (secret, source) = resolve_token_secret(
+            Some("   ".into()),
+            false,
+            Ok(key.as_path()),
+            &mut counting_gen('G'),
+        );
+        assert_eq!(secret, s('P', 64));
+        assert_eq!(source, TokenSecretSource::PersistedExisting);
+    }
+
+    #[test]
+    fn ephemeral_opt_in_ignores_and_never_touches_store() {
+        let tmp = TempDir::new().unwrap();
+        let key = key_path(&tmp);
+        std::fs::write(&key, s('P', 64)).unwrap();
+
+        let (secret, source) =
+            resolve_token_secret(None, true, Ok(key.as_path()), &mut counting_gen('G'));
+        assert_eq!(source, TokenSecretSource::EphemeralOptIn);
+        assert_eq!(secret, format!("G{:0>63}", 1), "opt-in 走生成器");
+        assert_eq!(
+            std::fs::read_to_string(&key).unwrap(),
+            s('P', 64),
+            "opt-in 不读不写持久层（已存副本原样保留）"
+        );
+    }
+
+    #[test]
+    fn persisted_existing_reused_and_trimmed() {
+        let tmp = TempDir::new().unwrap();
+        let key = key_path(&tmp);
+        // 尾随换行（编辑器手改常见形态）必须被 trim 后采用
+        std::fs::write(&key, format!("{}\n", s('P', 64))).unwrap();
+
+        let (secret, source) =
+            resolve_token_secret(None, false, Ok(key.as_path()), &mut counting_gen('G'));
+        assert_eq!(secret, s('P', 64), "尾随空白不应进入密钥");
+        assert_eq!(source, TokenSecretSource::PersistedExisting);
+        assert!(
+            std::fs::read_dir(tmp.path()).unwrap().count() == 1,
+            "复用路径不得产生临时文件残留"
+        );
+    }
+
+    #[test]
+    fn missing_file_generates_and_persists_atomically() {
+        let tmp = TempDir::new().unwrap();
+        let key = key_path(&tmp);
+
+        let (secret, source) =
+            resolve_token_secret(None, false, Ok(key.as_path()), &mut counting_gen('G'));
+        assert_eq!(source, TokenSecretSource::GeneratedAndPersisted);
+        assert_eq!(secret, format!("G{:0>63}", 1));
+        assert_eq!(
+            std::fs::read_to_string(&key).unwrap(),
+            secret,
+            "落盘内容必须与采用值逐字节一致"
+        );
+        assert!(
+            std::fs::read_dir(tmp.path()).unwrap().count() == 1,
+            "落盘后无临时文件残留（原子换入）"
+        );
+    }
+
+    #[test]
+    fn corrupt_short_file_regenerated_and_overwritten() {
+        let tmp = TempDir::new().unwrap();
+        let key = key_path(&tmp);
+        std::fs::write(&key, "tooshort").unwrap();
+
+        let (secret, source) =
+            resolve_token_secret(None, false, Ok(key.as_path()), &mut counting_gen('G'));
+        assert_eq!(source, TokenSecretSource::GeneratedAndPersisted);
+        assert_eq!(
+            std::fs::read_to_string(&key).unwrap(),
+            secret,
+            "过短存储视为损坏：重新生成并覆盖"
+        );
+    }
+
+    /// 核心性质：同一持久层两次解析（模拟重启）必须得到同一密钥。
+    #[test]
+    fn restart_reuses_persisted_secret() {
+        let tmp = TempDir::new().unwrap();
+        let key = key_path(&tmp);
+
+        let (first, s1) =
+            resolve_token_secret(None, false, Ok(key.as_path()), &mut counting_gen('A'));
+        assert_eq!(s1, TokenSecretSource::GeneratedAndPersisted);
+
+        // 模拟重启：全新生成器、仅持久层还在
+        let (second, s2) =
+            resolve_token_secret(None, false, Ok(key.as_path()), &mut counting_gen('B'));
+        assert_eq!(s2, TokenSecretSource::PersistedExisting);
+        assert_eq!(first, second, "重启后必须复用同一密钥（本裁断的核心性质）");
+    }
+
+    #[test]
+    fn store_unavailable_falls_back_ephemeral_with_reason() {
+        let (secret, source) = resolve_token_secret(
+            None,
+            false,
+            Err("用户空间不可用（无 OS 数据目录）"),
+            &mut counting_gen('G'),
+        );
+        assert_eq!(secret.len(), 64);
+        assert_eq!(
+            source,
+            TokenSecretSource::EphemeralFallback {
+                reason: "用户空间不可用（无 OS 数据目录）".into()
+            },
+            "降级原因必须透传（启动日志定位用）"
+        );
+    }
+
+    #[test]
+    fn write_failure_falls_back_without_partial_file() {
+        let tmp = TempDir::new().unwrap();
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, "x").unwrap();
+        let key = blocker.join(TOKEN_SECRET_FILE); // 父路径是文件 → 建目录必败
+
+        let (secret, source) =
+            resolve_token_secret(None, false, Ok(key.as_path()), &mut counting_gen('G'));
+        assert!(matches!(
+            source,
+            TokenSecretSource::EphemeralFallback { .. }
+        ));
+        assert_eq!(secret.len(), 64, "写失败降级仍给出可用密钥（不砖启动）");
+        assert!(!key.exists(), "失败路径不得留下半写文件");
+    }
+
+    #[test]
+    fn production_generator_is_64_hex_and_fresh() {
+        let a = generate_token_secret();
+        assert_eq!(a.len(), 64, "生产生成器 = 两个 uuid simple 拼接");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()), "{a}");
+        assert_ne!(a, generate_token_secret(), "两次生成必须不同（随机性）");
     }
 }

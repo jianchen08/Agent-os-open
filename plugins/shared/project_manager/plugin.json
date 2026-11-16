@@ -1,0 +1,559 @@
+{
+  "id": "project_manager",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Project Manager",
+  "description": "项目域主——项目创建（= 文件夹 + 登记行 + 类型出生初始化）与方案工作流状态查询/列举/迁移；承载 project_registry 登记簿（id↔路径最薄账本）并对外出 project.* 服务（消费方 capability 直连）",
+  "version": "1.1.1",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "metrics_class": "tool",
+    "tools": [
+      {
+        "name": "project",
+        "description": "项目操作面（四动作合一）。action='create'：创建项目（= 真实文件夹 + 登记行 + 类型出生初始化）。项目是任务树分组锚点，不执行、无执行者；创建后把 project_id 传给 task_submit 挂靠，任务即在项目文件夹下执行（默认 worktree 分叉）。同目录已登记时复用既有项目（created=false）并幂等补装类型初始化。最小示例：project(action='create', goal='<项目标题>')（path/mode_tags/default_mode/project_type 可选，project_type 映射说明见参数说明）。action='query'：按 project_id 读登记行方案工作流状态。最小示例：project(action='query', project_id='<12hex>')。action='list'：列举全部登记项目（无需 project_id，按更新时间倒序，含 title/path/status）。最小示例：project(action='list')。action='transition'：申请状态迁移（plan→running 定稿过门 / running→plan 修订回门），迁移触发用户审批（安全规则 needs_approval），审批通过前状态不变；plan 态内 task_submit 仅允许派发调研/环境准备类任务，执行类任务会被状态闸拒绝；done 由用户在界面管理，不在工具可迁集合内。最小示例：project(action='transition', project_id='<12hex>', target_state='running', reason='<定稿说明>')。",
+        "render": {
+          "card": "form",
+          "title": "项目"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "query",
+                "list",
+                "transition"
+              ],
+              "default": "query",
+              "description": "query=按 project_id 读工作流状态；list=列举全部登记项目（无需 project_id，按更新时间倒序）；transition=申请状态迁移（触发用户审批）"
+            },
+            "goal": {
+              "type": "string",
+              "minLength": 1,
+              "description": "项目标题（必填）。项目 = 真实文件夹 + 登记行（任务树分组锚点），不执行、无执行者；任务经 task_submit 的 project_id 挂靠后在项目文件夹下执行（默认 worktree 从项目仓库分叉）。"
+            },
+            "path": {
+              "type": "string",
+              "description": "项目文件夹（可选）。显式指定目录；缺省自动生成{工作空间根}/projects/<标题>。已存在目录非 git 仓库会自动git init（不删改现有文件）；同目录已登记时复用既有项目。"
+            },
+            "mode_tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "项目登记模式标签集合（可选，批 B8）。开放标签（非枚举），每个标签须为已注册模式包（出厂/用户双根可解析，如 coding/writing/godot/research），登记后 task_submit 显式带 mode 派发时校验 mode ∈ 本集合；同路径复用既有项目时显式传入即补挂/调整登记（不传则不动既有登记）。写入时各标签包的 skills/ 随之播种到项目根 skills/（增量补缺不覆盖用户改动）。"
+            },
+            "default_mode": {
+              "type": "string",
+              "description": "主域标注（可选，批 B8）。必须是 mode_tags 之一；仅作说明面消费（方案段第零步主域确定、AGENTS.md 主域标注），不做派发回退。"
+            },
+            "project_type": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "godot"
+              ],
+              "default": "auto",
+              "description": "项目类型 → 出生初始化映射（唯一真值 config/tools/project_create.yaml，本说明与枚举由其生成）。godot：Godot 4 游戏项目——出生即装两个宿主插件 addons/agentos（宿主桥：9600 探活/取上下文 + 选中引用推送）与 addons/godot_mcp（godot-mcp-go 执行面通道，配 godot_run 工具），并写入 project.godot [editor_plugins] 启用（清单缺失则脚手架最小 project.godot）；godot_run 执行面按任务 workspace 自动路由到本工程（编辑器打开即接线），机器 env 只需 GODOT_MCP_BIN。auto（缺省）：目录已有该类型的清单文件时自动按该类型初始化。未声明类型报错；初始化失败整体报错，同路径重跑幂等补装。"
+            },
+            "project_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "项目 id（12hex 登记键）。query/transition 必填；list 无需"
+            },
+            "target_state": {
+              "type": "string",
+              "enum": [
+                "plan",
+                "running"
+              ],
+              "description": "transition 的目标状态（合法边：plan→running 定稿过门；running→plan 修订回门）。done 由用户界面管理，不在工具可迁集合内。"
+            },
+            "reason": {
+              "type": "string",
+              "description": "transition 必填：迁移事由（定稿说明 / 修订申请：改动点+断链影响面+在途任务清单），进审批卡与日志审计"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "oneOf": [
+            {
+              "properties": {
+                "action": {
+                  "const": "create"
+                },
+                "goal": {},
+                "path": {},
+                "mode_tags": {},
+                "default_mode": {},
+                "project_type": {}
+              },
+              "required": [
+                "action",
+                "goal"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "query"
+                },
+                "project_id": {}
+              },
+              "required": [
+                "action",
+                "project_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "list"
+                }
+              },
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "properties": {
+                "action": {
+                  "const": "transition"
+                },
+                "project_id": {},
+                "target_state": {},
+                "reason": {}
+              },
+              "required": [
+                "action",
+                "project_id",
+                "target_state",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "description": "按 action 返回对应结构：create={project_id,title,path,status,created,workflow_state?,session_id?,mode_tags?,default_mode?,warnings?,project_type?,init?}；query/transition=单项目快照（project_id/workflow_state/title/path/mode_tags/default_mode/transitioned）；list={projects 数组 + total}；参数错误返回 {success:false,error}（error 教改法）",
+          "properties": {
+            "project_id": {
+              "type": "string",
+              "description": "项目 id（12hex；复用既有时同值）"
+            },
+            "title": {
+              "type": "string",
+              "description": "项目标题"
+            },
+            "path": {
+              "type": "string",
+              "description": "项目文件夹宿主绝对路径"
+            },
+            "status": {
+              "type": "string",
+              "description": "active | paused"
+            },
+            "workflow_state": {
+              "type": "string",
+              "description": "方案工作流状态 plan | running | done（ADR 2026-09-17）"
+            },
+            "created": {
+              "type": "boolean",
+              "description": "true=新建登记；false=复用既有"
+            },
+            "session_id": {
+              "type": "string",
+              "description": "创建时关联的会话（可选）"
+            },
+            "mode_tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "项目登记模式标签集合（未登记为空数组，批 B8）"
+            },
+            "default_mode": {
+              "type": "string",
+              "description": "主域标注（mode_tags 子集，未标注为空串）"
+            },
+            "warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "技能播种告警（登记成功照常返回；包不可解析/单技能复制失败在此可见，不静默）"
+            },
+            "project_type": {
+              "type": "string",
+              "description": "路由到的项目类型（未路由为空串）"
+            },
+            "init": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "description": "出生初始化执行明细（未路由为 null）",
+              "properties": {
+                "addons_installed": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "本次新装的宿主插件名"
+                },
+                "addons_present": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "已就位未重复安装的插件名"
+                },
+                "project_file_created": {
+                  "type": "boolean",
+                  "description": "类型清单文件是否本次脚手架创建"
+                },
+                "enabled_added": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "本次新增的启用条目"
+                },
+                "ci": {
+                  "type": "object",
+                  "description": "CI 包出生组装报告（设计 docs/working/项目类型CI包设计_20261030.md §6.2：启用/跳过的面 + 判定原因）",
+                  "properties": {
+                    "installed": {
+                      "type": "boolean",
+                      "description": "是否执行了 CI 包装配"
+                    },
+                    "packs": {
+                      "type": "object",
+                      "description": "装配的 pack → 出厂版本"
+                    },
+                    "packs_installed": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "本次实际拷写工厂物料的 pack"
+                    },
+                    "packs_skipped": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "跳过的 pack 与原因（未出厂/版本闸）"
+                    },
+                    "gates_total": {
+                      "type": "integer",
+                      "description": "组装后门禁总数"
+                    },
+                    "hook_installed": {
+                      "type": "boolean",
+                      "description": "pre-commit 钩子是否本次写入"
+                    },
+                    "hook_skipped_reason": {
+                      "type": "string",
+                      "description": "钩子未写入的原因（空串=已写入）"
+                    },
+                    "probes": {
+                      "type": "object",
+                      "description": "出生工具探测结果（godot_bin 路径或空串）"
+                    },
+                    "warnings": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "装配告警（钩子冲突/local 未触碰等，不静默）"
+                    }
+                  }
+                },
+                "committed": {
+                  "type": "boolean",
+                  "description": "初始化后是否执行了 git 提交（无变更则跳过为 false）"
+                }
+              }
+            },
+            "transitioned": {
+              "type": "boolean",
+              "description": "本次是否发生迁移（query 恒 false）"
+            },
+            "projects": {
+              "type": "array",
+              "description": "list 结果：全部登记项目，按 updated_at 倒序",
+              "items": {
+                "type": "object",
+                "required": [
+                  "project_id",
+                  "workflow_state"
+                ],
+                "properties": {
+                  "project_id": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "workflow_state": {
+                    "type": "string",
+                    "description": "plan | running | done"
+                  },
+                  "status": {
+                    "type": "string",
+                    "description": "active | paused（文件夹生命周期）"
+                  },
+                  "auto_execute": {
+                    "type": "boolean"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "mode_tags": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "default_mode": {
+                    "type": "string"
+                  },
+                  "updated_at": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "total": {
+              "type": "integer",
+              "description": "list 结果：项目总数"
+            }
+          }
+        }
+      }
+    ],
+    "services": [
+      {
+        "name": "project.get",
+        "description": "Get one project registration row; unknown id -> found=false",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "project_id": {
+              "type": "string",
+              "description": "项目 id（12hex 登记键）"
+            }
+          },
+          "required": [
+            "project_id"
+          ]
+        }
+      },
+      {
+        "name": "project.list",
+        "description": "List all project registration rows (created_at desc)",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      {
+        "name": "project.save",
+        "description": "Save one full project row (mode-field change validation on write face)",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "project": {
+              "type": "object",
+              "description": "完整登记行（读改写语义：取行改字段后整行回存）"
+            }
+          },
+          "required": [
+            "project"
+          ]
+        }
+      },
+      {
+        "name": "project.delete",
+        "description": "Delete one registration row (folder untouched); unknown id -> deleted=false",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "project_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "project_id"
+          ]
+        }
+      },
+      {
+        "name": "project.create",
+        "description": "Create/register a project folder (idempotent by path; reuse -> created=false)",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "description": "项目标题（必填）"
+            },
+            "path": {
+              "type": "string",
+              "description": "项目文件夹（可选；缺省 {工作空间根}/projects/<标题>）"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "submitted_by": {
+              "type": "string"
+            },
+            "auto_execute": {
+              "type": "boolean"
+            },
+            "mode_tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "default_mode": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "title"
+          ]
+        }
+      },
+      {
+        "name": "project.list_paths",
+        "description": "Lightweight read: project_id -> folder path map",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      {
+        "name": "project.remove_folder",
+        "description": "Delete a project folder (destructive; guarded roots refused -> removed=false)",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ]
+        }
+      },
+      {
+        "name": "project.load_zones",
+        "description": "Load all three zone-policy sections (entries/read_deny/read_allow) in one read",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      {
+        "name": "project.add_zone",
+        "description": "Append one zone-policy entry (section-scoped; whole-drive roots refused)",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "section": {
+              "type": "string",
+              "enum": [
+                "entries",
+                "read_deny",
+                "read_allow"
+              ],
+              "description": "entries=写区 read_deny=读排除 read_allow=读授权"
+            }
+          },
+          "required": [
+            "path"
+          ]
+        }
+      },
+      {
+        "name": "project.remove_zone",
+        "description": "Remove one zone-policy entry (idempotent)",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "section": {
+              "type": "string",
+              "enum": [
+                "entries",
+                "read_deny",
+                "read_allow"
+              ]
+            }
+          },
+          "required": [
+            "path"
+          ]
+        }
+      },
+      {
+        "name": "project.purge_legacy_dirs",
+        "description": "Remove container_* dirs under workspace base (idempotent)",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "provides": {
+    "capabilities": [
+      {
+        "namespace": "project",
+        "methods": [
+          "get",
+          "list",
+          "save",
+          "delete",
+          "create",
+          "list_paths",
+          "remove_folder",
+          "load_zones",
+          "add_zone",
+          "remove_zone",
+          "purge_legacy_dirs"
+        ],
+        "host": "sidecar",
+        "tool_prefix": "project"
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 10,
+  "host_group": "light"
+}

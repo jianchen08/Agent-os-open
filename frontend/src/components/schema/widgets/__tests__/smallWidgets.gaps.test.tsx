@@ -43,7 +43,6 @@ describe('taskStatusToPipelineStatus — 未知态告警与折叠（纯面）', 
     const { taskStatusToPipelineStatus } = await import('@/types/taskStatus')
     expect(taskStatusToPipelineStatus('completed')).toBe('completed')
     expect(taskStatusToPipelineStatus('cancelled')).toBe('cancelled')
-    expect(taskStatusToPipelineStatus('pending_evaluation')).toBe('unknown')
     expect(taskStatusToPipelineStatus('mystery-x')).toBe('unknown')
     expect(taskStatusToPipelineStatus(undefined)).toBe('unknown')
   })

@@ -1,0 +1,34 @@
+# /etc/systemd/system/agentos-kernel.service
+# 安装：复制本文件到上述路径后 `systemctl daemon-reload && systemctl enable --now agentos-kernel`
+# 路径按实际仓库根调整（下例假定仓库落在 /opt/agentos）。
+#
+# 前置：内核二进制由仓库构建——在 kernel/ 下 `cargo build --release`，
+# 产物即 ExecStart 指向的 kernel/target/release/agentos-kernel。
+
+[Unit]
+Description=AgentOS Kernel (agentos-kernel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agentos
+# WorkingDirectory 必须钉仓库根：内核日志在 CWD 可写时落 CWD 相对 logs/
+# （kernel/crates/api/src/bin/agentos-kernel.rs resolve_log_dir），钉住仓库根
+# 即落 <repo>/logs/，规避服务管理器下 CWD 漂移。
+WorkingDirectory=/opt/agentos
+# 密钥与路径集中在此文件（模板见仓库 deploy/agentos.env.example）。
+# 文件含明文口令，必须 0600，安装命令：
+#   sudo install -d -m 0755 /etc/agentos
+#   sudo install -m 0600 deploy/agentos.env.example /etc/agentos/agentos.env
+EnvironmentFile=/etc/agentos/agentos.env
+ExecStart=/opt/agentos/kernel/target/release/agentos-kernel
+Restart=on-failure
+RestartSec=3
+# 停机：内核已内置 SIGTERM 优雅退出（kernel/crates/api/src/server.rs
+# shutdown_signal——drain + 逐 kill Python sidecar，总预算 2s，best-effort），
+# 默认 KillMode=control-group 即可，unit 无需特殊停机配置。
+# stdout/stderr 交 journald 收口：journalctl -u agentos-kernel -f
+
+[Install]
+WantedBy=multi-user.target

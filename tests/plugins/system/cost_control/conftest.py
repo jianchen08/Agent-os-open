@@ -1,7 +1,7 @@
 # @feature: FP-0.2.可观测性 可观测性 | @ci: python-coverage
 """cost_control 测试 conftest——把插件目录注入 sys.path。
 
-插件位于 plugins/shared/system/cost_control/，内部用平铺 import
+插件位于 plugins/shared/cost_control/，内部用平铺 import
 （from budget_manager import ... / from config import ... / from exceptions import ...）。
 
 _PLUGIN_SOURCE_DIRS 暴露给 tests/plugins/conftest.py 的 pytest_runtest_setup，
@@ -15,7 +15,7 @@ from pathlib import Path
 
 _PLUGIN_DIR = (
     Path(__file__).resolve().parents[4]
-    / "plugins" / "shared" / "system" / "cost_control"
+    / "plugins" / "shared" / "cost_control"
 )
 
 _PLUGIN_SOURCE_DIRS = [str(_PLUGIN_DIR)]

@@ -297,7 +297,7 @@ class TestTenantConfigDir:
 
 # multimodal 模块内部平铺 import（from storage import ...），需把其源目录推上 sys.path。
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_MULTIMODAL_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "multimodal"
+_MULTIMODAL_DIR = _REPO_ROOT / "plugins" / "shared" / "multimodal"
 _mm = str(_MULTIMODAL_DIR)
 # storage 槽位逐出：收集期可能驻留 tasks 插件的 storage（同进程批跑时其目录
 # 在 sys.path 更前）——把 multimodal 推到最前再 pop+import 让本插件版本进入

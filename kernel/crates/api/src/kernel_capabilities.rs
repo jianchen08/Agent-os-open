@@ -891,6 +891,21 @@ mod tests {
         let contracts = chat_contracts();
         let spec = find_spec(&contracts, "chat", "send_message").unwrap();
         let store = Arc::new(agentos_engine::SqliteStore::open_memory().unwrap());
+        // 租户解析按真值走（K8 修订 ADR 2026-10-10）：测试用户先在库。
+        store
+            .create_user(&agentos_core::types::UserRecord {
+                user_id: "u1".to_string(),
+                username: "u-1".to_string(),
+                password: String::new(),
+                email: None,
+                role: "user".to_string(),
+                tenant_id: "default".to_string(),
+                created_at: "2026-10-10T00:00:00Z".to_string(),
+                last_login_at: None,
+                must_change_password: false,
+            })
+            .await
+            .unwrap();
         store
             .link_pipeline_session("c1b2c3d4e5f6", "thread-gate", "default")
             .await
@@ -1047,7 +1062,7 @@ mod tests {
         let llm_manifest: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../../plugins/shared/pipeline/core/llm_core/plugin.json"),
+                    .join("../../../plugins/shared/llm_core/plugin.json"),
             )
             .expect("llm_core/plugin.json 必须存在"),
         )
@@ -1055,7 +1070,7 @@ mod tests {
         let tool_manifest: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../../plugins/shared/pipeline/core/tool_core/plugin.json"),
+                    .join("../../../plugins/shared/tool_core/plugin.json"),
             )
             .expect("tool_core/plugin.json 必须存在"),
         )

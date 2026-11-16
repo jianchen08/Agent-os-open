@@ -4,16 +4,16 @@
  * - 管道数据：内核 `GET /api/v1/pipelines/runs` 快照（pipelineRegistryStore）
  *   + WS 流式/任务事件实时增量 + 任务列表（longTermTaskStore 权威）
  * - 展示：执行中/最近完成两组，组内按归属会话分组（会话 → 管道 包含关系），
- *   无归属（孤儿）管道单独平铺；树视图/列表视图切换；树子级点击展开/收起
- *   （默认收起），条目详情走独立「详细信息」按钮、与树展开解耦（树操作不关
- *   详情，详情停留显示）；操作按钮（打开对话/暂停/恢复/取消/复制 ID/打开工作空间）
+ *   无归属（孤儿）管道单独平铺；树子级点击展开/收起（默认收起），条目详情走
+ *   独立「详细信息」按钮、与树展开解耦（树操作不关
+ *   详情，详情停留显示）；操作按钮（打开对话/暂停/恢复（原「取消」改标暂停）/复制 ID/打开工作空间）
  * - 任务与执行管道一对一绑定：条目行即任务行，不包
  *   任务节点层——子任务/子管道直挂该条目行下，只一个层级
  */
 
 import { useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Loader2, ClipboardList, FolderTree, Trash2 } from '@/assets/icons'
+import { Loader2, Trash2 } from '@/assets/icons'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -23,6 +23,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { useAgentsQuery } from '@/hooks/queries/useAgentsQuery'
 import { useAllTasksQuery } from '@/hooks/queries/useAllTasksQuery'
 import { invalidateLongTermTasks } from '@/hooks/queries/useLongTermTasksQuery'
 import { usePipelineRunsQuery, usePipelineStatesQuery } from '@/hooks/queries/usePipelineRunsQuery'
@@ -32,22 +33,36 @@ import { useAsyncResource } from '@/hooks/useAsyncResource'
 import { useElementVisible } from '@/hooks/useElementVisible'
 import { useVisibleRefetch } from '@/hooks/useVisibleRefetch'
 import { mapStateInfoToViewModel, type PipelineStateEntryViewModel } from '@/services/api/pipelines'
-import { deleteProject, pauseTask, resumeTask, cancelTask } from '@/services/api/tasks'
+import { deleteProject } from '@/services/api/tasks'
 import { navigateToPipeline } from '@/services/pipelineNavigator'
 import { queryKeys } from '@/services/query/queryKeys'
+import { runTaskRowAction } from '@/services/taskRowActions'
 import { openFolderWithFeedback } from '@/services/workspaceFolderOpener'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useContextUsageStore } from '@/stores/contextUsageStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { useSessionListStore } from '@/stores/sessionListStore'
-import { taskStatusToPipelineStatus } from '@/types/taskStatus'
+import { useSessionStore } from '@/stores/sessionStore'
+import { taskPendingSubtaskParents, taskStatusToPipelineStatus } from '@/types/taskStatus'
+import { sanitizeSessionTitle } from '@/utils/sessionTitle'
+import {
+  matchesEntryFilters,
+  PipelineManagerFilterBar,
+  resolveEntrySessionId as resolveEntrySessionIdPure,
+  sessionFilterLabelOf,
+} from './PipelineManagerFilterBar'
+import {
+  PipelineManagerPauseConfirmDialog,
+  type PauseConfirmTarget,
+} from './PipelineManagerPauseConfirmDialog'
 import {
   ensureAnchorNode,
-  PipelineTable,
   PipelineTree,
   resolveThreadTop,
   type PipelineTreeNode,
 } from './PipelineManagerTreeParts'
+import { pipelineRowLifecycleFields } from './pipelineRowLifecycle'
+import { resolveAgentLabel } from './pipelineShortLabel'
 import { pipelineStatusToTabStatus, TERMINAL_PIPELINE_STATUSES } from './pipelineStatusVisuals'
 import { openWorkspaceTreeTab } from './workspaceTreeTab'
 import type { PipelineViewEntry } from '@/types/pipeline'
@@ -66,8 +81,24 @@ function taskPipelineId(task: Record<string, unknown>): string | undefined {
   return typeof metaRaw === 'string' && metaRaw ? metaRaw : undefined
 }
 
+/** 条目执行身份：state agent.id 真值优先 → 任务行出生快照 → 会话登记归属；
+ *  全缺 = undefined（行内不渲染 agent 名徽标，不猜默认主 agent） */
+function entryAgentId(
+  stateAgentId: string | undefined,
+  task: Record<string, unknown> | undefined,
+  sessionAgentId: string | undefined,
+): string | undefined {
+  const taskAgentId = task
+    ? String(task.agentName ?? task.agent_name ?? '') || undefined
+    : undefined
+  return stateAgentId ?? taskAgentId ?? sessionAgentId
+}
+
 /** 任务定位高亮时长（focusTaskId 定位行的高亮窗口，超时自动清除） */
 const LOCATE_HIGHLIGHT_MS = 2500
+
+/** agents 注册表空缺省（引用恒定：query 无数据时不打穿下游 useMemo 依赖） */
+const EMPTY_AGENT_LIST: Array<{ id?: string; configId?: string; name?: string }> = []
 
 /** 在树中查找节点 key 的祖先路径（父→子序、含自身；找不到返回空数组） */
 function findTreePathKeys(nodes: PipelineTreeNode[], key: string, trail: string[] = []): string[] {
@@ -111,6 +142,9 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
   )
   /** 会话列表（按 thread_id 取会话标题） */
   const { data: sessions = [] } = useSessionsQuery()
+  /** agents 注册表（行首 agent 名徽标的解析源；缺省用模块常量防 memo 打穿） */
+  const { data: agentsData } = useAgentsQuery()
+  const agents = agentsData ?? EMPTY_AGENT_LIST
   // 项目登记行（project = 文件夹+登记：树的项目分组节点数据源）。
   // 四态统一（OBS-R258-1）：副面降级决策在此声明——登记拉取失败不阻断任务
   // 列表（登记行只是分组/归局面），降级为「项目分组不可用」留痕横幅 + 重试，
@@ -131,6 +165,8 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
     for (const st of Object.values(registryStates)) {
       stateViews[st.pipeline_id] = mapStateInfoToViewModel(st)
     }
+    // 子任务挂号推导（§4.5「等待子任务」取数源）：单源 types/taskStatus.taskPendingSubtaskParents
+    const pendingSubtaskParents = taskPendingSubtaskParents(allTasks)
     // 任务 → 管道 ID 映射（判定任务类型 + 取任务名/进度；全量任务）
     const taskByPipeline = new Map<string, Record<string, unknown>>()
     for (const task of allTasks) {
@@ -155,11 +191,14 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
       // 内核 state 摘要视图（phase/迭代真值；runs 覆盖的管道也可能有 state 补充）
       const st = run.pipeline_id ? stateViews[run.pipeline_id] : undefined
       const kind = task ? 'task' : 'session'
-      const name =
-        (task ? String(task.title ?? '') : '')
-        || (session ? session.title : '')
-        || (run.thread_id ? `会话 ${run.thread_id.slice(0, 8)}` : '')
-        || (run.pipeline_id ? run.pipeline_id.slice(0, 12) : run.run_id.slice(0, 12))
+      // 统一管道标题（ADR 2026-10-27-pipeline-title-field）：单字段消费，无
+      // 域回退腿；无键不再回退短 ID（用户裁定 2026-11-06）
+      const name = (typeof run.title === 'string' && run.title) || '未命名' // 无 title 不落短 ID（用户裁定 2026-11-06）
+      const agentId = entryAgentId(
+        st?.agentId,
+        task,
+        session?.agentId ? String(session.agentId) : undefined,
+      )
       entries.push({
         key,
         pipelineId: run.pipeline_id,
@@ -173,10 +212,11 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         endedAt: run.ended_at,
         kind,
         name,
-        agentName: task ? String(task.agentName ?? task.agent_name ?? '') || undefined : undefined,
+        agentName: agentId,
+        agentLabel: resolveAgentLabel(agentId, agents),
         taskId: task ? String(task.id) : undefined,
         // 归属会话标题（threadId 未命中会话列表 = 无归属孤儿管道）
-        sessionTitle: session ? session.title : undefined,
+        sessionTitle: session ? sanitizeSessionTitle(session.title) : undefined,
         // 任务工作空间路径（R3：state 真值优先 ws_meta.path/workspace，任务
         // metadata 镜像回退；非任务条目也走 state 通道）
         workspacePath:
@@ -197,10 +237,10 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         messageCount: st?.messageCount,
         // 原始状态与 state 真值（不被 4 态映射吞掉——evaluating/planning 等细态可见）
         taskStatus: task ? String(task.status ?? '') || undefined : undefined,
+        hasPendingSubtasks: task ? pendingSubtaskParents.has(String(task.id)) : undefined,
         stateStatus: st?.taskStatus,
-        mode: st?.mode,
-        stateEnded: st?.ended,
-        rawError: st?.rawError,
+        modeTags: st?.modeTags,
+        ...pipelineRowLifecycleFields(st),
         liveUsage: live
           ? {
               promptTokens: live.promptTokens,
@@ -225,15 +265,15 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
       // BUG-2b 终态防御（ADR 2026-09-14）：state 视图已持 runs 权威终态
       // （冷行 run_status overlay / reap 投影）的行，崩溃遗留的陈旧
       // task.status 投影不再参与状态归组——终态优先，不再显示为幽灵执行中。
-      // BUG-21 无证据防御：runs/state 双面均无此管道行（未起跑任务管道无
-      // message_slots/checkpoint，state 冷兜底不出口）时，任务域未决态
-      // （pending/running/evaluating → running）没有运行态真值可依——runs
-      // 权威无行 = 无运行证据，落 'unknown' 不再猜 running；任务域终态
-      // （completed/failed/cancelled 等自有证据）照常投影。
+      // BUG-21 无证据防御：runs/state 双面均无此管道行，或 state 行在场但
+      // 三源运行键全缺（run_status/ended/raw_error，resolvePipelineRunStatus
+      // 落 'unknown'）时，任务域未决态（pending/running/evaluating → running）
+      // 无运行态真值可依——不猜 running，落 'unknown'；
+      // 任务域终态（completed/failed/cancelled 等自有证据）照常投影。
       const status =
         st && TERMINAL_PIPELINE_STATUSES.has(st.status)
           ? st.status
-          : !st && mapped === 'running'
+          : (st == null || st.status === 'unknown') && mapped === 'running'
             ? 'unknown'
             : mapped
       // 时间真值链：任务端点顶层只有 created_at/updated_at（state 聚合行
@@ -248,19 +288,27 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         (typeof task.updated_at === 'string' && task.updated_at) ||
         (typeof task.updatedAt === 'string' && task.updatedAt) ||
         ''
+      const threadId = String(task.threadId ?? task.thread_id ?? '') || undefined
+      const threadSession = threadId ? sessionById.get(threadId) : undefined
+      const agentId = entryAgentId(
+        st?.agentId,
+        task,
+        threadSession?.agentId ? String(threadSession.agentId) : undefined,
+      )
       entries.push({
         key: pid,
         pipelineId: pid,
         runId: pid,
-        threadId: String(task.threadId ?? task.thread_id ?? '') || undefined,
+        threadId,
         originSessionId: st?.originSessionId,
         status,
         startedAt,
         endedAt:
           updatedAt && TERMINAL_PIPELINE_STATUSES.has(status) ? updatedAt : undefined,
         kind: 'task',
-        name: String(task.title ?? pid.slice(0, 12)),
-        agentName: String(task.agentName ?? task.agent_name ?? '') || undefined,
+        name: String(task.title ?? '') || '未命名', // 无 title 不落短 ID（用户裁定 2026-11-06）
+        agentName: agentId,
+        agentLabel: resolveAgentLabel(agentId, agents),
         taskId: String(task.id),
         sessionTitle: undefined,
         workspacePath:
@@ -276,12 +324,12 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
             : undefined,
         totalTokens: null,
         taskStatus: taskStatus || undefined,
+        hasPendingSubtasks: pendingSubtaskParents.has(String(task.id)),
         currentPhase: st?.currentPhase,
         messageCount: st?.messageCount,
         stateStatus: st?.taskStatus,
-        mode: st?.mode,
-        stateEnded: st?.ended,
-        rawError: st?.rawError,
+        modeTags: st?.modeTags,
+        ...pipelineRowLifecycleFields(st),
       })
     }
 
@@ -292,6 +340,8 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
       if (seen.has(st.pipelineId)) continue
       seen.add(st.pipelineId)
       const session = st.threadId ? sessionById.get(st.threadId) : undefined
+      // state 独有条目无任务侧：执行身份 = state 真值 → 会话登记归属
+      const agentId = st.agentId ?? (session?.agentId ? String(session.agentId) : undefined)
       entries.push({
         key: st.pipelineId,
         pipelineId: st.pipelineId,
@@ -304,18 +354,16 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         // （GUI 黑盒测试 2026-09-11：stress2-10 已完成却显示 496969h 9m）。
         startedAt: '',
         kind: 'session',
-        name:
-          (session ? session.title : '')
-          || st.displayName
-          || st.name
-          || (st.threadId ? `会话 ${st.threadId.slice(0, 8)}` : st.pipelineId.slice(0, 12)),
-        sessionTitle: session ? session.title : undefined,
+        // 行名 = state.title；无键不落短 ID（用户裁定 2026-11-06）
+        name: st.title || '未命名',
+        agentName: agentId,
+        agentLabel: resolveAgentLabel(agentId, agents),
+        sessionTitle: session ? sanitizeSessionTitle(session.title) : undefined,
         currentPhase: st.currentPhase,
         messageCount: st.messageCount,
         stateStatus: st.taskStatus,
-        mode: st.mode,
-        stateEnded: st.ended,
-        rawError: st.rawError,
+        modeTags: st.modeTags,
+        ...pipelineRowLifecycleFields(st),
         // 工作区坐标（state 真值：ws_meta.path/workspace；替代旧
         // metadata.execution_context.source_path 推断）
         workspacePath: st.workspacePath,
@@ -342,15 +390,26 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
     }
 
     return entries
-  }, [registryRuns, registryStates, usageByPipeline, allTasks, sessions, projects])
+  }, [registryRuns, registryStates, usageByPipeline, allTasks, sessions, projects, agents])
 
-  /** 展示视图：tree（树视图）/ list（列表视图） */
-  const [viewMode, setViewMode] = useState<'tree' | 'list'>('tree')
-  /** 类型筛选：all / task / session */
-  const [kindFilter, setKindFilter] = useState<'all' | 'task' | 'session'>('all')
-  /** 状态筛选（缺省 running——面板默认只看运行中的管道/任务，用户裁定
-   *  2026-09-21；空串 = 全部） */
-  const [statusFilter, setStatusFilter] = useState('running')
+  /** 类型筛选（空集 = 全部；任务/会话可叠加并集） */
+  const [kindFilters, setKindFilters] = useState<Set<'task' | 'session'>>(new Set())
+  /** 状态筛选（空集 = 全部；「运行中」与其余状态互斥自动反选，逻辑在 FilterBar 单源）。
+   *  缺省：有活跃会话 → 空集（2026-10-17 裁定：会话筛选已收窄不叠加）；无 → 只看运行中（09-21 裁定） */
+  const [statusFilters, setStatusFilters] = useState<Set<string>>(() =>
+    useSessionStore.getState().activeSessionId ? new Set() : new Set(['running']))
+  /** 关键词筛选（小写 contains 匹配名称/agent/会话标题/任务 id/管道 id 任一命中） */
+  const [keyword, setKeyword] = useState('')
+  /** 会话筛选（null = 无会话筛选；主管道靠 threadId 命中、血缘子任务靠
+   *  originSessionId 命中） */
+  const [sessionFilter, setSessionFilter] = useState<string | null>(null)
+  /** 当前活跃会话（聊天侧切换会话时驱动会话筛选联动） */
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  // 会话筛选 = 活跃会话（聊天侧切换即跟随；× 清除后保持到下一个会话选择动作）
+  // ——行级会话钉住入口已下线（挤占行内操作区并把其后操作按钮挤出屏幕外）
+  useEffect(() => {
+    setSessionFilter(activeSessionId)
+  }, [activeSessionId])
   /** 树子级展开 key 集合（点击展开/收起，默认收起——树是点击展开） */
   const [treeOpenKeys, setTreeOpenKeys] = useState<Set<string>>(new Set())
   /** 展开详情的条目 key 集合（与树展开解耦：树收起不关详情，信息停留显示） */
@@ -368,10 +427,9 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
   }, [pipelineEntries, panelVisible])
 
   /** 项目删除确认弹窗（待删项目；null = 关闭） */
-  const [projectDeleteTarget, setProjectDeleteTarget] = useState<{
-    id: string
-    name: string
-  } | null>(null)
+  const [projectDeleteTarget, setProjectDeleteTarget] = useState<{ id: string; name: string } | null>(null)
+  /** 暂停确认弹窗目标（null = 关闭；确认链路内聚 PipelineManagerPauseConfirmDialog） */
+  const [pauseTarget, setPauseTarget] = useState<PauseConfirmTarget | null>(null)
   /** 删除口径：连子任务一起删除（缺省仅挂起保留）/ 连文件夹一起删除 */
   const [deleteChildren, setDeleteChildren] = useState(false)
   const [deleteFiles, setDeleteFiles] = useState(false)
@@ -395,7 +453,7 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         category: 'alert',
         isBlocking: false,
         autoDismissMs: 6000,
-        sourceLabel: '前端',
+        sourceLabel: '系统',
       })
       setProjectDeleteTarget(null)
     } catch (e) {
@@ -406,30 +464,33 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         category: 'alert',
         isBlocking: false,
         autoDismissMs: 6000,
-        sourceLabel: '前端',
+        sourceLabel: '系统',
       })
     } finally {
       setDeletingProject(false)
     }
   }, [projectDeleteTarget, deleteChildren, deleteFiles, queryClient])
 
-  /** 按类型 + 状态筛选管道条目 */
+  /** 按类型 + 状态 + 会话 + 关键词筛选管道条目（各维度 AND 叠加，谓词在
+   *  PipelineManagerFilterBar 单源） */
   const filteredPipelineEntries = useMemo(
     () =>
-      pipelineEntries.filter((entry) => {
-        if (kindFilter !== 'all' && entry.kind !== kindFilter) return false
-        if (statusFilter) {
-          const statusMatch =
-            entry.status === statusFilter
-            || (statusFilter === 'running' && entry.status === 'running')
-            || (statusFilter === 'completed' && entry.status === 'completed')
-            || (statusFilter === 'failed' && entry.status === 'failed')
-            || (statusFilter === 'paused' && entry.status === 'suspended')
-          if (!statusMatch) return false
-        }
-        return true
-      }),
-    [pipelineEntries, kindFilter, statusFilter],
+      pipelineEntries.filter((entry) =>
+        matchesEntryFilters(entry, { kindFilters, statusFilters, sessionFilter, keyword })),
+    [pipelineEntries, kindFilters, statusFilters, sessionFilter, keyword],
+  )
+
+  /** 会话 chip 标签：会话列表里的标题，查不到回退 id 前 8 位 */
+  const sessionFilterLabel = useMemo(
+    () => sessionFilterLabelOf(sessionFilter, sessions),
+    [sessionFilter, sessions],
+  )
+
+  /** 条目归属会话解析（与 handleEntryClick 同口径）：threadId 命中会话列表为
+   *  第一真值，否则血缘 originSessionId 兜底；都不命中 = 无归属（null） */
+  const resolveEntrySessionId = useCallback(
+    (entry: PipelineViewEntry): string | null => resolveEntrySessionIdPure(entry, sessions),
+    [sessions],
   )
 
   /** 管道树：会话主管道顶层 → 任务条目行（一对一绑定：条目行即任务行，
@@ -469,7 +530,7 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
       childrenMap.set(parentKey, list)
     }
     // 锚点行合成（契约见 ensureAnchorNode）：登记面按引用打包传入
-    const anchorCtx = { entryByKey, allEntryByKey, nodeByKey, roots, kindFilter }
+    const anchorCtx = { entryByKey, allEntryByKey, nodeByKey, roots, kindFilters }
     // 项目分组节点（登记行合成；无任务挂靠的项目也显示为空分组）
     const projectNodeKeys = new Map<string, string>() // projectId → node key
     for (const p of projects) {
@@ -574,10 +635,9 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
       if (parent) parent.children.push(...nodes)
       else roots.push(...nodes)
     }
-    // 状态筛选生效时空项目分组不占位（缺省「运行中」视图：没有在跑任务的
-    // 项目分组隐藏，面板只剩真正在跑的内容；「全部」视图保留空分组——登记
-    // 行可见性不受筛选排挤）
-    const visibleRoots = statusFilter
+    // 状态筛选生效时空项目分组不占位（选中任一状态：空分组隐藏；全量视图
+    // 保留——登记行可见性不受筛选排挤）
+    const visibleRoots = statusFilters.size > 0
       ? roots.filter((n) => n.entry.kind !== 'project' || n.children.length > 0)
       : roots
     const sortByStart = (a: PipelineTreeNode, b: PipelineTreeNode) =>
@@ -589,7 +649,7 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         children: build(n.children, depth + 1),
       }))
     return build(visibleRoots, 0)
-  }, [filteredPipelineEntries, pipelineEntries, allTasks, sessions, projects, statusFilter, kindFilter])
+  }, [filteredPipelineEntries, pipelineEntries, allTasks, sessions, projects, statusFilters, kindFilters])
 
   /** 展开/折叠树子级（行首 chevron / 任务节点行点击） */
   const toggleTreeNode = useCallback((key: string) => {
@@ -612,10 +672,10 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
   }, [])
 
   /**
-   * 通知点击定位（OBS-R259-1）：focusTaskId 非空时定位该任务行——解除状态
-   * 筛选收窄（面板默认只看运行中，终态任务行必须可见）、展开树祖先链、行内
-   * 滚动定位并短暂高亮。任务行不在条目集（列表未含/已清理）→ 只保留开签，
-   * 不定位（筛选与树状态不动）。
+   * 通知点击定位（OBS-R259-1）：focusTaskId 非空时定位该任务行——解除全部
+   * 筛选收窄（状态/类型标签清空回全量，终态任务行必须可见；会话筛选一并
+   * 清除，语义同手动 ×）、展开树祖先链、行内滚动定位并短暂高亮。任务行
+   * 不在条目集（列表未含/已清理）→ 只保留开签，不定位（筛选与树状态不动）。
    */
   const [locatedKey, setLocatedKey] = useState<string | null>(null)
   const locatedFocusRef = useRef('')
@@ -624,8 +684,10 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
     const entry = pipelineEntries.find((e) => e.kind === 'task' && e.taskId === focusTaskId)
     if (!entry) return
     locatedFocusRef.current = focusTaskId
-    setKindFilter('all')
-    setStatusFilter('')
+    setKindFilters(new Set())
+    setStatusFilters(new Set())
+    setKeyword('')
+    setSessionFilter(null)
     setLocatedKey(entry.key)
   }, [focusTaskId, pipelineEntries])
 
@@ -683,7 +745,7 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
           category: 'alert',
           isBlocking: false,
           autoDismissMs: 5000,
-          sourceLabel: '前端',
+          sourceLabel: '系统',
         })
         return
       }
@@ -736,13 +798,55 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
               category: 'alert',
               isBlocking: false,
               autoDismissMs: 5000,
-              sourceLabel: '前端',
+              sourceLabel: '系统',
             })
           })
       }
       return
     }
-    // 无会话归属：不定位，直接跳转打开对应标签页
+    // 无会话归属：Tab 条随 ChatContainer 挂载（router 按 activeSessionId 渲染
+    // 聊天区），无活跃会话时子标签无处渲染、loadTabMessages 也无从发起——
+    // 点击自此静默无反应（2026-10-13 装机版实证），禁止静默：
+    // - 带 thread 线索（threadId / 血缘 originSessionId）→ 会话记录缺失（如
+    //   清空过会话数据）但消息内核侧仍按 thread_id 可读：从 thread 重建会话
+    //   条目并切换打开（主管道绑本条目管道，消息即任务对话）；
+    // - 真孤儿（无任何会话线索）→ 显式反馈，不伪装成功。
+    if (!useSessionStore.getState().activeSessionId) {
+      const rebuildId = entry.threadId ?? entry.originSessionId
+      if (rebuildId) {
+        useSessionListStore.getState().rebuildSessionFromThread(rebuildId, {
+          title: entry.name,
+          pipelineId,
+        })
+        await useSessionListStore
+          .getState()
+          .setActiveSession(rebuildId)
+          .catch((e) => {
+            console.error('[PipelineManager] 重建会话打开失败', e)
+            useNotificationStore.getState().addNotification({
+              title: '无法打开对话',
+              message: `会话 ${rebuildId.slice(0, 12)} 重建打开失败，请稍后重试（管道 ${pipelineId.slice(0, 12)}）`,
+              priority: 'normal',
+              category: 'alert',
+              isBlocking: false,
+              autoDismissMs: 5000,
+              sourceLabel: '系统',
+            })
+          })
+        return
+      }
+      useNotificationStore.getState().addNotification({
+        title: '无法打开对话',
+        message: `管道 ${pipelineId.slice(0, 12)} 无归属会话线索，且当前无活跃会话——请先在侧栏选择或新建会话后再试`,
+        priority: 'normal',
+        category: 'alert',
+        isBlocking: false,
+        autoDismissMs: 6000,
+        sourceLabel: '系统',
+      })
+      return
+    }
+    // 无会话归属（有活跃会话承载子标签）：不定位，直接跳转打开对应标签页
     const tabStore = useAgentTabStore.getState()
     const existingTab = tabStore.tabs.find((t) => t.pipelineRunId === pipelineId)
     if (existingTab) {
@@ -762,11 +866,6 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
     })
     tabStore.loadTabMessages(tabId, pipelineId)
   }, [sessions])
-
-  /** 打开工作空间文件树标签（共享入口见 workspaceTreeTab.ts） */
-  const openWorkspaceTab = useCallback((taskId: string, title: string) => {
-    openWorkspaceTreeTab(taskId, title)
-  }, [])
 
   /** 操作：暂停/恢复/取消（任务管道）/复制 ID/打开工作空间/打开项目文件夹/删除项目 */
   const handleAction = useCallback(
@@ -802,116 +901,42 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         // R3：所有有工作区坐标的条目都可打开——任务条目用 taskId（任务镜像
         // 解析），非任务管道条目用 pipelineId（state 行解析通道），项目条目用
         // 裸登记 projectId（后端项目登记通道按键解析文件夹；条目 key 是
-        // project-<id> 前缀形态，进 workspace:// 数据源后登记通道查不到）
+        // project-<id> 前缀形态，进 workspace:// 数据源后登记通道查不到）。
+        // 归属会话作页签 owner 传入（会话派生页签按当前会话过滤显隐）
         const wsId = entry.taskId || entry.pipelineId || entry.projectId || entry.key
         if (!wsId) return
-        openWorkspaceTab(wsId, entry.name)
+        openWorkspaceTreeTab(wsId, entry.name, resolveEntrySessionId(entry) ?? undefined)
         return
       }
       if (!entry.taskId) return
-      try {
-        if (action === 'pause') {
-          await pauseTask(entry.taskId)
-        } else if (action === 'resume') {
-          await resumeTask(entry.taskId)
-        } else {
-          await cancelTask(entry.taskId)
-        }
-        // 操作后刷新任务列表（任务派生条目随之更新）——query 化：invalidate 由
-        // 活跃 useLongTermTasksQuery 订阅自动重拉
-        invalidateLongTermTasks()
-      } catch (e) {
-        console.error('[PipelineManager] 管道操作失败', action, e)
+      if (action === 'cancel') {
+        // 原「取消」操作改标「暂停」（词汇退役，接口不变）：确认弹窗说明可恢复后才落终态
+        setPauseTarget({ taskId: entry.taskId, name: entry.name })
+        return
+      }
+      if (action === 'pause' || action === 'resume') {
+        // 行级 pending + 失败 toast 编排收敛在 taskRowActions（#2/#11）
+        await runTaskRowAction(entry.taskId, action)
       }
     },
-    [openWorkspaceTab],
+    [resolveEntrySessionId],
   )
-
-  /** 状态筛选选项（与任务状态词表对齐） */
-  const STATUS_OPTIONS = [
-    { value: '', label: '全部' },
-    { value: 'running', label: '运行中' },
-    { value: 'paused', label: '已暂停' },
-    { value: 'completed', label: '已完成' },
-    { value: 'failed', label: '失败' },
-  ]
 
   return (
     <div ref={rootRef} className="flex h-full flex-col">
-      {/* 工具栏：视图切换 + 类型筛选 + 状态筛选 */}
-      <div className="border-b px-3 py-2">
-        <div className="flex flex-wrap items-center gap-1">
-          <button
-            onClick={() => setViewMode('tree')}
-            className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
-              viewMode === 'tree'
-                ? 'bg-primary/15 text-primary font-medium'
-                : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
-            }`}
-            title="树视图（会话分组）"
-          >
-            <FolderTree className="mr-1 inline h-3 w-3" />
-            树
-          </button>
-          <button
-            onClick={() => setViewMode('list')}
-            className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
-              viewMode === 'list'
-                ? 'bg-primary/15 text-primary font-medium'
-                : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
-            }`}
-            title="列表视图"
-          >
-            <ClipboardList className="mr-1 inline h-3 w-3" />
-            列表
-          </button>
-          <span className="bg-border mx-1 h-3 w-px" />
-          <button
-            onClick={() => setKindFilter('all')}
-            className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
-              kindFilter === 'all'
-                ? 'bg-primary/15 text-primary font-medium'
-                : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
-            }`}
-          >
-            全部
-          </button>
-          <button
-            onClick={() => setKindFilter('task')}
-            className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
-              kindFilter === 'task'
-                ? 'bg-primary/15 text-primary font-medium'
-                : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
-            }`}
-          >
-            任务
-          </button>
-          <button
-            onClick={() => setKindFilter('session')}
-            className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
-              kindFilter === 'session'
-                ? 'bg-primary/15 text-primary font-medium'
-                : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
-            }`}
-          >
-            会话
-          </button>
-          <span className="bg-border mx-1 h-3 w-px" />
-          {STATUS_OPTIONS.map((opt) => (
-            <button
-              key={opt.value}
-              onClick={() => setStatusFilter(opt.value)}
-              className={`rounded-md px-2 py-0.5 text-[11px] transition-colors ${
-                statusFilter === opt.value
-                  ? 'bg-primary/15 text-primary font-medium'
-                  : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-      </div>
+      <PipelineManagerFilterBar
+        keyword={keyword}
+        setKeyword={setKeyword}
+        statusFilters={statusFilters}
+        setStatusFilters={setStatusFilters}
+        kindFilters={kindFilters}
+        setKindFilters={setKindFilters}
+        sessionFilter={sessionFilter}
+        clearSessionFilter={() => {
+          setSessionFilter(null)
+        }}
+        sessionFilterLabel={sessionFilterLabel}
+      />
 
       {/* 降级留痕（FE6/FE9 + OBS-R258-1 副面声明）：states/任务列表/项目登记
           拉取失败时提示，不伪装成"无数据"；项目登记面带手动重试 */}
@@ -941,23 +966,18 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
         </div>
       )}
 
-      {/* 管道管理视图（首载中不渲染「暂无」空态——四态约定：空 ≠ 加载中） */}
+      {/* 管道管理视图（首载中不渲染「暂无」空态——四态约定：空 ≠ 加载中；
+          筛选后为空 ≠ 无数据：提示清筛选/关键词而非「暂无运行记录」） */}
       <div className="min-h-0 flex-1 overflow-auto">
         {listLoading && pipelineEntries.length === 0 ? (
           <div className="text-muted-foreground px-4 py-6 text-center text-xs">
             <Loader2 className="mr-1.5 inline h-3.5 w-3.5 animate-spin" />
             加载中...
           </div>
-        ) : viewMode === 'list' ? (
-          <PipelineTable
-            entries={filteredPipelineEntries}
-            nowMs={nowMs}
-            expandedKeys={detailOpenKeys}
-            locatedKey={locatedKey}
-            onToggle={toggleDetail}
-            onEntryClick={handleEntryClick}
-            onAction={handleAction}
-          />
+        ) : !listLoading && filteredPipelineEntries.length === 0 ? (
+          <div className="text-muted-foreground px-4 py-6 text-center text-xs">
+            无匹配结果（试试清除筛选或关键词）
+          </div>
         ) : (
           <PipelineTree
             tree={pipelineTree}
@@ -1048,12 +1068,10 @@ export function PipelineManagerWidget({ focusTaskId }: { focusTaskId?: string })
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <PipelineManagerPauseConfirmDialog target={pauseTarget} onClose={() => setPauseTarget(null)} />
     </div>
   )
 }
-
-// ═════════════════════════════════════════════════════════════════
-// 树视图：执行中/最近完成两组，组内按会话分组，孤儿平铺
-// ═════════════════════════════════════════════════════════════════
 
 /** 管道树节点：管道条目（任务一对一绑定时条目行即任务行，子级直挂其下） */

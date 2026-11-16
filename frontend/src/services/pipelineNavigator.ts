@@ -93,6 +93,8 @@ export async function findPipelineLocation(pipelineId: string): Promise<Pipeline
 export async function navigateToPipeline(
   pipelineId: string,
   options?: {
+    /** 子标签名。命名链（2026-10-16 用户拍板，全标签统一）：任务/交互标题 →
+     *  执行 agent 名 → 泛称（'子任务'）——调用方按手头数据传到链的最深已知层。 */
     agentName?: string
     agentLevel?: 1 | 2 | 3
     taskId?: string

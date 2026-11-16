@@ -1,11 +1,22 @@
 schema_version: 1
-# DSH 插件适配器配置：DSH 插件装载管理
+# DSH 插件适配器配置：DSH 插件装载管理 + 生态市场发现源
 #
 # 适配器自动装载 dsh_plugins/ 下含 package.json 的 DSH 插件包目录。
-# 此文件用于逐包启用/禁用（"配置 DSH 插件"）：
+# plugins 段用于逐包启用/禁用（dsh_plugins/ 目录装载面）：
 #   - 列出且 enabled: false 的包：跳过装载（不翻译、不出现在 dsh_list_plugins）
 #   - 未列出的包：默认启用
 #
+# market 段（生态嫁接设计 §4.1 发现源，多源可配置）：
+#   type: npm  = registry tarball 抽 index.json（npmmirror unpkg /files 无白名单
+#                403 实证，tarball 可达）；version 必须精确版本（npm 纪律）。
+#   type: url  = 直连 format 1 JSON 的市场站索引。
+#   升级目录版本 = 改 version 字段（dsh-plugin-catalog 按日期发版）。
+market:
+  sources:
+    - type: npm
+      package: dsh-plugin-catalog
+      version: "2026.1104.14928"
+
 # 当前装载（显式列出以便设置中心可见可操作）：
 plugins:
   dsh-tool-calculator:

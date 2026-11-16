@@ -14,7 +14,11 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { initializeWidgets } from '@/services/schema/registerWidgets'
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { slotRegistry } from '@/services/slots/slotRegistry'
 import { openPluginPage } from '@/services/workspacePanelOpener'
+import { loadSchemaIntoRegistries } from '@/test/schemaLoader'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { WorkspacePanel } from '../WorkspacePanel'
 import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
@@ -72,11 +76,25 @@ function openTabMenu(testId: string) {
 describe('WorkspacePanel 页签 detachable 弹出入口', () => {
   beforeEach(() => {
     contributionRegistry.clear()
+    slotRegistry.clear()
+    // 内建 widget 注册面（生产 main.tsx 启动同款）：槽装载期终验要求承载 widget 已注册
+    widgetRegistry.clear()
+    initializeWidgets()
     useLayoutModeStore.setState({ workspaceTabs: [], floatingWindows: [], visitedTabIds: [] })
   })
 
-  it('声明 detachable 的页签 → 菜单出现「弹出为浮窗」，点击弹出浮窗（props.pageId 反查声明）', () => {
-    contributionRegistry.register(DETACHABLE_PAGE)
+  it('声明 detachable 的页签 → 菜单出现「弹出为浮窗」，点击弹出浮窗（props.pageId 反查声明）', async () => {
+    // 声明经两表装载（C4：path 直达按 workspace.tab keyed 槽解析，detachable 随槽条目）
+    await loadSchemaIntoRegistries({
+      plugin_contributes: [
+        {
+          plugin_id: 'mode_godot',
+          plugin_name: 'Mode Godot',
+          contributes: { pages: [DETACHABLE_PAGE as unknown as Record<string, unknown>] },
+        },
+      ],
+      plugin_configs: [],
+    })
     expect(openPluginPage(DETACHABLE_PAGE)).toBe(true)
     renderPanel()
 
@@ -93,8 +111,17 @@ describe('WorkspacePanel 页签 detachable 弹出入口', () => {
     expect(screen.queryByTestId('workspace-tab-menu-popout')).not.toBeInTheDocument()
   })
 
-  it('未声明 detachable 的页签 → 菜单无弹出项（其余菜单项不受影响）', () => {
-    contributionRegistry.register(PLAIN_PAGE)
+  it('未声明 detachable 的页签 → 菜单无弹出项（其余菜单项不受影响）', async () => {
+    await loadSchemaIntoRegistries({
+      plugin_contributes: [
+        {
+          plugin_id: 'mode_plain',
+          plugin_name: 'Mode Plain',
+          contributes: { pages: [PLAIN_PAGE as unknown as Record<string, unknown>] },
+        },
+      ],
+      plugin_configs: [],
+    })
     expect(openPluginPage(PLAIN_PAGE)).toBe(true)
     renderPanel()
 
@@ -104,8 +131,17 @@ describe('WorkspacePanel 页签 detachable 弹出入口', () => {
     expect(useLayoutModeStore.getState().floatingWindows).toHaveLength(0)
   })
 
-  it('声明 popout:false 的页签 → 无弹出项（openPopout 为 no-op，不给死入口）', () => {
-    contributionRegistry.register(POPOUT_DENIED_PAGE)
+  it('声明 popout:false 的页签 → 无弹出项（openPopout 为 no-op，不给死入口）', async () => {
+    await loadSchemaIntoRegistries({
+      plugin_contributes: [
+        {
+          plugin_id: 'mode_denied',
+          plugin_name: 'Mode Denied',
+          contributes: { pages: [POPOUT_DENIED_PAGE as unknown as Record<string, unknown>] },
+        },
+      ],
+      plugin_configs: [],
+    })
     expect(openPluginPage(POPOUT_DENIED_PAGE)).toBe(true)
     renderPanel()
 

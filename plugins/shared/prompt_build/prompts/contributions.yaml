@@ -1,0 +1,47 @@
+# prompt_build 条件注入规则（单文件自包含；机制与治理口径见 contributions.py 模块头、
+# 方案 docs/working/提示词条件注入引擎方案_20261018.md）。
+#
+# 本文件归管理员配置面——命中规则的 agent system prompt 全部受影响，不作为用户级
+# 运行时定制点。内容只写"约定补充"，禁止覆盖骨架规则。
+#
+# 内容纪律（用户裁定 2026-10-18）：**原文句式直陈**——不写小标题、不写来源/补充
+# 声明等元话术（"以下为…""与官方对齐""补充，不覆盖…"一律禁止）；素材出处引用
+# 只写在本文件注释里（不下发到模型）。
+#
+# 条件键纪律：when.model 读落定键 state.model_id（agent_config_load 初始化时经
+# llm_service model.resolve 落定，与 llm_core 选模同源）；when.state 键须在
+# contributions.STATE_KEY_WHITELIST（任务稳定键）内，白名单外整条拒载。
+#
+# ── 第一条规则：deepseek-v4-profile ──
+# 素材来源（官方 Harness 系统提示词为模块化组装，2026-10-18 取自
+# D:\reference_repos\deepseek-harness-rc8 @141eb6fe（0.1.0-rc.8，MIT），
+# 抽取"工具使用约定"段并按本仓工具面改写）：
+#   - packages/shell/tool-bash/src/index.ts 提示段（order 105）：
+#     "Check the [exit code: N] marker on every bash result; investigate
+#      failures before moving on." → 本仓 bash_execute 结果带 exit_code 字段，直译。
+#   - packages/fs/tool-fs/src/edit.ts 提示段（order 102）：
+#     "Read the file first (the default fs-observation-policy requires it),
+#      unless you just created or edited it in this session." → 本仓无独立 edit
+#     工具（file_read/file_write 对），取"先读后写 + 窄改动"部分。
+#   - packages/subagent/tool-subagent/src/index.ts 提示段：
+#     "Start independent delegations together in one assistant message and
+#      continue useful work while they run." → 本仓 task_submit 为异步任务，
+#     直译（独立派发同一条消息一起提交，不空等）。
+#   未采纳项（记录防误迁）：
+#   - harness:identity（order -100，"You are an AI agent powered by DeepSeek
+#     Harness."）：身份锚语义要求 system 首位，本引擎只支持尾部追加
+#     （位置语义不匹配，宁缺勿错位）。
+#   - persona 段（preset agent.cordis.yml 的部署人设配置）与本仓灵汐骨架冲突，不迁。
+#   - plan-mode 段：本仓 agent 无 plan 模式对应物，不迁。
+# 生效条件：落定模型命中 deepseek-v4-*（未命中 = 零注入，模板内容不参与拼装）。
+rules:
+  - name: deepseek-v4-profile
+    enabled: true
+    when:
+      model: "deepseek-v4-*"
+    inject:
+      order: 100
+      content: |
+        - Check the exit_code on every bash_execute result; investigate failures before moving on.
+        - Read a file before changing it, unless you just created or edited it in this session; keep changes targeted.
+        - Start independent task_submit delegations together in one message and continue useful work while they run.

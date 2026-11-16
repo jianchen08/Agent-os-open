@@ -23,7 +23,13 @@
 //!   登记处（`--frozen`：只读工程目录绝无锁文件回写；登记键 = 独占插件 id /
 //!   `_host`），**绝不写安装目录**；
 //! - 降级：uv 缺席/失败/超时 → 逐插件 warn（行为不劣于现状：spawn 期保持
-//!   fail-closed 与修复指引），绝不阻断启动、绝不动任何已有 `.venv`。
+//!   fail-closed 与修复指引），绝不阻断启动、绝不动任何已有 `.venv`；
+//! - 加法式补装 + 共享目标串行（不变量：补依赖绝不移除他方已装依赖）：
+//!   `uv sync --inexact` 只补锁内缺失、绝不清锁外已装包（精确清场语义归 dev
+//!   launcher）；任务按真实落点（[`resolve_venv_target`] canonicalize 跟随
+//!   junction/symlink）分组，同址组内串行、组间并发不变——装机包 junction
+//!   寄生（多插件 `.venv` 同指一环境）时按各自锁的精确同步会互相卸依赖。
+//!   [来源: ADR 草稿 docs/working/ADR草稿-venv自愈加法式补装与共享目标串行_20261015.md]
 //!
 //! [来源: ADR 2026-09-20-packaged-dual-source-adjudication 决策②；
 //!  去重规则: ADR 2026-09-07-plugin-venv-dedup；
@@ -38,7 +44,9 @@ use agentos_core::traits::PluginManifest;
 use agentos_core::user_space;
 // 登记处消费面走 `invoker` 公开模块（lib.rs 根 re-export 保持原样不扩面——
 // 无可执行语句的 re-export 头文件不在 llvm-cov 度量面内，见 diff coverage 口径）。
-use agentos_invoker::invoker::{find_user_space_venv_interpreter, GROUP_HOST_DIR};
+use agentos_invoker::invoker::{
+    find_user_space_venv_interpreter, interpreter_layout, GROUP_HOST_DIR,
+};
 use agentos_invoker::{
     builtin_group_host_dir, find_group_host_dir, find_venv_interpreter, is_cohost_member,
     is_plain_python_command,
@@ -52,7 +60,8 @@ pub const VENV_AUTOPROVISION_ENV: &str = "AGENTOS_PLUGIN_VENV_AUTOPROVISION";
 /// （warn 留痕，下轮 boot 重试），绝不无限挂住后台任务。
 const SYNC_TIMEOUT_SECS: u64 = 300;
 
-/// 并发度：对齐 sidecar 预热（4 路把 ~30 插件压进 ~10s 量级的经验值）。
+/// 并发度：组粒度信号量闸（每组持一个 permit 至组内成员跑完）；对齐 sidecar
+/// 预热（4 路把 ~30 插件压进 ~10s 量级的经验值）。
 const CONCURRENCY: usize = 4;
 
 /// 门控是否打开。未知值一律视为关闭（保守：自愈是增强不是默认行为）。
@@ -138,6 +147,10 @@ pub fn select_shared_host_target(
 pub struct VenvSyncTask {
     pub project_dir: PathBuf,
     pub venv_dir: Option<PathBuf>,
+    /// 离线依赖库（`AGENTOS_UV_WHEELHOUSE`）：Some → sync 追加
+    /// `--no-index --find-links <dir>`，安装只吃随包 wheel，不触网
+    /// （2026-10-26 用户裁定「都放进去/离线也能用」）。
+    pub wheelhouse: Option<PathBuf>,
 }
 
 /// 探测目录可写：建目录 + 建删探针文件。Windows 上目录只读属性不拦创建、
@@ -175,25 +188,77 @@ pub fn provision_venv_target(
     Some(registry.join(key))
 }
 
+/// 构造 `uv sync` argv（纯函数，执行与契约测试共用一源）：`sync --project
+/// <工程> --inexact`；重定向模式追加 `--frozen`（`UV_PROJECT_ENVIRONMENT`
+/// 由 [`sync_plugin_venv`] 以环境变量注入，不入 argv）。
+///
+/// `--inexact` = 加法式补装：只补锁内缺失、绝不移除锁外已装包（uv 原生增量
+/// 语义）。精确清场语义不属本模块——装机共享环境（junction 寄生）下按各自
+/// 锁清场即互踩卸依赖；清场归 dev launcher 的常规重建。
+/// [来源: ADR 草稿 docs/working/ADR草稿-venv自愈加法式补装与共享目标串行_20261015.md]
+pub fn sync_args(task: &VenvSyncTask) -> Vec<String> {
+    let mut args = vec![
+        "sync".to_string(),
+        "--project".to_string(),
+        task.project_dir.display().to_string(),
+        "--inexact".to_string(),
+    ];
+    if task.venv_dir.is_some() {
+        args.push("--frozen".to_string());
+    }
+    if let Some(wh) = &task.wheelhouse {
+        // 离线模式锁文件即真相：禁触网（--no-index 只吃随包 wheel），且必须
+        // --frozen（非 frozen 会为整个 requires-python 区间重新解析，离线库只有
+        // 随包解释器单一版本必炸；锁不改写也与「无网不可重建」自洽）。
+        args.push("--frozen".to_string());
+        args.push("--no-index".to_string());
+        args.push("--find-links".to_string());
+        args.push(wh.display().to_string());
+    }
+    args
+}
+
+/// 离线依赖库 env 键（electron boot 注入随包 `prereqs/wheels`；内核与 electron
+/// `uvSyncRunner` 两消费方同源）。
+pub const UV_WHEELHOUSE_ENV: &str = "AGENTOS_UV_WHEELHOUSE";
+
+/// 离线依赖库裁定（纯函数，env 包装层单测面）：空白/未设 → None。
+pub fn wheelhouse_from_env_value(raw: Option<&str>) -> Option<PathBuf> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+}
+
+/// 分组键：同步任务的真实 venv 落点。显式 `venv_dir` 优先，缺省工程内
+/// `.venv`；已存在的路径经 [`std::fs::canonicalize`] 跟随 junction/symlink——
+/// 装机包 junction 寄生形态（多插件 `.venv` 指向同一真实环境）据此归入同组。
+/// 目标缺席（干净装机首启常态）原样返回：不存在即无从共享，各任务落点天然
+/// 互异，组粒度=任务粒度。
+pub fn resolve_venv_target(task: &VenvSyncTask) -> PathBuf {
+    let raw = task
+        .venv_dir
+        .clone()
+        .unwrap_or_else(|| task.project_dir.join(".venv"));
+    std::fs::canonicalize(&raw).unwrap_or(raw)
+}
+
 /// 执行单个重建任务。`venv_dir = None`：`uv sync --project <工程>` 原地建
-/// `.venv`（dev launcher 同款）；`Some(dir)`：`uv sync --frozen` +
-/// `UV_PROJECT_ENVIRONMENT` 把 venv 落用户空间登记处（`--frozen`：只读工程
-/// 目录绝无锁文件回写；工程缺 uv.lock 时显式报错——无锁不可重建，fail-closed）。
+/// `.venv`；`Some(dir)`：`uv sync --frozen` + `UV_PROJECT_ENVIRONMENT` 把
+/// venv 落用户空间登记处（`--frozen`：只读工程目录绝无锁文件回写；工程缺
+/// uv.lock 时显式报错——无锁不可重建，fail-closed）。
 /// 成功返回 Ok；uv 缺席/失败/超时以可读错误 Err。
 pub async fn sync_plugin_venv(task: VenvSyncTask) -> Result<(), String> {
+    if task.venv_dir.is_some() && !task.project_dir.join("uv.lock").is_file() {
+        return Err(format!(
+            "插件目录 {} 缺 uv.lock 且目录只读——用户空间重建必须按既有锁文件安装（--frozen），\
+             无锁不可重建；请在 dev 侧补锁后重新打包",
+            task.project_dir.display()
+        ));
+    }
     let mut command = tokio::process::Command::new("uv");
-    command.args(["sync", "--project"]).arg(&task.project_dir);
+    command.args(sync_args(&task));
     if let Some(venv_dir) = &task.venv_dir {
-        if !task.project_dir.join("uv.lock").is_file() {
-            return Err(format!(
-                "插件目录 {} 缺 uv.lock 且目录只读——用户空间重建必须按既有锁文件安装（--frozen），\
-                 无锁不可重建；请在 dev 侧补锁后重新打包",
-                task.project_dir.display()
-            ));
-        }
-        command
-            .arg("--frozen")
-            .env("UV_PROJECT_ENVIRONMENT", venv_dir);
+        command.env("UV_PROJECT_ENVIRONMENT", venv_dir);
     }
     let output = tokio::time::timeout(Duration::from_secs(SYNC_TIMEOUT_SECS), command.output())
         .await
@@ -224,10 +289,13 @@ pub struct VenvProvisionReport {
     pub failed: Vec<(String, String)>,
 }
 
-/// 对目标集执行重建（并发 [`CONCURRENCY`]），返回逐插件结论。
+/// 对目标集执行重建（按真实落点 [`resolve_venv_target`] 分组：同组=同一真实
+/// venv——junction 寄生/重定向同键，**组内串行**防并发写同一环境；组间并发
+/// 不变，[`CONCURRENCY`] 闸迁移到组粒度），返回逐插件结论。
 ///
 /// `runner` 注入执行体（生产传 [`sync_plugin_venv`]，测试传假 runner）——
-/// 单插件失败不牵连其余；全部跑完后由调用方记汇总日志。
+/// 单插件失败不牵连其余，同组成员也不因前者失败中断（加法式补装互不依赖
+/// 前序成败）；全部跑完后由调用方记汇总日志。
 pub async fn provision_missing_venvs<F, Fut>(
     targets: Vec<(String, VenvSyncTask)>,
     runner: F,
@@ -236,16 +304,30 @@ where
     F: Fn(VenvSyncTask) -> Fut + Clone + Send + 'static,
     Fut: std::future::Future<Output = Result<(), String>> + Send + 'static,
 {
+    let mut groups: HashMap<PathBuf, Vec<(String, VenvSyncTask)>> = HashMap::new();
+    for entry in targets {
+        groups
+            .entry(resolve_venv_target(&entry.1))
+            .or_default()
+            .push(entry);
+    }
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(CONCURRENCY));
     let mut handles = tokio::task::JoinSet::new();
-    for (plugin_id, task) in targets {
+    for (target, members) in groups {
+        if members.len() > 1 {
+            info!(target: "venv-provision", venv = %target.display(), count = members.len(),
+                "共享 venv 落点（junction 寄生/重定向同键）：组内串行加法式补装，绝不移除他方已装依赖");
+        }
         let semaphore = semaphore.clone();
         let runner = runner.clone();
         handles.spawn(async move {
-            // 并发闸：permit 持有至本任务结束
+            // 并发闸：permit 持有至本组全部成员结束（组内串行执行）
             let _permit = semaphore.acquire().await;
-            let result = runner(task.clone()).await;
-            (plugin_id, result)
+            let mut results = Vec::with_capacity(members.len());
+            for (plugin_id, task) in members {
+                results.push((plugin_id, runner(task).await));
+            }
+            results
         });
     }
     let mut report = VenvProvisionReport {
@@ -254,14 +336,20 @@ where
     };
     while let Some(joined) = handles.join_next().await {
         match joined {
-            Ok((plugin_id, Ok(()))) => {
-                info!(target: "venv-provision", plugin = %plugin_id, "venv 重建完成");
-                report.synced.push(plugin_id);
-            }
-            Ok((plugin_id, Err(error))) => {
-                warn!(target: "venv-provision", plugin = %plugin_id, error = %error,
-                    "venv 自愈失败（spawn 期保持 fail-closed；下轮 boot 重试）");
-                report.failed.push((plugin_id, error));
+            Ok(results) => {
+                for (plugin_id, result) in results {
+                    match result {
+                        Ok(()) => {
+                            info!(target: "venv-provision", plugin = %plugin_id, "venv 重建完成");
+                            report.synced.push(plugin_id);
+                        }
+                        Err(error) => {
+                            warn!(target: "venv-provision", plugin = %plugin_id, error = %error,
+                                "venv 自愈失败（spawn 期保持 fail-closed；下轮 boot 重试）");
+                            report.failed.push((plugin_id, error));
+                        }
+                    }
+                }
             }
             Err(e) => warn!(target: "venv-provision", error = %e, "venv 自愈任务崩溃（跳过）"),
         }
@@ -280,9 +368,11 @@ where
 /// `HOST_VENV_MISSING`），warn 留痕给 boot 日志验收面。
 pub async fn provision_and_log(core: Vec<(String, PathBuf)>, host: Option<PathBuf>) {
     let registry = user_space::user_plugin_venvs_dir();
+    let wheelhouse = wheelhouse_from_env_value(std::env::var(UV_WHEELHOUSE_ENV).ok().as_deref());
     let to_task = |key: &str, dir: &Path| VenvSyncTask {
         project_dir: dir.to_path_buf(),
         venv_dir: provision_venv_target(is_dir_writable(dir), registry.as_deref(), key),
+        wheelhouse: wheelhouse.clone(),
     };
     let core_tasks: Vec<(String, VenvSyncTask)> = core
         .iter()
@@ -360,14 +450,9 @@ pub fn aux_venv_registry_key(plugin_id: &str, dir: &str) -> String {
     format!("{plugin_id}--{}", dir.trim_start_matches('.'))
 }
 
-/// venv 目录下的解释器相对路径（Windows `Scripts\python.exe` / Unix `bin/python`）。
-fn aux_venv_interpreter(venv_dir: &Path) -> PathBuf {
-    if cfg!(windows) {
-        venv_dir.join("Scripts").join("python.exe")
-    } else {
-        venv_dir.join("bin").join("python")
-    }
-}
+// venv 目录下的解释器相对路径：单源在 invoker crate
+// （`agentos_invoker::invoker::interpreter_layout`，普查 ⚠️-1 收敛），本文件
+// 不再自持布局副本。
 
 /// 选出需要装配的辅助 venv：manifest 声明合法 + 清单文件在 + 解释器缺失
 /// （插件目录原地与用户空间登记处双查——与主 venv [`venv_available`] 同口径）。
@@ -398,10 +483,10 @@ pub fn select_missing_aux_venvs(
             let in_place = plugin_dir.join(&decl.dir);
             let registry_key = aux_venv_registry_key(&manifest.id, &decl.dir);
             let registered = registry.as_deref().map(|base| base.join(&registry_key));
-            let present = aux_venv_interpreter(&in_place).is_file()
+            let present = interpreter_layout(&in_place, cfg!(windows)).is_file()
                 || registered
                     .as_ref()
-                    .is_some_and(|dir| aux_venv_interpreter(dir).is_file());
+                    .is_some_and(|dir| interpreter_layout(dir, cfg!(windows)).is_file());
             if present {
                 continue;
             }
@@ -447,7 +532,7 @@ pub async fn sync_aux_venv(task: AuxVenvTask) -> Result<(), String> {
         c.arg("pip")
             .arg("install")
             .arg("--python")
-            .arg(aux_venv_interpreter(&task.venv_dir))
+            .arg(interpreter_layout(&task.venv_dir, cfg!(windows)))
             .arg("-r")
             .arg(&task.requirements);
         c
@@ -526,7 +611,6 @@ mod tests {
             description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::System,
-            pipeline_role: None,
             language: "python".to_string(),
             host_type: HostType::Sidecar,
             host_group: None,
@@ -538,7 +622,6 @@ mod tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            granted_capabilities: vec![],
             restricted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
@@ -706,6 +789,7 @@ mod tests {
                 VenvSyncTask {
                     project_dir: PathBuf::from("/a"),
                     venv_dir: None,
+                    wheelhouse: None,
                 },
             ),
             (
@@ -713,6 +797,7 @@ mod tests {
                 VenvSyncTask {
                     project_dir: PathBuf::from("/b"),
                     venv_dir: None,
+                    wheelhouse: None,
                 },
             ),
             (
@@ -720,6 +805,7 @@ mod tests {
                 VenvSyncTask {
                     project_dir: PathBuf::from("/c"),
                     venv_dir: None,
+                    wheelhouse: None,
                 },
             ),
         ];
@@ -745,6 +831,314 @@ mod tests {
     async fn provision_empty_targets_is_noop() {
         let report = provision_missing_venvs(Vec::new(), |_: VenvSyncTask| async { Ok(()) }).await;
         assert!(report.synced.is_empty() && report.failed.is_empty());
+    }
+
+    /// litellm 式互删复现（模型级，不触网络）：N 插件依赖集两两不同、共享同一
+    /// venv 落点（装机包 junction 寄生的编排等价形态）。runner 以 [`sync_args`]
+    /// 的真实 argv 解释 uv 语义——含 `--inexact` = 加法并集；否则 = 精确同步按
+    /// 各自锁替换（uv 对锁外"多余"包的移除正是装机首启互踩卸依赖的机制）。
+    /// 不变量：补依赖绝不移除他方已装依赖 → 终态 = 各插件依赖并集。
+    #[tokio::test]
+    async fn shared_venv_never_loses_other_plugins_deps() {
+        let shared = tempfile::tempdir().unwrap();
+        let shared_dir = shared.path().to_path_buf();
+        let plugin_deps = [
+            ("llm_service", vec!["litellm"]),
+            ("bash_tool", vec!["httpx"]),
+            ("lsp_service", vec!["pygls"]),
+            ("dsh_adapter", vec!["sqlalchemy"]),
+        ];
+        let mut locks: HashMap<PathBuf, Vec<String>> = HashMap::new();
+        let targets: Vec<(String, VenvSyncTask)> = plugin_deps
+            .iter()
+            .map(|(id, deps)| {
+                let project = PathBuf::from("/proj").join(id);
+                locks.insert(
+                    project.clone(),
+                    deps.iter().map(|s| s.to_string()).collect(),
+                );
+                (
+                    id.to_string(),
+                    VenvSyncTask {
+                        project_dir: project,
+                        venv_dir: Some(shared_dir.clone()),
+                        wheelhouse: None,
+                    },
+                )
+            })
+            .collect();
+        let installed = std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::<
+            String,
+        >::new()));
+        let locks = std::sync::Arc::new(locks);
+        let installed_for_runner = installed.clone();
+        let report = provision_missing_venvs(targets, move |task: VenvSyncTask| {
+            let installed = installed_for_runner.clone();
+            let locks = locks.clone();
+            async move {
+                let mut installed = installed.lock().unwrap_or_else(|e| e.into_inner());
+                let deps = locks
+                    .get(&task.project_dir)
+                    .expect("测试内每个工程必有依赖清单模型");
+                if sync_args(&task).iter().any(|arg| arg == "--inexact") {
+                    installed.extend(deps.iter().cloned());
+                } else {
+                    // uv sync 默认精确语义：清掉锁外全部已装包（互删机制本体）
+                    *installed = deps.iter().cloned().collect();
+                }
+                Ok(())
+            }
+        })
+        .await;
+        assert!(
+            report.failed.is_empty(),
+            "全部插件 sync 须成功，实际失败: {:?}",
+            report.failed
+        );
+        let final_deps = installed.lock().unwrap_or_else(|e| e.into_inner());
+        for (id, deps) in &plugin_deps {
+            for dep in deps {
+                assert!(
+                    final_deps.contains(*dep),
+                    "共享 venv 终态缺 {id} 的依赖 {dep}（互踩卸依赖复现）；终态: {final_deps:?}"
+                );
+            }
+        }
+        assert_eq!(final_deps.len(), 4, "终态恰为各插件依赖并集");
+    }
+
+    /// 互斥语义锁定：解析落点相同的任务必须串行（并发写同一 venv 是互踩放大
+    /// 器），且不得被"去重"吞掉——全部成员各跑一次；不同落点不受此限（跨组
+    /// 并发是性能面，不在本断言内）。
+    #[tokio::test]
+    async fn same_target_tasks_run_serially_without_dedup() {
+        let shared = tempfile::tempdir().unwrap();
+        let shared_dir = shared.path().to_path_buf();
+        let other = tempfile::tempdir().unwrap();
+        let other_dir = other.path().to_path_buf();
+        let mk = |id: &str, venv: &Path| {
+            (
+                id.to_string(),
+                VenvSyncTask {
+                    project_dir: PathBuf::from("/proj").join(id),
+                    venv_dir: Some(venv.to_path_buf()),
+                    wheelhouse: None,
+                },
+            )
+        };
+        let targets = vec![
+            mk("shared_1", &shared_dir),
+            mk("shared_2", &shared_dir),
+            mk("other_1", &other_dir),
+            mk("other_2", &other_dir),
+        ];
+        let in_flight =
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::<PathBuf, usize>::new()));
+        let violations = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let in_flight_for_runner = in_flight.clone();
+        let violations_for_runner = violations.clone();
+        let report = provision_missing_venvs(targets, move |task: VenvSyncTask| {
+            let in_flight = in_flight_for_runner.clone();
+            let violations = violations_for_runner.clone();
+            async move {
+                let target = resolve_venv_target(&task);
+                {
+                    let mut flying = in_flight.lock().unwrap_or_else(|e| e.into_inner());
+                    let count = flying.entry(target.clone()).or_insert(0);
+                    *count += 1;
+                    if *count > 1 {
+                        violations
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(task.project_dir.display().to_string());
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let mut flying = in_flight.lock().unwrap_or_else(|e| e.into_inner());
+                *flying.get_mut(&target).expect("在飞计数必在") -= 1;
+                Ok(())
+            }
+        })
+        .await;
+        assert!(
+            report.failed.is_empty(),
+            "全部任务须成功，实际失败: {:?}",
+            report.failed
+        );
+        assert!(
+            violations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "同落点任务出现并发在飞（互斥被破坏）: {:?}",
+            violations.lock().unwrap_or_else(|e| e.into_inner())
+        );
+        assert_eq!(report.synced.len(), 4, "四个成员全部执行（去重不得吞任务）");
+    }
+
+    /// junction 寄生形态锁定（Windows，装机包实害机制）：工程内 `.venv` 为
+    /// NTFS junction → 真实共享目录时，与显式落点任务解析为同一分组键。
+    #[cfg(windows)]
+    #[test]
+    fn resolve_venv_target_follows_ntfs_junction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real-venv");
+        std::fs::create_dir_all(&real).unwrap();
+        let proj = tmp.path().join("plugin_a");
+        std::fs::create_dir_all(&proj).unwrap();
+        let created = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(proj.join(".venv"))
+            .arg(&real)
+            .status()
+            .expect("mklink 拉起")
+            .success();
+        assert!(created, "junction 创建须成功（junction 无需特权）");
+        let via_junction = VenvSyncTask {
+            project_dir: proj,
+            venv_dir: None,
+            wheelhouse: None,
+        };
+        let via_explicit = VenvSyncTask {
+            project_dir: tmp.path().join("plugin_b"),
+            venv_dir: Some(real),
+            wheelhouse: None,
+        };
+        assert_eq!(
+            resolve_venv_target(&via_junction),
+            resolve_venv_target(&via_explicit),
+            "junction 与显式落点指同一真实环境时必须同组"
+        );
+    }
+
+    /// 离线依赖库：wheelhouse Some → sync argv 追加 --no-index --find-links <dir>。
+    #[test]
+    fn sync_args_with_wheelhouse_appends_no_index_find_links() {
+        let task = VenvSyncTask {
+            project_dir: std::path::PathBuf::from("C:/plugin"),
+            venv_dir: None,
+            wheelhouse: Some(std::path::PathBuf::from("C:/prereqs/wheels")),
+        };
+        let args = sync_args(&task);
+        assert!(args.iter().any(|a| a == "--frozen"), "离线模式须 frozen");
+        let pos = args
+            .iter()
+            .position(|a| a == "--no-index")
+            .expect("--no-index 须在 argv");
+        assert_eq!(args[pos + 1], "--find-links");
+        assert_eq!(args[pos + 2], "C:/prereqs/wheels");
+    }
+
+    /// 无 wheelhouse → argv 与既有契约逐字节一致（无 --no-index）。
+    #[test]
+    fn sync_args_without_wheelhouse_has_no_no_index() {
+        let task = VenvSyncTask {
+            project_dir: std::path::PathBuf::from("C:/plugin"),
+            venv_dir: Some(std::path::PathBuf::from("C:/v")),
+            wheelhouse: None,
+        };
+        let args = sync_args(&task);
+        assert!(!args.iter().any(|a| a == "--no-index"));
+        assert!(args.iter().any(|a| a == "--frozen"));
+    }
+
+    /// env 裁定纯函数：空白/未设 → None；合法路径 → Some。
+    #[test]
+    fn wheelhouse_from_env_value_trims_and_rejects_blank() {
+        assert!(wheelhouse_from_env_value(None).is_none());
+        assert!(wheelhouse_from_env_value(Some("")).is_none());
+        assert!(wheelhouse_from_env_value(Some("   ")).is_none());
+        assert_eq!(
+            wheelhouse_from_env_value(Some(" C:/prereqs/wheels ")),
+            Some(std::path::PathBuf::from("C:/prereqs/wheels"))
+        );
+    }
+
+    /// Unix 对称形态：`.venv` 为符号链接 → 真实共享目录时同组。
+    #[cfg(unix)]
+    #[test]
+    fn resolve_venv_target_follows_symlink() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real-venv");
+        std::fs::create_dir_all(&real).unwrap();
+        let proj = tmp.path().join("plugin_a");
+        std::fs::create_dir_all(&proj).unwrap();
+        symlink(&real, proj.join(".venv")).expect("symlink 创建");
+        let via_link = VenvSyncTask {
+            project_dir: proj,
+            venv_dir: None,
+            wheelhouse: None,
+        };
+        let via_explicit = VenvSyncTask {
+            project_dir: tmp.path().join("plugin_b"),
+            venv_dir: Some(real),
+            wheelhouse: None,
+        };
+        assert_eq!(
+            resolve_venv_target(&via_link),
+            resolve_venv_target(&via_explicit),
+            "symlink 与显式落点指同一真实环境时必须同组"
+        );
+    }
+
+    /// 目标缺席（干净装机首启常态）原样返回：不存在的路径无从共享，原路径
+    /// 即分组键，各任务天然互异。
+    #[test]
+    fn resolve_venv_target_absent_falls_back_to_raw_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let task = VenvSyncTask {
+            project_dir: tmp.path().join("fresh"),
+            venv_dir: None,
+            wheelhouse: None,
+        };
+        assert_eq!(
+            resolve_venv_target(&task),
+            tmp.path().join("fresh").join(".venv")
+        );
+    }
+
+    /// 单插件缺依赖补装仍工作（加法语义下最小闭环）：共享 venv 已含存量包，
+    /// 自身 sync 后存量包仍在、自身依赖到位。
+    #[tokio::test]
+    async fn single_plugin_sync_installs_own_deps_and_keeps_existing() {
+        let shared = tempfile::tempdir().unwrap();
+        let installed =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::from([
+                "preexisting".to_string(),
+            ])));
+        let deps = vec!["litellm".to_string()];
+        let task = VenvSyncTask {
+            project_dir: PathBuf::from("/proj/llm_service"),
+            venv_dir: Some(shared.path().to_path_buf()),
+            wheelhouse: None,
+        };
+        let installed_for_runner = installed.clone();
+        let report = provision_missing_venvs(
+            vec![("llm_service".to_string(), task)],
+            move |task: VenvSyncTask| {
+                let installed = installed_for_runner.clone();
+                let deps = deps.clone();
+                async move {
+                    assert!(
+                        sync_args(&task).iter().any(|arg| arg == "--inexact"),
+                        "补装必须走加法语义"
+                    );
+                    installed
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .extend(deps);
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        assert!(report.failed.is_empty(), "失败: {:?}", report.failed);
+        let final_deps = installed.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            final_deps.contains("litellm") && final_deps.contains("preexisting"),
+            "补装到位且存量不丢，实际: {final_deps:?}"
+        );
     }
 
     /// 重定向决策四象限（ADR 2026-09-28 解析序的 autoprovision 侧）：
@@ -893,11 +1287,13 @@ mod tests {
             VenvSyncTask {
                 project_dir: PathBuf::from("/a"),
                 venv_dir: None,
+                wheelhouse: None,
             },
         )];
         let host = VenvSyncTask {
             project_dir: PathBuf::from("/host"),
             venv_dir: None,
+            wheelhouse: None,
         };
         let host_repr = host.project_dir.to_string_lossy().into_owned();
         let core_repr = "/a".to_string();
@@ -947,6 +1343,7 @@ mod tests {
         sync_plugin_venv(VenvSyncTask {
             project_dir: dir.clone(),
             venv_dir: None,
+            wheelhouse: None,
         })
         .await
         .expect("uv sync 应成功");
@@ -994,6 +1391,7 @@ mod tests {
         sync_plugin_venv(VenvSyncTask {
             project_dir: project.clone(),
             venv_dir: Some(venv_dir.clone()),
+            wheelhouse: None,
         })
         .await
         .expect("重定向 uv sync 应成功");
@@ -1021,6 +1419,7 @@ mod tests {
         let err = sync_plugin_venv(VenvSyncTask {
             project_dir: project.clone(),
             venv_dir: Some(tmp.path().join("registry").join("no_lock")),
+            wheelhouse: None,
         })
         .await
         .expect_err("缺 uv.lock 的重定向重建必须失败");
@@ -1098,6 +1497,20 @@ mod tests {
         assert!(!is_safe_aux_name("../escape"));
         assert!(!is_safe_aux_name("a/b"));
         assert!(!is_safe_aux_name(""));
+    }
+
+    /// 单源一致性（多端平台差异普查 ⚠️-1 收敛锚）：辅助 venv 解释器路径 =
+    /// invoker crate 的 venv 解释器布局单源（Windows `Scripts\python.exe` /
+    /// Unix `bin/python` 字面形态）——api 侧不再自持一份布局。
+    #[test]
+    fn aux_interpreter_uses_invoker_layout_single_source() {
+        let venv_dir = PathBuf::from("X").join("venv-root");
+        let interpreter = agentos_invoker::invoker::interpreter_layout(&venv_dir, cfg!(windows));
+        if cfg!(windows) {
+            assert_eq!(interpreter, venv_dir.join("Scripts").join("python.exe"));
+        } else {
+            assert_eq!(interpreter, venv_dir.join("bin").join("python"));
+        }
     }
 
     #[test]

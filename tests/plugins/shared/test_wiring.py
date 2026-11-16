@@ -30,7 +30,7 @@ pytestmark = pytest.mark.unit
 
 # tests/plugins/shared/test_wiring.py → parents[3] = 仓库根
 _SHARED_ROOT = Path(__file__).resolve().parents[3] / "plugins" / "shared"
-_HINDSIGHT_MEMORY_DIR = _SHARED_ROOT / "system" / "hindsight_memory"
+_HINDSIGHT_MEMORY_DIR = _SHARED_ROOT / "hindsight_memory"
 if str(_HINDSIGHT_MEMORY_DIR) not in sys.path:
     sys.path.insert(0, str(_HINDSIGHT_MEMORY_DIR))
 

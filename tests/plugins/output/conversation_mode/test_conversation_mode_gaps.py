@@ -28,7 +28,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _DIR = Path(__file__).resolve().parent
-_PLUGIN_DIR = _DIR.parents[3] / "plugins" / "shared" / "pipeline" / "output" / "conversation_mode"
+_PLUGIN_DIR = _DIR.parents[3] / "plugins" / "shared" / "conversation_mode"
 _SHARED = _DIR.parents[3] / "plugins" / "shared"
 
 for _d in (str(_PLUGIN_DIR), str(_SHARED)):
@@ -54,8 +54,8 @@ def _load_plugin_module() -> Any:
 _mod = _load_plugin_module()
 ConversationModeDetector = _mod.ConversationModeDetector
 
-from pipeline.plugin import PluginContext  # noqa: E402
-from pipeline.types import StateKeys  # noqa: E402
+from _libs.pipeline_base.plugin import PluginContext  # noqa: E402
+from _libs.pipeline_base.types import StateKeys  # noqa: E402
 
 _SEEN_KEY = "conversation_mode.seen_tool_results_len"
 

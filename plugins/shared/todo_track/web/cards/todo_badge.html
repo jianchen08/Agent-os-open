@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<!--
+  待办悬浮角标卡（floating/panel 声明 id=todo_badge，anchor=top-right；
+  2026-10-24 用户裁定：悬浮挂载槽位置按插件声明定位）。
+
+  形态：默认收起 = 圆角小钮（主色计数徽章）；点击展开清单面板。单数据源
+  （2026-10-26 用户裁定：后端的数据是什么前端就显示什么，不做第二数据源）：
+  自拉 /ext/pipeline_todo_track/latest?pipeline_id=<当前管道>（2026-10-27
+  用户裁定：角标显示哪个管道就拉取哪个，不按"最近更新"猜桶——后台多管道
+  并行时最近更新者可能是别的任务；管道 ID 由宿主 ctx.sync 下行桥下发，
+  会话/管道切换即重取），15s 轮询，载荷原样渲染（后端无数据 = 隐藏，前端
+  不做合并/补差）。
+  展开面板分组（2026-10-26 用户裁定）：已完成项自动折叠（默认收起）、未完成
+  项带折叠钮（默认展开）；头区（标题/✕/进度条）常驻顶端（flex 列布局，滚动
+  只发生在分组列表内部）。
+  高宽经 webview.resize 上行回报（autoHeight 容器；经 bootstrap 桥携实例
+  令牌，宽度取内容首子元素实测宽——body.scrollWidth 有 clientWidth 下限
+  棘轮，收起态会残成展开宽长条）。渲染按开合+折叠态+数据指纹去重（轮询
+  重渲染不重播入场动画）。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --ag-fg: #1f2328; --ag-muted: #656d76; --ag-border: #d0d7de;
+    --ag-bg: rgba(255,255,255,.92); --ag-primary: #0969da;
+    --ag-primary-soft: rgba(9,105,218,.10);
+  }
+  * { box-sizing: border-box; }
+  /* 滚动条反馈环根除：报宽收敛前 iframe 视口 < 面板宽会引出文档滚动条，
+     滚动条又挤占视口宽 → 报宽永远追不上（残成长条/裁掉右缘）。文档恒
+     不滚动，滚动只发生在分组列表内部（min-height:0 + overflow:auto）。 */
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  body { font: 12px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; color: var(--ag-fg); }
+
+  /* ── 收起态：圆角小钮 ── */
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 28px; padding: 0 9px 0 10px; border-radius: 14px;
+    border: 1px solid var(--ag-border); background: var(--ag-bg);
+    color: var(--ag-fg); cursor: pointer; user-select: none;
+    box-shadow: 0 1px 4px rgba(0,0,0,.10);
+    transition: box-shadow .15s ease, transform .15s ease, background .15s ease;
+  }
+  .btn:hover { background: var(--ag-primary-soft); box-shadow: 0 2px 8px rgba(0,0,0,.14); }
+  .btn:active { transform: scale(.95); }
+  .btn .ico { font-size: 13px; line-height: 1; }
+  .btn .n {
+    min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--ag-primary); color: #fff;
+    font-size: 10.5px; font-weight: 700; font-variant-numeric: tabular-nums;
+  }
+
+  /* ── 展开态：清单面板 ──
+     flex 列布局：头区（标题/✕）与进度条 flex:none 常驻顶端，滚动只发生
+     在分组列表内部（min-height:0 + overflow-y:auto）——长清单不把关闭钮
+     与进度条卷走。 */
+  .panel {
+    width: 260px; max-height: 320px; overflow: hidden;
+    display: flex; flex-direction: column;
+    border: 1px solid var(--ag-border); border-radius: 14px;
+    background: var(--ag-bg); backdrop-filter: blur(12px);
+    padding: 10px 12px 12px;
+    box-shadow: 0 4px 6px rgba(0,0,0,.05), 0 16px 40px rgba(0,0,0,.16);
+    animation: pop .16s ease-out;
+    transform-origin: top right;
+  }
+  @keyframes pop {
+    from { opacity: 0; transform: scale(.95) translateY(-4px); }
+    to { opacity: 1; transform: none; }
+  }
+  .head { display: flex; align-items: center; flex: none; }
+  .head .ttl {
+    flex: 1; font-size: 11px; font-weight: 600; letter-spacing: .05em;
+    color: var(--ag-muted);
+  }
+  .head .cls {
+    width: 24px; height: 24px; margin: -3px -8px 0 0; padding: 0;
+    border: 0; border-radius: 7px; background: transparent;
+    color: var(--ag-muted); cursor: pointer; font-size: 13px;
+    line-height: 24px; text-align: center;
+    transition: background .15s ease, color .15s ease;
+  }
+  .head .cls:hover { background: var(--ag-primary-soft); color: var(--ag-primary); }
+  .prog { display: flex; align-items: center; gap: 8px; margin: 8px 1px 4px; flex: none; }
+  .prog .track {
+    flex: 1; height: 4px; border-radius: 2px;
+    background: rgba(125,125,125,.16); overflow: hidden;
+  }
+  .prog .fill {
+    height: 100%; border-radius: 2px;
+    background: linear-gradient(90deg, var(--ag-primary), #218bff);
+    transition: width .25s ease;
+  }
+  .prog .frac {
+    font-size: 10.5px; color: var(--ag-muted);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  /* 分组（2026-10-26 用户裁定）：未完成=默认展开带折叠钮；已完成=自动折叠 */
+  .sec { display: flex; flex-direction: column; min-height: 0; }
+  .sec.grow { flex: 1; }
+  .sec-h {
+    display: flex; align-items: center; gap: 5px;
+    margin: 5px 1px 0; padding: 3px 6px;
+    border: 0; border-radius: 6px; background: transparent;
+    color: var(--ag-muted); cursor: pointer; user-select: none;
+    font-size: 10.5px; font-weight: 600; letter-spacing: .04em;
+    transition: background .12s ease, color .12s ease;
+    flex: none;
+  }
+  .sec-h:hover { background: var(--ag-primary-soft); color: var(--ag-primary); }
+  .sec-h .arr { font-size: 9px; line-height: 1; }
+  .sec-h .cnt { font-variant-numeric: tabular-nums; }
+  .items {
+    margin: 2px 0 0; padding: 0; list-style: none;
+    overflow-y: auto; min-height: 0;
+  }
+  .items li {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 6px; margin: 1px -6px 0; border-radius: 8px;
+    transition: background .12s ease;
+  }
+  .items li:hover { background: rgba(125,125,125,.07); }
+  .items .box {
+    width: 15px; height: 15px; flex: none; border-radius: 5px;
+    border: 1.5px solid var(--ag-border); background: transparent;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 10px; line-height: 1; color: #fff;
+  }
+  .items li.done .box { background: var(--ag-primary); border-color: var(--ag-primary); }
+  .items .txt { font-size: 12.5px; }
+  .items li.done .txt { color: var(--ag-muted); text-decoration: line-through; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+  <div id="root" class="hidden"></div>
+<script>
+  'use strict';
+  var POLL_MS = 15000;
+  var FETCH_TIMEOUT_MS = 15000;
+  var open = false;
+  var undoneOpen = true;   // 未完成组：默认展开（带折叠钮）
+  var doneOpen = false;    // 已完成组：自动折叠（2026-10-26 用户裁定）
+  var pipelineId = '';     // 当前管道（宿主 ctx.sync 下行；空 = 无活跃会话）
+  var lastTodo = null;     // 后端 latest 载荷原样（单数据源，不合并不补差）
+  var lastRenderKey = null;
+
+  function agentosFetch(path) {
+    return new Promise(function (resolve, reject) {
+      if (!window.agentos) { reject(new Error('bridge unavailable')); return; }
+      var id = window.agentos.postMessage(path, undefined);
+      var timer = setTimeout(function () {
+        window.removeEventListener('message', handler);
+        reject(new Error('timeout'));
+      }, FETCH_TIMEOUT_MS);
+      function handler(ev) {
+        var d = ev.data;
+        if (!d || d.__agentos !== true && !d.__agentos_webview || d.id !== id) return;
+        window.removeEventListener('message', handler);
+        clearTimeout(timer);
+        if (d.method && d.method.indexOf('.error') > -1) reject(new Error('bridge error'));
+        else resolve(d.params);
+      }
+      window.addEventListener('message', handler);
+    });
+  }
+
+  function unwrap(res) {
+    var r = res && typeof res.data !== 'undefined' ? res.data : res;
+    if (typeof r === 'string') { try { r = JSON.parse(r); } catch (e) { r = null; } }
+    if (r && typeof r.todo !== 'undefined') return r.todo;
+    return r;
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function li(it) {
+    return '<li class="' + (it.done ? 'done' : '') + '"><span class="box">' +
+      (it.done ? '✓' : '') + '</span><span class="txt">' + esc(it.text) + '</span></li>';
+  }
+
+  function render(force) {
+    var root = document.getElementById('root');
+    if (!lastTodo || !lastTodo.items || !lastTodo.items.length) {
+      var emptyKey = 'empty|' + open;
+      if (!force && emptyKey === lastRenderKey) return;
+      lastRenderKey = emptyKey;
+      root.className = 'hidden';
+      root.innerHTML = '';
+      notifyResize();
+      return;
+    }
+    var items = lastTodo.items;
+    var undone = items.filter(function (i) { return !i.done; });
+    var done = items.filter(function (i) { return i.done; });
+    // 渲染指纹：开合态 + 两组折叠态 + 数据版本 + 勾选态分布——轮询拿到同数据
+    // 不重渲染（不重播入场动画、不打断 hover）
+    var key = open + '|' + undoneOpen + '|' + doneOpen + '|' +
+      String(lastTodo.updated_at || '') + '|' +
+      items.map(function (i) { return i.done ? 1 : 0; }).join('');
+    if (!force && key === lastRenderKey) return;
+    lastRenderKey = key;
+    root.className = '';
+    if (!open) {
+      root.innerHTML = '<button type="button" class="btn" id="t" title="待办清单">' +
+        '<span class="ico">📋</span><span class="n">' + undone.length + '</span></button>';
+    } else {
+      var pct = items.length ? Math.round(done.length * 100 / items.length) : 0;
+      root.innerHTML = '<div class="panel">' +
+        '<div class="head"><span class="ttl">任务清单</span>' +
+        '<button type="button" class="cls" id="t" title="收起">✕</button></div>' +
+        '<div class="prog"><div class="track"><div class="fill" style="width:' + pct + '%"></div></div>' +
+        '<span class="frac">' + done.length + '/' + items.length + '</span></div>' +
+        '<div class="sec' + (undoneOpen ? ' grow' : '') + '">' +
+        '<button type="button" class="sec-h" id="u" title="折叠/展开未完成项">' +
+        '<span class="arr">' + (undoneOpen ? '▾' : '▸') + '</span>' +
+        '<span class="cnt">待办 ' + undone.length + ' 项</span></button>' +
+        '<ul class="items' + (undoneOpen ? '' : ' hidden') + '">' +
+        undone.map(li).join('') + '</ul></div>' +
+        '<div class="sec">' +
+        '<button type="button" class="sec-h" id="d" title="展开/折叠已完成项">' +
+        '<span class="arr">' + (doneOpen ? '▾' : '▸') + '</span>' +
+        '<span class="cnt">已完成 ' + done.length + ' 项</span></button>' +
+        '<ul class="items' + (doneOpen ? '' : ' hidden') + '">' +
+        done.map(li).join('') + '</ul></div>' +
+        '</div>';
+    }
+    document.getElementById('t').addEventListener('click', function () {
+      open = !open;
+      render(true);
+    });
+    var u = document.getElementById('u');
+    if (u) u.addEventListener('click', function () {
+      undoneOpen = !undoneOpen;
+      render(true);
+    });
+    var d = document.getElementById('d');
+    if (d) d.addEventListener('click', function () {
+      doneOpen = !doneOpen;
+      render(true);
+    });
+    notifyResize();
+  }
+
+  function notifyResize() {
+    try {
+      // 经 bootstrap 桥上行（自带实例令牌——裸 postMessage 会被宿主安全校验
+      // 丢弃，令牌只有宿主注入的 bootstrap 知道）。宽度取内容首子元素实测宽：
+      // body.scrollWidth 有 clientWidth 下限棘轮（展开过 260 后收起态仍量出
+      // 260 残成长条），首子元素宽才是真实内容宽——收起=圆钮固有宽、展开=
+      // 面板固定 260、无单=0；高度取 body.scrollHeight（body 高由内容驱动，
+      // 无此棘轮）。
+      var el = document.getElementById('root').firstElementChild;
+      var post = function () {
+        var el2 = document.getElementById('root').firstElementChild;
+        window.agentos.postMessage('webview.resize', {
+          height: Math.ceil(document.body.scrollHeight),
+          width: el2 ? Math.ceil(el2.getBoundingClientRect().width) : 0,
+        });
+      };
+      post();
+      // 80ms 补报一次：容器宽从收起态过渡到面板宽的窗口里，首报的量测基准
+      // 还是旧视口；文档滚动条已被 overflow:hidden 根除，补报即终值自校正
+      setTimeout(post, 80);
+    } catch (e) { /* 静默容错 */ }
+  }
+
+  function refresh() {
+    // 按管道精确取桶（2026-10-27 用户裁定）：无管道 ID（无活跃会话/ctx.sync
+    // 未达）= 无清单上下文，隐藏不猜桶（"最近更新"可能是后台其他任务的管道）
+    if (!pipelineId) {
+      lastTodo = null;
+      render(false);
+      return;
+    }
+    agentosFetch('/ext/pipeline_todo_track/latest?pipeline_id=' + encodeURIComponent(pipelineId))
+      .then(function (res) {
+        // 单数据源（2026-10-26 用户裁定）：后端载荷原样采纳，后端是什么
+        // 显示什么——空载荷（内核重启清内存）= 无清单隐藏
+        lastTodo = unwrap(res);
+      })
+      .catch(function () { /* 桥失败保持上次数据；从未成功=隐藏 */ })
+      .then(function () { render(false); });
+  }
+
+  // 宿主下行：会话/管道上下文（WebviewWidget ctx.sync 桥——就绪补推 + 切换重推）
+  window.addEventListener('message', function (ev) {
+    var d = ev.data;
+    if (!d || d.__agentos_webview !== true || d.method !== 'ctx.sync') return;
+    var pid = d.params && typeof d.params.pipelineId === 'string' ? d.params.pipelineId : '';
+    if (pid === pipelineId) return;
+    pipelineId = pid;
+    refresh();
+  });
+
+  // 宿主下行主题令牌同步（主题配色由宿主按当前主题下发，字面量仅为首帧兜底）
+  window.addEventListener('message', function (ev) {
+    var d = ev.data;
+    if (!d || d.__agentos_webview !== true || typeof d.method !== 'string') return;
+    if (d.method === 'theme.sync' && d.params && d.params.tokens) {
+      var t = d.params.tokens;
+      Object.keys({ fg: 1, muted: 1, border: 1, primary: 1, 'primary-soft': 1 }).forEach(function (k) {
+        var v = t['--ag-' + k];
+        if (v) document.documentElement.style.setProperty('--ag-' + k, v);
+      });
+      if (t['--ag-bg-elevated']) {
+        document.documentElement.style.setProperty('--ag-bg', t['--ag-bg-elevated']);
+      }
+      render(true);
+    }
+  });
+
+  refresh();
+  setInterval(refresh, POLL_MS);
+</script>
+</body>
+</html>

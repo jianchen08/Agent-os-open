@@ -28,7 +28,7 @@
 
 ### 4. 消费与编辑
 
-- **内核零 agent 配置知识**（不读 `config/agents/**`）：全量加载归 context_build 插件按 `state.agent_id` 自持，`tool_ids` 与提示词同源注入；agent_id 只是执行上下文键（随 `execution_context` 贯穿任务链），内核只透传。
+- **内核零 agent 配置知识**（不读 `config/agents/**`）：全量加载归 agent_config_load 插件按 `state.agent_id` 自持，`tool_ids` 与提示词同源注入；agent_id 只是执行上下文键（随 `execution_context` 贯穿任务链），内核只透传。
 - agent_manager **双面编辑**（读面聚合注册表、条目标 `system|mode:<id>` 来源：规划中 P3）：系统侧 agent → 写 `config/agents`（admin 门控；12 常用字段表单，etag 并发保护 + .bak 备份 + 语法校验）；模式包 agent → 写用户副本文件并落用户仓 commit（规划中 P3）。UI 是编辑器、git 是同一份文件的版本层，不是两个竞争写者。
 - 直接改 yaml：全部字段可用；mtime 缓存，下一个新任务/会话生效，无需重启。反例：改完 yaml 期待在途任务生效——只对新任务生效。
 

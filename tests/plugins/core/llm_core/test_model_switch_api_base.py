@@ -7,8 +7,8 @@
    跨 provider 串味会把请求打到错误端点，属静默数据外泄面）；
 2. 新模型配置带 api_base → 实例整体替换为该值（execute 结果
    ``llm_api_base`` 可观测），不与旧值合并；
-3. 解析失败不得留下半套改动：失败后回到原模型执行，
-   ``llm_api_base`` / ``llm_model`` 仍是原模型的值。
+3. 解析失败不得留下半套改动：失败轮点名报错（含未命中配置表的模型名，
+   不静默回落构造默认继续对话），失败后合法模型照常整体解析。
 """
 
 from __future__ import annotations
@@ -23,10 +23,10 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_LLM_CORE_DIR = _REPO_ROOT / "plugins" / "shared" / "pipeline" / "core" / "llm_core"
+_LLM_CORE_DIR = _REPO_ROOT / "plugins" / "shared" / "llm_core"
 _CORE_DIR = _LLM_CORE_DIR.parent
 _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
-_SYSTEM_LLM_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "llm"
+_SYSTEM_LLM_DIR = _REPO_ROOT / "plugins" / "shared" / "llm"
 for _d in (_SYSTEM_LLM_DIR, _SHARED_DIR, _CORE_DIR, _LLM_CORE_DIR):
     if str(_d) not in sys.path:
         sys.path.insert(0, str(_d))
@@ -52,13 +52,35 @@ class _FakeCaller:
 
 
 class _FakeLoader:
-    """预设 model_id → llm_core 配置的桩加载器（不在表中 = 模型未配置）。"""
+    """预设 model_id → llm_core 配置的桩加载器（不在表中 = 模型未配置）。
+
+    接口面随配置桥 ``ModelConfigLoaderShim``：``load_llm_data``（llm.yaml
+    原始视图——显式改名映射 aliases/superseded_by 的查表面）、``get_llm_core_config``、
+    ``resolve_tier``、``get_default_chat_model``。
+    """
 
     def __init__(self, models: dict[str, dict[str, Any]]) -> None:
         self._models = models
 
+    def load_llm_data(self) -> dict[str, Any]:
+        return {"models": self._models}
+
     def get_llm_core_config(self, model_id: str) -> dict[str, Any] | None:
-        return self._models.get(model_id)
+        entry = self._models.get(model_id)
+        if entry is None:
+            return None
+        # 与真实 ModelConfigLoaderShim 同返回契约（_config_models.py
+        # get_llm_core_config）：非 None 恒带三超时键（defaults 兜底
+        # call_timeout 300 / first_token_timeout 60 / stream_idle_timeout 600）。
+        # 消费侧 _capability_timeout 按契约直取 conf["call_timeout"]——桩缺键
+        # 即 KeyError（556814da2 起超时查表键按 identity.model_id 命中桩条目
+        # 后暴露；真 loader 形态见 test_llm_core_capability_timeout.py）。
+        return {
+            "call_timeout": 300,
+            "first_token_timeout": 60,
+            "stream_idle_timeout": 600,
+            **entry,
+        }
 
     def resolve_tier(self, tier: str) -> str:
         return ""
@@ -68,7 +90,7 @@ class _FakeLoader:
 
 
 def _ctx(state: dict[str, Any]) -> Any:
-    from pipeline.plugin import PluginContext
+    from _libs.pipeline_base.plugin import PluginContext
 
     return PluginContext(state=dict(state), config={})
 
@@ -130,21 +152,41 @@ def test_switch_replaces_api_base_wholesale(monkeypatch: pytest.MonkeyPatch) -> 
     assert caller.calls[0]["args"]["model"] == "b-model"
 
 
-def test_failed_resolution_leaves_original_model_intact(
+def test_failed_resolution_leaves_no_partial_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """失败的解析不允许半套生效：回原模型继续执行，llm_api_base 保持原值。"""
+    """失败的解析不允许半套生效：失败轮点名报错，后续合法模型照常整体解析。
+
+    缺陷⑥-A 收紧后语义：未命中配置表的模型名（a-model）显式失败而非
+    静默回落构造默认；缺 api_base 的失败轮在落字段前中止，实例无残留，
+    下一轮合法模型（c-model）正常解析执行。
+    """
     monkeypatch.setattr(
         _config_models,
         "get_model_config_loader",
-        lambda: _FakeLoader({"b-model": _B_CONF_NO_BASE}),
+        lambda: _FakeLoader(
+            {
+                "b-model": _B_CONF_NO_BASE,
+                "c-model": {
+                    "provider": "openai",
+                    "model_name": "c-real",
+                    "api_base": "https://c-host.example",
+                    "api_key": "k-c",
+                },
+            }
+        ),
     )
-    core, _caller = _make_plugin()
+    core, caller = _make_plugin()
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="b-model"):
         asyncio.run(core.execute(_ctx({"model_id": "b-model"})))
 
-    # 原模型再执行（loader 无 a-model 配置 → 走未配置合法降级，保持构造默认）
-    result = asyncio.run(core.execute(_ctx({"model_id": "a-model"})))
-    assert result["llm_api_base"] == "https://a-host.example"
-    assert result["llm_model"] == "a-real"
+    # 未命中配置表：显式失败点名（不以构造默认模型静默回落继续对话）
+    with pytest.raises(RuntimeError, match="a-model"):
+        asyncio.run(core.execute(_ctx({"model_id": "a-model"})))
+
+    # 失败轮之后合法模型照常整体解析（无半套状态残留）
+    result = asyncio.run(core.execute(_ctx({"model_id": "c-model"})))
+    assert result["llm_api_base"] == "https://c-host.example"
+    assert result["llm_model"] == "c-real"
+    assert caller.calls[0]["args"]["model"] == "c-model"

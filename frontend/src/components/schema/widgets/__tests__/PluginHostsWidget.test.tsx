@@ -10,7 +10,8 @@
  * 调用长时间未返回疑似卡住/启动迟迟未完成）、「未装载」区渲染、底部折叠区
  * （已停止卡片与未装载默认收起不占主视野，展开可见，计数报头，全空不渲染）、
  * 汇总条全口径内存分段（插件段求和/内核段 memstats/应用壳段 Electron IPC，
- * 全应用合计仅三段全有值时给出，缺段显 — 不虚构）。
+ * 全应用合计仅三段全有值时给出，缺段显 — 不虚构）、应用壳 CPU 求和与内核
+ * 日志活性（健康正常/停摆红显/标记缺失显 — 不误报）。
  * mock 仅用于外部 API 请求层（services/api/pluginHosts、
  * services/api/systemMetrics）与 window.electronAPI；时钟用
  * toFake:['Date'] 钉死「现在」，定时器保持真实（react-query/RTL 正常工作）。
@@ -26,7 +27,14 @@ import type { PluginHostsSnapshot } from '@/services/api/pluginHosts'
 const mockGetPluginHosts = vi.fn<() => Promise<PluginHostsSnapshot>>()
 const mockGetPluginRuntimeRows = vi.fn<() => Promise<PluginRuntimeRow[]>>()
 const mockGetKernelMemStats = vi.fn<() => Promise<{ process_rss_bytes: number | null }>>()
-const mockGetAppMetrics = vi.fn<() => Promise<{ processCount: number; totalWorkingSetKb: number }>>()
+const mockGetAppMetrics = vi.fn<
+  () => Promise<{
+    processCount: number
+    totalWorkingSetKb: number
+    totalCpuPercent: number
+    kernelLiveness: { markerFound: boolean; lastOkWriteAgeMs: number | null; healthy: boolean }
+  }>
+>()
 
 vi.mock('@/services/api/pluginHosts', () => ({
   getPluginHosts: () => mockGetPluginHosts(),
@@ -63,7 +71,13 @@ beforeEach(() => {
   mockGetPluginRuntimeRows.mockResolvedValue([])
   // 全口径内存两段默认有值（内核 100 MB / 应用壳 700 MB）；缺段用例单独覆写
   mockGetKernelMemStats.mockResolvedValue({ process_rss_bytes: KERNEL_RSS_BYTES })
-  mockGetAppMetrics.mockResolvedValue({ processCount: 5, totalWorkingSetKb: SHELL_WORKING_SET_KB })
+  // 应用壳段默认带 CPU 与健康判活（停摆/缺失用例单独覆写）
+  mockGetAppMetrics.mockResolvedValue({
+    processCount: 5,
+    totalWorkingSetKb: SHELL_WORKING_SET_KB,
+    totalCpuPercent: 12.5,
+    kernelLiveness: { markerFound: true, lastOkWriteAgeMs: 30_000, healthy: true },
+  })
   setElectronApi({ appMetrics: { get: () => mockGetAppMetrics() } })
 })
 
@@ -79,7 +93,7 @@ function healthyGroupHost(): PluginHost {
     kind: 'group',
     pid: 1234,
     alive: true,
-    rss_mb: 56.2,
+    commit_mb: 56.2,
     uptime_secs: 3600,
     spawned_members: ['bash_tool', 'search', 'metrics'],
     members: [
@@ -95,14 +109,14 @@ function healthyGroupHost(): PluginHost {
   }
 }
 
-/** 异常独占进程：进程死亡 + 缺 pid/rss/uptime（契约允许 null） */
+/** 异常独占进程：进程死亡 + 缺 pid/commit/uptime（契约允许 null） */
 function deadSoloHost(): PluginHost {
   return {
     host_key: 'solo:metrics_admin',
     kind: 'solo',
     pid: null,
     alive: false,
-    rss_mb: null,
+    commit_mb: null,
     uptime_secs: null,
     spawned_members: [],
     members: [{ plugin_id: 'metrics_admin', pending_rejoin: true }],
@@ -183,7 +197,7 @@ describe('PluginHostsWidget — 卡片渲染（健康共享进程 + 异常独占
     // 「运行中」两处：卡头进程徽标（alive=true）+ bash_tool 成员状态词
     expect(healthy.getAllByText('运行中')).toHaveLength(2)
     expect(healthy.getByText('PID 1234')).toBeInTheDocument()
-    expect(healthy.getByText('内存 56.2 MB')).toBeInTheDocument()
+    expect(healthy.getByText('提交内存 56.2 MB')).toBeInTheDocument()
     expect(healthy.getByText('运行 1小时0分')).toBeInTheDocument()
     expect(healthy.getByText('进行中的调用 1')).toBeInTheDocument()
     expect(healthy.getByText('最后调用 1分钟前')).toBeInTheDocument()
@@ -191,7 +205,7 @@ describe('PluginHostsWidget — 卡片渲染（健康共享进程 + 异常独占
     const dead = within(cards[1]!)
     // 契约允许 null：缺值显示 —，不猜测
     expect(dead.getByText('PID —')).toBeInTheDocument()
-    expect(dead.getByText('内存 —')).toBeInTheDocument()
+    expect(dead.getByText('提交内存 —')).toBeInTheDocument()
     expect(dead.getByText('运行 —')).toBeInTheDocument()
     expect(dead.getByText('最后调用 —')).toBeInTheDocument()
   })
@@ -488,14 +502,14 @@ describe('PluginHostsWidget — 底部折叠区（非运行面收进最下）', 
 })
 
 describe('PluginHostsWidget — 汇总条（进程计数 + 全口径内存分段）', () => {
-  /** 健康独占进程：rss 100.4 + 单成员（与 healthy/dead 组成三态输入） */
+  /** 健康独占进程：commit 100.4 + 单成员（与 healthy/dead 组成三态输入） */
   function runningSoloHost(): PluginHost {
     return {
       host_key: 'solo:llm_service',
       kind: 'solo',
       pid: 5678,
       alive: true,
-      rss_mb: 100.4,
+      commit_mb: 100.4,
       uptime_secs: 60,
       spawned_members: ['llm_service'],
       members: [{ plugin_id: 'llm_service', pending_rejoin: false }],
@@ -522,7 +536,7 @@ describe('PluginHostsWidget — 汇总条（进程计数 + 全口径内存分段
     expect(within(summary).getByText('运行中 2')).toBeInTheDocument()
     expect(within(summary).getByText('已停止 1')).toBeInTheDocument()
     // 插件段 = 56.2 + 100.4（deadSoloHost 的 null 不进求和）
-    expect(within(summary).getByText('插件内存 156.6 MB')).toBeInTheDocument()
+    expect(within(summary).getByText('插件内存(提交) 156.6 MB')).toBeInTheDocument()
     // 内核段 104857600B→100.0 MB / 应用壳段 716800KB→700.0 MB
     expect(within(summary).getByText('内核 100.0 MB')).toBeInTheDocument()
     expect(within(summary).getByText('应用壳 700.0 MB')).toBeInTheDocument()
@@ -533,14 +547,14 @@ describe('PluginHostsWidget — 汇总条（进程计数 + 全口径内存分段
     expect(within(summary).getByText('未装载 2')).toBeInTheDocument()
   })
 
-  it('全部宿主 rss 缺失 → 插件内存/全应用显 —（内核壳有值也不虚构合计）', async () => {
+  it('全部宿主 commit 缺失 → 插件内存/全应用显 —（内核壳有值也不虚构合计）', async () => {
     mockGetPluginHosts.mockResolvedValue({
       hosts: [deadSoloHost()],
       pending_spawn: [],
     })
     renderWithProviders(<PluginHostsWidget />)
     const summary = await screen.findByTestId('hosts-summary')
-    expect(within(summary).getByText('插件内存 —')).toBeInTheDocument()
+    expect(within(summary).getByText('插件内存(提交) —')).toBeInTheDocument()
     expect(within(summary).getByText('内核 100.0 MB')).toBeInTheDocument()
     expect(within(summary).getByText('应用壳 700.0 MB')).toBeInTheDocument()
     expect(within(summary).getByText('全应用 —')).toBeInTheDocument()
@@ -548,7 +562,7 @@ describe('PluginHostsWidget — 汇总条（进程计数 + 全口径内存分段
     expect(within(summary).queryByText(/未装载/)).not.toBeInTheDocument()
   })
 
-  it('Web 形态（无 electronAPI）→ 应用壳/全应用显 —，插件与内核段照常', async () => {
+  it('Web 形态（无 electronAPI）→ 应用壳/CPU/判活/全应用显 —，插件与内核段照常', async () => {
     setElectronApi(undefined)
     mockGetPluginHosts.mockResolvedValue({
       hosts: [healthyGroupHost()],
@@ -556,9 +570,11 @@ describe('PluginHostsWidget — 汇总条（进程计数 + 全口径内存分段
     })
     renderWithProviders(<PluginHostsWidget />)
     const summary = await screen.findByTestId('hosts-summary')
-    expect(within(summary).getByText('插件内存 56.2 MB')).toBeInTheDocument()
+    expect(within(summary).getByText('插件内存(提交) 56.2 MB')).toBeInTheDocument()
     expect(within(summary).getByText('内核 100.0 MB')).toBeInTheDocument()
     expect(within(summary).getByText('应用壳 —')).toBeInTheDocument()
+    expect(within(summary).getByText('应用壳 CPU —')).toBeInTheDocument()
+    expect(within(summary).getByText('内核日志活性 —')).toBeInTheDocument()
     expect(within(summary).getByText('全应用 —')).toBeInTheDocument()
   })
 
@@ -570,9 +586,44 @@ describe('PluginHostsWidget — 汇总条（进程计数 + 全口径内存分段
     })
     renderWithProviders(<PluginHostsWidget />)
     const summary = await screen.findByTestId('hosts-summary')
-    expect(within(summary).getByText('插件内存 56.2 MB')).toBeInTheDocument()
+    expect(within(summary).getByText('插件内存(提交) 56.2 MB')).toBeInTheDocument()
     expect(within(summary).getByText('内核 —')).toBeInTheDocument()
     expect(within(summary).getByText('应用壳 700.0 MB')).toBeInTheDocument()
     expect(within(summary).getByText('全应用 —')).toBeInTheDocument()
+  })
+
+  it('应用壳 CPU 求和与内核日志活性（健康）→ CPU 百分比透出，活性报正常+新鲜度', async () => {
+    mockGetPluginHosts.mockResolvedValue({ hosts: [healthyGroupHost()], pending_spawn: [] })
+    renderWithProviders(<PluginHostsWidget />)
+    const summary = await screen.findByTestId('hosts-summary')
+    expect(within(summary).getByText('应用壳 CPU 12.5%')).toBeInTheDocument()
+    expect(within(summary).getByText('内核日志活性 正常 · 30秒前')).toBeInTheDocument()
+  })
+
+  it('内核日志停摆（标记在但超阈值）→ 红显停摆与未刷新时长', async () => {
+    mockGetAppMetrics.mockResolvedValue({
+      processCount: 5,
+      totalWorkingSetKb: SHELL_WORKING_SET_KB,
+      totalCpuPercent: 0,
+      kernelLiveness: { markerFound: true, lastOkWriteAgeMs: 11 * 60_000, healthy: false },
+    })
+    mockGetPluginHosts.mockResolvedValue({ hosts: [healthyGroupHost()], pending_spawn: [] })
+    renderWithProviders(<PluginHostsWidget />)
+    const summary = await screen.findByTestId('hosts-summary')
+    const liveness = within(summary).getByText('内核日志活性 停摆 · 11分前')
+    expect(liveness).toHaveClass('text-status-error')
+  })
+
+  it('判活标记缺失（markerFound=false）→ 显 — 不误报停摆', async () => {
+    mockGetAppMetrics.mockResolvedValue({
+      processCount: 5,
+      totalWorkingSetKb: SHELL_WORKING_SET_KB,
+      totalCpuPercent: 0,
+      kernelLiveness: { markerFound: false, lastOkWriteAgeMs: null, healthy: false },
+    })
+    mockGetPluginHosts.mockResolvedValue({ hosts: [healthyGroupHost()], pending_spawn: [] })
+    renderWithProviders(<PluginHostsWidget />)
+    const summary = await screen.findByTestId('hosts-summary')
+    expect(within(summary).getByText('内核日志活性 —')).toBeInTheDocument()
   })
 })

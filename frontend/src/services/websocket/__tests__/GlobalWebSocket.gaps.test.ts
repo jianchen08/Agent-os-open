@@ -6,6 +6,7 @@
  * - resync_required 转发、非 JSON 帧忽略、handler 异常隔离
  * - 通知/审批/子代理/人类交互四类发送帧
  * - 发送面有界失败：bufferedAmount 背压入队、send 抛错入队、断线去重、flush 失败回队
+ * - interaction_response 帧级 cmid 唯一化：同 thread 不同卡双帧均保留、同 cmid 重复投递仍去重
  * - 重连退避 60s 封顶（超过最大次数后恒定间隔）
  * - 登出后悬挂的陈旧重连计时器不得复活连接
  * - refresh 失败分流：真失效登出停机 / 瞬时故障等下轮
@@ -13,10 +14,11 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { finishWsServiceSetup, MockWebSocket, instances, type MockWebSocketInstance } from './helpers/mockWebSocket'
+import type * as UuidModule from '@/utils/uuid'
 
 // ── Mock 外部依赖（hoisted 供 vi.mock 工厂与用例共同操控） ──
 
-const { mockFetchWsTicket, mockRefresh, mockGetAccessToken, mockIsExpired, mockIsAuthFailureFromError, mockTriggerAuthExpired, mockUpdateConnectionStatus } = vi.hoisted(() => ({
+const { mockFetchWsTicket, mockRefresh, mockGetAccessToken, mockIsExpired, mockIsAuthFailureFromError, mockTriggerAuthExpired, mockUpdateConnectionStatus, mockGenerateUUID } = vi.hoisted(() => ({
   mockFetchWsTicket: vi.fn(),
   mockRefresh: vi.fn(),
   mockGetAccessToken: vi.fn(),
@@ -24,6 +26,7 @@ const { mockFetchWsTicket, mockRefresh, mockGetAccessToken, mockIsExpired, mockI
   mockIsAuthFailureFromError: vi.fn(),
   mockTriggerAuthExpired: vi.fn(),
   mockUpdateConnectionStatus: vi.fn(),
+  mockGenerateUUID: vi.fn(),
 }))
 
 vi.mock('@/services/auth/wsTicket', () => ({
@@ -51,6 +54,13 @@ vi.mock('@/utils/logger', () => ({
   loggers: {
     websocket: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   },
+}))
+
+// cmid 熵源受控：断言「同 cmid 重复投递仍去重」需固定 uuid 值构造输入（同 fake clock
+// 的受控源打桩语义）。默认实现回落真实 generateUUID（见 beforeEach），未接管的用例
+// 拿到天然互异的 uuid。
+vi.mock('@/utils/uuid', () => ({
+  generateUUID: mockGenerateUUID,
 }))
 
 
@@ -84,9 +94,13 @@ function authRejectedTicketError(): Error {
 }
 
 describe('GlobalWebSocketService 缺口补测', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.useFakeTimers()
     instances.length = 0
+    // uuid 受控源默认回落真实实现：未显式接管 cmid 的用例拿到天然互异的 uuid
+    const actualUuid = await vi.importActual<typeof UuidModule>('@/utils/uuid')
+    mockGenerateUUID.mockReset()
+    mockGenerateUUID.mockImplementation(actualUuid.generateUUID)
     mockFetchWsTicket.mockReset()
     mockFetchWsTicket.mockResolvedValue('ticket-1')
     mockRefresh.mockReset()
@@ -254,11 +268,14 @@ describe('GlobalWebSocketService 缺口补测', () => {
       execution_id: 'exec-1',
       response: 'yes',
     })
-    expect(payloads).toContainEqual({
-      type: 'interaction_response',
+    const interactionFrame = payloads.find((m) => m?.type === 'interaction_response')
+    expect(interactionFrame).toMatchObject({
       thread_id: 't1',
       data: { request_id: 'req-1', response: { value: 42 } },
     })
+    // 帧级 cmid（去重键组成部分）：必须是唯一化后的字符串
+    expect(typeof interactionFrame?.client_message_id).toBe('string')
+    expect((interactionFrame?.client_message_id as string).length).toBeGreaterThan(0)
 
     disconnect()
   })
@@ -332,6 +349,49 @@ describe('GlobalWebSocketService 缺口补测', () => {
     expect(
       payloads.filter((m) => m?.type === 'approval' && m.thread_id === 't2'),
     ).toHaveLength(1)
+
+    disconnect()
+  })
+
+  it('interaction_response 离线判重不误伤：同 thread 两张不同卡的应答帧均保留且 cmid 互异', async () => {
+    const { service, connect, getLatestWs, disconnect } = await createService()
+
+    // 断线期间：同一 thread 的两张不同审批卡先后应答（不同交互 request_id）
+    service.sendInteractionResponse('t1', 'req-a', { response_type: 'answered', selected_option: 'approve' })
+    service.sendInteractionResponse('t1', 'req-b', { response_type: 'answered', selected_option: 'reject' })
+
+    connect('token-a')
+    await vi.advanceTimersByTimeAsync(100)
+    const ws = getLatestWs()!
+    simulateOpen(ws)
+
+    const responses = sentPayloads(ws).filter((m) => m?.type === 'interaction_response')
+    expect(responses).toHaveLength(2)
+    expect(responses.map((m) => m.data?.request_id).sort()).toEqual(['req-a', 'req-b'])
+    const cmids = responses.map((m) => m.client_message_id)
+    expect(typeof cmids[0]).toBe('string')
+    expect(typeof cmids[1]).toBe('string')
+    expect(cmids[0]).not.toBe(cmids[1])
+
+    disconnect()
+  })
+
+  it('interaction_response 同帧重复投递仍去重：cmid 相同的应答只入队一次', async () => {
+    const { service, connect, getLatestWs, disconnect } = await createService()
+
+    // 受控熵源：两次发送产生同一 cmid（模拟同一条应答的重复投递）
+    mockGenerateUUID.mockReturnValue('cmid-ir-dup')
+    service.sendInteractionResponse('t1', 'req-a', { response_type: 'answered' })
+    service.sendInteractionResponse('t1', 'req-a', { response_type: 'answered' })
+
+    connect('token-a')
+    await vi.advanceTimersByTimeAsync(100)
+    const ws = getLatestWs()!
+    simulateOpen(ws)
+
+    const responses = sentPayloads(ws).filter((m) => m?.type === 'interaction_response')
+    expect(responses).toHaveLength(1)
+    expect(responses[0].client_message_id).toBe('cmid-ir-dup')
 
     disconnect()
   })

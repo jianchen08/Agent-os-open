@@ -23,13 +23,12 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_CORE_DIR = _REPO_ROOT / "plugins" / "shared" / "pipeline" / "core"
-_LLM_CORE_DIR = _CORE_DIR / "llm_core"
+_LLM_CORE_DIR = _REPO_ROOT / "plugins" / "shared" / "llm_core"
 _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
-_SYSTEM_LLM_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "llm"
+_LLM_DIR = _REPO_ROOT / "plugins" / "shared" / "llm"
 # 去重插入到 [0]：车道共跑时其他插件目录（如 channel_feishu）可能残留于
 # sys.path 前部，幂等跳过会让 plugin.py 的 `from adapter import` 命中他插件。
-for _d in (_LLM_CORE_DIR, _CORE_DIR, _SHARED_DIR, _SYSTEM_LLM_DIR):
+for _d in (_LLM_CORE_DIR, _SHARED_DIR, _LLM_DIR):
     if str(_d) in sys.path:
         sys.path.remove(str(_d))
     sys.path.insert(0, str(_d))
@@ -43,6 +42,7 @@ def _json(params: dict[str, Any]) -> str:
 
 
 # ─────────────────── 纯函数：参数组 JSON → 覆盖集 ───────────────────
+
 
 def test_empty_or_non_json_means_no_override() -> None:
     """空串（未选择）/ 旧档位裸词 / 非 JSON / 非对象 → 不覆盖。"""
@@ -63,12 +63,8 @@ def test_off_shape_is_a_param_set_not_a_skip_sentinel() -> None:
     """关闭形态参数组（thinking.type=disabled / reasoning_effort=none）与其他
     参数组同一条覆盖路径——选中即覆盖，模型 default_params 自带的思考开启
     被关闭值压制。"""
-    assert resolve_thinking_params(_json({"thinking": {"type": "disabled"}})) == {
-        "thinking": {"type": "disabled"}
-    }
-    assert resolve_thinking_params(_json({"reasoning_effort": "none"})) == {
-        "reasoning_effort": "none"
-    }
+    assert resolve_thinking_params(_json({"thinking": {"type": "disabled"}})) == {"thinking": {"type": "disabled"}}
+    assert resolve_thinking_params(_json({"reasoning_effort": "none"})) == {"reasoning_effort": "none"}
 
 
 def test_sampling_params_filtered() -> None:
@@ -81,12 +77,11 @@ def test_sampling_params_filtered() -> None:
 
 # ─────────────────── 真机配置闸（llm.yaml）───────────────────
 
+
 def _llm_yaml() -> dict[str, Any]:
     import yaml
 
-    return yaml.safe_load(
-        (_REPO_ROOT / "config" / "plugins" / "llm" / "llm.yaml").read_text(encoding="utf-8")
-    )
+    return yaml.safe_load((_REPO_ROOT / "config" / "plugins" / "llm" / "llm.yaml").read_text(encoding="utf-8"))
 
 
 def test_llm_yaml_carries_vendor_strength_param_sets() -> None:
@@ -106,17 +101,17 @@ def test_llm_yaml_carries_vendor_strength_param_sets() -> None:
         params = providers[pid]["thinking_strength_params"]
         assert set(params) == {"high", "medium", "low"}
         assert all(
-            set(v) == {"reasoning_effort"} and v["reasoning_effort"] in {"low", "high", "max"}
-            for v in params.values()
+            set(v) == {"reasoning_effort"} and v["reasoning_effort"] in {"low", "high", "max"} for v in params.values()
         )
     # minimax 无厂商级参数组：M3 与 M3.1 两代契约不同（M3 认 thinking.type，
     # M3.1-Flash-Preview 只认 reasoning_effort 且强制 adaptive 无关闭档，
     # 2026-09-28 接口实测），单一厂商级表无法同时为真，参数组落模型级。
     assert "thinking_strength_params" not in providers["minimax"]
+    # deepseek effort 档 = 官方 low/high/max 三档直映射；off 走 thinking 关闭
     assert providers["deepseek"]["thinking_strength_params"] == {
-        "high": {"reasoning_effort": "max"},
         "low": {"reasoning_effort": "low"},
-        "medium": {"reasoning_effort": "medium"},
+        "high": {"reasoning_effort": "high"},
+        "max": {"reasoning_effort": "max"},
         "off": {"thinking": {"type": "disabled"}},
     }
     assert providers["openai"]["thinking_strength_params"] == {
@@ -128,8 +123,8 @@ def test_llm_yaml_carries_vendor_strength_param_sets() -> None:
 
 def test_llm_yaml_minimax_model_level_param_sets() -> None:
     """minimax 模型级参数组：M3 保 thinking 形态（M3 忽略 reasoning_effort，
-    2026-09-28 接口实测）；M3.1-Flash-Preview 用 effort 参数组（high→max 同
-    deepseek 先例；off 无厂商关闭形态，落最低档 low——厂商强制 adaptive
+    2026-09-28 接口实测）；M3.1-Flash-Preview 用 effort 参数组（low/high/max
+    官方三档直映射；off 无厂商关闭形态，落最低档 low——厂商强制 adaptive
     thinking，none/disabled 均 400）。"""
     models = _llm_yaml()["models"]
     assert models["minimax-m3"]["thinking_strength_params"] == {
@@ -139,9 +134,9 @@ def test_llm_yaml_minimax_model_level_param_sets() -> None:
         "off": {"thinking": {"type": "disabled"}},
     }
     assert models["minimax-m3.1-flash-preview"]["thinking_strength_params"] == {
-        "high": {"reasoning_effort": "max"},
         "low": {"reasoning_effort": "low"},
-        "medium": {"reasoning_effort": "medium"},
+        "high": {"reasoning_effort": "high"},
+        "max": {"reasoning_effort": "max"},
         "off": {"reasoning_effort": "low"},
     }
 
@@ -155,8 +150,7 @@ def test_llm_yaml_gear_keys_are_strings() -> None:
             continue
         for gear in params:
             assert isinstance(gear, str), (
-                f"providers.{provider_name} 参数组键 {gear!r} 非字符串"
-                "（YAML 裸 off 会被解析成布尔 False）"
+                f"providers.{provider_name} 参数组键 {gear!r} 非字符串（YAML 裸 off 会被解析成布尔 False）"
             )
 
 
@@ -170,9 +164,7 @@ def test_thinking_levels_endpoint_covers_every_reasoning_model(
     是运行时生效视图，内容随时可变，不作闸真值源）。"""
     import yaml
 
-    data = yaml.safe_load(
-        (_REPO_ROOT / "config" / "plugins" / "llm" / "llm.yaml").read_text(encoding="utf-8")
-    )
+    data = yaml.safe_load((_REPO_ROOT / "config" / "plugins" / "llm" / "llm.yaml").read_text(encoding="utf-8"))
     spec = _load_routes_llm_config()
     monkeypatch.setattr(
         spec,
@@ -185,18 +177,18 @@ def test_thinking_levels_endpoint_covers_every_reasoning_model(
         result = spec.get_thinking_levels(str(model.get("model_name") or model_id))
         assert result["options"], f"推理模型 {model_id} 无思考参数组选项"
         for option in result["options"]:
-            assert isinstance(option["params"], dict) and option["params"]
+            assert isinstance(option["params"], dict)
+            assert option["params"]
 
 
 def _load_routes_llm_config() -> Any:
     """按显式路径加载 llm_service routes_llm_config（裸名防劫持）。"""
     import importlib.util
 
-    target = _SYSTEM_LLM_DIR / "routes_llm_config.py"
-    spec = importlib.util.spec_from_file_location(
-        "llm_routes_llm_config_strength_gate_test", str(target)
-    )
-    assert spec is not None and spec.loader is not None
+    target = _LLM_DIR / "routes_llm_config.py"
+    spec = importlib.util.spec_from_file_location("llm_routes_llm_config_strength_gate_test", str(target))
+    assert spec is not None
+    assert spec.loader is not None
     m = importlib.util.module_from_spec(spec)
     sys.modules["llm_routes_llm_config_strength_gate_test"] = m
     spec.loader.exec_module(m)
@@ -204,6 +196,7 @@ def _load_routes_llm_config() -> Any:
 
 
 # ─────────────────── 集成：_call_llm 覆盖 kwargs ───────────────────
+
 
 class _CapturingCaller:
     """伪 capability caller：记录 tool-executor 能力调用的 method 与 args。
@@ -215,23 +208,21 @@ class _CapturingCaller:
         self.captured_args: dict[str, Any] = {}
         self.captured_method: str | None = None
 
-    async def __call__(
-        self, method: str, params: dict[str, Any], timeout: float | None = None
-    ) -> Any:
+    async def __call__(self, method: str, params: dict[str, Any], timeout: float | None = None) -> Any:
         self.captured_method = method
         self.captured_args = dict(params["args"])
         # tool-executor.invoke 信封（内核 ToolExecutionResult 序列化形态）
         return {
             "success": True,
             "data": {
-            "status": "streamed",
-            "stream_id": "stream_test",
-            "partial": None,
-            "text": "ok",
-            "tool_calls": [],
-            "thinking_text": None,
-            "usage": {},
-            "finish_reason": "stop",
+                "status": "streamed",
+                "stream_id": "stream_test",
+                "partial": None,
+                "text": "ok",
+                "tool_calls": [],
+                "thinking_text": None,
+                "usage": {},
+                "finish_reason": "stop",
             },
         }
 
@@ -270,6 +261,8 @@ async def test_call_llm_without_selection_is_noop() -> None:
         [{"role": "user", "content": "hi"}],
         ctx,
         stream=False,
+
+        identity=plugin._boot_identity,
     )
 
     args = caller.captured_args
@@ -306,6 +299,8 @@ async def test_call_llm_applies_selected_param_set() -> None:
         [{"role": "user", "content": "hi"}],
         ctx,
         stream=False,
+
+        identity=plugin._boot_identity,
     )
 
     args = caller.captured_args
@@ -330,6 +325,8 @@ async def test_call_llm_keeps_defaults_when_strength_missing() -> None:
         [{"role": "user", "content": "hi"}],
         ctx,
         stream=False,
+
+        identity=plugin._boot_identity,
     )
 
     args = caller.captured_args
@@ -355,6 +352,8 @@ async def test_call_llm_legacy_gear_word_is_noop() -> None:
         [{"role": "user", "content": "hi"}],
         ctx,
         stream=False,
+
+        identity=plugin._boot_identity,
     )
 
     args = caller.captured_args
@@ -394,6 +393,8 @@ async def test_call_llm_disable_param_set_overrides_enabled_default() -> None:
         [{"role": "user", "content": "hi"}],
         ctx,
         stream=False,
+
+        identity=plugin._boot_identity,
     )
 
     args = caller.captured_args
@@ -430,6 +431,8 @@ async def test_call_llm_applies_thinking_toggle_param_set() -> None:
         [{"role": "user", "content": "hi"}],
         ctx,
         stream=False,
+
+        identity=plugin._boot_identity,
     )
 
     args = caller.captured_args

@@ -34,8 +34,8 @@ describe('loadDshAdapterContributions', () => {
               out_of_scope: [],
             },
             renderers: [
-              { tool: 'dsh_read', card: 'read' },
-              { tool: 'dsh_glob', card: 'search' },
+              { tool: 'sample_read', card: 'read' },
+              { tool: 'sample_glob', card: 'search' },
             ],
           },
         },
@@ -46,8 +46,8 @@ describe('loadDshAdapterContributions', () => {
     expect(result.renderersRegistered).toBe(2)
     expect(result.failures).toEqual([])
     expect(result.info?.source_commit).toBe('47f9438')
-    expect(getRenderIntent('dsh_read')?.card).toBe('read')
-    expect(getRenderIntent('dsh_glob')?.card).toBe('search')
+    expect(getRenderIntent('sample_read')?.card).toBe('read')
+    expect(getRenderIntent('sample_glob')?.card).toBe('search')
   })
 
   it('坏 renderer 条目被隔离，不影响其他条目', async () => {

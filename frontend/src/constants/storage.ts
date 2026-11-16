@@ -31,6 +31,10 @@ export const STORAGE_KEYS = {
   SIDEBAR_COLLAPSED: 'sidebar_collapsed',
   /** 最后活跃会话ID */
   LAST_ACTIVE_SESSION: 'last_active_session',
+  /** 本客户端新建会话登记（服务端列表窗口外补偿合并，sessionWatchlist 消费） */
+  SESSION_WATCHLIST: 'session_watchlist',
+  /** 会话自定义分组（用户手动建组/分配，sessionGroups 消费） */
+  SESSION_CUSTOM_GROUPS: 'session_custom_groups',
   /** 任务状态面板折叠状态 */
   TASK_PANEL_COLLAPSED: 'task_panel_collapsed',
   /** 工作区面板折叠状态 */

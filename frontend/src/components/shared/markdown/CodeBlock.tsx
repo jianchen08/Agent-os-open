@@ -6,9 +6,9 @@
  */
 
 import { type FC, memo, useState } from 'react'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { Check, Copy, Loader2 } from '@/assets/icons'
 import { cn } from '@/lib/utils'
+import { PrismSyntaxHighlighter, resolveHighlightLanguage } from './prismLanguages'
 import { codeHighlightStyle } from './codeHighlightStyle'
 
 export interface CodeBlockProps {
@@ -93,7 +93,8 @@ const CodeHeader: FC<{ language?: string; code: string; isStreaming?: boolean }>
  */
 export const CodeBlock: FC<CodeBlockProps> = memo(
   ({ code, language, showLineNumbers = true, className, isStreaming = false }) => {
-    const normalizedLanguage = language?.toLowerCase() || 'text'
+    // 渲染前守卫：未注册语言（LLM 围栏/artifact.language 任意值）回落 'text' 纯文本
+    const normalizedLanguage = resolveHighlightLanguage(language)
 
     return (
       <div
@@ -117,7 +118,7 @@ export const CodeBlock: FC<CodeBlockProps> = memo(
             <code>{code}</code>
           </pre>
         ) : (
-          <SyntaxHighlighter
+          <PrismSyntaxHighlighter
             language={normalizedLanguage}
             style={codeHighlightStyle}
             showLineNumbers={showLineNumbers}
@@ -139,7 +140,7 @@ export const CodeBlock: FC<CodeBlockProps> = memo(
             }}
           >
             {code}
-          </SyntaxHighlighter>
+          </PrismSyntaxHighlighter>
         )}
       </div>
     )

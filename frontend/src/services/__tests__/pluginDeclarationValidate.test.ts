@@ -62,6 +62,37 @@ describe('validatePluginDeclaration 负例（校验器不空转）', () => {
     expect(r.warnings.some((e) => e.includes('缺 options/datasourceUri'))).toBe(true)
   })
 
+  it('widget 级 fieldsUri 在场 → select 无 options 合法（选项面由端点下发，不误标）', () => {
+    const r = validatePluginDeclaration({
+      uiSchemaWidgets: [
+        {
+          id: 'thinking_strength',
+          type: 'form',
+          space: 'chat-input',
+          props: {
+            fieldsUri: '/ext/llm_service/config/llm/thinking-levels?model={model}',
+            fields: [{ name: 'strength', type: 'select', label: '思考强度' }],
+          },
+        },
+      ],
+    })
+    expect(r.warnings.some((e) => e.includes('缺 options/datasourceUri'))).toBe(false)
+  })
+
+  it('widget 无 fieldsUri → select 无 options 仍告警（误标消除不豁免真缺陷）', () => {
+    const r = validatePluginDeclaration({
+      uiSchemaWidgets: [
+        {
+          id: 'thinking_strength',
+          type: 'form',
+          space: 'chat-input',
+          props: { fields: [{ name: 'strength', type: 'select', label: '思考强度' }] },
+        },
+      ],
+    })
+    expect(r.warnings.some((e) => e.includes('缺 options/datasourceUri'))).toBe(true)
+  })
+
   it('external MCP 工具缺 input_schema → error（声明是 LLM 工具面唯一真源，缺失=零参数盲调）', () => {
     const errs = errorsOf({
       externalMcp: true,
@@ -116,7 +147,7 @@ describe('validatePluginDeclaration 负例（校验器不空转）', () => {
 
   it('streaming 合法声明零错误', () => {
     const r = validatePluginDeclaration({
-      streaming: { events: ['stream_start', 'text_delta', 'stream_end'], part_types: ['progress_card'], persist: false },
+      streaming: { events: ['stream_start', 'thinking_chunk', 'plugin_error'], part_types: ['progress_card'], persist: false },
     })
     expect(r.errors).toEqual([])
     expect(r.warnings).toEqual([])

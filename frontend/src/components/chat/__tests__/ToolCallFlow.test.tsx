@@ -116,7 +116,7 @@ describe('AC-1h: 工具调用流程', () => {
       }
     })
 
-    it('工具调用初始状态应为 pending', async () => {
+    it('非流式上下文无结果在途 state → interrupted 终态（孤儿工具调用不得推导 pending/running）', async () => {
       const messageId = 'msg-tool-3'
 
       const message = createMockMessage({
@@ -135,8 +135,11 @@ describe('AC-1h: 工具调用流程', () => {
       const { result } = await renderUseMessageRender(message)
 
       if (result.current.fragments[0].type === 'tool_call') {
-        expect(result.current.fragments[0].toolCall.status).toBe('pending')
-        expect(result.current.fragments[0].activity.status).toBe('pending')
+        // 显式终态范式（2026-10-24 工具卡中断终态）：非流式上下文中无终态
+        // 证据的在途 state 是历史孤儿（run 被中断、结果消息未落库）——渲染
+        // interrupted 静止终态卡，不再推导 pending（旧规则永动计时病灶）。
+        expect(result.current.fragments[0].toolCall.status).toBe('interrupted')
+        expect(result.current.fragments[0].activity.status).toBe('interrupted')
       }
     })
 

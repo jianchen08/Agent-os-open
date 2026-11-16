@@ -31,7 +31,7 @@ if str(_SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(_SHARED_DIR))
 
 import state_fields  # noqa: E402
-from state_fields import StateFieldError, as_dict, optional_dict, require_dict  # noqa: E402
+from state_fields import StateFieldError, as_dict, as_list, optional_dict, require_dict  # noqa: E402
 
 
 class TestAsDictThreeShapes:
@@ -115,6 +115,30 @@ class TestConvenienceWrappers:
 
     def test_optional_dict_returns_empty_on_invalid(self) -> None:
         assert optional_dict("[1,2]", field="f") == {}
+
+
+class TestAsList:
+    """as_list：list 字段两形态容忍（task.evaluation_history 契约位）。"""
+
+    def test_list_passthrough(self) -> None:
+        value = [{"metric_id": "m1", "passed": True}]
+        assert as_list(value, field="task.evaluation_history") is value
+
+    def test_json_string_restored(self) -> None:
+        assert as_list('[{"passed": true}, 2]', field="f") == [{"passed": True}, 2]
+
+    def test_missing_returns_none(self) -> None:
+        assert as_list(None, field="f") is None
+        assert as_list("", field="f") is None
+
+    def test_non_list_shapes_rejected_with_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("WARNING"):
+            assert as_list({"not": "a list"}, field="f") is None
+            assert as_list("not json [", field="f") is None
+        assert "形态非法" in caplog.text or "JSON 解析失败" in caplog.text
+
+    def test_json_array_string_is_legal_form(self) -> None:
+        assert as_list("[1, 2]", field="f") == [1, 2]
 
 
 class TestRoundTripProperty:

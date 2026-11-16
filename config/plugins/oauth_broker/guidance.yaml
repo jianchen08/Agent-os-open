@@ -1,0 +1,25 @@
+# oauth_broker 服务方引导页表（注册 OAuth App / 创建 PAT 的落地页 + 预填参数）
+#
+# 用途：当某服务的授权服务器【没有动态注册端点】（或连元数据都不提供，如 GitHub）
+# 时，插件自动打开下面对应的页面，让用户点一下、把 client_id（+client_secret）
+# 或 PAT 贴回来。新增一个服务 = 加一行，不在代码里写死任何服务 URL。
+#
+# 参数值可用占位符：{app_name} {homepage_url} {callback_url} {scopes} {scopes_comma} {description}
+# 预填为 best-effort [未验证]：query 参数形态属各服务方历史形态，本机无法在登录态验证，
+# 带上了也不保证生效——返回值会无条件逐条列出用户要手填的值（复制粘贴即可）。
+#
+# [未验证] GitHub 两行来自 2026-10-17 调度方只读探测指出的历史形态（未在登录态实测）。
+guidance:
+  providers:
+    github.com:
+      app_name: Lingxi AgentOS
+      registration_url: https://github.com/settings/applications/new
+      registration_params:
+        "oauth_application[name]": "{app_name}"
+        "oauth_application[url]": "{homepage_url}"
+        "oauth_application[callback_url]": "{callback_url}"
+        "oauth_application[description]": "{description}"
+      token_url: https://github.com/settings/tokens/new
+      token_params:
+        scopes: "{scopes_comma}"
+        description: "{description}"

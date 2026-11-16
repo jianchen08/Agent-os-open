@@ -42,18 +42,21 @@ export function Toaster() {
  * toast.error('操作失败');
  * toast.info('提示信息');
  * toast.warning('警告信息');
+ *
+ * options.id：sonner 幂等键（同 id 重入更新不新增）——事件类 toast 以后端
+ * record_id 作 id，重连重放不刷屏。
  */
 export const toast = {
-  success: (message: string, options?: { description?: string }) => {
+  success: (message: string, options?: { description?: string; id?: string }) => {
     return sonnerToast.success(message, options)
   },
-  error: (message: string, options?: { description?: string }) => {
+  error: (message: string, options?: { description?: string; id?: string }) => {
     return sonnerToast.error(message, options)
   },
-  info: (message: string, options?: { description?: string; duration?: number }) => {
+  info: (message: string, options?: { description?: string; id?: string; duration?: number }) => {
     return sonnerToast.info(message, options)
   },
-  warning: (message: string, options?: { description?: string }) => {
+  warning: (message: string, options?: { description?: string; id?: string }) => {
     return sonnerToast.warning(message, options)
   },
   loading: (message: string, options?: { description?: string }) => {

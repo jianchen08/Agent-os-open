@@ -4,9 +4,11 @@
  * - 渲染前 GET 拉取 {fields} 并入声明 props（fieldsUri 键摘除，组件拿到纯 fields）；
  * - uri 中 {key} 占位符以 contextVars 替换（渲染上下文，如 {model}=当前标签模型）；
  * - fields 空 / 拉取失败 → 不渲染（选择器隐藏语义在声明层）；
- * - 受控桥 overrideProps 与 fields 共存（宿主值通道 + 声明选项面）。
+ * - 受控桥 overrideProps 与 fields 共存（宿主值通道 + 声明选项面）；
+ * - 装载链全路径：注册表装载晚于挂载（真机时序：bootstrap 先渲染 React，
+ *   GrowthLoop 异步拉 schema 装载注册表）→ 渲染层必须跟随装载结果。
  */
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DeclaredWidgetLayer } from '../DeclaredWidgetLayer'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
@@ -44,28 +46,36 @@ const Probe = (props: Record<string, unknown>) => {
   )
 }
 
-function registerProbe() {
+/** 仅注册 widget 类型（渲染链另一半；不装载声明——装载时序由各测试自持） */
+function registerProbeType() {
   widgetRegistry.register('test_fields_probe', Probe, { name: 'test_fields_probe' })
+}
+
+/** 装载 thinking_strength 声明（fieldsUri 数据源形态） */
+function loadProbeDeclaration(widgets: Array<Record<string, unknown>> = [
+  {
+    id: 'thinking_strength',
+    type: 'test_fields_probe',
+    space: 'chat-input',
+    props: {
+      fieldsUri: '/ext/llm_service/config/llm/thinking-levels?model={model}',
+      title: '思考强度',
+    },
+  },
+]) {
   contributionRegistry.loadFromSchema({
     pipelines: [
       {
         id: 'pipeline_llm_core',
-        ui_schema: {
-          widgets: [
-            {
-              id: 'thinking_strength',
-              type: 'test_fields_probe',
-              space: 'chat-input',
-              props: {
-                fieldsUri: '/ext/llm_service/config/llm/thinking-levels?model={model}',
-                title: '思考强度',
-              },
-            },
-          ],
-        },
+        ui_schema: { widgets },
       },
     ],
   } as never)
+}
+
+function registerProbe() {
+  registerProbeType()
+  loadProbeDeclaration()
 }
 
 describe('DeclaredWidgetLayer — fieldsUri 声明数据源', () => {
@@ -128,5 +138,63 @@ describe('DeclaredWidgetLayer — fieldsUri 声明数据源', () => {
     await waitFor(() => expect(screen.getAllByTestId('probe-option').length).toBe(2))
     expect(lastProps?.value).toEqual({ strength: '{"reasoning_effort":"max"}' })
     expect(lastProps?.fields).toEqual(FIELDS)
+  })
+})
+
+describe('DeclaredWidgetLayer — 装载链全路径（挂载先于注册表装载，真机回归复现）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    widgetRegistry.clear()
+    contributionRegistry.clear()
+    lastProps = null
+  })
+  afterEach(() => {
+    widgetRegistry.clear()
+    contributionRegistry.clear()
+  })
+
+  it('空注册表挂载 → 装载后槽位渲染跟随（迟到装载不得永空）', async () => {
+    // 真机时序：widget 类型已预注册（bootstrap initializeWidgets），ChatInput
+    // 挂载时 GrowthLoop 的 schema 装载尚未完成 → 注册表空
+    registerProbeType()
+    vi.mocked(apiClient.get).mockResolvedValue({ data: { fields: FIELDS } })
+    render(
+      <DeclaredWidgetLayer
+        space="chat-input"
+        slotId="thinking_strength"
+        contextVars={{ model: 'glm-5.3' }}
+      />,
+    )
+    expect(screen.queryByTestId('probe')).toBeNull()
+
+    // GrowthLoop 装载注册表（晚于挂载）
+    act(() => {
+      loadProbeDeclaration()
+    })
+
+    await waitFor(() => expect(screen.getByTestId('probe')).toBeInTheDocument())
+    expect(apiClient.get).toHaveBeenCalledWith(
+      '/ext/llm_service/config/llm/thinking-levels?model=glm-5.3',
+    )
+  })
+
+  it('附加式渲染同样跟随迟到装载与二次替换装载（schema_updated 路径）', async () => {
+    registerProbeType()
+    vi.mocked(apiClient.get).mockResolvedValue({ data: { fields: FIELDS } })
+    render(<DeclaredWidgetLayer space="chat-input" />)
+    expect(screen.queryByTestId('probe')).toBeNull()
+
+    act(() => {
+      loadProbeDeclaration([
+        { id: 'thinking_strength', type: 'test_fields_probe', space: 'chat-input' },
+      ])
+    })
+    await waitFor(() => expect(screen.getByTestId('probe')).toBeInTheDocument())
+
+    // schema_updated / resync → 幂等重载替换声明集：声明消失即渲染消失
+    act(() => {
+      loadProbeDeclaration([])
+    })
+    await waitFor(() => expect(screen.queryByTestId('probe')).toBeNull())
   })
 })

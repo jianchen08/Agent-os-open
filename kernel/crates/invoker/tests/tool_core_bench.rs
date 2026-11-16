@@ -8,7 +8,7 @@
 //!   （level_guard 与 tool_core 同为 pipeline 插件、同 `execute(state, config)` 契约、
 //!   core_type=llm_call 时读小字段即返），大 state 全量经 JSON-RPC/stdio 往返。
 //!   测得的是**通道价格**（序列化 + IPC + Python 解析），不要求业务等价。
-//!   tool_core 本身无 Python sidecar 形态（plugins/shared/pipeline/core/tool_core/ 只有 cdylib），
+//!   tool_core 本身无 Python sidecar 形态（plugins/shared/tool_core/ 只有 cdylib），
 //!   这正是"若回 sidecar 轨"的等价通道成本。
 //! - **native 直调**：`invoke_pipeline_plugin("pipeline_tool_core")`（真实生产 cdylib，
 //!   raw_tool_calls=[] 空转快路径）——state to_string → spawn_blocking → C-ABI →

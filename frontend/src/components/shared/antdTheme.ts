@@ -12,8 +12,8 @@ import type { ThemeConfig as AntdThemeConfig } from 'antd'
 /**
  * 应用主题配置 → antd 主题
  *
- * @param config - 当前生效的主题配置（启动窗口期可能为 null，回退 dark 预设，
- *   与 index.html 内联脚本预挂的 dark class 同源）
+ * @param config - 当前生效的主题配置（启动窗口期可能为 null，回退 light 预设，
+ *   与 theme-init.js 首帧默认浅色同源）
  * @param resolvedTheme - themeStore 的深浅判定（special 族如 high-contrast 归 dark）
  */
 export function toAntdTheme(

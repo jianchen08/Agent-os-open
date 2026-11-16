@@ -12,10 +12,11 @@
  * @module StatusCardWidget
  */
 
-import React from 'react'
+import React, { useContext, useState } from 'react'
 import { AlertCircle, CheckCircle2, Clock, Loader2, PauseCircle, XCircle } from '@/assets/icons'
 import { DataWidgetStatus, useDataWidget } from '@/services/schema/dataWidget'
-import { useWidgetEventStore } from '@/stores/widgetEventStore'
+import { WidgetActionContext } from '@/services/schema/widgetActionBus'
+import { useWidgetEventValue } from '@/hooks/useWidgetEventValue'
 
 // ═════════════════════════════════════════════════════════════════
 // metric 形态（原 StatusCardWidget）
@@ -333,6 +334,74 @@ function StatusCard({
 
 type CardVariant = 'metric' | 'progress' | 'task'
 
+// ═════════════════════════════════════════════════════════════════
+// 声明动作按钮（ui_schema actions → actionUri 直调，ADR 2026-10-10）
+// ═════════════════════════════════════════════════════════════════
+
+/**
+ * 单个动作按钮：点击 → WidgetActionContext 分发（白名单校验后的 actionUri
+ * 直调插件端点）。失败内联展示（role=alert），不吞错误。
+ */
+function ActionButton({
+  name,
+  label,
+  dispatch,
+}: {
+  name: string
+  label: string
+  dispatch: (actionName: string, payload?: unknown) => Promise<unknown>
+}): React.ReactNode {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const run = (): void => {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    void dispatch(name)
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : String(err))
+      })
+      .finally(() => setBusy(false))
+  }
+  return (
+    <span className="inline-flex flex-col items-start">
+      <button
+        type="button"
+        data-testid={`widget-action-${name}`}
+        disabled={busy}
+        onClick={run}
+        className="border-primary/40 text-primary hover:bg-primary/10 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50"
+      >
+        {busy ? '…' : label}
+      </button>
+      {error && (
+        <span role="alert" className="text-status-error mt-0.5 text-xs">
+          {error}
+        </span>
+      )}
+    </span>
+  )
+}
+
+/**
+ * 声明动作按钮排：WidgetActionContext 里的声明 actions（actionUri）零代码
+ * 渲染为可点按钮——第三方 widget 声明 actions 即得按钮，前端零插件代码。
+ * 无声明动作或未渲染在 DeclaredWidgetLayer 内（无 context）时零渲染。
+ */
+function DeclaredActionButtons(): React.ReactNode {
+  const ctx = useContext(WidgetActionContext)
+  if (!ctx) return null
+  const entries = Object.entries(ctx.declaration?.actions ?? {})
+  if (entries.length === 0) return null
+  return (
+    <div className="mt-3 flex flex-wrap gap-2">
+      {entries.map(([name, action]) => (
+        <ActionButton key={name} name={name} label={action.label ?? name} dispatch={ctx.dispatch} />
+      ))}
+    </div>
+  )
+}
+
 /**
  * 卡片 widget（status_card / progress / task_card 三注册名共用）
  *
@@ -353,7 +422,7 @@ export function StatusCardWidget(props: Record<string, unknown>) {
   // 订阅 widget_event 推送（metric 形态：若有 widgetId，用 latest.data 的 value 覆盖 props）
   // 这是 metric_bindings 配置驱动推送的「最后一公里」：内核推 → store → 本组件渲染。
   const widgetId = props.widgetId as string | undefined
-  const latest = useWidgetEventStore((s) => (widgetId ? s.latest[widgetId] : undefined))
+  const latest = useWidgetEventValue(widgetId)
   // A1a：datasourceUri（HTTP 拉，scalar 形状）→ 无 uri 回退静态 props
   const remote = useDataWidget(props, 'scalar' as const)
   const scalar = (props.datasourceUri ? remote.data : undefined) as
@@ -394,8 +463,18 @@ export function StatusCardWidget(props: Record<string, unknown>) {
           ? 'progress'
           : 'metric')
 
+  // 声明动作（ui_schema actions）存在时缀按钮排；无声明零 DOM 变化
+  const declaredActions = useContext(WidgetActionContext)?.declaration?.actions
+  const hasActions = declaredActions !== undefined && Object.keys(declaredActions).length > 0
+  const withActions = (content: React.ReactNode): React.ReactNode => (
+    <div className="w-full">
+      {content}
+      <DeclaredActionButtons />
+    </div>
+  )
+
   if (resolved === 'progress') {
-    return (
+    const content = (
       <ProgressView
         value={typeof value === 'number' ? value : undefined}
         label={props.label as string | undefined}
@@ -404,10 +483,11 @@ export function StatusCardWidget(props: Record<string, unknown>) {
         indeterminate={indeterminate}
       />
     )
+    return hasActions ? withActions(content) : content
   }
 
   if (resolved === 'task') {
-    return (
+    const content = (
       <TaskCardView
         title={(props.title as string) ?? '未命名任务'}
         status={normalizeTaskStatus(props.status)}
@@ -416,6 +496,7 @@ export function StatusCardWidget(props: Record<string, unknown>) {
         taskId={props.task_id as string | undefined}
       />
     )
+    return hasActions ? withActions(content) : content
   }
 
   // metric 形态（默认）
@@ -427,13 +508,14 @@ export function StatusCardWidget(props: Record<string, unknown>) {
   const description = props.description as string | undefined
 
   // 数据源加载/错误提示（A1a）：有 uri 且失败/加载中时前置展示
+  // （加载/错误态不带声明动作按钮——动作面向就绪数据面）
   if ((props.datasourceUri && remote.error) || (props.datasourceUri && remote.loading)) {
     return <DataWidgetStatus loading={remote.loading} error={remote.error} />
   }
 
   // 多指标模式
   if (metrics.length > 0) {
-    return (
+    const content = (
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {metrics.map((metric, index) => (
           <StatusCard
@@ -448,10 +530,11 @@ export function StatusCardWidget(props: Record<string, unknown>) {
         ))}
       </div>
     )
+    return hasActions ? withActions(content) : content
   }
 
-  // 单指标模式
-  return (
+  // 单指标模式（声明动作按钮缀于卡内，ui_schema actions 零代码出按钮）
+  const content = (
     <StatusCard
       title={title}
       value={value ?? '—'}
@@ -461,4 +544,5 @@ export function StatusCardWidget(props: Record<string, unknown>) {
       description={description}
     />
   )
+  return hasActions ? withActions(content) : content
 }

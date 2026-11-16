@@ -3,7 +3,8 @@
 //! 职责：
 //! 1. 按 scope（thread/user/broadcast）查连接注册表路由；
 //! 2. 套信封 `{type:"widget_event", data:{widget_id,event,data}, metadata, sequence}`；
-//! 3. per-plugin 令牌桶限流（默认 20 msg/s、突发 50），超限丢弃；
+//! 3. per-plugin 令牌桶限流（按设备档取值：桌面/云 20 msg/s·突发 50，手机档
+//!    收窄减半；env 可钉值，见 [`resolved_rate_limit_config`]），超限丢弃；
 //! 4. sequence 与流式族共享同一空间（同 thread 内严格有序）。
 //!
 //! 铁律：插件绝不直接 speak WebSocket，只能通过 emit 把事件交给内核路由。
@@ -39,12 +40,71 @@ pub struct RateLimitConfig {
 
 impl Default for RateLimitConfig {
     fn default() -> Self {
-        // ADR 默认：20 msg/s、突发 50
+        // ADR 默认：20 msg/s、突发 50（桌面/云档现值）
         Self {
             burst: 50,
             refill_per_sec: 20,
         }
     }
+}
+
+/// 手机档持续速率（msg/s）：桌面半档（原则 P2 资源参数自适应，低端不过载）。
+/// 只压 widget/广播事件（`emit` 族）——流式 chunk/聊天走 `emit_event` 不过桶，
+/// 手机档收窄不影响流式体验。
+pub const PHONE_REFILL_PER_SEC: u32 = 10;
+/// 手机档突发容量（桌面半档）。
+pub const PHONE_BURST: u32 = 25;
+/// 持续速率钉值环境变量（运维逃生口：未设置/解析失败/非正值按缺席）。
+pub const REFILL_PER_SEC_ENV: &str = "AGENTOS_EVENT_BUS_REFILL_PER_SEC";
+/// 突发容量钉值环境变量（同上）。
+pub const BURST_ENV: &str = "AGENTOS_EVENT_BUS_BURST";
+
+/// 档位 → 令牌桶限流（纯函数；env 钉值外的默认派生）：手机档收窄至桌面半档，
+/// 桌面/云维持 ADR 默认。
+fn rate_limit_config_for_tier(tier: agentos_core::device_profile::DeviceTier) -> RateLimitConfig {
+    match tier {
+        agentos_core::device_profile::DeviceTier::Phone => RateLimitConfig {
+            burst: PHONE_BURST,
+            refill_per_sec: PHONE_REFILL_PER_SEC,
+        },
+        agentos_core::device_profile::DeviceTier::Desktop
+        | agentos_core::device_profile::DeviceTier::Cloud => RateLimitConfig::default(),
+    }
+}
+
+/// 解析核心（纯函数，测试注入 env/档位）：env 显式钉值 > 档位派生（与 invoker
+/// `light_host_max_members` 同构的三级序，本函数承载后两级）。两字段独立解析，
+/// 单字段钉值时另一字段仍取档位值。
+fn resolved_rate_limit_config_from(
+    refill_env: Option<&str>,
+    burst_env: Option<&str>,
+    tier: agentos_core::device_profile::DeviceTier,
+) -> RateLimitConfig {
+    let mut cfg = rate_limit_config_for_tier(tier);
+    if let Some(v) = refill_env
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|&n| n > 0)
+    {
+        cfg.refill_per_sec = v;
+    }
+    if let Some(v) = burst_env
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|&n| n > 0)
+    {
+        cfg.burst = v;
+    }
+    cfg
+}
+
+/// 生产限流配置解析序：环境变量显式钉值（[`REFILL_PER_SEC_ENV`]/
+/// [`BURST_ENV`]，两字段独立）优先 > 设备档位派生（原则 P2）> ADR 默认。
+/// 调用面为进程启动装配（[`FrontendEventBus::new`]），非热路径，现读现算。
+pub fn resolved_rate_limit_config() -> RateLimitConfig {
+    resolved_rate_limit_config_from(
+        std::env::var(REFILL_PER_SEC_ENV).ok().as_deref(),
+        std::env::var(BURST_ENV).ok().as_deref(),
+        agentos_core::device_profile::detect_device_tier(),
+    )
 }
 
 /// 令牌桶状态（per-plugin）。
@@ -102,9 +162,10 @@ pub struct FrontendEventBus {
 }
 
 impl FrontendEventBus {
-    /// 用默认限流（20 msg/s、突发 50）创建。
+    /// 用生产限流配置创建：env 钉值 > 设备档位派生（P2）> ADR 默认
+    /// （20 msg/s、突发 50），见 [`resolved_rate_limit_config`]。
     pub fn new(registry: Arc<ConnectionRegistry>) -> Self {
-        Self::with_rate_limit(registry, RateLimitConfig::default())
+        Self::with_rate_limit(registry, resolved_rate_limit_config())
     }
 
     /// 用自定义限流配置创建（测试用小突发便于快速触发丢弃）。
@@ -263,4 +324,118 @@ fn build_envelope(
         },
         "sequence": sequence,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 档位 → 限流映射区分度（≥2 档）：手机档收窄减半，桌面/云维持 ADR 默认；
+    /// 性质：手机档两字段都 ≤ 桌面档（低端不比高端更宽）。
+    #[test]
+    fn rate_limit_config_distinct_by_tier() {
+        use agentos_core::device_profile::DeviceTier;
+        let phone = rate_limit_config_for_tier(DeviceTier::Phone);
+        let desktop = rate_limit_config_for_tier(DeviceTier::Desktop);
+        let cloud = rate_limit_config_for_tier(DeviceTier::Cloud);
+        assert_eq!(
+            (phone.refill_per_sec, phone.burst),
+            (PHONE_REFILL_PER_SEC, PHONE_BURST),
+            "手机档取收窄常量"
+        );
+        assert_eq!(
+            (desktop.refill_per_sec, desktop.burst),
+            (20, 50),
+            "桌面档维持 ADR 默认"
+        );
+        assert_eq!(
+            (cloud.refill_per_sec, cloud.burst),
+            (desktop.refill_per_sec, desktop.burst),
+            "云档与桌面同值"
+        );
+        assert_ne!(
+            (phone.refill_per_sec, phone.burst),
+            (desktop.refill_per_sec, desktop.burst),
+            "手机与桌面必须有区分度"
+        );
+        assert!(phone.refill_per_sec <= desktop.refill_per_sec && phone.burst <= desktop.burst);
+    }
+
+    /// env 显式钉值优先于档位派生（host_key::light_host_max_members 同构）；
+    /// 两字段独立解析，单字段钉值时另一字段仍取档位值。
+    #[test]
+    fn env_overrides_beat_tier_derivation() {
+        use agentos_core::device_profile::DeviceTier;
+        let cfg = resolved_rate_limit_config_from(Some("7"), Some("9"), DeviceTier::Phone);
+        assert_eq!(
+            (cfg.refill_per_sec, cfg.burst),
+            (7, 9),
+            "双字段钉值整体压过手机档派生"
+        );
+        let cfg = resolved_rate_limit_config_from(Some("7"), None, DeviceTier::Phone);
+        assert_eq!(
+            (cfg.refill_per_sec, cfg.burst),
+            (7, PHONE_BURST),
+            "仅钉速率时突发仍取档位值"
+        );
+        // 桌面档（派生为 None 语义的默认档）钉值同样生效。
+        let cfg = resolved_rate_limit_config_from(Some(" 7 "), None, DeviceTier::Desktop);
+        assert_eq!(
+            (cfg.refill_per_sec, cfg.burst),
+            (7, 50),
+            "桌面档钉值生效且容忍首尾空白"
+        );
+    }
+
+    /// 非法钉值（非数字/零/空串）逐字段回落档位派生，不整体作废另一字段。
+    #[test]
+    fn invalid_env_falls_through_to_tier() {
+        use agentos_core::device_profile::DeviceTier;
+        for bad in ["not-a-number", "0", ""] {
+            let cfg = resolved_rate_limit_config_from(Some(bad), Some(bad), DeviceTier::Phone);
+            assert_eq!(
+                (cfg.refill_per_sec, cfg.burst),
+                (PHONE_REFILL_PER_SEC, PHONE_BURST),
+                "非法值 {bad:?} 必须回落手机档派生"
+            );
+            let cfg = resolved_rate_limit_config_from(Some(bad), None, DeviceTier::Desktop);
+            assert_eq!(
+                (cfg.refill_per_sec, cfg.burst),
+                (20, 50),
+                "非法值 {bad:?} 必须回落桌面档默认"
+            );
+        }
+    }
+
+    /// 生产解析链（真依赖）：env 未钉值 = 注入式解析同参结果；钉值生效后
+    /// 还原。环境变量进程全局态，分支串在一个测试内执行。
+    #[test]
+    fn resolved_rate_limit_config_reads_env_and_tier() {
+        std::env::remove_var(REFILL_PER_SEC_ENV);
+        std::env::remove_var(BURST_ENV);
+        let tier = agentos_core::device_profile::detect_device_tier();
+        assert_eq!(
+            {
+                let c = resolved_rate_limit_config();
+                (c.refill_per_sec, c.burst)
+            },
+            {
+                let c = resolved_rate_limit_config_from(None, None, tier);
+                (c.refill_per_sec, c.burst)
+            },
+            "未钉值 = 按当前档位派生"
+        );
+
+        std::env::set_var(REFILL_PER_SEC_ENV, "7");
+        std::env::set_var(BURST_ENV, "9");
+        let cfg = resolved_rate_limit_config();
+        assert_eq!(
+            (cfg.refill_per_sec, cfg.burst),
+            (7, 9),
+            "生产链 env 钉值生效"
+        );
+
+        std::env::remove_var(REFILL_PER_SEC_ENV);
+        std::env::remove_var(BURST_ENV);
+    }
 }

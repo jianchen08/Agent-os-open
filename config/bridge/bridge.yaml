@@ -16,13 +16,40 @@ auth:
 audit_dir: logs/mcp-bridge
 
 # 会话空闲回收（秒）：(上游, 会话) 无调用超此阈值后整树杀上游进程。
+# 注意：回收的只是 MCP 上游进程；持久浏览器本体（browser 段）不受影响。
 session_idle_timeout_secs: 300
+
+# 持久浏览器运行时（ADR 2026-10-21-browser-live-workspace-tab）：
+# Bridge 拥有浏览器进程，playwright-mcp 经 --cdp-endpoint 挂接同一实例——
+# 工作区直播页看到的页 = 工具操作的页。profile 持久（登录/缓存记住），
+# 桥关停才回收。删除本段 = 关闭运行时（MCP 上游回自带浏览器形态）。
+browser:
+  # 浏览器可执行文件；空 = 自动解析（playwright 缓存 → 系统 Chrome → Edge）。
+  executable: ""
+  # 持久 profile 目录（相对 bridge cwd；登录态/Cookie/缓存落这里）。
+  profile_dir: user_root/browser_profile
+  # CDP 调试端口（127.0.0.1；9222/9223 留给外部工具，此处用 9225）。
+  debug_port: 9225
+  # 无头模式。headless=new 支持持久 profile 与 CDP screencast。
+  headless: true
+  width: 1280
+  height: 800
+  upstream: browser
+  live:
+    # 投屏 JPEG 质量（1-100）与最大宽高（CDP screencast 缩放）。
+    quality: 60
+    max_width: 1280
+    max_height: 800
+    # 投屏对外基地址：远程部署（前端不在宿主机）时配 nginx 反代地址覆盖；
+    # 空 = 本机直连 http://127.0.0.1:<bridge port>。
+    public_base_url: ""
 
 upstreams:
   browser:
-    # @playwright/mcp：headless 一次性浏览器实例（每会话独立，无登录态）。
+    # @playwright/mcp：挂接 Bridge 持久浏览器（browser.debug_port 须与
+    # --cdp-endpoint 端口一致）。会话 = 浏览器内分页，登录态全会话共享。
     command: npx
-    args: ["-y", "@playwright/mcp", "--headless"]
+    args: ["-y", "@playwright/mcp", "--cdp-endpoint", "http://127.0.0.1:9225"]
     # 工具白名单：仅放行声明的浏览器工具。
     tools:
       - browser_navigate

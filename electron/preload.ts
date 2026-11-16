@@ -2,37 +2,21 @@
  * Electron 预加载脚本。
  *
  * 通过 contextBridge 安全地将 Electron API 暴露给渲染进程，
- * 提供窗口信息监听、应用版本查询等基础能力。
+ * 提供应用版本查询等基础能力。
  */
 
 import { contextBridge, ipcRenderer } from "electron";
 
-/** 窗口信息数据结构，与 window-info.ts 中的 WindowInfo 对应 */
-export interface WindowInfo {
-  /** 窗口标题 */
-  title: string;
-  /** 进程名称 */
-  processName: string;
-  /** 窗口左上角 X 坐标 */
-  x: number;
-  /** 窗口左上角 Y 坐标 */
-  y: number;
-  /** 窗口宽度 */
-  width: number;
-  /** 窗口高度 */
-  height: number;
+/** 通过 contextBridge 暴露给渲染进程的 API 接口 */
+/** WS 中继 URL 请求参数（目标基址 + 握手票据 + 协议版本 + 补漏游标） */
+export interface WsRelayUrlParams {
+  target: string;
+  ticket: string;
+  version?: string;
+  last_sequence?: number;
 }
 
-/** 通过 contextBridge 暴露给渲染进程的 API 接口 */
 export interface ElectronAPI {
-  /**
-   * 监听窗口信息更新。
-   *
-   * @param callback - 接收 WindowInfo 的回调函数
-   * @returns 取消监听的函数
-   */
-  onWindowInfo(callback: (info: WindowInfo) => void): () => void;
-
   /**
    * 获取应用版本号。
    *
@@ -46,15 +30,6 @@ export interface ElectronAPI {
    * @returns 平台标识字符串（win32 / darwin / linux）
    */
   getPlatform(): string;
-
-  /**
-   * 监听 IPC 通用事件。
-   *
-   * @param channel - 事件通道名称
-   * @param callback - 事件回调函数
-   * @returns 取消监听的函数
-   */
-  on(channel: string, callback: (...args: unknown[]) => void): () => void;
 
   /**
    * 窗口管理子 API（P2/P3 多窗口基础设施）。
@@ -91,6 +66,13 @@ export interface ElectronAPI {
   adminCredential: {
     load(): Promise<{ username: string; password: string } | null>;
   };
+  /** 远端内核实时通道中继（app:// 安全源发 ws:// 远端属混合内容被浏览器拦） */
+  wsRelay: {
+    /** 声明当前内核基址（中继只转发到它，非开放代理） */
+    allow(target: string | null): Promise<boolean>;
+    /** 取中继 URL（票据/协议版本/补漏游标随行） */
+    url(params: WsRelayUrlParams): Promise<string | null>;
+  };
   windowControls: {
     /** 最小化 */
     minimize(): Promise<void>;
@@ -111,8 +93,13 @@ export interface ElectronAPI {
 
   /** 系统通知子 API（宿主 OS 原生通知：Windows toast / macOS 通知中心 / Linux libnotify） */
   notification: {
-    /** 弹出系统通知；返回是否成功弹出（宿主不支持/参数非法为 false） */
-    show(opts: { title: string; body: string }): Promise<boolean>;
+    /** 弹出系统通知；返回是否成功弹出（宿主不支持/参数非法为 false）。
+     *  threadId 非空时点击通知额外派发 notification:navigate（跳转对应对话） */
+    show(opts: { title: string; body: string; threadId?: string }): Promise<boolean>;
+    /** 订阅系统通知点击导航；返回取消订阅函数 */
+    onNotificationNavigate(
+      callback: (payload: { threadId?: string }) => void,
+    ): () => void;
   };
 
   /** 原生对话框子 API（系统资源管理器） */
@@ -121,10 +108,27 @@ export interface ElectronAPI {
     pickDirectory(): Promise<string | null>;
   };
 
-  /** 应用壳进程树内存指标子 API（监控页全口径内存的应用壳段） */
+  /** 应用壳进程树内存与 CPU 指标子 API（监控页全口径内存的应用壳段） */
   appMetrics: {
-    /** 汇总 Electron 全部进程（主/渲染/GPU/utility）物理内存，KB 口径 */
-    get(): Promise<{ processCount: number; totalWorkingSetKb: number }>;
+    /** 汇总 Electron 全部进程（主/渲染/GPU/utility）物理内存（KB 口径）与 CPU（percentCPUUsage 求和） */
+    get(): Promise<{
+      processCount: number;
+      totalWorkingSetKb: number;
+      totalCpuPercent: number;
+    }>;
+  };
+
+  /** 更新提示子 API（P-24，不做自动更新；主进程启动时检查一次版本清单） */
+  update: {
+    /** 拉取当前已知的新版本信息（未检查/同版本/检查失败 = null） */
+    getAvailable(): Promise<{
+      latestVersion: string;
+      downloadUrl: string;
+    } | null>;
+    /** 订阅新版本可用推送（主进程 update:available）；返回取消订阅函数 */
+    onAvailable(
+      callback: (info: { latestVersion: string; downloadUrl: string }) => void,
+    ): () => void;
   };
 }
 
@@ -153,23 +157,6 @@ const MAXIMIZED_CHANGED_CHANNEL = "window:maximized-changed";
 
 // 通过 contextBridge 安全暴露 API
 contextBridge.exposeInMainWorld("electronAPI", {
-  /**
-   * 监听来自主进程的窗口信息更新事件。
-   */
-  onWindowInfo: (callback: (info: WindowInfo) => void): (() => void) => {
-    const handler = (
-      _event: Electron.IpcRendererEvent,
-      info: WindowInfo,
-    ): void => {
-      callback(info);
-    };
-    ipcRenderer.on("window-info", handler);
-
-    // 返回取消监听函数
-    return () => {
-      ipcRenderer.removeListener("window-info", handler);
-    };
-  },
   /** 认证会话镜像（强杀耐久备份）：tokenLifecycle 写入/清除时镜像，启动时回读 */
   authSession: {
     save: (refreshToken: string | null) => {
@@ -183,6 +170,17 @@ contextBridge.exposeInMainWorld("electronAPI", {
     },
   },
   /** 装机版自动登录凭据（ADR 2026-10-02-packaged-auto-login-env-only）：load 仅装机形态且 launcher 已播种 AGENTOS_ADMIN_PASSWORD 时返回非空 */
+  /** 远端内核实时通道中继（app:// 安全源发 ws:// 远端属混合内容被浏览器拦） */
+  wsRelay: {
+    /** 声明当前内核基址（中继只转发到它，非开放代理） */
+    allow: (target: string | null) => {
+      return ipcRenderer.invoke("ws:relay:allow", target) as Promise<boolean>;
+    },
+    /** 取中继 URL（票据/协议版本/补漏游标随行） */
+    url: (params: WsRelayUrlParams) => {
+      return ipcRenderer.invoke("ws:relay:url", params) as Promise<string | null>;
+    },
+  },
   adminCredential: {
     load: () => {
       return ipcRenderer.invoke("auth:admin-credential:load") as Promise<{
@@ -191,6 +189,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       } | null>;
     },
   },
+
 
   /**
    * 获取应用版本号。
@@ -204,39 +203,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
    */
   getPlatform: (): string => {
     return ipcRenderer.sendSync("get-platform") as string;
-  },
-
-  /**
-   * 监听 IPC 通用事件的便捷方法。
-   * 仅允许监听预定义的安全通道。
-   */
-  on: (
-    channel: string,
-    callback: (...args: unknown[]) => void,
-  ): (() => void) => {
-    // 白名单通道，防止渲染进程监听任意 IPC 事件
-    // 注意：window:open 等使用 ipcRenderer.invoke（见下方 window 子 API），
-    // 不经此白名单；此白名单只约束 ipcRenderer.on 监听通道。
-    // 仅收录主进程实际发射（webContents.send）的通道；版本/平台查询走
-    // sendSync（getAppVersion/getPlatform），无事件形态。
-    const allowedChannels = new Set(["window-info"]);
-
-    if (!allowedChannels.has(channel)) {
-      console.warn(`IPC 通道 "${channel}" 不在白名单中，已忽略`);
-      return () => {};
-    }
-
-    const handler = (
-      _event: Electron.IpcRendererEvent,
-      ...args: unknown[]
-    ): void => {
-      callback(...args);
-    };
-    ipcRenderer.on(channel, handler);
-
-    return () => {
-      ipcRenderer.removeListener(channel, handler);
-    };
   },
 
   /**
@@ -311,10 +277,28 @@ contextBridge.exposeInMainWorld("electronAPI", {
    * 系统通知子 API。invoke 通道为 notification:show，主进程用 Electron
    * Notification 按宿主 OS 路由（Windows toast / macOS 通知中心 / Linux
    * libnotify）；提示音仍由渲染进程 Web Audio 合成，主进程侧静音。
+   * show 携带 threadId 时，点击通知主进程额外派发 notification:navigate
+   * （经 onNotificationNavigate 订阅消费，跳转到通知对应的会话）。
    */
   notification: {
-    show: (opts: { title: string; body: string }) => {
+    show: (opts: { title: string; body: string; threadId?: string }) => {
       return ipcRenderer.invoke("notification:show", opts) as Promise<boolean>;
+    },
+    /** 订阅系统通知点击导航；返回取消订阅函数 */
+    onNotificationNavigate: (
+      callback: (payload: { threadId?: string }) => void,
+    ): (() => void) => {
+      const handler = (
+        _event: Electron.IpcRendererEvent,
+        payload: { threadId?: string },
+      ): void => {
+        callback(payload);
+      };
+      ipcRenderer.on("notification:navigate", handler);
+
+      return () => {
+        ipcRenderer.removeListener("notification:navigate", handler);
+      };
     },
   },
 
@@ -332,15 +316,47 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   /**
-   * 应用壳进程树内存指标。invoke 通道为 app:metrics，主进程汇总
-   * getAppMetrics 全部进程的物理内存（workingSetSize，KB 口径）。
+   * 应用壳进程树内存与 CPU 指标。invoke 通道为 app:metrics，主进程汇总
+   * getAppMetrics 全部进程的物理内存（workingSetSize，KB 口径）与 CPU
+   * （cpu.percentCPUUsage 求和）。
    */
   appMetrics: {
     get: () => {
       return ipcRenderer.invoke("app:metrics") as Promise<{
         processCount: number;
         totalWorkingSetKb: number;
+        totalCpuPercent: number;
       }>;
+    },
+  },
+
+  /**
+   * 更新提示子 API（P-24，不做自动更新）。invoke 通道为 update:get-available
+   * （拉取启动检查结果的兜底——渲染层挂载晚于主进程推送时补拿）；推送通道
+   * update:available 由主进程检查到新版本时经 webContents.send 发出。
+   * 仅提示版本与下载地址，不下载不安装。
+   */
+  update: {
+    getAvailable: () => {
+      return ipcRenderer.invoke("update:get-available") as Promise<{
+        latestVersion: string;
+        downloadUrl: string;
+      } | null>;
+    },
+    onAvailable: (
+      callback: (info: { latestVersion: string; downloadUrl: string }) => void,
+    ): (() => void) => {
+      const handler = (
+        _event: Electron.IpcRendererEvent,
+        info: { latestVersion: string; downloadUrl: string },
+      ): void => {
+        callback(info);
+      };
+      ipcRenderer.on("update:available", handler);
+
+      return () => {
+        ipcRenderer.removeListener("update:available", handler);
+      };
     },
   },
 } satisfies ElectronAPI);

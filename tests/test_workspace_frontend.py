@@ -75,9 +75,12 @@ class TestCodeEditorComponent:
         assert "LARGE_FILE_THRESHOLD" in content or "large" in content.lower(), "缺少大文件检测"
 
     def test_has_language_detection(self):
-        """应包含语言检测（根据文件扩展名）。"""
-        content = _read_ts_file("components/workspace/CodeEditor.tsx")
-        assert "EXTENSION_TO_LANGUAGE" in content, "缺少语言映射表"
+        """应包含语言检测（根据文件扩展名）——扩展名→语言映射单一真值源在
+        prismLanguages.ts（批次2-②收敛），CodeEditor 经共用导入消费。"""
+        editor = _read_ts_file("components/workspace/CodeEditor.tsx")
+        assert "prismLanguages" in editor, "CodeEditor 未接语言映射真值源"
+        table = _read_ts_file("components/shared/markdown/prismLanguages.ts")
+        assert "EXTENSION_TO_LANGUAGE" in table, "缺少语言映射表"
 
     def test_file_size_is_reasonable(self):
         """文件大小应合理（非空、不超过 50KB）。"""

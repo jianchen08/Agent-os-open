@@ -4,6 +4,7 @@
 
 import { loggers } from './logger'
 import { STORAGE_KEYS } from '../constants/storage'
+import { userScopedKey } from './userScopedStorage'
 
 export { STORAGE_KEYS }
 export type StorageKey = (typeof STORAGE_KEYS)[keyof typeof STORAGE_KEYS]
@@ -215,7 +216,7 @@ export const uiStorage = {
    * @param sessionId - 会话ID
    */
   setLastActiveSession(sessionId: string): void {
-    storage.setItem(STORAGE_KEYS.LAST_ACTIVE_SESSION, sessionId)
+    storage.setItem(userScopedKey(STORAGE_KEYS.LAST_ACTIVE_SESSION), sessionId)
   },
 
   /**
@@ -223,7 +224,29 @@ export const uiStorage = {
    * @returns 会话ID或null
    */
   getLastActiveSession(): string | null {
-    return storage.getItem<string>(STORAGE_KEYS.LAST_ACTIVE_SESSION)
+    return storage.getItem<string>(userScopedKey(STORAGE_KEYS.LAST_ACTIVE_SESSION))
+  },
+
+  /** 保存本客户端新建会话登记表（sessionWatchlist 消费；原始数组存取，形状校验在读侧） */
+  setSessionWatchlist(list: unknown[]): void {
+    storage.setItem(userScopedKey(STORAGE_KEYS.SESSION_WATCHLIST), list)
+  },
+
+  /** 读取本客户端新建会话登记表（无记录/形状损坏返回 null，读侧按空表处理） */
+  getSessionWatchlist(): unknown[] | null {
+    const list = storage.getItem<unknown[]>(userScopedKey(STORAGE_KEYS.SESSION_WATCHLIST))
+    return Array.isArray(list) ? list : null
+  },
+
+  /** 保存会话自定义分组表（sessionGroups 消费；原始数组存取，形状校验在读侧） */
+  setSessionCustomGroups(list: unknown[]): void {
+    storage.setItem(userScopedKey(STORAGE_KEYS.SESSION_CUSTOM_GROUPS), list)
+  },
+
+  /** 读取会话自定义分组表（无记录/形状损坏返回 null，读侧按空表处理） */
+  getSessionCustomGroups(): unknown[] | null {
+    const list = storage.getItem<unknown[]>(userScopedKey(STORAGE_KEYS.SESSION_CUSTOM_GROUPS))
+    return Array.isArray(list) ? list : null
   },
 
   /**

@@ -1,0 +1,31 @@
+# notify_judge 配置——经 manifest config_files settings 命名空间注入
+# （{"settings": {...}} 嵌套形态，host_context 同款）。缺失项回落插件代码默认。
+enabled: true
+# LLM 主判模型：缺省不钉具体模型——走 llm.yaml small 档（model.resolve 单源
+# 解析），换供应商/模型只动 llm.yaml；确需钉死才填 llm.yaml models 键名。
+# 尾部窗口轮数（最近 N 个 assistant 轮 + 其前置 user 消息）
+tail_rounds: 2
+# 判定转录截断上限（字符，保尾截断）
+max_prompt_chars: 4000
+# LLM 判定超时（秒；失败降级为 worthy=true）
+timeout_seconds: 20
+# LLM 判定 max_tokens：推理模型档 thinking 消耗预算，正文须留余量
+# （缺省 2000；minimax-m3 实测 200 全被 thinking 吃尽 → 输出空 → 降级）
+max_tokens: 2000
+# 快切词表（强承诺/意图统一词表）：最终文本命中即弹，跳过 LLM
+keywords:
+  - 已设置提醒
+  - 会通知你
+  - 到时候叫你
+  - 安排上了
+  - 记好了
+  - 搞定了
+  - 完成✅
+  - 提醒我
+  - 通知我
+  - 别忘了
+# 防双响工具面：尾部窗口出现过这些工具调用即不弹（交互卡路径已通知）
+silent_tools:
+  - human_interaction
+# 适用面门控不在本文件：管道步 when（agent_level == 'L1'）裁定只有主 agent
+# 会话判定（autonomous.yaml notify_judge 步），本插件零身份知识。

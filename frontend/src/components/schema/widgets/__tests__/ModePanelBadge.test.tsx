@@ -13,7 +13,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { getModePanelIcon, getModePanelLabel, getModePanelTarget } from '@/services/schema/modePanel'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
-import { ModePanelBadge } from '../ModePanelBadge'
+import { ModePanelBadge, ModeTagBadges } from '../ModePanelBadge'
 
 /** 合成 modes registry（徽标名/图标数据源）：beta 带 icon，alpha 无 icon */
 const REGISTRY = {
@@ -126,7 +126,7 @@ describe('ModePanelBadge — 徽标渲染与点击导航', () => {
     useLayoutModeStore.setState({ workspaceTabs: [] })
   })
 
-  it('有映射 → 渲染徽标（registry 声明图标+模式名）；点击打开面板页签且不触发行点击', () => {
+  it('有映射 → 渲染徽标（纯文字单形态）；点击打开面板页签且不触发行点击', () => {
     seedModePlugin('plug_x', 'alpha', '阿尔法', 'alpha_desk')
     seedModePlugin('plug_y', 'beta', '贝塔', 'beta_desk')
     flushSeeds()
@@ -134,7 +134,9 @@ describe('ModePanelBadge — 徽标渲染与点击导航', () => {
 
     const badge = screen.getByTestId('mode-badge-beta')
     expect(badge).toHaveTextContent('贝塔模式')
-    expect(badge).toHaveTextContent('⭐')
+    // 图标下线：同类信息只留一种表达形态（用户 2026-10-25 裁定）
+    expect(badge).not.toHaveTextContent('⭐')
+    expect(badge.querySelector('span[aria-hidden="true"]')).toBeNull()
 
     fireEvent.click(badge)
     const tabs = useLayoutModeStore.getState().workspaceTabs
@@ -142,15 +144,60 @@ describe('ModePanelBadge — 徽标渲染与点击导航', () => {
     expect(tabs[0].id).toBe('ws-plugin-beta_desk')
   })
 
-  it('registry 未声明 icon → 徽标仅模式名（缺省不渲染图标位）', () => {
+  it('模式徽标单形态：有无 icon 声明同形（均只显文字，不叠图标）', () => {
     seedModePlugin('plug_x', 'alpha', '阿尔法', 'alpha_desk')
     flushSeeds()
     render(<ModePanelBadge mode="alpha" />)
     expect(screen.getByTestId('mode-badge-alpha')).toHaveTextContent('阿尔法模式')
   })
 
+  it('模式 ID 无 registry 声明 → 只显短名（不显全路径）', () => {
+    seedModePlugin('plug_code', 'mode_coding/code_writer', '编码', 'code_desk')
+    flushSeeds()
+    render(<ModePanelBadge mode="mode_coding/code_writer" />)
+    const badge = screen.getByTestId('mode-badge-mode_coding/code_writer')
+    expect(badge.textContent).toBe('code_writer')
+    expect(badge.textContent).not.toContain('mode_coding/')
+    // 完整信息在 tooltip（短名 + 点击引导）
+    expect(badge.getAttribute('title')).toContain('code_writer')
+  })
+
   it('查不到映射 → 不渲染（零 mode 零渲染）', () => {
     render(<ModePanelBadge mode="ghost" />)
     expect(screen.queryByTestId('mode-badge-ghost')).not.toBeInTheDocument()
+  })
+})
+
+describe('ModeTagBadges — 模式标签集渲染（mode 键原生数组）', () => {
+  beforeEach(() => {
+    seeds.length = 0
+    contributionRegistry.clear()
+    useLayoutModeStore.setState({ workspaceTabs: [], visitedTabIds: [] })
+  })
+
+  it('集内逐标签渲染徽标（各标签独立解析面板声明）', () => {
+    seedModePlugin('plug_x', 'alpha', '阿尔法', 'alpha_desk')
+    seedModePlugin('plug_y', 'beta', '贝塔', 'beta_desk')
+    flushSeeds()
+    render(<ModeTagBadges modeTags={['alpha', 'beta']} />)
+    expect(screen.getByTestId('mode-badge-alpha')).toBeInTheDocument()
+    expect(screen.getByTestId('mode-badge-beta')).toBeInTheDocument()
+  })
+
+  it('集内未声明标签不渲染（查不到映射=不渲染），已声明照常', () => {
+    seedModePlugin('plug_x', 'alpha', '阿尔法', 'alpha_desk')
+    flushSeeds()
+    render(<ModeTagBadges modeTags={['ghost', 'alpha']} />)
+    expect(screen.queryByTestId('mode-badge-ghost')).not.toBeInTheDocument()
+    expect(screen.getByTestId('mode-badge-alpha')).toBeInTheDocument()
+  })
+
+  it('空集 / 缺省零渲染', () => {
+    seedModePlugin('plug_x', 'alpha', '阿尔法', 'alpha_desk')
+    flushSeeds()
+    const { container: c1 } = render(<ModeTagBadges modeTags={[]} />)
+    expect(c1).toBeEmptyDOMElement()
+    const { container: c2 } = render(<ModeTagBadges />)
+    expect(c2).toBeEmptyDOMElement()
   })
 })

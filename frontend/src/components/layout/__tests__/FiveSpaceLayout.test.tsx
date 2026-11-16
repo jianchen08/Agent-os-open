@@ -9,11 +9,12 @@
  * - 无常驻底栏（status-bar 不存在）
  */
 
-import { render, screen, fireEvent, act } from '@testing-library/react'
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
+import { openDeclaredPluginPage } from '@/services/workspacePanelOpener'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
+import { useNotificationStore } from '@/stores/notificationStore'
 import { useUIStore } from '@/stores/uiStore'
 import { FiveSpaceLayout } from '../FiveSpaceLayout'
 import { chatContent, renderLayout, ResizeObserverStub, setViewportWidth, sidebarContent } from './helpers/fiveSpaceTestUtils'
@@ -25,6 +26,12 @@ import type * as workspacePanelOpenerMod from '@/services/workspacePanelOpener'
 vi.mock('@/components/workspace/CodeEditor', () => ({
   CodeEditor: () => <div data-testid="mock-code-editor" />,
 }))
+// 通知条目 markdown 渲染（vitest 不解析渲染链重依赖）；预算条目无 message 不触渲染
+vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({
+  MarkdownRenderer: ({ content }: { content: string }) => (
+    <div data-testid="notif-markdown">{content}</div>
+  ),
+}))
 
 // budget 告警源：useLayoutAlerts → useBudgetStatus → cost_control getBudgetStatus，
 // mock 网络层控制 alert_level；默认 null（无预算告警，不影响其余用例）
@@ -35,10 +42,10 @@ vi.mock('@/services/api/costControl', () => ({
   getBudgetStatus: async () => mockBudget.current,
 }))
 
-// 跳转动作 spy：仅替换 openWorkspacePanelByPath（其余导出保持原实现）
+// 跳转动作 spy：仅替换 openDeclaredPluginPage（其余导出保持原实现）
 vi.mock('@/services/workspacePanelOpener', async (importOriginal) => ({
   ...(await importOriginal<workspacePanelOpenerMod>()),
-  openWorkspacePanelByPath: vi.fn(() => true),
+  openDeclaredPluginPage: vi.fn(() => true),
 }))
 
 
@@ -110,7 +117,7 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
     expect(screen.getByTestId('sidebar-panel').getAttribute('data-region')).toBe('sidebar')
     expect(screen.getByTestId('sidebar-panel').getAttribute('data-dsh-surface')).toBeNull()
     expect(screen.getByTestId('sidebar-panel').getAttribute('data-pane')).toBeNull()
-    // 无常驻底栏（状态栏已删除，异常走 AlertBanner 浮现）
+    // 无常驻底栏（状态栏已删除，系统异常走通知中心条目呈现）
     expect(screen.queryByTestId('status-bar')).not.toBeInTheDocument()
   })
 
@@ -126,7 +133,7 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
 
     fireEvent.pointerDown(handle, { clientX: 300 })
     act(() => {
-      fireEvent.pointerMove(window, { clientX: 400 }) // 拖到 40%
+      fireEvent.pointerMove(window, { clientX: 400, buttons: 1 }) // 拖到 40%（按键按住）
     })
     expect(useUIStore.getState().sidebarRatio).toBeCloseTo(0.4)
     expect(aside.style.width).toBe('360px') // 1000×0.4=400 → clamp 上限 360
@@ -150,17 +157,68 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
 
     fireEvent.pointerDown(handle, { clientX: 800 })
     act(() => {
-      fireEvent.pointerMove(window, { clientX: 500 }) // 手柄向左移：工作区增宽
+      fireEvent.pointerMove(window, { clientX: 500, buttons: 1 }) // 手柄向左移：工作区增宽
     })
     expect(useUIStore.getState().workspacePanelRatio).toBeCloseTo(0.5) // 1-0.5（上限）
     expect(panel.style.width).toBe('500px')
     act(() => {
-      fireEvent.pointerMove(window, { clientX: 700 }) // 向右拖回：缩窄到 30%
+      fireEvent.pointerMove(window, { clientX: 700, buttons: 1 }) // 向右拖回：缩窄到 30%
     })
     // 回归锁定：clamp 必须作用于归一化比例——作用于原始光标比时右半区拖动恒 0.5（拖不动）
     expect(useUIStore.getState().workspacePanelRatio).toBeCloseTo(0.3)
     expect(panel.style.width).toBe('360px') // 1000×0.3=300 → min 360 兜底
     fireEvent.pointerUp(window)
+  })
+
+  it('工作区手柄：抬起事件被内嵌文档吞掉时必须收尾（松开左键后工作区不再跟随鼠标移动）', () => {
+    // 病灶（真机实证 Chromium）：指针抬起落在内嵌文档（iframe/webview）上时，
+    // 宿主收不到 pointerup——拖拽会话无法结束，此后鼠标一动工作区就跟着改宽度。
+    // 判据：移动事件 buttons===0 = 按键已松开 → 必须收尾。
+    setViewportWidth(1280)
+    renderLayout()
+    const handle = screen.getByTestId('workspace-resize-handle')
+    mockRect(handle.parentElement as Element, 0, 1000)
+    mockRect(document.querySelector('[data-region="chat"]') as Element, 0, 1000)
+
+    fireEvent.pointerDown(handle, { clientX: 800 })
+    act(() => {
+      fireEvent.pointerMove(window, { clientX: 500, buttons: 1 })
+    })
+    expect(useUIStore.getState().workspacePanelRatio).toBeCloseTo(0.5)
+
+    // 抬起事件丢失：宿主只收到「没有按键」的移动事件
+    act(() => {
+      fireEvent.pointerMove(window, { clientX: 900, buttons: 0 })
+    })
+    const ratioAtRelease = useUIStore.getState().workspacePanelRatio
+    // 之后鼠标继续移动——工作区不得再跟随
+    act(() => {
+      fireEvent.pointerMove(window, { clientX: 100, buttons: 0 })
+    })
+    expect(useUIStore.getState().workspacePanelRatio).toBeCloseTo(ratioAtRelease)
+  })
+
+  it('侧栏手柄：抬起事件被内嵌文档吞掉时同样必须收尾', () => {
+    setViewportWidth(1280)
+    renderLayout()
+    const handle = screen.getByTestId('sidebar-resize-handle')
+    mockRect(handle.parentElement as Element, 0, 1000)
+    mockRect(document.querySelector('[data-region="chat"]') as Element, 0, 1000)
+
+    fireEvent.pointerDown(handle, { clientX: 300 })
+    act(() => {
+      fireEvent.pointerMove(window, { clientX: 400, buttons: 1 })
+    })
+    expect(useUIStore.getState().sidebarRatio).toBeCloseTo(0.4)
+
+    act(() => {
+      fireEvent.pointerMove(window, { clientX: 700, buttons: 0 })
+    })
+    const ratioAtRelease = useUIStore.getState().sidebarRatio
+    act(() => {
+      fireEvent.pointerMove(window, { clientX: 100, buttons: 0 })
+    })
+    expect(useUIStore.getState().sidebarRatio).toBeCloseTo(ratioAtRelease)
   })
 
   it('768px 为分界：767 走移动形态（单屏，无 Splitter 侧栏面板）', () => {
@@ -195,6 +253,36 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
     // 点击遮罩关闭
     fireEvent.click(screen.getByTestId('mobile-sidebar-backdrop'))
     expect(screen.queryByTestId('mobile-sidebar-drawer')).not.toBeInTheDocument()
+  })
+
+  it('移动端顶栏右上角工作区入口：点开覆盖层（抽屉一并收起），再点返回对话', async () => {
+    setViewportWidth(390)
+    renderLayout()
+    await act(async () => {})
+
+    const btn = screen.getByTestId('workspace-expand-float')
+    expect(btn).toHaveAttribute('aria-label', '工作区')
+    expect(useUIStore.getState().mobileWorkspaceOpen).toBe(false)
+
+    // 打开：抽屉若开着先收（抽屉 z-40 盖覆盖层 z-30，不收=点击无反应），覆盖层点亮
+    useUIStore.setState({ sidebarCollapsed: false })
+    fireEvent.click(btn)
+    expect(useUIStore.getState().mobileWorkspaceOpen).toBe(true)
+    expect(useUIStore.getState().sidebarCollapsed).toBe(true)
+    expect(screen.getByTestId('mobile-workspace-overlay')).toBeInTheDocument()
+    expect(btn).toHaveAttribute('aria-label', '返回对话')
+
+    // 再点 = 返回对话（覆盖层收起）
+    fireEvent.click(btn)
+    expect(useUIStore.getState().mobileWorkspaceOpen).toBe(false)
+    expect(screen.queryByTestId('mobile-workspace-overlay')).not.toBeInTheDocument()
+  })
+
+  it('工作区入口仅移动形态渲染（桌面由顶带工作区开关承载）', () => {
+    setViewportWidth(1280)
+    renderLayout()
+    expect(screen.queryByTestId('workspace-expand-float')).not.toBeInTheDocument()
+    expect(screen.getByTestId('workspace-toggle-float')).toBeInTheDocument()
   })
 
   it('移动端：顶栏工作区按钮 → 工作区全屏视图（返回按钮回到对话）', () => {
@@ -246,8 +334,8 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
     expect(screen.getByTestId('sidebar-panel')).toBeInTheDocument()
   })
 
-  it('预算告警浮现并点击 → 打开成本看板 /cost（治理债清理 7.5.3）', async () => {
-    // cost_control 真源：alert_level=warning 过阈 → AlertBanner 出现 budget 条目
+  it('预算告警 → 通知中心条目，动作按钮点击 → 打开监控页（治理债清理 7.5.3）', async () => {
+    // cost_control 真源：alert_level=warning 过阈 → 通知中心出现 budget 条目
     mockBudget.current = {
       scope: 'global',
       limit: 100000,
@@ -258,17 +346,27 @@ describe('FiveSpaceLayout — 响应式两档（768px 分界，平板=触屏桌�
       estimated_cost: 1.5,
     }
     renderLayout()
-    await act(async () => {}) // flush getBudgetStatus → banner 浮现
-
-    const banner = screen.getByRole('alert')
-    expect(banner).toHaveTextContent('预算使用已达 85%')
-
-    vi.mocked(openWorkspacePanelByPath).mockClear()
-    await act(async () => {
-      fireEvent.click(banner)
+    await waitFor(() => {
+      expect(
+        useNotificationStore.getState().notifications.some((n) => n.id === 'budget#1'),
+      ).toBe(true)
     })
-    // 成本卡并入监控页（独立 /cost 页已撤）——预算告警直达监控页签
-    expect(openWorkspacePanelByPath).toHaveBeenCalledWith('/monitoring')
+    const entry = useNotificationStore.getState().notifications.find((n) => n.id === 'budget#1')!
+    expect(entry.title).toContain('预算使用已达 85%')
+    expect(entry.actions?.[0].label).toBe('查看成本')
+
+    vi.mocked(openDeclaredPluginPage).mockClear()
+    // 动作经通知中心面板按钮点击走真实分发路径（handleAction → 告警动作执行器）
+    const { NotificationCenter } = await import('@/components/chat/NotificationCenter')
+    useNotificationStore.getState().openPanel() // 面板开（高优持久条目本有自动开面板语义，显式开保证确定性）
+    render(<NotificationCenter />)
+    // budget=high 组默认展开，条目动作按钮直接可点
+    fireEvent.click(screen.getByRole('button', { name: '查看成本' }))
+    // 成本卡并入监控页（独立 /cost 页已撤）——预算告警按声明动作直达监控页
+    // （E6：pageRef=监控页声明引用，经声明注册表活值解析，不再硬编码路径词面）
+    expect(openDeclaredPluginPage).toHaveBeenCalledWith(
+      expect.objectContaining({ pluginId: 'monitoring', pageId: 'monitoring' }),
+    )
   })
 })
 

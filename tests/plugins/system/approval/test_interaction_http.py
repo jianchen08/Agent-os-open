@@ -26,7 +26,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "system" / "approval"
+_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "approval"
 
 
 def _load_server() -> Any:

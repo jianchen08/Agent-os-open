@@ -8,7 +8,7 @@ R208 先例——合宿成员跳过自身 venv、进程从 plugins/shared/_host/
   2. 共享 venv 解释器在位：_host/.venv/{Scripts/python.exe | bin/python}
      （内核合宿 spawn fail-closed 只认它——HOST_VENV_MISSING 即全体 light
      成员 + 内置模式包不可用）；
-  3. 内置模式包（plugins/shared/modes/*）不带任何自身 .venv；
+  3. 内置模式包（plugins/shared/mode_*，按 id 前缀识别）不带任何自身 .venv；
   4. 一切声明 host_group 的合宿成员不带自身 .venv（运行期零消费，纯装机浪费）；
   5. 包内不出现 junction/symlink 形态的 .venv（Windows junction 存绝对路径，
      跨机必断——ADR 2026-09-07-plugin-venv-dedup）；
@@ -37,22 +37,16 @@ from pathlib import Path
 
 SHARED_REL = Path("plugins") / "shared"
 HOST_DIR_REL = SHARED_REL / "_host"
-MODES_REL = SHARED_REL / "modes"
 
 # 合宿基座必备文件（缺失 = 装机版合宿/mode pack 全体不可 spawn）
 HOST_BASE_FILES = ("host.py", "pyproject.toml")
 
-# 定深扫描布局（与 bootstrap_plugin_envs.py PLUGIN_GLOBS 同步；禁递归 glob）
+# 定深扫描布局（与 bootstrap_plugin_envs.py PLUGIN_GLOBS 同步；禁递归 glob）。
+# 拍平布局（ADR 2026-10-13-plugin-flat-layout）：96 插件平铺至 plugins/shared/<id>，
+# 一级 glob 即全集（_host/_libs 无 plugin.json 天然不入）。内置模式包不再有
+# 专用 modes/ 桶，按 mode_ id 前缀识别（MODE_ID_PREFIX 同源规则）。
 PLUGIN_GLOBS = [
-    "system/*",
-    "tools/*",
-    "pipeline/core/*",
-    "pipeline/input/*",
-    "pipeline/output/*",
-    "modes/*",
-    "db_admin",
-    "metrics_admin",
-    "user_admin",
+    "*",
 ]
 
 
@@ -65,13 +59,22 @@ class Finding:
 
 
 def is_link(path: Path) -> bool:
-    """junction 或 symlink（两者跨机/跨卷皆不可移植）。"""
-    if path.is_symlink():
-        return True
-    if hasattr(os.path, "isjunction"):
-        return os.path.isjunction(path)
-    st = path.lstat()
-    return bool(st.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    """junction 或 symlink（两者跨机/跨卷皆不可移植）。
+
+    缺失/不可达路径返回 False（非 link）——包内插件允许不带 .venv（装机侧
+    重建承接），Python 3.11 无 os.path.isjunction、走 lstat 分支时对缺失
+    路径抛 FileNotFoundError（CI 2026-11-06 实证：3.14 本机不炸、3.11
+    runner 炸）；断链 symlink 仍返回 True（is_symlink 不 follow 目标）。
+    """
+    try:
+        if path.is_symlink():
+            return True
+        if hasattr(os.path, "isjunction"):
+            return os.path.isjunction(path)
+        st = path.lstat()
+        return bool(st.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    except (FileNotFoundError, OSError):
+        return False
 
 
 def venv_interpreter(venv_dir: Path) -> Path | None:
@@ -244,8 +247,8 @@ def check_resources(root: Path) -> list[Finding]:
                 continue
             if venv.exists():
                 group = manifest_host_group(plugin_dir)
-                in_modes = plugin_dir.parent == (root / MODES_REL)
-                if group or in_modes:
+                is_mode_pkg = plugin_dir.name.startswith("mode_")
+                if group or is_mode_pkg:
                     findings.append(
                         Finding(
                             "error",
@@ -279,6 +282,12 @@ def check_resources(root: Path) -> list[Finding]:
 
 
 def main() -> int:
+    # Windows 控制台默认 cp1252，输出含 CJK 时 print 直接 UnicodeEncodeError
+    # （2026-11-06 冒烟步经 subprocess 复用本脚本实证——gate 封装入口的
+    # reconfigure 不覆盖本 CLI 入口，同族第五犯）——入口重配置 UTF-8。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("resources", type=Path, help="打包资源根（含 plugins/shared）")
     parser.add_argument("--json", action="store_true", help="输出 JSON")

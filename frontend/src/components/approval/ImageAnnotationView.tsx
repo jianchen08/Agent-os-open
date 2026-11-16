@@ -18,21 +18,21 @@ export interface ImageAnnotationViewProps {
   readOnly?: boolean
 }
 
-/** 标注颜色 */
+/** 标注颜色（rgb 三元组 token 消费，随主题） */
 const AREA_COLORS = [
-  'rgba(239, 68, 68, 0.35)',
-  'rgba(59, 130, 246, 0.35)',
-  'rgba(16, 185, 129, 0.35)',
-  'rgba(245, 158, 11, 0.35)',
-  'rgba(168, 85, 247, 0.35)',
+  'rgb(var(--status-error-rgb) / 0.35)',
+  'rgb(var(--status-info-rgb) / 0.35)',
+  'rgb(var(--status-success-rgb) / 0.35)',
+  'rgb(var(--status-warning-rgb) / 0.35)',
+  'rgb(var(--ds-accent-ai-rgb) / 0.35)',
 ]
 
 const AREA_BORDERS = [
-  'rgba(239, 68, 68, 0.8)',
-  'rgba(59, 130, 246, 0.8)',
-  'rgba(16, 185, 129, 0.8)',
-  'rgba(245, 158, 11, 0.8)',
-  'rgba(168, 85, 247, 0.8)',
+  'rgb(var(--status-error-rgb) / 0.8)',
+  'rgb(var(--status-info-rgb) / 0.8)',
+  'rgb(var(--status-success-rgb) / 0.8)',
+  'rgb(var(--status-warning-rgb) / 0.8)',
+  'rgb(var(--ds-accent-ai-rgb) / 0.8)',
 ]
 
 /**

@@ -1,0 +1,25 @@
+# 文风标准档·网文快节奏（C1 整合刀 2026-10-13）——档位结构契约同 concrete_plain.yaml
+#   （id/name/traits/authors/sample_note 五字段，缺一不可；schema 校验见
+#   modes/tests/test_roleplay_style_profiles.py）
+# 考据来源（整合对照，措辞原创）：sudachi-zh-style-core（MIT，可改编）、
+# bartender-zh-style-library（对照，作家锚与基调族）、lucid-loom-narrative-styles
+# （AGPL，仅对照不引文）。
+# 播种自包含：本目录数据不 import 共享根模块，C2 按 yaml 逐文件读取。
+id: webnovel_paced
+name: 网文快节奏档
+traits:
+  - 对话占比高（约四成以上），往来带机锋与情绪
+  - 段尾小钩子，轮末大钩子，悬念不断档
+  - 快慢切换：日常快进，冲突与情感戏放慢给特写
+  - 信息少量多餐，设定随剧情掉落，不集中倾倒
+  - 情绪直给：喜怒哀乐立刻落在动作与表情上
+  - 画面分镜化，善用切镜感与短段落
+  - 允许吐槽、玩梗、内心弹幕式独白
+authors:
+  - 八月长安
+  - 巫哲
+  - 天下霸唱
+sample_note: >-
+  对话占四成以上，你来我往带梗带情绪；段尾留小钩子，轮末留大钩子。快慢切换：
+  铺垫快进，冲突处放慢给特写。信息少量多餐，别一次倒完设定。情绪直给不加滤，
+  爽点痛点都落到具体动作上。画面感分镜化，像预告片一样剪。

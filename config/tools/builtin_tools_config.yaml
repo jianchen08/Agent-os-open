@@ -28,8 +28,6 @@ tool_cache:
     resource_search:
       enabled: true
       ttl: 300
-    yaml_validate:
-      enabled: false
     schema_evaluator:
       enabled: false
     resource_evaluator:
@@ -153,17 +151,6 @@ tools:
   - search
   - resource
   - system
-- name: yaml_validate
-  description: 验证 YAML 配置文件的格式和内容。支持验证 YAML 语法、检查必需字段、以及针对 agent/workflow/ui_scene
-    类型的 Schema 验证。使用时提供 content 或 file_path 之一，可指定 schema_type 进行特定格式验证。
-  category: system
-  level: system
-  requires_approval: false
-  dangerous_operations: []
-  tags:
-  - yaml
-  - validate
-  - config
 - name: schema_evaluator
   description: Schema 评估器：验证 JSON/YAML 格式和 Schema
   category: system
@@ -274,7 +261,7 @@ tools:
   - metric
   - completion
 - name: human_interaction
-  description: 与用户交互工具。选择模式：弹出选择框等待用户决定；对话模式：跳转到对话标签页。
+  description: 与用户交互工具。带 options：弹出选择卡阻塞等待用户作答（点选或自由回复）；不带 options：非阻塞通知。
   category: system
   level: all
   requires_approval: false
@@ -296,7 +283,6 @@ permission_policies:
     - fetch
     - web_search
     - resource_search
-    - yaml_validate
     - schema_evaluator
     - resource_evaluator
     - compatibility_checker
@@ -320,7 +306,6 @@ permission_policies:
     - file_read
     - file_write
     - bash_execute
-    - yaml_validate
     - schema_evaluator
     - resource_evaluator
     - compatibility_checker

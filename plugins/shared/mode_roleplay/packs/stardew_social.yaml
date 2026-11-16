@@ -1,0 +1,135 @@
+# ── 玩法包：星露谷好感（出厂首批，C3 整合刀——RP 物料整合）───────────────────
+#
+# 考据来源（docs/working/rp_prompt_material/，仅借结构与思路，本件文案全部原创）：
+#   gameplay/magpie-variables-turns.md   最简变量 + 日期计数形态（world.日期）
+#   gameplay/nimbkoll-rpg-engine.md（CC0）数值硬边界思想（好感 0-100 钳制）
+#   mixed/gm-os-v45-immersive.md（MIT）  事实优先级清单（引擎事实>规则>正典）
+#   gameplay/dem-status-choices.md       选项列表契约形态（分类标签思想）
+#
+# 声明面四件（卡顶层 pack_ids: [stardew_social] 引用；同键合并 = 后到覆盖，卡覆盖包；
+#  镇民样本两名为示例集，卡以同键 npc.<名>.好感度 覆盖/扩展自己的镇民集）：
+#   variables/behaviors —— Tier 0 内置逻辑执行：state_marker_parse 行为匹配 →
+#     State Contract Validator 结算（路径/类型/clamp 执法）；阈值解锁语义 =
+#     behaviors 数值结算 + choices 提示 + rules 阈值声明三层承载；
+#   rules/choices —— 提示词承载声明面（rules 经 /game/config 向宿主透出，choices
+#     为社交选项契约清单：text/category/hint，点击语义 = 清单全等选取）。
+# 播种型纪律：本包自包含不跨包引用；与卡合流自洽（effect 键全部在本包 variables 声明内）。
+
+name: 星露谷好感
+description: 牧场社交好感包——镇民好感度随送礼/交谈经行为触发自动结算，附好感阈值解锁（朋友/密友/恋人）、日期流转与社交选项契约。
+
+variables:
+  npc:
+    阿比:
+      好感度: {type: int, min: 0, max: 100, default: 0}
+    罗宾:
+      好感度: {type: int, min: 0, max: 100, default: 0}
+  world:
+    日期: {type: int, min: 1, max: 28, default: 1}
+    季节: {type: enum, values: [春, 夏, 秋, 冬], default: 春}
+
+behaviors:
+  阿比收礼:
+    trigger: "送给阿比|阿比收下|阿比接过"
+    effect: {npc.阿比.好感度: "+8"}
+  阿比交谈:
+    trigger: "(和|与|跟)阿比(聊天|交谈|谈心|打招呼)"
+    effect: {npc.阿比.好感度: "+2"}
+  罗宾收礼:
+    trigger: "送给罗宾|罗宾收下|罗宾接过"
+    effect: {npc.罗宾.好感度: "+8"}
+  罗宾交谈:
+    trigger: "(和|与|跟)罗宾(聊天|交谈|谈心|打招呼)"
+    effect: {npc.罗宾.好感度: "+2"}
+  入睡过夜:
+    trigger: "入睡|睡下|上床过夜"
+    effect: {world.日期: "+1"}
+
+rules:
+  裁决优先级:
+    - 引擎事实：好感度声明与结算结果（含 0-100 钳制）为最高事实，叙述不得改写数值
+    - 本包规则：好感阈值解锁与日期边界按本节执行
+    - 卡片设定：镇民性格、生日与个人剧情的事实来源
+    - 推测与气氛渲染：不产生任何数值后果
+  # 好感档位阈值单源（世界书条目与本包其他位置一律以「阈值见玩法规则」指回此处）
+  好感阈值: >-
+    朋友档（好感度≥10）解锁同行邀约与更亲近话题；密友档（≥40）解锁个人剧情线与
+    心事倾诉；恋人档（≥80 且玩家走告白选项）确立恋人关系。阈值未达档时对应选项
+    不生效（镇民婉拒，不落数值）；已达档的关系不随日期流转回退。
+  日期流转: >-
+    入睡过夜推进日期（行为触发结算）；世界演化 tick 为周期推进接口（宿主页⏩推进/
+    定时直达）：每 tick 推进一天，日期触顶 28 由引擎结算换季——季节按
+    春→夏→秋→冬 循环翻页、日期重置 1（枚举循环是引擎事实非叙述约定，结算结果
+    叙述不得改写）。
+
+# 世界演化周期推进声明（世界内嵌谱系右移批次三，调研 §7.6 真缺口②）：
+# steps 声明序逐条判定——恒真步推进一天；触顶步（日期≥28）由引擎结算换季翻页
+# （季节 cycle 算子 + 日期重置），换季从叙述约定升为引擎结算。结算走
+# state.adjudicate Validator 单源（cycle 算子由编排侧解析为绝对值），零 LLM。
+tick:
+  steps:
+    - effects:
+        world.日期: "+1"
+    - when: {key: world.日期, op: ">=", value: 28}
+      effects:
+        world.季节: {cycle: [春, 夏, 秋, 冬]}
+        world.日期: "=1"
+
+choices:
+  - text: 送一份礼物
+    category: 社交
+    hint: 点名收礼人（阿比/罗宾）——叙述命中「收礼」词面时好感大增
+  - text: 闲聊谈心
+    category: 社交
+    hint: 指名交谈对象——叙述命中「交谈」词面时好感小增
+  - text: 邀约同行
+    category: 关系
+    hint: 朋友档解锁（阈值见 rules）；未达档被婉拒，不落数值
+  - text: 告白
+    category: 关系
+    hint: 恋人档前置（阈值见 rules）；未达档不触发关系变更
+  - text: 入睡过夜
+    category: 日常
+    hint: 推进日期（行为触发结算），开启新一天
+
+# ── 呈现面声明（RP 面板 v3.1 刀1；结构契约见 card_lint lint_ui/lint_init_ui）──
+# ui：大厅卡视觉/谱系档位/包内像素主题/自包含玩法页（theme_css/page 相对本
+#  目录，文件缺失=声明无效剔除+warning）；init_ui：开演设置页——开局路线
+#  （单选）与出身词条（多选），profile 走 wizard_profile 既有通道，effects
+#  走 rp_init 快照通道经 Validator 首轮结算（键域全在本包 variables 声明内，
+#  fail-closed 同源自洽）。
+ui:
+  icon: "🌱"
+  style_tags: ["像素", "好感三档"]
+  lineage: full
+  theme_css: stardew_theme.css
+  page: stardew_page.html
+
+init_ui:
+  title: 开新的一局
+  intro: 选择你的开局路线与出身词条，落进星露谷的四季里——好感度随相处自然生长。
+  show_variables: true
+  routes:
+    - id: inherit_farm
+      label: 继承农场
+      profile: 你继承了爷爷留下的牧场，杂物房的旧农具还留着体温，镇上的名字大多只在信里见过。
+    - id: escape_city
+      label: 逃班青年
+      profile: 你辞掉了城市的上班族工作，带着全部积蓄来到星露谷，想弄明白「生活」两个字怎么写。
+  trait_pools:
+    - id: stardew_traits
+      label: 出身词条
+      options:
+        - id: angler
+          label: 钓鱼佬
+          profile: 你是钓鱼好手，清晨的河边总少不了你，对每段水域的鱼汛了如指掌。
+        - id: farmer
+          label: 种田好手
+          profile: 你深谙四季农时，庄稼在你手里总是长得格外好。
+        - id: miner
+          label: 矿工
+          profile: 你常年在矿洞里讨生活，凿石与辨矿是你的看家本事，也练出了一身好体格。
+        - id: social_star
+          label: 镇上红人
+          profile: 你是镇上人见人爱的红人，还没正式搬来就交到了朋友。
+          effects: {npc.阿比.好感度: "+5", npc.罗宾.好感度: "+5"}

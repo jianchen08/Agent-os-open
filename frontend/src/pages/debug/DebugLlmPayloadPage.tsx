@@ -8,12 +8,14 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { PageShell } from '@/components/shared/PageShell'
-import { useLlmPayloadDiagQuery } from '@/hooks/queries/useDebugQueries'
-import { getPayloadDiagFile } from '@/services/api/llmPayload'
+import { useDiagnosticsSettingsQuery, useLlmPayloadDiagQuery } from '@/hooks/queries/useDebugQueries'
+import { getPayloadDiagFile, updateDiagnosticsSettings } from '@/services/api/llmPayload'
 import type { PayloadDiagItem } from '@/services/api/llmPayload'
+import { queryKeys } from '@/services/query/queryKeys'
 
 /** LLM content 分段（OpenAI 视觉块形态 {type:'text', text}） */
 interface ContentBlock {
@@ -158,6 +160,51 @@ function PayloadDetail({ item }: { item: PayloadDiagItem }) {
   )
 }
 
+/** 诊断开关行：说明文案 + payload_diag 热切换（写 settings.yaml，下一次 LLM 调用即生效） */
+function DiagnosticsSettingsRow() {
+  const settingsQuery = useDiagnosticsSettingsQuery()
+  const queryClient = useQueryClient()
+  const [toggling, setToggling] = useState(false)
+  const [toggleError, setToggleError] = useState<string | null>(null)
+  const payloadDiag = settingsQuery.data?.diagnostics.payload_diag
+
+  const handleToggle = useCallback(async () => {
+    if (payloadDiag === undefined || toggling) return
+    setToggling(true)
+    setToggleError(null)
+    try {
+      await updateDiagnosticsSettings({ payload_diag: !payloadDiag })
+      await queryClient.invalidateQueries({ queryKey: queryKeys.diagnosticsSettings })
+    } catch (err) {
+      // 写失败就地呈现（不静默不冒泡）；回显不翻转（缓存值未失效）
+      setToggleError(err instanceof Error ? err.message : '切换失败')
+    } finally {
+      setToggling(false)
+    }
+  }, [payloadDiag, queryClient, toggling])
+
+  return (
+    <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs">
+      <span>最近发送给大模型的真实请求体（每次调用前落盘）</span>
+      <button
+        type="button"
+        onClick={() => void handleToggle()}
+        disabled={payloadDiag === undefined || toggling}
+        aria-pressed={payloadDiag ?? false}
+        className={
+          payloadDiag
+            ? 'bg-primary/15 text-primary rounded px-1.5 py-0.5 font-medium'
+            : 'bg-accent/40 rounded px-1.5 py-0.5 font-medium'
+        }
+        title="写用户空间 settings.yaml 的 diagnostics.payload_diag；下一次 LLM 调用即生效，无需重启"
+      >
+        {payloadDiag === undefined ? '开关读取中…' : toggling ? '切换中…' : payloadDiag ? '已开启' : '已关闭'}
+      </button>
+      {toggleError && <span className="text-destructive">切换失败：{toggleError}</span>}
+    </div>
+  )
+}
+
 /** 调试 LLM 请求页面组件 */
 export function DebugLlmPayloadPage({ embedded }: { embedded?: boolean } = {}) {
   const [selectedName, setSelectedName] = useState<string | null>(null)
@@ -180,16 +227,14 @@ export function DebugLlmPayloadPage({ embedded }: { embedded?: boolean } = {}) {
       embedded={embedded}
       actions={<span className="text-muted-foreground text-xs">共 {total} 个快照</span>}
     >
-      <p className="text-muted-foreground text-xs">
-        最近发送给大模型的真实请求体（每次调用前落盘；由环境变量 AGENTOS_PAYLOAD_DIAG=1 开启）
-      </p>
+      <DiagnosticsSettingsRow />
 
       {isLoading && <LoadingState />}
       {error && <ErrorState message={error} />}
 
       {!isLoading && !error && items.length === 0 && (
         <div className="text-muted-foreground py-12 text-center">
-          暂无快照——需设置 AGENTOS_PAYLOAD_DIAG=1 并产生新的 LLM 调用
+          暂无快照——产生新的 LLM 调用后自动落盘（上方开关已关闭时不会产生新快照）
         </div>
       )}
 

@@ -1,0 +1,22 @@
+#!/bin/sh
+# AgentOS 项目 CI 薄壳（packs/ci/base 出生装入，worktree 共享主仓钩子故全分叉生效）。
+# 职责仅一件：探测 python 后调项目内 runner；runner 缺席或 python 缺席 → 放行
+# （fail-open：CI 框架自身故障不拦业务提交，与门禁违规 fail-closed 相向）。
+set -u
+repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+run="$repo/.agentos/ci/run.py"
+if [ ! -f "$run" ]; then
+  echo "[agentos-ci] .agentos/ci/run.py 缺失，跳过项目 CI" >&2
+  exit 0
+fi
+if command -v python >/dev/null 2>&1; then
+  PY=python
+elif command -v py >/dev/null 2>&1; then
+  PY=py
+else
+  echo "[agentos-ci] 未探测到 python/py，跳过项目 CI" >&2
+  exit 0
+fi
+# staged 清单（NUL 分隔）经 stdin 传给 runner；退出码即提交放行/拦截依据。
+# --diff-filter=ACMR 排除删除：删产物是清理不是入库，待检面=新增/复制/修改/重命名。
+git diff --cached --name-only --diff-filter=ACMR -z | "$PY" "$run" --lane commit --staged

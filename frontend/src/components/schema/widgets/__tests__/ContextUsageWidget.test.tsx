@@ -101,15 +101,18 @@ describe('ContextUsageWidget', () => {
     expect(screen.queryByTestId('context-usage-invalid')).not.toBeInTheDocument()
   })
 
-  it('无匹配行 + 静态兜底 modelName：显示兜底模型名；注册表也无窗口真值时无圆环', async () => {
+  it('无匹配行 + 静态兜底 modelName：显示兜底模型名；注册表也无窗口真值时圆环无进度语义、无数字', async () => {
     fetchStatesMock.mockResolvedValue([])
     useAgentTabStore.setState({ tabs: [makeTab('p4')], activeTabId: 'sub-p4' })
 
     renderWithProviders(<ContextUsageWidget modelName="deepseek-v3" />)
     await waitFor(() => expect(screen.getByTestId('context-usage-indicator')).toBeInTheDocument())
     expect(screen.getByTestId('context-usage-indicator').textContent).toContain('deepseek-v3')
-    // state 行缺失 → 无 context_window 真值 → 不渲染圆环与已用/上限
-    expect(screen.queryByTestId('context-usage-ring')).not.toBeInTheDocument()
+    // state 行缺失 → 无 context_window 真值：圆环仍是图标槽位但不带进度语义，已用/上限不渲染
+    const ring = screen.getByTestId('context-usage-ring')
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+    expect(ring).not.toHaveAttribute('aria-valuenow')
+    expect(screen.getByTestId('context-usage-indicator').textContent).not.toContain('/')
   })
 
   it('行内 llm_model 优先于静态兜底模型名（state 真值 > 宿主猜测）', async () => {

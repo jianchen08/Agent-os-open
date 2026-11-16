@@ -2,9 +2,9 @@
 """合宿宿主单成员热重载单元测试：``_MemberLoader.reload`` 的裸名遮蔽纪律。
 
 契约（合宿成员粒度热重载的隔离不变量）：
-- reload 单成员 = 摘除全部已登记裸名模块 → 唯一名重 exec 该成员 →
-  **恢复他人模块、排除自身旧模块**：静息态 sys.modules 裸名槽位不残留
-  被重载成员的旧代码对象，他人模块对象原样保留；
+- reload 单成员 = 摘除全部已登记裸名模块与文件归属本目录的运行期懒载
+  模块 → 唯一名重 exec 该成员 → **恢复他人模块、排除自身旧模块**：静息态
+  sys.modules 裸名槽位不残留被重载成员的旧代码对象，他人模块对象原样保留；
 - reload 只更新目标成员的 owned 登记（成员间隔离不被破坏）；
 - 编排入口 ``_build_reload_handler``：按成员 id 定位目录 → 遮蔽纪律重载，
   与首次装载共用同一 loader（owned 表连续性是遮蔽判定的前提）。
@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -147,7 +148,7 @@ class TestReloadMemberOrchestration:
         _write_member(shared_root, "a_service", "a_service", "A1")
         _write_member(shared_root, "b_service", "b_service", "B1")
         loader = host._MemberLoader()
-        members = host._load_members(shared_root, ["a_service", "b_service"], loader=loader)
+        members, _ = host._load_members(shared_root, ["a_service", "b_service"], loader=loader)
         assert set(members) == {"a_service", "b_service"}
 
         handler = host._build_reload_handler(shared_root, loader)
@@ -165,3 +166,92 @@ class TestReloadMemberOrchestration:
 
         with pytest.raises(host.CohostError):
             await handler("ghost")
+
+
+def _write_lazy_member(root: Path, dirname: str, plugin_id: str, marker: str) -> Path:
+    """落盘一个运行期懒加载形态成员：helper.py 仅在工具函数内 import。
+
+    复刻 multimodal asr / scene routes_scene / task_service storage 三处
+    真实形态：函数级懒加载自身目录裸名模块，顶层不 import（owned 表因此
+    不含 helper——修复前 reload 不刷新它）。
+    """
+    d = root / "tools" / dirname
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "plugin.json").write_text(f'{{"id": "{plugin_id}"}}', encoding="utf-8")
+    (d / "helper.py").write_text(f"MARKER = {marker!r}\n", encoding="utf-8")
+    (d / "server.py").write_text(
+        "from agentos_plugin_sdk import AgentOSPlugin\n"
+        f"plugin = AgentOSPlugin({plugin_id!r})\n"
+        "@plugin.tool(name='probe', schema={'type': 'object'})\n"
+        "async def probe() -> dict:\n"
+        "    import helper\n"
+        "    return {'value': helper.MARKER}\n",
+        encoding="utf-8",
+    )
+    return d
+
+
+def _call_probe(plugin_id: str) -> dict:
+    """经唯一名模块调用成员的 probe 工具（返回懒加载 helper 的当前值）。"""
+    member_mod = sys.modules[host._MEMBER_MODULE_PREFIX + plugin_id]
+    return asyncio.run(member_mod.probe())
+
+
+class TestReloadRefreshesRuntimeLazyModules:
+    """reload 必须刷新运行期懒加载模块（审查总册 P1-19 / I2）。
+
+    根因：owned 表只在成员 exec 期间收集，函数级懒加载的模块运行期才
+    import、不进 owned——reload 不摘除则 sys.modules 旧缓存让懒加载点
+    持续跑旧代码，须整组重启才刷新。修复后按文件归属摘除未登记成员模块。
+    """
+
+    def test_lazy_module_code_takes_effect_after_reload(self, shared_root: Path) -> None:
+        """re-register 场景红→绿：成员热重载后懒加载代码生效。
+
+        新旧 MARKER 值长度必须不同：pyc 校验是（秒级 mtime, size）二元组
+        （Python 全局语义，与合宿机制无关），同秒同长度写入会让重新 import
+        命中旧字节码——size 差异使 pyc 必然失效，本测试靶是 sys.modules
+        缓存刷新而非 pyc 失效语义。
+        """
+        dir_m = _write_lazy_member(shared_root, "m_service", "m_service", "V1")
+        loader = host._MemberLoader()
+        loader.load("m_service", dir_m)
+        assert _call_probe("m_service") == {"value": "V1"}
+
+        # 成员代码变更（helper.py 磁盘更新）→ 热重载 → 新代码生效
+        (dir_m / "helper.py").write_text("MARKER = 'V2-longer'\n", encoding="utf-8")
+        loader.reload("m_service", dir_m)
+
+        assert _call_probe("m_service") == {"value": "V2-longer"}
+
+    def test_reload_does_not_reserve_stale_lazy_module_slot(self, shared_root: Path) -> None:
+        """reload 后静息态不残留旧懒载模块：旧 helper 不再驻留 sys.modules
+        （与已登记裸名槽位的刷新语义一致，下次运行期 import 从磁盘新读）。"""
+        dir_m = _write_lazy_member(shared_root, "m_service", "m_service", "V1")
+        loader = host._MemberLoader()
+        loader.load("m_service", dir_m)
+        assert _call_probe("m_service") == {"value": "V1"}
+        stale_helper = sys.modules["helper"]
+
+        (dir_m / "helper.py").write_text("MARKER = 'V2-longer'\n", encoding="utf-8")
+        loader.reload("m_service", dir_m)
+
+        assert "helper" not in sys.modules or sys.modules["helper"] is not stale_helper
+
+    def test_reload_member_leaves_other_member_lazy_modules_resident(
+        self, shared_root: Path
+    ) -> None:
+        """摘除按文件归属限定被重载成员目录：他人成员的运行期懒载模块原样
+        驻留（a 懒载 helper_a 后 reload b，a 的 helper_a 不被顶掉）。"""
+        dir_a = _write_lazy_member(shared_root, "a_service", "a_service", "A1")
+        dir_b = _write_member(shared_root, "b_service", "b_service", "B1")
+        loader = host._MemberLoader()
+        loader.load("a_service", dir_a)
+        assert _call_probe("a_service") == {"value": "A1"}  # 触发 a 的运行期懒载
+        helper_a = sys.modules["helper"]
+
+        loader.load("b_service", dir_b)
+        loader.reload("b_service", dir_b)
+
+        assert sys.modules["helper"] is helper_a
+        assert _call_probe("a_service") == {"value": "A1"}

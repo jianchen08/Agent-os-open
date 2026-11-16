@@ -7,8 +7,17 @@ workspace:
   # root 指到仓库内位置时无需手工配 .gitignore：解析本根时系统自动把实际
   # 路径写入 .git/info/exclude（本地排除，不入库，随 root 改配动态跟随）；
   # .gitignore 里的 ".ai_workspaces/" 只是缺省值的静态兜底。
-  # 主会话工作区 = {本根}/sessions/{session_id}（workspace_lifecycle 写入）。
+  # 主会话工作区 = {本根}/sessions/{短id}（session_id 剥 thread- 前缀与连字符
+  # 取前 12 位；workspace_lifecycle 写入）。
   root: .ai_workspaces
+  # 跨盘退化点根目录名（仅跨盘时生效，同盘场景不参与任何解析）：
+  # git worktree 要求 worktree 与源仓库同一文件系统，跨盘是 git 自身的
+  # fatal（path is on mount 'D:', start on mount 'C:'），无配置可适配。
+  # 本根与项目源目录不同盘时，任务 worktree 与会话工作区自动退化到
+  # <项目所在盘符根>/<本项> 并告警（ADR 草稿
+  # 2026-10-17-workspace-crossdrive-fallback）；盘符根不可写的机器可把本项
+  # 指到别处的同名目录名。
+  crossdrive_root_name: .agentos-workspaces
   nesting_mode: shared
   large_file_threshold_mb: 50
   worktree_link_patterns:
@@ -60,6 +69,9 @@ providers:
     build_timeout: 1800                           # 秒；首次冷构建 Playwright 慢，缓存命中后秒级
   # WSL 原生隔离后端（Codex 式：无 Docker 层，环境随进程消亡、结构性无泄漏）。
   # enabled: true 时占据 CONTAINER 槽位（与 cua 互斥），隔离级别语义不变。
+  # 平台门：enabled 仅在 Windows 平台生效；非 Windows 平台该配置不参与槽位
+  # 竞争，CONTAINER 槽位自动落 Docker（装载期平台适配，manager/guard 同一
+  # os.name 谓词双端一致，非运行期静默兜底，F11 语义不变），无需改配置。
   # 隔离边界 = WSL VM + 专用 Linux user + 可选 sandbox_cmd 前缀（如 bwrap）；
   # sandbox_cmd 配置后 provider 会校验首二进制在发行版内存在（缺失 fail-closed）。
   # 注意：browser_* 工具的容器内 bridge 通路 v1 未覆盖，仍需 cua 后端。
@@ -69,6 +81,24 @@ providers:
     user: null            # 建议配非特权专用用户；null = 发行版默认用户
     sandbox_cmd: []       # 例: ["bwrap", "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--unshare-net"]
     # state_dir: .ai_workspaces/wsl_native_envs   # 缺省即此值（相对仓库根）
+  # Linux 原生隔离后端（Codex 式：bubblewrap namespace 沙箱，免 daemon，
+  # 环境随进程消亡、结构性无泄漏）。Linux 平台的默认 CONTAINER 后端：
+  # enabled 默认 true，Docker 在 Linux 降级为显式 opt-out（enabled: false
+  # 才回 Docker；ADR 2026-10-12 修订 2026-10-09 的「Linux 自动落 Docker」）。
+  # 平台门：仅 Linux 生效（bwrap/namespace 为 Linux 内核机制）；Windows 该
+  # 配置不参与槽位竞争（wsl_native 优先、Docker 兜底不变）；macOS 同门
+  # （落 Docker）。bwrap 缺失 fail-closed（容器要求型工具拒绝 + 指引，
+  # 不静默回 Docker）。
+  # 隔离边界 = namespace 文件系统（根 ro-bind + workspace rw-bind 至
+  # /workspace）+ 独立 proc/dev/tmpfs + pid namespace + 默认禁网。
+  # 边界如实声明：无 cgroup 级内存/CPU 限额（bwrap 机制给不了，进程级失控
+  # 由 bash 侧看门狗按宿主 RSS 兜底）；browser_* 的容器 bridge 通路未覆盖
+  # （同 wsl_native v1 口径）。
+  linux_native:
+    enabled: true
+    network: false        # 默认禁网（--unshare-net）；true 放开
+    # bwrap_path: bwrap                          # 缺省即 PATH 解析
+    # state_dir: .ai_workspaces/linux_native_envs # 缺省即此值（相对仓库根）
 policy:
   enable_fallback: false
   custom: {}

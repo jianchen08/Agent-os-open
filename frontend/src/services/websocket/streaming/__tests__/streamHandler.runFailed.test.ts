@@ -39,6 +39,16 @@ function runFailedEvent(pipelineId: string, runId: string, stopReason: string | 
   }
 }
 
+function runFailedEventWithError(
+  pipelineId: string,
+  runId: string,
+  error: string | null,
+): { data: Record<string, unknown> } {
+  const ev = runFailedEvent(pipelineId, runId, null) as { data: Record<string, unknown> }
+  ev.data.error = error
+  return ev
+}
+
 function seedRun(pipelineId: string, runId: string): void {
   const run: PipelineRunInfo = {
     run_id: runId,
@@ -53,7 +63,6 @@ function seedRun(pipelineId: string, runId: string): void {
 function resetStores(): void {
   useNotificationStore.setState({
     notifications: [],
-    groupState: { collapsed: { critical: false, high: false, normal: true, low: true } },
     isPanelOpen: false,
     activeBlockingNotification: null,
   })
@@ -114,6 +123,81 @@ describe('handleRunFailed — 失败弹卡', () => {
   it('无 pipeline_id → 跳过（零通知零副作用）', () => {
     handleRunFailed({ data: { thread_id: 't', status: 'failed', run_id: 'r' } } as never)
     expect(useNotificationStore.getState().notifications).toHaveLength(0)
+  })
+
+  it('错误透传（ADR 2026-10-27）：卡片消息携带管道坐标 + error 原文', () => {
+    // 独立管道 id：模块级失败卡 15s 短窗去重按 pipelineId 记账，复用前例 id 会被吞
+    const pid = 'pipe-runfailed-err-x1'
+    handleRunFailed(
+      runFailedEventWithError(
+        pid,
+        'run-err-1',
+        'RateLimitError - [1302][您的账户已达到速率限制，请您控制请求频率]',
+      ) as never,
+    )
+    const ns = useNotificationStore.getState().notifications
+    expect(ns).toHaveLength(1)
+    expect(ns[0].message).toContain(`管道 ${pid.slice(0, 8)}`)
+    expect(ns[0].message).toContain('[1302][您的账户已达到速率限制，请您控制请求频率]')
+    expect(ns[0].priority).toBe('high')
+  })
+
+  it('error 为空/null 时回退无归因文案，不出现 null/undefined 字样', () => {
+    handleRunFailed(runFailedEventWithError('pipe-runfailed-err-x2', 'run-err-2', null) as never)
+    handleRunFailed(runFailedEventWithError('pipe-runfailed-err-x3', 'run-err-3', '   ') as never)
+    const ns = useNotificationStore.getState().notifications
+    expect(ns).toHaveLength(2)
+    for (const n of ns) {
+      expect(n.message).not.toContain('null')
+      expect(n.message).not.toContain('undefined')
+      expect(n.message).toContain('异常退出')
+    }
+  })
+})
+
+describe('handleRunFailed — 失败通知人话化（2026-11-06）', () => {
+  beforeEach(resetStores)
+
+  // 2026-11-06 生产原文（管道 35ee45bf，zcode-proxy:8080 拒连致死）
+  const PRODUCTION_REFUSED_ERROR = [
+    'MCP call failed: tool call failed: pipeline_llm_core.llm_core.execute: ',
+    'MCP protocol error: [0] llm.complete_stream 工具执行失败: [llm_failure code=service_down] ',
+    '[wire http 500] {"error":{"message":"Post \\"http://127.0.0.1:8080/v1/chat/completions\\": ',
+    'dial tcp 127.0.0.1:8080: connectex: No connection could be made because the target ',
+    'machine actively refused it.","type":"server_error","code":"internal_server_error"}}',
+  ].join('')
+
+  it('生产拒连形态：剥 MCP 噪声 + 插件措辞 + 拒连人话（传输腔/工具字样/JSON 刷屏不再出现）', () => {
+    handleRunFailed(
+      runFailedEventWithError('pipe-humanize-refused', 'run-h-1', PRODUCTION_REFUSED_ERROR) as never,
+    )
+    const [n] = useNotificationStore.getState().notifications
+    expect(n.message).toContain('LLM 插件调用失败：上游服务暂不可用')
+    expect(n.message).toContain('127.0.0.1:8080 拒绝连接（网关上游未运行或不可达）')
+    expect(n.message).not.toContain('MCP protocol error')
+    expect(n.message).not.toContain('工具执行失败')
+    expect(n.message).not.toContain('internal_server_error')
+  })
+
+  it('llm_failure 非拒连形态（上游 400 包 500 正文）：中文分类 + 截断尾随，不进拒连话术', () => {
+    const err =
+      'MCP protocol error: [0] llm.complete_stream 工具执行失败: [llm_failure code=service_down] ' +
+      '[wire http 500] {"error":{"message":"upstream 400: {\\"code\\":11103,\\"msg\\":\\"model not found\\"}"}}'
+    handleRunFailed(runFailedEventWithError('pipe-humanize-upstream', 'run-h-2', err) as never)
+    const [n] = useNotificationStore.getState().notifications
+    expect(n.message).toContain('LLM 插件调用失败：上游服务暂不可用')
+    expect(n.message).toContain('wire http 500')
+    expect(n.message).not.toContain('拒绝连接（网关上游未运行或不可达）')
+    expect(n.message).not.toContain('工具执行失败')
+  })
+
+  it('未知形态透传（剥噪 + 截 200），归因不丢失', () => {
+    const long = `MCP protocol error: some plugin boom: ${'x'.repeat(300)}`
+    handleRunFailed(runFailedEventWithError('pipe-humanize-generic', 'run-h-3', long) as never)
+    const [n] = useNotificationStore.getState().notifications
+    expect(n.message).toContain('some plugin boom')
+    expect(n.message).not.toContain('MCP protocol error')
+    expect(n.message.length).toBeLessThan(400)
   })
 })
 

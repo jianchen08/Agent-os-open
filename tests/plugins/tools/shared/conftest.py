@@ -5,9 +5,9 @@ sys.path 注入 + 裸名串扰治理声明。
 本目录全部测试共享的装配：
 - 仓库 SDK 源码目录 plugins/sdk/src（agentos_plugin_sdk——url_security /
   workspace_aware 等共享单一真值源所在）
-- 工具共享层 plugins/shared/tools（download/web_ext 等插件目录的父目录，
-  供 ``web_ext.tool`` 等 PEP-420 命名空间导入）
-- 各插件目录 download / web_ext / media（与 server.py 的 flat 导入语义一致）
+- 插件共享根 plugins/shared（拍平布局，web_ext/media 等插件目录的
+  父目录，供 ``web_ext.tool`` 等 PEP-420 命名空间导入）
+- 各插件目录 web_ext / media（与 server.py 的 flat 导入语义一致）
 
 _PLUGIN_SOURCE_DIRS 供 tests/plugins/conftest.py 的 pytest_runtest_setup
 在每个测试执行前重新提升源目录并逐出裸名缓存（与 bash/ conftest 同款纪律）。
@@ -22,17 +22,17 @@ import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_TOOLS_ROOT = _REPO_ROOT / "plugins" / "shared" / "tools"
+_SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
 _SDK_DIR = _REPO_ROOT / "plugins" / "sdk" / "src"
-_PLUGIN_DIRS = ["download", "web_ext", "media"]
+_PLUGIN_DIRS = ["web_ext", "media"]
 
 # 按优先级排序（第一个最优先），供 tests/plugins/conftest.py 治理钩子消费
 _PLUGIN_SOURCE_DIRS = [
-    *(str(_TOOLS_ROOT / d) for d in _PLUGIN_DIRS),
+    *(str(_SHARED_DIR / d) for d in _PLUGIN_DIRS),
     str(_SDK_DIR),
-    str(_TOOLS_ROOT),
+    str(_SHARED_DIR),
 ]
 
-for _p in [_TOOLS_ROOT, _SDK_DIR, *(_TOOLS_ROOT / d for d in _PLUGIN_DIRS)]:
+for _p in [_SHARED_DIR, _SDK_DIR, *(_SHARED_DIR / d for d in _PLUGIN_DIRS)]:
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))

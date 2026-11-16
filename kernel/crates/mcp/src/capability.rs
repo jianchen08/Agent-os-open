@@ -39,16 +39,18 @@ pub const STANDARD_CAPABILITIES: &[&str] = &[
     "event-bus",
     "metrics",
     "tool-executor",
-    // tool-surface.schemas：LLM 工具面过滤服务（agent 配置解析归 context_build
+    // tool-surface.schemas：LLM 工具面过滤服务（agent 配置解析归 agent_config_load
     // 插件，内核只持注册表过滤这一纯执行面，见 capability_router.rs）。
     "tool-surface",
     "service-registry",
+    // db-read：内核库读契约服务（C2 刀1，数据面声明式注册 + 自由只读 SELECT +
+    // 租户内建收窄 + 权限分档；执法核心在 db-admin crate read_faces 模块）。
+    "db-read",
     "frontend",
-    // trigger-svc：触发器注册面（M1 内核侧，ADR 2026-10-02-trigger-eval-
-    // unification）——注册/注销/对账/ack，求值锚点在 store 提交写入口。
-    // initialize 握手据此给 sidecar 建 CapabilityHandle（SDK 名单两端同步，
-    // Python 侧同步由触发器插件侧承担）。
-    "trigger-svc",
+    // session.create：sidecar 兜底新建承载管道（日程触发器挂载兜底，
+    // ADR 2026-11-03-pim-trigger-anchor）。仅 create 一个 method 暴露
+    // （读/删/改面不开放给 sidecar）。
+    "session",
 ];
 
 /// Capability 路由器——处理 sidecar 反向调用内核能力。

@@ -1,0 +1,236 @@
+{
+  "id": "pipeline_security_check",
+  "requires_services": [
+    "packaging",
+    "human-interaction",
+    "project.load_zones",
+    "project.add_zone",
+    "project.remove_zone"
+  ],
+  "name": "Security Check",
+  "version": "1.1.5",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "host_group": "light",
+  "entry": "python server.py",
+  "mcp": {
+    "transport": "stdio",
+    "request_timeout_secs": 86400
+  },
+  "invoke_entry": "security_check.execute",
+  "activation": "eager",
+  "capabilities": {
+    "tools": [
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for /ext/pipeline_security_check/**（权限模式切换端点）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "raw_body": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "query": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "query_multi": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "required": [
+            "path",
+            "method"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "integer"
+            },
+            "body": {
+              "type": "object"
+            }
+          }
+        },
+        "render": {
+          "card": "generic"
+        }
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "steps": [
+      {
+        "name": "pipeline_security_check",
+        "description": "管道步骤默认入口（自名声明；步骤服务索引兼容映射 method=None，与直引等价）"
+      }
+    ]
+  },
+  "export_fields": [
+    "task.authorized_write_zones"
+  ],
+  "state": {
+    "volatile_keys": [
+      "pre_decided_results"
+    ],
+    "reads": [
+      "core_type",
+      "execution_contexts",
+      "messages_tail:50",
+      "pipeline_id",
+      "project_root",
+      "raw_tool_calls",
+      "pre_decided_results",
+      "session_id",
+      "task.authorized_write_zones",
+      "thread_id",
+      "workspace"
+    ]
+  },
+  "permissions": {},
+  "priority": 50,
+  "config_files": [
+    {
+      "id": "security_rules",
+      "path": "config/plugins/security_check/security_rules.yaml",
+      "label": "安全规则"
+    },
+    {
+      "id": "builtin_tools_config",
+      "path": "config/tools/builtin_tools_config.yaml",
+      "label": "内置工具 dangerous_operations 声明（_is_dangerous_tool 轨道 2 数据源）"
+    },
+    {
+      "id": "settings",
+      "path": "config/plugins/security_check/settings.yaml",
+      "label": "安全检查配置（权限模式落点等）"
+    }
+  ],
+  "http_endpoints": [
+    {
+      "route_id": "permission_mode_switch",
+      "method": "POST",
+      "path": "/ext/pipeline_security_check/permission_mode",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "切换会话权限模式（键 session_id；auto/bypass 高风险模式经 human-interaction 审批窗确认）"
+    },
+    {
+      "route_id": "permission_mode_get",
+      "method": "GET",
+      "path": "/ext/pipeline_security_check/permission_mode",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "查询会话当前权限模式（键 session_id）"
+    },
+    {
+      "route_id": "zone_policy_get",
+      "method": "GET",
+      "path": "/ext/pipeline_security_check/zones",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "读授权名单全量（entries=写区，read_deny=读排除）"
+    },
+    {
+      "route_id": "zone_policy_add",
+      "method": "POST",
+      "path": "/ext/pipeline_security_check/zones/add",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "追加授权名单条目（section + path；用户显式操作通道）"
+    },
+    {
+      "route_id": "zone_policy_remove",
+      "method": "POST",
+      "path": "/ext/pipeline_security_check/zones/remove",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "description": "移除授权名单条目（幂等；用户显式操作通道）"
+    }
+  ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "zone-policy-settings",
+        "title": "授权区",
+        "icon": "🛡️",
+        "space": "settings",
+        "order": 6,
+        "widget": "zone_policy_settings",
+        "description": "授权区管理：写区（entries）与读排除（read_deny）名单，位置闸执法依据（ADR 2026-09-24）"
+      }
+    ]
+  },
+  "ui_schema": {
+    "widgets": [
+      {
+        "id": "permission_mode_selector",
+        "type": "form",
+        "space": "chat-input",
+        "props": {
+          "title": "权限模式",
+          "fields": [
+            {
+              "name": "mode",
+              "type": "select",
+              "default": "default",
+              "options": [
+                {
+                  "label": "默认（命中规则才确认）",
+                  "value": "default",
+                  "description": "显式选择后命中安全规则关键词（rm -rf、curl、pip install 等）的操作逐次弹窗确认（隔离/worktree 会话同样生效，覆盖免审批默认），未命中的直接执行"
+                },
+                {
+                  "label": "接受编辑（文件自动）",
+                  "value": "accept_edits",
+                  "description": "文件读写工具一律自动放行；命令类等其它工具仅在命中安全规则时弹窗确认（隔离/worktree 会话同样生效）"
+                },
+                {
+                  "label": "自动（block 不打扰）",
+                  "value": "auto",
+                  "description": "命中 block 级规则自动拒绝、不再询问；needs_approval 级才弹窗；未命中规则的操作直接执行（隔离/worktree 会话同样生效）"
+                },
+                {
+                  "label": "旁路（跳过审批）",
+                  "value": "bypass",
+                  "description": "不做规则匹配、不弹审批，危险命令可能直接执行；仅保留路径遍历、敏感目录、nul 重定向三条内置底线。隔离/worktree 会话未显式选择档位时默认即本档（免审批）"
+                }
+              ]
+            }
+          ],
+          "endpoint": "/ext/pipeline_security_check/permission_mode",
+          "readbackUri": "/ext/pipeline_security_check/permission_mode"
+        }
+      }
+    ]
+  }
+}

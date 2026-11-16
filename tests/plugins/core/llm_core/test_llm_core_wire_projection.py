@@ -26,7 +26,7 @@ def _load_llm_core() -> Any:
     """唯一名动态加载 plugin.py（裸名 `import plugin` 会被兄弟插件目录串扰）。"""
     path = (
         Path(__file__).resolve().parents[4]
-        / "plugins" / "shared" / "pipeline" / "core" / "llm_core" / "plugin.py"
+        / "plugins" / "shared" / "llm_core" / "plugin.py"
     )
     mod_name = "llm_core_wire_projection_test"
     if mod_name in sys.modules:

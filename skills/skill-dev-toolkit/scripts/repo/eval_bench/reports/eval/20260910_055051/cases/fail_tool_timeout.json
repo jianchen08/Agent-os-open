@@ -1,0 +1,70 @@
+{
+  "case_id": "fail_tool_timeout",
+  "category": "tool_timeout",
+  "passed": false,
+  "elapsed_seconds": 115.8,
+  "session_id": "thread-230c48bd-26b4-4025-806a-2ca615d8c1f1",
+  "pipeline_ids": [
+    "d2824a6d2c0e"
+  ],
+  "settled": true,
+  "dispatches": [
+    {
+      "terminal": "stream_end",
+      "pipeline_id": "d2824a6d2c0e",
+      "interactions": [],
+      "event_types": [
+        "pending_inputs_changed",
+        "pending_inputs_changed",
+        "stream_start",
+        "stream_end"
+      ]
+    }
+  ],
+  "approval": {
+    "requests_seen": 0,
+    "approved": 0,
+    "denied": 0,
+    "response_errors": []
+  },
+  "metrics": {
+    "pipelines": 1,
+    "iterations_total": 7,
+    "error_steps": 3,
+    "timeout_steps": 0,
+    "tool_calls": 3,
+    "tool_retries": 2,
+    "tool_names": [],
+    "tool_call_counts": {},
+    "task_statuses": [
+      null
+    ],
+    "all_settled": true,
+    "any_failed": false,
+    "by_model": {
+      "glm-5.3-flash": {
+        "input": 37044,
+        "output": 703,
+        "cached": 0,
+        "total": 37747
+      }
+    },
+    "tokens_total": 37747
+  },
+  "assertions": [
+    {
+      "type": "settled",
+      "passed": true,
+      "detail": "全链管道收敛"
+    },
+    {
+      "type": "trace_has_timeout",
+      "passed": false,
+      "detail": "超时步数 0"
+    }
+  ],
+  "failed_assertions": [
+    "trace_has_timeout"
+  ],
+  "reply_excerpt": "好啦老板，3 次调用全部失败，重试额度用完了，我如实给你报告结论～\n\n## 📋 执行结论：eval_sleep 无法完成 30 秒睡眠请求\n\n**实际执行过程**（全部失败）：\n- 第 1 次：`eval_sleep(seconds=30)` → 失败\n- 第 2 次（重试 1）：同样失败\n- 第 3 次（重试 2）：同样失败\n\n**错误原因**（3 次报错完全一致）：\n> `capability call timed out after 5000ms: plugin 'eval_probe' tool 'eval_sleep'`\n\n**我的分析**：这个工具自身声明的超时上限是 **5 秒**（timeout_ms=5000），而我们的请求是睡眠 **30 秒**——所以每次调用执行到 5 秒就被系统强制掐断了。这不是偶发网络抖动，而是**参数需求超出工具能力边界的必然失败**：30 秒"
+}

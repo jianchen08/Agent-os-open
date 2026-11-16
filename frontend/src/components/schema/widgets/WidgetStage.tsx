@@ -6,6 +6,8 @@
  * 分组（2026-09-10）：声明带 `group` 时按组渲染 tab（组序 = 组员最小 order，
  * 未分组声明归入「概览」组）；无任何分组声明的空间保持平铺（兼容两件小页）。
  * 组内渲染委托 DeclaredWidgetLayer（声明 props 透传 + watch/refresh 联动）。
+ * 分组组台是仪表盘式卡片面：组内用 grid 布局按容器宽自适应列数（R9 #8
+ * 桌面单列密度低）；未分组小页（表单+表格）保持纵向流不变。
  */
 import { Component, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { DeclaredWidgetLayer } from '@/components/schema/DeclaredWidgetLayer'
@@ -137,7 +139,7 @@ export function WidgetStage(props: Record<string, unknown>) {
                 'rounded-md px-2.5 py-1 text-xs transition-colors',
                 active?.name === g.name
                   ? 'bg-primary text-primary-foreground'
-                  : 'text-muted-foreground hover:bg-accent/50',
+                  : 'text-muted-foreground hover:bg-muted/50',
               )}
             >
               {g.name}
@@ -149,7 +151,7 @@ export function WidgetStage(props: Record<string, unknown>) {
         {/* key=组名：切组即重挂边界（上一组的错误态不残留到下一组） */}
         <WidgetGroupErrorBoundary key={active?.name ?? DEFAULT_GROUP} groupName={active?.name ?? DEFAULT_GROUP}>
           {active ? (
-            <DeclaredWidgetLayer space={space} declarations={active.members} />
+            <DeclaredWidgetLayer space={space} declarations={active.members} layout="grid" />
           ) : (
             <DeclaredWidgetLayer space={space} />
           )}

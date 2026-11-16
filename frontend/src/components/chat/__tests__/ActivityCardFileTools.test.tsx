@@ -7,7 +7,7 @@
  * 2. file_write（ui.chat_card 声明）：diff 块真实渲染（TextDiffView +/- 行）→
  *    切换"完整文件"视图（写后全文按行）→ 切回差异对比。
  *
- * 声明直接读 plugins/shared/tools/builtin_tools/plugin.json（与生产 schema 同源），
+ * 声明直接读 plugins/shared/builtin_tools/plugin.json（与生产 schema 同源），
  * 防止测试 fixture 与插件声明镜像漂移。
  */
 import { readFileSync } from 'node:fs'
@@ -42,7 +42,7 @@ vi.mock('@/components/shared/markdown/MarkdownRenderer', () => ({
 // ── 声明装载：直读真实 plugin.json（生产 /api/v1/schema 的源头）──
 const PLUGIN_JSON_PATH = resolve(
   dirname(fileURLToPath(import.meta.url)),
-  '../../../../../plugins/shared/tools/builtin_tools/plugin.json',
+  '../../../../../plugins/shared/builtin_tools/plugin.json',
 )
 const builtinTools = JSON.parse(readFileSync(PLUGIN_JSON_PATH, 'utf-8')) as {
   capabilities: { tools: Array<Record<string, unknown>> }
@@ -109,7 +109,10 @@ describe('文件工具卡片功能: file_read 打开文件链路（点击 → fi
     await waitFor(() => {
       expect(getFileEditorData('file-local-_app_src_main.py')?.content).toBe('print(1)\nprint(2)')
     })
-    expect(getMock).toHaveBeenCalledWith(CONTENT_URL('task-7'), { params: { path: '/app/src/main.py' } })
+    expect(getMock).toHaveBeenCalledWith(CONTENT_URL('task-7'), {
+      // 按需加载契约（用户裁定 2026-10-24）：打开带头部窗口参数
+      params: { path: '/app/src/main.py', offset: 0, limit: 64 * 1024 },
+    })
 
     const tabs = useLayoutModeStore.getState().workspaceTabs
     expect(tabs).toHaveLength(1)
@@ -138,7 +141,9 @@ describe('文件工具卡片功能: file_read 打开文件链路（点击 → fi
       expect(getFileEditorData('file-local-_app_lib_util.ts')).toBeDefined()
     })
     // 无 containerTaskId 时走 _local（项目根）；绝对路径由后端直读
-    expect(getMock).toHaveBeenCalledWith(CONTENT_URL('_local'), { params: { path: '/app/lib/util.ts' } })
+    expect(getMock).toHaveBeenCalledWith(CONTENT_URL('_local'), {
+      params: { path: '/app/lib/util.ts', offset: 0, limit: 64 * 1024 },
+    })
   })
 })
 
@@ -268,7 +273,9 @@ describe('文件工具卡片功能: file_write diff 渲染 + 完整文件切换�
     await waitFor(() => {
       expect(getFileEditorData('file-local-_app_a.txt')?.content).toContain('hello Rust')
     })
-    expect(getMock).toHaveBeenCalledWith(CONTENT_URL('task-9'), { params: { path: '/app/a.txt' } })
+    expect(getMock).toHaveBeenCalledWith(CONTENT_URL('task-9'), {
+      params: { path: '/app/a.txt', offset: 0, limit: 64 * 1024 },
+    })
     expect(useLayoutModeStore.getState().workspaceTabs).toHaveLength(1)
   })
 })

@@ -12,8 +12,8 @@ import time
 from pathlib import Path
 
 import pytest
-from bash_types import ProcessInfo
-from process_manager import ProcessManager
+from agentos_plugin_sdk.process_runtime import ProcessInfo
+from agentos_plugin_sdk.process_runtime import ProcessManager
 
 pytestmark = pytest.mark.unit
 

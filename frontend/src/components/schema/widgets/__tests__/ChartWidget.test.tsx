@@ -13,7 +13,7 @@ vi.mock('@/services/schema/dataWidget', async (importOriginal) => ({
   useDataWidget: (...args: unknown[]) => useDataWidgetMock(...args),
 }))
 
-import { ChartWidget } from '../ChartWidget'
+import { ChartWidget, formatDataLabel } from '../ChartWidget'
 
 const DATA = {
   labels: ['一月', '二月', '三月'],
@@ -131,5 +131,56 @@ describe('ChartWidget', () => {
       render(<ChartWidget chartType="bar" data={bad} />)
       expect(screen.getByText('暂无图表数据')).toBeTruthy()
     }
+  })
+})
+
+describe('数值标注 showDataLabels', () => {
+  it.each([
+    [0, '0'],
+    [9999, '9999'],
+    [10.6, '11'],
+    [10000, '1.0万'],
+    [14000, '1.4万'],
+    [13852087, '1385.2万'],
+    [100000000, '1.0亿'],
+    [250000000, '2.5亿'],
+    [-14000, '-1.4万'],
+  ])('formatDataLabel(%s) → %s', (value, expected) => {
+    expect(formatDataLabel(value)).toBe(expected)
+  })
+
+  it('bar 图开启：柱顶渲染压缩数值（含零值柱）', () => {
+    render(
+      <ChartWidget
+        chartType="bar"
+        data={{ labels: ['甲', '乙'], datasets: [{ label: 'Tokens', data: [14000, 0] }] }}
+        showDataLabels
+      />,
+    )
+    expect(screen.getByText('1.4万')).toBeTruthy()
+    // 零值也标（诚实面）；网格底线刻度同为「0」，数据标注使其 ≥2 处
+    expect(screen.getAllByText('0').length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('prop 缺省（默认关）：不渲染数值标注', () => {
+    render(
+      <ChartWidget
+        chartType="bar"
+        data={{ labels: ['甲', '乙'], datasets: [{ label: 'Tokens', data: [14000, 0] }] }}
+      />,
+    )
+    expect(screen.queryByText('1.4万')).toBeNull()
+  })
+
+  it('line 图开启：每个数据点上方渲染压缩数值', () => {
+    render(
+      <ChartWidget
+        chartType="line"
+        data={{ labels: ['周一', '周二'], datasets: [{ label: 'Tokens', data: [25000, 13852087] }] }}
+        showDataLabels
+      />,
+    )
+    expect(screen.getByText('2.5万')).toBeTruthy()
+    expect(screen.getByText('1385.2万')).toBeTruthy()
   })
 })

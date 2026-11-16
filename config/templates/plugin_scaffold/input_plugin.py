@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from pipeline.plugin import IInputPlugin, PluginContext, PluginResult
+from _libs.pipeline_base.plugin import IInputPlugin, PluginContext, PluginResult
 
 logger = logging.getLogger(__name__)
 

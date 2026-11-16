@@ -9,8 +9,8 @@
  * - 已读态的视觉分支（opacity-70 / 无未读圆点 / 标题不加色）
  *
  * 不可达/未覆盖说明（本文件 docstring 存证）：
- * - 折叠态 IconComponent 的 `IconComponent &&` 判空（L138）在 layout.features 含
- *   status 时恒为真、不含时恒为 null，两面均已覆盖，无残留。
+ * - 折叠摘要行已上移到 NotificationCenter 分组层（NotificationItem 不再有
+ *   isCollapsed 形态），组件侧无此分支。
  * - PRIORITY_ICONS 未命中（如 normal/low）回落分类图标（NOTIFICATION_ICON_MAP），
  *   map 未命中的最终兜底 Bell 由"未知分类 + 已知 priority"组合覆盖。
  */
@@ -97,15 +97,6 @@ describe('卡片点击与动作回调', () => {
 
     expect(onAction).toHaveBeenCalledWith('n-action', action)
     expect(onClick).not.toHaveBeenCalled()
-  })
-
-  it('折叠态点击 → 走同一 handleClick（折叠不改变点击语义）', () => {
-    const onClick = vi.fn()
-    const notification = makeNotification({ id: 'n-collapsed' })
-    render(<NotificationItemComponent notification={notification} isCollapsed onClick={onClick} />)
-
-    fireEvent.click(screen.getByTestId('notification-item-n-collapsed'))
-    expect(onClick).toHaveBeenCalledWith(notification)
   })
 })
 

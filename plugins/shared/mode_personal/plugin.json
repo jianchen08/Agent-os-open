@@ -1,0 +1,443 @@
+{
+  "id": "mode_personal",
+  "requires_services": [
+    "packaging",
+    "session",
+    "trigger-control"
+  ],
+  "name": "Mode Personal",
+  "version": "0.3.2",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "host_group": "light",
+  "entry": "python server.py",
+  "description": "个人助理模式出厂种子（单包自包含）：pim 单工具（capture/query/op 三 action，output_schema+render 强契约）+ 实体域数据落用户空间 <user_root>/data/mode_personal/（副本无关，包内存量 data/ 首启自动迁入；七实体 JSONL 原子重写 + op_log 环形 50 可撤销）+ REST /ext/mode_personal/*（today 聚合/capture 快速添加/三实体 CRUD/todo 状态机 op/undo/partner/番茄启停）+ pim.query 数据域服务 + 到点触发器同步（事项变更经 trigger-control 注册/迁移 per-item 触发器，trigger.fired 再武装 repeat；不再自持轮询、不再直接出卡）+ 番茄定向计时（时长配置默认 25，单次可由 LLM/用户覆盖）；工具入面 = agent_config_load 非任务管道并入制（零包外配置），mode.yaml default:true 为新会话出生默认模式",
+  "permissions": {},
+  "priority": 45,
+  "capabilities": {
+    "tools": [
+      {
+        "name": "pim",
+        "description": "个人事项助理（capture 一句话建卡 / query 读聚合 / op 状态机执行，全部走 op_log 可撤销）",
+        "render": {
+          "card": "form",
+          "title": "个人助理",
+          "open_page": {
+            "page": "pim_today",
+            "label": "打开今日总览"
+          }
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "capture",
+                "query",
+                "op"
+              ],
+              "description": "capture=建卡（零确认直建，回执含 op_id 可撤销）；query=读聚合；op=状态机执行"
+            },
+            "payload": {
+              "type": "object",
+              "description": "capture: {title, domain?, due?, priority?, repeat?, direction?, status?, kind?: 'event', at?} 或 {text: '- [ ] 明天 #工作 !P1 交周报'}（行语法，与页面快速添加同一解析）；query: {scope: today|todo|event|habit|partner|journal|preference, id?, status?, domain?, month?, key?, from?, to?}；op: {op: accept|complete|defer|split|wait|fail|cancel|focus_start|focus_stop|undo, entity?: todo|event, id?, todo_id?(别名), op_id?(undo), new_time?/new_due?(defer), parts?(split), duration_minutes?(focus_start，缺省取配置)}。capture 可带 pipeline_id（当前会话主管道 id）= 日程到点提醒的承载管道锚（ADR 2026-11-03-pim-trigger-anchor：提醒挂创建会话，不随活跃会话漂移）"
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "status",
+            "action"
+          ],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "ok",
+                "error"
+              ]
+            },
+            "action": {
+              "type": "string"
+            },
+            "op_id": {
+              "type": "string",
+              "description": "本次记账操作 id（capture/complete/defer/split 等，携此可 undo）"
+            },
+            "result": {
+              "type": "object",
+              "description": "各 action 结果载荷（todo/event/items/today/partner/created 等）"
+            },
+            "error": {
+              "type": "string",
+              "description": "status=error 时的原因"
+            }
+          }
+        }
+      }
+    ],
+    "services": [
+      {
+        "name": "pim.query",
+        "description": "pim 数据域读面（跨插件消费：today 聚合/todo/habit/partner/journal；晨报与调度器同源取数）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "payload": {
+              "type": "object",
+              "properties": {
+                "scope": {
+                  "type": "string",
+                  "enum": [
+                    "today",
+                    "todo",
+                    "event",
+                    "habit",
+                    "partner",
+                    "journal",
+                    "preference"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "domain": {
+                  "type": "string"
+                },
+                "month": {
+                  "type": "string"
+                },
+                "key": {
+                  "type": "string"
+                },
+                "from": {
+                  "type": "string"
+                },
+                "to": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "scope"
+              ]
+            }
+          },
+          "required": [
+            "payload"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "status",
+            "action"
+          ],
+          "properties": {
+            "status": {
+              "type": "string"
+            },
+            "action": {
+              "type": "string"
+            },
+            "result": {
+              "type": "object"
+            },
+            "error": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for /ext/mode_personal/** (个人助理 PIM REST 面)",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "raw_body": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object"
+            },
+            "query": {
+              "type": "object"
+            }
+          }
+        },
+        "output_schema": {
+          "type": "object"
+        }
+      }
+    ],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload",
+      "domain_event"
+    ]
+  },
+  "http_endpoints": [
+    {
+      "route_id": "personal_pim_today",
+      "method": "GET",
+      "path": "/ext/mode_personal/today",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "今日三栏聚合（逾期/今日/进行中 todo + 今日事件 + 到期习惯 + journal + partner + op 尾；晨报数据源）"
+    },
+    {
+      "route_id": "personal_pim_capture",
+      "method": "POST",
+      "path": "/ext/mode_personal/capture",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "快速添加行：{text} 行语法 → parse_line → 建 todo（零确认，回执含 op_id）；低置信 422"
+    },
+    {
+      "route_id": "personal_pim_todos_list",
+      "method": "GET",
+      "path": "/ext/mode_personal/todos",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "todo 列表（query 支持 status/domain 过滤）"
+    },
+    {
+      "route_id": "personal_pim_todos_create",
+      "method": "POST",
+      "path": "/ext/mode_personal/todos",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "todo 创建（结构化全字段；201 + op_id）"
+    },
+    {
+      "route_id": "personal_pim_todo_patch",
+      "method": "PATCH",
+      "path": "/ext/mode_personal/todos/{id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "todo 部分更新（status/progress/due/title/domain/priority/direction/repeat；JSON PATCH 浅合并）"
+    },
+    {
+      "route_id": "personal_pim_todo_complete",
+      "method": "POST",
+      "path": "/ext/mode_personal/todos/{id}/complete",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "todo 完成（状态机落账 + 伙伴结算，同一 op 可逆）"
+    },
+    {
+      "route_id": "personal_pim_todo_defer",
+      "method": "POST",
+      "path": "/ext/mode_personal/todos/{id}/defer",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "todo 改期（{new_due?} 缺省明天；status 回 backlog）"
+    },
+    {
+      "route_id": "personal_pim_todo_split",
+      "method": "POST",
+      "path": "/ext/mode_personal/todos/{id}/split",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "todo 拆小（{parts: [子项标题]} 各建新 todo，同一 op 整体可逆）"
+    },
+    {
+      "route_id": "personal_pim_events_list",
+      "method": "GET",
+      "path": "/ext/mode_personal/events",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "event 列表"
+    },
+    {
+      "route_id": "personal_pim_events_create",
+      "method": "POST",
+      "path": "/ext/mode_personal/events",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "event 创建（{title, at, ...}；201 + op_id）"
+    },
+    {
+      "route_id": "personal_pim_event_patch",
+      "method": "PATCH",
+      "path": "/ext/mode_personal/events/{id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "event 部分更新"
+    },
+    {
+      "route_id": "personal_pim_habits_list",
+      "method": "GET",
+      "path": "/ext/mode_personal/habits",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "habit 列表（streak 派生值随条目透出）"
+    },
+    {
+      "route_id": "personal_pim_habits_create",
+      "method": "POST",
+      "path": "/ext/mode_personal/habits",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "habit 创建（{title, schedule, ...}；201 + op_id）"
+    },
+    {
+      "route_id": "personal_pim_habit_patch",
+      "method": "PATCH",
+      "path": "/ext/mode_personal/habits/{id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "habit 部分更新"
+    },
+    {
+      "route_id": "personal_pim_habit_checkin",
+      "method": "POST",
+      "path": "/ext/mode_personal/habits/{id}/checkin",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "habit 打卡（history 追加今天；幂等——同日重复打卡零变化 op_id=null）"
+    },
+    {
+      "route_id": "personal_pim_undo",
+      "method": "POST",
+      "path": "/ext/mode_personal/undo/{op_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "撤销：按 op_id 回滚（items 逆序应用 before；重复撤销 409）"
+    },
+    {
+      "route_id": "personal_pim_partner",
+      "method": "GET",
+      "path": "/ext/mode_personal/partner",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "伙伴执行账（level/xp/streak/freezes/trees/season_id）"
+    },
+    {
+      "route_id": "personal_pim_focus_start",
+      "method": "POST",
+      "path": "/ext/mode_personal/focus/{id}/start",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "番茄钟启动：todo 转 doing + focus_started_at（计时到由自持调度器自动落账 1 番茄=1 树）"
+    },
+    {
+      "route_id": "personal_pim_focus_stop",
+      "method": "POST",
+      "path": "/ext/mode_personal/focus/{id}/stop",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "番茄钟手动停止：清 focus_started_at（计时未满零落账；无进行中番茄 400）"
+    },
+    {
+      "route_id": "personal_pim_today_page",
+      "method": "GET",
+      "path": "/ext/mode_personal/page/pim-today",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "Webview HTML page: 「今日」工作台（总览 + 伙伴星球两视图层，插件自带 webview 页）"
+    }
+  ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "pim_today",
+        "title": "今日",
+        "icon": "🌱",
+        "space": "workspace",
+        "slot": "tab",
+        "path": "/p/agentos_pim_today",
+        "widget": "webview",
+        "props": {
+          "pluginId": "mode_personal",
+          "htmlPath": "/page/pim-today",
+          "widgetId": "pim_today"
+        },
+        "order": 30,
+        "autoOpen": false,
+        "description": "今日工作台：统一日程总览（筛选标签）+ 伙伴星球（场景/森林/图鉴/旅程）",
+        "mode": "personal"
+      }
+    ]
+  },
+  "lifecycle": {
+    "idle_timeout_secs": 0
+  },
+  "config_files": [
+    {
+      "id": "mode_personal_settings",
+      "label": "个人助理配置",
+      "fields": [
+        {
+          "name": "focus_duration_minutes",
+          "label": "番茄默认时长（分钟）",
+          "type": "number",
+          "default": 25,
+          "min": 1,
+          "max": 1440,
+          "step": 1,
+          "description": "番茄钟默认时长；LLM/用户单次可通过 duration_minutes 覆盖，进行中的番茄不受配置变更影响"
+        }
+      ]
+    }
+  ]
+}

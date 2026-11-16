@@ -259,12 +259,12 @@ describe('pipelines API — state 摘要映射', () => {
     )
   })
 
-  it('无 run_status/raw_error/ended 时推断为 running', () => {
-    expect(pipelinesApi.resolvePipelineRunStatus({})).toBe('running')
+  it('无 run_status/raw_error/ended 时落 unknown（获取不到运行状态真值不猜 running）', () => {
+    expect(pipelinesApi.resolvePipelineRunStatus({})).toBe('unknown')
   })
 
-  it('ended=false 不被当作 completed（严格等值判定）', () => {
-    expect(pipelinesApi.resolvePipelineRunStatus({ ended: false })).toBe('running')
+  it('ended=false 不被当作 completed（严格等值判定），三源全缺落 unknown', () => {
+    expect(pipelinesApi.resolvePipelineRunStatus({ ended: false })).toBe('unknown')
   })
 
   it('视图模型：工作区路径按 task.ws_meta > ws_meta > workspace 优先级', () => {
@@ -290,15 +290,13 @@ describe('pipelines API — state 摘要映射', () => {
       'task.status': '',
       'lineage.origin_session_id': '',
       llm_model: '',
-      display_name: '',
-      name: '',
+      title: '',
       workspace: '',
     })
     expect(vm.taskStatus).toBeUndefined()
     expect(vm.originSessionId).toBeUndefined()
     expect(vm.llmModel).toBeUndefined()
-    expect(vm.displayName).toBeUndefined()
-    expect(vm.name).toBeUndefined()
+    expect(vm.title).toBeUndefined()
     expect(vm.workspacePath).toBeUndefined()
   })
 
@@ -333,13 +331,13 @@ describe('pipelines API — state 摘要映射', () => {
       pipeline_id: 'p1',
       thread_id: 'th1',
       source: 'checkpoint',
-      state: { run_status: 'completed', display_name: '显示名' },
+      state: { run_status: 'completed', title: '统一标题' },
     })
     expect(vm).toMatchObject({
       pipelineId: 'p1',
       threadId: 'th1',
       status: 'completed',
-      displayName: '显示名',
+      title: '统一标题',
     })
   })
 })
@@ -358,7 +356,6 @@ describe('pipelines API — fetchPipelinePluginCatalog（两接口 join）', () 
       {
         id: 'p_only',
         name: '仅目录',
-        role: 'core',
         hostType: 'python',
         version: '1.0',
         enabled: null,
@@ -389,7 +386,6 @@ describe('pipelines API — fetchPipelinePluginCatalog（两接口 join）', () 
     expect(res[0]).toMatchObject({
       id: 'p_status',
       name: '仅状态',
-      role: null,
       hostType: 'python',
       version: null,
       enabled: false,
@@ -417,7 +413,7 @@ describe('pipelines API — fetchPipelinePluginCatalog（两接口 join）', () 
     await expect(pipelinesApi.fetchPipelinePluginCatalog()).resolves.toEqual([])
   })
 
-  it('两接口都有：catalog 优先提供 role/name/version，status 提供 enabled/config_files', async () => {
+  it('两接口都有：catalog 优先提供 name/version，status 提供 enabled/config_files', async () => {
     getMock
       .mockResolvedValueOnce({
         data: [{ id: 'both', name: '目录名', version: '2.0', role: 'input', host_type: 'rust' }],
@@ -442,7 +438,6 @@ describe('pipelines API — fetchPipelinePluginCatalog（两接口 join）', () 
       {
         id: 'both',
         name: '目录名',
-        role: 'input',
         hostType: 'rust',
         version: '2.0',
         enabled: true,

@@ -1,0 +1,104 @@
+{
+  "id": "pipeline_prompt_build",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Prompt Build",
+  "version": "1.1.1",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "host_group": "light",
+  "entry": "python server.py",
+  "invoke_entry": "prompt_build.execute",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "steps": [
+      {
+        "name": "pipeline_prompt_build",
+        "required_state_inputs": [
+          "context.system_prompt"
+        ]
+      }
+    ],
+    "services": [
+      {
+        "name": "prompt.preview",
+        "description": "组装预览（离线面）：输入与管道步同形的 context 片段（system_prompt/static_vars/dynamic_vars/constraints_text/agent_name），走与 execute 完全相同的组装代码，返回 system_message 与 prompt.dynamic_vars 消息——供管理面预览端点等离线消费方取组装结果，组装逻辑单源零复制",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "context": {
+              "type": "object",
+              "description": "prompt_build 消费的 context.* 片段（去 context. 前缀的键名）",
+              "properties": {
+                "system_prompt": {
+                  "type": "string",
+                  "description": "系统提示词模板（占位符在此替换）"
+                },
+                "static_vars": {
+                  "type": "array",
+                  "description": "静态变量 items（与 agent yaml static_vars.items 同形）"
+                },
+                "dynamic_vars": {
+                  "type": "array",
+                  "description": "动态变量 items（与 agent yaml dynamic_vars.items 同形）"
+                },
+                "constraints_text": {
+                  "type": "string",
+                  "description": "约束文本块（agent 装载面已渲染的 hard/soft 约束）"
+                },
+                "agent_name": {
+                  "type": "string",
+                  "description": "agent 显示名"
+                }
+              }
+            },
+            "session_id": {
+              "type": "string",
+              "description": "可选会话 id（{{session}} 渲染用），缺省 preview"
+            }
+          },
+          "required": [
+            "context"
+          ]
+        }
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 50,
+  "state": {
+    "reads": [
+      "execution_context",
+      "context.agent_name",
+      "context.agent_pack_root",
+      "context.constraints_text",
+      "context.dynamic_vars",
+      "context.persona_text",
+      "context.session_id",
+      "context.static_vars",
+      "context.system_prompt",
+      "context_window",
+      "llm_model",
+      "messages",
+      "model_id",
+      "model_tier",
+      "project_roots",
+      "prompt.tool_descriptions",
+      "tool_surface.unavailable",
+      "user_id"
+    ]
+  },
+  "export_fields": [
+    "track.messages_chars"
+  ],
+  "persistent_fields": [
+    "track.messages_chars"
+  ]
+}

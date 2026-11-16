@@ -17,8 +17,8 @@ import pytest
 # 收集期路径自持：pytest 收集 tests/plugins/ 等包内测试目录时会把它 prepend
 # 到 sys.path[0] 且驻留（如 tests/plugins/system/tasks/、human 的 service.py
 # 同名劫持），本文件模块级 `from service import TaskService` 必须解析到
-# plugins/shared/system/tasks/——无条件前置本插件目录（先去重）。
-_TASKS_DIR = Path(__file__).resolve().parents[3] / "plugins" / "shared" / "system" / "tasks"
+# plugins/shared/tasks/——无条件前置本插件目录（先去重）。
+_TASKS_DIR = Path(__file__).resolve().parents[3] / "plugins" / "shared" / "tasks"
 _SHARED_DIR = _TASKS_DIR.parent.parent
 for _d in (_SHARED_DIR, _TASKS_DIR):
     _s = str(_d)

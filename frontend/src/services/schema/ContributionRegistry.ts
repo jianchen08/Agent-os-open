@@ -16,6 +16,8 @@
  * 薄视图，供渲染侧逐步迁移；渲染侧最终统一消费 getPages()/getPagesBySpace()。
  */
 
+import { normalizeContentCard, type ContentCardDeclaration, type RawContentCardDeclaration } from '@/services/schema/contentCard'
+import { extractValidatedWidgetActions, type WidgetActionUriDecl } from '@/services/schema/widgetActionBus'
 import type { PluginTheme } from '@/types/theme'
 
 /** 贡献点类型（含统一模型的 'pages'；旧类型仍可被薄视图查询） */
@@ -193,6 +195,14 @@ export interface WidgetDeclaration {
   order?: number
   /** widget props */
   props?: Record<string, unknown>
+  /**
+   * 动作声明（ui_schema.widgets[].actions，与 props 平级；字段只增，缺省无
+   * 动作、既有声明零影响）：动作名 → {uri, method?}。声明期经 actionUri 白
+   * 名单校验（比对 /api/v1/schema routes 面中该插件自己的端点集合），越界
+   * action 项拒绝注册 + console.error——此处仅存合法项
+   * [来源: docs/decisions/2026-10-10-widget-action-bus.md]
+   */
+  actions?: Record<string, WidgetActionUriDecl>
   /** 来源插件 ID */
   pluginId?: string
 }
@@ -205,6 +215,12 @@ export interface ClientStyleDeclaration {
   path: string
   /** 作用域：global 不包装（装饰全局）；scoped 自动加 [data-plugin] 前缀（防全局污染） */
   scope?: 'global' | 'scoped'
+  /**
+   * 会话域门（ADR 2026-10-14-message-card-body-form，与 message_cards match.modes
+   * 同键同语义）：活跃会话 modeBinding.mode ∈ modes 才注入，会话切换即重同步；
+   * 缺省/空数组 = 会话域不限（既有全局装饰语义）。
+   */
+  modes?: string[]
   /** 描述 */
   description?: string
   /** 来源插件 ID */
@@ -216,6 +232,7 @@ const NON_PAGE_CONTRIBUTE_KEYS: ReadonlySet<string> = new Set([
   'themes',
   'client_styles',
   'message_cards',
+  'content_cards',
 ])
 
 /**
@@ -239,16 +256,18 @@ const DEPRECATED_CONTRIBUTE_KEYS: ReadonlySet<string> = new Set([
  * - plugins_runtime_table（monitoring「插件运行」表）：用户裁定 2026-09-27——
  *   运行表与进程观测卡片（plugin_hosts）是同一数据的两套渲染，不允许并存；
  *   表的列数据已迁入卡片（上次崩溃列经前端 join 运行端点补齐，见
- *   PluginHostsWidget）。插件清单契约冻结期不动 plugins/，摘除落在前端
- *   声明聚合单点（ui_schema 提取面）。
+ *   PluginHostsWidget）。清单声明已同步下架；本过滤保留为守卫——装机/用户
+ *   空间旧副本清单可能仍携带该声明。
  */
 const RETIRED_WIDGET_IDS: ReadonlySet<string> = new Set(['plugins_runtime_table'])
 
 /**
  * 旧贡献点 key → 归一化 space/slot 映射（统一架构 4.4 节）
  *
- * 交互类（menus/commands/shortcuts/modal）在 actions 模型落地前暂归一化为
+ * 交互类（menus/commands/shortcuts）在 actions 模型落地前暂归一化为
  * 页面占位（legacyFrom 标记真实来源，旧查询薄视图按 legacyFrom 检索，不受影响）。
+ * modal 不在映射内：C4 槽位机制收敛后 modal 由 SlotRegistry 翻译为
+ * shell.overlay 槽条目（呈现面），不再归一化进 pages（旧声明路径删除，内部一刀切）。
  */
 const LEGACY_PAGE_MAP: Record<string, { space: PageSpace; slot: PageSlot }> = {
   viewsContainers: { space: 'workspace', slot: 'activity-bar' },
@@ -256,7 +275,6 @@ const LEGACY_PAGE_MAP: Record<string, { space: PageSpace; slot: PageSlot }> = {
   dockItems: { space: 'dock', slot: 'item' },
   statusBarItems: { space: 'dock', slot: 'status' },
   floating: { space: 'floating', slot: 'panel' },
-  modal: { space: 'floating', slot: 'overlay' },
   menus: { space: 'chat', slot: 'inline' },
   commands: { space: 'chat', slot: 'input-action' },
   shortcuts: { space: 'chat', slot: 'input-action' },
@@ -272,6 +290,7 @@ const LEGACY_PAGE_MAP: Record<string, { space: PageSpace; slot: PageSlot }> = {
   //   contributes.pages + openWorkspacePanelByPath（插件声明 path 直达）
   // - chat/inline 槽自始无渲染方——消息级内联卡片场景已被工具卡协议
   //   （ui.chat_card / render）覆盖，声明这些 key 的插件数据不再进 pages
+  // [C4 收敛] modal：归一化移除——SlotRegistry 翻译为 shell.overlay 槽条目
 }
 
 /** PageDeclaration 显式字段（归一化时其余字段原样透传） */
@@ -308,6 +327,36 @@ export class ContributionRegistry {
   private clientStyles: ClientStyleDeclaration[] = []
   /** 是否已初始化 */
   private initialized = false
+
+  /** 变更版本号（subscribe/getVersion 消费，见下） */
+  private version = 0
+  /** 变更订阅方（渲染层响应化接线） */
+  private listeners = new Set<() => void>()
+
+  /**
+   * 订阅注册表变更（渲染层响应化：useSyncExternalStore 消费）。返回退订函数。
+   *
+   * 本注册表是非响应式单例：渲染层在 useMemo 内直读 getAllWidgets() 时，挂载
+   * 早于装载（bootstrap 先渲染 React、GrowthLoop 异步拉 schema）会让 memo 持有
+   * 空解析且依赖恒定永不重算——声明 widget 永不出现（pack17 真机回归实证）。
+   * 装载/清空经 bumpVersion 通知订阅方重读。
+   */
+  subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener)
+    return () => {
+      this.listeners.delete(listener)
+    }
+  }
+
+  /** 变更版本号快照（useSyncExternalStore getSnapshot：值变化即触发重渲染） */
+  getVersion = (): number => {
+    return this.version
+  }
+
+  private bumpVersion(): void {
+    this.version += 1
+    for (const listener of this.listeners) listener()
+  }
 
   /**
    * 从 /api/v1/schema 响应加载贡献（含 plugin_configs）
@@ -355,6 +404,9 @@ export class ContributionRegistry {
 
     // 提取 agents / pipelines 的 ui_schema.widgets
     this.extractWidgets(schema)
+    // 装载完成通知订阅方重读（迟到装载渲染跟随；clear 先行的中途通知无害，
+    // 订阅方重读时看到的是装载终态）
+    this.bumpVersion()
   }
 
   /**
@@ -363,6 +415,10 @@ export class ContributionRegistry {
    * plugin_contributes 入口项是 tool 等非 System/Pipeline 类型插件的唯一来源——
    * 内核 schema 的 agents/pipelines 数组只收 System/Pipeline 类型清单，
    * 其余类型插件的 ui_schema 随 contributes 入口项出口。
+   *
+   * ui_schema.widgets[].actions 在此做声明期注册校验（actionUri 白名单 +
+   * host adapter 同名冲突，ADR 2026-10-10）：越界 action 项拒绝注册 + 错误
+   * 日志，粒度 = action 项，不拆整个 widget。
    */
   private extractWidgets(schema: Record<string, unknown>): void {
     const sources: Array<{ list?: Array<Record<string, unknown>>; idKey: string }> = [
@@ -373,6 +429,11 @@ export class ContributionRegistry {
         idKey: 'plugin_id',
       },
     ]
+    // routes 面（与 ui_schema 同响应）：actionUri 白名单比对源——按插件划界的
+    // http_endpoints 端点集合，声明期校验用（ADR 2026-10-10，fail-closed）
+    const routesFace = (typeof schema.routes === 'object' && schema.routes !== null
+      ? (schema.routes as Record<string, unknown>)
+      : {}) as Record<string, unknown>
     for (const { list, idKey } of sources) {
       if (!Array.isArray(list)) continue
       for (const entry of list) {
@@ -382,16 +443,27 @@ export class ContributionRegistry {
         if (!uiSchema || !Array.isArray(uiSchema.widgets)) continue
         const widgets: WidgetDeclaration[] = (uiSchema.widgets as Array<Record<string, unknown>>)
           .filter((w) => !RETIRED_WIDGET_IDS.has(String(w.id ?? '')))
-          .map((w) => ({
-            id: w.id as string,
-            type: w.type as string,
-            space: w.space as string | undefined,
-            group: w.group as string | undefined,
-            trigger: w.trigger as string | undefined,
-            order: typeof w.order === 'number' ? w.order : undefined,
-            props: w.props as Record<string, unknown> | undefined,
-            pluginId,
-          }))
+          .map((w) => {
+            // 声明期注册校验：actions 逐项过 actionUri 白名单（routes 面）+
+            // host adapter 同名冲突检测；越界项拒绝注册 + console.error
+            const actions = extractValidatedWidgetActions(
+              w.actions,
+              pluginId,
+              String(w.id ?? ''),
+              routesFace[pluginId],
+            )
+            return {
+              id: w.id as string,
+              type: w.type as string,
+              space: w.space as string | undefined,
+              group: w.group as string | undefined,
+              trigger: w.trigger as string | undefined,
+              order: typeof w.order === 'number' ? w.order : undefined,
+              props: w.props as Record<string, unknown> | undefined,
+              ...(actions ? { actions } : {}),
+              pluginId,
+            }
+          })
         this.widgetsByPlugin.set(pluginId, widgets)
       }
     }
@@ -449,6 +521,8 @@ export class ContributionRegistry {
             this.registerMessageCards(pluginId, items as Record<string, unknown>[])
           } else if (type === 'themes') {
             this.registerPluginThemes(pluginId, items as Record<string, unknown>[])
+          } else if (type === 'content_cards') {
+            this.registerContentCards(pluginId, items as RawContentCardDeclaration[])
           } else {
             this.registerClientStyles(pluginId, items as Record<string, unknown>[])
           }
@@ -576,6 +650,7 @@ export class ContributionRegistry {
       this.presetWidgets = this.presetWidgets.filter((p) => p.id !== widget.id)
       this.presetWidgets.push(widget)
     }
+    if (widgets.length > 0) this.bumpVersion()
   }
 
   /**
@@ -662,19 +737,8 @@ export class ContributionRegistry {
     return this.pages.filter((p) => p.legacyFrom === 'shortcuts')
   }
 
-  /**
-   * 获取所有模态弹窗声明（归一化前为 modal）
-   */
-  getModals(): PageDeclaration[] {
-    return this.pages.filter((p) => p.legacyFrom === 'modal')
-  }
-
-  /**
-   * 按 trigger 查找模态弹窗（如 'on_command:xxx'）
-   */
-  findModalByTrigger(trigger: string): PageDeclaration | undefined {
-    return this.getModals().find((m) => m.openOn === trigger || m.trigger === trigger)
-  }
+  // getModals/findModalByTrigger 已删除（C4 存量收敛：modal 声明经 SlotRegistry
+  // 翻译为 shell.overlay 槽条目，触发查询 = slotRegistry.findOverlayByTrigger）
 
   /**
    * 检查是否已初始化
@@ -700,7 +764,12 @@ export class ContributionRegistry {
     this.widgetsByPlugin.clear()
     this.pluginThemes = []
     this.clientStyles = []
+    this.contentCards = []
+    // message_cards 旁路同防幽灵卡（contentCards 同款：幂等重载清空重来——
+    // 插件禁用/声明撤下后旧条目残留会继续命中渲染）
+    this.messageCards = []
     this.initialized = false
+    this.bumpVersion()
   }
 
   // ── 内部：旁路注册（themes / client_styles，不归一化为页面）──
@@ -715,6 +784,13 @@ export class ContributionRegistry {
    *  渲染器按声明解释——宿主零专用卡片代码，2026-09-28 状态统一标记机制 §5b） */
   private messageCards: Array<Record<string, unknown> & { pluginId: string }> = []
 
+  /** 内容卡声明（contributes.content_cards，ADR 2026-10-14-content-card-registry）：
+   *  插件段经 schema 注册，loadFromSchema 幂等重载清空重来（防幽灵卡） */
+  private contentCards: ContentCardDeclaration[] = []
+  /** 内容卡 first-party 段（前端内置首选卡集，前端静态配置非后端数据，
+   *  registerPresetWidgets 同款语义：clear()/loadFromSchema 不清） */
+  private firstPartyContentCards: ContentCardDeclaration[] = []
+
   /** 全部 message_cards 声明（渲染侧按 match 命中，无声明零渲染） */
   getAllMessageCards(): Array<Record<string, unknown> & { pluginId: string }> {
     return this.messageCards
@@ -723,6 +799,46 @@ export class ContributionRegistry {
   private registerMessageCards(pluginId: string, items: Array<Record<string, unknown>>): void {
     for (const item of items) {
       this.messageCards.push({ ...(item as Record<string, unknown>), pluginId })
+    }
+  }
+
+  // ── 内容卡（contributes.content_cards 旁路注册，ADR 2026-10-14-content-card-registry）──
+
+  /**
+   * 注册前端内置首选卡集（html/csv 等 first-party 卡）
+   *
+   * 与插件卡完全同一查询/裁决/渲染路径（matchContentCard 消费两段拼接序）：
+   * 查询序 = 插件段在前、本段在后，同 order 时插件声明覆盖内置卡（ADR §2 裁决）。
+   * 幂等：同 id 重复注册只更新不追加。
+   */
+  registerFirstPartyContentCards(cards: ContentCardDeclaration[]): void {
+    for (const card of cards) {
+      const idx = this.firstPartyContentCards.findIndex((c) => c.id === card.id)
+      if (idx >= 0) this.firstPartyContentCards[idx] = card
+      else this.firstPartyContentCards.push(card)
+    }
+  }
+
+  /**
+   * 全部内容卡声明（插件段在前 + first-party 段在后；matchContentCard 的查询源）
+   */
+  getAllContentCards(): ContentCardDeclaration[] {
+    return [...this.contentCards, ...this.firstPartyContentCards]
+  }
+
+  /**
+   * 注册插件内容卡声明（contributes.content_cards，schema 通道）
+   *
+   * 声明校验 fail-closed（normalizeContentCard）：必填键缺失/形态非法剔除不注册；
+   * 同 pluginId+id 幂等覆盖。
+   */
+  private registerContentCards(pluginId: string, items: RawContentCardDeclaration[]): void {
+    for (const raw of items) {
+      const card = normalizeContentCard(raw, pluginId)
+      if (!card) continue
+      const idx = this.contentCards.findIndex((c) => c.pluginId === pluginId && c.id === card.id)
+      if (idx >= 0) this.contentCards[idx] = card
+      else this.contentCards.push(card)
     }
   }
 
@@ -764,6 +880,12 @@ export class ContributionRegistry {
         id: raw.id,
         path: raw.path,
         scope: raw.scope === 'scoped' ? 'scoped' : 'global',
+        // 会话域门：仅收合法形态（非空字符串数组），非法/缺省 = 不限域
+        ...(Array.isArray(raw.modes) &&
+        raw.modes.length > 0 &&
+        raw.modes.every((m) => typeof m === 'string' && m !== '')
+          ? { modes: raw.modes as string[] }
+          : {}),
         description: typeof raw.description === 'string' ? raw.description : undefined,
         pluginId,
       }

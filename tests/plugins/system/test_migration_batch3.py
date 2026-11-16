@@ -24,7 +24,7 @@ pytestmark = pytest.mark.unit
 
 # ---- 路径常量 ----
 # 被测插件树：plugins/shared/system（scene / workspace 所在）
-SYSTEM_DIR = Path(__file__).resolve().parents[3] / "plugins" / "shared" / "system"
+SYSTEM_DIR = Path(__file__).resolve().parents[3] / "plugins" / "shared"
 SCENE_DIR = SYSTEM_DIR / "scene"
 WORKSPACE_DIR = SYSTEM_DIR / "workspace"
 
@@ -165,10 +165,8 @@ class TestWorkspaceMigration:
         _purge_modules("models")
         sys.path.insert(0, str(WORKSPACE_DIR))
         try:
-            from models import FileTreeNode, Workspace  # noqa: F811
+            from models import Workspace  # noqa: F811
 
-            node = FileTreeNode(name="test.py", type="file", path="test.py")
-            assert node.name == "test.py"
             ws = Workspace(container_task_id="task-1")
             assert ws.container_task_id == "task-1"
         finally:

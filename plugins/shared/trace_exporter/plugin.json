@@ -1,0 +1,115 @@
+{
+  "id": "trace_exporter",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Trace Exporter",
+  "description": "E 事件汇聚导出插件：订阅本机域事件（run.* 等生命周期族，过滤配置化），ULID 幂等键 + outbox 本地缓冲，攒批 POST 到云端 trace_ingestion；断网不丢、恢复续传，云不可达不阻塞本机执行。token 走 env AGENTOS_TRACE_EXPORT_TOKEN。",
+  "version": "1.0.1",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "activation": "eager",
+  "lifecycle": {
+    "idle_timeout_secs": 0
+  },
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload",
+      "domain_event"
+    ],
+    "services": [
+      {
+        "name": "trace_exporter.get_status",
+        "description": "E 轨迹导出器状态（待投递数/计数面/末次错误）",
+        "input_schema": {
+          "properties": {},
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "loaded": {
+              "type": "boolean"
+            },
+            "pending": {
+              "type": "integer"
+            },
+            "enqueued_total": {
+              "type": "integer"
+            },
+            "flushed_total": {
+              "type": "integer"
+            },
+            "failed_flushes": {
+              "type": "integer"
+            },
+            "dropped_total": {
+              "type": "integer"
+            },
+            "last_error": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 50,
+  "config_files": [
+    {
+      "id": "settings",
+      "label": "轨迹导出配置",
+      "fields": [
+        {
+          "name": "ingestion_url",
+          "label": "Ingestion 端点 URL",
+          "type": "string",
+          "required": true,
+          "description": "云端 trace_ingestion 接收端点完整 URL（…/ext/trace_ingestion/events）"
+        },
+        {
+          "name": "origin_host",
+          "label": "来源主机标识（origin_host）",
+          "type": "string",
+          "required": true,
+          "description": "本机在汇聚拓扑里的主机标识（云端按 (origin_host, ulid) 排序与来源隔离）"
+        },
+        {
+          "name": "origin_kind",
+          "label": "来源类型（origin_kind）",
+          "type": "string",
+          "required": false,
+          "description": "dev / test / offline_assistant（§3.3 两级来源标；云端检索默认过滤非 assistant 来源）"
+        },
+        {
+          "name": "event_types",
+          "label": "导出事件类型（通配，逗号分隔）",
+          "type": "string",
+          "required": false,
+          "description": "fnmatch 通配匹配事件名，如 run.*,approval.created；留空 = 全不导出（privacy fail-closed）"
+        },
+        {
+          "name": "batch_max_events",
+          "label": "批大小阈值（条）",
+          "type": "integer",
+          "required": false,
+          "description": "待投递达到该条数即出批（大小/时间双阈值任一命中）"
+        },
+        {
+          "name": "flush_interval_secs",
+          "label": "批时间阈值（秒）",
+          "type": "number",
+          "required": false,
+          "description": "队首事件最长等待秒数，到点即出批（§3.6-1 批间隔上限）"
+        }
+      ],
+      "path": "config/plugins/trace_exporter/trace_exporter.yaml"
+    }
+  ]
+}

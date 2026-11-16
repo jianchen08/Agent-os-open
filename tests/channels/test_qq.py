@@ -912,9 +912,7 @@ class TestOneBotAccessToken:
         try:
             accepted = False
             async with aiohttp.ClientSession() as sess:
-                # 轮询等待服务端就绪：正确 token 应完成 WS 握手。
-                # ClientConnectorError = 服务端尚未监听（CI 慢启动），与握手失败
-                # 同属"未就绪"，一并重试。
+                # 轮询等待服务端就绪：正确 token 应完成 WS 握手
                 ws = None
                 for _ in range(50):
                     try:
@@ -924,7 +922,12 @@ class TestOneBotAccessToken:
                         )
                         accepted = True
                         break
-                    except (aiohttp.WSServerHandshakeError, aiohttp.ClientConnectorError):
+                    except aiohttp.ClientError:
+                        # 就绪轮询按“未就绪”重试：服务端 task 尚未完成 TCPSite
+                        # 绑定时客户端先到 → ClientConnectorError（连接拒绝），
+                        # 已绑定但握手未放行的窗口 → WSServerHandshakeError，
+                        # 两者都是就绪前该重试的形态（只捕 WSServerHandshakeError
+                        # 在 CI 调度窗口下会漏掉连接拒绝假红）
                         await asyncio.sleep(0.05)
                 assert ws is not None, "正确 token 应完成 WS 握手"
                 await ws.send_json({"post_type": "message", "user_id": 7})

@@ -1,0 +1,161 @@
+{
+  "id": "pipeline_workspace_lifecycle",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Workspace Lifecycle",
+  "version": "1.1.3",
+  "config_files": [
+    {
+      "id": "workspace_config",
+      "path": "config/plugins/isolation/isolation_config.yaml",
+      "label": "工作空间配置（引用隔离配置：worktree_link_patterns 等消费于此）"
+    }
+  ],
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "host_group": "light",
+  "entry": "python server.py",
+  "invoke_entry": "workspace_lifecycle.execute",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": [
+      {
+        "name": "workspace.prepare_task",
+        "description": "出生期同步创建任务工作空间（ADR 2026-10-17 四段式出生第三段）：复用 init 体同一段创建逻辑，失败即失败（无降级）",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "pipeline_id": {
+              "type": "string",
+              "description": "已登记的任务管道 id（= task.id）"
+            },
+            "state": {
+              "type": "object",
+              "description": "身份登记之后的管道 state"
+            },
+            "execution_context": {
+              "type": "object",
+              "description": "工作区/隔离声明（管道 init 时才随 dispatch 注入，此处按同形传入）"
+            }
+          },
+          "required": [
+            "pipeline_id",
+            "state"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "required": [
+            "ok"
+          ],
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "description": "工作空间创建成败（失败即失败，无降级）"
+            },
+            "workspace": {
+              "type": "string",
+              "description": "成功时的最终工作空间坐标"
+            },
+            "task.ws_meta": {
+              "type": "object",
+              "description": "坐标元数据（mode/path 等）"
+            },
+            "error": {
+              "type": "object",
+              "description": "失败原因信封 {message}"
+            }
+          }
+        }
+      }
+    ],
+    "steps": [
+      {
+        "name": "pipeline_workspace_lifecycle",
+        "description": "管道步骤默认入口（自名声明；步骤服务索引兼容映射 method=None，与直引等价）"
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 5,
+  "persistent_fields": [
+    "workspace",
+    "ws_meta",
+    "task.ws_meta"
+  ],
+  "provides": {
+    "capabilities": [
+      {
+        "namespace": "workspace",
+        "methods": [
+          "prepare_task"
+        ],
+        "host": "sidecar",
+        "tool_prefix": "workspace"
+      }
+    ]
+  },
+  "contributes": {
+    "thread_fields": [
+      {
+        "name": "workspace",
+        "type": "directory",
+        "label": "工作空间",
+        "x_metadata_key": "workspace",
+        "x_execution_path": "workspace.source_path",
+        "description": "主会话工作目录（项目路径），留空则使用自动生成的默认目录（拓扑固定 plain）。本插件域（工作空间生命周期）贡献的会话级工作空间设置，随线程创建写入 thread metadata → execution_context.workspace.source_path。"
+      },
+      {
+        "name": "workspaceMode",
+        "type": "select",
+        "label": "工作空间拓扑",
+        "x_metadata_key": "workspace_mode",
+        "x_execution_path": "workspace.mode",
+        "options": [
+          {
+            "label": "plain（直接操作目标目录，默认）",
+            "value": "plain"
+          },
+          {
+            "label": "worktree（隔离副本，需先填写工作空间）",
+            "value": "worktree"
+          }
+        ],
+        "description": "会话工作空间的拓扑形态，与隔离模式相互独立。默认 plain 直接操作目标目录；仅在工作空间已填写时可选择 worktree（在项目上建隔离副本），随线程创建写入 thread metadata → execution_context.workspace.mode。",
+        "x_guard": {
+          "requires": "workspace",
+          "on_empty": "plain"
+        }
+      }
+    ]
+  },
+  "export_fields": [
+    "workspace",
+    "ws_meta",
+    "task.ws_meta"
+  ],
+  "state": {
+    "writes": [
+      "task.ws_meta"
+    ],
+    "reads": [
+      "current_phase",
+      "execution_context",
+      "lineage.parent_pipeline_id",
+      "lineage.parent_ws_meta",
+      "pipeline_id",
+      "session_id",
+      "task.id",
+      "task.ws_meta",
+      "ws_meta",
+      "workspace"
+    ]
+  }
+}

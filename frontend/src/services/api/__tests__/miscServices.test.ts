@@ -13,13 +13,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TranscriptionError, transcribeAudio } from '@/services/api/asr'
 import { searchGlobal } from '@/services/api/search'
-import { getPayloadDiagList, getPayloadDiagFile } from '@/services/api/llmPayload'
+import { getDiagnosticsSettings, getPayloadDiagFile, getPayloadDiagList, updateDiagnosticsSettings } from '@/services/api/llmPayload'
+import { MONITORING_ENDPOINTS } from '@/services/api/endpoints.generated'
 import { getEvaluationMetrics } from '@/services/api/evaluationMetrics'
 
 vi.mock('../client', () => ({
   default: {
     get: vi.fn(),
     post: vi.fn(),
+    put: vi.fn(),
     delete: vi.fn(),
   },
 }))
@@ -210,5 +212,31 @@ describe('评估指标 API - evaluationMetrics', () => {
       // 可选端点请求级标记（P2-2）：评估服务未启用时 404 静默
       optional: true,
     })
+  })
+})
+
+describe('Payload 诊断开关 API - getDiagnosticsSettings / updateDiagnosticsSettings', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('GET 读开关集合：命中用户空间 settings 诊断端点，data 原样返回', async () => {
+    vi.mocked(apiClient.get).mockResolvedValue(
+      okResponse({ diagnostics: { payload_diag: true, prompt_audit: false } }),
+    )
+    const r = await getDiagnosticsSettings()
+    expect(apiClient.get).toHaveBeenCalledWith(MONITORING_ENDPOINTS.mon_diagnostics_settings_get)
+    expect(r.diagnostics).toEqual({ payload_diag: true, prompt_audit: false })
+  })
+
+  it('PUT 合并写开关：partial 透传请求体，返回写后全量', async () => {
+    vi.mocked(apiClient.put).mockResolvedValue(
+      okResponse({ diagnostics: { payload_diag: false, prompt_audit: false } }),
+    )
+    const r = await updateDiagnosticsSettings({ payload_diag: false })
+    expect(apiClient.put).toHaveBeenCalledWith(MONITORING_ENDPOINTS.mon_diagnostics_settings_put, {
+      payload_diag: false,
+    })
+    expect(r.diagnostics.payload_diag).toBe(false)
   })
 })

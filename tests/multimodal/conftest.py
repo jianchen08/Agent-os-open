@@ -1,6 +1,6 @@
 """multimodal 测试 conftest — 0.2 平铺 import 路径。
 
-0.2 架构下多模态模块位于 plugins/shared/system/multimodal/，内部用平铺 import
+0.2 架构下多模态模块位于 plugins/shared/multimodal/，内部用平铺 import
 （from mm_types import ...）。本 conftest 把该目录加入 sys.path。
 
 注意：0.1 的 multimodal.types 在 0.2 重命名为 multimodal.mm_types（模块文件名也变了）。
@@ -17,7 +17,7 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SHARED_ROOT = _REPO_ROOT / "plugins" / "shared"
-_MULTIMODAL_DIR = _SHARED_ROOT / "system" / "multimodal"
+_MULTIMODAL_DIR = _SHARED_ROOT / "multimodal"
 
 _s = str(_MULTIMODAL_DIR)
 # plugins/shared 裸模块（user_space，asr.py 配置用户层解析）以 append 驻留：

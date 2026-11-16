@@ -34,6 +34,13 @@ function getPatchTypeStyle(patchType: string): string {
 /** 单条 trace 行：插件/类型/摘要/token/错误 + 可展开原始 patch */
 function TraceRow({ trace }: { trace: PipelineTraceRow }) {
   const usage = trace.llm_usage
+  // patch 文本惰性化（X27-F1/P-153）：仅 details 展开时才 stringify，
+  // 折叠态大 patch 行不再每行全量 JSON.stringify 卡主线程
+  const [patchOpen, setPatchOpen] = useState(false)
+  const patchText = useMemo(
+    () => (patchOpen ? JSON.stringify(trace.patch_data, null, 2) : null),
+    [patchOpen, trace.patch_data],
+  )
   return (
     <div className="rounded-lg border p-2">
       <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -72,11 +79,16 @@ function TraceRow({ trace }: { trace: PipelineTraceRow }) {
           {trace.summary.length > 200 ? `${trace.summary.slice(0, 200)}…` : trace.summary}
         </div>
       )}
-      <details className="mt-1">
+      <details
+        className="mt-1"
+        onToggle={(e) => setPatchOpen(e.currentTarget.open)}
+      >
         <summary className="text-muted-foreground cursor-pointer text-xs">原始 patch</summary>
-        <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-background p-2 font-mono text-xs">
-          {JSON.stringify(trace.patch_data, null, 2)}
-        </pre>
+        {patchText !== null && (
+          <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-background p-2 font-mono text-xs">
+            {patchText}
+          </pre>
+        )}
       </details>
     </div>
   )

@@ -9,6 +9,8 @@
 import { create } from 'zustand'
 import { STORAGE_KEYS } from '../constants/storage'
 import * as authApi from '../services/api/auth'
+import { classifyLoginFailure, loginFailureBanner } from '../services/api/loginFailure'
+import { transitionCacheUser } from '../services/auth/cacheBoundary'
 import {
   getAccessToken,
   getRefreshTokenValue,
@@ -24,9 +26,49 @@ import {
   onTokenChanged,
 } from '../services/auth/tokenLifecycle'
 import { registerAuthExpiredCallback } from '../services/authCallbacks'
+import { borrowSession, borrowViaShellDevice, mintLocalKernelToken } from '../services/deviceBorrow'
+import { enrollAfterLogin } from '../services/deviceEnroll'
 import { queryClient } from '../services/query/queryClient'
+import { getServerBaseUrl, refreshTokenStorageKey, resolveApiBase } from '../services/shellApiBase'
+import { reconcileShellBackendMode } from '../services/shellBackendMode'
+import {
+  loadShellLocalCredential,
+  markShellAutoLoginDisabled,
+  notifyShellLoginOutcome,
+  shellAutoLoginDisabled,
+} from '../services/shellLocalAuth'
 import type { LoginResponse, RefreshResponse, UserInfoResponse } from '../types/api'
 import type { User } from '../types/models'
+
+/**
+ * 远端借权换发（目标内核签发会话 → 令牌按 @基址 分键落盘）。
+ * 返回落盘的 refresh token（失败 null）。两个调用点共用：启动前置与存量令牌
+ * 失效后的重借。
+ *
+ * 双腿按序、先成先得：①本机内核代持（桌面主腿——本机内核常驻，mint 后经
+ * 本机 sync_agent 握手）；②壳层配对设备直借（移动主腿——远端档本机栈按设计
+ * 不拉起，①必然 mint 失败；壳层 per-device token 与心跳同源，直打云端 relay
+ * /borrow_auth；桌面无壳凭据恒 null，行为不变）。两腿共享同一落盘点。
+ */
+async function borrowRemoteSession(customBase: string): Promise<string | null> {
+  const storeRefresh = (refreshToken: string): string | null => {
+    try {
+      localStorage.setItem(refreshTokenStorageKey(customBase), refreshToken)
+      return refreshToken
+    } catch {
+      // 存储不可用：保持未认证（调用方回落自动登录/手动登录）
+      return null
+    }
+  }
+  const localToken = await mintLocalKernelToken()
+  if (localToken) {
+    const borrowed = await borrowSession(customBase, localToken)
+    if (borrowed.ok && borrowed.refreshToken) return storeRefresh(borrowed.refreshToken)
+  }
+  const shelled = await borrowViaShellDevice(customBase)
+  if (shelled.ok && shelled.refreshToken) return storeRefresh(shelled.refreshToken)
+  return null
+}
 
 /** 认证状态接口 */
 interface AuthState {
@@ -78,12 +120,13 @@ function mapUserInfoToUser(userInfo: UserInfoResponse): User {
   }
 }
 
-/** 登录/注册成功后的公共收尾：落令牌 + 启动主动续期 + 拉取用户信息 */
+/** 登录/注册成功后的公共收尾：落令牌 + 启动主动续期 + 拉取用户信息。
+ * 返回落定的用户（获取失败返回 null——调用方据此跳过切户清账的身份翻转） */
 async function persistSessionAndLoadUser(
   response: LoginResponse | RefreshResponse,
   set: (partial: Partial<AuthState>) => void,
   context: '登录' | '注册',
-): Promise<void> {
+): Promise<User | null> {
   // refresh_token 类型上可选（后端不轮换时省略）：保留现有值兜底
   setTokens(
     response.access_token,
@@ -97,6 +140,10 @@ async function persistSessionAndLoadUser(
     const user = mapUserInfoToUser(userInfo)
     localStorage.setItem(STORAGE_KEYS.AUTH_USER, JSON.stringify(user))
     set({ user })
+    // 登录即入网（ADR 2026-11-02-login-as-enrollment，副链路）：admin 登录成功
+    // 即设备自动入网，失败不阻塞登录主流程（服务内部只告警）。
+    void enrollAfterLogin(user)
+    return user
   } catch (_userError) {
     // 获取用户信息失败不伪造 'unknown' 用户持久化——伪造用户写入 localStorage
     // 会掩盖故障（错误的不一致即掩盖）
@@ -106,7 +153,17 @@ async function persistSessionAndLoadUser(
       user: null,
       error: `${context}成功但获取用户信息失败：${userError}，请重新登录`,
     })
+    return null
   }
+}
+
+/** 本页面会话入网排程去重（认证恢复路径多入口触达；登录路径经
+ * persistSessionAndLoadUser 直调不受此限）。用户面以 store 现值为准。 */
+let enrollScheduled = false
+function scheduleEnrollFromStore(): void {
+  if (enrollScheduled) return
+  enrollScheduled = true
+  void enrollAfterLogin(useAuthStore.getState().user)
 }
 
 /** 认证Store 使用真实后端API进行认证操作。 */
@@ -139,7 +196,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         isLoading: false,
         error: null,
       })
-      await persistSessionAndLoadUser(response, set, '登录')
+      // 本机档自愈计数面复位（S5-A③）：成功登录=自愈达成证据，看门狗闩锁与
+      // 连续计数同清。尽力而为面，不阻塞登录主流程。
+      void notifyShellLoginOutcome(true)
+      const user = await persistSessionAndLoadUser(response, set, '登录')
+
+      // 切户清账（隔离执法点②）：跨户翻转（含令牌过期后换户）统一 purge 全部
+      // 持久化缓存面——zustand persist/查询持久缓存/用户维 localStorage 键，
+      // 旧账户缓存对新账户不可见（1018 实证缺陷：maintenance 登录闪现 admin
+      // 会话）。同户重入（装机版自动登录）不 purge，缓存秒开保持。
+      if (user) {
+        transitionCacheUser(user.id)
+      }
 
       // 认证态翻转即清空全部查询缓存：登录前已挂载的 query（sessions 等）
       // 以旧身份拉取的数据对新用户不可见即弃（invalidate 的重拉失败时旧数据
@@ -158,9 +226,24 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         console.error('登录后启动自生长闭环失败:', err)
       }
     } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : '登录失败'
+      // 三类失败区别呈现（S5-A②/S5-D①）：限速锁=终态锁定文案不诱导重试、
+      // 凭据错=后端原文、网络失败=无法连接内核+目标基址；横幅文案单点在 store。
+      const failure = classifyLoginFailure(error)
+      const errorMessage = loginFailureBanner(
+        failure,
+        resolveApiBase(),
+        error instanceof Error ? error.message : undefined,
+      )
       set({ isLoading: false, error: errorMessage })
-      throw new Error(errorMessage)
+      // 凭据错上报壳层计数面（S5-A③ 漂移自愈）：仅凭据类——429 限速锁不是凭据
+      // 证据（锁窗内重播种只会在锁内空转重启），网络失败无凭据语义。kind 随报
+      // 过桥（原生类别闸执法依据：仅 credential 计数，boot 期连接失败不进面）。
+      if (failure.kind === 'credential') {
+        void notifyShellLoginOutcome(false, 'credential')
+      }
+      // 重抛原错误（附着 code/retry_after_secs 分类字段）：LoginModal 自动链
+      // 据此识别 429 终态停链；重抛 new Error 会丢分类面（消费方只见 message）
+      throw error
     }
   },
 
@@ -187,7 +270,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         isLoading: false,
         error: null,
       })
-      await persistSessionAndLoadUser(response, set, '注册')
+      await persistSessionAndLoadUser(response, set, '注册').then((user) => {
+        // 切户清账（隔离执法点②，同 login）
+        if (user) transitionCacheUser(user.id)
+      })
 
       // 认证态翻转即清空全部查询缓存（同 login：注册即登录）
       queryClient.removeQueries()
@@ -212,6 +298,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   logout: async () => {
     // 登出时 await destroyGrowthLoop 确保完全清理；停止主动续期并清令牌（tokenLifecycle）
     stopAutoRefresh()
+    // 登出意图优先于移动壳本机档免填自动登录（sessionStorage 旗标，应用重启即清）
+    markShellAutoLoginDisabled()
     try {
       const { destroyGrowthLoop } = await import('@/services/modules/GrowthLoop')
       destroyGrowthLoop()
@@ -226,6 +314,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
 
     clearTokens()
+    // 切户清账（隔离执法点②）：会话结束即回收本账户全部持久化缓存面，
+    // 下一个登录者（无论谁）从干净态开始。
+    transitionCacheUser(null)
     // 这些状态会在 sessionListStore.fetchSessions 恢复时被使用，
     // 让重登后自动回到退出前的会话。
     // 注：会话被主动删除时由 sessionListStore 单独清理此 key（合理）。
@@ -269,6 +360,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // 升级残留清擦：access token 两键与 sessionStorage 的 refresh 键任何
       // 版本都非法（storage 面现状见 tokenLifecycle 头注）
       scrubLegacyTokenStorages()
+      // 壳后端模式归位（先于一切登录链：本机档必须先拉起本机栈，否则免填
+      // 自动登录打在没起来的 127.0.0.1 上=「无法连接内核」；残留 remote 的
+      // 病灶见 shellBackendMode.reconcileShellBackendMode 头注）
+      reconcileShellBackendMode()
       const storedUser = localStorage.getItem(STORAGE_KEYS.AUTH_USER)
 
       const memoryToken = getAccessToken()
@@ -294,6 +389,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         // 异步获取最新用户信息
         get()
           .fetchCurrentUser()
+          .then(() => scheduleEnrollFromStore())
           .catch(() => {
             // 获取失败，静默处理
           })
@@ -303,12 +399,26 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       let storedRefreshToken = getRefreshTokenValue()
       if (!storedRefreshToken) {
         // localStorage 批量提交被强杀丢失的兜底：从主进程镜像回读种子
+        // （自定义后端模式 loadMirroredAuthSession 恒 null——镜像文件是桌面
+        // 本机内核专属优化，不跨后端承载令牌）
         const mirrored = await loadMirroredAuthSession()
         if (mirrored) {
-          localStorage.setItem(STORAGE_KEYS.REFRESH_TOKEN, mirrored)
+          localStorage.setItem(refreshTokenStorageKey(), mirrored)
           storedRefreshToken = mirrored
         }
       }
+      // 启动即指向远端 = 配对设备借权免登（ADR 2026-10-22 借权）：本机内核代持
+      // per-device token 向目标借权，落地后走常规 refresh 恢复——全程零登录面
+      // （否则远端档启动即落登录闸，用户 2026-10-22 实测报障）。
+      //
+      // 借权在两处触发：①无存量令牌；②存量令牌失效（认证失败分支）——目标内核
+      // 重启导致令牌作废时必须重新借权，否则坏 token 短路自动登录（当时只清了
+      // 凭据没再借 → 又落登录页，用户 2026-10-22 实测二次撞墙）。
+      const customBase = getServerBaseUrl()
+      if (customBase && !storedRefreshToken) {
+        storedRefreshToken = await borrowRemoteSession(customBase)
+      }
+
       if (storedRefreshToken) {
         // 页面刷新恢复：refresh 轮换换取新 token 对
         try {
@@ -316,18 +426,40 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           // fetchCurrentUser 经 me 带回首登改密标记（D1-4）
           await get().fetchCurrentUser()
           set({ isAuthenticated: true, isInitializing: false })
+          scheduleEnrollFromStore()
           return
         } catch (refreshError) {
           if (isAuthFailureFromError(refreshError)) {
-            // refresh_token 真正失效，登出
-            await get().logout()
+            // 存量 refresh 已死（目标内核换签名密钥重启/过期/吊销）：清凭据后
+            // 继续走下方免填自动登录链，不 return——return 会短路装机/壳自动
+            // 登录，存量坏 token 把「开箱即用+无密码切回本机」劣化成每次手输
+            // （2026-10-22 用户实测报障根因）。此处是初始化清理非用户登出意图：
+            // 不走 logout()（它会落壳自动登录禁用旗标，把下方壳凭据链一并掐死）。
+            clearTokens()
+            transitionCacheUser(null)
+            // 远端档且存量令牌已死 → 重新借权再试一轮（坏 token 不能让用户
+            // 落登录页：借权链就是为「令牌失效后仍免登」而设）
+            if (customBase) {
+              const fresh = await borrowRemoteSession(customBase)
+              if (fresh) {
+                try {
+                  await refresh()
+                  await get().fetchCurrentUser()
+                  set({ isAuthenticated: true, isInitializing: false })
+                  scheduleEnrollFromStore()
+                  return
+                } catch {
+                  // 重新借权后仍失败：落入下方自动登录链
+                }
+              }
+            }
+            // 落入下方免填自动登录链；链全空才落手动登录
+          } else {
+            // 暂时性故障（网络/超时/5xx）：保留凭据，不登出，
+            // 让用户停留在未认证状态，网络恢复后可继续恢复。
             set({ isInitializing: false })
             return
           }
-          // 暂时性故障（网络/超时/5xx）：保留凭据，不登出，
-          // 让用户停留在未认证状态，网络恢复后可继续恢复。
-          set({ isInitializing: false })
-          return
         }
       }
 
@@ -335,7 +467,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // ——宿主提供凭据（仅 app.isPackaged 且 launcher 已播种
       // AGENTOS_ADMIN_PASSWORD 时非空，env 即口令事实源）时走既有登录链；
       // 未播种=部署 bug，回落手动登录。失败同样回落，不阻断初始化。
-      const credential = await window.electronAPI?.adminCredential?.load?.()
+      // 闸门：仅本机内核档（未设 server_base_url）。自定义后端（远端内核）
+      // 账号体系属对方实例——拿本机口令打远端=凭据外泄面+凭据错触发对方
+      // 限速锁（把对方 admin 锁进 429，用户随后的手输也被锁）；远端首登必手输。
+      const credential =
+        getServerBaseUrl() === null ? await window.electronAPI?.adminCredential?.load?.() : null
       if (credential?.username && credential.password) {
         try {
           await get().login(credential.username, credential.password)
@@ -343,6 +479,23 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           return
         } catch {
           // 自动登录失败不阻断初始化，落入下方未认证终态
+        }
+      }
+
+      // 移动壳本机内核档免填自动登录：凭据=壳设备侧生成口令（KernelHost.
+      // localCredentials，SharedPreferences 事实源；非本机档/无壳恒 null）。
+      // 用户本次运行内登出过则跳过（登出意图优先）；失败回落手动登录，
+      // 内核冷启动窗口由 LoginModal 的本机免填重试循环兜底。
+      if (!shellAutoLoginDisabled()) {
+        const shellCredential = await loadShellLocalCredential()
+        if (shellCredential) {
+          try {
+            await get().login(shellCredential.username, shellCredential.password)
+            set({ isInitializing: false })
+            return
+          } catch {
+            // 内核未就绪等：不阻断初始化，落登录页（免填重试继续兜）
+          }
         }
       }
 
@@ -361,6 +514,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     // 持久化用户信息
     localStorage.setItem(STORAGE_KEYS.AUTH_USER, JSON.stringify(user))
+
+    // 切户清账（隔离执法点②）：刷新恢复/改密等路径复确认身份，磁盘身份与
+    // 缓存命名空间漂移（异常态）在此对齐；同户为 no-op。
+    transitionCacheUser(user.id)
 
     // 首登改密标记以 me 为统一出口（登录/刷新/恢复各路径都会走到这里）
     set({ user, mustChangePassword: userInfo.must_change_password === true })
@@ -381,6 +538,10 @@ registerAuthExpiredCallback(async () => {
   } catch {
     // 动态导入失败，忽略
   }
+
+  // 切户清账（隔离执法点②）：认证失效=会话终止，整页刷新前回收持久化缓存面
+  // （重载后自动登录如换户，旧账户缓存不可见）
+  transitionCacheUser(null)
 
   useAuthStore.setState({
     user: null,

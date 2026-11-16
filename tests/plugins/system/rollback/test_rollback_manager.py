@@ -37,14 +37,11 @@ def _make_manager_with_fake_reverser(reverser: Any) -> Any:
     reg = ReverserRegistry()
     # 清掉默认注册的 reverser，换成我们指定的
     reg._reversers = {reverser.name: reverser}
-    reg._tool_mapping = {}
-    for tool in reverser.supported_tools:
-        reg._tool_mapping[tool] = reverser.name
     return RollbackManager(reverser_registry=reg)
 
 
 class _FakeReverser:
-    """可编程的假逆操作器：按 tool_name 返回预设结果。"""
+    """可编程的假逆操作器：按 tool_name 认领并返回预设结果。"""
 
     def __init__(self, name: str = "fake", supported: list[str] | None = None) -> None:
         self._name = name
@@ -56,9 +53,11 @@ class _FakeReverser:
     def name(self) -> str:
         return self._name
 
-    @property
-    def supported_tools(self) -> list[str]:
-        return self._supported
+    def supports_operation(self, operation: Any) -> bool:
+        return operation.tool_name in self._supported
+
+    def can_reverse(self, operation: Any) -> bool:
+        return operation.reversible and self.supports_operation(operation)
 
     async def reverse(self, operation: Any) -> dict[str, Any]:
         self.calls.append(operation)
@@ -328,20 +327,23 @@ class TestRollbackExecution:
         assert fake.calls == []  # 不可逆不调用 reverser
 
     @pytest.mark.asyncio
-    async def test_无reverser时跳过并warn(self) -> None:
+    async def test_查不中逆操作器显式失败不静默skipped(self) -> None:
         from models import OperationType
 
-        # registry 里只支持 file_write，传入未知 tool
+        # registry 里只支持 file_write，传入无人认领的操作
         fake = _FakeReverser(supported=["file_write"])
         mgr = _make_manager_with_fake_reverser(fake)
         await mgr.record_operation(
-            "t1", "unknown_tool", OperationType.CREATE, "a", {}
+            "t1", "unknown_tool", OperationType.EXECUTE, "a", {}
         )
 
         result = await mgr.rollback(task_id="t1", steps=1)
 
-        assert result.skipped_count == 1
-        assert any("未找到逆操作器" in w for w in result.warnings)
+        # B4：能力缺口是回滚失败（该撤销的操作没撤成），不得静默 skipped 假报成功
+        assert result.failed_count == 1
+        assert result.skipped_count == 0
+        assert result.success is False
+        assert any("未找到逆操作器" in e for e in result.errors)
 
     @pytest.mark.asyncio
     async def test_reverser抛异常计入failed且整体success为False(self) -> None:
@@ -404,21 +406,41 @@ class TestReverserRegistry:
         names = {r.name for r in reg.list_reversers()}
         assert {"file_reverser", "git_reverser", "api_reverser"}.issubset(names)
 
-    def test_工具名映射到对应reverser(self) -> None:
+    def test_按操作能力路由到对应reverser(self) -> None:
+        from models import OperationLog, OperationType
         from reversers import get_reverser_registry
 
         reg = get_reverser_registry()
-        assert reg.get_reverser("file_write").name == "file_reverser"
-        assert reg.get_reverser("git_commit").name == "git_reverser"
-        assert reg.get_reverser("api_create").name == "api_reverser"
+        # 文件态变更语义 → file_reverser（工具名无关）
+        file_op = OperationLog(
+            tool_name="delete_file", operation_type=OperationType.DELETE
+        )
+        # git 逆操作载荷 → git_reverser
+        git_op = OperationLog(
+            tool_name="git_commit",
+            operation_type=OperationType.EXECUTE,
+            before_state={"commit_hash": "a" * 40},
+        )
+        # 自定义逆操作定义 → api_reverser
+        api_op = OperationLog(
+            tool_name="api_call",
+            operation_type=OperationType.EXECUTE,
+            reverse_action={"type": "http", "method": "DELETE", "url": "https://x"},
+        )
 
-    def test_未知工具返回None且is_tool_reversible为False(self) -> None:
+        assert reg.get_reverser(file_op).name == "file_reverser"
+        assert reg.get_reverser(git_op).name == "git_reverser"
+        assert reg.get_reverser(api_op).name == "api_reverser"
+
+    def test_无人认领的操作返回None(self) -> None:
+        from models import OperationLog, OperationType
         from reversers import get_reverser_registry
 
         reg = get_reverser_registry()
-        assert reg.get_reverser("unknown") is None
-        assert reg.is_tool_reversible("unknown") is False
-        assert reg.is_tool_reversible("file_write") is True
+        orphan = OperationLog(
+            tool_name="unknown", operation_type=OperationType.EXECUTE
+        )
+        assert reg.get_reverser(orphan) is None
 
     def test_get_reverser_by_name(self) -> None:
         from reversers import get_reverser_registry
@@ -427,14 +449,18 @@ class TestReverserRegistry:
         assert reg.get_reverser_by_name("file_reverser") is not None
         assert reg.get_reverser_by_name("nope") is None
 
-    def test_注册自定义reverser覆盖工具映射(self) -> None:
+    def test_注册自定义reverser进入能力链(self) -> None:
+        from models import OperationLog, OperationType
         from reversers import ReverserRegistry
 
         reg = ReverserRegistry()
-        custom = _FakeReverser(name="custom", supported=["file_write"])
+        custom = _FakeReverser(name="custom", supported=["only_mine"])
         reg.register(custom)
-        # file_write 现在映射到 custom
-        assert reg.get_reverser("file_write") is custom
+        # 自定义逆操作器认领其支持的认知（按 tool_name 编程）
+        op = OperationLog(
+            tool_name="only_mine", operation_type=OperationType.EXECUTE
+        )
+        assert reg.get_reverser(op) is custom
         assert reg.get_reverser_by_name("custom") is custom
 
 
@@ -454,7 +480,7 @@ class TestFileReverser:
         f = tmp_path / "created.txt"
         f.write_text("data")
         op = OperationLog(
-            tool_name="file_create",
+            tool_name="file_write",
             operation_type=OperationType.CREATE,
             target=str(f),
         )
@@ -471,7 +497,7 @@ class TestFileReverser:
 
         f = tmp_path / "ghost.txt"
         op = OperationLog(
-            tool_name="file_create",
+            tool_name="file_write",
             operation_type=OperationType.CREATE,
             target=str(f),
         )
@@ -489,7 +515,7 @@ class TestFileReverser:
         f = tmp_path / "f.txt"
         f.write_text("new")
         op = OperationLog(
-            tool_name="file_update",
+            tool_name="file_write",
             operation_type=OperationType.UPDATE,
             target=str(f),
             before_state={"content": "old"},
@@ -507,7 +533,7 @@ class TestFileReverser:
 
         f = tmp_path / "f.txt"
         op = OperationLog(
-            tool_name="file_update",
+            tool_name="file_write",
             operation_type=OperationType.UPDATE,
             target=str(f),
             before_state={},  # 无 content
@@ -525,7 +551,7 @@ class TestFileReverser:
 
         f = tmp_path / "deleted.txt"
         op = OperationLog(
-            tool_name="file_delete",
+            tool_name="delete_file",
             operation_type=OperationType.DELETE,
             target=str(f),
             before_state={"content": "restored"},
@@ -536,11 +562,46 @@ class TestFileReverser:
         assert result["success"] is True
         assert f.read_text() == "restored"
 
-    def test_supported_tools列表(self) -> None:
+    def test_supports_operation按操作语义判定(self) -> None:
+        from models import OperationLog, OperationType
         from reversers import FileReverser
 
-        tools = FileReverser().supported_tools
-        assert "file_write" in tools and "file_create" in tools
+        rev = FileReverser()
+        assert (
+            rev.supports_operation(
+                OperationLog(tool_name="x", operation_type=OperationType.CREATE)
+            )
+            is True
+        )
+        assert (
+            rev.supports_operation(
+                OperationLog(tool_name="x", operation_type=OperationType.UPDATE)
+            )
+            is True
+        )
+        assert (
+            rev.supports_operation(
+                OperationLog(tool_name="x", operation_type=OperationType.DELETE)
+            )
+            is True
+        )
+        assert (
+            rev.supports_operation(
+                OperationLog(tool_name="x", operation_type=OperationType.EXECUTE)
+            )
+            is False
+        )
+        # 带 reverse_action 的操作归 API 逆操作器，文件逆操作器不认领
+        assert (
+            rev.supports_operation(
+                OperationLog(
+                    tool_name="x",
+                    operation_type=OperationType.DELETE,
+                    reverse_action={"type": "http"},
+                )
+            )
+            is False
+        )
 
     def test_can_reverse仅对支持的reversible操作为True(self) -> None:
         from models import OperationLog, OperationType
@@ -550,14 +611,14 @@ class TestFileReverser:
         ok = OperationLog(
             tool_name="file_write", operation_type=OperationType.UPDATE, reversible=True
         )
-        no_tool = OperationLog(
-            tool_name="git_commit", operation_type=OperationType.UPDATE, reversible=True
+        no_support = OperationLog(
+            tool_name="file_write", operation_type=OperationType.EXECUTE, reversible=True
         )
         no_rev = OperationLog(
             tool_name="file_write", operation_type=OperationType.UPDATE, reversible=False
         )
         assert rev.can_reverse(ok) is True
-        assert rev.can_reverse(no_tool) is False
+        assert rev.can_reverse(no_support) is False
         assert rev.can_reverse(no_rev) is False
 
 

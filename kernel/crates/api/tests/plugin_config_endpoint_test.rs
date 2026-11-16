@@ -87,7 +87,6 @@ fn manifest_with_files(plugin_id: &str, files: Vec<ConfigFileMapping>) -> Plugin
         description: None,
         version: "1.0.0".to_string(),
         plugin_type: PluginType::System,
-        pipeline_role: None,
         language: "python".to_string(),
         host_type: HostType::Sidecar,
         host_group: None,
@@ -99,7 +98,6 @@ fn manifest_with_files(plugin_id: &str, files: Vec<ConfigFileMapping>) -> Plugin
         mcp: None,
         lifecycle: None,
         native: None,
-        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: files,
@@ -120,6 +118,8 @@ fn manifest_with_files(plugin_id: &str, files: Vec<ConfigFileMapping>) -> Plugin
 #[tokio::test]
 async fn test_get_plugin_config_returns_file_content_with_etag() {
     let tmp = tempfile::tempdir().unwrap();
+    // 钉用户根（进程全局 env；不钉则并行期间兄弟用例的 pin 接管本用例读面）
+    let _user_root_guard = UserRootGuard::pin(tmp.path());
     let config_dir = tmp.path().join("config").join("models");
     fs::create_dir_all(&config_dir).unwrap();
     let llm_path = config_dir.join("llm.yaml");
@@ -174,6 +174,8 @@ async fn test_get_plugin_config_returns_file_content_with_etag() {
 #[tokio::test]
 async fn test_get_plugin_config_masks_plaintext_secret() {
     let tmp = tempfile::tempdir().unwrap();
+    // 钉用户根（进程全局 env；不钉则并行期间兄弟用例的 pin 接管本用例读面）
+    let _user_root_guard = UserRootGuard::pin(tmp.path());
     let config_dir = tmp.path().join("config").join("external_tools");
     fs::create_dir_all(&config_dir).unwrap();
     fs::write(
@@ -269,10 +271,10 @@ async fn test_put_plugin_config_preserves_env_placeholder_via_sentinel() {
         .unwrap()
         .to_string();
 
-    // PUT：改 limit，api_key 传 ***（前端 GET 时拿到明文掩码后的 ****，
-    // 但本场景文件存的是占位符，PUT *** 应回退为磁盘原值 ${DEEPSEEK_API_KEY}）
+    // PUT：改 limit，api_key 传 GET 掩码视图的哨兵 ****（前端整树回传掩码视图，
+    // 本场景文件存的是占位符，哨兵应回退为磁盘原值 ${DEEPSEEK_API_KEY}）
     let put_body = serde_json::to_string(&json!({
-        "data": {"name": "glm", "api_key": "***", "limit": 200},
+        "data": {"name": "glm", "api_key": "****", "limit": 200},
         "if_match": etag,
     }))
     .unwrap();
@@ -300,10 +302,100 @@ async fn test_put_plugin_config_preserves_env_placeholder_via_sentinel() {
     assert!(after.contains("200"), "limit must be updated, got: {after}");
 }
 
+/// B2 回归（字面 key 掩码写盘事故复现）：磁盘存字面明文 key 时 GET 掩码视图
+/// 呈 `****`；前端整树 PUT 该视图 + 无关编辑，磁盘必须保留字面原值——掩码
+/// 哨兵绝不落盘（落盘即该 provider 全链 401）。
+#[tokio::test]
+async fn test_put_plugin_config_preserves_literal_plaintext_key_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _user_root_guard = UserRootGuard::pin(tmp.path());
+    let config_dir = tmp.path().join("config").join("models");
+    fs::create_dir_all(&config_dir).unwrap();
+    let llm_path = config_dir.join("llm.yaml");
+    fs::write(
+        &llm_path,
+        "providers:\n  cpa_gateway:\n    keys:\n      - api_key: sk-literal-gw\n        id: cpa_main\nmodels:\n  mock-llm:\n    api_key: sk-model-literal\n",
+    )
+    .unwrap();
+
+    let manifest = manifest_with_files(
+        "llm_service",
+        vec![ConfigFileMapping {
+            id: "llm".to_string(),
+            path: "config/models/llm.yaml".to_string(),
+            label: "LLM".to_string(),
+            target: None,
+            settings: None,
+            fields: vec![],
+        }],
+    );
+
+    let mut state = AppState::new();
+    state.manifests = std::sync::Arc::new(tokio::sync::RwLock::new(vec![manifest]));
+    state.project_root = Some(tmp.path().to_path_buf());
+
+    // GET：拿到掩码视图（与前端 editLlmFile 同流程）
+    let app = build_router(state.clone());
+    let token = admin_token(&app).await;
+    let get_resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/plugins/llm_service/config/llm")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(get_resp.into_body(), 8192)
+        .await
+        .unwrap();
+    let get_json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        get_json["data"]["providers"]["cpa_gateway"]["keys"][0]["api_key"], "****",
+        "GET 视图字面 key 已掩码（keys 数组内同样掩码）"
+    );
+    let etag = get_json["etag"].as_str().unwrap().to_string();
+
+    // PUT：整树回传掩码视图，仅改 keys[0] 无关字段（前端保存链同形）
+    let mut data = get_json["data"].clone();
+    data["providers"]["cpa_gateway"]["keys"][0]["rpm"] = serde_json::json!(60);
+    let put_body = serde_json::to_string(&json!({"data": data, "if_match": etag})).unwrap();
+    let app = build_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/plugins/llm_service/config/llm")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(put_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // 磁盘：字面原值保留，掩码哨兵不落盘
+    let after = fs::read_to_string(&llm_path).unwrap();
+    assert!(
+        after.contains("sk-literal-gw"),
+        "字面 key 必须保留磁盘原值，got: {after}"
+    );
+    assert!(
+        after.contains("sk-model-literal"),
+        "models 区字面 key 同样保留，got: {after}"
+    );
+    assert!(!after.contains("****"), "掩码哨兵绝不落盘，got: {after}");
+    assert!(after.contains("rpm: 60"), "无关编辑正常生效，got: {after}");
+}
+
 /// PUT 缺失 If-Match → 409（B4 乐观锁）。
 #[tokio::test]
 async fn test_put_plugin_config_without_if_match_returns_409() {
     let tmp = tempfile::tempdir().unwrap();
+    // 钉用户根（进程全局 env；不钉则并行期间兄弟用例的 pin 接管本用例读面）
+    let _user_root_guard = UserRootGuard::pin(tmp.path());
     let config_dir = tmp.path().join("config").join("models");
     fs::create_dir_all(&config_dir).unwrap();
     fs::write(config_dir.join("llm.yaml"), "name: glm\n").unwrap();
@@ -349,6 +441,8 @@ async fn test_put_plugin_config_without_if_match_returns_409() {
 #[tokio::test]
 async fn test_get_plugin_config_unknown_file_id_returns_404() {
     let tmp = tempfile::tempdir().unwrap();
+    // 钉用户根（进程全局 env；不钉则并行期间兄弟用例的 pin 接管本用例读面）
+    let _user_root_guard = UserRootGuard::pin(tmp.path());
     fs::create_dir_all(tmp.path().join("config")).unwrap();
 
     let manifest = manifest_with_files(
@@ -644,12 +738,14 @@ async fn test_inline_entry_get_defaults_and_put_writes_manifest() {
             "language": "python",
             "host_type": "sidecar",
             "entry": "python server.py",
+            "capabilities": {},
+            "invoke_entry": "pipeline_context_window_guard",
             "config_files": [{
                 "id": "context_window",
                 "label": "上下文窗口配置",
                 "fields": [
-                    {"name": "compress_trigger_ratio", "type": "slider", "default": 0.55},
-                    {"name": "budgets.l1", "type": "slider", "default": 0.1}
+                    {"name": "compress_trigger_ratio", "label": "压缩触发比例", "type": "slider", "default": 0.55},
+                    {"name": "budgets.l1", "label": "预算·L1 记忆", "type": "slider", "default": 0.1}
                 ]
             }]
         })
@@ -660,14 +756,8 @@ async fn test_inline_entry_get_defaults_and_put_writes_manifest() {
     let mut state = AppState::new();
     state.manifests = std::sync::Arc::new(tokio::sync::RwLock::new(vec![manifest]));
     state.project_root = Some(tmp.path().to_path_buf());
-    state.plugin_dirs = std::sync::Arc::new(
-        [(
-            "pipeline_context_window_guard".to_string(),
-            plugin_dir.clone(),
-        )]
-        .into_iter()
-        .collect(),
-    );
+    state.plugin_loader =
+        Some(agentos_api::test_env::discovered_plugin_loader(&tmp.path().join("plugins")).await);
 
     let app = build_router(state);
     let token = admin_token(&app).await;
@@ -814,7 +904,7 @@ async fn test_referenced_missing_file_yields_empty_view() {
 
 /// 内联形态公共座（path 空）：同一份 fields JSON 同时喂内存 manifest 与磁盘
 /// plugin.json，杜绝两份声明漂移；返回 (临时目录, AppState, plugin_dir)。
-fn inline_state_with_fields(
+async fn inline_state_with_fields(
     plugin_id: &str,
     file_id: &str,
     fields_json: Value,
@@ -865,6 +955,8 @@ fn inline_state_with_fields(
             "language": "python",
             "host_type": "sidecar",
             "entry": "python server.py",
+            "capabilities": {},
+            "invoke_entry": "pipeline_context_window_guard",
             "config_files": [{
                 "id": file_id,
                 "label": file_id,
@@ -877,11 +969,8 @@ fn inline_state_with_fields(
     let mut state = AppState::new();
     state.manifests = std::sync::Arc::new(tokio::sync::RwLock::new(vec![manifest]));
     state.project_root = Some(tmp.path().to_path_buf());
-    state.plugin_dirs = std::sync::Arc::new(
-        [(plugin_id.to_string(), plugin_dir.clone())]
-            .into_iter()
-            .collect(),
-    );
+    state.plugin_loader =
+        Some(agentos_api::test_env::discovered_plugin_loader(&tmp.path().join("plugins")).await);
     (tmp, state, plugin_dir)
 }
 
@@ -894,12 +983,13 @@ async fn test_inline_put_accepts_nested_get_view_round_trip() {
         "pipeline_context_window_guard",
         "context_window",
         json!([
-            {"name": "compress_trigger_ratio", "type": "slider", "default": 0.06},
-            {"name": "budgets.recent", "type": "slider", "default": 0.18},
-            {"name": "budgets.l1", "type": "slider", "default": 0.08},
-            {"name": "compression.enabled", "type": "toggle", "default": true}
+            {"name": "compress_trigger_ratio", "label": "压缩触发比例", "type": "slider", "default": 0.06},
+            {"name": "budgets.recent", "label": "预算·近期记忆", "type": "slider", "default": 0.18},
+            {"name": "budgets.l1", "label": "预算·L1 记忆", "type": "slider", "default": 0.08},
+            {"name": "compression.enabled", "label": "压缩开关", "type": "toggle", "default": true}
         ]),
-    );
+    )
+    .await;
     let app = build_router(state);
     let token = admin_token(&app).await;
     let uri = "/api/v1/plugins/pipeline_context_window_guard/config/context_window";
@@ -1027,7 +1117,8 @@ async fn test_inline_put_rejects_undeclared_leaf_path() {
         json!([
             {"name": "budgets.recent", "type": "slider", "default": 0.18}
         ]),
-    );
+    )
+    .await;
     let app = build_router(state);
     let token = admin_token(&app).await;
     let uri = "/api/v1/plugins/pipeline_context_window_guard/config/context_window";

@@ -17,7 +17,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_CC = str(Path(__file__).resolve().parents[2] / "plugins" / "shared" / "system" / "channel_common")
+_CC = str(Path(__file__).resolve().parents[2] / "plugins" / "shared" / "channel_common")
 if _CC not in sys.path:
     sys.path.append(_CC)
 

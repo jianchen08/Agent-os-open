@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from tests._pipeline_plugin_path import add_plugin_dir
 
-add_plugin_dir("input", "security_check")
+add_plugin_dir("security_check")
 import plugin as sc_mod  # noqa: E402
 
 import os
@@ -21,8 +21,8 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from pipeline.plugin import PluginContext
-from pipeline.types import StateKeys
+from _libs.pipeline_base.plugin import PluginContext
+from _libs.pipeline_base.types import StateKeys
 
 from tests._security_check_harness import (
     unwire_approval_cap,
@@ -46,7 +46,7 @@ def _decision_view(result: Any) -> dict[str, Any]:
 
 def _make_plugin(rules: list[dict[str, Any]] | None = None) -> Any:
     """构建 SecurityCheckPlugin 实例。"""
-    add_plugin_dir("input", "security_check")
+    add_plugin_dir("security_check")
     from plugin import SecurityCheckPlugin
     config: dict[str, Any] = {"enabled": True}
     if rules is not None:

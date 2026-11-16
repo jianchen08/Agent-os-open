@@ -43,7 +43,7 @@ _SHARED_ROOT = _REPO_ROOT / "plugins" / "shared"
 if str(_SHARED_ROOT) not in sys.path:
     sys.path.insert(0, str(_SHARED_ROOT))
 
-import user_space  # noqa: E402
+from _root_api import user_space  # noqa: E402
 
 #: 复制与发现都排除的目录名：``__pycache__``（字节码缓存）、``.venv``
 #: （sidecar 虚拟环境，由 launcher ``uv sync`` 重建）。按名字精确匹配，
@@ -53,8 +53,8 @@ EXCLUDED_DIR_NAMES = ("__pycache__", ".venv")
 #: 插件目录标记文件；发现只认含此文件的目录。
 _PLUGIN_MARKER = "plugin.json"
 
-#: 发现深度上限：``shared/<n>``（1 层）、``shared/<cat>/<n>``（2 层）、
-#: ``shared/pipeline/<phase>/<n>``（3 层）——即 launcher venv 步记录的三种布局。
+#: 发现深度上限：仓内现役为拍平 ``shared/<n>``（1 层，ADR 2026-10-13）；
+#: 2/3 层容忍保留给存量用户空间历史布局（launcher venv 步记录的三种布局）。
 _MAX_DISCOVERY_DEPTH = 3
 
 

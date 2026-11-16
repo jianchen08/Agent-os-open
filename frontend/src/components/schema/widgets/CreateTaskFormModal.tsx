@@ -59,6 +59,10 @@ export function CreateTaskFormModal({
           })
           attachProjectId = project.id
         }
+        // HTTP 200 = 已受理**且工作空间已就绪**（ADR 2026-10-17 出生协议四段式：
+        // 工作空间创建在提交期同步完成，建不出来即返回错误）。故成功提示只断言
+        // 这两件确已发生的事，不再声称"开始执行"——run 跑没跑起来由任务面板的
+        // 真实状态列展示。
         await createRootTask({
           title: String(values.title ?? '').trim(),
           description: String(values.description ?? '').trim(),
@@ -72,9 +76,9 @@ export function CreateTaskFormModal({
         toast.success(
           attachProjectId
             ? projectTitle
-              ? '项目已创建，任务已挂靠并开始执行'
-              : '任务已创建并挂靠项目，开始执行'
-            : '任务已创建并开始执行',
+              ? '项目已创建，任务已挂靠，工作空间已就绪并已派发'
+              : '任务已创建并挂靠项目，工作空间已就绪并已派发'
+            : '任务已创建，工作空间已就绪并已派发',
         )
         onCreated()
       }}

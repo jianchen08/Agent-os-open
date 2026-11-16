@@ -12,12 +12,20 @@
 /* eslint-disable */
 
 
-  /** agent_manager（Agent Manager）：plugin.json 声明 7 端点 */
+  /** acp_quota_pool（ACP Quota Pool）：plugin.json 声明 3 端点 */
+  export const ACP_QUOTA_POOL_ENDPOINTS = {
+    'acp_gateway_start': '/ext/acp_quota_pool/gateway/start',
+    'acp_gateway_status': '/ext/acp_quota_pool/gateway/status',
+    'acp_console_page': '/ext/acp_quota_pool/page/console',
+  } as const
+
+  /** agent_manager（Agent Manager）：plugin.json 声明 8 端点 */
   export const AGENT_MANAGER_ENDPOINTS = {
     'agent_manager_list': '/ext/agent_manager/agents',
     'agent_manager_schema': '/ext/agent_manager/agents/schema',
     'agent_manager_get_config': '/ext/agent_manager/agents/{id}/config',
     'agent_manager_put_config': '/ext/agent_manager/agents/{id}/config',
+    'agent_manager_prompt_preview': '/ext/agent_manager/agents/{id}/prompt-preview',
     'agent_manager_mode_get_config': '/ext/agent_manager/agents/{mode_id}/{stem}/config',
     'agent_manager_mode_put_config': '/ext/agent_manager/agents/{mode_id}/{stem}/config',
     'agent_manager_modes': '/ext/agent_manager/modes',
@@ -52,6 +60,12 @@
     'artifacts_versions': '/ext/artifacts/{artifact_id}/versions',
   } as const
 
+  /** browser_tool（Browser Tool）：plugin.json 声明 2 端点 */
+  export const BROWSER_TOOL_ENDPOINTS = {
+    'browser_live_ticket': '/ext/browser_tool/live',
+    'browser_live_page': '/ext/browser_tool/page/browser-live',
+  } as const
+
   /** channel_wecom（WeCom Channel）：plugin.json 声明 2 端点 */
   export const CHANNEL_WECOM_ENDPOINTS = {
     'wecom_callback': '/ext/channel_wecom/callback',
@@ -80,11 +94,24 @@
     'tables': '/ext/db_admin/tables',
   } as const
 
-  /** dsh_adapter（DSH Plugin Adapter）：plugin.json 声明 3 端点 */
+  /** dsh_adapter（DSH Plugin Adapter）：plugin.json 声明 16 端点 */
   export const DSH_ADAPTER_ENDPOINTS = {
+    'dsh_hooks_translate': '/ext/dsh_adapter/api/dsh/hooks/translate',
+    'dsh_plugins_list': '/ext/dsh_adapter/api/dsh/plugins',
+    'dsh_plugins_disable': '/ext/dsh_adapter/api/dsh/plugins/disable',
+    'dsh_plugins_enable': '/ext/dsh_adapter/api/dsh/plugins/enable',
+    'dsh_plugins_index': '/ext/dsh_adapter/api/dsh/plugins/index',
+    'dsh_plugins_install': '/ext/dsh_adapter/api/dsh/plugins/install',
+    'dsh_plugins_uninstall': '/ext/dsh_adapter/api/dsh/plugins/uninstall',
+    'dsh_manager_page': '/ext/dsh_adapter/page/manager',
     'dsh_skin_assets': '/ext/dsh_adapter/styles/skin-assets/{skin}/{file:path}',
     'dsh_skin_hooks': '/ext/dsh_adapter/styles/skin/{skin}/hooks.mjs',
     'dsh_skin_merged_css': '/ext/dsh_adapter/styles/skin/{skin}/merged.css',
+    'dsh_web_proxy_delete': '/ext/dsh_adapter/web/{path:path}',
+    'dsh_web_proxy_get': '/ext/dsh_adapter/web/{path:path}',
+    'dsh_web_proxy_patch': '/ext/dsh_adapter/web/{path:path}',
+    'dsh_web_proxy_post': '/ext/dsh_adapter/web/{path:path}',
+    'dsh_web_proxy_put': '/ext/dsh_adapter/web/{path:path}',
   } as const
 
   /** e2e_lifecycle_probe（E2E Lifecycle Probe）：plugin.json 声明 1 端点 */
@@ -99,12 +126,9 @@
     'metric_detail': '/ext/evaluation_service/metrics/{metric_id}',
   } as const
 
-  /** hindsight_memory_service（Hindsight Memory Service）：plugin.json 声明 23 端点 */
+  /** hindsight_memory_service（Hindsight Memory Service）：plugin.json 声明 20 端点 */
   export const HINDSIGHT_MEMORY_SERVICE_ENDPOINTS = {
     'kb_list': '/ext/hindsight_memory_service/knowledge-base',
-    'kb_categories_list': '/ext/hindsight_memory_service/knowledge-base/categories',
-    'kb_category_create': '/ext/hindsight_memory_service/knowledge-base/categories',
-    'kb_category_delete': '/ext/hindsight_memory_service/knowledge-base/categories/{name}',
     'kb_check': '/ext/hindsight_memory_service/knowledge-base/check',
     'kb_search': '/ext/hindsight_memory_service/knowledge-base/search',
     'kb_stats': '/ext/hindsight_memory_service/knowledge-base/stats',
@@ -176,16 +200,28 @@
     'mode_godot_panel_page': '/ext/mode_godot/page/godot-panel',
   } as const
 
-  /** mode_planning（Mode Planning）：plugin.json 声明 8 端点 */
-  export const MODE_PLANNING_ENDPOINTS = {
-    'mode_planning_action_create_project': '/ext/mode_planning/data/actions/create_project',
-    'mode_planning_action_plan': '/ext/mode_planning/data/actions/plan',
-    'mode_planning_data_bootstrap': '/ext/mode_planning/data/bootstrap',
-    'mode_planning_data_discussions': '/ext/mode_planning/data/discussions',
-    'mode_planning_data_projects': '/ext/mode_planning/data/projects',
-    'mode_planning_data_sessions': '/ext/mode_planning/data/sessions',
-    'mode_planning_data_tasks': '/ext/mode_planning/data/tasks',
-    'mode_planning_panel_page': '/ext/mode_planning/page/planning-panel',
+  /** mode_personal（Mode Personal）：plugin.json 声明 20 端点 */
+  export const MODE_PERSONAL_ENDPOINTS = {
+    'personal_pim_capture': '/ext/mode_personal/capture',
+    'personal_pim_events_create': '/ext/mode_personal/events',
+    'personal_pim_events_list': '/ext/mode_personal/events',
+    'personal_pim_event_patch': '/ext/mode_personal/events/{id}',
+    'personal_pim_focus_start': '/ext/mode_personal/focus/{id}/start',
+    'personal_pim_focus_stop': '/ext/mode_personal/focus/{id}/stop',
+    'personal_pim_habits_create': '/ext/mode_personal/habits',
+    'personal_pim_habits_list': '/ext/mode_personal/habits',
+    'personal_pim_habit_patch': '/ext/mode_personal/habits/{id}',
+    'personal_pim_habit_checkin': '/ext/mode_personal/habits/{id}/checkin',
+    'personal_pim_today_page': '/ext/mode_personal/page/pim-today',
+    'personal_pim_partner': '/ext/mode_personal/partner',
+    'personal_pim_today': '/ext/mode_personal/today',
+    'personal_pim_todos_create': '/ext/mode_personal/todos',
+    'personal_pim_todos_list': '/ext/mode_personal/todos',
+    'personal_pim_todo_patch': '/ext/mode_personal/todos/{id}',
+    'personal_pim_todo_complete': '/ext/mode_personal/todos/{id}/complete',
+    'personal_pim_todo_defer': '/ext/mode_personal/todos/{id}/defer',
+    'personal_pim_todo_split': '/ext/mode_personal/todos/{id}/split',
+    'personal_pim_undo': '/ext/mode_personal/undo/{op_id}',
   } as const
 
   /** mode_research（Mode Research）：plugin.json 声明 8 端点 */
@@ -200,7 +236,7 @@
     'mode_research_panel_page': '/ext/mode_research/page/research-panel',
   } as const
 
-  /** mode_roleplay（Mode Roleplay）：plugin.json 声明 19 端点 */
+  /** mode_roleplay（Mode Roleplay）：plugin.json 声明 43 端点 */
   export const MODE_ROLEPLAY_ENDPOINTS = {
     'mode_roleplay_action_play': '/ext/mode_roleplay/data/actions/play',
     'mode_roleplay_action_regenerate': '/ext/mode_roleplay/data/actions/regenerate',
@@ -210,15 +246,39 @@
     'mode_roleplay_card_export': '/ext/mode_roleplay/data/cards/export',
     'mode_roleplay_card_import': '/ext/mode_roleplay/data/cards/import',
     'mode_roleplay_card_save': '/ext/mode_roleplay/data/cards/save',
+    'mode_roleplay_combo_delete': '/ext/mode_roleplay/data/combos/delete',
+    'mode_roleplay_combo_save': '/ext/mode_roleplay/data/combos/save',
+    'mode_roleplay_scene_turn': '/ext/mode_roleplay/data/group/scene_turn',
     'mode_roleplay_data_lorebooks': '/ext/mode_roleplay/data/lorebooks',
     'mode_roleplay_lorebook_delete': '/ext/mode_roleplay/data/lorebooks/delete',
     'mode_roleplay_lorebook_import': '/ext/mode_roleplay/data/lorebooks/import',
     'mode_roleplay_lorebook_save': '/ext/mode_roleplay/data/lorebooks/save',
     'mode_roleplay_data_messages': '/ext/mode_roleplay/data/messages',
+    'mode_roleplay_data_packs': '/ext/mode_roleplay/data/packs',
     'mode_roleplay_data_personas': '/ext/mode_roleplay/data/personas',
     'mode_roleplay_persona_delete': '/ext/mode_roleplay/data/personas/delete',
     'mode_roleplay_persona_save': '/ext/mode_roleplay/data/personas/save',
+    'mode_roleplay_precipitation_candidates': '/ext/mode_roleplay/data/precipitation/candidates',
+    'mode_roleplay_precipitation_promote': '/ext/mode_roleplay/data/precipitation/promote',
     'mode_roleplay_data_sessions': '/ext/mode_roleplay/data/sessions',
+    'mode_roleplay_data_wizard_axes': '/ext/mode_roleplay/data/wizard/axes',
+    'mode_roleplay_draft_approve': '/ext/mode_roleplay/data/wizards/draft/approve',
+    'mode_roleplay_draft_lint': '/ext/mode_roleplay/data/wizards/draft/lint',
+    'mode_roleplay_draft_register': '/ext/mode_roleplay/data/wizards/draft/register',
+    'mode_roleplay_draft_reject': '/ext/mode_roleplay/data/wizards/draft/reject',
+    'mode_roleplay_draft_smoke': '/ext/mode_roleplay/data/wizards/draft/smoke',
+    'mode_roleplay_draft_submit': '/ext/mode_roleplay/data/wizards/draft/submit',
+    'mode_roleplay_drafts_list': '/ext/mode_roleplay/data/wizards/drafts',
+    'mode_roleplay_game_config': '/ext/mode_roleplay/game/config',
+    'mode_roleplay_game_detach': '/ext/mode_roleplay/game/detach',
+    'mode_roleplay_game_operation': '/ext/mode_roleplay/game/operation',
+    'mode_roleplay_game_page_data': '/ext/mode_roleplay/game/page',
+    'mode_roleplay_game_attach': '/ext/mode_roleplay/game/session/attach',
+    'mode_roleplay_game_snapshot': '/ext/mode_roleplay/game/snapshot',
+    'mode_roleplay_game_state': '/ext/mode_roleplay/game/state',
+    'mode_roleplay_game_tick': '/ext/mode_roleplay/game/tick',
+    'mode_roleplay_game_turn': '/ext/mode_roleplay/game/turn',
+    'mode_roleplay_game_page': '/ext/mode_roleplay/page/game-host',
     'mode_roleplay_panel_page': '/ext/mode_roleplay/page/roleplay-panel',
     'pipeline_open': '/ext/mode_roleplay/pipeline/open',
   } as const
@@ -235,9 +295,11 @@
     'mode_writing_panel_page': '/ext/mode_writing/page/writing-panel',
   } as const
 
-  /** monitoring（Monitoring Service）：plugin.json 声明 25 端点 */
+  /** monitoring（Monitoring Service）：plugin.json 声明 28 端点 */
   export const MONITORING_ENDPOINTS = {
     'mon_cache_stats': '/ext/monitoring/cache-stats',
+    'mon_diagnostics_settings_get': '/ext/monitoring/diagnostics-settings',
+    'mon_diagnostics_settings_put': '/ext/monitoring/diagnostics-settings',
     'mon_execution_records_list': '/ext/monitoring/execution/records',
     'mon_execution_records_clear_all': '/ext/monitoring/execution/records/clear-all',
     'mon_execution_records_group_summary': '/ext/monitoring/execution/records/group-summary',
@@ -250,6 +312,7 @@
     'mon_payload_diag_list': '/ext/monitoring/payload-diag',
     'mon_payload_diag_get': '/ext/monitoring/payload-diag/file',
     'mon_pipeline_state_full': '/ext/monitoring/pipeline-state',
+    'mon_plugin_health': '/ext/monitoring/plugin-health',
     'mon_plugins_runtime': '/ext/monitoring/plugins',
     'mon_search_global': '/ext/monitoring/search',
     'mon_sessions_context_token_usage': '/ext/monitoring/sessions/{session_id}/context-token-usage',
@@ -269,6 +332,16 @@
     'mm_asr_transcriptions': '/ext/multimodal_service/audio/transcriptions',
     'mm_files_capabilities': '/ext/multimodal_service/files/capabilities',
     'mm_files_supported_types': '/ext/multimodal_service/files/supported-types',
+  } as const
+
+  /** notification_sounds（Notification Sounds）：plugin.json 声明 1 端点 */
+  export const NOTIFICATION_SOUNDS_ENDPOINTS = {
+    'sounds_catalog': '/ext/notification_sounds/sounds',
+  } as const
+
+  /** oauth_broker（OAuth Broker）：plugin.json 声明 1 端点 */
+  export const OAUTH_BROKER_ENDPOINTS = {
+    'oauth_callback': '/ext/oauth_broker/callback',
   } as const
 
   /** onboarding_service（Onboarding Service）：plugin.json 声明 3 端点 */
@@ -301,6 +374,12 @@
     'state_marker_latest': '/ext/pipeline_state_marker_parse/latest',
   } as const
 
+  /** pipeline_todo_track（Todo Track）：plugin.json 声明 2 端点 */
+  export const PIPELINE_TODO_TRACK_ENDPOINTS = {
+    'todo_latest': '/ext/pipeline_todo_track/latest',
+    'todo_plan_page': '/ext/pipeline_todo_track/page/todo-plan',
+  } as const
+
   /** review_service（Review Service）：plugin.json 声明 9 端点 */
   export const REVIEW_SERVICE_ENDPOINTS = {
     'review_create': '/ext/review_service/reviews',
@@ -323,6 +402,44 @@
     'scene_get': '/ext/scene_service/scenes/{scene_id}',
     'scene_update': '/ext/scene_service/scenes/{scene_id}',
     'scene_switch': '/ext/scene_service/scenes/{scene_id}/switch',
+  } as const
+
+  /** snippet_box（SnippetBox）：plugin.json 声明 1 端点 */
+  export const SNIPPET_BOX_ENDPOINTS = {
+    'snippet_box_page': '/ext/snippet_box/page/snippet_box',
+  } as const
+
+  /** sync_agent（Sync Agent）：plugin.json 声明 11 端点 */
+  export const SYNC_AGENT_ENDPOINTS = {
+    'backup_points': '/ext/sync_agent/backup/points',
+    'backup_restore': '/ext/sync_agent/backup/restore',
+    'backup_run': '/ext/sync_agent/backup/run',
+    'backup_status': '/ext/sync_agent/backup/status',
+    'borrow': '/ext/sync_agent/borrow',
+    'borrow_auth': '/ext/sync_agent/borrow_auth',
+    'enroll_device': '/ext/sync_agent/enroll',
+    'mirror_records': '/ext/sync_agent/mirror/records',
+    'sync_probe': '/ext/sync_agent/probe',
+    'relay_devices': '/ext/sync_agent/relay/devices',
+    'sync_status': '/ext/sync_agent/status',
+  } as const
+
+  /** sync_relay（Sync Relay）：plugin.json 声明 14 端点 */
+  export const SYNC_RELAY_ENDPOINTS = {
+    'bootstrap_baseline': '/ext/sync_relay/bootstrap',
+    'borrow_auth': '/ext/sync_relay/borrow_auth',
+    'list_dead_letters': '/ext/sync_relay/dead_letters',
+    'list_devices': '/ext/sync_relay/devices',
+    'register_device': '/ext/sync_relay/devices',
+    'device_heartbeat': '/ext/sync_relay/devices/heartbeat',
+    'enroll_device': '/ext/sync_relay/enroll',
+    'pull_events': '/ext/sync_relay/events',
+    'receive_events': '/ext/sync_relay/events',
+    'exec_verification_set': '/ext/sync_relay/exec_tokens',
+    'issue_exec_token': '/ext/sync_relay/exec_tokens',
+    'registry': '/ext/sync_relay/registry',
+    'routing_view': '/ext/sync_relay/routing_view',
+    'verify_device': '/ext/sync_relay/verify',
   } as const
 
   /** task_form（Task Form Service）：plugin.json 声明 3 端点 */
@@ -363,6 +480,13 @@
     'task_submit': '/ext/task_service/tasks/{task_id}/submit',
   } as const
 
+  /** trace_ingestion（Trace Ingestion）：plugin.json 声明 3 端点 */
+  export const TRACE_INGESTION_ENDPOINTS = {
+    'list_dead_letters': '/ext/trace_ingestion/dead_letters',
+    'ingest_events': '/ext/trace_ingestion/events',
+    'query_events': '/ext/trace_ingestion/events',
+  } as const
+
   /** trigger_setup_tool（Trigger Setup Tool）：plugin.json 声明 10 端点 */
   export const TRIGGER_SETUP_TOOL_ENDPOINTS = {
     'trigger_pipelines': '/ext/trigger_setup_tool/pipelines',
@@ -391,8 +515,9 @@
     'user_tenant_update': '/ext/user_admin/users/{user_id}/tenant',
   } as const
 
-  /** workspace_service（Workspace Service）：plugin.json 声明 11 端点 */
+  /** workspace_service（Workspace Service）：plugin.json 声明 12 端点 */
   export const WORKSPACE_SERVICE_ENDPOINTS = {
+    'workspaces_fs_tree': '/ext/workspace_service/workspaces/fs-tree',
     'workspaces_open_file': '/ext/workspace_service/workspaces/open-file',
     'workspaces_get': '/ext/workspace_service/workspaces/{container_task_id}',
     'workspaces_artifacts': '/ext/workspace_service/workspaces/{container_task_id}/artifacts',

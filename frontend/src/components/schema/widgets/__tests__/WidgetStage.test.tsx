@@ -6,6 +6,7 @@
  * - props.space 透传 DeclaredWidgetLayer（未声明 space 时兜底 'widget-stage'）
  * - 分组声明（group 字段）→ tab 栏 + 仅渲染激活组的声明（组序=组员最小 order）
  * - 无分组声明 → 平铺（兼容 triggers 等小页，不渲染 tab 栏）
+ * - 分组组台组内 grid 布局（R26 监控卡密度），未分组小页保持纵向流
  */
 
 import { fireEvent, render, screen } from '@testing-library/react'
@@ -13,11 +14,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { WidgetStage } from '../WidgetStage'
 
-const layerMock = vi.fn((props: { space?: string; declarations?: unknown[] }) => (
+const layerMock = vi.fn((props: { space?: string; declarations?: unknown[]; layout?: string }) => (
   <div data-testid="declared-layer">{(props.declarations ?? []).length} 件</div>
 ))
 vi.mock('@/components/schema/DeclaredWidgetLayer', () => ({
-  DeclaredWidgetLayer: (props: { space?: string; declarations?: unknown[] }) => layerMock(props),
+  DeclaredWidgetLayer: (props: { space?: string; declarations?: unknown[]; layout?: string }) =>
+    layerMock(props),
 }))
 
 function seedWidgets(widgets: Array<Record<string, unknown>>) {
@@ -91,5 +93,16 @@ describe('WidgetStage — 分组 tab（group 声明）', () => {
     expect(layerMock).toHaveBeenLastCalledWith(
       expect.objectContaining({ declarations: [expect.objectContaining({ id: 'mine' })] }),
     )
+  })
+
+  it('分组组台组内 grid 布局（监控卡密度），未分组小页保持纵向流', () => {
+    render(<WidgetStage space="monitoring" />)
+    expect(layerMock).toHaveBeenLastCalledWith(expect.objectContaining({ layout: 'grid' }))
+
+    seedWidgets([{ id: 'a', type: 'table', space: 'triggers' }])
+    render(<WidgetStage space="triggers" />)
+    expect(layerMock).toHaveBeenLastCalledWith(expect.objectContaining({ space: 'triggers' }))
+    const lastCall = layerMock.mock.lastCall?.[0] as { layout?: string } | undefined
+    expect(lastCall?.layout).toBeUndefined()
   })
 })

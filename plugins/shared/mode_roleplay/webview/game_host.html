@@ -1,0 +1,2082 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>游戏宿主</title>
+  <style>
+    /* 主题跟宿主（与 roleplay_panel 同族）：--ag-* token 经 theme.sync 下行，
+       未到时回落本文件基座。 */
+    :root {
+      --bg: var(--ag-bg, #f6f7fb); --fg: var(--ag-fg, #1a1a2e);
+      --muted: var(--ag-muted, #64748b); --border: var(--ag-border, #d7dce6);
+      --card: var(--ag-card, #ffffff); --accent: var(--ag-accent, #7c5cff);
+      --accent-soft: var(--ag-accent-soft, #efeaff); --chip: var(--ag-chip, #f1f5f9);
+      --ok: var(--ag-ok, #16a34a); --warn: var(--ag-warn, #d97706);
+      --err: var(--ag-err, #dc2626); --radius: var(--ag-radius, 8px);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: var(--ag-bg, #12121c); --fg: var(--ag-fg, #e2e8f0);
+        --muted: var(--ag-muted, #94a3b8); --border: var(--ag-border, #2c2f45);
+        --card: var(--ag-card, #1b1d2e); --accent: var(--ag-accent, #a78bfa);
+        --accent-soft: var(--ag-accent-soft, #2a2547); --chip: var(--ag-chip, #262a3d);
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--fg); background: var(--bg);
+      font-family: -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+      height: 100vh; display: flex; flex-direction: column;
+    }
+    header {
+      display: flex; align-items: center; gap: 8px; flex: none;
+      padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--chip);
+    }
+    header h1 { margin: 0; font-size: 13px; font-weight: 600; }
+    header .spacer { flex: 1; }
+    .lease-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block;
+      background: var(--muted); flex: none; }
+    .lease-dot.on { background: var(--ok); }
+    #gh-lease { color: var(--muted); font-size: 11px; max-width: 300px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #status { color: var(--muted); font-size: 11px; min-width: 60px; text-align: right; }
+    button {
+      padding: 4px 12px; background: var(--accent); color: #fff;
+      border: 1px solid transparent; border-radius: var(--radius);
+      cursor: pointer; font-size: 12px; line-height: 1.6; font-family: inherit;
+    }
+    button.secondary { background: var(--chip); color: var(--fg); border-color: var(--border); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    select, input, textarea {
+      padding: 4px 8px; background: var(--card); color: var(--fg);
+      border: 1px solid var(--border); border-radius: var(--radius);
+      font-size: 12px; line-height: 1.6; font-family: inherit;
+    }
+    textarea { resize: vertical; }
+    .gh-layout { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 3fr); gap: 8px; flex: 1; min-height: 0; padding: 8px; }
+    .pane {
+      display: flex; flex-direction: column; min-height: 0;
+      border: 1px solid var(--border); border-radius: var(--radius);
+      background: var(--card); overflow: hidden;
+    }
+    .pane-head {
+      flex: none; padding: 6px 10px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px;
+    }
+    .pane-head .title { font-weight: 600; color: var(--fg); font-size: 12px; flex: 1; }
+    .pane-body { flex: 1; overflow-y: auto; padding: 10px 12px; }
+    .gh-empty { color: var(--muted); font-size: 11.5px; padding: 8px 0; }
+    /* 快照键值表 */
+    table.kv { width: 100%; border-collapse: collapse; }
+    table.kv th, table.kv td {
+      text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border);
+      vertical-align: top; word-break: break-all;
+    }
+    table.kv th { color: var(--muted); font-weight: 500; width: 40%; }
+    table.kv td { font-family: Consolas, monospace; font-size: 11.5px; }
+    /* delta 流 */
+    .delta { border-bottom: 1px dashed var(--border); padding: 4px 2px; }
+    .delta:last-child { border-bottom: none; }
+    .delta .k { color: var(--accent); font-family: Consolas, monospace; font-size: 11.5px; }
+    .delta .v { font-family: Consolas, monospace; font-size: 11.5px; }
+    .delta .meta { color: var(--muted); font-size: 10px; }
+    /* 叙事流 */
+    .msg { margin-bottom: 8px; }
+    .msg .role { color: var(--muted); font-size: 10.5px; }
+    .msg .content { white-space: pre-wrap; margin-top: 2px; }
+    .msg.assistant .content { color: var(--fg); }
+    .msg.user .content { color: var(--accent); }
+    .msg.engine .content { color: var(--fg); border-left: 2px solid var(--accent-soft); padding-left: 8px; }
+    /* 4d/4e：模板渲染条目与 choices 按钮卡（叙事流内） */
+    .choices { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+    .choices:empty { display: none; }
+    button.choice { background: var(--card); color: var(--fg); border-color: var(--accent); }
+    button.choice:hover { background: var(--accent-soft); }
+    /* 4e：ui.status_bar_template 渲染位（无声明=hidden，骨架零变化） */
+    .statusbar {
+      flex: none; padding: 4px 12px; border-bottom: 1px solid var(--border);
+      background: var(--accent-soft); font-size: 12px;
+    }
+    /* 玩家输入区（turn 通道批 5 接通；选项卡点击自动填入并发送） */
+    .input-bar { flex: none; border-top: 1px solid var(--border); padding: 8px; display: flex; gap: 6px; }
+    .input-bar textarea { flex: 1; min-height: 44px; }
+    /* 操作区（世界内嵌批次二）：声明清单→按钮+内联参数输入（枚举声明制） */
+    .op-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 4px 0; }
+    /* 自包含 ui.page 包页整区接管（v3.1 刀1）：引擎渲染区由包页占据；
+       状态条/输入框画风输入全内置——通用 chrome（状态条+输入行）隐藏 */
+    .pack-page { height: 100%; }
+    body.pack-page-live .statusbar,
+    body.pack-page-live .input-bar { display: none; }
+    /* 开演设置（刀4）：占满主区（setup-live 时隐藏 .gh-layout）；声明字段通用渲染 */
+    #gh-setup { display: none; flex: 1; overflow-y: auto; padding: 12px 16px; border-top: 1px solid var(--border); }
+    body.setup-live #gh-setup { display: block; }
+    body.setup-live .gh-layout { display: none; }
+    .setup-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+    .setup-head .spacer { flex: 1; }
+    #gh-setup h3 { margin: 12px 0 4px; font-size: 11px; color: var(--muted); }
+    #gh-setup .formrow select { min-width: 160px; }
+    .setup-opts { display: flex; flex-direction: column; gap: 4px; }
+    .setup-opt {
+      display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+      border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 5px 10px; cursor: pointer;
+    }
+    .setup-opt:hover { border-color: var(--accent); }
+    .setup-note { color: var(--muted); font-size: 10.5px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🎮 游戏宿主</h1>
+    <span class="lease-dot" id="leaseDot"></span>
+    <span id="gh-lease" data-testid="gh-lease">未绑定会话</span>
+    <span class="spacer"></span>
+    <select id="gh-session" data-testid="gh-session" title="活跃 RP 会话（轮询跟随）"></select>
+    <label style="color:var(--muted);font-size:11px;">轮询(s)<input type="number" id="pollSecs" min="1" max="60" value="5" style="width:52px;margin-left:4px;"></label>
+    <button id="gh-setup-open" data-testid="gh-setup-open" class="secondary" title="开演设置（webview 页内开演配置）">🆕 新的一局</button>
+    <button id="gh-attach" data-testid="gh-attach">接入</button>
+    <button id="gh-detach" data-testid="gh-detach" class="secondary">断开</button>
+    <span id="gh-status"></span>
+  </header>
+  <div id="gh-statusbar" data-testid="gh-statusbar" class="statusbar" hidden></div>
+  <div class="gh-layout">
+    <div class="pane">
+      <div class="pane-head"><span class="title">叙事流</span><span id="narrationMeta"></span></div>
+      <div class="pane-body" id="gh-narration" data-testid="gh-narration">
+        <div id="gh-msgs"></div>
+        <!-- 4d/4e 引擎渲染位：模板条目 + choices 按钮卡（消息之后入叙事流） -->
+        <div id="gh-flow"></div>
+      </div>
+      <!-- 玩家输入区（批 5 turn 通道接通）：发送按钮/输入区由租约门控（renderLease），
+           choices 点击=文本入输入区+自动发送 -->
+      <div class="input-bar">
+        <textarea id="gh-input" data-testid="gh-input" placeholder="玩家输入（接入会话后可发送；点选项卡自动填入并发送）" disabled></textarea>
+        <button id="gh-send" data-testid="gh-send" disabled title="发送到绑定会话（service=main，需先接入）">发送</button>
+      </div>
+    </div>
+    <div class="pane">
+      <div class="pane-head"><span class="title">状态快照</span><span id="snapshotMeta"></span></div>
+      <div class="pane-body" id="gh-snapshot" data-testid="gh-snapshot"><div class="gh-empty">暂无快照（宿主接入后由宿主推送）</div></div>
+      <div class="pane-head"><span class="title">待发变更（game.* delta）</span><span id="deltaMeta"></span></div>
+      <div class="pane-body" id="gh-deltas" data-testid="gh-deltas"><div class="gh-empty">无待发变更</div></div>
+      <div class="pane-head"><span class="title">引擎（graph · template · ui）</span><span id="engineMeta"></span></div>
+      <div class="pane-body" id="gh-engine" data-testid="gh-engine"><div class="gh-empty">未装载 Tier 1 声明（Tier 0 空转）</div></div>
+      <div class="pane-head"><span class="title">NPC 深聊（npc_chat）</span><span id="npcMeta"></span></div>
+      <div class="pane-body" id="gh-npcs" data-testid="gh-npcs"><div class="gh-empty">卡库未过滤到 NPC 角色卡（tags 含 npc）</div></div>
+      <!-- 操作区（世界内嵌批次二）：绑定包 operations 声明清单→按钮+内联输入；
+           点击经桥 POST /game/operation（Propose→Adjudicate），回执上页不吞 -->
+      <div class="pane-head"><span class="title">操作（operations）</span><span id="opMeta"></span></div>
+      <div class="pane-body" id="gh-operations" data-testid="gh-operations"><div class="gh-empty">玩法包未声明操作（无自由操作面）</div></div>
+      <!-- 世界演化区（世界内嵌批次三）：绑定包 tick 声明在场才渲染⏩推进；
+           点击经桥 POST /game/tick（确定性引擎结算零 LLM），回执后状态刷新 -->
+      <div class="pane-head"><span class="title">世界演化（tick）</span><span id="tickMeta"></span></div>
+      <div class="pane-body" id="gh-tick" data-testid="gh-tick"><div class="gh-empty">玩法包未声明世界演化（无周期推进）</div></div>
+    </div>
+  </div>
+
+  <!-- 开演设置（刀4「工作区玩法页全 webview 化」）：无页包/未开会话的开演配置
+       在本 webview 页内渲染；声明字段通用表单（零包名硬编码），包无 init_ui
+       声明=无声明段直接开演。setup-live 时占满主区、.gh-layout 隐藏。 -->
+  <div id="gh-setup" data-testid="gh-setup">
+    <div class="setup-head">
+      <b>🆕 开新的一局</b>
+      <span class="spacer"></span>
+      <button id="gh-setup-close" class="secondary" type="button">收起</button>
+    </div>
+    <div id="gh-setup-body"></div>
+  </div>
+
+  <script>
+  /*@agentos-include:rp-sanitize*/
+  /* 上行为消毒单源装配标记：下发时由服务端以 roleplay_panel.html 的
+     rp-sanitize:single-source 块原位替换（面板刀-Ⅱ 单源复用，页面磁盘不持第
+     三份手抄副本——装配测试执法）。 */
+  /*@agentos-include:rp-bridge*/
+  /* 上行为宿主桥单源装配标记：下发时由服务端以 roleplay_panel.html 的
+     rp-bridge:single-source 块原位替换（agentosFetch/unwrap 面板单源复用，
+     页面磁盘不持手抄副本——装配测试执法，评审修复刀）。 */
+  /*@agentos-include:rp-core*/
+  /* 上行为面板核心纯函数单源装配标记（刀4）：rp_init 快照串组装（`\,`/`\\`
+     转义契约单源在 rp-panel-core 块）+ 路线/词条寻址 + profile 拼接——本页开演
+     设置表单与被挂载包页的 setup 阶段同源消费。可选装配：页无此标记不注入
+     （前刀用户包页兼容零变化），标记在而单源块缺 = fail-closed。三块保持全局
+     （非 IIFE 内）：被本页 document 注入挂载的包页经全局消费这些函数。 */
+
+  // ── 宿主下行桥（theme.sync 同面板族；具名=拆卸契约可移除，见 IIFE 内
+  // __RP_PAGE_DISPOSE__ 注册）──
+  function onHostMessage(e) {
+    var d = e.data;
+    if (!d || !d.__agentos_webview) return;
+    if (d.method === 'theme.sync' && d.params && d.params.tokens) {
+      var rootStyle = document.documentElement.style;
+      Object.keys(d.params.tokens).forEach(function (k) {
+        rootStyle.setProperty(k, d.params.tokens[k]);
+      });
+    }
+  }
+  window.addEventListener('message', onHostMessage);
+
+  // IIFE 化（刀4 嵌入安全）：本页可被面板「工作区·玩法界面」tab document 注入
+  // 挂载（同包页机制）——页内 var/function 全部收敛进 IIFE，不与面板全局
+  // 碰撞（state/$/engine 等同名互覆会炸宿主页）；独立打开时语义不变。
+  (function () {
+  // ── rpHost：宿主桥对象（SDK 运行时面单源，批 5）─────────────────────────────
+  // 页内全部数据面/桥调用的唯一出口——宿主 mod 开发者可见的 API 面 = 此对象 +
+  // REST 端点集（端点清单/载荷形状/时序契约见 GAME_HOST_SDK.md；外部 mod 无
+  // window.agentos 宿主时，同协议经 HTTPS + Bearer 直呼同端点集）。
+  var rpHost = {
+    // 出厂游戏页宿主 id（第一宿主；外部 mod 为第二宿主，同桥协议随扩展波 A）
+    HOST_ID: 'factory_web',
+    // 低层传输：经 window.agentos.postMessage（宿主代发 REST 带 token），同面板。
+    // 页内唯一出站点——其余方法一律经此（单源化，结构测试执法 count==1）。
+    request: function (path, params) {
+      return agentosFetch(path, params);
+    },
+    sessions: function () {
+      return this.request('/ext/mode_roleplay/data/sessions');
+    },
+    // 玩法包清点（刀4 开演设置数据源：init_ui 声明/has_page/variables_count）
+    packs: function () {
+      return this.request('/ext/mode_roleplay/data/packs');
+    },
+    messages: function (sid) {
+      return this.request('/ext/mode_roleplay/data/messages?pipeline_id=' + encodeURIComponent(sid));
+    },
+    state: function (sid) {
+      return this.request('/ext/mode_roleplay/game/state?session_id=' + encodeURIComponent(sid));
+    },
+    config: function (sid) {
+      return this.request('/ext/mode_roleplay/game/config?session_id=' + encodeURIComponent(sid));
+    },
+    cards: function () {
+      return this.request('/ext/mode_roleplay/data/cards');
+    },
+    attach: function (sid, gameSaveId) {
+      var params = { session_id: sid, host_id: this.HOST_ID };
+      if (gameSaveId) params.game_save_id = gameSaveId;
+      return this.request('/ext/mode_roleplay/game/session/attach', params);
+    },
+    detach: function (sid) {
+      return this.request('/ext/mode_roleplay/game/detach', { session_id: sid, host_id: this.HOST_ID });
+    },
+    pushSnapshot: function (sid, turnId, seq, snapState) {
+      return this.request('/ext/mode_roleplay/game/snapshot', {
+        session_id: sid, host_id: this.HOST_ID, turn_id: turnId, seq: seq, state: snapState
+      });
+    },
+    // turn（批 5）：玩家输入派发进绑定会话；service 缺省 main（服务类型框架，
+    // npc_chat=mode.session 专属会话、barks/event 后置占位——见 GAME_HOST_SDK.md）
+    turn: function (sid, text, service) {
+      return this.request('/ext/mode_roleplay/game/turn', {
+        session_id: sid, text: text, service: service || 'main'
+      });
+    },
+    // operation（世界内嵌批次二）：自由操作→结构化命令——页上可发的操作只来自
+    // 声明清单（枚举声明制），id 清单外由服务端 fail-closed 拒绝（未声明=不可发）
+    operation: function (sid, id, params) {
+      return this.request('/ext/mode_roleplay/game/operation', {
+        session_id: sid, operation: { id: id, params: params || {} }
+      });
+    },
+    // tick（世界内嵌批次三）：世界演化周期推进——确定性引擎结算零 LLM；ticks
+    // 缺省 1（服务端上限钳制；触发器定时直达同端点=离台推进）
+    tick: function (sid, ticks) {
+      return this.request('/ext/mode_roleplay/game/tick', {
+        session_id: sid, ticks: ticks || 1
+      });
+    }
+  };
+
+  var POLL_INTERVAL_MS = 5000;  // 快照轮询缺省间隔（页头可调 1-60s，即时生效）
+
+  var state = {
+    sessionId: null,     // 绑定的 RP 会话（pipeline_id）
+    pinned: false,       // 用户手动选会话后停止跟随最新
+    lease: null,
+    snapshot: null,      // 最新快照（引擎 tick 派生 seed 与回推基线用）
+    pollTimer: null,
+    deltaShown: 0,
+    flowChoices: [],     // 当前渲染的 choices（点击消费用，4e）
+    flowOperations: [],  // 当前渲染的 operations（点击消费用，世界内嵌批次二）
+    npcCards: [],        // NPC 角色卡（卡库 tags 含 npc 过滤，npc_chat 深聊入口）
+    bgmSrc: null,        // ui.bgm 待起播源（首交互后起播，4e）
+    bgmStarted: false
+  };
+
+  var disposed = false;  // 拆卸标记（__RP_PAGE_DISPOSE__ 置位）：在飞回包不写 DOM
+  function $(id) { return disposed ? null : document.getElementById(id); }
+  function setStatus(s) { $('gh-status').textContent = s || ''; }
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  // ── 会话绑定（轮询 data/sessions 跟随活跃 RP 会话）───────────────────────────
+  function renderSessionOptions(sessions) {
+    var sel = $('gh-session');
+    var current = sel.value;
+    sel.innerHTML = '';
+    if (!sessions.length) {
+      var opt = document.createElement('option');
+      opt.value = ''; opt.textContent = '（无活跃扮演会话）';
+      sel.appendChild(opt);
+      setupOffer();  // 刀4：无进行中会话=落开演设置视图（收起过不再自动展开）
+      return;
+    }
+    sessions.forEach(function (s) {
+      var opt = document.createElement('option');
+      opt.value = s.pipeline_id;
+      opt.textContent = (s.goal ? s.goal.slice(0, 24) : s.pipeline_id.slice(0, 12)) +
+        (s.run_status ? ' · ' + s.run_status : '');
+      sel.appendChild(opt);
+    });
+    if (state.pinned && current) {
+      sel.value = current;  // 手动选择后固定
+      if (sel.value !== current) { state.pinned = false; }  // 会话消失则恢复跟随
+    }
+    if (!state.pinned) sel.value = sessions[0].pipeline_id;  // 缺省跟随最新
+    state.sessionId = sel.value || null;
+  }
+
+  // ── 通道：attach / detach / state 轮询 ─────────────────────────────────────
+  function attach() {
+    if (!state.sessionId) { setStatus('无会话可接入'); return; }
+    var sid = state.sessionId;
+    rpHost.attach(sid).then(function (res) {
+      if (state.sessionId !== sid) return;  // 接入期间切换会话则丢弃
+      var out = unwrap(res);
+      if (out && out.error) { setStatus(out.error); return; }
+      state.lease = out.lease || null;
+      if (out.status === 'takeover') {
+        setStatus('已接管（前宿主 ' + (out.previous_host && out.previous_host.host_id || '?') +
+          '）——请对账后重推快照');
+      } else {
+        setStatus(out.status === 'renewed' ? '已续租' : '已接入');
+      }
+      renderLease();
+      pollOnce();
+    }).catch(function (err) { setStatus('接入失败: ' + err.message); });
+  }
+
+  function detach() {
+    if (!state.sessionId) { return; }
+    var sid = state.sessionId;
+    rpHost.detach(sid).then(function (res) {
+      if (state.sessionId !== sid) return;
+      var out = unwrap(res);
+      state.lease = null;
+      setStatus(out && out.released ? '已断开' : '本会话无租约');
+      renderLease();
+    }).catch(function (err) { setStatus('断开失败: ' + err.message); });
+  }
+
+  function renderLease() {
+    var dot = $('leaseDot');
+    var label = $('gh-lease');
+    // turn 门控（批 5）：输入区/发送按钮只在持租约时可用（未绑定=禁用；choices
+    // 自动发送同闸在 rpBuildTurnPayload，双闸同源）
+    var canTurn = !!(state.lease && state.sessionId);
+    $('gh-input').disabled = !canTurn;
+    $('gh-send').disabled = !canTurn;
+    if (state.lease) {
+      dot.className = 'lease-dot on';
+      label.textContent = '已接入 · ' + state.sessionId.slice(0, 12) +
+        (state.lease.attached_at ? ' · ' + state.lease.attached_at.slice(11, 19) : '');
+    } else {
+      dot.className = 'lease-dot';
+      label.textContent = state.sessionId ? '未接入 · ' + state.sessionId.slice(0, 12) : '未绑定会话';
+    }
+  }
+
+  function renderSnapshot(snapshot) {
+    var box = $('gh-snapshot');
+    if (!snapshot || !Object.keys(snapshot).length) {
+      $('snapshotMeta').textContent = '';
+      box.innerHTML = '<div class="gh-empty">暂无快照（宿主接入后由宿主推送）</div>';
+      return;
+    }
+    var stateObj = snapshot.state && typeof snapshot.state === 'object' ? snapshot.state : {};
+    var keys = Object.keys(stateObj);
+    $('snapshotMeta').textContent = 'turn ' + snapshot.turn_id + ' · ' + keys.length + ' 键';
+    var html = '<table class="kv"><tbody>';
+    keys.forEach(function (k) {
+      html += '<tr><th>' + escapeHtml(k) + '</th><td>' + escapeHtml(JSON.stringify(stateObj[k])) + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    box.innerHTML = html;
+  }
+
+  function renderDeltas(pending) {
+    var box = $('gh-deltas');
+    if (!pending || !pending.length) {
+      box.innerHTML = '<div class="gh-empty">无待发变更</div>';
+      return;
+    }
+    var html = '';
+    pending.forEach(function (d) {
+      html += '<div class="delta"><span class="k">' + escapeHtml(d.key) + '</span> → ' +
+        '<span class="v">' + escapeHtml(JSON.stringify(d.value)) + '</span>' +
+        (d.turn_seq != null ? ' <span class="meta">turn_seq ' + d.turn_seq + '</span>' : '') +
+        (d.source ? ' <span class="meta">' + escapeHtml(d.source) + '</span>' : '') +
+        '</div>';
+    });
+    box.innerHTML = html;
+  }
+
+  function renderNarration(messages) {
+    var box = $('gh-msgs');  // 消息容器（gh-narration 面板体内，兄弟位 gh-flow 归引擎渲染）
+    if (!messages || !messages.length) {
+      $('narrationMeta').textContent = '';
+      box.innerHTML = '<div class="gh-empty">会话暂无消息</div>';
+      return;
+    }
+    $('narrationMeta').textContent = messages.length + ' 条';
+    var html = '';
+    messages.forEach(function (m) {
+      html += '<div class="msg ' + escapeHtml(m.role) + '"><span class="role">' +
+        escapeHtml(m.role) + (m.created_at ? ' · ' + escapeHtml(m.created_at) : '') +
+        '</span><div class="content">' + escapeHtml(m.content) + '</div></div>';
+    });
+    box.innerHTML = html;
+  }
+
+  function pollOnce() {
+    if (!state.sessionId) { return; }
+    var sid = state.sessionId;
+    var got = { n: 0, snapshot: undefined, messages: undefined };
+    var settle = function () {
+      got.n++;
+      // 双面（快照+叙事）到齐后才做引擎每轮消费（4b 契约：新 narration+新快照）
+      if (got.n === 2 && !disposed && state.sessionId === sid) maybeEngineTick(got.snapshot, got.messages);
+    };
+    rpHost.state(sid)
+      .then(function (res) {
+        if (disposed || state.sessionId !== sid) return;  // 已拆卸/轮询期间切换会话则丢弃
+        var out = unwrap(res);
+        if (out && out.error) { setStatus(out.error); return; }
+        state.lease = out.lease || null;
+        state.snapshot = out.snapshot || null;
+        got.snapshot = out.snapshot;
+        renderLease();
+        renderSnapshot(out.snapshot);
+        renderDeltas(out.pending_deltas);
+      })
+      .catch(function () { /* 读面轮询失败静默，下一轮重试 */ })
+      .then(settle);
+    rpHost.messages(sid)
+      .then(function (res) {
+        if (disposed || state.sessionId !== sid) return;  // 已拆卸/轮询期间切换会话则丢弃
+        got.messages = (unwrap(res) || {}).messages;
+        renderNarration(got.messages);
+      })
+      .catch(function () { /* 同上 */ })
+      .then(settle);
+  }
+
+  function pollSessions() {
+    rpHost.sessions()
+      .then(function (res) {
+        if (disposed) return;  // 已拆卸：不写 DOM
+        renderSessionOptions((unwrap(res) || {}).sessions || []);
+        renderLease();
+      })
+      .catch(function () { /* 会话面失败静默 */ });
+  }
+
+  function restartPolling() {
+    if (state.pollTimer) clearInterval(state.pollTimer);
+    var secs = Math.min(60, Math.max(1, parseInt($('pollSecs').value, 10) || 5));
+    POLL_INTERVAL_MS = secs * 1000;
+    state.pollTimer = setInterval(function () { pollSessions(); pollOnce(); }, POLL_INTERVAL_MS);
+  }
+
+  $('gh-session').addEventListener('change', function () {
+    state.pinned = true;
+    state.sessionId = this.value || null;
+    state.lease = null;
+    renderLease();
+    pollOnce();
+  });
+  $('gh-attach').addEventListener('click', attach);
+  $('gh-detach').addEventListener('click', detach);
+  $('pollSecs').addEventListener('change', restartPolling);
+
+  /* rp-engine:single-source-begin */
+  /* 游戏宿主引擎件（RP 批 4-Ⅱ-核：4a 表达式求值 + 4b narrative_graph 求值 +
+     4c 通用 handler 库 + 可注入种子 rng）。纯函数实现（无 DOM 依赖），node 可
+     直测（tests 抽块执行——面板刀-Ⅱ rpSanitizeHtml 先例）。
+
+     沙箱铁律（硬约束）：表达式经手写 tokenizer + 递归下降求值，禁 eval/Function
+     构造。静态白名单——数值算子 + - * /、比较 > >= < <= == !=、逻辑 and or not、
+     函数 min/max/abs/round/rand、变量引用仅限 state. 点路径（自有键；缺失键
+     =undefined，原型链键 constructor/__proto__ 等一律拒绝）与 state 根自有键的
+     裸标识符短写（卡公式 atk/def 形态，单段；未知标识符拒绝）；白名单外一切
+     （未知标识符/白名单外函数/字面量属性访问/字符串拼接/bracket 下标/赋值/
+     对象字面量/语句形态）求值前拒绝，返回 {ok:false,error} 不执行不外抛。值域：
+     算术与关系比较要求数值（除零拒绝）；等值比较同型才相等；类型归一是 Tier 0
+     装载面/Validator 职责。rand 不隐式取 Math.random——rng 必须注入（同 seed
+     序列确定，宿主页可喂 seed 流）。
+
+     契约：
+     - rpCreateRng(seed) -> ()=>[0,1)（mulberry32）
+     - rpEvalExpr(expr, state, rng) -> {ok:true,value} | {ok:false,error}
+     - rpEvalGraph(graph, ctx) -> null（缺图=引擎件空转，Tier 0）
+       | {ok:true, node, previous_node, jump:{from,to,by}|null, actions, ending}
+       | {ok:false,error}（nodes 形态非法）
+       ctx = {state, narration, player_text, events, rng}；消费顺序：触发器
+       （全局）先、节点决策（局部）后，一轮至多一次跳转；节点位置记忆于
+       state.__graph_node（宿主权威：随快照回推）；node.ending 真值=结局（字
+       符串为结局名，否则节点 id）；node.actions=进入节点时交 4c 的调用清单。
+       决策 when 两形态：'<subject> matches /<pattern>/<flags>'（正则对
+       narration|text 或 player.text）| 状态条件表达式（走 4a）。触发器
+       threshold/location/time 的 when 均为状态条件表达式；event 的 when 为事
+       件名（对 ctx.events 匹配）。声明畸形（jump_to 未知节点/正则非法/未知
+       subject）= 该条跳过（fail-soft 读面）。matches pattern 长度 >512 不编译
+       （ReDoS 长度护栏，缓解非根治——根治需带求值超时的引擎=新依赖禁止，升级
+       触发=合法声明超限的真实需求）。表达式源串 >1024 字符同在 tokenize 前
+       拒绝（RP_EXPR_MAX_SRC）。
+     - rpApplyHandlers(calls, decls, state, rng) -> {ok:true, state, results,
+       events} | {ok:false,error}；calls=[{id, params?}]；decls=聚合通道
+       （GET game/config）的 actions 声明=白名单（未声明 id 拒绝+记录；仅
+       target=engine 执行，target=game 拒绝=game 下发后置）；声明条目 handler
+       字段选择参数化 handler（缺省=id 本身即 handler 名），params=缺省参数、
+       调用 params 覆盖。状态变更在克隆上进行（入参不突变），返回后由宿主随
+       快照回推（不直改后端 story 域）。handler 集：give/take（state.inventory
+       [item]±count，take 超持有拒绝=无负库存；inventory/flags 键 __proto__
+       拒绝+回执——原型链键写面，赋值静默 no-op 假成功）、buy（state.gold 扣减+入库，
+       余额不足拒绝）、move（state.location）、set_flag（state.flags[name]）、
+       heal/damage（path 叶子数值 ±amount，amount 为数值或 4a 表达式）、
+       play_sfx/show_image（表现类：本刀仅产事件占位/URL 校验，媒体播放后置；
+       URL 白名单 https?:// | / | data:image/）。
+     - rpUrlAllowed(url) -> boolean（媒体 URL 白名单 https?:// | / | data:image/
+       ——4c show_image 与 4e ui bg_image/bgm 同源同口径）。
+     - rpRenderTemplate(text, state, rng, macros) -> {ok:true, html}（4d；{{...}}
+       插值子集，宏外文本原样；产物整体过 rpSanitizeHtml 消毒——单源经服务端
+       装配自 rp-sanitize:single-source（面板刀-Ⅱ），页面磁盘不持第三份手抄）：
+       {{state:path.to.key}} → rpWalkPath 点路径读（缺失=空串）；
+       {{getvar::name}} / {{getvar name}} → state 根自有键读（st-design §2.3
+       双形态；缺失=空串）；{{user}} / {{char}} → macros 表（仓内 material.py
+       消费形态对齐；宏值缺席=原样保留占位）；其余 → rpEvalExpr（4a 白名单沙
+       箱；成功=值字符串化插入——undefined/null=空串、string 原样、数值/布尔
+       String()、对象 JSON；拒绝=该宏原样保留，作者可见 fail-soft 不静默）。
+     - rpRenderTemplates(templates, ctx) -> {ok:true, items:[{name, html,
+       choices}]}；templates = {<模板名>: {trigger?, text, choices?}}（映射；
+       text 缺失/非字符串=该条跳过 fail-soft）。渲染集=①当前节点同名模板
+       （ctx.node——节点进入/无 LLM 降级轮的消费时机）+ ②trigger 表达式真值的
+       模板（声明序，走 4a——事件显式触发时机；无 trigger 且非当前节点=不渲染，
+       模板库条目不随轮全量重放）。ctx = {node, state, rng, macros}。缺模板=
+       items 空（Tier 0 空转）。
+     - rpCollectChoices(raw) -> [{text, action}]}（4e 声明式 choices 归一化；
+       raw=[{text, action?}]：text 非字符串/空=条目剔除；action 字符串=id 短写
+       或 {id, params} 对象形态；无 action=null——渲染为叙事流内按钮卡，点击
+       =文本入输入区+自动发送（rpBuildTurnPayload 闸）+action 交 4c（whitelist
+       同源执法））。
+  */
+  function rpCreateRng(seed) {
+    /* mulberry32：同 seed 序列确定（rand 可测性的注入点）。 */
+    var a = (typeof seed === 'number' && isFinite(seed) ? seed : 0) >>> 0;
+    return function () {
+      a = (a + 0x6D2B79F5) >>> 0;
+      var t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  var RP_EXPR_MAX_TOKENS = 256;
+  var RP_EXPR_MAX_DEPTH = 64;
+  // 资源长度护栏（ReDoS 缓解非根治：无求值超时，根治需引擎级=新依赖禁止）：
+  // 表达式源串 tokenize 前截断、声明正则 pattern 编译前截断（该条 fail-soft
+  // 跳过）。升级触发：卡产物出现 >1024 字符合法表达式 / >512 字符合法 pattern
+  // 的真实需求；根治=带求值超时的正则引擎（新依赖，须 ADR）。
+  var RP_EXPR_MAX_SRC = 1024;
+  var RP_MATCHES_PATTERN_MAX = 512;
+  var RP_EXPR_FUNCS = { min: 2, max: 2, abs: 1, round: 1, rand: 2 };
+
+  function rpTokenizeExpr(src) {
+    var s = String(src == null ? '' : src);
+    if (s.length > RP_EXPR_MAX_SRC) return { error: '表达式超长（>' + RP_EXPR_MAX_SRC + ' 字符）' };
+    var tokens = [];
+    var i = 0;
+    while (i < s.length) {
+      var c = s.charAt(i);
+      if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { i++; continue; }
+      var two = s.slice(i, i + 2);
+      if (two === '>=' || two === '<=' || two === '==' || two === '!=') {
+        tokens.push({ t: 'op', v: two }); i += 2; continue;
+      }
+      if ('+-*/<>(),.'.indexOf(c) > -1) { tokens.push({ t: 'op', v: c }); i++; continue; }
+      var num = /^(?:\d+(?:\.\d+)?|\.\d+)/.exec(s.slice(i));
+      if (num) { tokens.push({ t: 'num', v: parseFloat(num[0]) }); i += num[0].length; continue; }
+      if (c === '"' || c === "'") {
+        var j = i + 1, buf = '';
+        while (j < s.length && s.charAt(j) !== c) {
+          if (s.charAt(j) === '\\' && j + 1 < s.length) { buf += s.charAt(j + 1); j += 2; }
+          else { buf += s.charAt(j); j++; }
+        }
+        if (j >= s.length) return { error: '字符串未闭合' };
+        tokens.push({ t: 'str', v: buf }); i = j + 1; continue;
+      }
+      var id = /^[A-Za-z_$\u00a1-\uffff][A-Za-z0-9_$\u00a1-\uffff]*/.exec(s.slice(i));
+      if (id) { tokens.push({ t: 'id', v: id[0] }); i += id[0].length; continue; }
+      return { error: '非法字符: ' + c };
+    }
+    return { tokens: tokens };
+  }
+
+  function rpStrictEqual(a, b) {
+    if (typeof a !== typeof b) return false;
+    return a === b;
+  }
+
+  function rpEvalExpr(expr, state, rng) {
+    var tok = rpTokenizeExpr(expr);
+    if (tok.error) return { ok: false, error: tok.error };
+    var tokens = tok.tokens;
+    if (!tokens.length) return { ok: false, error: '空表达式' };
+    if (tokens.length > RP_EXPR_MAX_TOKENS) {
+      return { ok: false, error: '表达式超长（>' + RP_EXPR_MAX_TOKENS + ' token）' };
+    }
+    var pos = 0;
+    var depth = 0;
+
+    function peek() { return tokens[pos]; }
+    function take() { return tokens[pos++]; }
+    function isOp(v) { var t = tokens[pos]; return !!t && t.t === 'op' && t.v === v; }
+    function isId(v) { var t = tokens[pos]; return !!t && t.t === 'id' && t.v === v; }
+    function fail(msg) { throw { rp: msg }; }
+    function truthy(v) { return !!v; }
+
+    /* 嵌套深度护栏：所有递归入口（组/逻辑/一元）计数，超限静态拒绝不爆栈。 */
+    function guard(fn) {
+      if (++depth > RP_EXPR_MAX_DEPTH) fail('表达式嵌套过深');
+      try { return fn(); } finally { depth--; }
+    }
+
+    function parseOr() {
+      var left = parseAnd();
+      while (isId('or')) {
+        take();
+        var right = parseAnd();
+        left = truthy(left) || truthy(right);  // 不短路：rand 消耗序与书写位置无关
+      }
+      return left;
+    }
+    function parseAnd() {
+      var left = parseNot();
+      while (isId('and')) {
+        take();
+        var right = parseNot();
+        left = truthy(left) && truthy(right);
+      }
+      return left;
+    }
+    function parseNot() {
+      return guard(function () {
+        if (isId('not')) { take(); return !truthy(parseNot()); }
+        return parseCmp();
+      });
+    }
+    function parseCmp() {
+      var left = parseAdd();
+      var t = peek();
+      if (t && t.t === 'op'
+        && (t.v === '>' || t.v === '>=' || t.v === '<' || t.v === '<=' || t.v === '==' || t.v === '!=')) {
+        take();
+        var right = parseAdd();
+        if (t.v === '==') return rpStrictEqual(left, right);
+        if (t.v === '!=') return !rpStrictEqual(left, right);
+        if (typeof left !== 'number' || typeof right !== 'number') fail('关系比较须为数值');
+        if (t.v === '>') return left > right;
+        if (t.v === '>=') return left >= right;
+        if (t.v === '<') return left < right;
+        return left <= right;
+      }
+      return left;
+    }
+    function parseAdd() {
+      var left = parseMul();
+      while (isOp('+') || isOp('-')) {
+        var op = take().v;
+        var right = parseMul();
+        if (typeof left !== 'number' || typeof right !== 'number') {
+          fail(op === '+' ? '字符串拼接出值域（+ 仅数值）' : '算术须为数值');
+        }
+        var r = op === '+' ? left + right : left - right;
+        if (!isFinite(r)) fail('算术溢出');
+        left = r;
+      }
+      return left;
+    }
+    function parseMul() {
+      var left = parseUnary();
+      while (isOp('*') || isOp('/')) {
+        var op = take().v;
+        var right = parseUnary();
+        if (typeof left !== 'number' || typeof right !== 'number') fail('算术须为数值');
+        if (op === '/' && right === 0) fail('除零');
+        var r = op === '*' ? left * right : left / right;
+        if (!isFinite(r)) fail('算术溢出');
+        left = r;
+      }
+      return left;
+    }
+    function parseUnary() {
+      return guard(function () {
+        if (isOp('-')) {
+          take();
+          var v = parseUnary();
+          if (typeof v !== 'number') fail('取负须为数值');
+          return -v;
+        }
+        return parsePrimary();
+      });
+    }
+    function parsePrimary() {
+      var t = take();
+      if (!t) fail('表达式意外结束');
+      if (t.t === 'num') return t.v;
+      if (t.t === 'str') return t.v;
+      if (t.t === 'op' && t.v === '(') {
+        var v = parseExpr();
+        if (!isOp(')')) fail('缺右括号');
+        take();
+        return v;
+      }
+      if (t.t === 'id') {
+        if (t.v === 'true') return true;
+        if (t.v === 'false') return false;
+        if (t.v === 'and' || t.v === 'or' || t.v === 'not') fail('逻辑保留字位置非法');
+        if (t.v === 'state') {
+          if (!isOp('.')) fail('变量引用须为 state. 点路径');
+          return parseStatePath();
+        }
+        if (RP_EXPR_FUNCS[t.v] !== undefined && isOp('(')) return parseCall(t.v);
+        // 裸标识符短写：state 根自有键（卡公式 atk/def 形态，单段）；未知标识符拒绝
+        if (state !== null && typeof state === 'object'
+          && Object.prototype.hasOwnProperty.call(state, t.v)) {
+          return state[t.v];
+        }
+        fail('标识符白名单外: ' + t.v);
+      }
+      fail('意外 token: ' + t.v);
+    }
+    function parseStatePath() {
+      var node = state;
+      var missing = false;
+      while (isOp('.')) {
+        take();
+        var seg = take();
+        if (!seg || seg.t !== 'id') fail('属性访问须为标识符');
+        if (!missing && node !== null && typeof node === 'object'
+          && Object.prototype.hasOwnProperty.call(node, seg.v)) {
+          node = node[seg.v];
+        } else {
+          if (!missing && node !== null && typeof node === 'object' && seg.v in node) {
+            fail('属性访问白名单外（原型链键）: ' + seg.v);
+          }
+          missing = true;  // 缺失键=undefined（等值可判 false；算术/关系会值域拒绝）
+        }
+      }
+      return missing ? undefined : node;
+    }
+    function parseCall(name) {
+      take();  // '('
+      var args = [];
+      if (!isOp(')')) {
+        args.push(parseExpr());
+        while (isOp(',')) { take(); args.push(parseExpr()); }
+      }
+      if (!isOp(')')) fail('缺右括号');
+      take();
+      if (args.length !== RP_EXPR_FUNCS[name]) fail(name + ' 参数须为 ' + RP_EXPR_FUNCS[name] + ' 个');
+      for (var i = 0; i < args.length; i++) {
+        if (typeof args[i] !== 'number' || !isFinite(args[i])) fail(name + ' 参数须为有限数值');
+      }
+      if (name === 'min') return Math.min(args[0], args[1]);
+      if (name === 'max') return Math.max(args[0], args[1]);
+      if (name === 'abs') return Math.abs(args[0]);
+      if (name === 'round') return Math.round(args[0]);
+      if (typeof rng !== 'function') fail('rand 需注入 rng（禁隐式随机）');
+      return args[0] + rng() * (args[1] - args[0]);  // rand(a,b) ∈ [a,b)
+    }
+    function parseExpr() { return guard(function () { return parseOr(); }); }
+
+    try {
+      var value = parseExpr();
+      if (pos !== tokens.length) fail('表达式尾随 token');
+      return { ok: true, value: value };
+    } catch (e) {
+      if (e && e.rp) return { ok: false, error: e.rp };
+      throw e;
+    }
+  }
+
+  function rpParseMatches(when) {
+    /* 决策 when 的正则形态：'<subject> matches /<pattern>/<flags>'。 */
+    var m = /^(.+?)\s+matches\s+\/((?:\\\/|[^\/])+?)\/([a-zA-Z]*)\s*$/.exec(String(when == null ? '' : when));
+    if (!m) return null;
+    return { subject: m[1].trim(), pattern: m[2].replace(/\\\//g, '/'), flags: m[3] };
+  }
+
+  function rpEvalGraph(graph, ctx) {
+    if (!graph || typeof graph !== 'object') return null;  // 缺图=引擎件空转（Tier 0）
+    var nodes = graph.nodes;
+    if (!Array.isArray(nodes) || !nodes.length) return { ok: false, error: 'graph.nodes 须为非空数组' };
+    var st = (ctx && ctx.state && typeof ctx.state === 'object') ? ctx.state : {};
+    var rng = (ctx && typeof ctx.rng === 'function') ? ctx.rng : null;
+    var byId = {};
+    nodes.forEach(function (n) {
+      if (n && typeof n === 'object' && typeof n.id === 'string' && n.id) byId[n.id] = n;
+    });
+    var current = (typeof st.__graph_node === 'string' && byId[st.__graph_node])
+      ? st.__graph_node : nodes[0].id;
+    var triggers = Array.isArray(graph.triggers) ? graph.triggers : [];
+    var fired = null;
+    var i, item, res;
+    for (i = 0; i < triggers.length && !fired; i++) {
+      item = triggers[i];
+      if (!item || typeof item !== 'object' || !byId[item.jump_to]) continue;
+      if (item.type === 'event') {
+        var evName = typeof item.when === 'string' ? item.when : item.event;
+        if (evName && Array.isArray(ctx.events) && ctx.events.indexOf(evName) > -1) {
+          fired = { from: current, to: item.jump_to, by: 'trigger:event' };
+        }
+      } else {
+        // threshold / location / time（及其余）：when=状态条件表达式走 4a
+        res = typeof item.when === 'string' ? rpEvalExpr(item.when, st, rng) : { ok: false };
+        if (res.ok && res.value) {
+          fired = { from: current, to: item.jump_to, by: 'trigger:' + (item.type || 'condition') };
+        }
+      }
+    }
+    var node = byId[current];
+    if (!fired && node && Array.isArray(node.decisions)) {
+      var decisions = node.decisions;
+      for (i = 0; i < decisions.length && !fired; i++) {
+        item = decisions[i];
+        if (!item || typeof item !== 'object' || !byId[item.next]) continue;
+        var hit = false;
+        var mt = rpParseMatches(item.when);
+        if (mt) {
+          var subjectText = null;
+          if (mt.subject === 'player.text') subjectText = ctx.player_text || '';
+          else if (mt.subject === 'narration' || mt.subject === 'text') subjectText = ctx.narration || '';
+          if (subjectText !== null) {
+            // 超长 pattern 不编译（ReDoS 长度护栏，缓解非根治）；
+            // 声明正则畸形=该条不命中（fail-soft）
+            if (mt.pattern.length > RP_MATCHES_PATTERN_MAX) hit = false;
+            else {
+              try { hit = new RegExp(mt.pattern, mt.flags).test(subjectText); }
+              catch (e) { hit = false; }
+            }
+          }
+        } else {
+          res = typeof item.when === 'string' ? rpEvalExpr(item.when, st, rng) : { ok: false };
+          hit = !!(res.ok && res.value);
+        }
+        if (hit) fired = { from: current, to: item.next, by: 'decision' };
+      }
+    }
+    var finalId = fired ? fired.to : current;
+    var finalNode = byId[finalId];
+    var ending = null;
+    if (finalNode && finalNode.ending) {
+      ending = typeof finalNode.ending === 'string' ? finalNode.ending : finalId;
+    }
+    var actions = (finalNode && Array.isArray(finalNode.actions))
+      ? finalNode.actions.filter(function (a) {
+        return !!(a && typeof a === 'object' && typeof a.id === 'string' && a.id);
+      })
+      : [];
+    return {
+      ok: true,
+      node: finalId,
+      previous_node: current,
+      jump: fired,
+      actions: actions,
+      ending: ending
+    };
+  }
+
+  function rpWalkPath(root, path) {
+    var parts = String(path == null ? '' : path).split('.');
+    if (!parts.length || parts.join('') === '') return { ok: false };
+    var node = root;
+    for (var i = 0; i < parts.length; i++) {
+      if (node === null || typeof node !== 'object'
+        || !Object.prototype.hasOwnProperty.call(node, parts[i])) {
+        return { ok: false };
+      }
+      node = node[parts[i]];
+    }
+    return { ok: true, value: node };
+  }
+
+  function rpSetPath(root, path, value) {
+    var parts = String(path == null ? '' : path).split('.');
+    if (!parts.length || parts.join('') === '') return false;
+    var node = root;
+    for (var i = 0; i < parts.length - 1; i++) {
+      if (node === null || typeof node !== 'object'
+        || !Object.prototype.hasOwnProperty.call(node, parts[i])) {
+        return false;
+      }
+      node = node[parts[i]];
+    }
+    if (node === null || typeof node !== 'object') return false;
+    node[parts[parts.length - 1]] = value;
+    return true;
+  }
+
+  function rpUrlAllowed(url) {
+    /* 媒体 URL 白名单（4c show_image 与 4e ui bg_image/bgm 同源同口径）。 */
+    return /^(?:https?:\/\/|\/|data:image\/)/.test(String(url == null ? '' : url));
+  }
+
+  function rpApplyHandlers(calls, decls, state, rng) {
+    if (!Array.isArray(calls)) return { ok: false, error: 'calls 须为数组' };
+    var whitelist = {};
+    (Array.isArray(decls) ? decls : []).forEach(function (d) {
+      if (d && typeof d === 'object' && typeof d.id === 'string' && d.id) {
+        whitelist[d.id] = {
+          target: d.target === undefined ? 'engine' : d.target,
+          handler: d.handler === undefined ? d.id : d.handler,
+          params: (d.params && typeof d.params === 'object') ? d.params : {}
+        };
+      }
+    });
+    var next = JSON.parse(JSON.stringify(state === null || state === undefined ? {} : state));
+    var events = [];
+    function numParam(p, key) {
+      var v = p[key];
+      return (typeof v === 'number' && isFinite(v)) ? v : null;
+    }
+    function ensureInventory() {
+      if (!next.inventory || typeof next.inventory !== 'object') next.inventory = {};
+    }
+    function heldCount(item) {
+      return (next.inventory && typeof next.inventory[item] === 'number') ? next.inventory[item] : 0;
+    }
+    function keyUnsafe(v) {
+      // 原型链键写面拒绝：赋值 obj['__proto__'] = 数值是静默 no-op（回 ok 零落账
+      // =假成功），须显式拒绝+回执（give/take/buy 的 inventory 键、set_flag 的 flags 键）
+      return v === '__proto__';
+    }
+    var HANDLERS = {
+      give: function (p) {
+        if (typeof p.item !== 'string' || !p.item) return { ok: false, error: 'give 须带 item' };
+        if (keyUnsafe(p.item)) return { ok: false, error: 'give item 键非法（__proto__ 拒绝）' };
+        var count = p.count === undefined ? 1 : numParam(p, 'count');
+        if (count === null || count <= 0) return { ok: false, error: 'give count 须为正数' };
+        ensureInventory();
+        next.inventory[p.item] = heldCount(p.item) + count;
+        return { ok: true };
+      },
+      take: function (p) {
+        if (typeof p.item !== 'string' || !p.item) return { ok: false, error: 'take 须带 item' };
+        if (keyUnsafe(p.item)) return { ok: false, error: 'take item 键非法（__proto__ 拒绝）' };
+        var count = p.count === undefined ? 1 : numParam(p, 'count');
+        if (count === null || count <= 0) return { ok: false, error: 'take count 须为正数' };
+        var held = heldCount(p.item);
+        if (held < count) {
+          return { ok: false, error: '持有不足（' + p.item + ' x' + held + ' < ' + count + '）' };
+        }
+        next.inventory[p.item] = held - count;  // 恰好取尽=0，无负库存
+        return { ok: true };
+      },
+      buy: function (p) {
+        if (typeof p.item !== 'string' || !p.item) return { ok: false, error: 'buy 须带 item' };
+        if (keyUnsafe(p.item)) return { ok: false, error: 'buy item 键非法（__proto__ 拒绝）' };
+        var price = numParam(p, 'price');
+        var count = p.count === undefined ? 1 : numParam(p, 'count');
+        if (price === null || price < 0) return { ok: false, error: 'buy price 须为非负数值' };
+        if (count === null || count <= 0) return { ok: false, error: 'buy count 须为正数' };
+        var gold = typeof next.gold === 'number' ? next.gold : 0;
+        var cost = price * count;
+        if (gold < cost) return { ok: false, error: '余额不足（gold ' + gold + ' < ' + cost + '）' };
+        next.gold = gold - cost;
+        ensureInventory();
+        next.inventory[p.item] = heldCount(p.item) + count;
+        return { ok: true };
+      },
+      move: function (p) {
+        if (typeof p.to !== 'string' || !p.to) return { ok: false, error: 'move 须带 to' };
+        next.location = p.to;
+        return { ok: true };
+      },
+      set_flag: function (p) {
+        if (typeof p.name !== 'string' || !p.name) return { ok: false, error: 'set_flag 须带 name' };
+        if (keyUnsafe(p.name)) return { ok: false, error: 'set_flag name 键非法（__proto__ 拒绝）' };
+        if (!next.flags || typeof next.flags !== 'object') next.flags = {};
+        next.flags[p.name] = p.value === undefined ? true : p.value;
+        return { ok: true };
+      },
+      play_sfx: function (p) {
+        if (typeof p.name !== 'string' || !p.name) return { ok: false, error: 'play_sfx 须带 name' };
+        events.push({ type: 'sfx', name: p.name });  // 表现类占位：媒体播放后置
+        return { ok: true };
+      },
+      show_image: function (p) {
+        var url = String(p.url == null ? '' : p.url);
+        if (!rpUrlAllowed(url)) {
+          return { ok: false, error: 'show_image URL 非法（白名单 https?:// | / | data:image/）' };
+        }
+        events.push({ type: 'image', url: url });  // 表现类占位：URL 已过白名单
+        return { ok: true };
+      }
+    };
+    function amountOf(p) {
+      if (typeof p.amount === 'number' && isFinite(p.amount)) return { ok: true, value: p.amount };
+      if (typeof p.amount === 'string') {
+        var r = rpEvalExpr(p.amount, next, rng);  // 数值走 4a（rand 走注入 rng）
+        if (!r.ok || typeof r.value !== 'number' || !isFinite(r.value)) {
+          return { ok: false, error: 'amount 表达式须产出数值' + (r.ok ? '' : '（' + r.error + '）') };
+        }
+        return { ok: true, value: r.value };
+      }
+      return { ok: false, error: 'amount 须为数值或表达式字符串' };
+    }
+    function deltaHandler(sign) {
+      return function (p) {
+        var cur = rpWalkPath(next, p.path);
+        if (!cur.ok || typeof cur.value !== 'number' || !isFinite(cur.value)) {
+          return { ok: false, error: 'path 须指向数值叶子: ' + p.path };
+        }
+        var amt = amountOf(p);
+        if (!amt.ok) return amt;
+        var out = cur.value + sign * amt.value;
+        if (!isFinite(out)) return { ok: false, error: '数值溢出' };
+        rpSetPath(next, p.path, out);
+        return { ok: true };
+      };
+    }
+    HANDLERS.heal = deltaHandler(1);
+    HANDLERS.damage = deltaHandler(-1);
+
+    var results = [];
+    for (var i = 0; i < calls.length; i++) {
+      var call = calls[i];
+      if (!call || typeof call !== 'object' || typeof call.id !== 'string' || !call.id) {
+        results.push({ id: null, ok: false, error: '调用须为带 id 的对象' });
+        continue;
+      }
+      if (!Object.prototype.hasOwnProperty.call(whitelist, call.id)) {
+        results.push({ id: call.id, ok: false, error: '未声明的 action id: ' + call.id });
+        continue;
+      }
+      var decl = whitelist[call.id];
+      if (decl.target !== 'engine') {
+        results.push({
+          id: call.id,
+          ok: false,
+          error: 'target=' + decl.target + ' 下发后置（本刀仅执行 target=engine）'
+        });
+        continue;
+      }
+      var fn = HANDLERS[decl.handler];
+      if (!fn) {
+        results.push({ id: call.id, ok: false, error: '未知 handler: ' + decl.handler });
+        continue;
+      }
+      var params = {};
+      var k;
+      for (k in decl.params) {
+        if (Object.prototype.hasOwnProperty.call(decl.params, k)) params[k] = decl.params[k];
+      }
+      var callParams = (call.params && typeof call.params === 'object') ? call.params : {};
+      for (k in callParams) {
+        if (Object.prototype.hasOwnProperty.call(callParams, k)) params[k] = callParams[k];
+      }
+      var r = fn(params);
+      results.push(r.ok ? { id: call.id, ok: true } : { id: call.id, ok: false, error: r.error });
+    }
+    return { ok: true, state: next, results: results, events: events };
+  }
+
+  /* ── 4d 模板渲染 + 4e 声明式 choices（RP 批 4-Ⅲ，并入引擎单源块）──────────── */
+
+  function rpStringifyTplValue(v) {
+    /* 插值值字符串化：undefined/null=空串；数值/布尔=String；对象=JSON。 */
+    if (v === undefined || v === null) return '';
+    if (typeof v === 'string') return v;
+    if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+    return JSON.stringify(v);
+  }
+
+  function rpRenderTemplate(text, state, rng, macros) {
+    /* {{...}} 插值子集（宏外文本原样）→ 整体过 rpSanitizeHtml。拒绝/缺席的宏
+       原样保留占位（作者可见 fail-soft，不静默吞也不中断渲染）。 */
+    if (typeof text !== 'string') return { ok: false, error: '模板 text 须为字符串' };
+    var parts = text.split(/{{([\s\S]*?)}}/);  // 奇数下标 = 宏段
+    var out = '';
+    for (var i = 0; i < parts.length; i++) {
+      if (i % 2 === 0) { out += parts[i]; continue; }
+      var seg = parts[i].trim();
+      var sp = /^state:([\s\S]+)$/.exec(seg);
+      if (sp) {
+        var walk = rpWalkPath(state, sp[1]);
+        out += walk.ok ? rpStringifyTplValue(walk.value) : '';
+        continue;
+      }
+      var gv = /^(?:getvar::([\s\S]+)|getvar\s+([\s\S]+))$/.exec(seg);
+      if (gv) {
+        var name = (gv[1] || gv[2]).trim();
+        var own = state !== null && typeof state === 'object'
+          && Object.prototype.hasOwnProperty.call(state, name);
+        out += rpStringifyTplValue(own ? state[name] : undefined);
+        continue;
+      }
+      var mc = /^(user|char)$/.exec(seg);
+      if (mc) {
+        var mv = (macros && typeof macros === 'object') ? macros[mc[1]] : undefined;
+        if (mv === undefined || mv === null) { out += '{{' + parts[i] + '}}'; continue; }
+        out += rpStringifyTplValue(mv);
+        continue;
+      }
+      var r = rpEvalExpr(seg, state, rng);
+      out += r.ok ? rpStringifyTplValue(r.value) : '{{' + parts[i] + '}}';
+    }
+    return { ok: true, html: rpSanitizeHtml(out) };
+  }
+
+  function rpRenderTemplates(templates, ctx) {
+    /* 渲染集 = 当前节点同名模板 + trigger 真值模板（声明序）；缺模板=空转。 */
+    if (!templates || typeof templates !== 'object') return { ok: true, items: [] };
+    var st = (ctx && ctx.state && typeof ctx.state === 'object') ? ctx.state : {};
+    var rng = (ctx && typeof ctx.rng === 'function') ? ctx.rng : null;
+    var macros = (ctx && ctx.macros && typeof ctx.macros === 'object') ? ctx.macros : null;
+    var node = (ctx && typeof ctx.node === 'string') ? ctx.node : null;
+    function renderEntry(name, entry) {
+      if (!entry || typeof entry !== 'object' || typeof entry.text !== 'string') return null;
+      var r = rpRenderTemplate(entry.text, st, rng, macros);
+      if (!r.ok) return null;
+      return { name: name, html: r.html, choices: rpCollectChoices(entry.choices) };
+    }
+    var items = [];
+    if (node && Object.prototype.hasOwnProperty.call(templates, node)) {
+      var entry = renderEntry(node, templates[node]);
+      if (entry) items.push(entry);
+    }
+    for (var key in templates) {
+      if (!Object.prototype.hasOwnProperty.call(templates, key)) continue;
+      if (key === node) continue;  // 节点同名模板已渲染，不重复
+      var e = templates[key];
+      if (!e || typeof e !== 'object' || e.trigger === undefined) continue;
+      var res = rpEvalExpr(String(e.trigger), st, rng);
+      if (res.ok && res.value) {
+        var rendered = renderEntry(key, e);
+        if (rendered) items.push(rendered);
+      }
+    }
+    return { ok: true, items: items };
+  }
+
+  function rpCollectChoices(raw) {
+    /* 声明式 choices 归一化：text 非字符串/空剔除；action=id 短写或 {id,params}。 */
+    if (!Array.isArray(raw)) return [];
+    var out = [];
+    for (var i = 0; i < raw.length; i++) {
+      var c = raw[i];
+      if (!c || typeof c !== 'object' || typeof c.text !== 'string' || !c.text) continue;
+      var action = null;
+      if (typeof c.action === 'string' && c.action) {
+        action = { id: c.action, params: {} };
+      } else if (c.action && typeof c.action === 'object'
+        && typeof c.action.id === 'string' && c.action.id) {
+        action = {
+          id: c.action.id,
+          params: (c.action.params && typeof c.action.params === 'object') ? c.action.params : {}
+        };
+      }
+      out.push({ text: c.text, action: action });
+    }
+    return out;
+  }
+
+  /* ── 批 5 turn 通道 + npc_chat 深聊（纯函数同块单源，node 可测）──────────────
+     - rpBuildTurnPayload(lease, sessionId, text, service) ->
+       {ok:true, payload:{session_id, text, service:'main'}} | {ok:false, error}：
+       turn 载荷构造 + 会话绑定闸。无租约/无会话=拒绝（未绑定不发送）；空文本
+       （剥离首尾空白后）=拒绝；service 页面闸——游戏页玩家输入只走 main
+       （服务端为权威闸，页面闸只为本地产可读提示、不发注定被拒的请求）：
+       npc_chat=mode.session 专属会话（深聊入口）、barks/event=后置占位。
+     - rpFilterNpcCards(cards) -> [{id, name, avatar}]：NPC 角色卡过滤（tags 含
+       'npc'，大小写敏感；name 缺失回落 id；非数组/空库=空表）——npc_chat 服务
+       类型一期消费面的列表源（深聊入口数据面）。
+  */
+  function rpBuildTurnPayload(lease, sessionId, text, service) {
+    if (!lease) return { ok: false, error: '未接入宿主租约：先接入会话再发送' };
+    if (!sessionId) return { ok: false, error: '未绑定会话' };
+    var trimmed = String(text == null ? '' : text).replace(/^\s+|\s+$/g, '');
+    if (!trimmed) return { ok: false, error: '输入为空' };
+    var svc = (service === undefined || service === null) ? 'main' : String(service);
+    if (svc !== 'main') {
+      return {
+        ok: false,
+        error: 'service=' + svc + ' 不经 turn 通道（npc_chat=mode.session 专属会话；barks/event=后置占位）'
+      };
+    }
+    return { ok: true, payload: { session_id: sessionId, text: trimmed, service: 'main' } };
+  }
+
+  function rpFilterNpcCards(cards) {
+    if (!Array.isArray(cards)) return [];
+    var out = [];
+    for (var i = 0; i < cards.length; i++) {
+      var c = cards[i];
+      if (!c || typeof c !== 'object' || !Array.isArray(c.tags)) continue;
+      if (c.tags.indexOf('npc') === -1) continue;
+      out.push({
+        id: c.id,
+        name: (typeof c.name === 'string' && c.name) ? c.name : c.id,
+        avatar: c.avatar
+      });
+    }
+    return out;
+  }
+
+  function rpBuildOperationPayload(lease, sessionId, id, params) {
+    /* 操作发送闸（世界内嵌批次二，与 rpBuildTurnPayload 同形）：无租约/无会话
+       页面同闸拒绝（服务端仍 fail-closed 执法——页闸只是 UX 前置）。 */
+    if (!lease) return { ok: false, error: '未接入宿主租约：操作不可发送（接入后可再试）' };
+    if (!sessionId) return { ok: false, error: '未绑定会话' };
+    var opId = String(id == null ? '' : id).trim();
+    if (!opId) return { ok: false, error: '缺少操作 id' };
+    return { ok: true, payload: { session_id: sessionId, operation: { id: opId, params: params || {} } } };
+  }
+
+  function rpCoerceParamValue(raw, decl) {
+    /* 内联输入值按声明 type 尽力转形（UX 前置；服务端 params_schema fail-closed
+       再校验——页面转形不是执法面）。空串=缺席（交服务端 default/必填判定）。 */
+    var v = String(raw == null ? '' : raw).replace(/^\s+|\s+$/g, '');
+    var type = decl && decl.type ? String(decl.type) : 'string';
+    if (v === '') return null;
+    if (type === 'bool') {
+      if (v === 'true') return true;
+      if (v === 'false') return false;
+      return v;
+    }
+    if (type === 'int' || type === 'float') {
+      var n = Number(v);
+      if (isNaN(n)) return v;
+      return type === 'int' ? Math.round(n) : n;
+    }
+    return v;
+  }
+
+  function rpBuildTickPayload(lease, sessionId, ticks) {
+    /* tick 推进闸（世界内嵌批次三，与 rpBuildOperationPayload 同形）：无租约/
+       无会话页面同闸拒绝；ticks 缺省 1、非正整数拒绝（服务端仍 fail-closed
+       校验+上限钳制——页闸只是 UX 前置，上限钳制以服务端为准）。 */
+    if (!lease) return { ok: false, error: '未接入宿主租约：推进不可发送（接入后可再试）' };
+    if (!sessionId) return { ok: false, error: '未绑定会话' };
+    var n = (ticks === undefined || ticks === null || ticks === '') ? 1 : Number(ticks);
+    if (!isFinite(n) || n < 1 || Math.floor(n) !== n) {
+      return { ok: false, error: 'ticks 须为正整数（缺省 1）' };
+    }
+    return { ok: true, payload: { session_id: sessionId, ticks: n } };
+  }
+  /* rp-engine:single-source-end */
+
+  // ── 引擎件页面接线（批 4-Ⅱ-核 4a/4b/4c + 批 4-Ⅲ 4d/4e + 批 5 turn/npc_chat，
+  //    单源块在上方，node 可直测）
+  // - 每轮消费：新 narration 或新快照（非宿主自推回声）到齐后 rpEvalGraph；跳转/
+  //   结局/节点 actions 写入 state 后随快照回推（宿主权威，不直改后端 story 域）；
+  //   无 LLM 降级轮（快照更新/节点进入而叙事缺席）同样消费——4d 模板渲染时机；
+  // - 声明装载：GET game/config（会话绑定卡+pack 聚合 rules/graph/actions/
+  //   template/ui；无声明=空转）；
+  // - 4d 模板渲染：当前节点同名模板 + trigger 真值模板 → rpSanitizeHtml 消毒后
+  //   入叙事流；4e choices=节点/模板声明 → 叙事流内按钮卡（点击=文本入输入区+
+  //   自动发送+action 交 4c）；4e ui=status_bar_template（4d 同款渲染）
+  //   + bg_image/bgm（rpUrlAllowed 白名单；bgm 仅用户交互后起播——浏览器策略）；
+  // - turn 通道（批 5 已接通）：输入区/choices 发送走 rpBuildTurnPayload 闸 +
+  //   rpHost.turn（POST /game/turn，service=main）；服务类型框架 npc_chat=mode.session
+  //   专属会话（NPC 深聊面板）、barks/event=后置占位（GAME_HOST_SDK.md 登记触发条件）；
+  // - 操作区（世界内嵌批次二已接通）：operations 声明清单→按钮+内联输入，点击走
+  //   rpBuildOperationPayload 闸 + rpHost.operation（POST /game/operation，
+  //   Propose→Adjudicate）；applied=状态刷新（pollOnce）+回执回显，rejected=原因
+  //   原文上页不吞（拒绝必须带原因）；
+  // - 世界演化区（世界内嵌批次三已接通）：tick 声明在场才渲染⏩推进（ticks 输入
+  //   缺省 1），点击走 rpBuildTickPayload 闸 + rpHost.tick（POST /game/tick，
+  //   确定性引擎结算零 LLM）；advanced=状态刷新+delta 回显，空转/被拒原因上页
+  //   不吞；自包含 ui.page 包页不接（has_page 页引擎区未接，台账登记留白）；
+  // - 已接：attach/detach 租约 + 快照轮询渲染 + game.* delta 显示 + 叙事流 +
+  //   NPC 深聊面板（data/cards 过滤 + mode.session 会话出生）。
+
+  var engine = {
+    config: null,          // 当前会话声明聚合（/game/config 载荷）
+    configSession: null,
+    lastNarrationFp: null, // 每轮消费指纹（新 narration 才求值，轮询不重入）
+    lastSnapKey: null,     // 已消费快照指纹（turn:seq——4d 无 LLM 降级轮的消费触发）
+    lastSelfPush: null     // 宿主自推回声指纹（回推落定后的轮询回读不重复消费）
+  };
+
+  function loadEngineConfig() {
+    var sid = state.sessionId;
+    if (!sid || engine.configSession === sid) return;
+    rpHost.config(sid)
+      .then(function (res) {
+        if (state.sessionId !== sid) return;
+        engine.config = unwrap(res) || {};
+        engine.configSession = sid;
+        engine.lastNarrationFp = null;  // 换会话重置消费指纹
+        engine.lastSnapKey = null;
+        engine.lastSelfPush = null;
+        applyUiStatics(engine.config.ui);  // 4e：背景/bgm 随声明装载（与 tick 无关）
+        renderOperations(engine.config.operations);  // 操作区随声明装载（批次二）
+        renderTick(engine.config.tick);  // 世界演化区随声明装载（批次三）
+        // 自包含 ui.page（v3.1 刀1）：包页整区接管引擎渲染区；无声明 = 通用
+        // 渲染现状零变化（卸载残留包页 chrome）。
+        if (engine.config.ui_page) mountPackPage(sid);
+        else { unmountPackPage(); renderEngineIdle(); }
+      })
+      .catch(function () { /* 声明面失败静默，下一轮重取 */ });
+  }
+
+  // ── 自包含 ui.page 包页接管（v3.1 刀1）───────────────────────────────────────
+  // document 注入选型（iframe/srcdoc 不可行的原因）：agentosFetch（rp-bridge
+  // 单源）绑定 window.agentos——宿主 webview 顶层窗口对象；srcdoc iframe 的
+  // window 无该对象，opaque-origin 中继需在页内分叉桥单源（违背单源装配契约）。
+  // 同窗 document 注入保桥函数原样可用（包页经 agentosFetch 消费 /game/config
+  // 与 /game/state 既有载荷）；包内 <script> innerHTML 不执行，逐个重建触发。
+  var packPage = { session: null, mounting: false };
+
+  function mountPackPage(sid) {
+    if (packPage.session === sid || packPage.mounting) return;
+    packPage.mounting = true;
+    rpHost.request('/ext/mode_roleplay/game/page?session_id=' + encodeURIComponent(sid))
+      .then(function (res) {
+        packPage.mounting = false;
+        if (state.sessionId !== sid) return;
+        var out = unwrap(res) || {};
+        packPage.session = sid;
+        if (!out.page_html) {  // 无声明/装配失败 = page_html null，回落通用渲染
+          unmountPackPage();
+          renderEngineIdle();
+          return;
+        }
+        mountPackPageHtml(out.page_html);
+      })
+      .catch(function () { packPage.mounting = false; /* 下一轮重取 */ });
+  }
+
+  function mountPackPageHtml(html) {
+    document.body.classList.add('pack-page-live');
+    $('engineMeta').textContent = '包页接管（ui.page）';
+    var box = $('gh-engine');
+    box.innerHTML = '<div id="gh-packpage" class="pack-page"></div>';
+    var host = $('gh-packpage');
+    // 会话注入通道：包内页脚本经 window.__RP_PAGE_SESSION__ 取绑定会话
+    // （document 注入形态下页无自有 URL query，宿主挂载前写入）。
+    window.__RP_PAGE_SESSION__ = state.sessionId;
+    var tpl = document.createElement('template');
+    tpl.innerHTML = html;
+    Array.prototype.slice.call(tpl.content.childNodes).forEach(function (node) {
+      if (node.tagName === 'SCRIPT') {
+        var s = document.createElement('script');
+        Array.prototype.slice.call(node.attributes).forEach(function (a) {
+          s.setAttribute(a.name, a.value);
+        });
+        s.textContent = node.textContent;
+        host.appendChild(s);
+      } else {
+        host.appendChild(node);
+      }
+    });
+  }
+
+  function unmountPackPage() {
+    document.body.classList.remove('pack-page-live');
+    packPage.session = null;
+  }
+
+  function engineHasDecls(cfg) {
+    return !!(cfg && (cfg.rules || cfg.narrative_graph || cfg.actions || cfg.template || cfg.ui));
+  }
+
+  function renderEngineIdle() {
+    var box = $('gh-engine');
+    if (!engineHasDecls(engine.config)) {
+      box.innerHTML = '<div class="gh-empty">未装载 Tier 1 声明（Tier 0 空转）</div>';
+      $('engineMeta').textContent = '';
+      return;
+    }
+    var cfg = engine.config;
+    var bits = [];
+    if (cfg.narrative_graph && cfg.narrative_graph.nodes) {
+      bits.push('graph ' + cfg.narrative_graph.nodes.length + ' 节点');
+    }
+    if (cfg.actions) bits.push('actions ' + cfg.actions.length);
+    if (cfg.rules) bits.push('rules');
+    if (cfg.template) bits.push('template ' + Object.keys(cfg.template).length);
+    if (cfg.ui) bits.push('ui ' + Object.keys(cfg.ui).length);
+    $('engineMeta').textContent = bits.join(' · ') + (cfg.card_id ? ' · ' + cfg.card_id : '');
+  }
+
+  function renderEngineTick(out, applied, tplItems, choiceCount) {
+    var html = '<div>节点 <b>' + escapeHtml(out.node) + '</b>';
+    if (out.jump) {
+      html += ' ← ' + escapeHtml(out.jump.from) + '（' + escapeHtml(out.jump.by) + '）';
+    }
+    if (out.ending) html += ' · 结局 <b>' + escapeHtml(out.ending) + '</b>';
+    html += '</div>';
+    (tplItems || []).forEach(function (it) {
+      html += '<div class="meta">模板 ' + escapeHtml(it.name) + ' 已渲染</div>';
+    });
+    if (choiceCount) html += '<div class="meta">choices ' + choiceCount + ' 项待选</div>';
+    (applied && applied.results || []).forEach(function (r) {
+      html += '<div class="delta"><span class="k">' + escapeHtml(r.id) + '</span> → ' +
+        (r.ok ? '<span class="meta">ok</span>'
+          : '<span class="meta" style="color:var(--err)">' + escapeHtml(r.error) + '</span>') +
+        '</div>';
+    });
+    (applied && applied.events || []).forEach(function (ev) {
+      html += '<div class="delta"><span class="meta">' + escapeHtml(ev.type) + '</span> ' +
+        escapeHtml(ev.name || ev.url || '') + '</div>';
+    });
+    $('gh-engine').innerHTML = html;
+  }
+
+  function narrationFingerprint(messages) {
+    if (!messages || !messages.length) return '0';
+    var last = messages[messages.length - 1];
+    return messages.length + ':' + String(last.content || '').slice(0, 80);
+  }
+
+  function pushEngineSnapshot(sid, nextState) {
+    var snap = state.snapshot;
+    var seq = (snap ? snap.seq : 0) + 1;
+    // 自推回声指纹：回推落定后下一轮轮询回读到本 seq，不再触发消费（4d 闭环防重入）
+    engine.lastSelfPush = (snap ? snap.turn_id : 0) + ':' + seq;
+    rpHost.pushSnapshot(sid, snap ? snap.turn_id : 0, seq, nextState).then(function (res) {
+      var out = unwrap(res);
+      if (out && out.error) { setStatus('引擎回推失败: ' + out.error); return; }
+      if (state.sessionId === sid) setStatus('引擎状态已回推（宿主权威）');
+    }).catch(function (err) { setStatus('引擎回推失败: ' + err.message); });
+  }
+
+  // ── 4e ui 渲染位（无 ui 声明=现状骨架零变化）─────────────────────────────────
+  function renderStatusBar(ui, s) {
+    var bar = $('gh-statusbar');
+    var tpl = (ui && typeof ui === 'object') ? ui.status_bar_template : null;
+    if (typeof tpl !== 'string' || !tpl) { bar.hidden = true; bar.innerHTML = ''; return; }
+    var r = rpRenderTemplate(tpl, s, null, null);  // 4d 同款渲染（状态条不喂 rand：rng=null）
+    if (!r.ok || !r.html) { bar.hidden = true; bar.innerHTML = ''; return; }
+    bar.hidden = false;
+    bar.innerHTML = r.html;  // 消毒产物（rpRenderTemplate 契约）
+  }
+
+  function applyUiStatics(ui) {
+    if (!ui || typeof ui !== 'object') return;
+    if (typeof ui.bg_image === 'string' && ui.bg_image && rpUrlAllowed(ui.bg_image)) {
+      document.body.style.backgroundImage = 'url("' + ui.bg_image.replace(/"/g, '%22') + '")';
+    }
+    if (typeof ui.bgm === 'string' && ui.bgm && rpUrlAllowed(ui.bgm) && !state.bgmSrc) {
+      state.bgmSrc = ui.bgm;  // 起播武装：仅用户交互后播放（浏览器自动播放策略，克制）
+    }
+  }
+
+  // ── 4d/4e 叙事流内渲染：模板条目 + choices 按钮卡 ────────────────────────────
+  function renderFlow(tplItems, choices) {
+    var box = $('gh-flow');
+    var html = '';
+    (tplItems || []).forEach(function (it) {
+      // it.html 为 rpRenderTemplate 产物（已过 rpSanitizeHtml，不再转义）
+      html += '<div class="msg engine"><span class="role">引擎 · ' + escapeHtml(it.name) +
+        '</span><div class="content">' + it.html + '</div></div>';
+    });
+    if (choices && choices.length) {
+      html += '<div class="choices" data-testid="gh-choices">';
+      choices.forEach(function (c, i) {
+        html += '<button type="button" class="choice" data-ci="' + i + '">' +
+          escapeHtml(c.text) + '</button>';
+      });
+      html += '</div>';
+    }
+    box.innerHTML = html;
+    state.flowChoices = choices || [];
+  }
+
+  function renderChoiceReceipt(choice, applied) {
+    var html = '<div>选项 <b>' + escapeHtml(choice.text) + '</b>' +
+      (choice.action ? ' · 动作 ' + escapeHtml(choice.action.id) : '（无动作）') + '</div>';
+    (applied && applied.results || []).forEach(function (r) {
+      html += '<div class="delta"><span class="k">' + escapeHtml(r.id) + '</span> → ' +
+        (r.ok ? '<span class="meta">ok</span>'
+          : '<span class="meta" style="color:var(--err)">' + escapeHtml(r.error) + '</span>') +
+        '</div>';
+    });
+    $('gh-engine').innerHTML = html;
+  }
+
+  // ── turn 通道（批 5）：玩家输入发送 + choices 自动发送 ────────────────────────
+  // 输入经 rpHost.turn（POST /game/turn，service=main）派发进绑定 RP 会话；
+  // 后台派发即时回执，叙事经既有 data/messages 轮询自然回流（零新回推通道）。
+  // 未绑定（无租约/无会话）= rpBuildTurnPayload 闸拒绝 + 可读提示，不发请求。
+  function sendTurn(text) {
+    var built = rpBuildTurnPayload(
+      state.lease, state.sessionId,
+      text === undefined ? $('gh-input').value : text, 'main');
+    if (!built.ok) { setStatus(built.error); return null; }
+    var sid = state.sessionId;
+    setStatus('发送中...');
+    rpHost.turn(sid, built.payload.text, 'main').then(function (res) {
+      if (state.sessionId !== sid) return;  // 发送期间切换会话则丢弃
+      var out = unwrap(res);
+      if (out && out.error) { setStatus('发送失败: ' + out.error); return; }
+      $('gh-input').value = '';
+      setStatus('已发送，等待叙事回流');
+      pollOnce();  // 立即拉一轮（此后叙事随既有轮询自然回流）
+    }).catch(function (err) { setStatus('发送失败: ' + err.message); });
+    return built;
+  }
+  $('gh-send').addEventListener('click', function () { sendTurn(); });
+
+  // choices 点击（事件委托）：文本入输入区 + 自动发送（批 5，一期直接发送）+
+  // action 交 4c 白名单（不变）；未绑定=仅填入+可读提示
+  $('gh-flow').addEventListener('click', function (e) {
+    var btn = e.target;
+    if (!btn || typeof btn.getAttribute !== 'function' || btn.getAttribute('data-ci') === null) return;
+    var choice = state.flowChoices[parseInt(btn.getAttribute('data-ci'), 10)];
+    if (!choice) return;
+    $('gh-input').value = choice.text;
+    var built = sendTurn(choice.text);  // 自动发送（未绑定=闸拒绝+可读提示）
+    if (!choice.action) {
+      if (!built) setStatus('未接入宿主租约：选项仅填入不发送（接入后可再选）');
+      return;
+    }
+    if (!state.lease || !state.snapshot) {
+      setStatus('未接入宿主租约：choice.action 不执行（接入后可再选）');
+      return;
+    }
+    var snap = state.snapshot;
+    var s = (snap.state && typeof snap.state === 'object') ? snap.state : {};
+    var seed = ((snap.turn_id * 100003 + snap.seq) || 0) >>> 0;
+    var applied = rpApplyHandlers(
+      [{ id: choice.action.id, params: choice.action.params }],
+      engine.config && engine.config.actions, s, rpCreateRng(seed));
+    renderChoiceReceipt(choice, applied);
+    if (applied.ok && applied.results.some(function (r) { return r.ok; })) {
+      pushEngineSnapshot(state.sessionId, applied.state);  // 状态变更随快照回推
+    }
+  });
+
+  // ── 操作区（世界内嵌批次二）：声明清单→按钮+内联输入；点击经桥发结构化命令 ──
+  // operations 是包级声明面（game/config 透出，枚举声明制——页上可发的操作只来自
+  // 清单）；回执二态：applied=true 状态刷新+delta 回显；applied=false 原因原文
+  // 上页不吞（拒绝必须带原因，页面同闸不做静默）。
+  function renderOperations(ops) {
+    var box = $('gh-operations');
+    if (!box) return;
+    state.flowOperations = Array.isArray(ops) ? ops : [];
+    if (!state.flowOperations.length) {
+      $('opMeta').textContent = '';
+      box.innerHTML = '<div class="gh-empty">玩法包未声明操作（无自由操作面）</div>';
+      return;
+    }
+    $('opMeta').textContent = state.flowOperations.length + ' 项';
+    var html = '';
+    state.flowOperations.forEach(function (op, i) {
+      html += '<div class="op-row">';
+      html += '<button type="button" class="choice" data-oi="' + i + '" data-testid="gh-op-btn" title="' +
+        escapeHtml(op.id) + '">' + escapeHtml(op.label) + '</button>';
+      var schema = (op.params_schema && typeof op.params_schema === 'object') ? op.params_schema : {};
+      Object.keys(schema).forEach(function (field) {
+        var d = schema[field] || {};
+        var ph = field + (d.type ? ' (' + d.type : '') + (d.min != null ? ' ≥' + d.min : '') +
+          (d.max != null ? ' ≤' + d.max : '') + (d.type ? ')' : '');
+        html += '<input type="text" class="op-param" data-oi="' + i + '" data-field="' +
+          escapeHtml(field) + '" placeholder="' + escapeHtml(ph) + '" style="width:120px">';
+      });
+      html += '</div>';
+    });
+    box.innerHTML = html + '<div id="gh-op-receipt" data-testid="gh-op-receipt"></div>';
+  }
+
+  function setOperationReceipt(op, out) {
+    var box = $('gh-op-receipt');
+    if (!box) return;
+    if (out && out.applied) {
+      var delta = '';
+      if (out.state_delta && typeof out.state_delta === 'object') {
+        delta = Object.keys(out.state_delta).map(function (k) {
+          return k + '=' + JSON.stringify(out.state_delta[k]);
+        }).join('，');
+      }
+      box.innerHTML = '<div class="meta">操作 <b>' + escapeHtml(out.operation || op.id) +
+        '</b> 已生效' + (delta ? '：' + escapeHtml(delta) : '') + '</div>';
+    } else {
+      // rejected/错误：原因原文上页（服务端 reason / 页闸 error / 传输 err.message）
+      var reason = (out && (out.reason || out.error)) || '操作失败（无原因返回）';
+      box.innerHTML = '<div class="delta" style="color:var(--err)">操作被拒：' +
+        escapeHtml(reason) + '</div>';
+    }
+  }
+
+  $('gh-operations').addEventListener('click', function (e) {
+    var btn = e.target;
+    if (!btn || typeof btn.getAttribute !== 'function' || btn.getAttribute('data-oi') === null) return;
+    var op = state.flowOperations[parseInt(btn.getAttribute('data-oi'), 10)];
+    if (!op) return;
+    var params = {};
+    var inputs = document.querySelectorAll('#gh-operations .op-param[data-oi="' + btn.getAttribute('data-oi') + '"]');
+    Array.prototype.forEach.call(inputs, function (inp) {
+      var field = inp.getAttribute('data-field');
+      var decl = (op.params_schema || {})[field] || {};
+      var v = rpCoerceParamValue(inp.value, decl);
+      if (v !== null && v !== '') params[field] = v;
+    });
+    var built = rpBuildOperationPayload(state.lease, state.sessionId, op.id, params);
+    if (!built.ok) { setOperationReceipt(op, { applied: false, reason: built.error }); return; }
+    var sid = state.sessionId;
+    rpHost.operation(sid, op.id, params).then(function (res) {
+      if (state.sessionId !== sid) return;  // 发送期间切换会话则丢弃
+      var out = unwrap(res) || {};
+      setOperationReceipt(op, out);
+      if (out.applied) pollOnce();  // applied=状态刷新（叙事/快照随既有轮询回流）
+    }).catch(function (err) {
+      setOperationReceipt(op, { applied: false, reason: err && err.message });
+    });
+  });
+
+  // ── 世界演化区（世界内嵌批次三）：tick 声明在场才渲染⏩推进（确定性引擎
+  // 结算零 LLM）；回执 advanced=true 状态刷新+delta 回显，空转/失败原因上页
+  // 不吞；ticks 输入缺省 1，上限钳制以服务端为准（回执回显钳后值）。
+  function renderTick(decl) {
+    var box = $('gh-tick');
+    if (!box) return;
+    var steps = (decl && typeof decl === 'object' && Array.isArray(decl.steps)) ? decl.steps : [];
+    if (!steps.length) {
+      $('tickMeta').textContent = '';
+      box.innerHTML = '<div class="gh-empty">玩法包未声明世界演化（无周期推进）</div>';
+      return;
+    }
+    $('tickMeta').textContent = steps.length + ' 步';
+    box.innerHTML = '<div class="op-row">' +
+      '<button type="button" class="choice" id="gh-tick-btn" data-testid="gh-tick-btn" ' +
+      'title="世界周期推进（tick 声明 steps 顺序结算，零 LLM）">⏩ 推进</button>' +
+      '<input type="number" id="gh-tick-count" class="op-param" min="1" step="1" value="1" ' +
+      'title="推进 tick 数（缺省 1；服务端上限钳制）" style="width:64px">' +
+      '</div><div id="gh-tick-receipt" data-testid="gh-tick-receipt"></div>';
+  }
+
+  function setTickReceipt(out) {
+    var box = $('gh-tick-receipt');
+    if (!box) return;
+    if (out && out.applied && out.advanced) {
+      var delta = '';
+      if (out.state_delta && typeof out.state_delta === 'object') {
+        delta = Object.keys(out.state_delta).map(function (k) {
+          return k + '=' + JSON.stringify(out.state_delta[k]);
+        }).join('，');
+      }
+      box.innerHTML = '<div class="meta">已推进 <b>' + escapeHtml(String(out.ticks)) +
+        '</b> tick' + (delta ? '：' + escapeHtml(delta) : '') + '</div>';
+    } else if (out && out.applied) {
+      box.innerHTML = '<div class="meta">空转 ' + escapeHtml(String(out.ticks)) +
+        ' tick（无演化步生效）</div>';
+    } else {
+      // 错误：原因原文上页（服务端 error / 页闸 error / 传输 err.message）
+      var reason = (out && (out.error || out.reason)) || '推进失败（无原因返回）';
+      box.innerHTML = '<div class="delta" style="color:var(--err)">推进被拒：' +
+        escapeHtml(reason) + '</div>';
+    }
+  }
+
+  $('gh-tick').addEventListener('click', function (e) {
+    if (!e.target || e.target.id !== 'gh-tick-btn') return;
+    var built = rpBuildTickPayload(state.lease, state.sessionId, $('gh-tick-count').value);
+    if (!built.ok) { setTickReceipt({ applied: false, error: built.error }); return; }
+    var sid = state.sessionId;
+    rpHost.tick(sid, built.payload.ticks).then(function (res) {
+      if (state.sessionId !== sid) return;  // 发送期间切换会话则丢弃
+      var out = unwrap(res) || {};
+      setTickReceipt(out);
+      if (out.applied && out.advanced) pollOnce();  // advanced=状态刷新
+    }).catch(function (err) {
+      setTickReceipt({ applied: false, error: err && err.message });
+    });
+  });
+
+  // ── npc_chat 深聊入口（服务类型框架一期消费面）───────────────────────────────
+  // NPC 列表 = 卡库过滤 NPC 角色卡（tags 含 npc，rpFilterNpcCards）；点击 =
+  // mode.session 宿主桥按 NPC 卡开专属会话（B8 同通道同载荷：建会话+绑定卡身份
+  // agent_id+宿主跳转+面板随开），会话内对话在宿主聊天区进行——深聊是会话出生
+  // 不是 turn（服务类型 npc_chat 的一期消费形态，GAME_HOST_SDK.md 服务类型节）。
+  function loadNpcCards() {
+    rpHost.cards().then(function (res) {
+      state.npcCards = rpFilterNpcCards((unwrap(res) || {}).cards);
+      renderNpcs();
+    }).catch(function () { /* 卡库读失败静默：NPC 面板诚实空态 */ });
+  }
+
+  function renderNpcs() {
+    var box = $('gh-npcs');
+    if (!state.npcCards.length) {
+      box.innerHTML = '<div class="gh-empty">卡库未过滤到 NPC 角色卡（tags 含 npc）</div>';
+      $('npcMeta').textContent = '';
+      return;
+    }
+    $('npcMeta').textContent = state.npcCards.length + ' 名';
+    var html = '';
+    state.npcCards.forEach(function (n, i) {
+      html += '<button type="button" class="choice" data-npc="' + i + '" title="与「' +
+        escapeHtml(n.name) + '」建立专属深聊会话（npc_chat）">' +
+        escapeHtml(n.avatar ? n.avatar + ' ' : '') + escapeHtml(n.name) + '</button>';
+    });
+    box.innerHTML = html;
+  }
+
+  $('gh-npcs').addEventListener('click', function (e) {
+    var btn = e.target;
+    if (!btn || typeof btn.getAttribute !== 'function' || btn.getAttribute('data-npc') === null) return;
+    var npc = state.npcCards[parseInt(btn.getAttribute('data-npc'), 10)];
+    if (!npc) return;
+    setStatus('建立「' + npc.name + '」深聊会话...');
+    rpHost.request('mode.session', {
+      mode: 'roleplay',
+      agent_id: 'mode_roleplay/' + npc.id,
+      name: npc.name,
+      title: '深聊·' + npc.name,
+      first_message: '（开始）'
+    }).then(function () {
+      setStatus('');  // 会话出生+跳转由宿主桥完成（openModeSession）
+    }).catch(function (err) { setStatus('深聊会话建立失败: ' + err.message); });
+  });
+  loadNpcCards();
+
+  // ui.bgm 起播（首次用户交互；自动播放被拒/媒体不可用=表现层降级，不阻断游戏面）
+  document.addEventListener('pointerdown', function onFirstPointer() {
+    if (disposed) return;
+    if (!state.bgmSrc || state.bgmStarted) return;
+    state.bgmStarted = true;
+    try {
+      var p = new Audio(state.bgmSrc).play();
+      if (p && p.catch) p.catch(function () { /* 起播被拒=表现层降级（浏览器策略） */ });
+    } catch (e) { /* 媒体不可用=表现层降级 */ }
+  });
+
+  function collectNodeChoices(graph, nodeId) {
+    var nodes = (graph && Array.isArray(graph.nodes)) ? graph.nodes : [];
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      if (n && typeof n === 'object' && n.id === nodeId) return rpCollectChoices(n.choices);
+    }
+    return [];
+  }
+
+  function maybeEngineTick(snapshot, messages) {
+    loadEngineConfig();
+    var cfg = engine.config;
+    if (!cfg || engine.configSession !== state.sessionId) return;
+    if (cfg.ui_page) {  // 包页整区接管：引擎件渲染面退役（页自消费 config/state）
+      mountPackPage(state.sessionId);
+      return;
+    }
+    var s = (snapshot && snapshot.state && typeof snapshot.state === 'object') ? snapshot.state : {};
+    var graph = cfg.narrative_graph;
+    if (!graph || typeof graph !== 'object') {  // 缺图空转（ui 状态条仍随快照刷新）
+      renderEngineIdle();
+      renderStatusBar(cfg.ui, s);
+      return;
+    }
+    var fp = narrationFingerprint(messages);
+    var snapKey = snapshot ? (snapshot.turn_id + ':' + snapshot.seq) : null;
+    var narrationNew = fp !== engine.lastNarrationFp;
+    // 4d 无 LLM 降级轮：叙事缺席但快照更新（外部 delta/节点进入）同样消费；
+    // 宿主自推回声（lastSelfPush）不重复消费——闭环防重入
+    var snapNew = snapKey !== null && snapKey !== engine.lastSnapKey
+      && snapKey !== engine.lastSelfPush;
+    if (!narrationNew && !snapNew) return;  // 每轮消费一次
+    engine.lastNarrationFp = fp;
+    engine.lastSnapKey = snapKey;
+    renderEngineIdle();
+    if (!state.lease) return;  // 无租约只读展示，不求值不回推（回推须持单宿主租约）
+    var narration = '', playerText = '';
+    (messages || []).forEach(function (m) {
+      if (m.role === 'assistant') narration = m.content;
+      else if (m.role === 'user') playerText = m.content;
+    });
+    // seed 流：turn+seq 派生（同轮重放确定；rand 可测——宿主页可喂 seed）
+    var seed = ((snapshot ? snapshot.turn_id * 100003 + snapshot.seq : 0) || 0) >>> 0;
+    var out = rpEvalGraph(graph, {
+      state: s, narration: narration, player_text: playerText, events: [],
+      rng: rpCreateRng(seed)
+    });
+    if (!out) { renderEngineIdle(); return; }
+    if (!out.ok) {
+      $('gh-engine').innerHTML =
+        '<div class="gh-empty" style="color:var(--err)">graph 求值失败: ' + escapeHtml(out.error) + '</div>';
+      renderFlow([], []);
+      renderStatusBar(cfg.ui, s);
+      return;
+    }
+    var entering = out.node !== s.__graph_node;  // 进入新节点（含首轮）才触发节点 actions
+    var applied = null;
+    var nextState = null;
+    if (entering && out.actions.length) {
+      applied = rpApplyHandlers(out.actions, cfg.actions, s, rpCreateRng(seed));
+      if (applied.ok) nextState = applied.state;
+    }
+    if (entering) {
+      if (!nextState) nextState = JSON.parse(JSON.stringify(s));
+      nextState.__graph_node = out.node;
+    }
+    var endingKnown = (nextState || s).__graph_ending;
+    if (out.ending && !endingKnown) {
+      if (!nextState) nextState = JSON.parse(JSON.stringify(s));
+      nextState.__graph_ending = out.ending;
+    }
+    // 4d：模板渲染（当前节点同名 + trigger 真值；消毒后入叙事流）
+    var tpl = rpRenderTemplates(cfg.template, {
+      node: out.node, state: s, rng: rpCreateRng(seed), macros: { char: cfg.card_id || '' }
+    });
+    var tplItems = tpl.ok ? tpl.items : [];
+    // 4e：节点声明 choices + 模板携带 choices（渲染为按钮卡；点击走 4c）
+    var choices = collectNodeChoices(graph, out.node);
+    tplItems.forEach(function (it) { choices = choices.concat(it.choices || []); });
+    renderFlow(tplItems, choices);
+    renderStatusBar(cfg.ui, s);
+    renderEngineTick(out, applied, tplItems, choices.length);
+    if (nextState) pushEngineSnapshot(state.sessionId, nextState);
+  }
+
+  // ── 开演设置（刀4「工作区玩法页全 webview 化」：无页包/未开会话的开演配置
+  //    在本 webview 页内渲染——通用 init_ui 声明式表单，零包名硬编码；载荷走
+  //    mode.session 既有开演路径，extra_context 键与面板既有开演同源同语义；
+  //    包无 init_ui 声明 = 无声明段直接开演（兼容态：现状零变化））────────────
+  var setup = {
+    seen: false,        // 清点/卡库已装载（惰性一次，重开不重拉）
+    dismissed: false,   // 用户手动收起后空会话不再自动展开
+    packs: [], cards: [],
+    packId: '', cardId: '', routeId: null, traitIds: []
+  };
+  function setupPack() {
+    var hit = null;
+    setup.packs.forEach(function (p) { if (p.id === setup.packId) hit = p; });
+    return hit;
+  }
+  function setupCard() {
+    var hit = null;
+    setup.cards.forEach(function (c) { if (c.id === setup.cardId) hit = c; });
+    return hit;
+  }
+  function setupShow() {
+    document.body.classList.add('setup-live');
+    if (!setup.seen) {
+      setup.seen = true;
+      // 挂载上下文注入的包上下文（面板「工作区」签挂载前写入）预选
+      var injected = String(window.__RP_PAGE_PACK__ || '');
+      if (injected) setup.packId = injected;
+      rpHost.packs().then(function (res) {
+        setup.packs = (unwrap(res) || {}).packs || [];
+        if (setup.packId && !setupPack()) setup.packId = '';  // 注入包已不在清点=回落手选
+        renderSetup();
+      }).catch(function () { setup.packs = []; renderSetup(); });
+      rpHost.cards().then(function (res) {
+        setup.cards = (unwrap(res) || {}).cards || [];
+        renderSetup();
+      }).catch(function () { setup.cards = []; renderSetup(); });
+    }
+    renderSetup();
+  }
+  function setupHide() {
+    setup.dismissed = true;
+    document.body.classList.remove('setup-live');
+  }
+  // 无进行中会话 = 落开演设置视图（收起过则尊重用户选择，头部按钮常在）
+  function setupOffer() {
+    if (!setup.dismissed) setupShow();
+  }
+  function renderSetup() {
+    var box = $('gh-setup-body');
+    if (!box) return;
+    var pack = setupPack();
+    var init = (pack && pack.init_ui) || {};
+    var routes = init.routes || [];
+    var pools = init.trait_pools || [];
+    // 玩法内定角色（2026-10-17 用户裁定）：包有绑定卡（卡顶层 pack_ids 引用包）
+    // 时卡为内定执行身份——不渲染选卡件，开演免选（固定玩法零跨包选卡；角色卡
+    // 选择只存在于世界+角色组合玩法）。无绑定卡回落全库下拉（兼容态零变化）。
+    var boundCards = pack
+      ? setup.cards.filter(function (c) { return (c.pack_ids || []).indexOf(pack.id) > -1; })
+      : [];
+    var fixedCast = boundCards.length > 0;
+    if (fixedCast && !boundCards.some(function (c) { return c.id === setup.cardId; })) {
+      setup.cardId = boundCards[0].id;  // 内定身份锁定（残留选择自动归位）
+    }
+    var cardPool = boundCards.length ? boundCards : setup.cards;
+    var html = '<div class="formrow">' +
+      '<span class="flabel">玩法包</span>' +
+      '<select id="gh-setup-pack" data-testid="gh-setup-pack"' + (setup.packs.length ? '' : ' disabled') + '>' +
+      (setup.packs.map(function (p) {
+        return '<option value="' + escapeHtml(p.id) + '"' + (setup.packId === p.id ? ' selected' : '') + '>' +
+          escapeHtml(p.name || p.id) + '</option>';
+      }).join('') || '<option value="">（无玩法包）</option>') + '</select>' +
+      (fixedCast
+        ? '<span class="flabel">角色</span><span class="setup-note">内定（' +
+          escapeHtml((boundCards[0].name || boundCards[0].id)) + '）——本玩法固定卡司，无需选卡</span>'
+        : '<span class="flabel">角色卡</span>' +
+      '<select id="gh-setup-card" data-testid="gh-setup-card"' + (cardPool.length ? '' : ' disabled') + '>' +
+      (cardPool.map(function (c) {
+        return '<option value="' + escapeHtml(c.id) + '"' + (setup.cardId === c.id ? ' selected' : '') + '>' +
+          escapeHtml(c.name || c.id) + '</option>';
+      }).join('') || '<option value="">（无角色卡）</option>') + '</select>') + '</div>';
+    if (!setup.packs.length) {
+      html += '<div class="setup-note">玩法包清点读取失败或为空（不选包也可按卡直接开演）。</div>';
+    }
+    if (pack && (init.title || init.intro)) {
+      html += '<h3>' + escapeHtml(init.title || '开演设置') + '</h3>' +
+        (init.intro ? '<div class="setup-note">' + escapeHtml(init.intro) + '</div>' : '');
+    }
+    if (pack && init.show_variables) {
+      html += '<div class="setup-note">本包声明 ' + (pack.variables_count || 0) +
+        ' 个状态变量，开局按缺省档起算。</div>';
+    }
+    if (routes.length) {
+      html += '<h3>开局路线（单选）</h3><div class="setup-opts">' + routes.map(function (r) {
+        return '<label class="setup-opt"><input type="radio" name="gh-setup-route" value="' +
+          escapeHtml(r.id) + '"' + (setup.routeId === r.id ? ' checked' : '') +
+          ' data-testid="gh-setup-route-opt"><b>' + escapeHtml(r.label || r.id) + '</b>' +
+          (r.profile ? '<span class="setup-note">' + escapeHtml(r.profile) + '</span>' : '') + '</label>';
+      }).join('') + '</div>';
+    }
+    pools.forEach(function (pool) {
+      var opts = (pool.options || []).map(function (opt) {
+        var effects = opt.effects
+          ? '<span class="setup-note">' + escapeHtml(Object.keys(opt.effects).map(function (k) {
+              return k + ' ' + opt.effects[k];
+            }).join('、')) + '</span>'
+          : '';
+        return '<label class="setup-opt"><input type="checkbox" data-trait="' + escapeHtml(opt.id) + '"' +
+          (setup.traitIds.indexOf(opt.id) > -1 ? ' checked' : '') +
+          ' data-testid="gh-setup-trait-opt"><b>' + escapeHtml(opt.label || opt.id) + '</b>' +
+          (opt.profile ? '<span class="setup-note">' + escapeHtml(opt.profile) + '</span>' : '') +
+          effects + '</label>';
+      }).join('');
+      html += '<h3>' + escapeHtml(pool.label || pool.id) + '（多选）</h3><div class="setup-opts">' + opts + '</div>';
+    });
+    if (pack && !routes.length && !pools.length && init.title === undefined && init.intro === undefined
+      && init.show_variables === undefined) {
+      // 包无 init_ui 声明 = 跳过声明段（兼容态：无声明包开演行为现状零变化）
+      html += '<div class="setup-note">该玩法包未声明开演配置（init_ui）——直接开演即可。</div>';
+    }
+    html += '<div class="formrow" style="margin-top:10px">' +
+      '<button id="gh-setup-start" data-testid="gh-setup-start">🎬 开 演</button>' +
+      '<span class="setup-note">开演后：对话进系统对话页，游玩在本页（包自包含玩法页的包由包页整区接管）。</span></div>';
+    html += '<div id="gh-setup-err" data-testid="gh-setup-err" class="setup-note" ' +
+      'style="color:#c0392b;font-weight:600;display:none"></div>';
+    box.innerHTML = html;
+    // 可见默认即状态：浏览器对首选项的隐式选中必须回写状态层，否则「显示已选卡、
+    // 开演报未选」（2026-10-15 用户实测复现：下拉显示凯尔·铁手、点开演报未选卡）
+    var packSelEl = $('gh-setup-pack');
+    if (packSelEl && packSelEl.value && !setupPack()) setup.packId = packSelEl.value;
+    var cardSelEl = $('gh-setup-card');
+    if (cardSelEl && cardSelEl.value) {
+      var inPool = cardPool.some(function (c) { return c.id === setup.cardId; });
+      if (!inPool) setup.cardId = cardSelEl.value;
+    }
+  }
+  function setupError(msg) {
+    var el = $('gh-setup-err');
+    if (el) { el.textContent = msg || ''; el.style.display = msg ? 'block' : 'none'; }
+    setStatus(msg || '');
+  }
+  function setupStart() {
+    setupError('');
+    var pack = setupPack();
+    var card = setupCard();
+    if (!card) { setupError('请先选择角色卡（下拉有值即已选中；若仍提示请点「刷新」重载卡库）'); return; }
+    var payload = {
+      mode: 'roleplay',
+      agent_id: 'mode_roleplay/' + card.id,
+      name: card.name,
+      title: '扮演·' + card.name,
+      first_message: '（开始）'
+    };
+    var extra = {};
+    if (card.first_mes) extra.roleplay_greeting = String(card.first_mes);
+    // 玩法归属：卡声明在前，本场包增量并入（与面板既有开演载荷同键同语义；
+    // Validator 键域按卡+包装载）
+    var packIds = (card.pack_ids || []).slice();
+    if (pack && packIds.indexOf(pack.id) < 0) packIds.push(pack.id);
+    if (packIds.length) extra.wizard_pack_ids = packIds.join(',');
+    // 玩法级管道绑定（批次一，调研 §6.4）：本场包声明管道透传（清点键
+    // pipeline，服务端已过登记校验）；无声明 = 键缺省（现役回落态零变化）
+    if (pack && pack.pipeline) payload.pipeline_config_id = pack.pipeline;
+    var init = (pack && pack.init_ui) || {};
+    var route = findRoute(init, setup.routeId);
+    var traits = findTraitOptions(init, setup.traitIds);
+    var profile = rpProfileFromSelection(route, traits, '');
+    if (profile) extra.wizard_profile = profile;
+    var initSnap = rpInitSnapshot(rpInitPairs(route, traits));
+    if (initSnap) extra.rp_init = initSnap;
+    if (Object.keys(extra).length) payload.extra_context = extra;
+    // 卡主题随扮演会话出生（批次四，与面板开演同键同语义）：所选卡 theme 载荷
+    // （卡库 /data/cards 条目字段，完整 ThemeConfig 档）随出生桥上行；无主题卡
+    // = 键缺席（现役行为一致），非法档宿主 fail-closed 丢该位
+    if (card.theme) payload.card_theme = card.theme;
+    setStatus('创建会话中...');
+    rpHost.request('mode.session', payload).then(function (res) {
+      setStatus('');
+      setupHide();
+      setStatus('已开演（无租约时先「接入」再发言）');
+      // 页内开演回执广播：面板「工作区」签同窗监听同步锚（无监听者=无副作用）
+      try {
+        window.dispatchEvent(new CustomEvent('rp:session-bound', { detail: { sid: (unwrap(res) || {}).session_id || '' } }));
+      } catch (e) { /* 老宿主无 CustomEvent=表现层降级 */ }
+      pollSessions();
+      pollOnce();
+    }).catch(function (err) { setupError('开演失败: ' + err.message); });
+  }
+  $('gh-setup-open').addEventListener('click', function () {
+    setup.dismissed = false;
+    setupShow();
+  });
+  $('gh-setup-close').addEventListener('click', setupHide);
+  $('gh-setup').addEventListener('change', function (e) {
+    var t = e.target;
+    if (!t || typeof t.getAttribute !== 'function') return;
+    if (t.id === 'gh-setup-pack') {
+      setup.packId = t.value;
+      setup.routeId = null;
+      setup.traitIds = [];
+      renderSetup();
+    } else if (t.id === 'gh-setup-card') {
+      setup.cardId = t.value;
+    } else if (t.name === 'gh-setup-route') {
+      setup.routeId = t.value;
+      renderSetup();
+    } else if (t.type === 'checkbox' && t.getAttribute('data-trait') !== null) {
+      var v = t.getAttribute('data-trait');
+      var i = setup.traitIds.indexOf(v);
+      if (i > -1) setup.traitIds.splice(i, 1); else setup.traitIds.push(v);
+    }
+  });
+  $('gh-setup').addEventListener('click', function (e) {
+    var t = e.target;
+    if (t && t.id === 'gh-setup-start') setupStart();
+  });
+
+  // 拆卸契约（面板挂载器 playPageDispose 消费，SDK 面见 GAME_HOST_SDK.md）：同
+  // 窗 document 注入挂载下容器清空杀不掉活脚本——页面自报清理，装载器换页前
+  // 调用，保证任意时刻至多一个活实例（多实例并存的定时器/监听器交叉写入=重影
+  // 根因）。在飞回包经 disposed 判废不写 DOM。
+  window.__RP_PAGE_DISPOSE__ = function () {
+    disposed = true;
+    if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+    window.removeEventListener('message', onHostMessage);
+    document.removeEventListener('pointerdown', onFirstPointer);
+  };
+
+  pollSessions();
+  pollOnce();
+  restartPolling();
+  })();
+  </script>
+</body>
+</html>

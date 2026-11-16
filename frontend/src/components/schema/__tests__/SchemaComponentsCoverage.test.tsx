@@ -53,6 +53,8 @@ import { InlineEditWidget } from '@/components/schema/widgets/InlineEditWidget'
 import { ReviewDocumentWidget } from '@/components/schema/widgets/ReviewDocumentWidget'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
+import { slotRegistry } from '@/services/slots/slotRegistry'
+import { loadSchemaIntoRegistries } from '@/test/schemaLoader'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import type { PageDeclaration, WidgetDeclaration } from '@/services/schema/ContributionRegistry'
 
@@ -236,6 +238,7 @@ describe('SchemaFullscreenHost 队列导航与 conversation 提交', () => {
 describe('PageRenderer 渲染来源与降级标记', () => {
   beforeEach(() => {
     contributionRegistry.clear()
+    slotRegistry.clear()
     widgetRegistry.clear()
     vi.restoreAllMocks()
   })
@@ -707,9 +710,23 @@ describe('WorkspacePanel 空态与全屏入口', () => {
     const { WorkspacePanel } = await import('@/components/layout/WorkspacePanel')
     const { useLayoutModeStore } = await import('@/stores/layoutModeStore')
     useLayoutModeStore.setState({ workspaceTabs: [], visitedTabIds: [] })
-    contributionRegistry.register({
-      type: 'pages', id: 'tasks', title: '任务管理',
-      space: 'workspace', slot: 'tab', path: '/tasks', pluginId: 'task_service',
+    // 内建 widget 注册面（生产 main.tsx 启动同款）+ 两表装载（C4：页签按
+    // workspace.tab keyed 槽解析，槽装载期终验要求承载 widget 已注册）
+    widgetRegistry.clear()
+    initializeWidgets()
+    await loadSchemaIntoRegistries({
+      plugin_contributes: [
+        {
+          plugin_id: 'task_service',
+          plugin_name: 'Task Service',
+          contributes: {
+            pages: [
+              { id: 'tasks', title: '任务管理', space: 'workspace', slot: 'tab', path: '/tasks', widget: 'status_card' },
+            ],
+          },
+        },
+      ],
+      plugin_configs: [],
     })
     render(
       <WorkspacePanel
@@ -727,6 +744,7 @@ describe('WorkspacePanel 空态与全屏入口', () => {
     expect(tabs.map((t) => t.id)).toEqual(['ws-plugin-tasks'])
     expect(tabs[0]?.isActive).toBe(true)
     contributionRegistry.clear()
+    slotRegistry.clear()
   })
 
   it('滚轮纵向 delta：横向滚动标签条（非被动绑定使 preventDefault 生效）', async () => {

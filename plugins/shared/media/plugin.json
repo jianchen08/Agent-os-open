@@ -1,0 +1,252 @@
+{
+  "id": "media_tools",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Media Generation Tools",
+  "description": "媒体生成 MCP 工具集（图片/音乐/视频/TTS）",
+  "version": "1.0.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "metrics_class": "tool",
+    "tools": [
+      {
+        "name": "image_generate",
+        "description": "图片生成",
+        "render": {
+          "card": "image",
+          "title": "图片生成"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "prompt": {
+              "type": "string"
+            },
+            "size": {
+              "type": "string"
+            },
+            "n": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          "required": [
+            "prompt"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "生成图片落盘路径"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "provider": {
+              "type": "string",
+              "description": "生成服务提供方"
+            },
+            "metadata": {
+              "type": "object",
+              "description": "提供方附加元数据（可缺省）"
+            }
+          },
+          "required": [
+            "file_path",
+            "media_type"
+          ]
+        }
+      },
+      {
+        "name": "music_generate",
+        "description": "音乐生成",
+        "render": {
+          "card": "file",
+          "title": "音乐生成"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "prompt": {
+              "type": "string"
+            },
+            "duration": {
+              "type": "integer",
+              "default": 30
+            }
+          },
+          "required": [
+            "prompt"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "生成音频落盘路径"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "duration_seconds": {
+              "type": "number"
+            },
+            "provider_name": {
+              "type": "string"
+            },
+            "metadata": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "file_path",
+            "media_type"
+          ]
+        }
+      },
+      {
+        "name": "video_generate",
+        "description": "视频生成",
+        "render": {
+          "card": "file",
+          "title": "视频生成"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "prompt": {
+              "type": "string",
+              "description": "视频内容描述，用于指导视频生成（必填）"
+            },
+            "duration": {
+              "type": "number",
+              "description": "视频时长（秒），默认由 Provider 决定"
+            },
+            "fps": {
+              "type": "integer",
+              "description": "帧率（fps），默认由 Provider 决定"
+            },
+            "resolution": {
+              "type": "string",
+              "description": "视频分辨率（如 '1920x1080'），默认由 Provider 决定"
+            },
+            "style": {
+              "type": "string",
+              "description": "视频风格（如 'realistic', 'anime', 'cartoon'），默认由 Provider 决定"
+            },
+            "provider": {
+              "type": "string",
+              "description": "指定使用的视频生成 Provider（不填则自动选择）"
+            }
+          },
+          "required": [
+            "prompt"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "生成视频落盘路径"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "duration_seconds": {
+              "type": "number"
+            },
+            "provider_name": {
+              "type": "string"
+            },
+            "metadata": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "file_path",
+            "media_type"
+          ]
+        }
+      },
+      {
+        "name": "tts_generate",
+        "description": "文本转语音",
+        "render": {
+          "card": "file",
+          "title": "语音生成"
+        },
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "description": "要合成的文本内容"
+            },
+            "voice": {
+              "type": "string",
+              "description": "语音名称（如 alloy, echo, fable 等）",
+              "default": "alloy"
+            },
+            "format": {
+              "type": "string",
+              "description": "输出音频格式（mp3, wav, ogg）",
+              "default": "mp3",
+              "enum": [
+                "mp3",
+                "wav",
+                "ogg"
+              ]
+            },
+            "speed": {
+              "type": "number",
+              "description": "语速倍率（0.5 ~ 2.0）",
+              "default": 1.0
+            }
+          },
+          "required": [
+            "text"
+          ]
+        },
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "file_path": {
+              "type": "string",
+              "description": "合成语音落盘路径"
+            },
+            "duration_seconds": {
+              "type": "number"
+            },
+            "format": {
+              "type": "string"
+            },
+            "voice": {
+              "type": "string"
+            },
+            "provider": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file_path"
+          ]
+        }
+      }
+    ],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ]
+  },
+  "permissions": {},
+  "priority": 30,
+  "host_group": "light"
+}

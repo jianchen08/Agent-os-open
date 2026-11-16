@@ -21,6 +21,7 @@ import { WebviewWidget } from '@/components/schema/widgets/WebviewWidget'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
 import { initializeWidgets } from '@/services/schema/registerWidgets'
 import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { slotRegistry } from '@/services/slots/slotRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
@@ -57,6 +58,7 @@ function webviewPage(overrides: Partial<PageDeclaration> = {}): PageDeclaration 
 
 beforeEach(() => {
   contributionRegistry.clear()
+  slotRegistry.clear()
   useLayoutModeStore.setState({ workspaceTabs: [] })
   useNotificationStore.setState({ notifications: [] })
   initializeWidgets()
@@ -136,8 +138,8 @@ describe('模式面板退役 — webview 形态页面在统一导航页可见可
     expect(item).toHaveTextContent('💻')
   })
 
-  it('点击 webview 页条目 → 打开工作区页签，component=webview 且 props 原样透传', () => {
-    contributionRegistry.loadFromSchema({
+  it('点击 webview 页条目 → 打开工作区页签，component=webview 且 props 原样透传', async () => {
+    const schema = {
       plugin_contributes: [
         {
           plugin_id: 'mode_coding',
@@ -146,7 +148,11 @@ describe('模式面板退役 — webview 形态页面在统一导航页可见可
         },
       ],
       plugin_configs: [],
-    })
+    }
+    contributionRegistry.loadFromSchema(schema as never)
+    // workspace.tab keyed 槽随 GrowthLoop 同批装载（C4 收敛：页签内容解析走
+    // SlotRegistry keyed 槽，存量 pages(space=workspace) 装载期翻译）
+    await slotRegistry.loadFromSchema(schema as never, { loadWidgets: async () => [] })
     render(<WorkspaceNavPage />)
     fireEvent.click(screen.getByTestId('nav-item-mode_coding:coding_delivery'))
 

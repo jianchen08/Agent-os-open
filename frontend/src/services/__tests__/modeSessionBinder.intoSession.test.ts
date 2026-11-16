@@ -4,12 +4,14 @@
  * mock 仅外部依赖（apiClient/Tab store/WS/registry）；快照与绑定全真实。
  */
 import { vi } from 'vitest'
-const { openSubTabMock, sendUserInputMock, apiGetMock, apiPostMock } = vi.hoisted(() => ({
-  openSubTabMock: vi.fn(),
-  sendUserInputMock: vi.fn(),
-  apiGetMock: vi.fn(),
-  apiPostMock: vi.fn(),
-}))
+const { openSubTabMock, sendUserInputMock, apiGetMock, apiPostMock, addNotificationMock } =
+  vi.hoisted(() => ({
+    openSubTabMock: vi.fn(),
+    sendUserInputMock: vi.fn(),
+    apiGetMock: vi.fn(),
+    apiPostMock: vi.fn(),
+    addNotificationMock: vi.fn(),
+  }))
 vi.mock('@/stores/agentTabStore', () => ({
   useAgentTabStore: { getState: () => ({ openSubAgentTab: openSubTabMock }) },
 }))
@@ -23,7 +25,7 @@ vi.mock('@/services/api/client', () => ({
   },
 }))
 vi.mock('@/stores/notificationStore', () => ({
-  useNotificationStore: { getState: () => ({ addNotification: vi.fn() }) },
+  useNotificationStore: { getState: () => ({ addNotification: addNotificationMock }) },
 }))
 vi.mock('@/services/workspacePanelOpener', () => ({
   openPluginPage: vi.fn(),
@@ -122,5 +124,59 @@ describe('openModeSession intoSession — B8 管道标签', () => {
       openModeSession('roleplay', { intoSessionId: 'th-main' }),
     ).rejects.toThrow('端点 502')
     expect(openSubTabMock).not.toHaveBeenCalled()
+  })
+
+  it('玩法级管道绑定透传（批次一）：ext.pipelineConfigId → POST pipeline_config_id，绑定落响应回执', async () => {
+    apiPostMock.mockResolvedValue({
+      data: { pipeline_id: 'pipe-t', thread_id: 'th-main', pipeline_config_id: 'triple_chain' },
+    })
+
+    await openModeSession('roleplay', {
+      intoSessionId: 'th-main',
+      pipelineConfigId: 'triple_chain',
+      firstMessage: '（开始）',
+    })
+
+    expect(apiPostMock).toHaveBeenCalledWith(
+      '/ext/mode_roleplay/pipeline/open',
+      expect.objectContaining({ pipeline_config_id: 'triple_chain' }),
+    )
+    expect(loadPipelineBinding('pipe-t')).toEqual({
+      mode: 'roleplay',
+      pipelineConfigId: 'triple_chain',
+    })
+    expect(sendUserInputMock).toHaveBeenCalledWith(
+      'th-main',
+      '（开始）',
+      expect.objectContaining({ pipelineConfigId: 'triple_chain' }),
+    )
+  })
+
+  it('bind 侧警示面：响应 pipeline_warning 在场 → 通知入栈（回落缺省可见），绑定落回落值', async () => {
+    apiPostMock.mockResolvedValue({
+      data: {
+        pipeline_id: 'pipe-t',
+        thread_id: 'th-main',
+        pipeline_config_id: 'roleplay',
+        pipeline_warning: "'ghost_chain' 未登记（config/pipelines 无此名），回落缺省 roleplay",
+      },
+    })
+
+    const receipt = await openModeSession('roleplay', {
+      intoSessionId: 'th-main',
+      pipelineConfigId: 'ghost_chain',
+    })
+
+    // 错误面可见：回落警示入通知（与 persona 接管提示同通道，内容可辨）
+    const warningCall = addNotificationMock.mock.calls.find((call) =>
+      String((call[0] as { message?: string }).message).includes('回落'),
+    )
+    expect(warningCall).toBeDefined()
+    // 绑定落端点实际生效值（回落 roleplay），非请求原值
+    expect(loadPipelineBinding('pipe-t')).toEqual({
+      mode: 'roleplay',
+      pipelineConfigId: 'roleplay',
+    })
+    expect(receipt.modeBinding).toEqual({ mode: 'roleplay', pipelineConfigId: 'roleplay' })
   })
 })

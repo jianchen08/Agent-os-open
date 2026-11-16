@@ -85,6 +85,56 @@ describe('handleReconnected 刷新后 backfill 覆盖子管道 (F1)', () => {
     expect(loadCalls).not.toContain(MAIN_PID)
   })
 
+  it('无 key 终态消息（completed/interrupted 无 seq）的管道进补漏集合（终态必携排序键，重连即对账）', async () => {
+    // 停止/出错与 WS 断窗重叠时，本地终态化先于 stream_end 到达且事件丢失——
+    // 无 seq 终态消息按排序键（缺 seq 恒排末尾）永久垫底，重连是最后对账点。
+    const ts = new Date().toISOString()
+    usePipelineMessageStore.setState({
+      messagesByPipeline: {
+        [SUB_PID]: [
+          {
+            id: 'a_stopped',
+            role: 'assistant',
+            status: 'interrupted',
+            content: '半截回复',
+            parts: [],
+            sequence: null,
+            timestamp: ts,
+          },
+        ],
+        [MAIN_PID]: [
+          { id: 'm2', role: 'assistant', status: 'completed', content: 'hi', parts: [], sequence: 1, timestamp: ts },
+        ],
+      },
+      streamingState: {},
+    })
+    await handleReconnected()
+    expect(loadCalls).toContain(SUB_PID)
+    expect(loadCalls).not.toContain(MAIN_PID)
+  })
+
+  it('非终态无 seq（sending 乐观气泡）不触发补漏（pending 态不进 keyed 排序域）', async () => {
+    const ts = new Date().toISOString()
+    usePipelineMessageStore.setState({
+      messagesByPipeline: {
+        [SUB_PID]: [
+          {
+            id: 'u_sending',
+            role: 'user',
+            status: 'sending',
+            content: '发送中',
+            parts: [],
+            sequence: null,
+            timestamp: ts,
+          },
+        ],
+      },
+      streamingState: {},
+    })
+    await handleReconnected()
+    expect(loadCalls).not.toContain(SUB_PID)
+  })
+
   it('F2: backfill 后仍 streaming 的消息——宽限期零活动后标记 interrupted + warning part', async () => {
     // loadPipelineMessages mock 不更新消息（模拟后端无记录、未能恢复）→ 仍 streaming。
     // 2026-08-23 宽限重查：重连瞬间不标（活流误判防护），20s 零活动后才标真·丢失。

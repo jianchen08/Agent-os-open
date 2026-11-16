@@ -6,13 +6,16 @@
  * - 重复打开同 id 只激活不重复建 tab
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { beforeEach, describe, expect, it } from 'vitest'
+import { initializeWidgets } from '@/services/schema/registerWidgets'
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { openWorkspacePanel, openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
+import { slotRegistry } from '@/services/slots/slotRegistry'
+import { loadSchemaIntoRegistries, registerWidgetStub } from '@/test/schemaLoader'
 
-/** 每用例前重置 store，避免跨用例残留 */
+/** 每用例前重置 store，避免跨用例残留（widget 注册面=生产 main.tsx 启动同款） */
 function resetStore() {
   useLayoutModeStore.setState({
     workspaceTabs: [],
@@ -20,6 +23,12 @@ function resetStore() {
     workspaceCollapsed: false,
   })
   useNotificationStore.setState({ notifications: [], activeBlockingNotification: null })
+  slotRegistry.clear()
+  widgetRegistry.clear()
+  initializeWidgets()
+  // 合成 widget 名补注册桩（槽装载期「声明↔注册一致性」终验需要承载 widget 存在）
+  registerWidgetStub('monitoring_panel')
+  registerWidgetStub('dsh_overview_card')
 }
 
 describe('openWorkspacePanel — props 透传', () => {
@@ -63,14 +72,23 @@ describe('openWorkspacePanelByPath — 解析失败显式报错（P0-1）', () =
     expect(workspaceTabs).toHaveLength(0)
   })
 
-  it('注册表有声明但请求另一未声明路径：同样显式报错（非空注册表仍报错）', () => {
-    contributionRegistry.loadFromSchema({
+  it('注册表有声明但请求另一未声明路径：同样显式报错（非空注册表仍报错）', async () => {
+    await loadSchemaIntoRegistries({
       plugin_contributes: [
         {
           plugin_id: 'monitoring',
           plugin_name: 'Monitoring',
           contributes: {
-            pages: [{ id: 'monitoring', path: '/monitoring', widget: 'monitoring_panel' }],
+            pages: [
+              {
+                id: 'monitoring',
+                title: '监控',
+                space: 'workspace',
+                slot: 'activity-bar',
+                path: '/monitoring',
+                widget: 'monitoring_panel',
+              },
+            ],
           },
         },
       ],
@@ -83,14 +101,23 @@ describe('openWorkspacePanelByPath — 解析失败显式报错（P0-1）', () =
     expect(errors.some((n) => n.message.includes('/cost'))).toBe(true)
   })
 
-  it('命中声明时不报错（错误路径只在解析失败时发出）', () => {
-    contributionRegistry.loadFromSchema({
+  it('命中声明时不报错（错误路径只在解析失败时发出）', async () => {
+    await loadSchemaIntoRegistries({
       plugin_contributes: [
         {
           plugin_id: 'monitoring',
           plugin_name: 'Monitoring',
           contributes: {
-            pages: [{ id: 'monitoring', path: '/monitoring', widget: 'monitoring_panel' }],
+            pages: [
+              {
+                id: 'monitoring',
+                title: '监控',
+                space: 'workspace',
+                slot: 'activity-bar',
+                path: '/monitoring',
+                widget: 'monitoring_panel',
+              },
+            ],
           },
         },
       ],
@@ -102,10 +129,9 @@ describe('openWorkspacePanelByPath — 解析失败显式报错（P0-1）', () =
 })
 
 describe('openWorkspacePanelByPath — 插件页面 props 直达', () => {
-  it('插件页面的 props 透传给面板', () => {
+  it('插件页面的 props 透传给面板', async () => {
     resetStore()
     const page = {
-      type: 'pages',
       id: 'dsh.overview',
       title: 'DSH 状态',
       path: '/dsh',
@@ -113,10 +139,14 @@ describe('openWorkspacePanelByPath — 插件页面 props 直达', () => {
       slot: 'activity-bar',
       widget: 'status_card',
       props: { metrics: [{ title: '插件', value: '3' }] },
-      pluginId: 'dsh_adapter',
-      legacyFrom: 'viewsContainers',
     }
-    vi.spyOn(contributionRegistry, 'getPages').mockReturnValue([page as never])
+    // 声明经两表装载（C4：workspace.tab 槽条目承载 props 直达面）
+    await loadSchemaIntoRegistries({
+      plugin_contributes: [
+        { plugin_id: 'dsh_adapter', plugin_name: 'DSH Adapter', contributes: { pages: [page] } },
+      ],
+      plugin_configs: [],
+    })
     const opened = openWorkspacePanelByPath('/dsh')
     expect(opened).toBe(true)
     const tab = useLayoutModeStore.getState().workspaceTabs[0]

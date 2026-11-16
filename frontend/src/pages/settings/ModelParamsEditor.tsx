@@ -194,15 +194,16 @@ export function ModelParamsEditor({
         </div>
       </div>
 
-      {/* 思考强度映射：聊天页档位 → 该模型参数（留空=该档位不覆盖，用模型默认参数） */}
+      {/* 思考参数组：各档位填的参数本身就是聊天页思考选择器的选项（标签=参数值直显） */}
       <div>
         <h4 className="text-muted-foreground mb-1.5 text-[10px] font-semibold uppercase tracking-wide">
-          思考强度映射
+          思考参数组
         </h4>
         <p className="text-muted-foreground mb-1.5 text-[10px] leading-relaxed">
-          聊天页思考强度 关/低/中/高 → 本模型参数；留空=该档位不覆盖（用模型默认参数）。
-          DeepSeek 类模型填推理力度，GLM/MiniMax 类填思考模式；关闭档填关闭形态
-          （推理力度 none 或思考模式 disabled），否则模型默认的思考开启会照常生效。
+          每行填的参数本身就是聊天页思考选择器的一个选项（标签=参数实际值，如 max /
+          adaptive）；留空=该行不产生选项。厂商级映射优先于模型级；选中即随消息
+          透传直覆盖，未选择=用模型默认参数。关闭形态（思考模式 disabled 或推理
+          力度 none）也是一个普通选项——模型默认思考开启时不选它思考照跑。
         </p>
         <div className="space-y-1.5">
           {levels.map((level) => (

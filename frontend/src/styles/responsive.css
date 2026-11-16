@@ -2,65 +2,46 @@
  * 移动端响应式工具样式
  *
  * 提供：
- * - 触控目标最小尺寸
+ * - 触控命中区扩展（全局规则，无需类名）
  * - 移动端动画减少媒体查询
- * - 移动端表格转卡片基础样式
  * - 小屏下减少动画
  */
-
-/* ============================================ */
-/* 触控目标最小尺寸                                */
-/* ============================================ */
-
-@layer utilities {
-  .min-touch-target {
-    min-height: 44px;
-    min-width: 44px;
-  }
-}
 
 /* ============================================ */
 /* 触控命中区扩展（task_layout_responsive 任务 3）  */
 /* -------------------------------------------- */
 /* 小屏 + 粗指针（触屏手机/平板）：交互元素命中区   */
 /* 扩展至 ≥44px，不改布局（视觉尺寸保持），避免小   */
-/* 图标按钮误触。配合 .touch-expand 类或全局规则。  */
+/* 图标按钮误触。经下方全局规则落地。               */
 /* ============================================ */
 
-/* 显式类：命中区以元素中心扩展至 44×44（视觉不变） */
-@layer utilities {
-  .touch-expand {
-    position: relative;
-  }
-  .touch-expand::after {
-    content: '';
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    transform: translate(-50%, -50%);
-    min-width: 44px;
-    min-height: 44px;
-  }
-}
-
 /* 全局规则（仅触屏小屏生效，不污染桌面鼠标交互）：
-   所有按钮/链接的命中区以中心扩展至 44×44。 */
-@media (pointer: coarse) and (max-width: 767px) {
-  button,
-  [role='button'],
-  a {
-    position: relative;
-  }
-  button::after,
-  [role='button']::after,
-  a::after {
-    content: '';
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    transform: translate(-50%, -50%);
-    min-width: 44px;
-    min-height: 44px;
+   所有按钮/链接的命中区以中心扩展至 44×44。
+   必须落 @layer utilities：本文件在 @import "tailwindcss" 之前导入，其
+   utilities 块把层序定为 utilities 最先（层间优先级最低），再落其他层或
+   保持无层都会反过来压过 utilities 层的定位工具类（.absolute/.fixed）——
+   触屏设备上全部浮动按钮退化 relative 落回文档流（v1.10 实证：移动顶栏
+   工作区入口跑到汉堡旁边）。同层内类/属性选择器 specificity 高于 button/a
+   元素选择器，工具类必赢；无定位工具类的元素仍得 relative，::after 命中区
+   锚定上下文保留。 */
+@layer utilities {
+  @media (pointer: coarse) and (max-width: 767px) {
+    button,
+    [role='button'],
+    a {
+      position: relative;
+    }
+    button::after,
+    [role='button']::after,
+    a::after {
+      content: '';
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      min-width: 44px;
+      min-height: 44px;
+    }
   }
 }
 
@@ -71,24 +52,19 @@
 
 @layer utilities {
   .safe-area-pb {
-    padding-bottom: env(safe-area-inset-bottom);
+    padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--safe-inset-bottom, 0px));
   }
+  /* 左右/顶同走 max(env, 壳变量) 双通道：与 layout-spec.css --safe-area-* 同一
+     口径（壳注入是 Android 侧唯一有效来源，env 供 iOS/新 WebView），任一通道
+     有值即避让、皆 0 零影响；仿真/诊断可经壳变量驱动同一路径。 */
   .safe-area-pl {
-    padding-left: env(safe-area-inset-left);
+    padding-left: max(env(safe-area-inset-left, 0px), var(--safe-inset-left, 0px));
   }
   .safe-area-pr {
-    padding-right: env(safe-area-inset-right);
+    padding-right: max(env(safe-area-inset-right, 0px), var(--safe-inset-right, 0px));
   }
   .safe-area-pt {
-    padding-top: env(safe-area-inset-top);
-  }
-}
-
-/* 移动端键盘适配：输入框固定底部时，用 dvh + interactive-widget=resizes-content
-   （index.html）让可视高度随键盘收缩；此处兜底 safe-area 横条留白。 */
-@media (max-width: 767px) {
-  .keyboard-safe-input {
-    padding-bottom: max(env(safe-area-inset-bottom), 4px);
+    padding-top: max(env(safe-area-inset-top, 0px), var(--safe-inset-top, 0px));
   }
 }
 
@@ -96,10 +72,11 @@
 /* 移动端顶栏高度（task_layout_responsive 任务 1） */
 /* -------------------------------------------- */
 /* 桌面顶栏 32px（主题变量 --layout-titlebar-height）；
-   移动端抬到 44px 标准触摸高度（按钮命中区由 touch-expand 扩展）。 */
+   移动端 44px 标准触摸高度 + 状态栏安全区（全屏沉浸下顶栏交互行
+   自行避让状态栏文字，抽屉/覆盖层顶沿跟随）。 */
 @media (max-width: 767px) {
   :root {
-    --layout-titlebar-height: 44px;
+    --layout-titlebar-height: calc(44px + var(--safe-area-top, 0px));
   }
 }
 
@@ -125,47 +102,5 @@
     animation-duration: 0.15ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.1ms !important;
-  }
-}
-
-/* ============================================ */
-/* 移动端表格转卡片辅助                            */
-/* ============================================ */
-
-@media (max-width: 767px) {
-  .mobile-card-table {
-    display: block;
-  }
-
-  .mobile-card-table thead {
-    display: none;
-  }
-
-  .mobile-card-table tbody {
-    display: block;
-  }
-
-  .mobile-card-table tr {
-    display: block;
-    border-radius: 0.5rem;
-    border: 1px solid hsl(var(--border));
-    padding: 0.75rem;
-    margin-bottom: 0.5rem;
-  }
-
-  .mobile-card-table td {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.25rem 0;
-    border: none;
-  }
-
-  .mobile-card-table td::before {
-    content: attr(data-label);
-    font-size: 0.75rem;
-    color: hsl(var(--muted-foreground));
-    margin-right: 0.5rem;
-    flex-shrink: 0;
   }
 }

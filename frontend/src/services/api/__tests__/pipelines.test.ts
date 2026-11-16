@@ -59,7 +59,6 @@ describe('fetchPipelinePluginCatalog', () => {
       {
         id: 'pipeline_tool_schema',
         name: 'Tool Schema',
-        role: 'input',
         hostType: 'sidecar',
         version: '1.0.0',
         enabled: true,

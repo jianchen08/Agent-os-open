@@ -309,7 +309,7 @@ describe('utils: mergeStreamingParts 与占位管理', () => {
     expect(msgs.find((m: any) => m.id === 'old-msg-with-text')?.status).toBe('completed')
   })
 
-  it('ensureStreamingPlaceholder：上一轮残留带未解析 tool_call（calling）→ 移除（后端对账补回）', () => {
+  it('ensureStreamingPlaceholder：上一轮残留带未解析 tool_call（calling）→ 保留并标 error（迟到结果可归并，禁止漂移下一轮）', () => {
     store.getState().addMessage(PIPELINE_ID, {
       id: 'old-msg-pending-tool',
       sessionId: THREAD_ID,
@@ -330,9 +330,17 @@ describe('utils: mergeStreamingParts 与占位管理', () => {
 
     utils.ensureStreamingPlaceholder(PIPELINE_ID, MESSAGE_ID, THREAD_ID)
 
-    expect(store.getState().getMessages(PIPELINE_ID).map((m: any) => m.id)).not.toContain(
-      'old-msg-pending-tool',
-    )
+    // 2026-10-29 契约变更：工具事件 message_id「晚一轮」，删声明卡会让迟到
+    // tool_result FIXUP 到下一轮气泡。保留消息与声明卡，未完成卡按中断标 error。
+    const old = store
+      .getState()
+      .getMessages(PIPELINE_ID)
+      .find((m: any) => m.id === 'old-msg-pending-tool')
+    expect(old, '带未解析工具卡的上一轮消息不得删除').toBeTruthy()
+    expect(old.status, '让位下一轮即视为该消息收尾').toBe('completed')
+    const toolPart = (old.parts || []).find((p: any) => p.type === 'tool_call')
+    expect(toolPart?.callId, '声明卡留着供迟到结果按 callId 归并').toBe('stale-call')
+    expect(toolPart?.state, '未完成卡按中断语义标 error').toBe('error')
   })
 
   it('ensureStreamingPlaceholder：上一轮残留的非文本 part（system）原样保留，只收敛 text/thinking 与工具卡', () => {

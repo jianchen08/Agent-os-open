@@ -26,8 +26,8 @@ import pytest
 # tool.py 顶部 `from service import …` / `from task_types import …` 直接解析到
 # system/tasks 平铺模块；故注入 task 工具目录与 system/tasks 目录。
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_TASK_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "task"
-_TASKS_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "tasks"
+_TASK_DIR = _REPO_ROOT / "plugins" / "shared" / "task"
+_TASKS_DIR = _REPO_ROOT / "plugins" / "shared" / "tasks"
 for _p in (str(_TASK_DIR), str(_TASKS_DIR)):
     if _p in sys.path:
         sys.path.remove(_p)

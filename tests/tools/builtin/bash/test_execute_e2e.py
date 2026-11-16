@@ -20,7 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from process_manager import ProcessManager
+from agentos_plugin_sdk.process_runtime import ProcessManager
 from tool import BashTool
 
 pytestmark = pytest.mark.unit

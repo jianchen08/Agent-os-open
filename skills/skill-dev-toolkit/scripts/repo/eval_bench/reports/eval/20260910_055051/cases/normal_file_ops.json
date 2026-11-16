@@ -1,0 +1,82 @@
+{
+  "case_id": "normal_file_ops",
+  "category": "normal",
+  "passed": true,
+  "elapsed_seconds": 139.2,
+  "session_id": "thread-fa1e6e5c-3e0a-409e-a644-3cbb6a5df33a",
+  "pipeline_ids": [
+    "024e882bc046",
+    "4ef1f615119a"
+  ],
+  "settled": true,
+  "dispatches": [
+    {
+      "terminal": "stream_end",
+      "pipeline_id": "024e882bc046",
+      "interactions": [],
+      "event_types": [
+        "pending_inputs_changed",
+        "pending_inputs_changed",
+        "stream_start",
+        "widget_event",
+        "stream_end"
+      ]
+    }
+  ],
+  "approval": {
+    "requests_seen": 0,
+    "approved": 0,
+    "denied": 0,
+    "response_errors": []
+  },
+  "metrics": {
+    "pipelines": 2,
+    "iterations_total": 9,
+    "error_steps": 0,
+    "timeout_steps": 0,
+    "tool_calls": 4,
+    "tool_retries": 0,
+    "tool_names": [],
+    "tool_call_counts": {},
+    "task_statuses": [
+      null,
+      "completed"
+    ],
+    "all_settled": true,
+    "any_failed": false,
+    "by_model": {
+      "glm-5.3-flash": {
+        "input": 34589,
+        "output": 660,
+        "cached": 128,
+        "total": 35249
+      },
+      "MiniMax-M3": {
+        "input": 31734,
+        "output": 391,
+        "cached": 0,
+        "total": 32125
+      }
+    },
+    "tokens_total": 67374
+  },
+  "assertions": [
+    {
+      "type": "settled",
+      "passed": true,
+      "detail": "全链管道收敛"
+    },
+    {
+      "type": "no_failed_task",
+      "passed": true,
+      "detail": "无 failed 任务"
+    },
+    {
+      "type": "file_exists",
+      "passed": true,
+      "detail": "工作区命中 1 处"
+    }
+  ],
+  "failed_assertions": [],
+  "reply_excerpt": "任务已经提交好啦～（任务ID：4ef1f615119a）\n\n我已经安排通用执行 Agent 在你指定的会话目录下创建 `eval_normal.txt`，内容为 `eval-ok`，并且设置了文件检查作为验收标准，确保文件确实存在且内容正确。\n\n现在任务正在后台执行中，等它完成后我会第一时间读取确认内容，然后把文件完整路径汇报给你哟～请稍等一下下呢～"
+}

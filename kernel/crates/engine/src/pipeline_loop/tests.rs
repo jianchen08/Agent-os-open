@@ -2,12 +2,15 @@
 // 由 pipeline_loop.rs 的主 #[cfg(test)] 测试块体平移而来（保留私有项访问）。
 
 use super::*;
-use crate::compiler::{compile_pipeline, HookFile};
+use crate::compiler::compile_pipeline;
 use crate::SqliteStore;
 use agentos_core::traits::{
     HostType, ManifestCapabilities, PluginManifest, PluginType, StepCapability, ToolCapability,
 };
-use agentos_core::types::{LoopBody, PipelineConfig, PipelineStep, Route, StepItem, StepLibrary};
+use agentos_core::types::StepCheck;
+use agentos_core::types::{
+    LoopBody, LoopConfig, PipelineConfig, PipelineStep, Route, StepItem, StepLibrary,
+};
 use async_trait::async_trait;
 use serde_json::json;
 use std::collections::HashMap;
@@ -25,6 +28,8 @@ use agentos_core::types::{
 /// 同时统计每个插件被调用的次数 + 捕获每次收到 ctx.config（inputs 通道测试用）。
 struct MockInvoker {
     results: Mutex<HashMap<String, PluginResult>>,
+    /// 按调用序弹出的结果序列（耗尽后回落静态 results；逐次不同写入用）。
+    sequences: Mutex<HashMap<String, Vec<PluginResult>>>,
     calls: Mutex<HashMap<String, usize>>,
     configs: Mutex<Vec<(String, serde_json::Value)>>,
     /// 预设 invoker 级 Err（模拟 sidecar 不可达等 invoker 自身报错）。
@@ -35,6 +40,7 @@ impl MockInvoker {
     fn new() -> Self {
         Self {
             results: Mutex::new(HashMap::new()),
+            sequences: Mutex::new(HashMap::new()),
             calls: Mutex::new(HashMap::new()),
             configs: Mutex::new(Vec::new()),
             errs: Mutex::new(HashMap::new()),
@@ -46,6 +52,14 @@ impl MockInvoker {
             .lock()
             .unwrap()
             .insert(plugin_id.to_string(), result);
+    }
+
+    /// 预设按调用序弹出的结果序列（耗尽后回落静态 results）。
+    fn set_sequence(&self, plugin_id: &str, sequence: Vec<PluginResult>) {
+        self.sequences
+            .lock()
+            .unwrap()
+            .insert(plugin_id.to_string(), sequence);
     }
 
     fn set_err(&self, plugin_id: &str, err: PluginError) {
@@ -90,6 +104,16 @@ impl PluginInvoker for MockInvoker {
         // invoker 级 Err 优先（模拟 sidecar 不可达）
         if let Some(e) = self.errs.lock().unwrap().get(plugin_id).cloned() {
             return Err(e);
+        }
+        // 结果序列次之（按调用序弹出；耗尽回落静态 results）
+        if let Some(next) = self
+            .sequences
+            .lock()
+            .unwrap()
+            .get_mut(plugin_id)
+            .and_then(|v| (!v.is_empty()).then(|| v.remove(0)))
+        {
+            return Ok(next);
         }
         // 返回预设结果（缺失则返回空成功）
         let result = self
@@ -188,6 +212,7 @@ impl StorageBackend for NullStorage {
         _tenant_id: &str,
         _run_id: &str,
         _config_hash: &str,
+        _started_at: &str,
     ) -> Result<(), agentos_core::types::StorageError> {
         if self
             .fail_record_run_start
@@ -1887,7 +1912,7 @@ async fn test_step_level_loop() {
 
 #[tokio::test]
 async fn test_loop_does_not_inject_agent_config_per_iteration() {
-    // 契约（双轨收敛）：agent 全量配置唯一事实源 = context_build 插件；
+    // 契约（双轨收敛）：agent 全量配置唯一事实源 = agent_config_load 插件；
     // 内核 engine 不再每轮迭代把 agent yaml 注入 state（即使存在
     // config/agents/<id>.yaml），也不打 _agent_config_missing 标记。
     let temp = tempfile::tempdir().unwrap();
@@ -1939,7 +1964,7 @@ async fn test_loop_does_not_inject_agent_config_per_iteration() {
     assert_eq!(final_state["ended"], json!(true), "loop 应正常执行");
     assert!(
         final_state.get("system_prompt").is_none(),
-        "agent 全量配置不得由 engine 注入（context_build 是唯一事实源）"
+        "agent 全量配置不得由 engine 注入（agent_config_load 是唯一事实源）"
     );
     assert!(
         final_state.get("_agent_config_missing").is_none(),
@@ -2376,7 +2401,6 @@ fn test_manifest(id: &str) -> PluginManifest {
         description: None,
         version: "1.0.0".to_string(),
         plugin_type: PluginType::Pipeline,
-        pipeline_role: None,
         language: "python".to_string(),
         host_type: HostType::Sidecar,
         host_group: None,
@@ -2388,7 +2412,6 @@ fn test_manifest(id: &str) -> PluginManifest {
         mcp: None,
         lifecycle: None,
         native: None,
-        granted_capabilities: vec![],
         restricted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
@@ -2415,6 +2438,7 @@ fn tool_cap(name: &str) -> ToolCapability {
         category: None,
         ui: None,
         render: None,
+        isolation_capable: None,
         smoke: None,
         timeout_ms: None,
     }
@@ -2545,91 +2569,39 @@ async fn implicit_direct_reference_config_has_no_step_method_key() {
     );
 }
 
-// ── hooks 同步边界分发（服务化提案 §3.6：step 级/body 级两档 + terminate）──
+// ── checks 统一边界分发（钩子收敛终局，设计 §4.3：pre 过滤/post terminate/
+// on-state route/一次性 run 步/state_delta 键级事件）──
 
-/// 构造带 hooks 的已编译管道（step_hooks 键 = "body:step" 复合键）。
-fn compiled_with_hooks(
+/// 构造带 checks 声明的已编译管道（body_checks 键 = 循环体 id）。
+fn compiled_with_checks(
     fixture: &Fixture,
     config: &PipelineConfig,
-    body_hooks: &[(String, Vec<HookFile>)],
-    step_hooks: &[(String, Vec<HookFile>)],
+    body_checks: &[(String, Vec<StepCheck>)],
+    safety: &[&str],
 ) -> crate::compiler::CompiledPipeline {
-    crate::compiler::compile_pipeline_with_hooks(
+    crate::compiler::compile_pipeline_with_checks(
         config,
         &StepLibrary::default(),
         &fixture.executor.plugin_ids,
         None,
-        body_hooks,
-        step_hooks,
+        body_checks,
+        &safety.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
     )
-    .expect("compile with hooks ok")
+    .expect("compile with checks ok")
 }
 
-fn step_hook_file(on: &str, run: &str) -> HookFile {
-    HookFile {
-        on: on.to_string(),
-        run: run.to_string(),
+/// checks 声明构造辅助。
+fn check(at: &str, when: Option<&str>, then: &str) -> StepCheck {
+    StepCheck {
+        at: at.to_string(),
+        when: when.map(|s| s.to_string()),
+        then: then.to_string(),
     }
 }
 
-/// step 级钩子：该 step 执行时 step_start/step_end 各分发一次（payload 带
-/// 步骤复合键与事件名），且只在本 step 触发。
-#[tokio::test]
-async fn step_level_hook_receives_start_and_end_once() {
-    let fixture = Fixture::build(&["a", "watcher"]);
-    let config = PipelineConfig {
-        name: "p".into(),
-        loop_bodies: vec![LoopBody {
-            id: "main".into(),
-            steps: vec![atomic_step("s1", "a")],
-            while_cond: None,
-            exit_routes: vec![],
-            run_on_error: false,
-        }],
-        checkpoint: Default::default(),
-        initial_state: std::collections::HashMap::new(),
-        max_rounds: None,
-    };
-    let compiled = compiled_with_hooks(
-        &fixture,
-        &config,
-        &[],
-        &[(
-            "main:s1".to_string(),
-            vec![
-                step_hook_file("step_start", "watcher.on_step"),
-                step_hook_file("step_end", "watcher.on_step"),
-            ],
-        )],
-    );
-    fixture
-        .executor
-        .run_compiled(&compiled, json!({}))
-        .await
-        .expect("run ok");
-    let configs = fixture.invoker.captured_configs("watcher");
-    assert_eq!(configs.len(), 2, "step 级钩子恰好分发两次");
-    let events: Vec<&str> = configs
-        .iter()
-        .filter_map(|c| {
-            c.get("_pipe_hook")
-                .and_then(|h| h.get("event"))
-                .and_then(|e| e.as_str())
-        })
-        .collect();
-    assert_eq!(events, vec!["step_start", "step_end"], "start/end 各一次");
-    // payload 携带步骤复合键与事件名（最小上下文）
-    let payload = &configs[0]["_pipe_hook"]["payload"];
-    assert_eq!(payload["step_id"], json!("main:s1"));
-    assert_eq!(payload["event"], json!("step_start"));
-    assert!(payload.get("timestamp").is_some(), "payload 含时间戳");
-}
-
-/// body 级钩子：body 内每个 step 的边界都收到分发（payload.step_id 逐 step 不同）。
-#[tokio::test]
-async fn body_level_hook_fires_for_every_step_in_body() {
-    let fixture = Fixture::build(&["a", "b", "watcher"]);
-    let config = PipelineConfig {
+/// 单循环体两步管道（s1→s2，各引用一个插件）。
+fn two_step_config() -> PipelineConfig {
+    PipelineConfig {
         name: "p".into(),
         loop_bodies: vec![LoopBody {
             id: "main".into(),
@@ -2641,67 +2613,99 @@ async fn body_level_hook_fires_for_every_step_in_body() {
         checkpoint: Default::default(),
         initial_state: std::collections::HashMap::new(),
         max_rounds: None,
+    }
+}
+
+/// pre 过滤（≥2 组有区分度输入）：pre:<步> 的 when 谓词为假 → run 动作零效果
+/// （触发步零调用）；为真 → 触发步先于主步执行。
+#[tokio::test]
+async fn check_pre_when_gate_filters_dispatch() {
+    // 组 A：gate=open → when 真 → 触发步（relay→runner 插件）执行，主步照常
+    let fixture = Fixture::build(&["a", "runner"]);
+    let config = PipelineConfig {
+        name: "p".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![atomic_step("s1", "a"), atomic_step("relay", "runner")],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
     };
-    let compiled = compiled_with_hooks(
+    let compiled = compiled_with_checks(
         &fixture,
         &config,
         &[(
-            "main".to_string(),
-            vec![step_hook_file("step_start", "watcher.on_step")],
+            "main".into(),
+            vec![check("pre:s1", Some("gate == 'open'"), "run:relay")],
         )],
         &[],
     );
-    fixture
+    let final_state = fixture
         .executor
-        .run_compiled(&compiled, json!({}))
+        .run_compiled(&compiled, json!({"gate": "open"}))
         .await
         .expect("run ok");
-    let configs = fixture.invoker.captured_configs("watcher");
-    assert_eq!(configs.len(), 2, "body 内两个 step 各收到一次");
-    let step_ids: Vec<&str> = configs
-        .iter()
-        .filter_map(|c| c["_pipe_hook"]["payload"]["step_id"].as_str())
-        .collect();
+    let configs = fixture.invoker.captured_configs("runner");
     assert_eq!(
-        step_ids,
-        vec!["main:s1", "main:s2"],
-        "payload 定位到具体 step"
+        fixture.invoker.call_count("runner"),
+        2,
+        "when 真 → 触发一次 + relay 步流内顺序执行一次: configs={configs:?}"
     );
-}
-
-/// terminate 决策：钩子返回 {"decision":"terminate"} → 引擎置 ended=true，
-/// 当前循环体后续 step 不再执行。
-#[tokio::test]
-async fn hook_terminate_decision_ends_loop_body() {
-    let fixture = Fixture::build(&["a", "b", "watcher"]);
-    fixture.invoker.set_result(
-        "watcher",
-        PluginResult {
-            state_updates: updates(&[("decision", json!("terminate"))]),
-            ..Default::default()
-        },
+    assert!(
+        configs[0].get("_pipe_check").is_some() && configs[1].get("_pipe_check").is_none(),
+        "首调 = check 触发（带 _pipe_check），次调 = 流内顺序执行: {configs:?}"
     );
-    let config = PipelineConfig {
-        name: "p".into(),
-        loop_bodies: vec![LoopBody {
-            id: "main".into(),
-            steps: vec![atomic_step("s1", "a"), atomic_step("s2", "b")],
-            while_cond: None,
-            exit_routes: vec![],
-            run_on_error: false,
-        }],
-        checkpoint: Default::default(),
-        initial_state: std::collections::HashMap::new(),
-        max_rounds: None,
-    };
-    let compiled = compiled_with_hooks(
+    assert_eq!(fixture.invoker.call_count("a"), 1, "主步照常执行");
+    assert_eq!(
+        final_state.get("ended"),
+        Some(&json!(false)),
+        "run 动作不改变流程"
+    );
+    // 组 B：gate=closed → when 假 → 零触发（唯一调用 = 流内顺序执行，无 _pipe_check）
+    let fixture = Fixture::build(&["a", "runner"]);
+    let compiled = compiled_with_checks(
         &fixture,
         &config,
-        &[],
         &[(
-            "main:s1".to_string(),
-            vec![step_hook_file("step_end", "watcher.on_step")],
+            "main".into(),
+            vec![check("pre:s1", Some("gate == 'open'"), "run:relay")],
         )],
+        &[],
+    );
+    fixture
+        .executor
+        .run_compiled(&compiled, json!({"gate": "closed"}))
+        .await
+        .expect("run ok");
+    assert_eq!(
+        fixture.invoker.call_count("runner"),
+        1,
+        "when 假 → 零触发（仅剩流内顺序执行）"
+    );
+    let configs = fixture.invoker.captured_configs("runner");
+    assert!(
+        configs.iter().all(|c| c.get("_pipe_check").is_none()),
+        "零触发 = 无 check 触发调用: {configs:?}"
+    );
+    assert_eq!(fixture.invoker.call_count("a"), 1, "主步不受影响");
+}
+
+/// post terminate（≥2 组有区分度输入）：post:<步> 动作 terminate → ended=true
+/// 短路本循环体（后续步不再执行）；对照组（when 恒假）→ 后续步照常执行。
+#[tokio::test]
+async fn check_post_terminate_ends_loop_body() {
+    // 组 A：terminate 触发 → s2 截断
+    let fixture = Fixture::build(&["a", "b"]);
+    let config = two_step_config();
+    let compiled = compiled_with_checks(
+        &fixture,
+        &config,
+        &[("main".into(), vec![check("post:s1", None, "terminate")])],
+        &[],
     );
     let final_state = fixture
         .executor
@@ -2711,25 +2715,66 @@ async fn hook_terminate_decision_ends_loop_body() {
     assert_eq!(final_state["ended"], json!(true), "terminate → ended=true");
     assert_eq!(fixture.invoker.call_count("a"), 1, "s1 执行");
     assert_eq!(fixture.invoker.call_count("b"), 0, "s2 被 terminate 截断");
+    // 边界写归属：terminate 的 ended 写落 check@post:s1 来源标注窗口轨迹
+    assert!(
+        fixture
+            .store
+            .trace_plugin_ids
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|id| id == "check@post:s1"),
+        "terminate 写必须有 check@post:s1 来源标注窗口轨迹: {:?}",
+        fixture.store.trace_plugin_ids.lock().unwrap()
+    );
+    // 组 B：同边界 when 恒假 → 不触发 → s2 照常
+    let fixture = Fixture::build(&["a", "b"]);
+    let compiled = compiled_with_checks(
+        &fixture,
+        &config,
+        &[(
+            "main".into(),
+            vec![check("post:s1", Some("never == 'set'"), "terminate")],
+        )],
+        &[],
+    );
+    let final_state = fixture
+        .executor
+        .run_compiled(&compiled, json!({}))
+        .await
+        .expect("run ok");
+    assert_eq!(
+        final_state.get("ended"),
+        Some(&json!(false)),
+        "未触发不置 ended"
+    );
+    assert_eq!(fixture.invoker.call_count("b"), 1, "s2 照常执行");
 }
 
-/// 分发异常（invoker 错误）不影响主流程：仅 warn，主 step 照常执行、run 成功。
+/// on-state route（≥2 组有区分度输入）：state:<键> 订阅——写键后首个步边界
+/// 消费，route 动作转移控制流（目标步执行、被跳过的步零调用）；when equals
+/// 值条件为假 → 不转移。
 #[tokio::test]
-async fn hook_dispatch_failure_does_not_block_main_flow() {
-    let fixture = Fixture::build(&["a", "watcher"]);
-    fixture.invoker.set_err(
-        "watcher",
-        PluginError {
-            message: "hook sidecar unreachable".into(),
-            code: Some("MCP_CALL_FAILED".into()),
-            source: Some("test".into()),
+async fn check_on_state_route_transfers_control() {
+    // 组 A：写 flag=done → on-state route:route_target 转移（目标执行、tail 跳过）
+    let fixture = Fixture::build(&["writer", "skipme", "target", "tail"]);
+    fixture.invoker.set_result(
+        "writer",
+        PluginResult {
+            state_updates: updates(&[("flag", json!("done"))]),
+            ..Default::default()
         },
     );
     let config = PipelineConfig {
         name: "p".into(),
         loop_bodies: vec![LoopBody {
             id: "main".into(),
-            steps: vec![atomic_step("s1", "a")],
+            steps: vec![
+                atomic_step("write", "writer"),
+                atomic_step("skipped", "skipme"),
+                atomic_step("route_target", "target"),
+                atomic_step("aftermath", "tail"),
+            ],
             while_cond: None,
             exit_routes: vec![],
             run_on_error: false,
@@ -2738,32 +2783,399 @@ async fn hook_dispatch_failure_does_not_block_main_flow() {
         initial_state: std::collections::HashMap::new(),
         max_rounds: None,
     };
-    let compiled = compiled_with_hooks(
+    let compiled = compiled_with_checks(
         &fixture,
         &config,
-        &[],
         &[(
-            "main:s1".to_string(),
-            vec![step_hook_file("step_end", "watcher.on_step")],
+            "main".into(),
+            vec![check("state:flag", None, "route:route_target")],
         )],
+        &[],
+    );
+    fixture
+        .executor
+        .run_compiled(&compiled, json!({}))
+        .await
+        .expect("run ok");
+    assert_eq!(fixture.invoker.call_count("writer"), 1, "写步执行");
+    assert_eq!(
+        fixture.invoker.call_count("skipme"),
+        0,
+        "route 转移跳过的步零调用"
+    );
+    assert_eq!(fixture.invoker.call_count("target"), 1, "route 目标步执行");
+    assert_eq!(
+        fixture.invoker.call_count("tail"),
+        1,
+        "转移后流继续顺序推进（目标之后的步照常）"
+    );
+    // 组 B：订阅键未被写 → 零触发，顺序推进
+    let fixture = Fixture::build(&["writer", "skipme", "target", "tail"]);
+    let compiled = compiled_with_checks(
+        &fixture,
+        &config,
+        &[(
+            "main".into(),
+            vec![check("state:flag", None, "route:route_target")],
+        )],
+        &[],
+    );
+    fixture
+        .executor
+        .run_compiled(&compiled, json!({}))
+        .await
+        .expect("run ok");
+    assert_eq!(
+        fixture.invoker.call_count("target"),
+        1,
+        "未写键零触发（target 为流内顺序执行）"
+    );
+    assert_eq!(fixture.invoker.call_count("skipme"), 1, "零触发不跳步");
+    assert_eq!(fixture.invoker.call_count("tail"), 1, "顺序推进不受影响");
+    // 组 C：when equals 值条件为假（写的值不匹配）→ 不转移
+    let fixture = Fixture::build(&["writer", "skipme", "target", "tail"]);
+    fixture.invoker.set_result(
+        "writer",
+        PluginResult {
+            state_updates: updates(&[("flag", json!("done"))]),
+            ..Default::default()
+        },
+    );
+    let compiled = compiled_with_checks(
+        &fixture,
+        &config,
+        &[(
+            "main".into(),
+            vec![check(
+                "state:flag",
+                Some("flag == 'pending'"),
+                "route:route_target",
+            )],
+        )],
+        &[],
+    );
+    fixture
+        .executor
+        .run_compiled(&compiled, json!({}))
+        .await
+        .expect("run ok");
+    assert_eq!(
+        fixture.invoker.call_count("target"),
+        1,
+        "equals 条件为假不转移（target 为流内顺序执行）"
+    );
+    assert_eq!(fixture.invoker.call_count("skipme"), 1, "不转移不跳步");
+    assert_eq!(fixture.invoker.call_count("tail"), 1);
+}
+
+/// 一次性触发步：触发一次执行一次（与顺序步同语义），轨迹身份 = 模板步 id +
+/// 触发纪元（多次触发多条目不混叠）；触发上下文经 `_pipe_check` 透传。
+#[tokio::test]
+async fn check_run_step_executes_once_with_epoch_trace() {
+    let fixture = Fixture::build(&["a", "b", "runner"]);
+    // runner 按调用序写不同的值 → 每次触发的轨迹窗口都有净变更（无产出步不落
+    // 轨迹的既有语义不变，轨迹身份断言依赖窗口产出）
+    fixture.invoker.set_sequence(
+        "runner",
+        vec![
+            PluginResult {
+                state_updates: updates(&[("relayed", json!(1))]),
+                ..Default::default()
+            },
+            PluginResult {
+                state_updates: updates(&[("relayed", json!(2))]),
+                ..Default::default()
+            },
+        ],
+    );
+    let config = PipelineConfig {
+        name: "p".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![
+                atomic_step("s1", "a"),
+                atomic_step("s2", "b"),
+                atomic_step("relay", "runner"),
+            ],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
+    };
+    // pre:s1 与 post:s1 各触发一次 run:relay → 单轮内两次触发、两个纪元
+    let compiled = compiled_with_checks(
+        &fixture,
+        &config,
+        &[(
+            "main".into(),
+            vec![
+                check("pre:s1", None, "run:relay"),
+                check("post:s1", None, "run:relay"),
+            ],
+        )],
+        &[],
     );
     let final_state = fixture
         .executor
         .run_compiled(&compiled, json!({}))
         .await
-        .expect("run 不因钩子分发失败翻车");
-    assert_eq!(fixture.invoker.call_count("a"), 1, "主 step 照常执行");
+        .expect("run ok");
+    assert_eq!(
+        fixture.invoker.call_count("runner"),
+        3,
+        "两次触发各执行一次 + relay 步流内顺序执行一次"
+    );
+    assert_eq!(fixture.invoker.call_count("a"), 1, "主步 s1 照常执行");
+    assert_eq!(
+        fixture.invoker.call_count("b"),
+        1,
+        "后续步 s2 照常（run 不转移）"
+    );
     assert_eq!(
         final_state.get("ended"),
         Some(&json!(false)),
-        "分发失败不得误置 ended（run 开头默认种子 false，终止决策才会置 true）"
+        "run 不终止流程"
+    );
+    // 轨迹身份 = 模板步 id + 触发纪元：relay#1 / relay#2 两条独立轨迹条目
+    let trace_ids = fixture.store.trace_plugin_ids.lock().unwrap().clone();
+    assert!(
+        trace_ids.iter().any(|id| id == "relay#1"),
+        "触发纪元 #1 轨迹条目: {trace_ids:?}"
+    );
+    assert!(
+        trace_ids.iter().any(|id| id == "relay#2"),
+        "触发纪元 #2 轨迹条目（多条目不混叠）: {trace_ids:?}"
+    );
+    // 触发上下文 `_pipe_check`：at + 触发纪元随本步插件调用透传（流内顺序
+    // 执行的那次不带 _pipe_check）
+    let configs = fixture.invoker.captured_configs("runner");
+    assert!(
+        configs
+            .iter()
+            .any(|c| c["_pipe_check"]["at"] == "pre:s1" && c["_pipe_check"]["epoch"] == 1),
+        "pre 触发上下文透传: {configs:?}"
+    );
+    assert!(
+        configs
+            .iter()
+            .any(|c| c["_pipe_check"]["at"] == "post:s1" && c["_pipe_check"]["epoch"] == 2),
+        "post 触发上下文透传: {configs:?}"
+    );
+    assert_eq!(
+        configs
+            .iter()
+            .filter(|c| c.get("_pipe_check").is_some())
+            .count(),
+        2,
+        "恰好两次触发调用携带 _pipe_check（顺序执行不携带）: {configs:?}"
     );
 }
 
-/// 空表零分发：未声明任何钩子的管道，边界分发点零调用。
+/// run 步自身产出 Step 跳转：触发边界无跳转宿主，跳转不消费（主流程继续
+/// 顺序推进），warn 留痕。
 #[tokio::test]
-async fn no_hooks_yields_zero_dispatch() {
-    let fixture = Fixture::build(&["a", "watcher"]);
+async fn check_run_step_self_jump_is_not_consumed() {
+    let fixture = Fixture::build(&["a", "runner", "skipped_target"]);
+    // relay 步自身路由：when True → Step 跳转 "relay_skip"（编译期校验合法）
+    let mut relay = atomic_step("relay", "runner");
+    relay.routes = vec![agentos_core::types::Route {
+        when: "True".into(),
+        then: agentos_core::types::RouteAction {
+            next: RouteNext::Step("relay_skip".into()),
+            set: HashMap::new(),
+        },
+    }];
+    let config = PipelineConfig {
+        name: "p".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![
+                atomic_step("s1", "a"),
+                relay,
+                atomic_step("relay_skip", "skipped_target"),
+            ],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
+    };
+    let compiled = compiled_with_checks(
+        &fixture,
+        &config,
+        &[("main".into(), vec![check("pre:s1", None, "run:relay")])],
+        &[],
+    );
+    fixture
+        .executor
+        .run_compiled(&compiled, json!({}))
+        .await
+        .expect("run ok");
+    // run 步触发执行了（1 次），但其自身 Step 跳转不消费——relay_skip 只在
+    // 流内顺序位置执行一次（若无跳转消费则同样 1 次；区别在于顺序流未被
+    // run 触发改写——skipped_target 的调用全部来自顺序位置）
+    assert_eq!(
+        fixture.invoker.call_count("runner"),
+        2,
+        "触发一次 + 流内一次"
+    );
+    assert_eq!(
+        fixture.invoker.call_count("skipped_target"),
+        1,
+        "run 触发的跳转不消费，主流程顺序推进照旧"
+    );
+    assert_eq!(fixture.invoker.call_count("a"), 1, "主步照常执行");
+}
+
+/// state_delta 键级事件：写路径 journal 落点发射，on-state run 动作的触发步
+/// 经 `_pipe_check.state_delta` 收到键级 payload（key/old/new）。
+#[tokio::test]
+async fn state_delta_emission_carries_key_payload() {
+    // 组 A：写键 flag=done（原值 absent）→ on-state 触发步收到键级 payload
+    let fixture = Fixture::build(&["writer", "reporter"]);
+    fixture.invoker.set_result(
+        "writer",
+        PluginResult {
+            state_updates: updates(&[("flag", json!("done"))]),
+            ..Default::default()
+        },
+    );
+    let config = PipelineConfig {
+        name: "p".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![
+                atomic_step("write", "writer"),
+                atomic_step("report_step", "reporter"),
+            ],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
+    };
+    let compiled = compiled_with_checks(
+        &fixture,
+        &config,
+        &[(
+            "main".into(),
+            vec![check("state:flag", None, "run:report_step")],
+        )],
+        &[],
+    );
+    fixture
+        .executor
+        .run_compiled(&compiled, json!({}))
+        .await
+        .expect("run ok");
+    // 触发一次（report_step 步也在流内顺序执行一次，由 _pipe_check 区分）
+    assert_eq!(
+        fixture.invoker.call_count("reporter"),
+        2,
+        "写键 → 触发一次 + 流内顺序执行一次"
+    );
+    let configs = fixture.invoker.captured_configs("reporter");
+    let triggered = configs
+        .iter()
+        .find(|c| c.get("_pipe_check").is_some())
+        .expect("触发调用带 _pipe_check");
+    let delta = &triggered["_pipe_check"]["state_delta"][0];
+    assert_eq!(delta["key"], json!("flag"), "payload 携带键名");
+    assert_eq!(delta["new"], json!("done"), "payload 携带新值");
+    assert_eq!(delta["old"], serde_json::Value::Null, "新增键旧值为 null");
+    // 组 B：写的键无订阅 → 零触发（事件不残留、不误触发）
+    let fixture = Fixture::build(&["writer", "reporter"]);
+    let compiled = compiled_with_checks(
+        &fixture,
+        &config,
+        &[(
+            "main".into(),
+            vec![check("state:other", None, "run:report_step")],
+        )],
+        &[],
+    );
+    fixture
+        .executor
+        .run_compiled(&compiled, json!({}))
+        .await
+        .expect("run ok");
+    assert_eq!(
+        fixture.invoker.call_count("reporter"),
+        1,
+        "未订阅键的写不触发（仅剩流内顺序执行）"
+    );
+    let configs = fixture.invoker.captured_configs("reporter");
+    assert!(
+        configs.iter().all(|c| c.get("_pipe_check").is_none()),
+        "零触发 = 无 check 触发调用"
+    );
+    assert_eq!(fixture.invoker.call_count("writer"), 1);
+}
+
+/// 护栏①（步产出路由优先）：post 边界步已产出路由（Step 跳转）时 check route
+/// 抑制——步自身的跳转目标执行，check 目标被跳过。
+#[tokio::test]
+async fn step_produced_route_takes_priority_over_check_route() {
+    let fixture = Fixture::build(&["a", "check_target", "step_target"]);
+    let mut s1 = atomic_step("s1", "a");
+    s1.routes = vec![agentos_core::types::Route {
+        when: "True".into(),
+        then: agentos_core::types::RouteAction {
+            next: RouteNext::Step("s3".into()),
+            set: HashMap::new(),
+        },
+    }];
+    let config = PipelineConfig {
+        name: "p".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![
+                s1,
+                atomic_step("s2", "check_target"),
+                atomic_step("s3", "step_target"),
+            ],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
+    };
+    let compiled = compiled_with_checks(
+        &fixture,
+        &config,
+        &[("main".into(), vec![check("post:s1", None, "route:s2")])],
+        &[],
+    );
+    fixture
+        .executor
+        .run_compiled(&compiled, json!({}))
+        .await
+        .expect("run ok");
+    assert_eq!(
+        fixture.invoker.call_count("step_target"),
+        1,
+        "步产出路由优先消费（s3 执行）"
+    );
+    assert_eq!(
+        fixture.invoker.call_count("check_target"),
+        0,
+        "check route 抑制（s2 零调用）"
+    );
+}
+
+/// 空表零分发：未声明任何 checks 的管道，边界分发点零开销。
+#[tokio::test]
+async fn no_checks_yields_zero_dispatch() {
+    let fixture = Fixture::build(&["a", "runner"]);
     let config = PipelineConfig {
         name: "p".into(),
         loop_bodies: vec![LoopBody {
@@ -2777,18 +3189,24 @@ async fn no_hooks_yields_zero_dispatch() {
         initial_state: std::collections::HashMap::new(),
         max_rounds: None,
     };
-    let compiled = compiled_with_hooks(&fixture, &config, &[], &[]);
+    let compiled = compile_pipeline(
+        &config,
+        &StepLibrary::default(),
+        fixture.executor.plugin_ids(),
+    )
+    .expect("compile ok");
     fixture
         .executor
         .run_compiled(&compiled, json!({}))
         .await
         .expect("run ok");
-    assert_eq!(
-        fixture.invoker.call_count("watcher"),
-        0,
-        "空 hooks 表零分发（空集短路零开销）"
-    );
     assert_eq!(fixture.invoker.call_count("a"), 1, "主流程不受影响");
+    // 无 checks → 无一次性触发步、无 _pipe_check 注入
+    let configs = fixture.invoker.captured_configs("a");
+    assert!(
+        configs.iter().all(|c| c.get("_pipe_check").is_none()),
+        "顺序执行零触发上下文注入"
+    );
 }
 
 // ── 控制状态键契约（ADR 2026-08-30）：should_stop 折算 / run_started_at / 终态映射 ──
@@ -3134,102 +3552,168 @@ async fn run_end_checkpoint_keeps_keys_without_declaration() {
     assert_eq!(state["task.status"], "running");
 }
 
-// ── 监控 M2 分类词表：显式映射替代子串猜测（基线锁定）──────────────
+// ── 监控 M2 分类（整改 K2 声明化）：真值源 = plugin.json 声明面 ──────
 
-/// 基线锁定：`plugin_metrics_class` 对现存插件集的分类结果与原子串启发
-/// （2026-09 基线：含 "llm"→Llm；含 "tool"→Tool；其余→Other）完全一致。
-/// 期望值逐条显式写死（非测试内重算启发式），表内条目被误删即变红。
+/// 迁移完整性对账（K2）：原内核内置 METRICS_PLUGIN_CLASS 表覆盖的每个
+/// 插件，plugin.json `capabilities.metrics_class` 都已声明且值与表退役前
+/// 一致（零迁移丢失）；且全部 manifest 的声明值均属合法词表（llm/tool）。
+/// 期望值逐条显式写死（表已删除，本测试即对账锚点）：漏补声明/值漂移/
+/// 非法声明值即红。
 #[test]
-fn test_plugin_metrics_class_locked_to_current_plugin_set() {
-    // LLM 调用面（现存全集）
-    for id in ["llm_service", "pipeline_llm_core"] {
+fn test_metrics_class_declaration_migration_integrity() {
+    // 期望值 = 表退役前各插件的类别（原表全集，非测试内重算）
+    let expected: &[(&str, PluginMetricsClass)] = &[
+        // LLM 调用面
+        ("llm_service", PluginMetricsClass::Llm),
+        ("pipeline_llm_core", PluginMetricsClass::Llm),
+        // 工具调用面（管道工具核 + 工具插件）
+        ("agentos-builtin-tools", PluginMetricsClass::Tool),
+        ("bash_tool", PluginMetricsClass::Tool),
+        ("human_interaction_tool", PluginMetricsClass::Tool),
+        ("media_tools", PluginMetricsClass::Tool),
+        ("memory_tool", PluginMetricsClass::Tool),
+        ("pipeline_tool_cache", PluginMetricsClass::Tool),
+        ("pipeline_tool_cache_writer", PluginMetricsClass::Tool),
+        ("pipeline_tool_core", PluginMetricsClass::Tool),
+        ("pipeline_tool_schema", PluginMetricsClass::Tool),
+        ("pipeline_tool_schema_validator", PluginMetricsClass::Tool),
+        ("project_manager", PluginMetricsClass::Tool),
+        ("resource_merge_tool", PluginMetricsClass::Tool),
+        ("resource_search_tool", PluginMetricsClass::Tool),
+        ("simple_tools", PluginMetricsClass::Tool),
+        ("spill_retrieve_tool", PluginMetricsClass::Tool),
+        ("task_evaluate_tool", PluginMetricsClass::Tool),
+        ("task_manage_tool", PluginMetricsClass::Tool),
+        ("task_submit_tool", PluginMetricsClass::Tool),
+        ("trigger_setup_tool", PluginMetricsClass::Tool),
+        ("web_operate_tool", PluginMetricsClass::Tool),
+    ];
+    let shared_root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../plugins/shared");
+    // 扫描面与 tests/test_plugin_manifest_schema.py 同构（定点扫描不递归——
+    // 拍平布局（ADR 2026-10-13-plugin-flat-layout）下插件平铺共享根一层；
+    // plugins/shared 下存在循环 junction，无界遍历会挂死）
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(&shared_root)
+        .expect("plugins/shared 必须可读")
+        .flatten()
+    {
+        paths.push(entry.path().join("plugin.json"));
+    }
+    // 装载面全集：id → 声明值（None = 未声明）。用真实 serde 模型解析——
+    // 模型面（deny_unknown_fields）与声明面同轮受验。
+    let mut declared_by_id: HashMap<String, Option<String>> = HashMap::new();
+    for path in paths {
+        if !path.is_file() {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("plugin.json 必须可读");
+        let manifest: PluginManifest =
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path:?} 解析失败：{e}"));
+        declared_by_id.insert(manifest.id, manifest.capabilities.metrics_class);
+    }
+    assert!(
+        declared_by_id.len() >= 50,
+        "装载面 manifest 清单异常（{} 个），扫描面可能被移动",
+        declared_by_id.len()
+    );
+    // ① 对账：表覆盖插件逐一已声明且值一致（零迁移丢失）
+    for (id, class) in expected {
+        let declared = declared_by_id
+            .get(*id)
+            .unwrap_or_else(|| panic!("{id} 不在 plugins/shared 装载面（表覆盖插件丢失）"))
+            .clone();
+        let want = match class {
+            PluginMetricsClass::Llm => METRICS_CLASS_LLM,
+            PluginMetricsClass::Tool => METRICS_CLASS_TOOL,
+            PluginMetricsClass::Other => unreachable!("Other 是缺省语义，期望表不含 Other 项"),
+        };
         assert_eq!(
-            plugin_metrics_class(id),
-            PluginMetricsClass::Llm,
-            "{id} 必须分类为 Llm（现存插件集基线）"
+            declared.as_deref(),
+            Some(want),
+            "{id} 声明值必须与表退役前类别一致（{want:?}）"
         );
     }
-    // 工具调用面（现存全集）
-    for id in [
-        "agentos-builtin-tools",
-        "bash_tool",
-        "download_tool",
-        "human_interaction_tool",
-        "media_tools",
-        "memory_tool",
-        "pipeline_tool_cache",
-        "pipeline_tool_cache_writer",
-        "pipeline_tool_core",
-        "pipeline_tool_schema",
-        "pipeline_tool_schema_validator",
-        "project_create_tool",
-        "resource_merge_tool",
-        "resource_search_tool",
-        "simple_tools",
-        "spill_retrieve_tool",
-        "task_evaluate_tool",
-        "task_manage_tool",
-        "task_submit_tool",
-        "trigger_setup_tool",
-        "web_operate_tool",
+    // ② 性质：全部声明值均属合法词表（任何插件、任何未来新增声明）
+    for (id, declared) in &declared_by_id {
+        if let Some(value) = declared {
+            assert!(
+                PluginMetricsClass::from_declared(value).is_some(),
+                "{id} 声明了非法 metrics_class 值 {value:?}（合法值：llm/tool）"
+            );
+        }
+    }
+}
+
+/// 声明值词表解析：合法值精确映射；Other 是缺省语义不是登记项（显式
+/// "other" = 非法声明，与表时代「Other 不得显式登记」同契约）；精确
+/// 匹配、大小写敏感、无空白容差。
+#[test]
+fn test_metrics_class_from_declared_vocabulary() {
+    assert_eq!(
+        PluginMetricsClass::from_declared(METRICS_CLASS_LLM),
+        Some(PluginMetricsClass::Llm)
+    );
+    assert_eq!(
+        PluginMetricsClass::from_declared(METRICS_CLASS_TOOL),
+        Some(PluginMetricsClass::Tool)
+    );
+    for illegal in [
+        "other", "Other", "LLM", "TOOL", "", "llm ", " tool", "tool\n",
     ] {
         assert_eq!(
-            plugin_metrics_class(id),
-            PluginMetricsClass::Tool,
-            "{id} 必须分类为 Tool（现存插件集基线）"
-        );
-    }
-    // 编排/服务面 = Other（不计 LLM/tool；样例覆盖管道输入输出编排、系统服务、
-    // 诊断面，含与词表前缀相近的条目如 pipeline_tool_schema 的近邻
-    // pipeline_context_window_guard）
-    for id in [
-        "pipeline_agent_config_load",
-        "pipeline_context_window_guard",
-        "pipeline_prompt_build",
-        "pipeline_stop_check",
-        "pipeline_task_reminder",
-        "pipeline_multimodal_preprocessor",
-        "condition",
-        "db_admin",
-        "task_service",
-        "isolation_service",
-        "monitoring",
-        "debug_center",
-        "user_admin",
-    ] {
-        assert_eq!(
-            plugin_metrics_class(id),
-            PluginMetricsClass::Other,
-            "{id} 必须分类为 Other（编排/服务插件不计 LLM/tool 指标）"
-        );
-    }
-    // 性质：未登记 id 一律 Other（分类全函数、缺省语义）
-    for id in ["", "unknown_plugin", "LLM_SERVICE", "my_toolbox_plugin"] {
-        assert_eq!(
-            plugin_metrics_class(id),
-            PluginMetricsClass::Other,
-            "未登记 id {id:?} 必须为 Other（大小写敏感、精确匹配）"
+            PluginMetricsClass::from_declared(illegal),
+            None,
+            "非法声明值 {illegal:?} 必须被拒绝（不进分类表）"
         );
     }
 }
 
-/// 词表自身契约：键不重复；不含显式 Other 条目（Other 是缺省，不是登记项）。
+/// 分类行为回归（K2 声明化后同插件同类别）：经 with_metrics_classes 装配
+/// 声明 → 查询结果与表时代一致；未声明 id、未装配执行器、非法声明值
+/// 三种边界一律 Other 兜底（新插件零声明也进指标面，不 panic 不漏）。
 #[test]
-fn test_metrics_class_table_has_no_duplicate_or_other_entries() {
-    let mut keys: Vec<&str> = METRICS_PLUGIN_CLASS.iter().map(|(id, _)| *id).collect();
-    keys.sort_unstable();
-    let count = keys.len();
-    keys.dedup();
+fn test_metrics_class_declarative_lookup() {
+    let executor = make_executor(
+        Arc::new(MockInvoker::new()),
+        &["llm_service", "bash_tool", "monitoring"],
+    )
+    .with_metrics_classes([
+        ("llm_service".to_string(), METRICS_CLASS_LLM.to_string()),
+        ("bash_tool".to_string(), METRICS_CLASS_TOOL.to_string()),
+        ("monitoring".to_string(), "banana".to_string()), // 非法声明 → warn + Other
+    ]);
     assert_eq!(
-        keys.len(),
-        count,
-        "METRICS_PLUGIN_CLASS 键不得重复：{keys:?}"
+        executor.plugin_metrics_class("llm_service"),
+        PluginMetricsClass::Llm,
+        "llm_service 分类须与表时代一致（Llm）"
     );
-    assert!(
-        METRICS_PLUGIN_CLASS
-            .iter()
-            .all(|(_, class)| *class != PluginMetricsClass::Other),
-        "Other 是缺省分类，不得显式登记进表"
+    assert_eq!(
+        executor.plugin_metrics_class("bash_tool"),
+        PluginMetricsClass::Tool,
+        "bash_tool 分类须与表时代一致（Tool）"
+    );
+    assert_eq!(
+        executor.plugin_metrics_class("monitoring"),
+        PluginMetricsClass::Other,
+        "非法声明值按 Other 计（指标少计是可观测债务，非行为故障）"
+    );
+    assert_eq!(
+        executor.plugin_metrics_class("brand_new_plugin"),
+        PluginMetricsClass::Other,
+        "未声明新插件兜底 Other（大小写敏感、精确匹配）"
+    );
+    assert_eq!(
+        executor.plugin_metrics_class("LLM_SERVICE"),
+        PluginMetricsClass::Other,
+        "大小写敏感：变体 id 不得命中声明"
+    );
+    // 未装配（测试默认/未接线）= 全 Other：声明表为空不影响执行路径
+    let bare = make_executor(Arc::new(MockInvoker::new()), &["llm_service"]);
+    assert_eq!(
+        bare.plugin_metrics_class("llm_service"),
+        PluginMetricsClass::Other,
+        "未注入声明表时全 Other（分类只影响 metrics，不影响执行）"
     );
 }
 
@@ -3867,11 +4351,246 @@ async fn empty_pending_message_ops_records_no_user_input_trace() {
     );
 }
 
-// ════════════════════════════════════════════════════════════════
-// 并行 for-each（LoopConfig over/as，ADR 2026-10-02-loopconfig-parallel-foreach）
-// ════════════════════════════════════════════════════════════════
+// ── 异常终局闸（凡异常终止必须显式报错）：abnormal_end_signature + 收尾署名 ──
 
-use agentos_core::types::LoopConfig;
+/// 兜底 end 的 post 步（零插件调用，仅无条件 end 路由——会话管道 post 路由
+/// 漏配回环路由时的形态）。
+fn bare_end_post() -> PipelineStep {
+    PipelineStep {
+        id: "post".into(),
+        steps: vec![],
+        when: None,
+        context: HashMap::new(),
+        routes: vec![Route {
+            when: "True".into(),
+            then: agentos_core::types::RouteAction {
+                next: RouteNext::End,
+                set: HashMap::new(),
+            },
+        }],
+        loop_config: None,
+    }
+}
+
+#[test]
+fn abnormal_end_signature_table() {
+    // 纯函数表驱动：异常特征各归其词，正常收束/挂起/已署名一律 None。
+    let calls = json!([{ "name": "resource_search", "arguments": {} }]);
+    let cases: Vec<(serde_json::Value, Option<&str>)> = vec![
+        // 未署名 + 未消费工具调用 → dropped_tool_calls
+        (
+            json!({ "raw_tool_calls": calls }),
+            Some("dropped_tool_calls"),
+        ),
+        // stop_reason 为空串同未署名（stop_check 无触发轮复位后的形态）
+        (
+            json!({ "router.stop_reason": "", "raw_tool_calls": calls }),
+            Some("dropped_tool_calls"),
+        ),
+        // 未署名 + 空回复耗尽未裁决 → empty_reply_exhausted
+        (
+            json!({ "llm_empty_exhausted": true }),
+            Some("empty_reply_exhausted"),
+        ),
+        // 挂起（等待恢复）非终局，恢复后调用继续消费
+        (json!({ "suspended": true, "raw_tool_calls": calls }), None),
+        // 已署名 = 终止方权威，引擎不覆写
+        (
+            json!({ "router.stop_reason": "task_completed", "raw_tool_calls": calls }),
+            None,
+        ),
+        // 正常收束：调用已消费（空数组/缺失/非数组）、无耗尽信号
+        (json!({ "raw_tool_calls": [] }), None),
+        (json!({}), None),
+        (json!({ "raw_tool_calls": "not-a-list" }), None),
+        (json!({ "llm_empty_exhausted": false }), None),
+    ];
+    for (state, expected) in cases {
+        assert_eq!(abnormal_end_signature(&state), expected, "state={state}");
+    }
+}
+
+#[tokio::test]
+async fn abnormal_end_with_pending_tool_calls_fails_loudly() {
+    // 复刻 2026-10-08 会话管道断链：post 路由漏配回环（仅兜底 end），llm
+    // 产出工具调用 → 收尾异常终局闸署名 dropped_tool_calls 折算 Failed，
+    // 调用被吞不再静默假绿 completed。
+    let fixture = Fixture::build(&["pipeline_llm_core"]);
+    fixture.invoker.set_result(
+        "pipeline_llm_core",
+        PluginResult {
+            state_updates: updates(&[
+                (
+                    "raw_tool_calls",
+                    json!([{ "name": "resource_search", "arguments": {} }]),
+                ),
+                ("raw_result", json!("好嘞～先把文件工具加载上。")),
+            ]),
+            ..Default::default()
+        },
+    );
+    let config = PipelineConfig::single_body(
+        "gate",
+        None,
+        vec![atomic_step("llm", "pipeline_llm_core"), bare_end_post()],
+    );
+    let final_state = fixture
+        .run(&config, &StepLibrary::default(), json!({}))
+        .await;
+    assert_eq!(
+        final_state["router.stop_reason"],
+        json!("dropped_tool_calls"),
+        "异常终局必须署名失败词进轨迹/state"
+    );
+    assert_eq!(final_state["run_status"], json!("failed"));
+    assert_eq!(
+        fixture.store.recorded_run_statuses(),
+        vec![RunStatus::Failed],
+        "落库终态同步 Failed（UI 可见报错）"
+    );
+}
+
+#[tokio::test]
+async fn abnormal_end_authored_stop_reason_not_overwritten() {
+    // 已署名终局权威在署名方：任务终态收束（task_completed）遗留在场调用
+    // 不翻 Failed，闸门零介入。
+    let fixture = Fixture::build(&["pipeline_llm_core"]);
+    fixture.invoker.set_result(
+        "pipeline_llm_core",
+        PluginResult {
+            state_updates: updates(&[
+                (
+                    "raw_tool_calls",
+                    json!([{ "name": "task_submit", "arguments": {} }]),
+                ),
+                ("router.stop_reason", json!("task_completed")),
+            ]),
+            ..Default::default()
+        },
+    );
+    let config = PipelineConfig::single_body(
+        "gate",
+        None,
+        vec![atomic_step("llm", "pipeline_llm_core"), bare_end_post()],
+    );
+    let final_state = fixture
+        .run(&config, &StepLibrary::default(), json!({}))
+        .await;
+    assert_eq!(
+        final_state["router.stop_reason"],
+        json!("task_completed"),
+        "署名方权威，引擎不得覆写"
+    );
+    assert_eq!(
+        fixture.store.recorded_run_statuses(),
+        vec![RunStatus::Completed]
+    );
+}
+
+#[tokio::test]
+async fn abnormal_end_empty_reply_exhausted_fails_loudly() {
+    // 会话管道空回复耗尽（无任务域收束方）：agent 零产出即退出 = 异常终局，
+    // 闸门署名 empty_reply_exhausted 折算 Failed。
+    let fixture = Fixture::build(&["pipeline_llm_core"]);
+    fixture.invoker.set_result(
+        "pipeline_llm_core",
+        PluginResult {
+            state_updates: updates(&[
+                ("llm_empty_exhausted", json!(true)),
+                ("raw_tool_calls", json!([])),
+            ]),
+            ..Default::default()
+        },
+    );
+    let config = PipelineConfig::single_body(
+        "gate",
+        None,
+        vec![atomic_step("llm", "pipeline_llm_core"), bare_end_post()],
+    );
+    let final_state = fixture
+        .run(&config, &StepLibrary::default(), json!({}))
+        .await;
+    assert_eq!(
+        final_state["router.stop_reason"],
+        json!("empty_reply_exhausted")
+    );
+    assert_eq!(final_state["run_status"], json!("failed"));
+    assert_eq!(
+        fixture.store.recorded_run_statuses(),
+        vec![RunStatus::Failed]
+    );
+}
+
+#[tokio::test]
+async fn normal_unsigned_close_without_abnormal_signature_stays_completed() {
+    // 会话"文本即停"正常收束（无署名、调用已消费、无耗尽信号）：闸门零
+    // 介入，Completed 映射不漂移。
+    let fixture = Fixture::build(&["pipeline_llm_core"]);
+    fixture.invoker.set_result(
+        "pipeline_llm_core",
+        PluginResult {
+            state_updates: updates(&[
+                ("raw_tool_calls", json!([])),
+                ("raw_result", json!("老板好呀～我是灵汐。")),
+            ]),
+            ..Default::default()
+        },
+    );
+    let config = PipelineConfig::single_body(
+        "gate",
+        None,
+        vec![atomic_step("llm", "pipeline_llm_core"), bare_end_post()],
+    );
+    let final_state = fixture
+        .run(&config, &StepLibrary::default(), json!({}))
+        .await;
+    assert_eq!(final_state["run_status"], json!("completed"));
+    assert_eq!(
+        fixture.store.recorded_run_statuses(),
+        vec![RunStatus::Completed]
+    );
+}
+
+#[tokio::test]
+async fn suspended_with_pending_calls_not_failed() {
+    // 挂起等待恢复非终局：pending 调用在场不署名（恢复后由 tool_exec 消费）。
+    let fixture = Fixture::build(&[]);
+    let config = PipelineConfig::single_body(
+        "gate",
+        None,
+        vec![PipelineStep {
+            id: "wait".into(),
+            steps: vec![],
+            when: None,
+            context: HashMap::new(),
+            routes: vec![Route {
+                when: "True".into(),
+                then: agentos_core::types::RouteAction {
+                    next: RouteNext::Wait,
+                    set: HashMap::new(),
+                },
+            }],
+            loop_config: None,
+        }],
+    );
+    let initial = json!({ "raw_tool_calls": [{ "name": "file_read", "arguments": {} }] });
+    let final_state = fixture.run(&config, &StepLibrary::default(), initial).await;
+    assert_eq!(final_state["suspended"], json!(true));
+    assert_eq!(
+        final_state.get("router.stop_reason"),
+        None,
+        "挂起路径不得署名失败词"
+    );
+    assert_eq!(
+        fixture.store.recorded_run_statuses(),
+        vec![RunStatus::Suspended]
+    );
+}
+
+// ════════════════════════════════════════════════════════════════
+// 并行 for-each（LoopConfig over/as；内容移植自 sync/open-main-20261008
+// c2db32c26，按意图重放到 dev 引擎）
+// ════════════════════════════════════════════════════════════════
 
 /// for-each 测试 invoker：捕获每次 invoke 的迭代变量与链式可见键，
 /// 回声式产出 state_updates（归并顺序断言的依据）。
@@ -3924,10 +4643,11 @@ impl PluginInvoker for ForeachInvoker {
             ("chain", json!(call)),
         ]);
         if self.emit_ops {
-            ups.insert(
-                "messages".into(),
-                json!({"_ops": [{"op": "set", "msg": {"role": "tool", "tool_call_id": call, "content": call}}]}),
-            );
+            let op = json!({
+                "op": "set",
+                "msg": {"role": "tool", "tool_call_id": call, "content": call}
+            });
+            ups.insert("messages".into(), json!({ "_ops": [op] }));
         }
         if self.end_on.as_ref() == Some(&call) {
             ups.insert("ended".into(), json!(true));
@@ -4001,9 +4721,15 @@ fn foreach_pipeline(step: PipelineStep) -> PipelineConfig {
 }
 
 fn foreach_initial(calls: &[&str]) -> serde_json::Value {
+    let calls: Vec<_> = calls
+        .iter()
+        .map(|c| json!({"name": "bash", "id": c}))
+        .collect();
     json!({
-        "raw_tool_calls": calls.iter().map(|c| json!({"name": "bash", "id": c})).collect::<Vec<_>>(),
-        "pre_decided_results": [{"call_id": "a", "tool_name": "bash", "success": false, "error": "denied"}],
+        "raw_tool_calls": calls,
+        "pre_decided_results": [
+            {"call_id": "a", "tool_name": "bash", "success": false, "error": "denied"}
+        ],
         "submitted_task_ids": ["t0"],
     })
 }
@@ -4039,9 +4765,10 @@ async fn test_foreach_parallel_collect_order_and_consume() {
         .collect();
     assert_eq!(seen, want, "每迭代恰好一次，元素即 current_call");
     // 归并顺序 = 迭代下标序（确定性），与完成顺序无关
+    let echo = |id: &str| json!({"echo": {"name": "bash", "id": id}});
     assert_eq!(
         state["tool_results"],
-        json!([{"echo": {"name": "bash", "id": "a"}}, {"echo": {"name": "bash", "id": "b"}}, {"echo": {"name": "bash", "id": "c"}}]),
+        json!([echo("a"), echo("b"), echo("c")]),
         "collect 按迭代序拼接"
     );
     assert_eq!(state["_full_tool_results"][0]["full"]["id"], json!("a"));
@@ -4190,6 +4917,37 @@ async fn test_foreach_empty_over_still_consumes() {
 }
 
 #[tokio::test]
+async fn test_foreach_single_item_over() {
+    // 单元素边界：单调用即执行，collect/collect_append/consume 语义与多元素一致。
+    let inv = Arc::new(ForeachInvoker::new(false));
+    let executor = make_executor(inv.clone(), &["tc"]);
+    let state = executor
+        .run_compiled(
+            &compile_pipeline(
+                &foreach_pipeline(foreach_step(foreach_loop_config(4))),
+                &StepLibrary::default(),
+                &executor.plugin_ids,
+            )
+            .expect("compile"),
+            foreach_initial(&["only"]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(inv.seen_calls.lock().unwrap().len(), 1);
+    assert_eq!(
+        state["tool_results"],
+        json!([{"echo": {"name": "bash", "id": "only"}}]),
+        "单元素 collect 拼接即该迭代产出"
+    );
+    assert_eq!(
+        state["submitted_task_ids"],
+        json!(["t0", {"name": "bash", "id": "only"}]),
+        "单元素累计键 = 父现值 + 一条增量"
+    );
+    assert_eq!(state["raw_tool_calls"], json!([]), "consume 照常清源");
+}
+
+#[tokio::test]
 async fn test_foreach_messages_ops_applied_in_iteration_order() {
     // messages ops 父侧按迭代序统一 apply：数组顺序 = 迭代下标序（确定性）。
     let inv = Arc::new(ForeachInvoker::new(true));
@@ -4247,6 +5005,167 @@ async fn test_foreach_collect_append_cumulative() {
     );
 }
 
+/// 跨轮对照 invoker：feed 按调用次序回放 raw_tool_calls 源数组并捕获当轮
+/// 迭代入口的 submitted_task_ids；tc 回声 current_call；stopper 第 2 次调用
+/// 置 should_stop 结束循环体（轮边界折算 ended）。
+struct CrossRoundInvoker {
+    feed_no: AtomicUsize,
+    stop_no: AtomicUsize,
+    /// 每次 feed 调用捕获的 state.submitted_task_ids（跨轮累计的插件视角观察）。
+    seen_submitted: Mutex<Vec<serde_json::Value>>,
+}
+
+#[async_trait]
+impl PluginInvoker for CrossRoundInvoker {
+    async fn invoke_pipeline_plugin<'a>(
+        &self,
+        plugin_id: &str,
+        ctx: &PluginContext<'a>,
+    ) -> Result<PluginResult, PluginError> {
+        match plugin_id {
+            "feed" => {
+                self.seen_submitted.lock().unwrap().push(
+                    ctx.state
+                        .get("submitted_task_ids")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                );
+                let n = self.feed_no.fetch_add(1, Ordering::SeqCst);
+                let src = if n == 0 {
+                    vec![
+                        json!({"name": "bash", "id": "a"}),
+                        json!({"name": "bash", "id": "b"}),
+                    ]
+                } else {
+                    vec![json!({"name": "bash", "id": "c"})]
+                };
+                Ok(PluginResult {
+                    state_updates: updates(&[("raw_tool_calls", json!(src))]),
+                    ..Default::default()
+                })
+            }
+            "tc" => {
+                let call = ctx
+                    .state
+                    .get("current_call")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                Ok(PluginResult {
+                    state_updates: updates(&[
+                        ("tool_results", json!([{ "echo": call }])),
+                        ("submitted_task_ids", json!([call])),
+                    ]),
+                    ..Default::default()
+                })
+            }
+            "stopper" => {
+                let n = self.stop_no.fetch_add(1, Ordering::SeqCst);
+                let mut ups = HashMap::new();
+                if n >= 1 {
+                    ups.insert("should_stop".into(), json!(true));
+                }
+                Ok(PluginResult {
+                    state_updates: ups,
+                    ..Default::default()
+                })
+            }
+            _ => Ok(PluginResult::default()),
+        }
+    }
+    async fn invoke_tool(
+        &self,
+        _p: &str,
+        _t: &str,
+        _i: &serde_json::Value,
+    ) -> Result<ToolExecutionResult, PluginError> {
+        Ok(ToolExecutionResult::success(serde_json::Value::Null))
+    }
+    async fn send_lifecycle_hook(
+        &self,
+        _p: &str,
+        _h: agentos_core::traits::LifecycleHook,
+        _c: &agentos_core::traits::HookContext,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_foreach_collect_cleared_each_round_while_append_grows() {
+    // 跨轮行为对照（同一 run 内循环体两轮进入同一 for-each step）：collect 键
+    // 每轮清 [] 只留本轮产出；collect_append 键跨轮累计不清。
+    let inv = Arc::new(CrossRoundInvoker {
+        feed_no: AtomicUsize::new(0),
+        stop_no: AtomicUsize::new(0),
+        seen_submitted: Mutex::new(Vec::new()),
+    });
+    let executor = make_executor(inv.clone(), &["feed", "tc", "stopper"]);
+    let config = PipelineConfig {
+        name: "foreach_cross_round".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![
+                PipelineStep {
+                    id: "feed_step".into(),
+                    steps: vec!["feed".into()],
+                    when: None,
+                    context: HashMap::new(),
+                    routes: vec![],
+                    loop_config: None,
+                },
+                foreach_step(foreach_loop_config(4)),
+                PipelineStep {
+                    id: "stop_step".into(),
+                    steps: vec!["stopper".into()],
+                    when: None,
+                    context: HashMap::new(),
+                    routes: vec![],
+                    loop_config: None,
+                },
+            ],
+            while_cond: Some("True".into()),
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
+    };
+    let state = executor
+        .run_compiled(
+            &compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids)
+                .expect("compile"),
+            foreach_initial(&[]),
+        )
+        .await
+        .unwrap();
+    // 第一轮 feed 时父侧只有初始 t0；第二轮 feed 时已含第一轮增量 a、b——
+    // collect_append 跨轮累计的插件视角直接观察。
+    assert_eq!(
+        *inv.seen_submitted.lock().unwrap(),
+        vec![
+            json!(["t0"]),
+            json!(["t0", {"name": "bash", "id": "a"}, {"name": "bash", "id": "b"}]),
+        ],
+        "第二轮迭代入口看到第一轮累计"
+    );
+    assert_eq!(
+        state["tool_results"],
+        json!([{"echo": {"name": "bash", "id": "c"}}]),
+        "collect 每轮清空：第二轮不残留第一轮产出"
+    );
+    assert_eq!(
+        state["submitted_task_ids"],
+        json!([
+            "t0",
+            {"name": "bash", "id": "a"},
+            {"name": "bash", "id": "b"},
+            {"name": "bash", "id": "c"}
+        ]),
+        "collect_append 跨轮累计：第二轮在第一轮终值上追加"
+    );
+}
+
 #[tokio::test]
 async fn test_foreach_plugin_errors_appended() {
     // 插件错误：warn+继续语义逐迭代成立，_plugin_errors 按迭代拼接，run 不中断。
@@ -4293,6 +5212,14 @@ fn test_foreach_compile_validation() {
         ..Default::default()
     };
     assert!(compile(&mk(lc)).contains("成对"), "over/as 必须成对");
+    // as 有而 over 缺（反向不成对）
+    let lc = LoopConfig {
+        enabled: true,
+        max_iterations: -1,
+        as_iter: Some("c".into()),
+        ..Default::default()
+    };
+    assert!(compile(&mk(lc)).contains("成对"), "as 缺 over 同样拒绝");
     // max_concurrency=0
     let lc = LoopConfig {
         enabled: true,
@@ -4329,6 +5256,16 @@ fn test_foreach_compile_validation() {
         ..Default::default()
     };
     assert!(compile(&mk(lc)).contains("保留键"), "as 禁用保留名");
+    // 归并键含点号
+    let lc = LoopConfig {
+        enabled: true,
+        max_iterations: -1,
+        over: Some("state.x".into()),
+        as_iter: Some("c".into()),
+        collect: vec!["a.b".into()],
+        ..Default::default()
+    };
+    assert!(compile(&mk(lc)).contains("归并键"), "归并键禁点号");
     // 合法配置编译通过（回归护栏：校验不误伤）
     assert!(
         compile_pipeline(
@@ -4338,5 +5275,820 @@ fn test_foreach_compile_validation() {
         )
         .is_ok(),
         "合法 for-each 配置必须编译通过"
+    );
+}
+
+// ── 请求路径整组并行 respawn 接线（ensure_hosts_ready，Phase 3 #1） ─────
+
+/// 记录型 invoker：把 ensure 入参与步骤 invoke 事件按序记录（到达即拉起断言面）。
+struct EnsureRecordingInvoker {
+    events: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl PluginInvoker for EnsureRecordingInvoker {
+    async fn invoke_pipeline_plugin<'a>(
+        &self,
+        plugin_id: &str,
+        _ctx: &PluginContext<'a>,
+    ) -> Result<PluginResult, PluginError> {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("invoke:{plugin_id}"));
+        Ok(PluginResult::default())
+    }
+    async fn invoke_tool(
+        &self,
+        _p: &str,
+        _t: &str,
+        _i: &serde_json::Value,
+    ) -> Result<ToolExecutionResult, PluginError> {
+        Ok(ToolExecutionResult::success(serde_json::Value::Null))
+    }
+    async fn send_lifecycle_hook(
+        &self,
+        _p: &str,
+        _h: agentos_core::traits::LifecycleHook,
+        _c: &agentos_core::traits::HookContext,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+    async fn ensure_hosts_ready(&self, plugin_ids: &[String]) {
+        let mut ids = plugin_ids.to_vec();
+        ids.sort();
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("ensure:{}", ids.join(",")));
+    }
+}
+
+/// run_compiled 入口接线：run 到达即以管道引用集（referenced_plugin_ids）调用
+/// ensure_hosts_ready，且先于任何步骤 invoke（"到达即并行拉起"语义锚）；
+/// 空引用集管道零调用。
+#[tokio::test]
+async fn run_compiled_ensures_chain_hosts_ready_before_first_step() {
+    let invoker = Arc::new(EnsureRecordingInvoker {
+        events: Mutex::new(Vec::new()),
+    });
+    let store: Arc<dyn StorageBackend> = Arc::new(NullStorage::default());
+    let executor = PipelineExecutor::new(
+        invoker.clone() as Arc<dyn PluginInvoker>,
+        PathBuf::from("."),
+        TenantContext::new("t", "s"),
+        ["chain_a", "chain_b"].iter().map(|s| s.to_string()),
+        store,
+        "run_ensure",
+    );
+    let config = PipelineConfig {
+        name: "chain".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![PipelineStep {
+                id: "body".into(),
+                when: None,
+                steps: vec![
+                    StepItem::Bare("chain_b".into()),
+                    StepItem::Bare("chain_a".into()),
+                ],
+                context: HashMap::new(),
+                routes: vec![],
+                loop_config: None,
+            }],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
+    };
+    let compiled =
+        compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids).expect("编译成功");
+    executor
+        .run_compiled(&compiled, json!({}))
+        .await
+        .expect("run 成功");
+
+    let events = invoker.events.lock().unwrap().clone();
+    assert_eq!(
+        events.first().map(String::as_str),
+        Some("ensure:chain_a,chain_b"),
+        "run 入口先拉起全链（引用集无序归一），先于任何步骤: {events:?}"
+    );
+    assert_eq!(
+        events.iter().filter(|e| e.starts_with("ensure:")).count(),
+        1,
+        "ensure 每 run 恰一次（循环轮内不重复拉起）"
+    );
+    assert!(
+        events.iter().any(|e| e == "invoke:chain_a")
+            && events.iter().any(|e| e == "invoke:chain_b"),
+        "拉起后步骤照常执行: {events:?}"
+    );
+}
+
+/// 空引用集（无步骤）管道：ensure 零调用（空集零开销）。
+#[tokio::test]
+async fn run_compiled_skips_ensure_for_empty_reference_set() {
+    let invoker = Arc::new(EnsureRecordingInvoker {
+        events: Mutex::new(Vec::new()),
+    });
+    let store: Arc<dyn StorageBackend> = Arc::new(NullStorage::default());
+    let executor = PipelineExecutor::new(
+        invoker.clone() as Arc<dyn PluginInvoker>,
+        PathBuf::from("."),
+        TenantContext::new("t", "s"),
+        std::iter::empty::<String>(),
+        store,
+        "run_ensure_empty",
+    );
+    let config = PipelineConfig {
+        name: "empty".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![PipelineStep {
+                id: "body".into(),
+                when: None,
+                steps: vec![],
+                context: HashMap::new(),
+                routes: vec![],
+                loop_config: None,
+            }],
+            while_cond: None,
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
+    };
+    let compiled =
+        compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids).expect("编译成功");
+    executor
+        .run_compiled(&compiled, json!({}))
+        .await
+        .expect("run 成功");
+    assert!(
+        invoker
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|e| !e.starts_with("ensure:")),
+        "空引用集不得调用 ensure: {:?}",
+        invoker.events.lock().unwrap()
+    );
+}
+
+use crate::round_events::{RoundEnd, RoundEvents, RoundStart};
+use agentos_core::types::{PendingInputRecord, PendingInputSource};
+
+// ── 待输入队列轮边界注入（设计真值 docs/working/待输入队列轮边界注入_方案_20261025.md）──
+
+/// 注入场景 invoker：捕获每次 invoke 时 state["messages"] 快照 + 按调用序返回
+/// 预设 state_updates（SequenceInvoker 语义）；支持 invoke 时副作用入队
+/// （模拟 run 在途新消息到达）。
+struct InjectScenarioInvoker {
+    counter: Arc<AtomicUsize>,
+    results: Vec<HashMap<String, serde_json::Value>>,
+    seen_messages: Mutex<Vec<Vec<serde_json::Value>>>,
+    store: Option<Arc<dyn StorageBackend>>,
+    enqueue_tenant: String,
+    enqueue_pipeline: String,
+    /// call 序号 → invoke 前入队的记录（模拟 LLM 调用期间新消息到达）。
+    enqueue_on_call: HashMap<usize, PendingInputRecord>,
+}
+
+#[async_trait]
+impl PluginInvoker for InjectScenarioInvoker {
+    async fn invoke_pipeline_plugin<'a>(
+        &self,
+        _plugin_id: &str,
+        ctx: &PluginContext<'a>,
+    ) -> Result<PluginResult, PluginError> {
+        let n = self.counter.fetch_add(1, Ordering::SeqCst);
+        if let (Some(store), Some(rec)) = (self.store.as_ref(), self.enqueue_on_call.get(&n)) {
+            store
+                .enqueue_pending_input(&self.enqueue_tenant, &self.enqueue_pipeline, rec)
+                .await
+                .expect("scenario enqueue should succeed");
+        }
+        let msgs = ctx
+            .state
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        self.seen_messages.lock().unwrap().push(msgs);
+        let updates = self.results.get(n).cloned().unwrap_or_default();
+        Ok(PluginResult {
+            state_updates: updates,
+            ..Default::default()
+        })
+    }
+    async fn invoke_tool(
+        &self,
+        _p: &str,
+        _t: &str,
+        _i: &serde_json::Value,
+    ) -> Result<ToolExecutionResult, PluginError> {
+        Ok(ToolExecutionResult::success(serde_json::Value::Null))
+    }
+    async fn send_lifecycle_hook(
+        &self,
+        _p: &str,
+        _h: agentos_core::traits::LifecycleHook,
+        _c: &agentos_core::traits::HookContext,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
+fn pending_record(
+    pipeline: &str,
+    content: &str,
+    cmid: &str,
+    created_at: &str,
+) -> PendingInputRecord {
+    PendingInputRecord {
+        id: format!("p_{cmid}"),
+        pipeline_id: pipeline.to_string(),
+        tenant_id: "tenant_inject".to_string(),
+        user_id: "u1".to_string(),
+        content: content.to_string(),
+        thread: "thread_inject".to_string(),
+        source: PendingInputSource::User,
+        agent_id: "agentos".to_string(),
+        route_id: pipeline.to_string(),
+        thinking_strength: "default".to_string(),
+        client_message_id: cmid.to_string(),
+        execution_context: None,
+        state_overlay: None,
+        pipeline_config_id: None,
+        created_at: created_at.to_string(),
+    }
+}
+
+/// 注入测试循环体：flag==true → Loop（core_type 由插件写，路由零覆盖）；
+/// 兜底 End。while_cond 恒真（由 flag 掀 End）。
+fn injection_loop_body(steps: Vec<StepItem>) -> PipelineConfig {
+    PipelineConfig {
+        name: "inject_loop".into(),
+        loop_bodies: vec![LoopBody {
+            id: "main".into(),
+            steps: vec![PipelineStep {
+                id: "post".into(),
+                when: None,
+                steps,
+                context: HashMap::new(),
+                routes: vec![
+                    Route {
+                        when: "flag == true".into(),
+                        then: agentos_core::types::RouteAction {
+                            next: RouteNext::Loop,
+                            set: HashMap::new(),
+                        },
+                    },
+                    Route {
+                        when: "True".into(),
+                        then: agentos_core::types::RouteAction {
+                            next: RouteNext::End,
+                            set: HashMap::new(),
+                        },
+                    },
+                ],
+                loop_config: None,
+            }],
+            while_cond: Some("True".into()),
+            exit_routes: vec![],
+            run_on_error: false,
+        }],
+        checkpoint: Default::default(),
+        initial_state: std::collections::HashMap::new(),
+        max_rounds: None,
+    }
+}
+
+#[tokio::test]
+async fn pending_inputs_injected_before_llm_call_fifo_and_queue_drained() {
+    // run 在途且队列有条目 → 首轮 LLM 调用前注入为 user 消息（FIFO 序），
+    // 队列清空、cmid 记入 run 内部键、消息落 message_slots。
+    let sqlite = Arc::new(SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let invoker = Arc::new(InjectScenarioInvoker {
+        counter: counter.clone(),
+        results: vec![
+            updates(&[("flag", json!(true))]),
+            updates(&[("flag", json!(false))]),
+        ],
+        seen_messages: Mutex::new(Vec::new()),
+        store: None,
+        enqueue_tenant: String::new(),
+        enqueue_pipeline: String::new(),
+        enqueue_on_call: HashMap::new(),
+    });
+    let executor = PipelineExecutor::new(
+        invoker.clone() as Arc<dyn PluginInvoker>,
+        PathBuf::from("."),
+        TenantContext::new("tenant_inject", "session_inject"),
+        std::iter::once("p".to_string()),
+        store.clone(),
+        "run_inject",
+    );
+    store
+        .enqueue_pending_input(
+            "tenant_inject",
+            "pipe-inject",
+            &pending_record("pipe-inject", "排队消息A", "cmid-a", "2026-10-25T00:00:01Z"),
+        )
+        .await
+        .unwrap();
+    store
+        .enqueue_pending_input(
+            "tenant_inject",
+            "pipe-inject",
+            &pending_record("pipe-inject", "排队消息B", "cmid-b", "2026-10-25T00:00:02Z"),
+        )
+        .await
+        .unwrap();
+
+    let config = injection_loop_body(vec![StepItem::Bare("p".into())]);
+    let final_state = executor
+        .run_compiled(
+            &compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids)
+                .expect("compile should succeed"),
+            json!({"pipeline_id": "pipe-inject", "session_id": "thread_inject"}),
+        )
+        .await
+        .unwrap();
+
+    let seen = invoker.seen_messages.lock().unwrap().clone();
+    assert!(!seen.is_empty(), "循环体至少执行一轮");
+    let first_call_users: Vec<&str> = seen[0]
+        .iter()
+        .filter(|m| m["role"] == json!("user"))
+        .filter_map(|m| m["content"].as_str())
+        .collect();
+    assert_eq!(
+        first_call_users,
+        vec!["排队消息A", "排队消息B"],
+        "首轮 LLM 调用前队列必须已注入且 FIFO 序"
+    );
+    let remaining = store
+        .list_pending_inputs("tenant_inject", "pipe-inject")
+        .await
+        .unwrap();
+    assert!(remaining.is_empty(), "注入后队列表必须清空");
+    assert_eq!(
+        final_state["_consumed_pending_cmids"],
+        json!(["cmid-a", "cmid-b"]),
+        "消费 cmid 必须记入 run 内部键（stage_finalize 提取面）"
+    );
+    // get_messages_by_pipeline 读路径按 task-local 租户作用域过滤（current_or_default）
+    let persisted = agentos_tenant::scope(
+        TenantContext::new("tenant_inject", "session_inject"),
+        store.get_messages_by_pipeline(
+            "pipe-inject",
+            agentos_core::traits::MessageQueryOpts {
+                before_sequence: None,
+                after_sequence: None,
+                limit: None,
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    let persisted_users: Vec<Option<&String>> = persisted
+        .iter()
+        .filter(|m| m.role == "user")
+        .map(|m| m.content_preview.as_ref())
+        .collect();
+    assert!(
+        persisted_users
+            .iter()
+            .any(|p| p.is_some_and(|c| c.contains("排队消息A")))
+            && persisted_users
+                .iter()
+                .any(|p| p.is_some_and(|c| c.contains("排队消息B"))),
+        "注入消息必须落 message_slots（持久化可查），实际 {persisted_users:?}"
+    );
+}
+
+#[tokio::test]
+async fn pending_inputs_not_consumed_at_tool_execute_iteration() {
+    // iter1（llm_call）执行期间新消息 X 入队（模拟 LLM 调用中到达）→ 路由写
+    // core_type=tool_execute → iter2（工具迭代）不消费（call2 快照无 X）→
+    // 路由写回 llm_call → iter3 开轮前消费 X（call3 快照有 X）。
+    let sqlite = Arc::new(SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let invoker = Arc::new(InjectScenarioInvoker {
+        counter: counter.clone(),
+        results: vec![
+            updates(&[("flag", json!(true)), ("core_type", json!("tool_execute"))]),
+            updates(&[("flag", json!(true)), ("core_type", json!("llm_call"))]),
+            updates(&[("flag", json!(false))]),
+        ],
+        seen_messages: Mutex::new(Vec::new()),
+        store: Some(store.clone()),
+        enqueue_tenant: "tenant_inject".to_string(),
+        enqueue_pipeline: "pipe-inject2".to_string(),
+        enqueue_on_call: [(
+            0usize,
+            pending_record(
+                "pipe-inject2",
+                "途中消息X",
+                "cmid-x",
+                "2026-10-25T00:00:03Z",
+            ),
+        )]
+        .into_iter()
+        .collect(),
+    });
+    let executor = PipelineExecutor::new(
+        invoker.clone() as Arc<dyn PluginInvoker>,
+        PathBuf::from("."),
+        TenantContext::new("tenant_inject", "session_inject"),
+        std::iter::once("p".to_string()),
+        store.clone(),
+        "run_inject2",
+    );
+
+    let config = injection_loop_body(vec![StepItem::Bare("p".into())]);
+    let final_state = executor
+        .run_compiled(
+            &compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids)
+                .expect("compile should succeed"),
+            json!({"pipeline_id": "pipe-inject2", "session_id": "thread_inject"}),
+        )
+        .await
+        .unwrap();
+
+    let seen = invoker.seen_messages.lock().unwrap().clone();
+    assert_eq!(seen.len(), 3, "三次调用：llm → tool → llm");
+    let has_x = |msgs: &[serde_json::Value]| {
+        msgs.iter()
+            .any(|m| m["role"] == json!("user") && m["content"] == json!("途中消息X"))
+    };
+    assert!(
+        !has_x(&seen[0]),
+        "call1 时 X 尚未入队（call1 执行中才入队）"
+    );
+    assert!(
+        !has_x(&seen[1]),
+        "call2 是 tool_execute 迭代：必须不消费，X 仍留队列"
+    );
+    assert!(has_x(&seen[2]), "iter3 llm_call 开轮前必须注入 X");
+    assert!(
+        store
+            .list_pending_inputs("tenant_inject", "pipe-inject2")
+            .await
+            .unwrap()
+            .is_empty(),
+        "iter3 注入后队列清空"
+    );
+    assert_eq!(
+        final_state["_consumed_pending_cmids"],
+        json!(["cmid-x"]),
+        "工具迭代不消费的条目由下一 LLM 迭代补消费"
+    );
+}
+
+/// 捕获 RoundEnd 的轮次观察点（user 认领回传语义断言用）。
+struct RoundEndCapture {
+    ends: Mutex<Vec<RoundEnd>>,
+}
+
+impl RoundEvents for RoundEndCapture {
+    fn on_round_start(
+        &self,
+        _ev: RoundStart,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async {})
+    }
+    fn on_round_end(
+        &self,
+        ev: RoundEnd,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        self.ends.lock().unwrap().push(ev);
+        Box::pin(async {})
+    }
+}
+
+#[tokio::test]
+async fn round_end_user_claim_prefers_trigger_message_after_injection() {
+    // 注入发生过的 run：round_end 的 user 认领回传必须仍指向 run 触发消息
+    // （前端乐观气泡按其 cmid 认领，不得被注入消息抢占）；未注入 run 行为
+    // 不变（last user）。
+    let store: Arc<dyn StorageBackend> = Arc::new(NullStorage::default());
+    let capture = Arc::new(RoundEndCapture {
+        ends: Mutex::new(Vec::new()),
+    });
+    let executor = PipelineExecutor::new(
+        Arc::new(MockInvoker::new()) as Arc<dyn PluginInvoker>,
+        PathBuf::from("."),
+        TenantContext::new("t_claim", "s_claim"),
+        std::iter::empty::<String>(),
+        store,
+        "run_claim",
+    )
+    .with_round_events(capture.clone());
+    let trigger = json!({"role": "user", "content": "触发消息", "seq": 0});
+    let state = json!({
+        "pipeline_id": "pipe-claim",
+        "session_id": "thread-claim",
+        "messages": [
+            trigger,
+            {"role": "user", "content": "注入消息", "seq": 1},
+            {"role": "assistant", "content": "回复", "seq": 2},
+        ],
+        "_consumed_pending_cmids": ["cmid-x"],
+    });
+    let start = RoundStart {
+        round_index: 1,
+        message_id: "a_claim1".into(),
+        sequence: 3,
+        pipeline_id: "pipe-claim".into(),
+        thread_id: "thread-claim".into(),
+    };
+    executor
+        .round_end_event(
+            &state,
+            1,
+            "a_claim1".into(),
+            &start,
+            0,
+            Some(json!({"role": "user", "content": "触发消息", "seq": 0})),
+        )
+        .await;
+    let ends = capture.ends.lock().unwrap().clone();
+    assert_eq!(ends.len(), 1);
+    assert_eq!(
+        ends[0]
+            .user_message
+            .as_ref()
+            .and_then(|u| u["content"].as_str()),
+        Some("触发消息"),
+        "注入发生过的 run：认领回传必须指向触发消息而非末条注入消息"
+    );
+
+    // 对照：未注入 run（无 _consumed_pending_cmids）→ last user（行为不变）。
+    capture.ends.lock().unwrap().clear();
+    let state_no_inject = json!({
+        "pipeline_id": "pipe-claim",
+        "session_id": "thread-claim",
+        "messages": [
+            {"role": "user", "content": "触发消息", "seq": 0},
+            {"role": "user", "content": "后续消息", "seq": 1},
+        ],
+    });
+    executor
+        .round_end_event(&state_no_inject, 1, "a_claim1".into(), &start, 0, None)
+        .await;
+    let ends = capture.ends.lock().unwrap().clone();
+    assert_eq!(
+        ends[0]
+            .user_message
+            .as_ref()
+            .and_then(|u| u["content"].as_str()),
+        Some("后续消息"),
+        "未注入 run：last user 语义不变"
+    );
+}
+
+/// 捕获注入消费回调的观察点（records 认领载荷断言用）。
+struct ConsumedCapture {
+    events: Mutex<Vec<crate::round_events::PendingConsumed>>,
+}
+
+#[async_trait]
+impl RoundEvents for ConsumedCapture {
+    fn on_round_start(
+        &self,
+        _ev: RoundStart,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async {})
+    }
+    fn on_round_end(
+        &self,
+        _ev: RoundEnd,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async {})
+    }
+    fn on_pending_inputs_consumed(
+        &self,
+        ev: crate::round_events::PendingConsumed,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        self.events.lock().unwrap().push(ev);
+        Box::pin(async {})
+    }
+}
+
+#[tokio::test]
+async fn pending_consumed_carries_authoritative_records_for_claim() {
+    // 排序键不变量（终态必携权威序号）：注入消费回调必须逐条携带权威 record
+    // （指纹 record_id / 引擎槽位 seq / 原文），前端据此走认领 upgrade/insert
+    // ——与正常发送同一条 claim 链，不再退化成无 key 原地升级（无 seq 消息按
+    // 排序键永久垫底的根因）。cmid 条目一一配对，FIFO 序即槽位序。
+    let sqlite = Arc::new(SqliteStore::open_memory().unwrap());
+    let store: Arc<dyn StorageBackend> = sqlite.clone();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let invoker = Arc::new(InjectScenarioInvoker {
+        counter: counter.clone(),
+        results: vec![
+            updates(&[("flag", json!(true))]),
+            updates(&[("flag", json!(false))]),
+        ],
+        seen_messages: Mutex::new(Vec::new()),
+        store: None,
+        enqueue_tenant: String::new(),
+        enqueue_pipeline: String::new(),
+        enqueue_on_call: HashMap::new(),
+    });
+    let capture = Arc::new(ConsumedCapture {
+        events: Mutex::new(Vec::new()),
+    });
+    let executor = PipelineExecutor::new(
+        invoker.clone() as Arc<dyn PluginInvoker>,
+        PathBuf::from("."),
+        TenantContext::new("tenant_inject", "session_inject"),
+        std::iter::once("p".to_string()),
+        store.clone(),
+        "run_inject_rec",
+    )
+    .with_round_events(capture.clone());
+    store
+        .enqueue_pending_input(
+            "tenant_inject",
+            "pipe-inject",
+            &pending_record("pipe-inject", "排队消息A", "cmid-a", "2026-10-25T00:00:01Z"),
+        )
+        .await
+        .unwrap();
+    store
+        .enqueue_pending_input(
+            "tenant_inject",
+            "pipe-inject",
+            &pending_record("pipe-inject", "排队消息B", "cmid-b", "2026-10-25T00:00:02Z"),
+        )
+        .await
+        .unwrap();
+
+    let config = injection_loop_body(vec![StepItem::Bare("p".into())]);
+    executor
+        .run_compiled(
+            &compile_pipeline(&config, &StepLibrary::default(), &executor.plugin_ids)
+                .expect("compile should succeed"),
+            json!({"pipeline_id": "pipe-inject", "session_id": "thread_inject"}),
+        )
+        .await
+        .unwrap();
+
+    let events = capture.events.lock().unwrap().clone();
+    assert_eq!(events.len(), 1, "注入发生的 run 恒发一次消费回调");
+    let records = &events[0].records;
+    assert_eq!(
+        records.len(),
+        2,
+        "逐条权威 record 必须与 cmid 一一配对（认领载荷，缺一即无 key 终态）"
+    );
+    assert_eq!(records[0].client_message_id, "cmid-a");
+    assert_eq!(records[1].client_message_id, "cmid-b");
+    assert_eq!(records[0].content, "排队消息A");
+    assert_eq!(records[1].content, "排队消息B");
+    assert!(
+        !records[0].message_id.is_empty() && !records[1].message_id.is_empty(),
+        "指纹 record_id 必带（claim 幂等键，与 REST 读路径同源）"
+    );
+    assert!(
+        records[1].sequence > records[0].sequence,
+        "FIFO 消费序必须等于权威槽位序：A={} B={}",
+        records[0].sequence,
+        records[1].sequence
+    );
+}
+
+// ── 同值不更新接线（更新层，2026-10-30）──────────────────
+
+/// merge_and_project 对与本管道基线同值的不变键跳过更新：首写 journal 记键、
+/// 轨迹落行（管道自含锚——2026-08-30 裁定零改动）；同值重写不 journal →
+/// diff 空 → 不产生 trace 行（没有 update 就没有轨迹）；值变更恢复落行。
+#[tokio::test]
+async fn merge_and_project_skips_identical_invariant_update_no_journal_no_trace() {
+    // 不 clear 全局：并发测试互清共享基线即互踩（c4689c7b9 同族）；管道
+    // scope "pt-suppress" 仅本测试写入，无 residue 可防，clear 纯风险。
+    let null = Arc::new(NullStorage::default());
+    let store: Arc<dyn StorageBackend> = null.clone();
+    let executor = PipelineExecutor::new(
+        Arc::new(MockInvoker::new()) as Arc<dyn PluginInvoker>,
+        PathBuf::from("."),
+        TenantContext::new("t", "s"),
+        Vec::<String>::new(),
+        store,
+        "run_suppress",
+    );
+    let big = json!({"text": format!("m-{}", "x".repeat(8192))});
+    let mut state = json!({"pipeline_id": "pt-suppress"});
+    let mut updates = HashMap::new();
+    updates.insert("system_message".to_string(), big.clone());
+
+    // 首写：journal 记键 + 轨迹落行（管道自含锚）
+    executor.merge_and_project(&mut state, &updates).await;
+    assert!(
+        executor
+            .step_key_journal
+            .lock()
+            .contains_key("system_message"),
+        "首写照常 journal"
+    );
+    executor
+        .append_window_trace("run_init", &state)
+        .await
+        .unwrap();
+    assert_eq!(
+        null.traces.lock().unwrap()[0].patch_data["system_message"],
+        big,
+        "管道首写照迹自含全值"
+    );
+
+    // 新窗口同值重写：跳过更新 → journal 无键 → diff 空 → 不产生 trace 行
+    executor.step_key_journal.lock().clear();
+    executor.merge_and_project(&mut state, &updates).await;
+    assert!(
+        !executor
+            .step_key_journal
+            .lock()
+            .contains_key("system_message"),
+        "同值重写不 journal（没有 update）"
+    );
+    executor
+        .append_window_trace("run_init", &state)
+        .await
+        .unwrap();
+    assert_eq!(
+        null.traces.lock().unwrap().len(),
+        1,
+        "同值重写不产生新 trace 行"
+    );
+
+    // 值变更：恢复 journal + 落行（同值跳过永不吞真变更）
+    let big2 = json!({"text": format!("m2-{}", "y".repeat(8192))});
+    let mut updates2 = HashMap::new();
+    updates2.insert("system_message".to_string(), big2.clone());
+    executor.merge_and_project(&mut state, &updates2).await;
+    executor
+        .append_window_trace("run_init", &state)
+        .await
+        .unwrap();
+    {
+        let traces = null.traces.lock().unwrap();
+        assert_eq!(traces.len(), 2);
+        assert_eq!(traces[1].patch_data["system_message"], big2, "变更落行");
+    }
+}
+
+#[tokio::test]
+async fn merge_and_project_invariant_suppress_skips_trace_never_state_on_fresh_run() {
+    // 回归（2026-11-02 装机实证）：基线跨 run 存活 + run state 每轮重建，
+    // 同值抑制若连 set 一起跳，重建 state 永远拿不到该键——tool_schemas
+    // 断链 → LLM 裸请求无 tools、system_message 同丢，模型降级正文伪调用。
+    // 抑制的语义边界 = 只免轨迹（journal/diff），set 必须照常落地。
+    let null = Arc::new(NullStorage::default());
+    let store: Arc<dyn StorageBackend> = null.clone();
+    let executor = PipelineExecutor::new(
+        Arc::new(MockInvoker::new()) as Arc<dyn PluginInvoker>,
+        PathBuf::from("."),
+        TenantContext::new("t", "s"),
+        Vec::<String>::new(),
+        store,
+        "run_suppress_fresh",
+    );
+    let big =
+        json!([{"function": {"name": "pim", "description": format!("d-{}", "x".repeat(8192))}}]);
+
+    // run A：首写落 state + 登记基线
+    let mut state_a = json!({"pipeline_id": "pt-suppress-fresh"});
+    let mut updates = HashMap::new();
+    updates.insert("tool_schemas".to_string(), big.clone());
+    executor.merge_and_project(&mut state_a, &updates).await;
+    assert_eq!(state_a["tool_schemas"], big, "run A 首写落 state");
+
+    // run B：state 每轮重建（空起点），同值重写——set 必须照常落地
+    let mut state_b = json!({"pipeline_id": "pt-suppress-fresh"});
+    executor.step_key_journal.lock().clear();
+    executor.merge_and_project(&mut state_b, &updates).await;
+    assert_eq!(
+        state_b["tool_schemas"], big,
+        "同值抑制只免轨迹：重建 state 仍必须拿到全值"
+    );
+    assert!(
+        !executor
+            .step_key_journal
+            .lock()
+            .contains_key("tool_schemas"),
+        "同值重写不 journal（轨迹去重语义保持）"
     );
 }

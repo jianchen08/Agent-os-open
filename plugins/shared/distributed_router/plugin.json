@@ -1,0 +1,41 @@
+{
+  "id": "distributed_router",
+  "requires_services": [
+    "packaging"
+  ],
+  "name": "Distributed Router",
+  "description": "2c 执行通道挂载 + 统一编址记法对照（零内核改动）。现状（ADR 2026-10-18-unified-namespace-fs-mount-and-mcp-transfer）：路径统一承载 = OS 文件系统挂载（D14，运行时零路径翻译服务），文件类操作不经本插件；本插件保留 tree_core 作 D16 统一编址规范记法与导出声明的对照单源，channel_ops + mount 供非文件类能力工具的执行通道挂载（D19 边界，签发为显式配置/管理动作）。LLM 工具面零新增（R24 撤四工具），地盘观测归前端「我的地盘」页。统一编址=设备前缀 /<device_id>/，掉盘语义=属主离线子树诚实不可用，写/执行权限只由连接性决定。裁定依据 docs/decisions/2026-10-18-unified-namespace-fs-mount-and-mcp-transfer.md 与台账 R24-R26。",
+  "version": "1.2.0",
+  "plugin_type": "tool",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "activation": "lazy",
+  "capabilities": {
+    "metrics_class": "tool",
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load"
+    ],
+    "services": []
+  },
+  "permissions": {},
+  "priority": 30,
+  "config_files": [
+    {
+      "id": "settings",
+      "label": "分布式路由配置",
+      "fields": [
+        {
+          "name": "router.relay_url",
+          "label": "relay 地址",
+          "type": "string",
+          "required": false,
+          "description": "设备注册表 relay 地址（env AGENTOS_SYNC_RELAY_URL 优先；与 sync_agent 同源）"
+        }
+      ],
+      "path": "config/plugins/distributed_router/settings.yaml"
+    }
+  ]
+}

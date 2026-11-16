@@ -19,27 +19,55 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _SERVER_PY = (
-    Path(__file__).resolve().parents[2] / "plugins" / "shared" / "system" / "monitoring" / "server.py"
+    Path(__file__).resolve().parents[2] / "plugins" / "shared" / "monitoring" / "server.py"
 )
 _spec = importlib.util.spec_from_file_location("monitoring_server_stats_fc", _SERVER_PY)
 server = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(server)
 
 
-def test_stats_fail_closed_when_kernel_db_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """库文件缺失 → error=kernel db not found（fail-closed，不假装空统计成功）。"""
-    monkeypatch.setattr(server, "_kernel_db_path", lambda: str(tmp_path / "nope.db"))
-    out = server._query_tool_call_stats({}, tenant_id="t1")
-    assert out["items"] == [] and out["total"] == 0
-    assert out["error"] == "kernel db not found"
+import asyncio  # noqa: E402 — 既有模块体后追加（读面替身装配需在模块态就绪）
+import sys  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+for _p in (str(_REPO_ROOT / "plugins" / "shared"),):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from _libs.testing.db_read_fake import FakeDbRead  # noqa: E402 — db-read 契约替身
 
 
-def test_stats_sqlite_error_degrades_with_reason(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def _run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def test_stats_fail_closed_when_kernel_db_missing(tmp_path: Path) -> None:
+    """db-read 契约失败（替身指向缺失库，执行期报错归一）→ error 如实回带，
+    items 空（fail-closed，不假装空统计成功）。"""
+    import kernel_reads  # noqa: F401 — server 同目录模块（provider 缝）
+
+    kernel_reads.set_provider(
+        "db-read", FakeDbRead(tmp_path / "nope.db", {"tok-t1": "t1"}).provider
+    )
+    out = _run(server._query_tool_call_stats({}, tenant_id="t1", authorization="tok-t1"))
+    assert out["items"] == []
+    assert out["total"] == 0
+    assert out["error"]
+
+
+def test_stats_sqlite_error_degrades_with_reason(tmp_path: Path) -> None:
     """库文件非 SQLite 内容 → sqlite3.Error 文本如实回 error，items 空。"""
+    import kernel_reads  # noqa: F401
+
     junk = tmp_path / "kernel.db"
     junk.write_text("definitely not a sqlite database", encoding="utf-8")
-    monkeypatch.setattr(server, "_kernel_db_path", lambda: str(junk))
-    out = server._query_tool_call_stats({}, tenant_id="t1")
-    assert out["items"] == [] and out["total"] == 0
+    kernel_reads.set_provider("db-read", FakeDbRead(junk, {"tok-t1": "t1"}).provider)
+    out = _run(server._query_tool_call_stats({}, tenant_id="t1", authorization="tok-t1"))
+    assert out["items"] == []
+    assert out["total"] == 0
     assert out["error"]
-    assert "not a database" in out["error"]

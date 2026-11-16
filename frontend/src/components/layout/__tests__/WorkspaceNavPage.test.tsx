@@ -17,38 +17,60 @@
  */
 
 import { fireEvent, render, screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { WorkspaceNavPage } from '@/components/layout/WorkspaceNavPage'
 import { WorkspacePanel } from '@/components/layout/WorkspacePanel'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { initializeWidgets } from '@/services/schema/registerWidgets'
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
-import type { PageDeclaration } from '@/services/schema/ContributionRegistry'
+import { slotRegistry } from '@/services/slots/slotRegistry'
+import { loadSchemaIntoRegistries, registerWidgetStub } from '@/test/schemaLoader'
 
-/** 声明播种：两个模式面板 + 两个普通页签 + 一个活动栏页 + 调试中心/设置一级分组页 + 一个浮窗页（带 path+widget） */
-function seedPages(): void {
-  const pages: PageDeclaration[] = [
-    { type: 'pages', id: 'coding_delivery', title: '编码交付', icon: '💻', space: 'workspace', slot: 'tab', path: '/p/coding_delivery', mode: 'coding', pluginId: 'mode_coding' },
-    { type: 'pages', id: 'writing_workshop', title: '写作工坊', icon: '✍️', space: 'workspace', slot: 'tab', path: '/p/writing_workshop', mode: 'writing', pluginId: 'mode_writing' },
-    { type: 'pages', id: 'memory', title: '记忆管理', space: 'workspace', slot: 'tab', path: '/memory', pluginId: 'memory' },
-    { type: 'pages', id: 'tasks', title: '任务管理', space: 'workspace', slot: 'tab', path: '/tasks', pluginId: 'task_service' },
-    { type: 'pages', id: 'monitoring', title: '监控', space: 'workspace', slot: 'activity-bar', path: '/monitoring', pluginId: 'monitoring' },
-    { type: 'pages', id: 'debug_tasks', title: '调试任务', icon: '⚙️', space: 'debug_center', slot: 'tab', widget: 'debug_tasks', path: '/debug/tasks', pluginId: 'debug_center' },
-    { type: 'pages', id: 'llm_settings', title: '模型设置', icon: '⚙️', space: 'settings', slot: 'nav', path: '/settings/llm', widget: 'llm_settings', pluginId: 'llm_service' },
-    { type: 'pages', id: 'floating_notes', title: '浮窗笔记', icon: '🪟', space: 'floating', slot: 'panel', path: '/floating/notes', widget: 'notes_widget', pluginId: 'notes' },
+/**
+ * 声明播种：两个模式面板 + 两个普通页签 + 一个活动栏页 + 调试中心/设置一级分组页
+ * + 一个浮窗页（widget 直开：非 workspace 空间未纳入 workspace.tab 槽收敛域）。
+ * workspace 页承载 widget 让声明经槽翻译可直达（C4：页签内容按 workspace.tab
+ * keyed 槽解析，设计真值 = ADR 2026-11-04-frontend-slot-and-widget-delivery 决策 4）。
+ */
+async function seedPages(): Promise<void> {
+  const contributions: Array<[string, Array<Record<string, unknown>>]> = [
+    ['mode_coding', [{ id: 'coding_delivery', title: '编码交付', icon: '💻', space: 'workspace', slot: 'tab', path: '/p/coding_delivery', mode: 'coding', widget: 'status_card' }]],
+    ['mode_writing', [{ id: 'writing_workshop', title: '写作工坊', icon: '✍️', space: 'workspace', slot: 'tab', path: '/p/writing_workshop', mode: 'writing', widget: 'status_card' }]],
+    ['memory', [{ id: 'memory', title: '记忆管理', space: 'workspace', slot: 'tab', path: '/memory', widget: 'status_card' }]],
+    ['task_service', [{ id: 'tasks', title: '任务管理', space: 'workspace', slot: 'tab', path: '/tasks', widget: 'status_card' }]],
+    ['monitoring', [{ id: 'monitoring', title: '监控', space: 'workspace', slot: 'activity-bar', path: '/monitoring', widget: 'status_card' }]],
+    ['debug_center', [{ id: 'debug_tasks', title: '调试任务', icon: '⚙️', space: 'debug_center', slot: 'tab', widget: 'debug_tasks', path: '/debug/tasks' }]],
+    ['llm_service', [{ id: 'llm_settings', title: '模型设置', icon: '⚙️', space: 'settings', slot: 'nav', path: '/settings/llm', widget: 'llm_settings' }]],
+    ['notes', [{ id: 'floating_notes', title: '浮窗笔记', icon: '🪟', space: 'floating', slot: 'panel', widget: 'notes_widget' }]],
   ]
-  for (const page of pages) contributionRegistry.register(page)
+  await loadSchemaIntoRegistries({
+    plugin_contributes: contributions.map(([plugin_id, pages]) => ({
+      plugin_id,
+      plugin_name: plugin_id,
+      contributes: { pages },
+    })),
+    plugin_configs: [],
+  })
 }
 
 beforeEach(() => {
   contributionRegistry.clear()
+  slotRegistry.clear()
   useLayoutModeStore.setState({ workspaceTabs: [], visitedTabIds: [] })
   useNotificationStore.setState({ notifications: [] })
+  // 内建 widget 注册面（生产 main.tsx 启动同款）+ 合成 widget 名注册桩
+  widgetRegistry.clear()
+  initializeWidgets()
+  registerWidgetStub('debug_tasks')
+  registerWidgetStub('llm_settings')
+  registerWidgetStub('notes_widget')
 })
 
 describe('WorkspaceNavPage — 声明驱动分组', () => {
-  it('主体按声明分组：模式面板组置顶/工作区页签组/活动栏组；调试中心/设置为一级分组；其余非 workspace 空间入「更多」区默认折叠', () => {
-    seedPages()
+  it('主体按声明分组：模式面板组置顶/工作区页签组/活动栏组；调试中心/设置为一级分组；其余非 workspace 空间入「更多」区默认折叠', async () => {
+    await seedPages()
     render(<WorkspaceNavPage />)
     expect(screen.getByTestId('nav-group-mode')).toBeInTheDocument()
     expect(screen.getByTestId('nav-group-tab')).toBeInTheDocument()
@@ -84,8 +106,8 @@ describe('WorkspaceNavPage — 声明驱动分组', () => {
     expect(screen.queryByTestId('nav-more')).toBeNull()
   })
 
-  it('点击大卡片经 opener 打开对应工作区页签并激活（再点另一条目激活权转移）', () => {
-    seedPages()
+  it('点击大卡片经 opener 打开对应工作区页签并激活（再点另一条目激活权转移）', async () => {
+    await seedPages()
     render(<WorkspaceNavPage />)
     fireEvent.click(screen.getByTestId('nav-item-mode_coding:coding_delivery'))
     const tabs = useLayoutModeStore.getState().workspaceTabs
@@ -107,8 +129,8 @@ describe('WorkspaceNavPage — 声明驱动分组', () => {
 })
 
 describe('WorkspaceNavPage — 搜索过滤', () => {
-  it('搜索命中 workspace 组标题 → 只保留命中条目（不匹配的不占位）', () => {
-    seedPages()
+  it('搜索命中 workspace 组标题 → 只保留命中条目（不匹配的不占位）', async () => {
+    await seedPages()
     render(<WorkspaceNavPage />)
     fireEvent.change(screen.getByTestId('nav-search'), { target: { value: '写作' } })
 
@@ -144,8 +166,8 @@ describe('WorkspaceNavPage — 搜索过滤', () => {
     expect(screen.queryByTestId('nav-item-debug_center:tasks')).not.toBeInTheDocument()
   })
 
-  it('搜索命中一级直属分组（设置）→ 直接过滤展示（无需展开）；workspace 大卡片未命中不占位', () => {
-    seedPages()
+  it('搜索命中一级直属分组（设置）→ 直接过滤展示（无需展开）；workspace 大卡片未命中不占位', async () => {
+    await seedPages()
     render(<WorkspaceNavPage />)
     fireEvent.change(screen.getByTestId('nav-search'), { target: { value: '模型' } })
 
@@ -156,8 +178,8 @@ describe('WorkspaceNavPage — 搜索过滤', () => {
     expect(screen.queryByTestId('nav-item-mode_coding:coding_delivery')).not.toBeInTheDocument()
   })
 
-  it('搜索命中「更多」空间页 → 「更多」区自动展开且未命中的一级分组不占位', () => {
-    seedPages()
+  it('搜索命中「更多」空间页 → 「更多」区自动展开且未命中的一级分组不占位', async () => {
+    await seedPages()
     render(<WorkspaceNavPage />)
     expect(screen.getByTestId('nav-more-toggle')).toHaveAttribute('aria-expanded', 'false')
 
@@ -170,8 +192,8 @@ describe('WorkspaceNavPage — 搜索过滤', () => {
     expect(screen.queryByTestId('nav-group-settings')).toBeNull()
   })
 
-  it('搜索无命中 → 显式空态（区分于 registry 空占位）', () => {
-    seedPages()
+  it('搜索无命中 → 显式空态（区分于 registry 空占位）', async () => {
+    await seedPages()
     render(<WorkspaceNavPage />)
     fireEvent.change(screen.getByTestId('nav-search'), { target: { value: '不存在的词' } })
 
@@ -180,8 +202,8 @@ describe('WorkspaceNavPage — 搜索过滤', () => {
 })
 
 describe('WorkspaceNavPage — 「更多」折叠区', () => {
-  it('默认收起，点击展开/再点收起（aria-expanded 同步）', () => {
-    seedPages()
+  it('默认收起，点击展开/再点收起（aria-expanded 同步）', async () => {
+    await seedPages()
     render(<WorkspaceNavPage />)
     expect(screen.queryByTestId('nav-item-notes:floating_notes')).not.toBeInTheDocument()
 
@@ -195,8 +217,8 @@ describe('WorkspaceNavPage — 「更多」折叠区', () => {
     expect(screen.queryByTestId('nav-item-notes:floating_notes')).not.toBeInTheDocument()
   })
 
-  it('小卡片点击 → openPluginPage 打开对应页签（path 声明直达）；重复点击激活既有页签不重复追加', () => {
-    seedPages()
+  it('小卡片点击 → openPluginPage 打开对应页签（widget 直开：非 workspace 空间按声明 widget 落页签）；重复点击激活既有页签不重复追加', async () => {
+    await seedPages()
     render(<WorkspaceNavPage />)
     fireEvent.click(screen.getByTestId('nav-more-toggle'))
     fireEvent.click(screen.getByTestId('nav-item-notes:floating_notes'))
@@ -299,5 +321,31 @@ describe('WorkspacePanel — 导航页兜底占位', () => {
       />,
     )
     expect(screen.queryByTestId('workspace-nav-page')).toBeNull()
+  })
+})
+
+describe('WorkspaceNavPage — 声明轮询与更多区（补覆盖）', () => {
+  it('声明数轮询：1.5s 周期到点重算（无变化不重渲染）', async () => {
+    vi.useFakeTimers()
+    try {
+      await seedPages()
+      render(<WorkspaceNavPage />)
+      // 推进一个轮询周期：覆盖 interval 回调与引用相等守卫
+      await vi.advanceTimersByTimeAsync(1600)
+      expect(screen.getByText('记忆管理')).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('非常见空间（extras）进「更多」区分组标签', async () => {
+    await seedPages()
+    contributionRegistry.register({
+      type: 'pages', id: 'lab_x', title: '实验室扩展页', space: 'lab' as never, slot: 'tab', path: '/lab/x', pluginId: 'lab_plugin',
+    })
+    render(<WorkspaceNavPage />)
+    // 「更多」区默认折叠：先展开再见条目
+    fireEvent.click(screen.getByTestId('nav-more-toggle'))
+    expect(screen.getByText('实验室扩展页')).toBeInTheDocument()
   })
 })

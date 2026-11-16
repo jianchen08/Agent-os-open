@@ -35,15 +35,15 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "pipeline" / "input" / "isolation_guard"
+_PLUGIN_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared" / "isolation_guard"
 _SHARED_DIR = Path(__file__).resolve().parents[4] / "plugins" / "shared"
 for _d in (str(_PLUGIN_DIR), str(_SHARED_DIR)):
     if _d not in sys.path:
         sys.path.insert(0, _d)
 
 from agentos_plugin_sdk.isolation_types import IsolationLevel  # noqa: E402
-from pipeline.plugin import PluginContext  # noqa: E402
-from pipeline.types import StateKeys  # noqa: E402
+from _libs.pipeline_base.plugin import PluginContext  # noqa: E402
+from _libs.pipeline_base.types import StateKeys  # noqa: E402
 
 
 def _guard(**config: Any) -> Any:
@@ -51,7 +51,7 @@ def _guard(**config: Any) -> Any:
     from plugin import IsolationGuard
 
     return IsolationGuard(config={
-        "providers": {"wsl_native": {"enabled": False}},
+        "providers": {"wsl_native": {"enabled": False}, "linux_native": {"enabled": False}},
         **config,
     })
 
@@ -203,7 +203,7 @@ class TestApplyProbeResult:
             monkeypatch, which="/usr/bin/docker", run=lambda *a, **k: _Completed(0)
         )
 
-        guard = IsolationGuard(config={"providers": {"wsl_native": {"enabled": False}}})
+        guard = IsolationGuard(config={"providers": {"wsl_native": {"enabled": False}, "linux_native": {"enabled": False}}})
 
         assert guard._docker_auto is True
         assert guard._docker_available is True
@@ -218,7 +218,7 @@ class TestApplyProbeResult:
             monkeypatch, which="/usr/bin/docker", run=TimeoutError("daemon hung")
         )
 
-        guard = IsolationGuard(config={"providers": {"wsl_native": {"enabled": False}}})
+        guard = IsolationGuard(config={"providers": {"wsl_native": {"enabled": False}, "linux_native": {"enabled": False}}})
 
         assert guard._docker_available is False
         assert guard._docker_probe_error == "daemon hung"

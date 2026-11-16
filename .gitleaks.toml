@@ -38,7 +38,7 @@ regexes = [
 [[allowlists]]
 description = "sensitive_checker 脱敏自测：Rust 源内嵌测试断言 + Python 测试用的哑 key（abcdef 顺字面量，用于验证脱敏正则本身）"
 paths = [
-  '''^plugins/shared/pipeline/output/sensitive_checker/src/lib\.rs$''',
+  '''^plugins/shared/sensitive_checker/src/lib\.rs$''',
   '''^tests/plugins/output/sensitive_checker/test_sensitive_checker\.py$''',
 ]
 regexes = [
@@ -49,7 +49,7 @@ regexes = [
 [[allowlists]]
 description = "llm 脱敏/写入语义测试：掩码与 llm.yaml 写入路径断言用的哑 key（plain-key/live-0123 均为可读占位形态）"
 paths = [
-  '''^plugins/shared/system/llm/test_prompt_audit\.py$''',
+  '''^plugins/shared/llm/test_prompt_audit\.py$''',
   '''^tests/plugins/system/llm/test_llm_http\.py$''',
 ]
 regexes = [
@@ -61,7 +61,7 @@ regexes = [
 [[allowlists]]
 description = "key_pool 测试：KeySlot 构造辅助 _slot() 的哑 key（sk-test 前缀顺字面量，非真实密钥）"
 paths = [
-  '''^plugins/shared/system/llm/test_key_pool\.py$''',
+  '''^plugins/shared/llm/test_key_pool\.py$''',
 ]
 regexes = [
   '''sk-test-1234567890''',
@@ -82,9 +82,18 @@ regexes = [
 [[allowlists]]
 description = "llm adapter/路由补测：脱敏断言用的哑 key（sk-abcd123456 为顺字面量，断言其不得回显）"
 paths = [
-  '''^plugins/shared/system/llm/test_routes_llm_config_gaps\.py$''',
+  '''^plugins/shared/llm/test_routes_llm_config_gaps\.py$''',
   '''^tests/test_llm_adapter_units\.py$''',
 ]
 regexes = [
   '''sk-abcd123456''',
+]
+
+[[allowlists]]
+description = "ecosystem_import OAuth 夹具：.mcp.json OAuth 块 client_secret 哑值（12 位降序 hex，非真实凭据形态）"
+paths = [
+  '^plugins/shared/ecosystem_import/tests/conftest\.py$',
+]
+regexes = [
+  '3f2e1d0c9b8a',
 ]

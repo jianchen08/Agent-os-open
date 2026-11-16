@@ -11,7 +11,6 @@
 //! - 路径安全：拒绝 `..` 逃逸、canonicalize 后必须仍在插件 web/ 子树内。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use agentos_api::http_dispatcher::{dispatch_http, DispatchOutcome, HttpDispatcher};
@@ -39,10 +38,22 @@ impl HttpHandleCapability for NopHandler {
     }
 }
 
-/// 构造一个临时插件目录：含 web/index.html、web/app.js、web/style.css。
+/// 构造插件根 fixture：`<root>/<PLUGIN_ID>/{web/,plugin.json}`（装机布局形态，
+/// loader discover 可发现）。返回根目录（供 loader 扫描）。
 fn make_plugin_with_web() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
-    let web = dir.path().join("web");
+    let pkg = dir.path().join(PLUGIN_ID);
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(
+        pkg.join("plugin.json"),
+        format!(
+            r#"{{"id":"{PLUGIN_ID}","name":"{PLUGIN_ID}","version":"1.0.0",
+                "plugin_type":"tool","language":"python","host_type":"sidecar",
+                "entry":"python server.py","capabilities":{{}}}}"#
+        ),
+    )
+    .unwrap();
+    let web = pkg.join("web");
     std::fs::create_dir_all(&web).unwrap();
     std::fs::write(
         web.join("index.html"),
@@ -61,15 +72,18 @@ fn make_plugin_with_web() -> tempfile::TempDir {
     dir
 }
 
-/// 构造带 plugin_dirs 的 AppState（plugin_id → 插件根目录）。
-fn make_state(plugin_id: &str, plugin_root: PathBuf) -> AppState {
+/// 构造带插件目录活真源（loader 活对象）的 AppState。
+async fn make_state(plugin_id: &str, plugins_root: &std::path::Path) -> AppState {
     let mut state = AppState::new();
     let registry = Arc::new(CapabilityRegistryImpl::new());
     state.capability_registry = Some(registry);
     state.http_handler = Some(Arc::new(NopHandler));
-    let mut dirs = HashMap::new();
-    dirs.insert(plugin_id.to_string(), plugin_root);
-    state.plugin_dirs = Arc::new(dirs);
+    let loader = agentos_api::test_env::discovered_plugin_loader(plugins_root).await;
+    assert!(
+        loader.plugin_dir(plugin_id).is_some(),
+        "fixture 插件必须被 loader 发现"
+    );
+    state.plugin_loader = Some(loader);
     state
 }
 
@@ -80,7 +94,7 @@ const PLUGIN_ID: &str = "demo_spa_plugin";
 #[tokio::test]
 async fn test_static_asset_serves_index_html() {
     let tmp = make_plugin_with_web();
-    let state = make_state(PLUGIN_ID, tmp.path().to_path_buf());
+    let state = make_state(PLUGIN_ID, tmp.path()).await;
     let app = build_router(state);
 
     let resp = app
@@ -114,7 +128,7 @@ async fn test_static_asset_serves_index_html() {
 #[tokio::test]
 async fn test_static_asset_serves_js_with_correct_mime() {
     let tmp = make_plugin_with_web();
-    let state = make_state(PLUGIN_ID, tmp.path().to_path_buf());
+    let state = make_state(PLUGIN_ID, tmp.path()).await;
     let app = build_router(state);
 
     let resp = app
@@ -145,7 +159,7 @@ async fn test_static_asset_serves_js_with_correct_mime() {
 #[tokio::test]
 async fn test_static_asset_serves_css_with_correct_mime() {
     let tmp = make_plugin_with_web();
-    let state = make_state(PLUGIN_ID, tmp.path().to_path_buf());
+    let state = make_state(PLUGIN_ID, tmp.path()).await;
     let app = build_router(state);
 
     let resp = app
@@ -173,7 +187,7 @@ async fn test_static_asset_serves_css_with_correct_mime() {
 #[tokio::test]
 async fn test_static_asset_serves_nested_path() {
     let tmp = make_plugin_with_web();
-    let state = make_state(PLUGIN_ID, tmp.path().to_path_buf());
+    let state = make_state(PLUGIN_ID, tmp.path()).await;
     let app = build_router(state);
 
     let resp = app
@@ -204,7 +218,7 @@ async fn test_static_asset_serves_nested_path() {
 #[tokio::test]
 async fn test_static_asset_nonexistent_returns_404() {
     let tmp = make_plugin_with_web();
-    let state = make_state(PLUGIN_ID, tmp.path().to_path_buf());
+    let state = make_state(PLUGIN_ID, tmp.path()).await;
     let app = build_router(state);
 
     let resp = app
@@ -224,7 +238,7 @@ async fn test_static_asset_nonexistent_returns_404() {
 #[tokio::test]
 async fn test_static_asset_rejects_path_traversal() {
     let tmp = make_plugin_with_web();
-    let state = make_state(PLUGIN_ID, tmp.path().to_path_buf());
+    let state = make_state(PLUGIN_ID, tmp.path()).await;
     let app = build_router(state);
 
     // /ext/{plugin}/assets/../../plugin.json —— 试图逃出 web/ 读 plugin.json
@@ -245,13 +259,13 @@ async fn test_static_asset_rejects_path_traversal() {
     );
 }
 
-// ── 无 plugin_dirs 时不影响 dispatcher 行为 ─────────────────
+// ── 未登记插件不影响 dispatcher 行为 ─────────────────
 
 #[tokio::test]
 async fn test_static_asset_unknown_plugin_falls_through_to_dispatcher() {
-    // 不在 plugin_dirs 里的插件 → 静态分支不命中 → 走 dispatcher → 404
+    // loader 路径表未登记的插件 → 静态分支不命中 → 走 dispatcher → 404
     let tmp = make_plugin_with_web();
-    let state = make_state(PLUGIN_ID, tmp.path().to_path_buf());
+    let state = make_state(PLUGIN_ID, tmp.path()).await;
     let app = build_router(state);
 
     let resp = app
@@ -272,7 +286,7 @@ async fn test_static_asset_unknown_plugin_falls_through_to_dispatcher() {
 async fn test_static_asset_only_intercepts_assets_subpath() {
     // /ext/{plugin}/foo（非 assets）不应被静态分支处理，应走 dispatcher（404）
     let tmp = make_plugin_with_web();
-    let state = make_state(PLUGIN_ID, tmp.path().to_path_buf());
+    let state = make_state(PLUGIN_ID, tmp.path()).await;
     let app = build_router(state);
 
     let resp = app

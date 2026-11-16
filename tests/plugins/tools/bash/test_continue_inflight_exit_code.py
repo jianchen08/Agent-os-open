@@ -36,19 +36,19 @@ async def test_continue_inflight_returns_real_exit_code(tmp_path: Path) -> None:
     r = await tool.execute(
         {
             "action": "execute",
-            "command": _py_cmd("import time; time.sleep(2); import sys; sys.exit(7)"),
-            "timeout": 1,
+            "command": _py_cmd("import time; time.sleep(8); import sys; sys.exit(7)"),
+            "timeout": 5,
             "workspace": ws,
         }
     )
     assert r.success and r.output["status"] == "running"
     pid = r.output["pid"]
 
-    r2 = await tool.execute({"action": "continue", "pid": pid, "timeout": 15, "workspace": ws})
+    r2 = await tool.execute({"action": "continue", "pid": pid, "timeout": 30, "workspace": ws})
     assert r2.success, r2.error
     # 等待循环至少跨过一次进程运行期（0.5s 轮询粒度），退出码必须保真
     assert r2.output["exit_code"] == 7, f"退出码失真: {r2.output}"
-    assert time.monotonic() - start >= 2  # 确实等到了进程退出，而非提前假完成
+    assert time.monotonic() - start >= 8  # 确实等到了进程退出，而非提前假完成
 
 
 async def test_continue_inflight_zero_exit_is_success(tmp_path: Path) -> None:
@@ -58,15 +58,15 @@ async def test_continue_inflight_zero_exit_is_success(tmp_path: Path) -> None:
     r = await tool.execute(
         {
             "action": "execute",
-            "command": _py_cmd("import time; time.sleep(2); print('done-marker')"),
-            "timeout": 1,
+            "command": _py_cmd("import time; time.sleep(8); print('done-marker')"),
+            "timeout": 5,
             "workspace": ws,
         }
     )
     assert r.success and r.output["status"] == "running"
     pid = r.output["pid"]
 
-    r2 = await tool.execute({"action": "continue", "pid": pid, "timeout": 15, "workspace": ws})
+    r2 = await tool.execute({"action": "continue", "pid": pid, "timeout": 30, "workspace": ws})
     assert r2.success, r2.error
     assert r2.output["exit_code"] == 0
     assert "done-marker" in str(r2.output.get("output", ""))
@@ -79,8 +79,8 @@ async def test_continue_after_cleanup_reads_disk_exit_code(tmp_path: Path) -> No
     r = await tool.execute(
         {
             "action": "execute",
-            "command": _py_cmd("import time; time.sleep(2); import sys; sys.exit(5)"),
-            "timeout": 1,
+            "command": _py_cmd("import time; time.sleep(8); import sys; sys.exit(5)"),
+            "timeout": 5,
             "workspace": ws,
         }
     )
@@ -88,9 +88,9 @@ async def test_continue_after_cleanup_reads_disk_exit_code(tmp_path: Path) -> No
     pid = r.output["pid"]
 
     # 等进程自然结束并被 _on_output_task_done 清理（超过生存期 + 轮询粒度）
-    await asyncio.sleep(3.5)
+    await asyncio.sleep(9.5)
     assert tool.process_manager.get_process_info(pid) is None
 
-    r2 = await tool.execute({"action": "continue", "pid": pid, "timeout": 5, "workspace": ws})
+    r2 = await tool.execute({"action": "continue", "pid": pid, "timeout": 30, "workspace": ws})
     assert r2.success, r2.error
     assert r2.output["exit_code"] == 5

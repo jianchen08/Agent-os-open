@@ -109,9 +109,12 @@ def test_v5_red_on_undeclared_est_and_over_budget():
     gates = [_gate("f1", fast=True, est=None)]
     out = v5_fast_budget(gates)
     assert any("未声明 est_seconds" in v for v in out)
-    gates2 = [_gate("f1", fast=True, est=80), _gate("f2", fast=True, est=20)]
+    # 超预算期望从常量推导（预算随闸门增减可调，改值须 commit 归因）
+    budget = _mod.FAST_BUDGET_SECONDS
+    total = budget + 10
+    gates2 = [_gate("f1", fast=True, est=80), _gate("f2", fast=True, est=total - 80)]
     out2 = v5_fast_budget(gates2)
-    assert any("100s > 预算 90s" in v for v in out2)
+    assert any(f"{total}s > 预算 {budget}s" in v for v in out2)
 
 
 # ── 删值实验 ⑤：账本位置 ────────────────────────────────────────────

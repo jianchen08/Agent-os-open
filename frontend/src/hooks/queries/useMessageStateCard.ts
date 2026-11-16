@@ -1,5 +1,7 @@
 /**
- * 消息状态卡分发 hook（状态统一标记机制 §5b，2026-09-28）
+ * 消息状态标记分发 hook（状态统一标记机制 §5b，2026-09-28；渲染形态
+ * 2026-10-17 退役 webview 卡后本 hook 只承载「标记段切除」数据面——状态呈现
+ * 归工作区玩法页）
  *
  * 「看情况」三道门（缺一即 null，零渲染语义）：
  * 1. active：仅最新 assistant 消息且非流式（历史/流式中不挂）；
@@ -7,7 +9,8 @@
  *    latest?pipeline_id=——pipelineStates 是内核白名单裁剪视图不透出该键，
  *    插件端点拉取是零内核边界下的唯一通道）；
  * 3. 声明：插件 message_cards 声明命中（match.marker='state' → style_id），
- *    registry 无声明 = 同源消失（宿主零样式 id 硬编码）。
+ *    registry 无声明 = 同源消失（宿主零样式 id 硬编码；命中即切除——渲染
+ *    本体归宿主，message-style 页声明门槛随 webview 卡退役移除）。
  *
  * 正文重组按 span 精确切除标记段本身（前段+后段拼接——标记可能在正文中间，
  * 后半正文不可丢）。
@@ -17,7 +20,6 @@ import { PIPELINE_STATE_MARKER_PARSE_ENDPOINTS } from '@/services/api/endpoints.
 import { queryClient } from '@/services/query/queryClient'
 import { apiClient } from '@/services/api/client'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
-import { resolveMessageStyle } from '@/components/chat/PluginMessageCard'
 import { readSessions } from '@/hooks/queries/useSessionsQuery'
 import { useSessionStore } from '@/stores/sessionStore'
 import { mainPipelineIdOf } from '@/utils/mappers'
@@ -29,7 +31,7 @@ interface StateUpdatesPayload {
   ts: string
 }
 
-/** 分发结果（调用方：正文按 span 精确切除 + 尾部 PluginMessageCard） */
+/** 分发结果（调用方：正文按 span 精确切除标记段；styleId=声明命中凭据） */
 export interface MessageStateCard {
   styleId: string
   entries: Record<string, unknown>
@@ -73,7 +75,7 @@ export function useMessageStateCard(active: boolean): MessageStateCard | null {
           return
         }
         const styleId = _matchStyleId(contributionRegistry.getAllMessageCards(), 'state')
-        if (!styleId || !resolveMessageStyle(styleId)) {
+        if (!styleId) {
           setCard(null)
           return
         }

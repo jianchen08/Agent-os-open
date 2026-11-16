@@ -15,7 +15,7 @@
 
 ## 📑 Table of Contents
 
-- [Overview](#-overview) · [Demo Video](#-demo-video) · [Key Highlights](#-key-highlights) · [Project Scale](#-project-scale)
+- [Overview](#-overview) · [Demo Video](#-demo-video) · [Product Interface](#-product-interface) · [Key Highlights](#-key-highlights) · [Project Scale](#-project-scale)
 - [Quick Start](#-quick-start)（[Windows](#option-1-windows-one-click-recommended) / [Linux·macOS](#option-2-linux--macos-one-click) / [Manual](#option-3-manual-development)）
 - [Multi-Instance Config](#cross-device--multi-instance-configuration)
 - [Documentation](#-documentation-navigation) · [Mirrors](#-mirror-repositories)
@@ -65,6 +65,28 @@
 </a>
 
 > Click the image above to watch a quick demo on Bilibili.
+
+---
+
+## 📸 Product Interface
+
+> All screenshots below are captured from a real running instance (local dev run); account names and other sensitive details are masked.
+
+### Workbench
+
+![Lingxi AgentOS workbench: sidebar with New Session / Task Management / Sessions, and the welcome area with a "start a new conversation" guide](screenshots/workbench.png)
+
+### Deep-Space Command Center Theme
+
+![The workbench after switching to the "Deep-Space Command Center" theme (dark)](screenshots/command-center-theme.png)
+
+### Theme Picker
+
+![Theme picker: 10 themes (7 compile-time presets + 3 dynamic JSON themes)](screenshots/theme-picker.png)
+
+### New Session: Agent Roster
+
+![Agent selection list in the "New Session" dialog](screenshots/agent-roster.png)
 
 ---
 

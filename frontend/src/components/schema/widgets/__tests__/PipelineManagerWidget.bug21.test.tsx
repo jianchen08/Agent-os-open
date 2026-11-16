@@ -29,6 +29,7 @@ vi.mock('@/services/api/tasks', () => pmMod.tasksApi())
 vi.mock('@/hooks/queries/usePipelineRunsQuery', () => pmMod.pipelineRunsQuery())
 vi.mock('@/hooks/queries/useAllTasksQuery', () => pmMod.allTasksQuery())
 vi.mock('@/hooks/queries/useSessionsQuery', () => pmMod.sessionsQuery())
+vi.mock('@/hooks/queries/useAgentsQuery', () => pmMod.agentsQuery())
 
 /** 播种一条「runs 窗口外 + state 行缺席」的任务（BUG-21 幽灵形态；任务载荷
  *  对齐 task_service 实际响应：无 timestamps 对象，created_at/updated_at 顶层
@@ -79,6 +80,23 @@ describe('PipelineManagerWidget BUG-21 无运行证据不猜 running', () => {
     renderWithProviders(<PipelineManagerWidget />)
     expect(await screen.findByText(/执行中的管道/)).toBeInTheDocument()
     expect(screen.getByText('陈旧待执行任务')).toBeInTheDocument()
+  })
+
+  it('state 行在场但无运行证据（装机活体 2026-11-01：出生行仅 task.* 键，无 run_status/ended/raw_error）→ 不猜 running，状态落未知', async () => {
+    seedUncoveredTask('pending')
+    // 内核 merge_cold_state 对表行非空管道出口（出生字段创建即落表），前端
+    // 拿到的 st 在场但三源运行键全缺——旧推断兜底猜 running 显「运行中」，
+    // 与任务域真值 pending（待执行，从未起跑）不一致。
+    pmSeed.states.stalePipe = {
+      pipeline_id: 'stalePipe',
+      thread_id: 'th-stale',
+      source: 'checkpoint',
+      state: {},
+    }
+    renderPmAllStatuses(<PipelineManagerWidget />)
+    expect(await screen.findByText('陈旧待执行任务')).toBeInTheDocument()
+    expect(screen.queryByText('执行中的管道')).toBeNull()
+    expect(screen.getAllByTitle(/运行状态：未知/).length).toBeGreaterThanOrEqual(1)
   })
 })
 

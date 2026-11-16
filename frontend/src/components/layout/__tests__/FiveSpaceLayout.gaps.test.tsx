@@ -8,7 +8,9 @@
  *   「打开文件夹」按钮（成功 / 业务失败 / 传输失败）
  * - Tab 关闭链（file_editor 注册表清理 / 钉住保护 / 移动端关最后一个 Tab 自动收起）
  * - 桌面侧栏/工作区开关、持久化比例恢复宽度、Esc 退出全屏覆盖层
- * - AlertBanner 动作分流（连接 → 监控页；审批 → 不跳转）
+ * - （顶栏异常横幅动作分流已并入通知中心：覆盖迁至
+ *   LayoutAlertNotifications.test 的动作执行器用例与 FiveSpaceLayout.test
+ *   预算告警面板分发用例）
  *
  * 任务树节点点击接线（2026-09-17 已修复）：handleTaskNodeClick 此前因
  * component-based 渲染路径取代 __dynamic__ 分支时接线丢失而成为死代码
@@ -23,7 +25,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import apiClient from '@/services/api/client'
-import { openWorkspacePanelByPath } from '@/services/workspacePanelOpener'
+import { openDeclaredPluginPage } from '@/services/workspacePanelOpener'
 vi.mock('@/services/pipelineNavigator', () => ({
   navigateToPipeline: vi.fn().mockResolvedValue(undefined),
 }))
@@ -38,6 +40,7 @@ import {
 } from '@/stores/fileEditorRegistry'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import { useUIStore } from '@/stores/uiStore'
 import { FiveSpaceLayout } from '../FiveSpaceLayout'
 import type * as costControlMod from '@/services/api/costControl'
@@ -90,10 +93,10 @@ vi.mock('@/services/api/costControl', () => ({
   getBudgetStatus: async () => null as costControlMod.BudgetStatusResponse | null,
 }))
 
-// 跳转动作 spy：仅替换 openWorkspacePanelByPath
+// 跳转动作 spy：仅替换 openDeclaredPluginPage
 vi.mock('@/services/workspacePanelOpener', async (importOriginal) => ({
   ...(await importOriginal<workspacePanelOpenerMod>()),
-  openWorkspacePanelByPath: vi.fn(() => true),
+  openDeclaredPluginPage: vi.fn(() => true),
 }))
 
 // apiClient 网络层打桩（外部依赖：HTTP）
@@ -147,10 +150,15 @@ function resetStores() {
   useUIStore.setState({
     sidebarCollapsed: false,
     workspaceCollapsed: false,
+    // 工作区全屏入 uiStore 后为跨用例全局态（原组件 useState 随卸载即逝）：
+    // 逐用例复位，防全屏钮用例的写入泄漏（后续用例宽度断言吃 ''）
+    workspaceFullscreen: false,
     sidebarRatio: null,
     workspacePanelRatio: null,
   })
   useNotificationStore.setState({ notifications: [] })
+  // 会话单例跨用例复位（工作区「只看当前会话」过滤依赖 activeSessionId）
+  useSessionStore.setState({ activeSessionId: null })
 }
 
 /** jsdom 无布局：给元素造非零 rect */
@@ -201,7 +209,7 @@ beforeEach(() => {
   globalThis.ResizeObserver = ResizeObserverStub as never
   setViewportWidth(1280)
   resetStores()
-  vi.mocked(openWorkspacePanelByPath).mockClear()
+  vi.mocked(openDeclaredPluginPage).mockClear()
   vi.mocked(navigateToPipeline).mockClear()
   apiMock.get.mockReset()
   apiMock.put.mockReset()
@@ -384,7 +392,7 @@ describe('FiveSpaceLayout 文件编辑器外部变更轮询（3s）', () => {
 // ────────────────────────── Tab 内容渲染分发 ──────────────────────────
 
 describe('FiveSpaceLayout 工作区 Tab 内容分发', () => {
-  it('文件编辑器：.py 文本走 CodeEditor（带保存链）', () => {
+  it('文件编辑器：.py 文本走 CodeEditor（带保存链）', async () => {
     registerEditorData('tab-e', {
       filePath: 'src/app.py',
       fileName: 'app.py',
@@ -393,10 +401,11 @@ describe('FiveSpaceLayout 工作区 Tab 内容分发', () => {
     })
     seedTab({ id: 'tab-e', title: 'app.py', moduleId: '__file_editor__' })
     renderLayout()
-    expect(screen.getByTestId('mock-code-editor')).toHaveAttribute('data-file', 'src/app.py')
+    // CodeEditor/FilePreview 为懒加载（启动屏裁剪），首挂载经一帧 Suspense，断言须等挂载完成
+    expect(await screen.findByTestId('mock-code-editor')).toHaveAttribute('data-file', 'src/app.py')
   })
 
-  it('文件编辑器：图片走 FilePreview', () => {
+  it('文件编辑器：图片走 FilePreview', async () => {
     registerEditorData('tab-img', {
       filePath: 'assets/logo.png',
       fileName: 'logo.png',
@@ -405,7 +414,7 @@ describe('FiveSpaceLayout 工作区 Tab 内容分发', () => {
     })
     seedTab({ id: 'tab-img', title: 'logo.png', moduleId: '__file_editor__' })
     renderLayout()
-    expect(screen.getByTestId('mock-file-preview')).toHaveAttribute('data-file', 'assets/logo.png')
+    expect(await screen.findByTestId('mock-file-preview')).toHaveAttribute('data-file', 'assets/logo.png')
   })
 
   it('文件编辑器：.html 走 HtmlPreviewWidget', () => {
@@ -420,7 +429,7 @@ describe('FiveSpaceLayout 工作区 Tab 内容分发', () => {
     expect(screen.getByTestId('mock-html-preview')).toHaveAttribute('data-file', 'site/page.html')
   })
 
-  it('文件编辑器：.pdf 走 FilePreview（扩展名直判）', () => {
+  it('文件编辑器：.pdf 走 FilePreview（扩展名直判）', async () => {
     registerEditorData('tab-pdf', {
       filePath: 'docs/manual.pdf',
       fileName: 'manual.pdf',
@@ -429,7 +438,7 @@ describe('FiveSpaceLayout 工作区 Tab 内容分发', () => {
     })
     seedTab({ id: 'tab-pdf', title: 'manual.pdf', moduleId: '__file_editor__' })
     renderLayout()
-    expect(screen.getByTestId('mock-file-preview')).toHaveAttribute('data-file', 'docs/manual.pdf')
+    expect(await screen.findByTestId('mock-file-preview')).toHaveAttribute('data-file', 'docs/manual.pdf')
   })
 
   it('文件编辑器数据过期（注册表无数据）→ 过期占位', () => {
@@ -497,6 +506,23 @@ describe('FiveSpaceLayout 任务树节点点击 → 管道导航接线', () => {
     capturedOnNodeClick?.({ id: 'task-9', title: '子任务A' })
     await act(async () => {})
     expect(navigateToPipeline).not.toHaveBeenCalled()
+  })
+
+  it('节点无标题 → 标签名回落执行 agent 名（标签命名链）', async () => {
+    seedTreeTabForNodes()
+    renderLayout()
+    capturedOnNodeClick?.({
+      id: 'task-10',
+      agent_name: '评审员',
+      pipeline_run_id: 'run-78',
+      agent_level: 'L2',
+      status: 'running',
+    })
+    await act(async () => {})
+    expect(navigateToPipeline).toHaveBeenCalledWith(
+      'run-78',
+      expect.objectContaining({ taskId: 'task-10', agentName: '评审员', agentLevel: 2 }),
+    )
   })
 })
 
@@ -607,7 +633,8 @@ describe('FiveSpaceLayout 文件树 Tab（file_tree widget 联动）', () => {
     )
     expect(apiMock.get).toHaveBeenCalledWith(
       '/ext/workspace_service/workspaces/ct-7/file-content',
-      { params: { path: 'docs/readme.md' } },
+      // 按需加载（用户裁定 2026-10-24）：文件树点击同带头部窗口参数
+      { params: { path: 'docs/readme.md', offset: 0, limit: 64 * 1024 } },
     )
     const data = getFileEditorData(newTabId)
     expect(data).toMatchObject({
@@ -620,6 +647,32 @@ describe('FiveSpaceLayout 文件树 Tab（file_tree widget 联动）', () => {
     const tab = useLayoutModeStore.getState().workspaceTabs.find((t) => t.id === newTabId)
     expect(tab).toMatchObject({ title: 'readme.md', moduleId: '__file_editor__' })
     registeredEditorTabIds.push(newTabId)
+  })
+
+  it('文件点击开的编辑页签继承文件树页签的 ownerSessionId（会话派生链同域）', async () => {
+    // 文件树页签归属 sess-9：工作区过滤开档下需当前会话命中才可见（挂载渲染前提）
+    useSessionStore.setState({ activeSessionId: 'sess-9' })
+    seedTab({
+      id: 'tab-tree-owned',
+      title: '文件树',
+      moduleId: '__dynamic__',
+      component: 'file_tree',
+      dataSource: 'workspace://ct-8',
+      ownerSessionId: 'sess-9',
+    })
+    apiMock.get.mockResolvedValueOnce({ data: { success: true, content: 'md body', size: 7 } })
+    renderLayout()
+
+    fireEvent.click(screen.getByTestId('widget-file-btn'))
+    const newTabId = 'file-ct-8-docs_readme.md'
+    await waitFor(() =>
+      expect(
+        useLayoutModeStore.getState().workspaceTabs.some((t) => t.id === newTabId),
+      ).toBe(true),
+    )
+    expect(
+      useLayoutModeStore.getState().workspaceTabs.find((t) => t.id === newTabId)?.ownerSessionId,
+    ).toBe('sess-9')
   })
 
   it('Tab 已存在 → 仅激活已有 Tab，不重复请求', async () => {
@@ -854,61 +907,6 @@ describe('FiveSpaceLayout Tab 关闭与面板开关', () => {
   })
 })
 
-// ────────────────────────── AlertBanner 动作分流 ──────────────────────────
-
-describe('FiveSpaceLayout 异常提示条动作分流', () => {
-  it('连接断开告警点击 → 打开监控面板', async () => {
-    useLayoutModeStore.setState({
-      connectionStatus: {
-        state: 'disconnected',
-        latencyMs: null,
-        reconnectAttempt: 1,
-        lastConnectedAt: null,
-        queuedMessages: 0,
-      },
-    })
-    renderLayout()
-
-    fireEvent.click(await screen.findByRole('alert'))
-
-    expect(openWorkspacePanelByPath).toHaveBeenCalledWith('/monitoring')
-  })
-
-  it('重连降级态告警点击 → globalWS.forceReconnect（一键重连，不打开监控面板）', async () => {
-    const globalWsMod = await import('@/services/websocket/GlobalWebSocket')
-    const forceSpy = vi.spyOn(globalWsMod.globalWS, 'forceReconnect').mockImplementation(() => {})
-    useLayoutModeStore.setState({
-      connectionStatus: {
-        state: 'reconnecting',
-        latencyMs: null,
-        reconnectAttempt: 12,
-        lastConnectedAt: null,
-        queuedMessages: 0,
-      },
-    })
-    renderLayout()
-
-    const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent('多次重连失败')
-    expect(alert).toHaveTextContent('立即重连')
-    fireEvent.click(alert)
-
-    expect(forceSpy).toHaveBeenCalledTimes(1)
-    expect(openWorkspacePanelByPath).not.toHaveBeenCalled()
-  })
-
-  it('审批待处理告警点击不跳转（审批弹窗全局可见）', async () => {
-    useLayoutModeStore.setState({
-      pendingInteractions: [{ id: 'i1' }] as never,
-    })
-    renderLayout()
-
-    fireEvent.click(await screen.findByRole('alert'))
-
-    expect(openWorkspacePanelByPath).not.toHaveBeenCalled()
-  })
-})
-
 describe('FiveSpaceLayout 顶带三区切分与内容列严格同域', () => {
   // 用户裁定：顶带切分严格按工作区/侧栏列边界；两端留白只能内化为各区
   // 内部内边距。留白若留在切分层，三区外缘整体内收——工作区标签行会
@@ -927,5 +925,46 @@ describe('FiveSpaceLayout 顶带三区切分与内容列严格同域', () => {
     // 侧栏区同理：开关按钮的容器带内部留白，区外缘与侧栏列对齐
     const sidebarToggle = screen.getByTestId('sidebar-toggle-float')
     expect(sidebarToggle.parentElement!.className).toContain('px-2')
+  })
+})
+
+describe('FiveSpaceLayout 移动端工作区全屏（M28 黑屏死路修复）', () => {
+  // 契约：移动端工作区唯一宿主=覆盖层（聊天区全屏时 hidden 让位），铺满全屏
+  // 不得卸载覆盖层——修复前条件带 !workspaceFullscreen，进全屏即卸载唯一宿主
+  // 且聊天已隐藏 → 整 app 无内容可渲染（黑屏死路，ESC 为唯一出口而移动端
+  // 无键盘）。修复后覆盖层恒挂载：全屏=覆盖层占满（顶栏「返回对话」仍是
+  // 出口），再点全屏钮（取反）或 ESC 退出均还原。
+  function setMobileOpen(open: boolean) {
+    act(() => {
+      useUIStore.getState().setMobileWorkspaceOpen(open)
+    })
+  }
+
+  it('铺满全屏后覆盖层保持挂载（全屏本体），不落入无内容死态', () => {
+    setViewportWidth(375)
+    setMobileOpen(true)
+    seedTab({ id: 't1', title: '任务' })
+    renderLayout()
+
+    expect(screen.getByTestId('mobile-workspace-overlay')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '铺满全屏' }))
+
+    // 修复断言：全屏态覆盖层仍在（此前被卸载 → 黑屏）
+    expect(screen.getByTestId('mobile-workspace-overlay')).toBeInTheDocument()
+  })
+
+  it('全屏后再点全屏钮（取反）退出，覆盖层依旧在、可继续退出到对话', () => {
+    setViewportWidth(375)
+    setMobileOpen(true)
+    seedTab({ id: 't1', title: '任务' })
+    renderLayout()
+
+    const fsBtn = () => screen.getByRole('button', { name: '铺满全屏' })
+    fireEvent.click(fsBtn())
+    fireEvent.click(fsBtn())
+
+    expect(screen.getByTestId('mobile-workspace-overlay')).toBeInTheDocument()
+    // 聊天区恢复可见（全屏退出）
+    expect(screen.getByTestId('chat-content')).toBeInTheDocument()
   })
 })

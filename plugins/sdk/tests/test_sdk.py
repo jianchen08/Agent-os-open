@@ -35,9 +35,15 @@ class TestSdkImport:
     """验证 SDK 可导入且核心 API 存在。"""
 
     def test_import_version(self) -> None:
+        import tomllib
+        from pathlib import Path
+
         from agentos_plugin_sdk import __version__
 
-        assert __version__ == "0.2.0"
+        expected = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))[
+            "project"
+        ]["version"]
+        assert __version__ == expected
 
     def test_agentos_plugin_exists(self) -> None:
         assert AgentOSPlugin is not None

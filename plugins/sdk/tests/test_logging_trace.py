@@ -256,5 +256,5 @@ class TestLoggingConfigEdgeCases:
 
 
 # 注：原 BridgeCore LogContext 集成测试已移除——pipeline.bridge_core 是 0.1 模块，
-# 0.2 架构下该功能由 pipeline 插件层负责（plugins/shared/pipeline/），
+# 0.2 架构下该功能由管道插件层负责（plugins/shared/ 平铺布局），
 # 不属于 SDK logging 单测范畴。

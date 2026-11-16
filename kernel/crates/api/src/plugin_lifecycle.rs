@@ -30,6 +30,14 @@ pub fn register_plugin_capabilities(
 ) -> usize {
     let mut count = 0usize;
     let scope = scopes.scope_of(&manifest.id);
+    // 宿主领地登记（F-min 属地路由，设计文档 §53）：manifest 声明
+    // mcp.allowed_roots 的插件即宿主实例载体，注册表据其做同名工具的
+    // 属地裁决（工作空间前缀匹配 → 实例选择）。
+    if let Some(mcp_cfg) = &manifest.mcp {
+        if !mcp_cfg.allowed_roots.is_empty() {
+            registry.register_host(&manifest.id, mcp_cfg.allowed_roots.clone());
+        }
+    }
     {
         for tool_cap in &manifest.capabilities.tools {
             let category = tool_cap.category.clone().unwrap_or(ToolCategory::System);
@@ -80,6 +88,7 @@ pub fn register_plugin_capabilities(
                 },
                 ui: tool_cap.ui.clone(),
                 render: tool_cap.render.clone(),
+                isolation_capable: tool_cap.isolation_capable,
             };
             scope.track(registry.register_tool_guarded(&manifest.id, descriptor));
             count += 1;
@@ -245,33 +254,9 @@ pub async fn heal_plugin_http_routes(
     if manifest.http_endpoints.is_empty() {
         return false;
     }
-    let scope = scopes.scope_of(plugin_id);
     let mut http_routes = 0usize;
     for ep in &manifest.http_endpoints {
-        // 幂等基线：端点已在（并发自愈/watcher 先行恢复）→ 计成功，不动。
-        if registry
-            .find_http_route(&ep.path, &ep.method)
-            .is_some_and(|d| d.plugin_id == manifest.id)
-        {
-            http_routes += 1;
-            continue;
-        }
-        let ok = registry
-            .register_http_route_guarded(plugin_id, ep.clone())
-            .map(|(_d, guard)| scope.track(guard))
-            .or_else(|_| {
-                // 注册冲突 = 并发补注册同键竞胜；复核条目确属本插件 → 计成功。
-                if registry
-                    .find_http_route(&ep.path, &ep.method)
-                    .is_some_and(|d| d.plugin_id == manifest.id)
-                {
-                    Ok(())
-                } else {
-                    Err(())
-                }
-            })
-            .is_ok();
-        if ok {
+        if ensure_declared_http_route(registry, scopes, &manifest.id, ep) {
             http_routes += 1;
         }
     }
@@ -282,6 +267,103 @@ pub async fn heal_plugin_http_routes(
         "调用路径自愈：注册表缺失的声明 http 路由已按 manifest 补注册（additive，不收回在册面）"
     );
     http_routes > 0
+}
+
+/// additive 补注册单条声明 http 路由（调用路径 heal 与波尾巡检共用原语）。
+///
+/// 幂等：端点已在册（并发自愈/watcher 先行恢复）→ 直接成功；注册冲突 =
+/// 并发补注册同键竞胜，复核条目确属本插件 → 计成功（additive 语义下冲突只
+/// 可能来自并发补注册同一路由）。guard 入该插件 scope（disable 可结构性收回）。
+fn ensure_declared_http_route(
+    registry: &Arc<CapabilityRegistryImpl>,
+    scopes: &PluginScopeRegistry,
+    plugin_id: &str,
+    ep: &agentos_core::traits::HttpEndpoint,
+) -> bool {
+    if registry
+        .find_http_route(&ep.path, &ep.method)
+        .is_some_and(|d| d.plugin_id == plugin_id)
+    {
+        return true;
+    }
+    let scope = scopes.scope_of(plugin_id);
+    registry
+        .register_http_route_guarded(plugin_id, ep.clone())
+        .map(|(_d, guard)| scope.track(guard))
+        .or_else(|_| {
+            if registry
+                .find_http_route(&ep.path, &ep.method)
+                .is_some_and(|d| d.plugin_id == plugin_id)
+            {
+                Ok(())
+            } else {
+                Err(())
+            }
+        })
+        .is_ok()
+}
+
+/// 重载波收尾的声明 http 路由巡检（波次收尾主动重注册，消除惰性自愈窗）。
+///
+/// 重载/卸载波（watcher sync 的 uninstall 收回 / 复验 revoke 重建）会把声明
+/// 路由从注册表摘掉，恢复靠请求触发 [`heal_plugin_http_routes`]（惰性）——波后
+/// 到下一请求之间注册表处于缺失态，manifest 面同窗重建时请求落 /ext 分发
+/// 「未在册」分支（纯文本 404，2026-10-15 酒馆面板实证）。每轮 sync 收尾对
+/// 「启用集 ∩ manifest store」内每个声明 http_endpoints 的插件做 additive
+/// 补注册（幂等：在册端点零动作；不收回在册面），波后路由表保证完整。
+///
+/// fail-closed 与 heal 同界：禁用/manifest 缺席插件不复活。返回
+/// (补注册的插件数, 补注册的路由数)；全部在册时 (0, 0)（调用方据此静默）。
+pub async fn sweep_declared_http_routes(
+    registry: &Arc<CapabilityRegistryImpl>,
+    scopes: &PluginScopeRegistry,
+    manifests: &crate::plugin_watcher::ManifestsStore,
+    enabled_ids: &Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+) -> (usize, usize) {
+    let enabled = enabled_ids.read().await.clone();
+    let candidates: Vec<PluginManifest> = {
+        let store = manifests.read().await;
+        store
+            .iter()
+            .filter(|m| enabled.contains(&m.id) && !m.http_endpoints.is_empty())
+            .cloned()
+            .collect()
+    };
+    let mut repaired_plugins = 0usize;
+    let mut repaired_routes = 0usize;
+    for manifest in &candidates {
+        let mut repaired = 0usize;
+        for ep in &manifest.http_endpoints {
+            let missing = registry
+                .find_http_route(&ep.path, &ep.method)
+                .is_none_or(|d| d.plugin_id != manifest.id);
+            if missing && ensure_declared_http_route(registry, scopes, &manifest.id, ep) {
+                repaired += 1;
+            }
+        }
+        if repaired > 0 {
+            repaired_plugins += 1;
+            repaired_routes += repaired;
+        }
+    }
+    (repaired_plugins, repaired_routes)
+}
+
+/// 声明 http 面完整性复核：manifest 声明的全部 http 端点当前是否都在注册表
+/// 在册（且确属本插件）。/ext 分发 503/404 裁决用——miss 后自愈重试仍 miss 时，
+/// 声明面完整 = miss 属请求 path/method 与声明面不匹配（重试同路径与重启都不可
+/// 恢复，装机 R297 resume/cancel 永续 503 实证：heal 27/27 幂等命中 = 注册面
+/// 从未缺失）；声明面有缺 = 真·生命周期空窗/注册面静默丢失。
+pub fn declared_http_routes_all_present(
+    registry: &CapabilityRegistryImpl,
+    manifest: &PluginManifest,
+) -> bool {
+    use agentos_core::traits::CapabilityRegistry;
+    manifest.http_endpoints.iter().all(|ep| {
+        registry
+            .find_http_route(&ep.path, &ep.method)
+            .is_some_and(|d| d.plugin_id == manifest.id)
+    })
 }
 
 /// 广播域事件（通用域事件通道：`LifecycleHook::DomainEvent` + `ctx["event"]` 事件名）。
@@ -342,6 +424,18 @@ pub async fn broadcast_domain_event_from(
         {
             continue;
         }
+        // ADR 2026-10-28 D5：去重**之前**先保证该订阅者在其宿主进程内在场。
+        // 被去重跳过的同宿主成员永远拿不到下方 send_lifecycle_hook 里那次
+        // loader.load 唤醒；宿主侧扇出只覆盖当前在场成员 → 事件静默丢失
+        // （装机 2026-10-28 实证）。唤醒失败只告警——不得静默丢事件。
+        if let Err(e) = invoker.ensure_member_present(&manifest.id).await {
+            tracing::warn!(
+                plugin = %manifest.id,
+                event = %name,
+                error = %e.message,
+                "域事件投递前唤醒订阅者失败（该插件本轮可能收不到事件）"
+            );
+        }
         if !notified_hosts.insert(invoker.host_key_of(&manifest.id)) {
             continue;
         }
@@ -391,6 +485,8 @@ mod domain_event_tests {
     /// 回退 plugin_id 本身（与 trait 默认实现同构）。
     struct RecordingInvoker {
         hooks: Mutex<Vec<(String, String)>>, // (plugin_id, event)
+        /// ensure_member_present 的调用序（ADR 2026-10-28 D5 唤醒面断言）
+        wakes: Mutex<Vec<String>>,
         hosts: std::collections::HashMap<String, String>,
     }
 
@@ -435,6 +531,10 @@ mod domain_event_tests {
                 .cloned()
                 .unwrap_or_else(|| plugin_id.to_string())
         }
+        async fn ensure_member_present(&self, plugin_id: &str) -> Result<(), PluginError> {
+            self.wakes.lock().unwrap().push(plugin_id.to_string());
+            Ok(())
+        }
     }
 
     fn manifest(id: &str, declare_domain: bool) -> PluginManifest {
@@ -446,7 +546,6 @@ mod domain_event_tests {
             description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::System,
-            pipeline_role: None,
             language: "python".to_string(),
             host_type: HostType::Sidecar,
             host_group: None,
@@ -465,7 +564,6 @@ mod domain_event_tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            granted_capabilities: vec![],
             restricted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
@@ -486,6 +584,7 @@ mod domain_event_tests {
     async fn domain_event_reaches_declaring_enabled_plugins_only() {
         let invoker = Arc::new(RecordingInvoker {
             hooks: Mutex::new(Vec::new()),
+            wakes: Mutex::new(Vec::new()),
             hosts: std::collections::HashMap::new(),
         });
         let mut state = AppState::new();
@@ -535,6 +634,7 @@ mod domain_event_tests {
     async fn domain_event_delivered_once_per_host_for_cohosted_subscribers() {
         let invoker = Arc::new(RecordingInvoker {
             hooks: Mutex::new(Vec::new()),
+            wakes: Mutex::new(Vec::new()),
             hosts: std::collections::HashMap::from([
                 ("p_a".to_string(), "group:light:1".to_string()),
                 ("p_c".to_string(), "group:light:1".to_string()),
@@ -569,11 +669,63 @@ mod domain_event_tests {
         );
     }
 
+    /// ADR 2026-10-28 D5 回归：被去重跳过的同宿主订阅者也必须被唤醒。
+    ///
+    /// 事故形态（装机 2026-10-28）：task_service 被空闲卸载后，广播按宿主
+    /// 去重把同宿主第二个订阅者当「已覆盖」跳过 → 它永远拿不到
+    /// send_lifecycle_hook 里的 loader.load 唤醒，宿主扇出也没有它的 handler
+    /// → 终态事件静默丢失（上级收不到子任务完成通知）。
+    #[tokio::test]
+    async fn domain_event_wakes_every_declaring_subscriber_before_dedup() {
+        let invoker = Arc::new(RecordingInvoker {
+            hooks: Mutex::new(Vec::new()),
+            wakes: Mutex::new(Vec::new()),
+            hosts: std::collections::HashMap::from([
+                ("p_a".to_string(), "group:light:1".to_string()),
+                ("p_c".to_string(), "group:light:1".to_string()),
+            ]),
+        });
+        let mut state = AppState::new();
+        state.manifests = Arc::new(tokio::sync::RwLock::new(vec![
+            manifest("p_a", true),
+            manifest("p_c", true),
+        ]));
+        state.enabled_plugin_ids = Arc::new(tokio::sync::RwLock::new(HashSet::from([
+            "p_a".to_string(),
+            "p_c".to_string(),
+        ])));
+        state.invoker = Some(invoker.clone());
+
+        broadcast_domain_event(&state, "task_completed", vec![]).await;
+
+        // 唤醒是投递前的前置 await（非 spawn）：广播返回时记录已完整
+        let mut wakes = invoker.wakes.lock().unwrap().clone();
+        wakes.sort();
+        assert_eq!(
+            wakes,
+            vec!["p_a".to_string(), "p_c".to_string()],
+            "同宿主两个声明订阅者都必须被唤醒（去重跳过的那个也要）"
+        );
+        // 去重防护不变：投递仍只有一次
+        for _ in 0..200 {
+            if !invoker.hooks.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            invoker.hooks.lock().unwrap().len(),
+            1,
+            "唤醒不得破坏同宿主只投递一次的 N² 防护"
+        );
+    }
+
     /// 去重不得欠投递：不同宿主的订阅插件各自收到一次。
     #[tokio::test]
     async fn domain_event_still_reaches_subscribers_in_distinct_hosts() {
         let invoker = Arc::new(RecordingInvoker {
             hooks: Mutex::new(Vec::new()),
+            wakes: Mutex::new(Vec::new()),
             hosts: std::collections::HashMap::from([
                 ("p_a".to_string(), "group:light:1".to_string()),
                 ("p_c".to_string(), "group:light:2".to_string()),
@@ -693,6 +845,7 @@ mod domain_event_tests {
 
         let invoker = Arc::new(RecordingInvoker {
             hooks: Mutex::new(Vec::new()),
+            wakes: Mutex::new(Vec::new()),
             hosts: std::collections::HashMap::new(),
         });
         let mut state = AppState::new();
@@ -797,7 +950,6 @@ mod external_mcp_schema_gate_tests {
             description: None,
             version: "1.0.0".to_string(),
             plugin_type: PluginType::Tool,
-            pipeline_role: None,
             language: "external".to_string(),
             host_type: HostType::Sidecar,
             host_group: None,
@@ -813,6 +965,7 @@ mod external_mcp_schema_gate_tests {
                     category: Some(ToolCategory::Search),
                     ui: None,
                     render: None,
+                    isolation_capable: None,
                 }],
                 ..Default::default()
             },
@@ -822,7 +975,6 @@ mod external_mcp_schema_gate_tests {
             mcp: None,
             lifecycle: None,
             native: None,
-            granted_capabilities: vec![],
             restricted_capabilities: vec![],
             requires_content: None,
             invoke_entry: None,
@@ -1123,20 +1275,7 @@ mod capability_registration_tests {
         m
     }
 
-    fn sample_mode_package(plugin_id: &str) -> agentos_plugin_loader::ModePackageResources {
-        agentos_plugin_loader::ModePackageResources {
-            plugin_id: plugin_id.to_string(),
-            mode_id: plugin_id.to_string(),
-            agents: vec![agentos_plugin_loader::ModeAgentEntry {
-                key: format!("{plugin_id}/main"),
-                plugin_id: plugin_id.to_string(),
-                path: std::path::PathBuf::from("agents/main.yaml"),
-            }],
-            pipelines: vec![],
-        }
-    }
-
-    /// 生命周期空窗现场：非路由维度（工具 + 模式包资源键）live 且入 scope，
+    /// 生命周期空窗现场：非路由维度（工具）live 且入 scope，
     /// 路由维度刚被摘除（guard 落测试手中，drop 即空窗）。
     #[allow(clippy::type_complexity)]
     async fn heal_fixture_with_route_window(
@@ -1150,14 +1289,8 @@ mod capability_registration_tests {
         let m = manifest_with_routes_and_tool(id, &format!("t_{id}"));
         let registry = Arc::new(CapabilityRegistryImpl::new());
         let scopes = Arc::new(agentos_plugin_loader::PluginScopeRegistry::new());
-        // live 面：工具入 scope（register 同源）；模式包资源键入 scope（boot 同源）。
+        // live 面：工具入 scope（register 同源）。
         register_plugin_capabilities(&m, &registry, &scopes);
-        let mode_guard = agentos_plugin_loader::register_mode_package_guarded(
-            &registry,
-            sample_mode_package(id),
-        )
-        .expect("模式包资源应注册");
-        scopes.scope_of(id).track(mode_guard);
         // 路由维度：guard 由调用方持有（可精确制造空窗）。
         let route_guards: Vec<_> = m
             .http_endpoints
@@ -1189,8 +1322,8 @@ mod capability_registration_tests {
     }
 
     /// 路由全量缺席（生命周期空窗现场）→ 自愈补齐声明路由，且**不得连带
-    /// 摧毁 scope 里非 http 维度的在册登记**（工具/模式包资源键是 live 面，
-    /// 不是自愈的处置对象；装机版实测被 revoke 后只能等 watcher 重扫恢复）。
+    /// 摧毁 scope 里非 http 维度的在册登记**（工具是 live 面，不是自愈的
+    /// 处置对象；装机版实测被 revoke 后只能等 watcher 重扫恢复）。
     #[tokio::test]
     async fn heal_restores_routes_without_revoking_live_registrations() {
         let id = "p_hx_full";
@@ -1217,19 +1350,14 @@ mod capability_registration_tests {
             "自愈后声明路由必须可查（既有语义）"
         );
         assert!(
-            registry.get_mode_agent(&format!("{id}/main")).is_some(),
-            "自愈不得连带摧毁模式包资源键（BUG-67：heal 全量 revoke 的连带毁灭面）"
-        );
-        assert!(
             registry.get_tool(&format!("t_{id}")).is_some(),
             "自愈不得连带摧毁工具注册"
         );
     }
 
-    /// 部分空窗：仅单端点缺席、其余面（/b 路由 + 工具 + 模式包资源键）在册时，
-    /// 自愈只补缺失项，**在册面原样存活**（不 revoke、不重注册）。（装机版
-    /// 实证：每次 503 触发的 heal 全量 revoke，把并发请求刚恢复的路由又摘掉，
-    /// 503 持续；在册的模式包资源键连带被毁。）
+    /// 部分空窗：仅单端点缺席、其余面（/b 路由 + 工具）在册时，自愈只补缺失项，
+    /// **在册面原样存活**（不 revoke、不重注册）。（装机版实证：每次 503 触发的
+    /// heal 全量 revoke，把并发请求刚恢复的路由又摘掉，503 持续。）
     #[tokio::test]
     async fn heal_fills_only_missing_and_leaves_present_surface_intact() {
         let id = "p_hx_part";
@@ -1237,12 +1365,6 @@ mod capability_registration_tests {
         let registry = Arc::new(CapabilityRegistryImpl::new());
         let scopes = Arc::new(agentos_plugin_loader::PluginScopeRegistry::new());
         register_plugin_capabilities(&m, &registry, &scopes);
-        let mode_guard = agentos_plugin_loader::register_mode_package_guarded(
-            &registry,
-            sample_mode_package(id),
-        )
-        .expect("模式包资源应注册");
-        scopes.scope_of(id).track(mode_guard);
         // /a、/b 路由在册，guard 由测试持有——可精确摘除 /a 制造部分空窗。
         let (a_ep, b_ep) = (m.http_endpoints[0].clone(), m.http_endpoints[1].clone());
         let (_, a_guard) = registry
@@ -1280,12 +1402,202 @@ mod capability_registration_tests {
             "在册端点 /b 必须原样存活"
         );
         assert!(
-            registry.get_mode_agent(&format!("{id}/main")).is_some(),
-            "自愈不得连带摧毁模式包资源键（BUG-67 连带毁灭面）"
-        );
-        assert!(
             registry.get_tool(&format!("t_{id}")).is_some(),
             "自愈不得连带摧毁工具注册"
         );
     }
+
+    // ── 波尾巡检（重载波收尾主动重注册）：波次摘掉的声明路由在 sync 收尾被
+    //    补回，不再依赖请求触发 heal（惰性自愈窗消除的状态机锁）──
+
+    /// 波次收回（scope revoke = uninstall/复验语义）后、零请求触发的前提下，
+    /// 一轮巡检补回全部声明路由；再巡检全在册 → 零动作（幂等）。
+    #[tokio::test]
+    async fn sweep_restores_wave_revoked_routes_without_requests() {
+        let id = "p_sweep_full";
+        let m = manifest_with_routes_and_tool(id, &format!("t_{id}"));
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let scopes = Arc::new(agentos_plugin_loader::PluginScopeRegistry::new());
+        reenable_plugin_capabilities(&m, &registry, &scopes);
+        assert!(
+            registry
+                .find_http_route(&format!("/ext/{id}/a"), "GET")
+                .is_some(),
+            "前置：boot 注册后路由在册"
+        );
+        // 波次收回（uninstall 语义：scope 整体 revoke）
+        scopes.revoke(id);
+        assert!(
+            registry
+                .find_http_route(&format!("/ext/{id}/a"), "GET")
+                .is_none(),
+            "前置：波次收回后路由缺失（惰性窗起点）"
+        );
+
+        let manifests: crate::plugin_watcher::ManifestsStore =
+            Arc::new(tokio::sync::RwLock::new(vec![m]));
+        let enabled_ids = Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::from([
+            id.to_string(),
+        ])));
+        let (plugins, routes) =
+            sweep_declared_http_routes(&registry, &scopes, &manifests, &enabled_ids).await;
+
+        assert_eq!(
+            (plugins, routes),
+            (1, 2),
+            "波尾巡检应补回该插件全部 2 条缺失声明路由"
+        );
+        assert!(
+            registry
+                .find_http_route(&format!("/ext/{id}/a"), "GET")
+                .is_some()
+                && registry
+                    .find_http_route(&format!("/ext/{id}/b"), "GET")
+                    .is_some(),
+            "巡检后路由集合必须非空（波后立即请求不再落缺失分支）"
+        );
+        // 幂等：全在册时零动作。
+        let again = sweep_declared_http_routes(&registry, &scopes, &manifests, &enabled_ids).await;
+        assert_eq!((again.0, again.1), (0, 0), "全在册时巡检必须零动作");
+    }
+
+    /// 巡检 fail-closed 与 heal 同界：禁用（不在启用集）/ manifest 缺席的插件
+    /// 不被巡检复活。
+    #[tokio::test]
+    async fn sweep_skips_disabled_and_absent_plugins() {
+        let id = "p_sweep_dis";
+        let m = manifest_with_routes_and_tool(id, &format!("t_{id}"));
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let scopes = Arc::new(agentos_plugin_loader::PluginScopeRegistry::new());
+        reenable_plugin_capabilities(&m, &registry, &scopes);
+        scopes.revoke(id); // 波次收回，制造缺失现场
+
+        let manifests: crate::plugin_watcher::ManifestsStore =
+            Arc::new(tokio::sync::RwLock::new(vec![m]));
+        // 禁用形态：manifest 在册但不在启用集。
+        let disabled_ids: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>> =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()));
+        let (plugins, routes) =
+            sweep_declared_http_routes(&registry, &scopes, &manifests, &disabled_ids).await;
+        assert_eq!((plugins, routes), (0, 0), "禁用插件不得被巡检复活");
+        assert!(
+            registry
+                .find_http_route(&format!("/ext/{id}/a"), "GET")
+                .is_none(),
+            "禁用插件的路由必须保持缺席"
+        );
+
+        // 缺席形态：在启用集但 manifest store 查无。
+        let absent_ids = Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::from([
+            id.to_string(),
+        ])));
+        let empty_store: crate::plugin_watcher::ManifestsStore =
+            Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let (plugins, routes) =
+            sweep_declared_http_routes(&registry, &scopes, &empty_store, &absent_ids).await;
+        assert_eq!((plugins, routes), (0, 0), "manifest 缺席插件不得被巡检复活");
+    }
+
+    /// 部分缺失：在册端点不动、仅补缺失端点（additive 语义与 heal 一致）。
+    #[tokio::test]
+    async fn sweep_fills_only_missing_endpoints() {
+        let id = "p_sweep_part";
+        let m = manifest_with_routes_and_tool(id, &format!("t_{id}"));
+        let registry = Arc::new(CapabilityRegistryImpl::new());
+        let scopes = Arc::new(agentos_plugin_loader::PluginScopeRegistry::new());
+        register_plugin_capabilities(&m, &registry, &scopes);
+        let (a_ep, b_ep) = (m.http_endpoints[0].clone(), m.http_endpoints[1].clone());
+        let (_, _b_guard) = registry
+            .register_http_route_guarded(id, b_ep.clone())
+            .expect("/b 注册成功");
+        // /a 缺席、/b 在册（部分空窗现场）。
+        assert!(registry.find_http_route(&a_ep.path, "GET").is_none());
+        assert!(registry.find_http_route(&b_ep.path, "GET").is_some());
+
+        let manifests: crate::plugin_watcher::ManifestsStore =
+            Arc::new(tokio::sync::RwLock::new(vec![m]));
+        let enabled_ids = Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::from([
+            id.to_string(),
+        ])));
+        let (plugins, routes) =
+            sweep_declared_http_routes(&registry, &scopes, &manifests, &enabled_ids).await;
+        assert_eq!(
+            (plugins, routes),
+            (1, 1),
+            "只补缺失的 /a，在册 /b 不重复计数"
+        );
+        assert!(registry.find_http_route(&a_ep.path, "GET").is_some());
+        assert!(registry.find_http_route(&b_ep.path, "GET").is_some());
+    }
+}
+
+/// 插件失败域事件 → WS 实时面转发订阅者（best-effort，慢消费 Lagged 自动恢复）。
+///
+/// 引擎步失败单点（`PipelineExecutor::handle_plugin_failure`）广播
+/// `plugin_step_failed` 域事件；本订阅者把它翻译为既有 WS `plugin_error` 事件
+/// （载荷形态与 run 收尾 `emit_plugin_error_events` 同构）——步级失败实时浮出
+/// 前端，不再攒到 run 收尾才结算（长跑 run 的步级失败此前全程不可见，
+/// 2026-10-27 装机压缩死循环实证：guard 每轮 STEP_CALL_TIMEOUT 而用户零感知）。
+/// thread_id 缺席（非会话管道）只跳过 WS 面，总线/审计面照常。
+pub fn spawn_plugin_error_ws_forwarder(
+    bus: std::sync::Arc<agentos_hooks::HookEventBus>,
+    session: std::sync::Arc<agentos_session::SessionCoordinator>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut rx = bus.subscribe();
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    if event.hook != agentos_core::traits::LifecycleHook::DomainEvent {
+                        continue;
+                    }
+                    let Some(name) = event.ctx.get("event").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    if name != "plugin_step_failed" {
+                        continue;
+                    }
+                    let field = |k: &str| {
+                        event
+                            .ctx
+                            .get(k)
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string()
+                    };
+                    let thread_id = field("thread_id");
+                    if thread_id.is_empty() {
+                        continue;
+                    }
+                    let _ = session
+                        .emit_event(
+                            &thread_id,
+                            "plugin_error",
+                            serde_json::json!({
+                                "pipeline_id": field("pipeline_id"),
+                                "message_id": serde_json::Value::Null,
+                                "_threadId": thread_id,
+                                "plugin_id": field("plugin_id"),
+                                "error": {
+                                    "code": field("code"),
+                                    "message": field("message"),
+                                    "source": "plugin",
+                                    "retryable": false,
+                                    "details": null,
+                                    "request_id": null,
+                                },
+                            }),
+                        )
+                        .await;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(
+                        dropped = n,
+                        "plugin_error WS forwarder lagged, events dropped"
+                    );
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
 }

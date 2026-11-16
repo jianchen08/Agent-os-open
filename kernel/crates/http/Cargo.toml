@@ -21,4 +21,6 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
+tempfile = "3"
 tokio.workspace = true

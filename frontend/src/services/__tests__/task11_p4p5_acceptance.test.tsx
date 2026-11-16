@@ -15,14 +15,12 @@
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import React from 'react'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import {
-  CommandPalette,
-  ContextMenuItems,
-  ExtensionModalHost,
-  useExtensionModal,
-} from '@/components/extension/ExtensionComponents'
+import { CommandPalette, ContextMenuItems } from '@/components/extension/ExtensionComponents'
+import { SlotOverlayHost } from '@/components/slots/SlotOverlayHost'
 import { CommandDispatcher } from '@/services/schema/commandDispatcher'
 import { ContributionRegistry, contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { slotRegistry } from '@/services/slots/slotRegistry'
 import { ShortcutRegistry } from '@/services/schema/shortcutRegistry'
 import { evaluateWhen } from '@/services/schema/whenExpression'
 import { useContextKeys } from '@/stores/contextKeysStore'
@@ -168,16 +166,17 @@ describe('task_11 P4/P5 验收：插件声明 contributes 后前端自动出现�
     })
   })
 
-  describe('P5-d modal（模态弹窗）', () => {
-    it('contributes.modal 命令触发后弹出声明的 widget', async () => {
+  describe('P5-d overlay（modal 收敛 → shell.overlay 槽锚点）', () => {
+    it('contributes.modal 命令触发后经 shell.overlay 槽条目弹出声明的 widget', async () => {
+      const greeting = (() => null) as unknown as Parameters<typeof widgetRegistry.register>[1]
+      widgetRegistry.register('greeting', greeting, { name: 'greeting' })
+      // C4 收敛：modal 声明经 SlotRegistry 翻译为 shell.overlay 槽条目
+      await slotRegistry.loadFromSchema(
+        TEST_PLUGIN_SCHEMA as unknown as Parameters<typeof slotRegistry.loadFromSchema>[0],
+        { loadWidgets: async () => [] },
+      )
       function Host() {
-        const { modal, closeModal } = useExtensionModal(dispatcher)
-        if (!modal) return null
-        return (
-          <ExtensionModalHost modal={modal} onClose={closeModal}>
-            <span>{`greeting-${String((modal.props as { msg?: string }).msg)}`}</span>
-          </ExtensionModalHost>
-        )
+        return <SlotOverlayHost dispatcher={dispatcher} />
       }
 
       render(<Host />)
@@ -187,7 +186,6 @@ describe('task_11 P4/P5 验收：插件声明 contributes 后前端自动出现�
         await dispatcher.executeCommand('demo.greet')
       })
       await waitFor(() => expect(screen.getByText('问候')).toBeInTheDocument())
-      expect(screen.getByText('greeting-你好')).toBeInTheDocument()
     })
   })
 

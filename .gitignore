@@ -87,7 +87,7 @@ src/logs/
 # 内核进程运行日志同理（kernel/logs/ 曾混入 git add -A 近乎入库）
 kernel/logs/
 # llm_core payload 诊断落盘（默认关闭；开启时改写系统 tempfile，但历史/误开仍可能在此产生）
-plugins/shared/pipeline/core/llm_core/logs/
+plugins/shared/llm_core/logs/
 **/logs/payload_diag/
 
 # ─── 备份文件(含后缀变体 .bak_xxx)───
@@ -173,6 +173,10 @@ packages/npm-tarballs/*
 **/target_release_check/
 **/target_warmup_diag/
 target_diag/
+# 备用 target 目录整族前缀（2026-10-28 f50f0b1f1 事故：target-cov-g2 5.0GB/1955
+# 件被 auto-save 盲扫入库，两远端 100MB 硬限拒 push；执法 = CI artifact-guard，
+# ADR 2026-10-29-build-artifact-commit-guard）
+kernel/target-*/
 
 # 内核数据库清空前的自动备份（db-admin clear 方法写盘）
 agentos_kernel.db.clear-backup-*
@@ -232,6 +236,14 @@ kernel/schema_tmp.json
 # ─── 根目录调试响应/进程转储（一次性排查产物，不入库）───
 /resp*.json
 /_procs*.json
+# N1 清理防回流（2026-11-04，逐件引用核查零活引用后 git rm；六类一次性
+# 排查产物：curl 未鉴权响应/临时探针/示例配置副本/状态残留/编译产物副本）
+/pending*.json
+/probe_tmp.py
+/cpa_example_tmp.yaml
+/xf.json
+/sampler.status
+/visibility-recovery.js
 # playwright-MCP 会话产物（截图/状态 yml）
 .playwright-mcp/
 # 根目录 outputs/：探针脚本、调试截图、一次性诊断产物，不入库
@@ -244,6 +256,10 @@ docs/agent_prompts_viewer.html
 /release/
 /release_manual/
 
+# ─── 打包预带依赖实物（多端挂载依赖：WinFsp MSI + rclone.exe，大二进制不入库）───
+# 由 scripts/check_prereqs.mjs 链首自动直连补齐；版本钉选单源在该脚本
+/electron/prereqs/
+
 # ─── 日志轮转 locked 后缀产物（*.log 罩不住 .log.locked-YYYYMMDD 变体，不入库）───
 *.log.locked-*
 # 根目录演示字幕副本（与 docs/working/demo-video-subtitles-godot-bridge.srt 逐字节相同，规范留档在其处）
@@ -253,6 +269,8 @@ docs/agent_prompts_viewer.html
 # 门禁/车道探针脚本与再现产物的沙箱目录（成熟度评估 581 条 ?? 噪音的主体）
 .packtest/
 .zctmp/
+.zctmp_*
+
 .covtmp/
 .bug28c3/
 # 计算机操作会话截图与取证转储（computer-use 会话产物）
@@ -285,3 +303,27 @@ gui-test-screenshots/
 /plugins/mcp_*/
 
 /plugins/shared/mcp_*/
+
+# 构建产物不入库（ADR 2026-10-16-build-artifacts-out-of-git）：
+# APK 交付位与 Capacitor www 构建面均为可再生构建输出，git 不跟踪；
+# 交付走构建产出/release/<版本>/ 发行位，勿 git add -f 强推回库
+/app-mobile/*.apk
+/app-mobile/www/
+/pack_linux.tar.gz
+.task_runtime/
+
+# run_gates.py 门禁输出临时件（tee+基线锁对账用，mktemp 仓内相对形态）
+.gate_tmp.*
+
+# ─── 项目全景图派生物（2026-10-28，scripts/graph_aggregate.py 可再生）───
+# 构建产物不入库同 ADR 2026-10-16：viewer.html 渲染规定入库，数据文件
+# 与增量 state 留本地（file:// 下 viewer 直接可开，被工作区还原即再生）
+docs/graph/graph.js
+docs/graph/.graph_state.json
+
+# ─── scratch 测试内核实例（spawn_test_kernel.py，运行时产物不入库）───
+# instance.json 档案 / kernel.db / kernel.log 均可再生，工作区还原即清
+.test_kernel/
+
+# ─── 个人隐私面（用户裁定 2026-11-01：停止跟踪不推送；本地文件保留）───
+docs/working/private/

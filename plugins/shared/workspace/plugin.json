@@ -1,0 +1,253 @@
+{
+  "id": "workspace_service",
+  "requires_services": [
+    "packaging",
+    "project.list_paths",
+    "project.get"
+  ],
+  "name": "Workspace Service",
+  "version": "1.1.0",
+  "plugin_type": "system",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load",
+      "on_unload"
+    ],
+    "services": [
+      {
+        "name": "workspace.get_or_create",
+        "description": "Get or create a workspace for a container task",
+        "input_schema": {
+          "properties": {
+            "container_task_id": {
+              "type": "string",
+              "description": "容器任务 ID"
+            },
+            "session_id": {
+              "type": "string",
+              "description": "关联会话 ID",
+              "default": ""
+            },
+            "title": {
+              "type": "string",
+              "description": "工作空间标题",
+              "default": ""
+            },
+            "description": {
+              "type": "string",
+              "description": "工作空间描述",
+              "default": ""
+            }
+          },
+          "required": [
+            "container_task_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "workspace.get",
+        "description": "Get workspace details",
+        "input_schema": {
+          "properties": {
+            "container_task_id": {
+              "type": "string",
+              "description": "容器任务 ID"
+            }
+          },
+          "required": [
+            "container_task_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "workspace.get_file_tree",
+        "description": "List one directory level of a workspace (lazy-loading file tree)",
+        "input_schema": {
+          "properties": {
+            "container_task_id": {
+              "type": "string",
+              "description": "容器任务 ID"
+            },
+            "base_path": {
+              "type": "string",
+              "description": "基础路径（可选，用于列举真实文件目录）"
+            },
+            "path": {
+              "type": "string",
+              "description": "工作区内相对路径（posix，缺省根层；单层列举不递归）"
+            }
+          },
+          "required": [
+            "container_task_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "http.handle",
+        "description": "HTTP endpoint handler for /ext/workspace_service/** (workspaces domain)",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "plugin_id": {
+              "type": "string"
+            },
+            "raw_body": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object"
+            },
+            "query": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "permissions": {},
+  "priority": 50,
+  "requires_content": 5,
+  "http_endpoints": [
+    {
+      "route_id": "workspaces_open_file",
+      "method": "POST",
+      "path": "/ext/workspace_service/workspaces/open-file",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "用宿主默认程序打开指定文件（body: file_path——原 POST /ext/channel_api/workspaces/open-file 语义）"
+    },
+    {
+      "route_id": "workspaces_fs_tree",
+      "method": "GET",
+      "path": "/ext/workspace_service/workspaces/fs-tree",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "多端目录树索引：任意绝对目录单层列举（query: path=，空=根层=本地盘枚举；设备分支=盘根下设备名挂载锚目录，下一层自然呈现）——前端 fsbrowse:// 懒加载目录树供数"
+    },
+    {
+      "route_id": "workspaces_get",
+      "method": "GET",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "获取工作空间详情（不存在时自动创建——原 GET /ext/channel_api/workspaces/{id} 语义）"
+    },
+    {
+      "route_id": "workspaces_artifacts",
+      "method": "GET",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}/artifacts",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "获取工作空间下所有制品（聚合容器任务下所有子任务的制品——原 GET /ext/channel_api/workspaces/{id}/artifacts 语义）"
+    },
+    {
+      "route_id": "workspaces_file_tree",
+      "method": "GET",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}/file-tree",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "列出工作空间文件树指定层级（query: path=工作区内相对路径，缺省根层；单层列举不递归，懒加载文件树供数——原 GET /ext/channel_api/workspaces/{id}/file-tree 语义）"
+    },
+    {
+      "route_id": "workspaces_file_content_get",
+      "method": "GET",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}/file-content",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "读取文件内容（query: path=，绝对路径或相对路径——原 GET /ext/channel_api/workspaces/{id}/file-content 语义）"
+    },
+    {
+      "route_id": "workspaces_file_content_put",
+      "method": "PUT",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}/file-content",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "保存文件内容（query: path=相对路径，body: content——原 PUT /ext/channel_api/workspaces/{id}/file-content 语义）"
+    },
+    {
+      "route_id": "workspaces_create_entry",
+      "method": "POST",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}/create-entry",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "创建文件或文件夹（body: path/type=file|directory——原 POST /ext/channel_api/workspaces/{id}/create-entry 语义）"
+    },
+    {
+      "route_id": "workspaces_delete_entry",
+      "method": "DELETE",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}/entries",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "删除文件或文件夹（query: path=相对路径——原 DELETE /ext/channel_api/workspaces/{id}/entries 语义）"
+    },
+    {
+      "route_id": "workspaces_rename_entry",
+      "method": "POST",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}/rename-entry",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "重命名文件或文件夹（body: old_path/new_name——原 POST /ext/channel_api/workspaces/{id}/rename-entry 语义）"
+    },
+    {
+      "route_id": "workspaces_move_entry",
+      "method": "POST",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}/move-entry",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "移动文件或文件夹到指定目录（body: source_path/destination_dir——原 POST /ext/channel_api/workspaces/{id}/move-entry 语义）"
+    },
+    {
+      "route_id": "workspaces_open",
+      "method": "POST",
+      "path": "/ext/workspace_service/workspaces/{container_task_id}/open",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 4,
+      "description": "在宿主中打开任务工作空间目录（原 POST /ext/channel_api/workspaces/{id}/open 语义）"
+    }
+  ],
+  "export_fields": [
+    "task.parent_project_id",
+    "ws_meta",
+    "task.ws_meta"
+  ],
+  "host_group": "light"
+}

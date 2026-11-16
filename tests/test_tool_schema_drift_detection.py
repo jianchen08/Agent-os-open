@@ -19,12 +19,12 @@ import logging
 
 from tests._pipeline_plugin_path import add_plugin_dir
 
-add_plugin_dir("input", "tool_schema")
+add_plugin_dir("tool_schema")
 import plugin as tool_schema_mod  # noqa: E402
 
 
 def _ctx(state: dict):
-    from pipeline.plugin import PluginContext
+    from _libs.pipeline_base.plugin import PluginContext
 
     return PluginContext(state=state, config={})
 
@@ -59,7 +59,9 @@ def test_drift_warns_on_missing_tool_ids(caplog):
         updates = asyncio.run(plugin.execute(_ctx(state))).state_updates
 
     # 转发契约：短方法名 + state.tool_ids 原样透传内核
-    assert caller.calls == [("schemas", {"tool_ids": ["file_read", "task_manage", "task_submit"]})]
+    assert caller.calls == [
+        ("schemas", {"tool_ids": ["file_read", "task_manage", "task_submit"], "workspace": None})
+    ]
     assert "tool_schemas" in updates
     names = {(s.get("function") or {}).get("name") for s in updates["tool_schemas"]}
     assert names == {"file_read", "task_submit"}

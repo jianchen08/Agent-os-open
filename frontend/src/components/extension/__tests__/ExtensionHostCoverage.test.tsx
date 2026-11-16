@@ -6,8 +6,9 @@
  * - Cmd/Ctrl+Shift+P 切换命令面板开/关（非 Mac 用 ctrlKey；面板打开后再次快捷键关闭）
  * - 面板可见命令来自注入 dispatcher（真实 CommandDispatcher + 真实
  *   ContributionRegistry），点击命令执行（transport 收到 commandId）并关闭面板
- * - 命令触发 modal 声明后渲染 ExtensionModalHost + widgetRegistry 渲染器；
- *   未注册 widget 显示「未知 widget: X」提示；关闭按钮/遮罩关闭 modal
+ * - 命令触发 shell.overlay 槽条目（modal 收敛，C4 槽位机制）后渲染
+ *   SlotOverlayHost；条目 widget 经 SlotRegistry 装载期 fail-closed——
+ *   渲染期未注册（热禁用竞态窗口）显示可见占位；关闭按钮/遮罩关闭
  * - 未挂载时快捷键不生效（卸载后 keydown 不再打开面板）
  *
  * 不可达说明（逐条）：
@@ -30,6 +31,8 @@ import {
   commandDispatcher,
 } from '@/services/schema/commandDispatcher'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { slotRegistry } from '@/services/slots/slotRegistry'
 
 function makeDispatcher(contributes: Record<string, unknown[]>): CommandDispatcher {
   contributionRegistry.loadFromSchema({
@@ -47,6 +50,8 @@ function pressPaletteShortcut() {
 
 beforeEach(() => {
   contributionRegistry.clear()
+  widgetRegistry.clear()
+  slotRegistry.clear()
   vi.clearAllMocks()
 })
 
@@ -103,110 +108,106 @@ describe('ExtensionHost — 命令面板', () => {
   })
 })
 
-describe('ExtensionHost — modal 宿主', () => {
-  it('命令触发 modal：按 widgetRegistry 渲染对应 widget 并透传 props', async () => {
-    const dispatcher = makeDispatcher({
-      commands: [{ id: 'demo.open', title: '打开弹窗' }],
-      modal: [
-        {
-          id: 'demo.modal',
-          title: '演示弹窗',
-          trigger: 'on_command:demo.open',
-          widget: 'demo_widget',
-          props: { level: 3 },
-        },
-      ],
-    })
-    const renderWidget = vi.fn((props: Record<string, unknown>, onClose: () => void) => (
-      <button type="button" onClick={onClose} data-testid="demo-widget-content">
-        参数 {String(props.level)}
-      </button>
-    ))
-    render(<ExtensionHost dispatcher={dispatcher} widgetRegistry={{ demo_widget: renderWidget }} />)
+describe('ExtensionHost — shell.overlay 槽锚点（modal 收敛）', () => {
+  async function loadOverlay(entries: Array<Record<string, unknown>>): Promise<void> {
+    await slotRegistry.loadFromSchema(
+      { plugin_contributes: [{ plugin_id: 'demo', contributes: { slots: entries } }] },
+      { loadWidgets: vi.fn().mockResolvedValue([]) },
+    )
+  }
 
-    // 经命令面板执行触发 modal（modal trigger=on_command:demo.open 约定）；
-    // executeCommand 经 transport await 后广播，弹窗挂载异步完成
+  it('命令触发 shell.overlay 条目：声明 widget 渲染并透传 props', async () => {
+    widgetRegistry.register('demo_widget', ((props: Record<string, unknown>) => (
+      <span data-testid="demo-widget-content">参数 {String(props.level)}</span>
+    )) as never, { name: 'demo_widget' })
+    const dispatcher = makeDispatcher({ commands: [{ id: 'demo.open', title: '打开弹窗' }] })
+    await loadOverlay([
+      {
+        id: 'demo.modal',
+        slot: 'shell.overlay',
+        openOn: 'on_command:demo.open',
+        title: '演示弹窗',
+        channel: 'component',
+        widget: 'demo_widget',
+        props: { level: 3 },
+      },
+    ])
+    render(<ExtensionHost dispatcher={dispatcher} />)
+
     pressPaletteShortcut()
     fireEvent.click(screen.getByText('打开弹窗'))
 
-    const modal = await screen.findByTestId('extension-modal')
-    expect(modal).toBeInTheDocument()
+    const overlay = await screen.findByTestId('slot-overlay')
+    expect(overlay).toBeInTheDocument()
     expect(screen.getByText('演示弹窗')).toBeInTheDocument()
     expect(screen.getByTestId('demo-widget-content')).toHaveTextContent('参数 3')
-    expect(renderWidget).toHaveBeenCalledWith({ level: 3 }, expect.any(Function))
   })
 
-  it('widget 未注册时显示「未知 widget」并给出注册指引', async () => {
-    const dispatcher = makeDispatcher({
-      commands: [{ id: 'demo.open', title: '打开弹窗' }],
-      modal: [
-        { id: 'demo.modal', title: '缺渲染器', trigger: 'on_command:demo.open', widget: 'missing_widget' },
-      ],
-    })
-    render(<ExtensionHost dispatcher={dispatcher} widgetRegistry={{}} />)
+  it('渲染期 widget 未注册（装载后被禁用竞态）→ 可见占位不空白', async () => {
+    widgetRegistry.register('ghost_widget', (() => <span>临时的</span>) as never, { name: 'ghost_widget' })
+    const dispatcher = makeDispatcher({ commands: [{ id: 'demo.open', title: '打开弹窗' }] })
+    await loadOverlay([
+      {
+        id: 'demo.modal',
+        slot: 'shell.overlay',
+        openOn: 'on_command:demo.open',
+        title: '缺渲染器',
+        channel: 'component',
+        widget: 'ghost_widget',
+      },
+    ])
+    // 装载后 widget 被注销（热禁用竞态窗口）
+    widgetRegistry.unregister('ghost_widget')
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    render(<ExtensionHost dispatcher={dispatcher} />)
 
     pressPaletteShortcut()
     fireEvent.click(screen.getByText('打开弹窗'))
-    expect(await screen.findByText(/未知 widget: missing_widget/)).toBeInTheDocument()
+    expect(await screen.findByTestId('slot-entry-error')).toBeInTheDocument()
+    spy.mockRestore()
   })
 
-  it('modal 渲染器 onClose 触发后弹窗关闭', async () => {
-    const dispatcher = makeDispatcher({
-      commands: [{ id: 'demo.open', title: '打开弹窗' }],
-      modal: [{ id: 'demo.modal', title: '可关闭', trigger: 'on_command:demo.open', widget: 'closer' }],
-    })
-    render(
-      <ExtensionHost
-        dispatcher={dispatcher}
-        widgetRegistry={{
-          closer: (_props, onClose) => (
-            <button type="button" onClick={onClose}>
-              内部关闭
-            </button>
-          ),
-        }}
-      />,
-    )
-
-    pressPaletteShortcut()
-    fireEvent.click(screen.getByText('打开弹窗'))
-    fireEvent.click(await screen.findByText('内部关闭'))
-    await waitFor(() => {
-      expect(screen.queryByTestId('extension-modal')).toBeNull()
-    })
-  })
-
-  it('modal 标题栏关闭按钮与遮罩点击都能关闭', async () => {
+  it('标题栏关闭按钮与遮罩点击都能关闭', async () => {
+    widgetRegistry.register('noop', (() => <span>内容</span>) as never, { name: 'noop' })
     const dispatcher = makeDispatcher({
       commands: [
         { id: 'demo.open', title: '打开弹窗' },
         { id: 'demo.open2', title: '再开一次' },
       ],
-      modal: [
-        { id: 'demo.modal', title: '多关闭路径', trigger: 'on_command:demo.open', widget: 'noop' },
-        { id: 'demo.modal2', title: '多关闭路径', trigger: 'on_command:demo.open2', widget: 'noop' },
-      ],
     })
-    render(
-      <ExtensionHost
-        dispatcher={dispatcher}
-        widgetRegistry={{ noop: () => <span>内容</span> }}
-      />,
-    )
+    await loadOverlay([
+      {
+        id: 'demo.modal',
+        slot: 'shell.overlay',
+        openOn: 'on_command:demo.open',
+        title: '多关闭路径',
+        channel: 'component',
+        widget: 'noop',
+      },
+      {
+        id: 'demo.modal2',
+        slot: 'shell.overlay',
+        openOn: 'on_command:demo.open2',
+        title: '多关闭路径',
+        channel: 'component',
+        widget: 'noop',
+      },
+    ])
+    render(<ExtensionHost dispatcher={dispatcher} />)
 
     pressPaletteShortcut()
     fireEvent.click(screen.getByText('打开弹窗'))
     fireEvent.click(await screen.findByRole('button', { name: '关闭' }))
     await waitFor(() => {
-      expect(screen.queryByTestId('extension-modal')).toBeNull()
+      expect(screen.queryByTestId('slot-overlay')).toBeNull()
     })
 
     pressPaletteShortcut()
     fireEvent.click(screen.getByText('再开一次'))
-    const reopened = await screen.findByTestId('extension-modal')
+    const reopened = await screen.findByTestId('slot-overlay')
     fireEvent.click(reopened)
     await waitFor(() => {
-      expect(screen.queryByTestId('extension-modal')).toBeNull()
+      expect(screen.queryByTestId('slot-overlay')).toBeNull()
     })
   })
 

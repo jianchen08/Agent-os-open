@@ -221,9 +221,25 @@ describe('RjsfForm — 组件层', () => {
     expect(screen.queryByRole('button', { name: /提交/ })).not.toBeInTheDocument()
   })
 
-  it('空字段列表 → 占位提示', () => {
-    render(<RjsfForm fields={[]} onSubmit={vi.fn()} />)
-    expect(screen.getByText('暂无表单字段')).toBeInTheDocument()
+  it('空字段列表 → 选项框自身承载空态（禁用 + 无选项，不另起占位组件）', () => {
+    // 两组形态：提交模式与字段模式，空态契约一致
+    const variants = [
+      <RjsfForm key="submit" fields={[]} onSubmit={vi.fn()} />,
+      <RjsfForm key="field" fields={[]} onChange={vi.fn()} />,
+    ]
+    for (const ui of variants) {
+      const { container, unmount } = render(ui)
+      expect(screen.getByText('无选项')).toBeInTheDocument()
+      const select = container.querySelector('.ant-select')
+      expect(select).not.toBeNull()
+      expect(select).toHaveClass('ant-select-disabled')
+      // 点不动：按下不展开下拉
+      fireEvent.mouseDown(select!.firstElementChild!)
+      expect(document.querySelector('.ant-select-dropdown')).not.toBeInTheDocument()
+      // 性质：空态不渲染表单体（无 form 元素，无可交互字段）
+      expect(container.querySelector('form')).not.toBeInTheDocument()
+      unmount()
+    }
   })
 
   it('requiredWhen 条件命中缺值 → 拦截提交并就近提示；未命中可提交', async () => {

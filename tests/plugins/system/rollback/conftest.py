@@ -1,6 +1,6 @@
 """rollback 测试 conftest——把插件目录注入 sys.path。
 
-插件位于 plugins/shared/system/rollback/，内部用平铺 import
+插件位于 plugins/shared/rollback/，内部用平铺 import
 （from manager import ... / from models import ...）。
 
 _PLUGIN_SOURCE_DIRS 暴露给 tests/plugins/conftest.py 的 pytest_runtest_setup，
@@ -14,7 +14,7 @@ from pathlib import Path
 
 _PLUGIN_DIR = (
     Path(__file__).resolve().parents[4]
-    / "plugins" / "shared" / "system" / "rollback"
+    / "plugins" / "shared" / "rollback"
 )
 
 _PLUGIN_SOURCE_DIRS = [str(_PLUGIN_DIR)]

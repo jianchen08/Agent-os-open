@@ -36,7 +36,7 @@ from agentos_plugin_sdk.tool_result_cache import global_cache
 
 pytestmark = pytest.mark.unit
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[1] / "plugins" / "shared" / "pipeline" / "input" / "tool_cache"
+_PLUGIN_DIR = Path(__file__).resolve().parents[1] / "plugins" / "shared" / "tool_cache"
 _SHARED_DIR = Path(__file__).resolve().parents[1] / "plugins" / "shared"
 for _d in (str(_PLUGIN_DIR), str(_SHARED_DIR)):
     if _d not in sys.path:
@@ -55,8 +55,8 @@ tc_plugin = importlib.util.module_from_spec(_tc_spec)
 sys.modules["tool_cache_plugin_gaps_under_test"] = tc_plugin
 _tc_spec.loader.exec_module(tc_plugin)
 
-from pipeline.plugin import PluginContext  # noqa: E402
-from pipeline.types import StateKeys  # noqa: E402
+from _libs.pipeline_base.plugin import PluginContext  # noqa: E402
+from _libs.pipeline_base.types import StateKeys  # noqa: E402
 
 
 @pytest.fixture(autouse=True)

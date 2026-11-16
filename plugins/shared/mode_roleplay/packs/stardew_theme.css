@@ -1,0 +1,121 @@
+/* 星露谷好感 · 像素主题（包内自包含物料，RP 面板 v3.1 刀1）。
+   消费面：game/page 内联 <style>（自包含玩法页）+ packs 清点 ui.theme_css_text
+   附加缝（面板开演设置页主题）。作用域根类 .rp-theme-stardew——注入面按根类
+   装载，避免污染宿主/面板既有样式。配色取牧场四季（嫩绿/麦黄/天蓝）+ 硬边
+   像素语汇（无圆角、粗描边、等宽字距）。 */
+.rp-theme-stardew {
+  --sd-bg: #2b2138;
+  --sd-panel: #3b2f52;
+  --sd-border: #1a1426;
+  --sd-text: #f4ecd8;
+  --sd-muted: #b8a9d0;
+  --sd-accent: #8ecf6f;
+  --sd-accent-2: #f2c14e;
+  --sd-heart: #e8635a;
+  background: var(--sd-bg);
+  color: var(--sd-text);
+  font-family: "Courier New", "SimSun", monospace;
+  letter-spacing: 0.04em;
+}
+.rp-theme-stardew .pg-head {
+  background: var(--sd-accent);
+  color: #1f2a17;
+  border-bottom: 4px solid var(--sd-border);
+  padding: 8px 14px;
+  font-weight: 700;
+}
+.rp-theme-stardew .pg-sub { font-weight: 400; opacity: 0.75; margin-left: 8px; font-size: 12px; }
+.rp-theme-stardew .pg-status {
+  background: var(--sd-panel);
+  border-bottom: 4px solid var(--sd-border);
+  padding: 8px 14px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.rp-theme-stardew .pg-status .sd-chip {
+  display: inline-block;
+  border: 2px solid var(--sd-border);
+  background: #4a3c68;
+  padding: 1px 8px;
+  margin: 2px 6px 2px 0;
+}
+.rp-theme-stardew .pg-status .sd-heart { color: var(--sd-heart); }
+.rp-theme-stardew .pg-log {
+  padding: 12px 14px;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+}
+.rp-theme-stardew .pg-empty { color: var(--sd-muted); }
+.rp-theme-stardew .pg-input {
+  display: flex;
+  gap: 8px;
+  border-top: 4px solid var(--sd-border);
+  background: var(--sd-panel);
+  padding: 8px;
+}
+.rp-theme-stardew .pg-input input {
+  flex: 1;
+  background: #241c33;
+  border: 2px solid var(--sd-border);
+  color: var(--sd-text);
+  padding: 8px;
+  font: inherit;
+}
+.rp-theme-stardew .pg-input button {
+  background: var(--sd-accent);
+  color: #1f2a17;
+  border: 2px solid var(--sd-border);
+  padding: 8px 16px;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.rp-theme-stardew .pg-input button:disabled { opacity: 0.5; cursor: default; }
+.rp-theme-stardew .pg-err { color: var(--sd-heart); font-size: 12px; padding: 4px 14px; min-height: 1.4em; }
+/* 开演设置（刀4「工作区玩法页全 webview 化」：setup 阶段页内自持）——
+   像素语汇同族：硬边粗描边选项卡 + 牧场配色，作用域仍锁根类。 */
+.rp-theme-stardew .pg-setup { display: none; padding: 12px 14px; overflow: auto; }
+.rp-theme-stardew .pg-setup.pg-live { display: block; }
+/* setup 期收起状态/日志/输入区：按 setup 区自带 .pg-live 的兄弟选择器——
+   作用域根类由挂载方自页面 body 标签补挂容器，页脚本不写 document.body。 */
+.rp-theme-stardew .pg-setup.pg-live ~ .pg-status,
+.rp-theme-stardew .pg-setup.pg-live ~ .pg-log,
+.rp-theme-stardew .pg-setup.pg-live ~ .pg-input { display: none; }
+.rp-theme-stardew .pg-setup h3 { margin: 14px 0 6px; font-size: 14px; color: var(--sd-accent-2); }
+.rp-theme-stardew .pg-setup .sd-note { color: var(--sd-muted); font-size: 12px; margin: 4px 0; }
+.rp-theme-stardew .pg-setup .sd-opts { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
+.rp-theme-stardew .pg-setup .sd-opt {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  border: 2px solid var(--sd-border); background: var(--sd-panel);
+  padding: 6px 10px; cursor: pointer;
+}
+.rp-theme-stardew .pg-setup .sd-opt:hover { border-color: var(--sd-accent); }
+.rp-theme-stardew .pg-setup .sd-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
+.rp-theme-stardew .pg-setup select {
+  background: #241c33; border: 2px solid var(--sd-border); color: var(--sd-text);
+  padding: 6px 8px; font: inherit;
+}
+.rp-theme-stardew .pg-setup .sd-start {
+  background: var(--sd-accent); color: #1f2a17; border: 2px solid var(--sd-border);
+  padding: 8px 18px; font: inherit; font-weight: 700; cursor: pointer;
+}
+.rp-theme-stardew .pg-setup .sd-start:disabled { opacity: 0.5; cursor: default; }
+
+/* choices 按钮卡（选项契约清单消费位，2026-10-17 标杆补齐；setup 期随兄弟
+   选择器一并收起） */
+.rp-theme-stardew .pg-setup.pg-live ~ .pg-choices { display: none; }
+.rp-theme-stardew .pg-choices { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0; }
+.rp-theme-stardew .pg-choices:empty { display: none; }
+.rp-theme-stardew .pg-choices .sd-choice {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--sd-panel); border: 2px solid var(--sd-border);
+  color: var(--sd-text); padding: 5px 10px; font: inherit; font-size: 12px;
+  cursor: pointer;
+}
+.rp-theme-stardew .pg-choices .sd-choice:hover { border-color: var(--sd-accent); }
+.rp-theme-stardew .pg-choices .sd-cat {
+  background: var(--sd-accent); color: #1f2a17; padding: 1px 5px;
+  font-size: 10px; font-weight: 700;
+}

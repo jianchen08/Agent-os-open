@@ -1,21 +1,23 @@
 # ============================================================
-# E2E 真实验证车道 — 灵汐 AgentOS 0.2（内核 + e2e_02 + 真实 LLM）
+# E2E 真实验证车道 — 灵汐 AgentOS 0.2（内核 + e2e_02 + LLM 轮）
 # ============================================================
 #
 # 定位：从 ci.yml 拆出的重型真实验证（Phase 2，2026-08-23）。
 #   - ci.yml 只跑静态门禁 + 单测 + 覆盖率（PR 必跑、分钟级）
-#   - 本 workflow 跑内核构建 + e2e_02 功能点 e2e + 真实 LLM 用例（十分钟级）
+#   - 本 workflow 跑内核构建 + 全插件 venv 建链 + e2e_02 功能点 e2e（十分钟级）
+#
+# LLM 轮语义（2026-10-23 用户令「打包 CI 之前必须保证所有插件关键链路完整、
+# 能够运行、且至少能运行一轮 llm」）：e2e job 不再被 key 预检整体门住——
+# stub LLM 上游的聊天轮/管道轮 keyless 必跑（关键链+一轮 LLM 的 CI 保证面）；
+# 依赖真实 LLM 的用例保持 skipif 守卫（无 secrets.ZHIPU_API_KEY 自动跳过）。
 #
 # 触发：
-#   - workflow_dispatch（手动）
+#   - workflow_dispatch（手动，全量套件）
 #   - schedule nightly（00:17 UTC = 08:17 北京时间，避开整点 cron 洪峰，
-#     参照 DSH e2e.yml 设计）
-#   - push 到 main / dev/*（有 key 的仓库 push 即真跑）
-#   - PR 不触发：真实 LLM e2e 慢且依赖 key，不作为 PR 门禁
-#
-# 密钥预检：check-key job 检查 ZHIPU_API_KEY 是否存在；无 key 时
-#   e2e job 跳过 → workflow 整体 skipped（不红），避免开源仓库无 key 持续失败。
-#   有 key 的仓库（如内部容器）则 nightly + 手动 + push 真跑。
+#     参照 DSH e2e.yml 设计，全量套件）
+#   - push 到 main / dev/*（PR 不触发）→ 只跑 smoke job（auth + 一轮管道
+#     chat，用户裁定 2026-11-06「打包 CI = 改动相关 + 打包相关 + 一个功能
+#     验证」——push 的功能验证取最小充分集，全量套件不入打包必经面）
 #
 # 权限：只读（contents: read），e2e 不写任何东西。
 # ============================================================
@@ -42,24 +44,119 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # ── 密钥预检 ──────────────────────────────────────────────
-  # 无 key → has_key=false → e2e job 跳过（workflow 显示 skipped 而非红）。
-  # 有 key → has_key=true → e2e 真跑。不静默假跑、不无 key 硬红。
-  check-key:
-    name: Check LLM key
+  # ── Smoke（功能验证车道，push 触发）─────────────────────────────────────
+  # 用户裁定 2026-11-06「打包 CI = 改动相关 + 打包相关 + 一个功能验证」：
+  # push 只跑一个功能验证 = auth 全链 + 一轮 stub-LLM 管道 chat（test_02，
+  # 关键链最小充分集）；全量 e2e_02 套件收敛 nightly/dispatch（下方 e2e job）。
+  # 准备链与 e2e job 同源（kernel + 全插件 venv + cdylib——测试选择不影响
+  # 构建面，防「smoke 特供路径」漂移）。
+  smoke:
+    name: Smoke (auth + one pipeline chat round, stub LLM)
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    outputs:
-      has_key: ${{ steps.key.outputs.has_key }}
     steps:
-      - id: key
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Cache Rust artifacts (shared-key 与 ci.yml 共享兜底)
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: kernel
+          shared-key: agentos-0.2
+
+      - name: sccache best-effort (workflow 级 RUSTC_WRAPPER 兜底)
         run: |
-          if [ -n "${{ secrets.ZHIPU_API_KEY }}" ]; then
-            echo "has_key=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_key=false" >> "$GITHUB_OUTPUT"
+          if ! command -v sccache >/dev/null 2>&1; then
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
           fi
 
-  # ── Python E2E（内核二进制 + 内存库 + e2e_02 功能点）──────────
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Sync dependencies + SDK
+        run: |
+          uv sync --frozen --extra dev
+          uv pip install -e ./plugins/sdk
+
+      - name: Build plugin venvs (uv sync per locked plugin)
+        run: |
+          uv python install 3.12
+          failed=0
+          for lock in $(git ls-files 'plugins/**/uv.lock' | sort -u); do
+            d=$(dirname "$lock")
+            echo "::group::uv sync $d"
+            if ! uv sync --frozen --project "$d"; then
+              echo "::error::uv sync failed: $d"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $failed
+
+      - name: Build native plugin artifacts (cdylib, Linux .so)
+        run: |
+          for mf in $(git ls-files 'plugins/**/plugin.json' | sort -u); do
+            d=$(dirname "$mf")
+            if grep -q '"native"' "$mf" && [ -f "$d/Cargo.toml" ]; then
+              echo "::group::native build $d"
+              (
+                # cd 与产物回拷必须同子 shell（e2e job 同款，2026-11-05 实证）
+                cd "$d" || exit 1
+                cargo build --release
+                art=$(python3 -c "import json;print(json.load(open('plugin.json'))['native'].get('artifact',''))" 2>/dev/null) || true
+                stem="${art%.*}"
+                if [ -n "$stem" ]; then
+                  for cand in "lib${stem}.so" "${stem}.so" "${stem}.dll"; do
+                    if [ -f "target/release/$cand" ]; then
+                      cp "target/release/$cand" .
+                      break
+                    fi
+                  done
+                fi
+              )
+              echo "::endgroup::"
+            fi
+          done
+
+      - name: Build kernel (release, sccache cached)
+        working-directory: kernel
+        run: |
+          cargo install sccache --locked || true
+          cargo +stable build --release --bin agentos-kernel
+
+      - name: Start kernel (in-memory DB, :9100)
+        env:
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          AGENTOS_ADMIN_PASSWORD: ${{ secrets.AGENTOS_ADMIN_PASSWORD }}
+        run: |
+          AGENTOS_DB_PATH=":memory:" AGENTOS_KERNEL_PORT=9100 \
+            ./kernel/target/release/agentos-kernel > /tmp/kernel.log 2>&1 &
+          for i in $(seq 1 150); do
+            curl -sf http://localhost:9100/health >/dev/null 2>&1 && break
+            sleep 2
+          done
+          curl -sf http://localhost:9100/health && echo " [kernel ready]" ||             { echo "===== kernel.log tail ====="; tail -60 /tmp/kernel.log; exit 1; }
+
+      - name: "Run smoke (test_02 — auth 全链 + 一轮管道 chat)"
+        env:
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          AGENTOS_ADMIN_PASSWORD: ${{ secrets.AGENTOS_ADMIN_PASSWORD }}
+          PYTHONPATH: ${{ github.workspace }}/plugins:${{ github.workspace }}/plugins/sdk/src
+        run: |
+          uv run --frozen python -m pytest -q -m "not timing" \
+            tests/e2e_02/test_02_auth_pipeline_e2e.py
+
+      - name: Show kernel log on failure
+        if: failure()
+        run: tail -60 /tmp/kernel.log
+  # ── Python E2E（内核二进制 + 内存库 + 全插件 venv 建链 + e2e_02 功能点）──
   # 从 ci.yml python-e2e 迁入（原 needs: rust-build 跨 workflow 失效，
   # 改为本 workflow 内自建内核；rust-cache 共享 key 兜底避免全量重编）。
   # 覆盖 tests/e2e_02 全部 Python e2e（01 内核 API/02 认证与管道 chat/
@@ -68,15 +165,17 @@ jobs:
   # 13 工作空间模式/14 产物保全/任务收束三信号路径矩阵——后者自带 stub
   # LLM 上游，无需 key 也零 mock）；02 前端浏览器套件依赖 Vite dev
   # server 与 Chromium，本车道不提供，故不在列。
-  # 依赖真实 LLM 的用例带 skipif 守卫：无 secrets.ZHIPU_API_KEY 时自动跳过。
-  # 14 产物保全另依赖 Docker（bash 容器隔离），runner 自带；shared 蒸发
-  # 用例 xfail(strict) 契约先行——修复落地前红属预期（xfail 不入账），
-  # 转绿即 XPASS 报错提示摘标。
+  # stub LLM 聊天轮 keyless 必跑（2026-10-23 用户令：CI 必保证关键链 +
+  # 一轮 LLM）；依赖真实 LLM 的用例带 skipif 守卫：无 secrets.ZHIPU_API_KEY
+  # 时自动跳过。14 产物保全另依赖 Docker（bash 容器隔离），runner 自带；
+  # shared 蒸发用例 xfail(strict) 契约先行——修复落地前红属预期（xfail
+  # 不入账），转绿即 XPASS 报错提示摘标。
   e2e:
-    name: Python E2E (kernel + e2e_02, real LLM)
+    name: Python E2E (kernel + plugin venvs + e2e_02, stub LLM round)
+    # 全量套件收敛 nightly/dispatch（push 的功能验证由上方 smoke 车道承载，
+    # 用户裁定 2026-11-06「打包 CI 不跑全矩阵」）
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
-    needs: check-key
-    if: needs.check-key.outputs.has_key == 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -132,14 +231,24 @@ jobs:
             d=$(dirname "$mf")
             if grep -q '"native"' "$mf" && [ -f "$d/Cargo.toml" ]; then
               echo "::group::native build $d"
-              (cd "$d" && cargo build --release)
-              art=$(python3 -c "import json;print(json.load(open('plugin.json'))['native']['artifact'])" 2>/dev/null)
-              stem="${art%.*}"
-              if [ -n "$stem" ]; then
-                for cand in "lib${stem}.so" "${stem}.so" "${stem}.dll"; do
-                  [ -f "target/release/$cand" ] && cp "target/release/$cand" . && break
-                done
-              fi
+              (
+                # cd 与产物回拷必须同子 shell：曾因主 shell 留在仓根、
+                # plugin.json 相对路径找不到而 set -e 静默 exit 1（2026-11-05
+                # CI 首跑实证——该步随 575c9dbb8 落地后从未上过 CI）。
+                cd "$d" || exit 1
+                cargo build --release
+                # artifact 缺声明=不回拷（deploy 产物断言步执法），不致命
+                art=$(python3 -c "import json;print(json.load(open('plugin.json'))['native'].get('artifact',''))" 2>/dev/null) || true
+                stem="${art%.*}"
+                if [ -n "$stem" ]; then
+                  for cand in "lib${stem}.so" "${stem}.so" "${stem}.dll"; do
+                    if [ -f "target/release/$cand" ]; then
+                      cp "target/release/$cand" .
+                      break
+                    fi
+                  done
+                fi
+              )
               echo "::endgroup::"
             fi
           done
@@ -153,6 +262,9 @@ jobs:
       - name: Start kernel (in-memory DB, :9100)
         env:
           ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          # 内核播种与 e2e 登录同源（test_02 auth 全链依赖；缺省=种子口令空
+          # → pytest 侧 RuntimeError 拒跑，2026-11-05 CI 首跑实证）
+          AGENTOS_ADMIN_PASSWORD: ${{ secrets.AGENTOS_ADMIN_PASSWORD }}
         run: |
           AGENTOS_DB_PATH=":memory:" AGENTOS_KERNEL_PORT=9100 \
             ./kernel/target/release/agentos-kernel > /tmp/kernel.log 2>&1 &
@@ -165,6 +277,7 @@ jobs:
       - name: Run e2e_02 (功能点 e2e；LLM 用例无 key 自动 skip)
         env:
           ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          AGENTOS_ADMIN_PASSWORD: ${{ secrets.AGENTOS_ADMIN_PASSWORD }}
           # github.workspace 经 env 注入而非内插 run（安全审查：表达式内插 shell 的规范写法）
           PYTHONPATH: ${{ github.workspace }}/plugins:${{ github.workspace }}/plugins/sdk/src
         run: |

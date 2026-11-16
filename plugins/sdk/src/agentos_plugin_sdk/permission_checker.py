@@ -1,7 +1,7 @@
 """
 权限检查器（SDK 单一真值源）。
 
-isolation 服务（system）与 download 工具插件共用的路径权限校验集中于此，
+isolation 服务（system）与工具插件共用的路径权限校验集中于此，
 消除双副本漂移（CUSTOM 白名单分隔符锚定为此处权威语义）。
 
 暴露接口：
@@ -26,6 +26,18 @@ from agentos_plugin_sdk.permission_policy import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _canon_path(path: str) -> str:
+    """路径比较 canon：normpath 后 Windows（``os.name == "nt"``）小写折叠，POSIX 原样。
+
+    与共享根单源 ``plugins/shared/_libs/paths.py::canon_path`` 同构——SDK 包
+    边界不可 import 共享根（site-packages 平拷贝布局无共享根可达），副本与
+    单源的同输入同输出由对齐断言钉死
+    （``tests/plugins/shared/test_paths_canon.py``），改动须与单源同刀。
+    """
+    norm = os.path.normpath(path)
+    return norm.lower() if os.name == "nt" else norm
 
 
 class PermissionChecker:
@@ -154,25 +166,15 @@ class PermissionChecker:
         """标准化路径"""
         abs_path = (self._project_root / path).resolve() if not os.path.isabs(path) else Path(path).resolve()  # noqa: PTH117
 
-        # 使用 normpath 处理路径分隔符
-        normalized = os.path.normpath(str(abs_path))
-
-        # Windows 下统一使用小写比较
-        if os.name == "nt":
-            return normalized.lower()
-
-        return normalized
+        # 分隔符归一 + Windows 小写折叠（canon 副本单点，见 _canon_path）
+        return _canon_path(str(abs_path))
 
     def _normalize_workspace(self, workspace: str) -> str:
         """标准化工作目录路径"""
         workspace_path = (self._project_root / workspace).resolve()
-        normalized = os.path.normpath(str(workspace_path))
 
-        # Windows 下统一使用小写比较
-        if os.name == "nt":
-            return normalized.lower()
-
-        return normalized
+        # 分隔符归一 + Windows 小写折叠（canon 副本单点，见 _canon_path）
+        return _canon_path(str(workspace_path))
 
     def _is_path_inside(self, path: str, workspace_path: str) -> bool:
         """检查路径是否在工作目录内"""

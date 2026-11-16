@@ -22,103 +22,221 @@
 # - test_metrics_path_layouts 0→2 / test_evaluation_server 4→7 /
 #   test_context_build_dual_root 3→4 / test_pack_relative_path 0→1：
 #   均为构造三布局 config 夹具目录或包内相对路径字面量，非运行时直读。
+#
+# 2026-10-09 推送轮豁免归因（批F4 真机断言 + hindsight 夹具）：
+# - test_main_prompt_mode_routing 0→2 / test_project_agents_anchor 0→2：
+#   批F4 主 agent 模式路由「真机断言常驻测试」——设计本意即读真实种子
+#   （agents/main 的 agentos.yaml）断言退役行清零/锚点引用，docstring 提及
+#   + 路径构造字面量，非运行时直读（测试即真值核对器）。
+# - test_hindsight_server_gaps 3→5：embedding 条件化批次新增 tmp_path 下
+#   config/ 夹具目录构造（models/ 与 plugins/llm/llm.yaml），测的是服务端
+#   布局发现逻辑，非仓库 config 直读。
+#
+# 2026-10-15 C2/C3 刀3 收缩：plugins/shared/kernel_db.py: 1 条目删除——
+# 共享契约模块整体退场（读契约唯一形态=内核 db-read 服务，ADR
+# 2026-10-15-kernel-db-read-contract），文件不存在即键永久归零。
 plugins/sdk/src/agentos_plugin_sdk/adapter_config.py: 7
 plugins/sdk/src/agentos_plugin_sdk/bridge_client.py: 1
 plugins/sdk/src/agentos_plugin_sdk/isolation_policy.py: 3
 plugins/sdk/src/agentos_plugin_sdk/permission_policy.py: 1
-plugins/shared/kernel_db.py: 1
-plugins/shared/modes/mode_evolution/batch_run.py: 7
-plugins/shared/modes/mode_evolution/fetch_external_trajectories.py: 2
-plugins/shared/modes/mode_evolution/harvest_trajectories.py: 1
-plugins/shared/modes/mode_evolution/test_eval_harness.py: 3
-plugins/shared/modes/mode_evolution/test_eval_harness_server_gaps.py: 2
-plugins/shared/modes/mode_evolution/verify_round.py: 1
-plugins/shared/modes/mode_evolution/ws_batch.py: 6
-plugins/shared/modes/mode_research/server.py: 1
-plugins/shared/pipeline/core/tool_core/src/lib.rs: 3
-plugins/shared/pipeline/input/agent_config_load/test_agent_config_load_dual_root.py: 4
-plugins/shared/pipeline/input/context_window_guard/test_manifest_inline_config.py: 1
-plugins/shared/pipeline/input/context_window_guard/test_plugin_branches.py: 1
-plugins/shared/pipeline/input/isolation_guard/plugin.py: 1
-plugins/shared/pipeline/input/mode_material_inject/test_mode_material_inject.py: 2
-plugins/shared/pipeline/input/multimodal_preprocessor/test_multimodal_preprocessor_plugin.py: 1
-plugins/shared/pipeline/input/prompt_build/test_persona_placeholder.py: 1
-plugins/shared/pipeline/input/prompt_build/test_session_workspace_placeholder.py: 2
-plugins/shared/pipeline/input/prompt_build/test_pack_relative_path.py: 1
-plugins/shared/pipeline/input/security_check/plugin.py: 7
-plugins/shared/pipeline/input/security_check/test_dangerous_operations_config.py: 1
-plugins/shared/pipeline/input/security_check/test_zone_gate.py: 7
-plugins/shared/pipeline/input/workspace_lifecycle/test_plugin.py: 2
-plugins/shared/pipeline/output/spill_guard/src/lib.rs: 1
+plugins/shared/mode_evolution/batch_run.py: 7
+plugins/shared/mode_evolution/fetch_external_trajectories.py: 2
+plugins/shared/mode_evolution/harvest_trajectories.py: 1
+plugins/shared/mode_evolution/test_eval_harness.py: 3
+plugins/shared/mode_evolution/test_eval_harness_server_gaps.py: 2
+plugins/shared/mode_evolution/verify_round.py: 1
+plugins/shared/mode_evolution/ws_batch.py: 6
+plugins/shared/mode_research/server.py: 1
+plugins/shared/tool_core/src/lib.rs: 3
+plugins/shared/agent_config_load/test_agent_config_load_dual_root.py: 4
+# 2026-10-11 批 3 触碰即清补账：rp_packs 测试两处为「用户空间布局夹具/断言
+# 路径构造字面量」（user-root/config/packs 双根解析测的真实布局），非仓库
+# config/ 运行时直读——与 dual_root 同款豁免（批 2-Ⅱ 落文件时漏登记，本刀
+# 同模块触碰补归因）。
+plugins/shared/agent_config_load/test_agent_config_load_rp_packs.py: 2
+plugins/shared/context_window_guard/test_manifest_inline_config.py: 1
+plugins/shared/context_window_guard/test_plugin_branches.py: 1
+plugins/shared/isolation_guard/plugin.py: 0
+plugins/shared/mode_material_inject/test_mode_material_inject.py: 2
+plugins/shared/multimodal_preprocessor/test_multimodal_preprocessor_plugin.py: 1
+plugins/shared/prompt_build/test_persona_placeholder.py: 1
+plugins/shared/prompt_build/test_session_workspace_placeholder.py: 2
+plugins/shared/prompt_build/test_main_prompt_mode_routing.py: 2
+plugins/shared/prompt_build/test_project_agents_anchor.py: 2
+# 2026-10-19 推送轮豁免归因：test_pack_relative_path 1→2——④ 旧形态回归
+# 测试（{{path:config/...}} 仍按系统根解析）新增包内同名 config/ 夹具字面量，
+# 非运行时直读。
+plugins/shared/prompt_build/test_pack_relative_path.py: 2
+plugins/shared/security_check/plugin.py: 7
+plugins/shared/security_check/test_dangerous_operations_config.py: 1
+plugins/shared/security_check/test_zone_gate.py: 7
+plugins/shared/workspace_lifecycle/test_plugin.py: 2
+plugins/shared/spill_guard/src/lib.rs: 1
 plugins/shared/project_registry.py: 2
 plugins/shared/repo_anchor.py: 3
-plugins/shared/system/agent_manager/server.py: 1
-plugins/shared/system/agent_manager/test_mode_registry.py: 5
-plugins/shared/system/agent_manager/test_server.py: 11
-plugins/shared/system/agent_manager/test_server_defense_gaps.py: 21
-plugins/shared/system/cost_control/config.py: 2
-plugins/shared/system/cost_control/server.py: 5
-plugins/shared/system/cost_control/test_cost_control_branch_gaps.py: 5
-plugins/shared/system/dsh_adapter/tests/test_dsh_adapter.py: 4
-plugins/shared/system/dsh_adapter/tests/test_dsh_server_branches.py: 2
-plugins/shared/system/dsh_adapter/translator.py: 2
+plugins/shared/agent_manager/server.py: 1
+plugins/shared/agent_manager/test_mode_registry.py: 5
+plugins/shared/agent_manager/test_server.py: 11
+plugins/shared/agent_manager/test_server_defense_gaps.py: 21
+plugins/shared/cost_control/config.py: 2
+plugins/shared/cost_control/server.py: 5
+plugins/shared/cost_control/test_cost_control_branch_gaps.py: 5
+plugins/shared/dsh_adapter/tests/test_dsh_adapter.py: 4
+plugins/shared/dsh_adapter/tests/test_dsh_server_branches.py: 2
+plugins/shared/dsh_adapter/translator.py: 2
 # 退役键：plugins/shared/system/eval_harness/* 七条已随批E迁移删除（键随迁见上方 mode_evolution 组）
-plugins/shared/system/evaluation/server.py: 2
-plugins/shared/system/evaluation/test_evaluation_server.py: 7
-plugins/shared/system/hindsight_memory/server.py: 4
-plugins/shared/system/hindsight_memory/test_hindsight_server_gaps.py: 3
-plugins/shared/system/hindsight_memory/test_hindsight_server_lifecycle.py: 3
-plugins/shared/system/isolation/_workspace_git_ops.py: 2
-plugins/shared/system/isolation/manager.py: 1
-plugins/shared/system/isolation/test_manager_branches.py: 1
-plugins/shared/system/isolation/test_policy.py: 5
-plugins/shared/system/isolation/test_workspace_gaps.py: 4
-plugins/shared/system/isolation/test_workspace_git_ops.py: 2
-plugins/shared/system/isolation/test_workspace_git_ops_branches.py: 4
-plugins/shared/system/isolation/test_workspace_lifecycle.py: 2
-plugins/shared/system/isolation/test_workspace_lifecycle_edges.py: 2
-plugins/shared/system/isolation/test_workspace_root.py: 5
-plugins/shared/system/isolation/workspace.py: 4
-plugins/shared/system/llm/_config_models.py: 1
-plugins/shared/system/llm/adapter.py: 1
-plugins/shared/system/llm/routes_llm_config.py: 2
-plugins/shared/system/llm/routes_thinking_mode.py: 3
-plugins/shared/system/llm/test_adapter_branches.py: 2
-plugins/shared/system/llm/test_config_injection.py: 3
-plugins/shared/system/llm/test_llm_keypool_router_config_gaps.py: 1
-plugins/shared/system/llm/test_llm_thinking_mode_gaps.py: 2
-plugins/shared/system/llm/test_routes_llm_config_gaps.py: 2
-plugins/shared/system/monitoring/server.py: 1
-plugins/shared/system/multimodal/asr.py: 3
-plugins/shared/system/multimodal/capabilities.py: 3
-plugins/shared/system/multimodal/server.py: 2
-plugins/shared/system/review/improvement.py: 2
-plugins/shared/system/review/server.py: 3
-plugins/shared/system/review/test_improvement.py: 1
-plugins/shared/system/review/test_review_service_gaps.py: 2
-plugins/shared/system/task_form/server.py: 3
-plugins/shared/system/task_form/test_task_form_server.py: 2
-plugins/shared/system/tasks/orchestration.py: 1
-plugins/shared/system/tasks/test_orchestration.py: 3
-plugins/shared/system/tasks/timer_manager.py: 1
+plugins/shared/evaluation/server.py: 2
+plugins/shared/evaluation/test_evaluation_server.py: 7
+plugins/shared/hindsight_memory/server.py: 4
+plugins/shared/hindsight_memory/test_hindsight_server_gaps.py: 5
+plugins/shared/hindsight_memory/test_hindsight_server_lifecycle.py: 3
+plugins/shared/isolation/_workspace_git_ops.py: 2
+plugins/shared/isolation/manager.py: 0
+plugins/shared/isolation/test_manager_branches.py: 1
+plugins/shared/isolation/test_policy.py: 5
+plugins/shared/isolation/test_workspace_gaps.py: 4
+plugins/shared/isolation/test_workspace_git_ops.py: 2
+plugins/shared/isolation/test_workspace_git_ops_branches.py: 4
+plugins/shared/isolation/test_workspace_lifecycle.py: 2
+plugins/shared/isolation/test_workspace_lifecycle_edges.py: 2
+plugins/shared/isolation/test_workspace_root.py: 5
+plugins/shared/isolation/workspace.py: 4
+plugins/shared/llm/adapter.py: 1
+plugins/shared/llm/routes_llm_config.py: 2
+plugins/shared/llm/routes_thinking_mode.py: 3
+plugins/shared/llm/test_adapter_branches.py: 2
+plugins/shared/llm/test_config_injection.py: 3
+plugins/shared/llm/test_llm_keypool_router_config_gaps.py: 1
+plugins/shared/llm/test_llm_thinking_mode_gaps.py: 2
+plugins/shared/llm/test_routes_llm_config_gaps.py: 2
+plugins/shared/multimodal/asr.py: 3
+plugins/shared/multimodal/capabilities.py: 3
+plugins/shared/multimodal/server.py: 2
+plugins/shared/review/improvement.py: 2
+plugins/shared/review/server.py: 3
+plugins/shared/review/test_improvement.py: 1
+plugins/shared/review/test_review_service_gaps.py: 2
+plugins/shared/task_form/server.py: 3
+plugins/shared/task_form/test_task_form_server.py: 2
+# 拍平迁移随键更新：repo+user 双候选 join，HEAD 实测同额（非新增违规）
+plugins/shared/tasks/orchestration.py: 2
+# 拍平迁移随键更新：HEAD 实测同额（非新增违规）
+plugins/shared/tasks/test_orchestration.py: 6
+plugins/shared/tasks/timer_manager.py: 1
 plugins/shared/tenant_data.py: 1
-plugins/shared/tools/builtin_tools/tests/test_fs_read_whitelist.py: 11
-plugins/shared/tools/builtin_tools/tests/test_fs_uploads_readonly.py: 1
-plugins/shared/tools/builtin_tools/tests/test_fs_workspace.py: 1
-plugins/shared/tools/builtin_tools/tests/test_repo_read_anchor.py: 5
-plugins/shared/tools/community_ops/tool.py: 1
-plugins/shared/tools/e2e_lifecycle_probe/server.py: 1
-plugins/shared/tools/project_create/test_project_create.py: 1
-plugins/shared/tools/project_create/tool.py: 5
-plugins/shared/tools/resource_merge/git_helpers.py: 2
-plugins/shared/tools/resource_merge/test_resource_merge.py: 8
-plugins/shared/tools/resource_merge/test_resource_merge_gaps.py: 6
-plugins/shared/tools/resource_merge/tool.py: 4
-plugins/shared/tools/search/tool.py: 1
-plugins/shared/tools/task/test_task_submit.py: 1
-plugins/shared/tools/task_evaluate/_executor.py: 4
-plugins/shared/tools/task_evaluate/test_metrics_path_layouts.py: 2
-plugins/shared/tools/task_evaluate/server.py: 1
-plugins/shared/tools/task_evaluate/tool.py: 1
-plugins/shared/tools/task_submit/tool.py: 3
-plugins/shared/worktree_merge.py: 2
+plugins/shared/builtin_tools/tests/test_fs_read_whitelist.py: 11
+plugins/shared/builtin_tools/tests/test_fs_uploads_readonly.py: 1
+plugins/shared/builtin_tools/tests/test_fs_workspace.py: 1
+plugins/shared/builtin_tools/tests/test_repo_read_anchor.py: 5
+plugins/shared/community_ops/tool.py: 1
+plugins/shared/e2e_lifecycle_probe/server.py: 1
+plugins/shared/project_create/test_project_create.py: 1
+plugins/shared/project_create/tool.py: 5
+plugins/shared/resource_merge/git_helpers.py: 2
+plugins/shared/resource_merge/test_resource_merge.py: 8
+plugins/shared/resource_merge/test_resource_merge_gaps.py: 6
+plugins/shared/resource_merge/tool.py: 4
+plugins/shared/search/tool.py: 1
+plugins/shared/task_evaluate/_executor.py: 2
+plugins/shared/task_evaluate/test_metrics_path_layouts.py: 2
+plugins/shared/task_evaluate/server.py: 1
+plugins/shared/task_evaluate/tool.py: 1
+plugins/shared/task_submit/tool.py: 2
+# T6b（2026-10-16）：worktree_merge 私有化迁入 task_evaluate，原
+# plugins/shared/worktree_merge.py: 2 条目随路径改名（命中串不变，仍为
+# _ensure_git_user 的 git config 命令字面量）。
+plugins/shared/task_evaluate/worktree_merge.py: 2
+#
+# 2026-10-11 推送轮归因（区间新增 7 处，均为字面量非运行时直读）：
+# - project_root.py 2 处 = docstring 指纹元组示例（("config","config/kernel")），
+#   文档字面量非 IO；
+# - test_skill_audit 3 处 = 临时 repo 夹具 mkdir("config","kernel")×1 +
+#   git config 子命令参数表×2（SEGMENT_FORM 对 git CLI 参数的误命中）；
+# - test_factory_skills_zone / test_factory_skills_fs 各 1 处 = 临时 repo
+#   夹具 mkdir("config","kernel")，夹具路径非仓库 config/ 直读。
+plugins/shared/mode_evolution/test_skill_audit.py: 3
+plugins/shared/security_check/test_factory_skills_zone.py: 1
+plugins/shared/project_root.py: 2
+plugins/shared/builtin_tools/tests/test_factory_skills_fs.py: 1
+#
+# 2026-10-12 推送轮归因（RP 扩展波 B-Ⅱ 新增测试文件）：
+# - test_content_proposal 1 处 = content_kind 非内容目标分类断言的路径字面量
+#   （config/agents/main/agentos.yaml 必须判 None），断言夹具字面量非运行时直读。
+plugins/shared/mode_evolution/test_content_proposal.py: 1
+# 豁免：'config' 为向导步骤标签 UI 串，非 config/ 路径（SEGMENT 形态误报）
+plugins/shared/_libs/mode_tests/test_roleplay_panel_v31.py: 1
+#
+# 2026-10-16 推送前核账归因（两段）：
+# ①指标路径单源化键随迁（B11-M3，探测算法抽 _libs 单源）：
+#   - _executor.py 4→2：祖先探测实现随迁 _libs/evaluation_metrics_path.py
+#     （docstring 契约描述字面量留守），键随迁非减免；
+#   - _libs/evaluation_metrics_path.py 0→2：探测模块本体（SEGMENT join 探测尾
+#     + docstring 契约描述），布局发现是合法读取通道（2026-09-29 先例随迁）；
+#   - test_metrics_path_parity.py 0→1：两侧对账夹具 _PROBE_PARTS 元组字面量。
+# ②区间存量入账（各轮提交未跑本闸的积累，治本随触碰批次清偿）：
+#   - db_read.py 1 / ledger_db.py 1 = docstring/注释提及 read_faces.yaml
+#     （文档字面量非 IO）；
+#   - llm/test_direct_hosts_sso.py 2 = 真机断言常驻测试（读真实 llm.yaml 核对
+#     派生律，2026-10-09 test_main_prompt_mode_routing 同款豁免）；
+#   - mode_roleplay/server.py 1 = llm.yaml join 路径构造（存量生产码入账）；
+#   - security_check/test_default_rules_fallback.py 1 = 真实
+#     security_rules.yaml 回退语义核对路径构造（测试即真值核对器）。
+plugins/shared/_libs/evaluation_metrics_path.py: 2
+plugins/shared/task_evaluate/test_metrics_path_parity.py: 1
+plugins/shared/mode_evolution/ledger_db.py: 1
+plugins/shared/llm/test_direct_hosts_sso.py: 2
+plugins/shared/mode_roleplay/server.py: 1
+plugins/shared/security_check/test_default_rules_fallback.py: 1
+#
+# 2026-10-17 推送前核账归因（区间新增 23 处，db_read 漏键回补）：
+# - db_read.py 1 = 2026-10-16 块注释已归因（docstring 提及 read_faces.yaml，
+#   文档字面量非 IO）但键行漏登，本刀回补；
+# - acp_gateway.py 1 / test_acp_manifest.py 1 = 前者 docstring 提及网关配置
+#   路径（实际读取走 config_files 注入），后者真机断言夹具（读真实
+#   gateway.yaml 核对 manifest↔路由契约，test_direct_hosts_sso 同款豁免）；
+# - agent_manager/test_server.py 11→12 = 提示词预览端点（a697fb8d8）docstring
+#   新增 config/agents 路径描述行；
+# - project_create_tool.py 5 / project_registry.py 2 = 类型配方表运行时直读
+#   （_PROJECT_ROOT join config/tools/project_create.yaml，真值单源设计
+#   「新增类型=加条目不改代码」，mode_roleplay/server.py 同款存量生产码
+#   入账）+ 根探测 docstring/报错串字面量；
+# - test_project_create.py 1 = 配方表 docstring 与隔离夹具路径构造字面量。
+plugins/shared/db_read.py: 1
+plugins/shared/acp_quota_pool/acp_gateway.py: 1
+plugins/shared/acp_quota_pool/tests/test_acp_manifest.py: 1
+plugins/shared/agent_manager/test_server.py: 12
+plugins/shared/project_manager/project_create_tool.py: 5
+plugins/shared/project_manager/project_registry.py: 2
+plugins/shared/project_manager/test_project_create.py: 1
+#
+# 2026-10-18 推送前核账归因（CI 扣费停摆期入库，非生产码直读回潮）：
+# - oauth_broker/guidance.py 1 + tests/test_guidance.py 2 = 真值文件位置
+#   docstring（config/plugins/oauth_broker/guidance.yaml）+ 测试对仓内真配置
+#   自证（引导面与配置同步防漂移，合法测试夹具读）；
+# - security_check/test_user_root_repo_anchor.py 6 = repo_anchor 解析契约测试
+#   docstring（装机/dev 双布局指纹规则描述，75ee90341 修复面）；
+# - _libs/mode_tests/test_mode_panel_live_research.py 1 = live 测试分段拼接读
+#   仓内真 agent yaml 自证（研究面板契约）；
+# - isolation/test_workspace_crossdrive.py 2 = git config 子命令参数
+#   （["config","user.email"] 形态，SEGMENT_FORM 启发式误伤，非配置文件读）。
+plugins/shared/oauth_broker/guidance.py: 1
+plugins/shared/oauth_broker/tests/test_guidance.py: 2
+plugins/shared/security_check/test_user_root_repo_anchor.py: 6
+plugins/shared/_libs/mode_tests/test_mode_panel_live_research.py: 1
+plugins/shared/isolation/test_workspace_crossdrive.py: 2
+#
+# 2026-10-20 推送前核账归因（工具面退役任务C刀叙述面，均文档字面量非 IO）：
+# - mode_evolution/server.py 1 = _PROPOSAL_DESCRIPTION 工具用法示例串提及
+#   target='config/agents/main/agentos.yaml'（提案目标面示例，非运行时直读）；
+# - project_manager/server.py 2 = docstring 提及 per-租户白名单真值路径 +
+#   注释两处提及 project_create.yaml 生成源（该文件运行时直读已在
+#   project_create_tool.py: 5 基线内，此处为设计叙述字面量）。
+plugins/shared/mode_evolution/server.py: 1
+plugins/shared/project_manager/server.py: 2
+#
+# 2026-10-21 推送前核账归因：
+# - _libs/testing/tool_ids_contract.py 0→1 = 工具id契约扫描单源模块
+#   config_agent_yaml_files() 读仓内出厂 agent 面（repo_root/"config"/"agents"
+#   join），agent-tool-ids 门禁消费面=测试真值核对器，非插件运行时直读
+#   （test_main_prompt_mode_routing 真机断言同款豁免）。
+plugins/shared/_libs/testing/tool_ids_contract.py: 1

@@ -21,32 +21,30 @@
 
 import { useMemo } from 'react'
 import { ContextUsageIndicator } from '@/components/chat/ContextUsageIndicator'
+import { useActiveTabPipelineId } from '@/hooks/useActiveExecutionContext'
 import { usePipelineStatesQuery } from '@/hooks/queries/usePipelineRunsQuery'
 import { useModelContextInfo } from '@/hooks/useModelContextInfo'
 import { mapStateInfoToViewModel } from '@/services/api/pipelines'
-import { useAgentTabStore } from '@/stores/agentTabStore'
 
 export function ContextUsageWidget(props: Record<string, unknown>) {
   /** 声明的静态兜底模型名：尚无管道 state 行时先显示它 */
   const staticModel = props.modelName as string | undefined
 
-  /** 当前激活 Tab（响应式：切标签即重算，不串到别的管道） */
-  const pipelineId = useAgentTabStore((s) => {
-    const tab = s.tabs.find((t) => t.id === s.activeTabId)
-    return tab?.pipelineRunId ?? ''
-  })
+  /** 当前激活 Tab 的管道坐标（响应式：切标签即重算，不串到别的管道） */
+  const pipelineId = useActiveTabPipelineId()
 
   /** 管道 state 摘要（共享 query 缓存；失效化/轮询由 query 层统一承担） */
   const { data: states } = usePipelineStatesQuery()
 
   /** 从 state 注册表中挑出当前管道行的模型/窗口/用量（视图模型适配，上游唯一数据源） */
-  const { modelName, usage, stateContextWindow } = useMemo(() => {
+  const { modelName, usage, stateContextWindow, compressionStatus } = useMemo(() => {
     const row = pipelineId && states ? states[pipelineId] : undefined
     const view = row ? mapStateInfoToViewModel(row) : undefined
     return {
       modelName: view?.llmModel || staticModel,
       usage: view?.llmUsage,
       stateContextWindow: view?.contextWindow ?? 0,
+      compressionStatus: view?.compressionStatus,
     }
   }, [states, pipelineId, staticModel])
 
@@ -65,6 +63,9 @@ export function ContextUsageWidget(props: Record<string, unknown>) {
   return (
     <ContextUsageIndicator
       modelName={modelName}
+      /** ringOnly：纯圈模式——模型名/行内数字全收进悬停浮窗（拆分裁定 20261023，
+       *  模型名展示归 model_id 选择器） */
+      ringOnly={props.ringOnly as boolean | undefined}
       currentTokenUsage={currentTokenUsage}
       maxTokens={maxTokens}
       totalTokens={totalTokens || undefined}
@@ -83,6 +84,7 @@ export function ContextUsageWidget(props: Record<string, unknown>) {
       }
       cachedTokens={usage?.last_cached_tokens || undefined}
       hitRatio={usage?.last_cache_hit_ratio || undefined}
+      compressionStatus={compressionStatus}
       className={props.className as string | undefined}
     />
   )

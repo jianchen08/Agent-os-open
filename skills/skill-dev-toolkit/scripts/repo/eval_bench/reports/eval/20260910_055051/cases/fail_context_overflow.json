@@ -1,0 +1,132 @@
+{
+  "case_id": "fail_context_overflow",
+  "category": "context_overflow",
+  "passed": true,
+  "elapsed_seconds": 272.1,
+  "session_id": "thread-b0a7ee0b-4907-403c-8e35-53e8ea9aab3a",
+  "pipeline_ids": [
+    "4a5b1376eaba",
+    "6b77d088338d"
+  ],
+  "settled": true,
+  "dispatches": [
+    {
+      "terminal": "stream_end",
+      "pipeline_id": "1089e67e9b99",
+      "interactions": [],
+      "event_types": [
+        "reasoning_delta",
+        "pending_inputs_changed",
+        "pending_inputs_changed",
+        "stream_start",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "widget_event",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "reasoning_delta",
+        "stream_end"
+      ]
+    },
+    {
+      "terminal": "stream_end",
+      "pipeline_id": "4a5b1376eaba",
+      "interactions": [],
+      "event_types": [
+        "widget_event",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "text_delta",
+        "widget_event",
+        "widget_event",
+        "widget_event",
+        "block_end",
+        "block_start",
+        "tool_call_delta",
+        "block_end",
+        "usage",
+        "finish",
+        "cost_update",
+        "cost_update",
+        "widget_event",
+        "new_message",
+        "stream_end"
+      ]
+    }
+  ],
+  "approval": {
+    "requests_seen": 0,
+    "approved": 0,
+    "denied": 0,
+    "response_errors": []
+  },
+  "metrics": {
+    "pipelines": 2,
+    "iterations_total": 20,
+    "error_steps": 2,
+    "timeout_steps": 0,
+    "tool_calls": 11,
+    "tool_retries": 0,
+    "tool_names": [],
+    "tool_call_counts": {},
+    "task_statuses": [
+      null,
+      "completed"
+    ],
+    "all_settled": true,
+    "any_failed": false,
+    "by_model": {
+      "glm-5.3-flash": {
+        "input": 61631,
+        "output": 1514,
+        "cached": 15616,
+        "total": 63145
+      },
+      "MiniMax-M3": {
+        "input": 86192,
+        "output": 2368,
+        "cached": 42130,
+        "total": 88560
+      }
+    },
+    "tokens_total": 151705
+  },
+  "assertions": [
+    {
+      "type": "settled",
+      "passed": true,
+      "detail": "全链管道收敛"
+    },
+    {
+      "type": "tokens_above",
+      "passed": true,
+      "detail": "Token 151705 阈值 15000"
+    }
+  ],
+  "failed_assertions": [],
+  "reply_excerpt": "老板，情况我说明一下哦～\n\n刚刚我用 file_read 依次尝试读取三个文件时，发现它们还**不存在**——因为第一步的生成任务（ID: 6b77d088338d）目前还处于 pending 状态，正在后台排队/执行中，bash 还没把文件写到磁盘上呢。系统也提示我不要频繁轮询状态，任务完成后会自动通知我。\n\n所以现在这一步我先安心等生成任务完成 ✨\n\n**接下来的安排**：\n1. 生成任务完成、系统通知我一到，我立刻用 file_read 完整读取 big_1.txt、big_2.txt、big_3.txt 的全部内容；\n2. 然后向你汇报三个文件的**总行数**（按任务要求理论上应为 800 × 3 = 2400 行，我会以实际读取结果为准汇报，不冒充哦）。\n\n再稍等一小下下，文件一落地我就马上动手读，绝不让你等太久～ 🌱"
+}

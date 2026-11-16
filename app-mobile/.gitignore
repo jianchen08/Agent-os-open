@@ -1,0 +1,6 @@
+node_modules/
+
+# android/ 内的构建产物与 local.properties 由 android/.gitignore 覆盖
+*.apk
+android/app/build/
+android/.gradle/

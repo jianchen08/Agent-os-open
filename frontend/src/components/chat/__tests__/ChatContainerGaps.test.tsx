@@ -8,7 +8,7 @@
  * - 会话初始化（initSessionTabs 仅在无激活 Tab 时触发）
  * - 生成态双来源（流式状态 + runs 快照）
  * - 模型名解析（agentId / pipelineAgentName → tiers 显示名）
- * - 思考强度（显式记忆优先、管道参数反向映射、默认回退、配置驱动档位选项与收束、切换分发）
+ * - 思考强度（显式记忆优先、管道参数反向映射、默认回退、切换分发与失败降级）
  * - 投票面板过滤、子标签完成禁用、待发送队列条渲染条件、hasMore 透传
  */
 import { act, render } from '@testing-library/react'
@@ -87,6 +87,7 @@ const stubs = vi.hoisted(() => ({
     current: string | null
   },
 }))
+
 
 vi.mock('../AgentTabBar', () => ({
   AgentTabBar: (props: NonNullable<typeof stubs.tabBar>) => {
@@ -258,6 +259,8 @@ beforeEach(() => {
     messagesByPipeline: {},
     pipelines: {},
     streamingState: {},
+    roundQueueDepthByPipeline: {},
+    stoppingByPipeline: {},
   })
   useVotingStore.setState({ votingSessions: [] })
   useSessionStore.setState({ activeSessionId: null })
@@ -280,7 +283,7 @@ describe('ChatContainer — 加载态', () => {
 })
 
 describe('ChatContainer — Tab 栏映射与回调', () => {
-  it('主 Tab 固定名「主管道」，子 Tab 用 agentName；未读/激活/可关闭逐项映射', async () => {
+  it('主 Tab 兜底名「灵汐」，子 Tab 用 agentName；未读/激活/可关闭逐项映射', async () => {
     useAgentTabStore.setState({
       tabs: [makeMainTab({ agentId: 'agent-1' }), makeSubTab()],
       activeTabId: 'main-1',
@@ -292,8 +295,8 @@ describe('ChatContainer — Tab 栏映射与回调', () => {
     const [mainBar, subBar] = stubs.tabBar?.tabs ?? []
     expect(mainBar).toMatchObject({
       id: 'main-1',
-      name: '主管道',
-      agentName: '主管道',
+      name: '灵汐',
+      agentName: '灵汐',
       status: 'running',
       isActive: true,
       unreadCount: 3,
@@ -432,15 +435,30 @@ describe('ChatContainer — 会话初始化', () => {
   })
 })
 
-describe('ChatContainer — 生成态双来源', () => {
-  it('当前标签管道流式中 → ChatInput/MessageList isGenerating=true', async () => {
+describe('ChatContainer — 生成态单一真值（runs 快照 + 收尾快照）', () => {
+  it('run 结束但 queue_depth>0（链尾 drain 未完成）→ ChatInput/MessageList isGenerating=true', async () => {
     setupActivePipeline([])
-    usePipelineMessageStore.setState({
-      streamingState: { 'pipe-1': { isStreaming: true, messageId: 'm1' } },
-    })
+    stubs.runs = { 'pipe-1': { status: 'completed' } }
+    usePipelineMessageStore.setState({ roundQueueDepthByPipeline: { 'pipe-1': 2 } })
     await mountContainer()
     expect(stubs.chatInput?.isGenerating).toBe(true)
     expect(stubs.messageList?.isGenerating).toBe(true)
+  })
+
+  it('停止受理中（stopping）→ 仍视为执行中（不回可发送空闲态）', async () => {
+    setupActivePipeline([])
+    stubs.runs = { 'pipe-1': { status: 'suspended' } }
+    usePipelineMessageStore.setState({ stoppingByPipeline: { 'pipe-1': true } })
+    await mountContainer()
+    expect(stubs.chatInput?.isGenerating).toBe(true)
+  })
+
+  it('runs 已终态 + stopping 残留 → isGenerating=false（终止事件丢失的轮询兜底）', async () => {
+    setupActivePipeline([])
+    stubs.runs = { 'pipe-1': { status: 'completed' } }
+    usePipelineMessageStore.setState({ stoppingByPipeline: { 'pipe-1': true } })
+    await mountContainer()
+    expect(stubs.chatInput?.isGenerating).toBe(false)
   })
 
   it('流式未激活但 runs 快照 running → 仍视为生成中', async () => {
@@ -450,7 +468,7 @@ describe('ChatContainer — 生成态双来源', () => {
     expect(stubs.chatInput?.isGenerating).toBe(true)
   })
 
-  it('两来源皆静默 → isGenerating=false', async () => {
+  it('三来源皆静默 → isGenerating=false', async () => {
     setupActivePipeline([])
     await mountContainer()
     expect(stubs.chatInput?.isGenerating).toBe(false)
@@ -475,14 +493,20 @@ describe('ChatContainer — 模型名解析', () => {
     expect(stubs.chatInput?.modelName).toBe('glm-air')
   })
 
-  it('无任何匹配 → modelName 为空串', async () => {
+  it('无任何匹配 → 回退系统默认对话模型（defaults.chat）', async () => {
     await mountContainer()
-    expect(stubs.chatInput?.modelName).toBe('')
+    expect(stubs.chatInput?.modelName).toBe('chat-model')
   })
 
-  it('agentId 命中但 agent 无任何模型字段 → modelName 为空串', async () => {
+  it('agentId 命中但 agent 无任何模型字段 → 回退系统默认对话模型（defaults.chat）', async () => {
     stubs.agents = [{ id: 'agent-1', configId: 'cfg-1' }]
     useAgentTabStore.setState({ tabs: [makeMainTab({ agentId: 'agent-1' })], activeTabId: 'main-1' })
+    await mountContainer()
+    expect(stubs.chatInput?.modelName).toBe('chat-model')
+  })
+
+  it('llm 配置整体缺失（无 agent 头也无 defaults）→ modelName 为空串（占位语义保留）', async () => {
+    stubs.llmView = null
     await mountContainer()
     expect(stubs.chatInput?.modelName).toBe('')
   })
@@ -588,13 +612,13 @@ describe('ChatContainer — 思考选择（宿主零业务知识，选项/当前
 })
 
 describe('ChatContainer — 降级提示', () => {
-  it('LLM 配置查询失败 → 一次性提示「LLM 配置获取失败」（重复挂载失败不重复弹）', async () => {
+  it('LLM 配置查询失败 → 一次性提示「模型配置获取失败」（重复挂载失败不重复弹）', async () => {
     stubs.llmError = true
     await mountContainer()
-    expect(notificationCountByTitle('LLM 配置获取失败')).toBe(1)
+    expect(notificationCountByTitle('模型配置获取失败')).toBe(1)
 
     await mountContainer()
-    expect(notificationCountByTitle('LLM 配置获取失败')).toBe(1)
+    expect(notificationCountByTitle('模型配置获取失败')).toBe(1)
   })
 })
 

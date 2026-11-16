@@ -107,3 +107,62 @@ describe('useModelContextInfo', () => {
     expect(getModelsMock).toHaveBeenCalledTimes(2)
   })
 })
+
+describe('useModelContextInfo — 模型名三级匹配（显示名 vs 配置键）', () => {
+  /** 现实形态：配置键小写，条目 model_name 才是真实模型名（管道 state 行 llm_model 来源于此） */
+  const REGISTRY = {
+    'minimax-m3': { model_name: 'MiniMax-M3', context_window: 196608 },
+    'deepseek-v3': { model_name: 'DeepSeek-V3', context_window: 128000 },
+    'alias-entry': { model_name: 'qwen-max', context_window: 32768 },
+    'kimi-entry': { model_name: 'kimi-k2', context_window: 131072 },
+  }
+
+  const queryWith = (modelName: string) => {
+    getModelsMock.mockResolvedValue({ models: REGISTRY })
+    const { result } = renderHook(() => useModelContextInfo(modelName))
+    return result
+  }
+
+  it('精确 id 命中：查询与配置键完全一致（回归保护）', async () => {
+    const result = queryWith('deepseek-v3')
+    await waitFor(() => expect(result.current.isLoading).toBe(false))
+    expect(result.current.contextWindow).toBe(128000)
+    expect(result.current.isValid).toBe(true)
+  })
+
+  it('键忽略大小写命中：显示名 MiniMax-M3 → 配置键 minimax-m3', async () => {
+    const result = queryWith('MiniMax-M3')
+    await waitFor(() => expect(result.current.isLoading).toBe(false))
+    expect(result.current.contextWindow).toBe(196608)
+    expect(result.current.isValid).toBe(true)
+  })
+
+  it('键忽略大小写命中（第二组）：DeepSeek-V3 → deepseek-v3', async () => {
+    const result = queryWith('DeepSeek-V3')
+    await waitFor(() => expect(result.current.isLoading).toBe(false))
+    expect(result.current.contextWindow).toBe(128000)
+    expect(result.current.isValid).toBe(true)
+  })
+
+  it('键不匹配但 model_name 字段命中：真名对真名', async () => {
+    const result = queryWith('qwen-max')
+    await waitFor(() => expect(result.current.isLoading).toBe(false))
+    expect(result.current.contextWindow).toBe(32768)
+    expect(result.current.isValid).toBe(true)
+  })
+
+  it('model_name 字段命中（第二组）：kimi-k2', async () => {
+    const result = queryWith('kimi-k2')
+    await waitFor(() => expect(result.current.isLoading).toBe(false))
+    expect(result.current.contextWindow).toBe(131072)
+    expect(result.current.isValid).toBe(true)
+  })
+
+  it('三级全不中：contextWindow=0、isValid=false、error=null（配置里确实没有）', async () => {
+    const result = queryWith('no-such-model')
+    await waitFor(() => expect(result.current.isLoading).toBe(false))
+    expect(result.current.contextWindow).toBe(0)
+    expect(result.current.isValid).toBe(false)
+    expect(result.current.error).toBeNull()
+  })
+})

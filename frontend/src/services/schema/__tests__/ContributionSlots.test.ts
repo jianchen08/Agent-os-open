@@ -182,79 +182,10 @@ describe('ContributionRegistry — contributes.shortcuts 解析', () => {
   })
 })
 
-describe('ContributionRegistry — contributes.modal 解析', () => {
-  let registry: ContributionRegistry
-
-  beforeEach(() => {
-    registry = new ContributionRegistry()
-  })
-
-  it('从 modules.contributes.modal 提取模态弹窗', () => {
-    registry.loadFromSchema(
-      makeSchema({
-        plugin_contributes: [
-          {
-            plugin_id: 'review',
-            contributes: {
-              modal: [
-                {
-                  id: 'review.approve',
-                  title: '审批确认',
-                  trigger: 'on_command:review.approve',
-                  widget: 'approval_card',
-                  props: { mode: 'strict' },
-                },
-              ],
-            },
-          },
-        ],
-      } as unknown as SchemaResponse),
-    )
-
-    const modals = registry.getModals()
-    expect(modals).toHaveLength(1)
-    expect(modals[0].id).toBe('review.approve')
-    expect(modals[0].widget).toBe('approval_card')
-    expect(modals[0].trigger).toBe('on_command:review.approve')
-    expect(modals[0].pluginId).toBe('review')
-  })
-
-  it('按 trigger 查找模态弹窗', () => {
-    registry.loadFromSchema(
-      makeSchema({
-        plugin_contributes: [
-          {
-            plugin_id: 'p',
-            contributes: {
-              modal: [
-                { id: 'm1', title: 'M1', trigger: 'on_command:cmd.a', widget: 'w1' },
-                { id: 'm2', title: 'M2', trigger: 'on_command:cmd.b', widget: 'w2' },
-              ],
-            },
-          },
-        ],
-      } as unknown as SchemaResponse),
-    )
-
-    const modal = registry.findModalByTrigger('on_command:cmd.a')
-    expect(modal?.id).toBe('m1')
-  })
-
-  it('trigger 未命中返回 undefined', () => {
-    registry.loadFromSchema(
-      makeSchema({
-        plugin_contributes: [
-          {
-            plugin_id: 'p',
-            contributes: { modal: [{ id: 'm1', title: 'M1', trigger: 'on_command:cmd.a', widget: 'w1' }] },
-          },
-        ],
-      } as unknown as SchemaResponse),
-    )
-
-    expect(registry.findModalByTrigger('on_command:nope')).toBeUndefined()
-  })
-})
+// contributes.modal 解析测试已随 C4 存量收敛迁移：modal 声明经 SlotRegistry
+// 翻译为 shell.overlay 槽条目（触发查询 = slotRegistry.findOverlayByTrigger），
+// 覆盖见 services/slots/__tests__/slotRegistry.test.ts 与 components/slots 通道测试。
+// ContributionRegistry 不再归一化 modal（旧声明路径删除，内部一刀切）。
 
 describe('ContributionRegistry — 重新加载清空旧插槽', () => {
   it('再次 loadFromSchema 覆盖旧的 contributes（避免幽灵菜单）', () => {
@@ -271,6 +202,7 @@ describe('ContributionRegistry — 重新加载清空旧插槽', () => {
     expect(registry.getMenus()).toEqual([])
     expect(registry.getCommands()).toEqual([])
     expect(registry.getShortcuts()).toEqual([])
-    expect(registry.getModals()).toEqual([])
+    // modal 不再归一化进 pages（C4 收敛：SlotRegistry 承接）
+    expect(registry.getPages().some((p) => p.legacyFrom === 'modal')).toBe(false)
   })
 })

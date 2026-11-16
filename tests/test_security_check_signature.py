@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from tests._pipeline_plugin_path import add_plugin_dir
 
-add_plugin_dir("input", "security_check")
+add_plugin_dir("security_check")
 from plugin import SecurityCheckPlugin
 
 

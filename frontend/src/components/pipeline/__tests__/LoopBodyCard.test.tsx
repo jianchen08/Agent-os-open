@@ -24,7 +24,6 @@ const catalog = [
   {
     id: 'pipeline_result_format',
     name: 'Result Format',
-    role: 'output',
     hostType: 'in_process',
     version: '1.0.0',
     enabled: true,

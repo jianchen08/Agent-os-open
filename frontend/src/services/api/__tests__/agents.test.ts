@@ -6,7 +6,7 @@
  * 后端不存在的端点，已删除（2026-08 清理，详见 services/api/agents.ts 头注释）。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { getAgents } from '@/services/api/agents'
+import { getAgentPromptPreview, getAgents } from '@/services/api/agents'
 // Mock axios
 vi.mock('../client', () => ({
   default: {
@@ -103,5 +103,16 @@ describe('Agent API', () => {
       await expect(getAgents({}, { retry: true, maxRetries: 3 })).rejects.toThrow()
       expect(apiClient.get).toHaveBeenCalledTimes(1)
     })
+  })
+})
+
+describe('getAgentPromptPreview - 提示词预览', () => {
+  it('按 id 拉取预览并透传数据', async () => {
+    const preview = { system_prompt: '你是研究员', sections: [] }
+    vi.mocked(apiClient.get).mockResolvedValueOnce({ data: preview })
+
+    const result = await getAgentPromptPreview('agent-1')
+
+    expect(result).toEqual(preview)
   })
 })

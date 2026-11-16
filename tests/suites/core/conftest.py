@@ -1,7 +1,7 @@
 """suites/core 测试 conftest — 注入 tasks 插件目录到 sys.path。
 
 tasks/ 插件内部用平铺 import（from service import / from task_types import），
-需把 plugins/shared/system/tasks/ 加入 sys.path 才能解析。
+需把 plugins/shared/tasks/ 加入 sys.path 才能解析。
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_TASKS_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "tasks"
+_TASKS_DIR = _REPO_ROOT / "plugins" / "shared" / "tasks"
 _SHARED_DIR = _REPO_ROOT / "plugins" / "shared"
 
 # 无条件前置（先去重）：其他插件套件（如 tests/plugins 的 human）的

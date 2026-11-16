@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from pipeline.plugin import ICorePlugin, PluginContext
+from _libs.pipeline_base.plugin import ICorePlugin, PluginContext
 
 logger = logging.getLogger(__name__)
 

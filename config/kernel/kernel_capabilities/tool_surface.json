@@ -14,6 +14,13 @@
               "type": "string"
             },
             "description": "agent 工具面白名单（context_build 按 agent yaml 注入 state.tool_ids，本插件转发）。空数组 = agent 声明零工具（仅框架强制工具返回）"
+          },
+          "workspace": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "工作空间路径（F-min 属地路由随调用上行）：内核对同名多实例工具按工作空间属地换出宿主实例 schema 面（工具名不变）；null/缺省 = 主实例"
           }
         },
         "required": [

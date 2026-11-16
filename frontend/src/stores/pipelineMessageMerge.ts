@@ -8,8 +8,17 @@ import type { TransientStateEntry } from '@/services/api/session'
 import type { MessagePart } from '@/types/messageParts'
 import type { Message } from '@/types/models'
 
-/** 单个管道在「内存」中保留的最大消息条数 与 PERSIST_MAX_MESSAGES_PER_PIPELINE（仅持久化裁剪）不同：内存里的 */
-const MAX_MESSAGES_PER_PIPELINE_IN_MEMORY = 2000
+/**
+ * 单个管道在「内存」中保留的最大消息条数。与 PERSIST_MAX_MESSAGES_PER_PIPELINE
+ * （仅持久化裁剪）不同：内存里的。
+ *
+ * 20000（2026-10-13 用户裁定，原 2000）：2000 触发即裁顶 + 关闭向上翻页闸，
+ * 长会话滚到顶就看不到更早历史（内核侧全量完好）——数据层截断不是内存护栏的
+ * 正确位置。20k 下纯消息对象体量可控（工具结果写入面已有 8KB 截断），真正的
+ * 渲染负载由 MessageList 的 content-visibility 渲染窗口化承担（视口外跳过
+ * 布局/绘制）；仅作极端增长的兜底护栏，不再与翻页闸耦合。
+ */
+const MAX_MESSAGES_PER_PIPELINE_IN_MEMORY = 20000
 
 /** 限制单管道内存消息数，防止无限增长导致浏览器 OOM。 仅在超量时裁剪：按 sequence 排序后保留最新的 N 条。未超限时只做一次 */
 export function capMessagesForMemory(msgs: Message[]): Message[] {
@@ -43,12 +52,14 @@ export function mutateMessageParts<T extends { messagesByPipeline: Record<string
 }
 
 /**
- * 过滤完全空白的 assistant 消息（无 content、无 parts、无 tool_call part、无 thinking、非 streaming）。
- * 这些消息来自后端记录但不包含可渲染内容，渲染为空气泡。
+ * 过滤完全空白的 assistant 消息（无 content、无 parts、无 tool_call part、无
+ * 有内容的 thinking part、非 streaming）。这些消息来自后端记录但不包含可渲染
+ * 内容，渲染为空气泡。
  *
- * 注意：assistant 可能 content 为空但有 tool_call part（发起工具调用）或 thinking
- * （纯思考）。子任务管道大量存在这种消息，若只检查 content/parts 会误删，
- * 导致消息丢失。必须检查 tool_call part 和 thinking。
+ * 注意：assistant 可能 content 为空但有 tool_call part（发起工具调用）或
+ * thinking part（纯思考）。子任务管道大量存在这种消息，若只检查 content/parts
+ * 会误删，导致消息丢失。必须检查 tool_call part 和 thinking part（思考只存
+ * parts，顶层 thinking 字段已停写，不得作为判空依据）。
  */
 export function filterBlankMessages(messages: Message[]): Message[] {
   return messages.filter((m) => {
@@ -57,7 +68,9 @@ export function filterBlankMessages(messages: Message[]): Message[] {
     const hasContent = m.content && m.content.trim()
     const hasParts = m.parts && m.parts.length > 0
     const hasToolCalls = (m.parts ?? []).some((p) => p.type === 'tool_call')
-    const hasThinking = m.thinking && (m.thinking.content || '').trim()
+    const hasThinking = (m.parts ?? []).some(
+      (p) => p.type === 'thinking' && (p.content || '').trim(),
+    )
     return hasContent || hasParts || hasToolCalls || hasThinking
   })
 }

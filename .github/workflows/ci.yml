@@ -22,7 +22,7 @@
 #   all-checks-passed 放行 skipped：车道未命中的 job 记 skipped 不红
 #
 # 流程：push/PR → changes（车道判定）
-#        → full: Rust Lint→Build→Test / Coverage / Deny + 前端 + Electron
+#        → full: Rust Lint→Build→Test / Metrics-Smoke / Coverage / Deny + 前端 + Electron
 #        → python_full: SDK Lint/Test + Python Coverage（插桩）/ Heavy（免插桩）+ Timing
 #        → related: 变更关联测试（plugins-related-tests）
 #        → 恒跑: Pre-commit / TDD / Traceability
@@ -219,6 +219,52 @@ jobs:
       - name: Run gates (kernel-test + 失败数基线锁)
         run: python scripts/run_gates.py --filter kernel-test
 
+  # ── Kernel Metrics Smoke（真内核拉起 /metrics 常用性能指标契约）──────────
+  # 性能监测补强 R1（docs/working/性能监测补强_20261028.md §四 O2）：性能指标
+  # 面（采集→聚合→导出→鉴权）每次内核面变更即实测，不等装机取证。scratch
+  # 内核（spawn_test_kernel 三隔离：随机端口硬拒 9100/9101、scratch DB、stop
+  # 验证端口释放）→ 登录取 access token → /metrics 断言常用指标齐活（
+  # kernel_proc_cpu_percent / kernel_proc_handle_count / kernel_proc_memory_bytes
+  # / kernel_mcp_* 水位）+ 无 token 被拒。二进制缺失即红（fail-loud 执法面，
+  # 非 timing 车道 skipif 语义）——kernel-build 由 --filter 同调用链先跑。
+  kernel-metrics-smoke:
+    name: Kernel Metrics Smoke (真内核 /metrics 指标契约)
+    runs-on: ubuntu-latest
+    needs: [changes, rust-build]
+    if: needs.changes.outputs.full == 'true'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+        working-directory: kernel
+
+      - name: Install sccache (best-effort)
+        run: |
+          if cargo install sccache --locked 2>/dev/null && command -v sccache >/dev/null; then
+            echo "sccache ready"
+          else
+            echo "sccache unavailable, disable RUSTC_WRAPPER"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+          fi
+        working-directory: kernel
+
+      - name: Set up Python (gate runner)
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: kernel
+          shared-key: agentos-0.2
+
+      - name: Run gates (kernel-build + kernel-build-release + kernel-metrics-smoke)
+        # release 必须同链重建：resolve_kernel_binary release 优先，跳过会
+        # 烟测到缓存/上次产物的陈旧 release（本门禁 needs 同款约束）
+        run: python scripts/run_gates.py --filter kernel-build,kernel-build-release,kernel-metrics-smoke
+
   # ── Rust Coverage（llvm-cov 插桩度量；整体基线 2026-09-01 挂起）────────
   # cargo-llvm-cov 产出 lcov，check_rust_coverage_baseline.py 解析 line% 对照
   # .github/rust-coverage-baseline.txt（2026-09-01 用户裁定 --skip 挂起：
@@ -260,6 +306,12 @@ jobs:
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
+
+      # 与 rust-test job 同款：mcp stdio 等内核测试 spawn 真 python server
+      # （agentos_plugin_sdk + mcp 包），缺失时 custom_request_roundtrip 以
+      # "response channel closed" 假失败（python 可用但 import 失败即进程死）。
+      - name: Install SDK (mcp stdio 测试 spawn 真 python server)
+        run: pip install -e ./plugins/sdk
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -343,10 +395,24 @@ jobs:
           uv sync --frozen --extra dev
           uv pip install -e ./plugins/sdk
 
-      - name: Run gates (sdk-lint, sdk-mypy, config-direct-reads, scripts-lint, plugins-lint, tool-contract-completeness)
+      - name: Run gates (sdk-lint, sdk-mypy, config-direct-reads, scripts-lint, plugins-lint, tool-contract-completeness, tool-schema-contract, agent-tool-ids, step-declaration-parity)
         # uv run：config-static 的检查器 import yaml，依赖在 uv venv 内——
-        # 裸 setup-python 解释器无 pyyaml（2026-10-01 CI 实红 ModuleNotFoundError）
-        run: uv run --frozen python scripts/run_gates.py --filter sdk-lint,sdk-mypy,config-direct-reads,scripts-lint,plugins-lint,tool-contract-completeness,config-static
+        # 裸 setup-python 解释器无 pyyaml（2026-10-01 CI 实红 ModuleNotFoundError）。
+        # step-declaration-parity（2026-10-10 CI 清单 C 项）此前只注册未接线，
+        # gate-wiring V1 判死门禁——本刀接入 python-lint 车道。
+        # tool-schema-contract（2026-10-16 工具调用形态修复执法面）同族静态闸，
+        # 2026-10-17 推送前核账接入本车道（V1 死门禁消除）。
+        # agent-tool-ids（2026-10-18 tool_ids 漂移归因刀）：同族静态闸 import yaml，
+        # 同置本车道（脚本/插件面变更触发 python_full；纯 config 变更走 related
+        # 车道的关联测试面，见 scripts/ci_changed_areas.py）。
+        # config-seed-ver（2026-10-24 ADR config-seed-version-arbitration）：
+        # 出厂默认 version 声明 + 变更必抬版本——治用户空间陈旧副本遮蔽包内
+        # 修复（评估通过空转事故根因）；纯 git+正则零第三方依赖。
+        # gate-protected 不在此列（2026-11-04 P-04 评估，ADR
+        # 2026-11-04-gate-protected-always-on-job）——本 job 有 if: python_full，
+        # 纯 docs/ / 纯 config/ 变更跳过它，而保护清单里恰有 docs/schemas/、
+        # docs/graph/viewer.html 与两个 config/ 文件：标记校验已挪恒跑 job。
+        run: uv run --frozen python scripts/run_gates.py --filter sdk-lint,sdk-mypy,config-direct-reads,kernel-db-direct-reads,scripts-lint,plugins-lint,tool-contract-completeness,tool-schema-contract,agent-tool-ids,step-declaration-parity,config-static,config-seed-ver,plugin-venv-health,enforcement-tier
 
   # ── Python Test（插件 SDK）─────────────────────────────────
   python-test:
@@ -382,312 +448,11 @@ jobs:
   #   由 python-heavy-suites job 免插桩并排执行，正确性信号不缩水。
   # 阈值守护：fail-under=50 会自动验证豁免名单正确性——若豁免套件实际
   # 独家贡献了覆盖率，本 job 当场红（misconfiguration fails loud）。
-  # 插桩车道 4 并行分片 + 合并（2026-10-04）：单 CI job 跑全量插桩套件恒定
-  # ~48 分钟墙处「runner lost communication」（五轮实证 + 探针 meminfo 排除
-  # 内存）；根因 = 输出体量（-v 逐行 + term-missing 全表 + VERBOSE 全量打印
-  # 灌爆 job log 上传管道）。分片后每 job 只跑 ~1/4 测试集、pytest -q 静默、
-  # 只出 .coverage 不出 term 报表，输出体量与时长同时降一个量级。各分片
-  # .coverage 经 artifact 交给 merge job：coverage combine + xml + 覆盖率
-  # 地板锁 + 渠道 per-file + 改动行 100%。测试集与阈值承诺不变。四 job 显式
-  # 展开（元门禁 V1 按 workflow 文本字面匹配 --filter 引用，matrix 动态拼
-  # 无法过闸）。
-  python-coverage-a:
-    name: Python Coverage 插桩分片 a
+  python-coverage:
+    name: Python Coverage (插桩 + 失败数基线 + mypy 基线 + 改动行 100%；整体基线挂起)
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.python_full == 'true'
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.11"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
-        with:
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-
-      - name: Sync dependencies from uv.lock (frozen, reproducible)
-        # --extra isolation：isolation docker timeout/manager 系测试 patch
-        #   ('docker.from_env')，需 docker 包（2026-09-01 实证）。
-        run: |
-          uv sync --frozen --extra dev --extra isolation
-          uv pip install -e ./plugins/sdk
-
-      # 插桩分片 gate：pytest -q || true 经 tee 捕获 → 失败数基线锁
-      #   .github/pytest-failure-baseline.txt（lane plugins-coverage-a）。
-      # 瞬时闸（配对/渠道守卫）各分片均摊；mypy 基线锁（~8min）挂 a 分片。
-      - name: Run gates (shard a) with stderr capture
-        run: |
-          T=$(mktemp); E=$(mktemp)
-          set +e
-          python scripts/run_gates.py --filter plugins-coverage-a,plugins-coverage-pairing,channel-copy-guard,plugins-mypy-baseline 2> "$E" 1> "$T"
-          # 把失败上下文写入 step summary（公开可见）
-          {
-            echo "## shard a — last 60 stdout"
-            tail -60 "$T"
-            echo "## shard a — last 40 stderr"
-            tail -40 "$E"
-          } >> "$GITHUB_STEP_SUMMARY" || true
-          # 仍发 commit comment 留底
-          cp "$E" "$GITHUB_WORKSPACE/shard_a.stderr" || true
-          cp "$T" "$GITHUB_WORKSPACE/shard_a.stdout" || true
-          test ! -s "$E"
-
-      - name: Upload shard a debug outputs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: shard-a-debug
-          path: |
-            shard_a.stdout
-            shard_a.stderr
-
-      - name: Upload coverage data (shard a .coverage)
-        uses: actions/upload-artifact@v4
-        with:
-          name: plugins-coverage-a
-          path: .coverage
-          retention-days: 1
-          if-no-files-found: error
-  python-coverage-b:
-    name: Python Coverage 插桩分片 b
-    runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.python_full == 'true'
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.11"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
-        with:
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-
-      - name: Sync dependencies from uv.lock (frozen, reproducible)
-        # --extra isolation：isolation docker timeout/manager 系测试 patch
-        #   ('docker.from_env')，需 docker 包（2026-09-01 实证）。
-        run: |
-          uv sync --frozen --extra dev --extra isolation
-          uv pip install -e ./plugins/sdk
-
-      # 插桩分片 gate：pytest -q || true 经 tee 捕获 → 失败数基线锁
-      #   .github/pytest-failure-baseline.txt（lane plugins-coverage-b）。
-      # 瞬时闸（配对/渠道守卫）各分片均摊；mypy 基线锁（~8min）挂 a 分片。
-      - name: Run gates (shard b) with stderr capture
-        run: |
-          T=$(mktemp); E=$(mktemp)
-          set +e
-          python scripts/run_gates.py --filter plugins-coverage-b,plugins-coverage-pairing,channel-copy-guard 2> "$E" 1> "$T"
-          {
-            echo "## shard b — last 60 stdout"
-            tail -60 "$T"
-            echo "## shard b — last 40 stderr"
-            tail -40 "$E"
-          } >> "$GITHUB_STEP_SUMMARY" || true
-          cp "$E" "$GITHUB_WORKSPACE/shard_b.stderr" || true
-          cp "$T" "$GITHUB_WORKSPACE/shard_b.stdout" || true
-          test ! -s "$E"
-
-      - name: Upload shard b debug outputs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: shard-b-debug
-          path: |
-            shard_b.stdout
-            shard_b.stderr
-
-      - name: Upload coverage data (shard b .coverage)
-        uses: actions/upload-artifact@v4
-        with:
-          name: plugins-coverage-b
-          path: .coverage
-          retention-days: 1
-          if-no-files-found: error
-  python-coverage-c:
-    name: Python Coverage 插桩分片 c
-    runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.python_full == 'true'
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.11"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
-        with:
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-
-      - name: Sync dependencies from uv.lock (frozen, reproducible)
-        # --extra isolation：isolation docker timeout/manager 系测试 patch
-        #   ('docker.from_env')，需 docker 包（2026-09-01 实证）。
-        run: |
-          uv sync --frozen --extra dev --extra isolation
-          uv pip install -e ./plugins/sdk
-
-      # 插桩分片 gate：pytest -q || true 经 tee 捕获 → 失败数基线锁
-      #   .github/pytest-failure-baseline.txt（lane plugins-coverage-c）。
-      # 瞬时闸（配对/渠道守卫）各分片均摊；mypy 基线锁（~8min）挂 a 分片。
-      - name: Run gates (shard c)
-        run: python scripts/run_gates.py --filter plugins-coverage-c,plugins-coverage-pairing,channel-copy-guard
-
-      - name: Upload coverage data (shard c .coverage)
-        uses: actions/upload-artifact@v4
-        with:
-          name: plugins-coverage-c
-          path: .coverage
-          retention-days: 1
-          if-no-files-found: error
-  python-coverage-d:
-    name: Python Coverage 插桩分片 d
-    runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.python_full == 'true'
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.11"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
-        with:
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-
-      - name: Sync dependencies from uv.lock (frozen, reproducible)
-        # --extra isolation：isolation docker timeout/manager 系测试 patch
-        #   ('docker.from_env')，需 docker 包（2026-09-01 实证）。
-        run: |
-          uv sync --frozen --extra dev --extra isolation
-          uv pip install -e ./plugins/sdk
-
-      # 插桩分片 gate：pytest -q || true 经 tee 捕获 → 失败数基线锁
-      #   .github/pytest-failure-baseline.txt（lane plugins-coverage-d）。
-      # 瞬时闸（配对/渠道守卫）各分片均摊；mypy 基线锁（~8min）挂 a 分片。
-      - name: Run gates (shard d) with stderr capture
-        run: |
-          T=$(mktemp); E=$(mktemp)
-          set +e
-          python scripts/run_gates.py --filter plugins-coverage-d,plugins-coverage-pairing,channel-copy-guard 2> "$E" 1> "$T"
-          {
-            echo "## shard d — last 60 stdout"
-            tail -60 "$T"
-            echo "## shard d — last 40 stderr"
-            tail -40 "$E"
-          } >> "$GITHUB_STEP_SUMMARY" || true
-          cp "$E" "$GITHUB_WORKSPACE/shard_d.stderr" || true
-          cp "$T" "$GITHUB_WORKSPACE/shard_d.stdout" || true
-          test ! -s "$E"
-
-      - name: Upload shard d debug outputs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: shard-d-debug
-          path: |
-            shard_d.stdout
-            shard_d.stderr
-
-      - name: Upload coverage data (shard d .coverage)
-        uses: actions/upload-artifact@v4
-        with:
-          name: plugins-coverage-d
-          path: .coverage
-          retention-days: 1
-          if-no-files-found: error
-
-  python-coverage-e:
-    name: Python Coverage 插桩分片 e
-    runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.python_full == 'true'
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.11"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
-        with:
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-
-      - name: Sync dependencies from uv.lock (frozen, reproducible)
-        # --extra isolation：isolation docker timeout/manager 系测试 patch
-        #   ('docker.from_env')，需 docker 包（2026-09-01 实证）。
-        run: |
-          uv sync --frozen --extra dev --extra isolation
-          uv pip install -e ./plugins/sdk
-
-      # 插桩分片 gate：pytest -q || true 经 tee 捕获 → 失败数基线锁
-      #   .github/pytest-failure-baseline.txt（lane plugins-coverage-e）。
-      # 瞬时闸（配对/渠道守卫）各分片均摊；mypy 基线锁（~8min）挂 a 分片。
-      - name: Run gates (shard e) with stderr capture
-        run: |
-          T=$(mktemp); E=$(mktemp)
-          set +e
-          python scripts/run_gates.py --filter plugins-coverage-e,plugins-coverage-pairing,channel-copy-guard 2> "$E" 1> "$T"
-          {
-            echo "## shard e — last 60 stdout"
-            tail -60 "$T"
-            echo "## shard e — last 40 stderr"
-            tail -40 "$E"
-          } >> "$GITHUB_STEP_SUMMARY" || true
-          cp "$E" "$GITHUB_WORKSPACE/shard_e.stderr" || true
-          cp "$T" "$GITHUB_WORKSPACE/shard_e.stdout" || true
-          test ! -s "$E"
-
-      - name: Upload shard e debug outputs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: shard-e-debug
-          path: |
-            shard_e.stdout
-            shard_e.stderr
-
-      - name: Upload coverage data (shard e .coverage)
-        uses: actions/upload-artifact@v4
-        with:
-          name: plugins-coverage-e
-          path: .coverage
-          retention-days: 1
-          if-no-files-found: error
-
-  python-coverage-merge:
-    name: Python Coverage 合并 (combine + 覆盖率/改动行基线)
-    runs-on: ubuntu-latest
-    needs: [python-coverage-a, python-coverage-b, python-coverage-c, python-coverage-d, python-coverage-e]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -706,33 +471,35 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Sync dependencies from uv.lock (frozen, reproducible)
+        # 从 uv.lock 安装根项目依赖（全量锁定、可复现构建），不再 pip 在线解析。
+        # 注：plugins/sdk 是独立包（自身无锁文件、其依赖 mcp 未纳入根 uv.lock），
+        # 故单独 editable 安装以补齐 SDK 源码与其依赖；根依赖均由锁文件锁定。
+        # --extra isolation：isolation docker timeout/manager 系测试 patch
+        #   ('docker.from_env')，需 docker 包（本地 .venv 常驻装有故本地绿、
+        #   CI 2026-09-01 首跑暴露 45 失败簇——mock.py:1419 AttributeError）。
         run: |
           uv sync --frozen --extra dev --extra isolation
           uv pip install -e ./plugins/sdk
 
-      - name: Download coverage data (四分片 .coverage)
-        uses: actions/download-artifact@v4
-        with:
-          pattern: plugins-coverage-?
-          merge-multiple: false
-          path: coverage-shards
-
-      - name: Place shard coverage files
-        run: |
-          for s in a b c d e; do
-            mv "coverage-shards/plugins-coverage-$s/.coverage" ".coverage-$s"
-          done
-
-      # 门禁：plugins-coverage-merge（coverage combine + xml → 整体覆盖率基线锁，
-      #       D1 拍板 90 地板恢复执法）
-      #     + channel-per-file-coverage（渠道三件逐文件 100%，消费 coverage.xml）
-      #     + plugins-diff-coverage（改动行 100%：PR 按 merge-base、push 查最后
-      #       一个提交；[skip-diff-cov] 逃生口，ADR 2026-08-20）
-      - name: Run gates (merge + channel per-file + diff-coverage)
+      # 门禁：plugins-coverage-pairing（名单配对校验，瞬时）
+      #     + channel-copy-guard（渠道共享拷贝守卫，瞬时——channel_common 模块名
+      #       黑名单不得重回 channel_* 目录，C1 合流防复发）
+      #     + plugins-coverage（插桩：pytest || true 经 tee 捕获 → 失败数基线锁
+      #       .github/pytest-failure-baseline.txt 只减不增 → 整体覆盖率基线
+      #       （2026-09-01 用户裁定 --skip 挂起，不做闸门；基线值保留在
+      #       .github/python-coverage-baseline.txt，coverage.xml 照常产出
+      #       供 diff 门禁与矩阵回填消费，恢复 = run_gates 去掉 --skip））
+      #     + channel-per-file-coverage（渠道三件 wecom/qq/dingtalk 逐源文件
+      #       行/函数 100% 检查，DSH 口径——run_gates 定义 2026-08-26，
+      #       此前漏接线，2026-09-01 补入；消费本 job 产出的 coverage.xml）
+      #     + plugins-diff-coverage（改动行覆盖率 100%：PR 事件按 merge-base，
+      #       push 事件查最后一个提交；[skip-diff-cov] 逃生口，ADR 2026-08-20）
+      #     + plugins-mypy-baseline（plugins/shared mypy 只减不增，
+      #       基线 .github/mypy-baseline.txt；uv run 保证与本地计数口径一致）
+      - name: Run gates (pairing + copy-guard + coverage + channel per-file + diff-coverage + mypy baseline)
         env:
           GITHUB_BASE_REF: ${{ github.base_ref }}
-        run: python scripts/run_gates.py --filter plugins-coverage-merge,channel-per-file-coverage,plugins-diff-coverage
-
+        run: python scripts/run_gates.py --filter plugins-coverage-pairing,channel-copy-guard,plugins-coverage,channel-per-file-coverage,plugins-diff-coverage,plugins-mypy-baseline
 
   # ── Python Heavy Suites（免插桩 gate：重型套件并排执行）────────────────
   # 与 python-coverage 并行（无 needs 依赖）：84 插件（78 sidecar + 3
@@ -789,11 +556,10 @@ jobs:
       # sccache，全局 env 的 RUSTC_WRAPPER 指向不存在二进制会直接失败。
       - name: Build native plugin artifacts (cdylib)
         run: |
-          # tool_core 已收窄为 Python sidecar（plugin.json 无 native 声明），
-          # 不再构建 cdylib；仅存 native 契约的两 output 插件在此列
           for crate in \
-            plugins/shared/pipeline/output/sensitive_checker \
-            plugins/shared/pipeline/output/spill_guard; do
+            plugins/shared/tool_core \
+            plugins/shared/sensitive_checker \
+            plugins/shared/spill_guard; do
             echo "::group::cargo build $crate"
             RUSTC_WRAPPER= cargo build --release --manifest-path "$crate/Cargo.toml"
             name=$(python -c "import json;print(json.load(open('$crate/plugin.json'))['native']['artifact'])")
@@ -851,8 +617,13 @@ jobs:
   #      计数只减不增（baseline 内嵌脚本，随 channel_api 批次逐域下调）。
   # 纯 Python 检查（重新生成 + 计数），不依赖 Node/内核，独立轻量 job，
   # 与 run_gates.py 无耦合（本闸承诺由本 job 持有）。
+  # 本 job 同时承载主题色卫生闸（run_gates --filter 追加步）：endpoints 车道
+  # 触发面前缀 = plugins/ + frontend/src/，是「仅改 plugins/**（含 plugin.json
+  # 声明模板）」时主题色门禁的唯一 CI 触达点——frontend-test job 只看 frontend/**，
+  # 不补此步则插件模板硬编码颜色可溜过 CI（2026-10-25 用户裁定：插件声明模板
+  # 同受「颜色一律随主题」约束）。
   frontend-endpoints-sync:
-    name: Frontend Endpoints Sync (生成物漂移闸 + /ext/ 手写棘轮闸)
+    name: Frontend Endpoints Sync (生成物漂移闸 + /ext/ 手写棘轮闸 + 主题色卫生)
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.endpoints == 'true'
@@ -866,6 +637,9 @@ jobs:
 
       - name: Run endpoints sync checks (drift + handwritten ratchet)
         run: python scripts/check_frontend_endpoints_sync.py
+
+      - name: Run theme color hygiene gate (plugin.json 声明模板同受主题色约束)
+        run: python scripts/run_gates.py --filter frontend-theme-color-hygiene
 
   # ── 插件配置写面机械门禁（2026-09-28 配置读写单源化批次 E1）──────────
   # 公理：配置读写同源落用户空间——插件禁止自拼路径直写 config/.env/data
@@ -885,6 +659,25 @@ jobs:
 
       - name: Run plugin config write surface gate
         run: python scripts/check_plugin_config_write_surface.py
+
+  # ── 三端统一版本号闸（AR-M10，用户拍板 2026-10-15）──────────────────
+  # 单一真值 = 仓根 VERSION；kernel Cargo.toml / frontend package.json /
+  # app-mobile package.json / build.gradle versionName 五面必须同值。
+  # 纯 Python 检查，独立轻量 job，与 run_gates.py 无耦合（本闸承诺由本 job
+  # 持有，同 frontend-endpoints-sync / plugin-config-write-surface 形态）。
+  version-sync:
+    name: Version Sync (三端统一版本号闸)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Run version sync gate
+        run: python scripts/check_version_sync.py
 
   # ── Timing Gate（关键时序不变量，独立阻塞，§9.4/§6.4）──────────────
   # 专门运行标记了 @pytest.mark.timing 的用例（事件顺序 / 间隔 / 超时边界）。
@@ -956,10 +749,10 @@ jobs:
       - name: Install dependencies (pnpm workspace,根 lock；不同步直接红——安全审查：禁 fallback 绕过锁定)
         run: pnpm install --frozen-lockfile
 
-      - name: Run gates (typecheck + lint 基线 + coverage 基线 + 改动行 100% + any/大文件冻结)
+      - name: Run gates (typecheck + lint 基线 + coverage 基线 + 改动行 100% + any/大文件冻结 + 主题色卫生)
         env:
           GITHUB_BASE_REF: ${{ github.base_ref }}
-        run: python scripts/run_gates.py --filter frontend-typecheck,frontend-lint,frontend-coverage,frontend-diff-coverage,frontend-any-baseline
+        run: python scripts/run_gates.py --filter frontend-typecheck,frontend-lint,frontend-coverage,frontend-diff-coverage,frontend-any-baseline,frontend-theme-color-hygiene
 
       # ── knip/jscpd 跨平台计数观察（执行方案 0-1 前置，2026-09-24）──
       # 基线已按 Windows pnpm 口径收紧（99/547）。本观察态步骤收集 Linux 侧
@@ -1075,8 +868,8 @@ jobs:
   #   --report-format json --report-path .github/gitleaks-baseline.json。
   # - fetch-depth: 0 必须：gitleaks 按 git log -p 全历史扫描，浅克隆下基线
   #   fingerprint（commit:file:rule:line）对不上会整体误红。
-  # - 基线与 CI 同参验证（gitleaks 8.30.1，--log-opts=--all → no leaks
-  #   found）；改扫描参数须同步重生成基线。
+  # - 本地生成基线与 CI 同参验证过（gitleaks 8.28.0，--log-opts=--all
+  #   → no leaks found）；改扫描参数须同步重生成基线。
   secret-scan:
     name: Secret scan (gitleaks)
     runs-on: ubuntu-latest
@@ -1085,11 +878,9 @@ jobs:
         with:
           fetch-depth: 0  # 全历史扫描 + 基线 fingerprint 对齐
 
-      # 8.28.0 linux 构建在本仓 runner 上 10s 快速失败（8.28.0/8.30.1
-      # windows 二进制同参同基线复验均通过）；升级钉版 8.30.1。
-      - name: Install gitleaks (pinned 8.30.1)
+      - name: Install gitleaks (pinned 8.28.0)
         run: |
-          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o /tmp/gitleaks.tgz
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_linux_x64.tar.gz -o /tmp/gitleaks.tgz
           tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
           sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
           gitleaks version
@@ -1111,7 +902,7 @@ jobs:
       # ruff/mypy hooks 是 language: system（hook 仓库 github 拉取在部分
       # 开发机不可达），本 job 钉版本装齐工具后再跑
       - name: Install pinned lint tools
-        run: pip install ruff==0.15.20 mypy==2.1.0 pre-commit==3.5.0
+        run: pip install ruff==0.15.20 mypy==2.1.0
 
       - name: Run pre-commit
         uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
@@ -1147,6 +938,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # file-length-baseline（ADR 2026-10-12）新文件档需 git diff
+          # <before-sha> 判定本 push 新增；触碰即拆档需 merge-base(base_ref)
+          # 全历史——默认 depth:1 都取不到，全量取回保两者可解析
+          # （解析失败该闸 fail-closed 红）。
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -1154,7 +951,29 @@ jobs:
           python-version: "3.11"
 
       - name: Run gates (traceability-gate)
-        run: python scripts/run_gates.py --filter traceability-gate,doc-baseline-sync,doc-paths
+        # kernel-port-sync（整改K4）：纯 Python 端口同步闸搭本恒跑轻量 job
+        # （electron KERNEL_DEFAULT_PORT ≡ 前端 PACKAGED_KERNEL_WS_ORIGIN）。
+        # openapi-drift（整改§6）：OpenAPI 说明书漂移闸（openapi.yaml ≡
+        # 路由注册面再生成的，纯 Python 同上搭本恒跑轻量 job）。
+        # file-length-baseline（ADR 2026-10-12）：文件长度新/存分档闸
+        # （新1500/3000 硬 + 存量触线2500/5000 + 基线棘轮 + 触碰即拆）；
+        # before-sha 经环境变量下传给闸做新文件判定（PR 事件为空 → 闸回退
+        # HEAD~1）；base_ref 下传给触碰即拆检查做 merge-base diff（与
+        # diff-coverage 车道同形态；push 事件为空 → 回退 HEAD^..HEAD 只查
+        # 最后一个提交）。
+        # gate-protected（P-04 评估，ADR 2026-11-04-gate-protected-always-on-
+        # job）：门禁护门禁的 [gate-change] 标记校验原只挂 python-lint
+        # （if: python_full）——纯 docs/ 或纯 config/ 变更时该 job 跳过，而保护
+        # 清单里恰有 docs/schemas/、docs/graph/viewer.html 与两个 config/ 文件，
+        # 受保护路径 diff 无标记在 CI 端无 job 跑 = 静默绕过。本 job 恒跑且
+        # fetch-depth: 0 + GITHUB_BASE_REF 已备，是既有成本为零的唯一恒跑落点。
+        env:
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        # pyyaml 前置：render-card-sync 经 _scan_dsh_translator exec
+        # dsh_adapter/translator.py（顶层 import yaml），本 job 裸 python
+        # 无三方包 → ModuleNotFoundError 假红（2026-11-06 CI 实证）。
+        run: pip install -q pyyaml && python scripts/run_gates.py --filter traceability-gate,doc-baseline-sync,doc-paths,doc-frontmatter,working-index-fresh,kernel-port-sync,openapi-drift,file-length-baseline,render-card-sync,shell-config-sync,frontend-plugin-pages-sync,shared-root-imports,service-declaration,observability-config,gate-protected
 
   # ── All Checks Passed（汇总门禁，分支保护唯一入口）───────────────────────
   # Phase 1（2026-08-23）：分支保护规则只挂本 job 一个名字。
@@ -1179,6 +998,36 @@ jobs:
       - name: Run meta gate
         run: python scripts/run_gates.py --filter gate-wiring
 
+  # ── 构建产物禁入提交（2026-10-29 ADR build-artifact-commit-guard）────────
+  # 两次同型事故（2026-09-01 target-rel-alt 1394 件；2026-10-28 target-cov-g2
+  # 5.0GB/1955 件，两远端 100MB 硬限拒 push）根因 = .gitignore 漏配 + worktree
+  # auto-save 盲扫。gitignore 是第一层，本 job 是第二层：已跟踪面出现产物
+  # 路径或 >95MiB 文件即红；push 事件额外扫 before..HEAD 区间对象（防
+  # 「提交后又删」绕过 HEAD 面）。与 run_gates 无耦合（本闸承诺由本 job 持有）。
+  artifact-guard:
+    name: Build artifacts must not be committed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # 区间扫描需要 before 提交可达（push 事件的上一 tip）
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Scan tracked tree (+ push range when available)
+        run: |
+          ARGS=""
+          BEFORE="${{ github.event.before }}"
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            ARGS="--range $BEFORE..HEAD"
+          fi
+          python scripts/check_no_build_artifacts.py $ARGS
+
   all-checks-passed:
     name: All checks passed
     runs-on: ubuntu-latest
@@ -1188,16 +1037,12 @@ jobs:
       - rust-lint
       - rust-build
       - rust-test
+      - kernel-metrics-smoke
       - rust-coverage
       - rust-deny
       - python-lint
       - python-test
-      - python-coverage-a
-      - python-coverage-b
-      - python-coverage-c
-      - python-coverage-d
-      - python-coverage-e
-      - python-coverage-merge
+      - python-coverage
       - python-heavy-suites
       - python-related
       - frontend-endpoints-sync
@@ -1210,6 +1055,7 @@ jobs:
       - tdd-gate
       - traceability-gate
       - gate-wiring
+      - artifact-guard
     steps:
       - name: Check all required jobs succeeded
         run: |

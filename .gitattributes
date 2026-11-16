@@ -11,3 +11,10 @@ docker-entrypoint.sh  text eol=lf
 
 # 默认：交给 git autocrlf 处理
 * text=auto
+
+# tiktoken 预置词表：内容寻址缓存件，字节级 sha256 校验，禁任何 EOL 转换
+plugins/shared/llm/tiktoken_cache/** -text
+
+# 技能同文双副本（P-17/E0-10）：行尾钉 LF，防两副本行尾分叉致 bytes 级同文闸假红
+skills/**/SKILL.md text eol=lf
+plugins/shared/mode_coding/skills/**/SKILL.md text eol=lf

@@ -1,0 +1,352 @@
+# @feature: FP-0.2.〇 管道引擎与插件执行模型 | @vision: V3 可嵌入 | @ci: python-coverage
+"""stop_check sidecar 实例复用契约测试。
+
+同 sidecar 进程内，一个插件实例被多个管道（多 agent）连续复用。本文件锁定：
+
+1. 运行时参数复位：前一 agent 经 state 注入的 max_iterations / timeout_seconds
+   不残留到下一 agent 的执行（每次 execute 先回构造默认再应用覆盖）；
+2. 任务实际状态查询走公共服务接口：未注册服务时经 tasks.service_access
+   单例兜底可查到终态；查询失败记 warning（与正常运行路径可区分），不崩溃。
+"""
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+_DIR = Path(__file__).resolve().parent
+_SHARED = _DIR.parents[0]  # plugins/shared/
+_SYSTEM = _SHARED / "system"
+
+for _d in [_DIR, _SHARED, _SYSTEM]:
+    if str(_d) not in sys.path:
+        sys.path.insert(0, str(_d))
+
+from _libs.pipeline_base.plugin import PluginContext  # noqa: E402
+from test_stop_check_run_reset import _FakeClock  # noqa: E402
+
+
+def _load_plugin_module() -> Any:
+    mod_name = "stop_check_plugin_sidecar_test"
+    module_path = _DIR / "plugin.py"
+    if mod_name in sys.modules:
+        del sys.modules[mod_name]
+    spec = importlib.util.spec_from_file_location(mod_name, str(module_path))
+    assert spec is not None, "Cannot load plugin.py"
+    assert spec.loader is not None, "Cannot load plugin.py"
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _run(coro: Any) -> Any:
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def _ctx(state: dict[str, Any], services: dict[str, Any] | None = None) -> PluginContext:
+    return PluginContext(state=dict(state), config={}, _services=services or {})
+
+
+class TestRuntimeConfigResetPerAgent:
+    def test_max_iterations_does_not_leak_across_agents(self) -> None:
+        """Agent A 注入 max_iterations=3 触发上限终止；随后的 Agent B 未注入任何
+        覆盖——同实例连续执行必须回到构造默认（20），iteration=5 正常放行。"""
+        mod = _load_plugin_module()
+        plugin = mod.StopCheckPlugin(config={})
+
+        state_a = {
+            "pipeline_id": "pipe-a",
+            "iteration": 5,
+            "max_iterations": 3,
+            "timeout_seconds": -1,
+            "task.id": "",
+        }
+        res_a = _run(plugin.execute(_ctx(state_a)))
+        assert res_a.state_updates.get("should_stop") is True, "Agent A 应命中自定义上限 3 终止"
+        assert res_a.state_updates.get("router.stop_reason") == "max_iterations"
+
+        state_b = {"pipeline_id": "pipe-b", "iteration": 5, "task.id": ""}
+        res_b = _run(plugin.execute(_ctx(state_b)))
+        assert res_b.state_updates.get("should_stop") is not True, (
+            f"Agent B 无覆盖时应按默认上限放行，实际残留了 Agent A 的配置: "
+            f"{res_b.state_updates}"
+        )
+        assert res_b.state_updates.get("router.stop_reason", "") == ""
+
+    def test_timeout_override_applies_then_resets(self) -> None:
+        """Agent A 注入 timeout_seconds=0 使其立即超时终止；随后 Agent B（无覆盖、
+        同实例、不同管道）不得继承该 0 阈值——缺省 -1（无限制，时间预算退役，
+        用户裁定 2026-10-17）下刚启动的管道应放行。
+
+        state 带 run_id（引擎每 run 注入的运行标识）：执行超时闸门的回落计时
+        锚按 (pipeline_id, run_id) 记账——无 run_id 即无锚，闸门无从判定。"""
+        mod = _load_plugin_module()
+        plugin = mod.StopCheckPlugin(config={})
+
+        state_a = {
+            "pipeline_id": "pipe-a",
+            "run_id": "run-a",
+            "iteration": 1,
+            "timeout_seconds": 0,
+            "task.id": "",
+        }
+        res_a = _run(plugin.execute(_ctx(state_a)))
+        assert res_a.state_updates.get("should_stop") is True, "Agent A 注入阈值 0 应立即命中超时终止"
+        assert res_a.state_updates.get("router.stop_reason") == "timeout"
+
+        # Agent B 无覆盖 → 缺省 -1（不设防）；新 run 的计时起点独立记账，
+        # elapsed 近零，残留的 0 阈值会让它同样立即误判超时。
+        state_b = {"pipeline_id": "pipe-b", "run_id": "run-b", "iteration": 1, "task.id": ""}
+        res_b = _run(plugin.execute(_ctx(state_b)))
+        assert res_b.state_updates.get("should_stop") is not True, (
+            "Agent B 无超时覆盖时不得继承 Agent A 注入的 timeout_seconds=0"
+        )
+
+    def test_llm_calls_anchor_counts_calls_not_iterations(self) -> None:
+        """轮次预算锚 = track.llm_usage.total_calls（用户裁定 2026-10-17：轮次
+        按大模型调用次数计）：total_calls 超线即停（iteration 远小于上限）；
+        total_calls 未超线放行（iteration 再大也不误停）；total_calls 缺席回退
+        引擎 iteration 锚（历史语义兜底）。"""
+        mod = _load_plugin_module()
+        plugin = mod.StopCheckPlugin(config={"max_iterations": 500, "max_duration_seconds": -1})
+
+        # total_calls=501 超线，iteration=7 远小——按调用数停，不看迭代号
+        state = {
+            "pipeline_id": "pipe-a", "iteration": 7, "task.id": "",
+            "track.llm_usage": {"total_calls": 501},
+        }
+        res = _run(plugin.execute(_ctx(state)))
+        assert res.state_updates.get("router.stop_reason") == "max_iterations"
+
+        # total_calls=500 恰在上限内，iteration=2001——迭代号再大也不误停
+        state = {
+            "pipeline_id": "pipe-a", "iteration": 2001, "task.id": "",
+            "track.llm_usage": {"total_calls": 500},
+        }
+        res = _run(plugin.execute(_ctx(state)))
+        assert res.state_updates.get("should_stop") is not True
+
+        # total_calls 缺席（旧 state）→ 回退 iteration 锚：>上限仍停
+        state = {"pipeline_id": "pipe-a", "iteration": 501, "task.id": ""}
+        res = _run(plugin.execute(_ctx(state)))
+        assert res.state_updates.get("router.stop_reason") == "max_iterations"
+
+
+class TestTaskStatusQueryChannel:
+    """任务实时终态检测：state 聚合读面（0.2 单一真值，无 YAML 兜底）。"""
+
+    def test_terminal_status_via_state_aggregation_ends(self, monkeypatch: Any) -> None:
+        """聚合行 task.status=completed → 管道收到 end 信号而不是静默放过。
+
+        外部终态写入（task_evaluate 经 pipeline-state.update）对运行中循环
+        内存态不可见——聚合读面是唯一实时来源（用户裁定：任务终态当轮停止）。"""
+        mod = _load_plugin_module()
+
+        async def fake_reader():
+            return [
+                {"pipeline_id": "p", "task.id": "p", "task.status": "completed"},
+            ]
+
+        monkeypatch.setattr(mod, "_state_reader", fake_reader)
+        plugin = mod.StopCheckPlugin(config={})
+        state = {"pipeline_id": "p", "iteration": 6, "task.id": "p"}
+        res = _run(plugin.execute(_ctx(state)))
+        assert res.state_updates.get("ended") is True, "聚合读到 completed 终态应收束管道"
+        assert res.state_updates.get("router.stop_reason") == "task_completed"
+
+    def test_failed_status_ends_and_running_passes(self, monkeypatch: Any) -> None:
+        """failed 同样当轮收束；running 非终态不拦截。"""
+        mod = _load_plugin_module()
+        plugin = mod.StopCheckPlugin(config={})
+        state = {"pipeline_id": "p", "iteration": 6, "task.id": "p"}
+
+        async def failed_reader():
+            return [{"pipeline_id": "p", "task.id": "p", "task.status": "failed"}]
+
+        monkeypatch.setattr(mod, "_state_reader", failed_reader)
+        res = _run(plugin.execute(_ctx(state)))
+        assert res.state_updates.get("ended") is True
+
+        async def running_reader():
+            return [{"pipeline_id": "p", "task.id": "p", "task.status": "running"}]
+
+        monkeypatch.setattr(mod, "_state_reader", running_reader)
+        res = _run(plugin.execute(_ctx(state)))
+        assert res.state_updates.get("ended") is not True, "running 非终态，不应收束"
+
+    def test_aggregation_branch_relinquishes_task_status_write(
+        self, monkeypatch: Any
+    ) -> None:
+        """收权（ADR 2026-10-30）：终态聚合分支不再写 task.status 键（裁决权
+        归任务域——评估闸门/失败链唯一写面），保留 ended=true 与
+        router.stop_reason 署名（状态键驱停通道照走，一字不动内核）。"""
+        mod = _load_plugin_module()
+
+        async def completed_reader():
+            return [{"pipeline_id": "p", "task.id": "p", "task.status": "completed"}]
+
+        monkeypatch.setattr(mod, "_state_reader", completed_reader)
+        plugin = mod.StopCheckPlugin(config={})
+        state = {"pipeline_id": "p", "iteration": 6, "task.id": "p"}
+        res = _run(plugin.execute(_ctx(state)))
+        assert res.state_updates.get("ended") is True
+        assert res.state_updates.get("router.stop_reason") == "task_completed"
+        assert "task.status" not in res.state_updates, (
+            "聚合分支不得写 task.status（裁决权收回任务域）"
+        )
+
+    def test_stopped_task_does_not_sign_stop(self, monkeypatch: Any) -> None:
+        """stopped（暂停放那里）不触发驱停署名：不 ended、不署名（放那的任务
+        允许其在飞 run 自然收束/被唤醒——ADR 2026-10-30 词汇收敛）。"""
+        mod = _load_plugin_module()
+
+        async def stopped_reader():
+            return [{"pipeline_id": "p", "task.id": "p", "task.status": "stopped"}]
+
+        monkeypatch.setattr(mod, "_state_reader", stopped_reader)
+        plugin = mod.StopCheckPlugin(config={})
+        state = {"pipeline_id": "p", "iteration": 6, "task.id": "p"}
+        res = _run(plugin.execute(_ctx(state)))
+        assert res.state_updates.get("ended") is not True, "stopped 任务不得驱动停"
+        assert res.state_updates.get("router.stop_reason", "") == "", (
+            "stopped 任务不得署名驱停（无驱停即无署名）"
+        )
+
+    def test_state_read_failure_warns_and_passes(
+        self, monkeypatch: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """聚合读取抛错 → 记 warning（与正常轮次区分可见），本轮不放行也不崩。"""
+        mod = _load_plugin_module()
+        plugin = mod.StopCheckPlugin(config={})
+        state = {"pipeline_id": "p", "iteration": 6, "task.id": "t-1"}
+
+        async def _boom():
+            raise RuntimeError("state bridge down")
+
+        monkeypatch.setattr(mod, "_state_reader", _boom)
+
+        with caplog.at_level("WARNING"):
+            res = _run(plugin.execute(_ctx(state)))
+
+        assert res.state_updates.get("ended") is not True, "读取失败不应伪造终态信号"
+        warnings = [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and "stop_check" in r.name
+        ]
+        assert warnings, "任务状态读取失败必须以 warning 级别留下可见痕迹"
+
+
+class TestLimitHitMarksTaskFailed:
+    """超线（迭代上限/超时）= 任务失败（完成唯一判据是 task_evaluate 评估通过）。"""
+
+    def test_max_iterations_marks_task_failed_for_task_pipeline(self) -> None:
+        mod = _load_plugin_module()
+        plugin = mod.StopCheckPlugin(config={})
+        state = {"pipeline_id": "p", "iteration": 99, "max_iterations": 3, "task.id": "t1"}
+        res = _run(plugin.execute(_ctx(state)))
+        assert res.state_updates.get("should_stop") is True
+        assert res.state_updates.get("router.stop_reason") == "max_iterations"
+        assert res.state_updates.get("task.status") == "failed"
+
+    def test_timeout_marks_task_failed_for_task_pipeline(self) -> None:
+        mod = _load_plugin_module()
+        plugin = mod.StopCheckPlugin(config={})
+        state = {
+            "pipeline_id": "p",
+            "run_id": "run-1",
+            "iteration": 1,
+            "timeout_seconds": 0,
+            "task.id": "t1",
+        }
+        res = _run(plugin.execute(_ctx(state)))
+        assert res.state_updates.get("router.stop_reason") == "timeout"
+        assert res.state_updates.get("task.status") == "failed"
+
+    def test_max_iterations_chat_pipeline_gets_no_task_status(self) -> None:
+        """无 task 上下文的聊天管道超线终止：不写 task.*（防幽灵任务标记）。"""
+        mod = _load_plugin_module()
+        plugin = mod.StopCheckPlugin(config={})
+        state = {"pipeline_id": "chat", "iteration": 99, "max_iterations": 3, "task.id": ""}
+        res = _run(plugin.execute(_ctx(state)))
+        assert res.state_updates.get("router.stop_reason") == "max_iterations"
+        assert "task.status" not in res.state_updates
+
+
+class TestLimitStopWritesSystemMessage:
+    """超线强停追加会话 system 消息：run 以 failed 收尾后终止原因用户可见。"""
+
+    def test_max_iterations_message_content(self) -> None:
+        """迭代上限强停：messages 恰一条 append set op，role=system，文案带
+        实际轮数与上限数值。"""
+        mod = _load_plugin_module()
+        plugin = mod.StopCheckPlugin(config={})
+        state = {"pipeline_id": "p", "iteration": 5, "max_iterations": 3, "task.id": "t1"}
+        res = _run(plugin.execute(_ctx(state)))
+
+        ops = res.state_updates["messages"]["_ops"]
+        assert len(ops) == 1
+        assert ops[0]["op"] == "set"
+        assert "seq" not in ops[0], "无 seq 的 set = append（引擎按 max seq 分配槽位）"
+        msg = ops[0]["msg"]
+        assert msg["role"] == "system"
+        # 锚标注随轮次锚（用户裁定 2026-10-17）：total_calls 缺席回退迭代锚
+        assert msg["content"] == (
+            "⚠️ 达到迭代上限被强制停止：已连续执行 5 轮（上限 3 轮，按迭代计），"
+            "进度已保存，可重新发送消息继续。"
+        )
+
+    def test_timeout_message_content_with_fake_clock(self, monkeypatch: Any) -> None:
+        """超时强停：文案带实际运行秒数与上限秒数（fake clock 注入，禁真实 sleep）。"""
+        mod = _load_plugin_module()
+        clock = _FakeClock()
+        monkeypatch.setattr(mod.time, "monotonic", clock.monotonic)
+        plugin = mod.StopCheckPlugin(config={})
+        state = {
+            "pipeline_id": "p",
+            "run_id": "run-1",
+            "iteration": 1,
+            "timeout_seconds": 50,
+            "task.id": "t1",
+        }
+        first = _run(plugin.execute(_ctx(state)))
+        assert first.state_updates.get("router.stop_reason", "") == ""
+
+        clock.advance(60)
+        res = _run(plugin.execute(_ctx(state)))
+        assert res.state_updates.get("router.stop_reason") == "timeout"
+        msg = res.state_updates["messages"]["_ops"][0]["msg"]
+        assert msg["role"] == "system"
+        assert "已连续运行 60.0 秒（上限 50 秒）" in msg["content"]
+        assert msg["content"].startswith("⚠️ 执行超时被强制停止：")
+        assert msg["content"].endswith("，进度已保存，可重新发送消息继续。")
+
+    def test_chat_pipeline_no_task_status_but_message(self) -> None:
+        """非任务管道（无 task.id）超线：不写 task.status，但消息照写（与
+        task.status 的分支条件解耦——聊天用户同样需要看到终止原因）。"""
+        mod = _load_plugin_module()
+        plugin = mod.StopCheckPlugin(config={})
+        state = {"pipeline_id": "chat", "iteration": 99, "max_iterations": 3, "task.id": ""}
+        res = _run(plugin.execute(_ctx(state)))
+        assert "task.status" not in res.state_updates
+        msg = res.state_updates["messages"]["_ops"][0]["msg"]
+        assert msg["role"] == "system"
+
+    def test_normal_round_produces_no_message(self) -> None:
+        """正常轮（未超线）：不产生任何消息 op。"""
+        mod = _load_plugin_module()
+        plugin = mod.StopCheckPlugin(config={})
+        state = {"pipeline_id": "p", "iteration": 1, "task.id": "t1"}
+        res = _run(plugin.execute(_ctx(state)))
+        assert "messages" not in res.state_updates

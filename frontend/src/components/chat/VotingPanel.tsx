@@ -268,10 +268,10 @@ export function VotingPanel({ voting, className }: VotingPanelProps) {
             className={cn(
               'text-[10px] px-1.5 py-0.5 rounded-full font-medium',
               isOpen
-                ? 'bg-[var(--status-success)]/10 text-[var(--status-success)]'
+                ? 'bg-[rgb(var(--status-success-rgb,5_150_105)/0.1)] text-[var(--status-success)]'
                 : isClosed
                   ? 'bg-muted text-muted-foreground'
-                  : 'bg-[var(--status-error)]/10 text-[var(--status-error)]',
+                  : 'bg-[rgb(var(--status-error-rgb,220_38_38)/0.1)] text-[var(--status-error)]',
             )}
           >
             {isOpen ? '投票中' : isClosed ? '已结束' : '已取消'}

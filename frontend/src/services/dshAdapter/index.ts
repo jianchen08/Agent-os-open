@@ -17,6 +17,7 @@
 
 import { getSchema } from '@/services/api/schema'
 import { loggers } from '@/utils/logger'
+import { DSH_RENDER_CARDS } from '@/utils/renderCardVocabulary.generated'
 import { addRenderIntent, type ToolRenderIntent } from '@/utils/renderIntent'
 
 /** dsh_adapter 插件 contributes.dsh_adapter 块（plugin.json 同构）。 */
@@ -42,7 +43,8 @@ export interface DshAdapterLoadResult {
   info: DshAdapterInfo | null
 }
 
-const VALID_CARDS: readonly ToolRenderIntent['card'][] = ['terminal', 'diff', 'read', 'web', 'search', 'generic']
+/** 贡献装载校验词表 = 生成物 DSH 面（translator 映射）子集——手抄清单已删（AR-M5 单源）。 */
+const VALID_CARDS: readonly ToolRenderIntent['card'][] = DSH_RENDER_CARDS
 
 /**
  * 拉取 schema 并装载 dsh_adapter 贡献。

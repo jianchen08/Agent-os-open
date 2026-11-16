@@ -28,7 +28,7 @@ import pytest
 pytestmark = pytest.mark.unit  # 0.2 TDD 分层：单元测试
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_PLUGIN_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "multimodal"
+_PLUGIN_DIR = _REPO_ROOT / "plugins" / "shared" / "multimodal"
 
 _MODULE_NAME = "multimodal_branch_gaps_server"
 

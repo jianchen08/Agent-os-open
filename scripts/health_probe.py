@@ -16,8 +16,10 @@ C1 UTC 找日志扑空、E3 资源位不可见、E1 handoff 盘点首步）。�
   WAITING_HUMAN/SUSPENDED/RUNNING_STALE/RUNNING 分类契约）；
 - L4 资源面：系统内存水位（≥80% 告警，E3）+ 内核 RSS 合计。
 
-两处根都扫（存在才报）：dev（repo logs/ 与 agentos_kernel.db）+ 装机
-（%LOCALAPPDATA%\\Programs\\agent-os\\resources\\kernel\\logs 与 %APPDATA%\\agentos）。
+日志根都扫（存在才报）：dev（repo logs/ 与 agentos_kernel.db）+ 装机默认位
+（%LOCALAPPDATA%\\Programs\\agent-os\\resources\\kernel\\logs）+ 用户空间
+（%APPDATA%\\agentos\\logs）+ 活体内核 exe 同目录 logs/（自定义 /D= 安装位）。
+口令：环境变量 AGENTOS_ADMIN_PASSWORD 优先，缺省回读用户空间 .env（只读）。
 
 用法：
   python scripts/health_probe.py [--json]
@@ -163,20 +165,37 @@ def _probe_ports() -> dict[str, Any]:
 # ── L2 日志面 ────────────────────────────────────────────────────────────────
 
 
-def _log_roots() -> list[Path]:
+def _log_roots(proc_face: dict[str, Any] | None = None) -> list[Path]:
+    """候选日志根（存在才报）：dev repo logs/ + 默认装机位 + 用户空间 + 活体内核同目录。
+
+    自定义安装位（``/D=`` 装到任意盘）不在默认候选里，按**运行中内核 exe 的
+    同目录 logs/** 派生——装机内核按自身 resources/kernel 相对 `logs/` 写日志，
+    与安装位置无关（2026-11-05 实测：D: 盘安装位未覆盖，日志面误红）。
+    """
     roots = [_REPO / "logs"]
     if local := os.environ.get("LOCALAPPDATA"):
         roots.append(Path(local) / "Programs" / "agent-os" / "resources" / "kernel" / "logs")
     if appdata := os.environ.get("APPDATA"):
         roots.append(Path(appdata) / "agentos" / "logs")
-    return roots
+    for item in (proc_face or {}).get("items", []):
+        if item.get("kind") != "kernel":
+            continue
+        exe = item.get("exe")
+        if not exe or exe == "?":
+            continue
+        roots.append(Path(exe).parent / "logs")
+    unique: list[Path] = []
+    for root in roots:
+        if root not in unique:
+            unique.append(root)
+    return unique
 
 
-def _probe_logs(now: datetime) -> dict[str, Any]:
+def _probe_logs(now: datetime, proc_face: dict[str, Any] | None = None) -> dict[str, Any]:
     utc_today = now.strftime("%Y-%m-%d")
     items, red = [], []
     any_fresh = False
-    for root in _log_roots():
+    for root in _log_roots(proc_face):
         if not root.is_dir():
             continue
         liveness = root / "kernel.liveness"
@@ -203,16 +222,41 @@ def _probe_logs(now: datetime) -> dict[str, Any]:
     elif any_fresh and len(items) > 1:
         # 多根场景只要求至少一处权威判活面新鲜；不新鲜根（残留装位等）降为记录项
         red = []
+        for item in items:
+            if not item["fresh"]:
+                item["informational"] = True
     return {"utc_today": utc_today, "items": items, "red": red}
 
 
 # ── L3 业务面 ────────────────────────────────────────────────────────────────
 
 
+def _admin_password() -> str | None:
+    """登录口令来源：用户空间 `.env`（真值）优先，环境变量兜底。
+
+    顺序不可反转：长驻 shell 里的 AGENTOS_ADMIN_PASSWORD 是启动时的历史快照，
+    口令轮换后它反而陈旧（2026-11-05 实测：环境变量旧值登录 400、.env 新值
+    通过）；`.env` 是部署真值面（口令恒读 .env 纪律）。
+    """
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        try:
+            env_lines = (Path(appdata) / "agentos" / ".env").read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            env_lines = []
+        for raw in env_lines:
+            if raw.startswith("AGENTOS_ADMIN_PASSWORD="):
+                value = raw.split("=", 1)[1].strip()
+                if value:
+                    return value
+    env_pw = os.environ.get("AGENTOS_ADMIN_PASSWORD")
+    return env_pw if env_pw and env_pw.strip() else None
+
+
 def _probe_login(base: str, listening_ports: list[int]) -> dict[str, Any]:
-    password = os.environ.get("AGENTOS_ADMIN_PASSWORD")
+    password = _admin_password()
     if not password:
-        return {"status": "no-password", "note": "未设 AGENTOS_ADMIN_PASSWORD，登录探活无法执行（非红项）"}
+        return {"status": "no-password", "note": "环境变量与用户空间 .env 均无口令，登录探活无法执行（非红项）"}
     if 9101 not in listening_ports:
         if 9100 in listening_ports:
             return {"status": "dev-only", "note": "9101 无监听而 9100 在——dev 形态，装机业务面未起（非红项）"}
@@ -257,6 +301,11 @@ def _probe_runs(db: Path, now: datetime) -> dict[str, Any] | None:
             )
         return {"db": str(db), "runs": verdicts}
     except sqlite3.Error as exc:
+        # 0.2 扁平 schema 没有 runs 表（run 语义随引擎内存态/checkpoint 承载），
+        # 长跑判定在本库上不适用——如实标注「不适用」而不是报「读失败」，
+        # 避免把 schema 世代差异渲染成运维红项（2026-11-05 装机轮实证）。
+        if "no such table: runs" in str(exc):
+            return {"db": str(db), "status": "schema-no-runs", "note": "0.2 schema 无 runs 表，长跑判定不适用"}
         return {"db": str(db), "error": f"读活跃 run 失败：{exc}"}
     finally:
         conn.close()
@@ -343,7 +392,8 @@ def _render(faces: dict[str, Any], now: datetime) -> None:
     print("[L2 日志面]")
     for item in faces["L2_logs"]["items"]:
         age = f"{item['liveness_age_s']:.0f}s 前" if item["liveness_age_s"] is not None else "无标记"
-        print(f"  {mark(not item['fresh'])} {item['root']} kernel.liveness={age}（阈值 {LIVENESS_FRESH_S}s）")
+        flagged = not item["fresh"] and not item.get("informational")
+        print(f"  {mark(flagged)} {item['root']} kernel.liveness={age}（阈值 {LIVENESS_FRESH_S}s）")
         size = _human_mb(item["current_log_bytes"]) if item["current_log_bytes"] else "缺失"
         print(f"    当前 UTC 日志：{item['current_log']}（{size}）")
     for r in faces["L2_logs"]["red"]:
@@ -361,6 +411,9 @@ def _render(faces: dict[str, Any], now: datetime) -> None:
     for runs in faces["L3_business"]["runs"]:
         if "error" in runs:
             print(f"  · {runs['db']}：{runs['error']}")
+            continue
+        if runs.get("status") == "schema-no-runs":
+            print(f"  · {runs['db']}：{runs['note']}")
             continue
         for v in runs["runs"]:
             print(
@@ -393,7 +446,7 @@ def main() -> int:
     faces: dict[str, Any] = {}
     faces["L0_process"] = _probe_processes()
     faces["L1_ports"] = _probe_ports()
-    faces["L2_logs"] = _probe_logs(now)
+    faces["L2_logs"] = _probe_logs(now, faces["L0_process"])
     faces["L3_business"] = _probe_business(now, faces["L1_ports"]["listening_ports"])
     faces["L4_resources"] = _probe_resources(faces["L0_process"])
 

@@ -10,6 +10,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { CommandDispatcher } from '@/services/schema/commandDispatcher'
 import { ContributionRegistry } from '@/services/schema/ContributionRegistry'
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { slotRegistry } from '@/services/slots/slotRegistry'
 import { useContextKeys } from '@/stores/contextKeysStore'
 
 describe('CommandDispatcher — 命令执行', () => {
@@ -53,8 +55,9 @@ describe('CommandDispatcher — modal trigger（P5-d）', () => {
     useContextKeys.getState().reset()
   })
 
-  it('命令触发 modal：声明 trigger=on_command:xxx 的 modal 被打开', async () => {
-    // 模拟插件声明：cost.showReport 命令 + 对应 modal
+  it('命令触发 overlay：shell.overlay 槽条目（modal 收敛）openOn=on_command:xxx 被打开', async () => {
+    // 模拟插件声明：cost.showReport 命令 + 对应 modal（触发面 commands 不动，
+    // 呈现面 = shell.overlay 槽条目，经 SlotRegistry 装载）
     ;(registry as unknown as { loadFromSchema: (s: unknown) => void }).loadFromSchema({
       plugin_contributes: [
         {
@@ -74,6 +77,29 @@ describe('CommandDispatcher — modal trigger（P5-d）', () => {
         },
       ],
     })
+    const chart = (() => null) as unknown as Parameters<typeof widgetRegistry.register>[1]
+    widgetRegistry.register('chart', chart, { name: 'chart' })
+    await slotRegistry.loadFromSchema(
+      {
+        plugin_contributes: [
+          {
+            plugin_id: 'cost',
+            contributes: {
+              modal: [
+                {
+                  id: 'cost.reportModal',
+                  title: '成本报告',
+                  trigger: 'on_command:cost.showReport',
+                  widget: 'chart',
+                  props: { metric: 'tokens' },
+                },
+              ],
+            },
+          },
+        ],
+      },
+      { loadWidgets: vi.fn().mockResolvedValue([]) },
+    )
 
     const onModalOpen = vi.fn()
     dispatcher.onModalOpen(onModalOpen)
@@ -83,8 +109,9 @@ describe('CommandDispatcher — modal trigger（P5-d）', () => {
 
     expect(onModalOpen).toHaveBeenCalledTimes(1)
     const opened = onModalOpen.mock.calls[0][0]
-    expect(opened.id).toBe('cost.reportModal')
+    expect(opened.id).toBe('cost:overlay:cost.reportModal')
     expect(opened.widget).toBe('chart')
+    expect(opened.slot).toBe('shell.overlay')
   })
 
   it('无 modal 绑定的命令不触发 modal 打开', async () => {

@@ -17,14 +17,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pipeline.plugin import PluginContext
-from pipeline.types import StateKeys
+from _libs.pipeline_base.plugin import PluginContext
+from _libs.pipeline_base.types import StateKeys
 
 pytestmark = pytest.mark.unit
 
 _PLUGIN_DIR = (
     Path(__file__).resolve().parents[4]
-    / "plugins" / "shared" / "pipeline" / "input" / "tool_args_inject"
+    / "plugins" / "shared" / "tool_args_inject"
 )
 _SHARED_DIR = _PLUGIN_DIR.parents[1]
 

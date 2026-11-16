@@ -1,7 +1,7 @@
 # @feature: FP-0.2.二 内部模块manifest | @vision: V3 可嵌入 | @ci: python-coverage
 """Bash 插件 0.2 sidecar 生命周期/越权/日志安全测试。
 
-覆盖评审 H-issue（仅 0.2 代码：plugins/shared/tools/bash + plugins/sdk）：
+覆盖评审 H-issue（仅 0.2 代码：plugins/shared/bash + plugins/sdk）：
 1. 状态生命周期：MCP 调用间复用同一 BashTool/ProcessManager 单例——
    execute → input → continue → terminate 全链路跨调用可用（原 bug：
    server.py 每次调用新建 BashTool 导致进程状态丢失）。
@@ -32,7 +32,7 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_PLUGIN_DIR = Path(__file__).resolve().parents[3] / "plugins" / "shared" / "tools" / "bash"
+_PLUGIN_DIR = Path(__file__).resolve().parents[3] / "plugins" / "shared" / "bash"
 _SDK_DIR = Path(__file__).resolve().parents[3] / "plugins" / "sdk" / "src"
 
 _NEEDS_BASH = pytest.mark.skipif(

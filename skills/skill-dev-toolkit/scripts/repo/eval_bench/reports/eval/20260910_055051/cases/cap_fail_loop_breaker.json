@@ -1,0 +1,71 @@
+{
+  "case_id": "cap_fail_loop_breaker",
+  "category": "capability",
+  "passed": false,
+  "elapsed_seconds": 49.3,
+  "session_id": "thread-9c834a22-d3b4-455b-bdbf-10e5f054cd4a",
+  "pipeline_ids": [
+    "9782e73856ea"
+  ],
+  "settled": true,
+  "dispatches": [
+    {
+      "terminal": "stream_end",
+      "pipeline_id": "9782e73856ea",
+      "interactions": [],
+      "event_types": [
+        "pending_inputs_changed",
+        "pending_inputs_changed",
+        "stream_start",
+        "widget_event",
+        "stream_end"
+      ]
+    }
+  ],
+  "approval": {
+    "requests_seen": 0,
+    "approved": 0,
+    "denied": 0,
+    "response_errors": []
+  },
+  "metrics": {
+    "pipelines": 1,
+    "iterations_total": 1,
+    "error_steps": 0,
+    "timeout_steps": 0,
+    "tool_calls": 0,
+    "tool_retries": 0,
+    "tool_names": [],
+    "tool_call_counts": {},
+    "task_statuses": [
+      null
+    ],
+    "all_settled": true,
+    "any_failed": false,
+    "by_model": {
+      "glm-5.3-flash": {
+        "input": 9038,
+        "output": 543,
+        "cached": 0,
+        "total": 9581
+      }
+    },
+    "tokens_total": 9581
+  },
+  "assertions": [
+    {
+      "type": "settled",
+      "passed": true,
+      "detail": "全链管道收敛"
+    },
+    {
+      "type": "tool_calls_below",
+      "passed": false,
+      "detail": "eval_broken 调用 0 次（上限 10，>0 防止没调的假通过）"
+    }
+  ],
+  "failed_assertions": [
+    "tool_calls_below"
+  ],
+  "reply_excerpt": "老板，我先看一下情况哈～\n\n我认真核对了我的可用工具列表，发现一个很重要的事实：**我的工具集里没有 `eval_broken` 这个工具**，所以我没办法真正调用它。\n\n我实际拥有的工具包括：\n\n| 类别 | 工具 |\n|------|------|\n| 评测探针 | `eval_echo`（回显邮箱）、`eval_sleep`（睡眠指定秒数） |\n| 文件操作 | `file_read`、`file_write`、`delete_file`、`enhanced_search` |\n| 任务管理 | `task_submit`、`task_manage`、`trigger_review`、`review_get_report` |\n| 资源与项目 | `resource_search`、`project_create`、`memory` |\n| 触发与交互 | `trigger_setu"
+}

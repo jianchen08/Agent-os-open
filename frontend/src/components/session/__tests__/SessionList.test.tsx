@@ -1,9 +1,10 @@
 /**
- * SessionList 组件单元测试 - 置顶分组显示功能
+ * SessionList 组件单元测试 - 置顶功能与列表排序
  *
  * 测试覆盖：
  * - AC-1.3-1: 下拉菜单中置顶/取消置顶操作项
- * - AC-1.3-2: 置顶会话分组显示（标题、分隔线、排序）
+ * - AC-1.3-2: 会话排序（置顶组恒浮顶 2026-11-06 用户裁定；其余按最近活跃降序，
+ *   星标只作视觉标记不参与排序）
  * - AC-1.3-3: 置顶视觉标识（Pin 图标）
  * - AC-1.3-4: 兼容现有功能（删除、编辑、复制、星标）
  */
@@ -83,10 +84,10 @@ describe('AC-1.3-1: 置顶功能入口', () => {
 })
 
 // ============================================================
-// AC-1.3-2: 置顶会话分组显示
+// AC-1.3-2: 会话排序（置顶组恒浮顶 2026-11-06 用户裁定；组内与普通会话按最近活跃降序）
 // ============================================================
-describe('AC-1.3-2: 置顶会话分组显示', () => {
-  it('有置顶会话时应显示「已置顶」和「全部会话」分组标题', () => {
+describe('AC-1.3-2: 会话排序（置顶浮顶 + 最近活跃）', () => {
+  it('有置顶会话时出现「已置顶」分组，置顶会话归入该组不入默认空间', () => {
     const pinnedSession = makeSession({ pinned: true, title: '置顶会话A' })
     const normalSession = makeSession({ pinned: false, title: '普通会话B' })
     render(
@@ -99,7 +100,14 @@ describe('AC-1.3-2: 置顶会话分组显示', () => {
     )
 
     expect(screen.getByText('已置顶')).toBeInTheDocument()
-    expect(screen.getByText('全部会话')).toBeInTheDocument()
+    expect(screen.getByText('默认空间')).toBeInTheDocument()
+    const pinnedGroup = document.querySelector('[data-group="pinned"]') as HTMLElement
+    expect(
+      within(pinnedGroup).getByRole('button', { name: /会话: 置顶会话A/ }),
+    ).toBeInTheDocument()
+    const normalGroup = document.querySelector('[data-group="normal"]') as HTMLElement
+    expect(within(normalGroup).queryByText('置顶会话A')).toBeNull()
+    expect(within(normalGroup).getByRole('button', { name: /会话: 普通会话B/ })).toBeInTheDocument()
   })
 
   it('无置顶会话时不应显示「已置顶」分组标题', () => {
@@ -114,85 +122,112 @@ describe('AC-1.3-2: 置顶会话分组显示', () => {
     )
 
     expect(screen.queryByText('已置顶')).not.toBeInTheDocument()
-    expect(screen.getByText('全部会话')).toBeInTheDocument()
+    expect(screen.getByText('默认空间')).toBeInTheDocument()
   })
 
-  it('置顶会话应显示在普通会话之前', () => {
+  it('置顶恒浮顶：更旧的置顶会话排在所有更新的普通会话之前（排序不干扰置顶）', () => {
     const pinnedSession = makeSession({
       pinned: true,
       title: '置顶会话',
       updatedAt: '2026-01-01T00:00:00Z',
     })
-    const normalSession = makeSession({
+    const normalNew = makeSession({
+      id: 'n-new',
       pinned: false,
-      title: '普通会话',
+      title: '新普通会话',
+      updatedAt: '2026-01-03T00:00:00Z',
+    })
+    const normalMid = makeSession({
+      id: 'n-mid',
+      pinned: false,
+      title: '中普通会话',
       updatedAt: '2026-01-02T00:00:00Z',
     })
     render(
       <SessionList
-        sessions={[normalSession, pinnedSession]}
+        sessions={[normalNew, pinnedSession, normalMid]}
         activeSessionId={null}
         deletingSessionIds={new Set()}
         {...defaultCallbacks}
       />,
     )
 
-    const allSessionTitles = screen
-      .getAllByRole('button', { name: /^会话:/ })
-      .map((el) => el.textContent)
-    const pinnedIndex = allSessionTitles.findIndex((t) => t?.includes('置顶会话'))
-    const normalIndex = allSessionTitles.findIndex((t) => t?.includes('普通会话'))
-    expect(pinnedIndex).toBeLessThan(normalIndex)
+    // 置顶组存在且位于普通组之前（DOM 顺序=视觉顺序）
+    const pinnedGroup = document.querySelector('[data-group="pinned"]') as HTMLElement
+    const normalGroup = document.querySelector('[data-group="normal"]') as HTMLElement
+    expect(pinnedGroup).not.toBeNull()
+    expect(normalGroup).not.toBeNull()
+    expect(
+      pinnedGroup.compareDocumentPosition(normalGroup) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    // 普通组内仍按最近活跃降序（更新的在前），置顶不入普通组
+    const rows = within(normalGroup).getAllByRole('button', { name: /^会话:/ })
+    expect(rows).toHaveLength(2)
+    expect(rows[0].textContent).toContain('新普通会话')
+    expect(rows[1].textContent).toContain('中普通会话')
+    expect(within(normalGroup).queryByText('置顶会话')).toBeNull()
   })
 
-  it('两组之间应有视觉分隔线', () => {
-    const pinnedSession = makeSession({ pinned: true, title: '置顶会话' })
-    const normalSession = makeSession({ pinned: false, title: '普通会话' })
+  it('星标同样不参与排序（只作视觉标记）', () => {
+    const starredOld = makeSession({
+      id: 'starred-old',
+      starred: true,
+      title: '旧星标',
+      updatedAt: '2026-01-01T00:00:00Z',
+    })
+    const plainNew = makeSession({
+      id: 'plain-new',
+      starred: false,
+      title: '新普通',
+      updatedAt: '2026-01-02T00:00:00Z',
+    })
     render(
       <SessionList
-        sessions={[pinnedSession, normalSession]}
+        sessions={[starredOld, plainNew]}
         activeSessionId={null}
         deletingSessionIds={new Set()}
         {...defaultCallbacks}
       />,
     )
 
-    // 验证分隔线存在（border-t 的 div）
-    const pinnedGroup = screen.getByText('已置顶').closest('[data-group="pinned"]')
-    expect(pinnedGroup).toBeInTheDocument()
-    const separator = pinnedGroup?.querySelector('.border-t')
-    expect(separator).toBeInTheDocument()
+    const titles = screen
+      .getAllByRole('button', { name: /^会话:/ })
+      .map((el) => el.textContent)
+    expect(titles[0]).toContain('新普通')
+    expect(titles[1]).toContain('旧星标')
   })
 
-  it('置顶会话组内应按 updatedAt 降序排序', () => {
-    const pinnedOlder = makeSession({
-      id: 'pinned-older',
+  it('置顶/普通混排：置顶归置顶组，普通组仍按 updatedAt 降序', () => {
+    const older = makeSession({
+      id: 'mixed-older',
       pinned: true,
       title: '较旧置顶',
       updatedAt: '2026-01-01T00:00:00Z',
     })
-    const pinnedNewer = makeSession({
-      id: 'pinned-newer',
-      pinned: true,
-      title: '较新置顶',
+    const newer = makeSession({
+      id: 'mixed-newer',
+      pinned: false,
+      title: '较新普通',
       updatedAt: '2026-01-02T00:00:00Z',
     })
     render(
       <SessionList
-        sessions={[pinnedOlder, pinnedNewer]}
+        sessions={[older, newer]}
         activeSessionId={null}
         deletingSessionIds={new Set()}
         {...defaultCallbacks}
       />,
     )
 
-    const pinnedGroup = screen.getByText('已置顶').closest('[data-group="pinned"]')
-    expect(pinnedGroup).toBeInTheDocument()
-    const titles = within(pinnedGroup as HTMLElement)
+    // 置顶组浮顶：更旧的置顶也归置顶组
+    const pinnedGroup = document.querySelector('[data-group="pinned"]') as HTMLElement
+    expect(within(pinnedGroup).getByRole('button', { name: /会话: 较旧置顶/ })).toBeInTheDocument()
+    const normalGroup = document.querySelector('[data-group="normal"]') as HTMLElement
+    const titles = within(normalGroup)
       .getAllByRole('button', { name: /^会话:/ })
       .map((el) => el.textContent)
-    expect(titles[0]).toContain('较新置顶')
-    expect(titles[1]).toContain('较旧置顶')
+    expect(titles).toHaveLength(1)
+    expect(titles[0]).toContain('较新普通')
   })
 
   it('普通会话组内应按 updatedAt 降序排序', () => {
@@ -217,7 +252,7 @@ describe('AC-1.3-2: 置顶会话分组显示', () => {
       />,
     )
 
-    const normalGroup = screen.getByText('全部会话').closest('[data-group="normal"]')
+    const normalGroup = screen.getByText('默认空间').closest('[data-group="normal"]')
     expect(normalGroup).toBeInTheDocument()
     const titles = within(normalGroup as HTMLElement)
       .getAllByRole('button', { name: /^会话:/ })

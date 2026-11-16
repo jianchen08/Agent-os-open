@@ -25,6 +25,15 @@ use crate::types::{
     ToolExecutionResult, ToolSource, TraceEntry, UserRecord,
 };
 
+/// trait 默认实现的"不支持"错误（code/source 均空的协议面裸错误）。
+fn unsupported_error(message: &str) -> PluginError {
+    PluginError {
+        message: message.to_string(),
+        code: None,
+        source: None,
+    }
+}
+
 // ── 1. 插件类型 ────────────────────────────────────────────────
 
 /// 插件类型枚举。
@@ -41,18 +50,6 @@ pub enum PluginType {
     System,
     /// 组合插件（ADR ⑥：YAML 配置编排步骤，引擎解释执行）
     Composite,
-}
-
-/// 管道插件角色（仅 type=Pipeline 时有效）。
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PipelineRole {
-    /// 输入阶段：参数校验、上下文注入、权限检查
-    Input,
-    /// 核心阶段：LLM 调用或工具执行
-    Core,
-    /// 输出阶段：结果格式化、后处理、路由信号生成
-    Output,
 }
 
 // ── 3. PluginInvoker（插件调用器） ──────────────────────────────
@@ -132,11 +129,25 @@ pub trait PluginInvoker: Send + Sync {
     /// 必须回退 [`Self::force_unload`] 整组驱逐。
     /// 默认实现返回不支持错误（无此能力的实现 / MockInvoker 编译兼容）。
     async fn reload_member(&self, _plugin_id: &str) -> Result<(), PluginError> {
-        Err(PluginError {
-            message: "reload_member not supported by this invoker".into(),
-            code: None,
-            source: None,
-        })
+        Err(unsupported_error(
+            "reload_member not supported by this invoker",
+        ))
+    }
+
+    /// 保证订阅者在场（域事件投递前的唤醒原语，ADR 2026-10-28 D5）。
+    ///
+    /// 背景：域事件广播按宿主去重（[`Self::host_key_of`]，防 N² handler 执行），
+    /// 但唤醒动作挂在 `send_lifecycle_hook` 里的 `loader.load` 上——被去重跳过
+    /// 的同宿主订阅者永远拿不到唤醒，宿主侧扇出只覆盖**当前在场**成员，事件
+    /// 静默丢失（装机 2026-10-28 实证：task_service 空闲卸载期间终态事件全丢，
+    /// 上级收不到子任务完成通知）。广播侧据此在去重**之前**对每个声明订阅者
+    /// 调用本方法：宿主在跑但成员被摘 → 成员级加回；宿主不在 → 交给正常投递
+    /// 路径拉起。
+    ///
+    /// 语义：幂等（已在场即 no-op）。无成员粒度能力的实现（独占宿主 / Native /
+    /// Mock）默认返回 Ok——独占进程的成员恒在场，没有可唤醒的对象。
+    async fn ensure_member_present(&self, _plugin_id: &str) -> Result<(), PluginError> {
+        Ok(())
     }
 
     /// 成员粒度卸载（合宿成员从共享宿主进程内摘除，其余成员不动）。
@@ -149,11 +160,9 @@ pub trait PluginInvoker: Send + Sync {
     /// ——调用方必须回退 [`Self::force_unload`] 整组路径。
     /// 默认实现返回不支持错误（无此能力的实现 / MockInvoker 编译兼容）。
     async fn unload_member(&self, _plugin_id: &str) -> Result<(), PluginError> {
-        Err(PluginError {
-            message: "unload_member not supported by this invoker".into(),
-            code: None,
-            source: None,
-        })
+        Err(unsupported_error(
+            "unload_member not supported by this invoker",
+        ))
     }
 
     /// 重新扫描插件目录，发现新增插件（运行时懒加载入口）。
@@ -173,11 +182,9 @@ pub trait PluginInvoker: Send + Sync {
     /// 若本次是新 spawn 的连接，校验后回收（kill）——安装期校验不破坏懒加载。
     /// 默认实现返回不支持错误（无此能力 / 未实现 host），供 MockInvoker 不破坏编译。
     async fn list_plugin_tools(&self, _plugin_id: &str) -> Result<serde_json::Value, PluginError> {
-        Err(PluginError {
-            message: "list_plugin_tools not supported by this invoker".into(),
-            code: None,
-            source: None,
-        })
+        Err(unsupported_error(
+            "list_plugin_tools not supported by this invoker",
+        ))
     }
 
     /// 内核停机：best-effort 杀掉全部已缓存 sidecar（drain 客户端缓存 + 逐个
@@ -206,6 +213,17 @@ pub trait PluginInvoker: Send + Sync {
     fn is_host_starting(&self, _plugin_id: &str) -> bool {
         false
     }
+
+    /// 请求路径整组并行 respawn：管道链撞死宿主后一次并行拉起全链（Phase 3 #1）。
+    ///
+    /// 语义：对 `plugin_ids` 中 sidecar 宿主已死/未 spawn 的，有界并行触发
+    /// spawn→连接→initialize→on_load 全程并等其完成（=就绪等待，调用方拿到
+    /// 返回即全链可服务）；存活宿主命中缓存 no-op。失败隔离：单宿主拉起失败
+    /// 只记日志不拖死整组——失败插件的调用路径懒 spawn 兜底（既有语义）。
+    /// 不动 keep-warm 常驻集与 idle GC 治理（拉起的宿主照常受空闲回收）。
+    /// 非 sidecar / 无 manifest 的 id 跳过。
+    /// 默认 no-op（无 spawn 概念的实现 / MockInvoker 不破坏编译）。
+    async fn ensure_hosts_ready(&self, _plugin_ids: &[String]) {}
 
     /// 宿主盒子快照（只读枚举面，`GET /api/v1/plugins/hosts` 数据源）。
     ///
@@ -248,9 +266,9 @@ pub struct HostBox {
     pub pid: Option<u32>,
     /// 未判死即 true（判死门控与进程态轮询同款）
     pub alive: bool,
-    /// 宿主进程 RSS（MB）。由 api 侧按 pid 富化（跳板下探 + RSS 采集面）；
-    /// 无 pid（HTTP transport）恒 null。
-    pub rss_mb: Option<f64>,
+    /// 宿主进程私有提交内存（MB；「提交大小」口径，含已换出私有页）。由 api 侧按
+    /// pid 富化（跳板下探 + 私有提交采集面）；无 pid（HTTP transport）恒 null。
+    pub commit_mb: Option<f64>,
     /// 宿主进程运行秒数（spawn 时刻起算；无记账 = null）
     pub uptime_secs: Option<u64>,
     /// spawn 时刻成员集快照（进程实际服务面；独占宿主 = 键内嵌插件自身）
@@ -331,14 +349,14 @@ pub enum LifecycleHook {
 /// - `state_snapshot`: 状态快照（可选）
 ///
 /// [来源: docs/working/adr_engine_design.md §7.3]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HookContext {
     /// 标签集合：key → value
     tags: HashMap<String, serde_json::Value>,
 }
 
 impl HookContext {
-    /// 创建空的标签化上下文。
+    /// 创建空的标签化上下文（与 `Default::default` 同一语义）。
     pub fn new() -> Self {
         Self {
             tags: HashMap::new(),
@@ -369,12 +387,6 @@ impl HookContext {
     /// 获取所有标签的只读引用。
     pub fn tags(&self) -> &HashMap<String, serde_json::Value> {
         &self.tags
-    }
-}
-
-impl Default for HookContext {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -430,6 +442,22 @@ pub trait CapabilityRegistry: Send + Sync {
 
     /// 注销插件提供的工具。
     fn unregister_tools(&self, plugin_id: &str);
+
+    /// 登记宿主领地（F-min 属地路由）：plugin_id → allowed_roots。
+    /// 缺省空实现 = 该注册表不参与属地路由（测试桩零负担）。
+    fn register_host(&self, _plugin_id: &str, _allowed_roots: Vec<String>) {}
+
+    /// 按工作空间属地解析工具实例：同名多实例时，workspace 前缀命中某宿主
+    /// 领地 → 返回该宿主实例；否则返回非宿主主实例（既有语义）。单实例 =
+    /// 原样返回。缺省实现 = `get_tool`（主实例直查，行为与属地路由上线前
+    /// 逐字节一致）。
+    fn resolve_tool_instance(
+        &self,
+        name: &str,
+        _workspace: Option<&str>,
+    ) -> Option<ToolDescriptor> {
+        self.get_tool(name)
+    }
 
     /// 按名称查询工具描述符。
     fn get_tool(&self, name: &str) -> Option<ToolDescriptor>;
@@ -487,6 +515,10 @@ pub struct ToolDescriptor {
     /// `capabilities.tools[].render` 提供（task_dsh_plugin_adapter 任务 1）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub render: Option<serde_json::Value>,
+    /// 隔离执行能力声明（manifest `capabilities.tools[].isolation_capable`），
+    /// 经 tool-surface.schemas 契约表下发 guard；缺省 = 未声明。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isolation_capable: Option<bool>,
 }
 
 // Resource 描述符与 resources 能力维度已删除（全链无消费方）。
@@ -549,6 +581,16 @@ pub trait PluginLoader: Send + Sync {
     fn get_manifest(&self, _plugin_id: &str) -> Option<PluginManifest> {
         None
     }
+
+    /// 服务条目（`ns.method` 点式）→ 声明提供方插件 id 列表（R7 F3 声明面
+    /// 依赖闭包）。附加式默认空（契约冻结惯例：mock/轻实现零负担）。
+    ///
+    /// 语义边界：只认点式精确声明（调用方点了名它运行时真实调用的服务）；
+    /// bare 命名空间条目不在本方法语义内——那是注册闸的存在性保证（全量
+    /// `packaging` 样板声明），按它展开会把无关提供方拖进每次 run。
+    fn service_provider_ids(&self, _service: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// 插件生命周期策略（manifest 可声明，覆盖内核默认）。
@@ -582,6 +624,14 @@ pub struct StateDeclaration {
     /// 空 = 无读面声明。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reads: Vec<String>,
+    /// state 持久写面声明（ADR 2026-10-02）：本插件允许经
+    /// `pipeline-state.update` 写入的 state 键。条目支持精确键
+    /// （`task.status`）与 `前缀.*` 通配（`task.owned.*`），语义同
+    /// `export_fields`。内核按调用方 `_plugin_id`（invoker 注入的信任锚点）
+    /// 查本声明，未声明即拒绝——内核只执行"声明才可写"机制，不解释键所属域。
+    /// 空 = 无持久写权限（该插件不得经此通道写 state）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writes: Vec<String>,
 }
 
 /// 已解析的插件 Manifest（运行时表示）。
@@ -598,8 +648,6 @@ pub struct PluginManifest {
     pub description: Option<String>,
     pub version: String,
     pub plugin_type: PluginType,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pipeline_role: Option<PipelineRole>,
     pub language: String,
     /// 宿主类型——所有插件均支持 InProcess 和 Sidecar（ADR ⑧）
     pub host_type: HostType,
@@ -660,14 +708,6 @@ pub struct PluginManifest {
     /// 指定的 C-ABI 符号（默认 `plugin_execute`）。仅 host_type==InProcess 时有意义。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native: Option<NativeArtifact>,
-    /// 能力信封（G6/G3：全轨统一授权面）。
-    ///
-    /// 插件经反向 capability 调用内核时可调用的能力白名单
-    /// （如 `["config-reader", "tool-executor"]`）。空 = 未声明，
-    /// 按向后兼容默认全授予（存量插件零迁移）；一旦声明非空即白名单制，
-    /// 越权调用在 CapabilityRouter 分发前单点拒绝（G6）。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub granted_capabilities: Vec<String>,
     /// 内容懒加载声明（ADR ⑦）。
     ///
     /// 声明插件需要多少条最近消息的完整内容。
@@ -761,6 +801,33 @@ pub struct PluginManifest {
     /// 状态留在主进程唯一一份 service 上，链路闭合。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provides: Option<ProvidesCapabilities>,
+}
+
+impl PluginManifest {
+    /// 本插件作为被调用者的声明需求上界（秒）——M2 单声明派生单点（ADR
+    /// 2026-11-05-timeout-taxonomy-and-merge）：`capabilities.call_timeout_seconds`
+    /// ∪ `mcp.request_timeout_secs` 取最大（两键任一在场即生效，0 值哨兵按
+    /// 未声明）。消费面：A3 传输界（invoker host_acquire）、A4 工具界回退
+    /// （invoker `tool_timeout_ms`）、L2 嵌套校验的内层需求（api
+    /// timeout_nesting）。两键全缺 = `None`（各消费面落各自缺省档）。
+    ///
+    /// 派生语义：传输单次往返的响应在整次调用结束才返回（含单请求内逐跳
+    /// 兜底），故传输界须 ≥ 声明需求——单声明（call_timeout_seconds）在场
+    /// 即同时派生传输界与工具界，插件级 `mcp.request_timeout_secs` 仅作为
+    /// 未声明 call_timeout_seconds 的既有声明面继续生效（llm_core 900<1800
+    /// 倒挂的解析面修复点）。
+    pub fn declared_call_need_secs(&self) -> Option<u64> {
+        let call_need = self.capabilities.call_timeout_seconds.filter(|s| *s > 0);
+        let transport = self
+            .mcp
+            .as_ref()
+            .and_then(|m| m.request_timeout_secs)
+            .filter(|s| *s > 0);
+        match (call_need, transport) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        }
+    }
 }
 
 /// 插件贡献的反向调用 capability 声明（M4）。
@@ -1038,34 +1105,57 @@ pub enum HostType {
 pub struct NativeArtifact {
     /// cdylib 文件名（相对插件目录），如 `my_plugin.dll` / `libmy_plugin.so`。
     pub artifact: String,
+    /// 异步预派发声明（native 同步 ABI 的跨进程等待卸载）。
+    ///
+    /// 声明后，内核在进入 cdylib 的同步 `execute` 之前，先以 async 方式调用
+    /// 指定 capability/method（如 `tool-executor.invoke`），把结果作为
+    /// `_pre_decided_results` 注入插件 config；插件只做整形/校验，不再在
+    /// 同步桥里 `block_on` 等待跨进程返回。缺省 = 插件自行同步调用（既有
+    /// 行为）；声明即内核契约：结果未预派发时插件必须 fail-closed。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_dispatch: Option<PreDispatchSpec>,
 }
+
+/// native 插件的异步预派发目标（capability/method 对）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreDispatchSpec {
+    pub capability: String,
+    pub method: String,
+}
+
+/// 单次插件调用缺省上界（秒）——跨 crate 单一真值：invoker 基础策略档
+/// （manifest 未声明时落此值）与引擎测试锚同源。语义见
+/// [`ManifestCapabilities::call_timeout_seconds`]。
+pub const DEFAULT_PLUGIN_CALL_TIMEOUT_SECS: u64 = 600;
+
+/// 单次调用超时错误码（`_plugin_errors[].code`）：与 run 级 timeout 署名
+/// （`router.stop_reason="timeout"`，FAILED_STOP_REASONS 既有词）分面可辨
+/// ——前者步级错误信封、run 继续推进；后者 run 终态签名。invoker 基础策略
+/// 层与引擎预算封顶层共用同码（错误面单点可辨）。
+pub const STEP_CALL_TIMEOUT_CODE: &str = "STEP_CALL_TIMEOUT";
 
 /// Manifest 能力声明（运行时表示）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManifestCapabilities {
-    /// 给 LLM 的工具声明——**声明即注册**（D.6 槽位拆分）：
-    /// 不按 plugin_type 门控，任何类型插件声明 tools 即进
-    /// CapabilityRegistry 暴露给 LLM 面。多职能插件
-    /// （system 适配器等）自然成立：声明 tools + services 两块即可。
+    /// 给 LLM 的工具声明——**声明即注册**（D.6 槽位拆分）：不按 plugin_type
+    /// 门控，声明即进 CapabilityRegistry 暴露给 LLM 面；多职能插件
+    /// （tools + services 并存）自然成立。
     #[serde(default)]
     pub tools: Vec<ToolCapability>,
-    /// 内核/插件间服务方法声明（D.6 槽位拆分）：不进 LLM 面；
-    /// 调用走既有通道——invoke_entry（管道）、
-    /// http_endpoints（面板）、tool-executor 显式 plugin_id（跨插件）、
-    /// provides 命名空间。wire 协议不变（仍是 MCP tools/call，ADR D.3）。
+    /// 内核/插件间服务方法声明（D.6 槽位拆分）：不进 LLM 面；调用走既有通道——
+    /// invoke_entry（管道）/ http_endpoints（面板）/ tool-executor 显式 plugin_id
+    /// （跨插件）/ provides 命名空间；wire 协议不变（MCP tools/call，ADR D.3）。
     #[serde(default)]
     pub services: Vec<ServiceCapability>,
-    /// 管道步骤服务声明（管道步骤服务化提案 2026-08-27 §3.1）：
-    /// 管道步骤成为显式注册的服务（capabilities.steps），引用与实现解耦
-    /// （G10 第③级命中 → 已注册步骤服务）。与 tools/services 并存合法
-    /// （多能力合一插件的正规形态）。step 名全局唯一（编译期查重，冲突
-    /// 启动报错）；不含 phase/orchestration 类字段（被否方案 #1：编排位置
-    /// 属管道配置，manifest 只声明存在性与签名）。
+    /// 管道步骤服务声明（2026-08-27 §3.1）：步骤为显式注册服务
+    /// （capabilities.steps），引用与实现解耦（G10 第③级命中）；与
+    /// tools/services 并存合法。step 名全局唯一（编译期查重，冲突启动报错）；
+    /// 不含 phase/orchestration 字段（被否方案 #1：编排位置属管道配置）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<StepCapability>,
-    /// `resources` 能力声明已删除（全链无消费方）；serde 默认忽略未知字段，
-    /// 旧 manifest 里的 `capabilities.resources` 条目不影响解析。
+    /// `resources` 槽已退役；能力键 fail-closed（deny_unknown_fields 解析期
+    /// 拒绝未知键）。
     #[serde(default)]
     pub route_signals: Vec<RouteType>,
     #[serde(default)]
@@ -1076,6 +1166,26 @@ pub struct ManifestCapabilities {
     /// 拒绝其流式事件（fail-closed），与当年 resources 的「声明即接入」同构。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub streaming: Option<StreamingCapability>,
+    /// 指标分类声明（K2 声明化）：引擎调度层监控的归组类别；合法值单一
+    /// 真值源 = `agentos_engine::pipeline_loop` 的 `METRICS_CLASS_*` 常量组
+    /// （"llm"/"tool"）。未声明/非法值 = Other 兜底（不计入 LLM/tool 指标，
+    /// 仅可观测债务非行为故障）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics_class: Option<String>,
+    /// 插件署名停机词声明（停机词声明化 ADR 2026-10-15）：本插件写入
+    /// `router.stop_reason` 的失败署名词，经 watcher sync 全量重建进 core
+    /// 声明注册表参与 Failed 折算；Completed 收束署名无须声明（缺省兜底）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop_reasons: Vec<String>,
+    /// 单次插件调用上界声明（秒；ADR 2026-10-15-plugin-call-timeout 的插件级
+    /// 延伸刀）：声明值替换引擎缺省档（600s）作为该插件单次调用的 base 上界。
+    /// 大模型调用类插件（上下文压缩多批摘要、长流式）合法时长超缺省档，经此
+    /// 自报；state 配置档 `plugin_call_timeout_seconds` 与 run 预算档仍在场取
+    /// min——配置只能收紧、预算恒封顶，「所有路径恒有界」不变量不破。
+    /// 未声明 = 缺省档；0 值非法（无界单次调用即冻结根因本身），装配点
+    /// warn 后按未声明处理落缺省档。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_timeout_seconds: Option<u64>,
 }
 
 /// 流式能力声明（capabilities.streaming，文档见 docs/guides/streaming-protocol.md）。
@@ -1275,6 +1385,13 @@ pub struct ToolCapability {
     /// `None` = 未声明，按优先级兜底。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// 隔离执行能力声明：该工具知道如何消费 `_container_id`/`_exec_backend`
+    /// （isolation_guard 服务端权威注入）在隔离环境内执行。声明与否不影响
+    /// guard 的隔离裁决（只降不升），仅决定是否注入 `_exec_backend`。
+    /// 缺省 = 未声明（不注入）。经 tool-surface.schemas 契约表下发，消费方
+    /// 见 isolation_guard（ADR 2026-10-21-tool-isolation-capability-declaration）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation_capable: Option<bool>,
 }
 
 /// 非流式 capability 调用的内核默认总时长超时（毫秒）：300s。
@@ -1337,6 +1454,13 @@ pub struct McpConfig {
     /// security_check 的 SDK 侧 timeout 参数仅作提示，内核不读。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_secs: Option<u64>,
+    /// 宿主领地声明（F-min 属地路由，设计文档 §53）：该插件承载的宿主机暴露
+    /// 给云内核的工作空间根目录清单（绝对路径）。非空 = 该插件是宿主实例
+    /// 载体，注册表据此前缀匹配工作空间属地、裁决同名工具的实例选择（同名
+    /// 同工具：异名即异工具，命名空间化已被否）。空/缺省 = 非宿主插件，
+    /// 不参与属地路由。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_roots: Vec<String>,
 }
 
 pub fn default_idle_timeout() -> u64 {
@@ -1484,6 +1608,15 @@ pub struct MessageQueryOpts {
 /// - `traces`：pipeline 级 op 日志（定位 = (pipeline_id, seq)，审计/DR 回放）
 /// - `pipeline_checkpoints`：纯备份（仅 state 丢失/损坏时作 DR 基线）
 ///
+/// run 起手 sweep 收口摘要（ADR 2026-11-06-round-entry-slot-placeholder 决策6）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StreamingSlotSweep {
+    /// 三空占位行删除数（崩溃残留，无用户可见产出）。
+    pub deleted_empty: usize,
+    /// 有内容占位行改写 `status=interrupted` 数（半截产出留账）。
+    pub marked_interrupted: usize,
+}
+
 /// [来源: docs/decisions/（ADR 2026-09-18 runs 退役与 state 唯一真值）]
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
@@ -1491,15 +1624,30 @@ pub trait StorageBackend: Send + Sync {
     async fn get_run(&self, run_id: &str) -> Result<RunRecord, StorageError>;
 
     /// 运行开始簿记：写 state 运行键（run_id/run_status='running'/run_started_at/
-    /// run_config_hash）。默认 no-op（mock/null store），SqliteStore 覆盖。
+    /// run_config_hash）。`started_at` 由调用方（引擎 run_init 单写者）显式传入，
+    /// 本方法只持久化、不自产时间戳——双写自产第二时间戳会让插件层字符串相等
+    /// renewal 判定误判新 run（刀5 根因）。默认 no-op（mock/null store），
+    /// SqliteStore 覆盖。
     async fn record_run_start(
         &self,
         _pipeline_id: &str,
         _tenant_id: &str,
         _run_id: &str,
         _config_hash: &str,
+        _started_at: &str,
     ) -> Result<(), StorageError> {
         Ok(())
+    }
+
+    /// 消费管道级待取消标记（首 token 前取消收口）：检出 `pending_cancel=true`
+    /// 即清除并返回 true（test-and-clear，一次落库）；无标记返回 false。
+    /// 默认无标记（mock/null store），SqliteStore 覆盖。
+    async fn consume_pending_cancel(
+        &self,
+        _pipeline_id: &str,
+        _tenant_id: &str,
+    ) -> Result<bool, StorageError> {
+        Ok(false)
     }
 
     /// 列出某管道的运行投影（ADR 2026-09-18：每管道至多一条——当前运行）。
@@ -1558,6 +1706,35 @@ pub trait StorageBackend: Send + Sync {
         _ops: &[serde_json::Value],
     ) -> Result<(), StorageError> {
         Ok(())
+    }
+
+    /// run 起手 sweep 前代流式占位行（ADR 2026-11-06-round-entry-slot-placeholder
+    /// 决策6）：扫描本管道 blob `status=streaming` 且 `run_id ≠ current_run_id` 的
+    /// 槽位行，逐条收口——三空（文本/思考/保留 tool_calls 全空，与 llm_core
+    /// 三路判据同词汇）删行；有内容改写 blob `status=interrupted`（内容保全，
+    /// 崩溃残留的半截产出按 2026-11-04 消息出口权留账）。单事务原子。
+    /// 默认 no-op（mock/null store），SqliteStore 覆盖。
+    async fn sweep_stale_streaming_slots(
+        &self,
+        _pipeline_id: &str,
+        _tenant_id: &str,
+        _current_run_id: &str,
+    ) -> Result<StreamingSlotSweep, StorageError> {
+        Ok(StreamingSlotSweep::default())
+    }
+
+    /// 删除流式占位行（ADR 2026-11-06 决策4：轮无 assistant 的收口删行）。
+    /// seq + record_id（占位行的 `a_` 轮次 id）双条件命中才删——同槽位已被真实
+    /// 消息覆写（record_id 不再是占位 id）时不命中返回 false，防误删真消息。
+    /// 默认 no-op（mock/null store），SqliteStore 覆盖。
+    async fn delete_streaming_placeholder(
+        &self,
+        _pipeline_id: &str,
+        _tenant_id: &str,
+        _seq: i64,
+        _message_id: &str,
+    ) -> Result<bool, StorageError> {
+        Ok(false)
     }
 
     /// upsert 一个 state 标量字段到 pipeline_state 表（覆盖最新值）。
@@ -1674,7 +1851,8 @@ pub trait StorageBackend: Send + Sync {
     // 消费任务从表取参数执行（内容不被闭包捕获）。默认 no-op（mock/null store），
     // SqliteStore 覆盖为真实实现。
 
-    /// 入队一条 pending 输入（created_at 即 FIFO 序）。幂等：同 id 重复入队忽略。
+    /// 入队一条 pending 输入（created_at 即 FIFO 序）。幂等：同 id 重复入队忽略；
+    /// 同一 client_message_id 重复入队忽略（网络重试/前端重发不产生第二条）。
     async fn enqueue_pending_input(
         &self,
         _tenant_id: &str,
@@ -1682,6 +1860,17 @@ pub trait StorageBackend: Send + Sync {
         _input: &PendingInputRecord,
     ) -> Result<(), StorageError> {
         Ok(())
+    }
+
+    /// 将队列目标条目置为队首（FIFO 键 created_at 置最早）。
+    /// 返回 false = 目标不在队列（已被消费/删除）。
+    async fn promote_pending_input(
+        &self,
+        _tenant_id: &str,
+        _pipeline_id: &str,
+        _input_id: &str,
+    ) -> Result<bool, StorageError> {
+        Ok(false)
     }
 
     /// 取队首（FIFO：created_at, id 升序）第一条 pending 输入。None = 队列空。
@@ -1830,7 +2019,9 @@ pub trait StorageBackend: Send + Sync {
     /// 创建用户（username 全局唯一约束，重复返回 StorageError）。
     async fn create_user(&self, user: &UserRecord) -> Result<(), StorageError>;
 
-    /// 按 user_id 取用户（WS 握手 / token 解析用，按 tenant 隔离）。
+    /// 按 user_id 取用户（WS 握手 / token 解析用，tenant-unscoped 主键查询：
+    /// user_id 全局唯一，租户解析正是求真租户，task_local 租户不参与——
+    /// K8 修订 ADR 2026-10-10 的载重不变量）。
     async fn get_user_by_id(&self, user_id: &str) -> Result<Option<UserRecord>, StorageError>;
 
     /// 按用户名取用户（登录用，跨租户全局查询，不加 tenant 过滤）。
@@ -1874,6 +2065,16 @@ pub struct SessionListFilter {
 mod tests {
     use super::*;
 
+    /// 最小合法 manifest JSON 底座（tool/sidecar/python），调用方按需
+    /// merge 进额外键（host_group / state 等）或直接解析。
+    fn base_manifest_json() -> serde_json::Value {
+        serde_json::json!({
+            "id": "p", "name": "p", "version": "1", "plugin_type": "tool",
+            "language": "python", "host_type": "sidecar", "entry": "python s.py",
+            "capabilities": {}
+        })
+    }
+
     #[test]
     fn mcp_config_request_timeout_secs_parse_roundtrip() {
         // 显式声明 → 覆盖内核默认（86400s，BUG-60 审批族统一值）
@@ -1901,19 +2102,12 @@ mod tests {
     fn plugin_manifest_host_group_serde_roundtrip() {
         // 合宿进程模型 §4.1：host_group 缺省 None（旧清单零迁移）；
         // 显式 "light" → Some；None 不序列化输出（兼容旧清单）。
-        let base = serde_json::json!({
-            "id": "p", "name": "p", "version": "1", "plugin_type": "tool",
-            "language": "python", "host_type": "sidecar", "entry": "python s.py",
-            "capabilities": {}
-        });
+        let base = base_manifest_json();
         let m: PluginManifest = serde_json::from_value(base).expect("缺省 host_group 应可解析");
         assert_eq!(m.host_group, None, "缺省 = None（独占宿主，默认保守）");
 
-        let light = serde_json::json!({
-            "id": "p", "name": "p", "version": "1", "plugin_type": "tool",
-            "language": "python", "host_type": "sidecar", "entry": "python s.py",
-            "capabilities": {}, "host_group": "light"
-        });
+        let mut light = base_manifest_json();
+        light["host_group"] = serde_json::json!("light");
         let m2: PluginManifest = serde_json::from_value(light).expect("host_group=light 应可解析");
         assert_eq!(m2.host_group.as_deref(), Some("light"));
 
@@ -1922,6 +2116,35 @@ mod tests {
         assert!(!s.contains("host_group"), "None 字段不应序列化: {s}");
         let s2 = serde_json::to_string(&m2).unwrap();
         assert!(s2.contains("host_group"), "Some 字段应保留: {s2}");
+    }
+
+    #[test]
+    fn tool_capability_isolation_capable_serde() {
+        // 显式声明 → 保留；缺省 → None（旧清单零迁移）；None 不序列化输出。
+        let mut base = base_manifest_json();
+        base["capabilities"]["tools"] = serde_json::json!([{
+            "name": "t", "input_schema": {"type": "object"},
+            "isolation_capable": true,
+        }]);
+        let m: PluginManifest = serde_json::from_value(base.clone()).expect("显式声明应可解析");
+        assert_eq!(
+            m.capabilities.tools[0].isolation_capable,
+            Some(true),
+            "显式 true 应保留"
+        );
+
+        let mut absent = base_manifest_json();
+        absent["capabilities"]["tools"] = serde_json::json!([{
+            "name": "t", "input_schema": {"type": "object"},
+        }]);
+        let m2: PluginManifest =
+            serde_json::from_value(absent).expect("缺省应可解析（旧清单零迁移）");
+        assert_eq!(m2.capabilities.tools[0].isolation_capable, None);
+
+        let s = serde_json::to_string(&m2.capabilities.tools[0]).unwrap();
+        assert!(!s.contains("isolation_capable"), "None 字段不应序列化: {s}");
+        let s2 = serde_json::to_string(&m.capabilities.tools[0]).unwrap();
+        assert!(s2.contains("isolation_capable"), "Some 字段应保留: {s2}");
     }
 
     /// capabilities.steps 契约（管道步骤服务化提案 §3.1）：带 steps 的
@@ -1972,14 +2195,10 @@ mod tests {
     /// `messages_tail:N`）解析并保留；roundtrip 幂等；空 reads 不序列化输出。
     #[test]
     fn state_declaration_reads_serde_roundtrip() {
-        let json = serde_json::json!({
-            "id": "p", "name": "p", "version": "1", "plugin_type": "tool",
-            "language": "python", "host_type": "sidecar", "entry": "python s.py",
-            "capabilities": {},
-            "state": {
-                "volatile_keys": ["mood.notes"],
-                "reads": ["task.status", "messages", "messages_tail:50"]
-            }
+        let mut json = base_manifest_json();
+        json["state"] = serde_json::json!({
+            "volatile_keys": ["mood.notes"],
+            "reads": ["task.status", "messages", "messages_tail:50"]
         });
         let m: PluginManifest =
             serde_json::from_value(json).expect("含 reads 的 manifest 应可解析");
@@ -2007,12 +2226,8 @@ mod tests {
 
         // 空 reads 不序列化输出（与既有字段风格一致）；旧 state 段
         //（只有 volatile_keys）→ reads 缺省为空
-        let legacy = serde_json::json!({
-            "id": "p", "name": "p", "version": "1", "plugin_type": "tool",
-            "language": "python", "host_type": "sidecar", "entry": "python s.py",
-            "capabilities": {},
-            "state": {"volatile_keys": ["k"]}
-        });
+        let mut legacy = base_manifest_json();
+        legacy["state"] = serde_json::json!({"volatile_keys": ["k"]});
         let m3: PluginManifest =
             serde_json::from_value(legacy).expect("旧 state 段（无 reads）应可解析");
         assert!(
@@ -2021,6 +2236,47 @@ mod tests {
         );
         let s3 = serde_json::to_string(&m3.state.as_ref().unwrap()).unwrap();
         assert!(!s3.contains("reads"), "空 reads 不应序列化输出: {s3}");
+    }
+
+    /// state.writes 持久写面声明契约（ADR 2026-10-02）：精确键与 `前缀.*`
+    /// 通配原样收录；roundtrip 幂等；空 writes 不序列化输出、旧 state 段
+    /// （无 writes）解析为空（向后兼容）。
+    #[test]
+    fn state_declaration_writes_serde_roundtrip() {
+        let mut json = base_manifest_json();
+        json["state"] = serde_json::json!({
+            "writes": ["task.status", "task.owned.*", "trigger.registry.*"]
+        });
+        let m: PluginManifest =
+            serde_json::from_value(json).expect("含 writes 的 manifest 应可解析");
+        let state = m.state.as_ref().expect("state 段应存在");
+        assert_eq!(
+            state.writes,
+            vec![
+                "task.status".to_string(),
+                "task.owned.*".to_string(),
+                "trigger.registry.*".to_string()
+            ],
+            "精确键与通配声明原样收录"
+        );
+
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains("trigger.registry.*"), "序列化应保留 writes: {s}");
+        let m2: PluginManifest = serde_json::from_str(&s).expect("序列化产物应可重新解析");
+        assert_eq!(m2.state.as_ref().unwrap().writes, state.writes);
+        let s2 = serde_json::to_string(&m2).unwrap();
+        assert_eq!(s, s2, "roundtrip 后序列化产物应逐字节一致");
+
+        let mut legacy = base_manifest_json();
+        legacy["state"] = serde_json::json!({"volatile_keys": ["k"]});
+        let m3: PluginManifest =
+            serde_json::from_value(legacy).expect("旧 state 段（无 writes）应可解析");
+        assert!(
+            m3.state.as_ref().unwrap().writes.is_empty(),
+            "缺省 writes = 空（向后兼容）"
+        );
+        let s3 = serde_json::to_string(&m3.state.as_ref().unwrap()).unwrap();
+        assert!(!s3.contains("writes"), "空 writes 不应序列化输出: {s3}");
     }
 
     /// 向后兼容：旧 manifest 无 capabilities.steps 键 → 反序列化成功且 steps 为空
@@ -2216,7 +2472,10 @@ mod tests {
     async fn storage_default_methods_contract() {
         let s = BareStore;
         // 运行投影族默认：record_run_start no-op = Ok；list_runs_by_pipeline 空集
-        assert!(s.record_run_start("p", "t", "r", "hash").await.is_ok());
+        assert!(s
+            .record_run_start("p", "t", "r", "hash", "2026-10-15T00:00:00+00:00")
+            .await
+            .is_ok());
         assert!(s.list_runs_by_pipeline("p", "t").await.unwrap().is_empty());
         assert!(s.list_pipelines("t", None, 10).await.unwrap().is_empty());
         assert!(s.delete_pipeline("p").await.is_ok());
@@ -2280,12 +2539,7 @@ mod tests {
     }
 
     fn minimal_manifest() -> PluginManifest {
-        serde_json::from_value(serde_json::json!({
-            "id": "p", "name": "p", "version": "1", "plugin_type": "tool",
-            "language": "python", "host_type": "sidecar", "entry": "python s.py",
-            "capabilities": {}
-        }))
-        .expect("最小 manifest 应可解析")
+        serde_json::from_value(base_manifest_json()).expect("最小 manifest 应可解析")
     }
 
     #[test]
@@ -2549,7 +2803,7 @@ mod tests {
     }
 
     #[test]
-    fn plugin_and_pipeline_role_serde_roundtrip() {
+    fn plugin_type_serde_roundtrip() {
         for (value, wire) in [
             (PluginType::Pipeline, "pipeline"),
             (PluginType::Tool, "tool"),
@@ -2561,19 +2815,8 @@ mod tests {
             let back: PluginType = serde_json::from_str(&text).unwrap();
             assert_eq!(back, value);
         }
-        for (value, wire) in [
-            (PipelineRole::Input, "input"),
-            (PipelineRole::Core, "core"),
-            (PipelineRole::Output, "output"),
-        ] {
-            let text = serde_json::to_string(&value).unwrap();
-            assert_eq!(text, format!("\"{wire}\""));
-            let back: PipelineRole = serde_json::from_str(&text).unwrap();
-            assert_eq!(back, value);
-        }
         // 畸形输入拒收
         assert!(serde_json::from_str::<PluginType>("\"hook\"").is_err());
-        assert!(serde_json::from_str::<PipelineRole>("\"middle\"").is_err());
     }
 
     #[test]
@@ -2815,6 +3058,7 @@ mod tests {
             category: Some(ToolCategory::Search),
             ui: Some(serde_json::json!({"card": "web"})),
             render: Some(serde_json::json!({"card": "search"})),
+            isolation_capable: None,
             smoke: Some(true),
             timeout_ms: Some(0), // 0 哨兵 = 显式豁免总时长超时
         };
@@ -2828,6 +3072,7 @@ mod tests {
             category: None,
             ui: None,
             render: None,
+            isolation_capable: None,
             smoke: None,
             timeout_ms: None,
         };
@@ -2916,7 +3161,6 @@ mod tests {
         let err = serde_json::from_str::<ManifestCapabilities>(r#"{"resources":[]}"#)
             .expect_err("未知键应拒绝");
         assert!(err.to_string().contains("unknown"), "{err}");
-        // 全部能力槽位解析与 roundtrip
         let caps = ManifestCapabilities {
             tools: vec![ToolCapability {
                 name: "t".into(),
@@ -2926,6 +3170,7 @@ mod tests {
                 category: None,
                 ui: None,
                 render: None,
+                isolation_capable: None,
                 smoke: None,
                 timeout_ms: None,
             }],
@@ -2942,17 +3187,26 @@ mod tests {
             }],
             route_signals: vec![RouteType::NextLlm],
             lifecycle_hooks: vec![LifecycleHook::OnLoad],
+            metrics_class: Some("llm".to_string()),
+            stop_reasons: vec!["task_evaluate_failed".to_string()],
             streaming: Some(StreamingCapability {
                 conduit: false,
                 events: None,
                 part_types: None,
                 persist: None,
             }),
+            call_timeout_seconds: None,
         };
         assert_serde_roundtrip(&caps);
         // 空能力段 → 全缺省
         let empty: ManifestCapabilities = serde_json::from_str("{}").unwrap();
-        assert!(empty.tools.is_empty() && empty.steps.is_empty() && empty.streaming.is_none());
+        assert!(
+            empty.tools.is_empty()
+                && empty.steps.is_empty()
+                && empty.streaming.is_none()
+                && empty.metrics_class.is_none()
+                && empty.stop_reasons.is_empty()
+        );
     }
 
     #[test]
@@ -2960,7 +3214,7 @@ mod tests {
         // 顶层标量/简单字段先建基座，复合声明逐段并入（避免单个 json! 递归超限）
         let mut json = serde_json::json!({
             "id": "llm_core", "name": "LLM Core", "description": "LLM 执行器官",
-            "version": "1.0.0", "plugin_type": "pipeline", "pipeline_role": "core",
+            "version": "1.0.0", "plugin_type": "pipeline",
             "language": "python", "host_type": "sidecar", "host_group": "light",
             "entry": "python server.py",
             "requires_services": ["service-registry.search"],
@@ -2969,7 +3223,6 @@ mod tests {
             "state": {"volatile_keys": ["scratch"], "reads": ["messages_tail:20"]},
             "force_include_tools": ["spill_retrieve"],
             "export_fields": ["task.owned.*"],
-            "granted_capabilities": ["config-reader"],
             "requires_content": 20,
             "invoke_entry": "llm_core.execute",
             "enabled": true,
@@ -2983,6 +3236,7 @@ mod tests {
                 "services": [{"name": "llm.execute"}],
                 "route_signals": ["next_llm"],
                 "lifecycle_hooks": ["on_load", "domain_event"],
+                "metrics_class": "llm",
                 "streaming": {"conduit": true, "events": ["message.delta"], "persist": false}
             }),
         );
@@ -3035,7 +3289,6 @@ mod tests {
         assert_eq!(m.requires_content, Some(20));
         assert_eq!(m.activation, Some(ActivationPolicy::Eager));
         assert_eq!(m.enabled, Some(true));
-        assert_eq!(m.pipeline_role, Some(PipelineRole::Core));
         assert_eq!(m.host_group.as_deref(), Some("light"));
         assert_eq!(
             m.lifecycle.as_ref().unwrap().idle_timeout_secs,
@@ -3048,6 +3301,11 @@ mod tests {
             "interaction-respond"
         );
         assert_eq!(m.http_endpoints[0].auth.as_deref(), Some("none"));
+        assert_eq!(
+            m.capabilities.metrics_class.as_deref(),
+            Some("llm"),
+            "capabilities.metrics_class 声明应可解析"
+        );
         // roundtrip 幂等：序列化 → 反序列化 → 序列化逐字节一致
         let s = serde_json::to_string(&m).unwrap();
         let m2: PluginManifest = serde_json::from_str(&s).expect("序列化产物应可重解析");
@@ -3076,10 +3334,6 @@ mod tests {
         assert!(m.export_fields.is_empty());
         assert!(m.config_files.is_empty());
         assert!(m.http_endpoints.is_empty());
-        assert!(
-            m.granted_capabilities.is_empty(),
-            "未声明 → 向后兼容默认全授予"
-        );
         assert!(m.state.is_none());
         assert!(m.lifecycle.is_none());
         assert!(m.mcp.is_none());

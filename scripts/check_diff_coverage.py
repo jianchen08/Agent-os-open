@@ -58,6 +58,43 @@ def _git(args: list[str]) -> str:
     return proc.stdout
 
 
+def rust_cfg_test_lines(path: Path) -> set[int]:
+    """rust 源文件中 #[cfg(test)] mod 块内的行号集合（1-based）。
+
+    行级口径（测试代码不进改动行覆盖率执法面的同构推广——既有 omit 是
+    文件级正则，覆盖不了「生产+内嵌 test mod 同文件」形态：llvm-cov 对
+    纯 test 段无 DA 行，整文件 test 化时该文件缺席 lcov → 度量面漂移
+    fail-loud 假红，2026-11-06 CI 实证 log_liveness.rs）。花括号深度追踪
+    不解字符串/注释字面量——保守形态（#[cfg(test)] 紧邻 mod 声明）下
+    够用；误纳/漏纳的最坏后果是单文件豁免误差，不弱化生产行执法。
+    """
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return set()
+    out: set[int] = set()
+    depth = 0
+    test_depth: int | None = None
+    pending_cfg = False
+    for i, raw in enumerate(lines, start=1):
+        stripped = raw.strip()
+        if test_depth is not None and depth >= test_depth:
+            out.add(i)
+        if stripped.startswith("#[cfg(test)]"):
+            pending_cfg = True
+            continue
+        opens = raw.count("{")
+        closes = raw.count("}")
+        if pending_cfg and stripped.startswith(("mod ", "pub mod ")) and "{" in raw:
+            test_depth = depth + 1 if depth == 0 else depth
+            out.add(i)
+            pending_cfg = False
+        depth += opens - closes
+        if test_depth is not None and depth < test_depth:
+            test_depth = None
+    return out
+
+
 def norm_path(raw: str) -> str:
     """规范化为仓库相对 posix 路径：去 b/ 前缀、反斜杠转正斜杠、去 ROOT 前缀。"""
     p = raw.replace("\\", "/").lstrip("./")
@@ -205,8 +242,12 @@ def parse_unified_diff(text: str) -> dict[str, list[int]]:
 # ── 范围解析与主流程 ──────────────────────────────────────────────
 
 
-def resolve_range(args: argparse.Namespace) -> tuple[str, str, str] | None:
-    """返回 (diff_a, diff_b, 说明)；无可查范围返回 None。"""
+def resolve_range(args: argparse.Namespace, tag: str = "[diff-cov]") -> tuple[str, str, str] | None:
+    """返回 (diff_a, diff_b, 说明)；无可查范围返回 None。
+
+    tag 为输出前缀（本函数也被 check_file_length_baseline.py 复用做触碰
+    即拆的范围解析，消费方各用各的标签）。
+    """
     if args.range:
         a, _, b = args.range.partition("..")
         return a.strip(), (b.strip() or "HEAD"), f"--range {args.range}"
@@ -227,7 +268,7 @@ def resolve_range(args: argparse.Namespace) -> tuple[str, str, str] | None:
                     return mb, "HEAD", f"merge-base({cand}, HEAD)"
                 except RuntimeError:
                     pass
-        print(f"[diff-cov] ❌ 基线分支不可解析: {base}", file=sys.stderr)
+        print(f"{tag} ❌ 基线分支不可解析: {base}", file=sys.stderr)
         raise SystemExit(1)
 
     # push / 本地默认：只查最后一个提交
@@ -235,17 +276,18 @@ def resolve_range(args: argparse.Namespace) -> tuple[str, str, str] | None:
     try:
         parent = _git(["rev-parse", "HEAD^"]).strip()
     except RuntimeError:
-        print("[diff-cov] 范围为空（根提交或无 HEAD^），放行")
+        print(f"{tag} 范围为空（根提交或无 HEAD^），放行")
         return None
     return parent, head, "HEAD^..HEAD（push 口径：只查最后一个提交）"
 
 
-def range_has_skip_marker(a: str, b: str) -> bool:
+def range_has_skip_marker(a: str, b: str, marker: str = SKIP_MARKER) -> bool:
+    """range 内任一 commit message 含指定逃生口标记则 True（默认 [skip-diff-cov]）。"""
     try:
         logs = _git(["log", "--format=%B", f"{a}..{b}"])
     except RuntimeError:
         return False
-    return SKIP_MARKER in logs
+    return marker in logs
 
 
 def main() -> int:
@@ -295,6 +337,17 @@ def main() -> int:
         if any(o.search(path) for o in omits):
             continue
         lines = added[path]
+        if path.lower().endswith(".rs"):
+            # 内嵌 #[cfg(test)] 段的改动行剔出度量口径（与上方 tests/ omit
+            # 同一执法哲学，行级推广——见 rust_cfg_test_lines docstring）。
+            test_lines = rust_cfg_test_lines(ROOT / path)
+            if test_lines:
+                prod = [n for n in lines if n not in test_lines]
+                if not prod:
+                    if verbose:
+                        report.append(f"  {path}: 改动行全在 #[cfg(test)] 段，豁免 ✓")
+                    continue
+                lines = prod
         if path not in coverage:
             missing_files.append(path)
             continue

@@ -1,0 +1,68 @@
+/* 修仙战斗 · 水墨主题（包内自包含物料，RP 面板 v3.1 刀1）。
+   消费面：packs 清点 ui.theme_css_text 附加缝（面板开演设置页主题；本包无
+   ui.page，不参与 game/page 内联）。作用域根类 .rp-theme-xianxia——注入面按
+   根类装载，避免污染宿主/面板既有样式。留白如纸、笔锋如剑：纸色底/墨字/
+   朱砂强调。 */
+.rp-theme-xianxia {
+  --xx-bg: #f5f1e8;
+  --xx-panel: #ede7d8;
+  --xx-border: #4a4238;
+  --xx-text: #2c2620;
+  --xx-muted: #7a7062;
+  --xx-accent: #8c3a32;
+  --xx-accent-2: #3f5a4c;
+  background: var(--xx-bg);
+  color: var(--xx-text);
+  font-family: "Kaiti SC", "KaiTi", "STKaiti", "SimSun", serif;
+}
+.rp-theme-xianxia .pg-head {
+  background: var(--xx-panel);
+  border-bottom: 2px solid var(--xx-border);
+  padding: 10px 16px;
+  font-size: 16px;
+  letter-spacing: 0.2em;
+}
+.rp-theme-xianxia .pg-sub { color: var(--xx-muted); margin-left: 10px; font-size: 12px; letter-spacing: 0.05em; }
+.rp-theme-xianxia .pg-status {
+  background: var(--xx-panel);
+  border-bottom: 1px solid var(--xx-border);
+  padding: 8px 16px;
+  font-size: 13px;
+  line-height: 1.8;
+}
+.rp-theme-xianxia .pg-status .xx-chip {
+  display: inline-block;
+  border: 1px solid var(--xx-border);
+  background: var(--xx-bg);
+  padding: 1px 10px;
+  margin: 2px 8px 2px 0;
+}
+.rp-theme-xianxia .pg-status .xx-harm { color: var(--xx-accent); }
+.rp-theme-xianxia .pg-log { padding: 14px 16px; font-size: 14px; line-height: 2; white-space: pre-wrap; }
+.rp-theme-xianxia .pg-empty { color: var(--xx-muted); }
+.rp-theme-xianxia .pg-input {
+  display: flex;
+  gap: 8px;
+  border-top: 1px solid var(--xx-border);
+  background: var(--xx-panel);
+  padding: 8px;
+}
+.rp-theme-xianxia .pg-input input {
+  flex: 1;
+  background: var(--xx-bg);
+  border: 1px solid var(--xx-border);
+  color: var(--xx-text);
+  padding: 8px;
+  font: inherit;
+}
+.rp-theme-xianxia .pg-input button {
+  background: var(--xx-accent);
+  color: #f5f1e8;
+  border: 1px solid var(--xx-border);
+  padding: 8px 18px;
+  font: inherit;
+  letter-spacing: 0.2em;
+  cursor: pointer;
+}
+.rp-theme-xianxia .pg-input button:disabled { opacity: 0.5; cursor: default; }
+.rp-theme-xianxia .pg-err { color: var(--xx-accent); font-size: 12px; padding: 4px 16px; min-height: 1.4em; }

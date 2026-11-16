@@ -371,7 +371,7 @@ export function ConfigObject({
           />
           <button
             onClick={() => onDelete([...parentPath, key])}
-            className="absolute -right-1 top-0 hidden rounded p-0.5 text-muted-foreground/50 hover:text-status-error group-hover:block"
+            className="absolute -right-1 top-0 block rounded p-0.5 text-muted-foreground/50 hover:text-status-error md:hidden md:group-hover:block"
             title={`删除 ${key}`}
           >
             <Trash2 className="h-3 w-3" />
@@ -473,9 +473,13 @@ function FieldRenderer({
   if (Array.isArray(value)) {
     return (
       <FieldRow label={label} htmlFor={id}>
+        {/* 代码窗（R14 追加）：高度按视口锚定（md:h-[min(50dvh,20rem)]）——
+            大段 JSON/配置不再挤 80px 小窗滚动，桌面大屏跟随屏幕放大、窄视口
+            维持 80px 观感（390 零回退）；宽度由 FieldRow 容器查询拿满容器列
+            （max-w-xl 死宽摘除） */}
         <textarea
           id={id}
-          className="border-input bg-background min-h-[80px] w-full max-w-xl rounded-md border px-3 py-2 text-sm"
+          className="border-input bg-background h-[80px] w-full rounded-md border px-3 py-2 font-mono text-sm md:h-[min(50dvh,20rem)]"
           value={JSON.stringify(value, null, 2)}
           onChange={(e) => {
             try {
@@ -550,7 +554,7 @@ function CollapsibleObject({
   const [open, setOpen] = useState(true)
   const childCount = Object.keys(value as Record<string, unknown>).length
   return (
-    <div className="rounded-lg border" style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}>
+    <div className="rounded-lg border" style={{ borderColor: 'var(--ds-border-subtle)' }}>
       <button
         onClick={() => setOpen(!open)}
         className="hover:bg-[var(--hover-overlay)] flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left"
@@ -560,7 +564,7 @@ function CollapsibleObject({
         <span className="text-muted-foreground/60 text-[10px]">({childCount})</span>
       </button>
       {open && (
-        <div className="border-t p-2.5" style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}>
+        <div className="border-t p-2.5" style={{ borderColor: 'var(--ds-border-subtle)' }}>
           <ConfigObject
             obj={value as Record<string, unknown>}
             parentPath={path}
@@ -642,7 +646,7 @@ function DictOfDictsRenderer({
     <FieldRow label={label} htmlFor={path.join('-')}>
       <div className="space-y-1.5">
         {entries.map(([key, val]) => (
-          <div key={key} className="rounded-lg border" style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}>
+          <div key={key} className="rounded-lg border" style={{ borderColor: 'var(--ds-border-subtle)' }}>
             <div className="flex items-center gap-2 px-2.5 py-1.5">
               <button
                 onClick={() => setExpandedKey(expandedKey === key ? null : key)}
@@ -659,7 +663,7 @@ function DictOfDictsRenderer({
               </button>
             </div>
             {expandedKey === key && (
-              <div className="border-t p-2.5" style={{ borderColor: 'var(--ds-border-subtle, rgba(148,163,184,0.12))' }}>
+              <div className="border-t p-2.5" style={{ borderColor: 'var(--ds-border-subtle)' }}>
                 <ConfigObject
                   obj={val as Record<string, unknown>}
                   parentPath={[...path, key]}
@@ -749,7 +753,12 @@ function FieldRow({
   children: React.ReactNode
 }) {
   return (
-    <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-4">
+    // 容器查询（R14 追加）：行/列随自身容器宽度切换，不再随视口断点——
+    // 窄面板（设置中枢内容列 ~313px）里 sm:flex-row 把值编辑器挤到 ~90px
+    // （标签 w-40 占死 160px，Loop Bodies 代码窗实测 89×80）；@md（容器
+    // ≥28rem）才横排，窄容器恒上下堆叠、值编辑器拿满容器宽。桌面宽面板
+    // 横排观感不变。
+    <div className="@container flex flex-col gap-1 @md:flex-row @md:items-start @md:gap-4">
       <label htmlFor={htmlFor} className="text-muted-foreground w-40 shrink-0 pt-2 text-xs">
         {label}
       </label>

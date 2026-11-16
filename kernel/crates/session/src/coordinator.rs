@@ -152,6 +152,34 @@ impl SessionCoordinator {
         delivered
     }
 
+    /// 广播任意类型事件到**全部活跃连接**（EmitScope::Broadcast 路由）。
+    ///
+    /// 与 [`Self::emit_event`] 同形（`{type, data, sequence}` 信封，顶层 type
+    /// 原样保留——前端按事件名订阅），与 [`Self::broadcast_widget`] 的区别：
+    /// 不经 build_envelope（那会把 type 硬编码成 widget_event，发不出
+    /// system_notification 等聊天协议事件）。不进 thread 重放缓冲（广播事件
+    /// 不重放，与 broadcast_widget 一致）——系统级通知断线不补投，重连后由
+    /// 前端 pending 兜底轮询/刷新恢复。卡3 全局通知路由的传输原语（装机
+    /// 2026-10-18 事故：组全灭时无活跃管道 → thread 单播零投递）。
+    ///
+    /// 返回成功投递的连接数。
+    pub async fn broadcast_event(&self, event_type: &str, data: Value) -> usize {
+        let sequence = self.bus.next_sequence(&EmitScope::Broadcast).await;
+        let payload = serde_json::json!({
+            "type": event_type,
+            "data": data,
+            "sequence": sequence,
+        });
+        let payload_str = serde_json::to_string(&payload).unwrap_or_default();
+        let delivered = self.registry.broadcast(&payload_str).await;
+        if delivered > 0 {
+            self.metrics.inc_event_bus_push(delivered as u64);
+        } else {
+            self.metrics.inc_event_bus_dropped();
+        }
+        delivered
+    }
+
     /// B3：仅回放（不重注册连接、不发连接确认）——连接已建立、确认已发，
     /// 在首个 thread 注册时补发断线期间该 thread 缺失的事件。
     /// `last_sequence` 是前端全局 watermark（0.2 sequence 已为全局空间，单 cursor 正确）。

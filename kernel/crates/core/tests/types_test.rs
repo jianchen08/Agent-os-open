@@ -225,3 +225,41 @@ fn tool_category_tool_source_round_trip() {
     let back2: ToolSource = serde_json::from_str(&ts).unwrap();
     assert_eq!(back2, ToolSource::Builtin);
 }
+
+#[test]
+fn declared_stop_reasons_extend_failed_vocabulary() {
+    // 声明链（停机词声明化 ADR 2026-10-15）：插件署名停机词经声明注册进
+    // core 词表扩展点——声明缺席落 Completed 兜底，声明在席折算 Failed；
+    // 全量重建覆盖式替换，卸载/停用插件的历史声明随重建消失无残留。
+    let word = "decl_chain_probe_word";
+    let signed = || json!({ "router.stop_reason": word });
+    assert_eq!(
+        RunStatus::from_control_state(&signed()),
+        RunStatus::Completed,
+        "未声明的插件署名不得映射 Failed（缺省兜底）"
+    );
+    // 声明注册（含空词与空声明插件——均不计入）：返回值 = 声明词总数
+    let registered = RunStatus::refresh_declared_stop_reasons([
+        (
+            "chain_probe_plugin".to_string(),
+            vec![word.to_string(), "".to_string()],
+        ),
+        ("empty_decl_plugin".to_string(), vec![]),
+    ]);
+    assert_eq!(
+        registered, 1,
+        "空词/空声明不计入声明词数（core 重建过滤语义）"
+    );
+    assert_eq!(
+        RunStatus::from_control_state(&signed()),
+        RunStatus::Failed,
+        "声明在席的插件署名折算 Failed"
+    );
+    // 重建摘词（覆盖式替换非增量累积）→ 回退兜底，无残留
+    RunStatus::refresh_declared_stop_reasons([]);
+    assert_eq!(
+        RunStatus::from_control_state(&signed()),
+        RunStatus::Completed,
+        "重建消失的声明不得残留映射"
+    );
+}

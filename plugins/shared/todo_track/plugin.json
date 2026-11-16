@@ -1,0 +1,137 @@
+{
+  "id": "pipeline_todo_track",
+  "plugin_type": "pipeline",
+  "language": "python",
+  "host_type": "sidecar",
+  "entry": "python server.py",
+  "invoke_entry": "todo.fold",
+  "name": "Todo Track",
+  "description": "todo 清单双步骤插件（③级步骤服务消费者）：todo.extract（输出阶段）把本轮 assistant 回复里的 checkbox 行按增量协议（[x] 勾选匹配/[ ] 新增查重）并入 context.todo_text，同批写内存 latest 载荷；todo.fold（输入阶段，挂 prompt_build 之后）把说明常量与当前清单并入 prompt.dynamic_vars 消息 content 尾部（系统提示词零触碰——缓存前缀契约，2026-10-23）。context.todo_text 经 persistent_fields 落 pipeline_state（1.2.26 修：此前未声明，内核每轮终态注销热缓存、冷恢复只认声明键——每轮 merge 基座被丢，清单只剩最新一轮增量）；1.2.26 起 extract 另带一次性自愈（状态缺失/旧版本时从近轮 assistant 消息重放增量协议重建）。capabilities.steps 为唯一挂载面（按步骤名跨阶段引用），无默认 execute 入口；无块=状态停更零写入，任何异常 warning 直通不阻断。",
+  "version": "1.2.26",
+  "persistent_fields": [
+    "context.todo_text",
+    "context.todo_state_v"
+  ],
+  "capabilities": {
+    "tools": [],
+    "route_signals": [],
+    "lifecycle_hooks": [
+      "on_load"
+    ],
+    "steps": [
+      {
+        "name": "todo.fold",
+        "description": "输入阶段：todo 说明常量 + 当前清单并入动态变量消息尾部（系统提示词零触碰；dynamic_vars 缺失零动作）"
+      },
+      {
+        "name": "todo.extract",
+        "description": "输出阶段：本轮 assistant 回复的 checkbox 行按增量协议并入 context.todo_text（持久化声明键，跨轮基座不丢）+ latest 端点载荷；无 ops 零写入"
+      }
+    ]
+  },
+  "priority": 60,
+  "host_group": "light",
+  "http_endpoints": [
+    {
+      "route_id": "todo_latest",
+      "method": "GET",
+      "path": "/ext/pipeline_todo_track/latest",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "该管道最近一轮 todo 清单载荷（?pipeline_id= 按管道取；缺省=最近更新载荷——webview 计划页与角标取数源，最近更新者即当前活动管道）"
+    },
+    {
+      "route_id": "todo_plan_page",
+      "method": "GET",
+      "path": "/ext/pipeline_todo_track/page/todo-plan",
+      "auth": "user",
+      "handler_capability": "http.handle",
+      "timeout_ms": 5000,
+      "max_concurrency": 8,
+      "description": "webview 计划页 HTML（contributes.pages todo_plan 的 htmlPath 取数源，形态镜像规划台）"
+    }
+  ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "todo_badge",
+        "title": "待办角标",
+        "space": "floating",
+        "slot": "panel",
+        "widget": "webview",
+        "props": {
+          "pluginId": "pipeline_todo_track",
+          "htmlPath": "/assets/cards/todo_badge.html",
+          "widgetId": "todo_badge",
+          "anchor": "top-right",
+          "offset": {
+            "x": 12,
+            "y": 8
+          },
+          "transparent": true
+        },
+        "description": "聊天区悬浮待办角标（2026-10-24 用户裁定：悬浮槽位置按插件声明定位）：默认收起圆钮（未完成数），点开清单面板（已完成项自动折叠、未完成项带折叠钮，头区/进度条常驻顶端）。单数据源（2026-10-26 用户裁定：后端的数据是什么前端就显示什么，不做第二数据源）：自拉 /ext/pipeline_todo_track/latest?pipeline_id=<当前管道> 15s 轮询（2026-10-27 用户裁定：角标显示哪个管道就拉取哪个，不按最近更新猜桶——后台多管道并行时最近更新者可能是其他任务；管道 ID 由宿主 ctx.sync 下行桥下发，切换即重取），载荷原样渲染，无清单隐藏。经 ChatFloatingLayer 通用悬浮挂载槽渲染（anchor 声明定位）。"
+      },
+      {
+        "id": "todo_plan",
+        "title": "任务计划",
+        "icon": "📋",
+        "space": "workspace",
+        "slot": "tab",
+        "path": "/p/todo_plan",
+        "widget": "webview",
+        "props": {
+          "pluginId": "pipeline_todo_track",
+          "htmlPath": "/page/todo-plan",
+          "widgetId": "todo_plan"
+        },
+        "detachable": {
+          "popout": true,
+          "childWindow": true,
+          "defaultSize": {
+            "w": 420,
+            "h": 520
+          },
+          "minSize": {
+            "w": 300,
+            "h": 360
+          }
+        },
+        "description": "todo 清单计划卡：当前最近任务清单（勾选态/n/m 进度，10s 自刷新；无计划空态）"
+      }
+    ],
+    "content_cards": [
+      {
+        "id": "todo_list_html",
+        "title": "任务清单",
+        "match": {
+          "fences": [
+            "html",
+            "todo"
+          ],
+          "fence_content_pattern": "<details[\\s\\S]*任务清单"
+        },
+        "form": "template",
+        "chromeless": true,
+        "template": "<details style=\"margin:6px 0;font:13px/1.6 -apple-system,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;\"><summary style=\"cursor:pointer;user-select:none;color:hsl(var(--primary));font-size:12px;\">📋 任务清单（点击展开/收起）</summary><pre style=\"margin:6px 0 2px;padding:8px 12px;background:hsl(var(--muted) / 0.5);border-radius:8px;font:12px/1.7 ui-monospace,Consolas,monospace;white-space:pre-wrap;color:hsl(var(--foreground));\">{{content_text}}</pre></details>",
+        "description": "模型仿历史折叠卡形态把任务卡 HTML 包进代码围栏（2026-10-25 用户实测显示源码）时的声明路由：fence 内容特征（<details…任务清单）命中才接管；form=template + {{content_text}}（HTML 去标签纯文本）与 GFM 清单卡同款形态——2026-10-25 用户裁定两态统一取模板卡观感，webview iframe 观感弃用。"
+      },
+      {
+        "id": "todo_list",
+        "title": "任务清单",
+        "match": {
+          "fences": [],
+          "blocks": [
+            "task-list"
+          ]
+        },
+        "form": "template",
+        "chromeless": true,
+        "description": "气泡内待办清单折叠卡(2026-10-24 用户裁定:待办是聊天框里的一张'单',渲染归待办插件声明):match.blocks=['task-list'] 命 markdown GFM 任务清单块,form=template 以 <details> 原生折叠+<pre> 保换行展示清单行原文;消息 append-only 零改写,前端 TaskListGate 通用声明路由,右上角待办角标常驻状态后气泡内清单默认收起。",
+        "template": "<details style=\"margin:6px 0;font:13px/1.6 -apple-system,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;\"><summary style=\"cursor:pointer;user-select:none;color:hsl(var(--primary));font-size:12px;\">📋 任务清单（点击展开/收起）</summary><pre style=\"margin:6px 0 2px;padding:8px 12px;background:hsl(var(--muted) / 0.5);border-radius:8px;font:12px/1.7 ui-monospace,Consolas,monospace;white-space:pre-wrap;color:hsl(var(--foreground));\">{{content}}</pre></details>"
+      }
+    ]
+  }
+}

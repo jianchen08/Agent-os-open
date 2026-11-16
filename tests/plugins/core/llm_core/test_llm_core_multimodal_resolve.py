@@ -30,7 +30,7 @@ def _load_plugin_under_test() -> ModuleType:
     """唯一名动态加载 plugin.py（裸名 `import plugin` 会被兄弟插件目录串扰）。"""
     path = (
         Path(__file__).resolve().parents[4]
-        / "plugins" / "shared" / "pipeline" / 'core' / 'llm_core' / "plugin.py"
+        / "plugins" / "shared" / "llm_core" / "plugin.py"
     )
     name = '_llm_core_under_test'
     sys.modules.pop(name, None)

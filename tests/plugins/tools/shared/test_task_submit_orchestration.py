@@ -3,7 +3,7 @@
 """task_submit 编排解析 + 完备性闸门行为测试（P2：两级解析/H3/审计键）。
 
 断输入→输出与结构化错误形状；解析域逻辑（两级链）单测见
-plugins/shared/system/tasks/test_orchestration.py，本文件验证工具侧接线：
+plugins/shared/tasks/test_orchestration.py，本文件验证工具侧接线：
 
 1. 旧调用兼容：不带 orchestration_key 的提交走② autonomous，行为不变
    （真实仓库编排发现，autonomous 派发成功 + 出生 state 记编排键）；
@@ -14,7 +14,9 @@ plugins/shared/system/tasks/test_orchestration.py，本文件验证工具侧接�
    execution_context；
 4. 完备性（§3.5 派发期门口拒派）：agent 基座缺身份性字段 / target_type
    非 agent（bypass schema 直调）→ INCOMPLETE_INITIAL_INPUTS 结构化拒绝
-   （{missing_fields, orchestration_key, suggestion}，不实例化）。
+   （{missing_fields, orchestration_key, suggestion}，不实例化）；
+   target_type 常量内化（LLM 面无此参数）→ 缺省归一 agent，agent.id 计入
+   左值正常放行。
 """
 from __future__ import annotations
 
@@ -28,14 +30,19 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_TS_DIR = _REPO_ROOT / "plugins" / "shared" / "tools" / "task_submit"
-_TASKS_DIR = _REPO_ROOT / "plugins" / "shared" / "system" / "tasks"
+_TS_DIR = _REPO_ROOT / "plugins" / "shared" / "task_submit"
+_TASKS_DIR = _REPO_ROOT / "plugins" / "shared" / "tasks"
 
 for _d in (str(_TASKS_DIR), str(_TS_DIR)):
     if str(_d) not in sys.path:
         sys.path.insert(0, str(_d))
 
 import orchestration as orchestration_mod  # noqa: E402 — tasks 域平铺模块
+
+_TESTS_ROOT = _REPO_ROOT / "tests"
+if str(_TESTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TESTS_ROOT))
+from _task_birth_workspace import inject_preparer, reset_preparer  # noqa: E402
 
 
 def _load_module() -> Any:
@@ -57,7 +64,7 @@ def _load_module() -> Any:
 
 
 class _FakeSender:
-    """chat.send_message 替身：三段出生各回同一 pipeline_id。"""
+    """chat.send_message 替身：出生各段各回同一 pipeline_id。"""
 
     def __init__(self, pipeline_id: str = "abcdef123456") -> None:
         self.calls: list[dict[str, Any]] = []
@@ -76,6 +83,8 @@ def _base_inputs(**over: Any) -> dict:
         "target_id": "code_writer",
         "parent_agent_level": 1,
         "user_id": "user-1",
+        # 提交者会话坐标（生产由 param_inject 注入；完备性闸门按 state 键计必需）
+        "session_id": "sess-1",
     }
     base.update(over)
     return base
@@ -90,13 +99,16 @@ def _make_tool(mod: Any) -> Any:
 
     tool._validate_target_agent = _ok  # type: ignore[method-assign]
 
-    async def _base_config(target_id: str) -> dict[str, Any] | None:
-        return {
-            "level": "L3",
-            "is_active": True,
-            "tool_ids": ["file_write"],
-            "system_prompt": "persona-stub",
-        }
+    async def _base_config(target_id: str) -> tuple[dict[str, Any] | None, None]:
+        return (
+            {
+                "level": "L3",
+                "is_active": True,
+                "tool_ids": ["file_write"],
+                "system_prompt": "persona-stub",
+            },
+            None,
+        )
 
     tool._get_agent_base_config = _base_config  # type: ignore[method-assign]
     return tool
@@ -128,11 +140,13 @@ def _restore_module_injections(tmp_path_factory, monkeypatch):
 async def _run_submit(mod: Any, inputs: dict[str, Any]) -> Any:
     sender = _FakeSender()
     mod.set_chat_sender(sender)
+    inject_preparer(mod)
     tool = _make_tool(mod)
     try:
         result = await tool.execute(inputs)
     finally:
         mod._chat_sender = None
+        reset_preparer(mod)
     return result, sender
 
 
@@ -145,7 +159,7 @@ class TestLegacyCalls:
         mod = _load_module()
         result, sender = await _run_submit(mod, _base_inputs())
         assert result.success, result.error
-        assert len(sender.calls) == 3, "出生三段（登记/身份/派发）"
+        assert len(sender.calls) == 4, "出生四段（登记/身份/工作空间/派发，ADR 2026-10-17 增工作空间段）"
         birth_state = sender.calls[0]["state"]
         assert birth_state["task.orchestration"] == "autonomous"
         assert result.output["pipeline_id"] == "abcdef123456"
@@ -155,8 +169,10 @@ class TestLegacyCalls:
         （fail-closed 提升到编排级，§3.5；错误是结构化值，M2 回流）。"""
         mod = _load_module()
 
-        async def _thin_base(target_id: str) -> dict[str, Any] | None:
-            return {"level": "L3", "is_active": True}
+        async def _thin_base(
+            target_id: str,
+        ) -> tuple[dict[str, Any] | None, None]:
+            return {"level": "L3", "is_active": True}, None
 
         sender = _FakeSender()
         mod.set_chat_sender(sender)
@@ -173,7 +189,7 @@ class TestLegacyCalls:
         assert fields["missing_fields"] == ["context.system_prompt", "tool_ids"]
         assert fields["suggestion"]
         assert "context.system_prompt" in result.error
-        assert sender.calls == [], "门口拒派不实例化（出生三段零调用）"
+        assert sender.calls == [], "门口拒派不实例化（出生四段零调用）"
 
 
 # ── ① 显式编排键 ──
@@ -233,22 +249,22 @@ class TestModeKeyDecoupled:
         mod = _load_module()
         result, sender = await _run_submit(mod, _base_inputs(mode="writing"))
         assert result.success, result.error
-        dispatch = sender.calls[2]
+        dispatch = sender.calls[3]
         assert dispatch["execution_context"]["mode"] == "writing"
 
         result_blank, sender_blank = await _run_submit(mod, _base_inputs(mode="  "))
         assert result_blank.success, result_blank.error
-        assert "mode" not in sender_blank.calls[2]["execution_context"]
+        assert "mode" not in sender_blank.calls[3]["execution_context"]
 
 
 # ── 完备性闸门（派发期门口拒派）──
 
 
 class TestAgentBaseConfig:
-    """_get_agent_base_config：registry 优先 → 磁盘回退（与 target 校验同解析序）。"""
+    """_get_agent_base_config：注入钩子单源（无磁盘回退，解析权归 agent_manager）。"""
 
-    async def test_registry_failure_falls_back_to_disk(self) -> None:
-        """registry 查询抛错（服务故障）→ 降级磁盘 yaml，不向调用方抛。"""
+    async def test_registry_failure_fails_closed(self) -> None:
+        """registry 查询抛错（服务故障）→ 显式失败信封（不冒充"缺字段"拒派）。"""
         mod = _load_module()
         tool = mod.TaskSubmitTool()
 
@@ -256,25 +272,14 @@ class TestAgentBaseConfig:
             raise RuntimeError("agent_manager 服务不可用")
 
         mod.set_agent_registry_lookup(_boom)
-        got = await tool._get_agent_base_config("mode_coding/code_writer")
-        assert got is not None
-        assert "level" in got
-
-    async def test_registry_non_dict_falls_back_to_disk(self) -> None:
-        """registry 返回非 dict（信封违约形态）→ 视为未命中，磁盘回退。"""
-        mod = _load_module()
-        tool = mod.TaskSubmitTool()
-
-        async def _junk(target_id: str) -> dict[str, Any] | None:
-            return "not-a-dict"  # type: ignore[return-value]
-
-        mod.set_agent_registry_lookup(_junk)
-        got = await tool._get_agent_base_config("mode_coding/code_writer")
-        assert got is not None
-        assert "level" in got
+        config, fail = await tool._get_agent_base_config("mode_coding/code_writer")
+        assert config is None
+        assert fail is not None
+        assert fail.error_code == "AGENT_CONFIG_UNAVAILABLE"
+        assert "agent_manager" in fail.error
 
     async def test_registry_hit_dict_returned_as_is(self) -> None:
-        """registry 命中 dict → 原样返回（不触磁盘；完备性身份字段同源解析）。"""
+        """registry 命中 dict → 原样返回（完备性身份字段同源解析）。"""
         mod = _load_module()
         tool = mod.TaskSubmitTool()
         base = {"level": "L3", "tool_ids": ["file_write"]}
@@ -284,10 +289,12 @@ class TestAgentBaseConfig:
             return dict(base)
 
         mod.set_agent_registry_lookup(_hit)
-        assert await tool._get_agent_base_config("code_writer") == base
+        config, fail = await tool._get_agent_base_config("code_writer")
+        assert fail is None
+        assert config == base
 
-    async def test_registry_miss_without_disk_hit_returns_none(self) -> None:
-        """registry 未命中且磁盘无此 agent（未注册形态）→ None（左值宁缺勿假）。"""
+    async def test_registry_miss_returns_none_without_fail(self) -> None:
+        """registry 未命中（未注册形态）→ (None, None)（左值宁缺勿假）。"""
         mod = _load_module()
         tool = mod.TaskSubmitTool()
 
@@ -295,55 +302,36 @@ class TestAgentBaseConfig:
             return None
 
         mod.set_agent_registry_lookup(_miss)
-        assert await tool._get_agent_base_config("no_such_agent_p2") is None
-
-    def test_disk_yaml_empty_file_is_empty_config(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """空 yaml = 空配置 dict（合法形态，按默认运行）。"""
-        mod = _load_module()
-        cfg_dir = tmp_path / "config" / "agents"
-        cfg_dir.mkdir(parents=True)
-        target = cfg_dir / "empty_agent_p2.yaml"
-        target.write_text("", encoding="utf-8")
-        import pathlib
-
-        def _fake_rglob(self: Any, pattern: str) -> Any:
-            if pattern == "empty_agent_p2.yaml":
-                return iter([target])
-            return pathlib.Path.rglob(self, pattern)
-
-        monkeypatch.setattr(pathlib.Path, "rglob", _fake_rglob)
-        config, corrupt = mod.TaskSubmitTool._load_agent_yaml_dict("empty_agent_p2")
-        assert config == {}
-        assert corrupt == ""
-
-    def test_disk_yaml_non_mapping_is_corrupt(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """yaml 解析为非映射（配置损坏形态）→ (None, 损坏路径) 与不存在区分归因。"""
-        mod = _load_module()
-        cfg_dir = tmp_path / "config" / "agents"
-        cfg_dir.mkdir(parents=True)
-        target = cfg_dir / "junk_agent_p2.yaml"
-        target.write_text("- just\n- a list\n", encoding="utf-8")
-        import pathlib
-
-        def _fake_rglob(self: Any, pattern: str) -> Any:
-            if pattern == "junk_agent_p2.yaml":
-                return iter([target])
-            return pathlib.Path.rglob(self, pattern)
-
-        monkeypatch.setattr(pathlib.Path, "rglob", _fake_rglob)
-        config, corrupt = mod.TaskSubmitTool._load_agent_yaml_dict("junk_agent_p2")
+        config, fail = await tool._get_agent_base_config("no_such_agent_p2")
         assert config is None
-        assert corrupt.endswith("junk_agent_p2.yaml")
+        assert fail is None
+
+    async def test_hook_missing_degrades_to_none(self) -> None:
+        """钩子未注入（sidecar 接线缺失）→ (None, None) 文档化降级（左值宁缺勿假）。"""
+        mod = _load_module()
+        mod._agent_registry_lookup = None
+        tool = mod.TaskSubmitTool()
+        config, fail = await tool._get_agent_base_config("any_agent_p2")
+        assert config is None
+        assert fail is None
 
 
 # ── 完备性闸门（派发期门口拒派）──
 
 
 class TestCompleteness:
+    async def test_target_type_constant_internalized_dispatches(self) -> None:
+        """LLM 面无 target_type（常量内化）→ 缺省归一 agent：agent.id 计入
+        完备性左值，派发放行（身份随 target_id 出生协议写全）。
+        回归锚：归一值曾不回写 inputs，左值恒缺 agent.id，所有 LLM 派发被
+        门口拒死（装机实测 2026-10-19 三连拒）。"""
+        mod = _load_module()
+        inputs = _base_inputs()
+        inputs.pop("target_type")
+        result, sender = await _run_submit(mod, inputs)
+        assert result.success, result.error
+        assert len(sender.calls) == 4
+
     async def test_non_agent_target_lacks_identity_rejected(self) -> None:
         """target_type 非 agent（bypass schema 直调）→ 无 agent.id 身份 →
         初始输入集不虚报，完备性拒绝（身份不明不派发）。"""
@@ -362,4 +350,4 @@ class TestCompleteness:
         mod = _load_module()
         result, sender = await _run_submit(mod, _base_inputs())
         assert result.success, result.error
-        assert len(sender.calls) == 3
+        assert len(sender.calls) == 4

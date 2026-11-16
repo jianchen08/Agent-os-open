@@ -116,7 +116,7 @@ def _wait_task_terminal(token, kernel_url: str, task_id: str) -> dict:
         if row is None:
             return None
         status = str((row.get("state") or {}).get("task.status") or "")
-        if status in ("completed", "pending_evaluation", "failed"):
+        if status in ("completed", "failed"):
             return row
         return None
 

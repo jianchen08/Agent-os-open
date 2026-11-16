@@ -165,6 +165,28 @@ describe('‹i/n› 切换器渲染（count>1 才显示）', () => {
     expect(screen.getByTestId('segment-next')).toBeDisabled()
     expect(screen.getByTestId('segment-prev')).toBeEnabled()
   })
+
+  it('切换器常驻可见：不在 hover 门控的操作组内（它是到达历史代版本的唯一入口）', () => {
+    render(
+      <MessageActions
+        message={makeMessage('assistant', 51)}
+        sessionId="sess-1"
+        segmentSwitcherBaseSeq={50}
+      />,
+    )
+    const switcher = screen.getByTestId('segment-switcher')
+    // 操作组带 hover 门控类（桌面端 md 起 opacity-0 → 悬停才显形）
+    let node: HTMLElement | null = switcher
+    let insideGatedGroup = false
+    while (node) {
+      if (typeof node.className === 'string' && node.className.includes('md:opacity-0')) {
+        insideGatedGroup = true
+        break
+      }
+      node = node.parentElement
+    }
+    expect(insideGatedGroup).toBe(false)
+  })
 })
 
 describe('切换乐观 + 出站（ack 对账由 useRealtimeEvents 契约测试覆盖）', () => {

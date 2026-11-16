@@ -3,8 +3,9 @@
 
 按行为分组补齐此前未覆盖的分支（断输入→输出/副作用，不钉实现）：
 
-1. 会话工作区键：session_id 优先 / pipeline_id 兜底 / 非目录安全字符清洗 /
-   清洗后为空回落 default——同基目录下所有会话共用一层隔离目录，不外溢。
+1. 会话工作区键：session_id 优先 / pipeline_id 兜底 / 短 id 派生（剥
+   thread- 前缀与连字符取前 12 位）/ 非目录安全字符清洗 / 清洗后为空回落
+   default——同基目录下所有会话共用一层隔离目录，不外溢。
 2. state 聚合行刷新：reader 未注入早退；reader 返回协程 / 返回 list（非 dict
    条目剔除）/ 非 list（保留旧快照）；reader 抛异常沿用旧快照且留痕。
 3. _ExecutionContextTaskTree.get_task：聚合行命中 / 行缺失且非当前任务 → None /
@@ -47,10 +48,11 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-_PLUGIN_DIR = Path(__file__).resolve().parent.parent / "plugins" / "shared" / "pipeline" / "input" / "workspace_lifecycle"
-_SHARED_ROOT = _PLUGIN_DIR.parents[2]  # plugins/shared
-_ISOLATION_DIR = _SHARED_ROOT / "system" / "isolation"
-for _p in (str(_SHARED_ROOT), str(_ISOLATION_DIR)):
+_PLUGIN_DIR = Path(__file__).resolve().parent.parent / "plugins" / "shared" / "workspace_lifecycle"
+_SHARED_ROOT = _PLUGIN_DIR.parents[0]  # plugins/shared（平铺根：_libs/_root_api 裸模块面）
+_ISOLATION_DIR = _SHARED_ROOT / "isolation"
+# 插件目录随同入 path：plugin.py 惰性消费插件内模块（tree_anchor，2c 树锚定）。
+for _p in (str(_PLUGIN_DIR), str(_SHARED_ROOT), str(_ISOLATION_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -182,17 +184,37 @@ class TestSessionWorkspaceKey:
     @pytest.mark.parametrize(
         ("state", "expected"),
         [
-            ({"session_id": "sess-1", "pipeline_id": "pipe-9"}, "sess-1"),
-            ({"pipeline_id": "pipe-9"}, "pipe-9"),
+            ({"session_id": "sess-1", "pipeline_id": "pipe-9"}, "sess1"),
+            ({"pipeline_id": "pipe-9"}, "pipe9"),
             ({}, "default"),
             ({"session_id": None, "pipeline_id": ""}, "default"),
             ({"session_id": "a/b c?d"}, "abcd"),          # 只留字母数字 -_
-            ({"session_id": "a-b_c-9"}, "a-b_c-9"),
+            ({"session_id": "a-b_c-9"}, "ab_c9"),
             ({"session_id": "../../etc"}, "etc"),          # 路径分隔符被清洗，不外溢
+            # 短 id：thread-<uuid> 剥前缀与连字符取前 12 位（与 pipeline 12hex 同形）
+            (
+                {"session_id": "thread-0a1b2c3d-4e5f-4c8a-9b1d-2e3f4a5b6c7d"},
+                "0a1b2c3d4e5f",
+            ),
+            ({"session_id": "abcdefghijklmnopqrst"}, "abcdefghijkl"),  # 截断至 12 位
+            ({"pipeline_id": "0a1b2c3d4e5f"}, "0a1b2c3d4e5f"),         # 已短 id 幂等
         ],
     )
     def test_key_derivation(self, plugin_mod: Any, state: dict[str, Any], expected: str) -> None:
         assert plugin_mod._session_workspace_key(state) == expected
+
+    def test_key_properties(self, plugin_mod: Any) -> None:
+        """性质契约：≤12 位、目录安全字符（无路径分隔符）、确定性、不同 uuid 不同键。"""
+        uuid_a = "thread-0a1b2c3d-4e5f-4c8a-9b1d-2e3f4a5b6c7d"
+        uuid_b = "thread-0a1b2c3e-4e5f-4c8a-9b1d-2e3f4a5b6c7d"
+        key_a = plugin_mod._session_workspace_key({"session_id": uuid_a})
+        key_b = plugin_mod._session_workspace_key({"session_id": uuid_b})
+
+        assert 0 < len(key_a) <= 12
+        assert all(c.isalnum() or c in "-_" for c in key_a)
+        assert "/" not in key_a and "\\" not in key_a
+        assert plugin_mod._session_workspace_key({"session_id": uuid_a}) == key_a
+        assert key_a != key_b
 
 
 # ═══════════════ state 聚合行刷新 ═══════════════
@@ -307,11 +329,11 @@ class TestExecutionContextTaskTree:
         assert task.parent_task_id is None
 
     def test_row_hit_carries_parent_and_ws_meta(self, plugin_mod: Any) -> None:
-        """聚合行命中 → 父链由行的 lineage 键解析，ws_meta 并入 metadata。"""
+        """聚合行命中 → 父链由行的 lineage 键解析，坐标单键 task.ws_meta 并入 metadata。"""
         plugin_mod._state_rows_cache = [{
             "pipeline_id": "t-child",
             "lineage.parent_pipeline_id": "t-parent",
-            "ws_meta": {"mode": "shared", "path": "/ws/parent"},
+            "task.ws_meta": {"mode": "shared", "path": "/ws/parent"},
         }]
         tree = self._tree(plugin_mod, {"task.id": "t-child"})
 
@@ -324,7 +346,7 @@ class TestExecutionContextTaskTree:
         """跨边界序列化形态（JSON 字符串）→ 还原为 dict（state_fields 契约）。"""
         plugin_mod._state_rows_cache = [{
             "pipeline_id": "t-2",
-            "ws_meta": '{"mode": "plain", "path": "/ws/p"}',
+            "task.ws_meta": '{"mode": "plain", "path": "/ws/p"}',
         }]
         tree = self._tree(plugin_mod, {"task.id": "t-2"})
 
@@ -566,7 +588,11 @@ class TestSessionWorkspace:
     async def test_no_task_and_no_source_uses_session_dir(
         self, plugin_mod: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     ) -> None:
-        """无任务身份、无显式工作区 → 工作区 = 工作空间根/sessions/{session_id}。"""
+        """无任务身份、无显式工作区 → 工作区 = 工作空间根/sessions/{session_id}。
+
+        ws_meta 坐标同刀携带统一树路径（2c D9' 锚定，R19）：基根同盘钉死防
+        跨盘退化干扰，设备前缀经 env 钉死保断言确定。
+        """
         base = tmp_path / "wsbase"
         base.mkdir()
         monkeypatch.setattr(
@@ -575,15 +601,20 @@ class TestSessionWorkspace:
         import isolation.workspace as iw
 
         monkeypatch.setattr(iw, "get_workspace_base_dir", lambda: base)
+        monkeypatch.setattr(iw, "find_project_root", lambda: tmp_path)
+        monkeypatch.setenv("AGENTOS_DEVICE_ID", "desk-gap")
         manager = _ScriptedManager()
         p = _plugin(plugin_mod, manager)
 
         result = await p._bootstrap(_ctx(plugin_mod, {"session_id": "sess-7"}))
 
-        expected = str(base / "sessions" / "sess-7")
+        expected = str(base / "sessions" / "sess7")
         assert result.state_updates["workspace"] == expected
         assert result.state_updates["ws_meta"] == {
-            "mode": "plain", "path": expected, "session_id": "sess-7",
+            "mode": "plain",
+            "path": expected,
+            "session_id": "sess7",
+            "tree_path": "/desk-gap/sessions/sess7",
         }
         assert manager.session_starts == [expected], "skills 快照同步到会话工作区"
 
@@ -596,13 +627,14 @@ class TestSessionWorkspace:
         import isolation.workspace as iw
 
         monkeypatch.setattr(iw, "get_workspace_base_dir", lambda: base)
+        monkeypatch.setattr(iw, "find_project_root", lambda: tmp_path)
         manager = _ScriptedManager(session_error=RuntimeError("copy failed"))
         p = _plugin(plugin_mod, manager)
 
         result = await p._bootstrap(_ctx(plugin_mod, {"session_id": "sess-8"}))
 
         assert result.error is None
-        assert result.state_updates["workspace"] == str(base / "sessions" / "sess-8")
+        assert result.state_updates["workspace"] == str(base / "sessions" / "sess8")
 
     async def test_workspace_root_resolution_failure_yields_no_output(
         self, plugin_mod: Any, monkeypatch: pytest.MonkeyPatch,
@@ -630,6 +662,7 @@ class TestSessionWorkspace:
         import isolation.workspace as iw
 
         monkeypatch.setattr(iw, "get_workspace_base_dir", lambda: base)
+        monkeypatch.setattr(iw, "find_project_root", lambda: tmp_path)
         p = _plugin(plugin_mod)  # 无 manager
 
         def _none(*_a: Any, **_k: Any) -> None:
@@ -638,7 +671,7 @@ class TestSessionWorkspace:
         monkeypatch.setattr(p, "_get_manager", _none)
         result = await p._bootstrap(_ctx(plugin_mod, {"session_id": "sess-10"}))
 
-        assert result.state_updates["workspace"] == str(base / "sessions" / "sess-10")
+        assert result.state_updates["workspace"] == str(base / "sessions" / "sess10")
 
 
 # ═══════════════ 任务工作区 ═══════════════
@@ -729,7 +762,7 @@ class TestTaskWorkspaceFailClosed:
     async def test_valid_ws_meta_written_to_state(
         self, plugin_mod: Any, tmp_path: Path,
     ) -> None:
-        """服务返回有效路径 → state.workspace / ws_meta 落盘（真契约形态）。"""
+        """服务返回有效路径 → state.workspace / task.ws_meta 落盘（单键真契约形态）。"""
         meta = {"mode": "plain", "path": str(tmp_path / "ws"), "project_root": str(tmp_path)}
         manager = _ScriptedManager(ws_meta=meta)
         p = _plugin(plugin_mod, manager)
@@ -738,7 +771,9 @@ class TestTaskWorkspaceFailClosed:
 
         assert result.error is None
         assert result.state_updates["workspace"] == meta["path"]
-        assert result.state_updates["ws_meta"] == meta
+        assert result.state_updates["task.ws_meta"] == meta
+        # 引擎出口键已退役：任务管道不再写裸 ws_meta
+        assert "ws_meta" not in result.state_updates
 
 
 class TestResolveDefaultSource:
@@ -871,32 +906,33 @@ class TestMirrorTaskWsMeta:
         plugin_mod.set_task_state_writer(None)
 
     async def test_writer_unbound_skips_silently(self, plugin_mod: Any) -> None:
-        """writer 未绑定 → 跳过镜像（镜像失败不阻断 init 主创建）。"""
+        """writer 未绑定 → 跳过创建写（写失败不阻断 init 主创建；坐标仍随
+        state_updates 入引擎 state 按 step 投影落表）。"""
         p = _plugin(plugin_mod, _ScriptedManager())
-        await p._mirror_task_ws_meta("t-1", {"path": "/x"})  # 不应抛
+        await p._write_task_ws_meta("t-1", {"path": "/x"})  # 不应抛
 
-    async def test_mirror_written_to_task_key_space(self, plugin_mod: Any) -> None:
-        """镜像键 = task.ws_meta（运行中 task_evaluate 门控即时可见）。"""
+    async def test_creation_write_targets_single_key(self, plugin_mod: Any) -> None:
+        """创建即写单键 task.ws_meta（运行中 task_evaluate 门控即时可见）。"""
         writer = _ScriptedWriter()
         plugin_mod.set_task_state_writer(writer)
         p = _plugin(plugin_mod, _ScriptedManager())
         meta = {"mode": "plain", "path": "/x"}
 
-        await p._mirror_task_ws_meta("t-1", meta)
+        await p._write_task_ws_meta("t-1", meta)
 
         assert writer.calls == [("t-1", {"task.ws_meta": meta})]
 
-    async def test_mirror_failure_logged_not_raised(
+    async def test_write_failure_logged_not_raised(
         self, plugin_mod: Any, caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """镜像写失败 → ERROR 留痕但不阻断（主创建已成功，门控将显式报错）。"""
+        """创建写失败 → ERROR 留痕但不阻断（主创建已成功，门控将显式报错）。"""
         plugin_mod.set_task_state_writer(_ScriptedWriter(error=RuntimeError("state locked")))
         p = _plugin(plugin_mod, _ScriptedManager())
 
         with caplog.at_level("ERROR"):
-            await p._mirror_task_ws_meta("t-1", {"path": "/x"})
+            await p._write_task_ws_meta("t-1", {"path": "/x"})
 
-        assert any("task.ws_meta 镜像写失败" in r.message for r in caplog.records)
+        assert any("task.ws_meta 创建写失败" in r.message for r in caplog.records)
 
 
 class TestMirrorInheritedWsMeta:
@@ -919,11 +955,10 @@ class TestMirrorInheritedWsMeta:
         "state",
         [
             {"task.id": "t-1", "task.ws_meta": {"path": "/already"}},
-            {"task.id": "t-1", "ws_meta": {"path": "/already"}},
         ],
     )
     async def test_existing_ws_meta_skips(self, plugin_mod: Any, state: dict[str, Any]) -> None:
-        """task.ws_meta / ws_meta 已有值 → 不重复补写（幂等）。"""
+        """坐标单键 task.ws_meta 已有值 → 不重复补写（幂等）。"""
         writer = _ScriptedWriter()
         plugin_mod.set_task_state_writer(writer)
         p = _plugin(plugin_mod, _ScriptedManager())
@@ -994,7 +1029,7 @@ class TestMirrorInheritedWsMeta:
                 "lineage.parent_ws_meta": {"path": "/parent"},
             })
 
-        assert any("task.ws_meta 镜像补写失败" in r.message for r in caplog.records)
+        assert any("task.ws_meta 补全写失败" in r.message for r in caplog.records)
 
 
 # ═══════════════ 属性与契约 ═══════════════

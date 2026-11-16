@@ -27,3 +27,11 @@ semver = "1"
 [dev-dependencies]
 serde_json.workspace = true
 tempfile = "3"
+
+# 设备档案内存探测（device_profile.rs）：GetPhysicallyInstalledSystemMemory。
+# 仅 FFI 声明零运行时开销，且为本仓依赖图既有传递依赖（Cargo.lock 0.52.0）。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_System_SystemInformation",
+] }

@@ -8,6 +8,8 @@
  *   extraContext/firstMessage）+ 回执 result（含 session_id）
  * - 转续演缺省（仅 mode/agent_id/name/title）→ 扩展位缺省不伪造
  * - 载荷校验失败（fail-closed）→ 丢弃回 error、出生零发生（≥3 组非法输入）
+ * - card_theme（卡主题出生钉扩展位）：合法档透传 cardTheme + 回执 theme_pinned；
+ *   非法档只丢该位、出生零阻断
  *
  * 外部依赖 mock：apiClient（HTML 取数）、sessionStore（宿主会话态）、
  * modeSessionBinder 的 openModeSession（会话创建编排 = WS/store 编排面，
@@ -15,6 +17,7 @@
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { presetThemes } from '@/config/themes'
 import { apiClient } from '@/services/api/client'
 import { findDownMessage, postUp as bridgePostUp } from './webviewTestBridge'
 import type { Mock } from 'vitest'
@@ -43,6 +46,7 @@ beforeEach(() => {
   openModeSession.mockResolvedValue({
     sessionId: 'sess-rp-1',
     modeBinding: { mode: 'roleplay', pipelineConfigId: 'roleplay' },
+    themePinned: false,
   })
   ;(apiClient.get as unknown as Mock).mockResolvedValue({ data: '<html><body></body></html>' })
 })
@@ -67,6 +71,7 @@ describe('WebviewWidget — mode.session 模式会话出生桥', () => {
         title: '扮演·月见',
         extra_context: { roleplay_greeting: '夜色降临……', roleplay_user_persona: '你是月见。' },
         first_message: '（开始）',
+        pipeline_config_id: 'triple_chain',
       },
       'wv_rc1',
     )
@@ -81,9 +86,10 @@ describe('WebviewWidget — mode.session 模式会话出生桥', () => {
       title: '扮演·月见',
       extraContext: { roleplay_greeting: '夜色降临……', roleplay_user_persona: '你是月见。' },
       firstMessage: '（开始）',
+      pipelineConfigId: 'triple_chain',
     })
     const down = findDownMessage(downSpy, 'mode.session.result')!
-    expect(down.params).toEqual({ applied: true, session_id: 'sess-rp-1' })
+    expect(down.params).toEqual({ applied: true, session_id: 'sess-rp-1', theme_pinned: false })
   })
 
   it('转续演缺省载荷：仅 mode/agent_id/name/title（扩展位缺席不伪造）', async () => {
@@ -123,5 +129,64 @@ describe('WebviewWidget — mode.session 模式会话出生桥', () => {
     })
     expect(findDownMessage(downSpy, 'mode.session.result')).toBeUndefined()
     expect(openModeSession).not.toHaveBeenCalled()
+  })
+
+  it('card_theme 合法档 → 透传出生扩展位 cardTheme + 回执 theme_pinned 事实位', async () => {
+    const CARD_THEME = presetThemes['pixel-art']
+    openModeSession.mockResolvedValue({
+      sessionId: 'sess-rp-2',
+      modeBinding: { mode: 'roleplay', pipelineConfigId: 'roleplay' },
+      themePinned: true,
+    })
+    const downSpy = await renderWidget()
+
+    bridgePostUp(
+      'mode.session',
+      { mode: 'roleplay', agent_id: 'mode_roleplay/card_luna', name: '月见', card_theme: CARD_THEME },
+      'wv_theme1',
+    )
+
+    await waitFor(() => {
+      expect(findDownMessage(downSpy, 'mode.session.result')).toBeDefined()
+    })
+    expect(openModeSession).toHaveBeenCalledWith(
+      'roleplay',
+      expect.objectContaining({ cardTheme: CARD_THEME }),
+    )
+    expect(findDownMessage(downSpy, 'mode.session.result')!.params).toEqual({
+      applied: true,
+      session_id: 'sess-rp-2',
+      theme_pinned: true,
+    })
+  })
+
+  it('card_theme 非法档 → fail-closed 丢该位但出生零阻断（session_id + theme_pinned=false）', async () => {
+    const downSpy = await renderWidget()
+
+    bridgePostUp(
+      'mode.session',
+      {
+        mode: 'roleplay',
+        agent_id: 'mode_roleplay/card_luna',
+        name: '月见',
+        title: '扮演·月见',
+        card_theme: { id: 'broken', name: '坏档' },
+      },
+      'wv_theme2',
+    )
+
+    await waitFor(() => {
+      expect(findDownMessage(downSpy, 'mode.session.result')).toBeDefined()
+    })
+    // 非法档只丢该位：其余扩展位照常下传，会话照常出生
+    expect(openModeSession).toHaveBeenCalledWith(
+      'roleplay',
+      expect.objectContaining({ title: '扮演·月见', cardTheme: undefined }),
+    )
+    expect(findDownMessage(downSpy, 'mode.session.result')!.params).toEqual({
+      applied: true,
+      session_id: 'sess-rp-1',
+      theme_pinned: false,
+    })
   })
 })

@@ -88,7 +88,6 @@ tool_ids:
   - task_evaluate
   - file_read
   - file_write
-  - list_directory
   - human_interaction
   - memory
   # resource_search 仅在需要灵活搜索时保留
@@ -116,8 +115,10 @@ is_active: true
 status: "active"
 max_iterations: 40
 max_reminders: 5
-timeout_seconds: 1800
-
+# run 墙钟预算：键刻意缺席（用户裁定 2026-10-17：任务可合法运行数小时，
+# 墙钟看门狗在该场景纯误伤）。防挂死由单次调用上界（plugin_call_timeout，
+# 内核恒有界）承接，防失控由 max_iterations 承接——不要在本文件加回
+# timeout_seconds：它会让整条 agent 链在预算耗尽时被引擎强制终态化。
 tags:
   - "orchestrator"
   - "L2"

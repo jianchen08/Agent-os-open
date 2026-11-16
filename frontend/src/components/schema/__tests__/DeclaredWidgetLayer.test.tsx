@@ -181,6 +181,85 @@ describe('DeclaredWidgetLayer', () => {
   })
 })
 
+describe('DeclaredWidgetLayer — grid 布局（R26 监控卡密度）', () => {
+  beforeEach(() => {
+    contributionRegistry.clear()
+    widgetRegistry.clear()
+  })
+  afterEach(() => {
+    contributionRegistry.clear()
+    widgetRegistry.clear()
+    vi.restoreAllMocks()
+  })
+
+  const Card: WidgetComponent = () => <div data-testid="stub-widget">卡</div>
+
+  /** 注册紧凑卡型与非紧凑型各一，返回监控页同构声明 */
+  function seedMixed() {
+    widgetRegistry.register('status_card', Card, { name: 'status_card', supportedSpaces: ['monitoring'] })
+    widgetRegistry.register('chart', Card, { name: 'chart', supportedSpaces: ['monitoring'] })
+    widgetRegistry.register('table', Card, { name: 'table', supportedSpaces: ['monitoring'] })
+    return [
+      { id: 'cpu', type: 'status_card', space: 'monitoring' },
+      { id: 'trend', type: 'chart', space: 'monitoring' },
+      { id: 'rows', type: 'table', space: 'monitoring' },
+    ]
+  }
+
+  it('缺省 stack：容器保持纵向流，包装层无整行类（既有消费者语义不变）', () => {
+    const declarations = seedMixed()
+    const { container } = render(
+      <DeclaredWidgetLayer declarations={declarations} space="monitoring" />,
+    )
+
+    const layer = container.querySelector('[data-testid="declared-widget-layer"]') as HTMLElement
+    expect(layer.className).toContain('flex')
+    expect(layer.className).toContain('flex-col')
+    expect(layer.className).not.toContain('grid')
+    for (const id of ['cpu', 'trend', 'rows']) {
+      expect(screen.getByTestId(`declared-widget-${id}`).className).not.toContain('col-span-full')
+    }
+  })
+
+  it('layout=grid：容器为 auto-fill 网格，紧凑卡型进格不整行', () => {
+    const declarations = seedMixed()
+    const { container } = render(
+      <DeclaredWidgetLayer declarations={declarations} space="monitoring" layout="grid" />,
+    )
+
+    const layer = container.querySelector('[data-testid="declared-widget-layer"]') as HTMLElement
+    expect(layer.className).toContain('grid')
+    expect(layer.className).toContain('grid-cols-[repeat(auto-fill,minmax(230px,1fr))]')
+    // 整行提升变体在容器上（RefreshBox 裸 div 隔层时 :has 打到真正网格子项）
+    expect(layer.className).toContain('[&>*:has([data-grid-span=full])]:col-span-full')
+    expect(layer.className).not.toContain('flex-col')
+    // 容器宽自适应列数（容器查询语义），断言不绑定视口断点类
+    expect(layer.className).not.toMatch(/\b(sm|md|lg|xl):/)
+    for (const id of ['cpu', 'trend']) {
+      const el = screen.getByTestId(`declared-widget-${id}`)
+      expect(el.className).not.toContain('col-span-full')
+      expect(el.getAttribute('data-grid-span')).toBeNull()
+    }
+  })
+
+  it.each(['table', 'form'])('layout=grid：非紧凑类型 %s 整行铺满（最小可读宽度 fail-safe）', (type) => {
+    widgetRegistry.register(type, Card, { name: type, supportedSpaces: ['monitoring'] })
+    const { container } = render(
+      <DeclaredWidgetLayer
+        declarations={[{ id: 'wide', type, space: 'monitoring' }]}
+        space="monitoring"
+        layout="grid"
+      />,
+    )
+
+    expect(container.querySelector('[data-testid="declared-widget-layer"]')).not.toBeNull()
+    const wide = screen.getByTestId('declared-widget-wide')
+    expect(wide.className).toContain('col-span-full')
+    // 带刷新声明的声明隔 RefreshBox 裸 div，:has 变体靠该标记提升网格子项
+    expect(wide.getAttribute('data-grid-span')).toBe('full')
+  })
+})
+
 describe('DeclaredWidgetLayer — select-option 选项追加合并', () => {
   beforeEach(() => {
     contributionRegistry.clear()

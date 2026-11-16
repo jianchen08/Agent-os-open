@@ -39,7 +39,7 @@ struct ReentrantState {
 }
 
 /// 用户空间隔离 guard：持锁 + 钉桩环境变量，drop 时（最后一个）恢复。
-pub(crate) struct UserSpaceGuard {
+pub struct UserSpaceGuard {
     /// 进程级锁的持有凭据（仅首个 guard 实际持有；其余为 None）。
     _lock: Option<MutexGuard<'static, ()>>,
 }
@@ -69,7 +69,7 @@ impl Drop for UserSpaceGuard {
 
 /// 钉桩用户空间根到 `root`，三个分区变量交给 `<root>` 的默认派生
 /// （`config`/`data`/`plugins` 子目录）。
-pub(crate) fn pin_user_root(root: &Path) -> UserSpaceGuard {
+pub fn pin_user_root(root: &Path) -> UserSpaceGuard {
     pin(&[
         (agentos_core::user_space::USER_ROOT_ENV, Some(root)),
         (agentos_core::user_space::USER_CONFIG_DIR_ENV, None),
@@ -79,7 +79,7 @@ pub(crate) fn pin_user_root(root: &Path) -> UserSpaceGuard {
 }
 
 /// 只钉桩用户配置层（其余分区清空，避免宿主机真实目录参与）。
-pub(crate) fn pin_user_config_dir(dir: &Path) -> UserSpaceGuard {
+pub fn pin_user_config_dir(dir: &Path) -> UserSpaceGuard {
     pin(&[
         (agentos_core::user_space::USER_ROOT_ENV, None),
         (agentos_core::user_space::USER_CONFIG_DIR_ENV, Some(dir)),
@@ -92,7 +92,7 @@ pub(crate) fn pin_user_config_dir(dir: &Path) -> UserSpaceGuard {
 ///
 /// `value = None` 清除该变量；同线程重复 pin 时后钉者赢，最后一个 guard drop
 /// 时恢复首个 guard 记下的原文。
-pub(crate) fn pin_env(key: &'static str, value: Option<&str>) -> UserSpaceGuard {
+pub fn pin_env(key: &'static str, value: Option<&str>) -> UserSpaceGuard {
     pin(&[(key, value.map(Path::new))])
 }
 
@@ -146,11 +146,13 @@ fn apply(vars: &[(&'static str, Option<&Path>)]) {
 ///
 /// 视图语义 = 「自本 handle 创建以来追加的日志」：底层是进程级共享缓冲（见
 /// [`capture_logs`]），本 handle 只截取自己创建之后的增量。
+#[cfg(test)]
 pub(crate) struct LogBuffer {
     sink: std::sync::Arc<Mutex<Vec<u8>>>,
     start: usize,
 }
 
+#[cfg(test)]
 impl LogBuffer {
     /// 自本 handle 创建以来写入的日志全文。
     pub(crate) fn text(&self) -> String {
@@ -161,8 +163,10 @@ impl LogBuffer {
 }
 
 #[derive(Clone)]
+#[cfg(test)]
 struct LogWriter(std::sync::Arc<Mutex<Vec<u8>>>);
 
+#[cfg(test)]
 impl std::io::Write for LogWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.0.lock().unwrap().extend_from_slice(buf);
@@ -173,6 +177,7 @@ impl std::io::Write for LogWriter {
     }
 }
 
+#[cfg(test)]
 impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogWriter {
     type Writer = LogWriter;
     fn make_writer(&'a self) -> Self::Writer {
@@ -181,12 +186,14 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogWriter {
 }
 
 /// 进程级采集缓冲（首次 [`capture_logs`] 时随全局订阅一起装配）。
+#[cfg(test)]
 static CAPTURE_SINK: std::sync::OnceLock<std::sync::Arc<Mutex<Vec<u8>>>> =
     std::sync::OnceLock::new();
 
 /// [`capture_logs`] 的 guard：全局订阅为进程级、不可逐用例卸载，guard 只是
 /// 保持与既有调用点的接口一致的占位（drop 后新日志仍会进共享缓冲，但本
 /// handle 的 `text()` 只回放自创建以来的增量，不因此串味）。
+#[cfg(test)]
 pub(crate) struct LogGuard {
     _priv: (),
 }
@@ -203,6 +210,7 @@ pub(crate) struct LogGuard {
 ///
 /// 并发用例的日志会互相出现在同一缓冲里——断言须用本用例独有的文案或标识
 /// （不得依赖"缓冲里只有我这一条"）。
+#[cfg(test)]
 pub(crate) fn capture_logs() -> (LogGuard, LogBuffer) {
     let sink = std::sync::Arc::clone(CAPTURE_SINK.get_or_init(|| {
         let sink = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -222,4 +230,22 @@ pub(crate) fn capture_logs() -> (LogGuard, LogBuffer) {
         buf.len()
     };
     (LogGuard { _priv: () }, LogBuffer { sink, start })
+}
+
+/// 构造已发现 `root` 下插件的 loader 活真源（B1 测试脚手架）。
+///
+/// 以 `root` 为内置根跑一轮 discover（单层扫描 `<root>/<dir>/plugin.json`）
+/// 填充 loader 路径表，返回可供 [`crate::routes::AppState::with_plugin_loader`]
+/// 注入的活句柄；静态资源 / 配置保存 / validate-all / schema 聚合等消费点
+/// 据此现取目录映射（与生产装配同源：AppState 不持 boot 快照）。
+pub async fn discovered_plugin_loader(
+    root: &Path,
+) -> std::sync::Arc<agentos_plugin_loader::PluginLoaderImpl> {
+    use agentos_core::traits::PluginLoader as _;
+    let loader = agentos_plugin_loader::PluginLoaderImpl::new(root.to_path_buf(), None);
+    loader
+        .discover(&[])
+        .await
+        .expect("discover test plugin root");
+    std::sync::Arc::new(loader)
 }

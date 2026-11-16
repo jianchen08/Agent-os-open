@@ -11,19 +11,19 @@ from __future__ import annotations
 
 from tests._pipeline_plugin_path import add_plugin_dir
 
-add_plugin_dir("output", "duplicate_check")
+add_plugin_dir("duplicate_check")
 
 from typing import Any
 
 import pytest
-from pipeline.plugin import PluginContext
-from pipeline.types import StateKeys
+from _libs.pipeline_base.plugin import PluginContext
+from _libs.pipeline_base.types import StateKeys
 
 pytestmark = pytest.mark.unit
 
 
 def _make_plugin() -> Any:
-    add_plugin_dir("output", "duplicate_check")
+    add_plugin_dir("duplicate_check")
     from plugin import DuplicateCheckPlugin
     return DuplicateCheckPlugin()
 

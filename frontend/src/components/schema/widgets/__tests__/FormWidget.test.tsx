@@ -213,8 +213,14 @@ describe('DecisionFormAdapter — decision 注册名 = 单字段表单（原 Dec
     await waitFor(() => expect(onDecision).toHaveBeenCalledWith(['a']))
   })
 
-  it('空 options 渲染占位（暂无表单字段）', () => {
-    render(<DecisionFormAdapter options={[]} />)
-    expect(screen.getByText('暂无表单字段')).toBeInTheDocument()
+  it('空 options → 选项框自身承载空态（禁用 + 无选项）', () => {
+    const { container } = render(<DecisionFormAdapter options={[]} />)
+    expect(screen.getByText('无选项')).toBeInTheDocument()
+    const select = container.querySelector('.ant-select')
+    expect(select).not.toBeNull()
+    expect(select).toHaveClass('ant-select-disabled')
+    // 点不动：按下不展开下拉
+    fireEvent.mouseDown(select!.firstElementChild!)
+    expect(document.querySelector('.ant-select-dropdown')).not.toBeInTheDocument()
   })
 })

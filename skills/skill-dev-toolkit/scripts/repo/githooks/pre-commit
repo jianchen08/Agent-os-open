@@ -1,0 +1,6 @@
+#!/bin/sh
+# pre-commit 车道感知 CI 触发器（用户裁定 2026-10-30：所有提交都能触发 CI；
+# CI 跟随执行空间——本地提交本地跑）。启用方式（一次性，本机）：
+#   git config core.hooksPath scripts/githooks
+# 真例外绕过：git commit --no-verify（自留无证记录）。
+exec python "$(git rev-parse --show-toplevel)/scripts/check_pre_commit.py" --repo "$(git rev-parse --show-toplevel)"

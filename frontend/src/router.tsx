@@ -1,13 +1,15 @@
 /** 路由配置 定义应用的所有路由，包含登录/注册和受保护的主页面。 */
 
-import { lazy, Suspense, useEffect, useCallback } from 'react'
+import { lazy, Suspense, useEffect, useCallback, useRef, useState } from 'react'
 import { createBrowserRouter, Navigate, useNavigate } from 'react-router-dom'
-import { composeSendIdentity, withModeBinding, withTaskMode } from '@/services/schema/modeOptions'
+import { Loader2 } from '@/assets/icons'
+import { composeSendIdentity, primaryModeTag, withModeBinding, withTaskMode } from '@/services/schema/modeOptions'
 import { ChatPanelShell } from './components/layout/ChatPanelShell'
 import { Sidebar } from './components/layout/Sidebar'
 import { ROUTES } from './constants/routes'
 import { WS_LOCAL_EVENTS } from './constants/websocket'
 import { useAgentsQuery } from './hooks/queries/useAgentsQuery'
+import { useIsMobileViewport } from './hooks/useIsMobileViewport'
 import { useLongTermTasksQuery } from './hooks/queries/useLongTermTasksQuery'
 import { useSessionsQuery, readSessions } from './hooks/queries/useSessionsQuery'
 import { useConnectionStatus } from './hooks/useConnectionStatus'
@@ -16,10 +18,13 @@ import { useWidgetEvents } from './hooks/useWidgetEvents'
 import { RegisterPage } from './pages/auth/RegisterPage'
 import { performLogout } from './services/auth/logout'
 import { ensureFreshToken } from './services/auth/tokenLifecycle'
-import { loadSessionExecutionOptions } from './services/sessionExecutionOptions'
+import { applyDefaultModeBinding } from './services/modeSessionBinder'
+import { forceSendPendingInput } from './services/pendingForceSend'
 import { loadPipelineBinding } from './services/pipelineExecutionOptions'
+import { loadSessionExecutionOptions } from './services/sessionExecutionOptions'
 import { globalWS } from './services/websocket/GlobalWebSocket'
 import { flushStreamChunkBuffer } from './services/websocket/streaming/handlers/streamHandler'
+import { markStopRequested } from './services/websocket/streaming/handlers/utils'
 import {
   initStreamingEvents,
   destroyStreamingEvents,
@@ -27,6 +32,7 @@ import {
 import { openWorkspacePanelByPath } from './services/workspacePanelOpener'
 import { useAgentTabStore } from './stores/agentTabStore'
 import { useAuthStore } from './stores/authStore'
+import { useChatInputStore } from './stores/chatInputStore'
 import { useInteractionStore } from './stores/interactionStore'
 import { useNotificationStore } from './stores/notificationStore'
 import { usePendingInputStore } from './stores/pendingInputStore'
@@ -57,11 +63,9 @@ const PluginPageRenderer = lazy(() =>
   import('@/components/schema/PluginPageRenderer').then((m) => ({ default: m.PluginPageRenderer })),
 )
 
-/** 懒加载 fallback */
-const LazyFallback = <div className="text-muted-foreground p-4">加载中...</div>
-
-// 路由守卫与懒加载装配自本模块抽出（行为零变化；LazyRoute 公共面经 re-export 保持）
+// 懒加载 fallback 共享单件（与 lazyRoute.tsx 同源，见 lazyFallback.tsx 头注）
 import { LazyRoute, ProtectedRoute } from './router/lazyRoute'
+import { LazyFallback } from './router/lazyFallback'
 export { LazyRoute }
 
 /** 判断当前视口是否为移动端（< md 断点 768px） */
@@ -188,10 +192,15 @@ function HomePage(): ReactNode {
     [setActiveSession, connectWebSocket],
   )
 
+  /** 创建新会话进行中（欢迎页新会话卡 disabled+spinner，防连点） */
+  const [creatingSession, setCreatingSession] = useState(false)
   /** 创建新会话并自动选中 */
   const handleCreateSession = useCallback(async () => {
+    setCreatingSession(true)
     try {
       const newSession = await createSession()
+      // 出生无显式模式选择 → default 声明模式补挂（M1 并入刀；fire-and-forget）
+      void applyDefaultModeBinding(newSession.id)
       await handleSelectSession(newSession.id)
     } catch (error) {
       console.error('创建会话失败:', error)
@@ -203,8 +212,10 @@ function HomePage(): ReactNode {
         category: 'error',
         isBlocking: false,
         autoDismissMs: 8000,
-        sourceLabel: '前端',
+        sourceLabel: '系统',
       })
+    } finally {
+      setCreatingSession(false)
     }
   }, [createSession, handleSelectSession])
 
@@ -233,7 +244,7 @@ function HomePage(): ReactNode {
               category: 'alert',
               isBlocking: false,
               autoDismissMs: 8000,
-              sourceLabel: '前端',
+              sourceLabel: '系统',
             })
           } else {
             useNotificationStore.getState().addNotification({
@@ -243,7 +254,7 @@ function HomePage(): ReactNode {
               category: 'error',
               isBlocking: false,
               autoDismissMs: 8000,
-              sourceLabel: '前端',
+              sourceLabel: '系统',
             })
           }
         })
@@ -255,7 +266,7 @@ function HomePage(): ReactNode {
           category: 'error',
           isBlocking: false,
           autoDismissMs: 8000,
-          sourceLabel: '前端',
+          sourceLabel: '系统',
         })
       }
       return false
@@ -270,8 +281,6 @@ function HomePage(): ReactNode {
         listStore.renameSession(sid, title)
       }
     }
-
-    const pipelineStore = usePipelineMessageStore.getState()
 
     // 管道路由（一对一）：目标 = 发送所在标签的管道 params.pipelineId
     // （主标签=主管道，子标签=子管道），原样透传不做主管道改写。会话串桶
@@ -292,12 +301,12 @@ function HomePage(): ReactNode {
       )
       useNotificationStore.getState().addNotification({
         title: '发送已终止',
-        message: '消息目标管道不属于当前会话，为防串桶已阻止发送，请刷新页面后重试',
+        message: '消息目标不属于当前会话，已阻止发送，请刷新页面后重试',
         priority: 'high',
         category: 'error',
         isBlocking: false,
         autoDismissMs: 8000,
-        sourceLabel: '前端',
+        sourceLabel: '系统',
       })
       return false
     }
@@ -324,9 +333,11 @@ function HomePage(): ReactNode {
     const sessionOptions = loadSessionExecutionOptions(sid)
     const sessionBinding =
       sessionOptions &&
-      (sessionOptions.modeBinding?.mode || sessionOptions.agentId || sessionOptions.extraContext)
+      (primaryModeTag(sessionOptions.modeBinding?.mode) ||
+        sessionOptions.agentId ||
+        sessionOptions.extraContext)
         ? {
-            mode: sessionOptions.modeBinding?.mode ?? '',
+            mode: sessionOptions.modeBinding?.mode ?? [],
             ...(sessionOptions.agentId ? { agentId: sessionOptions.agentId } : {}),
             ...(sessionOptions.extraContext ? { extraContext: sessionOptions.extraContext } : {}),
           }
@@ -344,39 +355,13 @@ function HomePage(): ReactNode {
     )
 
     // [来源: docs/decisions/2026-08-22-streaming-protocol-rewrite.md] 单一消息数组：
-    // 乐观 user、流式 assistant 全在 messagesByPipeline 同一数组，靠 status
-    // 状态机区分生命周期；独立 pending 区不存在。new_message 事件携带
-    // user_message 权威回传时按 cmid 认领（recordId 双字段范式，UI id 永不变）。
-    // ── busy 分支（ADR-2026-08-26）──
-    // 管道执行中（streaming）发送 → 消息照常走 WS（内核 pending 队列排队，
-    // 等待窗口内可编辑/删除/清空），但不建乐观气泡/不启动流式态——
-    // 队列条由 pending_inputs_changed 事件同步；消费激活时 stream_start
-    // 到达 → 现有流式协议接管（占位气泡 → 认领 → 回复）。
-    if (pipelineStore.isStreaming(targetPipelineId)) {
-      globalWS.sendUserInput(sid, contentWithRefs, {
-        thinkingStrength: params.thinkingStrength,
-        pipelineId: targetPipelineId,
-        clientMessageId: userMessageId,
-        executionContext,
-        agentId,
-        pipelineConfigId: effectiveBinding?.pipelineConfigId,
-      })
-      usePendingInputStore.getState().load(targetPipelineId)
-      return
-    }
-    pipelineStore.addMessage(targetPipelineId, {
-      id: userMessageId,
-      sessionId: sid,
-      role: 'user',
-      content: contentWithRefs,
-      timestamp: new Date().toISOString(),
-      status: 'sending',
-      clientMessageId: userMessageId,
-    })
-    // 发送瞬间启动流式态（驱动生成态：ChatInput Stop 按钮/消息项 isGenerating）；
-    // stream_start 到达时才以后端真实 message_id 建 assistant 占位气泡——
-    // 此前窗口期不渲染思考气泡，发送失败反馈由 send_timeout 错误气泡承担。
-    pipelineStore.startStreaming(targetPipelineId, userMessageId)
+    // 流式 assistant 与认领 user 全在 messagesByPipeline 同一数组。发送路径统一
+    // 事件驱动（聊天消息流权威化设计真值 docs/working/聊天消息流权威化重设计_20261027.md
+    // 不变量 2）：忙闲裁决归内核链（try_enqueue_direct），前端不再本地预判分叉——
+    // 直跑气泡经 user_message_confirmed 认领上屏（亚秒级），排队走
+    // pending_inputs_changed(enqueued) 队列条（排队期唯一视图），生成态只由
+    // stream_start 事件建立。零乐观气泡 = 零残影。
+
     // 用户发消息 = 对挂起中 conversation 交互的响应（2026-09-02 裁定）：
     // 先解除挂起（提交空 approved，交互工具返回空回复），消息再推进下一步。
     // 覆盖 pending（未点"进入对话"）与 entered 两态；choice 模式需显式
@@ -395,22 +380,34 @@ function HomePage(): ReactNode {
 
     // globalWS.sendUserInput 是同步入队（_send 永不抛异常：已连接则 ws.send，
     // 否则入队待重连），发送失败由 user_input_send_timeout（20s TTL）显式
-    // 撤下 pending + 插入错误气泡 + 高优通知兜底（诚实状态机，无静默容忍）。
+    // 通知兜底（诚实状态机，无静默容忍）。
     globalWS.sendUserInput(sid, contentWithRefs, {
       thinkingStrength: params.thinkingStrength,
+      modelId: params.modelId,
       pipelineId: targetPipelineId,
       clientMessageId: userMessageId,
       executionContext,
       agentId,
       pipelineConfigId: effectiveBinding?.pipelineConfigId,
     })
+    // 受理即挂发送在途（2026-11-04 落定语义重定义）：发送按钮转圈+输入锁定直到
+    // 消息落进消息流（气泡认领/队列条出现，landSendByCmid）——ack 受理回执不再
+    // 撤发送态；5s 落定超时（chatInputStore.SEND_LANDING_TIMEOUT_MS）= 判死 +
+    // 宿主停止链（见下方 timeout outcome 订阅），20s ack 看门狗是另一判死出口
+    // （对已判死 cmid 幂等零动作）。content 快照 + draftKey 随条目登记：落定清空
+    // 按快照比对在 ChatInput 执行，清草稿不依赖组件存活。
+    useChatInputStore
+      .getState()
+      .beginSend(targetPipelineId, userMessageId, params.composerText ?? params.content, params.draftKey)
+    // 队列条权威 GET（入队事件漏接窗口的对账兜底；空闲直跑返回空列表零副作用）
+    usePendingInputStore.getState().load(targetPipelineId)
   }, [])
 
-  /** 停止生成 */
-  const handleStopGenerate = useCallback(() => {
+  /** 停止生成（targetPipelineId 缺省 = 当前激活管道；强制发送场景显式传目标管道） */
+  const handleStopGenerate = useCallback((targetPipelineId?: string) => {
     const sid = useSessionStore.getState().activeSessionId
     const ps = usePipelineMessageStore.getState()
-    const currentPipelineId = ps.activePipelineId
+    const currentPipelineId = targetPipelineId ?? ps.activePipelineId
     if (sid) {
       globalWS.sendCancel(sid, undefined, currentPipelineId || undefined)
     }
@@ -423,10 +420,22 @@ function HomePage(): ReactNode {
     // pipeline 尚未激活），也要兜底清理任意残留 streamingState，否则 Stop 按钮
     // 持续显示、下一条新消息会卡在"思考中"。
     flushStreamChunkBuffer()
+    // 停止已请求护栏：内核取消链路收尾（round_finished/stream_error）前到达的
+    // 迟到 chunk 不得重点亮生成态（Stop 按钮复活、正文继续增长 = 「点了没
+    // 反应」体感）。护栏按消息 id 存续，新一轮 stream_start 自动解除。
     if (currentPipelineId) {
+      markStopRequested(currentPipelineId, ps.streamingState[currentPipelineId]?.messageId ?? null)
+      // 停止受理中：run_status 变 suspended 后按钮仍显示「停止中」，直到
+      // run 级终止事件（pipeline_round_finished/stream_error）或下一轮
+      // stream_start 清除——避免停止期间被误判为可发送空闲态。
+      ps.setStopping(currentPipelineId, true)
       ps.stopStreaming(currentPipelineId)
     } else {
-      Object.keys(ps.streamingState).forEach((pid) => ps.stopStreaming(pid))
+      Object.keys(ps.streamingState).forEach((pid) => {
+        markStopRequested(pid, ps.streamingState[pid]?.messageId ?? null)
+        ps.setStopping(pid, true)
+        ps.stopStreaming(pid)
+      })
     }
 
     // 不再设 5s watchdog：主管道 pipeline_id 会被下一轮对话复用，固定延时的
@@ -435,44 +444,75 @@ function HomePage(): ReactNode {
     // 真正的 stream_end 丢失由更上层的 keepalive 看门狗（~180s）兜底，此处不重复。
   }, [])
 
-  /** 重新生成：截断到最后一条 user 消息后重跑。本地乐观截断 + WS regenerate。
-   *  后端未就绪时（批次 D 内核侧）WS 消息被忽略，本地截断仍即时生效。 */
+  /** 5s 落定超时 = 判死 + 停止 run（用户裁定 2026-11-04「超时代表后端这条消息
+   *  坏了，应该停止run」）：store 超时终局（chatInputStore kind='timeout'）在此
+   *  驱动既有停止链（同停止按钮：停当前 run + 队列退回），不另起 cancel 通道。
+   *  挂载时以当前序号为水位、不回放历史终局（重载不误停正在跑的管道）。
+   *  连带代价（如实）：停止是管道级的——超时消息若只是事件丢失而管道正跑上一轮
+   *  生成，会连带停掉当前生成；断线时停止帧同样发不出，重连后按序送达。 */
+  const lastTimeoutOutcomeIdRef = useRef(0)
+  useEffect(() => {
+    const outcomes = useChatInputStore.getState().sendOutcomes
+    lastTimeoutOutcomeIdRef.current = outcomes.length > 0 ? outcomes[outcomes.length - 1].id : 0
+    const consumeTimeoutOutcomes = () => {
+      for (const outcome of useChatInputStore.getState().sendOutcomes) {
+        if (outcome.id <= lastTimeoutOutcomeIdRef.current) continue
+        lastTimeoutOutcomeIdRef.current = outcome.id
+        if (outcome.kind === 'timeout') {
+          handleStopGenerate(outcome.pipelineId)
+        }
+      }
+    }
+    return useChatInputStore.subscribe(consumeTimeoutOutcomes)
+  }, [handleStopGenerate])
+
+  /** 强制发送队列条目（2026-10-19 用户裁定；2026-10-27 权威化单帧原语）：
+   *  编排本体在内核 dispatch_force_pending（目标条目置队首 + 停当前回复不退回
+   *  队列 + drain 首个消费目标），此处只接会话坐标。 */
+  const handleForceSendPending = useCallback(
+    (pipelineId: string, inputId: string) => {
+      const sid = useSessionStore.getState().activeSessionId
+      if (!sid) return
+      void forceSendPendingInput({ sessionId: sid, pipelineId, inputId })
+    },
+    [],
+  )
+
+  /** 重新生成：内核截断到最后一条 user 消息后重跑（批次 D）。
+   *  零乐观截断（聊天消息流权威化设计真值不变量 3）：本地视图由内核
+   *  messages_truncated 权威事件收敛；链忙被内核拒绝 → route_error 通知。 */
   const handleRegenerate = useCallback(() => {
     const sid = useSessionStore.getState().activeSessionId
     const ps = usePipelineMessageStore.getState()
     const pipelineId = ps.activePipelineId
     if (!sid || !pipelineId) return
-    const lastUserId = ps.findLastUserMessageId(pipelineId)
-    if (!lastUserId) return
-    ps.truncateMessagesAfter(pipelineId, lastUserId)
     globalWS.sendRegenerate(sid, { pipelineId })
   }, [])
 
-  /** 回退到指定 user 消息（该消息之后整体截断重跑） */
+  /** 回退到指定 user 消息（该消息之后整体截断重跑）。
+   *  本地不截断：内核 messages_truncated 按权威 seq 收敛（多端一致）。
+   *  出站 user_message_id 解析为后端权威 id（recordId，缺失回退 UI id）——
+   *  内核按 record_id 键空间精确匹配（BUG-57）。 */
   const handleRollbackTo = useCallback((userMessageId: string) => {
     const sid = useSessionStore.getState().activeSessionId
     const ps = usePipelineMessageStore.getState()
     const pipelineId = ps.activePipelineId
     if (!sid || !pipelineId) return
-    // 本地截断/寻址按 UI id；出站 user_message_id 解析为后端权威 id（recordId，
-    // 缺失回退 UI id）——内核按 record_id 键空间精确匹配（BUG-57）。
     const target = ps.getMessages(pipelineId).find((m) => m.id === userMessageId)
-    ps.truncateMessagesAfter(pipelineId, userMessageId)
     globalWS.sendRegenerate(sid, {
       pipelineId,
       userMessageId: target ? resolveWireUserMessageId(target) : userMessageId,
     })
   }, [])
 
-  /** 编辑重发：改写目标 user 消息内容并截断其后重跑 */
-  const handleEditResend = useCallback(async (messageId: string, newContent: string) => {
+  /** 编辑重发：内核改写目标 user 消息内容并截断其后重跑。
+   *  内容改写随 messages_truncated 的 updated_messages 权威收敛，本地不改写。 */
+  const handleEditResend = useCallback((messageId: string, newContent: string) => {
     const sid = useSessionStore.getState().activeSessionId
     const ps = usePipelineMessageStore.getState()
     const pipelineId = ps.activePipelineId
     if (!sid || !pipelineId) return
     const target = ps.getMessages(pipelineId).find((m) => m.id === messageId)
-    ps.truncateMessagesAfter(pipelineId, messageId)
-    ps.updateMessage(pipelineId, messageId, { content: newContent })
     globalWS.sendRegenerate(sid, {
       pipelineId,
       userMessageId: target ? resolveWireUserMessageId(target) : messageId,
@@ -485,8 +525,11 @@ function HomePage(): ReactNode {
     await performLogout(navigate)
   }, [navigate])
 
-  // 统一使用 Sidebar 组件（VS Code 风格导航 + 会话列表）
-  const sidebarContent = <Sidebar />
+  // 统一使用 Sidebar 组件（VS Code 风格导航 + 会话列表）。
+  // isMobile 必须接线：Sidebar 内部「会话点击/新建/导航后收起抽屉」全走
+  // isMobile 分支，漏传则移动抽屉永远遮蔽其后打开的内容（M4 实测根因）。
+  const isMobile = useIsMobileViewport()
+  const sidebarContent = <Sidebar isMobile={isMobile} />
 
   // Render chat content (shared between layouts)
   // ChatContainer 为懒加载组件（见顶部 lazy 定义），Suspense 包裹提供加载占位，
@@ -497,7 +540,8 @@ function HomePage(): ReactNode {
         sessionId={activeSessionId}
         isLoading={isSessionLoading}
         onSendMessage={handleSendMessage}
-        onStopGenerate={handleStopGenerate}
+        onStopGenerate={() => handleStopGenerate()}
+        onForceSendPending={handleForceSendPending}
         onRegenerate={handleRegenerate}
         onRollbackTo={handleRollbackTo}
         onEdit={handleEditResend}
@@ -517,10 +561,10 @@ function HomePage(): ReactNode {
       />
     </Suspense>
   ) : (
-    <div className="text-foreground flex flex-1 flex-col items-center justify-center gap-8 px-8">
-      <div className="flex flex-col items-center gap-4">
-        <div className="bg-primary/10 text-primary flex h-20 w-20 items-center justify-center rounded-xl">
-          <svg className="h-10 w-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <div className="text-foreground flex flex-1 flex-col items-center justify-center gap-6 px-5 sm:gap-8 sm:px-8">
+      <div className="flex flex-col items-center gap-3 sm:gap-4">
+        <div className="bg-primary/10 text-primary flex h-16 w-16 items-center justify-center rounded-xl sm:h-20 sm:w-20">
+          <svg className="h-8 w-8 sm:h-10 sm:w-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -530,31 +574,48 @@ function HomePage(): ReactNode {
           </svg>
         </div>
         <div className="flex flex-col items-center gap-2 text-center">
-          <h2 className="text-3xl font-bold tracking-tight">欢迎使用超级终端</h2>
+          <h2 className="text-2xl font-bold tracking-tight sm:text-3xl">欢迎使用超级终端</h2>
           <p className="text-muted-foreground max-w-md text-base">
-            选择左侧已有会话，或创建新会话开始对话
+            开始一段新对话，或在左侧继续之前的会话
           </p>
         </div>
       </div>
-      <div className="grid w-full max-w-xl grid-cols-1 gap-4 sm:grid-cols-2">
+      {/* R10④：三卡按视口比例缩放（clamp——窄屏字号/内距随视口收，描述不断行）
+          + 文案精简（拍板③：保留三卡形态，只缩放与精简，不重排） */}
+      <div className="grid w-full max-w-xl grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
         <button
           onClick={handleCreateSession}
-          className="bg-card border-border hover:border-primary group flex items-start gap-4 rounded-xl border p-5 text-left transition-all hover:shadow-md"
+          disabled={creatingSession}
+          data-testid="welcome-create-session"
+          className="bg-card border-border hover:border-primary group flex items-start gap-3 rounded-xl border p-[clamp(0.75rem,2.6vw,1.25rem)] text-left transition-all hover:shadow-md disabled:cursor-not-allowed disabled:opacity-60 sm:gap-4"
         >
-          <span className="bg-primary text-primary-foreground flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-xl font-medium">
-            +
+          <span className="bg-primary text-primary-foreground flex h-[clamp(2.25rem,7.5vw,2.5rem)] w-[clamp(2.25rem,7.5vw,2.5rem)] shrink-0 items-center justify-center rounded-lg text-xl font-medium">
+            {creatingSession ? (
+              <Loader2 className="h-5 w-5 animate-spin" aria-label="创建中" />
+            ) : (
+              '+'
+            )}
           </span>
-          <span className="flex flex-col gap-1">
-            <span className="text-base font-medium">新会话</span>
-            <span className="text-muted-foreground text-sm">直接开始一段新的对话</span>
+          <span className="flex min-w-0 flex-col gap-1">
+            <span className="text-[clamp(0.95rem,3vw,1rem)] font-medium">
+              {creatingSession ? '创建中...' : '新会话'}
+            </span>
+            <span className="text-muted-foreground text-[clamp(0.72rem,2.4vw,0.875rem)]">
+              开始新对话
+            </span>
           </span>
         </button>
         <button
           onClick={() => openWorkspacePanelByPath('/agents')}
-          className="bg-card border-border hover:border-primary group flex items-start gap-4 rounded-xl border p-5 text-left transition-all hover:shadow-md"
+          className="bg-card border-border hover:border-primary group flex items-start gap-3 rounded-xl border p-[clamp(0.75rem,2.6vw,1.25rem)] text-left transition-all hover:shadow-md sm:gap-4"
         >
-          <span className="bg-primary/10 text-primary flex h-10 w-10 shrink-0 items-center justify-center rounded-lg">
-            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <span className="bg-primary/10 text-primary flex h-[clamp(2.25rem,7.5vw,2.5rem)] w-[clamp(2.25rem,7.5vw,2.5rem)] shrink-0 items-center justify-center rounded-lg">
+            <svg
+              className="h-[clamp(1.15rem,3.8vw,1.25rem)] w-[clamp(1.15rem,3.8vw,1.25rem)]"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
               <circle cx="9" cy="8" r="3.25" strokeWidth={1.5} />
               <path
                 strokeLinecap="round"
@@ -565,17 +626,24 @@ function HomePage(): ReactNode {
               <path strokeLinecap="round" strokeWidth={1.5} d="M15.2 14.7c2.3.3 4 1.7 4.8 4.3" />
             </svg>
           </span>
-          <span className="flex flex-col gap-1">
-            <span className="text-base font-medium">浏览智能体</span>
-            <span className="text-muted-foreground text-sm">按场景挑选合适的专家角色</span>
+          <span className="flex min-w-0 flex-col gap-1">
+            <span className="text-[clamp(0.95rem,3vw,1rem)] font-medium">浏览智能体</span>
+            <span className="text-muted-foreground text-[clamp(0.72rem,2.4vw,0.875rem)]">
+              按场景挑选专家角色
+            </span>
           </span>
         </button>
         <button
           onClick={() => openWorkspacePanelByPath('/p/get_started')}
-          className="bg-card border-border hover:border-primary group flex items-start gap-4 rounded-xl border p-5 text-left transition-all hover:shadow-md"
+          className="bg-card border-border hover:border-primary group flex items-start gap-3 rounded-xl border p-[clamp(0.75rem,2.6vw,1.25rem)] text-left transition-all hover:shadow-md sm:gap-4"
         >
-          <span className="bg-primary/10 text-primary flex h-10 w-10 shrink-0 items-center justify-center rounded-lg">
-            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <span className="bg-primary/10 text-primary flex h-[clamp(2.25rem,7.5vw,2.5rem)] w-[clamp(2.25rem,7.5vw,2.5rem)] shrink-0 items-center justify-center rounded-lg">
+            <svg
+              className="h-[clamp(1.15rem,3.8vw,1.25rem)] w-[clamp(1.15rem,3.8vw,1.25rem)]"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
               <path
                 strokeLinecap="round"
                 strokeLinejoin="round"
@@ -584,9 +652,11 @@ function HomePage(): ReactNode {
               />
             </svg>
           </span>
-          <span className="flex flex-col gap-1">
-            <span className="text-base font-medium">开始使用</span>
-            <span className="text-muted-foreground text-sm">引导配置模型，走通第一件事</span>
+          <span className="flex min-w-0 flex-col gap-1">
+            <span className="text-[clamp(0.95rem,3vw,1rem)] font-medium">开始使用</span>
+            <span className="text-muted-foreground text-[clamp(0.72rem,2.4vw,0.875rem)]">
+              配置模型，走通第一件事
+            </span>
           </span>
         </button>
       </div>

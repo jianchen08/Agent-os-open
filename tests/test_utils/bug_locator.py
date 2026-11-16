@@ -170,16 +170,27 @@ def _make_frame_info(filename: str, lineno: int, function: str, frame: Any) -> i
 
 
 def _frame_to_location(fi: inspect.FrameInfo) -> CodeLocation:
-    """将 FrameInfo 转为 CodeLocation。"""
+    """将 FrameInfo 转为 CodeLocation（fail-soft：报告面永不杀死会话）。
+
+    本函数在失败报告钩子内逐帧执行：报告帧可能异常（文件名为 ``<string>``
+    等不可解析形态，或进程处于 os.name 被钉住等病态窗口，``Path(...)
+    .resolve()`` 抛 NotImplementedError/OSError）——单帧解析异常上抛会让
+    整个 pytest session INTERNALERROR。故逐帧 try/except：异常帧降级为
+    未解析的 file:line 字符串（file_path 已由 _relative_path 产出）、双
+    分类 False（不进 bug 候选）、code context 置空，报告继续。
+    """
     file_path = _relative_path(fi.filename)
     code_lines = fi.code_context or []
-    center_line = code_lines[fi.index] if fi.index is not None and fi.index < len(code_lines) else ""
-    before = tuple(code_lines[:fi.index]) if fi.index else ()
-    after = tuple(code_lines[fi.index + 1:]) if fi.index is not None else ()
-
-    abs_path = Path(fi.filename).resolve()
-    is_project = _is_project_code(abs_path)
-    is_test = _is_test_code(abs_path)
+    try:
+        center_line = code_lines[fi.index] if fi.index is not None and fi.index < len(code_lines) else ""
+        before = tuple(code_lines[:fi.index]) if fi.index else ()
+        after = tuple(code_lines[fi.index + 1:]) if fi.index is not None else ()
+        abs_path = Path(fi.filename).resolve()
+        is_project = _is_project_code(abs_path)
+        is_test = _is_test_code(abs_path)
+    except Exception:  # noqa: BLE001 - fail-soft：单帧降级，报告不杀会话
+        center_line, before, after = "", (), ()
+        is_project = is_test = False
 
     return CodeLocation(
         file_path=file_path,

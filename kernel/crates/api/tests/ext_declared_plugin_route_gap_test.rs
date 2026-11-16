@@ -5,11 +5,14 @@
 //! enable/disable 切换、装机版实测的注册面静默丢失（BUG-58：主城数据面路由
 //! 缺席直至重启）。窗口内 `find_http_route` 落空。
 //!
-//! 契约（BUG-58 起，对齐 BUG-37 工具自愈）：
+//! 契约（BUG-58 起，对齐 BUG-37 工具自愈；404/503 裁决面按注册面现况分治）：
 //! - manifest 在册 **且** 插件启用，但路由缺席 → 调用路径自愈：按声明 manifest
 //!   重注册后当次分发成功（200）；路由进注册表，后续请求直接命中；
-//! - manifest 在册且启用，但声明无 http_endpoints（自愈无物可恢复）→
-//!   503 + Retry-After（瞬态不可用，前端按可重试处理），并以 warn 留痕；
+//! - 自愈重试仍 miss 时按注册面现况裁决：声明端点**仍缺**（真·生命周期空窗/
+//!   注册面静默丢失，自愈不可达或恢复失败）→ 503 + Retry-After（瞬态可重试），
+//!   warn 留痕（含 method）；声明面**完整**（全部声明端点在册，含零声明端点的
+//!   平凡完整）→ miss 属请求 path/method 与声明面不匹配，重试同路径与重启都
+//!   不可恢复 → 404（装机 R297 resume/cancel 永续 503「不自愈」实证修复）；
 //! - manifest 不在册（未知插件）或已禁用 → 404（fail-closed 语义不变）；
 //! - 路由在册 → 正常分发（既有测试覆盖，此处不重复）。
 
@@ -69,7 +72,6 @@ fn manifest_without_endpoints(plugin_id: &str) -> PluginManifest {
         description: None,
         version: "1.0.0".to_string(),
         plugin_type: PluginType::System,
-        pipeline_role: None,
         language: "python".to_string(),
         host_type: HostType::Sidecar,
         host_group: None,
@@ -81,7 +83,6 @@ fn manifest_without_endpoints(plugin_id: &str) -> PluginManifest {
         mcp: None,
         lifecycle: None,
         native: None,
-        granted_capabilities: vec![],
         requires_content: None,
         invoke_entry: None,
         config_files: vec![],
@@ -159,20 +160,21 @@ async fn declared_enabled_plugin_missing_route_self_heals() {
     );
 }
 
-/// 声明在册且启用，但声明本身无 http_endpoints（自愈无物可恢复）→
-/// 503 + Retry-After（瞬态语义保留），不是裸 404。
+/// 声明在册且启用，但声明本身无 http_endpoints → 声明面零端点 = 平凡完整，
+/// miss 属请求与声明面不匹配 → 404（旧语义 503 会把永不可达的路径标成
+/// 「瞬态可重试」，重试/重启都不可能恢复）。
 #[tokio::test]
-async fn declared_plugin_without_endpoints_still_returns_503() {
+async fn declared_plugin_without_endpoints_returns_404() {
     let state = make_state(vec![manifest_without_endpoints("svc")], vec!["svc"], false);
     let (status, retry_after) = get_status(build_router(state), "/ext/svc/ping").await;
     assert_eq!(
         status,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "声明无端点时自愈无物可恢复，维持瞬态 503"
+        StatusCode::NOT_FOUND,
+        "零声明端点 = 注册面平凡完整，路径级 miss 必须 404 而非可重试 503"
     );
     assert!(
-        retry_after.is_some(),
-        "503 必须携带 Retry-After（前端/代理按可重试语义处理）"
+        retry_after.is_none(),
+        "404 不得携带 Retry-After（不是瞬态语义）"
     );
 }
 

@@ -50,7 +50,7 @@ export function DebugEvaluationMetricsPage({ embedded }: { embedded?: boolean } 
           className={`rounded-lg border px-3 py-1.5 text-xs transition-colors ${
             categoryFilter === ''
               ? 'bg-primary text-primary-foreground border-primary'
-              : 'hover:bg-accent/50'
+              : 'hover:bg-muted/50'
           }`}
         >
           全部
@@ -62,7 +62,7 @@ export function DebugEvaluationMetricsPage({ embedded }: { embedded?: boolean } 
             className={`rounded-lg border px-3 py-1.5 text-xs capitalize transition-colors ${
               categoryFilter === cat
                 ? 'bg-primary text-primary-foreground border-primary'
-                : 'hover:bg-accent/50'
+                : 'hover:bg-muted/50'
             }`}
           >
             {cat}
@@ -87,7 +87,7 @@ export function DebugEvaluationMetricsPage({ embedded }: { embedded?: boolean } 
             {metrics.map((metric) => (
               <div
                 key={metric.id}
-                className="hover:bg-accent/30 cursor-pointer rounded-lg border p-4 transition-colors"
+                className="hover:bg-muted/30 cursor-pointer rounded-lg border p-4 transition-colors"
                 onClick={() => setExpandedId(expandedId === metric.id ? null : metric.id)}
               >
                 <div className="mb-2 flex items-start justify-between">

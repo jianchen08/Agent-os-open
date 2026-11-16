@@ -15,13 +15,44 @@ import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { useNotificationStore } from '@/stores/notificationStore'
 import { usePipelineMessageStore } from '@/stores/pipelineMessageStore'
 import { useUIStore } from '@/stores/uiStore'
+import { PRIORITY_STYLES } from '@/types/notification'
 import { playNotificationSound } from '@/utils/audioNotification'
 import { resolveInteractionSourceLabel } from '@/utils/interactionOrigin'
+import { loggers } from '@/utils/logger'
 import { showSystemNotification } from '@/utils/systemNotification'
 import type { PendingInteraction } from '@/stores/interactionStore'
+import type { NotificationPriority } from '@/types/notification'
 
 /** 模块级标志位：防止多个组件调用 useInteractionHandler 时重复注册 WebSocket 事件订阅 */
 let _isSubscribed = false
+
+/** priority 白名单（P-144）：= PRIORITY_STYLES 键集（critical/high/normal/low 四档） */
+const VALID_NOTIFICATION_PRIORITIES: ReadonlySet<string> = new Set(
+  Object.keys(PRIORITY_STYLES),
+)
+
+/** 已告警过的非法 priority 值（同值只 warn 一次，轮询重放不刷屏；越界整表清防无界增长） */
+const warnedInvalidPriorities = new Set<string>()
+
+/**
+ * priority 白名单校验（P-144）：human 插件/LLM 可能把 priority 发成白名单外
+ * 的任意值（'urgent'/'Critical'/数字），直传 store 会在渲染层落
+ * PRIORITY_STYLES[priority]=undefined（样式兜底缺失即崩）。白名单内原样透传
+ * （含 critical 四档）；白名单外回退本入口默认档 high 并按值去重 warn 一次
+ * （缺失/null/空串沿用既有静默默认，不算异常输入）。
+ */
+function normalizeNotificationPriority(raw: unknown): NotificationPriority {
+  if (typeof raw === 'string' && VALID_NOTIFICATION_PRIORITIES.has(raw)) {
+    return raw as NotificationPriority
+  }
+  const isAbsent = raw === undefined || raw === null || raw === ''
+  if (!isAbsent && !warnedInvalidPriorities.has(String(raw))) {
+    if (warnedInvalidPriorities.size >= 50) warnedInvalidPriorities.clear()
+    warnedInvalidPriorities.add(String(raw))
+    loggers.notification.warn('[P-144] notification priority 非法值，回退默认档 high: %j', raw)
+  }
+  return 'high'
+}
 
 /**
  * get_pending 兜底轮询间隔（BUG-36）：WS 推送是 fire-and-forget，任何一跳丢失
@@ -85,9 +116,15 @@ function normalizeOptions(raw: unknown): PendingInteraction['options'] {
   return out.length > 0 ? out : undefined
 }
 
+/** parse 产物：交互对象（入 store）与文件全文（fileContents 仅在本次派发链路内消费，不入库）。 */
+interface ParsedInteractionPayload {
+  interaction: Omit<PendingInteraction, 'status'>
+  fileContents?: Record<string, string>
+}
+
 async function parseInteractionEvent(
   data: Record<string, unknown>,
-): Promise<Omit<PendingInteraction, 'status'> | null> {
+): Promise<ParsedInteractionPayload | null> {
   const inner = (data.data as Record<string, unknown>) || data
 
   const requestId = inner.request_id as string
@@ -140,7 +177,7 @@ async function parseInteractionEvent(
     console.warn('[useInteractionHandler] pipeline_id 缺失，管道路由可能失败', inner)
   }
 
-  return {
+  const interaction: Omit<PendingInteraction, 'status'> = {
     requestId,
     mode: (inner.interaction_mode as 'choice' | 'conversation' | 'notification') || 'choice',
     title: (inner.title as string) || '',
@@ -150,7 +187,6 @@ async function parseInteractionEvent(
     agentId: (inner.agent_id as string) || '',
     pipelineId,
     options: normalizeOptions(inner.options),
-    questions: inner.questions as string[],
     initialMessage: inner.initial_message as string,
     suggestions: inner.suggestions as string[],
     priority: inner.priority as PendingInteraction['priority'],
@@ -161,9 +197,9 @@ async function parseInteractionEvent(
     timestamp: new Date().toISOString(),
     agentLevel: rawAgentLevel || undefined,
     agentName: (inner.agent_name as string) || undefined,
-    fileContents,
     sessionId,
   }
+  return fileContents ? { interaction, fileContents } : { interaction }
 }
 
 export function useInteractionHandler(sessionId: string | undefined) {
@@ -236,7 +272,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
           id: parsed.requestId,
           title: parsed.title || '人类交互请求',
           message: parsed.description || `${parsed.agentId || 'Agent'} 请求您的输入`,
-          priority: (parsed.priority as 'high' | 'normal' | 'low') || 'high',
+          priority: normalizeNotificationPriority(parsed.priority),
           category: 'alert',
           isBlocking: false,
           sourceLabel: resolveInteractionSourceLabel(parsed),
@@ -260,35 +296,38 @@ export function useInteractionHandler(sessionId: string | undefined) {
         return
       }
 
-      const isNew = ingestParsedInteraction(parsed)
+      const { interaction, fileContents } = parsed
+      const isNew = ingestParsedInteraction(interaction)
       if (!isNew) return
 
       // 系统级通知：Electron 下经宿主 OS 原生通知呈现（Windows toast /
       // macOS 通知中心 / Linux libnotify）；Web 环境无桥接自动跳过。
+      // 携带交互自身 threadId：点击通知跳转对应对话（无 threadId 退化为仅聚焦）。
       // 不 await：通知失败不阻断交互卡片与提示音链路。
       void showSystemNotification({
-        title: parsed.title || '人类交互请求',
-        body: parsed.description || `${parsed.agentId || 'Agent'} 请求您的输入`,
+        title: interaction.title || '人类交互请求',
+        body: interaction.description || `${interaction.agentId || 'Agent'} 请求您的输入`,
+        threadId: interaction.threadId || undefined,
       })
 
       // 避免重复通知。
       playNotificationSound().catch(() => {
-        if (parsed.mode === 'notification') return
+        if (interaction.mode === 'notification') return
         useNotificationStore.getState().addNotification({
-          title: parsed.title || '人类交互请求',
-          message: parsed.description || `${parsed.agentId || 'Agent'} 请求您的输入（音频通知失败）`,
-          priority: (parsed.priority as 'high' | 'normal' | 'low') || 'high',
+          title: interaction.title || '人类交互请求',
+          message: interaction.description || `${interaction.agentId || 'Agent'} 请求您的输入（音频通知失败）`,
+          priority: normalizeNotificationPriority(interaction.priority),
           category: 'alert',
           isBlocking: false,
           autoDismissMs: 8000,
-          sourceLabel: resolveInteractionSourceLabel(parsed),
+          sourceLabel: resolveInteractionSourceLabel(interaction),
         })
       })
 
       // tabId 形如 `file-${containerId}-${path}`，重复推送同一文件自动去重激活。
-      if (parsed.fileContents && Object.keys(parsed.fileContents).length > 0) {
+      if (fileContents && Object.keys(fileContents).length > 0) {
         const layoutStore = useLayoutModeStore.getState()
-        const filePaths = Object.keys(parsed.fileContents)
+        const filePaths = Object.keys(fileContents)
         const containerId = '_local'
         let firstTabId: string | null = null
 
@@ -305,7 +344,7 @@ export function useInteractionHandler(sessionId: string | undefined) {
           registerFileEditor(tabId, {
             filePath,
             fileName,
-            content: parsed.fileContents[filePath] ?? '',
+            content: fileContents[filePath] ?? '',
             containerTaskId: containerId,
           })
           layoutStore.addWorkspaceTab({
@@ -346,9 +385,14 @@ export function useInteractionHandler(sessionId: string | undefined) {
       if (now - lastRestoreAt < 1000) return
       lastRestoreAt = now
 
+      // 轮询发起时刻：此前入列的本地 pending 才参与对账（之后 WS 事件入列的
+      // 卡片豁免本轮——响应可能先于入列生成，防止误收在途卡）
+      const pollStartedAt = new Date().toISOString()
+
       try {
         const resp = await apiClient.get(API_ENDPOINTS.INTERACTION.PENDING)
         const items = (resp.data?.items as Record<string, unknown>[]) || []
+        const serverIds = new Set<string>()
         for (const record of items) {
           const normalized = normalizeRecord(record)
           const parsed = await parseInteractionEvent(normalized)
@@ -357,7 +401,18 @@ export function useInteractionHandler(sessionId: string | undefined) {
             console.warn('[InteractionHandler] pending 记录解析失败，跳过恢复:', record)
             continue
           }
-          ingestParsedInteraction(parsed)
+          serverIds.add(parsed.interaction.requestId)
+          ingestParsedInteraction(parsed.interaction)
+        }
+        // 对账收卡（真机缺陷"审批交互卡残影浮层不自动收"）：本地仍 pending、
+        // 服务端列表已无、且入列早于本轮轮询 = 已在他端结算（应答/取消/超时），
+        // 自动收起浮层卡；浮层随 pending 清空卸载，手动关闭按钮不受影响。
+        const { pendingInteractions } = useInteractionStore.getState()
+        for (const item of pendingInteractions) {
+          if (item.status !== 'pending') continue
+          if (serverIds.has(item.requestId)) continue
+          if (item.timestamp >= pollStartedAt) continue
+          dismissInteraction(item.requestId)
         }
       } catch (err) {
         // 记日志即止：恢复失败时逐条循环已留痕，此处为整链失败兜底；
@@ -398,6 +453,43 @@ export function useInteractionHandler(sessionId: string | undefined) {
       handleInteractionRequest,
     )
     globalWS.subscribe(WS_SERVER_EVENTS.APPROVAL_TAKEN, handleApprovalTaken)
+
+    /**
+     * 超时前提醒（P-20/U-2 订阅腿；后端 35b920af9 修复 payload.thread_id
+     * 路由后可达）：后端每请求提醒一次（timeout - remind_before 时刻）。
+     * 持卡端置提醒态（InteractionCard 倒计时切高亮「即将超时」）+ 提示
+     * 一次（稳定 id 防重放重复）；非持卡端静默（APPROVAL_TAKEN 同纪律：
+     * 提醒只面向正在等待的端，不无故打扰）。
+     */
+    const handleTimeoutReminder = (data: Record<string, unknown>) => {
+      const inner = (data.data as Record<string, unknown>) || data
+      const requestId = typeof inner.request_id === 'string' ? inner.request_id : ''
+      if (!requestId) return
+      const held = useInteractionStore
+        .getState()
+        .pendingInteractions.some((i) => i.requestId === requestId && i.status === 'pending')
+      if (!held) return
+      useInteractionStore.getState().markTimeoutReminded(requestId)
+      const remainingSeconds =
+        typeof inner.remaining_seconds === 'number' ? inner.remaining_seconds : null
+      useNotificationStore.getState().addNotification({
+        id: `interaction-timeout-reminder-${requestId}`,
+        title: '审批即将超时',
+        message:
+          remainingSeconds != null
+            ? `剩余 ${remainingSeconds} 秒，超时将自动按拒绝裁决，请尽快处理。`
+            : '超时将自动按拒绝裁决，请尽快处理。',
+        priority: 'high',
+        category: 'alert',
+        isBlocking: false,
+        autoDismissMs: 0,
+        sourceLabel: '审批',
+      })
+    }
+    globalWS.subscribe(
+      WS_SERVER_EVENTS.INTERACTION_TIMEOUT_REMINDER,
+      handleTimeoutReminder,
+    )
     // WS 重连后恢复 pending 交互（断线期间可能错过推送，或刷新后内存已清空）
     globalWS.subscribe(WS_LOCAL_EVENTS.RECONNECTED, restorePendingInteractions)
 
@@ -416,6 +508,10 @@ export function useInteractionHandler(sessionId: string | undefined) {
       globalWS.unsubscribe(WS_LOCAL_EVENTS.STATUS, handleWsStatusChange)
       globalWS.unsubscribe(WS_SERVER_EVENTS.INTERACTION_REQUEST, handleInteractionRequest)
       globalWS.unsubscribe(WS_SERVER_EVENTS.APPROVAL_TAKEN, handleApprovalTaken)
+      globalWS.unsubscribe(
+        WS_SERVER_EVENTS.INTERACTION_TIMEOUT_REMINDER,
+        handleTimeoutReminder,
+      )
       globalWS.unsubscribe(WS_LOCAL_EVENTS.RECONNECTED, restorePendingInteractions)
       _isSubscribed = false
     }
@@ -508,9 +604,10 @@ export function useInteractionHandler(sessionId: string | undefined) {
         else if (upper === 'L3' || upper === '3') agentLevel = 3
       }
 
-      // 使用全局管道导航服务跳转（自动处理跨会话查找和标签创建）
+      // 使用全局管道导航服务跳转（自动处理跨会话查找和标签创建）。
+      // 标签命名链（2026-10-16 用户拍板，全标签统一）：交互标题 → 智能体名 → 泛称
       await navigateToPipeline(pipelineId, {
-        agentName: title || '对话',
+        agentName: title || interaction?.agentName || '对话',
         agentLevel,
       })
     },

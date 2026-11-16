@@ -107,6 +107,7 @@ def _run_worker(agent_cfg: dict, workspace_path: str) -> dict:
         - workspace_path: 实际使用的 ws_meta.path
     """
     import os
+
     state = _build_agent_state(agent_cfg, workspace_path)
     payload = {"state": state, "workspace_path": workspace_path or ""}
 
@@ -117,7 +118,8 @@ def _run_worker(agent_cfg: dict, workspace_path: str) -> dict:
         "-I",
         str(SCRIPT_DIR / "agent_prompt_viewer.py"),
         "--worker",
-        "--workspace", workspace_path or "",
+        "--workspace",
+        workspace_path or "",
     ]
     # Agent YAML 内容通过 stdin 传递，避免命令行长度限制
     stdin_data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -143,16 +145,12 @@ def _run_worker(agent_cfg: dict, workspace_path: str) -> dict:
     )
     if proc.returncode != 0:
         err = proc.stderr.decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"Worker 子进程退出码 {proc.returncode}。stderr: {err[:2000]}"
-        )
+        raise RuntimeError(f"Worker 子进程退出码 {proc.returncode}。stderr: {err[:2000]}")
     try:
         result = json.loads(proc.stdout.decode("utf-8"))
     except json.JSONDecodeError as e:
         out = proc.stdout.decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"Worker 输出无法解析为 JSON: {e}\nstdout 前 500 字符: {out[:500]}"
-        ) from e
+        raise RuntimeError(f"Worker 输出无法解析为 JSON: {e}\nstdout 前 500 字符: {out[:500]}") from e
     if not result.get("ok"):
         raise RuntimeError(f"Worker 返回错误: {result.get('error')}")
     return result["data"]
@@ -330,17 +328,15 @@ def _worker_main() -> None:
         sys.path.remove(str(PROJECT_ROOT))
     sys.path.insert(0, str(PROJECT_ROOT))
 
-    # 0.2 布局：PromptBuildPlugin 位于 plugins/shared/pipeline/input/prompt_build/
+    # 0.2 布局：PromptBuildPlugin 位于 plugins/shared/prompt_build/
     # （0.1 的 src/ + plugins/input/ 布局已删除）。
     # 与插件自身 server.py 的 sys.path 注入方式对齐：
-    #   - plugins/shared/  → `from pipeline.plugin import PluginContext`（兼容包）
+    #   - plugins/shared/  → `from _libs.pipeline_base.plugin import PluginContext`（兼容包）
     #   - 插件目录本身    → `from plugin import PromptBuildPlugin`（平铺 import）
     shared_dir = PROJECT_ROOT / "plugins" / "shared"
     prompt_build_dir = shared_dir / "pipeline" / "input" / "prompt_build"
     if not (prompt_build_dir / "plugin.py").is_file():
-        raise RuntimeError(
-            f"0.2 插件目录不存在: {prompt_build_dir}（待 0.2 适配确认目录布局）"
-        )
+        raise RuntimeError(f"0.2 插件目录不存在: {prompt_build_dir}（待 0.2 适配确认目录布局）")
     for p in (str(shared_dir), str(prompt_build_dir)):
         if p in sys.path:
             sys.path.remove(p)
@@ -352,14 +348,12 @@ def _worker_main() -> None:
         # 断言：确认加载的是当前项目根的代码
         import inspect as _inspect
 
-        from pipeline.plugin import PluginContext
+        from _libs.pipeline_base.plugin import PluginContext
         from plugin import PromptBuildPlugin  # noqa: I001  (prompt_build 插件平铺模块)
+
         loaded_file = _inspect.getfile(PromptBuildPlugin._build_dynamic_vars)
         if not Path(loaded_file).resolve().is_relative_to(PROJECT_ROOT.resolve()):
-            raise RuntimeError(
-                f"PromptBuildPlugin 加载路径错误: {loaded_file}\n"
-                f"期望在 {PROJECT_ROOT} 下"
-            )
+            raise RuntimeError(f"PromptBuildPlugin 加载路径错误: {loaded_file}\n期望在 {PROJECT_ROOT} 下")
 
         raw = sys.stdin.buffer.read()
         payload = json.loads(raw.decode("utf-8"))
@@ -375,7 +369,9 @@ def _worker_main() -> None:
 
         dynamic_vars_msg = updates.get("prompt.dynamic_vars") or {}
         if isinstance(dynamic_vars_msg, dict):
-            dynamic_vars_content = dynamic_vars_msg.get("content", "") or json.dumps(dynamic_vars_msg, ensure_ascii=False)
+            dynamic_vars_content = dynamic_vars_msg.get("content", "") or json.dumps(
+                dynamic_vars_msg, ensure_ascii=False
+            )
         else:
             dynamic_vars_content = str(dynamic_vars_msg)
 
@@ -391,11 +387,17 @@ def _worker_main() -> None:
         sys.stdout.write(json.dumps({"ok": True, "data": data}, ensure_ascii=False))
     except Exception as e:
         import traceback
-        sys.stdout.write(json.dumps({
-            "ok": False,
-            "error": f"{type(e).__name__}: {e}",
-            "traceback": traceback.format_exc(),
-        }, ensure_ascii=False))
+
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": f"{type(e).__name__}: {e}",
+                    "traceback": traceback.format_exc(),
+                },
+                ensure_ascii=False,
+            )
+        )
 
 
 # ─── 扫描与解析 ───
@@ -428,16 +430,18 @@ def scan_agents() -> list[dict]:
         description = (config.get("description") or "").strip().split("\n")[0][:120]
         rel_path = str(yaml_file.relative_to(PROJECT_ROOT))
 
-        agents.append({
-            "config_id": config_id,
-            "name": name,
-            "category": category,
-            "level": level,
-            "agent_type": agent_type,
-            "description": description,
-            "path": rel_path,
-            "yaml_data": config,
-        })
+        agents.append(
+            {
+                "config_id": config_id,
+                "name": name,
+                "category": category,
+                "level": level,
+                "agent_type": agent_type,
+                "description": description,
+                "path": rel_path,
+                "yaml_data": config,
+            }
+        )
     agents.sort(key=lambda a: (a["category"], a["config_id"]))
     return agents
 
@@ -476,7 +480,8 @@ def build_all_prompts(agents: list[dict], workspace_path: str) -> list[dict]:
 
 def _clean_surrogates(s):
     """Remove unpaired surrogate characters."""
-    return s.encode('utf-8', errors='replace').decode('utf-8')
+    return s.encode("utf-8", errors="replace").decode("utf-8")
+
 
 def _json_dump(data: object) -> str:
     r"""JSON 序列化 + 防止 <script>/</script> 等标签破坏 HTML。
@@ -500,14 +505,14 @@ def _build_inject_map(system_message, yaml_data):
     inject_map = []
     sys_prompt = yaml_data.get("system_prompt", "")
     file_refs = set()
-    for m in re.finditer(r'\{\{path:([^}]+)\}\}', sys_prompt):
+    for m in re.finditer(r"\{\{path:([^}]+)\}\}", sys_prompt):
         file_refs.add(m.group(1).strip())
     sv = yaml_data.get("static_vars", {})
-    for item in (sv.get("items", []) if isinstance(sv, dict) else []):
+    for item in sv.get("items", []) if isinstance(sv, dict) else []:
         if isinstance(item, dict) and item.get("type") == "path":
             file_refs.add(item.get("path", ""))
         elif isinstance(item, str):
-            for m in re.finditer(r'\{\{path:([^}]+)\}\}', item):
+            for m in re.finditer(r"\{\{path:([^}]+)\}\}", item):
                 file_refs.add(m.group(1).strip())
     for raw_path in sorted(file_refs):
         if raw_path.startswith("skills/"):
@@ -520,12 +525,13 @@ def _build_inject_map(system_message, yaml_data):
                 fc = resolved.read_text(encoding="utf-8")
                 pos = system_message.find(fc)
                 if pos >= 0:
-                    inject_map.append({"name": resolved.name, "path": raw_path,
-                        "start": pos, "end": pos + len(fc), "size": len(fc)})
+                    inject_map.append(
+                        {"name": resolved.name, "path": raw_path, "start": pos, "end": pos + len(fc), "size": len(fc)}
+                    )
             elif resolved.is_dir():
                 total, sp = 0, -1
                 for f2 in sorted(resolved.rglob("*")):
-                    if f2.is_file() and f2.suffix in (".md",".yaml",".yml",".txt"):
+                    if f2.is_file() and f2.suffix in (".md", ".yaml", ".yml", ".txt"):
                         try:
                             fc2 = f2.read_text(encoding="utf-8")
                             p = system_message.find(fc2)
@@ -537,8 +543,15 @@ def _build_inject_map(system_message, yaml_data):
                             # 单个文件不可读只跳过该文件并留痕，不阻断其余文件扫描
                             logger.warning("跳过不可读文件 %s: %s", f2, exc)
                 if sp >= 0:
-                    inject_map.append({"name": str(raw_path).rstrip("/"), "path": raw_path,
-                        "start": sp, "end": sp + total, "size": total})
+                    inject_map.append(
+                        {
+                            "name": str(raw_path).rstrip("/"),
+                            "path": raw_path,
+                            "start": sp,
+                            "end": sp + total,
+                            "size": total,
+                        }
+                    )
         except OSError as exc:
             # 单个引用路径解析/读取失败只跳过该路径并留痕，不影响其余注入点
             logger.warning("跳过不可读路径引用 %s: %s", raw_path, exc)
@@ -570,7 +583,7 @@ def generate_html(agents: list[dict], workspace_path: str) -> str:
         cat_id = f"cat-{category}"
         item_rows = "".join(
             f'<div class="nav-item" data-agent="{a["config_id"]}" '
-            f'onclick="showAgent(\'{a["config_id"]}\')">'
+            f"onclick=\"showAgent('{a['config_id']}')\">"
             f'{a["name"]} <span class="level">{a["level"]}</span></div>'
             for a in cat_agents
         )

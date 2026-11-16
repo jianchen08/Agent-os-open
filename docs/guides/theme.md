@@ -20,7 +20,7 @@
 
 ### 2.2 插件主题（辅轨，contributes.themes）
 
-- 任何插件可在 manifest 声明主题包——纯 CSS 变量键值对，无 JS 执行：`{id, name, base(dark/light 打底), variables(CSS 变量覆盖，后写者胜), backgrounds}`；随插件启用自动出现在主题列表。批量样例 `plugins/shared/system/dsh_adapter/plugin.json`（16 款）。
+- 任何插件可在 manifest 声明主题包——纯 CSS 变量键值对，无 JS 执行：`{id, name, base(dark/light 打底), variables(CSS 变量覆盖，后写者胜), backgrounds}`；随插件启用自动出现在主题列表。批量样例 `plugins/shared/dsh_adapter/plugin.json`（16 款）。
 - 皮肤（`themes[].skin`）：皮肤资产目录（推荐 `styles/skins/<skin-id>/`：`skin.css` 全部圈在 `html[data-skin="<plugin>:<skin>"]` 下；可选 `hooks.mjs`；`assets/` 经插件端点同源递送）。hooks 契约：default 导出工厂 `defineSkinHooks()` 返回 `{apply(ctx)}`；模块零顶层副作用；所有 DOM 写入经 `ctx.onCleanup` 可回滚，apply 抛错按已注册清理回滚。
 - 皮肤运行时（平台，`frontend/src/services/skinRuntime.ts`）：scope 打标 → 拉 `/ext/<pluginId>/styles/skin/<skin>/merged.css` 消毒注入 → 执行 `hooks.mjs` → 切换即摘（标记/style/hooks 清理逆序）。递送三路由：`merged.css` / `hooks.mjs` / `skin-assets/{file}`（http_endpoints 声明 + 读文件返回信封；参考 `dsh_adapter/server.py`）。
 - 补充通道：动态 JSON 主题 `frontend/public/themes/*.json`（构建期扫描）；用户自定义存浏览器 localStorage（隐私模式/清缓存/换设备丢失，恢复默认 = 选 dark 主题 + dark 模式）。

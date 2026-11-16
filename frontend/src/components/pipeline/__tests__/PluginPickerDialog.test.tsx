@@ -3,7 +3,7 @@
  * PluginPickerDialog 行为测试（补齐目录过滤 / 手动引用两条输入通道）
  *
  * 弹窗职责：把一条插件引用写进 step 的 steps 组合。两条通道：
- * - 目录通道：role 分组展示 + 关键字过滤（id / name 任一命中）+ 已在本组合的置灰
+ * - 目录通道：平铺列表展示（role 死字段已退役，ADR 2026-10-13）+ 关键字过滤（id / name 任一命中）+ 已在本组合的置灰
  * - 手动通道：目录覆盖不到的形态（step 库 id / "{{...}}" 动态模板）原样加入，
  *   空串或纯空白不得成为引用
  *
@@ -21,7 +21,6 @@ import type { PipelinePluginCatalogEntry } from '@/services/api/pipelines'
 function entry(over: Partial<PipelinePluginCatalogEntry> & { id: string }): PipelinePluginCatalogEntry {
   return {
     name: over.id,
-    role: 'core',
     hostType: 'sidecar',
     version: '1.0.0',
     enabled: true,
@@ -31,10 +30,10 @@ function entry(over: Partial<PipelinePluginCatalogEntry> & { id: string }): Pipe
 }
 
 const CATALOG: PipelinePluginCatalogEntry[] = [
-  entry({ id: 'pipeline_tool_schema', name: 'Tool Schema', role: 'input' }),
-  entry({ id: 'pipeline_spill_guard', name: 'Spill Guard', role: 'core' }),
-  entry({ id: 'pipeline_result_format', name: 'Result Format', role: 'output', enabled: false }),
-  entry({ id: 'pipeline_orphan', name: 'Orphan', role: null, enabled: null }),
+  entry({ id: 'pipeline_tool_schema', name: 'Tool Schema' }),
+  entry({ id: 'pipeline_spill_guard', name: 'Spill Guard' }),
+  entry({ id: 'pipeline_result_format', name: 'Result Format', enabled: false }),
+  entry({ id: 'pipeline_orphan', name: 'Orphan', enabled: null }),
 ]
 
 function renderDialog(over: Partial<Parameters<typeof PluginPickerDialog>[0]> = {}) {
@@ -55,13 +54,9 @@ beforeEach(() => {
 })
 
 describe('PluginPickerDialog — 目录通道', () => {
-  it('按 role 分组渲染四类标签，条目同时展示名称与 id', () => {
+  it('平铺渲染全部目录条目（无 role 分组），条目同时展示名称与 id', () => {
     renderDialog()
 
-    expect(screen.getByText('输入 (input)')).toBeInTheDocument()
-    expect(screen.getByText('核心 (core)')).toBeInTheDocument()
-    expect(screen.getByText('输出 (output)')).toBeInTheDocument()
-    expect(screen.getByText('未标注角色')).toBeInTheDocument()
     expect(screen.getByLabelText('添加 pipeline_tool_schema')).toHaveTextContent('Tool Schema')
     expect(screen.getByLabelText('添加 pipeline_tool_schema')).toHaveTextContent(
       'pipeline_tool_schema',

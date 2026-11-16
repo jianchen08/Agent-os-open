@@ -462,6 +462,13 @@ export interface EffectsConfig {
   /** 毛玻璃效果 */
   glassmorphism: boolean
 
+  /**
+   * 消息气泡毛玻璃（flat 平铺+背景图路径的玻璃面：blur + 半透明底 + 玻璃描边）。
+   * 主题级开关，按主题风格定值；缺省开（皮肤清单未声明该字段，玻璃面是
+   * 皮肤 flat 气泡的既有观感基线）。关=实底面无模糊（文字仍不裸贴背景图）。
+   */
+  messageGlass?: boolean
+
   /** 动画 */
   animations: boolean
 

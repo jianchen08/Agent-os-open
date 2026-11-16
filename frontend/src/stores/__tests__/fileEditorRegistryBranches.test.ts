@@ -4,6 +4,7 @@
  * 落盘、监听器订阅/退订/异常隔离，以及更新/移除的命中与未命中分支。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { userScopedKey as pk } from '@/utils/userScopedStorage'
 
 /** 复位模块缓存，让 registry 重新执行 _loadFromStorage 启动逻辑 */
 async function loadFreshRegistry() {
@@ -25,7 +26,7 @@ beforeEach(() => {
 describe('fileEditorRegistry — localStorage 还原（防御性解析）', () => {
   it('合法持久化数据被还原（字段完整）', async () => {
     localStorage.setItem(
-      'file-editor-registry',
+      pk('file-editor-registry'),
       JSON.stringify({ 'tab-a': { ...baseData, size: 8 } }),
     )
     const reg = await loadFreshRegistry()
@@ -33,14 +34,14 @@ describe('fileEditorRegistry — localStorage 还原（防御性解析）', () =
   })
 
   it('JSON 损坏时回退空表（不抛异常）', async () => {
-    localStorage.setItem('file-editor-registry', '{not json')
+    localStorage.setItem(pk('file-editor-registry'), '{not json')
     const reg = await loadFreshRegistry()
     expect(reg.getFileEditorData('anything')).toBeUndefined()
   })
 
   it('缺 filePath 的条目被丢弃，合法条目保留（混合数据）', async () => {
     localStorage.setItem(
-      'file-editor-registry',
+      pk('file-editor-registry'),
       JSON.stringify({
         bad: { fileName: 'x', content: 'c', containerTaskId: 't' },
         nullEntry: null,
@@ -56,7 +57,7 @@ describe('fileEditorRegistry — localStorage 还原（防御性解析）', () =
   it('无持久化数据时注册表为空（启动快照性质断言）', async () => {
     const reg = await loadFreshRegistry()
     expect(reg.getFileEditorData('tab-a')).toBeUndefined()
-    expect(localStorage.getItem('file-editor-registry')).toBeNull()
+    expect(localStorage.getItem(pk('file-editor-registry'))).toBeNull()
   })
 
   it('localStorage 缺失（无全局 Storage）时还原为空表且读写不抛错', async () => {
@@ -108,7 +109,7 @@ describe('fileEditorRegistry — 注册/读取/更新/移除', () => {
       loading: true,
     })
     // 持久化剥离运行时 loading
-    const raw = JSON.parse(localStorage.getItem('file-editor-registry')!)
+    const raw = JSON.parse(localStorage.getItem(pk('file-editor-registry'))!)
     expect(raw['tab-1'].loading).toBeUndefined()
     expect(raw['tab-1'].content).toBe('changed')
   })
@@ -118,7 +119,7 @@ describe('fileEditorRegistry — 注册/读取/更新/移除', () => {
     reg.registerFileEditor('tab-1', baseData)
     reg.updateFileEditorData('tab-missing', { content: 'x' })
     expect(reg.getFileEditorData('tab-missing')).toBeUndefined()
-    const raw = JSON.parse(localStorage.getItem('file-editor-registry')!)
+    const raw = JSON.parse(localStorage.getItem(pk('file-editor-registry'))!)
     expect(Object.keys(raw)).toEqual(['tab-1'])
   })
 
@@ -131,7 +132,7 @@ describe('fileEditorRegistry — 注册/读取/更新/移除', () => {
     expect(reg.getFileEditorData('tab-1')).toBeUndefined()
     reg.emitFileChange('tab-1', 'new')
     expect(listener).not.toHaveBeenCalled()
-    expect(JSON.parse(localStorage.getItem('file-editor-registry')!)).toEqual({})
+    expect(JSON.parse(localStorage.getItem(pk('file-editor-registry'))!)).toEqual({})
   })
 })
 
@@ -141,7 +142,7 @@ describe('fileEditorRegistry — 持久化体积上限', () => {
     const huge = 'x'.repeat(256 * 1024 + 1)
     reg.registerFileEditor('huge', { ...baseData, content: huge })
     reg.registerFileEditor('small', baseData)
-    const raw = JSON.parse(localStorage.getItem('file-editor-registry')!)
+    const raw = JSON.parse(localStorage.getItem(pk('file-editor-registry'))!)
     expect(raw.huge).toBeUndefined()
     expect(raw.small).toBeDefined()
     // 内存中仍可见（仅持久化被跳过）
@@ -156,7 +157,7 @@ describe('fileEditorRegistry — 持久化体积上限', () => {
       content: undefined as unknown as string,
       containerTaskId: 't',
     })
-    const raw = JSON.parse(localStorage.getItem('file-editor-registry')!)
+    const raw = JSON.parse(localStorage.getItem(pk('file-editor-registry'))!)
     expect(raw['no-content']).toBeDefined()
     expect(raw['no-content'].filePath).toBe('a.bin')
   })
@@ -165,7 +166,7 @@ describe('fileEditorRegistry — 持久化体积上限', () => {
     const reg = await loadFreshRegistry()
     const exact = 'y'.repeat(256 * 1024)
     reg.registerFileEditor('exact', { ...baseData, content: exact })
-    const raw = JSON.parse(localStorage.getItem('file-editor-registry')!)
+    const raw = JSON.parse(localStorage.getItem(pk('file-editor-registry'))!)
     expect(raw.exact).toBeDefined()
     expect(raw.exact.content.length).toBe(256 * 1024)
   })

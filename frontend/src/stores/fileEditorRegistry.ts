@@ -8,6 +8,8 @@
  * @module stores/fileEditorRegistry
  */
 
+import { userScopedKey } from '@/utils/userScopedStorage'
+
 /** 编辑器 Tab 数据 */
 export interface FileEditorData {
   /** 文件路径（如 src/main.py） */
@@ -18,11 +20,17 @@ export interface FileEditorData {
   content: string
   /** 文件大小（字节） */
   size?: number
+  /**
+   * 已加载字节位（按需加载，用户裁定 2026-10-24）：undefined=全量已加载；
+   * 定义且 < size=部分加载（部分加载禁编辑——防截断内容写回丢数据），
+   * 「加载更多/加载全部」分页推进，读完置回 undefined
+   */
+  loadedBytes?: number
   /** 容器任务 ID（用于 API 调用） */
   containerTaskId: string
   /** 是否正在加载（运行时状态，不持久化） */
   loading?: boolean
-  /** 附件直链 URL（如 /uploads/xxx.pdf 或内存 blob URL）；优先于 containerTaskId 拼接的 workspaces URL */
+  /** 附件内容 URL（内存 blob URL——附件经 openFileWithLoader 鉴权取流生成；或「无加载器」卡的鉴权内容端点路径）；优先于 containerTaskId 拼接的 workspaces URL */
   url?: string
   /** 内存 blob URL（运行时状态，不持久化；页签关闭时统一 revokeObjectURL 防泄漏） */
   blobUrl?: string
@@ -47,7 +55,7 @@ const MAX_PERSIST_SIZE = 256 * 1024
 function _loadFromStorage(): Map<string, FileEditorData> {
   if (typeof localStorage === 'undefined') return new Map()
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    const raw = localStorage.getItem(userScopedKey(STORAGE_KEY))
     if (!raw) return new Map()
     const parsed = JSON.parse(raw) as Record<string, FileEditorData>
     const map = new Map<string, FileEditorData>()
@@ -78,7 +86,7 @@ function _saveToStorage(): void {
       const { loading: _l, blobUrl: _b, ...rest } = data
       obj[tabId] = rest
     }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(obj))
+    localStorage.setItem(userScopedKey(STORAGE_KEY), JSON.stringify(obj))
   } catch {
     // 配额溢出或权限受限，静默丢弃
   }

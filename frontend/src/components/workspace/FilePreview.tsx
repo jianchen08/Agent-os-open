@@ -8,9 +8,14 @@
  */
 
 import { useCallback, useMemo, useState } from 'react'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { FileQuestion, Download, ZoomIn, ZoomOut, RotateCw } from '@/assets/icons'
 import { codeHighlightStyle } from '@/components/shared/markdown/codeHighlightStyle'
+import {
+  EXTENSION_TO_LANGUAGE,
+  extractExtension,
+  getLanguageForFileName,
+  PrismSyntaxHighlighter,
+} from '@/components/shared/markdown/prismLanguages'
 import { cn } from '@/lib/utils'
 import { WORKSPACE_SERVICE_ENDPOINTS } from '@/services/api/endpoints.generated'
 
@@ -30,41 +35,6 @@ const CODE_PREVIEW_EXTENSIONS = new Set([
   '.gitignore', '.dockerignore', '.editorconfig', '.eslintrc',
   '.prettierrc', '.dockerfile', '.makefile', '.gradle', '.cmake',
 ])
-
-/** 文件扩展名 → Prism 语言映射 */
-const EXTENSION_TO_LANGUAGE: Record<string, string> = {
-  '.json': 'json',
-  '.yaml': 'yaml',
-  '.yml': 'yaml',
-  '.toml': 'toml',
-  '.xml': 'xml',
-  '.csv': 'text',
-  '.tsv': 'text',
-  '.md': 'markdown',
-  '.markdown': 'markdown',
-  '.txt': 'text',
-  '.log': 'text',
-  '.env': 'bash',
-  '.properties': 'properties',
-  '.ini': 'ini',
-  '.cfg': 'ini',
-  '.conf': 'ini',
-  '.graphql': 'graphql',
-  '.gql': 'graphql',
-  '.proto': 'protobuf',
-  '.map': 'json',
-  '.lock': 'text',
-  '.svg': 'xml',
-  '.gitignore': 'text',
-  '.dockerignore': 'text',
-  '.editorconfig': 'ini',
-  '.eslintrc': 'json',
-  '.prettierrc': 'json',
-  '.dockerfile': 'docker',
-  '.makefile': 'makefile',
-  '.gradle': 'groovy',
-  '.cmake': 'cmake',
-}
 
 /** 预览类型 */
 type PreviewType = 'image' | 'pdf' | 'code' | 'binary'
@@ -94,27 +64,8 @@ export interface FilePreviewProps {
   containerTaskId: string
   /** 自定义类名 */
   className?: string
-  /** 附件直链 URL（如 /uploads/xxx.pdf）；存在时优先于 containerTaskId 拼接的 workspaces URL */
+  /** 附件内容 URL（内存 blob URL——附件经 openFileWithLoader 鉴权取流生成）；存在时优先于 containerTaskId 拼接的 workspaces URL */
   url?: string
-}
-
-/**
- * 从文件名提取扩展名
- *
- * @param fileName - 文件名或文件路径
- * @returns 小写扩展名
- */
-function extractExtension(fileName: string): string {
-  const lastSlash = Math.max(fileName.lastIndexOf('/'), fileName.lastIndexOf('\\'))
-  const baseName = fileName.substring(lastSlash + 1)
-  if (baseName.startsWith('.') && baseName.lastIndexOf('.') === 0) {
-    return baseName.toLowerCase()
-  }
-  const dotIndex = baseName.lastIndexOf('.')
-  if (dotIndex === -1) {
-    return baseName.toLowerCase()
-  }
-  return baseName.substring(dotIndex).toLowerCase()
 }
 
 /**
@@ -159,10 +110,7 @@ export function FilePreview({
   }, [filePath])
 
   const previewType = useMemo(() => getPreviewType(filePath), [filePath])
-  const language = useMemo(() => {
-    const ext = extractExtension(filePath)
-    return EXTENSION_TO_LANGUAGE[ext] ?? 'text'
-  }, [filePath])
+  const language = useMemo(() => getLanguageForFileName(filePath), [filePath])
 
   /** 构建文件访问 URL（用于图片和 PDF） */
   const fileUrl = useMemo(() => {
@@ -204,7 +152,7 @@ export function FilePreview({
           <div className="flex items-center gap-1">
             <button
               onClick={handleZoomOut}
-              className="hover:bg-accent text-muted-foreground rounded p-1 transition-colors"
+              className="hover:bg-muted text-muted-foreground rounded p-1 transition-colors"
               title="缩小"
             >
               <ZoomOut className="h-4 w-4" />
@@ -214,14 +162,14 @@ export function FilePreview({
             </span>
             <button
               onClick={handleZoomIn}
-              className="hover:bg-accent text-muted-foreground rounded p-1 transition-colors"
+              className="hover:bg-muted text-muted-foreground rounded p-1 transition-colors"
               title="放大"
             >
               <ZoomIn className="h-4 w-4" />
             </button>
             <button
               onClick={handleRotate}
-              className="hover:bg-accent text-muted-foreground rounded p-1 transition-colors"
+              className="hover:bg-muted text-muted-foreground rounded p-1 transition-colors"
               title="旋转"
             >
               <RotateCw className="h-4 w-4" />
@@ -230,7 +178,7 @@ export function FilePreview({
         </div>
 
         {/* 图片显示区域 */}
-        <div className="flex flex-1 items-center justify-center overflow-auto bg-[var(--code-bg,#1a1a2e)]/30 p-4">
+        <div className="flex flex-1 items-center justify-center overflow-auto bg-[rgb(var(--code-bg-rgb,26_26_46)/0.3)] p-4">
           {fileUrl ? (
             <img
               src={fileUrl}
@@ -306,7 +254,7 @@ export function FilePreview({
           </button>
         </div>
         <div className="min-h-0 flex-1 overflow-auto">
-          <SyntaxHighlighter
+          <PrismSyntaxHighlighter
             language={language}
             style={codeHighlightStyle}
             showLineNumbers={true}
@@ -316,7 +264,7 @@ export function FilePreview({
               margin: 0,
               borderRadius: 0,
               fontSize: '0.8125rem',
-              background: 'var(--code-bg, #1e1e1e)',
+              background: 'var(--code-bg)',
               color: 'var(--code-text)',
               minHeight: '100%',
             }}
@@ -328,7 +276,7 @@ export function FilePreview({
             }}
           >
             {content}
-          </SyntaxHighlighter>
+          </PrismSyntaxHighlighter>
         </div>
       </div>
     )

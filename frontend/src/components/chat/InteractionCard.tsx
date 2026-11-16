@@ -103,7 +103,7 @@ export function InteractionCard({
       className={`group mx-4 my-3 rounded-xl border transition-colors ${
         isDone
           ? 'border-border/50 bg-muted/30'
-          : 'border-[var(--badge-info-text)]/40 bg-[var(--badge-info-bg)] animate-pulse-subtle shadow-md shadow-[var(--badge-info-bg)]'
+          : 'border-[rgb(var(--badge-info-text-rgb,59_130_246)/0.4)] bg-[var(--badge-info-bg)] animate-pulse-subtle shadow-md shadow-[var(--badge-info-bg)]'
       }`}
     >
       {/* 标题区 */}
@@ -117,11 +117,17 @@ export function InteractionCard({
               className={`ml-auto shrink-0 rounded px-1.5 py-0.5 text-xs tabular-nums ${
                 secondsLeft <= 0
                   ? 'bg-[var(--badge-danger-bg)] text-[var(--badge-danger-text)]'
-                  : 'bg-muted text-muted-foreground'
+                  : interaction.timeoutReminded
+                    ? 'bg-[var(--badge-warning-bg)] text-[var(--badge-warning-text)]'
+                    : 'bg-muted text-muted-foreground'
               }`}
               title="审批等待超时后将自动按拒绝裁决"
             >
-              {secondsLeft <= 0 ? '已超时，将自动拒绝' : `剩余 ${formatRemaining(secondsLeft)}`}
+              {secondsLeft <= 0
+                ? '已超时，将自动拒绝'
+                : interaction.timeoutReminded
+                  ? `即将超时 · 剩余 ${formatRemaining(secondsLeft)}`
+                  : `剩余 ${formatRemaining(secondsLeft)}`}
             </span>
           )}
           {isDone && (
@@ -150,7 +156,10 @@ export function InteractionCard({
           </p>
         )}
         {interaction.description && (
-          <p className="text-muted-foreground mt-1 text-sm">{interaction.description}</p>
+          <MarkdownRenderer
+            className="mt-1 text-sm text-muted-foreground"
+            content={interaction.description}
+          />
         )}
       </div>
 
@@ -161,7 +170,7 @@ export function InteractionCard({
           <div className="mb-3 max-h-[50vh] space-y-2 overflow-y-auto overscroll-contain rounded">
             {interaction.initialMessage && <MarkdownRenderer content={interaction.initialMessage} />}
             {!interaction.initialMessage && interaction.description && (
-              <p className="text-muted-foreground text-sm">{interaction.description}</p>
+              <MarkdownRenderer content={interaction.description} />
             )}
           </div>
         )}

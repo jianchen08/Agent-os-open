@@ -78,7 +78,7 @@ describe('声明注册表', () => {
       ['options', 'options_detail', 'text_input'].sort(),
     )
     expect([...resolveInteractionLayout(makeInteraction({ mode: 'conversation' })).features].sort()).toEqual(
-      ['navigate', 'options', 'suggestions', 'text_input'].sort(),
+      ['navigate', 'options', 'options_detail', 'suggestions', 'text_input'].sort(),
     )
     expect([...resolveInteractionLayout(makeInteraction({ mode: 'notification' })).features].sort()).toEqual(
       ['message', 'progress'].sort(),

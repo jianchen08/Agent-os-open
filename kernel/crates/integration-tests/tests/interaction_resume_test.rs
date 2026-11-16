@@ -35,7 +35,13 @@ fn make_store() -> Arc<SqliteStore> {
 /// 模拟 pipeline-executor.suspend：写运行簿记并置为 Suspended（state 运行键）。
 fn suspend_run(store: &SqliteStore, pipeline_id: &str, run_id: &str) {
     store
-        .record_run_start(pipeline_id, "default", run_id, "hash")
+        .record_run_start(
+            pipeline_id,
+            "default",
+            run_id,
+            "hash",
+            "2026-10-15T00:00:00+00:00",
+        )
         .unwrap();
     store
         .set_run_status_projection(pipeline_id, "default", RunStatus::Suspended)

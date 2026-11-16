@@ -19,9 +19,13 @@ import { updateSessionsCache } from '@/hooks/queries/useSessionsQuery'
 import { queryClient } from '@/services/query/queryClient'
 import { queryKeys } from '@/services/query/queryKeys'
 import { contributionRegistry } from '@/services/schema/ContributionRegistry'
+import { initializeWidgets } from '@/services/schema/registerWidgets'
+import { widgetRegistry } from '@/services/schema/WidgetRegistry'
+import { slotRegistry } from '@/services/slots/slotRegistry'
 import { useAgentTabStore } from '@/stores/agentTabStore'
 import { useLayoutModeStore } from '@/stores/layoutModeStore'
 import { seedPipelineState } from '@/test/modePanelTestUtils'
+import { loadSchemaIntoRegistries } from '@/test/schemaLoader'
 import { makeSessionFactory } from './helpers/agentTabTestUtils'
 import type { PipelineStateInfo } from '@/services/api/pipelines'
 import type { AgentTab } from '@/types/task'
@@ -43,14 +47,30 @@ const mainTab: AgentTab = {
   messages: [],
 }
 
-function seedModePages(): void {
-  contributionRegistry.register({
-    type: 'pages', id: 'coding_delivery', title: '编码交付',
-    space: 'workspace', slot: 'tab', path: '/p/coding_delivery', mode: 'coding', pluginId: 'mode_coding',
-  })
-  contributionRegistry.register({
-    type: 'pages', id: 'writing_workshop', title: '写作工坊',
-    space: 'workspace', slot: 'tab', path: '/p/writing_workshop', mode: 'writing', pluginId: 'mode_writing',
+/** 声明播种：两表同批装载（C4：path 直达按 workspace.tab keyed 槽解析） */
+async function seedModePages(): Promise<void> {
+  await loadSchemaIntoRegistries({
+    plugin_contributes: [
+      {
+        plugin_id: 'mode_coding',
+        plugin_name: 'Mode Coding',
+        contributes: {
+          pages: [
+            { id: 'coding_delivery', title: '编码交付', space: 'workspace', slot: 'tab', path: '/p/coding_delivery', widget: 'status_card', mode: 'coding' },
+          ],
+        },
+      },
+      {
+        plugin_id: 'mode_writing',
+        plugin_name: 'Mode Writing',
+        contributes: {
+          pages: [
+            { id: 'writing_workshop', title: '写作工坊', space: 'workspace', slot: 'tab', path: '/p/writing_workshop', widget: 'status_card', mode: 'writing' },
+          ],
+        },
+      },
+    ],
+    plugin_configs: [],
   })
 }
 
@@ -58,6 +78,10 @@ describe('agentTabStore — 对话标签激活自动弹出模式面板', () => {
   beforeEach(() => {
     queryClient.removeQueries()
     contributionRegistry.clear()
+    slotRegistry.clear()
+    // 内建 widget 注册面（生产 main.tsx 启动同款）：槽装载期终验要求承载 widget 已注册
+    widgetRegistry.clear()
+    initializeWidgets()
     localStorage.clear()
     useLayoutModeStore.setState({ workspaceTabs: [], visitedTabIds: [] })
     useAgentTabStore.setState({
@@ -71,8 +95,8 @@ describe('agentTabStore — 对话标签激活自动弹出模式面板', () => {
     updateSessionsCache(() => [makeSession()])
   })
 
-  it('switchToTab 切到对话 tab：面板页签自动打开并激活', () => {
-    seedModePages()
+  it('switchToTab 切到对话 tab：面板页签自动打开并激活', async () => {
+    await seedModePages()
     seedPipelineState(MAIN_PID, { mode: 'coding' })
     useAgentTabStore.setState({ currentSessionId: SESSION_ID, tabs: [mainTab], activeTabId: null })
 
@@ -83,8 +107,8 @@ describe('agentTabStore — 对话标签激活自动弹出模式面板', () => {
     expect(tabs[0]?.isActive).toBe(true)
   })
 
-  it('mode 不同开不同面板：writing 命中写作工坊而非编码交付', () => {
-    seedModePages()
+  it('mode 不同开不同面板：writing 命中写作工坊而非编码交付', async () => {
+    await seedModePages()
     seedPipelineState(MAIN_PID, { mode: 'writing' })
     useAgentTabStore.setState({ currentSessionId: SESSION_ID, tabs: [mainTab], activeTabId: null })
 
@@ -95,8 +119,8 @@ describe('agentTabStore — 对话标签激活自动弹出模式面板', () => {
     ])
   })
 
-  it('initSessionTabs 进会话：活跃对话 tab 的模式面板自动打开', () => {
-    seedModePages()
+  it('initSessionTabs 进会话：活跃对话 tab 的模式面板自动打开', async () => {
+    await seedModePages()
     seedPipelineState(MAIN_PID, { mode: 'coding' })
 
     useAgentTabStore.getState().initSessionTabs(SESSION_ID)
@@ -106,8 +130,8 @@ describe('agentTabStore — 对话标签激活自动弹出模式面板', () => {
     ])
   })
 
-  it('openSubAgentTab(setActive) 跳入子管道对话：子管道 mode 面板自动打开', () => {
-    seedModePages()
+  it('openSubAgentTab(setActive) 跳入子管道对话：子管道 mode 面板自动打开', async () => {
+    await seedModePages()
     seedPipelineState('pid-sub', { mode: 'coding' })
     useAgentTabStore.setState({ currentSessionId: SESSION_ID, tabs: [mainTab] })
 
@@ -125,12 +149,39 @@ describe('agentTabStore — 对话标签激活自动弹出模式面板', () => {
     ])
   })
 
-  it('对话 tab 管道无 mode 键 → 不动作', () => {
-    seedModePages()
+  it('对话 tab 管道无 mode 键 → 不动作', async () => {
+    await seedModePages()
     seedPipelineState(MAIN_PID, {})
     useAgentTabStore.setState({ currentSessionId: SESSION_ID, tabs: [mainTab], activeTabId: null })
 
     useAgentTabStore.getState().switchToTab(mainTab.id)
+
+    expect(useLayoutModeStore.getState().workspaceTabs).toEqual([])
+  })
+
+  it('声明 autoOpen:false 的模式页：三条激活漏斗（进会话/切tab/跳管道）均不弹', async () => {
+    contributionRegistry.register({
+      type: 'pages', id: 'pim_today', title: '今日',
+      space: 'workspace', slot: 'tab', path: '/p/agentos_pim_today', mode: 'personal',
+      autoOpen: false, pluginId: 'mode_personal',
+    })
+    seedPipelineState(MAIN_PID, { mode: 'personal' })
+    useAgentTabStore.setState({ currentSessionId: SESSION_ID, tabs: [mainTab], activeTabId: null })
+
+    // 进会话漏斗
+    useAgentTabStore.getState().initSessionTabs(SESSION_ID)
+    // 切 tab 漏斗
+    useAgentTabStore.getState().switchToTab(mainTab.id)
+    // 跳入管道对话漏斗
+    seedPipelineState('pid-sub', { mode: 'personal' })
+    useAgentTabStore.getState().openSubAgentTab({
+      agentId: 'agent-sub',
+      agentName: '子Agent',
+      parentRecordId: 'rec-1',
+      agentLevel: 2,
+      setActive: true,
+      pipelineId: 'pid-sub',
+    })
 
     expect(useLayoutModeStore.getState().workspaceTabs).toEqual([])
   })

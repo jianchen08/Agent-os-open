@@ -41,7 +41,27 @@ WORKFLOWS_DIR = ROOT / ".github" / "workflows"
 CHECKLIST_PATH = ROOT / ".github" / "ci-baseline-checklist.txt"
 WIRING_BASELINE_PATH = ROOT / ".github" / "gate-wiring-baseline.txt"
 
-FAST_BUDGET_SECONDS = 90  # V5：fast 档估时总和上限（改值 = 改代码 = commit 归因）
+# V5：fast 档估时总和上限（改值 = 改代码 = commit 归因）。
+# 90→95（2026-10-12）：新增 file-length-baseline 闸（est 2s，实测 1.2s 扫描）
+# 挤破 90s 满额预算；文件规模闸为用户 mandate 拍板项，预算随门禁面增长。
+# 95→105（2026-10-16 推送前核账）：快闸面 17→22 项扩容（traceability/config-direct/
+# kernel-db-direct 等守卫入 fast 批）后估时总和 99s；守卫快速化本身是预检价值面，
+# 预算随门禁面增长同前例。
+# 105→115（2026-10-16 资源注册收敛 T5.3）：新增 service-declaration 闸
+# （est 8s，实测 6.6s：429 文件 AST 普查 + Windows 小文件 IO）；服务声明闭包
+# 为方案拍板执法层，预算随门禁面增长同前例。
+# 115→125（2026-10-17 推送前核账）：tool-schema-contract 入 fast 批（est 6s）
+# 后估时总和 119s；工具 schema 契约为工具调用形态修复 ADR 执法面，预算随
+# 门禁面增长同前例。
+# 135 = 125 + graph-check 10s（2026-10-28 项目全景图三合一挂 fast 档，
+# 方案 AI辅助编程体系落地AgentOS_20261022 §4.4；预算随闸门增减可调，
+# 改值须 commit 归因——本次即归因）
+# 135→139（2026-10-28 推送前核账）：同方案 §3.6 两件新闸入 fast 批——
+# gate-protected 2s + enforcement-tier 2s（门禁护门禁/执法档位注册表），
+# 估时总和 139s；预算随门禁面增长同前例。
+# 139→140（2026-10-30 gate-change doc-frontmatter）：新增 docs 三字段闸
+# est 1s 入 fast 批（实测 ~0.2s）；预算随门禁面增长同前例。
+FAST_BUDGET_SECONDS = 140
 
 FILTER_RE = re.compile(r"run_gates\.py[^\n]*?--filter[ =]+([A-Za-z0-9_,\-]+)")
 MODE_RE = re.compile(r"run_gates\.py[^\n]*?--mode\b")
@@ -196,12 +216,25 @@ def v7_orphan_baseline(gates: list[dict], tracked: list[str], workflow_texts: di
                     script_sources.append((ROOT / p).read_text(encoding="utf-8"))
                 except OSError:
                     pass
+    # 前端 eslint 闸的基线消费面（如 widget-store-import-baseline.json 由
+    # frontend-lint 车道经 npm run lint → local-rules.mjs 读取）：规则源码即
+    # 消费方，与 scripts 检查器同权——不收此面会把 eslint 棘轮账本误判孤儿。
+    eslint_sources: list[str] = []
+    for p in tracked:
+        if (p.startswith("frontend/eslint-rules/") and p.endswith(".mjs")) or p == "frontend/eslint.config.js":
+            try:
+                eslint_sources.append((ROOT / p).read_text(encoding="utf-8"))
+            except OSError:
+                pass
     wf_text = "\n".join(workflow_texts.values())
     out: list[str] = []
     for p in sorted(baseline_files):
         name = p.rsplit("/", 1)[-1]
         consumed = (
-            any(name in cmd for cmd in gate_cmds) or any(name in src for src in script_sources) or (name in wf_text)
+            any(name in cmd for cmd in gate_cmds)
+            or any(name in src for src in script_sources)
+            or any(name in src for src in eslint_sources)
+            or (name in wf_text)
         )
         if not consumed:
             out.append(f"V7 基线文件无消费方（孤儿账本）: {p}")

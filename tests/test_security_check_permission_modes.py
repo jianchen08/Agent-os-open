@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import json
-import sys
 import logging
 from types import SimpleNamespace
 from typing import Any
@@ -23,11 +22,11 @@ import pytest
 
 from tests._pipeline_plugin_path import add_plugin_dir
 
-add_plugin_dir("input", "security_check")
+add_plugin_dir("security_check")
 
 import plugin as sc_mod  # noqa: E402
-from pipeline.plugin import PluginContext  # noqa: E402
-from pipeline.types import StateKeys  # noqa: E402
+from _libs.pipeline_base.plugin import PluginContext  # noqa: E402
+from _libs.pipeline_base.types import StateKeys  # noqa: E402
 from plugin import SecurityCheckPlugin  # noqa: E402
 
 pytestmark = pytest.mark.unit
@@ -395,22 +394,21 @@ class TestDispatchShortCircuits:
         assert _decision_view(result)["reason"] == "all checks passed"
 
     @pytest.mark.asyncio
-    @pytest.mark.skipif(
-        sys.platform != "win32",
-        reason="Linux 上 /etc 属 OS 核心目录：_run_base_safety_scan 第一道（任何模式"
-               "都必须执行，安全底线）先于 accept_edits 文件类短路软拦截 /etc/hosts——"
-               "设计内行为（sensitive_paths 按 os.name 选名单）；短路覆盖在 Linux 由 "
-               "TestAcceptEdits.test_文件类放行 承担",
-    )
     async def test_accept_edits_passes_dangerous_file_tools(self) -> None:
-        """accept_edits 下文件类工具即使参数危险也放行（档位语义）。"""
+        """accept_edits 下文件类工具即使参数危险也放行（档位语义）。
+
+        路径用两平台都不命中敏感目录黑名单的危险形态（/data/secret/x）：
+        /etc/hosts 在 Linux 宿主命中 /etc 无条件守卫（OS 核心目录「始终禁止」，
+        档位不豁免），档位分流断言会被守卫先行拦截——那是守卫测试的主题，
+        不是档位分流的输入。
+        """
         svc = _mock_approval()
         p = _make_plugin()
         _set_session_mode("ae-file-sess", "accept_edits")
         result = await p.execute(
             _ctx(_tool_state(
                 "file_write",
-                {"path": "/etc/hosts", "content": "x"},
+                {"path": "/data/secret/x", "content": "x"},
                 session_id="ae-file-sess",
             ))
         )

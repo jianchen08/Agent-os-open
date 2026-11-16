@@ -397,7 +397,13 @@ storage:
         assert!(db.is_some(), "memory driver 的 db-admin 句柄应可用");
         // trait 面可用性：运行开始簿记（state 运行键）+ 读回投影。
         backend
-            .record_run_start("pipe_r1", "default", "r1", "hash")
+            .record_run_start(
+                "pipe_r1",
+                "default",
+                "r1",
+                "hash",
+                "2026-10-15T00:00:00+00:00",
+            )
             .await
             .unwrap();
         let run = backend.get_run("r1").await.unwrap();
@@ -414,7 +420,7 @@ storage:
         let (backend, db) = open_storage(&cfg).unwrap();
         assert!(db.is_some());
         backend
-            .record_run_start("pipe_r1", "default", "r1", "h")
+            .record_run_start("pipe_r1", "default", "r1", "h", "2026-10-15T00:00:00+00:00")
             .await
             .unwrap();
         assert!(backend.get_run("r1").await.is_ok());

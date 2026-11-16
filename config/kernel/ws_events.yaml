@@ -1,0 +1,150 @@
+schema_version: 1
+# WS 事件名单源（单一真值源，ADR 2026-10-10-ws-events-single-source）。
+#
+# 三消费面同读本文件（真单源：双侧各自解析同一物理文件，无生成物投影）：
+# - 内核（include_str! 编译期内嵌 + serde）：stream_family 流式路由族 +
+#   domain_mirrors 域事件镜像名单（capability_router）；
+# - 前端（Vite ?raw 内嵌 + js-yaml）：server_events 派生 WS_SERVER_EVENTS
+#   （键 = 前端词汇表，值 = 事件名契约）。
+# 任一事件名改动只改本文件：内核随重编生效，前端随重构建生效；双侧契约
+# 测试各自解析本文件与消费面集合对账，改名即红。
+#
+# 收录原则：server_events 只收录有发射源的后端事件名（内核 ws_session/
+# capability_router/chat_send_handler 事件族 + 插件 event-bus.emit 全集）。
+# 旧流式事件名已退役（LLM 流式服务契约 2026-08-26 定稿，DSH 8 事件协议）：
+# stream_chunk / thinking_start / thinking_chunk / thinking_end / stream_keepalive
+# 后端 llm_service 不再发射（内核 stream_family 仍路由该族——0.1 协议信封
+# 兼容面）；前端 handler 已删除（不留兼容层）。
+ws_events:
+  # 流式路由族（内核 try_route_stream_family 白名单）：命中走 0.1 协议信封
+  # （thread_id + pipeline_id + message_id）校验后推前端。
+  stream_family:
+    - stream_chunk
+    - thinking_start
+    - thinking_chunk
+    - thinking_end
+    - stream_end
+    - stream_error
+
+  # 域事件镜像名单（内核 forward_unmatched_event 单点分流）：名单内事件除
+  # 前端 WS 透传外，同步广播进域事件总线（生命周期订阅者可感知）。
+  # 二期升级路径（ADR 影响节登记）：改 plugin.json domain_events 声明驱动，
+  # 注册表分流（与「一切皆插件」对齐），届时本节退役。
+  domain_mirrors:
+    - approval.created
+
+  # 前端 WS_SERVER_EVENTS 全量名单（键 = 前端常量词汇表，值 = 事件名契约）。
+  # task_status_update / task_status_changed：后端推送路径暂静默跳过，
+  # 待 SDK frontend.emit 落地恢复（前端订阅保留）。
+  server_events:
+    # 连接确认
+    CONNECTION_CONFIRMATION: connection_confirmation
+    # 任务完成
+    TASK_COMPLETED: task_completed
+    # 任务取消
+    TASK_CANCELLED: task_cancelled
+    # 任务失败（P-129 失败通知：tasks 插件派生面随 run.failed /
+    # 评估改判 failed 经 frontend.emit 出帧，负载含任务标识与失败归因）
+    TASK_FAILED: task_failed
+    # 任务状态实时更新（后端推送路径暂静默跳过，待 SDK frontend.emit 落地恢复）
+    TASK_STATUS_UPDATE: task_status_update
+    # 任务状态变更（实时推送，同上待后端恢复）
+    TASK_STATUS_CHANGED: task_status_changed
+    # 任务删除
+    TASK_DELETED: task_deleted
+    # 触发异常交付通知（P-71：triggers_ext 注入 failed/skipped 时经 frontend.emit
+    # 出帧，负载含触发器标识与失败原因；sent 不出帧——正常交付聊天注入已可见）
+    TRIGGER_FIRED: trigger_fired
+    # 心跳响应（后端发送 heartbeat_ack）
+    HEARTBEAT: heartbeat_ack
+    # 新消息
+    NEW_MESSAGE: new_message
+    # 流式输出开始
+    STREAM_START: stream_start
+    # 流式块开始（LLM 流式 8 事件协议：index=块索引，block_type=text/reasoning/tool-call）
+    BLOCK_START: block_start
+    # 正文增量（LLM 流式 8 事件协议：按块索引归组追加）
+    TEXT_DELTA: text_delta
+    # 思考增量（LLM 流式 8 事件协议：思考块起止由 block_start/block_end 表达）
+    REASONING_DELTA: reasoning_delta
+    # 工具调用增量（LLM 流式 8 事件协议：arguments_delta 原始 JSON 串按块索引累积）
+    TOOL_CALL_DELTA: tool_call_delta
+    # 块闭合（LLM 流式 8 事件协议：block 携带该块累积完整内容）
+    BLOCK_END: block_end
+    # 用量（LLM 流式 8 事件协议：finish 前发出）
+    USAGE_EVENT: usage
+    # 流式终结（LLM 流式 8 事件协议：reason=stop/length/tool_calls/error；断流由调用方补发 error）
+    FINISH: finish
+    # 流式保活（LLM 流式 8 事件协议：超时探活，无业务载荷，前端无订阅消费面）
+    KEEPALIVE: keepalive
+    # 流式输出结束（轮级：一轮 = 一条消息，不代表整次执行结束）
+    STREAM_END: stream_end
+    # run 级收尾：一次用户输入触发的整次执行结束（生成态终止信号）
+    PIPELINE_ROUND_FINISHED: pipeline_round_finished
+    # run 级失败终态（run.failed 域事件前端镜像：引擎 Err / stop_reason 署名失败，
+    # 通知中心弹「管道运行失败」卡片；ADR 2026-09-28-run-failure-frontend-notification）
+    RUN_FAILED: run_failed
+    # 流式输出错误（LLM 调用失败等）
+    STREAM_ERROR: stream_error
+    # 插件执行错误（非终止信号：引擎 warn+继续的插件失败，只弹通知不标记消息失败）
+    PLUGIN_ERROR: plugin_error
+    # 工具调用开始（管道流式事件）
+    TOOL_START: tool_start
+    # 工具调用结果（管道流式事件）
+    TOOL_RESULT: tool_result
+    # 工具执行进度（bash 等长任务执行中的 stdout 增量，task_observability 任务 2）
+    TOOL_PROGRESS: tool_progress
+    # 人类交互超时提醒
+    INTERACTION_TIMEOUT_REMINDER: interaction_timeout_reminder
+    # 人类交互请求
+    INTERACTION_REQUEST: interaction_request
+    # 系统通知（chat.send_message 后台派发失败补报，统一错误模型）
+    SYSTEM_NOTIFICATION: system_notification
+    # 迭代事件（管道引擎迭代开始/结束）
+    ITERATION: iteration
+    # 会话成本更新（Token 用量变化时推送）
+    COST_UPDATE: cost_update
+    # pending 输入队列同步（ADR-2026-08-26：入队/消费/修改/删除时推全量列表）
+    PENDING_INPUTS_CHANGED: pending_inputs_changed
+    # 上下文压缩彻底失败（context_window_guard 经 frontend.emit 透传，按故障周期去重）
+    COMPRESSION_FAILED: compression_failed
+    # 压缩开始（context_window_guard 经 frontend.emit 透传）。压缩是分钟级同步
+    # 调用（实测 6~18 分钟），其间管道无流式产出——前端据此把等待指示器
+    # 从通用「思考中」切成「压缩中」（用户裁定 2026-10-28）。
+    COMPRESSION_STARTED: compression_started
+    # 压缩结束（与 compression_started 配对）。载荷 {status: applied|failed,
+    # reason?}——前端据此撤下「压缩中」指示器；压缩进程被引擎超时丢弃时
+    # 不会有本事件，前端另由 run 终态事件兜底清除。
+    COMPRESSION_ENDED: compression_ended
+    # 压缩波次完成（context_window_guard 压缩成功时经 frontend.emit 透传）。
+    # 压缩原地重写 message_slots 槽位 → 内容寻址指纹变异，前端跨压缩持有的
+    # recordId 过期——收到后须按 API 权威全量对账刷新（BUG-72 A1）
+    COMPRESSION_APPLIED: compression_applied
+    # 段激活 ack（消息段模型：‹i/n› 多代切换后服务端后缀整段替换完成的对账事件，
+    # [来源: docs/working/消息历史双能力方案_多代切换与压缩原文_20260923.md §5.1]；
+    # 收到后对该 pipeline 增量重拉消息并刷新段清单）
+    SEGMENT_ACTIVATED: segment_activated
+    # 消息截断权威事件（重新生成/回退/编辑重发：内核截断落库完成后下发）。
+    # 载荷 {pipeline_id, thread_id, truncate_before_seq, regenerate, updated_messages?}；
+    # 前端按 seq 权威截断本地视图（不做乐观截断），编辑重发的目标消息改写随
+    # updated_messages 原地收敛（聊天消息流权威化设计真值不变量 3）
+    MESSAGES_TRUNCATED: messages_truncated
+    # user 消息早回执（直跑 run 起手消息落库后即时下发）：载荷
+    # {pipeline_id, thread_id, client_message_id, record:{id,sequence,content}}；
+    # 前端走 claimUserMessage 认领链——气泡只认引擎确认，替代乐观气泡
+    # （聊天消息流权威化设计真值不变量 1）
+    USER_MESSAGE_CONFIRMED: user_message_confirmed
+    # 需要全量重新同步（断线重连后后端告知 last_sequence 过期）
+    RESYNC_REQUIRED: resync_required
+    # widget 事件（内核 PluginWidgetBroadcaster 周期快照 + 插件 widget 交互，ADR §3.5'）
+    WIDGET_EVENT: widget_event
+    # 宿主选中引用变化（pipeline_host_context 插件转发外部宿主推送）
+    HOST_SELECTION_CHANGED: host_selection_changed
+    # 审批已在他端结算（approval.submit 成功路径广播：request_id + 结算摘要；
+    # 多前端并发应答对账——收到后清除对应 pending 并提示"已在别处处理"）
+    APPROVAL_TAKEN: approval.taken
+    # 入站路由错误回执（ADR 2026-09-29 回执契约）：非 user_input 帧被内核拒绝
+    # （regenerate 目标缺失、segment_activate 运行中等）时回给发起连接的通用
+    # 错误帧，载荷 {message_type, thread_id, client_message_id, error}；前端
+    # 收到即通知中心高优告警——fail-closed 拒绝不得对用户静默
+    ROUTE_ERROR: route_error
