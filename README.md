@@ -66,30 +66,6 @@
 
 > 点击上方图片在 B站 观看简单演示视频。
 
----
-
-## 📸 产品界面
-
-> 以下均为真实运行实例的实拍截图（本地开发态实跑），界面中的账号等敏感信息已做遮蔽处理。
-
-### 工作台
-
-![灵汐 AgentOS 工作台：左侧为「新建会话 / 任务管理 / 会话」面板，右侧为欢迎区与「开始一段新对话」引导](screenshots/workbench.png)
-
-### 深空指挥台主题
-
-![切换到「深空指挥台」主题后的工作台界面（深色）](screenshots/command-center-theme.png)
-
-### 主题选择
-
-![主题选择面板：10 套主题（7 套编译期预设 + 3 套动态 JSON 主题）](screenshots/theme-picker.png)
-
-### 新建会话：Agent 名单
-
-![「新建会话」对话框中的 Agent 选择列表](screenshots/agent-roster.png)
-
----
-
 ## ✨ 核心亮点
 
 > 以下亮点全部建立在"一切皆插件"之上：除引擎与前端外壳，每条能力都由插件承载（能力→插件对照见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)）。
